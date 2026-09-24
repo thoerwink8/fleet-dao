@@ -13,6 +13,8 @@ PENDING=()
 WROTE=0 # 最近一次 put_file / ensure_* 有没有动手；调用方据此决定要不要重启服务
 
 step() { printf '\n== %s\n' "$*"; }
+# 只说填没填，不把值打出来（地址、公钥进了日志就收不回）
+filled() { if [[ -n "$1" ]]; then printf '已填'; else printf '（未填）'; fi; }
 ok() { printf '  ✓ %s\n' "$*"; }
 changed() {
   CHANGES+=("$*")

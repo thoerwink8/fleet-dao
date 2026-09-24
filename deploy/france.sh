@@ -124,7 +124,7 @@ setup_identity() {
 load_config() {
   load_env "$ENV_FILE" "${ENV_KEYS[@]}"
   if [[ -f "$TEMPORAL_ENV" ]]; then load_env "$TEMPORAL_ENV" FLEET_TEMPORAL_DB_PASSWORD; fi
-  ok "本机配置 $ENV_FILE：香港地址 ${FLEET_WG_HK_ENDPOINT:+已填}${FLEET_WG_HK_ENDPOINT:-（未填）}，香港公钥 ${FLEET_WG_HK_PUBLIC_KEY:+已填}${FLEET_WG_HK_PUBLIC_KEY:-（未填）}"
+  ok "本机配置 $ENV_FILE：香港地址$(filled "$FLEET_WG_HK_ENDPOINT")，香港公钥$(filled "$FLEET_WG_HK_PUBLIC_KEY")"
 }
 
 # 签名公钥的指纹。用一次性的 GNUPGHOME：不在 root 家里留下 ~/.gnupg
@@ -584,7 +584,7 @@ readback_pnpm() {
 readback_wireguard() {
   local latest
   if [[ -z "$FLEET_WG_HK_PUBLIC_KEY" || -z "$FLEET_WG_HK_ENDPOINT" ]]; then
-    pending "WireGuard 待配：把香港 hk.sh 打印的公钥和 <香港公网IP>:51820 填进 $ENV_FILE，再跑一遍（法国公钥：$(wg pubkey <"/etc/wireguard/$WG_IF.key" 2>/dev/null || echo 读不到)）"
+    pending "WireGuard 待配：照香港 hk.sh 打印的提示，把香港公钥和 <香港公网IP>:<端口> 填进 $ENV_FILE，再跑一遍（法国公钥：$(wg pubkey <"/etc/wireguard/$WG_IF.key" 2>/dev/null || echo 读不到)）"
     return 0
   fi
   if [[ "$(systemctl is-active "wg-quick@$WG_IF.service" 2>/dev/null)" != active ]]; then
@@ -597,7 +597,7 @@ readback_wireguard() {
   fi
   latest=$(wg show "$WG_IF" latest-handshakes 2>/dev/null | awk '{ print $2 }') || latest=""
   if [[ -z "$latest" || "$latest" == 0 ]]; then
-    pending "隧道还没握上手：香港 hk.env 填了法国公钥、重跑过 hk.sh 了吗？香港 UDP 51820 从这里通吗？"
+    pending "隧道还没握上手：香港 hk.env 填了法国公钥、重跑过 hk.sh 了吗？$ENV_FILE 里的端口是 hk.sh 打印的那个吗（香港上游只放行少数 UDP 端口，见 docs/ops.md）？"
   else
     red "隧道握过手（$(($(date +%s) - latest)) 秒前），但 ping $WG_HK_ADDR 不通"
   fi

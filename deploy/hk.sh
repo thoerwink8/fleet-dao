@@ -19,7 +19,9 @@ trap 'on_error "$LINENO" "$BASH_COMMAND"' ERR
 
 # ── 约定（改这里要同步 docs/ops.md）──
 WG_IF=wg-fleet
-WG_PORT=51820 # UDP，香港唯一新开的公网入站端口
+# UDP，香港唯一新开的公网入站端口。这台的上游只放行少数常见 UDP 端口：2026-09-25 从法国实测，
+# 53/67/69/123/161/500/1701/4500 进得来，51820 和其余高端口都到不了网卡。4500（IPsec NAT-T）空着，WireGuard 在上面握得上手。
+WG_PORT=4500
 WG_ADDR=10.99.0.1/24
 WG_PEER_ADDR=10.99.0.2
 ENV_FILE=/etc/fleet-dao/hk.env
@@ -77,7 +79,7 @@ setup_identity() {
 
 load_config() {
   load_env "$ENV_FILE" "${ENV_KEYS[@]}"
-  ok "本机配置 $ENV_FILE：域名 ${FLEET_DOMAIN:-（未配）}，法国公钥 ${FLEET_WG_FRANCE_PUBLIC_KEY:+已填}${FLEET_WG_FRANCE_PUBLIC_KEY:-（未填）}"
+  ok "本机配置 $ENV_FILE：域名 ${FLEET_DOMAIN:-（未配）}，法国公钥$(filled "$FLEET_WG_FRANCE_PUBLIC_KEY")"
 }
 
 setup_wireguard() {
