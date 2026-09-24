@@ -5,6 +5,7 @@
   "description": "Temporal 工作流、活动与 worker",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./failure": "./src/failure/index.ts"
   }
 }
