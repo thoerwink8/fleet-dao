@@ -6,8 +6,9 @@ import {
   QuotaReadError,
   readAllQuotas,
   readingsFromUsageReport,
+  verifyNoCost,
 } from '../../src/quota/index.ts';
-import { blockNetwork, fakeCommands, fakeDeps, fixture, SCRATCH_PATH, scratchLog } from './helpers.ts';
+import { blockNetwork, fakeCommands, fakeDeps, fixture, WORK_DIR } from './helpers.ts';
 
 blockNetwork();
 
@@ -110,6 +111,87 @@ describe('Claude /usage 的结构化结果（VPS 真跑，零模型调用）', (
     ]);
     expect(notes?.join()).toContain('会继续花钱');
   });
+
+  it('上游改了字段名、收到的行一行都认不出：bad_response——不能把 97%、99% 的池报成「没有窗口」', () => {
+    const renamed = report({
+      limits: [
+        { type: 'session', used_percent: 97, reset: '2026-09-25T00:00:00Z', level: 'critical' },
+        { type: 'weekly_all', used_percent: 99, reset: '2026-09-27T00:00:00Z', level: 'critical' },
+      ],
+    });
+    expect(() => readingsFromUsageReport(renamed, ctx)).toThrowError(/一行都认不出/);
+    try {
+      readingsFromUsageReport(renamed, ctx);
+    } catch (e) {
+      expect((e as QuotaReadError).code).toBe('bad_response');
+    }
+  });
+
+  it('只丢了百分比、还带着状态字的行照收，留住状态字；认不出的行写明', () => {
+    const { windows, notes } = readingsFromUsageReport(
+      report({
+        limits: [
+          { kind: 'session', pct: 99, severity: 'critical', resets_at: '2026-09-25T00:00:00Z' },
+          { kind: 'weekly_all', pct: 40 },
+        ],
+      }),
+      ctx,
+    );
+    expect(windows).toEqual([
+      expect.objectContaining({ label: 'session', upstreamStatus: 'warning', statusRaw: 'critical' }),
+    ]);
+    expect(windows[0]?.used).toBeUndefined();
+    expect(notes?.join('\n')).toContain('第 2 行额度认不出');
+    expect(notes?.join('\n')).toContain('没读到额外用量');
+  });
+});
+
+describe('核实 /usage 没花钱', () => {
+  const withResult = (patch: Record<string, unknown> | null) =>
+    usageStream()
+      .split('\n')
+      .filter(Boolean)
+      .flatMap((line) => {
+        const doc = JSON.parse(line) as Record<string, unknown>;
+        if (doc.type !== 'result') return [line];
+        return patch === null ? [] : [JSON.stringify({ ...doc, ...patch })];
+      })
+      .join('\n');
+
+  it('真机输出：num_turns 0、total_cost_usd 0，放行', () => {
+    expect(() => verifyNoCost(usageStream())).not.toThrow();
+  });
+
+  it('花了 $0.41：read_cost，读数不采信', () => {
+    try {
+      verifyNoCost(withResult({ num_turns: 1, total_cost_usd: 0.41 }));
+      expect.unreachable('应当报读额度花了钱');
+    } catch (e) {
+      expect((e as QuotaReadError).code).toBe('read_cost');
+      expect((e as QuotaReadError).message).toContain('0.41');
+    }
+  });
+
+  it('没有 result 行：核实不了，bad_response，不当成没花钱', () => {
+    try {
+      verifyNoCost(withResult(null));
+      expect.unreachable('应当报核实不了');
+    } catch (e) {
+      expect((e as QuotaReadError).code).toBe('bad_response');
+    }
+  });
+
+  it('读取器端到端：/usage 花了钱，这个池报 read_cost', async () => {
+    const { run } = fakeCommands((argv) =>
+      argv.includes('/usage') ? { stdout: withResult({ num_turns: 1, total_cost_usd: 0.41 }) } : { code: 1 },
+    );
+    const rep = await readAllQuotas(
+      { pools: [{ poolId: 'claude', channelId: 'claude-sub', reader: 'claude-usage', command: ['claude'] }] },
+      fakeDeps({ runCommand: run }),
+    );
+    const r = rep.results[0];
+    expect(!r?.ok && r?.error.code).toBe('read_cost');
+  });
 });
 
 describe('reclaude org list：只留类型和是否当前', () => {
@@ -165,7 +247,7 @@ describe('Claude 读取器：只读当前组织，绝不切号', () => {
     // 读前核一次组织、读后再核一次；从头到尾没有 org use。
     expect(calls.map((c) => c.argv.slice(1).join(' '))).toEqual([
       'org list',
-      '-p --output-format stream-json --verbose --setting-sources project /usage',
+      '-p --output-format stream-json --verbose --setting-sources project --no-session-persistence /usage',
       'org list',
     ]);
     expect(calls.some((c) => c.argv.includes('use'))).toBe(false);
@@ -195,13 +277,26 @@ describe('Claude 读取器：只读当前组织，绝不切号', () => {
     expect(usage?.argv.join(' ')).toContain('--setting-sources project');
   });
 
-  it('没配工作目录：在新建的空目录里跑、跑完删掉——不在 /tmp 或家目录里加载别人的项目设置和钩子', async () => {
+  it('没配工作目录：每次都在同一个私有空目录里跑——不加载别人的项目设置，也不每读一次就多留一个项目目录', async () => {
     const { run, calls } = fakeCommands(answer);
-    const before = { ...scratchLog };
     await readAllQuotas({ pools: [pools[0] as QuotaConfig['pools'][number]] }, fakeDeps({ runCommand: run }));
-    expect(calls.map((c) => c.options.cwd)).toEqual([SCRATCH_PATH, SCRATCH_PATH, SCRATCH_PATH]);
-    expect(scratchLog.made - before.made).toBe(3);
-    expect(scratchLog.disposed - before.disposed).toBe(3);
+    expect(calls.map((c) => c.options.cwd)).toEqual([WORK_DIR, WORK_DIR, WORK_DIR]);
+  });
+
+  it('工作目录不可用（不是空的、不是真目录）：这个池报 config，不在别处凑合着跑', async () => {
+    const { run, calls } = fakeCommands(answer);
+    const rep = await readAllQuotas(
+      { pools: [pools[0] as QuotaConfig['pools'][number]] },
+      fakeDeps({
+        runCommand: run,
+        workDir: async () => {
+          throw new Error('/home/tester/.cache/fleet-dao/quota-cwd 不是空的（.claude）');
+        },
+      }),
+    );
+    const r = rep.results[0];
+    expect(!r?.ok && r?.error.code).toBe('config');
+    expect(calls).toHaveLength(0);
   });
 
   it('子进程环境显式构造：宿主环境里的 ANTHROPIC_* 不带过去（带了就绕开 reclaude）', async () => {
@@ -250,6 +345,13 @@ describe('Claude 读取器：只读当前组织，绝不切号', () => {
     expect(await code((argv) => (argv.includes('org') ? { stdout: 'Available organizations:\n' } : {}))).toBe(
       'bad_response',
     );
+    // org list 本身退出非 0、/usage 退出 0 却没有结构化结果（Claude Code 太旧）：都不许当成读成了。
+    expect(await code(() => ({ code: 2, stderr: 'boom' }))).toBe('bad_response');
+    expect(
+      await code((argv) =>
+        argv.includes('org') ? { stdout: orgList() } : { code: 0, stdout: '{"type":"result","result":"x"}' },
+      ),
+    ).toBe('bad_response');
   });
 
   it('没给 orgKind 时不跑 org list（不经 reclaude 的普通登录也能读）', async () => {

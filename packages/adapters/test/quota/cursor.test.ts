@@ -65,6 +65,24 @@ describe('Cursor Dashboard：账期用量（VPS 真机回包）', () => {
     expect(out.windows).toHaveLength(3);
     expect(out.notes.join()).toContain('individualLimit');
   });
+
+  it('上游改了字段名、一个窗口都认不出：bad_response，不许报「0 个窗口」让调度当成不限额', () => {
+    const renamed = {
+      billingCycleEnd: '1792177716000',
+      planUsage: { spendCents: 39000, capCents: 40000, autoUsagePct: 97, apiUsagePct: 99 },
+    };
+    expect(() => readingsFromPeriodUsage(renamed, ctx)).toThrowError(/一个额度窗口都认不出/);
+    expect(() => readingsFromPeriodUsage({ billingCycleEnd: '1' }, ctx)).toThrowError(/没有 planUsage/);
+  });
+
+  it('只剩账期美元、桶的百分比找不到：照收，但写明按桶卡不住', () => {
+    const body = period() as { planUsage: Record<string, unknown> };
+    delete body.planUsage.autoPercentUsed;
+    delete body.planUsage.apiPercentUsed;
+    const out = readingsFromPeriodUsage(body, ctx);
+    expect(out.windows.map((w) => w.label)).toEqual(['plan_usd']);
+    expect(out.notes.join()).toContain('按桶卡不住');
+  });
 });
 
 describe('Cursor 读取器', () => {
@@ -126,5 +144,8 @@ describe('Cursor 读取器', () => {
     expect(code((await run(() => new TypeError('fetch failed'))).result)).toBe('unreachable');
     expect(code((await run(happy, {})).result)).toBe('no_credentials');
     expect(code((await run(happy, { [authPath]: '{"refreshToken":"x"}' })).result)).toBe('no_credentials');
+    expect(code((await run(happy, { [authPath]: 'not json' })).result)).toBe('no_credentials');
+    expect(code((await run(() => ({ status: 502, body: 'bad gateway' }))).result)).toBe('upstream');
+    expect(code((await run(() => ({ body: '<html>login</html>' }))).result)).toBe('bad_response');
   });
 });

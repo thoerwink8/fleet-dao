@@ -34,11 +34,10 @@ const refuse = (what: string) => () => {
 
 export const FIXED_NOW = new Date('2026-09-24T19:00:00.000Z');
 
-/** 假的空目录：只记下建了几个、删了几个，不碰真文件系统。 */
-export const scratchLog = { made: 0, disposed: 0 };
-export const SCRATCH_PATH = '/tmp/fleet-quota-scratch';
+/** 假的固定工作目录：不碰真文件系统。 */
+export const WORK_DIR = '/home/tester/.cache/fleet-dao/quota-cwd';
 
-export function fakeDeps(over: QuotaDeps = {}): QuotaDeps {
+export function fakeDeps(over: Partial<QuotaDeps> = {}): QuotaDeps {
   return {
     now: () => FIXED_NOW,
     fetch: refuse('fetch') as unknown as typeof fetch,
@@ -46,15 +45,7 @@ export function fakeDeps(over: QuotaDeps = {}): QuotaDeps {
     readFile: refuse('readFile') as unknown as (p: string) => Promise<string>,
     listDir: refuse('listDir') as unknown as (p: string) => Promise<string[]>,
     openWebSocket: refuse('openWebSocket') as unknown as (u: string) => WebSocketLike,
-    scratchDir: async () => {
-      scratchLog.made++;
-      return {
-        path: SCRATCH_PATH,
-        dispose: async () => {
-          scratchLog.disposed++;
-        },
-      };
-    },
+    workDir: async () => WORK_DIR,
     homeDir: '/home/tester',
     env: { PATH: '/usr/bin', HOME: '/home/tester' },
     ...over,

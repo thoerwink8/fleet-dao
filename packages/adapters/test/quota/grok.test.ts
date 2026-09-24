@@ -105,4 +105,15 @@ describe('Grok 读取器', () => {
     const denied = await run(() => ({ status: 401, body: {} }));
     expect(!denied.result.ok && denied.result.error.code).toBe('auth');
   });
+
+  it('读不到的每条路都给明确失败：没登录文件、文件里没令牌、上游 5xx、连不上、回包认不出', async () => {
+    const code = (r: PoolQuotaResult) => (r.ok ? 'ok' : r.error.code);
+    expect(code((await run(happy, 'not json')).result)).toBe('no_credentials');
+    expect(code((await run(happy, JSON.stringify({ other: { refresh_token: 'x' } }))).result)).toBe(
+      'no_credentials',
+    );
+    expect(code((await run(() => ({ status: 503, body: 'down' }))).result)).toBe('upstream');
+    expect(code((await run(() => new TypeError('fetch failed'))).result)).toBe('unreachable');
+    expect(code((await run(() => ({ body: { data: {} } }))).result)).toBe('bad_response');
+  });
 });

@@ -9,20 +9,22 @@ export {
 export type {
   CommandResult,
   QuotaDeps,
+  QuotaIo,
   Reader,
   ReaderContext,
   ReaderOutput,
   RunCommand,
   RunCommandOptions,
-  ScratchDir,
   WebSocketLike,
 } from './context.ts';
 export { formatQuotaTable } from './format.ts';
+export { productionQuotaIo } from './io.ts';
 export { DEFAULT_TIMEOUT_MS, READERS, readAllQuotas } from './read-all.ts';
 export {
   findUsageReport,
   parseOrgList,
   readingsFromUsageReport,
+  verifyNoCost,
 } from './readers/claude.ts';
 export { readingsFromRateLimit } from './readers/claude-stream.ts';
 export { readingsFromPeriodUsage } from './readers/cursor.ts';

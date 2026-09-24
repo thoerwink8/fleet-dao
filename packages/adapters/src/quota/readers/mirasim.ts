@@ -11,10 +11,30 @@ export const DEFAULT_MIRASIM_PORT = 4316;
 const OPEN_TIMEOUT_MS = 8_000;
 
 /**
+ * 一个窗口的数：优先用点数（used / budget）；点数缺了、百分比还在，就按「已用 + 剩余」认刻度
+ * （加起来是 100 就是百分数，是 1 就是比例，都不是就不认——不把 0.9% 画成 90%）。
+ */
+function windowNumbers(
+  w: Record<string, unknown>,
+): { used: number; limit: number; utilization: number; unit: QuotaReading['unit'] } | undefined {
+  const used = num(w.used);
+  const budget = num(w.budget);
+  if (used !== undefined && budget !== undefined && budget > 0) {
+    return { used, limit: budget, utilization: used / budget, unit: 'points' };
+  }
+  const up = num(w.usedPercent);
+  const rp = num(w.remainingPercent);
+  if (up === undefined || rp === undefined) return undefined;
+  const scale = Math.abs(up + rp - 100) < 0.5 ? 100 : Math.abs(up + rp - 1) < 0.005 ? 1 : undefined;
+  if (scale === undefined) return undefined;
+  return { used: scale === 100 ? up : up * 100, limit: 100, utilization: up / scale, unit: 'percent' };
+}
+
+/**
  * getRelay 回帧 → 窗口读数。
  * - usage.ok 不为真：上游说没读成，报错（带上游给的原因），不填默认窗口；
  * - windows 为空而 ok 为真：零个窗口，正常返回；
- * - 单个窗口缺 used/budget：这一格不收并写进 notes，其余照收（全坏才算失败）。
+ * - 单个窗口缺数：有状态字的只留状态字，什么都没有的不收；都写进 notes。收到了却一格都没收下 → bad_response。
  * 上限（budget）每次都从这一帧取，不沿用旧值——官方会整体改档。
  */
 export function readingsFromRelayFrame(
@@ -53,12 +73,14 @@ export function readingsFromRelayFrame(
       notes.push(`第 ${i + 1} 个窗口没有名字，没收`);
       continue;
     }
-    const used = num(w.used);
-    const budget = num(w.budget);
-    if (used === undefined || budget === undefined || budget <= 0) {
-      notes.push(`窗口 ${label} 缺已用或上限，没收`);
+    const numbers = windowNumbers(w);
+    const status = normalizeStatus(w.status);
+    if (!numbers && !status.statusRaw) {
+      notes.push(`窗口 ${label} 既没有已用 / 上限，也没有状态字，没收`);
       continue;
     }
+    // 缺数字但带着状态字（比如 limit_reached）的窗口照收：丢了它，用满的窗口就从调度眼里消失了。
+    if (!numbers) notes.push(`窗口 ${label} 缺已用或上限，只留上游状态字`);
     const cls = classifyLabel(label, w.modelScoped === true || w.model_scoped === true);
     const afterSec = num(w.resetAfterSeconds);
     const resetsAt =
@@ -70,12 +92,12 @@ export function readingsFromRelayFrame(
         window: cls.window,
         scope: cls.scope,
         label,
-        unit: 'points',
-        used,
-        limit: budget,
-        utilization: used / budget,
+        unit: numbers?.unit ?? 'points',
+        used: numbers?.used,
+        limit: numbers?.limit,
+        utilization: numbers?.utilization,
         resetsAt,
-        ...normalizeStatus(w.status),
+        ...status,
         reading: 'measured',
         readAt,
         source: SOURCE,

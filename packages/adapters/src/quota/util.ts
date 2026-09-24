@@ -60,3 +60,9 @@ export function expandHome(path: string, home: string): string {
   if (path.startsWith('~/')) return `${home.replace(/[\\/]+$/, '')}/${path.slice(2)}`;
   return path;
 }
+
+/** 这些变量一旦进了 Claude Code 的环境，请求就会绕开 reclaude 的代理链、或换成别的凭据。 */
+export function isForbiddenClaudeEnv(key: string): boolean {
+  const k = key.toUpperCase();
+  return k.startsWith('ANTHROPIC_') || k === 'CLAUDE_CODE_OAUTH_TOKEN';
+}

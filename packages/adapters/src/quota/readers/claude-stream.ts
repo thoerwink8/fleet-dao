@@ -30,11 +30,12 @@ function resetFromText(text: string, from: string): string | undefined {
  * - 顶层 status / rateLimitType 说的是「当前卡着的那个窗口」，状态字只挂到那一行；
  * - 用满那一刻事件里常常只有 {status:"rejected"}、没有窗口：照样记「已用满」——
  *   窗口类型没给就看报错正文（errorText）是不是说「5 小时」，刷新点能从「约 N 分钟后重置」推就推。
+ * 既没有利用率、也没有状态字的窗口不收；一条都换不出来就返回 undefined——这次没读到，不是 0%。
  */
 export function readingsFromRateLimit(
   reading: RateLimitReading,
   ctx: { poolId: string; errorText?: string },
-): QuotaReading[] {
+): QuotaReading[] | undefined {
   const base = {
     poolId: ctx.poolId,
     reading: 'measured' as const,
@@ -43,7 +44,8 @@ export function readingsFromRateLimit(
   };
   const status = normalizeStatus(reading.status);
   const limiting = reading.rateLimitType;
-  const out: QuotaReading[] = reading.windows.map((w) => {
+  const usable = reading.windows.filter((w) => w.utilization !== undefined || w.name === limiting);
+  const out: QuotaReading[] = usable.map((w) => {
     const cls = classify(w.name);
     return pruned<QuotaReading>({
       ...base,
@@ -84,5 +86,5 @@ export function readingsFromRateLimit(
       );
     }
   }
-  return out;
+  return out.length ? out : undefined;
 }

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   type PoolConfig,
   type PoolQuotaResult,
+  type QuotaDeps,
   QuotaReadError,
   type QuotaReading,
   type Reader,
@@ -125,6 +126,37 @@ describe('一轮读完所有池：每个池一定有一条结果', () => {
       '窗口 5h 名字重复，没收',
       '窗口 7d 数字不是有限数，没收',
     ]);
+  });
+
+  it('交回来的窗口一个都不合格：bad_response，不许变成「读成了、0 个窗口」', async () => {
+    const reader: Reader = async () => ({
+      windows: [reading('b', '5h'), reading('a', '7d', { limit: Number.POSITIVE_INFINITY })],
+    });
+    const report = await readAllQuotas(
+      { pools: [pool('a')] },
+      fakeDeps({ readers: { 'mirasim-relay': reader } }),
+    );
+    expect(code(report.results[0])).toBe('bad_response');
+  });
+
+  it('外部能力没注入就当场抛错：库函数不自己去碰真进程、真网络、真文件', async () => {
+    const { fetch: _fetch, ...rest } = fakeDeps();
+    await expect(readAllQuotas({ pools: [pool('a')] }, rest as QuotaDeps)).rejects.toThrowError(
+      /缺注入：fetch/,
+    );
+    await expect(
+      readAllQuotas({ pools: [pool('a')] }, undefined as unknown as QuotaDeps),
+    ).rejects.toThrowError(/缺注入/);
+  });
+
+  it('配置里的读取器类型不认识：这个池报 config，别的池照读', async () => {
+    const report = await readAllQuotas(
+      { pools: [pool('x', { reader: 'guess' } as unknown as Partial<PoolConfig>), pool('a')] },
+      fakeDeps({
+        readers: { 'mirasim-relay': async (ctx) => ({ windows: [reading(ctx.pool.poolId, '5h')] }) },
+      }),
+    );
+    expect(report.results.map(code)).toEqual(['config', 'ok']);
   });
 
   it('同一轮里同一个 key 的共用调用只跑一次', async () => {

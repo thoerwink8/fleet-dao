@@ -122,6 +122,56 @@ describe('Jev 日账（旧系统 ~/.dao/judge-spend 的形状）', () => {
     expect(!r.ok && r.error.code).toBe('no_usage_source');
   });
 
+  const jevPool = {
+    poolId: 'jev',
+    channelId: 'jev',
+    reader: 'estimate' as const,
+    windows: [day],
+    usage: { type: 'daily-token-files' as const, dir: '/srv/ledger/judge-spend', usdPerMTok: 0.042 },
+  };
+  const enoent = () => {
+    const e = new Error('ENOENT: no such file or directory') as NodeJS.ErrnoException;
+    e.code = 'ENOENT';
+    return e;
+  };
+
+  it('日账目录不在：no_usage_source——不许按「今天用了 $0」算，否则每日上限永远不触发', async () => {
+    const report = await readAllQuotas(
+      { pools: [jevPool] },
+      fakeDeps({
+        listDir: async () => {
+          throw enoent();
+        },
+      }),
+    );
+    const r = report.results[0] as PoolQuotaResult;
+    expect(!r.ok && r.error.code).toBe('no_usage_source');
+    expect(!r.ok && r.error.message).toContain('不存在');
+  });
+
+  it('日账文件坏了、或缺 tokens：bad_response，不跳过', async () => {
+    const run = async (content: string) => {
+      const report = await readAllQuotas(
+        { pools: [jevPool] },
+        fakeDeps({ listDir: async () => ['2026-09-24.json'], readFile: async () => content }),
+      );
+      const r = report.results[0] as PoolQuotaResult;
+      return r.ok ? 'ok' : r.error.code;
+    };
+    expect(await run('{ broken')).toBe('bad_response');
+    expect(await run('{"calls":3}')).toBe('bad_response');
+  });
+
+  it('目录在、这段时间一条记录都没有：照算 0，但写明这只是下限', async () => {
+    const report = await readAllQuotas(
+      { pools: [jevPool] },
+      fakeDeps({ listDir: async () => ['2026-09-20.json'] }),
+    );
+    const r = report.results[0] as PoolQuotaResult;
+    expect(r.ok && r.windows[0]?.used).toBe(0);
+    expect(r.notes.join()).toContain('一条用量记录都没有');
+  });
+
   it('读取器：读日账估今天用了多少', async () => {
     const report = await readAllQuotas(
       {

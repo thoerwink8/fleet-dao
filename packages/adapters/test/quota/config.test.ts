@@ -61,7 +61,7 @@ describe('配置校验：一次列全，不撞到第一个就停', () => {
     ]);
   });
 
-  it('Claude 的环境变量不许带 ANTHROPIC_BASE_URL 这类（会绕开 reclaude）', () => {
+  it('Claude 的环境变量按前缀禁 ANTHROPIC_*，另禁 CLAUDE_CODE_OAUTH_TOKEN（都会绕开 reclaude）', () => {
     const got = problems({
       pools: [
         {
@@ -69,11 +69,19 @@ describe('配置校验：一次列全，不撞到第一个就停', () => {
           channelId: 'claude-sub',
           reader: 'claude-usage',
           command: ['reclaude'],
-          env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:1/x' },
+          env: {
+            ANTHROPIC_BASE_URL: 'http://127.0.0.1:1/x',
+            anthropic_custom_headers: 'x',
+            CLAUDE_CODE_OAUTH_TOKEN: 'x',
+            LANG: 'C.UTF-8',
+          },
         },
       ],
     });
-    expect(got.join()).toContain('ANTHROPIC_BASE_URL');
+    expect(got).toHaveLength(3);
+    for (const key of ['ANTHROPIC_BASE_URL', 'anthropic_custom_headers', 'CLAUDE_CODE_OAUTH_TOKEN']) {
+      expect(got.join('\n')).toContain(key);
+    }
   });
 
   it('估算窗口要写全：时长、单位、上限', () => {

@@ -1,7 +1,11 @@
 // 一轮读完所有账号池：各读取器并发、各自有超时；每个池一定有一条结果——读不成的带明确原因，绝不静默丢掉。
-import { homedir } from 'node:os';
-import type { QuotaDeps, Reader, ReaderContext, ReaderOutput } from './context.ts';
-import { listDir, openWebSocket, readTextFile, runCommand, scratchDir } from './io.ts';
+import {
+  QUOTA_IO_KEYS,
+  type QuotaDeps,
+  type Reader,
+  type ReaderContext,
+  type ReaderOutput,
+} from './context.ts';
 import { readClaudeUsage } from './readers/claude.ts';
 import { readCursorDashboard } from './readers/cursor.ts';
 import { readEstimate } from './readers/estimate.ts';
@@ -36,7 +40,17 @@ export const DEFAULT_TIMEOUT_MS: Record<ReaderType, number> = {
   estimate: 20_000,
 };
 
-export async function readAllQuotas(config: QuotaConfig, deps: QuotaDeps = {}): Promise<QuotaReport> {
+/**
+ * 外部能力（进程、网络、文件、家目录、环境）必须全部注入，少一样当场抛错——
+ * 库函数不自己拿真的，免得测试或调用方悄悄碰到真机器。生产传 productionQuotaIo()。
+ */
+export async function readAllQuotas(config: QuotaConfig, deps: QuotaDeps): Promise<QuotaReport> {
+  const missing = QUOTA_IO_KEYS.filter((k) => (deps as Partial<QuotaDeps> | undefined)?.[k] === undefined);
+  if (missing.length) {
+    throw new Error(
+      `readAllQuotas 缺注入：${missing.join('、')}（生产环境传 productionQuotaIo()，测试传假的）`,
+    );
+  }
   const now = deps.now ?? (() => new Date());
   const startedAt = now().toISOString();
   const shared = new Map<string, Promise<unknown>>();
@@ -52,11 +66,12 @@ function toQuotaError(e: unknown): QuotaError {
 
 /**
  * 读取器交回来的数再过一道：窗口必须属于这个池、名字不重、数字是有限数。
- * 不合格的丢掉并写进 notes——丢了也要说，不静默。
+ * 不合格的丢掉并写进 notes——丢了也要说，不静默；交回来的全被丢掉就不算读成（抛 bad_response）。
  */
 function vetWindows(poolId: string, windows: readonly QuotaReading[], notes: string[]): QuotaReading[] {
   const out: QuotaReading[] = [];
   const labels = new Set<string>();
+  const dropped: string[] = [];
   for (const w of windows) {
     const bad =
       w.poolId !== poolId
@@ -69,12 +84,19 @@ function vetWindows(poolId: string, windows: readonly QuotaReading[], notes: str
               ? '数字不是有限数'
               : undefined;
     if (bad) {
-      notes.push(`窗口 ${w.label || '（无名）'} ${bad}，没收`);
+      dropped.push(`窗口 ${w.label || '（无名）'} ${bad}，没收`);
       continue;
     }
     labels.add(w.label);
     out.push(w);
   }
+  if (windows.length > 0 && out.length === 0) {
+    throw new QuotaReadError(
+      'bad_response',
+      `读取器交回 ${windows.length} 个窗口，一个都不合格：${dropped.join('；')}`,
+    );
+  }
+  notes.push(...dropped);
   return out;
 }
 
@@ -105,14 +127,14 @@ async function readPool(
     fetchedAt,
     now,
     signal: controller.signal,
-    fetch: deps.fetch ?? globalThis.fetch,
-    runCommand: deps.runCommand ?? runCommand,
-    readFile: deps.readFile ?? readTextFile,
-    listDir: deps.listDir ?? listDir,
-    openWebSocket: deps.openWebSocket ?? openWebSocket,
-    scratchDir: deps.scratchDir ?? scratchDir,
-    homeDir: deps.homeDir ?? homedir(),
-    env: deps.env ?? process.env,
+    fetch: deps.fetch,
+    runCommand: deps.runCommand,
+    readFile: deps.readFile,
+    listDir: deps.listDir,
+    openWebSocket: deps.openWebSocket,
+    workDir: deps.workDir,
+    homeDir: deps.homeDir,
+    env: deps.env,
     shared<T>(key: string, fn: () => Promise<T>): Promise<T> {
       let p = shared.get(key) as Promise<T> | undefined;
       if (!p) {

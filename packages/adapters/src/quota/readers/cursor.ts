@@ -57,6 +57,7 @@ export function readingsFromPeriodUsage(
     notes.push('账期美元（totalSpend / limit）缺，没收');
   }
 
+  let buckets = 0;
   for (const [key, value] of Object.entries(plan)) {
     const m = /^(.+)PercentUsed$/.exec(key);
     const bucket = m?.[1];
@@ -66,6 +67,7 @@ export function readingsFromPeriodUsage(
       notes.push(`${key} 不是数字，没收`);
       continue;
     }
+    buckets++;
     windows.push(
       pruned<QuotaReading>({
         ...base,
@@ -79,6 +81,14 @@ export function readingsFromPeriodUsage(
       }),
     );
   }
+
+  if (windows.length === 0) {
+    throw new QuotaReadError(
+      'bad_response',
+      `Cursor 回包里一个额度窗口都认不出（上游多半改了字段名）：${notes.join('；') || 'planUsage 里没有认得的字段'}`,
+    );
+  }
+  if (buckets === 0) notes.push('没找到 Auto / API 桶的百分比（字段可能改名了），只剩账期美元，按桶卡不住');
 
   // 按需付费（超出套餐的部分）：实测只回了 {limitType}，没见过带数的样子——出现新字段只点名，不猜含义。
   const spend = body.spendLimitUsage;
@@ -95,6 +105,8 @@ export function readingsFromPeriodUsage(
   if (auto?.length) {
     scopeModels = { auto: { in: auto } };
     if (windows.some((w) => w.scope === 'api')) scopeModels.api = { notIn: auto };
+  } else if (buckets > 0) {
+    notes.push('没读到 Auto 桶的模型名单：桶窗口只能按名字匹配模型，可能卡不准');
   }
   const out: {
     windows: QuotaReading[];

@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { loadQuotaConfig, QuotaConfigError, quotaConfigPath } from './config.ts';
 import type { QuotaDeps } from './context.ts';
 import { formatQuotaTable } from './format.ts';
+import { productionQuotaIo } from './io.ts';
 import { readAllQuotas } from './read-all.ts';
 
 const HELP = `用法：node packages/adapters/src/quota/cli.ts [选项]
@@ -25,7 +26,12 @@ export interface CliIo {
   env: Record<string, string | undefined>;
 }
 
-export async function runQuotaCli(argv: string[], io: CliIo, deps: QuotaDeps = {}): Promise<number> {
+/** 生产环境的外部能力只在命令行这里接上；库函数 readAllQuotas 不自己拿真的。 */
+export async function runQuotaCli(
+  argv: string[],
+  io: CliIo,
+  deps: QuotaDeps = productionQuotaIo(),
+): Promise<number> {
   let json = false;
   let configPath: string | undefined;
   let timeZone: string | undefined;

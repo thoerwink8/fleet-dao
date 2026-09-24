@@ -105,7 +105,15 @@ export function dailyTokenFilesSource(
   return async ({ since, until }) => {
     const firstDay = since.toISOString().slice(0, 10);
     const lastDay = until.toISOString().slice(0, 10);
-    const names = await io.listDir(dir);
+    let names: string[];
+    try {
+      names = await io.listDir(dir);
+    } catch (e) {
+      // 目录不在 ≠ 没用量：路径写错或目录被搬走时，要是按 $0 算，每日上限就永远不会触发。
+      const code = (e as NodeJS.ErrnoException).code ?? 'ERR';
+      const why = code === 'ENOENT' ? '不存在（路径写错，或日账搬走了）' : `读不了（${code}）`;
+      throw new QuotaReadError('no_usage_source', `日账目录 ${dir} ${why}`);
+    }
     const out: UsageRecord[] = [];
     for (const name of names) {
       const m = /^(\d{4}-\d{2}-\d{2})\.json$/.exec(name);
@@ -145,5 +153,8 @@ export const readEstimate: Reader = async (ctx) => {
   const out = estimateWindows(pool.windows, records, { poolId: pool.poolId, now });
   const notes = [...out.notes];
   if (pool.usage) notes.push('用量来自旧系统的日账（按 UTC 日合计），不是上游账单');
+  if (records.length === 0) {
+    notes.push('这段时间一条用量记录都没有：要么真没用，要么记账没在写——估出来的 0 只是下限');
+  }
   return { windows: out.windows, notes };
 };

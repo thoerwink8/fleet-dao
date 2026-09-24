@@ -2,7 +2,7 @@
 // 从 FLEET_QUOTA_CONFIG 指的文件读（默认 /etc/fleet-dao/quota.json）；仓里只有 deploy/examples/quota.example.json。
 import { readFile } from 'node:fs/promises';
 import type { QuotaConfig, ReaderType, ReadingWindowKind } from './types.ts';
-import { isRecord } from './util.ts';
+import { isForbiddenClaudeEnv, isRecord } from './util.ts';
 
 export const DEFAULT_QUOTA_CONFIG_PATH = '/etc/fleet-dao/quota.json';
 
@@ -43,8 +43,6 @@ const READER_KEYS: Record<ReaderType, string[]> = {
   'grok-billing': ['authFile', 'baseUrl', 'clientVersion'],
   estimate: ['windows', 'usage'],
 };
-/** 这些变量一旦进了 Claude Code 的环境，请求就会绕开 reclaude 的代理链。 */
-const FORBIDDEN_CLAUDE_ENV = ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY'];
 
 /** 以 _ 或 $ 开头的键留给人写注释（JSON 没有注释），其余不认识的键当拼写错误报出来。 */
 const isCommentKey = (k: string) => k.startsWith('_') || k.startsWith('$');
@@ -128,9 +126,12 @@ function checkPool(p: unknown, i: number, problems: string[]): void {
         if (!isRecord(p.env) || !Object.values(p.env).every((v) => typeof v === 'string')) {
           problems.push(`${where}.env 要是「名字 → 字符串」`);
         } else {
-          for (const k of FORBIDDEN_CLAUDE_ENV) {
-            if (k in p.env)
-              problems.push(`${where}.env 不许带 ${k}：它会让 Claude Code 绕开 reclaude 的代理链`);
+          for (const k of Object.keys(p.env)) {
+            if (isForbiddenClaudeEnv(k)) {
+              problems.push(
+                `${where}.env 不许带 ${k}：ANTHROPIC_* 与 CLAUDE_CODE_OAUTH_TOKEN 会让 Claude Code 绕开 reclaude`,
+              );
+            }
           }
         }
       }

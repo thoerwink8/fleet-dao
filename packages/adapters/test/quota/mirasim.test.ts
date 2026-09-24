@@ -143,6 +143,8 @@ describe('Mirasim 中转：读到 0 个窗口 ≠ 没读成', () => {
     expect(code({ type: 'error', message: 'nope' })).toBe('upstream');
     expect(code({ type: 'state', state: {} })).toBe('bad_response');
     expect(code(null)).toBe('bad_response');
+    expect(code({ type: 'relay', relay: {} })).toBe('bad_response');
+    expect(code({ type: 'relay', relay: { usage: { ok: true, windows: 'x' } } })).toBe('bad_response');
   });
 
   it('个别窗口缺数：那一格不收并写明，其余照收；全坏才算失败', () => {
@@ -156,6 +158,45 @@ describe('Mirasim 中转：读到 0 个窗口 ≠ 没读成', () => {
     expect(some.windows.map((w) => w.label)).toEqual(['5h']);
     expect(some.notes.join()).toContain('7d');
     expect(() => readingsFromRelayFrame(relayWith([{ label: '7d', budget: 0 }]), ctx)).toThrowError(/认不出/);
+  });
+
+  it('缺数字但带着 limit_reached 的窗口不丢：只留状态字，调度照样看得见它满了', () => {
+    const { windows, notes } = readingsFromRelayFrame(
+      relayWith([
+        { label: '7d_fable', status: 'limit_reached', modelScoped: true, resetAt: '2026-09-29T05:27:56Z' },
+      ]),
+      ctx,
+    );
+    expect(windows).toEqual([
+      expect.objectContaining({
+        label: '7d_fable',
+        window: '7d_model',
+        scope: 'fable',
+        upstreamStatus: 'limit_reached',
+        resetsAt: '2026-09-29T05:27:56.000Z',
+      }),
+    ]);
+    expect(windows[0]?.used).toBeUndefined();
+    expect(notes.join()).toContain('只留上游状态字');
+  });
+
+  it('点数缺了、百分比还在：按「已用 + 剩余」认刻度，认不出刻度就不收', () => {
+    const { windows } = readingsFromRelayFrame(
+      relayWith([
+        { label: '5h', usedPercent: 0.9, remainingPercent: 99.1, resetAt: '2026-09-24T20:00:00Z' },
+        { label: '7d', usedPercent: 0.557, remainingPercent: 0.443, resetAt: '2026-09-29T00:00:00Z' },
+      ]),
+      ctx,
+    );
+    expect(windows).toMatchObject([
+      { label: '5h', unit: 'percent', used: 0.9, limit: 100 },
+      { label: '7d', unit: 'percent', limit: 100 },
+    ]);
+    expect(windows[0]?.utilization).toBeCloseTo(0.009, 10);
+    expect(windows[1]?.used).toBeCloseTo(55.7, 10);
+    expect(() =>
+      readingsFromRelayFrame(relayWith([{ label: '7d', usedPercent: 40, remainingPercent: 40 }]), ctx),
+    ).toThrowError(/认不出/);
   });
 });
 
@@ -194,6 +235,11 @@ describe('Mirasim 中转读取器：回环 WebSocket', () => {
     const r = report.results[0];
     expect(r?.ok).toBe(false);
     expect(!r?.ok && r?.error.code).toBe('no_credentials');
+    const empty = await readAllQuotas(
+      { pools: [pool] },
+      fakeDeps({ readFile: fakeFiles({ [tokenPath]: '  \n' }) }),
+    );
+    expect(!empty.results[0]?.ok && empty.results[0]?.error.code).toBe('no_credentials');
   });
 
   it('连不上回环端口：unreachable，令牌不进错误信息', async () => {

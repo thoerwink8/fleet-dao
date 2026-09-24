@@ -13,7 +13,49 @@ const SOURCE = 'claude-usage';
 
 export function usageArgs(): string[] {
   // --setting-sources project：不加载用户级设置，不跑用户的开机钩子；不能用 --bare（经 reclaude 会认证失败）。
-  return ['-p', '--output-format', 'stream-json', '--verbose', '--setting-sources', 'project', '/usage'];
+  // --no-session-persistence：不落会话记录——每读一次就在 ~/.claude/projects 下留一个目录，攒下来没人收。
+  return [
+    '-p',
+    '--output-format',
+    'stream-json',
+    '--verbose',
+    '--setting-sources',
+    'project',
+    '--no-session-persistence',
+    '/usage',
+  ];
+}
+
+/**
+ * 核实 /usage 真的没调模型：stream-json 的 result 行必须 num_turns === 0 且 total_cost_usd === 0。
+ * 没有 result 行 → 核不了，bad_response；有花销 → read_cost（读额度花了钱，读数不采信，要人查）。
+ */
+export function verifyNoCost(stdout: string): void {
+  let result: Record<string, unknown> | undefined;
+  for (const line of stdout.split(/\r?\n/)) {
+    const t = line.trim();
+    if (!t.startsWith('{') || !t.includes('"result"')) continue;
+    try {
+      const doc: unknown = JSON.parse(t);
+      if (isRecord(doc) && doc.type === 'result') result = doc;
+    } catch {
+      // 坏行跳过
+    }
+  }
+  if (!result) {
+    throw new QuotaReadError(
+      'bad_response',
+      'Claude Code /usage 的输出里没有 result 行，核实不了读额度有没有花钱',
+    );
+  }
+  const turns = result.num_turns;
+  const cost = result.total_cost_usd;
+  if (turns !== 0 || cost !== 0) {
+    throw new QuotaReadError(
+      'read_cost',
+      `读额度花了钱：/usage 本该是不调模型的本地命令，这次 num_turns=${String(turns)}、total_cost_usd=${String(cost)}`,
+    );
+  }
 }
 
 export interface OrgRow {
@@ -80,8 +122,10 @@ export function findUsageReport(stdout: string): Record<string, unknown> | undef
 
 /**
  * usage_report → 窗口读数。
- * rate_limits 为 null = CLI 没拿到（接口失败或令牌没有 profile 权限）→ 抛错，不当成「没有窗口」；
- * limits 为 [] = 服务端明说没有额度行 → 零个窗口，正常返回。
+ * - rate_limits 为 null = CLI 没拿到（接口失败或令牌没有 profile 权限）→ 抛错，不当成「没有窗口」；
+ * - limits 为 [] = 服务端明说没有额度行 → 零个窗口，正常返回；
+ * - 一行要有 kind，还要有百分比或状态字才算收下；只有状态字的行照收（留住「很紧」「已满」）；
+ * - 收到了行却一行都没收下（多半是上游改了字段名）→ bad_response：不然用满的池会被当成不限额。
  */
 export function readingsFromUsageReport(
   report: Record<string, unknown>,
@@ -102,16 +146,19 @@ export function readingsFromUsageReport(
   const notes: string[] = [];
   const seen = new Set<string>();
   for (const [i, row] of limits.entries()) {
-    if (!isRecord(row) || typeof row.kind !== 'string' || !row.kind) {
-      notes.push(`第 ${i + 1} 行额度认不出，没收`);
+    const kind = isRecord(row) && typeof row.kind === 'string' && row.kind ? row.kind : undefined;
+    const percent = isRecord(row) ? num(row.percent) : undefined;
+    const status = isRecord(row) ? normalizeStatus(row.severity) : {};
+    if (!isRecord(row) || !kind || (percent === undefined && !status.statusRaw)) {
+      notes.push(`第 ${i + 1} 行额度认不出（没有 kind，或既没有百分比也没有状态字），没收`);
       continue;
     }
-    const percent = num(row.percent);
     const scopeName = scopeNameOf(row.scope);
-    const cls = classifyUsageRow(row.kind, scopeName);
-    let label = scopeName ? `${row.kind}:${scopeName}` : row.kind;
+    const cls = classifyUsageRow(kind, scopeName);
+    let label = scopeName ? `${kind}:${scopeName}` : kind;
     if (seen.has(label)) label = `${label}#${i + 1}`;
     seen.add(label);
+    if (percent === undefined) notes.push(`${label} 没有百分比，只留上游状态字`);
     windows.push(
       pruned<QuotaReading>({
         poolId: ctx.poolId,
@@ -123,16 +170,23 @@ export function readingsFromUsageReport(
         limit: percent === undefined ? undefined : 100,
         utilization: percent === undefined ? undefined : percent / 100,
         resetsAt: toIso(row.resets_at),
-        ...normalizeStatus(row.severity),
+        ...status,
         reading: 'measured',
         readAt: ctx.readAt,
         source: SOURCE,
       }),
     );
   }
+  if (limits.length > 0 && windows.length === 0) {
+    throw new QuotaReadError(
+      'bad_response',
+      `Claude 回了 ${limits.length} 行额度，一行都认不出（上游多半改了字段名）：${notes.join('；')}`,
+    );
+  }
   if (limits.length === 0) notes.push('服务端说这个组织没有额度行');
 
   const extra = rateLimits.extra_usage;
+  if (!isRecord(extra)) notes.push('没读到额外用量（超出套餐按量付费）开没开');
   if (isRecord(extra)) {
     const limit = num(extra.monthly_limit);
     const used = num(extra.used_credits);
@@ -184,18 +238,24 @@ function failureFromRun(what: string, run: CommandResult): QuotaReadError {
   );
 }
 
-/** 没配 cwd 就在一个新建的空目录里跑：在 /tmp 或家目录里起，会把那里的项目设置（含钩子）一起加载。 */
+/** 没配 cwd 就在固定的私有空目录里跑（见 QuotaIo.workDir）：在 /tmp 或家目录里起，会把那里的项目设置和钩子一起加载。 */
 async function run(ctx: ReaderContext, pool: ClaudeUsageConfig, extraArgs: string[]): Promise<CommandResult> {
-  const scratch = pool.cwd === undefined ? await ctx.scratchDir() : undefined;
-  try {
-    return await ctx.runCommand([...pool.command, ...extraArgs], {
-      cwd: pool.cwd ?? scratch?.path ?? '.',
-      env: childEnv(ctx.env, pool.env ?? {}),
-      signal: ctx.signal,
-    });
-  } finally {
-    await scratch?.dispose();
+  let cwd = pool.cwd;
+  if (cwd === undefined) {
+    try {
+      cwd = await ctx.workDir();
+    } catch (e) {
+      throw new QuotaReadError(
+        'config',
+        `子进程的工作目录不可用：${redact(String((e as Error).message ?? e))}`,
+      );
+    }
   }
+  return ctx.runCommand([...pool.command, ...extraArgs], {
+    cwd,
+    env: childEnv(ctx.env, pool.env ?? {}),
+    signal: ctx.signal,
+  });
 }
 
 export const readClaudeUsage: Reader = async (ctx) => {
@@ -222,6 +282,7 @@ export const readClaudeUsage: Reader = async (ctx) => {
   const usageRun = await ctx.shared(`claude-usage:${key}`, () => run(ctx, pool, usageArgs()));
   const report = findUsageReport(usageRun.stdout);
   if (!report) throw failureFromRun('Claude Code /usage', usageRun);
+  verifyNoCost(usageRun.stdout);
   const out = readingsFromUsageReport(report, { poolId: pool.poolId, readAt: ctx.fetchedAt });
 
   if (pool.orgKind) {

@@ -34,8 +34,12 @@ describe('被动读：真会话里的 rate_limit_event → 每窗一行', () => 
       { label: 'seven_day', window: '7d', used: 83, upstreamStatus: 'warning', statusRaw: 'allowed_warning' },
       { label: 'seven_day_overage_included', window: 'other' },
     ]);
-    expect(out[0]?.upstreamStatus).toBeUndefined();
-    expect(out.every((r) => r.readAt === NOW.toISOString() && r.source === 'claude-stream')).toBe(true);
+    expect(out?.[0]?.upstreamStatus).toBeUndefined();
+    expect(out?.every((r) => r.readAt === NOW.toISOString() && r.source === 'claude-stream')).toBe(true);
+  });
+
+  it('事件里一个能记的窗口都没有（API key 会话就不带窗口）：返回 undefined——没读到，不是 0%', () => {
+    expect(readingsFromRateLimit(parse({ status: 'allowed' }), { poolId: 'claude-solo' })).toBeUndefined();
   });
 
   it('用满那一刻只有 {status:"rejected"}、没有利用率：记 5h 已用满，刷新点按「约 N 分钟后重置」推，不记成没查成', () => {
