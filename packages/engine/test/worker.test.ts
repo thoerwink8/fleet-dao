@@ -27,7 +27,7 @@ describe('worker 配置', () => {
 
   it('按环境变量改；数字不合法的回默认值', () => {
     const config = configFromEnv({
-      TEMPORAL_ADDRESS: '10.0.0.1:7233',
+      TEMPORAL_ADDRESS: 'temporal.example:7233',
       TEMPORAL_NAMESPACE: 'other',
       FLEET_TASK_QUEUE: 'q',
       FLEET_SHUTDOWN_GRACE_SECONDS: 'abc',
@@ -36,7 +36,7 @@ describe('worker 配置', () => {
       FLEET_CLI_BIN: '/opt/fleet/cli/bin',
     });
     expect(config).toEqual({
-      address: '10.0.0.1:7233',
+      address: 'temporal.example:7233',
       namespace: 'other',
       taskQueue: 'q',
       shutdownGraceSeconds: 30,
