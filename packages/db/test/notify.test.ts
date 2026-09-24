@@ -2,11 +2,13 @@
 import { FLEET_CHANGES_CHANNEL, REALTIME_TABLES } from '@fleet-dao/shared';
 import { eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { savePoolQuota } from '../src/queries/quota.ts';
 import {
   asks,
   auditLog,
   channels,
   notifications,
+  pools,
   progressEvents,
   quotaWindows,
   sessionRuns,
@@ -63,13 +65,32 @@ describe('写入即通知 fleet_changes', () => {
     await freshEars();
     await t.db.insert(quotaWindows).values({
       poolId: 'relay-a',
+      label: '7d_fable',
       window: '7d_model',
       scope: 'fable',
+      unit: 'points',
+      source: 'mirasim-relay',
       reading: 'measured',
       readAt: NOW,
     });
     await settle();
     expect(heard).toEqual([{ table: 'quota_windows', id: 'relay-a' }]);
+  });
+
+  it('池本身改了也按池报成 quota_windows：读成了但上游一个窗口都没报，额度页也能刷新', async () => {
+    await catalog(t.db);
+    await freshEars();
+    await savePoolQuota(
+      t.db,
+      { poolId: 'relay-a', readAt: NOW.toISOString(), complete: true, windows: [] },
+      { now: NOW },
+    );
+    await t.db.update(pools).set({ maxConcurrency: 3 }).where(eq(pools.id, 'relay-b'));
+    await settle();
+    expect(heard).toEqual([
+      { table: 'quota_windows', id: 'relay-a' },
+      { table: 'quota_windows', id: 'relay-b' },
+    ]);
   });
 
   it('会话排进队、开跑、结束都发（看板和额度页要刷新）；不属于任何需求的会话也发', async () => {
@@ -175,9 +196,15 @@ describe('写入即通知 fleet_changes', () => {
     const sub = await addSubtask(t.db, task.id);
     const run = await addRun(t.db, { taskId: task.id, subtaskId: sub.id, routeId: 'r1' });
     await t.db.insert(progressEvents).values({ runId: run.id, kind: 'done', payload: null });
-    await t.db
-      .insert(quotaWindows)
-      .values({ poolId: 'relay-a', window: '5h', reading: 'measured', readAt: NOW });
+    await t.db.insert(quotaWindows).values({
+      poolId: 'relay-a',
+      label: '5h',
+      window: '5h',
+      unit: 'percent',
+      source: 'claude-usage',
+      reading: 'measured',
+      readAt: NOW,
+    });
     await t.db.insert(notifications).values({ level: 'daily', dedupeKey: 'daily:2026-09-25', title: '日报' });
     await t.db.insert(asks).values({ taskId: task.id, runId: run.id, question: '要不要兼容旧接口？' });
     await t.db.insert(stagePolicyRoutes).values({ stage: 'execute', routeId: 'r1', position: 0 });

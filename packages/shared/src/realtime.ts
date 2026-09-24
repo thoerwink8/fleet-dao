@@ -22,7 +22,8 @@ export type RealtimeTable = (typeof REALTIME_TABLES)[number];
 
 /**
  * NOTIFY 的载荷，也是 SSE change 事件的 data：收到后按 id 回库里读。id 一律是文本：
- * 单列主键的表就是主键；quota_windows 是 pool_id（额度按池刷新）；stage_policies 是阶段名（改路由顺序也发）；settings 是 key。
+ * 单列主键的表就是主键；quota_windows 是 pool_id（额度按池刷新；池本身改了——最近读成时刻、到期日、成员表——也按池报成它）；
+ * stage_policies 是阶段名（改路由顺序也发）；settings 是 key。
  */
 export interface ChangeEvent {
   table: RealtimeTable;

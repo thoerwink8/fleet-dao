@@ -94,6 +94,8 @@ export const toPool = (r: typeof pools.$inferSelect): Pool =>
     channelId: r.channelId,
     maxConcurrency: r.maxConcurrency,
     expiresAt: isoOpt(r.expiresAt),
+    scopeModels: opt(r.scopeModels),
+    lastReadOkAt: isoOpt(r.lastReadOkAt),
   });
 
 export const toQuotaWindow = (r: typeof quotaWindows.$inferSelect): QuotaWindow =>
@@ -108,6 +110,11 @@ export const toQuotaWindow = (r: typeof quotaWindows.$inferSelect): QuotaWindow 
     upstreamStatus: opt(r.upstreamStatus),
     reading: r.reading,
     readAt: r.readAt.toISOString(),
+    label: r.label,
+    unit: r.unit,
+    source: r.source,
+    statusRaw: opt(r.statusRaw),
+    staleSince: isoOpt(r.staleSince),
   });
 
 export const toModel = (r: typeof models.$inferSelect): Model =>
@@ -126,6 +133,8 @@ export const toRoute = (r: typeof routes.$inferSelect): Route =>
     modelId: r.modelId,
     hostId: r.hostId,
     alive: r.alive,
+    upstreamModel: opt(r.upstreamModel),
+    upstreamAliases: r.upstreamAliases,
   });
 
 export const toStagePolicy = (r: typeof stagePolicies.$inferSelect, routeIds: string[]): StagePolicy =>

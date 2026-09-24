@@ -2,5 +2,6 @@
 export * from './agent-api.ts';
 export * from './bans.ts';
 export type * from './domain.ts';
+export * from './quota.ts';
 export * from './realtime.ts';
 export * from './web-api.ts';

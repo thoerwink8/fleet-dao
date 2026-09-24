@@ -1,8 +1,9 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { PGlite } from '@electric-sql/pglite';
 import { generateMigration } from 'drizzle-kit/api';
 import { eq, is } from 'drizzle-orm';
-import { getTableConfig, PgTable } from 'drizzle-orm/pg-core';
+import { getTableConfig, isPgEnum, PgTable } from 'drizzle-orm/pg-core';
 import { afterAll, beforeAll, describe, expect, expectTypeOf, it } from 'vitest';
 import { createDb, type Db } from '../src/client.ts';
 import { MIGRATIONS_FOLDER } from '../src/migrate.ts';
@@ -10,10 +11,10 @@ import * as schema from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import { addRepo, addTask } from './helpers.ts';
 
-const schemaTables = Object.values(schema as Record<string, unknown>)
+const tableConfigs = Object.values(schema as Record<string, unknown>)
   .filter((v) => is(v, PgTable))
-  .map((t) => getTableConfig(t as PgTable).name)
-  .sort();
+  .map((t) => getTableConfig(t as PgTable));
+const schemaTables = tableConfigs.map((c) => c.name).sort();
 
 interface JournalEntry {
   idx: number;
@@ -126,6 +127,178 @@ describe('迁移', () => {
     expect(schemaTables.length).toBeGreaterThan(20);
     expect(rows.rows.map((r) => r.name)).toEqual(schemaTables);
   });
+
+  // 快照一致性（schema-drift）只核「表结构 ↔ 快照」；迁移 SQL 手改过（如 0002 为了在有数据的库上跑通调了顺序）就核不到了。
+  // 这里拿真跑完迁移的库逐项对照表结构。
+  describe('跑完迁移的库和表结构逐项对得上', () => {
+    const rowsOf = async <R>(text: string) => (await t.client.query<R>(text)).rows;
+    /** Postgres 把超过 63 字节的名字截短。 */
+    const pgName = (name: string) => name.slice(0, 63);
+
+    it('每一列的类型和非空', async () => {
+      const expected = tableConfigs.flatMap((cfg) => {
+        // 组合主键的列 Postgres 自动设非空。
+        const inPk = new Set(cfg.primaryKeys.flatMap((pk) => pk.columns.map((c) => c.name)));
+        return cfg.columns.map(
+          (c) =>
+            `${cfg.name}.${c.name} ${c.getSQLType().replace(/,\s+/g, ',')}${c.notNull || inPk.has(c.name) ? ' not null' : ''}`,
+        );
+      });
+      const actual = (
+        await rowsOf<{ tbl: string; col: string; type: string; nn: boolean }>(
+          `select c.relname as tbl, a.attname as col, format_type(a.atttypid, a.atttypmod) as type, a.attnotnull as nn
+             from pg_attribute a join pg_class c on c.oid = a.attrelid join pg_namespace n on n.oid = c.relnamespace
+            where n.nspname = 'public' and c.relkind = 'r' and a.attnum > 0 and not a.attisdropped`,
+        )
+      ).map((r) => `${r.tbl}.${r.col} ${r.type}${r.nn ? ' not null' : ''}`);
+      expect(actual.length).toBeGreaterThan(100);
+      expect(actual.sort()).toEqual(expected.sort());
+    });
+
+    it('主键、唯一、外键、检查约束，按名字一一对上', async () => {
+      const expected = tableConfigs.flatMap((cfg) =>
+        [
+          ...cfg.columns.filter((c) => c.primary).map(() => `${cfg.name}_pkey`),
+          ...cfg.primaryKeys.map((pk) => pk.getName()),
+          ...cfg.columns.filter((c) => c.isUnique).map((c) => c.uniqueName ?? `${cfg.name}_${c.name}_unique`),
+          ...cfg.uniqueConstraints.map(
+            (u) => u.getName() ?? `${cfg.name}_${u.columns.map((c) => c.name).join('_')}_unique`,
+          ),
+          ...cfg.foreignKeys.map((fk) => fk.getName()),
+          ...cfg.checks.map((ck) => ck.name),
+        ].map((name) => `${cfg.name}: ${pgName(name)}`),
+      );
+      const actual = (
+        await rowsOf<{ tbl: string; name: string }>(
+          `select c.relname as tbl, k.conname as name
+             from pg_constraint k join pg_class c on c.oid = k.conrelid join pg_namespace n on n.oid = c.relnamespace
+            where n.nspname = 'public' and k.contype in ('p', 'u', 'f', 'c')`,
+        )
+      ).map((r) => `${r.tbl}: ${r.name}`);
+      expect(actual.length).toBeGreaterThan(50);
+      expect(actual.sort()).toEqual(expected.sort());
+    });
+
+    it('索引（约束自带的除外）按名字一一对上', async () => {
+      const expected = tableConfigs.flatMap((cfg) =>
+        cfg.indexes.map((i) => `${cfg.name}: ${pgName(i.config.name ?? '（没起名）')}`),
+      );
+      const actual = (
+        await rowsOf<{ tbl: string; name: string }>(
+          `select c.relname as tbl, i.relname as name
+             from pg_index x join pg_class i on i.oid = x.indexrelid join pg_class c on c.oid = x.indrelid
+             join pg_namespace n on n.oid = c.relnamespace
+            where n.nspname = 'public'
+              and not exists (select 1 from pg_constraint k where k.conindid = x.indexrelid and k.conrelid = x.indrelid)`,
+        )
+      ).map((r) => `${r.tbl}: ${r.name}`);
+      expect(actual.length).toBeGreaterThan(5);
+      expect(actual.sort()).toEqual(expected.sort());
+    });
+
+    it('枚举的值和顺序', async () => {
+      const expected = Object.values(schema as Record<string, unknown>)
+        .filter(isPgEnum)
+        .map((e) => `${e.enumName}: ${e.enumValues.join(',')}`);
+      const actual = (
+        await rowsOf<{ name: string; vals: string }>(
+          `select t.typname as name, string_agg(e.enumlabel, ',' order by e.enumsortorder) as vals
+             from pg_type t join pg_enum e on e.enumtypid = t.oid join pg_namespace n on n.oid = t.typnamespace
+            where n.nspname = 'public' group by t.typname`,
+        )
+      ).map((r) => `${r.name}: ${r.vals}`);
+      expect(actual.length).toBeGreaterThan(5);
+      expect(actual.sort()).toEqual(expected.sort());
+    });
+  });
+});
+
+describe('0002：额度窗改按上游原名存', () => {
+  const entries = [...journal.entries].sort((a, b) => a.idx - b.idx);
+  const target = entries.findIndex((e) => e.tag === '0002_quota_labels');
+
+  async function runMigration(pg: PGlite, tag: string) {
+    const text = readFileSync(join(MIGRATIONS_FOLDER, `${tag}.sql`), 'utf8');
+    for (const statement of text.split('--> statement-breakpoint')) await pg.exec(statement);
+  }
+
+  it(
+    '在已有旧数据的库上跑得通：旧行补上原名、单位、读法，池补上最近读成时刻，主键换成（池, 原名）',
+    async () => {
+      expect(target).toBeGreaterThan(0);
+      const pg = new PGlite();
+      try {
+        for (const e of entries.slice(0, target)) await runMigration(pg, e.tag);
+        await pg.exec(`
+        insert into channels (id, name, billing) values ('relay', '中转', 'subscription');
+        insert into pools (id, channel_id, max_concurrency) values
+          ('relay-a', 'relay', 2), ('relay-b', 'relay', 1), ('relay-c', 'relay', 1);
+        insert into quota_windows (pool_id, "window", scope, utilization, used, "limit", reading, read_at) values
+          ('relay-a', '5h', '', null, 1140, 143528, 'measured', '2026-09-20T10:00:00Z'),
+          ('relay-a', '7d', '', 0.4, null, null, 'measured', '2026-09-20T11:00:00Z'),
+          ('relay-a', '7d_model', 'claude', null, 510000, 512600, 'measured', '2026-09-20T10:00:00Z'),
+          ('relay-a', '7d_model', 'fable', 0.2, null, null, 'measured', '2026-09-20T10:00:00Z'),
+          ('relay-b', 'month_usd', '', 0.55, 222, 400, 'estimated', '2026-09-19T08:00:00Z'),
+          ('relay-b', 'period_usd', '', null, 3, 10, 'measured', '2026-09-19T08:00:00Z'),
+          ('relay-b', 'points', '', null, 10, 100, 'measured', '2026-09-19T08:00:00Z');
+      `);
+        await runMigration(pg, '0002_quota_labels');
+
+        const rows = await pg.query<{ row: string }>(
+          `select concat_ws(' ', pool_id, label, "window", nullif(scope, ''), unit, source, stale_since) as row
+           from quota_windows order by pool_id, label collate "C"`,
+        );
+        expect(rows.rows.map((r) => r.row)).toEqual([
+          'relay-a 5h 5h points legacy',
+          'relay-a 7d 7d percent legacy',
+          'relay-a 7d_claude 7d_model claude points legacy',
+          'relay-a 7d_fable 7d_model fable percent legacy',
+          'relay-b month_usd month_usd usd legacy',
+          'relay-b period_usd period_usd usd legacy',
+          'relay-b points points points legacy',
+        ]);
+        // 池的最近读成时刻取它窗口里最新的读数时刻；没有窗口的池留空（从没读成过）。
+        const poolRows = await pg.query<{ id: string; at: string | null }>(
+          `select id, to_char(last_read_ok_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI') as at from pools order by id`,
+        );
+        expect(poolRows.rows.map((r) => [r.id, r.at])).toEqual([
+          ['relay-a', '2026-09-20T11:00'],
+          ['relay-b', '2026-09-19T08:00'],
+          ['relay-c', null],
+        ]);
+
+        // 补值的两条 UPDATE 再单独跑一遍（不在事务里逐条重跑）：已有的原名、单位不被改写，读成时刻不倒退。
+        const backfills = readFileSync(join(MIGRATIONS_FOLDER, '0002_quota_labels.sql'), 'utf8')
+          .split('--> statement-breakpoint')
+          .filter((s) => /^UPDATE /m.test(s));
+        expect(backfills).toHaveLength(2);
+        await pg.exec(`
+          update quota_windows set unit = 'tokens' where pool_id = 'relay-a' and label = '5h';
+          update pools set last_read_ok_at = '2026-09-21T09:00:00Z' where id = 'relay-a';
+        `);
+        for (const statement of backfills) await pg.exec(statement);
+        const after = await pg.query<{ unit: string; at: string }>(
+          `select w.unit, to_char(p.last_read_ok_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI') as at
+             from quota_windows w join pools p on p.id = w.pool_id
+            where w.pool_id = 'relay-a' and w.label = '5h'`,
+        );
+        expect(after.rows).toEqual([{ unit: 'tokens', at: '2026-09-21T09:00' }]);
+
+        // 迁移后：other 窗口可以带组名；同一个池里原名不能重复（换个类型也不行），别的池可以同名。
+        const insert = (pool: string, label: string, window: string, scope = '') =>
+          pg.exec(
+            `insert into quota_windows (pool_id, label, "window", scope, unit, reading, source, read_at)
+           values ('${pool}', '${label}', '${window}', '${scope}', 'percent', 'measured', 'test', now())`,
+          );
+        await insert('relay-a', 'auto_percent', 'other', 'auto');
+        await insert('relay-b', '5h', '5h');
+        await expect(insert('relay-a', '5h', 'other')).rejects.toThrow(/quota_windows_pool_id_label_pk/);
+      } finally {
+        await pg.close();
+      }
+    },
+    TEST_DB_TIMEOUT_MS,
+  );
 });
 
 describe('测试库', () => {

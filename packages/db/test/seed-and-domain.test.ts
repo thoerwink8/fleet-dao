@@ -1,3 +1,4 @@
+import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   toBan,
@@ -7,6 +8,7 @@ import {
   toProgressEvent,
   toQuotaWindow,
   toRepo,
+  toRoute,
   toSessionRun,
   toStagePolicy,
   toTask,
@@ -85,7 +87,13 @@ describe('种子', () => {
 describe('库里的行 → 领域对象', () => {
   it('时间变 ISO 字符串，空值变「不填」，账号级窗口没有 scope', async () => {
     await catalog(t.db);
-    await addRoute(t.db, { id: 'opus', poolId: 'relay-a', modelId: 'opus-5.5' });
+    await addRoute(t.db, {
+      id: 'opus',
+      poolId: 'relay-a',
+      modelId: 'opus-5.5',
+      upstreamModel: 'claude-opus-5-5',
+      upstreamAliases: ['opus'],
+    });
     const repo = await addRepo(t.db, 'shop');
     const task = await addTask(t.db, repo.id, { issueNumber: 12, createdAt: ago(MIN) });
     const run = await addRun(t.db, {
@@ -100,21 +108,33 @@ describe('库里的行 → 领域对象', () => {
     await t.db.insert(quotaWindows).values([
       {
         poolId: 'relay-a',
+        label: '5h',
         window: '5h',
         utilization: 0.2,
+        unit: 'percent',
         resetsAt: later(MIN),
         reading: 'measured',
+        source: 'claude-usage',
         readAt: NOW,
       },
       {
         poolId: 'relay-a',
+        label: '7d_fable',
         window: '7d_model',
         scope: 'fable',
+        unit: 'points',
         upstreamStatus: 'limit_reached',
+        statusRaw: 'limit_reached',
         reading: 'estimated',
-        readAt: NOW,
+        source: 'estimate',
+        readAt: ago(MIN),
+        staleSince: NOW,
       },
     ]);
+    await t.db
+      .update(pools)
+      .set({ scopeModels: { fable: { in: ['fable-5.1'] } }, lastReadOkAt: NOW })
+      .where(eq(pools.id, 'relay-a'));
     const [ev] = await t.db
       .insert(progressEvents)
       .values({ runId: run.id, at: NOW, kind: 'say', payload: '好了' })
@@ -161,6 +181,9 @@ describe('库里的行 → 领域对象', () => {
           resetsAt: later(MIN).toISOString(),
           reading: 'measured',
           readAt: NOW.toISOString(),
+          label: '5h',
+          unit: 'percent',
+          source: 'claude-usage',
         },
         {
           poolId: 'relay-a',
@@ -168,7 +191,12 @@ describe('库里的行 → 领域对象', () => {
           scope: 'fable',
           upstreamStatus: 'limit_reached',
           reading: 'estimated',
-          readAt: NOW.toISOString(),
+          readAt: ago(MIN).toISOString(),
+          label: '7d_fable',
+          unit: 'points',
+          source: 'estimate',
+          statusRaw: 'limit_reached',
+          staleSince: NOW.toISOString(),
         },
       ]),
     );
@@ -178,11 +206,24 @@ describe('库里的行 → 领域对象', () => {
       kind: 'say',
       payload: '好了',
     });
-    const [pool] = await t.db.select().from(pools);
+    const [pool] = await t.db.select().from(pools).where(eq(pools.id, 'relay-a'));
     expect(toPool(pool as typeof pools.$inferSelect)).toEqual({
       id: 'relay-a',
       channelId: 'relay',
       maxConcurrency: 2,
+      scopeModels: { fable: { in: ['fable-5.1'] } },
+      lastReadOkAt: NOW.toISOString(),
+    });
+    const [route] = await t.db.select().from(routes).where(eq(routes.id, 'opus'));
+    expect(toRoute(route as typeof routes.$inferSelect)).toEqual({
+      id: 'opus',
+      channelId: 'relay',
+      poolId: 'relay-a',
+      modelId: 'opus-5.5',
+      hostId: 'claude-code',
+      alive: true,
+      upstreamModel: 'claude-opus-5-5',
+      upstreamAliases: ['opus'],
     });
     const [model] = (await t.db.select().from(models)).filter((m) => m.id === 'opus-5.5');
     expect(toModel(model as typeof models.$inferSelect)).toEqual({

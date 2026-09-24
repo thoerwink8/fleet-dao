@@ -4,6 +4,7 @@ import type {
   HostId,
   ProgressKind,
   QuotaStatus,
+  QuotaUnit,
   QuotaWindowKind,
   ReadingKind,
   RunOutcome,
@@ -66,7 +67,9 @@ export const QUOTA_WINDOW_KINDS = valuesOf<QuotaWindowKind>()([
   'month_usd',
   'points',
   'period_usd',
+  'other',
 ]);
+export const QUOTA_UNITS = valuesOf<QuotaUnit>()(['percent', 'usd', 'tokens', 'points']);
 export const QUOTA_STATUSES = valuesOf<QuotaStatus>()(['allowed', 'warning', 'limit_reached']);
 export const HOST_IDS = valuesOf<HostId>()([
   'claude-code',
@@ -98,6 +101,7 @@ export const subtaskState = pgEnum('subtask_state', SUBTASK_STATES);
 export const billingKind = pgEnum('billing_kind', BILLING_KINDS);
 export const readingKind = pgEnum('reading_kind', READING_KINDS);
 export const quotaWindowKind = pgEnum('quota_window_kind', QUOTA_WINDOW_KINDS);
+export const quotaUnit = pgEnum('quota_unit', QUOTA_UNITS);
 export const quotaStatus = pgEnum('quota_status', QUOTA_STATUSES);
 export const hostId = pgEnum('host_id', HOST_IDS);
 export const runOutcome = pgEnum('run_outcome', RUN_OUTCOMES);

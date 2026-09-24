@@ -1,5 +1,5 @@
 // 某阶段的候选路由：列出该阶段挂的每一条路由，并写明它为什么不能用（被挡的不删，带原因留在表里）。
-import { hardBanFor, type StageKind } from '@fleet-dao/shared';
+import { hardBanFor, type StageKind, windowAppliesTo } from '@fleet-dao/shared';
 import { asc, eq, inArray } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import {
@@ -12,7 +12,14 @@ import {
   stagePolicies,
   stagePolicyRoutes,
 } from '../schema/index.ts';
-import { inFlightByPool, QUOTA_STALE_AFTER_MS, type WindowState, windowState } from './quota.ts';
+import {
+  inFlightByPool,
+  poolDataTimes,
+  QUOTA_STALE_AFTER_MS,
+  quotaReadOverdue,
+  type WindowState,
+  windowState,
+} from './quota.ts';
 
 /**
  * offline 探针或熔断判不在线；channel-disabled 渠道关了；pool-expired 订阅过期；model-retired 模型已下架；
@@ -30,11 +37,16 @@ export type Blocker =
   | 'no-slot';
 
 export interface CandidateWindow {
+  label: string;
   window: (typeof quotaWindows.$inferSelect)['window'];
   scope: string | null;
   state: WindowState;
+  /** yes = 扣这条路由；unknown = 判不了（池给了成员表，路由没填上游名字），按额度未知算，不挡。 */
+  applies: 'yes' | 'unknown';
   resetsAt: Date | null;
   readAt: Date;
+  /** 非空 = 上游这次没报：只有最后一次读到是用满、还没过清零时刻的才列在这里，照样挡。 */
+  staleSince: Date | null;
 }
 
 export interface RouteCandidate {
@@ -46,9 +58,16 @@ export interface RouteCandidate {
   modelId: string;
   family: string;
   hostId: (typeof routes.$inferSelect)['hostId'];
-  /** unknown = 额度没读成：适用的窗口读数过期、已过清零点，或这个池从没读到过额度。派工原因里要写明「额度未知」。 */
+  /**
+   * unknown = 额度没读成或判不了：这个池从没读成过、最近一次读成或上游数据本身超过 30 分钟、适用的窗口已过清零点，
+   * 或有窗口判不了扣不扣这条路由。派工原因里要写明「额度未知」。读成了、但没有扣这个模型的窗口，是 ok。
+   */
   quota: 'ok' | 'exhausted' | 'unknown';
-  /** 这条路由适用的窗口：账号级的，加上组名对得上本模型的模型组窗口。 */
+  /**
+   * 这条路由适用（或判不了）的窗口：账号级的，加上扣本模型的模型组窗口（按 shared 的 windowAppliesTo 和池的成员表判）。
+   * 上游这次没报的窗口（stale_since 非空）不挡路由、不参与排序；但最后一次读到是用满、还没过清零时刻的照样挡
+   * （不知道清零时刻的，按读数 30 分钟内算），过了清零时刻才放。
+   */
   windows: CandidateWindow[];
   inFlight: number;
   maxConcurrency: number;
@@ -71,13 +90,6 @@ export interface StageCandidates {
 export interface StageCandidatesOptions {
   now?: Date;
   staleAfterMs?: number;
-}
-
-/** 模型组窗口（scope 非空）只卡组名对得上的模型：族名相同，或模型 id 里含组名。 */
-export function windowAppliesTo(scope: string, model: { id: string; family: string }): boolean {
-  if (scope === '') return true;
-  const s = scope.toLowerCase();
-  return model.family.toLowerCase() === s || model.id.toLowerCase().includes(s);
 }
 
 export async function stageCandidates(
@@ -103,28 +115,50 @@ export async function stageCandidates(
   if (rows.length === 0) return { stage, configured: true, pinned: policy.pinned, candidates: [] };
 
   const poolIds = [...new Set(rows.map((r) => r.pool.id))];
-  const windowRows = await db.select().from(quotaWindows).where(inArray(quotaWindows.poolId, poolIds));
+  const windowRows = await db
+    .select()
+    .from(quotaWindows)
+    .where(inArray(quotaWindows.poolId, poolIds))
+    .orderBy(asc(quotaWindows.label));
+  const dataTimes = poolDataTimes(windowRows);
   const dbBans = await db.select().from(bans);
   const inFlight = await inFlightByPool(db);
 
   const candidates = rows.map(({ order, route, pool, channel, model }): RouteCandidate => {
-    const windows: CandidateWindow[] = windowRows
-      .filter((w) => w.poolId === pool.id && windowAppliesTo(w.scope, model))
-      .map((w) => ({
+    // 成员表只和路由在上游的名字比（实际发的模型串 + 别名），不拿模型目录的 id 硬凑。
+    const ref = {
+      id: model.id,
+      family: model.family,
+      upstreamNames: [...(route.upstreamModel ? [route.upstreamModel] : []), ...route.upstreamAliases],
+    };
+    const windows: CandidateWindow[] = [];
+    for (const w of windowRows) {
+      if (w.poolId !== pool.id) continue;
+      const applies = windowAppliesTo(w, ref, pool.scopeModels ?? undefined);
+      if (applies === 'no') continue;
+      const state = windowState(w, now, staleAfterMs);
+      if (w.staleSince !== null && state !== 'exhausted') continue;
+      windows.push({
+        label: w.label,
         window: w.window,
         scope: w.scope === '' ? null : w.scope,
-        state: windowState(w, now, staleAfterMs),
+        state,
+        applies,
         resetsAt: w.resetsAt,
         readAt: w.readAt,
-      }));
-    const quota =
-      windows.length === 0
-        ? 'unknown'
-        : windows.some((w) => w.state === 'exhausted')
-          ? 'exhausted'
-          : windows.every((w) => w.state === 'ok')
-            ? 'ok'
-            : 'unknown';
+        staleSince: w.staleSince,
+      });
+    }
+    const readFresh = !quotaReadOverdue(
+      { lastReadOkAt: pool.lastReadOkAt, dataAt: dataTimes.get(pool.id) ?? null },
+      now,
+      staleAfterMs,
+    );
+    const quota = windows.some((w) => w.applies === 'yes' && w.state === 'exhausted')
+      ? 'exhausted'
+      : readFresh && windows.every((w) => w.applies === 'yes' && w.state === 'ok')
+        ? 'ok'
+        : 'unknown';
 
     // 代码里的硬禁令先过（库里的表清空了也照样生效），再并上库里的：写了的每一项都要对上才算命中，没写阶段 = 所有阶段。
     const hardBan = hardBanFor(model, stage);
