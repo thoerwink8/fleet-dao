@@ -423,7 +423,83 @@ describe('账号池、定时任务、通知、操作记录、设置', () => {
     });
     expect(byId.get('pool-cursor')?.quotaStatus).toBe('stale');
     expect(byId.get('pool-mirasim')).toMatchObject({ quotaStatus: 'unread', windows: [] });
+    expect(byId.get('pool-mirasim')?.lastReadAt).toBeUndefined();
     expect(body.staleAfterMinutes).toBe(30);
+  });
+
+  it('额度窗带原名、组名、单位、读法、上游原状态字；池上带最近一次读成的时刻；快清零的排前；超额原样给', async () => {
+    const h = harness();
+    const { cookie } = await h.login();
+    const ago = (m: number) => new Date(h.clock.now.getTime() - m * 60_000).toISOString();
+    h.store.data.quotaWindows.push(
+      {
+        poolId: 'pool-mirasim',
+        label: '7d_fable',
+        window: '7d_model',
+        scope: 'fable',
+        utilization: 1.3,
+        unit: 'percent',
+        upstreamStatus: 'limit_reached',
+        statusRaw: 'rate_limited',
+        reading: 'measured',
+        source: 'mirasim-relay',
+        readAt: ago(2),
+        resetsAt: ago(-600),
+      },
+      {
+        poolId: 'pool-mirasim',
+        label: 'burst_tokens',
+        window: 'other',
+        used: 10,
+        limit: 1000,
+        unit: 'tokens',
+        reading: 'measured',
+        source: 'mirasim-relay',
+        readAt: ago(40),
+        resetsAt: ago(-30),
+      },
+    );
+    const body = PoolsResponse.parse(
+      await (await h.cockpit.request('/api/pools', { headers: { cookie } })).json(),
+    );
+    const byId = new Map(body.pools.map((p) => [p.id, p]));
+    const claude = byId.get('pool-claude-a');
+    expect(claude?.lastReadAt).toBe(ago(5));
+    // 5h 两小时后清零，排在不知道清零时刻的 7d 前面。
+    expect(claude?.windows.map((w) => [w.label, w.unit, w.source])).toEqual([
+      ['5h', 'percent', 'claude-usage'],
+      ['7d', 'percent', 'claude-usage'],
+    ]);
+    const mirasim = byId.get('pool-mirasim');
+    expect(mirasim).toMatchObject({ quotaStatus: 'stale', lastReadAt: ago(2) });
+    expect(mirasim?.windows).toEqual([
+      {
+        label: 'burst_tokens',
+        window: 'other',
+        used: 10,
+        limit: 1000,
+        unit: 'tokens',
+        reading: 'measured',
+        source: 'mirasim-relay',
+        readAt: ago(40),
+        resetsAt: ago(-30),
+        stale: true,
+      },
+      {
+        label: '7d_fable',
+        window: '7d_model',
+        scope: 'fable',
+        utilization: 1.3,
+        unit: 'percent',
+        upstreamStatus: 'limit_reached',
+        statusRaw: 'rate_limited',
+        reading: 'measured',
+        source: 'mirasim-relay',
+        readAt: ago(2),
+        resetsAt: ago(-600),
+        stale: false,
+      },
+    ]);
   });
 
   it('定时任务：按期成功 / 超期 / 从没成功，分得开', async () => {

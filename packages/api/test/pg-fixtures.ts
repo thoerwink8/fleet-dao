@@ -14,7 +14,6 @@ import {
   pools,
   progressEvents,
   pullRequests,
-  quotaWindows,
   repos,
   routes,
   scheduledJobs,
@@ -25,6 +24,7 @@ import {
   stagePolicies,
   stagePolicyRoutes,
   tasks,
+  upsertQuotaWindow,
   users,
 } from '@fleet-dao/db';
 import { sql } from 'drizzle-orm';
@@ -67,21 +67,9 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
       })),
     );
   }
-  if (data.quotaWindows?.length) {
-    await db.insert(quotaWindows).values(
-      data.quotaWindows.map((w) => ({
-        poolId: w.poolId,
-        window: w.window,
-        scope: w.scope ?? '',
-        utilization: w.utilization ?? null,
-        used: w.used ?? null,
-        limit: w.limit ?? null,
-        resetsAt: dateOpt(w.resetsAt),
-        upstreamStatus: w.upstreamStatus ?? null,
-        reading: w.reading,
-        readAt: date(w.readAt),
-      })),
-    );
+  // 额度窗走库的真写入口（按池 + 原名覆盖），和读取器写库是同一条路。
+  for (const w of data.quotaWindows ?? []) {
+    if (!(await upsertQuotaWindow(db, w))) throw new Error(`样例额度窗 ${w.poolId}/${w.label} 没写进去`);
   }
   if (data.users?.length) {
     await db.insert(users).values(

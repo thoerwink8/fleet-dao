@@ -474,8 +474,9 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       const rows = await db
         .select()
         .from(quotaWindows)
-        .orderBy(asc(quotaWindows.poolId), asc(quotaWindows.window), asc(quotaWindows.scope));
-      return rows.map(toQuotaWindow);
+        .orderBy(asc(quotaWindows.poolId), asc(quotaWindows.label));
+      // 原名、单位、读法在库里不可空；领域类型里是可选的，这里按列补上必填的类型。
+      return rows.map((r) => ({ ...toQuotaWindow(r), label: r.label, unit: r.unit, source: r.source }));
     },
     async updateStagePolicy({ stage, expected, next }, entry) {
       return db.transaction(async (tx) => {

@@ -1,13 +1,13 @@
 // 内存里的 Store：测试和本地开发用，也是 ports.ts 语义的参照实现。数据按 Postgres 的表来摆（packages/db 的 schema），
 // 行为照库的约束来（比较后再改、和操作记录同一「事务」、同一会话同一句追问只一条、ok=false 的操作记录必须带原因……），
 // 和 pg-store.ts 过同一套契约测试（test/store-contract.ts）。onChange 模拟数据库的 NOTIFY fleet_changes。
+import type { StoredQuotaWindow } from '@fleet-dao/db';
 import type {
   Ban,
   Channel,
   Model,
   Pool,
   ProgressKind,
-  QuotaWindow,
   RealtimeTable,
   Repo,
   Route,
@@ -107,7 +107,8 @@ export interface MemoryData {
   routes: Route[];
   stagePolicies: StagePolicy[];
   bans: Ban[];
-  quotaWindows: QuotaWindow[];
+  /** 按（池, 原名 label）一行，和库的主键一样。 */
+  quotaWindows: StoredQuotaWindow[];
   jobs: JobRegistration[];
   scheduleRuns: ScheduleRunRecord[];
   notifications: NotificationRecord[];
@@ -530,10 +531,7 @@ export function createMemoryStore(
     },
     async listQuotaWindows() {
       return [...data.quotaWindows].sort(
-        (a, b) =>
-          a.poolId.localeCompare(b.poolId) ||
-          a.window.localeCompare(b.window) ||
-          (a.scope ?? '').localeCompare(b.scope ?? ''),
+        (a, b) => a.poolId.localeCompare(b.poolId) || a.label.localeCompare(b.label),
       );
     },
     async updateStagePolicy({ stage, expected, next }, entry) {

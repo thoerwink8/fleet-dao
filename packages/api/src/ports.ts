@@ -1,6 +1,7 @@
 // 后端依赖的外部能力，一律按接口写：数据库（pg-store.ts 用 @fleet-dao/db 实现）、Temporal、飞书、GitHub 补收
 // 由各自的实现接进来；测试和本地开发用 memory-store.ts。两个 Store 实现过同一套契约测试（test/store-contract.ts），
 // 改这里的语义要两边一起改、契约测试跟着改。
+import type { StoredQuotaWindow } from '@fleet-dao/db';
 import type {
   AuditEntrySchema,
   Ban,
@@ -9,7 +10,6 @@ import type {
   Model,
   Pool,
   ProgressKind,
-  QuotaWindow,
   RealtimeTable,
   Repo,
   Route,
@@ -258,7 +258,8 @@ export interface RoutingStore {
   listStagePolicies(): Promise<StagePolicy[]>;
   /** 库里另配的禁令（两条全局硬禁令写死在 shared/bans.ts，不在这里）。 */
   listBans(): Promise<Ban[]>;
-  listQuotaWindows(): Promise<QuotaWindow[]>;
+  /** 按（池, 原名 label）排。入库的窗口原名、单位、读法都有（StoredQuotaWindow）。 */
+  listQuotaWindows(): Promise<StoredQuotaWindow[]>;
   /** 比较后再改：库里的现值不等于 expected 就不改、返回 conflict。和操作记录同一事务。还没有这一行时现值按「空列表、没钉住」算。 */
   updateStagePolicy(
     input: { stage: StageKind; expected: StagePolicyValue; next: StagePolicyValue },

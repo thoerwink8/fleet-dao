@@ -54,11 +54,28 @@ function contractData(): Partial<MemoryData> {
     ...(data.quotaWindows ?? []),
     {
       poolId: 'pool-mirasim',
+      label: '7d_fable',
       window: '7d_model',
       scope: 'fable',
       utilization: 1.25,
+      unit: 'percent',
       upstreamStatus: 'limit_reached',
+      statusRaw: 'rate_limited',
       reading: 'measured',
+      source: 'mirasim-relay',
+      readAt: ago(1),
+    },
+    {
+      // 上游新出的、归不了类的窗口：照样收下，原名留着。
+      poolId: 'pool-mirasim',
+      label: 'burst_tokens',
+      window: 'other',
+      used: 900,
+      limit: 1000,
+      unit: 'tokens',
+      statusRaw: 'throttle_soon',
+      reading: 'measured',
+      source: 'mirasim-relay',
       readAt: ago(1),
     },
   ];
@@ -360,13 +377,34 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         ]);
       });
 
-      it('额度窗：模型组窗口带组名；超额（利用率大于 1）原样保存', async () => {
-        const fable = (await store.listQuotaWindows()).find((w) => w.window === '7d_model');
-        expect(fable).toMatchObject({
+      it('额度窗：按（池, 原名）排；原名、组名、单位、读法、上游原状态字原样保存；超额（利用率大于 1）原样保存', async () => {
+        const windows = await store.listQuotaWindows();
+        expect(windows.map((w) => `${w.poolId}/${w.label}`)).toEqual([
+          'pool-claude-a/5h',
+          'pool-claude-a/7d',
+          'pool-cursor/month_usd',
+          'pool-mirasim/7d_fable',
+          'pool-mirasim/burst_tokens',
+        ]);
+        expect(windows.find((w) => w.label === '7d_fable')).toEqual({
           poolId: 'pool-mirasim',
+          label: '7d_fable',
+          window: '7d_model',
           scope: 'fable',
           utilization: 1.25,
+          unit: 'percent',
           upstreamStatus: 'limit_reached',
+          statusRaw: 'rate_limited',
+          reading: 'measured',
+          source: 'mirasim-relay',
+          readAt: new Date(T0.getTime() - MIN).toISOString(),
+        });
+        expect(windows.find((w) => w.label === 'burst_tokens')).toMatchObject({
+          window: 'other',
+          used: 900,
+          limit: 1000,
+          unit: 'tokens',
+          statusRaw: 'throttle_soon',
         });
       });
 

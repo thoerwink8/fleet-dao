@@ -8,6 +8,7 @@ import type {
   HostId,
   ProgressKind,
   QuotaStatus,
+  QuotaUnit,
   QuotaWindowKind,
   ReadingKind,
   RunOutcome,
@@ -85,6 +86,7 @@ export const HostIdSchema = z.enum(['claude-code', 'codex', 'cursor-agent', 'gro
 export const RunOutcomeSchema = z.enum(['ok', 'failed', 'stopped', 'stalled']);
 export const ProgressKindSchema = z.enum(['plan', 'say', 'tool', 'file', 'test', 'ask', 'done', 'blocked']);
 export const QuotaStatusSchema = z.enum(['allowed', 'warning', 'limit_reached']);
+export const QuotaUnitSchema = z.enum(['percent', 'usd', 'tokens', 'points']);
 export const ScheduleOutcomeSchema = z.enum(['ok', 'partial', 'unscanned', 'failed']);
 
 type Same<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
@@ -101,8 +103,9 @@ export const ENUMS_MATCH_DOMAIN: [
   Same<z.infer<typeof RunOutcomeSchema>, RunOutcome>,
   Same<z.infer<typeof ProgressKindSchema>, ProgressKind>,
   Same<z.infer<typeof QuotaStatusSchema>, QuotaStatus>,
+  Same<z.infer<typeof QuotaUnitSchema>, QuotaUnit>,
   Same<z.infer<typeof ScheduleOutcomeSchema>, ScheduleOutcome>,
-] = [true, true, true, true, true, true, true, true, true, true, true, true];
+] = [true, true, true, true, true, true, true, true, true, true, true, true, true];
 
 // —— 通用 ——
 
@@ -425,20 +428,29 @@ export const UpdateChannelResponse = z.object({ ok: z.literal(true) });
 // —— 账号池与额度 ——
 
 export const QuotaWindowViewSchema = z.object({
+  /** 上游对这个窗口的原名（5h、7d_claude、auto_percent……），同一池里不重复。显示用它；window 只是归类。 */
+  label: z.string().min(1),
+  /** 归类；上游新出的、归不了类的是 other，看 label。 */
   window: QuotaWindowKindSchema,
-  /** 只扣某一组模型的窗口（7d_model）的组名，例如 fable；账号级窗口没有。 */
+  /** 只扣某一组模型的窗口的组名（中转的 fable、Cursor 的 auto / api 桶……）；账号级窗口没有。 */
   scope: z.string().optional(),
   /** 已用比例。超额是真实情况，可以大于 1——原样给出，显示进度条时再截到 100%。 */
   utilization: z.number().min(0).optional(),
   used: z.number().optional(),
   limit: z.number().optional(),
+  /** used / limit 的单位。上游只给百分比时是 percent，limit 是 100。 */
+  unit: QuotaUnitSchema,
   resetsAt: Time.optional(),
   /** 上游自己说的状态，以它为准（实测 99% 就可能已经 limit_reached）。 */
   upstreamStatus: QuotaStatusSchema.optional(),
+  /** 上游的原状态字：归不进 upstreamStatus 的也原样给人看，不猜。 */
+  statusRaw: z.string().optional(),
   /** measured = 实读；estimated = 按用量估算。 */
   reading: ReadingKindSchema,
+  /** 读法：claude-usage、mirasim-relay、cursor-dashboard、grok-billing、estimate……（官方接口、网页接口还是估算）。 */
+  source: z.string().min(1),
   readAt: Time,
-  /** 读数太旧（超过 staleAfterMinutes），不能当现值用。 */
+  /** 过期：读数太旧（超过 staleAfterMinutes），不能当现值用。上游不再报的窗口不删，旧读数到点就按过期显示。 */
   stale: z.boolean(),
 });
 
@@ -455,6 +467,9 @@ export const PoolViewSchema = z.object({
   expiresAt: Time.optional(),
   /** fresh = 读数都新鲜；stale = 有读数过期；unread = 一条读数都没有（没查成，不是「没用量」）。 */
   quotaStatus: z.enum(['fresh', 'stale', 'unread']),
+  /** 最近一次读成的时刻（这个池各窗口读数里最新的那个）；一次都没读成过就没有。 */
+  lastReadAt: Time.optional(),
+  /** 按清零时刻排，快清零的在前（不知道清零时刻的在后）；同时清零的按原名。 */
   windows: z.array(QuotaWindowViewSchema),
 });
 
