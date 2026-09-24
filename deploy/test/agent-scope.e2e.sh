@@ -36,8 +36,12 @@ wait_scope() { # 编号 要的状态（active / gone）
   return 1
 }
 cleanup() {
-  systemctl stop fleet-engine-$TAG.service 2>/dev/null
-  for u in $(systemctl list-units --all --plain --no-legend "fleet-agent-$TAG*.scope" | awk '{ print $1 }'); do systemctl stop "$u"; done
+  local u
+  for u in $(systemctl list-units --all --plain --no-legend "fleet-engine-$TAG*.service" "fleet-agent-$TAG*.scope" |
+    awk '{ print $1 }'); do
+    systemctl stop "$u" 2>/dev/null
+    systemctl reset-failed "$u" 2>/dev/null
+  done
 }
 trap cleanup EXIT
 
@@ -61,15 +65,20 @@ if wait_scope "$id" active; then
 else
   flunk "scope 没起来"
 fi
-wait
+wait 2>/dev/null # 后台那条 sudo 是被 stop 收掉的，shell 会报一句 Terminated，不是错
 
 echo "== 2. 上限生效"
+# 只给 --memory-max 时超出的部分被换进 swap、会话照样跑完（这台有 swap）；要真封顶得连 swap 一起封
+id=$TAG-swap
+as_fleet sudo -n "$BIN" run "$id" --memory-max 64M -- /usr/bin/python3 -c 'b = bytearray(256 * 1024 * 1024)' 2>/dev/null
+rc=$?
+if ((rc == 0)); then pass "只封 memory.max：256M 的会话换进 swap 跑完了（所以要连 swap 一起封）"; else echo "  · 只封 memory.max 时退出码 $rc（这台可能没开 swap）"; fi
 id=$TAG-mem
 since=$(date '+%Y-%m-%d %H:%M:%S')
-as_fleet sudo -n "$BIN" run "$id" --memory-max 64M -- /usr/bin/python3 -c 'b = bytearray(512 * 1024 * 1024)' 2>/dev/null
+as_fleet sudo -n "$BIN" run "$id" --memory-max 64M --memory-swap-max 0 -- /usr/bin/python3 -c 'b = bytearray(512 * 1024 * 1024)' 2>/dev/null
 rc=$?
 if ((rc == 137)) && journalctl -k --since "$since" --no-pager 2>/dev/null | grep -q "oom_memcg=/fleet.slice/fleet-agents.slice/fleet-agent-$id.scope"; then
-  pass "要 512M 的会话被 OOM 杀掉（退出码 137），内核记的是它自己的 scope"
+  pass "memory.max 64M + swap 0：要 512M 的会话被 OOM 杀掉（退出码 137），内核记的是它自己的 scope"
 else
   flunk "内存上限没生效（退出码 $rc）"
 fi
@@ -88,9 +97,9 @@ print(ok, bad)' 2>/dev/null)
 read -r forked refused <<<"$out"
 if ((${forked:-99} < 8 && ${refused:-0} > 0)); then pass "进程数到顶：20 次 fork 成功 $forked、被拒 $refused"; else flunk "进程数上限没生效（$out）"; fi
 
-# 假引擎：以 fleet 身份跑的临时服务，经 sudo 起一个会话然后自己挂着
+# 假引擎：以 fleet 身份跑的临时服务（名字带会话编号，跑完自动回收），经 sudo 起一个会话然后自己挂着
 start_fake_engine() { # 会话编号
-  systemd-run --quiet --unit="fleet-engine-$TAG" --uid=fleet --gid=fleet -p WorkingDirectory=/home/fleet \
+  systemd-run --quiet --collect --unit="fleet-engine-$1" --uid=fleet --gid=fleet -p WorkingDirectory=/home/fleet \
     /bin/bash -c "sudo -n $BIN run $1 -- /bin/sleep 600 & sleep 600"
 }
 
@@ -99,9 +108,8 @@ id=$TAG-orphan
 start_fake_engine "$id"
 if wait_scope "$id" active; then
   pid=$(scope_pids "$id" | head -1)
-  systemctl kill --signal=SIGKILL "fleet-engine-$TAG.service"
+  systemctl kill --signal=SIGKILL "fleet-engine-$id.service"
   sleep 1
-  systemctl stop "fleet-engine-$TAG.service" 2>/dev/null
   if kill -0 "$pid" 2>/dev/null && [[ "$(systemctl show -p ActiveState --value "fleet-agent-$id.scope")" == active ]]; then
     pass "假引擎崩掉后，会话（pid $pid）还在自己的 scope 里，没跟着引擎的 cgroup 一起没"
   else
@@ -119,7 +127,7 @@ echo "== 3b. 引擎正常停（SIGTERM）：sudo 把信号转给会话，会话�
 id=$TAG-graceful
 start_fake_engine "$id"
 if wait_scope "$id" active; then
-  systemctl stop "fleet-engine-$TAG.service"
+  systemctl stop "fleet-engine-$id.service"
   if wait_scope "$id" gone; then pass "引擎一停，会话收到 SIGTERM 退了，scope 自动回收"; else flunk "引擎停了，会话还挂着"; fi
 else
   flunk "假引擎起的会话 scope 没起来"

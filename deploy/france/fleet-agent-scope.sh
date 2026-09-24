@@ -5,8 +5,9 @@
 # 它以 root 跑，所以只做这一件事：身份写死 orca、slice 写死 fleet-agents.slice、单元名写死 fleet-agent-<编号>.scope，
 # 参数逐个按白名单验。环境变量不走命令行（sudo 会把命令行记进日志，/proc 里谁都看得到），只收 sudoers 的 env_keep 放过来的那几类。
 #
-#   sudo -n fleet-agent-scope run <编号> [--memory-high 大小] [--memory-max 大小] [--tasks-max 数] [--cpu-weight 数]
-#                                 [--cwd 目录] -- /绝对路径/命令 参数…
+#   sudo -n fleet-agent-scope run <编号> [--memory-high 大小] [--memory-max 大小] [--memory-swap-max 大小]
+#                                 [--tasks-max 数] [--cpu-weight 数] [--cwd 目录] -- /绝对路径/命令 参数…
+#   内存要真封顶，--memory-max 和 --memory-swap-max 得一起给：只给前者，超出的部分会被换进 swap，会话不会被杀（法国实测）。
 #   sudo -n fleet-agent-scope stop <编号>     没有这个会话也算收好，返回 0
 #   sudo -n fleet-agent-scope list            在册的会话：编号 状态，一行一个
 #
@@ -36,9 +37,13 @@ run() {
   shift
   while (($#)); do
     case $1 in
-    --memory-high | --memory-max)
-      [[ "${2:-}" =~ ^[1-9][0-9]*[KMGT]?$ ]] || die "$1 要形如 1536M，给的是「${2:-}」"
-      if [[ "$1" == --memory-high ]]; then props+=(-p "MemoryHigh=$2"); else props+=(-p "MemoryMax=$2"); fi
+    --memory-high | --memory-max | --memory-swap-max)
+      [[ "${2:-}" =~ ^(0|[1-9][0-9]*[KMGT]?)$ ]] || die "$1 要形如 1536M，给的是「${2:-}」"
+      case $1 in
+      --memory-high) props+=(-p "MemoryHigh=$2") ;;
+      --memory-max) props+=(-p "MemoryMax=$2") ;;
+      *) props+=(-p "MemorySwapMax=$2") ;;
+      esac
       shift 2
       ;;
     --tasks-max)
