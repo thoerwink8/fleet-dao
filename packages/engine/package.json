@@ -1,0 +1,10 @@
+{
+  "name": "@fleet-dao/engine",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Temporal 工作流、活动与 worker",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

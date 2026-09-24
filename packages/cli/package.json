@@ -1,0 +1,10 @@
+{
+  "name": "@fleet-dao/cli",
+  "version": "0.0.0",
+  "private": true,
+  "description": "fleet 命令：AI 会话汇报进度、提问、交活",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

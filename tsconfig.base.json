@@ -1,0 +1,22 @@
+{
+  // 后端包直接用 Node 22 的类型剥离运行 .ts，不编译：只许「可擦除」的写法（不用 enum、参数属性、namespace）。
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "composite": true,
+    "noEmit": true,
+    "types": ["node"]
+  }
+}

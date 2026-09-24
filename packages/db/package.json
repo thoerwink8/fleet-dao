@@ -1,0 +1,10 @@
+{
+  "name": "@fleet-dao/db",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Postgres 表结构（Drizzle）、迁移与查询",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

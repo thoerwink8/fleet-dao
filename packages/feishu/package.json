@@ -1,0 +1,10 @@
+{
+  "name": "@fleet-dao/feishu",
+  "version": "0.0.0",
+  "private": true,
+  "description": "飞书网关（跑在香港）：收消息、卡片、菜单、推送",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

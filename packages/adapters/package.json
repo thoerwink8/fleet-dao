@@ -1,0 +1,10 @@
+{
+  "name": "@fleet-dao/adapters",
+  "version": "0.0.0",
+  "private": true,
+  "description": "渠道插头：各家写码助手的无头启动与过程记录解析",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}
