@@ -300,59 +300,49 @@ describe('随手记任务', () => {
     expect(buttonValue(cardId, '确认')).toMatchObject({ r: 3 });
   });
 
-  it('回复确认卡 = 改一下（回复归到原来那件事，不当成新需求）', async () => {
+  it('回复确认卡 = 改一下：回复的是哪条交给后端（一次问完），改好的草稿原地更新那张卡，不发第二张', async () => {
     h = await harness();
-    h.backend.on('POST', '/feishu/messages', { body: { kind: 'draft', draft: draft() } });
-    h.backend.on('POST', '/feishu/drafts/:draftId/revise', { body: { draft: draft({ revision: 2 }) } });
+    let cardId = '';
+    h.backend.on('POST', '/feishu/messages', () =>
+      cardId === ''
+        ? { body: { kind: 'draft', draft: draft() } }
+        : {
+            body: {
+              kind: 'draft',
+              draft: draft({ revision: 2, understanding: '只做网页版的短信登录。', cardMessageId: cardId }),
+            },
+          },
+    );
     const { msg } = await say('给登录页加手机验证码');
-    const cardId = cardReplyTo(msg.messageId);
-    const { msg: reply } = await say('只做网页版', { replyTo: cardId });
-    expect(h.backend.calls('POST', '/feishu/messages')).toHaveLength(1);
-    const [rev] = h.backend.calls('POST', '/feishu/drafts/draft-1/revise');
-    expect(rev?.body).toEqual({ requestId: reply.messageId, note: '只做网页版' });
+    cardId = cardReplyTo(msg.messageId);
+    const { msg: rep } = await say('只做网页版', { replyTo: cardId });
+    expect(h.backend.calls('POST', '/feishu/messages')[1]?.body).toEqual({
+      sourceMessageId: rep.messageId,
+      text: '只做网页版',
+      chatType: 'p2p',
+      replyToMessageId: cardId,
+    });
+    expect(h.backend.calls('POST', '/feishu/drafts/draft-1/revise')).toHaveLength(0);
+    expect(textIn(h.feishu.cardOf(cardId))).toContain('只做网页版的短信登录。');
+    expect(textIn(h.feishu.cardOf(cardId))).toContain('已按你说的改好');
     expect(h.feishu.newMessages()).toHaveLength(1);
   });
 
-  it('回复了一张卡、可卡片登记没查成（后端挂了）：说清楚这条没记，不把「批准」当成新需求', async () => {
+  it('回复任何消息都只调一次后端：不先查卡片登记（最坏 8 秒，守得住确认卡 10 秒）', async () => {
     h = await harness();
-    h.backend.on('GET', '/feishu/cards/:messageId', apiError(503, 'unavailable', '后端暂时不可用'));
-    h.backend.on('POST', '/feishu/messages', { body: { kind: 'draft', draft: draft({ rawText: '批准' }) } });
-    const { msg } = await say('批准', { replyTo: 'om_some_card' });
-    expect(h.backend.calls('POST', '/feishu/messages')).toHaveLength(0);
-    expect(h.feishu.of('reply')).toEqual([
-      expect.objectContaining({
-        messageId: msg.messageId,
-        message: { text: expect.stringContaining('没查到它在说哪件事') },
-      }),
-    ]);
-    expect(h.gateway.stats.reply_context_unknown).toBe(1);
-  });
-
-  it('回复的不是我们发的卡（登记里查无此卡）：当成新的一句话', async () => {
-    h = await harness();
-    h.backend.on('POST', '/feishu/messages', { body: { kind: 'draft', draft: draft() } });
-    await say('给登录页加手机验证码', { replyTo: 'om_someone_elses_message' });
-    expect(h.backend.calls('GET', '/feishu/cards/om_someone_elses_message')).toHaveLength(1);
-    expect(h.backend.calls('POST', '/feishu/messages')[0]?.body).not.toHaveProperty('replyTo');
-  });
-
-  it('网关重启后（本地没缓存）回复卡片：从后端的卡片登记查回来历', async () => {
-    h = await harness();
-    h.backend.on('GET', '/feishu/cards/:messageId', (_, p) => ({
-      body: {
-        messageId: p.messageId,
-        chatId: 'oc_p2p_founder_a',
-        kind: 'progress',
-        ref: { taskId: 'task-12' },
-        sentAt: new Date().toISOString(),
-      },
-    }));
     h.backend.on('POST', '/feishu/messages', {
-      body: { kind: 'answer', text: '卡在测试：验证码过期那条一直红。' },
+      body: { kind: 'answer', text: '卡在测试：验证码过期那条一直红。', taskId: 'task-12' },
     });
-    await say('12 为什么卡住？', { replyTo: 'om_card_sent_before_restart' });
-    expect(h.backend.calls('POST', '/feishu/messages')[0]?.body).toMatchObject({
-      replyTo: { kind: 'progress', ref: { taskId: 'task-12' } },
+    const { msg } = await say('12 为什么卡住？', { replyTo: 'om_card_sent_before_restart' });
+    // 回话之前只问了后端这一次；之后那条 PUT 是给刚发出的回答登记。
+    expect(h.backend.requests.map((r) => `${r.method} ${r.path}`)).toEqual([
+      'POST /feishu/messages',
+      `PUT /feishu/cards/${h.feishu.of('reply')[0]?.sentId}`,
+    ]);
+    expect(h.backend.requests[0]?.body).toMatchObject({ replyToMessageId: 'om_card_sent_before_restart' });
+    expect(h.feishu.of('reply')[0]).toMatchObject({
+      messageId: msg.messageId,
+      message: { text: '卡在测试：验证码过期那条一直红。' },
     });
   });
 });
@@ -409,7 +399,7 @@ describe('查进度与回复即追问', () => {
     expect(titleOf(h.feishu.cardOf(pickId))).toBe('#12 登录验证码');
   });
 
-  it('私聊里回复进度卡就是追问：带着这张卡的来历问后端，回答回在这条下面', async () => {
+  it('私聊里回复进度卡就是追问：把回复的是哪张卡交给后端，回答回在这条下面；卡片登记着它在说哪个任务', async () => {
     h = await harness();
     h.backend.on('GET', '/feishu/tasks', {
       body: {
@@ -424,12 +414,17 @@ describe('查进度与回复即追问', () => {
     });
     const { msg } = await say('进度 12');
     const progressId = cardReplyTo(msg.messageId);
+    await until(() => h.backend.calls('PUT', `/feishu/cards/${progressId}`).length === 1);
+    expect(h.backend.calls('PUT', `/feishu/cards/${progressId}`)[0]?.body).toMatchObject({
+      kind: 'progress',
+      ref: { taskId: 'task-12' },
+    });
     const { msg: q } = await say('为什么这么慢？', { replyTo: progressId });
     expect(h.backend.calls('POST', '/feishu/messages')[0]?.body).toEqual({
       sourceMessageId: q.messageId,
       text: '为什么这么慢？',
       chatType: 'p2p',
-      replyTo: { kind: 'progress', ref: { taskId: 'task-12' } },
+      replyToMessageId: progressId,
     });
     expect(h.feishu.of('reply').at(-1)).toMatchObject({
       messageId: q.messageId,
@@ -437,23 +432,14 @@ describe('查进度与回复即追问', () => {
     });
   });
 
-  it('群里回复卡片也行（要 @我）', async () => {
+  it('群里回复卡片也行（要 @我）：代表的是回复的那个人', async () => {
     h = await harness();
-    h.backend.on('GET', '/feishu/cards/:messageId', (_, p) => ({
-      body: {
-        messageId: p.messageId,
-        chatId: TEAM,
-        kind: 'board',
-        ref: {},
-        sentAt: new Date().toISOString(),
-      },
-    }));
     h.backend.on('POST', '/feishu/messages', { body: { kind: 'answer', text: 'Cursor 今天用了 40%。' } });
     await say('今天 Cursor 用了多少？', { chat: 'group', chatId: TEAM, replyTo: 'om_board_card', from: B });
     expect(h.backend.calls('POST', '/feishu/messages')[0]?.body).toMatchObject({
       chatType: 'group',
       text: '今天 Cursor 用了多少？',
-      replyTo: { kind: 'board', ref: {} },
+      replyToMessageId: 'om_board_card',
     });
     expect(h.backend.calls('POST', '/feishu/messages')[0]?.headers['x-fleet-acting-feishu']).toBe(B);
   });
@@ -474,20 +460,59 @@ describe('推送卡上的按钮：回答追问、叫停、关注', () => {
     return id;
   }
 
-  it('AI 追问卡：直接回复就是回答；点选项也行；别人答过了就说明，不重复落', async () => {
+  it('回复「要人拍」的卡是追问、不是拍板：「要花多少钱？」不会被记成答案；拍板只认按钮', async () => {
+    h = await harness();
+    const decision = await pushed(outboxItem({ id: 'ask:1' }));
+    const hint = textIn(h.feishu.cardOf(decision));
+    expect(hint).toContain('拍板请点上面的按钮');
+    expect(hint).toContain('回复不算拍板');
+    h.backend.on('POST', '/feishu/messages', {
+      body: { kind: 'answer', text: '按量计费，约 30 元一个月。' },
+    });
+    h.backend.on('POST', '/asks/:askId/answer', { body: { ok: true } });
+    const { msg } = await say('要花多少钱？', { replyTo: decision });
+    expect(h.backend.calls('POST', '/asks/ask-1/answer')).toHaveLength(0);
+    expect(h.backend.calls('POST', '/feishu/messages')[0]?.body).toMatchObject({
+      text: '要花多少钱？',
+      replyToMessageId: decision,
+    });
+    expect(h.feishu.of('reply').at(-1)).toMatchObject({
+      messageId: msg.messageId,
+      message: { text: '按量计费，约 30 元一个月。' },
+    });
+    // 卡还是待拍板：按钮都在。
+    expect(buttonsOf(h.feishu.cardOf(decision)).map((b) => b.label)).toEqual(['批准', '拒绝', '打开驾驶舱']);
+
+    await click(decision, buttonValue(decision, '批准'));
+    expect(h.backend.calls('POST', '/asks/ask-1/answer').map((r) => r.body)).toEqual([{ answer: '批准' }]);
+    expect(textIn(h.feishu.cardOf(decision))).toContain('已回答：批准 · 甲');
+  });
+
+  it('AI 追问卡：回复交给后端当回答（网关自己不提交）；点选项走回答接口；别人答过了就说明，不重复落', async () => {
     h = await harness();
     const askCard = await pushed(
       outboxItem({ id: 'ask:2', kind: 'ask', askId: 'ask-2', options: ['阿里云', '腾讯云'] }),
     );
+    expect(textIn(h.feishu.cardOf(askCard))).toContain('也可以直接回复这张卡片作答');
+    h.backend.on('POST', '/feishu/messages', {
+      body: { kind: 'answer', text: '已记下你的回答：用阿里云的。' },
+    });
+    const { msg } = await say('用阿里云的', { replyTo: askCard });
+    expect(h.backend.calls('POST', '/feishu/messages')[0]?.body).toMatchObject({ replyToMessageId: askCard });
+    expect(h.backend.calls('POST', '/asks/ask-2/answer')).toHaveLength(0);
+    expect(h.feishu.of('reply').at(-1)).toMatchObject({
+      messageId: msg.messageId,
+      message: { text: '已记下你的回答：用阿里云的。' },
+    });
+
     h.backend.on('POST', '/asks/:askId/answer', { body: { ok: true } });
-    await say('用阿里云的', { replyTo: askCard });
+    await click(askCard, buttonValue(askCard, '阿里云'));
     const [ans] = h.backend.calls('POST', '/asks/ask-2/answer');
-    expect(ans?.body).toEqual({ answer: '用阿里云的' });
+    expect(ans?.body).toEqual({ answer: '阿里云' });
     expect(ans?.headers['x-fleet-acting-feishu']).toBe(A);
     const card = h.feishu.cardOf(askCard);
-    expect(textIn(card)).toContain('已回答：用阿里云的 · 甲');
+    expect(textIn(card)).toContain('已回答：阿里云 · 甲');
     expect(buttonsOf(card).map((b) => b.label)).toEqual(['打开驾驶舱']);
-    expect(h.backend.calls('POST', '/feishu/messages')).toHaveLength(0);
 
     const decision = await pushed(outboxItem({ id: 'ask:1' }));
     h.backend.on('POST', '/asks/:askId/answer', apiError(409, 'already_answered', '这条追问已经有人回答了'));
@@ -534,7 +559,7 @@ describe('推送卡上的按钮：回答追问、叫停、关注', () => {
   it('认不出的按钮回传值、陌生人点按钮：都不调后端', async () => {
     h = await harness();
     await click('om_whatever', { a: 'launch.missiles' });
-    await click('om_whatever', { a: 'board.refresh', n: 'x' }, { from: STRANGER });
+    await click('om_whatever', { a: 'board.refresh', _n: 'x' }, { from: STRANGER });
     expect(h.backend.requests).toHaveLength(0);
     expect(h.gateway.stats).toMatchObject({ unknown_action: 1, stranger: 1 });
   });
@@ -642,24 +667,15 @@ describe('停机与重启', () => {
     expect(textIn(card)).toContain('网关正在重启');
   });
 
-  it('重启后回复问题卡作答（本地没这张卡的缓存）：回答照样提交，并在这条下面说一声', async () => {
+  it('重启后点问题卡上的按钮（本地没这张卡的缓存）：回答照样提交，并在卡下面说一声', async () => {
     h = await harness();
-    h.backend.on('GET', '/feishu/cards/:messageId', (_, p) => ({
-      body: {
-        messageId: p.messageId,
-        chatId: TEAM,
-        kind: 'ask',
-        ref: { askId: 'ask-2', outboxId: 'ask:2' },
-        sentAt: new Date().toISOString(),
-      },
-    }));
     h.backend.on('POST', '/asks/:askId/answer', { body: { ok: true } });
-    const { msg } = await say('用阿里云的', { replyTo: 'om_ask_before_restart' });
-    expect(h.backend.calls('POST', '/asks/ask-2/answer')[0]?.body).toEqual({ answer: '用阿里云的' });
+    await click('om_ask_before_restart', { _n: 'n0', a: 'ask.answer', k: 'ask-2', o: '阿里云' });
+    expect(h.backend.calls('POST', '/asks/ask-2/answer')[0]?.body).toEqual({ answer: '阿里云' });
     expect(h.feishu.of('reply')).toEqual([
       expect.objectContaining({
-        messageId: msg.messageId,
-        message: { text: expect.stringContaining('已回答：用阿里云的 · 甲') },
+        messageId: 'om_ask_before_restart',
+        message: { text: expect.stringContaining('已回答：阿里云 · 甲') },
       }),
     ]);
   });

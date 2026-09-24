@@ -1,6 +1,8 @@
 // 卡片一律 JSON 2.0（共享卡，两位创始人看到同一个状态）；每张卡一个主按钮、版式统一、能点开直达驾驶舱对应页。
 // 动态文字只放进 plain_text（不走 markdown，原话里的符号不会把版式搞乱）。
-// 按钮回传值带 n（每次渲染一个新值）：SDK 按「卡片 + 点击人 + 回传值」去重 12 小时，卡片一刷新同一个按钮就能再点。
+// 按钮回传值带 _n（每次渲染一个新值）：SDK 按「卡片 + 点击人 + 回传值的前 128 个字符」去重 12 小时，
+// 卡片一刷新同一个按钮就能再点。_n 一律排在最前面：button() 里按插入顺序放第一；飞书要是把回传值按键名排序再回给我们，
+// 「_」也排在所有小写字母前面。回传值再长也截不掉它。
 import { z } from 'zod';
 import type { BoardSnapshot, Draft, OutboxItem, TaskDetail, TaskLookup } from './backend.ts';
 import type { Card } from './port.ts';
@@ -20,10 +22,10 @@ const Ref = z.string().min(1).max(200);
 const Nonce = z.string().min(1).max(40);
 
 export const ActionValueSchema = z.discriminatedUnion('a', [
-  z.object({ a: z.literal('draft.confirm'), d: Ref, r: z.number().int().min(1), n: Nonce }),
-  z.object({ a: z.literal('draft.revise'), d: Ref, r: z.number().int().min(1), n: Nonce }),
-  z.object({ a: z.literal('ask.answer'), k: Ref, o: z.string().min(1).max(40), n: Nonce }),
-  z.object({ a: z.literal('task.stop'), t: Ref, n: Nonce }),
+  z.object({ a: z.literal('draft.confirm'), d: Ref, r: z.number().int().min(1), _n: Nonce }),
+  z.object({ a: z.literal('draft.revise'), d: Ref, r: z.number().int().min(1), _n: Nonce }),
+  z.object({ a: z.literal('ask.answer'), k: Ref, o: z.string().min(1).max(40), _n: Nonce }),
+  z.object({ a: z.literal('task.stop'), t: Ref, _n: Nonce }),
   /**
    * f = 关注还是取消。c = 按钮在哪种卡上（点完刷新那张卡用），草稿卡另带 d。群里的卡是两个人共享的，显示不了「各自关没关注」，
    * 所以进度卡、草稿卡上只有「关注」；取消关注在私聊收到的关注推送卡上。
@@ -34,12 +36,12 @@ export const ActionValueSchema = z.discriminatedUnion('a', [
     f: z.boolean(),
     c: z.enum(['progress', 'draft', 'follow']),
     d: Ref.optional(),
-    n: Nonce,
+    _n: Nonce,
   }),
-  z.object({ a: z.literal('board.refresh'), n: Nonce }),
-  z.object({ a: z.literal('board.stalled'), n: Nonce }),
-  z.object({ a: z.literal('board.waiting'), n: Nonce }),
-  z.object({ a: z.literal('progress.show'), t: Ref, n: Nonce }),
+  z.object({ a: z.literal('board.refresh'), _n: Nonce }),
+  z.object({ a: z.literal('board.stalled'), _n: Nonce }),
+  z.object({ a: z.literal('board.waiting'), _n: Nonce }),
+  z.object({ a: z.literal('progress.show'), t: Ref, _n: Nonce }),
 ]);
 export type ActionValue = z.infer<typeof ActionValueSchema>;
 
@@ -102,7 +104,10 @@ function text(content: string, style: 'normal' | 'note' = 'normal'): El {
 function button(b: Button, form?: string): El {
   const behaviors: El[] = [];
   if (b.url) behaviors.push({ type: 'open_url', default_url: b.url });
-  if (b.value) behaviors.push({ type: 'callback', value: b.value });
+  if (b.value) {
+    const { _n, ...rest } = b.value;
+    behaviors.push({ type: 'callback', value: { _n, ...rest } });
+  }
   return {
     tag: 'button',
     text: { tag: 'plain_text', content: clip(b.label, 20) },
@@ -157,7 +162,7 @@ export function draftCard(
           cockpit(ctx, COCKPIT_PATHS.task(t.taskId)),
           {
             label: '关注',
-            value: { a: 'task.follow', t: t.taskId, f: true, c: 'draft', d: draft.id, n: ctx.nonce },
+            value: { a: 'task.follow', t: t.taskId, f: true, c: 'draft', d: draft.id, _n: ctx.nonce },
           },
         ]),
       ],
@@ -219,7 +224,7 @@ export function draftCard(
             {
               label: '确认',
               primary: true,
-              value: { a: 'draft.confirm', d: draft.id, r: draft.revision, n: ctx.nonce },
+              value: { a: 'draft.confirm', d: draft.id, r: draft.revision, _n: ctx.nonce },
             },
             'confirm',
           ),
@@ -230,7 +235,7 @@ export function draftCard(
         width: 'auto',
         elements: [
           button(
-            { label: '改一下', value: { a: 'draft.revise', d: draft.id, r: draft.revision, n: ctx.nonce } },
+            { label: '改一下', value: { a: 'draft.revise', d: draft.id, r: draft.revision, _n: ctx.nonce } },
             'revise',
           ),
         ],
@@ -308,13 +313,13 @@ export function progressCard(
   if (opts.note) lines.push(text(opts.note, 'note'));
   const actions: Button[] = [
     cockpit(ctx, COCKPIT_PATHS.task(task.id)),
-    { label: '关注', value: { a: 'task.follow', t: task.id, f: true, c: 'progress', n: ctx.nonce } },
+    { label: '关注', value: { a: 'task.follow', t: task.id, f: true, c: 'progress', _n: ctx.nonce } },
   ];
   if (!FINISHED.has(task.state)) {
     actions.push({
       label: '叫停',
       danger: true,
-      value: { a: 'task.stop', t: task.id, n: ctx.nonce },
+      value: { a: 'task.stop', t: task.id, _n: ctx.nonce },
       confirm: { title: `叫停 #${task.issueNumber}？`, text: '任务会停下来；要重新开始得在驾驶舱里操作。' },
     });
   }
@@ -345,7 +350,7 @@ export function pickTaskCard(issue: number, matches: TaskLookup['matches'], ctx:
         cockpit(ctx, COCKPIT_PATHS.overview),
         ...matches.slice(0, 3).map((m) => ({
           label: `看 ${m.repo.split('/').pop() ?? m.repo}`,
-          value: { a: 'progress.show', t: m.taskId, n: ctx.nonce } as const,
+          value: { a: 'progress.show', t: m.taskId, _n: ctx.nonce } as const,
         })),
       ]),
     ],
@@ -379,9 +384,9 @@ export function boardCard(
   elements.push(
     buttons([
       cockpit(ctx, COCKPIT_PATHS.overview),
-      { label: '刷新', value: { a: 'board.refresh', n: ctx.nonce } },
-      { label: '看卡住的', value: { a: 'board.stalled', n: ctx.nonce } },
-      { label: '看等我点头的', value: { a: 'board.waiting', n: ctx.nonce } },
+      { label: '刷新', value: { a: 'board.refresh', _n: ctx.nonce } },
+      { label: '看卡住的', value: { a: 'board.stalled', _n: ctx.nonce } },
+      { label: '看等我点头的', value: { a: 'board.waiting', _n: ctx.nonce } },
     ]),
   );
   return card({
@@ -499,25 +504,33 @@ export function outboxCard(
       actions.push({
         label: option,
         primary: i === 0,
-        value: { a: 'ask.answer', k: item.askId, o: option, n: ctx.nonce },
+        value: { a: 'ask.answer', k: item.askId, o: option, _n: ctx.nonce },
       });
     }
     actions.push(cockpit(ctx, link, '打开驾驶舱', false));
-    elements.push(text('也可以直接回复这张卡片作答（群里回复要 @我）。', 'note'));
+    // 要人拍的事拍板只认按钮：回复只算追问，免得「要花多少钱？」被记成答案。AI 的追问回复就是回答。
+    elements.push(
+      text(
+        item.kind === 'decision'
+          ? '拍板请点上面的按钮；有疑问直接回复这张卡片问（群里回复要 @我），回复不算拍板。'
+          : '也可以直接回复这张卡片作答（群里回复要 @我）。',
+        'note',
+      ),
+    );
   } else {
     actions.push(cockpit(ctx, link));
     if (!done && item.kind === 'alert' && item.taskId) {
       actions.push({
         label: '叫停',
         danger: true,
-        value: { a: 'task.stop', t: item.taskId, n: ctx.nonce },
+        value: { a: 'task.stop', t: item.taskId, _n: ctx.nonce },
         confirm: { title: '叫停这个任务？', text: '任务会停下来；要重新开始得在驾驶舱里操作。' },
       });
     }
     if (!done && item.kind === 'follow' && item.taskId) {
       actions.push({
         label: '取消关注',
-        value: { a: 'task.follow', t: item.taskId, f: false, c: 'follow', n: ctx.nonce },
+        value: { a: 'task.follow', t: item.taskId, f: false, c: 'follow', _n: ctx.nonce },
       });
     }
   }

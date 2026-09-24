@@ -4,17 +4,19 @@ import type { Cache, HttpInstance } from '@larksuiteoapi/node-sdk';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createBackend } from '../src/backend.ts';
 import { createGateway, type Gateway } from '../src/gateway.ts';
-import { createLark, type Lark } from '../src/lark.ts';
+import { createLark, type Lark, sdkDetail } from '../src/lark.ts';
 import { FeishuError } from '../src/port.ts';
 import { A, B, BOT, cardEvent, menuEvent, messageEvent, TEAM } from './events.ts';
 import { type FakeBackend, startFakeBackend } from './fake-backend.ts';
-import { draft, memoryLogger, TOKEN, until } from './harness.ts';
+import { draft, memoryLogger, outboxItem, TOKEN, until } from './harness.ts';
 
 interface HttpCall {
   method: string;
   path: string;
   params: Record<string, unknown>;
   data: unknown;
+  /** SDK 发请求时带的超时（毫秒）。 */
+  timeout: number | undefined;
 }
 
 type Route = (call: HttpCall) => unknown;
@@ -55,9 +57,16 @@ function fakeOpenPlatform(overrides: Record<string, Route> = {}) {
   ];
   for (const [key, route] of Object.entries(overrides)) routes.unshift([new RegExp(`^${key}$`), route]);
 
-  async function handle(method: string, url: string, data: unknown, params: Record<string, unknown> = {}) {
+  type Opts = {
+    url?: string;
+    method?: string;
+    data?: unknown;
+    params?: Record<string, unknown>;
+    timeout?: number;
+  };
+  async function handle(method: string, url: string, data: unknown, o: Opts = {}) {
     const path = new URL(url).pathname;
-    const call = { method: method.toUpperCase(), path, params, data };
+    const call = { method: method.toUpperCase(), path, params: o.params ?? {}, data, timeout: o.timeout };
     calls.push(call);
     const found = routes.find(([re]) => re.test(`${call.method} ${path}`));
     if (!found)
@@ -67,19 +76,21 @@ function fakeOpenPlatform(overrides: Record<string, Route> = {}) {
     return found[1](call);
   }
 
-  type Opts = { url?: string; method?: string; data?: unknown; params?: Record<string, unknown> };
   const http = {
-    request: (o: Opts) => handle(o.method ?? 'GET', o.url ?? '', o.data, o.params),
-    get: (url: string, o?: Opts) => handle('GET', url, o?.data, o?.params),
-    delete: (url: string, o?: Opts) => handle('DELETE', url, o?.data, o?.params),
-    head: (url: string, o?: Opts) => handle('HEAD', url, o?.data, o?.params),
-    options: (url: string, o?: Opts) => handle('OPTIONS', url, o?.data, o?.params),
-    post: (url: string, data?: unknown, o?: Opts) => handle('POST', url, data, o?.params),
-    put: (url: string, data?: unknown, o?: Opts) => handle('PUT', url, data, o?.params),
-    patch: (url: string, data?: unknown, o?: Opts) => handle('PATCH', url, data, o?.params),
+    request: (o: Opts) => handle(o.method ?? 'GET', o.url ?? '', o.data, o),
+    get: (url: string, o?: Opts) => handle('GET', url, o?.data, o),
+    delete: (url: string, o?: Opts) => handle('DELETE', url, o?.data, o),
+    head: (url: string, o?: Opts) => handle('HEAD', url, o?.data, o),
+    options: (url: string, o?: Opts) => handle('OPTIONS', url, o?.data, o),
+    post: (url: string, data?: unknown, o?: Opts) => handle('POST', url, data, o),
+    put: (url: string, data?: unknown, o?: Opts) => handle('PUT', url, data, o),
+    patch: (url: string, data?: unknown, o?: Opts) => handle('PATCH', url, data, o),
   } as unknown as HttpInstance;
   return { http, calls };
 }
+
+/** 一直不回：模拟飞书接口挂住。 */
+const hang: Route = () => new Promise(() => {});
 
 /** 每个测试一份缓存：SDK 默认的缓存是进程级共用的，去重记录会串到别的测试里。 */
 function memoryCache(): Cache {
@@ -110,7 +121,11 @@ afterEach(async () => {
   stack = undefined;
 });
 
-async function start(overrides: Record<string, Route> = {}, log = memoryLogger([])): Promise<Stack> {
+async function start(
+  overrides: Record<string, Route> = {},
+  log = memoryLogger([]),
+  timeouts?: { reactMs?: number; callMs?: number },
+): Promise<Stack> {
   const backend = await startFakeBackend();
   const open = fakeOpenPlatform(overrides);
   const lark = createLark({
@@ -121,6 +136,7 @@ async function start(overrides: Record<string, Route> = {}, log = memoryLogger([
     transport: 'webhook',
     httpInstance: open.http,
     cache: memoryCache(),
+    ...(timeouts ? { timeouts } : {}),
   });
   const gateway = createGateway({
     feishu: lark.port,
@@ -220,7 +236,7 @@ describe('飞书 SDK 这一层', () => {
     await s.lark.dispatch(
       cardEvent({
         messageId: 'om_card_1',
-        value: { a: 'draft.revise', d: 'draft-1', r: 1, n: 'n1' },
+        value: { a: 'draft.revise', d: 'draft-1', r: 1, _n: 'n1' },
         form: { note: '只做网页版', repo: 'repo-api' },
       }),
     );
@@ -258,5 +274,93 @@ describe('飞书 SDK 这一层', () => {
     expect(err).toBeInstanceOf(FeishuError);
     expect((err as FeishuError).kind).toBe('unavailable');
     expect(flaky).toBe(3);
+  });
+
+  it('飞书接口挂住：表情回应 3 秒、其余 10 秒就算超时（这里按比例缩短），不重试，记错误；每个请求也带着超时，挂住的连接会被收掉', async () => {
+    const lines: Array<{ level: string; message: string; fields?: Record<string, unknown> }> = [];
+    const s = await start(
+      {
+        'POST /open-apis/im/v1/messages/om_slow/reactions': hang,
+        'POST /open-apis/im/v1/messages': hang,
+      },
+      memoryLogger(lines as never),
+      { reactMs: 60, callMs: 120 },
+    );
+    const t0 = Date.now();
+    await expect(s.lark.port.react('om_slow', 'Get')).rejects.toMatchObject({ kind: 'timeout' });
+    const reactMs = Date.now() - t0;
+    expect(reactMs).toBeGreaterThanOrEqual(55);
+    expect(reactMs).toBeLessThan(1_000);
+    const t1 = Date.now();
+    await expect(s.lark.port.send({ chatId: TEAM }, { text: 'x' }, { uuid: 'u1' })).rejects.toMatchObject({
+      kind: 'timeout',
+    });
+    expect(Date.now() - t1).toBeLessThan(1_000);
+    // 超时不重试：各只发了一次。
+    expect(imCalls(s).map((c) => c.path)).toEqual([
+      '/open-apis/im/v1/messages/om_slow/reactions',
+      '/open-apis/im/v1/messages',
+    ]);
+    expect(s.open.calls.every((c) => c.timeout === 120)).toBe(true);
+    expect(
+      lines.filter((l) => l.level === 'error' && l.message === '飞书接口超时').map((l) => l.fields),
+    ).toEqual([
+      { what: '加表情回应', ms: 60 },
+      { what: '发消息', ms: 120 },
+    ]);
+  });
+
+  it('推送卡发出去时飞书挂住：推送这一轮照样走完（回执 failed，写明超时），不会整个停住', async () => {
+    const s = await start({ 'POST /open-apis/im/v1/messages': hang }, memoryLogger([]), { callMs: 100 });
+    const item = outboxItem();
+    s.backend.on('GET', '/feishu/outbox', {
+      body: { items: [item], quietHours: null, asOf: new Date().toISOString() },
+    });
+    s.backend.on('POST', '/feishu/outbox/acks', { body: { ok: true } });
+    const t0 = Date.now();
+    await s.gateway.outbox.runOnce();
+    expect(Date.now() - t0).toBeLessThan(2_000);
+    const [ack] = s.backend
+      .calls('POST', '/feishu/outbox/acks')
+      .flatMap((r) => (r.body as { acks: never[] }).acks);
+    expect(ack).toMatchObject({
+      itemId: 'ask:1',
+      result: { status: 'failed', error: expect.stringContaining('没回应') },
+    });
+  });
+
+  it('SDK 报错的日志里没有请求体（发出去的卡片里有创始人的原话），只留定位要的几项', async () => {
+    const lines: Array<{ level: string; message: string; fields?: Record<string, unknown> }> = [];
+    const secret = '创始人原话：下周融资的事先别告诉投资人';
+    const s = await start(
+      {
+        'POST /open-apis/im/v1/messages': (c) => {
+          throw Object.assign(new Error('Request failed with status code 400'), {
+            config: {
+              method: 'post',
+              url: 'https://open.feishu.cn/open-apis/im/v1/messages',
+              data: JSON.stringify(c.data),
+            },
+            request: { method: 'POST', path: '/open-apis/im/v1/messages' },
+            response: {
+              status: 400,
+              statusText: 'Bad Request',
+              data: { code: 230001, msg: 'invalid content', log_id: 'L1' },
+            },
+          });
+        },
+      },
+      memoryLogger(lines as never),
+    );
+    await s.lark.port.send({ chatId: TEAM }, { text: secret }, { uuid: 'u2' }).catch(() => undefined);
+    const sdk = lines.filter((l) => l.message === '飞书 SDK');
+    expect(sdk.length).toBeGreaterThan(0);
+    const logged = JSON.stringify(sdk);
+    expect(logged).not.toContain('下周融资');
+    expect(logged).toContain('230001');
+    expect(logged).toContain('/open-apis/im/v1/messages');
+    expect(
+      sdkDetail([{ config: { data: secret, url: '/x' }, response: { data: { code: 1, msg: 'bad' } } }]),
+    ).toBe('url=/x code=1 msg=bad');
   });
 });

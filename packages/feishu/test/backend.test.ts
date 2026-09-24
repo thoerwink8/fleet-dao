@@ -1,8 +1,36 @@
-// 调后端的客户端：带通行证；代表谁只在代表人的调用上带；超时、拒收、出错、形状不对分得清。
+// 调后端的客户端：带通行证；代表谁跟着路由表的 acting 走；超时、拒收、出错、形状不对分得清。
+import { FEISHU_GATEWAY_WEB_ROUTES, FeishuRoutes, WEB_API_PREFIX, WebRoutes } from '@fleet-dao/shared';
 import { afterEach, describe, expect, it } from 'vitest';
-import { ACTING_HEADER, BackendError, createBackend, describe as say } from '../src/backend.ts';
+import { ACTING_HEADER, type Backend, BackendError, createBackend, describe as say } from '../src/backend.ts';
 import { apiError, type FakeBackend, startFakeBackend } from './fake-backend.ts';
 import { TOKEN } from './harness.ts';
+
+const A = { openId: 'ou_founder_a' };
+const card = {
+  messageId: 'om_1',
+  chatId: 'oc_1',
+  kind: 'list',
+  ref: {},
+  sentAt: new Date().toISOString(),
+} as const;
+
+/** 客户端的每个方法各调一次（后端一律回 503，只看请求）。键是它走的路由。 */
+const EVERY_CALL: Record<string, (b: Backend) => Promise<unknown>> = {
+  message: (b) =>
+    b.understand(A, { sourceMessageId: 'om_1', text: 'x', chatType: 'p2p', replyToMessageId: 'om_0' }),
+  reviseDraft: (b) => b.reviseDraft(A, 'd1', { requestId: 'r1', note: '改' }),
+  confirmDraft: (b) => b.confirmDraft(A, 'd1', { revision: 1 }),
+  findTasks: (b) => b.findTasks(A, 12),
+  follow: (b) => b.follow(A, 't1', true),
+  board: (b) => b.board(),
+  outbox: (b) => b.outbox(0),
+  ackOutbox: (b) =>
+    b.ackOutbox([{ itemId: 'i1', revision: 1, result: { status: 'updated', messageId: 'om_1' } }]),
+  putCard: (b) => b.putCard(card),
+  task: (b) => b.task(A, 't1'),
+  taskAction: (b) => b.stopTask(A, 't1', '叫停'),
+  answerAsk: (b) => b.answerAsk(A, 'a1', '批准'),
+};
 
 let fake: FakeBackend;
 afterEach(async () => {
@@ -82,9 +110,37 @@ describe('后端客户端', () => {
     expect((await p).kind).toBe('aborted');
   });
 
-  it('卡片登记查不到（404）是 null，不是出错；路径里的编号会转义', async () => {
+  it('每条接口都按路由表的 acting 带或不带「代表谁」：required 带点按钮 / 说话的人，none 一律不带；都带通行证', async () => {
     const b = await client();
-    expect(await b.getCard('om_a/b')).toBeNull();
+    const table: Record<string, { method: string; path: string; acting: string }> = {
+      ...FeishuRoutes,
+      ...Object.fromEntries(
+        FEISHU_GATEWAY_WEB_ROUTES.map((k) => [k, { ...WebRoutes[k], acting: 'required' }]),
+      ),
+    };
+    // 路由表里的每一条客户端都有方法调它（加了接口没接上，这里先红）。
+    expect(Object.keys(EVERY_CALL).sort()).toEqual(Object.keys(table).sort());
+    for (const [name, call] of Object.entries(EVERY_CALL)) {
+      const before = fake.requests.length;
+      await call(b).catch(() => undefined);
+      const req = fake.requests[before];
+      const route = table[name];
+      const pattern = new RegExp(`^${route?.path.replace(/:[A-Za-z]+/g, '[^/]+')}$`);
+      expect({ name, method: req?.method, path: pattern.test(req?.path ?? '') }).toEqual({
+        name,
+        method: route?.method,
+        path: true,
+      });
+      expect({ name, auth: req?.headers.authorization }).toEqual({ name, auth: `Bearer ${TOKEN}` });
+      const acting = req?.headers[ACTING_HEADER.toLowerCase()];
+      expect({ name, acting }).toEqual({ name, acting: route?.acting === 'required' ? A.openId : undefined });
+    }
+    expect(WEB_API_PREFIX).toBe('/api');
+  });
+
+  it('路径里的编号会转义', async () => {
+    const b = await client();
+    await b.putCard({ ...card, messageId: 'om_a/b' }).catch(() => undefined);
     expect(fake.requests[0]?.path).toBe('/feishu/cards/om_a%2Fb');
   });
 

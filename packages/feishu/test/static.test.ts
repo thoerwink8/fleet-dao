@@ -2,7 +2,7 @@
 // 跟别的包约好的名字（请求头、驾驶舱页面）还对得上、时间预算加起来守得住设计目标。
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import * as shared from '@fleet-dao/shared';
-import { FEISHU_GATEWAY_WEB_ROUTES, FEISHU_UNDERSTAND_MS, WebRoutes } from '@fleet-dao/shared';
+import { FEISHU_GATEWAY_WEB_ROUTES, FEISHU_UNDERSTAND_MS, FeishuRoutes, WebRoutes } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import { ACTING_HEADER } from '../src/backend.ts';
 import { COCKPIT_PATHS } from '../src/cards.ts';
@@ -70,14 +70,28 @@ describe('静态检查', () => {
     }
   });
 
-  it('「代表哪位创始人」的请求头和后端的约定一致（后端的常量合进来之后按它核对）', () => {
-    expect(ACTING_HEADER).toBe('X-Fleet-Acting-Feishu');
-    const backendSide = (shared as Record<string, unknown>).FEISHU_ACTING_HEADER;
-    if (backendSide !== undefined) expect(backendSide).toBe(ACTING_HEADER);
-  });
+  const backendSide = (shared as Record<string, unknown>).FEISHU_ACTING_HEADER;
+  it.skipIf(backendSide === undefined)(
+    '「代表哪位创始人」的请求头和后端的一致（后端的常量 FEISHU_ACTING_HEADER 在 PR #9 里加，合进 main 之前跳过）',
+    () => {
+      expect(backendSide).toBe(ACTING_HEADER);
+    },
+  );
 
   it('网关要用的驾驶舱接口都在路由表里', () => {
     for (const name of FEISHU_GATEWAY_WEB_ROUTES) expect(WebRoutes[name]).toBeDefined();
+  });
+
+  it('每条飞书接口都标清了 acting：只有网关自己的后台活（盘面、待推送、回执、登记卡片）不带代表人', () => {
+    const table = Object.entries(FeishuRoutes).map(([name, r]) => [name, r.acting] as const);
+    expect(table.every(([, acting]) => acting === 'required' || acting === 'none')).toBe(true);
+    expect(
+      table
+        .filter(([, acting]) => acting === 'none')
+        .map(([name]) => name)
+        .sort(),
+    ).toEqual(['ackOutbox', 'board', 'outbox', 'putCard']);
+    expect(table).toHaveLength(9);
   });
 
   const webRoutes = new URL('../../web/src/routes.ts', pkg);

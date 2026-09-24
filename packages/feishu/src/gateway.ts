@@ -1,6 +1,8 @@
 // 网关的四件事：随手记任务、推送（outbox.ts）、看盘面（board.ts）、回复即追问。
 // 收事件的回调一律立刻返回（SDK 按会话排队，回调慢了会挡住后面的人），活放到后台跑；
 // 每条消息先加表情回应（2 秒内），不等后端；确认卡 10 秒内必到——后端慢就先回「正在理解」卡，之后原地更新。
+// 回复某张卡：网关不自己判它是改草稿、回答还是追问，把回复的消息编号交给后端一次问完（后端按卡片登记处理，
+// 规矩见 shared/feishu-api.ts 的 FeishuMessageRequest）；尤其不在回复里替人拍板——拍板只认卡上的按钮。
 
 import { FeishuDraftConflictDetails } from '@fleet-dao/shared';
 import {
@@ -12,7 +14,6 @@ import {
   type Draft,
   describe,
   isTransient,
-  type ReplyContext,
   UNDERSTAND_WAIT_MS,
   type Understood,
 } from './backend.ts';
@@ -114,8 +115,6 @@ const HINT_EMPTY = '在呢。直接说要做的事，比如「给登录页加手
 const HINT_NEW_TASK =
   '直接发一句话给我就行，比如「给登录页加手机验证码」。我会先回一张「我理解为」的卡，你点确认才开成任务。群里记任务要 @我。';
 const DECLINE = '你好，我是 fleet-dao 的机器人，只替两位创始人办事。这条我没有记下，有事请直接找他们。';
-const REPLY_CONTEXT_UNKNOWN =
-  '你回复的那张卡，我没查到它在说哪件事（后端现在没连上），这条先没记。过一会儿再回复一次，或者在驾驶舱里处理。';
 
 /** 「进度 12」「查进度12」「进度 #12」。 */
 export function parseProgress(text: string): number | null {
@@ -218,16 +217,9 @@ export function createGateway(o: GatewayOptions): Gateway {
       registry.remember({ messageId: sent.messageId, chatId: sent.chatId, kind, ref, sentAt: iso(now()) });
   }
 
-  /** 已登记过的卡补上新的来历（例如草稿确认后补 taskId），发出时刻沿用原来的。 */
-  async function reRemember(
-    messageId: string,
-    chatId: string,
-    kind: CardKind,
-    ref: CardRecord['ref'],
-  ): Promise<void> {
-    const old = await registry.lookup(messageId, 1_000);
-    const sentAt = old && old !== 'unknown' ? old.sentAt : iso(now());
-    registry.remember({ messageId, chatId, kind, ref, sentAt });
+  /** 已登记过的卡换种类或补来历（例如草稿确认后补 taskId）：后端保留第一次登记的发出时刻。 */
+  function reRemember(messageId: string, chatId: string, kind: CardKind, ref: CardRecord['ref']): void {
+    registry.remember({ messageId, chatId, kind, ref, sentAt: iso(now()) });
   }
 
   async function decline(openId: string, replyTo?: string): Promise<void> {
@@ -266,29 +258,14 @@ export function createGateway(o: GatewayOptions): Gateway {
         await reply(msg.messageId, { text: HINT_EMPTY }, 'hint');
         return;
       }
-      if (msg.replyToMessageId) {
-        const rec = await registry.lookup(msg.replyToMessageId);
-        if (rec === 'unknown') {
-          // 没查成不能当「不是回复」：回复问题卡的「批准」会被当成一个新需求。说清楚，请他稍后再回。
-          path = 'reply:unknown';
-          count('reply_context_unknown');
-          await reply(msg.messageId, { text: REPLY_CONTEXT_UNKNOWN }, 'reply-unknown');
-          return;
-        }
-        if (rec) {
-          path = `reply:${rec.kind}`;
-          await handleReply(msg, founder, rec, text, receivedAt);
-          return;
-        }
-        // 回复的不是我们发的卡（例如回复了别人的话）：当成新的一句话。
-      }
       const issue = parseProgress(text);
       if (issue !== null) {
         path = 'progress';
         await showProgress(msg, founder, issue);
         return;
       }
-      await understand(msg, founder, text, undefined, receivedAt);
+      if (msg.replyToMessageId) path = 'reply';
+      await understand(msg, founder, text, receivedAt);
     } finally {
       await acked;
       log.info('消息处理完', {
@@ -305,14 +282,13 @@ export function createGateway(o: GatewayOptions): Gateway {
     msg: InboundMessage,
     founder: Founder,
     text: string,
-    replyTo: ReplyContext | undefined,
     receivedAt: number,
   ): Promise<void> {
     const body = {
       sourceMessageId: msg.messageId,
       text: clip(text, 4000),
       chatType: msg.chatType,
-      ...(replyTo ? { replyTo } : {}),
+      ...(msg.replyToMessageId ? { replyToMessageId: msg.replyToMessageId } : {}),
     };
     let first: Understood;
     try {
@@ -394,7 +370,7 @@ export function createGateway(o: GatewayOptions): Gateway {
       const ref = res.taskId ? { taskId: res.taskId } : {};
       if (placeholder) {
         await patch(placeholder.messageId, answerCard(res.text, ctx(), res.taskId), 'answer');
-        await reRemember(placeholder.messageId, placeholder.chatId, 'answer', ref);
+        reRemember(placeholder.messageId, placeholder.chatId, 'answer', ref);
       } else {
         remember(await reply(msg.messageId, { text: res.text }, 'answer'), 'answer', ref);
       }
@@ -402,13 +378,28 @@ export function createGateway(o: GatewayOptions): Gateway {
     }
     const draft = res.draft;
     drafts.set(draft.id, draft);
-    const card = draftCard(draft, ctx());
-    const existing = placeholder?.messageId ?? draft.cardMessageId;
-    if (existing) {
-      await patch(existing, card, 'draft');
-      await reRemember(existing, placeholder?.chatId ?? msg.chatId, 'draft', { draftId: draft.id });
+    const ref = { draftId: draft.id, ...(draft.task ? { taskId: draft.task.taskId } : {}) };
+    if (draft.cardMessageId) {
+      // 这个草稿已经有卡了（回复那张卡改理解，或者同一条消息被重投）：原地更新那张，不发第二张。
+      const note = msg.replyToMessageId ? '已按你说的改好，看一眼再确认。' : undefined;
+      await patch(draft.cardMessageId, draftCard(draft, ctx(), { note }), 'draft', note);
+      if (placeholder) {
+        await patch(
+          placeholder.messageId,
+          answerCard('已按你说的改好了那张「我理解为」卡。', ctx()),
+          'draft-moved',
+        );
+        reRemember(placeholder.messageId, placeholder.chatId, 'answer', ref);
+      }
+    } else if (placeholder) {
+      await patch(placeholder.messageId, draftCard(draft, ctx()), 'draft');
+      reRemember(placeholder.messageId, placeholder.chatId, 'draft', ref);
     } else {
-      remember(await reply(msg.messageId, { card }, `draft:${draft.id}`), 'draft', { draftId: draft.id });
+      remember(
+        await reply(msg.messageId, { card: draftCard(draft, ctx()) }, `draft:${draft.id}`),
+        'draft',
+        ref,
+      );
       checkCardTime(msg.messageId, receivedAt, 'draft');
     }
     log.info('确认卡已回', { messageId: msg.messageId, draftId: draft.id, cardMs: now() - receivedAt });
@@ -421,41 +412,15 @@ export function createGateway(o: GatewayOptions): Gateway {
     return `${what}后端没收下：${describe(err)}。`;
   }
 
-  async function handleReply(
-    msg: InboundMessage,
-    founder: Founder,
-    rec: CardRecord,
-    text: string,
-    receivedAt: number,
-  ): Promise<void> {
-    if (rec.kind === 'draft' && rec.ref.draftId && !rec.ref.taskId) {
-      const handled = await reviseDraft(
-        founder,
-        rec.ref.draftId,
-        rec.messageId,
-        { note: text },
-        msg.messageId,
-      );
-      if (handled) return;
-      // 草稿已经确认成任务了：这句按追问处理。
-    }
-    if ((rec.kind === 'ask' || rec.kind === 'decision') && rec.ref.askId) {
-      await answerAsk(founder, rec.ref.askId, text, rec.messageId, msg.messageId);
-      return;
-    }
-    await understand(msg, founder, text, { kind: rec.kind, ref: rec.ref }, receivedAt);
-  }
+  // —— 草稿：卡上的「改一下」「确认」——
 
-  // —— 草稿：改一下、确认 ——
-
-  /** 返回 false = 草稿已经确认过了，这句话该按追问处理。 */
   async function reviseDraft(
     founder: Founder,
     draftId: string,
     cardMessageId: string,
     change: { note?: string; repoId?: string },
     requestId: string,
-  ): Promise<boolean> {
+  ): Promise<void> {
     const cached = drafts.get(draftId);
     await patch(
       cardMessageId,
@@ -477,15 +442,13 @@ export function createGateway(o: GatewayOptions): Gateway {
         draftCard(draft, ctx(), { note: '已按你说的改好，看一眼再确认。' }),
         'revised',
       );
-      return true;
     } catch (err) {
       const latest = draftIn(err);
       if (latest) drafts.set(latest.id, latest);
-      if (err instanceof BackendError && err.code === 'draft_confirmed') {
-        if (latest) await patch(cardMessageId, draftCard(latest, ctx()), 'already-confirmed');
-        return false;
-      }
-      const note = `没改成：${describe(err)}，再试一次。`;
+      const note =
+        err instanceof BackendError && err.code === 'draft_confirmed'
+          ? '已经开成任务了，这张卡改不了；要改需求请在驾驶舱里改。'
+          : `没改成：${describe(err)}，再试一次。`;
       const base = latest ?? cached;
       await patch(
         cardMessageId,
@@ -494,7 +457,6 @@ export function createGateway(o: GatewayOptions): Gateway {
           : draftWaitCard(ctx(), { title: '没改成', failed: true, lines: [note] }),
         'revise-failed',
       );
-      return true;
     }
   }
 
@@ -514,7 +476,7 @@ export function createGateway(o: GatewayOptions): Gateway {
         v.d,
         evt.messageId,
         { note, ...(repoChanged && repoId ? { repoId } : {}) },
-        uuidFor('revise', evt.messageId, v.n, founder.openId, note, repoId ?? ''),
+        uuidFor('revise', evt.messageId, v._n, founder.openId, note, repoId ?? ''),
       );
       return;
     }
@@ -545,7 +507,7 @@ export function createGateway(o: GatewayOptions): Gateway {
           'confirmed',
           task ? `已开成任务 #${task.issueNumber}` : '已确认',
         );
-        if (task) await reRemember(evt.messageId, evt.chatId, 'draft', { draftId: v.d, taskId: task.taskId });
+        if (task) reRemember(evt.messageId, evt.chatId, 'draft', { draftId: v.d, taskId: task.taskId });
         log.info('草稿已确认', { draftId: v.d, taskId: task?.taskId, again: r.alreadyConfirmed });
         return;
       } catch (err) {
@@ -576,22 +538,21 @@ export function createGateway(o: GatewayOptions): Gateway {
     );
   }
 
-  // —— 回答追问、叫停、关注 ——
+  // —— 卡上的按钮：回答追问（要人拍的事也在这里拍板）、叫停、关注 ——
 
   async function answerAsk(
     founder: Founder,
     askId: string,
     answer: string,
     cardMessageId: string,
-    replyTo?: string,
   ): Promise<void> {
     try {
       await o.backend.answerAsk(as(founder), askId, answer);
       const doneText = `已回答：${clip(answer, 60)} · ${founder.name} · ${when(now(), now())}`;
       if (!(await outbox.overlay(cardMessageId, { doneText }).catch(() => false))) {
-        // 卡不在本地缓存（例如网关刚重启）：卡等后端下一版推过来再改；回复答的，先在这条下面说一声。
+        // 卡不在本地缓存（例如网关刚重启）：在卡下面说一声，卡等后端下一版推过来再改。
         log.info('问题卡不在本地缓存，等后端下一版推过来再改卡', { askId });
-        if (replyTo) await reply(replyTo, { text: doneText }, `answered:${askId}`);
+        await reply(cardMessageId, { text: doneText }, `answered:${askId}`);
       }
     } catch (err) {
       const note =
@@ -599,10 +560,10 @@ export function createGateway(o: GatewayOptions): Gateway {
           ? '这个问题已经有人回答过了。'
           : err instanceof BackendError && err.status === 404
             ? '这条追问已经不在了。'
-            : `没提交上：${describe(err)}，再试一次。`;
+            : `没提交上：${describe(err)}，再点一次试试。`;
       log.warn('回答没提交上', { askId, error: String(err) });
       const shown = await outbox.overlay(cardMessageId, { note }).catch(() => false);
-      if (!shown) await reply(replyTo ?? cardMessageId, { text: note }, `answer-failed:${askId}`);
+      if (!shown) await reply(cardMessageId, { text: note }, `answer-failed:${askId}:${now()}`);
     }
   }
 
@@ -717,7 +678,7 @@ export function createGateway(o: GatewayOptions): Gateway {
     try {
       const detail = await o.backend.task(as(founder), taskId, { timeoutMs: timing.callMs });
       if (await patch(messageId, progressCard(detail, ctx()), 'progress-pick')) {
-        await reRemember(messageId, chatId, 'progress', { taskId });
+        reRemember(messageId, chatId, 'progress', { taskId });
       }
     } catch (err) {
       log.warn('进度详情没查成', { taskId, error: String(err) });
@@ -745,7 +706,7 @@ export function createGateway(o: GatewayOptions): Gateway {
         if (!note && !repoChanged) {
           const hint = '在输入框里写上要改哪里再点「改一下」，或者直接回复这张卡片说。';
           if (cached) await patch(evt.messageId, draftCard(cached, ctx(), { note: hint }), 'revise-empty');
-          else await reply(evt.messageId, { text: hint }, `revise-empty:${v.n}`);
+          else await reply(evt.messageId, { text: hint }, `revise-empty:${v._n}`);
           return;
         }
         await reviseDraft(
@@ -753,7 +714,7 @@ export function createGateway(o: GatewayOptions): Gateway {
           v.d,
           evt.messageId,
           { ...(note ? { note } : {}), ...(repoChanged && repoId ? { repoId } : {}) },
-          uuidFor('revise', evt.messageId, v.n, founder.openId, note ?? '', repoId ?? ''),
+          uuidFor('revise', evt.messageId, v._n, founder.openId, note ?? '', repoId ?? ''),
         );
         return;
       }

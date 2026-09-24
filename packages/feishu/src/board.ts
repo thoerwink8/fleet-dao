@@ -52,7 +52,10 @@ export function createBoard(deps: BoardDeps): Board {
   const minPatchIntervalMs = deps.minPatchIntervalMs ?? 10_000;
   const touchIntervalMs = deps.touchIntervalMs ?? 10 * 60_000;
   let cache: { snap: BoardSnapshot; fetchedAt: number } | null = null;
-  /** undefined = 还没查过登记（重启后先查，查不成不发新卡，免得团队群里出现两张）。 */
+  /**
+   * undefined = 还没从快照里认领过（重启后第一份快照里的 teamBoardCard 就是它；快照取不到就不发新卡，免得团队群里出现两张）。
+   * 认领之后以本地为准：刚发的新卡登记还没落到后端时，快照里可能还是旧的那张。
+   */
   let pinned: { messageId: string; sentAt: number } | null | undefined;
   let lastSignature: string | undefined;
   let lastPatchAt = 0;
@@ -68,6 +71,10 @@ export function createBoard(deps: BoardDeps): Board {
     try {
       const snap = await deps.backend.board({ timeoutMs });
       cache = { snap, fetchedAt: deps.now() };
+      if (pinned === undefined) {
+        const card = snap.teamBoardCard;
+        pinned = card ? { messageId: card.messageId, sentAt: Date.parse(card.sentAt) } : null;
+      }
       return snap;
     } catch (err) {
       deps.log.warn('盘面快照没取到，先用缓存', { error: String(err), cachedAt: cache?.fetchedAt });
@@ -127,16 +134,8 @@ export function createBoard(deps: BoardDeps): Board {
   }
 
   async function maintainPinned(): Promise<void> {
-    if (!cache) return;
-    if (pinned === undefined) {
-      try {
-        const rec = await deps.registry.latest('board', deps.teamChatId);
-        pinned = rec ? { messageId: rec.messageId, sentAt: Date.parse(rec.sentAt) } : null;
-      } catch (err) {
-        deps.log.warn('团队群的盘面卡没查成：这轮不发新卡，免得发重', { error: String(err) });
-        return;
-      }
-    }
+    // 快照一次都没取到（后端挂着）：不知道团队群里有没有盘面卡，这轮不发，免得发重。
+    if (!cache || pinned === undefined) return;
     const now = deps.now();
     if (pinned === null) return sendNewPinned(cache.snap, null);
     if (now - pinned.sentAt >= BOARD_RESEND_AFTER_MS) return sendNewPinned(cache.snap, pinned);
@@ -153,13 +152,14 @@ export function createBoard(deps: BoardDeps): Board {
     }
   }
 
-  async function dm(openId: string, card: Card, kind: 'board' | 'list', key: string): Promise<void> {
+  /** 私聊发的都登记成 list：只有团队群置顶的那张算 board（盘面快照里的 teamBoardCard 只认它）。 */
+  async function dm(openId: string, card: Card, key: string): Promise<void> {
     const now = deps.now();
     const sent = await deps.feishu.send({ openId }, { card }, { uuid: uuidFor('dm', openId, key, now) });
     deps.registry.remember({
       messageId: sent.messageId,
       chatId: sent.chatId,
-      kind,
+      kind: 'list',
       ref: {},
       sentAt: new Date(now).toISOString(),
     });
@@ -200,10 +200,10 @@ export function createBoard(deps: BoardDeps): Board {
       }
       let note: string | undefined;
       if (which === 'stalled') {
-        await dm(at.operatorId, stalledListCard(cur.snap, ctx()), 'list', 'stalled');
+        await dm(at.operatorId, stalledListCard(cur.snap, ctx()), 'stalled');
         note = `卡住的清单已私聊发给${at.operatorName}。`;
       } else if (which === 'waiting') {
-        await dm(at.operatorId, waitingListCard(cur.snap, ctx()), 'list', 'waiting');
+        await dm(at.operatorId, waitingListCard(cur.snap, ctx()), 'waiting');
         note = `等点头的清单已私聊发给${at.operatorName}。`;
       }
       // 点过的卡一定刷新一次：按钮换上新的回传值，同一个按钮过会儿还能再点。
@@ -230,7 +230,7 @@ export function createBoard(deps: BoardDeps): Board {
           : which === 'todo'
             ? waitingListCard(cur.snap, ctx(), '我的待办')
             : activeListCard(cur.snap, ctx());
-      await dm(openId, card, which === 'board' ? 'board' : 'list', which);
+      await dm(openId, card, which);
     },
 
     pinned: () => pinned ?? null,

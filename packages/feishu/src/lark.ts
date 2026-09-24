@@ -1,12 +1,15 @@
 // 飞书官方 SDK（@larksuiteoapi/node-sdk）的 Channel：长连接收事件（服务器不开端口）、自带去重和按会话排队。
 // 往飞书发东西只在这个文件里（test/static.test.ts 查着）：别处经 FeishuPort。
-// Channel 没接的两处自己补：
+// Channel 没管的几处自己补：
 // - 机器人菜单事件 application.bot.menu_v6：注册到 Channel 内部的事件分发器上（它没公开，升级 SDK 后 test/lark.test.ts 会报）；
-// - 发消息带 uuid（同一件事重试不重复发）：Channel.send 不带，改用它公开的 rawClient。
+// - 发消息带 uuid（同一件事重试不重复发）：Channel.send 不带，改用它公开的 rawClient；
+// - 超时：SDK 默认的 HTTP 实例不设超时（实读为 0），飞书接口一挂住，推送和盘面这些串行的活就全停、也不报警。
+//   每次调用自己限时（表情回应 3 秒，其余 10 秒），超时记错误；HTTP 实例上也带同样的上限，挂住的连接会被收掉。
 import {
   type Cache,
   type CardActionEvent,
   createLarkChannel,
+  defaultHttpInstance,
   type EventDispatcher,
   type HttpInstance,
   type LarkChannel,
@@ -28,6 +31,9 @@ import {
 } from './port.ts';
 import { sleep } from './util.ts';
 
+/** 表情回应要赶「2 秒内先回应」，给 3 秒；别的调用 10 秒。 */
+export const FEISHU_TIMEOUTS = { reactMs: 3_000, callMs: 10_000 };
+
 export interface InboundHandlers {
   onMessage(msg: InboundMessage): void;
   onCardAction(evt: InboundCardAction): void;
@@ -41,6 +47,7 @@ export interface LarkOptions {
   /** 允许的群（团队群、测试群）；别的群里 @我 一律不理。 */
   groups: string[];
   log: Logger;
+  timeouts?: Partial<typeof FEISHU_TIMEOUTS>;
   /** 测试用：换掉 SDK 的 HTTP 实例、缓存，走 webhook 传输（不连长连接）。 */
   httpInstance?: HttpInstance;
   cache?: Cache;
@@ -61,6 +68,7 @@ export interface Lark {
 const MENU_EVENT = 'application.bot.menu_v6';
 
 export function createLark(opts: LarkOptions): Lark {
+  const timeouts = { ...FEISHU_TIMEOUTS, ...opts.timeouts };
   const channel = createLarkChannel({
     appId: opts.appId,
     appSecret: opts.appSecret,
@@ -78,7 +86,10 @@ export function createLark(opts: LarkOptions): Lark {
     logger: sdkLogger(opts.log),
     source: 'fleet-dao',
     handshakeTimeoutMs: 15_000,
-    ...(opts.httpInstance ? { httpInstance: opts.httpInstance } : {}),
+    httpInstance: withTimeout(
+      opts.httpInstance ?? (defaultHttpInstance as unknown as HttpInstance),
+      timeouts.callMs,
+    ),
     ...(opts.cache ? { cache: opts.cache } : {}),
   });
   const dispatcher = (channel as unknown as { dispatcher?: EventDispatcher }).dispatcher;
@@ -89,15 +100,18 @@ export function createLark(opts: LarkOptions): Lark {
   }
   const client = channel.rawClient;
 
+  /** 调一次飞书：限时；超时不重试（报出来，由调用方决定下一步）；连不上、限频有界重试。 */
   async function api<T extends { code?: number | undefined; msg?: string | undefined }>(
     what: string,
     call: () => Promise<T>,
-    retries = 2,
+    o: { retries?: number; timeoutMs?: number } = {},
   ): Promise<T> {
+    const retries = o.retries ?? 2;
+    const timeoutMs = o.timeoutMs ?? timeouts.callMs;
     for (let attempt = 0; ; attempt++) {
       let err: FeishuError;
       try {
-        const res = await call();
+        const res = await within(timeoutMs, what, call());
         if (res.code === undefined || res.code === 0) return res;
         err = new FeishuError(
           kindOf(res.code, undefined),
@@ -107,7 +121,11 @@ export function createLark(opts: LarkOptions): Lark {
           },
         );
       } catch (raw) {
-        err = toFeishuError(what, raw);
+        err = raw instanceof FeishuError ? raw : toFeishuError(what, raw);
+      }
+      if (err.kind === 'timeout') {
+        opts.log.error('飞书接口超时', { what, ms: timeoutMs });
+        throw err;
       }
       const retryable = err.kind === 'unavailable' || err.kind === 'rate_limited';
       if (!retryable || attempt >= retries) throw err;
@@ -132,11 +150,15 @@ export function createLark(opts: LarkOptions): Lark {
 
   const port: FeishuPort = {
     async react(messageId, emojiType) {
-      await api('加表情回应', () =>
-        client.im.v1.messageReaction.create({
-          path: { message_id: messageId },
-          data: { reaction_type: { emoji_type: emojiType } },
-        }),
+      await api(
+        '加表情回应',
+        () =>
+          client.im.v1.messageReaction.create({
+            path: { message_id: messageId },
+            data: { reaction_type: { emoji_type: emojiType } },
+          }),
+        // 回应只有赶在 2 秒内才有用：不重试。
+        { retries: 0, timeoutMs: timeouts.reactMs },
       );
     },
 
@@ -170,7 +192,7 @@ export function createLark(opts: LarkOptions): Lark {
             path: { message_id: messageId },
             data: { content: JSON.stringify(card) },
           }),
-        1,
+        { retries: 1 },
       );
     },
 
@@ -258,6 +280,31 @@ export function toMenu(data: unknown): InboundMenu | null {
   };
 }
 
+/** 给 SDK 的每个请求带上超时（请求自己设了的不改）：挂住的连接到点就被收掉。 */
+function withTimeout(base: HttpInstance, ms: number): HttpInstance {
+  type Opts = Parameters<HttpInstance['request']>[0];
+  const t = (o?: Opts): Opts => ({ ...o, timeout: o?.timeout || ms });
+  return {
+    request: (o) => base.request(t(o)),
+    get: (url, o) => base.get(url, t(o)),
+    delete: (url, o) => base.delete(url, t(o)),
+    head: (url, o) => base.head(url, t(o)),
+    options: (url, o) => base.options(url, t(o)),
+    post: (url, data, o) => base.post(url, data, t(o)),
+    put: (url, data, o) => base.put(url, data, t(o)),
+    patch: (url, data, o) => base.patch(url, data, t(o)),
+  };
+}
+
+/** 限时：到点就当超时报出来，不等飞书。 */
+function within<T>(ms: number, what: string, work: Promise<T>): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const late = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new FeishuError('timeout', `${what}：飞书 ${ms} 毫秒没回应`)), ms);
+  });
+  return Promise.race([work, late]).finally(() => clearTimeout(timer));
+}
+
 /**
  * 飞书错误码 → 下一步怎么办。只收有出处的：230031 超 14 天不能改卡、230020 限频（docs/reference/feishu.md 第四节）、
  * 200861 卡片里有 JSON 2.0 不支持的组件（同上，windsurf-dao#1052）；其余归 unknown，原码写进日志。
@@ -280,10 +327,14 @@ function toFeishuError(what: string, raw: unknown): FeishuError {
   const status = e?.response?.status;
   const code = e?.response?.data?.code;
   if (status === undefined) {
-    // 没拿到 HTTP 回应：网络不通、超时。
-    return new FeishuError('unavailable', `${what}：连不上飞书（${e?.code ?? e?.message ?? String(raw)}）`, {
-      cause: raw,
-    });
+    // 没拿到 HTTP 回应：HTTP 实例上的超时到了，或者网络不通。
+    const timedOut =
+      e?.code === 'ECONNABORTED' || e?.code === 'ETIMEDOUT' || /timeout/i.test(e?.message ?? '');
+    return new FeishuError(
+      timedOut ? 'timeout' : 'unavailable',
+      `${what}：${timedOut ? '飞书没及时回应' : '连不上飞书'}（${e?.code ?? e?.message ?? String(raw)}）`,
+      { cause: raw },
+    );
   }
   const msg = e.response?.data?.msg ?? '';
   return new FeishuError(
@@ -296,15 +347,43 @@ function toFeishuError(what: string, raw: unknown): FeishuError {
   );
 }
 
-/** SDK 自己的日志转进我们的 JSON 日志（只收 warn 以上）。 */
+/**
+ * SDK 自己的日志转进我们的 JSON 日志（只收 warn 以上）。SDK 报错时会把请求体（发出去的卡片，里面有创始人的原话）
+ * 和整个回应一起打出来：这里只按白名单留定位问题要的几项，请求体一律不要。
+ */
+export function sdkDetail(args: unknown[]): string {
+  const parts: string[] = [];
+  const pick = (o: unknown, keys: string[]): string[] => {
+    if (!o || typeof o !== 'object') return [];
+    const r = o as Record<string, unknown>;
+    return keys.flatMap((k) =>
+      typeof r[k] === 'string' || typeof r[k] === 'number' ? [`${k}=${String(r[k]).slice(0, 200)}`] : [],
+    );
+  };
+  const visit = (a: unknown): void => {
+    if (typeof a === 'string') parts.push(a.slice(0, 300));
+    else if (Array.isArray(a)) a.forEach(visit);
+    else if (a && typeof a === 'object') {
+      const o = a as Record<string, unknown>;
+      const response = o.response as Record<string, unknown> | undefined;
+      const fields = [
+        ...pick(o, ['message', 'code', 'msg', 'log_id', 'status']),
+        ...pick(o.config, ['method', 'url']),
+        ...pick(o.request, ['method', 'path']),
+        ...pick(response, ['status', 'statusText']),
+        ...pick(response?.data, ['code', 'msg', 'log_id']),
+      ];
+      if (fields.length > 0) parts.push(fields.join(' '));
+    }
+  };
+  args.forEach(visit);
+  return parts.join(' | ').slice(0, 1000);
+}
+
 function sdkLogger(log: Logger) {
-  const flat = (args: unknown[]) =>
-    args
-      .map((a) => (a instanceof Error ? a.message : typeof a === 'string' ? a : JSON.stringify(a)))
-      .join(' ');
   return {
-    error: (...args: unknown[]) => log.error('飞书 SDK', { detail: flat(args).slice(0, 1000) }),
-    warn: (...args: unknown[]) => log.warn('飞书 SDK', { detail: flat(args).slice(0, 1000) }),
+    error: (...args: unknown[]) => log.error('飞书 SDK', { detail: sdkDetail(args) }),
+    warn: (...args: unknown[]) => log.warn('飞书 SDK', { detail: sdkDetail(args) }),
     info: () => {},
     debug: () => {},
     trace: () => {},

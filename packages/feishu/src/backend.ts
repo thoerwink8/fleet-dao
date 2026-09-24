@@ -1,13 +1,13 @@
-// 调驾驶舱后端：经隧道走驾驶舱同一套接口（/api），带网关通行证；代表某位创始人做事时注明是谁（飞书 open_id）。
+// 调驾驶舱后端：经隧道走驾驶舱同一套接口（/api），一律带网关通行证；路由表标 acting=required 的才注明代表哪位创始人。
 // 返回一律按 shared 里的约定校验：形状不对当场报错，不把坏数据往卡片上放。
 import {
   AnswerAskRequest,
   AnswerAskResponse,
   ApiErrorBody,
   FEISHU_UNDERSTAND_MS,
+  type FeishuActing,
   FeishuBoardSnapshotSchema,
-  FeishuCardRecordSchema,
-  FeishuCardsResponse,
+  type FeishuCardRecordSchema,
   FeishuConfirmDraftRequest,
   FeishuConfirmDraftResponse,
   type FeishuDraftSchema,
@@ -32,7 +32,7 @@ import {
 import type { z } from 'zod';
 
 /**
- * 代表哪位创始人（飞书 open_id）。后端那边的同名常量是 shared/web-api.ts 的 FEISHU_ACTING_HEADER（后端的 PR 在加）；
+ * 代表哪位创始人（飞书 open_id）。后端那边的同名常量是 shared/web-api.ts 的 FEISHU_ACTING_HEADER（后端的 PR #9 在加）；
  * test/static.test.ts 核对两边一致。
  */
 export const ACTING_HEADER = 'X-Fleet-Acting-Feishu';
@@ -48,7 +48,6 @@ export type OutboxItem = OutboxBatch['items'][number];
 export type OutboxAck = z.input<typeof FeishuOutboxAckRequest>['acks'][number];
 export type CardRecord = z.output<typeof FeishuCardRecordSchema>;
 export type CardKind = CardRecord['kind'];
-export type ReplyContext = NonNullable<z.input<typeof FeishuMessageRequest>['replyTo']>;
 
 /**
  * unreachable = 连不上；timeout = 超时；aborted = 网关自己叫停（停机）；rejected = 4xx（带 code）；
@@ -144,9 +143,6 @@ export interface Backend {
   outbox(waitSeconds: number, signal?: AbortSignal): Promise<OutboxBatch>;
   ackOutbox(acks: OutboxAck[]): Promise<void>;
   putCard(record: CardRecord): Promise<void>;
-  /** 没登记过返回 null。 */
-  getCard(messageId: string, opts?: CallOptions): Promise<CardRecord | null>;
-  listCards(query: { kind: CardKind; chatId?: string; limit?: number }): Promise<CardRecord[]>;
 }
 
 export interface BackendOptions {
@@ -160,9 +156,22 @@ export interface BackendOptions {
 /** 理解一句话：后端答应 FEISHU_UNDERSTAND_MS 内回，网关多给 1 秒（隧道、排队）。 */
 export const UNDERSTAND_WAIT_MS = FEISHU_UNDERSTAND_MS + 1_000;
 
-interface Request {
+interface Route {
   method: 'GET' | 'POST' | 'PUT';
   path: string;
+  acting: FeishuActing;
+}
+
+/** 驾驶舱接口里网关也调的几条：都代表某位创始人。 */
+const WEB = {
+  task: { method: WebRoutes.task.method, path: WebRoutes.task.path, acting: 'required' },
+  taskAction: { method: WebRoutes.taskAction.method, path: WebRoutes.taskAction.path, acting: 'required' },
+  answerAsk: { method: WebRoutes.answerAsk.method, path: WebRoutes.answerAsk.path, acting: 'required' },
+} as const satisfies Record<string, Route>;
+
+interface Call {
+  params?: Record<string, string>;
+  /** acting=required 的路由必须给，none 的不许给。 */
   acting?: Acting | undefined;
   query?: Record<string, string | number | undefined>;
   body?: unknown;
@@ -175,8 +184,15 @@ export function createBackend(options: BackendOptions): Backend {
   const defaultTimeout = options.timeoutMs ?? 5_000;
   const base = options.baseUrl.replace(/\/+$/, '');
 
-  async function call<S extends z.ZodType>(req: Request, schema: S): Promise<z.output<S>> {
-    const url = new URL(`${base}${WEB_API_PREFIX}${req.path}`);
+  async function call<S extends z.ZodType>(route: Route, req: Call, schema: S): Promise<z.output<S>> {
+    // 代表谁跟着路由表走：该带的没带、不该带的带了，都是网关自己的错，当场报出来。
+    if ((route.acting === 'required') !== (req.acting !== undefined)) {
+      throw new Error(
+        `${route.method} ${route.path} 的 acting 是 ${route.acting}，调用时却${req.acting ? '带了' : '没带'}代表人`,
+      );
+    }
+    const path = fill(route.path, req.params ?? {});
+    const url = new URL(`${base}${WEB_API_PREFIX}${path}`);
     for (const [k, v] of Object.entries(req.query ?? {}))
       if (v !== undefined) url.searchParams.set(k, String(v));
     const timeoutMs = req.timeoutMs ?? defaultTimeout;
@@ -189,12 +205,12 @@ export function createBackend(options: BackendOptions): Backend {
     };
     if (req.acting) headers[ACTING_HEADER.toLowerCase()] = req.acting.openId;
     if (req.body !== undefined) headers['content-type'] = 'application/json';
-    const where = `${req.method} ${req.path}`;
+    const where = `${route.method} ${route.path}`;
 
     let res: Response;
     try {
       res = await doFetch(url, {
-        method: req.method,
+        method: route.method,
         headers,
         ...(req.body === undefined ? {} : { body: JSON.stringify(req.body) }),
         signal,
@@ -219,10 +235,11 @@ export function createBackend(options: BackendOptions): Backend {
     try {
       json = text.trim() ? JSON.parse(text) : {};
     } catch {
-      if (!res.ok)
+      if (!res.ok) {
         throw new BackendError(res.status >= 500 ? 'server' : 'rejected', `${where}：HTTP ${res.status}`, {
           status: res.status,
         });
+      }
       throw new BackendError('bad_response', `${where}：回的不是 JSON`, { status: res.status });
     }
 
@@ -251,9 +268,8 @@ export function createBackend(options: BackendOptions): Backend {
   return {
     understand: (as, body, opts) =>
       call(
+        FeishuRoutes.message,
         {
-          method: 'POST',
-          path: FeishuRoutes.message.path,
           acting: as,
           body: FeishuMessageRequest.parse(body),
           timeoutMs: opts?.timeoutMs ?? UNDERSTAND_WAIT_MS,
@@ -265,9 +281,9 @@ export function createBackend(options: BackendOptions): Backend {
     reviseDraft: async (as, draftId, body, opts) =>
       (
         await call(
+          FeishuRoutes.reviseDraft,
           {
-            method: 'POST',
-            path: fill(FeishuRoutes.reviseDraft.path, { draftId }),
+            params: { draftId },
             acting: as,
             body: FeishuReviseDraftRequest.parse(body),
             timeoutMs: opts?.timeoutMs ?? UNDERSTAND_WAIT_MS,
@@ -279,9 +295,9 @@ export function createBackend(options: BackendOptions): Backend {
 
     confirmDraft: (as, draftId, body, opts) =>
       call(
+        FeishuRoutes.confirmDraft,
         {
-          method: 'POST',
-          path: fill(FeishuRoutes.confirmDraft.path, { draftId }),
+          params: { draftId },
           acting: as,
           body: FeishuConfirmDraftRequest.parse(body),
           timeoutMs: opts?.timeoutMs ?? 15_000,
@@ -292,49 +308,30 @@ export function createBackend(options: BackendOptions): Backend {
 
     findTasks: (as, issue, opts) =>
       call(
-        {
-          method: 'GET',
-          path: FeishuRoutes.findTasks.path,
-          acting: as,
-          query: { issue },
-          timeoutMs: opts?.timeoutMs,
-          signal: opts?.signal,
-        },
+        FeishuRoutes.findTasks,
+        { acting: as, query: { issue }, timeoutMs: opts?.timeoutMs, signal: opts?.signal },
         FeishuTaskLookupResponse,
       ),
 
     task: (as, taskId, opts) =>
       call(
-        {
-          method: 'GET',
-          path: fill(WebRoutes.task.path, { taskId }),
-          acting: as,
-          timeoutMs: opts?.timeoutMs,
-          signal: opts?.signal,
-        },
+        WEB.task,
+        { params: { taskId }, acting: as, timeoutMs: opts?.timeoutMs, signal: opts?.signal },
         TaskDetailResponse,
       ),
 
     stopTask: async (as, taskId, reason) => {
       await call(
-        {
-          method: 'POST',
-          path: fill(WebRoutes.taskAction.path, { taskId }),
-          acting: as,
-          body: TaskActionRequest.parse({ action: 'stop', reason }),
-        },
+        WEB.taskAction,
+        { params: { taskId }, acting: as, body: TaskActionRequest.parse({ action: 'stop', reason }) },
         TaskActionResponse,
       );
     },
 
     answerAsk: async (as, askId, answer) => {
       await call(
-        {
-          method: 'POST',
-          path: fill(WebRoutes.answerAsk.path, { askId }),
-          acting: as,
-          body: AnswerAskRequest.parse({ answer }),
-        },
+        WEB.answerAsk,
+        { params: { askId }, acting: as, body: AnswerAskRequest.parse({ answer }) },
         AnswerAskResponse,
       );
     },
@@ -342,80 +339,37 @@ export function createBackend(options: BackendOptions): Backend {
     follow: async (as, taskId, follow) =>
       (
         await call(
-          {
-            method: 'POST',
-            path: FeishuRoutes.follow.path,
-            acting: as,
-            body: FeishuFollowRequest.parse({ taskId, follow }),
-          },
+          FeishuRoutes.follow,
+          { acting: as, body: FeishuFollowRequest.parse({ taskId, follow }) },
           FeishuFollowResponse,
         )
       ).following,
 
     board: (opts) =>
       call(
-        { method: 'GET', path: FeishuRoutes.board.path, timeoutMs: opts?.timeoutMs, signal: opts?.signal },
+        FeishuRoutes.board,
+        { timeoutMs: opts?.timeoutMs, signal: opts?.signal },
         FeishuBoardSnapshotSchema,
       ),
 
     outbox: (waitSeconds, signal) =>
       call(
-        {
-          method: 'GET',
-          path: FeishuRoutes.outbox.path,
-          query: { waitSeconds },
-          timeoutMs: waitSeconds * 1000 + 10_000,
-          signal,
-        },
+        FeishuRoutes.outbox,
+        { query: { waitSeconds }, timeoutMs: waitSeconds * 1000 + 10_000, signal },
         FeishuOutboxResponse,
       ),
 
     ackOutbox: async (acks) => {
-      await call(
-        { method: 'POST', path: FeishuRoutes.ackOutbox.path, body: FeishuOutboxAckRequest.parse({ acks }) },
-        FeishuOkResponse,
-      );
+      await call(FeishuRoutes.ackOutbox, { body: FeishuOutboxAckRequest.parse({ acks }) }, FeishuOkResponse);
     },
 
     putCard: async ({ messageId, ...rest }) => {
       await call(
-        {
-          method: 'PUT',
-          path: fill(FeishuRoutes.putCard.path, { messageId }),
-          body: FeishuPutCardRequest.parse(rest),
-        },
+        FeishuRoutes.putCard,
+        { params: { messageId }, body: FeishuPutCardRequest.parse(rest) },
         FeishuOkResponse,
       );
     },
-
-    getCard: async (messageId, opts) => {
-      try {
-        return await call(
-          {
-            method: 'GET',
-            path: fill(FeishuRoutes.getCard.path, { messageId }),
-            timeoutMs: opts?.timeoutMs,
-            signal: opts?.signal,
-          },
-          FeishuCardRecordSchema,
-        );
-      } catch (err) {
-        if (err instanceof BackendError && err.status === 404) return null;
-        throw err;
-      }
-    },
-
-    listCards: async (query) =>
-      (
-        await call(
-          {
-            method: 'GET',
-            path: FeishuRoutes.listCards.path,
-            query: { kind: query.kind, chatId: query.chatId, limit: query.limit },
-          },
-          FeishuCardsResponse,
-        )
-      ).items,
   };
 }
 

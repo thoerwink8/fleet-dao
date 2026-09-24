@@ -19,7 +19,7 @@
     "action": {
       "tag": "button",
       "timezone": "Asia/Shanghai",
-      "value": { "a": "board.refresh", "n": "n1" }
+      "value": { "a": "board.refresh", "_n": "n1" }
     },
     "host": "im_message",
     "context": {

@@ -112,6 +112,43 @@ describe('卡片', () => {
     expect(JSON.stringify(card)).not.toContain('"tag":"markdown"');
   });
 
+  it('按钮回传值的随机值 _n 排在最前面：按插入顺序、按键名排序都在前 128 个字符里（SDK 只按这 128 个字符去重）', () => {
+    const long = outboxItem({
+      id: 'ask:long',
+      kind: 'ask',
+      askId: 'a'.repeat(200),
+      options: ['批准'.repeat(20)],
+    });
+    const cards: Array<[string, Card]> = [...allCards(), ['回传值很长的追问卡', outboxCard(long, ctx)]];
+    let checked = 0;
+    for (const [name, card] of cards) {
+      for (const b of buttonsOf(card)) {
+        if (!b.value) continue;
+        checked += 1;
+        const asIs = JSON.stringify(b.value);
+        const sorted = JSON.stringify(
+          Object.fromEntries(Object.entries(b.value as object).sort(([x], [y]) => (x < y ? -1 : 1))),
+        );
+        expect({
+          name,
+          asIs: asIs.startsWith('{"_n":"n1"'),
+          sorted: sorted.startsWith('{"_n":"n1"'),
+        }).toEqual({
+          name,
+          asIs: true,
+          sorted: true,
+        });
+      }
+    }
+    expect(checked).toBeGreaterThan(40);
+  });
+
+  it('要人拍的卡写明「拍板请点按钮、回复不算拍板」；AI 追问卡写明「回复就是作答」', () => {
+    expect(textIn(outboxCard(outboxItem({ kind: 'decision' }), ctx))).toContain('回复不算拍板');
+    expect(textIn(outboxCard(outboxItem({ kind: 'decision' }), ctx))).not.toContain('回复这张卡片作答');
+    expect(textIn(outboxCard(outboxItem({ kind: 'ask' }), ctx))).toContain('也可以直接回复这张卡片作答');
+  });
+
   it('「打开驾驶舱」直达对应页', () => {
     const urls = (card: Card) => buttonsOf(card).flatMap((b) => (b.url ? [b.url] : []));
     expect(urls(draftCard(confirmed(), ctx))).toEqual(['https://cockpit.example.test/tasks/task-12']);

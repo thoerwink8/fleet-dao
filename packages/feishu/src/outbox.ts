@@ -1,7 +1,8 @@
 // 推送的唯一出口：从后端长轮询「待推送」，每件事只发一张卡，之后按 revision 原地更新，不重发。
 // 这里执行四道闸：种类白名单（三类 + 关注 + AI 追问）、私聊只发创始人、免打扰、每天求人卡的预算。
 // 送达只认飞书回的 message_id，回执写回后端（驾驶舱「通知」页的送达记录就是它）。
-import type { Backend, OutboxAck, OutboxBatch, OutboxItem } from './backend.ts';
+// 回执送不上去时不许原地打转：一轮没走通就抛错，run() 退避；积压的回执按「条目 + 版本」去重、有上限。
+import { type Backend, BackendError, type OutboxAck, type OutboxBatch, type OutboxItem } from './backend.ts';
 import { budgetAlertCard, outboxCard, type RenderContext } from './cards.ts';
 import { DailyBudget, quietUntil } from './gate.ts';
 import type { Logger } from './log.ts';
@@ -15,8 +16,18 @@ const KINDS = new Set<OutboxItem['kind']>(['decision', 'alert', 'daily', 'follow
 const ASKING = new Set<OutboxItem['kind']>(['decision', 'ask']);
 const RETRY_AFTER_MS = 60_000;
 const BACKOFF_MS = [1_000, 2_000, 5_000, 10_000, 30_000];
+/** 积压回执的上限：后端长时间不收，超了丢最早的并记错误（丢了的那几件，网关重启后可能重发卡）。 */
+const MAX_PENDING_ACKS = 500;
 
 type AckResult = OutboxAck['result'];
+
+/** 这一轮没走通（回执送不上去、后端重复给已经回执过的），run() 据此退避。 */
+export class OutboxStall extends Error {
+  constructor(message: string, cause?: unknown) {
+    super(message, { cause });
+    this.name = 'OutboxStall';
+  }
+}
 
 export interface OutboxDeps {
   backend: Backend;
@@ -30,12 +41,13 @@ export interface OutboxDeps {
   askBudgetPerDay: number;
   /** 长轮询一次最多等几秒。 */
   waitSeconds?: number;
+  maxPendingAcks?: number;
 }
 
 export interface Outbox {
-  /** 取一批、处理、回执。返回这批有几件。 */
+  /** 取一批、处理、回执，返回这批有几件。回执没送成、或后端重复给已回执过的，抛 OutboxStall（调用方退避）。 */
   runOnce(signal?: AbortSignal): Promise<number>;
-  /** 一直跑到 signal 叫停；后端连不上就退避重试。 */
+  /** 一直跑到 signal 叫停；一轮没走通就退避重试（1、2、5、10、30 秒）。 */
   run(signal: AbortSignal): Promise<void>;
   /** 按钮一点先在本地把卡改掉（已回答、已叫停……）。不是推送卡或重启后缓存没了返回 false，等后端下一版推过来。 */
   overlay(messageId: string, o: { doneText?: string; note?: string }): Promise<boolean>;
@@ -50,7 +62,12 @@ export function createOutbox(deps: OutboxDeps): Outbox {
     { messageId: string; chatId: string; sentAt: number; revision: number; ack: AckResult }
   >(2000);
   const byMessage = new Lru<string, OutboxItem>(2000);
-  const pendingAcks: OutboxAck[] = [];
+  const maxPendingAcks = deps.maxPendingAcks ?? MAX_PENDING_ACKS;
+  /** 待送的回执：同一件事的同一版只留一条（新结果盖旧的）。 */
+  const pendingAcks = new Map<string, OutboxAck>();
+  /** 后端已经收下「了结」回执的「条目 + 版本」：后端又把它当待推送给过来，说明回执没记上，要退避而不是接着转。 */
+  const acked = new Lru<string, true>(5000);
+  const ackKey = (a: { itemId: string; revision: number }) => `${a.revision}\u0000${a.itemId}`;
 
   const ctx = (): RenderContext => ({
     publicUrl: deps.publicUrl,
@@ -161,30 +178,77 @@ export function createOutbox(deps: OutboxDeps): Outbox {
     }
   }
 
+  function queueAck(ack: OutboxAck): void {
+    const key = ackKey(ack);
+    pendingAcks.delete(key);
+    pendingAcks.set(key, ack);
+    let dropped = 0;
+    while (pendingAcks.size > maxPendingAcks) {
+      const oldest = pendingAcks.keys().next().value;
+      if (oldest === undefined) break;
+      pendingAcks.delete(oldest);
+      dropped += 1;
+    }
+    if (dropped > 0) {
+      deps.log.error(
+        '积压的推送回执超过上限，丢了最早的几条：后端没记下这些送达，网关重启后可能重发这几张卡',
+        {
+          dropped,
+          max: maxPendingAcks,
+        },
+      );
+    }
+  }
+
+  /** 把积压的回执送给后端。送不到（连不上、5xx）留着下次再送；被拒收（4xx）记错误、丢掉这批。两种都抛 OutboxStall。 */
   async function flushAcks(): Promise<void> {
-    while (pendingAcks.length > 0) {
-      const chunk = pendingAcks.slice(0, 100);
+    while (pendingAcks.size > 0) {
+      const chunk = [...pendingAcks.values()].slice(0, 100);
       try {
         await deps.backend.ackOutbox(chunk);
       } catch (err) {
-        deps.log.warn('推送回执没送到后端，下一轮再送', { count: pendingAcks.length, error: String(err) });
-        return;
+        if (err instanceof BackendError && err.kind === 'rejected') {
+          for (const a of chunk) pendingAcks.delete(ackKey(a));
+          deps.log.error(
+            '推送回执被后端拒收（4xx），这批丢掉：后端没记下这些送达，网关重启后可能重发这几张卡',
+            {
+              count: chunk.length,
+              status: err.status,
+              code: err.code,
+              error: err.message,
+            },
+          );
+          throw new OutboxStall(`推送回执被后端拒收（HTTP ${err.status}）`, err);
+        }
+        throw new OutboxStall(`推送回执没送到后端，还积压 ${pendingAcks.size} 条`, err);
       }
-      pendingAcks.splice(0, chunk.length);
+      for (const a of chunk) {
+        pendingAcks.delete(ackKey(a));
+        // 免打扰推迟的、飞书没发成的，到点本来就会再给回来；只有发了、改了、不发了这三种算「了结」。
+        if (a.result.status === 'sent' || a.result.status === 'updated' || a.result.status === 'dropped') {
+          acked.set(ackKey(a), true);
+        }
+      }
     }
   }
 
   async function runOnce(signal?: AbortSignal): Promise<number> {
     await flushAcks();
     const batch = await deps.backend.outbox(waitSeconds, signal);
+    let repeated = 0;
     for (const item of batch.items) {
+      if (acked.has(ackKey({ itemId: item.id, revision: item.revision }))) repeated += 1;
       const result = await handle(item, batch.quietHours);
-      pendingAcks.push({ itemId: item.id, revision: item.revision, result });
+      queueAck({ itemId: item.id, revision: item.revision, result });
       const fields = { itemId: item.id, revision: item.revision, kind: item.kind, status: result.status };
       if (result.status === 'failed') deps.log.error('推送没发出去', { ...fields, error: result.error });
       else deps.log.info('推送', { ...fields, ...('reason' in result ? { reason: result.reason } : {}) });
     }
     await flushAcks();
+    if (repeated > 0) {
+      deps.log.error('后端又把已经回执过的推送当待推送给了过来：回执可能没记上', { repeated });
+      throw new OutboxStall(`后端重复给了 ${repeated} 件已回执过的推送`);
+    }
     return batch.items.length;
   }
 
@@ -204,7 +268,7 @@ export function createOutbox(deps: OutboxDeps): Outbox {
           if (signal.aborted) break;
           failures += 1;
           const wait = BACKOFF_MS[Math.min(failures, BACKOFF_MS.length) - 1] ?? 30_000;
-          deps.log.warn('取待推送没成功，稍后重试', { failures, waitMs: wait, error: String(err) });
+          deps.log.warn('推送这一轮没走通，退避后重试', { failures, waitMs: wait, error: String(err) });
           await sleep(wait, signal);
         }
       }

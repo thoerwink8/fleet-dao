@@ -165,6 +165,7 @@ export function snapshot(o: Partial<Snapshot> = {}): Snapshot {
         reading: 'measured',
       },
     ],
+    teamBoardCard: null,
     ...o,
   });
 }

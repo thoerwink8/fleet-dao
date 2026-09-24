@@ -17,7 +17,7 @@
     },
     "token": "c-update_token_placeholder",
     "action": {
-      "value": { "a": "draft.revise", "d": "draft-1", "r": 1, "n": "n1" },
+      "value": { "a": "draft.revise", "d": "draft-1", "r": 1, "_n": "n1" },
       "tag": "button",
       "timezone": "Asia/Shanghai",
       "form_value": {

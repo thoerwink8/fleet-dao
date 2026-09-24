@@ -1,10 +1,12 @@
 // 推送出口：一件事一张卡、原地更新不重发、14 天后改不了就换新卡、免打扰、求人卡预算、送达只认 message_id。
 import { afterEach, describe, expect, it } from 'vitest';
+import { createBackend } from '../src/backend.ts';
 import { checkCard } from '../src/cards.ts';
+import { createOutbox } from '../src/outbox.ts';
 import { A, STRANGER, TEAM } from './events.ts';
 import { apiError, type Reply } from './fake-backend.ts';
 import { buttonsOf, textIn, titleOf, tooOld, unavailable } from './fake-feishu.ts';
-import { type Harness, harness, outboxItem } from './harness.ts';
+import { type Harness, harness, memoryLogger, outboxItem, TOKEN } from './harness.ts';
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -76,26 +78,128 @@ describe('推送出口', () => {
     expect(acks().map((a) => a.result.status)).toEqual(['sent', 'updated', 'updated']);
   });
 
-  it('回执没送到后端、同一版又来了：不再动飞书，回执照原样再送', async () => {
+  it('回执送不到（5xx）：这一轮报没走通（调用方退避）；回执留着下轮先补，同一件事同一版只送一条；同一版再来不再动飞书', async () => {
     h = await harness();
     const item = outboxItem();
-    let acked = 0;
-    h.backend.on('GET', '/feishu/outbox', {
-      body: { items: [item], quietHours: null, asOf: new Date().toISOString() },
+    const recorded = new Set<string>();
+    let ackCalls = 0;
+    // 像真后端：回执收下之前，这件事一直算待推送。
+    h.backend.on('GET', '/feishu/outbox', () => ({
+      body: {
+        items: recorded.has('ask:1#1') ? [] : [item],
+        quietHours: null,
+        asOf: new Date().toISOString(),
+      },
+    }));
+    h.backend.on('POST', '/feishu/outbox/acks', (req) => {
+      if (++ackCalls <= 2) return apiError(503, 'unavailable', '后端暂时不可用');
+      for (const a of (req.body as { acks: Array<{ itemId: string; revision: number }> }).acks) {
+        recorded.add(`${a.itemId}#${a.revision}`);
+      }
+      return { body: { ok: true } };
     });
-    h.backend.on('POST', '/feishu/outbox/acks', () =>
-      ++acked === 1 ? apiError(503, 'unavailable', '后端暂时不可用') : { body: { ok: true } },
-    );
-    await h.gateway.outbox.runOnce();
-    await h.gateway.outbox.runOnce();
+    await expect(h.gateway.outbox.runOnce()).rejects.toThrow('回执没送到后端');
+    await expect(h.gateway.outbox.runOnce()).rejects.toThrow('回执没送到后端');
+    expect(await h.gateway.outbox.runOnce()).toBe(0);
     expect(h.feishu.of('send')).toHaveLength(1);
     expect(h.feishu.of('update')).toHaveLength(0);
     const posted = h.backend
       .calls('POST', '/feishu/outbox/acks')
       .map((r) => (r.body as { acks: unknown[] }).acks);
-    // 第一次没送到；第二轮先补送上一轮的，再送这一轮的（同一个 sent 回执）。
     expect(posted.map((a) => a.length)).toEqual([1, 1, 1]);
-    expect(posted[1]).toEqual(posted[2]);
+    expect(posted[0]).toEqual(posted[2]);
+    // 第二轮回执没送到就退避了，没有去取新的待推送。
+    expect(h.backend.calls('GET', '/feishu/outbox')).toHaveLength(2);
+  });
+
+  it('回执被后端拒收（4xx）：记错误、丢掉这批、退避——不再一秒上千次地刷后端，积压不涨', async () => {
+    h = await harness();
+    h.backend.on('GET', '/feishu/outbox', {
+      body: { items: [outboxItem()], quietHours: null, asOf: new Date().toISOString() },
+    });
+    h.backend.on('POST', '/feishu/outbox/acks', apiError(400, 'invalid_request', '请求内容不符合约定'));
+    const stop = new AbortController();
+    const run = h.gateway.outbox.run(stop.signal);
+    await new Promise((r) => setTimeout(r, 1_500));
+    stop.abort();
+    await run;
+    const posted = h.backend
+      .calls('POST', '/feishu/outbox/acks')
+      .map((r) => (r.body as { acks: unknown[] }).acks);
+    // 退避是 1 秒、2 秒……：1.5 秒里最多两轮；每轮只送这一条，没有越积越多。
+    expect(posted.length).toBeGreaterThanOrEqual(1);
+    expect(posted.length).toBeLessThanOrEqual(2);
+    expect(posted.every((a) => a.length === 1)).toBe(true);
+    expect(h.backend.calls('GET', '/feishu/outbox').length).toBeLessThanOrEqual(2);
+    expect(h.feishu.of('send')).toHaveLength(1);
+    expect(
+      h.logs.filter((l) => l.level === 'error' && l.message.includes('被后端拒收')).length,
+    ).toBeGreaterThan(0);
+  });
+
+  it('被拒收（4xx）的那批回执直接丢掉：报「被后端拒收」，后端恢复后也不再重送这批', async () => {
+    h = await harness();
+    let reject = true;
+    let served = false;
+    h.backend.on('GET', '/feishu/outbox', () => {
+      const items = served ? [] : [outboxItem()];
+      served = true;
+      return { body: { items, quietHours: null, asOf: new Date().toISOString() } };
+    });
+    h.backend.on('POST', '/feishu/outbox/acks', () =>
+      reject ? apiError(422, 'unknown_item', '没有这件待推送') : { body: { ok: true } },
+    );
+    await expect(h.gateway.outbox.runOnce()).rejects.toThrow('被后端拒收');
+    reject = false;
+    expect(await h.gateway.outbox.runOnce()).toBe(0);
+    expect(h.backend.calls('POST', '/feishu/outbox/acks')).toHaveLength(1);
+  });
+
+  it('积压的回执有上限：后端一直不收，超了丢最早的并记错误', async () => {
+    h = await harness();
+    const backend = createBackend({ baseUrl: h.backend.url, gatewayToken: TOKEN });
+    const outbox = createOutbox({
+      backend,
+      feishu: h.feishu,
+      registry: { remember() {} },
+      log: memoryLogger(h.logs),
+      now: Date.now,
+      teamChatId: TEAM,
+      founders: new Set([A]),
+      publicUrl: 'https://cockpit.example.test',
+      askBudgetPerDay: 10,
+      waitSeconds: 0,
+      maxPendingAcks: 2,
+    });
+    let up = false;
+    serve([{ items: [1, 2, 3].map((i) => outboxItem({ id: `daily:${i}`, kind: 'daily' })) }]);
+    h.backend.on('POST', '/feishu/outbox/acks', () =>
+      up ? { body: { ok: true } } : apiError(503, 'x', '暂时不可用'),
+    );
+    await expect(outbox.runOnce()).rejects.toThrow('回执没送到后端');
+    expect(h.logs.some((l) => l.level === 'error' && l.message.includes('超过上限'))).toBe(true);
+    up = true;
+    await outbox.runOnce();
+    const last = h.backend.calls('POST', '/feishu/outbox/acks').at(-1)?.body as {
+      acks: Array<{ itemId: string }>;
+    };
+    expect(last.acks.map((a) => a.itemId)).toEqual(['daily:2', 'daily:3']);
+  });
+
+  it('后端收了回执、却又把同一版当待推送给过来：报出来并退避，不原地打转', async () => {
+    h = await harness();
+    h.backend.on('GET', '/feishu/outbox', {
+      body: { items: [outboxItem()], quietHours: null, asOf: new Date().toISOString() },
+    });
+    h.backend.on('POST', '/feishu/outbox/acks', { body: { ok: true } });
+    const stop = new AbortController();
+    const run = h.gateway.outbox.run(stop.signal);
+    await new Promise((r) => setTimeout(r, 1_500));
+    stop.abort();
+    await run;
+    expect(h.backend.calls('GET', '/feishu/outbox').length).toBeLessThanOrEqual(3);
+    expect(h.feishu.of('send')).toHaveLength(1);
+    expect(h.logs.some((l) => l.level === 'error' && l.message.includes('已经回执过'))).toBe(true);
   });
 
   it('送达只认飞书回的 message_id：飞书没发成就回 failed，不说 sent', async () => {
@@ -237,6 +341,6 @@ describe('推送出口', () => {
     await run;
     // 退避是 1 秒、2 秒……：1.5 秒里最多问两次。
     expect(h.backend.calls('GET', '/feishu/outbox').length).toBeLessThanOrEqual(2);
-    expect(h.logs.some((l) => l.message === '取待推送没成功，稍后重试')).toBe(true);
+    expect(h.logs.some((l) => l.message === '推送这一轮没走通，退避后重试')).toBe(true);
   });
 });

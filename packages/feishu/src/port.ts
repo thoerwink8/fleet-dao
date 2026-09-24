@@ -64,13 +64,14 @@ export interface FeishuPort {
 /**
  * too_old = 卡片发出超过 14 天不能再改（230031）；rate_limited = 限频（230020 或 HTTP 429）；
  * format = 卡片内容飞书不认（例如 200861：JSON 2.0 里用了不支持的组件）；permission = 没权限；
- * unavailable = 连不上或飞书 5xx；unknown = 其余，带原始错误码。
+ * timeout = 飞书在限时内没回应（不重试，报出来）；unavailable = 连不上或飞书 5xx；unknown = 其余，带原始错误码。
  */
 export type FeishuErrorKind =
   | 'too_old'
   | 'rate_limited'
   | 'format'
   | 'permission'
+  | 'timeout'
   | 'unavailable'
   | 'unknown';
 
