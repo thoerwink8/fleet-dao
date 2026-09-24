@@ -1,0 +1,111 @@
+[
+  {
+    "id": "vps-dg-01-escalation-1338",
+    "source": "/home/agent/.dao/broadcast-digest.json items（2026-09-23 [fleet-escalations] #1338 g1）；/home/agent/.dao/fleet-escalations/ledger/hold-notify.json；/home/agent/.dao/fleet/timeline/2026-09.jsonl（issue/1338/g1）；脱敏：服务用户家目录 换成 /home/agent、hold-notify 里的 message_id 未带入",
+    "evidence": {
+      "item": "类型：卡住单（fleet 升级给人）｜标题：#1338 g1 合并谓词是无界搜索：把「审官找不到问题」换成「有限契约满足」｜现在的状态：blocked，review-budget-exhausted，审查计数 3/3｜为什么进日报：🔴 卡住单需要人拍板。最后一轮阻塞：1) 要求 hard_blocks 总数控制在 10–20 条，但下限设为 1，现有 6 条仍会被判绿；2) 白名单可判定性闸过宽（可写成顶层数组、任意存在的路径都能过）。可选处置：retry / swap-leg / cancel / accept-as-is",
+      "history": "09-22 06:35 执行失败（MirasimUnavailableError）\n09-22 07:01 执行失败（SERVICE_UNAVAILABLE）\n09-22 15:23、15:42 执行又失败两次（MirasimUnavailableError）\n09-22 19:55 写成卡住单，升级给人\n09-23 18:46 再次提醒，仍没人处置"
+    },
+    "expect": {
+      "digest-pick": "must_see"
+    },
+    "why": {
+      "digest-pick": "在等人拍板（四个处置只能人选），审查预算已用完、提醒过一次仍没人接。事后：人处置后 09-23 21:53 第 5 轮完成，#1338 关单。"
+    }
+  },
+  {
+    "id": "vps-dg-02-board-gc-needs-human",
+    "source": "/home/agent/.dao/broadcast-digest.json items（2026-09-19 [board-gc] 第 3 条）；同文件 26 条 board-gc 记录；脱敏：服务用户家目录 换成 /home/agent",
+    "evidence": {
+      "item": "类型：盘面清理报告（board-gc）｜标题：盘面清理：实清 3 张，清不掉 0 张，要人判 3 张，没查成 1 张｜现在的状态：3 棵工人树等人判｜为什么进日报：要人判——ISSUE-#1227 工人，无 PR，分支 dao-1227 有 11 个提交但合不干净（有冲突），是不是陈旧副本判不了；ISSUE-#1397 工人，无 PR，分支 dao-1397 不在远端且有 46 个未提交改动——删了就没了；ISSUE-#1219 工人，无 PR，分支的 1 个提交合进 master 等于没合（内容已全在），有 3 个 tracked 改动，不自动删",
+      "history": "09-18 到 09-19 共 26 次清理报告，#1219 次次在「要人判」里\n#1397 出现在其中 24 次\n09-19 #1397 从「有 3 个提交但合不干净」变成「不在远端且有 46 个未提交改动」"
+    },
+    "expect": {
+      "digest-pick": "must_see"
+    },
+    "why": {
+      "digest-pick": "碰到删数据（删树会丢 46 个未提交改动）且明说要人判；同一批树连报一天多没人接手。"
+    }
+  },
+  {
+    "id": "vps-dg-03-board-stalled",
+    "source": "/home/agent/.dao/broadcast-digest.json items（2026-09-18 [commander] 盘面停滞 5 轮，三条）；脱敏：服务用户家目录 换成 /home/agent",
+    "evidence": {
+      "item": "类型：指挥官巡检｜标题：盘面停滞 5 轮（24 个对象没动）｜现在的状态：PR #1273、#1375、#1388、#1391、#1401 各连续 5 轮没动（都 MERGEABLE；#1375、#1388 是草稿，#1388 还没有审官判定）｜为什么进日报：停滞告警",
+      "history": "09-18 报「盘面停滞 5 轮（24 个对象没动）」\n09-18 再报（21 个对象）：复审票 PR #1277 连续 5 轮还在队列；#1219 #1220 #1295 #1302 已消歧但连续 5 轮没派出工人、也没有在途 PR\n09-18 第三次报（24 个对象）"
+    },
+    "expect": {
+      "digest-pick": "must_see"
+    },
+    "why": {
+      "digest-pick": "卡住了没人接手，且同一天反复告警三次。"
+    }
+  },
+  {
+    "id": "vps-dg-04-card-999-archive-or-delete",
+    "source": "/home/agent/.dao/feishu-threads.json hubPending 里 #999 卡（what/impact/recommend 原文）；/home/agent/.dao/hub-chat/2026-09-06.ndjson（08:26 回复把 #999 列在待拍第一位）；脱敏：卡片 message_id 未带入、服务用户家目录 换成 /home/agent",
+    "evidence": {
+      "item": "类型：待拍板卡片｜标题：#999 合并闸推广到全部仓 + 弃用老仓怎么处理｜现在的状态：等创始人拍板｜为什么进日报：今天给 windsurf-dao 装了分支保护（合并闸挪到平台层，机器人合不了红 PR）；你要求推广到所有项目、做成自上而下的机制，同时问弃用的老仓打算删该怎么办（你名下 16 个仓，多数已弃用）。拍之前：其余仓仍没有合并闸，机器人可以把红 PR 合进主干；老仓继续占着盘面。推荐：老仓一律归档（archive）不删；合并闸只推给还活着的 6 个仓，造检查器不造分发器。",
+      "history": "09-06 建单 #999 并发待拍板卡\n09-06 创始人问「有什么需要我拍板的吗」，机器人把 #999 列在第一位"
+    },
+    "expect": {
+      "digest-pick": "must_see"
+    },
+    "why": {
+      "digest-pick": "在等人拍板，且涉及删数据（弃用老仓删不删）。事后 #999 于 09-10 关单。"
+    }
+  },
+  {
+    "id": "vps-dg-05-auto-merged-1401",
+    "source": "/home/agent/.dao/broadcast-digest.json items（2026-09-18 [commander] PR #1401 已自动合并；同日盘面停滞记录）；脱敏：服务用户家目录 换成 /home/agent",
+    "evidence": {
+      "item": "类型：指挥官动作｜标题：PR #1401 已自动合并（[cc] test(ledger): #1217 账本按主体@版本攒多条时禁止 find 取最老）｜现在的状态：已合并｜为什么进日报：例行播报自动合并",
+      "history": "09-18 盘面停滞名单里：PR #1401 连续 5 轮没动（MERGEABLE、有审官判定）\n09-18 自动合并"
+    },
+    "expect": {
+      "digest-pick": "fyi"
+    },
+    "why": {
+      "digest-pick": "已经自动处理好（GitHub 显示 2026-09-18T02:16Z 合并），先前的停滞已自己解开。"
+    }
+  },
+  {
+    "id": "vps-dg-06-dispatched-1734",
+    "source": "/home/agent/.dao/broadcast-digest.json items（2026-09-22 [dispatcher] 派单器派了 #1734）；脱敏：服务用户家目录 换成 /home/agent",
+    "evidence": {
+      "item": "类型：派单器｜标题：派单器派了 #1734 选型目录保鲜：探针写回路由 alive/model_drift/interactive，6 小时一轮 + 派前补探（拆单 2/5）（本轮 1 张）｜现在的状态：已派出、在跑｜为什么进日报：例行派单记录"
+    },
+    "expect": {
+      "digest-pick": "fyi"
+    },
+    "why": {
+      "digest-pick": "正常推进中的例行记录。"
+    }
+  },
+  {
+    "id": "vps-dg-07-hub-auto-decided-1423",
+    "source": "/home/agent/.dao/broadcast-digest.json items（2026-09-18 [hub] #1423 missing-labels）；脱敏：服务用户家目录 换成 /home/agent",
+    "evidence": {
+      "item": "类型：总控待拍板分流｜标题：#1423 missing-labels｜现在的状态：机器自己拍了｜为什么进日报：不在 human_holds 那 4 条里；没给分级线索，按最轻的 patch 级算，confirm.patch.who=auto ⇒ 自己拍"
+    },
+    "expect": {
+      "digest-pick": "fyi"
+    },
+    "why": {
+      "digest-pick": "按规则不需要人（patch 级机器自己拍），只是记一笔。"
+    }
+  },
+  {
+    "id": "vps-dg-08-channel-breaker-cooling",
+    "source": "/home/agent/.dao/broadcast-digest.json items（2026-09-18 [commander] 渠道 native:xai-native 熔断冷却中）；脱敏：服务用户家目录 换成 /home/agent",
+    "evidence": {
+      "item": "类型：指挥官派工｜标题：渠道 native:xai-native 熔断冷却中，本轮不再往它派新会话｜现在的状态：冷却至 2026-09-18T12:40:57Z（冷却中等同满员），票留队列等下轮｜为什么进日报：派工跳过记录"
+    },
+    "expect": {
+      "digest-pick": "fyi"
+    },
+    "why": {
+      "digest-pick": "系统按熔断规则自动退避、票还在队列里，属自动处理中；当天只出现这一次，没到反复的程度。"
+    }
+  }
+]

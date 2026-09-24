@@ -109,6 +109,21 @@ importers:
         specifier: ^4.6.5
         version: 4.6.5
 
+  packages/jev:
+    dependencies:
+      '@fleet-dao/adapters':
+        specifier: workspace:*
+        version: link:../adapters
+      '@fleet-dao/db':
+        specifier: workspace:*
+        version: link:../db
+      '@fleet-dao/shared':
+        specifier: workspace:*
+        version: link:../shared
+      drizzle-orm:
+        specifier: ^0.45.3
+        version: 0.45.3(@electric-sql/pglite@0.5.8)(postgres@3.4.9)
+
   packages/shared:
     dependencies:
       zod:

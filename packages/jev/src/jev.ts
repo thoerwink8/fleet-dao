@@ -1,0 +1,330 @@
+// 提问接口：ask(题, 证据) → 选项 + 把握度。调用方只看 verdict.act：
+// - 真拦（题目在真拦、回话的就是钉死的模型、题面和库里一致、把握够）时是选项挂的效果；
+// - 只记不拦、把握不够、没判出来（连不上、超时、被限流、答了题面外的选项……）一律 none，当它不存在、照默认走，不当成「否」。
+// 每道题每次都记一行 jev_answers，包括本地就拦下的（停用、次数用完、证据不全）；记不上就当没判（store_error）。
+// 只有调用方自己的代码错（题写坏了、没说判的是谁）不记：那种题登记不进库，测试里就该暴露。
+// 不抛：任何出错都变成一个没判出来的 verdict。
+import { randomUUID } from 'node:crypto';
+import { sameModel } from '@fleet-dao/adapters';
+import type { Db } from '@fleet-dao/db';
+import type { BackendResult, JevBackend } from './backend.ts';
+import type { Effect } from './effects.ts';
+import {
+  dayStart,
+  digestEvidence,
+  type EvidenceInput,
+  fieldsOf,
+  missingKeys,
+  unknownKeys,
+} from './evidence.ts';
+import { DEFAULT_POLICY, type JevPolicy } from './policy.ts';
+import {
+  checkBatch,
+  checkQuestion,
+  type EvidenceOf,
+  type QuestionDef,
+  questionRev,
+  renderPrompt,
+} from './questions.ts';
+import {
+  type AnswerRow,
+  type AnswerSample,
+  countAskedSince,
+  ensureQuestions,
+  insertAnswers,
+  type QuestionState,
+  readPolicy,
+} from './store.ts';
+import { type Judged, LOCAL_REASONS, type NotJudged, type NotJudgedReason, type Verdict } from './verdict.ts';
+
+export interface AskContext {
+  /** 判的是谁：task:<id>、subtask:<id>、run:<id>、feishu:<消息号>…… */
+  subject: string;
+  /** 能复原原文的引用（例如 { issue: 'owner/repo#12', updatedAt }），记进库，以后从生产样本里挑考题用。 */
+  ref?: unknown;
+  signal?: AbortSignal;
+}
+
+/** 巡检考试：每道题的标准答案随答案一起记成真值（canary），考试从不真拦。 */
+export interface ExamContext {
+  runId: string;
+  sampleId: string;
+  expect: Readonly<Record<string, string>>;
+}
+
+export interface JevDeps {
+  db: Db;
+  backend: JevBackend;
+  now?: () => Date;
+  /** 设置表里没配时用的默认值。 */
+  policy?: JevPolicy;
+}
+
+type VerdictsOf<QS extends readonly QuestionDef[]> = {
+  -readonly [K in keyof QS]: QS[K] extends QuestionDef ? Verdict<QS[K]> : never;
+};
+
+export interface Jev {
+  readonly backend: JevBackend;
+  ask<const Q extends QuestionDef>(
+    question: Q,
+    evidence: EvidenceOf<Q>,
+    ctx: AskContext,
+  ): Promise<Verdict<Q>>;
+  /** 几道题共用一份证据，一次问完（分诊四题就是这样问）。 */
+  askAll<const QS extends readonly QuestionDef[]>(
+    questions: QS,
+    evidence: EvidenceOf<QS[number]>,
+    ctx: AskContext,
+  ): Promise<VerdictsOf<QS>>;
+  /** 巡检考试：只问 expect 里有标准答案的题。 */
+  exam(questions: readonly QuestionDef[], evidence: EvidenceInput, exam: ExamContext): Promise<Verdict[]>;
+}
+
+const DETAIL_CHARS = 500;
+const cut = (s: string) => (s.length > DETAIL_CHARS ? `${s.slice(0, DETAIL_CHARS)}…` : s);
+const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
+const isLocal = (reason: NotJudgedReason) => (LOCAL_REASONS as readonly string[]).includes(reason);
+
+function notJudged(q: QuestionDef, reason: NotJudgedReason, detail: string): NotJudged {
+  return { judged: false, questionId: q.id, reason, detail, act: 'none' };
+}
+
+export function createJev(deps: JevDeps): Jev {
+  const now = deps.now ?? (() => new Date());
+
+  async function run(
+    questions: readonly QuestionDef[],
+    evidence: EvidenceInput,
+    ctx: AskContext,
+    exam?: ExamContext,
+  ): Promise<Verdict[]> {
+    const { db, backend } = deps;
+    if (questions.length === 0) return [];
+    const askedAt = now();
+
+    // 题写错了、没说判的是谁：调用方的代码问题，连库都不碰（写错的题登记不进去）。
+    const callerProblems = [...checkBatch(questions), ...questions.flatMap(checkQuestion)];
+    if (!ctx.subject.trim()) callerProblems.push('没给 subject（判的是谁）');
+    if (callerProblems.length) {
+      return questions.map((q) => notJudged(q, 'bad_evidence', callerProblems.join('；')));
+    }
+
+    let states: Map<string, QuestionState>;
+    try {
+      states = await ensureQuestions(db, questions, backend.model);
+    } catch (err) {
+      return questions.map((q) => notJudged(q, 'store_error', message(err)));
+    }
+
+    // 本地先过一遍：证据字段不对、停用的、必填证据没给的，不问出去，但照样记一行。
+    const unknown = unknownKeys(questions, evidence);
+    const outcome = new Map<string, Verdict>();
+    const askable: QuestionDef[] = [];
+    for (const q of questions) {
+      const state = states.get(q.id);
+      const missing = missingKeys(q, evidence);
+      if (!state) outcome.set(q.id, notJudged(q, 'store_error', '题目没登记进库'));
+      else if (unknown.length)
+        outcome.set(q.id, notJudged(q, 'bad_evidence', `这几道题都不认识的证据字段：${unknown.join('、')}`));
+      else if (state.mode === 'off') outcome.set(q.id, notJudged(q, 'off', '这道题停用了'));
+      else if (missing.length)
+        outcome.set(q.id, notJudged(q, 'missing_evidence', `没给：${missing.join('、')}`));
+      else askable.push(q);
+    }
+
+    // 每天的次数：一次问几道算几次，考试也算。设置认不出就不问：拿默认值顶上等于假装读到了。
+    if (askable.length > 0) {
+      try {
+        const refuseAll = (reason: NotJudgedReason, detail: string) => {
+          for (const q of askable.splice(0)) outcome.set(q.id, notJudged(q, reason, detail));
+        };
+        const { policy, problems } = await readPolicy(db, deps.policy ?? DEFAULT_POLICY);
+        if (problems.length) {
+          refuseAll('bad_setting', problems.join('；'));
+        } else {
+          const used = await countAskedSince(db, dayStart(askedAt));
+          if (used + askable.length > policy.dailyCallLimit) {
+            refuseAll('daily_cap', `今天已经问了 ${used} 道，上限 ${policy.dailyCallLimit}`);
+          }
+        }
+      } catch (err) {
+        return questions.map((q) => notJudged(q, 'store_error', message(err)));
+      }
+    }
+
+    let result: BackendResult | undefined;
+    if (askable.length > 0) {
+      const fields = fieldsOf(askable).filter((f) => evidence[f.key] !== undefined);
+      try {
+        result = await backend.ask({
+          questions: askable.map((q) => ({
+            id: q.id,
+            instructions: q.instructions,
+            options: q.options.map((o) => ({ id: o.id, criteria: o.criteria })),
+          })),
+          evidence: fields.map((f) => ({ label: f.label, text: evidence[f.key] ?? '' })),
+          ...(ctx.signal ? { signal: ctx.signal } : {}),
+        });
+      } catch (err) {
+        result = {
+          ok: false,
+          reason: 'backend_error',
+          detail: `后端抛了异常：${message(err)}`,
+          latencyMs: 0,
+        };
+      }
+    }
+
+    const batch = { id: randomUUID(), size: questions.length };
+    const rows: AnswerRow[] = [];
+    for (const q of questions) {
+      const state = states.get(q.id);
+      if (!state) continue;
+      const enforceable =
+        !exam &&
+        state.mode === 'enforce' &&
+        state.model === backend.model &&
+        state.prompt === renderPrompt(q);
+      const verdict =
+        outcome.get(q.id) ??
+        (result ? judge(q, state, result, backend, enforceable) : notJudged(q, 'store_error', '没有结果'));
+      outcome.set(q.id, verdict);
+      rows.push(
+        answerRow(q, verdict, result, {
+          askedAt,
+          evidence,
+          ctx,
+          exam,
+          batch,
+          enforceable,
+          backend,
+          askedCount: askable.length,
+        }),
+      );
+    }
+
+    let ids: number[];
+    try {
+      ids = await insertAnswers(db, rows);
+    } catch (err) {
+      // 没记上就当没判：调用方照默认走，不带着一个库里查不到的判断去拦。
+      return questions.map((q) => notJudged(q, 'store_error', `判断没记进库：${message(err)}`));
+    }
+    const idOf = new Map(rows.map((r, i) => [r.questionId, ids[i]]));
+    return questions.map((q) => {
+      const v = outcome.get(q.id) ?? notJudged(q, 'store_error', '没有结果');
+      const answerId = idOf.get(q.id);
+      return answerId === undefined ? v : { ...v, answerId };
+    });
+  }
+
+  return {
+    backend: deps.backend,
+    async ask(question, evidence, ctx) {
+      const [v] = await run([question], evidence as EvidenceInput, ctx);
+      return v as Verdict<typeof question>;
+    },
+    async askAll(questions, evidence, ctx) {
+      return (await run(questions, evidence as EvidenceInput, ctx)) as VerdictsOf<typeof questions>;
+    },
+    async exam(questions, evidence, exam) {
+      const asked = questions.filter((q) => exam.expect[q.id] !== undefined);
+      return run(asked, evidence, { subject: `exam:${exam.sampleId}` }, exam);
+    },
+  };
+}
+
+function judge(
+  q: QuestionDef,
+  state: QuestionState,
+  result: BackendResult,
+  backend: JevBackend,
+  enforceable: boolean,
+): Verdict {
+  if (!result.ok) return notJudged(q, result.reason, cut(result.detail));
+  if (!sameModel(backend.model, result.model)) {
+    return notJudged(q, 'model_mismatch', `钉死的是 ${backend.model}，回话的是 ${result.model}`);
+  }
+  const a = result.answers[q.id];
+  if (a === undefined) return notJudged(q, 'no_answer', '回包里没有这道题');
+  if ('invalid' in a) return notJudged(q, 'bad_answer', cut(a.invalid));
+  const option = q.options.find((o) => o.id === a.option);
+  if (!option) return notJudged(q, 'bad_option', cut(`答了题面以外的选项「${a.option}」`));
+  if (!Number.isFinite(a.confidence) || a.confidence < 0 || a.confidence > 1) {
+    return notJudged(q, 'bad_answer', `把握度不在 0–1 之间：${a.confidence}`);
+  }
+  if (a.confidence < state.confidenceLine) {
+    return {
+      ...notJudged(
+        q,
+        'unsure',
+        `答「${option.id}」，把握度 ${a.confidence} 低于把握线 ${state.confidenceLine}`,
+      ),
+      option: option.id,
+      confidence: a.confidence,
+    };
+  }
+  const verdict: Judged<string, Effect> = {
+    judged: true,
+    questionId: q.id,
+    option: option.id,
+    confidence: a.confidence,
+    effect: option.effect,
+    enforced: enforceable,
+    act: enforceable ? option.effect : 'none',
+    model: result.model,
+    latencyMs: result.latencyMs,
+    // 记进库之后换成那一行的 id。
+    answerId: 0,
+  };
+  return verdict;
+}
+
+function answerRow(
+  q: QuestionDef,
+  verdict: Verdict,
+  result: BackendResult | undefined,
+  c: {
+    askedAt: Date;
+    evidence: EvidenceInput;
+    ctx: AskContext;
+    exam: ExamContext | undefined;
+    batch: { id: string; size: number };
+    enforceable: boolean;
+    backend: JevBackend;
+    askedCount: number;
+  },
+): AnswerRow {
+  const sent = result !== undefined && (verdict.judged || !isLocal(verdict.reason));
+  // 把握不够也是答了：答案和把握度照记（统计里算「没把握」），只是不作数。
+  const answered = verdict.judged || (verdict.reason === 'unsure' && verdict.option !== undefined);
+  const sample: AnswerSample = {
+    rev: questionRev(q),
+    model: c.backend.model,
+    backend: c.backend.kind,
+    evidence: digestEvidence(q.evidence, c.evidence),
+    ...(c.ctx.ref === undefined ? {} : { ref: c.ctx.ref }),
+    batch: c.batch,
+    ...(sent && result?.ok && result.tokensEstimated ? { tokensEstimated: true } : {}),
+    ...(c.exam ? { exam: { runId: c.exam.runId, sampleId: c.exam.sampleId } } : {}),
+    ...(verdict.judged ? {} : { detail: verdict.detail }),
+  };
+  const truth = c.exam?.expect[q.id];
+  return {
+    questionId: q.id,
+    askedAt: c.askedAt,
+    subject: c.exam ? `exam:${c.exam.sampleId}` : c.ctx.subject,
+    sample,
+    shadow: !c.enforceable,
+    ok: answered,
+    answer: answered ? (verdict.option ?? null) : null,
+    confidence: answered ? (verdict.confidence ?? null) : null,
+    failReason: answered || verdict.judged ? null : verdict.reason,
+    modelVersion: sent && result ? (result.model ?? null) : null,
+    latencyMs: sent && result ? result.latencyMs : null,
+    // 一次问几道题共用一次调用：按道分摊。
+    inputTokens: sent && result?.ok ? Math.ceil(result.inputTokens / Math.max(1, c.askedCount)) : null,
+    ...(truth === undefined ? {} : { truth, truthSource: 'canary' as const }),
+  };
+}

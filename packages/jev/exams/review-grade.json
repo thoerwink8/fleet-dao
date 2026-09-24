@@ -1,0 +1,152 @@
+[
+  {
+    "id": "review-899-path-escape",
+    "source": "windsurf-dao#899 review#1（dao-reviewer，2026-09-04T17:40Z，CHANGES_REQUESTED）第 1 条；去掉行首「- P1 」标记。acceptance 取审查时刻 PR 正文（2026-09-04T15:45 版）的「不变量」段；code 取修复前提交 07a0b40cb8（被审 HEAD 206bb40b 已被变基改写，内容等价）",
+    "evidence": {
+      "finding": "`scripts/lib/ledger-sync.mjs:36,110,391-540`：事件文件名校验允许路径分隔符，导致远端可构造 `01...-../../outside.json` 这类名字；`pullFromHost` 将其作为合法事件拉取，`writeIncoming` 直接 `join(localDir, name)`，实际会把文件写到账本目录之外（我用注入的 SSH runner 复现，返回 added=1 且 path 已逃出 localDir）。远端是受信机器也不应把账本完整性/路径边界寄托在远端；请把 machine/name 限制为不含 `/`, `\\\\`, `..` 等路径组件（最好要求 basename 且用 `resolve`/`relative` 做最终目录边界校验），并在写入前再次校验，补一个含 `../` 的列表+bundle 判别性回归，确认不写出 localDir。",
+      "acceptance": "不变量照设计 A / A.2，一条没破：\n\n- **一事件一文件、内容决定名** ⇒ 同名即同一事件，同名跳过安全（汇聚 = 按文件名求并集）\n- **不可变**：已存在的文件永不覆盖，纠错仍走 `attr.retract` 追加\n- **全序键 `(ts, machine, seq, event_id)`**：判据只有一份，直接用 `ledger-query.mjs` 的\n  `compareEvents`，没在这里抄第二份\n- **幂等**：重复拉取零副作用，输出「新增 N / 跳过 M」\n- **三态退出码**：0 拉过且没事 / 1 真红（同名不同内容、写盘或读回失败）/ 2 没查成\n  （ssh 探不到、远端目录不在、流被截断、来件进不了账）",
+      "code": "scripts/lib/ledger-sync.mjs（审查时代码）\n36: /** 事件文件名形态：26 位 Crockford base32 的 ULID + `-` + 机器名 + `.json`。 */\n37: export const EVENT_NAME_RE = /^([0-9A-HJKMNP-TV-Z]{26})-(.+)\\.json$/;\n38: \n39: export function parseEventName(name) {\n40:   const m = EVENT_NAME_RE.exec(String(name || ''));\n41:   if (!m) return null;\n42:   return { ulid: m[1], machine: m[2] };\n…\n353: export function writeIncoming({ dir, name, text }) {\n354:   const path = join(dir, name);\n…\n498:   for (const name of plan.fetch) {\n499:     const p = join(localDir, name);"
+    },
+    "expect": {
+      "review-severity": "must_fix"
+    },
+    "why": {
+      "review-severity": "路径逃逸能把远端来件写到账本目录之外，属安全/数据完整性问题；返工提交 2660d801「来件名禁路径组件，写盘前再验目录边界（#899 返工）」修掉，下一轮审官用注入 runner 复现得 `added=0 escaped=false verdict.code=2` 确认闭合，之后才 approve（windsurf-dao#899 review#2、review#3）"
+    }
+  },
+  {
+    "id": "review-1109-gate-bypass",
+    "source": "windsurf-dao#1109 review#0（dao-reviewer，2026-09-07T02:34Z，CHANGES_REQUESTED）阻断项第 1 条；去掉行首「1. **[P1] 」标记。acceptance 取审查时刻 PR 正文（userContentEdits 2026-09-07T02:14 版）的目标第 1 条与验收第 1 条；code 取被审 HEAD 4315259",
+    "evidence": {
+      "finding": "**`scripts/lib/control-plane-gate.mjs:222-246`：带空格参数值的部署命令会绕过不可达闸。** 当前代码用“第一个不是 `-` 的 token”当 docker/helm/kubectl 子命令，因此以下真实命令在 `DAO_CONTROL_PLANE=false` 时被判为 `other`，Claude hook 退出码为 0（放行）：\n\n   - `docker --context prod push registry/app:tag`\n   - `kubectl --context prod apply -f k8s.yaml`\n   - `helm --kube-context prod upgrade app chart`\n\n   同样的根因还覆盖 `-H <host>`、`-n <namespace>` 等常见分开写法。期望：正确跳过带值的全局选项并识别真实子命令（或采用等价的稳健解析），使 reachable=false 时这些命令在 Claude 面 exit 2、Cursor 面返回 deny；同时补上这些反例的分类和 hook 黑盒测试。当前新增的“常见部署命令”测试只覆盖无值选项，未拦住这个旁路。",
+      "acceptance": "1. **硬闸**：控制面明确不可达时，禁止推送 / 部署这类对外写；只读与本地提交不拦。\n\n- [x] 控制面明确不可达（reachable=false）+ `git push` / 部署类命令 → Claude 面 exit 2 拦、Cursor 面 permission deny。\n  - 证据：`tests/control-plane-gate.test.js`「Claude 面：DAO_CONTROL_PLANE=false + git push → exit 2」「Cursor 面：unreachable + git push → deny JSON」",
+      "code": "scripts/lib/control-plane-gate.mjs @4315259\n222:   if (base === 'docker' || base === 'podman') {\n223:     const sub = toks.find((t, i) => i > 0 && !t.startsWith('-')) || '';\n224:     if (sub === 'push') return 'outbound';\n225:     return 'other';\n226:   }\n227: \n228:   if (base === 'npm' || base === 'pnpm' || base === 'yarn') {\n229:     if (toks.includes('publish')) return 'outbound';\n230:     return 'other';\n231:   }\n232: \n233:   if (base === 'wrangler' || base === 'vercel' || base === 'fly' || base === 'flyctl') {\n234:     if (toks.includes('deploy') || hasFlag(toks, '--prod')) return 'outbound';\n235:     return 'other';\n236:   }\n237: \n238:   if (base === 'helm') {\n239:     const sub = toks.find((t, i) => i > 0 && !t.startsWith('-')) || '';\n240:     if (sub === 'upgrade' || sub === 'install') return 'outbound';\n241:     return 'other';\n242:   }\n243: \n244:   if (base === 'kubectl') {\n245:     const sub = toks.find((t, i) => i > 0 && !t.startsWith('-')) || '';\n246:     if (sub === 'apply' || sub === 'create' || sub === 'replace' || sub === 'rollout') return 'outbound';\n247:     return 'other';\n248:   }"
+    },
+    "expect": {
+      "review-severity": "must_fix"
+    },
+    "why": {
+      "review-severity": "控制面断了时 `docker --context prod push` 等常见写法仍被放行，安全闸可绕过，直接违反验收第 1 条；下一轮审官黑盒复现仍 exit 0 继续判红，返工提交 1c40c81「跳过 docker/helm/kubectl 带值全局参数再认子命令」后复验三条反例已拦才 approve，PR 正文验收也补上了这一条（windsurf-dao#1109 review#1、review#2）"
+    }
+  },
+  {
+    "id": "review-1402-stale-green",
+    "source": "windsurf-dao#1402 review#0（dao-reviewer，2026-09-17T22:58Z，CHANGES_REQUESTED）P1 红项第 2 条；去掉小节标题里的「2.」编号。acceptance 取审查时刻 PR 正文（2026-09-17T21:43 版）验收第 1、3 条；code 取被审 HEAD 633a73cf7；脱敏：IP 地址 换成 <IP>",
+    "evidence": {
+      "finding": "`--only` 跳过退役池时仍保留旧绿，并刷新整表时间戳\n\n**位置**：`scripts/lib/retired-gateway-probe.mjs:65-78` 与 `scripts/gw-remote-probe.mjs:243-281`，尤其是 `only ? folded : ...` 分支。\n\n**现象**：默认不带 `--include-retired-gw` 执行：\n\n```text\nnode scripts/gw-remote-probe.mjs --only gw:gptpool/gpt-5.6 --quiet\n→ 进程 0，stderr 说明“跳过 1 个退役 newapi 池”\n→ 没有该 target 的探测结果\n→ provider-health.updatedAt 被刷新\n→ 旧 target 仍是 state=green、lastGreenAt 仍是上一轮\n```\n\n这是实际端到端复现，不是纯函数猜测。结果会让消费端把“本轮根本没探”的退役池旧绿看成新鲜健康，违背本 PR 自己的验收要求“没探的 `gw:` key 从表里拿掉，避免 `updatedAt` 把旧绿装成刚探过”。\n\n**期望**：对 `--only` 命中但被默认跳过的 `gw:` target，也必须删除该 key 或写成明确的 `unscanned`，并补一条主流程回归测试；不能让它在刷新后的健康表里继续以旧 `green` 存在。",
+      "acceptance": "- [x] 默认周期探针不对 `gw:` 池发模型请求；人工诊断走 `--include-retired-gw`\n  - 证据：`scripts/lib/retired-gateway-probe.mjs` `selectPoolProbes`；`tests/retired-gateway-probe.test.js`「默认跳过全部 gw 池」\n- [x] 直连探针 URL 落在 sslip.io / `<IP>:4317` 时默认跳过；没探的 `gw:` key 从表里拿掉，避免 `updatedAt` 把旧绿装成刚探过\n  - 证据：同测试「planProbe(gpt) 撞上 4317/sslip.io」；`pruneHealthKeys`",
+      "code": "scripts/gw-remote-probe.mjs @633a73cf7\n275: // 折进上一份表（strikes/lastGreenAt 从旧表续）；--only 时其余 target 原样保留。\n276: // 默认路径没探的 gw: 池必须从表里拿掉——否则 updatedAt 一新，旧绿看起来像刚探过。\n277: const prevTable = readJson(HEALTH_FILE, null);\n278: const folded = buildHealthTable(prevTable, results, PLAN.intervalMin, nowIso);\n279: const table = only\n280:   ? folded\n281:   : { ...folded, targets: pruneHealthKeys(folded.targets, skippedKeys.filter((k) => String(k).startsWith(\"gw:\"))) };\n282: writeAtomic(HEALTH_FILE, table);"
+    },
+    "expect": {
+      "review-severity": "must_fix"
+    },
+    "why": {
+      "review-severity": "本轮根本没探的退役池，旧 green 连同刷新的 updatedAt 一起留在健康表，消费端会当成新鲜健康——违反本 PR 自己的验收第 3 条（审官端到端复现）；返工提交 d1511274「--only 跳过退役池时拿掉旧绿」修掉并补真子进程落盘回归，review#1 复验后才 approve（windsurf-dao#1402）"
+    }
+  },
+  {
+    "id": "review-886-merge-policy",
+    "source": "windsurf-dao#886 review#0（dao-reviewer，2026-09-04T15:12Z，CHANGES_REQUESTED）第 4 条；去掉行首「4. [P1] 」标记。acceptance 取 #880 卡 C 判据与审查时刻 PR 正文（2026-09-04T10:42 版）的目标段；code 取返工前提交 50e54735（被审 HEAD 8e0a69c8 已被变基改写，内容等价）",
+    "evidence": {
+      "finding": "`scripts/dao.mjs:4858-4860`：mirasim `worker-done` 为审官任务书硬编码 `mergePolicy: 'auto'`，没有读取原派工的 manual 策略。因此原单明确 `m=manual` 时，士兵走文档规定的 `worker-done --executor mirasim` 仍会给审官注入 `m=auto`，审官可能绕过“需人工合并”边界。期望：从原派工账本/参数恢复 `mergePolicy` 与 `mergeReason` 并传入 mirasim 任务书；manual 必须保持 manual，补 auto/manual 两路判别测试。",
+      "acceptance": "卡 C 审官流：reviewer-create / worker-done 的 mirasim 路径 → 判据：一张 PR（定为 #884）在 mirasim 审官会话判出判定行；顺带核：codex 族 relay 实际 served 模型、`model/effort` 覆盖 0.0.282 认不认、换厂商闸喂真实模型 id\n\n#880 卡 C：审官流的 mirasim 执行体路径。`reviewer-create` / `worker-done` 带 `--executor mirasim`\n时，不建 Orca 树/终端，改用卡 A 冻结的 mirasim-runtime 五动词起审官会话：ensureWorkspace 建审官树 →\n读回 HEAD 与 PR head 对齐才起会话 → startSession 起审官会话（prompt = 审官任务书）。判定不发明\n第二种协议（#807 判定行协议已删）：审官仍用 `gh-as reviewer -- pr review --approve|--request-changes`\n落 GitHub review 状态，这就是机器可读的「判定行」。",
+      "code": "scripts/dao.mjs（mirasim worker-done，返工前）\n4865:   const mkPrompt = (spec) => buildReviewerInject({\n4866:     spec, issue: plan.issue, pr: String(plan.pr), mergePolicy: 'auto', executor: 'mirasim',\n4867:   });"
+    },
+    "expect": {
+      "review-severity": "must_fix"
+    },
+    "why": {
+      "review-severity": "原单是 m=manual 时审官仍被注入 m=auto，可越过「需人工合并」边界自动合并（越权）；返工提交 6e8d64c5 改成 `lookupReviewerMergePolicy` 读回原派工策略、manual 必带 r=、读不出拒渲染，review#1 逐条核过才判绿（windsurf-dao#886 review#1）"
+    }
+  },
+  {
+    "id": "review-466-false-ok",
+    "source": "windsurf-dao#466 review#0（2026-08-15T07:24Z，审官以帅位账号提交的 COMMENTED 审查）红项第 2 条；去掉行首「2. [P1] 」标记。acceptance 取审查时刻 PR 正文（2026-08-15T07:15 版）目标段与验收前两条；code 取被审 HEAD 71ef8414",
+    "evidence": {
+      "finding": "重建链未就绪或 coordinator 未夺回时仍会输出 `ok:true` 并以 0 退出。`waitReady` 超时后在 `scripts/inbox-station.mjs:411-415` 被降为 warning 成功；随后 `scripts/inbox-station.mjs:464-468` 即使 `run-show` 失败、coordinator 为空或仍指向别的 handle，也只是（有值时）附加 `coordinatorHandle`，`statusPayload` 仍固定产生 `ok:true`。因此 `terminal create` 成功但启动串中的 `run-use`/relay 失败时，`ensure` 会宣称全链重建成功，违反“一键保证哑终端 + 中继 + coordinator”。请轮询并同时确认新 relay 当前存活且 `coordinator_handle === handle`；超时应输出 `ok:false`、非零退出，并补对应故障注入测试。",
+      "acceptance": "把手工搭的「信箱台」架构（issue #464 横幅根治垫片）脚本化为 `scripts/inbox-station.mjs`。一条 `ensure` 幂等保证：哑终端「信箱台（勿关）」活着、其内中继循环在跑、编排 Run 的 coordinator 是它。全活着秒退并打印现状 JSON；缺任何一环自动重建。帅的派工序是「run-use → 派工 → ensure 归还」乒乓，ensure 必含信箱台夺回 coordinator。\n\n- [x] `node scripts/inbox-station.mjs ensure` 全活着秒退，stdout 一行 JSON 含 `runId` / `handle` / `logPath`\n- [x] 缺终端 / 中继挂了 → 自动 `terminal create --command` 串「run-use + 中继」（`.cmd` 启动文件，不用 stdin 注入）",
+      "code": "scripts/inbox-station.mjs @71ef8414\n411:   const ready = await waitReady(handle);\n412:   if (!ready.ok) {\n413:     // 进程可能已起、只是标记还没刷到 preview；handle 仍可用，ensure 继续夺回\n414:     return { ok: true, handle, warning: ready.error };\n415:   }\n416:   return { ok: true, handle };\n…\n464:   const after = showRun(runId);\n465:   const coord = after.run?.coordinator_handle || null;\n466:   const payload = statusPayload({ runId, handle, logPath, action, reason });\n467:   if (coord && coord !== handle) payload.coordinatorHandle = coord;\n468:   console.log(JSON.stringify(payload));"
+    },
+    "expect": {
+      "review-severity": "must_fix"
+    },
+    "why": {
+      "review-severity": "重建没就绪、coordinator 没夺回也输出 ok:true 并以 0 退出，把失败报成成功，违反「一键保证哑终端+中继+coordinator」；返工 2b0eefc 让 waitReady 超时保持失败、finalizeEnsure 对 relay 死/run-show 失败/coordinator 为空或他人一律 ok:false 并 exit(1)，复核写明「红项 ② 已闭合」（windsurf-dao#466 review#1）"
+    }
+  },
+  {
+    "id": "review-1341-dup-snapshot",
+    "source": "windsurf-dao#1341 review#0（dao-reviewer，2026-09-17T04:53Z，APPROVED）「P3（不挡不追）」小节第 1 条（只取该条正文，不含小节标题）。acceptance 取 PR 正文「三态纪律」与「验收」；code 取被审 HEAD 61dcebeb 的新增段与 dao.mjs 同源函数",
+    "evidence": {
+      "finding": "快照读取与 `judgeVerdictOnHead` 重复一份。`dao.mjs` 已 import 本文件，不能反向引用；要去重要抽到 `review-state.mjs`，不在本单做。",
+      "acceptance": "## 三态纪律（沿用 #1289，本单不破）\n\n| 取值 | 含义 | 动作 |\n|---|---|---|\n| `true` | 当前 head 上有它交的判定 | 复用（一 PR 一审官） |\n| `false` | **确认**没有判定，且会话已终态 | 等于没审 → 可新建 |\n| `null` | **没查成**（gh 失败 / 解析失败 / 缺字段） | 维持复用，**不许**拿读不到去重复烧额度 |\n\n`null` 不许当 `false` 用——那是往反方向错。代码里的 `try/catch` 与逐字段校验就是为此。\n\n## 验收\n\n与本 PR HEAD `61dcebebd` 同基线：\n\n```\n$ node --test tests/mirasim-reviewer.test.js tests/dao-reviewer.test.js\n# tests 205 / # pass 205 / # fail 0\n\n$ node scripts/dao-check.mjs\ndao check: 好的（274 项，3 条可见，15 项跳过，75.3s）——0 红\n```",
+      "code": "scripts/lib/dispatch/reviewer-mirasim.mjs（本 PR 新增，mirasimWorkerDone 内）\n722:     let liveHead = null;\n723:     let verdict = null;\n724:     try {\n725:       const snap = gh(['pr', 'view', String(pr), '--json', 'headRefOid,reviews']);\n726:       if (snap && snap.ok) {\n727:         const parsed = JSON.parse(snap.out);\n728:         const head = String((parsed && parsed.headRefOid) || '').trim();\n729:         if (head && Array.isArray(parsed && parsed.reviews)) {\n730:           liveHead = head;\n731:           verdict = verdictOnHead(parsed.reviews, head);\n732:         }\n733:       }\n734:     } catch { /* 没查成 ⇒ 维持原来的复用行为 */ }\n735:     reuse = judgeReviewerSessionReuse({ record, view: peek.view, force, liveHead, verdictOnHead: verdict });\n\nscripts/dao.mjs（既有）\n1554: export function judgeVerdictOnHead(pr, record, targetRepo, { runGh } = {}) {\n1555:   if (!record || !record.sessionKey) return null;   // 没有在役登记，复用判据走不到这一步\n1556:   const gh = runGh || ghRunnerForTarget(targetRepo, { role: 'reviewer' });\n1557:   const snap = gh(['pr', 'view', String(pr), '--json', 'headRefOid,reviews']);\n1558:   if (!snap || !snap.ok) return null;\n1559:   let parsed;\n1560:   try {\n1561:     parsed = JSON.parse(snap.out);\n1562:   } catch { return null; }\n1563:   const head = String((parsed && parsed.headRefOid) || '').trim();\n1564:   if (!head) return null;\n1565:   const reviews = parsed && parsed.reviews;\n1566:   if (!Array.isArray(reviews)) return null;\n1567:   return verdictOnHead(reviews, head);"
+    },
+    "expect": {
+      "review-severity": "minor"
+    },
+    "why": {
+      "review-severity": "同一段「取 headRefOid+reviews 再算 verdictOnHead」写了两份，属重复代码，不影响对错；审官明确不挡不追并当轮 approve，PR 合并；至今两份仍并存且同步演进（master 的 scripts/lib/dispatch/reviewer-mirasim.mjs:736 与 scripts/dao.mjs:1637 都已改成 headRefOid,reviews,comments），没出过事（windsurf-dao#1341）"
+    }
+  },
+  {
+    "id": "review-1299-trailing-blank",
+    "source": "windsurf-dao#1299 review#1（dao-reviewer，2026-09-15T23:49Z，APPROVED）「检查说明」段末句。acceptance 取 PR 正文「验收标准」；code 取合并提交里该测试文件末尾",
+    "evidence": {
+      "finding": "`git diff --check base...HEAD` 只报告 `tests/gh-events.test.js` 文件末尾多一个空行，属非阻塞格式提示。",
+      "acceptance": "- [x] DELETE 失败且旧 hook 仍在清单时，隔离旧 orphan；`claimLiveHook` 不得返回旧 ID，也不得凭时间窗口认新 ID。\n- [x] 外部桥在本次时间窗口创建、且它是唯一候选：`ownInvalidHookIds` 返回 `[]`，`claimLiveHook` 返回 `null`。\n- [x] 有 `ownedHookId` 且清单对得上，仍只删/认这一根，不宽扫别人的活 hook。\n- [x] 反例测试、`dao-check`、handoff 正文证据齐；推送到原 PR #1299。",
+      "code": "tests/gh-events.test.js（合并提交 6e40a872 的文件末尾；最后一行编号是多出来的空行）\n572:     });\n573:   });\n574: });\n575: "
+    },
+    "expect": {
+      "review-severity": "minor"
+    },
+    "why": {
+      "review-severity": "文件末尾多一个空行，纯格式；审官写明非阻塞，同轮 approve，PR 合并；该空行至今仍在 master 的 tests/gh-events.test.js 末尾，没有任何影响（windsurf-dao#1299）"
+    }
+  },
+  {
+    "id": "review-656-comment-drift",
+    "source": "windsurf-dao#656 review#0（dao-reviewer，2026-08-19T07:43Z，APPROVED）「非 blocking 观察」下第 1 条（只取该条正文，不含小节标题）。acceptance 取 PR 正文验收 1；code 取被审 HEAD 6c21d273",
+    "evidence": {
+      "finding": "watchdog.mjs:507 gh-evidence.json 格式注释未补新 `prState` 字段，文档漂移。",
+      "acceptance": "1. watchdog 树级 pass：对有 PR 关联（linkedPR 或卡名/路径 `PR-#N` / `PR-N`）的树，gh PR state==MERGED → 判删；不是 MERGED（OPEN/CLOSED）→ 不删；gh 查不动 → unscanned note 不删（fail-closed）。",
+      "code": "scripts/watchdog.mjs @6c21d273\n505:   // 证据文件（可缺省；缺省时对应判据明确报「没查成」而不是当作查过没事）：\n506:   //   git-evidence.json  { capturedAt: <ms>, worktrees: { <worktreeId>: { lastActivityTs: <ms> } } }\n507:   //   gh-evidence.json   { <worktreeId>: { ticketOpen: bool, ticket: \"pr 505\"|\"issue 483\"|null } }\n508:   //   pr-evidence.json   { <worktreeId>: { number, open: bool, isDraft: bool, reviewDecision } }（#569）\n…\n1249:         if (ev && ev.prState) {\n1250:           state = String(ev.prState).toUpperCase();"
+    },
+    "expect": {
+      "review-severity": "minor"
+    },
+    "why": {
+      "review-severity": "只是证据文件格式注释没跟上新字段；真正读取在 1249 行 `ev.prState` 且有六枚夹具覆盖，行为不受影响；审官列为不挡合并的观察并同轮判绿；这行注释此后一直没改，直到 2026-09-04 整个 watchdog.mjs 随 Windows 编排层退役删除（#857），其间没有因它出过问题（windsurf-dao#656）"
+    }
+  },
+  {
+    "id": "review-890-doc-pointer",
+    "source": "windsurf-dao#890 review#1（dao-reviewer，2026-09-05T23:33Z，CHANGES_REQUESTED）末段「疑问（不计入红项）」一句（该轮判红原因是基底过旧，与本条无关）。acceptance 取审查时刻 PR 正文（2026-09-04T17:11 版）「改了什么」表；code 取被审 HEAD 2f969ce 的设计页",
+    "evidence": {
+      "finding": "`docs/decisions/2026-09-04-harvest-reflow.md:32` 仍写「交卷自查第 4 条」，士兵书合 master 后回流已是第 5 条（`harvest-check.mjs` 头注释已改）。顺手改指针即可，不阻塞。",
+      "acceptance": "| 层 | 落点 | 作用 |\n|---|---|---|\n| 提示 | `templates/soldier-book.md` 交卷自查第 4 条 | 士兵交卷前自问有没有通用产物 → 写 `## 回流` 段（三行：产物/为什么通用≥2场景/落点） |\n| 动作 | `dispatch/SKILL.md`「终审接回流段」 | 合并时收口官/帅三种落法 + 段内回写受理证据 |\n| 机械 | `scripts/lib/harvest-check.mjs` + dao-check 两项 | 孤儿回流段（写了没人接）判红并点名 PR；样本三态常跑，live 在 `--full` |\n| 子仓入口 | ai-gateway-stack `CLAUDE.md`（另仓单独提交） | 自下而上入口；全局页不加行（2000 token 预算） |",
+      "code": "docs/decisions/2026-09-04-harvest-reflow.md @2f969ce\n30: ## 三层发现面（提示 → 动作 → 机械）\n31: \n32: 1. **提示层**：`host/skills/dispatch/templates/soldier-book.md` 交卷自查第 4 条（有通用产物 → 写段）。\n33: 2. **动作层**：`host/skills/dispatch/SKILL.md`「终审接回流段」——合并时三种落法 + 回写证据。\n34: 3. **机械层**：`scripts/lib/harvest-check.mjs` + dao-check 两项（样本三态常跑；live 在 `--full`，"
+    },
+    "expect": {
+      "review-severity": "minor"
+    },
+    "why": {
+      "review-severity": "设计文档里一个条目序号过期（第 4 条→第 5 条），属文档措辞，不影响机制行为；审官写明不计入红项、不阻塞，工人顺手在 b7742edb 改掉后合并（windsurf-dao#890）"
+    }
+  },
+  {
+    "id": "review-1421-stacked-comments",
+    "source": "windsurf-dao#1421 review#0（dao-reviewer 代发的跨厂复核，2026-09-18T00:38Z，APPROVED）「可选改进」下第 1 条（只取该条正文，不含小节标题）。acceptance 取 PR 正文「验收标准」；code 取被审 HEAD 693166a4",
+    "evidence": {
+      "finding": "旧注释块与新注释叠在一起（`activities.mjs` 文件头）——属文字，随后续提交清理。",
+      "acceptance": "## 验收标准\n\n- [x] 单元 34 项：身份/审查/检查/交付/失败分类/运行器恢复路径/接缝行为。\n- [x] Temporal 集成 4 项（真实 server，非 mock）：同号不同仓不串号、worker 替换后恢复不重放副作用、取消是持久命令、清理未核实报 blocked。\n- [x] 长任务不被 30 秒心跳误杀（真实会话分钟级；此缺陷由集成测试之外的人工审查发现并修掉）。\n- [x] 执行必须产出新提交才允许推送。\n- [ ] 生产部署与首个真实任务端到端（另在 #816 记录）。",
+      "code": "packages/fleet/src/activities.mjs @693166a4\n8: /** 审查输出解析：只认**恰好一份**含 findings 数组的 JSON。模型先给结论、再回显空模板时，\n9:  *  取「最后一块」会把有阻塞的审查读成通过——宁可 unscanned，不猜。 */\n10: /** 扫出文本里**所有**能解析的平衡 JSON 对象（含围栏内外、含嵌套）。\n11:  *  只取「围栏内容 ∪ 全文首尾大括号」是不够的：模型常把真结论写成裸对象、再用围栏回显一份空模板，\n12:  *  那样「唯一进得了候选集的那块」就是空结论——有 P1 的审查被读成通过。 */\n13: export function jsonObjects(text) {"
+    },
+    "expect": {
+      "review-severity": "minor"
+    },
+    "why": {
+      "review-severity": "两段 JSDoc 注释叠在一起，属文字问题，不影响解析行为；审官列为可选改进（非阻塞）并同轮 approve，PR 合并（windsurf-dao#1421）"
+    }
+  }
+]

@@ -1,0 +1,100 @@
+[
+  {
+    "id": "vps-stall-01-lead-full-check-running",
+    "source": "/home/agent/.claude/projects/<dao-issue-1744-g1>/2dce6784-8f20-4a86-9acc-11c54116e122.jsonl（2026-09-23T21:22–21:29Z）；/home/agent/.mirasim/sessions/claude/2dce6784-8f20-4a86-9acc-11c54116e122/record.json（21:38:36Z Interrupted by user.）；脱敏：服务用户家目录 换成 /home/agent",
+    "evidence": {
+      "task": "主脑（lead）会话：issue #1744 第 2 轮——上一轮 CI 的 check 红了，gh 没登录看不到 CI 日志，在本机复现找是哪一步红",
+      "recent": "[+0.9m] Bash: git log --oneline -3 && gh pr list --head dao/issue-1744-g1 … && gh run list … → exit 4（gh 没登录）\n[+1.6m] Bash: gh pr list --state all …; gh run list … → 提示 gh auth login\n[+2.0m] Bash: cat .github/workflows/*.yml | grep -nE \"run:|name:\"; git show --stat HEAD → 列出 CI 步骤\n[+2.4m] Bash: sed -n 140,210p .github/workflows/dao-check.yml → exit 2，文件不存在\n[+2.8m] Bash: ls .github/workflows/ && sed -n 140,210p <check.yml> → 读到 CI 片段\n[+3.0m] 说明：在本机复现 CI 的 check 任务，找哪一步红（gh 没登录读不了 CI 日志）\n[+3.0m] Bash: sed -n 60,140p .github/workflows/check.yml → 读到 CI 步骤\n[+3.8m] Bash: git fetch origin master; node scripts/syntax-gate.mjs --base origin/master → 语法闸通过 rc=0\n[+4.2m] Bash: cd packages/fleet && npm test | tail -40 → 1 分 50 秒后返回，用例 ok\n[+7.2m] Bash: timeout 580 node scripts/dao-check.mjs --all-tests > /tmp/dao-check-1744.log 2>&1; echo rc; grep 失败行; tail -15 → 还在跑，没有返回\n（到现在 +12.2m，已经 5 分钟没有新记录）"
+    },
+    "expect": {
+      "stall-state": "waiting"
+    },
+    "why": {
+      "stall-state": "最后一步是自带 580 秒超时的全量检查，本来就要跑好几分钟，结果会回来。实际它一直在跑，9 分 27 秒时（还没到 580 秒上限）被编排方中断（mirasim 记录 Interrupted by user.）——是该等却被停。"
+    }
+  },
+  {
+    "id": "vps-stall-02-lead-waiting-sidekick",
+    "source": "/home/agent/.claude/projects/<dao-issue-1646-g1>/4d320e4f-5690-4cef-8f3f-3b6c0b44d622.jsonl（2026-09-20T16:54–17:30Z）；/home/agent/.dao/fleet/timeline/2026-09.jsonl（issue/1646/g1 lead DEADLINE_EXCEEDED）；脱敏：服务用户家目录 换成 /home/agent",
+    "evidence": {
+      "task": "主脑（lead）会话：issue #1646 第 1 轮——修导出符号撞车闸把模板字符串里的夹具源码当成真导出的误报",
+      "recent": "[+0.5m] Bash: cat scripts/lib/dup-export-symbols.mjs && ls tests | grep -i dup … → 读到闸源码\n[+0.7m] Bash: cat tests/dup-export-symbols.test.js; sed -n 695,715p tests/feishu-triage.test.js … → 读到测试与夹具\n[+0.9m] Bash: sed -n 1730,1795p scripts/dao-check.mjs; sed -n 1,80p scripts/debt-ledger.mjs … → 读到接线\n[+1.2m] Bash: cat ~/.dao/debt/*.json; grep -n judgeRecheck … → 读到债册子\n[+1.5m] Bash: sed -n 80,200p scripts/debt-ledger.mjs … → ok\n[+5.6m] Bash: ls .github/workflows/ && grep -n fetch-depth …; node --version; git count-objects -v → ok\n[+7.5m] Bash: git diff HEAD~1 HEAD -- … ; git cat-file blob <缩写 sha> → 两个前提都成立\n[+7.7m] 说明：两个前提都成立，把设计写成带代码的说明交给 sidekick 实现、写测试、验证并提交\n[+9.5m] handoff（交给 sidekick：只改三个文件，不推送、不开 PR、不联网、不跑全量检查）→ 还没返回\n（到现在 +24.5m，已经 15 分钟没有新记录）"
+    },
+    "expect": {
+      "stall-state": "waiting"
+    },
+    "why": {
+      "stall-state": "在等交出去的子任务回音。+34.7m 时 handoff 返回「还没读到终态（completion wait timed out）」，主脑接着阻塞读；+36.2m 读到结果：sidekick 因上游 504 超时失败——等到了结果（虽是失败），不是空转也不是挂死。"
+    }
+  },
+  {
+    "id": "vps-stall-03-fixture-sleep-running",
+    "source": "本地 fleet-dao 真跑夹具 fleet-dao 仓 packages/adapters/test/fixtures/claude-code/cc-haiku-bash-timeout.ndjson + .meta.json（Claude Code 真实输出，时间取 lineTimesMs；非 VPS）；脱敏：夹具里的  本就是占位，未改",
+    "evidence": {
+      "task": "（适配器真跑夹具）让 claude-haiku-4-5 用 Bash 跑一条要睡 12 秒的命令，再回报结果",
+      "recent": "[+0s] 会话启动（claude-haiku-4-5）\n[+5.7s] Bash: sleep 12; echo slept → 已发出\n[+6.5s] 限流状态事件：allowed（五小时窗用了 1%）\n[+11.1s] 系统：命令作为本地任务开始运行（sleep 12; echo slept）→ 还在跑\n（之后暂无新记录）"
+    },
+    "expect": {
+      "stall-state": "waiting"
+    },
+    "why": {
+      "stall-state": "有一条长命令在跑，等下去会有结果：+12.4s 任务通知、+12.7s 工具返回「Exit code 143 Command timed out after 4s」（夹具把 Bash 超时设成 4 秒），会话随后正常收尾。注意这里的静默只有 1 秒多。"
+    }
+  },
+  {
+    "id": "vps-stall-04-pi-grep-loop",
+    "source": "/home/agent/.pi/agent/sessions/--home-agent-mirasim-worktrees-windsurf-dao-dao-issue-1608-g1--/2026-09-20T06-06-53-877Z_13b36407-4acd-487d-b9d5-92ebcf05f930.jsonl（06:16–06:37Z）；/home/agent/.dao/fleet/timeline/2026-09.jsonl（issue/1608/g1 execute timed-out）；脱敏：会话目录名里的服务用户名 换成 agent",
+    "evidence": {
+      "task": "执行者会话（pi）：issue #1608 第 1 轮——leg-expiry 一被 import 就真探，测试把假观测写进生产状态，要改成只在直接运行时才执行",
+      "recent": "[+9.2m] Bash: mkdir -p /tmp/leg1608/scripts && cp …/old-leg-expiry.mjs … && sed -i …（搭旧版复现环境）→ ok\n[+9.4m] Bash: cp docs/execution-profiles.json /tmp/leg1608/docs/ && env -u NODE_TEST_CONTEXT node --test … → 跑完\n[+10.7m] Bash: grep -n \"NODE_TEST_CONTEXT\" tests/helpers/parent-alive.mjs; echo rc=$?; grep -rn \"NODE_TEST_CONTEXT\" tests/helpers/; echo rc2=$? → rc=1 rc2=1（没找到）\n[+11.0m] Bash: grep -n \"NODE_TEST_CONTEXT\" tests/helpers/parent-alive.mjs || true; grep -rn \"NODE_TEST_CONTEXT\" tests/helpers/ || true → 空\n[+11.2m] Bash: grep -n \"NODE_TEST_CONTEXT\" tests/helpers/parent-alive.mjs; echo \"rc=$?\" → rc=1\n[+12.3m] Bash: 同一条 grep（末尾改成 echo A / echo B）→ 空\n[+12.7m] Bash: grep -n \"NODE_TEST_CONTEXT\" tests/helpers/parent-alive.mjs; echo \"rc=$?\"; grep -rn \"NODE_TEST_CONTEXT\" tests/helpers/; echo \"rc2=$?\" → rc=1 rc2=1\n[+13.0m] Bash: grep -n \"NODE_TEST_CONTEXT\" tests/helpers/parent-alive.mjs; echo rc=$? → rc=1\n……（此后这两条一字不改地交替；从 +10.7m 起 64 次工具调用全是这几条 grep，每次 rc=1，没有任何编辑）\n[+29.9m] Bash: 同上第一条 → rc=1 rc2=1\n[+30.2m] Bash: 同上第二条 → rc=1\n（到现在 +31.2m，1 分钟没有新记录）"
+    },
+    "expect": {
+      "stall-state": "looping"
+    },
+    "why": {
+      "stall-state": "同一条 grep 近 20 分钟里反复跑了 60 多次、结果永远 rc=1、没有任何改动；这一步最后在第 38 分钟被 fleet 判 activity StartToClose timeout（06:44:46Z）。"
+    }
+  },
+  {
+    "id": "vps-stall-05-grok-tls-retry-loop",
+    "source": "/home/agent/.grok/sessions/<工作树 dao-issue-1734-g2>/01a0d0a0-916e-75d2-b589-530d64864303/updates.jsonl（2026-09-23T23:36–23:42Z）；/home/agent/.dao/execution/sessions/grok%3A35969559-5a6f-436e-9a1b-520379d6fbec.json（failure: stall, no progress for 361s）；脱敏：grok 接口域名 换成 <grok 接口>、服务用户家目录 换成 /home/agent",
+    "evidence": {
+      "task": "执行者会话（grok-4.6）：issue #1734 第 3 轮——选型目录保鲜：探针写回路由 alive/model_drift/interactive",
+      "recent": "[+0.0m] 收到任务书，向模型发第一个请求\n[+0.0m] 请求失败：error sending request for url (https://<grok 接口>/v1/responses): client error (Connect): invalid peer certificate: UnknownIssuer → 客户端自动重试第 1 次\n[+0.1m] 同一错误 → 重试第 2 次\n[+0.3m] 同一错误 → 重试第 3 次\n[+0.6m] 同一错误 → 重试第 4 次\n[+0.9m] 同一错误 → 重试第 5 次\n[+1.5m] 同一错误 → 重试第 6 次\n[+2.2m] 同一错误 → 重试第 7 次\n[+2.7m] 同一错误 → 重试第 8 次\n[+3.3m] 同一错误 → 重试第 9 次\n[+3.8m] 同一错误 → 重试第 10 次\n[+4.4m] 同一错误 → 重试第 11 次\n[+5.1m] 同一错误 → 重试第 12 次\n[+5.5m] 同一错误 → 重试第 13 次\n[+6.0m] 同一错误 → 重试第 14 次（上限 15）\n（一个工具都没调过，任务一步没动）"
+    },
+    "expect": {
+      "stall-state": "looping"
+    },
+    "why": {
+      "stall-state": "同一个连接错误（证书不受信）6 分钟里被原样重试 14 次，毫无进展；看门狗 361 秒判停（mirasim 那头只看到 0 个工具调用、一片空白）。这个证书错误在 grok 会话里共出现 78 次，不是等一等就会好的那种。重试是客户端自动做的，也有人会判成「在等外部服务」，故 medium。"
+    }
+  },
+  {
+    "id": "vps-stall-06-pi-silent-after-results",
+    "source": "/home/agent/.pi/agent/sessions/--home-agent-mirasim-worktrees-windsurf-dao-dao-1043--/2026-09-06T09-49-01-876Z_f7d6df9f-f51d-46aa-8c74-b166a76774ae.jsonl（09:49–10:17:45Z）；/home/agent/.dao/agent-stall-watch-liveness.json（dao-1043 escalate，2026-09-06T12:21:27Z）；脱敏：会话目录名里的服务用户名 换成 agent",
+    "evidence": {
+      "task": "指挥官自动派的工人会话（pi，grok-4.6）：issue #1043——先诊断再动手：draft 被当成「有人在做」、会话不动被当成「卡死」",
+      "recent": "[+20.9m] 读 scripts/lib/dispatch/git.mjs 等 → 都已返回\n[+23.6m] 说明：诊断清楚了，现在规划实现；读 commander-verbs.mjs、commander-core.mjs，rg escalateToOpenIssue → 都已返回\n[+25.1m] 说明：诊断完成，现在规划实现；读 tests/agent-stall-watch.test.js、dispatch/git.mjs，rg describe/it → 都已返回\n[+27.1m] 说明：已读完 spec，开始诊断；读 agent-stall-watch.test.js、dispatch/liveness.mjs，rg headRefName → 都已返回（rg 无匹配 exit 1）\n[+28.7m] 说明：诊断完毕，开始规划实现；rg analyzeReviewsAtHead …、读 scripts/lib/review-state.mjs → 都已返回\n（此后没有任何新记录：没有在跑的命令，也没有提问；到现在已静默 2 小时 4 分）"
+    },
+    "expect": {
+      "stall-state": "dead"
+    },
+    "why": {
+      "stall-state": "最后一批调用全部返回后模型再没出过声，既没有在跑的东西也没在等人；看门狗 12:21 以长时间静默升级，这个会话此后再没动过。前面几次「现在规划实现」却又去读文件有点绕，但最后两小时是彻底没动静。"
+    }
+  },
+  {
+    "id": "vps-stall-07-pi-silent-after-label",
+    "source": "/home/agent/.pi/agent/sessions/--home-agent-mirasim-worktrees-windsurf-dao-dao-1041--/2026-09-06T10-31-14-901Z_49158f6b-c3ed-4c82-b521-4e732a5d2cb4.jsonl（10:31–10:59:41Z，文件此后未再写）；脱敏：会话目录名里的服务用户名 换成 agent",
+    "evidence": {
+      "task": "指挥官自动派的工人会话（pi，grok-4.6）：issue #1041——指挥官的验收契约还钉在 orca 时代，派工成没成判不出来",
+      "recent": "[+22.6m] rg \"orca:\" …；读 card-identity.mjs；rg issueNumberFromWorktree …；读 dao.mjs → 都已返回\n[+22.9m] 说明：先看 createRuntime 的返回值和测试写法再改；读 mirasim-runtime.mjs 与两份测试，rg precheckDispatchDup … → 都已返回\n[+26.0m] 读 dao.mjs、commander.mjs、card-identity.test.js，rg child_process … → 都已返回\n[+28.4m] 说明：PR #1048 已在，先打标签，再按诊断改三处（验收契约、在途占用、派工拒派闸）\n[+28.4m] Bash: node scripts/gh-as.mjs worker -- pr edit 1048 --add-label \"model/grok-4.6\" --add-label \"type/写码\" → 返回 PR 链接\n[+28.4m] 读 scripts/lib/liveness.mjs、tests/dao-dispatch-gate.test.js → 都已返回\n（此后日志再没有新内容；到现在已 40 分钟没有新记录）"
+    },
+    "expect": {
+      "stall-state": "dead"
+    },
+    "why": {
+      "stall-state": "说完「按诊断改三处」、三个调用全部返回之后就没有下一步，没有在跑的东西也没有待答的问题；这个会话的日志文件此后再没被写过。"
+    }
+  }
+]

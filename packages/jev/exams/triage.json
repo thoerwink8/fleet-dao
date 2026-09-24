@@ -1,0 +1,368 @@
+[
+  {
+    "id": "tri-137",
+    "source": "windsurf-dao#137（取数 2026-09-24；取标题+正文原文，正文建单后未改过；评论未取：评论1是量级补充，评论2是拍板后的删除结果）",
+    "evidence": {
+      "request": "devin-credit-claimer：成批账号口令与浏览器登录态仍在项目内（#135 只搬走了 .env.local）\n\n## 一句话\n\n`devin-credit-claimer` 那个目录里的凭据**不止 `.env.local` 一处**。#135 第二步只搬走了\n`.env.local`（GitHub 登录口令），**同一个目录里还有三类凭据没动** —— 它们形态不是 `key=value`，\ndotenv 的搬法套不上去。\n\n🔴 **别把「#135 清完 4 处」读成「这个目录安全了」。** 它不安全。\n\n## 还剩什么（只报路径与形态，不报值）\n\n| 位置 | 装什么 | 为什么 dotenv 搬法套不上 |\n|---|---|---|\n| `data/trial-accounts.json` | **成批账号**，每条含 `email` + `password`（结构见 `src/claimer.ts` 的 `Account` 接口） | 是一个 JSON 数组，不是键值对；程序 `JSON.parse` 后按结构用 |\n| `data/cloud-accounts-export.txt` | 账号导出 | 自由文本 |\n| `data/cloud-trial-accounts.txt` | 账号清单 | 自由文本 |\n| `.auth/browser-profile/`、`.auth/chrome-profile-9222/` | **浏览器登录态**（Cookie / 会话） | 是整个目录，且 Chromium 要求可写路径 |\n\n## 为什么这个目录的风险面比别处大\n\n**它压根不是 git 仓库**（实测 `git rev-parse --show-toplevel` 报 not a git repository）\n⇒ `.gitignore` 那几行**什么都没挡住**，**整个目录复制一次 = 上面全部东西复制一次**。\n\n而 `trial-accounts.json` 一个文件就是**成批**账号口令 —— 按「泄露一次损失多少」算，\n它比已经搬走的那个 `.env.local` **更大**，只是形态上不像「密钥文件」所以此前没人盯它。\n\n## 要做什么（需设计，不是照搬）\n\n至少要回答三问：\n\n1. **成批账号该不该也进凭据根**？如果进，`sops` 对整个 JSON 加密是可行的\n   （sops 原生支持 JSON），但消费方 `loadAccounts()` 要改成经注入器取。\n2. **浏览器登录态怎么办**？它是目录不是文件，且要可写 —— 加密存放与「Chromium 要读写它」\n   直接冲突。可能的方向是「不搬，但把目录挪出项目 + 收紧 ACL」。\n3. **这个项目还要不要留着**？它的用途是一次性的批量领额度。若已用完，\n   **删掉整个目录是最彻底也最便宜的解** —— 这一格需要用户判断。\n\n## 关闭条件\n\n上面三问各有答案，且落地或显式判为不做（判为不做要写理由）。\n\n---\n\n出处：#135 第二步的顺带发现。**它是被 #135 的迁移脚本在收尾处主动打印出来的**，\n不是事后想起来的 —— 脚本第 4 节末尾就写着「只搬 .env.local 并不能让那个目录变安全」。"
+    },
+    "expect": {
+      "triage-ui": "no_ui",
+      "triage-clarity": "decision",
+      "triage-gate": "delete"
+    },
+    "why": {
+      "triage-ui": "只涉及凭据文件与浏览器登录态目录，没有任何界面。",
+      "triage-clarity": "正文第3问「这个项目还要不要留着？…删掉整个目录…这一格需要用户判断」，单子挂「待拍板」标；结局「用户拍板项目已不需要 → 整目录已删」（评论2）。",
+      "triage-gate": "落地动作是删掉含 112 条账号口令、三套浏览器登录态和 _dao-backup-135 备份的整个目录（评论2 原文），属删用户数据与备份。"
+    }
+  },
+  {
+    "id": "tri-819",
+    "source": "windsurf-dao#819（取数 2026-09-24；取标题+正文原文，正文未改过；评论未取：评论2起是 AI 的消歧判词与用户拍板，会泄露答案）",
+    "evidence": {
+      "request": "Windows 录像员：miraquota-win 上线前仿真人点击录像由谁来点（待拍板）\n\n## 问题\n用户希望大版本上线前看「仿真人点击」录像再确认。服务器是 Linux，Devin cloud / Mirasim 服务端都点不了 Windows 桌面程序（miraquota-win）。\n\n## 选项\n1. **用户本机当录像员**：Mirasim 本地 gui_task（已能点 Electron/浏览器）在本机跑用例并录屏，产物上传到 PR / 飞书卡片。零花钱；依赖本机在线。\n2. **云 Windows 机**：租一台 Windows VPS 常驻录像；花钱，属人拍项。\n3. **先不录视频**：桌面项目大版本先用「截图序列 + 测试报告」代替，等看板 v1 后再上视频。\n\n帅推荐：先 3 过渡，同时用 1 做一次 PoC；2 不建议。"
+    },
+    "expect": {
+      "triage-ui": "no_ui",
+      "triage-clarity": "decision"
+    },
+    "why": {
+      "triage-ui": "要解决的是上线前录像验收由谁来做，不改任何产品界面。",
+      "triage-clarity": "正文是三选一加「帅推荐」；dao-marshal 评论2（2026-09-06）「选项2（租 Windows VPS）花钱，属用户红线，机器不能替你选。等用户」；用户 2026-09-05 拍「先用3过渡，我们未来再接」（评论1）。"
+    }
+  },
+  {
+    "id": "tri-539",
+    "source": "windsurf-dao#539（取数 2026-09-24；取标题+正文原文，正文未改过；评论未取：评论1是前置解除提醒，评论3起是转 ideas 的判定）；脱敏：（用户名目录） 换成 D:/agent、内网 IP 段 换成 <内网IP段>",
+    "evidence": {
+      "request": "仓库转 public + 混淆历史：拷问后再定（起点是 ruleset 要 Pro）\n\n## 起因与拍板\n\n起点是 GitHub ruleset：**私仓用 ruleset 要 Pro**（#530 换路要靠 ruleset 把合并权交回服务端）。摆给用户的两条路是「升 Pro 约 $4/月」和「仓库转 public」，用户 2026-08-15 选了后者，并明确：\n\n> 那是个大得多的动作，我建议单独开一张 issue 走完整拷问再动手，而且不能在 #497 的任务树里做，也得先把 #497/#519 收口或明确作废。\n\n**本 issue 没有动手授权。** 它现在只有一个作用：把已经扫出来的事实存住，等用户在场时走完整拷问。\n\n## 前置\n\n- [x] **#497 收口** —— 2026-08-16 关闭止损，分支保留，交接材料落在 `_handover-497.md`\n- [ ] **#519 收口** —— 帅·B 线上，未合\n\n## 已扫出的事实（2026-08-16，别重扫）\n\n复现命令：`git log --all -p | grep -IohE '<模式>'`\n\n| 类别 | 命中量 | 说明 |\n|---|---|---|\n| 本机绝对路径 `D:/agent` | 约 1786 处 | 量最大的一类，纯路径 |\n| 内网 IP | 2 个 | `<内网IP段>` 段，其一带机器名注释 |\n| claude.ai session URL | 511 处 | commit 消息里的 `Claude-Session:` 尾行 |\n| ngrok 域名 | 1 个 | |\n| `127.0.0.1` | 若干 | |\n| 私有项目名 `mousse-cli` | 有 | |\n| **真密钥** | **0 命中** | `auth.json` 的历史版本全是 `__CONF…` 占位符 |\n\n**注意本 issue 自己**：真值一律没写进来（只写段和形态）。转 public 之后 issue 正文同样是公开的——**清理历史却把清单留在 issue 里等于没清**。这条同样适用于将来任何一张记录扫描结果的单。\n\n## 拷问要过的题（不预设答案）\n\n1. **质疑需求**：真需求是「省 $4/月」还是「让 ruleset 可用」？如果是后者，**升 Pro 是同一个结果的十分之一代价**，转 public 是不是从一开始就在解一个更贵的问题？\n2. **删除**：能不能不要 ruleset 这一层？#530 靠 ruleset 把合并权交回服务端——不要 ruleset 的世界长什么样，代价是什么？\n3. **爆炸半径**：混淆历史意味着 force push 重写全部分支。当前在途分支数、在途 PR 数、两个协调者手上的活——force push 会打断多少？（#497 的任务官当时正在查这个，被急停令拦下，数据没出来）\n4. **不可逆性**：public 一旦发生，第三方镜像/爬虫/GitHub 自身的缓存都不受我们控制。**「后来又改回 private」不能撤销已经发生的公开。** 这条是不是一票否决级？\n5. **1786 处路径到底算不算问题**：`D:/agent` 泄露的是什么？如果只是「知道作者用 D 盘」，那它值不值得为它 force push 全历史？\n6. **从零重做**：今天如果是一个新仓，我们会怎么起？这个问题的答案往往说明现在这个动作根本不该做，而该做的是「新起一个干净的公开仓，旧仓留私」。\n\n## 明确不做的\n\n- 不在任何在途任务树里做。\n- 未拷问完不动手：不改可见性、不 force push、不改历史。\n\nBlocked-by: #519"
+    },
+    "expect": {
+      "triage-ui": "no_ui",
+      "triage-clarity": "decision",
+      "triage-gate": "release"
+    },
+    "why": {
+      "triage-ui": "不涉及任何界面。",
+      "triage-clarity": "正文「本 issue 没有动手授权…等用户在场时走完整拷问」，拷问第一问就质疑要不要做；dao-worker 评论3（2026-08-18）「必须用户在场走完整拷问，第一问还可能整单否掉」，转 ideas（评论5）。",
+      "triage-gate": "核心动作是私有仓转 public（正文「public 一旦发生…不能撤销已经发生的公开」），属对外公开发布；同单还夹着「混淆历史＝force push 重写全部分支」（沾删历史）和「升 Pro 约 $4/月」这条花钱替代路，故 medium。仓库后来确实转了 public（#1583 标题「仓库已 public」）。"
+    }
+  },
+  {
+    "id": "tri-1753",
+    "source": "windsurf-dao#1753（取数 2026-09-24；取标题+建单时的正文版本 2026-09-22T07:52（GraphQL userContentEdits 最早版），后两版追加了拍板与 g1 返工意见，未取；评论未取）",
+    "evidence": {
+      "request": "动手前自动回查旧决定：开单/提机制前把可能同因的旧单、判例、已合 PR 推到眼前（recall-gate hook，用户 2026-09-22 提，待拍）\n\n起因：recall-before-act\n\n## 用户 2026-09-22 提出（原话）\n\n> 我希望这种场景你应该自己主动去分析找断链，而不是我提醒你，你觉得呢？查下最佳实践，是否要 hook 或者 skills？然后不要和其他 skills 或者机制冲突。\n\n场景：VPS 负载 15，帅位从机器上数进程、画分解表、提了一套新机制并开了 #1748，没先查「这件事是不是已经有单定过规矩」——#1583（两天前关，标题就是「CI 已是全量裁判」）定过，落地漏了第 5 处。用户提醒后才查到。帅位认账：chain-first 的「画链」前缺一步「先搜旧决定」，靠记忆想不起来，得机械推到眼前。\n\n## 调研（帅位派子代理查的，要点入档）\n\n- Claude Code hooks 官方文档：`additionalContext` 只注入不拦；**同一事件多个 hook 的注入全部叠加**（不是取一个）；同事件多 hook 并行跑、各自超时独立；显式 deny 优先于超时。Skill 靠模型自己判「要不要读」，会漏；hook 是确定性的。\n- incident.io / BigPanda 相似事故关联靠语义相似度，不靠关键词精确匹配。\n- GitHub 网页开单原生有「可能重复」提示（2025-07 增强），但 issue-gateway 走 API 拿不到。\n- Letta/MemGPT 等代理记忆的检索都由模型自己触发，没有「动作前强制回查」的现成阀门。\n- 没查成：PagerDuty 算法细节、OpenHands memory condenser 触发点、probot dup-bot 算法、ADR 检索成文规范。\n\n## 帅位建议（待用户拍，三选一）\n\nA（推荐）：新 skill `recall-gate`，形态照 ask-gate（自带 `hooks/hooks.json` 挂 PreToolUse，只注入、永不拦、10 秒超时）。触发：Bash 里出现 `issue-gateway.mjs create`；AskUserQuestion 问题文本含「机制 / 闸 / 规矩 / 方案」。确定性检索：标题关键词 → 近 60 天 open+closed issue（标题+正文首段）、`git log --grep`、memory 索引；命中注入「可能同因：#N（已关 x 天前，落地 PR #M）——先读它的落地面查断在哪，再开单」。二级精筛（影子）：候选 ≤ 8 时问 Jev「哪张与这张同一起因」，只记不拦。chain-first skill 第 2 步前加一行「先搜旧单 / 判例 / 已合 PR」。不撞：ask-gate 管问不问人，tool-use-gate 管命令文本，recall-gate 管有没有旧决定。\nB：只做 hook 不接 Jev（关键词会漏同义改写，先看命中率）。\nC：只改 chain-first 文字不加 hook（零机制；今天就是 skill 没被想起）。\n\n## 验收（按 A）\n\n- 故意用与 #1583 同义的标题开单 → 注入里出现 #1583；用无关标题 → 注入为空且不报错。\n- hook 超时或 gh 失败 → 注入一行「回查没查成」，不拦。\n- `tests/recall-gate.test.js` 用注入的 gh 桩，不出网；skill 经 `synced` 机制同步到 ~/.claude/skills。"
+    },
+    "expect": {
+      "triage-kind": "code",
+      "triage-ui": "no_ui",
+      "triage-clarity": "decision",
+      "triage-gate": "none"
+    },
+    "why": {
+      "triage-kind": "方案 A 是新 skill + PreToolUse hook + 测试；拍 A 后落地清单是 host/skills/recall-gate/…、tests/recall-gate.test.js（现行正文「拍板」节）。",
+      "triage-ui": "只加钩子与 skill，用户界面不变。",
+      "triage-clarity": "建单即被 dao-marshal[bot] 贴 triage/needs-decision（events 2026-09-22T07:52:30Z）；正文「帅位建议（待用户拍，三选一）」；用户选 A（原话「我希望不要人盯着，AI 自己处理可以吗？」，现行正文「拍板」节）后该标被摘（events 2026-09-22T23:04Z）。",
+      "triage-gate": "只改仓内 skill/hook/测试，不发布、不花钱、不删数据。"
+    }
+  },
+  {
+    "id": "tri-981",
+    "source": "windsurf-dao#981（取数 2026-09-24；取标题+正文原文，正文未改过；评论未取：两条都是工人交卷的查证结果）；脱敏：/… 换成 /home/agent/…",
+    "evidence": {
+      "request": "帅位每轮 cacheRead 是输出的 77 倍：量化注入面构成，给出削减方案（只查证不动手）\n\n## 起因（消歧完毕，2026-09-06 用户批准的方案第 1 条）\n\n7d 订阅额度 78.8% 时对账发现：帅位 opus 会话 113 次调用，输出仅 6.3 万 token，\n**cacheRead 484 万（77 倍）**——每轮把整个上下文重读一遍，同时是「慢」（发请求→上游\n首包中位 2.9s，链路只占 0.18s，其余是提示词体积）和「贵」的主因。数据源\n`~/.mirasim/insights/usage-*.ndjson`（reqBytes 字段单条请求 255KB 可直接佐证）。\n\n## 岔路（已拍，不再议）\n\n- 扇出降载 ✗（工人走 gw 不占订阅额度，与此无关）\n- 反代扩额度 ✗（2026-09-06 用户拍板不做）\n- **砍每轮重读的上下文体积 ✓（本单）**\n\n## 目标\n\n量化帅位 claude 会话每轮 cacheRead 的构成，按实测给出削减方案。只查证、出报告，\n**不直接改任何注入面**（CLAUDE.md/skills 属改规则，砍哪行由用户拍）。\n\n分解建议（工人可自行调整）：\n1. 静态面：两份 CLAUDE.md、memory 索引（MEMORY.md 22.9KB）、skills 元数据清单、\n   settings 各占多少 token（可用任一 tokenizer 估算，标明估算方法）\n2. 动态面：会话长尾——`autoCompactWindow=800000` 意味着上下文能长到 80 万才压缩；\n   从 usage ndjson 的 cacheRead 增长曲线反推单会话的上下文增长速率\n3. 输出：一张「注入项 × token/轮 × 削减建议 × 预期节省」的表，落本单评论\n\n## 硬边界\n\n- 只读不改：不碰 CLAUDE.md、settings、skills\n- 数据用 /home/agent/.mirasim/insights/（root 侧账读不到，报告里说明覆盖面即可）\n- 判别性实验（交卷必含）：任选一个可无害验证的削减项（如临时缩小 --settings 里的\n  autoCompactWindow 起一个一次性会话），同形态请求改造前后各测一次，贴两次的\n  usage 账对比。没有这个对比的报告不算交卷。"
+    },
+    "expect": {
+      "triage-kind": "research",
+      "triage-ui": "no_ui",
+      "triage-clarity": "clear",
+      "triage-gate": "none"
+    },
+    "why": {
+      "triage-kind": "正文「只查证、出报告，不直接改任何注入面」；交付是 docs/observations/2026-09-06-cacheRead-injection-surface.md 与评论里的「注入项×token/轮×削减建议」表，「没改 CLAUDE.md / settings / skills」（dao-worker 评论1/2）；单上有 type/查证 标。",
+      "triage-ui": "纯数据分析，不碰界面。",
+      "triage-clarity": "岔路「已拍，不再议」，目标、分解、硬边界、必交的判别性实验都写明；工人一次交卷（PR #983）。",
+      "triage-gate": "只读查证，不发布不花钱不删数据。"
+    }
+  },
+  {
+    "id": "tri-638",
+    "source": "windsurf-dao#638（取数 2026-09-24；取标题+正文原文，正文未改过；评论未取：评论1是实验结论）",
+    "evidence": {
+      "request": "验证：同一 Run 下并发多个 worker/reviewer dispatch 会不会互撑（帅收敛到 1 信箱台的前提）\n\n## 背景\n\n当前架构：信箱台是 Run 粒度 1:1 绑定，并发多少个 Run 就有多少个信箱台。本轮值守 10 个并发 Run 对应 10 个信箱台，用户想知道能不能收敛到 1 个——理想做法是所有值守单共用同一个长驻 Run（`run_979ca5904ac1`，标题已写\"帅值守派工 Run（勿 gc）\"，看名字本来就是照这个意图起的，只是本轮执行没坚持复用）。\n\n## 要验证什么（用户拍板：先验证可行性，不是直接改）\n\n在同一个 Run 下，能不能**并发**跑多个 worker/reviewer 的 dispatch，互不干扰？具体要验证：\n1. 消息路由：两个 dispatch 同时收发结构化消息，会不会串号（A 的完工信号被 B 收到）。\n2. coordinator 占用：`worker-start`/`reviewer-attach` 派工瞬间需要短暂持有 coordinator（`run-use`）——如果这时另一个 dispatch 也在同一 Run 下推进，会不会被互相夹走 coordinator 导致 `consumer_fenced`。\n3. 信箱台 relay：单个 relay 服务多个 dispatch 的消息，会不会漏收/顺序错乱。\n\n## 实验设计\n\n```\norca orchestration run-use --id run_979ca5904ac1\ndispatch A（随便挑一个待派的 issue）\ndispatch B（另一个待派的 issue，间隔几秒后）\n```\n观察 A、B 各自的完工信号是否准确送到各自审官手上；观察派工过程有没有 `consumer_fenced`/串号。\n\n## 输出\n\n不是代码改动，是一份结论：可行 / 不可行 + 证据（附复现命令与观察记录）。可行 → 回来问要不要真的把 `dispatch`/`reviewer-attach` 改成默认复用主 Run；不可行 → 问题到此为止，10 个信箱台是当前架构下的正常代价，不用再折腾。**不许自己下结论直接动代码，只交实验报告。**"
+    },
+    "expect": {
+      "triage-kind": "research",
+      "triage-ui": "no_ui",
+      "triage-clarity": "clear",
+      "triage-gate": "none"
+    },
+    "why": {
+      "triage-kind": "正文「不是代码改动，是一份结论：可行 / 不可行 + 证据」「不许自己下结论直接动代码，只交实验报告」；结局评论给出实测结论「会互撑」（dao-marshal 2026-08-18）。",
+      "triage-ui": "验证编排运行时的并发行为，无界面。",
+      "triage-clarity": "要验证的三点、实验命令、两种结论各自的下一步都写明。",
+      "triage-gate": "实验与报告，不发布不花钱不删数据。"
+    }
+  },
+  {
+    "id": "tri-314",
+    "source": "windsurf-dao#314（取数 2026-09-24；取标题+正文原文，正文未改过；评论未取：评论1是审计报告本身）",
+    "evidence": {
+      "request": "全仓五维度优化排查：注释质量 / 死指针 / 规则体积与送达率 / 测试守护盲区 / 无人调用脚本——产出排查报告 + 候选清单待拍\n\n## 一句话\n\n用户 2026-08-12 点名：整个项目还有没有值得优化的地方，做一次重点排查。派一路审计 worker 按五个维度扫全仓，产出一份排查报告（落 `_tmp/`，带日期文件名）+ 一张候选优化清单（逐条带证据与预估代价），**清单只列不做**，转给用户拍板后再分批派工。\n\n## 五个维度（每维度给判据，不是印象）\n\n1. **注释质量**：按 `ccswitch/rules/dao-comment.md` 三把尺子分桶统计（复述型该删 / 流水账该搬档案层 / 防呆判据该留），与在途 #275 注释清理批互补——本维度只出全仓分桶数字与重灾区文件排名，不动手。\n2. **死指针**：注释/文档里指向已搬走、已改名、已删除落点的指针（已知先例：#286 指向已关 issue、#292 dao.md 裸指针零覆盖、#262 件㈢ 归档档死指针 4 处）——扫出存量清单。\n3. **规则体积与送达率**：各规则文件字节数排名、always-on 面总量、被指而无人读的档（有触发器但触发时刻从不发生的）。\n4. **测试守护盲区**：`--list` 全清单里零 mutation 的测试套、宣称守护但无负控的断言（形态学扫描，不逐个实测）。\n5. **无人调用脚本**：`scripts/` 与 `ccswitch/scripts/` 里程序化调用点 N=0 的脚本（已知先例：#265 件7 dao-merge-cleanup.ps1）。\n\n## 关闭条件\n\n报告落 `_tmp/2026-08-12-repo-audit.md` 全文 + 本单评论贴摘要与候选清单（每条：发现 / 证据 / 建议处置 / 预估代价），用户拍板后按拍板结果分批转 issue，本单即关。\n\n## owner\n\n审计 worker（pi，Orca 编排）产报告；候选清单拍板归用户；转 issue 归帅。"
+    },
+    "expect": {
+      "triage-kind": "research",
+      "triage-ui": "no_ui",
+      "triage-clarity": "clear",
+      "triage-gate": "none"
+    },
+    "why": {
+      "triage-kind": "正文「产出一份排查报告…清单只列不做，转给用户拍板后再分批派工」；交付是审计报告+12 条候选清单，「本轮零写入源文件（git status 干净）」（评论1）。",
+      "triage-ui": "全仓代码/文档排查，无界面。",
+      "triage-clarity": "五个维度各给判据，关闭条件写明报告落点和评论摘要格式。",
+      "triage-gate": "只读排查。"
+    }
+  },
+  {
+    "id": "tri-49",
+    "source": "windsurf-dao#49（取数 2026-09-24；取标题+正文原文，正文未改过；评论未取：评论1是用户手动注册后的回写）",
+    "evidence": {
+      "request": "cc-switch 下发链与 config-sync 镜像层脱钩——hooks 注册写 common_config_claude 不进下发路径，且 per-provider hooks 天然漂移\n\n2026-08-01 深夜实测坐实（用户在场协作诊断）：①cc-switch 切 provider 时下发到 live settings.json 的内容来自 **providers 表该 provider 自带的 settings_config**，不是 settings 表的 common_config_claude 键——后者只是 config-sync export/restore 的镜像层。P1（PR #43）把 dao-hard-gates 注册写进快照层+down 写进 common_config_claude，**全程不在下发路径上**，live 始终未注册。②**per-provider hooks 漂移实锤**：PostCompact（dao-compact-log）只存在于旧 provider Dulays 的配置里，用户切到 claude-official 后被抹——compaction 快照刷新链当场断掉。③AI 侧修复被权限分类器全路径拦截（写 live/写 DB/准备脚本三试三拦——「AI 不得改自己 hook 注册」的意图级保护，合理），修复动作只能用户做（cc-switch GUI 编辑 provider 配置或手改 live）。**待修**：dao.md「改配置先认源与投影」条款要按本实测订正（下发源=providers.settings_config）；P1 的注册指引（PR body+#529）同步更正；长期解=cc-switch 各 provider 的 hooks 段对齐机制（或 settings-drift 检查器把 per-provider 差异纳入扫描面）。解冻条件：用户完成手动注册后，把最终生效形态回写本单。"
+    },
+    "expect": {
+      "triage-kind": "manual",
+      "triage-ui": "no_ui",
+      "triage-clarity": "clear",
+      "triage-gate": "none"
+    },
+    "why": {
+      "triage-kind": "正文「AI 侧修复被权限分类器全路径拦截…修复动作只能用户做（cc-switch GUI 编辑 provider 配置或手改 live）」「解冻条件：用户完成手动注册后…」；结局「用户 ! 前缀执行 AI 备好的 SQL」（评论1、评论3）。",
+      "triage-ui": "改的是本机 hook 注册配置；cc-switch GUI 只是用户动手的地方，需求不改任何界面。",
+      "triage-clarity": "下发源、漂移、待修条款都已实测坐实，要做什么很清楚。",
+      "triage-gate": "改本机配置，不发布、不花钱、不删数据。"
+    }
+  },
+  {
+    "id": "tri-64",
+    "source": "windsurf-dao#64（取数 2026-09-24；取标题+当前正文（2026-08-02T01:09 补了人话段的版本，早于关单）；评论未取：唯一评论是关单结果）",
+    "evidence": {
+      "request": "[需用户] 浏览器 MCP 首调提醒的 matcher 扩面——cc-switch DB 属用户写入面\n\n> **先用人话说一遍 —— 这张单要你本人动手**（2026-08-02 补：原本只有行话，没参与这个项目的人读不懂）\n\n有个提醒功能，本意是在 AI 第一次动用浏览器工具时给它一句提示（免得它用错工具）。\n\n但它现在配的**触发条件只认命令行工具**，认不出浏览器工具。也就是说：这个提醒做好了、装上了，**实际一次都没送到过**。\n\n要修它得改一处存在 cc-switch 数据库里的配置，而那个数据库属于**你的写入面**——AI 想改会被权限闸拦下（这是刻意的，不是故障）。所以这一步只能你在 cc-switch 界面上手动改一下，改成什么、怎么验，正文里写了。\n\n**在你改之前**，那条提醒只是一句写在文档里的文字兜底，靠谁想起来才生效（已在三处照直标注这个状态，没有假装它已经在工作）。\n\n---\n\n瘦身批 #5（PR #54）配的 dao-tool-nudge 浏览器 MCP 首调提醒，**当前送不到**：hook 注册的 matcher 是 `\"Bash\"`，覆盖不到 `mcp__chrome-devtools__*` / `mcp__playwright__*`。扩面写入点在 cc-switch DB `providers.settings_config`（各 provider 都要改），属用户动作（AI 侧被权限分类器拦，合理）。\n\n**用户操作**：cc-switch GUI 编辑各 provider 配置，把 dao-tool-nudge 那条 PostToolUse 的 matcher 改为：\n```\nBash|mcp__chrome-devtools__.*|mcp__playwright__.*\n```\n改完切一次 provider 生效；复核：`node ccswitch/hooks/dao-tool-nudge.js --selfcheck` exit 0。\n\n未扩之前该提醒是纯文字兜底（已在 dao.md 存根/规则文件/hook 头注三处照直标注）。"
+    },
+    "expect": {
+      "triage-kind": "manual",
+      "triage-ui": "no_ui",
+      "triage-clarity": "clear",
+      "triage-gate": "none"
+    },
+    "why": {
+      "triage-kind": "正文「这一步只能你在 cc-switch 界面上手动改一下」「属用户动作（AI 侧被权限分类器拦，合理）」，单子挂「需用户」标（events 2026-08-02T01:09Z）。但结局是「用户完全授权、AI 全程执行三步」（关单评论），故 medium。",
+      "triage-ui": "改 hook 的 matcher 配置，不改界面。",
+      "triage-clarity": "正文给了要改成的 matcher 串和复核命令。",
+      "triage-gate": "改本机配置。"
+    }
+  },
+  {
+    "id": "tri-1052",
+    "source": "windsurf-dao#1052（取数 2026-09-24；取标题+正文原文，正文未改过；评论未取：评论1是消歧与选型记录，之后是交卷）",
+    "evidence": {
+      "request": "总控群播报改成「日报卡」：纯文本墙换成 Card JSON 2.0，只报变化不报存量\n\n## 用户要什么（2026-09-06 亲口）\n\n> 「我希望总控群就好像报纸一样，隔三差五汇报一下概览信息且格式要更好看一点，现在的格式太难看了」\n\n## 现在难看在哪（实样）\n\n总控群的播报是 **`msg_type: text`**，一堵 `\\n` 拼出来的墙：\n\n```\n有 5 件要你拍（项目态势）；健康表 1 路过红、熔断 4 条还开着，后两件不用拍、先知道。\n需要你拍：\n#999 合并闸铺到全部仓库——先缩小范围再做分发器（三问已齐）\n#819 Windows 录像工具上线前，模拟点击录像这段谁来点\n...\n```\n\n没有层级、没有重点、没有状态色、手机上就是一段长文。而卡片能力只用在「待拍板」上，且是 **Card JSON 1.0** 的老结构（`scripts/lib/feishu-hub-card.mjs:3` 自己写着「布局沿用原 buildHubCard（Card 1.0 header/elements）」）。\n\n## 两处判据（都查过，不是凭感觉）\n\n**① 飞书侧**：官方明说 JSON 2.0 是推荐结构，**1.0 不回补新能力**。2.0 有：语义色标题 `header.template`、`column_set`/`column`（带权重宽度）做多列指标、`table`（单卡最多 5 个、只能放根节点、需客户端 ≥V7.4）、VChart `chart`（最多 5 个）、`note` 脚注、`divider`。另有**模板消息**（`template_id` + `template_variable`）专供周期性报告。\n\n**② 可视化侧**（dataviz skill 的 `choosing-a-form.md`）：\n\n| 数据是 | 用 | 不要用 |\n|---|---|---|\n| 一把标题数字 | **KPI 行（stat tile）** | 分组柱状图 |\n| 单个当前值（+可能的趋势） | **stat tile**（值 + delta + sparkline） | 单柱柱状图 |\n| 面板领读的那一个数 | **Hero figure**，每屏**有且只有一个** | — |\n\n**所以本单不做趋势图。** 四个概览数字的职责是「一眼看清现状」，不是「看随时间变化」；趋势图还要额外存历史，属于没被需求要求的机制。真出现「必须看变化」的阅读任务再单独开单。\n\n## 要做的：一张「日报卡」\n\n结构（自上而下）：\n\n```\n┌ header（语义色 + 图标 + 一句话状态）\n│   道·日报 · 9 月 6 日        🟠 有 5 件要你拍\n├ Hero figure：待拍板 5 件        ← 全卡唯一的头条数字\n│   一句话：这是今天唯一需要你动手的东西\n├ ── divider ──\n│ column_set 四列 KPI：\n│   开放 PR 17    待拍板 5    在跑工人 2    冲突 PR 4\n│   ↑ 昨日 +2      持平        ↓ -3          持平\n├ ── divider ──\n│ 本期发生了什么（≤5 行，多了折叠）\n│   ✅ 合并 4 张：#1048 #1040 #1032 #1031\n│   🔴 卡住 1 处：orca 干净退出没人拉起（已修 afc89868）\n├ ── divider ──\n│ note：数据截止 19:12 · 只在有变化时推送\n└ 按钮：[看待拍板] [看全部 PR]\n```\n\n### 编辑口径（这几条才是「像报纸」的真正来源）\n\n1. **只报变化，不报存量。** 报纸不重印昨天的新闻。与上一期完全无变化 ⇒ **一个字都不发**——这直接实现用户说的「隔三差五」，不需要另造节流开关。\n2. **每屏只有一个 Hero figure。** 它必须是「唯一要求用户动手的那个数」，当前就是待拍板件数。\n3. **每个 KPI 必带 delta**（带符号、注明对比的是哪一期）。没有 delta 的数字读者无法判断好坏。\n4. **状态色是保留色**，且**必须图标 + 文字一起出现，不许只靠颜色**（色盲/深色模式/转发截图都会丢色）。语义映射：正常=绿、有事要拍=橙、有东西卡住=红。\n5. **正文 ≤5 行**，长内容进 GitHub，卡里只留链接 + 一句摘要（沿用 persona.md 第 9 条）。\n6. **文字用文字色，不穿数据色**——数值、标签一律用普通文本色，颜色只由旁边的状态标记承担。\n\n## 硬边界\n\n- **卡片结构落 git，不用飞书模板消息。** 模板消息要把版式存在飞书后台，那是仓外的第二个真相源，本仓明确不许（真相源在仓里、要能被检查器测）。代价是改版式要走 PR，接受。\n- **升到 Card JSON 2.0，但不许顺手重写待拍板卡**（`buildHubCard`）。那张卡正在用、按钮回调刚打通，本单只新增日报卡；两张卡并存，待拍板卡的迁移另开单。\n- **不做趋势图 / sparkline**（理由见上）。想做要先证明有「看变化」的真实阅读任务。\n- **无变化必须真的不发**，不许发一张「今日无事」的卡——那就又变成刷屏了。心跳另有其路（`commander.mjs:1398` 连续 7 天静默才发一条）。\n- 移动端优先：`column_set` 列数 ≤4，超了在手机上会挤成一团。\n\n## 邻居\n\n- #1029 / PR #1032 正在做「总控群只留待拍板 + 播报撤出到静音群」。**本单做的是那份播报到了新群之后长什么样**，两单会撞 `scripts/lib/hub-ask.mjs` 与 `commander.mjs`，**以 #1029 先落地为准**，本单在它之上做。\n- 卡片按钮回调已于 2026-09-06 打通（飞书应用 1.0.2 已发版，订阅了 `card.action.trigger`），日报卡的按钮可以直接用回传，不用再走链接跳转。"
+    },
+    "expect": {
+      "triage-kind": "code",
+      "triage-ui": "ui",
+      "triage-clarity": "clear",
+      "triage-gate": "none"
+    },
+    "why": {
+      "triage-kind": "在代码里拼 Card JSON 2.0 并接发送逻辑；交付 PR #1058/#1114，测试 tests/feishu-daily-card.test.js。",
+      "triage-ui": "改总控群播报的卡片版式（header 语义色、column_set 指标、按钮）；消歧评论写明「本单是 UI 类活，ban-gpt-ui 禁令…」，审官因此避开 GPT（评论1）。",
+      "triage-clarity": "用户原话含糊（「格式要更好看一点」），但正文已把版式、编辑口径、硬边界写死；帅位按「patch 级 = 自己拍」直接派（评论1），没回头问用户。",
+      "triage-gate": "卡片只发内部总控群，不对外发布。"
+    }
+  },
+  {
+    "id": "tri-875",
+    "source": "windsurf-dao#875（取数 2026-09-24；取标题+正文原文+评论1（建单4分钟后同一人追加的「任务书增补」，属需求本身）；评论2起是交卷，未取）",
+    "evidence": {
+      "request": "飞书机器人：意图层（先理解再行动）+ 待拍板卡片一键拍板（card.action.trigger 回传）\n\n用户 2026-09-04 反馈的两个问题（原话要点）：\n\n1. **机器人不理解语义**：在总控群发「你好」，机器人机械地甩一整段盘点，不像 Discord 的 Mirasim 官方机器人那样先理解意图再回应。\n2. **拍板全靠读大段文字**：待拍板事项发的是纯文本，希望像 AskUserQuestion 那样给**卡片+按钮**，一键拍板。\n\n## 改什么（都在 `scripts/feishu-triage.mjs`，接线事实已核实）\n\n**① 意图层（先理解，再行动）**：@bot 消息先过一跳轻量 LLM 意图判定（问候/闲聊、问现状、拍板答复、其他），\n问候闲聊给对话式短回应（参照 Mirasim Discord 机器人口吻：友好、简短、给单号给状态）；只有明确问现状/盘点才走盘点流水线。\n说人话闸（`ensurePlain`/三行体）对所有出口照旧生效。\n\n**② 待拍板卡片一键拍板**：现有 `sendCard`（msg_type=interactive，行 569 附近）只有跳 GitHub 的 url 按钮。改为回传按钮：\n- 卡片按钮 `behaviors: callback`，value 带 `{issue, choice}`（如：按推荐执行 / 等我回来拍 / 打开单子看）。\n- `EventDispatcher` 注册 `card.action.trigger`（服务器已装 @larksuiteoapi/node-sdk **1.73.1**，types 里有该事件；走现有 WSClient 长连接，无需公网回调）。\n- 点击处理：往对应 issue 落一条评论（写清用户选了什么）+ 卡片原地更新为已选状态（toast/卡片回包）。\n- 与双门制对齐（PR #873）：按钮点击=单上有回复=自动拦住超时代拍（classifyDaipai 的零评论判据天然生效，不用另写）。\n\n## 验收判据（判别性，缺一不绿）\n\n1. fixture 模式：注入「你好」事件 → 回复是对话式短句，**不含**盘点段落；注入「现状怎么样」→ 三行盘点照旧。\n2. fixture 模式：注入 card.action.trigger 事件（带 issue+choice）→ 产出对该 issue 的 gh 评论动作 + 卡片更新回包；两者有测试断言。\n3. 服务器实测：总控群发「你好」得到人话回应；一张待拍板卡片点「按推荐执行」后 issue 上 5 秒内出现对应评论。\n4. `node scripts/dao-check.mjs` 绿；新增自动行为有「故意构造违规样本被拦」类判别用例。\n\n## 边界\n\n- key 永不进聊天/日志；`/etc/feishu-triage.env` 权限不动。\n- 本单不做视觉设计：卡片布局沿用现有 buildHubCard 结构，只加按钮与回传（协议接线，非 UI 视觉活）。\n- LLM 意图跳用现有 makeLlm（流式，LLM_TIMEOUT_MS 已 180s），不新增供应商。\n\n[评论1]\n任务书增补（用户 2026-09-04 亲自反馈，与原验收判据同级，缺一不绿）：\n\n**⑤ 卡片必须自带「拍板所需的全部上下文」**——用户原话：GitHub 链接可以留但大概率不点。卡片正文直接放：\n出了什么事（1 行）/ 影响（1 行）/ 推荐哪个+为什么（1-2 行）/ 期限（双向门写「X 点前不拍按推荐执行」）。\n按钮：按推荐执行 / 等我回来拍 / 换个方案（回传后由机器人追问）。GitHub 链接只作最后一行兜底。\n验收：找一张真实待拍板单渲染成卡片，用户不点链接就能拍——卡片截图贴 PR。\n\n**⑥ 机器人回答范围用配置管，不是什么都答**：`host/machine/feishu-groups.json` 每群加 profile 字段\n（persona 提示词要点 / 答什么意图白名单 / 拒答口径一句话）。意图层读所在群的 profile 拼系统提示词。\n回答只准基于盘面查得到的数据（现有 triage 数据源），查不到就说「没查到」，不许编。\n超范围问题一句话拒答并指路（例：「这事不归我，去问 XX / 开个单」）。\n验收：fixture 注入超范围问题 → 拒答一句话；注入盘面内问题 → 答对且带数据出处。\n\n**⑦ 单机器人多群，按 chat_id 路由人格**（用户提出「一群一机器人」备选，判定结论：飞书最佳实践是\n单应用机器人+多群按群路由，多应用只在「同群要区分消息来源/主备」时才值得，我们没到；多一个应用=多一套\n凭据+长连接+运维面。此判定可翻案——若用户后续想要不同名字/头像的观感，才需另建应用）。\n实现上就是 ⑥ 的 per-group profile，不建新应用。\n\n**⑧ 回传交互硬要求**（飞书官方口径）：收到 card.action.trigger 后 3 秒内响应（toast 或卡片更新）；\n拍板后卡片原地更新为「已拍：选了什么·谁·何时」，防重复点击。"
+    },
+    "expect": {
+      "triage-kind": "code",
+      "triage-clarity": "clear",
+      "triage-gate": "none"
+    },
+    "why": {
+      "triage-kind": "改 scripts/feishu-triage.mjs 与卡片回调；交付 PR #952/#968。",
+      "triage-clarity": "改什么、接线事实、验收判据都写明，工人按此交卷（评论2）。",
+      "triage-gate": "内部群机器人，不对外发布。"
+    }
+  },
+  {
+    "id": "tri-1029",
+    "source": "windsurf-dao#1029（取数 2026-09-24；取标题+正文原文+评论1（建单15分钟后追加的用户原话范围「群下方的机器人菜单」）；评论2起是重派与交卷，未取）；脱敏：飞书 chat_id oc_… 换成 oc_xxx",
+    "evidence": {
+      "request": "飞书总控群只留待拍板：状态别塞进消息流，发卡过滤复用 ask-gate\n\n## 用户要什么（2026-09-06 亲口）\n\n原话两句：\n\n> 「飞书群的消息太多了，我无法专注于看到所有信息。总控台是不是只需要只返回待拍板的信息，并且待拍板的假如说已经在其他地方被处理掉了，也要有解决机制。真正每日推送的消息，我认为需要有更好的方式，而不是像这样子持续大量推送」\n\n> 「如果不需要我拍板，机器就能自动拍板；那种优先级低的就不需要我拍板嘛，就它自己去拍板」\n\n用户已拍板：按下面「全套」做。\n\n## 病根：把状态塞进了流\n\n「待拍板」是一个**状态集合**（一件事只有待拍/已拍两态），现在却以**消息流**的形态存在于总控群。三个后果全在今天实测到了：\n\n1. 已拍的卡不会自己消失（拍板发生在 GitHub，飞书那条消息永远停在原样）\n2. 新消息把旧状态冲走——2026-09-06 实咬：5 张待拍板卡 15:52 发出，用户 16:24 问「有什么要我拍板的」时已被冲上去，用户结论是「好像目前没有这个机制」\n3. 播报与待拍板混在一条流里互相稀释\n\n加过滤、降频率都是在流上打补丁，不解决 1 和 2。\n\n## 要做的（四件，用户已拍板全做）\n\n### ① 总控群只留待拍板，一件一卡，原地更新\n\n- 一件待拍板 ↔ 总控群里**有且仅有一张卡**。诞生时发一次，此后只 update 那条消息，不发新消息。\n- 拍板 / 别处关单 / 摘掉标签 → 把那张卡原地改成「已办结」。`buildDecidedHubCard` 已存在，复用，不许另写。\n- 净效果：群里消息总数 == 当前待拍板件数。\n\n### ② 对账（这就是用户要的「已在别处处理掉」的解决机制）\n\n- **真相源是 GitHub 上的 `待拍板` 标签，不是飞书。** 飞书只是投影。\n- 跟着指挥官每轮跑：读带 `待拍板` 标签的单 → 与 `hubPending` 比对 → 多的补发卡、少的把卡改成已办结。\n- 因为真相源在 GitHub，「在别处被处理掉」天然生效，**不要另造消解机制**。\n- fail-close：GitHub 没查成时**不许**把卡判成已办结（那个方向是「把用户还要拍的事悄悄抹掉」，不可逆）。\n\n### ③ 发卡过滤：不需要用户拍的，机器自己拍\n\n- 判据**已经存在，不许新造**：`docs/release-policy.json` + `scripts/lib/ask-gate.mjs`（纯函数，`tests/ask-gate.test.js` 有单测）。\n- 命中 `human_holds` 四条（对用户发布 / 花钱 / 删数据 / 改规则）或该级 `confirm.<级>.who` 要人 ⇒ 发卡到决策群。\n- 判 `auto`（patch 级）⇒ **不发卡**，机器自己拍，只进播报摘要。\n- 判 `unscanned` ⇒ **发卡**（fail-close：没查成不许退回自己拍，见 ask-gate skill 原话）。\n\n### ④ 播报撤出总控，收进新群并攒成每天一条\n\n- 新建飞书群「道·播报」（机器人建得出来，实测 `POST /im/v1/chats` code=0）。\n- 心跳 / 发布 / 熔断 / board-gc / stall 告警从总控迁到播报群，且**攒成每天一条摘要**，不实时刷。\n- 现有调用点：`scripts/commander.mjs:353 hubSay`、`scripts/board-gc.mjs:200`、`scripts/agent-stall-watch.mjs:137`、`scripts/release-train.mjs:225`、`scripts/lib/provider-breaker.mjs:372`。\n- 顺手让机器人退出 4 个【已废弃·请退出】旧话题群（`oc_xxx…` / `oc_xxx…` / `oc_xxx…` / `oc_xxx…`）。\n\n## 硬边界\n\n- **不许新造「该不该问用户」的判据**——复用 ask-gate，那份 JSON 是用户 2026-09-03 拍板的真相源，改它本身属于「改规则」红线。\n- **不许把「没查成」当成「已办结」**，两者必须在代码里分得开。\n- 建群 API 能建**但删不掉**（缺 `im:chat` 权限，2026-09-06 实测；机器人也退不出，`members/me` 系列端点全 404）。所以建群这一步**只许建一个**，名字一次定对。\n- 卡片按钮的回调订阅由用户手工在开发者后台配（本单不做，见下）。\n\n## 已知邻居\n\n- #1012 / PR #1018：出站发卡通道（`scripts/hub-ask.mjs`）已交卷，本单**在它之上做**，不要重写它。\n- 卡片按钮当前是死的：飞书应用没订阅 `card.action.trigger`。用户 2026-09-06 亲口说这一步他自己去点，**不在本单范围内**。\n\n[评论1]\n## 追加范围：群下方的机器人菜单（用户 2026-09-06 亲口）\n\n> 「希望群下方是不是还可以有那种快捷方式，能马上看见。比如点一下快捷方式或子菜单，就能马上把待拍板全都重新列一遍。」\n\n这补上了本单原设计缺的最后一块：**用户主动召回**。原设计只有「机器主动推」和「对账自动落幕」两条，卡片被聊天记录冲走之后用户没有任何办法叫回来——2026-09-06 实咬就是这个（5 张卡 15:52 发出，16:24 用户问「有什么要我拍板的」时已被冲上去，用户结论「好像目前没有这个机制」）。\n\n### 做什么\n\n飞书的**机器人菜单**（开发者后台 → 机器人 → 机器人菜单）会在群输入框下方常驻，点一下推送 `application.bot.menu_v6` 事件到应用，事件里带配置好的 `event_key`。\n\n- 菜单项：**「看待拍板」**（`event_key` 建议 `list_pending`）。\n- 收到该事件 ⇒ 走**和对账同一条**取数路径（GitHub `待拍板` 标签为真相源），把当前全部待拍板重新呈现。\n- **不要新发一批卡**：优先把已存在的那几张卡「顶」上来或更新；确实已经没有对应消息的才补发。理由是本单主线就是「消息总数 == 待拍板件数」，一点菜单就多一批卡会直接毁掉这条不变式。\n- 0 件待拍板 ⇒ 明确回一句「当前没有要你拍的」，**不许静默**。\n- 取数没查成 ⇒ 报「没查成」，**不许回「0 件」**（两者必须分得开，这是仓规）。\n\n### 边界\n\n- 后台那侧的菜单配置与事件订阅（`application.bot.menu_v6`）由帅位在开发者后台配掉，**本单只负责收到事件之后的行为**。\n- 复用现成件：取数走对账那条路，呈现走 `buildHubCard` / `buildDecidedHubCard`，不许另起一套。\n\n### 顺带同步：卡片按钮当前是死的\n\n飞书应用尚未订阅 `card.action.trigger`，所以已发出的卡按下去只弹「该应用尚未配置卡片回调」。帅位正在后台配这一步，**不在本单范围**，但本单验收「点按钮 ⇒ 写回 issue」时要等它配完才做得了。"
+    },
+    "expect": {
+      "triage-kind": "code",
+      "triage-clarity": "clear",
+      "triage-gate": "none"
+    },
+    "why": {
+      "triage-kind": "改发卡、对账、播报路由的脚本；交付 PR #1103。菜单后台配置由帅位做，不在单内。",
+      "triage-clarity": "正文「用户已拍板：按下面「全套」做」，四件事和硬边界都写清。",
+      "triage-gate": "新建内部群、调整推送，不对外发布、不删数据。"
+    }
+  },
+  {
+    "id": "tri-763",
+    "source": "windsurf-dao#763（取数 2026-09-24；只取正文「谁提的，什么场景」节里引用的用户原话一句；标题与其余正文是 AI 改写成的二选一拍板题，会泄露答案，未取）",
+    "evidence": {
+      "request": "我希望尽可能把我们本仓库的内容删减掉不必要的内容，比如这么多的 tests，真的是需要的吗？我需要尽可能快为出发点，这个仓库是文档仓库。"
+    },
+    "expect": {
+      "triage-kind": "code",
+      "triage-ui": "no_ui",
+      "triage-clarity": "goal",
+      "triage-gate": "none"
+    },
+    "why": {
+      "triage-kind": "字面要求是删仓内测试等内容，属改仓库文件；最后什么都没删，故 medium。",
+      "triage-ui": "不涉及界面。",
+      "triage-clarity": "AI 当场「没按原话开「删测试」单」，先把它变成「这个仓还要不要当运行时」（#763 正文）；用户拍板「仍是运行时仓，不按尽量删测试来…要快，走已拍的派工从零 A（#762）」（评论1）——照原话直接做会做成别的东西。",
+      "triage-gate": "删的是仓内测试文件（git 可回退），不是数据或备份。"
+    }
+  },
+  {
+    "id": "tri-681",
+    "source": "windsurf-dao#681（取数 2026-09-24；只取正文里引用的用户原话一句；标题与正文是 grill 澄清之后写的，会泄露答案，未取）",
+    "evidence": {
+      "request": "每次建 issue，需求特别小……每次创建 issue 的时候，先去找未完成的 issues 列表，找关联性，最好是合并成一个大 issue"
+    },
+    "expect": {
+      "triage-kind": "code",
+      "triage-ui": "no_ui",
+      "triage-clarity": "goal",
+      "triage-gate": "none"
+    },
+    "why": {
+      "triage-kind": "要改的是开单/派工流程（脚本或流程文档）。",
+      "triage-ui": "不涉及界面。",
+      "triage-clarity": "原话「合并成一个大 issue」经 grill 才澄清为「合并成的大单 = 一个完整任务 = 1 工人 + 1 审官一次派工做完」，而字面的「开单时自动合并成大 issue」恰是已被 #487/#547/#556 否决的方向（#681 正文）；最后「承认不做机制…原则继续执行，脚本不写」（评论1）。",
+      "triage-gate": "不发布不花钱不删数据。"
+    }
+  },
+  {
+    "id": "tri-558",
+    "source": "windsurf-dao#558（取数 2026-09-24；只取正文「用户的原始想法」节的三段引用原话；其余正文是拷问后的发现与方案，会泄露答案，未取）",
+    "evidence": {
+      "request": "因为 windsurf-dao 是指导仓，所以未来其他仓库好的想法如果能抽成共性，要加在这个指导仓的 idea 文件夹里。\n\n还需要每一个项目自己有一个筛选器去过滤，这个筛选器应该由我们指导仓库指导项目维护好机制流程，每个仓库自然生成这一套体系。\n\n**你要考虑一个事情，需要跨机器**——每台机器如果用到这个 windsurf-dao 项目，就应该要好的想法全留住，好的使用技巧全留住。"
+    },
+    "expect": {
+      "triage-kind": "code",
+      "triage-ui": "no_ui",
+      "triage-clarity": "goal",
+      "triage-gate": "none"
+    },
+    "why": {
+      "triage-kind": "要的是目录结构、链接和检查这类机制改动。",
+      "triage-ui": "不涉及界面。",
+      "triage-clarity": "原话只给方向（抽共性进 idea 文件夹、每项目一个筛选器、跨机器）；拷问后「触发时机想不清楚」、扁平/分层「用户尚未拍板」、「用户说先别做」，整单转 docs/ideas.md（#558 正文与评论1/2）。里面也夹着一个待拍的扁平/分层取舍，故 medium。",
+      "triage-gate": "不发布不花钱不删数据。"
+    }
+  },
+  {
+    "id": "tri-96",
+    "source": "windsurf-dao#96（取数 2026-09-24；取标题+正文原文，正文建单后未改过；评论未取：评论2起是 AI 交的决策材料、用户拍板与删除结果，会泄露答案）",
+    "evidence": {
+      "request": "config-sync/providers/providers.json 严重陈旧——拿它恢复会静默抹掉 permissions(含全部 deny 规则)\n\n## 出了什么事\n\ndeny 归因官（PR #95 那路）顺带查出，**未修，只报**：\n\n`config-sync/providers/providers.json` **不在 6 个同步 scope 里、从不维护**，且已实质陈旧：\n- 17 行只有 **15 个唯一 id**（有重复）\n- `claude-official` 在里面**只有 46 字节且没有 permissions 块**\n- `dulays-…` **整行缺失**\n\n🔴 **危险在于**：拿它做恢复会把 `permissions`（含全部 deny 规则）**连同整个块悄无声息抹掉**——没有告警、没有 diff 提示，恢复完看起来一切正常，而 Grep-first 那套约束当场蒸发。\n\n## 怎么修（方向，未定）\n\n1. **纳入同步 scope**（让它跟着 DB 走），或\n2. **明确标注它是历史快照、不可用于恢复**（文件头 + README + 任何引用它的地方），或\n3. **删掉它**（若确认无人消费——需先 Grep 引用面）\n\n判据：**一个会被当成恢复源、而内容已经不对的文件，比没有这个文件更危险**。\n\n## 关闭条件\n\n要么它与 DB 一致且有机制保持（方案 1），要么任何人打开它都会立刻知道不能拿它恢复（方案 2/3）。指针：PR #95 的归因报告。"
+    },
+    "expect": {
+      "triage-kind": "code",
+      "triage-ui": "no_ui",
+      "triage-clarity": "decision",
+      "triage-gate": "delete"
+    },
+    "why": {
+      "triage-kind": "三条路（纳入同步 scope / 标成历史快照 / 删文件）都落在仓的工作副本里（config-sync/providers/ 在仓内、被 .gitignore 忽略）；止血那段由 AI 经 PR #105 做完，拍板后的删除也是 AI 在本机执行（评论3、评论4）。",
+      "triage-ui": "只涉及配置快照文件，没有界面。",
+      "triage-clarity": "正文「怎么修（方向，未定）」三选一；AI 交第一段后写明「这三条我都不会自己动手：方案 3 是删您的数据且不可逆，方案 1 改的是配置恢复链，都得您点头」（评论2），单子挂「待拍板」；用户 2026-08-04 拍「删掉」（评论4）。",
+      "triage-gate": "方案 3 要删一份会被当成「恢复源」的配置导出快照；结局删了 providers.json 和更早的 .bak 快照，「不可恢复，且刻意没有备份」（评论4），属删备份/历史记录。"
+    }
+  },
+  {
+    "id": "tri-818",
+    "source": "windsurf-dao#818（取数 2026-09-24；取标题+正文原文（正文 522 字，建单后未改过）。整单含 20 条评论约 1.6 万字，按放宽后的口径只看证据本身长度；评论未取：评论7 起是「未消歧」更正、7A 拍板与 v0 交付，会泄露答案）",
+    "evidence": {
+      "request": "看板项目：任务流水线可视 + 后台管理（飞书网页应用；配置即代码）\n\n## 用户想法（2026-09-03）\n流程图、多机器人交替处理、每任务阶段/耗时/模型、可调可重跑、内嵌 AI 聊天、手机+网页；兼具后台管理：机器人用哪个模型、切换内容、分级确认/回滚/预算闸配置。\n\n## 帅补充与拆分\n- **v0（零界面）**：读模型（GitHub + 服务器派工队列 + 账本 → 一张表）+ 每阶段超时告警发总控群 + `@机器人 状态` 回表。归 #800 第 2 步。\n- **v1**：飞书**网页应用**（登录/权限/手机端白送）。页面：任务列表、阶段时间线、每阶段模型、卡住标红；后台管理页读写 `docs/release-policy.json` 与 `docs/model-routing.json`——**保存 = 开 PR**，不建数据库；成本视图接网关（new-api）用量；操作审计（谁点了重跑/换模型）。\n- **v2**：流程图、内嵌 AI 聊天、重跑/换模型按钮直接触发指挥官动作。\n- 本项目自身走 AI 流水线（伞单）。\n\n## 待拍板（开工前）\n- 看板代码放哪个仓（新仓 vs windsurf-dao 子目录）。\n- 网页托管在 Contabo（走飞书网页应用鉴权）还是别处。"
+    },
+    "expect": {
+      "triage-kind": "code",
+      "triage-ui": "ui",
+      "triage-clarity": "decision",
+      "triage-gate": "none"
+    },
+    "why": {
+      "triage-kind": "要做的是看板的读模型、告警和后台页（配置即代码：保存 = 开 PR），都是改仓里代码；首期 v0 由工人交 PR #1108（dao board --json + 超时告警发总控群）。",
+      "triage-ui": "标题就是「任务流水线可视 + 后台管理（飞书网页应用）」，正文 v1 列了页面：任务列表、阶段时间线、每阶段模型、卡住标红、后台管理页。注意：帅位把首期 v0 切成「零界面」（一张表 + 告警），当时审官用的是 GPT；但整条需求是界面。",
+      "triage-clarity": "正文「待拍板（开工前）」两条：代码放哪个仓、网页托管在哪；用户 2026-09-04 指正「本单属未消歧」并贴「待消歧」（评论7，events 2026-09-04T05:01Z）；2026-09-07 拍 7A「代码放 windsurf-dao 子目录…网页放 Contabo，走飞书登录；先做 v0」后摘标（评论9）。",
+      "triage-gate": "内部看板，托管在已有的 Contabo，走飞书登录；不对外发布、不花钱、不删数据。"
+    }
+  },
+  {
+    "id": "tri-818-c8",
+    "source": "windsurf-dao#818（取数 2026-09-24；只取评论8（dao-marshal 2026-09-05「用户 2026-09-05 拍板：加一个『AI 自己干了什么』视图」）里引用的用户原话一段；其余是 AI 的落地方案，未取）",
+    "evidence": {
+      "request": "我觉得需要记录一下，我们后面的看板里面也需要有这个方式能看得到，比如：1. 历史的 LLM 查出了什么问题；2. Token 额度消耗；3. 派发的是什么模型。我觉得这是一种非常高效的看板方式，要加入到未来的计划里面。"
+    },
+    "expect": {
+      "triage-kind": "code",
+      "triage-ui": "ui",
+      "triage-clarity": "clear",
+      "triage-gate": "none"
+    },
+    "why": {
+      "triage-kind": "要的是看板上一个新视图；帅位把它落成三列并指明现成数据源，唯一要补的是 observation 里加模型与 token 字段（#818 评论8），都是改仓内代码/文档。",
+      "triage-ui": "原话「看板里面也需要有这个方式能看得到」「这是一种非常高效的看板方式」，要的是一个看板视图；帅位据此加了「AI 自己干了什么」视图（#818 评论8 标题）。",
+      "triage-clarity": "列了三样要看的东西（查出的问题、Token 消耗、派发模型），帅位直接对上数据源写成三列方案，没有追问（#818 评论8）。",
+      "triage-gate": "只是看板视图，不发布不花钱不删数据。"
+    }
+  },
+  {
+    "id": "tri-1052-quote",
+    "source": "windsurf-dao#1052（取数 2026-09-24；只取正文「用户要什么（2026-09-06 亲口）」节引用的用户原话一句（去掉外层「」）；标题与其余正文是 AI 写的版式方案，未取）",
+    "evidence": {
+      "request": "我希望总控群就好像报纸一样，隔三差五汇报一下概览信息且格式要更好看一点，现在的格式太难看了"
+    },
+    "expect": {
+      "triage-kind": "code",
+      "triage-ui": "ui",
+      "triage-gate": "none"
+    },
+    "why": {
+      "triage-kind": "落地是在代码里拼 Card JSON 2.0 日报卡（PR #1058 / #1103 / #1114）。",
+      "triage-ui": "要改的就是总控群播报的样子；#1052 消歧评论写明「本单是 UI 类活」，审官因此避开 GPT（评论1）。",
+      "triage-gate": "卡片只发内部总控群。"
+    }
+  },
+  {
+    "id": "tri-1029-quote",
+    "source": "windsurf-dao#1029（取数 2026-09-24；只取评论1「追加范围：群下方的机器人菜单（用户 2026-09-06 亲口）」引用的用户原话一句（去掉外层「」）；其余是 AI 的方案，未取）",
+    "evidence": {
+      "request": "希望群下方是不是还可以有那种快捷方式，能马上看见。比如点一下快捷方式或子菜单，就能马上把待拍板全都重新列一遍。"
+    },
+    "expect": {
+      "triage-kind": "code",
+      "triage-ui": "ui",
+      "triage-clarity": "clear",
+      "triage-gate": "none"
+    },
+    "why": {
+      "triage-kind": "落地是飞书机器人菜单事件的处理代码：PR #1103「菜单『看待拍板』和日报按钮走同一条取数」；菜单那侧的后台配置由帅位完成（#1029 评论1「边界」）。",
+      "triage-ui": "要的就是群输入框下方的快捷方式/子菜单，点一下把待拍板重新列出来，是飞书里看得见的交互；上线后用户真点过「看待拍板」（#1174 评论，2026-09-11 修「点了无反应」）。",
+      "triage-clarity": "对象和动作都具体；帅位 15 分钟内直接写成方案（菜单项、event_key、不重复发卡、0 件时怎么回、没查成怎么报），没有追问（#1029 评论1）。",
+      "triage-gate": "内部群菜单，不发布不花钱不删数据。"
+    }
+  }
+]

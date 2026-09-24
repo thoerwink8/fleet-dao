@@ -1,0 +1,16 @@
+{
+  "name": "@fleet-dao/jev",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Jev 判断题服务：题库、提问接口、可换的后端、只记不拦与转真拦、考题",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@fleet-dao/adapters": "workspace:*",
+    "@fleet-dao/db": "workspace:*",
+    "@fleet-dao/shared": "workspace:*",
+    "drizzle-orm": "^0.45.3"
+  }
+}
