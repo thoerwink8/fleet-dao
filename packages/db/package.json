@@ -5,6 +5,21 @@
   "description": "Postgres 表结构（Drizzle）、迁移与查询",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./testing": "./src/testing.ts"
+  },
+  "scripts": {
+    "db:generate": "drizzle-kit generate && biome format --write migrations",
+    "db:migrate": "node src/bin/migrate.ts",
+    "db:seed": "node src/bin/seed.ts"
+  },
+  "dependencies": {
+    "@fleet-dao/shared": "workspace:*",
+    "drizzle-orm": "^0.45.3",
+    "postgres": "^3.4.9"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8",
+    "drizzle-kit": "^0.31.11"
   }
 }
