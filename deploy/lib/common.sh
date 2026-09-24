@@ -10,6 +10,12 @@
 CHANGES=()
 REDS=()
 PENDING=()
+# 不计入退出码、但结论里要单列的：别家单元的 P02 问题；其中会话或服务身份改得了的，是会话上线前必须清零的
+OTHERS=()
+MUSTCLEAR=()
+# 本机上「会话或服务身份」有哪些：P02 自检用它们判别家的问题会不会被我们自己的进程利用。由各装机脚本设置。
+WRITER_IDENTITIES=(fleet)
+SESSION_USERS=() # AI 会话专用用户（只有法国有）
 WROTE=0 # 最近一次 put_file / ensure_* 有没有动手；调用方据此决定要不要重启服务
 
 step() { printf '\n== %s\n' "$*"; }
@@ -41,6 +47,13 @@ finish() {
   if ((${#PENDING[@]})); then
     printf '待配 / 没查成 %d 项：\n' "${#PENDING[@]}"
     printf '  - %s\n' "${PENDING[@]}"
+  fi
+  if ((${#OTHERS[@]})); then
+    printf '别家单元以 root 执行别人能改的文件 %d 处（不归 fleet-dao 管，不计入退出码，交人处置）\n' "${#OTHERS[@]}"
+  fi
+  if ((${#MUSTCLEAR[@]})); then
+    printf '会话上线前必须清零 %d 项（别家单元，但 fleet 或会话用户改得了、又被 root 执行；不计入退出码）：\n' "${#MUSTCLEAR[@]}"
+    printf '  - %s\n' "${MUSTCLEAR[@]}"
   fi
   if ((${#REDS[@]})); then
     printf '红 %d 项：\n' "${#REDS[@]}"
@@ -108,6 +121,15 @@ ensure_dir() { # 路径 属主:组 权限
   fi
   install -d -o "${own%%:*}" -g "${own##*:}" -m "$mode" -- "$path"
   changed "建目录 $path（$own $mode）"
+}
+
+# 早先的版本装过、现在不要了的东西：在就删掉（只删装机脚本自己放的东西，路径逐个写死）
+remove_legacy() { # 路径 说明
+  WROTE=0
+  if [[ -e "$1" || -L "$1" ]]; then
+    rm -f -- "$1"
+    changed "撤掉$2：$1"
+  fi
 }
 
 ensure_symlink() { # 链接 指向
@@ -333,13 +355,15 @@ readback_secrets_dir() {
   else
     ok "组 fleet 没有附加成员"
   fi
-  if id orca >/dev/null 2>&1; then
-    if runuser -u orca -- ls /etc/fleet-dao >/dev/null 2>&1; then
-      red "orca 读得到 /etc/fleet-dao"
+  local u
+  for u in orca "${SESSION_USERS[@]}"; do
+    id "$u" >/dev/null 2>&1 || continue
+    if runuser -u "$u" -- ls /etc/fleet-dao >/dev/null 2>&1; then
+      red "$u 读得到 /etc/fleet-dao"
     else
-      ok "orca 读不到 /etc/fleet-dao"
+      ok "$u 读不到 /etc/fleet-dao"
     fi
-  fi
+  done
   # 里面每个文件（手放进来的密钥也算）：属 root，组只许读，其他人什么都不许
   local f bad=0 n=0 mode
   while IFS= read -r -d '' f; do
@@ -353,28 +377,38 @@ readback_secrets_dir() {
   if ((bad == 0)); then ok "/etc/fleet-dao 里 $n 个文件都属 root、组只读、其他人无权限"; fi
 }
 
-# 自检（审计 P02）：机器上以 root 执行的文件全链属 root、组和其他人不可写，否则装机判红。
+# 自检（审计 P02）：以 root 执行的文件要全链属 root、组和其他人不可写。
+# 只有 fleet-dao 自己的单元违规才算装机红；别家单元单独列出、不计入退出码；
+# 别家的问题里，fleet 或会话用户自己就改得了的（我们的进程被打穿就能借它拿 root），单列成「会话上线前必须清零」。
 self_check_root_exec() {
   step "自检：以 root 执行的文件（审计 P02）"
-  local rc=0 line unit
+  local rc=0 line unit path why node u who shown ours=0
   root_exec_check || rc=$?
   if ((rc == 2)); then
     pending "没查成：拿不到 systemctl show 的输出"
     return 0
   fi
-  if ((rc == 0)); then
-    ok "以 root 执行的文件都全链属 root、组和其他人不可写"
-    return 0
-  fi
   for line in "${REC_VIOLATIONS[@]}"; do
-    unit=${line%%$'\t'*}
-    line=${line//$'\t'/ | }
+    IFS=$'\t' read -r unit path why node <<<"$line"
+    shown="$unit | $path | $why"
     if [[ "$unit" =~ $SNAPSHOT_OURS_UNITS_RE ]]; then
-      red "fleet-dao 自己的单元：$line"
+      red "fleet-dao 自己的单元：$shown"
+      ours=1
+      continue
+    fi
+    who=""
+    for u in "${WRITER_IDENTITIES[@]}"; do
+      if [[ -n "$node" ]] && id "$u" >/dev/null 2>&1 && runuser -u "$u" -- test -w "$node" 2>/dev/null; then who+=" $u"; fi
+    done
+    if [[ -n "$who" ]]; then
+      MUSTCLEAR+=("$shown（${who# } 就能改）")
+      printf '  ! 会话上线前必须清零：%s（%s 就能改）\n' "$shown" "${who# }"
     else
-      red "别的单元（不归 fleet-dao 管，修它要动旧系统，交人拍）：$line"
+      OTHERS+=("$shown")
+      printf '  · 别家单元（不计入退出码）：%s\n' "$shown"
     fi
   done
+  if ((ours == 0)); then ok "fleet-dao 自己的单元：以 root 执行的文件都全链属 root、组和其他人不可写"; fi
 }
 
 # 装机前后，不归 fleet-dao 管的单元状态、监听端口、防火墙应当一模一样。

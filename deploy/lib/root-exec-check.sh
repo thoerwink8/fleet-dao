@@ -11,11 +11,13 @@
 
 REC_PROPS=Id,LoadState,User,DynamicUser,WorkingDirectory,EnvironmentFiles,ExecConditionEx,ExecStartPreEx,ExecStartEx,ExecStartPostEx,ExecReloadEx,ExecStopEx,ExecStopPostEx
 REC_INTERP_RE='^(node|nodejs|bun|deno|tsx|python[0-9.]*|bash|sh|dash|zsh|perl|ruby|php[0-9.]*|lua[0-9.]*)$'
-REC_SCRIPT_RE='[.](sh|bash|js|mjs|cjs|ts|mts|cts|py|pl|rb|php|lua|jar)$'
+REC_SCRIPT_RE='[.](sh|bash|js|mjs|cjs|ts|mts|cts|py|pl|rb|php|lua|jar|nft)$'
 declare -gA REC_NODE=()    # 路径节点 → 违规原因（空 = 干净）；每个节点只 stat 一次
 declare -gA REC_VERDICT=() # 被查路径 → 违规原因（空 = 干净）
-REC_VIOLATIONS=()          # 每条：单元<TAB>路径（用途）<TAB>原因
+declare -gA REC_CULPRIT=() # 被查路径 → 出问题的那个节点（文件本身或某级父目录）
+REC_VIOLATIONS=()          # 每条：单元<TAB>路径（用途）<TAB>原因<TAB>出问题的节点
 REC_WHY=""
+REC_AT="" # 最近一次判出问题的节点
 
 rec_show() {
   if [[ -n "${ROOT_EXEC_CHECK_SHOW:-}" ]]; then
@@ -93,16 +95,23 @@ rec_node() {
 rec_chain() {
   local d=$1
   REC_WHY=""
+  REC_AT=""
   if [[ -e "$d" || -L "$d" ]]; then
     rec_node "$d"
-    if [[ -n "$REC_WHY" ]]; then return 0; fi
+    if [[ -n "$REC_WHY" ]]; then
+      REC_AT=$d
+      return 0
+    fi
   fi
   while [[ "$d" != / ]]; do
     d=${d%/*}
     d=${d:-/}
     if [[ -e "$d" ]]; then
       rec_node "$d"
-      if [[ -n "$REC_WHY" ]]; then return 0; fi
+      if [[ -n "$REC_WHY" ]]; then
+        REC_AT=$d
+        return 0
+      fi
     fi
   done
   return 0
@@ -113,6 +122,7 @@ rec_check_path() { # 单元 路径 用途
   [[ "$p" == /* ]] || return 0
   if [[ -n "${REC_VERDICT[$p]+查过}" ]]; then
     REC_WHY=${REC_VERDICT[$p]}
+    REC_AT=${REC_CULPRIT[$p]}
   else
     rec_chain "$p"
     if [[ -z "$REC_WHY" ]]; then
@@ -121,8 +131,9 @@ rec_check_path() { # 单元 路径 用途
       if [[ "$real" != "$p" ]]; then rec_chain "$real"; fi
     fi
     REC_VERDICT[$p]=$REC_WHY
+    REC_CULPRIT[$p]=$REC_AT
   fi
-  if [[ -n "$REC_WHY" ]]; then REC_VIOLATIONS+=("$unit	$p（$use）	$REC_WHY"); fi
+  if [[ -n "$REC_WHY" ]]; then REC_VIOLATIONS+=("$unit	$p（$use）	$REC_WHY	$REC_AT"); fi
   return 0
 }
 

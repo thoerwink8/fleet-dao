@@ -71,30 +71,36 @@ snapshot_file_list() {
 }
 
 snapshot_ours() {
+  local u
   echo "## identity"
-  getent passwd fleet || echo "passwd fleet: 无"
-  getent group fleet || echo "group fleet: 无"
+  for u in fleet fleet-agent-dedicated fleet-agent-carpool; do
+    getent passwd "$u" || echo "passwd $u: 无"
+    getent group "$u" || echo "group $u: 无"
+  done
   echo "## files"
   snapshot_file_list /etc/fleet-dao /opt/fleet-dao /srv/fleet-dao-web /var/www/fleet-dao-acme \
     /etc/wireguard /etc/postgresql/16/main /etc/apt/sources.list.d /etc/apt/keyrings \
     /usr/local/bin/fleet-temporal /usr/local/sbin/fleet-agent-scope /etc/sudoers.d/fleet-dao /home/fleet/.local/bin \
+    /home/fleet-agent-dedicated/.local/bin /home/fleet-agent-carpool/.local/bin \
     /etc/nginx/sites-available/fleet-dao /etc/nginx/sites-enabled/fleet-dao
+  echo "## nft"
+  nft list table inet fleet_dao 2>&1 || true
   if command -v ufw >/dev/null 2>&1; then
     echo "## ufw（fleet-dao 加的）"
     ufw show added 2>/dev/null | grep -F 'wg-fleet' || echo "（无）"
   fi
   find /etc/systemd/system /etc/letsencrypt/live /etc/letsencrypt/renewal -maxdepth 2 -name '*fleet*' -print0 2>/dev/null |
     sort -z | while IFS= read -r -d '' f; do snapshot_file_list "$f"; done
-  for d in /srv/fleet-dao /var/lib/fleet-dao /var/log/fleet-dao /home/fleet; do
-    [[ -e "$d" ]] && printf 'dir  %s %s\n' "$(stat -c '%U:%G %a' "$d")" "$d"
+  for d in /srv/fleet-dao /var/lib/fleet-dao /var/log/fleet-dao /home/fleet /home/fleet-agent-dedicated /home/fleet-agent-carpool; do
+    if [[ -e "$d" ]]; then printf 'dir  %s %s\n' "$(stat -c '%U:%G %a' "$d")" "$d"; fi
   done
   echo "## packages"
   dpkg-query -W -f '${Package} ${Version} ${Status}\n' postgresql-16 postgresql-common libpq5 wireguard-tools \
-    nginx certbot 2>/dev/null | sort
+    nftables nginx certbot 2>/dev/null | sort
   echo "## units"
-  systemctl show -p Id,UnitFileState,ActiveState,SubState,MainPID,NRestarts,ExecMainStartTimestampMonotonic \
-    fleet-temporal.service fleet-agents.slice postgresql@16-main.service wg-quick@wg-fleet.service nginx.service \
-    2>/dev/null | awk 'BEGIN { RS = ""; FS = "\n"; OFS = " " } { $1 = $1; print }'
+  systemctl show -p Id,UnitFileState,ActiveState,SubState,MainPID,NRestarts,ExecMainStartTimestampMonotonic,Restart \
+    fleet-temporal.service fleet-agents.slice fleet-firewall.service postgresql@16-main.service wg-quick@wg-fleet.service \
+    nginx.service 2>/dev/null | awk 'BEGIN { RS = ""; FS = "\n"; OFS = " " } { $1 = $1; print }'
   echo "## postgres"
   # 先 cd /：runuser 不换当前目录，postgres 进不了 /root 会多打一行警告，混进快照
   if command -v psql >/dev/null 2>&1 && id postgres >/dev/null 2>&1; then

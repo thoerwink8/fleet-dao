@@ -138,10 +138,13 @@ default_site_codes() {
 setup_site() {
   step "nginx 站点（$SITE_AVAILABLE）"
   ensure_pkgs nginx
-  ensure_dir "$WEB_ROOT" fleet:fleet 755
-  # 占位页只在还没有首页时放：驾驶舱真正发布之后，这一步不能把它盖掉
-  if [[ ! -e "$WEB_ROOT/index.html" ]]; then
-    put_file "$WEB_ROOT/index.html" fleet:fleet 644 "$(<"$DEPLOY_DIR/hk/placeholder.html")"
+  # 驾驶舱页面归 root：以后飞书网关以 fleet 跑在这台，网关被打穿也改不了驾驶舱的页面
+  ensure_dir "$WEB_ROOT" root:root 755
+  # 占位页只在还没有首页时放：驾驶舱真正发布之后，这一步不能把它盖掉（只管属主和权限）
+  if [[ -e "$WEB_ROOT/index.html" ]]; then
+    fix_meta "$WEB_ROOT/index.html" root:root 644
+  else
+    put_file "$WEB_ROOT/index.html" root:root 644 "$(<"$DEPLOY_DIR/hk/placeholder.html")"
   fi
   ensure_dir "$ACME_ROOT" root:root 755
   local name=${FLEET_DOMAIN:-$PLACEHOLDER_NAME} tpl=nginx-http.conf old="" had=0 site_changed before after why

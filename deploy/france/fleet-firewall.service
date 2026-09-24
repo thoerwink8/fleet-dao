@@ -1,0 +1,19 @@
+# fleet-dao 的 nft 表（/etc/fleet-dao/nftables.nft）：Temporal、库、驾驶舱后端的端口在本机只许 root 和 fleet 连。
+# deploy/france.sh 装到 /etc/systemd/system/；改这份、再跑一遍装机脚本，别在机器上手改。停掉它就是撤掉这张表。
+[Unit]
+Description=fleet-dao 的 nft 表：Temporal、库、驾驶舱后端只许 root 和 fleet 连
+Documentation=https://github.com/thoerwink8/fleet-dao/blob/main/docs/ops.md
+DefaultDependencies=no
+Wants=network-pre.target
+Before=network-pre.target shutdown.target fleet-temporal.service postgresql.service
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/fleet-dao/nftables.nft
+ExecReload=/usr/sbin/nft -f /etc/fleet-dao/nftables.nft
+ExecStop=/usr/sbin/nft delete table inet fleet_dao
+
+[Install]
+WantedBy=multi-user.target

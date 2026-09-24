@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # shellcheck source-path=SCRIPTDIR
-# 法国机器装机（以 root 跑；幂等：跑第二遍什么都不变）。装的是：系统用户 fleet 与目录、PostgreSQL 16（官方 PGDG 源）、
-# Temporal 服务端 1.32.0（Postgres 持久化，端口和旧系统错开）、AI 会话资源池 fleet-agents.slice（只记账）、
+# 法国机器装机（以 root 跑；幂等：跑第二遍什么都不变）。装的是：引擎用户 fleet 与两个会话专用用户、目录、
+# PostgreSQL 16（Ubuntu 自带的源，吃得到自动安全更新）、Temporal 服务端 1.32.0（Postgres 持久化，端口和旧系统错开）、
+# 本机上只许 root 和 fleet 连 Temporal 与库的 nft 表、AI 会话资源池 fleet-agents.slice 与起会话的脚本、
 # fleet 用户的 pnpm（corepack）、WireGuard 客户端（主动连香港，法国不开任何入站端口）。
 # 旧系统的服务、端口、文件一概不动。端口表、怎么跑、怎么看健康、怎么回滚：docs/ops.md。
 #   bash deploy/france.sh           装：缺的补上，已有的不动
@@ -23,9 +24,7 @@ TEMPORAL_SERVER_VERSION=1.32.0
 TEMPORAL_SERVER_SHA256=ca1ccbb1d1545b68eb4523de463c51ffcd80f7e0bccd14a9b2c56fc7e389e792
 TEMPORAL_CLI_VERSION=1.9.1
 TEMPORAL_CLI_SHA256=09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5
-PG_MAJOR=16 # Temporal 官方测过的最高大版本（13.18/14.15/15.10/16.6）
-PGDG_KEY_URL=https://www.postgresql.org/media/keys/ACCC4CF8.asc
-PGDG_KEY_FPR=B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8
+PG_MAJOR=16 # Temporal 官方测过的最高大版本（13.18/14.15/15.10/16.6）；Ubuntu 24.04 自带的源里就是 16
 
 # ── 端口：全部只绑本机，和旧系统的开发版 Temporal（7233/8233 与一批临时端口）错开。改了同步 docs/ops.md ──
 PG_PORT=5432
@@ -49,8 +48,13 @@ WG_ADDR=10.99.0.2/24
 WG_HK_ADDR=10.99.0.1
 # 驾驶舱后端在隧道地址上的端口（packages/api 的 FLEET_COCKPIT_LISTEN）：只对香港开，只在隧道网卡上开
 API_PORT=8787
-# AI 会话以 orca 跑（CLI 的登录态都在它家里）；引擎以 fleet 跑，经 sudo 只能调 fleet-agent-scope 这一个脚本起会话
-AGENT_USER=orca
+# 本机上只许 root 和 fleet 连的端口：Temporal 没开认证，库和驾驶舱后端也不该让会话直接碰（nft 表 inet fleet_dao）
+PROTECTED_PORTS=("$PG_PORT" "${TEMPORAL_PORTS[@]}" "$API_PORT")
+NFT_FILE=/etc/fleet-dao/nftables.nft
+# AI 会话跑在两个专用用户下，各挂一个 reclaude 组织、永不切号（独享、拼车）；引擎（fleet）经 sudo 只能调 fleet-agent-scope 起会话。
+# 会话用户：没有 sudo、不能提权、家目录干净、没有 GitHub 凭据、读不到 /etc/fleet-dao。旧系统的 orca 不用、不碰。
+SESSION_USERS=(fleet-agent-dedicated fleet-agent-carpool)
+WRITER_IDENTITIES=(fleet "${SESSION_USERS[@]}")
 AGENT_SCOPE_BIN=/usr/local/sbin/fleet-agent-scope
 SUDOERS_FILE=/etc/sudoers.d/fleet-dao
 ENV_FILE=/etc/fleet-dao/france.env
@@ -119,10 +123,14 @@ setup_identity() {
   ensure_dir /var/lib/fleet-dao fleet:fleet 750
   ensure_dir /var/log/fleet-dao fleet:fleet 750
   ensure_dir /etc/fleet-dao root:fleet 750
-  # 两个 GitHub 机器人的私钥放这里（root:fleet 640，手放，不进 git）：引擎读得到，orca 读不到
+  # 两个 GitHub 机器人的私钥放这里（root:fleet 640，手放，不进 git）：引擎读得到，会话用户和 orca 读不到
   ensure_dir /etc/fleet-dao/github root:fleet 750
   ensure_dir /opt/fleet-dao root:root 755
-  ensure_service_user "$AGENT_USER" "/home/$AGENT_USER"
+  local u
+  for u in "${SESSION_USERS[@]}"; do
+    ensure_service_user "$u" "/home/$u"
+    ensure_dir "/home/$u" "$u:$u" 750
+  done
   if [[ -e "$ENV_FILE" ]]; then
     fix_meta "$ENV_FILE" root:fleet 640
   else
@@ -136,45 +144,16 @@ load_config() {
   ok "本机配置 $ENV_FILE：香港地址$(filled "$FLEET_WG_HK_ENDPOINT")，香港公钥$(filled "$FLEET_WG_HK_PUBLIC_KEY")"
 }
 
-# 签名公钥的指纹。用一次性的 GNUPGHOME：不在 root 家里留下 ~/.gnupg
-key_fpr() {
-  local home out
-  home=$(mktemp -d)
-  out=$(GNUPGHOME=$home gpg --batch --quiet --show-keys --with-colons "$1" 2>/dev/null) || out=""
-  rm -rf -- "$home"
-  awk -F: '$1 == "fpr" { print $10; exit }' <<<"$out"
-}
-
 setup_packages() {
-  step "装包（PostgreSQL 官方源 + WireGuard 工具）"
-  local key=/etc/apt/keyrings/pgdg.asc tmp fpr
-  ensure_dir /etc/apt/keyrings root:root 755
-  if [[ -f "$key" && "$(key_fpr "$key")" == "$PGDG_KEY_FPR" ]]; then
-    fix_meta "$key" root:root 644
-  else
-    tmp=$(mktemp)
-    if ! curl -fsSL --retry 3 --max-time 60 -o "$tmp" "$PGDG_KEY_URL"; then
-      rm -f -- "$tmp"
-      red "下载 PGDG 签名公钥失败：$PGDG_KEY_URL"
-      return 1
-    fi
-    fpr=$(key_fpr "$tmp")
-    if [[ "$fpr" != "$PGDG_KEY_FPR" ]]; then
-      rm -f -- "$tmp"
-      red "下载到的 PGDG 签名公钥指纹是「$fpr」，应为 $PGDG_KEY_FPR——不装"
-      return 1
-    fi
-    put_file "$key" root:root 644 "$(<"$tmp")"
-    rm -f -- "$tmp"
-  fi
-  put_file /etc/apt/sources.list.d/pgdg.sources root:root 644 "# PostgreSQL 官方源（PGDG），deploy/france.sh 加的；签名公钥指纹 $PGDG_KEY_FPR。
-Types: deb
-URIs: https://apt.postgresql.org/pub/repos/apt
-Suites: $CODENAME-pgdg
-Components: main
-Signed-By: $key"
-  if ((WROTE)); then APT_UPDATED=0; fi
-  ensure_pkgs "postgresql-$PG_MAJOR" wireguard-tools
+  step "装包（PostgreSQL 用 Ubuntu 自带的源，吃得到自动安全更新）"
+  # 早先的版本加过 PostgreSQL 的 PGDG 源：撤掉。已经从 PGDG 装上的包不会因此变，读回会查出来
+  local removed=0
+  remove_legacy /etc/apt/sources.list.d/pgdg.sources "早先加的 PGDG 源"
+  removed=$((removed || WROTE))
+  remove_legacy /etc/apt/keyrings/pgdg.asc "早先加的 PGDG 签名公钥"
+  removed=$((removed || WROTE))
+  if ((removed)); then APT_UPDATED=0; fi
+  ensure_pkgs "postgresql-$PG_MAJOR" wireguard-tools nftables
 }
 
 setup_wireguard() {
@@ -221,35 +200,33 @@ temporal_login_ok() {
     psql -X -q -h 127.0.0.1 -p "$PG_PORT" -U temporal -d temporal -tAc 'select 1' >/dev/null 2>&1
 }
 
-wg_addr_up() {
-  local addrs
-  addrs=$(ip -4 -o addr show dev "$WG_IF" 2>/dev/null) || addrs=""
-  [[ "$addrs" == *" ${WG_ADDR%/*}/"* ]]
-}
-
-pg_listening_on() { [[ "$(ss -Hltn "sport = :$PG_PORT" 2>/dev/null)" == *" $1:$PG_PORT "* ]]; }
-
 setup_postgres() {
   step "PostgreSQL $PG_MAJOR"
-  local conf_dir=/etc/postgresql/$PG_MAJOR/main port restart i role db owner
-  if [[ ! -f "$conf_dir/postgresql.conf" ]]; then
-    red "没找到集群 $PG_MAJOR/main（$conf_dir）：装 postgresql-$PG_MAJOR 时它应当自动建好"
-    return 1
+  local conf_dir=/etc/postgresql/$PG_MAJOR/main port restart unit_changed=0 i role db owner
+  # 集群平时由装包顺手建好；包是后换的（比如从别的源换回来）时可能没有，补上
+  if [[ -z "$(pg_lsclusters -h | awk -v v="$PG_MAJOR" '$1 == v && $2 == "main"')" ]]; then
+    pg_createcluster "$PG_MAJOR" main >/dev/null
+    changed "建集群 $PG_MAJOR/main"
   fi
   port=$(pg_lsclusters -h | awk -v v="$PG_MAJOR" '$1 == v && $2 == "main" { print $3 }')
   if [[ "$port" != "$PG_PORT" ]]; then
     red "集群 $PG_MAJOR/main 的端口是「$port」，不是 $PG_PORT"
     return 1
   fi
-  put_file "$conf_dir/conf.d/fleet.conf" root:root 644 "# deploy/france.sh 写的：只听本机和 WireGuard 地址（法国不对公网开端口）。改了要重启库。
-listen_addresses = 'localhost,${WG_ADDR%/*}'"
+  put_file "$conf_dir/conf.d/fleet.conf" root:root 644 "# deploy/france.sh 写的：只听本机（法国不对外开端口，隧道那头也没人要直连库）。改了要重启库。
+listen_addresses = 'localhost'"
   restart=$WROTE
   ensure_dir "/etc/systemd/system/$PG_UNIT.d" root:root 755
-  put_file "/etc/systemd/system/$PG_UNIT.d/fleet-wireguard.conf" root:root 644 "# deploy/france.sh 写的：库要在 WireGuard 地址起来之后再起，否则 listen_addresses 里那个地址绑不上（库照样起，但之后再也不听它）。
-[Unit]
-After=wg-quick@$WG_IF.service
-Wants=wg-quick@$WG_IF.service"
-  if ((WROTE)); then systemctl daemon-reload; fi
+  # 装包自带的集群单元是 Restart=no：进程没了就一直躺着。always 连干净退出也拉起来（审计 P06）
+  put_file "/etc/systemd/system/$PG_UNIT.d/fleet.conf" root:root 644 "# deploy/france.sh 写的：库的进程没了（崩了、被杀了、干净退出了）都拉起来。
+[Service]
+Restart=always
+RestartSec=5"
+  unit_changed=$WROTE
+  # 早先的版本让库排在隧道之后起：wg-quick 起动没有超时，会把库一起拖住，而隧道上也没人连库
+  remove_legacy "/etc/systemd/system/$PG_UNIT.d/fleet-wireguard.conf" "早先让库等隧道的 drop-in"
+  unit_changed=$((unit_changed || WROTE))
+  if ((unit_changed)); then systemctl daemon-reload; fi
   # 集群单元由 postgresql.service 按 Debian 的方式拉起（装包时已启用），这里只管它在跑
   if [[ "$(systemctl is-active "$PG_UNIT" 2>/dev/null)" != active ]]; then
     systemctl start "$PG_UNIT"
@@ -257,10 +234,6 @@ Wants=wg-quick@$WG_IF.service"
   elif ((restart)); then
     systemctl restart "$PG_UNIT"
     changed "重启 $PG_UNIT（监听地址变了）"
-  fi
-  if wg_addr_up && ! pg_listening_on "${WG_ADDR%/*}"; then
-    systemctl restart "$PG_UNIT"
-    changed "重启 $PG_UNIT：它比隧道先起，漏听了 ${WG_ADDR%/*}"
   fi
   for ((i = 0; i < 30; i++)); do
     if pg_isready -q -h 127.0.0.1 -p "$PG_PORT"; then break; fi
@@ -464,7 +437,7 @@ setup_slice() {
   put_file /etc/systemd/system/fleet-agents.slice root:root 644 "$(<"$DEPLOY_DIR/france/fleet-agents.slice")"
   if ((WROTE)); then systemctl daemon-reload; fi
   ensure_unit_running fleet-agents.slice 0
-  # 引擎（fleet）自己建不了系统级 scope，会话还得以 orca 跑：给它一个只做这件事的 root 脚本，sudoers 只放行这一个。
+  # 引擎（fleet）自己建不了系统级 scope，会话还得换成会话用户：给它一个只做这件事的 root 脚本，sudoers 只放行这一个。
   # polkit 管不窄——systemd 255 建临时单元时不把单元名交给 polkit，放行就等于放行任何单元、任何身份。
   put_file "$AGENT_SCOPE_BIN" root:root 755 "$(<"$DEPLOY_DIR/france/fleet-agent-scope.sh")"
   local tmp
@@ -485,21 +458,44 @@ setup_slice() {
   fi
 }
 
-# 驾驶舱后端的端口只对隧道那头的香港开：规则挂在隧道网卡上，公网照旧一个入站端口都不开
 setup_firewall() {
-  step "防火墙（只在隧道网卡上放行香港访问驾驶舱后端 $API_PORT）"
-  local rule="allow in on $WG_IF from $WG_HK_ADDR to ${WG_ADDR%/*} port $API_PORT proto tcp"
-  if ! command -v ufw >/dev/null || [[ "$(ufw status 2>/dev/null | head -1)" != "Status: active" ]]; then
-    ok "这台没开 ufw，不用放行"
-    return 0
+  step "防火墙（隧道上放行香港访问驾驶舱后端；本机上 Temporal、库、后端只许 root 和 fleet 连）"
+  # 驾驶舱后端的端口只对隧道那头的香港开：规则挂在隧道网卡上，公网照旧一个入站端口都不开
+  local rule="allow in on $WG_IF from $WG_HK_ADDR to ${WG_ADDR%/*} port $API_PORT proto tcp" ports tmp err file_changed unit_changed
+  if command -v ufw >/dev/null && [[ "$(ufw status 2>/dev/null | head -1)" == "Status: active" ]]; then
+    if [[ "$(ufw show added 2>/dev/null)" == *"ufw $rule"* ]]; then
+      ok "ufw 已有：$rule"
+    else
+      # shellcheck disable=SC2086 # 规则按词拆开传给 ufw
+      ufw $rule comment 'fleet-dao cockpit api over wireguard' >/dev/null
+      changed "ufw $rule"
+    fi
+  else
+    ok "这台没开 ufw，隧道上不用另外放行"
   fi
-  if [[ "$(ufw show added 2>/dev/null)" == *"ufw $rule"* ]]; then
-    ok "ufw 已有：$rule"
-    return 0
+  # 本机上谁能连 Temporal、库、驾驶舱后端：只许 root 和 fleet（按连接发起方的属主）。会话用户连上去就被复位
+  ports=$(printf '%s, ' "${PROTECTED_PORTS[@]}")
+  render "$DEPLOY_DIR/france/fleet-dao.nft" PORTS="${ports%, }" FLEET_UID="$(id -u fleet)"
+  tmp=$(mktemp)
+  printf '%s\n' "$RENDERED" >"$tmp"
+  # 规则写错了载不进去：先验这一份，过了才放上去
+  if ! err=$(nft -c -f "$tmp" 2>&1); then
+    rm -f -- "$tmp"
+    red "deploy/france/fleet-dao.nft 渲染后过不了 nft -c：$(head -3 <<<"$err" | tr '\n' ' ')"
+    return 1
   fi
-  # shellcheck disable=SC2086 # 规则按词拆开传给 ufw
-  ufw $rule comment 'fleet-dao cockpit api over wireguard' >/dev/null
-  changed "ufw $rule"
+  rm -f -- "$tmp"
+  put_file "$NFT_FILE" root:fleet 640 "$RENDERED"
+  file_changed=$WROTE
+  put_file /etc/systemd/system/fleet-firewall.service root:root 644 "$(<"$DEPLOY_DIR/france/fleet-firewall.service")"
+  unit_changed=$WROTE
+  if ((unit_changed)); then systemctl daemon-reload; fi
+  if [[ "$(systemctl is-active fleet-firewall.service 2>/dev/null)" == active ]] && ((file_changed || unit_changed)); then
+    # 表是在一个事务里删了重建的，reload 不会有空窗；restart 会先删表，中间有一小段谁都能连
+    systemctl reload fleet-firewall.service
+    changed "重载 fleet-firewall（nft 表换成新规则）"
+  fi
+  ensure_unit_running fleet-firewall.service 0
 }
 
 pnpm_want() { /usr/bin/node -p 'require(process.argv[1]).packageManager' "$DEPLOY_DIR/../package.json"; }
@@ -536,6 +532,7 @@ readback() {
   readback_postgres
   readback_temporal
   readback_slice
+  readback_session_users
   readback_sessions
   readback_pnpm
   readback_wireguard
@@ -543,9 +540,36 @@ readback() {
   readback_service_home
 }
 
-# 真起一个会话走一遍：fleet 经 sudo 调脚本 → 落进 fleet-agents.slice 下自己的 scope → 身份是 orca、附加组干净、上限写进了 cgroup
+# 会话用户：没有 sudo、只在自己的组里、家里没有 GitHub 凭据；reclaude 登录要创始人在浏览器里点，没登录记「待配」
+readback_session_users() {
+  local u home bad f
+  for u in "${SESSION_USERS[@]}"; do
+    home=$(getent passwd "$u" | cut -d: -f6)
+    bad=""
+    if [[ "$(sudo -l -U "$u" 2>&1)" != *"not allowed to run sudo"* ]]; then bad+="有 sudo 条目；"; fi
+    if [[ "$(id -nG "$u")" != "$u" ]]; then bad+="附加组「$(id -nG "$u")」；"; fi
+    for f in .config/gh .git-credentials .netrc .ssh; do
+      if [[ -e "$home/$f" ]]; then bad+="家里有 ~/$f；"; fi
+    done
+    if [[ -n "$bad" ]]; then
+      red "$u：$bad"
+    else
+      ok "$u：没有 sudo、只在自己的组里、家里没有 GitHub 凭据和 ssh 钥匙"
+    fi
+    if [[ ! -x "$home/.local/bin/reclaude" ]]; then
+      pending "$u 还没有 reclaude 二进制（~/.local/bin/reclaude）：见 docs/ops.md「会话用户登录 reclaude」"
+    elif [[ ! -s "$home/.reclaude/device.json" ]]; then
+      pending "$u 的 reclaude 还没登录：要创始人在浏览器里授权，见 docs/ops.md「会话用户登录 reclaude」"
+    else
+      ok "$u 的 reclaude 已登录"
+    fi
+  done
+}
+
+# 真起一个会话走一遍：fleet 经 sudo 调脚本 → 落进 fleet-agents.slice 下自己的 scope → 身份是会话用户、不带 root 组、
+# 提不了权（NoNewPrivs=1）、上限写进了 cgroup
 readback_sessions() {
-  local id out want_cg
+  local id out want_cg user=${SESSION_USERS[0]} lines=()
   if [[ "$(sudo -l -U fleet 2>/dev/null)" == *"NOPASSWD: $AGENT_SCOPE_BIN"* ]]; then
     ok "sudoers：fleet 只能以 root 跑 $AGENT_SCOPE_BIN"
   else
@@ -557,24 +581,51 @@ readback_sessions() {
   id=readback-$$
   want_cg="0::/fleet.slice/fleet-agents.slice/fleet-agent-$id.scope"
   # shellcheck disable=SC2016 # 单引号里的东西要在会话里展开，不是在这里
-  out=$(as_user fleet /usr/bin/sudo -n "$AGENT_SCOPE_BIN" run "$id" --memory-max 64M --tasks-max 16 -- \
-    /bin/sh -c 'id -un; id -G; cat /proc/self/cgroup; cat "/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/memory.max"' 2>&1) || true
-  local lines=()
+  out=$(as_user fleet /usr/bin/sudo -n "$AGENT_SCOPE_BIN" run "$id" --user "$user" --memory-max 64M --tasks-max 16 -- \
+    /bin/sh -c 'id -un; id -G; cat /proc/self/cgroup; cat "/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/memory.max"; awk "/^NoNewPrivs/ { print \$2 }" /proc/self/status' 2>&1) || true
   mapfile -t lines <<<"$out"
-  if [[ "${lines[0]:-}" == "$AGENT_USER" && " ${lines[1]:-0} " != *" 0 "* && "${lines[2]:-}" == "$want_cg" && "${lines[3]:-}" == 67108864 ]]; then
-    ok "起会话走得通：fleet → sudo → $AGENT_USER（不带 root 组），落在 ${want_cg#0::}，上限写进了 cgroup"
+  if [[ "${lines[0]:-}" == "$user" && " ${lines[1]:-0} " != *" 0 "* && "${lines[2]:-}" == "$want_cg" && "${lines[3]:-}" == 67108864 && "${lines[4]:-}" == 1 ]]; then
+    ok "起会话走得通：fleet → sudo → $user（不带 root 组、提不了权），落在 ${want_cg#0::}，上限写进了 cgroup"
   else
     red "起会话没走通，读到：$(tr '\n' '|' <<<"$out")"
   fi
 }
 
+# 以某个用户去连本机某个端口：连上返回 0；被拒、超时都返回非 0
+connect_as() { # 用户 端口
+  (cd / && runuser -u "$1" -- timeout 3 bash -c "exec 3<>/dev/tcp/127.0.0.1/$2") >/dev/null 2>&1
+}
+
 readback_firewall() {
-  local rule="allow in on $WG_IF from $WG_HK_ADDR to ${WG_ADDR%/*} port $API_PORT proto tcp"
-  if ! command -v ufw >/dev/null || [[ "$(ufw status 2>/dev/null | head -1)" != "Status: active" ]]; then return 0; fi
-  if [[ "$(ufw show added 2>/dev/null)" == *"ufw $rule"* ]]; then
-    ok "ufw 只在隧道网卡上给香港开了 $API_PORT"
+  local rule="allow in on $WG_IF from $WG_HK_ADDR to ${WG_ADDR%/*} port $API_PORT proto tcp" u port bad=0
+  if command -v ufw >/dev/null && [[ "$(ufw status 2>/dev/null | head -1)" == "Status: active" ]]; then
+    if [[ "$(ufw show added 2>/dev/null)" == *"ufw $rule"* ]]; then
+      ok "ufw 只在隧道网卡上给香港开了 $API_PORT"
+    else
+      red "ufw 里没有「$rule」：香港转过来的驾驶舱请求会被挡"
+    fi
+  fi
+  if [[ "$(systemctl is-active fleet-firewall.service 2>/dev/null)" != active ]] || ! nft list table inet fleet_dao >/dev/null 2>&1; then
+    red "nft 表 inet fleet_dao 不在：会话能直接连 Temporal 给工作流发信号"
+    return 0
+  fi
+  # 真连一次：会话用户连不上 Temporal 前端和库，fleet 连得上
+  for u in "${SESSION_USERS[@]}"; do
+    for port in "$TEMPORAL_FRONTEND_PORT" "$PG_PORT"; do
+      if connect_as "$u" "$port"; then
+        red "$u 连得上 127.0.0.1:$port"
+        bad=1
+      fi
+    done
+  done
+  if ((bad == 0)); then ok "会话用户连不上 Temporal（$TEMPORAL_FRONTEND_PORT）和库（$PG_PORT）"; fi
+  if connect_as fleet "$TEMPORAL_FRONTEND_PORT" && connect_as fleet "$PG_PORT"; then
+    ok "fleet 连得上 Temporal 和库"
   else
-    red "ufw 里没有「$rule」：香港转过来的驾驶舱请求会被挡"
+    red "fleet 连不上 Temporal 或库：nft 表拦错了人"
+  fi
+  if [[ "$(systemctl is-enabled nftables.service 2>/dev/null)" == enabled ]]; then
+    red "nftables.service 被启用了：它开机会 flush ruleset，把 ufw 的规则和这张表一起冲掉"
   fi
 }
 
@@ -594,19 +645,26 @@ readback_dirs() {
 }
 
 readback_postgres() {
-  local listen
+  local listen version restart
   if [[ "$(systemctl is-active "$PG_UNIT" 2>/dev/null)" != active ]]; then
     red "$PG_UNIT 没在跑"
     return 0
   fi
   if pg_isready -q -h 127.0.0.1 -p "$PG_PORT"; then ok "库在 127.0.0.1:$PG_PORT 就绪"; else red "库在 127.0.0.1:$PG_PORT 没就绪"; fi
   listen=$(ss -Hltn "sport = :$PG_PORT" 2>/dev/null | awk '{ print $4 }' | sort | tr '\n' ' ')
-  if [[ " $listen" == *" 0.0.0.0:$PG_PORT "* || " $listen" == *" *:$PG_PORT "* || " $listen" == *" [::]:$PG_PORT "* ]]; then
-    red "库在所有网卡上监听（$listen），应只听本机和 WireGuard 地址"
+  if [[ "$listen" == "127.0.0.1:$PG_PORT [::1]:$PG_PORT " ]]; then
+    ok "库只听本机：$listen"
   else
-    ok "库只听：$listen"
+    red "库在听「$listen」，应只听 127.0.0.1 和 ::1"
   fi
-  if wg_addr_up && ! pg_listening_on "${WG_ADDR%/*}"; then red "隧道地址 ${WG_ADDR%/*} 起着，库却没在上面听"; fi
+  restart=$(unit_prop "$PG_UNIT" Restart)
+  if [[ "$restart" == always ]]; then ok "库的进程没了会被拉起（Restart=always）"; else red "$PG_UNIT 是 Restart=$restart，进程没了就一直躺着"; fi
+  version=$(dpkg-query -W -f '${Version}' "postgresql-$PG_MAJOR" 2>/dev/null) || version=""
+  if [[ "$version" == *pgdg* || -e /etc/apt/sources.list.d/pgdg.sources ]]; then
+    red "postgresql-$PG_MAJOR $version 是从 PGDG 源装的：吃不到 Ubuntu 的自动安全更新"
+  else
+    ok "postgresql-$PG_MAJOR $version（Ubuntu 自带的源）"
+  fi
   if temporal_login_ok; then ok "temporal 角色用口令登得上"; else red "temporal 角色用 $TEMPORAL_ENV 里的口令登不上"; fi
 }
 
@@ -689,11 +747,13 @@ readback_wireguard() {
 readback_service_home() {
   local found
   # 不接 head：find 被管道截断会让整条命令算失败，结果就被当成「没找到」
-  found=$(find /home/fleet /var/lib/fleet-dao /var/log/fleet-dao -user root 2>/dev/null || true)
+  local homes=(/home/fleet /var/lib/fleet-dao /var/log/fleet-dao) u
+  for u in "${SESSION_USERS[@]}"; do homes+=("/home/$u"); done
+  found=$(find "${homes[@]}" -user root 2>/dev/null || true)
   if [[ -n "$found" ]]; then
-    red "fleet 的目录里有 $(wc -l <<<"$found") 个 root 属主的文件，比如：$(head -3 <<<"$found" | tr '\n' ' ')"
+    red "fleet 或会话用户的目录里有 $(wc -l <<<"$found") 个 root 属主的文件，比如：$(head -3 <<<"$found" | tr '\n' ' ')"
   else
-    ok "fleet 的目录里没有 root 属主的文件"
+    ok "fleet 和会话用户的目录里没有 root 属主的文件"
   fi
 }
 

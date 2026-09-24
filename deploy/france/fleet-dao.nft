@@ -1,0 +1,14 @@
+#!/usr/sbin/nft -f
+# fleet-dao：Temporal、库、驾驶舱后端这几个端口，在本机上只许 root 和引擎用户（fleet）去连。
+# Temporal 没开认证、只靠绑本机回环：谁连得上谁就能给任意工作流发信号，会话就能绕过人闸。按连接发起方的属主（skuid）拦。
+# deploy/france.sh 把 @@…@@ 换好后装到 /etc/fleet-dao/nftables.nft，由 fleet-firewall.service 载入（先 nft -c 验过）。
+# 自己一张表、自己一个单元：不启用 nftables.service——它的默认配置开头是 flush ruleset，会把 ufw 的规则一起冲掉。
+# 前两行让整张表先删后建、在一个事务里换掉，重载时不会有空窗。
+table inet fleet_dao
+delete table inet fleet_dao
+table inet fleet_dao {
+	chain output {
+		type filter hook output priority filter; policy accept;
+		oifname "lo" tcp dport { @@PORTS@@ } meta skuid != { 0, @@FLEET_UID@@ } reject with tcp reset
+	}
+}
