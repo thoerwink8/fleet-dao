@@ -1,6 +1,7 @@
 // fleet 命令对着假后端测：请求形状（方法、路径、通行证、JSON 体）、本地校验、出错处理、退出码。
+import { DEFAULT_BASH_TIMEOUT_MS } from '@fleet-dao/adapters';
 import { afterEach, describe, expect, it } from 'vitest';
-import { type CliIo, parseStep, runFleet } from '../src/cli.ts';
+import { ASK_WAIT_MS, type CliIo, parseStep, runFleet } from '../src/cli.ts';
 import { EXIT } from '../src/client.ts';
 import { COMMAND_HELP } from '../src/help.ts';
 import { deadUrl, type FakeBackend, type Responder, startFakeBackend } from './fake-backend.ts';
@@ -255,6 +256,10 @@ describe('ask', () => {
     const opts = ['a', 'b', 'c', 'd', 'e'].flatMap((o) => ['-o', o]);
     expect((await fleet(['ask', '选哪个？', ...opts], { url: b.url })).code).toBe(EXIT.usage);
     expect(b.requests).toEqual([]);
+  });
+
+  it('等回答的上限短于会话里单条命令的超时：不然命令先被执行体杀掉，AI 只看到超时', () => {
+    expect(ASK_WAIT_MS).toBeLessThan(DEFAULT_BASH_TIMEOUT_MS);
   });
 
   it('等回答超时：不重试（再问一遍只会重复提问），按后端出错退出', async () => {

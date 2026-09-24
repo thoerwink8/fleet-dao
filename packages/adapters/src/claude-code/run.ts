@@ -20,6 +20,13 @@ import { ClaudeStreamReader, type ClaudeStreamSummary, sameModel, versionAtLeast
 /** 没有 CLAUDE.md 时回退读 AGENTS.md 是 2.1.277 才有的；更旧的版本会漏读仓库规矩。 */
 export const MIN_CLAUDE_VERSION = '2.1.277';
 
+/**
+ * Claude 的 Bash 工具默认 2 分钟就把命令杀掉：长一点的测试、等回答的 fleet ask 都会被腰斩。
+ * 会话里默认放宽到 10 分钟，模型自己最多能要到 30 分钟（BASH_DEFAULT_TIMEOUT_MS 生效已在 VPS 实测）。
+ */
+export const DEFAULT_BASH_TIMEOUT_MS = 10 * 60_000;
+const MAX_BASH_TIMEOUT_MS = 30 * 60_000;
+
 export interface ClaudeCodeRunSpec extends ClaudeArgsSpec {
   /** 驾驶舱里这次会话的编号，进度事件都挂在它下面。 */
   runId: string;
@@ -29,6 +36,8 @@ export interface ClaudeCodeRunSpec extends ClaudeArgsSpec {
   prompt: string;
   env: SessionEnvInput;
   limits?: Partial<ProcessLimits>;
+  /** 会话里单条命令的默认超时，默认 DEFAULT_BASH_TIMEOUT_MS。 */
+  bashTimeoutMs?: number;
   /** 仓库的测试命令，用来认出「跑了测试」。 */
   testCommands?: readonly string[];
   cgroup?: CgroupScope;
@@ -73,7 +82,13 @@ export async function runClaudeCode(
   if (!dir?.isDirectory()) throw new Error(`工作目录不存在：${spec.cwd}`);
 
   const args = buildClaudeArgs(spec);
-  const env = { ...buildSessionEnv(spec.env), CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' };
+  const bashTimeout = spec.bashTimeoutMs ?? DEFAULT_BASH_TIMEOUT_MS;
+  const env = {
+    ...buildSessionEnv(spec.env),
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+    BASH_DEFAULT_TIMEOUT_MS: String(bashTimeout),
+    BASH_MAX_TIMEOUT_MS: String(Math.max(bashTimeout, MAX_BASH_TIMEOUT_MS)),
+  };
   assertNoUpstreamOverride(env);
   const now = options.now ?? (() => new Date());
   const minVersion = options.minCliVersion ?? MIN_CLAUDE_VERSION;

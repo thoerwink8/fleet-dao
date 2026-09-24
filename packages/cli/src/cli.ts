@@ -18,8 +18,11 @@ import { COMMAND_HELP, MAIN_HELP } from './help.ts';
 
 z.config(z.locales.zhCN());
 
-/** 等回答的 ask 最多等这么久。后端的等待上限要比它短，否则后端回 pending 之前这边先超时了。 */
-export const ASK_WAIT_MS = 20 * 60_000;
+/**
+ * 等回答的 ask 最多等这么久：要长于后端等回答的上限（否则后端回 pending 之前这边先超时），
+ * 又要短于会话里单条命令的超时（否则命令先被执行体杀掉，AI 只看到超时）。后一条有测试钉着。
+ */
+export const ASK_WAIT_MS = 6 * 60_000;
 
 export interface CliIo {
   env: Readonly<Record<string, string | undefined>>;

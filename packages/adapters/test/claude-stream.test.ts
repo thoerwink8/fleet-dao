@@ -129,6 +129,15 @@ describe('ClaudeStreamReader · 真跑夹具', () => {
     expect(summary.result?.isError).toBe(false);
   });
 
+  it('命令超时（BASH_DEFAULT_TIMEOUT_MS=4000 时跑 sleep 12）：工具失败、退出码 143，中间的 task_* 系统帧不打扰', () => {
+    const { events, summary } = readAll('cc-haiku-bash-timeout');
+    const end = ofKind<ToolPayload>(events, 'tool').find((t) => t.phase === 'end');
+    expect(end).toMatchObject({ tool: 'Bash', summary: 'sleep 12; echo slept', ok: false });
+    expect(end?.error).toContain('Exit code 143');
+    expect(summary.result?.text).toContain('Command timed out after 4s');
+    expect(summary.unknownFrames).toEqual({});
+  });
+
   it('工具报错（读不存在的文件）只算工具失败，会话照常完成', () => {
     const { events, summary } = readAll('cc-haiku-tool-error');
     const end = ofKind<ToolPayload>(events, 'tool').find((t) => t.phase === 'end');
