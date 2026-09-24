@@ -148,6 +148,20 @@ describe('看板与任务', () => {
     expect(seen).toContain('正在写验证码过期的测试');
   });
 
+  it('翻页游标看不懂：400 invalid_cursor，不回空页（空页会被当成「后面没有了」）', async () => {
+    const h = harness();
+    const { cookie } = await h.login();
+    for (const path of [
+      `/api/tasks/${IDS.task12}/timeline?cursor=garbage`,
+      '/api/audit?cursor=garbage',
+      `/api/notifications?status=all&cursor=${encodeURIComponent(`${h.clock.now.toISOString()}|42`)}`,
+    ]) {
+      const res = await h.cockpit.request(path, { headers: { cookie } });
+      expect(res.status, path).toBe(400);
+      expect(await errorCode(res)).toBe('invalid_cursor');
+    }
+  });
+
   it('会话步骤清单与最近一句进度', async () => {
     const h = harness();
     const { cookie } = await h.login();

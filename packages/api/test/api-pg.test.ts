@@ -13,7 +13,7 @@ import { and, eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { notWiredGitHub } from '../src/github.ts';
 import { serviceHealthChecks } from '../src/health.ts';
-import { pingDb } from '../src/pg-store.ts';
+import { probeDb } from '../src/pg-store.ts';
 import { notConnectedTemporal } from '../src/temporal.ts';
 import {
   agentRequest,
@@ -152,11 +152,13 @@ describe('接口跑在真库上', () => {
     ]);
   });
 
-  it('健康检查（生产那一套）：库、实时推送是好的；Temporal、GitHub 事件没接上如实报红；LISTEN 断了实时推送也报红', async () => {
+  it('健康检查（生产那一套）：库、实时推送是真探的；Temporal、GitHub 事件没接上如实报红；LISTEN 停了实时推送也报红', async () => {
     const h = await start({
       health: serviceHealthChecks({
-        pingDb: () => pingDb(t.db),
-        feed: { status: () => current?.feed.status() ?? { listening: false } },
+        probeDb: () => probeDb(t.db),
+        feed: {
+          probe: (ms) => current?.feed.probe(ms) ?? Promise.reject(new Error('还没起')),
+        },
         temporal: notConnectedTemporal(),
         githubEvents: notWiredGitHub().check,
       }),

@@ -316,6 +316,42 @@ describe('幂等键（插头重试同一条命令用同一个键）', () => {
     expect(h.logs.filter((l) => l.message.includes('接过来重新执行'))).toHaveLength(2);
   });
 
+  it('同一个键用在别的命令上：409，这次不执行，也不回上一条命令的结果', async () => {
+    const h = harness();
+    expect((await post(h, 'say', { text: '一' }, 'key-x')).status).toBe(200);
+    const before = h.store.data.progress.length;
+    const res = await post(h, 'blocked', { reason: '缺账号', needs: 'access' }, 'key-x');
+    expect(res.status).toBe(409);
+    expect(await errorCode(res)).toBe('idempotency_key_reused');
+    expect(h.store.data.progress).toHaveLength(before);
+    expect(h.signals).toHaveLength(1);
+  });
+
+  it('上一次卡住、被接管以后才做完：它的回执记不上，第三次重试拿接管那次的结果、不再执行', async () => {
+    let release: () => void = () => {};
+    let calls = 0;
+    const h = harness({
+      workflows: {
+        async signal() {
+          calls += 1;
+          if (calls === 1) await new Promise<void>((resolve) => (release = resolve));
+        },
+      },
+    });
+    const says = () =>
+      h.store.data.progress.filter((p) => p.kind === 'say').map((p) => (p.payload as { text: string }).text);
+    const stuck = post(h, 'say', { text: '卡住的那次' }, 'key-slow');
+    for (let i = 0; i < 100 && calls === 0; i++) await new Promise((r) => setTimeout(r, 5));
+    h.clock.now = new Date(h.clock.now.getTime() + 61_000);
+    expect((await post(h, 'say', { text: '接管的那次' }, 'key-slow')).status).toBe(200);
+    release();
+    expect((await stuck).status).toBe(200);
+    expect(h.logs.some((l) => l.message.includes('已被别的请求接管'))).toBe(true);
+    expect((await post(h, 'say', { text: '第三次' }, 'key-slow')).status).toBe(200);
+    expect(says()).toContain('接管的那次');
+    expect(says()).not.toContain('第三次');
+  });
+
   it('键太长：400', async () => {
     const h = harness();
     expect(await errorCode(await post(h, 'say', { text: 'x' }, 'k'.repeat(201)))).toBe(

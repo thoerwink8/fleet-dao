@@ -3,15 +3,14 @@
 // - 这个 Store 自己写的时间一律用传进来的时钟（和后端其余部分同一个钟）；库自己记的（状态变化等）用库的钟。
 // - 按编号查的方法：编号不是 uuid 就当「没有」，不让它变成 SQL 报错（编号来自网址）。
 // - 「改数据 + 写操作记录」放在同一个事务里：操作记录写不进，改动一起回滚。
-// - 翻页游标是 `时刻|编号`；库里的时刻比毫秒精细，比较时截到毫秒，和游标的精度一致，翻页不漏同一毫秒里的几条。
+// - 翻页游标是 `时刻|编号`（ids.ts 判读，看不懂抛 InvalidCursorError）；库里的时刻比毫秒精细，比较时截到毫秒，
+//   和游标的精度一致，翻页不漏同一毫秒里的几条。
 import {
   asks,
   auditLog,
   bans,
-  type ClaimResult,
   channels,
   claimIdempotencyKey,
-  completeIdempotencyKey,
   type Db,
   idempotencyKeys,
   models,
@@ -52,6 +51,8 @@ import {
 } from '@fleet-dao/db';
 import type { ProgressKind, Step } from '@fleet-dao/shared';
 import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
+import { PublicHealthError } from './health.ts';
+import { isSerial, isUuid, parseCursor } from './ids.ts';
 import type {
   AskRecord,
   AuditRecord,
@@ -72,9 +73,6 @@ import type {
 export interface PgStoreOptions {
   now?: () => Date;
 }
-
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-export const isUuid = (s: string): boolean => UUID.test(s);
 
 const RECENT_TERMINAL_MS = 7 * 24 * 60 * 60_000;
 const opt = <V>(v: V | null): V | undefined => v ?? undefined;
@@ -129,14 +127,6 @@ function toAudit(r: AuditRow): AuditRecord {
     ok: r.ok,
     error: opt(r.error),
   };
-}
-
-function parseCursor(cursor: string | undefined): { at: string; id: string } | 'bad' | null {
-  if (!cursor) return null;
-  const sep = cursor.lastIndexOf('|');
-  const at = cursor.slice(0, sep);
-  if (sep <= 0 || Number.isNaN(Date.parse(at))) return 'bad';
-  return { at: new Date(at).toISOString(), id: cursor.slice(sep + 1) };
 }
 
 function planSteps(payload: unknown): Step[] {
@@ -239,6 +229,13 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
   }
 
   const commandKey = (runId: string, key: string) => `fleet:${runId}:${key}`;
+  /** 还没做完、而且还是这张凭据占着的那一行。 */
+  const heldBy = (key: string, token: string) =>
+    and(
+      eq(idempotencyKeys.key, key),
+      isNull(idempotencyKeys.completedAt),
+      eq(idempotencyKeys.claimedAt, new Date(token)),
+    );
 
   return {
     // —— 人 ——
@@ -368,9 +365,8 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       return row && typeof text === 'string' ? { text, at: iso(row.at) } : null;
     },
     async listTimeline(taskId, page) {
-      if (!isUuid(taskId)) return { items: [] };
       const cursor = parseCursor(page.cursor);
-      if (cursor === 'bad') return { items: [] };
+      if (!isUuid(taskId)) return { items: [] };
       const timeline = await taskTimeline(db, taskId);
       if (!timeline) return { items: [] };
       const subtaskOfRun = new Map(timeline.runs.map((r) => [r.id, r.subtaskId]));
@@ -551,8 +547,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       );
     },
     async listNotifications({ status, cursor: raw, limit }) {
-      const cursor = parseCursor(raw);
-      if (cursor === 'bad' || (cursor && !isUuid(cursor.id))) return { items: [] };
+      const cursor = parseCursor(raw, isUuid);
       const rows = await db
         .select()
         .from(notifications)
@@ -628,8 +623,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       return insertAudit(db, entry);
     },
     async listAudit({ target, cursor: raw, limit }): Promise<Page<AuditRecord>> {
-      const cursor = parseCursor(raw);
-      if (cursor === 'bad' || (cursor && !/^\d+$/.test(cursor.id))) return { items: [] };
+      const cursor = parseCursor(raw, isSerial);
       const rows = await db
         .select()
         .from(auditLog)
@@ -713,19 +707,27 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       await insertProgress(runId, kind, payload);
     },
     async openAsk({ runId, taskId, question, options: choices }) {
-      // 表上唯一的冲突来源是 (run_id, md5(question)) 这条唯一索引（主键是随机 uuid），所以不写冲突目标。
-      const [inserted] = await db
-        .insert(asks)
-        .values({ taskId, runId, question, options: choices, askedAt: now() })
-        .onConflictDoNothing()
-        .returning();
-      if (inserted) return { ask: toAsk(inserted), created: true };
-      const [existing] = await db
-        .select()
-        .from(asks)
-        .where(and(eq(asks.runId, runId), sql`md5(${asks.question}) = md5(${question})`));
-      if (!existing) throw new Error(`追问写不进也读不到（会话 ${runId}）`);
-      return { ask: toAsk(existing), created: false };
+      return db.transaction(async (tx) => {
+        // 表上唯一的冲突来源是 (run_id, md5(question)) 这条唯一索引（主键是随机 uuid），所以不写冲突目标。
+        const [inserted] = await tx
+          .insert(asks)
+          .values({ taskId, runId, question, options: choices, askedAt: now() })
+          .onConflictDoNothing()
+          .returning();
+        if (inserted) {
+          // 和追问同一事务：不会有「追问开了、进度没记」的半截（重试走去重，补不回来）。
+          await tx
+            .insert(progressEvents)
+            .values({ runId, at: now(), kind: 'ask', payload: { askId: inserted.id, question } });
+          return { ask: toAsk(inserted), created: true };
+        }
+        const [existing] = await tx
+          .select()
+          .from(asks)
+          .where(and(eq(asks.runId, runId), sql`md5(${asks.question}) = md5(${question})`));
+        if (!existing) throw new Error(`追问写不进也读不到（会话 ${runId}）`);
+        return { ask: toAsk(existing), created: false };
+      });
     },
     async searchHistory({ repoId, query, limit }) {
       if (!isUuid(repoId)) return [];
@@ -769,36 +771,48 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
     },
     async claimCommand({ runId, key, action, takeOverBefore }): Promise<CommandClaim> {
       const k = commandKey(runId, key);
-      const input = { key: k, action, target: `run:${runId}` };
-      const toClaim = (c: ClaimResult): CommandClaim =>
-        c.status === 'claimed'
-          ? c
-          : c.status === 'done'
-            ? { status: 'done', result: c.result }
-            : { status: 'in-flight', claimedAt: iso(c.claimedAt) };
-      const first = await claimIdempotencyKey(db, input, now());
       const cutoff = new Date(takeOverBefore);
-      if (first.status !== 'in-flight' || !(first.claimedAt < cutoff)) return toClaim(first);
-      // 条件更新是原子的：两个请求同时来接，后一个等前一个提交后重新判条件，claimed_at 已经变新，接不到。
-      const taken = await db
+      // 占用凭据就是这次占用的时刻（claimed_at，毫秒，本 Store 写的）：接管会把它改新，旧请求拿着旧凭据放不掉、也记不上。
+      // 最多试三轮：占不到、读的时候又刚被放掉，再来一次。
+      for (let round = 0; round < 3; round++) {
+        const at = now();
+        const inserted = await db
+          .insert(idempotencyKeys)
+          .values({ key: k, action, target: `run:${runId}`, claimedAt: at })
+          .onConflictDoNothing()
+          .returning({ key: idempotencyKeys.key });
+        if (inserted.length > 0) return { status: 'claimed', token: iso(at) };
+        const [row] = await db.select().from(idempotencyKeys).where(eq(idempotencyKeys.key, k));
+        if (!row) continue;
+        if (row.action !== action) return { status: 'other-action', action: row.action };
+        if (row.completedAt !== null) return { status: 'done', result: row.result };
+        if (!(row.claimedAt < cutoff)) return { status: 'in-flight', claimedAt: iso(row.claimedAt) };
+        // 条件更新是原子的：两个请求同时来接，后一个等前一个提交后重新判条件，claimed_at 已经变新，接不到。
+        const taken = await db
+          .update(idempotencyKeys)
+          .set({ claimedAt: at })
+          .where(
+            and(
+              eq(idempotencyKeys.key, k),
+              isNull(idempotencyKeys.completedAt),
+              lt(idempotencyKeys.claimedAt, cutoff),
+            ),
+          )
+          .returning({ key: idempotencyKeys.key });
+        if (taken.length > 0) return { status: 'claimed', token: iso(at), tookOver: true };
+      }
+      throw new Error(`幂等键 ${key} 反复被别的请求抢占，稍后再试`);
+    },
+    async completeCommand({ runId, key, token }, result) {
+      const written = await db
         .update(idempotencyKeys)
-        .set({ claimedAt: now(), action })
-        .where(
-          and(
-            eq(idempotencyKeys.key, k),
-            isNull(idempotencyKeys.completedAt),
-            lt(idempotencyKeys.claimedAt, cutoff),
-          ),
-        )
+        .set({ completedAt: now(), result })
+        .where(heldBy(commandKey(runId, key), token))
         .returning({ key: idempotencyKeys.key });
-      if (taken.length > 0) return { status: 'claimed', tookOver: true };
-      return toClaim(await claimIdempotencyKey(db, input, now()));
+      return written.length > 0;
     },
-    async completeCommand({ runId, key }, result) {
-      await completeIdempotencyKey(db, commandKey(runId, key), result, now());
-    },
-    async releaseCommand({ runId, key }) {
-      await releaseIdempotencyKey(db, commandKey(runId, key));
+    async releaseCommand({ runId, key, token }) {
+      await db.delete(idempotencyKeys).where(heldBy(commandKey(runId, key), token));
     },
 
     // —— GitHub ——
@@ -816,7 +830,54 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
   };
 }
 
-/** 健康检查用：库连得上、能查。 */
-export async function pingDb(db: Db): Promise<void> {
-  await db.execute(sql`select 1`);
+/** 应用的每条查询最多跑这么久（连接参数 statement_timeout）：表被锁住时接口几秒内报错，而不是一直挂着。 */
+export const DB_STATEMENT_TIMEOUT_MS = 5_000;
+
+/**
+ * 给连接串加上会话默认的语句超时（连接串里已经写了就不动）。postgres.js 把连接串里它自己不认识的参数
+ * 原样当启动参数发给库（postgres 包 src/index.js 的 parseOptions），所以池里每条连接、包括 LISTEN 那条，一连上就带着它。
+ * 以后 @fleet-dao/db 的 createDb 能直接收连接参数了，改走那里。
+ */
+export function withStatementTimeout(url: string, ms = DB_STATEMENT_TIMEOUT_MS): string {
+  if (/[?&]statement_timeout=/.test(url)) return url;
+  return `${url}${url.includes('?') ? '&' : '?'}statement_timeout=${ms}`;
+}
+
+/** 健康检查探库的上限：比单项上限（health.ts 的 3 秒）早到点，报出来的是「查库超时」而不是笼统的超时。 */
+const PROBE_TIMEOUT_MS = 2_000;
+
+/**
+ * 健康检查用：真去读登录和首页要用的表（users、repos、tasks），本事务里等锁和跑语句都限时，到点报红。
+ * 只 select 1 查不出「表被锁住」：锁表时它照样秒回，接口却全卡住。
+ */
+export async function probeDb(db: Db, timeoutMs = PROBE_TIMEOUT_MS): Promise<void> {
+  try {
+    await db.transaction(async (tx) => {
+      const ms = String(timeoutMs);
+      await tx.execute(
+        sql`select set_config('lock_timeout', ${ms}, true), set_config('statement_timeout', ${ms}, true)`,
+      );
+      await tx.execute(
+        sql`select (select 1 from ${users} limit 1), (select 1 from ${repos} limit 1), (select 1 from ${tasks} limit 1)`,
+      );
+    });
+  } catch (err) {
+    const code = sqlState(err);
+    // 57014 = 语句超时，55P03 = 等锁超时。
+    if (code === '57014' || code === '55P03') {
+      throw new PublicHealthError('timeout', `查库超过 ${timeoutMs / 1000} 秒没回来（多半有表被锁住）`);
+    }
+    throw err;
+  }
+}
+
+/** Postgres 的错误码（SQLSTATE）。drizzle 把驱动的错误包在 cause 里，往里找几层。 */
+export function sqlState(err: unknown): string | undefined {
+  let e: unknown = err;
+  for (let depth = 0; depth < 5 && e !== null && typeof e === 'object'; depth++) {
+    const code = (e as { code?: unknown }).code;
+    if (typeof code === 'string') return code;
+    e = (e as { cause?: unknown }).cause;
+  }
+  return undefined;
 }

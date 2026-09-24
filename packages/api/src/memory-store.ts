@@ -19,6 +19,7 @@ import type {
   Subtask,
   Task,
 } from '@fleet-dao/shared';
+import { isSerial, isUuid, parseCursor } from './ids.ts';
 import type {
   AgentSession,
   AskRecord,
@@ -188,13 +189,16 @@ function compareIds(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
-/** 按 (at, id) 倒序翻页；游标就是上一页最后一条的 `at|id`。 */
-function paginate<T extends { at: string; id: string }>(items: T[], page: PageRequest): Page<T> {
+/** 按 (at, id) 倒序翻页；游标就是上一页最后一条的 `at|id`，看不懂就抛 InvalidCursorError（和库版同一个判法）。 */
+function paginate<T extends { at: string; id: string }>(
+  items: T[],
+  page: PageRequest,
+  idOk?: (id: string) => boolean,
+): Page<T> {
+  const cursor = parseCursor(page.cursor, idOk);
   const sorted = [...items].sort((a, b) => byAtThenId(b, a));
   let start = 0;
-  if (page.cursor) {
-    const sep = page.cursor.lastIndexOf('|');
-    const cursor = { at: page.cursor.slice(0, sep), id: page.cursor.slice(sep + 1) };
+  if (cursor) {
     start = sorted.findIndex((x) => byAtThenId(x, cursor) < 0);
     if (start === -1) start = sorted.length;
   }
@@ -301,22 +305,10 @@ export function createMemoryStore(
     return { steps, updatedAt: record.at };
   }
 
-  function claim(key: string, action: string, target?: string): CommandClaim {
-    const existing = data.idempotency.get(key);
-    if (!existing) {
-      data.idempotency.set(key, { action, target, claimedAt: now().toISOString() });
-      return { status: 'claimed' };
-    }
-    if (existing.completedAt !== undefined) return { status: 'done', result: existing.result };
-    return { status: 'in-flight', claimedAt: existing.claimedAt };
-  }
-
-  function release(key: string): void {
-    const existing = data.idempotency.get(key);
-    if (existing && existing.completedAt === undefined) data.idempotency.delete(key);
-  }
-
   const commandKey = (runId: string, key: string) => `fleet:${runId}:${key}`;
+  /** 占用凭据就是这次占用的时刻（和库里的 claimed_at 一样）：接管会把它改新，旧凭据就对不上了。 */
+  const heldBy = (record: IdempotencyRecord | undefined, token: string): record is IdempotencyRecord =>
+    !!record && record.completedAt === undefined && record.claimedAt === token;
 
   return {
     data,
@@ -390,6 +382,7 @@ export function createMemoryStore(
       return say && typeof text === 'string' ? { text, at: say.at } : null;
     },
     async listTimeline(taskId, page) {
+      parseCursor(page.cursor);
       const task = data.tasks.find((t) => t.id === taskId);
       if (!task) return { items: [] };
       const runs = data.runs.filter((r) => r.taskId === taskId);
@@ -589,7 +582,7 @@ export function createMemoryStore(
       const items = data.notifications
         .filter((n) => status === 'all' || n.resolvedAt === undefined)
         .map((n) => ({ ...n, at: n.createdAt }));
-      const result = paginate(items, page);
+      const result = paginate(items, page, isUuid);
       return { items: result.items.map(({ at: _at, ...n }) => n), nextCursor: result.nextCursor };
     },
     async resolveNotification({ id, by }, entry) {
@@ -610,6 +603,7 @@ export function createMemoryStore(
       return paginate(
         data.audit.filter((a) => target === undefined || a.target === target),
         page,
+        isSerial,
       );
     },
     async listSettings() {
@@ -668,6 +662,7 @@ export function createMemoryStore(
       };
       data.asks.push(ask);
       changed('asks', ask.id);
+      progress(runId, 'ask', { askId: ask.id, question });
       return { ask, created: true };
     },
     async searchHistory({ repoId, query, limit }) {
@@ -728,40 +723,44 @@ export function createMemoryStore(
           ];
         });
     },
-    async claimCommand({ runId, key, action, takeOverBefore }) {
+    async claimCommand({ runId, key, action, takeOverBefore }): Promise<CommandClaim> {
       const k = commandKey(runId, key);
       const existing = data.idempotency.get(k);
-      if (
-        existing &&
-        existing.completedAt === undefined &&
-        Date.parse(existing.claimedAt) < Date.parse(takeOverBefore)
-      ) {
-        existing.claimedAt = now().toISOString();
-        existing.action = action;
-        return { status: 'claimed', tookOver: true };
+      const at = now().toISOString();
+      if (!existing) {
+        data.idempotency.set(k, { action, target: `run:${runId}`, claimedAt: at });
+        return { status: 'claimed', token: at };
       }
-      return claim(k, action, `run:${runId}`);
+      if (existing.action !== action) return { status: 'other-action', action: existing.action };
+      if (existing.completedAt !== undefined) return { status: 'done', result: existing.result };
+      if (Date.parse(existing.claimedAt) < Date.parse(takeOverBefore)) {
+        existing.claimedAt = at;
+        return { status: 'claimed', token: at, tookOver: true };
+      }
+      return { status: 'in-flight', claimedAt: existing.claimedAt };
     },
-    async completeCommand({ runId, key }, result) {
+    async completeCommand({ runId, key, token }, result) {
       const existing = data.idempotency.get(commandKey(runId, key));
-      if (!existing || existing.completedAt !== undefined) {
-        throw new Error(`幂等键 ${key} 没被占着，或者已经完成过`);
-      }
+      if (!heldBy(existing, token)) return false;
       existing.completedAt = now().toISOString();
       existing.result = result;
+      return true;
     },
-    async releaseCommand({ runId, key }) {
-      release(commandKey(runId, key));
+    async releaseCommand({ runId, key, token }) {
+      const k = commandKey(runId, key);
+      if (heldBy(data.idempotency.get(k), token)) data.idempotency.delete(k);
     },
 
     // —— GitHub ——
     async claimDelivery({ id, event, source }) {
-      return claim(`github-delivery:${id}`, `github.${event}`, source).status === 'claimed'
-        ? 'new'
-        : 'duplicate';
+      const k = `github-delivery:${id}`;
+      if (data.idempotency.has(k)) return 'duplicate';
+      data.idempotency.set(k, { action: `github.${event}`, target: source, claimedAt: now().toISOString() });
+      return 'new';
     },
     async releaseDelivery(id) {
-      release(`github-delivery:${id}`);
+      const k = `github-delivery:${id}`;
+      if (data.idempotency.get(k)?.completedAt === undefined) data.idempotency.delete(k);
     },
   };
 }

@@ -202,13 +202,23 @@ export async function pgHarness(
   await seedPg(t.db, options.data ?? devFixtures(T0));
   const clock = { now: new Date(T0) };
   const silent: Logger = { info() {}, warn() {}, error() {} };
-  const feed = startPgChangeFeed(async (channel, onNotify, onListen) => {
-    const unlisten = await t.client.listen(channel, onNotify);
-    onListen();
-    return { unlisten };
-  }, silent);
+  const feed = startPgChangeFeed(
+    {
+      listen: async (channel, onNotify, onListen) => {
+        const unlisten = await t.client.listen(channel, onNotify);
+        onListen();
+        return { unlisten };
+      },
+      notify: async (channel, payload) => {
+        await t.client.query('select pg_notify($1, $2)', [channel, payload]);
+      },
+    },
+    silent,
+    // 定时探活不插进测试；要探就调 feed.probe()。
+    { probeEveryMs: 60 * 60_000 },
+  );
   // 等 LISTEN 真接上，免得测试里的第一次写入赶在它前面。
-  for (let i = 0; i < 100 && !feed.status().listening; i++) await new Promise((r) => setTimeout(r, 5));
+  for (let i = 0; i < 100 && !feed.status().healthy; i++) await new Promise((r) => setTimeout(r, 5));
   const h = wire(createPgStore(t.db, { now: () => new Date(clock.now) }), feed, clock, options);
   return { ...h, feed, stop: () => feed.stop() };
 }

@@ -73,6 +73,7 @@ export interface Page<T> {
 }
 
 export interface PageRequest {
+  /** 上一页的 nextCursor。看不懂就抛 InvalidCursorError（翻页的方法都这样）。 */
   cursor?: string | undefined;
   limit: number;
 }
@@ -201,13 +202,18 @@ export interface StagePolicyValue {
 }
 
 /**
- * 幂等键的状态：claimed = 这次占到了，去执行（tookOver = 接过了一个多半已经死掉的占用）；
- * done = 以前执行成功过，直接回当时的结果；in-flight = 上一次还在处理。
+ * 幂等键的状态：
+ * - claimed：这次占到了，去执行。token 是这次占用的凭据，记结果、放键都要拿它（被接管后旧凭据就作废）；
+ *   tookOver = 接过了一个多半已经死掉的占用。
+ * - done：以前执行成功过，直接回当时的结果。
+ * - in-flight：上一次还在处理。
+ * - other-action：这个键已经用在别的命令上了（一条命令一个键）。
  */
 export type CommandClaim =
-  | { status: 'claimed'; tookOver?: true }
+  | { status: 'claimed'; token: string; tookOver?: true }
   | { status: 'done'; result: unknown }
-  | { status: 'in-flight'; claimedAt: string };
+  | { status: 'in-flight'; claimedAt: string }
+  | { status: 'other-action'; action: string };
 
 // —— 数据访问（按用途拆开）——
 // 所有按编号查的方法：编号格式不对（例如不是 uuid）当作「没有」，不抛错——编号来自网址，不能让它变成 500。
@@ -297,7 +303,10 @@ export interface AgentStore {
   savePlan(runId: string, steps: Step[]): Promise<void>;
   /** 会话主动报的进度（say / ask / done / blocked）或插头读出来的（test / file / tool），进 progress_events。 */
   appendProgress(runId: string, kind: ProgressKind, payload: unknown): Promise<void>;
-  /** 开一条追问。同一会话问过一模一样的一句就复用那一条（created=false），命令重试不会刷屏。 */
+  /**
+   * 开一条追问。同一会话问过一模一样的一句就复用那一条（created=false），命令重试不会刷屏。
+   * 新开的在同一事务里记一条 kind=ask 的进度（载荷 { askId, question }）：不会有「追问开了、进度没记」，重试也补不回来的半截。
+   */
   openAsk(input: {
     runId: string;
     taskId: string;
@@ -311,7 +320,7 @@ export interface AgentStore {
   listTestRuns(runId: string): Promise<TestRunRecord[]>;
   /**
    * fleet 命令的幂等键（同一会话内）：占键。键被占着没做完、而且是 takeOverBefore 之前占的（那一次多半已经死了）：
-   * 原子地接过来——两个请求同时来接，只有一个接得到，另一个看到 in-flight。
+   * 原子地接过来——两个请求同时来接，只有一个接得到，另一个看到 in-flight。键用在别的命令上：other-action，不回旧结果。
    */
   claimCommand(input: {
     runId: string;
@@ -319,10 +328,10 @@ export interface AgentStore {
     action: string;
     takeOverBefore: string;
   }): Promise<CommandClaim>;
-  /** 执行成功：记下结果，以后同一个键直接回它。 */
-  completeCommand(input: { runId: string; key: string }, result: unknown): Promise<void>;
-  /** 没执行成功（或占着的那次已经死了）：放掉键，重试会重新执行。已完成的键不放。 */
-  releaseCommand(input: { runId: string; key: string }): Promise<void>;
+  /** 执行成功：记下结果，以后同一个键直接回它。只认自己的凭据：占用已被接管或放掉了就不记，返回 false。 */
+  completeCommand(input: { runId: string; key: string; token: string }, result: unknown): Promise<boolean>;
+  /** 没执行成功：放掉自己的占用，重试会重新执行。凭据对不上（已被别的请求接管）或已完成的，都不动。 */
+  releaseCommand(input: { runId: string; key: string; token: string }): Promise<void>;
 }
 
 export interface GitHubStore {
@@ -380,6 +389,14 @@ export class WorkflowUnavailableError extends Error {
   constructor(message: string, cause?: unknown) {
     super(message, { cause });
     this.name = 'WorkflowUnavailableError';
+  }
+}
+
+/** 翻页游标看不懂：接口回 400（http.ts），不装成空页。判法在 ids.ts 的 parseCursor。 */
+export class InvalidCursorError extends Error {
+  constructor(message = '翻页游标看不懂（被改过，或者不是这个列表的），从第一页重新翻') {
+    super(message);
+    this.name = 'InvalidCursorError';
   }
 }
 

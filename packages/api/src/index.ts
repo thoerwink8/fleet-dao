@@ -13,6 +13,8 @@ export {
   createAskWaiters,
   createChangeHub,
   type PgChangeFeed,
+  type PgNotify,
+  PROBE_CHANNEL,
   parseChangePayload,
   startPgChangeFeed,
 } from './changes.ts';
@@ -31,9 +33,16 @@ export {
   verifyGithubSignature,
 } from './github.ts';
 export { type HealthReport, PublicHealthError, runHealthChecks, serviceHealthChecks } from './health.ts';
+export { isSerial, isUuid, parseCursor } from './ids.ts';
 export { jsonLogger, silentLogger } from './log.ts';
 export { createMemoryStore, emptyData, type MemoryData } from './memory-store.ts';
-export { createPgStore, isUuid, pingDb } from './pg-store.ts';
+export {
+  createPgStore,
+  DB_STATEMENT_TIMEOUT_MS,
+  probeDb,
+  sqlState,
+  withStatementTimeout,
+} from './pg-store.ts';
 export * from './ports.ts';
 export { createSseRelay, type SseRelay } from './sse.ts';
 export { createTemporalWorkflowControl, notConnectedTemporal, type TemporalClientLike } from './temporal.ts';

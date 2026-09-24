@@ -17,7 +17,7 @@ import { notWiredGitHub } from './github.ts';
 import { serviceHealthChecks } from './health.ts';
 import { jsonLogger } from './log.ts';
 import { createMemoryStore } from './memory-store.ts';
-import { createPgStore, pingDb } from './pg-store.ts';
+import { createPgStore, probeDb, withStatementTimeout } from './pg-store.ts';
 import { notConnectedTemporal } from './temporal.ts';
 
 const log = jsonLogger();
@@ -67,8 +67,16 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
     return { deps, close: async () => {} };
   }
 
-  const { db, listen, close: closeDb } = createDb({ url: config.databaseUrl });
-  const feed = startPgChangeFeed(listen, log);
+  const { db, client, listen, close: closeDb } = createDb({ url: withStatementTimeout(config.databaseUrl) });
+  const feed = startPgChangeFeed(
+    {
+      listen,
+      notify: async (channel, payload) => {
+        await client.notify(channel, payload);
+      },
+    },
+    log,
+  );
   const temporal = notConnectedTemporal();
   const github = notWiredGitHub();
   const deps: Deps = {
@@ -80,7 +88,7 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
     feishu,
     workflows: temporal.control,
     github: github.sink,
-    health: serviceHealthChecks({ pingDb: () => pingDb(db), feed, temporal, githubEvents: github.check }),
+    health: serviceHealthChecks({ probeDb: () => probeDb(db), feed, temporal, githubEvents: github.check }),
   };
   return {
     deps,

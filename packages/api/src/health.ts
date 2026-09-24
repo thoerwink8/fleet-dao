@@ -59,21 +59,17 @@ export async function runHealthChecks(
 
 /** 生产要探的几项：库、实时推送（LISTEN）、Temporal、GitHub 事件的去处。main.ts 用它装配，测试也用它，是同一份代码。 */
 export function serviceHealthChecks(parts: {
-  pingDb: () => Promise<void>;
-  feed: { status(): { listening: boolean } };
+  /** 真去读几张常用表、带自己的超时（pg-store.ts 的 probeDb）；只 select 1 查不出表被锁住。 */
+  probeDb: () => Promise<void>;
+  /** 真探：发一条 ping 看 LISTEN 那条连接收不收得回来（changes.ts）。只看「接上过」的标记会在库停时照样报好。 */
+  feed: { probe(timeoutMs?: number): Promise<void> };
   temporal: { check(): Promise<void> };
   githubEvents: () => Promise<void>;
 }): HealthCheck[] {
   return [
-    { name: 'database', check: parts.pingDb },
-    {
-      name: 'realtime',
-      check: async () => {
-        if (!parts.feed.status().listening) {
-          throw new PublicHealthError('not_listening', '实时推送没接上数据库（LISTEN fleet_changes）');
-        }
-      },
-    },
+    { name: 'database', check: parts.probeDb },
+    // 留出余量：比单项上限（CHECK_TIMEOUT_MS）早到点，报出来的是「ping 收不回来」而不是笼统的超时。
+    { name: 'realtime', check: () => parts.feed.probe(CHECK_TIMEOUT_MS - 1_000) },
     { name: 'temporal', check: () => parts.temporal.check() },
     { name: 'github_events', check: parts.githubEvents },
   ];

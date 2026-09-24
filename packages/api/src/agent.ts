@@ -48,8 +48,12 @@ function idempotent(deps: Deps, action: string, bootedAt: number): MiddlewareHan
     const ids = { runId: c.get('agent').runId, key };
     const takeOverBefore = new Date(Math.max(bootedAt, deps.now().getTime() - ABANDONED_CLAIM_MS));
     const claim = await store.claimCommand({ ...ids, action, takeOverBefore: takeOverBefore.toISOString() });
-    if (claim.status === 'claimed' && claim.tookOver) {
-      log.warn('幂等键上一次占着没做完（进程重启过或卡住了），接过来重新执行', { runId: ids.runId, action });
+    if (claim.status === 'other-action') {
+      throw new ApiError(
+        409,
+        'idempotency_key_reused',
+        `这个幂等键已经用在别的命令（${claim.action}）上了：一条命令一个键`,
+      );
     }
     if (claim.status === 'done') {
       const { status, body } = claim.result as { status: ContentfulStatusCode; body: unknown };
@@ -59,22 +63,32 @@ function idempotent(deps: Deps, action: string, bootedAt: number): MiddlewareHan
       c.header('Retry-After', '1');
       throw new ApiError(503, 'in_flight', '同一条命令（同一个幂等键）还在处理，稍后用同一个键重试');
     }
+    if (claim.tookOver) {
+      log.warn('幂等键上一次占着没做完（进程重启过或卡住了），接过来重新执行', { runId: ids.runId, action });
+    }
+    // 记结果、放键都只动自己这次的占用：被接管以后，旧请求再做完或失败都碰不到接管它的那次。
+    const mine = { ...ids, token: claim.token };
     try {
       await next();
     } catch (err) {
-      await store.releaseCommand(ids);
+      await store.releaseCommand(mine);
       throw err;
     }
     if (c.res.status >= 200 && c.res.status < 300 && !c.error) {
       const body: unknown = await c.res.clone().json();
       try {
-        await store.completeCommand(ids, { status: c.res.status, body });
+        if (!(await store.completeCommand(mine, { status: c.res.status, body }))) {
+          log.warn('命令做完了，但这个幂等键已被别的请求接管，回执以接管的那次为准', {
+            runId: ids.runId,
+            action,
+          });
+        }
       } catch (err) {
         // 命令已经做了，只是回执没记上：重试会在键过期（ABANDONED_CLAIM_MS）后重做一次。留日志。
         log.error('命令做完了，但幂等回执没记上', { runId: ids.runId, action, error: String(err) });
       }
     } else {
-      await store.releaseCommand(ids);
+      await store.releaseCommand(mine);
     }
   };
 }
@@ -200,10 +214,8 @@ export function agentRoutes(deps: Deps, waiters: AskWaiters): Hono<AgentEnv> {
       question: body.question,
       options: body.options ?? [],
     });
-    if (created) {
-      await store.appendProgress(session.runId, 'ask', { askId: ask.id, question: ask.question });
-      await wake(session, 'ask', ask.id);
-    }
+    // 追问和它的 ask 进度在 openAsk 里同一事务写进去了，这里只叫醒工作流。
+    if (created) await wake(session, 'ask', ask.id);
     const answered =
       ask.answer !== undefined
         ? ask

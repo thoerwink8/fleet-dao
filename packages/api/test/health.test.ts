@@ -1,6 +1,8 @@
+import { createDb, type Db } from '@fleet-dao/db';
 import { describe, expect, it } from 'vitest';
 import { PublicHealthError, runHealthChecks } from '../src/health.ts';
 import { silentLogger } from '../src/log.ts';
+import { probeDb, sqlState, withStatementTimeout } from '../src/pg-store.ts';
 import type { Logger } from '../src/ports.ts';
 import { notConnectedTemporal } from '../src/temporal.ts';
 import { errorCode, harness, IDS, write } from './harness.ts';
@@ -80,5 +82,41 @@ describe('健康检查', () => {
       ok: false,
       error: 'workflow_unavailable',
     });
+  });
+});
+
+describe('查库限时', () => {
+  it('连接串加上语句超时（写了就不动），postgres.js 真把它当启动参数发给库', async () => {
+    const base = 'postgres://fleet@db.internal.example/fleet';
+    expect(withStatementTimeout(base)).toBe(`${base}?statement_timeout=5000`);
+    expect(withStatementTimeout(`${base}?sslmode=require`)).toBe(
+      `${base}?sslmode=require&statement_timeout=5000`,
+    );
+    expect(withStatementTimeout(`${base}?statement_timeout=1000`)).toBe(`${base}?statement_timeout=1000`);
+    // postgres.js 到第一次查询才真连，这里不碰网络。
+    const { client, close } = createDb({ url: withStatementTimeout(base) });
+    expect(client.options.connection).toMatchObject({ statement_timeout: '5000' });
+    await close();
+  });
+
+  it('探库超时（语句超时 57014、等锁超时 55P03）报红「查库超时」；别的错原样抛（对外只说连不上）', async () => {
+    const failing = (code: string) =>
+      ({
+        async transaction() {
+          // drizzle 把驱动的错误包在 cause 里。
+          throw new Error('Failed query', {
+            cause: Object.assign(new Error('canceling statement'), { code }),
+          });
+        },
+      }) as unknown as Db;
+    for (const code of ['57014', '55P03']) {
+      await expect(probeDb(failing(code), 2_000)).rejects.toMatchObject({
+        name: 'PublicHealthError',
+        code: 'timeout',
+      });
+    }
+    await expect(probeDb(failing('08006'), 2_000)).rejects.toThrow('Failed query');
+    expect(sqlState(new Error('x', { cause: { code: '57014' } }))).toBe('57014');
+    expect(sqlState(new Error('没有错误码'))).toBeUndefined();
   });
 });

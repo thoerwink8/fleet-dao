@@ -3,7 +3,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { DEV_USER_ID, devFixtures, IDS } from '../src/dev-fixtures.ts';
 import type { MemoryData } from '../src/memory-store.ts';
-import type { NewAuditEntry, Store } from '../src/ports.ts';
+import { InvalidCursorError, type NewAuditEntry, type Store } from '../src/ports.ts';
 
 export const T0 = new Date('2026-09-25T08:00:00.000Z');
 const MIN = 60_000;
@@ -270,6 +270,29 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         expect((await store.listTimeline(OTHER_UUID, { limit: 10 })).items).toEqual([]);
         expect((await store.listTimeline('task-12', { limit: 10 })).items).toEqual([]);
       });
+
+      it('翻页游标看不懂（拼错、改过、编号不合这张列表）：抛 InvalidCursorError，不装成空页', async () => {
+        const at = T0.toISOString();
+        for (const cursor of ['garbage', '|x', 'not-a-time|1', `${at}|`]) {
+          await expect(store.listTimeline(IDS.task12, { cursor, limit: 5 }), cursor).rejects.toBeInstanceOf(
+            InvalidCursorError,
+          );
+        }
+        // 操作记录的编号是自增数，通知的是 uuid：别的列表的游标拿过来也不认。
+        await expect(
+          store.listAudit({ cursor: `${at}|${IDS.notification1}`, limit: 5 }),
+        ).rejects.toBeInstanceOf(InvalidCursorError);
+        await expect(
+          store.listNotifications({ status: 'all', cursor: `${at}|42`, limit: 5 }),
+        ).rejects.toBeInstanceOf(InvalidCursorError);
+        // 自己给出的游标照常能翻。
+        await store.appendAudit(audit());
+        tick();
+        await store.appendAudit(audit());
+        const first = await store.listAudit({ limit: 1 });
+        expect(first.nextCursor).toBeDefined();
+        await store.listAudit({ cursor: first.nextCursor, limit: 1 });
+      });
     });
 
     describe('追问', () => {
@@ -301,6 +324,22 @@ export function describeStoreContract(name: string, make: MakeStore): void {
           [first.ask.id, other.ask.id].sort(),
         );
         expect(await store.getAsk(first.ask.id)).toMatchObject({ question: long, options: ['是', '否'] });
+      });
+
+      it('新开的追问同一事务记一条 ask 进度；复用那一条时不再记', async () => {
+        const askEvents = async () =>
+          (await store.listTimeline(IDS.task12, { limit: 100 })).items.filter((r) => r.kind === 'ask');
+        const before = (await askEvents()).length;
+        const input = { runId: IDS.run1, taskId: IDS.task12, question: '验证码几位？', options: [] };
+        const { ask } = await store.openAsk(input);
+        tick();
+        await store.openAsk(input);
+        const after = await askEvents();
+        expect(after).toHaveLength(before + 1);
+        expect(after[0]).toMatchObject({
+          runId: IDS.run1,
+          payload: { askId: ask.id, question: '验证码几位？' },
+        });
       });
 
       it('回答：写上答案和谁答的，同一事务留操作记录；答过的不改；没有的是 not_found', async () => {
@@ -618,55 +657,108 @@ export function describeStoreContract(name: string, make: MakeStore): void {
       /** 默认不接管任何占用（接管界线在很久以前）。 */
       const LONG_AGO = new Date(0).toISOString();
 
-      it('命令的幂等键：占到 → 做完记结果 → 再来直接拿结果；没做完放掉可以重占；做完的键放不掉', async () => {
+      /** 占到就拿出凭据；没占到就让测试当场失败。 */
+      const tokenOf = (claim: Awaited<ReturnType<Store['claimCommand']>>): string => {
+        if (claim.status !== 'claimed') throw new Error(`没占到：${JSON.stringify(claim)}`);
+        return claim.token;
+      };
+      const ok200 = { status: 200, body: { ok: true } };
+
+      it('命令的幂等键：占到（带凭据）→ 做完记结果 → 再来直接拿结果；没做完放掉可以重占；做完的键放不掉', async () => {
         const ids = { runId: IDS.run1, key: 'k-1' };
         const claim = (over: { runId?: string; key?: string; action?: string } = {}) =>
           store.claimCommand({ ...ids, action: 'agent.say', takeOverBefore: LONG_AGO, ...over });
-        expect(await claim()).toEqual({ status: 'claimed' });
+        const first = await claim();
+        expect(first).toEqual({ status: 'claimed', token: T0.toISOString() });
         expect(await claim()).toEqual({ status: 'in-flight', claimedAt: T0.toISOString() });
-        await store.completeCommand(ids, { status: 200, body: { ok: true } });
-        expect(await claim()).toEqual({ status: 'done', result: { status: 200, body: { ok: true } } });
-        await store.releaseCommand(ids);
+        expect(await store.completeCommand({ ...ids, token: tokenOf(first) }, ok200)).toBe(true);
+        expect(await claim()).toEqual({ status: 'done', result: ok200 });
+        await store.releaseCommand({ ...ids, token: tokenOf(first) });
         expect((await claim()).status).toBe('done');
+        expect(await store.completeCommand({ ...ids, token: tokenOf(first) }, ok200)).toBe(false);
 
         const other = { runId: IDS.run1, key: 'k-2' };
-        await claim({ ...other, action: 'agent.done' });
-        await store.releaseCommand(other);
-        expect(await claim({ ...other, action: 'agent.done' })).toEqual({ status: 'claimed' });
+        const held = await claim({ ...other, action: 'agent.done' });
+        await store.releaseCommand({ ...other, token: tokenOf(held) });
+        tick();
+        expect(await claim({ ...other, action: 'agent.done' })).toEqual({
+          status: 'claimed',
+          token: clock.now.toISOString(),
+        });
         // 键按会话分开：别的会话用同一个键不受影响。
-        expect(await claim({ runId: IDS.run0 })).toEqual({ status: 'claimed' });
+        expect((await claim({ runId: IDS.run0 })).status).toBe('claimed');
+      });
+
+      it('命令的幂等键：同一个键用在别的命令上——不管做完没做完，都是 other-action，不回旧结果', async () => {
+        const ids = { runId: IDS.run1, key: 'k-reused' };
+        const say = await store.claimCommand({ ...ids, action: 'agent.say', takeOverBefore: LONG_AGO });
+        expect(await store.claimCommand({ ...ids, action: 'agent.done', takeOverBefore: LONG_AGO })).toEqual({
+          status: 'other-action',
+          action: 'agent.say',
+        });
+        await store.completeCommand({ ...ids, token: tokenOf(say) }, ok200);
+        tick(61_000);
+        expect(
+          await store.claimCommand({ ...ids, action: 'agent.plan', takeOverBefore: clock.now.toISOString() }),
+        ).toEqual({ status: 'other-action', action: 'agent.say' });
       });
 
       it('命令的幂等键：界线之前占的、没做完的键可以接过来；同时来接只有一个接得到；做完的不接', async () => {
         const ids = { runId: IDS.run1, key: 'k-stale' };
-        expect(await store.claimCommand({ ...ids, action: 'agent.say', takeOverBefore: LONG_AGO })).toEqual({
-          status: 'claimed',
-        });
+        expect(
+          (await store.claimCommand({ ...ids, action: 'agent.say', takeOverBefore: LONG_AGO })).status,
+        ).toBe('claimed');
         tick(61_000);
         // 界线正好等于占的时刻：不算「之前」，不接。
         expect(
           await store.claimCommand({ ...ids, action: 'agent.say', takeOverBefore: T0.toISOString() }),
-        ).toEqual({
-          status: 'in-flight',
-          claimedAt: T0.toISOString(),
-        });
+        ).toEqual({ status: 'in-flight', claimedAt: T0.toISOString() });
         const cutoff = new Date(T0.getTime() + 1).toISOString();
         const both = await Promise.all([
           store.claimCommand({ ...ids, action: 'agent.say', takeOverBefore: cutoff }),
           store.claimCommand({ ...ids, action: 'agent.say', takeOverBefore: cutoff }),
         ]);
         expect(both.map((c) => c.status).sort()).toEqual(['claimed', 'in-flight']);
-        expect(both).toContainEqual({ status: 'claimed', tookOver: true });
+        expect(both).toContainEqual({ status: 'claimed', token: clock.now.toISOString(), tookOver: true });
         // 接过来的占用从现在算起：同一条界线再来，是 in-flight（占的时刻是现在）。
         expect(await store.claimCommand({ ...ids, action: 'agent.say', takeOverBefore: cutoff })).toEqual({
           status: 'in-flight',
           claimedAt: clock.now.toISOString(),
         });
-        await store.completeCommand(ids, { status: 200, body: { ok: true } });
+        await store.completeCommand({ ...ids, token: clock.now.toISOString() }, ok200);
         tick(61_000);
         expect(
           await store.claimCommand({ ...ids, action: 'agent.say', takeOverBefore: clock.now.toISOString() }),
-        ).toEqual({ status: 'done', result: { status: 200, body: { ok: true } } });
+        ).toEqual({ status: 'done', result: ok200 });
+      });
+
+      it('命令的幂等键：被接管以后，旧请求拿着旧凭据放不掉、也记不上接管那次的占用', async () => {
+        const ids = { runId: IDS.run1, key: 'k-taken' };
+        const old = tokenOf(
+          await store.claimCommand({ ...ids, action: 'agent.say', takeOverBefore: LONG_AGO }),
+        );
+        tick(61_000);
+        const taken = await store.claimCommand({
+          ...ids,
+          action: 'agent.say',
+          takeOverBefore: new Date(clock.now.getTime() - 60_000).toISOString(),
+        });
+        expect(taken).toMatchObject({ status: 'claimed', tookOver: true });
+        // 旧请求这时才失败、要放键：不能把接管那次的占用删掉（不然第三个请求又占到了）。
+        await store.releaseCommand({ ...ids, token: old });
+        expect(await store.claimCommand({ ...ids, action: 'agent.say', takeOverBefore: LONG_AGO })).toEqual({
+          status: 'in-flight',
+          claimedAt: clock.now.toISOString(),
+        });
+        // 旧请求这时才做完：记不上；接管那次记得上。
+        expect(
+          await store.completeCommand({ ...ids, token: old }, { status: 200, body: { from: 'old' } }),
+        ).toBe(false);
+        expect(await store.completeCommand({ ...ids, token: tokenOf(taken) }, ok200)).toBe(true);
+        expect(await store.claimCommand({ ...ids, action: 'agent.say', takeOverBefore: LONG_AGO })).toEqual({
+          status: 'done',
+          result: ok200,
+        });
       });
 
       it('GitHub 投递编号：同一编号第二次来是 duplicate；撤销登记后能再进', async () => {
