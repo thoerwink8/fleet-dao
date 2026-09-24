@@ -1,0 +1,15 @@
+# AI 会话的资源池：所有会话进这个 slice，每个会话再各开一个 scope。deploy/france.sh 装到 /etc/systemd/system/。
+# 第一轮只记账、不设任何上限（windsurf-dao 仓 docs/decisions/2026-09-24-agent-isolation-and-error-routing.md「先观测」）；
+# 按实测画像加 MemoryHigh / CPUWeight / TasksMax 时写 drop-in，回滚就是删 drop-in。
+[Unit]
+Description=fleet-dao AI 会话资源池（第一轮只记账）
+Documentation=https://github.com/thoerwink8/fleet-dao/blob/main/docs/ops.md
+
+[Slice]
+CPUAccounting=yes
+MemoryAccounting=yes
+TasksAccounting=yes
+IOAccounting=yes
+
+[Install]
+WantedBy=multi-user.target
