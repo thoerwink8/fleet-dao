@@ -63,7 +63,15 @@ export const SubtaskStateSchema = z.enum([
 export const StepStateSchema = z.enum(['pending', 'in_progress', 'done']);
 export const BillingKindSchema = z.enum(['subscription', 'metered']);
 export const ReadingKindSchema = z.enum(['measured', 'estimated']);
-export const QuotaWindowKindSchema = z.enum(['5h', '7d', '7d_model', 'month_usd', 'points', 'period_usd']);
+export const QuotaWindowKindSchema = z.enum([
+  '5h',
+  '7d',
+  '7d_model',
+  'month_usd',
+  'points',
+  'period_usd',
+  'other',
+]);
 export const HostIdSchema = z.enum(['claude-code', 'codex', 'cursor-agent', 'grok', 'mirasim', 'api-shell']);
 export const RunOutcomeSchema = z.enum(['ok', 'failed', 'stopped', 'stalled']);
 export const ProgressKindSchema = z.enum(['plan', 'say', 'tool', 'file', 'test', 'ask', 'done', 'blocked']);

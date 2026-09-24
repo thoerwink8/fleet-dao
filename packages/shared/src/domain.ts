@@ -44,7 +44,14 @@ export type BillingKind = 'subscription' | 'metered';
 /** 驾驶舱上每个额度数字都要标明来源。 */
 export type ReadingKind = 'measured' | 'estimated';
 
-export type QuotaWindowKind = '5h' | '7d' | '7d_model' | 'month_usd' | 'points' | 'period_usd';
+/** 窗口归类（只增不改）。other = 上游新出的、还归不了类的窗口，照样收下，原名看 QuotaWindow.label。 */
+export type QuotaWindowKind = '5h' | '7d' | '7d_model' | 'month_usd' | 'points' | 'period_usd' | 'other';
+
+/** 额度数字（used / limit）的单位（只增不改）。上游只给百分比时记 percent，上限记 100。 */
+export type QuotaUnit = 'percent' | 'usd' | 'tokens' | 'points';
+
+/** 模型组窗口具体扣哪些模型：in = 只扣这些，notIn = 除了这些都扣。模型 id 按 windowAppliesTo 的规矩比较。 */
+export type ScopeMembership = { in: string[] } | { notIn: string[] };
 
 /** 上游自己说的额度状态。以它为准：实测 99% 就可能已经 limit_reached。 */
 export type QuotaStatus = 'allowed' | 'warning' | 'limit_reached';
@@ -118,15 +125,20 @@ export interface Pool {
   id: string;
   channelId: string;
   maxConcurrency: number;
-  /** 订阅到期日。 */
+  /** 订阅到期日。读数里给了（目前只有 Cursor 给账期末）就按读数写。 */
   expiresAt?: string;
+  /** 这个池里各模型组窗口扣哪些模型（组名 → 成员表），读数里给了就按读数写，例如 Cursor 的 auto / api 两个桶。没给成员表的组按组名匹配。 */
+  scopeModels?: Record<string, ScopeMembership>;
 }
 
 /** 每个账号池、每个时间窗各一行——只存「最紧的那个」就做不到「快清零的先用」。 */
 export interface QuotaWindow {
   poolId: string;
   window: QuotaWindowKind;
-  /** 只扣某一组模型的窗口（如中转的 7d_claude、7d_fable）写组名；账号级窗口不填。同一池可以有好几个模型组窗口。 */
+  /**
+   * 只扣某一组模型的窗口写组名（中转的 7d_claude、7d_fable，Cursor 的 auto / api 桶……）；账号级窗口不填。
+   * 同一池可以有好几个模型组窗口。
+   */
   scope?: string;
   /** 已用比例，通常 0–1；超额是真实情况，可以大于 1（显示时再截）。 */
   utilization?: number;
@@ -136,6 +148,14 @@ export interface QuotaWindow {
   upstreamStatus?: QuotaStatus;
   reading: ReadingKind;
   readAt: string;
+  /** 上游对这个窗口的原名（如 5h、7d_claude、auto_percent）。window 是归类，label 是原样；同一池里不重复，入库必填。 */
+  label?: string;
+  /** used / limit 的单位，入库必填。 */
+  unit?: QuotaUnit;
+  /** 读法：claude-usage、mirasim-relay、cursor-dashboard、grok-billing、estimate……（官方接口、网页接口还是估算，看读法），入库必填。 */
+  source?: string;
+  /** 上游的原状态字。归不进 upstreamStatus 的也留着给人看，不猜。 */
+  statusRaw?: string;
 }
 
 /** 模型厂商家族，例如 claude、gpt。禁令可以按族下。 */
