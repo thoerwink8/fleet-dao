@@ -97,6 +97,18 @@ importers:
         specifier: ^4.6.5
         version: 4.6.5
 
+  packages/github:
+    dependencies:
+      '@fleet-dao/db':
+        specifier: workspace:*
+        version: link:../db
+      drizzle-orm:
+        specifier: ^0.45.3
+        version: 0.45.3(@electric-sql/pglite@0.5.8)(postgres@3.4.9)
+      zod:
+        specifier: ^4.6.5
+        version: 4.6.5
+
   packages/shared:
     dependencies:
       zod:

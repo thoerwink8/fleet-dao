@@ -1,0 +1,15 @@
+{
+  "name": "@fleet-dao/github",
+  "version": "0.0.0",
+  "private": true,
+  "description": "GitHub：两个 App 的令牌、会话外推分支、开 PR、等 CI、合并、issue 进度段与关单、事件之后的处理、对账补漏",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@fleet-dao/db": "workspace:*",
+    "drizzle-orm": "^0.45.3",
+    "zod": "^4.6.5"
+  }
+}

@@ -1,0 +1,276 @@
+// 推分支用真 git、本地裸仓当远端（不出网）。GitHub 接口（默认分支、换令牌）走假服务。
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { beforeAll, describe, expect, it } from 'vitest';
+import { classifyPushFailure, execGit, type GitRunner } from '../src/git.ts';
+import { validBranchName } from '../src/push.ts';
+import { setup } from './helpers.ts';
+
+const ID = ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', '-c', 'commit.gpgsign=false'];
+
+function git(cwd: string, ...args: string[]): string {
+  return execFileSync('git', [...ID, '-c', 'core.autocrlf=false', ...args], {
+    cwd,
+    encoding: 'utf8',
+    env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  }).trim();
+}
+
+let root: string;
+let remote: string;
+let main: string;
+
+/** 在 main 上起一棵加出来的工作树（引擎就是这么给会话建树的），在里面提交一次。 */
+function worktree(
+  branch: string,
+  files: Record<string, string> = { [`${branch.replace(/\//g, '-')}.txt`]: branch },
+) {
+  const path = join(root, `wt-${branch.replace(/\//g, '-')}-${Math.random().toString(36).slice(2, 7)}`);
+  git(main, 'fetch', '-q', 'origin');
+  git(main, 'worktree', 'add', '-q', '-b', branch, path, 'origin/main');
+  for (const [name, text] of Object.entries(files)) writeFileSync(join(path, name), text);
+  git(path, 'add', '-A');
+  git(path, 'commit', '-q', '-m', `work on ${branch}`);
+  return { path, head: git(path, 'rev-parse', 'HEAD') };
+}
+
+function advanceRemoteMain(): string {
+  const tmp = join(root, `adv-${Math.random().toString(36).slice(2, 7)}`);
+  git(root, 'clone', '-q', remote, tmp);
+  writeFileSync(join(tmp, `main-${Date.now()}-${Math.random()}.txt`), 'x');
+  git(tmp, 'add', '-A');
+  git(tmp, 'commit', '-q', '-m', 'main moves');
+  git(tmp, 'push', '-q', 'origin', 'HEAD:main');
+  return git(tmp, 'rev-parse', 'HEAD');
+}
+
+function remoteHead(branch: string): string | null {
+  const out = git(root, 'ls-remote', remote, `refs/heads/${branch}`);
+  return out ? (out.split('\t')[0] ?? null) : null;
+}
+
+beforeAll(() => {
+  root = mkdtempSync(join(tmpdir(), 'fleet-gh-push-'));
+  remote = join(root, 'remote.git');
+  git(root, 'init', '-q', '--bare', '-b', 'main', remote);
+  main = join(root, 'main');
+  git(root, 'clone', '-q', remote, main);
+  writeFileSync(join(main, 'README.md'), 'hello\n');
+  git(main, 'add', '-A');
+  git(main, 'commit', '-q', '-m', 'init');
+  git(main, 'push', '-q', 'origin', 'HEAD:main');
+}, 60_000);
+
+function pushSetup(record?: { args: string[]; cwd: string; env: Record<string, string> }[]) {
+  const runner: GitRunner = async (args, call) => {
+    record?.push({ args, cwd: call.cwd, env: call.env });
+    return execGit(args, call);
+  };
+  return setup({
+    git: runner,
+    gitUrl: () => remote,
+    gitHost: 'https://github.com/',
+    env: { ...process.env, GH_TOKEN: 'ghp_personalpersonalpersonal', GIT_ASKPASS: '/usr/bin/evil' },
+  });
+}
+
+// 每个用例要起十几个 git 进程：Linux 上一两百毫秒，Windows 开发机上要好几秒
+describe('会话外推分支', { timeout: 60_000 }, () => {
+  it('新分支推上去，远端的头就是它；令牌只在环境变量里、不在命令行参数里', async () => {
+    const calls: { args: string[]; cwd: string; env: Record<string, string> }[] = [];
+    const { gh, fake } = pushSetup(calls);
+    const wt = worktree('task/1-new');
+    const res = await gh.pushBranch({
+      repo: { owner: 'acme', name: 'widgets' },
+      worktreePath: wt.path,
+      branch: 'task/1-new',
+      head: wt.head,
+    });
+    expect(res).toMatchObject({ pushed: true, remoteBefore: null, head: wt.head, defaultBranch: 'main' });
+    expect(remoteHead('task/1-new')).toBe(wt.head);
+
+    // 用的是「干活的」机器人的令牌
+    expect(fake.calls('POST', /access_tokens$/).map((r) => r.as)).toEqual(['app:agent']);
+    const pushCall = calls.find((c) => c.args[0] === 'push');
+    expect(pushCall).toBeDefined();
+    for (const c of calls) {
+      expect(c.args.join(' ')).not.toMatch(/ghs_|x-access-token|AUTHORIZATION/i);
+      expect(c.env.GH_TOKEN).toBeUndefined();
+      expect(c.env.GIT_ASKPASS).toBeUndefined();
+      expect(c.env.GIT_TERMINAL_PROMPT).toBe('0');
+    }
+    const header = Object.entries(pushCall?.env ?? {}).find(([, v]) => v.startsWith('AUTHORIZATION: basic '));
+    expect(header).toBeDefined();
+    const keyName = header?.[0].replace('VALUE', 'KEY') ?? '';
+    expect(pushCall?.env[keyName]).toBe('http.https://github.com/.extraHeader');
+    // 带令牌的 git 从不在会话的工作树里跑
+    expect(calls.every((c) => !c.cwd.startsWith(wt.path))).toBe(true);
+  });
+
+  it('拒绝推主线；分支名不合规就不推', async () => {
+    const { gh } = pushSetup();
+    const wt = worktree('task/2-main');
+    const repo = { owner: 'acme', name: 'widgets' };
+    await expect(
+      gh.pushBranch({ repo, worktreePath: wt.path, branch: 'main', head: wt.head }),
+    ).rejects.toMatchObject({
+      code: 'BRANCH_FORBIDDEN',
+    });
+    await expect(
+      gh.pushBranch({ repo, worktreePath: wt.path, branch: 'MAIN', head: wt.head }),
+    ).rejects.toMatchObject({
+      code: 'BRANCH_FORBIDDEN',
+    });
+    for (const bad of ['refs/heads/x', '-x', 'a..b', 'HEAD', 'a b', 'x.lock', '.hidden/x']) {
+      expect(validBranchName(bad)).toBe(false);
+    }
+    expect(remoteHead('main')).not.toBe(wt.head);
+  });
+
+  it('不包含最新主线就不推：先同步主线', async () => {
+    const { gh } = pushSetup();
+    const wt = worktree('task/3-behind');
+    advanceRemoteMain();
+    await expect(
+      gh.pushBranch({
+        repo: { owner: 'acme', name: 'widgets' },
+        worktreePath: wt.path,
+        branch: 'task/3-behind',
+        head: wt.head,
+      }),
+    ).rejects.toMatchObject({ code: 'BEHIND_MAINLINE', retryable: false });
+    expect(remoteHead('task/3-behind')).toBeNull();
+  });
+
+  it('C7：没有自己的提交、或提交了但内容和主线一样，都不推', async () => {
+    const { gh } = pushSetup();
+    const repo = { owner: 'acme', name: 'widgets' };
+    const wt = worktree('task/4-empty');
+    git(wt.path, 'revert', '--no-edit', 'HEAD');
+    const noDiff = git(wt.path, 'rev-parse', 'HEAD');
+    await expect(
+      gh.pushBranch({ repo, worktreePath: wt.path, branch: 'task/4-empty', head: noDiff }),
+    ).rejects.toMatchObject({
+      code: 'EMPTY_DELIVERY',
+    });
+    const mainline = git(wt.path, 'rev-parse', 'origin/main');
+    await expect(
+      gh.pushBranch({ repo, worktreePath: wt.path, branch: 'task/4-empty', head: mainline }),
+    ).rejects.toMatchObject({
+      code: 'EMPTY_DELIVERY',
+    });
+  });
+
+  it('同一个头再推一次（重试）：什么都不做', async () => {
+    const { gh } = pushSetup();
+    const repo = { owner: 'acme', name: 'widgets' };
+    const wt = worktree('task/5-again');
+    await gh.pushBranch({ repo, worktreePath: wt.path, branch: 'task/5-again', head: wt.head });
+    const again = await gh.pushBranch({ repo, worktreePath: wt.path, branch: 'task/5-again', head: wt.head });
+    expect(again).toMatchObject({ pushed: false, remoteBefore: wt.head });
+  });
+
+  it('远端是我们的祖先：快进推', async () => {
+    const { gh } = pushSetup();
+    const repo = { owner: 'acme', name: 'widgets' };
+    const wt = worktree('task/6-ff');
+    await gh.pushBranch({ repo, worktreePath: wt.path, branch: 'task/6-ff', head: wt.head });
+    writeFileSync(join(wt.path, 'more.txt'), 'more');
+    git(wt.path, 'add', '-A');
+    git(wt.path, 'commit', '-q', '-m', 'more');
+    const head2 = git(wt.path, 'rev-parse', 'HEAD');
+    const res = await gh.pushBranch({ repo, worktreePath: wt.path, branch: 'task/6-ff', head: head2 });
+    expect(res).toMatchObject({ pushed: true, remoteBefore: wt.head });
+    expect(remoteHead('task/6-ff')).toBe(head2);
+  });
+
+  it('C6：远端在我们的提交之上被推进过——报出远端的新头，不覆盖', async () => {
+    const { gh } = pushSetup();
+    const repo = { owner: 'acme', name: 'widgets' };
+    const wt = worktree('task/7-ahead');
+    await gh.pushBranch({ repo, worktreePath: wt.path, branch: 'task/7-ahead', head: wt.head });
+    const other = join(root, 'other-7');
+    git(root, 'clone', '-q', '-b', 'task/7-ahead', remote, other);
+    writeFileSync(join(other, 'by-someone.txt'), 'x');
+    git(other, 'add', '-A');
+    git(other, 'commit', '-q', '-m', 'someone else');
+    git(other, 'push', '-q', 'origin', 'HEAD:task/7-ahead');
+    const theirs = git(other, 'rev-parse', 'HEAD');
+    await expect(
+      gh.pushBranch({ repo, worktreePath: wt.path, branch: 'task/7-ahead', head: wt.head }),
+    ).rejects.toMatchObject({
+      code: 'REMOTE_AHEAD',
+      details: { remoteHead: theirs },
+    });
+    expect(remoteHead('task/7-ahead')).toBe(theirs);
+  });
+
+  it('分叉了：不强推，远端原样', async () => {
+    const { gh } = pushSetup();
+    const repo = { owner: 'acme', name: 'widgets' };
+    const wt = worktree('task/8-fork');
+    await gh.pushBranch({ repo, worktreePath: wt.path, branch: 'task/8-fork', head: wt.head });
+    const other = join(root, 'other-8');
+    git(root, 'clone', '-q', '-b', 'task/8-fork', remote, other);
+    writeFileSync(join(other, 'theirs.txt'), 'x');
+    git(other, 'add', '-A');
+    git(other, 'commit', '-q', '-m', 'theirs');
+    git(other, 'push', '-q', 'origin', 'HEAD:task/8-fork');
+    const theirs = git(other, 'rev-parse', 'HEAD');
+    writeFileSync(join(wt.path, 'ours.txt'), 'y');
+    git(wt.path, 'add', '-A');
+    git(wt.path, 'commit', '-q', '-m', 'ours');
+    const ours = git(wt.path, 'rev-parse', 'HEAD');
+    await expect(
+      gh.pushBranch({ repo, worktreePath: wt.path, branch: 'task/8-fork', head: ours }),
+    ).rejects.toMatchObject({
+      code: 'DIVERGED',
+    });
+    expect(remoteHead('task/8-fork')).toBe(theirs);
+  });
+
+  it('工作树里没有这个提交：报 HEAD_NOT_FOUND', async () => {
+    const { gh } = pushSetup();
+    const wt = worktree('task/9-missing');
+    await expect(
+      gh.pushBranch({
+        repo: { owner: 'acme', name: 'widgets' },
+        worktreePath: wt.path,
+        branch: 'task/9-missing',
+        head: 'f'.repeat(40),
+      }),
+    ).rejects.toMatchObject({ code: 'HEAD_NOT_FOUND' });
+  });
+
+  it('C3：推送因 workflows 权限被拒，一次判「要人」，不当可重试', async () => {
+    const stderr =
+      'remote: error: GH013 ...\n ! [remote rejected] abc -> task/x (refusing to allow a GitHub App to create or update workflow `.github/workflows/ci.yml` without `workflows` permission)\nerror: failed to push some refs';
+    expect(classifyPushFailure(stderr)).toBe('workflow_permission');
+    const runner: GitRunner = async (args, call) =>
+      args[0] === 'push' ? { code: 1, stdout: '', stderr } : execGit(args, call);
+    const { gh } = setup({ git: runner, gitUrl: () => remote, env: {} });
+    const wt = worktree('task/10-wf');
+    await expect(
+      gh.pushBranch({
+        repo: { owner: 'acme', name: 'widgets' },
+        worktreePath: wt.path,
+        branch: 'task/10-wf',
+        head: wt.head,
+      }),
+    ).rejects.toMatchObject({ code: 'WORKFLOW_PERMISSION', retryable: false });
+  });
+
+  it('推送失败的分类：规则集、凭据、网络', () => {
+    expect(classifyPushFailure('remote: error: GH013: Repository rule violations found')).toBe(
+      'rule_rejected',
+    );
+    expect(classifyPushFailure("fatal: Authentication failed for 'https://github.com/x/y.git/'")).toBe(
+      'auth',
+    );
+    expect(classifyPushFailure('error: RPC failed; HTTP 502 curl 22')).toBe('transient');
+    expect(classifyPushFailure(' ! [rejected]        x -> x (non-fast-forward)')).toBe('non_fast_forward');
+  });
+});
