@@ -693,3 +693,10 @@ dsh --profile headless "<task>"
 | Kimi Code | `-p --output-format stream-json` 的事件格式与完成信号；凭据文件位置；默认模型的出处；Mirasim 起 kimi 的方式 |
 | Mirasim | 服务端的 30 分钟回合看门狗能不能配置；kimi / dsh 会话的进程形态 |
 | 全部 | 各家无头模式下「额度用尽」的退出码与报错原文（目前只有 reclaude 有第一手样本） |
+
+**2026-09-25 P3 真跑查实的**（结论写在各插头读取器的文件头，`packages/adapters/src/{cursor,grok,codex,mirasim}/`；真跑记录在 `packages/adapters/test/fixtures/` 同名目录）：
+
+- cursor-agent：`-p` 的事件全集（`tool_call` 的 started / completed、`xxxToolCall` 键、`result.usage` 只算这一轮）；stdin 喂提示词可用；`init.model` 只是界面名，流里没有实际模型。
+- codex：`exec --json` 的 item 类型（`command_execution`、`file_change`、`agent_message`）、`turn.completed` 的 usage 是**整个会话的累计值**、上游 401 先重连 5 次再 `turn.failed`——真 CLI 对本机假上游跑出来的，零花费；0.156 的「代码模式」下没有 `update_plan`，步骤清单这一轮没见到。
+- Grok：streaming-json 真样本；`--prompt-file /dev/stdin` 只认真管道（Node 起子进程给的 stdin 是 socketpair，报 ENXIO）；`end.total_cost_usd` 只算这一轮。
+- Kimi Code、codex 经 Mirasim（`route=cloud`）：账本 `viaRelay` 全真、上游 `relay.mirasim.ai`；**续跑同一个 sessionKey 时，订阅先回上一轮收尾的快照（phase=done、旧 taskId）**，只按 taskId 认这一轮。
