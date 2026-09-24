@@ -1,0 +1,93 @@
+{
+  "_note": "法国 VPS 2026-09-24T18:59Z 真机 getRelay 回帧。脱敏：tokenTail、网卡名、执行体名单换成占位，history 只留两条。",
+  "type": "relay",
+  "relay": {
+    "available": true,
+    "host": "relay.mirasim.ai",
+    "agent": "claude",
+    "mode": "auto",
+    "enabled": true,
+    "configured": true,
+    "tokenTail": "xxxx",
+    "threshold": 0.95,
+    "on5h": true,
+    "on7d": true,
+    "reactive": true,
+    "always": false,
+    "engaged": false,
+    "reason": null,
+    "since": null,
+    "window": null,
+    "usedPercent": null,
+    "relayStatus": "ok",
+    "credentiallessAgents": ["agent-a", "agent-b", "agent-c"],
+    "blocked": null,
+    "relayWindow": null,
+    "relayResetAt": null,
+    "network": {
+      "iface": "eth0",
+      "tunnel": false,
+      "changedAt": null,
+      "checking": false,
+      "reached": true,
+      "probedAt": 1790276387244
+    },
+    "usage": {
+      "ok": true,
+      "agent": "claude",
+      "source": "relay-limits",
+      "capturedAt": "2026-09-24T18:59:47.384Z",
+      "status": "allowed",
+      "windows": [
+        {
+          "label": "5h",
+          "usedPercent": 0.8,
+          "remainingPercent": 99.2,
+          "resetAt": "2026-09-24T19:06:54.000Z",
+          "resetAfterSeconds": 427,
+          "status": "allowed",
+          "used": 1140.30619063,
+          "budget": 143528
+        },
+        {
+          "label": "7d",
+          "usedPercent": 55.7,
+          "remainingPercent": 44.3,
+          "resetAt": "2026-09-29T05:27:56.000Z",
+          "resetAfterSeconds": 383289,
+          "status": "allowed",
+          "used": 285510.67814471,
+          "budget": 512600
+        },
+        {
+          "label": "7d_claude",
+          "usedPercent": 52.2,
+          "remainingPercent": 47.8,
+          "resetAt": "2026-09-29T05:27:56.000Z",
+          "resetAfterSeconds": 383289,
+          "status": "allowed",
+          "used": 267665.73132,
+          "budget": 512600,
+          "modelScoped": true
+        },
+        {
+          "label": "7d_fable",
+          "usedPercent": 33.2,
+          "remainingPercent": 66.8,
+          "resetAt": "2026-09-29T05:27:56.000Z",
+          "resetAfterSeconds": 383289,
+          "status": "allowed",
+          "used": 90242.81785,
+          "budget": 271678,
+          "modelScoped": true
+        }
+      ],
+      "error": null
+    },
+    "paid": true,
+    "history": [
+      { "at": 1790269906934, "fiveHour": 0.8, "sevenDay": 55.7 },
+      { "at": 1790269967305, "fiveHour": 0.8, "sevenDay": 55.7 }
+    ]
+  }
+}

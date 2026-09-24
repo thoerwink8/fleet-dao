@@ -1,0 +1,9 @@
+{
+  "planInfo": {
+    "planName": "Ultra",
+    "includedAmountCents": 40000,
+    "price": "$200/mo",
+    "billingCycleEnd": "1792177716000",
+    "planOwner": "<账号主人>"
+  }
+}
