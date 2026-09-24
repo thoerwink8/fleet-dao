@@ -1,0 +1,4 @@
+#!/usr/bin/env node
+// fleet 命令入口：直接跑 TypeScript 源码（Node 22 的类型剥离），不另编译。
+// 不带扩展名，这个目录放进 PATH 就能敲 fleet；用 import() 而不是顶层 await，不管被当成 CJS 还是 ESM 都能跑。
+import('../src/main.ts');
