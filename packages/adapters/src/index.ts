@@ -7,4 +7,5 @@ export * from './env.ts';
 export * from './judge.ts';
 export * from './lines.ts';
 export * from './process.ts';
+export * from './procs.ts';
 export type * from './types.ts';

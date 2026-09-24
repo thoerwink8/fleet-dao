@@ -9,7 +9,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ProgressEvent } from '@fleet-dao/shared';
 import { type ClaudeCodeRunSpec, judgeClaudeRun, runClaudeCode } from '../../src/claude-code/run.ts';
+import { costOfThisRun } from '../../src/claude-code/stream.ts';
 import { checkDelivery } from '../../src/delivery.ts';
+import { sessionProcs } from '../../src/procs.ts';
 
 const [reclaude, model = 'claude-haiku-4-5'] = process.argv.slice(2);
 if (!reclaude) {
@@ -34,9 +36,10 @@ git(tree, 'push', '-q', 'origin', 'HEAD:main');
 git(tree, 'fetch', '-q', 'origin');
 
 const sessionId = randomUUID();
+const runId = `e2e-${sessionId.slice(0, 8)}`;
 const events: ProgressEvent[] = [];
 const base = (prompt: string, session: ClaudeCodeRunSpec['session']): ClaudeCodeRunSpec => ({
-  runId: `e2e-${sessionId.slice(0, 8)}`,
+  runId,
   cwd: tree,
   prompt,
   model,
@@ -47,6 +50,7 @@ const base = (prompt: string, session: ClaudeCodeRunSpec['session']): ClaudeCode
   testCommands: ['git commit'],
 });
 
+const before = git(tree, 'rev-parse', 'HEAD');
 const first = await runClaudeCode(
   base(
     '在 notes.md 末尾追加一行「- e2e 到此一游」，然后运行 `git add -A && git commit -m "e2e: 追加一行"`。做完只回复「好了」。',
@@ -54,14 +58,27 @@ const first = await runClaudeCode(
   ),
   { command: [reclaude], onEvent: (e) => events.push(e) },
 );
-const delivery = await checkDelivery({ cwd: tree, remote: 'origin', branch: 'main' });
+const delivery = await checkDelivery({ cwd: tree, remote: 'origin', branch: 'main', since: before });
 const firstVerdict = judgeClaudeRun(first, delivery);
 
+// 第二轮不提交，还在后台留一个进程：交付判据不能认上一轮的提交，插头要把后台进程收掉
+const afterFirst = git(tree, 'rev-parse', 'HEAD');
 const second = await runClaudeCode(
-  base('你刚才提交用的提交信息是什么？只回复提交信息本身。', { mode: 'resume', id: sessionId }),
+  base(
+    '先运行 `nohup sleep 300 >/dev/null 2>&1 &` 在后台起一个进程，不用等它；然后回答：你刚才提交用的提交信息是什么？只回复提交信息本身。',
+    { mode: 'resume', id: sessionId },
+  ),
   { command: [reclaude], onEvent: (e) => events.push(e) },
 );
+const secondDelivery = await checkDelivery({
+  cwd: tree,
+  remote: 'origin',
+  branch: 'main',
+  since: afterFirst,
+});
 const secondVerdict = judgeClaudeRun(second);
+const leftBehind = sessionProcs(runId);
+const secondCost = costOfThisRun(second.stream.result, first.stream.result);
 
 const checks: [string, boolean][] = [
   ['第一轮判交付', firstVerdict.outcome === 'ok' && firstVerdict.reason === 'delivered'],
@@ -73,6 +90,15 @@ const checks: [string, boolean][] = [
   ['续会话会话号不变', second.stream.sessionId === sessionId],
   ['续会话记得第一轮的提交信息', (second.stream.result?.text ?? '').includes('e2e: 追加一行')],
   ['第二轮正常结束', secondVerdict.outcome === 'ok'],
+  [
+    '第二轮没有新提交：不靠上一轮的提交判交付',
+    secondDelivery.state === 'not_delivered' && secondDelivery.newCommits === 0,
+  ],
+  [
+    '第二轮的累计花费含第一轮，本轮花费按差算',
+    secondCost !== undefined && secondCost > 0 && secondCost < (second.stream.result?.sessionCostUsd ?? 0),
+  ],
+  ['会话结束后没有留下带会话标记的进程', leftBehind.length === 0 && second.leftovers === 0],
 ];
 
 const brief = (r: typeof first) => ({
@@ -83,6 +109,7 @@ const brief = (r: typeof first) => ({
   wallMs: r.wallMs,
   lines: r.lines,
   stragglers: r.stragglers,
+  leftovers: r.leftovers,
   sessionId: r.stream.sessionId,
   observedModel: r.stream.observedModel,
   cliVersion: r.stream.cliVersion,
@@ -100,6 +127,9 @@ console.log(
       first: brief(first),
       delivery,
       firstVerdict,
+      secondDelivery,
+      secondCost,
+      leftBehind,
       second: brief(second),
       secondVerdict,
       eventKinds: events.map((e) => e.kind),

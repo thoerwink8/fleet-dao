@@ -5,6 +5,8 @@ import { describe, expect, it } from 'vitest';
 import {
   type ClaudeLineEffect,
   ClaudeStreamReader,
+  costOfThisRun,
+  exitStatusUntrusted,
   sameModel,
   versionAtLeast,
 } from '../src/claude-code/stream.ts';
@@ -42,7 +44,7 @@ function rawUsage(name: string) {
       cacheReadInputTokens: result.usage.cache_read_input_tokens,
       cacheCreationInputTokens: result.usage.cache_creation_input_tokens,
     },
-    costUsd: result.total_cost_usd,
+    sessionCostUsd: result.total_cost_usd,
   };
 }
 
@@ -53,14 +55,14 @@ describe('ClaudeStreamReader · 真跑夹具', () => {
       {
         phase: 'start',
         toolUseId: 'toolu_01SggLj3NCU3w4UJcUikKVDy',
-        tool: 'Read',
+        name: 'Read',
         action: 'read',
         summary: 'hello.txt',
       },
       {
         phase: 'end',
         toolUseId: 'toolu_01SggLj3NCU3w4UJcUikKVDy',
-        tool: 'Read',
+        name: 'Read',
         action: 'read',
         summary: 'hello.txt',
         ok: true,
@@ -89,7 +91,7 @@ describe('ClaudeStreamReader · 真跑夹具', () => {
   it('改文件：先读后改，改成功才报 file 事件，路径是工作树内的相对路径', () => {
     const { events, summary } = readAll('cc-haiku-edit');
     const starts = ofKind<ToolPayload>(events, 'tool').filter((t) => t.phase === 'start');
-    expect(starts.map((t) => [t.tool, t.action, t.summary])).toEqual([
+    expect(starts.map((t) => [t.name, t.action, t.summary])).toEqual([
       ['Read', 'read', 'notes.md'],
       ['Edit', 'edit', 'notes.md'],
     ]);
@@ -108,13 +110,13 @@ describe('ClaudeStreamReader · 真跑夹具', () => {
     const { events, summary } = readAll('cc-haiku-bash', ['git status']);
     const [start] = ofKind<ToolPayload>(events, 'tool');
     expect(start).toMatchObject({
-      tool: 'Bash',
+      name: 'Bash',
       action: 'run',
       summary: 'ls -1 && git status --short',
       description: 'List files in the current directory and show git status',
     });
     expect(ofKind<TestPayload>(events, 'test')).toEqual([
-      { command: 'ls -1 && git status --short', ok: true },
+      { command: 'ls -1 && git status --short', passed: true },
     ]);
     expect(summary.testRuns).toHaveLength(1);
   });
@@ -124,7 +126,7 @@ describe('ClaudeStreamReader · 真跑夹具', () => {
     const end = ofKind<ToolPayload>(events, 'tool').find((t) => t.phase === 'end');
     expect(end?.ok).toBe(false);
     expect(end?.error).toContain('Exit code 2');
-    expect(ofKind<TestPayload>(events, 'test')).toEqual([{ command: 'ls missing-dir', ok: false }]);
+    expect(ofKind<TestPayload>(events, 'test')).toEqual([{ command: 'ls missing-dir', passed: false }]);
     expect(summary.toolErrors).toBe(1);
     expect(summary.result?.isError).toBe(false);
   });
@@ -132,7 +134,7 @@ describe('ClaudeStreamReader · 真跑夹具', () => {
   it('命令超时（BASH_DEFAULT_TIMEOUT_MS=4000 时跑 sleep 12）：工具失败、退出码 143，中间的 task_* 系统帧不打扰', () => {
     const { events, summary } = readAll('cc-haiku-bash-timeout');
     const end = ofKind<ToolPayload>(events, 'tool').find((t) => t.phase === 'end');
-    expect(end).toMatchObject({ tool: 'Bash', summary: 'sleep 12; echo slept', ok: false });
+    expect(end).toMatchObject({ name: 'Bash', summary: 'sleep 12; echo slept', ok: false });
     expect(end?.error).toContain('Exit code 143');
     expect(summary.result?.text).toContain('Command timed out after 4s');
     expect(summary.unknownFrames).toEqual({});
@@ -141,7 +143,7 @@ describe('ClaudeStreamReader · 真跑夹具', () => {
   it('工具报错（读不存在的文件）只算工具失败，会话照常完成', () => {
     const { events, summary } = readAll('cc-haiku-tool-error');
     const end = ofKind<ToolPayload>(events, 'tool').find((t) => t.phase === 'end');
-    expect(end).toMatchObject({ tool: 'Read', ok: false });
+    expect(end).toMatchObject({ name: 'Read', ok: false });
     expect(end?.error).toContain('File does not exist');
     expect(summary.toolErrors).toBe(1);
     expect(summary.result?.isError).toBe(false);
@@ -189,6 +191,20 @@ describe('ClaudeStreamReader · 真跑夹具', () => {
     expect(b.sessionId).toBe(a.sessionId);
     expect(a.result?.text).toBe('391');
     expect(b.result?.text).toBe('392');
+  });
+
+  it('花费是整个会话的累计值：续会话那一轮的 total_cost_usd 含上一轮，本轮要减掉上一轮；token 是本轮的', () => {
+    const a = readAll('cc-haiku-resume-a').summary.result;
+    const b = readAll('cc-haiku-resume-b').summary.result;
+    expect(a?.sessionCostUsd).toBe(0.0162999);
+    expect(b?.sessionCostUsd).toBe(0.0189984);
+    expect(costOfThisRun(a)).toBe(0.0162999);
+    expect(costOfThisRun(b, a)).toBeCloseTo(0.0026985, 7);
+    // 上一轮没读到累计值：本轮是多少说不清，给「没查成」，不把累计值当本轮
+    expect(costOfThisRun(b, { isError: false, models: [], permissionDenials: 0 })).toBeUndefined();
+    // 第二轮只输出 54 个 token，比第一轮的 102 少：终帧 usage 不是累计值
+    expect(a?.usage?.outputTokens).toBe(102);
+    expect(b?.usage?.outputTokens).toBe(54);
   });
 
   it('额度读数：5 小时窗与 7 天窗的利用率和清零时间', () => {
@@ -297,6 +313,69 @@ describe('ClaudeStreamReader · 夹具里没有的帧（手造，依据写在用
       unknownFrames: { stream_event: 1 },
       frames: 1,
     });
+  });
+});
+
+describe('测试结果只认可信的退出码', () => {
+  /** 手造：把真跑夹具里那条 Bash 调用的输入换掉，其余帧原样。 */
+  function bashRun(input: Record<string, unknown>) {
+    const { cwd } = fixtureInit('cc-haiku-bash');
+    const reader = new ClaudeStreamReader({ runId: 'r', cwd, testCommands: ['pnpm check'] });
+    const events = fixtureLines('claude-code', 'cc-haiku-bash')
+      .map((line) => {
+        const frame = JSON.parse(line) as {
+          type?: string;
+          message?: { content?: Record<string, unknown>[] };
+        };
+        const block = frame.message?.content?.[0];
+        if (frame.type === 'assistant' && block?.type === 'tool_use') block.input = input;
+        return JSON.stringify(frame);
+      })
+      .flatMap((line) => reader.read(line).events);
+    return ofKind<TestPayload>(events, 'test');
+  }
+
+  it('工具报成功、命令可信：记通过', () => {
+    expect(bashRun({ command: 'pnpm check' })).toEqual([{ command: 'pnpm check', passed: true }]);
+  });
+
+  it('`pnpm check | tail` 工具报成功也不算通过：退出码是 tail 的，记结果未知', () => {
+    expect(bashRun({ command: 'pnpm check 2>&1 | tail -5' })).toEqual([
+      {
+        command: 'pnpm check 2>&1 | tail -5',
+        unknownBecause: '带管道又没开 pipefail，退出码是管道最后一段的',
+      },
+    ]);
+  });
+
+  it('放到后台跑的测试记结果未知', () => {
+    expect(bashRun({ command: 'pnpm check', run_in_background: true })).toEqual([
+      { command: 'pnpm check', unknownBecause: '放到后台跑，命令返回时测试还没跑完' },
+    ]);
+  });
+
+  it.each([
+    ['pnpm check | tail -5', '管道'],
+    ['pnpm check |& tee log', '管道'],
+    ['pnpm check || true', '||'],
+    ['pnpm check; echo done', ';'],
+    ['pnpm check &', '后台'],
+    ['pnpm check\necho done', '多行'],
+  ])('%j → 结果未知（%s）', (command, why) => {
+    expect(exitStatusUntrusted(command)).toContain(why);
+  });
+
+  it.each([
+    'pnpm check',
+    'cd packages/api && pnpm check',
+    'pnpm check 2>&1',
+    'pnpm check &> check.log',
+    'pnpm check && echo PASS',
+    'set -o pipefail; pnpm check | tail -5',
+    'set -euo pipefail && pnpm check | tee log',
+    'pnpm vitest run -t "a | b; c"',
+  ])('%j → 退出码可信', (command) => {
+    expect(exitStatusUntrusted(command)).toBeUndefined();
   });
 });
 

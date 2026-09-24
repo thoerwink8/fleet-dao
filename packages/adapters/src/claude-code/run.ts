@@ -2,17 +2,18 @@
 import { stat } from 'node:fs/promises';
 import type { ProgressEvent } from '@fleet-dao/shared';
 import type { DeliveryCheck } from '../delivery.ts';
-import { buildSessionEnv, type SessionEnvInput } from '../env.ts';
+import { assertNoForbiddenEnv, buildSessionEnv, type SessionEnvInput } from '../env.ts';
 import { judgeRun, type RunFacts, type RunVerdict } from '../judge.ts';
 import {
   type AgentProcessResult,
   assertNotRealAgentInTests,
-  type CgroupScope,
   DEFAULT_PROCESS_LIMITS,
+  guardCallback,
   type ProcessLimits,
   runAgentProcess,
-  scopePrefix,
+  type SpawnInfo,
 } from '../process.ts';
+import type { CgroupScope } from '../procs.ts';
 import type { RateLimitReading } from '../types.ts';
 import { buildClaudeArgs, type ClaudeArgsSpec, type ClaudeSession } from './args.ts';
 import { ClaudeStreamReader, type ClaudeStreamSummary, sameModel, versionAtLeast } from './stream.ts';
@@ -27,8 +28,15 @@ export const MIN_CLAUDE_VERSION = '2.1.277';
 export const DEFAULT_BASH_TIMEOUT_MS = 10 * 60_000;
 const MAX_BASH_TIMEOUT_MS = 30 * 60_000;
 
+/** reclaude 自己管上游、代理和证书：会话环境里带了这些，请求会被改道到别的网关。 */
+export const UPSTREAM_ENV: readonly RegExp[] = [
+  /^ANTHROPIC_/i,
+  /^(HTTPS?|ALL|NO)_PROXY$/i,
+  /^NODE_EXTRA_CA_CERTS$/i,
+];
+
 export interface ClaudeCodeRunSpec extends ClaudeArgsSpec {
-  /** 驾驶舱里这次会话的编号，进度事件都挂在它下面。 */
+  /** 驾驶舱里这次会话的编号：进度事件挂在它下面，也是收尸用的会话标记。 */
   runId: string;
   /** 工作树。 */
   cwd: string;
@@ -46,8 +54,11 @@ export interface ClaudeCodeRunSpec extends ClaudeArgsSpec {
 export interface ClaudeCodeRunOptions {
   /** 起 reclaude 的命令，给绝对路径。没有默认值：谁要起真执行体谁显式给，测试里换成假执行体。 */
   command: readonly string[];
-  onEvent?: (event: ProgressEvent) => void;
-  onRateLimit?: (reading: RateLimitReading) => void;
+  /** 可以是 async 的：被拒不会炸进程，记进 hookError；交报告之前会等它们落定。 */
+  onEvent?: (event: ProgressEvent) => unknown;
+  onRateLimit?: (reading: RateLimitReading) => unknown;
+  /** 进程起来了：引擎记下进程号和 scope，重启后用 reapSession 收旧会话。 */
+  onSpawn?: (info: SpawnInfo) => unknown;
   signal?: AbortSignal;
   now?: () => Date;
   minCliVersion?: string;
@@ -58,18 +69,6 @@ export interface ClaudeCodeRunReport extends AgentProcessResult {
   requestedModel: string;
   session: ClaudeSession;
   stream: ClaudeStreamSummary;
-}
-
-/** 这些键在会话环境里出现就拒起：reclaude 自己管上游、代理和证书，带进去会把请求改道。 */
-const FORBIDDEN_ENV = [/^ANTHROPIC_/i, /^(HTTPS?|ALL|NO)_PROXY$/i, /^NODE_EXTRA_CA_CERTS$/i];
-
-export function assertNoUpstreamOverride(env: Record<string, string>): void {
-  const bad = Object.keys(env).filter((key) => FORBIDDEN_ENV.some((re) => re.test(key)));
-  if (bad.length) {
-    throw new Error(
-      `会话环境里不许带 ${bad.join('、')}：reclaude 自己管上游、代理和证书，外面带进去会把请求改道到别的网关`,
-    );
-  }
 }
 
 export async function runClaudeCode(
@@ -89,7 +88,11 @@ export async function runClaudeCode(
     BASH_DEFAULT_TIMEOUT_MS: String(bashTimeout),
     BASH_MAX_TIMEOUT_MS: String(Math.max(bashTimeout, MAX_BASH_TIMEOUT_MS)),
   };
-  assertNoUpstreamOverride(env);
+  assertNoForbiddenEnv(
+    env,
+    UPSTREAM_ENV,
+    'reclaude 自己管上游、代理和证书，外面带进去会把请求改道到别的网关',
+  );
   const now = options.now ?? (() => new Date());
   const minVersion = options.minCliVersion ?? MIN_CLAUDE_VERSION;
   const reader = new ClaudeStreamReader({
@@ -99,43 +102,52 @@ export async function runClaudeCode(
     now,
   });
   let callbackError: string | undefined;
-  const call = (fn: () => void) => {
-    try {
-      fn();
-    } catch (err) {
+  const pending = new Set<Promise<unknown>>();
+  const call = (fn: () => unknown) => {
+    const settling = guardCallback(fn, (err) => {
       callbackError ??= err instanceof Error ? err.message : String(err);
+    });
+    if (settling) {
+      pending.add(settling);
+      void settling.finally(() => pending.delete(settling));
     }
   };
 
   const result = await runAgentProcess(
     {
-      command: [...(spec.cgroup ? scopePrefix(spec.cgroup) : []), ...options.command, ...args],
+      command: [...options.command, ...args],
       cwd: spec.cwd,
       env,
       stdin: spec.prompt,
       limits: { ...DEFAULT_PROCESS_LIMITS, ...spec.limits },
+      runId: spec.runId,
+      ...(spec.cgroup ? { scope: spec.cgroup } : {}),
       ...(options.signal ? { signal: options.signal } : {}),
     },
     {
       onLine(line, control) {
         const effect = reader.read(line);
         if (effect.activity) control.touch();
-        if (effect.init?.sessionId && effect.init.sessionId !== spec.session.id)
+        if (effect.init?.sessionId && effect.init.sessionId !== spec.session.id) {
           control.kill('session_mismatch');
+        }
         if (effect.init?.cliVersion && versionAtLeast(effect.init.cliVersion, minVersion) === false) {
           control.kill('cli_too_old');
         }
         // init.model 只是回显，核对要等第一条真实回复
-        if (effect.observedModel && !sameModel(spec.model, effect.observedModel))
+        if (effect.observedModel && !sameModel(spec.model, effect.observedModel)) {
           control.kill('model_mismatch');
+        }
         for (const event of effect.events) call(() => options.onEvent?.(event));
         const reading = effect.rateLimit;
         if (reading) call(() => options.onRateLimit?.(reading));
       },
       busy: () => reader.toolsInFlight > 0,
+      onSpawn: (info) => call(() => options.onSpawn?.(info)),
     },
     now,
   );
+  await Promise.allSettled([...pending]);
   const hookError = result.hookError ?? callbackError;
   return {
     ...result,

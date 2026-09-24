@@ -9,8 +9,8 @@ export const MAIN_HELP = `fleet —— 在 fleet 派的会话里，向驾驶舱�
   say <一句话>                  报一句白话进度，例如「正在写验证码过期的测试」
   ask <问题> [-o 选项]…         问创始人；默认等回答，等不到先按写明的假设继续
   history <关键词> [-n 条数]    翻做过的需求和结果，开新活之前先查
-  done <总结> --tests passed|failed [--pr 编号]
-                                交活；后端会核实 PR 和测试，不是说了就算
+  done <总结> --tests passed|failed
+                                交活：改动先在本地提交；推分支、开 PR 由引擎做。后端会核实
   blocked <原因> --needs human|info|access|other
                                 报卡住：卡在哪、需要什么
 
@@ -87,16 +87,19 @@ export const COMMAND_HELP: Record<string, string> = {
 `,
   done: `fleet done —— 交活
 
-用法：fleet done <总结> --tests passed|failed [--pr <编号>]
+用法：fleet done <总结> --tests passed|failed
 
+  交活之前，所有改动都在本地 git commit 好：没提交的改动不算交付。
+  不用推分支、不用开 PR，会话里也没有推送的凭据——这些由引擎在会话结束后做。
   总结写清做了什么、怎么验证的、还欠什么（4000 字以内）。
   --tests passed|failed   测试有没有全过，必填，如实写
-  --pr <编号>             开好的 PR 编号
 
-  后端会核实 PR 是否存在、测试是否真跑过；核实不过会拒收（退出码 4）。
+  后端会核实本次会话真跑过测试、而且最后一次是过的；核实不过会拒收（退出码 4）。
+  跑测试别接管道（例如 pnpm check | tail）：退出码是管道最后一段的，结果会记成「未知」。
 
 例子：
-  fleet done "加了验证码过期逻辑和 3 个测试；pnpm check 全绿" --tests passed --pr 31
+  git add -A && git commit -m "登录：验证码 5 分钟过期"
+  fleet done "加了验证码过期逻辑和 3 个测试；pnpm check 全绿" --tests passed
 `,
   blocked: `fleet blocked —— 报卡住
 

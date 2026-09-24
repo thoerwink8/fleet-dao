@@ -1,5 +1,6 @@
 // 插头交给引擎的东西：进度事件的载荷、强杀的原因、额度读数。
-// ProgressEvent 本身在 @fleet-dao/shared；这里定 payload 的形状，库和驾驶舱按它读（以后可以挪进 shared）。
+// ProgressEvent 本身在 @fleet-dao/shared；这里定 payload 的形状。驾驶舱后端的时间线按字段名读
+// （say.text、tool.name、file.path、test.passed / command），改字段名先对 packages/api 的 describeTimeline。
 import type { QuotaWindowKind } from '@fleet-dao/shared';
 
 /** kind='say'：助手说的一段话。stream = 从过程记录被动读到的；fleet say 主动报的由后端另记。 */
@@ -15,8 +16,8 @@ export type ToolAction = 'read' | 'edit' | 'run' | 'search' | 'web' | 'agent' | 
 export interface ToolPayload {
   phase: 'start' | 'end';
   toolUseId: string;
-  /** 执行体里的原名，例如 Read、Edit、Bash。 */
-  tool: string;
+  /** 执行体里的工具原名，例如 Read、Edit、Bash。 */
+  name: string;
   action: ToolAction;
   /** 文件路径（工作树内给相对路径）、命令原文、搜索词……最多 200 字。 */
   summary: string;
@@ -36,10 +37,16 @@ export interface FilePayload {
   tool: string;
 }
 
-/** kind='test'：跑了一次测试命令（命令里含仓库配置的测试命令）。 */
+/**
+ * kind='test'：跑了一次测试命令（命令里含仓库配置的测试命令）。
+ * 没有 passed = 结果未知：整条命令的退出码不一定是测试的（带管道没开 pipefail、`;`、`||`、放后台跑……），
+ * 不许当成通过——交活核实只认会话自己跑的测试。
+ */
 export interface TestPayload {
   command: string;
-  ok: boolean;
+  passed?: boolean;
+  /** 结果未知的原因。 */
+  unknownBecause?: string;
 }
 
 /** 插头自己把进程杀掉的原因。 */

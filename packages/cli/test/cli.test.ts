@@ -310,17 +310,27 @@ describe('history', () => {
 });
 
 describe('done', () => {
-  it('POST /agent/v1/done：总结、PR 编号（认 #31 写法）、测试结果', async () => {
-    const b = await backend(() => ({ status: 202, body: { message: '收到，正在核实 PR #31' } }));
-    const r = await fleet(['done', '加了过期逻辑和 3 个测试', '--tests', 'passed', '--pr', '#31'], {
-      url: b.url,
-    });
+  it('POST /agent/v1/done：总结和测试结果；会话只在本地提交，不带 PR 编号', async () => {
+    const b = await backend(() => ({ status: 200, body: { ok: true } }));
+    const r = await fleet(['done', '加了过期逻辑和 3 个测试', '--tests', 'passed'], { url: b.url });
     expect(r.code).toBe(EXIT.ok);
-    expect(b.requests[0]).toMatchObject({
-      path: '/agent/v1/done',
-      body: { summary: '加了过期逻辑和 3 个测试', prNumber: 31, testsPassed: true },
-    });
-    expect(r.out).toBe('收到，正在核实 PR #31\n');
+    expect(b.requests[0]).toMatchObject({ path: '/agent/v1/done' });
+    expect(b.requests[0]?.body).toEqual({ summary: '加了过期逻辑和 3 个测试', testsPassed: true });
+    expect(r.out).toBe('已交活，后端核实通过。\n');
+  });
+
+  it('--pr 已经没有了：推分支、开 PR 是引擎的事，给了算用法错', async () => {
+    const b = await backend(ok);
+    const r = await fleet(['done', '做完了', '--tests', 'passed', '--pr', '31'], { url: b.url });
+    expect(r.code).toBe(EXIT.usage);
+    expect(b.requests).toEqual([]);
+  });
+
+  it('说明里教的是本地提交，不教开 PR', async () => {
+    const r = await fleet(['done', '--help']);
+    expect(r.out).toContain('本地');
+    expect(r.out).not.toContain('--pr');
+    expect((await fleet(['--help'])).out).not.toContain('--pr');
   });
 
   it('没写测试结果：本地挡下', async () => {
@@ -342,7 +352,7 @@ describe('done', () => {
         },
       },
     }));
-    const r = await fleet(['done', '做完了', '--tests', 'passed', '--pr', '31'], { url: b.url });
+    const r = await fleet(['done', '做完了', '--tests', 'passed'], { url: b.url });
     expect(r.code).toBe(EXIT.rejected);
     expect(r.err).toBe(
       'fleet：后端拒收（HTTP 422）：交活没通过核实：没查到本次会话跑过测试的记录：先跑测试再交\n',
@@ -350,10 +360,10 @@ describe('done', () => {
   });
 
   it('核实没过、后端拒收：退出码 4，原样说出原因', async () => {
-    const b = await backend(() => ({ status: 409, body: { error: 'PR #31 不存在' } }));
-    const r = await fleet(['done', '做完了', '--tests', 'passed', '--pr', '31'], { url: b.url });
+    const b = await backend(() => ({ status: 409, body: { error: '核实不了，过一会儿再交' } }));
+    const r = await fleet(['done', '做完了', '--tests', 'passed'], { url: b.url });
     expect(r.code).toBe(EXIT.rejected);
-    expect(r.err).toBe('fleet：后端拒收（HTTP 409）：PR #31 不存在\n');
+    expect(r.err).toBe('fleet：后端拒收（HTTP 409）：核实不了，过一会儿再交\n');
     expect(b.requests).toHaveLength(1);
   });
 });

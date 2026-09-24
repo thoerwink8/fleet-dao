@@ -106,7 +106,6 @@ interface Options {
   'no-wait'?: boolean;
   limit?: string;
   tests?: string;
-  pr?: string;
   needs?: string;
 }
 
@@ -287,21 +286,20 @@ const COMMANDS: Record<string, Handler> = {
     io.stdout(`${lines.join('\n')}\n`);
   },
 
+  // 会话只在本地提交，推分支、开 PR 由引擎在会话外做，所以这里不带 PR 编号
   async done(args, { io, call }) {
-    const { values, positionals } = parse(args, { tests: { type: 'string' }, pr: { type: 'string' } });
+    const { values, positionals } = parse(args, { tests: { type: 'string' } });
     const tests = values.tests;
     if (tests !== 'passed' && tests !== 'failed') {
       throw new CliError(EXIT.usage, '要写明测试结果：--tests passed 或 --tests failed（如实写）');
     }
-    const pr = values.pr === undefined ? undefined : Number(String(values.pr).replace(/^#/, ''));
     const body = check(DoneRequest, {
       summary: joined(positionals, '交活总结'),
-      ...(pr === undefined ? {} : { prNumber: pr }),
       testsPassed: tests === 'passed',
     });
     const res = await call({ method: 'POST', path: AgentRoutes.done.path, body });
     if (values.json) return printJson(io, res);
-    // 后端核实 PR 和测试之后才回 2xx；核实不过回 4xx，在上面已经按拒收退出
+    // 后端核实过才回 2xx；核实不过回 4xx，在上面已经按拒收退出
     const message = (res as { message?: unknown } | undefined)?.message;
     io.stdout(`${typeof message === 'string' ? message : '已交活，后端核实通过。'}\n`);
   },

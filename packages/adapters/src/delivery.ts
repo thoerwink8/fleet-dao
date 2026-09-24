@@ -1,6 +1,8 @@
-// 交付判据：执行体说「做完了」不算数，工作树相对「此刻」的目标分支要有自己的提交，而且有内容差异。
-// 必须先抓最新的目标分支再比：拿旧的比，被快进到新主线、自己一行没写的树也会显得「有新提交」
-// （旧系统一次零产出的假完成就这样一路绿到合并，windsurf-dao#1572）。
+// 交付判据：执行体说「做完了」不算数。会话只在本地提交，推分支由引擎在会话外做，所以交付 = 引擎能推走的东西：
+// 1. 相对「此刻」的目标分支有自己的提交，而且有内容差异——必须先抓最新的目标分支再比：拿旧的比，
+//    被快进到新主线、自己一行没写的树也会显得「有新提交」（旧系统一次零产出的假完成就这样一路绿到合并，windsurf-dao#1572）；
+// 2. 这一轮会话自己有新提交（since..HEAD）——续会话那一轮什么都没做，不能靠上一轮的提交算交付；
+// 3. 已跟踪的文件没有没提交的改动——引擎只推提交，这部分会丢。没跟踪的文件（构建产物之类）不算。
 import { execFile } from 'node:child_process';
 
 export interface DeliveryCheck {
@@ -10,9 +12,11 @@ export interface DeliveryCheck {
   target: string;
   /** 目标分支上没有、HEAD 上有的提交数。 */
   ownCommits?: number;
+  /** 这一轮会话新增的提交数（since..HEAD）。 */
+  newCommits?: number;
   /** 相对合并基有没有内容差异。 */
   hasDiff?: boolean;
-  /** 工作树里还没提交的改动条数（git status --porcelain）。 */
+  /** 已跟踪文件里没提交的改动条数（git status --porcelain --untracked-files=no）。 */
   uncommitted?: number;
   detail: string;
 }
@@ -22,10 +26,12 @@ export interface DeliveryOptions {
   cwd: string;
   remote: string;
   branch: string;
+  /** 起这一轮会话之前的 HEAD：这一轮必须在它之后有新提交。 */
+  since: string;
   /** 默认先 git fetch 目标分支；只在确定刚抓过时才关。 */
   fetch?: boolean;
   timeoutMs?: number;
-  /** 跑 git 用的环境（抓取私有仓要带凭据）；默认用当前进程的。 */
+  /** 跑 git 用的环境（抓取私有仓要带凭据——这是引擎的环境，不是会话的）；默认用当前进程的。 */
   env?: Record<string, string | undefined>;
 }
 
@@ -45,13 +51,14 @@ export async function checkDelivery(options: DeliveryOptions): Promise<DeliveryC
     if (fetched.code !== 0)
       return unknown(`抓取 ${options.remote}/${options.branch} 失败：${tail(fetched.stderr)}`);
   }
-  const verified = await git(['rev-parse', '--verify', '--quiet', `${target}^{commit}`]);
-  if (verified.code !== 0) return unknown(`找不到目标分支 ${target}`);
+  for (const ref of [target, options.since]) {
+    const verified = await git(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
+    if (verified.code !== 0) return unknown(`找不到提交 ${ref}`);
+  }
 
-  const counted = await git(['rev-list', '--count', `${target}..HEAD`]);
-  const ownCommits = Number.parseInt(counted.stdout.trim(), 10);
-  if (counted.code !== 0 || !Number.isFinite(ownCommits))
-    return unknown(`数提交失败：${tail(counted.stderr)}`);
+  const ownCommits = await count(git, `${target}..HEAD`);
+  const newCommits = await count(git, `${options.since}..HEAD`);
+  if (ownCommits === undefined || newCommits === undefined) return unknown('数提交失败');
 
   const diffed = await git(['diff', '--quiet', `${target}...HEAD`]);
   if ((diffed.code !== 0 && diffed.code !== 1) || diffed.stderr.trim()) {
@@ -59,17 +66,31 @@ export async function checkDelivery(options: DeliveryOptions): Promise<DeliveryC
   }
   const hasDiff = diffed.code === 1;
 
-  const status = await git(['status', '--porcelain']);
-  const uncommitted =
-    status.code === 0 ? status.stdout.split('\n').filter((l) => l.trim()).length : undefined;
-  const facts = { target, ownCommits, hasDiff, ...(uncommitted === undefined ? {} : { uncommitted }) };
-  const dirty = uncommitted ? `；工作树里还有 ${uncommitted} 处改动没提交` : '';
+  const status = await git(['status', '--porcelain', '--untracked-files=no']);
+  if (status.code !== 0) return unknown(`看工作树失败：${tail(status.stderr)}`);
+  const uncommitted = status.stdout.split('\n').filter((l) => l.trim()).length;
 
-  if (ownCommits > 0 && hasDiff) {
-    return { state: 'delivered', ...facts, detail: `相对 ${target} 有 ${ownCommits} 个自己的提交${dirty}` };
+  const facts = { target, ownCommits, newCommits, hasDiff, uncommitted };
+  const problems = [
+    ownCommits === 0 ? `相对 ${target} 没有自己的提交` : undefined,
+    ownCommits > 0 && !hasDiff ? `有 ${ownCommits} 个提交，但内容和 ${target} 没有差异` : undefined,
+    newCommits === 0 ? '这一轮会话没有新提交' : undefined,
+    uncommitted > 0 ? `已跟踪的文件还有 ${uncommitted} 处改动没提交（引擎只推提交，这些会丢）` : undefined,
+  ].filter((p): p is string => p !== undefined);
+  if (problems.length === 0) {
+    return {
+      state: 'delivered',
+      ...facts,
+      detail: `这一轮新提交 ${newCommits} 个，相对 ${target} 共 ${ownCommits} 个自己的提交`,
+    };
   }
-  const why = ownCommits === 0 ? '没有自己的提交' : `有 ${ownCommits} 个提交，但内容和目标分支没有差异`;
-  return { state: 'not_delivered', ...facts, detail: `相对 ${target} ${why}${dirty}` };
+  return { state: 'not_delivered', ...facts, detail: problems.join('；') };
+}
+
+async function count(git: (args: string[]) => Promise<GitRun>, range: string): Promise<number | undefined> {
+  const res = await git(['rev-list', '--count', range]);
+  const n = Number.parseInt(res.stdout.trim(), 10);
+  return res.code === 0 && Number.isFinite(n) ? n : undefined;
 }
 
 function runGit(args: string[], options: DeliveryOptions): Promise<GitRun> {

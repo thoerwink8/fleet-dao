@@ -1,4 +1,5 @@
 // 起停测试：用假执行体回放真跑夹具，或故意卡住、留子进程，看插头怎么喂提示词、判超时、杀进程、交报告。
+import { randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ProgressEvent } from '@fleet-dao/shared';
@@ -10,7 +11,7 @@ import {
   MIN_CLAUDE_VERSION,
   runClaudeCode,
 } from '../src/claude-code/run.ts';
-import { DEFAULT_PROCESS_LIMITS } from '../src/process.ts';
+import { DEFAULT_PROCESS_LIMITS, type SpawnInfo } from '../src/process.ts';
 import type { ToolPayload } from '../src/types.ts';
 import { fakeAgent, fixtureInit, fixtureLines, fixturePath, pidAlive, tempDir } from './helpers.ts';
 
@@ -28,7 +29,8 @@ async function waitGone(pid: number, ms = 3_000): Promise<boolean> {
 
 function spec(fixture: string, over: Partial<ClaudeCodeRunSpec> = {}): ClaudeCodeRunSpec {
   return {
-    runId: 'run-7',
+    // 每个用例一个会话标记：收尸按它认进程，用例之间不能串
+    runId: `run-${randomUUID()}`,
     cwd: tempDir(),
     prompt: '把 notes.md 里的「TODO: 写测试」改成「DONE: 写测试」',
     model: 'claude-haiku-4-5',
@@ -68,7 +70,12 @@ describe('runClaudeCode', { timeout: 30_000 }, () => {
     expect(env.BASH_DEFAULT_TIMEOUT_MS).toBe(String(DEFAULT_BASH_TIMEOUT_MS));
     expect(Number(env.BASH_DEFAULT_TIMEOUT_MS)).toBeGreaterThanOrEqual(6 * 60_000);
     expect(env.BASH_MAX_TIMEOUT_MS).toBe(String(30 * 60_000));
-    expect(Object.keys(env).filter((k) => /^ANTHROPIC_|_PROXY$/i.test(k))).toEqual([]);
+    expect(env.FLEET_RUN_ID).toBe(s.runId);
+    expect(
+      Object.keys(env).filter((k) =>
+        /^ANTHROPIC_|_PROXY$|^GH_|^GITHUB_TOKEN$|^GIT_CONFIG_|^GIT_ASKPASS$/i.test(k),
+      ),
+    ).toEqual([]);
 
     expect(events.map((e) => e.kind)).toEqual(['tool', 'tool', 'tool', 'tool', 'file', 'say']);
     expect(report.exitCode).toBe(0);
@@ -246,10 +253,84 @@ describe('runClaudeCode', { timeout: 30_000 }, () => {
         childPidTo: pidFile,
       }),
     });
-    expect(report.stragglers).toBe(true);
+    expect(report.stragglers).toBe(1);
+    expect(report.leftovers).toBe(0);
     expect(await waitGone(Number(readFileSync(pidFile, 'utf8')))).toBe(true);
     expect(report.wallMs).toBeLessThan(5_000);
     expect(judgeClaudeRun(report).outcome).toBe('ok');
+  });
+
+  it.skipIf(!onPosix)(
+    '孙进程 setsid 自成一组、父进程又不理 SIGTERM：超时强杀时连孙进程一起收（只杀执行体的组会漏掉它）',
+    async () => {
+      const pidFile = join(tempDir(), 'child.pid');
+      const report = await runClaudeCode(
+        spec('cc-haiku-read', { limits: { startupMs: 10_000, wallClockMs: 3_000, killGraceMs: 300 } }),
+        {
+          command: fakeAgent({
+            replay: fixturePath('claude-code', 'cc-haiku-read'),
+            replayLines: 3,
+            after: 'hang-with-child',
+            childPidTo: pidFile,
+            childDetached: true,
+            childIgnoresSigterm: true,
+            ignoreSigterm: true,
+          }),
+        },
+      );
+      expect(report.killed?.reason).toBe('wall_clock_timeout');
+      expect(report.signal).toBe('SIGKILL');
+      expect(await waitGone(Number(readFileSync(pidFile, 'utf8')))).toBe(true);
+      expect(report.leftovers).toBe(0);
+    },
+  );
+
+  it.skipIf(!onPosix)(
+    '执行体正常退出、留下 setsid 的后台进程（已被过继给 init）：按会话标记找到并收掉',
+    async () => {
+      const pidFile = join(tempDir(), 'child.pid');
+      const report = await runClaudeCode(spec('cc-haiku-read'), {
+        command: fakeAgent({
+          replay: fixturePath('claude-code', 'cc-haiku-read'),
+          after: 'exit-leaving-child',
+          childPidTo: pidFile,
+          childDetached: true,
+          childIgnoresSigterm: true,
+        }),
+      });
+      expect(report.exitCode).toBe(0);
+      expect(report.stragglers).toBe(1);
+      expect(report.leftovers).toBe(0);
+      expect(await waitGone(Number(readFileSync(pidFile, 'utf8')))).toBe(true);
+    },
+  );
+
+  it('进程一起来就交出进程号，引擎记下来，重启后能收旧会话', async () => {
+    const spawned: SpawnInfo[] = [];
+    const s = spec('cc-haiku-read');
+    const report = await runClaudeCode(s, {
+      command: fakeAgent({ replay: fixturePath('claude-code', 'cc-haiku-read') }),
+      onSpawn: (info) => {
+        spawned.push(info);
+      },
+    });
+    expect(spawned).toHaveLength(1);
+    expect(spawned[0]).toMatchObject({ runId: s.runId, startedAt: report.startedAt });
+    expect(spawned[0]?.pid).toBeGreaterThan(0);
+  });
+
+  it('async 回调被拒：接住记进 hookError，不让未处理的 rejection 把引擎带崩；交报告前等它落定', async () => {
+    let settled = 0;
+    const report = await runClaudeCode(spec('cc-haiku-edit'), {
+      command: fakeAgent({ replay: fixturePath('claude-code', 'cc-haiku-edit') }),
+      onEvent: async (e) => {
+        await new Promise((r) => setTimeout(r, 20));
+        settled++;
+        if (e.kind === 'file') throw new Error('库连不上');
+      },
+    });
+    expect(report.hookError).toBe('库连不上');
+    expect(settled).toBe(6);
   });
 
   it('模型不存在：退出码 1、终帧报错，判执行体出错并写明原因', async () => {
@@ -292,7 +373,7 @@ describe('runClaudeCode', { timeout: 30_000 }, () => {
     expect(report.stream.result?.isError).toBe(false);
   });
 
-  it('起之前就拒：单元测试里起真执行体、环境里带上游改写、工作目录不存在、提示词为空', async () => {
+  it('起之前就拒：单元测试里起真执行体、环境里带上游改写或推送凭据、工作目录不存在、提示词为空', async () => {
     await expect(
       runClaudeCode(spec('cc-haiku-read'), { command: ['/usr/local/bin/reclaude'] }),
     ).rejects.toThrow('测试里不许起真的执行体');
@@ -302,6 +383,10 @@ describe('runClaudeCode', { timeout: 30_000 }, () => {
     await expect(runClaudeCode(withUpstream, { command: fakeAgent({}) })).rejects.toThrow(
       'ANTHROPIC_BASE_URL',
     );
+    const withGithubToken = spec('cc-haiku-read', {
+      env: { base: {}, fleetApi: 'a', fleetToken: 'b', extra: { GH_TOKEN: 'ghs_x' } },
+    });
+    await expect(runClaudeCode(withGithubToken, { command: fakeAgent({}) })).rejects.toThrow('GH_TOKEN');
     await expect(
       runClaudeCode(spec('cc-haiku-read', { cwd: join(tempDir(), 'missing') }), { command: fakeAgent({}) }),
     ).rejects.toThrow('工作目录不存在');
@@ -326,6 +411,6 @@ describe('runClaudeCode', { timeout: 30_000 }, () => {
       onEvent: (e) => events.push(e),
     });
     const start = events.find((e) => e.kind === 'tool')?.payload as ToolPayload;
-    expect(start).toMatchObject({ tool: 'Bash', action: 'run', summary: 'ls -1 && git status --short' });
+    expect(start).toMatchObject({ name: 'Bash', action: 'run', summary: 'ls -1 && git status --short' });
   });
 });

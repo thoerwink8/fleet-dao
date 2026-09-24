@@ -44,9 +44,16 @@ export interface ClaudeResult {
   /** 最后一段回复。 */
   text?: string;
   numTurns?: number;
+  /** 本轮墙钟。 */
   durationMs?: number;
-  durationApiMs?: number;
-  costUsd?: number;
+  /** 整个会话累计的接口耗时（续会话时含前几轮）。 */
+  sessionDurationApiMs?: number;
+  /**
+   * 整个会话累计的花费（total_cost_usd）：续会话时含前几轮，直接相加会重复计。
+   * 本轮花费用 costOfThisRun(本轮, 上一轮)。
+   */
+  sessionCostUsd?: number;
+  /** 本轮的 token（终帧 usage 只算这一次调用）。 */
   usage?: ClaudeUsage;
   /** modelUsage 里出现的模型。 */
   models: string[];
@@ -283,7 +290,7 @@ export class ClaudeStreamReader {
         this.#emit(effect, 'tool', {
           phase: 'start',
           toolUseId: id,
-          tool: name,
+          name,
           action: TOOL_ACTIONS[name] ?? 'other',
           summary: toolSummary(name, input, this.#cwd),
           ...optional('description', name === 'Bash' ? str(input.description) : undefined),
@@ -312,7 +319,7 @@ export class ClaudeStreamReader {
       this.#emit(effect, 'tool', {
         phase: 'end',
         toolUseId: id,
-        tool: name,
+        name,
         action: TOOL_ACTIONS[name] ?? 'other',
         summary: toolSummary(name, input, this.#cwd),
         ok,
@@ -336,7 +343,16 @@ export class ClaudeStreamReader {
       }
       const command = name === 'Bash' ? str(input.command) : undefined;
       if (command && this.#testCommands.some((t) => command.includes(t))) {
-        const run: TestPayload = { command: cut(command, 500), ok };
+        const unknownBecause =
+          input.run_in_background === true
+            ? '放到后台跑，命令返回时测试还没跑完'
+            : rec(structured)?.interrupted === true
+              ? '命令被打断'
+              : exitStatusUntrusted(command);
+        const run: TestPayload = {
+          command: cut(command, 500),
+          ...(unknownBecause === undefined ? { passed: ok } : { unknownBecause }),
+        };
         this.#s.testRuns.push(run);
         this.#emit(effect, 'test', run);
       }
@@ -357,8 +373,8 @@ export class ClaudeStreamReader {
       ...optional('text', str(frame.result)),
       ...optional('numTurns', num(frame.num_turns)),
       ...optional('durationMs', num(frame.duration_ms)),
-      ...optional('durationApiMs', num(frame.duration_api_ms)),
-      ...optional('costUsd', num(frame.total_cost_usd)),
+      ...optional('sessionDurationApiMs', num(frame.duration_api_ms)),
+      ...optional('sessionCostUsd', num(frame.total_cost_usd)),
       ...(usage
         ? {
             usage: {
@@ -401,6 +417,35 @@ export class ClaudeStreamReader {
     this.#s.rateLimits.push(reading);
     effect.rateLimit = reading;
   }
+}
+
+/** 本轮花费 = 本轮终帧的累计值 − 上一轮终帧的累计值（新会话没有上一轮）。有一边没读到就是没查成。 */
+export function costOfThisRun(current?: ClaudeResult, previous?: ClaudeResult): number | undefined {
+  if (current?.sessionCostUsd === undefined) return undefined;
+  if (previous === undefined) return current.sessionCostUsd;
+  if (previous.sessionCostUsd === undefined) return undefined;
+  return Math.max(0, current.sessionCostUsd - previous.sessionCostUsd);
+}
+
+/**
+ * 整条命令的退出码是不是就是测试的退出码；不是就返回原因。只有是的时候，工具报的成败才能当测试的成败。
+ * `pnpm check | tail` 的退出码是 tail 的，测试挂了也记成通过——这类一律记「结果未知」。
+ */
+export function exitStatusUntrusted(command: string): string | undefined {
+  // 引号里的 | ; & 是参数不是语法，先抹掉
+  let bare = command.replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, "''").trim();
+  let pipefail = false;
+  const preamble = /^set\s+-[a-z]*o\s+pipefail\s*(?:;|&&)\s*/;
+  if (preamble.test(bare)) {
+    pipefail = true;
+    bare = bare.replace(preamble, '');
+  }
+  if (bare.includes('\n')) return '多行命令，退出码是最后一行的';
+  if (bare.includes('||')) return '带 ||，失败会被吞掉';
+  if (bare.includes(';')) return '带 ;，退出码是最后一条命令的';
+  if (/(^|[^|])\|(?!\|)/.test(bare) && !pipefail) return '带管道又没开 pipefail，退出码是管道最后一段的';
+  if (/(^|[^&<>])&(?![&>])/.test(bare)) return '放到后台跑，命令返回时测试还没跑完';
+  return undefined;
 }
 
 /** 点名的模型和实际回话的模型是不是同一个：忽略末尾的日期（-20251001）和方括号参数。 */

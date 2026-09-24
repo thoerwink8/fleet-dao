@@ -1,8 +1,7 @@
 import { delimiter } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { assertNoUpstreamOverride } from '../src/claude-code/run.ts';
-import { buildSessionEnv, githubTokenEnv } from '../src/env.ts';
-import { git, isolatedGitEnv, tempDir } from './helpers.ts';
+import { UPSTREAM_ENV } from '../src/claude-code/run.ts';
+import { assertNoForbiddenEnv, buildSessionEnv, CREDENTIAL_ENV } from '../src/env.ts';
 
 describe('buildSessionEnv', () => {
   const base = {
@@ -10,19 +9,26 @@ describe('buildSessionEnv', () => {
     PATH: '/usr/bin',
     LANG: 'C.UTF-8',
     LC_ALL: 'C.UTF-8',
+    XDG_RUNTIME_DIR: '/run/user/999',
     ANTHROPIC_BASE_URL: 'http://127.0.0.1:9',
     HTTPS_PROXY: 'http://127.0.0.1:7890',
+    GH_TOKEN: 'ghs_from_host',
+    GITHUB_TOKEN: 'ghs_from_host',
+    GIT_ASKPASS: '/usr/lib/git-core/git-gui--askpass',
+    GIT_CONFIG_COUNT: '1',
+    SSH_AUTH_SOCK: '/tmp/ssh-agent.sock',
     SOME_SECRET: 'x',
     UNSET: undefined,
   };
 
-  it('只从宿主抄白名单里的键，宿主的上游、代理、密钥一个都不带', () => {
+  it('只从宿主抄白名单里的键：宿主的上游、代理、GitHub 凭据、密钥一个都不带', () => {
     const env = buildSessionEnv({ base, fleetApi: 'http://127.0.0.1:7070', fleetToken: 't1' });
     expect(env).toEqual({
       HOME: '/home/agent',
       PATH: '/usr/bin',
       LANG: 'C.UTF-8',
       LC_ALL: 'C.UTF-8',
+      XDG_RUNTIME_DIR: '/run/user/999',
       FLEET_API: 'http://127.0.0.1:7070',
       FLEET_TOKEN: 't1',
     });
@@ -33,33 +39,22 @@ describe('buildSessionEnv', () => {
     expect(env.PATH).toBe(['/opt/fleet/bin', '/usr/bin'].join(delimiter));
   });
 
-  it('带上 GitHub 令牌时，gh 和 git 都能用它', () => {
-    const env = buildSessionEnv({ base, fleetApi: 'a', fleetToken: 'b', githubToken: 'ghs_test' });
-    expect(env.GH_TOKEN).toBe('ghs_test');
-    expect(env.GIT_TERMINAL_PROMPT).toBe('0');
+  it.each([
+    'GH_TOKEN',
+    'GH_ENTERPRISE_TOKEN',
+    'GITHUB_TOKEN',
+    'GIT_ASKPASS',
+    'GIT_CONFIG_COUNT',
+    'GIT_CONFIG_KEY_0',
+    'SSH_AUTH_SOCK',
+  ])('会话只在本地提交、拿不到推送凭据：extra 里带 %s 就拒', (key) => {
+    expect(() =>
+      buildSessionEnv({ base: {}, fleetApi: 'a', fleetToken: 'b', extra: { [key]: 'x' } }),
+    ).toThrow(key);
   });
 });
 
-describe('githubTokenEnv', () => {
-  it('git 真的从 GH_TOKEN 取凭据，并且盖掉全局配置里原有的凭据助手', () => {
-    // 全局配置里先放一个「错的」助手：清空没生效的话，它会先答
-    const env = {
-      ...isolatedGitEnv('[credential]\n\thelper = "!f() { echo username=wrong; echo password=wrong; }; f"\n'),
-      ...githubTokenEnv('ghs_example_token'),
-    };
-    const out = git(
-      tempDir(),
-      ['credential', 'fill'],
-      env,
-      'protocol=https\nhost=github.com\npath=o/r.git\n\n',
-    );
-    expect(out).toContain('username=x-access-token');
-    expect(out).toContain('password=ghs_example_token');
-    expect(out).not.toContain('wrong');
-  });
-});
-
-describe('assertNoUpstreamOverride', () => {
+describe('assertNoForbiddenEnv', () => {
   it.each([
     'ANTHROPIC_BASE_URL',
     'ANTHROPIC_AUTH_TOKEN',
@@ -68,13 +63,12 @@ describe('assertNoUpstreamOverride', () => {
     'HTTP_PROXY',
     'NO_PROXY',
     'NODE_EXTRA_CA_CERTS',
-  ])('带 %s 就拒起', (key) => {
-    expect(() => assertNoUpstreamOverride({ PATH: '/usr/bin', [key]: 'x' })).toThrow(key);
+  ])('Claude 会话带 %s 就拒起（reclaude 自己管上游、代理和证书）', (key) => {
+    expect(() => assertNoForbiddenEnv({ PATH: '/usr/bin', [key]: 'x' }, UPSTREAM_ENV, '改道')).toThrow(key);
   });
 
   it('正常的会话环境放行', () => {
-    expect(() =>
-      assertNoUpstreamOverride({ PATH: '/usr/bin', FLEET_TOKEN: 't', GH_TOKEN: 'g' }),
-    ).not.toThrow();
+    const env = { PATH: '/usr/bin', FLEET_TOKEN: 't', FLEET_RUN_ID: 'r', GIT_TERMINAL_PROMPT: '0' };
+    expect(() => assertNoForbiddenEnv(env, [...UPSTREAM_ENV, ...CREDENTIAL_ENV], '')).not.toThrow();
   });
 });
