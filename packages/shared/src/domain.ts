@@ -189,6 +189,13 @@ export interface Route {
   hostId: HostId;
   /** 只由探针和熔断写，不许手填。 */
   alive: boolean;
+  /**
+   * 插头实际发给上游的模型串（目录原文，例如 claude-opus-5-5、grok-4.7[context=256k,…]）。
+   * 额度的模型组成员表只和它、和 upstreamAliases 比；两样都没填，这条路由扣哪个桶判不了，额度按未知算。
+   */
+  upstreamModel?: string;
+  /** 上游在别处对这条路由的叫法，和上面的模型串不同名时填，例如 Cursor 额度接口里 Auto 叫 default。 */
+  upstreamAliases?: string[];
 }
 
 /** 每个阶段类型挂一串有序路由，驾驶舱拖动排序。 */
