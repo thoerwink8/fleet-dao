@@ -610,7 +610,73 @@ readback() {
   readback_firewall
   readback_app_config
   readback_web_upload
+  readback_proxy_headers
   readback_service_home
+}
+
+# 香港往法国转发时要清掉 Authorization 与 X-Fleet-Acting-Feishu（飞书网关的通行证和代表谁）：从公网带着这两个头
+# 请求 /api，看法国收到的请求里有没有。驾驶舱后端没在跑：在隧道地址上临时起一个回显，直接看收到了哪些头，另带一个
+# 探针头证明请求确实到了这里；后端在跑：看它怎么答——收到 Authorization 答 bearer_not_allowed，没收到答
+# unauthenticated（packages/api 的 session.ts）
+readback_proxy_headers() {
+  local domain url nonce tmp pid i out code body verdict
+  domain=$(read_key /etc/fleet-dao/release.env FLEET_DOMAIN 2>/dev/null) || domain=""
+  if [[ ! "$domain" =~ ^[a-z0-9.-]+$ ]]; then
+    pending "没读到驾驶舱域名（/etc/fleet-dao/release.env 的 FLEET_DOMAIN），香港清不清请求头这项没查"
+    return 0
+  fi
+  url=https://$domain/api/fleet-dao-probe
+  local probe=(-H 'Authorization: Bearer fleet-dao-probe' -H 'X-Fleet-Acting-Feishu: fleet-dao-probe')
+  if [[ -n "$(ss -Hltn "src ${WG_ADDR%/*} and sport = :$API_PORT" 2>/dev/null)" ]]; then
+    if [[ "$(systemctl is-active fleet-api.service 2>/dev/null)" != active ]]; then
+      pending "${WG_ADDR%/*}:$API_PORT 被别的程序占着（不是 fleet-api），香港清不清请求头这项没查"
+      return 0
+    fi
+    out=$(curl -sS --max-time 15 "${probe[@]}" -w '\n%{http_code}' "https://$domain/api/me" 2>&1) || out=$'\n000'
+    code=${out##*$'\n'}
+    body=${out%$'\n'*}
+    if [[ "$code" == 401 && "$body" == *'"unauthenticated"'* ]]; then
+      ok "从公网带着 Authorization、X-Fleet-Acting-Feishu 请求 /api：后端答「没登录」，没收到这两个头"
+    elif [[ "$body" == *bearer_not_allowed* || "$body" == *acting_missing* ]]; then
+      red "香港把 Authorization 转给了后端（后端答的是网关通行证不对）：香港 nginx 没清这个头"
+    else
+      pending "从公网带头请求 /api，后端的回答认不出（HTTP $code），香港清不清请求头这项没查成"
+    fi
+    return 0
+  fi
+  nonce=$(openssl rand -hex 8)
+  tmp=$(mktemp)
+  (cd / && exec runuser -u fleet -- /usr/bin/node -e '
+    const [host, port] = process.argv.slice(1);
+    const srv = require("node:http").createServer((req, res) => {
+      const body = JSON.stringify({ headers: Object.keys(req.headers), probe: req.headers["x-fleet-probe"] ?? null });
+      res.writeHead(200, { "content-type": "application/json", connection: "close" });
+      res.end(body, () => process.exit(0));
+    });
+    srv.listen(Number(port), host);
+    setTimeout(() => process.exit(3), 30000);' "${WG_ADDR%/*}" "$API_PORT") >"$tmp" 2>&1 &
+  pid=$!
+  for ((i = 0; i < 50; i++)); do
+    if [[ -n "$(ss -Hltn "src ${WG_ADDR%/*} and sport = :$API_PORT" 2>/dev/null)" ]]; then break; fi
+    sleep 0.1
+  done
+  out=$(curl -sS --max-time 15 "${probe[@]}" -H "X-Fleet-Probe: $nonce" "$url" 2>&1) || out=""
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  rm -f -- "$tmp"
+  # shellcheck disable=SC2016 # 单引号里是给 node 的 JS，模板字符串不归 shell 展开
+  verdict=$(printf '%s' "$out" | /usr/bin/node -e '
+    let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
+      let r; try { r = JSON.parse(s); } catch { return console.log("unreadable"); }
+      if (r.probe !== process.argv[1]) return console.log("no-probe");
+      const leaked = (r.headers || []).filter((h) => h === "authorization" || h === "x-fleet-acting-feishu");
+      console.log(leaked.length ? `leaked ${leaked.join(",")}` : "clean");
+    });' "$nonce")
+  case $verdict in
+  clean) ok "从公网带着 Authorization、X-Fleet-Acting-Feishu 请求 /api：法国收到的请求里没有这两个头（探针头到了，临时回显已收）" ;;
+  leaked*) red "香港把 ${verdict#leaked } 转到了法国：香港 nginx 没清这个头" ;;
+  *) pending "从公网请求 $url 没走到法国的临时回显（读到「${out:0:120}」），香港清不清请求头这项没查成" ;;
+  esac
 }
 
 # 应用的环境文件都在、属主权限对；随机密钥是生成的样子、互不相同（后端要求）。只比对，不打印值
@@ -625,7 +691,7 @@ readback_app_config() {
   for spec in "${APP_SECRETS[@]}"; do
     IFS=: read -r name key what <<<"$spec"
     file=/etc/fleet-dao/$name.env
-    v=$(read_secret "$file" "$key" 2>/dev/null) || v=""
+    v=$(read_key "$file" "$key" 2>/dev/null) || v=""
     if [[ ! "$v" =~ ^[0-9a-f]{64}$ ]]; then
       red "$file 里的 $key 不是装机脚本生成的样子（64 位十六进制）"
       bad=1
@@ -640,7 +706,7 @@ readback_app_config() {
 }
 
 # 只当数据读一个键（不 source）：值只进变量，不进日志
-read_secret() { # 文件 键
+read_key() { # 文件 键
   local line
   while IFS= read -r line || [[ -n "$line" ]]; do
     if [[ "$line" == "$2="* ]]; then
