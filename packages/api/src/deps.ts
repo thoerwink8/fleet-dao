@@ -1,0 +1,15 @@
+import type { Config } from './config.ts';
+import type { ChangeFeed, FeishuAuth, GitHubEventSink, Logger, Store, WorkflowControl } from './ports.ts';
+
+/** 后端的全部外部依赖。生产由 main.ts 装配，测试各自换成假的。 */
+export interface Deps {
+  config: Config;
+  store: Store;
+  workflows: WorkflowControl;
+  changes: ChangeFeed;
+  /** null = 飞书登录没配置（只允许在开发环境）。 */
+  feishu: FeishuAuth | null;
+  github: GitHubEventSink;
+  log: Logger;
+  now: () => Date;
+}
