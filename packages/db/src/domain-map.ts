@@ -95,6 +95,7 @@ export const toPool = (r: typeof pools.$inferSelect): Pool =>
     maxConcurrency: r.maxConcurrency,
     expiresAt: isoOpt(r.expiresAt),
     scopeModels: opt(r.scopeModels),
+    lastReadOkAt: isoOpt(r.lastReadOkAt),
   });
 
 export const toQuotaWindow = (r: typeof quotaWindows.$inferSelect): QuotaWindow =>
@@ -113,6 +114,7 @@ export const toQuotaWindow = (r: typeof quotaWindows.$inferSelect): QuotaWindow 
     unit: r.unit,
     source: r.source,
     statusRaw: opt(r.statusRaw),
+    staleSince: isoOpt(r.staleSince),
   });
 
 export const toModel = (r: typeof models.$inferSelect): Model =>

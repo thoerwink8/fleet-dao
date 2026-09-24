@@ -54,6 +54,8 @@ export const pools = pgTable(
     expiresAt: timestamp('expires_at', tz),
     /** 模型组窗口扣哪些模型（组名 → 成员表），读数里给了就按读数写。 */
     scopeModels: jsonb('scope_models').$type<Record<string, ScopeMembership>>(),
+    /** 最近一次读成额度的时刻（savePoolQuota 写，读失败不动）。每小时对账看它是否超过 30 分钟。 */
+    lastReadOkAt: timestamp('last_read_ok_at', tz),
   },
   (t) => [
     // 给 routes 的组合外键用：路由挂的池必须属于路由写的渠道。
@@ -147,6 +149,7 @@ export const bans = pgTable(
 /**
  * 额度窗现值：每个账号池、每个上游窗口（按上游原名 label）各一行，每次读数覆盖。
  * 行数不随读数次数增长，按主键直查。window 是归类（认不出的归 other），scope 为空串 = 账号级窗口。
+ * 只经 savePoolQuota 写：上游不再报的窗口先标 stale_since，满 24 小时才删。
  */
 export const quotaWindows = pgTable(
   'quota_windows',
@@ -170,6 +173,8 @@ export const quotaWindows = pgTable(
     /** 读法：claude-usage、mirasim-relay、cursor-dashboard、grok-billing、estimate…… */
     source: text('source').notNull(),
     readAt: timestamp('read_at', tz).notNull(),
+    /** 读成了、但上游从这一次起没再报这个窗口的时刻；重新报了清空。不挡路由、不参与排序。 */
+    staleSince: timestamp('stale_since', tz),
   },
   (t) => [
     primaryKey({ columns: [t.poolId, t.label] }),

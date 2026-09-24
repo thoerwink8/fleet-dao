@@ -239,6 +239,12 @@
           "type": "jsonb",
           "primaryKey": false,
           "notNull": false
+        },
+        "last_read_ok_at": {
+          "name": "last_read_ok_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {},
@@ -366,6 +372,12 @@
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true
+        },
+        "stale_since": {
+          "name": "stale_since",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {},

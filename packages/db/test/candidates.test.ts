@@ -13,6 +13,7 @@ import {
   addWindow,
   ago,
   catalog,
+  DAY,
   HOUR,
   later,
   MIN,
@@ -193,6 +194,92 @@ describe('某阶段的候选路由', () => {
     expect(await summary('execute')).toEqual([
       ['composer', []],
       ['opus-on-cursor', ['quota-exhausted']],
+    ]);
+  });
+
+  it('上游这次没报的窗口不挡路由，也不让路由排到后面', async () => {
+    await addRoute(t.db, { id: 'opus-b', poolId: 'relay-b', modelId: 'opus-5.5' });
+    await addRoute(t.db, { id: 'k3-a', poolId: 'relay-a', modelId: 'kimi-k3', hostId: 'mirasim' });
+    await addRoute(t.db, { id: 'opus-a', poolId: 'relay-a', modelId: 'opus-5.5' });
+    await setStageOrder(t.db, 'execute', ['opus-b', 'k3-a', 'opus-a']);
+    const base = (poolId: string, at: Date) =>
+      ({
+        poolId,
+        unit: 'percent',
+        reading: 'measured',
+        source: 'mirasim-relay',
+        readAt: at.toISOString(),
+      }) as const;
+    const sevenDay = (poolId: string, at: Date): StoredQuotaWindow => ({
+      ...base(poolId, at),
+      label: '7d',
+      window: '7d',
+      utilization: 0.1,
+    });
+    const claudeFull = (poolId: string, at: Date): StoredQuotaWindow => ({
+      ...base(poolId, at),
+      label: '7d_claude',
+      window: '7d_model',
+      scope: 'claude',
+      upstreamStatus: 'limit_reached',
+    });
+    const save = (poolId: string, at: Date, windows: StoredQuotaWindow[]) =>
+      savePoolQuota(t.db, { poolId, readAt: at.toISOString(), windows });
+    // 两小时前那次读成都报了 7d_claude 用满：relay-a 给了清零时刻，relay-b 没给。刚才这次读成都没再报它。
+    const before = ago(2 * HOUR);
+    await save('relay-a', before, [
+      sevenDay('relay-a', before),
+      { ...claudeFull('relay-a', before), resetsAt: later(DAY).toISOString() },
+    ]);
+    await save('relay-b', before, [sevenDay('relay-b', before), claudeFull('relay-b', before)]);
+    await save('relay-a', ago(MIN), [sevenDay('relay-a', ago(MIN))]);
+    await save('relay-b', ago(MIN), [sevenDay('relay-b', ago(MIN))]);
+    // 要是还算它们：opus-a 被「用满」挡住，opus-b 因为读数过期挪到最后。
+    const result = await stageCandidates(t.db, 'execute', { now: NOW });
+    expect(
+      result.candidates.map((c) => [c.routeId, c.quota, c.blockers, c.windows.map((w) => w.label)]),
+    ).toEqual([
+      ['opus-b', 'ok', [], ['7d']],
+      ['k3-a', 'ok', [], ['7d']],
+      ['opus-a', 'ok', [], ['7d']],
+    ]);
+  });
+
+  it('读成了、只是没有扣这个模型的窗口：算 ok，不当没读成', async () => {
+    await t.db.insert(pools).values({ id: 'cursor-a', channelId: 'cursor', maxConcurrency: 1 });
+    await addRoute(t.db, { id: 'never-read', poolId: 'relay-a', modelId: 'opus-5.5' });
+    await addRoute(t.db, {
+      id: 'opus-on-cursor',
+      channelId: 'cursor',
+      poolId: 'cursor-a',
+      modelId: 'opus-5.5',
+      hostId: 'cursor-agent',
+    });
+    await setStageOrder(t.db, 'execute', ['never-read', 'opus-on-cursor']);
+    // Cursor 这次只报了 auto 桶（用满了），成员表说它只扣 Composer。
+    await savePoolQuota(t.db, {
+      poolId: 'cursor-a',
+      readAt: ago(MIN).toISOString(),
+      scopeModels: { auto: { in: ['composer-2'] } },
+      windows: [
+        {
+          poolId: 'cursor-a',
+          label: 'auto_percent',
+          window: 'other',
+          scope: 'auto',
+          used: 100,
+          limit: 100,
+          unit: 'percent',
+          reading: 'measured',
+          source: 'cursor-dashboard',
+          readAt: ago(MIN).toISOString(),
+        },
+      ],
+    });
+    const result = await stageCandidates(t.db, 'execute', { now: NOW });
+    expect(result.candidates.map((c) => [c.routeId, c.quota, c.blockers, c.windows.length])).toEqual([
+      ['opus-on-cursor', 'ok', [], 0],
+      ['never-read', 'unknown', [], 0],
     ]);
   });
 

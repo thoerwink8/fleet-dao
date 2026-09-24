@@ -120,12 +120,13 @@ describe('库里的行 → 领域对象', () => {
         statusRaw: 'limit_reached',
         reading: 'estimated',
         source: 'estimate',
-        readAt: NOW,
+        readAt: ago(MIN),
+        staleSince: NOW,
       },
     ]);
     await t.db
       .update(pools)
-      .set({ scopeModels: { fable: { in: ['fable-5.1'] } } })
+      .set({ scopeModels: { fable: { in: ['fable-5.1'] } }, lastReadOkAt: NOW })
       .where(eq(pools.id, 'relay-a'));
     const [ev] = await t.db
       .insert(progressEvents)
@@ -183,11 +184,12 @@ describe('库里的行 → 领域对象', () => {
           scope: 'fable',
           upstreamStatus: 'limit_reached',
           reading: 'estimated',
-          readAt: NOW.toISOString(),
+          readAt: ago(MIN).toISOString(),
           label: '7d_fable',
           unit: 'points',
           source: 'estimate',
           statusRaw: 'limit_reached',
+          staleSince: NOW.toISOString(),
         },
       ]),
     );
@@ -203,6 +205,7 @@ describe('库里的行 → 领域对象', () => {
       channelId: 'relay',
       maxConcurrency: 2,
       scopeModels: { fable: { in: ['fable-5.1'] } },
+      lastReadOkAt: NOW.toISOString(),
     });
     const [model] = (await t.db.select().from(models)).filter((m) => m.id === 'opus-5.5');
     expect(toModel(model as typeof models.$inferSelect)).toEqual({

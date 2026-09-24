@@ -223,7 +223,7 @@ describe('0002：额度窗改按上游原名存', () => {
   }
 
   it(
-    '在已有旧数据的库上跑得通：旧行补上原名、单位、读法，主键换成（池, 原名）',
+    '在已有旧数据的库上跑得通：旧行补上原名、单位、读法，池补上最近读成时刻，主键换成（池, 原名）',
     async () => {
       expect(target).toBeGreaterThan(0);
       const pg = new PGlite();
@@ -231,20 +231,21 @@ describe('0002：额度窗改按上游原名存', () => {
         for (const e of entries.slice(0, target)) await runMigration(pg, e.tag);
         await pg.exec(`
         insert into channels (id, name, billing) values ('relay', '中转', 'subscription');
-        insert into pools (id, channel_id, max_concurrency) values ('relay-a', 'relay', 2), ('relay-b', 'relay', 1);
+        insert into pools (id, channel_id, max_concurrency) values
+          ('relay-a', 'relay', 2), ('relay-b', 'relay', 1), ('relay-c', 'relay', 1);
         insert into quota_windows (pool_id, "window", scope, utilization, used, "limit", reading, read_at) values
-          ('relay-a', '5h', '', null, 1140, 143528, 'measured', now()),
-          ('relay-a', '7d', '', 0.4, null, null, 'measured', now()),
-          ('relay-a', '7d_model', 'claude', null, 510000, 512600, 'measured', now()),
-          ('relay-a', '7d_model', 'fable', 0.2, null, null, 'measured', now()),
-          ('relay-b', 'month_usd', '', 0.55, 222, 400, 'estimated', now()),
-          ('relay-b', 'period_usd', '', null, 3, 10, 'measured', now()),
-          ('relay-b', 'points', '', null, 10, 100, 'measured', now());
+          ('relay-a', '5h', '', null, 1140, 143528, 'measured', '2026-09-20T10:00:00Z'),
+          ('relay-a', '7d', '', 0.4, null, null, 'measured', '2026-09-20T11:00:00Z'),
+          ('relay-a', '7d_model', 'claude', null, 510000, 512600, 'measured', '2026-09-20T10:00:00Z'),
+          ('relay-a', '7d_model', 'fable', 0.2, null, null, 'measured', '2026-09-20T10:00:00Z'),
+          ('relay-b', 'month_usd', '', 0.55, 222, 400, 'estimated', '2026-09-19T08:00:00Z'),
+          ('relay-b', 'period_usd', '', null, 3, 10, 'measured', '2026-09-19T08:00:00Z'),
+          ('relay-b', 'points', '', null, 10, 100, 'measured', '2026-09-19T08:00:00Z');
       `);
         await runMigration(pg, '0002_quota_labels');
 
         const rows = await pg.query<{ row: string }>(
-          `select concat_ws(' ', pool_id, label, "window", nullif(scope, ''), unit, source) as row
+          `select concat_ws(' ', pool_id, label, "window", nullif(scope, ''), unit, source, stale_since) as row
            from quota_windows order by pool_id, label collate "C"`,
         );
         expect(rows.rows.map((r) => r.row)).toEqual([
@@ -255,6 +256,15 @@ describe('0002：额度窗改按上游原名存', () => {
           'relay-b month_usd month_usd usd legacy',
           'relay-b period_usd period_usd usd legacy',
           'relay-b points points points legacy',
+        ]);
+        // 池的最近读成时刻取它窗口里最新的读数时刻；没有窗口的池留空（从没读成过）。
+        const poolRows = await pg.query<{ id: string; at: string | null }>(
+          `select id, to_char(last_read_ok_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI') as at from pools order by id`,
+        );
+        expect(poolRows.rows.map((r) => [r.id, r.at])).toEqual([
+          ['relay-a', '2026-09-20T11:00'],
+          ['relay-b', '2026-09-19T08:00'],
+          ['relay-c', null],
         ]);
 
         // 迁移后：other 窗口可以带组名；同一个池里原名不能重复（换个类型也不行），别的池可以同名。

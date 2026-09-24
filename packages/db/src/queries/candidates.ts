@@ -12,7 +12,13 @@ import {
   stagePolicies,
   stagePolicyRoutes,
 } from '../schema/index.ts';
-import { inFlightByPool, QUOTA_STALE_AFTER_MS, type WindowState, windowState } from './quota.ts';
+import {
+  inFlightByPool,
+  QUOTA_STALE_AFTER_MS,
+  quotaReadOverdue,
+  type WindowState,
+  windowState,
+} from './quota.ts';
 
 /**
  * offline 探针或熔断判不在线；channel-disabled 渠道关了；pool-expired 订阅过期；model-retired 模型已下架；
@@ -47,9 +53,15 @@ export interface RouteCandidate {
   modelId: string;
   family: string;
   hostId: (typeof routes.$inferSelect)['hostId'];
-  /** unknown = 额度没读成：适用的窗口读数过期、已过清零点，或这个池从没读到过额度。派工原因里要写明「额度未知」。 */
+  /**
+   * unknown = 额度没读成：这个池从没读成过、最近一次读成超过 30 分钟，或适用的窗口已过清零点。派工原因里要写明「额度未知」。
+   * 读成了、但没有扣这个模型的窗口，是 ok。
+   */
   quota: 'ok' | 'exhausted' | 'unknown';
-  /** 这条路由适用的窗口：账号级的，加上扣本模型的模型组窗口（按 shared 的 windowAppliesTo 和池的成员表判）。 */
+  /**
+   * 这条路由适用的窗口：账号级的，加上扣本模型的模型组窗口（按 shared 的 windowAppliesTo 和池的成员表判）。
+   * 上游这次没报的窗口（stale_since 非空）不算：不挡路由，也不参与排序。
+   */
   windows: CandidateWindow[];
   inFlight: number;
   maxConcurrency: number;
@@ -103,7 +115,12 @@ export async function stageCandidates(
 
   const candidates = rows.map(({ order, route, pool, channel, model }): RouteCandidate => {
     const windows: CandidateWindow[] = windowRows
-      .filter((w) => w.poolId === pool.id && windowAppliesTo(w, model, pool.scopeModels ?? undefined))
+      .filter(
+        (w) =>
+          w.poolId === pool.id &&
+          w.staleSince === null &&
+          windowAppliesTo(w, model, pool.scopeModels ?? undefined),
+      )
       .map((w) => ({
         label: w.label,
         window: w.window,
@@ -112,14 +129,12 @@ export async function stageCandidates(
         resetsAt: w.resetsAt,
         readAt: w.readAt,
       }));
-    const quota =
-      windows.length === 0
-        ? 'unknown'
-        : windows.some((w) => w.state === 'exhausted')
-          ? 'exhausted'
-          : windows.every((w) => w.state === 'ok')
-            ? 'ok'
-            : 'unknown';
+    const readFresh = !quotaReadOverdue(pool.lastReadOkAt, now, staleAfterMs);
+    const quota = windows.some((w) => w.state === 'exhausted')
+      ? 'exhausted'
+      : readFresh && windows.every((w) => w.state === 'ok')
+        ? 'ok'
+        : 'unknown';
 
     // 代码里的硬禁令先过（库里的表清空了也照样生效），再并上库里的：写了的每一项都要对上才算命中，没写阶段 = 所有阶段。
     const hardBan = hardBanFor(model, stage);

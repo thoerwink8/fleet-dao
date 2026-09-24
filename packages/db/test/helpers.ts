@@ -1,5 +1,6 @@
 // 测试夹具：每个测试一份内存库（createTestDb 克隆出来的），数据互不可见。
 import { randomUUID } from 'node:crypto';
+import { and, eq, isNull, lt, or } from 'drizzle-orm';
 import { expect } from 'vitest';
 import type { Db } from '../src/client.ts';
 import {
@@ -139,9 +140,16 @@ export async function addRun(
 type WindowFixture = Omit<typeof quotaWindows.$inferInsert, 'label' | 'unit' | 'source'> &
   Partial<Pick<typeof quotaWindows.$inferInsert, 'label' | 'unit' | 'source'>>;
 
-/** 一行额度窗。没写的原名按「窗口类型_组名」拼，单位默认百分比，读法记 test。 */
+/**
+ * 直接插一行额度窗（绕开 savePoolQuota，好一行行造读数），并把池的最近读成时刻推到这行的读数时刻。
+ * 没写的原名按「窗口类型_组名」拼，单位默认百分比，读法记 test。
+ */
 export async function addWindow(db: Db, w: WindowFixture) {
   await db.insert(quotaWindows).values(windowRow(w));
+  await db
+    .update(pools)
+    .set({ lastReadOkAt: w.readAt })
+    .where(and(eq(pools.id, w.poolId), or(isNull(pools.lastReadOkAt), lt(pools.lastReadOkAt, w.readAt))));
 }
 
 export function windowRow(w: WindowFixture): typeof quotaWindows.$inferInsert {

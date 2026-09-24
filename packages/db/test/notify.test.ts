@@ -2,11 +2,13 @@
 import { FLEET_CHANGES_CHANNEL, REALTIME_TABLES } from '@fleet-dao/shared';
 import { eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { savePoolQuota } from '../src/queries/quota.ts';
 import {
   asks,
   auditLog,
   channels,
   notifications,
+  pools,
   progressEvents,
   quotaWindows,
   sessionRuns,
@@ -73,6 +75,18 @@ describe('写入即通知 fleet_changes', () => {
     });
     await settle();
     expect(heard).toEqual([{ table: 'quota_windows', id: 'relay-a' }]);
+  });
+
+  it('池本身改了也按池报成 quota_windows：读成了但上游一个窗口都没报，额度页也能刷新', async () => {
+    await catalog(t.db);
+    await freshEars();
+    await savePoolQuota(t.db, { poolId: 'relay-a', readAt: NOW.toISOString(), windows: [] });
+    await t.db.update(pools).set({ maxConcurrency: 3 }).where(eq(pools.id, 'relay-b'));
+    await settle();
+    expect(heard).toEqual([
+      { table: 'quota_windows', id: 'relay-a' },
+      { table: 'quota_windows', id: 'relay-b' },
+    ]);
   });
 
   it('会话排进队、开跑、结束都发（看板和额度页要刷新）；不属于任何需求的会话也发', async () => {
