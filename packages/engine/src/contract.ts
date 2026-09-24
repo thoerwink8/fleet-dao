@@ -1,0 +1,313 @@
+// 工作流的对外约定：编号、输入输出、信号、查询。驾驶舱后端（发信号、起工作流）和引擎共用这一份。
+// 输入带 schemaVersion；以后加字段只许可选、读时给默认值，不许改老字段的含义（在途任务的输入是老样子）。
+// 编号的拼法（requirementWorkflowId、subtaskWorkflowId）进了在途任务的历史：改格式要用 patched()。
+
+import type { Repo, StageKind, SubtaskState, TaskState } from '@fleet-dao/shared';
+import { defineQuery, defineSignal } from '@temporalio/workflow';
+import type { SubtaskSpec } from './decisions/plan.ts';
+import type { Limits } from './limits.ts';
+import type { WaitKind } from './ports.ts';
+
+export const WORKFLOW_TYPES = {
+  requirement: 'requirementWorkflow',
+  subtask: 'subtaskWorkflow',
+  mergeQueue: 'mergeQueueWorkflow',
+} as const;
+
+/** 一张 issue 一条需求工作流，例如 `req:acme/demo#12`。驾驶舱后端发信号按它找。 */
+export function requirementWorkflowId(repo: Pick<Repo, 'owner' | 'name'>, issueNumber: number): string {
+  return `req:${repo.owner}/${repo.name}#${issueNumber}`;
+}
+
+/** 例如 `sub:acme/demo#12/login-form~1a2b3c4d`：带上需求这一轮运行的前缀，需求重开时不和上一轮已关闭的子任务撞编号。 */
+export function subtaskWorkflowId(requirementId: string, requirementRunId: string, key: string): string {
+  return `sub:${requirementId.replace(/^req:/, '')}/${key}~${requirementRunId.slice(0, 8)}`;
+}
+
+/** 每个仓一条合并队列，例如 `mq:acme/demo`。 */
+export function mergeQueueWorkflowId(repo: Pick<Repo, 'owner' | 'name'>): string {
+  return `mq:${repo.owner}/${repo.name}`;
+}
+
+export function subtaskBranch(issueNumber: number, key: string): string {
+  return `fleet/${issueNumber}-${key}`;
+}
+
+/** 需求文档目录的默认值，例如 `specs/12-登录验证码`。 */
+export function defaultSpecDir(issueNumber: number, title: string): string {
+  const slug = title
+    .trim()
+    .replace(/[\\/:*?"<>|#%{}^~[\]`'!$&()+,;=@]+/g, '')
+    .replace(/\s+/g, '-')
+    .slice(0, 40)
+    .replace(/-+$/, '');
+  return slug ? `specs/${issueNumber}-${slug}` : `specs/${issueNumber}`;
+}
+
+export type RouteOverrides = Partial<Record<StageKind, string>>;
+
+export interface RequirementInput {
+  schemaVersion: 1;
+  /** 库里的 tasks.id。 */
+  taskId: string;
+  repo: Repo;
+  issueNumber: number;
+  title: string;
+  /** 创始人原话。 */
+  rawRequest: string;
+  requestedBy: string;
+  specDir?: string;
+  limits?: Partial<Limits>;
+  routeOverrides?: RouteOverrides;
+}
+
+export interface SubtaskInput {
+  schemaVersion: 1;
+  taskId: string;
+  /** 库里的 subtasks.id（需求工作流拆方案时生成的 UUID）。 */
+  subtaskId: string;
+  repo: Repo;
+  issueNumber: number;
+  specDir: string;
+  subtask: SubtaskSpec;
+  limits?: Partial<Limits>;
+  routeOverrides?: RouteOverrides;
+}
+
+export interface MergeItem {
+  itemId: string;
+  subtaskWorkflowId: string;
+  taskId: string;
+  subtaskId: string;
+  subtaskKey: string;
+  repo: Repo;
+  prNumber: number;
+  branch: string;
+  head: string;
+  enqueuedAt: string;
+}
+
+export type MergeResult =
+  | { itemId: string; outcome: 'merged'; mergeCommit: string }
+  | {
+      itemId: string;
+      outcome: 'returned';
+      reason: 'conflict' | 'tests-red' | 'tests-stale' | 'merge-failed' | 'infra';
+      detail: string;
+      files: string[];
+    };
+
+export interface MergeResultDelivery {
+  subtaskWorkflowId: string;
+  result: MergeResult;
+}
+
+export interface MergeQueueCarry {
+  queue: MergeItem[];
+  processed: number;
+  /** 最近的结果：子任务等太久重新入队时直接补发，不重合。 */
+  recent: MergeResultDelivery[];
+}
+
+export interface MergeQueueInput {
+  schemaVersion: 1;
+  repo: Repo;
+  limits?: Partial<Limits>;
+  carried?: MergeQueueCarry;
+}
+
+export type SubtaskOutcome = 'merged' | 'failed' | 'stopped';
+
+export interface SubtaskResult {
+  key: string;
+  subtaskId: string;
+  state: SubtaskOutcome;
+  prNumber: number | null;
+  mergeCommit: string | null;
+  summary: string;
+  problem: string | null;
+  rounds: { review: number; ciFix: number; conflict: number; mergeReturn: number };
+}
+
+export interface RequirementResult {
+  taskId: string;
+  state: 'done' | 'failed' | 'stopped';
+  subtasks: SubtaskResult[];
+  docs: { requirement?: string; plan?: string; result?: string };
+  problem: string | null;
+}
+
+export interface MergeQueueResult {
+  processed: number;
+}
+
+// ---- 查询
+
+export interface Waiting {
+  kind: WaitKind;
+  /** 白话，例如「等「a」合并」「等 Claude 订阅 A 号的空位」。 */
+  detail: string;
+  since: string;
+  on?: string[];
+  askId?: string;
+}
+
+/** 每条命令的受理结果：信号没有回执，受理与否写在这里，不静默丢弃。 */
+export interface CommandReceipt {
+  command: string;
+  at: string;
+  accepted: boolean;
+  note: string;
+  by?: string;
+}
+
+/** fleet 命令写库后叫醒工作流的那一下（最近一次）。 */
+export interface AgentEventSeen {
+  runId: string;
+  kind: AgentEventCommand['kind'];
+  askId?: string;
+  at: string;
+}
+
+export type SubtaskStep = 'worktree' | 'execute' | 'verify' | 'merge' | 'cleanup' | 'finished';
+
+export interface SubtaskStatus {
+  kind: 'subtask';
+  taskId: string;
+  subtaskId: string;
+  key: string;
+  title: string;
+  state: SubtaskState;
+  step: SubtaskStep;
+  /** 白话「正在：……」。 */
+  doing: string;
+  paused: boolean;
+  parked: boolean;
+  waiting: Waiting | null;
+  route: { routeId: string; modelId: string; why: string } | null;
+  /** 正在跑的会话（库里 session_runs.id）。 */
+  runId: string | null;
+  sessionId: string | null;
+  prNumber: number | null;
+  head: string | null;
+  rounds: { review: number; ciFix: number; conflict: number; mergeReturn: number };
+  lastProblem: string | null;
+  lastAgentEvent: AgentEventSeen | null;
+  commands: CommandReceipt[];
+}
+
+export type RequirementPhase = 'triage' | 'asking' | 'spec' | 'plan' | 'running' | 'result' | 'finished';
+
+export interface SubtaskView {
+  id: string;
+  key: string;
+  title: string;
+  state: SubtaskState;
+  workflowId: string | null;
+  prNumber: number | null;
+  paused: boolean;
+  waiting: Waiting | null;
+  runId: string | null;
+  touches: string[];
+  dependsOn: string[];
+}
+
+export interface RequirementStatus {
+  kind: 'requirement';
+  taskId: string;
+  issueNumber: number;
+  state: TaskState;
+  phase: RequirementPhase;
+  doing: string;
+  paused: boolean;
+  parked: boolean;
+  waiting: Waiting | null;
+  /** 分诊、需求文档、方案这几步的会话。 */
+  route: { routeId: string; modelId: string; why: string } | null;
+  runId: string | null;
+  sessionId: string | null;
+  subtasks: SubtaskView[];
+  progress: { done: number; total: number };
+  docs: { requirement?: string; plan?: string; result?: string };
+  lastProblem: string | null;
+  lastAgentEvent: AgentEventSeen | null;
+  commands: CommandReceipt[];
+}
+
+export interface MergeQueueStatus {
+  kind: 'merge-queue';
+  repo: string;
+  current: { itemId: string; prNumber: number; subtaskKey: string; step: string } | null;
+  queue: { itemId: string; prNumber: number; subtaskKey: string }[];
+  processed: number;
+}
+
+/** 查询只给人调试和驾驶舱兜底用；驾驶舱平时读 Postgres（查询要重放历史，结束太久的执行可能查不了）。 */
+export const requirementStatusQuery = defineQuery<RequirementStatus>('status');
+export const subtaskStatusQuery = defineQuery<SubtaskStatus>('status');
+export const mergeQueueStatusQuery = defineQuery<MergeQueueStatus>('status');
+
+// ---- 信号：名字和参数跟驾驶舱后端的 TaskSignal 一一对应（信号名 = TaskSignal.name，参数 = 去掉 name 的其余字段）。
+// 后端只按任务找需求工作流发；需求工作流转给在跑的子任务。
+
+export interface CommandMeta {
+  by?: string;
+  reason?: string;
+}
+
+export interface RerouteCommand extends CommandMeta {
+  routeId: string;
+  /** 只换这个子任务（库里的 subtasks.id）；不给就是整个需求。 */
+  subtaskId?: string;
+  /** 只换这个阶段；不给就是主线那几步（需求的分诊/需求文档/方案、子任务的写码）。 */
+  stage?: StageKind;
+}
+
+export interface AnswerCommand {
+  by?: string;
+  askId: string;
+  answer: string;
+}
+
+export interface AgentEventCommand {
+  /** 哪一次会话（session_runs.id）。 */
+  runId: string;
+  kind: 'plan' | 'say' | 'ask' | 'done' | 'blocked';
+  askId?: string;
+}
+
+/** 暂停：会话停在干净的点（做完的先提交），不再开新步骤。 */
+export const pauseSignal = defineSignal<[CommandMeta?]>('pause');
+/** 继续：解除暂停，或解除「挂起并报警」。 */
+export const resumeSignal = defineSignal<[CommandMeta?]>('resume');
+/** 叫停：停会话、撤出合并队列、收工作树，任务以 stopped 结束。 */
+export const stopSignal = defineSignal<[CommandMeta?]>('stop');
+/** 换路由：接下来用这条路由；正在跑的会话停在干净的点后换上。 */
+export const rerouteSignal = defineSignal<[RerouteCommand]>('reroute');
+/** 回答追问。 */
+export const answerSignal = defineSignal<[AnswerCommand]>('answer');
+/** fleet 命令写库之后叫醒工作流（按进展判死活要用）。 */
+export const agentEventSignal = defineSignal<[AgentEventCommand]>('agentEvent');
+
+/** 驾驶舱后端会发的信号名全集（和 TaskSignal['name'] 对得上）。 */
+export const TASK_SIGNAL_NAMES = ['pause', 'resume', 'stop', 'reroute', 'answer', 'agentEvent'] as const;
+
+// ---- 引擎内部信号
+
+export interface SubtaskProgress {
+  key: string;
+  state: SubtaskState;
+  prNumber: number | null;
+  paused: boolean;
+  waiting: Waiting | null;
+  runId: string | null;
+}
+
+/** 子任务 → 需求：状态变了。 */
+export const subtaskProgressSignal = defineSignal<[SubtaskProgress]>('subtaskProgress');
+/** 子任务（经活动）→ 合并队列：排进来。 */
+export const enqueueSignal = defineSignal<[MergeItem]>('enqueue');
+/** 子任务 → 合并队列：撤出。 */
+export const withdrawSignal = defineSignal<[{ itemId: string }]>('withdraw');
+/** 合并队列 → 子任务：合并结果。 */
+export const mergeResultSignal = defineSignal<[MergeResult]>('mergeResult');

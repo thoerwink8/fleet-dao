@@ -1,7 +1,9 @@
 packages:
   - "packages/*"
 # 依赖的安装脚本默认不跑（pnpm 11 要求逐个表态）。esbuild（drizzle-kit、vite 带进来的）的脚本只做二进制自检，
-# 平台二进制本来就经可选依赖装好，所以不放行。protobufjs（飞书 SDK 带进来的）的脚本只打印版本写法的提醒，不放行。
+# 平台二进制本来就经可选依赖装好，所以不放行。@swc/core（Temporal 打包工作流用）的只在缺平台原生包时兜底，
+# pnpm 会装上平台包，不放行。protobufjs（飞书 SDK、Temporal 带进来的）的脚本只打印版本写法的提醒，不放行。
 allowBuilds:
   esbuild: false
+  '@swc/core': false
   protobufjs: false
