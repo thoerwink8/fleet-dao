@@ -83,7 +83,8 @@
 
 - 旧单：按审计的去向表逐条关单（写明去向）或搬成 fleet-dao 需求。
 - ai-gateway-stack：还在用的接线搬进来，然后只读存档。
-- 香港清理：先查清谁还在用，再停掉退役和到期的服务（new-api、Devin 与 CommandCode 的转接）；数据先留着。
+- 香港清理：先查清谁还在用，再停掉退役和到期的服务（new-api、Devin 与 CommandCode 的转接）；数据先留着。香港防火墙现在是关着的，几个旧服务直接对公网开着端口，清理时一并收口。
+- MiraQuota 新版（改从 fleet-dao 读全部渠道额度，thoerwink8/miraquota-win#3）发版后，立刻停掉香港的 miraquota-hub：它经 nginx 对公网开着、读接口不鉴权，地址在旧版公开仓里出现过。
 - 旧系统：停并禁用定时任务和服务；数据留着，删不删到时问你们。
 - 规则：fleet-dao 的一页 AGENTS.md 定稿；你的全局 CLAUDE.md 精简稿给你逐条过。
 - 默认模型从「全 Opus」切到按数据分工，你们再调。
