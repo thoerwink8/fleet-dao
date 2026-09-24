@@ -1,0 +1,906 @@
+{
+  "about": "失败分流的样本夹具：原文（已脱敏）→ 正确的下一步动作。编号 S 开头的是 docs/reference/errors.md 第 5 节的同号样本；X 开头的是别处找到的。没写的证据字段由测试补默认值：source=session:execute、routeId=route-a、now=2026-09-25T00:00:00.000Z、没有处置过。",
+  "provenance": {
+    "production": "生产读回：旧系统 VPS 的执行记录、收件箱存档、执行器日志，或 fleet-dao 在法国 VPS 上真跑录下的过程记录",
+    "observed": "实遇：提交正文、代码注释、观察记录、判例里写明是真机原文",
+    "test-only": "只在旧仓测试里出现，没找到真机出处（errors.md 第 5 节已标明），可作补充",
+    "format": "码和原文的格式来自在用的代码（fleet-dao 插头的判定原因、引擎的端口码、旧 runner 的卡住原因），不是某次真跑录下的",
+    "synthetic": "合成：这一类没有真实样本（errors.md 第 5 节末列的几类）"
+  },
+  "samples": [
+    {
+      "id": "S01",
+      "provenance": "observed",
+      "origin": "windsurf-dao#1805（用户 2026-09-24 本机实遇）；mirasim 码 cloud_unavailable",
+      "evidence": {
+        "hostId": "mirasim",
+        "message": "API Error: 422 平台服务当前繁忙，正在处理的请求较多，本轮已停止；如需立即继续，请切换到「自有」路由。"
+      },
+      "expect": { "action": "swapRoute", "rule": "BZ1", "avoid": "route", "routeOutcome": "fail" }
+    },
+    {
+      "id": "S02",
+      "provenance": "observed",
+      "origin": "windsurf-dao#1805；mirasim 码 cloud_unreachable",
+      "evidence": {
+        "hostId": "mirasim",
+        "message": "422 当前是「平台」档，而本机此刻连不上平台（域名解析或建立连接失败），本轮已停止……[ECONNRESET]"
+      },
+      "expect": { "action": "retry", "rule": "NT1" }
+    },
+    {
+      "id": "S03",
+      "provenance": "production",
+      "origin": "旧系统 VPS 执行记录 1 条（reclaude-claude-fable-5-1）；mirasim 码 local_no_account。照原文处方换路由，不停账号池",
+      "evidence": {
+        "hostId": "mirasim",
+        "message": "API Error: 422 当前是「自有」档，而本机没有这个智能体的账号，本轮已停止，没有任何请求发往平台。为它登录一个自己的账号，或切换到「平台」。"
+      },
+      "expect": { "action": "swapRoute", "rule": "AU4", "avoid": "route", "alert": true }
+    },
+    {
+      "id": "S04",
+      "provenance": "production",
+      "origin": "旧系统 VPS 执行记录 1 条",
+      "evidence": { "hostId": "claude-code", "message": "Not logged in · Please run /login" },
+      "expect": {
+        "action": "swapRoute",
+        "rule": "AU2",
+        "avoid": "pool",
+        "alert": true,
+        "routeOutcome": "neutral"
+      }
+    },
+    {
+      "id": "S05",
+      "provenance": "production",
+      "origin": "旧系统 VPS 执行记录 1 条。状态码 400 不能当请求不合法",
+      "evidence": {
+        "hostId": "claude-code",
+        "message": "API Error: 400 此设备已被解绑，请在终端重新运行 reclaude 完成登录（请勿在 Claude Code 内使用 /login 登录）（请求 ID: <请求ID>）"
+      },
+      "expect": { "action": "swapRoute", "rule": "AU2", "avoid": "pool", "alert": true }
+    },
+    {
+      "id": "S06",
+      "provenance": "production",
+      "origin": "旧系统 VPS 执行记录 8 条；也是盲设计题第四臂的阵亡原因",
+      "evidence": { "hostId": "codex", "message": "codex app-server 'initialize' timed out" },
+      "expect": { "action": "retry", "rule": "ST1" }
+    },
+    {
+      "id": "S07a",
+      "provenance": "production",
+      "origin": "旧系统 VPS 执行记录 3 条",
+      "evidence": { "hostId": "cursor-agent", "message": "ACP runner did not accept the session in time" },
+      "expect": { "action": "retry", "rule": "ST1" }
+    },
+    {
+      "id": "S07b",
+      "provenance": "production",
+      "origin": "旧系统 VPS 执行记录 2 条",
+      "evidence": { "hostId": "cursor-agent", "message": "ACP initialize timed out" },
+      "expect": { "action": "retry", "rule": "ST1" }
+    },
+    {
+      "id": "S08a",
+      "provenance": "production",
+      "origin": "旧系统 VPS 执行记录 10 条；实测 12 小时红 11 次、每次下一轮自愈",
+      "evidence": { "hostId": "mirasim", "message": "连不上回环 ws" },
+      "expect": { "action": "retry", "rule": "NT1" }
+    },
+    {
+      "id": "S08b",
+      "provenance": "production",
+      "origin": "旧系统收件箱 fleet 任务 #1338 g1",
+      "evidence": { "hostId": "mirasim", "message": "session release unverified: 连不上回环 ws" },
+      "expect": { "action": "retry", "rule": "NT1" }
+    },
+    {
+      "id": "S09",
+      "provenance": "production",
+      "origin": "旧系统 VPS 执行记录 9 条；windsurf-dao#1840",
+      "evidence": { "hostId": "mirasim", "message": "起会话没查成：没收到 prompt 的应答帧（没查成）" },
+      "expect": { "action": "retry", "rule": "ST1" }
+    },
+    {
+      "id": "S10",
+      "provenance": "production",
+      "origin": "旧系统 VPS 执行记录 9 条",
+      "evidence": { "hostId": "mirasim", "message": "连上了但没收到 state 帧，契约没查成——不派" },
+      "expect": { "action": "retry", "rule": "ST1" }
+    },
+    {
+      "id": "S11",
+      "provenance": "production",
+      "origin": "旧系统 VPS 执行记录 7 条（code=model_unavailable）；windsurf-dao#1840：巡检判了下架的路线还在派",
+      "evidence": {
+        "hostId": "cursor-agent",
+        "code": "model_unavailable",
+        "message": "Requested concrete model ID is absent from the ACP model catalog"
+      },
+      "expect": { "action": "swapModel", "rule": "MD1", "avoid": "model", "alert": true }
+    },
+    {
+      "id": "S12",
+      "provenance": "production",
+      "origin": "旧系统 VPS 执行记录 3 条（code=stalled）",
+      "evidence": { "hostId": "mirasim", "code": "stalled", "message": "no progress for 361s" },
+      "expect": { "action": "retry", "rule": "SL1" }
+    },
+    {
+      "id": "S13",
+      "provenance": "production",
+      "origin": "旧系统 VPS 执行记录 82 条：code=failed、没有任何原文。缺原因要单独计数，走兜底梯，不算进路由的失败",
+      "evidence": { "hostId": "cursor-agent", "code": "failed", "message": "" },
+      "expect": { "action": "retry", "rule": "FB", "missingReason": true, "routeOutcome": "neutral" }
+    },
+    {
+      "id": "S14",
+      "provenance": "production",
+      "origin": "旧系统收件箱 fleet 任务 #1608 g1（Temporal 的超时没有 code，落成 UNKNOWN 交人）",
+      "evidence": { "code": "UNKNOWN", "message": "step-failed:UNKNOWN：activity StartToClose timeout" },
+      "expect": { "action": "retry", "rule": "EN1", "routeOutcome": "neutral" }
+    },
+    {
+      "id": "S15",
+      "provenance": "production",
+      "origin": "旧系统收件箱 fleet 任务 #1744 g1",
+      "evidence": {
+        "code": "UNKNOWN",
+        "message": "step-failed:UNKNOWN：worker 部署重启：活动随旧进程丢失（execute），立即判失败以免干等 startToClose"
+      },
+      "expect": { "action": "retry", "rule": "EN1" }
+    },
+    {
+      "id": "S17",
+      "provenance": "test-only",
+      "origin": "形态取自旧仓 packages/fleet/test/activities.test.mjs；生产上 fleet 任务 #1748 g2 的原文被 160 字上限切在「! [rejected]」",
+      "evidence": {
+        "source": "pushBranch",
+        "routeBound": false,
+        "message": "To https://github.com/owner/repo.git\n ! [rejected]        HEAD -> dao/issue-17-g1 (non-fast-forward)\nerror: failed to push some refs to 'https://github.com/owner/repo.git'"
+      },
+      "expect": { "action": "retry", "rule": "MC2" }
+    },
+    {
+      "id": "S18",
+      "provenance": "observed",
+      "origin": "windsurf-dao#1725 的真 stderr：推送身份没有 workflows 权限，旧系统判成可重试、退避白烧",
+      "evidence": {
+        "source": "pushBranch",
+        "routeBound": false,
+        "message": "To https://github.com/owner/repo.git\n ! [remote rejected] HEAD -> dao/issue-17-g1 (refusing to allow a GitHub App to create or update workflow `.github/workflows/check.yml` without `workflows` permission)\nerror: failed to push some refs to 'https://github.com/owner/repo.git'"
+      },
+      "expect": { "action": "park", "rule": "PM1", "alert": true }
+    },
+    {
+      "id": "S21",
+      "provenance": "production",
+      "origin": "旧系统收件箱 fleet 任务 #1560 g2",
+      "evidence": { "code": "TRANSPORT_CLOSED", "message": "lead session failed" },
+      "expect": { "action": "retry", "rule": "NT1" }
+    },
+    {
+      "id": "S22",
+      "provenance": "production",
+      "origin": "windsurf-dao#1802：2026-09-22 三条工作流同因卡住。fleet-dao 没有这把锁，留着验「errno 认得出」",
+      "evidence": {
+        "source": "startSession",
+        "routeBound": false,
+        "message": "execution admission flock unavailable: ETIMEDOUT (2636ms, timeout 2000ms, ~/.dao/execution/admission.lock)"
+      },
+      "expect": { "action": "retry", "rule": "NT1" }
+    },
+    {
+      "id": "S23",
+      "provenance": "observed",
+      "origin": "2026-09-19 中转三个模型同时满（旧仓 contract.mjs 注释与测试）",
+      "evidence": { "hostId": "mirasim", "message": "gpt-5.6-terra 当前可用容量已满，本次请求未被服务" },
+      "expect": { "action": "swapRoute", "rule": "BZ1", "avoid": "route" }
+    },
+    {
+      "id": "S24",
+      "provenance": "observed",
+      "origin": "2026-09-07 真会话（旧仓 dianjiangtai-reviewer-slot.mjs）。原文处方是换模型，照办",
+      "evidence": {
+        "hostId": "mirasim",
+        "message": "Selected model is at capacity. Please try a different model."
+      },
+      "expect": { "action": "swapModel", "rule": "MD2", "avoid": "model" }
+    },
+    {
+      "id": "S25",
+      "provenance": "observed",
+      "origin": "2026-09-07 真会话（旧仓 dianjiangtai-reviewer-slot.mjs）",
+      "evidence": { "hostId": "mirasim", "message": "pi turn stalled past 30 minutes" },
+      "expect": { "action": "retry", "rule": "SL1" }
+    },
+    {
+      "id": "S26",
+      "provenance": "observed",
+      "origin": "2026-09-17 codex 审查会话近 6 小时 10 次里 9 次（判例 reviewer-session-dies-upstream-stream）。断流不进路由失败率的分母",
+      "evidence": {
+        "hostId": "codex",
+        "message": "stream disconnected before completion: stream closed before response.completed"
+      },
+      "expect": { "action": "retry", "rule": "SB1", "routeOutcome": "neutral" }
+    },
+    {
+      "id": "S27",
+      "provenance": "observed",
+      "origin": "2026-08-16 pi 会话日志（判例 pi-silent-provider-fallback）",
+      "evidence": { "message": "503 status code (no body)" },
+      "expect": { "action": "retry", "rule": "UP1" }
+    },
+    {
+      "id": "S28",
+      "provenance": "observed",
+      "origin": "2026-08-16 直连渠道的 402（判例 pi-silent-provider-fallback）。不许自动切到按量计费的路由",
+      "evidence": { "message": "402 Insufficient Balance" },
+      "expect": { "action": "swapRoute", "rule": "QT2", "avoid": "pool", "alert": true }
+    },
+    {
+      "id": "S29",
+      "provenance": "test-only",
+      "origin": "旧仓 tests/go-fallback.test.js（GLM 网关过载）",
+      "evidence": { "message": "503 new_api_error: system cpu overloaded" },
+      "expect": { "action": "swapRoute", "rule": "BZ1" }
+    },
+    {
+      "id": "S30",
+      "provenance": "observed",
+      "origin": "2026-09-03 网关连续 403 的判别测试（旧仓 tests/go-fallback.test.js）。上游内部错误，不因为 403 停账号池",
+      "evidence": { "message": "403: Internal error during token generation" },
+      "expect": { "action": "retry", "rule": "UP1" }
+    },
+    {
+      "id": "S31",
+      "provenance": "test-only",
+      "origin": "旧仓 tests/go-fallback.test.js",
+      "evidence": { "message": "GoUsageLimitError: Monthly usage limit reached" },
+      "expect": { "action": "swapRoute", "rule": "QT1", "avoid": "pool", "alert": false }
+    },
+    {
+      "id": "S32",
+      "provenance": "test-only",
+      "origin": "旧仓 tests/go-fallback.test.js",
+      "evidence": { "message": "You've reached your 5-hour usage limit" },
+      "expect": { "action": "swapRoute", "rule": "QT1", "avoid": "pool" }
+    },
+    {
+      "id": "S35",
+      "provenance": "observed",
+      "origin": "2026-09-14 实遇（旧仓 retry-verdict.mjs）：旧系统每 20 分钟白试一次",
+      "evidence": {
+        "source": "syncMainline",
+        "routeBound": false,
+        "message": "reviewer-attach 失败：先让工人 rebase master，别派审官白审（mergeable=CONFLICTING）"
+      },
+      "expect": { "action": "retry", "rule": "MC1", "counter": "reworks" }
+    },
+    {
+      "id": "S37",
+      "provenance": "observed",
+      "origin": "gh pr create 常见（旧仓 loop-guard.mjs）。我方请求数据错，不许因为 422 当成平台繁忙",
+      "evidence": { "source": "openPr", "routeBound": false, "message": "HTTP 422: Validation Failed" },
+      "expect": { "action": "park", "rule": "GH1", "alert": true }
+    },
+    {
+      "id": "S38",
+      "provenance": "observed",
+      "origin": "2026-08-17 GitHub 部分中断期间（判例 github-outage-three-faces）",
+      "evidence": {
+        "source": "openPr",
+        "routeBound": false,
+        "message": "gh: Resource not accessible by integration (HTTP 403)"
+      },
+      "expect": { "action": "retry", "rule": "GH2" }
+    },
+    {
+      "id": "S39",
+      "provenance": "observed",
+      "origin": "2026-08-16（判例 github-secondary-vs-primary-limit）：主配额充足时的次级限流",
+      "evidence": { "source": "openPr", "routeBound": false, "message": "API rate limit exceeded" },
+      "expect": { "action": "retry", "rule": "RL2" }
+    },
+    {
+      "id": "S41",
+      "provenance": "production",
+      "origin": "旧系统执行器 2.5 天 skip 39 次。规则认不出，走兜底梯（先重试），不停下等人",
+      "evidence": {
+        "source": "queryWorkflow",
+        "routeBound": false,
+        "message": "[fleet] Failed to query Workflow"
+      },
+      "expect": { "action": "retry", "rule": "FB" }
+    },
+    {
+      "id": "S42",
+      "provenance": "observed",
+      "origin": "windsurf-dao#1633 真机样本（fleet 任务 #1337 g1）",
+      "evidence": {
+        "source": "queryWorkflow",
+        "routeBound": false,
+        "message": "[fleet] [TMPRL1100] Nondeterminism error: Activity type of scheduled event 'escalate' does not match activity type of activity command 'review'"
+      },
+      "expect": { "action": "park", "rule": "EN2", "alert": true }
+    },
+    {
+      "id": "S43",
+      "provenance": "test-only",
+      "origin": "旧仓 tests/failure-class.test.js；对应真实事故「按分钟限流被判成额度用完，停了一个挂着 28 条路线的账号池」",
+      "evidence": { "message": "429 Quota exceeded for requests per minute" },
+      "expect": { "action": "retry", "rule": "RL1", "delaySeconds": 60 }
+    },
+    {
+      "id": "S44",
+      "provenance": "test-only",
+      "origin": "旧仓 tests/failure-class.test.js",
+      "evidence": { "message": "触发限流：每分钟额度已满，请稍后再试" },
+      "expect": { "action": "retry", "rule": "RL1" }
+    },
+    {
+      "id": "S45",
+      "provenance": "test-only",
+      "origin": "旧仓 tests/failure-class.test.js 的反例：不许被「繁忙」「限流」一类规则拉走",
+      "evidence": { "message": "账户余额不足，请充值，本周额度已用完" },
+      "expect": { "action": "swapRoute", "rule": "QT2", "avoid": "pool", "alert": true }
+    },
+    {
+      "id": "S46",
+      "provenance": "test-only",
+      "origin": "码 agent_unconfigured 是 #649 实证（旧仓 next-launch.mjs）。errors.md 写的是换模型；fleet-dao 把「腿」拆成路由和模型两层，这是执行方式的配置问题，换模型救不了，所以换路由并报警",
+      "evidence": { "hostId": "cursor-agent", "message": "agent_unconfigured: Workspace Trust not granted" },
+      "expect": { "action": "swapRoute", "rule": "CF1", "avoid": "route", "alert": true }
+    },
+    {
+      "id": "S47",
+      "provenance": "test-only",
+      "origin": "旧仓 tests/next-launch.test.js",
+      "evidence": { "message": "Cannot use this model" },
+      "expect": { "action": "swapModel", "rule": "MD1" }
+    },
+    {
+      "id": "S49",
+      "provenance": "test-only",
+      "origin": "旧仓 tests/go-fallback.test.js。没给 Retry-After，换路由",
+      "evidence": { "message": "429 rate_limit_error" },
+      "expect": { "action": "swapRoute", "rule": "RL3", "avoid": "route" }
+    },
+    {
+      "id": "S52",
+      "provenance": "test-only",
+      "origin": "旧仓 tests/failure-class.test.js。余额没了，不是等一小时能等回来的",
+      "evidence": { "message": "429 insufficient_quota" },
+      "expect": { "action": "swapRoute", "rule": "QT2", "alert": true }
+    },
+    {
+      "id": "X01",
+      "provenance": "observed",
+      "origin": "ai-gateway-stack deploy/reclaude-org-switch.test.mjs 的 REAL_BANNED（2026-09-22 独享号被封，切号探针实收）。原文写着「请稍后重试」，照做只会在同一个池里反复撞",
+      "evidence": {
+        "hostId": "claude-code",
+        "message": "reclaude org use: sync Claude config: sync current account: unexpected status 403: {\"error\":{\"code\":\"account_banned\",\"status\":403,\"message\":\"当前绑定账号暂不可用，系统将自动处理，请稍后重试\"}}"
+      },
+      "expect": {
+        "action": "swapRoute",
+        "rule": "AU1",
+        "avoid": "pool",
+        "alert": true,
+        "routeOutcome": "neutral"
+      }
+    },
+    {
+      "id": "X02",
+      "provenance": "observed",
+      "origin": "windsurf-dao docs/observations/2026-09-05-mirasim叠reclaude的接法.md：mirasim 起的 claude 会话死于这句，reclaude 状态里是 account_banned 403",
+      "evidence": {
+        "hostId": "claude-code",
+        "message": "API Error: 400 当前绑定账号暂不可用，系统将自动处理…"
+      },
+      "expect": { "action": "swapRoute", "rule": "AU1", "avoid": "pool", "alert": true }
+    },
+    {
+      "id": "X03",
+      "provenance": "observed",
+      "origin": "ai-gateway-stack deploy/reclaude-org-switch.test.mjs 的 REAL_EXHAUSTED_ERR（2026-09-23 拼车号当场用满实测，同时收到 rate_limit_event status:rejected）。前半句是 Claude Code 自带的临时限流说法，后半句是 reclaude 说的额度用满；认的是后半句，按上游给的 20 分钟避开这个池",
+      "evidence": {
+        "hostId": "claude-code",
+        "message": "API Error: Server is temporarily limiting requests (not your usage limit) · 拼车 5 小时额度已用完，约 20 分钟后重置，请稍后再来（请求 ID: <请求ID>）"
+      },
+      "expect": {
+        "action": "swapRoute",
+        "rule": "QT1",
+        "avoid": "pool",
+        "until": "2026-09-25T00:20:00.000Z",
+        "alert": false
+      }
+    },
+    {
+      "id": "X03n",
+      "provenance": "format",
+      "origin": "反例：X03 真机原文的前半句单独出现，是 Claude Code 在服务端临时限流时自带的说法，明说了「不是用量上限」。不许判成额度用满去避开整个账号池（旧系统把限流当额度、一条报错停掉整个池的事故）",
+      "evidence": {
+        "hostId": "claude-code",
+        "message": "API Error: Server is temporarily limiting requests (not your usage limit)"
+      },
+      "expect": { "action": "swapRoute", "rule": "RL3", "avoid": "route", "routeOutcome": "fail" }
+    },
+    {
+      "id": "X04",
+      "provenance": "observed",
+      "origin": "ai-gateway-stack deploy/reclaude-org-switch.test.mjs 的 REAL_REJECTED_EVENT：用满时 rate_limit_event 是 status:rejected、没有 unifiedWindows；插头据此判 quota_exhausted",
+      "evidence": {
+        "hostId": "claude-code",
+        "code": "quota_exhausted",
+        "message": "账号池额度已用满，换池或等清零",
+        "transcriptTail": [
+          "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"rejected\",\"isUsingOverage\":false},\"uuid\":\"<uuid>\",\"session_id\":\"<会话编号>\"}"
+        ]
+      },
+      "expect": { "action": "swapRoute", "rule": "QT1", "avoid": "pool" }
+    },
+    {
+      "id": "X05",
+      "provenance": "observed",
+      "origin": "ai-gateway-stack docs/DECISIONS.md（同号多机高频触发，设备被解绑）；docs/reference/adapters.md 2.5",
+      "evidence": { "hostId": "claude-code", "message": "401 device_revoked" },
+      "expect": { "action": "swapRoute", "rule": "AU2", "avoid": "pool", "alert": true }
+    },
+    {
+      "id": "X06",
+      "provenance": "observed",
+      "origin": "ai-gateway-stack docs/RECLAUDE-IN-MIRASIM.md：status=400 + errorCode=non_cc_client，并上报，攒多了设备被解绑",
+      "evidence": {
+        "hostId": "mirasim",
+        "httpStatus": 400,
+        "code": "non_cc_client",
+        "message": "仅支持 Claude Code 客户端访问 reclaude 网关"
+      },
+      "expect": { "action": "swapRoute", "rule": "AU3", "avoid": "route", "alert": true }
+    },
+    {
+      "id": "X07",
+      "provenance": "production",
+      "origin": "fleet-dao 插头夹具 cc-bad-model（法国 VPS 真跑）：终帧 is_error、api_error_status 404、error=model_not_found；原文按插头的判定格式拼",
+      "evidence": {
+        "hostId": "claude-code",
+        "code": "agent_error",
+        "httpStatus": 404,
+        "exitCode": 1,
+        "message": "api_error · model_not_found · HTTP 404 · There's an issue with the selected model (claude-nonexistent-0). It may not exist or you may not have access to it. Run --model to pick a different model."
+      },
+      "expect": { "action": "swapModel", "rule": "MD1", "alert": true }
+    },
+    {
+      "id": "X08",
+      "provenance": "production",
+      "origin": "同上一次真跑的 stderr",
+      "evidence": {
+        "hostId": "claude-code",
+        "message": "[claude-code:unrecognized_model] {\"model\":\"claude-nonexistent-0\",\"query_source\":\"sdk\"}"
+      },
+      "expect": { "action": "swapModel", "rule": "MD1" }
+    },
+    {
+      "id": "X09",
+      "provenance": "production",
+      "origin": "fleet-dao 插头夹具 cc-haiku-bash-timeout（法国 VPS 真跑，Bash 超时压到 4 秒）：会话里的命令被杀；结局码是插头的判定原因",
+      "evidence": {
+        "hostId": "claude-code",
+        "code": "not_delivered",
+        "message": "说做完了，但这一轮会话没有新提交",
+        "transcriptTail": ["Error: Exit code 143\nCommand timed out after 4s"]
+      },
+      "expect": { "action": "retry", "rule": "KL1", "routeOutcome": "neutral" }
+    },
+    {
+      "id": "X10",
+      "provenance": "production",
+      "origin": "fleet-dao 插头夹具 cc-haiku-perm-denied（法国 VPS 真跑，没开 bypassPermissions）：原文自己说了同一会话里会一直被拒",
+      "evidence": {
+        "hostId": "claude-code",
+        "code": "not_delivered",
+        "message": "说做完了，但这一轮会话没有新提交",
+        "transcriptTail": [
+          "Error: Permission for this tool use was denied. It requires approval, and this session has no approval surface — nobody can answer a permission prompt here — so it was denied automatically. The action was NOT performed; do not claim it succeeded, and do not retry it: this action, and anything else that requires approval, will be denied the same way for the rest of this session."
+        ]
+      },
+      "expect": { "action": "swapRoute", "rule": "PM2", "alert": true }
+    },
+    {
+      "id": "X11",
+      "provenance": "observed",
+      "origin": "docs/reference/adapters.md 4.5：本机实跑 cursor-agent -p，不可达端点，stderr、退出 1、没有任何 JSON",
+      "evidence": {
+        "hostId": "cursor-agent",
+        "exitCode": 1,
+        "message": "✗ Failed to reach the Cursor API. Check that your proxy (http://<回环>:7890/) is reachable."
+      },
+      "expect": { "action": "retry", "rule": "NT1" }
+    },
+    {
+      "id": "X12",
+      "provenance": "observed",
+      "origin": "docs/reference/adapters.md 3.3：本机实跑 codex exec --json，上游不可达，反复出现、自己不退",
+      "evidence": {
+        "hostId": "codex",
+        "message": "Reconnecting... waiting for network (Connection failed: error sending request)"
+      },
+      "expect": { "action": "retry", "rule": "NT1" }
+    },
+    {
+      "id": "X13",
+      "provenance": "observed",
+      "origin": "windsurf-dao docs/GROK-MIRASIM-FIX.md：grok 的 unified.jsonl，没走代理（DNS 污染）",
+      "evidence": {
+        "hostId": "grok",
+        "message": "shell.turn.inference_retry :: request error: error sending request for url (https://cli-chat-proxy.grok.com/v1/responses): client error (Connect): tcp connect error: deadline has elapsed"
+      },
+      "expect": { "action": "retry", "rule": "NT1" }
+    },
+    {
+      "id": "X14",
+      "provenance": "observed",
+      "origin": "windsurf-dao docs/evidence/1460-pi-legs-carrier-and-account.json",
+      "evidence": {
+        "hostId": "mirasim",
+        "message": "403 You have run out of credits or need a Grok subscription"
+      },
+      "expect": { "action": "swapRoute", "rule": "QT2", "avoid": "pool", "alert": true }
+    },
+    {
+      "id": "X15",
+      "provenance": "observed",
+      "origin": "windsurf-dao docs/evidence/1460-pi-legs-carrier-and-account.json",
+      "evidence": { "hostId": "mirasim", "message": "403 RegionError" },
+      "expect": { "action": "swapRoute", "rule": "RG1", "avoid": "route", "alert": true }
+    },
+    {
+      "id": "X16",
+      "provenance": "observed",
+      "origin": "windsurf-dao docs/evidence/1576-dsh-relay-pinned-model.json：第三针零产出",
+      "evidence": { "hostId": "mirasim", "message": "dsh web did not become ready within 45s" },
+      "expect": { "action": "retry", "rule": "ST1" }
+    },
+    {
+      "id": "X17",
+      "provenance": "observed",
+      "origin": "windsurf-dao docs/evidence/1576-dsh-relay-fetch-failed.json",
+      "evidence": { "hostId": "mirasim", "message": "turn failed: fetch failed" },
+      "expect": { "action": "retry", "rule": "NT1" }
+    },
+    {
+      "id": "X18",
+      "provenance": "observed",
+      "origin": "ai-gateway-stack docs/DECISIONS.md：提示词拼进参数超 128KB。只有提示词长的任务撞，这个任务换路由，别的任务照用",
+      "evidence": { "hostId": "cursor-agent", "message": "spawn E2BIG" },
+      "expect": { "action": "swapRoute", "rule": "CF2", "alert": true, "routeOutcome": "neutral" }
+    },
+    {
+      "id": "X19",
+      "provenance": "observed",
+      "origin": "windsurf-dao docs/observations/2026-09-19-reclaude接入五步与两处退役接线.md：退役网关的环境变量残留",
+      "evidence": {
+        "hostId": "claude-code",
+        "message": "[claude-code:unrecognized_model] claude-5-fable-medium"
+      },
+      "expect": { "action": "swapModel", "rule": "MD1" }
+    },
+    {
+      "id": "X20",
+      "provenance": "observed",
+      "origin": "判例 tui-newline-per-agent（docs/reference/adapters.md 6.5）：路由没写死 provider",
+      "evidence": {
+        "hostId": "mirasim",
+        "message": "Error: Model \"deepseek-v4-flash\" is ambiguous across providers: …"
+      },
+      "expect": { "action": "swapRoute", "rule": "CF1", "alert": true }
+    },
+    {
+      "id": "X21",
+      "provenance": "observed",
+      "origin": "docs/reference/adapters.md 2.2：本机实跑，退出 1",
+      "evidence": {
+        "hostId": "claude-code",
+        "exitCode": 1,
+        "message": "Error: When using --print, --output-format=stream-json requires --verbose"
+      },
+      "expect": { "action": "swapRoute", "rule": "CF1", "alert": true }
+    },
+    {
+      "id": "X22",
+      "provenance": "observed",
+      "origin": "windsurf-dao docs/cli-notes/grok.md：旗标放在子命令后面，退出 2",
+      "evidence": { "hostId": "grok", "exitCode": 2, "message": "unexpected argument" },
+      "expect": { "action": "swapRoute", "rule": "CF1" }
+    },
+    {
+      "id": "X23",
+      "provenance": "observed",
+      "origin": "windsurf-dao NEW-MACHINE.md §7e：codex 冒烟，60 秒 timeout 124，没有最终消息",
+      "evidence": { "hostId": "codex", "exitCode": 124, "message": "ERROR: Reconnecting... 1/5" },
+      "expect": { "action": "retry", "rule": "NT1" }
+    },
+    {
+      "id": "X24",
+      "provenance": "observed",
+      "origin": "ai-gateway-stack docs/MIRASIM.md 能力测试：上游单账号满载",
+      "evidence": { "hostId": "mirasim", "message": "overloaded_error" },
+      "expect": { "action": "swapRoute", "rule": "BZ1" }
+    },
+    {
+      "id": "X25",
+      "provenance": "production",
+      "origin": "旧系统 VPS mirasim 回合结束码 overloaded（7 天 16 次，codex）",
+      "evidence": { "hostId": "mirasim", "code": "overloaded" },
+      "expect": { "action": "swapRoute", "rule": "BZ1", "avoid": "route" }
+    },
+    {
+      "id": "X26",
+      "provenance": "production",
+      "origin": "旧系统 VPS mirasim 回合结束码 incomplete（7 天 118 次）。长流被掐，不证明路由坏",
+      "evidence": { "hostId": "mirasim", "code": "incomplete" },
+      "expect": { "action": "retry", "rule": "SB1", "routeOutcome": "neutral" }
+    },
+    {
+      "id": "X27",
+      "provenance": "production",
+      "origin": "旧系统 VPS 会话记录 runDetail（2026-09-24 只读）；回合结束码 interrupted 236 条里 231 条是我们自己停的",
+      "evidence": { "hostId": "grok", "code": "interrupted", "message": "Interrupted by user." },
+      "expect": { "action": "retry", "rule": "OU1", "delaySeconds": 0, "routeOutcome": "neutral" }
+    },
+    {
+      "id": "X28",
+      "provenance": "production",
+      "origin": "旧系统 VPS mirasim 回合结束码 auth（7 天 3 次，kimi）",
+      "evidence": { "hostId": "mirasim", "code": "auth" },
+      "expect": { "action": "swapRoute", "rule": "AU2", "avoid": "pool", "alert": true }
+    },
+    {
+      "id": "X29",
+      "provenance": "production",
+      "origin": "旧系统 VPS mirasim 回合结束码 network（7 天 1 次，dsh）",
+      "evidence": { "hostId": "mirasim", "code": "network" },
+      "expect": { "action": "retry", "rule": "NT1" }
+    },
+    {
+      "id": "X30",
+      "provenance": "production",
+      "origin": "旧系统 VPS mirasim 回合结束码 route_refused（7 天 5 次）",
+      "evidence": { "hostId": "mirasim", "code": "route_refused" },
+      "expect": { "action": "swapRoute", "rule": "BZ1" }
+    },
+    {
+      "id": "X31",
+      "provenance": "format",
+      "origin": "fleet-dao 插头的强杀原因 startup_timeout（packages/adapters/src/judge.ts）",
+      "evidence": { "hostId": "claude-code", "code": "startup_timeout", "message": "起来之后迟迟没有第一帧" },
+      "expect": { "action": "retry", "rule": "ST1" }
+    },
+    {
+      "id": "X32",
+      "provenance": "format",
+      "origin": "fleet-dao 插头的强杀原因 idle_timeout",
+      "evidence": {
+        "hostId": "claude-code",
+        "code": "idle_timeout",
+        "message": "没有工具在跑，却长时间没有动静"
+      },
+      "expect": { "action": "retry", "rule": "SL1", "routeOutcome": "fail" }
+    },
+    {
+      "id": "X33",
+      "provenance": "format",
+      "origin": "fleet-dao 插头的强杀原因 wall_clock_timeout",
+      "evidence": { "hostId": "claude-code", "code": "wall_clock_timeout", "message": "总时长到顶，已强杀" },
+      "expect": { "action": "retry", "rule": "WT1" }
+    },
+    {
+      "id": "X34",
+      "provenance": "format",
+      "origin": "fleet-dao 插头的强杀原因 model_mismatch；别名配错是静默的（adapters.md CC-09）",
+      "evidence": {
+        "hostId": "claude-code",
+        "code": "model_mismatch",
+        "message": "实际回话的模型不是点名的那个，已停"
+      },
+      "expect": { "action": "swapRoute", "rule": "MD3", "avoid": "route", "alert": true }
+    },
+    {
+      "id": "X35",
+      "provenance": "format",
+      "origin": "fleet-dao 插头的强杀原因 cli_too_old",
+      "evidence": { "hostId": "claude-code", "code": "cli_too_old", "message": "命令行版本低于要求，已停" },
+      "expect": { "action": "swapRoute", "rule": "CF1", "alert": true }
+    },
+    {
+      "id": "X36",
+      "provenance": "format",
+      "origin": "fleet-dao 插头的交付判据（packages/adapters/src/delivery.ts）；旧系统零产出的假完成一路绿到合并（windsurf-dao#1572）",
+      "evidence": {
+        "hostId": "claude-code",
+        "code": "not_delivered",
+        "message": "说做完了，但相对 refs/remotes/origin/main 没有自己的提交；这一轮会话没有新提交"
+      },
+      "expect": { "action": "retry", "rule": "DL1", "counter": "reworks" }
+    },
+    {
+      "id": "X37",
+      "provenance": "format",
+      "origin": "fleet-dao 插头的交付判据：没查成不等于没交付",
+      "evidence": {
+        "hostId": "claude-code",
+        "code": "delivery_unknown",
+        "message": "交付没查成：找不到提交 refs/remotes/origin/main"
+      },
+      "expect": { "action": "retry", "rule": "DL2", "routeOutcome": "neutral" }
+    },
+    {
+      "id": "X38",
+      "provenance": "format",
+      "origin": "fleet-dao 插头的 spawn_failed 原因；ENOENT 是 Node 起进程找不到二进制时的原样报错",
+      "evidence": {
+        "hostId": "claude-code",
+        "code": "spawn_failed",
+        "message": "进程没起来：spawn reclaude ENOENT"
+      },
+      "expect": { "action": "swapRoute", "rule": "CF1", "alert": true }
+    },
+    {
+      "id": "X39",
+      "provenance": "format",
+      "origin": "引擎把 Temporal 的超时转成 TIMEOUT_<类型>；原文形态同 S14 的真机原文",
+      "evidence": { "code": "TIMEOUT_HEARTBEAT", "message": "activity Heartbeat timeout" },
+      "expect": { "action": "retry", "rule": "EN1" }
+    },
+    {
+      "id": "X40",
+      "provenance": "production",
+      "origin": "旧系统活动层真抛过的码（生产 2 次，errors.md 1.3）；冲突不许进原地退避（windsurf-dao#1595）",
+      "evidence": { "source": "mergeQueue", "routeBound": false, "code": "MERGE_CONFLICT" },
+      "expect": { "action": "retry", "rule": "MC1", "counter": "reworks", "delaySeconds": 0 }
+    },
+    {
+      "id": "X41",
+      "provenance": "format",
+      "origin": "旧系统 runner 把 CI 红写成的卡住原因（packages/fleet/src/runner.mjs）",
+      "evidence": {
+        "source": "waitCi",
+        "routeBound": false,
+        "code": "checks-failed",
+        "message": "契约检查未通过：[{\"name\":\"check\",\"conclusion\":\"FAILURE\"}]"
+      },
+      "expect": { "action": "retry", "rule": "TS1", "counter": "reworks" }
+    },
+    {
+      "id": "X42",
+      "provenance": "synthetic",
+      "origin": "没有真实 OOM 样本（旧系统三个服务 memory.events 全 0）。进程被 SIGKILL、没有终帧，按插头的判定格式",
+      "evidence": {
+        "hostId": "claude-code",
+        "code": "no_result",
+        "exitCode": 137,
+        "signal": "SIGKILL",
+        "message": "进程退出（信号 SIGKILL），没有终帧"
+      },
+      "expect": { "action": "retry", "rule": "KL2", "routeOutcome": "neutral" }
+    },
+    {
+      "id": "X43",
+      "provenance": "test-only",
+      "origin": "旧仓 tests/failure-class.test.js",
+      "evidence": { "message": "HTTP 402 Payment Required" },
+      "expect": { "action": "swapRoute", "rule": "QT2", "alert": true }
+    },
+    {
+      "id": "X44",
+      "provenance": "test-only",
+      "origin": "旧仓 tests/failure-class.test.js：带账单字样的仍是余额的事，哪怕同一句里也提了限流",
+      "evidence": {
+        "message": "429 rate limit: You exceeded your current quota, please check your plan and billing details"
+      },
+      "expect": { "action": "swapRoute", "rule": "QT2", "alert": true }
+    },
+    {
+      "id": "X45",
+      "provenance": "test-only",
+      "origin": "旧仓 tests/failure-class.test.js：按分钟的限流",
+      "evidence": { "message": "Rate limit reached: quota of 60 requests per min" },
+      "expect": { "action": "retry", "rule": "RL1" }
+    },
+    {
+      "id": "X46",
+      "provenance": "test-only",
+      "origin": "旧仓 tests/failure-class.test.js：按分钟的限流",
+      "evidence": { "message": "Too Many Requests (tokens per minute quota)" },
+      "expect": { "action": "retry", "rule": "RL1" }
+    },
+    {
+      "id": "X47",
+      "provenance": "test-only",
+      "origin": "旧仓 tests/failure-class.test.js：恢复时刻读得出就照办",
+      "evidence": {
+        "now": "2026-09-22T06:00:00.000Z",
+        "message": "usage limit reached, resets at 2026-09-22T08:00:00Z"
+      },
+      "expect": { "action": "swapRoute", "rule": "QT1", "avoid": "pool", "until": "2026-09-22T08:00:00.000Z" }
+    },
+    {
+      "id": "X48",
+      "provenance": "test-only",
+      "origin": "旧仓 tests/failure-class.test.js",
+      "evidence": { "message": "本周额度已用完" },
+      "expect": { "action": "swapRoute", "rule": "QT1", "avoid": "pool" }
+    },
+    {
+      "id": "X49",
+      "provenance": "observed",
+      "origin": "windsurf-dao docs/observations/2026-09-05-mirasim叠reclaude的接法.md：mirasim 自己的额度错",
+      "evidence": { "hostId": "mirasim", "message": "Cloud quota is exhausted" },
+      "expect": { "action": "swapRoute", "rule": "QT1", "avoid": "pool" }
+    },
+    {
+      "id": "X50",
+      "provenance": "observed",
+      "origin": "ai-gateway-stack docs/ops/MIRASIM-PI-STALLED-2026-08-31.md",
+      "evidence": { "hostId": "mirasim", "message": "pi rpc timed out after 30s" },
+      "expect": { "action": "retry", "rule": "NT2" }
+    },
+    {
+      "id": "X51",
+      "provenance": "test-only",
+      "origin": "旧仓 tests/go-fallback.test.js 里 Grok 连接中断的原文；规则认不出，走兜底梯先重试",
+      "evidence": { "hostId": "grok", "message": "This operation was aborted" },
+      "expect": { "action": "retry", "rule": "FB" }
+    },
+    {
+      "id": "X52",
+      "provenance": "format",
+      "origin": "引擎端口码 NEEDS_HUMAN（引擎兜底梯的结构化码表）",
+      "evidence": { "code": "NEEDS_HUMAN", "message": "要人拍板" },
+      "expect": { "action": "park", "rule": "HM1", "alert": true }
+    },
+    {
+      "id": "X53",
+      "provenance": "format",
+      "origin": "引擎在会话被外面停掉时给的码（SESSION_STOPPED）",
+      "evidence": { "code": "SESSION_STOPPED", "message": "会话被外面停掉了" },
+      "expect": { "action": "retry", "rule": "OU2" }
+    },
+    {
+      "id": "X54",
+      "provenance": "format",
+      "origin": "fleet-dao 插头的强杀原因 session_mismatch",
+      "evidence": {
+        "hostId": "claude-code",
+        "code": "session_mismatch",
+        "message": "续会话没续上原来那个会话，已停"
+      },
+      "expect": { "action": "retry", "rule": "SM1" }
+    }
+  ],
+  "skipped": [
+    {
+      "ids": ["S16"],
+      "why": "旧系统自己的出站闸（会话里推送被拦）。fleet-dao 的会话不推送，推分支在引擎里做"
+    },
+    {
+      "ids": ["S19", "S20", "S36"],
+      "why": "旧系统的树占用、租约层。fleet-dao 一个子任务一棵树一个会话，这层删了"
+    },
+    {
+      "ids": ["S33", "S48"],
+      "why": "对象已经不在：端口按约定正常返回 gone，不抛错，不进分流"
+    },
+    {
+      "ids": ["S34"],
+      "why": "旧系统的执行档目录。fleet-dao 的路由在库里，选路时已经过滤"
+    },
+    {
+      "ids": ["review-budget-exhausted", "review-not-complete-on-head", "check-missing-or-ambiguous"],
+      "why": "验证环节的结局（返工、重审），走引擎的验证判断，不是错误"
+    }
+  ]
+}
