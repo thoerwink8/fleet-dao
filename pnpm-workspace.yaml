@@ -1,2 +1,6 @@
 packages:
   - "packages/*"
+# 依赖的安装脚本默认不跑（pnpm 11 要求逐个表态）。esbuild（drizzle-kit、vite 带进来的）的脚本只做二进制自检，
+# 平台二进制本来就经可选依赖装好，所以不放行。
+allowBuilds:
+  esbuild: false

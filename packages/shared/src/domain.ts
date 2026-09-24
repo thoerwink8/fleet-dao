@@ -46,7 +46,17 @@ export type ReadingKind = 'measured' | 'estimated';
 
 export type QuotaWindowKind = '5h' | '7d' | '7d_model' | 'month_usd' | 'points' | 'period_usd';
 
+/** 上游自己说的额度状态。以它为准：实测 99% 就可能已经 limit_reached。 */
+export type QuotaStatus = 'allowed' | 'warning' | 'limit_reached';
+
 export type HostId = 'claude-code' | 'codex' | 'cursor-agent' | 'grok' | 'mirasim' | 'api-shell';
+
+/**
+ * 定时任务一次跑的结局（只增不改；还在跑时没有结局）。四种分开，「没跑成」「没扫到」不能当「没问题」：
+ * ok = 跑完了、扫了对象（发现几个问题另记）；partial = 跑完了但有一部分没查成；
+ * unscanned = 跑完了但一个对象都没扫到；failed = 没跑成。
+ */
+export type ScheduleOutcome = 'ok' | 'partial' | 'unscanned' | 'failed';
 
 export interface Repo {
   id: string;
@@ -71,6 +81,8 @@ export interface Task {
   priority: number;
   /** 需求文档所在目录，例如 `specs/12-登录验证码`。 */
   specDir?: string;
+  /** 做完标准（从需求文档来），fleet task 给会话看。 */
+  acceptance?: string[];
   createdAt: string;
 }
 
@@ -84,6 +96,8 @@ export interface Subtask {
   dependsOn: string[];
   state: SubtaskState;
   prNumber?: number;
+  /** 排队时在等什么（白话），例如「等 Claude 订阅 A 号的并发空位」。 */
+  waitingOn?: string;
 }
 
 export interface Step {
@@ -112,13 +126,23 @@ export interface Pool {
 export interface QuotaWindow {
   poolId: string;
   window: QuotaWindowKind;
-  /** 0–1。 */
+  /** 只扣某一组模型的窗口（如中转的 7d_claude、7d_fable）写组名；账号级窗口不填。同一池可以有好几个模型组窗口。 */
+  scope?: string;
+  /** 已用比例，通常 0–1；超额是真实情况，可以大于 1（显示时再截）。 */
   utilization?: number;
   used?: number;
   limit?: number;
   resetsAt?: string;
+  upstreamStatus?: QuotaStatus;
   reading: ReadingKind;
   readAt: string;
+}
+
+/** 模型厂商家族，例如 claude、gpt。禁令可以按族下。 */
+export interface Family {
+  id: string;
+  displayName: string;
+  vendor: string;
 }
 
 export interface Model {
@@ -161,16 +185,21 @@ export type RunOutcome = 'ok' | 'failed' | 'stopped' | 'stalled';
 /** 一次 AI 会话。排队和干活分开计时。 */
 export interface SessionRun {
   id: string;
-  taskId: string;
+  /** 帅位会话、考新模型的会话不属于任何需求，没有 taskId，但照样记账、照样占账号池并发。 */
+  taskId?: string;
   subtaskId?: string;
   stage: StageKind;
   routeId: string;
   /** 一句话「为什么派给它」。 */
   whyRoute: string;
+  /** 会话干活的分支。 */
+  branch?: string;
   queuedAt: string;
   startedAt?: string;
   endedAt?: string;
   outcome?: RunOutcome;
+  /** 上游实际用的模型。请求的模型看路由；两者不同就是被静默换了，战绩按实际的算。 */
+  actualModel?: string;
   inputTokens?: number;
   outputTokens?: number;
   costUsd?: number;
@@ -183,6 +212,6 @@ export interface ProgressEvent {
   runId: string;
   at: string;
   kind: ProgressKind;
-  /** 按 kind 不同而不同：plan 带 Step[]，say 带一句话，file 带路径…… */
+  /** 按 kind 不同而不同；fleet 命令报的就是命令的请求体：plan 是 { steps: Step[] }（库里有检查），say 是 { text }…… */
   payload: unknown;
 }

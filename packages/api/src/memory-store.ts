@@ -203,7 +203,9 @@ export function createMemoryStore(
     },
     async listRuns({ taskIds, active }) {
       return data.runs.filter(
-        (r) => (!taskIds || taskIds.includes(r.taskId)) && (!active || r.endedAt === undefined),
+        (r) =>
+          (!taskIds || (r.taskId !== undefined && taskIds.includes(r.taskId))) &&
+          (!active || r.endedAt === undefined),
       );
     },
     async getRun(id) {
