@@ -1,0 +1,10 @@
+{
+  "name": "mira-pi",
+  "agent": "pi",
+  "route": "未指定（服务端 auto）；不点名模型，吃服务端默认 agents.pi.model（kimi-k3）；账本显示走了中转",
+  "serverVersion": "0.0.355",
+  "cwd": "/tmp/agent-io-p3/mira-pi",
+  "capturedWith": "同 mira-kimi.meta.json",
+  "result": "phase=done、error=null、incomplete=false；工作树里提交成功",
+  "ledger": { "viaRelay": true, "upstreamHost": "relay.mirasim.ai", "model": "kimi-k3" }
+}

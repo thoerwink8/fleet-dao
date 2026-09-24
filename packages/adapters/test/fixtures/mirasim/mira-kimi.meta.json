@@ -1,0 +1,16 @@
+{
+  "name": "mira-kimi",
+  "agent": "kimi",
+  "route": "未指定（服务端 auto）；账本显示走了中转",
+  "serverVersion": "0.0.355",
+  "cwd": "/tmp/agent-io-p3/mira-kimi",
+  "capturedWith": "两条回环 ws：一条发 prompt，另一条 subscribe 并每 3 秒没新帧就重订阅；每行 {t, dir, frame}。只留本会话的帧和我们发出去的 prompt / subscribe，广播（中转、账号、额度、别的会话、工作区）一律删掉",
+  "result": "phase=done、error=null、incomplete=false；工作树里提交成功",
+  "ledger": {
+    "calls": 3,
+    "status": 200,
+    "viaRelay": true,
+    "upstreamHost": "relay.mirasim.ai",
+    "model": "kimi-k3"
+  }
+}

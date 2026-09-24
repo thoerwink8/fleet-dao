@@ -1,0 +1,25 @@
+{
+  "name": "cursor-resume",
+  "cmd": [
+    "cursor-agent",
+    "-p",
+    "--output-format",
+    "stream-json",
+    "--force",
+    "--trust",
+    "--model",
+    "auto",
+    "--workspace",
+    "/tmp/agent-io-p3/c-edit",
+    "--resume",
+    "e06fc62e-72a6-4020-9144-01155dbba6db"
+  ],
+  "cwd": "/tmp/agent-io-p3/c-edit",
+  "exitCode": 0,
+  "signal": null,
+  "wallMs": 11904,
+  "firstStdoutMs": 8227,
+  "firstStderrMs": null,
+  "lineTimesMs": [8227, 8227, 11190, 11208, 11209, 11394, 11394],
+  "trailingPartial": 0
+}

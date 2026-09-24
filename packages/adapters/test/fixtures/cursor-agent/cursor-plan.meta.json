@@ -1,0 +1,27 @@
+{
+  "name": "cursor-plan",
+  "cmd": [
+    "cursor-agent",
+    "-p",
+    "--output-format",
+    "stream-json",
+    "--force",
+    "--trust",
+    "--model",
+    "auto",
+    "--workspace",
+    "/tmp/agent-io-p3/c-plan"
+  ],
+  "cwd": "/tmp/agent-io-p3/c-plan",
+  "exitCode": 0,
+  "signal": null,
+  "wallMs": 36690,
+  "firstStdoutMs": 15000,
+  "firstStderrMs": null,
+  "lineTimesMs": [
+    15001, 15001, 19747, 19936, 19955, 19992, 19999, 20018, 20022, 20040, 22122, 22122, 22122, 22184, 22184,
+    24035, 24037, 24041, 25451, 27013, 27013, 27013, 27177, 27244, 27244, 29211, 30724, 30724, 30724, 30877,
+    30877, 30915, 31758, 34026, 34033, 34033, 34038, 36057, 36063, 36447, 36447
+  ],
+  "trailingPartial": 0
+}

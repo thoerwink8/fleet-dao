@@ -1,0 +1,23 @@
+{
+  "name": "cursor-stdin",
+  "cmd": [
+    "cursor-agent",
+    "-p",
+    "--output-format",
+    "stream-json",
+    "--force",
+    "--trust",
+    "--model",
+    "auto",
+    "--workspace",
+    "/tmp/agent-io-p3/c-stdin"
+  ],
+  "cwd": "/tmp/agent-io-p3/c-stdin",
+  "exitCode": 0,
+  "signal": null,
+  "wallMs": 22837,
+  "firstStdoutMs": 7499,
+  "firstStderrMs": null,
+  "lineTimesMs": [7502, 7502, 18486, 18590, 18606, 18606, 19480, 22475, 22475, 22475, 22475, 22573, 22573],
+  "trailingPartial": 0
+}

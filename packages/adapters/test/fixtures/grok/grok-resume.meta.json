@@ -1,0 +1,27 @@
+{
+  "name": "grok-resume",
+  "cmd": [
+    "grok",
+    "--prompt-file",
+    "/tmp/agent-io-p3/prompts/ask-commit.txt",
+    "--output-format",
+    "streaming-json",
+    "--always-approve",
+    "--cwd",
+    "/tmp/agent-io-p3/g-edit",
+    "-r",
+    "9cd315bc-0a1d-4025-8c11-e693d43ec1fb"
+  ],
+  "cwd": "/tmp/agent-io-p3/g-edit",
+  "exitCode": 0,
+  "signal": null,
+  "wallMs": 2695,
+  "firstStdoutMs": 485,
+  "firstStderrMs": null,
+  "lineTimesMs": [
+    485, 494, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2004, 2004, 2004, 2004, 2004, 2004,
+    2004, 2004, 2004, 2004, 2016, 2016, 2016, 2016, 2016, 2016, 2016, 2016, 2016, 2016, 2016, 2041, 2139,
+    2139, 2161, 2161, 2161, 2161, 2202, 2202, 2202, 2202, 2202, 2353, 2384, 2384, 2504
+  ],
+  "trailingPartial": 0
+}
