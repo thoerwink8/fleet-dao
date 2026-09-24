@@ -16,6 +16,15 @@ import { fakeAgent, fixtureInit, fixtureLines, fixturePath, pidAlive, tempDir } 
 const onPosix = process.platform !== 'win32';
 const readText = (file: string) => readFileSync(file, 'utf8');
 
+/** 被杀的孙进程要等 init 收尸才从进程表消失，轮询一会儿。 */
+async function waitGone(pid: number, ms = 3_000): Promise<boolean> {
+  for (const end = Date.now() + ms; Date.now() < end; ) {
+    if (!pidAlive(pid)) return true;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return !pidAlive(pid);
+}
+
 function spec(fixture: string, over: Partial<ClaudeCodeRunSpec> = {}): ClaudeCodeRunSpec {
   return {
     runId: 'run-7',
@@ -30,7 +39,8 @@ function spec(fixture: string, over: Partial<ClaudeCodeRunSpec> = {}): ClaudeCod
   };
 }
 
-describe('runClaudeCode', () => {
+// 每个用例都起真进程；Windows 开发机并行跑时起一个 node 就要几百毫秒，超时给宽
+describe('runClaudeCode', { timeout: 30_000 }, () => {
   it('提示词只走 stdin 且喂完就关；参数、环境按约定；进度事件边跑边吐；报告里有终帧', async () => {
     const dir = tempDir();
     const files = { stdinTo: join(dir, 'stdin'), argvTo: join(dir, 'argv'), envTo: join(dir, 'env') };
@@ -98,7 +108,7 @@ describe('runClaudeCode', () => {
     expect(DEFAULT_PROCESS_LIMITS.startupMs).toBeGreaterThanOrEqual(180_000);
     const dir = tempDir();
     const report = await runClaudeCode(
-      spec('cc-haiku-read', { limits: { startupMs: 2_000, killGraceMs: 300 } }),
+      spec('cc-haiku-read', { limits: { startupMs: 5_000, killGraceMs: 300 } }),
       {
         command: fakeAgent({
           stdinTo: join(dir, 'stdin'),
@@ -129,7 +139,7 @@ describe('runClaudeCode', () => {
   it('总时长到顶：连同子进程一起杀掉，判超时而不是 0', async () => {
     const pidFile = join(tempDir(), 'child.pid');
     const report = await runClaudeCode(
-      spec('cc-haiku-read', { limits: { startupMs: 5_000, wallClockMs: 800, killGraceMs: 300 } }),
+      spec('cc-haiku-read', { limits: { startupMs: 10_000, wallClockMs: 3_000, killGraceMs: 300 } }),
       {
         command: fakeAgent({
           replay: fixturePath('claude-code', 'cc-haiku-read'),
@@ -140,8 +150,8 @@ describe('runClaudeCode', () => {
       },
     );
     expect(report.killed?.reason).toBe('wall_clock_timeout');
-    const childPid = Number(readFileSync(pidFile, 'utf8'));
-    expect(pidAlive(childPid)).toBe(false);
+    expect(report.firstLineMs).toBeDefined();
+    expect(await waitGone(Number(readFileSync(pidFile, 'utf8')))).toBe(true);
     expect(judgeClaudeRun(report)).toMatchObject({ outcome: 'failed', reason: 'wall_clock_timeout' });
   });
 
@@ -164,7 +174,7 @@ describe('runClaudeCode', () => {
     // 前 5 行停在 Read 的 tool_use 上、结果还没回来
     const report = await runClaudeCode(
       spec('cc-haiku-read', {
-        limits: { startupMs: 5_000, idleMs: 200, wallClockMs: 1_200, killGraceMs: 300 },
+        limits: { startupMs: 10_000, idleMs: 300, wallClockMs: 3_000, killGraceMs: 300 },
       }),
       {
         command: fakeAgent({
@@ -175,6 +185,7 @@ describe('runClaudeCode', () => {
       },
     );
     expect(report.killed?.reason).toBe('wall_clock_timeout');
+    expect(report.lines).toBe(5);
   });
 
   it('引擎叫停：停掉进程，判 stopped', async () => {
@@ -207,7 +218,7 @@ describe('runClaudeCode', () => {
 
   it.skipIf(!onPosix)('不理 SIGTERM 的进程，宽限期过后 SIGKILL', async () => {
     const report = await runClaudeCode(
-      spec('cc-haiku-read', { limits: { startupMs: 5_000, wallClockMs: 500, killGraceMs: 300 } }),
+      spec('cc-haiku-read', { limits: { startupMs: 10_000, wallClockMs: 3_000, killGraceMs: 300 } }),
       {
         command: fakeAgent({
           replay: fixturePath('claude-code', 'cc-haiku-read'),
@@ -231,7 +242,7 @@ describe('runClaudeCode', () => {
       }),
     });
     expect(report.stragglers).toBe(true);
-    expect(pidAlive(Number(readFileSync(pidFile, 'utf8')))).toBe(false);
+    expect(await waitGone(Number(readFileSync(pidFile, 'utf8')))).toBe(true);
     expect(report.wallMs).toBeLessThan(5_000);
     expect(judgeClaudeRun(report).outcome).toBe('ok');
   });
