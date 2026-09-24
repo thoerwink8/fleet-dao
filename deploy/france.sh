@@ -3,7 +3,8 @@
 # 法国机器装机（以 root 跑；幂等：跑第二遍什么都不变）。装的是：引擎用户 fleet 与两个会话专用用户、目录、
 # PostgreSQL 16（Ubuntu 自带的源，吃得到自动安全更新）、Temporal 服务端 1.32.0（Postgres 持久化，端口和旧系统错开）、
 # 本机上只许 root 和 fleet 连 Temporal 与库的 nft 表、AI 会话资源池 fleet-agents.slice 与起会话的脚本、
-# fleet 用户的 pnpm（corepack）、WireGuard 客户端（主动连香港，法国不开任何入站端口）。
+# fleet 用户的 pnpm（corepack）、WireGuard 客户端（主动连香港，法国不开任何入站端口）、
+# 应用的本机配置与随机密钥、往香港传驾驶舱静态文件的钥匙。应用本身（引擎、后端、前端）由 deploy/release.sh 发布。
 # 旧系统的服务、端口、文件一概不动。端口表、怎么跑、怎么看健康、怎么回滚：docs/ops.md。
 #   bash deploy/france.sh           装：缺的补上，已有的不动
 #   bash deploy/france.sh --check   只读回和自检，不改任何东西
@@ -63,6 +64,16 @@ TEMPORAL_HOME=/opt/fleet-dao/temporal
 TEMPORAL_ENV=/etc/fleet-dao/temporal.env
 TEMPORAL_CONFIG=/etc/fleet-dao/temporal.yaml
 PG_UNIT=postgresql@$PG_MAJOR-main.service
+# 应用：每一版装在 /srv/fleet-dao-releases/<提交号>（deploy/release.sh）。本机配置从仓里的样例建一次，之后只读不写
+RELEASES_DIR=/srv/fleet-dao-releases
+APP_ENV_FILES=(engine api release) # /etc/fleet-dao/<名>.env ← deploy/france/<名>.env.example
+# 随机密钥（文件:键:用途），首次生成后不再动。gateway-token.env 香港也要放同一份（docs/ops.md 第九节）
+APP_SECRETS=("agent-token:FLEET_AGENT_TOKEN_SECRET:签 fleet 通行证（引擎签、后端验）"
+  "session-secret:FLEET_SESSION_SECRET:驾驶舱登录的 Cookie"
+  "gateway-token:FLEET_FEISHU_GATEWAY_TOKEN:飞书网关的通行证（香港放同一份）")
+# 发布脚本往香港传驾驶舱静态文件用的钥匙（只有 root 读得到），和钉住的香港 sshd 主机钥匙
+WEB_UPLOAD_KEY=/etc/fleet-dao/web-upload.key
+HK_KNOWN_HOSTS=/etc/fleet-dao/hk-known-hosts
 
 FLEET_WG_HK_ENDPOINT=""
 FLEET_WG_HK_PUBLIC_KEY=""
@@ -118,8 +129,10 @@ setup_identity() {
   step "用户与目录"
   ensure_service_user fleet /home/fleet
   ensure_dir /home/fleet fleet:fleet 750
-  # 代码归 root、fleet 只读：以 fleet 身份跑的 AI 会话改不了引擎自己的代码
+  # 代码归 root、fleet 只读：以 fleet 身份跑的 AI 会话改不了引擎自己的代码。/srv/fleet-dao 是装机脚本所在的检出，
+  # 应用的各版在 /srv/fleet-dao-releases（发布脚本建，构建完才换成 root 的）
   ensure_dir /srv/fleet-dao root:root 755
+  ensure_dir "$RELEASES_DIR" root:root 755
   ensure_dir /var/lib/fleet-dao fleet:fleet 750
   ensure_dir /var/log/fleet-dao fleet:fleet 750
   ensure_dir /etc/fleet-dao root:fleet 750
@@ -153,7 +166,8 @@ setup_packages() {
   remove_legacy /etc/apt/keyrings/pgdg.asc "早先加的 PGDG 签名公钥"
   removed=$((removed || WROTE))
   if ((removed)); then APT_UPDATED=0; fi
-  ensure_pkgs "postgresql-$PG_MAJOR" wireguard-tools nftables
+  # rsync、openssh-client：发布脚本经隧道往香港传驾驶舱静态文件
+  ensure_pkgs "postgresql-$PG_MAJOR" wireguard-tools nftables rsync openssh-client
 }
 
 setup_wireguard() {
@@ -525,6 +539,63 @@ setup_pnpm() {
   changed "fleet 用户装 pnpm $ver（corepack，垫片在 /home/fleet/.local/bin）"
 }
 
+setup_app_config() {
+  step "应用的本机配置（/etc/fleet-dao 下的环境文件；应用本身由 deploy/release.sh 发布）"
+  local name spec file key what
+  # 样例只在第一次照着建：之后这些文件归人改（填飞书、GitHub 的凭据，选本机起哪些服务），脚本只管属主和权限
+  for name in "${APP_ENV_FILES[@]}"; do
+    file=/etc/fleet-dao/$name.env
+    if [[ -e "$file" ]]; then
+      fix_meta "$file" root:fleet 640
+    else
+      put_file "$file" root:fleet 640 "$(<"$DEPLOY_DIR/france/$name.env.example")"
+    fi
+  done
+  # 随机密钥：首次生成，之后不再动（换了会让已发出的登录、通行证全部作废；真要换就删掉文件再跑）。值不进日志
+  for spec in "${APP_SECRETS[@]}"; do
+    IFS=: read -r name key what <<<"$spec"
+    file=/etc/fleet-dao/$name.env
+    if [[ -s "$file" ]]; then
+      fix_meta "$file" root:fleet 640
+    else
+      put_file "$file" root:fleet 640 "# $what。deploy/france.sh 首次生成的随机值，之后不再动；不进 git，别打印。
+$key=$(openssl rand -hex 32)"
+    fi
+  done
+}
+
+setup_web_upload() {
+  step "往香港传驾驶舱静态文件的钥匙（发布脚本用；香港只许它经隧道往 /srv/fleet-dao-web 写）"
+  local line re
+  if [[ ! -s "$WEB_UPLOAD_KEY" ]]; then
+    rm -f -- "$WEB_UPLOAD_KEY" "$WEB_UPLOAD_KEY.pub"
+    ssh-keygen -q -t ed25519 -N '' -C fleet-dao-web-upload -f "$WEB_UPLOAD_KEY" >/dev/null
+    # 公钥随时能从私钥导出，不另存一份
+    rm -f -- "$WEB_UPLOAD_KEY.pub"
+    changed "生成上传钥匙 $WEB_UPLOAD_KEY"
+  fi
+  fix_meta "$WEB_UPLOAD_KEY" root:root 600
+  echo "  上传钥匙的公钥：$(ssh-keygen -y -f "$WEB_UPLOAD_KEY")（整行填进香港 /etc/fleet-dao/hk.env 的 FLEET_WEB_UPLOAD_PUBLIC_KEY）"
+  # 香港 sshd 的主机钥匙：经隧道取（隧道两头靠 WireGuard 钥匙互认，那头只可能是香港），钉住之后只认这一把
+  if [[ -s "$HK_KNOWN_HOSTS" ]]; then
+    fix_meta "$HK_KNOWN_HOSTS" root:root 600
+    return 0
+  fi
+  if ! ping -c 1 -W 2 -q "$WG_HK_ADDR" >/dev/null 2>&1; then
+    # 读回那一步会记「待配」
+    echo "  隧道还没通，香港 sshd 的主机钥匙等隧道通了再取"
+    return 0
+  fi
+  line=$(ssh-keyscan -T 5 -t ed25519 "$WG_HK_ADDR" 2>/dev/null) || line=""
+  re="^${WG_HK_ADDR//./\\.} ssh-ed25519 [A-Za-z0-9+/]+=*$"
+  if [[ ! "$line" =~ $re ]]; then
+    red "经隧道取不到香港 sshd 的主机钥匙（读到「${line:0:80}」）"
+    return 1
+  fi
+  put_file "$HK_KNOWN_HOSTS" root:root 600 "# 香港 sshd 的主机钥匙：deploy/france.sh 经隧道取的。发布脚本往香港传静态文件时只认这一把；香港真换了主机钥匙就删掉本文件重跑。
+$line"
+}
+
 readback() {
   step "读回"
   readback_secrets_dir
@@ -537,7 +608,69 @@ readback() {
   readback_pnpm
   readback_wireguard
   readback_firewall
+  readback_app_config
+  readback_web_upload
   readback_service_home
+}
+
+# 应用的环境文件都在、属主权限对；随机密钥是生成的样子、互不相同（后端要求）。只比对，不打印值
+readback_app_config() {
+  local name spec file key what bad=0 values=() v
+  for name in "${APP_ENV_FILES[@]}"; do
+    if [[ ! -f "/etc/fleet-dao/$name.env" ]]; then
+      red "没有 /etc/fleet-dao/$name.env"
+      bad=1
+    fi
+  done
+  for spec in "${APP_SECRETS[@]}"; do
+    IFS=: read -r name key what <<<"$spec"
+    file=/etc/fleet-dao/$name.env
+    v=$(read_secret "$file" "$key" 2>/dev/null) || v=""
+    if [[ ! "$v" =~ ^[0-9a-f]{64}$ ]]; then
+      red "$file 里的 $key 不是装机脚本生成的样子（64 位十六进制）"
+      bad=1
+    fi
+    values+=("$v")
+  done
+  if [[ "${values[0]}" == "${values[1]}" || "${values[0]}" == "${values[2]}" || "${values[1]}" == "${values[2]}" ]]; then
+    red "三个随机密钥有两个一样：后端会拒绝启动"
+    bad=1
+  fi
+  if ((bad == 0)); then ok "应用的环境文件都在（${APP_ENV_FILES[*]}），三个随机密钥已生成、互不相同（值不打印）"; fi
+}
+
+# 只当数据读一个键（不 source）：值只进变量，不进日志
+read_secret() { # 文件 键
+  local line
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" == "$2="* ]]; then
+      printf '%s' "${line#*=}"
+      return 0
+    fi
+  done <"$1"
+}
+
+# 往香港传静态文件的通路：用发布脚本同一套参数试跑一次 rsync（-n，什么都不传）
+readback_web_upload() {
+  local empty rc=0 out
+  if [[ ! -s "$WEB_UPLOAD_KEY" ]]; then
+    red "没有上传钥匙 $WEB_UPLOAD_KEY"
+    return 0
+  fi
+  if [[ ! -s "$HK_KNOWN_HOSTS" ]]; then
+    pending "还没钉住香港 sshd 的主机钥匙（隧道通了再跑一遍 france.sh）"
+    return 0
+  fi
+  empty=$(mktemp -d)
+  out=$(rsync -n -r -e "$(web_upload_ssh "$WEB_UPLOAD_KEY" "$HK_KNOWN_HOSTS")" "$empty/" "root@$WG_HK_ADDR:/" 2>&1) || rc=$?
+  rmdir -- "$empty"
+  if ((rc == 0)); then
+    ok "法国经隧道往香港 /srv/fleet-dao-web 传文件的通路是通的（试跑，没传东西）"
+  elif [[ "$out" == *"Permission denied"* ]]; then
+    pending "香港还没认这把上传钥匙：把上面打印的公钥填进香港 hk.env 的 FLEET_WEB_UPLOAD_PUBLIC_KEY，重跑 hk.sh"
+  else
+    red "试着往香港传文件没成（rsync 退出码 $rc）：$(tail -2 <<<"$out" | tr '\n' ' ')"
+  fi
 }
 
 # 会话用户：没有 sudo、只在自己的组里、家里没有 GitHub 凭据；reclaude 登录要创始人在浏览器里点，没登录记「待配」
@@ -631,7 +764,7 @@ readback_firewall() {
 
 readback_dirs() {
   local spec path want have bad=0
-  for spec in "/srv/fleet-dao root:root 755" "/var/lib/fleet-dao fleet:fleet 750" "/var/log/fleet-dao fleet:fleet 750" \
+  for spec in "/srv/fleet-dao root:root 755" "$RELEASES_DIR root:root 755" "/var/lib/fleet-dao fleet:fleet 750" "/var/log/fleet-dao fleet:fleet 750" \
     "/opt/fleet-dao root:root 755" "/home/fleet fleet:fleet 750" "$TEMPORAL_ENV root:fleet 640" "$TEMPORAL_CONFIG root:fleet 640"; do
     path=${spec%% *}
     want=${spec#* }
@@ -771,6 +904,8 @@ main() {
     setup_slice
     setup_firewall
     setup_pnpm
+    setup_app_config
+    setup_web_upload
   else
     load_config
   fi

@@ -1,0 +1,31 @@
+# fleet-dao 引擎工人（Temporal worker）。deploy/release.sh 从要发布的那个提交里取这份，装到 /etc/systemd/system/；
+# 代码在 /srv/fleet-dao-releases/current（归 root，fleet 只读）。改这份、再发布一次，别在机器上手改。
+# 本机配置：/etc/fleet-dao/engine.env（样例 deploy/france/engine.env.example）、agent-token.env（france.sh 生成）。
+[Unit]
+Description=fleet-dao 引擎工人（Temporal worker）
+Documentation=https://github.com/thoerwink8/fleet-dao/blob/main/docs/ops.md
+After=network-online.target fleet-temporal.service postgresql@16-main.service
+Wants=network-online.target
+# Temporal 长时间起不来也一直重试，不在几次失败后放弃
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=fleet
+Group=fleet
+WorkingDirectory=/srv/fleet-dao-releases/current
+EnvironmentFile=/etc/fleet-dao/agent-token.env
+EnvironmentFile=/etc/fleet-dao/engine.env
+ExecStart=/usr/bin/node /srv/fleet-dao-releases/current/packages/engine/src/main.ts
+# always：干净退出也拉起来，on-failure 不管这种情况
+Restart=always
+RestartSec=5
+# 停机时引擎给在途活动收尾（FLEET_SHUTDOWN_GRACE_SECONDS，默认 30 秒），这里多留一些
+TimeoutStopSec=90
+LimitNOFILE=65536
+# 不开 NoNewPrivileges：引擎经 sudo 调 fleet-agent-scope 起 AI 会话，sudo 是 setuid 程序，开了就提不了权。
+# 也不开 ProtectSystem、ProtectHome、PrivateTmp 这类挂载隔离和能力收缩：会话是引擎的子进程，挪进自己的 scope 也还在
+# 引擎的挂载空间里，开了会话就看不见自己的家目录、写不了工作树。会话的隔离靠会话用户、nft 表和 scope 的上限（docs/ops.md 第五节）。
+
+[Install]
+WantedBy=multi-user.target

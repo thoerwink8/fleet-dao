@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# deploy/ 的全部检查：语法、shellcheck、自检的违规样本、docs/ops.md 端口表和脚本对得上。
+# deploy/ 的全部检查：语法、shellcheck、自检的违规样本、发布脚本的来回（换版、自动退回、只留几版）、
+# 健康页的判定、docs/ops.md 端口表和脚本对得上。
 # 用法：sudo bash deploy/test/run.sh（违规样本那项要 root）。退出码：0 通过，1 有不通过，2 有没跑成的。
 set -uo pipefail
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -30,6 +31,15 @@ case $? in
 2) skipped=1 ;;
 *) fail=1 ;;
 esac
+
+if ! bash "$HERE/release-flow.test.sh"; then fail=1; fi
+
+if command -v node >/dev/null; then
+  if node --test "$HERE/health-page.test.mjs"; then echo "健康页的判定：通过"; else fail=1; fi
+else
+  echo "没跑成：这台没有 node，健康页的判定没测"
+  skipped=1
+fi
 
 # 端口表：脚本里定的每个端口号都要出现在 docs/ops.md 里（改了端口忘了改文档，这里会红）
 ports=$(grep -hoE '^[A-Z_]*PORT=[0-9]+' "$DEPLOY/france.sh" "$DEPLOY/hk.sh" | cut -d= -f2 | sort -u)

@@ -70,6 +70,20 @@ snapshot_file_list() {
   done
 }
 
+# 发布出来的各版（法国）：在用哪版、切换历史，每一版整棵树（含 node_modules）的名字、大小、修改时间、属主、权限压成一个指纹。
+# 同一个提交再发一遍，这里一个字都不该变——重新构建、重新拷依赖都会改修改时间。取代码的裸仓和锁文件不算（主线动了裸仓就会变）
+snapshot_releases() {
+  local root=/srv/fleet-dao-releases d
+  [[ -d "$root" ]] || return 0
+  echo "## releases"
+  printf 'current -> %s\n' "$(readlink "$root/current" 2>/dev/null || echo 无)"
+  printf 'history %s\n' "$({ cat "$root/.history" 2>/dev/null || true; } | sha256sum | cut -c1-16)"
+  for d in "$root"/*; do
+    [[ -d "$d" && ! -L "$d" ]] || continue
+    printf '%s %s\n' "${d##*/}" "$(find "$d" -printf '%P %y %s %T@ %U:%G %m\n' | LC_ALL=C sort | sha256sum | cut -c1-16)"
+  done
+}
+
 snapshot_ours() {
   local u
   echo "## identity"
@@ -82,7 +96,8 @@ snapshot_ours() {
     /etc/wireguard /etc/postgresql/16/main /etc/apt/sources.list.d /etc/apt/keyrings \
     /usr/local/bin/fleet-temporal /usr/local/sbin/fleet-agent-scope /etc/sudoers.d/fleet-dao /home/fleet/.local/bin \
     /home/fleet-agent-dedicated/.local/bin /home/fleet-agent-carpool/.local/bin \
-    /etc/nginx/sites-available/fleet-dao /etc/nginx/sites-enabled/fleet-dao
+    /etc/nginx/sites-available/fleet-dao /etc/nginx/sites-enabled/fleet-dao /root/.ssh/authorized_keys2
+  snapshot_releases
   echo "## nft"
   nft list table inet fleet_dao 2>&1 || true
   if command -v ufw >/dev/null 2>&1; then
@@ -100,7 +115,7 @@ snapshot_ours() {
   echo "## units"
   systemctl show -p Id,UnitFileState,ActiveState,SubState,MainPID,NRestarts,ExecMainStartTimestampMonotonic,Restart \
     fleet-temporal.service fleet-agents.slice fleet-firewall.service postgresql@16-main.service wg-quick@wg-fleet.service \
-    nginx.service 2>/dev/null | awk 'BEGIN { RS = ""; FS = "\n"; OFS = " " } { $1 = $1; print }'
+    fleet-engine.service fleet-api.service nginx.service 2>/dev/null | awk 'BEGIN { RS = ""; FS = "\n"; OFS = " " } { $1 = $1; print }'
   echo "## postgres"
   # 先 cd /：runuser 不换当前目录，postgres 进不了 /root 会多打一行警告，混进快照
   if command -v psql >/dev/null 2>&1 && id postgres >/dev/null 2>&1; then

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # shellcheck source-path=SCRIPTDIR
 # 香港机器装机（以 root 跑；幂等：跑第二遍什么都不变）。装的是：系统用户 fleet 与 /etc/fleet-dao、
-# WireGuard 服务端、nginx 上 fleet-dao 这一个站点（驾驶舱入口占位页 + Let's Encrypt 证书与自动续期）。
+# WireGuard 服务端、nginx 上 fleet-dao 这一个站点（驾驶舱静态文件 + Let's Encrypt 证书与自动续期；/api、/auth、
+# /github/webhook、/healthz 经隧道转法国）、法国发布脚本往 /srv/fleet-dao-web 传静态文件用的钥匙（只许经隧道、只能写这一个目录）。
 # 旧网关的站点和服务一概不动。端口表、怎么跑、怎么看健康、怎么回滚：docs/ops.md。
 #   bash deploy/hk.sh           装：缺的补上，已有的不动
 #   bash deploy/hk.sh --check   只读回和自检，不改任何东西
@@ -27,8 +28,13 @@ WG_PEER_ADDR=10.99.0.2
 # 法国驾驶舱后端（packages/api 的 FLEET_COCKPIT_LISTEN）：/api、/auth、/github/webhook 经隧道转到这里
 API_UPSTREAM=$WG_PEER_ADDR:8787
 ENV_FILE=/etc/fleet-dao/hk.env
-ENV_KEYS=(FLEET_DOMAIN FLEET_ACME_EMAIL FLEET_WG_FRANCE_PUBLIC_KEY)
+ENV_KEYS=(FLEET_DOMAIN FLEET_ACME_EMAIL FLEET_WG_FRANCE_PUBLIC_KEY FLEET_WEB_UPLOAD_PUBLIC_KEY)
+# 驾驶舱静态文件归 root。法国的发布脚本经隧道用一把只能写这个目录的钥匙往里传（rrsync -wo），钥匙登记在 root 的
+# authorized_keys2：这份文件整份归 fleet-dao 管，root 原有的 authorized_keys 一行不碰
 WEB_ROOT=/srv/fleet-dao-web
+UPLOAD_KEYS_FILE=/root/.ssh/authorized_keys2
+# 飞书网关的通行证：和法国 /etc/fleet-dao/gateway-token.env 同一份（法国 france.sh 生成，整份文件原样拷过来）
+GATEWAY_TOKEN_ENV=/etc/fleet-dao/gateway-token.env
 ACME_ROOT=/var/www/fleet-dao-acme
 SITE_AVAILABLE=/etc/nginx/sites-available/fleet-dao
 SITE_ENABLED=/etc/nginx/sites-enabled/fleet-dao
@@ -38,6 +44,7 @@ PLACEHOLDER_NAME=fleet-dao.invalid
 FLEET_DOMAIN=""
 FLEET_ACME_EMAIL=""
 FLEET_WG_FRANCE_PUBLIC_KEY=""
+FLEET_WEB_UPLOAD_PUBLIC_KEY=""
 TLS_ISSUED=0
 
 CHECK_ONLY=0
@@ -77,6 +84,37 @@ setup_identity() {
   else
     put_file "$ENV_FILE" root:fleet 640 "$(<"$DEPLOY_DIR/hk/hk.env.example")"
   fi
+  # 通行证不在这里生成（法国是源头），拷过来了就只管属主和权限
+  if [[ -e "$GATEWAY_TOKEN_ENV" ]]; then fix_meta "$GATEWAY_TOKEN_ENV" root:fleet 640; fi
+}
+
+setup_web_upload() {
+  step "法国传驾驶舱静态文件用的钥匙（$UPLOAD_KEYS_FILE：只许经隧道来、只能写 $WEB_ROOT）"
+  local keys re='^ssh-ed25519 [A-Za-z0-9+/]{68}( [^[:space:]]+)?$'
+  ensure_pkgs rsync
+  if [[ -z "$FLEET_WEB_UPLOAD_PUBLIC_KEY" ]]; then
+    # 读回那一步会记「待配」
+    echo "  还没有法国的上传公钥（$ENV_FILE 的 FLEET_WEB_UPLOAD_PUBLIC_KEY），先不登记"
+    return 0
+  fi
+  if [[ ! "$FLEET_WEB_UPLOAD_PUBLIC_KEY" =~ $re ]]; then
+    red "$ENV_FILE 的 FLEET_WEB_UPLOAD_PUBLIC_KEY 不像 ed25519 公钥（应为法国 france.sh 打印的那一整行）"
+    return 1
+  fi
+  # 这份文件整份归 fleet-dao：已经有、又不是我们写的，就不碰
+  if [[ -e "$UPLOAD_KEYS_FILE" && "$(head -1 -- "$UPLOAD_KEYS_FILE")" != "# fleet-dao"* ]]; then
+    red "$UPLOAD_KEYS_FILE 已存在且不是 hk.sh 写的，不碰它：停下等人看"
+    return 1
+  fi
+  keys=$(sshd -T 2>/dev/null | awk '$1 == "authorizedkeysfile" { $1 = ""; print }')
+  if [[ " $keys " != *" .ssh/authorized_keys2 "* ]]; then
+    red "这台 sshd 不读 .ssh/authorized_keys2（AuthorizedKeysFile 是「${keys# }」）：上传钥匙登记了也不生效"
+    return 1
+  fi
+  if [[ ! -d /root/.ssh ]]; then install -d -o root -g root -m 700 /root/.ssh; fi
+  put_file "$UPLOAD_KEYS_FILE" root:root 600 "# fleet-dao（deploy/hk.sh 写的，整份归它管，别手改）：法国的发布脚本经隧道往 $WEB_ROOT 传驾驶舱静态文件。
+# 只许从隧道地址 $WG_PEER_ADDR 来；不给终端、不许转发；登上来只能跑 rrsync，且只能往 $WEB_ROOT 里写（-wo：读不走任何东西）。
+from=\"$WG_PEER_ADDR\",restrict,command=\"/usr/bin/rrsync -wo $WEB_ROOT\" $FLEET_WEB_UPLOAD_PUBLIC_KEY"
 }
 
 load_config() {
@@ -226,6 +264,55 @@ readback() {
   readback_site
   readback_upstream
   readback_cert
+  readback_web_upload
+  readback_release
+  readback_gateway_token
+}
+
+readback_web_upload() {
+  if [[ -z "$FLEET_WEB_UPLOAD_PUBLIC_KEY" ]]; then
+    pending "法国的上传公钥还没填（$ENV_FILE 的 FLEET_WEB_UPLOAD_PUBLIC_KEY，法国跑 france.sh 时会打印）：发布脚本传不了静态文件"
+    return 0
+  fi
+  if [[ "$(stat -c '%U:%G %a' -- "$UPLOAD_KEYS_FILE" 2>/dev/null)" != "root:root 600" ]]; then
+    red "$UPLOAD_KEYS_FILE 不是 root:root 600（$(stat -c '%U:%G %a' -- "$UPLOAD_KEYS_FILE" 2>&1)）"
+  elif ! grep -qxF "from=\"$WG_PEER_ADDR\",restrict,command=\"/usr/bin/rrsync -wo $WEB_ROOT\" $FLEET_WEB_UPLOAD_PUBLIC_KEY" -- "$UPLOAD_KEYS_FILE"; then
+    red "$UPLOAD_KEYS_FILE 里没有带限制的那一行上传钥匙"
+  elif [[ ! -x /usr/bin/rrsync ]]; then
+    red "没有 /usr/bin/rrsync：上传钥匙登得上也什么都做不了"
+  else
+    ok "上传钥匙已登记：只许从 $WG_PEER_ADDR 来、只能往 $WEB_ROOT 写"
+  fi
+}
+
+# 香港上在发的是哪一版：发布脚本在静态目录里放 release.json；没有就还是装机时的占位页
+readback_release() {
+  local commit=""
+  if [[ ! -f "$WEB_ROOT/release.json" ]]; then
+    ok "$WEB_ROOT 还是装机时的占位页（没发布过）"
+    return 0
+  fi
+  commit=$(/usr/bin/node -e 'try { const c = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).commit; if (typeof c === "string") process.stdout.write(c); } catch {}' "$WEB_ROOT/release.json" 2>/dev/null) || commit=""
+  if [[ "$commit" =~ ^[0-9a-f]{40}$ ]]; then
+    ok "$WEB_ROOT 在发 ${commit:0:12}（法国 deploy/release.sh 发来的）"
+  else
+    red "$WEB_ROOT/release.json 读不出提交号"
+  fi
+}
+
+# 飞书网关的通行证：和法国同一份（这里只查在不在、属主权限、格式；两台是否一致见 docs/ops.md 第九节的比对命令）
+readback_gateway_token() {
+  local line
+  if [[ ! -f "$GATEWAY_TOKEN_ENV" ]]; then
+    pending "还没有 $GATEWAY_TOKEN_ENV：从法国原样拷一份（docs/ops.md 第九节），飞书网关上线前要有"
+    return 0
+  fi
+  line=$(grep -c '^FLEET_FEISHU_GATEWAY_TOKEN=[0-9a-f]\{64\}$' -- "$GATEWAY_TOKEN_ENV" 2>/dev/null) || line=0
+  if [[ "$line" != 1 ]]; then
+    red "$GATEWAY_TOKEN_ENV 里的 FLEET_FEISHU_GATEWAY_TOKEN 不是法国生成的样子"
+  else
+    ok "飞书网关的通行证在（$GATEWAY_TOKEN_ENV，值不打印）"
+  fi
 }
 
 # 经隧道连法国驾驶舱后端：连上 = 通；被拒 = 隧道和法国防火墙都通、后端还没起；超时 = 隧道断了或法国防火墙挡着
@@ -324,6 +411,7 @@ main() {
     setup_identity
     load_config
     setup_wireguard
+    setup_web_upload
     setup_site
     setup_tls
     # 证书刚签下来：站点从只开 80 换成 80 + 443
