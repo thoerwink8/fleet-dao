@@ -60,7 +60,7 @@ for user in "${SESSION_USERS[@]}"; do
     cg=/sys/fs/cgroup$(systemctl show -p ControlGroup --value "fleet-agent-$id.scope")
     if [[ "$(ps -o user:32= -p "$pid" | tr -d ' ')" == "$user" ]]; then pass "$user：会话进程 $pid 的身份对"; else flunk "$user：会话进程身份是「$(ps -o user:32= -p "$pid")」"; fi
     if [[ "$(awk '/^Groups:/ { $1 = ""; print }' "/proc/$pid/status" | xargs)" == "$(id -g "$user")" ]]; then
-      pass "$user：只在自己的组里（不带 root 组、不在 orca 组）"
+      pass "$user：只在自己的组里（不带 root 组、不在别人的组里）"
     else
       flunk "$user：附加组是「$(awk '/^Groups:/' "/proc/$pid/status")」"
     fi
@@ -187,7 +187,9 @@ echo "== 5. 不该放行的"
 if as_fleet sudo -n "$BIN" run "$TAG-bad" --user "$U" -- sleep 1 2>/dev/null; then flunk "相对路径的命令被放行了"; else pass "相对路径的命令被拒"; fi
 if as_fleet sudo -n "$BIN" run "../x" --user "$U" -- /bin/true 2>/dev/null; then flunk "带 ../ 的编号被放行了"; else pass "带 ../ 的编号被拒"; fi
 if as_fleet sudo -n "$BIN" run "$TAG-cwd" --user "$U" --cwd /root -- /bin/true 2>/dev/null; then flunk "会话用户进不去的目录被放行了"; else pass "会话用户进不去的 --cwd /root 被拒"; fi
-if as_fleet sudo -n "$BIN" run "$TAG-orca" --user orca -- /bin/true 2>/dev/null; then flunk "--user orca 被放行了"; else pass "--user 只认两个会话用户（orca 被拒）"; fi
+for other in root nobody; do
+  if as_fleet sudo -n "$BIN" run "$TAG-$other" --user "$other" -- /bin/true 2>/dev/null; then flunk "--user $other 被放行了"; else pass "--user 只认两个会话用户（$other 被拒）"; fi
+done
 if as_fleet sudo -n "$BIN" run "$TAG-nouser" -- /bin/true 2>/dev/null; then flunk "没给 --user 也放行了"; else pass "没给 --user 被拒"; fi
 if as_fleet sudo -n /bin/true 2>/dev/null; then flunk "fleet 能 sudo 别的命令"; else pass "fleet 不能 sudo 别的命令"; fi
 

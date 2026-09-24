@@ -53,7 +53,7 @@ API_PORT=8787
 PROTECTED_PORTS=("$PG_PORT" "${TEMPORAL_PORTS[@]}" "$API_PORT")
 NFT_FILE=/etc/fleet-dao/nftables.nft
 # AI 会话跑在两个专用用户下，各挂一个 reclaude 组织、永不切号（独享、拼车）；引擎（fleet）经 sudo 只能调 fleet-agent-scope 起会话。
-# 会话用户：没有 sudo、不能提权、家目录干净、没有 GitHub 凭据、读不到 /etc/fleet-dao。旧系统的 orca 不用、不碰。
+# 会话用户：没有 sudo、不能提权、家目录干净、没有 GitHub 凭据、读不到 /etc/fleet-dao。旧系统的会话用户不用、不碰。
 SESSION_USERS=(fleet-agent-dedicated fleet-agent-carpool)
 WRITER_IDENTITIES=(fleet "${SESSION_USERS[@]}")
 AGENT_SCOPE_BIN=/usr/local/sbin/fleet-agent-scope
@@ -136,7 +136,7 @@ setup_identity() {
   ensure_dir /var/lib/fleet-dao fleet:fleet 750
   ensure_dir /var/log/fleet-dao fleet:fleet 750
   ensure_dir /etc/fleet-dao root:fleet 750
-  # 两个 GitHub 机器人的私钥放这里（root:fleet 640，手放，不进 git）：引擎读得到，会话用户和 orca 读不到
+  # 两个 GitHub 机器人的私钥放这里（root:fleet 640，手放，不进 git）：引擎读得到，会话用户和旧系统的用户读不到
   ensure_dir /etc/fleet-dao/github root:fleet 750
   ensure_dir /opt/fleet-dao root:root 755
   local u

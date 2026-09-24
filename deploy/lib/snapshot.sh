@@ -33,8 +33,8 @@ snapshot_others() {
   fi
   echo "## listening"
   # 只记「协议 地址:端口 进程名」，不记 pid；fleet-dao 自己的进程（temporal-server、postgres）和内核里的 WireGuard 套接字不算。
-  # 临时端口段（ip_local_port_range）里的也不算：那是程序运行中随手要的端口（旧系统的 mirasim-server 开会话时就会
-  # 新开一个，2026-09-25 法国实测），来去跟装机无关；装机真碰了旧服务，单元的状态、主进程、重启次数会变，上面那段照样查得出
+  # 临时端口段（ip_local_port_range）里的也不算：那是程序运行中随手要的端口（旧系统的服务开会话时就会新开一个，
+  # 2026-09-25 法国实测），来去跟装机无关；装机真碰了旧服务，单元的状态、主进程、重启次数会变，上面那段照样查得出
   local eph_lo eph_hi
   read -r eph_lo eph_hi </proc/sys/net/ipv4/ip_local_port_range 2>/dev/null || { eph_lo=65536 eph_hi=65536; }
   ss -H -ltnup 2>/dev/null |
