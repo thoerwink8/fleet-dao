@@ -414,26 +414,21 @@ export async function gate(kit: Kit): Promise<void> {
   await waitFor(kit, 'human', '已暂停，等「继续」', () => condition(() => !kit.control.paused));
 }
 
-/** 挂起并报警：兜底梯的最后一级。等「继续」或「换路由」。 */
+/** 挂起并报警：兜底梯的最后一级。等「继续」或「换路由」。挂起和「在等人」同一刻亮出来，报警在等的里面发。 */
 export async function park(kit: Kit, title: string, detail: string): Promise<void> {
   kit.control.parked = true;
   kit.parkCount += 1;
   kit.view.lastProblem = title;
-  try {
-    await kit.acts.raiseAlert({
-      ...kit.scope,
-      level: 'stuck',
-      title,
-      detail,
-      dedupeKey: `${workflowInfo().workflowId}:park:${kit.parkCount}`,
-    });
-  } catch (error) {
-    if (isCancellation(error)) throw error;
-    log.warn('报警没发出去，照样挂起等人', { title, error: String(error) });
-  }
-  await waitFor(kit, 'human', `挂起：${title}（等「继续」或「换路由」）`, () =>
-    condition(() => !kit.control.parked),
-  );
+  const dedupeKey = `${workflowInfo().workflowId}:park:${kit.parkCount}`;
+  await waitFor(kit, 'human', `挂起：${title}（等「继续」或「换路由」）`, async () => {
+    try {
+      await kit.acts.raiseAlert({ ...kit.scope, level: 'stuck', title, detail, dedupeKey });
+    } catch (error) {
+      if (isCancellation(error)) throw error;
+      log.warn('报警没发出去，照样挂起等人', { title, error: String(error) });
+    }
+    await condition(() => !kit.control.parked);
+  });
 }
 
 /**

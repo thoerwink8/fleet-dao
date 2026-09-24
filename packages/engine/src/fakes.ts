@@ -55,6 +55,8 @@ export interface FakeScript {
   failAfter: Partial<Record<PortName, number>>;
   /** 每次调用先等这么久（测串行、并发用）。 */
   delayMs: Partial<Record<PortName, number>>;
+  /** 这几个端口的调用挂着不返回，直到 releasePort（要控制先后时用它，别赌延时够不够长）。 */
+  holdPorts: PortName[];
   heartbeatMs: number;
   routes: RouteChoice[];
 }
@@ -97,6 +99,8 @@ export interface FakeWorld {
   count(port: PortName): number;
   /** 放行一个挂着的会话。 */
   release(sessionId: string): void;
+  /** 放行 holdPorts 挂着的那个端口（挂着的和以后的调用都不再挂）。 */
+  releasePort(port: PortName): void;
   /** 正挂着、有人在看守的会话。 */
   held(): FakeSession[];
 }
@@ -138,6 +142,7 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
   /** 和真实现一样按 runId 幂等：起过的原样返回，叫停过的不再起。 */
   const byRun = new Map<string, StartSessionResult>();
   const stoppedRuns = new Set<string>();
+  const heldPorts = new Set<PortName>(script.holdPorts ?? []);
   const counters = new Map<string, number>();
   const prByBranch = new Map<string, number>();
   const heartbeatMs = script.heartbeatMs ?? 50;
@@ -369,6 +374,7 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
       const call: FakeCall = { port: name, input, attempt: ctx.attempt, at: Date.now(), end: null, ok: null };
       calls.push(call);
       try {
+        while (heldPorts.has(name) && !ctx.signal.aborted) await pause(heartbeatMs, ctx.signal);
         const delay = script.delayMs?.[name] ?? 0;
         if (delay > 0) await pause(delay, ctx.signal);
         if (ctx.signal.aborted) throw ctx.signal.reason ?? new Error('取消');
@@ -406,6 +412,9 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
     release(sessionId) {
       const s = sessions.get(sessionId);
       if (s) s.released = true;
+    },
+    releasePort(port) {
+      heldPorts.delete(port);
     },
     held: () => [...sessions.values()].filter((s) => s.plan.hold && !s.released && !s.stopped && s.watching),
   };

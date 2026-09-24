@@ -103,13 +103,14 @@ describe('子任务工作流', { timeout: 60_000 }, () => {
   });
 
   it('起会话还没返回时叫停：收尾按 runId 停掉它，后来才做完的起会话不再起进程（不白烧额度）', async () => {
-    const world = createFakeWorld({ delayMs: { startSession: 1_500 } });
+    const world = createFakeWorld({ holdPorts: ['startSession'] });
     const result = await withWorker(env, world, async (q) => {
       const handle = await startSubtask(q);
       await waitUntil(() => world.count('startSession') === 1, '起会话的活动开始了');
       await handle.signal(stopSignal, { by: 'founder' });
       const done = (await handle.result()) as SubtaskResult;
-      // 起会话的活动还在跑：等它做完再关工人，看它有没有真起进程。
+      // 工作流收完尾了，起会话的活动这才做完：看它有没有真起进程。
+      world.releasePort('startSession');
       await waitUntil(() => world.callsOf('startSession')[0]?.end !== null, '起会话的活动做完');
       return done;
     });
