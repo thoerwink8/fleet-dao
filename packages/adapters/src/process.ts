@@ -255,13 +255,13 @@ export function runAgentProcess(
       windowsHide: true,
     });
 
-    let scopeStopping = false;
+    /** 经帮手收 scope 的那一下：收尸要等它落定（systemctl stop 收完才返回），报告里才有它的错。 */
+    let scopeStop: Promise<void> | undefined;
     function terminate(sig: NodeJS.Signals) {
       const pid = child.pid;
-      if (spec.scope && !scopeStopping) {
+      if (spec.scope && !scopeStop) {
         // 会话用户的进程引擎发不了信号：整个 scope 经帮手收（它自己先 SIGTERM、到点 SIGKILL）
-        scopeStopping = true;
-        void stopScope(spec.scope).then((err) => {
+        scopeStop = stopScope(spec.scope).then((err) => {
           if (err) reapErrors.push(err);
         });
       }
@@ -325,25 +325,29 @@ export function runAgentProcess(
         return;
       }
       // 执行体退了：会话里还活着的一律收掉；它们握着 stdout 的话 close 永远等不来
-      void reapSession({
-        runId: spec.runId,
-        ...(spec.scope ? { scope: spec.scope } : {}),
-        ...(child.pid === undefined ? {} : { rootPid: child.pid }),
-        extra: snapshot,
-        graceMs: spec.limits.killGraceMs,
-      }).then(
-        (r) => {
-          reaped = { stragglers: r.found, leftovers: r.leftovers };
-          if (r.error) reapErrors.push(r.error);
-          timers.push(setTimeout(() => finish(), 2_000));
-          maybeFinish();
-        },
-        (err: unknown) => {
-          reaped = { stragglers: 0, leftovers: undefined };
-          reapErrors.push(String(err));
-          finish();
-        },
-      );
+      void Promise.resolve(scopeStop)
+        .then(() =>
+          reapSession({
+            runId: spec.runId,
+            ...(spec.scope ? { scope: spec.scope } : {}),
+            ...(child.pid === undefined ? {} : { rootPid: child.pid }),
+            extra: snapshot,
+            graceMs: spec.limits.killGraceMs,
+          }),
+        )
+        .then(
+          (r) => {
+            reaped = { stragglers: r.found, leftovers: r.leftovers };
+            if (r.error) reapErrors.push(r.error);
+            timers.push(setTimeout(() => finish(), 2_000));
+            maybeFinish();
+          },
+          (err: unknown) => {
+            reaped = { stragglers: 0, leftovers: undefined };
+            reapErrors.push(String(err));
+            finish();
+          },
+        );
     });
     child.on('close', () => {
       closed = true;
