@@ -51,7 +51,9 @@ function fixtureName(method: string, path: string, data: unknown): string | null
   const rules: [RegExp, string][] = [
     [/^GET \/R$/, 'repo'],
     [/^GET \/R\/rules\/branches\/.+$/, 'rules'],
-    [/^GET \/R\/pulls$/, 'pulls-by-branch'],
+    [/^GET \/R\/pulls$/, 'pulls-list'],
+    [/^GET \/R\/issues$/, 'issues-list'],
+    [/^GET \/R\/issues\/comments$/, 'comments-list'],
     [/^POST \/R\/pulls$/, 'pull-created'],
     [/^GET \/R\/pulls\/\d+$/, merged ? 'pull-merged' : 'pull-open'],
     [/^GET \/R\/commits\/[0-9a-f]+\/check-runs$/, 'check-runs'],
@@ -100,27 +102,34 @@ const recordingFetch: typeof fetch = async (input, init) => {
   return res;
 };
 
+// 脱敏分两遍：先收齐所有「编号」字段的真值（账号、机器人、安装、仓……），再把它们在数字和字符串（链接、邮箱）里一起换掉
 const idMap = new Map<number, number>();
+const ID_KEY = /(^|_)id$|Id$/;
+function collectIds(value: unknown, key = ''): void {
+  if (typeof value === 'number') {
+    if (ID_KEY.test(key) && value >= 1000 && !idMap.has(value)) idMap.set(value, 1000 + idMap.size);
+  } else if (Array.isArray(value)) {
+    for (const v of value) collectIds(v, key);
+  } else if (value && typeof value === 'object') {
+    for (const [k, v] of Object.entries(value)) collectIds(v, k);
+  }
+}
+const literal = (s: string) => new RegExp(s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
 function sanitize(value: unknown, key = ''): unknown {
   if (typeof value === 'string') {
     let s = redact(value)
       .replace(
-        /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g,
+        /[A-Za-z0-9._%+\-[\]]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g,
         'someone@example.invalid',
       )
-      .replace(new RegExp(repo.owner.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), 'acme')
-      .replace(new RegExp(repo.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), 'widgets');
+      .replace(literal(repo.owner), 'acme')
+      .replace(literal(repo.name), 'widgets')
+      .replace(/\d{4,}/g, (d) => String(idMap.get(Number(d)) ?? d));
     if (key === 'node_id' || key === 'id' || key === 'pullRequestId')
       s = s.replace(/^[A-Za-z_]+[A-Za-z0-9_=-]{6,}$/, 'NODE_ID');
     return s;
   }
-  if (typeof value === 'number') {
-    if (/(^|_)id$|Id$|^id$/.test(key) && value >= 1000) {
-      if (!idMap.has(value)) idMap.set(value, 1000 + idMap.size);
-      return idMap.get(value);
-    }
-    return value;
-  }
+  if (typeof value === 'number') return ID_KEY.test(key) ? (idMap.get(value) ?? value) : value;
   if (Array.isArray(value)) return value.map((v) => sanitize(v, key));
   if (value && typeof value === 'object') {
     const out: Record<string, unknown> = {};
@@ -343,6 +352,26 @@ try {
     (out) => (out ? `远端还在：${out}` : null),
   );
 
+  // 推之前的两道核对（真 GitHub 上都在推之前拦下，不写任何东西）
+  const refused = async (input: Parameters<GitHub['pushBranch']>[0]) => {
+    try {
+      await github.pushBranch(input);
+      return '推上去了';
+    } catch (e) {
+      return (e as { code?: string }).code ?? String(e);
+    }
+  };
+  await step(
+    '拒绝推主线',
+    () => refused({ repo, worktreePath: tree, branch: 'main', head }),
+    (code) => (code === 'BRANCH_FORBIDDEN' ? null : `应当拒绝，实际：${code}`),
+  );
+  await step(
+    '主线已经前进：旧头不许推（先同步主线）',
+    () => refused({ repo, worktreePath: tree, branch: `${branch}-stale`, head }),
+    (code) => (code === 'BEHIND_MAINLINE' ? null : `应当报 BEHIND_MAINLINE，实际：${code}`),
+  );
+
   // 7. 更新 issue 进度段（「引擎」机器人）：人写的部分原样
   const progress = {
     state: 'running',
@@ -420,6 +449,36 @@ try {
       return r.outcome === 'ok' && byOther.length === 0 ? null : brief(r);
     },
   );
+
+  // 10. 轮询补收（只读）：这次验收产生的 issue、评论、PR 都能按 updated_at 捞回来，逐条交给门
+  const seen: { event: string; deliveryId: string }[] = [];
+  const intake = {
+    ingest: async (i: { deliveryId: string; event: string }) => {
+      seen.push({ event: i.event, deliveryId: i.deliveryId });
+      return { verdict: 'accepted' as const, wake: true };
+    },
+  };
+  const pollId = (r: string, kind: string, id: number | string, at: string) =>
+    `poll:${r}:${kind}:${id}:${at}`;
+  await step(
+    '轮询补收（只读）：捞得回这次的 issue、评论、PR',
+    () => github.reconciler({ intake, pollDeliveryId: pollId }).poll(repoSlug(repo), started),
+    (r) => {
+      const kinds = new Set(seen.map((s) => s.event));
+      const want = ['issues', 'issue_comment', 'pull_request'].filter((k) => !kinds.has(k));
+      return r.outcome === 'ok' && want.length === 0
+        ? null
+        : `outcome=${r.outcome} 缺 ${want.join('、')} ${r.why ?? ''}`;
+    },
+  );
+  await step(
+    '开放 issue 对账（只读）',
+    () =>
+      github
+        .reconciler({ intake, pollDeliveryId: pollId, hasWorkflow: async () => true })
+        .auditOpenIssues(repoSlug(repo)),
+    (r) => (r.outcome === 'ok' ? null : brief(r)),
+  );
 } catch (err) {
   exitCode = 1;
   if (!(err instanceof Error && results.some((r) => err.message.startsWith(r.step)))) {
@@ -438,15 +497,21 @@ try {
 
 if (recordDir) {
   mkdirSync(recordDir, { recursive: true });
+  for (const data of recorded.values()) collectIds(data);
   for (const [name, data] of recorded) {
     writeFileSync(join(recordDir, `${name}.json`), `${JSON.stringify(sanitize(data), null, 2)}\n`);
   }
-  // 录完自查：真账号名、真编号一个都不许留
+  // 录完自查：真账号名、真编号、邮箱、令牌一个都不许留
   for (const name of recorded.keys()) {
     const text = readFileSync(join(recordDir, `${name}.json`), 'utf8');
     const leaks = [
       text.toLowerCase().includes(repo.owner.toLowerCase()) ? '账号名' : '',
       ...[...idMap.keys()].filter((id) => new RegExp(`\\b${id}\\b`).test(text)).map((id) => `编号 ${id}`),
+      ...[...text.matchAll(/[A-Za-z0-9._%+\-[\]]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g)]
+        .map((m) => m[0])
+        .filter((m) => m !== 'someone@example.invalid')
+        .map((m) => `邮箱 ${m}`),
+      /\b(?:ghs|ghp|gho|ghu|ghr)_[A-Za-z0-9_]{8,}|\bgithub_pat_/.test(text) ? '令牌' : '',
     ].filter(Boolean);
     if (leaks.length) {
       console.log(`✗ 夹具 ${name}.json 没脱干净：${leaks.join('、')}（已删除）`);
