@@ -94,6 +94,7 @@ export const toPool = (r: typeof pools.$inferSelect): Pool =>
     channelId: r.channelId,
     maxConcurrency: r.maxConcurrency,
     expiresAt: isoOpt(r.expiresAt),
+    scopeModels: opt(r.scopeModels),
   });
 
 export const toQuotaWindow = (r: typeof quotaWindows.$inferSelect): QuotaWindow =>
@@ -108,6 +109,10 @@ export const toQuotaWindow = (r: typeof quotaWindows.$inferSelect): QuotaWindow 
     upstreamStatus: opt(r.upstreamStatus),
     reading: r.reading,
     readAt: r.readAt.toISOString(),
+    label: r.label,
+    unit: r.unit,
+    source: r.source,
+    statusRaw: opt(r.statusRaw),
   });
 
 export const toModel = (r: typeof models.$inferSelect): Model =>

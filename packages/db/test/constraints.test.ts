@@ -92,29 +92,80 @@ describe('路由与账号池', () => {
 });
 
 describe('额度窗', () => {
-  it('模型组窗口必须写组名，账号级窗口不许写', async () => {
+  const base = {
+    poolId: 'relay-a',
+    reading: 'measured',
+    readAt: NOW,
+    unit: 'percent',
+    source: 'test',
+  } as const;
+
+  it('7d_model 必须写组名；别的窗口也可以只扣一组模型（Cursor 的 auto / api 桶）', async () => {
     await expectViolation(
-      t.db
-        .insert(quotaWindows)
-        .values({ poolId: 'relay-a', window: '7d_model', reading: 'measured', readAt: NOW }),
+      t.db.insert(quotaWindows).values({ ...base, label: '7d_x', window: '7d_model' }),
       'quota_windows_model_scope',
     );
+    await t.db.insert(quotaWindows).values([
+      { ...base, label: 'auto_percent', window: 'other', scope: 'auto' },
+      { ...base, label: 'api_percent', window: 'other', scope: 'api' },
+      { ...base, label: 'plan_usd', window: 'month_usd', unit: 'usd' },
+    ]);
+  });
+
+  it('同一池里按上游原名一行：同类窗口可以有好几个，原名重复不行', async () => {
+    for (const scope of ['claude', 'fable', 'brand-new-group']) {
+      await t.db.insert(quotaWindows).values({ ...base, label: `7d_${scope}`, window: '7d_model', scope });
+    }
+    await t.db.insert(quotaWindows).values([
+      { ...base, label: 'weekly_all', window: 'other' },
+      { ...base, label: 'on_demand', window: 'other' },
+    ]);
+    const rows = await t.db.select().from(quotaWindows).where(eq(quotaWindows.poolId, 'relay-a'));
+    expect(rows.map((r) => r.label).sort()).toEqual([
+      '7d_brand-new-group',
+      '7d_claude',
+      '7d_fable',
+      'on_demand',
+      'weekly_all',
+    ]);
     await expectViolation(
-      t.db
-        .insert(quotaWindows)
-        .values({ poolId: 'relay-a', window: '7d', scope: 'claude', reading: 'measured', readAt: NOW }),
-      'quota_windows_model_scope',
+      t.db.insert(quotaWindows).values({ ...base, label: 'weekly_all', window: '7d' }),
+      'quota_windows_pool_id_label_pk',
     );
   });
 
-  it('同一池可以同时有几个模型组窗口（包括没见过的组名）', async () => {
-    for (const scope of ['claude', 'fable', 'brand-new-group']) {
-      await t.db
-        .insert(quotaWindows)
-        .values({ poolId: 'relay-a', window: '7d_model', scope, reading: 'measured', readAt: NOW });
-    }
-    const rows = await t.db.select().from(quotaWindows).where(eq(quotaWindows.poolId, 'relay-a'));
-    expect(rows.map((r) => r.scope).sort()).toEqual(['brand-new-group', 'claude', 'fable']);
+  it('原名、读法不许是空串', async () => {
+    await expectViolation(
+      t.db.insert(quotaWindows).values({ ...base, label: '', window: '5h' }),
+      'quota_windows_label_nonempty',
+    );
+    await expectViolation(
+      t.db.insert(quotaWindows).values({ ...base, label: '5h', window: '5h', source: '' }),
+      'quota_windows_source_nonempty',
+    );
+  });
+
+  it('池的成员表每一项是 {in: [模型 id…]} 或 {notIn: [模型 id…]}', async () => {
+    const members = { auto: { in: ['composer-2.5'] }, api: { notIn: ['composer-2.5'] }, spare: { in: [] } };
+    await t.db.update(pools).set({ scopeModels: members }).where(eq(pools.id, 'relay-a'));
+    const [row] = await t.db.select().from(pools).where(eq(pools.id, 'relay-a'));
+    expect(row?.scopeModels).toEqual(members);
+  });
+
+  it.each([
+    '["auto"]',
+    '{"auto": ["x"]}',
+    '{"auto": {}}',
+    '{"auto": {"only": ["x"]}}',
+    '{"auto": {"in": "composer-2.5"}}',
+    '{"auto": {"in": ["x"], "notIn": ["y"]}}',
+    '{"auto": {"in": [1]}}',
+    '{"auto": {"notIn": ["x", null]}}',
+  ])('形状不对的成员表写不进去：%s', async (bad) => {
+    await expectViolation(
+      t.client.query(`update pools set scope_models = $1::jsonb where id = 'relay-a'`, [bad]),
+      'pools_scope_models_shape',
+    );
   });
 });
 

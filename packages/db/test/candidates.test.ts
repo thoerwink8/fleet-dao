@@ -1,6 +1,8 @@
+import { windowAppliesTo } from '@fleet-dao/shared';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { stageCandidates, windowAppliesTo } from '../src/queries/candidates.ts';
+import { stageCandidates } from '../src/queries/candidates.ts';
+import { type StoredQuotaWindow, savePoolQuota } from '../src/queries/quota.ts';
 import { bans, channels, models, pools, stagePolicies } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import {
@@ -131,11 +133,67 @@ describe('某阶段的候选路由', () => {
     ]);
   });
 
-  it('模型组名按族名或模型 id 匹配', () => {
-    expect(windowAppliesTo('', { id: 'opus-5.5', family: 'claude' })).toBe(true);
-    expect(windowAppliesTo('claude', { id: 'opus-5.5', family: 'claude' })).toBe(true);
-    expect(windowAppliesTo('fable', { id: 'claude-fable-5.2', family: 'claude' })).toBe(true);
-    expect(windowAppliesTo('fable', { id: 'opus-5.5', family: 'claude' })).toBe(false);
+  it('模型组名按族名或模型 id 匹配，大小写和分隔符不计较', () => {
+    const opus = { id: 'opus-5.5', family: 'claude' };
+    // 库里账号级窗口的 scope 是空串。
+    expect(windowAppliesTo({ scope: '' }, opus)).toBe(true);
+    expect(windowAppliesTo({ scope: 'claude' }, opus)).toBe(true);
+    expect(windowAppliesTo({ scope: 'fable' }, { id: 'claude-fable-5.2', family: 'claude' })).toBe(true);
+    expect(windowAppliesTo({ scope: 'fable' }, opus)).toBe(false);
+    expect(windowAppliesTo({ scope: 'Opus_5_5' }, opus)).toBe(true);
+  });
+
+  it('池给了成员表就按成员表：in 只扣名单里的，not-in 扣名单外的；表里没有的组照旧按组名', () => {
+    const members = { auto: { in: ['Composer-2'] }, api: { notIn: ['composer_2'] } };
+    const composer = { id: 'composer-2', family: 'cursor' };
+    const opus = { id: 'opus-5.5', family: 'claude' };
+    expect(windowAppliesTo({ scope: 'auto' }, composer, members)).toBe(true);
+    expect(windowAppliesTo({ scope: 'auto' }, opus, members)).toBe(false);
+    expect(windowAppliesTo({ scope: 'api' }, composer, members)).toBe(false);
+    expect(windowAppliesTo({ scope: 'api' }, opus, members)).toBe(true);
+    expect(windowAppliesTo({ scope: 'claude' }, opus, members)).toBe(true);
+    // 没有成员表时，auto / api 这种组名跟哪个模型名都对不上：成员表不入库，Cursor 的桶就卡不住任何路由。
+    expect(windowAppliesTo({ scope: 'auto' }, composer)).toBe(false);
+  });
+
+  it('Cursor 的 auto / api 两个桶按读数带来的成员表卡：auto 满了只挡 Composer，api 满了只挡点名的其它模型', async () => {
+    await t.db.insert(pools).values({ id: 'cursor-a', channelId: 'cursor', maxConcurrency: 2 });
+    await t.db.insert(models).values({ id: 'composer-2', family: 'cursor', displayName: 'Composer 2' });
+    const onCursor = { channelId: 'cursor', poolId: 'cursor-a', hostId: 'cursor-agent' } as const;
+    await addRoute(t.db, { id: 'composer', modelId: 'composer-2', ...onCursor });
+    await addRoute(t.db, { id: 'opus-on-cursor', modelId: 'opus-5.5', ...onCursor });
+    await setStageOrder(t.db, 'execute', ['composer', 'opus-on-cursor']);
+    // 读取器的原样输出：两个桶都归 other，组名 auto / api，成员表来自接口的 autoBucketModels。
+    const read = (used: { auto: number; api: number }, at: Date) =>
+      savePoolQuota(t.db, {
+        poolId: 'cursor-a',
+        readAt: at.toISOString(),
+        scopeModels: { auto: { in: ['composer-2'] }, api: { notIn: ['composer-2'] } },
+        windows: (['auto', 'api'] as const).map(
+          (scope): StoredQuotaWindow => ({
+            poolId: 'cursor-a',
+            label: `${scope}_percent`,
+            window: 'other',
+            scope,
+            used: used[scope],
+            limit: 100,
+            unit: 'percent',
+            reading: 'measured',
+            source: 'cursor-dashboard',
+            readAt: at.toISOString(),
+          }),
+        ),
+      });
+    await read({ auto: 100, api: 30 }, ago(2 * MIN));
+    expect(await summary('execute')).toEqual([
+      ['composer', ['quota-exhausted']],
+      ['opus-on-cursor', []],
+    ]);
+    await read({ auto: 10, api: 100 }, ago(MIN));
+    expect(await summary('execute')).toEqual([
+      ['composer', []],
+      ['opus-on-cursor', ['quota-exhausted']],
+    ]);
   });
 
   it('额度没读成（从没读过、读数过期）不挡，但排在读到了的后面，标 unknown', async () => {

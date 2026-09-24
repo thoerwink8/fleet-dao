@@ -1,3 +1,4 @@
+import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   toBan,
@@ -100,21 +101,32 @@ describe('库里的行 → 领域对象', () => {
     await t.db.insert(quotaWindows).values([
       {
         poolId: 'relay-a',
+        label: '5h',
         window: '5h',
         utilization: 0.2,
+        unit: 'percent',
         resetsAt: later(MIN),
         reading: 'measured',
+        source: 'claude-usage',
         readAt: NOW,
       },
       {
         poolId: 'relay-a',
+        label: '7d_fable',
         window: '7d_model',
         scope: 'fable',
+        unit: 'points',
         upstreamStatus: 'limit_reached',
+        statusRaw: 'limit_reached',
         reading: 'estimated',
+        source: 'estimate',
         readAt: NOW,
       },
     ]);
+    await t.db
+      .update(pools)
+      .set({ scopeModels: { fable: { in: ['fable-5.1'] } } })
+      .where(eq(pools.id, 'relay-a'));
     const [ev] = await t.db
       .insert(progressEvents)
       .values({ runId: run.id, at: NOW, kind: 'say', payload: '好了' })
@@ -161,6 +173,9 @@ describe('库里的行 → 领域对象', () => {
           resetsAt: later(MIN).toISOString(),
           reading: 'measured',
           readAt: NOW.toISOString(),
+          label: '5h',
+          unit: 'percent',
+          source: 'claude-usage',
         },
         {
           poolId: 'relay-a',
@@ -169,6 +184,10 @@ describe('库里的行 → 领域对象', () => {
           upstreamStatus: 'limit_reached',
           reading: 'estimated',
           readAt: NOW.toISOString(),
+          label: '7d_fable',
+          unit: 'points',
+          source: 'estimate',
+          statusRaw: 'limit_reached',
         },
       ]),
     );
@@ -178,11 +197,12 @@ describe('库里的行 → 领域对象', () => {
       kind: 'say',
       payload: '好了',
     });
-    const [pool] = await t.db.select().from(pools);
+    const [pool] = await t.db.select().from(pools).where(eq(pools.id, 'relay-a'));
     expect(toPool(pool as typeof pools.$inferSelect)).toEqual({
       id: 'relay-a',
       channelId: 'relay',
       maxConcurrency: 2,
+      scopeModels: { fable: { in: ['fable-5.1'] } },
     });
     const [model] = (await t.db.select().from(models)).filter((m) => m.id === 'opus-5.5');
     expect(toModel(model as typeof models.$inferSelect)).toEqual({

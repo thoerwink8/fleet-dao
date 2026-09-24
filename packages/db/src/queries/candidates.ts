@@ -1,5 +1,5 @@
 // 某阶段的候选路由：列出该阶段挂的每一条路由，并写明它为什么不能用（被挡的不删，带原因留在表里）。
-import { hardBanFor, type StageKind } from '@fleet-dao/shared';
+import { hardBanFor, type StageKind, windowAppliesTo } from '@fleet-dao/shared';
 import { asc, eq, inArray } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import {
@@ -30,6 +30,7 @@ export type Blocker =
   | 'no-slot';
 
 export interface CandidateWindow {
+  label: string;
   window: (typeof quotaWindows.$inferSelect)['window'];
   scope: string | null;
   state: WindowState;
@@ -48,7 +49,7 @@ export interface RouteCandidate {
   hostId: (typeof routes.$inferSelect)['hostId'];
   /** unknown = 额度没读成：适用的窗口读数过期、已过清零点，或这个池从没读到过额度。派工原因里要写明「额度未知」。 */
   quota: 'ok' | 'exhausted' | 'unknown';
-  /** 这条路由适用的窗口：账号级的，加上组名对得上本模型的模型组窗口。 */
+  /** 这条路由适用的窗口：账号级的，加上扣本模型的模型组窗口（按 shared 的 windowAppliesTo 和池的成员表判）。 */
   windows: CandidateWindow[];
   inFlight: number;
   maxConcurrency: number;
@@ -71,13 +72,6 @@ export interface StageCandidates {
 export interface StageCandidatesOptions {
   now?: Date;
   staleAfterMs?: number;
-}
-
-/** 模型组窗口（scope 非空）只卡组名对得上的模型：族名相同，或模型 id 里含组名。 */
-export function windowAppliesTo(scope: string, model: { id: string; family: string }): boolean {
-  if (scope === '') return true;
-  const s = scope.toLowerCase();
-  return model.family.toLowerCase() === s || model.id.toLowerCase().includes(s);
 }
 
 export async function stageCandidates(
@@ -109,8 +103,9 @@ export async function stageCandidates(
 
   const candidates = rows.map(({ order, route, pool, channel, model }): RouteCandidate => {
     const windows: CandidateWindow[] = windowRows
-      .filter((w) => w.poolId === pool.id && windowAppliesTo(w.scope, model))
+      .filter((w) => w.poolId === pool.id && windowAppliesTo(w, model, pool.scopeModels ?? undefined))
       .map((w) => ({
+        label: w.label,
         window: w.window,
         scope: w.scope === '' ? null : w.scope,
         state: windowState(w, now, staleAfterMs),

@@ -59,13 +59,15 @@ export async function addRoute(
     id: string;
     poolId: string;
     modelId: string;
+    /** 池所在的渠道；catalog 建的两个池都在 relay。 */
+    channelId?: string;
     hostId?: (typeof routes.$inferInsert)['hostId'];
     alive?: boolean;
   },
 ) {
   await db.insert(routes).values({
     id: r.id,
-    channelId: 'relay',
+    channelId: r.channelId ?? 'relay',
     poolId: r.poolId,
     modelId: r.modelId,
     hostId: r.hostId ?? 'claude-code',
@@ -134,6 +136,19 @@ export async function addRun(
   return row;
 }
 
-export async function addWindow(db: Db, w: typeof quotaWindows.$inferInsert) {
-  await db.insert(quotaWindows).values(w);
+type WindowFixture = Omit<typeof quotaWindows.$inferInsert, 'label' | 'unit' | 'source'> &
+  Partial<Pick<typeof quotaWindows.$inferInsert, 'label' | 'unit' | 'source'>>;
+
+/** 一行额度窗。没写的原名按「窗口类型_组名」拼，单位默认百分比，读法记 test。 */
+export async function addWindow(db: Db, w: WindowFixture) {
+  await db.insert(quotaWindows).values(windowRow(w));
+}
+
+export function windowRow(w: WindowFixture): typeof quotaWindows.$inferInsert {
+  return {
+    label: w.scope ? `${w.window}_${w.scope}` : w.window,
+    unit: 'percent',
+    source: 'test',
+    ...w,
+  };
 }

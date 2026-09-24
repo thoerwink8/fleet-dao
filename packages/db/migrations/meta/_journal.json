@@ -15,6 +15,13 @@
       "when": 1790278473748,
       "tag": "0001_triggers",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1790281234677,
+      "tag": "0002_quota_labels",
+      "breakpoints": true
     }
   ]
 }

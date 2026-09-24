@@ -63,8 +63,11 @@ describe('写入即通知 fleet_changes', () => {
     await freshEars();
     await t.db.insert(quotaWindows).values({
       poolId: 'relay-a',
+      label: '7d_fable',
       window: '7d_model',
       scope: 'fable',
+      unit: 'points',
+      source: 'mirasim-relay',
       reading: 'measured',
       readAt: NOW,
     });
@@ -175,9 +178,15 @@ describe('写入即通知 fleet_changes', () => {
     const sub = await addSubtask(t.db, task.id);
     const run = await addRun(t.db, { taskId: task.id, subtaskId: sub.id, routeId: 'r1' });
     await t.db.insert(progressEvents).values({ runId: run.id, kind: 'done', payload: null });
-    await t.db
-      .insert(quotaWindows)
-      .values({ poolId: 'relay-a', window: '5h', reading: 'measured', readAt: NOW });
+    await t.db.insert(quotaWindows).values({
+      poolId: 'relay-a',
+      label: '5h',
+      window: '5h',
+      unit: 'percent',
+      source: 'claude-usage',
+      reading: 'measured',
+      readAt: NOW,
+    });
     await t.db.insert(notifications).values({ level: 'daily', dedupeKey: 'daily:2026-09-25', title: '日报' });
     await t.db.insert(asks).values({ taskId: task.id, runId: run.id, question: '要不要兼容旧接口？' });
     await t.db.insert(stagePolicyRoutes).values({ stage: 'execute', routeId: 'r1', position: 0 });
