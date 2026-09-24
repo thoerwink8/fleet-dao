@@ -1,8 +1,10 @@
 // 停滞判断：按「有没有进展」判，不按报错长什么样判（设计第六节「按进展判死活」、第八节「沉默就催」）。纯函数：时刻由调用方给。
-// 结论是「在等 / 在绕圈 / 死了」之一，没停滞就是 progressing；每个结论带规则编号和依据。
-// 拿不准的（有动静、没推进、又看不出在重复）出一道 Jev 题（停滞预判）；Jev 只能把它判成停滞，不能把停滞判回正常。
+// 结论是「在等 / 在绕圈 / 死了」之一，没停滞就是 progressing；过程记录没读成就是 unscanned（没查成），不当成没动静。
+// 每个结论带规则编号和依据。拿不准的（有动静、没推进、又看不出在重复）出一道 Jev 题（停滞预判）；
+// Jev 只能把它判成停滞，不能把停滞判回正常。
 
 import { type JevQuestion, type JevReply, readJevReply } from './jev.ts';
+import { type Bound, count, fraction, positive, resolvePolicy } from './policy.ts';
 import { duration, excerpt, parseTime } from './scan.ts';
 
 export type StallKind = 'waiting' | 'looping' | 'dead';
@@ -22,8 +24,11 @@ export interface StallFacts {
   now: string;
   /** 会话开始干活的时刻。 */
   startedAt: string;
-  /** 过程记录最后一条新事件（说话、工具、重试帧……任何一条）。 */
-  lastEventAt?: string;
+  /**
+   * 过程记录最后一条新事件（说话、工具、重试帧……任何一条）。null = 读到了，但还没有事件；
+   * 不给 = 过程记录没读成，结论是 unscanned（没查成）——不能当成「一直没动静」把正在干活的会话判死。
+   */
+  lastEventAt?: string | null;
   /** 步骤清单最后一次推进（有一步变成进行中或完成）；执行体不报步骤清单就不给。 */
   lastStepAt?: string;
   /** 最后一次有新提交。 */
@@ -73,10 +78,11 @@ export const DEFAULT_STALL_POLICY: Readonly<StallPolicy> = Object.freeze({
 });
 
 export interface StallVerdict {
-  state: 'progressing' | StallKind;
+  /** unscanned = 过程记录没读成，判不了（没查成），调用方别据此重开会话。 */
+  state: 'progressing' | StallKind | 'unscanned';
   /** state = waiting 时：在等什么。 */
   waitingOn?: 'human' | 'permission' | 'tool' | 'upstream';
-  /** W* = 在等，L* = 在绕圈，D* = 死了，G* = 有进展或拿不准先不动。 */
+  /** W* = 在等，L* = 在绕圈，D* = 死了，G* = 有进展或拿不准先不动，U1 = 没查成。 */
   rule: string;
   /** 依据，一句白话。 */
   basis: string;
@@ -102,10 +108,11 @@ export function judgeStall(facts: StallFacts, policyInput?: Partial<StallPolicy>
     ['waiting.since', facts.waiting?.since],
     ...(facts.toolsInFlight ?? []).map((t, i) => [`toolsInFlight[${i}].since`, t.since] as const),
   ] as const) {
-    if (value !== undefined) mustTime(value, name);
+    if (value !== undefined && value !== null) mustTime(value, name);
   }
-  const ago = (iso: string | undefined) => {
-    const t = parseTime(iso);
+  /** 多少秒前；没有这个时刻（null / 不给）回 undefined。 */
+  const ago = (iso: string | null | undefined) => {
+    const t = parseTime(iso ?? undefined);
     return t === undefined ? undefined : Math.max(0, (now - t) / 1000);
   };
   const since = (iso: string) => ago(iso) ?? 0;
@@ -151,9 +158,22 @@ export function judgeStall(facts: StallFacts, policyInput?: Partial<StallPolicy>
     return waitingOn('upstream', 'W4', `在等上游（${duration(waited)}）${what}`);
   }
 
-  const silent = ago(facts.lastEventAt) ?? since(facts.startedAt);
+  if (facts.lastEventAt === undefined) {
+    return {
+      state: 'unscanned',
+      rule: 'U1',
+      basis: '过程记录没读成，判不了有没有动静（没查成，不是没动静）',
+      via: 'rule',
+    };
+  }
+  // 沉默从最近的一个动静算起：新事件、步骤推进、新提交、改文件，哪个最近算哪个。
+  const silent = Math.min(
+    ...[facts.lastEventAt, facts.lastStepAt, facts.lastCommitAt, facts.lastFileChangeAt, facts.startedAt].map(
+      (t) => ago(t) ?? Number.POSITIVE_INFINITY,
+    ),
+  );
   if (silent >= policy.silentSeconds) {
-    return dead('D5', `过程记录 ${duration(silent)} 没有新事件，也没有工具在跑`);
+    return dead('D5', `${duration(silent)}没有任何动静（新事件、步骤、提交、改文件都没有），也没有工具在跑`);
   }
 
   const hasSteps = facts.lastStepAt !== undefined;
@@ -210,7 +230,7 @@ export function judgeStall(facts: StallFacts, policyInput?: Partial<StallPolicy>
   return {
     state: 'progressing',
     rule: 'G1',
-    basis: `${duration(silent)}前还有新事件，${duration(stuck)}前有推进`,
+    basis: `${duration(silent)}前还有动静，${duration(stuck)}前有推进`,
     via: 'rule',
   };
 }
@@ -257,7 +277,7 @@ function stallQuestion(
 ): JevQuestion<StallChoice> {
   const lines = [
     `会话开始：${facts.startedAt}；现在：${facts.now}`,
-    `${duration(stuckSeconds)}没推进；最近一条事件在 ${duration(silentSeconds)}前`,
+    `${duration(stuckSeconds)}没推进；最近一次动静在 ${duration(silentSeconds)}前`,
     '最近的工具调用（老的在前）：',
     ...(facts.recentTools ?? []).map(
       (t) => `- ${t.name} ${t.summary}${t.ok === undefined ? '' : t.ok ? ' （成功）' : ' （失败）'}`,
@@ -281,12 +301,19 @@ function stallQuestion(
   };
 }
 
+const STALL_POLICY_BOUNDS: { readonly [K in keyof StallPolicy]: Bound } = {
+  silentSeconds: positive,
+  toolMaxSeconds: positive,
+  permissionWaitMaxSeconds: positive,
+  upstreamWaitMaxSeconds: positive,
+  noProgressSeconds: positive,
+  // 至少做两次才叫重复。
+  repeatThreshold: count(2),
+  giveUpSeconds: positive,
+  jevConfidenceFloor: fraction,
+};
+
+/** 缺的取默认值，给了但不对的报错。 */
 export function resolveStallPolicy(partial?: Partial<StallPolicy>): StallPolicy {
-  const out: StallPolicy = { ...DEFAULT_STALL_POLICY };
-  if (!partial) return out;
-  for (const key of Object.keys(DEFAULT_STALL_POLICY) as (keyof StallPolicy)[]) {
-    const value: unknown = partial[key];
-    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) out[key] = value;
-  }
-  return out;
+  return resolvePolicy('停滞判断策略', DEFAULT_STALL_POLICY, STALL_POLICY_BOUNDS, partial);
 }

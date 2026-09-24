@@ -4,7 +4,6 @@ import {
   type AttemptCounters,
   classifyFailure,
   DEFAULT_FAILURE_POLICY,
-  engineClassifier,
   type FailureEvidence,
   type FailurePolicy,
   type FailureVerdict,
@@ -313,7 +312,7 @@ describe('路由健康和原文重复', () => {
   });
 
   it('熔断结果里的 window 直接当路由健康传进来', () => {
-    const empty = routeBreaker([], { now: NOW });
+    const empty = routeBreaker([], { now: NOW, inFlight: 0 });
     expect(empty.window).toEqual({ samples: 0, failures: 0, failureRate: null });
     expect(classifyFailure({ ...NETWORK, routeHealth: empty.window }).action).toBe('retry');
     // 一小时前起的 8 次真实流量：成、败、败交替，没有三连败，失败 5 次（63%）。
@@ -322,7 +321,7 @@ describe('路由健康和原文重复', () => {
       at: minute(n),
       result: n % 3 === 0 ? ('ok' as const) : ('fail' as const),
     }));
-    const sick = routeBreaker(results, { now: NOW });
+    const sick = routeBreaker(results, { now: NOW, inFlight: 0 });
     expect(sick.window).toEqual({ samples: 8, failures: 5, failureRate: 0.625 });
     expect(classifyFailure({ ...NETWORK, routeHealth: sick.window }).action).toBe('swapRoute');
   });
@@ -364,43 +363,82 @@ describe('证据里的时刻读坏了', () => {
 });
 
 describe('喂熔断：哪些算路由的失败', () => {
-  it('上游、网络算；我们自己停的、断流、账号池、任务自己的问题不算', () => {
+  it('上游、网络、认不出的算；我们自己停的、断流、账号池、任务自己的问题、缺原因的不算', () => {
     const outcome = (e: FailureEvidence) => classifyFailure(session(e)).routeOutcome;
     expect(outcome({ message: 'socket hang up' })).toBe('fail');
     expect(outcome({ message: '503 status code (no body)' })).toBe('fail');
+    expect(outcome({ code: 'agent_error', message: 'odd' })).toBe('fail');
     expect(outcome({ code: 'interrupted' })).toBe('neutral');
     expect(outcome({ code: 'incomplete' })).toBe('neutral');
     expect(outcome({ message: 'weekly limit reached' })).toBe('neutral');
     expect(outcome({ code: 'checks-failed' })).toBe('neutral');
-    expect(outcome({ code: 'agent_error', message: 'odd' })).toBe('fail');
+    // 连为什么都不知道，不能拿它判一条路由坏了（errors.md 第 8 节第 11 条）。
+    expect(outcome({ code: 'failed' })).toBe('neutral');
     expect(classifyFailure({ source: 'openPr', message: 'odd' }).routeOutcome).toBe('neutral');
   });
 });
 
-describe('接引擎的兜底梯', () => {
-  const classify = engineClassifier();
-  const info = (code: string, message = '') => ({
-    source: 'session:execute',
-    code,
-    message,
-    retryable: null,
+describe('规则的边界', () => {
+  it('「(not your usage limit)」是服务端临时限流，不是额度用满：换路由，不避开整个账号池', () => {
+    const v = classifyFailure(
+      session({ message: 'API Error: Server is temporarily limiting requests (not your usage limit)' }),
+    );
+    expect({ rule: v.rule, action: v.action }).toEqual({ rule: 'RL3', action: 'swapRoute' });
+    expect(v.avoid?.scope).toBe('route');
+    // 真用满的说法照样认成额度用满。
+    expect(classifyFailure(session({ message: "You've reached your 5-hour usage limit" })).rule).toBe('QT1');
   });
 
-  it('认得的回第一选择，认不出回 unknown', () => {
-    expect(classify(info('agent_error', 'account_banned'))).toBe('swapRoute');
-    expect(classify(info('model_not_found'))).toBe('swapModel');
-    expect(classify(info('TIMEOUT_START_TO_CLOSE', 'activity StartToClose timeout'))).toBe('retry');
-    expect(classify(info('TMPRL1100'))).toBe('park');
-    expect(classify(info('Error', '429 Too Many Requests'))).toBe('swapRoute');
-    expect(classify(info('SESSION_FAILED', 'odd'))).toBe('unknown');
+  it('GitHub 的限流、校验失败、没权限只认不是会话的步骤；AI 渠道报同样的字按它自己的事处置', () => {
+    const inSession = classifyFailure(session({ message: 'API rate limit exceeded' }));
+    expect({ rule: inSession.rule, action: inSession.action }).toEqual({ rule: 'RL3', action: 'swapRoute' });
+    const onGithub = classifyFailure({ source: 'openPr', message: 'API rate limit exceeded' });
+    expect({ rule: onGithub.rule, action: onGithub.action }).toEqual({ rule: 'RL2', action: 'retry' });
+    expect(classifyFailure(session({ message: 'HTTP 422: Validation Failed' })).rule).not.toBe('GH1');
+    expect(classifyFailure(session({ message: 'Resource not accessible by integration' })).rule).not.toBe(
+      'GH2',
+    );
   });
 
-  it('引擎的上限对象可以直接当策略传进来', () => {
+  it('原文里带个 /login 的网址不算登录失效：不能因此停掉整个账号池', () => {
+    const v = classifyFailure(
+      session({ message: 'upstream error, see https://status.example.com/login for details' }),
+    );
+    expect(v.rule).not.toBe('AU2');
+    expect(v.avoid?.scope).not.toBe('pool');
+    expect(classifyFailure(session({ message: 'Not logged in · Please run /login' })).rule).toBe('AU2');
+  });
+
+  it('模型不存在：只这个任务换模型、报警；不让所有任务一起避开这个模型，这条路由的失败记进熔断', () => {
+    const v = classifyFailure(session({ code: 'model_not_found' }));
+    expect({ action: v.action, alert: v.alert, routeOutcome: v.routeOutcome }).toEqual({
+      action: 'swapModel',
+      alert: true,
+      routeOutcome: 'fail',
+    });
+    expect(v.avoid).toEqual({ scope: 'model', shared: false });
+  });
+});
+
+describe('策略参数', () => {
+  it('引擎的上限对象可以直接当策略传进来（多出来的字段不管）', () => {
     const v = classifyFailure({ ...UNKNOWN, attempts: { retries: 3 } }, {
       retryAttempts: 5,
       maxParallel: 3,
     } as Partial<FailurePolicy>);
     expect(v.action).toBe('retry');
     expect(DEFAULT_FAILURE_POLICY.retryAttempts).toBe(2);
+  });
+
+  it('给了但不对的报错，不悄悄换成默认值；梯子上的次数可以是 0', () => {
+    const bad: [Partial<FailurePolicy>, string][] = [
+      [{ retryAttempts: -1 }, '失败分流策略的 retryAttempts 不对：要不小于 0 的整数，给的是 -1'],
+      [{ routeSwaps: 1.5 }, 'routeSwaps 不对：要不小于 0 的整数'],
+      [{ sickRouteMinSamples: 0 }, 'sickRouteMinSamples 不对：要不小于 1 的整数'],
+      [{ sickRouteFailureRate: 1.2 }, 'sickRouteFailureRate 不对：要在 0 到 1 之间（不含 0）'],
+      [{ jevConfidenceFloor: Number.NaN }, 'jevConfidenceFloor 不对：要在 0 到 1 之间'],
+    ];
+    for (const [policy, message] of bad) expect(() => classifyFailure(UNKNOWN, policy)).toThrow(message);
+    expect(classifyFailure(UNKNOWN, { retryAttempts: 0 }).action).toBe('swapRoute');
   });
 });

@@ -3,8 +3,10 @@
 // 按真实流量算，不只算探针（windsurf-dao#1342：探针绿的时候真实流量可以 2 成 6 败）：
 // - 失败率只数真实流量；
 // - 探针失败和真实流量失败一样计连败，探针成功不清零真实流量的连败；
+// - 半开时只有真实流量的试探成功才关上、才清零熔断次数；探针成功不算恢复（探针只能拦，不能放）；
 // - neutral（我们自己停的、断流、账号池的事、任务自己的问题）不进分母（#1386：断流进了分母，一条真干出活的路由被判死）。
 
+import { type Bound, count, fraction, positive, resolvePolicy } from './policy.ts';
 import { parseTime } from './scan.ts';
 
 export interface RouteOutcome {
@@ -43,29 +45,40 @@ export const DEFAULT_BREAKER_POLICY: Readonly<BreakerPolicy> = Object.freeze({
 
 export interface RouteBreakerState {
   state: 'closed' | 'open' | 'half_open';
-  /** all = 照常派；trial = 只放一个试探（这条路由在途为 0 才放）；none = 不派。 */
+  /** all = 照常派；trial = 放一个试探；none = 不派（开着，或半开但已经有一个试探在跑）。 */
   admit: 'all' | 'trial' | 'none';
   reason: string;
   /** 这一轮熔断开始的时刻。 */
   openedAt?: string;
   /** 几点起放试探。 */
   probeAt?: string;
-  /** 连着熔断了几次（试探失败再开一次算一次）；恢复后清零。 */
+  /** 连着熔断了几次（试探失败再开一次算一次）；只在真实流量试探成功、关上时清零。 */
   trips: number;
   consecutiveFailures: number;
   /** 窗口内的真实流量（不含探针、不含 neutral）。 */
   window: { samples: number; failures: number; failureRate: number | null };
 }
 
-/** 时刻或结果认不出就抛错（调用方按「熔断没查成」处理），不会把读坏的记录当成「没有失败」。 */
+export interface RouteBreakerOptions {
+  now: string;
+  /** 这条路由此刻在途的会话数。半开时在途的就是试探：已经有一个在跑，就不再放。 */
+  inFlight: number;
+  routeId?: string;
+  policy?: Partial<BreakerPolicy>;
+}
+
+/** 时刻、结果、在途数认不出就抛错（调用方按「熔断没查成」处理），不会把读坏的记录当成「没有失败」。 */
 export function routeBreaker(
   outcomes: readonly RouteOutcome[],
-  options: { now: string; routeId?: string; policy?: Partial<BreakerPolicy> },
+  options: RouteBreakerOptions,
 ): RouteBreakerState {
   const policy = resolveBreakerPolicy(options.policy);
   const now = parseTime(options.now);
   // 认不出的输入报错，不当成「没有结果 = 正常」：结果读坏了的路由不能显得健康。
   if (now === undefined) throw new Error(`熔断判不了：现在的时刻认不出（${String(options.now)}）`);
+  if (!Number.isInteger(options.inFlight) || options.inFlight < 0) {
+    throw new Error(`熔断判不了：在途数认不出（${String(options.inFlight)}）`);
+  }
   const events = outcomes.map((o, index) => {
     const t = parseTime(o.at);
     if (t === undefined) throw new Error(`熔断判不了：第 ${index + 1} 条结果的时刻认不出（${String(o.at)}）`);
@@ -96,17 +109,17 @@ export function routeBreaker(
     // 冷却期间结束的，是开闸前就派出去的，不算试探。
     if (m.state === 'open') continue;
     const probe = e.source === 'probe';
-    const who = probe ? '探针' : '真实流量';
     if (m.state === 'half_open') {
-      if (e.result === 'ok') {
+      if (e.result === 'fail') {
+        trip(m, policy, jitter, e.t, `${probe ? '探针' : '真实流量'}试探又失败`);
+      } else if (!probe) {
         m.state = 'closed';
         m.trips = 0;
         m.streak = 0;
         m.windowStart = e.t;
-        m.why = `${who}试探成功，${stamp(e.t)} 恢复`;
-      } else {
-        trip(m, policy, jitter, e.t, `${who}试探又失败`);
+        m.why = `真实流量试探成功，${stamp(e.t)} 恢复`;
       }
+      // 探针成功：不算恢复，还是半开，等一次真实流量的试探。
       continue;
     }
     if (!probe) m.traffic.push({ t: e.t, fail: e.result === 'fail' });
@@ -147,11 +160,14 @@ export function routeBreaker(
     };
   }
   if (m.state === 'half_open') {
+    const busy = options.inFlight > 0;
     return {
       ...base,
       state: 'half_open',
-      admit: 'trial',
-      reason: `${m.why}：冷却到点（${stamp(m.openUntil)}），放一个试探`,
+      admit: busy ? 'none' : 'trial',
+      reason: `${m.why}：冷却到点（${stamp(m.openUntil)}），${
+        busy ? `已经有 ${options.inFlight} 个在途当试探，等它的结果` : '放一个真实流量去试探'
+      }`,
       openedAt: iso(m.openedAt),
       probeAt: iso(m.openUntil),
     };
@@ -232,14 +248,26 @@ export function jitterOf(routeId: string | undefined, ratio: number): number {
   return (h / 0x1_0000_0000) * 2 * ratio - ratio;
 }
 
+const BREAKER_POLICY_BOUNDS: { readonly [K in keyof BreakerPolicy]: Bound } = {
+  consecutiveFailures: count(1),
+  windowMinutes: positive,
+  minSamples: count(1),
+  failureRate: { min: 0, minExclusive: true, max: 1 },
+  cooldownMinutes: positive,
+  maxCooldownMinutes: positive,
+  // 到 1 的话冷却能被错开成 0，等于没熔断。
+  jitterRatio: { ...fraction, maxExclusive: true },
+};
+
+/** 缺的取默认值，给了但不对的报错。 */
 export function resolveBreakerPolicy(partial?: Partial<BreakerPolicy>): BreakerPolicy {
-  const out: BreakerPolicy = { ...DEFAULT_BREAKER_POLICY };
-  if (!partial) return out;
-  for (const key of Object.keys(DEFAULT_BREAKER_POLICY) as (keyof BreakerPolicy)[]) {
-    const value: unknown = partial[key];
-    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) out[key] = value;
+  const policy = resolvePolicy('熔断策略', DEFAULT_BREAKER_POLICY, BREAKER_POLICY_BOUNDS, partial);
+  if (policy.maxCooldownMinutes < policy.cooldownMinutes) {
+    throw new Error(
+      `熔断策略的 maxCooldownMinutes（${policy.maxCooldownMinutes}）不能小于 cooldownMinutes（${policy.cooldownMinutes}）`,
+    );
   }
-  return out;
+  return policy;
 }
 
 function iso(ms: number): string {

@@ -13,9 +13,11 @@ const T0 = Date.parse('2026-09-25T00:00:00.000Z');
 /** 开工后第几秒。 */
 const s = (seconds: number) => new Date(T0 + seconds * 1000).toISOString();
 const m = (minutes: number) => s(minutes * 60);
+/** 默认过程记录读到了、还没有事件（lastEventAt: null）；「没读成」的场景单独写。 */
 const facts = (now: string, more: Partial<StallFacts> = {}): StallFacts => ({
   now,
   startedAt: s(0),
+  lastEventAt: null,
   ...more,
 });
 const bash = (summary: string, ok = false) => ({ name: 'Bash', summary, action: 'run', ok });
@@ -25,7 +27,40 @@ describe('有进展', () => {
   it('刚有新事件、刚推进过：不算停滞', () => {
     const v = judgeStall(facts(m(10), { lastEventAt: m(9.5), lastStepAt: m(8) }));
     expect({ state: v.state, rule: v.rule }).toEqual({ state: 'progressing', rule: 'G1' });
-    expect(v.basis).toBe('30 秒前还有新事件，2 分钟前有推进');
+    expect(v.basis).toBe('30 秒前还有动静，2 分钟前有推进');
+  });
+
+  it('步骤清单 100 秒前刚推进、过程记录里还没有事件：不算死（沉默从最近的动静算起）', () => {
+    const v = judgeStall(facts(m(20), { lastStepAt: s(20 * 60 - 100) }));
+    expect({ state: v.state, rule: v.rule }).toEqual({ state: 'progressing', rule: 'G1' });
+    // 刚提交、刚改过文件也算动静。
+    expect(judgeStall(facts(m(20), { lastEventAt: m(5), lastCommitAt: s(20 * 60 - 60) })).state).toBe(
+      'progressing',
+    );
+    expect(judgeStall(facts(m(20), { lastEventAt: m(5), lastFileChangeAt: s(20 * 60 - 60) })).state).toBe(
+      'progressing',
+    );
+  });
+
+  it('过程记录没读成：报「没查成」，不当成一直没动静去判死', () => {
+    const v = judgeStall({ now: m(20), startedAt: s(0), lastStepAt: s(20 * 60 - 100) });
+    expect({ state: v.state, rule: v.rule }).toEqual({ state: 'unscanned', rule: 'U1' });
+    expect(v.basis).toContain('没查成');
+    // 不靠过程记录也判得出的照判：进程退了、在等人。
+    expect(judgeStall({ now: m(20), startedAt: s(0), processAlive: false }).state).toBe('dead');
+    expect(judgeStall({ now: m(20), startedAt: s(0), waiting: { on: 'human', since: m(19) } }).state).toBe(
+      'waiting',
+    );
+  });
+
+  it('策略参数给了但不对：报错，不悄悄换成默认值', () => {
+    expect(() => judgeStall(facts(m(1)), { repeatThreshold: 1 })).toThrow(
+      '停滞判断策略的 repeatThreshold 不对：要不小于 2 的整数，给的是 1',
+    );
+    expect(() => judgeStall(facts(m(1)), { silentSeconds: 0 })).toThrow('silentSeconds 不对：要大于 0 的数');
+    expect(() => judgeStall(facts(m(1)), { jevConfidenceFloor: 1.5 })).toThrow(
+      'jevConfidenceFloor 不对：要在 0 到 1 之间',
+    );
   });
 
   it('时刻读坏了：报错，不当成「刚有动静」也不当成「没动静」', () => {
@@ -49,12 +84,12 @@ describe('死了', () => {
       }),
     );
     expect({ state: v.state, rule: v.rule }).toEqual({ state: 'dead', rule: 'D5' });
-    expect(v.basis).toBe('过程记录 6 分钟 没有新事件，也没有工具在跑');
+    expect(v.basis).toBe('6 分钟没有任何动静（新事件、步骤、提交、改文件都没有），也没有工具在跑');
     // 差一秒不到线。
     expect(judgeStall(facts(m(20), { lastEventAt: s(20 * 60 - 359) })).state).toBe('progressing');
   });
 
-  it('起来之后一条事件都没有，也按开工时刻算沉默', () => {
+  it('起来之后一条事件、一次推进都没有：从开工时刻算沉默', () => {
     expect(judgeStall(facts(s(400))).rule).toBe('D5');
   });
 

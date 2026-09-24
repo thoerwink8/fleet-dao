@@ -9,9 +9,16 @@ export interface Scan {
   text: string;
   /** 过程记录拼起来；只给写明读过程记录的规则。 */
   tail: string;
+  /** 这一步是 AI 会话（绑路由）。GitHub 那几条规则只认不是会话的步骤。 */
+  session: boolean;
   status?: number;
   exitCode?: number;
   signal?: string;
+}
+
+/** 绑不绑路由：证据明说就听它的；没说时有 routeId 或 source 是 `session:` 就算。 */
+export function isRouteBound(e: FailureEvidence): boolean {
+  return e.routeBound ?? (e.routeId !== undefined || (e.source ?? '').startsWith('session:'));
 }
 
 const JSON_CODE = /"(?:code|error|error_code|errorCode|type)"\s*:\s*"([A-Za-z][\w.-]{1,60})"/g;
@@ -100,6 +107,7 @@ export function scanEvidence(e: FailureEvidence): Scan {
     codes,
     text,
     tail: (e.transcriptTail ?? []).join('\n'),
+    session: isRouteBound(e),
     ...(status === undefined ? {} : { status }),
     ...(typeof e.exitCode === 'number' ? { exitCode: e.exitCode } : {}),
     ...(e.signal ? { signal: e.signal.toUpperCase() } : {}),

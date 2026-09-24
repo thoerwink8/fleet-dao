@@ -2,6 +2,7 @@
 // 本目录全是纯函数：不取时钟、不碰网络和文件，时间由调用方传进来。
 
 import type { JevQuestion, JevReply } from './jev.ts';
+import { type Bound, count, fraction, nonNegative, resolvePolicy } from './policy.ts';
 
 /** 下一步动作。四个名字和引擎兜底梯的四级一样，可以直接接。 */
 export type FailureAction = 'retry' | 'swapRoute' | 'swapModel' | 'park';
@@ -50,7 +51,7 @@ export interface FailureEvidence {
   /** 现在，ISO。算「等到几点」「避开到几点」要它；不给就只用默认时长、不写到期时刻。 */
   now?: string;
   attempts?: Partial<AttemptCounters>;
-  /** 同一路由最近的真实流量（不含探针）：直接传 routeBreaker 结果里的 window。 */
+  /** 同一路由最近的真实流量（不含探针）：直接传 routeBreaker 结果里的 window。失败率 null = 窗口里没有真实流量，不算病。 */
   routeHealth?: { samples: number; failureRate: number | null };
   /** 这一步上一次失败的原文。一字不差再犯 = 重试不会变，不在原路再试（windsurf-dao#1237）。 */
   previousMessage?: string;
@@ -137,13 +138,23 @@ export const DEFAULT_FAILURE_POLICY: Readonly<FailurePolicy> = Object.freeze({
   jevConfidenceFloor: 0.7,
 });
 
-/** 缺的、非法的（非有限数、负数）取默认值。 */
+/** 缺的取默认值，给了但不对的报错。梯子上的次数可以是 0（跳过那一级）。 */
 export function resolveFailurePolicy(partial?: Partial<FailurePolicy>): FailurePolicy {
-  const out: FailurePolicy = { ...DEFAULT_FAILURE_POLICY };
-  if (!partial) return out;
-  for (const key of Object.keys(DEFAULT_FAILURE_POLICY) as (keyof FailurePolicy)[]) {
-    const value: unknown = partial[key];
-    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) out[key] = value;
-  }
-  return out;
+  return resolvePolicy('失败分流策略', DEFAULT_FAILURE_POLICY, FAILURE_POLICY_BOUNDS, partial);
 }
+
+const FAILURE_POLICY_BOUNDS: { readonly [K in keyof FailurePolicy]: Bound } = {
+  retryAttempts: count(0),
+  routeSwaps: count(0),
+  modelSwaps: count(0),
+  reworkRounds: count(0),
+  retryBaseSeconds: nonNegative,
+  retryMaxSeconds: nonNegative,
+  inPlaceWaitMaxSeconds: nonNegative,
+  waitMaxSeconds: nonNegative,
+  routeCooldownSeconds: nonNegative,
+  poolCooldownSeconds: nonNegative,
+  sickRouteMinSamples: count(1),
+  sickRouteFailureRate: { min: 0, minExclusive: true, max: 1 },
+  jevConfidenceFloor: fraction,
+};

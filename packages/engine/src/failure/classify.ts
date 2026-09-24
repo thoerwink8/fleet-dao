@@ -87,9 +87,7 @@ export function classifyFailure(
     evidence,
     policy,
     nowMs,
-    routeBound:
-      evidence.routeBound ??
-      (evidence.routeId !== undefined || (evidence.source ?? '').startsWith('session:')),
+    routeBound: scan.session,
     used: {
       retries: count(evidence.attempts?.retries),
       reworks: count(evidence.attempts?.reworks),
@@ -127,7 +125,8 @@ export function classifyFailure(
       budget: 'infra' as const,
       maxRetries: Number.POSITIVE_INFINITY,
       alert: false,
-      routeOutcome: ctx.routeBound ? ('fail' as const) : ('neutral' as const),
+      // 缺原因的不算进路由的失败（errors.md 第 8 节第 11 条）：连为什么都不知道，不能拿它判一条路由坏了。
+      routeOutcome: ctx.routeBound && !missingReason ? ('fail' as const) : ('neutral' as const),
       unknown: true,
       hit: missingReason ? '没有任何原文' : describe(evidence, scan),
     };
@@ -408,25 +407,6 @@ export function triageQuestion(
     sample: lines.join('\n'),
     confidenceFloor,
   };
-}
-
-/**
- * 引擎兜底梯的分类器接口（引擎的 createDecide({ classify })）：只回答「认得的话第一步做什么」，认不出回 unknown；
- * 次数和梯子由引擎自己管。要原因、规则编号、避开范围，用 classifyFailure。
- */
-export function engineClassifier(
-  policy?: Partial<FailurePolicy>,
-): (failure: {
-  source: string;
-  code: string;
-  message: string;
-  retryable: boolean | null;
-}) => FailureAction | 'unknown' {
-  return (failure) =>
-    classifyFailure(
-      { source: failure.source, code: failure.code, message: failure.message, retryable: failure.retryable },
-      policy,
-    ).classifiedAs;
 }
 
 function count(value: number | undefined): number {

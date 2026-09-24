@@ -52,6 +52,8 @@ export interface FailureRule {
   routeOutcome: 'fail' | 'neutral';
   /** 原路再试时怎么试（接在原因后面）。 */
   hint?: string;
+  /** 只认不是 AI 会话的步骤（GitHub 的报错）：AI 渠道报同样的字，说的是它自己的事。 */
+  stepsOnly?: true;
 }
 
 const TRANSIENT_LADDER: readonly Rung[] = ['retry', 'swapRoute', 'park'];
@@ -123,7 +125,8 @@ export const RULES: readonly FailureRule[] = [
     id: 'QT1',
     title: '额度用满',
     codes: ['quota_exhausted', 'cloud_exhausted', 'usage_limit_reached', 'usage_limit_exceeded'],
-    text: /usage limit|额度已用完|额度用完|额度用尽|quota (?:is )?exhausted|weekly limit|monthly limit|周限|\b5[- ]?hour limit/i,
+    // 「(not your usage limit)」是 Claude Code 在服务端临时限流时自带的一句，说的恰恰不是额度用满：否定句不认。
+    text: /(?<!\bnot (?:your |a |the )?)usage limit|额度已用完|额度用完|额度用尽|quota (?:is )?exhausted|weekly limit|monthly limit|周限|\b5[- ]?hour limit/i,
     ladder: ['swapRoute', 'wait', 'park'],
     defaultWaitSeconds: 900,
     avoid: { scope: 'pool', shared: true, until: 'upstream' },
@@ -168,7 +171,8 @@ export const RULES: readonly FailureRule[] = [
       'local_own_auth_refused',
       'auth',
     ],
-    text: /not logged in|\/login\b|重新登录|完成登录|已被解绑|device[_ ]revoked|token (?:has )?expired|oauth token|invalid (?:x-)?api[ _-]?key|authentication (?:failed|required)|unauthori[sz]ed|unauthenticated/i,
+    // 只认说「要重新登录」的整句：原文里随便一个带 /login 的网址不能让整个池停下。
+    text: /not logged in|please run \/login|重新登录|完成登录|已被解绑|device[_ ]revoked|token (?:has )?expired|invalid (?:x-)?api[ _-]?key|authentication (?:failed|required)|unauthori[sz]ed|unauthenticated/i,
     statuses: [401],
     ladder: ['swapRoute', 'park'],
     avoid: { scope: 'pool', shared: true, until: 'none' },
@@ -195,14 +199,16 @@ export const RULES: readonly FailureRule[] = [
     avoid: { scope: 'model', shared: false, until: 'cooldown' },
     routeOutcome: 'fail',
   },
-  // 模型不存在或已下架：换模型并报警，好把对应路由下线（旧系统巡检判了下架的路线还在派，windsurf-dao#1840）。
+  // 模型不存在或已下架：这个任务换模型，并报警好把对应路由下线（旧系统巡检判了下架的路线还在派，windsurf-dao#1840）。
+  // 常常只是这一条路由的目录里没有它，别的路由上的同一个模型照样能用，所以不让所有任务一起避开这个模型；
+  // 这条路由的失败记进熔断，由熔断去下线它。
   {
     id: 'MD1',
     title: '模型不存在或已下架',
     codes: ['model_not_found', 'model_unavailable', 'model_retired', 'unrecognized_model'],
     text: /issue with the selected model|may not exist or you may not have access|absent from the ACP model catalog|model catalog has no match|cannot use this model|model[_ ]not[_ ]found/i,
     ladder: ['swapModel', 'park'],
-    avoid: { scope: 'model', shared: true, until: 'none' },
+    avoid: { scope: 'model', shared: false, until: 'none' },
     alert: true,
     routeOutcome: 'fail',
   },
@@ -283,6 +289,8 @@ export const RULES: readonly FailureRule[] = [
     routeOutcome: 'neutral',
     hint: '从检查点接着跑',
   },
+  // 下面三条只认不是会话的步骤（开 PR、推分支、查 CI）：AI 渠道报「API rate limit exceeded」说的是它自己限流，
+  // 该换路由，不该按 GitHub 限流原地干等。
   // 我方请求数据被 GitHub 校验拒了：重试不会变。不许因为 422 当成平台繁忙。
   {
     id: 'GH1',
@@ -291,6 +299,7 @@ export const RULES: readonly FailureRule[] = [
     ladder: ['park'],
     alert: true,
     routeOutcome: 'neutral',
+    stepsOnly: true,
   },
   // 2026-08-17 GitHub 部分中断时出现过；过几分钟再试，还不行再挂起（也可能真是权限不够）。
   {
@@ -301,6 +310,7 @@ export const RULES: readonly FailureRule[] = [
     maxRetries: 1,
     defaultWaitSeconds: 300,
     routeOutcome: 'neutral',
+    stepsOnly: true,
   },
   // 次级限流：停几分钟、串行，不按主配额的重置时间干等。
   {
@@ -310,6 +320,7 @@ export const RULES: readonly FailureRule[] = [
     ladder: ['wait', 'park'],
     defaultWaitSeconds: 300,
     routeOutcome: 'neutral',
+    stepsOnly: true,
   },
   // 冲突是必然失败，原地退避没用（windsurf-dao#1595）：同步主线、把冲突交回会话解决，记返工账。
   {
@@ -439,7 +450,7 @@ export const RULES: readonly FailureRule[] = [
     id: 'RL3',
     title: '限流',
     codes: ['rate_limited', 'rate_limit_error', 'rate_limit_exceeded', 'too_many_requests'],
-    text: /rate[ _-]?limit|too many requests|限流/i,
+    text: /rate[ _-]?limit|too many requests|temporarily limiting requests|限流/i,
     statuses: [429],
     ladder: ['waitShort', 'swapRoute', 'wait', 'park'],
     defaultWaitSeconds: 60,
@@ -525,7 +536,8 @@ export interface RuleHit {
 }
 
 /** 三轮认：强码 → 已知原文 → 状态码 / 退出码 / 信号 / 症状码。认不出返回 undefined。 */
-export function matchRule(scan: Scan, rules: readonly FailureRule[] = RULES): RuleHit | undefined {
+export function matchRule(scan: Scan, all: readonly FailureRule[] = RULES): RuleHit | undefined {
+  const rules = scan.session ? all.filter((r) => !r.stepsOnly) : all;
   for (const rule of rules) {
     const code = rule.codes?.find((c) => scan.codes.has(c));
     if (code) return { rule, via: 'signal', hit: code };
