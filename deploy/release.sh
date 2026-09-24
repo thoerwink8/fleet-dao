@@ -544,10 +544,13 @@ check_chain() {
   200) ok "健康页那条路通：香港 → 隧道 → 法国后端的 /healthz 回 200（全好）" ;;
   503) ok "健康页那条路通：香港 → 隧道 → 法国后端的 /healthz 回 503（有项不好，健康页会照实报红）" ;;
   502 | 504)
-    if has_service fleet-api; then
-      pending "香港转 /healthz 到法国后端没通（HTTP $code）：本机后端在跑，看香港 nginx 与隧道"
-    else
+    if ! has_service fleet-api; then
       pending "健康页现在三项全红（香港转 /healthz 回 $code）：本机没启用 fleet-api（$RELEASE_ENV 的 FLEET_SERVICES）"
+    elif api_healthz >/dev/null; then
+      pending "本机后端在答，香港却转不过来（HTTP $code）：看香港 nginx 与隧道"
+    else
+      # 本机后端没在答，上面已经记了红；健康页这时照实显示「香港连不上法国后端」
+      echo "  · 健康页现在三项全红（香港转 /healthz 回 $code）：本机后端没在答"
     fi
     ;;
   404) pending "香港还没转 /healthz（HTTP 404）：香港 git pull 后重跑 deploy/hk.sh" ;;
