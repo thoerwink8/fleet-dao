@@ -7,7 +7,8 @@
 // 2. 会被重试的活动必须幂等：推分支、开 PR 按分支复用、合并带头约束、写 GitHub 带幂等键、删已经不在的对象正常返回。
 // 3. 会话只在本地提交：推分支、开 PR 由引擎在会话外面做（pushBranch / openPr，用「干活的」机器人）；
 //    会话里拿不到任何 GitHub 凭据，依赖在建工作树时装好。
-// 4. 会话一律经 fleet-agent-scope 起（scope 名用 runId，内存上限按 input.resources，swap 一起封）；
+// 4. 会话一律经 fleet-agent-scope 起（scope 名用 runId，内存上限按 input.resources，swap 一起封），跑在按
+//    input.route.poolId 挑的会话专用用户下（一个 Claude 组织一个用户，从不切号）；
 //    startSession 先按 input.runId 在库里建这一次会话（session_runs），再起进程，把进程号和 scope 交回（handle）。
 // 5. awaitSession 只是「看守」：工人重启后它会被重试。接得上就接着看；接不上（引擎正常停时会话跟着退了，
 //    或者引擎被强杀、会话成了孤儿）就按 handle 把旧会话收掉，回 outcome=failed、code=SESSION_LOST——工作流会续会话重起。
