@@ -6,6 +6,7 @@
 // - 一条助手消息按内容块拆成多帧（同一个 message.id），用量以终帧为准；
 // - 2.1.281 给 opus-5-5 的工具表里没有步骤清单工具（haiku 有 TaskCreate 一类），步骤只能靠 fleet plan 主动报。
 import type { ProgressEvent, ProgressKind } from '@fleet-dao/shared';
+import { cleanTestCommands, cut, num, numbers, optional, rec, relPath, str, testRun } from '../stream-kit.ts';
 import type {
   FilePayload,
   RateLimitReading,
@@ -16,6 +17,8 @@ import type {
   ToolPayload,
 } from '../types.ts';
 
+export { exitStatusUntrusted } from '../stream-kit.ts';
+
 export interface ClaudeStreamOptions {
   runId: string;
   /** 会话的工作目录（工作树），用来把绝对路径换成相对路径。 */
@@ -25,12 +28,13 @@ export interface ClaudeStreamOptions {
   now?: () => Date;
 }
 
+/** 终帧里没有的字段就不带（读不到不记成 0）。 */
 export interface ClaudeUsage {
-  inputTokens: number;
-  outputTokens: number;
+  inputTokens?: number;
+  outputTokens?: number;
   /** 长会话的周额度主要被它吃掉，单列。 */
-  cacheReadInputTokens: number;
-  cacheCreationInputTokens: number;
+  cacheReadInputTokens?: number;
+  cacheCreationInputTokens?: number;
 }
 
 export interface ClaudeResult {
@@ -158,7 +162,7 @@ export class ClaudeStreamReader {
   constructor(options: ClaudeStreamOptions) {
     this.#runId = options.runId;
     this.#cwd = options.cwd;
-    this.#testCommands = (options.testCommands ?? []).map((c) => c.trim()).filter((c) => c);
+    this.#testCommands = cleanTestCommands(options.testCommands);
     this.#now = options.now ?? (() => new Date());
   }
 
@@ -342,17 +346,19 @@ export class ClaudeStreamReader {
         }
       }
       const command = name === 'Bash' ? str(input.command) : undefined;
-      if (command && this.#testCommands.some((t) => command.includes(t))) {
-        const unknownBecause =
-          input.run_in_background === true
-            ? '放到后台跑，命令返回时测试还没跑完'
-            : rec(structured)?.interrupted === true
-              ? '命令被打断'
-              : exitStatusUntrusted(command);
-        const run: TestPayload = {
-          command: cut(command, 500),
-          ...(unknownBecause === undefined ? { passed: ok } : { unknownBecause }),
-        };
+      const run = command
+        ? testRun(
+            command,
+            ok,
+            this.#testCommands,
+            input.run_in_background === true
+              ? '放到后台跑，命令返回时测试还没跑完'
+              : rec(structured)?.interrupted === true
+                ? '命令被打断'
+                : undefined,
+          )
+        : undefined;
+      if (run) {
         this.#s.testRuns.push(run);
         this.#emit(effect, 'test', run);
       }
@@ -377,12 +383,12 @@ export class ClaudeStreamReader {
       ...optional('sessionCostUsd', num(frame.total_cost_usd)),
       ...(usage
         ? {
-            usage: {
-              inputTokens: num(usage.input_tokens) ?? 0,
-              outputTokens: num(usage.output_tokens) ?? 0,
-              cacheReadInputTokens: num(usage.cache_read_input_tokens) ?? 0,
-              cacheCreationInputTokens: num(usage.cache_creation_input_tokens) ?? 0,
-            },
+            usage: numbers(usage, {
+              inputTokens: 'input_tokens',
+              outputTokens: 'output_tokens',
+              cacheReadInputTokens: 'cache_read_input_tokens',
+              cacheCreationInputTokens: 'cache_creation_input_tokens',
+            }),
           }
         : {}),
       models: modelUsage ? Object.keys(modelUsage) : [],
@@ -425,27 +431,6 @@ export function costOfThisRun(current?: ClaudeResult, previous?: ClaudeResult): 
   if (previous === undefined) return current.sessionCostUsd;
   if (previous.sessionCostUsd === undefined) return undefined;
   return Math.max(0, current.sessionCostUsd - previous.sessionCostUsd);
-}
-
-/**
- * 整条命令的退出码是不是就是测试的退出码；不是就返回原因。只有是的时候，工具报的成败才能当测试的成败。
- * `pnpm check | tail` 的退出码是 tail 的，测试挂了也记成通过——这类一律记「结果未知」。
- */
-export function exitStatusUntrusted(command: string): string | undefined {
-  // 引号里的 | ; & 是参数不是语法，先抹掉
-  let bare = command.replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, "''").trim();
-  let pipefail = false;
-  const preamble = /^set\s+-[a-z]*o\s+pipefail\s*(?:;|&&)\s*/;
-  if (preamble.test(bare)) {
-    pipefail = true;
-    bare = bare.replace(preamble, '');
-  }
-  if (bare.includes('\n')) return '多行命令，退出码是最后一行的';
-  if (bare.includes('||')) return '带 ||，失败会被吞掉';
-  if (bare.includes(';')) return '带 ;，退出码是最后一条命令的';
-  if (/(^|[^|])\|(?!\|)/.test(bare) && !pipefail) return '带管道又没开 pipefail，退出码是管道最后一段的';
-  if (/(^|[^&<>])&(?![&>])/.test(bare)) return '放到后台跑，命令返回时测试还没跑完';
-  return undefined;
 }
 
 /** 点名的模型和实际回话的模型是不是同一个：忽略末尾的日期（-20251001）和方括号参数。 */
@@ -513,13 +498,6 @@ function toolSummary(name: string, input: Record<string, unknown>, cwd: string):
   return cut(text ?? '', 200);
 }
 
-function relPath(path: string, cwd: string): string {
-  const norm = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '');
-  const base = norm(cwd);
-  const full = norm(path);
-  return base && full.startsWith(`${base}/`) ? full.slice(base.length + 1) : full;
-}
-
 function resultText(content: unknown): string {
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) return content.map((c) => str(rec(c)?.text) ?? '').join('');
@@ -529,27 +507,4 @@ function resultText(content: unknown): string {
 function epochSeconds(value: unknown): string | undefined {
   const n = num(value);
   return n === undefined ? undefined : new Date(n * 1000).toISOString();
-}
-
-function cut(text: string, max: number): string {
-  return text.length > max ? `${text.slice(0, max)}…` : text;
-}
-
-function rec(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === 'object' && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
-}
-
-function str(value: unknown): string | undefined {
-  return typeof value === 'string' && value !== '' ? value : undefined;
-}
-
-function num(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
-}
-
-/** exactOptionalPropertyTypes 下，值为 undefined 时干脆不带这个键。 */
-function optional<K extends string, V>(key: K, value: V | undefined): { [P in K]?: V } {
-  return (value === undefined ? {} : { [key]: value }) as { [P in K]?: V };
 }

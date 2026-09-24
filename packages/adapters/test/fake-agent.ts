@@ -1,7 +1,7 @@
 // 假执行体：照脚本回放一份真跑的过程记录，或者故意卡住、留下子进程，给插头的起停测试用。
 // 用法：node fake-agent.ts <脚本.json> [执行体参数……]；脚本字段见 FakeScript。
 import { spawn } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { fstatSync, readFileSync, writeFileSync } from 'node:fs';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 export interface FakeScript {
@@ -9,6 +9,10 @@ export interface FakeScript {
   stdinTo?: string;
   argvTo?: string;
   envTo?: string;
+  /** 进程身份（uid、gid、附加组）写到这里：验会话用户降权用。 */
+  idTo?: string;
+  /** stdin 是什么（fifo / socket / file / other）写到这里：grok 要的是真管道。 */
+  stdinKindTo?: string;
   /** 先往 stderr 打一句（模拟 reclaude 的「Syncing config…」）。 */
   stderr?: string;
   firstLineDelayMs?: number;
@@ -34,12 +38,25 @@ export interface FakeScript {
 
 const script = JSON.parse(readFileSync(process.argv[2] ?? '', 'utf8')) as FakeScript;
 if (script.ignoreSigterm) process.on('SIGTERM', () => {});
+if (script.stdinKindTo) {
+  const st = fstatSync(0);
+  writeFileSync(
+    script.stdinKindTo,
+    st.isFIFO() ? 'fifo' : st.isSocket() ? 'socket' : st.isFile() ? 'file' : 'other',
+  );
+}
 
 const chunks: Buffer[] = [];
 for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
 if (script.stdinTo) writeFileSync(script.stdinTo, Buffer.concat(chunks));
 if (script.argvTo) writeFileSync(script.argvTo, JSON.stringify(process.argv.slice(3)));
 if (script.envTo) writeFileSync(script.envTo, JSON.stringify(process.env));
+if (script.idTo && process.getuid && process.getgid && process.getgroups) {
+  writeFileSync(
+    script.idTo,
+    JSON.stringify({ uid: process.getuid(), gid: process.getgid(), groups: process.getgroups() }),
+  );
+}
 
 if (script.stderr) process.stderr.write(`${script.stderr}\n`);
 if (script.firstLineDelayMs) await sleep(script.firstLineDelayMs);

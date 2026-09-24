@@ -27,6 +27,18 @@ export function fixtureFrames(host: string, name: string): Record<string, unknow
   return fixtureLines(host, name).map((l) => JSON.parse(l) as Record<string, unknown>);
 }
 
+/** 夹具的抓取记录：命令行、工作目录、退出码。 */
+export function fixtureMeta(
+  host: string,
+  name: string,
+): { cmd: string[]; cwd: string; exitCode: number | null } {
+  return JSON.parse(readFileSync(join(FIXTURES, host, `${name}.meta.json`), 'utf8')) as {
+    cmd: string[];
+    cwd: string;
+    exitCode: number | null;
+  };
+}
+
 /** 夹具里 init 帧的会话号和工作目录。 */
 export function fixtureInit(name: string): { sessionId: string; cwd: string } {
   const init = fixtureFrames('claude-code', name).find((f) => f.subtype === 'init');

@@ -1,8 +1,8 @@
 // 找出、收掉一次会话留下的全部进程（Linux）。
 // Claude 的 Bash 工具每条命令都 setsid 自成一组（VPS 实测），只杀执行体自己的进程组收不干净；执行体一退，
 // 这些进程又被过继给 init，按父子关系也找不到了。所以三条线一起认：执行体的子孙（它还活着时）、
-// 执行体进程组里的、环境里带着会话标记（FLEET_RUN_ID）的。有 systemd scope 时以 cgroup 为准。
-import { spawnSync } from 'node:child_process';
+// 执行体进程组里的、环境里带着会话标记（FLEET_RUN_ID）的。会话放进 scope（fleet-agent-scope）时以 cgroup 为准。
+import { execFile, spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { setTimeout as sleep } from 'node:timers/promises';
 
@@ -104,65 +104,146 @@ export function signalProcs(pids: Iterable<number>, sig: NodeJS.Signals): void {
   }
 }
 
-/** systemd scope：会话放进去之后按 cgroup 收尸，setsid、过继都跑不出 cgroup。 */
-export interface CgroupScope {
-  /** 例如 fleet-agents.slice。 */
-  slice: string;
-  /** scope 名（不带 .scope），例如 fleet-run-<会话编号>。 */
-  unit: string;
-  /** 用户级 systemd（systemctl --user），要 XDG_RUNTIME_DIR。 */
-  user?: boolean;
+/**
+ * 会话进 scope 走 fleet-agent-scope（deploy/france/fleet-agent-scope.sh，装在 /usr/local/sbin/，sudoers 只放行引擎用户
+ * 以 root 跑它）：会话以会话专用用户的身份跑在 fleet-agents.slice 下自己的 fleet-agent-<编号>.scope 里，
+ * setsid、过继都跑不出这个 cgroup。引擎自己建不了系统级 scope，也发不了信号给会话用户的进程，收尸只能经它的 stop。
+ */
+export const SCOPE_HELPER = '/usr/local/sbin/fleet-agent-scope';
+
+/** 两个会话专用用户，各挂一个账号池（独享号、拼车号）；引擎按选中的账号池挑。 */
+export const SESSION_USERS = ['fleet-agent-dedicated', 'fleet-agent-carpool'] as const;
+export type SessionUser = (typeof SESSION_USERS)[number];
+
+export interface ScopeLimits {
+  /** 形如 1536M。要真封顶，memoryMax 和 memorySwapMax 得一起给：只给前者，超出的部分被换进 swap，会话不会被杀。 */
+  memoryHigh?: string;
+  memoryMax?: string;
+  memorySwapMax?: string;
+  tasksMax?: number;
+  cpuWeight?: number;
 }
 
-const UNIT_NAME = /^[A-Za-z0-9:_.\\-]+$/;
+export interface CgroupScope {
+  /** 会话编号：单元名是 fleet-agent-<id>.scope。只许字母、数字、_ 和 -，最长 63（和帮手脚本同一条规矩）。 */
+  id: string;
+  user: SessionUser;
+  limits?: ScopeLimits;
+  /** 帮手脚本，默认 SCOPE_HELPER。 */
+  helper?: string;
+  /** 调帮手的前缀，默认 ['/usr/bin/sudo', '-n']；测试里给 [] 直接起假帮手。 */
+  sudo?: readonly string[];
+}
 
-function assertUnitNames(scope: CgroupScope): void {
-  if (!UNIT_NAME.test(scope.slice) || !UNIT_NAME.test(scope.unit)) {
-    throw new Error(`systemd 单元名不合法：${scope.slice} / ${scope.unit}`);
+const SCOPE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/;
+const SIZE = /^(0|[1-9][0-9]*[KMGT]?)$/;
+
+function assertScope(scope: CgroupScope): void {
+  if (!SCOPE_ID.test(scope.id))
+    throw new Error(`会话编号只许字母、数字、_ 和 -，最长 63 个字符：${scope.id}`);
+  if (!SESSION_USERS.includes(scope.user))
+    throw new Error(`会话用户只能是 ${SESSION_USERS.join('、')} 之一：${scope.user}`);
+  const l = scope.limits ?? {};
+  for (const [k, v] of [
+    ['memoryHigh', l.memoryHigh],
+    ['memoryMax', l.memoryMax],
+    ['memorySwapMax', l.memorySwapMax],
+  ] as const) {
+    if (v !== undefined && !SIZE.test(v)) throw new Error(`${k} 要形如 1536M：${v}`);
+  }
+  if (l.tasksMax !== undefined && !(Number.isInteger(l.tasksMax) && l.tasksMax > 0))
+    throw new Error(`tasksMax 要是正整数：${l.tasksMax}`);
+  if (
+    l.cpuWeight !== undefined &&
+    !(Number.isInteger(l.cpuWeight) && l.cpuWeight >= 1 && l.cpuWeight <= 10_000)
+  ) {
+    throw new Error(`cpuWeight 要在 1–10000 之间：${l.cpuWeight}`);
   }
 }
 
-/** systemd-run --scope 会 exec 目标命令：进程号、stdin/stdout 都不变。 */
-export function scopePrefix(scope: CgroupScope): string[] {
-  assertUnitNames(scope);
+export function scopeUnit(scope: CgroupScope): string {
+  return `fleet-agent-${scope.id}.scope`;
+}
+
+function helperCall(scope: CgroupScope): string[] {
+  return [...(scope.sudo ?? ['/usr/bin/sudo', '-n']), scope.helper ?? SCOPE_HELPER];
+}
+
+/** 起会话的前缀：帮手脚本最后 exec 成会话本身，进程号、stdin/stdout 都还是调用方拿着的那一份。 */
+export function scopePrefix(scope: CgroupScope, cwd: string): string[] {
+  assertScope(scope);
+  if (!cwd.startsWith('/')) throw new Error(`工作目录要写绝对路径：${cwd}`);
+  const l = scope.limits ?? {};
   return [
-    'systemd-run',
-    ...(scope.user ? ['--user'] : []),
-    '--scope',
-    '--quiet',
-    '--collect',
-    `--slice=${scope.slice}`,
-    `--unit=${scope.unit}`,
+    ...helperCall(scope),
+    'run',
+    scope.id,
+    '--user',
+    scope.user,
+    ...(l.memoryHigh ? ['--memory-high', l.memoryHigh] : []),
+    ...(l.memoryMax ? ['--memory-max', l.memoryMax] : []),
+    ...(l.memorySwapMax ? ['--memory-swap-max', l.memorySwapMax] : []),
+    ...(l.tasksMax ? ['--tasks-max', String(l.tasksMax)] : []),
+    ...(l.cpuWeight ? ['--cpu-weight', String(l.cpuWeight)] : []),
+    '--cwd',
+    cwd,
     '--',
   ];
 }
 
-export function scopeKillArgs(scope: CgroupScope, sig: NodeJS.Signals): string[] {
-  assertUnitNames(scope);
-  return [
-    ...(scope.user ? ['--user'] : []),
-    'kill',
-    '--kill-whom=all',
-    `--signal=${sig}`,
-    `${scope.unit}.scope`,
-  ];
+/** 帮手脚本只把这几类环境变量放进会话（sudoers 的 env_keep 是同一张表）。 */
+export const SCOPE_ENV_KEEP = /^(FLEET_[A-Z0-9_]+|LANG|LANGUAGE|LC_[A-Z_]+|TZ|TERM|GIT_TERMINAL_PROMPT)$/;
+/** 帮手脚本自己给会话用户设的（HOME、USER……），或者只对引擎用户有意义的：不往里传。PATH 改走 FLEET_SESSION_PATH。 */
+const SCOPE_ENV_DROP =
+  /^(HOME|USER|LOGNAME|SHELL|TMPDIR|XDG_RUNTIME_DIR|SYSTEMROOT|WINDIR|COMSPEC|PATHEXT|USERPROFILE|APPDATA|LOCALAPPDATA|TEMP|TMP)$/i;
+const SECRET_NAME = /KEY|TOKEN|SECRET|PASSW|CREDENTIAL|COOKIE|AUTH/i;
+
+export interface ScopeLaunch {
+  /** 调 sudo 时的环境：FLEET_* 这几类，加 FLEET_SESSION_PATH。 */
+  sudoEnv: Record<string, string>;
+  /** 其余要给会话的变量（执行体自己的开关，例如 GROK_DISABLE_AUTOUPDATER）：写成 /usr/bin/env 的参数。 */
+  envArgs: string[];
 }
 
-/** 给整个 scope 发信号。scope 已经不在（进程全退、被回收）也算成功；出错返回原因。 */
-export function killScope(scope: CgroupScope, sig: NodeJS.Signals): string | undefined {
-  const res = spawnSync('systemctl', scopeKillArgs(scope, sig), { encoding: 'utf8', timeout: 10_000 });
-  if (res.status === 0) return undefined;
-  const why = `${res.stderr ?? ''}${res.error ? String(res.error) : ''}`.trim();
-  return /not loaded|not found/i.test(why) ? undefined : why || `systemctl 退出码 ${res.status}`;
+/**
+ * 把会话环境拆成「经 sudo 的环境传」和「写在命令行上」两份。命令行 sudo 会记日志、/proc 里谁都看得到，
+ * 所以像凭据的变量名一律拒：会话用户的登录态要在它自己家里登好，不从引擎这边传。
+ */
+export function scopeLaunch(env: Record<string, string>): ScopeLaunch {
+  const sudoEnv: Record<string, string> = { PATH: '/usr/sbin:/usr/bin:/sbin:/bin' };
+  const envArgs: string[] = [];
+  for (const [key, value] of Object.entries(env)) {
+    if (SCOPE_ENV_KEEP.test(key)) sudoEnv[key] = value;
+    else if (key === 'PATH') sudoEnv.FLEET_SESSION_PATH = value;
+    else if (SCOPE_ENV_DROP.test(key)) continue;
+    else if (SECRET_NAME.test(key)) {
+      throw new Error(
+        `${key} 进不了会话用户的会话：帮手脚本只放 FLEET_* 这几类环境变量，凭据又不能写在命令行上——在会话用户家里登录好`,
+      );
+    } else if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || /[\0\n]/.test(value)) {
+      throw new Error(`环境变量写不进命令行：${key}`);
+    } else envArgs.push(`${key}=${value}`);
+  }
+  return { sudoEnv, envArgs };
 }
 
-/** scope 的 cgroup 里还有几个进程。scope 已不在 = 0；查不了（没有 systemctl、权限不够）= undefined。 */
+/** 收掉整个 scope（systemctl stop：先 SIGTERM，15 秒后 SIGKILL）。scope 已经不在也算收好；出错返回原因。 */
+export function stopScope(scope: CgroupScope): Promise<string | undefined> {
+  assertScope(scope);
+  const [bin, ...args] = [...helperCall(scope), 'stop', scope.id];
+  return new Promise((resolve) => {
+    execFile(bin as string, args, { encoding: 'utf8', timeout: 60_000 }, (err, _stdout, stderr) => {
+      resolve(err ? `${stderr || ''}${err.message}`.trim() : undefined);
+    });
+  });
+}
+
+/** scope 的 cgroup 里还有几个进程。scope 已不在 = 0；查不了（没有 systemctl、读不了 cgroup）= undefined。 */
 export function scopeProcCount(scope: CgroupScope): number | undefined {
-  const res = spawnSync(
-    'systemctl',
-    [...(scope.user ? ['--user'] : []), 'show', '-p', 'ControlGroup', '--value', `${scope.unit}.scope`],
-    { encoding: 'utf8', timeout: 10_000 },
-  );
+  const res = spawnSync('systemctl', ['show', '-p', 'ControlGroup', '--value', scopeUnit(scope)], {
+    encoding: 'utf8',
+    timeout: 10_000,
+  });
   if (res.status !== 0) return undefined;
   const path = (res.stdout ?? '').trim();
   if (!path) return 0;
@@ -213,13 +294,6 @@ export async function reapSession(options: ReapOptions): Promise<ReapResult> {
     if (inScope === undefined) return procs;
     return Math.max(procs ?? 0, inScope);
   };
-  const hit = (sig: NodeJS.Signals) => {
-    if (scope) {
-      const err = killScope(scope, sig);
-      if (err) errors.push(err);
-    }
-    signalProcs(find(), sig);
-  };
   const until = async (ms: number) => {
     const end = Date.now() + ms;
     while (Date.now() < end) {
@@ -232,13 +306,18 @@ export async function reapSession(options: ReapOptions): Promise<ReapResult> {
   const found = remaining();
   if (found === undefined) return { found: 0, leftovers: undefined };
   if (found > 0) {
-    hit('SIGTERM');
+    signalProcs(find(), 'SIGTERM');
+    if (scope) {
+      // 会话用户的进程引擎发不了信号：经帮手 stop 整个 scope（systemd 先 SIGTERM、15 秒后 SIGKILL，收完才返回）
+      const err = await stopScope(scope);
+      if (err) errors.push(err);
+    }
     if (!(await until(options.graceMs ?? 5_000))) {
-      hit('SIGKILL');
+      signalProcs(find(), 'SIGKILL');
       await until(2_000);
     }
   }
   const leftovers = remaining();
-  // 以清空为准：scope 正在拆的时候 systemctl kill 会报 EINVAL，进程其实都没了，这种报错不算数
+  // 以清空为准：收干净了，中途帮手报的错不算数
   return { found, leftovers, ...(errors.length && leftovers !== 0 ? { error: errors.join('；') } : {}) };
 }

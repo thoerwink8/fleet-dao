@@ -49,6 +49,18 @@ export interface TestPayload {
   unknownBecause?: string;
 }
 
+/** fleet plan 的一步（同形：库里查 plan 的 payload 必须带 steps 数组）。 */
+export interface PlanStep {
+  title: string;
+  state: 'pending' | 'in_progress' | 'done';
+}
+
+/** kind='plan'：从执行体自己的待办清单被动读到的步骤清单（fleet plan 主动报的由后端另记）。 */
+export interface PlanPayload {
+  steps: PlanStep[];
+  source: 'stream';
+}
+
 /** 插头自己把进程杀掉的原因。 */
 export type KillReason =
   | 'startup_timeout' // 起了但迟迟没有第一帧
@@ -67,6 +79,21 @@ export interface RateLimitWindow {
   /** 0–1。 */
   utilization?: number;
   resetsAt?: string;
+}
+
+/** 这一轮的用量。各家口径不同，没给的就不带——不拿 0 冒充读到了。 */
+export interface RunUsage {
+  /** 没命中缓存的输入。 */
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  reasoningTokens?: number;
+  /**
+   * 执行体自报的本轮花费（美元）。订阅内的用量也会报一个数：它说明这一轮值多少，不说明账单多了这一笔；
+   * 算不出本轮的（只有累计值、又没有上一轮）就不带。
+   */
+  costUsd?: number;
 }
 
 /** 过程记录里顺带的额度读数。exhausted = 这个账号池已经用满（要换池或等清零）。 */

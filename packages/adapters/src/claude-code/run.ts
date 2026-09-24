@@ -1,22 +1,20 @@
 // Claude Code 插头：经 reclaude 无头起一个会话，边跑边把过程记录转成进度事件，结束时交出一份报告。
-import { stat } from 'node:fs/promises';
-import type { ProgressEvent } from '@fleet-dao/shared';
+import { type AgentRunOptions, assertRunnable, runCliAgent } from '../cli-run.ts';
 import type { DeliveryCheck } from '../delivery.ts';
 import { assertNoForbiddenEnv, buildSessionEnv, type SessionEnvInput } from '../env.ts';
-import { judgeRun, type RunFacts, type RunVerdict } from '../judge.ts';
-import {
-  type AgentProcessResult,
-  assertNotRealAgentInTests,
-  DEFAULT_PROCESS_LIMITS,
-  guardCallback,
-  type ProcessLimits,
-  runAgentProcess,
-  type SpawnInfo,
-} from '../process.ts';
+import { judgeRun, type RunFacts, type RunSummary, type RunVerdict } from '../judge.ts';
+import type { AgentProcessResult, ProcessLimits } from '../process.ts';
 import type { CgroupScope } from '../procs.ts';
-import type { RateLimitReading } from '../types.ts';
+import { lastLines, optional } from '../stream-kit.ts';
 import { buildClaudeArgs, type ClaudeArgsSpec, type ClaudeSession } from './args.ts';
-import { ClaudeStreamReader, type ClaudeStreamSummary, sameModel, versionAtLeast } from './stream.ts';
+import {
+  type ClaudeResult,
+  ClaudeStreamReader,
+  type ClaudeStreamSummary,
+  costOfThisRun,
+  sameModel,
+  versionAtLeast,
+} from './stream.ts';
 
 /** 没有 CLAUDE.md 时回退读 AGENTS.md 是 2.1.277 才有的；更旧的版本会漏读仓库规矩。 */
 export const MIN_CLAUDE_VERSION = '2.1.277';
@@ -51,16 +49,7 @@ export interface ClaudeCodeRunSpec extends ClaudeArgsSpec {
   cgroup?: CgroupScope;
 }
 
-export interface ClaudeCodeRunOptions {
-  /** 起 reclaude 的命令，给绝对路径。没有默认值：谁要起真执行体谁显式给，测试里换成假执行体。 */
-  command: readonly string[];
-  /** 可以是 async 的：被拒不会炸进程，记进 hookError；交报告之前会等它们落定。 */
-  onEvent?: (event: ProgressEvent) => unknown;
-  onRateLimit?: (reading: RateLimitReading) => unknown;
-  /** 进程起来了：引擎记下进程号和 scope，重启后用 reapSession 收旧会话。 */
-  onSpawn?: (info: SpawnInfo) => unknown;
-  signal?: AbortSignal;
-  now?: () => Date;
+export interface ClaudeCodeRunOptions extends AgentRunOptions {
   minCliVersion?: string;
 }
 
@@ -75,11 +64,7 @@ export async function runClaudeCode(
   spec: ClaudeCodeRunSpec,
   options: ClaudeCodeRunOptions,
 ): Promise<ClaudeCodeRunReport> {
-  assertNotRealAgentInTests(options.command);
-  if (!spec.prompt.trim()) throw new Error('提示词是空的');
-  const dir = await stat(spec.cwd).catch(() => undefined);
-  if (!dir?.isDirectory()) throw new Error(`工作目录不存在：${spec.cwd}`);
-
+  await assertRunnable(options.command, spec.prompt, spec.cwd);
   const args = buildClaudeArgs(spec);
   const bashTimeout = spec.bashTimeoutMs ?? DEFAULT_BASH_TIMEOUT_MS;
   const env = {
@@ -93,41 +78,25 @@ export async function runClaudeCode(
     UPSTREAM_ENV,
     'reclaude 自己管上游、代理和证书，外面带进去会把请求改道到别的网关',
   );
-  const now = options.now ?? (() => new Date());
   const minVersion = options.minCliVersion ?? MIN_CLAUDE_VERSION;
   const reader = new ClaudeStreamReader({
     runId: spec.runId,
     cwd: spec.cwd,
     ...(spec.testCommands ? { testCommands: spec.testCommands } : {}),
-    now,
+    ...(options.now ? { now: options.now } : {}),
   });
-  let callbackError: string | undefined;
-  const pending = new Set<Promise<unknown>>();
-  const call = (fn: () => unknown) => {
-    const settling = guardCallback(fn, (err) => {
-      callbackError ??= err instanceof Error ? err.message : String(err);
-    });
-    if (settling) {
-      pending.add(settling);
-      void settling.finally(() => pending.delete(settling));
-    }
-  };
-
-  const result = await runAgentProcess(
+  const result = await runCliAgent(
     {
-      command: [...options.command, ...args],
+      runId: spec.runId,
       cwd: spec.cwd,
+      args,
       env,
       stdin: spec.prompt,
-      limits: { ...DEFAULT_PROCESS_LIMITS, ...spec.limits },
-      runId: spec.runId,
-      ...(spec.cgroup ? { scope: spec.cgroup } : {}),
-      ...(options.signal ? { signal: options.signal } : {}),
-    },
-    {
-      onLine(line, control) {
-        const effect = reader.read(line);
-        if (effect.activity) control.touch();
+      limits: spec.limits,
+      cgroup: spec.cgroup,
+      read: (line) => reader.read(line),
+      busy: () => reader.toolsInFlight > 0,
+      inspect(effect, control) {
         if (effect.init?.sessionId && effect.init.sessionId !== spec.session.id) {
           control.kill('session_mismatch');
         }
@@ -138,20 +107,12 @@ export async function runClaudeCode(
         if (effect.observedModel && !sameModel(spec.model, effect.observedModel)) {
           control.kill('model_mismatch');
         }
-        for (const event of effect.events) call(() => options.onEvent?.(event));
-        const reading = effect.rateLimit;
-        if (reading) call(() => options.onRateLimit?.(reading));
       },
-      busy: () => reader.toolsInFlight > 0,
-      onSpawn: (info) => call(() => options.onSpawn?.(info)),
     },
-    now,
+    options,
   );
-  await Promise.allSettled([...pending]);
-  const hookError = result.hookError ?? callbackError;
   return {
     ...result,
-    ...(hookError === undefined ? {} : { hookError }),
     runId: spec.runId,
     requestedModel: spec.model,
     session: spec.session,
@@ -184,9 +145,36 @@ export function claudeRunFacts(report: ClaudeCodeRunReport): RunFacts {
         }
       : {}),
     quotaExhausted: report.stream.rateLimits.some((reading) => reading.exhausted),
+    ...optionalWords(lastLines(report.stderrTail)),
   };
 }
 
 export function judgeClaudeRun(report: ClaudeCodeRunReport, delivery?: DeliveryCheck): RunVerdict {
   return judgeRun(claudeRunFacts(report), delivery);
+}
+
+/**
+ * 交给引擎的统一摘要。终帧的花费是整个会话的累计值：续会话要给上一轮的终帧才算得出本轮花费，
+ * 不给就不带花费（不把累计值当本轮的记）。
+ */
+export function claudeRunSummary(report: ClaudeCodeRunReport, previous?: ClaudeResult): RunSummary {
+  const r = report.stream.result;
+  const cost =
+    report.session.mode === 'resume' && previous === undefined ? undefined : costOfThisRun(r, previous);
+  return {
+    facts: claudeRunFacts(report),
+    ...(report.stream.observedModel ? { actualModel: report.stream.observedModel } : {}),
+    ...(report.stream.sessionId ? { sessionId: report.stream.sessionId } : {}),
+    usage: {
+      ...optional('inputTokens', r?.usage?.inputTokens),
+      ...optional('outputTokens', r?.usage?.outputTokens),
+      ...optional('cacheReadTokens', r?.usage?.cacheReadInputTokens),
+      ...optional('cacheWriteTokens', r?.usage?.cacheCreationInputTokens),
+      ...(cost === undefined ? {} : { costUsd: cost }),
+    },
+  };
+}
+
+function optionalWords(words: string | undefined): { lastWords?: string } {
+  return words === undefined ? {} : { lastWords: words };
 }
