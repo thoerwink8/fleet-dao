@@ -1,0 +1,53 @@
+{
+  "_note": "2026-09-06 同一台 VPS 的真机 getRelay 回帧（旧仓 windsurf-dao tests/miraquota-contabo.test.js 里的夹具）。上限比 09-24 高：官方中途整体改过档。7d_fable 用到 99.04% 就已 limit_reached，7d 到 85% 就 warning。",
+  "type": "relay",
+  "relay": {
+    "available": true,
+    "host": "relay.mirasim.ai",
+    "agent": "claude",
+    "mode": "cloud",
+    "enabled": true,
+    "configured": true,
+    "usage": {
+      "ok": true,
+      "agent": "claude",
+      "source": "relay-limits",
+      "capturedAt": "2026-09-06T06:10:50.903Z",
+      "status": "warning",
+      "windows": [
+        {
+          "label": "5h",
+          "usedPercent": 2.7,
+          "remainingPercent": 97.3,
+          "resetAt": "2026-09-06T09:16:45.000Z",
+          "resetAfterSeconds": 11154,
+          "status": "allowed",
+          "used": 4702.412875,
+          "budget": 171852
+        },
+        {
+          "label": "7d",
+          "usedPercent": 85,
+          "remainingPercent": 15,
+          "resetAt": "2026-09-08T02:58:05.000Z",
+          "resetAfterSeconds": 161234,
+          "status": "warning",
+          "used": 521608.829464,
+          "budget": 613756
+        },
+        {
+          "label": "7d_fable",
+          "usedPercent": 100,
+          "remainingPercent": 0,
+          "resetAt": "2026-09-08T02:58:05.000Z",
+          "resetAfterSeconds": 161234,
+          "status": "limit_reached",
+          "used": 322156.15205,
+          "budget": 325291,
+          "modelScoped": true
+        }
+      ],
+      "error": null
+    }
+  }
+}

@@ -5,7 +5,8 @@
   "description": "渠道插头：各家写码助手的无头启动与过程记录解析",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./quota": "./src/quota/index.ts"
   },
   "dependencies": {
     "@fleet-dao/shared": "workspace:*"

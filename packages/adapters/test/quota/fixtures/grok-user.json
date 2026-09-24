@@ -1,0 +1,14 @@
+{
+  "_note": "真回包里有邮箱、姓名、各种编号；读取器只取 subscriptionTier，这里其余一律换成占位。",
+  "userId": "<用户编号>",
+  "email": "<邮箱>",
+  "firstName": "<名>",
+  "lastName": "<姓>",
+  "xUserId": "<编号>",
+  "userBlockedReason": null,
+  "teamId": null,
+  "teamBlockedReasons": [],
+  "organizationId": null,
+  "hasGrokCodeAccess": true,
+  "subscriptionTier": "SuperGrokPro"
+}

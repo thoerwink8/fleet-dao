@@ -1,0 +1,4 @@
+Available organizations:
+* 1000001	<独享组织名>	personal	<邮箱>
+  1000002	<拼车组织名>	team	<邮箱>
+Switch organization: reclaude org use <org_id>

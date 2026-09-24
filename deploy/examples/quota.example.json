@@ -1,0 +1,71 @@
+{
+  "_说明": "额度读取器的机器配置样例。真配置放 /etc/fleet-dao/quota.json（或用 FLEET_QUOTA_CONFIG 指定），不进 git。<服务用户> 换成凭据所属的那个系统用户；读取器要以能读这些文件的用户身份跑。以 _ 开头的键是注释。",
+  "timeoutMs": 30000,
+  "pools": [
+    {
+      "_说明": "Claude 订阅·独享组织。跑 Claude Code 自带的 /usage（本地命令，不调模型、不花额度）。只能读这台机器当前挂的组织。",
+      "poolId": "claude-solo",
+      "channelId": "claude-sub",
+      "name": "Claude 订阅 · 独享组织",
+      "reader": "claude-usage",
+      "command": ["/home/<服务用户>/.local/bin/reclaude"],
+      "orgKind": "solo",
+      "timeoutMs": 120000
+    },
+    {
+      "_说明": "Claude 订阅·拼车组织。和独享号是同一个 reclaude 账号下的两个组织；这台机器挂的不是它时会报 not_current，读取器不切号。",
+      "poolId": "claude-carpool",
+      "channelId": "claude-sub",
+      "name": "Claude 订阅 · 拼车组织",
+      "reader": "claude-usage",
+      "command": ["/home/<服务用户>/.local/bin/reclaude"],
+      "orgKind": "carpool",
+      "timeoutMs": 120000
+    },
+    {
+      "_说明": "Mirasim 中转账号：Opus、GPT（codex）、Kimi、DeepSeek 等走中转的路由共扣这一份（5h、7d），另有只扣某一族的窗口（7d_claude…）。",
+      "poolId": "mirasim-relay",
+      "channelId": "mirasim",
+      "name": "Mirasim 中转账号",
+      "reader": "mirasim-relay",
+      "port": 4316,
+      "tokenFile": "/home/<服务用户>/.mirasim/run/local-4316.token"
+    },
+    {
+      "poolId": "cursor",
+      "channelId": "cursor",
+      "name": "Cursor 订阅",
+      "reader": "cursor-dashboard",
+      "authFile": "/home/<服务用户>/.config/cursor/auth.json"
+    },
+    {
+      "poolId": "grok",
+      "channelId": "xai",
+      "name": "Grok 订阅（Grok Build）",
+      "reader": "grok-billing",
+      "authFile": "/home/<服务用户>/.grok/auth.json"
+    },
+    {
+      "_说明": "Jev 判断题小模型：按量计费、没有账单接口，按我们自己的用量估；上限是自己定的日帽。现在读旧系统的日账，引擎接上库后删掉 usage 这一项。",
+      "poolId": "jev",
+      "channelId": "jev",
+      "name": "Jev 判断题",
+      "reader": "estimate",
+      "windows": [
+        {
+          "label": "day_usd",
+          "window": "period_usd",
+          "unit": "usd",
+          "periodHours": 24,
+          "anchor": "2026-01-01T00:00:00Z",
+          "limit": 0.3
+        }
+      ],
+      "usage": {
+        "type": "daily-token-files",
+        "dir": "/home/<服务用户>/.dao/judge-spend",
+        "usdPerMTok": 0.042
+      }
+    }
+  ]
+}
