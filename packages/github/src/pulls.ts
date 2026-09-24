@@ -301,15 +301,17 @@ export async function readCi(
   const evaluation = evaluateChecks(required, checkRuns, commitStatuses);
   let anyActivity = checkRuns.length > 0 || commitStatuses.length > 0;
   if (!anyActivity) {
-    // 检查还没建出来，但工作流可能已经在排队（Actions: read）
-    const wf = await deps.client.request<{ total_count?: number }>({
+    // 检查还没建出来，但工作流可能已经在排队（Actions: read）。读不懂就是没查成，不当「没有工作流」
+    const wf = await deps.client.request({
       method: 'GET',
       path: `${base}/actions/runs`,
       auth,
       query: { head_sha: sha, per_page: 1 },
       signal,
     });
-    anyActivity = (wf.data?.total_count ?? 0) > 0;
+    const runs = z.object({ total_count: z.number() }).safeParse(wf.data);
+    if (!runs.success) throw unexpected(`读 ${sha.slice(0, 7)} 的工作流运行`, wf.data);
+    anyActivity = runs.data.total_count > 0;
   }
   return { evaluation, anyActivity };
 }

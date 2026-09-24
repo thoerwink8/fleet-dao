@@ -2,7 +2,8 @@
 // 生产：createGitHub({ ledger: pgLedger(db), locker: pgLocker(db) })——凭据从 /etc/fleet-dao/github 读（环境变量可改），
 // 推送用的裸仓放在 FLEET_GITHUB_STATE_DIR（默认 /var/lib/fleet-dao/github）下。
 import { join } from 'node:path';
-import { GitHubClient, type Logger, type RepoRef, repoSlug, type Sleep } from './client.ts';
+import { z } from 'zod';
+import { GitHubClient, type Logger, type RepoRef, repoSlug, type Sleep, unexpected } from './client.ts';
 import { type AppCredentials, type AppRole, appFilesFromEnv, loadApps, ROLE_NAMES } from './credentials.ts';
 import {
   type ActivityContext,
@@ -167,12 +168,14 @@ export function createGitHub(options: GitHubOptions): GitHub {
         for (const role of ['agent', 'engine'] as const) {
           try {
             const id = await client.installationId(role, repo, undefined, { fresh: true });
-            const res = await client.request<{ permissions?: Record<string, string> }>({
+            const res = await client.request({
               method: 'GET',
               path: `/app/installations/${id}`,
               auth: { as: 'app', role },
             });
-            const have = res.data?.permissions ?? {};
+            const parsed = z.object({ permissions: z.record(z.string(), z.string()) }).safeParse(res.data);
+            if (!parsed.success) throw unexpected('读安装的权限表', res.data);
+            const have = parsed.data.permissions;
             const need = REQUIRED_PERMISSIONS[role];
             const missing = Object.entries(need)
               .filter(([k, lvl]) => (LEVEL[have[k] ?? ''] ?? 0) < (LEVEL[lvl] ?? 0))
