@@ -149,6 +149,31 @@ reset
 do_release "$C" >/dev/null
 check "发 C 之后，上一版是记回健康的 B" "$(previous_sha)" "$B"
 
+echo "== 后端的健康报告、任务队列的回答：认得出才逐项给，认不出就是认不出（不当成「没问题」）"
+NODE=$(command -v node) || NODE=""
+if [[ -z "$NODE" ]]; then
+  echo "  ✗ 没跑成：这台没有 node"
+  fail=1
+else
+  body='{"ok":false,"checks":{"database":{"ok":true},"temporal":{"ok":false,"code":"not_connected","message":"Temporal 客户端还没接上"}}}'
+  check "503 的报告逐项给出" "$(report_items "$body" | tr '\t\n' '|;')" "database|ok|;temporal|bad|Temporal 客户端还没接上;"
+  for body in '<html>502 Bad Gateway</html>' '{"ok":true}' '{"ok":"true","checks":{}}' '{"ok":true,"checks":[]}' ''; do
+    report_items "$body" >/dev/null 2>&1
+    check "认不出的回答退出 1：${body:-（空）}" "$?" 1
+  done
+  tq='{"pollers":[{"taskQueueType":"workflow","identity":"4242@vmi"},{"taskQueueType":"activity","identity":"4242@vmi"}]}'
+  engine_polling "$tq" 4242@
+  check "引擎工人两种任务都在取：在" "$?" 0
+  engine_polling "$tq" 999@
+  check "换了进程号（旧工人的记录）：不算" "$?" 1
+  engine_polling '{"pollers":[{"taskQueueType":"workflow","identity":"4242@vmi"}]}' 4242@
+  check "只取工作流任务、不取活动任务：不算" "$?" 1
+  engine_polling '{"reachability":null,"pollers":null}' 4242@
+  check "没人在取（pollers 为 null）：不算" "$?" 1
+  engine_polling 'rpc error: connection refused' 4242@
+  check "回答认不出：不算" "$?" 1
+fi
+
 if ((fail)); then
   echo "release-flow：不通过"
   exit 1

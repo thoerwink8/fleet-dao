@@ -25,7 +25,7 @@ WG_IF=wg-fleet
 WG_PORT=4500
 WG_ADDR=10.99.0.1/24
 WG_PEER_ADDR=10.99.0.2
-# 法国驾驶舱后端（packages/api 的 FLEET_COCKPIT_LISTEN）：/api、/auth、/github/webhook 经隧道转到这里
+# 法国驾驶舱后端（packages/api 的 FLEET_COCKPIT_LISTEN）：/api、/auth、/github/webhook、/healthz 经隧道转到这里
 API_UPSTREAM=$WG_PEER_ADDR:8787
 ENV_FILE=/etc/fleet-dao/hk.env
 ENV_KEYS=(FLEET_DOMAIN FLEET_ACME_EMAIL FLEET_WG_FRANCE_PUBLIC_KEY FLEET_WEB_UPLOAD_PUBLIC_KEY)
@@ -292,9 +292,10 @@ readback_release() {
     ok "$WEB_ROOT 还是装机时的占位页（没发布过）"
     return 0
   fi
-  commit=$(/usr/bin/node -e 'try { const c = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).commit; if (typeof c === "string") process.stdout.write(c); } catch {}' "$WEB_ROOT/release.json" 2>/dev/null) || commit=""
-  if [[ "$commit" =~ ^[0-9a-f]{40}$ ]]; then
-    ok "$WEB_ROOT 在发 ${commit:0:12}（法国 deploy/release.sh 发来的）"
+  # 发布脚本写的就是一行 {"commit":"<40 位>"}：按这个样子认，不借这台机器上旧系统的 node
+  commit=$(<"$WEB_ROOT/release.json")
+  if [[ "$commit" =~ ^\{\"commit\":\"([0-9a-f]{40})\"\}$ ]]; then
+    ok "$WEB_ROOT 在发 ${BASH_REMATCH[1]:0:12}（法国 deploy/release.sh 发来的）"
   else
     red "$WEB_ROOT/release.json 读不出提交号"
   fi

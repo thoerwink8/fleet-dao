@@ -646,7 +646,8 @@ readback_proxy_headers() {
   fi
   nonce=$(openssl rand -hex 8)
   tmp=$(mktemp)
-  (cd / && exec runuser -u fleet -- /usr/bin/node -e '
+  # setpriv 直接换身份再 exec，记下的进程号就是回显本身（runuser 会多隔一层，杀它不一定连带杀掉回显、端口会被占着）
+  (cd / && exec setpriv --reuid=fleet --regid=fleet --init-groups /usr/bin/node -e '
     const [host, port] = process.argv.slice(1);
     const srv = require("node:http").createServer((req, res) => {
       const body = JSON.stringify({ headers: Object.keys(req.headers), probe: req.headers["x-fleet-probe"] ?? null });

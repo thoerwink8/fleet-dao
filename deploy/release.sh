@@ -32,6 +32,7 @@ AGENT_API=127.0.0.1:8788       # fleet 命令接口（api.env 的 FLEET_AGENT_LI
 TASK_QUEUE=fleet               # 引擎工人取活的任务队列（engine.env 的 FLEET_TASK_QUEUE）
 # 迁移连本机库：unix socket + peer 认证（同 api.env；postgres.js 不认连接串里的 ?host=，主机走 PGHOST）
 DB_ENV=(DATABASE_URL=postgres:///fleet PGHOST=/var/run/postgresql PGUSER=fleet)
+NODE=/usr/bin/node    # 法国的 node（france.sh 的前提里查过 22 以上）；只有测试会换成别处的
 SETTLE_SECONDS=10     # 服务起来后再看这么久：这段时间里退出过、重启过，就是没起稳
 ENGINE_POLL_WAIT=90   # 引擎工人起来后要先打包工作流，才去任务队列取活
 
@@ -131,7 +132,7 @@ preflight() {
     red "$RELEASE_ENV 的 FLEET_DOMAIN 应为驾驶舱的域名，现在是「$FLEET_DOMAIN」"
     return 1
   fi
-  for c in git rsync curl flock runuser psql /usr/bin/node /usr/local/bin/fleet-temporal; do
+  for c in git rsync curl flock runuser psql "$NODE" /usr/local/bin/fleet-temporal; do
     if ! command -v "$c" >/dev/null; then
       red "缺 $c：先跑一遍 deploy/france.sh"
       return 1
@@ -248,7 +249,7 @@ build_release() { # 提交号
 build_web() { # 临时目录 日志
   local stage=$1 log=$2
   if [[ -f "$stage/packages/web/package.json" ]] &&
-    /usr/bin/node -e 'process.exit(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).scripts?.build ? 0 : 1)' \
+    "$NODE" -e 'process.exit(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).scripts?.build ? 0 : 1)' \
       "$stage/packages/web/package.json"; then
     echo "  构建驾驶舱前端（packages/web）"
     if ! as_fleet_in "$stage" pnpm --filter ./packages/web run build >>"$log" 2>&1; then
@@ -303,7 +304,7 @@ migrate() { # 提交号
     return 1
   fi
   if ! out=$(cd -- "$dir" && runuser -u fleet -- env -i HOME=/home/fleet PATH=/usr/bin:/bin LANG=C.UTF-8 "${DB_ENV[@]}" \
-    /usr/bin/node packages/db/src/bin/migrate.ts 2>&1); then
+    "$NODE" packages/db/src/bin/migrate.ts 2>&1); then
     red "迁移失败（没切版本，在用的那版不受影响）：$(tail -5 <<<"$out" | tr '\n' ' ')"
     return 1
   fi
@@ -402,7 +403,7 @@ sync_web() { # 提交号
 # 认得出就逐项打印「名<TAB>ok|bad<TAB>原因」，认不出退出 1。故意不复用后端和健康页的解析代码：自己查自己查不出错
 # shellcheck disable=SC2016 # 单引号里是给 node 的 JS，模板字符串不归 shell 展开
 report_items() {
-  printf '%s' "$1" | /usr/bin/node -e '
+  printf '%s' "$1" | "$NODE" -e '
     let s = "";
     process.stdin.on("data", (d) => (s += d)).on("end", () => {
       let r;
@@ -488,18 +489,24 @@ check_api() { # 切之前的逐项结果
 }
 
 # 引擎工人：任务队列上有它（身份是「进程号@主机名」）在取工作流任务和活动任务
+# fleet-temporal task-queue describe -o json 的回答里，身份以这个前缀开头的取活者，工作流任务和活动任务是不是都在取。
+# 回答认不出（不是 JSON）也算不在，不当成「没问题」
+engine_polling() { # JSON 身份前缀
+  printf '%s' "$1" | "$NODE" -e '
+    let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
+      let r; try { r = JSON.parse(s); } catch { process.exit(1); }
+      const mine = ((r && r.pollers) || []).filter((p) => typeof p.identity === "string" && p.identity.startsWith(process.argv[1]));
+      const types = new Set(mine.map((p) => p.taskQueueType));
+      process.exit(types.has("workflow") && types.has("activity") ? 0 : 1);
+    });' "$2"
+}
+
 check_engine() {
   local pid json i
   pid=$(unit_prop fleet-engine.service MainPID)
   for ((i = 0; i < ENGINE_POLL_WAIT; i += 3)); do
     json=$(tcli task-queue describe --task-queue "$TASK_QUEUE" -o json 2>/dev/null) || json=""
-    if printf '%s' "$json" | /usr/bin/node -e '
-      let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
-        let r; try { r = JSON.parse(s); } catch { process.exit(1); }
-        const mine = (r.pollers || []).filter((p) => typeof p.identity === "string" && p.identity.startsWith(process.argv[1]));
-        const types = new Set(mine.map((p) => p.taskQueueType));
-        process.exit(types.has("workflow") && types.has("activity") ? 0 : 1);
-      });' "$pid@"; then
+    if engine_polling "$json" "$pid@"; then
       ok "fleet-engine：引擎工人（pid $pid）在任务队列 $TASK_QUEUE 上取工作流任务和活动任务"
       return 0
     fi
@@ -530,7 +537,7 @@ check_web() { # 提交号
 }
 
 json_field() { # JSON 键
-  printf '%s' "$1" | /usr/bin/node -e '
+  printf '%s' "$1" | "$NODE" -e '
     let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
       try { const v = JSON.parse(s)[process.argv[1]]; if (typeof v === "string") process.stdout.write(v); } catch {}
     });' "$2"
