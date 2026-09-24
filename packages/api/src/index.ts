@@ -9,11 +9,10 @@ export {
 export { type Apps, buildApps } from './app.ts';
 export {
   type AskWaiters,
-  CHANGES_CHANNEL,
   type ChangeHub,
   createAskWaiters,
   createChangeHub,
-  type PgListen,
+  type PgChangeFeed,
   parseChangePayload,
   startPgChangeFeed,
 } from './changes.ts';
@@ -25,12 +24,16 @@ export {
   type GitHubIntake,
   type GitHubReconciler,
   githubWhitelist,
+  notWiredGitHub,
   pollDeliveryId,
   type ReconcileReport,
   screenGithubEvent,
   verifyGithubSignature,
 } from './github.ts';
+export { type HealthReport, PublicHealthError, runHealthChecks, serviceHealthChecks } from './health.ts';
 export { jsonLogger, silentLogger } from './log.ts';
 export { createMemoryStore, emptyData, type MemoryData } from './memory-store.ts';
+export { createPgStore, isUuid, pingDb } from './pg-store.ts';
 export * from './ports.ts';
-export { createTemporalWorkflowControl, type TemporalClientLike } from './temporal.ts';
+export { createSseRelay, type SseRelay } from './sse.ts';
+export { createTemporalWorkflowControl, notConnectedTemporal, type TemporalClientLike } from './temporal.ts';

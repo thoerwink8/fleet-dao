@@ -18,16 +18,16 @@ import {
 import { describe, expect, it } from 'vitest';
 import { devFixtures } from '../src/dev-fixtures.ts';
 import { WorkflowGoneError } from '../src/ports.ts';
-import { DEV_RUN_ID, DEV_USER_ID, errorCode, harness, T0, write } from './harness.ts';
+import { DEV_RUN_ID, DEV_USER_ID, errorCode, harness, IDS, T0, write } from './harness.ts';
 
 const PARAMS: Record<string, string> = {
-  repoId: 'repo-1',
-  taskId: 'task-12',
+  repoId: IDS.repo,
+  taskId: IDS.task12,
   runId: DEV_RUN_ID,
   askId: 'ask-none',
   stage: 'execute',
   channelId: 'ch-cursor',
-  notificationId: 'n-1',
+  notificationId: IDS.notification1,
   key: 'sessions.maxConcurrent',
 };
 
@@ -63,7 +63,9 @@ describe('约定与实现对得上', () => {
   it('库里多出来的字段不会漏给前端（例如仓的测试命令、用户的飞书编号）', async () => {
     const h = harness();
     const { cookie } = await h.login();
-    const board = await (await h.cockpit.request('/api/repos/repo-1/board', { headers: { cookie } })).text();
+    const board = await (
+      await h.cockpit.request(`/api/repos/${IDS.repo}/board`, { headers: { cookie } })
+    ).text();
     expect(board).not.toContain('pnpm check');
     const me = await (await h.cockpit.request('/api/me', { headers: { cookie } })).text();
     expect(me).not.toContain('ou_dev_founder_a');
@@ -75,7 +77,7 @@ describe('约定与实现对得上', () => {
     const task = h.store.data.tasks[0];
     if (!task) throw new Error('样例数据里没有任务');
     Reflect.deleteProperty(task, 'title');
-    const res = await h.cockpit.request('/api/repos/repo-1/board', { headers: { cookie } });
+    const res = await h.cockpit.request(`/api/repos/${IDS.repo}/board`, { headers: { cookie } });
     expect(res.status).toBe(500);
     expect(await errorCode(res)).toBe('bad_response_shape');
   });
@@ -86,14 +88,14 @@ describe('看板与任务', () => {
     const h = harness();
     const { cookie } = await h.login();
     const board = BoardResponse.parse(
-      await (await h.cockpit.request('/api/repos/repo-1/board', { headers: { cookie } })).json(),
+      await (await h.cockpit.request(`/api/repos/${IDS.repo}/board`, { headers: { cookie } })).json(),
     );
-    const task = board.tasks.find((t) => t.id === 'task-12');
-    const sub = task?.subtasks.find((s) => s.id === 'sub-12a');
+    const task = board.tasks.find((t) => t.id === IDS.task12);
+    const sub = task?.subtasks.find((s) => s.id === IDS.sub12a);
     expect(sub?.activity?.text).toBe('Opus 5.5 正在写验证码过期的测试');
     expect(sub?.progress).toEqual({ done: 1, total: 3 });
     expect(task?.progress).toEqual({ done: 0, total: 2 });
-    expect(board.now.map((n) => [n.taskId, n.runId])).toEqual([['task-12', DEV_RUN_ID]]);
+    expect(board.now.map((n) => [n.taskId, n.runId])).toEqual([[IDS.task12, DEV_RUN_ID]]);
     expect((await h.cockpit.request('/api/repos/nope/board', { headers: { cookie } })).status).toBe(404);
   });
 
@@ -101,10 +103,10 @@ describe('看板与任务', () => {
     const h = harness();
     const { cookie } = await h.login();
     const detail = TaskDetailResponse.parse(
-      await (await h.cockpit.request('/api/tasks/task-12', { headers: { cookie } })).json(),
+      await (await h.cockpit.request(`/api/tasks/${IDS.task12}`, { headers: { cookie } })).json(),
     );
-    expect(detail.runs.map((r) => r.id).sort()).toEqual(['run-0', DEV_RUN_ID]);
-    expect(detail.runs.find((r) => r.id === 'run-0')?.modelName).toBe('Opus 5.5');
+    expect(detail.runs.map((r) => r.id).sort()).toEqual([IDS.run0, DEV_RUN_ID]);
+    expect(detail.runs.find((r) => r.id === IDS.run0)?.modelName).toBe('Opus 5.5');
   });
 
   it('时间线：会话报的、人做的都在，按时间倒序，翻页不重不漏', async () => {
@@ -121,7 +123,7 @@ describe('看板与任务', () => {
     }
     h.clock.now = new Date(h.clock.now.getTime() + 1000);
     await h.cockpit.request(
-      '/api/tasks/task-12/actions',
+      `/api/tasks/${IDS.task12}/actions`,
       write('POST', session, { action: 'pause', reason: '先停一下' }),
     );
 
@@ -131,7 +133,7 @@ describe('看板与任务', () => {
       const qs = new URLSearchParams({ limit: '2', ...(cursor ? { cursor } : {}) });
       const body = TimelineResponse.parse(
         await (
-          await h.cockpit.request(`/api/tasks/task-12/timeline?${qs}`, {
+          await h.cockpit.request(`/api/tasks/${IDS.task12}/timeline?${qs}`, {
             headers: { cookie: session.cookie },
           })
         ).json(),
@@ -162,13 +164,13 @@ describe('发给工作流的信号', () => {
     const h = harness();
     const s = await h.login();
     for (const action of ['pause', 'resume', 'stop'] as const) {
-      const res = await h.cockpit.request('/api/tasks/task-12/actions', write('POST', s, { action }));
+      const res = await h.cockpit.request(`/api/tasks/${IDS.task12}/actions`, write('POST', s, { action }));
       expect(res.status, action).toBe(200);
     }
     expect(h.signals.map((x) => [x.taskId, x.signal.name])).toEqual([
-      ['task-12', 'pause'],
-      ['task-12', 'resume'],
-      ['task-12', 'stop'],
+      [IDS.task12, 'pause'],
+      [IDS.task12, 'resume'],
+      [IDS.task12, 'stop'],
     ]);
     expect(h.signals[0]?.signal).toMatchObject({ by: DEV_USER_ID });
     expect(h.store.data.audit.slice(-3).map((a) => a.action)).toEqual([
@@ -181,7 +183,8 @@ describe('发给工作流的信号', () => {
   it('换路由：只许换到在线、不犯禁令的路由；目标是在跑的那次会话', async () => {
     const h = harness();
     const s = await h.login();
-    const post = (body: unknown) => h.cockpit.request('/api/tasks/task-12/actions', write('POST', s, body));
+    const post = (body: unknown) =>
+      h.cockpit.request(`/api/tasks/${IDS.task12}/actions`, write('POST', s, body));
     const fable = await post({ action: 'reroute', routeId: 'rt-mirasim-fable' });
     expect(await errorCode(fable)).toBe('route_not_allowed');
     const offline = h.store.data.routes.find((r) => r.id === 'rt-mirasim-kimi');
@@ -197,7 +200,7 @@ describe('发给工作流的信号', () => {
       name: 'reroute',
       by: DEV_USER_ID,
       routeId: 'rt-mirasim-kimi',
-      subtaskId: 'sub-12a',
+      subtaskId: IDS.sub12a,
       reason: '试试 Kimi',
     });
   });
@@ -211,17 +214,23 @@ describe('发给工作流的信号', () => {
       },
     });
     const s = await h.login();
-    const done = await h.cockpit.request('/api/tasks/task-13/actions', write('POST', s, { action: 'stop' }));
+    const done = await h.cockpit.request(
+      `/api/tasks/${IDS.task13}/actions`,
+      write('POST', s, { action: 'stop' }),
+    );
     expect(await errorCode(done)).toBe('task_finished');
-    const gone = await h.cockpit.request('/api/tasks/task-12/actions', write('POST', s, { action: 'pause' }));
+    const gone = await h.cockpit.request(
+      `/api/tasks/${IDS.task12}/actions`,
+      write('POST', s, { action: 'pause' }),
+    );
     expect(await errorCode(gone)).toBe('workflow_gone');
     expect(h.store.data.audit.slice(-2)).toMatchObject([
-      { action: 'task.pause', target: 'task:task-12', ok: true },
-      { action: 'task.pause', target: 'task:task-12', ok: false, error: 'workflow_gone' },
+      { action: 'task.pause', target: `task:${IDS.task12}`, ok: true },
+      { action: 'task.pause', target: `task:${IDS.task12}`, ok: false, error: 'workflow_gone' },
     ]);
     const timeline = TimelineResponse.parse(
       await (
-        await h.cockpit.request('/api/tasks/task-12/timeline', { headers: { cookie: s.cookie } })
+        await h.cockpit.request(`/api/tasks/${IDS.task12}/timeline`, { headers: { cookie: s.cookie } })
       ).json(),
     );
     expect(timeline.items.map((i) => i.text)).toContain('暂停没做成：workflow_gone');
@@ -234,11 +243,11 @@ describe('发给工作流的信号', () => {
       throw new Error('库写不进');
     };
     for (const action of ['pause', 'resume', 'stop']) {
-      const res = await h.cockpit.request('/api/tasks/task-12/actions', write('POST', s, { action }));
+      const res = await h.cockpit.request(`/api/tasks/${IDS.task12}/actions`, write('POST', s, { action }));
       expect(res.status, action).toBe(500);
     }
     const reroute = await h.cockpit.request(
-      '/api/tasks/task-12/actions',
+      `/api/tasks/${IDS.task12}/actions`,
       write('POST', s, { action: 'reroute', routeId: 'rt-mirasim-kimi' }),
     );
     expect(reroute.status).toBe(500);
@@ -250,7 +259,7 @@ describe('发给工作流的信号', () => {
     const s = await h.login();
     h.store.data.asks.push({
       id: 'ask-1',
-      taskId: 'task-12',
+      taskId: IDS.task12,
       runId: DEV_RUN_ID,
       question: '几位？',
       options: ['4', '6'],
@@ -260,10 +269,10 @@ describe('发给工作流的信号', () => {
     expect(res.status).toBe(200);
     expect(h.store.data.asks[0]).toMatchObject({ answer: '6', answeredBy: DEV_USER_ID });
     expect(h.signals.at(-1)).toEqual({
-      taskId: 'task-12',
+      taskId: IDS.task12,
       signal: { name: 'answer', by: DEV_USER_ID, askId: 'ask-1', answer: '6' },
     });
-    expect(h.store.data.audit.at(-1)).toMatchObject({ action: 'ask.answer', target: 'task:task-12' });
+    expect(h.store.data.audit.at(-1)).toMatchObject({ action: 'ask.answer', target: `task:${IDS.task12}` });
     const again = await h.cockpit.request('/api/asks/ask-1/answer', write('POST', s, { answer: '4' }));
     expect(await errorCode(again)).toBe('already_answered');
   });
@@ -445,7 +454,7 @@ describe('账号池、定时任务、通知、操作记录、设置', () => {
     );
     expect(list.items.map((n) => [n.id, n.deliveries[0]?.delivered])).toEqual([
       ['n-2', false],
-      ['n-1', true],
+      [IDS.notification1, true],
     ]);
     expect((await h.cockpit.request('/api/notifications/n-2/resolve', write('POST', s))).status).toBe(200);
     const open = NotificationsResponse.parse(
@@ -453,7 +462,7 @@ describe('账号池、定时任务、通知、操作记录、设置', () => {
         await h.cockpit.request('/api/notifications?status=open', { headers: { cookie: s.cookie } })
       ).json(),
     );
-    expect(open.items.map((n) => n.id)).toEqual(['n-1']);
+    expect(open.items.map((n) => n.id)).toEqual([IDS.notification1]);
     const audit = AuditResponse.parse(
       await (
         await h.cockpit.request('/api/audit?target=notification:n-2', { headers: { cookie: s.cookie } })

@@ -5,11 +5,30 @@ import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { z } from 'zod';
 import type { Deps } from './deps.ts';
+import { PublicHealthError } from './health.ts';
 import { ApiError, errorBody } from './http.ts';
-import type { User } from './ports.ts';
+import type { GitHubEventSink, User } from './ports.ts';
 
 /** GitHub 的投递上限是 25 MB。 */
 const MAX_BODY_BYTES = 25 * 1024 * 1024;
+
+/**
+ * 引擎还没接上时的 GitHub 事件去处：处理不了就如实失败（投递编号撤销登记，GitHub 记为投递失败、以后可重投），
+ * 不悄悄丢；健康检查报红。
+ */
+export function notWiredGitHub(): { sink: GitHubEventSink; check: () => Promise<void> } {
+  const why = 'GitHub 事件还没接到引擎（等引擎的 PR）';
+  return {
+    sink: {
+      async accept() {
+        throw new Error(why);
+      },
+    },
+    async check() {
+      throw new PublicHealthError('not_wired', why);
+    },
+  };
+}
 
 export function verifyGithubSignature(secret: string, body: Uint8Array, header: string | undefined): boolean {
   if (!header || !/^sha256=[0-9a-f]{64}$/i.test(header)) return false;

@@ -1,5 +1,7 @@
-// 从环境变量读配置。密钥只从环境变量来（机器本地配置），不进仓；缺了或不合规就拒绝启动，并一次列出全部问题。
+// 从环境变量读配置（机器本地配置，例如 systemd 的 EnvironmentFile）。密钥、地址只从这里来，不进仓；
+// 缺了或不合规就拒绝启动，并一次列出全部问题。
 import { randomBytes } from 'node:crypto';
+import { QUOTA_STALE_AFTER_MS } from '@fleet-dao/db';
 
 export type FleetEnv = 'production' | 'development' | 'test';
 
@@ -22,7 +24,14 @@ export interface Config {
   githubWebhookSecret: string | null;
   /** 没配时飞书登录返回 503（只允许在开发环境缺）。 */
   feishu: { appId: string; appSecret: string } | null;
-  /** 开发环境免登开关：必须 FLEET_ENV=development 且 FLEET_DEV_LOGIN=1。 */
+  /** Postgres 连接串（DATABASE_URL）。生产必须有；开发环境没有就用内存里的样例数据。 */
+  databaseUrl: string | null;
+  /**
+   * 飞书网关的通行证：香港的飞书网关经隧道调驾驶舱接口时带 `Authorization: Bearer <它>`，
+   * 并用 X-Fleet-Acting-Feishu 说明代表哪位创始人。没配就不认网关请求。
+   */
+  feishuGatewayToken: string | null;
+  /** 开发环境免登开关：必须 FLEET_ENV=development、FLEET_DEV_LOGIN=1，而且驾驶舱接口只听本机回环地址。 */
   devLogin: boolean;
   /** https 才给 Cookie 加 Secure 和 __Host- 前缀。 */
   cookieSecure: boolean;
@@ -88,8 +97,27 @@ export function loadConfig(env: Env): Config {
     problems.push('缺 FEISHU_APP_ID / FEISHU_APP_SECRET');
   }
 
+  const databaseUrl = env.DATABASE_URL || null;
+  if (!databaseUrl && !dev) problems.push('缺 DATABASE_URL（Postgres 连接串）');
+
+  const feishuGatewayToken = env.FLEET_FEISHU_GATEWAY_TOKEN || null;
+  if (feishuGatewayToken !== null) {
+    if (feishuGatewayToken.length < MIN_SECRET_LENGTH) {
+      problems.push(`FLEET_FEISHU_GATEWAY_TOKEN 太短：至少 ${MIN_SECRET_LENGTH} 个字符`);
+    }
+    if (feishuGatewayToken === sessionSecret || feishuGatewayToken === agentTokenSecret) {
+      problems.push('FLEET_FEISHU_GATEWAY_TOKEN 不能和别的密钥相同');
+    }
+  }
+
   const devLoginRequested = env.FLEET_DEV_LOGIN === '1';
   if (devLoginRequested && !dev) problems.push('FLEET_DEV_LOGIN=1 只允许和 FLEET_ENV=development 一起用');
+  // 香港把 /auth 转发到公网：驾驶舱接口一旦监听在非回环地址上，免登就等于对公网开门。
+  if (devLoginRequested && cockpitListen && !LOOPBACK.has(cockpitListen.host)) {
+    problems.push(
+      `FLEET_DEV_LOGIN=1 只允许驾驶舱接口监听本机回环地址，现在监听的是 ${cockpitListen.host}：/auth 会被转发到公网，免登不能开`,
+    );
+  }
 
   const askWaitSeconds = parseIntIn(
     'FLEET_ASK_WAIT_SECONDS',
@@ -119,10 +147,12 @@ export function loadConfig(env: Env): Config {
     agentTokenSecret,
     githubWebhookSecret,
     feishu,
+    databaseUrl,
+    feishuGatewayToken,
     devLogin: devLoginRequested && dev,
     cookieSecure: publicUrl.protocol === 'https:',
     askWaitMs: askWaitSeconds * 1000,
-    quotaStaleAfterMs: 30 * 60 * 1000,
+    quotaStaleAfterMs: QUOTA_STALE_AFTER_MS,
     sseHeartbeatMs: 25 * 1000,
   };
 }

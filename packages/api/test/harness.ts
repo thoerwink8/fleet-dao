@@ -1,25 +1,36 @@
-// 测试用的装配：内存 Store + 假飞书 + 记录信号的假工作流 + 手动推送的变化源。每个测试自己起一份，互不干扰。
+// 测试用的装配：Store（内存版，或 PGlite 上的 Postgres 版）+ 假飞书 + 记录信号的假工作流 + 变化源。
+// 每个测试自己起一份，互不干扰。
+import type { TestDb } from '@fleet-dao/db/testing';
+import { resetTestDb } from '@fleet-dao/db/testing';
+import { FLEET_CHANGES_CHANNEL } from '@fleet-dao/shared';
 import type { Hono } from 'hono';
 import { signAgentToken } from '../src/agent-token.ts';
 import { buildApps } from '../src/app.ts';
-import { type ChangeHub, createChangeHub } from '../src/changes.ts';
+import { type ChangeHub, createChangeHub, type PgChangeFeed, startPgChangeFeed } from '../src/changes.ts';
 import type { Config } from '../src/config.ts';
 import type { Deps } from '../src/deps.ts';
-import { DEV_RUN_ID, DEV_USER_ID, devFixtures } from '../src/dev-fixtures.ts';
+import { DEV_RUN_ID, DEV_USER_ID, devFixtures, IDS } from '../src/dev-fixtures.ts';
 import { FeishuRejectedError } from '../src/feishu.ts';
 import { createMemoryStore, type MemoryData } from '../src/memory-store.ts';
+import { createPgStore } from '../src/pg-store.ts';
 import type {
+  ChangeFeed,
   FeedEvent,
   FeishuAuth,
   FeishuIdentity,
+  HealthCheck,
   IngestedEvent,
   Logger,
+  Store,
   TaskSignal,
   WorkflowControl,
 } from '../src/ports.ts';
+import type { SseRelay } from '../src/sse.ts';
+import { seedPg } from './pg-fixtures.ts';
 
 export const T0 = new Date('2026-09-25T08:00:00.000Z');
 export const PUBLIC_ORIGIN = 'https://cockpit.example.test';
+export const GATEWAY_PASS = 'gateway-pass-for-tests-0123456789abcdef';
 
 export function testConfig(overrides: Partial<Config> = {}): Config {
   return {
@@ -31,6 +42,8 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     agentTokenSecret: 'agent-secret-for-tests-0123456789abcdef',
     githubWebhookSecret: 'webhook-secret-for-tests',
     feishu: { appId: 'cli_test_app', appSecret: 'feishu-secret-for-tests' },
+    databaseUrl: null,
+    feishuGatewayToken: GATEWAY_PASS,
     devLogin: false,
     cookieSecure: true,
     askWaitMs: 300,
@@ -40,7 +53,7 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
   };
 }
 
-/** 假飞书：授权码 code-<openId 后缀> 换成对应身份；code-bad 被飞书拒。记下每次调用的参数。 */
+/** 假飞书：授权码换成对应身份；不认识的授权码被飞书拒。记下每次调用的参数。 */
 export function fakeFeishu(identities: Record<string, FeishuIdentity>) {
   const calls: Parameters<FeishuAuth['identify']>[0][] = [];
   const auth: FeishuAuth = {
@@ -59,12 +72,13 @@ export function fakeFeishu(identities: Record<string, FeishuIdentity>) {
 export const FOUNDER_A_CODE = 'code-founder-a';
 export const STRANGER_CODE = 'code-stranger';
 
-export interface Harness {
+export interface Harness<S extends Store = Store> {
   cockpit: Hono;
   agent: Hono;
+  relay: SseRelay;
   config: Config;
-  store: ReturnType<typeof createMemoryStore>;
-  changes: ChangeHub;
+  store: S;
+  changes: ChangeFeed;
   signals: { taskId: string; signal: TaskSignal }[];
   accepted: IngestedEvent[];
   logs: { level: string; message: string; fields?: Record<string, unknown> | undefined }[];
@@ -83,17 +97,17 @@ export interface HarnessOptions {
   workflows?: WorkflowControl;
   feishu?: 'fake' | null;
   github?: (event: IngestedEvent) => Promise<void>;
+  health?: HealthCheck[];
 }
 
-export function harness(options: HarnessOptions = {}): Harness {
-  const clock = { now: new Date(T0) };
+function wire<S extends Store>(
+  store: S,
+  changes: ChangeFeed,
+  clock: { now: Date },
+  options: HarnessOptions,
+): Harness<S> {
   const now = () => new Date(clock.now);
   const config = testConfig(options.config);
-  const changes = createChangeHub();
-  const store = createMemoryStore(options.data ?? devFixtures(T0), {
-    now,
-    onChange: (table, id) => changes.publish({ type: 'change', table, id }),
-  });
   const signals: Harness['signals'] = [];
   const accepted: IngestedEvent[] = [];
   const logs: Harness['logs'] = [];
@@ -112,6 +126,7 @@ export function harness(options: HarnessOptions = {}): Harness {
     changes,
     log,
     now,
+    health: options.health ?? [],
     feishu: options.feishu === null ? null : feishu.auth,
     workflows: options.workflows ?? {
       async signal(taskId, signal) {
@@ -126,11 +141,12 @@ export function harness(options: HarnessOptions = {}): Harness {
         }),
     },
   };
-  const { cockpit, agent } = buildApps(deps);
+  const { cockpit, agent, relay } = buildApps(deps);
 
   return {
     cockpit,
     agent,
+    relay,
     config,
     store,
     changes,
@@ -151,14 +167,94 @@ export function harness(options: HarnessOptions = {}): Harness {
     },
     agentToken(input = {}) {
       return signAgentToken(config.agentTokenSecret, {
-        taskId: input.taskId ?? 'task-12',
-        subtaskId: input.subtaskId ?? 'sub-12a',
+        taskId: input.taskId ?? IDS.task12,
+        subtaskId: input.subtaskId ?? IDS.sub12a,
         runId: input.runId ?? DEV_RUN_ID,
         ttlSeconds: input.ttlSeconds ?? 3600,
         now: now(),
       });
     },
   };
+}
+
+/** 内存版：数据在 store.data 里，测试可以直接改。变化经 changes（ChangeHub）手动推或由 Store 推。 */
+export function harness(
+  options: HarnessOptions = {},
+): Harness<ReturnType<typeof createMemoryStore>> & { changes: ChangeHub } {
+  const clock = { now: new Date(T0) };
+  const changes = createChangeHub();
+  const store = createMemoryStore(options.data ?? devFixtures(T0), {
+    now: () => new Date(clock.now),
+    onChange: (table, id) => changes.publish({ type: 'change', table, id }),
+  });
+  return { ...wire(store, changes, clock, options), changes };
+}
+
+/**
+ * Postgres 版：PGlite 上跑真迁移，清空后写入同一份样例数据；变化来自真的 LISTEN fleet_changes（库里的触发器发）。
+ * 用完调 stop() 退掉 LISTEN。
+ */
+export async function pgHarness(
+  t: TestDb,
+  options: HarnessOptions = {},
+): Promise<Harness & { feed: PgChangeFeed; stop: () => Promise<void> }> {
+  await resetTestDb(t);
+  await seedPg(t.db, options.data ?? devFixtures(T0));
+  const clock = { now: new Date(T0) };
+  const silent: Logger = { info() {}, warn() {}, error() {} };
+  const feed = startPgChangeFeed(async (channel, onNotify, onListen) => {
+    const unlisten = await t.client.listen(channel, onNotify);
+    onListen();
+    return { unlisten };
+  }, silent);
+  // 等 LISTEN 真接上，免得测试里的第一次写入赶在它前面。
+  for (let i = 0; i < 100 && !feed.status().listening; i++) await new Promise((r) => setTimeout(r, 5));
+  const h = wire(createPgStore(t.db, { now: () => new Date(clock.now) }), feed, clock, options);
+  return { ...h, feed, stop: () => feed.stop() };
+}
+
+/** 数据库通知在提交后才送达（PGlite 在下一个任务里回调）。 */
+export const settle = (ms = 20) => new Promise((r) => setTimeout(r, ms));
+
+/** 打开 SSE：带登录 Cookie（可选带 Last-Event-ID），返回读流的 reader。 */
+export async function openEvents(h: Harness, cookie: string, lastEventId?: string) {
+  const res = await h.cockpit.request('/api/events', {
+    headers: { cookie, ...(lastEventId ? { 'last-event-id': lastEventId } : {}) },
+  });
+  if (!res.body) throw new Error('没有响应体');
+  return { res, reader: res.body.getReader() };
+}
+
+/** 从 SSE 流里一直读，直到出现 want（或超时）。 */
+export async function readUntil(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  want: string,
+  buffer = { text: '' },
+) {
+  const decoder = new TextDecoder();
+  const deadline = Date.now() + 2_000;
+  while (!buffer.text.includes(want)) {
+    if (Date.now() > deadline) throw new Error(`等不到 ${want}，已收到：${buffer.text}`);
+    const { value, done } = await reader.read();
+    if (done) throw new Error(`流提前结束，已收到：${buffer.text}`);
+    buffer.text += decoder.decode(value, { stream: true });
+  }
+  return buffer;
+}
+
+/** 把收到的文字拆成事件：[{ event, id, data }]。 */
+export function sseEvents(text: string) {
+  return text
+    .split('\n\n')
+    .filter((b) => b.startsWith('event: '))
+    .map((b) => {
+      const line = (prefix: string) =>
+        b
+          .split('\n')
+          .find((l) => l.startsWith(prefix))
+          ?.slice(prefix.length);
+      return { event: line('event: '), id: line('id: '), data: line('data: ') };
+    });
 }
 
 /** 把响应里的 Set-Cookie 变成下一个请求能带的 Cookie 头（只取 名=值）。 */
@@ -194,10 +290,33 @@ export function write(
   };
 }
 
-export function agentRequest(token: string, method: 'GET' | 'POST' = 'GET', body?: unknown): RequestInit {
+/** 飞书网关的请求：网关通行证 + 代表哪位创始人；不带 Cookie、不带 CSRF。 */
+export function viaGateway(
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH',
+  actingOpenId: string,
+  body?: unknown,
+  pass = GATEWAY_PASS,
+): RequestInit {
   return {
     method,
-    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    headers: {
+      authorization: `Bearer ${pass}`,
+      'x-fleet-acting-feishu': actingOpenId,
+      'content-type': 'application/json',
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  };
+}
+
+export function agentRequest(
+  token: string,
+  method: 'GET' | 'POST' = 'GET',
+  body?: unknown,
+  extraHeaders: Record<string, string> = {},
+): RequestInit {
+  return {
+    method,
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', ...extraHeaders },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   };
 }
@@ -208,4 +327,4 @@ export async function errorCode(res: Response): Promise<string> {
 }
 
 export type { FeedEvent };
-export { DEV_RUN_ID, DEV_USER_ID };
+export { DEV_RUN_ID, DEV_USER_ID, FLEET_CHANGES_CHANNEL, IDS };

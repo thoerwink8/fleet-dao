@@ -38,7 +38,8 @@ function rejected(reasons: string[]): DoneVerdict {
 
 export function checkDone(input: {
   stage: StageKind;
-  branch: string;
+  /** 本会话的分支；引擎还没建分支时没有。 */
+  branch?: string | undefined;
   request: z.output<typeof DoneRequest>;
   /** request.prNumber 对应的镜像记录；没带 PR 编号或库里没有都是 null。 */
   pr: PullRequestRecord | null;
@@ -60,7 +61,9 @@ export function checkDone(input: {
   }
 
   if (pr) {
-    if (pr.headRef !== input.branch) {
+    if (input.branch === undefined) {
+      reasons.push(`本次会话还没有分支，没法核对 PR #${pr.number} 是不是它的`);
+    } else if (pr.headRef !== input.branch) {
       reasons.push(`PR #${pr.number} 的分支是 ${pr.headRef}，不是本会话的分支 ${input.branch}`);
     }
     if (pr.state === 'closed') reasons.push(`PR #${pr.number} 已经关了`);

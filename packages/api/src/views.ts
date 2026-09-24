@@ -246,10 +246,13 @@ export function buildPools(
       .filter((w) => w.poolId === p.id)
       .map((w) => ({
         window: w.window,
+        scope: w.scope,
+        // 可以大于 1（超额），原样给出，前端画进度条时再截。
         utilization: w.utilization,
         used: w.used,
         limit: w.limit,
         resetsAt: w.resetsAt,
+        upstreamStatus: w.upstreamStatus,
         reading: w.reading,
         readAt: w.readAt,
         stale: now.getTime() - Date.parse(w.readAt) > staleAfterMs,
@@ -274,11 +277,15 @@ export function buildPools(
 // —— 定时任务 ——
 
 /** 允许错过一次：超过两个周期还没成功才算 overdue。 */
+/**
+ * 上次跑成（ok / partial）距今超过 expectEveryMinutes 就算过期——这个数登记时已经含了周期、抖动和一轮耗时
+ * （packages/db 的 scheduled_jobs 说明），所以不再另加余量。
+ */
 export function jobView(job: JobRecord, now: Date): z.input<typeof JobViewSchema> {
   let status: 'fresh' | 'overdue' | 'never' = 'never';
   if (job.lastSuccessAt) {
     const age = now.getTime() - Date.parse(job.lastSuccessAt);
-    status = age > 2 * job.expectEveryMinutes * 60_000 ? 'overdue' : 'fresh';
+    status = age > job.expectEveryMinutes * 60_000 ? 'overdue' : 'fresh';
   }
   return {
     id: job.id,
@@ -362,8 +369,38 @@ export function describeTimeline(rec: TimelineRecord): string {
       return `改文件：${text(p, 'path') ?? '（没带路径）'}`;
     case 'tool':
       return `用工具：${text(p, 'name') ?? '（没带名字）'}`;
-    case 'state':
-      return `状态：${text(p, 'from') ?? '?'} → ${text(p, 'to') ?? '?'}`;
+    case 'state': {
+      const who = field(p, 'entity') === 'subtask' ? '子任务' : '需求';
+      const from = text(p, 'from');
+      const to = text(p, 'to') ?? '?';
+      return from ? `${who}状态：${from} → ${to}` : `${who}建立：${to}`;
+    }
+    case 'run_queued': {
+      const stage = text(p, 'stage');
+      const word = stage && stage in STAGE_WORDS ? STAGE_WORDS[stage as StageKind] : (stage ?? '会话');
+      const why = text(p, 'whyRoute');
+      return `${word}排进队列${why ? `（${why}）` : ''}`;
+    }
+    case 'run_started': {
+      const queueMs = field(p, 'queueMs');
+      return typeof queueMs === 'number' ? `开工（排队 ${Math.round(queueMs / 60_000)} 分钟）` : '开工';
+    }
+    case 'run_ended': {
+      const outcome = text(p, 'outcome');
+      const word =
+        outcome === 'ok'
+          ? '做完'
+          : outcome === 'failed'
+            ? '失败'
+            : outcome === 'stopped'
+              ? '被叫停'
+              : outcome === 'stalled'
+                ? '停滞'
+                : '结束';
+      return `会话${word}`;
+    }
+    case 'notification':
+      return `通知：${text(p, 'title') ?? '（没带标题）'}`;
     case 'answer':
       return `回答追问：${text(p, 'answer') ?? '（没带回答原文）'}`;
     case 'done_rejected': {

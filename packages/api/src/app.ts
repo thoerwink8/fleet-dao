@@ -10,7 +10,9 @@ import { createAskWaiters } from './changes.ts';
 import { cockpitRoutes } from './cockpit.ts';
 import type { Deps } from './deps.ts';
 import { createGitHubIntake, githubRoutes } from './github.ts';
+import { healthHandler } from './health.ts';
 import { errorBody, errorHandler, notFound } from './http.ts';
+import { createSseRelay, type SseRelay } from './sse.ts';
 
 /** 驾驶舱和 fleet 命令的请求体都很小；GitHub 事件另有自己的上限。 */
 const MAX_JSON_BYTES = 1024 * 1024;
@@ -23,19 +25,22 @@ const jsonLimit = bodyLimit({
 export interface Apps {
   cockpit: Hono;
   agent: Hono;
+  /** SSE 的中转（带补发缓冲）：看在线连接数用。 */
+  relay: SseRelay;
 }
 
 export function buildApps(deps: Deps): Apps {
   const waiters = createAskWaiters(deps.changes);
+  const relay = createSseRelay(deps.changes);
 
   const cockpit = new Hono();
   cockpit.onError(errorHandler(deps.log));
   cockpit.notFound(notFound);
-  cockpit.get('/healthz', (c) => c.json({ ok: true }));
+  cockpit.get('/healthz', healthHandler(deps.health, deps.log));
   cockpit.use(`${WEB_API_PREFIX}/*`, jsonLimit);
   cockpit.use(`${AUTH_PREFIX}/*`, jsonLimit);
   cockpit.route(AUTH_PREFIX, authRoutes(deps));
-  cockpit.route(WEB_API_PREFIX, cockpitRoutes(deps, waiters));
+  cockpit.route(WEB_API_PREFIX, cockpitRoutes(deps, waiters, relay));
   cockpit.route('/github', githubRoutes(deps, createGitHubIntake(deps)));
 
   const agent = new Hono();
@@ -44,5 +49,5 @@ export function buildApps(deps: Deps): Apps {
   agent.use(`${AGENT_API_PREFIX}/*`, jsonLimit);
   agent.route(AGENT_API_PREFIX, agentRoutes(deps, waiters));
 
-  return { cockpit, agent };
+  return { cockpit, agent, relay };
 }

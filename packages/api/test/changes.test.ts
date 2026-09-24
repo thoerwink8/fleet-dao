@@ -1,29 +1,22 @@
+import { FLEET_CHANGES_CHANNEL, REALTIME_TABLES } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
-import {
-  CHANGES_CHANNEL,
-  createAskWaiters,
-  createChangeHub,
-  parseChangePayload,
-  startPgChangeFeed,
-} from '../src/changes.ts';
+import { createAskWaiters, createChangeHub, parseChangePayload, startPgChangeFeed } from '../src/changes.ts';
 import { silentLogger } from '../src/log.ts';
 import type { FeedEvent, Logger } from '../src/ports.ts';
 
-describe('NOTIFY 载荷', () => {
-  it('表名 + 主键；数字主键转成字符串；看不懂的丢掉', () => {
-    expect(parseChangePayload('{"table":"tasks","id":"t1"}')).toEqual({
-      type: 'change',
-      table: 'tasks',
-      id: 't1',
-    });
-    expect(parseChangePayload('{"table":"tasks","id":42}')).toEqual({
-      type: 'change',
-      table: 'tasks',
-      id: '42',
-    });
+describe('NOTIFY 载荷（形状照 shared/realtime.ts）', () => {
+  it('表名 + 文本主键；名单外的表、数字主键、看不懂的都丢掉', () => {
+    for (const table of REALTIME_TABLES) {
+      expect(parseChangePayload(JSON.stringify({ table, id: 'x1' }))).toEqual({
+        type: 'change',
+        table,
+        id: 'x1',
+      });
+    }
+    expect(parseChangePayload('{"table":"tasks","id":42}')).toBeNull();
+    expect(parseChangePayload('{"table":"pull_requests","id":"1"}')).toBeNull();
     expect(parseChangePayload('tasks:t1')).toBeNull();
     expect(parseChangePayload('{"table":"tasks"}')).toBeNull();
-    expect(parseChangePayload('{"table":"","id":"x"}')).toBeNull();
   });
 });
 
@@ -35,7 +28,7 @@ describe('LISTEN fleet_changes', () => {
     let unlistened = false;
     const warnings: string[] = [];
     const log: Logger = { ...silentLogger, warn: (m) => warnings.push(m) };
-    const feed = await startPgChangeFeed(async (ch, onNotify, listen) => {
+    const feed = startPgChangeFeed(async (ch, onNotify, listen) => {
       channel = ch;
       notify = onNotify;
       onListen = listen;
@@ -46,7 +39,8 @@ describe('LISTEN fleet_changes', () => {
         },
       };
     }, log);
-    expect(channel).toBe(CHANGES_CHANNEL);
+    expect(channel).toBe(FLEET_CHANGES_CHANNEL);
+    expect(feed.status().listening).toBe(true);
     const got: FeedEvent[] = [];
     feed.subscribe((e) => got.push(e));
 
@@ -57,6 +51,33 @@ describe('LISTEN fleet_changes', () => {
     expect(warnings).toHaveLength(2);
     await feed.stop();
     expect(unlistened).toBe(true);
+  });
+
+  it('库没起来：进程照样起、状态报没接上；退避重试，接上后广播 resync（中间可能漏了）', async () => {
+    let attempts = 0;
+    const errors: string[] = [];
+    const log: Logger = { ...silentLogger, error: (m) => errors.push(m) };
+    const feed = startPgChangeFeed(
+      async (_channel, _onNotify, onListen) => {
+        attempts += 1;
+        if (attempts < 3) throw new Error('connect ECONNREFUSED');
+        onListen();
+        return { unlisten: async () => {} };
+      },
+      log,
+      { retryMinMs: 5, retryMaxMs: 10 },
+    );
+    const got: FeedEvent[] = [];
+    feed.subscribe((e) => got.push(e));
+    await new Promise((r) => setTimeout(r, 1));
+    expect(feed.status()).toMatchObject({ listening: false, lastError: 'connect ECONNREFUSED' });
+    for (let i = 0; i < 100 && !feed.status().listening; i++) await new Promise((r) => setTimeout(r, 5));
+    expect(attempts).toBe(3);
+    expect(feed.status()).toEqual({ listening: true, lastError: undefined });
+    expect(got).toEqual([{ type: 'resync' }]);
+    expect(errors).toHaveLength(2);
+    await feed.stop();
+    expect(feed.status().listening).toBe(false);
   });
 
   it('一个订阅者抛错不影响别人；退订后收不到', () => {
@@ -74,7 +95,7 @@ describe('LISTEN fleet_changes', () => {
 });
 
 describe('等回答', () => {
-  it('对应主键的变化叫醒；resync 叫醒所有；不然到时间醒', async () => {
+  it('asks 表对应那一行的变化叫醒；别的表同编号不叫醒；resync 叫醒所有；不然到时间醒', async () => {
     const hub = createChangeHub();
     const waiters = createAskWaiters(hub);
     const started = Date.now();
@@ -85,9 +106,15 @@ describe('等回答', () => {
     hub.publish({ type: 'resync' });
     await b;
     expect(Date.now() - started).toBeLessThan(1_000);
-    const t = Date.now();
-    await waiters.sleep('ask-3', 30);
-    expect(Date.now() - t).toBeGreaterThanOrEqual(25);
+
+    let woke = false;
+    const c = waiters.sleep('ask-3', 60).then(() => {
+      woke = true;
+    });
+    hub.publish({ type: 'change', table: 'tasks', id: 'ask-3' });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(woke).toBe(false);
+    await c;
   });
 
   it('请求中止就不等了', async () => {
