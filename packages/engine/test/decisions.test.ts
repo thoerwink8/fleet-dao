@@ -19,6 +19,7 @@ import {
   validatePlan,
 } from '../src/decisions/index.ts';
 import { DEFAULT_LIMITS, resolveLimits } from '../src/limits.ts';
+import { costOfRun } from '../src/usage.ts';
 
 const limits = DEFAULT_LIMITS;
 const failure = (code: string, retryable: boolean | null = null) => ({
@@ -402,6 +403,16 @@ describe('子任务的墙钟预算（F5）', () => {
         elapsedMinutes: 300,
       }).action,
     ).toBe('merge');
+  });
+});
+
+describe('这一次的花费（执行体报的是会话累计）', () => {
+  it('头一回跑取累计；续会话取差；上一轮没读到就不给，不记 0', () => {
+    expect(costOfRun(undefined, 0.3)).toBe(0.3);
+    expect(costOfRun(0.3, 0.5)).toBe(0.2);
+    expect(costOfRun(null, 0.5)).toBeUndefined();
+    expect(costOfRun(0.3, undefined)).toBeUndefined();
+    expect(costOfRun(0.5, 0.3)).toBe(0);
   });
 });
 

@@ -190,8 +190,10 @@ export interface SessionEnd {
   };
   /** code 用结构化的：插头判定的原因（quota_exhausted、model_mismatch……）、SESSION_LOST…… */
   failure?: { code: string; message: string; retryable?: boolean };
-  /** 这个会话（sessionId）到目前为止的累计用量；续会话时引擎按上一轮求差，得出这一次的。 */
-  usage?: Usage;
+  /** 这一次会话的 token（执行体终帧报的就是这一次的）。 */
+  usage?: { inputTokens?: number; outputTokens?: number };
+  /** 整个会话（sessionId）到目前为止的累计花费（续会话时含前几轮）；这一次的由引擎按上一轮求差。 */
+  sessionCostUsd?: number;
 }
 
 export interface Usage {
@@ -407,7 +409,7 @@ export interface WaitTiming {
   waitMs: number;
 }
 
-/** 一次会话结束：结局和这一次的用量（续会话时是和上一轮累计值的差）。写进库里那一行 session_runs（按 runId）。 */
+/** 一次会话结束：结局和这一次的用量（花费是和上一轮累计值的差）。写进库里那一行 session_runs（按 runId）。 */
 export interface SessionRunRecord {
   kind: 'session';
   workflowId: string;
@@ -420,10 +422,10 @@ export interface SessionRunRecord {
   routeId: string;
   outcome: RunOutcome;
   endedAt: string;
-  /** 这一次的用量；不知道的字段不给（不记 0）。 */
+  /** 这一次的用量；不知道的字段不给（不记 0）。上一轮的累计花费没读到时，这一次的花费求不了差，也不给。 */
   usage: Usage;
-  /** 执行体报的累计值，对账用。 */
-  usageTotal: Usage;
+  /** 执行体报的会话累计花费，对账用。 */
+  sessionCostUsd?: number;
   failureCode?: string;
 }
 

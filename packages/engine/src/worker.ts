@@ -1,6 +1,7 @@
 // worker：连 Temporal、打包工作流、挂上活动。地址、命名空间、任务队列等从本机配置（环境变量）读，不写死进代码。
 
 import { fileURLToPath } from 'node:url';
+import { signAgentToken } from '@fleet-dao/api/agent-token';
 import { bundleWorkflowCode, NativeConnection, Worker, type WorkflowBundle } from '@temporalio/worker';
 import { type AgentTokenClaims, createActivities } from './activities.ts';
 import { type Classifier, createDecide } from './decisions/index.ts';
@@ -42,6 +43,23 @@ export function configFromEnv(env: Record<string, string | undefined> = process.
     agentApiUrl: env.FLEET_AGENT_API_URL?.trim() || null,
     cliBinDir: env.FLEET_CLI_BIN?.trim() || DEFAULT_CLI_BIN_DIR,
   };
+}
+
+/**
+ * fleet 通行证用驾驶舱后端的 signAgentToken 签（后端用同一把钥匙验）。钥匙从本机配置 FLEET_AGENT_TOKEN_SECRET 读，没配返回 null。
+ */
+export function agentTokenSignerFromEnv(
+  env: Record<string, string | undefined> = process.env,
+): ((claims: AgentTokenClaims) => string) | null {
+  const secret = env.FLEET_AGENT_TOKEN_SECRET;
+  if (!secret) return null;
+  return (claims) =>
+    signAgentToken(secret, {
+      taskId: claims.taskId,
+      subtaskId: claims.subtaskId,
+      runId: claims.runId,
+      ttlSeconds: claims.ttlSeconds,
+    });
 }
 
 export const WORKFLOWS_PATH = fileURLToPath(new URL('./workflows/index.ts', import.meta.url));
@@ -116,7 +134,7 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
       config: { ...config, agentApiUrl: config.agentApiUrl ?? 'fake://agent-api' },
       ports,
       connection,
-      signAgentToken: (claims) => `fake-token.${claims.runId}`,
+      signAgentToken: agentTokenSignerFromEnv(env) ?? ((claims) => `fake-token.${claims.runId}`),
       log: (message) => console.info(message),
     });
     console.info(

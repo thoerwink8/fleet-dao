@@ -123,7 +123,7 @@ describe('子任务工作流', { timeout: 60_000 }, () => {
     expect(markers.length).toBeGreaterThanOrEqual(2);
   });
 
-  it('会话结局记进库：用量是执行体累计值和上一轮的差（续会话时不重复算）', async () => {
+  it('会话结局记进库：花费是会话累计值和上一轮的差（续会话时不重复算），token 是这一次的', async () => {
     const world = createFakeWorld({
       review: (_input, n) =>
         n === 1 ? { verdict: 'changes', findings: [{ severity: 'blocking', text: '漏了过期' }] } : undefined,
@@ -131,10 +131,10 @@ describe('子任务工作流', { timeout: 60_000 }, () => {
     await withWorker(env, world, async (q) => (await startSubtask(q)).result());
     const runs = world.timings.filter((t) => t.kind === 'session');
     const execs = runs.filter((r) => r.stage === 'execute');
-    // 写码会话跑了两次（第二次是续上同一个会话返工）：累计 100 → 200，这一次的都是 100。
-    expect(execs.map((r) => [r.outcome, r.usageTotal.inputTokens, r.usage.inputTokens])).toEqual([
-      ['ok', 100, 100],
-      ['ok', 200, 100],
+    // 写码会话跑了两次（第二次是续上同一个会话返工）：累计花费 0.01 → 0.02，这一次的都是 0.01。
+    expect(execs.map((r) => [r.outcome, r.sessionCostUsd, r.usage.costUsd, r.usage.inputTokens])).toEqual([
+      ['ok', 0.01, 0.01, 100],
+      ['ok', 0.02, 0.01, 100],
     ]);
     expect(new Set(runs.map((r) => r.runId)).size).toBe(runs.length);
   });

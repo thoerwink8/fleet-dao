@@ -56,6 +56,7 @@ import type {
   Usage,
   WaitKind,
 } from '../ports.ts';
+import { costOfRun } from '../usage.ts';
 
 /** 流程判断：本地活动，结果进历史，重放时不重算。 */
 export const { decide } = proxyLocalActivities<{ decide: Decide }>({
@@ -253,24 +254,12 @@ export interface Kit {
   parkCount: number;
   /** 正在跑的会话（同一时刻可能有写码和第二意见两个）。 */
   active: Record<string, ActiveSession>;
-  /** 每个会话（sessionId）上一轮报的累计用量：执行体报累计值，这一次的用量按它求差。 */
-  usageSeen: Record<string, Usage>;
+  /** 每个会话（sessionId）上一轮报的累计花费；null = 上一轮没读到。这一次的花费按它求差。 */
+  costSeen: Record<string, number | null>;
 }
 
-export function newKit(fields: Omit<Kit, 'parkCount' | 'active' | 'usageSeen'>): Kit {
-  return { ...fields, parkCount: 0, active: {}, usageSeen: {} };
-}
-
-/** 这一次的用量 = 这次报的累计 − 上一轮的累计；累计变小（换了会话）就整个算这一次的。不知道的字段不给。 */
-export function usageDelta(before: Usage | undefined, total: Usage): Usage {
-  const out: Usage = {};
-  for (const key of ['inputTokens', 'outputTokens', 'costUsd'] as const) {
-    const now = total[key];
-    if (now === undefined) continue;
-    const prev = before?.[key] ?? 0;
-    out[key] = now >= prev ? now - prev : now;
-  }
-  return out;
+export function newKit(fields: Omit<Kit, 'parkCount' | 'active' | 'costSeen'>): Kit {
+  return { ...fields, parkCount: 0, active: {}, costSeen: {} };
 }
 
 export async function recordWait(
@@ -560,9 +549,9 @@ async function recordSessionEnd(
   runId: string,
   end: SessionEnd,
 ): Promise<void> {
-  const total = end.usage ?? {};
-  const usage = usageDelta(end.sessionId ? kit.usageSeen[end.sessionId] : undefined, total);
-  if (end.sessionId && end.usage) kit.usageSeen = { ...kit.usageSeen, [end.sessionId]: end.usage };
+  const cost = costOfRun(end.sessionId ? kit.costSeen[end.sessionId] : undefined, end.sessionCostUsd);
+  if (end.sessionId) kit.costSeen = { ...kit.costSeen, [end.sessionId]: end.sessionCostUsd ?? null };
+  const usage: Usage = { ...end.usage, ...(cost === undefined ? {} : { costUsd: cost }) };
   try {
     await CancellationScope.nonCancellable(() =>
       kit.acts.recordTiming({
@@ -576,7 +565,7 @@ async function recordSessionEnd(
         outcome: OUTCOME[end.outcome],
         endedAt: iso(Date.now()),
         usage,
-        usageTotal: total,
+        ...(end.sessionCostUsd === undefined ? {} : { sessionCostUsd: end.sessionCostUsd }),
         ...(end.failure?.code ? { failureCode: end.failure.code } : {}),
       }),
     );

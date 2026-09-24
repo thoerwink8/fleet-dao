@@ -166,29 +166,24 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
     }
   };
 
-  /** 执行体报的是会话累计用量：同一个会话每跑一次加 100/10 个 token、1 分钱。 */
-  const usageTotals = new Map<string, { inputTokens: number; outputTokens: number; costUsd: number }>();
-  const addUsage = (sessionId: string) => {
-    const prev = usageTotals.get(sessionId) ?? { inputTokens: 0, outputTokens: 0, costUsd: 0 };
-    const total = {
-      inputTokens: prev.inputTokens + 100,
-      outputTokens: prev.outputTokens + 10,
-      costUsd: Math.round((prev.costUsd + 0.01) * 100) / 100,
-    };
-    usageTotals.set(sessionId, total);
-    return total;
+  /** 和真执行体一样：token 报这一次的，花费报会话累计的（同一个会话每跑一次加 1 分钱）。 */
+  const costTotals = new Map<string, number>();
+  const usageOf = (sessionId: string) => {
+    const sessionCostUsd = Math.round(((costTotals.get(sessionId) ?? 0) + 0.01) * 100) / 100;
+    costTotals.set(sessionId, sessionCostUsd);
+    return { usage: { inputTokens: 100, outputTokens: 10 }, sessionCostUsd };
   };
 
   const endFor = (s: FakeSession): SessionEnd => {
-    const usage = addUsage(s.id);
-    if (s.stopped) return { sessionId: s.id, outcome: 'stopped', usage };
+    const spent = usageOf(s.id);
+    if (s.stopped) return { sessionId: s.id, outcome: 'stopped', ...spent };
     const outcome = s.plan.outcome ?? 'done';
-    if (outcome === 'done') return { sessionId: s.id, outcome, output: outputFor(s), usage };
+    if (outcome === 'done') return { sessionId: s.id, outcome, output: outputFor(s), ...spent };
     if (outcome === 'blocked') {
       return {
         sessionId: s.id,
         outcome,
-        usage,
+        ...spent,
         blocked: {
           reason: s.plan.blocked?.reason ?? '需要人回答',
           needs: 'human',
@@ -201,7 +196,7 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
     return {
       sessionId: s.id,
       outcome,
-      usage,
+      ...spent,
       failure: {
         code: failure.code,
         message: failure.message ?? `假会话${outcome === 'stalled' ? '没动静' : '失败'}`,

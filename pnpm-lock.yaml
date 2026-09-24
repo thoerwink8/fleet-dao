@@ -85,6 +85,9 @@ importers:
 
   packages/engine:
     dependencies:
+      '@fleet-dao/api':
+        specifier: workspace:*
+        version: link:../api
       '@fleet-dao/shared':
         specifier: workspace:*
         version: link:../shared

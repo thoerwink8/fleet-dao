@@ -250,21 +250,22 @@ export const mergeQueueStatusQuery = defineQuery<MergeQueueStatus>('status');
 // ---- 信号：名字和参数跟驾驶舱后端的 TaskSignal 一一对应（信号名 = TaskSignal.name，参数 = 去掉 name 的其余字段）。
 // 后端只按任务找需求工作流发；需求工作流转给在跑的子任务。
 
+/** 可选字段都收 undefined：后端的 TaskSignal 就是这么写的。 */
 export interface CommandMeta {
-  by?: string;
-  reason?: string;
+  by?: string | undefined;
+  reason?: string | undefined;
 }
 
 export interface RerouteCommand extends CommandMeta {
   routeId: string;
   /** 只换这个子任务（库里的 subtasks.id）；不给就是整个需求。 */
-  subtaskId?: string;
+  subtaskId?: string | undefined;
   /** 只换这个阶段；不给就是主线那几步（需求的分诊/需求文档/方案、子任务的写码）。 */
-  stage?: StageKind;
+  stage?: StageKind | undefined;
 }
 
 export interface AnswerCommand {
-  by?: string;
+  by?: string | undefined;
   askId: string;
   answer: string;
 }
@@ -273,7 +274,7 @@ export interface AgentEventCommand {
   /** 哪一次会话（session_runs.id）。 */
   runId: string;
   kind: 'plan' | 'say' | 'ask' | 'done' | 'blocked';
-  askId?: string;
+  askId?: string | undefined;
 }
 
 /** 暂停：会话停在干净的点（做完的先提交），不再开新步骤。 */
