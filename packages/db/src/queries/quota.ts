@@ -10,13 +10,34 @@ export const QUOTA_STALE_AFTER_MS = 30 * 60_000;
 /** 上游不再报的窗口，标过期满这么久就删掉（清理派生数据）。 */
 export const QUOTA_UNREPORTED_TTL_MS = 24 * 60 * 60_000;
 
-/** 按池判「额度没读成」：从没读成过，或最近一次读成已超过 staleAfterMs。每小时对账和候选路由都按它，不逐窗口看。 */
-export function quotaReadOverdue(
-  lastReadOkAt: Date | null,
-  now: Date,
-  staleAfterMs = QUOTA_STALE_AFTER_MS,
-): boolean {
-  return lastReadOkAt === null || now.getTime() - lastReadOkAt.getTime() > staleAfterMs;
+/** 一个池的读数新不新看两个时刻。 */
+export interface PoolReadTimes {
+  /** 最近一次完整读成的时刻（我们读的时刻）。 */
+  lastReadOkAt: Date | null;
+  /** 上游数据本身的时刻：这个池还在报的窗口里最新的读数时刻（中转给的是它自己的采集时刻）。一个在报的窗口都没有时为空。 */
+  dataAt: Date | null;
+}
+
+/**
+ * 按池判「额度没读成」：从没读成过、最近一次读成超过 staleAfterMs，或上游数据本身超过 staleAfterMs 没前进
+ * （读是读成了，上游的数冻住了）。每小时对账和候选路由都按它，不逐窗口看。
+ */
+export function quotaReadOverdue(t: PoolReadTimes, now: Date, staleAfterMs = QUOTA_STALE_AFTER_MS): boolean {
+  const old = (at: Date) => now.getTime() - at.getTime() > staleAfterMs;
+  return t.lastReadOkAt === null || old(t.lastReadOkAt) || (t.dataAt !== null && old(t.dataAt));
+}
+
+/** 每个池还在报的窗口（没标过期的）里最新的读数时刻，即 PoolReadTimes.dataAt。 */
+export function poolDataTimes(
+  windows: readonly Pick<typeof quotaWindows.$inferSelect, 'poolId' | 'readAt' | 'staleSince'>[],
+): Map<string, Date> {
+  const out = new Map<string, Date>();
+  for (const w of windows) {
+    if (w.staleSince !== null) continue;
+    const seen = out.get(w.poolId);
+    if (!seen || seen.getTime() < w.readAt.getTime()) out.set(w.poolId, w.readAt);
+  }
+  return out;
 }
 
 /**
@@ -53,8 +74,8 @@ export function remainingRatio(w: Pick<WindowReading, 'utilization' | 'used' | '
 export type StoredQuotaWindow = Omit<QuotaWindow, 'staleSince'> &
   Required<Pick<QuotaWindow, 'label' | 'unit' | 'source'>>;
 
-/** 按（池, label）覆盖一个窗口；库里那行的读数比它新就不动。返回是否写进去了。 */
-async function writeWindow(db: Db, w: StoredQuotaWindow): Promise<boolean> {
+/** 按（池, label）覆盖一个窗口；库里那行的读数比它新就不动。readAt 由调用方按「不晚于现在」处理过。返回是否写进去了。 */
+async function writeWindow(db: Db, w: StoredQuotaWindow, readAt: Date): Promise<boolean> {
   const changes = {
     window: w.window,
     scope: w.scope ?? '',
@@ -67,7 +88,7 @@ async function writeWindow(db: Db, w: StoredQuotaWindow): Promise<boolean> {
     statusRaw: w.statusRaw ?? null,
     reading: w.reading,
     source: w.source,
-    readAt: new Date(w.readAt),
+    readAt,
   };
   const written = await db
     .insert(quotaWindows)
@@ -84,8 +105,14 @@ async function writeWindow(db: Db, w: StoredQuotaWindow): Promise<boolean> {
 /** 读成的一次读数（和 adapters 额度读取器的 PoolReadOk 对得上）。读失败没有这个东西。 */
 export interface PoolQuotaSnapshot {
   poolId: string;
-  /** 这次读的时刻。比库里记的最近一次读成还早（晚到的）就整批不生效。 */
+  /** 这次读的时刻。比库里记的最近一次读成还早（晚到的）就整批不生效；比现在还晚的按现在算。 */
   readAt: string;
+  /**
+   * 这次是不是把池的窗口读全了：读取器主动读、一个窗口都没丢，才是 true。
+   * 被动读数（会话里顺带读到的）、读取器因为缺数丢过窗口的读数是 false：只写收到的窗口，
+   * 不标别的窗口过期、不删，也不算一次读成（最近读成时刻不动）。
+   */
+  complete: boolean;
   /** 可以是空数组：上游明说没有额度窗口。 */
   windows: readonly StoredQuotaWindow[];
   /** 读数里的订阅到期日（目前只有 Cursor 给账期末）。给了就写进 pools.expires_at，没给不动。 */
@@ -105,14 +132,23 @@ export interface SavePoolQuotaResult {
   deleted: number;
 }
 
+export interface SavePoolQuotaOptions {
+  /** 现在几点；比它还晚的读数时刻按它算，免得一次时钟跑快的读数把池冻住（之后的读数全成了「晚到的」）。 */
+  now?: Date;
+}
+
 /**
  * 额度账的唯一写入口，只在读成时调。读失败什么都不调、什么都不动（最近读成时刻不更新、窗口不标过期），
  * 失败由调用方报警。一个池一次读到的东西在同一事务里写：
- * - 池上记最近一次读成的时刻；订阅到期日、成员表给了才写。
- * - 这次报了的窗口按（池, label）覆盖，清掉过期标记。
- * - 这次没报的窗口标过期（stale_since = 这次读的时刻，已经标过的不重标）；标过期满 24 小时的删掉。
+ * - 这次报了的窗口按（池, label）覆盖，清掉过期标记；订阅到期日、成员表给了才写。
+ * - 读全了（complete）才算一次读成：池上记最近读成时刻；这次没报的窗口标过期
+ *   （stale_since = 这次读的时刻，已经标过的不重标）；标过期满 24 小时的删掉。
  */
-export async function savePoolQuota(db: Db, snapshot: PoolQuotaSnapshot): Promise<SavePoolQuotaResult> {
+export async function savePoolQuota(
+  db: Db,
+  snapshot: PoolQuotaSnapshot,
+  options: SavePoolQuotaOptions = {},
+): Promise<SavePoolQuotaResult> {
   const labels = new Set<string>();
   for (const w of snapshot.windows) {
     if (w.poolId !== snapshot.poolId) {
@@ -121,7 +157,13 @@ export async function savePoolQuota(db: Db, snapshot: PoolQuotaSnapshot): Promis
     if (labels.has(w.label)) throw new Error(`池 ${snapshot.poolId} 的这次读数里窗口 ${w.label} 出现了两次`);
     labels.add(w.label);
   }
-  const readAt = new Date(snapshot.readAt);
+  const now = options.now ?? new Date();
+  const notAfterNow = (iso: string) => {
+    const at = Date.parse(iso);
+    if (Number.isNaN(at)) throw new Error(`池 ${snapshot.poolId} 的读数时刻认不出：${iso}`);
+    return new Date(Math.min(at, now.getTime()));
+  };
+  const readAt = notAfterNow(snapshot.readAt);
   return db.transaction(async (tx) => {
     // 锁住这一行：同一个池的两次读数并发写时排队，免得互相把对方刚报的窗口标成过期。
     const [pool] = await tx
@@ -133,17 +175,17 @@ export async function savePoolQuota(db: Db, snapshot: PoolQuotaSnapshot): Promis
     if (pool.lastReadOkAt !== null && pool.lastReadOkAt.getTime() > readAt.getTime()) {
       return { written: 0, skippedAsOlder: snapshot.windows.length, markedStale: 0, deleted: 0 };
     }
-    await tx
-      .update(pools)
-      .set({
-        lastReadOkAt: readAt,
-        ...(snapshot.expiresAt !== undefined && { expiresAt: new Date(snapshot.expiresAt) }),
-        ...(snapshot.scopeModels !== undefined && { scopeModels: snapshot.scopeModels }),
-      })
-      .where(eq(pools.id, snapshot.poolId));
+    const poolChanges = {
+      ...(snapshot.complete && { lastReadOkAt: readAt }),
+      ...(snapshot.expiresAt !== undefined && { expiresAt: new Date(snapshot.expiresAt) }),
+      ...(snapshot.scopeModels !== undefined && { scopeModels: snapshot.scopeModels }),
+    };
+    if (Object.keys(poolChanges).length > 0) {
+      await tx.update(pools).set(poolChanges).where(eq(pools.id, snapshot.poolId));
+    }
 
     let written = 0;
-    for (const w of snapshot.windows) if (await writeWindow(tx, w)) written++;
+    for (const w of snapshot.windows) if (await writeWindow(tx, w, notAfterNow(w.readAt))) written++;
     const inPool = eq(quotaWindows.poolId, snapshot.poolId);
     const reported = [...labels];
     if (reported.length > 0) {
@@ -151,6 +193,9 @@ export async function savePoolQuota(db: Db, snapshot: PoolQuotaSnapshot): Promis
         .update(quotaWindows)
         .set({ staleSince: null })
         .where(and(inPool, inArray(quotaWindows.label, reported), isNotNull(quotaWindows.staleSince)));
+    }
+    if (!snapshot.complete) {
+      return { written, skippedAsOlder: snapshot.windows.length - written, markedStale: 0, deleted: 0 };
     }
     const marked = await tx
       .update(quotaWindows)
@@ -225,11 +270,13 @@ export interface QuotaTablePool {
   inFlight: number;
   expiresAt: Date | null;
   scopeModels: Record<string, ScopeMembership> | null;
-  /** 最近一次读成的时刻。 */
+  /** 最近一次完整读成的时刻。 */
   lastReadOkAt: Date | null;
+  /** 上游数据本身的时刻（还在报的窗口里最新的读数时刻）。 */
+  dataAt: Date | null;
   /** 这个池一次额度都没读成过：显示「没查成」，不是「没有额度」。读成了但上游一个窗口都没报的，不算。 */
   neverRead: boolean;
-  /** 从没读成过，或最近一次读成超过 30 分钟：每小时对账按它报警（按池看，不逐窗口看）。 */
+  /** 从没读成过、最近一次读成超过 30 分钟，或上游数据本身 30 分钟没前进：每小时对账按它报警（按池看，不逐窗口看）。 */
   readOverdue: boolean;
   /** 按清零时刻排，快清零的在前；同时清零的按原名。 */
   windows: QuotaTableWindow[];
@@ -251,6 +298,7 @@ export async function quotaTable(db: Db, options: QuotaTableOptions = {}): Promi
     .orderBy(asc(pools.channelId), asc(pools.id));
   const windowRows = await db.select().from(quotaWindows);
   const inFlight = await inFlightByPool(db);
+  const dataTimes = poolDataTimes(windowRows);
 
   const byPool = new Map<string, QuotaTableWindow[]>();
   for (const w of windowRows) {
@@ -282,6 +330,7 @@ export async function quotaTable(db: Db, options: QuotaTableOptions = {}): Promi
     const windows = (byPool.get(pool.id) ?? []).sort(
       (a, b) => resetKey(a) - resetKey(b) || (a.label < b.label ? -1 : a.label > b.label ? 1 : 0),
     );
+    const times = { lastReadOkAt: pool.lastReadOkAt, dataAt: dataTimes.get(pool.id) ?? null };
     return {
       poolId: pool.id,
       channelId: channel.id,
@@ -292,9 +341,9 @@ export async function quotaTable(db: Db, options: QuotaTableOptions = {}): Promi
       inFlight: inFlight.get(pool.id) ?? 0,
       expiresAt: pool.expiresAt,
       scopeModels: pool.scopeModels,
-      lastReadOkAt: pool.lastReadOkAt,
+      ...times,
       neverRead: pool.lastReadOkAt === null,
-      readOverdue: quotaReadOverdue(pool.lastReadOkAt, now, staleAfterMs),
+      readOverdue: quotaReadOverdue(times, now, staleAfterMs),
       windows,
     };
   });

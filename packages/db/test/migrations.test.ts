@@ -267,6 +267,23 @@ describe('0002：额度窗改按上游原名存', () => {
           ['relay-c', null],
         ]);
 
+        // 补值的两条 UPDATE 再单独跑一遍（不在事务里逐条重跑）：已有的原名、单位不被改写，读成时刻不倒退。
+        const backfills = readFileSync(join(MIGRATIONS_FOLDER, '0002_quota_labels.sql'), 'utf8')
+          .split('--> statement-breakpoint')
+          .filter((s) => /^UPDATE /m.test(s));
+        expect(backfills).toHaveLength(2);
+        await pg.exec(`
+          update quota_windows set unit = 'tokens' where pool_id = 'relay-a' and label = '5h';
+          update pools set last_read_ok_at = '2026-09-21T09:00:00Z' where id = 'relay-a';
+        `);
+        for (const statement of backfills) await pg.exec(statement);
+        const after = await pg.query<{ unit: string; at: string }>(
+          `select w.unit, to_char(p.last_read_ok_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI') as at
+             from quota_windows w join pools p on p.id = w.pool_id
+            where w.pool_id = 'relay-a' and w.label = '5h'`,
+        );
+        expect(after.rows).toEqual([{ unit: 'tokens', at: '2026-09-21T09:00' }]);
+
         // 迁移后：other 窗口可以带组名；同一个池里原名不能重复（换个类型也不行），别的池可以同名。
         const insert = (pool: string, label: string, window: string, scope = '') =>
           pg.exec(

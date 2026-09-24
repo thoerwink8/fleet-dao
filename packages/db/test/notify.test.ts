@@ -80,7 +80,11 @@ describe('写入即通知 fleet_changes', () => {
   it('池本身改了也按池报成 quota_windows：读成了但上游一个窗口都没报，额度页也能刷新', async () => {
     await catalog(t.db);
     await freshEars();
-    await savePoolQuota(t.db, { poolId: 'relay-a', readAt: NOW.toISOString(), windows: [] });
+    await savePoolQuota(
+      t.db,
+      { poolId: 'relay-a', readAt: NOW.toISOString(), complete: true, windows: [] },
+      { now: NOW },
+    );
     await t.db.update(pools).set({ maxConcurrency: 3 }).where(eq(pools.id, 'relay-b'));
     await settle();
     expect(heard).toEqual([

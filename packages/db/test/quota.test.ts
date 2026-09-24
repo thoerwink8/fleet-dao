@@ -93,17 +93,18 @@ describe('windowState：一个窗口现在能不能用', () => {
 type WindowInput = Omit<StoredQuotaWindow, 'poolId' | 'readAt' | 'reading' | 'source' | 'unit'> &
   Partial<Pick<StoredQuotaWindow, 'reading' | 'source' | 'unit'>>;
 
-/** 一个池在 at 这一刻的一次读成（读取器的 PoolReadOk 入库时就是这个形状）。 */
+/** 一个池在 at 这一刻的一次读成（读取器的 PoolReadOk 入库时就是这个形状）；没说的都当读全了。 */
 function readOk(
   poolId: string,
   at: Date,
   windows: readonly WindowInput[],
-  extra: Pick<PoolQuotaSnapshot, 'expiresAt' | 'scopeModels'> = {},
+  extra: Partial<Pick<PoolQuotaSnapshot, 'expiresAt' | 'scopeModels' | 'complete'>> = {},
 ): PoolQuotaSnapshot {
   const readAt = at.toISOString();
   return {
     poolId,
     readAt,
+    complete: true,
     windows: windows.map(
       (w): StoredQuotaWindow => ({
         poolId,
@@ -129,6 +130,8 @@ describe('额度写入与额度表', () => {
     await catalog(t.db);
   });
 
+  /** 写入口，时钟用测试的 NOW（读数时刻比它还晚的会按它算）。 */
+  const save = (snapshot: PoolQuotaSnapshot, now = NOW) => savePoolQuota(t.db, snapshot, { now });
   const poolRow = async (id: string) => {
     const [pool] = await t.db.select().from(pools).where(eq(pools.id, id));
     return pool;
@@ -136,8 +139,7 @@ describe('额度写入与额度表', () => {
   const tableRow = async (id: string) => (await quotaTable(t.db, { now: NOW })).find((p) => p.poolId === id);
 
   it('每个窗口各存一行：5h 快清零且几乎没用，调度看得到（不只存最紧的 7d）', async () => {
-    await savePoolQuota(
-      t.db,
+    await save(
       readOk('relay-a', ago(MIN), [
         {
           label: '5h',
@@ -165,8 +167,8 @@ describe('额度写入与额度表', () => {
 
   it('上限每次都按最新读数算', async () => {
     const fiveHour = { label: '5h', window: '5h', unit: 'points', used: 1000 } as const;
-    await savePoolQuota(t.db, readOk('relay-a', ago(20 * MIN), [{ ...fiveHour, limit: 171852 }]));
-    await savePoolQuota(t.db, readOk('relay-a', ago(MIN), [{ ...fiveHour, limit: 143528 }]));
+    await save(readOk('relay-a', ago(20 * MIN), [{ ...fiveHour, limit: 171852 }]));
+    await save(readOk('relay-a', ago(MIN), [{ ...fiveHour, limit: 143528 }]));
     const rows = await t.db.select().from(quotaWindows);
     expect(rows).toHaveLength(1);
     expect(rows[0]?.limit).toBe(143528);
@@ -174,8 +176,7 @@ describe('额度写入与额度表', () => {
 
   it('读很多次，行数不涨', async () => {
     for (let i = 0; i < 50; i++) {
-      await savePoolQuota(
-        t.db,
+      await save(
         readOk('relay-a', ago((50 - i) * MIN), [{ label: '7d', window: '7d', utilization: i / 100 }]),
       );
     }
@@ -186,10 +187,9 @@ describe('额度写入与额度表', () => {
 
   it('晚到的旧读数整批不生效：窗口不覆盖，最近读成时刻不倒退，也不标过期', async () => {
     const sevenDay = { label: '7d', window: '7d' } as const;
-    await savePoolQuota(t.db, readOk('relay-a', ago(MIN), [{ ...sevenDay, utilization: 0.6 }]));
+    await save(readOk('relay-a', ago(MIN), [{ ...sevenDay, utilization: 0.6 }]));
     expect(
-      await savePoolQuota(
-        t.db,
+      await save(
         readOk('relay-a', ago(HOUR), [
           { ...sevenDay, utilization: 0.2 },
           { label: '5h', window: '5h', utilization: 0.1 },
@@ -214,11 +214,8 @@ describe('额度写入与额度表', () => {
       },
       { label: 'weekly_all', window: 'other', utilization: 0.3 },
     ] as const;
-    await savePoolQuota(t.db, readOk('relay-a', ago(2 * MIN), windows));
-    await savePoolQuota(
-      t.db,
-      readOk('relay-a', ago(MIN), [...windows.slice(0, 3), { ...windows[3], utilization: 0.35 }]),
-    );
+    await save(readOk('relay-a', ago(2 * MIN), windows));
+    await save(readOk('relay-a', ago(MIN), [...windows.slice(0, 3), { ...windows[3], utilization: 0.35 }]));
     const relayA = await tableRow('relay-a');
     expect(relayA?.windows.map((w) => [w.label, w.window, w.scope, w.utilization, w.state])).toEqual([
       ['7d', '7d', null, 0.5, 'ok'],
@@ -238,8 +235,7 @@ describe('额度写入与额度表', () => {
   });
 
   it('每行写明实读还是估算、读法、单位、什么时候读的；最近一次读成超过 30 分钟，池和窗口都标出来', async () => {
-    await savePoolQuota(
-      t.db,
+    await save(
       readOk('relay-b', ago(3 * HOUR), [
         {
           label: 'month_usd',
@@ -295,10 +291,7 @@ describe('额度写入与额度表', () => {
   });
 
   it('超额是真实情况：利用率可以大于 1，算用满，剩余按 0 显示', async () => {
-    await savePoolQuota(
-      t.db,
-      readOk('relay-a', ago(MIN), [{ label: '5h', window: '5h', utilization: 1.25 }]),
-    );
+    await save(readOk('relay-a', ago(MIN), [{ label: '5h', window: '5h', utilization: 1.25 }]));
     const relayA = await tableRow('relay-a');
     expect(relayA?.windows[0]).toMatchObject({ utilization: 1.25, remainingRatio: 0, state: 'exhausted' });
   });
@@ -320,14 +313,14 @@ describe('额度写入与额度表', () => {
     const withoutClaude = threeWindows.slice(0, 2);
 
     it('标过期：照样列出、带过期时刻；已经标过的不重标', async () => {
-      await savePoolQuota(t.db, readOk('relay-a', ago(2 * HOUR), threeWindows));
-      expect(await savePoolQuota(t.db, readOk('relay-a', ago(HOUR), withoutClaude))).toEqual({
+      await save(readOk('relay-a', ago(2 * HOUR), threeWindows));
+      expect(await save(readOk('relay-a', ago(HOUR), withoutClaude))).toEqual({
         written: 2,
         skippedAsOlder: 0,
         markedStale: 1,
         deleted: 0,
       });
-      expect(await savePoolQuota(t.db, readOk('relay-a', ago(MIN), withoutClaude))).toEqual({
+      expect(await save(readOk('relay-a', ago(MIN), withoutClaude))).toEqual({
         written: 2,
         skippedAsOlder: 0,
         markedStale: 0,
@@ -342,31 +335,28 @@ describe('额度写入与额度表', () => {
     });
 
     it('重新报了就恢复：过期标记清掉，读数换成新的', async () => {
-      await savePoolQuota(t.db, readOk('relay-a', ago(2 * HOUR), threeWindows));
-      await savePoolQuota(t.db, readOk('relay-a', ago(HOUR), withoutClaude));
-      await savePoolQuota(
-        t.db,
-        readOk('relay-a', ago(MIN), [...withoutClaude, { ...threeWindows[2], utilization: 0.4 }]),
-      );
+      await save(readOk('relay-a', ago(2 * HOUR), threeWindows));
+      await save(readOk('relay-a', ago(HOUR), withoutClaude));
+      await save(readOk('relay-a', ago(MIN), [...withoutClaude, { ...threeWindows[2], utilization: 0.4 }]));
       const claude = (await tableRow('relay-a'))?.windows.find((w) => w.label === '7d_claude');
       expect([claude?.staleSince, claude?.readAt, claude?.utilization]).toEqual([null, ago(MIN), 0.4]);
     });
 
     it('标过期满 24 小时的删掉，差一点的不删', async () => {
       const markedAt = ago(QUOTA_UNREPORTED_TTL_MS + 2 * HOUR);
-      await savePoolQuota(t.db, readOk('relay-a', ago(QUOTA_UNREPORTED_TTL_MS + 3 * HOUR), threeWindows));
-      await savePoolQuota(t.db, readOk('relay-a', markedAt, withoutClaude));
+      await save(readOk('relay-a', ago(QUOTA_UNREPORTED_TTL_MS + 3 * HOUR), threeWindows));
+      await save(readOk('relay-a', markedAt, withoutClaude));
       const justBefore = new Date(markedAt.getTime() + QUOTA_UNREPORTED_TTL_MS - 1);
-      expect((await savePoolQuota(t.db, readOk('relay-a', justBefore, withoutClaude))).deleted).toBe(0);
+      expect((await save(readOk('relay-a', justBefore, withoutClaude))).deleted).toBe(0);
       const atTtl = new Date(markedAt.getTime() + QUOTA_UNREPORTED_TTL_MS);
-      expect((await savePoolQuota(t.db, readOk('relay-a', atTtl, withoutClaude))).deleted).toBe(1);
+      expect((await save(readOk('relay-a', atTtl, withoutClaude))).deleted).toBe(1);
       const rows = await t.db.select().from(quotaWindows);
       expect(rows.map((r) => r.label).sort()).toEqual(['5h', '7d']);
     });
 
     it('读成但上游一个窗口都没报：池照样记读成，已有的窗口全部标过期', async () => {
-      await savePoolQuota(t.db, readOk('relay-a', ago(HOUR), threeWindows));
-      expect(await savePoolQuota(t.db, readOk('relay-a', ago(MIN), []))).toEqual({
+      await save(readOk('relay-a', ago(HOUR), threeWindows));
+      expect(await save(readOk('relay-a', ago(MIN), []))).toEqual({
         written: 0,
         skippedAsOlder: 0,
         markedStale: 3,
@@ -383,8 +373,8 @@ describe('额度写入与额度表', () => {
 
     it('读失败时什么都不动：窗口不标过期也不删、最近读成时刻不更新，对账按池报超时；读成一次才补上', async () => {
       // 最后一次读成在两天前，那时 7d_claude 已经没报了；之后一直读失败（读失败不调写入口）。
-      await savePoolQuota(t.db, readOk('relay-a', ago(2 * DAY + HOUR), threeWindows));
-      await savePoolQuota(t.db, readOk('relay-a', ago(2 * DAY), withoutClaude));
+      await save(readOk('relay-a', ago(2 * DAY + HOUR), threeWindows));
+      await save(readOk('relay-a', ago(2 * DAY), withoutClaude));
       const before = await t.db.select().from(quotaWindows);
 
       const relayA = await tableRow('relay-a');
@@ -392,11 +382,70 @@ describe('额度写入与额度表', () => {
       // 过期满 24 小时的 7d_claude 也还在：删只在读成时顺带做。
       expect(await t.db.select().from(quotaWindows)).toEqual(before);
 
-      expect(await savePoolQuota(t.db, readOk('relay-a', ago(MIN), withoutClaude))).toMatchObject({
+      expect(await save(readOk('relay-a', ago(MIN), withoutClaude))).toMatchObject({
         markedStale: 0,
         deleted: 1,
       });
       expect((await tableRow('relay-a'))?.readOverdue).toBe(false);
+    });
+
+    it('没读全（被动读数、读取器缺数丢过窗口）：只写收到的窗口，不标别的过期、不删，也不算一次读成', async () => {
+      await save(readOk('relay-a', ago(2 * HOUR), threeWindows));
+      const partial = readOk('relay-a', ago(MIN), [{ ...threeWindows[0], utilization: 0.5 }], {
+        complete: false,
+      });
+      expect(await save(partial)).toEqual({ written: 1, skippedAsOlder: 0, markedStale: 0, deleted: 0 });
+      const relayA = await tableRow('relay-a');
+      expect(relayA?.windows.map((w) => [w.label, w.utilization, w.staleSince])).toEqual([
+        ['5h', 0.5, null],
+        ['7d', 0.2, null],
+        ['7d_claude', 0.3, null],
+      ]);
+      // 最近读成时刻还是两小时前那次完整读：对账照样报超时。
+      expect([relayA?.lastReadOkAt, relayA?.readOverdue]).toEqual([ago(2 * HOUR), true]);
+    });
+  });
+
+  describe('读数的时刻', () => {
+    const sevenDay = { label: '7d', window: '7d', utilization: 0.1 } as const;
+
+    it('比现在还晚的按现在算：池不会被一次时钟跑快的读数冻住', async () => {
+      await save(readOk('relay-a', later(HOUR), [sevenDay]));
+      expect((await poolRow('relay-a'))?.lastReadOkAt).toEqual(NOW);
+      expect((await t.db.select().from(quotaWindows)).map((r) => r.readAt)).toEqual([NOW]);
+      // 五分钟后正常的一次读成照样写进去；没按现在算的话，它会被当成晚到的整批丢掉。
+      const next = later(5 * MIN);
+      expect(await save(readOk('relay-a', next, [{ ...sevenDay, utilization: 0.2 }]), next)).toMatchObject({
+        written: 1,
+      });
+      expect((await poolRow('relay-a'))?.lastReadOkAt).toEqual(next);
+    });
+
+    it('上游数据本身冻住了（读是读成了，上游给的采集时刻不动）也报超时', async () => {
+      // 中转的窗口读数时刻是上游自己的采集时刻：这次读在一分钟前，上游的数停在两小时前。
+      const read = readOk('relay-a', ago(MIN), [sevenDay]);
+      await save({
+        ...read,
+        windows: read.windows.map((w) => ({ ...w, readAt: ago(2 * HOUR).toISOString() })),
+      });
+      const relayA = await tableRow('relay-a');
+      expect([relayA?.lastReadOkAt, relayA?.dataAt, relayA?.readOverdue]).toEqual([
+        ago(MIN),
+        ago(2 * HOUR),
+        true,
+      ]);
+      await save(readOk('relay-a', NOW, [sevenDay]));
+      expect((await tableRow('relay-a'))?.readOverdue).toBe(false);
+    });
+
+    it('读数时刻认不出：直接报错，一行不写', async () => {
+      await expect(save({ ...readOk('relay-a', NOW, []), readAt: 'yesterday' })).rejects.toThrow(/yesterday/);
+      const read = readOk('relay-a', NOW, [sevenDay]);
+      await expect(
+        save({ ...read, windows: read.windows.map((w) => ({ ...w, readAt: 'soon' })) }),
+      ).rejects.toThrow(/soon/);
+      expect(await t.db.select().from(quotaWindows)).toEqual([]);
+      expect((await poolRow('relay-a'))?.lastReadOkAt).toBeNull();
     });
   });
 
@@ -423,7 +472,7 @@ describe('额度写入与额度表', () => {
     }
 
     it('窗口、订阅到期日、成员表、最近读成时刻一起写进去', async () => {
-      expect(await savePoolQuota(t.db, cursorRead(ago(MIN)))).toEqual({
+      expect(await save(cursorRead(ago(MIN)))).toEqual({
         written: 3,
         skippedAsOlder: 0,
         markedStale: 0,
@@ -446,9 +495,9 @@ describe('额度写入与额度表', () => {
     });
 
     it('晚到的旧读数不让到期日和成员表回退', async () => {
-      await savePoolQuota(t.db, cursorRead(ago(MIN)));
+      await save(cursorRead(ago(MIN)));
       const older = { ...cursorRead(ago(HOUR)), expiresAt: later(DAY).toISOString(), scopeModels: {} };
-      expect(await savePoolQuota(t.db, older)).toEqual({
+      expect(await save(older)).toEqual({
         written: 0,
         skippedAsOlder: 3,
         markedStale: 0,
@@ -470,7 +519,7 @@ describe('额度写入与额度表', () => {
         .set({ expiresAt: later(9 * DAY), scopeModels: { auto: { in: ['composer-1'] } } })
         .where(eq(pools.id, 'cursor-a'));
       const { poolId, readAt, windows } = cursorRead(ago(MIN));
-      expect(await savePoolQuota(t.db, { poolId, readAt, windows })).toMatchObject({ written: 3 });
+      expect(await save({ poolId, readAt, complete: true, windows })).toMatchObject({ written: 3 });
       const pool = await poolRow('cursor-a');
       expect([pool?.expiresAt, pool?.scopeModels]).toEqual([
         later(9 * DAY),
@@ -487,7 +536,7 @@ describe('额度写入与额度表', () => {
         // 7d_model 不写组名：前两个窗口已经写进去了，第三个被拒。
         windows: [usd, auto, { ...usd, label: '7d', window: '7d_model' }],
       };
-      await expectViolation(savePoolQuota(t.db, broken), 'quota_windows_model_scope');
+      await expectViolation(save(broken), 'quota_windows_model_scope');
       expect(await t.db.select().from(quotaWindows)).toEqual([]);
       const pool = await poolRow('cursor-a');
       expect([pool?.expiresAt, pool?.lastReadOkAt]).toEqual([null, null]);
@@ -497,14 +546,14 @@ describe('额度写入与额度表', () => {
       const read = cursorRead(ago(MIN));
       const [usd, auto] = read.windows;
       if (!usd || !auto) throw new Error('夹具少了窗口');
+      await expect(save({ ...read, windows: [usd, { ...auto, poolId: 'relay-a' }] })).rejects.toThrow(
+        /relay-a/,
+      );
+      await expect(save({ ...read, windows: [usd, { ...auto, label: 'plan_usd' }] })).rejects.toThrow(
+        /plan_usd/,
+      );
       await expect(
-        savePoolQuota(t.db, { ...read, windows: [usd, { ...auto, poolId: 'relay-a' }] }),
-      ).rejects.toThrow(/relay-a/);
-      await expect(
-        savePoolQuota(t.db, { ...read, windows: [usd, { ...auto, label: 'plan_usd' }] }),
-      ).rejects.toThrow(/plan_usd/);
-      await expect(
-        savePoolQuota(t.db, {
+        save({
           ...read,
           poolId: 'nowhere',
           windows: read.windows.map((w) => ({ ...w, poolId: 'nowhere' })),

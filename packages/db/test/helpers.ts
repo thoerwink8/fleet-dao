@@ -64,6 +64,8 @@ export async function addRoute(
     channelId?: string;
     hostId?: (typeof routes.$inferInsert)['hostId'];
     alive?: boolean;
+    upstreamModel?: string;
+    upstreamAliases?: string[];
   },
 ) {
   await db.insert(routes).values({
@@ -73,6 +75,8 @@ export async function addRoute(
     modelId: r.modelId,
     hostId: r.hostId ?? 'claude-code',
     alive: r.alive ?? true,
+    upstreamModel: r.upstreamModel ?? null,
+    upstreamAliases: r.upstreamAliases ?? [],
   });
 }
 

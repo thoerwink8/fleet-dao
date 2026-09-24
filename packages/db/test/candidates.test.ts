@@ -1,8 +1,9 @@
+import { readFileSync } from 'node:fs';
 import { windowAppliesTo } from '@fleet-dao/shared';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { stageCandidates } from '../src/queries/candidates.ts';
-import { type StoredQuotaWindow, savePoolQuota } from '../src/queries/quota.ts';
+import { type PoolQuotaSnapshot, type StoredQuotaWindow, savePoolQuota } from '../src/queries/quota.ts';
 import { bans, channels, models, pools, stagePolicies } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import {
@@ -34,6 +35,9 @@ beforeEach(async () => {
 const fresh = { reading: 'measured', readAt: ago(MIN) } as const;
 const summary = async (stage: Parameters<typeof stageCandidates>[1]) =>
   (await stageCandidates(t.db, stage, { now: NOW })).candidates.map((c) => [c.routeId, c.blockers]);
+/** 经写入口写一次读数，时钟用 NOW；没说的都当读全了。 */
+const saveRead = (snapshot: Omit<PoolQuotaSnapshot, 'complete'> & { complete?: boolean }) =>
+  savePoolQuota(t.db, { complete: true, ...snapshot }, { now: NOW });
 
 describe('某阶段的候选路由', () => {
   it('按调度台排的顺序，不按 id 字母序', async () => {
@@ -137,36 +141,49 @@ describe('某阶段的候选路由', () => {
   it('模型组名按族名或模型 id 匹配，大小写和分隔符不计较', () => {
     const opus = { id: 'opus-5.5', family: 'claude' };
     // 库里账号级窗口的 scope 是空串。
-    expect(windowAppliesTo({ scope: '' }, opus)).toBe(true);
-    expect(windowAppliesTo({ scope: 'claude' }, opus)).toBe(true);
-    expect(windowAppliesTo({ scope: 'fable' }, { id: 'claude-fable-5.2', family: 'claude' })).toBe(true);
-    expect(windowAppliesTo({ scope: 'fable' }, opus)).toBe(false);
-    expect(windowAppliesTo({ scope: 'Opus_5_5' }, opus)).toBe(true);
+    expect(windowAppliesTo({ scope: '' }, opus)).toBe('yes');
+    expect(windowAppliesTo({ scope: 'claude' }, opus)).toBe('yes');
+    expect(windowAppliesTo({ scope: 'fable' }, { id: 'claude-fable-5.2', family: 'claude' })).toBe('yes');
+    expect(windowAppliesTo({ scope: 'fable' }, opus)).toBe('no');
+    expect(windowAppliesTo({ scope: 'Opus_5_5' }, opus)).toBe('yes');
   });
 
-  it('池给了成员表就按成员表：in 只扣名单里的，not-in 扣名单外的；表里没有的组照旧按组名', () => {
+  it('池给了成员表就只和路由在上游的名字比：in 只扣名单里的，notIn 扣名单外的；不知道上游名字就判不了', () => {
     const members = { auto: { in: ['Composer-2'] }, api: { notIn: ['composer_2'] } };
-    const composer = { id: 'composer-2', family: 'cursor' };
-    const opus = { id: 'opus-5.5', family: 'claude' };
-    expect(windowAppliesTo({ scope: 'auto' }, composer, members)).toBe(true);
-    expect(windowAppliesTo({ scope: 'auto' }, opus, members)).toBe(false);
-    expect(windowAppliesTo({ scope: 'api' }, composer, members)).toBe(false);
-    expect(windowAppliesTo({ scope: 'api' }, opus, members)).toBe(true);
-    expect(windowAppliesTo({ scope: 'claude' }, opus, members)).toBe(true);
+    const composer = { id: 'composer-2', family: 'cursor', upstreamNames: ['composer-2'] };
+    const opus = { id: 'opus-5.5', family: 'claude', upstreamNames: ['claude-opus-5-5'] };
+    expect(windowAppliesTo({ scope: 'auto' }, composer, members)).toBe('yes');
+    expect(windowAppliesTo({ scope: 'auto' }, opus, members)).toBe('no');
+    expect(windowAppliesTo({ scope: 'api' }, composer, members)).toBe('no');
+    expect(windowAppliesTo({ scope: 'api' }, opus, members)).toBe('yes');
+    // 成员表里没有的组照旧按组名。
+    expect(windowAppliesTo({ scope: 'claude' }, opus, members)).toBe('yes');
+    // 模型目录的 id 不算上游名字：没填上游名字的，两个桶都判不了，不默认落进「名单外都扣」的 api 桶。
+    const bare = { id: 'composer-2', family: 'cursor' };
+    expect(windowAppliesTo({ scope: 'auto' }, bare, members)).toBe('unknown');
+    expect(windowAppliesTo({ scope: 'api' }, bare, members)).toBe('unknown');
+    // 实际发的串和额度接口的叫法不同名时，靠别名对上。
+    const cursorAuto = { id: 'cursor-auto', family: 'cursor', upstreamNames: ['auto', 'default'] };
+    expect(windowAppliesTo({ scope: 'auto' }, cursorAuto, { auto: { in: ['default'] } })).toBe('yes');
     // 没有成员表时，auto / api 这种组名跟哪个模型名都对不上：成员表不入库，Cursor 的桶就卡不住任何路由。
-    expect(windowAppliesTo({ scope: 'auto' }, composer)).toBe(false);
+    expect(windowAppliesTo({ scope: 'auto' }, composer)).toBe('no');
   });
 
   it('Cursor 的 auto / api 两个桶按读数带来的成员表卡：auto 满了只挡 Composer，api 满了只挡点名的其它模型', async () => {
     await t.db.insert(pools).values({ id: 'cursor-a', channelId: 'cursor', maxConcurrency: 2 });
     await t.db.insert(models).values({ id: 'composer-2', family: 'cursor', displayName: 'Composer 2' });
     const onCursor = { channelId: 'cursor', poolId: 'cursor-a', hostId: 'cursor-agent' } as const;
-    await addRoute(t.db, { id: 'composer', modelId: 'composer-2', ...onCursor });
-    await addRoute(t.db, { id: 'opus-on-cursor', modelId: 'opus-5.5', ...onCursor });
+    await addRoute(t.db, { id: 'composer', modelId: 'composer-2', upstreamModel: 'composer-2', ...onCursor });
+    await addRoute(t.db, {
+      id: 'opus-on-cursor',
+      modelId: 'opus-5.5',
+      upstreamModel: 'claude-opus-5-5',
+      ...onCursor,
+    });
     await setStageOrder(t.db, 'execute', ['composer', 'opus-on-cursor']);
     // 读取器的原样输出：两个桶都归 other，组名 auto / api，成员表来自接口的 autoBucketModels。
     const read = (used: { auto: number; api: number }, at: Date) =>
-      savePoolQuota(t.db, {
+      saveRead({
         poolId: 'cursor-a',
         readAt: at.toISOString(),
         scopeModels: { auto: { in: ['composer-2'] }, api: { notIn: ['composer-2'] } },
@@ -197,7 +214,7 @@ describe('某阶段的候选路由', () => {
     ]);
   });
 
-  it('上游这次没报的窗口不挡路由，也不让路由排到后面', async () => {
+  it('上游这次没报的窗口不挡路由、不让路由排后；最后一次读到是用满、还没到清零时刻的照样挡', async () => {
     await addRoute(t.db, { id: 'opus-b', poolId: 'relay-b', modelId: 'opus-5.5' });
     await addRoute(t.db, { id: 'k3-a', poolId: 'relay-a', modelId: 'kimi-k3', hostId: 'mirasim' });
     await addRoute(t.db, { id: 'opus-a', poolId: 'relay-a', modelId: 'opus-5.5' });
@@ -224,8 +241,8 @@ describe('某阶段的候选路由', () => {
       upstreamStatus: 'limit_reached',
     });
     const save = (poolId: string, at: Date, windows: StoredQuotaWindow[]) =>
-      savePoolQuota(t.db, { poolId, readAt: at.toISOString(), windows });
-    // 两小时前那次读成都报了 7d_claude 用满：relay-a 给了清零时刻，relay-b 没给。刚才这次读成都没再报它。
+      saveRead({ poolId, readAt: at.toISOString(), windows });
+    // 两小时前那次读成都报了 7d_claude 用满：relay-a 给了明天的清零时刻，relay-b 没给。刚才这次读成都没再报它。
     const before = ago(2 * HOUR);
     await save('relay-a', before, [
       sevenDay('relay-a', before),
@@ -234,14 +251,149 @@ describe('某阶段的候选路由', () => {
     await save('relay-b', before, [sevenDay('relay-b', before), claudeFull('relay-b', before)]);
     await save('relay-a', ago(MIN), [sevenDay('relay-a', ago(MIN))]);
     await save('relay-b', ago(MIN), [sevenDay('relay-b', ago(MIN))]);
-    // 要是还算它们：opus-a 被「用满」挡住，opus-b 因为读数过期挪到最后。
+    // relay-b 的旧「满」不知道哪天清零、读数也旧了：不挡，也不让 opus-b 排到最后。
+    // relay-a 的明天才清零：照样挡 opus-a。
     const result = await stageCandidates(t.db, 'execute', { now: NOW });
     expect(
       result.candidates.map((c) => [c.routeId, c.quota, c.blockers, c.windows.map((w) => w.label)]),
     ).toEqual([
       ['opus-b', 'ok', [], ['7d']],
       ['k3-a', 'ok', [], ['7d']],
-      ['opus-a', 'ok', [], ['7d']],
+      ['opus-a', 'exhausted', ['quota-exhausted'], ['7d', '7d_claude']],
+    ]);
+  });
+
+  it('中转 7d_claude 已满、明天才清零，之后的读数里没了它：Opus 照样挡，过了清零时刻才放', async () => {
+    await addRoute(t.db, { id: 'opus', poolId: 'relay-a', modelId: 'opus-5.5' });
+    await setStageOrder(t.db, 'execute', ['opus']);
+    const tomorrow = later(DAY);
+    const relayWindow = (label: string, at: Date, more: Partial<StoredQuotaWindow>): StoredQuotaWindow => ({
+      poolId: 'relay-a',
+      label,
+      window: '7d',
+      unit: 'points',
+      reading: 'measured',
+      source: 'mirasim-relay',
+      readAt: at.toISOString(),
+      ...more,
+    });
+    const sevenDay = (at: Date) => relayWindow('7d', at, { used: 1, limit: 100 });
+    const claudeFull = (at: Date) =>
+      relayWindow('7d_claude', at, {
+        window: '7d_model',
+        scope: 'claude',
+        upstreamStatus: 'limit_reached',
+        resetsAt: tomorrow.toISOString(),
+      });
+    await saveRead({
+      poolId: 'relay-a',
+      readAt: ago(3 * MIN).toISOString(),
+      windows: [sevenDay(ago(3 * MIN)), claudeFull(ago(3 * MIN))],
+    });
+    // 读取器缺数丢了它、自己说没读全：不标过期，照旧挡。
+    await saveRead({
+      poolId: 'relay-a',
+      readAt: ago(2 * MIN).toISOString(),
+      complete: false,
+      windows: [sevenDay(ago(2 * MIN))],
+    });
+    const opusAt = async (now: Date) => (await stageCandidates(t.db, 'execute', { now })).candidates[0];
+    expect((await opusAt(NOW))?.blockers).toEqual(['quota-exhausted']);
+    // 下一次说读全了、还是没有它：标了过期，最后一次读到是用满、明天才清零，照样挡。
+    await saveRead({ poolId: 'relay-a', readAt: ago(MIN).toISOString(), windows: [sevenDay(ago(MIN))] });
+    const blocked = await opusAt(NOW);
+    expect([blocked?.blockers, blocked?.windows.map((w) => [w.label, w.staleSince])]).toEqual([
+      ['quota-exhausted'],
+      [
+        ['7d', null],
+        ['7d_claude', ago(MIN)],
+      ],
+    ]);
+    // 过了清零时刻才放（那时读数也旧了，额度按未知算，但不挡）。
+    const released = await opusAt(new Date(tomorrow.getTime() + MIN));
+    expect([released?.blockers, released?.quota, released?.windows.map((w) => w.label)]).toEqual([
+      [],
+      'unknown',
+      ['7d'],
+    ]);
+  });
+
+  it('真夹具：Cursor 的 Auto 桶名单（default、composer-2……）配种子里的 cursor-auto', async () => {
+    // 额度读取器测试用的 Cursor 真回包（2026-09-24 实读）；读取器从 autoBucketModels 生成成员表。
+    const fixture = JSON.parse(
+      readFileSync(
+        new URL('../../adapters/test/quota/fixtures/cursor-period-usage-2026-09-24.json', import.meta.url),
+        'utf8',
+      ),
+    ) as { autoBucketModels: string[] };
+    const autoModels = fixture.autoBucketModels;
+    expect(autoModels).toEqual(expect.arrayContaining(['default', 'composer-2']));
+    expect(autoModels).not.toContain('cursor-auto');
+
+    await t.db.insert(pools).values({ id: 'cursor-a', channelId: 'cursor', maxConcurrency: 3 });
+    const onCursor = { channelId: 'cursor', poolId: 'cursor-a', hostId: 'cursor-agent' } as const;
+    // Cursor Auto 在额度接口里叫 default；Grok 那条没填上游名字；Opus 那条是点名的其它模型。
+    await addRoute(t.db, {
+      id: 'cursor-auto',
+      modelId: 'cursor-auto',
+      upstreamAliases: ['default'],
+      ...onCursor,
+    });
+    await addRoute(t.db, { id: 'grok-on-cursor', modelId: 'grok-4.7', ...onCursor });
+    await addRoute(t.db, {
+      id: 'opus-on-cursor',
+      modelId: 'opus-5.5',
+      upstreamModel: 'claude-opus-5-5',
+      ...onCursor,
+    });
+    await setStageOrder(t.db, 'execute', ['cursor-auto', 'grok-on-cursor', 'opus-on-cursor']);
+
+    const at = ago(MIN).toISOString();
+    const bucket = (scope: 'auto' | 'api', used: number): StoredQuotaWindow => ({
+      poolId: 'cursor-a',
+      label: `${scope}_percent`,
+      window: 'other',
+      scope,
+      used,
+      limit: 100,
+      unit: 'percent',
+      reading: 'measured',
+      source: 'cursor-dashboard',
+      readAt: at,
+    });
+    await saveRead({
+      poolId: 'cursor-a',
+      readAt: at,
+      scopeModels: { auto: { in: autoModels }, api: { notIn: autoModels } },
+      windows: [
+        {
+          poolId: 'cursor-a',
+          label: 'plan_usd',
+          window: 'month_usd',
+          used: 222.81,
+          limit: 400,
+          unit: 'usd',
+          reading: 'measured',
+          source: 'cursor-dashboard',
+          readAt: at,
+        },
+        bucket('auto', 100),
+        bucket('api', 0),
+      ],
+    });
+    const result = await stageCandidates(t.db, 'execute', { now: NOW });
+    expect(
+      result.candidates.map((c) => [
+        c.routeId,
+        c.quota,
+        c.blockers,
+        c.windows.map((w) => `${w.label}:${w.applies}`).sort(),
+      ]),
+    ).toEqual([
+      ['cursor-auto', 'exhausted', ['quota-exhausted'], ['auto_percent:yes', 'plan_usd:yes']],
+      ['opus-on-cursor', 'ok', [], ['api_percent:yes', 'plan_usd:yes']],
+      // 不知道 Grok 这条在 Cursor 叫什么：两个桶都判不了，额度按未知算、排到后面，不算进 api 桶。
+      ['grok-on-cursor', 'unknown', [], ['api_percent:unknown', 'auto_percent:unknown', 'plan_usd:yes']],
     ]);
   });
 
@@ -254,10 +406,11 @@ describe('某阶段的候选路由', () => {
       poolId: 'cursor-a',
       modelId: 'opus-5.5',
       hostId: 'cursor-agent',
+      upstreamModel: 'claude-opus-5-5',
     });
     await setStageOrder(t.db, 'execute', ['never-read', 'opus-on-cursor']);
     // Cursor 这次只报了 auto 桶（用满了），成员表说它只扣 Composer。
-    await savePoolQuota(t.db, {
+    await saveRead({
       poolId: 'cursor-a',
       readAt: ago(MIN).toISOString(),
       scopeModels: { auto: { in: ['composer-2'] } },

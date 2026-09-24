@@ -461,6 +461,19 @@
           "primaryKey": false,
           "notNull": true,
           "default": false
+        },
+        "upstream_model": {
+          "name": "upstream_model",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "upstream_aliases": {
+          "name": "upstream_aliases",
+          "type": "text[]",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::text[]"
         }
       },
       "indexes": {},

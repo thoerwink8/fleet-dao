@@ -133,6 +133,8 @@ export const toRoute = (r: typeof routes.$inferSelect): Route =>
     modelId: r.modelId,
     hostId: r.hostId,
     alive: r.alive,
+    upstreamModel: opt(r.upstreamModel),
+    upstreamAliases: r.upstreamAliases,
   });
 
 export const toStagePolicy = (r: typeof stagePolicies.$inferSelect, routeIds: string[]): StagePolicy =>

@@ -92,6 +92,10 @@ export const routes = pgTable(
     hostId: hostId('host_id').notNull(),
     /** 只由探针和熔断写。新路由没探过，默认不在线。 */
     alive: boolean('alive').notNull().default(false),
+    /** 插头实际发给上游的模型串（目录原文）。额度成员表只和它、和别名比；都没填，扣哪个桶判不了。 */
+    upstreamModel: text('upstream_model'),
+    /** 上游在别处（额度接口的成员表）对这条路由的叫法，和上面的模型串不同名时填。 */
+    upstreamAliases: text('upstream_aliases').array().notNull().default(sql`'{}'::text[]`),
   },
   (t) => [
     foreignKey({
