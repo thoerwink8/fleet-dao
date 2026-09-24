@@ -33,7 +33,7 @@
 ### P0 地基（约 6 小时）
 
 - 仓骨架：pnpm 多包、TS、格式与检查、vitest、GitHub Actions（类型检查 + 单元测试，2 分钟内）、一页 AGENTS.md。
-- 法国：装 Postgres 17、Temporal 服务端（和旧系统的 Temporal 错开端口，互不影响）、systemd 单元、给 AI 会话的资源池（cgroup）、WireGuard。
+- 法国：装 Postgres 16（Temporal 官方测过的最高大版本）、Temporal 服务端（和旧系统的 Temporal 错开端口，互不影响）、systemd 单元、给 AI 会话的资源池（cgroup）、WireGuard。
 - 香港：nginx + HTTPS 证书（DigitalPlat 域名）、WireGuard。
 - `deploy/france.sh`、`deploy/hk.sh`：一条命令装好，跑第二遍什么都不变。
 
