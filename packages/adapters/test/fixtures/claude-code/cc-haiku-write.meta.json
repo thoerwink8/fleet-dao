@@ -1,0 +1,29 @@
+{
+  "name": "cc-haiku-write",
+  "cmd": [
+    "reclaude",
+    "-p",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--setting-sources",
+    "project",
+    "--strict-mcp-config",
+    "--permission-prompts",
+    "none",
+    "--permission-mode",
+    "bypassPermissions",
+    "--model",
+    "claude-haiku-4-5",
+    "--session-id",
+    "27a36738-3880-41fd-9c7c-b8d1774b2b33"
+  ],
+  "cwd": "/tmp/fleet-fx/v-write",
+  "exitCode": 0,
+  "signal": null,
+  "wallMs": 11957,
+  "firstStdoutMs": 3879,
+  "firstStderrMs": 62,
+  "lineTimesMs": [3879, 6366, 7181, 7181, 7792, 7813, 7940, 10919, 11363, 11376],
+  "trailingPartial": 0
+}

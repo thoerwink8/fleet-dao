@@ -1,0 +1,35 @@
+{
+  "name": "cc-haiku-bash-timeout",
+  "env": {
+    "BASH_DEFAULT_TIMEOUT_MS": "4000",
+    "BASH_MAX_TIMEOUT_MS": "4000"
+  },
+  "cmd": [
+    "reclaude",
+    "-p",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--setting-sources",
+    "project",
+    "--strict-mcp-config",
+    "--permission-prompts",
+    "none",
+    "--permission-mode",
+    "bypassPermissions",
+    "--model",
+    "claude-haiku-4-5",
+    "--session-id",
+    "d3032e54-612f-4bef-b182-0833fe620f5f"
+  ],
+  "cwd": "/tmp/fleet-fx/v-timeout",
+  "exitCode": 0,
+  "signal": null,
+  "wallMs": 23766,
+  "firstStdoutMs": 7547,
+  "firstStderrMs": 24,
+  "lineTimesMs": [
+    7547, 11342, 12987, 13134, 13229, 14084, 18659, 19913, 20263, 22504, 22794, 22797, 22912, 22930
+  ],
+  "trailingPartial": 0
+}

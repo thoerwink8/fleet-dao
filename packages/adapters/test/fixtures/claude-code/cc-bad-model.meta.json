@@ -1,0 +1,29 @@
+{
+  "name": "cc-bad-model",
+  "cmd": [
+    "reclaude",
+    "-p",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--setting-sources",
+    "project",
+    "--strict-mcp-config",
+    "--permission-prompts",
+    "none",
+    "--model",
+    "claude-nonexistent-0",
+    "--permission-mode",
+    "bypassPermissions",
+    "--session-id",
+    "4510eb5e-22e9-49e8-b631-1393b0f5c375"
+  ],
+  "cwd": "/tmp/fleet-fx/w-bad-model",
+  "exitCode": 1,
+  "signal": null,
+  "wallMs": 13184,
+  "firstStdoutMs": 5779,
+  "firstStderrMs": 37,
+  "lineTimesMs": [5779, 12563, 12591],
+  "trailingPartial": 0
+}

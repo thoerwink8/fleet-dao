@@ -1,0 +1,29 @@
+{
+  "name": "cc-haiku-bash-fail",
+  "cmd": [
+    "reclaude",
+    "-p",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--setting-sources",
+    "project",
+    "--strict-mcp-config",
+    "--permission-prompts",
+    "none",
+    "--permission-mode",
+    "bypassPermissions",
+    "--model",
+    "claude-haiku-4-5",
+    "--session-id",
+    "bcb195e9-7558-4643-94bf-7f180f96e7a8"
+  ],
+  "cwd": "/tmp/fleet-fx/v-bash-fail",
+  "exitCode": 0,
+  "signal": null,
+  "wallMs": 8125,
+  "firstStdoutMs": 2755,
+  "firstStderrMs": 29,
+  "lineTimesMs": [2755, 4433, 5025, 5060, 5207, 6731, 7000, 7016, 7208, 7269],
+  "trailingPartial": 0
+}

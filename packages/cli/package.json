@@ -4,7 +4,17 @@
   "private": true,
   "description": "fleet 命令：AI 会话汇报进度、提问、交活",
   "type": "module",
+  "bin": {
+    "fleet": "./bin/fleet"
+  },
   "exports": {
     ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@fleet-dao/shared": "workspace:*",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@fleet-dao/adapters": "workspace:*"
   }
 }

@@ -1,0 +1,29 @@
+{
+  "name": "cc-haiku-resume-b",
+  "cmd": [
+    "reclaude",
+    "-p",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--setting-sources",
+    "project",
+    "--strict-mcp-config",
+    "--permission-prompts",
+    "none",
+    "--permission-mode",
+    "bypassPermissions",
+    "--model",
+    "claude-haiku-4-5",
+    "--resume",
+    "bcd5c2ea-ecd9-4a4d-8384-de3032104cf6"
+  ],
+  "cwd": "/tmp/fleet-fx/v-resume2",
+  "exitCode": 0,
+  "signal": null,
+  "wallMs": 9018,
+  "firstStdoutMs": 3510,
+  "firstStderrMs": 21,
+  "lineTimesMs": [3510, 6770, 6816, 6828, 6850],
+  "trailingPartial": 0
+}

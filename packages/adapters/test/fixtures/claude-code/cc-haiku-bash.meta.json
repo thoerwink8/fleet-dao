@@ -1,0 +1,29 @@
+{
+  "name": "cc-haiku-bash",
+  "cmd": [
+    "reclaude",
+    "-p",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--setting-sources",
+    "project",
+    "--strict-mcp-config",
+    "--permission-prompts",
+    "none",
+    "--model",
+    "haiku",
+    "--permission-mode",
+    "bypassPermissions",
+    "--session-id",
+    "88e2f334-4215-43ae-9cfd-af13c5ccdc55"
+  ],
+  "cwd": "/tmp/fleet-fx/w-bash",
+  "exitCode": 0,
+  "signal": null,
+  "wallMs": 12777,
+  "firstStdoutMs": 2887,
+  "firstStderrMs": 44,
+  "lineTimesMs": [2888, 7796, 7972, 8003, 8539, 8582, 8843, 12140, 12140, 12140, 12179, 12191],
+  "trailingPartial": 0
+}
