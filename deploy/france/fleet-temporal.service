@@ -1,0 +1,33 @@
+# fleet-dao 的 Temporal 服务端。deploy/france.sh 装到 /etc/systemd/system/；改这份、再跑一遍装机脚本，别在机器上手改。
+[Unit]
+Description=fleet-dao Temporal 服务端（Postgres 持久化）
+Documentation=https://github.com/thoerwink8/fleet-dao/blob/main/docs/ops.md
+After=postgresql.service
+Wants=postgresql.service
+# 库长时间起不来也一直重试，不在几次失败后放弃
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=fleet
+Group=fleet
+EnvironmentFile=/etc/fleet-dao/temporal.env
+ExecStart=/opt/fleet-dao/temporal/bin/temporal-server --config-file /etc/fleet-dao/temporal.yaml --allow-no-auth start
+# always：干净退出（退出码 0、被 SIGTERM）也拉起来，on-failure 不管这种情况
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

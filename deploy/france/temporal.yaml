@@ -1,0 +1,78 @@
+# enable-template
+# fleet-dao 的 Temporal 服务端配置。deploy/france.sh 把 @@…@@ 换成端口后装到 /etc/fleet-dao/temporal.yaml。
+# 第一行那句注释让服务端把本文件当模板渲染：库口令不写在这里，启动时从环境变量读（/etc/fleet-dao/temporal.env）。
+# 端口全部只绑 127.0.0.1，和旧系统的开发版 Temporal（7233/8233 与一批临时端口）错开。
+log:
+  stdout: true
+  level: info
+
+persistence:
+  # 建库之后不能改：历史分片数定死在库里。单机、每天几百条工作流，16 片够用还有余量。
+  numHistoryShards: 16
+  defaultStore: default
+  visibilityStore: visibility
+  datastores:
+    default:
+      sql:
+        pluginName: postgres12
+        databaseName: temporal
+        connectAddr: "127.0.0.1:@@PG_PORT@@"
+        connectProtocol: tcp
+        user: temporal
+        password: {{ env "FLEET_TEMPORAL_DB_PASSWORD" | quote }}
+        maxConns: 20
+        maxIdleConns: 20
+        maxConnLifetime: 1h
+    visibility:
+      sql:
+        pluginName: postgres12
+        databaseName: temporal_visibility
+        connectAddr: "127.0.0.1:@@PG_PORT@@"
+        connectProtocol: tcp
+        user: temporal
+        password: {{ env "FLEET_TEMPORAL_DB_PASSWORD" | quote }}
+        maxConns: 10
+        maxIdleConns: 10
+        maxConnLifetime: 1h
+
+global:
+  membership:
+    maxJoinDuration: 30s
+    broadcastAddress: 127.0.0.1
+
+services:
+  frontend:
+    rpc:
+      grpcPort: @@FRONTEND_PORT@@
+      membershipPort: @@FRONTEND_MEMBERSHIP_PORT@@
+      bindOnLocalHost: true
+  history:
+    rpc:
+      grpcPort: @@HISTORY_PORT@@
+      membershipPort: @@HISTORY_MEMBERSHIP_PORT@@
+      bindOnLocalHost: true
+  matching:
+    rpc:
+      grpcPort: @@MATCHING_PORT@@
+      membershipPort: @@MATCHING_MEMBERSHIP_PORT@@
+      bindOnLocalHost: true
+  worker:
+    rpc:
+      grpcPort: @@WORKER_PORT@@
+      membershipPort: @@WORKER_MEMBERSHIP_PORT@@
+      bindOnLocalHost: true
+
+clusterMetadata:
+  enableGlobalNamespace: false
+  failoverVersionIncrement: 10
+  masterClusterName: active
+  currentClusterName: active
+  clusterInformation:
+    active:
+      enabled: true
+      initialFailoverVersion: 1
+      rpcName: frontend
+      rpcAddress: "127.0.0.1:@@FRONTEND_PORT@@"
+
+dcRedirectionPolicy:
+  policy: noop
