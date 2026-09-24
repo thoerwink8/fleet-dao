@@ -238,5 +238,7 @@ export async function reapSession(options: ReapOptions): Promise<ReapResult> {
       await until(2_000);
     }
   }
-  return { found, leftovers: remaining(), ...(errors.length ? { error: errors.join('；') } : {}) };
+  const leftovers = remaining();
+  // 以清空为准：scope 正在拆的时候 systemctl kill 会报 EINVAL，进程其实都没了，这种报错不算数
+  return { found, leftovers, ...(errors.length && leftovers !== 0 ? { error: errors.join('；') } : {}) };
 }

@@ -175,7 +175,8 @@ export function runAgentProcess(
         ...(killed ? { killed } : {}),
         stragglers: reaped?.stragglers ?? 0,
         leftovers: reaped?.leftovers,
-        ...(reapErrors.length ? { reapError: reapErrors.join('；') } : {}),
+        // 以清空为准：收干净了，中途 systemctl 报的错（scope 正在拆时的 EINVAL）不算数
+        ...(reapErrors.length && reaped?.leftovers !== 0 ? { reapError: reapErrors.join('；') } : {}),
         stderrTail,
         startedAt,
         endedAt: now().toISOString(),

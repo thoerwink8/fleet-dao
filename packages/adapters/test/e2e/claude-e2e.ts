@@ -63,6 +63,7 @@ const firstVerdict = judgeClaudeRun(first, delivery);
 
 // 第二轮不提交，还在后台留一个进程：交付判据不能认上一轮的提交，插头要把后台进程收掉
 const afterFirst = git(tree, 'rev-parse', 'HEAD');
+const firstRoundEvents = events.length;
 const second = await runClaudeCode(
   base(
     '先运行 `nohup sleep 300 >/dev/null 2>&1 &` 在后台起一个进程，不用等它；然后回答：你刚才提交用的提交信息是什么？只回复提交信息本身。',
@@ -79,6 +80,12 @@ const secondDelivery = await checkDelivery({
 const secondVerdict = judgeClaudeRun(second);
 const leftBehind = sessionProcs(runId);
 const secondCost = costOfThisRun(second.stream.result, first.stream.result);
+// 终帧只带最后一段回复（后台任务结束时模型还会再说一句），所以看这一轮说过的全部话
+const secondSaid = events
+  .slice(firstRoundEvents)
+  .filter((e) => e.kind === 'say')
+  .map((e) => String((e.payload as { text?: string }).text ?? ''))
+  .join('\n');
 
 const checks: [string, boolean][] = [
   ['第一轮判交付', firstVerdict.outcome === 'ok' && firstVerdict.reason === 'delivered'],
@@ -88,7 +95,8 @@ const checks: [string, boolean][] = [
   ['第一轮读到提交（按测试命令认）', events.some((e) => e.kind === 'test')],
   ['第一轮有额度读数', first.stream.rateLimits.length > 0],
   ['续会话会话号不变', second.stream.sessionId === sessionId],
-  ['续会话记得第一轮的提交信息', (second.stream.result?.text ?? '').includes('e2e: 追加一行')],
+  ['续会话记得第一轮的提交信息', secondSaid.includes('e2e: 追加一行')],
+  ['第二轮在后台留的进程被收掉了', second.stragglers >= 1],
   ['第二轮正常结束', secondVerdict.outcome === 'ok'],
   [
     '第二轮没有新提交：不靠上一轮的提交判交付',

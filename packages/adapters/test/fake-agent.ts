@@ -26,6 +26,8 @@ export interface FakeScript {
    */
   childDetached?: boolean;
   childIgnoresSigterm?: boolean;
+  /** 子进程连环境也清空（会话标记跟着没了）：没有 scope 时谁也找不到它，只有 cgroup 兜得住。 */
+  childCleanEnv?: boolean;
   exitCode?: number;
   ignoreSigterm?: boolean;
 }
@@ -55,7 +57,11 @@ const after = script.after ?? 'exit';
 if (after === 'hang-with-child' || after === 'exit-leaving-child') {
   const code = `${script.childIgnoresSigterm ? "process.on('SIGTERM', () => {});" : ''}setInterval(() => {}, 1000);`;
   const child = script.childDetached
-    ? spawn(process.execPath, ['-e', code], { detached: true, stdio: 'ignore' })
+    ? spawn(process.execPath, ['-e', code], {
+        detached: true,
+        stdio: 'ignore',
+        ...(script.childCleanEnv ? { env: {} } : {}),
+      })
     : // 子进程继承 stdout：它不死，插头那边的输出流就关不上
       spawn(process.execPath, ['-e', code], { stdio: ['ignore', 'inherit', 'inherit'] });
   if (script.childDetached) child.unref();
