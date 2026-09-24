@@ -77,8 +77,8 @@ snapshot_ours() {
     /etc/wireguard /etc/postgresql/16/main /etc/apt/sources.list.d /etc/apt/keyrings \
     /usr/local/bin/fleet-temporal /home/fleet/.local/bin \
     /etc/nginx/sites-available/fleet-dao /etc/nginx/sites-enabled/fleet-dao
-  find /etc/systemd/system -maxdepth 2 -name '*fleet*' -print0 2>/dev/null | sort -z |
-    while IFS= read -r -d '' f; do snapshot_file_list "$f"; done
+  find /etc/systemd/system /etc/letsencrypt/live /etc/letsencrypt/renewal -maxdepth 2 -name '*fleet*' -print0 2>/dev/null |
+    sort -z | while IFS= read -r -d '' f; do snapshot_file_list "$f"; done
   for d in /srv/fleet-dao /var/lib/fleet-dao /var/log/fleet-dao /home/fleet; do
     [[ -e "$d" ]] && printf 'dir  %s %s\n' "$(stat -c '%U:%G %a' "$d")" "$d"
   done
@@ -90,14 +90,18 @@ snapshot_ours() {
     fleet-temporal.service fleet-agents.slice postgresql@16-main.service wg-quick@wg-fleet.service nginx.service \
     2>/dev/null | awk 'BEGIN { RS = ""; FS = "\n"; OFS = " " } { $1 = $1; print }'
   echo "## postgres"
+  # 先 cd /：runuser 不换当前目录，postgres 进不了 /root 会多打一行警告，混进快照
   if command -v psql >/dev/null 2>&1 && id postgres >/dev/null 2>&1; then
-    runuser -u postgres -- psql -X -tA -c "select 'role', rolname, rolcanlogin, rolsuper, (rolpassword is not null) from pg_authid where rolname in ('fleet','temporal') union all select 'db', datname, pg_get_userbyid(datdba), datallowconn, null from pg_database where datname in ('fleet','temporal','temporal_visibility') order by 1, 2" 2>&1
-    for db in temporal temporal_visibility; do
-      printf 'schema %s ' "$db"
-      runuser -u postgres -- psql -X -tA -d "$db" -c "select curr_version from schema_version" 2>&1 | tr '\n' ' '
-      echo
-    done
-    runuser -u postgres -- psql -X -tA -c "show listen_addresses" 2>&1
+    (
+      cd / || exit
+      runuser -u postgres -- psql -X -tA -c "select 'role', rolname, rolcanlogin, rolsuper, (rolpassword is not null) from pg_authid where rolname in ('fleet','temporal') union all select 'db', datname, pg_get_userbyid(datdba), datallowconn, null from pg_database where datname in ('fleet','temporal','temporal_visibility') order by 1, 2" 2>&1
+      for db in temporal temporal_visibility; do
+        printf 'schema %s ' "$db"
+        runuser -u postgres -- psql -X -tA -d "$db" -c "select curr_version from schema_version" 2>&1 | tr '\n' ' '
+        echo
+      done
+      runuser -u postgres -- psql -X -tA -c "show listen_addresses" 2>&1
+    )
   else
     echo "postgres: 没装"
   fi
@@ -110,8 +114,8 @@ snapshot_ours() {
   fi
   echo "## pnpm"
   if id fleet >/dev/null 2>&1 && [[ -e /home/fleet/.local/bin/pnpm ]]; then
-    runuser -u fleet -- env -i HOME=/home/fleet PATH=/home/fleet/.local/bin:/usr/bin:/bin \
-      COREPACK_ENABLE_DOWNLOAD_PROMPT=0 pnpm --version 2>&1
+    (cd /home/fleet && runuser -u fleet -- env -i HOME=/home/fleet PATH=/home/fleet/.local/bin:/usr/bin:/bin \
+      COREPACK_ENABLE_DOWNLOAD_PROMPT=0 pnpm --version 2>&1)
   else
     echo "pnpm: 没装"
   fi

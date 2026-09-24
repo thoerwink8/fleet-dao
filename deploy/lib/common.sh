@@ -57,7 +57,11 @@ on_error() {
   # set -E 让命令替换里的失败也会进这里；那种失败由外层拿到的返回值说话，这里不管
   if [[ "$BASHPID" != "$$" ]]; then return 0; fi
   trap - ERR
-  red "装机停在第 $line 行：$cmd（返回 $rc）"
+  if [[ "$cmd" == return* ]]; then
+    red "装机停在「${FUNCNAME[1]:-主流程}」这一步，原因见上一条红"
+  else
+    red "装机停在「${FUNCNAME[1]:-主流程}」：命令「$cmd」返回 $rc（第 $line 行）"
+  fi
   finish
 }
 
@@ -137,13 +141,14 @@ ensure_service_user() { # 用户名 家目录
   ok "用户 $name（uid $uid，家目录 $home）"
 }
 
-# 以服务用户身份跑命令：环境清空、HOME 换成它自己的——runuser 不换 HOME，命令行工具会去读调用者家里的配置（审计 P03）。
+# 以服务用户身份跑命令：环境清空、HOME 和当前目录都换成它自己的家。runuser 两样都不换：
+# 命令行工具会去读调用者家里的配置（审计 P03），当前目录还停在 /root 的话，它连自己在哪都读不到（corepack 实咬）。
 as_user() { # 用户 命令…
   local user=$1 home
   shift
   home=$(getent passwd "$user" | cut -d: -f6)
-  runuser -u "$user" -- env -i HOME="$home" USER="$user" LOGNAME="$user" \
-    PATH="$home/.local/bin:/usr/local/bin:/usr/bin:/bin" LANG=C.UTF-8 "$@"
+  (cd -- "$home" && runuser -u "$user" -- env -i HOME="$home" USER="$user" LOGNAME="$user" \
+    PATH="$home/.local/bin:/usr/local/bin:/usr/bin:/bin" LANG=C.UTF-8 "$@")
 }
 
 # ── 装包 ──
