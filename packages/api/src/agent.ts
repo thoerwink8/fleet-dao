@@ -182,7 +182,23 @@ export function agentRoutes(deps: Deps, waiters: AskWaiters): Hono<AgentEnv> {
     ]);
     const verdict = checkDone({ stage: session.stage, branch: session.branch, request, pr, tests });
     if (!verdict.ok) {
-      log.info('交活被退回', { runId: session.runId, code: verdict.code, reasons: verdict.reasons });
+      // 退回也落库（任务时间线和操作记录里看得到），不只打日志：「交了几次、为什么被退」是判假完成的依据。
+      await store.appendAudit({
+        actor: { kind: 'agent', id: session.runId },
+        action: 'agent.done_rejected',
+        target: `task:${session.taskId}`,
+        after: {
+          runId: session.runId,
+          summary: request.summary,
+          prNumber: request.prNumber,
+          testsPassed: request.testsPassed,
+          code: verdict.code,
+          reasons: verdict.reasons,
+        },
+        via: 'agent',
+        ok: false,
+        error: verdict.code,
+      });
       throw new ApiError(verdict.status, verdict.code, verdict.message, { reasons: verdict.reasons });
     }
     await store.appendProgress(session.runId, 'done', {

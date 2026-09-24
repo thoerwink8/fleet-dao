@@ -68,15 +68,22 @@ describe('实时推送（SSE）', () => {
     expect(subscribers).toBe(0);
   });
 
-  it('驾驶舱里的写操作经数据库变化推给所有打开的页面', async () => {
+  it('写库引起的变化推给打开的页面（例：回答追问，asks 表会发通知）', async () => {
     const h = harness();
     const session = await h.login();
+    h.store.data.asks.push({
+      id: 'ask-sse',
+      taskId: 'task-12',
+      question: '几位？',
+      options: [],
+      askedAt: h.clock.now.toISOString(),
+    });
     const res = await h.cockpit.request('/api/events', { headers: { cookie: session.cookie } });
     if (!res.body) throw new Error('没有响应体');
     const reader = res.body.getReader();
     const buf = await readUntil(reader, 'event: ready');
-    await h.cockpit.request('/api/routing/channels/ch-cursor', write('PATCH', session, { enabled: false }));
-    await readUntil(reader, '"table":"channels"', buf);
+    await h.cockpit.request('/api/asks/ask-sse/answer', write('POST', session, { answer: '6 位' }));
+    await readUntil(reader, '{"table":"asks","id":"ask-sse"}', buf);
     await reader.cancel();
   });
 

@@ -77,7 +77,11 @@ export function authRoutes(deps: Deps): Hono<CockpitEnv> {
         `飞书账号「${identity.name}」不在白名单里，请找创始人把你加进来`,
       );
     }
-    const session = startSession(c, config, user.id, deps.now());
+    return { user, session: await startRecordedSession(c, user, method) };
+  }
+
+  /** 先记后做：登录记录写不进就抛错，不种 Cookie。 */
+  async function startRecordedSession(c: Context, user: CockpitUser, method: string) {
     await store.appendAudit({
       actor: { kind: 'user', id: user.id },
       action: 'login',
@@ -86,7 +90,7 @@ export function authRoutes(deps: Deps): Hono<CockpitEnv> {
       via: 'cockpit',
       ok: true,
     });
-    return { user, session };
+    return startSession(c, config, user.id, deps.now());
   }
 
   async function identify(input: Parameters<NonNullable<Deps['feishu']>['identify']>[0]) {
@@ -135,7 +139,8 @@ export function authRoutes(deps: Deps): Hono<CockpitEnv> {
     } catch (err) {
       // 这是浏览器直接打开的页面，出错给一页白话，不给 JSON。
       if (err instanceof ApiError) return loginFailedPage(c, err.status, err.message);
-      throw err;
+      log.error('飞书登录回调出错', { error: String(err) });
+      return loginFailedPage(c, 500, '后端出错了，已记日志，请稍后再登录');
     }
     return c.redirect(saved.next, 302);
   });
@@ -149,7 +154,6 @@ export function authRoutes(deps: Deps): Hono<CockpitEnv> {
   });
 
   app.post('/logout', requireSession(config, store, deps.now), async (c) => {
-    endSession(c, config);
     await store.appendAudit({
       actor: { kind: 'user', id: c.get('user').id },
       action: 'logout',
@@ -157,6 +161,7 @@ export function authRoutes(deps: Deps): Hono<CockpitEnv> {
       via: 'cockpit',
       ok: true,
     });
+    endSession(c, config);
     return c.body(null, 204);
   });
 
@@ -166,7 +171,7 @@ export function authRoutes(deps: Deps): Hono<CockpitEnv> {
       const { userId } = await readJson(c, DevLoginRequest);
       const user = await store.getUser(userId);
       if (!isCockpitUser(user)) throw new ApiError(403, 'not_whitelisted', '这个账号不在白名单里');
-      const session = startSession(c, config, user.id, deps.now());
+      const session = await startRecordedSession(c, user, 'dev-login');
       log.warn('开发环境免登', { userId: user.id });
       return reply(c, MeResponse, meBody(config, user, session));
     });

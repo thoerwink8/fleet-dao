@@ -243,12 +243,18 @@ export function createMemoryStore(
           .map((a) => ({
             id: a.id,
             at: a.at,
-            source: a.actor.kind === 'user' ? ('person' as const) : ('engine' as const),
-            kind: a.action.replace(/^(task|ask)\./, ''),
+            source:
+              a.actor.kind === 'user'
+                ? ('person' as const)
+                : a.actor.kind === 'agent'
+                  ? ('session' as const)
+                  : ('engine' as const),
+            kind: a.action.split('.').at(-1) ?? a.action,
             payload: {
               ...(a.after && typeof a.after === 'object' ? a.after : {}),
               reason: a.reason,
               ok: a.ok,
+              error: a.error,
             },
           })),
       ];
@@ -268,7 +274,7 @@ export function createMemoryStore(
       ask.answeredBy = by.id;
       ask.answeredAt = now().toISOString();
       audit(entry);
-      changed('task_questions', askId);
+      changed('asks', askId);
       return 'ok';
     },
 
@@ -390,7 +396,7 @@ export function createMemoryStore(
         askedAt: now().toISOString(),
       };
       data.asks.push(ask);
-      changed('task_questions', ask.id);
+      changed('asks', ask.id);
       return { ask, created: true };
     },
     async searchHistory({ repoId, query, limit }) {

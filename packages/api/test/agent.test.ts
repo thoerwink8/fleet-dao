@@ -1,4 +1,4 @@
-import { AskResponse, HistoryResponse, TaskResponse } from '@fleet-dao/shared';
+import { AskResponse, HistoryResponse, TaskResponse, TimelineResponse } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import { AGENT_TOKEN_MAX_TTL_SECONDS, signAgentToken, verifyAgentToken } from '../src/agent-token.ts';
 import { signPayload } from '../src/tokens.ts';
@@ -253,7 +253,7 @@ describe('fleet ask', () => {
     const record = h.store.data.asks[0];
     if (!record) throw new Error('追问没落库');
     record.answer = '先用阿里云';
-    h.changes.publish({ type: 'change', table: 'task_questions', id: record.id });
+    h.changes.publish({ type: 'change', table: 'asks', id: record.id });
     const body = AskResponse.parse(await (await pending).json());
     expect(body.status).toBe('answered');
   });
@@ -284,38 +284,89 @@ describe('fleet done 要核实', () => {
     });
   }
 
-  it('PR 在、分支对、会话里最后一次测试是绿的：收下，记进度并叫醒工作流', async () => {
-    const h = harness();
-    withPr(h);
+  function testRun(h: ReturnType<typeof harness>, passed: boolean, minutesLater = 0) {
     h.store.data.testRuns.push({
       runId: DEV_RUN_ID,
-      at: h.clock.now.toISOString(),
-      passed: true,
+      at: new Date(h.clock.now.getTime() + minutesLater * 60_000).toISOString(),
+      passed,
       command: 'pnpm check',
     });
-    const res = await done(h, { summary: '接口写完了', prNumber: 31, testsPassed: true });
+  }
+
+  async function reasonsOf(res: Response): Promise<string> {
+    const body = (await res.json()) as { error: { details: { reasons: string[] } } };
+    return body.error.details.reasons.join('\n');
+  }
+
+  it('会话里最后一次测试是绿的：收下（PR 由引擎在会话后开，不要求带），记进度并叫醒工作流', async () => {
+    const h = harness();
+    testRun(h, true);
+    const res = await done(h, { summary: '接口写完了', testsPassed: true });
     expect(res.status).toBe(200);
     expect(h.store.data.progress.at(-1)).toMatchObject({ kind: 'done' });
     expect(h.signals.at(-1)?.signal).toMatchObject({ name: 'agentEvent', kind: 'done' });
   });
 
-  it('说了就算不行：没跑过测试、最后一次测试是红的、PR 不在本会话分支上，都退回并说明原因', async () => {
+  it('返工轮次带着已有的 PR 编号：PR 在、分支对也收下', async () => {
     const h = harness();
-    withPr(h, { headRef: 'someone-else' });
-    const noTests = await done(h, { summary: 's', prNumber: 31, testsPassed: true });
+    withPr(h);
+    testRun(h, true);
+    expect((await done(h, { summary: '按审查意见改了', prNumber: 31, testsPassed: true })).status).toBe(200);
+  });
+
+  it('说了就算不行：没跑过测试、最后一次测试是红的、PR 不在本会话分支上，逐条退回并说明原因', async () => {
+    const h = harness();
+    const noTests = await done(h, { summary: 's', testsPassed: true });
     expect(noTests.status).toBe(422);
-    const reasons = ((await noTests.json()) as { error: { details: { reasons: string[] } } }).error.details
-      .reasons;
-    expect(reasons.join('\n')).toContain('不是本会话的分支');
-    expect(reasons.join('\n')).toContain('没查到本次会话跑过测试');
+    expect(await reasonsOf(noTests)).toContain('没查到本次会话跑过测试');
+
+    testRun(h, true);
+    testRun(h, false, 5);
+    const lastRed = await done(h, { summary: 's', testsPassed: true });
+    expect(lastRed.status).toBe(422);
+    expect(await reasonsOf(lastRed)).toContain('最后一次跑测试没过');
+
+    testRun(h, true, 10);
+    withPr(h, { headRef: 'someone-else' });
+    const wrongBranch = await done(h, { summary: 's', prNumber: 31, testsPassed: true });
+    expect(wrongBranch.status).toBe(422);
+    expect(await reasonsOf(wrongBranch)).toContain('不是本会话的分支');
+
     expect(h.store.data.progress.some((p) => p.kind === 'done')).toBe(false);
     expect(h.signals).toHaveLength(0);
   });
 
-  it('PR 还没同步进库：409，过一会儿再交', async () => {
+  it('退回要落库：操作记录里有，任务时间线上看得到，不只打日志', async () => {
     const h = harness();
+    const session = await h.login();
+    const res = await done(h, { summary: '写完了', testsPassed: true });
+    expect(res.status).toBe(422);
+    expect(h.store.data.audit.at(-1)).toMatchObject({
+      actor: { kind: 'agent', id: DEV_RUN_ID },
+      action: 'agent.done_rejected',
+      target: 'task:task-12',
+      via: 'agent',
+      ok: false,
+      error: 'done_rejected',
+    });
+    const timeline = TimelineResponse.parse(
+      await (
+        await h.cockpit.request('/api/tasks/task-12/timeline', { headers: { cookie: session.cookie } })
+      ).json(),
+    );
+    expect(timeline.items[0]).toMatchObject({ source: 'session', kind: 'done_rejected' });
+    expect(timeline.items[0]?.text).toContain('交活被退回：没查到本次会话跑过测试');
+  });
+
+  it('带的 PR 还没同步进库：409，过一会儿再交（也落库）', async () => {
+    const h = harness();
+    testRun(h, true);
     const res = await done(h, { summary: 's', prNumber: 99, testsPassed: true });
     expect(res.status).toBe(409);
     expect(await errorCode(res)).toBe('not_verifiable_yet');
+    expect(h.store.data.audit.at(-1)).toMatchObject({
+      action: 'agent.done_rejected',
+      error: 'not_verifiable_yet',
+    });
   });
 });

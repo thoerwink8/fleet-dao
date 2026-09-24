@@ -45,7 +45,7 @@ export function devFixtures(now: Date): Partial<MemoryData> {
       { id: 'opus-5.5', family: 'claude', displayName: 'Opus 5.5' },
       { id: 'gpt-5.6', family: 'gpt', displayName: 'GPT 5.6' },
       { id: 'kimi-k3', family: 'kimi', displayName: 'Kimi k3' },
-      { id: 'fable-1', family: 'fable', displayName: 'Fable' },
+      { id: 'fable-5.1', family: 'claude', displayName: 'Fable 5.1' },
     ],
     routes: [
       {
@@ -76,7 +76,7 @@ export function devFixtures(now: Date): Partial<MemoryData> {
         id: 'rt-mirasim-fable',
         channelId: 'ch-mirasim',
         poolId: 'pool-mirasim',
-        modelId: 'fable-1',
+        modelId: 'fable-5.1',
         hostId: 'mirasim',
         alive: true,
       },
@@ -86,10 +86,8 @@ export function devFixtures(now: Date): Partial<MemoryData> {
       { stage: 'ui', routeIds: ['rt-claude-opus'], pinned: true },
       { stage: 'review', routeIds: ['rt-mirasim-gpt'], pinned: false },
     ],
-    bans: [
-      { family: 'gpt', stage: 'ui', reason: 'GPT 不碰 UI' },
-      { family: 'fable', reason: '不用 Fable' },
-    ],
+    // 两条全局禁令写死在 shared/bans.ts，不在这里；库里只放另外加的（这条是样例）。
+    bans: [{ family: 'kimi', stage: 'ui', reason: '（样例）库里另配的禁令：Kimi 暂不进 UI' }],
     quotaWindows: [
       {
         poolId: 'pool-claude-a',

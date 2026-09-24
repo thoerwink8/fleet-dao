@@ -6,6 +6,7 @@ import {
   AuditQuery,
   AuditResponse,
   BoardResponse,
+  HARD_BANS,
   JobsResponse,
   MeResponse,
   NotificationsQuery,
@@ -64,18 +65,26 @@ export function cockpitRoutes(deps: Deps, waiters: AskWaiters): Hono<CockpitEnv>
 
   const actorOf = (c: Context<CockpitEnv>): Actor => ({ kind: 'user', id: c.get('user').id });
 
-  /** 发信号并留操作记录；工作流不在了返回 409，发不出去返回 502，两种都照样记下来。 */
+  /**
+   * 先记后做：操作记录写不进就抛错，信号不发。信号没发成（工作流不在了 409、发不出去 502）再追加一条 ok=false 的记录；
+   * 这一条也写不进时只能留日志，但不改变返回给人的结果。
+   */
   async function signalAndAudit(taskId: string, signal: TaskSignal, audit: NewAuditEntry): Promise<void> {
+    await store.appendAudit(audit);
     try {
       await deps.workflows.signal(taskId, signal);
     } catch (err) {
       const gone = err instanceof WorkflowGoneError;
-      await store.appendAudit({ ...audit, ok: false, error: gone ? 'workflow_gone' : String(err) });
+      const error = gone ? 'workflow_gone' : String(err);
+      try {
+        await store.appendAudit({ ...audit, ok: false, error });
+      } catch (auditErr) {
+        deps.log.error('信号没发成，这条失败记录也没写进去', { taskId, error, auditError: String(auditErr) });
+      }
       if (gone) throw new ApiError(409, 'workflow_gone', '这个任务的工作流已经结束或不存在');
-      deps.log.error('发信号失败', { taskId, signal: signal.name, error: String(err) });
+      deps.log.error('发信号失败', { taskId, signal: signal.name, error });
       throw new ApiError(502, 'workflow_unreachable', '发给工作流的信号没发出去，稍后再试');
     }
-    await store.appendAudit(audit);
   }
 
   app.get(WebRoutes.me.path, (c) => reply(c, MeResponse, meBody(config, c.get('user'), c.get('session'))));
@@ -280,7 +289,8 @@ export function cockpitRoutes(deps: Deps, waiters: AskWaiters): Hono<CockpitEnv>
     const stages: StagePolicy[] = StageKindSchema.options.map(
       (stage) => byStage.get(stage) ?? { stage, routeIds: [], pinned: false },
     );
-    return reply(c, RoutingResponse, { channels, pools, models, routes, stages, bans });
+    const hardBans = HARD_BANS.map(({ id, reason }) => ({ id, reason }));
+    return reply(c, RoutingResponse, { channels, pools, models, routes, stages, hardBans, bans });
   });
 
   app.put(WebRoutes.updateStagePolicy.path, async (c) => {

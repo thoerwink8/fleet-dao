@@ -16,8 +16,9 @@ import {
   WebRoutes,
 } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
+import { devFixtures } from '../src/dev-fixtures.ts';
 import { WorkflowGoneError } from '../src/ports.ts';
-import { DEV_RUN_ID, DEV_USER_ID, errorCode, harness, write } from './harness.ts';
+import { DEV_RUN_ID, DEV_USER_ID, errorCode, harness, T0, write } from './harness.ts';
 
 const PARAMS: Record<string, string> = {
   repoId: 'repo-1',
@@ -201,7 +202,7 @@ describe('发给工作流的信号', () => {
     });
   });
 
-  it('任务已结束、工作流不在了：409，失败也留操作记录', async () => {
+  it('任务已结束、工作流不在了：409；先记后做——发起那条在前，没做成再追加一条 ok=false', async () => {
     const h = harness({
       workflows: {
         async signal(taskId) {
@@ -214,11 +215,34 @@ describe('发给工作流的信号', () => {
     expect(await errorCode(done)).toBe('task_finished');
     const gone = await h.cockpit.request('/api/tasks/task-12/actions', write('POST', s, { action: 'pause' }));
     expect(await errorCode(gone)).toBe('workflow_gone');
-    expect(h.store.data.audit.at(-1)).toMatchObject({
-      action: 'task.pause',
-      ok: false,
-      error: 'workflow_gone',
-    });
+    expect(h.store.data.audit.slice(-2)).toMatchObject([
+      { action: 'task.pause', target: 'task:task-12', ok: true },
+      { action: 'task.pause', target: 'task:task-12', ok: false, error: 'workflow_gone' },
+    ]);
+    const timeline = TimelineResponse.parse(
+      await (
+        await h.cockpit.request('/api/tasks/task-12/timeline', { headers: { cookie: s.cookie } })
+      ).json(),
+    );
+    expect(timeline.items.map((i) => i.text)).toContain('暂停没做成：workflow_gone');
+  });
+
+  it('操作记录写不进：信号不发（故障注入）', async () => {
+    const h = harness();
+    const s = await h.login();
+    h.store.appendAudit = async () => {
+      throw new Error('库写不进');
+    };
+    for (const action of ['pause', 'resume', 'stop']) {
+      const res = await h.cockpit.request('/api/tasks/task-12/actions', write('POST', s, { action }));
+      expect(res.status, action).toBe(500);
+    }
+    const reroute = await h.cockpit.request(
+      '/api/tasks/task-12/actions',
+      write('POST', s, { action: 'reroute', routeId: 'rt-mirasim-kimi' }),
+    );
+    expect(reroute.status).toBe(500);
+    expect(h.signals).toHaveLength(0);
   });
 
   it('回答追问：写库、发 answer 信号、留记录；第二次回答 409', async () => {
@@ -306,8 +330,10 @@ describe('调度台', () => {
     ]);
   });
 
-  it('禁令：GPT 不进 UI、Fable 哪都不进；不存在的路由、重复的路由、不存在的阶段都拒', async () => {
-    const h = harness();
+  it('硬禁令写死在代码里：库里的 bans 表空了，GPT 照样进不了 UI，Fable（claude 族）哪个阶段都进不了', async () => {
+    const data = devFixtures(T0);
+    data.bans = [];
+    const h = harness({ data });
     const s = await h.login();
     const put = (stage: string, routeIds: string[]) =>
       h.cockpit.request(
@@ -320,21 +346,38 @@ describe('调度台', () => {
       );
     const gpt = await put('ui', ['rt-mirasim-gpt']);
     expect(gpt.status).toBe(422);
-    expect(((await gpt.json()) as { error: { message: string } }).error.message).toContain('GPT 不碰 UI');
-    expect(await errorCode(await put('review', ['rt-mirasim-fable']))).toBe('route_not_allowed');
+    expect(((await gpt.json()) as { error: { message: string } }).error.message).toContain('GPT 不做 UI');
+    for (const stage of ['execute', 'review', 'triage']) {
+      const fable = await put(stage, ['rt-mirasim-fable']);
+      expect(fable.status, stage).toBe(422);
+      expect(((await fable.json()) as { error: { message: string } }).error.message).toContain('不用 Fable');
+    }
+    expect(h.store.data.stagePolicies.find((p) => p.stage === 'ui')?.routeIds).toEqual(['rt-claude-opus']);
+
+    const routing = RoutingResponse.parse(
+      await (await h.cockpit.request('/api/routing', { headers: { cookie: s.cookie } })).json(),
+    );
+    expect(routing.hardBans.map((b) => b.id)).toEqual(['gpt-no-ui', 'no-fable']);
+    expect(routing.bans).toEqual([]);
+  });
+
+  it('库里另配的禁令和硬禁令一起生效；不存在的路由、重复的路由、不存在的阶段都拒', async () => {
+    const h = harness();
+    const s = await h.login();
+    const put = (stage: string, routeIds: string[]) =>
+      h.cockpit.request(
+        `/api/routing/stages/${stage}`,
+        write('PUT', s, {
+          routeIds,
+          pinned: false,
+          expected: { routeIds: ['rt-claude-opus'], pinned: true },
+        }),
+      );
+    const kimi = await put('ui', ['rt-mirasim-kimi']);
+    expect(((await kimi.json()) as { error: { message: string } }).error.message).toContain('Kimi 暂不进 UI');
     expect(await errorCode(await put('ui', ['rt-nope']))).toBe('route_not_allowed');
     expect(await errorCode(await put('ui', ['rt-claude-opus', 'rt-claude-opus']))).toBe('invalid_request');
     expect(await errorCode(await put('cooking', ['rt-claude-opus']))).toBe('stage_not_found');
-    // GPT 进审查阶段不犯禁令。
-    const review = await h.cockpit.request(
-      '/api/routing/stages/review',
-      write('PUT', s, {
-        routeIds: ['rt-mirasim-gpt'],
-        pinned: false,
-        expected: { routeIds: ['rt-mirasim-gpt'], pinned: false },
-      }),
-    );
-    expect(review.status).toBe(200);
   });
 
   it('下架渠道：写操作记录；不存在的渠道 404', async () => {

@@ -79,7 +79,7 @@ describe('等回答', () => {
     const waiters = createAskWaiters(hub);
     const started = Date.now();
     const a = waiters.sleep('ask-1', 5_000);
-    hub.publish({ type: 'change', table: 'task_questions', id: 'ask-1' });
+    hub.publish({ type: 'change', table: 'asks', id: 'ask-1' });
     await a;
     const b = waiters.sleep('ask-2', 5_000);
     hub.publish({ type: 'resync' });

@@ -155,7 +155,7 @@ describe('GitHub 事件白名单与去重', () => {
     expect(await (await deliver(h, 'pull_request', forkPr)).json()).toMatchObject({ reason: 'from_fork' });
   });
 
-  it('ping 和 CI 事件：不看作者；不认识的事件：不收', async () => {
+  it('ping 和本仓的 CI 事件：不看作者；不认识的事件：不收', async () => {
     const h = harness();
     expect(await (await deliver(h, 'ping', { zen: 'hi', hook_id: 1 })).json()).toMatchObject({
       verdict: 'accepted',
@@ -163,7 +163,7 @@ describe('GitHub 事件白名单与去重', () => {
     });
     const suite = {
       action: 'completed',
-      check_suite: { conclusion: 'success' },
+      check_suite: { head_branch: 'fleet/12-a', conclusion: 'success' },
       sender: stranger,
       repository: REPO,
     };
@@ -177,8 +177,40 @@ describe('GitHub 事件白名单与去重', () => {
       reason: 'event_not_handled',
     });
   });
-});
 
+  it('从 fork 来的 CI 事件也不收（四种事件各有认法），看不懂的也不收', async () => {
+    const h = harness();
+    const base = { action: 'completed', sender: stranger, repository: REPO };
+    const forks: [string, object][] = [
+      // GitHub 文档：fork 的分支推送认不出来，head_branch 为 null、pull_requests 为空。
+      ['check_suite', { ...base, check_suite: { head_branch: null, pull_requests: [] } }],
+      ['check_run', { ...base, check_run: { check_suite: { head_branch: null }, pull_requests: [] } }],
+      ['workflow_run', { ...base, workflow_run: { head_repository: { full_name: 'stranger/canary' } } }],
+      ['status', { sender: stranger, repository: REPO, state: 'success', branches: [] }],
+    ];
+    for (const [event, payload] of forks) {
+      expect(await (await deliver(h, event, payload)).json(), event).toMatchObject({
+        verdict: 'ignored',
+        reason: 'from_fork',
+      });
+    }
+    const sameRepo: [string, object][] = [
+      ['check_run', { ...base, check_run: { check_suite: { head_branch: 'fleet/12-a' } } }],
+      ['workflow_run', { ...base, workflow_run: { head_repository: REPO } }],
+      [
+        'status',
+        { sender: stranger, repository: REPO, state: 'success', branches: [{ name: 'fleet/12-a' }] },
+      ],
+    ];
+    for (const [event, payload] of sameRepo) {
+      expect(await (await deliver(h, event, payload)).json(), event).toMatchObject({ verdict: 'accepted' });
+    }
+    expect(await (await deliver(h, 'check_suite', { ...base, check_suite: {} })).json()).toMatchObject({
+      reason: 'payload_unreadable',
+    });
+    expect(h.accepted.map((e) => e.event)).toEqual(['check_run', 'workflow_run', 'status']);
+  });
+});
 describe('白名单判定', () => {
   const whitelist = githubWhitelist(devFixtures(T0).users ?? []);
   const repos = new Set(['example/canary']);
@@ -191,6 +223,17 @@ describe('白名单判定', () => {
 
   it('只登记了登录名的人按登录名认（不分大小写）', () => {
     expect(screen('issues', issueOpened(founderB)).accept).toBe(true);
+  });
+
+  it('协作者进不了驾驶舱，但开的单、写的评论照样算白名单作者', () => {
+    const withCollaborator = githubWhitelist([
+      ...(devFixtures(T0).users ?? []),
+      { id: 'u-collab', displayName: '协作者', role: 'collaborator', active: true, githubId: 3003 },
+    ]);
+    const collaborator = { login: 'collab', id: 3003, type: 'User' };
+    expect(
+      screenGithubEvent('issues', issueOpened(collaborator), { repos, whitelist: withCollaborator }).accept,
+    ).toBe(true);
   });
 
   it('机器人只按编号认，而且 type 必须是 Bot：普通账号起个机器人的名字不行', () => {

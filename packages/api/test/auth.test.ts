@@ -81,15 +81,26 @@ describe('飞书浏览器登录（授权码 + PKCE）', () => {
     expect(h.feishuCalls).toHaveLength(0);
   });
 
-  it('暂存 Cookie 只能用一次、10 分钟过期', async () => {
+  it('暂存 Cookie：回调时就让浏览器删掉（成功、失败都删）；超过 10 分钟不认', async () => {
     const h = harness();
+    const deleted = (res: Response) =>
+      setCookies(res).some((c) => /^__Host-fleet_oauth=;.*Max-Age=0/.test(c));
+
+    const ok = await startBrowserLogin(h);
+    const cb = await h.cockpit.request(`/auth/feishu/callback?code=${FOUNDER_A_CODE}&state=${ok.state}`, {
+      headers: { cookie: ok.cookie },
+    });
+    expect(cb.status).toBe(302);
+    expect(deleted(cb)).toBe(true);
+
     const { state, cookie } = await startBrowserLogin(h);
     h.clock.now = new Date(h.clock.now.getTime() + 11 * 60_000);
     const late = await h.cockpit.request(`/auth/feishu/callback?code=${FOUNDER_A_CODE}&state=${state}`, {
       headers: { cookie },
     });
     expect(late.status).toBe(400);
-    expect(setCookies(late).some((c) => c.startsWith('__Host-fleet_oauth=;'))).toBe(true);
+    expect(deleted(late)).toBe(true);
+    expect(h.feishuCalls).toHaveLength(1);
   });
 
   it('用户在飞书授权页点了拒绝：401 页面', async () => {
@@ -130,7 +141,7 @@ describe('飞书客户端内免登（requestAccess）', () => {
     expect(h.feishuCalls.at(-1)).toEqual({ code: FOUNDER_A_CODE });
   });
 
-  it('不在白名单、账号停用、机器人：都进不来', async () => {
+  it('只放创始人：不在白名单、账号停用、协作者、机器人都进不来', async () => {
     const h = harness();
     const post = (code: string) =>
       h.cockpit.request('/auth/feishu/access', {
@@ -144,10 +155,46 @@ describe('飞书客户端内免登（requestAccess）', () => {
     if (!founder) throw new Error('样例数据里没有创始人甲');
     founder.active = false;
     expect((await post(FOUNDER_A_CODE)).status).toBe(403);
-
     founder.active = true;
-    founder.role = 'bot';
-    expect((await post(FOUNDER_A_CODE)).status).toBe(403);
+
+    for (const role of ['collaborator', 'bot'] as const) {
+      founder.role = role;
+      const res = await post(FOUNDER_A_CODE);
+      expect(res.status, role).toBe(403);
+      expect(setCookies(res).some((c) => c.startsWith('__Host-fleet_session='))).toBe(false);
+    }
+  });
+
+  it('已经登录的人被改成协作者：下一个请求就 403', async () => {
+    const h = harness();
+    const { cookie } = await h.login();
+    const founder = h.store.data.users.find((u) => u.id === DEV_USER_ID);
+    if (!founder) throw new Error('样例数据里没有创始人甲');
+    founder.role = 'collaborator';
+    expect(await errorCode(await h.cockpit.request('/api/me', { headers: { cookie } }))).toBe(
+      'not_whitelisted',
+    );
+  });
+
+  it('先记后做：登录记录写不进，就不种 Cookie（故障注入）', async () => {
+    const h = harness();
+    h.store.appendAudit = async () => {
+      throw new Error('库写不进');
+    };
+    const inApp = await h.cockpit.request('/auth/feishu/access', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: PUBLIC_ORIGIN },
+      body: JSON.stringify({ code: FOUNDER_A_CODE }),
+    });
+    expect(inApp.status).toBe(500);
+    expect(setCookies(inApp).some((c) => c.startsWith('__Host-fleet_session='))).toBe(false);
+
+    const { state, cookie } = await startBrowserLogin(h);
+    const cb = await h.cockpit.request(`/auth/feishu/callback?code=${FOUNDER_A_CODE}&state=${state}`, {
+      headers: { cookie },
+    });
+    expect(cb.status).toBe(500);
+    expect(setCookies(cb).some((c) => c.startsWith('__Host-fleet_session='))).toBe(false);
   });
 
   it('飞书拒了授权码：401；来源不是驾驶舱：403', async () => {
@@ -202,6 +249,17 @@ describe('会话', () => {
     expect(res.status).toBe(204);
     expect(setCookies(res).some((c) => /^__Host-fleet_session=;.*Max-Age=0/.test(c))).toBe(true);
     expect(h.store.data.audit.at(-1)).toMatchObject({ action: 'logout', ok: true });
+  });
+
+  it('先记后做：退出记录写不进，就不清 Cookie（故障注入）', async () => {
+    const h = harness();
+    const session = await h.login();
+    h.store.appendAudit = async () => {
+      throw new Error('库写不进');
+    };
+    const res = await h.cockpit.request('/auth/logout', write('POST', session));
+    expect(res.status).toBe(500);
+    expect(setCookies(res)).toEqual([]);
   });
 
   it('http 的开发地址不用 __Host- 前缀、不加 Secure（不然浏览器存不下）', async () => {
@@ -271,7 +329,7 @@ describe('开发环境免登', () => {
     expect(config).toEqual({ feishuAppId: 'cli_test_app', devLogin: false });
   });
 
-  it('打开时仍只放白名单里的人', async () => {
+  it('打开时仍只放白名单里的创始人，也照样先留操作记录', async () => {
     const h = harness({ config: { devLogin: true } });
     const post = (userId: string) =>
       h.cockpit.request('/auth/dev-login', {
@@ -282,6 +340,7 @@ describe('开发环境免登', () => {
     const ok = await post(DEV_USER_ID);
     expect(ok.status).toBe(200);
     expect(MeResponse.parse(await ok.json()).user.id).toBe(DEV_USER_ID);
+    expect(h.store.data.audit.at(-1)).toMatchObject({ action: 'login', after: { method: 'dev-login' } });
     expect((await post('u-bot-worker')).status).toBe(403);
     expect((await post('nobody')).status).toBe(403);
   });

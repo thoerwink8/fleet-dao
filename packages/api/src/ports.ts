@@ -24,7 +24,10 @@ import type { z } from 'zod';
 
 export type UserRole = 'founder' | 'collaborator' | 'bot';
 
-/** users 表的一行：驾驶舱登录白名单 + GitHub 作者白名单。机器人（role=bot）不能登录驾驶舱，只按 GitHub 数字编号认。 */
+/**
+ * users 表的一行，两用：驾驶舱登录白名单（只放 role=founder）+ GitHub 作者白名单（创始人、协作者、自家机器人）。
+ * 机器人只按 GitHub 数字编号认。
+ */
 export interface User {
   id: string;
   displayName: string;
@@ -213,8 +216,9 @@ export interface BoardStore {
    * 一个需求的时间线，三处来源合在一起按时间倒序（memory-store.ts 是参照实现）：
    * - 这个需求所有会话的进度（source=session，kind 就是 ProgressKind，payload 原样）；
    * - 引擎记的状态变化（source=engine，kind=state，payload { from, to }）；
-   * - target=`task:<id>` 的操作记录（人做的 source=person，其余 engine；kind 取 action 最后一段，
-   *   如 task.pause → pause；payload 是 after 加上 reason）。
+   * - target=`task:<id>` 的操作记录（人做的 source=person，会话里的 AI 做的 source=session，其余 engine；
+   *   kind 取 action 最后一段，如 task.pause → pause、agent.done_rejected → done_rejected；
+   *   payload 是 after 加上 reason、ok、error）。
    * 游标由实现决定，建议用 (at, id) 做键，翻页不漏同一时刻的多条。
    */
   listTimeline(taskId: string, page: PageRequest): Promise<Page<TimelineRecord>>;

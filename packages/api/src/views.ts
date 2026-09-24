@@ -1,26 +1,27 @@
 // 把库里的记录拼成驾驶舱要的样子。纯函数，不碰数据库，测试直接喂数据。
-import type {
-  ActivitySchema,
-  Ban,
-  BoardResponse,
-  BoardSubtaskSchema,
-  BoardTaskSchema,
-  Channel,
-  HostId,
-  JobViewSchema,
-  Model,
-  NotificationSchema,
-  Pool,
-  PoolViewSchema,
-  ProgressSchema,
-  QuotaWindow,
-  Repo,
-  Route,
-  RunSchema,
-  SessionRun,
-  StageKind,
-  Subtask,
-  Task,
+import {
+  type ActivitySchema,
+  type Ban,
+  type BoardResponse,
+  type BoardSubtaskSchema,
+  type BoardTaskSchema,
+  type Channel,
+  type HostId,
+  hardBanFor,
+  type JobViewSchema,
+  type Model,
+  type NotificationSchema,
+  type Pool,
+  type PoolViewSchema,
+  type ProgressSchema,
+  type QuotaWindow,
+  type Repo,
+  type Route,
+  type RunSchema,
+  type SessionRun,
+  type StageKind,
+  type Subtask,
+  type Task,
 } from '@fleet-dao/shared';
 import type { z } from 'zod';
 import type { JobRecord, NotificationRecord, RunPlan, TimelineRecord } from './ports.ts';
@@ -195,7 +196,10 @@ export function findBan(model: Model, stage: StageKind | undefined, bans: Ban[])
   });
 }
 
-/** 一条路由能不能挂到这个阶段；能就返回 null，不能就返回白话原因。 */
+/**
+ * 一条路由能不能挂到这个阶段；能就返回 null，不能就返回白话原因。
+ * 先过写死的硬禁令（shared/bans.ts），再过库里配的 bans——库里的表空了，硬禁令照样拦。
+ */
 export function routeProblem(
   routeId: string,
   stage: StageKind | undefined,
@@ -204,13 +208,13 @@ export function routeProblem(
   const info = ctx.route(routeId);
   if (!info.route) return `路由 ${routeId} 不存在`;
   if (!info.model) return `路由 ${routeId} 用的模型 ${info.route.modelId} 不在模型目录里`;
+  const where = stage ? `「${STAGE_WORDS[stage]}」` : '这里';
+  const hard = hardBanFor(info.model, stage);
+  if (hard) return `${info.model.displayName} 不能用在${where}：${hard.reason}`;
+  const ban = findBan(info.model, stage, ctx.bans);
+  if (ban) return `${info.model.displayName} 不能用在${where}：${ban.reason}`;
   if (info.model.retiredAt && info.model.retiredAt <= ctx.now.toISOString()) {
     return `${info.model.displayName} 已下架`;
-  }
-  const ban = findBan(info.model, stage, ctx.bans);
-  if (ban) {
-    const where = stage ? `「${STAGE_WORDS[stage]}」` : '这里';
-    return `${info.model.displayName} 不能用在${where}：${ban.reason}`;
   }
   return null;
 }
@@ -361,9 +365,17 @@ export function describeTimeline(rec: TimelineRecord): string {
       return `状态：${text(p, 'from') ?? '?'} → ${text(p, 'to') ?? '?'}`;
     case 'answer':
       return `回答追问：${text(p, 'answer') ?? '（没带回答原文）'}`;
+    case 'done_rejected': {
+      const reasons = field(p, 'reasons');
+      const why = Array.isArray(reasons) ? reasons.filter((r) => typeof r === 'string').join('；') : '';
+      const head = field(p, 'code') === 'not_verifiable_yet' ? '交活暂时核实不了' : '交活被退回';
+      return why ? `${head}：${why}` : head;
+    }
     default: {
       const word = ACTION_WORDS[rec.kind];
       if (!word) return rec.kind;
+      // 先记后做：没做成的那一条（ok=false）单独写明。
+      if (field(p, 'ok') === false) return `${word}没做成：${text(p, 'error') ?? '原因没记下'}`;
       const reason = text(p, 'reason');
       return reason ? `${word}：${reason}` : word;
     }

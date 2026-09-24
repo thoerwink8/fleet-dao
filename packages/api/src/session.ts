@@ -33,8 +33,11 @@ const OAuthState = z.object({
 });
 export type OAuthState = z.infer<typeof OAuthState>;
 
-/** 能登录驾驶舱的人：白名单里、在用、不是机器人。 */
-export type CockpitUser = User & { role: 'founder' | 'collaborator' };
+/**
+ * 能登录驾驶舱的人：users 表里在用的创始人。协作者和机器人只算 GitHub 作者白名单，进不了驾驶舱；
+ * 以后要放别人进来，给 users 加显式字段（比如 cockpitAccess），不按角色推断。
+ */
+export type CockpitUser = User & { role: 'founder' };
 
 export type CockpitEnv = { Variables: { user: CockpitUser; session: SessionClaims } };
 
@@ -51,7 +54,7 @@ export function cookieNames(config: Config): CookieNames {
 }
 
 export function isCockpitUser(user: User | null): user is CockpitUser {
-  return !!user && user.active && (user.role === 'founder' || user.role === 'collaborator');
+  return !!user && user.active && user.role === 'founder';
 }
 
 export function csrfTokenFor(config: Config, sid: string): string {

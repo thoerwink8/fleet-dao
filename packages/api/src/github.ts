@@ -44,8 +44,50 @@ function fromFork(pr: z.infer<typeof PullPayload>['pull_request']): boolean {
   return !pr.head.repo || pr.head.repo.full_name.toLowerCase() !== pr.base.repo.full_name.toLowerCase();
 }
 
-/** 只带 CI 结果、不带人写的字的事件：不按作者过滤。 */
+/**
+ * CI 事件：触发人常是 GitHub 自己或占位账号，按作者过滤没意义，所以不看作者。但里面的提交信息、检查输出
+ * 同样是人或 AI 写的字——引擎只把 CI 事件当「叫醒」、回 GitHub 重读结论，不把里面的文字当指令。
+ * 从 fork 来的照样不收（各事件认 fork 的办法见 ciFromFork）。
+ */
 const CI_EVENTS = new Set(['check_suite', 'check_run', 'status', 'workflow_run']);
+
+const CheckSuitePayload = z.object({ check_suite: z.object({ head_branch: z.string().nullable() }) });
+const CheckRunPayload = z.object({
+  check_run: z.object({ check_suite: z.object({ head_branch: z.string().nullable() }) }),
+});
+const WorkflowRunPayload = z.object({ workflow_run: z.object({ head_repository: GhRepo.nullable() }) });
+const StatusPayload = z.object({ branches: z.array(z.unknown()) });
+
+/**
+ * CI 事件是不是 fork 来的；读不懂返回 null。
+ * - check_suite / check_run：GitHub 文档写明，fork 的分支推送认不出来，head_branch 为 null、pull_requests 为空。
+ * - workflow_run：head_repository 不是本仓。
+ * - status：这个提交不在本仓任何分支上（branches 为空）。
+ */
+function ciFromFork(event: string, payload: unknown, repo: string): boolean | null {
+  switch (event) {
+    case 'check_suite': {
+      const p = CheckSuitePayload.safeParse(payload);
+      return p.success ? p.data.check_suite.head_branch === null : null;
+    }
+    case 'check_run': {
+      const p = CheckRunPayload.safeParse(payload);
+      return p.success ? p.data.check_run.check_suite.head_branch === null : null;
+    }
+    case 'workflow_run': {
+      const p = WorkflowRunPayload.safeParse(payload);
+      if (!p.success) return null;
+      const head = p.data.workflow_run.head_repository;
+      return !head || head.full_name.toLowerCase() !== repo.toLowerCase();
+    }
+    case 'status': {
+      const p = StatusPayload.safeParse(payload);
+      return p.success ? p.data.branches.length === 0 : null;
+    }
+    default:
+      return null;
+  }
+}
 
 export interface GithubWhitelist {
   /** 有数字编号的人只按编号认。 */
@@ -131,7 +173,12 @@ export function screenGithubEvent(
     }
   })();
 
-  if (CI_EVENTS.has(event)) return { accept: true, wake, reason: 'ci', repo, action };
+  if (CI_EVENTS.has(event)) {
+    const fork = ciFromFork(event, payload, repo);
+    if (fork === null) return { accept: false, reason: 'payload_unreadable' };
+    if (fork) return { accept: false, reason: 'from_fork' };
+    return { accept: true, wake, reason: 'ci', repo, action };
+  }
   if (author === undefined) return { accept: false, reason: 'event_not_handled' };
   if (author === null) return { accept: false, reason: 'payload_unreadable' };
   if (author === 'fork') return { accept: false, reason: 'from_fork' };

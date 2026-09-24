@@ -109,7 +109,11 @@ export const ActorSchema = z.object({
 
 // —— 登录与当前用户 ——
 
-export const UserRoleSchema = z.enum(['founder', 'collaborator']);
+/**
+ * 驾驶舱只放行创始人。以后要放别人进来，给 users 加一个显式字段（比如 cockpitAccess），不按角色推断。
+ * （users 表同时是 GitHub 作者白名单，那边协作者和自家机器人照样算数。）
+ */
+export const UserRoleSchema = z.enum(['founder']);
 
 export const MeResponse = z.object({
   user: z.object({
@@ -366,6 +370,9 @@ export const RoutingResponse = z.object({
   models: z.array(ModelSchema),
   routes: z.array(RouteSchema),
   stages: z.array(StagePolicySchema),
+  /** 写死在代码里的全局禁令（bans.ts），驾驶舱只读展示，改不了。 */
+  hardBans: z.array(z.object({ id: z.string(), reason: z.string() })),
+  /** 库里另外配的禁令，和 hardBans 一起生效。 */
   bans: z.array(BanSchema),
 });
 
@@ -497,6 +504,10 @@ export const ResolveNotificationResponse = z.object({ ok: z.literal(true) });
 
 // —— 操作记录 ——
 
+/**
+ * 只追加，不改旧记录；先记后做：动作执行之前先写一条（写不进就不做），这一条的 ok=true 表示「已记录并发起」。
+ * 发起之后没做成（例如工作流已结束），再追加一条同 action、同 target、ok=false、带 error 的记录。
+ */
 export const AuditEntrySchema = z.object({
   id: Id,
   at: Time,
