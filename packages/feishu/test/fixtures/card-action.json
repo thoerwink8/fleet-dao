@@ -1,0 +1,30 @@
+{
+  "schema": "2.0",
+  "header": {
+    "event_id": "evt_card_0001",
+    "token": "verification_token_placeholder",
+    "create_time": "1790000000000000",
+    "event_type": "card.action.trigger",
+    "tenant_key": "tenant_placeholder",
+    "app_id": "cli_app_placeholder"
+  },
+  "event": {
+    "operator": {
+      "tenant_key": "tenant_placeholder",
+      "user_id": "u_founder_a",
+      "open_id": "ou_founder_a",
+      "union_id": "on_founder_a"
+    },
+    "token": "c-update_token_placeholder",
+    "action": {
+      "tag": "button",
+      "timezone": "Asia/Shanghai",
+      "value": { "a": "board.refresh", "n": "n1" }
+    },
+    "host": "im_message",
+    "context": {
+      "open_message_id": "om_card_placeholder",
+      "open_chat_id": "oc_team"
+    }
+  }
+}
