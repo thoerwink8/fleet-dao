@@ -1,0 +1,5 @@
+# fleet-dao（deploy/france.sh 装到 /etc/sudoers.d/fleet-dao，root 440，装之前先过 visudo -c；别在机器上手改）。
+# 引擎用户 fleet 只能以 root 跑这一个脚本：它把 AI 会话以 orca 身份放进 fleet-agents.slice 下自己的 scope，或收掉一个。
+# 会话要的环境变量经 env_keep 放过去（不上命令行）；不开伪终端，会话的标准输入输出原样接回引擎。
+Defaults!/usr/local/sbin/fleet-agent-scope !use_pty, env_keep += "FLEET_* LANG LANGUAGE LC_* TZ TERM GH_TOKEN GITHUB_TOKEN GIT_TERMINAL_PROMPT GIT_CONFIG_*"
+fleet ALL=(root) NOPASSWD: /usr/local/sbin/fleet-agent-scope

@@ -47,6 +47,12 @@ RETENTION_HOURS=720 # 30 天；Temporal 默认只留 24 小时，过后网页上
 WG_IF=wg-fleet
 WG_ADDR=10.99.0.2/24
 WG_HK_ADDR=10.99.0.1
+# 驾驶舱后端在隧道地址上的端口（packages/api 的 FLEET_COCKPIT_LISTEN）：只对香港开，只在隧道网卡上开
+API_PORT=8787
+# AI 会话以 orca 跑（CLI 的登录态都在它家里）；引擎以 fleet 跑，经 sudo 只能调 fleet-agent-scope 这一个脚本起会话
+AGENT_USER=orca
+AGENT_SCOPE_BIN=/usr/local/sbin/fleet-agent-scope
+SUDOERS_FILE=/etc/sudoers.d/fleet-dao
 ENV_FILE=/etc/fleet-dao/france.env
 ENV_KEYS=(FLEET_WG_HK_ENDPOINT FLEET_WG_HK_PUBLIC_KEY)
 TEMPORAL_HOME=/opt/fleet-dao/temporal
@@ -113,7 +119,10 @@ setup_identity() {
   ensure_dir /var/lib/fleet-dao fleet:fleet 750
   ensure_dir /var/log/fleet-dao fleet:fleet 750
   ensure_dir /etc/fleet-dao root:fleet 750
+  # 两个 GitHub 机器人的私钥放这里（root:fleet 640，手放，不进 git）：引擎读得到，orca 读不到
+  ensure_dir /etc/fleet-dao/github root:fleet 750
   ensure_dir /opt/fleet-dao root:root 755
+  ensure_service_user "$AGENT_USER" "/home/$AGENT_USER"
   if [[ -e "$ENV_FILE" ]]; then
     fix_meta "$ENV_FILE" root:fleet 640
   else
@@ -451,10 +460,46 @@ setup_temporal() {
 }
 
 setup_slice() {
-  step "AI 会话资源池 fleet-agents.slice（只记账，不设上限）"
+  step "AI 会话资源池 fleet-agents.slice（池子只记账；每个会话的上限由引擎起会话时给）"
   put_file /etc/systemd/system/fleet-agents.slice root:root 644 "$(<"$DEPLOY_DIR/france/fleet-agents.slice")"
   if ((WROTE)); then systemctl daemon-reload; fi
   ensure_unit_running fleet-agents.slice 0
+  # 引擎（fleet）自己建不了系统级 scope，会话还得以 orca 跑：给它一个只做这件事的 root 脚本，sudoers 只放行这一个。
+  # polkit 管不窄——systemd 255 建临时单元时不把单元名交给 polkit，放行就等于放行任何单元、任何身份。
+  put_file "$AGENT_SCOPE_BIN" root:root 755 "$(<"$DEPLOY_DIR/france/fleet-agent-scope.sh")"
+  local tmp
+  tmp=$(mktemp)
+  cp -- "$DEPLOY_DIR/france/sudoers-fleet-dao" "$tmp"
+  # sudoers 写坏了会把 sudo 整个弄瘫：先单独验这一份，过了才放进去
+  if ! visudo -cqf "$tmp" >/dev/null 2>&1; then
+    rm -f -- "$tmp"
+    red "deploy/france/sudoers-fleet-dao 过不了 visudo -c，不装"
+    return 1
+  fi
+  rm -f -- "$tmp"
+  put_file "$SUDOERS_FILE" root:root 440 "$(<"$DEPLOY_DIR/france/sudoers-fleet-dao")"
+  if ! visudo -cq >/dev/null 2>&1; then
+    rm -f -- "$SUDOERS_FILE"
+    red "放进 $SUDOERS_FILE 之后整套 sudoers 验不过，已撤回"
+    return 1
+  fi
+}
+
+# 驾驶舱后端的端口只对隧道那头的香港开：规则挂在隧道网卡上，公网照旧一个入站端口都不开
+setup_firewall() {
+  step "防火墙（只在隧道网卡上放行香港访问驾驶舱后端 $API_PORT）"
+  local rule="allow in on $WG_IF from $WG_HK_ADDR to ${WG_ADDR%/*} port $API_PORT proto tcp"
+  if ! command -v ufw >/dev/null || [[ "$(ufw status 2>/dev/null | head -1)" != "Status: active" ]]; then
+    ok "这台没开 ufw，不用放行"
+    return 0
+  fi
+  if [[ "$(ufw show added 2>/dev/null)" == *"ufw $rule"* ]]; then
+    ok "ufw 已有：$rule"
+    return 0
+  fi
+  # shellcheck disable=SC2086 # 规则按词拆开传给 ufw
+  ufw $rule comment 'fleet-dao cockpit api over wireguard' >/dev/null
+  changed "ufw $rule"
 }
 
 pnpm_want() { /usr/bin/node -p 'require(process.argv[1]).packageManager' "$DEPLOY_DIR/../package.json"; }
@@ -491,9 +536,46 @@ readback() {
   readback_postgres
   readback_temporal
   readback_slice
+  readback_sessions
   readback_pnpm
   readback_wireguard
+  readback_firewall
   readback_service_home
+}
+
+# 真起一个会话走一遍：fleet 经 sudo 调脚本 → 落进 fleet-agents.slice 下自己的 scope → 身份是 orca、附加组干净、上限写进了 cgroup
+readback_sessions() {
+  local id out want_cg
+  if [[ "$(sudo -l -U fleet 2>/dev/null)" == *"NOPASSWD: $AGENT_SCOPE_BIN"* ]]; then
+    ok "sudoers：fleet 只能以 root 跑 $AGENT_SCOPE_BIN"
+  else
+    red "sudo -l -U fleet 里没有 $AGENT_SCOPE_BIN"
+  fi
+  REC_VIOLATIONS=()
+  rec_check_path "sudo:fleet" "$AGENT_SCOPE_BIN" 程序
+  if ((${#REC_VIOLATIONS[@]})); then red "${REC_VIOLATIONS[0]//$'\t'/ | }"; fi
+  id=readback-$$
+  want_cg="0::/fleet.slice/fleet-agents.slice/fleet-agent-$id.scope"
+  # shellcheck disable=SC2016 # 单引号里的东西要在会话里展开，不是在这里
+  out=$(as_user fleet /usr/bin/sudo -n "$AGENT_SCOPE_BIN" run "$id" --memory-max 64M --tasks-max 16 -- \
+    /bin/sh -c 'id -un; id -G; cat /proc/self/cgroup; cat "/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/memory.max"' 2>&1) || true
+  local lines=()
+  mapfile -t lines <<<"$out"
+  if [[ "${lines[0]:-}" == "$AGENT_USER" && " ${lines[1]:-0} " != *" 0 "* && "${lines[2]:-}" == "$want_cg" && "${lines[3]:-}" == 67108864 ]]; then
+    ok "起会话走得通：fleet → sudo → $AGENT_USER（不带 root 组），落在 ${want_cg#0::}，上限写进了 cgroup"
+  else
+    red "起会话没走通，读到：$(tr '\n' '|' <<<"$out")"
+  fi
+}
+
+readback_firewall() {
+  local rule="allow in on $WG_IF from $WG_HK_ADDR to ${WG_ADDR%/*} port $API_PORT proto tcp"
+  if ! command -v ufw >/dev/null || [[ "$(ufw status 2>/dev/null | head -1)" != "Status: active" ]]; then return 0; fi
+  if [[ "$(ufw show added 2>/dev/null)" == *"ufw $rule"* ]]; then
+    ok "ufw 只在隧道网卡上给香港开了 $API_PORT"
+  else
+    red "ufw 里没有「$rule」：香港转过来的驾驶舱请求会被挡"
+  fi
 }
 
 readback_dirs() {
@@ -627,6 +709,7 @@ main() {
     setup_postgres
     setup_temporal
     setup_slice
+    setup_firewall
     setup_pnpm
   else
     load_config

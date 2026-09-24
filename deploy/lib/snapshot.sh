@@ -43,11 +43,12 @@ snapshot_others() {
 
 snapshot_firewall() {
   echo "## firewall"
+  # 挂在隧道网卡 wg-fleet 上的规则是 fleet-dao 自己加的，不算旧系统的状态
   if command -v ufw >/dev/null 2>&1; then
-    printf 'ufw %s\n' "$(ufw status verbose 2>&1 | sha256sum | cut -c1-16)"
+    printf 'ufw %s\n' "$(ufw status verbose 2>&1 | { grep -v -e 'wg-fleet' || true; } | sha256sum | cut -c1-16)"
   fi
   # 计数器和 fail2ban 的封禁条目每分钟都在变，不算状态
-  printf 'iptables %s\n' "$({ iptables-save 2>/dev/null || true; } | { grep -v -e '^#' -e '-A f2b-' || true; } |
+  printf 'iptables %s\n' "$({ iptables-save 2>/dev/null || true; } | { grep -v -e '^#' -e '-A f2b-' -e 'wg-fleet' || true; } |
     sed -E 's/\[[0-9]+:[0-9]+\]//' | sha256sum | cut -c1-16)"
 }
 
@@ -76,8 +77,12 @@ snapshot_ours() {
   echo "## files"
   snapshot_file_list /etc/fleet-dao /opt/fleet-dao /srv/fleet-dao-web /var/www/fleet-dao-acme \
     /etc/wireguard /etc/postgresql/16/main /etc/apt/sources.list.d /etc/apt/keyrings \
-    /usr/local/bin/fleet-temporal /home/fleet/.local/bin \
+    /usr/local/bin/fleet-temporal /usr/local/sbin/fleet-agent-scope /etc/sudoers.d/fleet-dao /home/fleet/.local/bin \
     /etc/nginx/sites-available/fleet-dao /etc/nginx/sites-enabled/fleet-dao
+  if command -v ufw >/dev/null 2>&1; then
+    echo "## ufw（fleet-dao 加的）"
+    ufw show added 2>/dev/null | grep -F 'wg-fleet' || echo "（无）"
+  fi
   find /etc/systemd/system /etc/letsencrypt/live /etc/letsencrypt/renewal -maxdepth 2 -name '*fleet*' -print0 2>/dev/null |
     sort -z | while IFS= read -r -d '' f; do snapshot_file_list "$f"; done
   for d in /srv/fleet-dao /var/lib/fleet-dao /var/log/fleet-dao /home/fleet; do

@@ -24,6 +24,8 @@ WG_IF=wg-fleet
 WG_PORT=4500
 WG_ADDR=10.99.0.1/24
 WG_PEER_ADDR=10.99.0.2
+# 法国驾驶舱后端（packages/api 的 FLEET_COCKPIT_LISTEN）：/api、/auth、/github/webhook 经隧道转到这里
+API_UPSTREAM=$WG_PEER_ADDR:8787
 ENV_FILE=/etc/fleet-dao/hk.env
 ENV_KEYS=(FLEET_DOMAIN FLEET_ACME_EMAIL FLEET_WG_FRANCE_PUBLIC_KEY)
 WEB_ROOT=/srv/fleet-dao-web
@@ -144,7 +146,7 @@ setup_site() {
   ensure_dir "$ACME_ROOT" root:root 755
   local name=${FLEET_DOMAIN:-$PLACEHOLDER_NAME} tpl=nginx-http.conf old="" had=0 site_changed before after why
   if [[ -n "$FLEET_DOMAIN" && -f "/etc/letsencrypt/live/$FLEET_DOMAIN/fullchain.pem" ]]; then tpl=nginx-https.conf; fi
-  render "$DEPLOY_DIR/hk/$tpl" SERVER_NAME="$name" WEB_ROOT="$WEB_ROOT" ACME_ROOT="$ACME_ROOT"
+  render "$DEPLOY_DIR/hk/$tpl" SERVER_NAME="$name" WEB_ROOT="$WEB_ROOT" ACME_ROOT="$ACME_ROOT" API_UPSTREAM="$API_UPSTREAM"
   if [[ -f "$SITE_AVAILABLE" ]]; then
     old=$(<"$SITE_AVAILABLE")
     had=1
@@ -219,7 +221,21 @@ readback() {
   readback_secrets_dir
   readback_wireguard
   readback_site
+  readback_upstream
   readback_cert
+}
+
+# 经隧道连法国驾驶舱后端：连上 = 通；被拒 = 隧道和法国防火墙都通、后端还没起；超时 = 隧道断了或法国防火墙挡着
+readback_upstream() {
+  local rc=0
+  timeout 5 bash -c "exec 3<>/dev/tcp/${API_UPSTREAM%:*}/${API_UPSTREAM#*:}" 2>/dev/null || rc=$?
+  if ((rc == 0)); then
+    ok "经隧道连得上法国驾驶舱后端 $API_UPSTREAM"
+  elif ((rc == 124)); then
+    red "连 $API_UPSTREAM 超时：隧道断了，或法国 ufw 没在 wg-fleet 上放行这个端口"
+  else
+    pending "法国驾驶舱后端 $API_UPSTREAM 还没起（连接被拒：隧道和法国防火墙是通的）"
+  fi
 }
 
 readback_wireguard() {

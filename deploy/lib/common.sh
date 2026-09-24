@@ -340,6 +340,17 @@ readback_secrets_dir() {
       ok "orca 读不到 /etc/fleet-dao"
     fi
   fi
+  # 里面每个文件（手放进来的密钥也算）：属 root，组只许读，其他人什么都不许
+  local f bad=0 n=0 mode
+  while IFS= read -r -d '' f; do
+    n=$((n + 1))
+    mode=$(stat -c '%a' -- "$f")
+    if [[ "$(stat -c '%u' -- "$f")" != 0 ]] || ((8#$mode & 8#027)); then
+      red "$f 是 $(stat -c '%U:%G %a' -- "$f")，应属 root、组只读、其他人无权限（640 或 600）"
+      bad=1
+    fi
+  done < <(find /etc/fleet-dao -type f -print0 2>/dev/null)
+  if ((bad == 0)); then ok "/etc/fleet-dao 里 $n 个文件都属 root、组只读、其他人无权限"; fi
 }
 
 # 自检（审计 P02）：机器上以 root 执行的文件全链属 root、组和其他人不可写，否则装机判红。
