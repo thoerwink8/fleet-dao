@@ -6,7 +6,7 @@
 import { z } from 'zod';
 import { enc, type Logger, parseRepoSlug, repoSlug } from './client.ts';
 import type { Deps } from './deps.ts';
-import { readPull } from './pulls.ts';
+import { mergeKey, readPull } from './pulls.ts';
 
 /** 和 @fleet-dao/api 的 GitHubIntake 同形：补收的东西走同一道门、同一本投递账。 */
 export interface Intake {
@@ -347,6 +347,12 @@ export function createReconciler(deps: Deps, options: ReconcilerOptions): Reconc
                 problems.push(
                   `#${item.number} 不是「引擎」机器人合的（合并人 ${pr.merged_by?.login ?? '读不到'}）`,
                 );
+              }
+              // 合并队列合的每一张都在幂等账里留了合并记录（C21）
+              const record = await ledger.idempotency.peek(mergeKey(repo, item.number, pr.head.sha));
+              if (!record?.completedAt) {
+                found += 1;
+                problems.push(`#${item.number} 合并了，但账上没有合并队列的合并记录`);
               }
             } catch (err) {
               failures += 1;

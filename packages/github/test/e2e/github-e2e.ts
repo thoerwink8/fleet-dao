@@ -124,9 +124,13 @@ function sanitize(value: unknown, key = ''): unknown {
       )
       .replace(literal(repo.owner), 'acme')
       .replace(literal(repo.name), 'widgets')
+      // 机器的地址：投递日志的报错里会带上（证书对不上时连 IP 一起报）
+      .replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, '192.0.2.1')
+      .replace(/[A-Za-z0-9.-]+\.nip\.io\b/g, 'host.example.invalid')
       .replace(/\d{4,}/g, (d) => String(idMap.get(Number(d)) ?? d));
     if (key === 'node_id' || key === 'id' || key === 'pullRequestId')
       s = s.replace(/^[A-Za-z_]+[A-Za-z0-9_=-]{6,}$/, 'NODE_ID');
+    if (key === 'client_id') s = 'Iv1.CLIENT_ID';
     return s;
   }
   if (typeof value === 'number') return ID_KEY.test(key) ? (idMap.get(value) ?? value) : value;
@@ -437,7 +441,7 @@ try {
   );
   issueNumber = undefined;
 
-  // 9. 对账：合并的 PR 都记了、都是「引擎」合的
+  // 9. 对账：合并的 PR 都是「引擎」合的、账上都有合并队列的合并记录（镜像没有事件来写，这里补上是预期的）
   await step(
     '对账：合并的 PR',
     () =>
@@ -445,8 +449,8 @@ try {
         .reconciler({ intake: { ingest: async () => ({ verdict: 'duplicate' }) }, pollDeliveryId: () => '' })
         .auditMergedPrs(repoSlug(repo), started),
     (r) => {
-      const byOther = r.problems.filter((p) => p.includes('不是「引擎」'));
-      return r.outcome === 'ok' && byOther.length === 0 ? null : brief(r);
+      const bad = r.problems.filter((p) => p.includes('不是「引擎」') || p.includes('没有合并队列'));
+      return r.outcome === 'ok' && r.scanned >= 1 && bad.length === 0 ? null : brief(r);
     },
   );
 
@@ -512,6 +516,10 @@ if (recordDir) {
         .filter((m) => m !== 'someone@example.invalid')
         .map((m) => `邮箱 ${m}`),
       /\b(?:ghs|ghp|gho|ghu|ghr)_[A-Za-z0-9_]{8,}|\bgithub_pat_/.test(text) ? '令牌' : '',
+      ...[...text.matchAll(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g)]
+        .map((m) => m[0])
+        .filter((ip) => !ip.startsWith('192.0.2.'))
+        .map((ip) => `IP ${ip}`),
     ].filter(Boolean);
     if (leaks.length) {
       console.log(`✗ 夹具 ${name}.json 没脱干净：${leaks.join('、')}（已删除）`);

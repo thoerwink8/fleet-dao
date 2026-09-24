@@ -52,6 +52,8 @@ export interface GitHubOptions {
   apps?: Record<AppRole, AppCredentials>;
   env?: Record<string, string | undefined>;
   log?: Logger;
+  /** 限流时原地最多等多久（见 GitHubClientOptions）；活动的心跳超时要比它长。 */
+  maxRateLimitWaitMs?: number;
   /** 以下测试用。 */
   apiUrl?: string;
   fetch?: typeof fetch;
@@ -123,6 +125,7 @@ export function createGitHub(options: GitHubOptions): GitHub {
     ...(options.sleep ? { sleep: options.sleep } : {}),
     ...(options.log ? { log: options.log } : {}),
     ...(options.writeSpacingMs !== undefined ? { writeSpacingMs: options.writeSpacingMs } : {}),
+    ...(options.maxRateLimitWaitMs !== undefined ? { maxRateLimitWaitMs: options.maxRateLimitWaitMs } : {}),
   });
   const deps: Deps = {
     client,

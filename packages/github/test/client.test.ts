@@ -121,8 +121,8 @@ describe('限流（F1）', () => {
     expect(sleeps).toContain(7000);
   });
 
-  it('次级限流没给头：至少等 60 秒，再来就翻倍（不拿主配额余额证明「没限流」）', async () => {
-    const { gh, fake, sleeps } = setup();
+  it('次级限流没给头：至少等 60 秒；再撞就翻倍，超过原地等的上限交给上层排期（不拿主配额余额证明「没限流」）', async () => {
+    const { gh, fake, sleeps, clock } = setup();
     await gh.client.request(get);
     let n = 0;
     fake.before.push((req) => {
@@ -132,8 +132,17 @@ describe('限流（F1）', () => {
       }
       return undefined;
     });
-    await gh.client.request(get);
-    expect(sleeps.filter((s) => s >= 60_000)).toEqual([60_000, 120_000]);
+    await expect(gh.client.request(get)).rejects.toMatchObject({
+      code: 'RATE_LIMITED',
+      retryable: true,
+      details: { retryAfterSeconds: 120 },
+    });
+    expect(sleeps.filter((s) => s >= 60_000)).toEqual([60_000]);
+    // 限流期间别的请求也先停：要停的时间超过上限，当场报可重试，不干等
+    await expect(gh.client.request(get)).rejects.toMatchObject({ code: 'RATE_LIMITED' });
+    expect(fake.calls('GET', /^\/repos\/acme\/widgets$/)).toHaveLength(3);
+    clock.advance(120_000);
+    expect((await gh.client.request(get)).status).toBe(200);
   });
 
   it('主配额用完：等到 x-ratelimit-reset', async () => {

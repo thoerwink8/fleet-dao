@@ -25,6 +25,8 @@ export interface IdempotencyStore {
   release(key: string): Promise<boolean>;
   /** 占着的人大概死了：把占用抢过来。只有 claimedAt 还是看到的那个时才成功（两个重试同时来只有一个抢得到）。 */
   takeOver(key: string, seenClaimedAt: Date, now: Date): Promise<boolean>;
+  /** 只读：这个键的账（对账用）；没有返回 null。 */
+  peek(key: string): Promise<{ completedAt: Date | null; result: unknown } | null>;
 }
 
 export function pgIdempotencyStore(db: Db): IdempotencyStore {
@@ -32,6 +34,13 @@ export function pgIdempotencyStore(db: Db): IdempotencyStore {
     claim: (input, now) => claimIdempotencyKey(db, input, now),
     complete: (key, result, now) => completeIdempotencyKey(db, key, result, now),
     release: (key) => releaseIdempotencyKey(db, key),
+    async peek(key) {
+      const [row] = await db
+        .select({ completedAt: idempotencyKeys.completedAt, result: idempotencyKeys.result })
+        .from(idempotencyKeys)
+        .where(eq(idempotencyKeys.key, key));
+      return row ?? null;
+    },
     async takeOver(key, seenClaimedAt, now) {
       const rows = await db
         .update(idempotencyKeys)
@@ -82,6 +91,10 @@ export function memoryIdempotencyStore(): IdempotencyStore & {
       if (!row || row.completedAt || row.claimedAt.getTime() !== seen.getTime()) return false;
       row.claimedAt = now;
       return true;
+    },
+    async peek(key) {
+      const row = rows.get(key);
+      return row ? { completedAt: row.completedAt ?? null, result: row.result } : null;
     },
   };
 }

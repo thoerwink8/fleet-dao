@@ -34,7 +34,7 @@ export const IssueSchema = z.object({
 });
 export type Issue = z.infer<typeof IssueSchema>;
 
-const CommentSchema = z.object({
+export const CommentSchema = z.object({
   id: z.number(),
   html_url: z.string(),
   body: z.string().nullable(),
@@ -162,7 +162,7 @@ const EditsQuery = `query($owner: String!, $name: String!, $number: Int!) {
   }
 }`;
 
-const EditsSchema = z.object({
+export const EditsSchema = z.object({
   repository: z.object({
     issue: z
       .object({

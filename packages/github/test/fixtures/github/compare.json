@@ -1,0 +1,261 @@
+{
+  "url": "https://api.github.com/repos/acme/widgets/compare/main...f3168d89ac687221d08812e0c6d1b44e893dccd3",
+  "html_url": "https://github.com/acme/widgets/compare/main...f3168d89ac687221d08812e0c6d1b44e893dccd3",
+  "permalink_url": "https://github.com/acme/widgets/compare/acme:129ac56...acme:f3168d8",
+  "diff_url": "https://github.com/acme/widgets/compare/main...f3168d89ac687221d08812e0c6d1b44e893dccd3.diff",
+  "patch_url": "https://github.com/acme/widgets/compare/main...f3168d89ac687221d08812e0c6d1b44e893dccd3.patch",
+  "base_commit": {
+    "sha": "129ac564650ba8bd2d5ab5e309dcd391f9fae165",
+    "node_id": "NODE_ID",
+    "commit": {
+      "author": {
+        "name": "fleet-dao-agent[bot]",
+        "email": "someone@example.invalid",
+        "date": "2026-09-24T20:50:48Z"
+      },
+      "committer": {
+        "name": "GitHub",
+        "email": "someone@example.invalid",
+        "date": "2026-09-24T20:50:48Z"
+      },
+      "message": "巡检：真机验收 2026-09-24T20-50-11-690Z (#2)",
+      "tree": {
+        "sha": "9dd9944f677f10f61d3765cd48663d99c42a76e8",
+        "url": "https://api.github.com/repos/acme/widgets/git/trees/9dd9944f677f10f61d3765cd48663d99c42a76e8"
+      },
+      "url": "https://api.github.com/repos/acme/widgets/git/commits/129ac564650ba8bd2d5ab5e309dcd391f9fae165",
+      "comment_count": 0,
+      "verification": {
+        "verified": true,
+        "reason": "valid",
+        "signature": "-----BEGIN PGP SIGNATURE-----\n\nwsFcBAABCAAQBQJqtY0oCRC1aQ7uu5UhlAAAeuwQAF0IPmngsB8fMX85ADkLrDl3\n1O5ibzVXwoJ/PYwKT07Ny5Zcl1+jqUU5hJrsJjAQFSlsNQR9G2XmFyQaBUYwAOVe\nFY7RdlASaqpFnSUnOtnQeU6cdKB4jyec9VQjUtwUi1rp8+Vvpm4i34Ee8UB9mYE1\nD13MiSd1wiYclzEN+911EScuDbAAHl/xL7IghHQMllkJYDbLBmRECDi/6PTo4sjv\nRQS1wHdpeI3jYwvdgKo7m4TKGMdXeQTeO5cNaJXnYYFiHCwuz3KCLnQoPGmr7qsD\nNMwFbQbailR5uJhaVtdgKqR5NWnyacBuQIjA7Lw4czq3+6SvF0TO6Lc2wg0wxI4V\nbaNYmdgzpCopgMs0dUoOtq2WCOazWW/qZkVXZqd2BTT4waNFpTY9u5B/gkRzK/Mu\nz9pv9ONtLDB+2ARVkgnJyg20EwoE6KJXAdsTPEnkXpl+9LRBOXlFOUSZjo2L0OU0\nGSr7vgdK+t/Yk+sM6drzghZyleqUNBQdJ7VnKwoSN9RiJonDgszi2m47dgAeP7eu\niLL8BNDCIDRxpU8V2YCwDTrCgjhJ0TSbpR5kemhSvyeqlndzsWnfeFXD8AM1VPOX\niHHmMVBLQi93ooltWRXFElq6H3iUJjveEI83uIH6K6YoH14fcB3oeWguGmT+cl9z\nwW+Ub9wbdzUu1ODr2Ei5\n=kO7n\n-----END PGP SIGNATURE-----\n",
+        "payload": "tree 9dd9944f677f10f61d3765cd48663d99c42a76e8\nparent 11eef4af7254ecad212f182567f9841e852ddacc\nauthor fleet-dao-agent[bot] <someone@example.invalid> 1790283048 +0000\ncommitter GitHub <someone@example.invalid> 1790283048 +0000\n\n巡检：真机验收 2026-09-24T20-50-11-690Z (#2)",
+        "verified_at": "2026-09-24T20:50:48Z"
+      }
+    },
+    "url": "https://api.github.com/repos/acme/widgets/commits/129ac564650ba8bd2d5ab5e309dcd391f9fae165",
+    "html_url": "https://github.com/acme/widgets/commit/129ac564650ba8bd2d5ab5e309dcd391f9fae165",
+    "comments_url": "https://api.github.com/repos/acme/widgets/commits/129ac564650ba8bd2d5ab5e309dcd391f9fae165/comments",
+    "author": {
+      "login": "fleet-dao-agent[bot]",
+      "id": 1004,
+      "node_id": "NODE_ID",
+      "url": "https://api.github.com/users/fleet-dao-agent%5Bbot%5D",
+      "html_url": "https://github.com/apps/fleet-dao-agent",
+      "followers_url": "https://api.github.com/users/fleet-dao-agent%5Bbot%5D/followers",
+      "following_url": "https://api.github.com/users/fleet-dao-agent%5Bbot%5D/following{/other_user}",
+      "gists_url": "https://api.github.com/users/fleet-dao-agent%5Bbot%5D/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/fleet-dao-agent%5Bbot%5D/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/fleet-dao-agent%5Bbot%5D/subscriptions",
+      "organizations_url": "https://api.github.com/users/fleet-dao-agent%5Bbot%5D/orgs",
+      "repos_url": "https://api.github.com/users/fleet-dao-agent%5Bbot%5D/repos",
+      "events_url": "https://api.github.com/users/fleet-dao-agent%5Bbot%5D/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/fleet-dao-agent%5Bbot%5D/received_events",
+      "type": "Bot",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "committer": {
+      "login": "web-flow",
+      "id": 1013,
+      "node_id": "NODE_ID",
+      "url": "https://api.github.com/users/web-flow",
+      "html_url": "https://github.com/web-flow",
+      "followers_url": "https://api.github.com/users/web-flow/followers",
+      "following_url": "https://api.github.com/users/web-flow/following{/other_user}",
+      "gists_url": "https://api.github.com/users/web-flow/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/web-flow/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/web-flow/subscriptions",
+      "organizations_url": "https://api.github.com/users/web-flow/orgs",
+      "repos_url": "https://api.github.com/users/web-flow/repos",
+      "events_url": "https://api.github.com/users/web-flow/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/web-flow/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "parents": [
+      {
+        "sha": "11eef4af7254ecad212f182567f9841e852ddacc",
+        "url": "https://api.github.com/repos/acme/widgets/commits/11eef4af7254ecad212f182567f9841e852ddacc",
+        "html_url": "https://github.com/acme/widgets/commit/11eef4af7254ecad212f182567f9841e852ddacc"
+      }
+    ]
+  },
+  "merge_base_commit": {
+    "sha": "129ac564650ba8bd2d5ab5e309dcd391f9fae165",
+    "node_id": "NODE_ID",
+    "commit": {
+      "author": {
+        "name": "fleet-dao-agent[bot]",
+        "email": "someone@example.invalid",
+        "date": "2026-09-24T20:50:48Z"
+      },
+      "committer": {
+        "name": "GitHub",
+        "email": "someone@example.invalid",
+        "date": "2026-09-24T20:50:48Z"
+      },
+      "message": "巡检：真机验收 2026-09-24T20-50-11-690Z (#2)",
+      "tree": {
+        "sha": "9dd9944f677f10f61d3765cd48663d99c42a76e8",
+        "url": "https://api.github.com/repos/acme/widgets/git/trees/9dd9944f677f10f61d3765cd48663d99c42a76e8"
+      },
+      "url": "https://api.github.com/repos/acme/widgets/git/commits/129ac564650ba8bd2d5ab5e309dcd391f9fae165",
+      "comment_count": 0,
+      "verification": {
+        "verified": true,
+        "reason": "valid",
+        "signature": "-----BEGIN PGP SIGNATURE-----\n\nwsFcBAABCAAQBQJqtY0oCRC1aQ7uu5UhlAAAeuwQAF0IPmngsB8fMX85ADkLrDl3\n1O5ibzVXwoJ/PYwKT07Ny5Zcl1+jqUU5hJrsJjAQFSlsNQR9G2XmFyQaBUYwAOVe\nFY7RdlASaqpFnSUnOtnQeU6cdKB4jyec9VQjUtwUi1rp8+Vvpm4i34Ee8UB9mYE1\nD13MiSd1wiYclzEN+911EScuDbAAHl/xL7IghHQMllkJYDbLBmRECDi/6PTo4sjv\nRQS1wHdpeI3jYwvdgKo7m4TKGMdXeQTeO5cNaJXnYYFiHCwuz3KCLnQoPGmr7qsD\nNMwFbQbailR5uJhaVtdgKqR5NWnyacBuQIjA7Lw4czq3+6SvF0TO6Lc2wg0wxI4V\nbaNYmdgzpCopgMs0dUoOtq2WCOazWW/qZkVXZqd2BTT4waNFpTY9u5B/gkRzK/Mu\nz9pv9ONtLDB+2ARVkgnJyg20EwoE6KJXAdsTPEnkXpl+9LRBOXlFOUSZjo2L0OU0\nGSr7vgdK+t/Yk+sM6drzghZyleqUNBQdJ7VnKwoSN9RiJonDgszi2m47dgAeP7eu\niLL8BNDCIDRxpU8V2YCwDTrCgjhJ0TSbpR5kemhSvyeqlndzsWnfeFXD8AM1VPOX\niHHmMVBLQi93ooltWRXFElq6H3iUJjveEI83uIH6K6YoH14fcB3oeWguGmT+cl9z\nwW+Ub9wbdzUu1ODr2Ei5\n=kO7n\n-----END PGP SIGNATURE-----\n",
+        "payload": "tree 9dd9944f677f10f61d3765cd48663d99c42a76e8\nparent 11eef4af7254ecad212f182567f9841e852ddacc\nauthor fleet-dao-agent[bot] <someone@example.invalid> 1790283048 +0000\ncommitter GitHub <someone@example.invalid> 1790283048 +0000\n\n巡检：真机验收 2026-09-24T20-50-11-690Z (#2)",
+        "verified_at": "2026-09-24T20:50:48Z"
+      }
+    },
+    "url": "https://api.github.com/repos/acme/widgets/commits/129ac564650ba8bd2d5ab5e309dcd391f9fae165",
+    "html_url": "https://github.com/acme/widgets/commit/129ac564650ba8bd2d5ab5e309dcd391f9fae165",
+    "comments_url": "https://api.github.com/repos/acme/widgets/commits/129ac564650ba8bd2d5ab5e309dcd391f9fae165/comments",
+    "author": {
+      "login": "fleet-dao-agent[bot]",
+      "id": 1004,
+      "node_id": "NODE_ID",
+      "url": "https://api.github.com/users/fleet-dao-agent%5Bbot%5D",
+      "html_url": "https://github.com/apps/fleet-dao-agent",
+      "followers_url": "https://api.github.com/users/fleet-dao-agent%5Bbot%5D/followers",
+      "following_url": "https://api.github.com/users/fleet-dao-agent%5Bbot%5D/following{/other_user}",
+      "gists_url": "https://api.github.com/users/fleet-dao-agent%5Bbot%5D/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/fleet-dao-agent%5Bbot%5D/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/fleet-dao-agent%5Bbot%5D/subscriptions",
+      "organizations_url": "https://api.github.com/users/fleet-dao-agent%5Bbot%5D/orgs",
+      "repos_url": "https://api.github.com/users/fleet-dao-agent%5Bbot%5D/repos",
+      "events_url": "https://api.github.com/users/fleet-dao-agent%5Bbot%5D/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/fleet-dao-agent%5Bbot%5D/received_events",
+      "type": "Bot",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "committer": {
+      "login": "web-flow",
+      "id": 1013,
+      "node_id": "NODE_ID",
+      "url": "https://api.github.com/users/web-flow",
+      "html_url": "https://github.com/web-flow",
+      "followers_url": "https://api.github.com/users/web-flow/followers",
+      "following_url": "https://api.github.com/users/web-flow/following{/other_user}",
+      "gists_url": "https://api.github.com/users/web-flow/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/web-flow/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/web-flow/subscriptions",
+      "organizations_url": "https://api.github.com/users/web-flow/orgs",
+      "repos_url": "https://api.github.com/users/web-flow/repos",
+      "events_url": "https://api.github.com/users/web-flow/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/web-flow/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "parents": [
+      {
+        "sha": "11eef4af7254ecad212f182567f9841e852ddacc",
+        "url": "https://api.github.com/repos/acme/widgets/commits/11eef4af7254ecad212f182567f9841e852ddacc",
+        "html_url": "https://github.com/acme/widgets/commit/11eef4af7254ecad212f182567f9841e852ddacc"
+      }
+    ]
+  },
+  "status": "ahead",
+  "ahead_by": 1,
+  "behind_by": 0,
+  "total_commits": 1,
+  "commits": [
+    {
+      "sha": "f3168d89ac687221d08812e0c6d1b44e893dccd3",
+      "node_id": "NODE_ID",
+      "commit": {
+        "author": {
+          "name": "fleet-dao-agent[bot]",
+          "email": "someone@example.invalid",
+          "date": "2026-09-24T20:56:05Z"
+        },
+        "committer": {
+          "name": "fleet-dao-agent[bot]",
+          "email": "someone@example.invalid",
+          "date": "2026-09-24T20:56:05Z"
+        },
+        "message": "巡检：真机验收 2026-09-24T20-55-57-851Z",
+        "tree": {
+          "sha": "b7b78492aa66ecf9c9fa2cce61a6cc77b7a5e198",
+          "url": "https://api.github.com/repos/acme/widgets/git/trees/b7b78492aa66ecf9c9fa2cce61a6cc77b7a5e198"
+        },
+        "url": "https://api.github.com/repos/acme/widgets/git/commits/f3168d89ac687221d08812e0c6d1b44e893dccd3",
+        "comment_count": 0,
+        "verification": {
+          "verified": false,
+          "reason": "unsigned",
+          "signature": null,
+          "payload": null,
+          "verified_at": null
+        }
+      },
+      "url": "https://api.github.com/repos/acme/widgets/commits/f3168d89ac687221d08812e0c6d1b44e893dccd3",
+      "html_url": "https://github.com/acme/widgets/commit/f3168d89ac687221d08812e0c6d1b44e893dccd3",
+      "comments_url": "https://api.github.com/repos/acme/widgets/commits/f3168d89ac687221d08812e0c6d1b44e893dccd3/comments",
+      "author": {
+        "login": "fleet-dao-agent[bot]",
+        "id": 1004,
+        "node_id": "NODE_ID",
+        "url": "https://api.github.com/users/fleet-dao-agent%5Bbot%5D",
+        "html_url": "https://github.com/apps/fleet-dao-agent",
+        "followers_url": "https://api.github.com/users/fleet-dao-agent%5Bbot%5D/followers",
+        "following_url": "https://api.github.com/users/fleet-dao-agent%5Bbot%5D/following{/other_user}",
+        "gists_url": "https://api.github.com/users/fleet-dao-agent%5Bbot%5D/gists{/gist_id}",
+        "starred_url": "https://api.github.com/users/fleet-dao-agent%5Bbot%5D/starred{/owner}{/repo}",
+        "subscriptions_url": "https://api.github.com/users/fleet-dao-agent%5Bbot%5D/subscriptions",
+        "organizations_url": "https://api.github.com/users/fleet-dao-agent%5Bbot%5D/orgs",
+        "repos_url": "https://api.github.com/users/fleet-dao-agent%5Bbot%5D/repos",
+        "events_url": "https://api.github.com/users/fleet-dao-agent%5Bbot%5D/events{/privacy}",
+        "received_events_url": "https://api.github.com/users/fleet-dao-agent%5Bbot%5D/received_events",
+        "type": "Bot",
+        "user_view_type": "public",
+        "site_admin": false
+      },
+      "committer": {
+        "login": "fleet-dao-agent[bot]",
+        "id": 1004,
+        "node_id": "NODE_ID",
+        "url": "https://api.github.com/users/fleet-dao-agent%5Bbot%5D",
+        "html_url": "https://github.com/apps/fleet-dao-agent",
+        "followers_url": "https://api.github.com/users/fleet-dao-agent%5Bbot%5D/followers",
+        "following_url": "https://api.github.com/users/fleet-dao-agent%5Bbot%5D/following{/other_user}",
+        "gists_url": "https://api.github.com/users/fleet-dao-agent%5Bbot%5D/gists{/gist_id}",
+        "starred_url": "https://api.github.com/users/fleet-dao-agent%5Bbot%5D/starred{/owner}{/repo}",
+        "subscriptions_url": "https://api.github.com/users/fleet-dao-agent%5Bbot%5D/subscriptions",
+        "organizations_url": "https://api.github.com/users/fleet-dao-agent%5Bbot%5D/orgs",
+        "repos_url": "https://api.github.com/users/fleet-dao-agent%5Bbot%5D/repos",
+        "events_url": "https://api.github.com/users/fleet-dao-agent%5Bbot%5D/events{/privacy}",
+        "received_events_url": "https://api.github.com/users/fleet-dao-agent%5Bbot%5D/received_events",
+        "type": "Bot",
+        "user_view_type": "public",
+        "site_admin": false
+      },
+      "parents": [
+        {
+          "sha": "129ac564650ba8bd2d5ab5e309dcd391f9fae165",
+          "url": "https://api.github.com/repos/acme/widgets/commits/129ac564650ba8bd2d5ab5e309dcd391f9fae165",
+          "html_url": "https://github.com/acme/widgets/commit/129ac564650ba8bd2d5ab5e309dcd391f9fae165"
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "sha": "50d3ad1c74632eb38734dccaf4cd787a15507246",
+      "filename": "README.md",
+      "status": "modified",
+      "additions": 2,
+      "deletions": 0,
+      "changes": 2,
+      "blob_url": "https://github.com/acme/widgets/blob/f3168d89ac687221d08812e0c6d1b44e893dccd3/README.md",
+      "raw_url": "https://github.com/acme/widgets/raw/f3168d89ac687221d08812e0c6d1b44e893dccd3/README.md",
+      "contents_url": "https://api.github.com/repos/acme/widgets/contents/README.md?ref=f3168d89ac687221d08812e0c6d1b44e893dccd3",
+      "patch": "@@ -5,3 +5,5 @@ fleet-dao 的巡检仓。每 6 小时，fleet-dao 在这里开一张巡检任务\n 这里的改动都是巡检任务自己产生的，不承载任何业务。\n \n <!-- 真机验收 2026-09-24T20-50-11-690Z -->\n+\n+<!-- 真机验收 2026-09-24T20-55-57-851Z -->"
+    }
+  ]
+}

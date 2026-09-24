@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { mergeKey } from '../src/pulls.ts';
 import { json, repo, setup, sha } from './helpers.ts';
 
 const A = sha('a');
@@ -285,6 +286,34 @@ describe('合并', () => {
     });
     expect(fake.refs.has('task/1')).toBe(false);
     expect(fake.calls('DELETE', /\/git\/refs\/heads\/task\/1$/).map((r) => r.as)).toEqual(['engine']);
+  });
+
+  it('C21：合并记进幂等账（对账拿它核「是合并队列合的」）；合完回执丢了，重试补记、不再合', async () => {
+    const first = setup();
+    const pr = ready(first.fake);
+    await first.gh.mergePr({ repo, prNumber: pr.number, expectedHead: A });
+    const record = await first.ledger.idempotency.peek(mergeKey(repo, pr.number, A));
+    expect(record?.result).toEqual({
+      number: pr.number,
+      head: A,
+      mergeCommit: sha('c'),
+      mergedBy: 'fleet-test-engine[bot]',
+    });
+
+    const lost = setup();
+    const pr2 = ready(lost.fake);
+    let dropped = false;
+    lost.fake.dropAfter.push((req) => {
+      if (req.method === 'PUT' && !dropped) {
+        dropped = true;
+        return true;
+      }
+      return false;
+    });
+    // PUT 断在回执上：客户端自己重试一次 PUT，GitHub 回「合不了」（已经合了），重读认下
+    const res = await lost.gh.mergePr({ repo, prNumber: pr2.number, expectedHead: A });
+    expect(res).toMatchObject({ merged: true });
+    expect((await lost.ledger.idempotency.peek(mergeKey(repo, pr2.number, A)))?.completedAt).toBeTruthy();
   });
 
   it('C8：头不是审过的那个就不合（不发合并请求）', async () => {

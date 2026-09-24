@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { IngestedEvent, WakeEvent } from '../src/events.ts';
+import { mergeKey } from '../src/pulls.ts';
 import type { Intake } from '../src/reconcile.ts';
 import { REPO_ID, repo, setup, sha } from './helpers.ts';
 
@@ -226,16 +227,21 @@ describe('对账与补漏', () => {
       headSha: B,
       updatedAt: new Date('2026-09-25T11:30:00Z'),
     });
+    // 引擎合的那张在账上有合并记录（合并队列合的）；另一张没有
+    const key = mergeKey(repo, byEngine.number, A);
+    await ledger.idempotency.claim({ key, action: 'github.merge_pr' }, new Date());
+    await ledger.idempotency.complete(key, { number: byEngine.number }, new Date());
     const { intake } = fakeIntake(() => true);
     const report = await gh
       .reconciler({ intake, pollDeliveryId })
       .auditMergedPrs('acme/widgets', new Date('2026-09-25T00:00:00Z'));
-    expect(report).toMatchObject({ outcome: 'ok', scanned: 2, found: 2, fixed: 1 });
-    expect(report.problems).toEqual(
-      expect.arrayContaining([
+    expect(report).toMatchObject({ outcome: 'ok', scanned: 2, found: 3, fixed: 1 });
+    expect([...report.problems].sort()).toEqual(
+      [
         `#${byEngine.number} 合并了但镜像里没有（已补）`,
         `#${byAgent.number} 不是「引擎」机器人合的（合并人 fleet-test-agent[bot]）`,
-      ]),
+        `#${byAgent.number} 合并了，但账上没有合并队列的合并记录`,
+      ].sort(),
     );
     expect((await ledger.getPullRequest(REPO_ID, byEngine.number))?.state).toBe('merged');
   });

@@ -99,7 +99,10 @@ export interface GitHubClientOptions {
   requestTimeoutMs?: number;
   /** 写请求之间至少隔多久，默认 1 秒（官方最佳实践：写请求串行、间隔至少 1 秒）。 */
   writeSpacingMs?: number;
-  /** 限流要等的时间超过它就不在这里干等，抛可重试的 RATE_LIMITED（带 retryAfterSeconds），交给上层排期。默认 5 分钟。 */
+  /**
+   * 限流要等的时间超过它就不在这里干等，抛可重试的 RATE_LIMITED（带 retryAfterSeconds），交给上层排期。默认 90 秒：
+   * 等的时候没有心跳，活动的心跳超时要比它长（或者把它调小）。
+   */
   maxRateLimitWaitMs?: number;
   /** 同一个请求最多因限流退避几次，默认 3。 */
   maxRateLimitRetries?: number;
@@ -136,7 +139,7 @@ export class GitHubClient {
     this.userAgent = options.userAgent ?? 'fleet-dao';
     this.requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
     this.writeSpacingMs = options.writeSpacingMs ?? 1000;
-    this.maxRateLimitWaitMs = options.maxRateLimitWaitMs ?? 5 * 60_000;
+    this.maxRateLimitWaitMs = options.maxRateLimitWaitMs ?? 90_000;
     this.maxRateLimitRetries = options.maxRateLimitRetries ?? 3;
     this.maxTransientRetries = options.maxTransientRetries ?? 3;
     this.tokens = new TokenCache({ now: this.now });
@@ -309,7 +312,18 @@ export class GitHubClient {
     let transient = 0;
     let limited = 0;
     for (;;) {
+      // 撞过限流：所有请求一起停；要停太久就别在这里干等
       const paused = this.pausedUntil - this.now().getTime();
+      if (paused > this.maxRateLimitWaitMs) {
+        throw new GitHubError(
+          'RATE_LIMITED',
+          `${label}：GitHub 限流中，还要等 ${Math.ceil(paused / 1000)} 秒`,
+          {
+            retryable: true,
+            details: { retryAfterSeconds: Math.ceil(paused / 1000) },
+          },
+        );
+      }
       if (paused > 0) await this.sleep(paused, req.signal);
 
       const token = await this.credential(req.auth, req.signal);
@@ -370,6 +384,7 @@ export class GitHubClient {
 
       const wait = this.rateLimitWait(res.status, res.headers, message, limited);
       if (wait !== null) {
+        this.pausedUntil = Math.max(this.pausedUntil, this.now().getTime() + wait);
         if (wait > this.maxRateLimitWaitMs || limited >= this.maxRateLimitRetries) {
           throw new GitHubError(
             'RATE_LIMITED',
@@ -385,7 +400,6 @@ export class GitHubClient {
           );
         }
         limited += 1;
-        this.pausedUntil = Math.max(this.pausedUntil, this.now().getTime() + wait);
         this.log.warn('GitHub 限流，按它给的头退避', { label, status: res.status, waitMs: wait, message });
         continue;
       }
