@@ -33,6 +33,7 @@ const PORT_KEYS: Readonly<Record<PortName, true>> = {
   closeIssue: true,
   writeSpecDoc: true,
   askHuman: true,
+  requestApproval: true,
   raiseAlert: true,
   recordTiming: true,
 };

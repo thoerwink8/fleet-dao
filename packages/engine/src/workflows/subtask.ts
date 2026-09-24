@@ -1,5 +1,6 @@
 // 子任务工作流：建工作树 → 执行（AI 会话，只在本地提交）→ 引擎推分支、开 PR → 验证（同步主线 + 等 CI ∥ 全新会话第二意见；
-// 意见回主会话）→ 进合并队列。需求工作流以子工作流起它；也能单独起（没有上级就不发进度信号）。
+// 意见回主会话）→ 人闸（带人闸标记的等人批准）→ 进合并队列。需求工作流以子工作流起它；也能单独起（没有上级就不发进度信号）。
+// 编号是 subtaskWorkflowId(subtasks.id)：驾驶舱后端可以直接给它发信号（fleet 叫醒、批准、回答……）。
 
 import type { SubtaskState } from '@fleet-dao/shared';
 import {
@@ -14,6 +15,7 @@ import {
   workflowInfo,
 } from '@temporalio/workflow';
 import {
+  type ApprovalCommand,
   type MergeItem,
   type MergeResult,
   mergeQueueWorkflowId,
@@ -29,20 +31,32 @@ import {
   withdrawSignal,
 } from '../contract.ts';
 import type { Feedback, ReviewResult } from '../decisions/verify.ts';
+import { describeHolds, normalizeHolds } from '../holds.ts';
 import type { SessionBrief, Worktree } from '../ports.ts';
 import {
   activitiesFor,
   attempt,
-  decide,
+  type Control,
+  gate,
   installControl,
+  iso,
+  judge,
+  type Kit,
+  limitsFor,
+  newId,
   newKit,
+  offClockMs,
   park,
   runStage,
   stopActiveSessions,
+  type Verdict,
   waitFor,
 } from './kit.ts';
 
 type Next = 'execute' | 'verify' | 'merge' | 'done';
+
+/** 叫停收尾时等合并队列确认撤出多久：队列正在合的要等那一步做完（合并是秒级的），其余当场确认。 */
+const STOP_WITHDRAW_MINUTES = 10;
 
 export async function subtaskWorkflow(input: SubtaskInput): Promise<SubtaskResult> {
   const info = workflowInfo();
@@ -66,9 +80,59 @@ export async function subtaskWorkflow(input: SubtaskInput): Promise<SubtaskResul
     prNumber: null,
     head: null,
     rounds: { review: 0, ciFix: 0, conflict: 0, mergeReturn: 0 },
+    holds: normalizeHolds(sub.holds),
+    approval: null,
     lastProblem: null,
     lastAgentEvent: null,
     commands: [],
+  };
+
+  // 信号处理器挂上时会当场处理缓存着的信号：它们要用的东西都得先声明好（control、kit 在那时还可能是 null）。
+  let controlRef: Control | null = null;
+  let kitRef: Kit | null = null;
+  let lastSent = '';
+  const notifyParent = () => {
+    const parent = info.parent;
+    if (!parent) return;
+    const progress: SubtaskProgress = {
+      key: sub.key,
+      state: status.state,
+      prNumber: status.prNumber,
+      paused: controlRef?.paused ?? false,
+      waiting: status.waiting,
+      holds: status.holds,
+    };
+    const text = JSON.stringify(progress);
+    if (text === lastSent) return;
+    lastSent = text;
+    CancellationScope.nonCancellable(() =>
+      getExternalWorkflowHandle(parent.workflowId).signal(subtaskProgressSignal, progress),
+    ).catch((error) => log.warn('进度没送到需求工作流', { error: String(error) }));
+  };
+
+  const decideApproval = (command: ApprovalCommand, state: 'approved' | 'rejected'): Verdict => {
+    if (command.subtaskId && command.subtaskId !== input.subtaskId) {
+      return { accepted: false, note: `点名的是别的子任务（${command.subtaskId}）` };
+    }
+    const pending = status.approval;
+    if (pending?.state !== 'pending') return { accepted: false, note: '没有在等批准' };
+    if (command.approvalId && command.approvalId !== pending.approvalId) {
+      return { accepted: false, note: `批准编号对不上：在等的是 ${pending.approvalId}` };
+    }
+    status.approval = {
+      ...pending,
+      state,
+      ...(command.by ? { by: command.by } : {}),
+      ...(command.reason ? { reason: command.reason } : {}),
+      at: iso(Date.now()),
+    };
+    return {
+      accepted: true,
+      note:
+        state === 'approved'
+          ? `批准（${describeHolds(pending.holds)}），进合并队列`
+          : `拒绝，退回返工${command.reason ? `：${command.reason}` : ''}`,
+    };
   };
 
   // 具体的信号处理先挂，再挂兜底处理（兜底处理一挂上就会吃掉还没有处理器的缓存信号）。
@@ -81,7 +145,23 @@ export async function subtaskWorkflow(input: SubtaskInput): Promise<SubtaskResul
     onStop: () => main.cancel(),
     mainStages: [sub.stage],
     selfSubtaskId: input.subtaskId,
+    ownsRun: (runId) => Boolean(kitRef?.active[runId]),
+    approve: (command) => decideApproval(command, 'approved'),
+    reject: (command) => decideApproval(command, 'rejected'),
+    requireApproval: (command) => {
+      if (command.subtaskId && command.subtaskId !== input.subtaskId) {
+        return { accepted: false, note: `点名的是别的子任务（${command.subtaskId}）` };
+      }
+      const holds = normalizeHolds([...status.holds, ...(command.holds ?? [])]);
+      if (holds.length === status.holds.length) {
+        return { accepted: false, note: command.holds?.length ? '这些人闸已经有了' : '没给要拦的事' };
+      }
+      status.holds = holds;
+      notifyParent();
+      return { accepted: true, note: `加人闸：${describeHolds(holds)}（合并前等人批）` };
+    },
   });
+  controlRef = control;
   setHandler(subtaskStatusQuery, () => ({
     ...status,
     paused: control.paused,
@@ -90,25 +170,6 @@ export async function subtaskWorkflow(input: SubtaskInput): Promise<SubtaskResul
     commands: [...control.commands],
   }));
 
-  let lastSent = '';
-  const notifyParent = () => {
-    const parent = info.parent;
-    if (!parent) return;
-    const progress: SubtaskProgress = {
-      key: sub.key,
-      state: status.state,
-      prNumber: status.prNumber,
-      paused: control.paused,
-      waiting: status.waiting,
-      runId: status.runId,
-    };
-    const text = JSON.stringify(progress);
-    if (text === lastSent) return;
-    lastSent = text;
-    CancellationScope.nonCancellable(() =>
-      getExternalWorkflowHandle(parent.workflowId).signal(subtaskProgressSignal, progress),
-    ).catch((error) => log.warn('进度没送到需求工作流', { error: String(error) }));
-  };
   const setStep = (step: SubtaskStep, state: SubtaskState, doing: string) => {
     status.step = step;
     status.state = state;
@@ -116,7 +177,7 @@ export async function subtaskWorkflow(input: SubtaskInput): Promise<SubtaskResul
     notifyParent();
   };
 
-  const limits = await decide('limits', input.limits ?? {});
+  const limits = await limitsFor(input.limits);
   const acts = activitiesFor(limits);
   const kit = newKit({
     acts,
@@ -126,9 +187,11 @@ export async function subtaskWorkflow(input: SubtaskInput): Promise<SubtaskResul
     view: status,
     onChange: notifyParent,
   });
+  kitRef = kit;
 
   let worktree: Worktree | null = null;
   let pendingItemId: string | null = null;
+  let mergeAttempt = 0;
   let summary = '';
   let mergeCommit: string | null = null;
 
@@ -154,9 +217,84 @@ export async function subtaskWorkflow(input: SubtaskInput): Promise<SubtaskResul
     return review.output.review;
   };
 
-  const viaMergeQueue = async (prNumber: number, head: string, n: number): Promise<MergeResult> => {
+  /** 这个头批过了吗（批的时候的人闸要盖住现在的全部人闸：之后又加了的，要重新批）。 */
+  const approvedFor = (head: string) => {
+    const a = status.approval;
+    return a?.state === 'approved' && a.head === head && status.holds.every((h) => a.holds.includes(h));
+  };
+  const needsApproval = (head: string) => status.holds.length > 0 && !approvedFor(head);
+
+  /** 人闸：发卡请人批（编号先定好进历史，发卡重试只有一张卡），等批准或拒绝。拒了回返工意见，批了回 null。 */
+  const awaitApproval = async (prNumber: number, head: string): Promise<Feedback[] | null> => {
+    const approvalId = await newId(kit);
+    const holds = [...status.holds];
+    const what = describeHolds(holds);
+    status.approval = { approvalId, holds, head, state: 'pending' };
+    setStep('merge', 'verifying', `等人批准（${what}）`);
+    await waitFor(
+      kit,
+      'human',
+      `等人批准：${what}（PR #${prNumber}）`,
+      async () => {
+        await attempt(kit, 'requestApproval', () =>
+          acts.requestApproval({
+            ...kit.scope,
+            approvalId,
+            holds,
+            repo: input.repo,
+            prNumber,
+            head,
+            title: sub.title,
+            summary,
+          }),
+        );
+        await condition(() => status.approval?.state !== 'pending');
+      },
+      { approvalId },
+    );
+    const decided = status.approval;
+    if (decided?.state !== 'rejected') return null;
+    return [
+      {
+        kind: 'review',
+        summary: `人没批（${what}）：${decided.reason ?? '没写理由'}`,
+        items: decided.reason ? [decided.reason] : [],
+      },
+    ];
+  };
+
+  const sendWithdraw = async (itemId: string): Promise<boolean> => {
+    try {
+      await getExternalWorkflowHandle(mergeQueueWorkflowId(input.repo)).signal(withdrawSignal, {
+        itemId,
+        subtaskWorkflowId: info.workflowId,
+      });
+      return true;
+    } catch (error) {
+      if (isCancellation(error)) throw error;
+      // 队列不在了（空闲收工、被终止）：没有谁会再合它。
+      log.warn('撤出合并队列的信号没发出去', { itemId, error: String(error) });
+      return false;
+    }
+  };
+
+  /** 暂停、新加人闸时撤出合并队列：一直等到队列确认（撤出了，或撤出前已经合上/退回了）。 */
+  const withdrawUntilConfirmed = (itemId: string): Promise<MergeResult | null> =>
+    waitFor(kit, 'merge-queue', '撤出合并队列，等队列确认', async () => {
+      for (;;) {
+        if (!(await sendWithdraw(itemId))) return mergeResults[itemId] ?? null;
+        if (await condition(() => itemId in mergeResults, `${limits.mergeWaitMinutes} minutes`)) {
+          return mergeResults[itemId] ?? null;
+        }
+      }
+    });
+
+  /** 排进合并队列等结果。暂停了、或新加了人闸要等批准：还没合的撤出来，回 null（回头过暂停门、人闸再排）。 */
+  const viaMergeQueue = async (prNumber: number, head: string): Promise<MergeResult | null> => {
+    await gate(kit);
+    mergeAttempt += 1;
     const item: MergeItem = {
-      itemId: `${info.workflowId}#${n}`,
+      itemId: `${info.workflowId}#${mergeAttempt}`,
       subtaskWorkflowId: info.workflowId,
       taskId: input.taskId,
       subtaskId: input.subtaskId,
@@ -168,15 +306,21 @@ export async function subtaskWorkflow(input: SubtaskInput): Promise<SubtaskResul
       enqueuedAt: new Date().toISOString(),
     };
     pendingItemId = item.itemId;
+    const interrupted = () => control.paused || needsApproval(head);
     for (;;) {
       await attempt(kit, 'enqueueMerge', () => acts.enqueueMerge({ item, limits: input.limits ?? {} }));
-      const answered = await waitFor(kit, 'merge-queue', `PR #${prNumber} 在合并队列里`, () =>
-        condition(() => item.itemId in mergeResults, `${limits.mergeWaitMinutes} minutes`),
+      await waitFor(kit, 'merge-queue', `PR #${prNumber} 在合并队列里`, () =>
+        condition(() => item.itemId in mergeResults || interrupted(), `${limits.mergeWaitMinutes} minutes`),
       );
-      const result = mergeResults[item.itemId];
-      if (answered && result) {
+      const answered = mergeResults[item.itemId];
+      if (answered) {
         pendingItemId = null;
-        return result;
+        return answered;
+      }
+      if (interrupted()) {
+        const confirmed = await withdrawUntilConfirmed(item.itemId);
+        pendingItemId = null;
+        return confirmed && confirmed.outcome !== 'withdrawn' ? confirmed : null;
       }
       // 太久没回话：再排一次（队列按条目编号去重，已经有结果的会补发）。
     }
@@ -192,13 +336,14 @@ export async function subtaskWorkflow(input: SubtaskInput): Promise<SubtaskResul
     let feedback: Feedback[] = [];
     let fingerprints: { ci?: string; review?: string } = {};
     let verifiedHead = '';
-    let mergeAttempt = 0;
     let offPlan = 0;
-    // 墙钟预算从开工算起；人看过（挂起后被放行）就重新计。
-    let budgetStart = Date.now();
+    // 墙钟预算：从开工算起，等人（暂停、挂起、回答、批准）和排队（空位、额度、合并队列）的时间不算；
+    // 人看过（挂起后被放行）就重新计。
+    let budget = { since: Date.now(), off: offClockMs(kit) };
+    const workedMinutes = () => (Date.now() - budget.since - (offClockMs(kit) - budget.off)) / 60_000;
     const parkAndReset = async (reason: string, detail: string) => {
       await park(kit, reason, detail);
-      budgetStart = Date.now();
+      budget = { since: Date.now(), off: offClockMs(kit) };
     };
     let next: Next = 'execute';
     while (next !== 'done') {
@@ -215,7 +360,7 @@ export async function subtaskWorkflow(input: SubtaskInput): Promise<SubtaskResul
         sessionId = exec.sessionId;
         summary = exec.output.summary;
         // 交付对账：改的文件和方案点名的地方一个都对不上，就是假完成，不推也不进验证。
-        const delivery = await decide('delivery', {
+        const delivery = await judge(kit, 'delivery', {
           touches: sub.touches,
           changedFiles: exec.output.changedFiles,
           offPlanSoFar: offPlan,
@@ -291,7 +436,7 @@ export async function subtaskWorkflow(input: SubtaskInput): Promise<SubtaskResul
                 sub.secondOpinion ? secondOpinion(prNumber, sync.head) : Promise.resolve(null),
               ])
             : [null, null];
-        const verdict = await decide('verify', {
+        const verdict = await judge(kit, 'verify', {
           sync,
           ci,
           review,
@@ -299,7 +444,7 @@ export async function subtaskWorkflow(input: SubtaskInput): Promise<SubtaskResul
           rounds: status.rounds,
           limits,
           lastFingerprints: fingerprints,
-          elapsedMinutes: (Date.now() - budgetStart) / 60_000,
+          elapsedMinutes: workedMinutes(),
         });
         if (verdict.action === 'merge') {
           verifiedHead = sync.head;
@@ -328,15 +473,25 @@ export async function subtaskWorkflow(input: SubtaskInput): Promise<SubtaskResul
         continue;
       }
 
+      // 合并：先过人闸（带人闸标记的等人批），再进合并队列。
+      if (needsApproval(verifiedHead)) {
+        const rejected = await awaitApproval(prNumber, verifiedHead);
+        if (rejected) {
+          status.lastProblem = rejected[0]?.summary ?? '人没批';
+          feedback = rejected;
+          next = 'execute';
+        }
+        continue;
+      }
       setStep('merge', 'in_merge_queue', '在合并队列里排队');
-      mergeAttempt += 1;
-      const result = await viaMergeQueue(prNumber, verifiedHead, mergeAttempt);
+      const result = await viaMergeQueue(prNumber, verifiedHead);
+      if (!result || result.outcome === 'withdrawn') continue;
       if (result.outcome === 'merged') {
         mergeCommit = result.mergeCommit;
         next = 'done';
         continue;
       }
-      const after = await decide('mergeReturn', {
+      const after = await judge(kit, 'mergeReturn', {
         reason: result.reason,
         detail: result.detail,
         files: result.files,
@@ -387,11 +542,18 @@ export async function subtaskWorkflow(input: SubtaskInput): Promise<SubtaskResul
     status.runId = null;
     status.sessionId = null;
     const itemId = pendingItemId as string | null;
-    if (itemId) {
-      try {
-        await getExternalWorkflowHandle(mergeQueueWorkflowId(input.repo)).signal(withdrawSignal, { itemId });
-      } catch (error) {
-        log.warn('撤出合并队列失败', { error: String(error) });
+    if (itemId && (await sendWithdraw(itemId))) {
+      // 等队列确认：撤出前已经合上的，如实记成合并了（不然合进主线的改动没人认）。
+      await waitFor(kit, 'merge-queue', '撤出合并队列，等队列确认', () =>
+        condition(() => itemId in mergeResults, `${STOP_WITHDRAW_MINUTES} minutes`),
+      );
+      const confirmed = mergeResults[itemId];
+      if (confirmed?.outcome === 'merged') {
+        outcome = 'merged';
+        mergeCommit = confirmed.mergeCommit;
+        problem = `${problem ?? '收尾'}时已经合进主线了`;
+      } else if (!confirmed) {
+        problem = `${problem ?? '收尾'}；合并队列 ${STOP_WITHDRAW_MINUTES} 分钟没确认撤出，PR #${status.prNumber} 要人核对有没有合上`;
       }
     }
     const tree = worktree as Worktree | null;

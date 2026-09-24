@@ -14,11 +14,13 @@ import {
   type AgentEventCommand,
   type AnswerCommand,
   type CommandMeta,
+  type NEW_TASK_SIGNAL_NAMES,
   type RequirementResult,
   type RequirementStatus,
   type RerouteCommand,
   requirementWorkflowId,
   type SubtaskStatus,
+  subtaskWorkflowId,
   type TASK_SIGNAL_NAMES,
   WORKFLOW_TYPES,
 } from '../src/contract.ts';
@@ -41,6 +43,9 @@ const argsFit: [
   ArgOf<'answer'> extends AnswerCommand ? true : false,
   ArgOf<'agentEvent'> extends AgentEventCommand ? true : false,
 ] = [true, true, true, true, true, true];
+// 引擎先收、后端还没发的（人闸）：后端加进 TaskSignal 的那天这里编译报错，提醒把名字挪进 TASK_SIGNAL_NAMES、补上参数对拍。
+type AlreadySent = Extract<(typeof NEW_TASK_SIGNAL_NAMES)[number], ApiName>;
+const noneSentYet: [AlreadySent] extends [never] ? true : AlreadySent = true;
 
 describe('fleet 通行证', () => {
   it('引擎签的，后端验得过：任务、子任务、这一次会话都对得上，寿命在后端认的上限里', () => {
@@ -71,7 +76,17 @@ describe('后端发来的信号', { timeout: 60_000 }, () => {
   });
 
   it('编译期对上了名字和参数', () => {
-    expect([noneMissing, noneExtra, ...argsFit]).toEqual([true, true, true, true, true, true, true, true]);
+    expect([noneMissing, noneExtra, noneSentYet, ...argsFit]).toEqual([
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+    ]);
   });
 
   it('用后端真的发信号代码发：暂停、换路由、叫醒、回答、继续、叫停，引擎都收得到、有回执', async () => {
@@ -93,16 +108,26 @@ describe('后端发来的信号', { timeout: 60_000 }, () => {
       await waitUntil(() => world.held().length === 1, '写码会话挂着');
       const running = await queryUntil<RequirementStatus>(
         handle,
-        (s) => Boolean(s.subtasks[0]?.runId),
+        (s) => Boolean(s.subtasks[0]?.workflowId),
         '子任务在写码',
       );
       const sub = running.subtasks[0];
       const child = env.client.workflow.getHandle(sub?.workflowId ?? '');
+      const writing = await queryUntil<SubtaskStatus>(child, (s) => Boolean(s.runId), '子任务报上了会话');
 
-      await control.signal(input.taskId, { name: 'agentEvent', runId: sub?.runId ?? '', kind: 'say' });
+      // 叫醒按会话发给所属的工作流（后端要改的就是这一处的编号）：子任务的会话发 sub:<subtask_id>。
+      const wake = createTemporalWorkflowControl(env.client, {
+        workflowIdForTask: () => subtaskWorkflowId(sub?.id ?? ''),
+      });
+      await wake.signal(input.taskId, {
+        name: 'agentEvent',
+        runId: writing.runId ?? '',
+        kind: 'ask',
+        askId: 'ask-1',
+      });
       await queryUntil<SubtaskStatus>(
         child,
-        (s) => s.lastAgentEvent?.kind === 'say',
+        (s) => s.lastAgentEvent?.kind === 'ask',
         '子任务收到 agentEvent',
       );
 

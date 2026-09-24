@@ -3,5 +3,6 @@
 export * from './activity-options.ts';
 export * from './contract.ts';
 export * from './decisions/index.ts';
+export * from './holds.ts';
 export * from './limits.ts';
 export * from './ports.ts';

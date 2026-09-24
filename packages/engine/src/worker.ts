@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { signAgentToken } from '@fleet-dao/api/agent-token';
 import { bundleWorkflowCode, NativeConnection, Worker, type WorkflowBundle } from '@temporalio/worker';
 import { type AgentTokenClaims, createActivities } from './activities.ts';
-import { type Classifier, createDecide } from './decisions/index.ts';
+import { type Classifier, createDecide, type Decide } from './decisions/index.ts';
 import { createFakeWorld } from './fakes.ts';
 import type { EnginePorts } from './ports.ts';
 
@@ -86,6 +86,8 @@ export interface CreateEngineWorkerOptions {
   workflowBundle?: WorkflowBundle;
   /** 错误分类表；不给只用认结构化错误码的底表。 */
   classify?: Classifier;
+  /** 整个换掉判断入口（演练「判断出错」用）；不给就是 createDecide({ classify })。 */
+  decide?: Decide;
   /** 缓存几条工作流；0 = 不缓存、每个工作流任务都从历史重放（换工人、换代码演练用）。 */
   maxCachedWorkflows?: number;
   log?: (message: string) => void;
@@ -109,7 +111,7 @@ export async function createEngineWorker(options: CreateEngineWorkerOptions): Pr
         cliBinDir: config.cliBinDir,
         signToken: options.signAgentToken,
       }),
-      decide: createDecide(options.classify ? { classify: options.classify } : {}),
+      decide: options.decide ?? createDecide(options.classify ? { classify: options.classify } : {}),
     },
     shutdownGraceTime: `${config.shutdownGraceSeconds} seconds`,
     maxConcurrentActivityTaskExecutions: config.maxConcurrentActivities,

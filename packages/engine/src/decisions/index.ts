@@ -1,6 +1,7 @@
 // 流程判断的唯一入口。工作流经本地活动 `decide` 调它：每次判断的结果记进历史，重放时直接取历史里的答案、
 // 不重算——改判断条件（阈值、分类表、默认值）不会让在途任务的历史对不上（windsurf-dao#1633、#1813）。
 // 工作流文件只许 `import type` 这里的东西；直接调用会把判断搬回工作流、失去这层保护（test/structure.test.ts 盯着）。
+// 库主键也从这里出（newIds）：理由一样，要进历史。
 
 import { type Limits, resolveLimits } from '../limits.ts';
 import { checkDelivery, type DeliveryDecision, type DeliveryInput } from './delivery.ts';
@@ -11,6 +12,7 @@ import {
   type NextAction,
   nextAction,
 } from './failure.ts';
+import { type NewIdsInput, newIds } from './ids.ts';
 import {
   afterMergeReturn,
   type MergeReturnDecision,
@@ -32,6 +34,7 @@ import { decideAfterVerify, type VerifyDecision, type VerifyInput } from './veri
 
 export interface DecisionMap {
   limits: { input: Partial<Limits> | undefined; output: Limits };
+  newIds: { input: NewIdsInput; output: string[] };
   triage: { input: TriageInput; output: TriageDecision };
   plan: { input: PlanInput; output: PlanDecision };
   runnable: { input: RunnableInput; output: RunnableDecision };
@@ -60,6 +63,7 @@ export function createDecide(deps: DecideDeps = {}): Decide {
   const classify = deps.classify ?? classifyStructural;
   const table: Table = {
     limits: resolveLimits,
+    newIds,
     triage: decideTriage,
     plan: validatePlan,
     runnable: pickRunnable,
@@ -78,6 +82,7 @@ export function createDecide(deps: DecideDeps = {}): Decide {
 
 export * from './delivery.ts';
 export * from './failure.ts';
+export * from './ids.ts';
 export * from './merge.ts';
 export * from './plan.ts';
 export * from './triage.ts';

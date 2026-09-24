@@ -6,6 +6,7 @@ import type { PlannedSubtask } from './decisions/plan.ts';
 import type { TriageVerdict } from './decisions/triage.ts';
 import type { CiResult, ReviewResult, SyncResult } from './decisions/verify.ts';
 import {
+  type AskHumanInput,
   type EnginePorts,
   type LaunchSessionInput,
   type MergePrInput,
@@ -14,10 +15,12 @@ import {
   type PortContext,
   PortError,
   type PortName,
+  type RequestApprovalInput,
   type RouteChoice,
   type RunTestsInput,
   type SessionEnd,
   type SessionOutput,
+  type StartSessionResult,
   type SyncMainlineInput,
   type TaskStateSnapshot,
   type TimingEntry,
@@ -48,6 +51,8 @@ export interface FakeScript {
   route: (input: PickRouteInput, n: number) => PickRouteResult | undefined;
   /** 前 N 次调用抛可重试的 TRANSIENT。 */
   failFirst: Partial<Record<PortName, number>>;
+  /** 前 N 次调用做完了再抛可重试的 TRANSIENT（事办成了、回话丢了：重试时考的是幂等）。 */
+  failAfter: Partial<Record<PortName, number>>;
   /** 每次调用先等这么久（测串行、并发用）。 */
   delayMs: Partial<Record<PortName, number>>;
   heartbeatMs: number;
@@ -82,6 +87,12 @@ export interface FakeWorld {
   /** 写进「库」的任务状态，按写入顺序。 */
   states: TaskStateSnapshot[];
   sessions: Map<string, FakeSession>;
+  /** 真起了进程的 runId，每起一次记一次（同一个 runId 出现两次 = 起了两个会话）。 */
+  spawned: string[];
+  /** 发出去的提问卡片（按 askId 去重后的）。 */
+  asks: AskHumanInput[];
+  /** 发出去的批准卡片（按 approvalId 去重后的）。 */
+  approvals: RequestApprovalInput[];
   callsOf<P extends PortName>(port: P): (FakeCall & { input: Parameters<EnginePorts[P]>[0] })[];
   count(port: PortName): number;
   /** 放行一个挂着的会话。 */
@@ -121,6 +132,12 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
   const timings: TimingEntry[] = [];
   const states: TaskStateSnapshot[] = [];
   const sessions = new Map<string, FakeSession>();
+  const spawned: string[] = [];
+  const asks: AskHumanInput[] = [];
+  const approvals: RequestApprovalInput[] = [];
+  /** 和真实现一样按 runId 幂等：起过的原样返回，叫停过的不再起。 */
+  const byRun = new Map<string, StartSessionResult>();
+  const stoppedRuns = new Set<string>();
   const counters = new Map<string, number>();
   const prByBranch = new Map<string, number>();
   const heartbeatMs = script.heartbeatMs ?? 50;
@@ -210,7 +227,10 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
       const scripted = script.route?.(input, next('pickRoute'));
       if (scripted) return scripted;
       const usable = routes.filter(
-        (r) => !input.avoidRouteIds.includes(r.routeId) && !input.avoidModelIds.includes(r.modelId),
+        (r) =>
+          !input.avoidRouteIds.includes(r.routeId) &&
+          !input.avoidPoolIds.includes(r.poolId) &&
+          !input.avoidModelIds.includes(r.modelId),
       );
       const preferred = input.preferRouteId
         ? usable.find((r) => r.routeId === input.preferRouteId)
@@ -220,6 +240,11 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
       return { ok: true, route, why: preferred ? '点名的路由' : '排第一的可用路由' };
     },
     async startSession(input) {
+      const known = byRun.get(input.runId);
+      if (known) return known;
+      if (stoppedRuns.has(input.runId)) {
+        throw new PortError('SESSION_STOPPED', `会话 ${input.runId} 已经叫停，不再起`, { retryable: false });
+      }
       const n = next(`session:${input.stage}`);
       const id = input.resumeSessionId ?? `s${next('sessionId')}`;
       sessions.set(id, {
@@ -233,11 +258,14 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
         stopped: false,
         watching: false,
       });
-      return {
+      spawned.push(input.runId);
+      const started: StartSessionResult = {
         sessionId: id,
         resumed: Boolean(input.resumeSessionId),
         handle: { pid: 40_000 + next('pid'), scope: `fleet-agent-${input.runId}.scope` },
       };
+      byRun.set(input.runId, started);
+      return started;
     },
     async awaitSession(input, ctx) {
       const s = sessions.get(input.sessionId);
@@ -262,7 +290,9 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
       return endFor(s);
     },
     async stopSession(input) {
-      const s = sessions.get(input.sessionId);
+      stoppedRuns.add(input.runId);
+      const started = byRun.get(input.runId);
+      const s = started ? sessions.get(started.sessionId) : undefined;
       if (s && s.runId === input.runId) s.stopped = true;
     },
     async createWorktree(input) {
@@ -318,8 +348,11 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
     async writeSpecDoc(input) {
       return { path: `${input.specDir}/${DOC_FILE[input.doc]}` };
     },
-    async askHuman() {
-      return { askId: `ask-${next('ask')}` };
+    async askHuman(input) {
+      if (!asks.some((a) => a.askId === input.askId)) asks.push(input);
+    },
+    async requestApproval(input) {
+      if (!approvals.some((a) => a.approvalId === input.approvalId)) approvals.push(input);
     },
     async raiseAlert() {
       return { alertId: `alert-${next('alert')}` };
@@ -344,6 +377,10 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
           throw new PortError('TRANSIENT', `${name} 假失败`, { retryable: true });
         }
         const out = await fn(input, ctx);
+        const lostReplies = script.failAfter?.[name] ?? 0;
+        if (lostReplies > 0 && calls.filter((c) => c.port === name).length <= lostReplies) {
+          throw new PortError('TRANSIENT', `${name} 做完了、回话丢了（假）`, { retryable: true });
+        }
         call.ok = true;
         return out;
       } catch (error) {
@@ -361,6 +398,9 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
     timings,
     states,
     sessions,
+    spawned,
+    asks,
+    approvals,
     callsOf: (<P extends PortName>(port: P) => calls.filter((c) => c.port === port)) as FakeWorld['callsOf'],
     count: (port) => calls.filter((c) => c.port === port).length,
     release(sessionId) {

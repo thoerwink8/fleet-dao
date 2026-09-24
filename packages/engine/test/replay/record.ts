@@ -19,8 +19,10 @@ import {
   type RequirementStatus,
   requirementWorkflowId,
   type SubtaskStatus,
+  subtaskWorkflowId,
   WORKFLOW_TYPES,
 } from '../../src/contract.ts';
+import type { SubtaskSpec } from '../../src/decisions/plan.ts';
 import { createFakeWorld, type FakeScript, type FakeWorld } from '../../src/fakes.ts';
 import {
   createEnv,
@@ -45,15 +47,15 @@ interface Run {
 /** 返回「夹具名 → 工作流」：跑到想要的位置就返回，那一刻的历史就是夹具。 */
 type Scenario = { script?: Partial<FakeScript>; run(run: Run): Promise<Record<string, WorkflowHandle>> };
 
-const startSubtask = ({ env, queue }: Run, key: string) => {
-  const input = subtaskInput(spec(key), {
+const startSubtask = ({ env, queue }: Run, key: string, over: Partial<SubtaskSpec> = {}) => {
+  const input = subtaskInput(spec(key, over), {
     repo,
     taskId: 'task-fixture',
     subtaskId: '00000000-0000-4000-8000-000000000001',
   });
   return env.client.workflow.start(WORKFLOW_TYPES.subtask, {
     taskQueue: queue,
-    workflowId: `sub:acme/fixture#12/${key}`,
+    workflowId: subtaskWorkflowId(input.subtaskId),
     args: [input],
   });
 };
@@ -76,6 +78,43 @@ const SCENARIOS: Record<string, Scenario> = {
       const handle = await startSubtask(r, 'a');
       await handle.result();
       return { 'subtask-merged': handle, 'merge-queue-idle': mergeQueue(r) };
+    },
+  },
+  // 返工一轮：CI 红、第二意见要改，意见回主会话（续同一个会话）改完再验，合上。
+  'subtask-reworked': {
+    script: {
+      ci: (_input, n) =>
+        n === 1 ? { state: 'red', failedChecks: ['test'], digest: '登录测试挂了' } : undefined,
+      review: (_input, n) =>
+        n === 1
+          ? { verdict: 'changes', findings: [{ severity: 'blocking', text: '验证码没设过期时间' }] }
+          : undefined,
+    },
+    async run(r) {
+      const handle = await startSubtask(r, 'a');
+      await handle.result();
+      return { 'subtask-reworked': handle };
+    },
+  },
+  // 合并队列在最新主线上测红了、退回：回主会话修完重新排队，合上。队列这边也录一份。
+  'subtask-merge-returned': {
+    script: { tests: (_input, n) => (n === 1 ? { passed: false, summary: '登录测试挂了' } : undefined) },
+    async run(r) {
+      const handle = await startSubtask(r, 'a');
+      await handle.result();
+      return { 'subtask-merge-returned': handle, 'merge-queue-returned': mergeQueue(r) };
+    },
+  },
+  // 人闸：验证过了，停在等人批准（卡片已发）。
+  'subtask-awaiting-approval': {
+    async run(r) {
+      const handle = await startSubtask(r, 'a', { holds: ['release'] });
+      await queryUntil<SubtaskStatus>(
+        handle,
+        (s) => s.approval?.state === 'pending' && r.world.approvals.length === 1,
+        '在等批准',
+      );
+      return { 'subtask-awaiting-approval': handle };
     },
   },
   // #1633 的原形：停在暂停里、等「继续」信号。工人换代码时重放的正是这种工作流。
@@ -151,7 +190,7 @@ const SCENARIOS: Record<string, Scenario> = {
       await waitUntil(() => r.world.held().length === 1, '写码会话挂着');
       const status = await queryUntil<RequirementStatus>(
         handle,
-        (s) => Boolean(s.subtasks[0]?.runId),
+        (s) => s.subtasks[0]?.state === 'running',
         '子任务在写码',
       );
       const child = r.env.client.workflow.getHandle(status.subtasks[0]?.workflowId ?? '');

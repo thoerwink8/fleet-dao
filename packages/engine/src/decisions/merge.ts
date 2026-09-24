@@ -33,10 +33,14 @@ export type MergeStep =
   | { next: 'merge'; head: string }
   | { next: 'done'; result: 'merged'; mergeCommit: string }
   | { next: 'done'; result: 'returned'; reason: ReturnReason; detail: string; files: string[] }
-  | { next: 'done'; result: 'dropped'; detail: string };
+  | { next: 'done'; result: 'withdrawn'; detail: string };
 
 export function mergeStep(input: MergeStepInput): MergeStep {
-  if (input.withdrawn) return { next: 'done', result: 'dropped', detail: '子任务撤回了' };
+  // 已经合上的就是合上了：撤出晚到一步也不许当成没合（不然合进主线的改动没人认，子任务还以为能重排）。
+  if (input.merge?.merged && input.merge.mergeCommit) {
+    return { next: 'done', result: 'merged', mergeCommit: input.merge.mergeCommit };
+  }
+  if (input.withdrawn) return { next: 'done', result: 'withdrawn', detail: '子任务撤回了' };
   if (input.failed) {
     return {
       next: 'done',
@@ -71,8 +75,6 @@ export function mergeStep(input: MergeStepInput): MergeStep {
     return { next: 'done', result: 'returned', reason: 'tests-red', detail: tests.summary, files: [] };
   }
   if (!merge) return { next: 'merge', head: sync.head };
-  if (merge.merged && merge.mergeCommit)
-    return { next: 'done', result: 'merged', mergeCommit: merge.mergeCommit };
   return {
     next: 'done',
     result: 'returned',

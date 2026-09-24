@@ -34,6 +34,7 @@ export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
   saveTaskState: 'quick',
   raiseAlert: 'quick',
   askHuman: 'quick',
+  requestApproval: 'quick',
   enqueueMerge: 'quick',
   startSession: 'git',
   stopSession: 'git',

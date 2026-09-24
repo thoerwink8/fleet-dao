@@ -2,16 +2,29 @@ import type { TestWorkflowEnvironment } from '@temporalio/testing';
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
   answerSignal,
+  approveSignal,
   pauseSignal,
+  rejectSignal,
+  requireApprovalSignal,
   resumeSignal,
   type SubtaskResult,
   type SubtaskStatus,
   stopSignal,
   WORKFLOW_TYPES,
 } from '../src/contract.ts';
+import { createDecide, type Decide } from '../src/decisions/index.ts';
 import { createFakeWorld } from '../src/fakes.ts';
-import type { ActivityTiming, AwaitSessionInput, StartSessionInput } from '../src/ports.ts';
-import { historyText, queryUntil, spec, subtaskInput, useEnv, waitUntil, withWorker } from './helpers.ts';
+import type { ActivityTiming, AwaitSessionInput, StartSessionInput, WaitTiming } from '../src/ports.ts';
+import {
+  historyText,
+  markerText,
+  queryUntil,
+  spec,
+  subtaskInput,
+  useEnv,
+  waitUntil,
+  withWorker,
+} from './helpers.ts';
 
 const currentEnv = useEnv();
 let env: TestWorkflowEnvironment;
@@ -84,6 +97,45 @@ describe('子任务工作流', { timeout: 60_000 }, () => {
     const text = historyText(history);
     expect(text).toContain(runIds[0]);
     expect(text).not.toContain('token:');
+    // runId 是 decide 生成、记在判断记录里的（重放时取历史里的值，不随代码里调了几次错位）。
+    const recorded = markerText(history);
+    for (const runId of runIds) expect(recorded).toContain(runId);
+  });
+
+  it('起会话还没返回时叫停：收尾按 runId 停掉它，后来才做完的起会话不再起进程（不白烧额度）', async () => {
+    const world = createFakeWorld({ delayMs: { startSession: 1_500 } });
+    const result = await withWorker(env, world, async (q) => {
+      const handle = await startSubtask(q);
+      await waitUntil(() => world.count('startSession') === 1, '起会话的活动开始了');
+      await handle.signal(stopSignal, { by: 'founder' });
+      const done = (await handle.result()) as SubtaskResult;
+      // 起会话的活动还在跑：等它做完再关工人，看它有没有真起进程。
+      await waitUntil(() => world.callsOf('startSession')[0]?.end !== null, '起会话的活动做完');
+      return done;
+    });
+    expect(result.state).toBe('stopped');
+    const start = world.callsOf('startSession')[0];
+    expect(world.callsOf('stopSession').map((c) => [c.input.runId, c.input.sessionId, c.input.mode])).toEqual(
+      [[start?.input.runId, undefined, 'kill']],
+    );
+    expect(start?.ok).toBe(false);
+    expect(world.spawned).toEqual([]);
+  });
+
+  it('起会话做完了、回话丢了：重试拿同一个 runId 来，拿回已经起的那个，不起第二个', async () => {
+    const world = createFakeWorld({ failAfter: { startSession: 1 } });
+    const result = (await withWorker(env, world, async (q) =>
+      (await startSubtask(q)).result(),
+    )) as SubtaskResult;
+    expect(result.state).toBe('merged');
+    const execs = world.callsOf('startSession').filter((c) => c.input.stage === 'execute');
+    expect(execs.map((c) => [c.attempt, c.ok])).toEqual([
+      [1, false],
+      [2, true],
+    ]);
+    const runId = execs[0]?.input.runId;
+    expect(execs[1]?.input.runId).toBe(runId);
+    expect(world.spawned.filter((r) => r === runId)).toHaveLength(1);
   });
 
   it('每次活动尝试都记了排队和干活两段时间', async () => {
@@ -245,13 +297,36 @@ describe('子任务工作流', { timeout: 60_000 }, () => {
       return (await handle.result()) as SubtaskResult;
     });
     expect(result.state).toBe('merged');
-    expect(world.callsOf('askHuman')[0]?.input).toMatchObject({
-      question: '验证码几位？',
-      options: ['4 位', '6 位'],
-    });
+    expect(world.asks).toHaveLength(1);
+    expect(world.asks[0]).toMatchObject({ question: '验证码几位？', options: ['4 位', '6 位'] });
     const execs = world.callsOf('startSession').filter((c) => c.input.stage === 'execute');
     expect(execs[1]?.input.resumeSessionId).toBe('s1');
     expect(execs[1]?.input.brief.answers).toEqual([{ question: '验证码几位？', answer: '6 位' }]);
+  });
+
+  it('问人的活动发完卡、回话丢了：重试带同一个提问编号，只有一张卡；人答了那一张就接着干', async () => {
+    const world = createFakeWorld({
+      failAfter: { askHuman: 1 },
+      session: (input, n) =>
+        input.stage === 'execute' && n === 1
+          ? { outcome: 'blocked', blocked: { question: '验证码几位？' } }
+          : {},
+    });
+    const result = await withWorker(env, world, async (q) => {
+      const handle = await startSubtask(q);
+      // 第一次发卡就回答（旧写法里这张卡作废、工作流等的是重试发的第二张，任务就卡死了）。
+      await waitUntil(() => world.asks.length === 1, '卡片发出去了');
+      await handle.signal(answerSignal, { by: 'founder', askId: world.asks[0]?.askId ?? '', answer: '6 位' });
+      return (await handle.result()) as SubtaskResult;
+    });
+    expect(result.state).toBe('merged');
+    const calls = world.callsOf('askHuman');
+    expect(calls.map((c) => [c.attempt, c.ok])).toEqual([
+      [1, false],
+      [2, true],
+    ]);
+    expect(new Set(calls.map((c) => c.input.askId)).size).toBe(1);
+    expect(world.asks).toHaveLength(1);
   });
 
   it('不认识的命令不静默丢：回执里写明忽略', async () => {
@@ -261,13 +336,181 @@ describe('子任务工作流', { timeout: 60_000 }, () => {
     const status = await withWorker(env, world, async (q) => {
       const handle = await startSubtask(q);
       await waitUntil(() => world.held().length === 1, '写码会话挂着');
-      await handle.signal('approve', { by: 'founder' });
+      await handle.signal('rollback', { by: 'founder' });
       const s = await queryUntil<SubtaskStatus>(handle, (x) => x.commands.length === 1, '回执');
       world.release('s1');
       await handle.result();
       return s;
     });
-    expect(status.commands[0]).toMatchObject({ command: 'approve', accepted: false });
+    expect(status.commands[0]).toMatchObject({ command: 'rollback', accepted: false });
+  });
+
+  it('暂停 5 小时再继续：等人的时间不算进墙钟预算，第一次 CI 红照常回主会话修，不挂起', async () => {
+    const world = createFakeWorld({
+      session: (input, n) => (input.stage === 'execute' && n === 1 ? { hold: true } : {}),
+      ci: (_input, n) =>
+        n === 1 ? { state: 'red', failedChecks: ['test'], digest: '登录测试挂了' } : undefined,
+    });
+    const result = await withWorker(env, world, async (q) => {
+      const handle = await startSubtask(q);
+      await waitUntil(() => world.held().length === 1, '写码会话挂着');
+      await handle.signal(pauseSignal, { by: 'founder' });
+      await queryUntil<SubtaskStatus>(handle, (s) => s.waiting?.kind === 'human', '暂停后在等人');
+      await env.sleep('5 hours');
+      await handle.signal(resumeSignal, { by: 'founder' });
+      return (await handle.result()) as SubtaskResult;
+    });
+    expect(result.state).toBe('merged');
+    expect(result.rounds.ciFix).toBe(1);
+    expect(world.count('raiseAlert')).toBe(0);
+    // 确实停了 5 小时（预算 4 小时）：记下的等人时长。
+    const paused = world.timings.filter((t): t is WaitTiming => t.kind === 'wait' && t.waitFor === 'human');
+    expect(Math.max(...paused.map((t) => t.waitMs))).toBeGreaterThanOrEqual(5 * 60 * 60 * 1000);
+  });
+
+  it('人闸：带人闸的子任务验证通过后先等人批（只发一张卡），批了才进合并队列', async () => {
+    const world = createFakeWorld();
+    const input = subtaskInput(spec('a', { holds: ['release'] }));
+    const result = await withWorker(env, world, async (q) => {
+      const handle = await startSubtask(q, input);
+      const waiting = await queryUntil<SubtaskStatus>(
+        handle,
+        (s) => s.approval?.state === 'pending' && world.approvals.length === 1,
+        '在等批准',
+      );
+      expect(waiting.state).toBe('verifying');
+      expect(waiting.waiting).toMatchObject({ kind: 'human', approvalId: waiting.approval?.approvalId });
+      expect(waiting.waiting?.detail).toContain('对外发布');
+      expect(world.approvals[0]).toMatchObject({
+        approvalId: waiting.approval?.approvalId,
+        holds: ['release'],
+        prNumber: 100,
+        head: waiting.head,
+      });
+      expect(world.count('mergePr')).toBe(0);
+      await handle.signal(approveSignal, { by: 'founder', approvalId: waiting.approval?.approvalId });
+      const done = (await handle.result()) as SubtaskResult;
+      return { done, status: (await handle.query('status')) as SubtaskStatus };
+    });
+    expect(result.done.state).toBe('merged');
+    expect(result.status.approval).toMatchObject({ state: 'approved', by: 'founder' });
+    expect(result.status.commands.map((c) => [c.command, c.accepted])).toEqual([['approve', true]]);
+    // 批准编号也是 decide 生成、记在历史里的。
+    const history = await env.client.workflow.getHandle(`sub-test-${input.taskId}`).fetchHistory();
+    expect(markerText(history)).toContain(result.status.approval?.approvalId ?? '-');
+  });
+
+  it('人闸：拒绝就退回返工（理由作为意见），换了头要重新批', async () => {
+    const world = createFakeWorld();
+    const input = subtaskInput(spec('a', { holds: ['delete'] }));
+    const result = await withWorker(env, world, async (q) => {
+      const handle = await startSubtask(q, input);
+      const first = await queryUntil<SubtaskStatus>(
+        handle,
+        (s) => s.approval?.state === 'pending',
+        '第一次等批准',
+      );
+      await handle.signal(rejectSignal, {
+        by: 'founder',
+        approvalId: first.approval?.approvalId,
+        reason: '先别删老数据，改成标记删除',
+      });
+      const second = await queryUntil<SubtaskStatus>(
+        handle,
+        (s) => s.approval?.state === 'pending' && s.approval.approvalId !== first.approval?.approvalId,
+        '返工后第二次等批准',
+      );
+      expect(second.approval?.head).not.toBe(first.approval?.head);
+      // 拿上一轮的卡批：编号对不上，不算数。
+      await handle.signal(approveSignal, { by: 'founder', approvalId: first.approval?.approvalId });
+      await handle.signal(approveSignal, { by: 'founder', subtaskId: input.subtaskId });
+      const done = (await handle.result()) as SubtaskResult;
+      return { done, status: (await handle.query('status')) as SubtaskStatus };
+    });
+    expect(result.done.state).toBe('merged');
+    expect(result.status.commands.map((c) => [c.command, c.accepted])).toEqual([
+      ['reject', true],
+      ['approve', false],
+      ['approve', true],
+    ]);
+    const execs = world.callsOf('startSession').filter((c) => c.input.stage === 'execute');
+    expect(execs).toHaveLength(2);
+    expect(execs[1]?.input.brief.feedback[0]?.items).toEqual(['先别删老数据，改成标记删除']);
+    expect(world.approvals).toHaveLength(2);
+    expect(world.count('mergePr')).toBe(1);
+  });
+
+  it('人工加人闸：跑着的子任务也拦得住，合并前等人批', async () => {
+    const world = createFakeWorld({
+      session: (input, n) => (input.stage === 'execute' && n === 1 ? { hold: true } : {}),
+    });
+    const result = await withWorker(env, world, async (q) => {
+      const handle = await startSubtask(q);
+      await waitUntil(() => world.held().length === 1, '写码会话挂着');
+      await handle.signal(requireApprovalSignal, { by: 'founder', holds: ['spend'] });
+      await queryUntil<SubtaskStatus>(handle, (s) => s.holds.includes('spend'), '人闸加上了');
+      world.release('s1');
+      const waiting = await queryUntil<SubtaskStatus>(
+        handle,
+        (s) => s.approval?.state === 'pending',
+        '等批准',
+      );
+      expect(world.count('mergePr')).toBe(0);
+      await handle.signal(approveSignal, { by: 'founder', approvalId: waiting.approval?.approvalId });
+      return (await handle.result()) as SubtaskResult;
+    });
+    expect(result.state).toBe('merged');
+    expect(world.approvals.map((a) => a.holds)).toEqual([['spend']]);
+  });
+
+  it('判断出错不判死：本地活动自己的重试用完，按兜底梯退避后再判，接着走完', async () => {
+    const real = createDecide();
+    let failures = 0;
+    const decide: Decide = async (kind, input) => {
+      if (kind === 'verify' && failures < 3) {
+        failures += 1;
+        throw new Error('判断代码出错（假）');
+      }
+      return real(kind, input);
+    };
+    const world = createFakeWorld();
+    const result = (await withWorker(env, world, async (q) => (await startSubtask(q)).result(), {
+      decide,
+    })) as SubtaskResult;
+    expect(result.state).toBe('merged');
+    // 本地活动试了 3 次都错；兜底梯退避一次后再判就好了，没挂起、没报警。
+    expect(failures).toBe(3);
+    expect(world.count('raiseAlert')).toBe(0);
+    const retries = world.timings.filter((t): t is WaitTiming => t.kind === 'wait' && t.waitFor === 'retry');
+    expect(retries.map((t) => t.detail)).toEqual(['判断「verify」出错：第 1 次重试，15 秒后']);
+  });
+
+  it('判断一直出错：重试用完挂起报警，修好之后人发「继续」接着走', async () => {
+    const real = createDecide();
+    let broken = true;
+    const decide: Decide = async (kind, input) => {
+      if (kind === 'delivery' && broken) throw new Error('判断代码出错（假）');
+      return real(kind, input);
+    };
+    const world = createFakeWorld();
+    const input = subtaskInput(spec('a'), { limits: { retryAttempts: 0 } });
+    const result = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const handle = await startSubtask(q, input);
+        await queryUntil<SubtaskStatus>(handle, (s) => s.parked, '挂起');
+        expect(world.callsOf('raiseAlert')[0]?.input).toMatchObject({
+          title: '判断「delivery」出错，挂起等人',
+          level: 'stuck',
+        });
+        broken = false;
+        await handle.signal(resumeSignal, { by: 'founder' });
+        return (await handle.result()) as SubtaskResult;
+      },
+      { decide },
+    );
+    expect(result.state).toBe('merged');
   });
 
   it('活动失败先按活动自己的重试来：建树失败两次，第三次成功', async () => {
@@ -299,6 +542,34 @@ describe('子任务工作流', { timeout: 60_000 }, () => {
     const picks = world.callsOf('pickRoute').filter((c) => c.input.stage === 'execute');
     expect(picks[1]?.input.avoidRouteIds).toEqual(['r1']);
     expect(world.count('raiseAlert')).toBe(0);
+  });
+
+  it('封号这类账号池的事：整个池避开，同一个池的别的路由再空着也不选', async () => {
+    const route = (routeId: string, poolId: string) =>
+      ({ routeId, poolId, modelId: 'm1', family: 'claude', hostId: 'claude-code' }) as const;
+    const world = createFakeWorld({
+      routes: [route('a1', 'pa'), route('a2', 'pa'), route('b1', 'pb'), route('b2', 'pb')],
+      session: (input, n) => {
+        if (input.stage !== 'execute') return {};
+        if (n === 1)
+          return { outcome: 'failed', failure: { code: 'account_banned', message: '403 账号被封' } };
+        if (n === 2) return { outcome: 'failed', failure: { code: 'ROUTE_BUSY', message: '繁忙' } };
+        return {};
+      },
+    });
+    const result = (await withWorker(env, world, async (q) =>
+      (await startSubtask(q)).result(),
+    )) as SubtaskResult;
+    expect(result.state).toBe('merged');
+    const execs = world.callsOf('startSession').filter((c) => c.input.stage === 'execute');
+    // a1 被封 → 整个 pa 池避开（a2 空着也不选）；b1 繁忙 → 只避开 b1 这条路由。
+    expect(execs.map((c) => c.input.route.routeId)).toEqual(['a1', 'b1', 'b2']);
+    const picks = world.callsOf('pickRoute').filter((c) => c.input.stage === 'execute');
+    expect(picks.map((c) => [c.input.avoidPoolIds, c.input.avoidRouteIds])).toEqual([
+      [[], []],
+      [['pa'], []],
+      [['pa'], ['b1']],
+    ]);
   });
 
   it('工人丢了：长活动靠心跳超时在秒级发现并重试接上，不等整段限时', async () => {

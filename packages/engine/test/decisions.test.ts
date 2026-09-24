@@ -18,6 +18,7 @@ import {
   type VerifyInput,
   validatePlan,
 } from '../src/decisions/index.ts';
+import { describeHolds, normalizeHolds } from '../src/holds.ts';
 import { DEFAULT_LIMITS, resolveLimits } from '../src/limits.ts';
 import { costOfRun } from '../src/usage.ts';
 
@@ -91,6 +92,25 @@ describe('方案校验', () => {
       [true, 'ui'],
     ]);
   });
+
+  it('人闸：方案标的和整个需求的合在一起，规整成小写、去重、排序；认不得的也留着（宁可多拦一次）', () => {
+    const plan = validatePlan({
+      subtasks: [
+        { key: 'api', title: 'a', holds: ['Delete', ' release ', 'delete'] },
+        { key: 'page', title: 'p' },
+        { key: 'misc', title: 'm', holds: ['上线'] },
+      ],
+      maxSubtasks: 12,
+      holds: ['spend'],
+    });
+    expect(plan.ok && plan.subtasks.map((s) => s.holds)).toEqual([
+      ['delete', 'release', 'spend'],
+      ['spend'],
+      ['spend', '上线'],
+    ]);
+    expect(normalizeHolds([' Spend', 3, '', 'spend'])).toEqual(['spend']);
+    expect(describeHolds(['release', 'spend', 'delete', '上线'])).toBe('对外发布、花钱、删数据、上线');
+  });
 });
 
 describe('不撞车调度', () => {
@@ -157,7 +177,8 @@ describe('不撞车调度', () => {
 
 describe('失败分流：兜底梯', () => {
   it('分类表认错误码不分大小写（插头的判定原因是小写的）', () => {
-    expect(classifyStructural(failure('quota_exhausted'))).toBe('swapRoute');
+    expect(classifyStructural(failure('quota_exhausted'))).toEqual({ action: 'swapRoute', avoid: 'pool' });
+    expect(classifyStructural(failure('route_busy'))).toBe('swapRoute');
     expect(classifyStructural(failure('MODEL_MISMATCH'))).toBe('swapModel');
     expect(classifyStructural(failure('SESSION_LOST'))).toBe('retry');
     expect(classifyStructural(failure('什么鬼'))).toBe('unknown');
@@ -200,6 +221,34 @@ describe('失败分流：兜底梯', () => {
       nextAction({ failure: failure('ROUTE_BUSY'), counters: { retries: 0 }, limits, routeBound: false })
         .action,
     ).toBe('park');
+  });
+
+  it('账号池的事（封号、额度用满）换路由时避开整个池；别的换路由只避这条路由；换上的分类表也能给池级结论', () => {
+    expect(nextAction({ failure: failure('account_banned'), limits, routeBound: true })).toMatchObject({
+      action: 'swapRoute',
+      avoid: 'pool',
+    });
+    expect(nextAction({ failure: failure('QUOTA_EXHAUSTED'), limits, routeBound: true }).avoid).toBe('pool');
+    expect(nextAction({ failure: failure('ROUTE_BUSY'), limits, routeBound: true }).avoid).toBe('route');
+    // 认不出、重试用完爬上来的换路由：只避这条路由。
+    expect(
+      nextAction({ failure: failure('WEIRD'), counters: { retries: 2 }, limits, routeBound: true }).avoid,
+    ).toBe('route');
+    // 池级结论但换路由的额度用完了：往下走到换模型，避开的是模型。
+    expect(
+      nextAction({
+        failure: failure('account_banned'),
+        counters: { routeSwaps: 2 },
+        limits,
+        routeBound: true,
+      }),
+    ).toMatchObject({ action: 'swapModel', avoid: 'model' });
+    const plugged = nextAction({ failure: failure('X'), limits, routeBound: true }, () => ({
+      action: 'swapRoute',
+      avoid: 'pool',
+    }));
+    expect(plugged).toMatchObject({ action: 'swapRoute', classifiedAs: 'swapRoute', avoid: 'pool' });
+    expect(plugged.reason).toContain('换一个账号池');
   });
 
   it('要人的直接挂起并报警', () => {
@@ -455,7 +504,19 @@ describe('合并队列的条目状态机', () => {
       }),
     ).toBe('merge-failed');
     expect(reason({ ...none, failed: { step: 'sync', message: 'GitHub 挂了' } })).toBe('infra');
-    expect(mergeStep({ ...none, withdrawn: true })).toMatchObject({ result: 'dropped' });
+    expect(mergeStep({ ...none, withdrawn: true })).toMatchObject({ result: 'withdrawn' });
+  });
+
+  it('撤出晚到一步、已经合上了：按合上算，不当成撤回丢掉；没合上的才算撤回', () => {
+    const tests = { passed: true, head: 'h2', summary: '绿' };
+    const late = { withdrawn: true, sync: clean, tests };
+    expect(mergeStep({ ...late, merge: { merged: true, mergeCommit: 'm' } })).toEqual({
+      next: 'done',
+      result: 'merged',
+      mergeCommit: 'm',
+    });
+    expect(mergeStep({ ...late, merge: { merged: false } })).toMatchObject({ result: 'withdrawn' });
+    expect(mergeStep({ ...late, merge: null })).toMatchObject({ result: 'withdrawn' });
   });
 
   it('退回之后：基础设施出错等一会儿原样重排；冲突、测红回主会话；次数到了交人', () => {
@@ -488,5 +549,27 @@ describe('分诊之后', () => {
     expect(
       decideTriage({ verdict: { clear: false, question: '哪个页面？' }, asked: 2, maxQuestions: 2 }),
     ).toMatchObject({ action: 'proceed', assumed: true });
+  });
+
+  it('分诊判出的人闸（会碰花钱、删数据、对外发布）带出来，规整过', () => {
+    expect(
+      decideTriage({ verdict: { clear: true, holds: ['Spend', 'spend'] }, asked: 0, maxQuestions: 2 }),
+    ).toEqual({ action: 'proceed', assumed: false, note: '需求清楚', holds: ['spend'] });
+    expect(decideTriage({ verdict: { clear: null }, asked: 0, maxQuestions: 2 })).toMatchObject({
+      holds: [],
+    });
+  });
+});
+
+describe('编号（库主键）', () => {
+  it('newIds 给要的个数，都是 UUID、互不相同；给 0 个就是空', async () => {
+    const decide = createDecide();
+    const ids = await decide('newIds', { count: 3 });
+    expect(ids).toHaveLength(3);
+    for (const id of ids) {
+      expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    }
+    expect(new Set(ids).size).toBe(3);
+    expect(await decide('newIds', { count: 0 })).toEqual([]);
   });
 });

@@ -2,6 +2,7 @@
 // 重放出来的步骤和历史对不上 = 此刻在途的任务（包括停在暂停、挂起、等回答、等合并队列里的）换上新代码会变僵尸
 // （TMPRL1100：读不了状态、收不了信号，只能终止）。修法是用 patched() 把改动包起来，不许重录夹具让它变绿。
 // 流程判断走本地活动、结果在历史里，重放时不重算——所以改判断条件不会让这里变红；改调度顺序才会。
+// 库主键（子任务、会话、提问、批准的编号）也一样从判断记录里取：代码里多调少调都不会让在途任务手里的编号和库错位。
 import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { Worker } from '@temporalio/worker';
@@ -15,11 +16,15 @@ const files = readdirSync(DIR).filter((f) => f.endsWith('.json'));
 /** 必须有的场景：没有它们，「扫完 0 条」和「一条样本都没扫到」就分不开了。 */
 const REQUIRED = [
   'subtask-merged',
+  'subtask-reworked',
+  'subtask-merge-returned',
+  'subtask-awaiting-approval',
   'subtask-paused',
   'subtask-parked',
   'subtask-in-merge-queue',
   'merge-queue-idle',
   'merge-queue-busy',
+  'merge-queue-returned',
   'requirement-done',
   'requirement-done-api',
   'requirement-done-page',
@@ -32,10 +37,19 @@ const HOW =
   '这份历史是过去的代码真走过的路：现在的代码走不出同样的步骤 = 在途的任务会变僵尸。' +
   "用 patched('<新标记>') 把改动包起来，老任务照老步序重放；不许重录夹具让它变绿。";
 
+interface Payload {
+  data: string;
+}
 interface Fixture {
-  /** 工作流编号不在历史里，但工作流代码会用（子任务编号、合并条目编号），重放要按原编号。 */
+  /** 工作流编号不在历史里，但工作流代码会用（合并条目编号、报警去重键），重放按原编号。 */
   workflowId: string;
-  history: { events: Record<string, unknown>[] };
+  history: {
+    events: {
+      markerRecordedEventAttributes?: { details?: { result?: { payloads?: Payload[] } } };
+      startChildWorkflowExecutionInitiatedEventAttributes?: { workflowId: string };
+      [key: string]: unknown;
+    }[];
+  };
 }
 
 const load = (file: string): Fixture => JSON.parse(readFileSync(`${DIR}${file}`, 'utf8')) as Fixture;
@@ -75,13 +89,29 @@ describe('老历史按现在的代码重放', { timeout: 60_000 }, () => {
     expect(error).toBeInstanceOf(DeterminismViolationError);
   });
 
-  it('对照：拿错编号重放也会红（编号进了子任务编号、合并条目编号，所以夹具要带原编号）', async () => {
-    const { history } = load('requirement-done.json');
-    const error = await Worker.runReplayHistory(
-      { workflowBundle: bundle },
-      history,
-      'req:other/repo#1',
-    ).catch((e: unknown) => e);
+  it('对照：库主键是从历史里取的——把 decide 记下的子任务编号改掉，重放出来的子工作流编号就对不上', async () => {
+    const { workflowId, history } = load('requirement-done.json');
+    const childId = history.events.find((e) => e.startChildWorkflowExecutionInitiatedEventAttributes)
+      ?.startChildWorkflowExecutionInitiatedEventAttributes?.workflowId;
+    const subtaskId = childId?.replace(/^sub:/, '') ?? '';
+    expect(subtaskId).toMatch(/^[0-9a-f-]{36}$/);
+    // 在判断记录（本地活动的结果）里找到这个编号，换成别的——代码没动，只动历史。
+    let tampered = 0;
+    for (const event of history.events) {
+      for (const payload of event.markerRecordedEventAttributes?.details?.result?.payloads ?? []) {
+        const text = Buffer.from(payload.data, 'base64').toString('utf8');
+        if (!text.includes(subtaskId)) continue;
+        payload.data = Buffer.from(text.replace(subtaskId, '00000000-0000-4000-8000-00000000beef')).toString(
+          'base64',
+        );
+        tampered += 1;
+      }
+    }
+    expect(tampered).toBe(1);
+    const error = await Worker.runReplayHistory({ workflowBundle: bundle }, history, workflowId).catch(
+      (e: unknown) => e,
+    );
     expect(error).toBeInstanceOf(DeterminismViolationError);
+    expect(String((error as Error).message)).toContain('Child workflow id');
   });
 });

@@ -6,6 +6,7 @@ import { TestWorkflowEnvironment } from '@temporalio/testing';
 import { DefaultLogger, Runtime, type WorkflowBundle } from '@temporalio/worker';
 import type { RequirementInput, SubtaskInput } from '../src/contract.ts';
 import type { Classifier } from '../src/decisions/failure.ts';
+import type { Decide } from '../src/decisions/index.ts';
 import type { SubtaskSpec } from '../src/decisions/plan.ts';
 import type { FakeWorld } from '../src/fakes.ts';
 import { bundleEngineWorkflows, createEngineWorker } from '../src/worker.ts';
@@ -27,6 +28,8 @@ export function createEnv(): Promise<TestWorkflowEnvironment> {
 export interface WorkerOptions {
   taskQueue?: string;
   classify?: Classifier;
+  /** 换掉判断入口（演练「判断出错」）。 */
+  decide?: Decide;
   /**
    * 换工人的用例设 0：不走粘性队列。可跳时间的测试服务端不会把关掉的工人粘性队列里的任务挪回普通队列，
    * 真服务端会（工人停机时通知服务端，或粘性队列超时后挪回）。
@@ -58,6 +61,7 @@ export async function withWorker<T>(
     connection: env.nativeConnection,
     workflowBundle: await engineBundle(),
     ...(options.classify ? { classify: options.classify } : {}),
+    ...(options.decide ? { decide: options.decide } : {}),
     ...(options.maxCachedWorkflows === undefined ? {} : { maxCachedWorkflows: options.maxCachedWorkflows }),
   });
   return worker.runUntil(fn(taskQueue));
@@ -167,6 +171,13 @@ export function historyText(history: unknown): string {
   };
   walk(history);
   return parts.join('\n');
+}
+
+/** 只取历史里本地活动（decide）记下的那些条目的文字：查「这个值是不是从判断记录里来的」。 */
+export function markerText(history: {
+  events?: readonly { markerRecordedEventAttributes?: unknown }[] | null;
+}): string {
+  return historyText((history.events ?? []).filter((e) => e.markerRecordedEventAttributes));
 }
 
 /** 两段时间是否重叠。 */

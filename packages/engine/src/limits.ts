@@ -16,7 +16,7 @@ export interface Limits {
   mergeReturns: number;
   /** 改的文件和方案点名的地方对不上，退回重做的次数上限。 */
   offPlanRounds: number;
-  /** 一个子任务的墙钟预算：超了就不再自动返工，交帅位（人看过之后重新计）。 */
+  /** 一个子任务的墙钟预算：超了就不再自动返工，交帅位（人看过之后重新计；等人、排队的时间不算）。 */
   subtaskWallMinutes: number;
   /** 兜底梯：有界重试次数。 */
   retryAttempts: number;

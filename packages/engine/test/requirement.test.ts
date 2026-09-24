@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import {
   agentEventSignal,
   answerSignal,
+  approveSignal,
   pauseSignal,
   type RequirementResult,
   type RequirementStatus,
@@ -11,11 +12,20 @@ import {
   resumeSignal,
   type SubtaskStatus,
   stopSignal,
+  subtaskWorkflowId,
   WORKFLOW_TYPES,
 } from '../src/contract.ts';
 import { createFakeWorld, type FakeCall } from '../src/fakes.ts';
 import type { StartSessionInput, WaitTiming } from '../src/ports.ts';
-import { overlaps, queryUntil, requirementInput, useEnv, waitUntil, withWorker } from './helpers.ts';
+import {
+  markerText,
+  overlaps,
+  queryUntil,
+  requirementInput,
+  useEnv,
+  waitUntil,
+  withWorker,
+} from './helpers.ts';
 
 const currentEnv = useEnv();
 let env: TestWorkflowEnvironment;
@@ -54,14 +64,30 @@ describe('需求工作流', { timeout: 60_000 }, () => {
       ],
     });
     const input = requirementInput();
-    const result = (await withWorker(env, world, async (q) =>
-      (await startRequirement(q, input)).result(),
-    )) as RequirementResult;
+    const { result, history } = await withWorker(env, world, async (q) => {
+      const handle = await startRequirement(q, input);
+      const done = (await handle.result()) as RequirementResult;
+      return { result: done, history: await handle.fetchHistory() };
+    });
     expect(result.state).toBe('done');
     expect(result.subtasks.map((s) => [s.key, s.state])).toEqual([
       ['login', 'merged'],
       ['docs', 'merged'],
     ]);
+    // 子任务工作流编号就是 sub:<子任务编号>（后端手里有 subtask_id 就拼得出来）。
+    expect(world.states.at(-1)?.subtasks.map((s) => s.workflowId === subtaskWorkflowId(s.id))).toEqual([
+      true,
+      true,
+    ]);
+    // 子任务编号、需求自己的会话编号都是 decide 生成、记在历史里的（重放时取历史里的，不随代码里调了几次错位）。
+    const recorded = markerText(history);
+    for (const s of result.subtasks) expect(recorded).toContain(s.subtaskId);
+    const ownRuns = world
+      .callsOf('startSession')
+      .filter((c) => !c.input.subtaskId)
+      .map((c) => c.input.runId);
+    expect(ownRuns).toHaveLength(3);
+    for (const runId of ownRuns) expect(recorded).toContain(runId);
     expect(world.callsOf('writeSpecDoc').map((c) => c.input.doc)).toEqual(['requirement', 'plan', 'result']);
     expect(result.docs).toEqual({
       requirement: 'specs/12-登录页加验证码/需求.md',
@@ -250,30 +276,81 @@ describe('需求工作流', { timeout: 60_000 }, () => {
     expect(world.callsOf('stopSession')).toHaveLength(1);
   });
 
-  it('fleet 命令的 agentEvent 按会话转给对应的子任务', async () => {
+  it('fleet 叫醒直接发给会话所属的子任务工作流，需求一条都不转；say、plan 这类不叫醒', async () => {
     const world = createFakeWorld({
       session: (input, n) => (input.stage === 'execute' && n === 1 ? { hold: true } : {}),
     });
-    await withWorker(env, world, async (q) => {
+    const history = await withWorker(env, world, async (q) => {
       const handle = await startRequirement(q);
       await waitUntil(() => world.held().length === 1, '写码会话挂着');
-      const status = await queryUntil<RequirementStatus>(
-        handle,
-        (s) => Boolean(s.subtasks[0]?.runId),
-        '子任务报上了会话',
-      );
-      const runId = status.subtasks[0]?.runId ?? '';
-      await handle.signal(agentEventSignal, { runId, kind: 'say' });
-      const child = env.client.workflow.getHandle(status.subtasks[0]?.workflowId ?? '');
-      await queryUntil<SubtaskStatus>(
-        child,
-        (s) => s.lastAgentEvent?.runId === runId,
-        '子任务收到 agentEvent',
-      );
       const held = world.held()[0];
+      const runId = held?.runId ?? '';
+      // 后端拿 session_runs.subtask_id 拼出子任务工作流编号。
+      const child = env.client.workflow.getHandle(subtaskWorkflowId(held?.input.subtaskId ?? ''));
+      await child.signal(agentEventSignal, { runId, kind: 'ask', askId: 'ask-1' });
+      await queryUntil<SubtaskStatus>(child, (s) => s.lastAgentEvent?.kind === 'ask', '子任务收到叫醒');
+      // 不叫醒的几类、别人的会话：不理。发个不认识的命令垫后，等它的回执，确保前面几条都处理过了。
+      await child.signal(agentEventSignal, { runId, kind: 'say' });
+      await child.signal(agentEventSignal, { runId: 'someone-else', kind: 'done' });
+      await child.signal('ping');
+      const seen = await queryUntil<SubtaskStatus>(child, (s) => s.commands.length === 1, '垫后的回执');
+      expect(seen.lastAgentEvent).toMatchObject({ runId, kind: 'ask', askId: 'ask-1' });
+      // 发到需求上的（老后端就是这么发的）：需求不转，也不当成自己的。
+      await handle.signal(agentEventSignal, { runId, kind: 'done' });
+      await handle.signal('ping');
+      const req = await queryUntil<RequirementStatus>(handle, (s) => s.commands.length === 1, '垫后的回执');
+      expect(req.lastAgentEvent).toBeNull();
       if (held) world.release(held.id);
       await handle.result();
+      return handle.fetchHistory();
     });
+    const relayed = (history.events ?? []).filter(
+      (e) => e.signalExternalWorkflowExecutionInitiatedEventAttributes?.signalName === 'agentEvent',
+    );
+    expect(relayed).toEqual([]);
+  });
+
+  it('人闸：方案标的、分诊判出的都带上；批准发给需求，按子任务编号或批准编号转给对应的子任务', async () => {
+    const world = createFakeWorld({
+      triage: () => ({ clear: true, holds: ['spend'] }),
+      plan: [
+        { key: 'api', title: '后端接口', touches: ['src/api'], holds: ['delete'] },
+        { key: 'page', title: '页面', touches: ['src/page'] },
+      ],
+    });
+    const result = await withWorker(env, world, async (q) => {
+      const handle = await startRequirement(q);
+      const waiting = await queryUntil<RequirementStatus>(
+        handle,
+        (s) => s.subtasks.filter((x) => x.waiting?.approvalId).length === 2,
+        '两个子任务都在等批准',
+      );
+      expect(waiting.subtasks.map((s) => [s.key, s.holds])).toEqual([
+        ['api', ['delete', 'spend']],
+        ['page', ['spend']],
+      ]);
+      expect(world.count('mergePr')).toBe(0);
+      const [api, page] = waiting.subtasks;
+      await handle.signal(approveSignal, { by: 'founder', subtaskId: api?.id });
+      await handle.signal(approveSignal, { by: 'founder', approvalId: page?.waiting?.approvalId });
+      // 不点名的不受理：一次批一张。
+      await handle.signal(approveSignal, { by: 'founder' });
+      const done = (await handle.result()) as RequirementResult;
+      return { done, status: (await handle.query('status')) as RequirementStatus };
+    });
+    expect(result.done.state).toBe('done');
+    expect(result.status.commands.map((c) => [c.command, c.accepted])).toEqual([
+      ['approve', true],
+      ['approve', true],
+      ['approve', false],
+    ]);
+    expect(world.approvals.map((a) => [a.subtaskKey, a.holds])).toEqual(
+      expect.arrayContaining([
+        ['api', ['delete', 'spend']],
+        ['page', ['spend']],
+      ]),
+    );
+    expect(world.states.at(-1)?.subtasks.map((s) => s.holds)).toEqual([['delete', 'spend'], ['spend']]);
   });
 
   it('依赖的子任务被叫停：后面的起不来，需求以没做完结束并报警，不关单', async () => {

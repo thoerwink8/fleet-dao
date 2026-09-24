@@ -18,15 +18,25 @@ export interface FailureInfo {
   retryable: boolean | null;
 }
 
-/** 分类器：只回答「下一步该做什么」；答不上来回 unknown。 */
-export type Classifier = (failure: FailureInfo) => ActionClass | 'unknown';
+/**
+ * 换路时避开多大范围：route 只避这条路由；pool 避开整个账号池（封号、额度用满——同一个池的别的路由照样撞）；
+ * model 避开这个模型。
+ */
+export type AvoidScope = 'route' | 'pool' | 'model';
+
+/** 分类器的回答：下一步该做什么（可带上换路时避开的范围）；答不上来回 unknown。 */
+export type Classification = ActionClass | 'unknown' | { action: ActionClass; avoid?: AvoidScope };
+
+/** 分类器：只回答「下一步该做什么」。 */
+export type Classifier = (failure: FailureInfo) => Classification;
 
 /** 错误码不分大小写（插头的判定原因是小写蛇形，例如 quota_exhausted）。 */
-const STRUCTURAL: Readonly<Record<string, ActionClass>> = {
+const STRUCTURAL: Readonly<Record<string, Classification>> = {
   ROUTE_BUSY: 'swapRoute',
   RATE_LIMITED: 'swapRoute',
   CAPACITY: 'swapRoute',
-  QUOTA_EXHAUSTED: 'swapRoute',
+  QUOTA_EXHAUSTED: { action: 'swapRoute', avoid: 'pool' },
+  ACCOUNT_BANNED: { action: 'swapRoute', avoid: 'pool' },
   ROUTE_OFFLINE: 'swapRoute',
   CLI_TOO_OLD: 'swapRoute',
   MODEL_UNAVAILABLE: 'swapModel',
@@ -42,6 +52,8 @@ const STRUCTURAL: Readonly<Record<string, ActionClass>> = {
   SESSION_STALLED: 'retry',
   SESSION_LOST: 'retry',
   SESSION_MISMATCH: 'retry',
+  // 这一次会话被外面停了（对账、人手停的）：换个新编号重起就是。
+  SESSION_STOPPED: 'retry',
   STARTUP_TIMEOUT: 'retry',
   WALL_CLOCK_TIMEOUT: 'retry',
   SPAWN_FAILED: 'retry',
@@ -77,6 +89,8 @@ export interface NextAction {
   classifiedAs: ActionClass | 'unknown';
   delaySeconds: number;
   reason: string;
+  /** 换路由、换模型时避开多大范围（换路由默认只避这条路由，分类器说是账号池的事就避开整个池）。 */
+  avoid?: AvoidScope;
 }
 
 const LABEL: Record<ActionClass, string> = {
@@ -97,13 +111,17 @@ export function nextAction(input: FailureInput, classify: Classifier = classifyS
     routeSwaps: input.counters?.routeSwaps ?? 0,
     modelSwaps: input.counters?.modelSwaps ?? 0,
   };
-  let classifiedAs: ActionClass | 'unknown';
+  let answer: Classification;
   try {
-    classifiedAs = classify(input.failure);
+    answer = classify(input.failure);
   } catch {
-    classifiedAs = 'unknown';
+    answer = 'unknown';
   }
+  let classifiedAs: ActionClass | 'unknown' = typeof answer === 'object' && answer ? answer.action : answer;
   if (classifiedAs !== 'unknown' && !LADDER.includes(classifiedAs)) classifiedAs = 'unknown';
+  const scope = typeof answer === 'object' && answer ? answer.avoid : undefined;
+  // 分类器说「整个账号池的事」只在它原判的那一级换路由时算数；从别的级爬上来的换路由只避这条路由。
+  const routeAvoid: AvoidScope = classifiedAs === 'swapRoute' && scope === 'pool' ? 'pool' : 'route';
   // 认不出的从最低一级爬；端口明说「重试没用」的跳过重试。
   let rung =
     classifiedAs === 'unknown' ? (input.failure.retryable === false ? 1 : 0) : LADDER.indexOf(classifiedAs);
@@ -124,10 +142,11 @@ export function nextAction(input: FailureInput, classify: Classifier = classifyS
       };
     }
     if (action === 'swapRoute' && input.routeBound && used.routeSwaps < input.limits.routeSwaps) {
-      return { action, classifiedAs, delaySeconds: 0, reason: `${what}：换一条路由${via}` };
+      const target = routeAvoid === 'pool' ? '换一个账号池（这个池的路由都不再用）' : '换一条路由';
+      return { action, classifiedAs, delaySeconds: 0, reason: `${what}：${target}${via}`, avoid: routeAvoid };
     }
     if (action === 'swapModel' && input.routeBound && used.modelSwaps < input.limits.modelSwaps) {
-      return { action, classifiedAs, delaySeconds: 0, reason: `${what}：换一个模型${via}` };
+      return { action, classifiedAs, delaySeconds: 0, reason: `${what}：换一个模型${via}`, avoid: 'model' };
     }
     if (action === 'park') {
       return { action, classifiedAs, delaySeconds: 0, reason: `${what}：挂起并报警${via}` };

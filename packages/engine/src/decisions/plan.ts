@@ -1,5 +1,7 @@
 // 方案校验与「不撞车」调度：纯函数，经 decide 本地活动调用，结果进历史。
 
+import { normalizeHolds } from '../holds.ts';
+
 export type SubtaskStage = 'execute' | 'ui';
 export type Risk = 'low' | 'normal' | 'high';
 
@@ -14,6 +16,8 @@ export interface PlannedSubtask {
   /** low = 纯文档这类，不要第二意见。 */
   risk?: Risk;
   acceptance?: string[];
+  /** 人闸：会对外发布（release）、花钱（spend）、删数据（delete）的，合并前要人批。 */
+  holds?: string[];
 }
 
 /** 校验、规整后的子任务。 */
@@ -26,6 +30,8 @@ export interface SubtaskSpec {
   stage: SubtaskStage;
   secondOpinion: boolean;
   acceptance: string[];
+  /** 人闸标记，规整过（小写、去重、排好序）。老输入没有这个字段 = 没有人闸。 */
+  holds?: string[];
 }
 
 export type PlanDecision = { ok: true; subtasks: SubtaskSpec[] } | { ok: false; problems: string[] };
@@ -89,6 +95,8 @@ function findCycle(list: readonly PlannedSubtask[]): string[] | null {
 export interface PlanInput {
   subtasks: readonly PlannedSubtask[] | undefined;
   maxSubtasks: number;
+  /** 整个需求的人闸（分诊判出的、人工加的），每个子任务都带上。 */
+  holds?: readonly string[] | undefined;
 }
 
 export function validatePlan(input: PlanInput): PlanDecision {
@@ -127,6 +135,7 @@ export function validatePlan(input: PlanInput): PlanDecision {
       stage: s.stage === 'ui' ? 'ui' : 'execute',
       secondOpinion: s.risk !== 'low',
       acceptance: s.acceptance ?? [],
+      holds: normalizeHolds([...(input.holds ?? []), ...(s.holds ?? [])]),
     })),
   };
 }

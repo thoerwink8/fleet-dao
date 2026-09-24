@@ -5,6 +5,9 @@ import {
   type MergeItem,
   type MergeQueueStatus,
   mergeQueueWorkflowId,
+  pauseSignal,
+  resumeSignal,
+  type SubtaskInput,
   type SubtaskResult,
   type SubtaskStatus,
   stopSignal,
@@ -113,6 +116,62 @@ describe('合并队列', { timeout: 60_000 }, () => {
     expect(outcome.rb.state).toBe('stopped');
     expect(world.count('mergePr')).toBe(1);
     expect(outcome.queue.processed).toBe(1);
+  });
+
+  it('暂停挡得住排在队里还没合的：撤出来（队列当场确认），继续后重新排队再合', async () => {
+    const repo = freshRepo();
+    const world = createFakeWorld({ delayMs: { mergePr: 1_500 } });
+    const [a, b] = [subtaskInput(spec('a'), { repo }), subtaskInput(spec('b'), { repo })];
+    const start = (q: string, input: SubtaskInput) =>
+      env.client.workflow.start(WORKFLOW_TYPES.subtask, {
+        taskQueue: q,
+        workflowId: `sub-${input.subtaskId}`,
+        args: [input],
+      });
+    const outcome = await withWorker(env, world, async (q) => {
+      const ha = await start(q, a);
+      await waitUntil(() => world.count('mergePr') === 1, 'a 开始合并');
+      const hb = await start(q, b);
+      const mq = env.client.workflow.getHandle(mergeQueueWorkflowId(repo));
+      await queryUntil<MergeQueueStatus>(mq, (s) => s.queue.length === 1, 'b 在队里等');
+      await hb.signal(pauseSignal, { by: 'founder' });
+      const paused = await queryUntil<SubtaskStatus>(
+        hb,
+        (s) => s.waiting?.detail === '已暂停，等「继续」',
+        'b 撤出来、停在暂停门',
+      );
+      const ra = (await ha.result()) as SubtaskResult;
+      // a 合完了，b 还停着：没有被合。
+      expect(world.count('mergePr')).toBe(1);
+      await hb.signal(resumeSignal, { by: 'founder' });
+      const rb = (await hb.result()) as SubtaskResult;
+      return { ra, rb, paused };
+    });
+    expect(outcome.paused.step).toBe('merge');
+    expect(outcome.ra.state).toBe('merged');
+    expect(outcome.rb.state).toBe('merged');
+    expect(world.callsOf('mergePr').map((c) => c.input.prNumber)).toEqual([
+      outcome.ra.prNumber,
+      outcome.rb.prNumber,
+    ]);
+  });
+
+  it('撤出晚到一步、那一条已经在合了：等合完如实回「合上了」，子任务按合并算', async () => {
+    const world = createFakeWorld({ delayMs: { mergePr: 1_500 } });
+    const input = subtaskInput(spec('a'));
+    const result = (await withWorker(env, world, async (q) => {
+      const handle = await env.client.workflow.start(WORKFLOW_TYPES.subtask, {
+        taskQueue: q,
+        workflowId: `sub-${input.subtaskId}`,
+        args: [input],
+      });
+      await waitUntil(() => world.count('mergePr') === 1, '开始合并');
+      await handle.signal(pauseSignal, { by: 'founder' });
+      return handle.result();
+    })) as SubtaskResult;
+    expect(result.state).toBe('merged');
+    expect(result.mergeCommit).toBe(`mc-${result.prNumber}-1`);
+    expect(world.count('mergePr')).toBe(1);
   });
 
   it('合并回读不是已合并：退回主会话，修完重新排队', async () => {

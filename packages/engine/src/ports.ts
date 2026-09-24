@@ -4,12 +4,17 @@
 // 实现方必须知道的：
 // 1. 长活动（awaitSession / waitCi / runTests）至少每 heartbeatSeconds/3 调一次 ctx.heartbeat()。
 //    不调就会在心跳超时后被判「工人丢了」并重试——工人重启后分钟级发现，不再干等整段限时。
-// 2. 会被重试的活动必须幂等：推分支、开 PR 按分支复用、合并带头约束、写 GitHub 带幂等键、删已经不在的对象正常返回。
+// 2. 会被重试的活动必须幂等：推分支、开 PR 按分支复用、合并带头约束（已经合上的回 merged 和它的合并提交）、
+//    写 GitHub 带幂等键、删已经不在的对象正常返回。编号由工作流给（记在历史里），实现按编号去重：
+//    startSession 按 runId（同一个 runId 起第二次返回已有的那个，不起第二个进程）、askHuman 按 askId（同一个问题只发一张卡）、
+//    requestApproval 按 approvalId（同一次批准只发一张卡）。
 // 3. 会话只在本地提交：推分支、开 PR 由引擎在会话外面做（pushBranch / openPr，用「干活的」机器人）；
 //    会话里拿不到任何 GitHub 凭据，依赖在建工作树时装好。
 // 4. 会话一律经 fleet-agent-scope 起（scope 名用 runId，内存上限按 input.resources，swap 一起封），跑在按
 //    input.route.poolId 挑的会话专用用户下（一个 Claude 组织一个用户，从不切号）；
 //    startSession 先按 input.runId 在库里建这一次会话（session_runs），再起进程，把进程号和 scope 交回（handle）。
+//    stopSession 按 runId 停（起会话还没返回时工作流只知道 runId）：停掉这个 runId 名下的进程，并记下「这个 runId 已叫停」——
+//    之后（或同时在跑的）startSession 再拿这个 runId 来，不起进程，抛 SESSION_STOPPED。
 // 5. awaitSession 只是「看守」：工人重启后它会被重试。接得上就接着看；接不上（引擎正常停时会话跟着退了，
 //    或者引擎被强杀、会话成了孤儿）就按 handle 把旧会话收掉，回 outcome=failed、code=SESSION_LOST——工作流会续会话重起。
 //    工人进程起来时 createEngineWorker 会先调 reapOrphanSessions（fleet-agent-scope list 再逐个 stop）：
@@ -77,6 +82,8 @@ export interface RouteChoice {
 export interface PickRouteInput extends Scope {
   stage: StageKind;
   avoidRouteIds: string[];
+  /** 整个账号池都不用（封号、额度用满：同一个池的别的路由照样撞）。 */
+  avoidPoolIds: string[];
   avoidModelIds: string[];
   /** 人或帅位点名的路由；犯禁令、不在线就不用，并在 why 里写明。 */
   preferRouteId?: string;
@@ -117,7 +124,10 @@ export interface SessionResources {
 }
 
 export interface StartSessionInput extends Scope {
-  /** 这一次会话的编号（库里 session_runs.id、fleet 通行证里的 runId、scope 名），工作流生成的 UUID。 */
+  /**
+   * 这一次会话的编号（库里 session_runs.id、fleet 通行证里的 runId、scope 名），工作流经 decide 生成、记在历史里的 UUID。
+   * 幂等键：活动重试拿同一个 runId 来，返回已经起了的那个。
+   */
   runId: string;
   stage: StageKind;
   route: RouteChoice;
@@ -204,8 +214,9 @@ export interface Usage {
 }
 
 export interface StopSessionInput extends Scope {
+  /** 按它停：起会话还没返回时只有它。 */
   runId: string;
-  sessionId: string;
+  sessionId?: string;
   handle?: SessionHandle;
   /** graceful = 停在干净的点（做完的先提交）；kill = 立刻停。 */
   mode: 'graceful' | 'kill';
@@ -331,6 +342,8 @@ export interface TaskStateSnapshot extends Scope {
     /** 白话，在等什么；不在等就是 null。 */
     waitingOn: string | null;
     workflowId: string | null;
+    /** 人闸标记（release / spend / delete…）；非空 = 合并前要人批。 */
+    holds: string[];
   }[];
 }
 
@@ -357,10 +370,26 @@ export interface SpecDocRef {
 // ---- 人、报警、计时
 
 export interface AskHumanInput extends Scope {
+  /** 工作流给的提问编号（库里 asks.id，UUID）：幂等键，同一个编号只发一张卡；人回答时带回来。 */
+  askId: string;
   question: string;
   options?: string[];
   /** 会话里问的就带上是哪一次会话。 */
   runId?: string;
+}
+
+/** 人闸：请人批准这个子任务进合并队列（飞书卡片 + 驾驶舱待点头，一键批准 / 拒绝）。 */
+export interface RequestApprovalInput extends Scope {
+  /** 工作流给的批准编号（UUID）：幂等键，同一个编号只发一张卡；批准、拒绝时带回来。 */
+  approvalId: string;
+  /** 为什么要人批：release 对外发布、spend 花钱、delete 删数据（认不得的原样给人看）。 */
+  holds: string[];
+  repo: Repo;
+  prNumber: number;
+  /** 批的是这个头；之后头变了（返工、解冲突）要重新批。 */
+  head: string;
+  title: string;
+  summary: string;
 }
 
 export interface RaiseAlertInput extends Scope {
@@ -371,7 +400,7 @@ export interface RaiseAlertInput extends Scope {
   dedupeKey: string;
 }
 
-/** 在等什么：deps 等依赖、overlap 等改同一块的子任务、capacity 等需求内并发、slot 等账号池空位、quota 等额度、human 等人、merge-queue 等合并队列、retry 退避中。 */
+/** 在等什么：deps 等依赖、overlap 等改同一块的子任务、capacity 等需求内并发、slot 等账号池空位、quota 等额度、human 等人（暂停、挂起、回答、批准）、merge-queue 等合并队列、retry 退避中。 */
 export type WaitKind = 'deps' | 'overlap' | 'capacity' | 'slot' | 'quota' | 'human' | 'merge-queue' | 'retry';
 
 /** 一次活动尝试：排队（排进任务队列 → 工人开始干）和干活（开始 → 结束）分开记。 */
@@ -449,7 +478,8 @@ export interface EnginePorts {
   saveTaskState(input: TaskStateSnapshot, ctx: PortContext): Promise<void>;
   closeIssue(input: CloseIssueInput, ctx: PortContext): Promise<void>;
   writeSpecDoc(input: WriteSpecDocInput, ctx: PortContext): Promise<SpecDocRef>;
-  askHuman(input: AskHumanInput, ctx: PortContext): Promise<{ askId: string }>;
+  askHuman(input: AskHumanInput, ctx: PortContext): Promise<void>;
+  requestApproval(input: RequestApprovalInput, ctx: PortContext): Promise<void>;
   raiseAlert(input: RaiseAlertInput, ctx: PortContext): Promise<{ alertId: string }>;
   recordTiming(input: TimingEntry, ctx: PortContext): Promise<void>;
 }

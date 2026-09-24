@@ -59,7 +59,7 @@ export interface VerifyInput {
     Partial<Pick<Limits, 'subtaskWallMinutes'>>;
   /** 上一轮返工的指纹；这一轮一模一样就是同一个假设第二次失败（windsurf-dao#1744）。 */
   lastFingerprints?: { ci?: string; review?: string } | undefined;
-  /** 子任务开工（或人上次看过）到现在多少分钟；超了墙钟预算就不再自动返工。 */
+  /** 子任务开工（或人上次看过）到现在干了多少分钟：等人（暂停、挂起、回答、批准）和排队（空位、额度、合并队列）不算。 */
   elapsedMinutes?: number | undefined;
 }
 
