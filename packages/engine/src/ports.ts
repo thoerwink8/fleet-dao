@@ -9,7 +9,9 @@
 //    startSession 按 runId（同一个 runId 起第二次返回已有的那个，不起第二个进程）、askHuman 按 askId（同一个问题只发一张卡）、
 //    requestApproval 按 approvalId（同一次批准只发一张卡）。
 // 3. 会话只在本地提交：推分支、开 PR 由引擎在会话外面做（pushBranch / openPr，用「干活的」机器人）；
-//    会话里拿不到任何 GitHub 凭据，依赖在建工作树时装好。
+//    会话里拿不到任何 GitHub 凭据，依赖在建工作树时装好。引擎不以自己的身份在会话的工作树里跑 git（design 十四）：
+//    pushBranch 由会话用户把起会话前的头之后的新提交打成包（git bundle），引擎导入自己的仓库、核实交付再推；
+//    syncMainline 在引擎自己的仓库里并主线、推上去，再由会话用户把工作树快进到新头。
 // 4. 会话一律经 fleet-agent-scope 起（scope 名用 runId，内存上限按 input.resources，swap 一起封），跑在按
 //    input.route.poolId 挑的会话专用用户下（一个 Claude 组织一个用户，从不切号）；
 //    startSession 先按 input.runId 在库里建这一次会话（session_runs），再起进程，把进程号和 scope 交回（handle）。
@@ -254,6 +256,7 @@ export interface RemoveWorktreeResult {
 
 export interface PushBranchInput extends Scope {
   repo: Repo;
+  /** 会话的工作树：新提交由会话用户从这里打包交出来（引擎不在里面跑 git）。 */
   worktreePath: string;
   branch: string;
   /** 要推上去的本地提交；推完远端分支头应当就是它。 */
@@ -285,7 +288,7 @@ export interface SyncMainlineInput extends Scope {
   branch: string;
   /** 以为分支现在的头是它；对不上说明被别人推过，先认领新头。 */
   head: string;
-  /** 子任务有工作树就在树里并、并完推；合并队列没有工作树，由实现自己找地方并。 */
+  /** 子任务的工作树：并完、推完后由会话用户把它快进到新头（接着返工用）；合并队列没有工作树。 */
   worktreePath?: string;
 }
 
