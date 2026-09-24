@@ -78,7 +78,21 @@ function contractData(): Partial<MemoryData> {
       source: 'mirasim-relay',
       readAt: ago(1),
     },
+    {
+      // 上游这次没再报的窗口：标着过期留在库里。
+      poolId: 'pool-mirasim',
+      label: '7d_old',
+      window: '7d_model',
+      scope: 'old',
+      utilization: 0.3,
+      unit: 'percent',
+      reading: 'measured',
+      source: 'mirasim-relay',
+      readAt: ago(90),
+      staleSince: ago(1),
+    },
   ];
+  data.pools = (data.pools ?? []).map((p) => (p.id === 'pool-mirasim' ? { ...p, lastReadOkAt: ago(1) } : p));
   data.pullRequests = [
     {
       repoId: IDS.repo,
@@ -388,10 +402,10 @@ export function describeStoreContract(name: string, make: MakeStore): void {
           'ch-cursor',
           'ch-mirasim',
         ]);
-        expect((await store.listPools()).map((p) => p.id)).toEqual([
-          'pool-claude-a',
-          'pool-cursor',
-          'pool-mirasim',
+        expect((await store.listPools()).map((p) => [p.id, p.lastReadOkAt])).toEqual([
+          ['pool-claude-a', new Date(T0.getTime() - 5 * MIN).toISOString()],
+          ['pool-cursor', new Date(T0.getTime() - 120 * MIN).toISOString()],
+          ['pool-mirasim', new Date(T0.getTime() - MIN).toISOString()],
         ]);
         expect((await store.listModels()).map((m) => m.id)).toEqual([
           'fable-5.1',
@@ -423,8 +437,14 @@ export function describeStoreContract(name: string, make: MakeStore): void {
           'pool-claude-a/7d',
           'pool-cursor/month_usd',
           'pool-mirasim/7d_fable',
+          'pool-mirasim/7d_old',
           'pool-mirasim/burst_tokens',
         ]);
+        expect(windows.find((w) => w.label === '7d_old')).toMatchObject({
+          readAt: new Date(T0.getTime() - 90 * MIN).toISOString(),
+          staleSince: new Date(T0.getTime() - MIN).toISOString(),
+        });
+        expect(windows.find((w) => w.label === '7d_fable')?.staleSince).toBeUndefined();
         expect(windows.find((w) => w.label === '7d_fable')).toEqual({
           poolId: 'pool-mirasim',
           label: '7d_fable',

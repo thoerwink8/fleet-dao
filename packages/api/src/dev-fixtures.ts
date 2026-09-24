@@ -54,8 +54,10 @@ export function devFixtures(now: Date): Partial<MemoryData> {
       { id: 'ch-mirasim', name: 'Mirasim 云端', billing: 'subscription', enabled: true },
     ],
     pools: [
-      { id: 'pool-claude-a', channelId: 'ch-claude', maxConcurrency: 5 },
-      { id: 'pool-cursor', channelId: 'ch-cursor', maxConcurrency: 2 },
+      { id: 'pool-claude-a', channelId: 'ch-claude', maxConcurrency: 5, lastReadOkAt: ago(5) },
+      // 两小时前读成过一次，之后一直没读成：额度按「过期」显示。
+      { id: 'pool-cursor', channelId: 'ch-cursor', maxConcurrency: 2, lastReadOkAt: ago(120) },
+      // 一次都没读成过：显示「没查成」，不是「没有额度」。
       { id: 'pool-mirasim', channelId: 'ch-mirasim', maxConcurrency: 3 },
     ],
     models: [

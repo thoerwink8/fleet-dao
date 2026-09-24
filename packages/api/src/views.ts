@@ -1,5 +1,5 @@
 // 把库里的记录拼成驾驶舱要的样子。纯函数，不碰数据库，测试直接喂数据。
-import type { StoredQuotaWindow } from '@fleet-dao/db';
+import { poolDataTimes, quotaReadOverdue } from '@fleet-dao/db';
 import {
   type ActivitySchema,
   type Ban,
@@ -24,7 +24,7 @@ import {
   type Task,
 } from '@fleet-dao/shared';
 import type { z } from 'zod';
-import type { JobRecord, NotificationRecord, RunPlan, TimelineRecord } from './ports.ts';
+import type { JobRecord, NotificationRecord, QuotaWindowRecord, RunPlan, TimelineRecord } from './ports.ts';
 
 type Activity = z.input<typeof ActivitySchema>;
 type Progress = z.input<typeof ProgressSchema>;
@@ -226,7 +226,7 @@ export function buildPools(
   input: {
     pools: Pool[];
     channels: Channel[];
-    windows: StoredQuotaWindow[];
+    windows: QuotaWindowRecord[];
     routes: Route[];
     activeRuns: SessionRun[];
   },
@@ -240,36 +240,45 @@ export function buildPools(
     const poolId = poolOfRoute.get(run.routeId);
     if (poolId && run.startedAt) running.set(poolId, (running.get(poolId) ?? 0) + 1);
   }
-  const resetKey = (w: StoredQuotaWindow) => (w.resetsAt ? Date.parse(w.resetsAt) : Number.POSITIVE_INFINITY);
+  // 「上游数据本身的时刻」照数据库包的算法（还在报的窗口里最新的读数时刻），不自己另算一份。
+  const dataTimes = poolDataTimes(
+    input.windows.map((w) => ({
+      poolId: w.poolId,
+      readAt: new Date(w.readAt),
+      staleSince: w.staleSince ? new Date(w.staleSince) : null,
+    })),
+  );
+  const resetKey = (w: QuotaWindowRecord) => (w.resetsAt ? Date.parse(w.resetsAt) : Number.POSITIVE_INFINITY);
   return input.pools.map((p) => {
     const channel = channelById.get(p.channelId);
-    const own = input.windows
+    const windows = input.windows
       .filter((w) => w.poolId === p.id)
       // 和数据库包的额度表（quotaTable）同一个排法：快清零的在前，同时清零的按原名。
-      .sort((a, b) => resetKey(a) - resetKey(b) || (a.label < b.label ? -1 : a.label > b.label ? 1 : 0));
-    const windows = own.map((w) => ({
-      label: w.label,
-      window: w.window,
-      scope: w.scope,
-      // 可以大于 1（超额），原样给出，前端画进度条时再截。
-      utilization: w.utilization,
-      used: w.used,
-      limit: w.limit,
-      unit: w.unit,
-      resetsAt: w.resetsAt,
-      upstreamStatus: w.upstreamStatus,
-      statusRaw: w.statusRaw,
-      reading: w.reading,
-      source: w.source,
-      readAt: w.readAt,
-      stale: now.getTime() - Date.parse(w.readAt) > staleAfterMs,
-    }));
-    const quotaStatus: 'fresh' | 'stale' | 'unread' =
-      windows.length === 0 ? 'unread' : windows.some((w) => w.stale) ? 'stale' : 'fresh';
-    // 读成一次就写一遍这次读到的窗口，所以各窗口里最新的读数时刻就是最近一次读成的时刻。
-    const lastReadAt = own.reduce<string | undefined>(
-      (latest, w) => (latest === undefined || Date.parse(w.readAt) > Date.parse(latest) ? w.readAt : latest),
-      undefined,
+      .sort((a, b) => resetKey(a) - resetKey(b) || (a.label < b.label ? -1 : a.label > b.label ? 1 : 0))
+      .map((w) => ({
+        label: w.label,
+        window: w.window,
+        scope: w.scope,
+        // 可以大于 1（超额），原样给出，前端画进度条时再截。
+        utilization: w.utilization,
+        used: w.used,
+        limit: w.limit,
+        unit: w.unit,
+        resetsAt: w.resetsAt,
+        upstreamStatus: w.upstreamStatus,
+        statusRaw: w.statusRaw,
+        reading: w.reading,
+        source: w.source,
+        readAt: w.readAt,
+        staleSince: w.staleSince,
+        stale: now.getTime() - Date.parse(w.readAt) > staleAfterMs,
+      }));
+    const dataAt = dataTimes.get(p.id);
+    // 按池判，和每小时对账、选路由同一个判法（数据库包的 quotaReadOverdue），不逐窗口看。
+    const overdue = quotaReadOverdue(
+      { lastReadOkAt: p.lastReadOkAt ? new Date(p.lastReadOkAt) : null, dataAt: dataAt ?? null },
+      now,
+      staleAfterMs,
     );
     return {
       id: p.id,
@@ -280,8 +289,9 @@ export function buildPools(
       maxConcurrency: p.maxConcurrency,
       running: running.get(p.id) ?? 0,
       expiresAt: p.expiresAt,
-      quotaStatus,
-      lastReadAt,
+      quotaStatus: p.lastReadOkAt === undefined ? 'unread' : overdue ? 'stale' : 'fresh',
+      lastReadOkAt: p.lastReadOkAt,
+      dataAt: dataAt?.toISOString(),
       windows,
     };
   });

@@ -437,14 +437,47 @@ describe('账号池、定时任务、通知、操作记录、设置', () => {
     });
     expect(byId.get('pool-cursor')?.quotaStatus).toBe('stale');
     expect(byId.get('pool-mirasim')).toMatchObject({ quotaStatus: 'unread', windows: [] });
-    expect(byId.get('pool-mirasim')?.lastReadAt).toBeUndefined();
+    expect(byId.get('pool-mirasim')?.lastReadOkAt).toBeUndefined();
     expect(body.staleAfterMinutes).toBe(30);
   });
 
-  it('额度窗带原名、组名、单位、读法、上游原状态字；池上带最近一次读成的时刻；快清零的排前；超额原样给', async () => {
+  it('额度按池判新旧：读成了、但上游的数冻住没前进，也算过期（看 dataAt）', async () => {
     const h = harness();
     const { cookie } = await h.login();
     const ago = (m: number) => new Date(h.clock.now.getTime() - m * 60_000).toISOString();
+    const cursor = h.store.data.pools.find((p) => p.id === 'pool-cursor');
+    if (!cursor) throw new Error('样例数据里没有 pool-cursor');
+    cursor.lastReadOkAt = ago(1);
+    // 上游不再报的窗口读数再新，也不算「上游数据的时刻」。
+    h.store.data.quotaWindows.push({
+      poolId: 'pool-cursor',
+      label: 'old_bucket',
+      window: 'other',
+      used: 1,
+      limit: 10,
+      unit: 'usd',
+      reading: 'measured',
+      source: 'cursor-dashboard',
+      readAt: ago(5),
+      staleSince: ago(1),
+    });
+    const body = PoolsResponse.parse(
+      await (await h.cockpit.request('/api/pools', { headers: { cookie } })).json(),
+    );
+    expect(body.pools.find((p) => p.id === 'pool-cursor')).toMatchObject({
+      quotaStatus: 'stale',
+      lastReadOkAt: ago(1),
+      dataAt: ago(120),
+    });
+  });
+
+  it('额度窗带原名、组名、单位、读法、上游原状态字、「上游这次没报」的时刻；池上带最近读成与数据时刻；快清零的排前；超额原样给', async () => {
+    const h = harness();
+    const { cookie } = await h.login();
+    const ago = (m: number) => new Date(h.clock.now.getTime() - m * 60_000).toISOString();
+    const mirasimPool = h.store.data.pools.find((p) => p.id === 'pool-mirasim');
+    if (!mirasimPool) throw new Error('样例数据里没有 pool-mirasim');
+    mirasimPool.lastReadOkAt = ago(2);
     h.store.data.quotaWindows.push(
       {
         poolId: 'pool-mirasim',
@@ -461,6 +494,7 @@ describe('账号池、定时任务、通知、操作记录、设置', () => {
         resetsAt: ago(-600),
       },
       {
+        // 上次读成时上游没再报它：标着过期留着，照样列出。
         poolId: 'pool-mirasim',
         label: 'burst_tokens',
         window: 'other',
@@ -471,6 +505,7 @@ describe('账号池、定时任务、通知、操作记录、设置', () => {
         source: 'mirasim-relay',
         readAt: ago(40),
         resetsAt: ago(-30),
+        staleSince: ago(2),
       },
     );
     const body = PoolsResponse.parse(
@@ -478,14 +513,15 @@ describe('账号池、定时任务、通知、操作记录、设置', () => {
     );
     const byId = new Map(body.pools.map((p) => [p.id, p]));
     const claude = byId.get('pool-claude-a');
-    expect(claude?.lastReadAt).toBe(ago(5));
+    expect(claude).toMatchObject({ lastReadOkAt: ago(5), dataAt: ago(5) });
     // 5h 两小时后清零，排在不知道清零时刻的 7d 前面。
     expect(claude?.windows.map((w) => [w.label, w.unit, w.source])).toEqual([
       ['5h', 'percent', 'claude-usage'],
       ['7d', 'percent', 'claude-usage'],
     ]);
     const mirasim = byId.get('pool-mirasim');
-    expect(mirasim).toMatchObject({ quotaStatus: 'stale', lastReadAt: ago(2) });
+    // 上游不再报的窗口不算进数据时刻：池照样是新的。
+    expect(mirasim).toMatchObject({ quotaStatus: 'fresh', lastReadOkAt: ago(2), dataAt: ago(2) });
     expect(mirasim?.windows).toEqual([
       {
         label: 'burst_tokens',
@@ -497,6 +533,7 @@ describe('账号池、定时任务、通知、操作记录、设置', () => {
         source: 'mirasim-relay',
         readAt: ago(40),
         resetsAt: ago(-30),
+        staleSince: ago(2),
         stale: true,
       },
       {

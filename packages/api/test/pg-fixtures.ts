@@ -14,6 +14,7 @@ import {
   pools,
   progressEvents,
   pullRequests,
+  quotaWindows,
   repos,
   routes,
   scheduledJobs,
@@ -24,7 +25,6 @@ import {
   stagePolicies,
   stagePolicyRoutes,
   tasks,
-  upsertQuotaWindow,
   users,
 } from '@fleet-dao/db';
 import { sql } from 'drizzle-orm';
@@ -43,7 +43,13 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
   }
   if (data.channels?.length) await db.insert(channels).values(data.channels);
   if (data.pools?.length) {
-    await db.insert(pools).values(data.pools.map((p) => ({ ...p, expiresAt: dateOpt(p.expiresAt) })));
+    await db.insert(pools).values(
+      data.pools.map((p) => ({
+        ...p,
+        expiresAt: dateOpt(p.expiresAt),
+        lastReadOkAt: dateOpt(p.lastReadOkAt),
+      })),
+    );
   }
   if (data.models?.length) {
     await db.insert(models).values(data.models.map((m) => ({ ...m, retiredAt: dateOpt(m.retiredAt) })));
@@ -67,9 +73,27 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
       })),
     );
   }
-  // 额度窗走库的真写入口（按池 + 原名覆盖），和读取器写库是同一条路。
-  for (const w of data.quotaWindows ?? []) {
-    if (!(await upsertQuotaWindow(db, w))) throw new Error(`样例额度窗 ${w.poolId}/${w.label} 没写进去`);
+  // 额度窗照样例原样写（含「上游不再报」的标记）。库的写入口 savePoolQuota 会按读数现算这些标记，造不出任意现状。
+  if (data.quotaWindows?.length) {
+    await db.insert(quotaWindows).values(
+      data.quotaWindows.map((w) => ({
+        poolId: w.poolId,
+        label: w.label,
+        window: w.window,
+        scope: w.scope ?? '',
+        utilization: w.utilization ?? null,
+        used: w.used ?? null,
+        limit: w.limit ?? null,
+        unit: w.unit,
+        resetsAt: dateOpt(w.resetsAt),
+        upstreamStatus: w.upstreamStatus ?? null,
+        statusRaw: w.statusRaw ?? null,
+        reading: w.reading,
+        source: w.source,
+        readAt: date(w.readAt),
+        staleSince: dateOpt(w.staleSince),
+      })),
+    );
   }
   if (data.users?.length) {
     await db.insert(users).values(

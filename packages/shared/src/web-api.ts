@@ -450,7 +450,12 @@ export const QuotaWindowViewSchema = z.object({
   /** 读法：claude-usage、mirasim-relay、cursor-dashboard、grok-billing、estimate……（官方接口、网页接口还是估算）。 */
   source: z.string().min(1),
   readAt: Time,
-  /** 过期：读数太旧（超过 staleAfterMinutes），不能当现值用。上游不再报的窗口不删，旧读数到点就按过期显示。 */
+  /**
+   * 过期标记：读成了、但上游从这个时刻起没再报这个窗口。照样显示，注明「上游这次没报」；不挡路由、不参与排序。
+   * 上游重新报了就清空，满 24 小时库里删掉（数据库包的 savePoolQuota 管）。
+   */
+  staleSince: Time.optional(),
+  /** 这条读数本身太旧（读数时刻超过 staleAfterMinutes），不能当现值用。 */
   stale: z.boolean(),
 });
 
@@ -465,10 +470,15 @@ export const PoolViewSchema = z.object({
   /** 正在跑的会话数。 */
   running: z.number().int().min(0),
   expiresAt: Time.optional(),
-  /** fresh = 读数都新鲜；stale = 有读数过期；unread = 一条读数都没有（没查成，不是「没用量」）。 */
+  /**
+   * 按池看，不逐窗口看（和每小时对账、选路由同一个判法，数据库包的 quotaReadOverdue）：
+   * unread = 一次都没读成过（没查成，不是「没用量」）；stale = 最近一次读成、或上游数据本身超过 staleAfterMinutes；fresh = 其余。
+   */
   quotaStatus: z.enum(['fresh', 'stale', 'unread']),
-  /** 最近一次读成的时刻（这个池各窗口读数里最新的那个）；一次都没读成过就没有。 */
-  lastReadAt: Time.optional(),
+  /** 最近一次完整读成的时刻（我们读的时刻），读失败不动；一次都没读成过就没有。 */
+  lastReadOkAt: Time.optional(),
+  /** 上游数据本身的时刻：还在报的窗口里最新的读数时刻（中转给的是它自己的采集时刻）。读成了、上游的数却冻住时看它。 */
+  dataAt: Time.optional(),
   /** 按清零时刻排，快清零的在前（不知道清零时刻的在后）；同时清零的按原名。 */
   windows: z.array(QuotaWindowViewSchema),
 });
