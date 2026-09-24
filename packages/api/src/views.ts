@@ -168,7 +168,8 @@ export function buildBoard(repo: Repo, input: BoardInput, now: Date): z.input<ty
     };
   });
   const now_ = input.activeRuns
-    .filter((r) => titleOf.has(r.taskId))
+    // 不属于任何需求的会话（帅位、考新模型）不上仓的看板。
+    .filter((r): r is SessionRun & { taskId: string } => r.taskId !== undefined && titleOf.has(r.taskId))
     .map((r) => ({
       ...activityOf(r, input.plans.get(r.id), input.route(r.routeId)),
       taskId: r.taskId,
