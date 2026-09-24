@@ -54,6 +54,9 @@ EOF
 # ── 小零件 ──
 
 is_sha() { [[ "$1" =~ ^[0-9a-f]{40}$ ]]; }
+short() { # 提交号 没有时显示的字
+  if [[ -n "$1" ]]; then printf '%s' "${1:0:12}"; else printf '%s' "$2"; fi
+}
 has_service() { [[ " $FLEET_SERVICES " == *" $1 "* ]]; }
 current_sha() {
   local s
@@ -610,7 +613,7 @@ do_release() { # 要发的提交（空 = 主线最新）
   cur=$(current_sha)
   migrate "$SHA"
   before=$(api_report_before)
-  step "切到 ${SHA:0:12}（在用：${cur:+${cur:0:12}}${cur:-还没有}）"
+  step "切到 ${SHA:0:12}（在用：$(short "$cur" 还没有)）"
   if activate "$SHA" release && health_gate "$SHA" "$before"; then
     # 之前判过不健康（比如那时本机配置没备齐）、这次过了：记回健康，它又能当退回的目标
     if [[ "$(last_event "$SHA")" == unhealthy ]]; then
@@ -645,7 +648,7 @@ do_rollback() {
     red "没有可退的上一版（历史里没有别的在用过、没被判过不健康、目录还在的版本）"
     return 1
   fi
-  step "退回 ${prev:0:12}（在用：${cur:+${cur:0:12}}${cur:-没有}）"
+  step "退回 ${prev:0:12}（在用：$(short "$cur" 没有)）"
   if activate "$prev" rollback && health_gate "$prev" ""; then
     ok "已退回 ${prev:0:12}"
   else
@@ -663,7 +666,7 @@ do_check() {
     pending "还没发布过（$RELEASES/current 不在）"
     return 0
   fi
-  ok "在用 ${cur:0:12}（$(marker_get "$cur" built) 建的，静态文件：$(marker_get "$cur" web)）；上一版 ${prev:+${prev:0:12}}${prev:-没有}"
+  ok "在用 ${cur:0:12}（$(marker_get "$cur" built) 建的，静态文件：$(marker_get "$cur" web)）；上一版 $(short "$prev" 没有)"
   for d in "$RELEASES"/*; do
     s=${d##*/}
     if is_sha "$s" && [[ -d "$d" && ! -L "$d" ]]; then echo "  · 留着的版本 ${s:0:12}（$(marker_get "$s" built) 建的）"; fi

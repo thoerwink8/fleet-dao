@@ -4,7 +4,7 @@
 # deploy/release.sh 的来回：换版、健康检查不过自动退回、一键退回、不退到判过不健康的版本、只留最近几版。
 # 取代码、构建、迁移、健康检查、往香港传文件换成桩（按提交号预先定好健康不健康）；切 current、记历史、挑上一版、
 # 清旧版用的是 release.sh 里的真代码，目录落在临时目录，不碰 systemd、不连网、不用 root。
-# 真机上的那一半（真起服务、真传文件、真健康检查）见 docs/ops.md 第九节的实测记录。
+# 真机上的那一半（真起服务、真传文件、真健康检查）在法国、香港上实测，记录在引入本文件的 PR 里。
 # 用法：bash deploy/test/release-flow.test.sh。退出码：0 通过，1 不通过。
 set -uo pipefail
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)

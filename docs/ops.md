@@ -1,15 +1,16 @@
-# 运维手册：两台机器的地基
+# 运维手册：两台机器的地基与应用发布
 
 装法在 `deploy/`，这里讲怎么用、怎么看、怎么退。机器的公网 IP 不进仓，下文写作 `<法国IP>`、`<香港IP>`。
-旧系统（windsurf-dao、ai-gateway-stack 那一套）已于 2026-09-25 从两台机器上全部清退：单元、用户、目录、数据都删了。它留下的坑与由来见 [reference/deploy.md](reference/deploy.md)（文中的 P01、P02 等编号出自那里；那份记的是清退前的现场）。
+旧系统的坑与由来见 [reference/deploy.md](reference/deploy.md)（文中的 P01、P02 等编号出自那里）。
+两层：`deploy/france.sh`、`deploy/hk.sh` 装机器（第一到第八节）；`deploy/release.sh` 发布应用（第九节）。
 
 ## 一、两台机器
 
 | | 法国 | 香港 |
 |---|---|---|
 | 系统 | Ubuntu 24.04，6 核 12G | Ubuntu 22.04，2 核 2G |
-| 跑什么 | Temporal、PostgreSQL、引擎、驾驶舱后端、AI 会话 | nginx（驾驶舱入口与证书）、WireGuard 服务端；以后还有飞书网关 |
-| 公网入站（ufw） | 只放 22/tcp；另在隧道网卡上给香港开 8787 | 只放 22/tcp、80/tcp、443/tcp（nginx）、4500/udp（WireGuard） |
+| 跑什么 | Temporal、PostgreSQL、引擎工人、驾驶舱后端、AI 会话 | nginx（驾驶舱静态文件、证书、往法国转接口）、WireGuard 服务端；以后还有飞书网关 |
+| 新开的公网入站 | 无 | 80/443（与旧网关共用同一个 nginx）、UDP 4500（WireGuard） |
 | 装机脚本 | `deploy/france.sh` | `deploy/hk.sh` |
 | 不归 fleet-dao 管的 | MiraQuota 的 `miraquota-sync`（等 miraquota-win#3 发版后停） | MiraQuota 的 `miraquota-hub`（127.0.0.1:4331）和同一个 nginx 上的站点 `ai-gateway`（只剩 `https://<香港IP>.sslip.io/mq/`），同样等 miraquota-win#3 发版后停；装机不碰 |
 
@@ -38,8 +39,8 @@
 
 | 端口 | 绑在 | 是谁 | 说明 |
 |---|---|---|---|
-| 80/tcp | 0.0.0.0 | nginx | `fleetdao.dpdns.org`：证书续期的验证路径，其余跳 https |
-| 443/tcp | 0.0.0.0 | nginx | `https://fleetdao.dpdns.org`：静态页；`/api`、`/auth`、`/github/webhook` 经隧道转法国 `10.99.0.2:8787`；`/agent` 不转 |
+| 80/tcp | 0.0.0.0 | nginx（与旧网关共用） | `fleetdao.dpdns.org`：证书续期的验证路径，其余跳 https |
+| 443/tcp | 0.0.0.0 | nginx（与旧网关共用） | `https://fleetdao.dpdns.org`：静态页；`/api`、`/auth`、`/github/webhook`、`/healthz` 经隧道转法国 `10.99.0.2:8787`，转之前清掉 `Authorization`、`X-Fleet-Acting-Feishu`；`/agent` 不转 |
 | 4500/udp | 0.0.0.0 | WireGuard 服务端 | 香港上游只放行少数常见 UDP 端口（2026-09-25 从法国实测：53/67/69/123/161/500/1701/4500 能到），51820 进不来 |
 
 GitHub 事件地址：`https://fleetdao.dpdns.org/github/webhook`。飞书登录回调：`https://fleetdao.dpdns.org/auth/feishu/callback`。
@@ -56,15 +57,17 @@ GitHub 事件地址：`https://fleetdao.dpdns.org/github/webhook`。飞书登录
 
 | 路径 | 属主 权限 | 放什么 |
 |---|---|---|
-| `/srv/fleet-dao` | root:root 755 | 代码（git clone）。fleet 和会话用户都只读 |
+| `/srv/fleet-dao` | root:root 755 | 装机脚本所在的检出（git clone）。fleet 和会话用户都只读 |
+| `/srv/fleet-dao-releases` | root:root 755 | 应用的各版（第九节）：`<提交号>/`、`current` 链接、`.history`；每一版归 root，fleet 只读 |
 | `/var/lib/fleet-dao`、`/var/log/fleet-dao` | fleet:fleet 750 | 运行数据、日志（服务日志主要在 journald） |
-| `/etc/fleet-dao` | root:fleet 750 | 本机配置与密钥：`france.env`、`temporal.env`（库口令）、`temporal.yaml`、`nftables.nft`、`github/`（两个 GitHub 机器人的 json，手放）。文件一律 root:fleet 640 |
+| `/etc/fleet-dao` | root:fleet 750 | 本机配置与密钥：`france.env`、`temporal.env`（库口令）、`temporal.yaml`、`nftables.nft`、`github/`（两个 GitHub 机器人的 json，手放）；应用的 `engine.env`、`api.env`、`release.env`（照仓里样例建一次，之后归人改），随机密钥 `agent-token.env`、`session-secret.env`、`gateway-token.env`（首次生成，之后不动）。文件一律 root:fleet 640；只有 `web-upload.key`（往香港传静态文件的钥匙）和 `hk-known-hosts`（钉住的香港主机钥匙）是 root:root 600 |
 | `/opt/fleet-dao/temporal` | root:root 755 | `server-1.32.0/`（temporal-server、temporal-sql-tool）、`cli-1.9.1/`（temporal），`bin/` 链接到在用的版本 |
 | `/usr/local/bin/fleet-temporal` | root 755 | 运维命令行：连 127.0.0.1:7243，默认命名空间 fleet（只有 root 和 fleet 用得了） |
 | `/usr/local/sbin/fleet-agent-scope`、`/etc/sudoers.d/fleet-dao` | root 755、root 440 | 起、收 AI 会话（第五节） |
 | `/etc/wireguard/wg-fleet.conf`、`wg-fleet.key` | root 600 | 隧道配置与私钥（私钥本机生成，不出机器） |
 | `/etc/postgresql/16/main/conf.d/fleet.conf` | root 644 | 库只听本机 |
 | `/etc/systemd/system/`：`fleet-temporal.service`、`fleet-agents.slice`、`fleet-firewall.service`、`postgresql@16-main.service.d/fleet.conf` | root 644 | 单元；最后那个让库的进程没了（干净退出也算）就拉起来——装包自带的是 `Restart=no` |
+| `/etc/systemd/system/`：`fleet-engine.service`、`fleet-api.service` | root 644 | 应用单元，发布脚本从要发的那版里取来装上，只装 `release.env` 启用了的（第九节） |
 | `/home/fleet/.local/bin/pnpm` | fleet | corepack 的垫片，版本跟仓根 `package.json` 的 `packageManager` |
 | `/home/fleet-agent-*/.local/bin/reclaude` | 各会话用户 | reclaude 二进制；登录见第五节 |
 
@@ -72,9 +75,11 @@ GitHub 事件地址：`https://fleetdao.dpdns.org/github/webhook`。飞书登录
 
 | 路径 | 属主 权限 | 放什么 |
 |---|---|---|
-| `/etc/fleet-dao/hk.env` | root:fleet 640 | 域名、证书联系邮箱、法国公钥 |
-| `/srv/fleet-dao` | root:root 755 | 代码 |
-| `/srv/fleet-dao-web` | root:root 755 | 驾驶舱静态文件，归 root：以后飞书网关以 fleet 跑在这台，网关被打穿也改不了页面。现在是占位页；装机脚本只在没有 `index.html` 时放占位页，不盖已发布的 |
+| `/etc/fleet-dao/hk.env` | root:fleet 640 | 域名、证书联系邮箱、法国的 WireGuard 公钥、法国的上传公钥 |
+| `/etc/fleet-dao/gateway-token.env` | root:fleet 640 | 飞书网关的通行证，和法国那份一模一样（第九节「两台同一份」） |
+| `/srv/fleet-dao` | root:root 755 | 装机脚本所在的检出 |
+| `/srv/fleet-dao-web` | root:root 755 | 驾驶舱静态文件，归 root：以后飞书网关以 fleet 跑在这台，网关被打穿也改不了页面。由法国的发布脚本传来（`release.json` 写着是哪一版，`/health/` 是健康页）；装机脚本只在没有 `index.html` 时放占位页，不盖已发布的 |
+| `/root/.ssh/authorized_keys2` | root:root 600 | 整份归 fleet-dao：法国上传钥匙的一行，限死成只许从 `10.99.0.2` 来、只能跑 `rrsync -wo /srv/fleet-dao-web`。root 原有的 `authorized_keys` 一行不碰 |
 | `/var/www/fleet-dao-acme` | root:root 755 | 证书续期的验证文件 |
 | `/etc/nginx/sites-available/fleet-dao`（`sites-enabled` 里有链接） | root 644 | fleet-dao 的站点。同一个 nginx 上另有 MiraQuota 的站点 `ai-gateway`（不归 fleet-dao 管，装机不碰） |
 | `/etc/letsencrypt/live/fleetdao.dpdns.org` | certbot 管 | 证书；`certbot.timer` 续期，续完重载 nginx |
@@ -90,10 +95,12 @@ GitHub 事件地址：`https://fleetdao.dpdns.org/github/webhook`。飞书登录
 2. 香港：`bash /srv/fleet-dao/deploy/hk.sh`。它打印香港的 WireGuard 公钥；`hk.env` 里的域名已经解析到这台的话，证书这一轮就签下来。
 3. 法国：`bash /srv/fleet-dao/deploy/france.sh`。它打印法国的公钥。
 4. 互填：香港公钥和 `<香港IP>:4500` 填进法国 `/etc/fleet-dao/france.env`；法国公钥填进香港 `/etc/fleet-dao/hk.env`。
-5. 先重跑香港、再重跑法国：隧道起来，法国读回里 `ping 10.99.0.1` 通。
-6. 手放密钥：两个 GitHub 机器人的 json 放进法国 `/etc/fleet-dao/github/`，root:fleet 640（读回会查权限）。
-7. 会话用户登录 reclaude（第五节，要创始人）。
-8. 各再跑一遍，结论应是「本次改动 0 处」。
+5. 先重跑香港、再重跑法国：隧道起来，法国读回里 `ping 10.99.0.1` 通；法国这一遍还会经隧道钉住香港 sshd 的主机钥匙。
+6. 上传钥匙：法国 france.sh 打印的「上传钥匙的公钥」整行填进香港 `hk.env` 的 `FLEET_WEB_UPLOAD_PUBLIC_KEY`，重跑香港；再跑法国，读回里「往香港传文件的通路是通的」。
+7. 飞书网关的通行证拷一份到香港（第九节「两台同一份」）。
+8. 手放密钥：两个 GitHub 机器人的 json 放进法国 `/etc/fleet-dao/github/`，root:fleet 640（读回会查权限）。
+9. 会话用户登录 reclaude（第五节，要创始人）。
+10. 各再跑一遍，结论应是「本次改动 0 处」。然后发布应用（第九节）。
 
 平时：
 
@@ -106,8 +113,8 @@ GitHub 事件地址：`https://fleetdao.dpdns.org/github/webhook`。飞书登录
 验证用的工具：
 
 - `bash deploy/lib/snapshot.sh ours`：fleet-dao 管的东西的指纹。连跑两遍装机，两遍之间各拍一次，diff 为空才算第二遍零改动——和脚本自己数的「改动几处」是两套判据。
-- `bash deploy/lib/snapshot.sh others`：不归 fleet-dao 管的单元状态、监听端口、防火墙（系统自带的服务、MiraQuota 等）。装机脚本每次开头结尾自己比一遍：装机不许碰它们。
-- `sudo bash deploy/test/run.sh`：语法、shellcheck、自检的违规样本、本页端口表和脚本对得上。
+- `bash deploy/lib/snapshot.sh others`：旧系统的单元状态、监听端口、防火墙。装机脚本每次开头结尾自己比一遍。
+- `sudo bash deploy/test/run.sh`：语法、shellcheck、自检的违规样本、发布脚本的来回（`release-flow.test.sh`）、健康页的判定（`health-page.test.mjs`）、本页端口表和脚本对得上。
 - `sudo bash deploy/test/agent-scope.e2e.sh`（法国）：会话通路真跑一遍，见第五节。
 
 ## 五、AI 会话
@@ -148,10 +155,11 @@ reclaude 按用户记设备：组织写在各自家里的 `~/.reclaude/device.js
 ## 六、怎么看健康
 
 一条命令：`bash /srv/fleet-dao/deploy/france.sh --check`（香港用 `hk.sh --check`），只读回和自检，不改东西。
+应用这一层：`bash /srv/fleet-dao/deploy/release.sh --check`（在用哪版、服务、健康检查），和浏览器里的健康页 <https://fleetdao.dpdns.org/health/>（第九节）。
 
 法国分项：
 
-- `systemctl status fleet-temporal postgresql@16-main wg-quick@wg-fleet fleet-agents.slice fleet-firewall`
+- `systemctl status fleet-temporal postgresql@16-main wg-quick@wg-fleet fleet-agents.slice fleet-firewall`；应用：`systemctl status fleet-engine fleet-api`、`journalctl -u fleet-api -n 100`
 - `fleet-temporal operator cluster health`（应为 SERVING）、`fleet-temporal operator namespace describe fleet`、`fleet-temporal workflow list`
 - `sudo -u postgres psql -c '\l'`、`pg_isready -h 127.0.0.1`
 - `nft list table inet fleet_dao`
@@ -173,11 +181,14 @@ reclaude 按用户记设备：组织写在各自家里的 `~/.reclaude/device.js
 
 ## 七、怎么回滚
 
-原则：先停用（随时能装回来）；删数据的那一步单独问人。
+原则：先停用（随时能装回来）；删数据的那一步单独问人。应用退一版用 `bash deploy/release.sh --rollback`（第九节），这里讲整套撤掉。
 
 法国：
 
 ```
+# 0. 应用：停掉、撤掉单元（各版代码还在 /srv/fleet-dao-releases）
+systemctl disable --now fleet-engine.service fleet-api.service
+rm -f /etc/systemd/system/fleet-engine.service /etc/systemd/system/fleet-api.service
 # 1. 停用，不删数据
 systemctl disable --now fleet-temporal.service fleet-agents.slice wg-quick@wg-fleet.service
 systemctl stop postgresql@16-main.service   # 库还在，start 就回来
@@ -190,7 +201,7 @@ ufw delete allow in on wg-fleet from 10.99.0.1 to 10.99.0.2 port 8787 proto tcp
 systemctl daemon-reload
 ```
 
-3. 删数据（先问人）：`pg_dropcluster --stop 16 main`、`apt purge postgresql-16`，删 `/opt/fleet-dao`、`/etc/fleet-dao`、`/var/lib/fleet-dao`、`/var/log/fleet-dao`、`/etc/wireguard/wg-fleet.*`，`userdel -r fleet`、`userdel -r fleet-agent-dedicated`、`userdel -r fleet-agent-carpool`（会话用户家里有 reclaude 的设备，删之前先在 reclaude 里注销）。
+3. 删数据（先问人）：`pg_dropcluster --stop 16 main`、`apt purge postgresql-16`，删 `/opt/fleet-dao`、`/etc/fleet-dao`、`/srv/fleet-dao-releases`、`/var/lib/fleet-dao`、`/var/log/fleet-dao`、`/etc/wireguard/wg-fleet.*`，`userdel -r fleet`、`userdel -r fleet-agent-dedicated`、`userdel -r fleet-agent-carpool`（会话用户家里有 reclaude 的设备，删之前先在 reclaude 里注销）。
 
 香港：
 
@@ -199,9 +210,11 @@ systemctl daemon-reload
 rm /etc/nginx/sites-enabled/fleet-dao && nginx -t && systemctl reload nginx
 # 2. 停隧道
 systemctl disable --now wg-quick@wg-fleet
+# 3. 收回法国的上传钥匙（整份文件是 fleet-dao 的，root 原有的 authorized_keys 不动）
+rm /root/.ssh/authorized_keys2
 ```
 
-3. 删数据（先问人）：`certbot delete --cert-name fleetdao.dpdns.org`，删 `/srv/fleet-dao-web`、`/var/www/fleet-dao-acme`、`/etc/fleet-dao`、`/etc/wireguard/wg-fleet.*`，`userdel -r fleet`。
+4. 删数据（先问人）：`certbot delete --cert-name fleetdao.dpdns.org`，删 `/srv/fleet-dao-web`、`/var/www/fleet-dao-acme`、`/etc/fleet-dao`、`/etc/wireguard/wg-fleet.*`，`userdel -r fleet`。
 
 只退一步：`git revert` 那次提交 → 机器上 pull → 重跑；脚本会把它管的文件改回仓里的样子，新加过又撤掉的东西按上面手动删。
 
@@ -212,4 +225,88 @@ systemctl disable --now wg-quick@wg-fleet
 - 升 Temporal：改 `france.sh` 顶部的版本号和 sha256 → 重跑。新版本装进新目录、`bin/` 链接切过去、服务重启；表结构由 temporal-sql-tool 升到新版本自带的最新。
 - PostgreSQL 用 16：Temporal 官方测过的最高大版本是 16（16.6）；装 Ubuntu 自带源里的，跟着系统的自动安全更新走。
 - 香港 WireGuard 用 UDP 4500 是因为上游只放行少数 UDP 端口；换端口前先从法国实测新端口到不到得了香港网卡。
-- 还没验过的：重启机器（单元开机自起、nft 表在服务之前载入）——这一轮没重启过机器。旧系统的单元文件已经删光，开机不会再复活。
+- 香港站点配置里，转发给法国的 `location` 不要自己写 `proxy_set_header`：写了一条，server 那一层的就全部不继承，清 `Authorization`、`X-Fleet-Acting-Feishu` 的两条也跟着失效（法国 france.sh 的读回会查出来）。
+- 数据库迁移只进不退：发布时先迁移再切版本，退回上一版不撤迁移。新迁移要写成旧代码照样能跑（先加列、下一版再删旧的）。
+- 应用单元（`deploy/france/fleet-*.service`）跟着版本走：改单元就是发一版，退回时单元也跟着退。引擎单元不能开 `NoNewPrivileges` 和挂载隔离（第五节、单元里的注释）。
+- 还没验过的：重启机器（单元开机自起、旧单元不复活、nft 表在服务之前载入）——这一轮没重启过机器。
+
+## 九、发布应用（deploy/release.sh）
+
+在法国以 root 跑：
+
+```
+bash /srv/fleet-dao/deploy/release.sh              # 发主线最新
+bash /srv/fleet-dao/deploy/release.sh <提交号>     # 发主线上的某个提交
+bash /srv/fleet-dao/deploy/release.sh --rollback   # 退回上一版
+bash /srv/fleet-dao/deploy/release.sh --check      # 只读：在用哪版、服务、健康检查
+```
+
+法国经跳板登录会断，长的甩到后台：`nohup setsid bash /srv/fleet-dao/deploy/release.sh > /root/fleet-dao-release.log 2>&1 < /dev/null &`。
+输出与退出码同装机脚本；没过健康检查、已自动退回，也是 1。
+
+每一步：
+
+1. 取代码：从 GitHub 取主线到 `/srv/fleet-dao-releases/.repo.git`（root 的裸仓）。只发主线上的提交；合并前要在真机上验，加 `--unmerged`，历史里会标出来。
+2. 构建：代码解到临时目录，以 fleet 跑 `pnpm install --frozen-lockfile`（依赖整份拷进来，不和 fleet 的 pnpm 仓库共用文件）；有 `packages/web` 就构建它（产出 `dist/client`），没有就用占位页；再放上健康页 `/health/`、版本标记 `release.json`。然后整棵树换成 root、fleet 只读，挪到 `/srv/fleet-dao-releases/<提交号>`。第三方代码不以 root 跑；root 照着起服务的单元文件，是换属主之后 root 才从 git 里取出来放进 `.units/` 的。构建日志在这一版目录的 `.fleet-build.log`。
+3. 迁移：以 fleet 跑 `packages/db` 的迁移（库 fleet，本机 socket）。在切版本之前跑，只进不退（第八节）。
+4. 切版本：`current` 原子地指到这一版；`/etc/fleet-dao/release.env` 的 `FLEET_SERVICES` 里启用的服务装上这一版的单元、起来（换了代码、单元或环境文件就重启），没启用的停掉、撤掉单元。
+5. 发静态文件：经隧道用 rrsync 传到香港 `/srv/fleet-dao-web`（新文件先落临时名、最后一起换上，旧文件最后删；在香港属 root）。
+6. 健康检查：启用的服务 10 秒里没退出、没重启；`fleet-api` 的驾驶舱接口在答健康报告、切之前好的项没变坏，fleet 命令接口在听；`fleet-engine` 90 秒内到任务队列 fleet 上取活（工作流任务、活动任务都要有它）；香港在发这一版（经隧道读 `release.json`、健康页 200）。不过就自动退回上一版（同样的切法、同样的检查），报红。
+7. 清旧版：留 5 版——在用的、上一版，再按最近用过的补满。
+
+同一个提交跑第二遍，结论是「本次改动 0 处」；两遍之间各拍一次 `bash deploy/lib/snapshot.sh ours`，diff 为空（快照里每一版整棵树的名字、大小、修改时间、属主、权限压成一个指纹，重新构建一定会变）。
+
+退回：
+
+- `--rollback` 退到「上一版」：历史里最近在用过、不是现在这版、没被判过不健康、目录还在的那一版。
+- 健康检查没过的版本在历史里记成不健康，`--rollback` 不会退到它；它以后再发一次、过了，就记回健康。
+- 历史在 `/srv/fleet-dao-releases/.history`，一行一件事：时间、提交号、事件（`release`、`rollback`、`auto-rollback`、`unhealthy`、`recovered`），合并前发的带 `unmerged`。
+
+本机起哪些服务（`/etc/fleet-dao/release.env`，照 `deploy/france/release.env.example` 建一次，之后归人改）：
+
+```
+FLEET_SERVICES=fleet-engine fleet-api   # 空 = 只发代码、迁移和静态页
+FLEET_DOMAIN=fleetdao.dpdns.org
+```
+
+起一个服务之前先把它要的配置备齐：起不来的话健康检查过不了，会自动退回。
+
+| 单元 | 身份 | 跑什么 | 读的配置（都在 `/etc/fleet-dao`） |
+|---|---|---|---|
+| `fleet-engine` | fleet | `node packages/engine/src/main.ts`（Temporal worker，任务队列 fleet） | `engine.env`（`FLEET_ENGINE_PORTS=fake`：先用假端口）、`agent-token.env` |
+| `fleet-api` | fleet | `node packages/api/src/main.ts`：一个进程两个监听，驾驶舱接口 `10.99.0.2:8787`、fleet 命令接口 `127.0.0.1:8788` | `api.env`、`agent-token.env`、`session-secret.env`、`gateway-token.env` |
+
+- 两个都是 `Restart=always`。引擎不开 `NoNewPrivileges`（要经 sudo 调 `fleet-agent-scope` 起会话），也不开挂载隔离（会话是它的子进程，会跟着看不见自己的家目录）；后端不起子进程，照常收紧。
+- `engine.env`、`api.env` 照仓里 `deploy/france/*.env.example` 建一次，之后归人改（飞书、GitHub 的凭据填在 `api.env`），改完再发布一次就会重启对应服务。库连接写成 `DATABASE_URL=postgres:///fleet` 加 `PGHOST=/var/run/postgresql`：本机 socket、peer 认证，没有口令（postgres.js 不认连接串里的 `?host=`）。
+- 随机密钥各一个文件，france.sh 首次生成，之后不动、不打印：`agent-token.env`（`FLEET_AGENT_TOKEN_SECRET`：引擎签 fleet 通行证、后端验）、`session-secret.env`（`FLEET_SESSION_SECRET`）、`gateway-token.env`（`FLEET_FEISHU_GATEWAY_TOKEN`）。
+- 免登 `FLEET_DEV_LOGIN` 永远不开：驾驶舱接口听的不是回环地址，后端也会拒绝启动。
+
+两台同一份（飞书网关的通行证）：法国生成，原样拷到香港，值不过屏幕：
+
+```
+# 在能同时登两台的机器上
+ssh <法国> 'cat /etc/fleet-dao/gateway-token.env' | ssh <香港> 'f=/etc/fleet-dao/gateway-token.env; t=$(mktemp /etc/fleet-dao/.new.XXXXXX); cat > "$t" && chown root:fleet "$t" && chmod 640 "$t" && mv "$t" "$f"'
+# 核对：比指纹，不看值
+ssh <法国> 'sha256sum < /etc/fleet-dao/gateway-token.env'; ssh <香港> 'sha256sum < /etc/fleet-dao/gateway-token.env'
+```
+
+往香港传静态文件的钥匙：法国 `/etc/fleet-dao/web-upload.key`（root 600，france.sh 生成）；香港 root 的 `authorized_keys2` 里那一行限死成 `from="10.99.0.2",restrict,command="/usr/bin/rrsync -wo /srv/fleet-dao-web"`：只许从隧道地址来、不给终端、只能往这一个目录写、读不走任何东西。香港 sshd 的主机钥匙由 france.sh 经隧道取来钉住（隧道两头靠 WireGuard 钥匙互认），发布时只认这一把。
+
+健康页 <https://fleetdao.dpdns.org/health/>：
+
+- 读 `/healthz`：香港经隧道转给法国驾驶舱后端，后端逐项探库、Temporal……，全好回 200、有一项不好回 503。每 15 秒刷新。
+- 必看三项：数据库、Temporal、引擎工人。只有后端明说在线的才绿；连不上（香港回 502、504）、回的不是健康报告、后端没报这一项、后端的结论和逐项对不上，一律红，并写明是哪一种。判定在 `deploy/web/health/health.js`，`deploy/test/health-page.test.mjs` 把每一种「没查成」都造了一遍。
+- 香港转发时清掉 `Authorization`、`X-Fleet-Acting-Feishu`。france.sh 的读回从公网带着这两个头请求 `/api`，核对法国收到的请求里没有：后端没在跑时在隧道地址上临时起回显直接看，后端在跑时看它答的是「没登录」。
+
+## 十、「你好」工作流（P0 验收）
+
+让引擎工人跑一次 `helloWorkflow`，耗时查得到：Temporal 把每次执行的开始、结束、耗时记在本机 Postgres（库 `temporal_visibility` 的表 `executions_visibility`）。
+
+跑法（法国，root）：`bash /srv/fleet-dao/deploy/hello.sh`
+
+1. 查任务队列 fleet 上有没有引擎工人在取活；没有就停下（退出码 2），说缺什么。
+2. `fleet-temporal workflow execute --type helloWorkflow --task-queue fleet --workflow-id hello-<时间> --input '"法国"'`，90 秒没跑完判红。
+3. 从 `executions_visibility` 读这一次的开始、结束、耗时。以后再查：`fleet-temporal workflow describe --workflow-id hello-<时间>`，或以 postgres 在库 `temporal_visibility` 里：
+   `select workflow_id, start_time, close_time, execution_duration / 1e6 as ms from executions_visibility where workflow_type_name = 'helloWorkflow' order by start_time desc;`
+
+要先齐的：引擎里注册 `helloWorkflow(name: string): Promise<string>`（不调活动也行）并合进主线；`release.env` 的 `FLEET_SERVICES` 加上 `fleet-engine`，发布一次。
