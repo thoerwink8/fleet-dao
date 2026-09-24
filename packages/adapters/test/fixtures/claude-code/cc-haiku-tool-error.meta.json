@@ -1,0 +1,29 @@
+{
+  "name": "cc-haiku-tool-error",
+  "cmd": [
+    "reclaude",
+    "-p",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--setting-sources",
+    "project",
+    "--strict-mcp-config",
+    "--permission-prompts",
+    "none",
+    "--model",
+    "haiku",
+    "--permission-mode",
+    "bypassPermissions",
+    "--session-id",
+    "0a83ea0c-5db3-47bd-bcc8-bdeb424643d1"
+  ],
+  "cwd": "/tmp/fleet-fx/w-tool-error",
+  "exitCode": 0,
+  "signal": null,
+  "wallMs": 12693,
+  "firstStdoutMs": 1823,
+  "firstStderrMs": 12,
+  "lineTimesMs": [1823, 6817, 8202, 8202, 8606, 8606, 8771, 10726, 11011, 11119],
+  "trailingPartial": 0
+}

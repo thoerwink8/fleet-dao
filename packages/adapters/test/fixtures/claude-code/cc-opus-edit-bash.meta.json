@@ -1,0 +1,29 @@
+{
+  "name": "cc-opus-edit-bash",
+  "cmd": [
+    "reclaude",
+    "-p",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--setting-sources",
+    "project",
+    "--strict-mcp-config",
+    "--permission-prompts",
+    "none",
+    "--model",
+    "claude-opus-5-5",
+    "--permission-mode",
+    "bypassPermissions",
+    "--session-id",
+    "8e188c1c-4430-4735-9eb2-bbb3d9f012c6"
+  ],
+  "cwd": "/tmp/fleet-fx/w-opus",
+  "exitCode": 0,
+  "signal": null,
+  "wallMs": 21199,
+  "firstStdoutMs": 3419,
+  "firstStderrMs": 14,
+  "lineTimesMs": [3419, 8745, 10859, 11623, 12338, 20290, 20585],
+  "trailingPartial": 0
+}

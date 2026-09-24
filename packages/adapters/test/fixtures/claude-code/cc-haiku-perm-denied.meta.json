@@ -1,0 +1,29 @@
+{
+  "name": "cc-haiku-perm-denied",
+  "cmd": [
+    "reclaude",
+    "-p",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--setting-sources",
+    "project",
+    "--strict-mcp-config",
+    "--permission-prompts",
+    "none",
+    "--model",
+    "haiku",
+    "--permission-mode",
+    "default",
+    "--session-id",
+    "6b162487-78fb-4af8-8b4b-7e0a74274b82"
+  ],
+  "cwd": "/tmp/fleet-fx/w-perm",
+  "exitCode": 0,
+  "signal": null,
+  "wallMs": 11168,
+  "firstStdoutMs": 4146,
+  "firstStderrMs": 8,
+  "lineTimesMs": [4146, 7470, 7911, 7942, 7949, 7954, 9446, 9880, 9880, 10497, 10523],
+  "trailingPartial": 0
+}

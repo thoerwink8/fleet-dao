@@ -1,0 +1,29 @@
+{
+  "name": "cc-haiku-read",
+  "cmd": [
+    "reclaude",
+    "-p",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--setting-sources",
+    "project",
+    "--strict-mcp-config",
+    "--permission-prompts",
+    "none",
+    "--model",
+    "haiku",
+    "--permission-mode",
+    "bypassPermissions",
+    "--session-id",
+    "0389dff2-502c-4557-8205-b57acb325bc4"
+  ],
+  "cwd": "/tmp/fleet-fx/w-read",
+  "exitCode": 0,
+  "signal": null,
+  "wallMs": 11893,
+  "firstStdoutMs": 3996,
+  "firstStderrMs": 19,
+  "lineTimesMs": [3996, 7645, 8438, 8667, 8905, 8939, 8978, 10428, 10775, 10862],
+  "trailingPartial": 0
+}

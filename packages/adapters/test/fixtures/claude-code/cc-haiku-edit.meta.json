@@ -1,0 +1,29 @@
+{
+  "name": "cc-haiku-edit",
+  "cmd": [
+    "reclaude",
+    "-p",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--setting-sources",
+    "project",
+    "--strict-mcp-config",
+    "--permission-prompts",
+    "none",
+    "--model",
+    "haiku",
+    "--permission-mode",
+    "bypassPermissions",
+    "--session-id",
+    "a1abd031-1b7b-40bd-9152-3a8b48ed57f1"
+  ],
+  "cwd": "/tmp/fleet-fx/w-edit",
+  "exitCode": 0,
+  "signal": null,
+  "wallMs": 15844,
+  "firstStdoutMs": 3768,
+  "firstStderrMs": 31,
+  "lineTimesMs": [3768, 9898, 10162, 10164, 10496, 10532, 10557, 12089, 12783, 12866, 14182, 14921, 15113],
+  "trailingPartial": 0
+}

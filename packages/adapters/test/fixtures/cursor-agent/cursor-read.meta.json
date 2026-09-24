@@ -1,0 +1,22 @@
+{
+  "name": "cursor-read",
+  "cmd": [
+    "cursor-agent",
+    "-p",
+    "--output-format",
+    "stream-json",
+    "--force",
+    "--trust",
+    "--workspace",
+    "/tmp/fleet-fx/w-cursor",
+    "读取当前目录下的 hello.txt，只回复它的第一行，不要做别的。"
+  ],
+  "cwd": "/tmp/fleet-fx/w-cursor",
+  "exitCode": 0,
+  "signal": null,
+  "wallMs": 27191,
+  "firstStdoutMs": 19362,
+  "firstStderrMs": null,
+  "lineTimesMs": [19364, 19364, 23854, 23878, 23878, 23878, 24757, 26880, 26880, 26885, 26964, 26964],
+  "trailingPartial": 0
+}

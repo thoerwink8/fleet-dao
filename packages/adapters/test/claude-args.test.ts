@@ -1,0 +1,53 @@
+import { describe, expect, it } from 'vitest';
+import { buildClaudeArgs, type ClaudeArgsSpec } from '../src/claude-code/args.ts';
+
+const ID = '8e188c1c-4430-4735-9eb2-bbb3d9f012c6';
+const base: ClaudeArgsSpec = {
+  model: 'claude-opus-5-5',
+  session: { mode: 'new', id: ID },
+  permissionMode: 'bypassPermissions',
+};
+
+describe('buildClaudeArgs', () => {
+  it('新会话：无头 stream-json 必带 --verbose，只读项目级设置，权限弹窗一律当场拒，用我们给的会话号', () => {
+    expect(buildClaudeArgs(base)).toEqual([
+      '-p',
+      '--output-format',
+      'stream-json',
+      '--verbose',
+      '--model',
+      'claude-opus-5-5',
+      '--setting-sources',
+      'project',
+      '--strict-mcp-config',
+      '--permission-mode',
+      'bypassPermissions',
+      '--permission-prompts',
+      'none',
+      '--session-id',
+      ID,
+    ]);
+  });
+
+  it('续会话用 --resume，不再带 --session-id', () => {
+    const args = buildClaudeArgs({ ...base, session: { mode: 'resume', id: ID } });
+    expect(args.slice(-2)).toEqual(['--resume', ID]);
+    expect(args).not.toContain('--session-id');
+  });
+
+  it('--allowedTools 放在最后、值并成一个参数（它吃变长参数，后面不能再有别的）', () => {
+    const args = buildClaudeArgs({ ...base, allowedTools: ['Read', 'Bash(git diff:*)'], effort: 'high' });
+    expect(args.slice(-2)).toEqual(['--allowedTools', 'Read,Bash(git diff:*)']);
+    expect(args).toContain('--effort');
+  });
+
+  it('不用 --bare（经 reclaude 起会认证失败，回一条 <synthetic> 占位）', () => {
+    expect(buildClaudeArgs(base)).not.toContain('--bare');
+  });
+
+  it('拒绝不合法的模型名和会话号', () => {
+    expect(() => buildClaudeArgs({ ...base, model: '--bare' })).toThrow('模型名');
+    expect(() => buildClaudeArgs({ ...base, model: 'opus 5' })).toThrow('模型名');
+    expect(() => buildClaudeArgs({ ...base, session: { mode: 'resume', id: 'latest' } })).toThrow('UUID');
+  });
+});
