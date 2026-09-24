@@ -50,7 +50,7 @@ GitHub 事件地址：`https://fleetdao.dpdns.org/github/webhook`。飞书登录
 |---|---|---|
 | `fleet` | 两台 | 引擎、驾驶舱后端、Temporal（法国），以后的飞书网关（香港）。系统用户，家 `/home/fleet`（750） |
 | `fleet-agent-dedicated`、`fleet-agent-carpool` | 法国 | AI 会话专用：各挂一个 reclaude 组织（独享、拼车），永不切号；引擎按选中的账号池挑用户。没有 sudo、不能提权、只在自己的组里、家里没有 GitHub 凭据、读不到 `/etc/fleet-dao`、连不上 Temporal 和库 |
-| `orca` | 法国（旧系统的） | fleet-dao 不用、不碰 |
+| 旧系统的会话用户 | 法国（旧系统的） | fleet-dao 不用、不碰 |
 | `root` | | 只装机 |
 
 法国：
