@@ -129,6 +129,8 @@ export interface Pool {
   expiresAt?: string;
   /** 这个池里各模型组窗口扣哪些模型（组名 → 成员表），读数里给了就按读数写，例如 Cursor 的 auto / api 两个桶。没给成员表的组按组名匹配。 */
   scopeModels?: Record<string, ScopeMembership>;
+  /** 最近一次读成额度的时刻，读失败不动。每小时对账按池看它是否超过 30 分钟，不逐窗口看。 */
+  lastReadOkAt?: string;
 }
 
 /** 每个账号池、每个时间窗各一行——只存「最紧的那个」就做不到「快清零的先用」。 */
@@ -156,6 +158,11 @@ export interface QuotaWindow {
   source?: string;
   /** 上游的原状态字。归不进 upstreamStatus 的也留着给人看，不猜。 */
   statusRaw?: string;
+  /**
+   * 读成了、但上游从这个时刻起没再报这个窗口。照样显示（注明「上游这次没报」），但不挡路由、不参与排序；
+   * 上游重新报了就清空，满 24 小时删掉。
+   */
+  staleSince?: string;
 }
 
 /** 模型厂商家族，例如 claude、gpt。禁令可以按族下。 */
