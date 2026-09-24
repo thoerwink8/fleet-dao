@@ -331,6 +331,24 @@ describe('done', () => {
     expect(b.requests).toEqual([]);
   });
 
+  it('驾驶舱后端（#1）的错误体 { error: { code, message } }：打出 message', async () => {
+    const b = await backend(() => ({
+      status: 422,
+      body: {
+        error: {
+          code: 'done_rejected',
+          message: '交活没通过核实：没查到本次会话跑过测试的记录：先跑测试再交',
+          details: { reasons: ['没查到本次会话跑过测试的记录：先跑测试再交'] },
+        },
+      },
+    }));
+    const r = await fleet(['done', '做完了', '--tests', 'passed', '--pr', '31'], { url: b.url });
+    expect(r.code).toBe(EXIT.rejected);
+    expect(r.err).toBe(
+      'fleet：后端拒收（HTTP 422）：交活没通过核实：没查到本次会话跑过测试的记录：先跑测试再交\n',
+    );
+  });
+
   it('核实没过、后端拒收：退出码 4，原样说出原因', async () => {
     const b = await backend(() => ({ status: 409, body: { error: 'PR #31 不存在' } }));
     const r = await fleet(['done', '做完了', '--tests', 'passed', '--pr', '31'], { url: b.url });

@@ -301,8 +301,9 @@ const COMMANDS: Record<string, Handler> = {
     });
     const res = await call({ method: 'POST', path: AgentRoutes.done.path, body });
     if (values.json) return printJson(io, res);
+    // 后端核实 PR 和测试之后才回 2xx；核实不过回 4xx，在上面已经按拒收退出
     const message = (res as { message?: unknown } | undefined)?.message;
-    io.stdout(`${typeof message === 'string' ? message : '已交活，后端会核实 PR 和测试结果。'}\n`);
+    io.stdout(`${typeof message === 'string' ? message : '已交活，后端核实通过。'}\n`);
   },
 
   async blocked(args, { io, call }) {
