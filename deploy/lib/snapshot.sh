@@ -8,8 +8,9 @@ set -uo pipefail
 
 # fleet-dao 自己的单元。改名或新增单元时同步改这里，否则新单元会被当成「旧系统变了」。
 SNAPSHOT_OURS_UNITS_RE='^(fleet-.*|postgresql.*|wg-quick@wg-fleet[.]service)$'
-# 会随登录会话、临时命令自然变化的单元，不算旧系统的状态。
-SNAPSHOT_NOISE_UNITS_RE='^(run-.*|session-.*|user@.*|user-runtime-dir@.*|systemd-.*[.]service|.*[.]device)$'
+# 会随登录会话、临时命令自然变化的单元，不算旧系统的状态。packagekit、fwupd 是按需拉起、闲了自己退的系统守护进程
+# （apt 装完包会通过 D-Bus 把 packagekit 叫起来）。
+SNAPSHOT_NOISE_UNITS_RE='^(run-.*|session-.*|user@.*|user-runtime-dir@.*|systemd-.*[.]service|.*[.]device|packagekit[.]service|fwupd[.]service)$'
 
 snapshot_others() {
   local units

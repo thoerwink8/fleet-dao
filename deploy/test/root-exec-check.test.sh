@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck source-path=SCRIPTDIR
 # 故意造违规样本，看 deploy/lib/root-exec-check.sh 能不能拦下；同时造几个不该拦的，看它会不会误报。
 # 要 root：得造出属主不是 root 的文件。用法：sudo bash deploy/test/root-exec-check.test.sh
 # 退出码：0 通过，1 不通过，2 没跑成（不是 root）。

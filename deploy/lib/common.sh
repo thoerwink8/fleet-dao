@@ -365,14 +365,29 @@ self_check_root_exec() {
 }
 
 # 装机前后，不归 fleet-dao 管的单元状态、监听端口、防火墙应当一模一样。
+# 按单元逐个比：原有单元变了或没了、多出监听端口、防火墙变了 → 红；装包新带进来、之前没有的单元只列出来备查。
 compare_others() { # 装机前的快照
-  local before=$1 after
+  local before=$1 after report kind line added=()
   step "旧系统有没有被碰"
   after=$(snapshot_others)
-  if [[ "$after" == "$before" ]]; then
-    ok "装机前后，不归 fleet-dao 管的单元状态、监听端口、防火墙都没变"
-    return 0
-  fi
-  red "装机前后，不归 fleet-dao 管的东西有变化——逐行看下面的差异（别的服务自己重启也会出现在这里）"
-  diff <(printf '%s\n' "$before") <(printf '%s\n' "$after") | sed 's/^/    /' || true
+  report=$(awk -F '\n' '
+    FNR == 1 { file++ }
+    /^## / { sec = substr($0, 4); next }
+    {
+      split($0, w, " "); key = (sec == "listening") ? $0 : sec " " w[1]
+      if (file == 1) b[key] = $0; else a[key] = $0
+    }
+    END {
+      for (k in b) {
+        if (!(k in a)) print "red\t没了：" b[k]
+        else if (a[k] != b[k]) print "red\t变了：" b[k] " → " a[k]
+      }
+      for (k in a) if (!(k in b)) print ((k ~ /^units /) ? "new\t" : "red\t多了：") a[k]
+    }' <(printf '%s\n' "$before") <(printf '%s\n' "$after") | sort)
+  while IFS=$'\t' read -r kind line; do
+    if [[ "$kind" == red ]]; then red "旧系统有变化（别的服务自己重启也会出现在这里，逐条看）：$line"; fi
+    if [[ "$kind" == new ]]; then added+=("${line%% *}"); fi
+  done <<<"$report"
+  if ((${#added[@]})); then ok "装包新带进来的单元（之前没有，不是旧系统的）：${added[*]}"; fi
+  if [[ $'\n'"$report" != *$'\nred\t'* ]]; then ok "装机前后，旧系统的单元状态、监听端口、防火墙都没变"; fi
 }
