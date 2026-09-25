@@ -1,0 +1,6 @@
+sftp> df /
+        Size         Used        Avail       (root)    %Capacity
+    40458684     13915712     26526588     26542972          34%
+sftp> df /srv/fleet-dao-backup
+        Size         Used        Avail       (root)    %Capacity
+    40458684     13915712     26526588     26542972          34%

@@ -1,0 +1,10 @@
+# deploy/backup/install.sh 装的。
+[Unit]
+Description=每小时 17 分巡检 fleet-dao 两台机器的磁盘和备份新鲜度
+
+[Timer]
+OnCalendar=*-*-* *:17:00 Asia/Shanghai
+Persistent=true
+
+[Install]
+WantedBy=timers.target

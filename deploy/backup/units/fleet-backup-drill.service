@@ -1,0 +1,31 @@
+# fleet-dao 恢复演练。deploy/backup/install.sh 装到 /etc/systemd/system/；改这份、再跑一遍装机脚本，别在机器上手改。
+[Unit]
+Description=fleet-dao 恢复演练（最近一份备份从香港取回，恢复进临时库核对，再删掉）
+Documentation=https://github.com/thoerwink8/fleet-dao/blob/main/docs/ops.md
+Wants=network-online.target
+After=network-online.target postgresql.service wg-quick@wg-fleet.service
+# 同每晚备份：没做成隔 20 分钟再试，3 小时里最多起 3 次；恢复出来对不上是「查出问题」，报警但不重试
+StartLimitIntervalSec=3h
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+User=fleet
+Group=fleet
+ExecStart=/usr/local/lib/fleet-dao/backup/fleet-backup.sh drill
+Restart=on-failure
+RestartSec=20min
+TimeoutStartSec=3h
+Nice=10
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+ReadWritePaths=/var/lib/fleet-dao/backup

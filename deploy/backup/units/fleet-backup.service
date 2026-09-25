@@ -1,0 +1,32 @@
+# fleet-dao 每晚备份。deploy/backup/install.sh 装到 /etc/systemd/system/；改这份、再跑一遍装机脚本，别在机器上手改。
+[Unit]
+Description=fleet-dao 每晚备份（法国的库加密传到香港）
+Documentation=https://github.com/thoerwink8/fleet-dao/blob/main/docs/ops.md
+Wants=network-online.target
+After=network-online.target postgresql.service wg-quick@wg-fleet.service
+# 没做成（退出 1）隔 20 分钟再试，3 小时里最多起 3 次；「查出问题」退出 0，不重试（docs/reference/deploy.md P12）。
+# 判活不看这里，看运行记录里上次跑成的时刻（schedule_runs，过期分钟登记在 scheduled_jobs）
+StartLimitIntervalSec=3h
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+User=fleet
+Group=fleet
+ExecStart=/usr/local/lib/fleet-dao/backup/fleet-backup.sh backup
+Restart=on-failure
+RestartSec=20min
+TimeoutStartSec=3h
+Nice=10
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+ReadWritePaths=/var/lib/fleet-dao/backup
