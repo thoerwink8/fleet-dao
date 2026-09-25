@@ -230,13 +230,21 @@ describe('认得出的：按各自的梯子走', () => {
     });
   });
 
-  it('额度用满：先换池，这个池避到清零；池都换过了就等到清零再试；要等太久就挂起报警', () => {
-    const quota = session({ message: '拼车 5 小时额度已用完，约 20 分钟后重置' });
+  it('额度用满（主池）：挂起到清零、续同一个会话；等过两次还满才换池；这个池所有任务一起避到清零', () => {
+    const quota = session({ message: '5 小时额度已用完，约 20 分钟后重置' });
     const { trail, verdicts } = drive(quota);
-    expect(trail).toEqual(['swapRoute', 'swapRoute', 'retry', 'retry', 'park']);
-    expect(verdicts[0]?.avoid).toEqual({ scope: 'pool', shared: true, until: '2026-09-25T00:20:00.000Z' });
-    expect(verdicts[2]?.delaySeconds).toBe(1200);
-    expect(verdicts[2]?.counter).toBe('retries');
+    expect(trail).toEqual(['retry', 'retry', 'swapRoute', 'swapRoute', 'park']);
+    expect(verdicts[0]).toMatchObject({
+      delaySeconds: 1200,
+      counter: 'retries',
+      wait: 'quota',
+      resumeSame: true,
+    });
+    // 等的时候也要让别的任务别再派到这个池：共享的避开给到清零时刻。
+    expect(verdicts[0]?.shared).toEqual({ scope: 'pool', shared: true, until: '2026-09-25T00:20:00.000Z' });
+    expect(verdicts[0]?.avoid).toBeUndefined();
+    expect(verdicts[2]?.avoid).toEqual({ scope: 'pool', shared: true, until: '2026-09-25T00:20:00.000Z' });
+    expect(verdicts[2]?.resumeSame).toBe(false);
     expect(verdicts[0]?.alert).toBe(false);
 
     const weekly = classifyFailure(
@@ -253,6 +261,102 @@ describe('认得出的：按各自的梯子走', () => {
     expect({ action: unknownReset.action, delay: unknownReset.delaySeconds }).toEqual({
       action: 'retry',
       delay: 900,
+    });
+  });
+
+  it('额度用满（备池 = 拼车号）：窗口小、等不起，先换到别的池接着干；池都换过了才等清零', () => {
+    const quota = session({ message: '拼车 5 小时额度已用完，约 20 分钟后重置', poolRole: 'backup' });
+    const { trail, verdicts } = drive(quota);
+    expect(trail).toEqual(['swapRoute', 'swapRoute', 'retry', 'retry', 'park']);
+    expect(verdicts[0]?.avoid).toEqual({ scope: 'pool', shared: true, until: '2026-09-25T00:20:00.000Z' });
+    expect(verdicts[0]?.resumeSame).toBe(false);
+    expect(verdicts[2]).toMatchObject({ delaySeconds: 1200, wait: 'quota', resumeSame: true });
+  });
+
+  it('设备被撤销（401 device_revoked）单独一类：不当额度用满、不当封号；挂起等人重新登录，整池暂停，写清去哪台机器以谁的身份登录', () => {
+    const revoked = session({
+      code: 'agent_error',
+      message: 'API Error: 401 device_revoked',
+      poolId: 'claude-carpool',
+      machine: '法国',
+      runAsUser: 'fleet-agent-carpool',
+    });
+    const v = classifyFailure(revoked);
+    expect({ rule: v.rule, action: v.action, alert: v.alert, resumeSame: v.resumeSame }).toEqual({
+      rule: 'DV1',
+      action: 'park',
+      alert: true,
+      resumeSame: true,
+    });
+    expect(v.shared).toEqual({ scope: 'pool', shared: true });
+    expect(v.humanFix).toBe(
+      '在「法国」上以会话用户 fleet-agent-carpool 重跑 reclaude login，按登录流程在浏览器里批准；然后在驾驶舱点「继续」',
+    );
+    expect(v.reason).toContain('要人：在「法国」上以会话用户 fleet-agent-carpool 重跑 reclaude login');
+    // 重试、换池都不做：梯子只有挂起。
+    expect(drive(revoked).trail).toEqual(['park']);
+    // 机器、会话用户没报：写明没报，不瞎猜。
+    expect(classifyFailure(session({ message: '401 device_revoked' })).humanFix).toBe(
+      '在机器（没报）上以会话用户（没报）重跑 reclaude login，按登录流程在浏览器里批准；然后在驾驶舱点「继续」',
+    );
+    // 生产上见过的另一种说法（400 此设备已被解绑，请在终端重新运行 reclaude 完成登录）归同一类。
+    expect(
+      classifyFailure(
+        session({ message: 'API Error: 400 此设备已被解绑，请在终端重新运行 reclaude 完成登录' }),
+      ).rule,
+    ).toBe('DV1');
+    // 别的登录失效照旧归 AU2（换池 + 报警），封号照旧归 AU1。
+    expect(classifyFailure(session({ message: 'Not logged in · Please run /login' })).rule).toBe('AU2');
+    expect(classifyFailure(BANNED).rule).toBe('AU1');
+  });
+
+  it('推之前的卫生检查拦下了新增内容：退回会话去掉再交（记返工账）；同一处连续被拦两次就挂起报警', () => {
+    const spots = '推之前的卫生检查拦下了新增内容：config/app.env:3 github-token';
+    const blocked = (over: FailureEvidence = {}) =>
+      classifyFailure({
+        source: 'pushBranch',
+        routeBound: false,
+        code: 'HYGIENE_BLOCKED',
+        retryable: false,
+        message: spots,
+        now: NOW,
+        ...over,
+      });
+    // 端口说不可重试也照样退回会话：退回会话不是「原样再推一次」。
+    expect(blocked()).toMatchObject({ rule: 'HY1', action: 'retry', counter: 'reworks', delaySeconds: 0 });
+    // 会话改过又交，拦在别处：再退一轮。
+    expect(
+      blocked({
+        attempts: { reworks: 1 },
+        previousMessage: '推之前的卫生检查拦下了新增内容：src/a.ts:9 email',
+      }).action,
+    ).toBe('retry');
+    // 同一处又被拦：挂起报警，不再退回。
+    const again = blocked({ attempts: { reworks: 1 }, previousMessage: spots });
+    expect({ action: again.action, alert: again.alert }).toEqual({ action: 'park', alert: true });
+    expect(again.reason).toContain('一字不差');
+    // 返工轮数用完也挂起。
+    expect(blocked({ attempts: { reworks: 2 } }).action).toBe('park');
+    // 码只认结构化的 code 字段：测试输出里带着这个词不算。
+    expect(classifyFailure(session({ message: 'expected HYGIENE_BLOCKED to be thrown' })).rule).not.toBe(
+      'HY1',
+    );
+  });
+
+  it('卫生检查的名单没读到：是配置问题，不退回会话，挂起报警', () => {
+    const v = classifyFailure({
+      source: 'pushBranch',
+      routeBound: false,
+      code: 'HYGIENE_LIST_MISSING',
+      retryable: false,
+      message: '推之前的卫生检查没法做：没找到已知敏感值名单',
+      now: NOW,
+    });
+    expect({ rule: v.rule, action: v.action, alert: v.alert, counter: v.counter }).toEqual({
+      rule: 'HY2',
+      action: 'park',
+      alert: true,
+      counter: null,
     });
   });
 
@@ -347,12 +451,12 @@ describe('证据里的时刻读坏了', () => {
   it('分流照样给出能撤回的动作（它不能跟着失败），但原因里写明哪项没读成、按默认时长走', () => {
     const quota = { source: 'session:execute', routeId: 'route-a', message: 'weekly limit reached' };
     const badNow = classifyFailure({ ...quota, now: '昨天' });
-    expect(badNow.action).toBe('swapRoute');
-    expect(badNow.avoid).toEqual({ scope: 'pool', shared: true });
+    expect(badNow.action).toBe('retry');
+    expect(badNow.shared).toEqual({ scope: 'pool', shared: true });
     expect(badNow.reason).toContain('now 认不出（昨天），不写到期时刻');
 
     const badReset = classifyFailure({ ...quota, now: NOW, resetsAt: 'soon' });
-    expect(badReset.avoid?.until).toBe('2026-09-25T00:15:00.000Z');
+    expect(badReset.shared?.until).toBe('2026-09-25T00:15:00.000Z');
     expect(badReset.reason).toContain('resetsAt 认不出（soon），按默认时长');
 
     const badAfter = classifyFailure(

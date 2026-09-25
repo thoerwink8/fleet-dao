@@ -52,6 +52,11 @@ export interface Limits {
   mergeQueueBatch: number;
   /** 合并队列空闲多久就收工（有新条目时会被重新拉起）。 */
   mergeQueueIdleMinutes: number;
+  /**
+   * 一条工作流的事件数到这么多就报一次警（需求、子任务不换历史）。Temporal 每条执行 1 万个信号封顶、事件数 1 万出警告、
+   * 5 万多封死：到那一步连叫停都发不进去，所以在一半之前就要有人知道。
+   */
+  historyAlertEvents: number;
 }
 
 export const DEFAULT_LIMITS: Readonly<Limits> = Object.freeze({
@@ -79,6 +84,7 @@ export const DEFAULT_LIMITS: Readonly<Limits> = Object.freeze({
   mergeWaitMinutes: 360,
   mergeQueueBatch: 50,
   mergeQueueIdleMinutes: 60,
+  historyAlertEvents: 5000,
 });
 
 /**

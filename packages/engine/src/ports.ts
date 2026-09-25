@@ -79,6 +79,8 @@ export interface RouteChoice {
   modelId: string;
   family: string;
   hostId: HostId;
+  /** 主池 / 备池（拼车号是备池）：额度用满时走法不同（失败分流 QT1）。老历史里没有 = 按主池。 */
+  poolRole?: 'primary' | 'backup';
 }
 
 export interface PickRouteInput extends Scope {
@@ -89,6 +91,11 @@ export interface PickRouteInput extends Scope {
   avoidModelIds: string[];
   /** 人或帅位点名的路由；犯禁令、不在线就不用，并在 why 里写明。 */
   preferRouteId?: string;
+  /**
+   * 续同一个会话（重试、等完额度、修好机器后人点「继续」）：还是这条路由——暂时派不了就等它，不换；
+   * 用不了（下线、被禁）才照常选。账号池被暂停（设备被撤销）时它也放行：这一单就是看人修好了没有的试探。
+   */
+  stickRouteId?: string;
 }
 
 export type PickRouteResult =
@@ -202,7 +209,22 @@ export interface SessionEnd {
     options?: string[];
   };
   /** code 用结构化的：插头判定的原因（quota_exhausted、model_mismatch……）、SESSION_LOST…… */
-  failure?: { code: string; message: string; retryable?: boolean };
+  failure?: {
+    code: string;
+    message: string;
+    retryable?: boolean;
+    /** 上游给的清零时刻（ISO，额度用满时从 rate_limit_event 或原文里读的）/ 等待秒数。 */
+    resetsAt?: string;
+    retryAfterSeconds?: number;
+    httpStatus?: number;
+    exitCode?: number | null;
+    signal?: string | null;
+    /** 最后几段过程记录（老的在前），失败分流只在写明读过程记录的规则里看。 */
+    transcriptTail?: string[];
+    /** 会话跑在哪台机器（给人看的名字）、哪个会话用户：只有人能修的（重新登录）要写清去哪修。 */
+    machine?: string;
+    runAsUser?: string;
+  };
   /** 这一次会话的 token（执行体终帧报的就是这一次的）。 */
   usage?: { inputTokens?: number; outputTokens?: number };
   /** 整个会话（sessionId）到目前为止的累计花费（续会话时含前几轮）；这一次的由引擎按上一轮求差。 */
@@ -263,12 +285,32 @@ export interface PushBranchInput extends Scope {
   head: string;
 }
 
+/**
+ * PR 正文的内容。正文由 github 包的 renderPrBody 按 .github/pull_request_template.md 的栏目生成（design：引擎开的 PR
+ * 和人开的同一套栏目，对不上测试会红），这里只给结构，不自己拼字。
+ */
+export interface PrBody {
+  /** 对应的需求（issue 号）。 */
+  requirement?: number;
+  /** 子任务名。 */
+  subtask?: string;
+  /** 做了什么，3–5 条。 */
+  did: string[];
+  /** 怎么验证的。 */
+  verified: string[];
+  /** 还欠什么；空 = 无。 */
+  owed?: string[];
+  risks?: string[];
+  /** 改到的文件（仓内相对路径）：「文档」一栏按它写。 */
+  changedFiles: string[];
+}
+
 export interface OpenPrInput extends Scope {
   repo: Repo;
   branch: string;
   head: string;
   title: string;
-  body: string;
+  body: PrBody;
 }
 
 export interface PullRequestRef {

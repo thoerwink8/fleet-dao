@@ -36,6 +36,7 @@ import type { SessionBrief, Worktree } from '../ports.ts';
 import {
   activitiesFor,
   attempt,
+  attemptOrRework,
   type Control,
   gate,
   installControl,
@@ -43,10 +44,12 @@ import {
   judge,
   type Kit,
   limitsFor,
+  NO_REWORK,
   newId,
   newKit,
   offClockMs,
   park,
+  type ReworkCarry,
   runStage,
   stopActiveSessions,
   type Verdict,
@@ -348,6 +351,7 @@ export async function subtaskWorkflow(input: SubtaskInput): Promise<SubtaskResul
     let fingerprints: { ci?: string; review?: string } = {};
     let verifiedHead = '';
     let offPlan = 0;
+    let pushRework: ReworkCarry = NO_REWORK;
     // 墙钟预算：从开工算起，等人（暂停、挂起、回答、批准）和排队（空位、额度、合并队列）的时间不算；
     // 人看过（挂起后被放行）就重新计。
     let budget = { since: Date.now(), off: offClockMs(kit) };
@@ -392,18 +396,39 @@ export async function subtaskWorkflow(input: SubtaskInput): Promise<SubtaskResul
           continue;
         }
         if (delivery.note) status.lastProblem = delivery.note;
-        // 会话只在本地提交；推分支、开 PR 由引擎在会话外面做。
-        const pushed = await attempt(kit, 'pushBranch', () =>
-          acts.pushBranch({
-            ...kit.scope,
-            repo: input.repo,
-            worktreePath: tree.path,
-            branch,
-            head: exec.output.head,
-          }),
+        // 会话只在本地提交；推分支、开 PR 由引擎在会话外面做。推之前的卫生检查拦下了会话交的内容：退回会话拿掉再交
+        // （同一处连续被拦两次挂起报警，失败分流 HY1）；名单没读到是配置问题，挂起报警、不退会话（HY2）。
+        const pushedOrRework = await attemptOrRework(
+          kit,
+          'pushBranch',
+          () =>
+            acts.pushBranch({
+              ...kit.scope,
+              repo: input.repo,
+              worktreePath: tree.path,
+              branch,
+              head: exec.output.head,
+            }),
+          pushRework,
         );
+        if ('rework' in pushedOrRework) {
+          pushRework = pushedOrRework.rework.carry;
+          status.lastProblem = pushedOrRework.rework.reason;
+          feedback = [
+            {
+              kind: 'hygiene',
+              summary:
+                '推之前的卫生检查拦下了你交的内容：公开仓推上去就公开了。把这些从提交里拿掉——要改写提交（推上去的是全部提交），不能只加一个删掉它的新提交',
+              items: [pushedOrRework.rework.message],
+            },
+          ];
+          continue;
+        }
+        pushRework = NO_REWORK;
+        const pushed = pushedOrRework.ok;
         status.head = pushed.head;
         if (status.prNumber === null) {
+          const changedFiles = exec.output.changedFiles;
           const pr = await attempt(kit, 'openPr', () =>
             acts.openPr({
               ...kit.scope,
@@ -411,7 +436,20 @@ export async function subtaskWorkflow(input: SubtaskInput): Promise<SubtaskResul
               branch,
               head: pushed.head,
               title: sub.title,
-              body: `需求 #${input.issueNumber} 的子任务「${sub.key}」\n\n${summary}`,
+              // 正文由 github 包的 renderPrBody 按 PR 模板的栏目生成；这里只给结构。
+              body: {
+                requirement: input.issueNumber,
+                subtask: `${sub.key} ${sub.title}`,
+                did: summaryItems(summary),
+                verified: [
+                  exec.output.testsPassed
+                    ? '会话里跑过测试，报通过（fleet done --tests passed）'
+                    : '会话报测试没过（fleet done --tests failed）',
+                  '合并前在最新主线上再等 CI（合并队列）',
+                ],
+                changedFiles: changedFiles ?? [],
+                ...(changedFiles ? {} : { owed: ['改了哪些文件没查成（交付没带文件清单）'] }),
+              },
             }),
           );
           status.prNumber = pr.prNumber;
@@ -609,4 +647,13 @@ export async function subtaskWorkflow(input: SubtaskInput): Promise<SubtaskResul
     problem,
     rounds: status.rounds,
   };
+}
+
+/** 会话交活时的总结 → PR 正文「做了什么」的几条：按换行、分号切，去掉列表记号，最多 5 条。 */
+function summaryItems(summary: string): string[] {
+  return summary
+    .split(/\r?\n|；|;/)
+    .map((line) => line.replace(/^[\s\-*•]+/, '').trim())
+    .filter(Boolean)
+    .slice(0, 5);
 }

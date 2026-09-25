@@ -5,13 +5,7 @@
 
 import { type Limits, resolveLimits } from '../limits.ts';
 import { checkDelivery, type DeliveryDecision, type DeliveryInput } from './delivery.ts';
-import {
-  type Classifier,
-  classifyStructural,
-  type FailureInput,
-  type NextAction,
-  nextAction,
-} from './failure.ts';
+import { type FailureInput, type FailureTriage, type NextAction, nextAction } from './failure.ts';
 import { type NewIdsInput, newIds } from './ids.ts';
 import {
   afterMergeReturn,
@@ -53,21 +47,21 @@ export type Decide = <K extends DecisionKind>(
 ) => Promise<DecisionMap[K]['output']>;
 
 export interface DecideDeps {
-  /** 错误分类表；不给就只用认结构化错误码的底表。 */
-  classify?: Classifier;
+  /** 失败分流；不给就是 failure/classify.ts 的 classifyFailure（规则表 + 兜底梯）。演练「分流出错」时换掉。 */
+  triage?: FailureTriage;
 }
 
 type Table = { [K in DecisionKind]: (input: DecisionMap[K]['input']) => DecisionMap[K]['output'] };
 
 export function createDecide(deps: DecideDeps = {}): Decide {
-  const classify = deps.classify ?? classifyStructural;
+  const triage = deps.triage;
   const table: Table = {
     limits: resolveLimits,
     newIds,
     triage: decideTriage,
     plan: validatePlan,
     runnable: pickRunnable,
-    failure: (input) => nextAction(input, classify),
+    failure: (input) => (triage ? nextAction(input, triage) : nextAction(input)),
     delivery: checkDelivery,
     verify: decideAfterVerify,
     mergeStep,

@@ -12,6 +12,7 @@ import {
   condition,
   isCancellation,
   log,
+  patched,
   proxyActivities,
   proxyLocalActivities,
   setDefaultSignalHandler,
@@ -48,7 +49,7 @@ import {
   stopSignal,
   type Waiting,
 } from '../contract.ts';
-import type { FailureInfo, LadderCounters } from '../decisions/failure.ts';
+import type { FailureContext, FailureInfo, LadderCounters, NextAction } from '../decisions/failure.ts';
 import type { Decide, DecisionKind, DecisionMap } from '../decisions/index.ts';
 import type { Limits } from '../limits.ts';
 import type {
@@ -319,10 +320,21 @@ export interface Kit {
   costSeen: Record<string, number | null>;
   /** 墙钟预算的停表：等人、排队时不走。depth 是嵌套着的停表等待有几层（排队时又暂停了只算一段）。 */
   clock: { depth: number; since: number; offMs: number };
+  /** 事件数报警报过了（一条执行只报一次）。 */
+  historyAlarmed: boolean;
 }
 
-export function newKit(fields: Omit<Kit, 'parkCount' | 'active' | 'costSeen' | 'clock'>): Kit {
-  return { ...fields, parkCount: 0, active: {}, costSeen: {}, clock: { depth: 0, since: 0, offMs: 0 } };
+export function newKit(
+  fields: Omit<Kit, 'parkCount' | 'active' | 'costSeen' | 'clock' | 'historyAlarmed'>,
+): Kit {
+  return {
+    ...fields,
+    parkCount: 0,
+    active: {},
+    costSeen: {},
+    clock: { depth: 0, since: 0, offMs: 0 },
+    historyAlarmed: false,
+  };
 }
 
 /** 墙钟预算不算的等待：等人（暂停、挂起、回答、批准）和排队（账号池空位、额度、合并队列）。 */
@@ -400,10 +412,37 @@ export async function waitFor<T>(
   }
 }
 
-/** 暂停门：暂停着就在这里等「继续」。每一步开工前过一次。 */
+/** 暂停门：暂停着就在这里等「继续」。每一步开工前过一次，顺带看一眼事件数。 */
 export async function gate(kit: Kit): Promise<void> {
+  await watchHistory(kit);
   if (!kit.control.paused) return;
   await waitFor(kit, 'human', '已暂停，等「继续」', () => condition(() => !kit.control.paused));
+}
+
+/**
+ * 工作流事件数报警：到 limits.historyAlertEvents 报一次（一条执行一张卡）。需求、子任务不换历史，事件数一路涨——
+ * 撞上 Temporal 的上限后连叫停都发不进去（fleet 叫醒改成只发 ask/done/blocked 之后，正常一个需求远到不了这个数，
+ * 到了多半是哪里在刷信号或绕圈）。报警本身失败不挡流程。
+ */
+export async function watchHistory(kit: Kit): Promise<void> {
+  if (kit.historyAlarmed) return;
+  const info = workflowInfo();
+  if (info.historyLength < kit.limits.historyAlertEvents) return;
+  // 接这道报警之前起的执行，重放时这里没有这一步：按老样子不报。
+  if (!patched('history-alarm')) return;
+  kit.historyAlarmed = true;
+  try {
+    await kit.acts.raiseAlert({
+      ...kit.scope,
+      level: 'info',
+      title: `工作流事件数到了 ${info.historyLength}（报警线 ${kit.limits.historyAlertEvents}）`,
+      detail: `${info.workflowType} ${info.workflowId}：事件数一路涨到 Temporal 的上限（每条执行 1 万个信号、5 万多个事件）就连叫停都发不进去。看看是不是有东西在刷信号或会话在绕圈；要接着跑，考虑叫停后重开。`,
+      dedupeKey: `${info.workflowId}:history`,
+    });
+  } catch (error) {
+    if (isCancellation(error)) throw error;
+    log.warn('事件数报警没发出去', { error: String(error) });
+  }
 }
 
 /** 挂起并报警：兜底梯的最后一级。等「继续」或「换路由」。挂起和「在等人」同一刻亮出来，报警在等的里面发。 */
@@ -479,11 +518,59 @@ export function failureOf(error: unknown, source: string): FailureInfo {
   return { source, code: 'UNKNOWN', message: String(cause), retryable: null };
 }
 
-const NO_LADDER: LadderCounters = { retries: 0, routeSwaps: 0, modelSwaps: 0 };
+const NO_LADDER: LadderCounters = { retries: 0, reworks: 0, routeSwaps: 0, modelSwaps: 0 };
 
-/** 不绑路由的一步（建树、推分支、等 CI……）：活动自己的重试用完后按兜底梯走——有界重试，再不行挂起报警。 */
+const COUNTER_OF: Readonly<Record<NextAction['action'], keyof LadderCounters | null>> = {
+  retry: 'retries',
+  swapRoute: 'routeSwaps',
+  swapModel: 'modelSwaps',
+  park: null,
+};
+
+/** 按判断给计数加一：判断带 counter 就听它的（返工另记一本账）；在途任务历史里的老判断没有，按动作推。 */
+function bump(counters: LadderCounters, next: NextAction): LadderCounters {
+  const key = next.counter === undefined ? COUNTER_OF[next.action] : next.counter;
+  return key ? { ...counters, [key]: (counters[key] ?? 0) + 1 } : counters;
+}
+
+/** 这一步之后续不续同一个会话：判断写明的听它的；老判断没写，只有重试续。 */
+function resumesSame(next: NextAction): boolean {
+  return next.resumeSame ?? next.action === 'retry';
+}
+
+/** 等上游：等账号池额度清零不算墙钟预算（和排队一样），别的等待照常算。 */
+function waitKindOf(next: NextAction): WaitKind {
+  return next.wait === 'quota' ? 'quota' : 'retry';
+}
+
+/** 不挂起也要报警的（例如封号：换池接着干，但要人知道）。一条执行一条规则一张卡；报不出去不挡流程。 */
+async function alertIfNeeded(kit: Kit, next: NextAction, detail: string): Promise<void> {
+  if (!next.alert || next.action === 'park') return;
+  try {
+    await kit.acts.raiseAlert({
+      ...kit.scope,
+      level: 'info',
+      title: next.reason,
+      detail,
+      dedupeKey: `${workflowInfo().workflowId}:failure:${next.rule ?? next.classifiedAs}`,
+    });
+  } catch (error) {
+    if (isCancellation(error)) throw error;
+    log.warn('报警没发出去，接着按判断走', { error: String(error) });
+  }
+}
+
+/** 挂起的标题：只有人能修、修法确定的（重新登录），把修法写进标题，卡片上一眼看到。 */
+function parkTitle(next: NextAction): string {
+  return next.humanFix && !next.reason.includes(next.humanFix)
+    ? `${next.reason}；要人：${next.humanFix}`
+    : next.reason;
+}
+
+/** 不绑路由的一步（建树、推分支、等 CI……）：活动自己的重试用完后按失败分流走——有界重试（或等上游），再不行挂起报警。 */
 export async function attempt<T>(kit: Kit, source: string, fn: () => Promise<T>): Promise<T> {
   let counters = NO_LADDER;
+  let previousMessage: string | undefined;
   for (;;) {
     await gate(kit);
     try {
@@ -491,15 +578,83 @@ export async function attempt<T>(kit: Kit, source: string, fn: () => Promise<T>)
     } catch (error) {
       if (isCancellation(error)) throw error;
       const failure = failureOf(error, source);
-      const next = await judge(kit, 'failure', { failure, counters, limits: kit.limits, routeBound: false });
+      const next = await judge(kit, 'failure', {
+        failure,
+        counters,
+        limits: kit.limits,
+        routeBound: false,
+        context: { now: iso(Date.now()), ...(previousMessage ? { previousMessage } : {}) },
+      });
+      previousMessage = failure.message;
       kit.view.lastProblem = next.reason;
       kit.onChange();
+      await alertIfNeeded(kit, next, failure.message);
       if (next.action === 'retry') {
-        counters = { ...counters, retries: counters.retries + 1 };
-        await waitFor(kit, 'retry', next.reason, () => sleep(`${next.delaySeconds} seconds`));
+        counters = bump(counters, next);
+        await waitFor(kit, waitKindOf(next), next.reason, () => sleep(`${next.delaySeconds} seconds`));
       } else {
-        await park(kit, next.reason, failure.message);
+        await park(kit, parkTitle(next), failure.message);
         counters = NO_LADDER;
+        previousMessage = undefined;
+      }
+    }
+  }
+}
+
+/** 返工账：跨轮次带着（会话改完再交，又走到同一步）。previousMessage = 上一次被拦的原文，一字不差再犯就挂起。 */
+export interface ReworkCarry {
+  reworks: number;
+  previousMessage?: string;
+}
+
+export const NO_REWORK: ReworkCarry = { reworks: 0 };
+
+/**
+ * 和 attempt 一样按失败分流走，多一种结局：分流说「返工」（记返工账的那一级，例如推之前的卫生检查拦下了会话交的内容），
+ * 这一步不在原地重试——原样再推一次还是被拦——交回调用方退回会话，带上被拦的原文。carry 由调用方跨轮次带着。
+ */
+export async function attemptOrRework<T>(
+  kit: Kit,
+  source: string,
+  fn: () => Promise<T>,
+  carry: ReworkCarry,
+): Promise<{ ok: T } | { rework: { reason: string; message: string; carry: ReworkCarry } }> {
+  let counters: LadderCounters = { ...NO_LADDER, reworks: carry.reworks };
+  let previousMessage = carry.previousMessage;
+  for (;;) {
+    await gate(kit);
+    try {
+      return { ok: await fn() };
+    } catch (error) {
+      if (isCancellation(error)) throw error;
+      const failure = failureOf(error, source);
+      const next = await judge(kit, 'failure', {
+        failure,
+        counters,
+        limits: kit.limits,
+        routeBound: false,
+        context: { now: iso(Date.now()), ...(previousMessage ? { previousMessage } : {}) },
+      });
+      kit.view.lastProblem = next.reason;
+      kit.onChange();
+      await alertIfNeeded(kit, next, failure.message);
+      if (next.action === 'retry' && next.counter === 'reworks') {
+        return {
+          rework: {
+            reason: next.reason,
+            message: failure.message,
+            carry: { reworks: counters.reworks + 1, previousMessage: failure.message },
+          },
+        };
+      }
+      previousMessage = failure.message;
+      if (next.action === 'retry') {
+        counters = bump(counters, next);
+        await waitFor(kit, waitKindOf(next), next.reason, () => sleep(`${next.delaySeconds} seconds`));
+      } else {
+        await park(kit, parkTitle(next), failure.message);
+        counters = NO_LADDER;
+        previousMessage = undefined;
       }
     }
   }
@@ -577,7 +732,12 @@ interface Avoid {
 const AVOID_NOTHING: Avoid = { routeIds: [], poolIds: [], modelIds: [] };
 
 /** 选路由；没空位、没额度就等（记下在等哪个、停表），一条能用的都没有就交回去挂起。 */
-async function chooseRoute(kit: Kit, stage: StageKind, avoid: Avoid): Promise<Picked> {
+async function chooseRoute(
+  kit: Kit,
+  stage: StageKind,
+  avoid: Avoid,
+  stickRouteId: string | undefined,
+): Promise<Picked> {
   const outer = kit.view.waiting;
   let since: number | null = null;
   let restartClock: (() => void) | null = null;
@@ -586,6 +746,8 @@ async function chooseRoute(kit: Kit, stage: StageKind, avoid: Avoid): Promise<Pi
   try {
     for (;;) {
       const preferRouteId = kit.control.routeOverrides[stage];
+      // 人点名的路由压过「续同一个会话」：换路由的命令就是要换。
+      const stick = preferRouteId ? undefined : stickRouteId;
       const result = await attempt(kit, 'pickRoute', () =>
         kit.acts.pickRoute({
           ...kit.scope,
@@ -594,6 +756,7 @@ async function chooseRoute(kit: Kit, stage: StageKind, avoid: Avoid): Promise<Pi
           avoidPoolIds: avoid.poolIds,
           avoidModelIds: avoid.modelIds,
           ...(preferRouteId ? { preferRouteId } : {}),
+          ...(stick ? { stickRouteId: stick } : {}),
         }),
       );
       if (result.ok) return { route: result.route, why: result.why };
@@ -717,7 +880,9 @@ async function recordSessionEnd(
 /**
  * 跑一个阶段：选路由 → 起会话（能续就续）→ 等它结束。
  * 暂停、换路由：停在干净的点再按新设置接着干；会话要人回答：问了再续；
- * 失败：按兜底梯（有界重试 → 换路由 → 换模型 → 挂起并报警），不默认停下等人。
+ * 失败：按失败分流（failure/classify.ts 的规则表；认不出的走兜底梯：有界重试 → 换路由 → 换模型 → 挂起并报警），
+ * 不默认停下等人。会话断了接着干（design 第一节）：重试、等完额度、暂停后继续、人修好机器点「继续」，都续同一个会话、
+ * 同一条路由（stick）；换路由、换模型才照常选，跨了会话用户的接续（fork 续 / 接力任务书）由会话端口定。
  */
 export async function runStage<K extends OutputKind>(
   kit: Kit,
@@ -726,16 +891,19 @@ export async function runStage<K extends OutputKind>(
   const source = `session:${request.stage}`;
   let counters = NO_LADDER;
   let avoid = AVOID_NOTHING;
+  let stick: string | undefined;
+  let previousMessage: string | undefined;
   const answers = [...request.brief.answers];
   let resumeSessionId = request.resumeSessionId;
   for (;;) {
     await gate(kit);
     const queuedAt = iso(Date.now());
-    const picked = await chooseRoute(kit, request.stage, avoid);
+    const picked = await chooseRoute(kit, request.stage, avoid, stick);
     if ('none' in picked) {
       await park(kit, `「${request.stage}」没有能用的路由`, picked.none);
       counters = NO_LADDER;
       avoid = AVOID_NOTHING;
+      stick = undefined;
       continue;
     }
     kit.view.route = { routeId: picked.route.routeId, modelId: picked.route.modelId, why: picked.why };
@@ -807,11 +975,16 @@ export async function runStage<K extends OutputKind>(
     if (end.outcome === 'done' && end.output?.kind === request.expect) {
       return { sessionId: end.sessionId, runId, output: end.output as OutputOf<K>, route: picked.route };
     }
-    if (end.outcome === 'stopped' && stoppedByUs) continue;
+    if (end.outcome === 'stopped' && stoppedByUs) {
+      // 暂停后继续：续同一个会话；换路由的命令由点名的路由压过（chooseRoute 里）。
+      stick = picked.route.routeId;
+      continue;
+    }
     if (end.outcome === 'blocked') {
       const question = end.blocked?.question ?? end.blocked?.reason ?? '会话说需要人回答';
       const answer = await askAndWait(kit, question, end.blocked?.options, runId);
       answers.push({ question, answer });
+      stick = picked.route.routeId;
       continue;
     }
 
@@ -838,26 +1011,68 @@ export async function runStage<K extends OutputKind>(
                 message: end.failure?.message ?? '',
                 retryable: end.failure?.retryable ?? null,
               };
-    const next = await judge(kit, 'failure', { failure, counters, limits: kit.limits, routeBound: true });
+    const next = await judge(kit, 'failure', {
+      failure,
+      counters,
+      limits: kit.limits,
+      routeBound: true,
+      context: failureContext(request.stage, picked.route, end, previousMessage),
+    });
+    previousMessage = failure.message;
     kit.view.lastProblem = next.reason;
     kit.onChange();
+    await alertIfNeeded(kit, next, failure.message);
+    counters = bump(counters, next);
     if (next.action === 'retry') {
-      counters = { ...counters, retries: counters.retries + 1 };
-      await waitFor(kit, 'retry', next.reason, () => sleep(`${next.delaySeconds} seconds`));
+      await waitFor(kit, waitKindOf(next), next.reason, () => sleep(`${next.delaySeconds} seconds`));
+      stick = resumesSame(next) ? picked.route.routeId : undefined;
     } else if (next.action === 'swapRoute') {
-      counters = { ...counters, routeSwaps: counters.routeSwaps + 1 };
       // 账号池的事（封号、额度用满）避开整个池：换到同一个池的别的路由照样撞。
       avoid =
         next.avoid === 'pool'
           ? { ...avoid, poolIds: [...avoid.poolIds, picked.route.poolId] }
           : { ...avoid, routeIds: [...avoid.routeIds, picked.route.routeId] };
+      stick = undefined;
     } else if (next.action === 'swapModel') {
-      counters = { ...counters, modelSwaps: counters.modelSwaps + 1 };
       avoid = { ...avoid, modelIds: [...avoid.modelIds, picked.route.modelId] };
+      stick = undefined;
     } else {
-      await park(kit, next.reason, failure.message);
+      await park(kit, parkTitle(next), failure.message);
       counters = NO_LADDER;
       avoid = AVOID_NOTHING;
+      previousMessage = undefined;
+      // 修的是机器或账号池（例如设备被撤销、人重新登录了）：人点「继续」后续同一个会话。
+      stick = resumesSame(next) ? picked.route.routeId : undefined;
     }
   }
+}
+
+/** 失败分流要的这一步的事实：哪个阶段、哪条路由（主池还是备池）、上游给的等待、会话跑在哪。 */
+function failureContext(
+  stage: StageKind,
+  route: RouteChoice,
+  end: SessionEnd,
+  previousMessage: string | undefined,
+): FailureContext {
+  const f = end.failure;
+  return {
+    stage,
+    route: {
+      routeId: route.routeId,
+      poolId: route.poolId,
+      modelId: route.modelId,
+      hostId: route.hostId,
+      ...(route.poolRole ? { poolRole: route.poolRole } : {}),
+    },
+    ...(f?.resetsAt ? { resetsAt: f.resetsAt } : {}),
+    ...(f?.retryAfterSeconds === undefined ? {} : { retryAfterSeconds: f.retryAfterSeconds }),
+    ...(f?.httpStatus === undefined ? {} : { httpStatus: f.httpStatus }),
+    ...(f?.exitCode === undefined ? {} : { exitCode: f.exitCode }),
+    ...(f?.signal === undefined ? {} : { signal: f.signal }),
+    ...(f?.transcriptTail?.length ? { transcriptTail: f.transcriptTail } : {}),
+    ...(f?.machine ? { machine: f.machine } : {}),
+    ...(f?.runAsUser ? { runAsUser: f.runAsUser } : {}),
+    ...(previousMessage ? { previousMessage } : {}),
+    now: iso(Date.now()),
+  };
 }

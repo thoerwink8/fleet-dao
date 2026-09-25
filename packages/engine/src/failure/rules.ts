@@ -42,6 +42,8 @@ export interface FailureRule {
   weakCodes?: readonly string[];
   /** 依次尝试，某一级的次数用完就往下走；最后一级总是 park。 */
   ladder: readonly Rung[];
+  /** 出在备池（拼车号）时改用这个梯子；不给就和主池一样。 */
+  backupLadder?: readonly Rung[];
   /** 重试记哪本账：返工（测试红、冲突、没交付）和基础设施处置分开。 */
   budget?: 'infra' | 'rework';
   /** 这条规则最多原路重试几次（和策略上限取小）。 */
@@ -60,6 +62,13 @@ export interface FailureRule {
   hint?: string;
   /** 只认不是 AI 会话的步骤（GitHub 的报错）：AI 渠道报同样的字，说的是它自己的事。 */
   stepsOnly?: true;
+  /**
+   * 只有人能修、而且修法是确定的：写给人看的一句（「要人拍」通知的正文）。{machine}、{user}、{pool} 由证据填，
+   * 证据没给的写「（没报）」，不瞎猜。
+   */
+  humanFix?: string;
+  /** 挂起后人点「继续」时续同一个会话（同一条路由）：修的是这台机器或这个池，不是任务本身。 */
+  resumeAfterPark?: true;
 }
 
 const TRANSIENT_LADDER: readonly Rung[] = ['retry', 'swapRoute', 'park'];
@@ -112,6 +121,23 @@ export const RULES: readonly FailureRule[] = [
     retryBaseSeconds: 0,
     routeOutcome: 'neutral',
   },
+  // 这台机器的 reclaude 登录被撤销（reclaude 文档「设备被自动撤销」：同号多机同时高频用会触发风控，自动撤销设备，
+  // 请求拿到 401 device_revoked；修法只有人在那台机器上、以那个用户重跑 reclaude login）。不是额度用满、也不是封号：
+  // 换池、等清零都没用，这个池在这台机器上整池暂停，手上的会话挂起；重新登录后人点「继续」，续同一个会话。
+  // 认的两句都有出处：401 device_revoked 是 reclaude 文档原文（夹具 X05），「此设备已被解绑」是旧系统生产记录（夹具 S05）；
+  // 两句在会话流里真实长什么样（插头交来的 detail 怎么拼）还没有真样本。
+  {
+    id: 'DV1',
+    title: '这台机器的 reclaude 登录被撤销',
+    codes: ['device_revoked'],
+    text: /此设备已被解绑|device[_ ]revoked/i,
+    ladder: ['park'],
+    avoid: { scope: 'pool', shared: true, until: 'none' },
+    alert: true,
+    routeOutcome: 'neutral',
+    humanFix: '在{machine}上以{user}重跑 reclaude login，按登录流程在浏览器里批准；然后在驾驶舱点「继续」',
+    resumeAfterPark: true,
+  },
   // 封号：原文还写着「请稍后重试」，照做只会在同一个池里反复撞（2026-09-22 独享号被封，reclaude 实测）。
   {
     id: 'AU1',
@@ -154,14 +180,18 @@ export const RULES: readonly FailureRule[] = [
     avoid: { scope: 'route', shared: true, until: 'upstream' },
     routeOutcome: 'fail',
   },
-  // 时间窗额度用满（5 小时、周、月）：换一个账号池；别的池也满了就等到清零（按上游给的时间）。
+  // 时间窗额度用满（5 小时、周、月）。design 第一节「会话断了接着干」（2026-09-25 拍）：挂起到清零时刻，续上同一个会话，
+  // 不开新的；要等太久（超过 waitMaxSeconds，例如周限）才换到别的池（换用户的接续由会话端口定：fork 续或接力任务书）。
+  // 备池（拼车号）窗口小、清零前手上的活等不起：先换到别的池接着干（第九节「拼车用完，手上的活原地接着干」），换不了再等清零。
+  // 两种都把这个池记成「所有任务一起避开到清零」（按上游给的时间）。
   {
     id: 'QT1',
     title: '额度用满',
     codes: ['quota_exhausted', 'cloud_exhausted', 'usage_limit_reached', 'usage_limit_exceeded'],
     // 「(not your usage limit)」是 Claude Code 在服务端临时限流时自带的一句，说的恰恰不是额度用满：否定句不认。
     text: /(?<!\bnot (?:your |a |the )?)usage limit|额度已用完|额度用完|额度用尽|quota (?:is )?exhausted|weekly limit|monthly limit|周限|\b5[- ]?hour limit/i,
-    ladder: ['swapRoute', 'wait', 'park'],
+    ladder: ['wait', 'swapRoute', 'park'],
+    backupLadder: ['swapRoute', 'wait', 'park'],
     defaultWaitSeconds: 900,
     avoid: { scope: 'pool', shared: true, until: 'upstream' },
     routeOutcome: 'neutral',
@@ -188,12 +218,11 @@ export const RULES: readonly FailureRule[] = [
     alert: true,
     routeOutcome: 'fail',
   },
-  // 登录失效要人重新登录；「400 此设备已被解绑」是凭据失效，不是请求不合法。
+  // 登录失效要人重新登录（设备被撤销单独归 DV1）。
   {
     id: 'AU2',
     title: '登录失效',
     codes: [
-      'device_revoked',
       'auth_required',
       'authentication_error',
       'unauthenticated',
@@ -206,7 +235,7 @@ export const RULES: readonly FailureRule[] = [
       'auth',
     ],
     // 只认说「要重新登录」的整句：原文里随便一个带 /login 的网址不能让整个池停下。
-    text: /not logged in|please run \/login|重新登录|完成登录|已被解绑|device[_ ]revoked|token (?:has )?expired|invalid (?:x-)?api[ _-]?key|authentication (?:failed|required)|unauthori[sz]ed|unauthenticated/i,
+    text: /not logged in|please run \/login|重新登录|完成登录|token (?:has )?expired|invalid (?:x-)?api[ _-]?key|authentication (?:failed|required)|unauthori[sz]ed|unauthenticated/i,
     statuses: [401],
     ladder: ['swapRoute', 'park'],
     avoid: { scope: 'pool', shared: true, until: 'none' },
@@ -283,6 +312,32 @@ export const RULES: readonly FailureRule[] = [
     title: '没有权限',
     codes: ['permission_denied', 'workflows_permission'],
     text: /refusing to allow a GitHub App|without [`']?workflows[`']? permission/i,
+    ladder: ['park'],
+    alert: true,
+    routeOutcome: 'neutral',
+  },
+  // 推分支前的卫生检查（packages/hygiene，github 的 pushBranch 推之前扫相对主线新增的行和文件名）拦下了会话交的内容：
+  // 密钥、账号编号、名单里的敏感值……公开仓推上去就公开了。是会话交的东西有问题：退回会话去掉再交（记返工账）；
+  // 同一处连续被拦两次（端口把命中处整理成稳定的一句，和上一次一字不差）就挂起报警。码只认结构化的 code 字段：
+  // 测试输出、源码里常有这个词。
+  {
+    id: 'HY1',
+    title: '卫生检查拦下了新增内容',
+    codes: ['hygiene_blocked'],
+    codeFieldOnly: true,
+    ladder: ['retry', 'park'],
+    budget: 'rework',
+    retryBaseSeconds: 0,
+    routeOutcome: 'neutral',
+    hint: '退回会话把这些内容从提交里拿掉再交',
+  },
+  // 卫生检查的名单（法国上是 /etc/fleet-dao/sensitive-values.txt）没读到：不推，也不当成「查过没事」。
+  // 是这台机器的配置问题，不是会话的错：不退回会话，整条推送路挂起报警，等人把名单放好后点「继续」。
+  {
+    id: 'HY2',
+    title: '卫生检查的名单没读到',
+    codes: ['hygiene_list_missing'],
+    codeFieldOnly: true,
     ladder: ['park'],
     alert: true,
     routeOutcome: 'neutral',

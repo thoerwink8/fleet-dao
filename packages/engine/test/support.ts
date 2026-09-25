@@ -6,7 +6,7 @@ import { TestWorkflowEnvironment } from '@temporalio/testing';
 import { DefaultLogger, Runtime, type WorkflowBundle } from '@temporalio/worker';
 import type { EngineActivities } from '../src/activity-options.ts';
 import type { RequirementInput, SubtaskInput } from '../src/contract.ts';
-import type { Classifier } from '../src/decisions/failure.ts';
+import type { FailureTriage } from '../src/decisions/failure.ts';
 import type { Decide } from '../src/decisions/index.ts';
 import type { SubtaskSpec } from '../src/decisions/plan.ts';
 import type { FakeWorld } from '../src/fakes.ts';
@@ -40,7 +40,7 @@ export function createRealEnv(): Promise<TestWorkflowEnvironment> {
 
 export interface WorkerOptions {
   taskQueue?: string;
-  classify?: Classifier;
+  triage?: FailureTriage;
   /** 换掉判断入口（演练「判断出错」）。 */
   decide?: Decide;
   /** 包一层活动（让某个活动卡在半路）。 */
@@ -75,7 +75,7 @@ export async function withWorker<T>(
       `token:${claims.taskId}:${claims.subtaskId ?? '-'}:${claims.runId}:${claims.ttlSeconds}`,
     connection: env.nativeConnection,
     workflowBundle: await engineBundle(),
-    ...(options.classify ? { classify: options.classify } : {}),
+    ...(options.triage ? { triage: options.triage } : {}),
     ...(options.decide ? { decide: options.decide } : {}),
     ...(options.wrapActivities ? { wrapActivities: options.wrapActivities } : {}),
     ...(options.maxCachedWorkflows === undefined ? {} : { maxCachedWorkflows: options.maxCachedWorkflows }),

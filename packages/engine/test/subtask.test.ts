@@ -14,7 +14,13 @@ import {
 } from '../src/contract.ts';
 import { createDecide, type Decide } from '../src/decisions/index.ts';
 import { createFakeWorld } from '../src/fakes.ts';
-import type { ActivityTiming, AwaitSessionInput, StartSessionInput, WaitTiming } from '../src/ports.ts';
+import {
+  type ActivityTiming,
+  type AwaitSessionInput,
+  PortError,
+  type StartSessionInput,
+  type WaitTiming,
+} from '../src/ports.ts';
 import {
   historyText,
   markerText,
@@ -571,6 +577,174 @@ describe('子任务工作流', { timeout: 60_000 }, () => {
       [['pa'], []],
       [['pa'], ['b1']],
     ]);
+  });
+
+  it('额度用满（主池）：挂起到清零、续上同一个会话同一条路由，不换池；等的时间不算墙钟预算', async () => {
+    const world = createFakeWorld({
+      session: (input, n) =>
+        input.stage === 'execute' && n === 1
+          ? {
+              outcome: 'failed',
+              failure: { code: 'quota_exhausted', message: '5 小时额度已用完，约 20 分钟后重置' },
+            }
+          : {},
+    });
+    const result = (await withWorker(env, world, async (q) =>
+      (await startSubtask(q)).result(),
+    )) as SubtaskResult;
+    expect(result.state).toBe('merged');
+    const execs = world.callsOf('startSession').filter((c) => c.input.stage === 'execute');
+    // 续的是同一条路由、同一个会话：第二次起会话带着第一次的会话编号，没有换池。
+    expect(execs.map((c) => c.input.route.routeId)).toEqual(['r1', 'r1']);
+    expect(execs[1]?.input.resumeSessionId).toBe('s1');
+    const picks = world.callsOf('pickRoute').filter((c) => c.input.stage === 'execute');
+    expect(picks.map((c) => [c.input.avoidPoolIds, c.input.stickRouteId])).toEqual([
+      [[], undefined],
+      [[], 'r1'],
+    ]);
+    // 等清零按「额度」记（不算墙钟预算），等了 20 分钟。
+    const quotaWait = world.timings.find((t): t is WaitTiming => t.kind === 'wait' && t.waitFor === 'quota');
+    expect(quotaWait?.waitMs).toBeGreaterThanOrEqual(20 * 60_000);
+    expect(world.count('raiseAlert')).toBe(0);
+  });
+
+  it('设备被撤销：挂起报警（写明去哪台机器以谁的身份重跑 reclaude login），人点继续后续同一个会话同一条路由', async () => {
+    const world = createFakeWorld({
+      session: (input, n) =>
+        input.stage === 'execute' && n === 1
+          ? { outcome: 'failed', failure: { code: 'agent_error', message: 'API Error: 401 device_revoked' } }
+          : {},
+    });
+    const result = await withWorker(env, world, async (q) => {
+      const handle = await startSubtask(q);
+      const parked = await queryUntil<SubtaskStatus>(handle, (s) => s.parked, '挂起');
+      expect(parked.lastProblem).toContain('重跑 reclaude login');
+      expect(world.alerts.map((a) => a.level)).toEqual(['stuck']);
+      expect(world.alerts[0]?.title).toContain('重跑 reclaude login');
+      await handle.signal(resumeSignal, { by: 'founder' });
+      return (await handle.result()) as SubtaskResult;
+    });
+    expect(result.state).toBe('merged');
+    const execs = world.callsOf('startSession').filter((c) => c.input.stage === 'execute');
+    expect(execs.map((c) => c.input.route.routeId)).toEqual(['r1', 'r1']);
+    expect(execs[1]?.input.resumeSessionId).toBe('s1');
+    // 没换池：设备被撤销不是这个任务的事，换池、等清零都没用。
+    const picks = world.callsOf('pickRoute').filter((c) => c.input.stage === 'execute');
+    expect(picks.map((c) => c.input.avoidPoolIds)).toEqual([[], []]);
+  });
+
+  it('推之前的卫生检查拦下了会话交的内容：退回会话（带着拦在哪），会话拿掉再交就推上去、开 PR', async () => {
+    const world = createFakeWorld({
+      push: (_input, n) =>
+        n === 1
+          ? new PortError(
+              'HYGIENE_BLOCKED',
+              '推之前的卫生检查拦下了新增内容：config/app.env:3 github-token',
+              {
+                retryable: false,
+              },
+            )
+          : undefined,
+    });
+    const result = (await withWorker(env, world, async (q) =>
+      (await startSubtask(q)).result(),
+    )) as SubtaskResult;
+    expect(result.state).toBe('merged');
+    const execs = world.callsOf('startSession').filter((c) => c.input.stage === 'execute');
+    expect(execs).toHaveLength(2);
+    // 退回的是同一个会话，意见里写明拦在哪、要改写提交。
+    expect(execs[1]?.input.resumeSessionId).toBe('s1');
+    const feedback = execs[1]?.input.brief.feedback ?? [];
+    expect(feedback.map((f) => f.kind)).toEqual(['hygiene']);
+    expect(feedback[0]?.items).toEqual(['推之前的卫生检查拦下了新增内容：config/app.env:3 github-token']);
+    expect(feedback[0]?.summary).toContain('改写提交');
+    // 被拦的那次没原样再推：第二次推的是会话改过之后交的头。
+    const pushes = world.callsOf('pushBranch');
+    expect(pushes).toHaveLength(2);
+    expect(pushes[0]?.input.head).not.toBe(pushes[1]?.input.head);
+    expect(world.count('openPr')).toBe(1);
+    expect(world.count('raiseAlert')).toBe(0);
+  });
+
+  it('卫生检查同一处连续被拦两次：不再退回会话，挂起报警；人看过点继续，接着推', async () => {
+    const blocked = () =>
+      new PortError('HYGIENE_BLOCKED', '推之前的卫生检查拦下了新增内容：config/app.env:3 github-token', {
+        retryable: false,
+      });
+    const world = createFakeWorld({ push: (_input, n) => (n <= 2 ? blocked() : undefined) });
+    const result = await withWorker(env, world, async (q) => {
+      const handle = await startSubtask(q);
+      const parked = await queryUntil<SubtaskStatus>(handle, (s) => s.parked, '挂起');
+      expect(parked.lastProblem).toContain('卫生检查拦下了新增内容');
+      expect(world.alerts.map((a) => a.level)).toEqual(['stuck']);
+      // 挂起前只退回过一次：第二次同一处被拦就停了。
+      expect(world.callsOf('startSession').filter((c) => c.input.stage === 'execute')).toHaveLength(2);
+      await handle.signal(resumeSignal, { by: 'founder' });
+      return (await handle.result()) as SubtaskResult;
+    });
+    expect(result.state).toBe('merged');
+    expect(world.count('pushBranch')).toBe(3);
+  });
+
+  it('卫生检查的名单没读到：配置问题，挂起报警、不退回会话；名单放好点继续就推', async () => {
+    const world = createFakeWorld({
+      push: (_input, n) =>
+        n === 1
+          ? new PortError(
+              'HYGIENE_LIST_MISSING',
+              '推之前的卫生检查没法做：没找到已知敏感值名单（引擎读 /etc/fleet-dao/sensitive-values.txt）',
+              { retryable: false },
+            )
+          : undefined,
+    });
+    const result = await withWorker(env, world, async (q) => {
+      const handle = await startSubtask(q);
+      const parked = await queryUntil<SubtaskStatus>(handle, (s) => s.parked, '挂起');
+      expect(parked.lastProblem).toContain('名单没读到');
+      expect(world.alerts.map((a) => a.level)).toEqual(['stuck']);
+      await handle.signal(resumeSignal, { by: 'founder' });
+      return (await handle.result()) as SubtaskResult;
+    });
+    expect(result.state).toBe('merged');
+    // 会话只跑了一次：名单的事不是会话的错，不退回。
+    expect(world.callsOf('startSession').filter((c) => c.input.stage === 'execute')).toHaveLength(1);
+    expect(world.count('pushBranch')).toBe(2);
+  });
+
+  it('开 PR 的正文给结构（交给 github 包的 renderPrBody 按 PR 模板生成），不自己拼字', async () => {
+    const world = createFakeWorld();
+    const input = subtaskInput(spec('a'));
+    await withWorker(env, world, async (q) => (await startSubtask(q, input)).result());
+    const body = world.callsOf('openPr')[0]?.input.body;
+    expect(body).toEqual({
+      requirement: input.issueNumber,
+      subtask: `a ${input.subtask.title}`,
+      did: [`做完：${input.subtask.title}`],
+      verified: [
+        '会话里跑过测试，报通过（fleet done --tests passed）',
+        '合并前在最新主线上再等 CI（合并队列）',
+      ],
+      changedFiles: ['src/a/changed.ts'],
+    });
+  });
+
+  it('工作流事件数到了报警线：报一次警（一条执行一张卡），照样走完', async () => {
+    const world = createFakeWorld();
+    const input = subtaskInput(spec('a'), { limits: { historyAlertEvents: 20 } });
+    const result = (await withWorker(env, world, async (q) =>
+      (await startSubtask(q, input)).result(),
+    )) as SubtaskResult;
+    expect(result.state).toBe('merged');
+    const history = world.alerts.filter((a) => a.dedupeKey.endsWith(':history'));
+    expect(history).toHaveLength(1);
+    expect(history[0]?.title).toContain('工作流事件数到了');
+    expect(history[0]?.level).toBe('info');
+  });
+
+  it('事件数没到报警线：不报', async () => {
+    const world = createFakeWorld();
+    await withWorker(env, world, async (q) => (await startSubtask(q)).result());
+    expect(world.alerts.filter((a) => a.dedupeKey.endsWith(':history'))).toEqual([]);
   });
 
   it('工人丢了：长活动靠心跳超时在秒级发现并重试接上，不等整段限时', async () => {
