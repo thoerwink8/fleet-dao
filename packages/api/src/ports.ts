@@ -337,19 +337,104 @@ export interface AgentStore {
   releaseCommand(input: { runId: string; key: string; token: string }): Promise<void>;
 }
 
-export interface GitHubStore {
-  /** 记下投递编号；同一编号第二次来返回 duplicate。存 Postgres，不放本机文件。 */
-  claimDelivery(delivery: {
-    id: string;
-    event: string;
-    source: 'webhook' | 'poll' | 'redelivery';
-    receivedAt: string;
-  }): Promise<'new' | 'duplicate'>;
-  /** 处理失败时撤销登记，让重投或补收还能进来。 */
-  releaseDelivery(id: string): Promise<void>;
+export type GitHubDeliverySource = 'webhook' | 'poll' | 'redelivery';
+
+/**
+ * processing = 正在处理（进程死在半路也停在这）；accepted = 放进来、处理完；ignored = 按规矩不收（reason 写为什么）；
+ * failed = 处理出错（reason 写错在哪），等重投、补收或重放再来。
+ */
+export type GitHubDeliveryStatus = 'processing' | 'accepted' | 'ignored' | 'failed';
+
+/** 一次投递（webhook 收到的，或补收时拼出来的），原文照收。 */
+export interface NewGitHubDelivery {
+  id: string;
+  event: string;
+  action?: string | undefined;
+  source: GitHubDeliverySource;
+  /** owner/name，原样取自事件；没有仓的事件不填。 */
+  repo?: string | undefined;
+  /** 这条事件说的那个对象的那一版（写法同 pollDeliveryId）；轮询补收按它认出 webhook 收过的同一版。 */
+  versionKey?: string | undefined;
+  payload: unknown;
 }
 
-export type Store = UserStore & BoardStore & RoutingStore & OpsStore & AgentStore & GitHubStore;
+export interface GitHubDelivery extends NewGitHubDelivery {
+  status: GitHubDeliveryStatus;
+  reason?: string | undefined;
+  note?: string | undefined;
+  attempts: number;
+  receivedAt: string;
+  claimedAt: string;
+  finishedAt?: string | undefined;
+}
+
+/** 占到了（retry = 上次没处理成、这次重来）就去处理，记结局要拿 token；duplicate = 处理过了、正在处理，或同一版收过了。 */
+export type GitHubDeliveryClaim =
+  | { status: 'claimed'; token: string; retry: boolean }
+  | { status: 'duplicate' };
+
+export type GitHubDeliveryOutcome =
+  | { status: 'accepted'; note?: string | undefined }
+  | { status: 'ignored' | 'failed'; reason: string };
+
+export interface GitHubStore {
+  /**
+   * 收下一条投递：原文落库，按投递编号去重，存 Postgres 不放本机文件。同一编号再来：上次出错、或处理中而且占用早于
+   * staleBefore（那一次多半死了）就重新占住（retry）；处理完了、正在处理就是 duplicate。
+   * skipIfVersionSeen（轮询补收用）：别的投递的 versionKey 已经是它（webhook 收过同一版），也是 duplicate、不落库。
+   */
+  claimDelivery(
+    delivery: NewGitHubDelivery,
+    options: { staleBefore: string; skipIfVersionSeen?: string | undefined },
+  ): Promise<GitHubDeliveryClaim>;
+  /** 重放库里的一条：接管的规矩同 claimDelivery；force = 处理完的也重新占住（修了代码、改了名单之后重跑）。 */
+  reclaimDelivery(
+    id: string,
+    options: { staleBefore: string; force: boolean },
+  ): Promise<
+    | { status: 'claimed'; token: string; delivery: GitHubDelivery }
+    | { status: 'not_found' | 'in_flight' | 'finished' }
+  >;
+  /** 记结局。只认这次占用的凭据：已经被别的请求接管了就不改，返回 false。 */
+  finishDelivery(id: string, token: string, outcome: GitHubDeliveryOutcome): Promise<boolean>;
+  getDelivery(id: string): Promise<GitHubDelivery | null>;
+  /** 没处理成的（出错的，和处理中但占用早于 staleBefore 的），次数少的在前、再按收到先后，最多 limit 条。 */
+  listUnfinishedDeliveries(query: { staleBefore: string; limit: number }): Promise<GitHubDelivery[]>;
+}
+
+/** 受管的仓，带自动派活开关：autoDispatchSince = 打开的时刻，null = 关着（只收单、显示，不拉起工作流）。 */
+export interface IntakeRepo extends Repo {
+  autoDispatchSince: string | null;
+}
+
+/** 从 issue 建的任务行。id 由调用方生成（操作记录的 target 要用）；这张 issue 已经有任务就不建、回已有的那行。 */
+export interface NewIssueTask {
+  id: string;
+  repoId: string;
+  issueNumber: number;
+  title: string;
+  rawRequest: string;
+  /** 成员编号（users.id），和驾驶舱开的需求同一种写法。 */
+  requestedBy: string;
+}
+
+/** 接活要用的：按名字找仓、按 issue 找任务、建任务行、跟着 issue 改原话。写操作和操作记录同一事务。 */
+export interface IntakeStore {
+  /** owner/name 不分大小写。 */
+  findRepoByName(owner: string, name: string): Promise<IntakeRepo | null>;
+  findTaskByIssue(repoId: string, issueNumber: number): Promise<Task | null>;
+  /** 按（仓, issue 号）唯一：并发来两次也只建一行，第二次回 created=false 和已有的那行，不写操作记录。新行排在这个仓最后。 */
+  createTaskFromIssue(input: NewIssueTask, audit: NewAuditEntry): Promise<{ task: Task; created: boolean }>;
+  /** 标题和原话都没变是 unchanged（不写操作记录）。 */
+  updateTaskRequest(
+    input: { taskId: string; title: string; rawRequest: string },
+    audit: NewAuditEntry,
+  ): Promise<'ok' | 'unchanged' | 'not_found'>;
+  /** 还在排队（从没派出去）的任务直接记成叫停；已经不在排队了就不动，返回 not_queued。 */
+  stopQueuedTask(taskId: string, audit: NewAuditEntry): Promise<'ok' | 'not_queued'>;
+}
+
+export type Store = UserStore & BoardStore & RoutingStore & OpsStore & AgentStore & GitHubStore & IntakeStore;
 
 // —— 发给工作流的信号（Temporal）——
 
@@ -385,6 +470,32 @@ export class WorkflowGoneError extends Error {
     this.name = 'WorkflowGoneError';
     this.taskId = taskId;
   }
+}
+
+/**
+ * 拉起需求工作流要给的东西：和引擎 contract.ts 的 RequirementInput 同形（schemaVersion 1；limits、routeOverrides 不给，用引擎的默认）。
+ * 这是进了工作流历史的输入：以后只许加可选字段，不许改老字段的意思。
+ */
+export interface RequirementStart {
+  schemaVersion: 1;
+  /** 库里的 tasks.id。 */
+  taskId: string;
+  repo: Repo;
+  issueNumber: number;
+  title: string;
+  /** 创始人原话（issue 正文去掉进度段；正文空就是标题）。 */
+  rawRequest: string;
+  /** issue 作者的 GitHub 登录名：结果文档里写「提出人」用，本来就公开在 issue 上。 */
+  requestedBy: string;
+}
+
+/** 拉起需求工作流（一张 issue 一条，工作流编号 requirementWorkflowId(repo, issueNumber)）。 */
+export interface RequirementWorkflows {
+  /**
+   * 同一编号的工作流正在跑：already_running，不起第二条；上一条已经结束（需求重开）就再起一条。
+   * Temporal 没接上、连不上抛 WorkflowUnavailableError（调用方记成出错，重放时再来）。
+   */
+  start(input: RequirementStart): Promise<'started' | 'already_running'>;
 }
 
 /** 发不了信号：Temporal 客户端没接上或连不上。 */
@@ -451,10 +562,10 @@ export interface FeishuAuth {
 
 // —— GitHub 事件 ——
 
-/** 通过签名与白名单之后交给引擎的事件。wake=false 表示只同步镜像、不叫醒工作流（自家机器人的回声）。 */
+/** 通过签名与白名单之后的事件。wake=false 表示只同步镜像、不叫醒工作流（自家机器人的回声）。 */
 export interface IngestedEvent {
   deliveryId: string;
-  source: 'webhook' | 'poll' | 'redelivery';
+  source: GitHubDeliverySource;
   event: string;
   action?: string | undefined;
   repo: string;
@@ -463,6 +574,10 @@ export interface IngestedEvent {
   payload: unknown;
 }
 
+/**
+ * 放进来的每条事件都先交给它：写 PR 镜像、CI 汇总（生产是 @fleet-dao/github 的 eventSink）。
+ * issue 和评论之后另由 issue-intake.ts 变成任务、工作流。抛错 = 没处理成，这条投递记成出错。
+ */
 export interface GitHubEventSink {
   accept(event: IngestedEvent): Promise<void>;
 }

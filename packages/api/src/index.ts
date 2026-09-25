@@ -23,17 +23,25 @@ export type { Deps } from './deps.ts';
 export { createFeishuAuth, FeishuRejectedError, FeishuUnavailableError } from './feishu.ts';
 export {
   createGitHubIntake,
+  DELIVERY_STALE_MS,
   type GitHubIntake,
-  type GitHubReconciler,
+  githubAppMissing,
   githubWhitelist,
-  notWiredGitHub,
+  type IngestResult,
   pollDeliveryId,
-  type ReconcileReport,
+  type ReplayResult,
   screenGithubEvent,
   verifyGithubSignature,
+  versionKeyOf,
 } from './github.ts';
 export { type HealthReport, PublicHealthError, runHealthChecks, serviceHealthChecks } from './health.ts';
 export { isSerial, isUuid, parseCursor } from './ids.ts';
+export {
+  createIssueIntake,
+  type DispatchDecision,
+  dispatchDecision,
+  type IssueIntake,
+} from './issue-intake.ts';
 export { jsonLogger, silentLogger } from './log.ts';
 export { createMemoryStore, emptyData, type MemoryData } from './memory-store.ts';
 export {
@@ -44,5 +52,12 @@ export {
   withStatementTimeout,
 } from './pg-store.ts';
 export * from './ports.ts';
+export {
+  type GitHubReconcileResult,
+  MAX_AUTO_REPLAYS,
+  type ReconcileParts,
+  type ReconcileStep,
+  reconcileGitHub,
+} from './reconcile.ts';
 export { createSseRelay, type SseRelay } from './sse.ts';
 export { createTemporalWorkflowControl, notConnectedTemporal, type TemporalClientLike } from './temporal.ts';

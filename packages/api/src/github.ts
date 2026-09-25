@@ -1,5 +1,6 @@
-// GitHub 事件接收：验签名（X-Hub-Signature-256）→ 投递编号去重 → 白名单过滤 → 交给引擎（写镜像、叫醒工作流）。
-// 公开仓里陌生人也能开单、评论；设计删了「进门标签」，这道白名单就是唯一的门，所以在代码里强制，不靠互动限制。
+// GitHub 事件接收：验签名（X-Hub-Signature-256）→ 原文落库、投递编号去重 → 白名单过滤 → PR 镜像 → issue 变成任务和工作流。
+// 香港只转发不验签：请求体和几个头原样透传，签名必须对收到的原始字节算，不许先解析再序列化。
+// 验签不过的不落库（没认证的请求不许往库里写），只回 401、记日志。
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
@@ -7,25 +8,37 @@ import { z } from 'zod';
 import type { Deps } from './deps.ts';
 import { PublicHealthError } from './health.ts';
 import { ApiError, errorBody } from './http.ts';
-import type { GitHubEventSink, User } from './ports.ts';
+import { CommentPayload, createIssueIntake, IssuePayload } from './issue-intake.ts';
+import type { GitHubDeliveryOutcome, GitHubDeliverySource, GitHubEventSink, IngestedEvent } from './ports.ts';
+import { GhUser, type GithubWhitelist, githubWhitelist, isTrusted } from './whitelist.ts';
+
+export { type GithubWhitelist, githubWhitelist, isTrusted } from './whitelist.ts';
 
 /** GitHub 的投递上限是 25 MB。 */
 const MAX_BODY_BYTES = 25 * 1024 * 1024;
+/** 处理中的投递超过这么久没收尾，就当那一次死了，重投、补收、重放时接过来。一次处理是几次查库加一次起工作流，秒级。 */
+export const DELIVERY_STALE_MS = 5 * 60_000;
+/** 出错原因记进库之前截到这么长（原文可能带整段堆栈）。 */
+const MAX_REASON_CHARS = 2_000;
 
 /**
- * 引擎还没接上时的 GitHub 事件去处：处理不了就如实失败（投递编号撤销登记，GitHub 记为投递失败、以后可重投），
- * 不悄悄丢；健康检查报红。
+ * 两个机器人的凭据读不到时 PR 镜像、CI 汇总的去处：这两样要调 GitHub，如实失败（这条投递记成出错，凭据补上后
+ * 由对账重放）；issue、评论、ping 不用写镜像，照常放过去，issue 照样变成任务。健康检查报红。
  */
-export function notWiredGitHub(): { sink: GitHubEventSink; check: () => Promise<void> } {
-  const why = 'GitHub 事件还没接到引擎（等引擎的 PR）';
+export function githubAppMissing(why: string): { sink: GitHubEventSink; check: () => Promise<void> } {
+  const message = `GitHub 机器人的凭据没读到，PR 镜像和 CI 汇总写不了：${why}`;
   return {
     sink: {
-      async accept() {
-        throw new Error(why);
+      async accept(event) {
+        if (event.event === 'issues' || event.event === 'issue_comment' || event.event === 'ping') return;
+        throw new Error(message);
       },
     },
     async check() {
-      throw new PublicHealthError('not_wired', why);
+      throw new PublicHealthError(
+        'app_credentials_missing',
+        'GitHub 机器人的凭据没读到，PR 和 CI 事件写不进镜像',
+      );
     },
   };
 }
@@ -37,8 +50,6 @@ export function verifyGithubSignature(secret: string, body: Uint8Array, header: 
   return given.length === expected.length && timingSafeEqual(given, expected);
 }
 
-const GhUser = z.object({ login: z.string(), id: z.number(), type: z.string() });
-type GhUser = z.infer<typeof GhUser>;
 const GhRepo = z.object({ full_name: z.string() });
 
 const Envelope = z.object({
@@ -46,8 +57,6 @@ const Envelope = z.object({
   sender: GhUser.optional(),
   repository: GhRepo.optional(),
 });
-const IssuePayload = z.object({ issue: z.object({ number: z.number(), user: GhUser }) });
-const CommentPayload = z.object({ comment: z.object({ id: z.number(), user: GhUser }) });
 const PullPayload = z.object({
   pull_request: z.object({
     number: z.number(),
@@ -106,39 +115,6 @@ function ciFromFork(event: string, payload: unknown, repo: string): boolean | nu
     default:
       return null;
   }
-}
-
-export interface GithubWhitelist {
-  /** 有数字编号的人只按编号认。 */
-  userIds: ReadonlySet<number>;
-  /** 没登记数字编号的人才按登录名认（小写）。 */
-  logins: ReadonlySet<string>;
-  /** 自家机器人：只按数字编号认，且 type 必须是 Bot。 */
-  botIds: ReadonlySet<number>;
-}
-
-export function githubWhitelist(users: User[]): GithubWhitelist {
-  const userIds = new Set<number>();
-  const logins = new Set<string>();
-  const botIds = new Set<number>();
-  for (const u of users) {
-    if (!u.active) continue;
-    if (u.role === 'bot') {
-      if (u.githubId !== undefined) botIds.add(u.githubId);
-    } else if (u.githubId !== undefined) {
-      userIds.add(u.githubId);
-    } else if (u.githubLogin) {
-      logins.add(u.githubLogin.toLowerCase());
-    }
-  }
-  return { userIds, logins, botIds };
-}
-
-export function isTrusted(user: GhUser | null | undefined, w: GithubWhitelist): boolean {
-  if (!user) return false;
-  if (user.type === 'Bot') return w.botIds.has(user.id);
-  if (user.type !== 'User') return false;
-  return w.userIds.has(user.id) || w.logins.has(user.login.toLowerCase());
 }
 
 export type Screening =
@@ -206,55 +182,170 @@ export function screenGithubEvent(
   return { accept: true, wake, reason: 'whitelisted', repo, action };
 }
 
+/** 轮询捞到的东西用这个当投递编号：同一版本（updated_at 相同）只收一次，改过之后再收。 */
+export function pollDeliveryId(repo: string, kind: string, id: number | string, updatedAt: string): string {
+  return `poll:${repo.toLowerCase()}:${kind}:${id}:${updatedAt}`;
+}
+
+const Versioned = {
+  issues: z.object({ issue: z.object({ number: z.number(), updated_at: z.string() }) }),
+  issue_comment: z.object({ comment: z.object({ id: z.number(), updated_at: z.string() }) }),
+  pull_request: z.object({ pull_request: z.object({ number: z.number(), updated_at: z.string() }) }),
+};
+
+/** webhook 带来的这一版，写成轮询的投递编号：轮询再看到同一版就知道收过了。不是这三种事件、认不出版本的不写。 */
+export function versionKeyOf(event: string, payload: unknown, repo: string | undefined): string | undefined {
+  if (!repo) return undefined;
+  if (event === 'issues') {
+    const p = Versioned.issues.safeParse(payload);
+    return p.success
+      ? pollDeliveryId(repo, 'issue', p.data.issue.number, p.data.issue.updated_at)
+      : undefined;
+  }
+  if (event === 'issue_comment') {
+    const p = Versioned.issue_comment.safeParse(payload);
+    return p.success
+      ? pollDeliveryId(repo, 'comment', p.data.comment.id, p.data.comment.updated_at)
+      : undefined;
+  }
+  if (event === 'pull_request') {
+    const p = Versioned.pull_request.safeParse(payload);
+    return p.success
+      ? pollDeliveryId(repo, 'pull', p.data.pull_request.number, p.data.pull_request.updated_at)
+      : undefined;
+  }
+  return undefined;
+}
+
 export type IngestResult =
-  | { verdict: 'accepted'; wake: boolean }
+  | { verdict: 'accepted'; wake: boolean; note?: string | undefined }
   | { verdict: 'ignored'; reason: string }
   | { verdict: 'duplicate' };
+
+/** 重放的结果：not_found = 库里没有这条；in_flight = 正在处理；finished = 已经处理完（要重跑得带 force）。 */
+export type ReplayResult = IngestResult | { verdict: 'not_found' | 'in_flight' | 'finished' };
 
 export interface GitHubIntake {
   ingest(input: {
     deliveryId: string;
     event: string;
     payload: unknown;
-    source: 'webhook' | 'poll' | 'redelivery';
+    source: GitHubDeliverySource;
   }): Promise<IngestResult>;
+  /** 按库里的原文再处理一遍（对账重放出错、卡住的投递；修了代码、改了名单之后手动重跑时带 force）。 */
+  replay(deliveryId: string, options?: { force?: boolean }): Promise<ReplayResult>;
 }
 
-/** 收件（webhook）和补收（对账、轮询）共用这一道门和这一本投递账。 */
-export function createGitHubIntake(deps: Pick<Deps, 'store' | 'github' | 'log' | 'now'>): GitHubIntake {
+/** 收件（webhook）、补收（对账、轮询）、重放共用这一道门和这一本投递账（github_events）。 */
+export function createGitHubIntake(
+  deps: Pick<Deps, 'store' | 'github' | 'workflows' | 'requirements' | 'log' | 'now'>,
+): GitHubIntake {
   const { store, log } = deps;
+  const issues = createIssueIntake(deps);
+  const staleBefore = () => new Date(deps.now().getTime() - DELIVERY_STALE_MS).toISOString();
+
+  async function finish(id: string, token: string, outcome: GitHubDeliveryOutcome): Promise<void> {
+    if (!(await store.finishDelivery(id, token, outcome))) {
+      log.warn('这条投递处理期间被别的请求接管了，这次的结局没记上', {
+        deliveryId: id,
+        status: outcome.status,
+      });
+    }
+  }
+
+  async function process(
+    delivery: {
+      id: string;
+      event: string;
+      source: GitHubDeliverySource;
+      payload: unknown;
+      receivedAt: string;
+    },
+    token: string,
+  ): Promise<IngestResult> {
+    const { id: deliveryId, event, source, payload } = delivery;
+    try {
+      const [users, repos] = await Promise.all([store.listUsers(), store.listRepos()]);
+      const screening = screenGithubEvent(event, payload, {
+        repos: new Set(repos.map((r) => `${r.owner}/${r.name}`.toLowerCase())),
+        whitelist: githubWhitelist(users),
+      });
+      if (!screening.accept) {
+        // 外人改了白名单作者的单、认不出的事件：告警（不当成「没事件」）；陌生人、别的仓、不处理的事件：照常不收
+        const warn = screening.reason === 'edited_by_outsider' || screening.reason === 'payload_unreadable';
+        log[warn ? 'warn' : 'info']('GitHub 事件没放进来', { deliveryId, event, reason: screening.reason });
+        await finish(deliveryId, token, { status: 'ignored', reason: screening.reason });
+        return { verdict: 'ignored', reason: screening.reason };
+      }
+      const ingested: IngestedEvent = {
+        deliveryId,
+        source,
+        event,
+        action: screening.action,
+        repo: screening.repo,
+        wake: screening.wake,
+        receivedAt: delivery.receivedAt,
+        payload,
+      };
+      await deps.github.accept(ingested);
+      const note = await issues.handle(ingested);
+      await finish(deliveryId, token, { status: 'accepted', note });
+      if (note) log.info('GitHub 事件已处理', { deliveryId, event, note });
+      return { verdict: 'accepted', wake: screening.wake, ...(note ? { note } : {}) };
+    } catch (err) {
+      const reason =
+        (err instanceof Error ? err.message : String(err)).slice(0, MAX_REASON_CHARS) || '没带原因';
+      // 原文留在库里：重投、补收或对账重放时还能再来
+      try {
+        await finish(deliveryId, token, { status: 'failed', reason });
+      } catch (recordErr) {
+        log.error('GitHub 事件没处理成，出错记录也没写进去', {
+          deliveryId,
+          event,
+          error: reason,
+          recordError: String(recordErr),
+        });
+      }
+      throw err;
+    }
+  }
+
   return {
     async ingest({ deliveryId, event, payload, source }) {
-      const receivedAt = deps.now().toISOString();
-      const claim = await store.claimDelivery({ id: deliveryId, event, source, receivedAt });
-      if (claim === 'duplicate') return { verdict: 'duplicate' };
-      try {
-        const [users, repos] = await Promise.all([store.listUsers(), store.listRepos()]);
-        const screening = screenGithubEvent(event, payload, {
-          repos: new Set(repos.map((r) => `${r.owner}/${r.name}`.toLowerCase())),
-          whitelist: githubWhitelist(users),
-        });
-        if (!screening.accept) {
-          const level = screening.reason === 'edited_by_outsider' ? 'warn' : 'info';
-          log[level]('GitHub 事件没放进来', { deliveryId, event, reason: screening.reason });
-          return { verdict: 'ignored', reason: screening.reason };
-        }
-        await deps.github.accept({
-          deliveryId,
-          source,
+      const env = Envelope.safeParse(payload);
+      const repo = env.success ? env.data.repository?.full_name : undefined;
+      // 轮询的投递编号就是「对象 + 版本」：webhook 收过的同一版不再重做；webhook 自己只按投递编号去重
+      const versionKey = source === 'poll' ? deliveryId : versionKeyOf(event, payload, repo);
+      const claim = await store.claimDelivery(
+        {
+          id: deliveryId,
           event,
-          action: screening.action,
-          repo: screening.repo,
-          wake: screening.wake,
-          receivedAt,
+          action: env.success ? env.data.action : undefined,
+          source,
+          repo,
+          versionKey,
           payload,
-        });
-        return { verdict: 'accepted', wake: screening.wake };
-      } catch (err) {
-        // 没处理成就撤销登记，让 GitHub 重投或补收还能再进来。
-        await store.releaseDelivery(deliveryId);
-        throw err;
-      }
+        },
+        { staleBefore: staleBefore(), skipIfVersionSeen: source === 'poll' ? deliveryId : undefined },
+      );
+      if (claim.status === 'duplicate') return { verdict: 'duplicate' };
+      return process(
+        { id: deliveryId, event, source, payload, receivedAt: deps.now().toISOString() },
+        claim.token,
+      );
+    },
+
+    async replay(deliveryId, options = {}) {
+      const claim = await store.reclaimDelivery(deliveryId, {
+        staleBefore: staleBefore(),
+        force: options.force ?? false,
+      });
+      if (claim.status !== 'claimed') return { verdict: claim.status };
+      const d = claim.delivery;
+      return process(
+        { id: d.id, event: d.event, source: d.source, payload: d.payload, receivedAt: d.receivedAt },
+        claim.token,
+      );
     },
   };
 }
@@ -277,12 +368,15 @@ export function githubRoutes(deps: Deps, intake: GitHubIntake): Hono {
         deps.log.warn('GitHub 事件签名不对，已拒绝', { deliveryId, event, bytes: body.length });
         throw new ApiError(401, 'bad_signature', '签名不对');
       }
-      if (!deliveryId || !event)
+      if (!deliveryId || !event) {
+        deps.log.warn('GitHub 事件缺投递编号或事件名，已拒绝', { deliveryId, event });
         throw new ApiError(400, 'missing_headers', '缺 X-GitHub-Delivery 或 X-GitHub-Event');
+      }
       let payload: unknown;
       try {
         payload = JSON.parse(new TextDecoder().decode(body));
       } catch {
+        deps.log.warn('GitHub 事件的请求体不是 JSON，已拒绝', { deliveryId, event, bytes: body.length });
         throw new ApiError(400, 'invalid_json', '请求体不是 JSON（Content type 要选 application/json）');
       }
       const result = await intake.ingest({ deliveryId, event, payload, source: 'webhook' });
@@ -290,28 +384,4 @@ export function githubRoutes(deps: Deps, intake: GitHubIntake): Hono {
     },
   );
   return app;
-}
-
-/**
- * 补收（先留接口）：GitHub 不会自动重投失败的投递，事件也可能在路上丢。由引擎的定时任务实现，
- * 捞回来的事件一律走 GitHubIntake.ingest（同一道白名单门、同一本投递账）。
- */
-export interface GitHubReconciler {
-  /** 对账：用 App 身份拉投递日志，把失败的重投（重投时投递编号不变，去重账会认出来）。 */
-  redeliverFailed(since: Date): Promise<ReconcileReport>;
-  /** 轮询：按 updated_at 拉一个仓的 issue、评论、PR，逐条 ingest（source=poll，编号用 pollDeliveryId）。 */
-  poll(repoFullName: string, since: Date): Promise<ReconcileReport>;
-}
-
-export interface ReconcileReport {
-  /** ok = 查完了；unscanned = 这次没查成（和「查了没发现」分开）。 */
-  outcome: 'ok' | 'unscanned';
-  checked: number;
-  recovered: number;
-  why?: string | undefined;
-}
-
-/** 轮询捞到的东西用这个当投递编号：同一版本（updated_at 相同）只收一次，改过之后再收。 */
-export function pollDeliveryId(repo: string, kind: string, id: number | string, updatedAt: string): string {
-  return `poll:${repo.toLowerCase()}:${kind}:${id}:${updatedAt}`;
 }

@@ -359,6 +359,60 @@ describe('0003：目录装载器要的三列', () => {
   );
 });
 
+describe('0004：接活入口（GitHub 事件原文、自动派活开关）', () => {
+  const entries = [...journal.entries].sort((a, b) => a.idx - b.idx);
+  const target = entries.findIndex((e) => e.tag === '0004_github_intake');
+  const runMigration = async (pg: PGlite, tag: string) => {
+    const text = readFileSync(join(MIGRATIONS_FOLDER, `${tag}.sql`), 'utf8');
+    for (const statement of text.split('--> statement-breakpoint')) await pg.exec(statement);
+  };
+
+  it(
+    '已有的仓一律是关着的（不会一升级就开始自动派活）；事件表不收没原因的「不收」「出错」、处理中不许有收尾时刻',
+    async () => {
+      expect(target).toBeGreaterThan(0);
+      const pg = new PGlite();
+      try {
+        for (const e of entries.slice(0, target)) await runMigration(pg, e.tag);
+        await pg.exec(
+          `insert into repos (owner, name, test_command) values ('acme', 'widgets', 'pnpm check')`,
+        );
+        // github_events 是这一条建的表，装之前不存在；升级时的仓和别的行都留着
+        await runMigration(pg, '0004_github_intake');
+
+        expect((await pg.query(`select auto_dispatch_since from repos`)).rows).toEqual([
+          { auto_dispatch_since: null },
+        ]);
+        const insert = (id: string, status: string, reason: string | null, finished: boolean) =>
+          pg.query(
+            `insert into github_events (delivery_id, event, source, payload, status, reason, finished_at)
+             values ($1, 'issues', 'webhook', '{}'::jsonb, $2, $3, ${finished ? 'now()' : 'null'})`,
+            [id, status, reason],
+          );
+        await insert('ok-processing', 'processing', null, false);
+        await insert('ok-accepted', 'accepted', null, true);
+        await insert('ok-failed', 'failed', '库连不上', true);
+        await expect(insert('no-reason', 'failed', null, true)).rejects.toThrow(
+          /github_events_reason_when_not_taken/,
+        );
+        await expect(insert('empty-reason', 'ignored', '', true)).rejects.toThrow(
+          /github_events_reason_when_not_taken/,
+        );
+        await expect(insert('processing-done', 'processing', null, true)).rejects.toThrow(
+          /github_events_finished_iff_done/,
+        );
+        await expect(insert('accepted-open', 'accepted', null, false)).rejects.toThrow(
+          /github_events_finished_iff_done/,
+        );
+        await expect(insert('odd-status', 'lost', 'x', true)).rejects.toThrow(/github_events_status_known/);
+      } finally {
+        await pg.close();
+      }
+    },
+    TEST_DB_TIMEOUT_MS,
+  );
+});
+
 describe('测试库', () => {
   it(
     '在内存里，两份测试库互相看不见对方的数据',

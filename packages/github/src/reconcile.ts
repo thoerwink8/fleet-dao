@@ -64,19 +64,21 @@ const Delivery = z.object({
   event: z.string().optional(),
 });
 
-const IssueItem = z.object({
+// issue、评论、PR 都原样整条送进门（looseObject 不删别的字段）：后端要用标题、正文、开关状态、建立时刻建任务，
+// 原文也照样落库、能重放。这里只认要用到的几样在不在。
+const IssueItem = z.looseObject({
   number: z.number(),
   updated_at: z.string(),
   pull_request: z.unknown().optional(),
   user: z.object({ login: z.string(), id: z.number(), type: z.string() }).nullable(),
 });
-const CommentItem = z.object({
+const CommentItem = z.looseObject({
   id: z.number(),
   updated_at: z.string(),
   issue_url: z.string().optional(),
   user: z.object({ login: z.string(), id: z.number(), type: z.string() }).nullable(),
 });
-const PullItem = z.object({
+const PullItem = z.looseObject({
   number: z.number(),
   updated_at: z.string(),
   merged_at: z.string().nullable().optional(),

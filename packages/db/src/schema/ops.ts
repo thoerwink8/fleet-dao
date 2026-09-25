@@ -1,4 +1,4 @@
-// 人与运维：成员、通知、操作记录、外部写操作的幂等键、Jev 判断记录、定时任务登记与每次跑的记录、设置。
+// 人与运维：成员、通知、操作记录、外部写操作的幂等键、收到的 GitHub 事件、Jev 判断记录、定时任务登记与每次跑的记录、设置。
 // 「谁做的」统一记成 actor_kind + actor_id（人是用户 id，会话里的 AI 是会话 id……），和驾驶舱接口的 Actor 同形。
 import { sql } from 'drizzle-orm';
 import {
@@ -126,7 +126,7 @@ export const auditLog = pgTable(
   ],
 );
 
-/** 对 GitHub 等外部写操作防重复：先占键再写，写成了把回执记上；重放时直接拿回执。GitHub 事件的投递编号也记在这里。 */
+/** 对 GitHub 等外部写操作防重复：先占键再写，写成了把回执记上；重放时直接拿回执。GitHub 事件的投递编号不在这里，在 github_events。 */
 export const idempotencyKeys = pgTable(
   'idempotency_keys',
   {
@@ -139,6 +139,59 @@ export const idempotencyKeys = pgTable(
     result: jsonb('result'),
   },
   (t) => [index('idempotency_keys_claimed_at_idx').on(t.claimedAt)],
+);
+
+/** processing = 正在处理（进程死在半路也停在这）；accepted = 放进来、处理完；ignored = 按规矩不收；failed = 处理出错，等重投、补收或重放。 */
+export const GITHUB_EVENT_STATUSES = ['processing', 'accepted', 'ignored', 'failed'] as const;
+export const GITHUB_EVENT_SOURCES = ['webhook', 'poll', 'redelivery'] as const;
+
+const inList = (values: readonly string[]) => sql.raw(values.map((v) => `'${v}'`).join(', '));
+
+/**
+ * 收到的 GitHub 事件，一次投递一行：原文留着能重放，投递编号去重也靠它（design 第十四节「收 GitHub 事件」）。
+ * 验签不过的不进这里：没认证的请求不许往库里写。
+ * version_key = 这条事件说的那个对象的那一版（issue、评论、PR 的编号 + updated_at，写法同轮询的投递编号）：
+ * 轮询补收时拿它认出 webhook 已经收过的同一版，不再重做一遍。
+ */
+export const githubEvents = pgTable(
+  'github_events',
+  {
+    deliveryId: text('delivery_id').primaryKey(),
+    event: text('event').notNull(),
+    action: text('action'),
+    source: text('source').notNull().$type<(typeof GITHUB_EVENT_SOURCES)[number]>(),
+    /** owner/name，原样取自事件；没有仓的事件（安装类）为空。 */
+    repo: text('repo'),
+    versionKey: text('version_key'),
+    payload: jsonb('payload').notNull(),
+    status: text('status').notNull().$type<(typeof GITHUB_EVENT_STATUSES)[number]>(),
+    /** 不收、出错的原因。 */
+    reason: text('reason'),
+    /** 放进来之后做了什么（建了任务、拉起了工作流、叫停……），给人查。 */
+    note: text('note'),
+    /** 第几次处理：重投、重放、接管各加一。 */
+    attempts: integer('attempts').notNull().default(1),
+    receivedAt: timestamp('received_at', tz).notNull().defaultNow(),
+    /** 这次占用的时刻，也是记结局的凭据：接管会把它改新，旧的那次就记不上了。 */
+    claimedAt: timestamp('claimed_at', tz).notNull().defaultNow(),
+    finishedAt: timestamp('finished_at', tz),
+  },
+  (t) => [
+    check('github_events_status_known', sql`${t.status} in (${inList(GITHUB_EVENT_STATUSES)})`),
+    check('github_events_source_known', sql`${t.source} in (${inList(GITHUB_EVENT_SOURCES)})`),
+    // 不收、出错都得写原因：不许出现「没处理，也不知道为什么」的行（空字符串也不算原因）。
+    check(
+      'github_events_reason_when_not_taken',
+      sql`${t.status} not in ('ignored', 'failed') or coalesce(length(${t.reason}), 0) > 0`,
+    ),
+    check('github_events_finished_iff_done', sql`(${t.status} = 'processing') = (${t.finishedAt} is null)`),
+    check('github_events_attempts_positive', sql`${t.attempts} > 0`),
+    index('github_events_version_key_idx').on(t.versionKey).where(sql`${t.versionKey} is not null`),
+    // 对账捞没处理成的：先捞次数少的。
+    index('github_events_unfinished_idx')
+      .on(t.attempts, t.receivedAt)
+      .where(sql`${t.status} in ('processing', 'failed')`),
+  ],
 );
 
 /** Jev 的题目。先只记不拦，攒够样本、准确率过线才改成真拦。 */

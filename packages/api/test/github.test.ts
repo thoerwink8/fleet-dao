@@ -1,40 +1,39 @@
-import { createHmac } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { devFixtures } from '../src/dev-fixtures.ts';
-import { githubWhitelist, pollDeliveryId, screenGithubEvent, verifyGithubSignature } from '../src/github.ts';
-import { errorCode, harness, T0 } from './harness.ts';
+import {
+  createGitHubIntake,
+  githubWhitelist,
+  pollDeliveryId,
+  screenGithubEvent,
+  verifyGithubSignature,
+  versionKeyOf,
+} from '../src/github.ts';
+import {
+  deliverGithub as deliver,
+  errorCode,
+  harness,
+  WEBHOOK_SECRET as SECRET,
+  signGithub as sign,
+  T0,
+} from './harness.ts';
 
-const SECRET = 'webhook-secret-for-tests';
 const REPO = { full_name: 'example/canary' };
 const founderA = { login: 'founder-a', id: 1001, type: 'User' };
 const founderB = { login: 'Founder-B', id: 5555, type: 'User' }; // 白名单里只登记了登录名
 const stranger = { login: 'stranger', id: 4242, type: 'User' };
 const workerBot = { login: 'fleet-worker[bot]', id: 9001, type: 'Bot' };
 
-function sign(body: string, secret = SECRET): string {
-  return `sha256=${createHmac('sha256', secret).update(body).digest('hex')}`;
-}
-
-let deliverySeq = 0;
-function deliver(
-  h: ReturnType<typeof harness>,
-  event: string,
-  payload: unknown,
-  options: { delivery?: string; signature?: string | null } = {},
-) {
-  const body = JSON.stringify(payload);
-  const headers: Record<string, string> = {
-    'content-type': 'application/json',
-    'x-github-event': event,
-    'x-github-delivery': options.delivery ?? `d-${++deliverySeq}`,
-  };
-  if (options.signature !== null) headers['x-hub-signature-256'] = options.signature ?? sign(body);
-  return h.cockpit.request('/github/webhook', { method: 'POST', headers, body });
-}
-
 const issueOpened = (user: object, sender: object = user) => ({
   action: 'opened',
-  issue: { number: 12, user },
+  issue: {
+    number: 12,
+    title: '登录页加验证码',
+    body: '给登录页加手机验证码',
+    state: 'open',
+    user,
+    created_at: '2026-09-25T07:59:00Z',
+    updated_at: '2026-09-25T07:59:00Z',
+  },
   sender,
   repository: REPO,
 });
@@ -69,6 +68,117 @@ describe('GitHub 事件签名', () => {
   it('没配密钥：503（不会无签名放行）', async () => {
     const h = harness({ config: { githubWebhookSecret: null } });
     expect((await deliver(h, 'issues', issueOpened(founderA))).status).toBe(503);
+  });
+
+  it('香港原样透传：按收到的原始字节验，带缩进、键序随意的原文验得过；被重新序列化过（空格、键序变了）就验不过', async () => {
+    const h = harness();
+    // GitHub 发来的原文：两格缩进、repository 排在前面。签名是对这份字节算的
+    const original = `{\n  "repository": ${JSON.stringify(REPO)},\n  "action": "opened",\n  "sender": ${JSON.stringify(founderA)},\n  "issue": ${JSON.stringify(issueOpened(founderA).issue)}\n}`;
+    const signature = sign(original);
+    const ok = await deliver(h, 'issues', null, { body: original, signature });
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toMatchObject({ verdict: 'accepted' });
+    // 内容一模一样，只是被中间谁解析再序列化了一遍：字节变了，签名就对不上
+    const reserialized = JSON.stringify(JSON.parse(original));
+    expect(reserialized).not.toBe(original);
+    const bad = await deliver(h, 'issues', null, { body: reserialized, signature, delivery: 'reserialized' });
+    expect(bad.status).toBe(401);
+    expect(await errorCode(bad)).toBe('bad_signature');
+    const { action, sender, issue, repository } = JSON.parse(original);
+    const reordered = JSON.stringify({ issue, sender, action, repository });
+    expect(
+      (
+        await deliver(h, 'issues', null, {
+          body: reordered,
+          signature: sign(original),
+          delivery: 'reordered',
+        })
+      ).status,
+    ).toBe(401);
+    // 验签不过的一律不落库：没认证的请求不许往库里写
+    expect(await h.store.getDelivery('reserialized')).toBeNull();
+    expect(await h.store.getDelivery('reordered')).toBeNull();
+  });
+});
+
+describe('读不到的请求：明确失败、留日志，不当成「没事件」', () => {
+  it('缺投递编号或事件名：400，留日志，不落库', async () => {
+    const h = harness();
+    const body = JSON.stringify(issueOpened(founderA));
+    const res = await h.cockpit.request('/github/webhook', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-hub-signature-256': sign(body) },
+      body,
+    });
+    expect(res.status).toBe(400);
+    expect(await errorCode(res)).toBe('missing_headers');
+    expect(h.logs.some((l) => l.level === 'warn' && l.message.includes('缺投递编号'))).toBe(true);
+    expect(h.store.data.githubEvents.size).toBe(0);
+  });
+
+  it('签名对、请求体却不是 JSON（Content type 选成了表单）：400，留日志，不落库', async () => {
+    const h = harness();
+    const body = 'payload=%7B%22action%22%3A%22opened%22%7D';
+    const res = await deliver(h, 'issues', null, { body, delivery: 'form-encoded' });
+    expect(res.status).toBe(400);
+    expect(await errorCode(res)).toBe('invalid_json');
+    expect(h.logs.some((l) => l.level === 'warn' && l.fields?.deliveryId === 'form-encoded')).toBe(true);
+    expect(await h.store.getDelivery('form-encoded')).toBeNull();
+  });
+
+  it('认得的事件、形状认不出：不收，原因记进库、告警，不交给后面', async () => {
+    const h = harness();
+    const broken = { ...issueOpened(founderA), issue: { number: 12, user: founderA } };
+    const res = await deliver(h, 'issues', broken, { delivery: 'broken' });
+    expect(await res.json()).toMatchObject({ verdict: 'ignored', reason: 'payload_unreadable' });
+    expect(await h.store.getDelivery('broken')).toMatchObject({
+      status: 'ignored',
+      reason: 'payload_unreadable',
+      payload: broken,
+    });
+    expect(h.logs.some((l) => l.level === 'warn' && l.fields?.reason === 'payload_unreadable')).toBe(true);
+    expect(h.accepted).toEqual([]);
+  });
+});
+
+describe('原文落库', () => {
+  it('放进来的、不收的都记一行：原文、事件、仓、结局和原因；处理完的带上做了什么', async () => {
+    const h = harness();
+    await deliver(h, 'issues', issueOpened(founderA), { delivery: 'kept' });
+    await deliver(h, 'issues', issueOpened(stranger), { delivery: 'stranger' });
+    expect(await h.store.getDelivery('kept')).toMatchObject({
+      event: 'issues',
+      action: 'opened',
+      source: 'webhook',
+      repo: 'example/canary',
+      versionKey: 'poll:example/canary:issue:12:2026-09-25T07:59:00Z',
+      payload: issueOpened(founderA),
+      status: 'accepted',
+      note: 'task=exists, workflow=dispatch_off',
+      attempts: 1,
+    });
+    expect(await h.store.getDelivery('stranger')).toMatchObject({
+      status: 'ignored',
+      reason: 'author_not_whitelisted',
+    });
+  });
+
+  it('重放：按库里的原文再走一遍门（改了名单之后，当初不收的现在收）', async () => {
+    const h = harness();
+    await deliver(h, 'issues', issueOpened(stranger), { delivery: 'late' });
+    expect((await h.store.getDelivery('late'))?.status).toBe('ignored');
+    h.store.data.users.push({
+      id: 'e0000000-0000-4000-8000-00000000000c',
+      displayName: '新协作者',
+      role: 'collaborator',
+      active: true,
+      githubId: stranger.id,
+    });
+    const intake = createGitHubIntake(h.deps);
+    expect(await intake.replay('late')).toEqual({ verdict: 'finished' });
+    expect(await intake.replay('late', { force: true })).toMatchObject({ verdict: 'accepted' });
+    expect(await h.store.getDelivery('late')).toMatchObject({ status: 'accepted', attempts: 2 });
+    expect(await intake.replay('never-seen')).toEqual({ verdict: 'not_found' });
   });
 });
 
@@ -109,7 +219,7 @@ describe('GitHub 事件白名单与去重', () => {
     expect(h.accepted).toHaveLength(1);
   });
 
-  it('交给引擎失败：500，并撤销登记，GitHub 重投时还能进来', async () => {
+  it('交给后面处理失败：500，这条记成出错（原因、原文都在）；GitHub 重投时照样能进来，次数加一', async () => {
     let fail = true;
     const h = harness({
       github: async () => {
@@ -117,9 +227,16 @@ describe('GitHub 事件白名单与去重', () => {
       },
     });
     expect((await deliver(h, 'issues', issueOpened(founderA), { delivery: 'retry-me' })).status).toBe(500);
+    expect(await h.store.getDelivery('retry-me')).toMatchObject({
+      status: 'failed',
+      reason: '库连不上',
+      payload: issueOpened(founderA),
+      attempts: 1,
+    });
     fail = false;
     const redelivered = await deliver(h, 'issues', issueOpened(founderA), { delivery: 'retry-me' });
     expect(await redelivered.json()).toMatchObject({ verdict: 'accepted' });
+    expect(await h.store.getDelivery('retry-me')).toMatchObject({ status: 'accepted', attempts: 2 });
   });
 
   it('白名单作者的单被外人编辑：不收并告警；自家机器人的动作只同步镜像不叫醒', async () => {
@@ -246,5 +363,21 @@ describe('白名单判定', () => {
     expect(pollDeliveryId('Example/Canary', 'issue', 12, '2026-09-25T08:00:00Z')).toBe(
       'poll:example/canary:issue:12:2026-09-25T08:00:00Z',
     );
+  });
+
+  it('webhook 带来的版本写成轮询的编号（issue、评论、PR）；别的事件、认不出版本的不写', () => {
+    const at = '2026-09-25T08:00:00Z';
+    expect(versionKeyOf('issues', { issue: { number: 12, updated_at: at } }, 'Example/Canary')).toBe(
+      pollDeliveryId('example/canary', 'issue', 12, at),
+    );
+    expect(versionKeyOf('issue_comment', { comment: { id: 7, updated_at: at } }, 'example/canary')).toBe(
+      pollDeliveryId('example/canary', 'comment', 7, at),
+    );
+    expect(
+      versionKeyOf('pull_request', { pull_request: { number: 5, updated_at: at } }, 'example/canary'),
+    ).toBe(pollDeliveryId('example/canary', 'pull', 5, at));
+    expect(versionKeyOf('check_suite', { check_suite: {} }, 'example/canary')).toBeUndefined();
+    expect(versionKeyOf('issues', { issue: { number: 12 } }, 'example/canary')).toBeUndefined();
+    expect(versionKeyOf('issues', { issue: { number: 12, updated_at: at } }, undefined)).toBeUndefined();
   });
 });

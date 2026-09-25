@@ -3,7 +3,13 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { DEV_USER_ID, devFixtures, IDS } from '../src/dev-fixtures.ts';
 import type { MemoryData } from '../src/memory-store.ts';
-import { InvalidCursorError, type NewAuditEntry, type Store } from '../src/ports.ts';
+import {
+  InvalidCursorError,
+  type NewAuditEntry,
+  type NewGitHubDelivery,
+  type NewIssueTask,
+  type Store,
+} from '../src/ports.ts';
 
 export const T0 = new Date('2026-09-25T08:00:00.000Z');
 const MIN = 60_000;
@@ -20,6 +26,8 @@ export type MakeStore = (data: Partial<MemoryData>, clock: { now: Date }) => Pro
 
 const OTHER_UUID = '99999999-0000-4000-8000-000000000000';
 const TASKLESS_RUN = 'd0000000-0000-4000-8000-0000000000ff';
+/** 接活时新建的任务。 */
+const NEW_TASK = 'b0000000-0000-4000-8000-000000000040';
 
 const audit = (over: Partial<NewAuditEntry> = {}): NewAuditEntry => ({
   actor: { kind: 'user', id: DEV_USER_ID },
@@ -817,18 +825,299 @@ export function describeStoreContract(name: string, make: MakeStore): void {
           result: ok200,
         });
       });
+    });
 
-      it('GitHub 投递编号：同一编号第二次来是 duplicate；撤销登记后能再进', async () => {
-        const d = {
-          id: 'delivery-1',
+    describe('GitHub 事件', () => {
+      const payload = {
+        action: 'opened',
+        issue: { number: 12, title: '原文' },
+        repository: { full_name: 'x/y' },
+      };
+      const delivery = (id: string, over: Partial<NewGitHubDelivery> = {}): NewGitHubDelivery => ({
+        id,
+        event: 'issues',
+        action: 'opened',
+        source: 'webhook',
+        repo: 'example/canary',
+        versionKey: `poll:example/canary:issue:12:${id}`,
+        payload,
+        ...over,
+      });
+      /** 现在往前 5 分钟：早于它占的「处理中」算死了。 */
+      const stale = () => new Date(clock.now.getTime() - 5 * MIN).toISOString();
+      const tokenOf = (c: Awaited<ReturnType<Store['claimDelivery']>>) => {
+        if (c.status !== 'claimed') throw new Error(`没占到：${c.status}`);
+        return c.token;
+      };
+
+      it('第一次来占到、原文照存；处理完再来是 duplicate；出错的再来重新占住、次数加一，旧凭据记不上', async () => {
+        const first = await store.claimDelivery(delivery('d-1'), { staleBefore: stale() });
+        expect(first).toMatchObject({ status: 'claimed', retry: false });
+        expect(await store.getDelivery('d-1')).toMatchObject({
+          id: 'd-1',
           event: 'issues',
-          source: 'webhook' as const,
+          action: 'opened',
+          source: 'webhook',
+          repo: 'example/canary',
+          versionKey: 'poll:example/canary:issue:12:d-1',
+          payload,
+          status: 'processing',
+          attempts: 1,
           receivedAt: T0.toISOString(),
+        });
+        expect(await store.claimDelivery(delivery('d-1'), { staleBefore: stale() })).toEqual({
+          status: 'duplicate',
+        });
+        tick();
+        expect(
+          await store.finishDelivery('d-1', tokenOf(first), { status: 'accepted', note: 'task=created' }),
+        ).toBe(true);
+        expect(await store.getDelivery('d-1')).toMatchObject({
+          status: 'accepted',
+          note: 'task=created',
+          finishedAt: clock.now.toISOString(),
+        });
+        expect(await store.claimDelivery(delivery('d-1'), { staleBefore: stale() })).toEqual({
+          status: 'duplicate',
+        });
+
+        const second = await store.claimDelivery(delivery('d-2'), { staleBefore: stale() });
+        expect(
+          await store.finishDelivery('d-2', tokenOf(second), { status: 'failed', reason: '库连不上' }),
+        ).toBe(true);
+        expect(await store.getDelivery('d-2')).toMatchObject({ status: 'failed', reason: '库连不上' });
+        tick();
+        const again = await store.claimDelivery(delivery('d-2'), { staleBefore: stale() });
+        expect(again).toMatchObject({ status: 'claimed', retry: true });
+        expect(await store.getDelivery('d-2')).toMatchObject({ status: 'processing', attempts: 2 });
+        expect(
+          await store.finishDelivery('d-2', tokenOf(second), { status: 'accepted', note: '旧的那次' }),
+        ).toBe(false);
+        expect(await store.finishDelivery('d-2', tokenOf(again), { status: 'ignored', reason: 'ping' })).toBe(
+          true,
+        );
+        expect(await store.getDelivery('d-2')).toMatchObject({
+          status: 'ignored',
+          reason: 'ping',
+          note: undefined,
+        });
+      });
+
+      it('处理中太久没收尾（那一次多半死了）才接得过去；没过期的是 duplicate', async () => {
+        const first = await store.claimDelivery(delivery('d-1'), { staleBefore: stale() });
+        tick(4 * MIN);
+        expect(await store.claimDelivery(delivery('d-1'), { staleBefore: stale() })).toEqual({
+          status: 'duplicate',
+        });
+        tick(2 * MIN);
+        const taken = await store.claimDelivery(delivery('d-1'), { staleBefore: stale() });
+        expect(taken).toMatchObject({ status: 'claimed', retry: true });
+        expect(await store.finishDelivery('d-1', tokenOf(first), { status: 'accepted' })).toBe(false);
+        expect(await store.finishDelivery('d-1', tokenOf(taken), { status: 'accepted' })).toBe(true);
+      });
+
+      it('原文不是对象也照存（JSON 的 null、数字），认不认得出是门口的事', async () => {
+        await store.claimDelivery(delivery('d-null', { payload: null }), { staleBefore: stale() });
+        await store.claimDelivery(delivery('d-num', { payload: 42 }), { staleBefore: stale() });
+        expect((await store.getDelivery('d-null'))?.payload).toBeNull();
+        expect((await store.getDelivery('d-num'))?.payload).toBe(42);
+      });
+
+      it('轮询按版本认 webhook 收过的同一版：命中别的投递的 versionKey 就是 duplicate，也不落库', async () => {
+        await store.claimDelivery(delivery('guid-1', { versionKey: 'poll:example/canary:issue:12:v1' }), {
+          staleBefore: stale(),
+        });
+        const seen = 'poll:example/canary:issue:12:v1';
+        expect(
+          await store.claimDelivery(delivery(seen, { source: 'poll', versionKey: seen }), {
+            staleBefore: stale(),
+            skipIfVersionSeen: seen,
+          }),
+        ).toEqual({ status: 'duplicate' });
+        expect(await store.getDelivery(seen)).toBeNull();
+        const fresh = 'poll:example/canary:issue:12:v2';
+        expect(
+          await store.claimDelivery(delivery(fresh, { source: 'poll', versionKey: fresh }), {
+            staleBefore: stale(),
+            skipIfVersionSeen: fresh,
+          }),
+        ).toMatchObject({ status: 'claimed', retry: false });
+      });
+
+      it('重放：没有是 not_found；正在处理是 in_flight；处理完的不带 force 是 finished，带 force 重新占住', async () => {
+        expect(await store.reclaimDelivery('nope', { staleBefore: stale(), force: true })).toEqual({
+          status: 'not_found',
+        });
+        const first = await store.claimDelivery(delivery('d-1'), { staleBefore: stale() });
+        expect(await store.reclaimDelivery('d-1', { staleBefore: stale(), force: true })).toEqual({
+          status: 'in_flight',
+        });
+        await store.finishDelivery('d-1', tokenOf(first), {
+          status: 'ignored',
+          reason: 'author_not_whitelisted',
+        });
+        expect(await store.reclaimDelivery('d-1', { staleBefore: stale(), force: false })).toEqual({
+          status: 'finished',
+        });
+        tick();
+        const replay = await store.reclaimDelivery('d-1', { staleBefore: stale(), force: true });
+        expect(replay).toMatchObject({
+          status: 'claimed',
+          delivery: { id: 'd-1', payload, status: 'processing', attempts: 2 },
+        });
+        if (replay.status !== 'claimed') throw new Error('没占到');
+        expect(await store.finishDelivery('d-1', replay.token, { status: 'accepted' })).toBe(true);
+      });
+
+      it('没处理成的清单：出错的、卡住的；次数少的在前，再按收到先后', async () => {
+        const failed = async (id: string, times: number) => {
+          for (let i = 0; i < times; i++) {
+            const c = await store.claimDelivery(delivery(id), { staleBefore: stale() });
+            await store.finishDelivery(id, tokenOf(c), { status: 'failed', reason: `第 ${i + 1} 次出错` });
+            tick();
+          }
         };
-        expect(await store.claimDelivery(d)).toBe('new');
-        expect(await store.claimDelivery(d)).toBe('duplicate');
-        await store.releaseDelivery('delivery-1');
-        expect(await store.claimDelivery(d)).toBe('new');
+        await failed('twice', 2);
+        await failed('once', 1);
+        const done = await store.claimDelivery(delivery('done'), { staleBefore: stale() });
+        await store.finishDelivery('done', tokenOf(done), { status: 'accepted' });
+        await store.claimDelivery(delivery('dead'), { staleBefore: stale() });
+        // dead 占了 6 分钟没收尾；busy 是刚占的，还算在处理
+        tick(6 * MIN);
+        await store.claimDelivery(delivery('busy'), { staleBefore: stale() });
+        const list = await store.listUnfinishedDeliveries({ staleBefore: stale(), limit: 10 });
+        expect(list.map((d) => [d.id, d.status, d.attempts])).toEqual([
+          ['once', 'failed', 1],
+          ['dead', 'processing', 1],
+          ['twice', 'failed', 2],
+        ]);
+        expect(await store.listUnfinishedDeliveries({ staleBefore: stale(), limit: 1 })).toHaveLength(1);
+      });
+
+      it('不收、出错都得写原因：原因是空的整笔不记', async () => {
+        const c = await store.claimDelivery(delivery('d-1'), { staleBefore: stale() });
+        // 库里是检查约束 github_events_reason_when_not_taken，内存版照样拦
+        await expect(
+          store.finishDelivery('d-1', tokenOf(c), { status: 'failed', reason: '' }),
+        ).rejects.toThrow();
+        expect(await store.getDelivery('d-1')).toMatchObject({ status: 'processing' });
+      });
+    });
+
+    describe('接活', () => {
+      const issueTask = (over: Partial<NewIssueTask> = {}): NewIssueTask => ({
+        id: NEW_TASK,
+        repoId: IDS.repo,
+        issueNumber: 40,
+        title: '新需求',
+        rawRequest: '原话',
+        requestedBy: IDS.founderA,
+        ...over,
+      });
+      const created = (over: Partial<NewAuditEntry> = {}) =>
+        audit({ action: 'task.create', target: `task:${NEW_TASK}`, via: 'github', ...over });
+
+      it('按名字找仓：不分大小写，带自动派活开关（没开是 null）；没有就是 null', async () => {
+        expect(await store.findRepoByName('Example', 'CANARY')).toEqual({
+          id: IDS.repo,
+          owner: 'example',
+          name: 'canary',
+          defaultBranch: 'main',
+          testCommand: 'pnpm check',
+          autoDispatchSince: null,
+        });
+        expect(await store.findRepoByName('example', 'other')).toBeNull();
+      });
+
+      it('按 issue 找任务；别的仓、看不懂的编号是 null', async () => {
+        expect((await store.findTaskByIssue(IDS.repo, 12))?.id).toBe(IDS.task12);
+        expect(await store.findTaskByIssue(IDS.repo, 999)).toBeNull();
+        expect(await store.findTaskByIssue(OTHER_UUID, 12)).toBeNull();
+        expect(await store.findTaskByIssue('nope', 12)).toBeNull();
+      });
+
+      it('从 issue 建任务：排队中、排在这个仓最后、记一条状态和操作记录；同一张 issue 再建不建、不记', async () => {
+        const first = await store.createTaskFromIssue(issueTask(), created());
+        expect(first).toEqual({
+          created: true,
+          task: {
+            id: NEW_TASK,
+            repoId: IDS.repo,
+            issueNumber: 40,
+            title: '新需求',
+            rawRequest: '原话',
+            requestedBy: IDS.founderA,
+            state: 'queued',
+            priority: 3,
+            acceptance: [],
+            createdAt: T0.toISOString(),
+          },
+        });
+        expect(await store.getTask(NEW_TASK)).toEqual(first.task);
+        const again = await store.createTaskFromIssue(
+          issueTask({ id: OTHER_UUID, title: '别的标题' }),
+          created({ target: `task:${OTHER_UUID}` }),
+        );
+        expect(again).toEqual({ created: false, task: first.task });
+        expect(await store.getTask(OTHER_UUID)).toBeNull();
+        const audits = await store.listAudit({ target: `task:${NEW_TASK}`, limit: 10 });
+        expect(audits.items.map((a) => [a.action, a.via])).toEqual([['task.create', 'github']]);
+        expect((await store.listAudit({ target: `task:${OTHER_UUID}`, limit: 10 })).items).toEqual([]);
+        const timeline = await store.listTimeline(NEW_TASK, { limit: 10 });
+        expect(timeline.items.some((r) => r.kind === 'state')).toBe(true);
+      });
+
+      it('建任务时操作记录写不进：任务也不建', async () => {
+        await expect(store.createTaskFromIssue(issueTask(), badAudit())).rejects.toThrow();
+        expect(await store.getTask(NEW_TASK)).toBeNull();
+      });
+
+      it('改原话：变了才改、写操作记录；没变是 unchanged；没有这条是 not_found', async () => {
+        const edit = audit({ action: 'task.edit', via: 'github' });
+        expect(
+          await store.updateTaskRequest(
+            { taskId: IDS.task12, title: '登录页加验证码', rawRequest: '给登录页加手机验证码' },
+            edit,
+          ),
+        ).toBe('unchanged');
+        expect(
+          await store.updateTaskRequest(
+            { taskId: IDS.task12, title: '登录加验证码', rawRequest: '改过的原话' },
+            edit,
+          ),
+        ).toBe('ok');
+        expect(await store.getTask(IDS.task12)).toMatchObject({
+          title: '登录加验证码',
+          rawRequest: '改过的原话',
+        });
+        expect(await store.updateTaskRequest({ taskId: OTHER_UUID, title: 'x', rawRequest: 'y' }, edit)).toBe(
+          'not_found',
+        );
+        expect(await store.updateTaskRequest({ taskId: 'nope', title: 'x', rawRequest: 'y' }, edit)).toBe(
+          'not_found',
+        );
+        const audits = await store.listAudit({ target: `task:${IDS.task12}`, limit: 10 });
+        expect(audits.items.filter((a) => a.action === 'task.edit')).toHaveLength(1);
+        await expect(
+          store.updateTaskRequest({ taskId: IDS.task12, title: '再改', rawRequest: '再改' }, badAudit()),
+        ).rejects.toThrow();
+        expect((await store.getTask(IDS.task12))?.title).toBe('登录加验证码');
+      });
+
+      it('还在排队的任务直接记成叫停（状态变化照记）；不在排队的不动', async () => {
+        await store.createTaskFromIssue(issueTask(), created());
+        const stop = audit({ action: 'task.stop', target: `task:${NEW_TASK}`, via: 'github' });
+        tick();
+        expect(await store.stopQueuedTask(NEW_TASK, stop)).toBe('ok');
+        expect((await store.getTask(NEW_TASK))?.state).toBe('stopped');
+        expect(await store.stopQueuedTask(NEW_TASK, stop)).toBe('not_queued');
+        expect(await store.stopQueuedTask(IDS.task12, stop)).toBe('not_queued');
+        expect((await store.getTask(IDS.task12))?.state).toBe('running');
+        expect(await store.stopQueuedTask('nope', stop)).toBe('not_queued');
+        const states = (await store.listTimeline(NEW_TASK, { limit: 10 })).items.filter(
+          (r) => r.kind === 'state',
+        );
+        expect(states.map((r) => (r.payload as { to?: string }).to)).toEqual(['stopped', 'queued']);
       });
     });
   });

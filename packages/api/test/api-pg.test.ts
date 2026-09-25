@@ -1,6 +1,6 @@
 // 整条链路跑在真库上：接口 → Postgres Store → PGlite（真迁移）→ 库里的触发器发 NOTIFY → LISTEN → SSE / 叫醒等回答的命令。
 // 语义细节在契约测试（store-contract.ts）和各接口的测试里按内存版测过；这里只证明「换成真库，接起来照样通」。
-import { asks, auditLog, progressEvents } from '@fleet-dao/db';
+import { asks, auditLog, githubEvents, progressEvents, tasks } from '@fleet-dao/db';
 import { createTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import {
   AskResponse,
@@ -11,19 +11,22 @@ import {
 } from '@fleet-dao/shared';
 import { and, eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { notWiredGitHub } from '../src/github.ts';
+import { devFixtures } from '../src/dev-fixtures.ts';
+import { githubAppMissing } from '../src/github.ts';
 import { serviceHealthChecks } from '../src/health.ts';
 import { probeDb } from '../src/pg-store.ts';
 import { notConnectedTemporal } from '../src/temporal.ts';
 import {
   agentRequest,
   DEV_RUN_ID,
+  deliverGithub,
   type HarnessOptions,
   IDS,
   openEvents,
   pgHarness,
   readUntil,
   settle,
+  T0,
   write,
 } from './harness.ts';
 
@@ -152,7 +155,48 @@ describe('接口跑在真库上', () => {
     ]);
   });
 
-  it('健康检查（生产那一套）：库、实时推送是真探的；Temporal、GitHub 事件没接上如实报红；LISTEN 停了实时推送也报红', async () => {
+  it('GitHub 事件进来（真库）：原文落库、建任务行、拉起需求工作流；看板实时收到新任务；同一投递再来不重复建', async () => {
+    const data = devFixtures(T0);
+    data.repos = (data.repos ?? []).map((r) => ({ ...r, autoDispatchSince: '2026-09-25T07:00:00.000Z' }));
+    const h = await start({ data });
+    const session = await h.login();
+    const { reader } = await openEvents(h, session.cookie);
+    const buffer = await readUntil(reader, 'event: ready');
+    const founderA = { login: 'founder-a', id: 1001, type: 'User' };
+    const payload = {
+      action: 'opened',
+      issue: {
+        number: 40,
+        title: '给 README 加一行当前时间',
+        body: '在 README 末尾加一行当前时间',
+        state: 'open',
+        user: founderA,
+        created_at: '2026-09-25T07:30:00Z',
+        updated_at: '2026-09-25T07:30:00Z',
+      },
+      sender: founderA,
+      repository: { full_name: 'example/canary' },
+    };
+    const res = await deliverGithub(h, 'issues', payload, { delivery: 'pg-1' });
+    expect(await res.json()).toMatchObject({ verdict: 'accepted', note: 'task=created, workflow=started' });
+    expect(
+      await deliverGithub(h, 'issues', payload, { delivery: 'pg-1' }).then((r) => r.json()),
+    ).toMatchObject({
+      verdict: 'duplicate',
+    });
+
+    const rows = await t.db.select().from(tasks).where(eq(tasks.issueNumber, 40));
+    expect(rows.map((r) => ({ state: r.state, priority: r.priority, requestedBy: r.requestedBy }))).toEqual([
+      { state: 'queued', priority: 3, requestedBy: IDS.founderA },
+    ]);
+    const [event] = await t.db.select().from(githubEvents).where(eq(githubEvents.deliveryId, 'pg-1'));
+    expect(event).toMatchObject({ status: 'accepted', attempts: 1, payload });
+    expect(h.starts.map((s) => s.taskId)).toEqual([rows[0]?.id]);
+    await readUntil(reader, `"table":"tasks","id":"${rows[0]?.id}"`, buffer);
+    await reader.cancel();
+  });
+
+  it('健康检查（生产那一套）：库、实时推送是真探的；Temporal 没接上、机器人凭据没读到如实报红；LISTEN 停了实时推送也报红', async () => {
     const h = await start({
       health: serviceHealthChecks({
         probeDb: () => probeDb(t.db),
@@ -160,7 +204,7 @@ describe('接口跑在真库上', () => {
           probe: (ms) => current?.feed.probe(ms) ?? Promise.reject(new Error('还没起')),
         },
         temporal: notConnectedTemporal(),
-        githubEvents: notWiredGitHub().check,
+        githubEvents: githubAppMissing('没有 /etc/fleet-dao/github/gh-app-fleet-dao-engine.json').check,
       }),
     });
     const res = await h.cockpit.request('/healthz');
@@ -171,7 +215,11 @@ describe('接口跑在真库上', () => {
         database: { ok: true },
         realtime: { ok: true },
         temporal: { ok: false, code: 'not_connected', message: 'Temporal 客户端还没接上（等引擎的 PR）' },
-        github_events: { ok: false, code: 'not_wired', message: 'GitHub 事件还没接到引擎（等引擎的 PR）' },
+        github_events: {
+          ok: false,
+          code: 'app_credentials_missing',
+          message: 'GitHub 机器人的凭据没读到，PR 和 CI 事件写不进镜像',
+        },
       },
     });
     await h.feed.stop();

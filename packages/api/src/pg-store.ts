@@ -10,8 +10,8 @@ import {
   auditLog,
   bans,
   channels,
-  claimIdempotencyKey,
   type Db,
+  githubEvents,
   idempotencyKeys,
   models,
   notificationDeliveries,
@@ -20,7 +20,6 @@ import {
   progressEvents,
   pullRequests,
   quotaWindows,
-  releaseIdempotencyKey,
   repos,
   routes,
   scheduleHealth,
@@ -50,13 +49,14 @@ import {
   users,
 } from '@fleet-dao/db';
 import type { ProgressKind, Step } from '@fleet-dao/shared';
-import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import { PublicHealthError } from './health.ts';
 import { isSerial, isUuid, parseCursor } from './ids.ts';
 import type {
   AskRecord,
   AuditRecord,
   CommandClaim,
+  GitHubDelivery,
   JobRecord,
   NewAuditEntry,
   NotificationRecord,
@@ -823,18 +823,224 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       await db.delete(idempotencyKeys).where(heldBy(commandKey(runId, key), token));
     },
 
-    // —— GitHub ——
-    async claimDelivery({ id, event, source }) {
-      const claim = await claimIdempotencyKey(
-        db,
-        { key: `github-delivery:${id}`, action: `github.${event}`, target: source },
-        now(),
-      );
-      return claim.status === 'claimed' ? 'new' : 'duplicate';
+    // —— GitHub 事件 ——
+    async claimDelivery(delivery, { staleBefore, skipIfVersionSeen }) {
+      if (skipIfVersionSeen) {
+        const [seen] = await db
+          .select({ id: githubEvents.deliveryId })
+          .from(githubEvents)
+          .where(
+            and(eq(githubEvents.versionKey, skipIfVersionSeen), ne(githubEvents.deliveryId, delivery.id)),
+          )
+          .limit(1);
+        if (seen) return { status: 'duplicate' };
+      }
+      const at = now();
+      const inserted = await db
+        .insert(githubEvents)
+        .values({
+          deliveryId: delivery.id,
+          event: delivery.event,
+          action: delivery.action ?? null,
+          source: delivery.source,
+          repo: delivery.repo ?? null,
+          versionKey: delivery.versionKey ?? null,
+          // 原文原样存：JSON 的 null、数字也收（认不认得出是门口的事），不让它变成 SQL 的空值
+          payload: sql`${JSON.stringify(delivery.payload ?? null)}::jsonb`,
+          status: 'processing',
+          attempts: 1,
+          receivedAt: at,
+          claimedAt: at,
+        })
+        .onConflictDoNothing()
+        .returning({ id: githubEvents.deliveryId });
+      if (inserted.length > 0) return { status: 'claimed', token: iso(at), retry: false };
+      // 已经有这一条：条件更新是原子的，两个请求同时来接，只有一个接得到
+      const taken = await db
+        .update(githubEvents)
+        .set(reclaimSet(at))
+        .where(and(eq(githubEvents.deliveryId, delivery.id), reclaimableRow(new Date(staleBefore))))
+        .returning({ id: githubEvents.deliveryId });
+      return taken.length > 0 ? { status: 'claimed', token: iso(at), retry: true } : { status: 'duplicate' };
     },
-    async releaseDelivery(id) {
-      await releaseIdempotencyKey(db, `github-delivery:${id}`);
+    async reclaimDelivery(id, { staleBefore, force }) {
+      const at = now();
+      const stale = new Date(staleBefore);
+      const [row] = await db
+        .update(githubEvents)
+        .set(reclaimSet(at))
+        .where(
+          and(
+            eq(githubEvents.deliveryId, id),
+            force
+              ? or(ne(githubEvents.status, 'processing'), lt(githubEvents.claimedAt, stale))
+              : reclaimableRow(stale),
+          ),
+        )
+        .returning();
+      if (row) return { status: 'claimed', token: iso(at), delivery: toDelivery(row) };
+      const [existing] = await db
+        .select({ status: githubEvents.status })
+        .from(githubEvents)
+        .where(eq(githubEvents.deliveryId, id));
+      if (!existing) return { status: 'not_found' };
+      return { status: existing.status === 'processing' ? 'in_flight' : 'finished' };
     },
+    async finishDelivery(id, token, outcome) {
+      const rows = await db
+        .update(githubEvents)
+        .set({
+          status: outcome.status,
+          reason: outcome.status === 'accepted' ? null : outcome.reason,
+          note: outcome.status === 'accepted' ? (outcome.note ?? null) : null,
+          finishedAt: now(),
+        })
+        .where(
+          and(
+            eq(githubEvents.deliveryId, id),
+            eq(githubEvents.status, 'processing'),
+            eq(githubEvents.claimedAt, new Date(token)),
+          ),
+        )
+        .returning({ id: githubEvents.deliveryId });
+      return rows.length > 0;
+    },
+    async getDelivery(id) {
+      const [row] = await db.select().from(githubEvents).where(eq(githubEvents.deliveryId, id));
+      return row ? toDelivery(row) : null;
+    },
+    async listUnfinishedDeliveries({ staleBefore, limit }) {
+      const rows = await db
+        .select()
+        .from(githubEvents)
+        .where(reclaimableRow(new Date(staleBefore)))
+        .orderBy(asc(githubEvents.attempts), asc(githubEvents.receivedAt), asc(githubEvents.deliveryId))
+        .limit(limit);
+      return rows.map(toDelivery);
+    },
+
+    // —— 接活 ——
+    async findRepoByName(owner, name) {
+      const [row] = await db
+        .select()
+        .from(repos)
+        .where(and(sql`lower(${repos.owner}) = lower(${owner})`, sql`lower(${repos.name}) = lower(${name})`))
+        .limit(1);
+      return row
+        ? { ...toRepo(row), autoDispatchSince: row.autoDispatchSince ? iso(row.autoDispatchSince) : null }
+        : null;
+    },
+    async findTaskByIssue(repoId, issueNumber) {
+      if (!isUuid(repoId)) return null;
+      const [row] = await db
+        .select()
+        .from(tasks)
+        .where(and(eq(tasks.repoId, repoId), eq(tasks.issueNumber, issueNumber)));
+      return row ? toTask(row) : null;
+    },
+    async createTaskFromIssue(input, entry) {
+      return db.transaction(async (tx) => {
+        const [created] = await tx
+          .insert(tasks)
+          .values({
+            id: input.id,
+            repoId: input.repoId,
+            issueNumber: input.issueNumber,
+            title: input.title,
+            rawRequest: input.rawRequest,
+            requestedBy: input.requestedBy,
+            // 排在这个仓最后
+            priority: sql`(select coalesce(max(${tasks.priority}), 0) + 1 from ${tasks} where ${tasks.repoId} = ${input.repoId})`,
+            createdAt: now(),
+          })
+          .onConflictDoNothing({ target: [tasks.repoId, tasks.issueNumber] })
+          .returning();
+        if (created) {
+          await insertAudit(tx, entry);
+          return { task: toTask(created), created: true };
+        }
+        const [existing] = await tx
+          .select()
+          .from(tasks)
+          .where(and(eq(tasks.repoId, input.repoId), eq(tasks.issueNumber, input.issueNumber)));
+        if (!existing) throw new Error(`任务 ${input.repoId}#${input.issueNumber} 建不进去也读不到`);
+        return { task: toTask(existing), created: false };
+      });
+    },
+    async updateTaskRequest({ taskId, title, rawRequest }, entry) {
+      if (!isUuid(taskId)) return 'not_found';
+      return db.transaction(async (tx) => {
+        const updated = await tx
+          .update(tasks)
+          .set({ title, rawRequest })
+          .where(
+            and(
+              eq(tasks.id, taskId),
+              or(
+                sql`${tasks.title} is distinct from ${title}`,
+                sql`${tasks.rawRequest} is distinct from ${rawRequest}`,
+              ),
+            ),
+          )
+          .returning({ id: tasks.id });
+        if (updated.length === 0) {
+          const [exists] = await tx.select({ id: tasks.id }).from(tasks).where(eq(tasks.id, taskId));
+          return exists ? 'unchanged' : 'not_found';
+        }
+        await insertAudit(tx, entry);
+        return 'ok';
+      });
+    },
+    async stopQueuedTask(taskId, entry) {
+      if (!isUuid(taskId)) return 'not_queued';
+      return db.transaction(async (tx) => {
+        const stopped = await tx
+          .update(tasks)
+          .set({ state: 'stopped' })
+          .where(and(eq(tasks.id, taskId), eq(tasks.state, 'queued')))
+          .returning({ id: tasks.id });
+        if (stopped.length === 0) return 'not_queued';
+        await insertAudit(tx, entry);
+        return 'ok';
+      });
+    },
+  };
+}
+
+/** 上次出错的、处理中但占用早于 stale 的（那一次多半死了）：可以接过来重做。 */
+function reclaimableRow(stale: Date) {
+  return or(
+    eq(githubEvents.status, 'failed'),
+    and(eq(githubEvents.status, 'processing'), lt(githubEvents.claimedAt, stale)),
+  );
+}
+
+/** 接过来：重新记成处理中，次数加一，凭据换成这次的时刻（旧凭据记不上结局了）。上次的原因留着，记下新结局时覆盖。 */
+function reclaimSet(at: Date) {
+  return {
+    status: 'processing' as const,
+    attempts: sql`${githubEvents.attempts} + 1`,
+    claimedAt: at,
+    finishedAt: null,
+  };
+}
+
+function toDelivery(r: typeof githubEvents.$inferSelect): GitHubDelivery {
+  return {
+    id: r.deliveryId,
+    event: r.event,
+    action: opt(r.action),
+    source: r.source,
+    repo: opt(r.repo),
+    versionKey: opt(r.versionKey),
+    payload: r.payload,
+    status: r.status,
+    reason: opt(r.reason),
+    note: opt(r.note),
+    attempts: r.attempts,
+    receivedAt: iso(r.receivedAt),
+    claimedAt: iso(r.claimedAt),
+    finishedAt: isoOpt(r.finishedAt),
   };
 }
 

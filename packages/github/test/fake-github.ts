@@ -87,8 +87,10 @@ export interface IssueState {
   state: 'open' | 'closed';
   state_reason: string | null;
   user: GhUser;
+  created_at: string;
   updated_at: string;
-  comments: { id: number; body: string; user: GhUser; updated_at: string }[];
+  /** 评论没给 created_at 的，按 updated_at 算（没改过的评论两者相同）。 */
+  comments: { id: number; body: string; user: GhUser; updated_at: string; created_at?: string }[];
   /** 编辑历史，新的在前（和 GraphQL userContentEdits 一样）。 */
   edits: { diff: string; editor: GhUser }[];
 }
@@ -157,6 +159,7 @@ export class FakeGitHub {
       state: init.state ?? 'open',
       state_reason: init.state_reason ?? null,
       user: init.user ?? this.human,
+      created_at: init.created_at ?? this.iso(),
       updated_at: this.iso(),
       comments: init.comments ?? [],
       edits: init.edits ?? [],
@@ -327,6 +330,7 @@ export class FakeGitHub {
       title: i.title,
       body: i.body,
       user: i.user,
+      created_at: i.created_at,
       updated_at: i.updated_at,
     };
   }
@@ -584,6 +588,7 @@ export class FakeGitHub {
             html_url: `https://github.test/c/${c.id}`,
             body: c.body,
             user: c.user,
+            created_at: c.created_at ?? c.updated_at,
             updated_at: c.updated_at,
             issue_url: `${API}/repos/${OWNER}/${REPO}/issues/${i.number}`,
           })),
@@ -613,6 +618,7 @@ export class FakeGitHub {
         html_url: `https://github.test/${OWNER}/${REPO}/issues/${issue.number}#issuecomment-${c.id}`,
         body: c.body,
         user: c.user,
+        created_at: c.created_at ?? c.updated_at,
         updated_at: c.updated_at,
       });
       if (m === 'GET') return this.page(req, issue.comments.map(view));

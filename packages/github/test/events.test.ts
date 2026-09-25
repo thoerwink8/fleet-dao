@@ -218,6 +218,34 @@ describe('对账与补漏', () => {
     expect(second).toEqual({ outcome: 'ok', checked: 3, recovered: 0 });
   });
 
+  it('轮询把 issue、评论整条原样送进门：标题、正文、开关状态、建立时刻都在（后端建任务、认回答要用）', async () => {
+    const { gh, fake } = setup();
+    const opened = fake.addIssue({ title: '人开的', body: '原话' });
+    opened.comments.push({
+      id: 78,
+      body: '5 分钟',
+      user: fake.human,
+      created_at: '2026-09-25T11:00:00Z',
+      updated_at: '2026-09-25T12:00:00Z',
+    });
+    const { intake, ingested } = fakeIntake(() => true);
+    await gh.reconciler({ intake, pollDeliveryId }).poll('acme/widgets', new Date('2026-09-25T00:00:00Z'));
+    expect(ingested.find((i) => i.event === 'issues')?.payload.issue).toMatchObject({
+      number: opened.number,
+      title: '人开的',
+      body: '原话',
+      state: 'open',
+      created_at: opened.created_at,
+      user: fake.human,
+    });
+    expect(ingested.find((i) => i.event === 'issue_comment')?.payload.comment).toMatchObject({
+      id: 78,
+      body: '5 分钟',
+      created_at: '2026-09-25T11:00:00Z',
+      user: fake.human,
+    });
+  });
+
   it('轮询认得出自家的回声：引擎改进度段、关单、发的评论、开和合的 PR 都不叫醒；人改的、人写的照样叫醒', async () => {
     const { gh, fake, clock } = setup();
     const progress = { state: 'running', current: 'x', done: 0, total: 1, subtasks: [], docs: {} };
