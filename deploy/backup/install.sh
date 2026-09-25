@@ -5,12 +5,11 @@
 #   bash deploy/backup/install.sh hk [--check]       香港：只收密文的 fleet-backup 用户、它的目录、那一行 authorized_keys、把它关进 chroot
 # 先后：法国先跑（生成备份钥匙、打印公钥）→ 公钥填进香港 /etc/fleet-dao/backup.env、跑香港 → 法国再跑一遍（钉香港的主机钥匙、
 # 建仓库、首跑）。--check 只读回，不改任何东西。退出码同 france.sh：0 全绿，1 有红，2 有待配或没查成。
-# 换机恢复（仓库里已有快照、这台从没备份成功过）时不开每晚备份、不首跑，见 docs/ops.md 第十一节。
+# 换机恢复（仓库里已有快照、这台从没备份成功过，或跑成过没有读不出来）时不开每晚备份、不首跑，见 docs/ops.md「换机恢复」。
 # 只写这些地方——法国：/opt/fleet-dao/restic、/etc/fleet-dao/backup{,.env}、/usr/local/lib/fleet-dao/backup、/var/lib/fleet-dao/backup、
 # /etc/systemd/system/fleet-backup*、库角色 fleet_drill、scheduled_jobs 里的三行；香港：用户 fleet-backup、/srv/fleet-dao-backup、
 # /etc/fleet-dao/backup.env、/etc/ssh/sshd_config.d/60-fleet-dao-backup.conf（只管这一个用户的 Match 段）。别的一概不碰。
-set -Eeuo pipefail
-umask 022
+# 测试 source 本文件只要函数（deploy/backup/test/backup.test.sh 拿替身跑接线），不跑：set、陷阱、读参数都在文件末尾的 main 里。
 
 BACKUP_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 DEPLOY_DIR=$(cd -- "$BACKUP_DIR/.." && pwd)
@@ -18,7 +17,6 @@ DEPLOY_DIR=$(cd -- "$BACKUP_DIR/.." && pwd)
 source "$DEPLOY_DIR/lib/common.sh"
 # shellcheck source=lib.sh
 source "$BACKUP_DIR/lib.sh"
-trap 'on_error "$LINENO" "$BASH_COMMAND"' ERR
 
 UNITS=(fleet-backup.service fleet-backup.timer fleet-backup-drill.service fleet-backup-drill.timer
   fleet-backup-watch.service fleet-backup-watch.timer)
@@ -28,23 +26,13 @@ TIMERS=(fleet-backup.timer:fleet-backup.service:backup.nightly fleet-backup-dril
 REPO_READY=0
 REPO_SNAPSHOTS=""
 PROBE_OUT=""
+MACHINE=""
+CHECK_ONLY=0
 
 usage() {
   echo "用法：bash $0 france|hk [--check]" >&2
   exit 64
 }
-
-MACHINE=${1:-}
-CHECK_ONLY=0
-case "${2:-}" in
---check) CHECK_ONLY=1 ;;
-"") ;;
-*) usage ;;
-esac
-case $MACHINE in
-france | hk) ;;
-*) usage ;;
-esac
 
 # shellcheck disable=SC1091 # /etc/os-release 是目标机器上的文件
 preflight_common() {
@@ -336,9 +324,7 @@ setup_repo() {
 # 每晚备份能不能开（开定时器、首跑都问它），判法见 lib.sh 的 bk_backup_hold；不能开时原因放进 BACKUP_HOLD
 BACKUP_HOLD=""
 backup_allowed() {
-  local never=0
-  if never_succeeded backup.nightly; then never=1; fi
-  if BACKUP_HOLD=$(bk_backup_hold "$REPO_READY" "$REPO_SNAPSHOTS" "$never"); then return 0; fi
+  if BACKUP_HOLD=$(bk_backup_hold "$REPO_READY" "$REPO_SNAPSHOTS" "$(job_success_state backup.nightly)"); then return 0; fi
   if ((REPO_READY == 0)); then BACKUP_HOLD+="（${PROBE_OUT:-没查成}）"; fi
   return 1
 }
@@ -359,10 +345,11 @@ order by j.id;
 SQL
 }
 
-never_succeeded() { # 任务编号
-  local rows
-  rows=$(job_health 2>/dev/null) || return 1
-  awk -F '\t' -v id="$1" '$1 == id && $3 == "never" { found = 1 } END { exit !found }' <<<"$rows"
+# 某个任务在本机跑成过没有：yes / no / unknown（判法见 lib.sh 的 bk_success_state）。运行记录读不到喂空输入，得 unknown
+job_success_state() { # 任务编号
+  local rows=""
+  rows=$(job_health 2>/dev/null) || rows=""
+  bk_success_state "$1" <<<"$rows"
 }
 
 first_runs() {
@@ -370,10 +357,16 @@ first_runs() {
   local t service job
   for t in "${TIMERS[@]}"; do
     IFS=: read -r _ service job <<<"$t"
-    if ! never_succeeded "$job"; then
+    case $(job_success_state "$job") in
+    yes)
       ok "$job 跑成过，不再首跑"
       continue
-    fi
+      ;;
+    unknown)
+      pending "$job 跑成过没有读不出来（运行记录读不到，或它没登记），不首跑"
+      continue
+      ;;
+    esac
     if [[ "$job" == backup.nightly ]] && ! backup_allowed; then
       pending "$job 不首跑：$BACKUP_HOLD"
       continue
@@ -392,7 +385,7 @@ first_runs() {
 
 readback_france() {
   step "读回"
-  local f have t timer service job rows line expect age outcome scanned found why user verdict pass
+  local f have t timer service job user pass
   detect_repo 0 # 首跑之后快照数变了，重新连一次
   if [[ "$(readlink -f "$BK_RESTIC" 2>/dev/null)" == "$BK_RESTIC_HOME/$BK_RESTIC_VERSION/restic" ]] &&
     (cd "$BK_RESTIC_HOME/$BK_RESTIC_VERSION" && sha256sum --quiet --status -c .sha256) 2>/dev/null; then
@@ -449,7 +442,13 @@ readback_france() {
       red "$timer 没启用或没在排班"
     fi
   done
-  # 判活：看上次跑成的时刻，超过登记的过期分钟就红；最近一次没做成、没扫到、查出问题也红（判法见 lib.sh 的 bk_judge_job）
+  readback_jobs "$held"
+}
+
+# 判活：看上次跑成的时刻，超过登记的过期分钟就红；最近一次没做成、没扫到、查出问题也红（判法见 lib.sh 的 bk_judge_job）。
+# 只有一种例外：每晚备份因为换机恢复被挡着（held=1）、还一次没跑过，记「待配」
+readback_jobs() { # held(1/0)
+  local held=$1 rows t job line expect age outcome scanned found why verdict
   if ! rows=$(job_health 2>&1); then
     pending "运行记录读不出来：${rows:0:200}"
     return 0
@@ -675,4 +674,21 @@ main_hk() {
   finish
 }
 
-if [[ "$MACHINE" == france ]]; then main_france; else main_hk; fi
+main() { # france|hk [--check]
+  set -Eeuo pipefail
+  umask 022
+  trap 'on_error "$LINENO" "$BASH_COMMAND"' ERR
+  MACHINE=${1:-}
+  case "${2:-}" in
+  --check) CHECK_ONLY=1 ;;
+  "") ;;
+  *) usage ;;
+  esac
+  case $MACHINE in
+  france) main_france ;;
+  hk) main_hk ;;
+  *) usage ;;
+  esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then main "$@"; fi

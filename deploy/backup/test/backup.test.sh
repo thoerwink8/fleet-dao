@@ -53,11 +53,9 @@ if [[ "$(stat -c '%a' "$T/gw.env")" == 664 ]]; then
   check "配置：组能写 → 失败" 1 "$(rc_of bk_read_config "$T/gw.env" "$me" "${BK_CONFIG_KEYS_FRANCE[@]}")"
 fi
 
-cfg_case() { # 线 法国路径 香港路径 → 0/1
-  (
-    FLEET_DISK_ALERT_PERCENT=$1 FLEET_DISK_PATHS_FRANCE=$2 FLEET_DISK_PATHS_HK=$3
-    rc_of bk_check_france_config
-  )
+cfg_case() { # 线 法国路径 香港路径 → 0/1（local 的值被调到的函数看得见，出了这个函数就没了）
+  local FLEET_DISK_ALERT_PERCENT=$1 FLEET_DISK_PATHS_FRANCE=$2 FLEET_DISK_PATHS_HK=$3
+  rc_of bk_check_france_config
 }
 check "配置：85 合格" 0 "$(cfg_case 85 / /)"
 check "配置：线 0 → 失败" 1 "$(cfg_case 0 / /)"
@@ -113,12 +111,30 @@ check "仓库口令：空的 → 不认（openssl 没了会写出空行）" 1 "$
 check "仓库口令：短了 → 不认" 1 "$(rc_of bk_valid_restic_password abc)"
 check "仓库口令：带空白 → 不认" 1 "$(rc_of bk_valid_restic_password "$(printf 'ab%.0s' {1..31}) a")"
 
-check "开每晚备份：新仓库（0 份快照）、从没备份过 → 开（第一次装机）" 0 "$(rc_of bk_backup_hold 1 0 1)"
-check "开每晚备份：仓库有快照、这台备份成功过 → 开（平常重跑装机脚本）" 0 "$(rc_of bk_backup_hold 1 5 0)"
-check "开每晚备份：仓库有快照、这台从没备份成功过 → 不开（换机恢复，首跑会备空库、删掉出事前那份）" 1 "$(rc_of bk_backup_hold 1 5 1)"
-check "开每晚备份：不开时说清是换机恢复、去看 ops.md" 1 "$(bk_backup_hold 1 5 1 | grep -c 'docs/ops.md 第十一节')"
-check "开每晚备份：仓库连不上 → 不开" 1 "$(rc_of bk_backup_hold 0 "" 1)"
-check "开每晚备份：快照数读不出 → 不开（拿不准就不冒险）" 1 "$(rc_of bk_backup_hold 1 "" 0)"
+# 跑成过没有：三态。输入照装机脚本 job_health 的样子（任务<TAB>过期分钟<TAB>上次跑成距今秒数或 never<TAB>结局<TAB>扫到<TAB>问题<TAB>原因）
+hist_rows=$(printf 'backup.drill\t10200\tnever\tnone\t-\t-\t\nbackup.nightly\t1560\t3600\tok\t3\t0\t快照 abc\nbackup.watch\t90\tnever\tnone\t-\t-\t')
+check "跑成过没有：有秒数 → yes" yes "$(bk_success_state backup.nightly <<<"$hist_rows")"
+check "跑成过没有：never → no" no "$(bk_success_state backup.drill <<<"$hist_rows")"
+check "跑成过没有：没这一行（没登记）→ unknown，不当成跑成过" unknown "$(bk_success_state backup.other <<<"$hist_rows")"
+check "跑成过没有：运行记录读不到（空输入）→ unknown" unknown "$(bk_success_state backup.nightly </dev/null)"
+check "跑成过没有：读数认不出 → unknown" unknown "$(bk_success_state backup.nightly <<<"$(printf 'backup.nightly\t1560\tsoon\tok\t3\t0\t')")"
+
+# 开每晚备份：每条只动一个输入，别的都给「放行」的值——删掉哪一个判断，对应那条就红
+check "开每晚备份：新仓库（0 份快照）、从没备份过 → 开（第一次装机）" 0 "$(rc_of bk_backup_hold 1 0 no)"
+check "开每晚备份：仓库有快照、这台备份成功过 → 开（平常重跑装机脚本）" 0 "$(rc_of bk_backup_hold 1 5 yes)"
+check "开每晚备份：仓库有快照、这台从没备份成功过 → 不开（换机恢复，首跑会备空库、删掉出事前那份）" 1 "$(rc_of bk_backup_hold 1 5 no)"
+check "开每晚备份：不开时说清是换机恢复、去看 ops.md 的「换机恢复」" 1 "$(bk_backup_hold 1 5 no | grep -c 'docs/ops.md「换机恢复」')"
+check "开每晚备份：仓库连不上 → 不开" 1 "$(rc_of bk_backup_hold 0 0 yes)"
+check "开每晚备份：快照数读不出 → 不开（拿不准就不冒险）" 1 "$(rc_of bk_backup_hold 1 "" yes)"
+check "开每晚备份：跑成过没有读不出（运行记录读不到、没登记）→ 不开" 1 "$(rc_of bk_backup_hold 1 5 unknown)"
+check "开每晚备份：读不出时连新仓库也不开（不拿「0 份快照」冒充查过了）" 1 "$(rc_of bk_backup_hold 1 0 unknown)"
+check "开每晚备份：认不出的三态值 → 不开" 1 "$(rc_of bk_backup_hold 1 0 1)"
+
+# 代码里按标题指 ops.md 的地方（写法是 docs/ops.md 后面紧跟全角书名号括起的标题），标题得真在：改名、挪走了这里红
+while IFS= read -r ref; do
+  check "指针 $ref 指得到 ops.md 里的标题" 1 "$(grep -cE "^#+ .*${ref}" "$BK/../../docs/ops.md" | sed 's/^[1-9][0-9]*$/1/')"
+done < <(grep -rhoE 'docs/ops\.md「[^」]+」' "$BK" --include='*.sh' | sed -E 's/.*「(.*)」/\1/' | sort -u)
+check "指针：至少有一处按标题指（不然上面那条等于没查）" 1 "$(grep -rhoE 'docs/ops\.md「[^」]+」' "$BK" --include='*.sh' | sort -u | wc -l | sed 's/^[1-9][0-9]*$/1/')"
 
 verdict() { bk_judge_job "$@" | cut -f1; }
 check "判活：新鲜、没问题 → 绿" ok "$(verdict backup.drill 10200 600 ok 3 0 '')"
@@ -653,6 +669,99 @@ check "写库退回：日志里说了改记短的" 2 "$(grep -c '改记一句短
 check "写库退回：库整个连不上 → run_end 如实返回失败" "run_end=1" "$(grep '^run_end=' "$T/out")"
 check "写库退回：库整个连不上 → alert_raise 如实返回失败（不冒充发出去了）" "alert_raise=1" "$(grep '^alert_raise=' "$T/out")"
 check "写库退回：库整个连不上 → 什么都没写进" 0 "$(wc -l <"$T/sql")"
+
+# ── 装机脚本的接线：开定时器、首跑、--check 判活真的问了上面那几个判断（source install.sh，替身不要 root）──
+# 每条都在子 shell 里跑：install.sh 带进来的 common.sh 有自己的 finish，别盖掉任务本体那个
+
+# 替身：systemctl 只记账（定时器一律当成没启用、没在跑）；写文件不动手；运行记录吐 HIST，HIST=FAIL 时读不到
+install_stubs() {
+  # shellcheck source=../install.sh
+  source "$BK/install.sh"
+  put_file() { WROTE=0; }
+  systemctl() {
+    echo "$*" >>"$T/systemctl"
+    case $1 in
+    is-enabled)
+      echo disabled
+      return 1
+      ;;
+    is-active)
+      echo inactive
+      return 3
+      ;;
+    esac
+  }
+  job_health() {
+    if [[ "$HIST" == FAIL ]]; then
+      echo "psql: connection refused" >&2
+      return 2
+    fi
+    printf '%s\n' "$HIST"
+  }
+}
+
+wiring() { # 仓库里几份快照 运行记录 要跑的函数及参数…（输出进 $T/wiring，systemctl 的调用进 $T/systemctl）
+  : >"$T/systemctl"
+  (
+    install_stubs
+    REPO_READY=1 REPO_SNAPSHOTS=$1 HIST=$2
+    shift 2
+    "$@"
+    if ((${#REDS[@]})); then printf 'RED:%s\n' "${REDS[@]}"; fi
+    if ((${#PENDING[@]})); then printf 'PENDING:%s\n' "${PENDING[@]}"; fi
+  ) >"$T/wiring" 2>&1
+}
+sys_calls() { grep -cxF -- "$1" "$T/systemctl"; }
+
+hist() { # 每晚 演练 巡检 三个的「上次跑成距今秒数或 never」，没写的那个就不出那一行
+  local id age
+  for id in backup.drill:$2 backup.nightly:$1 backup.watch:$3; do
+    age=${id#*:}
+    if [[ -n "$age" ]]; then printf '%s\t60\t%s\tok\t3\t0\t\n' "${id%%:*}" "$age"; fi
+  done
+}
+H_ADOPT=$(hist never never never) # 新机：三个都从没跑成过
+H_NORMAL=$(hist 3600 3600 60)     # 平常：都跑成过
+H_NO_NIGHTLY=$(hist "" 3600 60)   # 每晚备份那一行没有（没登记）
+
+wiring 5 "$H_ADOPT" setup_units
+check "接线·开定时器：换机恢复（仓库有快照、这台从没备份成功过）→ 每晚备份的定时器不开" 0 "$(sys_calls 'enable --quiet fleet-backup.timer')"
+check "接线·开定时器：换机恢复时演练、巡检照开" 2 "$(($(sys_calls 'enable --quiet fleet-backup-drill.timer') + $(sys_calls 'enable --quiet fleet-backup-watch.timer')))"
+check "接线·开定时器：挡着的记成待配、说清原因" 1 "$(grep -c '^PENDING:fleet-backup.timer 先不开：.*换机恢复' "$T/wiring")"
+wiring 5 FAIL setup_units
+check "接线·开定时器：运行记录读不到 → 每晚备份的定时器不开（不当成跑成过）" 0 "$(sys_calls 'enable --quiet fleet-backup.timer')"
+wiring 5 "$H_NO_NIGHTLY" setup_units
+check "接线·开定时器：每晚备份没登记（缺那一行）→ 不开" 0 "$(sys_calls 'enable --quiet fleet-backup.timer')"
+wiring 5 "$H_NORMAL" setup_units
+check "接线·开定时器：平常重跑（跑成过）→ 开" 1 "$(sys_calls 'enable --quiet fleet-backup.timer')"
+wiring 0 "$H_ADOPT" setup_units
+check "接线·开定时器：第一次装机（新仓库、0 份快照）→ 开" 1 "$(sys_calls 'enable --quiet fleet-backup.timer')"
+
+wiring 5 "$H_ADOPT" first_runs
+check "接线·首跑：换机恢复 → 不首跑每晚备份（会把空库备上去）" 0 "$(sys_calls 'start fleet-backup.service')"
+check "接线·首跑：换机恢复 → 演练照样首跑（只动临时库）" 1 "$(sys_calls 'start fleet-backup-drill.service')"
+wiring 0 "$H_ADOPT" first_runs
+check "接线·首跑：第一次装机 → 首跑每晚备份" 1 "$(sys_calls 'start fleet-backup.service')"
+wiring 5 FAIL first_runs
+check "接线·首跑：运行记录读不到 → 一个都不首跑" 0 "$(grep -c '^start ' "$T/systemctl")"
+check "接线·首跑：读不到的记成待配（没查成），不说跑成过" 3 "$(grep -c '^PENDING:.*跑成过没有读不出来' "$T/wiring")"
+wiring 5 "$H_NO_NIGHTLY" first_runs
+check "接线·首跑：每晚备份没登记 → 不首跑它" 0 "$(sys_calls 'start fleet-backup.service')"
+wiring 5 "$H_NORMAL" first_runs
+check "接线·首跑：都跑成过 → 一个都不首跑" 0 "$(grep -c '^start ' "$T/systemctl")"
+
+H_DRILL_FOUND=$(printf 'backup.drill\t10200\t600\tok\t3\t1\t对不上 1 个\nbackup.nightly\t1560\t600\tok\t3\t0\t\nbackup.watch\t90\t60\tok\t4\t0\t')
+wiring 5 "$H_DRILL_FOUND" readback_jobs 0
+check "接线·--check：演练查出问题 → 红（判活走 bk_judge_job）" 1 "$(grep -c '^RED:backup.drill 最近一次查出 1 个问题' "$T/wiring")"
+check "接线·--check：另两个新鲜、没问题 → 不红" 1 "$(grep -c '^RED:' "$T/wiring")"
+wiring 5 "$H_ADOPT" readback_jobs 1
+check "接线·--check：换机恢复挡着时，每晚备份没跑过记待配、不判红" "1 0" \
+  "$(grep -c '^PENDING:backup.nightly 还没跑过' "$T/wiring") $(grep -c '^RED:backup.nightly' "$T/wiring")"
+wiring 5 FAIL readback_jobs 0
+check "接线·--check：运行记录读不到 → 没查成（待配），不判成通过" "1 0" \
+  "$(grep -c '^PENDING:运行记录读不出来' "$T/wiring") $(grep -c '^RED:' "$T/wiring")"
+wiring 5 "$H_NO_NIGHTLY" readback_jobs 0
+check "接线·--check：每晚备份没登记 → 红" 1 "$(grep -c '^RED:backup.nightly 没登记' "$T/wiring")"
 
 printf '备份的测试：通过 %d 条，不通过 %d 条\n' "$passes" "$fails"
 if ((fails)); then exit 1; fi
