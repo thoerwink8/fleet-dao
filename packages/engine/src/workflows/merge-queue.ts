@@ -1,6 +1,7 @@
 // 合并队列：每个仓一条，一次只合一个。合之前把最新主线并进分支、在新头上重跑测试，红了退回子任务。
 // 由子任务的 enqueueMerge 活动 signalWithStart 拉起；空闲一阵就收工，攒够一批换一次历史（continue-as-new）。
 // 撤出（子任务暂停、要等人批准、叫停）一定回话：还没开始合的当场回 withdrawn；正在合的等那一步做完，合上了回 merged。
+// 回过的话都记在 recent 里，撤回也记：排队信号比撤出晚到（排队的活动还在路上就叫停了），会被挡回去、不再排进来。
 
 import {
   allHandlersFinished,
@@ -57,14 +58,15 @@ export async function mergeQueueWorkflow(input: MergeQueueInput): Promise<MergeQ
       });
     }
   };
-  /** 记下结果（子任务等太久重排、重复撤出时补发），再送过去。 */
-  const answer = async (item: MergeItem, result: MergeResult) => {
-    const delivery = { subtaskWorkflowId: item.subtaskWorkflowId, result };
+  /** 记下结果（子任务等太久重排、重复撤出时补发；撤回挡住后到的排队），再送过去。 */
+  const answer = async (subtaskWorkflowId: string, result: MergeResult) => {
+    const delivery = { subtaskWorkflowId, result };
     recent = [...recent.filter((d) => d.result.itemId !== result.itemId), delivery].slice(-RECENT_KEPT);
     await deliver(delivery);
   };
 
   setHandler(enqueueSignal, async (item) => {
+    // 回过话的（合上、退回、撤回）不再排：补发那句话。
     const done = recent.find((d) => d.result.itemId === item.itemId);
     if (done) return deliver(done);
     if (current?.item.itemId === item.itemId || queue.some((q) => q.itemId === item.itemId)) return;
@@ -74,7 +76,7 @@ export async function mergeQueueWorkflow(input: MergeQueueInput): Promise<MergeQ
     const index = queue.findIndex((q) => q.itemId === itemId);
     if (index >= 0) {
       const [item] = queue.splice(index, 1);
-      if (item) await answer(item, { itemId, outcome: 'withdrawn' });
+      if (item) await answer(item.subtaskWorkflowId, { itemId, outcome: 'withdrawn' });
       return;
     }
     if (current?.item.itemId === itemId) {
@@ -82,14 +84,14 @@ export async function mergeQueueWorkflow(input: MergeQueueInput): Promise<MergeQ
       // 还没开始合：当场确认——之后不会再去合（handleItem 每步都先看撤没撤）。正在合的等那一步做完再回话。
       if (current.step !== 'merge' && !current.answered) {
         current.answered = true;
-        await answer(current.item, { itemId, outcome: 'withdrawn' });
+        await answer(current.item.subtaskWorkflowId, { itemId, outcome: 'withdrawn' });
       }
       return;
     }
     const done = recent.find((d) => d.result.itemId === itemId);
     if (done) return deliver(done);
-    // 没见过这一条（还没排进来、或者早就处理完了记录已经轮掉）：没有谁会再合它。
-    await deliver({ subtaskWorkflowId, result: { itemId, outcome: 'withdrawn' } });
+    // 没见过这一条：排队信号可能还在路上（排队的活动还没做完就叫停了）。记下撤回，它后到也会被挡回去。
+    await answer(subtaskWorkflowId, { itemId, outcome: 'withdrawn' });
   });
   setHandler(
     mergeQueueStatusQuery,
@@ -204,7 +206,7 @@ export async function mergeQueueWorkflow(input: MergeQueueInput): Promise<MergeQ
     current = null;
     if (!entry.answered) {
       entry.answered = true;
-      await answer(item, result);
+      await answer(item.subtaskWorkflowId, result);
     }
     processed += 1;
     processedThisRun += 1;

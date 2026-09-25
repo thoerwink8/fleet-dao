@@ -1,5 +1,5 @@
-// 每个活动的超时、心跳、重试：按活动类型分开设，唯一出处在这里（旧系统所有活动共用一个 74 分钟、没有心跳，
-// 工人一重启丢掉的活动要干等 74 分钟才判死）。工作流按这张表给每个活动配代理，不许在调用处另写超时。
+// 每个活动的超时、心跳、重试、叫停时等不等它收场：按活动类型分开设，唯一出处在这里（旧系统所有活动共用一个 74 分钟、
+// 没有心跳，工人一重启丢掉的活动要干等 74 分钟才判死）。工作流按这张表给每个活动配代理，不许在调用处另写。
 
 import type { ActivityOptions, RetryPolicy } from '@temporalio/common';
 import type { MergeItem } from './contract.ts';
@@ -105,4 +105,21 @@ export function profileOptions(profile: Profile, limits: Limits): ActivityOption
         retry: retry(2, '5 seconds', '1 minute'),
       };
   }
+}
+
+/**
+ * 叫停时要等它收场（做完，或者服务端确认它不会再做）才往下走的活动。
+ * 不设的活动按 SDK 的实际默认 TRY_CANCEL：叫停时工作流当场往下走，不等活动（1.24 的文档注释说默认是
+ * WAIT_CANCELLATION_COMPLETED，不对——不设就编码成 0 = TRY_CANCEL）。
+ * 排进合并队列必须等：不等的话收尾先撤出、活动随后照样把条目排进去（队列没在跑还会被它拉起来），PR 照样合进主线。
+ * 它不心跳、最多一次尝试 30 秒；叫停之后服务端不再重试，所以最多多等这一次。
+ */
+export const WAIT_FOR_CANCEL: readonly ActivityName[] = ['enqueueMerge'];
+
+/** 一个活动的完整选项：它那一档的超时、心跳、重试，加上叫停时等不等它收场。 */
+export function activityOptions(name: ActivityName, limits: Limits): ActivityOptions {
+  const options = profileOptions(ACTIVITY_PROFILE[name], limits);
+  return WAIT_FOR_CANCEL.includes(name)
+    ? { ...options, cancellationType: 'WAIT_CANCELLATION_COMPLETED' }
+    : options;
 }

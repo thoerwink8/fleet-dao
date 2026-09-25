@@ -1,5 +1,8 @@
+import type { Repo } from '@fleet-dao/shared';
+import type { WorkflowHandle } from '@temporalio/client';
 import type { TestWorkflowEnvironment } from '@temporalio/testing';
 import { beforeEach, describe, expect, it } from 'vitest';
+import type { EngineActivities } from '../src/activity-options.ts';
 import {
   enqueueSignal,
   type MergeItem,
@@ -12,6 +15,7 @@ import {
   type SubtaskStatus,
   stopSignal,
   WORKFLOW_TYPES,
+  withdrawSignal,
 } from '../src/contract.ts';
 import { createFakeWorld, type FakeCall } from '../src/fakes.ts';
 import {
@@ -39,6 +43,61 @@ async function resultsInOrder(handles: { result(): Promise<unknown> }[]): Promis
   const out: SubtaskResult[] = [];
   for (const handle of handles) out.push((await handle.result()) as SubtaskResult);
   return out;
+}
+
+/** 让「排进合并队列」的活动卡在半路（排队信号还没发出去），由测试放行。 */
+function holdEnqueue() {
+  let open: () => void = () => undefined;
+  const opened = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  const held = { started: 0, done: 0, open: () => open() };
+  const wrap = (acts: EngineActivities): EngineActivities => ({
+    ...acts,
+    enqueueMerge: async (input) => {
+      held.started += 1;
+      await opened;
+      await acts.enqueueMerge(input);
+      held.done += 1;
+    },
+  });
+  return { held, wrap };
+}
+
+/**
+ * 叫停之后等它处理到位：没修的代码当场撤出——等撤出送到队列（或确认队列不在、送不到）；
+ * 修好的代码先等排队活动收场，这时撤出还没发。两种都看子任务自己的历史判断，不赌时间。
+ */
+async function stopHandled(handle: WorkflowHandle): Promise<void> {
+  await waitUntil(async () => {
+    const events = (await handle.fetchHistory()).events ?? [];
+    if (!events.some((e) => e.activityTaskCancelRequestedEventAttributes)) return false;
+    const withdrawSent = events.some(
+      (e) => e.signalExternalWorkflowExecutionInitiatedEventAttributes?.signalName === 'withdraw',
+    );
+    if (!withdrawSent) return true;
+    return events.some(
+      (e) =>
+        e.externalWorkflowExecutionSignaledEventAttributes ||
+        e.signalExternalWorkflowExecutionFailedEventAttributes,
+    );
+  }, '叫停处理到位');
+}
+
+/** 哨兵条目：排在后面，它合完了，排在它前面的就都处理完了。 */
+function sentinel(repo: Repo, prNumber: number): MergeItem {
+  return {
+    itemId: `sentinel#${prNumber}`,
+    subtaskWorkflowId: `sentinel-${prNumber}`,
+    taskId: 't',
+    subtaskId: 's',
+    subtaskKey: 'z',
+    repo,
+    prNumber,
+    branch: `fleet/1-z${prNumber}`,
+    head: `h${prNumber}`,
+    enqueuedAt: new Date(0).toISOString(),
+  };
 }
 
 /** 合并队列处理一个条目的时间段：从同步主线开始到合并结束。 */
@@ -118,6 +177,78 @@ describe('合并队列', { timeout: 60_000 }, () => {
     expect(outcome.rb.state).toBe('stopped');
     expect(world.count('mergePr')).toBe(1);
     expect(outcome.queue.processed).toBe(1);
+  });
+
+  for (const queueRunning of [true, false]) {
+    it(`排队的活动还没做完就叫停（队列${queueRunning ? '在跑' : '没在跑'}）：不会被后到的排队拉去照样合上`, async () => {
+      const repo = freshRepo();
+      // 队列卡在「新头上跑测试」这一步：撤出一定赶在合并之前到；最后放开，看它到底合没合。
+      const world = createFakeWorld({ holdPorts: ['runTests'] });
+      const { held, wrap } = holdEnqueue();
+      const input = subtaskInput(spec('a'), { repo });
+      const mqId = mergeQueueWorkflowId(repo);
+      const result = await withWorker(
+        env,
+        world,
+        async (q) => {
+          if (queueRunning) {
+            await env.client.workflow.start(WORKFLOW_TYPES.mergeQueue, {
+              taskQueue: q,
+              workflowId: mqId,
+              args: [{ schemaVersion: 1, repo }],
+            });
+          }
+          const handle = await env.client.workflow.start(WORKFLOW_TYPES.subtask, {
+            taskQueue: q,
+            workflowId: `sub-${input.subtaskId}`,
+            args: [input],
+          });
+          await waitUntil(() => held.started === 1, '排队活动卡在半路');
+          await handle.signal(stopSignal, { by: 'founder' });
+          await stopHandled(handle);
+          held.open();
+          const done = (await handle.result()) as SubtaskResult;
+          await waitUntil(() => held.done === 1, '排队信号发出去了');
+          world.releasePort('runTests');
+          await env.client.workflow.signalWithStart(WORKFLOW_TYPES.mergeQueue, {
+            taskQueue: q,
+            workflowId: mqId,
+            args: [{ schemaVersion: 1, repo }],
+            signal: enqueueSignal,
+            signalArgs: [sentinel(repo, 900)],
+          });
+          await waitUntil(
+            () => world.callsOf('mergePr').some((c) => c.input.prNumber === 900 && c.end !== null),
+            '哨兵合完',
+          );
+          return done;
+        },
+        { wrapActivities: wrap },
+      );
+      expect(result.state).toBe('stopped');
+      expect(world.callsOf('mergePr').map((c) => c.input.prNumber)).toEqual([900]);
+    });
+  }
+
+  it('撤出比排队先到：队列记下撤回，后到的同一条排队挡回去，不合', async () => {
+    const repo = freshRepo();
+    const world = createFakeWorld();
+    const late = { ...sentinel(repo, 800), itemId: 'late#1', subtaskWorkflowId: 'late-subtask' };
+    await withWorker(env, world, async (q) => {
+      const mq = await env.client.workflow.start(WORKFLOW_TYPES.mergeQueue, {
+        taskQueue: q,
+        workflowId: mergeQueueWorkflowId(repo),
+        args: [{ schemaVersion: 1, repo }],
+      });
+      await mq.signal(withdrawSignal, { itemId: late.itemId, subtaskWorkflowId: late.subtaskWorkflowId });
+      await mq.signal(enqueueSignal, late);
+      await mq.signal(enqueueSignal, sentinel(repo, 900));
+      await waitUntil(
+        () => world.callsOf('mergePr').some((c) => c.input.prNumber === 900 && c.end !== null),
+        '哨兵合完',
+      );
+    });
+    expect(world.callsOf('mergePr').map((c) => c.input.prNumber)).toEqual([900]);
   });
 
   it('暂停挡得住排在队里还没合的：撤出来（队列当场确认），继续后重新排队再合', async () => {

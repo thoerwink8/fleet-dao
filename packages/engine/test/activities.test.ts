@@ -3,7 +3,7 @@ import { ApplicationFailure, CancelledFailure } from '@temporalio/common';
 import { MockActivityEnvironment } from '@temporalio/testing';
 import { describe, expect, it } from 'vitest';
 import { agentTokenTtlSeconds, createActivities, PORT_NAMES } from '../src/activities.ts';
-import { ACTIVITY_PROFILE, profileOptions } from '../src/activity-options.ts';
+import { ACTIVITY_PROFILE, activityOptions, profileOptions } from '../src/activity-options.ts';
 import { createFakeWorld } from '../src/fakes.ts';
 import { DEFAULT_LIMITS } from '../src/limits.ts';
 import { type ActivityTiming, type EnginePorts, PortError, type StartSessionInput } from '../src/ports.ts';
@@ -185,6 +185,17 @@ describe('活动外壳', () => {
     );
     // 要人的错误码不白白重试。
     expect(quick.retry?.nonRetryableErrorTypes).toContain('WORKFLOWS_PERMISSION');
+  });
+
+  it('叫停时只有「排进合并队列」要等活动收场（不等会被它事后排进去照合），别的照 SDK 默认当场往下走', () => {
+    const waits = (Object.keys(ACTIVITY_PROFILE) as (keyof typeof ACTIVITY_PROFILE)[]).filter(
+      (name) => activityOptions(name, DEFAULT_LIMITS).cancellationType !== undefined,
+    );
+    expect(waits).toEqual(['enqueueMerge']);
+    expect(activityOptions('enqueueMerge', DEFAULT_LIMITS)).toMatchObject({
+      cancellationType: 'WAIT_CANCELLATION_COMPLETED',
+      startToCloseTimeout: '30 seconds',
+    });
   });
 
   it('通行证比会话限时多一刻钟，最长一天', () => {

@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { signAgentToken } from '@fleet-dao/api/agent-token';
 import { bundleWorkflowCode, NativeConnection, Worker, type WorkflowBundle } from '@temporalio/worker';
 import { type AgentTokenClaims, createActivities } from './activities.ts';
+import type { EngineActivities } from './activity-options.ts';
 import { type Classifier, createDecide, type Decide } from './decisions/index.ts';
 import { createFakeWorld } from './fakes.ts';
 import type { EnginePorts } from './ports.ts';
@@ -88,6 +89,8 @@ export interface CreateEngineWorkerOptions {
   classify?: Classifier;
   /** 整个换掉判断入口（演练「判断出错」用）；不给就是 createDecide({ classify })。 */
   decide?: Decide;
+  /** 包一层活动（演练用：让某个活动卡在半路，看叫停、换工人时的先后）；不给就是原样。 */
+  wrapActivities?: (activities: EngineActivities) => EngineActivities;
   /** 缓存几条工作流；0 = 不缓存、每个工作流任务都从历史重放（换工人、换代码演练用）。 */
   maxCachedWorkflows?: number;
   log?: (message: string) => void;
@@ -100,17 +103,18 @@ export async function createEngineWorker(options: CreateEngineWorkerOptions): Pr
     options.log?.(`收掉上一轮留下的会话 ${reaped} 个`);
   }
   const connection = options.connection ?? (await NativeConnection.connect({ address: config.address }));
+  const activities = createActivities(options.ports, {
+    fleetApi: config.agentApiUrl ?? '',
+    cliBinDir: config.cliBinDir,
+    signToken: options.signAgentToken,
+  });
   return Worker.create({
     connection,
     namespace: config.namespace,
     taskQueue: config.taskQueue,
     workflowBundle: options.workflowBundle ?? (await bundleEngineWorkflows()),
     activities: {
-      ...createActivities(options.ports, {
-        fleetApi: config.agentApiUrl ?? '',
-        cliBinDir: config.cliBinDir,
-        signToken: options.signAgentToken,
-      }),
+      ...(options.wrapActivities ? options.wrapActivities(activities) : activities),
       decide: options.decide ?? createDecide(options.classify ? { classify: options.classify } : {}),
     },
     shutdownGraceTime: `${config.shutdownGraceSeconds} seconds`,

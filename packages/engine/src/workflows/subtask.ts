@@ -272,7 +272,8 @@ export async function subtaskWorkflow(input: SubtaskInput): Promise<SubtaskResul
       return true;
     } catch (error) {
       if (isCancellation(error)) throw error;
-      // 队列不在了（空闲收工、被终止）：没有谁会再合它。
+      // 队列不在：这一条没排进去。排队的活动叫停时要等它收场（activity-options 的 WAIT_FOR_CANCEL），
+      // 走到这里时排队信号要么已经送到（队列就在）、要么再也不会送——不会有活动事后把队列拉起来照合。
       log.warn('撤出合并队列的信号没发出去', { itemId, error: String(error) });
       return false;
     }

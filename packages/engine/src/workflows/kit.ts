@@ -24,9 +24,8 @@ import {
 import {
   ACTIVITY_PROFILE,
   type ActivityName,
+  activityOptions,
   type EngineActivities,
-  type Profile,
-  profileOptions,
 } from '../activity-options.ts';
 import {
   AGENT_EVENT_WAKE_KINDS,
@@ -105,18 +104,11 @@ export function limitsFor(partial: Partial<Limits> | undefined): Promise<Limits>
   return judgeRetrying('limits', partial ?? {});
 }
 
-/** 按 ACTIVITY_PROFILE 给每个活动配上自己那一档的超时与重试。 */
+/** 给每个活动配上它自己的选项（那一档的超时与重试、叫停时等不等它收场），见 activity-options.ts。 */
 export function activitiesFor(limits: Limits): EngineActivities {
-  const proxies = new Map<Profile, EngineActivities>();
   const out: Partial<Record<ActivityName, unknown>> = {};
   for (const name of Object.keys(ACTIVITY_PROFILE) as ActivityName[]) {
-    const profile = ACTIVITY_PROFILE[name];
-    let proxy = proxies.get(profile);
-    if (!proxy) {
-      proxy = proxyActivities<EngineActivities>(profileOptions(profile, limits));
-      proxies.set(profile, proxy);
-    }
-    out[name] = proxy[name];
+    out[name] = proxyActivities<EngineActivities>(activityOptions(name, limits))[name];
   }
   return out as EngineActivities;
 }
