@@ -92,7 +92,7 @@ run() {
     esac
   done
   for u in "${SESSION_USERS[@]}"; do if [[ "$user" == "$u" ]]; then ok=1; fi; done
-  ((ok)) || die "--user 只能是 ${SESSION_USERS[*]} 之一，给的是「$user」"
+  ((ok)) || die "--user 只能是会话用户 ${SESSION_USERS[*]} 之一，给的是「$user」"
   (($#)) || die "-- 后面要有要跑的命令"
   [[ "$1" == /* ]] || die "命令要写绝对路径：「$1」"
   [[ "$cwd" == /* ]] || die "--cwd 要写绝对路径：「$cwd」"
@@ -243,12 +243,12 @@ adopt() {
   done
   # 先验和文件系统无关的：user/from/session 的形状，不用等工作树存在就能测
   for u in "${SESSION_USERS[@]}"; do if [[ "$user" == "$u" ]]; then ok=1; fi; done
-  ((ok)) || die "--user 只能是 ${SESSION_USERS[*]} 之一，给的是「$user」"
+  ((ok)) || die "--user 只能是会话用户 ${SESSION_USERS[*]} 之一，给的是「$user」"
   if [[ -n "$from" || -n "$session" ]]; then
     [[ -n "$from" && -n "$session" ]] || die "--from 和 --session 要么都给，要么都不给（拷会话记录要知道从哪个用户拷）"
     ok=0
     for u in "${SESSION_USERS[@]}"; do if [[ "$from" == "$u" ]]; then ok=1; fi; done
-    ((ok)) || die "--from 只能是 ${SESSION_USERS[*]} 之一，给的是「$from」"
+    ((ok)) || die "--from 只能是会话用户 ${SESSION_USERS[*]} 之一，给的是「$from」"
     [[ "$from" != "$user" ]] || die "--from 和 --user 不能一样：「$user」"
     [[ "$session" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] ||
       die "--session 要是 UUID：「$session」"
@@ -273,10 +273,12 @@ adopt() {
     # pipefail 只留管道最后一段的退出码：右边就算读到空输入也能 mkdir+cat 成功，会把左边（旧用户）读失败
     # 盖成「成功」，写出一份空的会话记录。两段的退出码都要看，用 PIPESTATUS（在 if 判完的下一句立刻取，
     # 再跑别的命令它就被冲掉了）。
-    # shellcheck disable=SC2016 # $1 要由降权后的 sh 展开，不是这一层的
+    # 权限显式设（700 / 600），不只靠 umask：上级目录带默认 ACL 时 umask 不生效，新建的会是 775 / 664（CI 的机器就是）。
+    # shellcheck disable=SC2016 # $1…$4 要由降权后的 sh 展开，不是这一层的
     if ! as_session_user "$from" cat -- "$src" |
-      as_session_user "$user" /bin/sh -c 'umask 077 && mkdir -p -- "$(dirname -- "$1")" && cat >"$1"' sh \
-        "$dest_dir/$session.jsonl"; then
+      as_session_user "$user" /bin/sh -c \
+        'umask 077 && install -d -m 700 -- "$1" "$2" "$3" && cat >"$4" && chmod 600 -- "$4"' sh \
+        "$to_home/.claude" "$to_home/.claude/projects" "$dest_dir" "$dest_dir/$session.jsonl"; then
       pstat=("${PIPESTATUS[@]}")
       echo "fleet-agent-scope：拷会话记录失败（读 ${pstat[0]}，写 ${pstat[1]}）：$src → $dest_dir/$session.jsonl" >&2
       exit 1
