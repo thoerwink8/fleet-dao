@@ -27,6 +27,8 @@ export interface WriteSpecDocResult {
 
 /** 内容按字节数算（GitHub 按文件大小限制，不是字符数），超了发出前就拒。 */
 const MAX_CONTENT_BYTES = 1024 * 1024;
+/** GitHub 说 sha 过期的两种原文：给的 sha 对不上（409 does not match）、文件已经在了却没给 sha（422）。 */
+const STALE_SHA = /does not match|"sha" wasn't supplied/i;
 // biome-ignore lint/suspicious/noControlCharactersInRegex: 就是要拦控制字符
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
 
@@ -153,10 +155,19 @@ export async function writeSpecDoc(deps: Deps, input: WriteSpecDocInput): Promis
     });
     if (res.status === 409 || res.status === 422) {
       const message = (res.data as { message?: string } | null)?.message ?? String(res.status);
-      throw new GitHubError('SPEC_DOC_CONFLICT', `写 ${path} 时 sha 过期了（${message}）`, {
-        retryable: true,
-        status: res.status,
-      });
+      // 409、422 不全是 sha 过期：规则集、保护分支拒写（409「Repository rule violations found」）、路径不合法（422）
+      // 重读再写一遍也一样被拒，不许当成过期去重试
+      if (STALE_SHA.test(message)) {
+        throw new GitHubError('SPEC_DOC_CONFLICT', `写 ${path} 时 sha 过期了（${message}）`, {
+          retryable: true,
+          status: res.status,
+        });
+      }
+      throw new GitHubError(
+        'SPEC_DOC_REJECTED',
+        `GitHub 拒绝写 ${path}（${res.status}：${message}）：不是 sha 过期，重试没用——多半是主线的规则集或保护不让「引擎」直写，要人看`,
+        { retryable: false, status: res.status },
+      );
     }
     const parsed = WriteReceipt.safeParse(res.data);
     if (!parsed.success) throw unexpected(`写 ${path} 的回执`, res.data);

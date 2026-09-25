@@ -1068,6 +1068,19 @@
         "message": "会话没起来：spawn /opt/fleet/bin/reclaude ENOENT"
       },
       "expect": { "action": "swapRoute", "rule": "CF1", "alert": true }
+    },
+    {
+      "id": "X69",
+      "provenance": "format",
+      "origin": "github 包写需求文档进主线时 GitHub 回 409「Repository rule violations found」（规则集不让直写）：不是 sha 过期，SPEC_DOC_REJECTED 不可重试",
+      "evidence": {
+        "source": "writeSpecDoc",
+        "routeBound": false,
+        "code": "SPEC_DOC_REJECTED",
+        "retryable": false,
+        "message": "GitHub 拒绝写 specs/12-x/需求.md（409：Repository rule violations found）：不是 sha 过期，重试没用"
+      },
+      "expect": { "action": "park", "rule": "PM1", "alert": true }
     }
   ],
   "skipped": [

@@ -97,6 +97,22 @@ describe('writeSpecDoc', () => {
       gh.writeSpecDoc({ repo, path: 'specs/16-foo/需求.md', content: 'x', message: 'm' }),
     ).rejects.toMatchObject({ code: 'FORBIDDEN' });
   });
+
+  it('409 / 422 不是 sha 过期（规则集拒写、路径不合法）：明确报 SPEC_DOC_REJECTED，不重读重写', async () => {
+    for (const [status, message] of [
+      [409, 'Repository rule violations found\n\nChanges must be made through a pull request.'],
+      [422, 'path contains a malformed path component'],
+    ] as const) {
+      const { gh, fake } = setup();
+      fake.before.push((req) =>
+        req.method === 'PUT' && req.path.includes('/contents/') ? json(status, { message }) : undefined,
+      );
+      await expect(
+        gh.writeSpecDoc({ repo, path: 'specs/20-foo/需求.md', content: 'x', message: 'm' }),
+      ).rejects.toMatchObject({ code: 'SPEC_DOC_REJECTED', retryable: false, status });
+      expect(fake.calls('PUT', /\/contents\//)).toHaveLength(1);
+    }
+  });
 });
 
 describe('写主线之前的卫生检查（直写不经 git 推送，推前扫描拦不到）', () => {

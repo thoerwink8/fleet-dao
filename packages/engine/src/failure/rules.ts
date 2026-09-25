@@ -307,10 +307,11 @@ export const RULES: readonly FailureRule[] = [
     routeOutcome: 'neutral',
   },
   // 推送身份没有 workflows 权限：换有权限的身份属于改凭据，要人拍（旧系统判成可重试，退避白烧，#1725）。
+  // 主线的规则集、保护不让「引擎」直写需求文档（spec_doc_rejected）同一类：重试一样被拒，要人改设置。
   {
     id: 'PM1',
     title: '没有权限',
-    codes: ['permission_denied', 'workflows_permission'],
+    codes: ['permission_denied', 'workflows_permission', 'spec_doc_rejected'],
     text: /refusing to allow a GitHub App|without [`']?workflows[`']? permission/i,
     ladder: ['park'],
     alert: true,
