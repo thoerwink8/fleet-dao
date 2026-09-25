@@ -840,8 +840,33 @@ check_running_release() { # 提交号
   return "$bad"
 }
 
+# 会随时间自己变红、和换没换版无关的健康项：只标待处理，不当成这一版的错去退回。
+# draft_backlog = 最早一张待开单等得太久：发版那一两分钟里恰好跨过时限，好版本也会被退回。
+# 这里的名字都得是后端真报的项（packages/api 的 health.test.ts 核对，改了名那边报警）
+DRIFTING_HEALTH_ITEMS="draft_backlog"
+
+# 切之后的健康报告逐项和切之前比：之前好的变坏了才算这一版的错（返回 1）；会自己变红的那几项只标待处理
+compare_api_items() { # 切之前的逐项结果 切之后的逐项结果
+  local k st why was bad=0
+  while IFS=$'\t' read -r k st why; do
+    if [[ -z "$k" ]]; then continue; fi
+    was=$(awk -F '\t' -v k="$k" '$1 == k { print $2 }' <<<"$1")
+    if [[ "$st" == ok ]]; then
+      ok "后端报 $k 好"
+    elif [[ " $DRIFTING_HEALTH_ITEMS " == *" $k "* ]]; then
+      pending "后端报 $k 不好：$why（这一项会随时间自己变红，和换没换版无关，不退回）"
+    elif [[ "$was" == ok ]]; then
+      red "fleet-api：$k 切之前是好的，换了这一版不好了：$why"
+      bad=1
+    else
+      pending "后端报 $k 不好：$why（切之前就不好或第一次起，不算这一版的错，不退回）"
+    fi
+  done <<<"$2"
+  return "$bad"
+}
+
 check_api() { # 切之前的逐项结果
-  local before=$1 got code body items k st why was bad=0
+  local before=$1 got code body items bad=0
   if ! got=$(api_healthz); then
     red "fleet-api：驾驶舱接口 http://$COCKPIT/healthz 连不上"
     return 1
@@ -853,18 +878,7 @@ check_api() { # 切之前的逐项结果
     return 1
   fi
   ok "fleet-api：驾驶舱接口 $COCKPIT 在答健康报告（HTTP $code）"
-  while IFS=$'\t' read -r k st why; do
-    if [[ -z "$k" ]]; then continue; fi
-    was=$(awk -F '\t' -v k="$k" '$1 == k { print $2 }' <<<"$before")
-    if [[ "$st" == ok ]]; then
-      ok "后端报 $k 好"
-    elif [[ "$was" == ok ]]; then
-      red "fleet-api：$k 切之前是好的，换了这一版不好了：$why"
-      bad=1
-    else
-      pending "后端报 $k 不好：$why（切之前就不好或第一次起，不算这一版的错，不退回）"
-    fi
-  done <<<"$items"
+  compare_api_items "$before" "$items" || bad=1
   if ! timeout 5 bash -c "exec 3<>/dev/tcp/${AGENT_API%:*}/${AGENT_API#*:}" 2>/dev/null; then
     red "fleet-api：fleet 命令接口 $AGENT_API 连不上"
     bad=1

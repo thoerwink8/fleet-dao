@@ -1,6 +1,7 @@
+import { readFileSync } from 'node:fs';
 import { createDb, type Db } from '@fleet-dao/db';
 import { describe, expect, it } from 'vitest';
-import { PublicHealthError, runHealthChecks } from '../src/health.ts';
+import { PublicHealthError, runHealthChecks, serviceHealthChecks } from '../src/health.ts';
 import { silentLogger } from '../src/log.ts';
 import { probeDb, sqlState, withStatementTimeout } from '../src/pg-store.ts';
 import type { Logger } from '../src/ports.ts';
@@ -66,6 +67,21 @@ describe('健康检查', () => {
       },
     });
     expect(warnings).toHaveLength(2);
+  });
+
+  it('发版脚本里「会随时间自己变红、不退回」的健康项都是后端真报的项（这边改了名，发版脚本的名单跟着改）', () => {
+    const script = readFileSync(new URL('../../../deploy/release.sh', import.meta.url), 'utf8');
+    const listed = /^DRIFTING_HEALTH_ITEMS="([^"]*)"$/m.exec(script)?.[1]?.trim().split(/\s+/) ?? [];
+    expect(listed).toContain('draft_backlog');
+    const names = serviceHealthChecks({
+      probeDb: async () => {},
+      feed: { probe: async () => {} },
+      temporal: { check: async () => {} },
+      githubEvents: async () => {},
+      draftOpener: { check: async () => {} },
+      draftBacklog: async () => {},
+    }).map((c) => c.name);
+    for (const name of listed) expect(names, name).toContain(name);
   });
 
   it('Temporal 没接上时发信号：503，失败也留操作记录', async () => {
