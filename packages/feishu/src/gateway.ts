@@ -445,9 +445,10 @@ export function createGateway(o: GatewayOptions): Gateway {
     } catch (err) {
       const latest = draftIn(err);
       if (latest) drafts.set(latest.id, latest);
+      // 已确认的：后端写明了现在在哪一步（待开单 / 已开成 #n），照它说，不自己猜「已经开成任务了」。
       const note =
         err instanceof BackendError && err.code === 'draft_confirmed'
-          ? '已经开成任务了，这张卡改不了；要改需求请在驾驶舱里改。'
+          ? `${err.said ?? '已经确认了，这张卡改不了'}。`
           : `没改成：${describe(err)}，再试一次。`;
       const base = latest ?? cached;
       await patch(
