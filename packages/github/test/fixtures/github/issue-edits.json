@@ -1,0 +1,39 @@
+{
+  "data": {
+    "repository": {
+      "issue": {
+        "userContentEdits": {
+          "nodes": [
+            {
+              "diff": "原话：真机验收 2026-09-24T20-55-57-851Z（验收脚本自动开的，跑完自己关）\nAI 理解：在 README 末尾加一行时间\n\n<!-- fleet:progress:start as-of=2026-09-24T20:56:49.662Z -->\n**进度**：■■■■■ 1/1 · 已完成\n**子任务**：A README 加一行 ✅ #4\n<sub>这一段由引擎自动更新，改了会被覆盖；要说的话写在上面或评论里。</sub>\n<!-- fleet:progress:end -->\n",
+              "deletedAt": null,
+              "editor": {
+                "__typename": "Bot",
+                "login": "fleet-dao-engine",
+                "databaseId": 1014
+              }
+            },
+            {
+              "diff": "原话：真机验收 2026-09-24T20-55-57-851Z（验收脚本自动开的，跑完自己关）\nAI 理解：在 README 末尾加一行时间\n\n<!-- fleet:progress:start as-of=2026-09-24T20:56:47.204Z -->\n**进度**：■■■■■ 1/1 · 进行中 · 正在：写结果文档\n**子任务**：A README 加一行 ✅ #4\n<sub>这一段由引擎自动更新，改了会被覆盖；要说的话写在上面或评论里。</sub>\n<!-- fleet:progress:end -->\n",
+              "deletedAt": null,
+              "editor": {
+                "__typename": "Bot",
+                "login": "fleet-dao-engine",
+                "databaseId": 1014
+              }
+            },
+            {
+              "diff": "原话：真机验收 2026-09-24T20-55-57-851Z（验收脚本自动开的，跑完自己关）\nAI 理解：在 README 末尾加一行时间",
+              "deletedAt": null,
+              "editor": {
+                "__typename": "Bot",
+                "login": "fleet-dao-engine",
+                "databaseId": 1014
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

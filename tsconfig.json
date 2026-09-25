@@ -21,6 +21,9 @@
     },
     {
       "path": "packages/feishu"
+    },
+    {
+      "path": "packages/github"
     }
   ]
 }
