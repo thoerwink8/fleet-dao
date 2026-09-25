@@ -176,6 +176,20 @@ describe('并主线', { timeout: 60_000 }, () => {
     expect(remoteHead('task/7-wf')).toBe(branch.head);
   });
 
+  it('抓取主线与分支失败（网络类）：报 GIT_FAILED，可重试，远端分支没被动', async () => {
+    const runner: GitRunner = async (args, call) =>
+      args[0] === 'fetch'
+        ? { code: 128, stdout: '', stderr: 'fatal: unable to access: Could not resolve host: github.test' }
+        : execGit(args, call);
+    const { gh } = syncSetup(runner);
+    const branch = makeBranch('task/9-fetch-fail', 'n.txt', 'feature\n');
+    advanceMain('o.txt', 'advance\n');
+    await expect(
+      gh.syncMainline({ repo, prNumber: 9, branch: 'task/9-fetch-fail', head: branch.head }),
+    ).rejects.toMatchObject({ code: 'GIT_FAILED', retryable: true });
+    expect(remoteHead('task/9-fetch-fail')).toBe(branch.head);
+  });
+
   it('git 版本太旧：merge-tree 用不了，报 GIT_TOO_OLD，什么都没推', async () => {
     const runner: GitRunner = async (args, call) =>
       args[0] === '--version' ? { code: 0, stdout: 'git version 2.30.0\n', stderr: '' } : execGit(args, call);

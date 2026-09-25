@@ -4,7 +4,7 @@ import { mkdtempSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { execGit } from '../src/git.ts';
+import { execGit, type GitRunner } from '../src/git.ts';
 import { repo, setup } from './helpers.ts';
 
 const ID = ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', '-c', 'commit.gpgsign=false'];
@@ -150,5 +150,52 @@ describe('从镜像打包', { timeout: 60_000 }, () => {
     await expect(
       gh.bundleCommits({ repo, tips: ['not-a-sha'], outPath: outFile('junk-tip') }),
     ).rejects.toMatchObject({ code: 'BAD_INPUT' });
+  });
+
+  it('fetchMainline 抓取主线失败（网络类）：报 GIT_FAILED，可重试，不吞', async () => {
+    const runner: GitRunner = async (args, call) =>
+      args[0] === 'fetch'
+        ? { code: 128, stdout: '', stderr: 'fatal: unable to access: Could not resolve host: github.test' }
+        : execGit(args, call);
+    const { gh } = setup({ git: runner, gitUrl: () => remote, gitHost: 'https://github.com/', env: {} });
+    await expect(gh.fetchMainline({ repo })).rejects.toMatchObject({ code: 'GIT_FAILED', retryable: true });
+  });
+
+  it('fetchMainline 抓到远端后解析不出主线提交号：报 GIT_FAILED，可重试', async () => {
+    const runner: GitRunner = async (args, call) =>
+      args[0] === 'rev-parse' ? { code: 128, stdout: '', stderr: '' } : execGit(args, call);
+    const { gh } = setup({ git: runner, gitUrl: () => remote, gitHost: 'https://github.com/', env: {} });
+    await expect(gh.fetchMainline({ repo })).rejects.toMatchObject({ code: 'GIT_FAILED', retryable: true });
+  });
+
+  it('打包输出文件所在目录没建：报 BUNDLE_OUT_UNWRITABLE，不可重试', async () => {
+    const { gh } = bundleSetup();
+    const fetched = await gh.fetchMainline({ repo });
+    const outPath = join(root, `no-such-dir-${Math.random().toString(36).slice(2, 7)}`, 'x.bundle');
+    await expect(gh.bundleCommits({ repo, tips: [fetched.head], outPath })).rejects.toMatchObject({
+      code: 'BUNDLE_OUT_UNWRITABLE',
+      retryable: false,
+    });
+  });
+
+  it('git bundle create 失败：报 GIT_FAILED，可重试，且失败后也不留导出引用', async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), 'fleet-gh-state-'));
+    const runner: GitRunner = async (args, call) =>
+      args[0] === 'bundle' && args[1] === 'create'
+        ? { code: 128, stdout: '', stderr: 'fatal: unable to write bundle: No space left on device' }
+        : execGit(args, call);
+    const { gh } = setup({
+      git: runner,
+      gitUrl: () => remote,
+      gitHost: 'https://github.com/',
+      env: {},
+      stateDir,
+    });
+    const fetched = await gh.fetchMainline({ repo });
+    await expect(
+      gh.bundleCommits({ repo, tips: [fetched.head], outPath: outFile('bundle-create-fail') }),
+    ).rejects.toMatchObject({ code: 'GIT_FAILED', retryable: true });
+    const mirror = join(stateDir, 'mirrors', repo.owner.toLowerCase(), `${repo.name.toLowerCase()}.git`);
+    expect(git(mirror, 'for-each-ref', 'refs/fleet/export')).toBe('');
   });
 });
