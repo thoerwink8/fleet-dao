@@ -4,8 +4,8 @@
 # PostgreSQL 16（Ubuntu 自带的源，吃得到自动安全更新）、Temporal 服务端 1.32.0（Postgres 持久化，端口和旧系统错开）、
 # 本机上只许 root 和 fleet 连 Temporal 与库的 nft 表、AI 会话资源池 fleet-agents.slice 与起会话的脚本、
 # fleet 用户的 pnpm（corepack）、WireGuard 客户端（主动连香港，法国不开任何入站端口）、
-# 应用的本机配置与随机密钥、往香港传驾驶舱静态文件的钥匙、会话用户和 pilot 家里各家 AI 的全局说明与方法类 skill。
-# 应用本身（引擎、后端、前端）由 deploy/release.sh 发布。
+# 应用的本机配置与随机密钥、往香港传驾驶舱静态文件的钥匙、会话用户和 pilot 家里各家 AI 的全局说明与方法类 skill、
+# 他们各自的 ddgs（用钉住版本的 uv 装）。应用本身（引擎、后端、前端）由 deploy/release.sh 发布。
 # 旧系统的服务、端口、文件一概不动。端口表、怎么跑、怎么看健康、怎么回滚：docs/ops.md。
 #   bash deploy/france.sh           装：缺的补上，已有的不动
 #   bash deploy/france.sh --check   只读回和自检，不改任何东西
@@ -21,6 +21,8 @@ source "$DEPLOY_DIR/lib/snapshot.sh"
 source "$DEPLOY_DIR/lib/root-exec-check.sh"
 # shellcheck source=lib/login-user.sh
 source "$DEPLOY_DIR/lib/login-user.sh"
+# shellcheck source=lib/cli-tools.sh
+source "$DEPLOY_DIR/lib/cli-tools.sh"
 trap 'on_error "$LINENO" "$BASH_COMMAND"' ERR
 
 # ── 钉死的版本与校验和：外部二进制装上机器就进了信任面，不用 latest ──
@@ -33,6 +35,11 @@ PG_MAJOR=16 # Temporal 官方测过的最高大版本（13.18/14.15/15.10/16.6�
 # 之后由 pilot 自己 reclaude update，脚本不盖
 RECLAUDE_VERSION=v1.4.0
 RECLAUDE_SHA256=4f5d683b695ea392f53d4e8f2a916f092794f8d4196d5b7356afb0c9a9392f0a
+# uv：只用来给会话用户和 pilot 各装一份 ddgs（lib/cli-tools.sh）。装在 /opt/fleet-dao/uv/<版本>，归 root，不进谁的 PATH
+UV_VERSION=0.12.17
+UV_SHA256=fa82fd8dde8e8eefdecada6aa0889666556cfceb690d06e0c3bca49eb3070a63
+# ddgs：skill docs-lookup 首选的搜索命令行（PyPI 上的包，uv 按这个版本号装）
+DDGS_VERSION=9.16.0
 
 # ── 端口：全部只绑本机，和旧系统的开发版 Temporal（7233/8233 与一批临时端口）错开。改了同步 docs/ops.md ──
 PG_PORT=5432
@@ -76,6 +83,7 @@ SUDOERS_FILE=/etc/sudoers.d/fleet-dao
 ENV_FILE=/etc/fleet-dao/france.env
 ENV_KEYS=(FLEET_WG_HK_ENDPOINT FLEET_WG_HK_PUBLIC_KEY)
 TEMPORAL_HOME=/opt/fleet-dao/temporal
+UV_HOME=/opt/fleet-dao/uv
 TEMPORAL_ENV=/etc/fleet-dao/temporal.env
 TEMPORAL_CONFIG=/etc/fleet-dao/temporal.yaml
 PG_UNIT=postgresql@$PG_MAJOR-main.service
@@ -327,7 +335,8 @@ FLEET_TEMPORAL_DB_PASSWORD=$(openssl rand -hex 24)"
   ok "库 fleet / temporal / temporal_visibility 与角色 fleet / temporal 就位"
 }
 
-# 下载发布包、核对 sha256、只解出要的几个文件；标记文件（.sha256）最后才写，半截安装下次会重来
+# 下载发布包、核对 sha256、只解出要的几个文件；标记文件（.sha256）最后才写，半截安装下次会重来。
+# 要的文件写它在包里的路径（可以带一层目录，比如 uv 的包），装进目录时只留文件名
 fetch_release() { # 目录 下载地址 sha256 要的文件…
   local dir=$1 url=$2 sum=$3 tmp m
   shift 3
@@ -349,8 +358,8 @@ fetch_release() { # 目录 下载地址 sha256 要的文件…
   fi
   tar -xzf "$tmp/pkg.tgz" -C "$tmp" "$@"
   install -d -o root -g root -m 755 "$dir"
-  for m in "$@"; do install -o root -g root -m 755 "$tmp/$m" "$dir/$m"; done
-  (cd "$dir" && sha256sum "$@" >.sha256)
+  for m in "$@"; do install -o root -g root -m 755 "$tmp/$m" "$dir/${m##*/}"; done
+  (cd "$dir" && sha256sum "${@##*/}" >.sha256)
   rm -rf -- "$tmp"
   changed "装 ${url##*/}（sha256 已核对）到 $dir"
 }
@@ -654,14 +663,19 @@ agents_sync() { # 模式 用户
 }
 
 setup_agent_rules() {
-  step "各家 AI 的全局说明与方法类 skill（${AGENT_RULES_USERS[*]}；仓根 AGENTS.md 的通用段、agents/skills/）"
+  step "各家 AI 的全局说明与方法类 skill（${AGENT_RULES_USERS[*]}；仓根 AGENTS.md 的通用段、agents/skills/，外加 ddgs）"
   local u
+  fetch_release "$UV_HOME/$UV_VERSION" \
+    "https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-x86_64-unknown-linux-gnu.tar.gz" \
+    "$UV_SHA256" uv-x86_64-unknown-linux-gnu/uv
   for u in "${AGENT_RULES_USERS[@]}"; do
     if ! id "$u" >/dev/null 2>&1; then
       pending "$u 这个用户还没有，全局说明没写（建了再跑一遍）"
       continue
     fi
     agents_sync --apply "$u"
+    # skill docs-lookup 首选的搜索命令行，分发过去就得能用
+    ensure_ddgs "$u" "$UV_HOME/$UV_VERSION/uv" "$DDGS_VERSION"
   done
 }
 
@@ -673,6 +687,7 @@ readback_agent_rules() {
       continue
     fi
     agents_sync --check "$u"
+    check_ddgs "$u" "$DDGS_VERSION"
   done
 }
 

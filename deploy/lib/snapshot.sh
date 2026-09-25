@@ -198,6 +198,10 @@ snapshot_agents_sync() {
         if [[ -e "$h/$d/$s" || -L "$h/$d/$s" ]]; then snapshot_tree_line "$u ~/$d/$s" "$h/$d/$s"; fi
       done
     done
+    # ddgs（france.sh 以他的身份用 uv 装的，lib/cli-tools.sh）：只记命令入口和 uv 的安装记录，不记整个虚拟环境
+    for p in .local/bin/ddgs .local/share/uv/tools/ddgs/uv-receipt.toml; do
+      if [[ -e "$h/$p" || -L "$h/$p" ]]; then snapshot_tree_line "$u ~/$p" "$h/$p"; fi
+    done
   done
 }
 

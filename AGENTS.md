@@ -39,4 +39,5 @@
 - 提交前跑 `pnpm check`（格式、类型、测试、公开仓卫生检查，要秒级到分钟级）。
 - 后端直接用 Node 22 运行 TypeScript：只写可擦除的类型写法（不用 enum、参数属性、namespace），相对导入带 `.ts` 后缀。
 - 这是公开仓：上面「底线」里公开仓那条在这里处处适用。卫生检查（packages/hygiene）在三处跑：推之前（`pnpm install` 设好的 git pre-push 钩子；引擎推分支在 packages/github 里自己扫）、`pnpm check`、CI。内容像密钥的拦，密钥文件名（.gitignore 标记段里的 `.secrets/`、`*.pass`、`*.key`、`*.pem`…）被 `git add -f` 强行加进来的也拦；真实的组织编号、账号靠已知敏感值名单认（不进仓：本机 `~/.fleet-dao/sensitive-values.txt`，名单没读到检查不算过）。真该放行的写进它的白名单并写明理由；输出只有文件、行、规则名，不打值。
+- Jev：判断题小模型（TypeSafe 的 System One），代码在 `packages/jev`；接在哪、怎么管见 `docs/design.md` 第十一节。
 - 改了上半段（通用段）：合进主线后，每台机器跑一遍 `node packages/agents-sync/bin/agents-sync --apply` 才会生效（法国由 `deploy/france.sh` 跑，见 docs/ops.md 第五节）。
