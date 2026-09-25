@@ -84,8 +84,15 @@ export function percent(ratio: number): string {
   return `${Math.round(ratio * 100)}%`;
 }
 
-/** 截断给人看的长文字，保证卡片不超 30 KB。 */
+/**
+ * 截断给人看的长文字，保证卡片不超 30 KB。不截在代理对中间（emoji 这类）：半个代理对交给后端，
+ * 写库时会被换成 � 或整条被拒。
+ */
 export function clip(text: string, max: number): string {
   const t = text.trim();
-  return t.length <= max ? t : `${t.slice(0, max - 1)}…`;
+  if (t.length <= max) return t;
+  let end = max - 1;
+  const last = t.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+  return `${t.slice(0, end)}…`;
 }

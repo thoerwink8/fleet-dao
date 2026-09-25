@@ -8,6 +8,7 @@ import type { Db, PgListen } from '@fleet-dao/db';
 import { FLEET_CHANGES_CHANNEL } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import { startPgChangeFeed } from '../src/changes.ts';
+import { draftBacklogCheck, notWiredDraftOpener } from '../src/draft-opening.ts';
 import { githubAppMissing, githubEventsCheck } from '../src/github.ts';
 import { type HealthReport, runHealthChecks } from '../src/health.ts';
 import { silentLogger } from '../src/log.ts';
@@ -121,6 +122,16 @@ async function publicFailures(log: Logger) {
       },
       'fleet-dao',
     ),
+  );
+  // 飞书草稿开单：没接上；最早一张待开单等太久
+  await run('draft-opener', true, () => notWiredDraftOpener().check());
+  const backlogStore = {
+    listDraftsToOpen: async () => [{ id: 'd1', confirmedAt: new Date(0).toISOString() }],
+  } as unknown as Store;
+  await run(
+    'draft-backlog',
+    true,
+    draftBacklogCheck(backlogStore, () => new Date()),
   );
   return { reports, sites };
 }

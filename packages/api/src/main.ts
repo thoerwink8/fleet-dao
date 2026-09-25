@@ -6,6 +6,8 @@
 //   PR、CI 事件经 @fleet-dao/github 写镜像（机器人凭据在 /etc/fleet-dao/github，读不到时如实失败、健康检查报红）。
 // - 开发环境没有 DATABASE_URL：内存里的样例数据；飞书登录没配时可以用 POST /auth/dev-login 免登（只许本机回环监听）；
 //   发给工作流的信号、拉起需求工作流都只记日志，不接 Temporal。
+// 飞书确认的草稿去开单（DraftOpener）等 #43 接：在那之前草稿留在「待开单」、健康检查报红，这里定时补开，接上后自动开出来。
+// （#43 已随 #56 合并、没接这一步，真开单记在 #91。）
 import type { Server } from 'node:http';
 import { createDb, type Db } from '@fleet-dao/db';
 import { createGitHub, pgLedger, pgLocker } from '@fleet-dao/github';
@@ -17,6 +19,7 @@ import { ConfigError, loadConfig } from './config.ts';
 import { createDirDemoPublisher, sweepExpiredDemoLinks } from './demo.ts';
 import type { Deps } from './deps.ts';
 import { DEV_RUN_ID, DEV_USER_ID, devFixtures, IDS } from './dev-fixtures.ts';
+import { draftBacklogCheck, notWiredDraftOpener } from './draft-opening.ts';
 import { createFeishuAuth } from './feishu.ts';
 import { githubAppMissing, githubEventsCheck } from './github.ts';
 import { serviceHealthChecks } from './health.ts';
@@ -93,6 +96,7 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
           log.info('（开发）收到 GitHub 事件', { event: event.event, repo: event.repo, wake: event.wake });
         },
       },
+      draftOpener: notWiredDraftOpener(),
     };
     return { deps, close: async () => {} };
   }
@@ -114,6 +118,7 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
   });
   const github = githubMirror(db);
   const store = createPgStore(db, { now });
+  const draftOpener = notWiredDraftOpener();
   const deps: Deps = {
     config,
     store,
@@ -125,11 +130,14 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
     workflows: temporal.control,
     requirements: temporal.requirements,
     github: github.sink,
+    draftOpener,
     health: serviceHealthChecks({
       probeDb: () => probeDb(db),
       feed,
       temporal,
       githubEvents: githubEventsCheck({ store, now, credentialsMissing: github.credentialsMissing }),
+      draftOpener,
+      draftBacklog: draftBacklogCheck(store, now),
     }),
   };
   return {
@@ -143,7 +151,8 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
 }
 
 const { deps, close } = await assemble();
-const { cockpit, agent } = buildApps(deps);
+const { cockpit, agent, draftOpening } = buildApps(deps);
+const stopDraftOpening = draftOpening.start();
 const servers = [
   serve({ fetch: cockpit.fetch, hostname: config.cockpitListen.host, port: config.cockpitListen.port }),
   serve({ fetch: agent.fetch, hostname: config.agentListen.host, port: config.agentListen.port }),
@@ -186,6 +195,7 @@ async function shutdown(signal: string) {
   if (stopping) return;
   stopping = true;
   log.info('收到退出信号，停止接新请求', { signal });
+  stopDraftOpening();
   const drained = Promise.all(
     servers.map((server) => new Promise<void>((resolve) => (server as Server).close(() => resolve()))),
   );

@@ -3,6 +3,7 @@
 // 按钮回传值带 _n（每次渲染一个新值）：SDK 按「卡片 + 点击人 + 回传值的前 128 个字符」去重 12 小时，
 // 卡片一刷新同一个按钮就能再点。_n 一律排在最前面：button() 里按插入顺序放第一；飞书要是把回传值按键名排序再回给我们，
 // 「_」也排在所有小写字母前面。回传值再长也截不掉它。
+import { FEISHU_NOTE_MAX } from '@fleet-dao/shared';
 import { z } from 'zod';
 import type { BoardSnapshot, Draft, OutboxItem, TaskDetail, TaskLookup } from './backend.ts';
 import type { Card } from './port.ts';
@@ -169,6 +170,23 @@ export function draftCard(
     });
   }
 
+  if (draft.status === 'confirmed') {
+    // 确认了、issue 还没开出来（后端的「待开单」，开单那一步接上或恢复后自动补开）：不再给确认、改一下，免得看着像没确认；
+    // 也和点确认那几秒的「正在开成任务…」分开，看得出是卡在待开单。
+    return card({
+      title: '已确认，待开单',
+      ...(draft.repo ? { subtitle: draft.repo.fullName } : {}),
+      template: 'wathet',
+      elements: [
+        text(`我理解为：${draft.understanding}`),
+        text(`提出：${draft.proposedBy}${draft.confirmedBy ? ` · 确认：${draft.confirmedBy}` : ''}`, 'note'),
+        ...(opts.note ? [text(opts.note, 'note')] : []),
+        text('开 issue 那一步还没做成，后台会自动补开，不会丢；开好后驾驶舱里就有这个任务。', 'note'),
+        buttons([cockpit(ctx, COCKPIT_PATHS.overview)]),
+      ],
+    });
+  }
+
   const state = opts.state ?? 'open';
   const base = [
     text(draft.understanding),
@@ -194,7 +212,7 @@ export function draftCard(
       tag: 'input',
       name: FORM.note,
       placeholder: { tag: 'plain_text', content: '哪里不对？写一句再点「改一下」' },
-      max_length: 500,
+      max_length: FEISHU_NOTE_MAX,
       width: 'fill',
     },
   ];

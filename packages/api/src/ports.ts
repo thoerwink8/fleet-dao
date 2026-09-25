@@ -5,6 +5,8 @@ import type {
   AuditEntrySchema,
   Ban,
   Channel,
+  FeishuCardKindSchema,
+  FeishuOutboxAckSchema,
   HistoryResponse,
   Model,
   Pool,
@@ -21,6 +23,7 @@ import type {
   Step,
   Subtask,
   Task,
+  TaskState,
 } from '@fleet-dao/shared';
 import type { z } from 'zod';
 
@@ -135,6 +138,8 @@ export interface JobRecord {
 
 export interface DeliveryRecord {
   channel: string;
+  /** 送到哪（飞书推送：team = 团队群，user:<open_id> = 私聊）。同一条通知、同一去处只有一条送达记录。 */
+  target?: string | undefined;
   /** 飞书返回的消息编号；没有就是没送到。 */
   messageId?: string | undefined;
   attempts: number;
@@ -480,7 +485,296 @@ export interface IntakeStore {
   stopQueuedTask(taskId: string, audit: NewAuditEntry): Promise<'ok' | 'not_queued'>;
 }
 
-export type Store = UserStore & BoardStore & RoutingStore & OpsStore & AgentStore & GitHubStore & IntakeStore;
+// —— 飞书网关（shared/feishu-api.ts 的 9 条接口）——
+
+export type FeishuChatType = 'p2p' | 'group';
+export type FeishuCardKind = z.infer<typeof FeishuCardKindSchema>;
+export type FeishuOutboxAck = z.infer<typeof FeishuOutboxAckSchema>;
+
+/** 一张随手记的草稿（库里的一行）。卡片上要的名字、仓名、任务号由接口层按编号查。 */
+export interface DraftRecord {
+  id: string;
+  revision: number;
+  status: 'open' | 'confirmed';
+  sourceMessageId: string;
+  chatType: FeishuChatType;
+  rawText: string;
+  understanding: string;
+  unsure: boolean;
+  repoId?: string | undefined;
+  /** 提出人（users.id）。 */
+  proposedBy: string;
+  confirmedBy?: string | undefined;
+  confirmedAt?: string | undefined;
+  /** 开成的任务；确认了还没有就是「待开单」。 */
+  taskId?: string | undefined;
+  /** 卡片登记里这张草稿最近登记的确认卡（kind=draft）。 */
+  cardMessageId?: string | undefined;
+  /** 开单试过几次、最近一次没成的原因、什么时候试的。 */
+  opening: { attempts: number; error?: string | undefined; triedAt?: string | undefined };
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface NewDraft {
+  id: string;
+  rawText: string;
+  understanding: string;
+  unsure: boolean;
+  repoId?: string | undefined;
+  chatType: FeishuChatType;
+}
+
+/** 一条飞书消息（幂等键就是消息编号）。 */
+export interface FeishuMessageKey {
+  sourceMessageId: string;
+  /** 说话的创始人（users.id）。 */
+  userId: string;
+  /** 原话的摘要：同一个消息编号换了人或内容再来，说明网关出了错，拒收，不回旧结果。 */
+  textHash: string;
+  replyToMessageId?: string | undefined;
+}
+
+/** 一条消息落成了什么：记成（或改了）哪张草稿，或回了一段话。 */
+export type FeishuMessageResult =
+  | { kind: 'draft'; draftId: string }
+  | { kind: 'answer'; text: string; taskId?: string | undefined };
+
+export interface FeishuMessageRecord extends FeishuMessageKey {
+  result: FeishuMessageResult;
+  at: string;
+}
+
+export type CreateDraftResult =
+  | { status: 'created'; draft: DraftRecord }
+  /** 这条消息处理过：不建第二个草稿，交回当时的结果。 */
+  | { status: 'replayed'; message: FeishuMessageRecord };
+
+/** 改草稿的幂等键：卡上「改一下」的请求编号，或回复确认卡的那条消息。 */
+export type DraftChangeKey =
+  | { type: 'request'; requestId: string }
+  | { type: 'message'; message: FeishuMessageKey };
+
+export type ReviseDraftResult =
+  | { status: 'revised'; draft: DraftRecord }
+  /** 同一个请求编号、同样的内容再来：不再改，交回现在的草稿。 */
+  | { status: 'replayed'; draft: DraftRecord }
+  /** 请求编号已经用在这张草稿另一次不同内容的改动上：不改。 */
+  | { status: 'request_reused'; draft: DraftRecord }
+  /** 这条消息处理过（不管当时落成了什么）：不再改，交回当时的结果。 */
+  | { status: 'replayed_message'; message: FeishuMessageRecord }
+  | { status: 'confirmed'; draft: DraftRecord }
+  | { status: 'not_found' };
+
+export type ConfirmDraftResult =
+  | { status: 'confirmed'; draft: DraftRecord }
+  /** 已经确认过（可能是另一位创始人）：不再改。 */
+  | { status: 'already'; draft: DraftRecord }
+  /** 版本对不上：草稿刚被改过。 */
+  | { status: 'changed'; draft: DraftRecord }
+  | { status: 'not_found' };
+
+export interface FeishuCardRecord {
+  messageId: string;
+  chatId: string;
+  kind: FeishuCardKind;
+  ref: {
+    taskId?: string | undefined;
+    askId?: string | undefined;
+    draftId?: string | undefined;
+    notificationId?: string | undefined;
+    outboxId?: string | undefined;
+  };
+  sentAt: string;
+}
+
+/** 推送卡、盘面要的需求信息（仓写成 owner/name）。 */
+export interface FeishuTaskInfo {
+  id: string;
+  title: string;
+  issueNumber: number;
+  state: TaskState;
+  repo: string;
+}
+
+/**
+ * 算「待推送」和盘面要读的源头：还没回答的追问、最近答过的追问、没处理的通知、最近处理过的通知（「最近」= since 之后）。
+ * 回答人、处理人的显示名一并查好（查不到就没有）。
+ */
+export interface FeishuOutboxSources {
+  asks: Array<{ ask: AskRecord; task: FeishuTaskInfo; answeredByName?: string | undefined }>;
+  notifications: Array<{
+    notification: Omit<NotificationRecord, 'deliveries'>;
+    task?: FeishuTaskInfo | undefined;
+    resolvedByName?: string | undefined;
+  }>;
+}
+
+/** 一件推送的送达状态（feishu_outbox 的一行，外加按卡片登记补上的「上次送到的卡」）。 */
+export interface FeishuOutboxState {
+  id: string;
+  revision: number;
+  createdAt: string;
+  ack?:
+    | {
+        revision: number;
+        status: FeishuOutboxAck['result']['status'];
+        reason?: string | undefined;
+        holdUntil?: string | undefined;
+      }
+    | undefined;
+  /** 回执记的上次送到的卡；回执没记上时按卡片登记里 ref.outboxId 补（补的不知道是哪一版，revision 空）。 */
+  delivered?:
+    | { messageId: string; chatId: string; sentAt: string; revision?: number | undefined }
+    | undefined;
+}
+
+export interface FeishuOutboxSyncItem {
+  id: string;
+  fingerprint: string;
+  /** 库里还没有这件时建不建：已经了结、又从没发过卡的不建（网关也只会回「不发了」）。 */
+  create: boolean;
+}
+
+/** 一批回执的处理结果：认不出的跳过，写明为什么（接口层记日志，不让整批失败）。 */
+export interface FeishuAckReport {
+  applied: number;
+  skipped: Array<{
+    itemId: string;
+    revision: number;
+    why: 'unknown_item' | 'future_revision' | 'stale_revision';
+  }>;
+}
+
+export interface FeishuStore {
+  getDraft(id: string): Promise<DraftRecord | null>;
+  /** 新草稿，和「这条消息已处理」的记录同一事务：同一条消息只记一个草稿。操作记录同一事务。 */
+  createDraft(
+    input: { message: FeishuMessageKey; draft: NewDraft },
+    audit: NewAuditEntry,
+  ): Promise<CreateDraftResult>;
+  /**
+   * 改草稿：note 整句接在原话和「我理解为」后面（feishu-records.ts 的 withNote），repoId 换仓；每改一次 revision 加 1。
+   * 同一个幂等键只改一次；请求编号用过但内容不同回 request_reused，也不改。已确认的不改。操作记录同一事务。
+   */
+  reviseDraft(
+    input: {
+      draftId: string;
+      note?: string | undefined;
+      repoId?: string | undefined;
+      key: DraftChangeKey;
+    },
+    audit: NewAuditEntry,
+  ): Promise<ReviseDraftResult>;
+  /** 确认：记下谁、什么时候、放哪个仓，进「待开单」。revision 对不上不改。操作记录同一事务。 */
+  confirmDraft(
+    input: { draftId: string; revision: number; repoId: string; by: string },
+    audit: NewAuditEntry,
+  ): Promise<ConfirmDraftResult>;
+  /** 待开单的草稿（确认了、还没有任务），先确认的在前。 */
+  listDraftsToOpen(limit: number): Promise<DraftRecord[]>;
+  /** 开单成了：记上任务。草稿已经记过任务（或没确认）返回 not_pending；任务不在库里返回 task_not_found。 */
+  recordDraftOpened(input: {
+    draftId: string;
+    taskId: string;
+  }): Promise<'ok' | 'not_pending' | 'task_not_found'>;
+  /** 开单没成：记下原因、次数、时刻。 */
+  recordDraftOpenFailure(input: { draftId: string; error: string }): Promise<void>;
+
+  /** 这条飞书消息处理过没有。 */
+  getFeishuMessage(sourceMessageId: string): Promise<FeishuMessageRecord | null>;
+  /** 记下「这条消息回了一段话」（草稿以外的结果）。已经记过就不改，交回当时的记录。 */
+  recordFeishuMessage(input: {
+    message: FeishuMessageKey;
+    result: FeishuMessageResult;
+  }): Promise<FeishuMessageRecord>;
+
+  /** 各个仓里这个 issue 号的需求，按仓名排。 */
+  findTasksByIssue(issueNumber: number): Promise<Task[]>;
+  /** 关注 / 取消关注；和原来一样返回 unchanged（不写操作记录）。操作记录同一事务。 */
+  setFollow(
+    input: { taskId: string; userId: string; follow: boolean },
+    audit: NewAuditEntry,
+  ): Promise<'changed' | 'unchanged' | 'task_not_found'>;
+
+  /** 登记一张卡：同一条消息再登记，种类和来历覆盖，发出时刻和所在会话保留第一次的。 */
+  putCard(record: FeishuCardRecord): Promise<void>;
+  getCard(messageId: string): Promise<FeishuCardRecord | null>;
+  /** 最新登记的盘面卡（kind=board）。 */
+  latestBoardCard(): Promise<{ messageId: string; sentAt: string } | null>;
+
+  /** 每个编号（需求或子任务）最近一次状态变化的时刻；没有记录的不在结果里。 */
+  stateSince(entityIds: readonly string[]): Promise<Map<string, string>>;
+  /** since 之后进入「已合并」的子任务个数。 */
+  countMergedSubtasksSince(since: string): Promise<number>;
+
+  listOutboxSources(since: string): Promise<FeishuOutboxSources>;
+  /**
+   * 按现算的内容指纹更新送达状态：没有的建成第 1 版（create=false 的不建）；指纹变了版本加 1。
+   * 返回这些编号现在的状态（没建的不在结果里）。
+   */
+  syncOutbox(items: readonly FeishuOutboxSyncItem[]): Promise<Map<string, FeishuOutboxState>>;
+  /**
+   * 记回执，按条处理：认不出的（没有这件、版本比现在还新）跳过；旧版本的「发了 / 改了」只记下送到的卡，不算了结。
+   * 通知类的回执同时写进通知的送达记录（驾驶舱「通知」页看得到）。整批同一事务。
+   */
+  ackOutbox(acks: readonly FeishuOutboxAck[], at: string): Promise<FeishuAckReport>;
+}
+
+export type Store = UserStore &
+  BoardStore &
+  RoutingStore &
+  OpsStore &
+  AgentStore &
+  GitHubStore &
+  IntakeStore &
+  FeishuStore;
+
+// —— 飞书草稿开单：开 issue + 建任务 + 拉起需求工作流（飞书里确认的草稿用）——
+// 和 GitHub 那边的接活（issue 已经在了，进来建任务）方向相反：这里从飞书草稿出发，由后端去开 issue。
+
+/** 飞书里确认了的草稿，交给开单的那一步：开 GitHub issue、建任务行、拉起需求工作流。 */
+export interface DraftOpenRequest {
+  /** 幂等键：同一个草稿再来（包括后端重启之后），交回第一次开成的那张 issue 和那个任务，不开第二张。 */
+  draftId: string;
+  repo: Repo;
+  /** issue 标题（「我理解为」的第一行截短）。 */
+  title: string;
+  /** 创始人的原话（「改一下」的补充整句接在后面）。 */
+  rawText: string;
+  /** 「我理解为」。 */
+  understanding: string;
+  proposedBy: { userId: string; name: string };
+  confirmedBy: { userId: string; name: string };
+}
+
+export interface DraftOpenResult {
+  /** 库里 tasks.id（开单那一步建的任务行）。 */
+  taskId: string;
+  issueNumber: number;
+}
+
+/**
+ * 飞书草稿开单：开 issue + 建任务行 + 拉起需求工作流。确认草稿时调一次；没成的草稿留在「待开单」，后端定时补开
+ * （draft-opening.ts）。后端自己计时：到点没回算没成、那次调用挂着期间不再开第二次，所以 signal 中止后要尽快放手。
+ * 实现要按 draftId 幂等：确认时和补开时可能同时来、超时之后可能再来，发版重启后后端一起来就会马上再调一遍
+ * （「正在开」只记在后端进程里，重启就没了）。所以幂等要记在重启后还查得到的地方，不能靠进程内存：比如开 issue 之前
+ * 先在库里按草稿编号占住、开出来马上记下 issue 号，或者 issue 正文带上草稿编号、再来时能查回来。issue 已经开出来、
+ * 还没交回结果时进程没了，再来也得认出那张 issue，交回它，不开第二张。
+ * 没接上或暂时开不成抛 DraftOpenerUnavailableError；抛别的错也一样留着补开。
+ */
+export interface DraftOpener {
+  open(request: DraftOpenRequest, signal: AbortSignal): Promise<DraftOpenResult>;
+  /** 健康检查（/healthz 的 draft_opener）：开不了单就抛（对外的原因用 PublicHealthError），接好了就返回。 */
+  check(): Promise<void>;
+}
+
+export class DraftOpenerUnavailableError extends Error {
+  constructor(message: string, cause?: unknown) {
+    super(message, { cause });
+    this.name = 'DraftOpenerUnavailableError';
+  }
+}
 
 // —— 发给工作流的信号（Temporal）——
 

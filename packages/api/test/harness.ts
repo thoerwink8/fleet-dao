@@ -12,11 +12,13 @@ import type { Config } from '../src/config.ts';
 import type { DemoPublisher } from '../src/demo.ts';
 import type { Deps } from '../src/deps.ts';
 import { DEV_RUN_ID, DEV_USER_ID, devFixtures, IDS } from '../src/dev-fixtures.ts';
+import { type DraftOpenLimits, type DraftOpenRunner, notWiredDraftOpener } from '../src/draft-opening.ts';
 import { FeishuRejectedError } from '../src/feishu.ts';
 import { createMemoryStore, type MemoryData } from '../src/memory-store.ts';
 import { createPgStore } from '../src/pg-store.ts';
 import type {
   ChangeFeed,
+  DraftOpener,
   FeedEvent,
   FeishuAuth,
   FeishuIdentity,
@@ -84,6 +86,8 @@ export interface Harness<S extends Store = Store> {
   cockpit: Hono;
   agent: Hono;
   relay: SseRelay;
+  /** 飞书确认的草稿去开单（定时补开在测试里不起，要补就调 runPending）。 */
+  draftOpening: DraftOpenRunner;
   /** 装配好的全部依赖（自己另起 GitHubIntake、对账时用）。 */
   deps: Deps;
   config: Config;
@@ -112,6 +116,10 @@ export interface HarnessOptions {
   feishu?: 'fake' | null;
   github?: (event: IngestedEvent) => Promise<void>;
   health?: HealthCheck[];
+  /** 不给就是「开单还没接上」（和生产现在一样）。 */
+  draftOpener?: DraftOpener;
+  /** 开单的时限调小（测「实现不回」时不真等半分钟）。 */
+  draftOpenLimits?: Partial<DraftOpenLimits>;
   /** 演示版的发布处；不给就是没配。 */
   demo?: DemoPublisher | null;
 }
@@ -175,13 +183,17 @@ function wire<S extends Store>(
           accepted.push(event);
         }),
     },
+    draftOpener: options.draftOpener ?? notWiredDraftOpener(),
   };
-  const { cockpit, agent, relay } = buildApps(deps);
+  const { cockpit, agent, relay, draftOpening } = buildApps(deps, {
+    draftOpenLimits: options.draftOpenLimits,
+  });
 
   return {
     cockpit,
     agent,
     relay,
+    draftOpening,
     deps,
     config,
     store,
