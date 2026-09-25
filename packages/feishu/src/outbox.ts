@@ -2,6 +2,7 @@
 // 这里执行四道闸：种类白名单（三类 + 关注 + AI 追问）、私聊只发创始人、免打扰、每天求人卡的预算。
 // 送达只认飞书回的 message_id，回执写回后端（驾驶舱「通知」页的送达记录就是它）。
 // 回执送不上去时不许原地打转：一轮没走通就抛错，run() 退避；积压的回执按「条目 + 版本」去重、有上限。
+// 后端收下回执后又把同一版给回来（了结了的，或推迟 / 没发成、还没到约定时刻的）：不再处理、不碰飞书，报错并退避。
 import { type Backend, BackendError, type OutboxAck, type OutboxBatch, type OutboxItem } from './backend.ts';
 import { budgetAlertCard, outboxCard, type RenderContext } from './cards.ts';
 import { DailyBudget, quietUntil } from './gate.ts';
@@ -65,8 +66,11 @@ export function createOutbox(deps: OutboxDeps): Outbox {
   const maxPendingAcks = deps.maxPendingAcks ?? MAX_PENDING_ACKS;
   /** 待送的回执：同一件事的同一版只留一条（新结果盖旧的）。 */
   const pendingAcks = new Map<string, OutboxAck>();
-  /** 后端已经收下「了结」回执的「条目 + 版本」：后端又把它当待推送给过来，说明回执没记上，要退避而不是接着转。 */
-  const acked = new Lru<string, true>(5000);
+  /**
+   * 后端已经收下回执的「条目 + 版本」，和它在什么时刻之前不该再给回来：了结的（发了、改了、不发了）永远不该，
+   * 免打扰推迟的到 until，没发成的到 retryAfter。这之前又给回来，说明回执没记上或后端没按约定等，要退避而不是接着转。
+   */
+  const settled = new Lru<string, { holdUntil: number; result: AckResult }>(5000);
   const ackKey = (a: { itemId: string; revision: number }) => `${a.revision}\u0000${a.itemId}`;
 
   const ctx = (): RenderContext => ({
@@ -224,20 +228,30 @@ export function createOutbox(deps: OutboxDeps): Outbox {
       }
       for (const a of chunk) {
         pendingAcks.delete(ackKey(a));
-        // 免打扰推迟的、飞书没发成的，到点本来就会再给回来；只有发了、改了、不发了这三种算「了结」。
-        if (a.result.status === 'sent' || a.result.status === 'updated' || a.result.status === 'dropped') {
-          acked.set(ackKey(a), true);
-        }
+        settled.set(ackKey(a), { holdUntil: holdUntil(a.result), result: a.result });
       }
     }
+  }
+
+  /** 回执收下后，同一版到什么时刻才可以再给回来。 */
+  function holdUntil(r: AckResult): number {
+    if (r.status === 'deferred') return Date.parse(r.until);
+    if (r.status === 'failed') return Date.parse(r.retryAfter);
+    return Number.POSITIVE_INFINITY;
   }
 
   async function runOnce(signal?: AbortSignal): Promise<number> {
     await flushAcks();
     const batch = await deps.backend.outbox(waitSeconds, signal);
-    let repeated = 0;
+    const repeated: Array<{ itemId: string; revision: number; status: AckResult['status'] }> = [];
     for (const item of batch.items) {
-      if (acked.has(ackKey({ itemId: item.id, revision: item.revision }))) repeated += 1;
+      const prior = settled.get(ackKey({ itemId: item.id, revision: item.revision }));
+      if (prior && deps.now() < prior.holdUntil) {
+        // 不再处理、不碰飞书；把上次的回执再送一遍，后端要是弄丢了还能补上。
+        repeated.push({ itemId: item.id, revision: item.revision, status: prior.result.status });
+        queueAck({ itemId: item.id, revision: item.revision, result: prior.result });
+        continue;
+      }
       const result = await handle(item, batch.quietHours);
       queueAck({ itemId: item.id, revision: item.revision, result });
       const fields = { itemId: item.id, revision: item.revision, kind: item.kind, status: result.status };
@@ -245,9 +259,12 @@ export function createOutbox(deps: OutboxDeps): Outbox {
       else deps.log.info('推送', { ...fields, ...('reason' in result ? { reason: result.reason } : {}) });
     }
     await flushAcks();
-    if (repeated > 0) {
-      deps.log.error('后端又把已经回执过的推送当待推送给了过来：回执可能没记上', { repeated });
-      throw new OutboxStall(`后端重复给了 ${repeated} 件已回执过的推送`);
+    if (repeated.length > 0) {
+      deps.log.error(
+        '后端又把已经回执过的推送当待推送给了过来（了结了的，或没到 until / retryAfter 的）：回执可能没记上，或后端没按约定等',
+        { repeated: repeated.length, examples: repeated.slice(0, 5) },
+      );
+      throw new OutboxStall(`后端重复给了 ${repeated.length} 件已回执过的推送`);
     }
     return batch.items.length;
   }

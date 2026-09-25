@@ -202,6 +202,59 @@ describe('推送出口', () => {
     expect(h.logs.some((l) => l.level === 'error' && l.message.includes('已经回执过'))).toBe(true);
   });
 
+  it('免打扰推迟了的，后端没到 until 又给回来：算重复、退避，不原地打转', async () => {
+    h = await harness({ now: () => beijing('23:30') });
+    // 照最直白的写法：后端不看 until，每次都把这件事给回来。
+    h.backend.on('GET', '/feishu/outbox', {
+      body: {
+        items: [outboxItem({ id: 'ask:new' })],
+        quietHours: { start: '23:00', end: '08:00' },
+        asOf: new Date().toISOString(),
+      },
+    });
+    h.backend.on('POST', '/feishu/outbox/acks', { body: { ok: true } });
+    const stop = new AbortController();
+    const run = h.gateway.outbox.run(stop.signal);
+    await new Promise((r) => setTimeout(r, 1_500));
+    stop.abort();
+    await run;
+    // 退避是 1 秒、2 秒……：1.5 秒里最多三轮（第一轮推迟、之后每轮都算重复）。
+    expect(h.backend.calls('GET', '/feishu/outbox').length).toBeLessThanOrEqual(3);
+    expect(h.feishu.of('send')).toHaveLength(0);
+    // 重复给回来的，把上次那条回执原样再送一遍（后端弄丢了还能补上），不重新算。
+    const sentAcks = acks();
+    expect(sentAcks.length).toBeGreaterThanOrEqual(2);
+    expect(sentAcks.every((a) => JSON.stringify(a) === JSON.stringify(sentAcks[0]))).toBe(true);
+    expect(sentAcks[0]?.result).toMatchObject({ status: 'deferred', reason: 'quiet_hours' });
+    expect(h.logs.some((l) => l.level === 'error' && l.message.includes('已经回执过'))).toBe(true);
+  });
+
+  it('飞书没发成的，后端没到 retryAfter 又给回来：算重复、退避，不再调飞书；过了 retryAfter 照常重发', async () => {
+    let now = Date.now();
+    h = await harness({ now: () => now });
+    h.backend.on('GET', '/feishu/outbox', {
+      body: { items: [outboxItem()], quietHours: null, asOf: new Date().toISOString() },
+    });
+    h.backend.on('POST', '/feishu/outbox/acks', { body: { ok: true } });
+    h.feishu.fail('send', ...Array.from({ length: 5_000 }, () => unavailable()));
+    const stop = new AbortController();
+    const run = h.gateway.outbox.run(stop.signal);
+    await new Promise((r) => setTimeout(r, 1_500));
+    stop.abort();
+    await run;
+    expect(h.feishu.of('send')).toHaveLength(1);
+    expect(h.backend.calls('GET', '/feishu/outbox').length).toBeLessThanOrEqual(3);
+    const [first] = acks();
+    expect(first?.result).toMatchObject({ status: 'failed' });
+
+    // 过了约定的 retryAfter，同一版再来就照常重发。
+    now = Date.parse(String(first?.result.retryAfter));
+    h.feishu.failures.send = [];
+    await h.gateway.outbox.runOnce();
+    expect(h.feishu.of('send')).toHaveLength(2);
+    expect(acks().at(-1)?.result).toMatchObject({ status: 'sent' });
+  });
+
   it('送达只认飞书回的 message_id：飞书没发成就回 failed，不说 sent', async () => {
     h = await harness();
     serve([{ items: [outboxItem()] }]);

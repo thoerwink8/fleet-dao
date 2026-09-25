@@ -292,6 +292,7 @@ export const FeishuOutboxKindSchema = z.enum(['decision', 'alert', 'daily', 'fol
 /**
  * 一件事一个编号，状态或内容每变一次 revision 加 1。网关只发一张卡，之后按 revision 原地更新，不重发。
  * 「待推送」= 当前 revision 还没收到 sent / updated / dropped 回执、也不在 deferred 或 failed 的等待期内。
+ * 不合这条又给回来的（了结了的，或没到 until / retryAfter 的），网关当成重复：不处理、不碰飞书，记错误并退避。
  */
 export const FeishuOutboxItemSchema = z.object({
   /** 例如 notification:88、ask:31、follow:task-12:<open_id>、daily:2026-09-25。 */
