@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { type CheckRun, evaluateChecks } from '../src/checks.ts';
 import { hasCloseKeywords, neutralizeCloseKeywords, PR_BODY_MAX_LINES, renderPrBody } from '../src/text.ts';
@@ -25,7 +26,29 @@ describe('C13：GitHub 关单词', () => {
 });
 
 describe('PR 正文模板', () => {
-  it('15 行以内：条目多了从最长的一节砍，砍掉的写「另有 N 条」', () => {
+  /** 栏目标题：行首的「**标题**：」。自己按文字认，不借 renderPrBody 的任何东西。 */
+  const columns = (text: string) => [...text.matchAll(/^\*\*([^*\n]+)\*\*：/gm)].map((m) => m[1]);
+
+  it('栏目和仓里的 .github/pull_request_template.md 一样、顺序也一样：引擎开的 PR 和人开的长一个样', () => {
+    const template = readFileSync(
+      new URL('../../../.github/pull_request_template.md', import.meta.url),
+      'utf8',
+    );
+    const fromTemplate = columns(template);
+    expect(fromTemplate).not.toEqual([]); // 模板里一栏都没认出来，下面那条就成了拿空的去比
+    const body = renderPrBody({
+      requirement: 12,
+      subtask: 'B 验证码',
+      did: ['加了验证码输入框'],
+      verified: ['pnpm check'],
+      owed: ['过期提示放到子任务 C'],
+      risks: ['旧的登录接口还在用'],
+      changedFiles: ['docs/design.md'],
+    });
+    expect(columns(body)).toEqual(fromTemplate);
+  });
+
+  it('15 行以内：条目多了从最长的一栏砍，砍掉的写「另有 N 条」；风险并进「还欠什么」', () => {
     const body = renderPrBody({
       requirement: 12,
       subtask: 'B 验证码',
@@ -33,17 +56,31 @@ describe('PR 正文模板', () => {
       verified: ['pnpm check', 'CI 链接'],
       owed: ['过期提示放到子任务 C'],
       risks: ['旧的登录接口还在用'],
+      changedFiles: ['packages/web/src/login.tsx'],
     });
     const lines = body.split('\n');
     expect(lines.length).toBeLessThanOrEqual(PR_BODY_MAX_LINES);
-    expect(lines[0]).toBe('属于需求 #12 · 子任务：B 验证码');
     expect(body).toContain('- ……另有');
-    expect(body).toContain('**还欠什么**\n- 过期提示放到子任务 C');
-    expect(body).toContain('**风险**\n- 旧的登录接口还在用');
+    expect(body).toContain('**还欠什么**：\n- 过期提示放到子任务 C\n- 风险：旧的登录接口还在用');
+    expect(lines.slice(-2)).toEqual(['**需求**：#12 · 子任务 B 验证码', '**文档**：不适用']);
+  });
+
+  it('「文档」按改到的文件写：只认仓根 README 和 docs 下的 design、ops、plan，顺序同模板；一份没改写「不适用」', () => {
+    const docs = (changedFiles: string[]) =>
+      renderPrBody({ did: ['a'], verified: ['b'], changedFiles })
+        .split('\n')
+        .at(-1);
+    expect(docs(['docs/plan.md', 'packages/x.ts', 'README.md'])).toBe('**文档**：README、plan');
+    expect(docs(['deploy/README.md', 'docs/reference/deploy.md', 'packages/x.ts'])).toBe('**文档**：不适用');
+  });
+
+  it('没有需求号写「无」，还欠的没有写「无」', () => {
+    const body = renderPrBody({ did: ['a'], verified: ['b'], changedFiles: [] });
+    expect(body).toContain('**还欠什么**：无\n**需求**：无\n');
   });
 
   it('条目里的关单词也改掉', () => {
-    expect(renderPrBody({ did: ['fixes #3'], verified: ['ok'] })).toContain('- 关联 #3');
+    expect(renderPrBody({ did: ['fixes #3'], verified: ['ok'], changedFiles: [] })).toContain('- 关联 #3');
   });
 });
 

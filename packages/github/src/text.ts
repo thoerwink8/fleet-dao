@@ -29,7 +29,8 @@ export function neutralizeCloseKeywords(text: string): string {
   return text.replace(CLOSING, (_m, _kw, _sep, ref: string) => `关联 ${ref}`);
 }
 
-// —— PR 正文（设计 §7：15 行以内；属于哪个需求、做了什么、怎么验证的、还欠什么）——
+// —— PR 正文：栏目以仓根 .github/pull_request_template.md 为准。人开的 PR 由 GitHub 套那份模板，引擎开的走这里；
+// 两边栏目对不上，test/text.test.ts 会红。整篇 15 行以内（设计 §7）。——
 
 export interface PrBodyInput {
   /** 对应的需求（issue 号）。 */
@@ -42,35 +43,54 @@ export interface PrBodyInput {
   verified: readonly string[];
   /** 还欠什么；空 = 无。 */
   owed?: readonly string[] | undefined;
-  /** 有什么风险；空就不写这一节。 */
+  /** 有什么风险。模板没有这一栏：并进「还欠什么」，每条前面标「风险：」。 */
   risks?: readonly string[] | undefined;
+  /** 这个 PR 改到的文件（仓内相对路径）。「文档」一栏按它写；必填，不给就说不清是「不适用」还是没查。 */
+  changedFiles: readonly string[];
 }
+
+/** 「文档」一栏认的几份文档：仓内路径和栏里写的名字，顺序同模板。 */
+const PR_DOC_FILES: readonly (readonly [path: string, name: string])[] = [
+  ['README.md', 'README'],
+  ['docs/design.md', 'design'],
+  ['docs/ops.md', 'ops'],
+  ['docs/plan.md', 'plan'],
+];
 
 export const PR_BODY_MAX_LINES = 15;
 
 export function renderPrBody(input: PrBodyInput): string {
-  const lines: string[] = [];
-  const head: string[] = [];
-  if (input.requirement !== undefined) head.push(`属于需求 #${input.requirement}`);
-  if (input.subtask) head.push(`子任务：${oneLine(input.subtask)}`);
-  if (head.length) lines.push(head.join(' · '));
-  const sections: [string, readonly string[]][] = [
+  const lists: [string, readonly string[]][] = [
     ['做了什么', input.did.length ? input.did : ['（没写）']],
     ['怎么验证的', input.verified.length ? input.verified : ['（没写）']],
-    ['还欠什么', input.owed?.length ? input.owed : ['无']],
+    ['还欠什么', [...(input.owed ?? []), ...(input.risks ?? []).map((r) => `风险：${r}`)]],
   ];
-  if (input.risks?.length) sections.push(['风险', input.risks]);
+  const requirement =
+    [
+      input.requirement === undefined ? '' : `#${input.requirement}`,
+      input.subtask ? `子任务 ${oneLine(input.subtask)}` : '',
+    ]
+      .filter(Boolean)
+      .join(' · ') || '无';
+  const changed = new Set(input.changedFiles);
+  const docs = PR_DOC_FILES.filter(([path]) => changed.has(path)).map(([, name]) => name);
+  const tail = [`**需求**：${requirement}`, `**文档**：${docs.length ? docs.join('、') : '不适用'}`];
 
-  // 总行数不超过上限：每节标题占一行，条目从最长的一节往下砍，砍掉的用一行「另有 N 条」代替
-  const budget = PR_BODY_MAX_LINES - lines.length - sections.length;
-  const counts = sections.map(([, items]) => items.length);
+  // 总行数不超过上限：每栏标题占一行，条目从最长的一栏往下砍，砍掉的用一行「另有 N 条」代替
+  const budget = PR_BODY_MAX_LINES - lists.length - tail.length;
+  const counts = lists.map(([, items]) => items.length);
   while (counts.reduce((a, b) => a + b, 0) > budget) {
     const i = counts.indexOf(Math.max(...counts));
     if ((counts[i] ?? 0) <= 1) break;
     counts[i] = (counts[i] ?? 1) - 1;
   }
-  sections.forEach(([title, items], i) => {
-    lines.push(`**${title}**`);
+  const lines: string[] = [];
+  lists.forEach(([title, items], i) => {
+    if (items.length === 0) {
+      lines.push(`**${title}**：无`);
+      return;
+    }
+    lines.push(`**${title}**：`);
     const n = counts[i] ?? items.length;
     if (items.length <= n) {
       for (const item of items) lines.push(`- ${oneLine(item)}`);
@@ -79,6 +99,7 @@ export function renderPrBody(input: PrBodyInput): string {
       lines.push(`- ……另有 ${items.length - n + 1} 条，见需求文档`);
     }
   });
+  lines.push(...tail);
   return neutralizeCloseKeywords(lines.join('\n'));
 }
 
