@@ -131,6 +131,8 @@ export interface Pool {
   scopeModels?: Record<string, ScopeMembership>;
   /** 最近一次读成额度的时刻，读失败不动。每小时对账按池看它是否超过 30 分钟，不逐窗口看。 */
   lastReadOkAt?: string;
+  /** 这个池的会话跑在哪个系统用户下（Claude 订阅一个组织一个用户，引擎按池挑、从不切号）。没填 = 还没定。 */
+  sessionUser?: string;
 }
 
 /** 每个账号池、每个时间窗各一行——只存「最紧的那个」就做不到「快清零的先用」。 */
@@ -204,6 +206,8 @@ export interface StagePolicy {
   routeIds: string[];
   /** 创始人手动钉住的顺序，AI 帅位不改。 */
   pinned: boolean;
+  /** routeIds 里关着的那些：照样挂在顺序里，但不派（驾驶舱的开关）。 */
+  disabledRouteIds?: string[];
 }
 
 /** 全局禁令：GPT × UI、Fable × 一切。 */
