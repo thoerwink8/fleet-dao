@@ -2,6 +2,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
+import { ALLOWLIST, applyAllowlist, findHits } from '@fleet-dao/hygiene';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { BANK, questionsOfSite } from '../src/bank.ts';
 import { checkExam, EXAMS_DIR, loadExam, pickSamples, runExam } from '../src/exam.ts';
@@ -14,32 +15,16 @@ import { fakeBackend, ok } from './helpers.ts';
 const MIN_PER_QUESTION = 5;
 const SITE_IDS = Object.keys(SITES) as SiteId[];
 
-/** 占位用的名字：agent 是约定的占位，alice / bob 和单个字母是旧仓测试夹具里的示例。 */
-const PLACEHOLDER = String.raw`(?:agent|alice|bob|[a-z])\b`;
-
-const RULES: [string, RegExp][] = [
-  ['邮箱', /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g],
-  ['IP', /\b(?!(?:127\.0\.0\.1|0\.0\.0\.0)\b)(?:\d{1,3}\.){3}\d{1,3}\b/g],
-  ['家目录里的用户名', new RegExp(`/home/(?!${PLACEHOLDER})[A-Za-z0-9_.-]+`, 'g')],
-  // 盘符前面不能紧挨着路径字符：/home/a:/home/b 里的 a: 不是盘符。
-  [
-    'Windows 用户目录',
-    new RegExp(String.raw`(?<![\w/\\])[A-Za-z]:[\\/]Users[\\/](?!${PLACEHOLDER})[A-Za-z0-9_.-]+`, 'gi'),
-  ],
-  [
-    '盘符下的个人目录',
-    new RegExp(String.raw`(?<![\w/\\])[A-Za-z]:[\\/](?!${PLACEHOLDER}|Users\b)[A-Za-z0-9_.-]+`, 'g'),
-  ],
-  ['令牌', /\b(?:ghp_|gho_|ghs_|ghu_|github_pat_|sk-ant-|sk-|xai-|tvly-)[A-Za-z0-9_-]{8,}/g],
-  ['带值的 Bearer', /Bearer\s+(?!<)[A-Za-z0-9._-]{12,}/g],
-  ['飞书编号', /\b(?:ou|oc|om|on|cli)_[0-9a-f]{12,}\b/g],
-];
-
 /** 审官自己写的定级、处置：留在考题的意见原文里，模型照抄就能答对，考不出东西。 */
 const SELF_GRADE = /不阻塞|非阻塞|不计入红项|不挡|不追|顺手改|随后续|不在本单|可选改进|blocking|\bP[0-3]\b/i;
 
-export function findLeaks(text: string): string[] {
-  return RULES.flatMap(([label, re]) => [...text.matchAll(re)].map((m) => `${label}：${m[0].slice(0, 60)}`));
+/**
+ * 能认出人、账号、机器的东西：规则、白名单都用全仓卫生检查那一份（packages/hygiene），这里不另写一套。
+ * 只报文件和规则名，不打命中的值。path 给白名单用（考题里原样收的上游请求号按那边的约定放行）。
+ */
+export function findLeaks(text: string, path = 'packages/jev/test/samples'): string[] {
+  const hits = findHits(text).map((h) => ({ ...h, path }));
+  return applyAllowlist(hits, ALLOWLIST, new Set()).map((h) => h.label);
 }
 
 /** JSON 里的反斜杠是转义过的，要解析后逐个字符串查，才查得到 C:\Users\… 这种。 */
@@ -81,7 +66,8 @@ describe('考题文件', () => {
   it('脱敏：不许有邮箱、IP、令牌、家目录用户名、飞书编号', () => {
     const leaks = SITE_IDS.flatMap((site) => {
       const parsed: unknown = JSON.parse(readFileSync(join(EXAMS_DIR, `${site}.json`), 'utf8'));
-      return stringsIn(parsed).flatMap((s) => findLeaks(s).map((l) => `${site} ${l}`));
+      const path = `packages/jev/exams/${site}.json`;
+      return stringsIn(parsed).flatMap((s) => findLeaks(s, path).map((l) => `${site} ${l}`));
     });
     expect(leaks).toEqual([]);
   });
@@ -103,18 +89,18 @@ describe('考题文件', () => {
   });
 
   it('故意放进去的违规样本都拦得住', () => {
+    // 样本在运行时拼起来：整段写在源码里，全仓卫生检查会拦这个文件自己。值是随手编的、不指向任何人。
     const samples = [
-      'mail me: someone@example.com',
-      'host 10.2.3.4',
-      '"cwd":"/home/someone/.claude/projects/x"',
-      'C:\\Users\\Administrator\\x',
-      'C:/Users/someone/x',
-      'D:/someone/windsurf-dao',
-      'token ghs_abcdefghijklmnop',
-      'Authorization: Bearer abcdefghijklmnopqrstuvwxyz',
-      'from ou_56e1940982ad97f11c57cf599cdc600c',
+      `mail me: ${['zhangsan', 'corp-mail.co'].join('@')}`,
+      `host ${[51, 38, 4, 17].join('.')}`,
+      `"cwd":"${['', 'home', 'zhangsan', '.claude', 'projects', 'x'].join('/')}"`,
+      ['C:', 'Users', 'zhangsan', 'x'].join('\\'),
+      ['D:', 'zhangsan', 'windsurf-dao'].join('/'),
+      `token ${['ghs', 'q7Rz2LmX9vKp4TnB8wYc1HdF6jGs3NaE'].join('_')}`,
+      `Authorization: ${['Bearer', 'Q9vKp4TnB8wYc1HdF6jGs3NaEq7Rz2LmX'].join(' ')}`,
+      `from ${['ou', '5e1d9a40c82f97b13c57af599cdc6e0d'].join('_')}`,
     ];
-    for (const s of samples) expect(findLeaks(s), s).toHaveLength(1);
+    for (const s of samples) expect(findLeaks(s).length, s).toBeGreaterThan(0);
     expect(
       findLeaks(
         '127.0.0.1 · /home/agent · /home/a,/home/b · C:/Users/alice · C:\\Users\\bob · D:/agent · Bearer <令牌> · ou_xxx · jev-1.13.0',

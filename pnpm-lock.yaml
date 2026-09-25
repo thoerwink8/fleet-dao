@@ -131,12 +131,17 @@ importers:
       '@fleet-dao/db':
         specifier: workspace:*
         version: link:../db
+      '@fleet-dao/hygiene':
+        specifier: workspace:*
+        version: link:../hygiene
       drizzle-orm:
         specifier: ^0.45.3
         version: 0.45.3(@electric-sql/pglite@0.5.8)(postgres@3.4.9)
       zod:
         specifier: ^4.6.5
         version: 4.6.5
+
+  packages/hygiene: {}
 
   packages/jev:
     dependencies:
@@ -152,6 +157,10 @@ importers:
       drizzle-orm:
         specifier: ^0.45.3
         version: 0.45.3(@electric-sql/pglite@0.5.8)(postgres@3.4.9)
+    devDependencies:
+      '@fleet-dao/hygiene':
+        specifier: workspace:*
+        version: link:../hygiene
 
   packages/shared:
     dependencies:
