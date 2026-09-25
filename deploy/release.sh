@@ -311,8 +311,8 @@ web_script() { # 临时目录 脚本名：packages/web 有没有这个 npm 脚�
 }
 
 # 静态文件，两份：web/ 是正式驾驶舱（有 packages/web 就构建它，没有就用占位页）加健康页 /health/、版本标记
-# release.json（由 root 写）；web-demo/ 是演示版（这一版的 packages/web 有 build:demo 才有），按 FLEET_DEMO_PATH
-# 这个路径构建，打包后自己扫一遍产物，出现真名、真域名（FLEET_DOMAIN）、GitHub 地址就构建失败。发到哪见 sync_web
+# release.json（由 root 写；香港只给经隧道来的读）；web-demo/ 是演示版（这一版的 packages/web 有 build:demo 才有），
+# 按 FLEET_DEMO_PATH 这个路径构建，打包后自己扫一遍产物，出现真名、真域名（FLEET_DOMAIN）、GitHub 地址就构建失败。发到哪见 sync_web
 DEMO_BUILT=""
 build_web() { # 临时目录 日志
   local stage=$1 log=$2
@@ -902,12 +902,13 @@ check_engine() {
   return 1
 }
 
-# 香港在发的是不是这一版：经隧道连香港的 nginx（证书照常按域名校验）。发了 web 的，读 release.json 与健康页；
-# 发了 demo 的，看演示版的首页是不是这一版、深链接回落对不对。没发的那样不查（根地址上是什么由人定）
+# 香港在发的是不是这一版：经隧道连香港的 nginx（证书照常按域名校验）。发了 web 的，读 release.json 与健康页——
+# release.json 香港只给经隧道来的，别处来的是 404；发了 demo 的，看演示版的首页是不是这一版、深链接回落对不对。
+# 没发的那样不查（根地址上是什么由人定）
 check_web() { # 提交号
   local body commit code dir=$RELEASES/$1 bad=0
   if has_part web; then
-    if ! body=$(curl -sS --max-time 10 --resolve "$FLEET_DOMAIN:443:$HK_TUNNEL" "https://$FLEET_DOMAIN/release.json" 2>&1); then
+    if ! body=$(curl -sS -f --max-time 10 --resolve "$FLEET_DOMAIN:443:$HK_TUNNEL" "https://$FLEET_DOMAIN/release.json" 2>&1); then
       red "从香港取不到 https://$FLEET_DOMAIN/release.json：$(tail -1 <<<"$body")"
       return 1
     fi

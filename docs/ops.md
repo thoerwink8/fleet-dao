@@ -40,10 +40,11 @@
 | 端口 | 绑在 | 是谁 | 说明 |
 |---|---|---|---|
 | 80/tcp | 0.0.0.0 | nginx | `<驾驶舱域名>`：证书续期的验证路径，其余跳 https |
-| 443/tcp | 0.0.0.0 | nginx | `https://<驾驶舱域名>`：静态页；`/api`、`/auth`、`/github/webhook`、`/healthz` 经隧道转法国 `10.99.0.2:8787`，转之前清掉 `Authorization`、`X-Fleet-Acting-Feishu`；`/agent` 不转 |
+| 443/tcp | 0.0.0.0 | nginx | `https://<驾驶舱域名>`：静态页；`/api`、`/auth`、`/github/webhook`、`/healthz` 经隧道转法国 `10.99.0.2:8787`，转之前清掉 `Authorization`、`X-Fleet-Acting-Feishu`；`/agent` 不转；`/release.json`（带完整提交号）只给法国经隧道来的（`10.99.0.2`），别处来的回 404 |
 | 4500/udp | 0.0.0.0 | WireGuard 服务端 | 香港上游只放行少数常见 UDP 端口（2026-09-25 从法国实测：53/67/69/123/161/500/1701/4500 能到），51820 进不来 |
 
 GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录回调：`https://<驾驶舱域名>/auth/feishu/callback`。
+整站不让搜索引擎收录：80、443 的回应都带 `X-Robots-Tag: noindex, nofollow`，`/robots.txt` 禁抓全站（`deploy/hk/nginx-*.conf`）。
 
 ## 三、用户、目录、库
 
@@ -84,7 +85,7 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 | `/etc/fleet-dao/gateway-token.env` | root:fleet 640 | 飞书网关的通行证，和法国那份一模一样（第九节「两台同一份」） |
 | `/etc/fleet-dao/feishu.env` | root:fleet 640 | 飞书网关的配置：飞书凭据、创始人（人放），后端地址、公网地址、团队群（hk.sh 缺才补，第十二节） |
 | `/srv/fleet-dao` | root:root 755 | 装机脚本所在的检出 |
-| `/srv/fleet-dao-web` | root:root 755 | 静态文件，归 root：飞书网关以 fleet 跑在这台，网关被打穿也改不了页面。由法国传来：`release.json` 写着根上的驾驶舱是哪一版，`/health/` 是健康页，`/demo/`（`FLEET_DEMO_PATH`）是演示版、它下面的 `scopes/` 是可见范围（第九节「发静态文件」「演示版」）。装机脚本只在没有 `index.html` 时放占位页，不盖已发布的 |
+| `/srv/fleet-dao-web` | root:root 755 | 静态文件，归 root：飞书网关以 fleet 跑在这台，网关被打穿也改不了页面。由法国传来：`release.json` 写着根上的驾驶舱是哪一版（只给经隧道来的读），`/health/` 是健康页，`/demo/`（`FLEET_DEMO_PATH`）是演示版、它下面的 `scopes/` 是可见范围（第九节「发静态文件」「演示版」）。装机脚本只在没有 `index.html` 时放占位页，不盖已发布的 |
 | `/srv/fleet-dao-gateway` | root:root 755 | 飞书网关的各版（第十二节）：`<提交号>/gateway.mjs`（法国打好的一个文件）、`current` 链接、`.history`；归 root，fleet 只读 |
 | `/opt/fleet-dao/node-v22.23.3`（`/opt/fleet-dao/node` 链接到它） | root:root 755 | 飞书网关用的 node，固定版本、核对过 sha256；不用系统里的 node |
 | `/usr/local/sbin/fleet-gateway-deploy` | root 755 | 发飞书网关的入口：法国发布脚本登上来只能跑它（第十二节） |
@@ -124,7 +125,7 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 
 - `bash deploy/lib/snapshot.sh ours`：fleet-dao 管的东西的指纹。连跑两遍装机，两遍之间各拍一次，diff 为空才算第二遍零改动——和脚本自己数的「改动几处」是两套判据。
 - `bash deploy/lib/snapshot.sh others`：不归 fleet-dao 管的单元状态、监听端口、防火墙（系统自带的服务、MiraQuota 等）。装机脚本每次开头结尾自己比一遍：装机不许碰它们。
-- `sudo bash deploy/test/run.sh`：语法、shellcheck、自检的违规样本、发布脚本的来回（`release-flow.test.sh`）、香港网关的入口（`gateway-deploy.test.sh`）、网关打包（`gateway-bundle.test.sh`，要先 `pnpm install`）、健康页的判定（`health-page.test.mjs`）、本页端口表和脚本对得上。
+- `sudo bash deploy/test/run.sh`：语法、shellcheck、自检的违规样本、发布脚本的来回（`release-flow.test.sh`）、香港网关的入口（`gateway-deploy.test.sh`）、网关打包（`gateway-bundle.test.sh`，要先 `pnpm install`）、公网上看得到的几样（`public-site.test.sh`：占位页、健康页不带仓名，`release.json` 只给隧道、整站 noindex；真起 nginx 那段要这台装了 nginx）、健康页的判定（`health-page.test.mjs`）、本页端口表和脚本对得上。
 - `sudo bash deploy/test/agent-scope.e2e.sh`（法国）：会话通路真跑一遍，见第五节。
 
 ## 五、AI 会话
@@ -197,6 +198,7 @@ reclaude 按用户记设备：组织写在各自家里的 `~/.reclaude/device.js
 香港分项：
 
 - `curl -I https://<驾驶舱域名>`、`certbot certificates`
+- `curl -s -o /dev/null -w '%{http_code}\n' https://<驾驶舱域名>/release.json`：从公网取应为 404（它只给法国经隧道读，第九节）
 - `certbot renew --dry-run --cert-name <驾驶舱域名>`：只演练续期，不换证书
 - `wg show wg-fleet`（看法国的 latest handshake）、`nginx -t`
 - 飞书网关：`fleet-gateway-deploy status`、`journalctl -u fleet-feishu -n 100`（第十二节）
@@ -283,7 +285,7 @@ bash /srv/fleet-dao/deploy/release.sh --check      # 只读：在用哪版、服
 每一步：
 
 1. 取代码：从 GitHub 取主线到 `/srv/fleet-dao-releases/.repo.git`（root 的裸仓）。只发主线上的提交；合并前要在真机上验，加 `--unmerged`，历史里会标出来。
-2. 构建：代码解到临时目录，以 fleet 跑 `pnpm install --frozen-lockfile`（依赖整份拷进来，不和 fleet 的 pnpm 仓库共用文件）；有 `packages/web` 就构建它（产出 `dist/client`，登录页的「看演示版」指向 `FLEET_DEMO_PATH`），没有就用占位页；再放上健康页 `/health/`、版本标记 `release.json`。这一版的 `packages/web` 有 `build:demo` 的，再按 `FLEET_DEMO_PATH` 构建演示版（放进这一版的 `web-demo/`，路径记进 `.fleet-release` 的 `demo_path=`）：打包完先查第三方许可证声明 `licenses.txt` 在不在（演示版去掉了注释，声明只在这个文件里，页面上不放链接），再自己扫一遍产物（连声明一起扫），声明缺了，或出现真名、内部叫法、`FLEET_DOMAIN`、GitHub 地址、源码对照文件，就构建失败、不切版本。有 `packages/feishu` 就把飞书网关连同依赖打成一个文件 `gateway/gateway.mjs`（第十二节）。然后整棵树换成 root、fleet 只读，挪到 `/srv/fleet-dao-releases/<提交号>`。第三方代码不以 root 跑；root 照着起服务的单元文件，是换属主之后 root 才从 git 里取出来放进 `.units/` 的。构建日志在这一版目录的 `.fleet-build.log`。
+2. 构建：代码解到临时目录，以 fleet 跑 `pnpm install --frozen-lockfile`（依赖整份拷进来，不和 fleet 的 pnpm 仓库共用文件）；有 `packages/web` 就构建它（产出 `dist/client`，登录页的「看演示版」指向 `FLEET_DEMO_PATH`），没有就用占位页；再放上健康页 `/health/`、版本标记 `release.json`（带完整提交号，香港只给经隧道来的读）。这一版的 `packages/web` 有 `build:demo` 的，再按 `FLEET_DEMO_PATH` 构建演示版（放进这一版的 `web-demo/`，路径记进 `.fleet-release` 的 `demo_path=`）：打包完先查第三方许可证声明 `licenses.txt` 在不在（演示版去掉了注释，声明只在这个文件里，页面上不放链接），再自己扫一遍产物（连声明一起扫），声明缺了，或出现真名、内部叫法、`FLEET_DOMAIN`、GitHub 地址、源码对照文件，就构建失败、不切版本。有 `packages/feishu` 就把飞书网关连同依赖打成一个文件 `gateway/gateway.mjs`（第十二节）。然后整棵树换成 root、fleet 只读，挪到 `/srv/fleet-dao-releases/<提交号>`。第三方代码不以 root 跑；root 照着起服务的单元文件，是换属主之后 root 才从 git 里取出来放进 `.units/` 的。构建日志在这一版目录的 `.fleet-build.log`。
 3. 先试通香港这次要发的那几样（`FLEET_HK_PARTS`，见本节末尾）：发静态文件或演示版就 `rsync -n`（什么都不传），发网关就问一次网关入口的 `status`。不通就停，不切版本——不然健康检查必不过，新旧两版会一起被记成不健康。
 4. 迁移：以 fleet 跑 `packages/db` 的迁移（库 fleet，本机 socket）。在切版本之前跑，只进不退（第八节）。每一版带几个迁移记在它的 `.fleet-release`（`migrations=`）。跑之前先比库：库里跑过的比这一版带的多（直接发了个老提交），就停、不切——drizzle 碰到比代码新的迁移记录什么也不做、也不报错，光靠迁移这一步拦不住。迁移完装目录：以 fleet 跑这一版的目录装载器，把 `/etc/fleet-dao/catalog.json` 装进库（下面「目录配置」）；装不成、装完读不回就停、不切。
 5. 切版本：`current` 原子地指到这一版；`/etc/fleet-dao/release.env` 的 `FLEET_SERVICES` 里启用的服务装上这一版的单元、起来，没启用的停掉、撤掉单元。要不要重启看服务的主进程在哪个目录（`/proc/<主进程>/cwd`）：不在这一版的目录里就重启——所以上次切完 `current`、还没重启完就被打断，重跑同一版照样会重启；单元或环境文件变了也重启。
@@ -363,10 +365,11 @@ ssh <法国> 'sha256sum < /etc/fleet-dao/gateway-token.env'; ssh <香港> 'sha25
 健康页 `https://<驾驶舱域名>/health/`：
 
 - 读 `/healthz`：香港经隧道转给法国驾驶舱后端，后端逐项探库、Temporal……，全好回 200、有一项不好回 503。每 15 秒刷新。公网 `/healthz` 在香港限流：每个来源每分钟 30 次、突发 10 次，超了回 429（健康页照样报红，写明是限流）。
+- 必看三项：数据库、Temporal、引擎工人。只有后端明说在线的才绿；连不上（香港回 502、504）、回的不是健康报告、后端没报这一项、后端的结论和逐项对不上，一律红，并写明是哪一种。判定在 `deploy/web/health/health.js`，`deploy/test/health-page.test.mjs` 把每一种「没查成」都造了一遍。
+- 从公网打开的，健康页和占位页上都不写仓名、GitHub 账号名和地址（设计文档第十四节「演示版」），也不显示版本号（`release.json` 公网上读不到）。`deploy/test/public-site.test.sh` 拿演示版打包扫描的同一份名单（`packages/web/src/build/scan.ts`）扫发布脚本生成的这几页；改了文字，下次发 `web` 才到香港。
+- 香港转发时清掉 `Authorization`、`X-Fleet-Acting-Feishu`。france.sh 的读回从公网带着这两个头请求 `/api`，核对法国收到的请求里没有：后端没在跑时在隧道地址上临时起回显直接看，后端在跑时看它答的是「没登录」。
 
 还欠（发布这块）：构建以 fleet 身份跑，构建期间的第三方代码（前端构建工具等）读得到 `/etc/fleet-dao` 里 fleet 能读的全部密钥。换成读不到 `/etc/fleet-dao` 的专用构建用户要动装机（新用户、它的 pnpm、属主交接），留到下一轮。现在挡着的：pnpm 11 默认不跑依赖的安装脚本，只跑 `pnpm-workspace.yaml` 的 `allowBuilds` 放行的（现在一个都没放行），所以装依赖这一步第三方代码不执行；前端构建那一步照样会执行构建工具的代码。
-- 必看三项：数据库、Temporal、引擎工人。只有后端明说在线的才绿；连不上（香港回 502、504）、回的不是健康报告、后端没报这一项、后端的结论和逐项对不上，一律红，并写明是哪一种。判定在 `deploy/web/health/health.js`，`deploy/test/health-page.test.mjs` 把每一种「没查成」都造了一遍。
-- 香港转发时清掉 `Authorization`、`X-Fleet-Acting-Feishu`。france.sh 的读回从公网带着这两个头请求 `/api`，核对法国收到的请求里没有：后端没在跑时在隧道地址上临时起回显直接看，后端在跑时看它答的是「没登录」。
 
 ## 十、「你好」工作流（P0 验收）
 
