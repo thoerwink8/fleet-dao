@@ -1,0 +1,56 @@
+name: merge-gate
+# 合并闸（#74）：在 PR 当前头上写提交状态 merge-gate，「按我们的规矩能不能合」只看它一个——不是草稿、和主线没冲突、
+# 改到先审后合的三种路径（packages/conventions/high-risk-paths.json）时当前头上有通过的 second-opinion；必填栏只提醒
+# （packages/conventions/src/merge-gate.ts，design 第五节「流程只为快」）。
+# 三处触发：
+# - PR 事件用 pull_request_target：有冲突的 PR 上 pull_request 跑不起来，fork 来的 PR 在 pull_request 里也拿不到写状态的令牌。
+#   这里跑的是主线上的代码、检出的是主线，不检出也不跑 PR 里的代码；PR 的 plan.md、specs 目录都按 API 现读。
+# - 主线推送：冲突是主线一变才出现的，逐个重算所有开着的 PR。
+# - status 事件：第二意见写上 second-opinion 时重算那个头的 PR。status 事件只跑默认分支上的这份文件、事件里没有 PR 号，
+#   所以按 sha 去找 PR，再用状态接口写回 PR 的头（GitHub 文档「Events that trigger workflows」的 status 一节）。
+# 用 GITHUB_TOKEN 写的状态不会再触发 status 事件，不会自己转圈。也能在 Actions 页手动跑（填 PR 号，留空算所有开着的）。
+on:
+  pull_request_target:
+    types:
+      [
+        opened,
+        reopened,
+        synchronize,
+        edited,
+        ready_for_review,
+        converted_to_draft,
+        labeled,
+        unlabeled,
+        milestoned,
+        demilestoned,
+      ]
+  push:
+    branches: [main]
+  status:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: PR 号；留空算所有开着的
+        required: false
+concurrency:
+  group: merge-gate-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+  pull-requests: read
+  statuses: write
+jobs:
+  merge-gate:
+    if: github.event_name != 'status' || github.event.context == 'second-opinion'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # 默认检出触发分支（pull_request_target 也是主线），高风险清单和判法都用主线上的：PR 改不了自己的门槛
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # 退出码 2 = 有 PR 没算成或没写上状态（没写上的那个 PR 缺 merge-gate，合不了），同样是红
+      - run: node packages/conventions/src/bin/merge-gate.ts
+        env:
+          GITHUB_TOKEN: ${{ github.token }}

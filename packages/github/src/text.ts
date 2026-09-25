@@ -52,6 +52,11 @@ export interface PrBodyInput {
   plan: string;
   /** 「specs」：需求文档的目录，例如 specs/12-登录验证码/；null = 杂活，写「不适用」。必填，免得分不清是杂活还是忘了给。 */
   specs: string | null;
+  /**
+   * 「档位」：design 第五节的三档之一加理由，例如「先审后合——方案标了高风险」。不给或给空的写「（没写）」，
+   * 合并闸（packages/conventions 的 merge-gate）照样判红，不冒充填了。
+   */
+  tier?: string | undefined;
   /** 这个 PR 改到的文件（仓内相对路径）。「文档」一栏按它写；必填，不给就说不清是「不适用」还是没查。 */
   changedFiles: readonly string[];
 }
@@ -85,6 +90,7 @@ export function renderPrBody(input: PrBodyInput): string {
     `**需求**：${requirement}`,
     `**对应计划**：${oneLine(input.plan) || '（没写）'}`,
     `**specs**：${input.specs === null ? '不适用' : oneLine(input.specs) || '（没写）'}`,
+    `**档位**：${oneLine(input.tier ?? '') || '（没写）'}`,
     `**文档**：${docs.length ? docs.join('、') : '不适用'}`,
   ];
 

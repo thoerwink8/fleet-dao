@@ -105,6 +105,7 @@ function prBody(body: PrBody, plan: string, specs: string): PrBodyInput {
     ...(body.risks ? { risks: body.risks } : {}),
     plan,
     specs,
+    tier: body.tier,
     changedFiles: body.changedFiles,
   };
 }

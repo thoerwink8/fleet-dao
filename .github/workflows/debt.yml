@@ -1,25 +1,45 @@
 name: debt
-# 欠账检查看 GitHub 现状的那一半（#67、#87，packages/conventions/src/debt.ts 的 liveDebt）：推后的话挂的单号是不是
-# 开着的 issue、开着的 issue 在主线上有没有 specs/<号>-<短名>/需求.md（开单一天内不算欠）。
-# 结果随单子开关、随时间变，所以不进 PR 的必过检查（必过检查必须确定：同一份代码什么时候跑结果都一样）；
-# 在主线上每天跑、每次合并后跑，查出来的留言到对应的单上（同一条只留一次）。只看文件的那一半在 pnpm check 里。
-# 退出码：没欠账或都留了言 = 0；有落不到单上的 = 1；没查成（读不到 GitHub、留言没留成）= 2。只影响这个定时任务，不挡 PR。
+# 欠账检查（#67、#87，packages/conventions/src/debt.ts），只报告、不挡任何 PR（创始人 2026-09-26「流程只为快」）。
+# debt-docs：只看文件的那一半（推后的话带没带单号、需求.md 写没写怎么算做完），PR 上和主线上都跑；
+#   查出来的在检查页上列出来，这一步失败也不把 PR 标红（continue-on-error），也别把它设成必过检查。
+# debt-live：看 GitHub 现状的那一半（挂的单号开没开着、开着的 issue 有没有需求文档）。结果随单子开关、随时间变，
+#   只在主线上每天跑、每次合并后跑，查出来的留言到对应的单上（同一条只留一次）。
+# 退出码：没欠账或都留了言 = 0；有落不到单上的 = 1；没查成（读不到 GitHub、留言没留成）= 2。
 on:
+  pull_request:
   push:
     branches: [main]
   schedule:
     - cron: '17 1 * * *'
   workflow_dispatch:
 concurrency:
-  group: debt
-  cancel-in-progress: false
+  group: debt-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 permissions:
   contents: read
-  issues: write
 jobs:
-  debt:
+  debt-docs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node packages/conventions/src/bin/debt-check.ts
+        continue-on-error: true
+  debt-live:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    concurrency:
+      group: debt-live
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

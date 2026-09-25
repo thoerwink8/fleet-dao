@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
@@ -427,11 +428,17 @@ describe('欠账（定时任务）：查出来的留言到单上，同一条只�
   });
 });
 
-describe('欠账：全仓的文档（main 上现有的，加上本 PR 改的）', () => {
-  it('只看文件的那一半在真仓上过', () => {
-    const r = checkDebtDocs(fsRepo(ROOT));
-    expect(r.lines.filter((l) => !l.startsWith('欠账检查'))).toEqual([]);
-    expect(r.code).toBe(0);
-    expect(r.deferrals.length).toBeGreaterThan(0);
+describe('欠账只报告、不挡 PR（创始人 2026-09-26「流程只为快」）', () => {
+  const read = (rel: string) => readFileSync(new URL(`../../../${rel}`, import.meta.url), 'utf8');
+
+  it('pnpm check 里不跑欠账检查；只看文件的那一半在 debt.yml 里跑，失败不把 PR 标红', () => {
+    const pkg = JSON.parse(read('package.json')) as { scripts: Record<string, string> };
+    expect(pkg.scripts.check).toBeDefined();
+    expect(pkg.scripts.check).not.toContain('debt-check');
+    const yml = read('.github/workflows/debt.yml');
+    expect(yml).toMatch(/^ {2}pull_request:/m);
+    const docs = yml.slice(yml.indexOf('  debt-docs:'), yml.indexOf('  debt-live:'));
+    expect(docs).toContain('continue-on-error: true');
+    expect(docs).toMatch(/run: node packages\/conventions\/src\/bin\/debt-check\.ts\s*$/m);
   });
 });

@@ -1,6 +1,6 @@
 // 欠账检查入口（#67、#87，见 ../debt.ts）：node packages/conventions/src/bin/debt-check.ts [--live [--comment]]
 // 不带参数：只看文件（推后的话带没带单号、需求.md 写没写怎么算做完），不读 GitHub，没网也能跑；
-//   pnpm check 里由 test/debt.test.ts 跑同一份代码，这里是给人手动看的。
+//   .github/workflows/debt.yml 在 PR 和主线上跑它，只报告、不挡 PR（创始人 2026-09-26「流程只为快」）。
 // --live：另读 GitHub——挂的单号开没开着、开着的 issue 有没有需求文档。只给 .github/workflows/debt.yml 的定时任务用，
 //   别接进 PR 的必过检查（#87）。加 --comment 把查出来的留言到对应的单上（同一条只留一次）。
 // 退出码 0 = 没欠账，或查出来的都留言到单上了；1 = 有欠账没落到单上（逐条列出）；2 = 没查成（读不到文档或 GitHub、留言没留成）。

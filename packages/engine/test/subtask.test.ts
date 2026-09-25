@@ -877,8 +877,17 @@ describe('子任务工作流', { timeout: 60_000 }, () => {
       ],
       // 「specs」一栏给需求文档的目录；「对应计划」由端口开 PR 时去那份需求文档里现读
       specs: input.specDir,
+      // 「档位」按方案标的风险写：合并闸按它判要不要等第二意见
+      tier: '先审后合——方案里标了高风险，合并前第二意见',
       changedFiles: ['src/a/changed.ts'],
     });
+  });
+
+  it('方案标了一般改动的子任务：PR 档位写「CI 绿就合」', async () => {
+    const world = createFakeWorld();
+    const input = subtaskInput(spec('a', { secondOpinion: false }));
+    await withWorker(env, world, async (q) => (await startSubtask(q, input)).result());
+    expect(world.callsOf('openPr')[0]?.input.body.tier).toBe('CI 绿就合——方案里标了一般改动');
   });
 
   it('工作流事件数到了报警线：报一次警（一条执行一张卡），照样走完', async () => {

@@ -474,6 +474,7 @@ describe('开 PR、CI、合并', () => {
     did: ['加了验证码'],
     verified: ['pnpm check'],
     specs: 'specs/28-接真端口/',
+    tier: '先合后看——一般改动',
     changedFiles: ['src/login.ts'],
   };
 
@@ -491,6 +492,7 @@ describe('开 PR、CI、合并', () => {
         did: ['加了验证码'],
         plan: 'plan.md P1「工作流」',
         specs: 'specs/28-接真端口/',
+        tier: '先合后看——一般改动',
       },
       inheritFrom: { issueNumber: 12 },
     });

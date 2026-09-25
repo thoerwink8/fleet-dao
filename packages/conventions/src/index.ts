@@ -54,6 +54,16 @@ export {
   USAGE,
 } from './issue-new.ts';
 export { isKindLabel, KIND_LABELS, type KindLabel, milestonePhase } from './labels.ts';
+export { type GateResult, type GitHubReads, gateGitHub, gatePr, runMergeGate } from './merge-gate.ts';
+export {
+  GATE_CONTEXT,
+  REVIEW_TIER,
+  RISK_PATHS_FILE,
+  SECOND_OPINION_CONTEXT,
+  TIER_COLUMN,
+  TIERS,
+  type Tier,
+} from './merge-gates.ts';
 export { type CloseCheck, MILESTONE_USAGE, milestoneCloseCheck } from './milestone-close.ts';
 export { type PlanPhase, type PlanRef, parsePlanRefs, planPhases } from './plan.ts';
 export {
@@ -67,9 +77,8 @@ export {
   prColumns,
   prFromEvent,
   type RepoFacts,
-  type RunResult,
-  runPrFields,
   SPECS_COLUMN,
+  specsPaths,
 } from './pr-fields.ts';
 export {
   ISSUE_COLUMN,

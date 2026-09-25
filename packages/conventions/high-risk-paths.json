@@ -1,0 +1,106 @@
+{
+  "说明": "先审后合的路径（design 第五节「流程只为快」：只有三种——迁移里有删改语句、部署和生产脚本、密钥与登录鉴权含卫生检查和 CI 工作流本身；引擎代码、必填栏判法都不算）。PR 改到这里的文件，当前头上要有通过的 second-opinion，合并闸（merge-gate）才放行；按路径判，不看 PR 自己写的档位。合并闸用的是主线上的这一份，PR 里改了要合进主线之后才算数。以 / 结尾的是目录（下面所有文件都算），否则是单个文件；kind 是三种之一；mode 为 migrations 的目录里，新加的迁移只建表、加列不算。加一条要写为什么。",
+  "paths": [
+    {
+      "path": "packages/db/migrations/",
+      "kind": "改数据库",
+      "mode": "migrations",
+      "why": "合进去就在真库上跑：改、删已有的迁移，或新迁移里删、改已有的表、列、数据，回滚难"
+    },
+    {
+      "path": "deploy/",
+      "kind": "动生产",
+      "why": "部署脚本和生产机器上的配置（systemd、防火墙、nginx、sudoers），直接改法国、香港的真机和对公网开的口子"
+    },
+    {
+      "path": "packages/api/src/auth.ts",
+      "kind": "碰安全",
+      "why": "驾驶舱登录，只放行白名单里的人"
+    },
+    {
+      "path": "packages/api/src/session.ts",
+      "kind": "碰安全",
+      "why": "登录态 Cookie 和 CSRF"
+    },
+    {
+      "path": "packages/api/src/tokens.ts",
+      "kind": "碰安全",
+      "why": "Cookie、飞书登录暂存、fleet 令牌共用的签名"
+    },
+    {
+      "path": "packages/api/src/agent-token.ts",
+      "kind": "碰安全",
+      "why": "fleet 令牌的签发和校验"
+    },
+    {
+      "path": "packages/api/src/feishu.ts",
+      "kind": "碰安全",
+      "why": "飞书账号登录"
+    },
+    {
+      "path": "packages/api/src/github.ts",
+      "kind": "碰安全",
+      "why": "对公网开的 GitHub 事件入口：验签名、作者白名单，公开仓陌生人能开单，这是唯一的门"
+    },
+    {
+      "path": "packages/github/src/app-auth.ts",
+      "kind": "碰安全",
+      "why": "GitHub App 的私钥和安装令牌"
+    },
+    {
+      "path": "packages/github/src/credentials.ts",
+      "kind": "碰安全",
+      "why": "两个机器人的密钥从哪读、怎么分"
+    },
+    {
+      "path": "packages/github/src/push.ts",
+      "kind": "碰安全",
+      "why": "引擎推分支前的卫生扫描"
+    },
+    {
+      "path": "packages/github/src/publish-check.ts",
+      "kind": "碰安全",
+      "why": "往公开仓写正文、文档前的卫生扫描"
+    },
+    {
+      "path": "packages/hygiene/",
+      "kind": "碰安全",
+      "why": "公开仓卫生检查，漏拦一次密钥、账号就公开了"
+    },
+    {
+      "path": ".gitignore",
+      "kind": "碰安全",
+      "why": "标记段里的密钥文件名是卫生检查拦「强行加进来的密钥文件」的依据"
+    },
+    {
+      "path": ".github/workflows/",
+      "kind": "碰安全",
+      "why": "用仓库密钥（已知敏感值名单）、定令牌权限；合并闸、pull_request_target 拿写令牌也在这"
+    },
+    {
+      "path": "packages/conventions/high-risk-paths.json",
+      "kind": "碰安全",
+      "why": "CI 检查本身：就是这份清单：删一条就少拦一类"
+    },
+    {
+      "path": "packages/conventions/src/merge-gate.ts",
+      "kind": "碰安全",
+      "why": "CI 检查本身（合并闸）：写 merge-gate 状态，放松它等于绕过上面所有的先审后合"
+    },
+    {
+      "path": "packages/conventions/src/merge-gates.ts",
+      "kind": "碰安全",
+      "why": "CI 检查本身（合并闸）：档位、高风险路径、第二意见的判法"
+    },
+    {
+      "path": "packages/conventions/src/gh-api.ts",
+      "kind": "碰安全",
+      "why": "合并闸读写 GitHub 用的令牌客户端"
+    },
+    {
+      "path": "packages/conventions/src/bin/merge-gate.ts",
+      "kind": "碰安全",
+      "why": "合并闸在 Actions 里跑的入口"
+    }
+  ]
+}

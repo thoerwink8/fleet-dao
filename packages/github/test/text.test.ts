@@ -67,10 +67,11 @@ describe('PR 正文模板', () => {
     expect(lines.length).toBeLessThanOrEqual(PR_BODY_MAX_LINES);
     expect(body).toContain('- ……另有');
     expect(body).toContain('**还欠什么**：\n- 过期提示放到子任务 C\n- 风险：旧的登录接口还在用');
-    expect(lines.slice(-4)).toEqual([
+    expect(lines.slice(-5)).toEqual([
       '**需求**：#12 · 子任务 B 验证码',
       '**对应计划**：P1「工作流」',
       '**specs**：specs/12-登录验证码/',
+      '**档位**：（没写）',
       '**文档**：不适用',
     ]);
   });
@@ -95,13 +96,29 @@ describe('PR 正文模板', () => {
     expect(body).toContain('**还欠什么**：无\n**需求**：无\n');
   });
 
-  it('specs 给 null 写「不适用」；对应计划、specs 给空的写「（没写）」（CI 照样判红），不冒充填了', () => {
-    const tail = (plan: string, specs: string | null) =>
-      renderPrBody({ did: ['a'], verified: ['b'], plan, specs, changedFiles: [] })
+  it('specs 给 null 写「不适用」；对应计划、specs、档位给空的或没给写「（没写）」（合并闸照样判红），不冒充填了', () => {
+    const tail = (plan: string, specs: string | null, tier?: string) =>
+      renderPrBody({
+        did: ['a'],
+        verified: ['b'],
+        plan,
+        specs,
+        ...(tier === undefined ? {} : { tier }),
+        changedFiles: [],
+      })
         .split('\n')
-        .slice(-3, -1);
-    expect(tail('P0「仓骨架」', null)).toEqual(['**对应计划**：P0「仓骨架」', '**specs**：不适用']);
-    expect(tail(' ', '')).toEqual(['**对应计划**：（没写）', '**specs**：（没写）']);
+        .slice(-4, -1);
+    expect(tail('P0「仓骨架」', null, '直接合（纯文档）')).toEqual([
+      '**对应计划**：P0「仓骨架」',
+      '**specs**：不适用',
+      '**档位**：直接合（纯文档）',
+    ]);
+    expect(tail(' ', '', ' ')).toEqual([
+      '**对应计划**：（没写）',
+      '**specs**：（没写）',
+      '**档位**：（没写）',
+    ]);
+    expect(tail('P0「仓骨架」', null)[2]).toBe('**档位**：（没写）');
   });
 
   it('条目里的关单词也改掉', () => {
