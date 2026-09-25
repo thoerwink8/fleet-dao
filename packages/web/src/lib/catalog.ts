@@ -1,8 +1,11 @@
 // 路由、模型、账号池、额度窗的查询与白话名。各页都从这里拿名字，不各拼各的。
-import { hardBanFor } from '@fleet-dao/shared';
+
+import { hardBanFor, windowAppliesTo } from '@fleet-dao/shared';
+import { brand } from '#brand';
 import type {
   BillingKind,
   HostId,
+  Model,
   PoolView,
   QuotaWindowKind,
   QuotaWindowView,
@@ -20,7 +23,7 @@ export const STAGES: { id: StageKind; label: string; hint: string }[] = [
   { id: 'ui', label: 'UI', hint: '界面类写码；GPT 族不碰' },
   { id: 'review', label: '第二意见', hint: '全新会话看改动，最多 2 轮' },
   { id: 'research', label: '调研', hint: '查资料、比方案' },
-  { id: 'judge', label: '判断', hint: 'Jev 判断题：选择题 + 把握度' },
+  { id: 'judge', label: '判断', hint: `${brand.terms.judgeQuiz}：选择题 + 把握度` },
 ];
 
 export const stageLabel: Record<StageKind, string> = {
@@ -39,7 +42,7 @@ export const hostLabel: Record<HostId, string> = {
   codex: 'codex',
   'cursor-agent': 'cursor-agent',
   grok: 'Grok 命令行',
-  mirasim: 'Mirasim',
+  mirasim: brand.terms.relay,
   'api-shell': '接口 + 自研外壳',
 };
 
@@ -209,7 +212,9 @@ export type QuotaHeadline =
   | { kind: 'util'; w: QuotaWindowView; util: number }
   | { kind: 'unknown'; w: QuotaWindowView }
   | { kind: 'unreported'; w: QuotaWindowView }
-  | { kind: 'empty' };
+  | { kind: 'empty' }
+  /** 按路由看时：池里有窗，但都是只扣别的模型组的（routeQuotaHeadline）。 */
+  | { kind: 'unscoped' };
 
 /** pool 为 undefined 表示额度表里查不到这个池，和「一次都没读成过」一样说「额度没查成」。 */
 export function quotaHeadline(pool: Pick<PoolView, 'quotaStatus' | 'windows'> | undefined): QuotaHeadline {
@@ -225,12 +230,33 @@ export function quotaHeadline(pool: Pick<PoolView, 'quotaStatus' | 'windows'> | 
   return { kind: 'empty' };
 }
 
+/**
+ * 一条路由的额度概况：只算扣它的窗。账号级窗都扣；只扣一组模型的窗按 shared 的 windowAppliesTo 判
+ * （和读额度、选路由同一套判法）——只有 fable 组满了时，同池的 Kimi 不算满。
+ * 驾驶舱拿不到池的组成员表，按组名和模型名比；模型在目录里查不到时整池一起算（宁可说紧，不说松）。
+ */
+export function routeQuotaHeadline(
+  pool: Pick<PoolView, 'quotaStatus' | 'windows'> | undefined,
+  model: Pick<Model, 'id' | 'family'> | undefined,
+): QuotaHeadline {
+  if (!pool || !model) return quotaHeadline(pool);
+  const windows = pool.windows.filter(
+    (w) =>
+      windowAppliesTo(w.scope ? { scope: w.scope } : {}, { id: model.id, family: model.family }) !== 'no',
+  );
+  if (pool.quotaStatus !== 'unread' && pool.windows.length && !windows.length) return { kind: 'unscoped' };
+  return quotaHeadline({ ...pool, windows });
+}
+
 export function headlineText(h: QuotaHeadline): string {
   switch (h.kind) {
     case 'unread':
       return '额度没查成';
     case 'full':
-      return '已用满';
+      // 只扣一组模型的窗满了，写明是哪一组满了，别让人以为整个池都用不了。
+      return h.w.scope ? `${h.w.scope} 组已用满` : '已用满';
+    case 'unscoped':
+      return '没有扣它的窗';
     case 'util':
       return formatUtil(h.util);
     case 'unknown':
@@ -248,6 +274,7 @@ export function headlineInk(h: QuotaHeadline): string {
     case 'full':
       return 'text-ink-fail';
     case 'util':
+    case 'unscoped':
       return '';
     default:
       return 'text-ink-stall';

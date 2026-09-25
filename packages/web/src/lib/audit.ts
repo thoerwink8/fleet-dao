@@ -1,5 +1,6 @@
 // 操作记录的白话：动作名、对象、谁、从哪来。后端只给代码（例如 stage_policy.update、task:xxx），名字在这里翻。
 // 认不出的动作原样显示，不猜。
+import { brand } from '#brand';
 import type { AuditEntry, BoardTask, Me, SettingKey, StageKind } from '../api/types';
 import { stageLabel } from './catalog';
 
@@ -15,8 +16,11 @@ const ACTION_LABEL: Record<string, string> = {
   'notification.resolve': '处理了提醒',
   'setting.update': '改了设置',
   'agent.done_rejected': '「做完了」被退回',
-  login: '登录了驾驶舱',
-  logout: '退出了驾驶舱',
+  'demo.link.create': '发了演示链接',
+  'demo.link.revoke': '作废了演示链接',
+  'demo.default.update': '改了演示版的默认范围',
+  login: `登录了${brand.product}`,
+  logout: `退出了${brand.product}`,
   // 引擎一侧的动作（名字以引擎实际写的为准，认不出的原样显示）。
   'run.start': '派了会话',
   'run.fail': '会话失败',
@@ -32,7 +36,7 @@ export function actionLabel(action: string): string {
 }
 
 export const viaLabel: Record<AuditEntry['via'], string> = {
-  cockpit: '驾驶舱',
+  cockpit: brand.product,
   feishu: '飞书',
   github: 'GitHub',
   engine: '引擎',
@@ -41,7 +45,7 @@ export const viaLabel: Record<AuditEntry['via'], string> = {
 
 export const actorKindLabel: Record<AuditEntry['actor']['kind'], string> = {
   user: '人',
-  ai: 'AI 帅位',
+  ai: brand.terms.marshal,
   engine: '引擎',
   agent: '会话里的 AI',
 };
@@ -55,7 +59,7 @@ export function actorName(a: AuditEntry['actor'], me?: Me): string {
 export const settingLabel: Record<SettingKey, string> = {
   'sessions.maxConcurrent': '同时跑的会话上限',
   'notify.quietHours': '飞书免打扰时段',
-  'judge.dailyCallLimit': 'Jev 每天调用上限',
+  'judge.dailyCallLimit': `${brand.terms.judgeQuiz}每天调用上限`,
 };
 
 function isStage(s: string): s is StageKind {
@@ -68,7 +72,7 @@ export function targetLabel(
   tasks: ReadonlyMap<string, Pick<BoardTask, 'issueNumber' | 'title'>>,
 ): string {
   const i = target.indexOf(':');
-  if (i < 0) return target === 'cockpit' ? '驾驶舱' : target;
+  if (i < 0) return target === 'cockpit' ? brand.product : target;
   const kind = target.slice(0, i);
   const id = target.slice(i + 1);
   switch (kind) {
@@ -86,6 +90,10 @@ export function targetLabel(
       return id in settingLabel ? `设置「${settingLabel[id as SettingKey]}」` : `设置 ${id}`;
     case 'notification':
       return '一条提醒';
+    case 'demo-link':
+      return `演示链接 ${id.slice(0, 8)}`;
+    case 'demo':
+      return id === 'default' ? '演示版的默认范围' : `演示版 ${id}`;
     default:
       return target;
   }

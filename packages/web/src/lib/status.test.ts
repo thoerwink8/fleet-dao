@@ -16,7 +16,7 @@ let board: Board;
 
 beforeAll(async () => {
   // 看板数据走一遍假后端：出来的形状已经按 shared/web-api.ts 校验过。
-  board = await createMockApi({ live: false, now: () => NOW }).board('r-fleet');
+  board = await createMockApi({ live: false, now: () => NOW }).board('r-orbit');
 });
 
 function task(issue: number): BoardTask {

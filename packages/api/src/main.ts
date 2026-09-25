@@ -10,6 +10,7 @@ import { signAgentToken } from './agent-token.ts';
 import { buildApps } from './app.ts';
 import { createChangeHub, startPgChangeFeed } from './changes.ts';
 import { ConfigError, loadConfig } from './config.ts';
+import { createDirDemoPublisher, sweepExpiredDemoLinks } from './demo.ts';
 import type { Deps } from './deps.ts';
 import { DEV_RUN_ID, DEV_USER_ID, devFixtures, IDS } from './dev-fixtures.ts';
 import { createFeishuAuth } from './feishu.ts';
@@ -37,6 +38,7 @@ function load() {
 const config = load();
 const now = () => new Date();
 const feishu = config.feishu ? createFeishuAuth(config.feishu) : null;
+const demo = config.demoDir ? createDirDemoPublisher(config.demoDir) : null;
 
 async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
   if (config.databaseUrl === null) {
@@ -52,6 +54,7 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
       log,
       now,
       feishu,
+      demo,
       health: [],
       workflows: {
         async signal(taskId, signal) {
@@ -86,6 +89,7 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
     log,
     now,
     feishu,
+    demo,
     workflows: temporal.control,
     github: github.sink,
     health: serviceHealthChecks({ probeDb: () => probeDb(db), feed, temporal, githubEvents: github.check }),
@@ -125,6 +129,16 @@ log.info('驾驶舱后端已起', {
       }
     : {}),
 });
+
+// 演示链接到期就撤掉公开的范围文件：没人打开驾驶舱时也要撤（列表接口也会顺手撤）。撤不成照实记错误，下个钟头再来。
+if (demo) {
+  const sweep = () =>
+    sweepExpiredDemoLinks(demo, now()).catch((err: unknown) =>
+      log.error('撤过期的演示链接没成', { error: String(err) }),
+    );
+  void sweep();
+  setInterval(() => void sweep(), 60 * 60_000).unref();
+}
 
 /** 退出时给在途的短请求多久做完（做完了幂等回执才记得上，插头重试不会重做）。 */
 const DRAIN_MS = 3_000;

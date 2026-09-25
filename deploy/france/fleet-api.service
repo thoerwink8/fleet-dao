@@ -27,6 +27,9 @@ LimitNOFILE=65536
 # 后端不起子进程，可以收紧（引擎不行，见 fleet-engine.service）
 NoNewPrivileges=yes
 ProtectSystem=strict
+# 唯一能写的地方：演示版的可见范围（api.env 的 FLEET_DEMO_DIR，france.sh 建）。前面的「-」：目录还没建时照样起得来，
+# 只是发不了演示链接（驾驶舱里照实报没配好）
+ReadWritePaths=-/var/lib/fleet-dao/demo
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes

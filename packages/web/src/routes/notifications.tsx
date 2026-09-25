@@ -1,6 +1,7 @@
 import { Bell, Check, Send, TriangleAlert } from 'lucide-react';
 import { Link, useNavigate, useSearchParams } from 'react-router';
 import { toast } from 'sonner';
+import { brand } from '#brand';
 import { errorText, useAllBoards, useMe, useNotifications, useResolveNotification } from '../api/client';
 import type { Notification, NotificationLevel } from '../api/types';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
@@ -14,7 +15,7 @@ import { isMine, noticeLevelMeta } from '../lib/status';
 import { cn } from '../lib/utils';
 
 export function meta() {
-  return [{ title: '通知中心 · fleet-dao 驾驶舱' }];
+  return [{ title: brand.title('通知中心') }];
 }
 
 const LEVELS: { id: 'all' | NotificationLevel; label: string }[] = [
@@ -38,7 +39,7 @@ const DELIVERY_NAME: Record<string, string> = { feishu: '飞书' };
 
 /** 飞书等渠道送没送到：没拿到消息编号就算没送到。 */
 function Deliveries({ n }: { n: Notification }) {
-  if (!n.deliveries.length) return <span className="text-[11px] text-faint">只在驾驶舱</span>;
+  if (!n.deliveries.length) return <span className="text-[11px] text-faint">只在{brand.product}</span>;
   return (
     <span className="flex flex-wrap gap-1.5">
       {n.deliveries.map((d, i) => (

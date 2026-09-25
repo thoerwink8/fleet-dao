@@ -1,3 +1,4 @@
+import { brand } from '#brand';
 import '@fontsource-variable/inter';
 import '@fontsource-variable/jetbrains-mono';
 import './app.css';
@@ -20,6 +21,7 @@ import { FAVICON, LogoMark } from './components/logo';
 import { ThemeProvider, useTheme } from './components/theme-provider';
 import { Toaster } from './components/ui/sonner';
 import { TooltipProvider } from './components/ui/tooltip';
+import { loadDemoScope } from './demo/access';
 import { THEME_BOOT_SCRIPT } from './lib/theme';
 
 export function Layout({ children }: { children: ReactNode }) {
@@ -29,7 +31,7 @@ export function Layout({ children }: { children: ReactNode }) {
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
         <meta name="color-scheme" content="light dark" />
-        <title>fleet-dao 驾驶舱</title>
+        <title>{brand.title()}</title>
         <link rel="icon" href={FAVICON} />
         {/* biome-ignore lint/security/noDangerouslySetInnerHtml: 固定的主题启动脚本，不含任何外部输入；要在首次绘制前挂上主题，避免闪色。 */}
         <script dangerouslySetInnerHTML={{ __html: THEME_BOOT_SCRIPT }} />
@@ -45,8 +47,10 @@ export function Layout({ children }: { children: ReactNode }) {
   );
 }
 
-// 根路由带一个空的 clientLoader：构建时只渲染下面的启动画面，应用本体只在浏览器里跑。
+// 根路由带一个 clientLoader：构建时只渲染下面的启动画面，应用本体只在浏览器里跑。
+// 演示版在这里先把可见范围读好，页面一出来就是按范围收好的样子（不先露再收）。
 export async function clientLoader() {
+  await loadDemoScope();
   return null;
 }
 
@@ -55,7 +59,7 @@ export function HydrateFallback() {
     <div className="grid h-dvh place-items-center bg-background">
       <div className="flex flex-col items-center gap-3 text-muted-foreground">
         <LogoMark className="size-10 animate-pulse" />
-        <span className="text-sm">驾驶舱启动中…</span>
+        <span className="text-sm">{brand.product}启动中…</span>
       </div>
     </div>
   );
@@ -93,7 +97,9 @@ export default function App() {
 
 export function ErrorBoundary() {
   const error = useRouteError();
-  const title = isRouteErrorResponse(error) ? `${error.status} ${error.statusText}` : '驾驶舱出错了';
+  const title = isRouteErrorResponse(error)
+    ? `${error.status} ${error.statusText}`
+    : `${brand.product}出错了`;
   const detail = isRouteErrorResponse(error)
     ? String(error.data ?? '')
     : error instanceof Error

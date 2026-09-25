@@ -22,11 +22,11 @@ async function rejects(p: Promise<unknown>): Promise<ApiError> {
 describe('假后端：发给工作流的信号', () => {
   test('换子任务的路由：旧会话停下，新会话写明是谁手动换的', async () => {
     const api = fresh();
-    await api.taskAction('t-12', { action: 'reroute', routeId: 'r-mi-opus', subtaskId: 't-12-b' });
+    await api.taskAction('t-12', { action: 'reroute', routeId: 'r-rl-opus', subtaskId: 't-12-b' });
     const d = await api.task('t-12');
     const runs = d.runs.filter((r) => r.subtaskId === 't-12-b');
     const active = runs.filter((r) => !r.endedAt);
-    expect(active.map((r) => r.routeId)).toEqual(['r-mi-opus']);
+    expect(active.map((r) => r.routeId)).toEqual(['r-rl-opus']);
     expect(active[0]?.whyRoute).toBe('阿岚手动换成 Opus 5.5');
     expect(runs.find((r) => r.routeId === 'r-cb-opus')?.outcome).toBe('stopped');
   });
@@ -34,7 +34,7 @@ describe('假后端：发给工作流的信号', () => {
   test('换到犯禁令的路由：422 route_not_allowed，白话写明原因', async () => {
     const api = fresh();
     const e = await rejects(
-      api.taskAction('t-12', { action: 'reroute', routeId: 'r-mi-fable', subtaskId: 't-12-b' }),
+      api.taskAction('t-12', { action: 'reroute', routeId: 'r-rl-fable', subtaskId: 't-12-b' }),
     );
     expect(e.status).toBe(422);
     expect(e.code).toBe('route_not_allowed');
@@ -122,7 +122,7 @@ describe('假后端：调度台', () => {
     if (!ui) throw new Error('没有 ui 阶段');
     const e = await rejects(
       api.updateStagePolicy('ui', {
-        routeIds: [...ui.routeIds, 'r-mi-gpt'],
+        routeIds: [...ui.routeIds, 'r-rl-gpt'],
         pinned: ui.pinned,
         expected: { routeIds: ui.routeIds, pinned: ui.pinned },
       }),
@@ -171,12 +171,12 @@ describe('假后端：实时推送', () => {
   test('模拟器连跑 300 拍不出错，返回照样过校验，而且盘面真的在往前走', async () => {
     let clock = NOW;
     const api = createMockApi({ live: false, now: () => clock });
-    const before = await api.board('r-fleet');
+    const before = await api.board('r-orbit');
     for (let i = 0; i < 300; i++) {
       clock += 2600;
       api.tick();
     }
-    const after = await api.board('r-fleet');
+    const after = await api.board('r-orbit');
     expect(JSON.stringify(after.tasks)).not.toBe(JSON.stringify(before.tasks));
     const merged = (b: typeof before) =>
       b.tasks.flatMap((t) => t.subtasks).filter((s) => s.state === 'merged').length;

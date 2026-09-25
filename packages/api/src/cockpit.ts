@@ -38,6 +38,7 @@ import { type Context, Hono } from 'hono';
 import type { z } from 'zod';
 import { meBody } from './auth.ts';
 import type { AskWaiters } from './changes.ts';
+import { registerDemoRoutes } from './demo.ts';
 import type { Deps } from './deps.ts';
 import { ApiError, readJson, readQuery, reply } from './http.ts';
 import {
@@ -436,6 +437,8 @@ export function cockpitRoutes(deps: Deps, waiters: AskWaiters, relay: SseRelay):
     if (!setting) throw new ApiError(500, 'setting_missing', '设置写完读不回来');
     return reply(c, UpdateSettingResponse, { setting });
   });
+
+  registerDemoRoutes(app, deps, actorOf);
 
   /** 表里每一项都返回；没设过的 version=0、value=null。 */
   async function settingsView() {
