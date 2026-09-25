@@ -60,6 +60,9 @@ import {
   feishuReviseKey,
   messagePayload,
   parseMessageRecord,
+  reviseFingerprint,
+  revisePayload,
+  reviseReplay,
   withNote,
 } from './feishu-records.ts';
 import { PublicHealthError } from './health.ts';
@@ -1201,12 +1204,20 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         // 锁住这张草稿：同一张草稿的改动、确认排队做。
         const [row] = await tx.select().from(feishuDrafts).where(eq(feishuDrafts.id, draftId)).for('update');
         if (!row) return { status: 'not_found' as const };
+        const fingerprint = reviseFingerprint({ note, repoId });
         if (key.type === 'request') {
+          const reviseKey = feishuReviseKey(draftId, key.requestId);
           const [seen] = await tx
-            .select({ key: idempotencyKeys.key })
+            .select({ action: idempotencyKeys.action, result: idempotencyKeys.result })
             .from(idempotencyKeys)
-            .where(eq(idempotencyKeys.key, feishuReviseKey(draftId, key.requestId)));
-          if (seen) return { status: 'replayed' as const, draft: await draftOut(tx, row) };
+            .where(eq(idempotencyKeys.key, reviseKey));
+          if (seen) {
+            const replay = reviseReplay(reviseKey, seen, fingerprint);
+            return {
+              status: replay === 'same' ? ('replayed' as const) : ('request_reused' as const),
+              draft: await draftOut(tx, row),
+            };
+          }
         }
         if (row.status === 'confirmed')
           return { status: 'confirmed' as const, draft: await draftOut(tx, row) };
@@ -1221,7 +1232,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
                   target: `draft:${draftId}`,
                   claimedAt: at,
                   completedAt: at,
-                  result: { revision: row.revision + 1 },
+                  result: revisePayload(row.revision + 1, fingerprint),
                 }
               : messageClaim(key.message, { kind: 'draft', draftId }, at),
           )

@@ -23,6 +23,9 @@ import {
   feishuReviseKey,
   messagePayload,
   parseMessageRecord,
+  reviseFingerprint,
+  revisePayload,
+  reviseReplay,
   UNDERSTANDING_MAX,
   withNote,
 } from './feishu-records.ts';
@@ -1229,8 +1232,14 @@ export function createMemoryStore(
       }
       const row = data.feishuDrafts.find((d) => d.id === draftId);
       if (!row) return { status: 'not_found' };
-      if (key.type === 'request' && data.idempotency.has(feishuReviseKey(draftId, key.requestId))) {
-        return { status: 'replayed', draft: draftOut(row) };
+      const fingerprint = reviseFingerprint({ note, repoId });
+      if (key.type === 'request') {
+        const reviseKey = feishuReviseKey(draftId, key.requestId);
+        const seen = data.idempotency.get(reviseKey);
+        if (seen) {
+          const replay = reviseReplay(reviseKey, seen, fingerprint);
+          return { status: replay === 'same' ? 'replayed' : 'request_reused', draft: draftOut(row) };
+        }
       }
       if (row.status === 'confirmed') return { status: 'confirmed', draft: draftOut(row) };
       checkAudit(entry);
@@ -1253,7 +1262,7 @@ export function createMemoryStore(
               target: `draft:${draftId}`,
               claimedAt: at,
               completedAt: at,
-              result: { revision: row.revision },
+              result: revisePayload(row.revision, fingerprint),
             }
           : {
               action: 'feishu.message',

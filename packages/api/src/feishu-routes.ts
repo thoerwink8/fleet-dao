@@ -232,6 +232,7 @@ export function feishuRoutes(deps: Deps, waiters: AskWaiters, opening: DraftOpen
         case 'confirmed':
           return confirmed(r.draft);
         case 'replayed':
+        case 'request_reused':
           throw new ApiError(500, 'unexpected', '按消息改草稿，却回了「请求编号用过」');
         case 'not_found':
           break;
@@ -363,6 +364,12 @@ export function feishuRoutes(deps: Deps, waiters: AskWaiters, opening: DraftOpen
         );
       case 'replayed_message':
         throw new ApiError(500, 'unexpected', '按请求编号改草稿，却回了「消息已处理」');
+      case 'request_reused':
+        throw new ApiError(
+          409,
+          'request_reused',
+          '这个请求编号已经用在这张草稿另一次不同的改动上了（网关出错？），没有改',
+        );
       default:
         return reply(c, FeishuReviseDraftResponse, { draft: await view(r.draft) });
     }

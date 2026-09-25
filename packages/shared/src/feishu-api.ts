@@ -156,10 +156,11 @@ export const FEISHU_NOTE_MAX = 800;
 /**
  * POST /feishu/drafts/:draftId/revise（acting=required）：卡上的「改一下」——按补充重新理解，或只换个仓。
  * 要在 FEISHU_UNDERSTAND_MS 之内回。草稿已确认时 409（code=draft_confirmed），错误体 details 是 FeishuDraftConflictDetails。
+ * 同一个 requestId 带着不同的补充或仓再来：409（code=request_reused），不改。
  */
 export const FeishuReviseDraftRequest = z
   .object({
-    /** 幂等键：同一个编号再来只改一次（网关超时重试用）。 */
+    /** 幂等键：同一个编号带同样内容再来只改一次（网关超时重试用）；内容不同回 409 request_reused。 */
     requestId: z.string().min(1).max(100),
     note: z.string().max(FEISHU_NOTE_MAX).optional(),
     repoId: Id.optional(),

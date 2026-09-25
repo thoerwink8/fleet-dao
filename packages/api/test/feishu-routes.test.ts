@@ -14,7 +14,7 @@ import {
 } from '@fleet-dao/shared';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { devFixtures } from '../src/dev-fixtures.ts';
-import { feishuMessageKey } from '../src/feishu-records.ts';
+import { feishuMessageKey, feishuReviseKey } from '../src/feishu-records.ts';
 import { ANSWER_TEXTS } from '../src/feishu-views.ts';
 import type { MemoryData } from '../src/memory-store.ts';
 import {
@@ -648,6 +648,53 @@ describe('POST /feishu/drafts/:draftId/revise：改一下', () => {
       repo: { id: FEISHU_IDS.repo2, fullName: 'example/another' },
     });
     expect(h.store.data.audit.filter((a) => a.action === 'draft.revise')).toHaveLength(2);
+  });
+
+  it('同一个请求编号换了补充再来：409 request_reused，草稿不改、不写操作记录', async () => {
+    const h = harness({ data: feishuData() });
+    const draft = await newDraft(h);
+    const revise = (body: unknown) =>
+      h.cockpit.request(`/api/feishu/drafts/${draft.id}/revise`, gw('POST', body));
+    expect((await revise({ requestId: 'r1', note: '要 6 位' })).status).toBe(200);
+    const reused = await revise({ requestId: 'r1', note: '要 8 位' });
+    expect({ status: reused.status, code: await errorCode(reused) }).toEqual({
+      status: 409,
+      code: 'request_reused',
+    });
+    expect(await h.store.getDraft(draft.id)).toMatchObject({
+      revision: 2,
+      understanding: '给登录页加手机验证码\n补充：要 6 位',
+    });
+    expect(h.store.data.audit.filter((a) => a.action === 'draft.revise')).toHaveLength(1);
+  });
+
+  it('改草稿的幂等记录认不出、键被别的命令占着：500，不当成重放、也不再改一遍', async () => {
+    const h = harness({ data: feishuData() });
+    const draft = await newDraft(h);
+    h.store.data.idempotency.set(feishuReviseKey(draft.id, 'r_broken'), {
+      action: 'feishu.revise',
+      claimedAt: T0.toISOString(),
+      completedAt: T0.toISOString(),
+      result: { revision: 2 },
+    });
+    h.store.data.idempotency.set(feishuReviseKey(draft.id, 'r_taken'), {
+      action: 'fleet.say',
+      claimedAt: T0.toISOString(),
+    });
+    for (const requestId of ['r_broken', 'r_taken']) {
+      const res = await h.cockpit.request(
+        `/api/feishu/drafts/${draft.id}/revise`,
+        gw('POST', { requestId, note: '要 6 位' }),
+      );
+      expect({ requestId, status: res.status, code: await errorCode(res) }).toEqual({
+        requestId,
+        status: 500,
+        code: 'internal',
+      });
+    }
+    expect(h.logs.some((l) => String(l.fields?.error).includes('格式认不出'))).toBe(true);
+    expect(h.logs.some((l) => String(l.fields?.error).includes('被别的命令（fleet.say）占着'))).toBe(true);
+    expect((await h.store.getDraft(draft.id))?.revision).toBe(1);
   });
 
   it('参数认不出 400；没有这张草稿 404；没有这个仓 422；已确认的 409（带上现在的草稿）', async () => {

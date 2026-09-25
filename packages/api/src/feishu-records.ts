@@ -29,6 +29,38 @@ const MessagePayload = z.object({
   ]),
 });
 
+/** 「改一下」一次请求改的是什么（补充、仓）的指纹：同一个请求编号再来，内容一样才算重放。 */
+export function reviseFingerprint(change: {
+  note?: string | undefined;
+  repoId?: string | undefined;
+}): string {
+  return textHash(JSON.stringify([change.note ?? null, change.repoId ?? null]));
+}
+
+/** 「改一下」的幂等记录（result 里）。 */
+export const revisePayload = (revision: number, fingerprint: string) => ({ revision, fingerprint });
+
+const RevisePayload = z.object({ revision: z.number().int(), fingerprint: z.string().min(1) });
+
+/**
+ * 请求编号已经用过：内容一样是 same（重放），不一样是 reused（不改、明说）。键被别的命令占着、记录认不出就抛错，
+ * 不当成重放、也不当成没处理过。
+ */
+export function reviseReplay(
+  key: string,
+  record: { action: string; result?: unknown },
+  fingerprint: string,
+): 'same' | 'reused' {
+  if (record.action !== 'feishu.revise') {
+    throw new Error(`改草稿的幂等键 ${key} 被别的命令（${record.action}）占着`);
+  }
+  const parsed = RevisePayload.safeParse(record.result);
+  if (!parsed.success) {
+    throw new Error(`改草稿的幂等记录 ${key} 格式认不出：${parsed.error.message.slice(0, 200)}`);
+  }
+  return parsed.data.fingerprint === fingerprint ? 'same' : 'reused';
+}
+
 /** 写进幂等记录的样子。 */
 export function messagePayload(message: FeishuMessageKey, result: FeishuMessageResult): unknown {
   return {

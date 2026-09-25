@@ -556,8 +556,10 @@ export type DraftChangeKey =
 
 export type ReviseDraftResult =
   | { status: 'revised'; draft: DraftRecord }
-  /** 同一个请求编号再来：不再改，交回现在的草稿。 */
+  /** 同一个请求编号、同样的内容再来：不再改，交回现在的草稿。 */
   | { status: 'replayed'; draft: DraftRecord }
+  /** 请求编号已经用在这张草稿另一次不同内容的改动上：不改。 */
+  | { status: 'request_reused'; draft: DraftRecord }
   /** 这条消息处理过（不管当时落成了什么）：不再改，交回当时的结果。 */
   | { status: 'replayed_message'; message: FeishuMessageRecord }
   | { status: 'confirmed'; draft: DraftRecord }
@@ -652,7 +654,7 @@ export interface FeishuStore {
   ): Promise<CreateDraftResult>;
   /**
    * 改草稿：note 整句接在原话和「我理解为」后面（feishu-records.ts 的 withNote），repoId 换仓；每改一次 revision 加 1。
-   * 同一个幂等键只改一次。已确认的不改。操作记录同一事务。
+   * 同一个幂等键只改一次；请求编号用过但内容不同回 request_reused，也不改。已确认的不改。操作记录同一事务。
    */
   reviseDraft(
     input: {

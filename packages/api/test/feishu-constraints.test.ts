@@ -138,6 +138,32 @@ describe('飞书表的库级约束', () => {
     expect(await store.getFeishuMessage('om_never')).toBeNull();
   });
 
+  it('改草稿的幂等记录被改坏、键被别的命令占着：库版明确报错，不当成重放、也不再改一遍', async () => {
+    const store = createPgStore(t.db);
+    await run(draftSql());
+    await run(
+      "insert into idempotency_keys (key, action, completed_at, result) values ($1, 'feishu.revise', now(), $2)",
+      [`feishu-revise:${FEISHU_IDS.draft1}:r_broken`, JSON.stringify({ revision: 2 })],
+    );
+    await run("insert into idempotency_keys (key, action) values ($1, 'fleet.say')", [
+      `feishu-revise:${FEISHU_IDS.draft1}:r_taken`,
+    ]);
+    const revise = (requestId: string) =>
+      store.reviseDraft(
+        { draftId: FEISHU_IDS.draft1, note: '要 6 位', key: { type: 'request', requestId } },
+        {
+          actor: { kind: 'user', id: IDS.founderA },
+          action: 'draft.revise',
+          target: `draft:${FEISHU_IDS.draft1}`,
+          via: 'feishu',
+          ok: true,
+        },
+      );
+    await expect(revise('r_broken')).rejects.toThrow(/格式认不出/);
+    await expect(revise('r_taken')).rejects.toThrow(/被别的命令（fleet.say）占着/);
+    expect((await run('select revision from feishu_drafts')).rows).toEqual([{ revision: 1 }]);
+  });
+
   it('关注：一个人对一个需求只有一行；需求没了关注跟着走（不挡删需求）', async () => {
     await run('insert into feishu_follows (task_id, user_id, following) values ($1, $2, true)', [
       FEISHU_IDS.task2of12,

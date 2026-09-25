@@ -212,6 +212,45 @@ export function describeFeishuStoreContract(name: string, make: MakeStore): void
         );
       });
 
+      it('同一个请求编号换了内容再来（补充不同、仓不同、少了仓）：request_reused，草稿不改、不写操作记录', async () => {
+        await store.createDraft({ message: msg('om_1'), draft: newDraft() }, audit());
+        const first = await store.reviseDraft(
+          {
+            draftId: FEISHU_IDS.draft1,
+            note: '要 6 位',
+            repoId: IDS.repo,
+            key: { type: 'request', requestId: 'r1' },
+          },
+          audit(),
+        );
+        expect(first.status).toBe('revised');
+        const before = await audits();
+        tick();
+        for (const change of [
+          { note: '要 8 位', repoId: IDS.repo },
+          { note: '要 6 位', repoId: FEISHU_IDS.repo2 },
+          { note: '要 6 位' },
+        ]) {
+          const r = await store.reviseDraft(
+            { draftId: FEISHU_IDS.draft1, ...change, key: { type: 'request', requestId: 'r1' } },
+            audit(),
+          );
+          expect({ change, r }).toMatchObject({
+            change,
+            r: {
+              status: 'request_reused',
+              draft: { revision: 2, understanding: '给登录页加手机验证码\n补充：要 6 位', repoId: IDS.repo },
+            },
+          });
+        }
+        expect(await store.getDraft(FEISHU_IDS.draft1)).toMatchObject({
+          revision: 2,
+          understanding: '给登录页加手机验证码\n补充：要 6 位',
+          repoId: IDS.repo,
+        });
+        expect(await audits()).toBe(before);
+      });
+
       it('按请求编号改：补充接在「我理解为」后面、换仓、版本加 1；同一个编号再来不再改；草稿不在是 not_found', async () => {
         await store.createDraft({ message: msg('om_1'), draft: newDraft() }, audit());
         tick();
@@ -235,7 +274,12 @@ export function describeFeishuStoreContract(name: string, make: MakeStore): void
         });
         tick();
         const replay = await store.reviseDraft(
-          { draftId: FEISHU_IDS.draft1, note: '要 6 位', key: { type: 'request', requestId: 'r1' } },
+          {
+            draftId: FEISHU_IDS.draft1,
+            note: '要 6 位',
+            repoId: IDS.repo,
+            key: { type: 'request', requestId: 'r1' },
+          },
           audit(),
         );
         expect(replay).toMatchObject({ status: 'replayed', draft: { revision: 2 } });
