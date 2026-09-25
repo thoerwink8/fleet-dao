@@ -2,7 +2,7 @@
 # 真机验收（法国，root 跑）：会话通路 fleet → sudo → fleet-agent-scope → 会话专用用户 真跑一遍。
 #   1. 落点与身份：两个会话用户各起一次，会话在 fleet-agents.slice 下自己的 scope 里，身份对、只在自己的组里、提不了权、上限写进 cgroup
 #   2. 会话里的边界：读不到 /etc/fleet-dao、sudo 失败、没有 GitHub 凭据（调用方塞了也带不进去）、连得上 fleet 命令接口、
-#      连不上 Temporal 和库
+#      连不上 Temporal 和库；引擎给的 PATH 里没有会话用户的 ~/.local/bin，会话里它照样排在最前、找得到 ddgs
 #   3. 上限生效：内存（连 swap 一起封）超了只杀它，进程数到顶 fork 失败
 #   4. 引擎崩了会话留在自己的 scope 里、按名字找回收掉；引擎正常停会话跟着退
 #   5. 不该放行的参数
@@ -116,6 +116,19 @@ if has fleet_token=task-token; then pass "FLEET_* 照常带进会话"; else flun
 if has "port_$AGENT_API_PORT=open"; then pass "会话连得上 fleet 命令接口 127.0.0.1:$AGENT_API_PORT"; else flunk "会话连不上 fleet 命令接口（$out）"; fi
 if has port_7243=closed && has port_5432=closed; then pass "会话连不上 Temporal（7243）和库（5432）"; else flunk "会话连得上 Temporal 或库：$(grep '^port_' <<<"$out" | tr '\n' ' ')"; fi
 if ((api_temp)); then systemctl stop "fleet-e2e-api-$TAG" 2>/dev/null; fi
+# 引擎把它自己的 PATH 改名成 FLEET_SESSION_PATH 传进来（packages/adapters 的 procs.ts），里面没有会话用户家里的
+# ~/.local/bin；会话里照样要先找那儿：ddgs 这些各用户自己装的命令在那儿（france.sh 装、读回查）
+home=$(getent passwd "$U" | cut -d: -f6)
+# shellcheck disable=SC2016 # 单引号里的东西要在会话里展开
+out=$(as_fleet FLEET_SESSION_PATH=/home/fleet/.local/bin:/usr/bin:/bin sudo -n "$BIN" run "$TAG-path" --user "$U" -- /bin/sh -c '
+  echo "path_first=${PATH%%:*}"
+  echo "ddgs=$(command -v ddgs || echo none)"' 2>&1)
+if has "path_first=$home/.local/bin"; then
+  pass "引擎给的 PATH 里没有会话用户的 ~/.local/bin，会话里它照样排在最前"
+else
+  flunk "会话的 PATH 最前面不是 $home/.local/bin：$(grep '^path_first=' <<<"$out")"
+fi
+if has "ddgs=$home/.local/bin/ddgs"; then pass "会话里找得到 ddgs（$home/.local/bin/ddgs）"; else flunk "会话里找不到 ddgs：$(grep '^ddgs=' <<<"$out")"; fi
 
 echo "== 3. 上限生效"
 # 只给 --memory-max 时超出的部分被换进 swap、会话照样跑完（这台有 swap）；要真封顶得连 swap 一起封

@@ -14,7 +14,8 @@
 # 引擎按选中的账号池挑用户。reclaude 的组织写在各自家里的 ~/.reclaude/device.json，对这个用户的所有会话一起生效。
 # 内存要真封顶，--memory-max 和 --memory-swap-max 得一起给：只给前者，超出的部分会被换进 swap，会话不会被杀（法国实测）。
 # run 会 exec 成会话本身：进程号、标准输入输出都还是调用方拿着的那一份。会话看得到的环境：HOME/USER/LOGNAME/SHELL 是会话用户的；
-# PATH 取 FLEET_SESSION_PATH（没给就用默认）；另外原样带上 FLEET_*、LANG、LANGUAGE、LC_*、TZ、TERM、GIT_TERMINAL_PROMPT。
+# PATH 取 FLEET_SESSION_PATH（没给就用默认），最前面总加上会话用户家里的 ~/.local/bin（引擎传来的是它自己的 PATH，
+# 里面没有；ddgs 这些各用户自己装的命令在那儿）；另外原样带上 FLEET_*、LANG、LANGUAGE、LC_*、TZ、TERM、GIT_TERMINAL_PROMPT。
 # 会话里不许有 GitHub 凭据：推分支、开 PR 由引擎在会话外做，GH_TOKEN 之类一概不放。
 # 降权用 setpriv --init-groups --no-new-privs：systemd-run --uid 在 scope 里不清附加组，会话会带着 root 组（法国实测）；
 # no-new-privs 让会话里的 sudo、setuid 程序都提不了权。
@@ -90,8 +91,9 @@ run() {
   as_session_user "$user" /bin/sh -c 'cd -- "$1"' sh "$cwd" 2>/dev/null || die "$user 进不去这个目录：$cwd"
   cd -- "$cwd"
   home=$(getent passwd "$user" | cut -d: -f6)
-  path=${FLEET_SESSION_PATH:-$home/.local/bin:/usr/local/bin:/usr/bin:/bin}
+  path=${FLEET_SESSION_PATH:-/usr/local/bin:/usr/bin:/bin}
   [[ "$path" =~ ^/[^:]*(:/[^:]*)*$ ]] || die "FLEET_SESSION_PATH 的每一段都要是绝对路径"
+  path=$home/.local/bin:$path
   # 把自己的环境清成会话该看到的样子，再一路 exec 下去：值只在环境里传，不上命令行
   for k in $(compgen -e); do
     if [[ "$k" =~ $ENV_RE ]]; then keep+=("$k"); else unset "$k" 2>/dev/null || true; fi

@@ -124,7 +124,7 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 - `bash deploy/lib/snapshot.sh ours`：fleet-dao 管的东西的指纹。连跑两遍装机，两遍之间各拍一次，diff 为空才算第二遍零改动——和脚本自己数的「改动几处」是两套判据。
 - `bash deploy/lib/snapshot.sh others`：不归 fleet-dao 管的单元状态、监听端口、防火墙（系统自带的服务、MiraQuota 等）。装机脚本每次开头结尾自己比一遍：装机不许碰它们。
 - `sudo bash deploy/test/run.sh`：语法、shellcheck、自检的违规样本、发布脚本的来回（`release-flow.test.sh`）、香港网关的入口（`gateway-deploy.test.sh`）、网关打包（`gateway-bundle.test.sh`，要先 `pnpm install`）、健康页的判定（`health-page.test.mjs`）、同步脚本以 root 替别的用户写（`agents-sync.test.sh`）、ddgs 的装和查（`cli-tools.test.sh`）、本页端口表和脚本对得上。
-- `sudo bash deploy/test/agent-scope.e2e.sh`（法国）：会话通路真跑一遍，见第五节。
+- `sudo bash deploy/test/agent-scope.e2e.sh`（法国）：会话通路真跑一遍，见第五节；含引擎给的 PATH 里没有会话用户的 `~/.local/bin` 时，会话里照样先找那儿、找得到 ddgs。
 
 ## 五、AI 会话
 
@@ -143,7 +143,7 @@ sudo -n /usr/local/sbin/fleet-agent-scope list            # 编号 状态，一�
 ```
 
 - `run` 最后 exec 成会话本身，标准输入输出还是引擎手里那一份。
-- 环境变量不走命令行（sudo 会把命令行记进日志）：引擎把 `FLEET_*`、`LANG`、`LC_*`、`TZ`、`TERM`、`GIT_TERMINAL_PROMPT` 放进调 sudo 时的环境；会话的 PATH 用 `FLEET_SESSION_PATH` 给；HOME、USER 是会话用户的。GitHub 凭据（`GH_TOKEN` 之类）一概带不进去：推分支、开 PR 由引擎在会话外做。
+- 环境变量不走命令行（sudo 会把命令行记进日志）：引擎把 `FLEET_*`、`LANG`、`LC_*`、`TZ`、`TERM`、`GIT_TERMINAL_PROMPT` 放进调 sudo 时的环境；会话的 PATH 用 `FLEET_SESSION_PATH` 给，帮手脚本再在最前面加上会话用户家里的 `~/.local/bin`（引擎给的是它自己的 PATH，里面没有；ddgs 这些各用户自己装的命令在那儿）；HOME、USER 是会话用户的。GitHub 凭据（`GH_TOKEN` 之类）一概带不进去：推分支、开 PR 由引擎在会话外做。
 - 会话降权用 `setpriv --init-groups --no-new-privs`：只在自己的组里，会话里的 sudo、setuid 程序都提不了权。不用 `systemd-run --uid`：它在 scope 里不清附加组，会话会带着 root 组（法国实测）。
 - 内存要真封顶，`--memory-max` 和 `--memory-swap-max` 得一起给：只给前者，超出的部分被换进 swap，会话不会被杀（法国实测）。
 - 引擎正常停（SIGTERM）：sudo 把信号转给会话，会话跟着退。引擎崩了（SIGKILL）：会话留在自己的 scope 里；引擎起来后 `list` 找回、`stop` 收掉。
@@ -185,8 +185,8 @@ reclaude 按用户记设备：组织写在各自家里的 `~/.reclaude/device.js
 - 法国：`france.sh` 最后一步以 root 跑 `node packages/agents-sync/bin/agents-sync --apply --user <用户>`，给 `fleet-agent-dedicated`、`fleet-agent-carpool`、`pilot` 各写一份：同步脚本先换成那个用户再动手，写出来的都归他。读回里的 `--check` 逐人逐项列出。只写这台装了的那几家（按 PATH 和家里的 `.local/bin` 找命令），没装的列为「没装，跳过」。
 - 只动两样：文件里标记圈起来的那一块（标记外的内容原样留着；第一次接管、文件里还没有标记时，先把原文件整份备份，再整份换成受管块），和清单 `~/.fleet-dao/agents-sync.json` 里记着是它装的 skill（仓里删了的会撤掉；插件链进来的、claude.ai 同步来的一律不碰）。备份在各用户家里的 `~/.fleet-dao/backups/<时间>/`，照原来的相对路径摆。
 - 改了 `AGENTS.md` 上半段或 `agents/skills/`：合进主线、机器上 pull 之后重跑 `france.sh`（或只跑上面那条命令）才生效。
-- ddgs（skill docs-lookup 首选的搜索命令行）：同一步里以各用户自己的身份 `uv tool install ddgs==<版本>`，装在他家里（`~/.local/share/uv/tools/ddgs`，命令在 `~/.local/bin/ddgs`），只用系统的 Python；已经是那一版就不动。用的 uv 装在 `/opt/fleet-dao/uv/<版本>/uv`（钉版本、核 sha256）。读回以各用户的身份跑 `ddgs version`：没装、跑不起来、输出认不出、版本不对都判红（`deploy/lib/cli-tools.sh`）。
-- 自测：`sudo bash deploy/test/run.sh` 里的 `agents-sync.test.sh` 以 root 建临时用户，验换身份再写、写出来的都归他、第二遍零改动、属主不对判红、root 不带 `--user` 往别人家里写被拦下；`cli-tools.test.sh` 用假的 uv、ddgs 验 ddgs 的装和查（不出网）。
+- ddgs（skill docs-lookup 首选的搜索命令行）：装机最后一步以各用户自己的身份 `uv tool install ddgs==<版本>`，依赖用 `--with` 写死版本一起装（`france.sh` 顶部的 `DDGS_DEPS`），装在他家里（`~/.local/share/uv/tools/ddgs`，命令在 `~/.local/bin/ddgs`），只用系统的 Python；命令能跑、版本对、虚拟环境里的包和钉住的一样，就不动。用的 uv 装在 `/opt/fleet-dao/uv/<版本>/uv`（钉版本、核 sha256）；ddgs 和它的依赖是 PyPI 上的包，只钉版本、不核校验和。读回以各用户的身份跑 `ddgs version`，再按虚拟环境里的 dist-info 逐个核对依赖：没装、跑不起来、输出认不出、版本不对、依赖不一样都判红（`deploy/lib/cli-tools.sh`）。下载 uv 失败按装机的规矩判红停下；这一步排在最后，规矩已经写完。
+- 自测：`sudo bash deploy/test/run.sh` 里的 `agents-sync.test.sh` 以 root 建临时用户，验换身份再写、写出来的都归他、第二遍零改动、属主不对判红、root 不带 `--user` 往别人家里写被拦下；`cli-tools.test.sh` 用假的 uv、ddgs 验 ddgs 的装和查（不出网）。会话里找不找得到 ddgs 在 `agent-scope.e2e.sh`（法国）里查。
 - 撤掉：删各用户家里受管的那几份文件（要原件就从备份拷回）、清单里列的 skill 目录和清单本身；ddgs 以各用户的身份 `/opt/fleet-dao/uv/<版本>/uv tool uninstall ddgs`，再删 `/opt/fleet-dao/uv`；`france.sh` 里去掉 `setup_agent_rules` 这一步。
 
 ## 六、怎么看健康
@@ -264,7 +264,7 @@ rm /root/.ssh/authorized_keys2
 - 改了端口要同步第二节的端口表（`deploy/test/run.sh` 会查）；要本机只许 root 和 fleet 连的端口，加进 `france.sh` 的 `PROTECTED_PORTS`。
 - Temporal 的历史分片数（`numHistoryShards: 16`）建库后不能改。
 - 升 Temporal：改 `france.sh` 顶部的版本号和 sha256 → 重跑。新版本装进新目录、`bin/` 链接切过去、服务重启；表结构由 temporal-sql-tool 升到新版本自带的最新。
-- 升 uv、ddgs：改 `france.sh` 顶部的 `UV_VERSION`、`UV_SHA256`（uv 发布页每个包旁边的 `.sha256`）或 `DDGS_VERSION` → 重跑。uv 装进新的版本目录；ddgs 版本不对的，各用户以自己的身份重装。
+- 升 uv、ddgs：改 `france.sh` 顶部的 `UV_VERSION`、`UV_SHA256`（uv 发布页每个包旁边的 `.sha256`）或 `DDGS_VERSION`、`DDGS_DEPS`（新版 ddgs 要的依赖在 PyPI 上它那一版的说明里，逐个写死版本）→ 重跑。uv 装进新的版本目录；ddgs 或依赖和钉住的不一样的，各用户以自己的身份整套重装。
 - PostgreSQL 用 16：Temporal 官方测过的最高大版本是 16（16.6）；装 Ubuntu 自带源里的，跟着系统的自动安全更新走。
 - 香港 WireGuard 用 UDP 4500 是因为上游只放行少数 UDP 端口；换端口前先从法国实测新端口到不到得了香港网卡。
 - 香港站点配置里，转发给法国的 `location` 不要自己写 `proxy_set_header`：写了一条，server 那一层的就全部不继承，清 `Authorization`、`X-Fleet-Acting-Feishu` 的两条也跟着失效（法国 france.sh 的读回会查出来）。

@@ -38,8 +38,10 @@ RECLAUDE_SHA256=4f5d683b695ea392f53d4e8f2a916f092794f8d4196d5b7356afb0c9a9392f0a
 # uv：只用来给会话用户和 pilot 各装一份 ddgs（lib/cli-tools.sh）。装在 /opt/fleet-dao/uv/<版本>，归 root，不进谁的 PATH
 UV_VERSION=0.12.17
 UV_SHA256=fa82fd8dde8e8eefdecada6aa0889666556cfceb690d06e0c3bca49eb3070a63
-# ddgs：skill docs-lookup 首选的搜索命令行（PyPI 上的包，uv 按这个版本号装）
+# ddgs：skill docs-lookup 首选的搜索命令行。它自己和它的依赖都钉死版本（依赖里 primp、lxml 带编译好的二进制）；
+# 这些是 PyPI 上的包，只钉版本、不核校验和（核 sha256 的只有上面的 uv）。升 ddgs 时依赖跟着对一遍
 DDGS_VERSION=9.16.0
+DDGS_DEPS=(click==8.5.0 lxml==6.1.3 primp==2.0.1)
 
 # ── 端口：全部只绑本机，和旧系统的开发版 Temporal（7233/8233 与一批临时端口）错开。改了同步 docs/ops.md ──
 PG_PORT=5432
@@ -663,19 +665,31 @@ agents_sync() { # 模式 用户
 }
 
 setup_agent_rules() {
-  step "各家 AI 的全局说明与方法类 skill（${AGENT_RULES_USERS[*]}；仓根 AGENTS.md 的通用段、agents/skills/，外加 ddgs）"
+  step "各家 AI 的全局说明与方法类 skill（${AGENT_RULES_USERS[*]}；仓根 AGENTS.md 的通用段、agents/skills/）"
   local u
-  fetch_release "$UV_HOME/$UV_VERSION" \
-    "https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-x86_64-unknown-linux-gnu.tar.gz" \
-    "$UV_SHA256" uv-x86_64-unknown-linux-gnu/uv
   for u in "${AGENT_RULES_USERS[@]}"; do
     if ! id "$u" >/dev/null 2>&1; then
       pending "$u 这个用户还没有，全局说明没写（建了再跑一遍）"
       continue
     fi
     agents_sync --apply "$u"
-    # skill docs-lookup 首选的搜索命令行，分发过去就得能用
-    ensure_ddgs "$u" "$UV_HOME/$UV_VERSION/uv" "$DDGS_VERSION"
+  done
+}
+
+# skill docs-lookup 首选的搜索命令行，分发过去就得能用。排在装机最后：下载 uv 失败按装机的规矩判红停下时，
+# 上一步的规矩已经写完；uv tool install 失败只记红、接着装下一个用户（lib/cli-tools.sh）
+setup_cli_tools() {
+  step "各用户的 ddgs（${AGENT_RULES_USERS[*]}；uv $UV_VERSION 钉版本、核 sha256，ddgs 和依赖钉版本）"
+  local u
+  fetch_release "$UV_HOME/$UV_VERSION" \
+    "https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-x86_64-unknown-linux-gnu.tar.gz" \
+    "$UV_SHA256" uv-x86_64-unknown-linux-gnu/uv
+  for u in "${AGENT_RULES_USERS[@]}"; do
+    if ! id "$u" >/dev/null 2>&1; then
+      pending "$u 这个用户还没有，ddgs 没装（建了再跑一遍）"
+      continue
+    fi
+    ensure_ddgs "$u" "$UV_HOME/$UV_VERSION/uv" "$DDGS_VERSION" "${DDGS_DEPS[@]}"
   done
 }
 
@@ -687,7 +701,7 @@ readback_agent_rules() {
       continue
     fi
     agents_sync --check "$u"
-    check_ddgs "$u" "$DDGS_VERSION"
+    check_ddgs "$u" "$DDGS_VERSION" "${DDGS_DEPS[@]}"
   done
 }
 
@@ -1097,6 +1111,7 @@ main() {
     setup_app_config
     setup_web_upload
     setup_agent_rules
+    setup_cli_tools
   else
     load_config
   fi
