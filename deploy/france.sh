@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # shellcheck source-path=SCRIPTDIR
-# 法国机器装机（以 root 跑；幂等：跑第二遍什么都不变）。装的是：引擎用户 fleet 与两个会话专用用户、目录、
+# 法国机器装机（以 root 跑；幂等：跑第二遍什么都不变）。装的是：引擎用户 fleet、两个会话专用用户、创始人的登录用户 pilot、目录、
 # PostgreSQL 16（Ubuntu 自带的源，吃得到自动安全更新）、Temporal 服务端 1.32.0（Postgres 持久化，端口和旧系统错开）、
 # 本机上只许 root 和 fleet 连 Temporal 与库的 nft 表、AI 会话资源池 fleet-agents.slice 与起会话的脚本、
 # fleet 用户的 pnpm（corepack）、WireGuard 客户端（主动连香港，法国不开任何入站端口）、
@@ -18,6 +18,8 @@ source "$DEPLOY_DIR/lib/common.sh"
 source "$DEPLOY_DIR/lib/snapshot.sh"
 # shellcheck source=lib/root-exec-check.sh
 source "$DEPLOY_DIR/lib/root-exec-check.sh"
+# shellcheck source=lib/login-user.sh
+source "$DEPLOY_DIR/lib/login-user.sh"
 trap 'on_error "$LINENO" "$BASH_COMMAND"' ERR
 
 # ── 钉死的版本与校验和：外部二进制装上机器就进了信任面，不用 latest ──
@@ -26,6 +28,10 @@ TEMPORAL_SERVER_SHA256=ca1ccbb1d1545b68eb4523de463c51ffcd80f7e0bccd14a9b2c56fc7e
 TEMPORAL_CLI_VERSION=1.9.1
 TEMPORAL_CLI_SHA256=09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5
 PG_MAJOR=16 # Temporal 官方测过的最高大版本（13.18/14.15/15.10/16.6）；Ubuntu 24.04 自带的源里就是 16
+# pilot 的 reclaude：和会话用户手上那份同一个（dl.reclaude.ai/stable.json 列的 linux-amd64）。只在没有时装，
+# 之后由 pilot 自己 reclaude update，脚本不盖
+RECLAUDE_VERSION=v1.4.0
+RECLAUDE_SHA256=4f5d683b695ea392f53d4e8f2a916f092794f8d4196d5b7356afb0c9a9392f0a
 
 # ── 端口：全部只绑本机，和旧系统的开发版 Temporal（7233/8233 与一批临时端口）错开。改了同步 docs/ops.md ──
 PG_PORT=5432
@@ -55,7 +61,11 @@ NFT_FILE=/etc/fleet-dao/nftables.nft
 # AI 会话跑在两个专用用户下，各挂一个 reclaude 组织、永不切号（独享、拼车）；引擎（fleet）经 sudo 只能调 fleet-agent-scope 起会话。
 # 会话用户：没有 sudo、不能提权、家目录干净、没有 GitHub 凭据、读不到 /etc/fleet-dao。旧系统的会话用户不用、不碰。
 SESSION_USERS=(fleet-agent-dedicated fleet-agent-carpool)
-WRITER_IDENTITIES=(fleet "${SESSION_USERS[@]}")
+# 创始人的登录用户：经 Mirasim 的 ssh 远程模式登进来干活。没有 sudo、只在自己的组和 systemd-journal 里，
+# 家里只放 reclaude 二进制、不放任何凭据（lib/login-user.sh）。它改得了的 root 执行文件一样要清零，所以也算写入身份
+PILOT_USER=pilot
+PILOT_HOME=/home/pilot
+WRITER_IDENTITIES=(fleet "${SESSION_USERS[@]}" "$PILOT_USER")
 AGENT_SCOPE_BIN=/usr/local/sbin/fleet-agent-scope
 SUDOERS_FILE=/etc/sudoers.d/fleet-dao
 ENV_FILE=/etc/fleet-dao/france.env
@@ -149,6 +159,14 @@ setup_identity() {
   else
     put_file "$ENV_FILE" root:fleet 640 "$(<"$DEPLOY_DIR/france/france.env.example")"
   fi
+}
+
+setup_pilot() {
+  step "创始人的登录用户 $PILOT_USER（经 Mirasim 的 ssh 远程模式登进来；没有 sudo，看得了日志）"
+  # Mirasim 桌面端连进来时在它家里自己装服务端（~/.mirasim-remote，自带 node）：这头要 curl 直接下服务端包
+  # （下不了由桌面端经 scp 传）、tar 和 gzip 解包（Ubuntu 必装的包）；干活要 git 和 ssh 客户端
+  ensure_pkgs git openssh-client curl
+  setup_login_user "$PILOT_USER" "$PILOT_HOME" "https://dl.reclaude.ai/$RECLAUDE_VERSION/reclaude-linux-amd64" "$RECLAUDE_SHA256"
 }
 
 load_config() {
@@ -604,6 +622,7 @@ readback() {
   readback_temporal
   readback_slice
   readback_session_users
+  readback_pilot
   readback_sessions
   readback_pnpm
   readback_wireguard
@@ -766,6 +785,16 @@ readback_session_users() {
   done
 }
 
+# 创始人的登录用户：判据在 lib/login-user.sh。reclaude 登没登录、家里放了什么钥匙是创始人自己的事，不查
+readback_pilot() {
+  local line
+  if check_login_user "$PILOT_USER"; then
+    ok "$PILOT_USER：在，家目录 750，只在自己的组和 $LOGIN_USER_LOG_GROUP 里，没有 sudo，reclaude 执行得了、登录 shell 里找得到"
+    return 0
+  fi
+  for line in "${LOGIN_USER_BAD[@]}"; do red "$PILOT_USER：${line#*$'\t'}"; done
+}
+
 # 真起一个会话走一遍：fleet 经 sudo 调脚本 → 落进 fleet-agents.slice 下自己的 scope → 身份是会话用户、不带 root 组、
 # 提不了权（NoNewPrivs=1）、上限写进了 cgroup
 readback_sessions() {
@@ -809,8 +838,9 @@ readback_firewall() {
     red "nft 表 inet fleet_dao 不在：会话能直接连 Temporal 给工作流发信号"
     return 0
   fi
-  # 真连一次：会话用户连不上 Temporal 前端和库，fleet 连得上
-  for u in "${SESSION_USERS[@]}"; do
+  # 真连一次：会话用户和登录用户 pilot 都连不上 Temporal 前端和库，fleet 连得上
+  for u in "${SESSION_USERS[@]}" "$PILOT_USER"; do
+    id "$u" >/dev/null 2>&1 || continue
     for port in "$TEMPORAL_FRONTEND_PORT" "$PG_PORT"; do
       if connect_as "$u" "$port"; then
         red "$u 连得上 127.0.0.1:$port"
@@ -818,7 +848,7 @@ readback_firewall() {
       fi
     done
   done
-  if ((bad == 0)); then ok "会话用户连不上 Temporal（$TEMPORAL_FRONTEND_PORT）和库（$PG_PORT）"; fi
+  if ((bad == 0)); then ok "会话用户和 $PILOT_USER 都连不上 Temporal（$TEMPORAL_FRONTEND_PORT）和库（$PG_PORT）"; fi
   if connect_as fleet "$TEMPORAL_FRONTEND_PORT" && connect_as fleet "$PG_PORT"; then
     ok "fleet 连得上 Temporal 和库"
   else
@@ -947,13 +977,13 @@ readback_wireguard() {
 readback_service_home() {
   local found
   # 不接 head：find 被管道截断会让整条命令算失败，结果就被当成「没找到」
-  local homes=(/home/fleet /var/lib/fleet-dao /var/log/fleet-dao) u
+  local homes=(/home/fleet /var/lib/fleet-dao /var/log/fleet-dao "$PILOT_HOME") u
   for u in "${SESSION_USERS[@]}"; do homes+=("/home/$u"); done
   found=$(find "${homes[@]}" -user root 2>/dev/null || true)
   if [[ -n "$found" ]]; then
-    red "fleet 或会话用户的目录里有 $(wc -l <<<"$found") 个 root 属主的文件，比如：$(head -3 <<<"$found" | tr '\n' ' ')"
+    red "fleet、会话用户或 $PILOT_USER 的目录里有 $(wc -l <<<"$found") 个 root 属主的文件，比如：$(head -3 <<<"$found" | tr '\n' ' ')"
   else
-    ok "fleet 和会话用户的目录里没有 root 属主的文件"
+    ok "fleet、会话用户和 $PILOT_USER 的目录里没有 root 属主的文件"
   fi
 }
 
@@ -963,6 +993,7 @@ main() {
   if ((CHECK_ONLY == 0)); then
     before=$(snapshot_others)
     setup_identity
+    setup_pilot
     load_config
     setup_packages
     setup_wireguard

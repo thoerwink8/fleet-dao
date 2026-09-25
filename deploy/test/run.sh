@@ -25,6 +25,13 @@ else
   skipped=1
 fi
 
+bash "$HERE/login-user.test.sh"
+case $? in
+0) ;;
+2) skipped=1 ;;
+*) fail=1 ;;
+esac
+
 bash "$HERE/root-exec-check.test.sh"
 case $? in
 0) ;;

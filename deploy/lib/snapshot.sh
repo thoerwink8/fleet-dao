@@ -93,11 +93,15 @@ snapshot_releases() {
 snapshot_ours() {
   local u
   echo "## identity"
-  for u in fleet fleet-agent-dedicated fleet-agent-carpool; do
+  for u in fleet fleet-agent-dedicated fleet-agent-carpool pilot; do
     getent passwd "$u" || echo "passwd $u: 无"
     getent group "$u" || echo "group $u: 无"
   done
+  # pilot 在这个组里才看得了日志
+  getent group systemd-journal || echo "group systemd-journal: 无"
   echo "## files"
+  # pilot 的 ~/.local/bin 不取内容指纹：reclaude 归 pilot 自己 reclaude update，记指纹会因它升级而每次报「变了」；
+  # 只记在不在、归谁（在下面 ## pilot-reclaude）
   snapshot_file_list /etc/fleet-dao /opt/fleet-dao /srv/fleet-dao-web /var/www/fleet-dao-acme \
     /etc/wireguard /etc/postgresql/16/main /etc/apt/sources.list.d /etc/apt/keyrings \
     /usr/local/bin/fleet-temporal /usr/local/sbin/fleet-agent-scope /etc/sudoers.d/fleet-dao /home/fleet/.local/bin \
@@ -112,9 +116,16 @@ snapshot_ours() {
   fi
   find /etc/systemd/system /etc/letsencrypt/live /etc/letsencrypt/renewal -maxdepth 2 -name '*fleet*' -print0 2>/dev/null |
     sort -z | while IFS= read -r -d '' f; do snapshot_file_list "$f"; done
-  for d in /srv/fleet-dao /var/lib/fleet-dao /var/log/fleet-dao /home/fleet /home/fleet-agent-dedicated /home/fleet-agent-carpool; do
+  for d in /srv/fleet-dao /var/lib/fleet-dao /var/log/fleet-dao /home/fleet /home/fleet-agent-dedicated /home/fleet-agent-carpool /home/pilot; do
     if [[ -e "$d" ]]; then printf 'dir  %s %s\n' "$(stat -c '%U:%G %a' "$d")" "$d"; fi
   done
+  echo "## pilot-reclaude"
+  # 只记在不在、归谁（内容归 pilot 自己升级，不进指纹）
+  if [[ -e /home/pilot/.local/bin/reclaude ]]; then
+    printf 'present %s\n' "$(stat -c '%U:%G %a' /home/pilot/.local/bin/reclaude)"
+  else
+    printf 'absent\n'
+  fi
   echo "## packages"
   dpkg-query -W -f '${Package} ${Version} ${Status}\n' postgresql-16 postgresql-common libpq5 wireguard-tools \
     nftables nginx certbot 2>/dev/null | sort

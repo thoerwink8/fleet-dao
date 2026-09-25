@@ -144,17 +144,25 @@ ensure_symlink() { # 链接 指向
   changed "链接 $link → $target"
 }
 
-# 系统用户：没有就建；有但不是本脚本建的样子（家目录、组对不上）就判红，不去改别人的账号。
-ensure_service_user() { # 用户名 家目录
-  local name=$1 home=$2 entry uid gid have_home shell
+# 建用户：没有就建；有但不是本脚本建的样子（家目录、组对不上）就判红，不去改别人的账号。
+# 第三个参数 login＝人用的登录账号，建成普通用户（UID/GID ≥ 1000）；默认 system＝服务用户（--system，UID/GID < 1000）。
+# 服务用户的号是内部的、随手可复用；人用的账号不能落在系统号段——旧服务用户删掉后号会被复用，journal 里旧记录的
+# _UID 就串到新用户名下（审查官发现 pilot 拿到刚删的旧号 999，18 万条旧记录看着像 pilot 干的）。
+ensure_service_user() { # 用户名 家目录 [system|login]
+  local name=$1 home=$2 kind=${3:-system} entry uid gid have_home shell sysarg=--system
   WROTE=0
+  if [[ "$kind" == login ]]; then sysarg=""; fi
   if ! getent group "$name" >/dev/null; then
-    groupadd --system "$name"
+    # shellcheck disable=SC2086 # sysarg 空时不能传一个空参数，故意不加引号
+    groupadd $sysarg "$name"
     changed "建组 $name"
   fi
   if ! getent passwd "$name" >/dev/null; then
-    useradd --system --gid "$name" --home-dir "$home" --create-home --shell /bin/bash --comment "fleet-dao" "$name"
-    changed "建系统用户 $name（家目录 $home）"
+    local what=系统
+    if [[ "$kind" == login ]]; then what=登录; fi
+    # shellcheck disable=SC2086 # 同上
+    useradd $sysarg --gid "$name" --home-dir "$home" --create-home --shell /bin/bash --comment "fleet-dao" "$name"
+    changed "建${what}用户 $name（家目录 $home）"
   fi
   entry=$(getent passwd "$name")
   IFS=: read -r _ _ uid gid _ have_home shell <<<"$entry"
