@@ -95,7 +95,7 @@ export interface OpenPrInput {
   /** 刚推上去的头（回读核对用）。 */
   head: string;
   title: string;
-  /** 字符串原样用；给结构就按模板渲染（做了什么、怎么验证的、还欠什么、对应的需求编号）。 */
+  /** 字符串原样用；给结构就按仓里的 PR 模板渲染（renderPrBody）。 */
   body: string | PrBodyInput;
   draft?: boolean | undefined;
 }

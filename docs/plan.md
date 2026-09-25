@@ -2,7 +2,7 @@
 
 > 依据：[设计文档](design.md)。本计划回答「先做什么、谁来做、做到什么程度算完、要你们动手的有哪些」。
 > 旧仓审计只提供「要带走的坑」和「接线细节」，不决定新系统长什么样。
-> 进度看 GitHub [里程碑](https://github.com/thoerwink8/fleet-dao/milestones) P0–P6（一个阶段一个），这里只放各阶段的验收标准，不记进度。
+> 阶段进度看 GitHub [里程碑](https://github.com/thoerwink8/fleet-dao/milestones) P0–P6（一个阶段一个），这里只放各阶段的验收标准。
 
 ## 一、总思路
 
