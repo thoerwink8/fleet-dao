@@ -372,7 +372,13 @@ export function buildFeishuBoard(input: FeishuBoardInput, now: Date, staleAfterM
         since: x.ask.askedAt,
       })),
     ...input.sources.notifications
-      .filter((x) => x.notification.level === 'decision' && x.notification.resolvedAt === undefined)
+      // 和追问同一口径：需求已经结束的不算等人；没挂在需求上的要人拍照算。
+      .filter(
+        (x) =>
+          x.notification.level === 'decision' &&
+          x.notification.resolvedAt === undefined &&
+          (x.task === undefined || openTaskIds.has(x.task.id)),
+      )
       .map((x) => ({
         kind: 'decision' as const,
         notificationId: x.notification.id,

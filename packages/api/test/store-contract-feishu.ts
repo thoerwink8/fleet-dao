@@ -815,6 +815,37 @@ export function describeFeishuStoreContract(name: string, make: MakeStore): void
         });
       });
 
+      it('第 2 版已经送到新卡，第 1 版的回执后到：「送到的卡」不退回旧卡，跳过写明是旧版本', async () => {
+        await store.syncOutbox([{ id: 'ask:a', fingerprint: 'f1', create: true }]);
+        const at = T0.toISOString();
+        const sentA = { status: 'sent' as const, messageId: 'om_a', chatId: 'oc_team', sentAt: at };
+        await store.ackOutbox([{ itemId: 'ask:a', revision: 1, result: sentA }], at);
+        await store.syncOutbox([{ id: 'ask:a', fingerprint: 'f2', create: true }]);
+        const later = new Date(T0.getTime() + 5000).toISOString();
+        await store.ackOutbox(
+          [
+            {
+              itemId: 'ask:a',
+              revision: 2,
+              result: { status: 'sent', messageId: 'om_b', chatId: 'oc_team', sentAt: later },
+            },
+          ],
+          later,
+        );
+        for (const result of [sentA, { status: 'updated' as const, messageId: 'om_a' }]) {
+          expect(await store.ackOutbox([{ itemId: 'ask:a', revision: 1, result }], later)).toEqual({
+            applied: 0,
+            skipped: [{ itemId: 'ask:a', revision: 1, why: 'stale_revision' }],
+          });
+        }
+        expect(
+          (await store.syncOutbox([{ id: 'ask:a', fingerprint: 'f2', create: true }])).get('ask:a'),
+        ).toMatchObject({
+          ack: { revision: 2, status: 'sent' },
+          delivered: { messageId: 'om_b', sentAt: later, revision: 2 },
+        });
+      });
+
       it('「改了」的卡回执没记过、卡片登记里也没有：只记结果，不编一张送到的卡', async () => {
         await store.syncOutbox([{ id: 'ask:a', fingerprint: 'f1', create: true }]);
         await store.ackOutbox(

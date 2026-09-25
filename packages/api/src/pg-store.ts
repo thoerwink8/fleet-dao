@@ -1547,6 +1547,16 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
             report.skipped.push({ itemId: ack.itemId, revision: ack.revision, why: 'stale_revision' });
             continue;
           }
+          // 已经送到过更新一版的卡：旧版本的回执后到（重试、迟到）不能把「送到的卡」退回旧卡。
+          if (
+            !current &&
+            row.deliveredMessageId !== null &&
+            row.deliveredRevision !== null &&
+            ack.revision < row.deliveredRevision
+          ) {
+            report.skipped.push({ itemId: ack.itemId, revision: ack.revision, why: 'stale_revision' });
+            continue;
+          }
           const set: Partial<typeof feishuOutbox.$inferInsert> = {};
           if (r.status === 'sent') {
             Object.assign(set, {
