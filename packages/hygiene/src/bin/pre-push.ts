@@ -1,5 +1,6 @@
 // git pre-push 钩子（.githooks/pre-push 调它）：推之前把要推的新内容过一遍卫生检查，查出来就拒推。
 // pnpm install 的 prepare 会把 core.hooksPath 设成 .githooks（bin/install-hooks.ts）。判定在 prepush.ts。
+// git 传进来的两个参数（远端名、网址）不用：网址里可能带令牌，判定也不靠它（见 prepush.ts 开头）。
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { type GitSync, parsePushedRefs, prePushCheck } from '../prepush.ts';
@@ -10,9 +11,7 @@ const git: GitSync = (args) => {
   return { code: r.status ?? 1, stdout: r.stdout ?? '', stderr: r.stderr ?? String(r.error ?? '') };
 };
 
-const [remote = 'origin'] = process.argv.slice(2);
 const { code, lines } = prePushCheck({
-  remote,
   refs: parsePushedRefs(readFileSync(0, 'utf8')),
   git,
   values: loadSensitiveValues(),

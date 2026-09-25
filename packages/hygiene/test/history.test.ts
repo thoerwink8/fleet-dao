@@ -51,7 +51,28 @@ describe('scanHistory', () => {
   });
 
   it('没有提交：三份输出都是空的，扫了 0 个', () => {
-    expect(scan('', '', '')).toEqual({ commits: [], addedLines: 0, findings: [] });
+    expect(scan('', '', '')).toEqual({ commits: [], addedLines: 0, binaryHunks: 0, findings: [] });
+  });
+
+  it('带 NUL 的段是二进制：不看内容、单独计数；同一个提交里别的段照看', () => {
+    const patch = [
+      mark(A),
+      '',
+      'diff --git a/logo.png b/logo.png',
+      '--- /dev/null',
+      '+++ b/logo.png',
+      '@@ -0,0 +1,2 @@',
+      '+\x89PNG\0\x01',
+      '+又是 fake-org-778899',
+      'diff --git a/docs/a.md b/docs/a.md',
+      '--- /dev/null',
+      '+++ b/docs/a.md',
+      '@@ -0,0 +1 @@',
+      '+用户 fake-org-778899',
+    ].join('\n');
+    const result = scan(patch, [mark(A), '', 'logo.png', 'docs/a.md'].join('\n'), message(A, 'x'));
+    expect(result).toMatchObject({ binaryHunks: 1, addedLines: 1 });
+    expect(result.findings.map(formatFinding)).toEqual(['docs/a.md:1 名单里的敏感值（提交 aaaaaaa）']);
   });
 
   it('认不出、对不上就抛错，不当成扫过没事', () => {
@@ -69,13 +90,16 @@ describe('scanHistory', () => {
   });
 
   it('三条命令都钉住输出格式、按从旧到新排，范围参数原样放在 -- 前面', () => {
-    const args = historyArgs(['HEAD', '--not', '--remotes=origin']);
+    const args = historyArgs(['HEAD', '--not', '--remotes']);
     for (const cmd of [args.patch, args.names, args.messages]) {
-      expect(cmd.slice(-4)).toEqual(['HEAD', '--not', '--remotes=origin', '--']);
+      expect(cmd.slice(-4)).toEqual(['HEAD', '--not', '--remotes', '--']);
       expect(cmd).toEqual(
         expect.arrayContaining(['log', '--reverse', '--no-color', 'log.showSignature=false']),
       );
     }
-    expect(args.patch).toEqual(expect.arrayContaining(['--diff-merges=remerge', '--no-textconv', '-U0']));
+    // --text：git 当成二进制的文本文件（-diff 属性、大文件阈值）也要出内容。
+    expect(args.patch).toEqual(
+      expect.arrayContaining(['--diff-merges=remerge', '--no-textconv', '--text', '-U0']),
+    );
   });
 });

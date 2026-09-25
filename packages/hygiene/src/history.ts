@@ -16,8 +16,10 @@ export interface CommitFinding extends Finding {
 export interface HistoryScan {
   /** 扫了的提交，从旧到新。 */
   commits: string[];
-  /** 各个提交新增的行数加起来。 */
+  /** 各个提交新增的行数加起来（不算下面跳过的那些段）。 */
   addedLines: number;
+  /** 带 NUL 的新增段（二进制文件）：内容没看，只按文件名判。单列出来，免得「没看」混进「看了没事」。 */
+  binaryHunks: number;
   findings: CommitFinding[];
 }
 
@@ -37,8 +39,10 @@ const COMMIT_MARK = '\x01fleet-commit ';
 const SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 
 /**
- * 取一段提交逐个的内容要跑的三条 git 命令。revs 是 git log 的范围，例如 [<头>, '--not', '--remotes=origin']。
+ * 取一段提交逐个的内容要跑的三条 git 命令。revs 是 git log 的范围，例如 [<头>, '--not', '--remotes']。
  * 会改输出格式的配置（颜色、外部 diff、textconv、路径前缀、签名显示）都钉死，不受本机 git 配置影响。
+ * --text：.gitattributes 标了 -diff / binary、或 core.bigFileThreshold 调低时，git 会把文本文件当二进制只说一句
+ * 「Binary files differ」，内容就漏了；强制出文本差异，真二进制（带 NUL 的段）由 scanHistory 跳过、单独计数。
  */
 export function historyArgs(revs: readonly string[]): {
   patch: string[];
@@ -59,6 +63,7 @@ export function historyArgs(revs: readonly string[]): {
   const diff = [
     '--no-ext-diff',
     '--no-textconv',
+    '--text',
     '--src-prefix=a/',
     '--dst-prefix=b/',
     '-M',
@@ -129,10 +134,16 @@ export function scanHistory(
   const patches = byCommit('逐个提交的差异', out.patch);
   const names = byCommit('逐个提交的文件名', out.names);
   let addedLines = 0;
+  let binaryHunks = 0;
   for (const commit of new Set([...patches.keys(), ...names.keys()])) {
     if (!order.has(commit))
       throw new Error(`逐个提交的差异和提交清单对不上：${commit.slice(0, 7)} 不在清单里`);
-    const hunks = addedHunks(patches.get(commit) ?? '');
+    // 带 NUL 的段是二进制文件（--text 硬出的），和全仓扫一样不看内容、只按文件名判。
+    const hunks = addedHunks(patches.get(commit) ?? '').filter((h) => {
+      if (!h.text.includes('\0')) return true;
+      binaryHunks += 1;
+      return false;
+    });
     addedLines += hunks.reduce((n, h) => n + h.text.split('\n').length, 0);
     const paths = (names.get(commit) ?? '')
       .split('\n')
@@ -147,5 +158,5 @@ export function scanHistory(
   const findings = [...inContent, ...inMessages].sort(
     (a, b) => (order.get(a.commit) ?? 0) - (order.get(b.commit) ?? 0),
   );
-  return { commits: [...order.keys()], addedLines, findings };
+  return { commits: [...order.keys()], addedLines, binaryHunks, findings };
 }

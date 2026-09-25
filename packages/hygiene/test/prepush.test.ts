@@ -4,6 +4,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { type GitSync, type PrePushInput, parsePushedRefs, prePushCheck } from '../src/prepush.ts';
 import type { LoadedValues } from '../src/values.ts';
@@ -11,53 +12,72 @@ import { pseudoRandom } from './helpers.ts';
 
 const LIST: LoadedValues = { ok: true, source: '测试名单', values: ['fake-org-778899'] };
 const ID = ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', '-c', 'commit.gpgsign=false'];
+const HOOK = fileURLToPath(new URL('../src/bin/pre-push.ts', import.meta.url));
 let repo: string;
+let scratch: string;
 let base: string;
-const git = (...args: string[]) =>
+const gitIn = (cwd: string, ...args: string[]) =>
   execFileSync('git', [...ID, '-c', 'core.autocrlf=false', ...args], {
-    cwd: repo,
+    cwd,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
   }).trim();
+const git = (...args: string[]) => gitIn(repo, ...args);
 const gitSync: GitSync = (args) => {
   const r = spawnSync('git', args, { cwd: repo, encoding: 'utf8' });
   return { code: r.status ?? 1, stdout: r.stdout, stderr: r.stderr };
 };
-/** 写文件（null = 删掉）、提交，返回新提交号。 */
-const commit = (files: Record<string, string | null>, message = 'x', ident: string[] = []) => {
-  for (const [name, text] of Object.entries(files)) {
-    if (text === null) rmSync(join(repo, name));
+/** 在 cwd 里写文件（null = 删掉）、提交，返回新提交号。 */
+const commitIn = (
+  cwd: string,
+  files: Record<string, string | Buffer | null>,
+  message = 'x',
+  ident: string[] = [],
+) => {
+  for (const [name, content] of Object.entries(files)) {
+    if (content === null) rmSync(join(cwd, name));
     else {
-      mkdirSync(join(repo, name, '..'), { recursive: true });
-      writeFileSync(join(repo, name), text);
+      mkdirSync(join(cwd, name, '..'), { recursive: true });
+      writeFileSync(join(cwd, name), content);
     }
   }
-  git('add', '-A', '-f');
-  git(...ident, 'commit', '-q', '--allow-empty', '-m', message);
-  return git('rev-parse', 'HEAD');
+  gitIn(cwd, 'add', '-A', '-f');
+  gitIn(cwd, ...ident, 'commit', '-q', '--allow-empty', '-m', message);
+  return gitIn(cwd, 'rev-parse', 'HEAD');
 };
+const commit = (files: Record<string, string | Buffer | null>, message = 'x', ident: string[] = []) =>
+  commitIn(repo, files, message, ident);
 /** 从远端主线另起一段。 */
 const fresh = () => git('checkout', '-q', '--detach', base);
 const ZERO = '0'.repeat(40);
 const refLine = (oid: string, remoteOid = ZERO) => `refs/heads/task ${oid} refs/heads/task ${remoteOid}\n`;
 const check = (head: string, over: Partial<PrePushInput> = {}) =>
-  prePushCheck({
-    remote: 'origin',
-    refs: parsePushedRefs(refLine(head)),
-    git: gitSync,
-    values: LIST,
-    ...over,
-  });
+  prePushCheck({ refs: parsePushedRefs(refLine(head)), git: gitSync, values: LIST, ...over });
 const short = (oid: string) => oid.slice(0, 7);
+/** 像 git 那样调钩子本身：参数是远端名和网址，标准输入是要推的引用；名单用测试的假名单。 */
+const runHook = (cwd: string, stdin: string, args: string[]) => {
+  const r = spawnSync(process.execPath, [HOOK, ...args], {
+    cwd,
+    input: stdin,
+    encoding: 'utf8',
+    env: { ...process.env, FLEET_SENSITIVE_VALUES_FILE: join(scratch, 'list.txt') },
+  });
+  return { code: r.status, out: `${r.stdout}${r.stderr}` };
+};
 
 beforeAll(() => {
+  scratch = mkdtempSync(join(tmpdir(), 'fleet-hygiene-prepush-list-'));
+  writeFileSync(join(scratch, 'list.txt'), 'fake-org-778899\n');
   repo = mkdtempSync(join(tmpdir(), 'fleet-hygiene-prepush-'));
   git('init', '-q', '-b', 'main');
   base = commit({ 'README.md': 'hello\n' });
-  // 装作远端主线就在这里：钩子只扫 refs/remotes/<远端>/* 上没有的提交。
+  // 装作远端主线就在这里：钩子只扫 refs/remotes/* 上都没有的提交。
   git('update-ref', 'refs/remotes/origin/main', base);
 });
-afterAll(() => rmSync(repo, { recursive: true, force: true }));
+afterAll(() => {
+  rmSync(repo, { recursive: true, force: true });
+  rmSync(scratch, { recursive: true, force: true });
+});
 
 describe('prePushCheck', { timeout: 30_000 }, () => {
   it('解析钩子的标准输入：四段一行', () => {
@@ -131,6 +151,54 @@ describe('prePushCheck', { timeout: 30_000 }, () => {
     expect(result.lines.join('\n')).not.toContain(token);
   });
 
+  it('git 把文本文件当二进制（.gitattributes 标 -diff、core.bigFileThreshold 调低）：内容照样扫，先加后删也拦', () => {
+    const token = ['ghp', pseudoRandom(36, 406)].join('_');
+    const attributes = join(repo, '.git', 'info', 'attributes');
+    fresh();
+    mkdirSync(join(repo, '.git', 'info'), { recursive: true });
+    writeFileSync(attributes, '*.txt -diff\n');
+    try {
+      const added = commit({ 'docs/notes.txt': `export GH_TOKEN=${token}\n` });
+      const head = commit({ 'docs/notes.txt': null });
+      // 不强制出文本差异时，git 只说一句 Binary files … differ，内容就漏了。
+      expect(git('show', '--format=', added)).toContain('Binary files');
+      const result = check(head);
+      expect(result.code).toBe(1);
+      expect(result.lines).toEqual(expect.arrayContaining([`docs/notes.txt:1 令牌（提交 ${short(added)}）`]));
+    } finally {
+      rmSync(attributes, { force: true });
+    }
+
+    fresh();
+    git('config', 'core.bigFileThreshold', '64');
+    try {
+      const added = commit({ 'docs/big.md': `${'# 说明\n'.repeat(20)}export GH_TOKEN=${token}\n` });
+      const head = commit({ 'docs/big.md': null });
+      expect(git('show', '--format=', added)).toContain('Binary files');
+      const result = check(head);
+      expect(result.code).toBe(1);
+      expect(result.lines).toEqual(expect.arrayContaining([`docs/big.md:21 令牌（提交 ${short(added)}）`]));
+    } finally {
+      git('config', '--unset', 'core.bigFileThreshold');
+    }
+  });
+
+  it('带 NUL 的段是真二进制：不看内容、单独报出来；二进制的密钥文件照样按名字拦', () => {
+    fresh();
+    const token = ['ghp', pseudoRandom(36, 407)].join('_');
+    const blob = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01, 0x0a]),
+      Buffer.from(`${token}\n`),
+    ]);
+    const head = commit({ 'assets/logo.png': blob, 'deploy/cert.p12': blob });
+    const result = check(head);
+    expect(result.code).toBe(1);
+    expect(result.lines[0]).toContain('（带 NUL 的 2 段是二进制，没看内容、只按文件名判）');
+    expect(result.lines.filter((l) => l.includes('（提交 '))).toEqual([
+      `deploy/cert.p12 密钥文件（提交 ${short(head)}）`,
+    ]);
+  });
+
   it('提交说明、作者邮箱也会推上去：名单里的值、令牌、真邮箱都拦', () => {
     fresh();
     const token = ['ghp', pseudoRandom(36, 403)].join('_');
@@ -186,6 +254,47 @@ describe('prePushCheck', { timeout: 30_000 }, () => {
     expect(unknown.code).toBe(1);
   });
 
+  it('推到网址、推到没 fetch 过的远端名：别的远端分支上早有的不重扫；网址里的令牌不进输出', () => {
+    fresh();
+    const leaky = commit({ 'docs/old.md': '用户 fake-org-778899\n' });
+    git('update-ref', 'refs/remotes/origin/leaky', leaky);
+    const head = commit({ 'docs/ok.md': '没问题\n' });
+    const token = ['ghp', pseudoRandom(36, 405)].join('_');
+    const url = `https://x-access-token:${token}@example.invalid/o/r.git`;
+    for (const args of [
+      [url, url],
+      ['never-fetched', url],
+    ]) {
+      const hook = runHook(repo, refLine(head), args);
+      expect(hook.code).toBe(0);
+      expect(hook.out).toContain('有 1 个提交远端还没有');
+      expect(hook.out).not.toContain('整段历史');
+      expect(hook.out).not.toContain(token);
+      expect(hook.out).not.toContain('example.invalid');
+    }
+  });
+
+  it('本地没记着任何远端分支：整段历史都扫，说清楚；拒推时输出里也没有网址和令牌', () => {
+    const solo = mkdtempSync(join(tmpdir(), 'fleet-hygiene-prepush-solo-'));
+    try {
+      gitIn(solo, 'init', '-q', '-b', 'main');
+      commitIn(solo, { 'README.md': 'hello\n' });
+      const head = commitIn(solo, { 'docs/who.md': '用户 fake-org-778899\n' });
+      const token = ['ghp', pseudoRandom(36, 408)].join('_');
+      const url = `https://x-access-token:${token}@example.invalid/o/r.git`;
+      const hook = runHook(solo, refLine(head), ['origin', url]);
+      expect(hook.code).toBe(1);
+      expect(hook.out).toContain('有 2 个提交远端还没有');
+      expect(hook.out).toContain('本地没记着任何远端分支，整段历史都扫了');
+      expect(hook.out).toContain(`docs/who.md:1 名单里的敏感值（提交 ${short(head)}）`);
+      expect(hook.out).not.toContain(token);
+      expect(hook.out).not.toContain('example.invalid');
+      expect(hook.out).not.toContain('fake-org-778899');
+    } finally {
+      rmSync(solo, { recursive: true, force: true });
+    }
+  });
+
   it('名单没读到：退出码 2，不推', () => {
     fresh();
     const result = check(commit({ 'docs/ok.md': '没问题\n' }), {
@@ -224,14 +333,7 @@ describe('prePushCheck', { timeout: 30_000 }, () => {
     expect(result.lines[0]).toContain('有 0 个提交远端还没有');
   });
 
-  it('删远端分支（本地提交是全 0）不扫；本地没记着这个远端的任何分支时，整段历史都扫', () => {
+  it('删远端分支（本地提交是全 0）：没有新内容，不扫', () => {
     expect(check(ZERO)).toEqual({ code: 0, lines: [] });
-    fresh();
-    const head = commit({ 'docs/ok.md': '没问题\n' });
-    const result = check(head, { remote: 'nowhere' });
-    expect(result.code).toBe(0);
-    expect(result.lines[0]).toMatch(
-      /有 2 个提交远端还没有.*（本地没记着 nowhere 的任何分支，整段历史都扫了）$/,
-    );
   });
 });
