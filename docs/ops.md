@@ -1,7 +1,7 @@
 # 运维手册：两台机器的地基
 
 装法在 `deploy/`，这里讲怎么用、怎么看、怎么退。机器的公网 IP 不进仓，下文写作 `<法国IP>`、`<香港IP>`。
-旧系统的坑与由来见 [reference/deploy.md](reference/deploy.md)（文中的 P01、P02 等编号出自那里）。
+旧系统（windsurf-dao、ai-gateway-stack 那一套）已于 2026-09-25 从两台机器上全部清退：单元、用户、目录、数据都删了。它留下的坑与由来见 [reference/deploy.md](reference/deploy.md)（文中的 P01、P02 等编号出自那里；那份记的是清退前的现场）。
 
 ## 一、两台机器
 
@@ -9,9 +9,9 @@
 |---|---|---|
 | 系统 | Ubuntu 24.04，6 核 12G | Ubuntu 22.04，2 核 2G |
 | 跑什么 | Temporal、PostgreSQL、引擎、驾驶舱后端、AI 会话 | nginx（驾驶舱入口与证书）、WireGuard 服务端；以后还有飞书网关 |
-| 新开的公网入站 | 无 | 80/443（与旧网关共用同一个 nginx）、UDP 4500（WireGuard） |
+| 公网入站（ufw） | 只放 22/tcp；另在隧道网卡上给香港开 8787 | 只放 22/tcp、80/tcp、443/tcp（nginx）、4500/udp（WireGuard） |
 | 装机脚本 | `deploy/france.sh` | `deploy/hk.sh` |
-| 旧系统 | 在跑（旧的开发版 Temporal 占 7233/8233），装机不碰 | 旧网关在跑，nginx 只加一个站点 |
+| 不归 fleet-dao 管的 | MiraQuota 的 `miraquota-sync`（等 miraquota-win#3 发版后停） | MiraQuota 的 `miraquota-hub`（127.0.0.1:4331）和同一个 nginx 上的站点 `ai-gateway`（只剩 `https://<香港IP>.sslip.io/mq/`），同样等 miraquota-win#3 发版后停；装机不碰 |
 
 两机之间走 WireGuard 隧道 `10.99.0.0/24`：香港 `10.99.0.1` 是服务端；法国 `10.99.0.2` 是客户端，主动连、每 25 秒保活，所以法国不用开任何入站端口。
 
@@ -32,14 +32,14 @@
 
 上表里除了 8788，本机上只有 root 和 fleet 连得上：Temporal 没开认证，谁连得上谁就能给任意工作流发信号，会话就能绕过人闸。拦法是一张单独的 nft 表 `inet fleet_dao`（按连接发起方的属主 skuid，别人连就被复位），由 `fleet-firewall.service` 载入。**别启用 `nftables.service`**：它的默认配置开头是 `flush ruleset`，会把 ufw 的规则和这张表一起冲掉。
 
-选端口的规矩：Temporal 一律「官方默认 +10」，避开旧系统的 7233/8233；都在 32768 以下——旧开发版 Temporal 的内部端口是随机临时端口（32768 起），重启会变，同段里挑端口迟早撞上。
+选端口的规矩：Temporal 一律「官方默认 +10」（当初为了和旧系统的 7233/8233 错开；旧系统已清退，端口不再改）；都在 32768 以下——32768 起是临时端口段，程序运行中随手要的端口会落在里面，同段里挑端口迟早撞上。
 
 香港：
 
 | 端口 | 绑在 | 是谁 | 说明 |
 |---|---|---|---|
-| 80/tcp | 0.0.0.0 | nginx（与旧网关共用） | `fleetdao.dpdns.org`：证书续期的验证路径，其余跳 https |
-| 443/tcp | 0.0.0.0 | nginx（与旧网关共用） | `https://fleetdao.dpdns.org`：静态页；`/api`、`/auth`、`/github/webhook` 经隧道转法国 `10.99.0.2:8787`；`/agent` 不转 |
+| 80/tcp | 0.0.0.0 | nginx | `fleetdao.dpdns.org`：证书续期的验证路径，其余跳 https |
+| 443/tcp | 0.0.0.0 | nginx | `https://fleetdao.dpdns.org`：静态页；`/api`、`/auth`、`/github/webhook` 经隧道转法国 `10.99.0.2:8787`；`/agent` 不转 |
 | 4500/udp | 0.0.0.0 | WireGuard 服务端 | 香港上游只放行少数常见 UDP 端口（2026-09-25 从法国实测：53/67/69/123/161/500/1701/4500 能到），51820 进不来 |
 
 GitHub 事件地址：`https://fleetdao.dpdns.org/github/webhook`。飞书登录回调：`https://fleetdao.dpdns.org/auth/feishu/callback`。
@@ -50,7 +50,6 @@ GitHub 事件地址：`https://fleetdao.dpdns.org/github/webhook`。飞书登录
 |---|---|---|
 | `fleet` | 两台 | 引擎、驾驶舱后端、Temporal（法国），以后的飞书网关（香港）。系统用户，家 `/home/fleet`（750） |
 | `fleet-agent-dedicated`、`fleet-agent-carpool` | 法国 | AI 会话专用：各挂一个 reclaude 组织（独享、拼车），永不切号；引擎按选中的账号池挑用户。没有 sudo、不能提权、只在自己的组里、家里没有 GitHub 凭据、读不到 `/etc/fleet-dao`、连不上 Temporal 和库 |
-| 旧系统的会话用户 | 法国（旧系统的） | fleet-dao 不用、不碰 |
 | `root` | | 只装机 |
 
 法国：
@@ -77,7 +76,7 @@ GitHub 事件地址：`https://fleetdao.dpdns.org/github/webhook`。飞书登录
 | `/srv/fleet-dao` | root:root 755 | 代码 |
 | `/srv/fleet-dao-web` | root:root 755 | 驾驶舱静态文件，归 root：以后飞书网关以 fleet 跑在这台，网关被打穿也改不了页面。现在是占位页；装机脚本只在没有 `index.html` 时放占位页，不盖已发布的 |
 | `/var/www/fleet-dao-acme` | root:root 755 | 证书续期的验证文件 |
-| `/etc/nginx/sites-available/fleet-dao`（`sites-enabled` 里有链接） | root 644 | 只加这一个站点，旧网关的站点不动 |
+| `/etc/nginx/sites-available/fleet-dao`（`sites-enabled` 里有链接） | root 644 | fleet-dao 的站点。同一个 nginx 上另有 MiraQuota 的站点 `ai-gateway`（不归 fleet-dao 管，装机不碰） |
 | `/etc/letsencrypt/live/fleetdao.dpdns.org` | certbot 管 | 证书；`certbot.timer` 续期，续完重载 nginx |
 | `/etc/wireguard/wg-fleet.conf`、`wg-fleet.key` | root 600 | 隧道配置与私钥 |
 
@@ -107,7 +106,7 @@ GitHub 事件地址：`https://fleetdao.dpdns.org/github/webhook`。飞书登录
 验证用的工具：
 
 - `bash deploy/lib/snapshot.sh ours`：fleet-dao 管的东西的指纹。连跑两遍装机，两遍之间各拍一次，diff 为空才算第二遍零改动——和脚本自己数的「改动几处」是两套判据。
-- `bash deploy/lib/snapshot.sh others`：旧系统的单元状态、监听端口、防火墙。装机脚本每次开头结尾自己比一遍。
+- `bash deploy/lib/snapshot.sh others`：不归 fleet-dao 管的单元状态、监听端口、防火墙（系统自带的服务、MiraQuota 等）。装机脚本每次开头结尾自己比一遍：装机不许碰它们。
 - `sudo bash deploy/test/run.sh`：语法、shellcheck、自检的违规样本、本页端口表和脚本对得上。
 - `sudo bash deploy/test/agent-scope.e2e.sh`（法国）：会话通路真跑一遍，见第五节。
 
@@ -196,7 +195,7 @@ systemctl daemon-reload
 香港：
 
 ```
-# 1. 下掉站点（旧站点不受影响）
+# 1. 下掉站点（别的站点不受影响）
 rm /etc/nginx/sites-enabled/fleet-dao && nginx -t && systemctl reload nginx
 # 2. 停隧道
 systemctl disable --now wg-quick@wg-fleet
@@ -213,4 +212,4 @@ systemctl disable --now wg-quick@wg-fleet
 - 升 Temporal：改 `france.sh` 顶部的版本号和 sha256 → 重跑。新版本装进新目录、`bin/` 链接切过去、服务重启；表结构由 temporal-sql-tool 升到新版本自带的最新。
 - PostgreSQL 用 16：Temporal 官方测过的最高大版本是 16（16.6）；装 Ubuntu 自带源里的，跟着系统的自动安全更新走。
 - 香港 WireGuard 用 UDP 4500 是因为上游只放行少数 UDP 端口；换端口前先从法国实测新端口到不到得了香港网卡。
-- 还没验过的：重启机器（单元开机自起、旧单元不复活、nft 表在服务之前载入）——这一轮没重启过机器。
+- 还没验过的：重启机器（单元开机自起、nft 表在服务之前载入）——这一轮没重启过机器。旧系统的单元文件已经删光，开机不会再复活。
