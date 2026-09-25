@@ -1,7 +1,7 @@
 // 对账补漏（design 第十四节「收 GitHub 事件」：漏收的靠对账与定时轮询补回）：把几样查法按受管的仓串起来，汇总成一个结局。
 // 每一样怎么查在 @fleet-dao/github 的 reconcile.ts；补回来的东西一律走 GitHubIntake（同一道门、同一本投递账）。
-// 定时调它的是引擎里的 Temporal 定时任务：每 15 分钟一次、往回看 2 小时（specs/43-接活入口/方案.md「谁来定时调对账」），
-// 调用方把返回值原样记进 schedule_runs。
+// 定时调它的是引擎里的 Temporal 定时任务 github-reconcile：每 15 分钟一次、往回看 2 小时，结局记进 schedule_runs
+// （packages/engine/src/jobs/，specs/43-接活入口/方案-对账调度.md）。
 import type { Reconciler, ReconcilerOptions } from '@fleet-dao/github';
 import type { ScheduleOutcome } from '@fleet-dao/shared';
 import { DELIVERY_STALE_MS, type GitHubIntake, MAX_AUTO_REPLAYS, pollDeliveryId } from './github.ts';

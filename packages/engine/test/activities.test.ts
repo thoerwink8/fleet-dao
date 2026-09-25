@@ -44,7 +44,7 @@ describe('活动外壳', () => {
   it('活动表齐全：工作流会调的每个名字 worker 都挂上了（windsurf-dao#1422）', () => {
     const activities = createActivities(createFakeWorld().ports, launch);
     expect(Object.keys(activities).sort()).toEqual(Object.keys(ACTIVITY_PROFILE).sort());
-    expect([...PORT_NAMES, 'enqueueMerge', 'withdrawMerge'].sort()).toEqual(
+    expect([...PORT_NAMES, 'enqueueMerge', 'withdrawMerge', 'reconcileGitHub'].sort()).toEqual(
       Object.keys(ACTIVITY_PROFILE).sort(),
     );
   });

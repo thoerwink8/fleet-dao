@@ -2,11 +2,13 @@
 
 import { fileURLToPath } from 'node:url';
 import { signAgentToken } from '@fleet-dao/api/agent-token';
+import { Client, Connection } from '@temporalio/client';
 import { bundleWorkflowCode, NativeConnection, Worker, type WorkflowBundle } from '@temporalio/worker';
-import { type AgentTokenClaims, createActivities } from './activities.ts';
+import { type AgentTokenClaims, createActivities, type EngineJobs } from './activities.ts';
 import type { EngineActivities } from './activity-options.ts';
 import { createDecide, type Decide, type FailureTriage } from './decisions/index.ts';
 import { createFakeWorld } from './fakes.ts';
+import { ensureEngineSchedules } from './jobs/schedules.ts';
 import type { EnginePorts } from './ports.ts';
 
 export interface EngineConfig {
@@ -81,6 +83,8 @@ export interface CreateEngineWorkerOptions {
    * 引擎被强杀时会话留在自己的 scope 里；它们的输出管道断了、接不上，工作流会按 SESSION_LOST 续会话重起。
    */
   reapOrphanSessions?: () => Promise<number>;
+  /** 定时任务要的东西（真端口才有）；不给，定时任务的活动明确报 JOB_NOT_CONFIGURED。 */
+  jobs?: EngineJobs;
   /** 不给就按 config.address 自己连。 */
   connection?: NativeConnection;
   /** 不给就现打包。 */
@@ -103,11 +107,15 @@ export async function createEngineWorker(options: CreateEngineWorkerOptions): Pr
     options.log?.(`收掉上一轮留下的会话 ${reaped} 个`);
   }
   const connection = options.connection ?? (await NativeConnection.connect({ address: config.address }));
-  const activities = createActivities(options.ports, {
-    fleetApi: config.agentApiUrl ?? '',
-    cliBinDir: config.cliBinDir,
-    signToken: options.signAgentToken,
-  });
+  const activities = createActivities(
+    options.ports,
+    {
+      fleetApi: config.agentApiUrl ?? '',
+      cliBinDir: config.cliBinDir,
+      signToken: options.signAgentToken,
+    },
+    options.jobs,
+  );
   return Worker.create({
     connection,
     namespace: config.namespace,
@@ -140,6 +148,8 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
   const mode = portsModeFromEnv(env);
   let ports: EnginePorts;
   let reapOrphanSessions: (() => Promise<number>) | undefined;
+  let jobs: EngineJobs | undefined;
+  let registerJobs: (() => Promise<void>) | undefined;
   let close: () => Promise<void> = async () => {};
   let signAgentToken = agentTokenSignerFromEnv(env);
   if (mode === 'real') {
@@ -153,13 +163,25 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
     const real = realPortsFromEnv(env);
     ports = real.ports;
     reapOrphanSessions = real.reapOrphanSessions;
+    jobs = real.jobs;
+    registerJobs = real.registerJobs;
     close = real.close;
   } else {
     ports = createFakeWorld().ports;
     signAgentToken ??= (claims) => `fake-token.${claims.runId}`;
   }
   const connection = await NativeConnection.connect({ address: config.address });
+  let clientConnection: Connection | undefined;
   try {
+    if (registerJobs) {
+      // 定时任务只由真端口的工人建：假端口不碰库和 GitHub，建了也只会一轮轮报 JOB_NOT_CONFIGURED。
+      // 先登记再建：一次都没跑过的也在看门狗的名单上。任一步失败就不起，别让对账悄悄没人跑。
+      await registerJobs();
+      clientConnection = await Connection.connect({ address: config.address });
+      const client = new Client({ connection: clientConnection, namespace: config.namespace });
+      const ensured = await ensureEngineSchedules(client, config.taskQueue);
+      console.info(`定时任务已对齐：${JSON.stringify(ensured)}`);
+    }
     const worker = await createEngineWorker({
       // 假实现不真起会话，fleet 命令的后端地址用不上。
       config: { ...config, agentApiUrl: config.agentApiUrl ?? 'fake://agent-api' },
@@ -167,6 +189,7 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
       connection,
       signAgentToken: signAgentToken as (claims: AgentTokenClaims) => string,
       ...(reapOrphanSessions ? { reapOrphanSessions } : {}),
+      ...(jobs ? { jobs } : {}),
       log: (message) => console.info(message),
     });
     console.info(
@@ -174,6 +197,7 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
     );
     await worker.run();
   } finally {
+    await clientConnection?.close();
     await connection.close();
     await close();
   }

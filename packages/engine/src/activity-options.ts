@@ -3,7 +3,7 @@
 
 import type { Repo } from '@fleet-dao/shared';
 import type { ActivityOptions, RetryPolicy } from '@temporalio/common';
-import type { MergeItem } from './contract.ts';
+import type { GitHubReconcileInput, GitHubReconcileRun, MergeItem } from './contract.ts';
 import type { Limits } from './limits.ts';
 import type { EnginePorts, StartSessionInput, StartSessionResult } from './ports.ts';
 
@@ -28,6 +28,8 @@ export type EngineActivities = PortActivities & {
     subtaskWorkflowId: string;
     limits: Partial<Limits>;
   }): Promise<void>;
+  /** 引擎自己的活动：对账补漏跑一轮，结局记进 schedule_runs（jobs/github-reconcile.ts）。 */
+  reconcileGitHub(input: GitHubReconcileInput): Promise<GitHubReconcileRun>;
 };
 
 export type ActivityName = keyof EngineActivities;
@@ -36,8 +38,9 @@ export type ActivityName = keyof EngineActivities;
  * quick：毫秒到秒级的记账、选路由、报警——30 秒，丢了 1 分钟内重来。
  * git：推分支、开 PR、合并这类几秒到几分钟的——5 分钟，幂等，重试 3 次。
  * setup / watch / ci / tests：长活动——限时按活来，必须心跳，心跳超时 = 工人丢了。
+ * job：定时任务的一轮——10 分钟，不重试：每次尝试都记一行 schedule_runs，没跑成的等下一轮（间隔 15 分钟），不在这一轮里补。
  */
-export type Profile = 'quick' | 'git' | 'setup' | 'watch' | 'ci' | 'tests';
+export type Profile = 'quick' | 'git' | 'setup' | 'watch' | 'ci' | 'tests' | 'job';
 
 export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
   pickRoute: 'quick',
@@ -62,6 +65,7 @@ export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
   awaitSession: 'watch',
   waitCi: 'ci',
   runTests: 'tests',
+  reconcileGitHub: 'job',
 };
 
 /** quick 一档（含排进合并队列、撤出）一次尝试的限时。合并队列的空闲收工时长不能比它短（limits.ts 的下限）。 */
@@ -116,6 +120,8 @@ export function profileOptions(profile: Profile, limits: Limits): ActivityOption
         heartbeatTimeout,
         retry: retry(3, '5 seconds', '1 minute'),
       };
+    case 'job':
+      return { startToCloseTimeout: '10 minutes', retry: retry(1, '1 second', '1 second') };
     case 'tests':
       return {
         startToCloseTimeout: `${limits.testsMinutes} minutes`,

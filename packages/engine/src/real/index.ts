@@ -6,9 +6,11 @@ import { join } from 'node:path';
 import type { SessionUser } from '@fleet-dao/adapters';
 import { createDb, type Db } from '@fleet-dao/db';
 import { createGitHub, pgLedger, pgLocker } from '@fleet-dao/github';
+import type { EngineJobs } from '../activities.ts';
 import type { EnginePorts } from '../ports.ts';
 import { scopeExec, type UserExec } from './exec.ts';
 import { createGitHubPorts, type EngineGitHub } from './github-ports.ts';
+import { githubReconcileJob, registerEngineJobs } from './github-reconcile.ts';
 import { createSessionPorts, DEFAULT_FORK_MAX_CONTEXT_TOKENS, type SessionPortsDeps } from './sessions.ts';
 import { createStorePorts } from './store-ports.ts';
 import { DEFAULT_WORK_ROOT, helperWorkTrees, type WorkTrees } from './worktrees.ts';
@@ -136,10 +138,10 @@ export function realPortsConfigFromEnv(env: Readonly<Record<string, string | und
   return { machine, workRoot, stateDir, claudeBin, forkMaxContextTokens };
 }
 
-/** 生产：按环境变量装真端口。返回的 close 在工人停下后关库连接。 */
+/** 生产：按环境变量装真端口，连同定时任务要的东西（jobs）和登记定时任务（registerJobs）。返回的 close 在工人停下后关库连接。 */
 export function realPortsFromEnv(
   env: Readonly<Record<string, string | undefined>> = process.env,
-): RealPorts & { close(): Promise<void> } {
+): RealPorts & { jobs: EngineJobs; registerJobs(): Promise<void>; close(): Promise<void> } {
   const config = realPortsConfigFromEnv(env);
   const { db, close } = createDb({ env: env as Record<string, string | undefined> });
   const gh = createGitHub({
@@ -158,5 +160,8 @@ export function realPortsFromEnv(
     claudeCommand: (user) => [config.claudeBin.replaceAll('{user}', user)],
     forkMaxContextTokens: config.forkMaxContextTokens,
   });
-  return { ...real, close };
+  const jobs: EngineJobs = {
+    githubReconcile: githubReconcileJob({ db, gh }),
+  };
+  return { ...real, jobs, registerJobs: () => registerEngineJobs(db), close };
 }
