@@ -34,6 +34,8 @@ export const QUOTA_WINDOW_WORDS: Record<QuotaWindowKind, string> = {
   month_usd: '月度额度',
   points: '点数',
   period_usd: '本期额度',
+  // 上游新出、还归不了类的窗口；快照带了原名（label）时卡片显示原名，这里只是没带时的兜底。
+  other: '其它额度',
 };
 
 const TZ = 'Asia/Shanghai';

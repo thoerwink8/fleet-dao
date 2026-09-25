@@ -272,6 +272,8 @@ export const FeishuBoardSnapshotSchema = z.object({
       z.object({
         poolName: z.string(),
         window: QuotaWindowKindSchema,
+        /** 上游对这个窗口的原名（QuotaWindow.label）。window=other 时卡片拿它当名字——只写「其它额度」看不出是哪个。 */
+        label: z.string().optional(),
         /** 剩余比例 0–1。 */
         remaining: z.number().min(0).max(1).optional(),
         resetsAt: Time.optional(),

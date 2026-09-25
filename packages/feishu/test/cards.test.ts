@@ -97,6 +97,22 @@ describe('卡片', () => {
     }
   });
 
+  it('上游新出、归不了类的额度窗口（other）：带了原名显示原名，没带才写「其它额度」', () => {
+    const line = (q: Partial<ReturnType<typeof snapshot>['quota'][number]>) =>
+      textIn(
+        boardCard(
+          snapshot({ quota: [{ poolName: 'Cursor 甲', window: 'other', reading: 'measured', ...q }] }),
+          ctx,
+        ),
+      );
+    expect(line({ label: 'auto_percent', remaining: 0.25 })).toContain(
+      'Cursor 甲 额度「auto_percent」：剩 25%',
+    );
+    expect(line({})).toContain('Cursor 甲 其它额度：');
+    // 归得了类的窗口照旧写白话，原名不上卡
+    expect(line({ window: '7d', label: '7d_claude' })).toContain('Cursor 甲 周额度：');
+  });
+
   it('超长的原话、超多的行：截断后仍不超 30 KB', () => {
     const huge = '很长的一句话'.repeat(5000);
     const d = draft({ rawText: huge, understanding: huge.slice(0, 1000) });

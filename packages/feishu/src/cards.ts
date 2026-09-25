@@ -371,10 +371,9 @@ export function boardCard(
   for (const q of snap.quota.slice(0, 3)) {
     const left = q.remaining === undefined ? '' : `剩 ${percent(q.remaining)}`;
     const reset = q.resetsAt ? `${left ? '，' : ''}${when(q.resetsAt, ctx.now)} 清零` : '';
+    const name = q.window === 'other' && q.label ? `额度「${q.label}」` : QUOTA_WINDOW_WORDS[q.window];
     elements.push(
-      text(
-        `${q.poolName} ${QUOTA_WINDOW_WORDS[q.window]}：${left}${reset}${q.reading === 'estimated' ? '（估算）' : ''}`,
-      ),
+      text(`${q.poolName} ${name}：${left}${reset}${q.reading === 'estimated' ? '（估算）' : ''}`),
     );
   }
   if (opts.staleMs !== undefined) {
