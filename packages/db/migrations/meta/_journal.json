@@ -22,6 +22,13 @@
       "when": 1790281234677,
       "tag": "0002_quota_labels",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1790302017264,
+      "tag": "0003_catalog",
+      "breakpoints": true
     }
   ]
 }

@@ -58,9 +58,14 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
   for (const p of data.stagePolicies ?? []) {
     await db.insert(stagePolicies).values({ stage: p.stage, pinned: p.pinned });
     if (p.routeIds.length > 0) {
-      await db
-        .insert(stagePolicyRoutes)
-        .values(p.routeIds.map((routeId, position) => ({ stage: p.stage, routeId, position })));
+      await db.insert(stagePolicyRoutes).values(
+        p.routeIds.map((routeId, position) => ({
+          stage: p.stage,
+          routeId,
+          position,
+          enabled: !p.disabledRouteIds?.includes(routeId),
+        })),
+      );
     }
   }
   if (data.bans?.length) {

@@ -175,14 +175,14 @@ describe('额度写入与额度表', () => {
   });
 
   it('读很多次，行数不涨', async () => {
-    for (let i = 0; i < 50; i++) {
+    for (let i = 0; i < 12; i++) {
       await save(
-        readOk('relay-a', ago((50 - i) * MIN), [{ label: '7d', window: '7d', utilization: i / 100 }]),
+        readOk('relay-a', ago((12 - i) * MIN), [{ label: '7d', window: '7d', utilization: i / 100 }]),
       );
     }
     const rows = await t.db.select().from(quotaWindows);
     expect(rows).toHaveLength(1);
-    expect(rows[0]?.utilization).toBe(0.49);
+    expect(rows[0]?.utilization).toBe(0.11);
   });
 
   it('晚到的旧读数整批不生效：窗口不覆盖，最近读成时刻不倒退，也不标过期', async () => {

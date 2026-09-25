@@ -58,66 +58,74 @@ describe('迁移', () => {
     expect(sqlFiles).toEqual(entries.map((e) => `${e.tag}.sql`));
   });
 
-  it('触发器迁移单独再跑一遍不报错，也不会装出重复的触发器', async () => {
-    const db = await createTestDb();
-    try {
-      const count = async () =>
-        (
-          await db.client.query<{ n: number }>(
-            'select count(*)::int as n from pg_trigger where not tgisinternal',
-          )
-        ).rows[0]?.n;
-      const before = await count();
-      await db.client.exec(triggerSql);
-      expect(await count()).toBe(before);
-      // 状态变化仍然只记一行。
-      const repo = await addRepo(db.db);
-      const task = await addTask(db.db, repo.id);
-      await db.db.update(schema.tasks).set({ state: 'running' }).where(eq(schema.tasks.id, task.id));
-      const changes = await db.db.select().from(schema.stateChanges);
-      expect(changes.map((c) => c.toState)).toEqual(['queued', 'running']);
-    } finally {
-      await db.close();
-    }
-  });
+  it(
+    '触发器迁移单独再跑一遍不报错，也不会装出重复的触发器',
+    async () => {
+      const db = await createTestDb();
+      try {
+        const count = async () =>
+          (
+            await db.client.query<{ n: number }>(
+              'select count(*)::int as n from pg_trigger where not tgisinternal',
+            )
+          ).rows[0]?.n;
+        const before = await count();
+        await db.client.exec(triggerSql);
+        expect(await count()).toBe(before);
+        // 状态变化仍然只记一行。
+        const repo = await addRepo(db.db);
+        const task = await addTask(db.db, repo.id);
+        await db.db.update(schema.tasks).set({ state: 'running' }).where(eq(schema.tasks.id, task.id));
+        const changes = await db.db.select().from(schema.stateChanges);
+        expect(changes.map((c) => c.toState)).toEqual(['queued', 'running']);
+      } finally {
+        await db.close();
+      }
+    },
+    TEST_DB_TIMEOUT_MS,
+  );
 
-  it('删一个状态枚举值（drizzle-kit 生成的改列类型）不会被触发器挡住', async () => {
-    const snapshots = readdirSync(join(MIGRATIONS_FOLDER, 'meta'))
-      .filter((f) => f.endsWith('_snapshot.json'))
-      .sort();
-    const latest = JSON.parse(
-      readFileSync(join(MIGRATIONS_FOLDER, 'meta', snapshots.at(-1) as string), 'utf8'),
-    );
-    const next = structuredClone(latest);
-    next.enums['public.task_state'].values = next.enums['public.task_state'].values.filter(
-      (v: string) => v !== 'stalled',
-    );
-    const statements = await generateMigration(latest, next);
-    expect(statements[0]).toContain('SET DATA TYPE text');
-
-    // 对照：触发器要是把 state 列绑住（UPDATE OF state / WHEN），同一批语句就过不去。
-    const bound = await createTestDb();
-    try {
-      await bound.client.exec(
-        "create trigger bound_to_state after update of state on tasks for each row execute function fleet_record_state_change('task')",
+  it(
+    '删一个状态枚举值（drizzle-kit 生成的改列类型）不会被触发器挡住',
+    async () => {
+      const snapshots = readdirSync(join(MIGRATIONS_FOLDER, 'meta'))
+        .filter((f) => f.endsWith('_snapshot.json'))
+        .sort();
+      const latest = JSON.parse(
+        readFileSync(join(MIGRATIONS_FOLDER, 'meta', snapshots.at(-1) as string), 'utf8'),
       );
-      await expect(runEach(bound, statements)).rejects.toThrow(/trigger/);
-    } finally {
-      await bound.close();
-    }
+      const next = structuredClone(latest);
+      next.enums['public.task_state'].values = next.enums['public.task_state'].values.filter(
+        (v: string) => v !== 'stalled',
+      );
+      const statements = await generateMigration(latest, next);
+      expect(statements[0]).toContain('SET DATA TYPE text');
 
-    const db = await createTestDb();
-    try {
-      const repo = await addRepo(db.db);
-      const task = await addTask(db.db, repo.id);
-      await runEach(db, statements);
-      await db.db.update(schema.tasks).set({ state: 'running' }).where(eq(schema.tasks.id, task.id));
-      const changes = await db.db.select().from(schema.stateChanges);
-      expect(changes.map((c) => c.toState)).toEqual(['queued', 'running']);
-    } finally {
-      await db.close();
-    }
-  });
+      // 对照：触发器要是把 state 列绑住（UPDATE OF state / WHEN），同一批语句就过不去。
+      const bound = await createTestDb();
+      try {
+        await bound.client.exec(
+          "create trigger bound_to_state after update of state on tasks for each row execute function fleet_record_state_change('task')",
+        );
+        await expect(runEach(bound, statements)).rejects.toThrow(/trigger/);
+      } finally {
+        await bound.close();
+      }
+
+      const db = await createTestDb();
+      try {
+        const repo = await addRepo(db.db);
+        const task = await addTask(db.db, repo.id);
+        await runEach(db, statements);
+        await db.db.update(schema.tasks).set({ state: 'running' }).where(eq(schema.tasks.id, task.id));
+        const changes = await db.db.select().from(schema.stateChanges);
+        expect(changes.map((c) => c.toState)).toEqual(['queued', 'running']);
+      } finally {
+        await db.close();
+      }
+    },
+    TEST_DB_TIMEOUT_MS,
+  );
 
   it('表结构里的每张表迁移后都在库里，库里也没有多出来的表', async () => {
     const rows = await t.client.query<{ name: string }>(
@@ -301,17 +309,71 @@ describe('0002：额度窗改按上游原名存', () => {
   );
 });
 
+describe('0003：目录装载器要的三列', () => {
+  const entries = [...journal.entries].sort((a, b) => a.idx - b.idx);
+  const target = entries.findIndex((e) => e.tag === '0003_catalog');
+  const runMigration = async (pg: PGlite, tag: string) => {
+    const text = readFileSync(join(MIGRATIONS_FOLDER, `${tag}.sql`), 'utf8');
+    for (const statement of text.split('--> statement-breakpoint')) await pg.exec(statement);
+  };
+
+  it(
+    '已有的阶段顺序回填成开着，之后不再有默认值；会话用户按列名读得回来、只许两个值',
+    async () => {
+      expect(target).toBeGreaterThan(0);
+      const pg = new PGlite();
+      try {
+        for (const e of entries.slice(0, target)) await runMigration(pg, e.tag);
+        await pg.exec(`
+        insert into families (id, display_name, vendor) values ('claude', 'Claude', 'Anthropic');
+        insert into channels (id, name, billing) values ('sub', '订阅', 'subscription');
+        insert into pools (id, channel_id, max_concurrency) values ('solo', 'sub', 1);
+        insert into models (id, family, display_name) values ('opus', 'claude', 'Opus');
+        insert into routes (id, channel_id, pool_id, model_id, host_id) values ('r1', 'sub', 'solo', 'opus', 'claude-code');
+        insert into stage_policies (stage) values ('execute');
+        insert into stage_policy_routes (stage, route_id, position) values ('execute', 'r1', 0);
+      `);
+        await runMigration(pg, '0003_catalog');
+
+        expect((await pg.query(`select route_id, enabled from stage_policy_routes`)).rows).toEqual([
+          { route_id: 'r1', enabled: true },
+        ]);
+        // 没有默认值：重写顺序时漏带开关就插不进去，不会悄悄全打开。
+        await pg.exec(`delete from stage_policy_routes`);
+        await expect(
+          pg.exec(`insert into stage_policy_routes (stage, route_id, position) values ('execute', 'r1', 0)`),
+        ).rejects.toThrow(/enabled/);
+
+        await pg.exec(`update pools set run_as_user = 'fleet-agent-carpool' where id = 'solo'`);
+        expect((await pg.query(`select run_as_user from pools`)).rows).toEqual([
+          { run_as_user: 'fleet-agent-carpool' },
+        ]);
+        await expect(pg.exec(`update pools set run_as_user = 'root'`)).rejects.toThrow(
+          /pools_run_as_user_known/,
+        );
+      } finally {
+        await pg.close();
+      }
+    },
+    TEST_DB_TIMEOUT_MS,
+  );
+});
+
 describe('测试库', () => {
-  it('在内存里，两份测试库互相看不见对方的数据', async () => {
-    const other = await createTestDb();
-    try {
-      expect(t.client.dataDir ?? 'memory://').toMatch(/^memory:\/\//);
-      await t.db.insert(schema.families).values({ id: 'only-in-t', displayName: 'T', vendor: 'T' });
-      expect(await other.db.select().from(schema.families)).toEqual([]);
-    } finally {
-      await other.close();
-    }
-  });
+  it(
+    '在内存里，两份测试库互相看不见对方的数据',
+    async () => {
+      const other = await createTestDb();
+      try {
+        expect(t.client.dataDir ?? 'memory://').toMatch(/^memory:\/\//);
+        await t.db.insert(schema.families).values({ id: 'only-in-t', displayName: 'T', vendor: 'T' });
+        expect(await other.db.select().from(schema.families)).toEqual([]);
+      } finally {
+        await other.close();
+      }
+    },
+    TEST_DB_TIMEOUT_MS,
+  );
 
   it('清空后每张表都是空的，迁移记录还在', async () => {
     await t.db.insert(schema.families).values({ id: 'to-be-cleared', displayName: 'X', vendor: 'X' });

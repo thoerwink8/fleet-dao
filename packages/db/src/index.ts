@@ -1,5 +1,6 @@
 // Postgres 表结构（Drizzle）、迁移、查询。测试用的内存库在 @fleet-dao/db/testing。
 // 实时推送的约定（频道名、哪些表写入会发通知、载荷形状）在 @fleet-dao/shared 的 realtime.ts。
+export * from './catalog.ts';
 export * from './client.ts';
 export * from './domain-map.ts';
 export * from './migrate.ts';

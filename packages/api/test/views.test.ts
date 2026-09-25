@@ -21,6 +21,19 @@ describe('硬禁令（写死在 shared/bans.ts）', () => {
     expect(hardBanFor(gpt, 'ui')?.id).toBe('gpt-no-ui');
     expect(hardBanFor({ ...gpt, family: ' gpt ' }, 'ui')?.id).toBe('gpt-no-ui');
     expect(hardBanFor(opus, 'ui')).toBeUndefined();
+    // 族写成 openai、或族写错了但名字里带 gpt，照样认成 GPT。
+    expect(hardBanFor({ ...gpt, family: 'OpenAI' }, 'ui')?.id).toBe('gpt-no-ui');
+    expect(hardBanFor({ ...gpt, family: 'luna' }, 'ui')?.id).toBe('gpt-no-ui');
+    expect(hardBanFor({ ...gpt, family: 'openai' }, 'review')).toBeUndefined();
+  });
+
+  it('判路由时连上游串和别名一起看：模型叫 opus、上游发的是 Fable 或 GPT，照样拦', () => {
+    expect(hardBanFor({ ...opus, upstreamModel: 'claude-fable-5-1' }, 'execute')?.id).toBe('no-fable');
+    expect(hardBanFor({ ...opus, upstreamAliases: ['fable'] }, 'execute')?.id).toBe('no-fable');
+    expect(hardBanFor({ ...opus, upstreamModel: 'gpt-5.6' }, 'ui')?.id).toBe('gpt-no-ui');
+    expect(
+      hardBanFor({ ...opus, upstreamModel: 'claude-opus-5-5', upstreamAliases: [] }, 'ui'),
+    ).toBeUndefined();
   });
 
   it('Fable 按模型认（它属 claude 族），哪个阶段都不用', () => {

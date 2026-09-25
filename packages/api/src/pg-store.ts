@@ -456,12 +456,14 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
           .from(stagePolicyRoutes)
           .orderBy(asc(stagePolicyRoutes.stage), asc(stagePolicyRoutes.position)),
       ]);
-      return rows.map((r) =>
-        toStagePolicy(
+      return rows.map((r) => {
+        const mine = links.filter((l) => l.stage === r.stage);
+        return toStagePolicy(
           r,
-          links.filter((l) => l.stage === r.stage).map((l) => l.routeId),
-        ),
-      );
+          mine.map((l) => l.routeId),
+          mine.filter((l) => !l.enabled).map((l) => l.routeId),
+        );
+      });
     },
     async listBans() {
       return (await db.select().from(bans).orderBy(asc(bans.id))).map(toBan);
@@ -483,13 +485,12 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
           .from(stagePolicies)
           .where(eq(stagePolicies.stage, stage))
           .for('update');
-        const currentIds = (
-          await tx
-            .select({ routeId: stagePolicyRoutes.routeId })
-            .from(stagePolicyRoutes)
-            .where(eq(stagePolicyRoutes.stage, stage))
-            .orderBy(asc(stagePolicyRoutes.position))
-        ).map((r) => r.routeId);
+        const current = await tx
+          .select({ routeId: stagePolicyRoutes.routeId, enabled: stagePolicyRoutes.enabled })
+          .from(stagePolicyRoutes)
+          .where(eq(stagePolicyRoutes.stage, stage))
+          .orderBy(asc(stagePolicyRoutes.position));
+        const currentIds = current.map((r) => r.routeId);
         const pinned = row?.pinned ?? false;
         const same =
           pinned === expected.pinned &&
@@ -500,11 +501,18 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
           .insert(stagePolicies)
           .values({ stage, pinned: next.pinned })
           .onConflictDoUpdate({ target: stagePolicies.stage, set: { pinned: next.pinned } });
+        // 排序是删掉重插：每条路由的开关照原样带回去（关着的仍关着）；这次新挂进来的开着。
+        const enabledBefore = new Map(current.map((r) => [r.routeId, r.enabled]));
         await tx.delete(stagePolicyRoutes).where(eq(stagePolicyRoutes.stage, stage));
         if (next.routeIds.length > 0) {
-          await tx
-            .insert(stagePolicyRoutes)
-            .values(next.routeIds.map((routeId, position) => ({ stage, routeId, position })));
+          await tx.insert(stagePolicyRoutes).values(
+            next.routeIds.map((routeId, position) => ({
+              stage,
+              routeId,
+              position,
+              enabled: enabledBefore.get(routeId) ?? true,
+            })),
+          );
         }
         await insertAudit(tx, entry);
         return 'ok';

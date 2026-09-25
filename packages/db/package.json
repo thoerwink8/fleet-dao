@@ -11,12 +11,14 @@
   "scripts": {
     "db:generate": "drizzle-kit generate && biome format --write migrations",
     "db:migrate": "node src/bin/migrate.ts",
-    "db:seed": "node src/bin/seed.ts"
+    "db:seed": "node src/bin/seed.ts",
+    "db:catalog": "node src/bin/catalog.ts"
   },
   "dependencies": {
     "@fleet-dao/shared": "workspace:*",
     "drizzle-orm": "^0.45.3",
-    "postgres": "^3.4.9"
+    "postgres": "^3.4.9",
+    "zod": "^4.6.5"
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.5.8",

@@ -89,7 +89,7 @@ export async function setStageOrder(
   if (routeIds.length > 0) {
     await db
       .insert(stagePolicyRoutes)
-      .values(routeIds.map((routeId, position) => ({ stage, routeId, position })));
+      .values(routeIds.map((routeId, position) => ({ stage, routeId, position, enabled: true })));
   }
 }
 
