@@ -13,7 +13,7 @@ export interface PlannedSubtask {
   touches?: string[];
   dependsOn?: string[];
   stage?: SubtaskStage;
-  /** low = 纯文档这类，不要第二意见。 */
+  /** 只有 high 合并前要第二意见（design 第五节：审官默认不要，只留先审后合一档）；没写按 high 算（拿不准按先审后合）。 */
   risk?: Risk;
   acceptance?: string[];
   /** 人闸：会对外发布（release）、花钱（spend）、删数据（delete）的，合并前要人批。 */
@@ -133,7 +133,7 @@ export function validatePlan(input: PlanInput): PlanDecision {
       touches: normalizeTouches(s.touches),
       dependsOn: [...new Set(s.dependsOn ?? [])],
       stage: s.stage === 'ui' ? 'ui' : 'execute',
-      secondOpinion: s.risk !== 'low',
+      secondOpinion: (s.risk ?? 'high') === 'high',
       acceptance: s.acceptance ?? [],
       holds: normalizeHolds([...(input.holds ?? []), ...(s.holds ?? [])]),
     })),

@@ -98,17 +98,21 @@ describe('方案校验', () => {
     expect(validatePlan({ subtasks: [], maxSubtasks: 12 }).ok).toBe(false);
   });
 
-  it('低风险（纯文档）不要第二意见；UI 活单独标出来', () => {
+  it('只有高风险合并前要第二意见，没写风险按高风险算；UI 活单独标出来', () => {
     const plan = validatePlan({
       subtasks: [
         { key: 'docs', title: 'd', touches: ['docs'], risk: 'low' },
+        { key: 'api', title: 'a', touches: ['api'], risk: 'normal' },
+        { key: 'db', title: 'm', touches: ['db'], risk: 'high' },
         { key: 'page', title: 'p', touches: ['web'], stage: 'ui' },
       ],
       maxSubtasks: 12,
     });
-    expect(plan.ok && plan.subtasks.map((s) => [s.secondOpinion, s.stage])).toEqual([
-      [false, 'execute'],
-      [true, 'ui'],
+    expect(plan.ok && plan.subtasks.map((s) => [s.key, s.secondOpinion, s.stage])).toEqual([
+      ['docs', false, 'execute'],
+      ['api', false, 'execute'],
+      ['db', true, 'execute'],
+      ['page', true, 'ui'],
     ]);
   });
 

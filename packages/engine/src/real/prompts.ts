@@ -152,7 +152,7 @@ function deliverBlock(input: PromptInput): string {
 {"key": "login-form", "title": "登录表单加验证码输入", "touches": ["src/login/"], "dependsOn": [], "stage": "execute", "risk": "normal", "acceptance": ["……"], "holds": []}
 - key：小写字母、数字、连字符，子任务之间不重复；dependsOn 写别的子任务的 key。
 - touches：会改的文件或目录（前缀相同算同一块地方，引擎据此排先后，别漏写——没写就当整个仓，跟谁都撞）。
-- stage：写码是 "execute"，界面活是 "ui"。risk：纯文档这类写 "low"（不要第二意见），一般 "normal"，碰钱、数据、发布的 "high"。
+- stage：写码是 "execute"，界面活是 "ui"。risk：纯文档、小配置写 "low"；一般改动写 "normal"（CI 绿就合，合并前不审）；碰安全、权限、数据（迁移、删改）、往公开处写东西、系统核心的写 "high"（合并前另一个会话审一次）。拿不准写 "high"。
 - holds：会对外发布、花钱、删数据的写 "release" / "spend" / "delete"（合并前要人批）。
 一个子任务一个会话能做完、各自能单独合进主线。只写这两个文件，不改仓里别的文件。写完就结束，不用 fleet done。`;
     case 'review':
