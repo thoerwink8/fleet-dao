@@ -3,16 +3,20 @@ import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
+  appendProgressEvents,
   decideApproval,
   getApproval,
+  openAlertsByPrefix,
   openApproval,
   openEngineAsk,
+  PROGRESS_BATCH_MAX,
+  resolveAlertByKey,
   runProgressFacts,
   upsertAlert,
 } from '../src/queries/engine.ts';
 import { asks, notifications, progressEvents } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
-import { addRepo, addRoute, addRun, addTask, ago, catalog, MIN, NOW } from './helpers.ts';
+import { addRepo, addRoute, addRun, addTask, ago, catalog, later, MIN, NOW } from './helpers.ts';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -173,6 +177,98 @@ describe('upsertAlert', () => {
     const [row] = await t.db.select().from(notifications).where(eq(notifications.id, id));
     expect(row?.resolvedAt).toBeNull();
     expect(row?.resolvedBy).toBeNull();
+  });
+});
+
+describe('resolveAlertByKey', () => {
+  it('处理掉一条；再处理回 already_resolved，不改处理人和时刻；没报过的回 not_found', async () => {
+    await upsertAlert(t.db, {
+      dedupeKey: 'pool-hold:carpool-1',
+      level: 'decision',
+      taskId: null,
+      title: '账号池暂停',
+      body: '要重新登录',
+    });
+    expect(await resolveAlertByKey(t.db, { dedupeKey: 'pool-hold:carpool-1', by: 'engine', at: NOW })).toBe('ok');
+    expect(
+      await resolveAlertByKey(t.db, { dedupeKey: 'pool-hold:carpool-1', by: 'someone', at: later(MIN) }),
+    ).toBe('already_resolved');
+    const [row] = await t.db
+      .select()
+      .from(notifications)
+      .where(eq(notifications.dedupeKey, 'pool-hold:carpool-1'));
+    expect(row?.resolvedAt).toEqual(NOW);
+    expect(row?.resolvedBy).toBe('engine');
+    expect(await resolveAlertByKey(t.db, { dedupeKey: 'pool-hold:never', by: 'engine' })).toBe('not_found');
+  });
+});
+
+describe('openAlertsByPrefix', () => {
+  it('只给没处理的、前缀逐字对上的；前缀里的 % 和 _ 不当通配符', async () => {
+    for (const key of ['pool-hold:a', 'pool-hold:b', 'pool-holder:x', 'stuck:1', 'p%_:1', 'pxx:1']) {
+      await upsertAlert(t.db, { dedupeKey: key, level: 'alert', taskId: null, title: key, body: '' });
+    }
+    await resolveAlertByKey(t.db, { dedupeKey: 'pool-hold:b', by: 'engine' });
+    expect((await openAlertsByPrefix(t.db, 'pool-hold:')).map((a) => a.dedupeKey)).toEqual(['pool-hold:a']);
+    expect((await openAlertsByPrefix(t.db, 'p%_:')).map((a) => a.dedupeKey)).toEqual(['p%_:1']);
+  });
+
+  it('空前缀明确拒绝（那等于全表）', async () => {
+    await expect(openAlertsByPrefix(t.db, '')).rejects.toThrow('空');
+  });
+});
+
+describe('appendProgressEvents', () => {
+  it('一批写进去，runProgressFacts 读得到（工具、改文件、被动读到的待办清单）', async () => {
+    const { run } = await fixtures();
+    expect(
+      await appendProgressEvents(t.db, run.id, [
+        {
+          at: ago(3 * MIN),
+          kind: 'tool',
+          payload: { phase: 'start', toolUseId: 't1', name: 'Bash', action: 'run', summary: 'pnpm test' },
+        },
+        { at: ago(2 * MIN), kind: 'file', payload: { path: 'src/a.ts', tool: 'Edit' } },
+        {
+          at: ago(MIN),
+          kind: 'plan',
+          payload: { steps: [{ title: '改 a.ts', state: 'in_progress' }], source: 'stream' },
+        },
+      ]),
+    ).toBe('written');
+    const facts = await runProgressFacts(t.db, run.id);
+    expect(facts?.lastEventAt).toEqual(ago(MIN));
+    expect(facts?.lastStepAdvanceAt).toEqual(ago(MIN));
+    const rows = await t.db.select().from(progressEvents).where(eq(progressEvents.runId, run.id));
+    expect(rows.map((r) => r.kind).sort()).toEqual(['file', 'plan', 'tool']);
+  });
+
+  it('会话行不在回 run_not_found，一条不写', async () => {
+    const missing = randomUUID();
+    expect(await appendProgressEvents(t.db, missing, [{ at: NOW, kind: 'say', payload: { text: '嗨' } }])).toBe(
+      'run_not_found',
+    );
+    expect(await t.db.select().from(progressEvents)).toEqual([]);
+  });
+
+  it('plan 没有 steps 数组、时刻读不出、超过一批上限：抛错，一条不写', async () => {
+    const { run } = await fixtures();
+    await expect(
+      appendProgressEvents(t.db, run.id, [
+        { at: NOW, kind: 'say', payload: { text: '先说一句' } },
+        { at: NOW, kind: 'plan', payload: { items: [] } },
+      ]),
+    ).rejects.toThrow('steps');
+    await expect(
+      appendProgressEvents(t.db, run.id, [{ at: new Date('坏时刻'), kind: 'say', payload: { text: 'x' } }]),
+    ).rejects.toThrow('时刻');
+    const tooMany = Array.from({ length: PROGRESS_BATCH_MAX + 1 }, () => ({
+      at: NOW,
+      kind: 'say' as const,
+      payload: { text: 'x' },
+    }));
+    await expect(appendProgressEvents(t.db, run.id, tooMany)).rejects.toThrow('上限');
+    expect(await t.db.select().from(progressEvents)).toEqual([]);
   });
 });
 

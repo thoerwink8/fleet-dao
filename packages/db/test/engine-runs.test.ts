@@ -78,6 +78,7 @@ describe('openSessionRun', () => {
       endedAt: null,
       outcome: null,
       failureCode: null,
+      failureMessage: null,
       contextTokens: null,
       sessionCostUsd: null,
       stopRequested: null,
@@ -309,6 +310,22 @@ describe('finishSessionRun', () => {
     expect(result).toBe('finished');
     const run = await getSessionRun(t.db, id);
     expect(run?.endedAt).toEqual(later(10 * MIN));
+  });
+
+  it('失败的原话读得回来（续会话时写进提示词），超长的截到 2000 字', async () => {
+    const id = runId();
+    await openAndStart(id);
+    await finishSessionRun(t.db, {
+      id,
+      outcome: 'failed',
+      endedAt: later(MIN),
+      failureCode: 'quota_exhausted',
+      failureMessage: `额度用满${'。'.repeat(3000)}`,
+    });
+    const run = await getSessionRun(t.db, id);
+    expect(run?.failureCode).toBe('quota_exhausted');
+    expect(run?.failureMessage?.startsWith('额度用满')).toBe(true);
+    expect(run?.failureMessage).toHaveLength(2000);
   });
 
   it('不知道的用量是 null，不是 0', async () => {

@@ -3,6 +3,7 @@
 // 不经 JSON 边界）。
 import type {
   HostId,
+  ProgressKind,
   QuotaWindowKind,
   RunAsUser,
   RunOutcome,
@@ -61,6 +62,8 @@ export interface SessionRunState {
   endedAt: Date | null;
   outcome: RunOutcome | null;
   failureCode: string | null;
+  /** 上一轮为什么断了（续会话时写进提示词）。 */
+  failureMessage: string | null;
   contextTokens: number | null;
   sessionCostUsd: number | null;
   /** session_stops 里有这一行就给出。 */
@@ -88,6 +91,7 @@ function mapSessionRun(
     endedAt: row.endedAt,
     outcome: row.outcome,
     failureCode: row.failureCode,
+    failureMessage: row.failureMessage,
     contextTokens: row.contextTokens,
     sessionCostUsd: row.sessionCostUsd,
     stopRequested: stop ? { at: stop.requestedAt, reason: stop.reason } : null,
@@ -627,6 +631,90 @@ export async function upsertAlert(
     .returning({ id: notifications.id, created: sql<boolean>`(xmax = 0)` });
   if (!row) throw new Error(`报警 ${input.dedupeKey} 写不进去`);
   return { id: row.id, created: row.created };
+}
+
+/**
+ * 按 dedupe_key 把一条报警标成已处理（引擎看到事情好了：挂起的账号池跑通了一次会话）。已处理的不动（不改处理人、处理时刻），
+ * 回 already_resolved；没有这条回 not_found——调用方分得清「处理掉了」「本来就处理过」「根本没报过」。
+ */
+export async function resolveAlertByKey(
+  db: Db,
+  input: { dedupeKey: string; by: string; at?: Date },
+): Promise<'ok' | 'already_resolved' | 'not_found'> {
+  const at = input.at ?? new Date();
+  const [row] = await db
+    .update(notifications)
+    .set({ resolvedAt: at, resolvedBy: input.by, updatedAt: at })
+    .where(and(eq(notifications.dedupeKey, input.dedupeKey), isNull(notifications.resolvedAt)))
+    .returning({ id: notifications.id });
+  if (row) return 'ok';
+  const [existing] = await db
+    .select({ id: notifications.id })
+    .from(notifications)
+    .where(eq(notifications.dedupeKey, input.dedupeKey));
+  return existing ? 'already_resolved' : 'not_found';
+}
+
+export interface OpenAlert {
+  id: string;
+  dedupeKey: string;
+  level: 'decision' | 'alert' | 'daily';
+  taskId: string | null;
+  title: string;
+  body: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+/**
+ * 还没处理的、dedupe_key 以 prefix 开头的报警，老的在前（例如 `pool-hold:` 找出被挂起的账号池）。
+ * 按前缀逐字比（starts_with），不走 LIKE：前缀里的 % 和 _ 不会变成通配符。空前缀等于全表，明确拒绝。
+ */
+export async function openAlertsByPrefix(db: Db, prefix: string): Promise<OpenAlert[]> {
+  if (!prefix) throw new Error('报警前缀是空的：那等于把所有没处理的报警都拿出来');
+  return db
+    .select({
+      id: notifications.id,
+      dedupeKey: notifications.dedupeKey,
+      level: notifications.level,
+      taskId: notifications.taskId,
+      title: notifications.title,
+      body: notifications.body,
+      createdAt: notifications.createdAt,
+      updatedAt: notifications.updatedAt,
+    })
+    .from(notifications)
+    .where(and(isNull(notifications.resolvedAt), sql`starts_with(${notifications.dedupeKey}, ${prefix})`))
+    .orderBy(asc(notifications.createdAt), asc(notifications.id));
+}
+
+/** 一次最多写这么多条：插头一秒能吐几十条工具事件，引擎攒一批再写；再多说明攒批的地方坏了。 */
+export const PROGRESS_BATCH_MAX = 500;
+
+/**
+ * 引擎从过程记录里被动读到的进度（说话、工具、改文件、跑测试、待办清单）按批追加进 progress_events。
+ * 会话行不在回 run_not_found（一条都不写）；plan 的 payload 没有 steps 数组、条数超上限、时刻读不出都直接抛——
+ * 这些是引擎自己的错，不能静默丢（看板的进度条会变成 0/0）。整批一个语句，要么全进要么全不进。
+ */
+export async function appendProgressEvents(
+  db: Db,
+  runId: string,
+  events: readonly { at: Date; kind: ProgressKind; payload: unknown }[],
+): Promise<'written' | 'run_not_found'> {
+  if (events.length > PROGRESS_BATCH_MAX) {
+    throw new Error(`一批进度事件 ${events.length} 条，超过上限 ${PROGRESS_BATCH_MAX}`);
+  }
+  for (const [i, e] of events.entries()) {
+    if (!(e.at instanceof Date) || Number.isNaN(e.at.getTime())) throw new Error(`第 ${i + 1} 条进度事件的时刻读不出`);
+    if (e.kind === 'plan' && !Array.isArray(asRecord(e.payload)?.steps)) {
+      throw new Error(`第 ${i + 1} 条进度事件是 plan，但 payload 里没有 steps 数组`);
+    }
+  }
+  const [run] = await db.select({ id: sessionRuns.id }).from(sessionRuns).where(eq(sessionRuns.id, runId));
+  if (!run) return 'run_not_found';
+  if (events.length === 0) return 'written';
+  await db.insert(progressEvents).values(events.map((e) => ({ runId, at: e.at, kind: e.kind, payload: e.payload })));
+  return 'written';
 }
 
 export interface ApprovalRecord {
