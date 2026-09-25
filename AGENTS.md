@@ -36,6 +36,7 @@
 ## 本仓（fleet-dao）
 - 设计看 `docs/design.md`，计划看 `docs/plan.md`；需求文档在 `specs/<编号>-<短名>/`（需求、方案、结果）。
 - 在 fleet 流程里干活时，用 `fleet` 命令汇报进度、提问、交活（`fleet --help`）。
+- 引擎接活之前，本机干活也照 `docs/design.md` 第五节走：风险三档定第二意见挡不挡合并，第二意见换厂商；PR 正文写明档位和理由。
 - 提交前跑 `pnpm check`（格式、类型、测试、公开仓卫生检查，要秒级到分钟级）。
 - 后端直接用 Node 22 运行 TypeScript：只写可擦除的类型写法（不用 enum、参数属性、namespace），相对导入带 `.ts` 后缀。
 - 这是公开仓：上面「底线」里公开仓那条在这里处处适用。卫生检查（packages/hygiene）在三处跑：推之前（`pnpm install` 设好的 git pre-push 钩子；引擎推分支在 packages/github 里自己扫）、`pnpm check`、CI。内容像密钥的拦，密钥文件名（.gitignore 标记段里的 `.secrets/`、`*.pass`、`*.key`、`*.pem`…）被 `git add -f` 强行加进来的也拦；真实的组织编号、账号靠已知敏感值名单认（不进仓：本机 `~/.fleet-dao/sensitive-values.txt`，名单没读到检查不算过）。真该放行的写进它的白名单并写明理由；输出只有文件、行、规则名，不打值。

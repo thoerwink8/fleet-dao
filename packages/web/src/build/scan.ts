@@ -114,6 +114,21 @@ function findAll(text: string, lower: string, term: string, word: boolean): numb
   return found;
 }
 
+/** 扫一段文字（产物里的一个文件，或测试里渲染出来的一页）；file 只用来标明是哪里的字。 */
+export function scanText(file: string, text: string, terms: readonly string[] = BUILTIN_TERMS): ScanHit[] {
+  const hits: ScanHit[] = [];
+  const lower = text.toLowerCase();
+  for (const term of terms.map((t) => t.toLowerCase())) {
+    for (const at of findAll(text, lower, term, false))
+      hits.push({ file, term, context: around(text, at, term.length) });
+  }
+  for (const word of BUILTIN_WORDS) {
+    for (const at of findAll(text, lower, word, true))
+      hits.push({ file, term: word, context: around(text, at, word.length) });
+  }
+  return hits;
+}
+
 /**
  * 扫一个目录。一个文件都没扫到直接报错：「没扫到」不能冒充「扫了没事」
  * （构建输出目录写错、构建没跑，都会走到这里）。
@@ -137,16 +152,8 @@ export function scanDir(dir: string, terms: readonly string[] = BUILTIN_TERMS): 
     if (ext === '.map') hits.push({ file, term: '源码对照文件（sourcemap）', context: file });
     if (!TEXT.has(ext)) continue;
     const text = readFileSync(abs, 'utf8');
-    const lower = text.toLowerCase();
-    for (const term of lowerTerms) {
-      for (const at of findAll(text, lower, term, false))
-        hits.push({ file, term, context: around(text, at, term.length) });
-    }
-    for (const word of BUILTIN_WORDS) {
-      for (const at of findAll(text, lower, word, true))
-        hits.push({ file, term: word, context: around(text, at, word.length) });
-    }
-    const map = lower.indexOf('sourcemappingurl');
+    hits.push(...scanText(file, text, lowerTerms));
+    const map = text.toLowerCase().indexOf('sourcemappingurl');
     if (map >= 0) hits.push({ file, term: 'sourceMappingURL', context: around(text, map, 16) });
   }
   return { files: files.length, hits };
