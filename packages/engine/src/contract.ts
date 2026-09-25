@@ -3,6 +3,7 @@
 // 编号的拼法（requirementWorkflowId、subtaskWorkflowId）进了在途任务的历史：改格式要用 patched()。
 
 import type { Repo, StageKind, SubtaskState, TaskState } from '@fleet-dao/shared';
+import { AGENT_EVENT_WAKE_KINDS as SHARED_WAKE_KINDS } from '@fleet-dao/shared/workflow-ids';
 import { defineQuery, defineSignal } from '@temporalio/workflow';
 import type { SubtaskSpec } from './decisions/plan.ts';
 import type { Limits } from './limits.ts';
@@ -293,12 +294,8 @@ export interface AgentEventCommand {
   askId?: string | undefined;
 }
 
-/** 会改变走向、才值得叫醒工作流的几类 fleet 命令；其余（say、plan）只进库，发来了引擎也不理。 */
-export const AGENT_EVENT_WAKE_KINDS = [
-  'ask',
-  'done',
-  'blocked',
-] as const satisfies readonly AgentEventCommand['kind'][];
+/** 会改变走向、才值得叫醒工作流的几类 fleet 命令；其余（say、plan）只进库，发来了引擎也不理。和后端共用一份。 */
+export const AGENT_EVENT_WAKE_KINDS: readonly AgentEventCommand['kind'][] = SHARED_WAKE_KINDS;
 
 /** 批准或拒绝人闸。点名批准编号（卡片上带的）或子任务；都不点名的不受理（一次批一张，不一把全批）。 */
 export interface ApprovalCommand {

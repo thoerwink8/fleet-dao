@@ -24,3 +24,11 @@ export function subtaskWorkflowId(subtaskId: string): string {
 export function mergeQueueWorkflowId(repo: WorkflowRepoRef): string {
   return `mq:${repo.owner}/${repo.name}`;
 }
+
+/**
+ * fleet 命令写库之后，只有这几类值得叫醒工作流（会改变走向）；say、plan 只进库，驾驶舱从库里读。
+ * 每条都发的话，一个需求二十来个子任务就能把工作流的历史撑到上万条事件，撞上 Temporal 每条执行 1 万个信号的上限后，
+ * 连叫停都发不进去。叫醒直接发给会话所属的工作流：子任务的会话发 subtaskWorkflowId，需求自己的会话发需求工作流。
+ */
+export const AGENT_EVENT_WAKE_KINDS = ['ask', 'done', 'blocked'] as const;
+export type AgentEventWakeKind = (typeof AGENT_EVENT_WAKE_KINDS)[number];
