@@ -1,4 +1,5 @@
-// 干活的记录：仓、需求、子任务、会话、进度、追问、状态变化、PR 镜像、需求文档索引。
+// 干活的记录：仓、需求、子任务、会话、叫停请求、进度、追问、人闸批准、状态变化、PR 镜像、需求文档索引。
+import type { RunAsUser } from '@fleet-dao/shared';
 import { sql } from 'drizzle-orm';
 import {
   bigint,
@@ -21,6 +22,7 @@ import {
   prChecks,
   progressKind,
   prState,
+  RUN_AS_USERS,
   runOutcome,
   stageKind,
   stateEntity,
@@ -60,6 +62,18 @@ export const tasks = pgTable(
     /** 做完标准，引擎从需求文档写进来（fleet task 要给会话看）。 */
     acceptance: text('acceptance').array().notNull().default(sql`'{}'::text[]`),
     createdAt: timestamp('created_at', tz).notNull().defaultNow(),
+    /** 引擎工作流此刻在哪个大阶段（分诊、写方案、执行……），白话见 doing。 */
+    phase: text('phase'),
+    /** 正在做什么的白话，例如「等第 2 个子任务的 CI」。 */
+    doing: text('doing'),
+    docs: jsonb('docs')
+      .$type<{ requirement?: string; plan?: string; result?: string }>()
+      .notNull()
+      .default({}),
+    /** 最近一次卡住或失败的白话原因；顺利推进时清空。 */
+    lastProblem: text('last_problem'),
+    /** 由 saveTaskSnapshot 显式写；从没做过快照的任务是空，不是「没变化」。 */
+    updatedAt: timestamp('updated_at', tz),
   },
   (t) => [
     unique('tasks_repo_issue_unique').on(t.repoId, t.issueNumber),
@@ -81,9 +95,17 @@ export const subtasks = pgTable(
     state: subtaskState('state').notNull().default('pending'),
     prNumber: integer('pr_number'),
     waitingOn: text('waiting_on'),
+    /** 方案里的子任务编号（人看的，例如 login-form），fleet 命令和引擎按它认子任务。 */
+    key: text('key'),
+    workflowId: text('workflow_id'),
+    /** 人闸标记（release / spend / delete……）；非空 = 合并前要人批。 */
+    holds: text('holds').array().notNull().default(sql`'{}'::text[]`),
+    /** 重拆方案时旧子任务标这个时刻，不删（已有 session_runs 引用删不掉）；非空 = 已作废，读的地方要跳过。 */
+    supersededAt: timestamp('superseded_at', tz),
   },
   (t) => [
-    unique('subtasks_task_index_unique').on(t.taskId, t.index),
+    // 部分唯一：重拆方案时新子任务会和旧的撞 index，旧子任务标了作废就不算数了。
+    uniqueIndex('subtasks_task_index_unique').on(t.taskId, t.index).where(sql`${t.supersededAt} is null`),
     // 给组合外键用：依赖和会话引用的子任务必须属于同一个需求。
     unique('subtasks_task_id_id_unique').on(t.taskId, t.id),
   ],
@@ -145,6 +167,23 @@ export const sessionRuns = pgTable(
     runMs: bigint('run_ms', { mode: 'number' }).generatedAlwaysAs(
       sql`(extract(epoch from (ended_at - started_at)) * 1000)::bigint`,
     ),
+    /** 执行体自己的会话编号（续会话用）。 */
+    sessionId: text('session_id'),
+    workflowId: text('workflow_id'),
+    /** 这次会话跑在哪个系统用户下（引擎按池挑，从不切号）。 */
+    runAsUser: text('run_as_user').$type<RunAsUser>(),
+    worktreePath: text('worktree_path'),
+    /** 起出来的会话进程在哪（插头的 onSpawn 报上来的），工人重启后看守和收尾靠它找回旧会话。 */
+    handle: jsonb('handle').$type<{ pid?: number; scope?: string }>(),
+    /** 插头判定的失败原因（quota_exhausted、model_mismatch……）或 SESSION_LOST 之类的结构化码。 */
+    failureCode: text('failure_code'),
+    /** 白话失败详情，写入时截到 2000 字。 */
+    failureMessage: text('failure_message'),
+    /** 这次会话对选路账本算胜负：ok 记一胜、fail 记一败、neutral 不进战绩（叫停、环境问题）。 */
+    routeOutcome: text('route_outcome').$type<'ok' | 'fail' | 'neutral'>(),
+    /** 执行体报的会话累计花费（续会话时含前几轮），对账用；不知道就是空，不记 0。 */
+    sessionCostUsd: numeric('session_cost_usd', { precision: 14, scale: 6, mode: 'number' }),
+    contextTokens: bigint('context_tokens', { mode: 'number' }),
   },
   (t) => [
     foreignKey({
@@ -168,13 +207,29 @@ export const sessionRuns = pgTable(
     ),
     check(
       'session_runs_usage_nonneg',
-      sql`coalesce(${t.inputTokens}, 0) >= 0 and coalesce(${t.outputTokens}, 0) >= 0 and coalesce(${t.costUsd}, 0) >= 0`,
+      sql`coalesce(${t.inputTokens}, 0) >= 0 and coalesce(${t.outputTokens}, 0) >= 0 and coalesce(${t.costUsd}, 0) >= 0 and coalesce(${t.sessionCostUsd}, 0) >= 0 and coalesce(${t.contextTokens}, 0) >= 0`,
+    ),
+    check(
+      'session_runs_run_as_user_known',
+      sql`${t.runAsUser} is null or ${t.runAsUser} in (${sql.raw(RUN_AS_USERS.map((u) => `'${u}'`).join(', '))})`,
+    ),
+    check(
+      'session_runs_route_outcome_known',
+      sql`${t.routeOutcome} is null or ${t.routeOutcome} in ('ok', 'fail', 'neutral')`,
     ),
     index('session_runs_task_idx').on(t.taskId, t.queuedAt),
     // 在途会话（还没结束的）按路由查，算账号池的并发。
     index('session_runs_open_idx').on(t.routeId).where(sql`${t.endedAt} is null`),
+    index('session_runs_session_id_idx').on(t.sessionId),
   ],
 );
+
+/** 叫停一次会话的请求：可能早于 session_runs 那一行插入（起会话的活动还没返回时工作流只知道 runId），不设外键。 */
+export const sessionStops = pgTable('session_stops', {
+  runId: uuid('run_id').primaryKey(),
+  requestedAt: timestamp('requested_at', tz).notNull().defaultNow(),
+  reason: text('reason').notNull(),
+});
 
 /** 会话过程中的一条进度或动作。只追加。 */
 export const progressEvents = pgTable(
@@ -231,6 +286,50 @@ export const asks = pgTable(
       sql`(${t.answer} is null) = (${t.answeredAt} is null) and (${t.answer} is null) = (${t.answeredBy} is null)`,
     ),
     index('asks_task_idx').on(t.taskId, t.askedAt),
+  ],
+);
+
+/**
+ * 人闸：请人批准这个子任务（或整个需求）进合并队列。批准 / 拒绝写一次，同一条 id 幂等；批过的头变了要另开一条。
+ * decision 三列（decision、decided_by、decided_at）要么全空要么全有：不许出现「批了但不知道谁批的」。
+ */
+export const approvals = pgTable(
+  'approvals',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    taskId: uuid('task_id')
+      .notNull()
+      .references(() => tasks.id),
+    subtaskId: uuid('subtask_id'),
+    /** 为什么要人批：release 对外发布、spend 花钱、delete 删数据（认不得的原样给人看）。 */
+    holds: text('holds').array().notNull(),
+    prNumber: integer('pr_number').notNull(),
+    /** 批的是这个头；之后头变了（返工、解冲突）要重新批。 */
+    head: text('head').notNull(),
+    title: text('title').notNull(),
+    summary: text('summary').notNull(),
+    requestedAt: timestamp('requested_at', tz).notNull().defaultNow(),
+    decision: text('decision').$type<'approved' | 'rejected'>(),
+    /** 谁批的 / 拒的（actor id）。 */
+    decidedBy: text('decided_by'),
+    decidedAt: timestamp('decided_at', tz),
+    reason: text('reason'),
+  },
+  (t) => [
+    foreignKey({
+      name: 'approvals_subtask_in_task_fk',
+      columns: [t.taskId, t.subtaskId],
+      foreignColumns: [subtasks.taskId, subtasks.id],
+    }),
+    check('approvals_pr_number_positive', sql`${t.prNumber} > 0`),
+    check(
+      'approvals_decision_shape',
+      sql`(${t.decision} is null) = (${t.decidedBy} is null) and (${t.decision} is null) = (${t.decidedAt} is null)`,
+    ),
+    check(
+      'approvals_decision_known',
+      sql`${t.decision} is null or ${t.decision} in ('approved', 'rejected')`,
+    ),
   ],
 );
 
