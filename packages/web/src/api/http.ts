@@ -6,12 +6,14 @@ import {
   AUTH_PREFIX,
   AuthRoutes,
   ChangeEventSchema,
+  CreateDemoLinkRequest,
   CSRF_HEADER,
   DevLoginRequest,
   FeishuAccessRequest,
   SSE_EVENTS,
   TaskActionRequest,
   UpdateChannelRequest,
+  UpdateDemoDefaultRequest,
   UpdateSettingRequest,
   UpdateStagePolicyRequest,
   WEB_API_PREFIX,
@@ -219,6 +221,20 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
         body: UpdateSettingRequest.parse(body),
       });
       return res.setting;
+    },
+    demoLinks: () => send('GET', apiUrl(R.demoLinks.path), R.demoLinks.response),
+    createDemoLink: (body) =>
+      send('POST', apiUrl(R.createDemoLink.path), R.createDemoLink.response, {
+        body: CreateDemoLinkRequest.parse(body),
+      }),
+    async revokeDemoLink(linkId) {
+      await send('DELETE', apiUrl(R.revokeDemoLink.path, { linkId }), R.revokeDemoLink.response);
+    },
+    async updateDemoDefault(body) {
+      const res = await send('PUT', apiUrl(R.updateDemoDefault.path), R.updateDemoDefault.response, {
+        body: UpdateDemoDefaultRequest.parse(body),
+      });
+      return res.defaultScope;
     },
     subscribe(listener, onStatus) {
       const make = opts.eventSource ?? ((url: string) => new EventSource(url, { withCredentials: true }));

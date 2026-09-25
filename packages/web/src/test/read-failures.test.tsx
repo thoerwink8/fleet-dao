@@ -49,7 +49,7 @@ describe('读不到时照实说，不冒充「没有」', () => {
     const board = api.board;
     api.board = (repoId) => (repoId === 'r-canary' ? boom() : board(repoId));
     renderApp(<TasksPage />, { api });
-    expect(await screen.findByText(/仓 fleet-dao-canary 的需求没读成/)).toBeTruthy();
+    expect(await screen.findByText(/仓 orbit-canary 的需求没读成/)).toBeTruthy();
     expect(await screen.findAllByText('登录页加手机验证码')).toBeTruthy();
   });
 
@@ -119,7 +119,7 @@ function Trigger({ action }: { action: 'reroute' | 'answer' }) {
       ...targetOf({
         id: 't-15',
         issueNumber: 15,
-        title: '飞书置顶盘面卡每 13 天自动重发',
+        title: '站内通知 7 天没读就再提醒一次',
         state: 'asking',
         priority: 3,
         requestedBy: 'u-lan',

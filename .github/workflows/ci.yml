@@ -28,5 +28,7 @@ jobs:
           printf '%s\n' "$FLEET_SENSITIVE_VALUES" > "$f"
           echo "FLEET_SENSITIVE_VALUES_FILE=$f" >> "$GITHUB_ENV"
       - run: pnpm check
+      # 演示版打包，打包完扫产物：出现真名、内部叫法、GitHub 地址、源码对照文件就红（法国发布时也是这一道）
+      - run: pnpm --filter ./packages/web run build:demo
       # 装机脚本的检查：退出码 2 = 有项没跑成，同样算红，别让「没跑」冒充「通过」
       - run: sudo bash deploy/test/run.sh

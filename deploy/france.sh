@@ -4,7 +4,7 @@
 # PostgreSQL 16（Ubuntu 自带的源，吃得到自动安全更新）、Temporal 服务端 1.32.0（Postgres 持久化，端口和旧系统错开）、
 # 本机上只许 root 和 fleet 连 Temporal 与库的 nft 表、AI 会话资源池 fleet-agents.slice 与起会话的脚本、
 # fleet 用户的 pnpm（corepack）、WireGuard 客户端（主动连香港，法国不开任何入站端口）、
-# 应用的本机配置与随机密钥、往香港传驾驶舱静态文件的钥匙。应用本身（引擎、后端、前端）由 deploy/release.sh 发布。
+# 应用的本机配置与随机密钥、往香港传驾驶舱静态文件的钥匙、把演示版的可见范围推到香港的单元。应用本身（引擎、后端、前端）由 deploy/release.sh 发布。
 # 旧系统的服务、端口、文件一概不动。端口表、怎么跑、怎么看健康、怎么回滚：docs/ops.md。
 #   bash deploy/france.sh           装：缺的补上，已有的不动
 #   bash deploy/france.sh --check   只读回和自检，不改任何东西
@@ -86,6 +86,11 @@ WEB_UPLOAD_KEY=/etc/fleet-dao/web-upload.key
 HK_KNOWN_HOSTS=/etc/fleet-dao/hk-known-hosts
 # 发布脚本发飞书网关用的钥匙（另一把）：香港把它限死成只能跑 fleet-gateway-deploy
 GATEWAY_DEPLOY_KEY=/etc/fleet-dao/gateway-deploy.key
+# 演示版的可见范围：驾驶舱后端（fleet）写在这里（api.env 的 FLEET_DEMO_DIR 就写它，后端的单元只放行这一处可写），
+# root 的 fleet-demo-scopes 把 scopes/ 推到香港（和发静态文件同一把上传钥匙）
+DEMO_DIR=/var/lib/fleet-dao/demo
+DEMO_SCOPES_BIN=/usr/local/sbin/fleet-demo-scopes
+DEMO_UNITS=(fleet-demo-scopes.service fleet-demo-scopes.path fleet-demo-scopes.timer)
 
 FLEET_WG_HK_ENDPOINT=""
 FLEET_WG_HK_PUBLIC_KEY=""
@@ -146,6 +151,7 @@ setup_identity() {
   ensure_dir /srv/fleet-dao root:root 755
   ensure_dir "$RELEASES_DIR" root:root 755
   ensure_dir /var/lib/fleet-dao fleet:fleet 750
+  ensure_dir "$DEMO_DIR" fleet:fleet 750
   ensure_dir /var/log/fleet-dao fleet:fleet 750
   ensure_dir /etc/fleet-dao root:fleet 750
   # 两个 GitHub 机器人的私钥放这里（root:fleet 640，手放，不进 git）：引擎读得到，会话用户和旧系统的用户读不到
@@ -621,6 +627,21 @@ setup_web_upload() {
 $line"
 }
 
+# 演示版的可见范围推到香港：范围目录一变就推（path 单元），每 10 分钟再补一次（timer）。推的脚本以 root 跑、
+# 只当数据读 fleet 写的范围文件（认不出的不推），和发布脚本用同一把上传钥匙
+setup_demo_scopes() {
+  step "演示版的可见范围推到香港（$DEMO_DIR/scopes → 香港演示版目录下的 scopes/）"
+  local u unit_changed=0
+  put_file "$DEMO_SCOPES_BIN" root:root 755 "$(<"$DEPLOY_DIR/france/fleet-demo-scopes.sh")"
+  for u in "${DEMO_UNITS[@]}"; do
+    put_file "/etc/systemd/system/$u" root:root 644 "$(<"$DEPLOY_DIR/france/$u")"
+    if ((WROTE)); then unit_changed=1; fi
+  done
+  if ((unit_changed)); then systemctl daemon-reload; fi
+  ensure_unit_running fleet-demo-scopes.path "$unit_changed"
+  ensure_unit_running fleet-demo-scopes.timer "$unit_changed"
+}
+
 readback() {
   step "读回"
   readback_secrets_dir
@@ -636,8 +657,31 @@ readback() {
   readback_firewall
   readback_app_config
   readback_web_upload
+  readback_demo_scopes
   readback_proxy_headers
   readback_service_home
+}
+
+# 演示版的可见范围：两个触发单元在等、上一次推成了没有（一次都没推过是「待配」，推不成、有文件认不出是红）
+readback_demo_scopes() {
+  local u result status at
+  for u in fleet-demo-scopes.path fleet-demo-scopes.timer; do
+    if [[ "$(systemctl is-active "$u" 2>/dev/null)" != active ]]; then red "$u 没在跑：可见范围变了不会推到香港"; fi
+  done
+  at=$(unit_prop fleet-demo-scopes.service ExecMainExitTimestamp)
+  if [[ -z "$at" ]]; then
+    pending "演示版的可见范围还一次都没推过（systemctl start fleet-demo-scopes 推一次）"
+    return 0
+  fi
+  result=$(unit_prop fleet-demo-scopes.service Result)
+  status=$(unit_prop fleet-demo-scopes.service ExecMainStatus)
+  if [[ "$result" == success ]]; then
+    ok "演示版的可见范围上次推到香港是 $at"
+  elif [[ "$status" == 1 ]]; then
+    red "演示版的范围目录里有认不出的文件，没推（别的推了）：journalctl -u fleet-demo-scopes -n 20"
+  else
+    red "演示版的可见范围上次没推成（$at，退出码 ${status:-读不到}）：journalctl -u fleet-demo-scopes -n 20"
+  fi
 }
 
 # 香港往法国转发时要清掉 Authorization 与 X-Fleet-Acting-Feishu（飞书网关的通行证和代表谁）：从公网带着这两个头
@@ -882,7 +926,7 @@ readback_firewall() {
 
 readback_dirs() {
   local spec path want have bad=0
-  for spec in "/srv/fleet-dao root:root 755" "$RELEASES_DIR root:root 755" "/var/lib/fleet-dao fleet:fleet 750" "/var/log/fleet-dao fleet:fleet 750" \
+  for spec in "/srv/fleet-dao root:root 755" "$RELEASES_DIR root:root 755" "/var/lib/fleet-dao fleet:fleet 750" "$DEMO_DIR fleet:fleet 750" "/var/log/fleet-dao fleet:fleet 750" \
     "/opt/fleet-dao root:root 755" "/home/fleet fleet:fleet 750" "$TEMPORAL_ENV root:fleet 640" "$TEMPORAL_CONFIG root:fleet 640"; do
     path=${spec%% *}
     want=${spec#* }
@@ -1025,6 +1069,7 @@ main() {
     setup_pnpm
     setup_app_config
     setup_web_upload
+    setup_demo_scopes
   else
     load_config
   fi

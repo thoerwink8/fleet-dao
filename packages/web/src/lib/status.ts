@@ -1,4 +1,5 @@
 // 状态的颜色、名字和白话句子。看板上颜色只表达状态，七种，全在这里定义。
+
 import type { LucideIcon } from 'lucide-react';
 import {
   CircleCheck,
@@ -9,6 +10,7 @@ import {
   Hourglass,
   MessageCircleQuestion,
 } from 'lucide-react';
+import { brand } from '#brand';
 import type {
   Activity,
   BoardSubtask,
@@ -241,7 +243,9 @@ export function activityPhrase(a: Activity, now: number): string {
 /** 每张子任务卡上那一句白话。siblings 用来把「等前置」写成「等子任务 A 先合并」。 */
 export function describeSubtask(s: BoardSubtask, now: number, siblings: BoardSubtask[] = []): string {
   if (s.state === 'stalled') {
-    return s.activity?.step ? `卡在「${s.activity.step}」没有进展，已交帅位诊断` : '没有进展，已交帅位诊断';
+    return s.activity?.step
+      ? `卡在「${s.activity.step}」没有进展，已交${brand.terms.marshalShort}诊断`
+      : `没有进展，已交${brand.terms.marshalShort}诊断`;
   }
   if (s.activity && (s.state === 'running' || s.state === 'verifying'))
     return activityPhrase(s.activity, now);
@@ -316,7 +320,9 @@ export function describeTask(t: BoardTask, now: number): string {
       return t.subtasks.length ? countPhrase(t) : '在干活';
     case 'stalled': {
       const s = t.subtasks.find((x) => x.state === 'stalled');
-      return s ? `子任务 ${letterOf(s.index)} 没有进展，已交帅位诊断` : '没有进展，已交帅位诊断';
+      return s
+        ? `子任务 ${letterOf(s.index)} 没有进展，已交${brand.terms.marshalShort}诊断`
+        : `没有进展，已交${brand.terms.marshalShort}诊断`;
     }
     case 'failed': {
       const s = t.subtasks.find((x) => x.state === 'failed');

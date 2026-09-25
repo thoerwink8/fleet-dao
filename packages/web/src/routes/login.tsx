@@ -5,18 +5,20 @@
 
 import { AUTH_PREFIX, AuthRoutes } from '@fleet-dao/shared';
 import { useQueryClient } from '@tanstack/react-query';
-import { LogIn } from 'lucide-react';
+import { LogIn, Presentation } from 'lucide-react';
 import { type FormEvent, useEffect, useRef, useState } from 'react';
 import { Navigate, useNavigate, useSearchParams } from 'react-router';
+import { brand } from '#brand';
 import { errorText, keys, useApi, useAuthConfig, useMe } from '../api/client';
 import type { Me } from '../api/types';
 import { LogoMark } from '../components/logo';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
+import { DEMO_URL } from '../demo/url';
 
 export function meta() {
-  return [{ title: '登录 · fleet-dao 驾驶舱' }];
+  return [{ title: brand.title('登录') }];
 }
 
 /** 和后端 auth.ts 的 safeNext 同一条规矩：只接受站内路径，别的一律回首页；也不回登录页自己。 */
@@ -107,8 +109,12 @@ export default function LoginPage() {
       <div className="w-full max-w-sm">
         <div className="flex flex-col items-center text-center">
           <LogoMark className="size-12" />
-          <h1 className="mt-4 text-xl font-semibold tracking-tight">登录 fleet·dao 驾驶舱</h1>
-          <p className="mt-1.5 text-sm text-muted-foreground">驾驶舱只放行创始人，用飞书账号登录。</p>
+          <h1 className="mt-4 text-xl font-semibold tracking-tight">
+            登录 {brand.name} {brand.product}
+          </h1>
+          <p className="mt-1.5 text-sm text-muted-foreground">
+            {brand.product}只放行创始人，用飞书账号登录。
+          </p>
         </div>
 
         <div className="mt-8 rounded-2xl border bg-card p-5 shadow-sm">
@@ -116,7 +122,7 @@ export default function LoginPage() {
             <div className="space-y-3 text-center">
               <p className="text-sm text-muted-foreground">现在是假数据模式，不用登录。</p>
               <Button className="w-full" onClick={() => navigate(next, { replace: true })}>
-                进驾驶舱
+                进{brand.product}
               </Button>
             </div>
           ) : (
@@ -138,7 +144,7 @@ export default function LoginPage() {
                 <p className="mt-2 text-center text-xs text-muted-foreground">正在读登录配置…</p>
               ) : config.error ? (
                 <p className="mt-2 text-center text-xs text-ink-fail">
-                  连不上驾驶舱后端：{errorText(config.error)}
+                  连不上{brand.product}后端：{errorText(config.error)}
                 </p>
               ) : !feishuReady ? (
                 <p className="mt-2 text-center text-xs text-muted-foreground">飞书登录还没配置。</p>
@@ -175,6 +181,15 @@ export default function LoginPage() {
         <p className="mt-4 text-center text-xs text-muted-foreground">
           登录后回到 <span className="num">{next}</span>
         </p>
+        {/* 演示版是另一个单页（假数据、不用登录），地址由构建配置给（FLEET_DEMO_URL）：整页跳过去，不走站内路由。 */}
+        <a
+          href={DEMO_URL}
+          className="mt-6 flex items-center justify-center gap-1.5 rounded-xl border border-dashed px-4 py-3 text-sm text-muted-foreground transition-colors hover:border-border-strong hover:text-foreground"
+        >
+          <Presentation className="size-4" aria-hidden />
+          没有账号？看演示版
+          <span className="text-xs text-faint">（假数据，不用登录）</span>
+        </a>
       </div>
     </main>
   );

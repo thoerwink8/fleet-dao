@@ -5,6 +5,12 @@ import {
   AuditResponse,
   AuthConfigResponse,
   BoardResponse,
+  CreateDemoLinkRequest,
+  CreateDemoLinkResponse,
+  DEMO_MODULES,
+  DEMO_STRICT_DEFAULT,
+  DemoLinksResponse,
+  type DemoScope,
   HARD_BANS,
   type HostId,
   hardBanFor,
@@ -28,14 +34,16 @@ import {
   TaskDetailResponse,
   TimelineResponse,
   UpdateChannelRequest,
+  UpdateDemoDefaultRequest,
   UpdateSettingRequest,
   UpdateSettingResponse,
   UpdateStagePolicyRequest,
   UpdateStagePolicyResponse,
 } from '@fleet-dao/shared';
 import type { z } from 'zod';
+import { sha256Hex } from '../../demo/scope';
 import { ApiError, type FleetApi } from '../client';
-import type { AuditEntry, LiveEvent } from '../types';
+import type { AuditEntry, DemoLink, LiveEvent } from '../types';
 import type { MLog, MockState, MSubtask, MTask } from './model';
 import { createSeed, fakeAction } from './seed';
 
@@ -128,6 +136,12 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
   let counter = 0;
   /** 进合并队列的先后。 */
   const queuedAt = new Map<string, number>();
+  /** 演示链接：只在内存里，不真发布（假数据模式没有后端的发布目录）。 */
+  const demo: {
+    links: Omit<DemoLink, 'expired'>[];
+    defaultScope: DemoScope;
+    defaultPublished: boolean;
+  } = { links: [], defaultScope: DEMO_STRICT_DEFAULT, defaultPublished: false };
 
   const iso = () => new Date(now()).toISOString();
   const nextId = (p: string) => `${p}-${++st.seq}`;
@@ -549,7 +563,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
           source: 'session',
           kind: 'done',
           runId: front.id,
-          text: '交活：分诊完成——写码类、说清楚了、不碰人闸',
+          text: '交活：分诊完成——写码类、说清楚了、不用等人拍板',
         });
         startRun(tv, undefined, 'spec', pickRoute('spec') ?? front.routeId, '需求文档阶段排第一');
         setTaskState(tv, 'planning');
@@ -683,7 +697,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
           startedAt: started,
           endedAt: started,
           outcome: j.keepsFailing,
-          why: j.keepsFailing === 'unscanned' ? 'GitHub 接口限流，这次没查成' : 'ssh 连香港超时',
+          why: j.keepsFailing === 'unscanned' ? 'GitHub 接口限流，这次没查成' : 'ssh 连备份机超时',
         };
       } else {
         j.lastRun = { startedAt: started, endedAt: started, outcome: 'ok', found: 0 };
@@ -1036,6 +1050,74 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       });
       emit('settings', key);
       return UpdateSettingResponse.parse({ setting: next }).setting;
+    },
+    async demoLinks() {
+      await wait();
+      return DemoLinksResponse.parse({
+        configured: true,
+        links: demo.links.map((l) => ({ ...l, expired: Date.parse(l.expiresAt) <= now() })),
+        defaultScope: demo.defaultScope,
+        defaultPublished: demo.defaultPublished,
+      });
+    },
+    async createDemoLink(raw) {
+      await wait();
+      const body = CreateDemoLinkRequest.parse(raw);
+      const bytes = crypto.getRandomValues(new Uint8Array(32));
+      const token = btoa(String.fromCharCode(...bytes))
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_')
+        .replace(/=+$/, '');
+      const id = await sha256Hex(token);
+      const link = {
+        id,
+        modules: DEMO_MODULES.filter((m) => body.modules.includes(m)),
+        detail: body.detail,
+        expiresAt: new Date(now() + body.expiresInDays * 86_400_000).toISOString(),
+        ...(body.note ? { note: body.note } : {}),
+        createdAt: iso(),
+        createdBy: st.me.user.id,
+      };
+      audit({
+        actor: meActor(),
+        action: 'demo.link.create',
+        target: `demo-link:${id.slice(0, 12)}`,
+        via: 'cockpit',
+      });
+      demo.links.unshift(link);
+      return CreateDemoLinkResponse.parse({ link: { ...link, expired: false }, token });
+    },
+    async revokeDemoLink(linkId) {
+      await wait();
+      const i = demo.links.findIndex((l) => l.id === linkId);
+      if (i < 0) throw new ApiError(404, 'demo_link_not_found', '没有这条演示链接（可能已经作废了）');
+      audit({
+        actor: meActor(),
+        action: 'demo.link.revoke',
+        target: `demo-link:${linkId.slice(0, 12)}`,
+        via: 'cockpit',
+      });
+      demo.links.splice(i, 1);
+    },
+    async updateDemoDefault(raw) {
+      await wait();
+      const body = UpdateDemoDefaultRequest.parse(raw);
+      const before = demo.defaultScope;
+      demo.defaultScope = {
+        v: 1,
+        modules: DEMO_MODULES.filter((m) => body.modules.includes(m)),
+        detail: body.detail,
+      };
+      demo.defaultPublished = true;
+      audit({
+        actor: meActor(),
+        action: 'demo.default.update',
+        target: 'demo:default',
+        before,
+        after: demo.defaultScope,
+        via: 'cockpit',
+      });
+      return demo.defaultScope;
     },
     subscribe(listener, onStatus) {
       listeners.add(listener);

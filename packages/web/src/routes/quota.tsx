@@ -1,6 +1,7 @@
 import type { LucideIcon } from 'lucide-react';
 import { Flame, Gauge, TimerOff, TriangleAlert } from 'lucide-react';
 import type { ReactNode } from 'react';
+import { brand } from '#brand';
 import { usePools } from '../api/client';
 import type { PoolView, QuotaWindowKind, QuotaWindowView } from '../api/types';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
@@ -22,7 +23,7 @@ import { useNow } from '../lib/hooks';
 import { cn } from '../lib/utils';
 
 export function meta() {
-  return [{ title: '额度 · fleet-dao 驾驶舱' }];
+  return [{ title: brand.title('额度') }];
 }
 
 function Callout({

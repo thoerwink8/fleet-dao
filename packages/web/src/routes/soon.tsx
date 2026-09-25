@@ -1,5 +1,6 @@
 import { ArrowRight, Construction } from 'lucide-react';
 import { Link, useLocation } from 'react-router';
+import { brand } from '#brand';
 import { NAV_ITEMS } from '../components/shell/nav';
 import { Button } from '../components/ui/button';
 
@@ -38,8 +39,8 @@ const PLANS: Record<string, { what: string; bullets: string[]; related: { to: st
     ],
     related: [{ to: '/dispatch', label: '调度台' }],
   },
-  '/jev': {
-    what: 'Jev 判断题的记录：九个接入点，每道题的答案、把握度和准确率。',
+  '/judge': {
+    what: `${brand.terms.judgeQuiz}的记录：九个接入点，每道题的答案、把握度和准确率。`,
     bullets: [
       '先只记不拦，攒满 50 条且准确率过线才真拦',
       '能拦不能放：不能批准合并、不能动账号、不能删东西',
@@ -48,7 +49,7 @@ const PLANS: Record<string, { what: string; bullets: string[]; related: { to: st
     related: [{ to: '/schedules', label: '定时任务' }],
   },
   '/members': {
-    what: '谁能进驾驶舱、能做什么。',
+    what: `谁能进${brand.product}、能做什么。`,
     bullets: [
       '飞书账号登录，只放行白名单',
       '以后加人在这里加，写 GitHub 的动作由机器人代发并记下提出人',

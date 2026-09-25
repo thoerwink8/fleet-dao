@@ -30,7 +30,7 @@ WG_PEER_ADDR=10.99.0.2
 API_UPSTREAM=$WG_PEER_ADDR:8787
 ENV_FILE=/etc/fleet-dao/hk.env
 ENV_KEYS=(FLEET_DOMAIN FLEET_ACME_EMAIL FLEET_WG_FRANCE_PUBLIC_KEY FLEET_WEB_UPLOAD_PUBLIC_KEY
-  FLEET_GATEWAY_DEPLOY_PUBLIC_KEY)
+  FLEET_GATEWAY_DEPLOY_PUBLIC_KEY FLEET_DEMO_PATH)
 # 驾驶舱静态文件归 root。法国的发布脚本经隧道用一把只能写这个目录的钥匙往里传（rrsync -wo），钥匙登记在 root 的
 # authorized_keys2：这份文件整份归 fleet-dao 管，root 原有的 authorized_keys 一行不碰
 WEB_ROOT=/srv/fleet-dao-web
@@ -60,6 +60,8 @@ FLEET_ACME_EMAIL=""
 FLEET_WG_FRANCE_PUBLIC_KEY=""
 FLEET_WEB_UPLOAD_PUBLIC_KEY=""
 FLEET_GATEWAY_DEPLOY_PUBLIC_KEY=""
+# 演示版在站点上的路径（hk.env，默认 /demo/）：和法国 release.env 的同一个，站点给它单独一段（深链接回落到它自己的首页）
+FLEET_DEMO_PATH=""
 TLS_ISSUED=0
 
 CHECK_ONLY=0
@@ -268,7 +270,12 @@ setup_feishu_env() {
 
 load_config() {
   load_env "$ENV_FILE" "${ENV_KEYS[@]}"
-  ok "本机配置 $ENV_FILE：域名 ${FLEET_DOMAIN:-（未配）}，法国公钥$(filled "$FLEET_WG_FRANCE_PUBLIC_KEY")"
+  FLEET_DEMO_PATH=${FLEET_DEMO_PATH:-/demo/}
+  if ! demo_path_ok "$FLEET_DEMO_PATH"; then
+    red "$ENV_FILE 的 FLEET_DEMO_PATH 应为 /demo/ 这样的一级路径（不能是 assets、health、healthz、api、auth、github），现在是「$FLEET_DEMO_PATH」"
+    return 1
+  fi
+  ok "本机配置 $ENV_FILE：域名 ${FLEET_DOMAIN:-（未配）}，法国公钥$(filled "$FLEET_WG_FRANCE_PUBLIC_KEY")，演示版在 $FLEET_DEMO_PATH"
 }
 
 setup_wireguard() {
@@ -336,7 +343,8 @@ setup_site() {
   ensure_dir "$ACME_ROOT" root:root 755
   local name=${FLEET_DOMAIN:-$PLACEHOLDER_NAME} tpl=nginx-http.conf old="" had=0 site_changed before after why
   if [[ -n "$FLEET_DOMAIN" && -f "/etc/letsencrypt/live/$FLEET_DOMAIN/fullchain.pem" ]]; then tpl=nginx-https.conf; fi
-  render "$DEPLOY_DIR/hk/$tpl" SERVER_NAME="$name" WEB_ROOT="$WEB_ROOT" ACME_ROOT="$ACME_ROOT" API_UPSTREAM="$API_UPSTREAM"
+  render "$DEPLOY_DIR/hk/$tpl" SERVER_NAME="$name" WEB_ROOT="$WEB_ROOT" ACME_ROOT="$ACME_ROOT" API_UPSTREAM="$API_UPSTREAM" \
+    DEMO_PATH="$FLEET_DEMO_PATH" DEMO_BASE="${FLEET_DEMO_PATH%/}"
   if [[ -f "$SITE_AVAILABLE" ]]; then
     old=$(<"$SITE_AVAILABLE")
     had=1

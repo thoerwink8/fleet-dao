@@ -11,10 +11,15 @@ import {
   useQueryClient,
 } from '@tanstack/react-query';
 import { createContext, type ReactNode, useContext, useEffect, useSyncExternalStore } from 'react';
+import { canSee, canSeeDetail } from '../demo/access';
 import type {
   Audit,
   AuthConfig,
   Board,
+  CreateDemoLinkBody,
+  CreatedDemoLink,
+  DemoLinks,
+  DemoScopeView,
   Jobs,
   LiveEvent,
   Me,
@@ -32,6 +37,7 @@ import type {
   TaskDetail,
   Timeline,
   UpdateChannelBody,
+  UpdateDemoDefaultBody,
   UpdateSettingBody,
   UpdateStagePolicyBody,
 } from './types';
@@ -39,8 +45,8 @@ import type {
 export type LiveStatus = 'connecting' | 'open' | 'down';
 
 export interface FleetApi {
-  /** 数据来自哪里：真后端还是假数据。界面上要写明。 */
-  readonly source: 'http' | 'mock';
+  /** 数据来自哪里：真后端、假数据，还是演示版（假数据 + 可见范围）。界面上要写明。 */
+  readonly source: 'http' | 'mock' | 'demo';
   authConfig(): Promise<AuthConfig>;
   devLogin(userId: string): Promise<Me>;
   feishuAccess(code: string): Promise<Me>;
@@ -67,6 +73,11 @@ export interface FleetApi {
   audit(query?: { target?: string | undefined; cursor?: string | undefined; limit?: number }): Promise<Audit>;
   settings(): Promise<Settings>;
   updateSetting(key: SettingKey, body: UpdateSettingBody): Promise<Setting>;
+  /** 演示链接：发、作废、默认范围（设计文档第十四节）。只有正式驾驶舱用。 */
+  demoLinks(): Promise<DemoLinks>;
+  createDemoLink(body: CreateDemoLinkBody): Promise<CreatedDemoLink>;
+  revokeDemoLink(linkId: string): Promise<void>;
+  updateDemoDefault(body: UpdateDemoDefaultBody): Promise<DemoScopeView>;
   /** 订阅实时推送，返回取消订阅的函数。onStatus 报连接状态（给顶栏的「实时」小灯）。 */
   subscribe(listener: (event: LiveEvent) => void, onStatus?: (status: LiveStatus) => void): () => void;
 }
@@ -116,6 +127,7 @@ export const keys = {
   notifications: (status: 'open' | 'all') => ['notifications', status] as const,
   audit: (target: string) => ['audit', target] as const,
   settings: ['settings'] as const,
+  demoLinks: ['demo-links'] as const,
 };
 
 // ---------- 读 ----------
@@ -181,7 +193,8 @@ export function useTimeline(taskId: string | undefined) {
     queryFn: ({ pageParam }) => api.timeline(taskId ?? '', { cursor: pageParam, limit: 100 }),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (last) => last.nextCursor,
-    enabled: Boolean(taskId),
+    // 演示版细节不到「过程」这一级就不读（页面上另说「没开放」）。
+    enabled: Boolean(taskId) && canSeeDetail('process'),
   });
 }
 
@@ -190,7 +203,7 @@ export function useRunSteps(runId: string | undefined) {
   return useQuery({
     queryKey: keys.runSteps(runId ?? ''),
     queryFn: () => api.runSteps(runId ?? ''),
-    enabled: Boolean(runId),
+    enabled: Boolean(runId) && canSeeDetail('process'),
   });
 }
 
@@ -208,7 +221,12 @@ export function usePools() {
 /** 定时任务不在推送名单里，每 30 秒重拉一次。 */
 export function useJobs() {
   const api = useApi();
-  return useQuery({ queryKey: keys.jobs, queryFn: () => api.jobs(), refetchInterval: 30_000 });
+  return useQuery({
+    queryKey: keys.jobs,
+    queryFn: () => api.jobs(),
+    refetchInterval: 30_000,
+    enabled: canSee('schedules'),
+  });
 }
 
 export function useNotifications(status: 'open' | 'all' = 'open') {
@@ -216,6 +234,7 @@ export function useNotifications(status: 'open' | 'all' = 'open') {
   return useQuery({
     queryKey: keys.notifications(status),
     queryFn: () => api.notifications({ status, limit: 200 }),
+    enabled: canSee('notifications'),
   });
 }
 
@@ -227,15 +246,41 @@ export function useAudit(target?: string) {
     queryFn: ({ pageParam }) => api.audit({ target, cursor: pageParam, limit: 100 }),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (last) => last.nextCursor,
+    // 调度台的「最近改动」也读它（演示版只开调度台时只给改路由顺序的那几条）。
+    enabled: canSee('audit') || canSee('dispatch'),
   });
 }
 
 export function useSettings() {
   const api = useApi();
-  return useQuery({ queryKey: keys.settings, queryFn: () => api.settings() });
+  return useQuery({ queryKey: keys.settings, queryFn: () => api.settings(), enabled: canSee('settings') });
+}
+
+export function useDemoLinks() {
+  const api = useApi();
+  return useQuery({ queryKey: keys.demoLinks, queryFn: () => api.demoLinks() });
 }
 
 // ---------- 写 ----------
+
+/** 发链接、作废、改默认范围：做完都重拉列表，操作记录里也多一条。 */
+function useDemoMutation<V, R>(fn: (api: FleetApi, v: V) => Promise<R>) {
+  const api = useApi();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (v: V) => fn(api, v),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: keys.demoLinks });
+      qc.invalidateQueries({ queryKey: ['audit'] });
+    },
+  });
+}
+
+export const useCreateDemoLink = () =>
+  useDemoMutation((api, body: CreateDemoLinkBody) => api.createDemoLink(body));
+export const useRevokeDemoLink = () => useDemoMutation((api, id: string) => api.revokeDemoLink(id));
+export const useUpdateDemoDefault = () =>
+  useDemoMutation((api, body: UpdateDemoDefaultBody) => api.updateDemoDefault(body));
 
 export function useTaskAction() {
   const api = useApi();

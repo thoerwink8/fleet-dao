@@ -1,11 +1,12 @@
 import { Database, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import { NavLink } from 'react-router';
+import { brand } from '#brand';
 import { useAllBoards, useApi, useNotifications } from '../../api/client';
 import { needsAttention } from '../../lib/status';
 import { cn } from '../../lib/utils';
 import { LogoMark } from '../logo';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../ui/tooltip';
-import { NAV, type NavItem } from './nav';
+import { type NavItem, visibleNav } from './nav';
 
 /** 侧栏角标：数字，或者「!」表示没读成（不拿 0 冒充没事）。 */
 function useBadges(): Record<string, number | '!'> {
@@ -24,19 +25,21 @@ function useBadges(): Record<string, number | '!'> {
 /** 侧栏底部写明数据从哪来：真后端还是假数据。 */
 function DataSource({ collapsed }: { collapsed: boolean }) {
   const api = useApi();
-  const mock = api.source === 'mock';
+  const mock = api.source !== 'http';
   return (
     <Tooltip>
       <TooltipTrigger asChild>
         <span className="flex min-w-0 items-center gap-1.5 rounded-md px-1.5 py-1 text-[11px] text-muted-foreground">
           <Database className={cn('size-3.5 shrink-0', mock && 'text-ink-stall')} aria-hidden />
-          {collapsed ? null : <span className="truncate">{mock ? '假数据（演示）' : '驾驶舱后端'}</span>}
+          {collapsed ? null : (
+            <span className="truncate">{mock ? '假数据（演示）' : `${brand.product}后端`}</span>
+          )}
         </span>
       </TooltipTrigger>
       <TooltipContent side="right" className="max-w-64">
         {mock
-          ? '现在显示的是按设计文档编的假数据，会自己「动」起来；页面上的操作只改这份假数据。'
-          : '数据来自驾驶舱后端（/api），推送走 /api/events。'}
+          ? '现在显示的是编的假数据，会自己「动」起来；页面上的操作只改这份假数据。'
+          : `数据来自${brand.product}后端（/api），推送走 /api/events。`}
       </TooltipContent>
     </Tooltip>
   );
@@ -125,13 +128,13 @@ export function SidebarNav({
         <LogoMark className="size-7 shrink-0" />
         {collapsed ? null : (
           <div className="min-w-0 leading-tight">
-            <div className="num text-[14px] font-semibold tracking-tight">fleet·dao</div>
-            <div className="text-[11px] text-muted-foreground">驾驶舱</div>
+            <div className="num text-[14px] font-semibold tracking-tight">{brand.name}</div>
+            <div className="text-[11px] text-muted-foreground">{brand.product}</div>
           </div>
         )}
       </div>
       <nav className="min-h-0 flex-1 overflow-y-auto px-3 pb-3 scrollbar-thin" aria-label="主导航">
-        {NAV.map((g) => (
+        {visibleNav().map((g) => (
           <div key={g.group} className="mt-3 first:mt-1">
             {collapsed ? (
               <div className="mx-auto my-2 h-px w-6 bg-border" />
