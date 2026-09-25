@@ -114,7 +114,9 @@ describe('写入即通知 fleet_changes', () => {
     await catalog(t.db);
     await addRoute(t.db, { id: 'r1', poolId: 'relay-a', modelId: 'opus-5.5' });
     await freshEars();
-    await t.db.insert(stagePolicyRoutes).values({ stage: 'execute', routeId: 'r1', position: 0 });
+    await t.db
+      .insert(stagePolicyRoutes)
+      .values({ stage: 'execute', routeId: 'r1', position: 0, enabled: true });
     await t.db.update(stagePolicies).set({ pinned: true }).where(eq(stagePolicies.stage, 'execute'));
     await settle();
     expect(heard).toEqual([
@@ -207,7 +209,9 @@ describe('写入即通知 fleet_changes', () => {
     });
     await t.db.insert(notifications).values({ level: 'daily', dedupeKey: 'daily:2026-09-25', title: '日报' });
     await t.db.insert(asks).values({ taskId: task.id, runId: run.id, question: '要不要兼容旧接口？' });
-    await t.db.insert(stagePolicyRoutes).values({ stage: 'execute', routeId: 'r1', position: 0 });
+    await t.db
+      .insert(stagePolicyRoutes)
+      .values({ stage: 'execute', routeId: 'r1', position: 0, enabled: true });
     await t.db.insert(settings).values({ key: 'theme', value: 'dusk' });
     await t.db
       .insert(auditLog)

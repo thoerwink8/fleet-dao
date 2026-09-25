@@ -162,7 +162,10 @@ export async function stageCandidates(
         : 'unknown';
 
     // 代码里的硬禁令先过（库里的表清空了也照样生效），再并上库里的：写了的每一项都要对上才算命中，没写阶段 = 所有阶段。
-    const hardBan = hardBanFor(model, stage);
+    const hardBan = hardBanFor(
+      { ...model, upstreamModel: route.upstreamModel, upstreamAliases: route.upstreamAliases },
+      stage,
+    );
     const banReasons = [
       ...(hardBan ? [hardBan.reason] : []),
       ...dbBans

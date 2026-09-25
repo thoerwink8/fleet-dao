@@ -1,6 +1,6 @@
 // 调度台要的配置：族、渠道、账号池、模型、路由、每个阶段的路由顺序、禁令，外加额度窗（机器写的现值）。
 
-import type { ScopeMembership } from '@fleet-dao/shared';
+import type { RunAsUser, ScopeMembership } from '@fleet-dao/shared';
 import { sql } from 'drizzle-orm';
 import {
   boolean,
@@ -21,6 +21,7 @@ import {
   quotaStatus,
   quotaUnit,
   quotaWindowKind,
+  RUN_AS_USERS,
   readingKind,
   stageKind,
 } from './enums.ts';
@@ -57,9 +58,14 @@ export const pools = pgTable(
     /** 最近一次读成额度的时刻（savePoolQuota 写，读失败不动）。每小时对账看它是否超过 30 分钟。 */
     lastReadOkAt: timestamp('last_read_ok_at', tz),
     /** 这个池的会话跑在哪个系统用户下（Claude 订阅一个组织一个用户，引擎按池挑、从不切号）。空 = 还没定。 */
-    sessionUser: text('session_user'),
+    // 不叫 session_user：那是 Postgres 保留字，裸写 select 拿到的是连接角色。
+    runAsUser: text('run_as_user').$type<RunAsUser>(),
   },
   (t) => [
+    check(
+      'pools_run_as_user_known',
+      sql`${t.runAsUser} is null or ${t.runAsUser} in (${sql.raw(RUN_AS_USERS.map((u) => `'${u}'`).join(', '))})`,
+    ),
     // 给 routes 的组合外键用：路由挂的池必须属于路由写的渠道。
     unique('pools_channel_id_id_unique').on(t.channelId, t.id),
     check('pools_max_concurrency_positive', sql`${t.maxConcurrency} > 0`),
@@ -130,8 +136,11 @@ export const stagePolicyRoutes = pgTable(
       .references(() => routes.id),
     /** 从 0 起，越小越先用。 */
     position: integer('position').notNull(),
-    /** 调度台上这个阶段里的开关：关着的照样挂在顺序里，但不派。 */
-    enabled: boolean('enabled').notNull().default(true),
+    /**
+     * 调度台上这个阶段里的开关：关着的照样挂在顺序里，但不派。
+     * 没有默认值：重写顺序的地方（驾驶舱拖动排序、目录装载器）必须逐条带上，漏带就插不进去，不会悄悄全打开。
+     */
+    enabled: boolean('enabled').notNull(),
   },
   (t) => [
     primaryKey({ columns: [t.stage, t.routeId] }),

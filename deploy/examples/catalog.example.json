@@ -27,14 +27,14 @@
       "id": "claude-solo",
       "channelId": "claude-sub",
       "maxConcurrency": 3,
-      "sessionUser": "fleet-agent-dedicated"
+      "runAsUser": "fleet-agent-dedicated"
     },
     {
       "_说明": "Claude 订阅 · 拼车组织。会话跑在 fleet-agent-carpool。并发没量过，按保守值 3。",
       "id": "claude-carpool",
       "channelId": "claude-sub",
       "maxConcurrency": 3,
-      "sessionUser": "fleet-agent-carpool"
+      "runAsUser": "fleet-agent-carpool"
     },
     {
       "_说明": "Mirasim 中转账号：Opus、GPT（codex）、Kimi、DeepSeek 都扣这一份（5h、7d），另有只扣某一族的窗口（7d_claude、7d_fable）。经 Mirasim 起的会话要给会话用户单独起一份 Mirasim 服务，配好之前这些路由保持关着（docs/design.md）。并发 5 是旧系统拍的，没量过。",
@@ -137,12 +137,21 @@
     }
   ],
   "stages": {
-    "_说明": "构建期所有阶段都先用 Opus 5.5、经两个 Claude 池（设计文档「已定」表第 8 条）；其余路由挂在后面、默认关着。硬禁令（GPT 不做 UI、不用 Fable）由代码管。每个阶段只在第一次装的时候排，之后驾驶舱里怎么改都不覆盖；要给某个阶段单排，就加一个以阶段名为键的列表。",
+    "_说明": "构建期所有阶段都先用 Opus 5.5、经两个 Claude 池（设计文档「已定」表第 8 条）；其余路由挂在后面、默认关着。硬禁令（GPT 不做 UI、不用 Fable）由代码管，装载器也按它拒收：ui 单列一份、不挂 GPT（关着也不行）。每个阶段只在第一次装的时候排，之后驾驶舱里怎么改都不覆盖；要给某个阶段单排，就加一个以阶段名为键的列表。",
     "default": [
       { "routeId": "claude-solo:opus-5.5:claude-code", "enabled": true },
       { "routeId": "claude-carpool:opus-5.5:claude-code", "enabled": true },
       { "routeId": "mirasim-relay:opus-5.5:mirasim", "enabled": false },
       { "routeId": "mirasim-relay:gpt-5.6-luna:mirasim", "enabled": false },
+      { "routeId": "mirasim-relay:kimi-k3:mirasim", "enabled": false },
+      { "routeId": "mirasim-relay:deepseek-flash:mirasim", "enabled": false },
+      { "routeId": "cursor:cursor-auto:cursor-agent", "enabled": false },
+      { "routeId": "grok:grok-4.7:grok", "enabled": false }
+    ],
+    "ui": [
+      { "routeId": "claude-solo:opus-5.5:claude-code", "enabled": true },
+      { "routeId": "claude-carpool:opus-5.5:claude-code", "enabled": true },
+      { "routeId": "mirasim-relay:opus-5.5:mirasim", "enabled": false },
       { "routeId": "mirasim-relay:kimi-k3:mirasim", "enabled": false },
       { "routeId": "mirasim-relay:deepseek-flash:mirasim", "enabled": false },
       { "routeId": "cursor:cursor-auto:cursor-agent", "enabled": false },

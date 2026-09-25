@@ -96,7 +96,7 @@ export const toPool = (r: typeof pools.$inferSelect): Pool =>
     expiresAt: isoOpt(r.expiresAt),
     scopeModels: opt(r.scopeModels),
     lastReadOkAt: isoOpt(r.lastReadOkAt),
-    sessionUser: opt(r.sessionUser),
+    runAsUser: opt(r.runAsUser),
   });
 
 export const toQuotaWindow = (r: typeof quotaWindows.$inferSelect): QuotaWindow =>
@@ -138,11 +138,11 @@ export const toRoute = (r: typeof routes.$inferSelect): Route =>
     upstreamAliases: r.upstreamAliases,
   });
 
-/** routeIds 按调度台的先后；disabledRouteIds 是其中关着的。 */
+/** routeIds 按调度台的先后；disabledRouteIds 是其中关着的（必须传：漏传就把关着的全当开着）。 */
 export const toStagePolicy = (
   r: typeof stagePolicies.$inferSelect,
   routeIds: string[],
-  disabledRouteIds: string[] = [],
+  disabledRouteIds: string[],
 ): StagePolicy => build<StagePolicy>({ stage: r.stage, routeIds, pinned: r.pinned, disabledRouteIds });
 
 export const toBan = (r: typeof bans.$inferSelect): Ban =>

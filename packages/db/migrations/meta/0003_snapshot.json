@@ -1,5 +1,5 @@
 {
-  "id": "146ad298-a269-401b-a0cf-e7e27f315b67",
+  "id": "4a5e0724-d8b4-45af-ae7d-199026ce6efd",
   "prevId": "d5f5e272-8532-4cca-a903-3be2d817c157",
   "version": "7",
   "dialect": "postgresql",
@@ -246,8 +246,8 @@
           "primaryKey": false,
           "notNull": false
         },
-        "session_user": {
-          "name": "session_user",
+        "run_as_user": {
+          "name": "run_as_user",
           "type": "text",
           "primaryKey": false,
           "notNull": false
@@ -275,6 +275,10 @@
       },
       "policies": {},
       "checkConstraints": {
+        "pools_run_as_user_known": {
+          "name": "pools_run_as_user_known",
+          "value": "\"pools\".\"run_as_user\" is null or \"pools\".\"run_as_user\" in ('fleet-agent-dedicated', 'fleet-agent-carpool')"
+        },
         "pools_max_concurrency_positive": {
           "name": "pools_max_concurrency_positive",
           "value": "\"pools\".\"max_concurrency\" > 0"
@@ -575,8 +579,7 @@
           "name": "enabled",
           "type": "boolean",
           "primaryKey": false,
-          "notNull": true,
-          "default": true
+          "notNull": true
         }
       },
       "indexes": {},

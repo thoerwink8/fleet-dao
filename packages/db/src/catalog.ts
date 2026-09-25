@@ -3,11 +3,11 @@
 // 配置和库里不一样的列进 kept 给人看。阶段顺序每个阶段只排一次（stage_policies.catalog_applied_at），之后怎么改都不覆盖。
 // 配置文件缺失、格式错、引用不存在都明确报错，库里一行不写——不许当成空目录继续。
 import { readFile } from 'node:fs/promises';
-import type { StageKind } from '@fleet-dao/shared';
-import { asc, eq } from 'drizzle-orm';
+import { type BanSubject, hardBanFor, type RunAsUser, type StageKind } from '@fleet-dao/shared';
+import { and, asc, eq, isNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { Db } from './client.ts';
-import { BILLING_KINDS, HOST_IDS, STAGE_KINDS } from './schema/enums.ts';
+import { BILLING_KINDS, HOST_IDS, RUN_AS_USERS, STAGE_KINDS } from './schema/enums.ts';
 import {
   auditLog,
   channels,
@@ -37,7 +37,7 @@ export const CatalogSchema = z.strictObject({
         id: Id,
         channelId: Id,
         maxConcurrency: z.int().positive(),
-        sessionUser: Id.optional(),
+        runAsUser: z.enum(RUN_AS_USERS).optional(),
         expiresAt: z.iso.datetime({ offset: true }).optional(),
       }),
     )
@@ -85,6 +85,9 @@ function stripComments(value: unknown): unknown {
   return value;
 }
 
+const routeLine = (r: { poolId: string; modelId: string; hostId: string }) =>
+  `${r.poolId} / ${r.modelId} / ${r.hostId}`;
+
 function duplicates(ids: readonly string[]): string[] {
   const seen = new Set<string>();
   const repeated = new Set<string>();
@@ -120,6 +123,10 @@ export function parseCatalog(text: string, source = '目录配置'): CatalogConf
     ['routes', config.routes],
   ] as const) {
     for (const id of duplicates(list.map((x) => x.id))) problems.push(`${kind} 里 ${id} 出现了不止一次`);
+  }
+  // 库里（池, 模型, 执行方式）唯一：换个 id 写同一条线，插的时候会被唯一约束挡掉。
+  for (const line of duplicates(config.routes.map(routeLine))) {
+    problems.push(`routes 里（账号池 / 模型 / 执行方式）${line} 出现了不止一次`);
   }
   for (const [stage, entries] of Object.entries(config.stages)) {
     for (const id of duplicates((entries ?? []).map((e) => e.routeId))) {
@@ -262,6 +269,42 @@ export async function loadCatalog(
     }
     if (problems.length > 0) throw new CatalogError('目录配置里引用了不存在的东西', problems);
 
+    for (const r of config.routes) {
+      const same = [...stored.routes.values()].find((s) => s.id !== r.id && routeLine(s) === routeLine(r));
+      if (same) problems.push(`路由 ${r.id} 和库里的 ${same.id} 是同一条线（${routeLine(r)}）`);
+    }
+    if (problems.length > 0) throw new CatalogError('目录配置里的路由和库里的重了', problems);
+
+    // 硬禁令（shared/bans.ts）：配置里写了就拒收，不等选路时再拦。按模型本身、再按路由带上游串判。
+    const modelOf = (id: string) => config.models.find((m) => m.id === id) ?? stored.models.get(id);
+    const routeSubject = (routeId: string): BanSubject | undefined => {
+      const r = config.routes.find((x) => x.id === routeId) ?? stored.routes.get(routeId);
+      const model = r && modelOf(r.modelId);
+      return model && { ...model, upstreamModel: r.upstreamModel, upstreamAliases: r.upstreamAliases };
+    };
+    for (const m of config.models) {
+      const ban = hardBanFor(m, undefined);
+      if (ban) problems.push(`模型 ${m.id}：${ban.reason}`);
+    }
+    for (const r of config.routes) {
+      const subject = routeSubject(r.id);
+      const ban = subject && hardBanFor(subject, undefined);
+      if (ban) problems.push(`路由 ${r.id}：${ban.reason}`);
+    }
+    for (const stage of STAGE_KINDS) {
+      const key = config.stages[stage] ? stage : 'default';
+      for (const e of config.stages[key] ?? []) {
+        const subject = routeSubject(e.routeId);
+        const ban = subject && hardBanFor(subject, stage);
+        if (ban && !problems.some((p) => p.startsWith(`路由 ${e.routeId}：`))) {
+          problems.push(
+            `stages.${key} 的路由 ${e.routeId} 不能用在 ${stage}${key === stage ? '' : '（没单列这个阶段，用的是 default）'}：${ban.reason}`,
+          );
+        }
+      }
+    }
+    if (problems.length > 0) throw new CatalogError('目录配置撞了硬禁令', problems);
+
     const inserted: CatalogLoadResult['inserted'] = {
       families: [],
       channels: [],
@@ -275,7 +318,8 @@ export async function loadCatalog(
 
     /**
      * 没有的插进去；有的逐个字段比：fillable 里库里空着的补上，其余不一样的记进 kept。
-     * fill 只会收到 fillable 里的字段。
+     * fill 一次补一个 fillable 里的字段，而且只在库里那一格还空着时才写（返回写没写成）：
+     * 两个装载器并发、或读完之后有人刚填上，都不会被覆盖。
      */
     async function upsertMissing<W extends { id: string }>(
       kind: keyof typeof stored,
@@ -283,7 +327,7 @@ export async function loadCatalog(
       insert: (w: W) => Promise<boolean>,
       fields: readonly (keyof W & string)[],
       fillable: readonly (keyof W & string)[] = [],
-      fill: (id: string, values: Row) => Promise<void> = async () => {},
+      fill: (id: string, field: string, value: unknown) => Promise<boolean> = async () => false,
     ) {
       for (const wanted of list) {
         const have = stored[kind].get(wanted.id) as Row | undefined;
@@ -292,9 +336,8 @@ export async function loadCatalog(
           continue;
         }
         const values = compare(kind, wanted.id, have, wanted as Row, fields, fillable, kept);
-        if (Object.keys(values).length > 0) {
-          await fill(wanted.id, values);
-          filled.push(...Object.keys(values).map((f) => `${kind}.${wanted.id}.${f}`));
+        for (const [field, value] of Object.entries(values)) {
+          if (await fill(wanted.id, field, value)) filled.push(`${kind}.${wanted.id}.${field}`);
         }
       }
     }
@@ -304,14 +347,26 @@ export async function loadCatalog(
       'families',
       config.families,
       async (f) =>
-        wrote(await tx.insert(families).values(f).onConflictDoNothing().returning({ id: families.id })),
+        wrote(
+          await tx
+            .insert(families)
+            .values(f)
+            .onConflictDoNothing({ target: families.id })
+            .returning({ id: families.id }),
+        ),
       ['displayName', 'vendor'],
     );
     await upsertMissing(
       'channels',
       config.channels,
       async (c) =>
-        wrote(await tx.insert(channels).values(c).onConflictDoNothing().returning({ id: channels.id })),
+        wrote(
+          await tx
+            .insert(channels)
+            .values(c)
+            .onConflictDoNothing({ target: channels.id })
+            .returning({ id: channels.id }),
+        ),
       ['name', 'billing', 'enabled'],
     );
     await upsertMissing(
@@ -325,29 +380,39 @@ export async function loadCatalog(
               id: p.id,
               channelId: p.channelId,
               maxConcurrency: p.maxConcurrency,
-              sessionUser: p.sessionUser ?? null,
+              runAsUser: p.runAsUser ?? null,
               expiresAt: p.expiresAt ? new Date(p.expiresAt) : null,
             })
-            .onConflictDoNothing()
+            .onConflictDoNothing({ target: pools.id })
             .returning({ id: pools.id }),
         ),
-      ['channelId', 'maxConcurrency', 'sessionUser', 'expiresAt'],
-      ['sessionUser', 'expiresAt'],
-      async (id, values) => {
-        await tx
-          .update(pools)
-          .set({
-            ...(values.sessionUser !== undefined && { sessionUser: values.sessionUser as string }),
-            ...(values.expiresAt !== undefined && { expiresAt: new Date(values.expiresAt as string) }),
-          })
-          .where(eq(pools.id, id));
+      ['channelId', 'maxConcurrency', 'runAsUser', 'expiresAt'],
+      ['runAsUser', 'expiresAt'],
+      async (id, field, value) => {
+        const [set, empty] =
+          field === 'runAsUser'
+            ? [{ runAsUser: value as RunAsUser }, isNull(pools.runAsUser)]
+            : [{ expiresAt: new Date(value as string) }, isNull(pools.expiresAt)];
+        return wrote(
+          await tx
+            .update(pools)
+            .set(set)
+            .where(and(eq(pools.id, id), empty))
+            .returning({ id: pools.id }),
+        );
       },
     );
     await upsertMissing(
       'models',
       config.models,
       async (m) =>
-        wrote(await tx.insert(models).values(m).onConflictDoNothing().returning({ id: models.id })),
+        wrote(
+          await tx
+            .insert(models)
+            .values(m)
+            .onConflictDoNothing({ target: models.id })
+            .returning({ id: models.id }),
+        ),
       ['family', 'displayName'],
     );
     // 路由挂的渠道跟着池走（库里已有的池以库里为准）。
@@ -369,21 +434,23 @@ export async function loadCatalog(
               upstreamModel: r.upstreamModel ?? null,
               upstreamAliases: r.upstreamAliases,
             })
-            .onConflictDoNothing()
+            .onConflictDoNothing({ target: routes.id })
             .returning({ id: routes.id }),
         ),
       ['poolId', 'modelId', 'hostId', 'upstreamModel', 'upstreamAliases'],
       ['upstreamModel', 'upstreamAliases'],
-      async (id, values) => {
-        await tx
-          .update(routes)
-          .set({
-            ...(values.upstreamModel !== undefined && { upstreamModel: values.upstreamModel as string }),
-            ...(values.upstreamAliases !== undefined && {
-              upstreamAliases: values.upstreamAliases as string[],
-            }),
-          })
-          .where(eq(routes.id, id));
+      async (id, field, value) => {
+        const [set, empty] =
+          field === 'upstreamModel'
+            ? [{ upstreamModel: value as string }, isNull(routes.upstreamModel)]
+            : [{ upstreamAliases: value as string[] }, sql`cardinality(${routes.upstreamAliases}) = 0`];
+        return wrote(
+          await tx
+            .update(routes)
+            .set(set)
+            .where(and(eq(routes.id, id), empty))
+            .returning({ id: routes.id }),
+        );
       },
     );
 
@@ -391,7 +458,7 @@ export async function loadCatalog(
     for (const stage of STAGE_KINDS) {
       const entries = config.stages[stage] ?? config.stages.default;
       if (!entries) continue;
-      await tx.insert(stagePolicies).values({ stage }).onConflictDoNothing();
+      await tx.insert(stagePolicies).values({ stage }).onConflictDoNothing({ target: stagePolicies.stage });
       const [policy] = await tx
         .select()
         .from(stagePolicies)
@@ -405,14 +472,22 @@ export async function loadCatalog(
       const sameOrder =
         current.length === entries.length &&
         current.every((c, i) => c.routeId === entries[i]?.routeId && c.enabled === entries[i]?.enabled);
+      // 配置里有、这个阶段里没挂上的路由点名出来（例如排过之后配置里新加的）：装载器不再动这个阶段，要用得去驾驶舱加。
+      const missing = entries
+        .filter((e) => !current.some((c) => c.routeId === e.routeId))
+        .map((e) => e.routeId);
+      const why = (base: string) =>
+        missing.length > 0
+          ? `阶段 ${stage}：${base}，配置里的 ${missing.join('、')} 没挂上（要用就在驾驶舱里加）`
+          : `阶段 ${stage}：${base}，和配置不一样，没动`;
       if (policy?.catalogAppliedAt) {
-        if (!sameOrder) kept.push(`阶段 ${stage}：驾驶舱或帅位改过顺序，没动`);
+        if (!sameOrder) kept.push(why('装载器早先排过，之后不再动它'));
         continue;
       }
       if (policy?.pinned || current.length > 0) {
         // 库里已经有人排过（或钉住了）：接手下来，这次和以后都不动它。
         adoptedStages.push(stage);
-        if (!sameOrder) kept.push(`阶段 ${stage}：库里已有顺序${policy?.pinned ? '（钉住了）' : ''}，没动`);
+        if (!sameOrder) kept.push(why(`库里已有顺序${policy?.pinned ? '（钉住了）' : ''}`));
       } else {
         await tx
           .insert(stagePolicyRoutes)

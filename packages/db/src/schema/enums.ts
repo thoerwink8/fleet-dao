@@ -7,6 +7,7 @@ import type {
   QuotaUnit,
   QuotaWindowKind,
   ReadingKind,
+  RunAsUser,
   RunOutcome,
   ScheduleOutcome,
   StageKind,
@@ -79,6 +80,8 @@ export const HOST_IDS = valuesOf<HostId>()([
   'mirasim',
   'api-shell',
 ]);
+/** 会话能跑在哪些系统用户下：pools.run_as_user 的检查约束用它（不是 pg 枚举，值表写在约束里）。 */
+export const RUN_AS_USERS = valuesOf<RunAsUser>()(['fleet-agent-dedicated', 'fleet-agent-carpool']);
 export const RUN_OUTCOMES = valuesOf<RunOutcome>()(['ok', 'failed', 'stopped', 'stalled']);
 export const SCHEDULE_OUTCOMES = valuesOf<ScheduleOutcome>()(['ok', 'partial', 'unscanned', 'failed']);
 export const PROGRESS_KINDS = valuesOf<ProgressKind>()([

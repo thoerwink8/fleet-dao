@@ -210,7 +210,14 @@ export function routeProblem(
   if (!info.route) return `路由 ${routeId} 不存在`;
   if (!info.model) return `路由 ${routeId} 用的模型 ${info.route.modelId} 不在模型目录里`;
   const where = stage ? `「${STAGE_WORDS[stage]}」` : '这里';
-  const hard = hardBanFor(info.model, stage);
+  const hard = hardBanFor(
+    {
+      ...info.model,
+      upstreamModel: info.route.upstreamModel,
+      upstreamAliases: info.route.upstreamAliases,
+    },
+    stage,
+  );
   if (hard) return `${info.model.displayName} 不能用在${where}：${hard.reason}`;
   const ban = findBan(info.model, stage, ctx.bans);
   if (ban) return `${info.model.displayName} 不能用在${where}：${ban.reason}`;

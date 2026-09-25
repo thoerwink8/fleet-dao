@@ -309,6 +309,56 @@ describe('0002：额度窗改按上游原名存', () => {
   );
 });
 
+describe('0003：目录装载器要的三列', () => {
+  const entries = [...journal.entries].sort((a, b) => a.idx - b.idx);
+  const target = entries.findIndex((e) => e.tag === '0003_catalog');
+  const runMigration = async (pg: PGlite, tag: string) => {
+    const text = readFileSync(join(MIGRATIONS_FOLDER, `${tag}.sql`), 'utf8');
+    for (const statement of text.split('--> statement-breakpoint')) await pg.exec(statement);
+  };
+
+  it(
+    '已有的阶段顺序回填成开着，之后不再有默认值；会话用户按列名读得回来、只许两个值',
+    async () => {
+      expect(target).toBeGreaterThan(0);
+      const pg = new PGlite();
+      try {
+        for (const e of entries.slice(0, target)) await runMigration(pg, e.tag);
+        await pg.exec(`
+        insert into families (id, display_name, vendor) values ('claude', 'Claude', 'Anthropic');
+        insert into channels (id, name, billing) values ('sub', '订阅', 'subscription');
+        insert into pools (id, channel_id, max_concurrency) values ('solo', 'sub', 1);
+        insert into models (id, family, display_name) values ('opus', 'claude', 'Opus');
+        insert into routes (id, channel_id, pool_id, model_id, host_id) values ('r1', 'sub', 'solo', 'opus', 'claude-code');
+        insert into stage_policies (stage) values ('execute');
+        insert into stage_policy_routes (stage, route_id, position) values ('execute', 'r1', 0);
+      `);
+        await runMigration(pg, '0003_catalog');
+
+        expect((await pg.query(`select route_id, enabled from stage_policy_routes`)).rows).toEqual([
+          { route_id: 'r1', enabled: true },
+        ]);
+        // 没有默认值：重写顺序时漏带开关就插不进去，不会悄悄全打开。
+        await pg.exec(`delete from stage_policy_routes`);
+        await expect(
+          pg.exec(`insert into stage_policy_routes (stage, route_id, position) values ('execute', 'r1', 0)`),
+        ).rejects.toThrow(/enabled/);
+
+        await pg.exec(`update pools set run_as_user = 'fleet-agent-carpool' where id = 'solo'`);
+        expect((await pg.query(`select run_as_user from pools`)).rows).toEqual([
+          { run_as_user: 'fleet-agent-carpool' },
+        ]);
+        await expect(pg.exec(`update pools set run_as_user = 'root'`)).rejects.toThrow(
+          /pools_run_as_user_known/,
+        );
+      } finally {
+        await pg.close();
+      }
+    },
+    TEST_DB_TIMEOUT_MS,
+  );
+});
+
 describe('测试库', () => {
   it(
     '在内存里，两份测试库互相看不见对方的数据',
