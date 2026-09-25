@@ -132,7 +132,7 @@ export function createEnginePollerCheck(
       ...pollerProblems('workflow', workflow, now(), freshMs),
       ...pollerProblems('activity', activity, now(), freshMs),
     ];
-    if (problems.length > 0) throw new PublicHealthError('engine_offline', problems.join('；'));
+    if (problems.length > 0) throw new PublicHealthError('engine_offline', '引擎不在线', problems.join('；'));
   };
 }
 
@@ -204,7 +204,11 @@ export function createNamespaceCheck(client: NamespaceCheckClient, namespace: st
       await client.describeNamespace(namespace);
     } catch (err) {
       if (isNamespaceNotFound(err)) {
-        throw new PublicHealthError('namespace_not_found', `Temporal 命名空间「${namespace}」不存在`);
+        throw new PublicHealthError(
+          'namespace_not_found',
+          'Temporal 配置不对',
+          `命名空间「${namespace}」不存在`,
+        );
       }
       throw err;
     }

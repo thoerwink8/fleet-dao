@@ -155,7 +155,7 @@ describe('createNamespaceCheck：命名空间查不到归成安全的红，别�
     await expect(createNamespaceCheck(client, 'fleet')()).resolves.toBeUndefined();
   });
 
-  it('命名空间不存在（gRPC NOT_FOUND，状态码 5）：报红，写清是哪个命名空间', async () => {
+  it('命名空间不存在（gRPC NOT_FOUND，状态码 5）：报红；对外一句中性话，哪个命名空间只进日志', async () => {
     const client: NamespaceCheckClient = {
       async describeNamespace() {
         throw Object.assign(new Error('namespace fleet-nope is not found'), { code: 5 });
@@ -164,7 +164,8 @@ describe('createNamespaceCheck：命名空间查不到归成安全的红，别�
     await expect(createNamespaceCheck(client, 'fleet-nope')()).rejects.toMatchObject({
       name: 'PublicHealthError',
       code: 'namespace_not_found',
-      message: expect.stringContaining('fleet-nope'),
+      message: expect.not.stringContaining('fleet-nope'),
+      detail: expect.stringContaining('fleet-nope'),
     });
   });
 
@@ -200,12 +201,18 @@ describe('createEnginePollerCheck：FLEET_TASK_QUEUE 上 workflow、activity 两
 
   it('缺 activity 类的 poller：红，写明是 activity', async () => {
     const check = createEnginePollerCheck(source({ activity: [] }), () => NOW, FRESH_MS);
-    await expect(check()).rejects.toThrow(/activity 任务队列上没有 poller/);
+    await expect(check()).rejects.toMatchObject({
+      code: 'engine_offline',
+      detail: expect.stringMatching(/activity 任务队列上没有 poller/),
+    });
   });
 
   it('缺 workflow 类的 poller：红，写明是 workflow', async () => {
     const check = createEnginePollerCheck(source({ workflow: [] }), () => NOW, FRESH_MS);
-    await expect(check()).rejects.toThrow(/workflow 任务队列上没有 poller/);
+    await expect(check()).rejects.toMatchObject({
+      code: 'engine_offline',
+      detail: expect.stringMatching(/workflow 任务队列上没有 poller/),
+    });
   });
 
   it('poller 在，但最近一次拉活太旧：红', async () => {
@@ -215,7 +222,9 @@ describe('createEnginePollerCheck：FLEET_TASK_QUEUE 上 workflow、activity 两
       () => NOW,
       FRESH_MS,
     );
-    await expect(check()).rejects.toThrow(/workflow poller 最近一次拉活是 5 分钟前/);
+    await expect(check()).rejects.toMatchObject({
+      detail: expect.stringMatching(/workflow poller 最近一次拉活是 5 分钟前/),
+    });
   });
 
   it('查任务队列本身报错：红（不是「没查成」当绿）', async () => {

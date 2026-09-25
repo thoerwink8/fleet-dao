@@ -10,10 +10,13 @@ import type { HealthCheck, Logger } from './ports.ts';
  */
 export class PublicHealthError extends Error {
   readonly code: string;
-  constructor(code: string, message: string) {
+  /** 只进日志的细节（队列名、命名空间名这类），不对外。 */
+  readonly detail: string | undefined;
+  constructor(code: string, message: string, detail?: string) {
     super(message);
     this.name = 'PublicHealthError';
     this.code = code;
+    this.detail = detail;
   }
 }
 
@@ -45,7 +48,11 @@ export async function runHealthChecks(
         ]);
         return [name, { ok: true }] as const;
       } catch (err) {
-        log.warn('健康检查没过', { check: name, error: err instanceof Error ? err.message : String(err) });
+        log.warn('健康检查没过', {
+          check: name,
+          error: err instanceof Error ? err.message : String(err),
+          ...(err instanceof PublicHealthError && err.detail ? { detail: err.detail } : {}),
+        });
         return [
           name,
           err instanceof PublicHealthError
