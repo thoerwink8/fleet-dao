@@ -38,6 +38,8 @@ export interface RepoFacts {
 const BOLD_COLUMN = /^\s*(?:[-*+]\s+)?\*\*\s*([^*：:\n]+?)\s*(?:\*\*\s*[：:]|[：:]\s*\*\*)\s*(.*)$/;
 /** 「对应计划：」：不加粗的只认模板里有的栏名，免得把正文里带冒号的一句话当成新的一栏。 */
 const PLAIN_COLUMN = /^\s*(?:[-*+]\s+)?([^\s*：:][^*：:\n]*?)\s*[：:]\s*(.*)$/;
+/** 小标题是正文分节，上一栏到这里为止：栏写在正文开头时，不截的话后面各节里提到的 specs 路径会被当成这一栏来查。 */
+const HEADING = /^\s{0,3}#{1,6}(?:\s|$)/;
 
 /**
  * 正文里的各栏：从一栏的开头起，到下一栏为止；栏名不分大小写。
@@ -51,6 +53,12 @@ export function prColumns(body: string): Map<string, string> {
     if (current !== undefined && !cols.has(current)) cols.set(current, buf.join('\n').trim());
   };
   for (const line of stripComments(body.replace(/\r\n?/g, '\n')).split('\n')) {
+    if (HEADING.test(line)) {
+      flush();
+      current = undefined;
+      buf = [];
+      continue;
+    }
     const bold = BOLD_COLUMN.exec(line);
     const plain = bold ? null : PLAIN_COLUMN.exec(line);
     const m = bold ?? (plain?.[1] && KNOWN.has(plain[1].toLowerCase()) ? plain : null);
@@ -154,7 +162,7 @@ function checkSpecs(value: string | undefined, repo: RepoFacts): string[] {
   if (!v) return ['「specs」一栏是空的：写需求文档的目录（specs/<号>-<短名>/），杂活写「不适用」。'];
   if (v.startsWith('不适用')) return [];
   // 链接也认（[specs/12-x/](https://…/specs/12-x)）：只取不在网址中间的那个
-  const paths = [...v.matchAll(/(?<![\w./%-])specs\/[^\s、，,；;()（）[\]「」]+/g)].map((m) =>
+  const paths = [...v.matchAll(/(?<![\w./%-])specs\/[^\s、，,；;：:。()（）[\]「」]+/g)].map((m) =>
     decode(m[0]).replace(/[。.]+$/, ''),
   );
   if (paths.length === 0) {
