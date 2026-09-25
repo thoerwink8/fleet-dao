@@ -1,6 +1,7 @@
 // 每个活动的超时、心跳、重试、叫停时等不等它收场：按活动类型分开设，唯一出处在这里（旧系统所有活动共用一个 74 分钟、
 // 没有心跳，工人一重启丢掉的活动要干等 74 分钟才判死）。工作流按这张表给每个活动配代理，不许在调用处另写。
 
+import type { Repo } from '@fleet-dao/shared';
 import type { ActivityOptions, RetryPolicy } from '@temporalio/common';
 import type { MergeItem } from './contract.ts';
 import type { Limits } from './limits.ts';
@@ -17,6 +18,16 @@ export type EngineActivities = PortActivities & {
   startSession(input: StartSessionInput): Promise<StartSessionResult>;
   /** 引擎自己的活动：经 Temporal 客户端 signalWithStart 把条目排进这个仓的合并队列。 */
   enqueueMerge(input: { item: MergeItem; limits: Partial<Limits> }): Promise<void>;
+  /**
+   * 引擎自己的活动：撤出信号直接发不出去（队列没在跑）时，经 signalWithStart 送去——顺手把队列拉起来，
+   * 让它记下撤回、挡住晚到的排队（排队的那一下可能还在路上）。
+   */
+  withdrawMerge(input: {
+    repo: Repo;
+    itemId: string;
+    subtaskWorkflowId: string;
+    limits: Partial<Limits>;
+  }): Promise<void>;
 };
 
 export type ActivityName = keyof EngineActivities;
@@ -36,6 +47,7 @@ export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
   askHuman: 'quick',
   requestApproval: 'quick',
   enqueueMerge: 'quick',
+  withdrawMerge: 'quick',
   startSession: 'git',
   stopSession: 'git',
   removeWorktree: 'git',
@@ -108,11 +120,12 @@ export function profileOptions(profile: Profile, limits: Limits): ActivityOption
 }
 
 /**
- * 叫停时要等它收场（做完，或者服务端确认它不会再做）才往下走的活动。
+ * 叫停时要等服务端给出结论（活动做完，或者判它超时）才往下走的活动。
  * 不设的活动按 SDK 的实际默认 TRY_CANCEL：叫停时工作流当场往下走，不等活动（1.24 的文档注释说默认是
  * WAIT_CANCELLATION_COMPLETED，不对——不设就编码成 0 = TRY_CANCEL）。
- * 排进合并队列必须等：不等的话收尾先撤出、活动随后照样把条目排进去（队列没在跑还会被它拉起来），PR 照样合进主线。
- * 它不心跳、最多一次尝试 30 秒；叫停之后服务端不再重试，所以最多多等这一次。
+ * 排进合并队列要等：排队的那一下通常在这期间落地，收尾再撤出就撤得掉。它不心跳、收不到叫停，最多等到这次尝试的限时
+ * （30 秒，叫停之后服务端不再重试）；服务端判超时时代码可能还卡着、事后才发——那一下由队列记下的撤回挡回去
+ * （workflows/subtask.ts 的 sendWithdraw）。
  */
 export const WAIT_FOR_CANCEL: readonly ActivityName[] = ['enqueueMerge'];
 

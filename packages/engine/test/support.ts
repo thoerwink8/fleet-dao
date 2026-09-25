@@ -26,6 +26,18 @@ export function createEnv(): Promise<TestWorkflowEnvironment> {
   return TestWorkflowEnvironment.createTimeSkipping();
 }
 
+/**
+ * 真的 Temporal 开发服务端（temporal server start-dev），不能跳时间。只给「测试服务端和真服务端行为不同」的用例用：
+ * 比如测试服务端不会让已经请求叫停、又不心跳的活动超时（一直等工人回话），真服务端到了限时就判超时。
+ * FLEET_TEST_TEMPORAL_CLI 指向本机的 temporal 命令就用它（最好和法国同一版），否则按 SDK 默认的版本下载一份（缓存一天）。
+ */
+export function createRealEnv(): Promise<TestWorkflowEnvironment> {
+  const cli = process.env.FLEET_TEST_TEMPORAL_CLI?.trim();
+  return TestWorkflowEnvironment.createLocal(
+    cli ? { server: { executable: { type: 'existing-path', path: cli } } } : {},
+  );
+}
+
 export interface WorkerOptions {
   taskQueue?: string;
   classify?: Classifier;

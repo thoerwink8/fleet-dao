@@ -4,6 +4,7 @@ import { MockActivityEnvironment } from '@temporalio/testing';
 import { describe, expect, it } from 'vitest';
 import { agentTokenTtlSeconds, createActivities, PORT_NAMES } from '../src/activities.ts';
 import { ACTIVITY_PROFILE, activityOptions, profileOptions } from '../src/activity-options.ts';
+import type { MergeItem } from '../src/contract.ts';
 import { createFakeWorld } from '../src/fakes.ts';
 import { DEFAULT_LIMITS } from '../src/limits.ts';
 import { type ActivityTiming, type EnginePorts, PortError, type StartSessionInput } from '../src/ports.ts';
@@ -18,7 +19,7 @@ const launch = {
 
 const quiet = { log() {}, trace() {}, debug() {}, info() {}, warn() {}, error() {} };
 
-function envWith(info: Record<string, unknown> = {}) {
+function envWith(info: Record<string, unknown> = {}, client?: unknown) {
   return new MockActivityEnvironment(
     {
       attempt: 1,
@@ -27,7 +28,7 @@ function envWith(info: Record<string, unknown> = {}) {
       currentAttemptScheduledTimestampMs: Date.now(),
       ...info,
     } as never,
-    { logger: quiet },
+    { logger: quiet, ...(client ? { client: client as never } : {}) },
   );
 }
 
@@ -43,7 +44,9 @@ describe('活动外壳', () => {
   it('活动表齐全：工作流会调的每个名字 worker 都挂上了（windsurf-dao#1422）', () => {
     const activities = createActivities(createFakeWorld().ports, launch);
     expect(Object.keys(activities).sort()).toEqual(Object.keys(ACTIVITY_PROFILE).sort());
-    expect([...PORT_NAMES, 'enqueueMerge'].sort()).toEqual(Object.keys(ACTIVITY_PROFILE).sort());
+    expect([...PORT_NAMES, 'enqueueMerge', 'withdrawMerge'].sort()).toEqual(
+      Object.keys(ACTIVITY_PROFILE).sort(),
+    );
   });
 
   it('每次尝试记一笔：排队（排进队列 → 开始）和干活（开始 → 结束）分开', async () => {
@@ -196,6 +199,60 @@ describe('活动外壳', () => {
       cancellationType: 'WAIT_CANCELLATION_COMPLETED',
       startToCloseTimeout: '30 seconds',
     });
+  });
+
+  it('排队、撤出发给合并队列的那一下带截止时间（这次尝试的限时）：卡住的一下拖不过这次尝试、事后才送到', async () => {
+    const calls: { signal: string; args: unknown[]; deadline: number | null }[] = [];
+    let deadline: number | null = null;
+    const client = {
+      // worker 跑活动时把客户端调用绑在活动的取消信号上（不心跳的活动收不到取消，所以另带截止时间）。
+      withAbortSignal: <R>(_signal: AbortSignal, fn: () => Promise<R>): Promise<R> => fn(),
+      async withDeadline<R>(at: number | Date, fn: () => Promise<R>): Promise<R> {
+        deadline = Number(at);
+        try {
+          return await fn();
+        } finally {
+          deadline = null;
+        }
+      },
+      workflow: {
+        async signalWithStart(_type: string, options: { signal: { name: string }; signalArgs: unknown[] }) {
+          calls.push({ signal: options.signal.name, args: options.signalArgs, deadline });
+        },
+      },
+    };
+    const repo = freshRepo();
+    const item: MergeItem = {
+      itemId: 'sub:x#1',
+      subtaskWorkflowId: 'sub:x',
+      taskId: 't1',
+      subtaskId: 's1',
+      subtaskKey: 'a',
+      repo,
+      prNumber: 7,
+      branch: 'fleet/1-a',
+      head: 'h1',
+      enqueuedAt: new Date(0).toISOString(),
+    };
+    const activities = createActivities(createFakeWorld().ports, launch);
+    const env = envWith({ startToCloseTimeoutMs: 30_000, taskQueue: 'q' }, client);
+    const before = Date.now();
+    await env.run(activities.enqueueMerge, { item, limits: {} });
+    await env.run(activities.withdrawMerge, {
+      repo,
+      itemId: item.itemId,
+      subtaskWorkflowId: 'sub:x',
+      limits: {},
+    });
+    const after = Date.now();
+    expect(calls.map((c) => [c.signal, c.args])).toEqual([
+      ['enqueue', [item]],
+      ['withdraw', [{ itemId: 'sub:x#1', subtaskWorkflowId: 'sub:x' }]],
+    ]);
+    for (const c of calls) {
+      expect(c.deadline).toBeGreaterThanOrEqual(before + 30_000);
+      expect(c.deadline).toBeLessThanOrEqual(after + 30_000);
+    }
   });
 
   it('通行证比会话限时多一刻钟，最长一天', () => {

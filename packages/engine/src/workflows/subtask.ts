@@ -263,18 +263,28 @@ export async function subtaskWorkflow(input: SubtaskInput): Promise<SubtaskResul
     ];
   };
 
+  /**
+   * 撤出：送到队列，它记下撤回、回一句话（撤回，或撤出前已经合上/退回了）。送到了回 true，两条路都送不到回 false。
+   * 队列没在跑时直接发的信号送不到，但排队的那一下可能还在路上：排队的活动不心跳、收不到叫停，服务端到了这次尝试的限时
+   * 就判它超时、让这里收尾，代码却可能还卡着、事后才发（真服务端上实测过：卡完把队列拉起来照合）。所以改经活动
+   * signalWithStart 送：顺手把队列拉起来记下撤回，晚到的排队被挡回去。队列收到信号就从头再等一个空闲期，撤回至少留这么久；
+   * 排队那一下带着这次尝试的截止时间，拖不了这么久。
+   */
   const sendWithdraw = async (itemId: string): Promise<boolean> => {
+    const withdraw = { itemId, subtaskWorkflowId: info.workflowId };
     try {
-      await getExternalWorkflowHandle(mergeQueueWorkflowId(input.repo)).signal(withdrawSignal, {
-        itemId,
-        subtaskWorkflowId: info.workflowId,
-      });
+      await getExternalWorkflowHandle(mergeQueueWorkflowId(input.repo)).signal(withdrawSignal, withdraw);
       return true;
     } catch (error) {
       if (isCancellation(error)) throw error;
-      // 队列不在：这一条没排进去。排队的活动叫停时要等它收场（activity-options 的 WAIT_FOR_CANCEL），
-      // 走到这里时排队信号要么已经送到（队列就在）、要么再也不会送——不会有活动事后把队列拉起来照合。
-      log.warn('撤出合并队列的信号没发出去', { itemId, error: String(error) });
+      log.info('合并队列没在跑，撤出改经活动送去', { itemId, error: String(error) });
+    }
+    try {
+      await acts.withdrawMerge({ repo: input.repo, ...withdraw, limits: input.limits ?? {} });
+      return true;
+    } catch (error) {
+      if (isCancellation(error)) throw error;
+      log.warn('撤出没送到合并队列', { itemId, error: String(error) });
       return false;
     }
   };
@@ -543,7 +553,9 @@ export async function subtaskWorkflow(input: SubtaskInput): Promise<SubtaskResul
     status.runId = null;
     status.sessionId = null;
     const itemId = pendingItemId as string | null;
-    if (itemId && (await sendWithdraw(itemId))) {
+    if (itemId && !(await sendWithdraw(itemId))) {
+      problem = `${problem ?? '收尾'}；撤出没送到合并队列，PR #${status.prNumber} 要人核对有没有合上`;
+    } else if (itemId) {
       // 等队列确认：撤出前已经合上的，如实记成合并了（不然合进主线的改动没人认）。
       await waitFor(kit, 'merge-queue', '撤出合并队列，等队列确认', () =>
         condition(() => itemId in mergeResults, `${STOP_WITHDRAW_MINUTES} minutes`),

@@ -2,9 +2,16 @@
 // 起会话前现签 fleet 通行证、把 fleet 命令放进会话的 PATH（通行证不进工作流历史）。
 
 import { Context } from '@temporalio/activity';
-import { ApplicationFailure, CancelledFailure } from '@temporalio/common';
+import { ApplicationFailure, CancelledFailure, type SignalDefinition } from '@temporalio/common';
 import type { EngineActivities } from './activity-options.ts';
-import { enqueueSignal, type MergeQueueInput, mergeQueueWorkflowId, WORKFLOW_TYPES } from './contract.ts';
+import {
+  enqueueSignal,
+  type MergeQueueInput,
+  mergeQueueWorkflowId,
+  WORKFLOW_TYPES,
+  withdrawSignal,
+} from './contract.ts';
+import type { Limits } from './limits.ts';
 import {
   type ActivityTiming,
   type EnginePorts,
@@ -174,16 +181,40 @@ function timed(name: string, handler: Handler, record: EnginePorts['recordTiming
   };
 }
 
-/** 引擎自己的活动：把条目排进合并队列（队列不在跑就顺手起一条）。工作流里发不了 signalWithStart，只能在活动里发。 */
-async function enqueueMerge(input: Parameters<EngineActivities['enqueueMerge']>[0]): Promise<void> {
+/**
+ * 给这个仓的合并队列发一个信号，队列不在跑就顺手起一条（工作流里发不了 signalWithStart，只能在活动里发）。
+ * 发这一下带截止时间 = 这次尝试的限时：卡住的一下不会拖过这次尝试、事后才送到——服务端判这次尝试超时以后，
+ * 工作流就当它收场了（叫停时照常收尾撤出），拖过去再送到的排队只能靠队列记下的撤回挡，队列收工了就挡不住。
+ */
+async function signalMergeQueue<A>(
+  repo: MergeQueueInput['repo'],
+  limits: Partial<Limits>,
+  signal: SignalDefinition<[A]>,
+  arg: A,
+): Promise<void> {
   const ctx = Context.current();
-  const args: MergeQueueInput = { schemaVersion: 1, repo: input.item.repo, limits: input.limits };
-  await ctx.client.workflow.signalWithStart(WORKFLOW_TYPES.mergeQueue, {
-    workflowId: mergeQueueWorkflowId(input.item.repo),
-    taskQueue: ctx.info.taskQueue,
-    args: [args],
-    signal: enqueueSignal,
-    signalArgs: [input.item],
+  const args: MergeQueueInput = { schemaVersion: 1, repo, limits };
+  await ctx.client.withDeadline(Date.now() + ctx.info.startToCloseTimeoutMs, () =>
+    ctx.client.workflow.signalWithStart(WORKFLOW_TYPES.mergeQueue, {
+      workflowId: mergeQueueWorkflowId(repo),
+      taskQueue: ctx.info.taskQueue,
+      args: [args],
+      signal,
+      signalArgs: [arg],
+    }),
+  );
+}
+
+/** 引擎自己的活动：把条目排进合并队列。 */
+function enqueueMerge(input: Parameters<EngineActivities['enqueueMerge']>[0]): Promise<void> {
+  return signalMergeQueue(input.item.repo, input.limits, enqueueSignal, input.item);
+}
+
+/** 引擎自己的活动：撤出信号直接发不出去（队列没在跑）时经这里送去，把队列拉起来记下撤回。 */
+function withdrawMerge(input: Parameters<EngineActivities['withdrawMerge']>[0]): Promise<void> {
+  return signalMergeQueue(input.repo, input.limits, withdrawSignal, {
+    itemId: input.itemId,
+    subtaskWorkflowId: input.subtaskWorkflowId,
   });
 }
 
@@ -230,5 +261,6 @@ export function createActivities(ports: EnginePorts, launch: SessionLaunchConfig
     }
   }
   out.enqueueMerge = timed('enqueueMerge', (input) => enqueueMerge(input as never), record);
+  out.withdrawMerge = timed('withdrawMerge', (input) => withdrawMerge(input as never), record);
   return out as unknown as EngineActivities;
 }

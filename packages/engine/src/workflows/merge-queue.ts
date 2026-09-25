@@ -2,6 +2,7 @@
 // 由子任务的 enqueueMerge 活动 signalWithStart 拉起；空闲一阵就收工，攒够一批换一次历史（continue-as-new）。
 // 撤出（子任务暂停、要等人批准、叫停）一定回话：还没开始合的当场回 withdrawn；正在合的等那一步做完，合上了回 merged。
 // 回过的话都记在 recent 里，撤回也记：排队信号比撤出晚到（排队的活动还在路上就叫停了），会被挡回去、不再排进来。
+// 空闲计时从最后一个信号算起，刚记下的撤回至少留一个空闲期（mergeQueueIdleMinutes）。
 
 import {
   allHandlersFinished,
@@ -65,7 +66,10 @@ export async function mergeQueueWorkflow(input: MergeQueueInput): Promise<MergeQ
     await deliver(delivery);
   };
 
+  // 收到过几个信号（排队、撤出）：空闲计时从最后一个信号算起。
+  let heard = 0;
   setHandler(enqueueSignal, async (item) => {
+    heard += 1;
     // 回过话的（合上、退回、撤回）不再排：补发那句话。
     const done = recent.find((d) => d.result.itemId === item.itemId);
     if (done) return deliver(done);
@@ -73,6 +77,7 @@ export async function mergeQueueWorkflow(input: MergeQueueInput): Promise<MergeQ
     queue.push(item);
   });
   setHandler(withdrawSignal, async ({ itemId, subtaskWorkflowId }) => {
+    heard += 1;
     const index = queue.findIndex((q) => q.itemId === itemId);
     if (index >= 0) {
       const [item] = queue.splice(index, 1);
@@ -191,11 +196,17 @@ export async function mergeQueueWorkflow(input: MergeQueueInput): Promise<MergeQ
   };
 
   for (;;) {
-    const hasWork = await condition(() => queue.length > 0, `${limits.mergeQueueIdleMinutes} minutes`);
-    if (!hasWork) {
-      // 收工前把正在回话的送完（撤出确认、补发结果）。
+    const heardBefore = heard;
+    await condition(
+      () => queue.length > 0 || heard !== heardBefore,
+      `${limits.mergeQueueIdleMinutes} minutes`,
+    );
+    if (queue.length === 0) {
+      // 空闲计时从最后一个信号算起：刚记下的撤回至少再留一个空闲期，快收工时来的撤回也挡得住晚到的排队。
+      if (heard !== heardBefore) continue;
+      // 收工前把正在回话的送完（撤出确认、补发结果）；这期间又来了信号就接着等。
       await condition(allHandlersFinished);
-      if (queue.length === 0) return { processed };
+      if (queue.length === 0 && heard === heardBefore) return { processed };
       continue;
     }
     const item = queue.shift();
