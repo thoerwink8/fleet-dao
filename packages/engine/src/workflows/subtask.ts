@@ -9,6 +9,7 @@ import {
   getExternalWorkflowHandle,
   isCancellation,
   log,
+  patched,
   setHandler,
   sleep,
   TemporalFailure,
@@ -365,6 +366,24 @@ export async function subtaskWorkflow(input: SubtaskInput): Promise<SubtaskResul
       await park(kit, reason, detail);
       budget = { since: Date.now(), off: offClockMs(kit) };
     };
+    // 合并队列退回来、要回会话接着改之前：队列那边可能已经把主线并进分支推上去了（并提交的第一个父提交是 verifiedHead），
+    // 会话的树里却没有它——会话在旧头上改完一推，就和远端分叉（DIVERGED，不可重试）。先照 verifiedHead 同步一次：
+    // github 包认得自己推过的那个并提交（只回它、不再并），端口带着树就把树快进过去，会话起在并好的头上。
+    const followBranchHead = async (prNumber: number) => {
+      if (!patched('merge-return-follows-head')) return;
+      const sync = await attempt(kit, 'syncMainline', () =>
+        acts.syncMainline({
+          ...kit.scope,
+          repo: input.repo,
+          prNumber,
+          branch,
+          head: verifiedHead,
+          worktreePath: tree.path,
+        }),
+      );
+      // 冲突：队列没推成什么，树还在 verifiedHead 上；会话照退回的意见改，推的端口推之前再并主线
+      if (sync.state === 'clean') status.head = sync.head;
+    };
     let next: Next = 'execute';
     while (next !== 'done') {
       if (next === 'execute') {
@@ -568,10 +587,12 @@ export async function subtaskWorkflow(input: SubtaskInput): Promise<SubtaskResul
         await waitFor(kit, 'retry', after.reason, () => sleep(`${after.delaySeconds} seconds`));
         next = 'merge';
       } else if (after.action === 'rework') {
+        await followBranchHead(prNumber);
         feedback = after.feedback;
         next = 'execute';
       } else {
         await parkAndReset(after.reason, after.detail);
+        await followBranchHead(prNumber);
         status.rounds = { ...status.rounds, mergeReturn: 0 };
         feedback = [
           { kind: 'merge-return', summary: `人看过后接着干：${after.reason}`, items: [after.detail] },

@@ -988,6 +988,38 @@ describe('子任务工作流', { timeout: 60_000 }, () => {
     expect(world.count('mergePr')).toBe(1);
   });
 
+  it('合并队列并好主线推上去之后测红退回：回会话之前照原来的头同步一次、带着树，会话起在并好的头上（不然再推就分叉）', async () => {
+    const world = createFakeWorld({
+      // 第 1 次：验证那一步的同步（带树，主线没动）；第 2 次：合并队列的同步（不带树），把主线并进来推上去；
+      // 第 3 次：测红退回后子任务照 verifiedHead 同步（带树），github 包认得自己推过的并提交，回它
+      sync: (input, n) => {
+        if (!input.worktreePath) return { head: `${input.head}+main` };
+        return n === 3 ? { head: `${input.head}+main` } : undefined;
+      },
+      tests: (_input, n) => (n === 1 ? { passed: false, summary: '登录测试挂了' } : undefined),
+    });
+    const result = (await withWorker(env, world, async (q) =>
+      (await startSubtask(q)).result(),
+    )) as SubtaskResult;
+    expect(result.state).toBe('merged');
+    const red = world.calls.findIndex((c) => c.port === 'runTests');
+    const after = world.calls
+      .slice(red + 1)
+      .filter((c) => ['syncMainline', 'startSession', 'pushBranch'].includes(c.port));
+    // 测红之后的第一件事：照 verifiedHead 同步、带着树（端口会把树快进到并好的头）
+    expect(after[0]).toMatchObject({
+      port: 'syncMainline',
+      input: { head: 'a-1', worktreePath: expect.any(String) },
+    });
+    expect(after[1]?.port).toBe('startSession');
+    const execs = world.callsOf('startSession').filter((c) => c.input.stage === 'execute');
+    expect(execs).toHaveLength(2);
+    // 返工的会话起在并好的头上：交付核对、推分支都从这里算
+    expect(execs[1]?.input.baseHead).toBe('a-1+main');
+    expect(world.callsOf('pushBranch').map((c) => c.input.head)).toEqual(['a-1', 'a-2']);
+    expect(world.count('mergePr')).toBe(1);
+  });
+
   // 这条要十来秒：测试服务端会把新任务派给已关掉的老工人留下的长轮询，合并队列的第一个工作流任务要等 10 秒超时才重派
   // （真服务端上工人停机会通知服务端，没有这 10 秒）。
   it('换了工人：停在暂停里的在途任务照样能查状态、收信号、走完', async () => {
