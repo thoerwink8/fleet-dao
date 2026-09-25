@@ -69,9 +69,12 @@ describe('工作流文件的规矩', () => {
     expect(offending).toEqual([]);
   });
 
-  it('不碰活动、worker、客户端、假实现和 Node 自带模块', () => {
+  it('不碰活动、worker、客户端、假实现、真端口和 Node 自带模块', () => {
     const banned =
-      /^(node:|@temporalio\/(activity|worker|client|testing)$|\.\.\/(activities|worker|fakes|main)\.ts$)/;
+      /^(node:|@temporalio\/(activity|worker|client|testing)$|\.\.\/(activities|worker|fakes|main)\.ts$|\.\.\/real\/|@fleet-dao\/(db|github|adapters)(\/|$))/;
+    expect(banned.test('../real/sessions.ts')).toBe(true);
+    expect(banned.test('@fleet-dao/db')).toBe(true);
+    expect(banned.test('@fleet-dao/shared')).toBe(false);
     const offending = all
       .filter((i) => banned.test(i.source) && !i.typeOnly)
       .map((i) => `${i.file}：${i.text}`);

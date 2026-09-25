@@ -123,16 +123,41 @@ export async function createEngineWorker(options: CreateEngineWorkerOptions): Pr
   });
 }
 
+/** 端口用哪一套：real = 真仓、真会话、真 GitHub；fake = 假实现（联调、演练，不碰真东西）。没配、配错都不起。 */
+export type PortsMode = 'real' | 'fake';
+
+export function portsModeFromEnv(env: Record<string, string | undefined>): PortsMode {
+  const mode = env.FLEET_ENGINE_PORTS?.trim();
+  if (mode === 'real' || mode === 'fake') return mode;
+  throw new Error(
+    `FLEET_ENGINE_PORTS 要写 real（真仓、真会话、真 GitHub）或 fake（假实现，不碰真东西）：现在是「${mode ?? ''}」`,
+  );
+}
+
 /** 进程入口用：按环境变量起一个 worker，收到 SIGINT/SIGTERM 优雅停机。 */
 export async function runEngineWorker(env: Record<string, string | undefined> = process.env): Promise<void> {
   const config = configFromEnv(env);
-  const mode = env.FLEET_ENGINE_PORTS?.trim();
-  if (mode !== 'fake') {
-    throw new Error(
-      '真实现还没接上：这一版只有假实现。联调时设 FLEET_ENGINE_PORTS=fake（不碰真仓、真会话、真 GitHub）。',
-    );
+  const mode = portsModeFromEnv(env);
+  let ports: EnginePorts;
+  let reapOrphanSessions: (() => Promise<number>) | undefined;
+  let close: () => Promise<void> = async () => {};
+  let signAgentToken = agentTokenSignerFromEnv(env);
+  if (mode === 'real') {
+    // 真会话里的 fleet 命令要连后端、要通行证：缺一样就不起（起了也只会一个个会话起不来）。
+    const missing = [
+      ...(config.agentApiUrl ? [] : ['FLEET_AGENT_API_URL']),
+      ...(signAgentToken ? [] : ['FLEET_AGENT_TOKEN_SECRET']),
+    ];
+    if (missing.length > 0) throw new Error(`真端口起不来，本机配置缺：${missing.join('、')}`);
+    const { realPortsFromEnv } = await import('./real/index.ts');
+    const real = realPortsFromEnv(env);
+    ports = real.ports;
+    reapOrphanSessions = real.reapOrphanSessions;
+    close = real.close;
+  } else {
+    ports = createFakeWorld().ports;
+    signAgentToken ??= (claims) => `fake-token.${claims.runId}`;
   }
-  const ports = createFakeWorld().ports;
   const connection = await NativeConnection.connect({ address: config.address });
   try {
     const worker = await createEngineWorker({
@@ -140,7 +165,8 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
       config: { ...config, agentApiUrl: config.agentApiUrl ?? 'fake://agent-api' },
       ports,
       connection,
-      signAgentToken: agentTokenSignerFromEnv(env) ?? ((claims) => `fake-token.${claims.runId}`),
+      signAgentToken: signAgentToken as (claims: AgentTokenClaims) => string,
+      ...(reapOrphanSessions ? { reapOrphanSessions } : {}),
       log: (message) => console.info(message),
     });
     console.info(
@@ -149,5 +175,6 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
     await worker.run();
   } finally {
     await connection.close();
+    await close();
   }
 }
