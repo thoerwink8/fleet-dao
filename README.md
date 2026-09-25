@@ -28,6 +28,7 @@
 | `packages/github` | 引擎对 GitHub 的读写：推分支、开 PR、等 CI、合并、issue 进度段与关单、对账补漏 |
 | `packages/jev` | Jev 判断题服务：题库、提问接口、从只记不拦转到真拦 |
 | `packages/feishu` | 飞书网关（跑在香港） |
+| `packages/conventions` | design 第七节的约定写成检查：PR 必填栏（CI 的 pr-fields）、开单脚本、文档指针检查 |
 | `deploy/` | 装机、发版、健康页，和它们的检查 |
 | `docs/` | 设计、计划、运维；`docs/reference/` 是旧系统的坑 |
 | `specs/` | 需求文档，每个需求一个文件夹（需求、方案、结果） |
@@ -46,7 +47,8 @@
 - 装机：ops 第四节（怎么跑装机脚本）。
 - 发版：`deploy/release.sh`，见 ops 第九节（发布应用）。
 - 开发：`pnpm install`，Node 和 pnpm 的版本钉在 `package.json`；给 AI 的约定在 [AGENTS.md](AGENTS.md)。
-- 跑检查：`pnpm check`；CI 跑哪些见 `.github/workflows/ci.yml`。
+- 跑检查：`pnpm check`（文档里的路径、章节指针也在里面查）；CI 跑哪些见 `.github/workflows/`。
+- 开单：`pnpm issue:new --kind 需求 --milestone P1 --title "一句话" --body-file 正文.md`，缺类别或里程碑不开；加 `--specs 短名` 顺带建需求文档骨架。
 
 ## 文档各管什么
 
@@ -61,4 +63,4 @@
 
 ## 协作
 
-GitHub 上只用标签和里程碑：每个标签的意思写在[标签页](https://github.com/thoerwink8/fleet-dao/labels)，里程碑就是 plan 的 P0–P6；怎么用、为什么这样定，见 design 第七节。开 PR 照模板填，最后一栏「文档」写改了哪份文档，或「不适用」。
+GitHub 上只用标签和里程碑：每个标签的意思写在[标签页](https://github.com/thoerwink8/fleet-dao/labels)，里程碑就是 plan 的 P0–P6；怎么用、为什么这样定，见 design 第七节。开 issue 用上面的 `pnpm issue:new`；开 PR 照模板填，贴一个类别标签、挂一个里程碑、写明「对应计划」和「specs」，缺一样 CI 的 pr-fields 就红；最后一栏「文档」写改了哪份文档，或「不适用」。

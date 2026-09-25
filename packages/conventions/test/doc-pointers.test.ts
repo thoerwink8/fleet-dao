@@ -1,36 +1,41 @@
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { checkDocPointers, DOCS, formatProblem, type PointerKind } from '../src/doc-pointers.ts';
+import { checkDocPointers, DOCS, formatProblem, type PointerKind, quoteFits } from '../src/doc-pointers.ts';
 import { fsRepo } from '../src/repo.ts';
 import { memRepo } from './helpers.ts';
 
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 
 const DESIGN = [
-  '# 设计', // 1
+  '# 设计',
   '',
-  '## 一、一句话', // 3
+  '## 一、一句话',
   '',
   '写任务。',
   '',
-  '## 二、为什么', // 7
+  '## 二、为什么',
   '',
   '| 现象 | 根因 |',
   '|---|---|',
   '| 没人盯就停 | 要贴标签 |',
   '',
-  '## 三、已定', // 13
+  '## 三、已定',
   '',
   '| # | 事项 |',
   '|---|---|',
   '| 1 | 仓 |',
   '| 2 | 结构 |',
   '',
-  '### 仓库结构', // 20
+  '### 仓库结构',
   '',
-  '## 十五、驾驶舱', // 22
+  '## 八、进度',
   '',
-  '### 15.1 看板', // 24
+  '- **再主动，做成 `fleet` 命令**：只有 AI 自己知道的事才让它说。',
+  '  - 为什么是命令不是 MCP：各家都会跑命令。',
+  '',
+  '## 十五、驾驶舱',
+  '',
+  '### 15.1 看板',
   '',
   '1. **随手记任务**：说一句话。',
   '2. **只推三类消息**：别的不推。',
@@ -188,6 +193,19 @@ describe('文档指针：故意弄断的，逐条报 文件:行', () => {
     expect(report.problems).toEqual([{ file, line: first, message }]);
   });
 
+  it('引的话写个大意可以，可小标题改了名、章节号指错了一节照样抓', () => {
+    // 「做成命令不是 MCP」是上下两行的大意（main 上真有这样写的）；「仓库目录」是「仓库结构」改名后的样子
+    const { report, first } = withLines('docs/design.md', [
+      '见第八节「做成命令不是 MCP」。',
+      '见第三节「仓库目录」。',
+      '见第十五节「为什么是命令不是 MCP」。',
+    ]);
+    expect(report.problems.map(formatProblem)).toEqual([
+      `docs/design.md:${first + 1}  docs/design.md 第三节里找不到「仓库目录」`,
+      `docs/design.md:${first + 2}  docs/design.md 第十五节里找不到「为什么是命令不是 MCP」`,
+    ]);
+  });
+
   it('一行里前面写了哪份文档，后面光写的「第 X 节」「X.Y」也按那份查', () => {
     const { report, first } = withLines('specs/1-demo/需求.md', [
       '设计依据：design 第一节、第九节；15.1 第 9 件。',
@@ -213,6 +231,31 @@ describe('文档指针：故意弄断的，逐条报 文件:行', () => {
     delete files['specs/1-demo/需求.md'];
     const report = checkDocPointers(memRepo(files));
     expect(report.problems.map(formatProblem)).toEqual(['specs/:0  列不出这个目录下的文件，里面的文档没查']);
+  });
+});
+
+describe('章节后面引的话：写大意可以，差太多不行（样本照 main 上的原文）', () => {
+  const six = [
+    '3. 不撞车的调度：会动同一块地方的子任务不同时跑——排队，或交给同一个会话连着做；互不相干的才并行。',
+  ];
+  const eight = [
+    '- 再主动，做成 fleet 命令：只有 AI 自己知道的事才让它主动说。',
+    '- 为什么是命令不是 MCP：所有写码助手都会跑命令，一条命令各家通用。',
+  ];
+
+  it('原样在那一节里：过', () => {
+    expect(quoteFits('不撞车的调度', six)).toBe(true);
+  });
+
+  it('少一个「的」、拼了上下两条意思的大意：过', () => {
+    expect(quoteFits('不撞车调度', six)).toBe(true);
+    expect(quoteFits('做成命令不是 MCP', eight)).toBe(true);
+  });
+
+  it('小标题改了名、指到不相干的一节、引号是空的：不过', () => {
+    expect(quoteFits('仓库结构', ['### 仓库目录', '| 存结构不固定的数据 | 弱 |'])).toBe(false);
+    expect(quoteFits('做成命令不是 MCP', six)).toBe(false);
+    expect(quoteFits('', six)).toBe(false);
   });
 });
 

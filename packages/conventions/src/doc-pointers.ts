@@ -399,7 +399,9 @@ class Checker {
     for (let q = readQuote(text, e); q; q = readQuote(text, e)) {
       if (doc && h) {
         this.note('quote', file, line, `${label}「${q.text}」`);
-        if (!this.sectionHas(doc, h, q.text)) this.problem(file, line, `${label}里找不到「${q.text}」`);
+        if (!this.sectionHas(doc, h, q.text, doc.path === file ? line : undefined)) {
+          this.problem(file, line, `${label}里找不到「${q.text}」`);
+        }
       }
       e = q.end;
     }
@@ -439,11 +441,15 @@ class Checker {
     return quote.end;
   }
 
-  private sectionHas(doc: MdDoc, h: Heading, quote: string): boolean {
-    const want = norm(quote);
-    if (!want) return false;
+  /** skipLine：指针自己那一行（指针就写在它指的那一节里时），不拿它自己的字去对。 */
+  private sectionHas(doc: MdDoc, h: Heading, quote: string, skipLine: number | undefined): boolean {
     const { start, end } = sectionRange(doc, h);
-    return doc.lines.slice(start, end).some((l, k) => !doc.fenced[start + k] && norm(l).includes(want));
+    const lines = doc.lines
+      .slice(start, end)
+      .filter((_l, k) => !doc.fenced[start + k] && start + k + 1 !== skipLine)
+      .map(norm)
+      .filter(Boolean);
+    return quoteFits(quote, lines);
   }
 
   /** 表格里「| N |」那一行，或者有序列表「N. 」那一条。 */
@@ -500,6 +506,35 @@ class Checker {
   private problem(file: string, line: number, message: string): void {
     this.problems.push({ file, line, message });
   }
+}
+
+/**
+ * 章节后面引的话在不在那一节里（lines 是那一节比较用的各行）。
+ * 文档里常写个大意而不是原文（main 上就有「第六节「不撞车调度」」「第八节「做成命令不是 MCP」」），所以不要求一字不差：
+ * 原样在某一行里算；不然把它拆成词（汉字两个一组、英文和数字一个词），同一行里找得到三分之二以上也算。
+ * 三分之二是按实物定的：上面两处大意分别是 75% 和正好 67%；小标题「仓库结构」改名「仓库目录」后剩 33%；
+ * 章节号错一节、拿「演示版单独放」去对第十五节，最像的一行凑得出 60%。只看同一行：拿相邻两行凑，不相干的两行也凑得够。
+ */
+export function quoteFits(quote: string, lines: readonly string[]): boolean {
+  const want = norm(quote);
+  if (!want) return false;
+  if (lines.some((l) => l.includes(want))) return true;
+  const words = quoteWords(want);
+  if (words.length === 0) return false;
+  return lines.some((l) => {
+    const text = l.toLowerCase();
+    return words.filter((w) => text.includes(w)).length * 3 >= words.length * 2;
+  });
+}
+
+function quoteWords(s: string): string[] {
+  const words: string[] = [];
+  for (const m of s.toLowerCase().matchAll(/\p{Script=Han}+|[a-z0-9]+/gu)) {
+    const w = m[0];
+    if (!/\p{Script=Han}/u.test(w) || w.length === 1) words.push(w);
+    else for (let i = 0; i + 1 < w.length; i++) words.push(w.slice(i, i + 2));
+  }
+  return words;
 }
 
 function skipSpaces(s: string, i: number): number {
