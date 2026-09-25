@@ -155,6 +155,12 @@ reclaude 按用户记设备：组织写在各自家里的 `~/.reclaude/device.js
 4. `fleet-agent-carpool` 照 2、3 再做一遍，第 3 步选拼车的组织。
 5. 重跑 `deploy/france.sh`：读回里两个会话用户的「reclaude 还没登录」消失。
 
+已知口子（会话用户的 reclaude 代理端口，2026-09-25 审查官发现，待定机制修）：每个会话用户的 reclaude 守护在 `127.0.0.1` 上开两个临时端口（一个 HTTP CONNECT 代理，会话的 `HTTPS_PROXY` 指它；一个 MITM TLS 口），端口号每次重启会变。代理口不认客户端身份——本机**别的用户**（`pilot`、`fleet`、另一个会话用户）也连得上、也会被转发，等于借用这个账号的订阅（拿另一个号的额度、或从 pilot 借会话号的额度）。`HTTPS_PROXY` 里没有令牌，靠的是绑回环 + 会话本该只有自己碰，但回环对所有本机用户都通。
+
+- 验证（只读、无害，不打真实模型调用）：`runuser -u fleet -- bash -c 'exec 3<>/dev/tcp/127.0.0.1/<代理口>; printf "CONNECT 127.0.0.1:1 HTTP/1.1\r\nHost: x\r\n\r\n" >&3; head -1 <&3'`。回 `502 Bad Gateway`（而不是 `407 Proxy Authentication Required`）＝它接了别的用户、没要身份，能借。代理口是两个端口里对这个探测回 502 的那个（`ss -ltnp` 看 reclaude 的两个口，逐个试）。
+- nft 挡不干净：端口是临时的、每次变，而 nft 的 `skuid` 只认「发起连接的是谁」，认不出「监听口归谁」，没法表达「只许本人连自己的 reclaude」。粗暴地按 `skuid` 挡住 `pilot`、`fleet` 连临时端口段能挡住这两个借用方（fleet-dao 自己的口都 < 32768，不受影响），但挡不住两个会话用户互相借——把会话用户也挡了就断了它连自己 reclaude 的正路。
+- 真正的修法在别处、要单独拍：每个会话一个网络命名空间（回环各自独立，`fleet-agent-scope` 起会话时加，属编排/隔离机制），或请 ai-gateway-stack 让 reclaude 给代理加一个每实例令牌（`HTTPS_PROXY` 带 `token@`，代理验 `Proxy-Authorization`）/ 改绑 0700 的 unix socket。本 PR 不动它，已上报编排。
+
 创始人的登录用户 pilot（创始人用 Mirasim 桌面端的 ssh 远程模式连 `pilot@<法国>` 干活）：
 
 - 装机脚本管的（`deploy/lib/login-user.sh`）：建用户、加进 `systemd-journal` 组（`journalctl -u 'fleet-*'` 看日志）、装 `~/.local/bin/reclaude`（只在没有时装，写的事以 pilot 自己的身份做）、确保有 git、ssh 客户端、curl。不给它写任何 sudoers；它也不在 fleet 组里，所以读不到 `/etc/fleet-dao`，连不上 Temporal 和库（nft 表只放行 root 和 fleet）。
