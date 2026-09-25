@@ -466,7 +466,9 @@ sync_web() { # 提交号
     return 1
   fi
   if [[ -n "$out" ]]; then
-    changed "香港的静态文件换成 ${1:0:12} 那版（$(wc -l <<<"$out") 处变化）"
+    # 逐条列出来（最多 20 条）：数字不对时看得到是哪些
+    head -20 <<<"$out" | sed 's/^/    /'
+    changed "香港的静态文件换成 ${1:0:12} 那版（rsync 报了 $(grep -c . <<<"$out") 行变化）"
   else
     ok "香港的静态文件已是 ${1:0:12} 那版"
   fi
