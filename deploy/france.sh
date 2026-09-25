@@ -838,8 +838,9 @@ readback_firewall() {
     red "nft 表 inet fleet_dao 不在：会话能直接连 Temporal 给工作流发信号"
     return 0
   fi
-  # 真连一次：会话用户连不上 Temporal 前端和库，fleet 连得上
-  for u in "${SESSION_USERS[@]}"; do
+  # 真连一次：会话用户和登录用户 pilot 都连不上 Temporal 前端和库，fleet 连得上
+  for u in "${SESSION_USERS[@]}" "$PILOT_USER"; do
+    id "$u" >/dev/null 2>&1 || continue
     for port in "$TEMPORAL_FRONTEND_PORT" "$PG_PORT"; do
       if connect_as "$u" "$port"; then
         red "$u 连得上 127.0.0.1:$port"
@@ -847,7 +848,7 @@ readback_firewall() {
       fi
     done
   done
-  if ((bad == 0)); then ok "会话用户连不上 Temporal（$TEMPORAL_FRONTEND_PORT）和库（$PG_PORT）"; fi
+  if ((bad == 0)); then ok "会话用户和 $PILOT_USER 都连不上 Temporal（$TEMPORAL_FRONTEND_PORT）和库（$PG_PORT）"; fi
   if connect_as fleet "$TEMPORAL_FRONTEND_PORT" && connect_as fleet "$PG_PORT"; then
     ok "fleet 连得上 Temporal 和库"
   else

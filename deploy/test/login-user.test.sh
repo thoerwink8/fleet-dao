@@ -4,8 +4,9 @@
 #   1. 装两遍：第一遍建用户、加进看日志的组、从本地造的「发布」装 reclaude（sha256 照核），第二遍零改动；
 #      装上的 reclaude 和它家里的东西都不归 root
 #   2. 故意造错，看 check_login_user 拦不拦得下：拿出看日志的组、加 sudo 条目、多加一个组、reclaude 没执行位、
-#      登录 shell 里找不到 reclaude、家目录权限不对、sudo 的回答认不出（没查成也算问题）、没有这个用户
-#   3. 同时缺三样（组、家目录权限、reclaude），只补这三样；sha256 对不上的包不装
+#      登录 shell 里找不到 reclaude、家目录权限不对/没了、sudo 的回答认不出、前台卡住（判 124）、没有这个用户；
+#      另验：登录脚本起后台进程时那一问不该被堵住（输出落文件不落管道）
+#   3. 同时缺三样（组、家目录权限、reclaude），只补这三样；sha256 对不上、下载失败的包不装
 # 要 root：得建用户、组和 sudoers 条目（都是临时的，结束时删掉）。用法：sudo bash deploy/test/login-user.test.sh
 # 退出码：0 通过，1 不通过，2 没跑成（不是 root、缺工具）。
 set -uo pipefail
@@ -40,6 +41,9 @@ BIN=$H/.local/bin/reclaude
 cleanup() {
   local g
   rm -f -- "$SUDOERS"
+  # 后台样本会在这个用户名下留个 sleep，先杀掉再删用户（不然 userdel 删不干净）
+  pkill -KILL -u "$U" >/dev/null 2>&1
+  sleep 0.3
   userdel -r "$U" >/dev/null 2>&1
   for g in "$U" "$LOGIN_USER_LOG_GROUP" "$EXTRA"; do groupdel "$g" >/dev/null 2>&1; done
   rm -rf -- "$T"
@@ -148,6 +152,32 @@ mv -- "$H" "$H.away"
 violation "家目录没了（读不到也算问题）" "$U" home no-reclaude
 mv -- "$H.away" "$H"
 
+# 登录脚本起了个后台进程：它继承了那一问的输出 fd。落文件不落管道，所以不该堵住——秒回、照样判干净
+cp -- "$H/.profile" "$H/.profile.bak"
+echo 'sleep 60 &' >>"$H/.profile"
+start=$SECONDS
+expect "登录脚本起了后台进程：不卡、照常判干净" "$U"
+elapsed=$((SECONDS - start))
+if ((elapsed < 30)); then pass "后台进程没堵住读回（$elapsed 秒）"; else flunk "后台进程把读回堵了 $elapsed 秒（落文件不落管道就不该堵）"; fi
+mv -f -- "$H/.profile.bak" "$H/.profile"
+pkill -KILL -u "$U" >/dev/null 2>&1
+
+# 登录脚本前台卡住：那一问被 timeout 杀掉（退出码 124），判红，十来秒内返回，不会一直等
+samples=$((samples + 1))
+cp -- "$H/.profile" "$H/.profile.bak"
+printf 'sleep 60\n' >>"$H/.profile"
+start=$SECONDS
+check_login_user "$U"
+rc=$?
+elapsed=$((SECONDS - start))
+msg=$(printf '%s\n' "${LOGIN_USER_BAD[@]}")
+if ((rc == 1)) && [[ "$msg" == *reclaude-not-on-path* && "$msg" == *"退出码 124"* ]] && ((elapsed < 25)); then
+  pass "登录脚本前台卡住：判红、退出码 124、$elapsed 秒内返回"
+else
+  flunk "前台卡住没按预期（rc=$rc，$elapsed 秒）：$msg"
+fi
+mv -f -- "$H/.profile.bak" "$H/.profile"
+
 LOGIN_USER_SUDO=/bin/false
 violation "sudo 的回答认不出（没查成）" "$U" sudo-unreadable
 LOGIN_USER_SUDO=sudo
@@ -182,4 +212,4 @@ if ((fail)); then
   cat "$T/setup.log"
   exit 1
 fi
-echo "通过：$samples 个违规样本全部拦下；装两遍第二遍零改动；缺的只补缺的；下载失败、sha256 对不上都不装"
+echo "通过：$samples 个违规样本全部拦下（含前台卡住判 124）；后台进程不堵读回；装两遍第二遍零改动；缺的只补缺的；下载失败、sha256 对不上都不装"

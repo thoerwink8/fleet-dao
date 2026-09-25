@@ -16,7 +16,7 @@ LOGIN_USER_BAD=()    # check_login_user 的结论，每条：代号<TAB>说明�
 # 一条从 AI 会话摸进创始人账号的路。
 setup_login_user() { # 用户 家目录 reclaude下载地址 sha256
   local user=$1 home=$2 url=$3 sum=$4 bin tmp
-  ensure_service_user "$user" "$home"
+  ensure_service_user "$user" "$home" login # 人用的账号，普通用户（UID ≥ 1000），不占系统号段
   ensure_dir "$home" "$user:$user" 750
   if ! getent group "$LOGIN_USER_LOG_GROUP" >/dev/null; then
     red "这台没有 $LOGIN_USER_LOG_GROUP 组，$user 看不了日志"
@@ -62,14 +62,20 @@ setup_login_user() { # 用户 家目录 reclaude下载地址 sha256
 
 # 查（只读）：返回 0 干净、1 有问题，问题放进 LOGIN_USER_BAD。读不到、认不出也算问题，不当成「查了没事」
 check_login_user() { # 用户
-  local user=$1 home shell groups=() g extra="" in_log=0 out bin have rc
+  local user=$1 home shell uid groups=() g extra="" in_log=0 out bin have rc probe
   LOGIN_USER_BAD=()
   if ! getent passwd "$user" >/dev/null; then
     LOGIN_USER_BAD+=("no-user	没有这个用户：跑 bash deploy/france.sh 建")
     return 1
   fi
+  uid=$(getent passwd "$user" | cut -d: -f3)
   home=$(getent passwd "$user" | cut -d: -f6)
   shell=$(getent passwd "$user" | cut -d: -f7)
+  # 人用的账号必须是普通用户（UID ≥ 1000）：落在系统号段就会跟删掉的旧服务用户共号，journal 里旧记录串到它名下。
+  # 迁号：先确认这个用户没有进程在跑（创始人可能正登着 reclaude），再 usermod -u <新号> 并把家目录属主改过来
+  if [[ "$uid" =~ ^[0-9]+$ ]] && ((uid < 1000)); then
+    LOGIN_USER_BAD+=("system-uid	UID $uid 在系统号段（< 1000），会和删掉的旧服务用户串号：等它没有进程在跑时 usermod -u <≥1000> $user，家目录属主一并改过来")
+  fi
   # 组：只许它自己的组和看日志的组。多出来的组可能就是提权或读密钥的门（sudo、docker、fleet……）
   read -r -a groups <<<"$(id -nG "$user")"
   for g in "${groups[@]}"; do
@@ -105,13 +111,19 @@ check_login_user() { # 用户
     fi
     return 1
   fi
-  # 照 Mirasim 远端服务端取 PATH 的办法问一遍登录 shell（环境照 sshd 给的那样干净）；多行输出取最后一行。
-  # setsid：不带控制终端。带着终端（比如 sudo 分出来的伪终端）时，交互 shell 去抢终端会被挂起，连 timeout 一起停住，
-  # 整个读回卡死（CI 和法国实咬）。-k：挂起的进程收不到 TERM，到点再补 KILL
-  # 交互 shell 起来时往 stderr 打的「no job control」在命令输出之前，所以合在一起取最后一行；对不上时把末几行带进结论
+  # 照 Mirasim 远端服务端取 PATH 的办法问一遍登录 shell（环境照 sshd 给的那样干净）。
+  # 输出落进 root 建的临时文件，不走 $(...) 的管道：管道要等写端全关，而 pilot 的 .profile/.bashrc 起个后台进程
+  # 就一直占着写端，timeout 杀了前台也堵着不返回（AI 会话跑在 pilot 下、改得了这两个文件；审查官在法国实测：
+  # 走管道 5 秒后台睡眠要等满 5.01 秒，落文件 0.02 秒）。setsid：不带控制终端——带着终端（sudo 的伪终端）交互 shell
+  # 抢终端会被挂起，连 timeout 一起停住（CI 与法国实咬）。-k：挂起的进程收不到 TERM，到点再补 KILL。
   rc=0
-  out=$(cd -- "$home" && runuser -u "$user" -- env -i HOME="$home" USER="$user" LOGNAME="$user" SHELL="$shell" \
-    PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 setsid -w timeout -k 5 10 "$shell" -ilc 'command -v reclaude' </dev/null 2>&1) || rc=$?
+  probe=$(mktemp "${TMPDIR:-/var/tmp}/fleet-dao-pilot-probe.XXXXXX")
+  (cd -- "$home" && runuser -u "$user" -- env -i HOME="$home" USER="$user" LOGNAME="$user" SHELL="$shell" \
+    PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 setsid -w timeout -k 5 10 "$shell" -ilc 'command -v reclaude' \
+    </dev/null >"$probe" 2>&1) || rc=$?
+  # 交互 shell 起来时往 stderr 打的「no job control」在命令输出之前，所以取最后一行
+  out=$(<"$probe")
+  rm -f -- "$probe"
   if [[ "${out##*$'\n'}" != "$bin" ]]; then
     LOGIN_USER_BAD+=("reclaude-not-on-path	登录 shell（$shell -ilc）里找不到 $bin（退出码 $rc，输出末几行「$(tail -4 <<<"$out" | tr '\n' '|')」）：Mirasim 远端按登录 shell 取 PATH，~/.profile 里要把 ~/.local/bin 加进 PATH（Ubuntu 默认的就有）")
   fi
