@@ -179,7 +179,7 @@ describe('接口跑在真库上', () => {
         realtime: { ok: true },
         temporal: { ok: false, code: 'not_connected', message: 'Temporal 客户端还没接上' },
         engine: { ok: false, code: 'not_connected', message: 'Temporal 客户端还没接上' },
-        github_events: { ok: false, code: 'not_wired', message: 'GitHub 事件还没接到引擎（等引擎的 PR）' },
+        github_events: { ok: false, code: 'not_wired', message: 'GitHub 事件还没接到引擎' },
       },
     });
     await h.feed.stop();
