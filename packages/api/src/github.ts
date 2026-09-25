@@ -9,12 +9,13 @@ import type { Deps } from './deps.ts';
 import { PublicHealthError } from './health.ts';
 import { ApiError, errorBody } from './http.ts';
 import { CommentPayload, createIssueIntake, IssuePayload, RetryLaterError } from './issue-intake.ts';
-import type {
-  GitHubDeliveryOutcome,
-  GitHubDeliverySource,
-  GitHubEventSink,
-  GitHubObjectVersion,
-  IngestedEvent,
+import {
+  type GitHubDeliveryOutcome,
+  type GitHubDeliverySource,
+  type GitHubEventSink,
+  type GitHubObjectVersion,
+  type IngestedEvent,
+  REPO_NOT_MANAGED,
 } from './ports.ts';
 import { GhUser, type GithubWhitelist, githubWhitelist, isTrusted } from './whitelist.ts';
 
@@ -143,7 +144,7 @@ export function screenGithubEvent(
   if (event === 'ping')
     return { accept: true, wake: false, reason: 'ping', repo: repository?.full_name ?? '' };
   if (!repository || !ctx.repos.has(repository.full_name.toLowerCase())) {
-    return { accept: false, reason: 'repo_not_managed' };
+    return { accept: false, reason: REPO_NOT_MANAGED };
   }
   const repo = repository.full_name;
   // 自家机器人（改 issue 进度段、推分支、开 PR）引起的事件只同步镜像，不叫醒工作流，防自己叫醒自己。
@@ -287,8 +288,11 @@ export function githubEventsCheck(
   };
 }
 
+/**
+ * seenBefore：补收的这一版别的投递带过、只是被门挡掉了（陌生人评论顺带的 issue 那一版之类）。处理照样做，对账不算补回。
+ */
 export type IngestResult =
-  | { verdict: 'accepted'; wake: boolean; note?: string | undefined }
+  | { verdict: 'accepted'; wake: boolean; note?: string | undefined; seenBefore?: boolean | undefined }
   | { verdict: 'ignored'; reason: string }
   | { verdict: 'duplicate' };
 
@@ -330,6 +334,7 @@ export function createGitHubIntake(
       source: GitHubDeliverySource;
       payload: unknown;
       receivedAt: string;
+      seenBefore?: boolean | undefined;
     },
     token: string,
   ): Promise<IngestResult> {
@@ -383,13 +388,20 @@ export function createGitHubIntake(
       const note = await issues.handle(ingested);
       await finish(deliveryId, token, { status: 'accepted', note });
       if (note) log.info('GitHub 事件已处理', { deliveryId, event, note });
-      return { verdict: 'accepted', wake: screening.wake, ...(note ? { note } : {}) };
+      return {
+        verdict: 'accepted',
+        wake: screening.wake,
+        ...(note ? { note } : {}),
+        ...(delivery.seenBefore ? { seenBefore: true } : {}),
+      };
     } catch (err) {
       const reason =
         (err instanceof Error ? err.message : String(err)).slice(0, MAX_REASON_CHARS) || '没带原因';
-      // 原文留在库里：重投、补收或对账重放时还能再来
+      // 原文留在库里：重投、补收或对账重放时还能再来。现在做不了、要等前一件事的（重开时上一轮还没结束）记成等着：
+      // 每轮对账都重放，不占自动重放的次数
+      const status = err instanceof RetryLaterError ? 'waiting' : 'failed';
       try {
-        await finish(deliveryId, token, { status: 'failed', reason });
+        await finish(deliveryId, token, { status, reason });
       } catch (recordErr) {
         log.error('GitHub 事件没处理成，出错记录也没写进去', {
           deliveryId,
@@ -422,7 +434,14 @@ export function createGitHubIntake(
       );
       if (claim.status === 'duplicate') return { verdict: 'duplicate' };
       return process(
-        { id: deliveryId, event, source, payload, receivedAt: deps.now().toISOString() },
+        {
+          id: deliveryId,
+          event,
+          source,
+          payload,
+          receivedAt: deps.now().toISOString(),
+          seenBefore: claim.seenBefore,
+        },
         claim.token,
       );
     },
@@ -475,9 +494,13 @@ export function githubRoutes(deps: Deps, intake: GitHubIntake): Hono {
         const result = await intake.ingest({ deliveryId, event, payload, source: 'webhook' });
         return c.json({ ok: true, ...result });
       } catch (err) {
-        // 现在做不了、过一会儿就行（关了又重开、上一轮还没结束）：这条已经记成出错，等对账重放，不当后端出错
+        // 现在做不了、过一会儿就行（关了又重开、上一轮还没结束）：这条已经记成等着，每轮对账重放，不当后端出错
         if (!(err instanceof RetryLaterError)) throw err;
-        deps.log.warn('GitHub 事件现在做不了，记成出错等重放', { deliveryId, event, reason: err.message });
+        deps.log.warn('GitHub 事件现在做不了，记成等着、对账时再来', {
+          deliveryId,
+          event,
+          reason: err.message,
+        });
         return c.json(errorBody('retry_later', err.message), 503);
       }
     },

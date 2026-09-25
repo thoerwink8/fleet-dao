@@ -47,8 +47,8 @@ export const CommentPayload = z.object({
 });
 
 /**
- * 现在做不了、过一会儿再做就行（关了又马上重开，上一轮还没结束）：这条投递记成出错，对账重放时再来。
- * 不是后端出了错：webhook 回 503 retry_later，日志只记一条警告。
+ * 现在做不了、过一会儿再做就行（关了又马上重开，上一轮还没结束）：这条投递记成等着（waiting），每轮对账都重放，
+ * 不占自动重放的次数——上一轮跑多久都等得住。不是后端出了错：webhook 回 503 retry_later，日志只记一条警告。
  */
 export class RetryLaterError extends Error {
   constructor(message: string) {

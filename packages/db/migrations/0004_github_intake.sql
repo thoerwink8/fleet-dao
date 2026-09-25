@@ -23,9 +23,9 @@ CREATE TABLE "github_events" (
 	"received_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"claimed_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"finished_at" timestamp with time zone,
-	CONSTRAINT "github_events_status_known" CHECK ("github_events"."status" in ('processing', 'accepted', 'ignored', 'failed')),
+	CONSTRAINT "github_events_status_known" CHECK ("github_events"."status" in ('processing', 'accepted', 'ignored', 'failed', 'waiting')),
 	CONSTRAINT "github_events_source_known" CHECK ("github_events"."source" in ('webhook', 'poll', 'redelivery')),
-	CONSTRAINT "github_events_reason_when_not_taken" CHECK ("github_events"."status" not in ('ignored', 'failed') or coalesce(length("github_events"."reason"), 0) > 0),
+	CONSTRAINT "github_events_reason_when_not_taken" CHECK ("github_events"."status" not in ('ignored', 'failed', 'waiting') or coalesce(length("github_events"."reason"), 0) > 0),
 	CONSTRAINT "github_events_finished_iff_done" CHECK (("github_events"."status" = 'processing') = ("github_events"."finished_at" is null)),
 	CONSTRAINT "github_events_attempts_positive" CHECK ("github_events"."attempts" > 0)
 );
@@ -33,4 +33,4 @@ CREATE TABLE "github_events" (
 ALTER TABLE "repos" ADD COLUMN "auto_dispatch_since" timestamp with time zone;--> statement-breakpoint
 ALTER TABLE "github_event_versions" ADD CONSTRAINT "github_event_versions_delivery_id_github_events_delivery_id_fk" FOREIGN KEY ("delivery_id") REFERENCES "public"."github_events"("delivery_id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX "github_event_versions_object_idx" ON "github_event_versions" USING btree ("object","version");--> statement-breakpoint
-CREATE INDEX "github_events_unfinished_idx" ON "github_events" USING btree ("attempts","received_at") WHERE "github_events"."status" in ('processing', 'failed');
+CREATE INDEX "github_events_unfinished_idx" ON "github_events" USING btree ("attempts","received_at") WHERE "github_events"."status" in ('processing', 'failed', 'waiting');

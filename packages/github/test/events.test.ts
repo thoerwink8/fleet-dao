@@ -109,7 +109,7 @@ describe('事件之后的处理', () => {
     ]);
   });
 
-  it('叫醒失败就抛：后端会撤掉投递登记，让重投或补收再来', async () => {
+  it('叫醒失败就抛：后端把这条投递记成出错、原文留着，对账时按原文重放', async () => {
     const { gh } = setup();
     const sink = gh.eventSink({ wake: async () => Promise.reject(new Error('Temporal 连不上')) });
     await expect(sink.accept(event({ event: 'issues', payload: { issue: { number: 1 } } }))).rejects.toThrow(
@@ -219,7 +219,7 @@ describe('对账与补漏', () => {
     expect(report).toEqual({ outcome: 'ok', checked: 2, recovered: 1, why: undefined });
   });
 
-  it('查后端库有没有这些投递失败：报「没查成」，一条都不重投（宁可不重投，也不让 GitHub 送第二遍）', async () => {
+  it('查后端库有没有这些投递失败：重投这一步报 failed，一条都不重投（宁可不重投，也不让 GitHub 送第二遍）', async () => {
     const { gh, fake } = setup();
     fake.deliveries = [
       { id: 12, guid: 'g-missing', delivered_at: '2026-09-25T11:00:00Z', status_code: 502, event: 'issues' },

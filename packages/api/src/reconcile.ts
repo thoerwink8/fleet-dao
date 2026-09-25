@@ -5,7 +5,8 @@
 import type { Reconciler, ReconcilerOptions } from '@fleet-dao/github';
 import type { ScheduleOutcome } from '@fleet-dao/shared';
 import { DELIVERY_STALE_MS, type GitHubIntake, MAX_AUTO_REPLAYS, pollDeliveryId } from './github.ts';
-import type { Logger, Store } from './ports.ts';
+import { RetryLaterError } from './issue-intake.ts';
+import type { GitHubDelivery, Logger, Store } from './ports.ts';
 
 export { MAX_AUTO_REPLAYS } from './github.ts';
 
@@ -44,9 +45,10 @@ export interface GitHubReconcileResult {
   /** 查成了几个仓（轮询和查开放 issue 都查完）。 */
   scanned: number;
   /**
-   * 补回来几样，加上重放到头还不成、要人看的。补回 = 轮询捞到、webhook 没带过的那一版（放进来的），没任务的 issue，
-   * 库里没有、叫 GitHub 重投的，重放后做成的。「webhook 没带过」只按对象和 updated_at 认：要是有改动顶新了
-   * updated_at、GitHub 却没发我们订的事件，也会被算进来，所以这不是精确的漏收数。
+   * 补回来几样，加上重放到头还不成、要人看的。补回 = 轮询捞到、以前的投递都没带过的那一版（放进来的；门挡掉的投递带过的
+   * 也算带过，比如陌生人评论顺带的 issue 那一版，只有「仓不受管」挡掉的不算），没任务的 issue，库里没有、叫 GitHub 重投的，
+   * 重放后做成的。「带没带过」只按对象和 updated_at 认：要是有改动顶新了 updated_at、GitHub 却没发我们订的事件，也会被
+   * 算进来，所以这不是精确的漏收数。
    */
   found: number;
   why?: string | undefined;
@@ -96,19 +98,24 @@ export async function reconcileGitHub(
     if (poll.outcome === 'ok' && audit.outcome === 'ok') scanned += 1;
   }
 
-  // 库里出错、卡住的投递按原文重放：GitHub 的重投只管没送到的，送到了却没处理成的靠这里
+  // 库里出错、卡住、等着的投递按原文重放：GitHub 的重投只管没送到的，送到了却没处理成的靠这里。
+  // 出错、卡住的最多自动重放 MAX_AUTO_REPLAYS 次；等着的（重开时上一轮还没结束）每轮都重放，不占次数
   const staleBefore = new Date(parts.now().getTime() - DELIVERY_STALE_MS).toISOString();
   const unfinished = await store.listUnfinishedDeliveries({ staleBefore, limit: REPLAY_BATCH });
-  const stuck = unfinished.filter((d) => d.attempts >= MAX_AUTO_REPLAYS);
+  const replayable = (d: GitHubDelivery) => d.status === 'waiting' || d.attempts < MAX_AUTO_REPLAYS;
+  const stuck = unfinished.filter((d) => !replayable(d));
   let replayed = 0;
+  let stillWaiting = 0;
   const replayErrors: string[] = [];
-  for (const d of unfinished.filter((x) => x.attempts < MAX_AUTO_REPLAYS)) {
+  for (const d of unfinished.filter(replayable)) {
     try {
       // 只有这次放进来、做成了的才算补回；重放后不收的（门挡掉、被更新的一版盖过）处理完了，但不算补回
       const result = await parts.intake.replay(d.id);
       if (result.verdict === 'accepted') replayed += 1;
     } catch (err) {
-      replayErrors.push(`${d.id}：${why(err)}`);
+      // 还在等（上一轮还没结束）：不算出错，下一轮再来
+      if (err instanceof RetryLaterError) stillWaiting += 1;
+      else replayErrors.push(`${d.id}：${why(err)}`);
     }
   }
   if (stuck.length > 0) {
@@ -127,6 +134,7 @@ export async function reconcileGitHub(
           .map((d) => d.id)
           .join('、')}`
       : '',
+    stillWaiting > 0 ? `${stillWaiting} 条还在等上一轮结束（每轮再试，不占重放次数）` : '',
   ].filter(Boolean);
   steps.push({
     step: 'replay',
@@ -139,7 +147,10 @@ export async function reconcileGitHub(
   const found = steps.reduce((n, s) => n + s.recovered, 0) + stuck.length;
   const notOk = steps.filter((s) => s.outcome !== 'ok');
   const notes = notOk.map((s) => `${s.step}${s.repo ? ` ${s.repo}` : ''}：${s.why ?? s.outcome}`);
-  if (stuck.length > 0 && !notOk.some((s) => s.step === 'replay')) notes.push(replayNotes.join('；'));
+  // 重放这一步没出错时，到头的、还在等的也写进这一轮的说明（记进 schedule_runs 的是这一句）
+  if ((stuck.length > 0 || stillWaiting > 0) && !notOk.some((s) => s.step === 'replay')) {
+    notes.push(replayNotes.join('；'));
+  }
   const text = notes.join('；') || undefined;
   if (scanned === repos.length && notOk.length === 0)
     return { outcome: 'ok', scanned, found, why: text, steps };

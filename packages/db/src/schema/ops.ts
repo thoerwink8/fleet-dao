@@ -142,8 +142,11 @@ export const idempotencyKeys = pgTable(
   (t) => [index('idempotency_keys_claimed_at_idx').on(t.claimedAt)],
 );
 
-/** processing = 正在处理（进程死在半路也停在这）；accepted = 放进来、处理完；ignored = 按规矩不收；failed = 处理出错，等重投、补收或重放。 */
-export const GITHUB_EVENT_STATUSES = ['processing', 'accepted', 'ignored', 'failed'] as const;
+/**
+ * processing = 正在处理（进程死在半路也停在这）；accepted = 放进来、处理完；ignored = 按规矩不收；failed = 处理出错，等重投、
+ * 补收或重放；waiting = 现在做不了、要等前一件事做完（重开时上一轮还没结束），每轮对账都重放，不占自动重放的次数。
+ */
+export const GITHUB_EVENT_STATUSES = ['processing', 'accepted', 'ignored', 'failed', 'waiting'] as const;
 export const GITHUB_EVENT_SOURCES = ['webhook', 'poll', 'redelivery'] as const;
 
 const inList = (values: readonly string[]) => sql.raw(values.map((v) => `'${v}'`).join(', '));
@@ -163,11 +166,11 @@ export const githubEvents = pgTable(
     repo: text('repo'),
     payload: jsonb('payload').notNull(),
     status: text('status').notNull().$type<(typeof GITHUB_EVENT_STATUSES)[number]>(),
-    /** 不收、出错的原因。 */
+    /** 不收、出错的原因，等着的在等什么。 */
     reason: text('reason'),
     /** 放进来之后做了什么（建了任务、拉起了工作流、叫停……），给人查。 */
     note: text('note'),
-    /** 第几次处理：重投、重放、接管各加一。 */
+    /** 算自动重放次数的处理次数：重投、重放、接管各加一；从「等着」接回来的不加（等上一轮不占次数）。 */
     attempts: integer('attempts').notNull().default(1),
     receivedAt: timestamp('received_at', tz).notNull().defaultNow(),
     /** 这次占用的时刻，也是记结局的凭据：接管会把它改新，旧的那次就记不上了。 */
@@ -177,17 +180,17 @@ export const githubEvents = pgTable(
   (t) => [
     check('github_events_status_known', sql`${t.status} in (${inList(GITHUB_EVENT_STATUSES)})`),
     check('github_events_source_known', sql`${t.source} in (${inList(GITHUB_EVENT_SOURCES)})`),
-    // 不收、出错都得写原因：不许出现「没处理，也不知道为什么」的行（空字符串也不算原因）。
+    // 不收、出错、等着都得写原因：不许出现「没处理，也不知道为什么」的行（空字符串也不算原因）。
     check(
       'github_events_reason_when_not_taken',
-      sql`${t.status} not in ('ignored', 'failed') or coalesce(length(${t.reason}), 0) > 0`,
+      sql`${t.status} not in ('ignored', 'failed', 'waiting') or coalesce(length(${t.reason}), 0) > 0`,
     ),
     check('github_events_finished_iff_done', sql`(${t.status} = 'processing') = (${t.finishedAt} is null)`),
     check('github_events_attempts_positive', sql`${t.attempts} > 0`),
     // 对账捞没处理成的：先捞次数少的。
     index('github_events_unfinished_idx')
       .on(t.attempts, t.receivedAt)
-      .where(sql`${t.status} in ('processing', 'failed')`),
+      .where(sql`${t.status} in ('processing', 'failed', 'waiting')`),
   ],
 );
 

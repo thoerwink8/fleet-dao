@@ -10,7 +10,10 @@ import type { Deps } from './deps.ts';
 import { type EchoKind, echoOf } from './echo.ts';
 import { mergeKey, readPull } from './pulls.ts';
 
-/** 和 @fleet-dao/api 的 GitHubIntake 同形：补收的东西走同一道门、同一本投递账。 */
+/**
+ * 和 @fleet-dao/api 的 GitHubIntake 同形：补收的东西走同一道门、同一本投递账。seenBefore = 这一版以前的投递带过
+ * （只是被门挡掉了，比如陌生人评论顺带的 issue 那一版）：照样处理了，但不算补回。
+ */
 export interface Intake {
   ingest(input: {
     deliveryId: string;
@@ -18,7 +21,9 @@ export interface Intake {
     payload: unknown;
     source: 'webhook' | 'poll' | 'redelivery';
   }): Promise<
-    { verdict: 'accepted'; wake: boolean } | { verdict: 'ignored'; reason: string } | { verdict: 'duplicate' }
+    | { verdict: 'accepted'; wake: boolean; seenBefore?: boolean | undefined }
+    | { verdict: 'ignored'; reason: string }
+    | { verdict: 'duplicate' }
   >;
 }
 
@@ -191,7 +196,7 @@ export function createReconciler(deps: Deps, options: ReconcilerOptions): Reconc
       const ingest = async (deliveryId: string, event: string, payload: unknown) => {
         checked += 1;
         const res = await options.intake.ingest({ deliveryId, event, payload, source: 'poll' });
-        if (res.verdict === 'accepted') recovered += 1;
+        if (res.verdict === 'accepted' && !res.seenBefore) recovered += 1;
       };
       // 列表里没有「是谁改的」：这一版是自家机器人写出来的（按写入回执记过 updated_at），就把机器人当 sender，
       // 后端据此不叫醒工作流；认不出的不带 sender（后端当别人改的，叫醒）

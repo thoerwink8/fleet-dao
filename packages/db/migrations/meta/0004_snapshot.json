@@ -1,5 +1,5 @@
 {
-  "id": "77337e90-bb68-4319-b089-345d3db93690",
+  "id": "1b3fe79a-8daf-4cf2-a0ce-2479116254ff",
   "prevId": "4a5e0724-d8b4-45af-ae7d-199026ce6efd",
   "version": "7",
   "dialect": "postgresql",
@@ -950,7 +950,7 @@
             }
           ],
           "isUnique": false,
-          "where": "\"github_events\".\"status\" in ('processing', 'failed')",
+          "where": "\"github_events\".\"status\" in ('processing', 'failed', 'waiting')",
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -963,7 +963,7 @@
       "checkConstraints": {
         "github_events_status_known": {
           "name": "github_events_status_known",
-          "value": "\"github_events\".\"status\" in ('processing', 'accepted', 'ignored', 'failed')"
+          "value": "\"github_events\".\"status\" in ('processing', 'accepted', 'ignored', 'failed', 'waiting')"
         },
         "github_events_source_known": {
           "name": "github_events_source_known",
@@ -971,7 +971,7 @@
         },
         "github_events_reason_when_not_taken": {
           "name": "github_events_reason_when_not_taken",
-          "value": "\"github_events\".\"status\" not in ('ignored', 'failed') or coalesce(length(\"github_events\".\"reason\"), 0) > 0"
+          "value": "\"github_events\".\"status\" not in ('ignored', 'failed', 'waiting') or coalesce(length(\"github_events\".\"reason\"), 0) > 0"
         },
         "github_events_finished_iff_done": {
           "name": "github_events_finished_iff_done",

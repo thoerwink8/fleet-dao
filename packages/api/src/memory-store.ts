@@ -19,26 +19,27 @@ import type {
   Task,
 } from '@fleet-dao/shared';
 import { isSerial, isUuid, parseCursor } from './ids.ts';
-import type {
-  AgentSession,
-  AskRecord,
-  AuditRecord,
-  CommandClaim,
-  GitHubDelivery,
-  JobRecord,
-  NewAuditEntry,
-  NotificationRecord,
-  Page,
-  PageRequest,
-  PullRequestRecord,
-  QuotaWindowRecord,
-  RunPlan,
-  SettingRecord,
-  StagePolicyValue,
-  Store,
-  TestRunRecord,
-  TimelineRecord,
-  User,
+import {
+  type AgentSession,
+  type AskRecord,
+  type AuditRecord,
+  type CommandClaim,
+  type GitHubDelivery,
+  type JobRecord,
+  type NewAuditEntry,
+  type NotificationRecord,
+  type Page,
+  type PageRequest,
+  type PullRequestRecord,
+  type QuotaWindowRecord,
+  REPO_NOT_MANAGED,
+  type RunPlan,
+  type SettingRecord,
+  type StagePolicyValue,
+  type Store,
+  type TestRunRecord,
+  type TimelineRecord,
+  type User,
 } from './ports.ts';
 
 export interface ProgressRecord {
@@ -191,9 +192,12 @@ const copyDelivery = (e: GitHubDelivery): GitHubDelivery => ({
 /** 同一时刻不同写法（秒 / 毫秒）算同一个。 */
 const sameInstant = (a: string, b: string) => Date.parse(a) === Date.parse(b);
 
-/** 上次出错的、处理中但占用早于 staleBefore 的（那一次多半死了），可以接过来重做。时刻都是 toISOString 的写法，按字面比就是按先后比。 */
+/** 上次出错的、在等着的、处理中但占用早于 staleBefore 的（那一次多半死了），可以接过来重做。时刻都是 toISOString 的写法，按字面比就是按先后比。 */
 const reclaimable = (e: GitHubDelivery, staleBefore: string) =>
-  e.status === 'failed' || (e.status === 'processing' && e.claimedAt < staleBefore);
+  e.status === 'failed' || e.status === 'waiting' || (e.status === 'processing' && e.claimedAt < staleBefore);
+
+/** 接过来重做：次数加一；从等着接回来的不加（等上一轮不占自动重放的次数）。 */
+const reclaimedAttempts = (e: GitHubDelivery) => e.attempts + (e.status === 'waiting' ? 0 : 1);
 
 function sameValue(a: StagePolicyValue, b: StagePolicyValue): boolean {
   return (
@@ -788,18 +792,22 @@ export function createMemoryStore(
     // —— GitHub 事件 ——
     async claimDelivery(delivery, { staleBefore, skipIfSeen }) {
       const at = now().toISOString();
+      // 先看别的投递带没带过这一版（和 Postgres 版同一个次序：不管这条自己在不在库里）
+      let seenBefore = false;
+      if (skipIfSeen) {
+        const carriers = [...data.githubEvents.values()].filter(
+          (e) =>
+            e.id !== delivery.id &&
+            e.versions.some(
+              (v) => v.object === skipIfSeen.object && sameInstant(v.version, skipIfSeen.version),
+            ),
+        );
+        if (carriers.some((e) => e.status !== 'ignored')) return { status: 'duplicate' };
+        seenBefore = carriers.some((e) => e.reason !== REPO_NOT_MANAGED);
+      }
+      const seen = seenBefore ? { seenBefore } : {};
       const existing = data.githubEvents.get(delivery.id);
       if (!existing) {
-        const seen =
-          skipIfSeen &&
-          [...data.githubEvents.values()].some(
-            (e) =>
-              e.status !== 'ignored' &&
-              e.versions.some(
-                (v) => v.object === skipIfSeen.object && sameInstant(v.version, skipIfSeen.version),
-              ),
-          );
-        if (seen) return { status: 'duplicate' };
         if (new Set(delivery.versions.map((v) => v.object)).size !== delivery.versions.length) {
           throw new Error('github_event_versions_delivery_id_object_pk：同一条投递里同一个对象只能有一版');
         }
@@ -811,12 +819,12 @@ export function createMemoryStore(
           receivedAt: at,
           claimedAt: at,
         });
-        return { status: 'claimed', token: at, retry: false };
+        return { status: 'claimed', token: at, retry: false, ...seen };
       }
       if (!reclaimable(existing, staleBefore)) return { status: 'duplicate' };
-      Object.assign(existing, { status: 'processing', attempts: existing.attempts + 1, claimedAt: at });
+      Object.assign(existing, { status: 'processing', attempts: reclaimedAttempts(existing), claimedAt: at });
       existing.finishedAt = undefined;
-      return { status: 'claimed', token: at, retry: true };
+      return { status: 'claimed', token: at, retry: true, ...seen };
     },
     async reclaimDelivery(id, { staleBefore, force }) {
       const existing = data.githubEvents.get(id);
@@ -826,7 +834,7 @@ export function createMemoryStore(
         if (!force) return { status: 'finished' };
       }
       const at = now().toISOString();
-      Object.assign(existing, { status: 'processing', attempts: existing.attempts + 1, claimedAt: at });
+      Object.assign(existing, { status: 'processing', attempts: reclaimedAttempts(existing), claimedAt: at });
       existing.finishedAt = undefined;
       return { status: 'claimed', token: at, delivery: copyDelivery(existing) };
     },

@@ -405,6 +405,14 @@ describe('0004：接活入口（GitHub 事件原文、自动派活开关）', ()
           /github_events_finished_iff_done/,
         );
         await expect(insert('odd-status', 'lost', 'x', true)).rejects.toThrow(/github_events_status_known/);
+        // 等着（重开时上一轮还没结束）：也得写在等什么、也得有收尾时刻
+        await insert('ok-waiting', 'waiting', '上一轮还没结束', true);
+        await expect(insert('waiting-no-reason', 'waiting', null, true)).rejects.toThrow(
+          /github_events_reason_when_not_taken/,
+        );
+        await expect(insert('waiting-open', 'waiting', '上一轮还没结束', false)).rejects.toThrow(
+          /github_events_finished_iff_done/,
+        );
 
         // 每次投递带着的对象版本：一次投递里一个对象只记一版；开关状态只认 open/closed；投递删了版本跟着删
         const version = (id: string, object: string, state: string | null) =>

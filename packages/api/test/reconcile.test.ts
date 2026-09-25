@@ -4,7 +4,7 @@ import { generateKeyPairSync } from 'node:crypto';
 import { type AppCredentials, createGitHub, memoryLedger } from '@fleet-dao/github';
 import { describe, expect, it } from 'vitest';
 import { devFixtures, IDS } from '../src/dev-fixtures.ts';
-import { createGitHubIntake, pollDeliveryId } from '../src/github.ts';
+import { createGitHubIntake, githubEventsCheck, pollDeliveryId } from '../src/github.ts';
 import type { MemoryData } from '../src/memory-store.ts';
 import type { AskRecord, GitHubDelivery } from '../src/ports.ts';
 import { MAX_AUTO_REPLAYS, reconcileGitHub, reconcilerOptions } from '../src/reconcile.ts';
@@ -251,6 +251,150 @@ describe('对账补漏', () => {
     const result = await run();
     expect(result).toMatchObject({ outcome: 'ok', scanned: 1, found: 0 });
     expect(result.steps.find((s) => s.step === 'poll')).toMatchObject({ checked: 3, recovered: 0 });
+  });
+
+  it('陌生人在白名单作者的 issue 下评论（门挡掉了这条评论）：它顺带的 issue 那一版轮询照样过一遍门，但不算补回', async () => {
+    const opened40 = issue(40, -30);
+    const bumped = issue(40, -10, { created_at: at(-30) });
+    const strangerComment = {
+      id: 950,
+      body: '路过',
+      user: stranger,
+      created_at: at(-10),
+      updated_at: at(-10),
+    };
+    const { h, run } = setup({
+      repos: {
+        [SLUG]: {
+          ...empty(),
+          issues: [bumped],
+          comments: [{ ...strangerComment, issue_url: `${API}/repos/${SLUG}/issues/40` }],
+        },
+      },
+    });
+    await deliver(h, 'issues', opened(opened40));
+    const task = h.store.data.tasks.find((t) => t.issueNumber === 40);
+    if (!task) throw new Error('没建任务');
+    task.state = 'running'; // 引擎接手后写的
+    await deliver(h, 'issue_comment', {
+      action: 'created',
+      issue: bumped,
+      comment: strangerComment,
+      sender: stranger,
+      repository: { full_name: SLUG },
+    });
+    const result = await run();
+    expect(result).toMatchObject({ outcome: 'ok', scanned: 1, found: 0 });
+    expect(result.steps.find((s) => s.step === 'poll')).toMatchObject({ checked: 2, recovered: 0 });
+    // 过了一遍门（没有跳过），只是不算补回
+    expect(await h.store.getDelivery(pollDeliveryId(SLUG, 'issue', 40, at(-10)))).toMatchObject({
+      status: 'accepted',
+      note: 'task=exists, workflow=in_progress',
+    });
+    expect(h.starts).toHaveLength(1);
+  });
+
+  it('关单的 webhook 丢了、之后陌生人又来评论：关着的那一版补收时照样叫停任务（只是不算补回）', async () => {
+    const closed = issue(40, -10, { created_at: at(-30), state: 'closed' });
+    const strangerComment = {
+      id: 951,
+      body: '怎么关了',
+      user: stranger,
+      created_at: at(-10),
+      updated_at: at(-10),
+    };
+    const { h, run } = setup({ repos: { [SLUG]: { ...empty(), issues: [closed] } } });
+    await deliver(h, 'issues', opened(issue(40, -30)));
+    const task = await h.store.findTaskByIssue(IDS.repo, 40);
+    if (!task) throw new Error('没建任务');
+    // 关单的 webhook 没到；陌生人的评论到了，被门挡掉
+    await deliver(h, 'issue_comment', {
+      action: 'created',
+      issue: closed,
+      comment: strangerComment,
+      sender: stranger,
+      repository: { full_name: SLUG },
+    });
+    expect(h.signals).toEqual([]);
+    const result = await run();
+    expect(h.signals).toEqual([{ taskId: task.id, signal: expect.objectContaining({ name: 'stop' }) }]);
+    expect(result).toMatchObject({ outcome: 'ok', found: 0 });
+  });
+
+  it('重开时上一轮还没结束：记成等着，一轮轮等下去不占重放次数、健康检查不红；上一轮结束后那一轮就拉起', async () => {
+    const { h, run } = setup({ repos: { [SLUG]: empty() } });
+    await deliver(h, 'issues', opened(issue(50, -60)));
+    const task = h.store.data.tasks.find((t) => t.issueNumber === 50);
+    if (!task) throw new Error('没建任务');
+    task.state = 'running';
+    await deliver(h, 'issues', {
+      ...opened(issue(50, -40, { created_at: at(-60), state: 'closed' })),
+      action: 'closed',
+    });
+    const res = await deliver(
+      h,
+      'issues',
+      { ...opened(issue(50, -30, { created_at: at(-60) })), action: 'reopened' },
+      { delivery: 'reopen' },
+    );
+    expect(res.status).toBe(503);
+    const health = githubEventsCheck({ store: h.store, now: () => T0 });
+    for (let round = 0; round < MAX_AUTO_REPLAYS + 2; round++) {
+      const result = await run();
+      expect(result.outcome).toBe('ok');
+      expect(result.why).toContain('1 条还在等上一轮结束');
+      expect(result.found).toBe(0);
+    }
+    expect(await h.store.getDelivery('reopen')).toMatchObject({ status: 'waiting', attempts: 1 });
+    await expect(health()).resolves.toBeUndefined();
+    expect(h.starts.map((s) => s.issueNumber)).toEqual([50]);
+
+    task.state = 'stopped'; // 引擎收完尾写的
+    const result = await run();
+    expect(result).toMatchObject({ outcome: 'ok', found: 1 });
+    expect(await h.store.getDelivery('reopen')).toMatchObject({ status: 'accepted', attempts: 1 });
+    expect(h.starts.map((s) => s.issueNumber)).toEqual([50, 50]);
+  });
+
+  it('出错过几次、到第 5 次正好碰上「等上一轮」：照样每轮重放，不当成重放到头（不然既不重放、也不报红，这次重开就丢了）', async () => {
+    const reopen = { ...opened(issue(51, -30, { created_at: at(-60) })), action: 'reopened' };
+    const data = devFixtures(T0);
+    data.githubEvents = new Map([
+      [
+        'late-reopen',
+        stored('late-reopen', {
+          action: 'reopened',
+          payload: reopen,
+          status: 'waiting',
+          reason: '上一轮还没结束',
+          attempts: MAX_AUTO_REPLAYS,
+        }),
+      ],
+    ]);
+    const { h, run } = setup({ repos: { [SLUG]: empty() } }, data);
+    await deliver(h, 'issues', opened(issue(51, -60)));
+    const task = h.store.data.tasks.find((t) => t.issueNumber === 51);
+    if (!task) throw new Error('没建任务');
+    task.state = 'running';
+    await deliver(h, 'issues', {
+      ...opened(issue(51, -40, { created_at: at(-60), state: 'closed' })),
+      action: 'closed',
+    });
+
+    const first = await run();
+    expect(first).toMatchObject({ outcome: 'ok', found: 0 });
+    expect(first.why).toContain('1 条还在等上一轮结束');
+    expect(first.why).not.toContain('不再自动重放');
+    expect(await h.store.getDelivery('late-reopen')).toMatchObject({
+      status: 'waiting',
+      attempts: MAX_AUTO_REPLAYS,
+    });
+    await expect(githubEventsCheck({ store: h.store, now: () => T0 })()).resolves.toBeUndefined();
+
+    task.state = 'stopped';
+    expect(await run()).toMatchObject({ outcome: 'ok', found: 1 });
+    expect(await h.store.getDelivery('late-reopen')).toMatchObject({ status: 'accepted' });
+    expect(h.starts.map((s) => s.issueNumber)).toEqual([51, 51]);
   });
 
   it('改动早于这一轮、轮询看不到的开放 issue：查开放 issue 时发现没有任务，补上；陌生人开的不算', async () => {

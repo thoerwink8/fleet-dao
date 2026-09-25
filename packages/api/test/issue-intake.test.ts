@@ -335,7 +335,7 @@ describe('issue 关了、重开、改了', () => {
     });
   });
 
-  it('关了又马上重开、上一轮还没结束（任务还在跑）：重开记成出错（503，不当后端出错），不拉起；上一轮结束后重放再拉起', async () => {
+  it('关了又马上重开、上一轮还没结束（任务还在跑）：重开记成等着（503，不当后端出错），不拉起；上一轮结束后重放再拉起，等的那几次不算次数', async () => {
     const { h } = setup();
     await json(deliver(h, 'issues', issuesEvent('opened')));
     const t = h.store.data.tasks.find((x) => x.issueNumber === 40);
@@ -348,26 +348,27 @@ describe('issue 关了、重开、改了', () => {
     expect(res.status).toBe(503);
     expect(await res.json()).toMatchObject({ error: { code: 'retry_later' } });
     expect(await h.store.getDelivery('reopen')).toMatchObject({
-      status: 'failed',
+      status: 'waiting',
       reason: expect.stringContaining('上一轮还没结束（任务现在是 running）'),
     });
     expect(h.logs.some((l) => l.level === 'warn' && l.message.includes('现在做不了'))).toBe(true);
     expect(h.logs.some((l) => l.level === 'error')).toBe(false);
     expect(h.starts).toHaveLength(1);
 
-    // 还没结束时重放：照样等
+    // 还没结束时重放：照样等，次数不加（等上一轮不占自动重放的次数）
     const intake = createGitHubIntake(h.deps);
     await expect(intake.replay('reopen')).rejects.toThrow('上一轮还没结束');
+    expect(await h.store.getDelivery('reopen')).toMatchObject({ status: 'waiting', attempts: 1 });
     t.state = 'stopped'; // 引擎收完尾写的
     expect(await intake.replay('reopen')).toMatchObject({
       verdict: 'accepted',
       note: 'task=exists, workflow=started',
     });
     expect(h.starts).toHaveLength(2);
-    expect(await h.store.getDelivery('reopen')).toMatchObject({ status: 'accepted', attempts: 3 });
+    expect(await h.store.getDelivery('reopen')).toMatchObject({ status: 'accepted', attempts: 1 });
   });
 
-  it('任务已经记成结束、上一轮工作流却还在收尾（拉起回 already_running）：重开同样记成出错，之后重放再拉起', async () => {
+  it('任务已经记成结束、上一轮工作流却还在收尾（拉起回 already_running）：重开同样记成等着，之后重放再拉起', async () => {
     let calls = 0;
     const requirements: RequirementWorkflows = {
       async start() {
@@ -386,7 +387,7 @@ describe('issue 关了、重开、改了', () => {
     });
     expect(res.status).toBe(503);
     expect(await h.store.getDelivery('reopen')).toMatchObject({
-      status: 'failed',
+      status: 'waiting',
       reason: expect.stringContaining('上一轮工作流还没收完尾'),
     });
     expect(await createGitHubIntake(h.deps).replay('reopen')).toMatchObject({

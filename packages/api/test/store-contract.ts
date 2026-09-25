@@ -980,20 +980,42 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         expect(await polled('poll-v2-again', '2026-09-25T07:05:00.000Z')).toEqual({ status: 'duplicate' });
       });
 
-      it('门挡掉的那一版不算带过：改了名单、新加了仓之后补收还能再过一次门', async () => {
-        await settled(delivery('guid-ignored', { versions: [ver('2026-09-25T07:10:00.000Z')] }), {
+      it('门挡掉的那一版不跳过（改了名单、新加了仓之后补收还能再过一次门）；除了「仓不受管」挡掉的，都回 seenBefore（不算补回）', async () => {
+        const V10 = '2026-09-25T07:10:00.000Z';
+        const V20 = '2026-09-25T07:20:00.000Z';
+        // 陌生人在白名单作者的 issue 下评论：门挡掉这条评论，它顺带的 issue 那一版照样记下
+        await settled(
+          delivery('guid-stranger-comment', {
+            event: 'issue_comment',
+            versions: [ver(V10, { object: 'example/canary:comment:901', state: undefined }), ver(V10)],
+          }),
+          { status: 'ignored', reason: 'author_not_whitelisted' },
+        );
+        // 仓还没纳管时收到的一条：带过的那一版不算见过
+        await settled(delivery('guid-unmanaged', { versions: [ver(V20)] }), {
           status: 'ignored',
-          reason: 'author_not_whitelisted',
+          reason: 'repo_not_managed',
         });
+        const polled = (id: string, version: string) =>
+          store.claimDelivery(delivery(id, { source: 'poll', versions: [ver(version)] }), {
+            staleBefore: stale(),
+            skipIfSeen: { object: ISSUE, version },
+          });
+        const carried = await polled('poll-v10', '2026-09-25T07:10:00Z');
+        expect(carried).toMatchObject({ status: 'claimed', retry: false, seenBefore: true });
+        const unmanaged = await polled('poll-v20', V20);
+        expect(unmanaged).toMatchObject({ status: 'claimed', retry: false });
+        expect(unmanaged).not.toHaveProperty('seenBefore');
+        // 这一轮补收自己出了错、下一轮再来：接过来重做时照样回 seenBefore
         expect(
-          await store.claimDelivery(
-            delivery('poll-again', { source: 'poll', versions: [ver('2026-09-25T07:10:00.000Z')] }),
-            {
-              staleBefore: stale(),
-              skipIfSeen: { object: ISSUE, version: '2026-09-25T07:10:00.000Z' },
-            },
-          ),
-        ).toMatchObject({ status: 'claimed' });
+          await store.finishDelivery('poll-v10', tokenOf(carried), { status: 'failed', reason: '库连不上' }),
+        ).toBe(true);
+        tick();
+        expect(await polled('poll-v10', V10)).toMatchObject({
+          status: 'claimed',
+          retry: true,
+          seenBefore: true,
+        });
       });
 
       it('重放：没有是 not_found；正在处理是 in_flight；处理完的不带 force 是 finished，带 force 重新占住', async () => {
@@ -1045,6 +1067,46 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         ]);
         expect(list[0]?.versions).toEqual([ver(V1)]);
         expect(await store.listUnfinishedDeliveries({ staleBefore: stale(), limit: 1 })).toHaveLength(1);
+      });
+
+      it('等着的（重开时上一轮还没结束）：得写原因；接过来重做不加次数，出错才加；列在没处理成的清单里', async () => {
+        const first = await store.claimDelivery(delivery('reopen'), { staleBefore: stale() });
+        await expect(
+          store.finishDelivery('reopen', tokenOf(first), { status: 'waiting', reason: '' }),
+        ).rejects.toThrow();
+        expect(
+          await store.finishDelivery('reopen', tokenOf(first), {
+            status: 'waiting',
+            reason: '上一轮还没结束',
+          }),
+        ).toBe(true);
+        expect(await store.getDelivery('reopen')).toMatchObject({
+          status: 'waiting',
+          reason: '上一轮还没结束',
+          attempts: 1,
+          finishedAt: clock.now.toISOString(),
+        });
+        expect(
+          (await store.listUnfinishedDeliveries({ staleBefore: stale(), limit: 10 })).map((d) => d.id),
+        ).toEqual(['reopen']);
+        // 重放接过来（等了好几轮）：次数不加
+        for (let round = 0; round < 3; round++) {
+          tick();
+          const replay = await store.reclaimDelivery('reopen', { staleBefore: stale(), force: false });
+          if (replay.status !== 'claimed') throw new Error(`没占到：${replay.status}`);
+          expect(replay.delivery).toMatchObject({ status: 'processing', attempts: 1 });
+          await store.finishDelivery('reopen', replay.token, { status: 'waiting', reason: '还没结束' });
+        }
+        // webhook 同一编号再来也一样
+        tick();
+        const again = await store.claimDelivery(delivery('reopen'), { staleBefore: stale() });
+        expect(again).toMatchObject({ status: 'claimed', retry: true });
+        expect(await store.getDelivery('reopen')).toMatchObject({ status: 'processing', attempts: 1 });
+        // 这次真出错了：再接过来才加一
+        await store.finishDelivery('reopen', tokenOf(again), { status: 'failed', reason: 'Temporal 连不上' });
+        tick();
+        await store.claimDelivery(delivery('reopen'), { staleBefore: stale() });
+        expect(await store.getDelivery('reopen')).toMatchObject({ status: 'processing', attempts: 2 });
       });
 
       it('不收、出错都得写原因：原因是空的整笔不记', async () => {
@@ -1100,7 +1162,7 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         ).toBeNull();
       });
 
-      it('卡住的条数：出错到了上限的、处理中超过时限的；还能重放的、刚占的、处理完的不算', async () => {
+      it('卡住的条数：出错到了上限的、处理中超过时限的；还能重放的、等着的、刚占的、处理完的不算', async () => {
         const failTimes = async (id: string, times: number) => {
           for (let i = 0; i < times; i++) {
             const c = await store.claimDelivery(delivery(id), { staleBefore: stale() });
@@ -1109,17 +1171,23 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         };
         await failTimes('exhausted', 5);
         await failTimes('retryable', 2);
+        // 出错到了上限、这一次又在等着（上一轮还没结束）：等着的不算卡住
+        await failTimes('waiting', 5);
+        const w = await store.claimDelivery(delivery('waiting'), { staleBefore: stale() });
+        await store.finishDelivery('waiting', tokenOf(w), { status: 'waiting', reason: '上一轮还没结束' });
         await settled(delivery('done'), { status: 'accepted' });
-        await store.claimDelivery(delivery('dead'), { staleBefore: stale() });
+        // 两条占了 6 分钟没收尾（那一次多半死了），一条刚占上
+        await store.claimDelivery(delivery('dead-1'), { staleBefore: stale() });
+        await store.claimDelivery(delivery('dead-2'), { staleBefore: stale() });
         tick(6 * MIN);
         await store.claimDelivery(delivery('busy'), { staleBefore: stale() });
         expect(await store.countStuckDeliveries({ staleBefore: stale(), maxAttempts: 5 })).toEqual({
           exhausted: 1,
-          stale: 1,
+          stale: 2,
         });
         expect(await store.countStuckDeliveries({ staleBefore: stale(), maxAttempts: 2 })).toEqual({
           exhausted: 2,
-          stale: 1,
+          stale: 2,
         });
       });
     });

@@ -53,23 +53,24 @@ import type { ProgressKind, Step } from '@fleet-dao/shared';
 import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import { PublicHealthError } from './health.ts';
 import { isSerial, isUuid, parseCursor } from './ids.ts';
-import type {
-  AskRecord,
-  AuditRecord,
-  CommandClaim,
-  GitHubDelivery,
-  GitHubObjectVersion,
-  JobRecord,
-  NewAuditEntry,
-  NotificationRecord,
-  Page,
-  PullRequestRecord,
-  RunPlan,
-  SettingRecord,
-  Store,
-  TestRunRecord,
-  TimelineRecord,
-  User,
+import {
+  type AskRecord,
+  type AuditRecord,
+  type CommandClaim,
+  type GitHubDelivery,
+  type GitHubObjectVersion,
+  type JobRecord,
+  type NewAuditEntry,
+  type NotificationRecord,
+  type Page,
+  type PullRequestRecord,
+  REPO_NOT_MANAGED,
+  type RunPlan,
+  type SettingRecord,
+  type Store,
+  type TestRunRecord,
+  type TimelineRecord,
+  type User,
 } from './ports.ts';
 
 export interface PgStoreOptions {
@@ -845,9 +846,11 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
 
     // —— GitHub 事件 ——
     async claimDelivery(delivery, { staleBefore, skipIfSeen }) {
+      let seenBefore = false;
       if (skipIfSeen) {
-        const [seen] = await db
-          .select({ id: githubEventVersions.deliveryId })
+        // 带过这一版的别的投递（同一版一般只有一两条）：有没被门挡掉的就不再做；只有被挡掉的，照样做、回 seenBefore
+        const carriers = await db
+          .select({ status: githubEvents.status, reason: githubEvents.reason })
           .from(githubEventVersions)
           .innerJoin(githubEvents, eq(githubEvents.deliveryId, githubEventVersions.deliveryId))
           .where(
@@ -855,12 +858,12 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
               eq(githubEventVersions.object, skipIfSeen.object),
               eq(githubEventVersions.version, new Date(skipIfSeen.version)),
               ne(githubEventVersions.deliveryId, delivery.id),
-              ne(githubEvents.status, 'ignored'),
             ),
-          )
-          .limit(1);
-        if (seen) return { status: 'duplicate' };
+          );
+        if (carriers.some((c) => c.status !== 'ignored')) return { status: 'duplicate' };
+        seenBefore = carriers.some((c) => c.reason !== REPO_NOT_MANAGED);
       }
+      const seen = seenBefore ? { seenBefore } : {};
       const at = now();
       const inserted = await db.transaction(async (tx) => {
         const rows = await tx
@@ -892,14 +895,16 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         }
         return rows;
       });
-      if (inserted.length > 0) return { status: 'claimed', token: iso(at), retry: false };
+      if (inserted.length > 0) return { status: 'claimed', token: iso(at), retry: false, ...seen };
       // 已经有这一条：条件更新是原子的，两个请求同时来接，只有一个接得到
       const taken = await db
         .update(githubEvents)
         .set(reclaimSet(at))
         .where(and(eq(githubEvents.deliveryId, delivery.id), reclaimableRow(new Date(staleBefore))))
         .returning({ id: githubEvents.deliveryId });
-      return taken.length > 0 ? { status: 'claimed', token: iso(at), retry: true } : { status: 'duplicate' };
+      return taken.length > 0
+        ? { status: 'claimed', token: iso(at), retry: true, ...seen }
+        : { status: 'duplicate' };
     },
     async reclaimDelivery(id, { staleBefore, force }) {
       const at = now();
@@ -1091,19 +1096,22 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
   };
 }
 
-/** 上次出错的、处理中但占用早于 stale 的（那一次多半死了）：可以接过来重做。 */
+/** 上次出错的、在等着的、处理中但占用早于 stale 的（那一次多半死了）：可以接过来重做。 */
 function reclaimableRow(stale: Date) {
   return or(
-    eq(githubEvents.status, 'failed'),
+    inArray(githubEvents.status, ['failed', 'waiting']),
     and(eq(githubEvents.status, 'processing'), lt(githubEvents.claimedAt, stale)),
   );
 }
 
-/** 接过来：重新记成处理中，次数加一，凭据换成这次的时刻（旧凭据记不上结局了）。上次的原因留着，记下新结局时覆盖。 */
+/**
+ * 接过来：重新记成处理中，次数加一（从等着接回来的不加：等上一轮不占自动重放的次数），凭据换成这次的时刻（旧凭据
+ * 记不上结局了）。上次的原因留着，记下新结局时覆盖。SET 里读到的 status 是改之前的。
+ */
 function reclaimSet(at: Date) {
   return {
     status: 'processing' as const,
-    attempts: sql`${githubEvents.attempts} + 1`,
+    attempts: sql`${githubEvents.attempts} + case when ${githubEvents.status} = 'waiting' then 0 else 1 end`,
     claimedAt: at,
     finishedAt: null,
   };

@@ -331,7 +331,7 @@ FLEET_DEMO_PATH=/demo/                  # 演示版的路径，和香港 hk.env 
 - `engine.env`、`api.env` 照仓里 `deploy/france/*.env.example` 建一次，之后归人改（飞书、GitHub 的凭据填在 `api.env`），改完再发布一次就会重启对应服务。库连接写成 `DATABASE_URL=postgres:///fleet` 加 `PGHOST=/var/run/postgresql`：本机 socket、peer 认证，没有口令（postgres.js 不认连接串里的 `?host=`）。
 - 随机密钥各一个文件，france.sh 首次生成，之后不动、不打印：`agent-token.env`（`FLEET_AGENT_TOKEN_SECRET`：引擎签 fleet 通行证、后端验）、`session-secret.env`（`FLEET_SESSION_SECRET`）、`gateway-token.env`（`FLEET_FEISHU_GATEWAY_TOKEN`）。
 - 免登 `FLEET_DEV_LOGIN` 永远不开：驾驶舱接口听的不是回环地址，后端也会拒绝启动。
-- 后端收 GitHub 事件：原文一次投递一行落进库里的 `github_events`（状态、原因、做了什么都在）。PR、CI 事件要用 `github/` 里两个机器人的凭据写镜像，凭据只在后端启动时读一次：读不到时后端照样起、issue 照收，PR 和 CI 事件记成出错，健康检查的 `github_events` 报红；补上凭据后要重启 `fleet-api` 才读得到。记成出错的投递原文还在，但对账还没接上定时（`specs/43-接活入口/方案.md`「谁来定时调对账」），现在没有东西自动重放它们；自动重放到头（5 次）的也没有手动再推的入口，只在健康检查里报红。
+- 后端收 GitHub 事件：原文一次投递一行落进库里的 `github_events`（状态、原因、做了什么都在）。PR、CI 事件要用 `github/` 里两个机器人的凭据写镜像，凭据只在后端启动时读一次：读不到时后端照样起、issue 照收，PR 和 CI 事件记成出错，健康检查的 `github_events` 报红；补上凭据后要重启 `fleet-api` 才读得到。记成出错、等着（重开时上一轮还没结束）的投递原文还在，但对账还没接上定时（`specs/43-接活入口/方案.md`「谁来定时调对账」），现在没有东西自动重放它们；自动重放到头（5 次）的也没有手动再推的入口，只在健康检查里报红。
 - GitHub 不会自己重投没送到的 webhook：漏收的靠对账调它的重投接口、再按仓轮询补回，对账没接上之前收不回来。
 - 受管的仓就是库里 `repos` 表的行，别的仓的事件一律不收。自动派活开关是 `repos.auto_dispatch_since`：空 = 关着，只收单（建任务行）、不拉起需求工作流；打开以前就开着的 issue 也不自动派。驾驶舱还没有开关页面，现在在库里改：`sudo -u fleet psql fleet -c "update repos set auto_dispatch_since = now() where owner = '<owner>' and name = '<仓名>'"`，关掉设回 `null`。
 
