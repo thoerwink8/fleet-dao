@@ -7,6 +7,8 @@ import {
   channels,
   type Db,
   families,
+  githubEvents,
+  githubEventVersions,
   insertSubtasks,
   models,
   notificationDeliveries,
@@ -115,7 +117,11 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
       })),
     );
   }
-  if (data.repos?.length) await db.insert(repos).values(data.repos);
+  if (data.repos?.length) {
+    await db
+      .insert(repos)
+      .values(data.repos.map((r) => ({ ...r, autoDispatchSince: dateOpt(r.autoDispatchSince) })));
+  }
   if (data.tasks?.length) {
     await db.insert(tasks).values(
       data.tasks.map((t) => ({
@@ -269,5 +275,32 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
         mergedAt: dateOpt(s.mergedAt),
       })),
     );
+  }
+  for (const e of data.githubEvents?.values() ?? []) {
+    await db.insert(githubEvents).values({
+      deliveryId: e.id,
+      event: e.event,
+      action: e.action ?? null,
+      source: e.source,
+      repo: e.repo ?? null,
+      payload: sql`${JSON.stringify(e.payload ?? null)}::jsonb`,
+      status: e.status,
+      reason: e.reason ?? null,
+      note: e.note ?? null,
+      attempts: e.attempts,
+      receivedAt: date(e.receivedAt),
+      claimedAt: date(e.claimedAt),
+      finishedAt: dateOpt(e.finishedAt),
+    });
+    if (e.versions.length > 0) {
+      await db.insert(githubEventVersions).values(
+        e.versions.map((v) => ({
+          deliveryId: e.id,
+          object: v.object,
+          version: date(v.version),
+          state: v.state ?? null,
+        })),
+      );
+    }
   }
 }

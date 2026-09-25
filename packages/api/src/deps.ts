@@ -6,6 +6,7 @@ import type {
   GitHubEventSink,
   HealthCheck,
   Logger,
+  RequirementWorkflows,
   Store,
   WorkflowControl,
 } from './ports.ts';
@@ -15,6 +16,8 @@ export interface Deps {
   config: Config;
   store: Store;
   workflows: WorkflowControl;
+  /** 拉起需求工作流（issue 进来之后）。 */
+  requirements: RequirementWorkflows;
   changes: ChangeFeed;
   /** null = 飞书登录没配置（只允许在开发环境）。 */
   feishu: FeishuAuth | null;

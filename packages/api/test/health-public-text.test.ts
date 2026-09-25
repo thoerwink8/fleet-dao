@@ -8,11 +8,11 @@ import type { Db, PgListen } from '@fleet-dao/db';
 import { FLEET_CHANGES_CHANNEL } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import { startPgChangeFeed } from '../src/changes.ts';
-import { notWiredGitHub } from '../src/github.ts';
+import { githubAppMissing, githubEventsCheck } from '../src/github.ts';
 import { type HealthReport, runHealthChecks } from '../src/health.ts';
 import { silentLogger } from '../src/log.ts';
 import { probeDb } from '../src/pg-store.ts';
-import type { Logger } from '../src/ports.ts';
+import type { Logger, Store } from '../src/ports.ts';
 import { createEnginePollerCheck, createNamespaceCheck, notConnectedTemporal } from '../src/temporal.ts';
 import { fakePostgres } from './fake-postgres.ts';
 
@@ -100,7 +100,10 @@ async function publicFailures(log: Logger) {
   await run('feed-stopped', true, () => stopped.probe(30));
 
   await run('workflow-client', true, () => notConnectedTemporal().check());
-  await run('events', true, notWiredGitHub().check);
+  // GitHub 事件：机器人凭据没读到；有投递重放到顶还出错、处理中卡住
+  await run('events-no-credentials', true, githubAppMissing('ENOENT /etc/fleet-dao/github/app.json').check);
+  const stuckStore = { countStuckDeliveries: async () => ({ exhausted: 2, stale: 1 }) } as unknown as Store;
+  await run('events-stuck', true, githubEventsCheck({ store: stuckStore, now: () => new Date() }));
   // 引擎工人不在、命名空间查不到：队列名、命名空间名只进日志
   await run(
     'engine-offline',

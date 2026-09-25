@@ -1,12 +1,14 @@
 // 进程入口：两个监听——驾驶舱接口（生产上是法国机器的隧道地址，香港经它访问）与 fleet 命令接口（只本机回环）。
 // 地址、端口、密钥都从本机配置（环境变量）读，见 config.ts。
 // - 有 DATABASE_URL：真库（Postgres Store + LISTEN fleet_changes）+ 真 Temporal（懒连接，Temporal 没起来时
-//   这一步不报错，健康检查会如实报红）。生产必须有。
+//   这一步不报错，健康检查会如实报红）。生产必须有。GitHub 事件原文落库、issue 变成任务；
+//   PR、CI 事件经 @fleet-dao/github 写镜像（机器人凭据在 /etc/fleet-dao/github，读不到时如实失败、健康检查报红）。
 // - 开发环境没有 DATABASE_URL：内存里的样例数据；飞书登录没配时可以用 POST /auth/dev-login 免登（只许本机回环监听）；
-//   发给工作流的信号只记日志，不接 Temporal。
-// GitHub 事件落库等引擎的 PR 合了再接；在那之前对应检查如实报红。
+//   发给工作流的信号、拉起需求工作流都只记日志，不接 Temporal。
+// 拉起需求工作流还没接到 Temporal 客户端：拉起工作流的投递如实记成出错，接上后由对账重放。
 import type { Server } from 'node:http';
-import { createDb } from '@fleet-dao/db';
+import { createDb, type Db } from '@fleet-dao/db';
+import { createGitHub, pgLedger, pgLocker } from '@fleet-dao/github';
 import { serve } from '@hono/node-server';
 import { signAgentToken } from './agent-token.ts';
 import { buildApps } from './app.ts';
@@ -16,14 +18,38 @@ import { createDirDemoPublisher, sweepExpiredDemoLinks } from './demo.ts';
 import type { Deps } from './deps.ts';
 import { DEV_RUN_ID, DEV_USER_ID, devFixtures, IDS } from './dev-fixtures.ts';
 import { createFeishuAuth } from './feishu.ts';
-import { notWiredGitHub } from './github.ts';
+import { githubAppMissing, githubEventsCheck } from './github.ts';
 import { serviceHealthChecks } from './health.ts';
 import { jsonLogger } from './log.ts';
 import { createMemoryStore } from './memory-store.ts';
 import { createPgStore, probeDb, withStatementTimeout } from './pg-store.ts';
+import { type GitHubEventSink, type RequirementWorkflows, WorkflowUnavailableError } from './ports.ts';
 import { connectTemporal } from './temporal.ts';
 
 const log = jsonLogger();
+
+/** 拉起需求工作流要经 Temporal 客户端；没接上时如实失败（这条投递记成出错，接上后由对账重放）。 */
+const requirementsNotConnected: RequirementWorkflows = {
+  async start() {
+    throw new WorkflowUnavailableError('拉起需求工作流的 Temporal 客户端没接上');
+  },
+};
+
+/**
+ * PR、CI 事件写镜像：@fleet-dao/github 的事件去处，要两个机器人的凭据（只在这里、启动时读一次）。读不到时后端照样起
+ * （issue 照收），PR、CI 事件如实失败，健康检查的 github_events 报红（credentialsMissing）；补上凭据要重启后端。
+ */
+function githubMirror(db: Db): { sink: GitHubEventSink; credentialsMissing?: () => Promise<void> } {
+  try {
+    const gh = createGitHub({ ledger: pgLedger(db), locker: pgLocker(db, { log }), log });
+    // 引擎等 CI 靠活动自己轮询（waitCi），不收按事件叫醒的信号：PR、CI 事件只写镜像
+    return { sink: gh.eventSink({ async wake() {} }) };
+  } catch (err) {
+    log.error('GitHub 机器人的凭据没读到：PR、CI 事件写不进镜像（issue 照收）', { error: String(err) });
+    const missing = githubAppMissing(String(err));
+    return { sink: missing.sink, credentialsMissing: missing.check };
+  }
+}
 
 function load() {
   try {
@@ -63,6 +89,12 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
           log.info('（开发）发给工作流的信号', { workflowId, signal: signal.name });
         },
       },
+      requirements: {
+        async start(input) {
+          log.info('（开发）拉起需求工作流', { taskId: input.taskId, issueNumber: input.issueNumber });
+          return 'started';
+        },
+      },
       github: {
         async accept(event) {
           log.info('（开发）收到 GitHub 事件', { event: event.event, repo: event.repo, wake: event.wake });
@@ -87,18 +119,25 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
     namespace: config.temporalNamespace,
     taskQueue: config.fleetTaskQueue,
   });
-  const github = notWiredGitHub();
+  const github = githubMirror(db);
+  const store = createPgStore(db, { now });
   const deps: Deps = {
     config,
-    store: createPgStore(db, { now }),
+    store,
     changes: feed,
     log,
     now,
     feishu,
     demo,
     workflows: temporal.control,
+    requirements: requirementsNotConnected,
     github: github.sink,
-    health: serviceHealthChecks({ probeDb: () => probeDb(db), feed, temporal, githubEvents: github.check }),
+    health: serviceHealthChecks({
+      probeDb: () => probeDb(db),
+      feed,
+      temporal,
+      githubEvents: githubEventsCheck({ store, now, credentialsMissing: github.credentialsMissing }),
+    }),
   };
   return {
     deps,
