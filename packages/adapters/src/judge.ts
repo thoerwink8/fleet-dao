@@ -25,8 +25,8 @@ export interface RunFacts {
   /** 执行体最后说的话（stderr 末几行、报错原文）：没有终帧时拿它当原因，不写死一个占位词。 */
   lastWords?: string;
   /**
-   * 走中转时，上游到底有没有真的干了活没查成（账本没读成、没给账本目录）：终帧说完成也不算数；
-   * 和交付没查成一样该重查，不算执行体失败。
+   * 走中转时，上游到底有没有真的干了活没查成（账本没读成、没给账本目录）：终帧说完成也不算数，也不算执行体失败。
+   * 活可能已经交了：要对账（重读账本），不能重跑会话。
    */
   relayUnknown?: string;
 }
@@ -49,7 +49,7 @@ export type VerdictReason =
   | 'no_result'
   | 'agent_error'
   | 'exit_nonzero'
-  | 'relay_unknown' // 中转有没有真打到上游没查成：该重查，不该算执行体失败
+  | 'relay_unknown' // 中转有没有真打到上游没查成：要对账，不能重跑会话，不该算执行体失败
   | 'not_delivered'
   | 'delivery_unknown'; // 交付没查成：该重查，不该算执行体失败
 

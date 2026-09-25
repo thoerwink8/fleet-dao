@@ -879,6 +879,61 @@
         "message": "续会话没续上原来那个会话，已停"
       },
       "expect": { "action": "retry", "rule": "SM1" }
+    },
+    {
+      "id": "X55",
+      "provenance": "format",
+      "origin": "fleet-dao 插头的判定原因 launch_unknown（packages/adapters/src/judge.ts、mirasim/run.ts）：prompt 发出去了、没等到本次的应答；MS-18 不许重发",
+      "evidence": {
+        "hostId": "mirasim",
+        "code": "launch_unknown",
+        "message": "起会话没查成：prompt 发出去了，没等到应答。它可能已经在跑——别重发（会烧两次额度），按工作目录和起针时间去 ~/.mirasim/sessions 对账"
+      },
+      "expect": { "action": "park", "rule": "ST2", "alert": true, "routeOutcome": "neutral", "counter": null }
+    },
+    {
+      "id": "X56",
+      "provenance": "format",
+      "origin": "同 X55，等应答时收到过一条不带本次 clientRef 的报错（原话取自 MS-10 的 at capacity）：码压得过繁忙的字样，不换路由重派",
+      "evidence": {
+        "hostId": "mirasim",
+        "code": "launch_unknown",
+        "message": "起会话没查成：prompt 发出去了，没等到应答（收到过一条认不出是冲这一针来的报错：Selected model is at capacity）。它可能已经在跑——别重发（会烧两次额度），按工作目录和起针时间去 ~/.mirasim/sessions 对账"
+      },
+      "expect": { "action": "park", "rule": "ST2", "alert": true, "routeOutcome": "neutral" }
+    },
+    {
+      "id": "X57",
+      "provenance": "format",
+      "origin": "同 X55，那条报错没带 message，插头照原样记下整帧：嵌着的 overloaded_error 是繁忙的强码，也压得过",
+      "evidence": {
+        "hostId": "mirasim",
+        "code": "launch_unknown",
+        "message": "起会话没查成：prompt 发出去了，没等到应答（收到过一条认不出是冲这一针来的报错：{\"type\":\"error\",\"code\":\"overloaded_error\"}）。它可能已经在跑——别重发（会烧两次额度），按工作目录和起针时间去 ~/.mirasim/sessions 对账"
+      },
+      "expect": { "action": "park", "rule": "ST2", "alert": true, "routeOutcome": "neutral" }
+    },
+    {
+      "id": "X58",
+      "provenance": "format",
+      "origin": "fleet-dao 插头的判定原因 relay_unknown（packages/adapters/src/judge.ts、mirasim/run.ts）：走中转、快照说 done，账本没读成",
+      "evidence": {
+        "hostId": "mirasim",
+        "code": "relay_unknown",
+        "message": "中转没查成：账本没读成：账本里没有这个会话的目录（可能一次上游调用都没有，也可能账本换了地方）"
+      },
+      "expect": { "action": "park", "rule": "DL3", "alert": true, "routeOutcome": "neutral", "counter": null }
+    },
+    {
+      "id": "X59",
+      "provenance": "format",
+      "origin": "同 X58，没给账本目录",
+      "evidence": {
+        "hostId": "mirasim",
+        "code": "relay_unknown",
+        "message": "中转没查成：没给账本目录，上游有没有真的干活核实不了"
+      },
+      "expect": { "action": "park", "rule": "DL3", "alert": true, "routeOutcome": "neutral" }
     }
   ],
   "skipped": [

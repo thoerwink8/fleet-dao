@@ -69,6 +69,28 @@ export const RULES: readonly FailureRule[] = [
     alert: true,
     routeOutcome: 'neutral',
   },
+  // 下面两条是插头「没查成」（packages/adapters/src/judge.ts）：launch_unknown = prompt 发出去了、没等到本次的应答，
+  // 会话可能已经在跑；relay_unknown = 会话说做完了、中转账本没读成，上游有没有真干活核实不了，活可能已经交了。
+  // 原路重试、换路由都是再起一个会话：同一件活跑两遍、扣两次额度、同一棵树里两个会话。所以只挂起报警，等对账；
+  // 是我们没查成，不是路由坏了，不记路由的失败。强码一轮按表的先后认，这两条只排在 EN2（同样只挂起）后面：
+  // 原话里常夹着等应答时收到的别的报错（at capacity、overloaded_error、account_banned……），排在繁忙、封号这些规则
+  // 后面就会被抢走。
+  {
+    id: 'ST2',
+    title: '起会话没查成，可能已经在跑',
+    codes: ['launch_unknown'],
+    ladder: ['park'],
+    alert: true,
+    routeOutcome: 'neutral',
+  },
+  {
+    id: 'DL3',
+    title: '中转有没有真干活没查成',
+    codes: ['relay_unknown'],
+    ladder: ['park'],
+    alert: true,
+    routeOutcome: 'neutral',
+  },
   // 我们自己停的不算失败，也不进路由的失败率（旧系统 236 条 interrupted 里 231 条是自己停的）。
   {
     id: 'OU1',
