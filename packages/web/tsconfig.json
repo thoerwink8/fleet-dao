@@ -1,0 +1,12 @@
+{
+  // 前端由 Vite 打包：模块解析改成 bundler，加 DOM 与 JSX；其余严格项沿用根配置。
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "types": ["node", "vite/client"]
+  },
+  "include": ["src", "vite.config.ts", "react-router.config.ts"]
+}

@@ -1,0 +1,45 @@
+{
+  "name": "@fleet-dao/web",
+  "version": "0.0.0",
+  "private": true,
+  "description": "驾驶舱前端：看板 + 后台管理（React Router 纯前端单页模式）",
+  "type": "module",
+  "scripts": {
+    "dev": "react-router dev",
+    "dev:mock": "react-router dev --mode mock",
+    "build": "react-router build",
+    "preview": "vite preview --outDir dist/client"
+  },
+  "dependencies": {
+    "@fleet-dao/shared": "workspace:*",
+    "@fontsource-variable/inter": "^5.3.0",
+    "@fontsource-variable/jetbrains-mono": "^5.3.0",
+    "@tanstack/react-query": "^5.103.2",
+    "@xyflow/react": "^12.11.6",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "cmdk": "^1.1.1",
+    "elkjs": "^0.12.0",
+    "lucide-react": "^1.48.0",
+    "motion": "^13.4.3",
+    "radix-ui": "^1.6.7",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "react-router": "^8.4.0",
+    "sonner": "^2.0.8",
+    "tailwind-merge": "^3.7.0",
+    "tw-animate-css": "^1.4.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@react-router/dev": "^8.4.0",
+    "@tailwindcss/vite": "^4.3.3",
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/react": "^16.3.3",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "happy-dom": "^20.14.5",
+    "tailwindcss": "^4.3.3",
+    "vite": "^8.3.0"
+  }
+}
