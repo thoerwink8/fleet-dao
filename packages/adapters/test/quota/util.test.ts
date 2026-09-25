@@ -51,8 +51,8 @@ describe('redact', () => {
     expect(all('a@b.com.sk-ABCDEFGHIJK')).toBe('<邮箱>.<密钥>');
     expect(all('a@b.com.tvly-ABCDEFGHIJK 尾')).toBe('<邮箱>.<密钥> 尾');
     // 反过来密钥紧贴着邮箱的前半截：前半截跟着密钥抹掉，剩下的「@域名」也不露。
-    expect(all('sk-ABCDEFGHIJKuser@corp.io 尾')).toBe('<密钥><邮箱> 尾');
-    expect(all('Bearer abc.def@corp.io')).toBe('Bearer <令牌><邮箱>');
+    expect(all('sk-ABCDEFGHIJKuser@example.com 尾')).toBe('<密钥><邮箱> 尾');
+    expect(all('Bearer abc.def@example.com')).toBe('Bearer <令牌><邮箱>');
   });
 
   it('抹邮箱和旧写法（整段一个正则）对拍：随机拼出来的两万条结果都一样', () => {
