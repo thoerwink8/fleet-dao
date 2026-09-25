@@ -64,4 +64,10 @@ export {
   reconcilerOptions,
 } from './reconcile.ts';
 export { createSseRelay, type SseRelay } from './sse.ts';
-export { createTemporalWorkflowControl, notConnectedTemporal, type TemporalClientLike } from './temporal.ts';
+export {
+  createTemporalRequirementWorkflows,
+  createTemporalWorkflowControl,
+  notConnectedTemporal,
+  type TemporalClientLike,
+  type WorkflowStarterLike,
+} from './temporal.ts';
