@@ -49,7 +49,11 @@ migrations_applied() {
   if [[ "$DB_MIG" == fail ]]; then return 1; fi
   echo "$DB_MIG"
 }
-migrate() { if [[ "${MIG[$1]:-0}" -gt "$DB_MIG" ]]; then DB_MIG=${MIG[$1]}; fi; }
+MIGRATE_RUNS=() # 跑过哪几版的迁移程序
+migrate() {
+  MIGRATE_RUNS+=("$1")
+  if [[ "${MIG[$1]:-0}" -gt "$DB_MIG" ]]; then DB_MIG=${MIG[$1]}; fi
+}
 api_report_before() { :; }
 sync_web() { :; }
 web_reachable() { :; }
@@ -194,6 +198,14 @@ do_rollback >/dev/null 2>&1
 check "读不到库里跑过几个迁移：不退" "$(current_sha)" "$B"
 check "报了红" "$((${#REDS[@]} > 0))" 1
 DB_MIG=3
+before=$(events)
+reset
+MIGRATE_RUNS=()
+do_release "$A" >/dev/null 2>&1
+check "直接发老提交 A（只带 2 个、库里 3 个）：不切，还在 B" "$(current_sha)" "$B"
+check "红里说了为什么不切" "$(printf '%s\n' "${REDS[@]}" | grep -c '不切到 aaaaaaaaaaaa：库 fleet 已跑过 3 个迁移，那一版只带 2 个')" 1
+check "老版本的迁移程序没跑" "${#MIGRATE_RUNS[@]}" 0
+check "历史没变" "$(events)" "$before"
 
 echo "== 这一版带几个迁移：记在标记里；早先构建、没记的，现场数它的迁移账；读不出就失败"
 NODE=$(command -v node) || NODE=""

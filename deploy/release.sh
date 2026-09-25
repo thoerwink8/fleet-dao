@@ -324,18 +324,18 @@ release_migrations() { # 提交号
 
 # 迁移只进不退：退到某一版之前先比库。库里跑过的比那一版带的多，旧代码就要对着它不认识的表结构跑
 # （比如新迁移改了主键、加了 NOT NULL 列，旧代码一写就报错，健康检查还查不出来）——不退，报红等人。读不清也不退
-schema_allows() { # 提交号
-  local have want
+schema_allows() { # 提交号 [动作：退到（默认）/ 切到]
+  local have want act=${2:-退到}
   if ! have=$(migrations_applied); then
-    red "读不到库 fleet 里跑过几个迁移，不敢退到 ${1:0:12}"
+    red "读不到库 fleet 里跑过几个迁移，不敢${act} ${1:0:12}"
     return 1
   fi
   if ! want=$(release_migrations "$1"); then
-    red "读不出 ${1:0:12} 带几个迁移，不敢退到它"
+    red "读不出 ${1:0:12} 带几个迁移，不敢${act}它"
     return 1
   fi
   if ((have > want)); then
-    red "不退到 ${1:0:12}：库 fleet 已跑过 $have 个迁移，那一版只带 $want 个（迁移只进不退，旧代码对着新表结构会出错）"
+    red "不${act} ${1:0:12}：库 fleet 已跑过 $have 个迁移，那一版只带 $want 个（迁移只进不退，旧代码对着新表结构会出错）"
     return 1
   fi
 }
@@ -457,10 +457,11 @@ web_reachable() {
 }
 
 # 静态文件经隧道发到香港（那头 rrsync 把路径限死在 /srv/fleet-dao-web、只许写）。先落临时名、最后一起换上，
-# 旧的最后删：换的那一下之前浏览器拿到的都是整套旧页面。属主是香港的 root
+# 旧的最后删：换的那一下之前浏览器拿到的都是整套旧页面。属主是香港的 root。
+# 按内容比（-c）、不带修改时间（不加 -t）：每一版都是新构建的，时间必然不同，按时间比会把内容没变的文件也算成变化
 sync_web() { # 提交号
   local out
-  if ! out=$(rsync -rpt -O --delete-after --delay-updates --itemize-changes \
+  if ! out=$(rsync -rpc -O --delete-after --delay-updates --itemize-changes \
     -e "$(web_upload_ssh "$UPLOAD_KEY" "$HK_KNOWN_HOSTS")" -- "$RELEASES/$1/web/" "root@$HK_TUNNEL:/" 2>&1); then
     red "把静态文件发到香港没成：$(tail -3 <<<"$out" | tr '\n' ' ')"
     return 1
@@ -715,6 +716,9 @@ do_release() { # 要发的提交（空 = 主线最新）
   build_release "$SHA"
   cur=$(current_sha)
   web_reachable
+  # 直接发一个老提交也一样把关：库里的迁移比它带的多就不切（drizzle 碰到比代码新的迁移记录什么也不做、也不报错，
+  # 光靠迁移那一步拦不住）。放在迁移之前：老版本的迁移程序连库都不碰
+  schema_allows "$SHA" 切到 || return 1
   migrate "$SHA"
   before=$(api_report_before)
   step "切到 ${SHA:0:12}（在用：$(short "$cur" 还没有)）"

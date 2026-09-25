@@ -249,9 +249,9 @@ bash /srv/fleet-dao/deploy/release.sh --check      # 只读：在用哪版、服
 1. 取代码：从 GitHub 取主线到 `/srv/fleet-dao-releases/.repo.git`（root 的裸仓）。只发主线上的提交；合并前要在真机上验，加 `--unmerged`，历史里会标出来。
 2. 构建：代码解到临时目录，以 fleet 跑 `pnpm install --frozen-lockfile`（依赖整份拷进来，不和 fleet 的 pnpm 仓库共用文件）；有 `packages/web` 就构建它（产出 `dist/client`），没有就用占位页；再放上健康页 `/health/`、版本标记 `release.json`。然后整棵树换成 root、fleet 只读，挪到 `/srv/fleet-dao-releases/<提交号>`。第三方代码不以 root 跑；root 照着起服务的单元文件，是换属主之后 root 才从 git 里取出来放进 `.units/` 的。构建日志在这一版目录的 `.fleet-build.log`。
 3. 先试通香港（`rsync -n`，什么都不传）：不通就停，不切版本——不然健康检查必不过，新旧两版会一起被记成不健康。
-4. 迁移：以 fleet 跑 `packages/db` 的迁移（库 fleet，本机 socket）。在切版本之前跑，只进不退（第八节）。每一版带几个迁移记在它的 `.fleet-release`（`migrations=`）。
+4. 迁移：以 fleet 跑 `packages/db` 的迁移（库 fleet，本机 socket）。在切版本之前跑，只进不退（第八节）。每一版带几个迁移记在它的 `.fleet-release`（`migrations=`）。跑之前先比库：库里跑过的比这一版带的多（直接发了个老提交），就停、不切——drizzle 碰到比代码新的迁移记录什么也不做、也不报错，光靠迁移这一步拦不住。
 5. 切版本：`current` 原子地指到这一版；`/etc/fleet-dao/release.env` 的 `FLEET_SERVICES` 里启用的服务装上这一版的单元、起来，没启用的停掉、撤掉单元。要不要重启看服务的主进程在哪个目录（`/proc/<主进程>/cwd`）：不在这一版的目录里就重启——所以上次切完 `current`、还没重启完就被打断，重跑同一版照样会重启；单元或环境文件变了也重启。
-6. 发静态文件：经隧道用 rrsync 传到香港 `/srv/fleet-dao-web`（新文件先落临时名、最后一起换上，旧文件最后删；在香港属 root）。
+6. 发静态文件：经隧道用 rrsync 传到香港 `/srv/fleet-dao-web`（新文件先落临时名、最后一起换上，旧文件最后删；在香港属 root）。按内容比、不带修改时间：内容没变的文件不传、不算变化。目录里不是这一版的文件会被删掉——别往 `/srv/fleet-dao-web` 手放东西，下次发布就没了。
 7. 健康检查：启用的服务 10 秒里没退出、没重启，主进程跑的是这一版的目录；`fleet-api` 的驾驶舱接口在答健康报告、切之前好的项没变坏，fleet 命令接口在听；`fleet-engine` 90 秒内到任务队列 fleet 上取活（工作流任务、活动任务都要有它）；香港在发这一版（经隧道读 `release.json`、健康页 200）。不过就自动退回上一版（同样的切法、同样的检查），报红；但库里跑过的迁移比上一版带的多时不退，停在新版报红等人（旧代码对着新表结构会出错，健康检查还查不出来）。
 8. 清旧版：留 5 版——在用的、上一版，再按最近用过的补满。
 
