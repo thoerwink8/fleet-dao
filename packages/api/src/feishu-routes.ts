@@ -320,10 +320,13 @@ export function feishuRoutes(deps: Deps, waiters: AskWaiters, opening: DraftOpen
     return newDraft(c, founder, body.chatType, text, message);
   });
 
+  /** 草稿记着的任务号和仓名。任务或它的仓读不到就报错：已开成的不能说成「待开单」。 */
   async function taskRef(taskId: string) {
     const task = await store.getTask(taskId);
-    const repo = task ? await store.getRepo(task.repoId) : null;
-    return task && repo ? { issueNumber: task.issueNumber, repo: fullName(repo) } : undefined;
+    if (!task) throw new Error(`草稿记着的任务 ${taskId} 在库里读不到`);
+    const repo = await store.getRepo(task.repoId);
+    if (!repo) throw new Error(`草稿记着的任务 ${taskId} 所在的仓 ${task.repoId} 在库里读不到`);
+    return { issueNumber: task.issueNumber, repo: fullName(repo) };
   }
 
   // —— 改草稿、确认 ——

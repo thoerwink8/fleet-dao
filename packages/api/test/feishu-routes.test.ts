@@ -756,6 +756,20 @@ describe('POST /feishu/drafts/:draftId/revise：改一下', () => {
     });
   });
 
+  it('已开成任务、任务却读不到：500，不说成「待开单」', async () => {
+    const stub = openerStub();
+    const h = harness({ draftOpener: stub.opener });
+    stub.set(opensTask(() => h));
+    const draft = await newDraft(h);
+    await h.cockpit.request(`/api/feishu/drafts/${draft.id}/confirm`, gw('POST', { revision: 1 }));
+    vi.spyOn(h.store, 'getTask').mockResolvedValueOnce(null);
+    const late = await h.cockpit.request(
+      `/api/feishu/drafts/${draft.id}/revise`,
+      gw('POST', { requestId: 'r-late', note: '晚了' }),
+    );
+    expect({ status: late.status, code: await errorCode(late) }).toEqual({ status: 500, code: 'internal' });
+  });
+
   it('长原话（「我理解为」已经截满 1000 字）再改一下：补的这句整句留下（接在原话后面、理解里截旧的），不被吞', async () => {
     const h = harness();
     const long = '原'.repeat(1500);
@@ -1370,6 +1384,18 @@ describe('GET /feishu/board：盘面快照', () => {
     ]);
     expect(snap.active.map((t) => t.taskId)).toEqual([FEISHU_IDS.task2of12]);
     expect(snap.teamBoardCard).toEqual({ messageId: 'om_board', sentAt: T0.toISOString() });
+  });
+
+  it('需求已经结束：它上面没答的追问、没处理的要人拍都不算「等你们」', async () => {
+    const h = harness({ data: feishuData() });
+    const task12 = h.store.data.tasks.find((t) => t.id === IDS.task12);
+    if (!task12) throw new Error('没有 12');
+    task12.state = 'done';
+    const snap = FeishuBoardSnapshotSchema.parse(
+      await (await h.cockpit.request('/api/feishu/board', gw('GET', undefined, null))).json(),
+    );
+    expect(snap.waiting).toEqual([]);
+    expect(snap.counts.waitingForYou).toBe(0);
   });
 
   it('库读不到：500，不回一份全是 0 的盘面', async () => {
