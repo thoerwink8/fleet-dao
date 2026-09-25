@@ -27,6 +27,7 @@ import {
   useResolveNotification,
 } from '../../api/client';
 import type { Notification } from '../../api/types';
+import { canSee } from '../../demo/access';
 import { formatAgo } from '../../lib/format';
 import { useNow } from '../../lib/hooks';
 import { noticeLevelMeta, taskTone } from '../../lib/status';
@@ -70,7 +71,7 @@ export function Topbar({ onMenu, onSearch }: { onMenu(): void; onSearch(): void 
           <Search />
         </Button>
         <LiveIndicator />
-        <NotificationBell />
+        {canSee('notifications') ? <NotificationBell /> : null}
         <ThemeMenu />
         <UserMenu />
       </div>
@@ -402,17 +403,25 @@ function UserMenu() {
       <DropdownMenuContent align="end" className="w-52">
         <DropdownMenuLabel>
           <div className="text-sm">{user?.displayName}</div>
-          <div className="text-xs font-normal text-muted-foreground">创始人 · 飞书登录</div>
+          <div className="text-xs font-normal text-muted-foreground">
+            {api.source === 'demo' ? '访客 · 演示版不用登录' : '创始人 · 飞书登录'}
+          </div>
         </DropdownMenuLabel>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={() => navigate('/settings')}>
-          <Settings />
-          设置
-        </DropdownMenuItem>
-        <DropdownMenuItem disabled={api.source === 'mock'} onSelect={() => void logout()}>
-          <LogOut />
-          {api.source === 'mock' ? '退出（假数据模式不用登录）' : '退出登录'}
-        </DropdownMenuItem>
+        {canSee('settings') ? (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={() => navigate('/settings')}>
+              <Settings />
+              设置
+            </DropdownMenuItem>
+          </>
+        ) : null}
+        {api.source === 'demo' ? null : (
+          <DropdownMenuItem disabled={api.source === 'mock'} onSelect={() => void logout()}>
+            <LogOut />
+            {api.source === 'mock' ? '退出（假数据模式不用登录）' : '退出登录'}
+          </DropdownMenuItem>
+        )}
       </DropdownMenuContent>
     </DropdownMenu>
   );

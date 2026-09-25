@@ -12,6 +12,11 @@ import type {
   BoardTaskSchema,
   ChangeEventSchema,
   ChannelSchema,
+  CreateDemoLinkRequest,
+  CreateDemoLinkResponse,
+  DemoLinkSchema,
+  DemoLinksResponse,
+  DemoScopeSchema,
   JobsResponse,
   JobViewSchema,
   MeResponse,
@@ -37,6 +42,7 @@ import type {
   TimelineItemSchema,
   TimelineResponse,
   UpdateChannelRequest,
+  UpdateDemoDefaultRequest,
   UpdateSettingRequest,
   UpdateStagePolicyRequest,
 } from '@fleet-dao/shared';
@@ -100,6 +106,13 @@ export type AuditEntry = z.infer<typeof AuditEntrySchema>;
 export type Settings = z.infer<typeof SettingsResponse>;
 export type Setting = z.infer<typeof SettingSchema>;
 export type UpdateSettingBody = z.input<typeof UpdateSettingRequest>;
+
+export type DemoLinks = z.infer<typeof DemoLinksResponse>;
+export type DemoLink = z.infer<typeof DemoLinkSchema>;
+export type DemoScopeView = z.infer<typeof DemoScopeSchema>;
+export type CreateDemoLinkBody = z.input<typeof CreateDemoLinkRequest>;
+export type CreatedDemoLink = z.infer<typeof CreateDemoLinkResponse>;
+export type UpdateDemoDefaultBody = z.input<typeof UpdateDemoDefaultRequest>;
 
 /** 实时推送（SSE，事件名见 SSE_EVENTS）：ready = 连上了，全量重拉一次；change = 某张表某一行变了；resync = 断过，全量重拉。 */
 export type LiveEvent =

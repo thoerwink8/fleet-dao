@@ -14,7 +14,7 @@ let me: Me;
 
 beforeAll(async () => {
   const api = createMockApi({ live: false });
-  board = await api.board('r-fleet');
+  board = await api.board('r-orbit');
   me = await api.me();
 });
 
@@ -23,7 +23,7 @@ function Harness() {
   return <BoardTree board={board} me={me} filter={filter} onFilter={setFilter} />;
 }
 
-const list = () => screen.getByRole('list', { name: 'fleet-dao 的需求' });
+const list = () => screen.getByRole('list', { name: 'orbit 的需求' });
 const issueNumbers = () =>
   within(list())
     .getAllByText(/^#\d+$/)

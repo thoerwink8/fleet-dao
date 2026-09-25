@@ -1,6 +1,7 @@
 import { Bot, Cog, ScrollText, Search, Terminal, X } from 'lucide-react';
 import { useState } from 'react';
 import { useSearchParams } from 'react-router';
+import { brand } from '#brand';
 import { useAllBoards, useAudit, useMe } from '../api/client';
 import type { AuditEntry, Me } from '../api/types';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
@@ -13,13 +14,13 @@ import { useNow } from '../lib/hooks';
 import { cn } from '../lib/utils';
 
 export function meta() {
-  return [{ title: '操作记录 · fleet-dao 驾驶舱' }];
+  return [{ title: brand.title('操作记录') }];
 }
 
 const FILTERS: { id: 'all' | AuditEntry['actor']['kind']; label: string }[] = [
   { id: 'all', label: '全部' },
   { id: 'user', label: '人' },
-  { id: 'ai', label: 'AI 帅位' },
+  { id: 'ai', label: brand.terms.marshal },
   { id: 'engine', label: '引擎' },
   { id: 'agent', label: '会话' },
 ];
@@ -92,7 +93,7 @@ export default function Audit() {
   return (
     <Page
       title="操作记录"
-      description="谁在什么时候做了什么：人的操作、AI 帅位的调整、引擎的动作，只追加、不改、不删。先记后做，没做成的另记一条。"
+      description={`谁在什么时候做了什么：人的操作、${brand.terms.marshal}的调整、引擎的动作，只追加、不改、不删。先记后做，没做成的另记一条。`}
     >
       <div className="mb-4 flex flex-wrap items-center gap-2">
         <div

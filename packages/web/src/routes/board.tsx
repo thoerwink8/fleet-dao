@@ -1,6 +1,7 @@
 import { FolderGit2, TriangleAlert } from 'lucide-react';
 import { lazy, Suspense } from 'react';
 import { useSearchParams } from 'react-router';
+import { brand } from '#brand';
 import { errorText, useBoard, useMe } from '../api/client';
 import { BoardTree } from '../board/board-tree';
 import { Empty, LoadError } from '../components/page';
@@ -14,7 +15,7 @@ import { useIsMobile, useNow } from '../lib/hooks';
 const BoardCanvas = lazy(() => import('../board/board-canvas').then((m) => ({ default: m.BoardCanvas })));
 
 export function meta() {
-  return [{ title: '看板 · fleet-dao 驾驶舱' }];
+  return [{ title: brand.title('看板') }];
 }
 
 function BoardSkeleton() {

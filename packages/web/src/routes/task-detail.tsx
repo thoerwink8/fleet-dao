@@ -10,6 +10,7 @@ import {
   MessageCircleQuestion,
 } from 'lucide-react';
 import { Link, useParams, useSearchParams } from 'react-router';
+import { brand } from '#brand';
 import {
   errorText,
   useBoard,
@@ -22,10 +23,13 @@ import {
 import type { Ask, BoardSubtask, BoardTask, Routing, Run, TaskDetail, TimelineItem } from '../api/types';
 import { LogStream } from '../components/log-stream';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
+import { RepoLink, repoHref } from '../components/repo-link';
 import { RunTimeline } from '../components/run-timeline';
 import { StatusChip, StatusDot, ToneBar } from '../components/status';
 import { ActionButtons, targetOf, useTaskActions } from '../components/task-actions';
 import { Button } from '../components/ui/button';
+import { canSeeDetail } from '../demo/access';
+import { HiddenNote } from '../demo/views';
 import { stageLabel } from '../lib/catalog';
 import { formatAgo, formatCount, formatDuration, formatUsd, span } from '../lib/format';
 import { useNow } from '../lib/hooks';
@@ -50,7 +54,7 @@ import {
 import { cn } from '../lib/utils';
 
 export function meta() {
-  return [{ title: '任务详情 · fleet-dao 驾驶舱' }];
+  return [{ title: brand.title('任务详情') }];
 }
 
 /** 「需求级」那一栏的编号（分诊、需求文档、方案这些不属于子任务的会话）。 */
@@ -138,7 +142,7 @@ export default function TaskDetailPage() {
   const items = timeline.data?.pages.flatMap((p) => p.items) ?? [];
   const pendingAsks = d.asks.filter((a) => a.status === 'pending');
   const answeredAsks = d.asks.filter((a) => a.status === 'answered');
-  const issueUrl = `https://github.com/${d.repo.owner}/${d.repo.name}/issues/${d.task.issueNumber}`;
+  const issueUrl = repoHref(d.repo, 'issues', d.task.issueNumber);
 
   const selectTab = (id: string) => {
     const p = new URLSearchParams(params);
@@ -184,14 +188,16 @@ export default function TaskDetailPage() {
         <span>
           优先级 <span className="num text-foreground">P{d.task.priority}</span>
         </span>
-        <a
-          href={issueUrl}
-          target="_blank"
-          rel="noreferrer"
-          className="inline-flex items-center gap-1 hover:text-foreground"
-        >
-          GitHub issue <ExternalLink className="size-3" />
-        </a>
+        {issueUrl ? (
+          <a
+            href={issueUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center gap-1 hover:text-foreground"
+          >
+            GitHub issue <ExternalLink className="size-3" />
+          </a>
+        ) : null}
         {d.task.specDir ? (
           <span className="inline-flex items-center gap-1">
             <FileText className="size-3" />
@@ -247,11 +253,15 @@ export default function TaskDetailPage() {
 
         <div className="space-y-4">
           <Panel title="原话">
-            <blockquote className="rounded-lg border-l-2 border-border-strong bg-muted/60 px-3 py-2 text-sm whitespace-pre-wrap">
-              {d.task.rawRequest}
-            </blockquote>
+            {canSeeDetail('process') ? (
+              <blockquote className="rounded-lg border-l-2 border-border-strong bg-muted/60 px-3 py-2 text-sm whitespace-pre-wrap">
+                {d.task.rawRequest}
+              </blockquote>
+            ) : (
+              <HiddenNote what="需求的原话" />
+            )}
           </Panel>
-          {answeredAsks.length ? (
+          {answeredAsks.length && canSeeDetail('process') ? (
             <Panel title="问答记录" description="AI 问过你的、你怎么答的。">
               <ul className="space-y-3">
                 {answeredAsks.map((a) => (
@@ -442,7 +452,11 @@ function FrontSection({
         description="需求级的记录：分诊、写需求文档、写方案，以及人做的操作。"
         bodyClassName="p-3"
       >
-        <LogStream items={own} runs={runs} live={runs.some(isRunning)} {...paging} />
+        {canSeeDetail('process') ? (
+          <LogStream items={own} runs={runs} live={runs.some(isRunning)} {...paging} />
+        ) : (
+          <HiddenNote what="过程日志" />
+        )}
       </Panel>
     </>
   );
@@ -501,7 +515,9 @@ function SubtaskSection({
                 </span>
               ) : null}
             </div>
-            {list.length ? (
+            {!canSeeDetail('process') ? (
+              <HiddenNote what="步骤清单" />
+            ) : list.length ? (
               <>
                 <ToneBar value={done / list.length} tone={tone} live={tone === 'run'} className="mb-3" />
                 <ol className="space-y-1.5">
@@ -555,7 +571,9 @@ function SubtaskSection({
           <div className="space-y-4">
             <div>
               <div className="mb-2 text-xs text-muted-foreground">会改的地方</div>
-              {s.touches.length ? (
+              {!canSeeDetail('process') ? (
+                <HiddenNote what="要改的文件" />
+              ) : s.touches.length ? (
                 <ul className="space-y-1">
                   {s.touches.map((p) => (
                     <li key={p} className="num flex items-center gap-1.5 truncate text-xs">
@@ -574,17 +592,17 @@ function SubtaskSection({
             {s.prNumber ? (
               <div>
                 <div className="mb-2 text-xs text-muted-foreground">PR</div>
-                <a
-                  href={`https://github.com/${d.repo.owner}/${d.repo.name}/pull/${s.prNumber}`}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex items-center gap-2 text-sm hover:underline"
+                <RepoLink
+                  repo={d.repo}
+                  kind="pull"
+                  n={s.prNumber}
+                  className="inline-flex items-center gap-2 text-sm [&[href]]:hover:underline"
+                  icon={<ExternalLink className="size-3 text-muted-foreground" />}
                 >
                   <GitPullRequest className="size-4 text-muted-foreground" aria-hidden />
                   <span className="num font-medium">#{s.prNumber}</span>
                   <span className="text-muted-foreground">{subtaskStateLabel[s.state]}</span>
-                  <ExternalLink className="size-3 text-muted-foreground" />
-                </a>
+                </RepoLink>
               </div>
             ) : null}
           </div>
@@ -600,7 +618,11 @@ function SubtaskSection({
         description="助手每一步在干什么：读了哪些文件、改了哪里、跑了哪些测试。"
         bodyClassName="p-3"
       >
-        <LogStream items={own} runs={runs} live={runs.some(isRunning)} {...paging} />
+        {canSeeDetail('process') ? (
+          <LogStream items={own} runs={runs} live={runs.some(isRunning)} {...paging} />
+        ) : (
+          <HiddenNote what="过程日志" />
+        )}
       </Panel>
     </>
   );

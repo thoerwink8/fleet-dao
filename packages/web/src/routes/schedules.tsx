@@ -1,4 +1,5 @@
 import { CalendarClock, CircleX, ScanSearch, TimerOff } from 'lucide-react';
+import { brand } from '#brand';
 import { useJobs } from '../api/client';
 import type { JobView } from '../api/types';
 import { Empty, LoadError, LoadingRows, Page, Panel, Stat } from '../components/page';
@@ -10,7 +11,7 @@ import { everyText, jobStatusLabel, outcomeText } from '../lib/schedule';
 import { cn } from '../lib/utils';
 
 export function meta() {
-  return [{ title: '定时任务 · fleet-dao 驾驶舱' }];
+  return [{ title: brand.title('定时任务') }];
 }
 
 /** 一行该用什么颜色提醒：失败红，没查成、只查了一部分、过期黄。 */

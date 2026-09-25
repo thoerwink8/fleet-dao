@@ -3,18 +3,18 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { type RenderResult, render } from '@testing-library/react';
 import type { ReactElement } from 'react';
 import { MemoryRouter } from 'react-router';
-import { ApiProvider } from '../api/client';
+import { ApiProvider, type FleetApi } from '../api/client';
 import { createMockApi, type MockApi } from '../api/mock/server';
 import { RepoProvider } from '../components/repo-context';
 import { TaskActionsProvider } from '../components/task-actions';
 import { ThemeProvider } from '../components/theme-provider';
 import { TooltipProvider } from '../components/ui/tooltip';
 
-export function renderApp(
+export function renderApp<A extends FleetApi = MockApi>(
   ui: ReactElement,
-  opts: { api?: MockApi; route?: string } = {},
-): RenderResult & { api: MockApi; qc: QueryClient } {
-  const api = opts.api ?? createMockApi({ live: false });
+  opts: { api?: A; route?: string } = {},
+): RenderResult & { api: A; qc: QueryClient } {
+  const api = opts.api ?? (createMockApi({ live: false }) as FleetApi as A);
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 0 } } });
   const view = render(
     <MemoryRouter initialEntries={[opts.route ?? '/']}>
