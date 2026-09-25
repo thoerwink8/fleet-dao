@@ -63,7 +63,7 @@ export interface RouteRecord {
 
 /**
  * 主池 / 备池。独享号是主池，拼车号是备池：备池只接短而轻的活、并发另有上限、剩余不够跑一个活就不派，
- * 额度未知时只放一个试探。端口按池的 orgKind 填（carpool → backup），别的渠道默认 primary。
+ * 额度未知时只放一个试探。端口按池的会话用户填（pools.run_as_user = fleet-agent-carpool → backup），其余 primary。
  */
 export type PoolRole = 'primary' | 'backup';
 
