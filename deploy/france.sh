@@ -643,7 +643,7 @@ agents_sync() { # 模式 用户
       said=1
       if [[ "$mode" == --check ]]; then pending "$u ${line#  … }"; else printf '  … %s %s\n' "$u" "${line#  … }"; fi
       ;;
-    '  ✓ '*) if [[ "$mode" == --check ]]; then ok "$u ${line#  ✓ }"; fi ;;
+    '  ✓ '*) ok "$u ${line#  ✓ }" ;;
     '  · '*) if [[ "$mode" == --check ]]; then printf '  · %s %s\n' "$u" "${line#  · }"; fi ;;
     esac
   done <<<"$out"
