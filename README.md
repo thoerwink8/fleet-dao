@@ -24,6 +24,7 @@
 | `packages/adapters` | 渠道插头：无头起各家写码助手、读过程记录；各渠道的额度读取 |
 | `packages/cli` | `fleet` 命令：AI 会话汇报进度、提问、交活 |
 | `packages/api` | 驾驶舱后端：登录、接口、实时推送、给工作流发信号、fleet 命令接口、收 GitHub 事件 |
+| `packages/web` | 驾驶舱前端：看板和后台管理页面 |
 | `packages/github` | 引擎对 GitHub 的读写：推分支、开 PR、等 CI、合并、issue 进度段与关单、对账补漏 |
 | `packages/jev` | Jev 判断题服务：题库、提问接口、从只记不拦转到真拦 |
 | `packages/feishu` | 飞书网关（跑在香港） |
