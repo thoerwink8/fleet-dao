@@ -216,13 +216,21 @@ describe('没有 skill、清单读不懂', () => {
 
   it('清单里的名字带路径（../../.ssh、a/b、..）：读不懂，写的时候一个都不撤——不许顺着名字删到 skill 目录外面', () => {
     for (const bad of ['../../.ssh', 'a/b', 'a\\b', '..', '.', '']) {
-      const file = put(tempDir('m'), 'agents-sync.json', JSON.stringify({ skills: { '.claude/skills': [bad] } }));
+      const file = put(
+        tempDir('m'),
+        'agents-sync.json',
+        JSON.stringify({ skills: { '.claude/skills': [bad] } }),
+      );
       const read = readManifest(file);
       expect(read.ok, bad).toBe(false);
     }
     const m = machine(null);
     put(m.home, '.ssh/id_test', '别删我\n');
-    put(m.home, '.fleet-dao/agents-sync.json', JSON.stringify({ skills: { '.claude/skills': ['../../.ssh'] } }));
+    put(
+      m.home,
+      '.fleet-dao/agents-sync.json',
+      JSON.stringify({ skills: { '.claude/skills': ['../../.ssh'] } }),
+    );
     const applied = m.apply();
     expect(applied.map((l) => l.kind)).toEqual(['failed']);
     expect(get(m.home, '.ssh/id_test')).toBe('别删我\n');
