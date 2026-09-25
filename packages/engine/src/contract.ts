@@ -16,23 +16,12 @@ export const WORKFLOW_TYPES = {
   hello: 'helloWorkflow',
 } as const;
 
-/** 一张 issue 一条需求工作流，例如 `req:acme/demo#12`。驾驶舱后端发信号按它找。 */
-export function requirementWorkflowId(repo: Pick<Repo, 'owner' | 'name'>, issueNumber: number): string {
-  return `req:${repo.owner}/${repo.name}#${issueNumber}`;
-}
-
-/**
- * 子任务工作流编号 = `sub:<subtasks.id>`。后端手里有 session_runs.subtask_id 就拼得出来，不用查别的；
- * subtasks.id 每次拆方案新生成，需求重开也不会和上一轮已关闭的子任务撞编号。
- */
-export function subtaskWorkflowId(subtaskId: string): string {
-  return `sub:${subtaskId}`;
-}
-
-/** 每个仓一条合并队列，例如 `mq:acme/demo`。 */
-export function mergeQueueWorkflowId(repo: Pick<Repo, 'owner' | 'name'>): string {
-  return `mq:${repo.owner}/${repo.name}`;
-}
+// 编号的拼法和驾驶舱后端共用一份（@fleet-dao/shared/workflow-ids）：后端按它给会话所属的工作流发叫醒。
+export {
+  mergeQueueWorkflowId,
+  requirementWorkflowId,
+  subtaskWorkflowId,
+} from '@fleet-dao/shared/workflow-ids';
 
 export function subtaskBranch(issueNumber: number, key: string): string {
   return `fleet/${issueNumber}-${key}`;
