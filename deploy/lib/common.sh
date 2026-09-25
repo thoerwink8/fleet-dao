@@ -325,6 +325,12 @@ wait_active() { # 单元 次数
   return 1
 }
 
+# 法国往香港传驾驶舱静态文件用的 ssh（france.sh 的读回和 release.sh 同一套）：只用那一把钥匙、只认钉住的主机钥匙、
+# 不交互。香港那头把这把钥匙限死成 rrsync -wo -munge /srv/fleet-dao-web，只许从隧道地址来（hk.sh）。
+web_upload_ssh() { # 私钥 known_hosts
+  printf 'ssh -i %s -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=%s -o ConnectTimeout=10' "$1" "$2"
+}
+
 # 谁在监听这个端口：打印进程号（空格分隔；没人听就空）。协议 tcp 或 udp。
 port_pids() { # 协议 端口
   local flag=-ltnp
@@ -341,7 +347,7 @@ port_in_use() { # 协议 端口
 
 # ── 两台共用的读回与自检（要先 source snapshot.sh 与 root-exec-check.sh）──
 
-# /etc/fleet-dao 放密钥：只有 root 和 fleet 读得到；旧系统的 orca 用户读不到。
+# /etc/fleet-dao 放密钥：只有 root 和 fleet 读得到；会话用户、旧系统的用户和别的能登录的用户都读不到。
 readback_secrets_dir() {
   local members
   if [[ "$(stat -c '%U:%G %a' /etc/fleet-dao 2>/dev/null)" == "root:fleet 750" ]]; then
@@ -355,15 +361,20 @@ readback_secrets_dir() {
   else
     ok "组 fleet 没有附加成员"
   fi
-  local u
-  for u in orca "${SESSION_USERS[@]}"; do
-    id "$u" >/dev/null 2>&1 || continue
-    if runuser -u "$u" -- ls /etc/fleet-dao >/dev/null 2>&1; then
-      red "$u 读得到 /etc/fleet-dao"
-    else
-      ok "$u 读不到 /etc/fleet-dao"
-    fi
-  done
+  # 真以每个能登录的用户（有 shell 的，root 和 fleet 除外；会话用户、旧系统的用户都在里面）去读一次。
+  # 名单现场从 passwd 取，不把旧系统的用户名写进公开仓
+  local u tried=0 leaked=""
+  while IFS= read -r u; do
+    tried=$((tried + 1))
+    if runuser -u "$u" -- ls /etc/fleet-dao >/dev/null 2>&1; then leaked+=" $u"; fi
+  done < <(getent passwd | awk -F: '$1 != "root" && $1 != "fleet" && $7 != "" && $7 !~ /(nologin|false)$/ { print $1 }')
+  if ((tried == 0)); then
+    pending "passwd 里没读到能登录的用户，/etc/fleet-dao 谁读得到这项没查成"
+  elif [[ -n "$leaked" ]]; then
+    red "这些用户读得到 /etc/fleet-dao：${leaked# }"
+  else
+    ok "能登录的 $tried 个用户（root、fleet 除外）都读不到 /etc/fleet-dao"
+  fi
   # 里面每个文件（手放进来的密钥也算）：属 root，组只许读，其他人什么都不许
   local f bad=0 n=0 mode
   while IFS= read -r -d '' f; do

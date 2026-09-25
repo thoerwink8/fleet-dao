@@ -1,0 +1,41 @@
+# fleet-dao 驾驶舱后端：一个进程两个监听——驾驶舱接口（隧道地址 10.99.0.2:8787，香港经它转 /api、/auth、
+# /github/webhook、/healthz）与 fleet 命令接口（127.0.0.1:8788，只给本机的 AI 会话）。
+# deploy/release.sh 从要发布的那个提交里取这份，装到 /etc/systemd/system/；改这份、再发布一次，别在机器上手改。
+# 本机配置：/etc/fleet-dao/api.env（样例 deploy/france/api.env.example），密钥在 france.sh 生成的三个文件里。
+[Unit]
+Description=fleet-dao 驾驶舱后端（驾驶舱接口 + fleet 命令接口）
+Documentation=https://github.com/thoerwink8/fleet-dao/blob/main/docs/ops.md
+# 驾驶舱接口听隧道地址：隧道没起时绑不上，退出后按 Restart 重试，隧道起来就绑上了
+After=network-online.target wg-quick@wg-fleet.service postgresql@16-main.service fleet-temporal.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=fleet
+Group=fleet
+WorkingDirectory=/srv/fleet-dao-releases/current
+EnvironmentFile=/etc/fleet-dao/agent-token.env
+EnvironmentFile=/etc/fleet-dao/session-secret.env
+EnvironmentFile=/etc/fleet-dao/gateway-token.env
+EnvironmentFile=/etc/fleet-dao/api.env
+ExecStart=/usr/bin/node /srv/fleet-dao-releases/current/packages/api/src/main.ts
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+LimitNOFILE=65536
+# 后端不起子进程，可以收紧（引擎不行，见 fleet-engine.service）
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

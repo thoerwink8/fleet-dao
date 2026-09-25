@@ -1,18 +1,21 @@
 // 起一个无头执行体进程：提示词从 stdin 喂完立即关，stdout 按行交给解析方；超时、停滞、叫停时整个会话一起杀。
-// 「整个会话」= 执行体、它的子孙、它们各自的进程组、带会话标记的进程；有 systemd scope 时以 cgroup 为准。
+// 「整个会话」= 执行体、它的子孙、它们各自的进程组、带会话标记的进程；放进 scope（fleet-agent-scope）时以 cgroup 为准。
 // 执行体退出后会话里还活着的（后台服务、脱离了进程组的测试）一律收掉：谁起的谁回收，不留孤儿占树。
 import { spawn, spawnSync } from 'node:child_process';
 import { basename } from 'node:path';
 import { LineSplitter } from './lines.ts';
 import {
+  assertScopeInProduction,
   type CgroupScope,
   HAS_PROC,
-  killScope,
   RUN_MARKER_KEY,
   reapSession,
+  scopeLaunch,
   scopePrefix,
+  scopeUnit,
   sessionProcs,
   signalProcs,
+  stopScope,
 } from './procs.ts';
 import type { KillReason } from './types.ts';
 
@@ -44,7 +47,12 @@ export interface AgentProcessSpec {
   limits: ProcessLimits;
   /** 会话编号：写进环境当标记（FLEET_RUN_ID），收尸时按它认出脱离了进程组的子孙。 */
   runId: string;
-  /** 放进 systemd scope 做资源记账和收尸。起它的用户要有建 scope 的权限。 */
+  /**
+   * 经 fleet-agent-scope 以会话专用用户的身份放进它自己的 scope（资源记账、收尸以 cgroup 为准）。生产配置下必须给
+   * （见 assertScopeInProduction），不给就不起。命令要写绝对路径；
+   * 环境里 FLEET_* 这几类经 sudo 的环境传，PATH 改名 FLEET_SESSION_PATH，白名单里的执行体开关写成 /usr/bin/env 的参数，
+   * 别的一律拒（见 scopeLaunch）。
+   */
   scope?: CgroupScope;
   signal?: AbortSignal;
 }
@@ -59,13 +67,15 @@ export interface ProcessControl {
 export interface SpawnInfo {
   pid: number;
   runId: string;
-  /** scope 单元全名，例如 fleet-run-x.scope。 */
+  /** scope 单元全名，例如 fleet-agent-x.scope。 */
   scope?: string;
   startedAt: string;
 }
 
 export interface AgentProcessHooks {
   onLine(line: string, control: ProcessControl): void;
+  /** stdout 的原样字节（读文件用：按行切会吃掉 \r 和末尾的换行）。给了也照样按行交给 onLine。 */
+  onStdout?(chunk: Buffer): void;
   /** 有工具正在跑（比如一轮测试跑十几分钟）时返回 true，这段时间不算停滞。 */
   busy?(): boolean;
   onSpawn?(info: SpawnInfo): void;
@@ -135,6 +145,28 @@ export function guardCallback(
   return undefined;
 }
 
+/** 真正要起的命令、环境、工作目录：放进 scope 时前面接上帮手脚本，环境按它的规矩拆。 */
+function launchSpec(spec: AgentProcessSpec): { command: string[]; env: Record<string, string>; cwd: string } {
+  if (spec.command.length === 0 || !spec.command[0]) throw new Error('没有给命令');
+  const env = { ...spec.env, [RUN_MARKER_KEY]: spec.runId };
+  if (!spec.scope) {
+    assertScopeInProduction(spec.scope);
+    return { command: [...spec.command], env, cwd: spec.cwd };
+  }
+  if (!spec.command[0].startsWith('/')) throw new Error(`放进 scope 的命令要写绝对路径：${spec.command[0]}`);
+  const { sudoEnv, envArgs } = scopeLaunch(env);
+  return {
+    command: [
+      ...scopePrefix(spec.scope, spec.cwd),
+      ...(envArgs.length ? ['/usr/bin/env', ...envArgs] : []),
+      ...spec.command,
+    ],
+    env: sudoEnv,
+    // 帮手先以会话用户的身份进工作目录；引擎自己不一定进得去
+    cwd: '/',
+  };
+}
+
 export function runAgentProcess(
   spec: AgentProcessSpec,
   hooks: AgentProcessHooks,
@@ -175,7 +207,7 @@ export function runAgentProcess(
         ...(killed ? { killed } : {}),
         stragglers: reaped?.stragglers ?? 0,
         leftovers: reaped?.leftovers,
-        // 以清空为准：收干净了，中途 systemctl 报的错（scope 正在拆时的 EINVAL）不算数
+        // 以清空为准：收干净了，中途帮手、systemctl 报的错不算数
         ...(reapErrors.length && reaped?.leftovers !== 0 ? { reapError: reapErrors.join('；') } : {}),
         stderrTail,
         startedAt,
@@ -213,26 +245,33 @@ export function runAgentProcess(
       return;
     }
 
-    const command = [...(spec.scope ? scopePrefix(spec.scope) : []), ...spec.command];
-    const [bin, ...args] = command;
-    if (!bin || spec.command.length === 0) {
-      finish({ spawnError: '没有给命令' });
+    let launch: { command: string[]; env: Record<string, string>; cwd: string };
+    try {
+      launch = launchSpec(spec);
+    } catch (err) {
+      reaped = { stragglers: 0, leftovers: 0 };
+      finish({ spawnError: err instanceof Error ? err.message : String(err) });
       return;
     }
-    const child = spawn(bin, args, {
-      cwd: spec.cwd,
-      env: { ...spec.env, [RUN_MARKER_KEY]: spec.runId },
+    const [bin, ...args] = launch.command;
+    const child = spawn(bin as string, args, {
+      cwd: launch.cwd,
+      env: launch.env,
       stdio: ['pipe', 'pipe', 'pipe'],
       // 自成一个进程组；子孙靠 /proc 和会话标记另外认
       detached: posix,
       windowsHide: true,
     });
 
+    /** 经帮手收 scope 的那一下：收尸要等它落定（systemctl stop 收完才返回），报告里才有它的错。 */
+    let scopeStop: Promise<void> | undefined;
     function terminate(sig: NodeJS.Signals) {
       const pid = child.pid;
-      if (spec.scope) {
-        const err = killScope(spec.scope, sig);
-        if (err) reapErrors.push(err);
+      if (spec.scope && !scopeStop) {
+        // 会话用户的进程引擎发不了信号：整个 scope 经帮手收（它自己先 SIGTERM、到点 SIGKILL）
+        scopeStop = stopScope(spec.scope).then((err) => {
+          if (err) reapErrors.push(err);
+        });
       }
       if (pid === undefined) return;
       if (!posix) {
@@ -270,7 +309,7 @@ export function runAgentProcess(
       const info: SpawnInfo = {
         pid: child.pid,
         runId: spec.runId,
-        ...(spec.scope ? { scope: `${spec.scope.unit}.scope` } : {}),
+        ...(spec.scope ? { scope: scopeUnit(spec.scope) } : {}),
         startedAt,
       };
       guardCallback(() => hooks.onSpawn?.(info), record);
@@ -280,6 +319,13 @@ export function runAgentProcess(
     });
     child.stdin.end(spec.stdin);
     child.stdout.on('data', (chunk: Buffer) => {
+      if (hooks.onStdout) {
+        try {
+          hooks.onStdout(chunk);
+        } catch (err) {
+          record(err);
+        }
+      }
       for (const line of splitter.push(chunk)) handleLine(line);
     });
     child.stderr.on('data', (chunk: Buffer) => {
@@ -294,25 +340,29 @@ export function runAgentProcess(
         return;
       }
       // 执行体退了：会话里还活着的一律收掉；它们握着 stdout 的话 close 永远等不来
-      void reapSession({
-        runId: spec.runId,
-        ...(spec.scope ? { scope: spec.scope } : {}),
-        ...(child.pid === undefined ? {} : { rootPid: child.pid }),
-        extra: snapshot,
-        graceMs: spec.limits.killGraceMs,
-      }).then(
-        (r) => {
-          reaped = { stragglers: r.found, leftovers: r.leftovers };
-          if (r.error) reapErrors.push(r.error);
-          timers.push(setTimeout(() => finish(), 2_000));
-          maybeFinish();
-        },
-        (err: unknown) => {
-          reaped = { stragglers: 0, leftovers: undefined };
-          reapErrors.push(String(err));
-          finish();
-        },
-      );
+      void Promise.resolve(scopeStop)
+        .then(() =>
+          reapSession({
+            runId: spec.runId,
+            ...(spec.scope ? { scope: spec.scope } : {}),
+            ...(child.pid === undefined ? {} : { rootPid: child.pid }),
+            extra: snapshot,
+            graceMs: spec.limits.killGraceMs,
+          }),
+        )
+        .then(
+          (r) => {
+            reaped = { stragglers: r.found, leftovers: r.leftovers };
+            if (r.error) reapErrors.push(r.error);
+            timers.push(setTimeout(() => finish(), 2_000));
+            maybeFinish();
+          },
+          (err: unknown) => {
+            reaped = { stragglers: 0, leftovers: undefined };
+            reapErrors.push(String(err));
+            finish();
+          },
+        );
     });
     child.on('close', () => {
       closed = true;

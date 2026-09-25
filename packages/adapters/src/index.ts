@@ -1,4 +1,6 @@
 // 渠道插头：各家写码助手的无头启动与过程记录解析
+
+export * from './channels.ts';
 export * from './claude-code/args.ts';
 export * from './claude-code/run.ts';
 export * from './claude-code/stream.ts';

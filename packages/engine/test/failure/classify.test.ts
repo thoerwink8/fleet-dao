@@ -1,4 +1,5 @@
 // 分流的行为：梯子怎么往下走、次数怎么封顶、认不出的怎么办、Jev 能碰什么、路由病了和原文重复时怎么跳。全是纯函数，不出网。
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
   type AttemptCounters,
@@ -375,6 +376,115 @@ describe('喂熔断：哪些算路由的失败', () => {
     // 连为什么都不知道，不能拿它判一条路由坏了（errors.md 第 8 节第 11 条）。
     expect(outcome({ code: 'failed' })).toBe('neutral');
     expect(classifyFailure({ source: 'openPr', message: 'odd' }).routeOutcome).toBe('neutral');
+  });
+});
+
+describe('插头没查成的：再起一个会话就可能跑两遍，只挂起报警', () => {
+  const launch = (stray?: string) =>
+    `起会话没查成：prompt 发出去了，没等到应答${
+      stray ? `（收到过一条认不出是冲这一针来的报错：${stray}）` : ''
+    }。它可能已经在跑——别重发（会烧两次额度），按工作目录和起针时间去 ~/.mirasim/sessions 对账`;
+  const parked = (v: FailureVerdict | undefined) => ({
+    rule: v?.rule,
+    action: v?.action,
+    alert: v?.alert,
+    routeOutcome: v?.routeOutcome,
+    counter: v?.counter,
+  });
+
+  it('起会话没查成：头一步就挂起报警，一次也不原路重派、不换路由；不记路由的失败', () => {
+    const { trail, last } = drive(session({ hostId: 'mirasim', code: 'launch_unknown', message: launch() }));
+    expect(trail).toEqual(['park']);
+    expect(parked(last)).toEqual({
+      rule: 'ST2',
+      action: 'park',
+      alert: true,
+      routeOutcome: 'neutral',
+      counter: null,
+    });
+    // 旧系统同一件事的原文（不带码）：起没起成同样不知道，也不重试
+    const old = drive(
+      session({ hostId: 'mirasim', message: '起会话没查成：没收到 prompt 的应答帧（没查成）' }),
+    );
+    expect(old.trail).toEqual(['park']);
+    expect(parked(old.last)).toEqual({
+      rule: 'ST2',
+      action: 'park',
+      alert: true,
+      routeOutcome: 'neutral',
+      counter: null,
+    });
+  });
+
+  it('原话里夹着等应答时收到的别的报错：没有码时它们各归各的规则，有 launch_unknown 就压得过（尤其是繁忙 BZ1）', () => {
+    const cases: [string, string][] = [
+      ['Selected model is at capacity', 'BZ1'],
+      ['{"type":"error","code":"overloaded_error"}', 'BZ1'],
+      ['{"error":{"code":"account_banned","message":"当前绑定账号暂不可用"}}', 'AU1'],
+      ['429 Too Many Requests', 'RL3'],
+    ];
+    for (const [stray, without] of cases) {
+      const message = launch(stray);
+      expect(classifyFailure(session({ hostId: 'mirasim', message })).rule).toBe(without);
+      const v = classifyFailure(session({ hostId: 'mirasim', code: 'launch_unknown', message }));
+      expect(parked(v)).toEqual({
+        rule: 'ST2',
+        action: 'park',
+        alert: true,
+        routeOutcome: 'neutral',
+        counter: null,
+      });
+    }
+  });
+
+  it('中转没查成：活可能已经交了，不重跑、不换路由，挂起报警；和交付没查成（重查交付）分开', () => {
+    for (const message of [
+      '中转没查成：账本没读成：账本里没有这个会话的目录（可能一次上游调用都没有，也可能账本换了地方）',
+      '中转没查成：没给账本目录，上游有没有真的干活核实不了',
+    ]) {
+      const { trail, last } = drive(session({ hostId: 'mirasim', code: 'relay_unknown', message }));
+      expect(trail).toEqual(['park']);
+      expect(parked(last)).toEqual({
+        rule: 'DL3',
+        action: 'park',
+        alert: true,
+        routeOutcome: 'neutral',
+        counter: null,
+      });
+    }
+    expect(classifyFailure(session({ code: 'delivery_unknown' })).action).toBe('retry');
+  });
+
+  it('测试输出里出现这两个码、旧系统那句原文（fleet-dao 自己的测试里满是）：带不带 CI 红的码都判 TS1 返工，不挂起', () => {
+    // 两份真 vitest 失败输出（夹具 X60、X61）；先确认样本里真有这些字样，免得测的是空话
+    const samples = JSON.parse(
+      readFileSync(new URL('./fixtures/failure-samples.json', import.meta.url), 'utf8'),
+    ) as { samples: { id: string; evidence: FailureEvidence }[] };
+    const output = (id: string) => samples.samples.find((s) => s.id === id)?.evidence.message ?? '';
+    expect(['launch_unknown', 'relay_unknown'].filter((w) => output('X60').includes(w))).toHaveLength(2);
+    expect(output('X61')).toContain('没收到 prompt 的应答帧');
+    for (const id of ['X60', 'X61']) {
+      for (const code of ['checks_failed', 'checks-failed', undefined]) {
+        const v = classifyFailure({
+          source: 'waitCi',
+          routeBound: false,
+          ...(code ? { code } : {}),
+          message: output(id),
+          now: NOW,
+        });
+        expect({ id, code, rule: v.rule, action: v.action, counter: v.counter, alert: v.alert }).toEqual({
+          id,
+          code,
+          rule: 'TS1',
+          action: 'retry',
+          counter: 'reworks',
+          alert: false,
+        });
+      }
+    }
+    // 插头交来的结构化码照样认：原文里有什么都压得过
+    expect(classifyFailure(session({ code: 'launch_unknown', message: output('X60') })).rule).toBe('ST2');
+    expect(classifyFailure(session({ code: 'relay_unknown', message: output('X60') })).rule).toBe('DL3');
   });
 });
 

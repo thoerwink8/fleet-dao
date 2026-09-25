@@ -6,6 +6,7 @@ import type { ProgressEvent } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import {
   type ClaudeCodeRunSpec,
+  claudeRunSummary,
   DEFAULT_BASH_TIMEOUT_MS,
   judgeClaudeRun,
   MIN_CLAUDE_VERSION,
@@ -84,6 +85,22 @@ describe('runClaudeCode', { timeout: 30_000 }, () => {
     expect(report.stream.result?.isError).toBe(false);
     expect(report.lines).toBe(fixtureLines('claude-code', 'cc-haiku-edit').length);
     expect(judgeClaudeRun(report)).toEqual({ outcome: 'ok', reason: 'answered', detail: '正常结束' });
+  });
+
+  it('统一摘要：实际模型、会话号、本轮用量；续会话不给上一轮就不带花费（终帧是累计值）', async () => {
+    const run = (name: string, session: ClaudeCodeRunSpec['session']) =>
+      runClaudeCode(spec(name, { session }), {
+        command: fakeAgent({ replay: fixturePath('claude-code', name) }),
+      });
+    const id = fixtureInit('cc-haiku-resume-a').sessionId;
+    const a = await run('cc-haiku-resume-a', { mode: 'new', id });
+    const b = await run('cc-haiku-resume-b', { mode: 'resume', id });
+    const first = claudeRunSummary(a);
+    expect(first).toMatchObject({ actualModel: expect.stringContaining('haiku'), sessionId: id });
+    expect(first.usage.costUsd).toBe(a.stream.result?.sessionCostUsd);
+    expect(first.usage.inputTokens).toBeGreaterThan(0);
+    expect(claudeRunSummary(b).usage).not.toHaveProperty('costUsd');
+    expect(claudeRunSummary(b, a.stream.result).usage.costUsd).toBeCloseTo(0.0026985, 7);
   });
 
   it('实际回话的模型不是点名的那个：读到第一条真实回复就停', async () => {

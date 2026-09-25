@@ -1,0 +1,26 @@
+{
+  "name": "cursor-edit-tools",
+  "cmd": [
+    "cursor-agent",
+    "-p",
+    "--output-format",
+    "stream-json",
+    "--force",
+    "--trust",
+    "--model",
+    "auto",
+    "--workspace",
+    "/tmp/agent-io-p3/c-tools"
+  ],
+  "cwd": "/tmp/agent-io-p3/c-tools",
+  "exitCode": 0,
+  "signal": null,
+  "wallMs": 26672,
+  "firstStdoutMs": 13872,
+  "firstStderrMs": null,
+  "lineTimesMs": [
+    13872, 13872, 17436, 17600, 18005, 18010, 18487, 18487, 18535, 19702, 20335, 22066, 22070, 22070, 22070,
+    22070, 24567, 26370, 26370, 26370, 26469, 26469
+  ],
+  "trailingPartial": 0
+}

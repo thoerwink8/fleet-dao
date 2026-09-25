@@ -1,6 +1,6 @@
 // 真跑验收：经 reclaude 起两轮极小的会话，走插头的全部代码路径——
 // 第一轮改文件并提交，判交付；第二轮续同一个会话，问第一轮的提交信息，证明上下文真的接上了。
-// 在法国 VPS 上以执行体用户跑：node packages/adapters/test/e2e/claude-e2e.ts <reclaude 绝对路径> [模型]
+// 在法国 VPS 上以登录好的会话用户跑（不进 scope）：FLEET_ENV=development node packages/adapters/test/e2e/claude-e2e.ts <reclaude 绝对路径> [模型]
 // 花一点订阅额度（默认 haiku，两轮）；只动临时目录，不碰任何配置。
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';

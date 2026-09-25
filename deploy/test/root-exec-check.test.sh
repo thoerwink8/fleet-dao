@@ -70,7 +70,7 @@ SHOW=$T/show.txt
   unit workdir.service loaded "" no "$T/opendir"
   exec_line ExecStartEx "$T/ok/bin/tool" "$T/ok/bin/tool" ""
   echo
-  unit privileged-in-nonroot.service loaded orca no ""
+  unit privileged-in-nonroot.service loaded someone no ""
   exec_line ExecStartPreEx /usr/bin/node "/usr/bin/node $T/world/app.mjs" privileged
   exec_line ExecStartEx /usr/bin/node "/usr/bin/node $T/ok/app.mjs" ""
   echo
@@ -81,7 +81,7 @@ SHOW=$T/show.txt
   unit data-arg.service loaded "" no ""
   exec_line ExecStartPreEx /usr/bin/savelog "/usr/bin/savelog -q $T/logs/data.log" ignore-failure
   echo
-  unit nonroot.service loaded orca no ""
+  unit nonroot.service loaded someone no ""
   exec_line ExecStartEx /usr/bin/node "/usr/bin/node $T/world/app.mjs" ""
   echo
   unit dynamic.service loaded "" yes ""
