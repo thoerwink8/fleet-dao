@@ -153,11 +153,12 @@ function backupBlocks(route: RouteFacts, ctx: FilterContext): Block[] {
       until: null,
     });
   }
-  if (probe !== null || route.blockers.includes('quota-exhausted')) return out;
+  if (route.blockers.includes('quota-exhausted')) return out;
+  // 额度未知时也照样看读到了的窗口（池级读数过期，但会话里顺手读到的窗口还新）：知道不够就等它清零，不拿试探去撞。
   for (const w of route.windows) {
     if (w.applies !== 'yes' || w.state !== 'ok') continue;
     const left = remaining(w);
-    // 算不出还剩多少的，上面已经按额度未知放试探了。
+    // 算不出还剩多少的，按额度未知放试探（backupProbeReason）。
     if (left === null) continue;
     const need = needPerTask(w, policy);
     if (left < need) out.push(shortBlock(route, w, left, need, ctx.now));

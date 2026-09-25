@@ -250,6 +250,22 @@ describe('备池（拼车号）', () => {
       expect(codes(blind(0), ctx({ weight: 'heavy' }))).toEqual(['backup-heavy']);
     });
 
+    it('池级读数过期、但会话里顺手读到的窗口还新：读到了不够就等它清零，不拿试探去撞', () => {
+      // 候选查询：池的最近读成超过 30 分钟 → quota unknown；窗口本身是 10 分钟前从会话流里读到的。
+      const passive = (used: number, inFlight = 0) =>
+        carpool({
+          quota: 'unknown',
+          inFlight,
+          windows: [win({ label: '5h', window: '5h', used, resetsAt: at(1) }), win({ used: 0.4 })],
+        });
+      const short = blocksFor(passive(0.95), entry('c', 0), light);
+      expect(short.map((b) => b.code)).toEqual(['backup-quota-short']);
+      expect(groupOf(short)).toEqual({ kind: 'wait', waitFor: 'quota', until: Date.parse(at(1)) });
+      // 读到的够：照样只放一个。
+      expect(codes(passive(0.5), light)).toEqual([]);
+      expect(codes(passive(0.5, 1), light)).toEqual(['backup-quota-unknown']);
+    });
+
     it('已用比例算不出来：同样按额度未知，只放一个', () => {
       const r = (inFlight: number) => carpool({ windows: [win({ used: null })], inFlight });
       expect(codes(r(0), light)).toEqual([]);
