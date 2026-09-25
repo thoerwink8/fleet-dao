@@ -32,6 +32,8 @@ describe('开 PR', () => {
         subtask: 'A 登录表单',
         did: ['加了验证码输入框'],
         verified: ['pnpm check 全绿'],
+        plan: 'P1「工作流」',
+        specs: 'specs/12-otp/',
         changedFiles: ['packages/web/src/login.tsx', 'docs/design.md'],
       },
     });
@@ -42,7 +44,7 @@ describe('开 PR', () => {
     expect(new Set(fake.calls('POST', /\/pulls$/).map((r) => r.as))).toEqual(new Set(['agent']));
     expect(fake.pulls.size).toBe(1);
     expect(pr?.body).toBe(
-      '**做了什么**：\n- 加了验证码输入框\n**怎么验证的**：\n- pnpm check 全绿\n**还欠什么**：无\n**需求**：#12 · 子任务 A 登录表单\n**文档**：design',
+      '**做了什么**：\n- 加了验证码输入框\n**怎么验证的**：\n- pnpm check 全绿\n**还欠什么**：无\n**需求**：#12 · 子任务 A 登录表单\n**对应计划**：P1「工作流」\n**specs**：specs/12-otp/\n**文档**：design',
     );
     expect(pr?.base.ref).toBe('main');
   });

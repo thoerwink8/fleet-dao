@@ -36,6 +36,7 @@ describe('PR 正文模板', () => {
     );
     const fromTemplate = columns(template);
     expect(fromTemplate).not.toEqual([]); // 模板里一栏都没认出来，下面那条就成了拿空的去比
+    expect(fromTemplate).toEqual(expect.arrayContaining(['对应计划', 'specs'])); // CI 的 pr-fields 查的两栏
     const body = renderPrBody({
       requirement: 12,
       subtask: 'B 验证码',
@@ -43,6 +44,8 @@ describe('PR 正文模板', () => {
       verified: ['pnpm check'],
       owed: ['过期提示放到子任务 C'],
       risks: ['旧的登录接口还在用'],
+      plan: 'P1「工作流」',
+      specs: 'specs/12-登录验证码/',
       changedFiles: ['docs/design.md'],
     });
     expect(columns(body)).toEqual(fromTemplate);
@@ -56,18 +59,25 @@ describe('PR 正文模板', () => {
       verified: ['pnpm check', 'CI 链接'],
       owed: ['过期提示放到子任务 C'],
       risks: ['旧的登录接口还在用'],
+      plan: 'P1「工作流」',
+      specs: 'specs/12-登录验证码/',
       changedFiles: ['packages/web/src/login.tsx'],
     });
     const lines = body.split('\n');
     expect(lines.length).toBeLessThanOrEqual(PR_BODY_MAX_LINES);
     expect(body).toContain('- ……另有');
     expect(body).toContain('**还欠什么**：\n- 过期提示放到子任务 C\n- 风险：旧的登录接口还在用');
-    expect(lines.slice(-2)).toEqual(['**需求**：#12 · 子任务 B 验证码', '**文档**：不适用']);
+    expect(lines.slice(-4)).toEqual([
+      '**需求**：#12 · 子任务 B 验证码',
+      '**对应计划**：P1「工作流」',
+      '**specs**：specs/12-登录验证码/',
+      '**文档**：不适用',
+    ]);
   });
 
   it('「文档」按改到的文件写：只认仓根 README 和 docs 下的 design、ops、plan，顺序同模板；一份没改写「不适用」', () => {
     const docs = (changedFiles: string[]) =>
-      renderPrBody({ did: ['a'], verified: ['b'], changedFiles })
+      renderPrBody({ did: ['a'], verified: ['b'], plan: 'P1「工作流」', specs: null, changedFiles })
         .split('\n')
         .at(-1);
     expect(docs(['docs/plan.md', 'packages/x.ts', 'README.md'])).toBe('**文档**：README、plan');
@@ -75,12 +85,35 @@ describe('PR 正文模板', () => {
   });
 
   it('没有需求号写「无」，还欠的没有写「无」', () => {
-    const body = renderPrBody({ did: ['a'], verified: ['b'], changedFiles: [] });
+    const body = renderPrBody({
+      did: ['a'],
+      verified: ['b'],
+      plan: 'P1「工作流」',
+      specs: null,
+      changedFiles: [],
+    });
     expect(body).toContain('**还欠什么**：无\n**需求**：无\n');
   });
 
+  it('specs 给 null 写「不适用」；对应计划、specs 给空的写「（没写）」（CI 照样判红），不冒充填了', () => {
+    const tail = (plan: string, specs: string | null) =>
+      renderPrBody({ did: ['a'], verified: ['b'], plan, specs, changedFiles: [] })
+        .split('\n')
+        .slice(-3, -1);
+    expect(tail('P0「仓骨架」', null)).toEqual(['**对应计划**：P0「仓骨架」', '**specs**：不适用']);
+    expect(tail(' ', '')).toEqual(['**对应计划**：（没写）', '**specs**：（没写）']);
+  });
+
   it('条目里的关单词也改掉', () => {
-    expect(renderPrBody({ did: ['fixes #3'], verified: ['ok'], changedFiles: [] })).toContain('- 关联 #3');
+    expect(
+      renderPrBody({
+        did: ['fixes #3'],
+        verified: ['ok'],
+        plan: 'P1「工作流」',
+        specs: null,
+        changedFiles: [],
+      }),
+    ).toContain('- 关联 #3');
   });
 });
 

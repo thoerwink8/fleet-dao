@@ -1,0 +1,23 @@
+name: pr
+# PR 必填栏：类别标签恰好一个、挂里程碑、正文「对应计划」「specs」两栏（packages/conventions/src/pr-fields.ts）。
+# 和 ci.yml 分开：改标签、改里程碑、改正文都要重查，但不该连带重跑、打断整套 check。
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, labeled, unlabeled, milestoned, demilestoned]
+concurrency:
+  group: pr-fields-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  pr-fields:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # 查的是这次事件里的标签、里程碑、正文，对着检出来的 docs/plan.md 和 specs/；只用 Node 自带的，不用装依赖。
+      # 退出码 2 = 没查成（事件或 plan.md 读不到），同样是红
+      - run: node packages/conventions/src/bin/pr-fields.ts
