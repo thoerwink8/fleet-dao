@@ -52,11 +52,31 @@ describe('找名单', () => {
     expect(
       loadSensitiveValues({ env: { [SENSITIVE_VALUES_ENV]: '/ci/tmp/list.txt' }, home: HOME, ...fromEnv }),
     ).toMatchObject({ ok: true, source: '/ci/tmp/list.txt', values: ['ci-value-1'] });
-    // 环境变量指的文件不在：往下找。
     const onlyEtc = fakeFs({ [IN_ETC]: 'etc-value-1\n' });
+    expect(loadSensitiveValues({ env: {}, home: HOME, ...onlyEtc })).toMatchObject({
+      ok: true,
+      values: ['etc-value-1'],
+    });
+  });
+
+  it('环境变量指的文件不在：算没读到，不悄悄退回家目录或 /etc 那份', () => {
+    const others = fakeFs({ [IN_HOME]: 'home-value-1\n', [IN_ETC]: 'etc-value-1\n' });
+    const result = loadSensitiveValues({
+      env: { [SENSITIVE_VALUES_ENV]: '/nope.txt' },
+      home: HOME,
+      ...others,
+    });
+    expect(result).toMatchObject({ ok: false, tried: ['/nope.txt'] });
+    expect(result.ok ? '' : result.reason).toContain(
+      `${SENSITIVE_VALUES_ENV} 指的已知敏感值名单 /nope.txt 不在`,
+    );
+    // 只有空白的环境变量当没设，照常往下找。
     expect(
-      loadSensitiveValues({ env: { [SENSITIVE_VALUES_ENV]: '/nope.txt' }, home: HOME, ...onlyEtc }),
-    ).toMatchObject({ ok: true, values: ['etc-value-1'] });
+      loadSensitiveValues({ env: { [SENSITIVE_VALUES_ENV]: '  ' }, home: HOME, ...others }),
+    ).toMatchObject({
+      ok: true,
+      values: ['home-value-1'],
+    });
   });
 
   it('一个都没有、存在但读不了、读出来是空的：都是没读到，不当成「没问题」', () => {
@@ -83,10 +103,31 @@ describe('按名单比', () => {
     expect(lines('第一行\n切回 4821 接轻活，拼车号的会话用户\nreclaude 的 org 是 4821')).toEqual([2, 3]);
   });
 
-  it('短值要整词：更长数字的一部分不算', () => {
+  it('短值要整词：更长数字、小数、带点分段的编号的一截都不算', () => {
     // 拼起来写：「组织 + 数字」本身就会被上下文规则拦，这个测试文件自己不能带。
     const org = (n: string) => ['组织', n].join(' ');
-    expect(lines([org('148210'), org('48211'), org('4821a')].join(' · '))).toEqual([]);
+    expect(
+      lines([org('148210'), org('48211'), org('4821a'), org('1.4821'), org('4821.5')].join(' · ')),
+    ).toEqual([]);
+    // 句末的点不是小数点。
+    expect(lines(`${org('4821')}。\n${org('4821')}.`)).toEqual([1, 2]);
+  });
+
+  it('键名里的 org 用下划线、连字符、驼峰连着也算上下文；值用下划线连着也算整词', () => {
+    const kv = (k: string, v = '4821') => [k, v].join('=');
+    expect(
+      lines(
+        [
+          kv('ANTHROPIC_ORG_ID'),
+          kv('CLAUDE_ORG'),
+          ['reclaude', '--org', '4821'].join(' '),
+          `{"anthropicOrgId": ${'4821'}}`,
+          ['CLAUDE', 'ORG', '4821'].join('_'),
+        ].join('\n'),
+      ),
+    ).toEqual([1, 2, 3, 4, 5]);
+    // org 是别的词的一部分（organ、morgan、forge）不算上下文。
+    expect(lines(['organic 4821', 'morgan 4821', 'forge 4821'].join('\n'))).toEqual([]);
   });
 
   it('长值（6 个字符及以上）整词出现就报，不要上下文；大小写不管', () => {

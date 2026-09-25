@@ -44,11 +44,21 @@ export function parseSensitiveValues(text: string): string[] {
   return [...new Set(values)];
 }
 
-/** 找第一个存在的名单读进来。存在但读不了、或者读出来是空的，都算没读到（不往下一个找，免得悄悄换了名单）。 */
+/**
+ * 找第一个存在的名单读进来。存在但读不了、或者读出来是空的，都算没读到（不往下一个找，免得悄悄换了名单）；
+ * 环境变量指了文件、文件却不在，也算没读到（多半是路径写错了，同样不能悄悄换成家目录那份）。
+ */
 export function loadSensitiveValues(options: LoadOptions = {}): LoadedValues {
   const env = options.env ?? process.env;
   const exists = options.exists ?? existsSync;
   const read = options.read ?? ((path: string) => readFileSync(path, 'utf8'));
+  const fromEnv = env[SENSITIVE_VALUES_ENV]?.trim();
+  if (fromEnv && !exists(fromEnv))
+    return {
+      ok: false,
+      reason: `环境变量 ${SENSITIVE_VALUES_ENV} 指的已知敏感值名单 ${fromEnv} 不在`,
+      tried: [fromEnv],
+    };
   const tried = sensitiveValuesPaths(env, options.home ?? homedir());
   for (const path of tried) {
     if (!exists(path)) continue;
@@ -66,18 +76,26 @@ export function loadSensitiveValues(options: LoadOptions = {}): LoadedValues {
   return { ok: false, reason: `已知敏感值名单没读到（找过：${tried.join('、')}）`, tried };
 }
 
-/** 短值（少于 6 个字符）要同一行有这类词才算：三四位的组织编号直接按值比会撞上行号、端口、计数。 */
+/**
+ * 短值（少于 6 个字符）要同一行有这类词才算：三四位的组织编号直接按值比会撞上行号、端口、计数。
+ * org 前后只拦字母数字（organ、morgan 不算）：不用 \b，\b 把下划线当单词的一部分，ANTHROPIC_ORG_ID=、CLAUDE_ORG= 会漏；
+ * 驼峰的键名先拆开再比（anthropicOrgId 当 anthropic Org Id）。
+ */
 const CONTEXT_WORDS =
-  /\borg\b|organi[sz]ation|account|tenant|workspace|组织|账号|账户|独享|拼车|reclaude|切到|切回|换号|切号|封号/i;
+  /(?<![A-Za-z0-9])orgs?(?![A-Za-z0-9])|organi[sz]ation|account|tenant|workspace|组织|账号|账户|独享|拼车|reclaude|切到|切回|换号|切号|封号/i;
+const splitCamel = (line: string) => line.replace(/([a-z0-9])([A-Z])/g, '$1 $2');
 export const SHORT_VALUE_LENGTH = 6;
 
 const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-/** 整词：前后都不能紧挨着字母、数字、下划线（不许是更长数字、更长单词的一部分）。 */
+/**
+ * 整词：前后都不能紧挨着字母、数字（不许是更长数字、更长单词的一部分），也不许是小数、带点分段的编号的一截（1.4821、4821.5）。
+ * 下划线、连字符算分隔：ORG_4821、org-4821 里的 4821 照样算。
+ */
 function wholeWords(values: readonly string[]): RegExp | undefined {
   if (values.length === 0) return undefined;
   const alternatives = [...values].sort((a, b) => b.length - a.length).map(escapeRegExp);
-  return new RegExp(`(?<![A-Za-z0-9_])(?:${alternatives.join('|')})(?![A-Za-z0-9_])`, 'gi');
+  return new RegExp(`(?<![A-Za-z0-9]|\\d\\.)(?:${alternatives.join('|')})(?![A-Za-z0-9]|\\.\\d)`, 'gi');
 }
 
 export interface ValueMatcher {
@@ -99,7 +117,7 @@ export function valueMatcher(values: readonly string[]): ValueMatcher {
         const at = m.index ?? 0;
         const start = text.lastIndexOf('\n', at) + 1;
         const end = text.indexOf('\n', at);
-        if (CONTEXT_WORDS.test(text.slice(start, end === -1 ? undefined : end))) hit(at, m[0]);
+        if (CONTEXT_WORDS.test(splitCamel(text.slice(start, end === -1 ? undefined : end)))) hit(at, m[0]);
       }
       return hits;
     },

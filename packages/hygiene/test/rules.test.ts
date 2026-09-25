@@ -46,6 +46,12 @@ const planted: [RuleId, string][] = [
   ],
   ['secret-assign', `aws_secret_access_key = /${B64(39, 38)}`],
   ['secret-assign', `| app_secret | ${R(32, 24)} |`],
+  // 控制台抄来的：空格隔开的英文键名、中文键名、全角冒号。
+  ['secret-assign', `App Secret：${R(32, 41)}`],
+  ['secret-assign', `飞书应用密钥: ${R(32, 42)}`],
+  ['secret-assign', `**Verification Token**：${R(32, 43)}（别外传）`],
+  ['secret-assign', `app_secret：${R(32, 44)}`],
+  ['secret-assign', `| 数据库密码 | ${R(24, 45)} |`],
   ['url-password', `DATABASE_URL=${['postgres://fleet', `${R(20, 25)}@db:5432/fleet`].join(':')}`],
   ['webhook', `${['https://open.feishu.cn/open-apis/bot/v2/hook', pseudoUuid(26)].join('/')}`],
   [
@@ -63,9 +69,18 @@ const planted: [RuleId, string][] = [
   ['account-id', `reclaude org switch ${ORG}`],
   ['account-id', `切到 ${ORG} 号组织`],
   ['account-id', `{"orgId": ${ORG}}`],
+  // 键名前面用下划线连着前缀（\b 会漏）、驼峰带前缀、命令行参数。
+  ['account-id', `ANTHROPIC_ORG_ID=${ORG}`],
+  ['account-id', `export CLAUDE_ORG=${ORG}`],
+  ['account-id', `{"anthropicOrgId": ${ORG}}`],
+  ['account-id', `reclaude --org ${ORG} -p hi`],
+  ['account-id', `claude --organization-id=${pseudoUuid(46)}`],
+  ['account-id', `FLEET_USER_ID=${pseudoNumber(6, 47)}`],
   ['account-id', `{"organization_uuid": "${pseudoUuid(31)}"}`],
   ['account-id', `组织编号：${ORG}`],
   ['account-id', `from ${['ou', HEX(32, 32)].join('_')}`],
+  // 飞书应用编号是 16 位十六进制，平均只有 10 种字符：只有 8 种的真编号也要拦（旧的「少于 10 种算编的」放过两成多）。
+  ['account-id', `app_id: ${['cli', pseudoRandom(16, 48, '3a7f09c1')].join('_')}`],
   ['account-id', `${['https://avatars.githubusercontent.com/u', pseudoNumber(8, 33)].join('/')}?v=4`],
   ['account-id', `"client_id": "${['Iv23li', R(14, 34)].join('')}"`],
   ['signature', JSON.stringify({ type: 'thinking', signature: `ErEE${B64(40, 35)}` })],
@@ -160,6 +175,20 @@ describe('形状像、但不算的', () => {
       '组织后面跟人数、账号后面跟状态码',
       '这次组织 200 人参加演练 · 自有档无账号 400 · reclaude org use: · 组织编号在 reclaude 里选',
     ],
+    [
+      'org 是别的词的一部分、键名只是带着 org 的别的东西',
+      'organ_id: 5566 · morgan=7788 · forge_no: 9911 · ORG_COUNT=12 · maxOrgs: 500 · sortOrder: 300 · --organic 4455',
+    ],
+    [
+      '控制台键名、值是说明或变量',
+      [
+        '密码：至少 12 位，大小写加数字',
+        'App Secret：见 1Password 里 fleet-dao 那一条',
+        ['App Secret: $', '{{ secrets.FEISHU_APP_SECRET }}'].join(''),
+        '密钥：/etc/fleet-dao/app-secret',
+        'Primary Key: user_id_fk_12345',
+      ].join('\n'),
+    ],
     ['占位的编号', 'reclaude org use 1234 · "orgId": 9999 · ou_xxx · "client_id": "Iv1.CLIENT_ID"'],
     [
       'webhook 地址是占位',
@@ -183,6 +212,23 @@ describe('判定用的小函数', () => {
       expect([fake, isFakeValue(fake)]).toEqual([fake, true]);
     }
     for (const seed of [1, 2, 3, 4, 5]) expect(isFakeValue(R(32, seed))).toBe(false);
+  });
+
+  it('单调按字符种类比：随机的 16 位十六进制、12 位数字不算编的', () => {
+    const seeds = Array.from({ length: 300 }, (_, i) => i + 1);
+    expect(seeds.filter((s) => isFakeValue(HEX(16, s)))).toEqual([]);
+    expect(seeds.filter((s) => isFakeValue(pseudoNumber(12, s)))).toEqual([]);
+    // 种类真少的照样算编的。
+    expect(['aaaabbbbccccdddd', '1113332221113332', 'abcabcabcabcabcx'].map(isFakeValue)).toEqual([
+      true,
+      true,
+      true,
+    ]);
+  });
+
+  it('同一类规则的几种写法对上同一处，只报一条', () => {
+    // 带引号的写法和空格隔开的键名写法都对得上这一行。
+    expect(findHits(`App Secret: '${R(32, 49)}'`).map((h) => h.rule)).toEqual(['secret-assign']);
   });
 
   it('公网 IPv4（内网段的边界两侧都核）', () => {

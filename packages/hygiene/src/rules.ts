@@ -56,14 +56,26 @@ function longestAscendingRun(s: string): number {
 }
 
 /**
- * 一眼是编出来的值：带占位字样；字符种类很少；六个以上同一字符连着；字母表或数字顺序、键盘顺序；
- * 同一小段反复（replayreplay）。真随机的密钥几乎不可能这样。
+ * 同样的字符组成、同样长的随机串平均有几种不同字符（s 已转小写）。字符种类按出现了哪几类粗估：
+ * 全是数字 10 种，全是十六进制 16 种，否则数字 10、字母 26、其余符号 10 加起来。
+ */
+function expectedDistinct(s: string): number {
+  let kinds: number;
+  if (/^[0-9]+$/.test(s)) kinds = 10;
+  else if (/^[0-9a-f]+$/.test(s)) kinds = 16;
+  else kinds = (/[0-9]/.test(s) ? 10 : 0) + (/[a-z]/.test(s) ? 26 : 0) + (/[^0-9a-z]/.test(s) ? 10 : 0);
+  return kinds * (1 - (1 - 1 / kinds) ** s.length);
+}
+
+/**
+ * 一眼是编出来的值：带占位字样；字符太单调（不同字符不到同样随机串平均的一半）；六个以上同一字符连着；
+ * 字母表或数字顺序、键盘顺序；同一小段反复（replayreplay）。真随机的密钥几乎不可能这样。
+ * 单调按字符种类比，不按固定个数：16 位十六进制（飞书 cli_ 应用编号）平均只有 10 种字符，按「少于 10 种」判会放过三成真编号。
  */
 export function isFakeValue(value: string): boolean {
   const s = value.toLowerCase();
   if (s.length === 0 || FAKE_WORDS.test(s)) return true;
-  const distinct = new Set(s).size;
-  if (s.length >= 16 ? distinct < 10 : distinct * 2 <= s.length) return true;
+  if (new Set(s).size * 2 < expectedDistinct(s)) return true;
   if (/(.)\1{5,}/.test(s) || longestAscendingRun(s) >= 6 || /qwerty|asdfgh|zxcvbn/.test(s)) return true;
   for (let p = 1; p <= Math.min(12, s.length >> 1); p++) {
     let repeats = true;
@@ -84,6 +96,14 @@ export function isPlaceholderId(id: string): boolean {
 /** 一眼是占位的数字编号：同一个数字重复（1111）、顺着数（1234、9876）。 */
 function isPlaceholderNumber(n: string): boolean {
   return /^(\d)\1+$/.test(n) || '0123456789'.includes(n) || '9876543210'.includes(n);
+}
+
+const UUID = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+
+/** 账号编号规则里取出的那个编号（哪个命名分组对上了就是哪个）是不是占位的。 */
+function placeholderAccount(_match: string, m: RegExpMatchArray): boolean {
+  const id = Object.values(m.groups ?? {}).find((v) => v !== undefined) ?? '';
+  return id.includes('-') ? isPlaceholderId(id) : isPlaceholderNumber(id);
 }
 
 /**
@@ -224,6 +244,12 @@ const TOKEN_PREFIX =
 /** 键名的最后一段是这些词之一才算（tokenizer、max_tokens、passwordHash 不算）。 */
 const SECRET_KEY = String.raw`[A-Za-z0-9_.-]*?(?:password|passwd|passphrase|pwd|secret|token|(?:api|app|access|private|secret|client|signing|encrypt(?:ion)?|master)[_.-]?key|credentials?)(?![A-Za-z0-9_])`;
 
+/** 空格隔开的英文键名（控制台里抄来的 App Secret、Verification Token、Secret Access Key、AccessKey Secret）。 */
+const SECRET_KEY_SPACED = String.raw`(?:(?:app|client|api|access|accesskey|secret|private|signing|encrypt(?:ion)?|master|bot|verification)[ \t]+){1,2}(?:secret|key|token)(?![A-Za-z0-9_])`;
+
+/** 中文键名：密钥、秘钥、私钥、密码、口令、令牌（前面带什么都行：飞书应用密钥、数据库密码）。 */
+const SECRET_KEY_CN = String.raw`(?:密钥|秘钥|私钥|密码|口令|令牌)`;
+
 const secretAssign = (label: string, source: string, flags: string): Rule => ({
   id: 'secret-assign',
   label,
@@ -285,15 +311,16 @@ export const RULES: readonly Rule[] = [
     pattern: /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}/g,
   },
   // 没有固定前缀的密钥（飞书 app secret、数据库密码、webhook 密钥……）：键名的最后一段像密钥，值又像随机串。
-  // 四种写法：带引号的（JSON、YAML、代码）、行首不带引号的（env 大小写都算、YAML、ini）、命令行参数、Markdown 表格。
+  // 五种写法：带引号的（JSON、YAML、代码）、行首不带引号的（env 大小写都算、YAML、ini）、命令行参数、Markdown 表格，
+  // 以及控制台抄来的「App Secret：值」「应用密钥：值」（空格隔开的英文键名、中文键名，全角冒号也算）。
   secretAssign(
     '像密钥的赋值',
-    String.raw`\b${SECRET_KEY}["']?\s*[:=]\s*["'\x60](?<value>[^"'\x60\s]{12,})["'\x60]`,
+    String.raw`\b${SECRET_KEY}["']?\s*[:=：＝]\s*["'\x60](?<value>[^"'\x60\s]{12,})["'\x60]`,
     'gi',
   ),
   secretAssign(
     '像密钥的赋值',
-    String.raw`^[ \t]*(?:export[ \t]+|set[ \t]+|-[ \t]+)?["']?${SECRET_KEY}["']?[ \t]*[:=][ \t]*(?<value>[^\s"'\x60(){}\[\],;<>]{12,})[ \t]*(?:#.*)?$`,
+    String.raw`^[ \t]*(?:export[ \t]+|set[ \t]+|-[ \t]+)?["']?${SECRET_KEY}["']?[ \t]*[:=：＝][ \t]*(?<value>[^\s"'\x60(){}\[\],;<>]{12,})[ \t]*(?:#.*)?$`,
     'gim',
   ),
   secretAssign(
@@ -303,7 +330,12 @@ export const RULES: readonly Rule[] = [
   ),
   secretAssign(
     '表格里像密钥的值',
-    String.raw`\|[ \t]*\x60?${SECRET_KEY}\x60?[ \t]*\|[ \t]*\x60?(?<value>[^\s|\x60]{12,})\x60?[ \t]*\|`,
+    String.raw`\|[ \t]*\x60?(?:${SECRET_KEY}|${SECRET_KEY_SPACED}|[^|\n]{0,20}?${SECRET_KEY_CN})\x60?[ \t]*\|[ \t]*\x60?(?<value>[^\s|\x60]{12,})\x60?[ \t]*\|`,
+    'gi',
+  ),
+  secretAssign(
+    '像密钥的赋值',
+    String.raw`(?:(?<![A-Za-z0-9_])${SECRET_KEY_SPACED}|${SECRET_KEY_CN})(?:\*\*|\x60)?[ \t]*[:=：＝][ \t]*["'\x60“‘]?(?<value>[^\s"'\x60“”‘’（）()，。；、,;<>|*]{12,})`,
     'gi',
   ),
   {
@@ -366,25 +398,34 @@ export const RULES: readonly Rule[] = [
     pattern: /\breq_[A-Za-z0-9]{8,}|\brequest[ _-]?id["']?\s*[:=：]\s*["']?[0-9a-f]{16,}/gi,
   },
   {
-    // 账号 / 组织编号只在上下文里认：键名是 org / account / tenant… 的数字或 UUID；reclaude org use / switch N；
+    // 账号 / 组织编号只在上下文里认：键名是 org / account / tenant… 的数字或 UUID；命令行的 --org N；reclaude org use / switch N；
     // 「N 号组织」「N 独享号」；「组织编号 N」「账号 id N」「组织 N」（后面跟着人、个、次这类量词的是计数，不算）。
     // 「账号 400」这种光秃秃的账号加数字多半是状态码，不算；真实的账号靠名单认。
+    // 键名前后只拦字母数字，不用 \b：\b 把下划线当单词的一部分，ANTHROPIC_ORG_ID=、CLAUDE_ORG= 会漏。
     id: 'account-id',
     label: '账号或组织编号',
     pattern: new RegExp(
       [
-        String.raw`\b(?:org|organi[sz]ation|account|tenant|workspace)(?:[_-]?(?:id|uuid|number|no))?["']?\s*[:=]\s*["']?(?<a>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|\d{3,})(?![\w-])`,
-        String.raw`\b(?:user|member|customer)[_-]?(?:id|uuid)["']?\s*[:=]\s*["']?(?<b>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|\d{3,})(?![\w-])`,
-        String.raw`\borg\s+(?:use|switch|set|select)\s+(?<c>\d{3,})`,
+        String.raw`(?<![A-Za-z0-9])(?:org|organi[sz]ation|account|tenant|workspace)(?:[_-]?(?:id|uuid|number|no))?["']?\s*[:=：]\s*["']?(?<a>${UUID}|\d{3,})(?![\w-])`,
+        String.raw`(?<![A-Za-z0-9])(?:user|member|customer)[_-]?(?:id|uuid)["']?\s*[:=：]\s*["']?(?<b>${UUID}|\d{3,})(?![\w-])`,
+        String.raw`(?<![A-Za-z0-9])org\s+(?:use|switch|set|select)\s+(?<c>\d{3,})`,
         String.raw`(?<![\d.])(?<d>\d{3,})\s*号?\s*(?:组织|独享号|拼车号)`,
         String.raw`(?:组织(?:编号|号|\s*id)?|(?:账号|账户)(?:编号|号|\s*id))\s*[:=：]?\s*(?<e>\d{3,})(?!\s*[人个次名家位天份条张%])(?![\d.])`,
+        String.raw`(?<![A-Za-z0-9-])--(?:org|organi[sz]ation|account|tenant|workspace)(?:[_-]?(?:id|uuid))?(?:=|[ \t]+)["']?(?<f>${UUID}|\d{3,})(?![\w-])`,
       ].join('|'),
       'gi',
     ),
-    harmless: (_match, m) => {
-      const id = Object.values(m.groups ?? {}).find((v) => v !== undefined) ?? '';
-      return id.includes('-') ? isPlaceholderId(id) : isPlaceholderNumber(id);
-    },
+    harmless: placeholderAccount,
+  },
+  {
+    // 驼峰键名里带前缀的（anthropicOrgId、claudeAccountUuid）：前缀小写、Org 大写开头才算，所以单列一条、分大小写。
+    id: 'account-id',
+    label: '账号或组织编号',
+    pattern: new RegExp(
+      String.raw`(?<=[a-z0-9])(?:Org|Organi[sz]ation|Account|Tenant|Workspace)(?:Id|ID|Uuid|UUID|Number|No)?["']?\s*[:=：]\s*["']?(?<g>${UUID}|\d{3,})(?![\w-])`,
+      'g',
+    ),
+    harmless: placeholderAccount,
   },
   {
     // 带账号编号的地址和编号：飞书的 open_id / union_id / 会话 / 消息 / 应用编号，GitHub 头像地址里的账号编号，
@@ -483,14 +524,21 @@ export function lineLocator(text: string): (index: number) => number {
   };
 }
 
-/** 一段文本里命中的所有规则（已去掉形状对上但无害的）。 */
+/** 一段文本里命中的所有规则（已去掉形状对上但无害的）。同一类规则的几种写法对上同一处（范围有重叠），只算一条。 */
 export function findHits(text: string, rules: readonly Rule[] = RULES): Hit[] {
   const lineOf = lineLocator(text);
   const hits: Hit[] = [];
+  const taken = new Map<RuleId, [number, number][]>();
   for (const rule of rules) {
+    const spans = taken.get(rule.id) ?? [];
+    taken.set(rule.id, spans);
     for (const m of text.matchAll(rule.pattern)) {
       if (rule.harmless?.(m[0], m)) continue;
-      hits.push({ rule: rule.id, label: rule.label, match: m[0], line: lineOf(m.index ?? 0) });
+      const start = m.index ?? 0;
+      const end = start + m[0].length;
+      if (spans.some(([s, e]) => start < e && s < end)) continue;
+      spans.push([start, end]);
+      hits.push({ rule: rule.id, label: rule.label, match: m[0], line: lineOf(start) });
     }
   }
   return hits;
