@@ -189,7 +189,9 @@ describe('resolveAlertByKey', () => {
       title: '账号池暂停',
       body: '要重新登录',
     });
-    expect(await resolveAlertByKey(t.db, { dedupeKey: 'pool-hold:carpool-1', by: 'engine', at: NOW })).toBe('ok');
+    expect(await resolveAlertByKey(t.db, { dedupeKey: 'pool-hold:carpool-1', by: 'engine', at: NOW })).toBe(
+      'ok',
+    );
     expect(
       await resolveAlertByKey(t.db, { dedupeKey: 'pool-hold:carpool-1', by: 'someone', at: later(MIN) }),
     ).toBe('already_resolved');
@@ -245,9 +247,9 @@ describe('appendProgressEvents', () => {
 
   it('会话行不在回 run_not_found，一条不写', async () => {
     const missing = randomUUID();
-    expect(await appendProgressEvents(t.db, missing, [{ at: NOW, kind: 'say', payload: { text: '嗨' } }])).toBe(
-      'run_not_found',
-    );
+    expect(
+      await appendProgressEvents(t.db, missing, [{ at: NOW, kind: 'say', payload: { text: '嗨' } }]),
+    ).toBe('run_not_found');
     expect(await t.db.select().from(progressEvents)).toEqual([]);
   });
 
