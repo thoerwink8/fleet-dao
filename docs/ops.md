@@ -44,7 +44,7 @@
 | 4500/udp | 0.0.0.0 | WireGuard 服务端 | 香港上游只放行少数常见 UDP 端口（2026-09-25 从法国实测：53/67/69/123/161/500/1701/4500 能到），51820 进不来 |
 
 GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录回调：`https://<驾驶舱域名>/auth/feishu/callback`。
-整站不让搜索引擎收录：80、443 的回应都带 `X-Robots-Tag: noindex, nofollow`，`/robots.txt` 禁抓全站（`deploy/hk/nginx-*.conf`）。
+整站不让搜索引擎收录：80、443 的回应都带 `X-Robots-Tag: noindex, nofollow`；`/robots.txt` 故意不禁抓——禁抓了爬虫就看不到这个头，网址反而可能凭外链被收进结果（`deploy/hk/nginx-*.conf`）。
 
 ## 三、用户、目录、库
 

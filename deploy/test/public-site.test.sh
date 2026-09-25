@@ -7,7 +7,8 @@
 #   （packages/web/src/build/scan.ts 的 BUILTIN_TERMS）。构建用的是 release.sh 里的真代码 build_web，只把「以 fleet 身份跑」换成原地跑。
 # - 香港站点配置（deploy/hk/nginx-*.conf 渲染出来的）：先按 nginx 的继承规则查每一层都带 X-Robots-Tag；再真起一个 nginx
 #   （临时目录、本机回环上的临时端口、自签证书）打请求：带完整提交号的 release.json 只给隧道那头（这里拿 127.0.0.2 当法国），
-#   别处来的 404；每种回应都带 noindex；robots.txt 禁抓全站。这台没有 nginx、openssl、curl 就记「没跑成」。
+#   别处来的 404；每种回应都带 noindex；robots.txt 不禁抓（禁抓了爬虫就看不到 noindex）。这台没有 nginx、openssl、curl
+#   就记「没跑成」。
 # 用法：bash deploy/test/public-site.test.sh（不用 root）。退出码：0 通过，1 不通过，2 有没跑成的。
 set -uo pipefail
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -230,7 +231,7 @@ else
   check "一个 server 都没有：没查成" "$?" 2
 fi
 
-echo "== 真起一个 nginx：release.json 只给隧道那头（127.0.0.2 当法国）、别处来的 404；每种回应都带 noindex；robots.txt 禁抓"
+echo "== 真起一个 nginx：release.json 只给隧道那头（127.0.0.2 当法国）、别处来的 404；每种回应都带 noindex；robots.txt 不禁抓"
 no_tools=""
 for c in nginx openssl curl; do
   if ! command -v "$c" >/dev/null; then no_tools+=" $c"; fi
@@ -315,7 +316,8 @@ EOF
       "{\"commit\":\"$COMMIT\"}"
     check "版本标记照旧不让浏览器凭猜缓存" \
       "$(curl -s -o /dev/null -D - "${TLS[@]}" --interface 127.0.0.2 "$HTTPS/release.json" | tr -d '\r' | grep -ci '^cache-control: no-cache$')" 1
-    check "robots.txt 禁抓全站" "$(curl -s "${TLS[@]}" "$HTTPS/robots.txt")" $'User-agent: *\nDisallow: /'
+    check "robots.txt 不禁抓（爬虫抓得到页面才看得见 noindex）" "$(curl -s "${TLS[@]}" "$HTTPS/robots.txt")" \
+      $'User-agent: *\nAllow: /'
     check "robots.txt 是纯文本" "$(curl -s -o /dev/null -w '%{content_type}' "${TLS[@]}" "$HTTPS/robots.txt")" text/plain
     PLAIN=(--resolve "cockpit.example.test:$P1:127.0.0.1")
     for pc in "/ 301" "/robots.txt 301" "/.well-known/acme-challenge/probe 200"; do
@@ -331,7 +333,7 @@ EOF
     done
     check "只开 80 的模板 /release.json（隧道那头来的）：200，带 noindex" \
       "$(probe "${ONLY[@]}" --interface 127.0.0.2 "$HTTP/release.json")" "200 1"
-    check "只开 80 的模板：robots.txt 禁抓全站" "$(curl -s "${ONLY[@]}" "$HTTP/robots.txt")" $'User-agent: *\nDisallow: /'
+    check "只开 80 的模板：robots.txt 不禁抓" "$(curl -s "${ONLY[@]}" "$HTTP/robots.txt")" $'User-agent: *\nAllow: /'
     if ((fail)); then
       echo "  测试用的 nginx 的错误日志（最后 10 行）："
       tail -10 "$NG/error.log" 2>/dev/null | sed 's/^/    /'
