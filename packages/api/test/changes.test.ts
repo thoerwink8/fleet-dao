@@ -210,9 +210,72 @@ describe('LISTEN fleet_changes（替身照 postgres.js：失败后监听仍挂�
     pg.dropListenConnection();
     for (let i = 0; i < 100 && feed.status().healthy; i++) await settle(5);
     expect(feed.status().healthy).toBe(false);
+    // LISTEN 按退避晚一会儿才连回来：这时多半有一条 ping 在等，它发出去时还没人在听。
+    await settle(20);
     pg.startDb();
     await afterRecovery();
     expect(got).toEqual([{ type: 'resync' }]);
+    expect(feed.status().healthy).toBe(true);
+    await feed.stop();
+  });
+
+  it('等 ping 的时候 LISTEN 连回来了：那条 ping 注定收不到，重发一条，不判红，也不把这一轮的 resync 清掉', async () => {
+    const pg = fakePostgres();
+    const { feed, got } = start(pg);
+    await settle();
+    pg.dropListenConnection();
+    await expect(feed.probe(20)).rejects.toMatchObject({ code: 'not_listening' });
+    // 这一条 ping 发出去时 LISTEN 还没连回来。
+    const waiting = feed.probe(200);
+    await settle(10);
+    pg.startDb();
+    await waiting;
+    expect(feed.status()).toEqual({ healthy: true, lastError: undefined });
+    await afterRecovery();
+    expect(got).toEqual([{ type: 'resync' }]);
+    await feed.stop();
+  });
+
+  it('等 ping 期间没连回来过：照样判红，一次探活只发一条 ping（重发只给「连回来过」的）', async () => {
+    const pg = fakePostgres();
+    const { feed } = start(pg);
+    await settle();
+    pg.dropListenConnection();
+    const before = pg.notifyCalls();
+    await expect(feed.probe(20)).rejects.toMatchObject({ code: 'not_listening' });
+    await expect(feed.probe(20)).rejects.toMatchObject({ code: 'not_listening' });
+    expect(pg.notifyCalls() - before).toBe(2);
+    expect(feed.status().healthy).toBe(false);
+    await feed.stop();
+  });
+
+  it('连接一直断了又连（每次等 ping 都赶上一次重连）：重发有上限，到了就判红，不会永远等下去', async () => {
+    const pg = fakePostgres();
+    const { feed } = start(pg);
+    await settle();
+    pg.dropListenConnection();
+    // 每 5 毫秒连上一下又断：每条 ping 等的时候都「连回来过」，但发出去那一刻都没人在听。
+    const flap = setInterval(() => {
+      pg.startDb();
+      pg.dropListenConnection();
+    }, 5);
+    try {
+      const before = pg.notifyCalls();
+      const verdict = await Promise.race([
+        feed.probe(40).then(
+          () => 'healthy',
+          (err: { code?: string }) => err.code,
+        ),
+        settle(2_000).then(() => 'still waiting'),
+      ]);
+      expect(verdict).toBe('not_listening');
+      // 重发过，但不超过上限：第一条加最多 3 次重发。
+      const pings = pg.notifyCalls() - before;
+      expect(pings).toBeGreaterThan(1);
+      expect(pings).toBeLessThanOrEqual(4);
+    } finally {
+      clearInterval(flap);
+    }
     await feed.stop();
   });
 

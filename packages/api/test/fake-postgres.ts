@@ -1,7 +1,7 @@
 // 照 postgres.js 的 LISTEN 行为做的替身（postgres 包 src/index.js 的 listen），给 changes.ts 的测试用：
 // - listen 先把监听挂上，再发 LISTEN。库连不上时 promise 失败，但监听还挂着；库回来时它自己重连。
 // - 同一个频道再调一次 listen，就多挂一个监听：之后每条通知送好几遍。
-// - 连接断了不告诉调用方；断开期间的通知丢了。
+// - 连接断了不告诉调用方；断开期间的通知丢了。通知只送给提交那一刻正在 LISTEN 的连接，连回来以后也补不上。
 // - 连接断一次，postgres.js 就给每个监听重排一条 LISTEN；之后每次重连失败再多排一条（onclose 里重新 listen，
 //   排着的不作废）。库回来时这些 LISTEN 逐条执行，每条都调一次 onListen——停得越久，恢复时 onListen 调得越多
 //   （审查在真 Postgres 17 上看库日志证实：停 20 秒恢复时 4 条，停 120 秒 8 条）。
@@ -24,6 +24,7 @@ export function fakePostgres() {
   /** 连接没断、只是通知暂时送不到（例如很卡）。 */
   let delivering = true;
   let listenCalls = 0;
+  let notifyCalls = 0;
 
   const all = () => [...channels.values()].flat();
   const deliver = (channel: string, payload: string) => {
@@ -59,8 +60,13 @@ export function fakePostgres() {
 
   const notify: PgNotify = async (channel, payload) => {
     if (!queriesUp) throw new Error('connect ECONNREFUSED');
+    notifyCalls += 1;
+    // 只送给提交那一刻正在 LISTEN 的连接：那时还没连回来，之后再连回来也收不到这一条（Postgres 就是这样）。
+    const listeningAtCommit = listenUp && delivering;
     // 通知在提交之后才送到，不在 notify 返回之前。
-    setTimeout(() => deliver(channel, payload), 0);
+    setTimeout(() => {
+      if (listeningAtCommit) deliver(channel, payload);
+    }, 0);
   };
 
   return {
@@ -99,5 +105,7 @@ export function fakePostgres() {
     },
     listeners: (channel: string) => channels.get(channel)?.length ?? 0,
     listenCalls: () => listenCalls,
+    /** 经普通连接发出去的 NOTIFY 条数（探活的 ping 就走这里）。 */
+    notifyCalls: () => notifyCalls,
   };
 }
