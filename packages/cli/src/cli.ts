@@ -179,7 +179,8 @@ const COMMANDS: Record<string, Handler> = {
     if (values.json) return printJson(io, task);
     const lines = [
       `任务 ${task.taskId}${task.subtaskId ? ` · 子任务 ${task.subtaskId}` : ''}`,
-      `仓库：${task.repo} · 分支：${task.branch}`,
+      // 引擎建分支之前没有 branch
+      `仓库：${task.repo} · 分支：${task.branch ?? '（引擎还没建）'}`,
       ...(task.specDir ? [`需求文档：${task.specDir}`] : []),
       '',
       '需求：',

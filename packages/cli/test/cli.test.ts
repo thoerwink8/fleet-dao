@@ -138,6 +138,15 @@ describe('task', () => {
     );
   });
 
+  it('引擎还没建分支（后端不带 branch）：照样打印，分支写「还没建」', async () => {
+    const { branch: _, ...noBranch } = TASK;
+    const b = await backend(() => ({ status: 200, body: noBranch }));
+    const r = await fleet(['task'], { url: b.url });
+    expect(r.code).toBe(EXIT.ok);
+    expect(r.out.split('\n')[1]).toBe('仓库：thoerwink8/fleet-dao · 分支：（引擎还没建）');
+    expect(r.out).not.toContain('undefined');
+  });
+
   it('--json 原样输出', async () => {
     const b = await backend(() => ({ status: 200, body: TASK }));
     const r = await fleet(['task', '--json'], { url: b.url });
