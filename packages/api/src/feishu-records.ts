@@ -63,10 +63,17 @@ export function parseMessageRecord(sourceMessageId: string, raw: unknown, at: st
   };
 }
 
-/** 截到 max 个字，截了就以「…」结尾。 */
+/**
+ * 截到 max 个字（按 UTF-16 数，和约定里 zod 的 max 同一个数法），截了就以「…」结尾。
+ * 不截在代理对中间（emoji 这类）：半个代理对写进 jsonb 会被库整条拒收。
+ */
 export function clip(text: string, max: number): string {
   const t = text.trim();
-  return t.length <= max ? t : `${t.slice(0, max - 1)}…`;
+  if (t.length <= max) return t;
+  let end = max - 1;
+  const last = t.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+  return `${t.slice(0, end)}…`;
 }
 
 /** 按补充改「我理解为」：还没接模型理解，先把补充原样接在后面（超长截断）。 */

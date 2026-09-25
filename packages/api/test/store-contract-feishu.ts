@@ -2,6 +2,7 @@
 // 内存版（参照实现）和 Postgres 版过同一套，入口在 store.memory.test.ts / store.pg.test.ts。
 import { beforeEach, describe, expect, it } from 'vitest';
 import { DEV_USER_ID, devFixtures, IDS } from '../src/dev-fixtures.ts';
+import { ANSWER_TEXTS } from '../src/feishu-views.ts';
 import type { MemoryData } from '../src/memory-store.ts';
 import type { FeishuMessageKey, NewAuditEntry, NewDraft, Store } from '../src/ports.ts';
 import type { MakeStore, StoreUnderTest } from './store-contract.ts';
@@ -463,6 +464,16 @@ export function describeFeishuStoreContract(name: string, make: MakeStore): void
         });
         expect(again).toEqual(first);
         expect(await store.getFeishuMessage('om_q')).toEqual(first);
+      });
+
+      it('回的话里截断过的 emoji 照样写得进、读得回（半个代理对进 jsonb 会被库拒收）', async () => {
+        const text = ANSWER_TEXTS.askTaken('😀'.repeat(40), '创始人乙');
+        const rec = await store.recordFeishuMessage({
+          message: msg('om_emoji'),
+          result: { kind: 'answer', text },
+        });
+        expect(rec.result).toEqual({ kind: 'answer', text });
+        expect((await store.getFeishuMessage('om_emoji'))?.result).toEqual({ kind: 'answer', text });
       });
     });
 

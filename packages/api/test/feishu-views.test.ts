@@ -1,6 +1,7 @@
 // 飞书接口的纯函数：北京时间的「今天」、推送条目的指纹和截断、等待期、猜仓、盘面的额度挑选。
 import { FeishuOutboxItemSchema } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
+import { clip } from '../src/feishu-records.ts';
 import {
   beijingDayStart,
   beijingStamp,
@@ -171,6 +172,17 @@ describe('草稿的小工具', () => {
     expect(guessRepo('web 和 api 都要改', [repo('web'), repo('api')])).toBeUndefined();
     expect(guessRepo('随便', [repo('web'), repo('api')])).toBeUndefined();
     expect(guessRepo('随便', [])).toBeUndefined();
+  });
+
+  it('截断不切在 emoji 中间（半个代理对写进 jsonb 会被库整条拒收）', () => {
+    expect(clip('a😀b', 3)).toBe('a…');
+    expect(clip('😀😀😀', 3)).toBe('😀…');
+    expect(clip('ab', 3)).toBe('ab');
+    for (const s of ['😀'.repeat(50), `x${'😀'.repeat(50)}`]) {
+      const out = clip(s, 21);
+      expect(out.length).toBeLessThanOrEqual(21);
+      expect(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(out)).toBe(false);
+    }
   });
 
   it('issue 标题取「我理解为」第一行，截到 80 字', () => {
