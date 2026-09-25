@@ -7,18 +7,28 @@ import type {
   BillingKind,
   HostId,
   ProgressKind,
+  QuotaStatus,
+  QuotaUnit,
   QuotaWindowKind,
   ReadingKind,
   RunOutcome,
+  ScheduleOutcome,
   StageKind,
   StepState,
   SubtaskState,
   TaskState,
 } from './domain.ts';
+import { type ChangeEvent, REALTIME_TABLES } from './realtime.ts';
 
 export const WEB_API_PREFIX = '/api';
 export const AUTH_PREFIX = '/auth';
 export const CSRF_HEADER = 'X-CSRF-Token';
+
+/**
+ * 飞书网关调 /api 的第二种进法（不用 Cookie、不用 CSRF）：`Authorization: Bearer <网关通行证>`，
+ * 再用这个请求头写明代表哪位创始人（飞书 open_id）。后端按 open_id 认人，不是创始人就 403；操作记录写 via=feishu。
+ */
+export const FEISHU_ACTING_HEADER = 'X-Fleet-Acting-Feishu';
 
 const Id = z.string().min(1).max(200);
 const Time = z.iso.datetime({ offset: true });
@@ -75,6 +85,9 @@ export const QuotaWindowKindSchema = z.enum([
 export const HostIdSchema = z.enum(['claude-code', 'codex', 'cursor-agent', 'grok', 'mirasim', 'api-shell']);
 export const RunOutcomeSchema = z.enum(['ok', 'failed', 'stopped', 'stalled']);
 export const ProgressKindSchema = z.enum(['plan', 'say', 'tool', 'file', 'test', 'ask', 'done', 'blocked']);
+export const QuotaStatusSchema = z.enum(['allowed', 'warning', 'limit_reached']);
+export const QuotaUnitSchema = z.enum(['percent', 'usd', 'tokens', 'points']);
+export const ScheduleOutcomeSchema = z.enum(['ok', 'partial', 'unscanned', 'failed']);
 
 type Same<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
 /** 编译期闸：上面的枚举和 domain.ts 的联合类型必须一字不差，改了一边没改另一边 `tsc` 当场报错。 */
@@ -89,7 +102,10 @@ export const ENUMS_MATCH_DOMAIN: [
   Same<z.infer<typeof HostIdSchema>, HostId>,
   Same<z.infer<typeof RunOutcomeSchema>, RunOutcome>,
   Same<z.infer<typeof ProgressKindSchema>, ProgressKind>,
-] = [true, true, true, true, true, true, true, true, true, true];
+  Same<z.infer<typeof QuotaStatusSchema>, QuotaStatus>,
+  Same<z.infer<typeof QuotaUnitSchema>, QuotaUnit>,
+  Same<z.infer<typeof ScheduleOutcomeSchema>, ScheduleOutcome>,
+] = [true, true, true, true, true, true, true, true, true, true, true, true, true];
 
 // —— 通用 ——
 
@@ -412,16 +428,34 @@ export const UpdateChannelResponse = z.object({ ok: z.literal(true) });
 // —— 账号池与额度 ——
 
 export const QuotaWindowViewSchema = z.object({
+  /** 上游对这个窗口的原名（5h、7d_claude、auto_percent……），同一池里不重复。显示用它；window 只是归类。 */
+  label: z.string().min(1),
+  /** 归类；上游新出的、归不了类的是 other，看 label。 */
   window: QuotaWindowKindSchema,
-  /** 0–1。 */
-  utilization: z.number().min(0).max(1).optional(),
+  /** 只扣某一组模型的窗口的组名（中转的 fable、Cursor 的 auto / api 桶……）；账号级窗口没有。 */
+  scope: z.string().optional(),
+  /** 已用比例。超额是真实情况，可以大于 1——原样给出，显示进度条时再截到 100%。 */
+  utilization: z.number().min(0).optional(),
   used: z.number().optional(),
   limit: z.number().optional(),
+  /** used / limit 的单位。上游只给百分比时是 percent，limit 是 100。 */
+  unit: QuotaUnitSchema,
   resetsAt: Time.optional(),
+  /** 上游自己说的状态，以它为准（实测 99% 就可能已经 limit_reached）。 */
+  upstreamStatus: QuotaStatusSchema.optional(),
+  /** 上游的原状态字：归不进 upstreamStatus 的也原样给人看，不猜。 */
+  statusRaw: z.string().optional(),
   /** measured = 实读；estimated = 按用量估算。 */
   reading: ReadingKindSchema,
+  /** 读法：claude-usage、mirasim-relay、cursor-dashboard、grok-billing、estimate……（官方接口、网页接口还是估算）。 */
+  source: z.string().min(1),
   readAt: Time,
-  /** 读数太旧（超过 staleAfterMinutes），不能当现值用。 */
+  /**
+   * 过期标记：读成了、但上游从这个时刻起没再报这个窗口。照样显示，注明「上游这次没报」；不挡路由、不参与排序。
+   * 上游重新报了就清空，满 24 小时库里删掉（数据库包的 savePoolQuota 管）。
+   */
+  staleSince: Time.optional(),
+  /** 这条读数本身太旧（读数时刻超过 staleAfterMinutes），不能当现值用。 */
   stale: z.boolean(),
 });
 
@@ -436,8 +470,16 @@ export const PoolViewSchema = z.object({
   /** 正在跑的会话数。 */
   running: z.number().int().min(0),
   expiresAt: Time.optional(),
-  /** fresh = 读数都新鲜；stale = 有读数过期；unread = 一条读数都没有（没查成，不是「没用量」）。 */
+  /**
+   * 按池看，不逐窗口看（和每小时对账、选路由同一个判法，数据库包的 quotaReadOverdue）：
+   * unread = 一次都没读成过（没查成，不是「没用量」）；stale = 最近一次读成、或上游数据本身超过 staleAfterMinutes；fresh = 其余。
+   */
   quotaStatus: z.enum(['fresh', 'stale', 'unread']),
+  /** 最近一次完整读成的时刻（我们读的时刻），读失败不动；一次都没读成过就没有。 */
+  lastReadOkAt: Time.optional(),
+  /** 上游数据本身的时刻：还在报的窗口里最新的读数时刻（中转给的是它自己的采集时刻）。读成了、上游的数却冻住时看它。 */
+  dataAt: Time.optional(),
+  /** 按清零时刻排，快清零的在前（不知道清零时刻的在后）；同时清零的按原名。 */
   windows: z.array(QuotaWindowViewSchema),
 });
 
@@ -453,21 +495,28 @@ export const JobViewSchema = z.object({
   id: Id,
   name: z.string(),
   schedule: z.string(),
-  /** 期望多久成功一次。 */
+  /** 上次成功距今超过这么多分钟就算过期（登记时已含周期、抖动和一轮耗时）。 */
   expectEveryMinutes: z.number().int().positive(),
   lastRun: z
     .object({
       startedAt: Time,
       endedAt: Time.optional(),
-      /** 没有 = 还在跑。ok = 查完了；unscanned = 这次没查成；failed = 出错。 */
-      outcome: z.enum(['ok', 'unscanned', 'failed']).optional(),
+      /**
+       * 没有 = 还在跑。四种结局分开，「没跑成」「没扫到」不能当「没问题」：
+       * ok = 跑完了、扫了对象；partial = 跑完了但有一部分没查成；unscanned = 跑完了但一个对象都没扫到；failed = 没跑成。
+       */
+      outcome: ScheduleOutcomeSchema.optional(),
+      /** 扫了几个对象。 */
+      scanned: z.number().int().min(0).optional(),
       /** 查出几条问题。ok 且 found=0 才是「查过，没事」。 */
       found: z.number().int().min(0).optional(),
+      /** 不是 ok 时写的原因。 */
       why: z.string().optional(),
     })
     .optional(),
+  /** 最近一次跑成（ok 或 partial）的结束时刻。 */
   lastSuccessAt: Time.optional(),
-  /** fresh = 按期成功；overdue = 超过两个周期没成功；never = 从没成功过。 */
+  /** fresh = 上次跑成在 expectEveryMinutes 之内；overdue = 超过了；never = 从没跑成过。 */
   status: z.enum(['fresh', 'overdue', 'never']),
 });
 
@@ -573,14 +622,22 @@ export const UpdateSettingResponse = z.object({ setting: SettingSchema });
 
 // —— 实时推送（SSE：GET /api/events）——
 
-/** 事件名。change：某张表的某一行变了，前端重拉受影响的数据；resync：推送断过，前端全部重拉。 */
+/**
+ * 事件名。ready：连上了，前端全量拉一次；change：某张表的某一行变了，前端重拉受影响的数据；
+ * resync：中间可能漏了变化（后端和数据库之间断过线，或者浏览器断开太久），前端全部重拉。
+ * change 和 resync 都带 SSE 的 id；浏览器断线重连时（EventSource 自动带 Last-Event-ID）后端补发断开期间的变化，
+ * 补不全（后端重启过、断开太久）就先发一条 resync。
+ */
 export const SSE_EVENTS = { ready: 'ready', change: 'change', resync: 'resync' } as const;
 
-/** change 事件的 data，也是数据库 NOTIFY fleet_changes 的载荷。 */
+/** change 事件的 data，也是数据库 NOTIFY fleet_changes 的载荷（形状定义在 realtime.ts）。 */
 export const ChangeEventSchema = z.object({
-  table: z.string().min(1).max(63),
+  table: z.enum(REALTIME_TABLES),
   id: z.string().min(1).max(200),
 });
+
+/** 编译期闸：ChangeEventSchema 和 realtime.ts 的 ChangeEvent 必须同形。 */
+export const CHANGE_EVENT_MATCHES_REALTIME: Same<z.infer<typeof ChangeEventSchema>, ChangeEvent> = true;
 
 // —— 路由表（前端据此封装请求；路径都在 WEB_API_PREFIX 之下，:xxx 是路径参数）——
 

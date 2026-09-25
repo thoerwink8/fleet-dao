@@ -2,7 +2,7 @@ import { AskResponse, HistoryResponse, TaskResponse, TimelineResponse } from '@f
 import { describe, expect, it } from 'vitest';
 import { AGENT_TOKEN_MAX_TTL_SECONDS, signAgentToken, verifyAgentToken } from '../src/agent-token.ts';
 import { signPayload } from '../src/tokens.ts';
-import { agentRequest, DEV_RUN_ID, errorCode, harness, write } from './harness.ts';
+import { agentRequest, DEV_RUN_ID, errorCode, harness, IDS, write } from './harness.ts';
 
 describe('fleet 令牌', () => {
   it('签出来的能验过；换密钥、改内容、过期、寿命超上限、签发时间在未来都不认', () => {
@@ -47,14 +47,14 @@ describe('令牌越权', () => {
   it('fleet 令牌访问驾驶舱接口：一律 401，哪怕同时带着有效的登录 Cookie', async () => {
     const h = harness();
     const token = h.agentToken();
-    for (const path of ['/api/me', '/api/repos/repo-1/board', '/api/settings', '/api/events']) {
+    for (const path of ['/api/me', `/api/repos/${IDS.repo}/board`, '/api/settings', '/api/events']) {
       const res = await h.cockpit.request(path, { headers: { authorization: `Bearer ${token}` } });
       expect(res.status, path).toBe(401);
       expect(await errorCode(res)).toBe('bearer_not_allowed');
     }
     const session = await h.login();
     const both = await h.cockpit.request(
-      '/api/tasks/task-12/actions',
+      `/api/tasks/${IDS.task12}/actions`,
       write('POST', session, { action: 'stop' }, { authorization: `Bearer ${token}` }),
     );
     expect(await errorCode(both)).toBe('bearer_not_allowed');
@@ -81,8 +81,8 @@ describe('令牌越权', () => {
   it('用登录密钥签的令牌、别的会话的令牌、会话结束后的令牌：都 401', async () => {
     const h = harness();
     const wrongKey = signAgentToken(h.config.sessionSecret, {
-      taskId: 'task-12',
-      subtaskId: 'sub-12a',
+      taskId: IDS.task12,
+      subtaskId: IDS.sub12a,
       runId: DEV_RUN_ID,
       ttlSeconds: 60,
       now: h.clock.now,
@@ -90,7 +90,7 @@ describe('令牌越权', () => {
     expect(await errorCode(await h.agent.request('/agent/v1/task', agentRequest(wrongKey)))).toBe(
       'agent_token_invalid',
     );
-    const otherTask = h.agentToken({ taskId: 'task-13' });
+    const otherTask = h.agentToken({ taskId: IDS.task13 });
     expect(await errorCode(await h.agent.request('/agent/v1/task', agentRequest(otherTask)))).toBe(
       'agent_token_invalid',
     );
@@ -98,9 +98,10 @@ describe('令牌越权', () => {
     expect((await h.agent.request('/agent/v1/task', agentRequest(noSuchRun))).status).toBe(401);
 
     const token = h.agentToken();
-    const session = h.store.data.agentSessions[0];
-    if (!session) throw new Error('样例数据里没有会话');
-    session.endedAt = h.clock.now.toISOString();
+    const run = h.store.data.runs.find((r) => r.id === DEV_RUN_ID);
+    if (!run) throw new Error('样例数据里没有会话');
+    run.endedAt = h.clock.now.toISOString();
+    run.outcome = 'ok';
     expect(
       await errorCode(await h.agent.request('/agent/v1/say', agentRequest(token, 'POST', { text: '还在' }))),
     ).toBe('agent_session_ended');
@@ -121,8 +122,8 @@ describe('/agent/v1 的七个动作', () => {
     expect(res.status).toBe(200);
     const body = TaskResponse.parse(await res.json());
     expect(body).toMatchObject({
-      taskId: 'task-12',
-      subtaskId: 'sub-12a',
+      taskId: IDS.task12,
+      subtaskId: IDS.sub12a,
       repo: 'example/canary',
       branch: 'fleet/12-a',
       request: '给登录页加手机验证码',
@@ -155,13 +156,13 @@ describe('/agent/v1 的七个动作', () => {
       }),
     );
     expect(ok.status).toBe(200);
-    expect(h.store.data.plans.get(DEV_RUN_ID)?.steps).toEqual([
+    expect((await h.store.getPlans([DEV_RUN_ID])).get(DEV_RUN_ID)?.steps).toEqual([
       { index: 0, title: '写测试', state: 'done' },
       { index: 1, title: '写实现', state: 'in_progress' },
     ]);
     expect(h.store.data.progress.at(-1)).toMatchObject({ runId: DEV_RUN_ID, kind: 'plan' });
     expect(h.signals).toEqual([
-      { taskId: 'task-12', signal: { name: 'agentEvent', runId: DEV_RUN_ID, kind: 'plan' } },
+      { taskId: IDS.task12, signal: { name: 'agentEvent', runId: DEV_RUN_ID, kind: 'plan' } },
     ]);
   });
 
@@ -206,7 +207,156 @@ describe('/agent/v1 的七个动作', () => {
       agentRequest(h.agentToken(), 'POST', { query: 'readme' }),
     );
     const body = HistoryResponse.parse(await res.json());
-    expect(body.items.map((i) => i.taskId)).toEqual(['task-13']);
+    expect(body.items.map((i) => i.taskId)).toEqual([IDS.task13]);
+  });
+});
+
+describe('幂等键（插头重试同一条命令用同一个键）', () => {
+  const post = (h: ReturnType<typeof harness>, path: string, body: unknown, key?: string) =>
+    h.agent.request(
+      `/agent/v1/${path}`,
+      agentRequest(h.agentToken(), 'POST', body, key === undefined ? {} : { 'idempotency-key': key }),
+    );
+  const passingTest = (h: ReturnType<typeof harness>) =>
+    h.store.data.progress.push({
+      id: '900',
+      runId: DEV_RUN_ID,
+      at: h.clock.now.toISOString(),
+      kind: 'test',
+      payload: { passed: true, command: 'pnpm check' },
+    });
+
+  it('say / plan / blocked / done 重试：直接回第一次的结果，只记一条、只叫醒一次；ask 同一句也只开一条', async () => {
+    const h = harness();
+    passingTest(h);
+    const before = h.store.data.progress.length;
+    const commands: [string, unknown][] = [
+      ['say', { text: '写好测试了' }],
+      ['plan', { steps: [{ title: '写实现', state: 'in_progress' }] }],
+      ['blocked', { reason: '缺短信服务的测试账号', needs: 'access' }],
+      ['done', { summary: '写完了', testsPassed: true }],
+    ];
+    for (const [path, body] of commands) {
+      const first = await post(h, path, body, `key-${path}`);
+      const retry = await post(h, path, body, `key-${path}`);
+      expect([first.status, retry.status], path).toEqual([200, 200]);
+      expect(await retry.json(), path).toEqual(await first.json());
+    }
+    expect(h.store.data.progress.slice(before).map((p) => p.kind)).toEqual([
+      'say',
+      'plan',
+      'blocked',
+      'done',
+    ]);
+    expect(h.signals).toHaveLength(4);
+
+    const asked = [await post(h, 'ask', { question: '几位？', blocking: false }, 'key-ask')];
+    asked.push(await post(h, 'ask', { question: '几位？', blocking: false }, 'key-ask'));
+    const [a, b] = await Promise.all(asked.map(async (r) => AskResponse.parse(await r.json())));
+    expect(b?.askId).toBe(a?.askId);
+    expect(h.store.data.asks).toHaveLength(1);
+  });
+
+  it('没带键照常执行（老插头）：两次就是两条', async () => {
+    const h = harness();
+    await post(h, 'say', { text: '一' });
+    await post(h, 'say', { text: '一' });
+    expect(
+      h.store.data.progress.filter((p) => p.kind === 'say' && p.at === h.clock.now.toISOString()),
+    ).toHaveLength(2);
+  });
+
+  it('被退回（422）不占键：补跑测试后用同一个键再交，照常核实、收下', async () => {
+    const h = harness();
+    const rejected = await post(h, 'done', { summary: '写完了', testsPassed: true }, 'key-done');
+    expect(rejected.status).toBe(422);
+    passingTest(h);
+    const accepted = await post(h, 'done', { summary: '写完了', testsPassed: true }, 'key-done');
+    expect(accepted.status).toBe(200);
+    expect(h.store.data.progress.filter((p) => p.kind === 'done')).toHaveLength(1);
+  });
+
+  it('同一个键的上一次还在处理：503 + Retry-After，这次不执行', async () => {
+    const h = harness();
+    await h.store.claimCommand({
+      runId: DEV_RUN_ID,
+      key: 'key-busy',
+      action: 'agent.say',
+      takeOverBefore: new Date(0).toISOString(),
+    });
+    h.clock.now = new Date(h.clock.now.getTime() + 30_000);
+    const before = h.store.data.progress.length;
+    const res = await post(h, 'say', { text: '在写' }, 'key-busy');
+    expect(res.status).toBe(503);
+    expect(res.headers.get('retry-after')).toBe('1');
+    expect(await errorCode(res)).toBe('in_flight');
+    expect(h.store.data.progress).toHaveLength(before);
+    expect(h.signals).toHaveLength(0);
+  });
+
+  it('占着没做完的键，是本进程启动前占的（发版重启）或占了超过 60 秒：重试接过来执行，留日志', async () => {
+    const h = harness();
+    const booted = h.clock.now.getTime();
+    const claimAt = async (key: string, at: number) => {
+      h.clock.now = new Date(at);
+      await h.store.claimCommand({
+        runId: DEV_RUN_ID,
+        key,
+        action: 'agent.say',
+        takeOverBefore: new Date(0).toISOString(),
+      });
+    };
+    await claimAt('key-before-boot', booted - 1_000);
+    await claimAt('key-stuck', booted + 1_000);
+    h.clock.now = new Date(booted + 2_000);
+    expect((await post(h, 'say', { text: '重启前那句' }, 'key-before-boot')).status).toBe(200);
+    expect((await post(h, 'say', { text: '卡住那句' }, 'key-stuck')).status).toBe(503);
+    h.clock.now = new Date(booted + 62_000);
+    expect((await post(h, 'say', { text: '卡住那句' }, 'key-stuck')).status).toBe(200);
+    expect(h.logs.filter((l) => l.message.includes('接过来重新执行'))).toHaveLength(2);
+  });
+
+  it('同一个键用在别的命令上：409，这次不执行，也不回上一条命令的结果', async () => {
+    const h = harness();
+    expect((await post(h, 'say', { text: '一' }, 'key-x')).status).toBe(200);
+    const before = h.store.data.progress.length;
+    const res = await post(h, 'blocked', { reason: '缺账号', needs: 'access' }, 'key-x');
+    expect(res.status).toBe(409);
+    expect(await errorCode(res)).toBe('idempotency_key_reused');
+    expect(h.store.data.progress).toHaveLength(before);
+    expect(h.signals).toHaveLength(1);
+  });
+
+  it('上一次卡住、被接管以后才做完：它的回执记不上，第三次重试拿接管那次的结果、不再执行', async () => {
+    let release: () => void = () => {};
+    let calls = 0;
+    const h = harness({
+      workflows: {
+        async signal() {
+          calls += 1;
+          if (calls === 1) await new Promise<void>((resolve) => (release = resolve));
+        },
+      },
+    });
+    const says = () =>
+      h.store.data.progress.filter((p) => p.kind === 'say').map((p) => (p.payload as { text: string }).text);
+    const stuck = post(h, 'say', { text: '卡住的那次' }, 'key-slow');
+    for (let i = 0; i < 100 && calls === 0; i++) await new Promise((r) => setTimeout(r, 5));
+    h.clock.now = new Date(h.clock.now.getTime() + 61_000);
+    expect((await post(h, 'say', { text: '接管的那次' }, 'key-slow')).status).toBe(200);
+    release();
+    expect((await stuck).status).toBe(200);
+    expect(h.logs.some((l) => l.message.includes('已被别的请求接管'))).toBe(true);
+    expect((await post(h, 'say', { text: '第三次' }, 'key-slow')).status).toBe(200);
+    expect(says()).toContain('接管的那次');
+    expect(says()).not.toContain('第三次');
+  });
+
+  it('键太长：400', async () => {
+    const h = harness();
+    expect(await errorCode(await post(h, 'say', { text: 'x' }, 'k'.repeat(201)))).toBe(
+      'invalid_idempotency_key',
+    );
   });
 });
 
@@ -274,7 +424,7 @@ describe('fleet done 要核实', () => {
     pr: Partial<(typeof h.store.data.pullRequests)[number]> = {},
   ) {
     h.store.data.pullRequests.push({
-      repoId: 'repo-1',
+      repoId: IDS.repo,
       number: 31,
       state: 'open',
       headRef: 'fleet/12-a',
@@ -284,12 +434,15 @@ describe('fleet done 要核实', () => {
     });
   }
 
+  /** 插头读出来的测试结果：kind=test 的进度，载荷带 passed。 */
+  let seq = 1000;
   function testRun(h: ReturnType<typeof harness>, passed: boolean, minutesLater = 0) {
-    h.store.data.testRuns.push({
+    h.store.data.progress.push({
+      id: String(++seq),
       runId: DEV_RUN_ID,
       at: new Date(h.clock.now.getTime() + minutesLater * 60_000).toISOString(),
-      passed,
-      command: 'pnpm check',
+      kind: 'test',
+      payload: { passed, command: 'pnpm check' },
     });
   }
 
@@ -344,14 +497,14 @@ describe('fleet done 要核实', () => {
     expect(h.store.data.audit.at(-1)).toMatchObject({
       actor: { kind: 'agent', id: DEV_RUN_ID },
       action: 'agent.done_rejected',
-      target: 'task:task-12',
+      target: `task:${IDS.task12}`,
       via: 'agent',
       ok: false,
       error: 'done_rejected',
     });
     const timeline = TimelineResponse.parse(
       await (
-        await h.cockpit.request('/api/tasks/task-12/timeline', { headers: { cookie: session.cookie } })
+        await h.cockpit.request(`/api/tasks/${IDS.task12}/timeline`, { headers: { cookie: session.cookie } })
       ).json(),
     );
     expect(timeline.items[0]).toMatchObject({ source: 'session', kind: 'done_rejected' });

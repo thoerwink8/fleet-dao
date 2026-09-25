@@ -3,7 +3,7 @@ import type { Context, ErrorHandler, NotFoundHandler } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import type { z } from 'zod';
-import type { Logger } from './ports.ts';
+import { InvalidCursorError, type Logger } from './ports.ts';
 
 export class ApiError extends Error {
   readonly status: ContentfulStatusCode;
@@ -33,6 +33,8 @@ export function errorHandler(log: Logger): ErrorHandler {
     if (err instanceof HTTPException) {
       return c.json(errorBody(`http_${err.status}`, err.message || '请求被拒'), err.status);
     }
+    // 游标看不懂回 400，不回空页：空页会被前端当成「后面没有了」。
+    if (err instanceof InvalidCursorError) return c.json(errorBody('invalid_cursor', err.message), 400);
     log.error('未处理的错误', { method: c.req.method, path: c.req.path, error: String(err.stack ?? err) });
     return c.json(errorBody('internal', '后端出错了，已记日志'), 500);
   };

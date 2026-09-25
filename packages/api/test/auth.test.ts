@@ -8,6 +8,7 @@ import {
   errorCode,
   FOUNDER_A_CODE,
   harness,
+  IDS,
   PUBLIC_ORIGIN,
   STRANGER_CODE,
   setCookies,
@@ -15,7 +16,7 @@ import {
 } from './harness.ts';
 
 /** 浏览器登录的前半段：拿到飞书授权页地址和暂存 Cookie。 */
-async function startBrowserLogin(h: ReturnType<typeof harness>, next = '/tasks/task-12') {
+async function startBrowserLogin(h: ReturnType<typeof harness>, next = `/tasks/${IDS.task12}`) {
   const res = await h.cockpit.request(`/auth/feishu/login?next=${encodeURIComponent(next)}`);
   expect(res.status).toBe(302);
   const location = new URL(res.headers.get('location') ?? '');
@@ -36,7 +37,7 @@ describe('飞书浏览器登录（授权码 + PKCE）', () => {
       headers: { cookie },
     });
     expect(cb.status).toBe(302);
-    expect(cb.headers.get('location')).toBe('/tasks/task-12');
+    expect(cb.headers.get('location')).toBe(`/tasks/${IDS.task12}`);
     const session = setCookies(cb).find((c) => c.startsWith('__Host-fleet_session='));
     expect(session).toMatch(/HttpOnly/);
     expect(session).toMatch(/Secure/);
@@ -341,7 +342,7 @@ describe('开发环境免登', () => {
     expect(ok.status).toBe(200);
     expect(MeResponse.parse(await ok.json()).user.id).toBe(DEV_USER_ID);
     expect(h.store.data.audit.at(-1)).toMatchObject({ action: 'login', after: { method: 'dev-login' } });
-    expect((await post('u-bot-worker')).status).toBe(403);
+    expect((await post(IDS.botWorker)).status).toBe(403);
     expect((await post('nobody')).status).toBe(403);
   });
 });

@@ -8,11 +8,13 @@ import {
   DoneRequest,
   HistoryRequest,
   HistoryResponse,
+  IDEMPOTENCY_KEY_HEADER,
   PlanRequest,
   SayRequest,
   TaskResponse,
 } from '@fleet-dao/shared';
 import { Hono, type MiddlewareHandler } from 'hono';
+import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { verifyAgentToken } from './agent-token.ts';
 import type { AskWaiters } from './changes.ts';
 import type { Deps } from './deps.ts';
@@ -24,6 +26,72 @@ export type AgentEnv = { Variables: { agent: AgentSession } };
 
 /** 等回答时隔多久回库看一眼（数据库变化通知没接上时的兜底）。 */
 const ASK_POLL_MS = 5_000;
+/** 幂等键最长多少字（插头用的是 uuid）。 */
+const MAX_IDEMPOTENCY_KEY_LENGTH = 200;
+/** 占着键超过这么久还没做完，当它已经死了（连接断了、卡死了），接过来重做。正常一条命令毫秒级做完。 */
+const ABANDONED_CLAIM_MS = 60_000;
+
+/**
+ * 按 Idempotency-Key 去重（同一会话内）：第一次成功的结果记下来，重试直接回它，不会把一句话记成两句；
+ * 没成功（4xx/5xx）就放掉键，重试会重新执行。没带键的请求照常执行（兼容老客户端）。
+ * 本进程启动前占的键一定是上一个进程留下的（fleet 接口只有一个进程，只听本机），重试当场接过来重做——
+ * 不然发版重启那一下在途的命令，插头几次重试全吃 in_flight，白白失败。
+ */
+function idempotent(deps: Deps, action: string, bootedAt: number): MiddlewareHandler<AgentEnv> {
+  return async (c, next) => {
+    const key = c.req.header(IDEMPOTENCY_KEY_HEADER)?.trim();
+    if (!key) return next();
+    if (key.length > MAX_IDEMPOTENCY_KEY_LENGTH) {
+      throw new ApiError(400, 'invalid_idempotency_key', `${IDEMPOTENCY_KEY_HEADER} 太长`);
+    }
+    const { store, log } = deps;
+    const ids = { runId: c.get('agent').runId, key };
+    const takeOverBefore = new Date(Math.max(bootedAt, deps.now().getTime() - ABANDONED_CLAIM_MS));
+    const claim = await store.claimCommand({ ...ids, action, takeOverBefore: takeOverBefore.toISOString() });
+    if (claim.status === 'other-action') {
+      throw new ApiError(
+        409,
+        'idempotency_key_reused',
+        `这个幂等键已经用在别的命令（${claim.action}）上了：一条命令一个键`,
+      );
+    }
+    if (claim.status === 'done') {
+      const { status, body } = claim.result as { status: ContentfulStatusCode; body: unknown };
+      return c.json(body as object, status);
+    }
+    if (claim.status === 'in-flight') {
+      c.header('Retry-After', '1');
+      throw new ApiError(503, 'in_flight', '同一条命令（同一个幂等键）还在处理，稍后用同一个键重试');
+    }
+    if (claim.tookOver) {
+      log.warn('幂等键上一次占着没做完（进程重启过或卡住了），接过来重新执行', { runId: ids.runId, action });
+    }
+    // 记结果、放键都只动自己这次的占用：被接管以后，旧请求再做完或失败都碰不到接管它的那次。
+    const mine = { ...ids, token: claim.token };
+    try {
+      await next();
+    } catch (err) {
+      await store.releaseCommand(mine);
+      throw err;
+    }
+    if (c.res.status >= 200 && c.res.status < 300 && !c.error) {
+      const body: unknown = await c.res.clone().json();
+      try {
+        if (!(await store.completeCommand(mine, { status: c.res.status, body }))) {
+          log.warn('命令做完了，但这个幂等键已被别的请求接管，回执以接管的那次为准', {
+            runId: ids.runId,
+            action,
+          });
+        }
+      } catch (err) {
+        // 命令已经做了，只是回执没记上：重试会在键过期（ABANDONED_CLAIM_MS）后重做一次。留日志。
+        log.error('命令做完了，但幂等回执没记上', { runId: ids.runId, action, error: String(err) });
+      }
+    } else {
+      await store.releaseCommand(mine);
+    }
+  };
+}
 
 const TOKEN_PROBLEMS = {
   malformed: '令牌格式不对',
@@ -66,6 +134,7 @@ export function agentAuth(deps: Deps): MiddlewareHandler<AgentEnv> {
 
 export function agentRoutes(deps: Deps, waiters: AskWaiters): Hono<AgentEnv> {
   const { store, log } = deps;
+  const bootedAt = deps.now().getTime();
   const app = new Hono<AgentEnv>();
   app.use('*', agentAuth(deps));
   const ok = { ok: true } as const;
@@ -117,7 +186,7 @@ export function agentRoutes(deps: Deps, waiters: AskWaiters): Hono<AgentEnv> {
     });
   });
 
-  app.post(AgentRoutes.plan.path, async (c) => {
+  app.post(AgentRoutes.plan.path, idempotent(deps, 'agent.plan', bootedAt), async (c) => {
     const session = c.get('agent');
     const { steps } = await readJson(c, PlanRequest);
     await store.savePlan(
@@ -128,7 +197,7 @@ export function agentRoutes(deps: Deps, waiters: AskWaiters): Hono<AgentEnv> {
     return c.json(ok);
   });
 
-  app.post(AgentRoutes.say.path, async (c) => {
+  app.post(AgentRoutes.say.path, idempotent(deps, 'agent.say', bootedAt), async (c) => {
     const session = c.get('agent');
     const { text } = await readJson(c, SayRequest);
     await store.appendProgress(session.runId, 'say', { text });
@@ -145,10 +214,8 @@ export function agentRoutes(deps: Deps, waiters: AskWaiters): Hono<AgentEnv> {
       question: body.question,
       options: body.options ?? [],
     });
-    if (created) {
-      await store.appendProgress(session.runId, 'ask', { askId: ask.id, question: ask.question });
-      await wake(session, 'ask', ask.id);
-    }
+    // 追问和它的 ask 进度在 openAsk 里同一事务写进去了，这里只叫醒工作流。
+    if (created) await wake(session, 'ask', ask.id);
     const answered =
       ask.answer !== undefined
         ? ask
@@ -171,7 +238,7 @@ export function agentRoutes(deps: Deps, waiters: AskWaiters): Hono<AgentEnv> {
     return reply(c, HistoryResponse, { items });
   });
 
-  app.post(AgentRoutes.done.path, async (c) => {
+  app.post(AgentRoutes.done.path, idempotent(deps, 'agent.done', bootedAt), async (c) => {
     const session = c.get('agent');
     const request = await readJson(c, DoneRequest);
     const [pr, tests] = await Promise.all([
@@ -211,7 +278,7 @@ export function agentRoutes(deps: Deps, waiters: AskWaiters): Hono<AgentEnv> {
     return c.json(ok);
   });
 
-  app.post(AgentRoutes.blocked.path, async (c) => {
+  app.post(AgentRoutes.blocked.path, idempotent(deps, 'agent.blocked', bootedAt), async (c) => {
     const session = c.get('agent');
     const body = await readJson(c, BlockedRequest);
     await store.appendProgress(session.runId, 'blocked', { reason: body.reason, needs: body.needs });

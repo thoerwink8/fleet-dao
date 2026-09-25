@@ -1,6 +1,6 @@
 // 驾驶舱登录态：HttpOnly Cookie（自签，带过期时间）+ 按会话派生的 CSRF 令牌。
 // 每个请求都回库查一次用户：从白名单里拿掉的人，下一个请求就进不来。
-import { CSRF_HEADER } from '@fleet-dao/shared';
+import { CSRF_HEADER, FEISHU_ACTING_HEADER } from '@fleet-dao/shared';
 import type { Context, MiddlewareHandler } from 'hono';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import { z } from 'zod';
@@ -39,7 +39,13 @@ export type OAuthState = z.infer<typeof OAuthState>;
  */
 export type CockpitUser = User & { role: 'founder' };
 
-export type CockpitEnv = { Variables: { user: CockpitUser; session: SessionClaims } };
+/**
+ * 这次请求经哪里来：cockpit = 浏览器（登录 Cookie）；feishu = 香港的飞书网关（网关通行证，代表某位创始人）。
+ * 操作记录的 via 就写它。网关请求没有登录会话（session 为空），也不走 CSRF。
+ */
+export type CockpitEnv = {
+  Variables: { user: CockpitUser; via: 'cockpit' | 'feishu'; session: SessionClaims | undefined };
+};
 
 export interface CookieNames {
   session: string;
@@ -132,11 +138,22 @@ export function checkCsrf(c: Context, config: Config, sid: string): void {
   }
 }
 
-/** 驾驶舱接口的门：只认登录 Cookie；带 Authorization 头的一律拒（fleet 令牌不能拿来调驾驶舱）。 */
+/**
+ * 驾驶舱接口的门，两种进法：
+ * 1. 浏览器：登录 Cookie（写操作另过 CSRF）；
+ * 2. 飞书网关：`Authorization: Bearer <网关通行证>` + `X-Fleet-Acting-Feishu: <飞书 open_id>`，按 open_id 认创始人，
+ *    当作这位创始人操作（操作记录 via=feishu），不走 CSRF。
+ * 带了 Authorization 却不是网关通行证的（例如 fleet 令牌）一律拒。通行证常量时间比较，不写进日志。
+ */
 export function requireSession(config: Config, store: Store, now: () => Date): MiddlewareHandler<CockpitEnv> {
   return async (c, next) => {
-    if (c.req.header('authorization') !== undefined) {
-      throw new ApiError(401, 'bearer_not_allowed', '驾驶舱接口只认登录 Cookie，fleet 令牌不能用在这里');
+    const authorization = c.req.header('authorization');
+    if (authorization !== undefined) {
+      c.set('user', await gatewayUser(c, config, store, authorization));
+      c.set('via', 'feishu');
+      c.set('session', undefined);
+      await next();
+      return;
     }
     const session = readSession(c, config, now());
     if (!session) throw new ApiError(401, 'unauthenticated', '没登录或登录已过期');
@@ -144,7 +161,31 @@ export function requireSession(config: Config, store: Store, now: () => Date): M
     if (!isCockpitUser(user)) throw new ApiError(403, 'not_whitelisted', '这个账号不在白名单里');
     if (!SAFE_METHODS.has(c.req.method)) checkCsrf(c, config, session.sid);
     c.set('user', user);
+    c.set('via', 'cockpit');
     c.set('session', session);
     await next();
   };
+}
+
+async function gatewayUser(
+  c: Context,
+  config: Config,
+  store: Store,
+  authorization: string,
+): Promise<CockpitUser> {
+  const pass = config.feishuGatewayToken;
+  const bearer = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length).trim() : '';
+  if (pass === null || !safeEqual(bearer, pass)) {
+    throw new ApiError(
+      401,
+      'bearer_not_allowed',
+      '驾驶舱接口只认登录 Cookie 或飞书网关通行证，fleet 令牌不能用在这里',
+    );
+  }
+  const openId = c.req.header(FEISHU_ACTING_HEADER)?.trim();
+  if (!openId)
+    throw new ApiError(403, 'acting_missing', `网关请求要带 ${FEISHU_ACTING_HEADER}（代表哪位创始人）`);
+  const user = await store.findUserByFeishu({ openId });
+  if (!isCockpitUser(user)) throw new ApiError(403, 'not_whitelisted', '这个飞书账号不是创始人');
+  return user;
 }

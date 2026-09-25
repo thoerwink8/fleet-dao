@@ -40,9 +40,15 @@ import { meBody } from './auth.ts';
 import type { AskWaiters } from './changes.ts';
 import type { Deps } from './deps.ts';
 import { ApiError, readJson, readQuery, reply } from './http.ts';
-import { type Actor, type NewAuditEntry, type TaskSignal, WorkflowGoneError } from './ports.ts';
+import {
+  type Actor,
+  type NewAuditEntry,
+  type TaskSignal,
+  WorkflowGoneError,
+  WorkflowUnavailableError,
+} from './ports.ts';
 import { type CockpitEnv, requireSession } from './session.ts';
-import { eventsHandler } from './sse.ts';
+import { eventsHandler, type SseRelay } from './sse.ts';
 import {
   buildBoard,
   buildPools,
@@ -58,7 +64,7 @@ import {
 
 const ACTION_WORDS = { pause: '暂停', resume: '继续', stop: '叫停', reroute: '换路由' } as const;
 
-export function cockpitRoutes(deps: Deps, waiters: AskWaiters): Hono<CockpitEnv> {
+export function cockpitRoutes(deps: Deps, waiters: AskWaiters, relay: SseRelay): Hono<CockpitEnv> {
   const { config, store } = deps;
   const app = new Hono<CockpitEnv>();
   app.use('*', requireSession(config, store, deps.now));
@@ -66,8 +72,8 @@ export function cockpitRoutes(deps: Deps, waiters: AskWaiters): Hono<CockpitEnv>
   const actorOf = (c: Context<CockpitEnv>): Actor => ({ kind: 'user', id: c.get('user').id });
 
   /**
-   * 先记后做：操作记录写不进就抛错，信号不发。信号没发成（工作流不在了 409、发不出去 502）再追加一条 ok=false 的记录；
-   * 这一条也写不进时只能留日志，但不改变返回给人的结果。
+   * 先记后做：操作记录写不进就抛错，信号不发。信号没发成再追加一条 ok=false 的记录（工作流不在了 409、
+   * Temporal 没接上或连不上 503、别的 502）；这一条也写不进时只能留日志，但不改变返回给人的结果。
    */
   async function signalAndAudit(taskId: string, signal: TaskSignal, audit: NewAuditEntry): Promise<void> {
     await store.appendAudit(audit);
@@ -75,21 +81,23 @@ export function cockpitRoutes(deps: Deps, waiters: AskWaiters): Hono<CockpitEnv>
       await deps.workflows.signal(taskId, signal);
     } catch (err) {
       const gone = err instanceof WorkflowGoneError;
-      const error = gone ? 'workflow_gone' : String(err);
+      const unavailable = err instanceof WorkflowUnavailableError;
+      const error = gone ? 'workflow_gone' : unavailable ? 'workflow_unavailable' : String(err);
       try {
         await store.appendAudit({ ...audit, ok: false, error });
       } catch (auditErr) {
         deps.log.error('信号没发成，这条失败记录也没写进去', { taskId, error, auditError: String(auditErr) });
       }
       if (gone) throw new ApiError(409, 'workflow_gone', '这个任务的工作流已经结束或不存在');
-      deps.log.error('发信号失败', { taskId, signal: signal.name, error });
+      deps.log.error('发信号失败', { taskId, signal: signal.name, error: String(err) });
+      if (unavailable) throw new ApiError(503, 'workflow_unavailable', '工作流服务暂时连不上，稍后再试');
       throw new ApiError(502, 'workflow_unreachable', '发给工作流的信号没发出去，稍后再试');
     }
   }
 
   app.get(WebRoutes.me.path, (c) => reply(c, MeResponse, meBody(config, c.get('user'), c.get('session'))));
 
-  app.get(WebRoutes.events.path, eventsHandler(deps));
+  app.get(WebRoutes.events.path, eventsHandler(deps, relay));
 
   app.get(WebRoutes.repos.path, async (c) => {
     const repos = await store.listRepos();
@@ -228,7 +236,7 @@ export function cockpitRoutes(deps: Deps, waiters: AskWaiters): Hono<CockpitEnv>
       target: `task:${taskId}`,
       after: detail,
       reason: 'reason' in body ? body.reason : undefined,
-      via: 'cockpit',
+      via: c.get('via'),
       ok: true,
     });
     return reply(c, TaskActionResponse, { ok: true });
@@ -260,7 +268,7 @@ export function cockpitRoutes(deps: Deps, waiters: AskWaiters): Hono<CockpitEnv>
         action: 'ask.answer',
         target: `task:${ask.taskId}`,
         after: { askId, answer },
-        via: 'cockpit',
+        via: c.get('via'),
         ok: true,
       },
     );
@@ -319,7 +327,7 @@ export function cockpitRoutes(deps: Deps, waiters: AskWaiters): Hono<CockpitEnv>
         before: body.expected,
         after: next,
         reason: body.reason,
-        via: 'cockpit',
+        via: c.get('via'),
         ok: true,
       },
     );
@@ -341,7 +349,7 @@ export function cockpitRoutes(deps: Deps, waiters: AskWaiters): Hono<CockpitEnv>
         target: `channel:${channelId}`,
         after: { enabled: body.enabled },
         reason: body.reason,
-        via: 'cockpit',
+        via: c.get('via'),
         ok: true,
       },
     );
@@ -385,7 +393,7 @@ export function cockpitRoutes(deps: Deps, waiters: AskWaiters): Hono<CockpitEnv>
     const actor = actorOf(c);
     const result = await store.resolveNotification(
       { id, by: actor },
-      { actor, action: 'notification.resolve', target: `notification:${id}`, via: 'cockpit', ok: true },
+      { actor, action: 'notification.resolve', target: `notification:${id}`, via: c.get('via'), ok: true },
     );
     if (result === 'not_found') throw new ApiError(404, 'notification_not_found', '没有这条通知');
     return reply(c, ResolveNotificationResponse, { ok: true });
@@ -419,7 +427,7 @@ export function cockpitRoutes(deps: Deps, waiters: AskWaiters): Hono<CockpitEnv>
         before: before?.value,
         after: value.data,
         reason: body.reason,
-        via: 'cockpit',
+        via: c.get('via'),
         ok: true,
       },
     );

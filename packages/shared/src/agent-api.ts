@@ -1,8 +1,18 @@
 // fleet 命令（跑在 AI 会话里）⇄ 驾驶舱后端 的接口约定。命令这边（packages/cli）和后端那边（packages/api）都按这份实现。
 // 认证：请求头 `Authorization: Bearer <FLEET_TOKEN>`；令牌只对一个任务的一次会话有效，过期即失效，不能合并、不能改调度台。
+// 出错时返回体是 `{ error: { code, message, details? } }`（同 web-api.ts 的 ApiErrorBody），message 是给 AI 看的白话：
+//   401 令牌无效、过期或这次会话已结束（重试没用）；400 请求不合约定；
+//   409 暂时做不了、过一会儿再试（例如 done 带的 PR 还没同步进库）；422 核实不过、要改了再交（done 的原因在 details.reasons）；
+//   503 同一个幂等键的上一次请求还在处理，稍后用同一个键重试。
 import { z } from 'zod';
 
 export const AGENT_API_PREFIX = '/agent/v1';
+
+/**
+ * 写动作（plan / say / ask / done / blocked）带这个请求头：同一条命令的几次重试用同一个值。
+ * 后端按「会话 + 键」只执行一次，重试拿到第一次成功的结果，不会把一句话记成两句；没成功的那次不占键，重试会重新执行。
+ */
+export const IDEMPOTENCY_KEY_HEADER = 'Idempotency-Key';
 
 export const StepSchema = z.object({
   title: z.string().min(1).max(200),
@@ -31,7 +41,10 @@ export const AskResponse = z.object({
   answer: z.string().optional(),
 });
 
-/** 交活。后端会核实（PR 是否存在、测试是否真跑过），不是说了就算。 */
+/**
+ * 交活。后端会核实，不是说了就算：写码的活要有本次会话跑测试的记录、且最后一次是绿的；带了 PR 编号就核对它在本会话分支上、没关掉。
+ * 会话只在本地提交，推分支和开 PR 由引擎在会话后做，所以一般不带 PR 编号。
+ */
 export const DoneRequest = z.object({
   summary: z.string().min(1).max(4000),
   prNumber: z.number().int().positive().optional(),
@@ -48,7 +61,8 @@ export const TaskResponse = z.object({
   taskId: z.string(),
   subtaskId: z.string().optional(),
   repo: z.string(),
-  branch: z.string(),
+  /** 会话干活的分支；引擎还没给这次会话建分支时没有。 */
+  branch: z.string().optional(),
   specDir: z.string().optional(),
   request: z.string(),
   acceptance: z.array(z.string()),

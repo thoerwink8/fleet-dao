@@ -22,14 +22,15 @@ import {
 } from './session.ts';
 import { pkceChallenge, randomToken, safeEqual } from './tokens.ts';
 
+/** 飞书网关的请求没有登录会话，也用不着 CSRF 令牌，给空串。 */
 export function meBody(
   config: Config,
   user: CockpitUser,
-  session: SessionClaims,
+  session: SessionClaims | undefined,
 ): z.input<typeof MeResponse> {
   return {
     user: { id: user.id, displayName: user.displayName, role: user.role, avatarUrl: user.avatarUrl },
-    csrfToken: csrfTokenFor(config, session.sid),
+    csrfToken: session ? csrfTokenFor(config, session.sid) : '',
   };
 }
 
@@ -154,6 +155,8 @@ export function authRoutes(deps: Deps): Hono<CockpitEnv> {
   });
 
   app.post('/logout', requireSession(config, store, deps.now), async (c) => {
+    if (c.get('via') !== 'cockpit')
+      throw new ApiError(400, 'not_a_browser_session', '只有浏览器登录会话能退出');
     await store.appendAudit({
       actor: { kind: 'user', id: c.get('user').id },
       action: 'logout',

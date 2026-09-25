@@ -1,4 +1,5 @@
 // 把库里的记录拼成驾驶舱要的样子。纯函数，不碰数据库，测试直接喂数据。
+import { poolDataTimes, quotaReadOverdue } from '@fleet-dao/db';
 import {
   type ActivitySchema,
   type Ban,
@@ -14,7 +15,6 @@ import {
   type Pool,
   type PoolViewSchema,
   type ProgressSchema,
-  type QuotaWindow,
   type Repo,
   type Route,
   type RunSchema,
@@ -24,7 +24,7 @@ import {
   type Task,
 } from '@fleet-dao/shared';
 import type { z } from 'zod';
-import type { JobRecord, NotificationRecord, RunPlan, TimelineRecord } from './ports.ts';
+import type { JobRecord, NotificationRecord, QuotaWindowRecord, RunPlan, TimelineRecord } from './ports.ts';
 
 type Activity = z.input<typeof ActivitySchema>;
 type Progress = z.input<typeof ProgressSchema>;
@@ -226,7 +226,7 @@ export function buildPools(
   input: {
     pools: Pool[];
     channels: Channel[];
-    windows: QuotaWindow[];
+    windows: QuotaWindowRecord[];
     routes: Route[];
     activeRuns: SessionRun[];
   },
@@ -240,22 +240,46 @@ export function buildPools(
     const poolId = poolOfRoute.get(run.routeId);
     if (poolId && run.startedAt) running.set(poolId, (running.get(poolId) ?? 0) + 1);
   }
+  // 「上游数据本身的时刻」照数据库包的算法（还在报的窗口里最新的读数时刻），不自己另算一份。
+  const dataTimes = poolDataTimes(
+    input.windows.map((w) => ({
+      poolId: w.poolId,
+      readAt: new Date(w.readAt),
+      staleSince: w.staleSince ? new Date(w.staleSince) : null,
+    })),
+  );
+  const resetKey = (w: QuotaWindowRecord) => (w.resetsAt ? Date.parse(w.resetsAt) : Number.POSITIVE_INFINITY);
   return input.pools.map((p) => {
     const channel = channelById.get(p.channelId);
     const windows = input.windows
       .filter((w) => w.poolId === p.id)
+      // 和数据库包的额度表（quotaTable）同一个排法：快清零的在前，同时清零的按原名。
+      .sort((a, b) => resetKey(a) - resetKey(b) || (a.label < b.label ? -1 : a.label > b.label ? 1 : 0))
       .map((w) => ({
+        label: w.label,
         window: w.window,
+        scope: w.scope,
+        // 可以大于 1（超额），原样给出，前端画进度条时再截。
         utilization: w.utilization,
         used: w.used,
         limit: w.limit,
+        unit: w.unit,
         resetsAt: w.resetsAt,
+        upstreamStatus: w.upstreamStatus,
+        statusRaw: w.statusRaw,
         reading: w.reading,
+        source: w.source,
         readAt: w.readAt,
+        staleSince: w.staleSince,
         stale: now.getTime() - Date.parse(w.readAt) > staleAfterMs,
       }));
-    const quotaStatus: 'fresh' | 'stale' | 'unread' =
-      windows.length === 0 ? 'unread' : windows.some((w) => w.stale) ? 'stale' : 'fresh';
+    const dataAt = dataTimes.get(p.id);
+    // 按池判，和每小时对账、选路由同一个判法（数据库包的 quotaReadOverdue），不逐窗口看。
+    const overdue = quotaReadOverdue(
+      { lastReadOkAt: p.lastReadOkAt ? new Date(p.lastReadOkAt) : null, dataAt: dataAt ?? null },
+      now,
+      staleAfterMs,
+    );
     return {
       id: p.id,
       channelId: p.channelId,
@@ -265,7 +289,9 @@ export function buildPools(
       maxConcurrency: p.maxConcurrency,
       running: running.get(p.id) ?? 0,
       expiresAt: p.expiresAt,
-      quotaStatus,
+      quotaStatus: p.lastReadOkAt === undefined ? 'unread' : overdue ? 'stale' : 'fresh',
+      lastReadOkAt: p.lastReadOkAt,
+      dataAt: dataAt?.toISOString(),
       windows,
     };
   });
@@ -273,12 +299,15 @@ export function buildPools(
 
 // —— 定时任务 ——
 
-/** 允许错过一次：超过两个周期还没成功才算 overdue。 */
+/**
+ * 上次跑成（ok / partial）距今超过 expectEveryMinutes 就算过期——这个数登记时已经含了周期、抖动和一轮耗时
+ * （packages/db 的 scheduled_jobs 说明），所以不再另加余量。
+ */
 export function jobView(job: JobRecord, now: Date): z.input<typeof JobViewSchema> {
   let status: 'fresh' | 'overdue' | 'never' = 'never';
   if (job.lastSuccessAt) {
     const age = now.getTime() - Date.parse(job.lastSuccessAt);
-    status = age > 2 * job.expectEveryMinutes * 60_000 ? 'overdue' : 'fresh';
+    status = age > job.expectEveryMinutes * 60_000 ? 'overdue' : 'fresh';
   }
   return {
     id: job.id,
@@ -362,8 +391,38 @@ export function describeTimeline(rec: TimelineRecord): string {
       return `改文件：${text(p, 'path') ?? '（没带路径）'}`;
     case 'tool':
       return `用工具：${text(p, 'name') ?? '（没带名字）'}`;
-    case 'state':
-      return `状态：${text(p, 'from') ?? '?'} → ${text(p, 'to') ?? '?'}`;
+    case 'state': {
+      const who = field(p, 'entity') === 'subtask' ? '子任务' : '需求';
+      const from = text(p, 'from');
+      const to = text(p, 'to') ?? '?';
+      return from ? `${who}状态：${from} → ${to}` : `${who}建立：${to}`;
+    }
+    case 'run_queued': {
+      const stage = text(p, 'stage');
+      const word = stage && stage in STAGE_WORDS ? STAGE_WORDS[stage as StageKind] : (stage ?? '会话');
+      const why = text(p, 'whyRoute');
+      return `${word}排进队列${why ? `（${why}）` : ''}`;
+    }
+    case 'run_started': {
+      const queueMs = field(p, 'queueMs');
+      return typeof queueMs === 'number' ? `开工（排队 ${Math.round(queueMs / 60_000)} 分钟）` : '开工';
+    }
+    case 'run_ended': {
+      const outcome = text(p, 'outcome');
+      const word =
+        outcome === 'ok'
+          ? '做完'
+          : outcome === 'failed'
+            ? '失败'
+            : outcome === 'stopped'
+              ? '被叫停'
+              : outcome === 'stalled'
+                ? '停滞'
+                : '结束';
+      return `会话${word}`;
+    }
+    case 'notification':
+      return `通知：${text(p, 'title') ?? '（没带标题）'}`;
     case 'answer':
       return `回答追问：${text(p, 'answer') ?? '（没带回答原文）'}`;
     case 'done_rejected': {

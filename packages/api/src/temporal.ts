@@ -1,6 +1,30 @@
 // 发给工作流的信号经 Temporal 客户端发出。这里只依赖客户端的一小块形状（@temporalio/client 的 Client 满足它），
 // 装配时传 `new Client(...)` 进来即可；工作流编号怎么拼、信号叫什么由引擎定，引擎按 TaskSignal 的 name 注册同名信号。
-import { type TaskSignal, type WorkflowControl, WorkflowGoneError } from './ports.ts';
+// 真客户端等引擎的 PR 合了再接（main.ts 里现在用 notConnectedTemporal，健康检查如实报红）。
+import { PublicHealthError } from './health.ts';
+import {
+  type TaskSignal,
+  type TemporalConnection,
+  type WorkflowControl,
+  WorkflowGoneError,
+  WorkflowUnavailableError,
+} from './ports.ts';
+
+/** 还没接上 Temporal：发信号一律 503（WorkflowUnavailableError），健康检查报红。不装作接上了。 */
+export function notConnectedTemporal(): TemporalConnection {
+  const why = 'Temporal 客户端还没接上（等引擎的 PR）';
+  return {
+    control: {
+      async signal() {
+        throw new WorkflowUnavailableError(why);
+      },
+    },
+    async check() {
+      throw new PublicHealthError('not_connected', why);
+    },
+    async close() {},
+  };
+}
 
 export interface TemporalClientLike {
   workflow: {

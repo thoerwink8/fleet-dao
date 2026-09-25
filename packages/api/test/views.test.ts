@@ -102,9 +102,16 @@ describe('时间线白话', () => {
       '跑测试（pnpm check）：没过',
     );
     expect(describeTimeline(rec('test', {}))).toBe('跑测试：结果没读到');
-    expect(describeTimeline(rec('state', { from: 'running', to: 'merging' }))).toBe(
-      '状态：running → merging',
+    expect(describeTimeline(rec('state', { entity: 'task', from: 'running', to: 'merging' }))).toBe(
+      '需求状态：running → merging',
     );
+    expect(describeTimeline(rec('state', { entity: 'subtask', to: 'pending' }))).toBe('子任务建立：pending');
+    expect(describeTimeline(rec('run_queued', { stage: 'execute', whyRoute: '排第一' }))).toBe(
+      '写码排进队列（排第一）',
+    );
+    expect(describeTimeline(rec('run_started', { queueMs: 120_000 }))).toBe('开工（排队 2 分钟）');
+    expect(describeTimeline(rec('run_ended', { outcome: 'stopped' }))).toBe('会话被叫停');
+    expect(describeTimeline(rec('notification', { title: '卡住了' }))).toBe('通知：卡住了');
     expect(describeTimeline(rec('stop', { reason: '方向错了' }))).toBe('叫停：方向错了');
     expect(describeTimeline(rec('file', 'not-an-object'))).toBe('改文件：（没带路径）');
     expect(describeTimeline(rec('something-new'))).toBe('something-new');
@@ -121,16 +128,41 @@ describe('时间线白话', () => {
 });
 
 describe('定时任务新鲜度', () => {
-  it('错过一次不算超期，超过两个周期才算', () => {
+  it('上次跑成超过 expectEveryMinutes 就算过期（这个数登记时已含余量，不再加倍）；从没跑成是 never', () => {
     const now = new Date('2026-09-25T08:00:00Z');
     const job = (minutesAgo: number) => ({
       id: 'j',
       name: 'j',
       schedule: '每小时',
-      expectEveryMinutes: 60,
+      expectEveryMinutes: 75,
       lastSuccessAt: new Date(now.getTime() - minutesAgo * 60_000).toISOString(),
     });
-    expect(jobView(job(119), now).status).toBe('fresh');
-    expect(jobView(job(121), now).status).toBe('overdue');
+    expect(jobView(job(74), now).status).toBe('fresh');
+    expect(jobView(job(76), now).status).toBe('overdue');
+    expect(jobView({ id: 'j', name: 'j', schedule: '每小时', expectEveryMinutes: 75 }, now).status).toBe(
+      'never',
+    );
+  });
+
+  it('四种结局原样给前端（partial 也是跑成，算新鲜）', () => {
+    const now = new Date('2026-09-25T08:00:00Z');
+    const view = jobView(
+      {
+        id: 'j',
+        name: 'j',
+        schedule: '每小时',
+        expectEveryMinutes: 75,
+        lastRun: {
+          startedAt: now.toISOString(),
+          endedAt: now.toISOString(),
+          outcome: 'partial',
+          scanned: 4,
+          why: '一个仓没查成',
+        },
+        lastSuccessAt: now.toISOString(),
+      },
+      now,
+    );
+    expect(view).toMatchObject({ status: 'fresh', lastRun: { outcome: 'partial', scanned: 4 } });
   });
 });
