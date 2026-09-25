@@ -1,0 +1,31 @@
+{
+  "schema": "2.0",
+  "header": {
+    "event_id": "evt_msg_p2p_0001",
+    "event_type": "im.message.receive_v1",
+    "create_time": "1790000000000",
+    "token": "verification_token_placeholder",
+    "app_id": "cli_app_placeholder",
+    "tenant_key": "tenant_placeholder"
+  },
+  "event": {
+    "sender": {
+      "sender_id": {
+        "union_id": "on_founder_a",
+        "user_id": "u_founder_a",
+        "open_id": "ou_founder_a"
+      },
+      "sender_type": "user",
+      "tenant_key": "tenant_placeholder"
+    },
+    "message": {
+      "message_id": "om_user_0001",
+      "create_time": "1790000000000",
+      "update_time": "1790000000000",
+      "chat_id": "oc_p2p_founder_a",
+      "chat_type": "p2p",
+      "message_type": "text",
+      "content": "{\"text\":\"给登录页加手机验证码\"}"
+    }
+  }
+}

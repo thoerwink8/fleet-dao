@@ -1,0 +1,35 @@
+{
+  "schema": "2.0",
+  "header": {
+    "event_id": "evt_card_form_0001",
+    "token": "verification_token_placeholder",
+    "create_time": "1790000000000000",
+    "event_type": "card.action.trigger",
+    "tenant_key": "tenant_placeholder",
+    "app_id": "cli_app_placeholder"
+  },
+  "event": {
+    "operator": {
+      "tenant_key": "tenant_placeholder",
+      "user_id": "u_founder_a",
+      "open_id": "ou_founder_a",
+      "union_id": "on_founder_a"
+    },
+    "token": "c-update_token_placeholder",
+    "action": {
+      "value": { "a": "draft.revise", "d": "draft-1", "r": 1, "_n": "n1" },
+      "tag": "button",
+      "timezone": "Asia/Shanghai",
+      "form_value": {
+        "note": "只做网页版，先不管小程序",
+        "repo": "repo-web"
+      },
+      "name": "revise"
+    },
+    "host": "im_message",
+    "context": {
+      "open_message_id": "om_card_placeholder",
+      "open_chat_id": "oc_team"
+    }
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "schema": "2.0",
+  "header": {
+    "event_id": "evt_msg_group_0001",
+    "event_type": "im.message.receive_v1",
+    "create_time": "1790000000000",
+    "token": "verification_token_placeholder",
+    "app_id": "cli_app_placeholder",
+    "tenant_key": "tenant_placeholder"
+  },
+  "event": {
+    "sender": {
+      "sender_id": {
+        "union_id": "on_founder_b",
+        "user_id": "u_founder_b",
+        "open_id": "ou_founder_b"
+      },
+      "sender_type": "user",
+      "tenant_key": "tenant_placeholder"
+    },
+    "message": {
+      "message_id": "om_user_0101",
+      "root_id": "om_card_placeholder",
+      "parent_id": "om_card_placeholder",
+      "create_time": "1790000000000",
+      "update_time": "1790000000000",
+      "chat_id": "oc_team",
+      "chat_type": "group",
+      "message_type": "text",
+      "content": "{\"text\":\"@_user_1 12 为什么卡住？\"}",
+      "mentions": [
+        {
+          "key": "@_user_1",
+          "id": {
+            "union_id": "on_bot",
+            "user_id": "",
+            "open_id": "ou_bot"
+          },
+          "name": "fleet",
+          "tenant_key": "tenant_placeholder"
+        }
+      ]
+    }
+  }
+}
