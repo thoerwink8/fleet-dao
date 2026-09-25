@@ -33,6 +33,13 @@ export function createEnv(): Promise<TestWorkflowEnvironment> {
  */
 export function createRealEnv(): Promise<TestWorkflowEnvironment> {
   const cli = process.env.FLEET_TEST_TEMPORAL_CLI?.trim();
+  // CI 按 deploy/france.sh 钉的版本装好命令行再交过来（.github/workflows/ci.yml）；没给说明那几步坏了，
+  // 不许悄悄退回 SDK 默认版本（和法国不同版，测过也不算数）。
+  if (!cli && process.env.CI) {
+    throw new Error(
+      'CI 里没给 FLEET_TEST_TEMPORAL_CLI：Temporal 命令行没按法国的版本装上，这条真服务端的测试不算数',
+    );
+  }
   return TestWorkflowEnvironment.createLocal(
     cli ? { server: { executable: { type: 'existing-path', path: cli } } } : {},
   );
