@@ -56,6 +56,8 @@ export const pools = pgTable(
     scopeModels: jsonb('scope_models').$type<Record<string, ScopeMembership>>(),
     /** 最近一次读成额度的时刻（savePoolQuota 写，读失败不动）。每小时对账看它是否超过 30 分钟。 */
     lastReadOkAt: timestamp('last_read_ok_at', tz),
+    /** 这个池的会话跑在哪个系统用户下（Claude 订阅一个组织一个用户，引擎按池挑、从不切号）。空 = 还没定。 */
+    sessionUser: text('session_user'),
   },
   (t) => [
     // 给 routes 的组合外键用：路由挂的池必须属于路由写的渠道。
@@ -113,6 +115,8 @@ export const stagePolicies = pgTable('stage_policies', {
   stage: stageKind('stage').primaryKey(),
   /** 创始人手动钉住的顺序，AI 帅位不改。 */
   pinned: boolean('pinned').notNull().default(false),
+  /** 目录装载器给这个阶段排过初始顺序（或接手了库里已有的顺序）的时刻。有值之后装载器再也不动这个阶段。 */
+  catalogAppliedAt: timestamp('catalog_applied_at', tz),
 });
 
 export const stagePolicyRoutes = pgTable(
@@ -126,6 +130,8 @@ export const stagePolicyRoutes = pgTable(
       .references(() => routes.id),
     /** 从 0 起，越小越先用。 */
     position: integer('position').notNull(),
+    /** 调度台上这个阶段里的开关：关着的照样挂在顺序里，但不派。 */
+    enabled: boolean('enabled').notNull().default(true),
   },
   (t) => [
     primaryKey({ columns: [t.stage, t.routeId] }),

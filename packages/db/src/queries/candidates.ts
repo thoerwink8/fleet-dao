@@ -22,12 +22,13 @@ import {
 } from './quota.ts';
 
 /**
- * offline 探针或熔断判不在线；channel-disabled 渠道关了；pool-expired 订阅过期；model-retired 模型已下架；
- * banned 命中禁令（代码里的全局硬禁令 + 库里的 bans）；quota-exhausted 适用的额度窗用满；
+ * switched-off 调度台上这个阶段里关着；offline 探针或熔断判不在线；channel-disabled 渠道关了；pool-expired 订阅过期；
+ * model-retired 模型已下架；banned 命中禁令（代码里的全局硬禁令 + 库里的 bans）；quota-exhausted 适用的额度窗用满；
  * no-slot 账号池并发满了（等空位，不是坏了）。
  * 额度没读成不算挡：照常可选，但排在读到了的后面（设计 §九 选路第 3 条）。
  */
 export type Blocker =
+  | 'switched-off'
   | 'offline'
   | 'channel-disabled'
   | 'pool-expired'
@@ -176,6 +177,7 @@ export async function stageCandidates(
 
     const running = inFlight.get(pool.id) ?? 0;
     const blockers: Blocker[] = [];
+    if (!order.enabled) blockers.push('switched-off');
     if (!route.alive) blockers.push('offline');
     if (!channel.enabled) blockers.push('channel-disabled');
     if (pool.expiresAt !== null && pool.expiresAt.getTime() <= now.getTime()) blockers.push('pool-expired');

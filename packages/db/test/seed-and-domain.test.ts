@@ -239,10 +239,11 @@ describe('库里的行 → 领域对象', () => {
       enabled: true,
     });
     const [policy] = (await t.db.select().from(stagePolicies)).filter((p) => p.stage === 'execute');
-    expect(toStagePolicy(policy as typeof stagePolicies.$inferSelect, ['opus'])).toEqual({
+    expect(toStagePolicy(policy as typeof stagePolicies.$inferSelect, ['opus', 'k3'], ['k3'])).toEqual({
       stage: 'execute',
-      routeIds: ['opus'],
+      routeIds: ['opus', 'k3'],
       pinned: false,
+      disabledRouteIds: ['k3'],
     });
   });
 

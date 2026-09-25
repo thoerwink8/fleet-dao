@@ -1,0 +1,152 @@
+{
+  "_说明": "目录配置样例：族、渠道、账号池、模型、路由、各阶段的路由顺序。真配置放 /etc/fleet-dao/catalog.json（或用 FLEET_CATALOG 指定），不进 git。发布脚本在迁移之后跑 packages/db/src/bin/catalog.ts 装进库：只补缺，驾驶舱里改过的不覆盖。账号池 id 要和额度读取器配置（quota.example.json）的 poolId 一致。以 _ 开头的键是注释。",
+  "families": [
+    { "id": "claude", "displayName": "Claude", "vendor": "Anthropic" },
+    { "id": "gpt", "displayName": "GPT", "vendor": "OpenAI" },
+    { "id": "kimi", "displayName": "Kimi", "vendor": "Moonshot AI" },
+    { "id": "deepseek", "displayName": "DeepSeek", "vendor": "DeepSeek" },
+    { "id": "cursor", "displayName": "Cursor", "vendor": "Anysphere" },
+    { "id": "grok", "displayName": "Grok", "vendor": "xAI" }
+  ],
+  "channels": [
+    { "id": "claude-sub", "name": "Claude 订阅", "billing": "subscription", "enabled": true },
+    { "id": "mirasim", "name": "Mirasim 中转", "billing": "subscription", "enabled": true },
+    { "id": "cursor", "name": "Cursor 订阅", "billing": "subscription", "enabled": true },
+    { "id": "xai", "name": "Grok 订阅（Grok Build）", "billing": "subscription", "enabled": true },
+    {
+      "_说明": "按量计费、没有账单接口，只给 Jev 判断题用、不挂路由；日帽在额度读取器配置里。",
+      "id": "jev",
+      "name": "Jev 判断题",
+      "billing": "metered",
+      "enabled": true
+    }
+  ],
+  "pools": [
+    {
+      "_说明": "Claude 订阅 · 独享组织。会话跑在 fleet-agent-dedicated（这个用户的 reclaude 挂着独享组织，从不切号）。并发没量过，按保守值 3。",
+      "id": "claude-solo",
+      "channelId": "claude-sub",
+      "maxConcurrency": 3,
+      "sessionUser": "fleet-agent-dedicated"
+    },
+    {
+      "_说明": "Claude 订阅 · 拼车组织。会话跑在 fleet-agent-carpool。并发没量过，按保守值 3。",
+      "id": "claude-carpool",
+      "channelId": "claude-sub",
+      "maxConcurrency": 3,
+      "sessionUser": "fleet-agent-carpool"
+    },
+    {
+      "_说明": "Mirasim 中转账号：Opus、GPT（codex）、Kimi、DeepSeek 都扣这一份（5h、7d），另有只扣某一族的窗口（7d_claude、7d_fable）。经 Mirasim 起的会话要给会话用户单独起一份 Mirasim 服务，配好之前这些路由保持关着（docs/design.md）。并发 5 是旧系统拍的，没量过。",
+      "id": "mirasim-relay",
+      "channelId": "mirasim",
+      "maxConcurrency": 5
+    },
+    {
+      "_说明": "Cursor：Auto、API 两个桶是只扣对应模型组的窗口，成员表由额度读取器读来。并发 6 是旧系统实测（docs/reference/quota.md）。两个会话用户各登录一次 Cursor（docs/plan.md），不绑某一个用户。",
+      "id": "cursor",
+      "channelId": "cursor",
+      "maxConcurrency": 6
+    },
+    {
+      "_说明": "Grok Build 订阅，按周的额度百分比。并发 6 是旧系统实测（docs/reference/quota.md）。两个会话用户各登录一次 Grok（docs/plan.md），不绑某一个用户。",
+      "id": "grok",
+      "channelId": "xai",
+      "maxConcurrency": 6
+    },
+    {
+      "_说明": "Jev 判断题：不跑会话，只记额度（额度读取器按用量估）。",
+      "id": "jev",
+      "channelId": "jev",
+      "maxConcurrency": 1
+    }
+  ],
+  "models": [
+    { "id": "opus-5.5", "family": "claude", "displayName": "Opus 5.5" },
+    { "id": "gpt-5.6-luna", "family": "gpt", "displayName": "GPT 5.6 luna" },
+    { "id": "kimi-k3", "family": "kimi", "displayName": "Kimi k3" },
+    { "id": "deepseek-flash", "family": "deepseek", "displayName": "DeepSeek Flash" },
+    { "id": "cursor-auto", "family": "cursor", "displayName": "Cursor Auto" },
+    { "id": "grok-4.7", "family": "grok", "displayName": "Grok 4.7" }
+  ],
+  "routes": [
+    {
+      "_说明": "reclaude -p --model claude-opus-5-5，流里回显同名（插头夹具 packages/adapters/test/fixtures/claude-code/cc-opus-edit-bash）。",
+      "id": "claude-solo:opus-5.5:claude-code",
+      "poolId": "claude-solo",
+      "modelId": "opus-5.5",
+      "hostId": "claude-code",
+      "upstreamModel": "claude-opus-5-5"
+    },
+    {
+      "id": "claude-carpool:opus-5.5:claude-code",
+      "poolId": "claude-carpool",
+      "modelId": "opus-5.5",
+      "hostId": "claude-code",
+      "upstreamModel": "claude-opus-5-5"
+    },
+    {
+      "_说明": "经 Mirasim 起 claude、扣中转额度；中转的 7d_claude 窗按族名扣它（额度读取器夹具 mirasim-relay-2026-09-24）。",
+      "id": "mirasim-relay:opus-5.5:mirasim",
+      "poolId": "mirasim-relay",
+      "modelId": "opus-5.5",
+      "hostId": "mirasim",
+      "upstreamModel": "claude-opus-5-5"
+    },
+    {
+      "_说明": "codex 不直起（直起用的是按量计费的 key），经 Mirasim 起 codex、走中转，点名 gpt-5.6-luna（旧系统在役档 codex-relay-gpt-5.6-luna，见 docs/reference/adapters.md）。",
+      "id": "mirasim-relay:gpt-5.6-luna:mirasim",
+      "poolId": "mirasim-relay",
+      "modelId": "gpt-5.6-luna",
+      "hostId": "mirasim",
+      "upstreamModel": "gpt-5.6-luna"
+    },
+    {
+      "_说明": "经 Mirasim 起 pi、不点名模型，吃服务端默认 kimi-k3，中转账本回显 kimi-k3（见 docs/reference/adapters.md 的 pi 一节）。",
+      "id": "mirasim-relay:kimi-k3:mirasim",
+      "poolId": "mirasim-relay",
+      "modelId": "kimi-k3",
+      "hostId": "mirasim",
+      "upstreamModel": "kimi-k3"
+    },
+    {
+      "_说明": "旧系统点名过 deepseek-flash（docs/reference/adapters.md 的 dsh 一节），新插头还没实跑。",
+      "id": "mirasim-relay:deepseek-flash:mirasim",
+      "poolId": "mirasim-relay",
+      "modelId": "deepseek-flash",
+      "hostId": "mirasim",
+      "upstreamModel": "deepseek-flash"
+    },
+    {
+      "_说明": "cursor-agent --model auto 吃订阅里的 Auto 桶；额度接口的成员表里 Auto 叫 default（额度读取器夹具 cursor-period-usage-2026-09-24）。",
+      "id": "cursor:cursor-auto:cursor-agent",
+      "poolId": "cursor",
+      "modelId": "cursor-auto",
+      "hostId": "cursor-agent",
+      "upstreamModel": "auto",
+      "upstreamAliases": ["default"]
+    },
+    {
+      "_说明": "grok -m grok-4.7，终帧回 grok-4.7-build（插头夹具 packages/adapters/test/fixtures/grok/grok-read）。",
+      "id": "grok:grok-4.7:grok",
+      "poolId": "grok",
+      "modelId": "grok-4.7",
+      "hostId": "grok",
+      "upstreamModel": "grok-4.7",
+      "upstreamAliases": ["grok-4.7-build"]
+    }
+  ],
+  "stages": {
+    "_说明": "构建期所有阶段都先用 Opus 5.5、经两个 Claude 池（设计文档「已定」表第 8 条）；其余路由挂在后面、默认关着。硬禁令（GPT 不做 UI、不用 Fable）由代码管。每个阶段只在第一次装的时候排，之后驾驶舱里怎么改都不覆盖；要给某个阶段单排，就加一个以阶段名为键的列表。",
+    "default": [
+      { "routeId": "claude-solo:opus-5.5:claude-code", "enabled": true },
+      { "routeId": "claude-carpool:opus-5.5:claude-code", "enabled": true },
+      { "routeId": "mirasim-relay:opus-5.5:mirasim", "enabled": false },
+      { "routeId": "mirasim-relay:gpt-5.6-luna:mirasim", "enabled": false },
+      { "routeId": "mirasim-relay:kimi-k3:mirasim", "enabled": false },
+      { "routeId": "mirasim-relay:deepseek-flash:mirasim", "enabled": false },
+      { "routeId": "cursor:cursor-auto:cursor-agent", "enabled": false },
+      { "routeId": "grok:grok-4.7:grok", "enabled": false }
+    ]
+  }
+}
