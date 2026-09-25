@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { type AdoptWorktreeInput, adoptWorktree } from '../src/procs.ts';
+import { type AdoptWorktreeInput, adoptWorktree, removeWorktreeDir } from '../src/procs.ts';
 import { tempDir } from './helpers.ts';
 
 const HELPER = join(dirname(fileURLToPath(import.meta.url)), 'fake-scope-helper.ts');
@@ -120,5 +120,67 @@ describe('adoptWorktree · 调帮手的参数与退出码（假帮手）', () =>
   it('帮手脚本本身起不来（拼错路径，spawn 就失败）：failed，exitCode 是 null（不是脚本的退出码，是 spawn 自己的错）', async () => {
     const result = await adoptWorktree(input({ sudo: [], helper: join(tempDir(), 'no-such-helper') }));
     expect(result).toMatchObject({ ok: false, code: 'failed', exitCode: null });
+  });
+});
+
+describe('removeWorktreeDir · 调帮手删工作树（假帮手）', () => {
+  let log: string;
+  beforeEach(() => {
+    log = join(tempDir(), 'remove.log');
+    process.env.FLEET_FAKE_SCOPE_LOG = log;
+  });
+  afterEach(() => {
+    delete process.env.FLEET_FAKE_SCOPE_LOG;
+    delete process.env.FLEET_FAKE_SCOPE_REMOVE_STDOUT;
+    delete process.env.FLEET_FAKE_SCOPE_REMOVE_STDERR;
+    delete process.env.FLEET_FAKE_SCOPE_REMOVE_EXIT;
+  });
+  const remove = (over: Partial<Parameters<typeof removeWorktreeDir>[0]> = {}) =>
+    removeWorktreeDir({ dir: DIR, helper: HELPER, sudo: [process.execPath], ...over });
+
+  it('参数：remove <工作树>；帮手报 removed 就是删了', async () => {
+    expect(await remove()).toEqual({ ok: true, gone: false });
+    const [run] = readFileSync(log, 'utf8')
+      .split('\n')
+      .filter((l) => l)
+      .map((l) => JSON.parse(l) as { action: string; args: string[] });
+    expect(run?.action).toBe('remove');
+    expect(run?.args).toEqual([DIR]);
+  });
+
+  it('帮手报 gone：本来就不在，正常返回', async () => {
+    process.env.FLEET_FAKE_SCOPE_REMOVE_STDOUT = `gone ${DIR}\n`;
+    expect(await remove()).toEqual({ ok: true, gone: true });
+  });
+
+  it('退出码 0 却认不出最后一行（别的路径、空输出）：failed，不当成删好了', async () => {
+    process.env.FLEET_FAKE_SCOPE_REMOVE_STDOUT = 'removed /var/lib/fleet-work/repo1/other\n';
+    expect(await remove()).toMatchObject({ ok: false, code: 'failed', exitCode: 0 });
+    process.env.FLEET_FAKE_SCOPE_REMOVE_STDOUT = '';
+    expect(await remove()).toMatchObject({ ok: false, code: 'failed', exitCode: 0 });
+  });
+
+  it('退出码 64：usage，带帮手原话；别的退出码：failed', async () => {
+    process.env.FLEET_FAKE_SCOPE_REMOVE_STDOUT = '';
+    process.env.FLEET_FAKE_SCOPE_REMOVE_EXIT = '64';
+    process.env.FLEET_FAKE_SCOPE_REMOVE_STDERR = 'fleet-agent-scope：工作树路径上有符号链接\n';
+    const usage = await remove();
+    expect(usage).toMatchObject({ ok: false, code: 'usage', exitCode: 64 });
+    expect(!usage.ok && usage.detail).toContain('符号链接');
+    process.env.FLEET_FAKE_SCOPE_REMOVE_EXIT = '1';
+    expect(await remove()).toMatchObject({ ok: false, code: 'failed', exitCode: 1 });
+  });
+
+  it('帮手起不来：failed，exitCode 是 null', async () => {
+    expect(await remove({ sudo: [], helper: join(tempDir(), 'no-such-helper') })).toMatchObject({
+      ok: false,
+      code: 'failed',
+      exitCode: null,
+    });
+  });
+
+  it('相对路径、控制字符：起之前就拒', () => {
+    expect(() => remove({ dir: 'repo1/task1' })).toThrow('绝对路径');
+    expect(() => remove({ dir: `${DIR}\n` })).toThrow('控制字符');
   });
 });

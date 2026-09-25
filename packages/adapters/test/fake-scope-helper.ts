@@ -35,6 +35,12 @@ if (action === 'run') {
   if (process.env.FLEET_FAKE_SCOPE_ADOPT_STDERR)
     process.stderr.write(process.env.FLEET_FAKE_SCOPE_ADOPT_STDERR);
   process.exit(Number(process.env.FLEET_FAKE_SCOPE_ADOPT_EXIT ?? '0'));
+} else if (action === 'remove') {
+  // 标准输出和退出码由测试摆布：验 removeWorktreeDir 怎么认 removed / gone / 认不出
+  process.stdout.write(process.env.FLEET_FAKE_SCOPE_REMOVE_STDOUT ?? `removed ${rest[0]}\n`);
+  if (process.env.FLEET_FAKE_SCOPE_REMOVE_STDERR)
+    process.stderr.write(process.env.FLEET_FAKE_SCOPE_REMOVE_STDERR);
+  process.exit(Number(process.env.FLEET_FAKE_SCOPE_REMOVE_EXIT ?? '0'));
 } else {
   process.exit(0);
 }

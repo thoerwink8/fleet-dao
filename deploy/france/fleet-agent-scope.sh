@@ -10,9 +10,12 @@
 #   sudo -n fleet-agent-scope stop <编号>     没有这个会话也算收好，返回 0
 #   sudo -n fleet-agent-scope list            在册的会话：编号 状态，一行一个
 #   sudo -n fleet-agent-scope adopt <工作树> --user <会话用户> [--from <会话用户> --session <会话编号>]
-#                                    换会话用户接着干：改工作树属主，给了 --session 就顺带把过程记录拷过去
+#                                    把工作树交给这个会话用户：不在就建（中间各级 root:root 755，最后一级归它、700），
+#                                    在就改属主；给了 --session 就顺带把过程记录从 --from 那里拷过去
 #                                    （--from 和 --session 要么都给要么都不给）。退出码：0 成功；64 校验不过；
 #                                    65 会话记录没找到或不唯一；其余失败 1。
+#   sudo -n fleet-agent-scope remove <工作树>  删掉一棵工作树（不跟随符号链接、不跨文件系统）。本来就不在也返回 0；
+#                                    标准输出最后一行是 removed <路径> 或 gone <路径>。退出码同 adopt。
 #
 # 两个会话用户各挂一个 reclaude 组织、永不切号：fleet-agent-dedicated（独享）、fleet-agent-carpool（拼车）；
 # 引擎按选中的账号池挑用户。reclaude 的组织写在各自家里的 ~/.reclaude/device.json，对这个用户的所有会话一起生效。
@@ -132,8 +135,92 @@ list() {
 # 换会话用户接着干（docs/design.md 第十四节）：工作树路径不变，只改属主；给了 --session 就把过程记录也拷过去，
 # 新用户按同一个路径算出的项目目录名和旧用户一样，fork 续会话时就能接着找到它。
 # 退出码：0 成功；64 用法/校验不过（下面全部经 die）；65 会话记录没找到或不唯一；其余失败 1。
+# 工作树落点（docs/design.md 第十四节）：绝对路径、在 WORK_BASE 之下、至少两层（仓/任务）、每一段只许字母数字和 . _ -
+# （不许 . 和 ..）。WORK_BASE 和中间各级都归 root、别人写不进，会话用户没法在路径上塞符号链接；这里照样逐段核对。
+check_tree_path() {
+  local dir=$1 rel seg
+  local -a segs=()
+  [[ "$dir" == /* ]] || die "工作树要写绝对路径：「$dir」"
+  case $dir in
+  "$WORK_BASE"/*) ;;
+  *) die "工作树要在 $WORK_BASE 之下：「$dir」" ;;
+  esac
+  rel=${dir#"$WORK_BASE"/}
+  [[ "$rel" == */* ]] || die "工作树至少要在 $WORK_BASE 下两层（仓/任务）：「$dir」"
+  IFS=/ read -r -a segs <<<"$rel"
+  for seg in "${segs[@]}"; do
+    [[ -n "$seg" && "$seg" != . && "$seg" != .. ]] || die "工作树路径里不许有空段、. 和 ..：「$dir」"
+    [[ "$seg" =~ ^[A-Za-z0-9._-]+$ ]] || die "工作树路径每一段只许字母、数字和 . _ -：「$dir」"
+  done
+}
+
+# 路径上 WORK_BASE 到上一级之间各段：不许是符号链接，在的要是目录；make=1 时不在的以 root:root 755 建。
+walk_parents() {
+  local dir=$1 make=$2 cur seg i
+  local -a segs=()
+  [[ -d "$WORK_BASE" && ! -L "$WORK_BASE" ]] || die "工作树的根不在或是符号链接：$WORK_BASE"
+  IFS=/ read -r -a segs <<<"${dir#"$WORK_BASE"/}"
+  cur=$WORK_BASE
+  for ((i = 0; i < ${#segs[@]} - 1; i++)); do
+    seg=${segs[i]}
+    cur=$cur/$seg
+    [[ ! -L "$cur" ]] || die "工作树路径上有符号链接：「$cur」"
+    if [[ -e "$cur" ]]; then
+      [[ -d "$cur" ]] || die "工作树路径上的「$cur」不是目录"
+    elif ((make)); then
+      install -d -o root -g root -m 755 -- "$cur" || {
+        echo "fleet-agent-scope：建不了目录：$cur" >&2
+        exit 1
+      }
+    fi
+  done
+}
+
+# 把工作树交给 user：不在就建（归它、700），在就整棵改属主（不跟随符号链接）。
+ensure_tree() {
+  local dir=$1 user=$2 real
+  walk_parents "$dir" 1
+  [[ ! -L "$dir" ]] || die "工作树路径上有符号链接：「$dir」"
+  if [[ -e "$dir" ]]; then
+    [[ -d "$dir" ]] || die "工作树不是目录：「$dir」"
+    real=$(realpath -e -- "$dir" 2>/dev/null) || die "工作树不存在：「$dir」"
+    [[ "$real" == "$dir" ]] || die "工作树路径上有符号链接：「$dir」解析成「$real」"
+    chown -R --no-dereference "$user:$user" -- "$dir" || {
+      echo "fleet-agent-scope：改属主失败：$dir" >&2
+      exit 1
+    }
+  else
+    install -d -o "$user" -g "$user" -m 700 -- "$dir" || {
+      echo "fleet-agent-scope：建不了工作树：$dir" >&2
+      exit 1
+    }
+  fi
+}
+
+# 删一棵工作树：以 root rm -rf，不跟随符号链接（rm 只删链接本身）、不跨文件系统。本来就不在算删好。
+remove() {
+  local dir=${1:-} real
+  [[ -n "$dir" ]] || die "用法：fleet-agent-scope remove <工作树>"
+  (($# == 1)) || die "remove 只收一个参数（工作树）"
+  check_tree_path "$dir"
+  walk_parents "$dir" 0
+  if [[ ! -e "$dir" && ! -L "$dir" ]]; then
+    echo "gone $dir"
+    return 0
+  fi
+  [[ ! -L "$dir" ]] || die "工作树路径上有符号链接：「$dir」"
+  [[ -d "$dir" ]] || die "工作树不是目录：「$dir」"
+  real=$(realpath -e -- "$dir" 2>/dev/null) || die "工作树不存在：「$dir」"
+  [[ "$real" == "$dir" ]] || die "工作树路径上有符号链接：「$dir」解析成「$real」"
+  rm -rf --one-file-system -- "$dir" || {
+    echo "fleet-agent-scope：删不掉：$dir" >&2
+    exit 1
+  }
+  echo "removed $dir"
+}
+
 adopt() {
-  local dir=${1:-} user="" from="" session="" u ok=0 rel real from_home to_home src project_dir dest_dir
+  local dir=${1:-} user="" from="" session="" u ok=0 from_home to_home src project_dir dest_dir
   local -a hits=() pstat=()
   [[ -n "$dir" ]] || die "用法：fleet-agent-scope adopt <工作树> --user <会话用户> [--from <会话用户> --session <会话编号>]"
   shift
@@ -166,22 +253,8 @@ adopt() {
     [[ "$session" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] ||
       die "--session 要是 UUID：「$session」"
   fi
-  # 工作树落点：绝对路径、在 WORK_BASE 之下、至少两层（仓/任务）、路径上每一段都不是符号链接、是目录
-  [[ "$dir" == /* ]] || die "工作树要写绝对路径：「$dir」"
-  case $dir in
-  "$WORK_BASE"/*) ;;
-  *) die "工作树要在 $WORK_BASE 之下：「$dir」" ;;
-  esac
-  rel=${dir#"$WORK_BASE"/}
-  [[ "$rel" == */* ]] || die "工作树至少要在 $WORK_BASE 下两层（仓/任务）：「$dir」"
-  real=$(realpath -e -- "$dir" 2>/dev/null) || die "工作树不存在：「$dir」"
-  [[ "$real" == "$dir" ]] || die "工作树路径上有符号链接：「$dir」解析成「$real」"
-  [[ -d "$dir" ]] || die "工作树不是目录：「$dir」"
-
-  chown -R --no-dereference "$user:$user" -- "$dir" || {
-    echo "fleet-agent-scope：改属主失败：$dir" >&2
-    exit 1
-  }
+  check_tree_path "$dir"
+  ensure_tree "$dir" "$user"
 
   if [[ -n "$session" ]]; then
     from_home=$(getent passwd "$from" | cut -d: -f6) || die "找不到用户 $from 的家目录"
@@ -226,5 +299,9 @@ adopt)
   shift
   adopt "$@"
   ;;
-*) die "用法：fleet-agent-scope run <编号> --user <会话用户> [选项] -- /绝对路径/命令 参数… | stop <编号> | list | adopt <工作树> --user <会话用户> [--from <会话用户> --session <会话编号>]" ;;
+remove)
+  shift
+  remove "$@"
+  ;;
+*) die "用法：fleet-agent-scope run <编号> --user <会话用户> [选项] -- /绝对路径/命令 参数… | stop <编号> | list | adopt <工作树> --user <会话用户> [--from <会话用户> --session <会话编号>] | remove <工作树>" ;;
 esac

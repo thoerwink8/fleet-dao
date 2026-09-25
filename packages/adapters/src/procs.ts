@@ -334,6 +334,53 @@ export function adoptWorktree(input: AdoptWorktreeInput): Promise<AdoptWorktreeR
   });
 }
 
+export interface RemoveWorktreeDirInput {
+  /** AI 会话的工作树，绝对路径；帮手脚本以 root 再核实一遍（同 adoptWorktree）。 */
+  dir: string;
+  helper?: string;
+  sudo?: readonly string[];
+}
+
+export type RemoveWorktreeDirResult =
+  /** gone = 本来就不在（清理动作对已消失的对象正常返回，不当失败）。 */
+  | { ok: true; gone: boolean }
+  | { ok: false; code: 'usage' | 'failed'; exitCode: number | null; detail: string };
+
+/**
+ * 删一棵 AI 会话工作树：会话用户的目录（700）引擎自己进不去，经 `sudo -n fleet-agent-scope remove` 以 root 删。
+ * 帮手的标准输出最后一行是 `removed <路径>` 或 `gone <路径>`；退出码 0 却认不出这一行也算失败（不当成删好了）。
+ */
+export function removeWorktreeDir(input: RemoveWorktreeDirInput): Promise<RemoveWorktreeDirResult> {
+  if (!input.dir.startsWith('/')) throw new Error(`工作树要写绝对路径：${input.dir}`);
+  if (CONTROL_CHAR.test(input.dir)) throw new Error('工作树路径里有控制字符，不写上命令行');
+  const [bin, ...rest] = [
+    ...(input.sudo ?? ['/usr/bin/sudo', '-n']),
+    input.helper ?? SCOPE_HELPER,
+    'remove',
+    input.dir,
+  ];
+  return new Promise((resolve) => {
+    execFile(bin as string, rest, { encoding: 'utf8', timeout: 120_000 }, (err, stdout, stderr) => {
+      if (err) {
+        const exitCode = typeof err.code === 'number' ? err.code : null;
+        const detail = `${stderr || ''}${err.message}`.trim();
+        resolve({ ok: false, code: exitCode === 64 ? 'usage' : 'failed', exitCode, detail });
+        return;
+      }
+      const last = stdout.trimEnd().split('\n').at(-1) ?? '';
+      if (last === `removed ${input.dir}`) resolve({ ok: true, gone: false });
+      else if (last === `gone ${input.dir}`) resolve({ ok: true, gone: true });
+      else
+        resolve({
+          ok: false,
+          code: 'failed',
+          exitCode: 0,
+          detail: `帮手退出码 0，但没报 removed / gone（最后一行：「${last.slice(0, 200)}」）`,
+        });
+    });
+  });
+}
+
 /** scope 的 cgroup 里还有几个进程。scope 已不在 = 0；查不了（没有 systemctl、读不了 cgroup）= undefined。 */
 export function scopeProcCount(scope: CgroupScope): number | undefined {
   const res = spawnSync('systemctl', ['show', '-p', 'ControlGroup', '--value', scopeUnit(scope)], {

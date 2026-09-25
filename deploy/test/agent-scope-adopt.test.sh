@@ -89,6 +89,68 @@ else
   flunk "--session 不是 UUID 应退出码 64：退出码 $rc，输出「$out」"
 fi
 
+touch "$WORK/afile"
+out=$(bash "$BIN" adopt "$WORK/afile/task" --user fleet-agent-dedicated 2>&1)
+rc=$?
+if ((rc == 64)) && [[ "$out" == *"不是目录"* ]]; then
+  pass "中间一级是文件：退出码 64"
+else
+  flunk "中间一级是文件应退出码 64：退出码 $rc，输出「$out」"
+fi
+
+out=$(bash "$BIN" adopt "$WORK/repo1/a b" --user fleet-agent-dedicated 2>&1)
+rc=$?
+if ((rc == 64)) && [[ "$out" == *"只许字母"* ]]; then
+  pass "路径里有空格：退出码 64"
+else
+  flunk "路径里有空格应退出码 64：退出码 $rc，输出「$out」"
+fi
+
+echo "== remove（以 root 删，不需要会话用户）"
+
+out=$(bash "$BIN" remove "repo1/task1" 2>&1)
+rc=$?
+if ((rc == 64)) && [[ "$out" == *"绝对路径"* ]]; then pass "remove 相对路径：退出码 64"; else flunk "remove 相对路径应 64：$rc「$out」"; fi
+
+out=$(bash "$BIN" remove "$OUTSIDE/repo1/task1" 2>&1)
+rc=$?
+if ((rc == 64)) && [[ "$out" == *"之下"* ]]; then pass "remove 不在根下：退出码 64"; else flunk "remove 不在根下应 64：$rc「$out」"; fi
+
+out=$(bash "$BIN" remove "$WORK/onlyonelevel" 2>&1)
+rc=$?
+if ((rc == 64)) && [[ "$out" == *"两层"* ]]; then pass "remove 只有一层：退出码 64"; else flunk "remove 只有一层应 64：$rc「$out」"; fi
+
+out=$(bash "$BIN" remove "$WORK/repo1/../repo2" 2>&1)
+rc=$?
+if ((rc == 64)) && [[ "$out" == *".."* ]]; then pass "remove 带 ..：退出码 64"; else flunk "remove 带 .. 应 64：$rc「$out」"; fi
+
+out=$(bash "$BIN" remove "$WORK/symrepo/linked" 2>&1)
+rc=$?
+if ((rc == 64)) && [[ "$out" == *"符号链接"* ]] && [[ -d "$WORK/symrepo/real" ]]; then
+  pass "remove 符号链接：退出码 64，链接指向的目录还在"
+else
+  flunk "remove 符号链接应 64 且不碰目标：$rc「$out」"
+fi
+
+out=$(bash "$BIN" remove "$WORK/repo9/never-was" 2>/dev/null)
+rc=$?
+if ((rc == 0)) && [[ "$(tail -n 1 <<<"$out")" == "gone $WORK/repo9/never-was" ]]; then
+  pass "remove 本来就不在：退出码 0，报 gone"
+else
+  flunk "remove 本来就不在应 0 + gone：$rc「$out」"
+fi
+
+mkdir -p "$WORK/repo8/done-task/sub"
+echo x >"$WORK/repo8/done-task/sub/file"
+out=$(bash "$BIN" remove "$WORK/repo8/done-task" 2>/dev/null)
+rc=$?
+if ((rc == 0)) && [[ "$(tail -n 1 <<<"$out")" == "removed $WORK/repo8/done-task" ]] && [[ ! -e "$WORK/repo8/done-task" ]] &&
+  [[ -d "$WORK/repo8" ]]; then
+  pass "remove 在的：退出码 0，报 removed，整棵删了、上一级还在"
+else
+  flunk "remove 在的应 0 + removed 且删干净：$rc「$out」"
+fi
+
 echo "== 正常路径（chown、拷会话记录）"
 
 if id fleet-agent-dedicated >/dev/null 2>&1 || id fleet-agent-carpool >/dev/null 2>&1; then
@@ -118,6 +180,17 @@ else
     pass "只改属主：退出码 0，$WT1 归 fleet-agent-dedicated 了"
   else
     flunk "只改属主没成功（退出码 $rc，属主「$owner」）：$out"
+  fi
+
+  WT0=$WORK/newrepo/newtask
+  out=$(bash "$BIN" adopt "$WT0" --user fleet-agent-dedicated 2>&1)
+  rc=$?
+  parent=$(stat -c '%U:%G %a' "$WORK/newrepo" 2>/dev/null)
+  leaf=$(stat -c '%U:%G %a' "$WT0" 2>/dev/null)
+  if ((rc == 0)) && [[ "$parent" == "root:root 755" && "$leaf" == "fleet-agent-dedicated:fleet-agent-dedicated 700" ]]; then
+    pass "不在就建：中间一级 root 755，工作树归会话用户 700"
+  else
+    flunk "不在就建没对（退出码 $rc，上一级「$parent」，工作树「$leaf」）：$out"
   fi
 
   from_home=$(getent passwd fleet-agent-carpool | cut -d: -f6)
