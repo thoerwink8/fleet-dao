@@ -20,7 +20,13 @@ export interface QuotaReading extends Omit<QuotaWindow, 'window'> {
   statusRaw?: string;
 }
 
-export type ReaderType = 'claude-usage' | 'mirasim-relay' | 'cursor-dashboard' | 'grok-billing' | 'estimate';
+export type ReaderType =
+  | 'claude-usage'
+  | 'reclaude-carpool'
+  | 'mirasim-relay'
+  | 'cursor-dashboard'
+  | 'grok-billing'
+  | 'estimate';
 
 export type QuotaErrorCode =
   /** 配置写错了。 */
@@ -128,6 +134,13 @@ export interface ClaudeUsageConfig extends PoolConfigBase {
   env?: Record<string, string>;
 }
 
+export interface ReclaudeCarpoolConfig extends PoolConfigBase {
+  reader: 'reclaude-carpool';
+  /** reclaude 网页「设置 → API Key」生成的那把，文件里只放这一行。账号级：哪台机器、挂哪个组织都读得到。 */
+  keyFile: string;
+  baseUrl?: string;
+}
+
 export interface MirasimRelayConfig extends PoolConfigBase {
   reader: 'mirasim-relay';
   port?: number;
@@ -180,6 +193,7 @@ export interface EstimateConfig extends PoolConfigBase {
 
 export type PoolConfig =
   | ClaudeUsageConfig
+  | ReclaudeCarpoolConfig
   | MirasimRelayConfig
   | CursorDashboardConfig
   | GrokBillingConfig

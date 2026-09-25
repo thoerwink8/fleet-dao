@@ -31,6 +31,7 @@ export { readingsFromPeriodUsage } from './readers/cursor.ts';
 export { dailyTokenFilesSource, estimateWindows, windowSpan } from './readers/estimate.ts';
 export { readingsFromGrokBilling } from './readers/grok.ts';
 export { readingsFromRelayFrame } from './readers/mirasim.ts';
+export { carpoolSubscription, readingsFromCarpoolQuota } from './readers/reclaude.ts';
 export type * from './types.ts';
 export { QuotaReadError } from './types.ts';
 export {

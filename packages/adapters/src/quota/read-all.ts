@@ -11,6 +11,7 @@ import { readCursorDashboard } from './readers/cursor.ts';
 import { readEstimate } from './readers/estimate.ts';
 import { readGrokBilling } from './readers/grok.ts';
 import { readMirasimRelay } from './readers/mirasim.ts';
+import { readReclaudeCarpool } from './readers/reclaude.ts';
 import type {
   PoolConfig,
   PoolQuotaResult,
@@ -25,6 +26,7 @@ import { redact } from './util.ts';
 
 export const READERS: Record<ReaderType, Reader> = {
   'claude-usage': readClaudeUsage,
+  'reclaude-carpool': readReclaudeCarpool,
   'mirasim-relay': readMirasimRelay,
   'cursor-dashboard': readCursorDashboard,
   'grok-billing': readGrokBilling,
@@ -34,6 +36,7 @@ export const READERS: Record<ReaderType, Reader> = {
 /** 默认超时：Claude 要起一次 Claude Code（reclaude 首跑还要同步配置），给足；其余是一两次 HTTP / 本机调用。 */
 export const DEFAULT_TIMEOUT_MS: Record<ReaderType, number> = {
   'claude-usage': 120_000,
+  'reclaude-carpool': 20_000,
   'mirasim-relay': 20_000,
   'cursor-dashboard': 20_000,
   'grok-billing': 20_000,

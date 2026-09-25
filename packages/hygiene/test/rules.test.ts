@@ -33,6 +33,7 @@ const planted: [RuleId, string][] = [
   ['token', `key ${['sk', 'ant', 'api03', R(93, 12)].join('-')}`],
   ['token', `key ${['sk', 'proj', R(48, 13)].join('-')}`],
   ['token', `grok ${['xai', R(40, 14)].join('-')}`],
+  ['token', `export RECLAUDE_API_KEY=${['rck', R(43, 52)].join('_')}`],
   ['token', `aws ${['AKIA', pseudoRandom(16, 15, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567')].join('')}`],
   ['token', `bot ${['7' + pseudoNumber(8, 16), `AA${R(33, 17)}`].join(':')}`],
   ['token', `Authorization: ${['Bearer', R(40, 18)].join(' ')}`],
