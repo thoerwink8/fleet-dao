@@ -3,7 +3,7 @@ name: grill-me
 description: 用户要我拷问他的想法、计划或决定时读（该不该做、长什么样都算）：「拷问我」「grill me」「帮我压一压」。
 ---
 
-# grill-me：拷问用户的想法
+# `grill-me`：拷问用户的想法
 
 > 来源：「设计树轮询」一节是 [mattpocock/skills](https://github.com/mattpocock/skills) 里 `grilling` skill 的原文（MIT，版权与许可见同目录 `LICENSE-upstream.txt`；同步到上游 `85f83d3`，2026-08-20），上游有更新时人工同步这一节。「出手前对账」「先判对象」「五步法」是 2026-08-11 创始人拍板引入时加的扩展。
 
