@@ -20,6 +20,8 @@ const ORG = pseudoNumber(4, 7);
 
 const planted: [RuleId, string][] = [
   ['email', `mail me: ${[R(8, 2).toLowerCase(), 'mail.co'].join('@')}`],
+  // 域名很短的真邮箱服务不当玩具地址。
+  ['email', `联系 ${['li', 'qq.com'].join('@')} 或 ${['wu', '163.com'].join('@')}`],
   ['ipv4', `ssh root@${[51, 38, 4, 17].join('.')}`],
   ['ipv6', `ssh root@${['2a01', '4f8', 'c17', HEX(4, 3)].join(':')}::1`],
   ['private-key', `${['-----BEGIN', 'OPENSSH PRIVATE KEY-----'].join(' ')}\n${B64(64, 4)}\n`],
@@ -50,6 +52,8 @@ const planted: [RuleId, string][] = [
   ['secret-assign', `App Secret：${R(32, 41)}`],
   ['secret-assign', `飞书应用密钥: ${R(32, 42)}`],
   ['secret-assign', `**Verification Token**：${R(32, 43)}（别外传）`],
+  ['secret-assign', `应用密钥是 ${R(32, 50)}`],
+  ['secret-assign', `App Secret 为${R(32, 51)}，别外传`],
   ['secret-assign', `app_secret：${R(32, 44)}`],
   ['secret-assign', `| 数据库密码 | ${R(24, 45)} |`],
   ['url-password', `DATABASE_URL=${['postgres://fleet', `${R(20, 25)}@db:5432/fleet`].join(':')}`],
@@ -183,6 +187,7 @@ describe('形状像、但不算的', () => {
       '控制台键名、值是说明或变量',
       [
         '密码：至少 12 位，大小写加数字',
+        '密钥是在控制台生成的，见 1Password 里 fleet-dao 那一条 · 密码为必填项Required12345',
         'App Secret：见 1Password 里 fleet-dao 那一条',
         ['App Secret: $', '{{ secrets.FEISHU_APP_SECRET }}'].join(''),
         '密钥：/etc/fleet-dao/app-secret',

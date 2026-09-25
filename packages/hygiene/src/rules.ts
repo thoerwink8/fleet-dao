@@ -144,6 +144,10 @@ function looksLikeRealSecret(raw: string): boolean {
 
 // —— 邮箱、IP ——
 
+/** 域名很短的真邮箱服务：玩具地址的判法（每段不超过三个字符）对它们不适用，qq.com、163.com 上两三个字母的地址是真能收信的。 */
+const REAL_MAIL_DOMAINS =
+  /^(?:(?:vip\.)?qq\.com|163\.com|126\.com|139\.com|188\.com|189\.cn|wo\.cn|tom\.com|me\.com|mac\.com|msn\.com|aol\.com|hey\.com|pm\.me|gmx\.[a-z]{2,3}|web\.de|ya\.ru|bk\.ru|wp\.pl|o2\.pl)$/;
+
 /**
  * 形状像邮箱但不算的：GitHub 隐私邮箱、不回信的系统地址（noreply@…）、git 远端（git@github.com）、
  * RFC 2606 / 6761 留给示例的域名，以及 systemd 的模板单元名（postgresql@16-main.service）。
@@ -155,9 +159,13 @@ function harmlessEmail(address: string): boolean {
   const domain = lower.slice(at + 1);
   if (domain === 'users.noreply.github.com' || /^no-?reply(?:\+[\w.-]*)?$/.test(local)) return true;
   // 玩具地址：本地部分、域名每段都不超过三个字符（a@b.com、x.y+z@q-r.io，连写的 a@b.com_c@d.com 会被认成 b.com_c@d.com），
-  // 或者本地部分是 user / someone 这类泛称。
+  // 真邮箱服务的短域名除外；或者本地部分是 user / someone 这类泛称。
   const labels = domain.split('.').slice(0, -1);
-  if (local.split(/[^a-z0-9]+/).every((run) => run.length <= 3) && labels.every((l) => l.length <= 3))
+  if (
+    !REAL_MAIL_DOMAINS.test(domain) &&
+    local.split(/[^a-z0-9]+/).every((run) => run.length <= 3) &&
+    labels.every((l) => l.length <= 3)
+  )
     return true;
   if (/^(?:user|username|someone|somebody|name|foo|bar|baz|me|you)$/.test(local)) return true;
   if (local === 'git' && /^(?:github\.com|gitlab\.com|bitbucket\.org|ssh\.dev\.azure\.com)$/.test(domain))
@@ -333,9 +341,10 @@ export const RULES: readonly Rule[] = [
     String.raw`\|[ \t]*\x60?(?:${SECRET_KEY}|${SECRET_KEY_SPACED}|[^|\n]{0,20}?${SECRET_KEY_CN})\x60?[ \t]*\|[ \t]*\x60?(?<value>[^\s|\x60]{12,})\x60?[ \t]*\|`,
     'gi',
   ),
+  // 「是」「为」连着的（应用密钥是 值）也算；值只收 ASCII：密钥不会带中文，中文说明（密钥是在控制台生成的）不算值。
   secretAssign(
     '像密钥的赋值',
-    String.raw`(?:(?<![A-Za-z0-9_])${SECRET_KEY_SPACED}|${SECRET_KEY_CN})(?:\*\*|\x60)?[ \t]*[:=：＝][ \t]*["'\x60“‘]?(?<value>[^\s"'\x60“”‘’（）()，。；、,;<>|*]{12,})`,
+    String.raw`(?:(?<![A-Za-z0-9_])${SECRET_KEY_SPACED}|${SECRET_KEY_CN})(?:\*\*|\x60)?(?:[ \t]*[:=：＝]|[ \t]*[是为])[ \t]*["'\x60“‘]?(?<value>[^\s"'\x60“”‘’（）()，。；、,;<>|*\u0080-￿]{12,})`,
     'gi',
   ),
   {
