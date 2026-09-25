@@ -1,5 +1,5 @@
 export {
-  checkOpenIssuesHaveSpecs,
+  checkDebtDocs,
   checkSpecsDone,
   DEFERRAL_PATTERNS,
   type DebtProblem,
@@ -7,13 +7,19 @@ export {
   type Deferral,
   debtFiles,
   doneSection,
+  type Finding,
   findDeferrals,
+  findingMarker,
   formatDebtProblem,
-  judgeDeferrals,
+  type LiveDebt,
+  liveDebt,
+  missingSpecsFindings,
   type RefState,
   refStates,
-  runDebtCheck,
+  reportFindings,
   SPECS_GRACE_HOURS,
+  staleRefFindings,
+  untrackedDeferrals,
 } from './debt.ts';
 export {
   checkDocPointers,
@@ -26,6 +32,7 @@ export {
   type Report,
 } from './doc-pointers.ts';
 export {
+  type GitHubCommenter,
   type GitHubReader,
   type IssueInfo,
   liveGitHub,

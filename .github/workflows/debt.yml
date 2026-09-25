@@ -1,8 +1,9 @@
 name: debt
-# 欠账检查的全量版（#67，packages/conventions/src/debt.ts）：pnpm check 里查的两样（文档里推后的话带着开着的单号、
-# 需求.md 写了怎么算做完）之外，另查开着的 issue 在主线上都有 specs/<号>-<短名>/需求.md（开单一天内不算欠）。
-# 这一样看的是 GitHub 上的现状，放进 PR 的必过检查会让两个各带自己需求文档的 PR 互相卡死，所以只在主线上跑：
-# 每次合并后、每天一次。只用 Node 自带的，不用装依赖。退出码 2 = 没查成，同样是红。
+# 欠账检查看 GitHub 现状的那一半（#67、#87，packages/conventions/src/debt.ts 的 liveDebt）：推后的话挂的单号是不是
+# 开着的 issue、开着的 issue 在主线上有没有 specs/<号>-<短名>/需求.md（开单一天内不算欠）。
+# 结果随单子开关、随时间变，所以不进 PR 的必过检查（必过检查必须确定：同一份代码什么时候跑结果都一样）；
+# 在主线上每天跑、每次合并后跑，查出来的留言到对应的单上（同一条只留一次）。只看文件的那一半在 pnpm check 里。
+# 退出码：没欠账或都留了言 = 0；有落不到单上的 = 1；没查成（读不到 GitHub、留言没留成）= 2。只影响这个定时任务，不挡 PR。
 on:
   push:
     branches: [main]
@@ -11,10 +12,10 @@ on:
   workflow_dispatch:
 concurrency:
   group: debt
-  cancel-in-progress: true
+  cancel-in-progress: false
 permissions:
   contents: read
-  issues: read
+  issues: write
 jobs:
   debt:
     runs-on: ubuntu-latest
@@ -24,6 +25,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: node packages/conventions/src/bin/debt-check.ts --open-issues
+      - run: node packages/conventions/src/bin/debt-check.ts --live --comment
         env:
           GITHUB_TOKEN: ${{ github.token }}

@@ -51,7 +51,7 @@
 - 开发：`pnpm install`，Node 和 pnpm 的版本钉在 `package.json`；给 AI 的约定在 [AGENTS.md](AGENTS.md)。
 - 跑检查：`pnpm check`（文档里的路径、章节指针也在里面查）；CI 跑哪些见 `.github/workflows/`。
 - 开单：`pnpm issue:new --kind 需求 --milestone P1 --title "一句话" --body-file 正文.md`，缺类别、里程碑，或正文里没写「## 怎么算做完」都不开；加 `--specs 短名` 时完整正文进 `specs/<号>-<短名>/需求.md`，issue 上只留原话、AI 理解和路径。
-- 欠账：`pnpm debt:check` 查文档里推后的话带着开着的单号、需求.md 写了怎么算做完（`pnpm check` 里也跑），加 `--open-issues` 另查开着的单都有需求文档；关里程碑之前跑 `pnpm milestone:close-check P1`，还有开着的单就不关。见 design 第七节「欠账不漏」「阶段收口」。
+- 欠账：`pnpm debt:check` 只看文件，查文档里推后的话带着单号、需求.md 写了怎么算做完（`pnpm check` 里也跑，不读 GitHub）；加 `--live` 另读 GitHub，查挂的单号开没开着、开着的单都有需求文档（定时任务 debt.yml 用，它再加 `--comment` 留言到单上）；关里程碑之前跑 `pnpm milestone:close-check P1`，还有开着的单就不关。见 design 第七节「欠账不漏」「阶段收口」。
 - 各家 AI 的全局说明：`node packages/agents-sync/bin/agents-sync --check`（只读），`--apply` 写；`--help` 看全部用法，法国怎么跑见 ops 第五节。
 
 ## 文档各管什么

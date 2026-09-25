@@ -42,3 +42,5 @@
 - 这是公开仓：上面「底线」里公开仓那条在这里处处适用。卫生检查（packages/hygiene）在三处跑：推之前（`pnpm install` 设好的 git pre-push 钩子；引擎推分支在 packages/github 里自己扫）、`pnpm check`、CI。内容像密钥的拦，密钥文件名（.gitignore 标记段里的 `.secrets/`、`*.pass`、`*.key`、`*.pem`…）被 `git add -f` 强行加进来的也拦；真实的组织编号、账号靠已知敏感值名单认（不进仓：本机 `~/.fleet-dao/sensitive-values.txt`，名单没读到检查不算过）。真该放行的写进它的白名单并写明理由；输出只有文件、行、规则名，不打值。
 - Jev：判断题小模型（TypeSafe 的 System One），代码在 `packages/jev`；接在哪、怎么管见 `docs/design.md` 第十一节。
 - 改了上半段（通用段）：合进主线后，每台机器跑一遍 `node packages/agents-sync/bin/agents-sync --apply` 才会生效（法国由 `deploy/france.sh` 跑，见 docs/ops.md 第五节）。
+- 合并后出问题（创始人 2026-09-25 拍，#87，细节见 `docs/design.md` 第五节「合并后出问题」）：主线坏了（必过检查红、生产坏了）立刻修，修不简单先回退，修复 PR 写清是哪次合并弄坏的；数据、泄露、安全类主线绿也立刻修；其余合并后才发现的问题一律开单攒着，不开 PR。必过检查必须确定：同一份代码什么时候跑结果都一样，看单子开关、时间这类外部状态的检查放进定时任务，只开单或留言，不挡 PR。
+- 谁开的 PR 谁负责到合并（创始人 2026-09-25 拍）：「做完」＝合进去了，或者明确交接给总指挥（写清卡在哪）。推完自己盯 CI（`gh pr checks <号> --watch`），红了修、冲突了并主线、第二意见里必须改的就改；按 PR 算最多 3 轮，超了交接。

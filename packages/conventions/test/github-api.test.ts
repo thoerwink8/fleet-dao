@@ -173,3 +173,31 @@ describe('读 GitHub：认是哪个仓', () => {
     expect(origin(undefined)).toBeUndefined();
   });
 });
+
+describe('读 GitHub：单上的留言（欠账的定时任务用）', () => {
+  it('读留言正文；留言用 POST、带 JSON，回 201 才算留成', async () => {
+    const posts: { method: string | undefined; body: string | undefined }[] = [];
+    const impl = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url === `${API}/issues/29/comments?per_page=100`) return json([{ body: '甲' }, { body: '乙' }]);
+      if (url === `${API}/issues/29/comments`) {
+        posts.push({ method: init?.method, body: init?.body as string | undefined });
+        return new Response('{}', { status: 201 });
+      }
+      if (url === `${API}/issues/30/comments`) return new Response('{}', { status: 403 });
+      throw new Error(`没料到的请求 ${url}`);
+    }) as typeof fetch;
+    const gh = liveGitHub('o/r', { GITHUB_TOKEN: TOKEN }, { fetchImpl: impl });
+    expect(await gh.comments(29)).toEqual(['甲', '乙']);
+    await gh.comment(29, '欠账');
+    expect(posts).toEqual([{ method: 'POST', body: JSON.stringify({ body: '欠账' }) }]);
+    await expect(gh.comment(30, 'x')).rejects.toThrow('在 #30 上留言，GitHub 回了 403');
+  });
+
+  it('留言认不出：抛', async () => {
+    const { impl } = fakeFetch({ [`${API}/issues/1/comments?per_page=100`]: () => json([{ id: 1 }]) });
+    await expect(
+      liveGitHub('o/r', {}, { fetchImpl: impl, token: () => undefined }).comments(1),
+    ).rejects.toThrow('读 #1 的留言，有一条认不出（body）');
+  });
+});
