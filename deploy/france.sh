@@ -26,6 +26,8 @@ source "$DEPLOY_DIR/lib/login-user.sh"
 source "$DEPLOY_DIR/lib/cli-tools.sh"
 # shellcheck source=lib/agents-sync.sh
 source "$DEPLOY_DIR/lib/agents-sync.sh"
+# shellcheck source=lib/app-config.sh
+source "$DEPLOY_DIR/lib/app-config.sh"
 trap 'on_error "$LINENO" "$BASH_COMMAND"' ERR
 
 # ── 钉死的版本与校验和：外部二进制装上机器就进了信任面，不用 latest ──
@@ -100,6 +102,14 @@ APP_ENV_FILES=(engine api release) # /etc/fleet-dao/<名>.env ← deploy/france/
 APP_SECRETS=("agent-token:FLEET_AGENT_TOKEN_SECRET:签 fleet 通行证（引擎签、后端验）"
   "session-secret:FLEET_SESSION_SECRET:驾驶舱登录的 Cookie"
   "gateway-token:FLEET_FEISHU_GATEWAY_TOKEN:飞书网关的通行证（香港放同一份）")
+# 「引擎」GitHub App 的凭据（手放）：api.env 的 FLEET_GITHUB_WEBHOOK_SECRET 照它的 webhook_secret 填（lib/app-config.sh）
+ENGINE_APP_JSON=/etc/fleet-dao/github/gh-app-fleet-dao-engine.json
+SENSITIVE_VALUES=/etc/fleet-dao/sensitive-values.txt # 卫生检查的已知敏感值名单，手放（docs/ops.md 目录一节）
+# 拼车用户家里的派活垫片：引擎接真活以后退役（#28 登记），读回在它还在时记待配。装机脚本不碰它
+CARPOOL_SHIM=/home/fleet-agent-carpool/bin/carpool-run.sh
+# AI 会话的工作树的根（引擎真端口的 FLEET_WORK_DIR，fleet-agent-scope 的 WORK_BASE）、引擎自己的状态目录（FLEET_ENGINE_STATE_DIR）
+WORK_DIR=/var/lib/fleet-work
+ENGINE_STATE_DIR=/var/lib/fleet-dao/engine
 # 发布脚本往香港传驾驶舱静态文件用的钥匙（只有 root 读得到），和钉住的香港 sshd 主机钥匙
 WEB_UPLOAD_KEY=/etc/fleet-dao/web-upload.key
 HK_KNOWN_HOSTS=/etc/fleet-dao/hk-known-hosts
@@ -171,6 +181,10 @@ setup_identity() {
   ensure_dir "$RELEASES_DIR" root:root 755
   ensure_dir /var/lib/fleet-dao fleet:fleet 750
   ensure_dir "$DEMO_DIR" fleet:fleet 750
+  # 引擎自己的临时目录（从镜像打的 bundle）和存档（没合并就收的树里没提交的改动）放在这下面，引擎自己建 tmp/、archive/
+  ensure_dir "$ENGINE_STATE_DIR" fleet:fleet 750
+  # AI 会话的工作树的根：归 root、别人写不进（会话用户没法在路径上塞符号链接）；每棵树由 fleet-agent-scope 建、归会话用户 700
+  ensure_dir "$WORK_DIR" root:root 755
   ensure_dir /var/log/fleet-dao fleet:fleet 750
   ensure_dir /etc/fleet-dao root:fleet 750
   # 两个 GitHub 机器人的私钥放这里（root:fleet 640，手放，不进 git）：引擎读得到，会话用户和旧系统的用户读不到
@@ -588,15 +602,19 @@ setup_pnpm() {
 setup_app_config() {
   step "应用的本机配置（/etc/fleet-dao 下的环境文件；应用本身由 deploy/release.sh 发布）"
   local name spec file key what
-  # 样例只在第一次照着建：之后这些文件归人改（填飞书、GitHub 的凭据，选本机起哪些服务），脚本只管属主和权限
+  # 样例只在第一次照着建：之后这些文件归人改（填飞书、GitHub 的凭据，选本机起哪些服务），脚本只管属主和权限、
+  # 补样例后来加的键（只补缺）、按「引擎」App 填空着的 webhook 密钥（lib/app-config.sh）
   for name in "${APP_ENV_FILES[@]}"; do
     file=/etc/fleet-dao/$name.env
     if [[ -e "$file" ]]; then
       fix_meta "$file" root:fleet 640
+      # 样例后来加的键补上（只补缺，已有的不动）；release.env 不补：它的每一项都要人定
+      if [[ "$name" != release ]]; then add_missing_keys "$file" "$DEPLOY_DIR/france/$name.env.example"; fi
     else
       put_file "$file" root:fleet 640 "$(<"$DEPLOY_DIR/france/$name.env.example")"
     fi
   done
+  fill_webhook_secret /etc/fleet-dao/api.env "$ENGINE_APP_JSON"
   # 随机密钥：首次生成，之后不再动（换了会让已发出的登录、通行证全部作废；真要换就删掉文件再跑）。值不进日志
   for spec in "${APP_SECRETS[@]}"; do
     IFS=: read -r name key what <<<"$spec"
@@ -752,10 +770,15 @@ readback_demo_scopes() {
 # 探针头证明请求确实到了这里；后端在跑：看它怎么答——收到 Authorization 答 bearer_not_allowed，没收到答
 # unauthenticated（packages/api 的 session.ts）
 readback_proxy_headers() {
-  local domain url nonce tmp pid i out code body verdict
-  domain=$(read_key /etc/fleet-dao/release.env FLEET_DOMAIN 2>/dev/null) || domain=""
+  local domain url nonce tmp pid i out code body verdict rc=0
+  env_get /etc/fleet-dao/release.env FLEET_DOMAIN || rc=$?
+  domain=$APP_ENV_VALUE
+  if ((rc == 2)); then
+    pending "没读到驾驶舱域名（$APP_CONFIG_WHY），香港清不清请求头这项没查"
+    return 0
+  fi
   if [[ ! "$domain" =~ ^[a-z0-9.-]+$ ]]; then
-    pending "没读到驾驶舱域名（/etc/fleet-dao/release.env 的 FLEET_DOMAIN），香港清不清请求头这项没查"
+    pending "/etc/fleet-dao/release.env 的 FLEET_DOMAIN 没写或认不出，香港清不清请求头这项没查"
     return 0
   fi
   url=https://$domain/api/fleet-dao-probe
@@ -813,9 +836,10 @@ readback_proxy_headers() {
   esac
 }
 
-# 应用的环境文件都在、属主权限对；随机密钥是生成的样子、互不相同（后端要求）。只比对，不打印值
+# 应用的环境文件都在、属主权限对；随机密钥是生成的样子、互不相同（后端要求）。按 systemd 的读法读（lib/app-config.sh
+# 的 env_get），只比对，不打印值。lib/app-config.sh 的 check_* 判红返回 1：红已经记账，这里照样往下查，不让读回停在半路
 readback_app_config() {
-  local name spec file key what bad=0 values=() v
+  local name spec file key what bad=0 values=() rc
   for name in "${APP_ENV_FILES[@]}"; do
     if [[ ! -f "/etc/fleet-dao/$name.env" ]]; then
       red "没有 /etc/fleet-dao/$name.env"
@@ -825,29 +849,30 @@ readback_app_config() {
   for spec in "${APP_SECRETS[@]}"; do
     IFS=: read -r name key what <<<"$spec"
     file=/etc/fleet-dao/$name.env
-    v=$(read_key "$file" "$key" 2>/dev/null) || v=""
-    if [[ ! "$v" =~ ^[0-9a-f]{64}$ ]]; then
+    rc=0
+    env_get "$file" "$key" || rc=$?
+    if ((rc == 2)); then
+      red "$key 核对不了：$APP_CONFIG_WHY"
+      bad=1
+    elif ((APP_ENV_COUNT > 1)); then
+      red "$file 里 $key 写了 $APP_ENV_COUNT 行（服务里生效的是最后一行）：删成一行"
+      bad=1
+    elif [[ ! "$APP_ENV_VALUE" =~ ^[0-9a-f]{64}$ ]]; then
       red "$file 里的 $key 不是装机脚本生成的样子（64 位十六进制）"
       bad=1
     fi
-    values+=("$v")
+    values+=("$APP_ENV_VALUE")
   done
-  if [[ "${values[0]}" == "${values[1]}" || "${values[0]}" == "${values[2]}" || "${values[1]}" == "${values[2]}" ]]; then
+  if ((bad == 0)) && [[ "${values[0]}" == "${values[1]}" || "${values[0]}" == "${values[2]}" || "${values[1]}" == "${values[2]}" ]]; then
     red "三个随机密钥有两个一样：后端会拒绝启动"
     bad=1
   fi
   if ((bad == 0)); then ok "应用的环境文件都在（${APP_ENV_FILES[*]}），三个随机密钥已生成、互不相同（值不打印）"; fi
-}
-
-# 只当数据读一个键（不 source）：值只进变量，不进日志
-read_key() { # 文件 键
-  local line
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    if [[ "$line" == "$2="* ]]; then
-      printf '%s' "${line#*=}"
-      return 0
-    fi
-  done <"$1"
+  # api.env 不在的话上面已经判红
+  if [[ -f /etc/fleet-dao/api.env ]]; then check_webhook_secret /etc/fleet-dao/api.env "$ENGINE_APP_JSON" || :; fi
+  check_sensitive_values "$SENSITIVE_VALUES" || :
+  check_engine_env /etc/fleet-dao/engine.env "$SENSITIVE_VALUES" || :
+  check_retired "$CARPOOL_SHIM" 拼车用户家里的派活垫片
 }
 
 # 往香港传静态文件的通路：用发布脚本同一套参数试跑一次 rsync（-n，什么都不传）
@@ -990,6 +1015,7 @@ readback_firewall() {
 readback_dirs() {
   local spec path want have bad=0
   for spec in "/srv/fleet-dao root:root 755" "$RELEASES_DIR root:root 755" "/var/lib/fleet-dao fleet:fleet 750" "$DEMO_DIR fleet:fleet 750" "/var/log/fleet-dao fleet:fleet 750" \
+    "$ENGINE_STATE_DIR fleet:fleet 750" "$WORK_DIR root:root 755" \
     "/opt/fleet-dao root:root 755" "/home/fleet fleet:fleet 750" "$TEMPORAL_ENV root:fleet 640" "$TEMPORAL_CONFIG root:fleet 640"; do
     path=${spec%% *}
     want=${spec#* }
