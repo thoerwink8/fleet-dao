@@ -96,7 +96,10 @@ if (($? == 0 && ${#REDS[@]} == 0 && ${#CHANGES[@]} >= 3)); then
 else
   flunk "第一遍没装成（红：${REDS[*]:-无}；改动 ${#CHANGES[@]} 处）"
 fi
-# .profile 不靠这台 /etc/skel 的样子：写成 Ubuntu 默认那几行（把 ~/.local/bin 加进 PATH），归这个用户
+# 登录 shell 读哪份启动文件不靠这台 /etc/skel 的样子：bash 登录时只读 .bash_profile、.bash_login、.profile 里
+# 头一个在的（CI 的镜像就带了别的，读不到 .profile）。只留 .profile，写成 Ubuntu 默认那几行，归这个用户
+echo "  · 这台 /etc/skel 放进家里的：$(find "$H" -mindepth 1 -maxdepth 1 -printf '%f ')"
+rm -f -- "$H/.bash_profile" "$H/.bash_login"
 # shellcheck disable=SC2016 # 单引号里的东西要在登录 shell 里展开
 printf '%s\n' 'if [ -d "$HOME/.local/bin" ] ; then' '    PATH="$HOME/.local/bin:$PATH"' 'fi' >"$H/.profile"
 chown "$U:$U" "$H/.profile"
