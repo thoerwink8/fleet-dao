@@ -121,11 +121,14 @@ check_login_user() { # 用户
   (cd -- "$home" && runuser -u "$user" -- env -i HOME="$home" USER="$user" LOGNAME="$user" SHELL="$shell" \
     PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 setsid -w timeout -k 5 10 "$shell" -ilc 'command -v reclaude' \
     </dev/null >"$probe" 2>&1) || rc=$?
-  # 交互 shell 起来时往 stderr 打的「no job control」在命令输出之前，所以取最后一行
+  # 交互 shell 起来时往 stderr 打的「no job control」在命令输出之前，所以取最后一行。
+  # 退出码也要是 0：登录脚本前台卡住时 timeout 到点会给整组发信号，把卡住的那个命令杀掉，交互 bash 自己不理 TERM、
+  # 接着把登录脚本跑完、照样打出路径——光看输出会判成干净（CI 实咬），可 timeout 自己返回 124。
+  # 被 timeout 杀过就是卡住了：Mirasim 自己那一问也会卡在这里，算红。
   out=$(<"$probe")
   rm -f -- "$probe"
-  if [[ "${out##*$'\n'}" != "$bin" ]]; then
-    LOGIN_USER_BAD+=("reclaude-not-on-path	登录 shell（$shell -ilc）里找不到 $bin（退出码 $rc，输出末几行「$(tail -4 <<<"$out" | tr '\n' '|')」）：Mirasim 远端按登录 shell 取 PATH，~/.profile 里要把 ~/.local/bin 加进 PATH（Ubuntu 默认的就有）")
+  if ((rc != 0)) || [[ "${out##*$'\n'}" != "$bin" ]]; then
+    LOGIN_USER_BAD+=("reclaude-not-on-path	登录 shell（$shell -ilc）没正常找到 $bin（退出码 $rc，124＝登录脚本卡住被 timeout 杀了；输出末几行「$(tail -4 <<<"$out" | tr '\n' '|')」）：Mirasim 远端按登录 shell 取 PATH，~/.profile 里要把 ~/.local/bin 加进 PATH（Ubuntu 默认的就有），登录脚本也不能前台卡住")
   fi
   if ((${#LOGIN_USER_BAD[@]})); then return 1; fi
   return 0
