@@ -33,6 +33,8 @@ const exampleText = repoFile(EXAMPLE_PATH);
 const example = () => parseCatalog(exampleText, EXAMPLE_PATH);
 
 const CLAUDE_ROUTES = ['claude-solo:opus-5.5:claude-code', 'claude-carpool:opus-5.5:claude-code'];
+/** TypeSafe 的 Jev：只挂判断阶段（packages/jev 按判断阶段排第一的路由起后端）。 */
+const JEV_ROUTE = 'jev:jev-1.13:api-shell';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -71,14 +73,23 @@ async function stageOrder(stage: (typeof STAGE_KINDS)[number]) {
 }
 
 describe('示例配置 deploy/examples/catalog.example.json', () => {
-  it('装得进空库：每个阶段先是两个 Claude 池的 Opus（开着），其余路由挂在后面关着', async () => {
+  it('装得进空库：每个阶段先是独享号、拼车号的 Opus（开着），其余挂在后面关着；判断阶段 TypeSafe 在前', async () => {
     const result = await load();
     expect(result.inserted.stages).toEqual([...STAGE_KINDS]);
     const config = example();
-    const expected = config.routes.map((r) => [r.id, CLAUDE_ROUTES.includes(r.id)]);
+    // Jev 只挂判断阶段；其余路由按样例里的先后挂在各阶段，开着的只有两条 Claude（独享在前、拼车在后）。
+    const expected = config.routes
+      .filter((r) => r.id !== JEV_ROUTE)
+      .map((r) => [r.id, CLAUDE_ROUTES.includes(r.id)]);
     for (const stage of STAGE_KINDS) {
-      // ui 单列一份，不挂 GPT（硬禁令，关着也不挂）。
-      const want = stage === 'ui' ? expected.filter(([id]) => !String(id).includes('gpt')) : expected;
+      // ui 单列一份，不挂 GPT（硬禁令，关着也不挂）。judge 照 packages/jev：TypeSafe 开着在前，两条 Claude 关着
+      // （Claude 判断会话接上 fleet-agent-scope 之前 packages/jev 接不了，见 packages/jev/test/catalog-judge.test.ts）。
+      const want =
+        stage === 'judge'
+          ? [[JEV_ROUTE, true], ...CLAUDE_ROUTES.map((id) => [id, false])]
+          : stage === 'ui'
+            ? expected.filter(([id]) => !String(id).includes('gpt'))
+            : expected;
       expect(await stageOrder(stage)).toEqual(want);
     }
     expect((await stageOrder('ui')).length).toBe(expected.length - 1);
@@ -87,6 +98,29 @@ describe('示例配置 deploy/examples/catalog.example.json', () => {
     expect(execute.candidates.map((c) => [c.routeId, !c.blockers.includes('switched-off')])).toEqual(
       expected,
     );
+  });
+
+  it('装进空库，每张表的行数和样例对得上', async () => {
+    const config = example();
+    await load();
+    const rows = await catalogRows(t.db);
+    const orders = STAGE_KINDS.map((s) => config.stages[s] ?? config.stages.default ?? []);
+    expect(Object.fromEntries(Object.entries(rows).map(([kind, list]) => [kind, list.length]))).toEqual({
+      families: config.families.length,
+      channels: config.channels.length,
+      pools: config.pools.length,
+      models: config.models.length,
+      routes: config.routes.length,
+      stagePolicies: orders.filter((o) => o.length > 0).length,
+      stagePolicyRoutes: orders.reduce((n, o) => n + o.length, 0),
+    });
+    // 两边都从样例算，再钉一遍样例本身：8 个阶段都排了；判断阶段 3 条、UI 7 条、其余 6 个阶段各 8 条。
+    expect([rows.stagePolicies.length, rows.stagePolicyRoutes.length]).toEqual([8, 3 + 7 + 6 * 8]);
+  });
+
+  it('拼车号是备池：会话用户 fleet-agent-carpool、并发 2（design 第九节「并发起步 2」）', () => {
+    const carpool = example().pools.find((p) => p.id === 'claude-carpool');
+    expect([carpool?.runAsUser, carpool?.maxConcurrency]).toEqual(['fleet-agent-carpool', 2]);
   });
 
   it('账号池和额度读取器的配置样例一一对应（额度按池入库，池不在库里就写不进去）', () => {
@@ -200,7 +234,7 @@ describe('只补缺，跑几遍都一样', () => {
     expect(again.kept).toEqual(
       expect.arrayContaining([
         'channels.cursor.enabled：库里是 false，配置是 true，没动',
-        'pools.claude-solo.maxConcurrency：库里是 1，配置是 3，没动',
+        'pools.claude-solo.maxConcurrency：库里是 1，配置是 5，没动',
         `routes.${solo}.upstreamModel：库里是 "claude-opus-5-5[1m]"，配置是 "claude-opus-5-5"，没动`,
         '阶段 execute：装载器早先排过，之后不再动它，和配置不一样，没动',
       ]),
@@ -208,9 +242,7 @@ describe('只补缺，跑几遍都一样', () => {
     // 摘掉的路由点名出来，不笼统说「改过顺序」。
     const stageNotes = again.kept.filter((k) => k.startsWith('阶段'));
     expect(stageNotes).toHaveLength(3);
-    const notCarpool = example()
-      .routes.map((r) => r.id)
-      .filter((id) => id !== carpool);
+    const notCarpool = (example().stages.default ?? []).map((e) => e.routeId).filter((id) => id !== carpool);
     expect(stageNotes).toContain(
       `阶段 review：装载器早先排过，之后不再动它，配置里的 ${notCarpool.join('、')} 没挂上（要用就在驾驶舱里加）`,
     );
@@ -448,6 +480,18 @@ describe('配置文件缺失或格式错：明确报错，库里一行不写', (
     expect(
       await fail(readCatalogFile('/x.json', text({ ...base, routes: [...base.routes, base.routes[0]] }))),
     ).toContain(`routes 里 ${base.routes[0]?.id} 出现了不止一次`);
+  });
+
+  it('样例只写错一处引用（判断阶段排第一的路由名）：装载报错、只报这一处，目录七张表和操作记录都是 0 行', async () => {
+    const good = '{ "routeId": "jev:jev-1.13:api-shell", "enabled": true }';
+    expect(exampleText.split(good)).toHaveLength(2);
+    const text = exampleText.replace(good, '{ "routeId": "jev:jev-1.13:api-shel", "enabled": true }');
+    const config = await readCatalogFile('/etc/fleet-dao/catalog.json', async () => text);
+    const message = await fail(load(config));
+    expect(message).toContain('stages.judge 的路由 jev:jev-1.13:api-shel 不存在');
+    expect(message.split('\n').filter((l) => l.startsWith('- '))).toHaveLength(1);
+    expect(Object.values(await catalogRows(t.db)).every((list) => list.length === 0)).toBe(true);
+    expect(await t.db.select().from(auditLog)).toEqual([]);
   });
 
   it('引用了不存在的池、模型、路由：整批不写', async () => {
