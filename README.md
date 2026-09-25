@@ -6,7 +6,7 @@
 
 ## 入口
 
-- **驾驶舱**：<https://fleetdao.dpdns.org>，健康页在 `/health/`。
+- **驾驶舱**：域名只在机器配置里（香港 `/etc/fleet-dao/hk.env` 的 `FLEET_DOMAIN`），公开仓不写；健康页在 `/health/`。
 - **飞书机器人 fleet-dao**：能做什么见 design 15.4。
 - **GitHub issue**：用「需求」模板写一句话就行。
 

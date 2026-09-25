@@ -576,7 +576,7 @@ flowchart TD
 
 | 件 | 建议 | 依据 |
 |---|---|---|
-| Postgres | 一个实例，库分开：`temporal`、`temporal_visibility`、`fleetdao`；角色分开 | 设计三/13；官方支持 PG12+ 同时做持久化和可见性（docs.temporal.io/self-hosted-guide/visibility） |
+| Postgres | 一个实例，库分开：`temporal`、`temporal_visibility`、`fleet`；角色分开 | 设计三/13；官方支持 PG12+ 同时做持久化和可见性（docs.temporal.io/self-hosted-guide/visibility） |
 | 服务端 | 二选一：官方服务端二进制 + systemd（与「一条命令重建」最贴），或 `temporalio/server` 镜像 + admin-tools 管库表结构；只绑回环 | docs.temporal.io/self-hosted-guide/deployment |
 | 库表结构 | `temporal-sql-tool` 初始化和升级；装机脚本里读回库表版本 | 同上；§4.4 |
 | 命名空间 | `fleet`，保留期 30 天，显式设置并读回；长期记录在 Postgres | G7 |

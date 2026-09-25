@@ -1,6 +1,6 @@
 # 运维手册：两台机器的地基与应用发布
 
-装法在 `deploy/`，这里讲怎么用、怎么看、怎么退。机器的公网 IP 不进仓，下文写作 `<法国IP>`、`<香港IP>`。
+装法在 `deploy/`，这里讲怎么用、怎么看、怎么退。机器的公网 IP 和驾驶舱域名不进仓，下文写作 `<法国IP>`、`<香港IP>`、`<驾驶舱域名>`；域名的真值只在机器配置里（香港 `hk.env`、法国 `release.env` 的 `FLEET_DOMAIN`）。
 旧系统（windsurf-dao、ai-gateway-stack 那一套）已于 2026-09-25 从两台机器上全部清退：单元、用户、目录、数据都删了。它留下的坑与由来见 [reference/deploy.md](reference/deploy.md)（文中的 P01、P02 等编号出自那里；那份记的是清退前的现场）。
 两层：`deploy/france.sh`、`deploy/hk.sh` 装机器（第一到第八节）；`deploy/release.sh` 发布应用（第九节）。
 
@@ -39,11 +39,11 @@
 
 | 端口 | 绑在 | 是谁 | 说明 |
 |---|---|---|---|
-| 80/tcp | 0.0.0.0 | nginx | `fleetdao.dpdns.org`：证书续期的验证路径，其余跳 https |
-| 443/tcp | 0.0.0.0 | nginx | `https://fleetdao.dpdns.org`：静态页；`/api`、`/auth`、`/github/webhook`、`/healthz` 经隧道转法国 `10.99.0.2:8787`，转之前清掉 `Authorization`、`X-Fleet-Acting-Feishu`；`/agent` 不转 |
+| 80/tcp | 0.0.0.0 | nginx | `<驾驶舱域名>`：证书续期的验证路径，其余跳 https |
+| 443/tcp | 0.0.0.0 | nginx | `https://<驾驶舱域名>`：静态页；`/api`、`/auth`、`/github/webhook`、`/healthz` 经隧道转法国 `10.99.0.2:8787`，转之前清掉 `Authorization`、`X-Fleet-Acting-Feishu`；`/agent` 不转 |
 | 4500/udp | 0.0.0.0 | WireGuard 服务端 | 香港上游只放行少数常见 UDP 端口（2026-09-25 从法国实测：53/67/69/123/161/500/1701/4500 能到），51820 进不来 |
 
-GitHub 事件地址：`https://fleetdao.dpdns.org/github/webhook`。飞书登录回调：`https://fleetdao.dpdns.org/auth/feishu/callback`。
+GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录回调：`https://<驾驶舱域名>/auth/feishu/callback`。
 
 ## 三、用户、目录、库
 
@@ -82,7 +82,7 @@ GitHub 事件地址：`https://fleetdao.dpdns.org/github/webhook`。飞书登录
 | `/root/.ssh/authorized_keys2` | root:root 600 | 整份归 fleet-dao：法国上传钥匙的一行，限死成只许从 `10.99.0.2` 来、只能跑 `rrsync -wo -munge /srv/fleet-dao-web`。root 原有的 `authorized_keys` 一行不碰 |
 | `/var/www/fleet-dao-acme` | root:root 755 | 证书续期的验证文件 |
 | `/etc/nginx/sites-available/fleet-dao`（`sites-enabled` 里有链接） | root 644 | fleet-dao 的站点。同一个 nginx 上另有 MiraQuota 的站点 `ai-gateway`（不归 fleet-dao 管，装机不碰） |
-| `/etc/letsencrypt/live/fleetdao.dpdns.org` | certbot 管 | 证书；`certbot.timer` 续期，续完重载 nginx |
+| `/etc/letsencrypt/live/<驾驶舱域名>` | certbot 管 | 证书；`certbot.timer` 续期，续完重载 nginx |
 | `/etc/wireguard/wg-fleet.conf`、`wg-fleet.key` | root 600 | 隧道配置与私钥 |
 
 库（法国）：PostgreSQL 16 装的是 Ubuntu 自带的源（吃得到自动安全更新）。`fleet` 库属 fleet 角色，本机 socket + peer 认证（系统用户 fleet 就是库角色 fleet），不设口令；`temporal`、`temporal_visibility` 属 temporal 角色，走 127.0.0.1:5432 + 口令（`/etc/fleet-dao/temporal.env`）。Temporal 命名空间 `fleet`，已结束的工作流保留 30 天。
@@ -92,8 +92,8 @@ GitHub 事件地址：`https://fleetdao.dpdns.org/github/webhook`。飞书登录
 从零装（新机器或重建）：
 
 1. 两台都以 root：`git clone https://github.com/thoerwink8/fleet-dao /srv/fleet-dao`。
-2. 香港：`bash /srv/fleet-dao/deploy/hk.sh`。它打印香港的 WireGuard 公钥；`hk.env` 里的域名已经解析到这台的话，证书这一轮就签下来。
-3. 法国：`bash /srv/fleet-dao/deploy/france.sh`。它打印法国的公钥。
+2. 香港：`bash /srv/fleet-dao/deploy/hk.sh`。它照样例建 `hk.env`、打印香港的 WireGuard 公钥。样例里的域名是 `cockpit.example.com`，改成真域名再重跑；域名已经解析到这台的话，证书这一轮就签下来。
+3. 法国：`bash /srv/fleet-dao/deploy/france.sh`。它打印法国的公钥；照样例建的 `release.env`（`FLEET_DOMAIN`）和 `api.env`（`FLEET_PUBLIC_URL`）同样把域名改成真的。重建时这些配置直接从保险箱取回（README「密钥和本机配置在哪」）。
 4. 互填：香港公钥和 `<香港IP>:4500` 填进法国 `/etc/fleet-dao/france.env`；法国公钥填进香港 `/etc/fleet-dao/hk.env`。
 5. 先重跑香港、再重跑法国：隧道起来，法国读回里 `ping 10.99.0.1` 通；法国这一遍还会经隧道钉住香港 sshd 的主机钥匙。
 6. 上传钥匙：法国 france.sh 打印的「上传钥匙的公钥」整行填进香港 `hk.env` 的 `FLEET_WEB_UPLOAD_PUBLIC_KEY`，重跑香港；再跑法国，读回里「往香港传文件的通路是通的」。
@@ -155,7 +155,7 @@ reclaude 按用户记设备：组织写在各自家里的 `~/.reclaude/device.js
 ## 六、怎么看健康
 
 一条命令：`bash /srv/fleet-dao/deploy/france.sh --check`（香港用 `hk.sh --check`），只读回和自检，不改东西。
-应用这一层：`bash /srv/fleet-dao/deploy/release.sh --check`（在用哪版、服务、健康检查），和浏览器里的健康页 <https://fleetdao.dpdns.org/health/>（第九节）。
+应用这一层：`bash /srv/fleet-dao/deploy/release.sh --check`（在用哪版、服务、健康检查），和浏览器里的健康页 `https://<驾驶舱域名>/health/`（第九节）。
 
 法国分项：
 
@@ -168,8 +168,8 @@ reclaude 按用户记设备：组织写在各自家里的 `~/.reclaude/device.js
 
 香港分项：
 
-- `curl -I https://fleetdao.dpdns.org`、`certbot certificates`
-- `certbot renew --dry-run --cert-name fleetdao.dpdns.org`：只演练续期，不换证书
+- `curl -I https://<驾驶舱域名>`、`certbot certificates`
+- `certbot renew --dry-run --cert-name <驾驶舱域名>`：只演练续期，不换证书
 - `wg show wg-fleet`（看法国的 latest handshake）、`nginx -t`
 
 自检（P02：以 root 执行的文件要全链属 root、组和其他人不可写）分三档：
@@ -214,7 +214,7 @@ systemctl disable --now wg-quick@wg-fleet
 rm /root/.ssh/authorized_keys2
 ```
 
-4. 删数据（先问人）：`certbot delete --cert-name fleetdao.dpdns.org`，删 `/srv/fleet-dao-web`、`/var/www/fleet-dao-acme`、`/etc/fleet-dao`、`/etc/wireguard/wg-fleet.*`，`userdel -r fleet`。
+4. 删数据（先问人）：`certbot delete --cert-name <驾驶舱域名>`，删 `/srv/fleet-dao-web`、`/var/www/fleet-dao-acme`、`/etc/fleet-dao`、`/etc/wireguard/wg-fleet.*`，`userdel -r fleet`。
 
 只退一步：`git revert` 那次提交 → 机器上 pull → 重跑；脚本会把它管的文件改回仓里的样子，新加过又撤掉的东西按上面手动删。
 
@@ -267,7 +267,7 @@ bash /srv/fleet-dao/deploy/release.sh --check      # 只读：在用哪版、服
 
 ```
 FLEET_SERVICES=fleet-engine fleet-api   # 空 = 只发代码、迁移和静态页
-FLEET_DOMAIN=fleetdao.dpdns.org
+FLEET_DOMAIN=<驾驶舱域名>
 ```
 
 起一个服务之前先把它要的配置备齐：起不来的话健康检查过不了，会自动退回。
@@ -293,7 +293,7 @@ ssh <法国> 'sha256sum < /etc/fleet-dao/gateway-token.env'; ssh <香港> 'sha25
 
 往香港传静态文件的钥匙：法国 `/etc/fleet-dao/web-upload.key`（root 600，france.sh 生成）；香港 root 的 `authorized_keys2` 里那一行限死成 `from="10.99.0.2",restrict,command="/usr/bin/rrsync -wo -munge /srv/fleet-dao-web"`：只许从隧道地址来、不给终端、只能往这一个目录写、读不走任何东西。`-munge`：传来的符号链接落地时改成无效的样子，法国 root 失守也没法借链接让 nginx 读出目录外的文件。香港 sshd 的主机钥匙由 france.sh 经隧道取来钉住（隧道两头靠 WireGuard 钥匙互认），发布时只认这一把。
 
-健康页 <https://fleetdao.dpdns.org/health/>：
+健康页 `https://<驾驶舱域名>/health/`：
 
 - 读 `/healthz`：香港经隧道转给法国驾驶舱后端，后端逐项探库、Temporal……，全好回 200、有一项不好回 503。每 15 秒刷新。公网 `/healthz` 在香港限流：每个来源每分钟 30 次、突发 10 次，超了回 429（健康页照样报红，写明是限流）。
 
