@@ -3,7 +3,7 @@ name: design-exam
 description: 重大设计岔路要让几家模型各自独立出方案、再比对交用户拍时读：用户说「出设计题」「先出盲设计题」时。
 ---
 
-# design-exam：盲设计题
+# `design-exam`：盲设计题
 
 ## 何时用
 
