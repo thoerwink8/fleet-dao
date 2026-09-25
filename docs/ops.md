@@ -143,7 +143,7 @@ sudo -n /usr/local/sbin/fleet-agent-scope list            # 编号 状态，一�
 ```
 
 - `run` 最后 exec 成会话本身，标准输入输出还是引擎手里那一份。
-- 环境变量不走命令行（sudo 会把命令行记进日志）：引擎把 `FLEET_*`、`LANG`、`LC_*`、`TZ`、`TERM`、`GIT_TERMINAL_PROMPT` 放进调 sudo 时的环境；会话的 PATH 用 `FLEET_SESSION_PATH` 给，帮手脚本再在最前面加上会话用户家里的 `~/.local/bin`（引擎给的是它自己的 PATH，里面没有；ddgs 这些各用户自己装的命令在那儿）；HOME、USER 是会话用户的。GitHub 凭据（`GH_TOKEN` 之类）一概带不进去：推分支、开 PR 由引擎在会话外做。
+- 环境变量不走命令行（sudo 会把命令行记进日志）：引擎把 `FLEET_*`、`LANG`、`LC_*`、`TZ`、`TERM`、`GIT_TERMINAL_PROMPT` 放进调 sudo 时的环境；会话的 PATH 用 `FLEET_SESSION_PATH` 给，帮手脚本再把会话用户家里的 `~/.local/bin` 接在最后（引擎给的是它自己的 PATH，里面没有；ddgs 这些各用户自己装的命令在那儿。会话自己写得动的目录一律排最后：放在前面，会话放个同名程序就能顶掉 fleet 命令和系统命令）；HOME、USER 是会话用户的。GitHub 凭据（`GH_TOKEN` 之类）一概带不进去：推分支、开 PR 由引擎在会话外做。
 - 会话降权用 `setpriv --init-groups --no-new-privs`：只在自己的组里，会话里的 sudo、setuid 程序都提不了权。不用 `systemd-run --uid`：它在 scope 里不清附加组，会话会带着 root 组（法国实测）。
 - 内存要真封顶，`--memory-max` 和 `--memory-swap-max` 得一起给：只给前者，超出的部分被换进 swap，会话不会被杀（法国实测）。
 - 引擎正常停（SIGTERM）：sudo 把信号转给会话，会话跟着退。引擎崩了（SIGKILL）：会话留在自己的 scope 里；引擎起来后 `list` 找回、`stop` 收掉。
@@ -185,9 +185,9 @@ reclaude 按用户记设备：组织写在各自家里的 `~/.reclaude/device.js
 - 法国：`france.sh` 最后一步以 root 跑 `node packages/agents-sync/bin/agents-sync --apply --user <用户>`，给 `fleet-agent-dedicated`、`fleet-agent-carpool`、`pilot` 各写一份：同步脚本先换成那个用户再动手，写出来的都归他。读回里的 `--check` 逐人逐项列出。只写这台装了的那几家（按 PATH 和家里的 `.local/bin` 找命令），没装的列为「没装，跳过」。
 - 只动两样：文件里标记圈起来的那一块（标记外的内容原样留着；第一次接管、文件里还没有标记时，先把原文件整份备份，再整份换成受管块），和清单 `~/.fleet-dao/agents-sync.json` 里记着是它装的 skill（仓里删了的会撤掉；插件链进来的、claude.ai 同步来的一律不碰）。备份在各用户家里的 `~/.fleet-dao/backups/<时间>/`，照原来的相对路径摆。
 - 改了 `AGENTS.md` 上半段或 `agents/skills/`：合进主线、机器上 pull 之后重跑 `france.sh`（或只跑上面那条命令）才生效。
-- ddgs（skill docs-lookup 首选的搜索命令行）：装机最后一步以各用户自己的身份 `uv tool install ddgs==<版本>`，依赖用 `--with` 写死版本一起装（`france.sh` 顶部的 `DDGS_DEPS`），装在他家里（`~/.local/share/uv/tools/ddgs`，命令在 `~/.local/bin/ddgs`），只用系统的 Python；命令能跑、版本对、虚拟环境里的包和钉住的一样，就不动。用的 uv 装在 `/opt/fleet-dao/uv/<版本>/uv`（钉版本、核 sha256）；ddgs 和它的依赖是 PyPI 上的包，只钉版本、不核校验和。读回以各用户的身份跑 `ddgs version`，再按虚拟环境里的 dist-info 逐个核对依赖：没装、跑不起来、输出认不出、版本不对、依赖不一样都判红（`deploy/lib/cli-tools.sh`）。下载 uv 失败按装机的规矩判红停下；这一步排在最后，规矩已经写完。
-- 自测：`sudo bash deploy/test/run.sh` 里的 `agents-sync.test.sh` 以 root 建临时用户，验换身份再写、写出来的都归他、第二遍零改动、属主不对判红、root 不带 `--user` 往别人家里写被拦下；`cli-tools.test.sh` 用假的 uv、ddgs 验 ddgs 的装和查（不出网）。会话里找不找得到 ddgs 在 `agent-scope.e2e.sh`（法国）里查。
-- 撤掉：删各用户家里受管的那几份文件（要原件就从备份拷回）、清单里列的 skill 目录和清单本身；ddgs 以各用户的身份 `/opt/fleet-dao/uv/<版本>/uv tool uninstall ddgs`，再删 `/opt/fleet-dao/uv`；`france.sh` 里去掉 `setup_agent_rules` 这一步。
+- ddgs（skill docs-lookup 首选的搜索命令行）：装机最后一步以各用户自己的身份 `uv tool install ddgs==<版本>`，依赖用 `--with` 写死版本一起装（`france.sh` 顶部的 `DDGS_DEPS`），装在他家里（`~/.local/share/uv/tools/ddgs`，命令在 `~/.local/bin/ddgs`），只用系统的 Python；命令能跑、版本对、虚拟环境里的包和钉住的一样，就不动。用的 uv 装在 `/opt/fleet-dao/uv/<版本>/uv`（钉版本、核 sha256），带 `--no-config` 跑（不读他家里的 `uv.toml`：那里能改装包来源、绕过钉版本）；ddgs 和它的依赖是 PyPI 上的包，只钉版本、不核校验和。读回以各用户的身份跑 `ddgs version`，再按虚拟环境里的 dist-info 逐个核对依赖：没装、跑不起来、卡住、输出认不出、版本不对、依赖不一样、虚拟环境没了都判红（`deploy/lib/cli-tools.sh`）。装和读回用的 PATH 和会话的一样，他写得动的 `~/.local/bin` 排最后；ddgs 他改得动，读回照登录 shell 那一问的做法防卡：输出落进 root 建的临时文件、不带控制终端、10 秒叫停再过 5 秒强杀。下载 uv 失败按装机的规矩判红停下；这一步排在最后，规矩已经写完。
+- 自测：`sudo bash deploy/test/run.sh` 里的 `agents-sync.test.sh` 以 root 建临时用户，验换身份再写、写出来的都归他、第二遍零改动、属主不对判红、root 不带 `--user` 往别人家里写被拦下；`agents-sync-account.test.sh` 用假的同步脚本验装机怎么记账（崩了判红、写时的 ✗ 只打不记）；`cli-tools.test.sh` 用假的 uv、ddgs 验 ddgs 的装和查（装错了、卡住了都判红，不出网）。会话的 PATH、会话里找不找得到 ddgs 在 `agent-scope.e2e.sh` 和 `packages/adapters/test/e2e/scope-e2e.ts`（法国）里查。
+- 撤掉：删各用户家里受管的那几份文件（要原件就从备份拷回）、清单里列的 skill 目录和清单本身；ddgs 以各用户的身份 `/opt/fleet-dao/uv/<版本>/uv tool uninstall ddgs`，再删 `/opt/fleet-dao/uv`；`france.sh` 里去掉 `setup_agent_rules`、`setup_cli_tools` 两步，和读回里的 `readback_agent_rules`（`agents_sync --check` 加 `check_ddgs`）。
 
 ## 六、怎么看健康
 
