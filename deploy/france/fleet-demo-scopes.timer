@@ -1,0 +1,11 @@
+# 演示版的可见范围每 10 分钟再推一次：香港一时连不上、推的时候漏了变化，都靠这一下补上。france.sh 装。
+[Unit]
+Description=fleet-dao 演示版的可见范围每 10 分钟补推一次
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+Unit=fleet-demo-scopes.service
+
+[Install]
+WantedBy=timers.target

@@ -1,5 +1,6 @@
 import { ListChecks, Search } from 'lucide-react';
 import { Link, useNavigate, useSearchParams } from 'react-router';
+import { brand } from '#brand';
 import { useAllBoards, useMe } from '../api/client';
 import type { BoardTask, Repo } from '../api/types';
 import { BoardsError, Empty, LoadingRows, Page, Panel } from '../components/page';
@@ -22,7 +23,7 @@ import {
 import { cn } from '../lib/utils';
 
 export function meta() {
-  return [{ title: '任务 · fleet-dao 驾驶舱' }];
+  return [{ title: brand.title('任务') }];
 }
 
 const TONE_FILTERS = [

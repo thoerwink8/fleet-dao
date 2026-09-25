@@ -1,3 +1,4 @@
+import { brand } from '#brand';
 import '@xyflow/react/dist/style.css';
 import {
   Background,
@@ -806,7 +807,7 @@ const toneMeaning = {
   run: '在跑：分诊、写方案、写码、验证、合并中',
   wait: '在等：排队、等空位、等前一个子任务',
   human: '等你：回答追问',
-  stall: '停滞：一段时间没进展，已交帅位',
+  stall: `停滞：一段时间没进展，已交${brand.terms.marshalShort}`,
   fail: '失败：测试没过或出错，等重试',
   done: '完成：已合并 / 已关单',
   stop: '叫停：人叫停的',
@@ -859,7 +860,7 @@ function nowRow(board: Board, item: NowItem) {
 function NowPanel({ board, onPick }: { board: Board; onPick(id: string): void }) {
   // 矮屏（笔记本）默认收起，只留一行，免得盖住卡片；点开过、收起过就记住这个选择。
   const tall = useMediaQuery('(min-height: 940px)');
-  const [stored, setStored] = useLocalState<boolean | null>('fleet-dao.board.now-open', null);
+  const [stored, setStored] = useLocalState<boolean | null>(`${brand.storagePrefix}board.now-open`, null);
   const open = stored ?? tall;
   const rows = board.now
     .map((n) => nowRow(board, n))

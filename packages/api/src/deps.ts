@@ -1,4 +1,5 @@
 import type { Config } from './config.ts';
+import type { DemoPublisher } from './demo.ts';
 import type {
   ChangeFeed,
   DraftOpener,
@@ -25,4 +26,6 @@ export interface Deps {
   health: HealthCheck[];
   log: Logger;
   now: () => Date;
+  /** 演示版可见范围的发布处；null = 没配（FLEET_DEMO_DIR）。 */
+  demo: DemoPublisher | null;
 }

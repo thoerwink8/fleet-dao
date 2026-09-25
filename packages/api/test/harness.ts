@@ -8,6 +8,7 @@ import { signAgentToken } from '../src/agent-token.ts';
 import { buildApps } from '../src/app.ts';
 import { type ChangeHub, createChangeHub, type PgChangeFeed, startPgChangeFeed } from '../src/changes.ts';
 import type { Config } from '../src/config.ts';
+import type { DemoPublisher } from '../src/demo.ts';
 import type { Deps } from '../src/deps.ts';
 import { DEV_RUN_ID, DEV_USER_ID, devFixtures, IDS } from '../src/dev-fixtures.ts';
 import { type DraftOpenLimits, type DraftOpenRunner, notWiredDraftOpener } from '../src/draft-opening.ts';
@@ -51,6 +52,7 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     askWaitMs: 300,
     quotaStaleAfterMs: 30 * 60_000,
     sseHeartbeatMs: 60_000,
+    demoDir: null,
     ...overrides,
   };
 }
@@ -106,6 +108,8 @@ export interface HarnessOptions {
   draftOpener?: DraftOpener;
   /** 开单的时限调小（测「实现不回」时不真等半分钟）。 */
   draftOpenLimits?: Partial<DraftOpenLimits>;
+  /** 演示版的发布处；不给就是没配。 */
+  demo?: DemoPublisher | null;
 }
 
 function wire<S extends Store>(
@@ -135,6 +139,7 @@ function wire<S extends Store>(
     log,
     now,
     health: options.health ?? [],
+    demo: options.demo ?? null,
     feishu: options.feishu === null ? null : feishu.auth,
     workflows: options.workflows ?? {
       async signal(taskId, signal) {

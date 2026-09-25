@@ -9,6 +9,7 @@ import {
   TriangleAlert,
 } from 'lucide-react';
 import { Link, useNavigate } from 'react-router';
+import { brand } from '#brand';
 import { useAllBoards, useAudit, useMe, usePools } from '../api/client';
 import type { Board, BoardTask, NowItem, PoolView, QuotaWindowView } from '../api/types';
 import { BoardsError, Empty, LoadError, LoadingRows, Page, Panel, Stat } from '../components/page';
@@ -17,6 +18,7 @@ import { useRepo } from '../components/repo-context';
 import { StatusChip, StatusDot } from '../components/status';
 import { ActionButtons, targetOf } from '../components/task-actions';
 import { Button } from '../components/ui/button';
+import { canSee } from '../demo/access';
 import { actionLabel, actorName, targetLabel, taskIndex } from '../lib/audit';
 import { isUpstreamFull, isUseItOrLoseIt, poolTitle, utilOf, windowTitle } from '../lib/catalog';
 import { formatAgo, formatDuration, formatIn, formatPercent } from '../lib/format';
@@ -35,7 +37,7 @@ import {
 import { cn } from '../lib/utils';
 
 export function meta() {
-  return [{ title: '总览 · fleet-dao 驾驶舱' }];
+  return [{ title: brand.title('总览') }];
 }
 
 function nowLabel(boards: Board[], n: NowItem): string {
@@ -89,7 +91,7 @@ export default function Overview() {
           value={count(byTone('run'))}
           icon={Activity}
           hint="分诊、写方案、写码、验证、合并"
-          to="/tasks"
+          to={canSee('task') ? '/tasks' : undefined}
         />
         <Stat
           label="卡住"
@@ -105,22 +107,24 @@ export default function Overview() {
           icon={Hand}
           accent={boardsOk && byTone('human') ? 'text-ink-human' : undefined}
           hint="回答追问"
-          to="/notifications"
+          to={canSee('notifications') ? '/notifications' : undefined}
         />
         <Stat
           label="排队的会话"
           value={count(queued)}
           icon={Hourglass}
           hint={boardsOk ? `${working.length} 个在干活` : '看板没读全'}
-          to="/quota"
+          to={canSee('quota') ? '/quota' : undefined}
         />
-        <Stat
-          label="额度快清零"
-          value={pools.data ? hot.length : '—'}
-          icon={GaugeCircle}
-          hint={pools.error ? '额度没读成' : '还剩不少，该先用它'}
-          to="/quota"
-        />
+        {canSee('quota') ? (
+          <Stat
+            label="额度快清零"
+            value={pools.data ? hot.length : '—'}
+            icon={GaugeCircle}
+            hint={pools.error ? '额度没读成' : '还剩不少，该先用它'}
+            to="/quota"
+          />
+        ) : null}
       </div>
 
       {error ? (
@@ -268,104 +272,112 @@ export default function Overview() {
             ) : null}
           </Panel>
 
-          <Panel
-            title="额度"
-            description="用得最满的几个窗"
-            actions={
-              <Button asChild size="sm" variant="ghost" className="h-7">
-                <Link to="/quota">
-                  全部
-                  <ArrowRight />
-                </Link>
-              </Button>
-            }
-          >
-            {pools.error ? <LoadError what="额度" error={pools.error} /> : null}
-            <ul className="space-y-3">
-              {fullest.map(({ pool, w, util, full }, i) => (
-                // biome-ignore lint/suspicious/noArrayIndexKey: 同一个池同一种窗可能有好几个（按模型组），契约里没有区分它们的字段。
-                <li key={`${pool.id}-${w.window}-${i}`}>
-                  <div className="flex items-center justify-between gap-2 text-xs">
-                    <span className="truncate">
-                      {poolTitle(pool)}
-                      <span className="text-muted-foreground"> · {windowTitle(w)}</span>
-                    </span>
-                    <span
-                      className={cn(
-                        full ? 'font-medium text-ink-fail' : 'num',
-                        w.stale && 'text-muted-foreground line-through',
-                      )}
-                    >
-                      {full ? '已用满' : formatPercent(util ?? 0)}
-                    </span>
-                  </div>
-                  <QuotaBar util={util ?? (full ? 1 : undefined)} className="mt-1" />
-                  <div className="mt-1 text-[11px] text-muted-foreground">
-                    {w.resetsAt ? (
-                      <>
-                        <span className="num">{formatIn(w.resetsAt, now)}</span>清零 ·{' '}
-                      </>
-                    ) : null}
-                    {w.reading === 'measured' ? '实读' : '估算'}
-                    {w.stale ? ' · 读数过期' : ''}
-                  </div>
-                </li>
-              ))}
-            </ul>
-            {pools.data && !windows.length ? (
-              <p className="text-center text-sm text-muted-foreground">还没有额度读数</p>
-            ) : null}
-            {unknownUse ? (
-              <p className="mt-3 text-xs text-ink-stall">
-                另有 <span className="num">{unknownUse}</span> 个窗没排进来（用量没读到，或上游这次没报）——
-                <Link to="/quota" className="underline underline-offset-2">
-                  去额度页看
-                </Link>
-              </p>
-            ) : null}
-          </Panel>
-
-          <Panel
-            title="最近动态"
-            bodyClassName="p-0"
-            actions={
-              <Button asChild size="sm" variant="ghost" className="h-7">
-                <Link to="/audit">
-                  全部
-                  <ArrowRight />
-                </Link>
-              </Button>
-            }
-          >
-            {audit.error ? (
-              <div className="p-4">
-                <LoadError what="操作记录" error={audit.error} />
-              </div>
-            ) : null}
-            <ul className="divide-y">
-              {recent.map((a) => (
-                <li key={a.id} className="px-4 py-2 text-xs">
-                  <div className="flex items-center gap-1.5">
-                    <span className="shrink-0 font-medium" title={a.actor.id}>
-                      {actorName(a.actor, me)}
-                    </span>
-                    <span className={cn('shrink-0', !a.ok && 'text-ink-fail')}>{actionLabel(a.action)}</span>
-                    <span className="min-w-0 truncate text-muted-foreground">
-                      {targetLabel(a.target, tasksById)}
-                    </span>
-                    <span className="num ml-auto shrink-0 text-muted-foreground">{formatAgo(a.at, now)}</span>
-                  </div>
-                  {a.reason || a.error ? (
-                    <div
-                      className={cn('mt-0.5 truncate', a.error ? 'text-ink-fail' : 'text-muted-foreground')}
-                    >
-                      {a.error ?? a.reason}
+          {canSee('quota') ? (
+            <Panel
+              title="额度"
+              description="用得最满的几个窗"
+              actions={
+                <Button asChild size="sm" variant="ghost" className="h-7">
+                  <Link to="/quota">
+                    全部
+                    <ArrowRight />
+                  </Link>
+                </Button>
+              }
+            >
+              {pools.error ? <LoadError what="额度" error={pools.error} /> : null}
+              <ul className="space-y-3">
+                {fullest.map(({ pool, w, util, full }, i) => (
+                  // biome-ignore lint/suspicious/noArrayIndexKey: 同一个池同一种窗可能有好几个（按模型组），契约里没有区分它们的字段。
+                  <li key={`${pool.id}-${w.window}-${i}`}>
+                    <div className="flex items-center justify-between gap-2 text-xs">
+                      <span className="truncate">
+                        {poolTitle(pool)}
+                        <span className="text-muted-foreground"> · {windowTitle(w)}</span>
+                      </span>
+                      <span
+                        className={cn(
+                          full ? 'font-medium text-ink-fail' : 'num',
+                          w.stale && 'text-muted-foreground line-through',
+                        )}
+                      >
+                        {full ? '已用满' : formatPercent(util ?? 0)}
+                      </span>
                     </div>
-                  ) : null}
-                </li>
-              ))}
-            </ul>
-          </Panel>
+                    <QuotaBar util={util ?? (full ? 1 : undefined)} className="mt-1" />
+                    <div className="mt-1 text-[11px] text-muted-foreground">
+                      {w.resetsAt ? (
+                        <>
+                          <span className="num">{formatIn(w.resetsAt, now)}</span>清零 ·{' '}
+                        </>
+                      ) : null}
+                      {w.reading === 'measured' ? '实读' : '估算'}
+                      {w.stale ? ' · 读数过期' : ''}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+              {pools.data && !windows.length ? (
+                <p className="text-center text-sm text-muted-foreground">还没有额度读数</p>
+              ) : null}
+              {unknownUse ? (
+                <p className="mt-3 text-xs text-ink-stall">
+                  另有 <span className="num">{unknownUse}</span> 个窗没排进来（用量没读到，或上游这次没报）——
+                  <Link to="/quota" className="underline underline-offset-2">
+                    去额度页看
+                  </Link>
+                </p>
+              ) : null}
+            </Panel>
+          ) : null}
+
+          {canSee('audit') ? (
+            <Panel
+              title="最近动态"
+              bodyClassName="p-0"
+              actions={
+                <Button asChild size="sm" variant="ghost" className="h-7">
+                  <Link to="/audit">
+                    全部
+                    <ArrowRight />
+                  </Link>
+                </Button>
+              }
+            >
+              {audit.error ? (
+                <div className="p-4">
+                  <LoadError what="操作记录" error={audit.error} />
+                </div>
+              ) : null}
+              <ul className="divide-y">
+                {recent.map((a) => (
+                  <li key={a.id} className="px-4 py-2 text-xs">
+                    <div className="flex items-center gap-1.5">
+                      <span className="shrink-0 font-medium" title={a.actor.id}>
+                        {actorName(a.actor, me)}
+                      </span>
+                      <span className={cn('shrink-0', !a.ok && 'text-ink-fail')}>
+                        {actionLabel(a.action)}
+                      </span>
+                      <span className="min-w-0 truncate text-muted-foreground">
+                        {targetLabel(a.target, tasksById)}
+                      </span>
+                      <span className="num ml-auto shrink-0 text-muted-foreground">
+                        {formatAgo(a.at, now)}
+                      </span>
+                    </div>
+                    {a.reason || a.error ? (
+                      <div
+                        className={cn('mt-0.5 truncate', a.error ? 'text-ink-fail' : 'text-muted-foreground')}
+                      >
+                        {a.error ?? a.reason}
+                      </div>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            </Panel>
+          ) : null}
         </div>
       </div>
     </Page>

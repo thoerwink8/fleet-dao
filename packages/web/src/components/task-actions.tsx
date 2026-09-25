@@ -20,9 +20,9 @@ import {
   headlineInk,
   headlineText,
   type QuotaHeadline,
-  quotaHeadline,
   routeInfo,
   routeProblem,
+  routeQuotaHeadline,
   stageLabel,
 } from '../lib/catalog';
 import { isTaskFinished, letterOf } from '../lib/status';
@@ -250,7 +250,13 @@ export function routeOptions(
     const info = routeInfo(routing, id);
     if (!info) return undefined;
     const pool = pools?.find((p) => p.id === info.poolId);
-    const quota = pools ? quotaHeadline(pool) : undefined;
+    // 按这条路由算：只扣别的模型组的窗满了不算它满，和调度台同一句话。
+    const quota = pools
+      ? routeQuotaHeadline(
+          pool,
+          routing.models.find((m) => m.id === info.route.modelId),
+        )
+      : undefined;
     let blocked = routeProblem(routing, id, stage, now) ?? undefined;
     if (!blocked && !info.route.alive) blocked = '离线';
     if (!blocked && !info.channelEnabled) blocked = '渠道已下架';
@@ -325,7 +331,7 @@ function RoutePickerDialog({
         </div>
       </div>
       {o.quota ? (
-        <div className="w-20 shrink-0 text-right" data-quota={o.quota.kind}>
+        <div className="w-24 shrink-0 text-right" data-quota={o.quota.kind}>
           <div
             className={cn(
               o.quota.kind === 'util' ? 'num text-xs' : cn('text-[11px] font-medium', headlineInk(o.quota)),

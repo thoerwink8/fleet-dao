@@ -4,10 +4,15 @@
   "private": true,
   "description": "驾驶舱前端：看板 + 后台管理（React Router 纯前端单页模式）",
   "type": "module",
+  "imports": {
+    "#brand": "./src/brand/cockpit.tsx"
+  },
   "scripts": {
     "dev": "react-router dev",
     "dev:mock": "react-router dev --mode mock",
+    "dev:demo": "node scripts/demo.ts dev",
     "build": "react-router build",
+    "build:demo": "node scripts/demo.ts build",
     "preview": "vite preview --outDir dist/client"
   },
   "dependencies": {

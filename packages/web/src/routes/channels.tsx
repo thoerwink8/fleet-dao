@@ -1,6 +1,7 @@
 import { CalendarClock, Radio } from 'lucide-react';
 import { useState } from 'react';
 import { toast } from 'sonner';
+import { brand } from '#brand';
 import { errorText, usePools, useRouting, useUpdateChannel } from '../api/client';
 import type { Channel, PoolView, Routing } from '../api/types';
 import { Empty, LoadError, LoadingRows, Page } from '../components/page';
@@ -34,7 +35,7 @@ import { useNow } from '../lib/hooks';
 import { cn } from '../lib/utils';
 
 export function meta() {
-  return [{ title: '渠道与账号 · fleet-dao 驾驶舱' }];
+  return [{ title: brand.title('渠道与账号') }];
 }
 
 export default function Channels() {

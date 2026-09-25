@@ -4,6 +4,7 @@ import { BellRing, FolderGit2, Info, Palette, SlidersHorizontal } from 'lucide-r
 import { type FormEvent, type ReactNode, useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import type { z } from 'zod';
+import { brand } from '#brand';
 import { ApiError, errorText, useApi, useMe, useSettings, useUpdateSetting } from '../api/client';
 import type { Setting, SettingKey } from '../api/types';
 import { LoadError, LoadingRows, Page } from '../components/page';
@@ -23,7 +24,7 @@ import { isMine, TONES, toneLabel } from '../lib/status';
 import { PALETTES } from '../lib/theme';
 
 export function meta() {
-  return [{ title: '设置 · fleet-dao 驾驶舱' }];
+  return [{ title: brand.title('设置') }];
 }
 
 function Section({
@@ -211,7 +212,7 @@ function QuietHours({ s }: { s: Setting | undefined }) {
         <div>
           <div className="text-sm font-medium">{settingLabel['notify.quietHours']}</div>
           <p className="mt-0.5 text-xs text-muted-foreground">
-            北京时间。免打扰时段里飞书不响；驾驶舱里照常能看到。
+            北京时间。免打扰时段里飞书不响；{brand.product}里照常能看到。
           </p>
         </div>
         <Switch checked={on} onCheckedChange={setOn} aria-label="开免打扰时段" />
@@ -331,7 +332,7 @@ export default function Settings() {
         id="notify"
         icon={BellRing}
         title="提醒"
-        description="飞书和驾驶舱只推三类：要你拍、卡住报警、日报。进度不主动推，问了才给。"
+        description={`飞书和${brand.product}只推三类：要你拍、卡住报警、日报。进度不主动推，问了才给。`}
       >
         {!settings.data ? (
           <LoadingRows rows={1} />
@@ -378,18 +379,28 @@ export default function Settings() {
         </ul>
       </Section>
 
-      <Section id="about" icon={Info} title="关于" description="驾驶舱 v1 的前端。">
+      <Section id="about" icon={Info} title="关于" description={`${brand.product} v1 的前端。`}>
         <dl className="grid max-w-md grid-cols-[96px_1fr] gap-y-2 text-sm">
           <dt className="text-muted-foreground">数据</dt>
           <dd>
-            {api.source === 'mock'
-              ? '假数据（按设计文档编的，会自己动）'
-              : '驾驶舱后端（/api），推送走 /api/events'}
+            {api.source === 'http'
+              ? `${brand.product}后端（/api），推送走 /api/events`
+              : '假数据（编的，会自己动；页面上的操作只改这份假数据）'}
           </dd>
           <dt className="text-muted-foreground">登录</dt>
-          <dd>{me ? `${me.user.displayName}（飞书账号，只放行创始人）` : '—'}</dd>
-          <dt className="text-muted-foreground">接口约定</dt>
-          <dd className="num text-xs leading-5">packages/shared/src/web-api.ts</dd>
+          <dd>
+            {api.source === 'demo'
+              ? '访客（演示版不用登录）'
+              : me
+                ? `${me.user.displayName}（飞书账号，只放行创始人）`
+                : '—'}
+          </dd>
+          {import.meta.env.MODE !== 'demo' ? (
+            <>
+              <dt className="text-muted-foreground">接口约定</dt>
+              <dd className="num text-xs leading-5">packages/shared/src/web-api.ts</dd>
+            </>
+          ) : null}
         </dl>
       </Section>
     </Page>

@@ -5,10 +5,13 @@ import type { ReactNode } from 'react';
 import { Link } from 'react-router';
 import { errorText, useRunSteps, useTaskDetail } from '../api/client';
 import type { Board, BoardSubtask, BoardTask, Routing, Run } from '../api/types';
+import { RepoLink } from '../components/repo-link';
 import { StatusChip, StatusDot } from '../components/status';
 import { ActionButtons, targetOf } from '../components/task-actions';
 import { Button } from '../components/ui/button';
 import { ScrollArea } from '../components/ui/scroll-area';
+import { canSeeDetail } from '../demo/access';
+import { HiddenNote } from '../demo/views';
 import { routeInfo, stageLabel } from '../lib/catalog';
 import { formatAgo, formatDuration } from '../lib/format';
 import { useNow } from '../lib/hooks';
@@ -150,7 +153,9 @@ function TaskPanel({
       </div>
 
       <Section title="原话">
-        {detail.data ? (
+        {!canSeeDetail('process') ? (
+          <HiddenNote what="需求的原话" />
+        ) : detail.data ? (
           <blockquote className="rounded-lg border-l-2 border-border-strong bg-muted/60 px-3 py-2 text-sm whitespace-pre-wrap">
             {detail.data.task.rawRequest}
             <div className="mt-1 text-xs text-muted-foreground">
@@ -313,7 +318,9 @@ function SubPanel({
       </div>
 
       <Section title="步骤清单">
-        {steps.data?.steps.length ? (
+        {!canSeeDetail('process') ? (
+          <HiddenNote what="步骤清单" />
+        ) : steps.data?.steps.length ? (
           <ol className="space-y-1">
             {steps.data.steps.map((st) => (
               <li key={st.index} className="flex items-center gap-2 text-[13px]">
@@ -378,7 +385,9 @@ function SubPanel({
       ) : null}
 
       <Section title="会改的地方">
-        {s.touches.length ? (
+        {!canSeeDetail('process') ? (
+          <HiddenNote what="要改的文件" />
+        ) : s.touches.length ? (
           <ul className="space-y-1">
             {s.touches.map((p) => (
               <li key={p} className="num flex items-center gap-1.5 truncate text-xs">
@@ -397,17 +406,17 @@ function SubPanel({
 
       {s.prNumber ? (
         <Section title="PR">
-          <a
-            href={`https://github.com/${board.repo.owner}/${board.repo.name}/pull/${s.prNumber}`}
-            target="_blank"
-            rel="noreferrer"
-            className="flex items-center gap-2 text-sm hover:underline"
+          <RepoLink
+            repo={board.repo}
+            kind="pull"
+            n={s.prNumber}
+            className="flex items-center gap-2 text-sm [&[href]]:hover:underline"
+            icon={<ArrowUpRight className="size-3.5 text-muted-foreground" aria-hidden />}
           >
             <GitPullRequest className="size-4 text-muted-foreground" aria-hidden />
             <span className="num font-medium">#{s.prNumber}</span>
             <span className="text-muted-foreground">{pr.text}</span>
-            <ArrowUpRight className="size-3.5 text-muted-foreground" aria-hidden />
-          </a>
+          </RepoLink>
         </Section>
       ) : null}
     </div>
