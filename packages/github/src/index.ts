@@ -58,8 +58,12 @@ export {
   type SelfCheckItem,
 } from './github.ts';
 export {
+  CLAIM_RENEW_EVERY_MS,
+  CLAIM_STALE_AFTER_MS,
+  holdLease,
   type IdempotencyStore,
   idempotencyKey,
+  type Lease,
   memoryIdempotencyStore,
   once,
   pgIdempotencyStore,
@@ -77,7 +81,14 @@ export {
   type UpdateIssueProgressResult,
   updateIssueProgress,
 } from './issues.ts';
-export { type Ledger, memoryLedger, type PrMirror, pgLedger, pgLocker } from './ledger.ts';
+export {
+  type Ledger,
+  memoryLedger,
+  type PgLockerOptions,
+  type PrMirror,
+  pgLedger,
+  pgLocker,
+} from './ledger.ts';
 export {
   humanPart,
   type IssueProgress,
@@ -102,7 +113,13 @@ export {
   type WaitCiInput,
   waitCi,
 } from './pulls.ts';
-export { type PushBranchInput, type PushBranchResult, pushBranch, validBranchName } from './push.ts';
+export {
+  MAX_BUNDLE_BYTES,
+  type PushBranchInput,
+  type PushBranchResult,
+  pushBranch,
+  validBranchName,
+} from './push.ts';
 export {
   type AuditReport,
   createReconciler,

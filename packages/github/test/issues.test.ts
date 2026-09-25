@@ -1,6 +1,21 @@
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { createGitHub } from '../src/github.ts';
 import { humanPart, type IssueProgress, parseBody, renderProgress, spliceProgress } from '../src/progress.ts';
+import { API } from './fake-github.ts';
 import { json, repo, setup } from './helpers.ts';
+
+/** 等条件成立（真时间，最多 ms 毫秒）；到点不成立就返回 false，由调用方决定算不算失败。 */
+async function settle(cond: () => boolean, ms = 2000): Promise<boolean> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (cond()) return true;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  return cond();
+}
 
 const progress = (over: Partial<IssueProgress> = {}): IssueProgress => ({
   state: 'running',
@@ -228,6 +243,70 @@ describe('关单', () => {
     await gh.closeIssue(input);
     expect(issue.comments).toHaveLength(1);
     expect(issue.state_reason).toBe('not_planned');
+  });
+
+  it('回查慢（评论多、撞了限流在等）过了 2 分钟：别的重试不抢，同一条评论只落一次', async () => {
+    const { fake, clock, ledger } = setup();
+    const issue = fake.addIssue();
+    // 第一个工人的回查（翻评论）回执在路上走了好几分钟
+    let holding = false;
+    let held = false;
+    let releaseLookup: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      releaseLookup = resolve;
+    });
+    const slowLookup: typeof fetch = async (input, init) => {
+      const res = await fake.fetch(input, init);
+      const url = String(input instanceof Request ? input.url : input);
+      if (!held && (init?.method ?? 'GET') === 'GET' && /\/issues\/\d+\/comments/.test(url)) {
+        held = true;
+        holding = true;
+        await gate;
+      }
+      return res;
+    };
+    // 两个工人：同一个假 GitHub、同一本账、同一个钟
+    const worker = (fetchImpl: typeof fetch) =>
+      createGitHub({
+        ledger,
+        apps: fake.apps,
+        apiUrl: API,
+        fetch: fetchImpl,
+        now: clock.now,
+        sleep: async (ms) => clock.advance(ms),
+        env: {},
+        stateDir: mkdtempSync(join(tmpdir(), 'fleet-gh-state-')),
+        leaseRenewMs: 5,
+      });
+    const a = worker(slowLookup);
+    const b = worker(fake.fetch);
+    const input = { repo, issueNumber: issue.number, reason: 'completed' as const, comment: '完成：见 #31' };
+    const rows = (ledger.idempotency as unknown as { rows: Map<string, { action: string; claimedAt: Date }> })
+      .rows;
+    const claimedAt = () =>
+      [...rows.values()].find((r) => r.action === 'github.close_comment')?.claimedAt.getTime();
+
+    const first = a.closeIssue(input).then(
+      () => 'ok',
+      (err: { code?: string }) => err.code ?? String(err),
+    );
+    expect(await settle(() => holding)).toBe(true);
+    clock.advance(3 * 60_000);
+    // 真实里时间一点点走、每 30 秒续一次；这里一下拨了 3 分钟，等它续一次再让第二个来
+    await settle(() => claimedAt() === clock.now().getTime());
+    const second = await b.closeIssue(input).then(
+      () => 'wrote',
+      (err: { code?: string }) => err.code ?? String(err),
+    );
+    releaseLookup();
+    const firstOutcome = await first;
+    const marked = () => issue.comments.filter((c) => (c.body ?? '').includes('<!-- fleet:close:'));
+    expect(marked()).toHaveLength(1);
+    expect(firstOutcome).toBe('ok');
+    expect(second).toBe('IN_FLIGHT');
+    // 第二个再重试：认下已经发的那条，不再发
+    expect(await b.closeIssue(input)).toMatchObject({ commentCreated: false });
+    expect(marked()).toHaveLength(1);
   });
 
   it('评论过百也翻得到自己那条（不只翻第一页）', async () => {

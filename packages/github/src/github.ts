@@ -40,14 +40,14 @@ import {
   type WaitCiInput,
   waitCi,
 } from './pulls.ts';
-import { type PushBranchInput, type PushBranchResult, pushBranch } from './push.ts';
+import { MAX_BUNDLE_BYTES, type PushBranchInput, type PushBranchResult, pushBranch } from './push.ts';
 import { createReconciler, type Reconciler, type ReconcilerOptions } from './reconcile.ts';
 import { RepoFactsCache } from './repos.ts';
 
 export interface GitHubOptions {
   /** 防重复写的账、PR 镜像：生产用 pgLedger(db)。 */
   ledger: Ledger;
-  /** 同一张 issue 的进度写入串行：生产用 pgLocker(db)（跨工人），默认只在本进程内。 */
+  /** 同一张 issue 的进度写入、同一个仓的合并串行：生产用 pgLocker(db)（跨工人），默认只在本进程内。 */
   locker?: Locker;
   /** 不给就从本机配置读（appFilesFromEnv(env)）。 */
   apps?: Record<AppRole, AppCredentials>;
@@ -65,6 +65,9 @@ export interface GitHubOptions {
   gitUrl?: (repo: RepoRef) => string;
   stateDir?: string;
   writeSpacingMs?: number;
+  leaseRenewMs?: number;
+  /** 会话交来的包最大多少字节，默认 MAX_BUNDLE_BYTES。 */
+  maxBundleBytes?: number;
 }
 
 /** 各身份要有的权限（自检用）。「干活的」只推分支、开 PR；「引擎」合并、改 issue、续互动限制、读 CI。 */
@@ -135,6 +138,7 @@ export function createGitHub(options: GitHubOptions): GitHub {
     locker: options.locker ?? memoryLocker(),
     bots: new Bots(client),
     log: client.log,
+    leaseRenewMs: options.leaseRenewMs,
   };
   const stateDir = options.stateDir ?? env.FLEET_GITHUB_STATE_DIR ?? '/var/lib/fleet-dao/github';
   const gitHost = options.gitHost ?? 'https://github.com/';
@@ -145,6 +149,7 @@ export function createGitHub(options: GitHubOptions): GitHub {
     gitUrl: options.gitUrl ?? ((r: RepoRef) => `${gitHost.replace(/\/+$/, '')}/${r.owner}/${r.name}.git`),
     gitHost,
     mirrorRoot: join(stateDir, 'mirrors'),
+    maxBundleBytes: options.maxBundleBytes ?? MAX_BUNDLE_BYTES,
     log: client.log,
     baseEnv: env,
   };

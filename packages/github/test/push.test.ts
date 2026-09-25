@@ -1,11 +1,12 @@
 // 推分支用真 git、本地裸仓当远端（不出网）。GitHub 接口（默认分支、换令牌）走假服务。
 // 会话交出来的是包（git bundle）：这里在测试自己的树里打包，模拟会话用户那一步。
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { classifyPushFailure, execGit, type GitRunner } from '../src/git.ts';
+import type { GitHubOptions } from '../src/github.ts';
 import { validBranchName } from '../src/push.ts';
 import { setup } from './helpers.ts';
 
@@ -73,7 +74,10 @@ beforeAll(() => {
   git(main, 'push', '-q', 'origin', 'HEAD:main');
 }, 60_000);
 
-function pushSetup(record?: { args: string[]; cwd: string; env: Record<string, string> }[]) {
+function pushSetup(
+  record?: { args: string[]; cwd: string; env: Record<string, string> }[],
+  over: Partial<GitHubOptions> = {},
+) {
   const runner: GitRunner = async (args, call) => {
     record?.push({ args, cwd: call.cwd, env: call.env });
     return execGit(args, call);
@@ -83,8 +87,34 @@ function pushSetup(record?: { args: string[]; cwd: string; env: Record<string, s
     gitUrl: () => remote,
     gitHost: 'https://github.com/',
     env: { ...process.env, GH_TOKEN: 'ghp_personalpersonalpersonal', GIT_ASKPASS: '/usr/bin/evil' },
+    ...over,
   });
 }
+
+/** 包的两段：头（到空行为止）和后面的 pack。 */
+function splitBundle(file: string): { header: Buffer; pack: Buffer } {
+  const bytes = readFileSync(file);
+  const at = bytes.indexOf('\n\nPACK');
+  if (at < 0) throw new Error(`${file} 的格式认不出，造不了坏包`);
+  return { header: bytes.subarray(0, at + 2), pack: bytes.subarray(at + 2) };
+}
+
+function writeBundle(name: string, bytes: Buffer): string {
+  const file = join(root, `${name}-${Math.random().toString(36).slice(2, 9)}.bundle`);
+  writeFileSync(file, bytes);
+  return file;
+}
+
+/** 这台机器能不能建符号链接（Windows 没开开发者模式时不行）。 */
+const canSymlink = (() => {
+  const dir = mkdtempSync(join(tmpdir(), 'fleet-gh-ln-'));
+  try {
+    symlinkSync(join(dir, 'target'), join(dir, 'link'));
+    return true;
+  } catch {
+    return false;
+  }
+})();
 
 // 每个用例要起十几个 git 进程：Linux 上一两百毫秒，Windows 开发机上要好几秒
 describe('会话外推分支', { timeout: 60_000 }, () => {
@@ -115,13 +145,18 @@ describe('会话外推分支', { timeout: 60_000 }, () => {
     expect(header).toBeDefined();
     const keyName = header?.[0].replace('VALUE', 'KEY') ?? '';
     expect(pushCall?.env[keyName]).toBe('http.https://github.com/.extraHeader');
-    // 引擎不碰会话的工作树：不在里面跑 git、不借它的对象库，只读交出来的包；导入包那一步不带令牌
+    // 引擎不碰会话的工作树：不在里面跑 git、不借它的对象库；交来的包也不直接给 git，
+    // 先拷进引擎自己的裸仓目录再导入（导入时会话换包也换不到这份），导入那一步不带令牌
     expect(calls.filter((c) => c.cwd.startsWith(wt.path))).toEqual([]);
-    expect(calls.filter((c) => c.args.some((a) => a.includes(wt.path)))).toEqual([]);
+    expect(calls.filter((c) => c.args.some((a) => a.includes(wt.path) || a === wt.bundle))).toEqual([]);
     expect(calls.filter((c) => c.env.GIT_ALTERNATE_OBJECT_DIRECTORIES !== undefined)).toEqual([]);
     const unbundle = calls.filter((c) => c.args[0] === 'bundle');
-    expect(unbundle.map((c) => c.args)).toEqual([['bundle', 'unbundle', wt.bundle]]);
+    expect(unbundle).toHaveLength(1);
+    expect(unbundle[0]?.args.slice(0, 2)).toEqual(['bundle', 'unbundle']);
+    expect(unbundle[0]?.args[2]?.startsWith(join(unbundle[0]?.cwd ?? '', 'incoming-'))).toBe(true);
     expect(Object.values(unbundle[0]?.env ?? {}).filter((v) => v.startsWith('AUTHORIZATION'))).toEqual([]);
+    // 拷贝用完就删
+    expect(readdirSync(unbundle[0]?.cwd ?? '').filter((f) => f.startsWith('incoming-'))).toEqual([]);
   });
 
   it('拒绝推主线；分支名不合规就不推', async () => {
@@ -288,7 +323,7 @@ describe('会话外推分支', { timeout: 60_000 }, () => {
     ).rejects.toMatchObject({ code: 'BUNDLE_UNREADABLE', retryable: false });
     await expect(
       gh.pushBranch({ repo, bundlePath: root, branch: 'task/11-bad-bundle', head: wt.head }),
-    ).rejects.toMatchObject({ code: 'BUNDLE_UNREADABLE' });
+    ).rejects.toMatchObject({ code: 'BUNDLE_INVALID', retryable: false });
 
     const junk = join(root, 'junk.bundle');
     writeFileSync(junk, 'not a bundle\n');
@@ -329,6 +364,143 @@ describe('会话外推分支', { timeout: 60_000 }, () => {
         head: wt.head,
       }),
     ).rejects.toMatchObject({ code: 'WORKFLOW_PERMISSION', retryable: false });
+  });
+
+  // 坏包拿去重试只会再坏一次：一律不可重试，原因要分对（不能归成网络错）
+  it('只有头、没有 pack 的包：BUNDLE_INVALID，不可重试', async () => {
+    const { gh } = pushSetup();
+    const wt = worktree('task/12-header-only');
+    const bundlePath = writeBundle('header-only', splitBundle(wt.bundle).header);
+    await expect(
+      gh.pushBranch({
+        repo: { owner: 'acme', name: 'widgets' },
+        bundlePath,
+        branch: 'task/12-header-only',
+        head: wt.head,
+      }),
+    ).rejects.toMatchObject({ code: 'BUNDLE_INVALID', retryable: false });
+    expect(remoteHead('task/12-header-only')).toBeNull();
+  });
+
+  it('截断了的包：BUNDLE_INVALID，不可重试', async () => {
+    const { gh } = pushSetup();
+    const wt = worktree('task/13-truncated');
+    const { header, pack } = splitBundle(wt.bundle);
+    const bundlePath = writeBundle(
+      'truncated',
+      Buffer.concat([header, pack.subarray(0, Math.floor(pack.length / 2))]),
+    );
+    await expect(
+      gh.pushBranch({
+        repo: { owner: 'acme', name: 'widgets' },
+        bundlePath,
+        branch: 'task/13-truncated',
+        head: wt.head,
+      }),
+    ).rejects.toMatchObject({ code: 'BUNDLE_INVALID', retryable: false });
+    expect(remoteHead('task/13-truncated')).toBeNull();
+  });
+
+  it('改坏一个字节的包：BUNDLE_INVALID，不可重试；导入失败也不留拷贝', async () => {
+    const calls: { args: string[]; cwd: string; env: Record<string, string> }[] = [];
+    const { gh } = pushSetup(calls);
+    const wt = worktree('task/14-corrupt');
+    const { header, pack } = splitBundle(wt.bundle);
+    const broken = Buffer.from(pack);
+    const at = Math.floor(broken.length / 2);
+    broken[at] = (broken[at] ?? 0) ^ 0xff;
+    const bundlePath = writeBundle('corrupt', Buffer.concat([header, broken]));
+    await expect(
+      gh.pushBranch({
+        repo: { owner: 'acme', name: 'widgets' },
+        bundlePath,
+        branch: 'task/14-corrupt',
+        head: wt.head,
+      }),
+    ).rejects.toMatchObject({ code: 'BUNDLE_INVALID', retryable: false });
+    expect(remoteHead('task/14-corrupt')).toBeNull();
+    const mirror = calls.find((c) => c.args[0] === 'bundle')?.cwd ?? '';
+    expect(mirror).not.toBe('');
+    expect(readdirSync(mirror).filter((f) => f.startsWith('incoming-'))).toEqual([]);
+  });
+
+  it('缺对象的包（只带提交、不带它的树）：导入后就核出来，BUNDLE_INCOMPLETE，不可重试', async () => {
+    const { gh } = pushSetup();
+    const wt = worktree('task/15-missing-objects');
+    // 头照抄真包，pack 里只放提交对象本身
+    const onlyCommit = execFileSync('git', ['pack-objects', '--stdout', '-q'], {
+      cwd: wt.path,
+      input: `${wt.head}\n`,
+    });
+    const bundlePath = writeBundle(
+      'missing-objects',
+      Buffer.concat([splitBundle(wt.bundle).header, onlyCommit]),
+    );
+    await expect(
+      gh.pushBranch({
+        repo: { owner: 'acme', name: 'widgets' },
+        bundlePath,
+        branch: 'task/15-missing-objects',
+        head: wt.head,
+      }),
+    ).rejects.toMatchObject({ code: 'BUNDLE_INCOMPLETE', retryable: false });
+    expect(remoteHead('task/15-missing-objects')).toBeNull();
+  });
+
+  it('包超过大小上限：BUNDLE_TOO_LARGE，不读进来', async () => {
+    const calls: { args: string[]; cwd: string; env: Record<string, string> }[] = [];
+    const { gh } = pushSetup(calls, { maxBundleBytes: 64 });
+    const wt = worktree('task/16-too-large');
+    await expect(
+      gh.pushBranch({
+        repo: { owner: 'acme', name: 'widgets' },
+        bundlePath: wt.bundle,
+        branch: 'task/16-too-large',
+        head: wt.head,
+      }),
+    ).rejects.toMatchObject({ code: 'BUNDLE_TOO_LARGE', retryable: false });
+    expect(calls.filter((c) => c.args[0] === 'bundle')).toEqual([]);
+    expect(remoteHead('task/16-too-large')).toBeNull();
+  });
+
+  it.skipIf(!canSymlink)('包是符号链接：不跟过去读', async () => {
+    const { gh } = pushSetup();
+    const wt = worktree('task/17-symlink');
+    const link = join(root, `link-${Math.random().toString(36).slice(2, 9)}.bundle`);
+    symlinkSync(wt.bundle, link);
+    await expect(
+      gh.pushBranch({
+        repo: { owner: 'acme', name: 'widgets' },
+        bundlePath: link,
+        branch: 'task/17-symlink',
+        head: wt.head,
+      }),
+    ).rejects.toMatchObject({
+      code: 'BUNDLE_INVALID',
+      retryable: false,
+      message: expect.stringContaining('是符号链接'),
+    });
+    expect(remoteHead('task/17-symlink')).toBeNull();
+  });
+
+  it.skipIf(process.platform === 'win32')('包是命名管道：不卡在打开上，BUNDLE_INVALID', async () => {
+    const { gh } = pushSetup();
+    const wt = worktree('task/18-fifo');
+    const fifo = join(root, `fifo-${Math.random().toString(36).slice(2, 9)}.bundle`);
+    execFileSync('mkfifo', [fifo]);
+    await expect(
+      gh.pushBranch({
+        repo: { owner: 'acme', name: 'widgets' },
+        bundlePath: fifo,
+        branch: 'task/18-fifo',
+        head: wt.head,
+      }),
+    ).rejects.toMatchObject({
+      code: 'BUNDLE_INVALID',
+      retryable: false,
+      message: expect.stringContaining('不是普通文件'),
+    });
+    expect(remoteHead('task/18-fifo')).toBeNull();
   });
 
   it('推送失败的分类：规则集、凭据、网络', () => {

@@ -2,8 +2,9 @@
 // 换机器、多个工人、从备份恢复后重放都认得出来（旧网关的账是每台机器一份的本地文件，docs/reference/github.md §0 第 7 条）。
 //
 // 流程（once）：占键 → 先回查远端有没有（按正文里的标记、按分支）→ 没有才写 → 记回执。
+// - 占到键就开始续占用（回查、写都可能慢）；写之前再确认一次占用还在自己手里，不在就放弃这次写。
 // - 写的时候断在回执上（maybeLanded）：键留着「写到一半」，下次重试先回查，找到就补账，找不到且占用已过期才重写（B1）。
-// - 确定没写成（GitHub 明确拒了）：放键，下次可以重新占。
+// - 确定没写成（GitHub 明确拒了、回查就失败了）：放键，下次可以重新占。只放自己那一份，已经被别人接过去的不动。
 // - 键由内容推出来（动作 + 目标 + 内容摘要）：同一件事重试一定是同一个键；给 issue 和给 PR 的同一组改动是两个键（B4）。
 import { createHash } from 'node:crypto';
 import {
@@ -12,17 +13,21 @@ import {
   completeIdempotencyKey,
   type Db,
   idempotencyKeys,
-  releaseIdempotencyKey,
 } from '@fleet-dao/db';
 import { and, eq, isNull } from 'drizzle-orm';
 import { GitHubError, isGitHubError, redact } from './errors.ts';
 
 export type { ClaimResult };
 
+/** 占用多久没续就当占着的人死了。续的间隔要远小于它：续不上几次也还来得及。 */
+export const CLAIM_STALE_AFTER_MS = 120_000;
+export const CLAIM_RENEW_EVERY_MS = 30_000;
+
 export interface IdempotencyStore {
   claim(input: { key: string; action: string; target?: string }, now: Date): Promise<ClaimResult>;
   complete(key: string, result: unknown, now: Date): Promise<void>;
-  release(key: string): Promise<boolean>;
+  /** 放掉占用：只在 claimedAt 还是 heldClaimedAt 时放（被别人接过去了就不动，不然会删掉别人的占用）。 */
+  release(key: string, heldClaimedAt: Date): Promise<boolean>;
   /** 占着的人大概死了：把占用抢过来。只有 claimedAt 还是看到的那个时才成功（两个重试同时来只有一个抢得到）。 */
   takeOver(key: string, seenClaimedAt: Date, now: Date): Promise<boolean>;
   /** 只读：这个键的账（对账、认回声用）；没有返回 null。 */
@@ -33,7 +38,19 @@ export function pgIdempotencyStore(db: Db): IdempotencyStore {
   return {
     claim: (input, now) => claimIdempotencyKey(db, input, now),
     complete: (key, result, now) => completeIdempotencyKey(db, key, result, now),
-    release: (key) => releaseIdempotencyKey(db, key),
+    async release(key, heldClaimedAt) {
+      const rows = await db
+        .delete(idempotencyKeys)
+        .where(
+          and(
+            eq(idempotencyKeys.key, key),
+            isNull(idempotencyKeys.completedAt),
+            eq(idempotencyKeys.claimedAt, heldClaimedAt),
+          ),
+        )
+        .returning({ key: idempotencyKeys.key });
+      return rows.length > 0;
+    },
     async peek(key) {
       const [row] = await db
         .select({
@@ -84,9 +101,9 @@ export function memoryIdempotencyStore(): IdempotencyStore & {
       row.completedAt = now;
       row.result = JSON.parse(JSON.stringify(result ?? null));
     },
-    async release(key) {
+    async release(key, heldClaimedAt) {
       const row = rows.get(key);
-      if (!row || row.completedAt) return false;
+      if (!row || row.completedAt || row.claimedAt.getTime() !== heldClaimedAt.getTime()) return false;
       rows.delete(key);
       return true;
     },
@@ -134,12 +151,12 @@ export interface OnceSpec<T> {
   write: () => Promise<T>;
   now: () => Date;
   /** 「写到一半」的占用超过这么久没续、远端又找不到，就当写的人死了，抢过来重写。默认 2 分钟。 */
-  staleAfterMs?: number;
+  staleAfterMs?: number | undefined;
   /**
-   * 写的时候每隔这么久续一次占用（把 claimedAt 挪到现在），默认 30 秒。写请求要排队、撞了限流还要等，
-   * 等多久没有上限；只靠「占了多久」判死活，活着的写方会被重试抢走、同一条评论落两次。
+   * 占着的期间每隔这么久续一次（把 claimedAt 挪到现在），默认 30 秒。回查要翻页、写要排队，撞了限流还要等，
+   * 等多久没有上限；只靠「占了多久」判死活，活着的一方会被重试抢走、同一条评论落两次。
    */
-  renewEveryMs?: number;
+  renewEveryMs?: number | undefined;
 }
 
 export interface OnceResult<T> {
@@ -149,75 +166,153 @@ export interface OnceResult<T> {
 }
 
 export async function once<T>(store: IdempotencyStore, spec: OnceSpec<T>): Promise<OnceResult<T>> {
-  let held = spec.now();
-  const claim = await store.claim({ key: spec.key, action: spec.action, target: spec.target }, held);
+  const claimedAt = spec.now();
+  const claim = await store.claim({ key: spec.key, action: spec.action, target: spec.target }, claimedAt);
   if (claim.status === 'done') return { value: claim.result as T, replay: true };
 
+  if (claim.status === 'claimed') {
+    // 占到了就开始续：回查也会慢（评论翻很多页、撞了限流在等）
+    const lease = holdLease(store, spec, claimedAt);
+    try {
+      let found: T | null;
+      try {
+        found = await spec.lookup();
+      } catch (err) {
+        // 还没写过：放掉刚占的键，重试不用等占用过期
+        await lease.release();
+        throw err;
+      }
+      if (found !== null) {
+        lease.stop();
+        await record(store, spec, found);
+        return { value: found, replay: true };
+      }
+      return await writeHolding(store, spec, lease);
+    } finally {
+      lease.stop();
+    }
+  }
+
+  // 别处占着：先回查（可能写成了、只是账没记上），找不到且占用过期了才接过来
   const found = await spec.lookup();
   if (found !== null) {
     await record(store, spec, found);
     return { value: found, replay: true };
   }
-  if (claim.status === 'in-flight') {
-    const age = spec.now().getTime() - claim.claimedAt.getTime();
-    if (age < (spec.staleAfterMs ?? 120_000)) {
-      throw new GitHubError(
-        'IN_FLIGHT',
-        `同一个写操作（${spec.action} ${spec.target}）别处正在做，稍后重试`,
-        {
-          retryable: true,
-          details: { key: spec.key, claimedAt: claim.claimedAt.toISOString() },
-        },
-      );
-    }
-    held = spec.now();
-    if (!(await store.takeOver(spec.key, claim.claimedAt, held))) {
-      throw new GitHubError(
-        'IN_FLIGHT',
-        `同一个写操作（${spec.action} ${spec.target}）刚被别的重试抢走，稍后重试`,
-        {
-          retryable: true,
-          details: { key: spec.key },
-        },
-      );
-    }
+  const age = spec.now().getTime() - claim.claimedAt.getTime();
+  if (age < (spec.staleAfterMs ?? CLAIM_STALE_AFTER_MS)) {
+    throw new GitHubError('IN_FLIGHT', `同一个写操作（${spec.action} ${spec.target}）别处正在做，稍后重试`, {
+      retryable: true,
+      details: { key: spec.key, claimedAt: claim.claimedAt.toISOString() },
+    });
   }
+  const takenAt = spec.now();
+  if (!(await store.takeOver(spec.key, claim.claimedAt, takenAt))) {
+    throw new GitHubError(
+      'IN_FLIGHT',
+      `同一个写操作（${spec.action} ${spec.target}）刚被别的重试抢走，稍后重试`,
+      { retryable: true, details: { key: spec.key } },
+    );
+  }
+  const lease = holdLease(store, spec, takenAt);
+  try {
+    return await writeHolding(store, spec, lease);
+  } finally {
+    lease.stop();
+  }
+}
 
-  const lease = keepClaimed(store, spec, held);
+/** 占着键去写：写之前确认占用还在自己手里（续约断过一阵，可能已被别的重试当成死了接过去）。 */
+async function writeHolding<T>(
+  store: IdempotencyStore,
+  spec: OnceSpec<T>,
+  lease: Lease,
+): Promise<OnceResult<T>> {
+  if (!(await lease.confirm())) {
+    throw new GitHubError(
+      'CLAIM_LOST',
+      `${spec.action} ${spec.target}：占用已经被别的重试接过去了，这次不写（写了就是第二份）`,
+      { retryable: true, details: { key: spec.key } },
+    );
+  }
   let value: T;
   try {
     value = await spec.write();
   } catch (err) {
     // 可能已经写成的，键留着让下次先回查；确定没写成的放键。
-    if (!(isGitHubError(err) && err.maybeLanded)) await store.release(spec.key).catch(() => false);
+    if (!(isGitHubError(err) && err.maybeLanded)) await lease.release();
     throw err;
-  } finally {
-    lease.stop();
   }
+  lease.stop();
   await record(store, spec, value);
   return { value, replay: false };
 }
 
-/** 写的期间定时续占用。续不上（被抢走、库一时连不上）就等下一轮再试，不打断写。 */
-function keepClaimed<T>(store: IdempotencyStore, spec: OnceSpec<T>, held: Date): { stop(): void } {
-  let current = held;
-  let busy = false;
+export interface Lease {
+  /** 马上续一次（排在正在跑的那次后面），返回占用是不是还在自己手里。库连不上就抛。 */
+  confirm(): Promise<boolean>;
+  /** 停止续，放掉占用：只放自己那一份，已经被别人接过去的不动。返回放没放成。 */
+  release(): Promise<boolean>;
+  /** 只停止续（写成了、接着记回执）。 */
+  stop(): void;
+  /** 续的时候发现占用已经不在自己手里。 */
+  readonly lost: boolean;
+}
+
+export interface LeaseSpec {
+  key: string;
+  now: () => Date;
+  renewEveryMs?: number | undefined;
+}
+
+/**
+ * 占着一个键的期间定时续（CAS：claimedAt 还是自己上次写的那个才续得上）。
+ * 续不上分两种：库一时连不上（下一轮再试），和占用已经被别人接过去（记成 lost，之后不再续）。
+ */
+export function holdLease(store: IdempotencyStore, spec: LeaseSpec, since: Date): Lease {
+  let current = since;
+  let lost = false;
+  let pending = false;
+  let chain: Promise<unknown> = Promise.resolve();
+  // 一次接一次地续：两次同时拿同一个旧时刻去比，后到的那次必然失败，会被错当成「被接走了」
+  const serial = <R>(fn: () => Promise<R>): Promise<R> => {
+    const run = chain.then(fn);
+    chain = run.catch(() => undefined);
+    return run;
+  };
+  const renew = () =>
+    serial(async () => {
+      if (lost) return false;
+      const next = spec.now();
+      if (await store.takeOver(spec.key, current, next)) {
+        current = next;
+        return true;
+      }
+      lost = true;
+      return false;
+    });
   const timer = setInterval(() => {
-    if (busy) return;
-    busy = true;
-    const next = spec.now();
-    store
-      .takeOver(spec.key, current, next)
-      .then((ok) => {
-        if (ok) current = next;
-      })
+    if (pending) return;
+    pending = true;
+    renew()
       .catch(() => undefined)
       .finally(() => {
-        busy = false;
+        pending = false;
       });
-  }, spec.renewEveryMs ?? 30_000);
+  }, spec.renewEveryMs ?? CLAIM_RENEW_EVERY_MS);
   timer.unref?.();
-  return { stop: () => clearInterval(timer) };
+  const stop = () => clearInterval(timer);
+  return {
+    confirm: renew,
+    async release() {
+      stop();
+      return serial(async () => (lost ? false : store.release(spec.key, current))).catch(() => false);
+    },
+    stop,
+    get lost() {
+      return lost;
+    },
+  };
 }
 
 async function record<T>(store: IdempotencyStore, spec: OnceSpec<T>, value: T): Promise<void> {

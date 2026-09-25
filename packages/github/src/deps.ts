@@ -88,4 +88,6 @@ export interface Deps {
   locker: Locker;
   bots: Bots;
   log: Logger;
+  /** 防重复写的占用多久续一次（不给用默认 30 秒；测试调短）。 */
+  leaseRenewMs?: number | undefined;
 }

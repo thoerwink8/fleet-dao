@@ -3,12 +3,13 @@
 // 远端分支要么没有、要么是我们的祖先（别人在上面推进过就报出来让引擎认领新头，分叉就停，绝不强推，C6）。
 // 会话的提交由会话用户打成包（git bundle）交出来，这里只把包导入引擎自己的裸仓；带令牌的 git 只在这个裸仓里跑
 // （为什么见 git.ts 开头）。
-import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, statSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { constants, existsSync, lstatSync, mkdirSync, rmSync } from 'node:fs';
+import { type FileHandle, open } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { GitHubClient, Logger, RepoRef } from './client.ts';
 import { repoSlug } from './client.ts';
-import { GitHubError } from './errors.ts';
+import { GitHubError, redact } from './errors.ts';
 import {
   authHeaderConfig,
   classifyPushFailure,
@@ -30,6 +31,8 @@ export interface PushDeps {
   gitHost: string;
   /** 引擎自己的裸仓放这里，每个仓一个。 */
   mirrorRoot: string;
+  /** 会话交来的包最大多少字节（默认 MAX_BUNDLE_BYTES）。 */
+  maxBundleBytes: number;
   log: Logger;
   baseEnv?: Readonly<Record<string, string | undefined>>;
 }
@@ -144,13 +147,22 @@ export async function pushBranch(deps: PushDeps, input: PushBranchInput): Promis
       if (fetched.code !== 0) throw fromGitFailure('抓取主线', slug, fetched);
       const mainline = await revParse(git, local, mainRef);
 
-      // 3. 导入会话交来的包（包的前置提交靠刚抓进来的主线和远端分支补齐），再看要推的提交在不在
-      await importBundle(git, local, input.bundlePath, slug);
+      // 3. 导入会话交来的包（包的前置提交靠刚抓进来的主线和远端分支补齐），再看要推的提交在不在、对象全不全
+      await importBundle(git, local, mirror, input.bundlePath, deps.maxBundleBytes);
       const exists = await git(['cat-file', '-e', `${head}^{commit}`], local);
       if (exists.code !== 0) {
         throw new GitHubError('HEAD_NOT_FOUND', `会话交来的包 ${input.bundlePath} 里没有提交 ${head}`, {
           details: { bundlePath: input.bundlePath, head },
         });
+      }
+      // 导入只管把包里的对象收下，不查齐不齐：从 head 走得到、主线和远端分支上又没有的对象，要一个不缺
+      const connected = await git(['rev-list', '--objects', '--quiet', head, '--not', '--all'], local);
+      if (connected.code !== 0) {
+        throw new GitHubError(
+          'BUNDLE_INCOMPLETE',
+          `会话交来的包缺对象：${head.slice(0, 7)} 用到的东西包里没带全（${tail(connected.stderr)}）`,
+          { details: { bundlePath: input.bundlePath, head, exitCode: connected.code } },
+        );
       }
 
       // 4. 基于最新主线
@@ -247,43 +259,129 @@ async function ensureMirror(deps: PushDeps, mirror: string): Promise<void> {
 
 type Git = (args: string[], call: GitCall) => Promise<GitRun>;
 
+/** 默认的包大小上限。单个文件过 100 MiB GitHub 本来就拒收；一次交付的包比这还大，已经不是 AI 会话的正常交付。 */
+export const MAX_BUNDLE_BYTES = 100 * 1024 * 1024;
+
 /**
- * 把会话交来的包导入镜像。包是会话用户写的，当数据读：`bundle unbundle` 只写对象、不建引用、不执行包里的任何东西。
- * 读不到、不是包、缺前置提交各报各的错，都不当「导入了」往下走。
+ * 把会话交来的包导入镜像。包在会话写得到的地方，当数据读、不信它：先拷一份到引擎自己的目录，再从拷贝导入
+ * （导入的时候会话再换包，也换不到引擎读的那份）。`bundle unbundle` 只写对象、不建引用、不执行包里的任何东西。
+ * 导入失败一律当坏包、不可重试：拿同一个包重试只会再坏一次（原因不是网络，别让重试次数白白用完）；缺前置提交单说。
  */
-async function importBundle(git: Git, call: GitCall, bundlePath: string, slug: string): Promise<void> {
-  let isFile = false;
+async function importBundle(
+  git: Git,
+  call: GitCall,
+  mirror: string,
+  bundlePath: string,
+  maxBytes: number,
+): Promise<void> {
+  const copy = join(mirror, `incoming-${randomUUID()}.bundle`);
   try {
-    isFile = statSync(bundlePath).isFile();
-  } catch {
-    isFile = false;
-  }
-  if (!isFile) {
-    throw new GitHubError('BUNDLE_UNREADABLE', `读不到会话交来的包 ${bundlePath}：没导入成，这次不推`, {
-      details: { bundlePath },
-    });
-  }
-  const res = await git(['bundle', 'unbundle', bundlePath], call);
-  if (res.code === 0) return;
-  const why = res.stderr.toLowerCase();
-  if (why.includes('lacks these prerequisite commits')) {
+    await copyBundle(bundlePath, copy, maxBytes);
+    const res = await git(['bundle', 'unbundle', copy], call);
+    if (res.code === 0) return;
+    if (res.stderr.toLowerCase().includes('lacks these prerequisite commits')) {
+      throw new GitHubError(
+        'BUNDLE_INCOMPLETE',
+        `会话交来的包缺前置提交：包要从主线或远端分支上已有的提交之后打（${tail(res.stderr)}）`,
+        { details: { bundlePath, exitCode: res.code } },
+      );
+    }
     throw new GitHubError(
-      'BUNDLE_INCOMPLETE',
-      `会话交来的包缺前置提交：包要从主线或远端分支上已有的提交之后打（${tail(res.stderr)}）`,
-      { details: { bundlePath, exitCode: res.code } },
+      'BUNDLE_INVALID',
+      `会话交来的包 ${bundlePath} 导入不了（坏包）：${tail(res.stderr)}`,
+      {
+        details: { bundlePath, exitCode: res.code },
+      },
     );
+  } finally {
+    rmSync(copy, { force: true });
   }
-  if (why.includes('does not look like a v2 or v3 bundle') || why.includes('is not a bundle')) {
-    throw new GitHubError('BUNDLE_INVALID', `会话交来的 ${bundlePath} 不是 git 包：${tail(res.stderr)}`, {
-      details: { bundlePath, exitCode: res.code },
+}
+
+/**
+ * 拷包：不跟符号链接走（lstat，打开时再带 O_NOFOLLOW：查完再换成链接也不跟），不是普通文件（目录、管道、设备）不读
+ * （打开带 O_NONBLOCK：命名管道不会把打开卡住），超过上限不读；边拷边数，拷的时候文件还在长也截得住。
+ */
+async function copyBundle(from: string, to: string, maxBytes: number): Promise<void> {
+  const invalid = (why: string) =>
+    new GitHubError('BUNDLE_INVALID', `会话交来的包 ${from} ${why}：不读，这次不推`, {
+      details: { bundlePath: from },
     });
+  const tooLarge = (bytes: number) =>
+    new GitHubError(
+      'BUNDLE_TOO_LARGE',
+      `会话交来的包 ${from} 至少 ${bytes} 字节，超过上限 ${maxBytes}：不读，这次不推`,
+      { details: { bundlePath: from, bytes, maxBytes } },
+    );
+  const unreadable = (err: unknown) =>
+    new GitHubError(
+      'BUNDLE_UNREADABLE',
+      `读不到会话交来的包 ${from}（${(err as { code?: string }).code ?? String(err)}）：没导入成，这次不推`,
+      { details: { bundlePath: from } },
+    );
+
+  let before: ReturnType<typeof lstatSync>;
+  try {
+    before = lstatSync(from);
+  } catch (err) {
+    throw unreadable(err);
   }
-  if (why.includes('could not open')) {
-    throw new GitHubError('BUNDLE_UNREADABLE', `打不开会话交来的包 ${bundlePath}：${tail(res.stderr)}`, {
-      details: { bundlePath, exitCode: res.code },
-    });
+  if (before.isSymbolicLink()) throw invalid('是符号链接，不跟过去读');
+  if (!before.isFile()) throw invalid('不是普通文件');
+  if (before.size > maxBytes) throw tooLarge(before.size);
+
+  let src: FileHandle;
+  try {
+    // Windows 上没有这两个标志（值是 undefined）：只剩上面的 lstat 把关
+    src = await open(from, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+  } catch (err) {
+    if ((err as { code?: string }).code === 'ELOOP') throw invalid('是符号链接，不跟过去读');
+    throw unreadable(err);
   }
-  throw fromGitFailure('导入会话交来的包', slug, res);
+  try {
+    const opened = await src.stat();
+    if (!opened.isFile()) throw invalid('不是普通文件');
+    if (opened.size > maxBytes) throw tooLarge(opened.size);
+    let dst: FileHandle;
+    try {
+      dst = await open(to, 'wx', 0o600);
+    } catch (err) {
+      throw mirrorFailed(to, err);
+    }
+    try {
+      const buf = Buffer.allocUnsafe(1 << 20);
+      let total = 0;
+      for (;;) {
+        let bytesRead: number;
+        try {
+          ({ bytesRead } = await src.read(buf, 0, buf.length, null));
+        } catch (err) {
+          throw unreadable(err);
+        }
+        if (bytesRead === 0) break;
+        total += bytesRead;
+        if (total > maxBytes) throw tooLarge(total);
+        try {
+          await dst.write(buf, 0, bytesRead);
+        } catch (err) {
+          throw mirrorFailed(to, err);
+        }
+      }
+    } finally {
+      await dst.close();
+    }
+  } finally {
+    await src.close();
+  }
+}
+
+/** 引擎自己这边写不了（磁盘满、目录权限）：不怪包，可以重试。 */
+function mirrorFailed(path: string, err: unknown): GitHubError {
+  return new GitHubError(
+    'MIRROR_FAILED',
+    `把包拷进引擎的目录 ${path} 失败：${redact(err instanceof Error ? err.message : String(err))}`,
+    { retryable: true },
+  );
 }
 
 async function lsRemote(

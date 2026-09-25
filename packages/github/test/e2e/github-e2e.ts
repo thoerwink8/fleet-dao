@@ -17,9 +17,9 @@ import {
   defaultCommitMessage,
   type GitHub,
   isBot,
-  memoryLocker,
   parseRepoSlug,
   pgLedger,
+  pgLocker,
   redact,
   repoSlug,
 } from '../../src/index.ts';
@@ -202,8 +202,8 @@ try {
   await t.db.insert(repos).values({ owner: repo.owner, name: repo.name, testCommand: 'node --test' });
   const github = createGitHub({
     ledger: pgLedger(t.db),
-    // PGlite 只有一条连接：pgLocker 的事务占着它时，锁里的幂等账读写会自己等自己。单进程验收用进程内的锁
-    locker: memoryLocker(),
+    // 和生产同一把锁（锁是账里的一行、不占连接，PGlite 只有一条连接也跑得动）
+    locker: pgLocker(t.db, { log: { info() {}, warn: console.log, error: console.log } }),
     fetch: recordingFetch,
     stateDir: join(root, 'state'),
     log: {

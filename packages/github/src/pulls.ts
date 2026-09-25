@@ -172,6 +172,7 @@ export async function openPr(
     action: 'github.open_pr',
     target: `${slug}:${branch}`,
     now: deps.client.now,
+    renewEveryMs: deps.leaseRenewMs,
     lookup,
     write: async () => {
       try {
@@ -553,6 +554,7 @@ export async function mergePr(
         action: 'github.merge_pr',
         target: `${slug}#${prNumber}`,
         now: deps.client.now,
+        renewEveryMs: deps.leaseRenewMs,
         lookup: async () => mergeReceipt(done),
         write: async () => mergeReceipt(done),
       });
@@ -666,6 +668,7 @@ export async function mergePr(
         action: 'github.merge_pr',
         target: `${slug}#${prNumber}`,
         now: deps.client.now,
+        renewEveryMs: deps.leaseRenewMs,
         lookup: mergedNow,
         write: async () => {
           const res = await deps.client.request<{ merged?: boolean; sha?: string; message?: string }>({

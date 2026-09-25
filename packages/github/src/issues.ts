@@ -306,6 +306,7 @@ export async function closeIssue(
     action: 'github.close_comment',
     target: `${slug}#${issueNumber}`,
     now: deps.client.now,
+    renewEveryMs: deps.leaseRenewMs,
     lookup: async () => {
       // 评论可能过百：一页页翻完（旧网关只翻第一页，评论多了就会再发一条）
       for await (const page of deps.client.pages({
