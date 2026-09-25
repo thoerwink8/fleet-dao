@@ -35,6 +35,9 @@ const RULES: [string, RegExp][] = [
   ['飞书编号', /\b(?:ou|oc|om|on|cli)_[0-9a-f]{12,}\b/g],
 ];
 
+/** 审官自己写的定级、处置：留在考题的意见原文里，模型照抄就能答对，考不出东西。 */
+const SELF_GRADE = /不阻塞|非阻塞|不计入红项|不挡|不追|顺手改|随后续|不在本单|可选改进|blocking|\bP[0-3]\b/i;
+
 export function findLeaks(text: string): string[] {
   return RULES.flatMap(([label, re]) => [...text.matchAll(re)].map((m) => `${label}：${m[0].slice(0, 60)}`));
 }
@@ -67,12 +70,36 @@ describe('考题文件', () => {
     });
   }
 
+  it('巡检考试的每日次数默认够一天四轮满卷（每 6 小时一轮，设计「已定」第 15 条）', () => {
+    const fullExam = SITE_IDS.reduce(
+      (n, site) => n + loadExam(site).reduce((m, s) => m + Object.keys(s.expect).length, 0),
+      0,
+    );
+    expect(DEFAULT_POLICY.examDailyCallLimit).toBeGreaterThanOrEqual(4 * fullExam);
+  });
+
   it('脱敏：不许有邮箱、IP、令牌、家目录用户名、飞书编号', () => {
     const leaks = SITE_IDS.flatMap((site) => {
       const parsed: unknown = JSON.parse(readFileSync(join(EXAMS_DIR, `${site}.json`), 'utf8'));
       return stringsIn(parsed).flatMap((s) => findLeaks(s).map((l) => `${site} ${l}`));
     });
     expect(leaks).toEqual([]);
+  });
+
+  it('审查意见分级：意见原文里不许留审官自己的定级或处置（不阻塞、不在本单做……），那等于把答案写进了题里', () => {
+    const hits = loadExam('review-grade').flatMap((s) => {
+      const m = s.evidence.finding?.match(SELF_GRADE);
+      return m ? [`${s.id}：${m[0]}`] : [];
+    });
+    expect(hits).toEqual([]);
+    const planted = [
+      '属非阻塞格式提示',
+      '顺手改指针即可，不阻塞',
+      '不在本单做',
+      '随后续提交清理',
+      '[P1] 路径逃逸',
+    ];
+    for (const bad of planted) expect(SELF_GRADE.test(bad), bad).toBe(true);
   });
 
   it('故意放进去的违规样本都拦得住', () => {

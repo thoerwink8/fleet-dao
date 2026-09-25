@@ -176,6 +176,7 @@ export const DEDUPE_PAIR = defineQuestion({
   askWhen: '新需求进来时，对代码先筛出来的每一条同仓在途需求各问一次',
 });
 
+// 「怎么算做完」和「怎么做」是两回事（设计第七节：需求写前者，方案写后者）：只写了改法、没说做到什么样算完，算没写。
 export const SPEC_DONE = defineQuestion({
   id: 'spec-done',
   site: 'spec-check',
@@ -185,21 +186,22 @@ export const SPEC_DONE = defineQuestion({
     {
       id: 'checkable',
       label: '能核对',
-      criteria: '每一条都能用测试、命令或看得见的结果核对真假',
+      criteria: '写了做到什么样算完，而且每一条都能用测试、命令或看得见的结果核对真假',
       effect: 'none',
       does: '照常开工',
     },
     {
       id: 'vague',
       label: '有口号',
-      criteria: '有的条目只是感觉或口号（「更好用」「更稳定」「体验流畅」），没法核对真假',
+      criteria:
+        '写了做到什么样算完，但有的条目只是感觉或口号（「更好用」「更稳定」「体验流畅」），没法核对真假',
       effect: 'send_back',
       does: '退回写需求文档那一步，重写核对不了的那几条',
     },
     {
       id: 'missing',
       label: '没写',
-      criteria: '文档里没有写怎么算做完',
+      criteria: '没写做到什么样算完：只有现象、原因、要做什么或怎么改',
       effect: 'send_back',
       does: '退回写需求文档那一步，补上做完标准',
     },

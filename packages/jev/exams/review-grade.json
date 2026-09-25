@@ -76,9 +76,9 @@
   },
   {
     "id": "review-1341-dup-snapshot",
-    "source": "windsurf-dao#1341 review#0（dao-reviewer，2026-09-17T04:53Z，APPROVED）「P3（不挡不追）」小节第 1 条（只取该条正文，不含小节标题）。acceptance 取 PR 正文「三态纪律」与「验收」；code 取被审 HEAD 61dcebeb 的新增段与 dao.mjs 同源函数",
+    "source": "windsurf-dao#1341 review#0（dao-reviewer，2026-09-17T04:53Z，APPROVED）「P3（不挡不追）」小节第 1 条（只取该条正文，不含小节标题）。acceptance 取 PR 正文「三态纪律」与「验收」；code 取被审 HEAD 61dcebeb 的新增段与 dao.mjs 同源函数；去掉句末审官自己的处置「不在本单做」（考题里不能带答案）",
     "evidence": {
-      "finding": "快照读取与 `judgeVerdictOnHead` 重复一份。`dao.mjs` 已 import 本文件，不能反向引用；要去重要抽到 `review-state.mjs`，不在本单做。",
+      "finding": "快照读取与 `judgeVerdictOnHead` 重复一份。`dao.mjs` 已 import 本文件，不能反向引用；要去重要抽到 `review-state.mjs`。",
       "acceptance": "## 三态纪律（沿用 #1289，本单不破）\n\n| 取值 | 含义 | 动作 |\n|---|---|---|\n| `true` | 当前 head 上有它交的判定 | 复用（一 PR 一审官） |\n| `false` | **确认**没有判定，且会话已终态 | 等于没审 → 可新建 |\n| `null` | **没查成**（gh 失败 / 解析失败 / 缺字段） | 维持复用，**不许**拿读不到去重复烧额度 |\n\n`null` 不许当 `false` 用——那是往反方向错。代码里的 `try/catch` 与逐字段校验就是为此。\n\n## 验收\n\n与本 PR HEAD `61dcebebd` 同基线：\n\n```\n$ node --test tests/mirasim-reviewer.test.js tests/dao-reviewer.test.js\n# tests 205 / # pass 205 / # fail 0\n\n$ node scripts/dao-check.mjs\ndao check: 好的（274 项，3 条可见，15 项跳过，75.3s）——0 红\n```",
       "code": "scripts/lib/dispatch/reviewer-mirasim.mjs（本 PR 新增，mirasimWorkerDone 内）\n722:     let liveHead = null;\n723:     let verdict = null;\n724:     try {\n725:       const snap = gh(['pr', 'view', String(pr), '--json', 'headRefOid,reviews']);\n726:       if (snap && snap.ok) {\n727:         const parsed = JSON.parse(snap.out);\n728:         const head = String((parsed && parsed.headRefOid) || '').trim();\n729:         if (head && Array.isArray(parsed && parsed.reviews)) {\n730:           liveHead = head;\n731:           verdict = verdictOnHead(parsed.reviews, head);\n732:         }\n733:       }\n734:     } catch { /* 没查成 ⇒ 维持原来的复用行为 */ }\n735:     reuse = judgeReviewerSessionReuse({ record, view: peek.view, force, liveHead, verdictOnHead: verdict });\n\nscripts/dao.mjs（既有）\n1554: export function judgeVerdictOnHead(pr, record, targetRepo, { runGh } = {}) {\n1555:   if (!record || !record.sessionKey) return null;   // 没有在役登记，复用判据走不到这一步\n1556:   const gh = runGh || ghRunnerForTarget(targetRepo, { role: 'reviewer' });\n1557:   const snap = gh(['pr', 'view', String(pr), '--json', 'headRefOid,reviews']);\n1558:   if (!snap || !snap.ok) return null;\n1559:   let parsed;\n1560:   try {\n1561:     parsed = JSON.parse(snap.out);\n1562:   } catch { return null; }\n1563:   const head = String((parsed && parsed.headRefOid) || '').trim();\n1564:   if (!head) return null;\n1565:   const reviews = parsed && parsed.reviews;\n1566:   if (!Array.isArray(reviews)) return null;\n1567:   return verdictOnHead(reviews, head);"
     },
@@ -91,11 +91,11 @@
   },
   {
     "id": "review-1299-trailing-blank",
-    "source": "windsurf-dao#1299 review#1（dao-reviewer，2026-09-15T23:49Z，APPROVED）「检查说明」段末句。acceptance 取 PR 正文「验收标准」；code 取合并提交里该测试文件末尾",
+    "source": "windsurf-dao#1299 review#1（dao-reviewer，2026-09-15T23:49Z，APPROVED）「检查说明」段末句。acceptance 取 PR 正文「验收标准」；code 取合并提交里该测试文件末尾；去掉句末审官自己的定级「属非阻塞格式提示」、code 标题里的「合并提交」（考题里不能带答案）",
     "evidence": {
-      "finding": "`git diff --check base...HEAD` 只报告 `tests/gh-events.test.js` 文件末尾多一个空行，属非阻塞格式提示。",
+      "finding": "`git diff --check base...HEAD` 只报告 `tests/gh-events.test.js` 文件末尾多一个空行。",
       "acceptance": "- [x] DELETE 失败且旧 hook 仍在清单时，隔离旧 orphan；`claimLiveHook` 不得返回旧 ID，也不得凭时间窗口认新 ID。\n- [x] 外部桥在本次时间窗口创建、且它是唯一候选：`ownInvalidHookIds` 返回 `[]`，`claimLiveHook` 返回 `null`。\n- [x] 有 `ownedHookId` 且清单对得上，仍只删/认这一根，不宽扫别人的活 hook。\n- [x] 反例测试、`dao-check`、handoff 正文证据齐；推送到原 PR #1299。",
-      "code": "tests/gh-events.test.js（合并提交 6e40a872 的文件末尾；最后一行编号是多出来的空行）\n572:     });\n573:   });\n574: });\n575: "
+      "code": "tests/gh-events.test.js（文件末尾；最后一行编号是多出来的空行）\n572:     });\n573:   });\n574: });\n575: "
     },
     "expect": {
       "review-severity": "minor"
@@ -121,9 +121,9 @@
   },
   {
     "id": "review-890-doc-pointer",
-    "source": "windsurf-dao#890 review#1（dao-reviewer，2026-09-05T23:33Z，CHANGES_REQUESTED）末段「疑问（不计入红项）」一句（该轮判红原因是基底过旧，与本条无关）。acceptance 取审查时刻 PR 正文（2026-09-04T17:11 版）「改了什么」表；code 取被审 HEAD 2f969ce 的设计页",
+    "source": "windsurf-dao#890 review#1（dao-reviewer，2026-09-05T23:33Z，CHANGES_REQUESTED）末段「疑问（不计入红项）」一句（该轮判红原因是基底过旧，与本条无关）。acceptance 取审查时刻 PR 正文（2026-09-04T17:11 版）「改了什么」表；code 取被审 HEAD 2f969ce 的设计页；去掉句末审官自己的定级「顺手改指针即可，不阻塞」（考题里不能带答案）",
     "evidence": {
-      "finding": "`docs/decisions/2026-09-04-harvest-reflow.md:32` 仍写「交卷自查第 4 条」，士兵书合 master 后回流已是第 5 条（`harvest-check.mjs` 头注释已改）。顺手改指针即可，不阻塞。",
+      "finding": "`docs/decisions/2026-09-04-harvest-reflow.md:32` 仍写「交卷自查第 4 条」，士兵书合 master 后回流已是第 5 条（`harvest-check.mjs` 头注释已改）。",
       "acceptance": "| 层 | 落点 | 作用 |\n|---|---|---|\n| 提示 | `templates/soldier-book.md` 交卷自查第 4 条 | 士兵交卷前自问有没有通用产物 → 写 `## 回流` 段（三行：产物/为什么通用≥2场景/落点） |\n| 动作 | `dispatch/SKILL.md`「终审接回流段」 | 合并时收口官/帅三种落法 + 段内回写受理证据 |\n| 机械 | `scripts/lib/harvest-check.mjs` + dao-check 两项 | 孤儿回流段（写了没人接）判红并点名 PR；样本三态常跑，live 在 `--full` |\n| 子仓入口 | ai-gateway-stack `CLAUDE.md`（另仓单独提交） | 自下而上入口；全局页不加行（2000 token 预算） |",
       "code": "docs/decisions/2026-09-04-harvest-reflow.md @2f969ce\n30: ## 三层发现面（提示 → 动作 → 机械）\n31: \n32: 1. **提示层**：`host/skills/dispatch/templates/soldier-book.md` 交卷自查第 4 条（有通用产物 → 写段）。\n33: 2. **动作层**：`host/skills/dispatch/SKILL.md`「终审接回流段」——合并时三种落法 + 回写证据。\n34: 3. **机械层**：`scripts/lib/harvest-check.mjs` + dao-check 两项（样本三态常跑；live 在 `--full`，"
     },
@@ -136,9 +136,9 @@
   },
   {
     "id": "review-1421-stacked-comments",
-    "source": "windsurf-dao#1421 review#0（dao-reviewer 代发的跨厂复核，2026-09-18T00:38Z，APPROVED）「可选改进」下第 1 条（只取该条正文，不含小节标题）。acceptance 取 PR 正文「验收标准」；code 取被审 HEAD 693166a4",
+    "source": "windsurf-dao#1421 review#0（dao-reviewer 代发的跨厂复核，2026-09-18T00:38Z，APPROVED）「可选改进」下第 1 条（只取该条正文，不含小节标题）。acceptance 取 PR 正文「验收标准」；code 取被审 HEAD 693166a4；去掉句末审官自己的定级与处置「属文字，随后续提交清理」（考题里不能带答案）",
     "evidence": {
-      "finding": "旧注释块与新注释叠在一起（`activities.mjs` 文件头）——属文字，随后续提交清理。",
+      "finding": "旧注释块与新注释叠在一起（`activities.mjs` 文件头）。",
       "acceptance": "## 验收标准\n\n- [x] 单元 34 项：身份/审查/检查/交付/失败分类/运行器恢复路径/接缝行为。\n- [x] Temporal 集成 4 项（真实 server，非 mock）：同号不同仓不串号、worker 替换后恢复不重放副作用、取消是持久命令、清理未核实报 blocked。\n- [x] 长任务不被 30 秒心跳误杀（真实会话分钟级；此缺陷由集成测试之外的人工审查发现并修掉）。\n- [x] 执行必须产出新提交才允许推送。\n- [ ] 生产部署与首个真实任务端到端（另在 #816 记录）。",
       "code": "packages/fleet/src/activities.mjs @693166a4\n8: /** 审查输出解析：只认**恰好一份**含 findings 数组的 JSON。模型先给结论、再回显空模板时，\n9:  *  取「最后一块」会把有阻塞的审查读成通过——宁可 unscanned，不猜。 */\n10: /** 扫出文本里**所有**能解析的平衡 JSON 对象（含围栏内外、含嵌套）。\n11:  *  只取「围栏内容 ∪ 全文首尾大括号」是不够的：模型常把真结论写成裸对象、再用围栏回显一份空模板，\n12:  *  那样「唯一进得了候选集的那块」就是空结论——有 P1 的审查被读成通过。 */\n13: export function jsonObjects(text) {"
     },
