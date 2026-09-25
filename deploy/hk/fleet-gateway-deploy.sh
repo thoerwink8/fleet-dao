@@ -72,12 +72,25 @@ current_sha() {
   if is_sha "$s"; then printf '%s' "$s"; fi
 }
 
+# 进程是什么时候起来的（秒）：/proc/<进程号>/stat 的第 22 项（开机后的时钟滴答）加开机时刻。
+# 不用 systemctl show --timestamp=unix：香港的 systemd 249 不认（2026-09-25 真机撞到，读成空，连上了也判成没连上）
+proc_start() { # 进程号
+  local stat fields btime hz
+  stat=$(<"/proc/$1/stat") || return 1
+  # 第 2 项是括起来的程序名，里面可能有空格：从最后一个「) 」之后数，第 3 项起下标 0，第 22 项就是下标 19
+  read -r -a fields <<<"${stat##*) }"
+  btime=$(awk '$1 == "btime" { print $2 }' /proc/stat)
+  hz=$(getconf CLK_TCK)
+  [[ "${fields[19]:-}" =~ ^[0-9]+$ && "$btime" =~ ^[0-9]+$ && "$hz" =~ ^[1-9][0-9]*$ ]] || return 1
+  printf '%s' $((btime + fields[19] / hz))
+}
+
 # 环境文件在这次进程起来之后改过（hk.sh 补了键、人改了配置）：要重启才生效
 env_changed_since_start() {
-  local start f
-  start=$(systemctl show -p ExecMainStartTimestamp --timestamp=unix --value "$UNIT" 2>/dev/null) || start=""
-  start=${start#@}
-  [[ "$start" =~ ^[0-9]+$ ]] || return 1
+  local pid start f
+  pid=$(main_pid)
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  start=$(proc_start "$pid") || return 1
   for f in "$FEISHU_ENV" "$TOKEN_ENV"; do
     if [[ -f "$f" ]] && (($(stat -c %Y -- "$f") > start)); then return 0; fi
   done
@@ -195,7 +208,7 @@ backend_state() {
 }
 
 cmd_status() {
-  local pid start log="" last missing
+  local pid inv log="" last missing
   pid=$(main_pid)
   echo "current=$(current_sha)"
   echo "enabled=$(systemctl is-enabled "$UNIT" 2>/dev/null || true)"
@@ -203,10 +216,10 @@ cmd_status() {
   echo "pid=$pid"
   echo "restarts=$(systemctl show -p NRestarts --value "$UNIT" 2>/dev/null || echo 0)"
   echo "running=$(running_sha)"
-  start=$(systemctl show -p ExecMainStartTimestamp --timestamp=unix --value "$UNIT" 2>/dev/null) || start=""
-  start=${start#@}
-  if [[ "$pid" =~ ^[1-9][0-9]*$ && "$start" =~ ^[0-9]+$ ]]; then
-    log=$(journalctl -u "$UNIT" --since "@$start" -o cat --no-pager 2>/dev/null) || log=""
+  # 这次进程起来之后的日志：按这次启动的编号（InvocationID）取，重启一次换一个编号，旧进程的日志混不进来
+  inv=$(systemctl show -p InvocationID --value "$UNIT" 2>/dev/null) || inv=""
+  if [[ "$pid" =~ ^[1-9][0-9]*$ && "$inv" =~ ^[0-9a-f]{32}$ ]]; then
+    log=$(journalctl "_SYSTEMD_INVOCATION_ID=$inv" -o cat --no-pager 2>/dev/null) || log=""
   fi
   # yes 连着；reconnecting 断了、正在重连；no 这次起来之后还没连上过
   last=$(grep -F -e "$CONNECTED_MARK" -e "$RECONNECTED_MARK" -e "$DISCONNECTED_MARK" <<<"$log" | tail -1) || last=""

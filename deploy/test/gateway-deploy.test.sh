@@ -35,27 +35,40 @@ check() { # 说明 实际 期望
 }
 
 # ── 桩：服务的状态由各段摆好；脚本调了 systemctl 什么，一行一条记进 $TMP/calls（脚本多在子进程里跑，变量带不回来）──
+# 只认香港 systemd 249 也认的写法：--timestamp=unix 那边会报 Invalid value（2026-09-25 真机撞到），这里照样报错
 ACTIVE=inactive
 ENABLED=disabled
 PID=0
-START=0
-JOURNAL=""
+INVOCATION=0123456789abcdef0123456789abcdef # systemd 报的「这次启动」的编号
+JOURNAL=""                                 # 日志里有的那些行……
+JOURNAL_INV=$INVOCATION                    # ……属于哪次启动
 systemctl() {
   printf '%s\n' "$*" >>"$TMP/calls"
+  if [[ " $* " == *" --timestamp"* ]]; then
+    echo "Invalid value: unix." >&2
+    return 1
+  fi
   case "$1" in
   is-active) echo "$ACTIVE" ;;
   is-enabled) echo "$ENABLED" ;;
   show)
     case "$*" in
-    *MainPID*) echo "$PID" ;;
-    *NRestarts*) echo 0 ;;
-    *ExecMainStartTimestamp*) echo "@$START" ;;
+    "show -p MainPID --value "*) echo "$PID" ;;
+    "show -p NRestarts --value "*) echo 0 ;;
+    "show -p InvocationID --value "*) echo "$INVOCATION" ;;
+    *)
+      echo "桩不认识：systemctl $*" >&2
+      return 1
+      ;;
     esac
     ;;
   esac
   return 0
 }
-journalctl() { printf '%s\n' "$JOURNAL"; }
+# 只按启动编号给日志：按别的条件取（整个单元、按时间）拿不到东西，免得取错了范围照样「连上了」
+journalctl() {
+  if [[ " $* " == *" _SYSTEMD_INVOCATION_ID=$JOURNAL_INV "* ]]; then printf '%s\n' "$JOURNAL"; fi
+}
 calls() { grep -cE "^($1) " "$TMP/calls"; }
 # 起一个当前目录在 $1 的进程当「主进程」，PID 记进 PID
 main_process_in() { # 目录
@@ -144,17 +157,21 @@ check "历史记了一笔" "$(awk '{ print substr($2, 1, 1), $3 }' "$ROOT/.histo
 echo "== 已在跑：主进程在这一版的目录里就不动；在别的版就重启；环境文件在它起来之后改过也重启"
 ACTIVE=active
 ENABLED=enabled
+# 环境文件的修改时间摆到主进程起来之前；主进程是真进程，起来的时刻由脚本自己从 /proc 读
+touch -d '-100 seconds' -- "$FEISHU_ENV" "$TOKEN_ENV"
 main_process_in "$ROOT/$A"
-START=$(date +%s)
+check "读得出主进程起来的时刻（和现在差不到 5 秒）" "$(($(date +%s) - $(proc_start "$PID") < 5))" 1
 activate "$A"
 check "主进程就在 A：不起、不重启" "$(calls 'start|restart')" 0
 check "没有改动" "$(grep -c '^changed' "$TMP/out")" 0
 check "历史没多记" "$(wc -l <"$ROOT/.history")" 1
-START=$(($(date +%s) - 100))
+touch -d '+100 seconds' -- "$FEISHU_ENV"
 activate "$A"
 check "环境文件在主进程起来之后改过：重启" "$(calls restart)" 1
 check "说了为什么" "$(grep -c '环境文件改过' "$TMP/out")" 1
-START=$(date +%s)
+touch -d '-100 seconds' -- "$FEISHU_ENV"
+(proc_start 999999999) >/dev/null 2>&1
+check "进程不在：读不出起来的时刻（返回失败，不给 0）" "$?" 1
 receive "$B" "$TMP/b.mjs"
 activate "$B"
 check "切到 B、主进程还在 A：重启" "$(calls restart)" 1
@@ -179,9 +196,8 @@ mkdir "$ROOT/.incoming.leftover"
 activate "$D"
 check "收了一半的临时目录也清掉" "$([[ -e "$ROOT/.incoming.leftover" ]] && echo 在 || echo 没了)" 没了
 
-echo "== 状态：长连接看这次起来之后最后一条；后端连不上照实报；配置缺的列出来"
+echo "== 状态：长连接看这次启动（InvocationID）的日志里最后一条；后端连不上照实报；配置缺的列出来"
 main_process_in "$ROOT/$D"
-START=$(date +%s)
 JOURNAL='{"level":"warn","message":"盘面快照没取到，先用缓存"}'
 st=$(cmd_status)
 check "主进程跑的是 D" "$(grep '^running=' <<<"$st")" "running=$D"
@@ -201,6 +217,11 @@ check "又重连上了：yes" "$(cmd_status | grep '^connected=')" "connected=ye
 check "后端（本机 9 号端口没人听）：refused" "$(grep '^backend=' <<<"$st")" "backend=refused"
 check "配置齐了：ok" "$(grep '^config=' <<<"$st")" "config=ok"
 check "current、enabled、active 都报了" "$(grep -cE '^(current|enabled|active|pid|restarts)=' <<<"$st")" 5
+INVOCATION=fedcba9876543210fedcba9876543210
+check "重启过（换了启动编号）：上一次的「已连上」不算" "$(cmd_status | grep '^connected=')" "connected=no"
+INVOCATION=not-an-id
+check "启动编号读不出：不去翻日志，connected=no" "$(cmd_status | grep '^connected=')" "connected=no"
+INVOCATION=0123456789abcdef0123456789abcdef
 PID=0
 check "主进程没了：running 空、connected=no（不拿旧日志冒充）" "$(cmd_status | grep -E '^(running|connected)=' | tr '\n' ' ')" \
   "running= connected=no "
