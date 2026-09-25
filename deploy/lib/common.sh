@@ -333,6 +333,12 @@ wait_active() { # 单元 次数
   return 1
 }
 
+# 演示版在香港站点上的路径（法国 release.env、香港 hk.env 的 FLEET_DEMO_PATH，两台写同一个）：一级、以 / 结尾，
+# 不和根上已有的东西撞（前端的 assets/、健康页、转给后端的 /api /auth /github、/healthz）
+demo_path_ok() { # 路径
+  [[ "$1" =~ ^/[a-z0-9][a-z0-9-]*/$ ]] && [[ " /assets/ /health/ /healthz/ /api/ /auth/ /github/ " != *" $1 "* ]]
+}
+
 # 法国往香港传驾驶舱静态文件用的 ssh（france.sh 的读回和 release.sh 同一套）：只用那一把钥匙、只认钉住的主机钥匙、
 # 不交互。香港那头把这把钥匙限死成 rrsync -wo -munge /srv/fleet-dao-web，只许从隧道地址来（hk.sh）。
 web_upload_ssh() { # 私钥 known_hosts

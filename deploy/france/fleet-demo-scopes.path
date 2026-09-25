@@ -1,0 +1,11 @@
+# 演示版的范围目录一变（驾驶舱里发了、作废了一条链接，改了默认范围，到期撤了文件）就推到香港。france.sh 装。
+# 目录还不在时 systemd 盯着它的上级，建出来就盯上。推的过程中又变了，脚本自己会再推一轮；漏了还有 timer 补。
+[Unit]
+Description=fleet-dao 演示版的可见范围一变就推到香港
+
+[Path]
+PathChanged=/var/lib/fleet-dao/demo/scopes
+Unit=fleet-demo-scopes.service
+
+[Install]
+WantedBy=multi-user.target

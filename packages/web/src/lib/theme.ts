@@ -1,4 +1,5 @@
 // 主题 = 主题色 × 深浅 × 动效。存在浏览器本地，切换即时生效。
+import { brand } from '#brand';
 
 export type PaletteId =
   | 'graphite'
@@ -19,7 +20,7 @@ export interface ThemePref {
   motion: MotionPref;
 }
 
-export const THEME_KEY = 'fleet-dao.theme';
+export const THEME_KEY = `${brand.storagePrefix}theme`;
 
 export const DEFAULT_THEME: ThemePref = { palette: 'graphite', mode: 'system', motion: 'system' };
 

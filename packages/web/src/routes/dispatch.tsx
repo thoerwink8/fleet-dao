@@ -14,6 +14,7 @@ import {
 import { Reorder, useDragControls } from 'motion/react';
 import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
+import { brand } from '#brand';
 import {
   ApiError,
   errorText,
@@ -36,9 +37,9 @@ import {
   headlineBar,
   headlineInk,
   headlineText,
-  quotaHeadline,
   routeInfo,
   routeProblem,
+  routeQuotaHeadline,
   STAGES,
   stageLabel,
 } from '../lib/catalog';
@@ -48,7 +49,7 @@ import { describeChange, type PolicyValue, routeShort, samePolicy } from '../lib
 import { cn } from '../lib/utils';
 
 export function meta() {
-  return [{ title: '调度台 · fleet-dao 驾驶舱' }];
+  return [{ title: brand.title('调度台') }];
 }
 
 function banText(routing: Routing, b: Ban): string {
@@ -129,7 +130,9 @@ export default function Dispatch() {
                     {b.reason}
                   </span>
                 </TooltipTrigger>
-                <TooltipContent>写死在代码里（{b.id}），驾驶舱改不了</TooltipContent>
+                <TooltipContent>
+                  写死在代码里（{b.id}），{brand.product}改不了
+                </TooltipContent>
               </Tooltip>
             ))}
             {data.bans.map((b) => (
@@ -310,14 +313,18 @@ function StageCard({
               onClick={() =>
                 onSave(
                   { routeIds: policy.routeIds, pinned: !policy.pinned },
-                  policy.pinned ? `已取消钉住${name}` : `已钉住${name}：AI 帅位不会再改这个顺序`,
+                  policy.pinned
+                    ? `已取消钉住${name}`
+                    : `已钉住${name}：${brand.terms.marshal}不会再改这个顺序`,
                 )
               }
             >
               {policy.pinned ? <PinOff /> : <Pin />}
             </Button>
           </TooltipTrigger>
-          <TooltipContent>{policy.pinned ? '取消钉住' : '钉住：AI 帅位不改这个顺序'}</TooltipContent>
+          <TooltipContent>
+            {policy.pinned ? '取消钉住' : `钉住：${brand.terms.marshal}不改这个顺序`}
+          </TooltipContent>
         </Tooltip>
       }
       bodyClassName="p-3"
@@ -421,8 +428,15 @@ function RouteRow({
   const controls = useDragControls();
   const info = routeInfo(routing, rid);
   const pool = info && pools ? pools.find((p) => p.id === info.poolId) : undefined;
-  // 和渠道页、换模型对话框同一句话。额度表读到了、却查不到这个池，也算「额度没查成」。
-  const h = info && pools ? quotaHeadline(pool) : undefined;
+  // 和换模型对话框同一句话，按这条路由算：只扣别的模型组的窗满了不算它满（routeQuotaHeadline）。
+  // 额度表读到了、却查不到这个池，也算「额度没查成」。
+  const h =
+    info && pools
+      ? routeQuotaHeadline(
+          pool,
+          routing.models.find((m) => m.id === info.route.modelId),
+        )
+      : undefined;
   const w = h && 'w' in h ? h.w : undefined;
   const problem = routeProblem(routing, rid, stage, now);
   const offline = info ? !info.route.alive : true;
@@ -483,7 +497,7 @@ function RouteRow({
       </div>
       {h ? (
         <div
-          className="hidden w-16 shrink-0 sm:block"
+          className="hidden w-24 shrink-0 sm:block"
           title={
             h.kind === 'util'
               ? w?.stale
@@ -492,8 +506,10 @@ function RouteRow({
                   ? '实读'
                   : '估算'
               : h.kind === 'full'
-                ? '上游说这个池有窗已用满，调度会先绕开'
-                : `${headlineText(h)}：不参与比较`
+                ? `上游说${h.w.scope ? ` ${h.w.scope} 组的窗` : '扣它的窗'}已用满，调度会先绕开`
+                : h.kind === 'unscoped'
+                  ? '这个池的额度窗都只扣别的模型组'
+                  : `${headlineText(h)}：不参与比较`
           }
         >
           <div

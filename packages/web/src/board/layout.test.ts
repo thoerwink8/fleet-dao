@@ -9,7 +9,7 @@ const boards = new Map<string, Board>();
 
 beforeAll(async () => {
   const api = createMockApi({ live: false, now: () => NOW });
-  for (const id of ['r-fleet', 'r-canary']) boards.set(id, await api.board(id));
+  for (const id of ['r-orbit', 'r-canary']) boards.set(id, await api.board(id));
 });
 
 function boardOf(repoId: string): Board {
@@ -30,39 +30,39 @@ function boxes(graph: Graph, pos: Map<string, { x: number; y: number }>) {
 
 describe('看板的图', () => {
   test('仓 → 需求 → 子任务 → PR：开了 PR 的子任务外面挂一张 PR 卡', () => {
-    const graph = buildGraph(boardOf('r-fleet'), ALL);
+    const graph = buildGraph(boardOf('r-orbit'), ALL);
     expect(graph.parentOf.get(nodeId.pr('t-14-a'))).toBe(nodeId.sub('t-14-a'));
     expect(graph.parentOf.get(nodeId.sub('t-14-a'))).toBe(nodeId.task('t-14'));
-    expect(graph.parentOf.get(nodeId.task('t-14'))).toBe(nodeId.repo('r-fleet'));
+    expect(graph.parentOf.get(nodeId.task('t-14'))).toBe(nodeId.repo('r-orbit'));
   });
 
   test('做完的需求收成一张卡，不展开子任务', () => {
-    const graph = buildGraph(boardOf('r-fleet'), ALL);
+    const graph = buildGraph(boardOf('r-orbit'), ALL);
     expect(graph.nodes.some((n) => n.id === nodeId.task('t-11'))).toBe(true);
     expect(graph.childrenOf.get(nodeId.task('t-11'))).toBeUndefined();
   });
 
   test('只看我提的：按用户编号过滤', () => {
-    const graph = buildGraph(boardOf('r-fleet'), { stuck: false, mine: ['u-lan', '阿岚'] });
+    const graph = buildGraph(boardOf('r-orbit'), { stuck: false, mine: ['u-lan', '阿岚'] });
     const tasks = graph.nodes.flatMap((n) => (n.data.kind === 'task' ? [n.data.task.issueNumber] : []));
     expect(tasks).toEqual([12, 15, 18, 19, 21]);
   });
 
   test('状态变了（颜色、文字）排版指纹不变；节点增减才变', async () => {
     const api = createMockApi({ live: false, now: () => NOW });
-    const before = buildGraph(await api.board('r-fleet'), ALL).structureKey;
+    const before = buildGraph(await api.board('r-orbit'), ALL).structureKey;
     await api.taskAction('t-12', { action: 'pause' });
-    expect(buildGraph(await api.board('r-fleet'), ALL).structureKey).toBe(before);
+    expect(buildGraph(await api.board('r-orbit'), ALL).structureKey).toBe(before);
     await api.taskAction('t-12', { action: 'stop' });
-    expect(buildGraph(await api.board('r-fleet'), ALL).structureKey).not.toBe(before);
+    expect(buildGraph(await api.board('r-orbit'), ALL).structureKey).not.toBe(before);
   });
 });
 
 describe('思维导图排版', () => {
   test('仓在中间：右半边的都在仓右边，左半边的都在仓左边', async () => {
-    const graph = buildGraph(boardOf('r-fleet'), ALL);
+    const graph = buildGraph(boardOf('r-orbit'), ALL);
     const all = boxes(graph, await layoutGraph(graph));
-    const root = all.find((b) => b.id === nodeId.repo('r-fleet'));
+    const root = all.find((b) => b.id === nodeId.repo('r-orbit'));
     if (!root) throw new Error('没有仓节点');
     const right = all.filter((b) => b.side === 'right');
     const left = all.filter((b) => b.side === 'left');
@@ -73,7 +73,7 @@ describe('思维导图排版', () => {
   });
 
   test('卡片互不重叠', async () => {
-    const graph = buildGraph(boardOf('r-fleet'), ALL);
+    const graph = buildGraph(boardOf('r-orbit'), ALL);
     const all = boxes(graph, await layoutGraph(graph));
     const overlaps: string[] = [];
     for (let i = 0; i < all.length; i++) {
@@ -89,7 +89,7 @@ describe('思维导图排版', () => {
   });
 
   test('子任务在它的需求外侧，PR 在它的子任务外侧', async () => {
-    const graph = buildGraph(boardOf('r-fleet'), ALL);
+    const graph = buildGraph(boardOf('r-orbit'), ALL);
     const pos = await layoutGraph(graph);
     for (const [child, parent] of graph.parentOf) {
       const node = graph.nodes.find((n) => n.id === child);

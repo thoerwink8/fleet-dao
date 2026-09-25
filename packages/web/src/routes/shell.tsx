@@ -1,16 +1,20 @@
 import { type ReactNode, useEffect, useRef, useState } from 'react';
 import { Link, Outlet, useLocation, useNavigate } from 'react-router';
 import { toast } from 'sonner';
+import { brand } from '#brand';
 import { ApiError, errorText, useLiveSync, useMe, useNotifications } from '../api/client';
 import { loginPath } from '../api/index';
 import { LogoMark } from '../components/logo';
 import { RepoProvider } from '../components/repo-context';
 import { CommandMenu } from '../components/shell/command-menu';
+import { demoBlocked } from '../components/shell/nav';
 import { SidebarNav } from '../components/shell/sidebar';
 import { Topbar } from '../components/shell/topbar';
 import { TaskActionsProvider } from '../components/task-actions';
 import { Button } from '../components/ui/button';
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from '../components/ui/sheet';
+import { isDemo } from '../demo/access';
+import { DemoBanner, NotOpen } from '../demo/views';
 import { useIsMobile, useLocalState } from '../lib/hooks';
 import { cn } from '../lib/utils';
 
@@ -79,39 +83,44 @@ function useNoticeToasts() {
 function Frame() {
   const location = useLocation();
   const isMobile = useIsMobile();
-  const [collapsed, setCollapsed] = useLocalState('fleet-dao.sidebar-collapsed', false);
+  const [collapsed, setCollapsed] = useLocalState(`${brand.storagePrefix}sidebar-collapsed`, false);
   const [mobileNav, setMobileNav] = useState(false);
   const [cmdk, setCmdk] = useState(false);
   useLiveSync();
   useNoticeToasts();
 
-  const fullBleed = location.pathname === '/' && !isMobile;
+  // 演示版：这一页所在的模块没开放，就不渲染它（它的数据也就不去读）。
+  const blocked = demoBlocked(location.pathname);
+  const fullBleed = location.pathname === '/' && !isMobile && !blocked;
 
   return (
-    <div className="flex h-dvh overflow-hidden bg-background">
-      <aside
-        className={cn(
-          'hidden shrink-0 border-r bg-panel transition-[width] duration-200 md:block',
-          collapsed ? 'w-[60px]' : 'w-[232px]',
-        )}
-      >
-        <SidebarNav collapsed={collapsed} onToggle={() => setCollapsed(!collapsed)} />
-      </aside>
-      <div className="flex min-w-0 flex-1 flex-col">
-        <Topbar onMenu={() => setMobileNav(true)} onSearch={() => setCmdk(true)} />
-        <main
+    <div className="flex h-dvh flex-col overflow-hidden bg-background">
+      {isDemo() ? <DemoBanner /> : null}
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        <aside
           className={cn(
-            'relative min-h-0 flex-1',
-            fullBleed ? 'overflow-hidden' : 'overflow-y-auto scrollbar-thin',
+            'hidden shrink-0 border-r bg-panel transition-[width] duration-200 md:block',
+            collapsed ? 'w-[60px]' : 'w-[232px]',
           )}
         >
-          <Outlet />
-        </main>
+          <SidebarNav collapsed={collapsed} onToggle={() => setCollapsed(!collapsed)} />
+        </aside>
+        <div className="flex min-w-0 flex-1 flex-col">
+          <Topbar onMenu={() => setMobileNav(true)} onSearch={() => setCmdk(true)} />
+          <main
+            className={cn(
+              'relative min-h-0 flex-1',
+              fullBleed ? 'overflow-hidden' : 'overflow-y-auto scrollbar-thin',
+            )}
+          >
+            {blocked ? <NotOpen /> : <Outlet />}
+          </main>
+        </div>
       </div>
       <Sheet open={mobileNav} onOpenChange={setMobileNav}>
         <SheetContent side="left" className="w-[260px] bg-panel p-0">
           <SheetTitle className="sr-only">导航</SheetTitle>
-          <SheetDescription className="sr-only">驾驶舱的全部页面</SheetDescription>
+          <SheetDescription className="sr-only">{brand.product}的全部页面</SheetDescription>
           <SidebarNav onNavigate={() => setMobileNav(false)} />
         </SheetContent>
       </Sheet>

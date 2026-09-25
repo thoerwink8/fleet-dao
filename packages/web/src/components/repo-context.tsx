@@ -1,4 +1,5 @@
 import { createContext, type ReactNode, useContext, useMemo } from 'react';
+import { brand } from '#brand';
 import { useRepos } from '../api/client';
 import type { Repo } from '../api/types';
 import { useLocalState } from '../lib/hooks';
@@ -18,7 +19,7 @@ const Ctx = createContext<RepoApi | null>(null);
 /** 当前看的仓（看板按仓切换）。记在浏览器本地，下次打开还是它。 */
 export function RepoProvider({ children }: { children: ReactNode }) {
   const { data, isPending, error } = useRepos();
-  const [stored, setRepoId] = useLocalState<string | null>('fleet-dao.repo', null);
+  const [stored, setRepoId] = useLocalState<string | null>(`${brand.storagePrefix}repo`, null);
   const repos = data?.repos ?? [];
   const repo = repos.find((r) => r.id === stored) ?? repos[0];
   const api = useMemo(

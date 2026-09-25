@@ -1,6 +1,7 @@
 // 从环境变量读配置（机器本地配置，例如 systemd 的 EnvironmentFile）。密钥、地址只从这里来，不进仓；
 // 缺了或不合规就拒绝启动，并一次列出全部问题。
 import { randomBytes } from 'node:crypto';
+import { isAbsolute } from 'node:path';
 import { QUOTA_STALE_AFTER_MS } from '@fleet-dao/db';
 
 export type FleetEnv = 'production' | 'development' | 'test';
@@ -41,6 +42,12 @@ export interface Config {
   quotaStaleAfterMs: number;
   /** SSE 心跳间隔，防香港 nginx 和浏览器把空闲连接掐掉。 */
   sseHeartbeatMs: number;
+  /**
+   * 演示版可见范围的发布目录（FLEET_DEMO_DIR，绝对路径）：scopes/ 下的文件由装机时的同步单元推到香港，
+   * links/ 下是只留本机的备注。没配时驾驶舱发不了演示链接（接口说明没配，不假装「没有链接」）。
+   * 演示版的地址不归后端管：发布脚本构建驾驶舱时写进前端（FLEET_DEMO_URL），链接由前端拼。
+   */
+  demoDir: string | null;
 }
 
 export class ConfigError extends Error {
@@ -119,6 +126,10 @@ export function loadConfig(env: Env): Config {
     );
   }
 
+  const demoDir = env.FLEET_DEMO_DIR || null;
+  if (demoDir !== null && !isAbsolute(demoDir))
+    problems.push(`FLEET_DEMO_DIR 要写绝对路径，现在是「${demoDir}」`);
+
   const askWaitSeconds = parseIntIn(
     'FLEET_ASK_WAIT_SECONDS',
     env.FLEET_ASK_WAIT_SECONDS,
@@ -154,6 +165,7 @@ export function loadConfig(env: Env): Config {
     askWaitMs: askWaitSeconds * 1000,
     quotaStaleAfterMs: QUOTA_STALE_AFTER_MS,
     sseHeartbeatMs: 25 * 1000,
+    demoDir,
   };
 }
 

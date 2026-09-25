@@ -7,6 +7,7 @@
 ## 入口
 
 - **驾驶舱**：域名只在机器配置里（香港 `/etc/fleet-dao/hk.env` 的 `FLEET_DOMAIN`），公开仓不写；健康页在 `/health/`。
+- **演示版**：驾驶舱域名下的 `/demo/`（路径是配置，见 ops 第九节「演示版」）：假数据、不用登录、换了一套名字；游客能看什么在驾驶舱的「演示版」页定。
 - **飞书机器人 fleet-dao**：能做什么见 design 15.4。
 - **GitHub issue**：用「需求」模板写一句话就行。
 
@@ -24,7 +25,7 @@
 | `packages/adapters` | 渠道插头：无头起各家写码助手、读过程记录；各渠道的额度读取 |
 | `packages/cli` | `fleet` 命令：AI 会话汇报进度、提问、交活 |
 | `packages/api` | 驾驶舱后端：登录、接口、实时推送、给工作流发信号、fleet 命令接口、收 GitHub 事件 |
-| `packages/web` | 驾驶舱前端：看板和后台管理页面 |
+| `packages/web` | 驾驶舱前端：看板和后台管理页面；同一份代码另打一个演示版（`build:demo`） |
 | `packages/github` | 引擎对 GitHub 的读写：推分支、开 PR、等 CI、合并、issue 进度段与关单、对账补漏 |
 | `packages/jev` | Jev 判断题服务：题库、提问接口、从只记不拦转到真拦 |
 | `packages/feishu` | 飞书网关（跑在香港） |

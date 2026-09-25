@@ -27,34 +27,34 @@ describe('调度台「最近改动」的白话', () => {
     const c = describeChange(
       routing,
       entry(
-        { routeIds: ['r-ca-opus', 'r-mi-kimi', 'r-cursor', 'r-ds'], pinned: false },
-        { routeIds: ['r-ca-opus', 'r-cursor', 'r-ds', 'r-mi-kimi'], pinned: false },
+        { routeIds: ['r-ca-opus', 'r-rl-kimi', 'r-cursor', 'r-ds'], pinned: false },
+        { routeIds: ['r-ca-opus', 'r-cursor', 'r-ds', 'r-rl-kimi'], pinned: false },
       ),
     );
-    expect(c.summary).toBe('「写码」：把 Kimi k3（mirasim）从第 2 挪到第 4');
-    expect(c.after?.routeIds).toEqual(['r-ca-opus', 'r-cursor', 'r-ds', 'r-mi-kimi']);
+    expect(c.summary).toBe('「写码」：把 Kimi k3（relay）从第 2 挪到第 4');
+    expect(c.after?.routeIds).toEqual(['r-ca-opus', 'r-cursor', 'r-ds', 'r-rl-kimi']);
   });
 
   test('两条对调就说对调', () => {
     const c = describeChange(
       routing,
       entry(
-        { routeIds: ['r-ca-opus', 'r-mi-kimi', 'r-cursor'], pinned: false },
-        { routeIds: ['r-ca-opus', 'r-cursor', 'r-mi-kimi'], pinned: false },
+        { routeIds: ['r-ca-opus', 'r-rl-kimi', 'r-cursor'], pinned: false },
+        { routeIds: ['r-ca-opus', 'r-cursor', 'r-rl-kimi'], pinned: false },
       ),
     );
-    expect(c.summary).toBe('「写码」：Cursor Auto（cursor-pro）和 Kimi k3（mirasim）对调了位置');
+    expect(c.summary).toBe('「写码」：Cursor Auto（cursor-pro）和 Kimi k3（relay）对调了位置');
   });
 
   test('加、去、钉住都写出来', () => {
     const c = describeChange(
       routing,
       entry(
-        { routeIds: ['r-ca-opus', 'r-mi-kimi'], pinned: false },
+        { routeIds: ['r-ca-opus', 'r-rl-kimi'], pinned: false },
         { routeIds: ['r-ca-opus', 'r-cursor'], pinned: true },
       ),
     );
-    expect(c.summary).toBe('「写码」：钉住了，加上 Cursor Auto（cursor-pro），去掉 Kimi k3（mirasim）');
+    expect(c.summary).toBe('「写码」：钉住了，加上 Cursor Auto（cursor-pro），去掉 Kimi k3（relay）');
   });
 
   test('记录里没有前后对比：照实说，不给撤回的依据', () => {

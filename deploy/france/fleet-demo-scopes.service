@@ -1,0 +1,23 @@
+# fleet-dao 演示版的可见范围推到香港：跑 /usr/local/sbin/fleet-demo-scopes（deploy/france/fleet-demo-scopes.sh）。
+# 由 fleet-demo-scopes.path（范围目录一变）和 fleet-demo-scopes.timer（每 10 分钟补一次）拉起。france.sh 装，别在机器上手改。
+# 以 root 跑：往香港传文件的钥匙只有 root 读得到。只读本机、只往香港推，其余一律收紧。
+[Unit]
+Description=fleet-dao 演示版的可见范围推到香港
+Documentation=https://github.com/thoerwink8/fleet-dao/blob/main/docs/ops.md
+After=network-online.target wg-quick@wg-fleet.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/fleet-demo-scopes
+TimeoutStartSec=120
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
