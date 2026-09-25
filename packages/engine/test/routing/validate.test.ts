@@ -72,6 +72,13 @@ describe('输入认不出就明确失败', () => {
     );
   });
 
+  it('上游模型串、别名认不出（没带上，硬禁令就认不出上游串是 Fable 的）', () => {
+    fails(() => one({ upstreamModel: undefined as never }), /上游模型串认不出/);
+    fails(() => one({ upstreamModel: 42 as never }), /上游模型串认不出/);
+    fails(() => one({ upstreamAliases: undefined as never }), /上游别名认不出/);
+    fails(() => one({ upstreamAliases: [7] as never }), /上游别名认不出/);
+  });
+
   it('在途数、并发上限认不出', () => {
     fails(() => one({ inFlight: -1 }), /在途数认不出/);
     fails(() => one({ maxConcurrency: 1.5 }), /并发上限认不出/);

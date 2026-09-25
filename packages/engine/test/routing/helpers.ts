@@ -36,6 +36,8 @@ export function route(routeId: string, overrides: Partial<RouteFacts> = {}): Rou
     modelName: 'Opus 5.5',
     family: 'claude',
     hostId: 'claude-code',
+    upstreamModel: null,
+    upstreamAliases: [],
     quota: 'ok',
     windows: [win({ label: '5h', window: '5h', used: 0.2, resetsAt: at(3) }), win()],
     inFlight: 0,

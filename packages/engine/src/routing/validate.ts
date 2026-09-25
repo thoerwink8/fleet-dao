@@ -55,6 +55,13 @@ export function validateInput(input: ChooseRouteInput, trialEnabled: boolean): n
       throw new RoutingInputError(`选路判不了：${who} 的池主备认不出（${r.poolRole}）`);
     count(r.inFlight, `${who} 的在途数`);
     count(r.maxConcurrency, `${who} 的并发上限`);
+    // 硬禁令也按上游串和别名认：没带上就只认得模型 id 和显示名，上游串是 Fable 的会漏过去。
+    if (r.upstreamModel !== null && typeof r.upstreamModel !== 'string') {
+      throw new RoutingInputError(`选路判不了：${who} 的上游模型串认不出（${String(r.upstreamModel)}）`);
+    }
+    if (!Array.isArray(r.upstreamAliases) || r.upstreamAliases.some((a) => typeof a !== 'string')) {
+      throw new RoutingInputError(`选路判不了：${who} 的上游别名认不出（${String(r.upstreamAliases)}）`);
+    }
     for (const b of r.blockers) {
       if (!CANDIDATE_BLOCKERS.includes(b))
         throw new RoutingInputError(`选路判不了：${who} 的被挡原因认不出（${b}）`);

@@ -26,7 +26,10 @@ export function blocksFor(
   ctx: FilterContext,
 ): Block[] {
   const out: Block[] = [];
-  if (entry && !entry.enabled) out.push(hard('switched-off', '调度台上这一条关着'));
+  // 候选查询按同一个开关也会给 switched-off：两边任一说关着就挡，只记一条。
+  if ((entry && !entry.enabled) || route.blockers.includes('switched-off')) {
+    out.push(hard('switched-off', '调度台上这一条关着'));
+  }
   out.push(...candidateBlocks(route, ctx));
   const unfit = hostUnfit(route.hostId, ctx.stage);
   if (unfit) out.push(hard('host-unfit', unfit));
@@ -48,7 +51,9 @@ function hard(code: Block['code'], text: string): Block {
   return { code, text, wait: null, until: null };
 }
 
-const CANDIDATE_TEXT: Record<Exclude<CandidateBlocker, 'banned' | 'quota-exhausted' | 'no-slot'>, string> = {
+type SpecialBlocker = 'switched-off' | 'banned' | 'quota-exhausted' | 'no-slot';
+
+const CANDIDATE_TEXT: Record<Exclude<CandidateBlocker, SpecialBlocker>, string> = {
   offline: '不在线（探活或熔断判的）',
   'channel-disabled': '渠道关了',
   'pool-expired': '订阅过期了',
@@ -58,12 +63,18 @@ const CANDIDATE_TEXT: Record<Exclude<CandidateBlocker, 'banned' | 'quota-exhaust
 function candidateBlocks(route: RouteFacts, ctx: FilterContext): Block[] {
   const out: Block[] = [];
   for (const b of route.blockers) {
-    if (b === 'banned' || b === 'quota-exhausted' || b === 'no-slot') continue;
+    if (b === 'switched-off' || b === 'banned' || b === 'quota-exhausted' || b === 'no-slot') continue;
     out.push(hard(b, CANDIDATE_TEXT[b]));
   }
-  // 硬禁令在这里再过一遍（shared 的同一份）：候选查询漏了、或任务指定的路由没经过候选查询，也照样挡。
+  // 硬禁令在这里再过一遍（shared 的同一份，连上游串和别名一起认）：候选查询漏了、或任务指定的路由没经过候选查询，也照样挡。
   const hardBan = hardBanFor(
-    { id: route.modelId, family: route.family, displayName: route.modelName },
+    {
+      id: route.modelId,
+      family: route.family,
+      displayName: route.modelName,
+      upstreamModel: route.upstreamModel,
+      upstreamAliases: route.upstreamAliases,
+    },
     ctx.stage,
   );
   const reasons = [...route.banReasons];

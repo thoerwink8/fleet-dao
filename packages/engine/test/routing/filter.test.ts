@@ -101,12 +101,27 @@ describe('禁令用 shared 的硬禁令，候选查询漏了也挡', () => {
     const blocks = blocksFor(r, entry('k', 0), ctx({ stage: 'review' }));
     expect(blocks.map((b) => b.text)).toEqual(['犯禁令：创始人另加：Kimi 不做审查']);
   });
+
+  it('目录里写成 opus、上游串或别名却是 Fable：照样挡；上游串正常不挡', () => {
+    const viaUpstream = route('o', { upstreamModel: 'claude-fable-5-1' });
+    expect(codes(viaUpstream)).toEqual(['banned']);
+    const viaAlias = route('o', { upstreamModel: 'claude-opus-5-5', upstreamAliases: ['fable'] });
+    expect(codes(viaAlias)).toEqual(['banned']);
+    expect(codes(route('o', { upstreamModel: 'claude-opus-5-5', upstreamAliases: ['opus'] }))).toEqual([]);
+  });
 });
 
 describe('单条开关', () => {
   it('关着的不派；开着的派', () => {
     expect(codes(route('a'), ctx(), entry('a', 0, { enabled: false }))).toEqual(['switched-off']);
     expect(codes(route('a'), ctx(), entry('a', 0, { enabled: true }))).toEqual([]);
+  });
+
+  it('候选查询说关着也挡（它按同一个开关算）；两边都说只记一条', () => {
+    const off = route('a', { blockers: ['switched-off'] });
+    const blocks = blocksFor(off, entry('a', 0), ctx());
+    expect(blocks).toEqual([{ code: 'switched-off', text: '调度台上这一条关着', wait: null, until: null }]);
+    expect(codes(off, ctx(), entry('a', 0, { enabled: false }))).toEqual(['switched-off']);
   });
 });
 

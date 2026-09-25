@@ -3,8 +3,12 @@
 import type { HostId, QuotaWindowKind, StageKind } from '@fleet-dao/shared';
 import type { RoutingPolicy } from './policy.ts';
 
-/** 和 packages/db 的 queries/candidates.ts 的 Blocker 同一套取值（候选查询已经算好的被挡原因）。 */
+/**
+ * 和 packages/db 的 queries/candidates.ts 的 Blocker 同一套取值（候选查询已经算好的被挡原因）。
+ * engine 不依赖 db，两边各写一份：test/routing/blockers-sync.test.ts 读 db 的源码比对，那边加了取值这里会红。
+ */
 export type CandidateBlocker =
+  | 'switched-off'
   | 'offline'
   | 'channel-disabled'
   | 'pool-expired'
@@ -14,6 +18,7 @@ export type CandidateBlocker =
   | 'no-slot';
 
 export const CANDIDATE_BLOCKERS: readonly CandidateBlocker[] = [
+  'switched-off',
   'offline',
   'channel-disabled',
   'pool-expired',
@@ -75,6 +80,12 @@ export interface RouteFacts {
   modelName: string;
   family: string;
   hostId: HostId;
+  /**
+   * 插头实际发给上游的模型串和别名（routes.upstream_model / upstream_aliases，没填为 null / 空数组）。
+   * 硬禁令也按它们认（shared 的 BanSubject）：目录里模型写成 opus、上游串却是 Fable，照样要拦。
+   */
+  upstreamModel: string | null;
+  upstreamAliases: string[];
   /** 候选查询算好的：ok / exhausted / unknown（没读成、读数过期、判不了扣不扣）。 */
   quota: 'ok' | 'exhausted' | 'unknown';
   windows: RouteWindow[];
@@ -125,11 +136,10 @@ export interface ChooseRouteInput {
 
 /**
  * 被挡的原因。waitable = 等得来（空位、额度清零、熔断到点）；其余是硬挡，等也等不来。
- * 前七种来自候选查询，其余是选路自己判的。
+ * CandidateBlocker 来自候选查询（switched-off 选路也按调度台那一行自己判），其余是选路自己判的。
  */
 export type BlockCode =
   | CandidateBlocker
-  | 'switched-off'
   | 'host-unfit'
   | 'breaker-open'
   | 'avoided'
