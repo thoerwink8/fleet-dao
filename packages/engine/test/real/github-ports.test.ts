@@ -21,8 +21,8 @@ import { createGitHubPorts, type EngineGitHub, toPortError } from '../../src/rea
 import { checkoutBranch, fetchBundle } from '../../src/real/user-git.ts';
 import { fakeTrees, git, mirror } from './fixtures.ts';
 
-// 每条用例都真跑好几次 git（Windows 上一次几百毫秒），机器忙时默认的 5 秒不够。
-vi.setConfig({ testTimeout: 60_000 });
+// 每条用例（和每条用例前建的镜像）都真跑好几次 git（Windows 上一次几百毫秒），机器忙时默认的 5 秒、10 秒不够。
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 });
 
 const ctx: PortContext = {
   signal: new AbortController().signal,
