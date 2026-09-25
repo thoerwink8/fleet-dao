@@ -1,4 +1,5 @@
 // 分流的行为：梯子怎么往下走、次数怎么封顶、认不出的怎么办、Jev 能碰什么、路由病了和原文重复时怎么跳。全是纯函数，不出网。
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
   type AttemptCounters,
@@ -452,6 +453,38 @@ describe('插头没查成的：再起一个会话就可能跑两遍，只挂起�
       });
     }
     expect(classifyFailure(session({ code: 'delivery_unknown' })).action).toBe('retry');
+  });
+
+  it('测试输出里出现这两个码、旧系统那句原文（fleet-dao 自己的测试里满是）：带不带 CI 红的码都判 TS1 返工，不挂起', () => {
+    // 两份真 vitest 失败输出（夹具 X60、X61）；先确认样本里真有这些字样，免得测的是空话
+    const samples = JSON.parse(
+      readFileSync(new URL('./fixtures/failure-samples.json', import.meta.url), 'utf8'),
+    ) as { samples: { id: string; evidence: FailureEvidence }[] };
+    const output = (id: string) => samples.samples.find((s) => s.id === id)?.evidence.message ?? '';
+    expect(['launch_unknown', 'relay_unknown'].filter((w) => output('X60').includes(w))).toHaveLength(2);
+    expect(output('X61')).toContain('没收到 prompt 的应答帧');
+    for (const id of ['X60', 'X61']) {
+      for (const code of ['checks_failed', 'checks-failed', undefined]) {
+        const v = classifyFailure({
+          source: 'waitCi',
+          routeBound: false,
+          ...(code ? { code } : {}),
+          message: output(id),
+          now: NOW,
+        });
+        expect({ id, code, rule: v.rule, action: v.action, counter: v.counter, alert: v.alert }).toEqual({
+          id,
+          code,
+          rule: 'TS1',
+          action: 'retry',
+          counter: 'reworks',
+          alert: false,
+        });
+      }
+    }
+    // 插头交来的结构化码照样认：原文里有什么都压得过
+    expect(classifyFailure(session({ code: 'launch_unknown', message: output('X60') })).rule).toBe('ST2');
+    expect(classifyFailure(session({ code: 'relay_unknown', message: output('X60') })).rule).toBe('DL3');
   });
 });
 

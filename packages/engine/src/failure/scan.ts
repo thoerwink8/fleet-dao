@@ -5,6 +5,8 @@ import type { FailureEvidence } from './types.ts';
 export interface Scan {
   /** 小写。证据给的 code，加上原文里嵌着的码（JSON 的 "code"/"error"、errorCode=、[claude-code:…]、蛇形标识）。 */
   codes: ReadonlySet<string>;
+  /** 证据自己给的 code（小写）：codes 里还混着从原文捞的，只认结构化码的规则看这个。 */
+  code?: string;
   /** 上游错误原文全文。 */
   text: string;
   /** 过程记录拼起来；只给写明读过程记录的规则。 */
@@ -101,10 +103,12 @@ export function waitFromText(text: string, nowMs?: number): number | undefined {
 export function scanEvidence(e: FailureEvidence): Scan {
   const text = e.message ?? '';
   const codes = new Set<string>(embeddedCodes(text));
-  if (e.code?.trim()) codes.add(e.code.trim().toLowerCase());
+  const code = e.code?.trim().toLowerCase() || undefined;
+  if (code) codes.add(code);
   const status = e.httpStatus ?? statusFromText(text);
   return {
     codes,
+    ...(code ? { code } : {}),
     text,
     tail: (e.transcriptTail ?? []).join('\n'),
     session: isRouteBound(e),

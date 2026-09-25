@@ -934,6 +934,41 @@
         "message": "中转没查成：没给账本目录，上游有没有真的干活核实不了"
       },
       "expect": { "action": "park", "rule": "DL3", "alert": true, "routeOutcome": "neutral" }
+    },
+    {
+      "id": "X60",
+      "provenance": "observed",
+      "origin": "PR #14 复核：审查官实测真 vitest 失败输出里带 relay_unknown 字样，被判成插头没查成、挂起报警，该判 TS1 返工。这里是本机照做的真输出：把 Mirasim 插头改回审查前的判法，跑 packages/adapters/test/mirasim.test.ts（vitest 5.0.1，工作目录已脱敏）；输出里 launch_unknown、relay_unknown 都有",
+      "evidence": {
+        "source": "waitCi",
+        "routeBound": false,
+        "code": "checks_failed",
+        "message": "\n RUN  v5.0.1 /work/fleet-dao\n\n ❯ packages/adapters/test/mirasim.test.ts (28 tests | 2 failed | 26 skipped) 1543ms\n   ❯ Mirasim 起会话到判定（假服务端） (18)\n     × prompt 发出去没等到应答：标「没查成」，不当成确定没起、不判成重派的那一类（MS-18） 518ms\n     × 中转路由：账本里起针之后没有 2xx，done 不算数；账本没读成、没给账本目录判「中转没查成」 1024ms\n\n⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯\n\n FAIL  packages/adapters/test/mirasim.test.ts > Mirasim 起会话到判定（假服务端） > prompt 发出去没等到应答：标「没查成」，不当成确定没起、不判成重派的那一类（MS-18）\nAssertionError: expected { outcome: 'failed', …(2) } to match object { outcome: 'failed', …(1) }\n(1 matching property omitted from actual)\n\n- Expected\n+ Received\n\n  {\n    \"outcome\": \"failed\",\n-   \"reason\": \"launch_unknown\",\n+   \"reason\": \"spawn_failed\",\n  }\n\n ❯ packages/adapters/test/mirasim.test.ts:364:55\n    362|     expect(report.launchUnknown).toBe(true);\n    363|     expect(report.launchError).toContain('别重发');\n    364|     expect(judgeRun(mirasimRunSummary(report).facts)).toMatchObject({\n       |                                                       ^\n    365|       outcome: 'failed',\n    366|       reason: 'launch_unknown',\n\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯\n\n FAIL  packages/adapters/test/mirasim.test.ts > Mirasim 起会话到判定（假服务端） > 中转路由：账本里起针之后没有 2xx，done 不算数；账本没读成、没给账本目录判「中转没查成」\nAssertionError: expected { outcome: 'ok', …(2) } to deeply equal { outcome: 'failed', …(2) }\n\n- Expected\n+ Received\n\n  {\n-   \"detail\": \"中转没查成：账本没读成：账本里没有这个会话的目录（可能一次上游调用都没有，也可能账本换了地方）\",\n-   \"outcome\": \"failed\",\n-   \"reason\": \"relay_unknown\",\n+   \"detail\": \"正常结束\",\n+   \"outcome\": \"ok\",\n+   \"reason\": \"answered\",\n  }\n\n ❯ packages/adapters/test/mirasim.test.ts:491:56\n    489|     });\n    490|     expect(unknown.ledger?.state).toBe('unknown');\n    491|     expect(judgeRun(mirasimRunSummary(unknown).facts)).toEqual({\n       |                                                        ^\n    492|       outcome: 'failed',\n    493|       reason: 'relay_unknown',\n\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/2]⎯\n\n\n Test Files  1 failed (1)\n      Tests  2 failed | 26 skipped (28)\n   Start at  11:39:35\n   Duration  1.81s (tests 91%, transform 6%, import 2%)\n\n"
+      },
+      "expect": {
+        "action": "retry",
+        "rule": "TS1",
+        "counter": "reworks",
+        "alert": false,
+        "routeOutcome": "neutral"
+      }
+    },
+    {
+      "id": "X61",
+      "provenance": "observed",
+      "origin": "同 X60，不带 CI 红的码、只有原文：本机把 ST2 认的旧系统原文删掉，跑 packages/engine/test/failure/classify.test.ts 的真输出，代码片段里带着「没收到 prompt 的应答帧」这句",
+      "evidence": {
+        "source": "waitCi",
+        "routeBound": false,
+        "message": "\n RUN  v5.0.1 /work/fleet-dao\n\n ❯ packages/engine/test/failure/classify.test.ts (38 tests | 1 failed | 37 skipped) 13ms\n   ❯ 插头没查成的：再起一个会话就可能跑两遍，只挂起报警 (3)\n     × 起会话没查成：头一步就挂起报警，一次也不原路重派、不换路由；不记路由的失败 12ms\n\n⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯\n\n FAIL  packages/engine/test/failure/classify.test.ts > 插头没查成的：再起一个会话就可能跑两遍，只挂起报警 > 起会话没查成：头一步就挂起报警，一次也不原路重派、不换路由；不记路由的失败\nAssertionError: expected [ 'retry', 'retry', 'swapRoute', …(3) ] to deeply equal [ 'park' ]\n\n- Expected\n+ Received\n\n  [\n+   \"retry\",\n+   \"retry\",\n+   \"swapRoute\",\n+   \"swapRoute\",\n+   \"swapModel\",\n    \"park\",\n  ]\n\n ❯ packages/engine/test/failure/classify.test.ts:408:23\n    406|       session({ hostId: 'mirasim', message: '起会话没查成：没收到 prompt 的应答帧（没查…\n    407|     );\n    408|     expect(old.trail).toEqual(['park']);\n       |                       ^\n    409|     expect(parked(old.last)).toEqual({\n    410|       rule: 'ST2',\n\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯\n\n\n Test Files  1 failed (1)\n      Tests  1 failed | 37 skipped (38)\n   Start at  11:40:38\n   Duration  228ms (transform 70%, import 16%, tests 11%, worker 3%)\n\n"
+      },
+      "expect": {
+        "action": "retry",
+        "rule": "TS1",
+        "counter": "reworks",
+        "alert": false,
+        "routeOutcome": "neutral"
+      }
     }
   ],
   "skipped": [

@@ -3,6 +3,7 @@
 //
 // 认的顺序是三轮，每轮内按表里的先后：
 //   1. 强码：原因码（account_banned、quota_exhausted、TIMEOUT_HEARTBEAT……），含原文里嵌着的 JSON 码——命中即终判；
+//      标了 codeFieldOnly 的规则只认证据的 code 字段，原文里捞出来的不算；
 //   2. 已知原文：上游错误原文（和少数写明读过程记录的规则）；
 //   3. 只剩状态码、退出码、信号，或症状码（idle_timeout、not_delivered……）：原文认得出原因时让原文说了算。
 // 状态码只在语义稳定时单独定类（401、402、429、5xx）；422 永远不单凭状态码定类（mirasim 用它表示繁忙、断网、
@@ -24,6 +25,11 @@ export interface FailureRule {
   title: string;
   /** 强码（第 1 轮）。小写。 */
   codes?: readonly string[];
+  /**
+   * 强码只认证据的 code 字段（插头、端口交来的结构化码），不认从原文里捞出来的：这个词常出现在测试输出、
+   * 源码片段里（fleet-dao 自己的测试就满是），原文里有它不说明这一步是这么失败的。
+   */
+  codeFieldOnly?: true;
   /** 已知原文（第 2 轮）。不带 g 标志。 */
   text?: RegExp;
   /** 过程记录里的已知句子（第 2 轮）；只收很具体的句子，助手正文里常有错误字样。 */
@@ -74,13 +80,16 @@ export const RULES: readonly FailureRule[] = [
   // 原路重试、换路由都是再起一个会话：同一件活跑两遍、扣两次额度、同一棵树里两个会话。所以只挂起报警，等对账；
   // 是我们没查成，不是路由坏了，不记路由的失败。强码一轮按表的先后认，这两条只排在 EN2（同样只挂起）后面：
   // 原话里常夹着等应答时收到的别的报错（at capacity、overloaded_error、account_banned……），排在繁忙、封号这些规则
-  // 后面就会被抢走。旧系统同一件事的原文「没收到 prompt 的应答帧」（夹具 S09）也归 ST2：起没起成同样不知道，
-  // docs/reference/errors.md 第 5 节 S09 原判 retry-here，以这条为准（PR #14 复审拍板）。
+  // 后面就会被抢走。反过来，这两个词只认插头交来的 code 字段：测试输出里有这两个词（CI 红时常见）不能把返工判成挂起。
+  // 旧系统同一件事的原文「没收到 prompt 的应答帧」（夹具 S09）也归 ST2：起没起成同样不知道，
+  // docs/reference/errors.md 第 5 节 S09 原判 retry-here，以这条为准（PR #14 复审拍板）。只认以这句开头的整条报错，
+  // 测试输出、源码片段里带着这句不算（夹具 X61）。
   {
     id: 'ST2',
     title: '起会话没查成，可能已经在跑',
     codes: ['launch_unknown'],
-    text: /没收到 prompt 的应答帧/,
+    codeFieldOnly: true,
+    text: /^起会话没查成：没收到 prompt 的应答帧/,
     ladder: ['park'],
     alert: true,
     routeOutcome: 'neutral',
@@ -89,6 +98,7 @@ export const RULES: readonly FailureRule[] = [
     id: 'DL3',
     title: '中转有没有真干活没查成',
     codes: ['relay_unknown'],
+    codeFieldOnly: true,
     ladder: ['park'],
     alert: true,
     routeOutcome: 'neutral',
@@ -563,7 +573,7 @@ export interface RuleHit {
 export function matchRule(scan: Scan, all: readonly FailureRule[] = RULES): RuleHit | undefined {
   const rules = scan.session ? all.filter((r) => !r.stepsOnly) : all;
   for (const rule of rules) {
-    const code = rule.codes?.find((c) => scan.codes.has(c));
+    const code = rule.codes?.find((c) => (rule.codeFieldOnly ? scan.code === c : scan.codes.has(c)));
     if (code) return { rule, via: 'signal', hit: code };
   }
   for (const rule of rules) {
