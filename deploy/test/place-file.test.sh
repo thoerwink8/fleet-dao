@@ -2,7 +2,8 @@
 # shellcheck disable=SC2016 # 这里处理的是命令原文：$t、$(mktemp …) 要原样留着交给 sh -c，不能在这里展开
 # docs/ops.md 第九节两条「放文件」的命令（飞书网关的通行证、目录配置）：那头收到的是空的、半截的、不像样的，原来那份原样留着，
 # 临时名不留下；收到完整的才换上。命令从 docs/ops.md 里原样取出来（文档改了，这里跟着测；认不出就报没跑成），只换两处：
-# /etc/fleet-dao 换成临时目录，chown root:fleet 换成 true（这台上没有 fleet 组，属主不是这里要测的）。管道左边换成桩：
+# /etc/fleet-dao 换成临时目录，chown root:fleet 换成 true（这台上没有 fleet 组，属主不是这里要测的）；换完还指着 /etc/fleet-dao
+# 的也报没跑成、不跑（在服务器上 sudo 跑 run.sh 时，不能真往那里写）。管道左边换成桩：
 # 解密失败就是左边失败、一个字节都不给（age 解不开时就是这样，本机实测过，见 specs/47-目录配置/结果.md）。
 # 最后拿修之前的老写法当反例跑一遍：它会把好的那份换成空的，说明这里抓得到。
 # 用法：bash deploy/test/place-file.test.sh。退出码：0 通过，1 不通过，2 有没跑成的。
@@ -32,22 +33,30 @@ fi
 
 # ops 里以 prefix 开头那一行（要恰好一行），取出那头要跑的命令：prefix 之后、行尾那个单引号之前
 REMOTE=""
-remote_of() { # 行的开头（到那头命令的左单引号为止）
-  local prefix=$1 n line rest
-  n=$(grep -cF -- "$prefix" "$OPS")
+remote_of() { # 行的开头（到那头命令的左单引号为止） [从哪份文档取，默认 docs/ops.md]
+  local prefix=$1 doc=${2:-$OPS} n line rest
+  REMOTE=""
+  n=$(grep -cF -- "$prefix" "$doc")
   if [[ "$n" != 1 ]]; then
     echo "  … 没跑成：docs/ops.md 里以「$prefix」开头的行有 $n 行，应为 1 行"
     return 1
   fi
-  line=$(grep -F -- "$prefix" "$OPS")
+  line=$(grep -F -- "$prefix" "$doc")
   rest=${line#*"$prefix"}
   REMOTE=${rest%\'}
   if [[ "$rest" != *\' || "$REMOTE" == *\'* || "$REMOTE" != *'/etc/fleet-dao/'* || "$REMOTE" != *'chown root:fleet "$t"'* ]]; then
     echo "  … 没跑成：认不出「$prefix」那一行那头的命令（要以单引号收尾，里面有 /etc/fleet-dao/ 和 chown root:fleet \"\$t\"）"
+    REMOTE=""
     return 1
   fi
   REMOTE=${REMOTE//\/etc\/fleet-dao\//$D/}
   REMOTE=${REMOTE//'chown root:fleet "$t"'/true}
+  # 换完还指着 /etc/fleet-dao（比如写成了不带斜杠的 cd /etc/fleet-dao）就不跑：在服务器上跑 run.sh，会真往那里写
+  if [[ "$REMOTE" == *'/etc/fleet-dao'* ]]; then
+    echo "  … 没跑成：「$prefix」那一行换完还指着 /etc/fleet-dao，不跑（在服务器上跑会真往那里写）"
+    REMOTE=""
+    return 1
+  fi
 }
 
 GOOD=$TMP/good
@@ -94,8 +103,9 @@ full_catalog() { cat -- "$EXAMPLE"; }
 half_token() { printf 'FLEET_FEISHU_GATEWAY_TOKEN=%s' "${TOKEN:0:20}"; }
 full_token() { cat -- "$TMP/token-full"; }
 
-echo "== 目录配置：age -d … | ssh <法国> '…'"
-if remote_of "age -d -i ~/.fleet-dao/vault-key.txt france/etc/fleet-dao/catalog.json.age | ssh <法国> '"; then
+echo "== 目录配置：~/.fleet-dao/bin/age -d … | ssh <法国> '…'"
+# shellcheck disable=SC2088 # 这是 ops 里那一行的原文开头，拿来逐字比，~ 不能展开
+if remote_of "~/.fleet-dao/bin/age -d -i ~/.fleet-dao/vault-key.txt france/etc/fleet-dao/catalog.json.age | ssh <法国> '"; then
   CATALOG_CMD=$REMOTE
   place "$CATALOG_CMD" decrypt_failed catalog.json
   kept "解密失败（那头收到空的）" catalog.json
@@ -123,6 +133,14 @@ if remote_of "ssh <法国> 'cat /etc/fleet-dao/gateway-token.env' | ssh <香港>
 else
   skipped=1
 fi
+
+echo "== 自检：ops 里那一行换完还指着 /etc/fleet-dao，就不跑"
+cat >"$TMP/ops-bad.md" <<'EOF'
+x | ssh <法国> 'cd /etc/fleet-dao && t=$(mktemp /etc/fleet-dao/.new.XXXXXX); cat > "$t" && chown root:fleet "$t" && mv "$t" catalog.json'
+EOF
+if remote_of "x | ssh <法国> '" "$TMP/ops-bad.md" >"$TMP/guard"; then guard=跑了; else guard=没跑; fi
+check "换完还剩 cd /etc/fleet-dao：不跑、说了为什么、没交出命令" \
+  "$guard:$(grep -c '换完还指着 /etc/fleet-dao' "$TMP/guard"):${REMOTE:-空}" "没跑:1:空"
 
 echo "== 反例：修之前的老写法（先落临时名就换，不看收到的是什么）"
 OLD='f=/etc/fleet-dao/catalog.json; t=$(mktemp /etc/fleet-dao/.new.XXXXXX); cat > "$t" && chown root:fleet "$t" && chmod 640 "$t" && mv "$t" "$f"'
