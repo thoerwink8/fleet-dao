@@ -16,7 +16,7 @@ import { createDirDemoPublisher, sweepExpiredDemoLinks } from './demo.ts';
 import type { Deps } from './deps.ts';
 import { DEV_RUN_ID, DEV_USER_ID, devFixtures, IDS } from './dev-fixtures.ts';
 import { createFeishuAuth } from './feishu.ts';
-import { githubAppMissing } from './github.ts';
+import { githubAppMissing, githubEventsCheck } from './github.ts';
 import { serviceHealthChecks } from './health.ts';
 import { jsonLogger } from './log.ts';
 import { createMemoryStore } from './memory-store.ts';
@@ -34,17 +34,18 @@ const requirementsNotConnected: RequirementWorkflows = {
 };
 
 /**
- * PR、CI 事件写镜像：@fleet-dao/github 的事件去处，要两个机器人的凭据。读不到时后端照样起（issue 照收），
- * PR、CI 事件如实失败，健康检查的 github_events 报红。
+ * PR、CI 事件写镜像：@fleet-dao/github 的事件去处，要两个机器人的凭据（只在这里、启动时读一次）。读不到时后端照样起
+ * （issue 照收），PR、CI 事件如实失败，健康检查的 github_events 报红（credentialsMissing）；补上凭据要重启后端。
  */
-function githubMirror(db: Db): { sink: GitHubEventSink; check: () => Promise<void> } {
+function githubMirror(db: Db): { sink: GitHubEventSink; credentialsMissing?: () => Promise<void> } {
   try {
     const gh = createGitHub({ ledger: pgLedger(db), locker: pgLocker(db, { log }), log });
     // 引擎等 CI 靠活动自己轮询（waitCi），不收按事件叫醒的信号：PR、CI 事件只写镜像
-    return { sink: gh.eventSink({ async wake() {} }), check: async () => {} };
+    return { sink: gh.eventSink({ async wake() {} }) };
   } catch (err) {
     log.error('GitHub 机器人的凭据没读到：PR、CI 事件写不进镜像（issue 照收）', { error: String(err) });
-    return githubAppMissing(String(err));
+    const missing = githubAppMissing(String(err));
+    return { sink: missing.sink, credentialsMissing: missing.check };
   }
 }
 
@@ -113,9 +114,10 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
   );
   const temporal = notConnectedTemporal();
   const github = githubMirror(db);
+  const store = createPgStore(db, { now });
   const deps: Deps = {
     config,
-    store: createPgStore(db, { now }),
+    store,
     changes: feed,
     log,
     now,
@@ -124,7 +126,12 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
     workflows: temporal.control,
     requirements: requirementsNotConnected,
     github: github.sink,
-    health: serviceHealthChecks({ probeDb: () => probeDb(db), feed, temporal, githubEvents: github.check }),
+    health: serviceHealthChecks({
+      probeDb: () => probeDb(db),
+      feed,
+      temporal,
+      githubEvents: githubEventsCheck({ store, now, credentialsMissing: github.credentialsMissing }),
+    }),
   };
   return {
     deps,

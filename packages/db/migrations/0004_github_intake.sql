@@ -1,11 +1,20 @@
--- 接活入口（#43）：收到的 GitHub 事件原文落库（一次投递一行，去重、重放都靠它）；仓加自动派活开关，已有的仓一律是关着的（空）。
+-- 接活入口（#43）：收到的 GitHub 事件原文落库（一次投递一行，去重、重放都靠它），每次投递带着的对象版本另记一张表；
+-- 仓加自动派活开关，已有的仓一律是关着的（空）。
+CREATE TABLE "github_event_versions" (
+	"delivery_id" text NOT NULL,
+	"object" text NOT NULL,
+	"version" timestamp with time zone NOT NULL,
+	"state" text,
+	CONSTRAINT "github_event_versions_delivery_id_object_pk" PRIMARY KEY("delivery_id","object"),
+	CONSTRAINT "github_event_versions_state_known" CHECK ("github_event_versions"."state" is null or "github_event_versions"."state" in ('open', 'closed'))
+);
+--> statement-breakpoint
 CREATE TABLE "github_events" (
 	"delivery_id" text PRIMARY KEY NOT NULL,
 	"event" text NOT NULL,
 	"action" text,
 	"source" text NOT NULL,
 	"repo" text,
-	"version_key" text,
 	"payload" jsonb NOT NULL,
 	"status" text NOT NULL,
 	"reason" text,
@@ -22,5 +31,6 @@ CREATE TABLE "github_events" (
 );
 --> statement-breakpoint
 ALTER TABLE "repos" ADD COLUMN "auto_dispatch_since" timestamp with time zone;--> statement-breakpoint
-CREATE INDEX "github_events_version_key_idx" ON "github_events" USING btree ("version_key") WHERE "github_events"."version_key" is not null;--> statement-breakpoint
+ALTER TABLE "github_event_versions" ADD CONSTRAINT "github_event_versions_delivery_id_github_events_delivery_id_fk" FOREIGN KEY ("delivery_id") REFERENCES "public"."github_events"("delivery_id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+CREATE INDEX "github_event_versions_object_idx" ON "github_event_versions" USING btree ("object","version");--> statement-breakpoint
 CREATE INDEX "github_events_unfinished_idx" ON "github_events" USING btree ("attempts","received_at") WHERE "github_events"."status" in ('processing', 'failed');

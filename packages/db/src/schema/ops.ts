@@ -10,6 +10,7 @@ import {
   integer,
   jsonb,
   pgTable,
+  primaryKey,
   text,
   timestamp,
   unique,
@@ -149,9 +150,7 @@ const inList = (values: readonly string[]) => sql.raw(values.map((v) => `'${v}'`
 
 /**
  * 收到的 GitHub 事件，一次投递一行：原文留着能重放，投递编号去重也靠它（design 第十四节「收 GitHub 事件」）。
- * 验签不过的不进这里：没认证的请求不许往库里写。
- * version_key = 这条事件说的那个对象的那一版（issue、评论、PR 的编号 + updated_at，写法同轮询的投递编号）：
- * 轮询补收时拿它认出 webhook 已经收过的同一版，不再重做一遍。
+ * 验签不过的不进这里：没认证的请求不许往库里写。它带着哪些对象的哪一版，记在 github_event_versions。
  */
 export const githubEvents = pgTable(
   'github_events',
@@ -162,7 +161,6 @@ export const githubEvents = pgTable(
     source: text('source').notNull().$type<(typeof GITHUB_EVENT_SOURCES)[number]>(),
     /** owner/name，原样取自事件；没有仓的事件（安装类）为空。 */
     repo: text('repo'),
-    versionKey: text('version_key'),
     payload: jsonb('payload').notNull(),
     status: text('status').notNull().$type<(typeof GITHUB_EVENT_STATUSES)[number]>(),
     /** 不收、出错的原因。 */
@@ -186,11 +184,35 @@ export const githubEvents = pgTable(
     ),
     check('github_events_finished_iff_done', sql`(${t.status} = 'processing') = (${t.finishedAt} is null)`),
     check('github_events_attempts_positive', sql`${t.attempts} > 0`),
-    index('github_events_version_key_idx').on(t.versionKey).where(sql`${t.versionKey} is not null`),
     // 对账捞没处理成的：先捞次数少的。
     index('github_events_unfinished_idx')
       .on(t.attempts, t.receivedAt)
       .where(sql`${t.status} in ('processing', 'failed')`),
+  ],
+);
+
+/**
+ * 一次投递带着的每个对象的那一版：issue、评论、PR 各一行（评论事件同时带着被它顶新的 issue，审查类事件带着 PR）。
+ * 两个用处：轮询补收时认出 webhook 收过的同一版，不再算漏收；issue 事件晚到或重放时，同一张 issue 有更新的一版
+ * 已经处理过、开关状态又和这条不一样，这条旧的就不再做（旧的「重开」不会把后来关了的单又拉起来）。
+ */
+export const githubEventVersions = pgTable(
+  'github_event_versions',
+  {
+    deliveryId: text('delivery_id')
+      .notNull()
+      .references(() => githubEvents.deliveryId, { onDelete: 'cascade' }),
+    /** `<owner/name 小写>:<issue|comment|pull>:<编号>`。 */
+    object: text('object').notNull(),
+    /** 这个对象在 GitHub 上的 updated_at。 */
+    version: timestamp('version', tz).notNull(),
+    /** issue、PR 这一版开着还是关着；评论没有。 */
+    state: text('state').$type<'open' | 'closed'>(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.deliveryId, t.object] }),
+    check('github_event_versions_state_known', sql`${t.state} is null or ${t.state} in ('open', 'closed')`),
+    index('github_event_versions_object_idx').on(t.object, t.version),
   ],
 );
 

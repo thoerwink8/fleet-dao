@@ -2,7 +2,7 @@
 // 按事件里 issue 此刻的样子处理（开着 / 关了），不逐个对动作名：补收拼出来的事件动作是 synced、reconcile，照样处理。
 // 只有「重开」「编辑」这两件边沿上的事只认 webhook 带来的动作：补收看不出是谁、什么时候改的。
 // 每一步都能重放：任务行按（仓, issue 号）唯一，起工作流按工作流编号去重，叫停重发引擎回「已经在叫停」。
-// 抛错 = 没处理成：这条投递记成出错，重投、补收或重放时整条再来一遍。
+// 抛错 = 没处理成：这条投递记成出错，对账重放时整条再来一遍（GitHub 自己不重投）。
 import { randomUUID } from 'node:crypto';
 import { humanPart } from '@fleet-dao/github';
 import { AnswerAskRequest, type Repo, type Task } from '@fleet-dao/shared';
@@ -41,17 +41,35 @@ export const CommentPayload = z.object({
     id: z.number(),
     body: z.string().nullish(),
     created_at: z.string().optional(),
+    updated_at: z.string().optional(),
     user: GhUser,
   }),
 });
+
+/**
+ * 现在做不了、过一会儿再做就行（关了又马上重开，上一轮还没结束）：这条投递记成出错，对账重放时再来。
+ * 不是后端出了错：webhook 回 503 retry_later，日志只记一条警告。
+ */
+export class RetryLaterError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RetryLaterError';
+  }
+}
 
 const TERMINAL: readonly string[] = ['done', 'stopped', 'failed'];
 /** 引擎这边自己的动作（拉起工作流）记在这个名下。 */
 const INTAKE: Actor = { kind: 'engine', id: 'github-intake' };
 
-/** 为什么没拉起工作流；start = 该拉起。 */
+/**
+ * 拉不拉起工作流。start = 从没派过（还在排队），拉起；restart = 重开了、任务已经结束或还在排队，再拉起一次
+ * （拉起时发现上一轮还在跑，就等它结束）；wait_previous_run = 重开了、上一轮正在做（刚叫停还在收尾，或者引擎
+ * 做完正在收工），等它结束再拉起；其余都不拉起。
+ */
 export type DispatchDecision =
   | 'start'
+  | 'restart'
+  | 'wait_previous_run'
   | 'dispatch_off'
   | 'opened_before_switch'
   | 'created_at_unreadable'
@@ -60,7 +78,7 @@ export type DispatchDecision =
 
 /**
  * 自动派活开关（design 第九节「在哪能做与仓级开关」）：关着不派；开关打开以前就开着的 issue 不自动派（要人点「交给 fleet」）。
- * 开关允许时：还在排队（从没派过）的拉起；已经结束的只在 GitHub 上重开时再拉起一次。
+ * 开关允许时：还在排队（从没派过）的拉起；已经结束的只在 GitHub 上重开时再拉起一次；重开时上一轮还没结束的，等它结束。
  */
 export function dispatchDecision(
   repo: Pick<IntakeRepo, 'autoDispatchSince'>,
@@ -72,8 +90,10 @@ export function dispatchDecision(
   const opened = Date.parse(issueCreatedAt);
   if (!Number.isFinite(opened)) return 'created_at_unreadable';
   if (opened < Date.parse(repo.autoDispatchSince)) return 'opened_before_switch';
+  if (reopened)
+    return TERMINAL.includes(task.state) || task.state === 'queued' ? 'restart' : 'wait_previous_run';
   if (task.state === 'queued') return 'start';
-  if (TERMINAL.includes(task.state)) return reopened ? 'start' : 'finished';
+  if (TERMINAL.includes(task.state)) return 'finished';
   return 'in_progress';
 }
 
@@ -123,7 +143,13 @@ export function createIssueIntake(
         task.id,
         entry(actor, 'task.stop', task.id, { reason: `${reason}（没派出去过，直接记成叫停）` }),
       );
-      return r === 'ok' ? 'task=stopped' : 'stop=workflow_gone';
+      if (r === 'ok') return 'task=stopped';
+      log.warn('关单时工作流已经不在、任务又不在排队：多半刚结束，状态等引擎写；一直对不上要人看', {
+        deliveryId: event.deliveryId,
+        taskId: task.id,
+        state: task.state,
+      });
+      return 'stop=workflow_gone';
     }
     await store.appendAudit(entry(actor, 'task.stop', task.id, { reason }));
     return 'stop=sent';
@@ -177,7 +203,13 @@ export function createIssueIntake(
     }
 
     const decision = dispatchDecision(repo, issue.created_at, task, event.wake && p.action === 'reopened');
-    if (decision !== 'start') {
+    if (decision === 'wait_previous_run') {
+      // 关了又马上重开：叫停还在收尾（或引擎做完正在收工），这会儿拉起会撞上还没结束的上一轮，悄悄丢掉这次重开
+      throw new RetryLaterError(
+        `GitHub 上重开了，上一轮还没结束（任务现在是 ${task.state}）：等它结束后由对账重放再拉起`,
+      );
+    }
+    if (decision !== 'start' && decision !== 'restart') {
       notes.push(`workflow=${decision}`);
       return notes.join(', ');
     }
@@ -191,10 +223,14 @@ export function createIssueIntake(
       rawRequest,
       requestedBy: issue.user.login,
     });
+    if (started === 'already_running' && decision === 'restart') {
+      // 任务记成结束（或还在排队），上一轮工作流却还在收尾：同上，等它真结束
+      throw new RetryLaterError('GitHub 上重开了，上一轮工作流还没收完尾：等它结束后由对账重放再拉起');
+    }
     if (started === 'started') {
       await store.appendAudit(
         entry(INTAKE, 'task.start', task.id, {
-          reason: TERMINAL.includes(task.state) ? 'GitHub 上重开了这张 issue' : undefined,
+          reason: decision === 'restart' ? 'GitHub 上重开了这张 issue' : undefined,
         }),
       );
     }
@@ -202,13 +238,47 @@ export function createIssueIntake(
     return notes.join(', ');
   }
 
+  /**
+   * 评论能不能当回答，先看它是不是原样的：webhook 新写的（created）可以；补收拼出来的（synced）只有从没改过的
+   * （updated_at 等于 created_at）才可以——改过的看不出是谁改的，白名单作者的评论可能被外人改过（改评论的
+   * webhook 丢了，补收就只看得到改后的样子）。别的动作（改了、删了）一律不当回答。
+   */
+  function pristine(p: z.infer<typeof CommentPayload>, event: IngestedEvent): string | null {
+    if (p.action === 'created') return null;
+    if (p.action !== 'synced') return `skip=${p.action ?? 'no_action'}`;
+    const created = Date.parse(p.comment.created_at ?? '');
+    const updated = Date.parse(p.comment.updated_at ?? '');
+    if (!Number.isFinite(created) || !Number.isFinite(updated)) {
+      log.warn('补收到的评论读不出建立、修改时刻：看不出改没改过，没当回答', {
+        deliveryId: event.deliveryId,
+        commentId: p.comment.id,
+      });
+      return 'ask=comment_time_unreadable';
+    }
+    if (created !== updated) {
+      log.warn('补收到的评论改过（看不出是谁改的），没当回答', {
+        deliveryId: event.deliveryId,
+        commentId: p.comment.id,
+      });
+      return 'skip=edited';
+    }
+    return null;
+  }
+
   async function onComment(event: IngestedEvent): Promise<string> {
     const p = CommentPayload.parse(event.payload);
     // 自家机器人发的评论（关单时的说明、进度）不当回答
     if (!event.wake) return 'skip=bot';
-    // 改过、删了的评论不当回答：回答只认新写的那一条（补收拼出来的是 synced）
-    if (p.action !== undefined && p.action !== 'created' && p.action !== 'synced') return `skip=${p.action}`;
-    if (!p.issue) return 'skip=issue_unknown';
+    const notPristine = pristine(p, event);
+    if (notPristine) return notPristine;
+    if (!p.issue) {
+      // 补收时评论的 issue_url 认不出：不知道是哪张 issue 的，可能是一句回答，丢了要让人知道
+      log.warn('评论认不出是哪张 issue 的，没当回答', {
+        deliveryId: event.deliveryId,
+        commentId: p.comment.id,
+      });
+      return 'skip=issue_unknown';
+    }
     if (p.issue.pull_request) return 'skip=pull_request';
     const repo = await repoOf(event);
     const task = await store.findTaskByIssue(repo.id, p.issue.number);
@@ -217,10 +287,22 @@ export function createIssueIntake(
 
     const answer = p.comment.body?.trim() ?? '';
     if (!AnswerAskRequest.safeParse({ answer }).success) {
-      return answer ? 'ask=comment_too_long' : 'ask=empty_comment';
+      if (!answer) return 'ask=empty_comment';
+      log.warn('评论太长，没当回答（回答最长 4000 字）', {
+        deliveryId: event.deliveryId,
+        taskId: task.id,
+        chars: answer.length,
+      });
+      return 'ask=comment_too_long';
     }
     const at = Date.parse(p.comment.created_at ?? '');
-    if (!Number.isFinite(at)) return 'ask=comment_time_unreadable';
+    if (!Number.isFinite(at)) {
+      log.warn('评论读不出是什么时候写的：对不上是回答哪一条追问，没当回答', {
+        deliveryId: event.deliveryId,
+        taskId: task.id,
+      });
+      return 'ask=comment_time_unreadable';
+    }
     const users = await store.listUsers();
     const actor = actorFor(memberFor(users, p.comment.user));
     // 只有评论之前就问了的才算：评论不会回答它之后才问的问题

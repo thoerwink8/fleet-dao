@@ -12,6 +12,7 @@ import {
   channels,
   type Db,
   githubEvents,
+  githubEventVersions,
   idempotencyKeys,
   models,
   notificationDeliveries,
@@ -49,7 +50,7 @@ import {
   users,
 } from '@fleet-dao/db';
 import type { ProgressKind, Step } from '@fleet-dao/shared';
-import { and, asc, desc, eq, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import { PublicHealthError } from './health.ts';
 import { isSerial, isUuid, parseCursor } from './ids.ts';
 import type {
@@ -57,6 +58,7 @@ import type {
   AuditRecord,
   CommandClaim,
   GitHubDelivery,
+  GitHubObjectVersion,
   JobRecord,
   NewAuditEntry,
   NotificationRecord,
@@ -226,6 +228,24 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
 
   async function insertProgress(runId: string, kind: ProgressKind, payload: unknown): Promise<void> {
     await db.insert(progressEvents).values({ runId, at: now(), kind, payload: payload ?? null });
+  }
+
+  /** 这几条投递带着的对象版本，按投递编号分好；每条里按对象排（和内存版一样）。 */
+  async function versionsOf(ids: readonly string[]): Promise<Map<string, GitHubObjectVersion[]>> {
+    const out = new Map<string, GitHubObjectVersion[]>();
+    if (ids.length === 0) return out;
+    const rows = await db
+      .select()
+      .from(githubEventVersions)
+      .where(inArray(githubEventVersions.deliveryId, [...ids]))
+      // 按字节排（collate "C"），和内存版按字面比的结果一样，不随库的排序规则变
+      .orderBy(asc(githubEventVersions.deliveryId), sql`${githubEventVersions.object} collate "C"`);
+    for (const r of rows) {
+      const list = out.get(r.deliveryId) ?? [];
+      list.push({ object: r.object, version: iso(r.version), state: opt(r.state) });
+      out.set(r.deliveryId, list);
+    }
+    return out;
   }
 
   const commandKey = (runId: string, key: string) => `fleet:${runId}:${key}`;
@@ -824,36 +844,54 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
     },
 
     // —— GitHub 事件 ——
-    async claimDelivery(delivery, { staleBefore, skipIfVersionSeen }) {
-      if (skipIfVersionSeen) {
+    async claimDelivery(delivery, { staleBefore, skipIfSeen }) {
+      if (skipIfSeen) {
         const [seen] = await db
-          .select({ id: githubEvents.deliveryId })
-          .from(githubEvents)
+          .select({ id: githubEventVersions.deliveryId })
+          .from(githubEventVersions)
+          .innerJoin(githubEvents, eq(githubEvents.deliveryId, githubEventVersions.deliveryId))
           .where(
-            and(eq(githubEvents.versionKey, skipIfVersionSeen), ne(githubEvents.deliveryId, delivery.id)),
+            and(
+              eq(githubEventVersions.object, skipIfSeen.object),
+              eq(githubEventVersions.version, new Date(skipIfSeen.version)),
+              ne(githubEventVersions.deliveryId, delivery.id),
+              ne(githubEvents.status, 'ignored'),
+            ),
           )
           .limit(1);
         if (seen) return { status: 'duplicate' };
       }
       const at = now();
-      const inserted = await db
-        .insert(githubEvents)
-        .values({
-          deliveryId: delivery.id,
-          event: delivery.event,
-          action: delivery.action ?? null,
-          source: delivery.source,
-          repo: delivery.repo ?? null,
-          versionKey: delivery.versionKey ?? null,
-          // 原文原样存：JSON 的 null、数字也收（认不认得出是门口的事），不让它变成 SQL 的空值
-          payload: sql`${JSON.stringify(delivery.payload ?? null)}::jsonb`,
-          status: 'processing',
-          attempts: 1,
-          receivedAt: at,
-          claimedAt: at,
-        })
-        .onConflictDoNothing()
-        .returning({ id: githubEvents.deliveryId });
+      const inserted = await db.transaction(async (tx) => {
+        const rows = await tx
+          .insert(githubEvents)
+          .values({
+            deliveryId: delivery.id,
+            event: delivery.event,
+            action: delivery.action ?? null,
+            source: delivery.source,
+            repo: delivery.repo ?? null,
+            // 原文原样存：JSON 的 null、数字也收（认不认得出是门口的事），不让它变成 SQL 的空值
+            payload: sql`${JSON.stringify(delivery.payload ?? null)}::jsonb`,
+            status: 'processing',
+            attempts: 1,
+            receivedAt: at,
+            claimedAt: at,
+          })
+          .onConflictDoNothing()
+          .returning({ id: githubEvents.deliveryId });
+        if (rows.length > 0 && delivery.versions.length > 0) {
+          await tx.insert(githubEventVersions).values(
+            delivery.versions.map((v) => ({
+              deliveryId: delivery.id,
+              object: v.object,
+              version: new Date(v.version),
+              state: v.state ?? null,
+            })),
+          );
+        }
+        return rows;
+      });
       if (inserted.length > 0) return { status: 'claimed', token: iso(at), retry: false };
       // 已经有这一条：条件更新是原子的，两个请求同时来接，只有一个接得到
       const taken = await db
@@ -878,7 +916,10 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
           ),
         )
         .returning();
-      if (row) return { status: 'claimed', token: iso(at), delivery: toDelivery(row) };
+      if (row) {
+        const versions = await versionsOf([row.deliveryId]);
+        return { status: 'claimed', token: iso(at), delivery: toDelivery(row, versions) };
+      }
       const [existing] = await db
         .select({ status: githubEvents.status })
         .from(githubEvents)
@@ -907,7 +948,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
     },
     async getDelivery(id) {
       const [row] = await db.select().from(githubEvents).where(eq(githubEvents.deliveryId, id));
-      return row ? toDelivery(row) : null;
+      return row ? toDelivery(row, await versionsOf([id])) : null;
     },
     async listUnfinishedDeliveries({ staleBefore, limit }) {
       const rows = await db
@@ -916,7 +957,50 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         .where(reclaimableRow(new Date(staleBefore)))
         .orderBy(asc(githubEvents.attempts), asc(githubEvents.receivedAt), asc(githubEvents.deliveryId))
         .limit(limit);
-      return rows.map(toDelivery);
+      const versions = await versionsOf(rows.map((r) => r.deliveryId));
+      return rows.map((r) => toDelivery(r, versions));
+    },
+    async existingDeliveryIds(ids) {
+      if (ids.length === 0) return new Set();
+      const rows = await db
+        .select({ id: githubEvents.deliveryId })
+        .from(githubEvents)
+        .where(inArray(githubEvents.deliveryId, [...ids]));
+      return new Set(rows.map((r) => r.id));
+    },
+    async findSupersedingVersion({ object, version, state, excludeDeliveryId }) {
+      const [row] = await db
+        .select({
+          deliveryId: githubEventVersions.deliveryId,
+          version: githubEventVersions.version,
+          state: githubEventVersions.state,
+        })
+        .from(githubEventVersions)
+        .innerJoin(githubEvents, eq(githubEvents.deliveryId, githubEventVersions.deliveryId))
+        .where(
+          and(
+            eq(githubEventVersions.object, object),
+            gt(githubEventVersions.version, new Date(version)),
+            ne(githubEventVersions.state, state),
+            ne(githubEventVersions.deliveryId, excludeDeliveryId),
+            eq(githubEvents.status, 'accepted'),
+          ),
+        )
+        .orderBy(desc(githubEventVersions.version))
+        .limit(1);
+      return row?.state ? { deliveryId: row.deliveryId, version: iso(row.version), state: row.state } : null;
+    },
+    async countStuckDeliveries({ staleBefore, maxAttempts }) {
+      const [row] = await db
+        .select({
+          exhausted: sql<number>`count(*) filter (where ${githubEvents.status} = 'failed' and ${githubEvents.attempts} >= ${maxAttempts})::int`,
+          stale: sql<number>`count(*) filter (where ${githubEvents.status} = 'processing' and ${githubEvents.claimedAt} < ${new Date(staleBefore)})::int`,
+        })
+        .from(githubEvents)
+        .where(inArray(githubEvents.status, ['processing', 'failed']));
+      // 不分组的 count 总有一行：没有就是查询本身出了问题，不许当成「0 条卡住」
+      if (!row) throw new Error('数卡住的 GitHub 投递没读到结果');
+      return { exhausted: row.exhausted, stale: row.stale };
     },
 
     // —— 接活 ——
@@ -1025,14 +1109,17 @@ function reclaimSet(at: Date) {
   };
 }
 
-function toDelivery(r: typeof githubEvents.$inferSelect): GitHubDelivery {
+function toDelivery(
+  r: typeof githubEvents.$inferSelect,
+  versions: Map<string, GitHubObjectVersion[]>,
+): GitHubDelivery {
   return {
     id: r.deliveryId,
     event: r.event,
     action: opt(r.action),
     source: r.source,
     repo: opt(r.repo),
-    versionKey: opt(r.versionKey),
+    versions: versions.get(r.deliveryId) ?? [],
     payload: r.payload,
     status: r.status,
     reason: opt(r.reason),

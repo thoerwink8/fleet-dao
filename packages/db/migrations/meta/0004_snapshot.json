@@ -1,5 +1,5 @@
 {
-  "id": "1b168bc8-f415-4bd0-941d-925c6f2a1ff2",
+  "id": "77337e90-bb68-4319-b089-345d3db93690",
   "prevId": "4a5e0724-d8b4-45af-ae7d-199026ce6efd",
   "version": "7",
   "dialect": "postgresql",
@@ -767,6 +767,85 @@
       },
       "isRLSEnabled": false
     },
+    "public.github_event_versions": {
+      "name": "github_event_versions",
+      "schema": "",
+      "columns": {
+        "delivery_id": {
+          "name": "delivery_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "object": {
+          "name": "object",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "version": {
+          "name": "version",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "state": {
+          "name": "state",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "github_event_versions_object_idx": {
+          "name": "github_event_versions_object_idx",
+          "columns": [
+            {
+              "expression": "object",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "version",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "github_event_versions_delivery_id_github_events_delivery_id_fk": {
+          "name": "github_event_versions_delivery_id_github_events_delivery_id_fk",
+          "tableFrom": "github_event_versions",
+          "tableTo": "github_events",
+          "columnsFrom": ["delivery_id"],
+          "columnsTo": ["delivery_id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "github_event_versions_delivery_id_object_pk": {
+          "name": "github_event_versions_delivery_id_object_pk",
+          "columns": ["delivery_id", "object"]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "github_event_versions_state_known": {
+          "name": "github_event_versions_state_known",
+          "value": "\"github_event_versions\".\"state\" is null or \"github_event_versions\".\"state\" in ('open', 'closed')"
+        }
+      },
+      "isRLSEnabled": false
+    },
     "public.github_events": {
       "name": "github_events",
       "schema": "",
@@ -797,12 +876,6 @@
         },
         "repo": {
           "name": "repo",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "version_key": {
-          "name": "version_key",
           "type": "text",
           "primaryKey": false,
           "notNull": false
@@ -860,22 +933,6 @@
         }
       },
       "indexes": {
-        "github_events_version_key_idx": {
-          "name": "github_events_version_key_idx",
-          "columns": [
-            {
-              "expression": "version_key",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "where": "\"github_events\".\"version_key\" is not null",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
         "github_events_unfinished_idx": {
           "name": "github_events_unfinished_idx",
           "columns": [

@@ -1,15 +1,31 @@
 // 对账补漏（design 第十四节「收 GitHub 事件」：漏收的靠对账与定时轮询补回）：把几样查法按受管的仓串起来，汇总成一个结局。
 // 每一样怎么查在 @fleet-dao/github 的 reconcile.ts；补回来的东西一律走 GitHubIntake（同一道门、同一本投递账）。
-// 谁来定时调它、多久一次还没定（specs/43-接活入口/方案.md「谁来定时调对账」）：调用方把返回值原样记进 schedule_runs。
-import type { Reconciler } from '@fleet-dao/github';
+// 定时调它的是引擎里的 Temporal 定时任务：每 15 分钟一次、往回看 2 小时（specs/43-接活入口/方案.md「谁来定时调对账」），
+// 调用方把返回值原样记进 schedule_runs。
+import type { Reconciler, ReconcilerOptions } from '@fleet-dao/github';
 import type { ScheduleOutcome } from '@fleet-dao/shared';
-import { DELIVERY_STALE_MS, type GitHubIntake } from './github.ts';
+import { DELIVERY_STALE_MS, type GitHubIntake, MAX_AUTO_REPLAYS, pollDeliveryId } from './github.ts';
 import type { Logger, Store } from './ports.ts';
 
-/** 自动重放到第几次为止：还不成的多半是代码或数据的问题，重放也没用，报出来等人看。 */
-export const MAX_AUTO_REPLAYS = 5;
+export { MAX_AUTO_REPLAYS } from './github.ts';
+
 /** 一轮最多重放几条。 */
 const REPLAY_BATCH = 50;
+
+/**
+ * 给 @fleet-dao/github 的 reconciler 的选项（createGitHub(...).reconciler(reconcilerOptions(...))）：补收走同一道门；
+ * GitHub 投递日志里没送成的，库里已经有原文的不重投（交给重放，免得同一次投递被算两遍、做两遍），只重投库里没有的。
+ */
+export function reconcilerOptions(parts: {
+  store: Pick<Store, 'existingDeliveryIds'>;
+  intake: GitHubIntake;
+}): ReconcilerOptions {
+  return {
+    intake: parts.intake,
+    pollDeliveryId,
+    storedDeliveries: (guids) => parts.store.existingDeliveryIds(guids),
+  };
+}
 
 export interface ReconcileStep {
   step: 'redeliver' | 'poll' | 'audit' | 'replay';
@@ -27,7 +43,11 @@ export interface GitHubReconcileResult {
   outcome: ScheduleOutcome;
   /** 查成了几个仓（轮询和查开放 issue 都查完）。 */
   scanned: number;
-  /** 补回来几样（漏收的事件、没任务的 issue、GitHub 重投、重放成的），加上重放到头还不成、要人看的。 */
+  /**
+   * 补回来几样，加上重放到头还不成、要人看的。补回 = 轮询捞到、webhook 没带过的那一版（放进来的），没任务的 issue，
+   * 库里没有、叫 GitHub 重投的，重放后做成的。「webhook 没带过」只按对象和 updated_at 认：要是有改动顶新了
+   * updated_at、GitHub 却没发我们订的事件，也会被算进来，所以这不是精确的漏收数。
+   */
   found: number;
   why?: string | undefined;
   steps: ReconcileStep[];
@@ -36,7 +56,7 @@ export interface GitHubReconcileResult {
 export interface ReconcileParts {
   store: Pick<Store, 'listRepos' | 'listUnfinishedDeliveries'>;
   intake: Pick<GitHubIntake, 'replay'>;
-  /** @fleet-dao/github 的 createGitHub(...).reconciler({ intake, pollDeliveryId })。 */
+  /** @fleet-dao/github 的 createGitHub(...).reconciler(reconcilerOptions(...))。 */
   reconciler: Pick<Reconciler, 'redeliverFailed' | 'poll' | 'auditOpenIssues'>;
   log: Logger;
   now: () => Date;
@@ -84,8 +104,9 @@ export async function reconcileGitHub(
   const replayErrors: string[] = [];
   for (const d of unfinished.filter((x) => x.attempts < MAX_AUTO_REPLAYS)) {
     try {
+      // 只有这次放进来、做成了的才算补回；重放后不收的（门挡掉、被更新的一版盖过）处理完了，但不算补回
       const result = await parts.intake.replay(d.id);
-      if (result.verdict === 'accepted' || result.verdict === 'ignored') replayed += 1;
+      if (result.verdict === 'accepted') replayed += 1;
     } catch (err) {
       replayErrors.push(`${d.id}：${why(err)}`);
     }

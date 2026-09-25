@@ -180,6 +180,17 @@ const seq15 = (n: string | number): string => String(n).padStart(15, '0');
 
 const repoOnly = ({ autoDispatchSince: _switch, ...repo }: RepoRecord): Repo => repo;
 
+/** 给出去的是副本：调用方改了不影响库里的。对象版本按对象排（和库版一样）。 */
+const copyDelivery = (e: GitHubDelivery): GitHubDelivery => ({
+  ...e,
+  versions: e.versions
+    .map((v) => ({ ...v }))
+    .sort((a, b) => (a.object < b.object ? -1 : a.object > b.object ? 1 : 0)),
+});
+
+/** 同一时刻不同写法（秒 / 毫秒）算同一个。 */
+const sameInstant = (a: string, b: string) => Date.parse(a) === Date.parse(b);
+
 /** 上次出错的、处理中但占用早于 staleBefore 的（那一次多半死了），可以接过来重做。时刻都是 toISOString 的写法，按字面比就是按先后比。 */
 const reclaimable = (e: GitHubDelivery, staleBefore: string) =>
   e.status === 'failed' || (e.status === 'processing' && e.claimedAt < staleBefore);
@@ -775,18 +786,26 @@ export function createMemoryStore(
     },
 
     // —— GitHub 事件 ——
-    async claimDelivery(delivery, { staleBefore, skipIfVersionSeen }) {
+    async claimDelivery(delivery, { staleBefore, skipIfSeen }) {
       const at = now().toISOString();
       const existing = data.githubEvents.get(delivery.id);
       if (!existing) {
-        if (
-          skipIfVersionSeen &&
-          [...data.githubEvents.values()].some((e) => e.versionKey === skipIfVersionSeen)
-        ) {
-          return { status: 'duplicate' };
+        const seen =
+          skipIfSeen &&
+          [...data.githubEvents.values()].some(
+            (e) =>
+              e.status !== 'ignored' &&
+              e.versions.some(
+                (v) => v.object === skipIfSeen.object && sameInstant(v.version, skipIfSeen.version),
+              ),
+          );
+        if (seen) return { status: 'duplicate' };
+        if (new Set(delivery.versions.map((v) => v.object)).size !== delivery.versions.length) {
+          throw new Error('github_event_versions_delivery_id_object_pk：同一条投递里同一个对象只能有一版');
         }
         data.githubEvents.set(delivery.id, {
           ...delivery,
+          versions: delivery.versions.map((v) => ({ ...v })),
           status: 'processing',
           attempts: 1,
           receivedAt: at,
@@ -809,7 +828,7 @@ export function createMemoryStore(
       const at = now().toISOString();
       Object.assign(existing, { status: 'processing', attempts: existing.attempts + 1, claimedAt: at });
       existing.finishedAt = undefined;
-      return { status: 'claimed', token: at, delivery: { ...existing } };
+      return { status: 'claimed', token: at, delivery: copyDelivery(existing) };
     },
     async finishDelivery(id, token, outcome) {
       const existing = data.githubEvents.get(id);
@@ -825,7 +844,7 @@ export function createMemoryStore(
     },
     async getDelivery(id) {
       const existing = data.githubEvents.get(id);
-      return existing ? { ...existing } : null;
+      return existing ? copyDelivery(existing) : null;
     },
     async listUnfinishedDeliveries({ staleBefore, limit }) {
       return [...data.githubEvents.values()]
@@ -835,7 +854,31 @@ export function createMemoryStore(
             a.attempts - b.attempts || a.receivedAt.localeCompare(b.receivedAt) || a.id.localeCompare(b.id),
         )
         .slice(0, limit)
-        .map((e) => ({ ...e }));
+        .map(copyDelivery);
+    },
+    async existingDeliveryIds(ids) {
+      return new Set(ids.filter((id) => data.githubEvents.has(id)));
+    },
+    async findSupersedingVersion({ object, version, state, excludeDeliveryId }) {
+      let newest: { deliveryId: string; version: string; state: 'open' | 'closed' } | null = null;
+      for (const e of data.githubEvents.values()) {
+        if (e.id === excludeDeliveryId || e.status !== 'accepted') continue;
+        for (const v of e.versions) {
+          if (v.object !== object || !v.state || v.state === state) continue;
+          if (Date.parse(v.version) <= Date.parse(version)) continue;
+          if (!newest || Date.parse(v.version) > Date.parse(newest.version)) {
+            newest = { deliveryId: e.id, version: v.version, state: v.state };
+          }
+        }
+      }
+      return newest;
+    },
+    async countStuckDeliveries({ staleBefore, maxAttempts }) {
+      const all = [...data.githubEvents.values()];
+      return {
+        exhausted: all.filter((e) => e.status === 'failed' && e.attempts >= maxAttempts).length,
+        stale: all.filter((e) => e.status === 'processing' && e.claimedAt < staleBefore).length,
+      };
     },
 
     // —— 接活 ——

@@ -314,25 +314,121 @@ describe('issue 关了、重开、改了', () => {
   it('重开：已经结束的任务重新拉起一次；补收看到「开着、任务已结束」不算重开，不拉起', async () => {
     const { h, task, auditsOf } = setup();
     await json(deliver(h, 'issues', issuesEvent('opened')));
-    await json(deliver(h, 'issues', issuesEvent('closed', issue({ state: 'closed' }))));
+    await json(deliver(h, 'issues', issuesEvent('closed', issue({ state: 'closed', updated_at: at(-20) }))));
     const t = h.store.data.tasks.find((x) => x.issueNumber === 40);
     if (!t) throw new Error('没建任务');
     t.state = 'stopped'; // 引擎收到叫停后写的
-    const polled = issuesEvent('synced', issue({ updated_at: at(-1) }));
+    const polled = issuesEvent('synced', issue({ updated_at: at(-10) }));
     expect(await json(deliver(h, 'issues', polled))).toMatchObject({
       note: 'task=exists, workflow=finished',
     });
     expect(h.starts).toHaveLength(1);
 
-    expect(await json(deliver(h, 'issues', issuesEvent('reopened')))).toMatchObject({
-      note: 'task=exists, workflow=started',
-    });
+    expect(
+      await json(deliver(h, 'issues', issuesEvent('reopened', issue({ updated_at: at(-5) })))),
+    ).toMatchObject({ note: 'task=exists, workflow=started' });
     expect(h.starts).toHaveLength(2);
     expect((await task())?.id).toBe(t.id);
     expect((await auditsOf(t.id))[0]).toMatchObject({
       action: 'task.start',
       reason: 'GitHub 上重开了这张 issue',
     });
+  });
+
+  it('关了又马上重开、上一轮还没结束（任务还在跑）：重开记成出错（503，不当后端出错），不拉起；上一轮结束后重放再拉起', async () => {
+    const { h } = setup();
+    await json(deliver(h, 'issues', issuesEvent('opened')));
+    const t = h.store.data.tasks.find((x) => x.issueNumber === 40);
+    if (!t) throw new Error('没建任务');
+    t.state = 'running';
+    await json(deliver(h, 'issues', issuesEvent('closed', issue({ state: 'closed', updated_at: at(-20) }))));
+    const res = await deliver(h, 'issues', issuesEvent('reopened', issue({ updated_at: at(-10) })), {
+      delivery: 'reopen',
+    });
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ error: { code: 'retry_later' } });
+    expect(await h.store.getDelivery('reopen')).toMatchObject({
+      status: 'failed',
+      reason: expect.stringContaining('上一轮还没结束（任务现在是 running）'),
+    });
+    expect(h.logs.some((l) => l.level === 'warn' && l.message.includes('现在做不了'))).toBe(true);
+    expect(h.logs.some((l) => l.level === 'error')).toBe(false);
+    expect(h.starts).toHaveLength(1);
+
+    // 还没结束时重放：照样等
+    const intake = createGitHubIntake(h.deps);
+    await expect(intake.replay('reopen')).rejects.toThrow('上一轮还没结束');
+    t.state = 'stopped'; // 引擎收完尾写的
+    expect(await intake.replay('reopen')).toMatchObject({
+      verdict: 'accepted',
+      note: 'task=exists, workflow=started',
+    });
+    expect(h.starts).toHaveLength(2);
+    expect(await h.store.getDelivery('reopen')).toMatchObject({ status: 'accepted', attempts: 3 });
+  });
+
+  it('任务已经记成结束、上一轮工作流却还在收尾（拉起回 already_running）：重开同样记成出错，之后重放再拉起', async () => {
+    let calls = 0;
+    const requirements: RequirementWorkflows = {
+      async start() {
+        calls += 1;
+        return calls === 2 ? 'already_running' : 'started';
+      },
+    };
+    const { h } = setup({ requirements });
+    await json(deliver(h, 'issues', issuesEvent('opened')));
+    await json(deliver(h, 'issues', issuesEvent('closed', issue({ state: 'closed', updated_at: at(-20) }))));
+    const t = h.store.data.tasks.find((x) => x.issueNumber === 40);
+    if (!t) throw new Error('没建任务');
+    t.state = 'stopped';
+    const res = await deliver(h, 'issues', issuesEvent('reopened', issue({ updated_at: at(-10) })), {
+      delivery: 'reopen',
+    });
+    expect(res.status).toBe(503);
+    expect(await h.store.getDelivery('reopen')).toMatchObject({
+      status: 'failed',
+      reason: expect.stringContaining('上一轮工作流还没收完尾'),
+    });
+    expect(await createGitHubIntake(h.deps).replay('reopen')).toMatchObject({
+      note: 'task=exists, workflow=started',
+    });
+    expect(calls).toBe(3);
+  });
+
+  it('旧的重开重放时，同一张 issue 后来又关了（更新的一版处理过）：不再拉起，记成 superseded', async () => {
+    const { h } = setup();
+    await json(deliver(h, 'issues', issuesEvent('opened')));
+    const t = h.store.data.tasks.find((x) => x.issueNumber === 40);
+    if (!t) throw new Error('没建任务');
+    t.state = 'running';
+    await json(deliver(h, 'issues', issuesEvent('closed', issue({ state: 'closed', updated_at: at(-20) }))));
+    await deliver(h, 'issues', issuesEvent('reopened', issue({ updated_at: at(-10) })), {
+      delivery: 'reopen',
+    });
+    // 又关了一次（这一版处理过了）
+    await json(deliver(h, 'issues', issuesEvent('closed', issue({ state: 'closed', updated_at: at(-5) }))));
+    t.state = 'stopped';
+    expect(await createGitHubIntake(h.deps).replay('reopen')).toEqual({
+      verdict: 'ignored',
+      reason: 'superseded',
+    });
+    expect(await h.store.getDelivery('reopen')).toMatchObject({ status: 'ignored', reason: 'superseded' });
+    expect(h.starts).toHaveLength(1);
+  });
+
+  it('晚到的旧关单（之后的一版已经处理过、显示开着）：不叫停', async () => {
+    const { h } = setup();
+    await json(deliver(h, 'issues', issuesEvent('opened')));
+    await json(
+      deliver(h, 'issues', issuesEvent('edited', issue({ title: '改过的标题', updated_at: at(-10) }))),
+    );
+    const late = issuesEvent('closed', issue({ state: 'closed', updated_at: at(-20) }));
+    expect(await json(deliver(h, 'issues', late))).toEqual({
+      ok: true,
+      verdict: 'ignored',
+      reason: 'superseded',
+    });
+    expect(h.signals).toEqual([]);
   });
 
   it('白名单的人改了标题、正文：任务行跟着改、记操作记录；自家机器人改进度段不动任务行', async () => {
@@ -429,6 +525,63 @@ describe('评论 → 回答追问', () => {
     expect(h.signals).toEqual([]);
   });
 
+  it('补收来的评论（synced）：从没改过的照样当回答；改过的（updated_at 不等于 created_at）不当，记 skip=edited 并告警', async () => {
+    const synced = (over: Record<string, unknown>) => {
+      const { sender: _sender, ...rest } = comment('5 分钟', over);
+      return { ...rest, action: 'synced', issue: { number: 12 } };
+    };
+    const edited = setup({ asks: [ask()] });
+    expect(
+      await json(deliver(edited.h, 'issue_comment', synced({ created_at: at(-5), updated_at: at(-2) }))),
+    ).toMatchObject({ note: 'skip=edited' });
+    expect((await edited.h.store.getAsk(ask().id))?.answer).toBeUndefined();
+    expect(edited.h.signals).toEqual([]);
+    expect(edited.h.logs.some((l) => l.level === 'warn' && l.message.includes('改过'))).toBe(true);
+    const audits = await edited.h.store.listAudit({ target: `task:${IDS.task12}`, limit: 10 });
+    expect(audits.items.filter((a) => a.action === 'ask.answer')).toEqual([]);
+
+    const pristine = setup({ asks: [ask()] });
+    expect(await json(deliver(pristine.h, 'issue_comment', synced({})))).toMatchObject({
+      note: 'ask=answered',
+    });
+    expect(await pristine.h.store.getAsk(ask().id)).toMatchObject({
+      answer: '5 分钟',
+      answeredBy: IDS.founderA,
+    });
+  });
+
+  it('评论的时刻读不出（补收的建立或修改时刻、webhook 的建立时刻）：不当回答，告警', async () => {
+    const polled = setup({ asks: [ask()] });
+    const { sender: _sender, ...rest } = comment('5 分钟', { updated_at: 'garbage' });
+    expect(
+      await json(deliver(polled.h, 'issue_comment', { ...rest, action: 'synced', issue: { number: 12 } })),
+    ).toMatchObject({ note: 'ask=comment_time_unreadable' });
+    expect(polled.h.logs.some((l) => l.level === 'warn' && l.message.includes('读不出'))).toBe(true);
+
+    const hooked = setup({ asks: [ask()] });
+    expect(
+      await json(deliver(hooked.h, 'issue_comment', comment('5 分钟', { created_at: 'yesterday' }))),
+    ).toMatchObject({ note: 'ask=comment_time_unreadable' });
+    expect(hooked.h.logs.some((l) => l.level === 'warn' && l.message.includes('什么时候写的'))).toBe(true);
+    for (const s of [polled, hooked]) expect((await s.h.store.getAsk(ask().id))?.answer).toBeUndefined();
+  });
+
+  it('补收的评论认不出是哪张 issue、评论太长、事件没带动作：不当回答，记下原因（前两样告警）', async () => {
+    const { h } = setup({ asks: [ask()] });
+    const { issue: _issue, sender: _sender, ...orphan } = comment('5 分钟');
+    expect(await json(deliver(h, 'issue_comment', { ...orphan, action: 'synced' }))).toMatchObject({
+      note: 'skip=issue_unknown',
+    });
+    expect(h.logs.some((l) => l.level === 'warn' && l.message.includes('认不出是哪张 issue'))).toBe(true);
+    expect(await json(deliver(h, 'issue_comment', comment('长'.repeat(4001))))).toMatchObject({
+      note: 'ask=comment_too_long',
+    });
+    expect(h.logs.some((l) => l.level === 'warn' && l.message.includes('评论太长'))).toBe(true);
+    const { action: _action, ...noAction } = comment('5 分钟');
+    expect(await json(deliver(h, 'issue_comment', noAction))).toMatchObject({ note: 'skip=no_action' });
+    expect((await h.store.getAsk(ask().id))?.answer).toBeUndefined();
+  });
+
   it('回答写进库了、信号没发出去（Temporal 连不上）：记成出错；重放时只补发信号，不重写回答', async () => {
     let down = true;
     const sent: TaskSignal[] = [];
@@ -461,9 +614,50 @@ describe('开关的判法', () => {
     expect(dispatchDecision(on, at(-61), { state: 'queued' }, false)).toBe('opened_before_switch');
     expect(dispatchDecision(on, at(-60), { state: 'queued' }, false)).toBe('start');
     expect(dispatchDecision(on, at(0), { state: 'done' }, false)).toBe('finished');
-    expect(dispatchDecision(on, at(0), { state: 'failed' }, true)).toBe('start');
-    expect(dispatchDecision(on, at(-61), { state: 'failed' }, true)).toBe('opened_before_switch');
-    expect(dispatchDecision(on, at(0), { state: 'running' }, true)).toBe('in_progress');
+    expect(dispatchDecision(on, at(0), { state: 'running' }, false)).toBe('in_progress');
     expect(dispatchDecision(on, 'yesterday', { state: 'queued' }, false)).toBe('created_at_unreadable');
+  });
+
+  it('重开：已结束的、还在排队的再拉起；正在做的等它结束；开关照样先看', () => {
+    expect(dispatchDecision(on, at(0), { state: 'failed' }, true)).toBe('restart');
+    expect(dispatchDecision(on, at(0), { state: 'stopped' }, true)).toBe('restart');
+    expect(dispatchDecision(on, at(0), { state: 'queued' }, true)).toBe('restart');
+    expect(dispatchDecision(on, at(0), { state: 'running' }, true)).toBe('wait_previous_run');
+    expect(dispatchDecision(on, at(0), { state: 'triaging' }, true)).toBe('wait_previous_run');
+    expect(dispatchDecision(on, at(-61), { state: 'failed' }, true)).toBe('opened_before_switch');
+    expect(dispatchDecision({ autoDispatchSince: null }, at(0), { state: 'running' }, true)).toBe(
+      'dispatch_off',
+    );
+  });
+});
+
+describe('读不到、认不出：明确失败或记下原因，并告警', () => {
+  it('仓在门口放进来之后、接活之前被删了：投递记成出错，原因写明', async () => {
+    const { h } = setup();
+    h.store.findRepoByName = async () => null;
+    const res = await deliver(h, 'issues', issuesEvent('opened'), { delivery: 'repo-gone' });
+    expect(res.status).toBe(500);
+    expect(await h.store.getDelivery('repo-gone')).toMatchObject({
+      status: 'failed',
+      reason: '仓 example/canary 不在库里（门口还当它是受管的）',
+    });
+    expect(h.store.data.tasks.filter((t) => t.issueNumber === 40)).toEqual([]);
+  });
+
+  it('关单时工作流已经不在、任务又不在排队（多半刚结束）：记 stop=workflow_gone 并告警', async () => {
+    const workflows: WorkflowControl = {
+      async signal(taskId) {
+        throw new WorkflowGoneError(taskId);
+      },
+    };
+    const { h } = setup({ workflows });
+    await json(deliver(h, 'issues', issuesEvent('opened')));
+    const t = h.store.data.tasks.find((x) => x.issueNumber === 40);
+    if (!t) throw new Error('没建任务');
+    t.state = 'running';
+    const closed = issuesEvent('closed', issue({ state: 'closed', updated_at: at(-5) }));
+    expect(await json(deliver(h, 'issues', closed))).toMatchObject({ note: 'stop=workflow_gone' });
+    expect(h.logs.some((l) => l.level === 'warn' && l.message.includes('工作流已经不在'))).toBe(true);
+    expect(t.state).toBe('running');
   });
 });

@@ -1,5 +1,6 @@
 // 对账与补漏（引擎的定时任务调这里；设计第六节「每小时对账」）：
-// - 重投：GitHub 不自动重投失败的投递。用 App 身份拉投递日志，同一次投递（guid）一次都没成功的就重投（重投时编号不变，后端去重认得出）。
+// - 重投：GitHub 不自动重投失败的投递。用 App 身份拉投递日志，同一次投递（guid）一次都没成功、后端库里也没有原文的就重投
+//   （重投时编号不变，后端去重认得出）；库里有原文的由后端按原文重放，不再叫 GitHub 重投。
 // - 轮询：按 updated_at 拉 issue、评论、PR，逐条交给后端的同一道门（白名单、去重），漏收的事件这样补回来。
 // - 核对：白名单作者开的开放 issue 都有工作流；合并的 PR 都记在镜像里、都是「引擎」机器人合的（C21/C22）。
 // 每一项都分清「查了、0 个问题」和「这次没查成」：读不到 GitHub 就报 unscanned，不报 ok；做了一半报 partial，全没做成报 failed。
@@ -22,7 +23,7 @@ export interface Intake {
 }
 
 /**
- * 重投、轮询的结果。和 @fleet-dao/api 的 ReconcileReport 同形，只是 outcome 多两态（和定时任务的结局 ScheduleOutcome 一致）：
+ * 重投、轮询的结果。outcome 的写法和定时任务的结局（ScheduleOutcome）一致，@fleet-dao/api 的 reconcileGitHub 照原样汇总：
  * ok = 查完了、该做的都做成了；partial = 做了一部分（有的重投失败、翻到一半断了）；
  * unscanned = 这次没查成（和「查了没发现」分开）；failed = 该做的一件都没做成。
  */
@@ -52,6 +53,11 @@ export interface ReconcilerOptions {
   pollDeliveryId: (repo: string, kind: string, id: number | string, updatedAt: string) => string;
   /** 这张 issue 有没有在跑的工作流；引擎按 Temporal 实现。不给就按「库里有这个需求」算。 */
   hasWorkflow?: ((repo: string, issueNumber: number) => Promise<boolean>) | undefined;
+  /**
+   * 这几次投递（guid）里，后端库里已经有原文的：它们由后端按原文重放，不再叫 GitHub 重投（不然同一次投递要算两遍、
+   * 做两遍）。不给就全都重投。查不成就抛：宁可这一轮不重投，也不盲目重投。
+   */
+  storedDeliveries?: ((guids: readonly string[]) => Promise<ReadonlySet<string>>) | undefined;
   /** 一次最多重投几个（重投是写请求，要串行、要间隔），默认 50。 */
   maxRedeliveries?: number | undefined;
 }
@@ -132,7 +138,21 @@ export function createReconciler(deps: Deps, options: ReconcilerOptions): Reconc
       } catch (err) {
         return { outcome: 'unscanned', checked, recovered: 0, why: `读投递日志失败：${why(err)}` };
       }
-      const todo = [...failed].filter(([guid]) => !ok.has(guid));
+      const neverOk = [...failed].filter(([guid]) => !ok.has(guid));
+      let stored: ReadonlySet<string> = new Set();
+      try {
+        if (options.storedDeliveries && neverOk.length > 0) {
+          stored = await options.storedDeliveries(neverOk.map(([guid]) => guid));
+        }
+      } catch (err) {
+        return {
+          outcome: 'failed',
+          checked,
+          recovered: 0,
+          why: `查后端库里有没有这些投递失败，这一轮不重投：${why(err)}`,
+        };
+      }
+      const todo = neverOk.filter(([guid]) => !stored.has(guid));
       const limit = options.maxRedeliveries ?? 50;
       let recovered = 0;
       const errors: string[] = [];
@@ -210,13 +230,15 @@ export function createReconciler(deps: Deps, options: ReconcilerOptions): Reconc
           for (const c of items) {
             // 评论列表里没有 issue 号这一栏，只有 issue_url；只认 GitHub 自己的固定形状，认不出就不带号（引擎会回读）
             const m = /\/issues\/(\d+)$/.exec(c.issue_url ?? '');
+            // 从没改过的评论，最后动它的就是作者：自家机器人发的关单评论，后端认得出是回声。改过的看不出是谁改的
+            // （可能是有写权限的外人），不带 sender，后端也不会把它当回答
+            const edited = Date.parse(String(c.created_at ?? '')) !== Date.parse(c.updated_at);
             await ingest(options.pollDeliveryId(slug, 'comment', c.id, c.updated_at), 'issue_comment', {
               action: 'synced',
               comment: c,
               ...(m?.[1] ? { issue: { number: Number(m[1]) } } : {}),
               repository,
-              // 评论是谁写的就是谁：自家机器人发的关单评论，后端认得出是回声
-              ...(c.user ? { sender: c.user } : {}),
+              ...(c.user && !edited ? { sender: c.user } : {}),
             });
           }
         }
@@ -285,7 +307,6 @@ export function createReconciler(deps: Deps, options: ReconcilerOptions): Reconc
           why: `列开放 issue 失败：${why(err)}`,
         };
       }
-      const runAt = client.now().toISOString();
       const problems: string[] = [];
       let found = 0;
       let fixed = 0;
@@ -296,9 +317,10 @@ export function createReconciler(deps: Deps, options: ReconcilerOptions): Reconc
             ? await options.hasWorkflow(slug, issue.number)
             : (await ledger.taskFor(repoId, issue.number)) !== null;
           if (has) continue;
-          // 没有工作流：重新走一遍门。白名单外的作者会被门挡下（不算问题）；放进来的就是漏掉的，引擎收到会起工作流
+          // 没有工作流：重新走一遍门。白名单外的作者会被门挡下（不算问题）；放进来的就是漏掉的，引擎收到会起工作流。
+          // 编号按 issue 的这一版起：同一版每轮都来核对，后端的投递账里也只留一条，不会每轮攒一条被挡下的
           const res = await options.intake.ingest({
-            deliveryId: options.pollDeliveryId(slug, 'issue-audit', issue.number, runAt),
+            deliveryId: options.pollDeliveryId(slug, 'issue-audit', issue.number, issue.updated_at),
             event: 'issues',
             payload: { action: 'reconcile', issue, repository: { full_name: slug } },
             source: 'poll',

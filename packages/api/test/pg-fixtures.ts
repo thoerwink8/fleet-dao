@@ -8,6 +8,7 @@ import {
   type Db,
   families,
   githubEvents,
+  githubEventVersions,
   insertSubtasks,
   models,
   notificationDeliveries,
@@ -282,7 +283,6 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
       action: e.action ?? null,
       source: e.source,
       repo: e.repo ?? null,
-      versionKey: e.versionKey ?? null,
       payload: sql`${JSON.stringify(e.payload ?? null)}::jsonb`,
       status: e.status,
       reason: e.reason ?? null,
@@ -292,5 +292,15 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
       claimedAt: date(e.claimedAt),
       finishedAt: dateOpt(e.finishedAt),
     });
+    if (e.versions.length > 0) {
+      await db.insert(githubEventVersions).values(
+        e.versions.map((v) => ({
+          deliveryId: e.id,
+          object: v.object,
+          version: date(v.version),
+          state: v.state ?? null,
+        })),
+      );
+    }
   }
 }

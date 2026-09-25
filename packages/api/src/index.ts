@@ -26,13 +26,16 @@ export {
   DELIVERY_STALE_MS,
   type GitHubIntake,
   githubAppMissing,
+  githubEventsCheck,
   githubWhitelist,
   type IngestResult,
+  MAX_AUTO_REPLAYS,
+  objectKey,
   pollDeliveryId,
   type ReplayResult,
   screenGithubEvent,
   verifyGithubSignature,
-  versionKeyOf,
+  versionsOf,
 } from './github.ts';
 export { type HealthReport, PublicHealthError, runHealthChecks, serviceHealthChecks } from './health.ts';
 export { isSerial, isUuid, parseCursor } from './ids.ts';
@@ -41,6 +44,7 @@ export {
   type DispatchDecision,
   dispatchDecision,
   type IssueIntake,
+  RetryLaterError,
 } from './issue-intake.ts';
 export { jsonLogger, silentLogger } from './log.ts';
 export { createMemoryStore, emptyData, type MemoryData } from './memory-store.ts';
@@ -54,10 +58,10 @@ export {
 export * from './ports.ts';
 export {
   type GitHubReconcileResult,
-  MAX_AUTO_REPLAYS,
   type ReconcileParts,
   type ReconcileStep,
   reconcileGitHub,
+  reconcilerOptions,
 } from './reconcile.ts';
 export { createSseRelay, type SseRelay } from './sse.ts';
 export { createTemporalWorkflowControl, notConnectedTemporal, type TemporalClientLike } from './temporal.ts';

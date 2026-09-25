@@ -405,6 +405,28 @@ describe('0004：接活入口（GitHub 事件原文、自动派活开关）', ()
           /github_events_finished_iff_done/,
         );
         await expect(insert('odd-status', 'lost', 'x', true)).rejects.toThrow(/github_events_status_known/);
+
+        // 每次投递带着的对象版本：一次投递里一个对象只记一版；开关状态只认 open/closed；投递删了版本跟着删
+        const version = (id: string, object: string, state: string | null) =>
+          pg.query(
+            `insert into github_event_versions (delivery_id, object, version, state) values ($1, $2, now(), $3)`,
+            [id, object, state],
+          );
+        await version('ok-accepted', 'acme/widgets:issue:1', 'open');
+        await version('ok-accepted', 'acme/widgets:comment:9', null);
+        await expect(version('ok-accepted', 'acme/widgets:issue:1', 'closed')).rejects.toThrow(
+          /github_event_versions_delivery_id_object_pk/,
+        );
+        await expect(version('ok-failed', 'acme/widgets:pull:2', 'merged')).rejects.toThrow(
+          /github_event_versions_state_known/,
+        );
+        await expect(version('never-delivered', 'acme/widgets:issue:3', 'open')).rejects.toThrow(
+          /github_event_versions_delivery_id_github_events_delivery_id_fk/,
+        );
+        await pg.exec(`delete from github_events where delivery_id = 'ok-accepted'`);
+        expect((await pg.query(`select count(*)::int as n from github_event_versions`)).rows).toEqual([
+          { n: 0 },
+        ]);
       } finally {
         await pg.close();
       }

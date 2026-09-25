@@ -2,12 +2,16 @@ import { describe, expect, it } from 'vitest';
 import { devFixtures } from '../src/dev-fixtures.ts';
 import {
   createGitHubIntake,
+  githubAppMissing,
+  githubEventsCheck,
   githubWhitelist,
+  objectKey,
   pollDeliveryId,
   screenGithubEvent,
   verifyGithubSignature,
-  versionKeyOf,
+  versionsOf,
 } from '../src/github.ts';
+import type { GitHubDelivery } from '../src/ports.ts';
 import {
   deliverGithub as deliver,
   errorCode,
@@ -151,7 +155,7 @@ describe('原文落库', () => {
       action: 'opened',
       source: 'webhook',
       repo: 'example/canary',
-      versionKey: 'poll:example/canary:issue:12:2026-09-25T07:59:00Z',
+      versions: [{ object: 'example/canary:issue:12', version: '2026-09-25T07:59:00.000Z', state: 'open' }],
       payload: issueOpened(founderA),
       status: 'accepted',
       note: 'task=exists, workflow=dispatch_off',
@@ -365,19 +369,149 @@ describe('白名单判定', () => {
     );
   });
 
-  it('webhook 带来的版本写成轮询的编号（issue、评论、PR）；别的事件、认不出版本的不写', () => {
+  it('事件带着的对象版本：issue；评论和它顶新的 issue（PR 上的评论记成 PR）；PR 和它的审查、审查评论', () => {
     const at = '2026-09-25T08:00:00Z';
-    expect(versionKeyOf('issues', { issue: { number: 12, updated_at: at } }, 'Example/Canary')).toBe(
-      pollDeliveryId('example/canary', 'issue', 12, at),
-    );
-    expect(versionKeyOf('issue_comment', { comment: { id: 7, updated_at: at } }, 'example/canary')).toBe(
-      pollDeliveryId('example/canary', 'comment', 7, at),
-    );
+    const iso = '2026-09-25T08:00:00.000Z';
+    const later = '2026-09-25T08:01:00Z';
     expect(
-      versionKeyOf('pull_request', { pull_request: { number: 5, updated_at: at } }, 'example/canary'),
-    ).toBe(pollDeliveryId('example/canary', 'pull', 5, at));
-    expect(versionKeyOf('check_suite', { check_suite: {} }, 'example/canary')).toBeUndefined();
-    expect(versionKeyOf('issues', { issue: { number: 12 } }, 'example/canary')).toBeUndefined();
-    expect(versionKeyOf('issues', { issue: { number: 12, updated_at: at } }, undefined)).toBeUndefined();
+      versionsOf('issues', { issue: { number: 12, updated_at: at, state: 'open' } }, 'Example/Canary'),
+    ).toEqual([{ object: 'example/canary:issue:12', version: iso, state: 'open' }]);
+    expect(
+      versionsOf(
+        'issue_comment',
+        { comment: { id: 7, updated_at: at }, issue: { number: 12, updated_at: later, state: 'closed' } },
+        'example/canary',
+      ),
+    ).toEqual([
+      { object: 'example/canary:comment:7', version: iso },
+      { object: 'example/canary:issue:12', version: '2026-09-25T08:01:00.000Z', state: 'closed' },
+    ]);
+    const onPr = {
+      comment: { id: 8, updated_at: at },
+      issue: { number: 5, updated_at: at, pull_request: {} },
+    };
+    expect(versionsOf('issue_comment', onPr, 'example/canary').map((v) => v.object)).toEqual([
+      'example/canary:comment:8',
+      'example/canary:pull:5',
+    ]);
+    // 补收拼出来的评论只带 issue 号：只记评论
+    expect(
+      versionsOf(
+        'issue_comment',
+        { comment: { id: 9, updated_at: at }, issue: { number: 12 } },
+        'example/canary',
+      ),
+    ).toEqual([{ object: 'example/canary:comment:9', version: iso }]);
+    for (const event of ['pull_request', 'pull_request_review', 'pull_request_review_comment']) {
+      expect(
+        versionsOf(event, { pull_request: { number: 5, updated_at: at, state: 'closed' } }, 'example/canary'),
+        event,
+      ).toEqual([{ object: 'example/canary:pull:5', version: iso, state: 'closed' }]);
+    }
+    expect(objectKey('Example/Canary', 'issue', 12)).toBe('example/canary:issue:12');
+  });
+
+  it('认不出版本的不记：别的事件、缺 updated_at、时刻读不出、没有仓', () => {
+    const at = '2026-09-25T08:00:00Z';
+    expect(versionsOf('check_suite', { check_suite: {} }, 'example/canary')).toEqual([]);
+    expect(versionsOf('issues', { issue: { number: 12 } }, 'example/canary')).toEqual([]);
+    expect(
+      versionsOf('issues', { issue: { number: 12, updated_at: 'yesterday' } }, 'example/canary'),
+    ).toEqual([]);
+    expect(versionsOf('issues', { issue: { number: 12, updated_at: at } }, undefined)).toEqual([]);
+    expect(versionsOf('issues', null, 'example/canary')).toEqual([]);
+  });
+});
+
+describe('健康检查的 github_events 一项', () => {
+  const minutesAgo = (m: number) => new Date(T0.getTime() - m * 60_000).toISOString();
+  /** 收件人看不到的东西：投递编号、原文里的字。 */
+  const SECRET_ID = 'delivery-that-must-not-leak';
+  const SECRET_TEXT = '原文里的一句话不能上公网';
+  const stuck = (id: string, over: Partial<GitHubDelivery>): GitHubDelivery => ({
+    id,
+    event: 'issues',
+    source: 'webhook',
+    repo: 'example/canary',
+    versions: [],
+    payload: { issue: { title: SECRET_TEXT } },
+    status: 'failed',
+    reason: `Temporal 连不上：${SECRET_TEXT}`,
+    attempts: 1,
+    receivedAt: minutesAgo(60),
+    claimedAt: minutesAgo(60),
+    finishedAt: minutesAgo(60),
+    ...over,
+  });
+  async function healthOf(
+    deliveries: GitHubDelivery[],
+    options: { credentialsMissing?: () => Promise<void>; breakStore?: boolean } = {},
+  ) {
+    const data = devFixtures(T0);
+    data.githubEvents = new Map(deliveries.map((d) => [d.id, d]));
+    const h = harness({ data });
+    if (options.breakStore) {
+      h.store.countStuckDeliveries = async () => {
+        throw new Error('库连不上：10.0.0.1:5432');
+      };
+    }
+    const check = githubEventsCheck({
+      store: h.store,
+      now: h.deps.now,
+      credentialsMissing: options.credentialsMissing,
+    });
+    const app = harness({ data: devFixtures(T0), health: [{ name: 'github_events', check }] });
+    const res = await app.cockpit.request('/healthz');
+    const text = await res.text();
+    return { status: res.status, text, body: JSON.parse(text) as { checks: Record<string, unknown> } };
+  }
+
+  it('重放到上限还出错的、处理中超过 5 分钟的：报红，只报条数，不带投递编号和原文', async () => {
+    const r = await healthOf([
+      stuck(SECRET_ID, { attempts: 5 }),
+      stuck('dead', {
+        status: 'processing',
+        reason: undefined,
+        claimedAt: minutesAgo(6),
+        finishedAt: undefined,
+      }),
+    ]);
+    expect(r.status).toBe(503);
+    expect(r.body.checks.github_events).toEqual({
+      ok: false,
+      code: 'stuck_deliveries',
+      message: '有 GitHub 投递没处理成：重放 5 次还出错的 1 条、处理中超过 5 分钟没收尾的 1 条',
+    });
+    expect(r.text).not.toContain(SECRET_ID);
+    expect(r.text).not.toContain(SECRET_TEXT);
+  });
+
+  it('还能重放的、刚占上的、处理完的：不算卡住，绿', async () => {
+    const r = await healthOf([
+      stuck('retryable', { attempts: 4 }),
+      stuck('busy', {
+        status: 'processing',
+        reason: undefined,
+        claimedAt: minutesAgo(1),
+        finishedAt: undefined,
+      }),
+      stuck('done', { status: 'accepted', reason: undefined, attempts: 7 }),
+    ]);
+    expect(r.status).toBe(200);
+    expect(r.body.checks.github_events).toEqual({ ok: true });
+  });
+
+  it('机器人凭据没读到：报红（先于卡住的投递报）', async () => {
+    const r = await healthOf([], {
+      credentialsMissing: githubAppMissing('没有 /etc/fleet-dao/github/gh-app-fleet-dao-engine.json').check,
+    });
+    expect(r.body.checks.github_events).toMatchObject({ ok: false, code: 'app_credentials_missing' });
+  });
+
+  it('查库失败：报红（对外只说连不上，不当成没有卡住的，也不漏出库的地址）', async () => {
+    const r = await healthOf([], { breakStore: true });
+    expect(r.status).toBe(503);
+    expect(r.body.checks.github_events).toEqual({ ok: false, code: 'unreachable', message: '连不上' });
+    expect(r.text).not.toContain('10.0.0.1');
   });
 });

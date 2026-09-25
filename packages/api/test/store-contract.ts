@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { DEV_USER_ID, devFixtures, IDS } from '../src/dev-fixtures.ts';
 import type { MemoryData } from '../src/memory-store.ts';
 import {
+  type GitHubObjectVersion,
   InvalidCursorError,
   type NewAuditEntry,
   type NewGitHubDelivery,
@@ -833,13 +834,21 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         issue: { number: 12, title: '原文' },
         repository: { full_name: 'x/y' },
       };
+      const ISSUE = 'example/canary:issue:12';
+      const V1 = '2026-09-25T07:00:00.000Z';
+      const ver = (version: string, over: Partial<GitHubObjectVersion> = {}): GitHubObjectVersion => ({
+        object: ISSUE,
+        version,
+        state: 'open',
+        ...over,
+      });
       const delivery = (id: string, over: Partial<NewGitHubDelivery> = {}): NewGitHubDelivery => ({
         id,
         event: 'issues',
         action: 'opened',
         source: 'webhook',
         repo: 'example/canary',
-        versionKey: `poll:example/canary:issue:12:${id}`,
+        versions: [ver(V1)],
         payload,
         ...over,
       });
@@ -849,9 +858,20 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         if (c.status !== 'claimed') throw new Error(`没占到：${c.status}`);
         return c.token;
       };
+      /** 收下一条、立刻记上结局。 */
+      const settled = async (d: NewGitHubDelivery, outcome: Parameters<Store['finishDelivery']>[2]) => {
+        const c = await store.claimDelivery(d, { staleBefore: stale() });
+        expect(await store.finishDelivery(d.id, tokenOf(c), outcome)).toBe(true);
+      };
 
-      it('第一次来占到、原文照存；处理完再来是 duplicate；出错的再来重新占住、次数加一，旧凭据记不上', async () => {
-        const first = await store.claimDelivery(delivery('d-1'), { staleBefore: stale() });
+      it('第一次来占到、原文和对象版本照存；处理完再来是 duplicate；出错的再来重新占住、次数加一，旧凭据记不上', async () => {
+        const comment = ver('2026-09-25T06:59:00.000Z', {
+          object: 'example/canary:comment:900',
+          state: undefined,
+        });
+        const first = await store.claimDelivery(delivery('d-1', { versions: [ver(V1), comment] }), {
+          staleBefore: stale(),
+        });
         expect(first).toMatchObject({ status: 'claimed', retry: false });
         expect(await store.getDelivery('d-1')).toMatchObject({
           id: 'd-1',
@@ -859,12 +879,16 @@ export function describeStoreContract(name: string, make: MakeStore): void {
           action: 'opened',
           source: 'webhook',
           repo: 'example/canary',
-          versionKey: 'poll:example/canary:issue:12:d-1',
           payload,
           status: 'processing',
           attempts: 1,
           receivedAt: T0.toISOString(),
         });
+        // 读回来按对象排
+        expect((await store.getDelivery('d-1'))?.versions).toEqual([
+          { object: 'example/canary:comment:900', version: '2026-09-25T06:59:00.000Z' },
+          { object: ISSUE, version: V1, state: 'open' },
+        ]);
         expect(await store.claimDelivery(delivery('d-1'), { staleBefore: stale() })).toEqual({
           status: 'duplicate',
         });
@@ -917,31 +941,59 @@ export function describeStoreContract(name: string, make: MakeStore): void {
       });
 
       it('原文不是对象也照存（JSON 的 null、数字），认不认得出是门口的事', async () => {
-        await store.claimDelivery(delivery('d-null', { payload: null }), { staleBefore: stale() });
-        await store.claimDelivery(delivery('d-num', { payload: 42 }), { staleBefore: stale() });
-        expect((await store.getDelivery('d-null'))?.payload).toBeNull();
-        expect((await store.getDelivery('d-num'))?.payload).toBe(42);
-      });
-
-      it('轮询按版本认 webhook 收过的同一版：命中别的投递的 versionKey 就是 duplicate，也不落库', async () => {
-        await store.claimDelivery(delivery('guid-1', { versionKey: 'poll:example/canary:issue:12:v1' }), {
+        await store.claimDelivery(delivery('d-null', { payload: null, versions: [] }), {
           staleBefore: stale(),
         });
-        const seen = 'poll:example/canary:issue:12:v1';
-        expect(
-          await store.claimDelivery(delivery(seen, { source: 'poll', versionKey: seen }), {
+        await store.claimDelivery(delivery('d-num', { payload: 42, versions: [] }), { staleBefore: stale() });
+        expect((await store.getDelivery('d-null'))?.payload).toBeNull();
+        expect((await store.getDelivery('d-num'))?.payload).toBe(42);
+        expect((await store.getDelivery('d-num'))?.versions).toEqual([]);
+      });
+
+      it('同一条投递里同一个对象只能有一版：整条不收', async () => {
+        await expect(
+          store.claimDelivery(delivery('d-dup', { versions: [ver(V1), ver('2026-09-25T07:01:00.000Z')] }), {
             staleBefore: stale(),
-            skipIfVersionSeen: seen,
           }),
-        ).toEqual({ status: 'duplicate' });
-        expect(await store.getDelivery(seen)).toBeNull();
-        const fresh = 'poll:example/canary:issue:12:v2';
-        expect(
-          await store.claimDelivery(delivery(fresh, { source: 'poll', versionKey: fresh }), {
+        ).rejects.toThrow();
+        expect(await store.getDelivery('d-dup')).toBeNull();
+      });
+
+      it('补收按对象版本认 webhook 带过的同一版（评论顶新的 issue 那一版也算）：duplicate、不落库；时刻写法不同照样认得', async () => {
+        const commentVersion = ver('2026-09-25T06:58:00.000Z', {
+          object: 'example/canary:comment:900',
+          state: undefined,
+        });
+        await store.claimDelivery(
+          delivery('guid-comment', { event: 'issue_comment', versions: [commentVersion, ver(V1)] }),
+          { staleBefore: stale() },
+        );
+        const polled = (id: string, version: string) =>
+          store.claimDelivery(delivery(id, { source: 'poll', versions: [ver(version)] }), {
             staleBefore: stale(),
-            skipIfVersionSeen: fresh,
-          }),
-        ).toMatchObject({ status: 'claimed', retry: false });
+            skipIfSeen: { object: ISSUE, version },
+          });
+        expect(await polled('poll-v1', '2026-09-25T07:00:00Z')).toEqual({ status: 'duplicate' });
+        expect(await store.getDelivery('poll-v1')).toBeNull();
+        expect(await polled('poll-v2', '2026-09-25T07:05:00.000Z')).toMatchObject({ status: 'claimed' });
+        // 同一版再补收一次：认得出是 poll-v2 带过的
+        expect(await polled('poll-v2-again', '2026-09-25T07:05:00.000Z')).toEqual({ status: 'duplicate' });
+      });
+
+      it('门挡掉的那一版不算带过：改了名单、新加了仓之后补收还能再过一次门', async () => {
+        await settled(delivery('guid-ignored', { versions: [ver('2026-09-25T07:10:00.000Z')] }), {
+          status: 'ignored',
+          reason: 'author_not_whitelisted',
+        });
+        expect(
+          await store.claimDelivery(
+            delivery('poll-again', { source: 'poll', versions: [ver('2026-09-25T07:10:00.000Z')] }),
+            {
+              staleBefore: stale(),
+              skipIfSeen: { object: ISSUE, version: '2026-09-25T07:10:00.000Z' },
+            },
+          ),
+        ).toMatchObject({ status: 'claimed' });
       });
 
       it('重放：没有是 not_found；正在处理是 in_flight；处理完的不带 force 是 finished，带 force 重新占住', async () => {
@@ -963,7 +1015,7 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         const replay = await store.reclaimDelivery('d-1', { staleBefore: stale(), force: true });
         expect(replay).toMatchObject({
           status: 'claimed',
-          delivery: { id: 'd-1', payload, status: 'processing', attempts: 2 },
+          delivery: { id: 'd-1', payload, status: 'processing', attempts: 2, versions: [ver(V1)] },
         });
         if (replay.status !== 'claimed') throw new Error('没占到');
         expect(await store.finishDelivery('d-1', replay.token, { status: 'accepted' })).toBe(true);
@@ -991,6 +1043,7 @@ export function describeStoreContract(name: string, make: MakeStore): void {
           ['dead', 'processing', 1],
           ['twice', 'failed', 2],
         ]);
+        expect(list[0]?.versions).toEqual([ver(V1)]);
         expect(await store.listUnfinishedDeliveries({ staleBefore: stale(), limit: 1 })).toHaveLength(1);
       });
 
@@ -1001,6 +1054,73 @@ export function describeStoreContract(name: string, make: MakeStore): void {
           store.finishDelivery('d-1', tokenOf(c), { status: 'failed', reason: '' }),
         ).rejects.toThrow();
         expect(await store.getDelivery('d-1')).toMatchObject({ status: 'processing' });
+      });
+
+      it('哪些投递编号库里已经有原文（不管处理成没成）', async () => {
+        await settled(delivery('kept'), { status: 'accepted' });
+        await store.claimDelivery(delivery('in-flight'), { staleBefore: stale() });
+        expect([...(await store.existingDeliveryIds(['kept', 'in-flight', 'never']))].sort()).toEqual([
+          'in-flight',
+          'kept',
+        ]);
+        expect(await store.existingDeliveryIds([])).toEqual(new Set());
+      });
+
+      it('更新的一版已经处理过、开关状态又不一样才算盖过：同状态、更旧的、没处理成的、它自己都不算', async () => {
+        const at = (m: number) => `2026-09-25T07:${String(m).padStart(2, '0')}:00.000Z`;
+        await settled(delivery('open-1', { versions: [ver(at(1))] }), { status: 'accepted' });
+        await settled(delivery('closed-3', { versions: [ver(at(3), { state: 'closed' })] }), {
+          status: 'accepted',
+        });
+        await settled(delivery('open-4', { versions: [ver(at(4))] }), { status: 'accepted' });
+        await settled(delivery('closed-5-failed', { versions: [ver(at(5), { state: 'closed' })] }), {
+          status: 'failed',
+          reason: 'Temporal 连不上',
+        });
+        const find = (version: string, state: 'open' | 'closed', excludeDeliveryId = 'me') =>
+          store.findSupersedingVersion({ object: ISSUE, version, state, excludeDeliveryId });
+        // 两分时开着的那一版：三分时关了（处理过）→ 盖过，回最新的那一版
+        expect(await find(at(2), 'open')).toEqual({
+          deliveryId: 'closed-3',
+          version: at(3),
+          state: 'closed',
+        });
+        // 两分时关了的那一版：四分时开着（处理过）→ 盖过
+        expect(await find(at(2), 'closed')).toEqual({ deliveryId: 'open-4', version: at(4), state: 'open' });
+        // 四分时开着的那一版：五分时关了但没处理成 → 不算
+        expect(await find(at(4), 'open')).toBeNull();
+        expect(await find(at(3), 'closed', 'open-4')).toBeNull();
+        expect(
+          await store.findSupersedingVersion({
+            object: 'example/canary:issue:99',
+            version: at(0),
+            state: 'open',
+            excludeDeliveryId: 'me',
+          }),
+        ).toBeNull();
+      });
+
+      it('卡住的条数：出错到了上限的、处理中超过时限的；还能重放的、刚占的、处理完的不算', async () => {
+        const failTimes = async (id: string, times: number) => {
+          for (let i = 0; i < times; i++) {
+            const c = await store.claimDelivery(delivery(id), { staleBefore: stale() });
+            await store.finishDelivery(id, tokenOf(c), { status: 'failed', reason: '还是不成' });
+          }
+        };
+        await failTimes('exhausted', 5);
+        await failTimes('retryable', 2);
+        await settled(delivery('done'), { status: 'accepted' });
+        await store.claimDelivery(delivery('dead'), { staleBefore: stale() });
+        tick(6 * MIN);
+        await store.claimDelivery(delivery('busy'), { staleBefore: stale() });
+        expect(await store.countStuckDeliveries({ staleBefore: stale(), maxAttempts: 5 })).toEqual({
+          exhausted: 1,
+          stale: 1,
+        });
+        expect(await store.countStuckDeliveries({ staleBefore: stale(), maxAttempts: 2 })).toEqual({
+          exhausted: 2,
+          stale: 1,
+        });
       });
     });
 

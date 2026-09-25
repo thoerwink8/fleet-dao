@@ -345,6 +345,16 @@ export type GitHubDeliverySource = 'webhook' | 'poll' | 'redelivery';
  */
 export type GitHubDeliveryStatus = 'processing' | 'accepted' | 'ignored' | 'failed';
 
+/** 一次投递带着的一个对象（issue、评论、PR）的那一版。 */
+export interface GitHubObjectVersion {
+  /** `<owner/name 小写>:<issue|comment|pull>:<编号>`（写法见 github.ts 的 objectKey）。 */
+  object: string;
+  /** 这个对象在 GitHub 上的 updated_at（ISO 时刻）。 */
+  version: string;
+  /** issue、PR 这一版开着还是关着；评论没有。 */
+  state?: 'open' | 'closed' | undefined;
+}
+
 /** 一次投递（webhook 收到的，或补收时拼出来的），原文照收。 */
 export interface NewGitHubDelivery {
   id: string;
@@ -353,11 +363,12 @@ export interface NewGitHubDelivery {
   source: GitHubDeliverySource;
   /** owner/name，原样取自事件；没有仓的事件不填。 */
   repo?: string | undefined;
-  /** 这条事件说的那个对象的那一版（写法同 pollDeliveryId）；轮询补收按它认出 webhook 收过的同一版。 */
-  versionKey?: string | undefined;
+  /** 带着的对象版本，主对象在第一个（评论事件：评论、再是它顶新的 issue）。认不出版本的不写。 */
+  versions: GitHubObjectVersion[];
   payload: unknown;
 }
 
+/** 库里的一条投递。versions 读回来是按对象排的（不再保证主对象在第一个）。 */
 export interface GitHubDelivery extends NewGitHubDelivery {
   status: GitHubDeliveryStatus;
   reason?: string | undefined;
@@ -379,13 +390,17 @@ export type GitHubDeliveryOutcome =
 
 export interface GitHubStore {
   /**
-   * 收下一条投递：原文落库，按投递编号去重，存 Postgres 不放本机文件。同一编号再来：上次出错、或处理中而且占用早于
-   * staleBefore（那一次多半死了）就重新占住（retry）；处理完了、正在处理就是 duplicate。
-   * skipIfVersionSeen（轮询补收用）：别的投递的 versionKey 已经是它（webhook 收过同一版），也是 duplicate、不落库。
+   * 收下一条投递：原文和它带着的对象版本落库，按投递编号去重，存 Postgres 不放本机文件。同一编号再来：上次出错、
+   * 或处理中而且占用早于 staleBefore（那一次多半死了）就重新占住（retry）；处理完了、正在处理就是 duplicate。
+   * skipIfSeen（轮询补收用）：别的投递已经带过这个对象的这一版、而且没被门挡掉（webhook 收过同一版），
+   * 也是 duplicate、不落库。门挡掉的那一版不算：改了名单、新加了仓之后补收还能再过一次门。
    */
   claimDelivery(
     delivery: NewGitHubDelivery,
-    options: { staleBefore: string; skipIfVersionSeen?: string | undefined },
+    options: {
+      staleBefore: string;
+      skipIfSeen?: Pick<GitHubObjectVersion, 'object' | 'version'> | undefined;
+    },
   ): Promise<GitHubDeliveryClaim>;
   /** 重放库里的一条：接管的规矩同 claimDelivery；force = 处理完的也重新占住（修了代码、改了名单之后重跑）。 */
   reclaimDelivery(
@@ -400,6 +415,23 @@ export interface GitHubStore {
   getDelivery(id: string): Promise<GitHubDelivery | null>;
   /** 没处理成的（出错的，和处理中但占用早于 staleBefore 的），次数少的在前、再按收到先后，最多 limit 条。 */
   listUnfinishedDeliveries(query: { staleBefore: string; limit: number }): Promise<GitHubDelivery[]>;
+  /** 这几个投递编号里，库里已经有原文的（不管处理成没成）。 */
+  existingDeliveryIds(ids: readonly string[]): Promise<Set<string>>;
+  /**
+   * 同一个对象有没有更新的一版已经处理过（放进来、处理完）、而且开关状态和 state 不一样；有就回那一版。
+   * 不算 excludeDeliveryId 这一条自己。
+   */
+  findSupersedingVersion(query: {
+    object: string;
+    version: string;
+    state: 'open' | 'closed';
+    excludeDeliveryId: string;
+  }): Promise<{ deliveryId: string; version: string; state: 'open' | 'closed' } | null>;
+  /** 卡住的投递有几条：exhausted = 出错、次数到了 maxAttempts（不再自动重放）；stale = 处理中、占用早于 staleBefore。 */
+  countStuckDeliveries(query: {
+    staleBefore: string;
+    maxAttempts: number;
+  }): Promise<{ exhausted: number; stale: number }>;
 }
 
 /** 受管的仓，带自动派活开关：autoDispatchSince = 打开的时刻，null = 关着（只收单、显示，不拉起工作流）。 */
