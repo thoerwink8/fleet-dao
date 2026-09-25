@@ -2,7 +2,7 @@
   "name": "@fleet-dao/conventions",
   "version": "0.0.0",
   "private": true,
-  "description": "第七节的约定写成检查：PR 必填栏（类别标签、里程碑、对应计划、specs）、开单脚本、文档指针",
+  "description": "第七节的约定写成检查：PR 必填栏（类别标签、里程碑、对应计划、specs）、开单脚本、文档指针、欠账检查、阶段收口",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
