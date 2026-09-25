@@ -30,6 +30,7 @@ const SUBTASK_STATES = Object.keys(SUBTASK_STATE_WORDS) as SubtaskState[];
 
 function allCards(): Array<[string, Card]> {
   const d = draft();
+  const { task: _task, ...pendingIssue } = confirmed();
   const detail = taskDetail();
   const snap = snapshot();
   const empty = snapshot({
@@ -46,6 +47,7 @@ function allCards(): Array<[string, Card]> {
     ['草稿·正在开', draftCard(d, ctx, { state: 'confirming' })],
     ['草稿·正在改', draftCard(d, ctx, { state: 'revising' })],
     ['草稿·已确认', draftCard(confirmed(), ctx)],
+    ['草稿·已确认·待开单', draftCard(pendingIssue, ctx, { note: '已确认（乙），没有重复开任务。' })],
     ['正在理解', draftWaitCard(ctx, { title: '收到，正在理解…', rawText: '原话' })],
     ['没记成', draftWaitCard(ctx, { title: '这句话没记成', failed: true, lines: ['后端没回应'] })],
     ['回答', answerCard('在等 PR 合并。', ctx, 'task-12')],
@@ -163,6 +165,17 @@ describe('卡片', () => {
     expect(textIn(outboxCard(outboxItem({ kind: 'decision' }), ctx))).toContain('回复不算拍板');
     expect(textIn(outboxCard(outboxItem({ kind: 'decision' }), ctx))).not.toContain('回复这张卡片作答');
     expect(textIn(outboxCard(outboxItem({ kind: 'ask' }), ctx))).toContain('也可以直接回复这张卡片作答');
+  });
+
+  it('确认了、issue 还没开出来（后端的「待开单」）：写明正在开，不再出「确认」「改一下」', () => {
+    const { task: _task, ...pendingIssue } = confirmed();
+    const card = draftCard(pendingIssue, ctx);
+    expect(textIn(card)).toContain('已确认，正在开成任务');
+    expect(textIn(card)).toContain('确认：甲');
+    const actions = buttonsOf(card).map((b) => (b.value as { a?: string } | undefined)?.a);
+    expect(actions).not.toContain('draft.confirm');
+    expect(actions).not.toContain('draft.revise');
+    expect(buttonsOf(card).map((b) => b.url)).toEqual(['https://cockpit.example.test/overview']);
   });
 
   it('「打开驾驶舱」直达对应页', () => {

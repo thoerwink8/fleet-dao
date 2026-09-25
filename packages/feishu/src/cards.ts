@@ -169,6 +169,22 @@ export function draftCard(
     });
   }
 
+  if (draft.status === 'confirmed') {
+    // 确认了、issue 还没开出来（后端记成「待开单」，开单那一步接上或恢复后自动补开）：不再给确认、改一下，免得看着像没确认。
+    return card({
+      title: '已确认，正在开成任务',
+      ...(draft.repo ? { subtitle: draft.repo.fullName } : {}),
+      template: 'wathet',
+      elements: [
+        text(`我理解为：${draft.understanding}`),
+        text(`提出：${draft.proposedBy}${draft.confirmedBy ? ` · 确认：${draft.confirmedBy}` : ''}`, 'note'),
+        ...(opts.note ? [text(opts.note, 'note')] : []),
+        text('开好后驾驶舱里就有这个任务；要改需求请在驾驶舱里改。', 'note'),
+        buttons([cockpit(ctx, COCKPIT_PATHS.overview)]),
+      ],
+    });
+  }
+
   const state = opts.state ?? 'open';
   const base = [
     text(draft.understanding),
