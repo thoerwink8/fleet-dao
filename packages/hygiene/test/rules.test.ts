@@ -34,6 +34,8 @@ const planted: [RuleId, string][] = [
   ['token', `key ${['sk', 'proj', R(48, 13)].join('-')}`],
   ['token', `grok ${['xai', R(40, 14)].join('-')}`],
   ['token', `export RECLAUDE_API_KEY=${['rck', R(43, 52)].join('_')}`],
+  // 额度读取器收的最短 Key（packages/adapters/src/quota/readers/reclaude.ts 的 KEY_SHAPE），这里也要拦。
+  ['token', `key ${['rck', R(20, 53)].join('_')}`],
   ['token', `aws ${['AKIA', pseudoRandom(16, 15, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567')].join('')}`],
   ['token', `bot ${['7' + pseudoNumber(8, 16), `AA${R(33, 17)}`].join(':')}`],
   ['token', `Authorization: ${['Bearer', R(40, 18)].join(' ')}`],

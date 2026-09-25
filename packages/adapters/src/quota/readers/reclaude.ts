@@ -10,6 +10,7 @@ import { normalizeStatus } from '../windows.ts';
 
 const SOURCE = 'reclaude-carpool';
 export const DEFAULT_RECLAUDE_BASE_URL = 'https://www.reclaude.ai';
+/** 最短长度和卫生检查（packages/hygiene/src/rules.ts 的 token 规则）一致：读得了的 Key，推送前也扫得到。 */
 const KEY_SHAPE = /^rck_[A-Za-z0-9_-]{20,}$/;
 
 /**
@@ -59,18 +60,32 @@ export function readingsFromCarpoolQuota(
   return { windows, notes };
 }
 
-/** GET /api/v1/orgs → 拼车组织（type team）的到期日。组织编号、名字、邮箱一律不往外带。 */
-export function carpoolSubscription(body: unknown): { subscription?: SubscriptionInfo; notes: string[] } {
+/**
+ * GET /api/v1/orgs → 拼车组织（type team）的到期日。组织编号、名字、邮箱一律不往外带。
+ * 上游明说拼车池用不了（没有拼车组织、没分到 Claude 账号、已到期）→ 抛 upstream：额度读数再好看，这个池也派不了活。
+ * 只是到期日认不出、有几个拼车组织分不清 → 记一笔，额度照收。
+ */
+export function carpoolSubscription(
+  body: unknown,
+  now: Date,
+): { subscription?: SubscriptionInfo; notes: string[] } {
   const items = isRecord(body) && Array.isArray(body.items) ? body.items.filter(isRecord) : undefined;
   if (!items) return { notes: ['组织列表认不出，没读到到期日'] };
   const teams = items.filter((o) => o.type === 'team');
-  if (teams.length !== 1) return { notes: [`账号下有 ${teams.length} 个拼车组织，不猜是哪个，没读到期日`] };
+  if (teams.length === 0) {
+    throw new QuotaReadError('upstream', 'reclaude 账号下没有拼车组织（到期或被收回）：拼车池用不了');
+  }
+  if (teams.length > 1) return { notes: [`账号下有 ${teams.length} 个拼车组织，不猜是哪个，没读到期日`] };
   const team = teams[0] as Record<string, unknown>;
-  const notes: string[] = [];
-  if (team.has_assigned_account === false) notes.push('拼车组织现在没分到 Claude 账号：会话起不来');
+  if (team.has_assigned_account === false) {
+    throw new QuotaReadError('upstream', '拼车组织现在没分到 Claude 账号：会话起不来');
+  }
   const expiresAt = toIso(team.subscription_expires_at);
-  if (!expiresAt) return { notes: [...notes, '拼车组织没给到期日'] };
-  return { subscription: { expiresAt }, notes };
+  if (!expiresAt) return { notes: ['拼车组织没给到期日'] };
+  if (Date.parse(expiresAt) <= now.getTime()) {
+    throw new QuotaReadError('upstream', `拼车组织已于 ${expiresAt} 到期：拼车池用不了`);
+  }
+  return { subscription: { expiresAt }, notes: [] };
 }
 
 export const readReclaudeCarpool: Reader = async (ctx) => {
@@ -98,18 +113,19 @@ export const readReclaudeCarpool: Reader = async (ctx) => {
       authHint: '在 reclaude 网页「设置 → API Key」重新生成，换掉 Key 文件里那把',
     });
 
-  // 额度是主数；到期日是补充，读不到只记一笔。
+  // 额度是主数；组织接口连不上、5xx 只记一笔。它说 Key 不认（同一把 Key）或拼车池用不了，整池判失败。
   const [quota, orgs] = await Promise.all([
     get('/api/v1/carpool/quota'),
     get('/api/v1/orgs').catch((e: unknown) => e),
   ]);
+  if (orgs instanceof QuotaReadError && orgs.code === 'auth') throw orgs;
   const out = readingsFromCarpoolQuota(quota, { poolId: pool.poolId, readAt: ctx.fetchedAt });
   const notes = [...out.notes];
   const result: Awaited<ReturnType<Reader>> = { windows: out.windows, notes };
   if (orgs instanceof Error) {
     notes.push(`到期日没读到：${orgs.message}`);
   } else {
-    const sub = carpoolSubscription(orgs);
+    const sub = carpoolSubscription(orgs, ctx.now());
     notes.push(...sub.notes);
     if (sub.subscription) result.subscription = sub.subscription;
   }
