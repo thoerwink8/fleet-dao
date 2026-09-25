@@ -19,7 +19,7 @@ if ((EUID != 0)); then
   echo "没跑成：要 root（得建临时用户、组和 sudoers 条目）"
   exit 2
 fi
-for c in useradd userdel groupadd groupdel gpasswd usermod runuser visudo sudo curl; do
+for c in useradd userdel groupadd groupdel gpasswd usermod runuser visudo sudo curl setsid timeout; do
   if ! command -v "$c" >/dev/null; then
     echo "没跑成：这台没有 $c"
     exit 2
@@ -96,6 +96,10 @@ if (($? == 0 && ${#REDS[@]} == 0 && ${#CHANGES[@]} >= 3)); then
 else
   flunk "第一遍没装成（红：${REDS[*]:-无}；改动 ${#CHANGES[@]} 处）"
 fi
+# .profile 不靠这台 /etc/skel 的样子：写成 Ubuntu 默认那几行（把 ~/.local/bin 加进 PATH），归这个用户
+# shellcheck disable=SC2016 # 单引号里的东西要在登录 shell 里展开
+printf '%s\n' 'if [ -d "$HOME/.local/bin" ] ; then' '    PATH="$HOME/.local/bin:$PATH"' 'fi' >"$H/.profile"
+chown "$U:$U" "$H/.profile"
 run_setup
 if (($? == 0 && ${#REDS[@]} == 0 && ${#CHANGES[@]} == 0)); then pass "第二遍零改动"; else flunk "第二遍改了：${CHANGES[*]:-} ${REDS[*]:-}"; fi
 if [[ "$(stat -c %U "$BIN" 2>/dev/null)" == "$U" && -z "$(find "$H" -user root 2>/dev/null)" ]]; then
