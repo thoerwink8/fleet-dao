@@ -12,7 +12,7 @@ import {
 
 /** 还没接上 Temporal：发信号一律 503（WorkflowUnavailableError），健康检查报红。不装作接上了。 */
 export function notConnectedTemporal(): TemporalConnection {
-  const why = 'Temporal 客户端还没接上（等引擎的 PR）';
+  const why = 'Temporal 客户端还没接上';
   return {
     control: {
       async signal() {

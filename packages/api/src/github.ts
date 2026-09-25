@@ -17,7 +17,7 @@ const MAX_BODY_BYTES = 25 * 1024 * 1024;
  * 不悄悄丢；健康检查报红。
  */
 export function notWiredGitHub(): { sink: GitHubEventSink; check: () => Promise<void> } {
-  const why = 'GitHub 事件还没接到引擎（等引擎的 PR）';
+  const why = 'GitHub 事件还没接到引擎';
   return {
     sink: {
       async accept() {
