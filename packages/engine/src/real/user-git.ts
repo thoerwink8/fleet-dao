@@ -122,6 +122,15 @@ async function headOfRef(t: UserTree, ref: string): Promise<string> {
   return sha;
 }
 
+/** 仓里有没有这个提交（换检出之前先看：已经有了就不用再从镜像取，取了反而是空包）。 */
+export async function hasCommit(t: UserTree, sha: string): Promise<boolean> {
+  assertSha(sha, '提交');
+  const r = await run(t, [t.git ?? GIT, 'cat-file', '-e', `${sha}^{commit}`]);
+  if (r.code === 0) return true;
+  if (r.code === 1 || r.code === 128) return false;
+  throw new PortError('GIT_FAILED', describeFailure('看仓里有没有这个提交', r), { retryable: true });
+}
+
 /** 把分支放到这个提交上并检出（新建的树用）。 */
 export async function checkoutBranch(t: UserTree, branch: string, sha: string): Promise<void> {
   assertSha(sha, '检出的提交');
@@ -137,6 +146,11 @@ export async function checkoutDetached(t: UserTree, sha: string): Promise<void> 
 
 export async function headOf(t: UserTree): Promise<string> {
   return headOfRef(t, 'HEAD');
+}
+
+/** 树最后一次从引擎取进来的头（refs/fleet/incoming）：建树时的主线头，或并主线后的新头。引擎的镜像里一定有它，交 bundle 拿它当起点。 */
+export async function headOfIncoming(t: UserTree): Promise<string> {
+  return headOfRef(t, 'refs/fleet/incoming');
 }
 
 /** 没提交的已跟踪改动（交付判据：不许有）。 */

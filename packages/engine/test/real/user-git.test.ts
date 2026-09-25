@@ -32,9 +32,9 @@ afterEach(() => {
 const ENV = {
   ...process.env,
   GIT_AUTHOR_NAME: 't',
-  GIT_AUTHOR_EMAIL: 't@example.invalid',
+  GIT_AUTHOR_EMAIL: 'fleet-test@localhost',
   GIT_COMMITTER_NAME: 't',
-  GIT_COMMITTER_EMAIL: 't@example.invalid',
+  GIT_COMMITTER_EMAIL: 'fleet-test@localhost',
   GIT_CONFIG_NOSYSTEM: '1',
 };
 const sh = (cwd: string, ...args: string[]) =>
@@ -83,7 +83,7 @@ describe('会话目录里的 git', { timeout: 60_000 }, () => {
     const m = mirror();
     const t = tree('work');
     const fetched = await fetchBundle(t, m.bundle(m.head), 'refs/fleet/export/0', {
-      identity: { name: 'fleet-dao-agent[bot]', email: 'bot@example.invalid' },
+      identity: { name: 'fleet-dao-agent[bot]', email: 'bofleet-test@localhost' },
     });
     expect(fetched).toBe(m.head);
     await checkoutBranch(t, 'fleet/12-a', m.head);
