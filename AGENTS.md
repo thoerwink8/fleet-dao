@@ -37,7 +37,7 @@
 - 设计看 `docs/design.md`，计划看 `docs/plan.md`；需求文档在 `specs/<编号>-<短名>/`（需求、方案、结果）。
 - 在 fleet 流程里干活时，用 `fleet` 命令汇报进度、提问、交活（`fleet --help`）。
 - 引擎接活之前，本机干活也照 `docs/design.md` 第五节走：只有改数据库、动生产、碰安全三种要第二意见（换厂商），其余 CI 绿就合；PR 正文写明档位和理由。本仓同一时间只由一个总指挥会话开 PR、定规矩，别的会话要干活先开单。
-- 提交前跑 `pnpm check`（格式、类型、测试、公开仓卫生检查，要秒级到分钟级）。
+- 本机推之前只跑改动涉及的包的测试（`pnpm exec vitest run packages/<包>`）和格式、类型检查，卫生检查由推前钩子自动跑；全量 `pnpm check` 交给 GitHub CI，不在本机跑（几个会话同时跑全量会把机器拖垮；「能不能合」都看 GitHub，创始人 2026-09-25）。
 - 后端直接用 Node 22 运行 TypeScript：只写可擦除的类型写法（不用 enum、参数属性、namespace），相对导入带 `.ts` 后缀。
 - 这是公开仓：上面「底线」里公开仓那条在这里处处适用。卫生检查（packages/hygiene）在三处跑：推之前（`pnpm install` 设好的 git pre-push 钩子；引擎推分支在 packages/github 里自己扫）、`pnpm check`、CI。内容像密钥的拦，密钥文件名（.gitignore 标记段里的 `.secrets/`、`*.pass`、`*.key`、`*.pem`…）被 `git add -f` 强行加进来的也拦；真实的组织编号、账号靠已知敏感值名单认（不进仓：本机 `~/.fleet-dao/sensitive-values.txt`，名单没读到检查不算过）。真该放行的写进它的白名单并写明理由；输出只有文件、行、规则名，不打值。
 - Jev：判断题小模型（TypeSafe 的 System One），代码在 `packages/jev`；接在哪、怎么管见 `docs/design.md` 第十一节。
