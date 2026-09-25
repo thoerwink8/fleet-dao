@@ -52,7 +52,7 @@ import {
 import type { FailureContext, FailureInfo, LadderCounters, NextAction } from '../decisions/failure.ts';
 import type { Decide, DecisionKind, DecisionMap } from '../decisions/index.ts';
 import type { Feedback } from '../decisions/verify.ts';
-import type { Limits } from '../limits.ts';
+import { historyAlertLine, type Limits } from '../limits.ts';
 import type {
   RouteChoice,
   Scope,
@@ -428,7 +428,8 @@ export async function gate(kit: Kit): Promise<void> {
 export async function watchHistory(kit: Kit): Promise<void> {
   if (kit.historyAlarmed) return;
   const info = workflowInfo();
-  if (info.historyLength < kit.limits.historyAlertEvents) return;
+  const line = historyAlertLine(kit.limits);
+  if (info.historyLength < line) return;
   // 接这道报警之前起的执行，重放时这里没有这一步：按老样子不报。
   if (!patched('history-alarm')) return;
   kit.historyAlarmed = true;
@@ -436,7 +437,7 @@ export async function watchHistory(kit: Kit): Promise<void> {
     await kit.acts.raiseAlert({
       ...kit.scope,
       level: 'info',
-      title: `工作流事件数到了 ${info.historyLength}（报警线 ${kit.limits.historyAlertEvents}）`,
+      title: `工作流事件数到了 ${info.historyLength}（报警线 ${line}）`,
       detail: `${info.workflowType} ${info.workflowId}：事件数一路涨到 Temporal 的上限（每条执行 1 万个信号、5 万多个事件）就连叫停都发不进去。看看是不是有东西在刷信号或会话在绕圈；要接着跑，考虑叫停后重开。`,
       dedupeKey: `${info.workflowId}:history`,
     });
@@ -1064,7 +1065,9 @@ export async function runStage<K extends OutputKind>(
     await alertIfNeeded(kit, next, failure.message);
     counters = bump(counters, next);
     if (next.action === 'retry') {
-      await waitFor(kit, waitKindOf(next), next.reason, () => sleep(`${next.delaySeconds} seconds`));
+      await waitFor(kit, waitKindOf(next), next.reason, () =>
+        retryPause(kit, request.stage, next.delaySeconds),
+      );
       stick = resumesSame(next) ? picked.route.routeId : undefined;
     } else if (next.action === 'swapRoute') {
       // 账号池的事（封号、额度用满）避开整个池：换到同一个池的别的路由照样撞。
@@ -1085,6 +1088,24 @@ export async function runStage<K extends OutputKind>(
       stick = resumesSame(next) ? picked.route.routeId : undefined;
     }
   }
+}
+
+/**
+ * 会话这一步原地再试之前等的那一觉：到点，或人改了这一阶段的路由、点了暂停、叫停了就醒——等额度清零可能要睡
+ * 好几个小时，人这时候换了路由不该还干等到点（醒了回到 runStage 开头：暂停门、按新路由选）。
+ * 接这道改法之前起的执行，重放时照老样子整觉睡完。
+ */
+async function retryPause(kit: Kit, stage: StageKind, seconds: number): Promise<void> {
+  if (!patched('retry-wait-wakes')) {
+    await sleep(`${seconds} seconds`);
+    return;
+  }
+  const routeAtStart = kit.control.routeOverrides[stage];
+  await condition(
+    () =>
+      kit.control.paused || kit.control.stopRequested || kit.control.routeOverrides[stage] !== routeAtStart,
+    `${seconds} seconds`,
+  );
 }
 
 /** 失败分流要的这一步的事实：哪个阶段、哪条路由（主池还是备池）、上游给的等待、会话跑在哪。 */

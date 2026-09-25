@@ -57,9 +57,25 @@ export interface GitHubPortsDeps {
   /** 没合并就收的树，没提交的改动存到这里。 */
   archiveDir: string;
   now?: () => Date;
+  /** 要心跳的活动（建树）在等 GitHub 时多久报一次活着；默认 HEARTBEAT_EVERY_MS，测试调短。 */
+  heartbeatEveryMs?: number;
   /** 会话目录里跑的 git、sh（测试里换成 PATH 上的）。 */
   gitBin?: string;
   shBin?: string;
+}
+
+/** 远小于心跳超时（limits.heartbeatSeconds 默认 120 秒）：漏一两次也不判工人丢了。 */
+export const HEARTBEAT_EVERY_MS = 15_000;
+
+/** fn 跑着的时候每隔一会儿报一次活着；fn 结束（成功或失败）就停。 */
+async function withHeartbeat<T>(ctx: PortContext, everyMs: number, fn: () => Promise<T>): Promise<T> {
+  ctx.heartbeat();
+  const timer = setInterval(() => ctx.heartbeat(), everyMs);
+  try {
+    return await fn();
+  } finally {
+    clearInterval(timer);
+  }
 }
 
 type GitHubPorts = Pick<
@@ -133,6 +149,7 @@ export function ciResultOf(r: Awaited<ReturnType<EngineGitHub['waitCi']>>): CiRe
 export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
   const { gh, trees } = deps;
   const now = deps.now ?? (() => new Date());
+  const heartbeatEveryMs = deps.heartbeatEveryMs ?? HEARTBEAT_EVERY_MS;
 
   const treeAs = (dir: string, user: SessionUser, prefix: string, ctx: PortContext): UserTree => ({
     exec: deps.exec,
@@ -159,8 +176,11 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
     async createWorktree(input, ctx): Promise<Worktree> {
       // 这里只定位置、记下主线的头：树等起会话时由那个会话用户自己从 bundle 建（sessions.ts）——
       // 建树的时候还不知道会派给哪个账号池、哪个会话用户。同一位置留着上一轮的旧树（同名分支）就先删掉。
+      // 这一档要心跳（activity-options 的 setup）：大仓第一次抓进镜像可能要好几分钟，抓的时候照常报活着。
       const path = trees.treeFor(input.repo, input.branch);
-      const main = await mapped(() => gh.fetchMainline({ repo: input.repo, signal: ctx.signal }, ctx));
+      const main = await withHeartbeat(ctx, heartbeatEveryMs, () =>
+        mapped(() => gh.fetchMainline({ repo: input.repo, signal: ctx.signal }, ctx)),
+      );
       if ((await trees.ownerOf(path)) !== null) await trees.remove(path);
       return { path, branch: input.branch, baseSha: main.head };
     },

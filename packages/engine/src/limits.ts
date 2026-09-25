@@ -108,3 +108,12 @@ export function resolveLimits(partial: Partial<Limits> | null | undefined): Limi
   }
   return out;
 }
+
+/**
+ * 工作流事件数的报警线。上限在工作流开头解析一次、记进历史：这一项加进来之前开工的在途任务，记下的那一套里没有它，
+ * 读出来是 undefined——那样一比就报「报警线 undefined」。缺了按现在的默认值。
+ */
+export function historyAlertLine(limits: Partial<Limits>): number {
+  const value = limits.historyAlertEvents;
+  return typeof value === 'number' && Number.isFinite(value) ? value : DEFAULT_LIMITS.historyAlertEvents;
+}

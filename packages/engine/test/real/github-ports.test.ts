@@ -94,7 +94,7 @@ function fakeGh(over: Partial<Record<keyof EngineGitHub, (input: never) => unkno
   return { gh, calls };
 }
 
-function setup(over: Parameters<typeof fakeGh>[0] = {}) {
+function setup(over: Parameters<typeof fakeGh>[0] = {}, opts: { heartbeatEveryMs?: number } = {}) {
   const { gh, calls } = fakeGh(over);
   const trees = fakeTrees(join(root, 'work'));
   const ports = createGitHubPorts({
@@ -106,6 +106,7 @@ function setup(over: Parameters<typeof fakeGh>[0] = {}) {
     gitBin: 'git',
     shBin: 'sh',
     now: () => new Date('2026-09-25T08:00:00Z'),
+    ...opts,
   });
   return { ports, calls, trees };
 }
@@ -175,6 +176,31 @@ describe('建树、收树', () => {
     const tree = await ports.createWorktree({ taskId: 't1', repo, branch: BRANCH }, ctx);
     expect(tree).toEqual({ path: stale, branch: BRANCH, baseSha: m.head });
     expect(trees.owners.has(stale)).toBe(false);
+  });
+
+  it('建树等 GitHub 的时候照常心跳（setup 一档要心跳：大仓第一次抓进镜像可能要好几分钟）', async () => {
+    const { ports } = setup(
+      {
+        fetchMainline: async () => {
+          await new Promise((r) => setTimeout(r, 120));
+          return m.gh.fetchMainline();
+        },
+      },
+      { heartbeatEveryMs: 20 },
+    );
+    let beats = 0;
+    const counting: PortContext = {
+      ...ctx,
+      heartbeat: () => {
+        beats += 1;
+      },
+    };
+    await ports.createWorktree({ taskId: 't1', repo, branch: BRANCH }, counting);
+    expect(beats).toBeGreaterThanOrEqual(3);
+    // 结束就停：之后不再报
+    const after = beats;
+    await new Promise((r) => setTimeout(r, 60));
+    expect(beats).toBe(after);
   });
 
   it('没合并就收：没提交的改动存档成补丁再删；本来就不在的正常返回', async () => {

@@ -6,6 +6,7 @@ import {
   pauseSignal,
   rejectSignal,
   requireApprovalSignal,
+  rerouteSignal,
   resumeSignal,
   type SubtaskResult,
   type SubtaskStatus,
@@ -577,6 +578,30 @@ describe('子任务工作流', { timeout: 60_000 }, () => {
       [['pa'], []],
       [['pa'], ['b1']],
     ]);
+  });
+
+  it('等额度清零的长觉：人中途换了路由就醒，按新路由接着干，不干等到点', async () => {
+    const world = createFakeWorld({
+      session: (input, n) =>
+        input.stage === 'execute' && n === 1
+          ? {
+              outcome: 'failed',
+              failure: { code: 'quota_exhausted', message: '5 小时额度已用完，约 3 小时后重置' },
+            }
+          : {},
+    });
+    const result = await withWorker(env, world, async (q) => {
+      const handle = await startSubtask(q);
+      await queryUntil<SubtaskStatus>(handle, (s) => s.waiting?.kind === 'quota', '等额度');
+      await handle.signal(rerouteSignal, { by: 'founder', routeId: 'r2' });
+      return (await handle.result()) as SubtaskResult;
+    });
+    expect(result.state).toBe('merged');
+    const execs = world.callsOf('startSession').filter((c) => c.input.stage === 'execute');
+    expect(execs.map((c) => c.input.route.routeId)).toEqual(['r1', 'r2']);
+    // 醒得早：没睡满 3 小时
+    const quotaWait = world.timings.find((t): t is WaitTiming => t.kind === 'wait' && t.waitFor === 'quota');
+    expect(quotaWait?.waitMs).toBeLessThan(3 * 3600_000);
   });
 
   it('额度用满（主池）：挂起到清零、续上同一个会话同一条路由，不换池；等的时间不算墙钟预算', async () => {

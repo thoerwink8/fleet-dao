@@ -20,7 +20,7 @@ import {
 } from '../src/decisions/index.ts';
 import type { FailureVerdict } from '../src/failure/index.ts';
 import { describeHolds, normalizeHolds } from '../src/holds.ts';
-import { DEFAULT_LIMITS, resolveLimits } from '../src/limits.ts';
+import { DEFAULT_LIMITS, historyAlertLine, resolveLimits } from '../src/limits.ts';
 import { costOfRun } from '../src/usage.ts';
 
 const limits = DEFAULT_LIMITS;
@@ -40,6 +40,12 @@ describe('上限：读时现算默认值', () => {
     expect(old).toEqual({ reviewRounds: 5 });
     expect(resolveLimits({ ciFixRounds: -1, heartbeatSeconds: Number.NaN }).ciFixRounds).toBe(3);
     expect(resolveLimits(undefined)).toEqual(DEFAULT_LIMITS);
+  });
+
+  it('事件数报警线：在途任务记下的那一套里没有这一项（它加进来之前开工的），按现在的默认值，不报「报警线 undefined」', () => {
+    const { historyAlertEvents: _missing, ...old } = DEFAULT_LIMITS;
+    expect(historyAlertLine(old)).toBe(DEFAULT_LIMITS.historyAlertEvents);
+    expect(historyAlertLine({ ...old, historyAlertEvents: 20 })).toBe(20);
   });
 
   it('合并队列空闲收工有下限：不短于排队活动一次尝试的限时（30 秒），给小了取下限', () => {
