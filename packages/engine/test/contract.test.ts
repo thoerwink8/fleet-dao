@@ -96,13 +96,14 @@ describe('后端发来的信号', { timeout: 60_000 }, () => {
       session: (input, n) => (input.stage === 'execute' && n <= 2 ? { hold: true } : {}),
     });
     const input = requirementInput();
-    const control = createTemporalWorkflowControl(env.client, {
-      workflowIdForTask: () => requirementWorkflowId(input.repo, input.issueNumber),
-    });
+    // 后端现在的接口是 signal(workflowId, signal)：编号由调用方算好再传——需求工作流编号固定，
+    // 子任务工作流编号等子任务报上了会话才知道（sub?.id）。
+    const control = createTemporalWorkflowControl(env.client);
+    const requirementId = requirementWorkflowId(input.repo, input.issueNumber);
     const result = await withWorker(env, world, async (q) => {
       const handle = await env.client.workflow.start(WORKFLOW_TYPES.requirement, {
         taskQueue: q,
-        workflowId: requirementWorkflowId(input.repo, input.issueNumber),
+        workflowId: requirementId,
         args: [input],
       });
       await waitUntil(() => world.held().length === 1, '写码会话挂着');
@@ -116,10 +117,7 @@ describe('后端发来的信号', { timeout: 60_000 }, () => {
       const writing = await queryUntil<SubtaskStatus>(child, (s) => Boolean(s.runId), '子任务报上了会话');
 
       // 叫醒按会话发给所属的工作流（后端要改的就是这一处的编号）：子任务的会话发 sub:<subtask_id>。
-      const wake = createTemporalWorkflowControl(env.client, {
-        workflowIdForTask: () => subtaskWorkflowId(sub?.id ?? ''),
-      });
-      await wake.signal(input.taskId, {
+      await control.signal(subtaskWorkflowId(sub?.id ?? ''), {
         name: 'agentEvent',
         runId: writing.runId ?? '',
         kind: 'ask',
@@ -131,25 +129,25 @@ describe('后端发来的信号', { timeout: 60_000 }, () => {
         '子任务收到 agentEvent',
       );
 
-      await control.signal(input.taskId, { name: 'pause', by: 'founder', reason: '先停一下' });
+      await control.signal(requirementId, { name: 'pause', by: 'founder', reason: '先停一下' });
       await queryUntil<SubtaskStatus>(child, (s) => s.paused && s.waiting?.kind === 'human', '子任务暂停');
 
-      await control.signal(input.taskId, {
+      await control.signal(requirementId, {
         name: 'reroute',
         by: 'founder',
         routeId: 'r3',
         subtaskId: sub?.id ?? '',
       });
-      await control.signal(input.taskId, {
+      await control.signal(requirementId, {
         name: 'answer',
         by: 'founder',
         askId: 'ask-nobody',
         answer: '好',
       });
-      await control.signal(input.taskId, { name: 'resume', by: 'founder' });
+      await control.signal(requirementId, { name: 'resume', by: 'founder' });
       await waitUntil(() => world.held().length === 1 && world.held()[0]?.n === 2, '按新路由接着写');
       const receipts = ((await handle.query('status')) as RequirementStatus).commands;
-      await control.signal(input.taskId, { name: 'stop', by: 'founder', reason: '不做了' });
+      await control.signal(requirementId, { name: 'stop', by: 'founder', reason: '不做了' });
       return { receipts, final: (await handle.result()) as RequirementResult };
     });
     expect(result.receipts.map((r) => [r.command, r.accepted, r.by])).toEqual([

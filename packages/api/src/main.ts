@@ -1,8 +1,10 @@
 // 进程入口：两个监听——驾驶舱接口（生产上是法国机器的隧道地址，香港经它访问）与 fleet 命令接口（只本机回环）。
 // 地址、端口、密钥都从本机配置（环境变量）读，见 config.ts。
-// - 有 DATABASE_URL：真库（Postgres Store + LISTEN fleet_changes）。生产必须有。
-// - 开发环境没有 DATABASE_URL：内存里的样例数据；飞书登录没配时可以用 POST /auth/dev-login 免登（只许本机回环监听）。
-// Temporal 客户端、GitHub 事件落库等引擎的 PR 合了再接；在那之前健康检查如实报红，发信号返回 503。
+// - 有 DATABASE_URL：真库（Postgres Store + LISTEN fleet_changes）+ 真 Temporal（懒连接，Temporal 没起来时
+//   这一步不报错，健康检查会如实报红）。生产必须有。
+// - 开发环境没有 DATABASE_URL：内存里的样例数据；飞书登录没配时可以用 POST /auth/dev-login 免登（只许本机回环监听）；
+//   发给工作流的信号只记日志，不接 Temporal。
+// GitHub 事件落库等引擎的 PR 合了再接；在那之前对应检查如实报红。
 import type { Server } from 'node:http';
 import { createDb } from '@fleet-dao/db';
 import { serve } from '@hono/node-server';
@@ -19,7 +21,7 @@ import { serviceHealthChecks } from './health.ts';
 import { jsonLogger } from './log.ts';
 import { createMemoryStore } from './memory-store.ts';
 import { createPgStore, probeDb, withStatementTimeout } from './pg-store.ts';
-import { notConnectedTemporal } from './temporal.ts';
+import { connectTemporal } from './temporal.ts';
 
 const log = jsonLogger();
 
@@ -57,8 +59,8 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
       demo,
       health: [],
       workflows: {
-        async signal(taskId, signal) {
-          log.info('（开发）发给工作流的信号', { taskId, signal: signal.name });
+        async signal(workflowId, signal) {
+          log.info('（开发）发给工作流的信号', { workflowId, signal: signal.name });
         },
       },
       github: {
@@ -80,7 +82,11 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
     },
     log,
   );
-  const temporal = notConnectedTemporal();
+  const temporal = connectTemporal({
+    address: config.temporalAddress,
+    namespace: config.temporalNamespace,
+    taskQueue: config.fleetTaskQueue,
+  });
   const github = notWiredGitHub();
   const deps: Deps = {
     config,

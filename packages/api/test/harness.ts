@@ -51,6 +51,9 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     quotaStaleAfterMs: 30 * 60_000,
     sseHeartbeatMs: 60_000,
     demoDir: null,
+    temporalAddress: '127.0.0.1:7243',
+    temporalNamespace: 'fleet',
+    fleetTaskQueue: 'fleet',
     ...overrides,
   };
 }
@@ -81,7 +84,8 @@ export interface Harness<S extends Store = Store> {
   config: Config;
   store: S;
   changes: ChangeFeed;
-  signals: { taskId: string; signal: TaskSignal }[];
+  /** workflowId 是目标工作流的编号（req:owner/name#issueNumber 或 sub:subtaskId），不是调用方传的原始 taskId。 */
+  signals: { workflowId: string; signal: TaskSignal }[];
   accepted: IngestedEvent[];
   logs: { level: string; message: string; fields?: Record<string, unknown> | undefined }[];
   feishuCalls: Parameters<FeishuAuth['identify']>[0][];
@@ -134,8 +138,8 @@ function wire<S extends Store>(
     demo: options.demo ?? null,
     feishu: options.feishu === null ? null : feishu.auth,
     workflows: options.workflows ?? {
-      async signal(taskId, signal) {
-        signals.push({ taskId, signal });
+      async signal(workflowId, signal) {
+        signals.push({ workflowId, signal });
       },
     },
     github: {

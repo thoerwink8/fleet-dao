@@ -6,6 +6,7 @@ import {
   PoolsResponse,
   RoutingResponse,
   RunStepsResponse,
+  requirementWorkflowId,
   SettingsResponse,
   StageKindSchema,
   TaskDetailResponse,
@@ -174,6 +175,9 @@ describe('看板与任务', () => {
 });
 
 describe('发给工作流的信号', () => {
+  // task12 在 example/canary 仓，issue 号 12（dev-fixtures.ts）：命令按任务发，编号查库拼成这个需求工作流。
+  const TASK12_WORKFLOW_ID = requirementWorkflowId({ owner: 'example', name: 'canary' }, 12);
+
   it('暂停、继续、叫停：发给这个任务的工作流，并写操作记录', async () => {
     const h = harness();
     const s = await h.login();
@@ -181,10 +185,10 @@ describe('发给工作流的信号', () => {
       const res = await h.cockpit.request(`/api/tasks/${IDS.task12}/actions`, write('POST', s, { action }));
       expect(res.status, action).toBe(200);
     }
-    expect(h.signals.map((x) => [x.taskId, x.signal.name])).toEqual([
-      [IDS.task12, 'pause'],
-      [IDS.task12, 'resume'],
-      [IDS.task12, 'stop'],
+    expect(h.signals.map((x) => [x.workflowId, x.signal.name])).toEqual([
+      [TASK12_WORKFLOW_ID, 'pause'],
+      [TASK12_WORKFLOW_ID, 'resume'],
+      [TASK12_WORKFLOW_ID, 'stop'],
     ]);
     expect(h.signals[0]?.signal).toMatchObject({ by: DEV_USER_ID });
     expect(h.store.data.audit.slice(-3).map((a) => a.action)).toEqual([
@@ -222,8 +226,8 @@ describe('发给工作流的信号', () => {
   it('任务已结束、工作流不在了：409；先记后做——发起那条在前，没做成再追加一条 ok=false', async () => {
     const h = harness({
       workflows: {
-        async signal(taskId) {
-          throw new WorkflowGoneError(taskId);
+        async signal(workflowId) {
+          throw new WorkflowGoneError(workflowId);
         },
       },
     });
@@ -283,12 +287,29 @@ describe('发给工作流的信号', () => {
     expect(res.status).toBe(200);
     expect(h.store.data.asks[0]).toMatchObject({ answer: '6', answeredBy: DEV_USER_ID });
     expect(h.signals.at(-1)).toEqual({
-      taskId: IDS.task12,
+      workflowId: TASK12_WORKFLOW_ID,
       signal: { name: 'answer', by: DEV_USER_ID, askId: 'ask-1', answer: '6' },
     });
     expect(h.store.data.audit.at(-1)).toMatchObject({ action: 'ask.answer', target: `task:${IDS.task12}` });
     const again = await h.cockpit.request('/api/asks/ask-1/answer', write('POST', s, { answer: '4' }));
     expect(await errorCode(again)).toBe('already_answered');
+  });
+
+  it('回答追问指向的任务不在库里：回答照常成功，但拼不出工作流编号、叫醒失败要留日志（不瞎拼、不装成功）', async () => {
+    const h = harness();
+    const s = await h.login();
+    h.store.data.asks.push({
+      id: 'ask-orphan',
+      taskId: 'task-does-not-exist',
+      runId: DEV_RUN_ID,
+      question: '这条追问指的任务已经不在库里了',
+      options: [],
+      askedAt: h.clock.now.toISOString(),
+    });
+    const res = await h.cockpit.request('/api/asks/ask-orphan/answer', write('POST', s, { answer: '随便' }));
+    expect(res.status).toBe(200);
+    expect(h.signals).toHaveLength(0);
+    expect(h.logs.some((l) => l.level === 'warn' && l.message.includes('叫醒工作流没成功'))).toBe(true);
   });
 });
 
