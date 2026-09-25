@@ -7,3 +7,12 @@ coverage/
 *.local
 .DS_Store
 .playwright-mcp/
+
+# 密钥和本机配置不进公开仓。加密副本在私有仓 fleet-dao-vault（README「密钥和本机配置在哪」）；
+# 这几条是多一层保险：密钥文件、保险箱的钥匙 vault-key.txt、密文 *.age 被误拷进来，git add 也不会带上。
+.secrets/
+*.pass
+*.key
+*.pem
+vault-key.txt
+*.age
