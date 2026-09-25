@@ -132,6 +132,8 @@ console.log(
         inputTokens: r.inputTokens,
         costUsd: (r.sample as { costUsd?: number }).costUsd,
         model: r.modelVersion,
+        // 没判出来时库里记的原文，比如「因每日花费上限没问：……」
+        detail: (r.sample as { detail?: string }).detail,
       })),
       checks: Object.fromEntries(checks),
     },
