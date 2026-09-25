@@ -102,12 +102,15 @@ export async function addRepo(db: Db, name = `repo-${randomUUID().slice(0, 8)}`)
   return repo;
 }
 
+/** 没指定 issue 号时顺序发号：纯随机在同一个仓里会撞唯一约束（CI 撞过一次）。从 100 万往上起，不撞测试里手写的小号。 */
+let nextIssueNumber = 1_000_000 + Math.floor(Math.random() * 1_000_000);
+
 export async function addTask(db: Db, repoId: string, over: Partial<typeof tasks.$inferInsert> = {}) {
   const [task] = await db
     .insert(tasks)
     .values({
       repoId,
-      issueNumber: over.issueNumber ?? Math.floor(Math.random() * 1e6) + 1,
+      issueNumber: over.issueNumber ?? nextIssueNumber++,
       title: '给登录页加验证码',
       rawRequest: '登录页加一个手机验证码',
       requestedBy: 'founder-a',
