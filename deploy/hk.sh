@@ -46,6 +46,7 @@ NODE_LINK=/opt/fleet-dao/node
 GATEWAY_ROOT=/srv/fleet-dao-gateway
 GATEWAY_UNIT=fleet-feishu.service
 GATEWAY_DEPLOY_BIN=/usr/local/sbin/fleet-gateway-deploy
+GATEWAY_CONNECT_WAIT=30 # 网关刚起（比如上面刚重启过）时，读回等它连上飞书最多这么久再判
 # 飞书凭据、创始人由人放；缺的后端地址、公网地址、团队群由本脚本补（已有的不改）；通行证不抄进来，单元另读 gateway-token.env
 FEISHU_ENV=/etc/fleet-dao/feishu.env
 ACME_ROOT=/var/www/fleet-dao-acme
@@ -481,10 +482,20 @@ readback_gateway() {
     return 0
   fi
   if [[ "${s[running]:-}" != "${s[current]}" ]]; then red "飞书网关的主进程跑的是「${s[running]:-别处}」，不是在用的 ${s[current]:0:12}"; fi
+  # 刚起的网关（比如上面装机时单元改了、刚重启过）要一两秒才连上飞书：还没连上就再等一会儿再判，
+  # 不然读回和重启撞在一起，报成「没连上」（2026-09-25 香港真机撞到）
+  local waited=0
+  while [[ "${s[connected]:-}" != yes ]] && ((waited < GATEWAY_CONNECT_WAIT)); do
+    sleep 2
+    waited=$((waited + 2))
+    st=$("$GATEWAY_DEPLOY_BIN" status 2>&1) || break
+    s=()
+    while IFS='=' read -r key val; do s[$key]=$val; done <<<"$st"
+  done
   case ${s[connected]:-} in
   yes) ok "飞书网关 ${s[current]:0:12} 在跑，长连接连着飞书（这次起来后处理过 ${s[messages]:-0} 条消息）" ;;
-  reconnecting) red "飞书网关在跑，但长连接断了、正在重连：journalctl -u $GATEWAY_UNIT -n 50" ;;
-  *) red "飞书网关在跑，但这次起来之后没见它连上飞书：journalctl -u $GATEWAY_UNIT -n 50" ;;
+  reconnecting) red "飞书网关在跑，但长连接断了、${GATEWAY_CONNECT_WAIT} 秒里没重连上：journalctl -u $GATEWAY_UNIT -n 50" ;;
+  *) red "飞书网关在跑，但这次起来之后 ${GATEWAY_CONNECT_WAIT} 秒里没见它连上飞书：journalctl -u $GATEWAY_UNIT -n 50" ;;
   esac
   case ${s[backend]:-} in
   reachable) ok "飞书网关经隧道连得上法国后端" ;;
