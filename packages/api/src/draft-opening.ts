@@ -15,7 +15,7 @@ import {
   type Store,
 } from './ports.ts';
 
-/** 开单还没接上时的去处：一律如实没成（草稿留在待开单），健康检查报红，不装作开成了。真开单记在 #89（#43 已合、没接这一步）。 */
+/** 开单还没接上时的去处：一律如实没成（草稿留在待开单），健康检查报红，不装作开成了。真开单记在 #91（#43 已合、没接这一步）。 */
 export function notWiredDraftOpener(): DraftOpener {
   const why = '飞书草稿开单还没接上（开 issue、拉起需求工作流那一步，等 #43）';
   return {

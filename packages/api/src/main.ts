@@ -7,7 +7,7 @@
 //   发给工作流的信号、拉起需求工作流都只记日志，不接 Temporal。
 // 拉起需求工作流还没接到 Temporal 客户端：拉起工作流的投递如实记成出错，接上后由对账重放。
 // 飞书确认的草稿去开单（DraftOpener）也等 #43 接：在那之前草稿留在「待开单」、健康检查报红，这里定时补开，接上后自动开出来。
-// （#43 已随 #56 合并、没接这一步，真开单记在 #89。）
+// （#43 已随 #56 合并、没接这一步，真开单记在 #91。）
 import type { Server } from 'node:http';
 import { createDb, type Db } from '@fleet-dao/db';
 import { createGitHub, pgLedger, pgLocker } from '@fleet-dao/github';
