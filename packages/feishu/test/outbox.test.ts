@@ -155,6 +155,59 @@ describe('推送出口', () => {
     expect(h.backend.calls('POST', '/feishu/outbox/acks')).toHaveLength(1);
   });
 
+  it('私聊卡飞书没带回 chat_id，回执不合约定：丢掉这条并记错误，后面的推送照常走（不许永远卡在队列里）', async () => {
+    h = await harness();
+    const send = h.feishu.send.bind(h.feishu);
+    h.feishu.send = async (to, message, opts) => {
+      const sent = await send(to, message, opts);
+      return 'openId' in to ? { ...sent, chatId: '' } : sent;
+    };
+    serve([
+      { items: [outboxItem({ id: 'follow:t:a', kind: 'follow', to: { type: 'user', openId: A } })] },
+      {
+        items: [
+          outboxItem({ id: 'follow:t:b', kind: 'follow', to: { type: 'user', openId: A } }),
+          outboxItem({ id: 'daily:2', kind: 'daily' }),
+        ],
+      },
+    ]);
+    await h.gateway.outbox.runOnce();
+    // 下一轮照常取、照常发；同一批里好的回执不被坏的连累。
+    await h.gateway.outbox.runOnce();
+    expect(h.feishu.of('send')).toHaveLength(3);
+    expect(acks().map((a) => a.itemId)).toEqual(['daily:2']);
+    expect(h.logs.some((l) => l.level === 'error' && l.message.includes('回执不合约定'))).toBe(true);
+  });
+
+  it('送回执时出了不是后端的错（例如本地校验）：这批丢掉并记错误，不当成「没送到」永远留着', async () => {
+    h = await harness();
+    const backend = createBackend({ baseUrl: h.backend.url, gatewayToken: TOKEN });
+    let ackCalls = 0;
+    const outbox = createOutbox({
+      backend: {
+        ...backend,
+        async ackOutbox() {
+          ackCalls += 1;
+          throw new TypeError('本地出错');
+        },
+      },
+      feishu: h.feishu,
+      registry: { remember() {} },
+      log: memoryLogger(h.logs),
+      now: Date.now,
+      teamChatId: TEAM,
+      founders: new Set([A]),
+      publicUrl: 'https://cockpit.example.test',
+      askBudgetPerDay: 10,
+      waitSeconds: 0,
+    });
+    serve([{ items: [outboxItem({ id: 'daily:1', kind: 'daily' })] }, { items: [] }]);
+    await expect(outbox.runOnce()).rejects.toThrow('回执没送成');
+    expect(await outbox.runOnce()).toBe(0);
+    expect(ackCalls).toBe(1);
+    expect(h.logs.some((l) => l.level === 'error' && l.message.includes('这批丢掉'))).toBe(true);
+  });
+
   it('积压的回执有上限：后端一直不收，超了丢最早的并记错误', async () => {
     h = await harness();
     const backend = createBackend({ baseUrl: h.backend.url, gatewayToken: TOKEN });

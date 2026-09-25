@@ -3,6 +3,7 @@
 // 送达只认飞书回的 message_id，回执写回后端（驾驶舱「通知」页的送达记录就是它）。
 // 回执送不上去时不许原地打转：一轮没走通就抛错，run() 退避；积压的回执按「条目 + 版本」去重、有上限。
 // 后端收下回执后又把同一版给回来（了结了的，或推迟 / 没发成、还没到约定时刻的）：不再处理、不碰飞书，报错并退避。
+import { FeishuOutboxAckSchema } from '@fleet-dao/shared';
 import { type Backend, BackendError, type OutboxAck, type OutboxBatch, type OutboxItem } from './backend.ts';
 import { budgetAlertCard, outboxCard, type RenderContext } from './cards.ts';
 import { DailyBudget, quietUntil } from './gate.ts';
@@ -204,13 +205,39 @@ export function createOutbox(deps: OutboxDeps): Outbox {
     }
   }
 
-  /** 把积压的回执送给后端。送不到（连不上、5xx）留着下次再送；被拒收（4xx）记错误、丢掉这批。两种都抛 OutboxStall。 */
+  /**
+   * 把积压的回执送给后端。送不到（连不上、超时、5xx）留着下次再送；被拒收（4xx）或出了别的错（例如本地校验不过）
+   * 记错误、丢掉这批——留着只会每轮都一样失败，后面的推送全被堵住。这几种都抛 OutboxStall。
+   */
   async function flushAcks(): Promise<void> {
+    // 不合约定的回执（例如飞书没带回私聊的 chat_id）一条条先挑出来丢掉，免得连累同一批里好的。
+    for (const [key, a] of pendingAcks) {
+      const checked = FeishuOutboxAckSchema.safeParse(a);
+      if (checked.success) continue;
+      pendingAcks.delete(key);
+      deps.log.error('推送回执不合约定，丢掉这条：后端没记下这次送达，网关重启后可能重发这张卡', {
+        itemId: a.itemId,
+        revision: a.revision,
+        status: a.result.status,
+        error: clip(checked.error.message, 500),
+      });
+    }
     while (pendingAcks.size > 0) {
       const chunk = [...pendingAcks.values()].slice(0, 100);
       try {
         await deps.backend.ackOutbox(chunk);
       } catch (err) {
+        if (!(err instanceof BackendError)) {
+          for (const a of chunk) pendingAcks.delete(ackKey(a));
+          deps.log.error(
+            '送推送回执时出错（不是后端的回应），这批丢掉：后端没记下这些送达，网关重启后可能重发这几张卡',
+            {
+              count: chunk.length,
+              error: clip(String(err), 500),
+            },
+          );
+          throw new OutboxStall('推送回执没送成（本地出错），这批已丢掉', err);
+        }
         if (err instanceof BackendError && err.kind === 'rejected') {
           for (const a of chunk) pendingAcks.delete(ackKey(a));
           deps.log.error(
