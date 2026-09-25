@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { type AdoptWorktreeInput, adoptWorktree, removeWorktreeDir } from '../src/procs.ts';
+import { type AdoptWorktreeInput, adoptWorktree, listAgentScopes, removeWorktreeDir } from '../src/procs.ts';
 import { tempDir } from './helpers.ts';
 
 const HELPER = join(dirname(fileURLToPath(import.meta.url)), 'fake-scope-helper.ts');
@@ -120,6 +120,40 @@ describe('adoptWorktree · 调帮手的参数与退出码（假帮手）', () =>
   it('帮手脚本本身起不来（拼错路径，spawn 就失败）：failed，exitCode 是 null（不是脚本的退出码，是 spawn 自己的错）', async () => {
     const result = await adoptWorktree(input({ sudo: [], helper: join(tempDir(), 'no-such-helper') }));
     expect(result).toMatchObject({ ok: false, code: 'failed', exitCode: null });
+  });
+});
+
+describe('listAgentScopes · 在册的会话 scope（假帮手）', () => {
+  afterEach(() => {
+    delete process.env.FLEET_FAKE_SCOPE_LIST_STDOUT;
+    delete process.env.FLEET_FAKE_SCOPE_LIST_EXIT;
+  });
+  const list = (over: { helper?: string; sudo?: readonly string[] } = {}) =>
+    listAgentScopes({ helper: HELPER, sudo: [process.execPath], ...over });
+
+  it('一行一个「编号 状态」；一个都没有是空数组', async () => {
+    process.env.FLEET_FAKE_SCOPE_LIST_STDOUT = `${SESSION} active\npush-t1-g3 failed\n`;
+    expect(await list()).toEqual({
+      ok: true,
+      scopes: [
+        { id: SESSION, state: 'active' },
+        { id: 'push-t1-g3', state: 'failed' },
+      ],
+    });
+    process.env.FLEET_FAKE_SCOPE_LIST_STDOUT = '';
+    expect(await list()).toEqual({ ok: true, scopes: [] });
+  });
+
+  it('认不出的行、帮手报错、帮手起不来：明确失败，不当成一个都没有', async () => {
+    process.env.FLEET_FAKE_SCOPE_LIST_STDOUT = 'fleet-agent-x.scope loaded active running\n';
+    expect(await list()).toMatchObject({ ok: false, exitCode: 0 });
+    process.env.FLEET_FAKE_SCOPE_LIST_STDOUT = '';
+    process.env.FLEET_FAKE_SCOPE_LIST_EXIT = '1';
+    expect(await list()).toMatchObject({ ok: false, exitCode: 1 });
+    expect(await list({ sudo: [], helper: join(tempDir(), 'no-such-helper') })).toMatchObject({
+      ok: false,
+      exitCode: null,
+    });
   });
 });
 

@@ -334,6 +334,47 @@ export function adoptWorktree(input: AdoptWorktreeInput): Promise<AdoptWorktreeR
   });
 }
 
+export interface ListAgentScopesOptions {
+  helper?: string;
+  sudo?: readonly string[];
+}
+
+export type ListAgentScopesResult =
+  | { ok: true; scopes: { id: string; state: string }[] }
+  | { ok: false; exitCode: number | null; detail: string };
+
+/**
+ * 在册的会话 scope（`fleet-agent-scope list`：一行一个「编号 状态」）。引擎重启后按它收掉上一轮留下的会话。
+ * 查不了（帮手没装、sudo 没放行）明确回失败，不当成「一个都没有」；认不出的行也算失败。
+ */
+export function listAgentScopes(options: ListAgentScopesOptions = {}): Promise<ListAgentScopesResult> {
+  const [bin, ...rest] = [
+    ...(options.sudo ?? ['/usr/bin/sudo', '-n']),
+    options.helper ?? SCOPE_HELPER,
+    'list',
+  ];
+  return new Promise((resolve) => {
+    execFile(bin as string, rest, { encoding: 'utf8', timeout: 60_000 }, (err, stdout, stderr) => {
+      if (err) {
+        const exitCode = typeof err.code === 'number' ? err.code : null;
+        resolve({ ok: false, exitCode, detail: `${stderr || ''}${err.message}`.trim() });
+        return;
+      }
+      const scopes: { id: string; state: string }[] = [];
+      for (const line of stdout.split('\n')) {
+        if (!line.trim()) continue;
+        const [id, state, ...extra] = line.trim().split(/\s+/);
+        if (!id || !state || extra.length > 0 || !SCOPE_ID.test(id)) {
+          resolve({ ok: false, exitCode: 0, detail: `认不出帮手列出的这一行：「${line.slice(0, 200)}」` });
+          return;
+        }
+        scopes.push({ id, state });
+      }
+      resolve({ ok: true, scopes });
+    });
+  });
+}
+
 export interface RemoveWorktreeDirInput {
   /** AI 会话的工作树，绝对路径；帮手脚本以 root 再核实一遍（同 adoptWorktree）。 */
   dir: string;
