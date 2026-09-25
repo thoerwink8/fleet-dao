@@ -116,7 +116,7 @@ check "仓库口令：带空白 → 不认" 1 "$(rc_of bk_valid_restic_password 
 check "开每晚备份：新仓库（0 份快照）、从没备份过 → 开（第一次装机）" 0 "$(rc_of bk_backup_hold 1 0 1)"
 check "开每晚备份：仓库有快照、这台备份成功过 → 开（平常重跑装机脚本）" 0 "$(rc_of bk_backup_hold 1 5 0)"
 check "开每晚备份：仓库有快照、这台从没备份成功过 → 不开（换机恢复，首跑会备空库、删掉出事前那份）" 1 "$(rc_of bk_backup_hold 1 5 1)"
-check "开每晚备份：不开时说清是换机恢复、去看 ops.md" 1 "$(bk_backup_hold 1 5 1 | grep -c 'docs/ops.md 第九节')"
+check "开每晚备份：不开时说清是换机恢复、去看 ops.md" 1 "$(bk_backup_hold 1 5 1 | grep -c 'docs/ops.md 第十一节')"
 check "开每晚备份：仓库连不上 → 不开" 1 "$(rc_of bk_backup_hold 0 "" 1)"
 check "开每晚备份：快照数读不出 → 不开（拿不准就不冒险）" 1 "$(rc_of bk_backup_hold 1 "" 0)"
 

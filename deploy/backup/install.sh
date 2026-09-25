@@ -5,7 +5,7 @@
 #   bash deploy/backup/install.sh hk [--check]       香港：只收密文的 fleet-backup 用户、它的目录、那一行 authorized_keys、把它关进 chroot
 # 先后：法国先跑（生成备份钥匙、打印公钥）→ 公钥填进香港 /etc/fleet-dao/backup.env、跑香港 → 法国再跑一遍（钉香港的主机钥匙、
 # 建仓库、首跑）。--check 只读回，不改任何东西。退出码同 france.sh：0 全绿，1 有红，2 有待配或没查成。
-# 换机恢复（仓库里已有快照、这台从没备份成功过）时不开每晚备份、不首跑，见 docs/ops.md 第九节。
+# 换机恢复（仓库里已有快照、这台从没备份成功过）时不开每晚备份、不首跑，见 docs/ops.md 第十一节。
 # 只写这些地方——法国：/opt/fleet-dao/restic、/etc/fleet-dao/backup{,.env}、/usr/local/lib/fleet-dao/backup、/var/lib/fleet-dao/backup、
 # /etc/systemd/system/fleet-backup*、库角色 fleet_drill、scheduled_jobs 里的三行；香港：用户 fleet-backup、/srv/fleet-dao-backup、
 # /etc/fleet-dao/backup.env、/etc/ssh/sshd_config.d/60-fleet-dao-backup.conf（只管这一个用户的 Match 段）。别的一概不碰。
