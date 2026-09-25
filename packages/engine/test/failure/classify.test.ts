@@ -211,6 +211,14 @@ describe('认得出的：按各自的梯子走', () => {
     expect(verdicts[2]?.avoid).toEqual({ scope: 'route', shared: false });
   });
 
+  it('真会话端口的进程迟迟起不来（SPAWN_TIMEOUT）：先原路重起一次，再起不来才换路由，最后挂起', () => {
+    const { trail, verdicts } = drive(session({ code: 'SPAWN_TIMEOUT', message: '等了 45 秒进程还没起来' }));
+    expect(trail[0]).toBe('retry');
+    expect(trail.slice(1, -1).every((a) => a === 'swapRoute')).toBe(true);
+    expect(trail.at(-1)).toBe('park');
+    expect(verdicts.every((v) => v.rule === 'ST1')).toBe(true);
+  });
+
   it('账号被封：原文说「请稍后重试」也不在同一个池里重试；换池，所有任务避开这个池，报警', () => {
     const { trail, verdicts } = drive(BANNED);
     expect(trail).toEqual(['swapRoute', 'swapRoute', 'park']);

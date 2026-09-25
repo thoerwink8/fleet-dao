@@ -1081,6 +1081,20 @@
         "message": "GitHub 拒绝写 specs/12-x/需求.md（409：Repository rule violations found）：不是 sha 过期，重试没用"
       },
       "expect": { "action": "park", "rule": "PM1", "alert": true }
+    },
+    {
+      "id": "X70",
+      "provenance": "format",
+      "origin": "真会话端口起会话时进程迟迟没起来（SPAWN_TIMEOUT，不可重试：同一个 runId 重试只会报已经起过）；工作流换新 runId 原路重起一次，再起不来才换路由",
+      "evidence": {
+        "source": "session:execute",
+        "routeBound": true,
+        "hostId": "claude-code",
+        "code": "SPAWN_TIMEOUT",
+        "retryable": false,
+        "message": "等了 45 秒进程还没起来"
+      },
+      "expect": { "action": "retry", "rule": "ST1" }
     }
   ],
   "skipped": [

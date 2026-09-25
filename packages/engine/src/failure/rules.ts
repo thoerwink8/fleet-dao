@@ -505,12 +505,13 @@ export const RULES: readonly FailureRule[] = [
     routeOutcome: 'fail',
     hint: '续一句提醒它，续不上开新会话',
   },
-  // 起不来：重起一次，再不行换路由（盲设计题有一臂就这么阵亡：codex initialize timed out）。
+  // 起不来：重起一次，再不行换路由（盲设计题有一臂就这么阵亡：codex initialize timed out）。真会话端口的进程迟迟
+  // 起不来（spawn_timeout，不可重试：原地同一个 runId 重试只会报已经起过）也归这里，由工作流换新 runId 原路重起一次。
   {
     id: 'ST1',
     title: '会话起不来',
     text: /initialize'? timed out|did not accept the session in time|没收到 state 帧|did not become ready within|session\/new timed out|迟迟没有第一帧/i,
-    weakCodes: ['startup_timeout'],
+    weakCodes: ['startup_timeout', 'spawn_timeout'],
     ladder: ['retry', 'swapRoute', 'park'],
     maxRetries: 1,
     routeOutcome: 'fail',
