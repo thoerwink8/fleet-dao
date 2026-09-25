@@ -150,6 +150,15 @@ sudo -n /usr/local/sbin/fleet-agent-scope list            # 编号 状态，一�
 - 看用量（不用 root）：`systemctl status fleet-agents.slice`、`systemd-cgtop /fleet.slice/fleet-agents.slice`、`systemctl show fleet-agent-<编号>.scope -p MemoryCurrent,CPUUsageNSec,TasksCurrent`。
 - 给池子加上限：写 `/etc/systemd/system/fleet-agents.slice.d/limits.conf`（MemoryHigh、MemoryMax、MemorySwapMax…）再 `systemctl daemon-reload`；回滚就删掉它。
 
+各家 AI 的全局说明与方法类 skill（`packages/agents-sync`）：
+
+- 写什么：仓根 `AGENTS.md` 上半段（两行 `fleet-dao:通用段` 标记圈起来的那一块）写进各家的全局文件，`agents/skills/` 下的每个 skill 拷进各家的 skill 目录。哪家读哪份、为什么这样放，见 `packages/agents-sync/src/targets.ts`（Windows、Linux 各一列）。
+- 法国：`france.sh` 最后一步以 root 跑 `node packages/agents-sync/bin/agents-sync --apply --user <用户>`，给 `fleet-agent-dedicated`、`fleet-agent-carpool`、`pilot` 各写一份：同步脚本先换成那个用户再动手，写出来的都归他。读回里的 `--check` 逐人逐项列出。只写这台装了的那几家（按 PATH 和家里的 `.local/bin` 找命令），没装的列为「没装，跳过」。
+- 只动两样：文件里标记圈起来的那一块（标记外的内容原样留着；第一次接管、文件里还没有标记时，先把原文件整份备份，再整份换成受管块），和清单 `~/.fleet-dao/agents-sync.json` 里记着是它装的 skill（仓里删了的会撤掉；插件链进来的、claude.ai 同步来的一律不碰）。备份在各用户家里的 `~/.fleet-dao/backups/<时间>/`，照原来的相对路径摆。
+- 改了 `AGENTS.md` 上半段或 `agents/skills/`：合进主线、机器上 pull 之后重跑 `france.sh`（或只跑上面那条命令）才生效。
+- 自测：`sudo bash deploy/test/run.sh` 里的 `agents-sync.test.sh` 以 root 建临时用户，验换身份再写、写出来的都归他、第二遍零改动、属主不对判红、root 不带 `--user` 往别人家里写被拦下。
+- 撤掉：删各用户家里受管的那几份文件（要原件就从备份拷回）、清单里列的 skill 目录和清单本身；`france.sh` 里去掉 `setup_agent_rules` 这一步。
+
 会话用户登录 reclaude（要创始人做，每个会话用户各一次）：
 
 reclaude 按用户记设备：组织写在各自家里的 `~/.reclaude/device.json`，对这个用户的所有会话一起生效，请求按设备签名。所以不拷别的用户的 `~/.reclaude`（同一设备号从两个家目录跑会互相打架），每个会话用户各自登录一次。

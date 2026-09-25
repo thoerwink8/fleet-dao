@@ -39,6 +39,9 @@
     },
     {
       "path": "packages/conventions"
+    },
+    {
+      "path": "packages/agents-sync"
     }
   ]
 }

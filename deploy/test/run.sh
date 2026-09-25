@@ -62,6 +62,13 @@ else
   skipped=1
 fi
 
+bash "$HERE/agents-sync.test.sh"
+case $? in
+0) ;;
+2) skipped=1 ;;
+*) fail=1 ;;
+esac
+
 # 端口表：脚本里定的每个端口号都要出现在 docs/ops.md 里（改了端口忘了改文档，这里会红）
 ports=$(grep -hoE '^[A-Z_]*PORT=[0-9]+' "$DEPLOY/france.sh" "$DEPLOY/hk.sh" | cut -d= -f2 | sort -u)
 if [[ -z "$ports" ]]; then

@@ -4,7 +4,8 @@
 # PostgreSQL 16（Ubuntu 自带的源，吃得到自动安全更新）、Temporal 服务端 1.32.0（Postgres 持久化，端口和旧系统错开）、
 # 本机上只许 root 和 fleet 连 Temporal 与库的 nft 表、AI 会话资源池 fleet-agents.slice 与起会话的脚本、
 # fleet 用户的 pnpm（corepack）、WireGuard 客户端（主动连香港，法国不开任何入站端口）、
-# 应用的本机配置与随机密钥、往香港传驾驶舱静态文件的钥匙。应用本身（引擎、后端、前端）由 deploy/release.sh 发布。
+# 应用的本机配置与随机密钥、往香港传驾驶舱静态文件的钥匙、会话用户和 pilot 家里各家 AI 的全局说明与方法类 skill。
+# 应用本身（引擎、后端、前端）由 deploy/release.sh 发布。
 # 旧系统的服务、端口、文件一概不动。端口表、怎么跑、怎么看健康、怎么回滚：docs/ops.md。
 #   bash deploy/france.sh           装：缺的补上，已有的不动
 #   bash deploy/france.sh --check   只读回和自检，不改任何东西
@@ -66,6 +67,10 @@ SESSION_USERS=(fleet-agent-dedicated fleet-agent-carpool)
 PILOT_USER=pilot
 PILOT_HOME=/home/pilot
 WRITER_IDENTITIES=(fleet "${SESSION_USERS[@]}" "$PILOT_USER")
+# 各家 AI 的全局说明（仓根 AGENTS.md 的通用段）和方法类 skill（agents/skills/）写进这几个用户家里：
+# 同步脚本以各用户自己的身份写（文件归他们），只动标记圈起来的那一块和它清单里记着的 skill（docs/ops.md 第五节）
+AGENT_RULES_USERS=("${SESSION_USERS[@]}" "$PILOT_USER")
+AGENTS_SYNC=$DEPLOY_DIR/../packages/agents-sync/bin/agents-sync
 AGENT_SCOPE_BIN=/usr/local/sbin/fleet-agent-scope
 SUDOERS_FILE=/etc/sudoers.d/fleet-dao
 ENV_FILE=/etc/fleet-dao/france.env
@@ -621,6 +626,56 @@ setup_web_upload() {
 $line"
 }
 
+# 跑一遍同步脚本（packages/agents-sync），把它逐行的结论接进本脚本的账：↻ 改了、✗ 红、… 没查成、✓ 对、· 没装跳过。
+# 它以 --user 换成那个用户再动手，写出来的东西归那个用户。
+# 写（--apply）的时候只记「改了」，✗ 和 … 照打不记账：读回那一步的 --check 会把同一件事再判一次，记两遍就重了
+agents_sync() { # 模式 用户
+  local mode=$1 u=$2 out rc=0 line said=0
+  out=$(/usr/bin/node "$AGENTS_SYNC" "$mode" --user "$u" 2>&1) || rc=$?
+  while IFS= read -r line; do
+    case $line in
+    '  ↻ '*) changed "$u ${line#  ↻ }" ;;
+    '  ✗ '*)
+      said=1
+      if [[ "$mode" == --check ]]; then red "$u ${line#  ✗ }"; else printf '  ✗ %s %s\n' "$u" "${line#  ✗ }"; fi
+      ;;
+    '  … '*)
+      said=1
+      if [[ "$mode" == --check ]]; then pending "$u ${line#  … }"; else printf '  … %s %s\n' "$u" "${line#  … }"; fi
+      ;;
+    '  ✓ '*) if [[ "$mode" == --check ]]; then ok "$u ${line#  ✓ }"; fi ;;
+    '  · '*) if [[ "$mode" == --check ]]; then printf '  · %s %s\n' "$u" "${line#  · }"; fi ;;
+    esac
+  done <<<"$out"
+  # 退出码不是 0 却一行 ✗、… 都没给（崩了、node 起不来）：别当成没事
+  if ((rc != 0 && said == 0)); then
+    red "$u：同步脚本 $mode 退出 $rc，没给出逐项结论：$(tail -3 <<<"$out" | tr '\n' ' ')"
+  fi
+}
+
+setup_agent_rules() {
+  step "各家 AI 的全局说明与方法类 skill（${AGENT_RULES_USERS[*]}；仓根 AGENTS.md 的通用段、agents/skills/）"
+  local u
+  for u in "${AGENT_RULES_USERS[@]}"; do
+    if ! id "$u" >/dev/null 2>&1; then
+      pending "$u 这个用户还没有，全局说明没写（建了再跑一遍）"
+      continue
+    fi
+    agents_sync --apply "$u"
+  done
+}
+
+readback_agent_rules() {
+  local u
+  for u in "${AGENT_RULES_USERS[@]}"; do
+    if ! id "$u" >/dev/null 2>&1; then
+      pending "$u 这个用户还没有，全局说明没查"
+      continue
+    fi
+    agents_sync --check "$u"
+  done
+}
+
 readback() {
   step "读回"
   readback_secrets_dir
@@ -630,6 +685,7 @@ readback() {
   readback_slice
   readback_session_users
   readback_pilot
+  readback_agent_rules
   readback_sessions
   readback_pnpm
   readback_wireguard
@@ -1025,6 +1081,7 @@ main() {
     setup_pnpm
     setup_app_config
     setup_web_upload
+    setup_agent_rules
   else
     load_config
   fi
