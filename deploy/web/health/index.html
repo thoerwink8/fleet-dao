@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fleet-dao 健康检查</title>
+<style>
+  :root { color-scheme: light dark; --ok: #1a7f37; --bad: #cf222e; --wait: #6e7781; --line: #d0d7de; }
+  @media (prefers-color-scheme: dark) { :root { --ok: #3fb950; --bad: #f85149; --wait: #8b949e; --line: #30363d; } }
+  body { margin: 0; font: 16px/1.6 system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  main { max-width: 640px; margin: 0 auto; padding: 24px 16px; }
+  h1 { font-size: 22px; margin: 0 0 16px; }
+  #banner { padding: 12px 16px; border-radius: 8px; font-weight: 600; color: #fff; background: var(--wait); }
+  #banner.ok { background: var(--ok); }
+  #banner.bad { background: var(--bad); }
+  ul { list-style: none; margin: 16px 0; padding: 0; }
+  li { display: flex; gap: 12px; align-items: baseline; padding: 10px 4px; border-bottom: 1px solid var(--line); }
+  .dot { flex: none; width: 10px; height: 10px; border-radius: 50%; background: var(--wait); transform: translateY(-1px); }
+  .dot.ok { background: var(--ok); }
+  .dot.bad { background: var(--bad); }
+  .label { flex: none; min-width: 6em; font-weight: 600; }
+  .reason { opacity: .8; overflow-wrap: anywhere; }
+  footer { font-size: 14px; opacity: .7; display: flex; flex-wrap: wrap; gap: 4px 16px; align-items: center; }
+  button { font: inherit; font-size: 14px; padding: 2px 10px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>fleet-dao 健康检查</h1>
+  <div id="banner" role="status" aria-live="polite">检查中…</div>
+  <ul id="rows"></ul>
+  <footer>
+    <span id="checked">还没查过</span>
+    <span>每 15 秒自动刷新</span>
+    <button id="refresh" type="button">现在刷新</button>
+    <span id="release">页面版本：读取中</span>
+  </footer>
+</main>
+<script type="module">
+  // 绝对路径：从 /health（不带斜杠）打开时，相对路径会解析到 /health.js
+  import { fetchHealth, judge } from '/health/health.js';
+
+  const REFRESH_MS = 15000;
+  const banner = document.getElementById('banner');
+  const list = document.getElementById('rows');
+  const checked = document.getElementById('checked');
+  let busy = false;
+
+  // 只用 textContent 往页面里放后端给的文字：原因是后端说的，不当 HTML 解释
+  function render(verdict, at) {
+    banner.textContent = verdict.summary;
+    banner.className = verdict.ok ? 'ok' : 'bad';
+    list.replaceChildren(
+      ...verdict.rows.map((r) => {
+        const li = document.createElement('li');
+        const dot = document.createElement('span');
+        dot.className = `dot ${r.ok ? 'ok' : 'bad'}`;
+        const label = document.createElement('span');
+        label.className = 'label';
+        label.textContent = r.label;
+        const reason = document.createElement('span');
+        reason.className = 'reason';
+        reason.textContent = r.reason;
+        li.append(dot, label, reason);
+        return li;
+      }),
+    );
+    checked.textContent = `上次检查：${at.toLocaleTimeString('zh-CN', { hour12: false })}`;
+  }
+
+  async function refresh() {
+    if (busy) return;
+    busy = true;
+    try {
+      render(judge(await fetchHealth()), new Date());
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function showRelease() {
+    const el = document.getElementById('release');
+    try {
+      const res = await fetch('/release.json', { cache: 'no-store' });
+      const { commit } = await res.json();
+      el.textContent = typeof commit === 'string' ? `页面版本：${commit.slice(0, 12)}` : '页面版本：读不出';
+    } catch {
+      el.textContent = '页面版本：读不到';
+    }
+  }
+
+  document.getElementById('refresh').addEventListener('click', refresh);
+  refresh();
+  showRelease();
+  setInterval(refresh, REFRESH_MS);
+</script>
+</body>
+</html>
