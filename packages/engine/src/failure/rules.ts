@@ -74,11 +74,13 @@ export const RULES: readonly FailureRule[] = [
   // 原路重试、换路由都是再起一个会话：同一件活跑两遍、扣两次额度、同一棵树里两个会话。所以只挂起报警，等对账；
   // 是我们没查成，不是路由坏了，不记路由的失败。强码一轮按表的先后认，这两条只排在 EN2（同样只挂起）后面：
   // 原话里常夹着等应答时收到的别的报错（at capacity、overloaded_error、account_banned……），排在繁忙、封号这些规则
-  // 后面就会被抢走。
+  // 后面就会被抢走。旧系统同一件事的原文「没收到 prompt 的应答帧」（夹具 S09）也归 ST2：起没起成同样不知道，
+  // docs/reference/errors.md 第 5 节 S09 原判 retry-here，以这条为准（PR #14 复审拍板）。
   {
     id: 'ST2',
     title: '起会话没查成，可能已经在跑',
     codes: ['launch_unknown'],
+    text: /没收到 prompt 的应答帧/,
     ladder: ['park'],
     alert: true,
     routeOutcome: 'neutral',
@@ -424,7 +426,7 @@ export const RULES: readonly FailureRule[] = [
   {
     id: 'ST1',
     title: '会话起不来',
-    text: /initialize'? timed out|did not accept the session in time|没收到 prompt 的应答帧|没收到 state 帧|did not become ready within|session\/new timed out|迟迟没有第一帧/i,
+    text: /initialize'? timed out|did not accept the session in time|没收到 state 帧|did not become ready within|session\/new timed out|迟迟没有第一帧/i,
     weakCodes: ['startup_timeout'],
     ladder: ['retry', 'swapRoute', 'park'],
     maxRetries: 1,

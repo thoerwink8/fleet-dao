@@ -401,6 +401,18 @@ describe('插头没查成的：再起一个会话就可能跑两遍，只挂起�
       routeOutcome: 'neutral',
       counter: null,
     });
+    // 旧系统同一件事的原文（不带码）：起没起成同样不知道，也不重试
+    const old = drive(
+      session({ hostId: 'mirasim', message: '起会话没查成：没收到 prompt 的应答帧（没查成）' }),
+    );
+    expect(old.trail).toEqual(['park']);
+    expect(parked(old.last)).toEqual({
+      rule: 'ST2',
+      action: 'park',
+      alert: true,
+      routeOutcome: 'neutral',
+      counter: null,
+    });
   });
 
   it('原话里夹着等应答时收到的别的报错：没有码时它们各归各的规则，有 launch_unknown 就压得过（尤其是繁忙 BZ1）', () => {

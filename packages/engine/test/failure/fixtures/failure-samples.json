@@ -99,9 +99,9 @@
     {
       "id": "S09",
       "provenance": "production",
-      "origin": "旧系统 VPS 执行记录 9 条；windsurf-dao#1840",
+      "origin": "旧系统 VPS 执行记录 9 条；windsurf-dao#1840。和 launch_unknown 同一件事（prompt 发出去了、起没起成不知道），重试就可能扣两次额度：errors.md 第 5 节原判 retry-here，以 ST2 为准（PR #14 复审拍板）",
       "evidence": { "hostId": "mirasim", "message": "起会话没查成：没收到 prompt 的应答帧（没查成）" },
-      "expect": { "action": "retry", "rule": "ST1" }
+      "expect": { "action": "park", "rule": "ST2", "alert": true, "routeOutcome": "neutral", "counter": null }
     },
     {
       "id": "S10",
