@@ -7,6 +7,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./failure": "./src/failure/index.ts",
+    "./routing": "./src/routing/index.ts",
     "./worker": "./src/worker.ts",
     "./fakes": "./src/fakes.ts"
   },
