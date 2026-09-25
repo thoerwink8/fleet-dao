@@ -35,7 +35,7 @@ import {
   questionRev,
   renderPrompt,
 } from './questions.ts';
-import { scrubHead } from './scrub.ts';
+import { cutAt, scrubHead } from './scrub.ts';
 import {
   type AnswerRow,
   type AnswerSample,
@@ -108,7 +108,7 @@ const DETAIL_CHARS = 500;
  */
 function clean(detail: string): string {
   const text = scrubHead(detail, DETAIL_CHARS + 1);
-  return text.length > DETAIL_CHARS ? `${text.slice(0, DETAIL_CHARS)}…` : text;
+  return text.length > DETAIL_CHARS ? `${cutAt(text, DETAIL_CHARS)}…` : text;
 }
 const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
 const isLocal = (reason: NotJudgedReason) => (LOCAL_REASONS as readonly string[]).includes(reason);
@@ -275,7 +275,10 @@ export function createJev(deps: JevDeps): Jev {
       ids = await insertAnswers(db, rows, demote);
     } catch (err) {
       // 没记上就当没判：调用方照默认走，不带着一个库里查不到的判断去拦。
-      return questions.map((q) => notJudged(q, 'store_error', `判断没记进库：${message(err)}`));
+      // 这一问要是已经发出去了，花费另记一行；说明放在原因最前面（原因截到 500 字，库的报错可能很长）。
+      const lost = `判断没记进库：${message(err)}`;
+      const note = await recordSpendOnly(db, rows, demote, lost);
+      return questions.map((q) => notJudged(q, 'store_error', `${note}${lost}`));
     }
     const idOf = new Map(rows.map((r, i) => [r.questionId, ids[i]]));
     return questions.map((q) => {
@@ -410,4 +413,56 @@ function billedTokens(result: BackendResult, estimated: number): { tokens: numbe
   if (result.ok) return { tokens: result.inputTokens, estimated: result.tokensEstimated };
   if (result.inputTokens !== undefined) return { tokens: result.inputTokens, estimated: false };
   return { tokens: estimated, estimated: true };
+}
+
+/**
+ * 判断没记进库，可这一问已经发给后端、上游可能已经计费：花费单独补记一行（原因 unrecorded，漂移的照记原来的原因），
+ * 每日次数和花费上限照样算得到；该当场退回只记不拦的题照样退回。
+ * 补记的行只留花费、题目版本、批号这些，证据只留长度和哈希，不带引用和原文——写不进库多半就坏在这几样。
+ * 返回放在原因最前面的说明；这一批一问都没发出去（都是本地拦下的）就是空串。补也补不上就明说花了钱没记上，不静默丢。
+ */
+async function recordSpendOnly(
+  db: Db,
+  rows: readonly AnswerRow[],
+  demote: readonly DriftDemotion[],
+  lost: string,
+): Promise<string> {
+  const sent = rows.filter((r) => r.inputTokens !== null && r.inputTokens !== undefined);
+  if (sent.length === 0) return '';
+  const detail = clean(lost);
+  const spendRows = sent.map((r): AnswerRow => {
+    const s = r.sample as AnswerSample;
+    const sample: AnswerSample = {
+      rev: s.rev,
+      model: s.model,
+      backend: s.backend,
+      evidence: Object.fromEntries(
+        Object.entries(s.evidence).map(([k, d]) => [k, { chars: d.chars, sha: d.sha }]),
+      ),
+      batch: s.batch,
+      ...(s.tokensEstimated ? { tokensEstimated: true } : {}),
+      ...(s.costUsd === undefined ? {} : { costUsd: s.costUsd }),
+      ...(s.exam ? { exam: s.exam } : {}),
+      detail,
+    };
+    const drift = r.failReason && isDrift(r.failReason as NotJudgedReason) ? r.failReason : null;
+    return {
+      questionId: r.questionId,
+      askedAt: r.askedAt,
+      subject: r.subject,
+      sample,
+      shadow: true,
+      ok: false,
+      failReason: drift ?? 'unrecorded',
+      modelVersion: r.modelVersion ?? null,
+      latencyMs: r.latencyMs ?? null,
+      inputTokens: r.inputTokens,
+    };
+  });
+  try {
+    await insertAnswers(db, spendRows, demote);
+    return '这一问已经发给后端，花费另记了一行。';
+  } catch (err) {
+    return `这一问已经发给后端，花了钱没记上（补记也失败：${message(err)}）。`;
+  }
 }

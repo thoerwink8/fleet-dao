@@ -591,6 +591,82 @@ describe('证据：喂全文，库里只留摘要', () => {
   });
 });
 
+describe('写不进库的字与写不进库的时候', () => {
+  const HIGH = /[\uD800-\uDBFF]$/;
+
+  it('证据开头截在 emoji 中间：去掉落单的前一半，照常记进库（改之前整行被 jsonb 拒收、返回 store_error）', async () => {
+    const backend = fakeBackend(() => ok({ 'triage-ui': ['ui', 0.9] }));
+    const v = await jevWith(backend).ask(TRIAGE_UI, { request: `${'字'.repeat(199)}🔴后面还有` }, ctx);
+    expect(v).toMatchObject({ judged: true });
+    const [row] = await rows();
+    const sample = row?.sample as { evidence: Record<string, { head?: string }> } | undefined;
+    expect(sample?.evidence.request?.head).toBe('字'.repeat(199));
+  });
+
+  it('没判出来的原文截在 emoji 中间：同样去掉落单的前一半，原因照常记进库', async () => {
+    const detail = `${'错'.repeat(499)}🔴尾巴`;
+    const backend = fakeBackend(() => ({ ok: false, reason: 'timeout', detail, latencyMs: 8000 }));
+    const v = await jevWith(backend).ask(TRIAGE_UI, request, ctx);
+    expect(v).toMatchObject({ judged: false, reason: 'timeout' });
+    if (!v.judged) expect(v.detail).toBe(`${'错'.repeat(499)}…`);
+    const [row] = await rows();
+    expect(row).toMatchObject({ failReason: 'timeout' });
+    expect((row?.sample as { detail?: string } | undefined)?.detail).not.toMatch(HIGH);
+  });
+
+  it('判断没记进库、可这一问已经发给后端：花费另记一行（unrecorded），每日花费照样算；调用方拿到 store_error，原因开头说清', async () => {
+    const paid = { ...fakeBackend(() => ok({ 'triage-ui': ['ui', 0.9] })), usdPerMTok: 1 };
+    // 引用里带着落单的代理项：jsonb 收不下，这一行写不进去（调用方给的引用，什么都可能有）。
+    const v = await jevWith(paid).ask(TRIAGE_UI, request, { subject: 'task:1', ref: { note: '\uD83D' } });
+    expect(v).toMatchObject({ judged: false, reason: 'store_error', act: 'none' });
+    if (!v.judged)
+      expect(v.detail.startsWith('这一问已经发给后端，花费另记了一行。判断没记进库：')).toBe(true);
+    expect(paid.calls).toHaveLength(1);
+    const [row] = await rows();
+    expect(row).toMatchObject({ ok: false, failReason: 'unrecorded', inputTokens: 400, shadow: true });
+    const sample = row?.sample as { costUsd?: number; ref?: unknown; evidence: Record<string, object> };
+    expect(sample.costUsd).toBe(0.0004);
+    expect(sample.ref).toBeUndefined();
+    expect(sample.evidence.request).toEqual({ chars: request.request.length, sha: expect.any(String) });
+    // 补记的这一行占每日花费：上限只比这一问多一点（0.0004 + 下一问估约 0.0001 超了 0.00045），再问就不问了。
+    await t.db.insert(settings).values({ key: 'judge.dailyUsdCap', value: 0.00045 });
+    expect(await jevWith(paid).ask(TRIAGE_UI, { request: '改首页标题' }, ctx)).toMatchObject({
+      reason: 'daily_cap',
+    });
+  });
+
+  it(
+    '补记也补不上：原因开头明说花了钱没记上，不静默丢',
+    async () => {
+      const own = await createTestDb();
+      const paid = {
+        ...fakeBackend(async () => {
+          await own.close();
+          return ok({ 'triage-ui': ['ui', 0.9] });
+        }),
+        usdPerMTok: 1,
+      };
+      const v = await createJev({ db: own.db, backend: paid, now: () => NOW }).ask(TRIAGE_UI, request, ctx);
+      expect(v).toMatchObject({ judged: false, reason: 'store_error' });
+      if (!v.judged) expect(v.detail.startsWith('这一问已经发给后端，花了钱没记上（补记也失败：')).toBe(true);
+    },
+    TEST_DB_TIMEOUT_MS,
+  );
+
+  it('本地就拦下的（没发出去）写不进库时不补记：没花钱，也不说花了钱', async () => {
+    const backend = fakeBackend();
+    const v = await jevWith(backend).ask(
+      ERROR_NEXT,
+      { step: 'createWorktree', message: '   ' },
+      { subject: 'task:1', ref: { note: '\uD83D' } },
+    );
+    expect(v).toMatchObject({ judged: false, reason: 'store_error' });
+    if (!v.judged) expect(v.detail.startsWith('判断没记进库：')).toBe(true);
+    expect(backend.calls).toHaveLength(0);
+    expect(await rows()).toHaveLength(0);
+  });
+});
+
 describe('考试', () => {
   it('标准答案记成真值（canary），从不真拦；只问有标准答案的题', async () => {
     const backend = fakeBackend(() => ok({ 'triage-ui': ['ui', 0.95] }));
