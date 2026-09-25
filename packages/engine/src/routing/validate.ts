@@ -54,6 +54,8 @@ export function validateInput(input: ChooseRouteInput, trialEnabled: boolean): n
     if (!ROLES.includes(r.poolRole))
       throw new RoutingInputError(`选路判不了：${who} 的池主备认不出（${r.poolRole}）`);
     count(r.inFlight, `${who} 的在途数`);
+    // 读不到不能当 0：一批任务同时来时，每个都会看到「没人占着」，拼车号就放出不止一个试探。
+    count(r.reserved, `${who} 的已选定还没开工数`);
     count(r.maxConcurrency, `${who} 的并发上限`);
     // 硬禁令也按上游串和别名认：没带上就只认得模型 id 和显示名，上游串是 Fable 的会漏过去。
     if (r.upstreamModel !== null && typeof r.upstreamModel !== 'string') {

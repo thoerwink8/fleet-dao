@@ -69,26 +69,31 @@ export function chooseRoute(input: ChooseRouteInput): ChooseRouteResult {
   if (first) {
     const explore = pickTrial(input, ready, policy);
     const chosen = explore ?? first;
-    const breakerTrial = chosen.item.route.breaker.admit === 'trial';
-    const probe = probeNote(chosen.item.route);
+    const route = chosen.item.route;
+    const breakerTrial = route.breaker.admit === 'trial';
     const trial: TrialKind | null = explore
       ? 'explore'
       : breakerTrial
         ? 'breaker'
-        : probe
+        : backupProbeReason(route) !== null
           ? 'quota-probe'
           : null;
-    let why = explore
-      ? `试探：${stageName}阶段第 ${explore.item.humanIndex + 1} 条 ${routeLabel(explore.item.route)}（首选是 ${routeLabel(first.item.route)}；约 ${Math.round(policy.trialRatio * 100)}% 的任务派给非首选，攒战绩）`
-      : whyFirst(stageName, chosen, judged);
-    if (explore && probe) why += `；${probe}`;
-    if (breakerTrial) why += '；熔断半开，这一单当试探';
-    return dispatch(chosen.item.route, why, trial, null, verdicts);
+    const why = explore
+      ? withNotes(
+          `试探：${stageName}阶段第 ${explore.item.humanIndex + 1} 条 ${routeLabel(route)}（首选是 ${routeLabel(first.item.route)}；约 ${Math.round(policy.trialRatio * 100)}% 的任务派给非首选，攒战绩）`,
+          quotaNote(route),
+          breakerTrial ? BREAKER_TRIAL : null,
+        )
+      : withNotes(whyFirst(stageName, chosen, judged), breakerTrial ? BREAKER_TRIAL : null);
+    return dispatch(route, why, trial, null, verdicts);
   }
 
   const allOpen = allOpenTrial(judged);
   if (allOpen) {
-    const why = `${stageName}阶段的候选路由全都熔断，多半是共用的一层坏了（本机网络、中转服务）：放最早到点的 ${routeLabel(allOpen.item.route)} 去试探`;
+    const why = withNotes(
+      `${stageName}阶段的候选路由全都熔断，多半是共用的一层坏了（本机网络、中转服务）：放最早到点的 ${routeLabel(allOpen.item.route)} 去试探`,
+      quotaNote(allOpen.item.route),
+    );
     return dispatch(allOpen.item.route, why, 'all-open', why, verdicts);
   }
 
@@ -140,9 +145,8 @@ function whyFirst(stageName: string, chosen: Judged, judged: Judged[]): string {
     if (fast && item.humanIndex > at)
       parts.push(fast.text.replace(/往前提$/, at === 0 ? '提到最前' : `提到第 ${at + 1}`));
   }
-  const probe = probeNote(item.route);
-  if (probe) parts.push(probe);
-  else if (item.route.quota === 'unknown') parts.push(QUOTA_UNKNOWN);
+  const note = quotaNote(item.route);
+  if (note) parts.push(note);
   // 人排在它前面、这次没派的：各自为什么（被挡，或被微调挪到了后面）。
   const passed = judged.filter((j) => j !== chosen && j.item.humanIndex < item.humanIndex);
   const notes = passed.map((j) => {
@@ -207,32 +211,41 @@ function waitOrNone(stageName: string, judged: Judged[], verdicts: RouteVerdict[
   if (waiting.length === 0) {
     return { kind: 'none', reason: `${stageName}阶段没有能派的路由（${summary}）`, verdicts };
   }
-  const order = ['slot', 'breaker', 'quota'] as const;
-  const waitFor =
-    order.find((k) => waiting.some((j) => j.group.kind === 'wait' && j.group.waitFor === k)) ?? 'quota';
-  const those = waiting.filter((j) => j.group.kind === 'wait' && j.group.waitFor === waitFor);
-  const untils = those
-    .map((j) => (j.group.kind === 'wait' ? j.group.until : null))
-    .filter((t): t is number => t !== null);
-  const until = untils.length > 0 ? Math.min(...untils) : null;
-  const head = {
-    slot: `${stageName}阶段能用的路由都在等并发空位`,
-    breaker: `${stageName}阶段能用的路由都在熔断冷却`,
-    quota: `${stageName}阶段能用的路由都在等额度清零`,
-  }[waitFor];
-  const when =
-    until === null
-      ? waitFor === 'slot'
-        ? ''
-        : '，最早几点能派不知道'
-      : `，最早 ${stamp(until)}${those.length > untils.length ? `（另有 ${those.length - untils.length} 条时刻不知道）` : ''}`;
+  const soonest = earliestWait(waiting.map((j) => j.group).filter(isWait));
   return {
     kind: 'wait',
-    waitFor,
-    until: until === null ? null : new Date(until).toISOString(),
-    reason: `${head}${when}（${summary}）`,
+    waitFor: soonest.waitFor,
+    until: soonest.until === null ? null : new Date(soonest.until).toISOString(),
+    reason: `${stageName}阶段暂时派不了，${waitText(soonest)}（${summary}）`,
     verdicts,
   };
+}
+
+type Wait = Extract<BlockGroup, { kind: 'wait' }>;
+
+function isWait(g: BlockGroup): g is Wait {
+  return g.kind === 'wait';
+}
+
+/**
+ * 几条路由各等各的：最早能派 = 最早好的那条。有一条时刻不知道（只差空位、等试探结果、清零时刻不知道），
+ * 它随时可能好，就不给时刻、按轮询间隔再选一次——不能拿别的路由几天后的清零时刻去睡，把它错过。
+ * 时刻不知道时，有只差空位的就说在等空位（多半最快），否则说第一条时刻不知道的在等什么。
+ */
+function earliestWait(waits: Wait[]): Wait {
+  const unknown = waits.filter((w) => w.until === null);
+  if (unknown.length > 0) return unknown.find((w) => w.waitFor === 'slot') ?? (unknown[0] as Wait);
+  return waits.reduce((a, b) => ((b.until as number) < (a.until as number) ? b : a));
+}
+
+function waitText(w: Wait): string {
+  if (w.waitFor === 'slot') return '在等并发空位';
+  if (w.until === null) {
+    return w.waitFor === 'breaker' ? '在等熔断的试探结果' : '在等额度清零，清零时刻不知道，按轮询间隔再看';
+  }
+  return w.waitFor === 'breaker'
+    ? `最早 ${stamp(w.until)} 熔断到点、放试探`
+    : `最早 ${stamp(w.until)} 额度清零、够跑一个活`;
 }
 
 /** 任务指定了路由：只看它；硬挡报「指定的路由用不了」，等得来就等，绝不偷偷换。 */
@@ -265,18 +278,26 @@ function chooseTaskRoute(input: ChooseRouteInput, route: RouteFacts, ctx: Filter
     };
   }
   const breakerTrial = route.breaker.admit === 'trial';
-  const probe = probeNote(route);
-  const parts = [`任务指定的路由：${label}`];
-  if (probe) parts.push(probe);
-  else if (route.quota === 'unknown') parts.push(QUOTA_UNKNOWN);
-  if (breakerTrial) parts.push('熔断半开，这一单当试探');
-  const trial: TrialKind | null = breakerTrial ? 'breaker' : probe ? 'quota-probe' : null;
-  return dispatch(route, parts.join('；'), trial, null, [verdict]);
+  const trial: TrialKind | null = breakerTrial
+    ? 'breaker'
+    : backupProbeReason(route) !== null
+      ? 'quota-probe'
+      : null;
+  const why = withNotes(`任务指定的路由：${label}`, quotaNote(route), breakerTrial ? BREAKER_TRIAL : null);
+  return dispatch(route, why, trial, null, [verdict]);
 }
 
-const QUOTA_UNKNOWN = '额度未知（没读成或读数过期）';
+const BREAKER_TRIAL = '熔断半开，这一单当试探';
 
-/** 派给额度未知的备池：这一单就是那一个试探（filter.ts 的 backupBlocks 只放一个）。 */
-function probeNote(route: RouteFacts): string | null {
-  return backupProbeReason(route) === null ? null : `${route.poolName}额度未知，只放一个试探`;
+/**
+ * 派出去的这条额度未知时，理由里写明（design §九 选路第 3 条）：备池写「只放一个试探」（filter.ts 的
+ * backupBlocks 只放一个），主池写「额度未知」。每条派出去的路径都经这里，试探、全熔断的也不例外。
+ */
+function quotaNote(route: RouteFacts): string | null {
+  if (backupProbeReason(route) !== null) return `${route.poolName}额度未知，只放一个试探`;
+  return route.quota === 'unknown' ? '额度未知（没读成或读数过期）' : null;
+}
+
+function withNotes(head: string, ...notes: (string | null)[]): string {
+  return [head, ...notes.filter((n): n is string => n !== null)].join('；');
 }

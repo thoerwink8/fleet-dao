@@ -72,10 +72,13 @@ export interface RoutingPolicy {
   /** 备池（拼车号）同时最多几个会话，和池自己的并发上限取小的（创始人 2026-09-25 定：不超过 2）。 */
   backupMaxConcurrency: number;
   /**
-   * 备池剩余少于这个比例就不派（「剩余不够跑一个活」）。按窗口种类给：一个轻活大约占 5 小时窗的一成、周窗的百分之三。
-   * 这是估的，没有量过；攒够会话用量后换成「该阶段在该池上的 p80 用量」。没列的种类按 other 算。
+   * 额度够收尾（design §九 选路第 1 条，所有路由都判）：适用的窗口剩余少于这个比例就不派，等它清零。没列的种类按 other 算。
+   * 起步值按拼车号的轻活估：一个活大约占 5 小时窗的一成、周窗的百分之三（估的，没有量过）。独享号的窗口大得多
+   * （design §十：拼车一窗约 3400 万输入当量，独享至少 2.8 亿），这张表对它偏保守，宁可早一点停下等清零，
+   * 也不派一个跑不完的活；它的 5 小时窗在 12 个会话下撑了 3 小时 20 分还没满，6 个并发下多半撑不到只剩一成就清零了。
+   * 攒够会话用量后换成「该阶段在该池上的 p80 用量」。
    */
-  backupNeedPerTask: Partial<Record<QuotaWindowKind, number>>;
+  needPerTask: Partial<Record<QuotaWindowKind, number>>;
   /**
    * 各阶段默认的轻重（任务没给轻重时用）：分诊、判断题、写需求文档、审查算短而轻，其余算重。
    * design §九「主池与备池」：拼车号派审查、判断题、巡检这类短而独立的活；巡检任务由引擎在任务上标 light。
@@ -96,7 +99,7 @@ export const DEFAULT_ROUTING_POLICY: Readonly<RoutingPolicy> = Object.freeze<Rou
   trialEnabled: false,
   trialRatio: 0.1,
   backupMaxConcurrency: 2,
-  backupNeedPerTask: {
+  needPerTask: {
     '5h': 0.1,
     '7d': 0.03,
     '7d_model': 0.03,
@@ -123,7 +126,7 @@ export function resolveRoutingPolicy(partial?: Partial<RoutingPolicy>): RoutingP
   const p: RoutingPolicy = {
     ...DEFAULT_ROUTING_POLICY,
     ...(partial ?? {}),
-    backupNeedPerTask: { ...DEFAULT_ROUTING_POLICY.backupNeedPerTask, ...partial?.backupNeedPerTask },
+    needPerTask: { ...DEFAULT_ROUTING_POLICY.needPerTask, ...partial?.needPerTask },
     stageWeight: { ...DEFAULT_ROUTING_POLICY.stageWeight, ...partial?.stageWeight },
   };
   const bad = (key: string, want: string, got: unknown) =>
@@ -149,8 +152,8 @@ export function resolveRoutingPolicy(partial?: Partial<RoutingPolicy>): RoutingP
   if (!Number.isInteger(p.backupMaxConcurrency) || p.backupMaxConcurrency < 1) {
     throw bad('backupMaxConcurrency', '不小于 1 的整数', p.backupMaxConcurrency);
   }
-  for (const [kind, need] of Object.entries(p.backupNeedPerTask)) {
-    if (need !== undefined) ratio(`backupNeedPerTask.${kind}`, need);
+  for (const [kind, need] of Object.entries(p.needPerTask)) {
+    if (need !== undefined) ratio(`needPerTask.${kind}`, need);
   }
   for (const [stage, w] of Object.entries(p.stageWeight)) {
     if (w !== 'light' && w !== 'heavy') throw bad(`stageWeight.${stage}`, ' light 或 heavy', w);

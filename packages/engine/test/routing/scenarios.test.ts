@@ -2,8 +2,8 @@
 // 池名都是占位；数字取自 docs/reference/quota.md 的现场读数（比例），不带任何账号信息。
 import { describe, expect, it } from 'vitest';
 import { classifyFailure } from '../../src/failure/index.ts';
-import { chooseRoute, type RouteFacts } from '../../src/routing/index.ts';
-import { at, input, NOW, route, win } from './helpers.ts';
+import { type ChooseRouteInput, chooseRoute, type RouteFacts } from '../../src/routing/index.ts';
+import { at, halfOpenBreaker, input, NOW, reserve, route, win } from './helpers.ts';
 
 const solo = (extra: Partial<RouteFacts> = {}) =>
   route('solo-opus', { poolId: 'claude-solo', poolName: '独享号', ...extra });
@@ -263,6 +263,69 @@ describe('拼车号额度读不到：只放一个轻活去试探，被拒就一�
   });
 });
 
+describe('构建期重活只有独享号能接（审查实测的两处）', () => {
+  // 写码是重活，拼车号不接；独享号是唯一能派的一条。
+  const execute = (soloExtra: Partial<RouteFacts>) =>
+    chooseRoute(input([solo(soloExtra), carpool()], { stage: 'execute' }));
+
+  it('独享号 5 小时窗只剩 1%：不派过去，等它清零（额度够收尾，主池也判）', () => {
+    const r = execute({
+      windows: [win({ label: '5h', window: '5h', used: 0.99, resetsAt: at(2) }), win({ used: 0.3 })],
+    });
+    expect(r).toMatchObject({ kind: 'wait', waitFor: 'quota', until: at(2) });
+    if (r.kind === 'wait') expect(r.reason).toContain('独享号5 小时额度只剩 1%，不够跑一个活');
+  });
+
+  it('独享号熔断半开、已经有一个试探在跑：等试探结果；最早几点不给过去的时刻', () => {
+    const r = execute({ breaker: halfOpenBreaker(1, 'solo-opus') });
+    expect(r).toMatchObject({ kind: 'wait', waitFor: 'breaker', until: null });
+    if (r.kind === 'wait') expect(r.reason).toContain('在等熔断的试探结果');
+  });
+});
+
+describe('一批任务同时来选路：已选定、还没开工的也占位子', () => {
+  /** 端口的做法：每选定一条，就在同一个事务里记下（这个池的已选定数加一），下一个任务读到的是加过的。 */
+  function batch(routes: RouteFacts[], n: number, stage: ChooseRouteInput['stage']): string[] {
+    const out: string[] = [];
+    let rs = routes;
+    for (let i = 0; i < n; i += 1) {
+      const r = chooseRoute(input(rs, { stage }));
+      out.push(
+        r.kind === 'dispatch'
+          ? `${r.routeId}${r.trial ? `(${r.trial})` : ''}`
+          : `${r.kind}:${r.kind === 'wait' ? r.waitFor : ''}`,
+      );
+      if (r.kind === 'dispatch') rs = reserve(rs, r.poolId);
+    }
+    return out;
+  }
+  const soloFull = () => solo({ blockers: ['no-slot'], inFlight: 5 });
+
+  it('拼车号额度未知：三个轻活同时来，只放出一个试探（创始人不要短时间在拼车号上并发）', () => {
+    expect(batch([soloFull(), carpool({ quota: 'unknown', windows: [] })], 3, 'triage')).toEqual([
+      'carpool-opus(quota-probe)',
+      'wait:slot',
+      'wait:slot',
+    ]);
+  });
+
+  it('拼车号读到了：三个轻活同时来，放出两个（备池上限 2），第三个等', () => {
+    expect(batch([soloFull(), carpool()], 3, 'triage')).toEqual([
+      'carpool-opus',
+      'carpool-opus',
+      'wait:slot',
+    ]);
+  });
+
+  it('独享号上限 2：三个重活同时来，第三个等空位', () => {
+    expect(batch([solo({ maxConcurrency: 2 }), carpool()], 3, 'execute')).toEqual([
+      'solo-opus',
+      'solo-opus',
+      'wait:slot',
+    ]);
+  });
+});
+
 describe('全部并发满 / 全部额度满 / 全部被禁', () => {
   it('全部并发满：等空位', () => {
     const rs = [
@@ -272,16 +335,22 @@ describe('全部并发满 / 全部额度满 / 全部被禁', () => {
     expect(chooseRoute(input(rs))).toMatchObject({ kind: 'wait', waitFor: 'slot', until: null });
   });
 
-  it('全部额度满：等最早清零的那个', () => {
+  it('全部额度满：等最早清零的那个；有一条清零时刻不知道就按轮询间隔再看', () => {
     const full = (id: string, hours: number | null) =>
       route(id, {
         quota: 'exhausted',
         blockers: ['quota-exhausted'],
         windows: [win({ state: 'exhausted', used: 1, resetsAt: hours === null ? null : at(hours) })],
       });
+    expect(chooseRoute(input([full('a', 50), full('b', 8)]))).toMatchObject({
+      kind: 'wait',
+      waitFor: 'quota',
+      until: at(8),
+    });
+    // 时刻不知道的那条随时可能好（读数 30 分钟内会更新）：不拿 8 小时后的清零时刻去睡。
     const r = chooseRoute(input([full('a', 50), full('b', 8), full('c', null)]));
-    expect(r).toMatchObject({ kind: 'wait', waitFor: 'quota', until: at(8) });
-    if (r.kind === 'wait') expect(r.reason).toContain('另有 1 条时刻不知道');
+    expect(r).toMatchObject({ kind: 'wait', waitFor: 'quota', until: null });
+    if (r.kind === 'wait') expect(r.reason).toContain('清零时刻不知道，按轮询间隔再看');
   });
 
   it('全部被禁（UI 阶段只挂了 GPT 和 Fable）：派不出，附每条原因', () => {

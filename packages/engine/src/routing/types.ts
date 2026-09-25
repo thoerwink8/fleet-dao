@@ -89,8 +89,13 @@ export interface RouteFacts {
   /** 候选查询算好的：ok / exhausted / unknown（没读成、读数过期、判不了扣不扣）。 */
   quota: 'ok' | 'exhausted' | 'unknown';
   windows: RouteWindow[];
-  /** 这个池此刻在跑的会话数（按池算）。 */
+  /** 这个池此刻在跑的会话数（按池算：已开工、没结束）。 */
   inFlight: number;
+  /**
+   * 这个池已选定、还没开工的会话数（按池算：session_runs 里没开工、没结束的行）。并发上限、备池上限、
+   * 「只放一个试探」都把它算进去：一批任务同时来选路时，只数已开工的，每个任务都会看到 0 个在跑。
+   */
+  reserved: number;
   maxConcurrency: number;
   /** 命中的禁令原因（代码里的硬禁令 + 库里的 bans）。 */
   banReasons: string[];
@@ -143,9 +148,9 @@ export type BlockCode =
   | 'host-unfit'
   | 'breaker-open'
   | 'avoided'
+  | 'quota-short'
   | 'backup-heavy'
   | 'backup-no-slot'
-  | 'backup-quota-short'
   | 'backup-quota-unknown';
 
 export interface Block {
@@ -154,7 +159,7 @@ export interface Block {
   text: string;
   /** 等什么：slot 空位 / quota 额度清零 / breaker 熔断到点；硬挡为空。 */
   wait: 'slot' | 'quota' | 'breaker' | null;
-  /** 等得来的，最早几点能好（不知道为空）。 */
+  /** 等得来的，最早几点能好：一定晚于现在；不知道（或那个时刻已经过了）为空。 */
   until: string | null;
 }
 
@@ -203,8 +208,12 @@ export type ChooseRouteResult =
     }
   | {
       kind: 'wait';
+      /** 最早能派的那条在等什么；时刻不知道时，有只差空位的就是空位。 */
       waitFor: 'slot' | 'quota' | 'breaker';
-      /** 最早能派的时刻（已知的里最早的）；等空位不知道几点，为空。 */
+      /**
+       * 最早能派的时刻：各条路由里最早好的那条，一定晚于现在。有一条时刻不知道（只差空位、等试探结果、
+       * 清零时刻不知道）就为空：它随时可能好，调用方按轮询间隔再选一次。
+       */
       until: string | null;
       reason: string;
       verdicts: RouteVerdict[];

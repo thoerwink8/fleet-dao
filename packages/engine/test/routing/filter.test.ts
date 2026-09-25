@@ -6,9 +6,10 @@ import {
   DEFAULT_ROUTING_POLICY,
   HOST_ABILITIES,
   type RouteFacts,
+  type RouteWindow,
   STAGE_NEEDS,
 } from '../../src/routing/index.ts';
-import { at, entry, NOW, route, win } from './helpers.ts';
+import { at, entry, halfOpenBreaker, NOW, route, win } from './helpers.ts';
 
 function ctx(overrides: Partial<FilterContext> = {}): FilterContext {
   return {
@@ -164,6 +165,165 @@ describe('熔断', () => {
     ).toEqual([]);
     expect(codes(route('a'))).toEqual([]);
   });
+
+  it('半开、已经有试探在跑（真熔断函数算的）：试探时刻早过了，不给过去的时刻，等试探结果', () => {
+    const breaker = halfOpenBreaker(1, 'a');
+    expect(breaker).toMatchObject({ state: 'half_open', admit: 'none' });
+    expect(Date.parse(breaker.probeAt as string)).toBeLessThan(Date.parse(NOW));
+    const blocks = blocksFor(route('a', { breaker }), entry('a', 0), ctx());
+    expect(blocks.map((b) => [b.code, b.until])).toEqual([['breaker-open', null]]);
+    expect(blocks[0]?.text).toMatch(/^熔断：等试探结果（/);
+    expect(groupOf(blocks)).toEqual({ kind: 'wait', waitFor: 'breaker', until: null });
+    // 没有在跑的：放这一单当试探。
+    expect(codes(route('a', { breaker: halfOpenBreaker(0, 'a') }))).toEqual([]);
+  });
+});
+
+describe('最早几点能好：一定晚于现在', () => {
+  it('用满的窗口清零时刻已经过了（读数慢了一步）：不给过去的时刻，等下一次读数', () => {
+    const r = route('a', {
+      quota: 'exhausted',
+      blockers: ['quota-exhausted'],
+      windows: [win({ state: 'exhausted', used: 1, resetsAt: at(-0.1) })],
+    });
+    const blocks = blocksFor(r, entry('a', 0), ctx());
+    expect(blocks.map((b) => [b.code, b.until])).toEqual([['quota-exhausted', null]]);
+    expect(blocks[0]?.text).toContain('清零时刻已过，等下一次读数');
+  });
+
+  it('剩余不够的窗口清零时刻已经过了：同样不给过去的时刻', () => {
+    const r = route('a', { windows: [win({ label: '5h', window: '5h', used: 0.99, resetsAt: at(-0.1) })] });
+    const blocks = blocksFor(r, entry('a', 0), ctx());
+    expect(blocks.map((b) => [b.code, b.until])).toEqual([['quota-short', null]]);
+    expect(blocks[0]?.text).toContain('清零时刻已过，等下一次读数');
+  });
+});
+
+describe('一条路由挡在几处', () => {
+  it('有一条硬挡就是硬挡，哪怕另有等得来的（等来了也还是派不了）', () => {
+    const blocks = blocksFor(
+      route('a', { blockers: ['offline', 'no-slot'], inFlight: 5 }),
+      entry('a', 0),
+      ctx(),
+    );
+    expect(blocks.map((b) => b.code)).toEqual(['offline', 'no-slot']);
+    expect(groupOf(blocks)).toEqual({ kind: 'hard' });
+  });
+
+  it('等额度 1 小时、又熔断 2 小时：两样都解除才派得出去，最早 2 小时后', () => {
+    const r = route('a', {
+      quota: 'exhausted',
+      blockers: ['quota-exhausted'],
+      windows: [win({ state: 'exhausted', used: 1, resetsAt: at(1) })],
+      breaker: { state: 'open', admit: 'none', reason: '连续失败 3 次', probeAt: at(2) },
+    });
+    expect(groupOf(blocksFor(r, entry('a', 0), ctx()))).toEqual({
+      kind: 'wait',
+      waitFor: 'quota',
+      until: Date.parse(at(2)),
+    });
+  });
+
+  it('等额度 1 小时、又差空位：1 小时之前一定派不了，到时候再看空位', () => {
+    const r = route('a', {
+      quota: 'exhausted',
+      blockers: ['quota-exhausted', 'no-slot'],
+      inFlight: 5,
+      windows: [win({ state: 'exhausted', used: 1, resetsAt: at(1) })],
+    });
+    expect(groupOf(blocksFor(r, entry('a', 0), ctx()))).toEqual({
+      kind: 'wait',
+      waitFor: 'quota',
+      until: Date.parse(at(1)),
+    });
+  });
+
+  it('额度 3 天后才清零、又在等试探结果：3 天之内一定派不了，最早 3 天后（不因为试探时刻不知道就每 30 秒轮询 3 天）', () => {
+    const r = route('a', {
+      quota: 'exhausted',
+      blockers: ['quota-exhausted'],
+      windows: [win({ state: 'exhausted', used: 1, resetsAt: at(72) })],
+      breaker: halfOpenBreaker(1, 'a'),
+    });
+    expect(groupOf(blocksFor(r, entry('a', 0), ctx()))).toEqual({
+      kind: 'wait',
+      waitFor: 'quota',
+      until: Date.parse(at(72)),
+    });
+  });
+
+  it('只有时刻不知道的原因：不知道', () => {
+    const r = route('a', { breaker: halfOpenBreaker(1, 'a'), blockers: ['no-slot'], inFlight: 5 });
+    expect(groupOf(blocksFor(r, entry('a', 0), ctx()))).toEqual({
+      kind: 'wait',
+      waitFor: 'breaker',
+      until: null,
+    });
+  });
+});
+
+describe('额度够收尾：所有路由都判（design §九 选路第 1 条）', () => {
+  const solo = (o: Partial<RouteFacts> = {}) => route('solo', { poolName: '独享号', ...o });
+  const fiveHour = (used: number, extra: Partial<RouteWindow> = {}) =>
+    win({ label: '5h', window: '5h', used, resetsAt: at(2), ...extra });
+
+  it('独享号 5 小时窗只剩 1%：写码重活不派，等它清零（审查实测照派了）', () => {
+    const blocks = blocksFor(solo({ windows: [fiveHour(0.99), win()] }), entry('solo', 0), ctx());
+    expect(blocks.map((b) => b.code)).toEqual(['quota-short']);
+    expect(blocks[0]?.text).toBe('独享号5 小时额度只剩 1%，不够跑一个活（要 10%），2 小时后清零');
+    expect(groupOf(blocks)).toEqual({ kind: 'wait', waitFor: 'quota', until: Date.parse(at(2)) });
+  });
+
+  it('够就派；正好剩一成也算够（1 − 0.9 算出来是 0.0999…）', () => {
+    expect(codes(solo({ windows: [fiveHour(0.5), win()] }))).toEqual([]);
+    expect(codes(solo({ windows: [fiveHour(0.9), win()] }))).toEqual([]);
+  });
+
+  it('判不了扣不扣的窗口不在这里挡（那是额度未知，排后面）', () => {
+    const r = solo({ quota: 'unknown', windows: [fiveHour(0.99, { applies: 'unknown' }), win()] });
+    expect(codes(r)).toEqual([]);
+  });
+
+  it('读数过期、算不出剩多少的窗口也不在这里挡', () => {
+    expect(codes(solo({ quota: 'unknown', windows: [fiveHour(0.99, { state: 'stale' })] }))).toEqual([]);
+    expect(codes(solo({ windows: [fiveHour(0.99, { used: null })] }))).toEqual([]);
+  });
+
+  it('已经用满的只记一条用满，不再记不够', () => {
+    const r = solo({
+      quota: 'exhausted',
+      blockers: ['quota-exhausted'],
+      windows: [fiveHour(1, { state: 'exhausted' }), win({ used: 0.99 })],
+    });
+    expect(codes(r)).toEqual(['quota-exhausted']);
+  });
+});
+
+describe('已选定、还没开工的也占位子（一批任务同时选路）', () => {
+  it('主池：在跑 3 个 + 已选定 2 个 = 上限 5，候选查询没标 no-slot 也等空位；已选定 1 个放', () => {
+    const blocks = blocksFor(route('a', { inFlight: 3, reserved: 2 }), entry('a', 0), ctx());
+    expect(blocks.map((b) => b.code)).toEqual(['no-slot']);
+    expect(blocks[0]?.text).toBe('池a并发满了（已经有 5 个（在跑 3 个、已选定还没开工 2 个），上限 5 个）');
+    expect(codes(route('a', { inFlight: 3, reserved: 1 }))).toEqual([]);
+  });
+
+  it('备池：在跑 1 个 + 已选定 1 个 = 备池上限 2，等空位', () => {
+    const c = route('c', { poolRole: 'backup', poolName: '拼车号', inFlight: 1, reserved: 1 });
+    const blocks = blocksFor(c, entry('c', 0), ctx({ weight: 'light' }));
+    expect(blocks.map((b) => b.code)).toEqual(['backup-no-slot']);
+    expect(blocks[0]?.text).toContain('已选定还没开工 1 个');
+  });
+
+  it('备池额度未知：试探已选定、还没开工，第二个也等', () => {
+    const c = route('c', {
+      poolRole: 'backup',
+      poolName: '拼车号',
+      quota: 'unknown',
+      windows: [],
+      reserved: 1,
+    });
+    expect(codes(c, ctx({ weight: 'light' }))).toEqual(['backup-quota-unknown']);
+  });
 });
 
 describe('避开', () => {
@@ -198,10 +358,8 @@ describe('备池（拼车号）', () => {
     expect(codes(carpool({ inFlight: 1 }), light)).toEqual([]);
   });
 
-  it('池自己的上限更小时按池的', () => {
-    expect(codes(carpool({ inFlight: 1, maxConcurrency: 1 }), ctx({ weight: 'light' }))).toEqual([
-      'backup-no-slot',
-    ]);
+  it('池自己的上限更小时按池的（记成池的并发满了）', () => {
+    expect(codes(carpool({ inFlight: 1, maxConcurrency: 1 }), ctx({ weight: 'light' }))).toEqual(['no-slot']);
   });
 
   it('剩余不够跑一个活不派，等那个窗口清零；够就派', () => {
@@ -210,7 +368,7 @@ describe('备池（拼车号）', () => {
       windows: [win({ label: '5h', window: '5h', used: 0.95, resetsAt: at(1) }), win()],
     });
     const blocks = blocksFor(short, entry('c', 0), light);
-    expect(blocks.map((b) => b.code)).toEqual(['backup-quota-short']);
+    expect(blocks.map((b) => b.code)).toEqual(['quota-short']);
     expect(blocks[0]?.text).toContain('只剩 5%');
     expect(groupOf(blocks)).toEqual({ kind: 'wait', waitFor: 'quota', until: Date.parse(at(1)) });
     const enough = carpool({
@@ -221,7 +379,7 @@ describe('备池（拼车号）', () => {
 
   it('周窗只剩 2% 也不派（一个活要 3%）', () => {
     const r = carpool({ windows: [win({ used: 0.98 })] });
-    expect(codes(r, ctx({ weight: 'light' }))).toEqual(['backup-quota-short']);
+    expect(codes(r, ctx({ weight: 'light' }))).toEqual(['quota-short']);
   });
 
   describe('额度未知：只放一个轻活去试探', () => {
@@ -236,7 +394,7 @@ describe('备池（拼车号）', () => {
       const blocks = blocksFor(blind(1), entry('c', 0), light);
       expect(blocks.map((b) => b.code)).toEqual(['backup-quota-unknown']);
       expect(blocks[0]?.text).toBe(
-        '拼车号额度未知（没读成或读数过期），只放一个试探，已经有 1 个在跑：等它的结果',
+        '拼车号额度未知（没读成或读数过期），只放一个试探，已经在跑 1 个：等它的结果',
       );
       expect(groupOf(blocks)).toEqual({ kind: 'wait', waitFor: 'slot', until: null });
     });
@@ -259,7 +417,7 @@ describe('备池（拼车号）', () => {
           windows: [win({ label: '5h', window: '5h', used, resetsAt: at(1) }), win({ used: 0.4 })],
         });
       const short = blocksFor(passive(0.95), entry('c', 0), light);
-      expect(short.map((b) => b.code)).toEqual(['backup-quota-short']);
+      expect(short.map((b) => b.code)).toEqual(['quota-short']);
       expect(groupOf(short)).toEqual({ kind: 'wait', waitFor: 'quota', until: Date.parse(at(1)) });
       // 读到的够：照样只放一个。
       expect(codes(passive(0.5), light)).toEqual([]);

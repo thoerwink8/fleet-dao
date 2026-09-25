@@ -1,7 +1,7 @@
 // chooseRoute 的三种结果、任务指定路由、试探、熔断，以及「为什么派给它」。
 import { describe, expect, it } from 'vitest';
 import { type ChooseRouteResult, chooseRoute, type RouteFacts } from '../../src/routing/index.ts';
-import { at, entry, input, route, soloAndCarpool, win } from './helpers.ts';
+import { at, entry, halfOpenBreaker, input, route, soloAndCarpool, win } from './helpers.ts';
 
 function picked(result: ChooseRouteResult): string {
   if (result.kind !== 'dispatch') throw new Error(`没派出去：${result.kind} ${result.reason}`);
@@ -96,6 +96,41 @@ describe('等', () => {
     );
     expect(r).toMatchObject({ kind: 'wait', waitFor: 'breaker', until: at(0.25) });
   });
+
+  it('一条等额度 1 小时、一条等熔断 2 小时：等 1 小时（取最早好的那条，不按种类挑）', () => {
+    const r = chooseRoute(
+      input([
+        route('a', {
+          quota: 'exhausted',
+          blockers: ['quota-exhausted'],
+          windows: [win({ state: 'exhausted', used: 1, resetsAt: at(1) })],
+        }),
+        route('b', { breaker: { state: 'open', admit: 'none', reason: '连续失败 3 次', probeAt: at(2) } }),
+      ]),
+    );
+    expect(r).toMatchObject({ kind: 'wait', waitFor: 'quota', until: at(1) });
+    if (r.kind === 'wait') expect(r.reason).toMatch(/^写码阶段暂时派不了，最早 .* 额度清零/);
+  });
+
+  it('熔断半开、已经有试探在跑：等试探结果，不给过去的时刻（给了，等待秒数是负数，选路会空转）', () => {
+    const r = chooseRoute(input([route('a', { breaker: halfOpenBreaker(1, 'a') })]));
+    expect(r).toMatchObject({ kind: 'wait', waitFor: 'breaker', until: null });
+    if (r.kind === 'wait') expect(r.reason).toContain('在等熔断的试探结果');
+  });
+
+  it('有一条时刻不知道：不拿别的路由几天后的清零时刻去睡，按轮询间隔再看', () => {
+    const r = chooseRoute(
+      input([
+        route('a', {
+          quota: 'exhausted',
+          blockers: ['quota-exhausted'],
+          windows: [win({ state: 'exhausted', used: 1, resetsAt: at(50) })],
+        }),
+        route('b', { breaker: halfOpenBreaker(1, 'b') }),
+      ]),
+    );
+    expect(r).toMatchObject({ kind: 'wait', waitFor: 'breaker', until: null });
+  });
 });
 
 describe('派不出（要报警，附每条被挡的原因）', () => {
@@ -130,6 +165,11 @@ describe('派不出（要报警，附每条被挡的原因）', () => {
 
   it('单条开关全关', () => {
     const r = chooseRoute(input([route('a')], { order: [entry('a', 0, { enabled: false })] }));
+    expect(r.kind).toBe('none');
+  });
+
+  it('一条路由既不在线、又差空位：派不出（等来空位也还是派不了），不说等空位', () => {
+    const r = chooseRoute(input([route('a', { blockers: ['offline', 'no-slot'], inFlight: 5 })]));
     expect(r.kind).toBe('none');
   });
 });
@@ -254,6 +294,13 @@ describe('试探', () => {
       expect(r.why).toContain('拼车号额度未知，只放一个试探');
     }
   });
+
+  it('试探落到额度未知的主池：理由写「额度未知」（design §九 选路第 3 条）', () => {
+    const rs = [route('a'), route('b', { quota: 'unknown', windows: [] })];
+    const r = chooseRoute(input(rs, { draw: 0.05, policy: on }));
+    expect(r).toMatchObject({ routeId: 'b', trial: 'explore' });
+    if (r.kind === 'dispatch') expect(r.why).toMatch(/^试探：.*；额度未知（没读成或读数过期）$/);
+  });
 });
 
 describe('熔断：trial 只放一个', () => {
@@ -278,6 +325,17 @@ describe('熔断：trial 只放一个', () => {
     const r = chooseRoute(input([open('a', 0.5), open('b', 0.2)]));
     expect(r).toMatchObject({ kind: 'dispatch', routeId: 'b', trial: 'all-open' });
     if (r.kind === 'dispatch') expect(r.alarm).toContain('全都熔断');
+  });
+
+  it('全都熔断、放出去试探的那条额度未知：理由里也写「额度未知」', () => {
+    const open = (id: string, probe: number, extra: Partial<RouteFacts> = {}) =>
+      route(id, {
+        breaker: { state: 'open', admit: 'none', reason: '连续失败 3 次', probeAt: at(probe) },
+        ...extra,
+      });
+    const r = chooseRoute(input([open('a', 0.5), open('b', 0.2, { quota: 'unknown', windows: [] })]));
+    expect(r).toMatchObject({ kind: 'dispatch', routeId: 'b', trial: 'all-open' });
+    if (r.kind === 'dispatch') expect(r.why).toMatch(/去试探；额度未知（没读成或读数过期）$/);
   });
 
   it('只有一条熔断、别的只差空位：不强放试探，等空位', () => {

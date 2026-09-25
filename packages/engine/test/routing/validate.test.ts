@@ -84,6 +84,12 @@ describe('输入认不出就明确失败', () => {
     fails(() => one({ maxConcurrency: 1.5 }), /并发上限认不出/);
   });
 
+  it('已选定还没开工数没给、认不出：不当 0（当 0 一批任务会各放一个拼车号试探）', () => {
+    fails(() => one({ reserved: undefined as never }), /已选定还没开工数认不出/);
+    fails(() => one({ reserved: -1 }), /已选定还没开工数认不出/);
+    fails(() => one({ reserved: 0.5 }), /已选定还没开工数认不出/);
+  });
+
   it('战绩认不出', () => {
     fails(() => one({ record: { samples: Number.NaN, successes: 0 } }), /战绩样本数认不出/);
     fails(() => one({ record: { samples: 3, successes: 4 } }), /成功数比样本数还多/);
@@ -108,7 +114,7 @@ describe('策略给了但不对就报错，不悄悄换成默认', () => {
     [{ othersMinRemaining: -1 }, /othersMinRemaining/],
     [{ fastReset: { '7d': { withinHours: 0, minRemaining: 0.3 } } }, /withinHours/],
     [{ fastReset: { '7d': { withinHours: 24, minRemaining: 0 } } }, /minRemaining/],
-    [{ backupNeedPerTask: { '5h': 2 } }, /backupNeedPerTask/],
+    [{ needPerTask: { '5h': 2 } }, /needPerTask/],
     [{ stageWeight: { triage: 'tiny' as never } } as never, /stageWeight/],
     [{ trialEnabled: 'yes' as never }, /trialEnabled/],
   ])('%j', (policy, message) => {
@@ -118,12 +124,12 @@ describe('策略给了但不对就报错，不悄悄换成默认', () => {
   it('只改给了的项，其余照默认', () => {
     const p = resolveRoutingPolicy({
       stageWeight: { plan: 'light' } as never,
-      backupNeedPerTask: { '5h': 0.2 },
+      needPerTask: { '5h': 0.2 },
     });
     expect(p.stageWeight.plan).toBe('light');
     expect(p.stageWeight.execute).toBe('heavy');
-    expect(p.backupNeedPerTask['5h']).toBe(0.2);
-    expect(p.backupNeedPerTask['7d']).toBe(0.03);
+    expect(p.needPerTask['5h']).toBe(0.2);
+    expect(p.needPerTask['7d']).toBe(0.03);
     expect(p.trialEnabled).toBe(false);
   });
 });
