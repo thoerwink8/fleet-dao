@@ -62,7 +62,7 @@ setup_login_user() { # 用户 家目录 reclaude下载地址 sha256
 
 # 查（只读）：返回 0 干净、1 有问题，问题放进 LOGIN_USER_BAD。读不到、认不出也算问题，不当成「查了没事」
 check_login_user() { # 用户
-  local user=$1 home shell groups=() g extra="" in_log=0 out bin have
+  local user=$1 home shell groups=() g extra="" in_log=0 out bin have rc
   LOGIN_USER_BAD=()
   if ! getent passwd "$user" >/dev/null; then
     LOGIN_USER_BAD+=("no-user	没有这个用户：跑 bash deploy/france.sh 建")
@@ -108,10 +108,12 @@ check_login_user() { # 用户
   # 照 Mirasim 远端服务端取 PATH 的办法问一遍登录 shell（环境照 sshd 给的那样干净）；多行输出取最后一行。
   # setsid：不带控制终端。带着终端（比如 sudo 分出来的伪终端）时，交互 shell 去抢终端会被挂起，连 timeout 一起停住，
   # 整个读回卡死（CI 和法国实咬）。-k：挂起的进程收不到 TERM，到点再补 KILL
+  # 交互 shell 起来时往 stderr 打的「no job control」在命令输出之前，所以合在一起取最后一行；对不上时把末几行带进结论
+  rc=0
   out=$(cd -- "$home" && runuser -u "$user" -- env -i HOME="$home" USER="$user" LOGNAME="$user" SHELL="$shell" \
-    PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 setsid -w timeout -k 5 10 "$shell" -ilc 'command -v reclaude' </dev/null 2>/dev/null) || true
+    PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 setsid -w timeout -k 5 10 "$shell" -ilc 'command -v reclaude' </dev/null 2>&1) || rc=$?
   if [[ "${out##*$'\n'}" != "$bin" ]]; then
-    LOGIN_USER_BAD+=("reclaude-not-on-path	登录 shell（$shell -ilc）里找不到 $bin，读到「${out##*$'\n'}」：Mirasim 远端按登录 shell 取 PATH，~/.profile 里要把 ~/.local/bin 加进 PATH（Ubuntu 默认的就有）")
+    LOGIN_USER_BAD+=("reclaude-not-on-path	登录 shell（$shell -ilc）里找不到 $bin（退出码 $rc，输出末几行「$(tail -4 <<<"$out" | tr '\n' '|')」）：Mirasim 远端按登录 shell 取 PATH，~/.profile 里要把 ~/.local/bin 加进 PATH（Ubuntu 默认的就有）")
   fi
   if ((${#LOGIN_USER_BAD[@]})); then return 1; fi
   return 0
