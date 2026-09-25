@@ -27,6 +27,7 @@ import {
   type SyncMainlineInput,
   type TaskStateSnapshot,
   type TimingEntry,
+  type UpdateIssueProgressInput,
   type WaitCiInput,
   type WriteSpecDocInput,
 } from './ports.ts';
@@ -58,6 +59,8 @@ export interface FakeScript {
   openPr: (input: OpenPrInput, n: number) => PortError | undefined;
   /** 写需求文档、方案、结果进主线：给了就抛它；n = 第几次写（三种文档一起数，从 1 开始）。 */
   specDoc: (input: WriteSpecDocInput, n: number) => PortError | undefined;
+  /** 写 issue 进度段：给了就抛它（假的卫生检查拦下子任务标题……）；n = 第几次写（从 1 开始）。 */
+  progress: (input: UpdateIssueProgressInput, n: number) => PortError | undefined;
   route: (input: PickRouteInput, n: number) => PickRouteResult | undefined;
   /** 前 N 次调用抛可重试的 TRANSIENT。 */
   failFirst: Partial<Record<PortName, number>>;
@@ -368,7 +371,10 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
       const n = next('mergePr');
       return { merged: true, mergeCommit: `mc-${input.prNumber}-${n}`, ...script.merge?.(input, n) };
     },
-    async updateIssueProgress() {},
+    async updateIssueProgress(input) {
+      const refused = script.progress?.(input, next('updateIssueProgress'));
+      if (refused) throw refused;
+    },
     async saveTaskState(input) {
       states.push(input);
     },

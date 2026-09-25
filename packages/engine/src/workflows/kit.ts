@@ -623,13 +623,15 @@ export interface Rework {
 }
 
 /** 哪一步把活退回会话：推分支、开 PR、写需求文档或方案进主线。 */
-export type ReworkStep = 'push' | 'openPr' | 'doc';
+export type ReworkStep = 'push' | 'openPr' | 'doc' | 'progress';
 
 const HYGIENE_SUMMARY: Record<ReworkStep, string> = {
   push: '推之前的卫生检查拦下了你交的内容：公开仓推上去就公开了。把这些从提交里拿掉——要改写提交（推上去的是全部提交），不能只加一个删掉它的新提交',
   openPr:
     '开 PR 之前的卫生检查拦下了 PR 的标题或正文（你交活时 fleet done 写的总结就在正文里）：开出去就公开了。代码不用动，改好总结重新 fleet done',
   doc: '写进主线之前的卫生检查拦下了你写的文档：公开仓写上去就公开了。把这些从文档里拿掉再交',
+  progress:
+    '子任务的标题要写进需求 issue 的进度段，写之前的卫生检查拦下了：公开仓的 issue 谁都看得到。改掉标题（和 key）里的这些内容再交方案',
 };
 
 /** 退回会话时的返工意见：按认出的规则写（卫生检查、并主线冲突、交付不对各有各的改法），原文原样带上。 */

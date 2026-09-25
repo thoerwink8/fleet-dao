@@ -172,6 +172,67 @@ describe('需求工作流', { timeout: 60_000 }, () => {
     expect((plans[1]?.input.brief.feedback ?? []).map((f) => f.kind)).toEqual(['hygiene']);
   });
 
+  it('子任务标题写进 issue 进度段前被卫生检查拦下：退回写方案的会话改标题（意见说的是进度段），再写成才开工', async () => {
+    let titled = 0;
+    const world = createFakeWorld({
+      plan: [{ key: 'login', title: '登录页加验证码', touches: ['src/login'] }],
+      progress: (input) => {
+        if (input.progress.subtasks.length === 0) return undefined;
+        titled += 1;
+        return titled === 1
+          ? new PortError(
+              'HYGIENE_BLOCKED',
+              '卫生检查拦下了要公开的内容：#12 的进度段：第 1 个子任务:1 known-value',
+              { retryable: false },
+            )
+          : undefined;
+      },
+    });
+    const result = await withWorker(
+      env,
+      world,
+      async (q) => (await (await startRequirement(q)).result()) as RequirementResult,
+    );
+    expect(result.state).toBe('done');
+    const plans = world.callsOf('startSession').filter((c) => c.input.stage === 'plan');
+    expect(plans).toHaveLength(2);
+    const feedback = plans[1]?.input.brief.feedback ?? [];
+    expect(feedback.map((f) => f.kind)).toEqual(['hygiene']);
+    expect(feedback[0]?.summary).toContain('进度段');
+    expect(feedback[0]?.items).toEqual([
+      '卫生检查拦下了要公开的内容：#12 的进度段：第 1 个子任务:1 known-value',
+    ]);
+    // 标题过了检查才开工：子任务的会话都在第二次写方案之后
+    const firstExec = world.calls.findIndex(
+      (c) => c.port === 'startSession' && (c.input as StartSessionInput).stage === 'execute',
+    );
+    expect(firstExec).toBeGreaterThan(world.calls.indexOf(plans[1] as FakeCall));
+  });
+
+  it('写进度段前卫生检查的名单没读到：挂起报警、不退回写方案的会话；放好点继续就开工', async () => {
+    let titled = 0;
+    const world = createFakeWorld({
+      progress: (input) => {
+        if (input.progress.subtasks.length === 0) return undefined;
+        titled += 1;
+        return titled === 1
+          ? new PortError('HYGIENE_LIST_MISSING', '写进度段之前的卫生检查没法做：已知敏感值名单没读到', {
+              retryable: false,
+            })
+          : undefined;
+      },
+    });
+    const result = await withWorker(env, world, async (q) => {
+      const handle = await startRequirement(q);
+      const parked = await queryUntil<RequirementStatus>(handle, (s) => s.parked, '挂起');
+      expect(parked.lastProblem).toContain('名单没读到');
+      await handle.signal(resumeSignal, { by: 'founder' });
+      return (await handle.result()) as RequirementResult;
+    });
+    expect(result.state).toBe('done');
+    expect(world.callsOf('startSession').filter((c) => c.input.stage === 'plan')).toHaveLength(1);
+  });
+
   it('看不懂就在任务里追问：回答（后端的 answer 信号）之后重新分诊，再往下走', async () => {
     const world = createFakeWorld({
       triage: (n) => (n === 1 ? { clear: false, question: '验证码发短信还是邮件？' } : { clear: true }),

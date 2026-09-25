@@ -9,6 +9,7 @@ import {
   condition,
   isCancellation,
   log,
+  patched,
   setHandler,
   startChild,
   TemporalFailure,
@@ -360,19 +361,9 @@ export async function requirementWorkflow(input: RequirementInput): Promise<Requ
         log.warn('任务状态没写进库', { error: String(error) });
       }
     }
-    const progress: IssueProgress = {
-      state: status.state,
-      current: status.doing,
-      done: items.filter((i) => i.state === 'merged').length,
-      total: items.length,
-      subtasks: items.map((i) => ({
-        key: i.spec.key,
-        title: i.spec.title,
-        state: i.state,
-        prNumber: i.prNumber,
-      })),
-      docs: status.docs,
-    };
+    const progress = progressFor(
+      items.map((i) => ({ key: i.spec.key, title: i.spec.title, state: i.state, prNumber: i.prNumber })),
+    );
     const progressText = JSON.stringify(progress);
     if (progressText === lastPublished) return;
     lastPublished = progressText;
@@ -389,6 +380,17 @@ export async function requirementWorkflow(input: RequirementInput): Promise<Requ
       log.warn('issue 进度段没更新上', { error: String(error) });
     }
   };
+  /** issue 进度段的内容：需求到哪了、各子任务的标题和状态、文档在哪。 */
+  function progressFor(subtasks: IssueProgress['subtasks']): IssueProgress {
+    return {
+      state: status.state,
+      current: status.doing,
+      done: subtasks.filter((s) => s.state === 'merged').length,
+      total: subtasks.length,
+      subtasks,
+      docs: status.docs,
+    };
+  }
   const setPhase = async (phase: RequirementPhase, doing: string) => {
     status.phase = phase;
     status.state = STATE_OF_PHASE[phase];
@@ -610,8 +612,38 @@ export async function requirementWorkflow(input: RequirementInput): Promise<Requ
           status.lastProblem = planDoc.rework.reason;
           continue;
         }
-        subtasks = checked.subtasks;
         status.docs = { ...status.docs, plan: planDoc.ok.path };
+        // 子任务的标题（会话写的）从这里起写进公开的 issue 进度段：先照这份方案写一次，github 包写之前过卫生检查，
+        // 拦下了退回写方案的会话改标题（HY1，同一处连续两次挂起报警），名单没读到挂起报警（HY2）。这一次写成了，
+        // 后面各阶段的进度段里是同样的标题（进度段平时尽力写、写不上只记日志）。
+        if (patched('plan-titles-hygiene')) {
+          const titles = await attemptOrRework(
+            kit,
+            'updateIssueProgress',
+            () =>
+              acts.updateIssueProgress({
+                ...kit.scope,
+                repo: input.repo,
+                issueNumber: input.issueNumber,
+                progress: progressFor(
+                  checked.subtasks.map((s) => ({
+                    key: s.key,
+                    title: s.title,
+                    state: 'pending',
+                    prNumber: null,
+                  })),
+                ),
+              }),
+            planRework,
+          );
+          if ('rework' in titles) {
+            planRework = titles.rework.carry;
+            planFeedback = [reworkFeedback('progress', titles.rework)];
+            status.lastProblem = titles.rework.reason;
+            continue;
+          }
+        }
+        subtasks = checked.subtasks;
         break;
       }
       planFeedback = [{ kind: 'plan', summary: '方案不合格，按下面几条改', items: checked.problems }];
