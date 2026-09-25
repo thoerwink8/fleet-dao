@@ -39,6 +39,12 @@ const planted: [RuleId, string][] = [
   ['secret-assign', `FEISHU_APP_SECRET=${R(32, 21)}`],
   ['secret-assign', `  db_password: ${R(16, 22)}`],
   ['secret-assign', `lark-cli config init --app-secret ${R(32, 23)}`],
+  // 纯字母的随机串、开头碰巧是 / 的随机串，都还是密钥。
+  [
+    'secret-assign',
+    `APP_SECRET=${pseudoRandom(32, 37, 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz')}`,
+  ],
+  ['secret-assign', `aws_secret_access_key = /${B64(39, 38)}`],
   ['secret-assign', `| app_secret | ${R(32, 24)} |`],
   ['url-password', `DATABASE_URL=${['postgres://fleet', `${R(20, 25)}@db:5432/fleet`].join(':')}`],
   ['webhook', `${['https://open.feishu.cn/open-apis/bot/v2/hook', pseudoUuid(26)].join('/')}`],

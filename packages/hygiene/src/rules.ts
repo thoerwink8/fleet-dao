@@ -90,10 +90,20 @@ function isPlaceholderNumber(n: string): boolean {
  * 键名像密钥的赋值里，值像不像真密钥：够长；不是路径 / 变量 / 网址 / 代码里的成员访问；
  * 有字母，并且有数字、或者大小写加符号都有（_ . - 是标识符里的连接符，不算符号）；不是编出来的。
  */
+/** 像文件路径：/、./、~/ 开头，每一段都是全小写、全大写或很短的词（/etc/fleet-dao/webhook-secret）。随机串开头碰巧是 / 的不算。 */
+function looksLikePath(v: string): boolean {
+  const rest = /^(?:~|\.{1,2})?\/(.*)$/.exec(v)?.[1];
+  if (rest === undefined) return false;
+  return rest
+    .split('/')
+    .filter(Boolean)
+    .every((seg) => /^[a-z0-9_.-]+$/.test(seg) || /^[A-Z0-9_.-]+$/.test(seg) || seg.length <= 4);
+}
+
 function looksLikeRealSecret(raw: string): boolean {
   const v = raw.replace(/^["'`]|["'`]$/g, '');
   if (v.length < 12) return false;
-  if (/^[./~$%{<\\]|^[a-z][a-z0-9+.-]*:\/\//i.test(v)) return false;
+  if (/^[$%{<\\]|^[a-z][a-z0-9+.-]*:\/\//i.test(v) || looksLikePath(v)) return false;
   // 代码：模板插值、调用、括号、成员访问（process.env.X）。
   if (/\$\{|[(){}[\]<>,;]/.test(v) || /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+$/.test(v)) return false;
   // 人起的名字：三段以上的小写短词用 - _ . 连起来（e2e-not-a-token、cache_read_input_tokens）。
@@ -104,7 +114,11 @@ function looksLikeRealSecret(raw: string): boolean {
   )
     return false;
   const mixed = /[a-z]/.test(v) && /[A-Z]/.test(v) && /[^A-Za-z0-9_.-]/.test(v);
-  if (!/[A-Za-z]/.test(v) || !(/[0-9]/.test(v) || mixed)) return false;
+  // 纯字母的随机串：大小写各占四分之一以上（驼峰写法的名字大写少得多）。
+  const upper = (v.match(/[A-Z]/g) ?? []).length;
+  const lower = (v.match(/[a-z]/g) ?? []).length;
+  const randomCase = v.length >= 16 && upper * 4 >= v.length && lower * 4 >= v.length;
+  if (!/[A-Za-z]/.test(v) || !(/[0-9]/.test(v) || mixed || randomCase)) return false;
   return !isFakeValue(v);
 }
 
@@ -123,7 +137,8 @@ function harmlessEmail(address: string): boolean {
   // 玩具地址：本地部分、域名每段都不超过三个字符（a@b.com、x.y+z@q-r.io，连写的 a@b.com_c@d.com 会被认成 b.com_c@d.com），
   // 或者本地部分是 user / someone 这类泛称。
   const labels = domain.split('.').slice(0, -1);
-  if (local.split(/[^a-z0-9]+/).every((run) => run.length <= 3) && labels.every((l) => l.length <= 3)) return true;
+  if (local.split(/[^a-z0-9]+/).every((run) => run.length <= 3) && labels.every((l) => l.length <= 3))
+    return true;
   if (/^(?:user|username|someone|somebody|name|foo|bar|baz|me|you)$/.test(local)) return true;
   if (local === 'git' && /^(?:github\.com|gitlab\.com|bitbucket\.org|ssh\.dev\.azure\.com)$/.test(domain))
     return true;
