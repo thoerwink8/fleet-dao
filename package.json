@@ -12,7 +12,8 @@
     "prepare": "node packages/hygiene/src/bin/install-hooks.ts",
     "format": "biome check --write .",
     "typecheck": "tsc -b",
-    "test": "vitest run"
+    "test": "vitest run",
+    "issue:new": "node packages/conventions/src/bin/issue-new.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.14",
