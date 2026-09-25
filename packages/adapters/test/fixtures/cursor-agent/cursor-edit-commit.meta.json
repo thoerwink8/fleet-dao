@@ -1,0 +1,26 @@
+{
+  "name": "cursor-edit-commit",
+  "cmd": [
+    "cursor-agent",
+    "-p",
+    "--output-format",
+    "stream-json",
+    "--force",
+    "--trust",
+    "--model",
+    "auto",
+    "--workspace",
+    "/tmp/agent-io-p3/c-edit"
+  ],
+  "cwd": "/tmp/agent-io-p3/c-edit",
+  "exitCode": 0,
+  "signal": null,
+  "wallMs": 18352,
+  "firstStdoutMs": 9583,
+  "firstStderrMs": null,
+  "lineTimesMs": [
+    9583, 9583, 14389, 14397, 14398, 14398, 14399, 14431, 14431, 15735, 17901, 17901, 17901, 17901, 17901,
+    18111, 18111
+  ],
+  "trailingPartial": 0
+}

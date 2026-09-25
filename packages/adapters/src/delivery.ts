@@ -22,7 +22,10 @@ export interface DeliveryCheck {
 }
 
 export interface DeliveryOptions {
-  /** 工作树。 */
+  /**
+   * 在哪个仓库里比。主线定的是会话用户把新提交打成 git bundle、引擎导入自己的仓库再核实，引擎不以自己的身份进会话的
+   * 工作树跑 git（docs/design.md 第十四节）；第 3 条（没提交的改动）只有工作树里看得到，要由打包那一步一起报上来。
+   */
   cwd: string;
   remote: string;
   branch: string;

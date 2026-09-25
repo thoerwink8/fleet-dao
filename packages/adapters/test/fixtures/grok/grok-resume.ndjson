@@ -1,0 +1,49 @@
+{"type":"available_commands","tools":["run_terminal_command","read_file","search_replace","list_dir","grep","kill_command_or_subagent","todo_write","get_command_or_subagent_output","spawn_subagent","scheduler_create","scheduler_delete","scheduler_list","monitor","search_tool","use_tool","workflow","enter_plan_mode","exit_plan_mode","ask_user_question","send_feedback","web_search","web_fetch","image_gen","image_edit","image_to_video","reference_to_video","write"],"commands":["compact","always-approve","context","session-info","feedback","deep-research","workflow","goal","loop","lark-approval","lark-apps","lark-attendance","lark-base","lark-calendar","lark-contact","lark-doc","lark-drive","lark-event","lark-im","lark-mail","lark-markdown","lark-meeting","lark-minutes","lark-note","lark-okr","lark-openapi-explorer","lark-shared","lark-sheets","lark-skill-maker","lark-slides","lark-task","lark-vc","lark-vc-agent","lark-whiteboard","lark-wiki","lark-workflow-meeting-summary","lark-workflow-standup-report","admit-push","ask-gate","commander","dao-commit","dao-inbox","dao-mode","dao-project","design-exam","dispatch","docs-lookup","eval","feishu-ops","feishu-triage","grill-ai","grill-me","mirasim-guide","plain-board","pr-fast","user:resume","server-ops","built-in-browser","chrome-browser","computer-use","user:deep-research","user:docs","docx","import-memory","morning","pdf","pptx","skill-creator","xlsx","tool-use-gate","worker-brief","best-practice-first","chain-first","judge-or-code","stop-gate","build-with-ai","code-review","create-skill","create-workflow","design","execute-plan","game-assets","bundled:imagine","implement","learn","long-running-background-tasks","pr-babysit","resume-claude","resume-codex","resume-cursor","review","skill-design-principles","statusline","threejs-frame-conventions","learn-traces"]}
+{"type":"available_commands","tools":["run_terminal_command","read_file","search_replace","list_dir","grep","kill_command_or_subagent","todo_write","get_command_or_subagent_output","spawn_subagent","scheduler_create","scheduler_delete","scheduler_list","monitor","search_tool","use_tool","workflow","enter_plan_mode","exit_plan_mode","ask_user_question","send_feedback","web_search","web_fetch","image_gen","image_edit","image_to_video","reference_to_video","write"],"commands":["compact","always-approve","context","session-info","feedback","deep-research","workflow","goal","loop","lark-approval","lark-apps","lark-attendance","lark-base","lark-calendar","lark-contact","lark-doc","lark-drive","lark-event","lark-im","lark-mail","lark-markdown","lark-meeting","lark-minutes","lark-note","lark-okr","lark-openapi-explorer","lark-shared","lark-sheets","lark-skill-maker","lark-slides","lark-task","lark-vc","lark-vc-agent","lark-whiteboard","lark-wiki","lark-workflow-meeting-summary","lark-workflow-standup-report","admit-push","ask-gate","commander","dao-commit","dao-inbox","dao-mode","dao-project","design-exam","dispatch","docs-lookup","eval","feishu-ops","feishu-triage","grill-ai","grill-me","mirasim-guide","plain-board","pr-fast","user:resume","server-ops","built-in-browser","chrome-browser","computer-use","user:deep-research","user:docs","docx","import-memory","morning","pdf","pptx","skill-creator","xlsx","tool-use-gate","worker-brief","best-practice-first","chain-first","judge-or-code","stop-gate","build-with-ai","code-review","create-skill","create-workflow","design","execute-plan","game-assets","bundled:imagine","implement","learn","long-running-background-tasks","pr-babysit","resume-claude","resume-codex","resume-cursor","review","skill-design-principles","statusline","threejs-frame-conventions","learn-traces"]}
+{"type":"thought","data":"The"}
+{"type":"thought","data":" user"}
+{"type":"thought","data":" wants"}
+{"type":"thought","data":" me"}
+{"type":"thought","data":" to"}
+{"type":"thought","data":" reply"}
+{"type":"thought","data":" with"}
+{"type":"thought","data":" only"}
+{"type":"thought","data":" the"}
+{"type":"thought","data":" commit"}
+{"type":"thought","data":" message"}
+{"type":"thought","data":" I"}
+{"type":"thought","data":" used"}
+{"type":"thought","data":" when"}
+{"type":"thought","data":" they"}
+{"type":"thought","data":" asked"}
+{"type":"thought","data":" me"}
+{"type":"thought","data":" to"}
+{"type":"thought","data":" commit"}
+{"type":"thought","data":"."}
+{"type":"thought","data":" That"}
+{"type":"thought","data":" was"}
+{"type":"thought","data":" \""}
+{"type":"thought","data":"gro"}
+{"type":"thought","data":"k"}
+{"type":"thought","data":":"}
+{"type":"thought","data":" "}
+{"type":"thought","data":"追加"}
+{"type":"thought","data":"一行"}
+{"type":"thought","data":"\"."}
+{"type":"thought","data":" They"}
+{"type":"thought","data":" want"}
+{"type":"thought","data":" only"}
+{"type":"thought","data":" the"}
+{"type":"thought","data":" commit"}
+{"type":"thought","data":" message"}
+{"type":"thought","data":" itself"}
+{"type":"thought","data":"."}
+{"type":"text","data":"gro"}
+{"type":"text","data":"k"}
+{"type":"text","data":":"}
+{"type":"text","data":" "}
+{"type":"text","data":"追加"}
+{"type":"text","data":"一行"}
+{"type":"available_commands","tools":["run_terminal_command","read_file","search_replace","list_dir","grep","kill_command_or_subagent","todo_write","get_command_or_subagent_output","spawn_subagent","scheduler_create","scheduler_delete","scheduler_list","monitor","search_tool","use_tool","workflow","enter_plan_mode","exit_plan_mode","ask_user_question","send_feedback","web_search","web_fetch","image_gen","image_edit","image_to_video","reference_to_video","write","dao_handoff__handoff","dao_handoff__read_handoff","dao_handoff__cancel_handoff"],"commands":["compact","always-approve","context","session-info","feedback","deep-research","workflow","goal","loop","lark-approval","lark-apps","lark-attendance","lark-base","lark-calendar","lark-contact","lark-doc","lark-drive","lark-event","lark-im","lark-mail","lark-markdown","lark-meeting","lark-minutes","lark-note","lark-okr","lark-openapi-explorer","lark-shared","lark-sheets","lark-skill-maker","lark-slides","lark-task","lark-vc","lark-vc-agent","lark-whiteboard","lark-wiki","lark-workflow-meeting-summary","lark-workflow-standup-report","admit-push","ask-gate","commander","dao-commit","dao-inbox","dao-mode","dao-project","design-exam","dispatch","docs-lookup","eval","feishu-ops","feishu-triage","grill-ai","grill-me","mirasim-guide","plain-board","pr-fast","user:resume","server-ops","built-in-browser","chrome-browser","computer-use","user:deep-research","user:docs","docx","import-memory","morning","pdf","pptx","skill-creator","xlsx","tool-use-gate","worker-brief","best-practice-first","chain-first","judge-or-code","stop-gate","build-with-ai","code-review","create-skill","create-workflow","design","execute-plan","game-assets","bundled:imagine","implement","learn","long-running-background-tasks","pr-babysit","resume-claude","resume-codex","resume-cursor","review","skill-design-principles","statusline","threejs-frame-conventions","learn-traces"]}
+{"type":"usage","usage":{"input_tokens":69,"output_tokens":44,"cache_read_input_tokens":28288,"cache_creation_input_tokens":0,"reasoning_tokens":38},"signature":"<redacted>"}
+{"type":"end","stopReason":"end_turn","sessionId":"9cd315bc-0a1d-4025-8c11-e693d43ec1fb","requestId":"4c7c2996-0f77-4b28-9013-bf19521ffe47","usage":{"input_tokens":69,"cache_read_input_tokens":28288,"cache_creation_input_tokens":0,"output_tokens":44,"reasoning_tokens":38,"total_tokens":28401},"num_turns":1,"total_cost_usd":0.00494564,"total_cost_usd_ticks":49456400,"modelUsage":{"grok-4.7-build":{"inputTokens":69,"outputTokens":44,"cacheReadInputTokens":28288,"cacheCreationInputTokens":0,"modelCalls":1,"costUSD":0.00494564}}}

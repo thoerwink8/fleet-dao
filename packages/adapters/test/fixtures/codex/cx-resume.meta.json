@@ -1,0 +1,18 @@
+{
+  "name": "cx-resume",
+  "cmd": [
+    "codex",
+    "exec",
+    "resume",
+    "--json",
+    "-m",
+    "gpt-5.6-luna",
+    "--dangerously-bypass-approvals-and-sandbox",
+    "01a0d533-b133-7a01-aab9-35f1bd7ef90a",
+    "-"
+  ],
+  "exitCode": 0,
+  "cwd": "/tmp/agent-io-p3/cx-repo",
+  "signal": null,
+  "upstream": "上游是本机 127.0.0.1 上的假 Responses 服务（按脚本回流：exec 工具里调 apply_patch、exec_command，最后回一句话），没连任何真上游、零花费；codex-cli 0.156.1 是真起的，事件是它真打出来的。"
+}
