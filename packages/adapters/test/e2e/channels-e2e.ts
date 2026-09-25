@@ -1,9 +1,10 @@
 // 真跑验收（P3 各渠道）：在一个临时 git 仓里跑两轮极小的会话，走插头的全部代码路径——
 // 第一轮改文件并提交，判交付；第二轮续同一个会话，问第一轮的提交信息，证明上下文真的接上了，而且第二轮不靠上一轮的提交判交付。
-// 在法国 VPS 上以已经登录好的用户跑（只用订阅 / Mirasim 中转额度，不碰按量计费的接口）：
-//   node packages/adapters/test/e2e/channels-e2e.ts cursor <cursor-agent 绝对路径> [模型，默认 auto]
-//   node packages/adapters/test/e2e/channels-e2e.ts grok <grok 绝对路径> [模型，默认 grok-4.7]
-//   node packages/adapters/test/e2e/channels-e2e.ts mirasim <执行体> <route> <令牌文件> [期望模型] [账本目录] [点名模型]
+// 以登录好的会话用户、带 FLEET_ENV=development 跑（不进 scope：会话就是跑脚本的这个用户；
+// 只用订阅 / Mirasim 中转额度，不碰按量计费的接口）：
+//   FLEET_ENV=development node packages/adapters/test/e2e/channels-e2e.ts cursor <cursor-agent 绝对路径> [模型，默认 auto]
+//   FLEET_ENV=development node packages/adapters/test/e2e/channels-e2e.ts grok <grok 绝对路径> [模型，默认 grok-4.7]
+//   FLEET_ENV=development node packages/adapters/test/e2e/channels-e2e.ts mirasim <执行体> <route> <令牌文件> [期望模型] [账本目录] [点名模型]
 // 只动临时目录（TMPDIR 下），不碰任何配置。
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';

@@ -1,6 +1,6 @@
-// codex 插头（直起 codex exec --json）。法国 VPS 上 codex 的登录是按量计费的 API key，而且已拍板「codex 只走 Mirasim 中转」，
-// 所以这条直起的路这一轮只写好、用假上游验过事件格式，不对真上游跑；要不要启用等创始人定（见 PR）。
-// 走中转的 codex 用 Mirasim 插头（agent=codex、route=cloud）。
+// codex 插头（直起 codex exec --json）。主线已定 codex 不直起（docs/design.md 第十四节）：直起用的是按量计费的 key，
+// 只经 Mirasim 中转走（Mirasim 插头，agent=codex、route=cloud）。这条路只用假上游验过事件格式；
+// 调用方不显式给 allowMetered: true 就拒起，免得哪天被当成普通渠道接上、账单多出一笔。
 import { type AgentRunOptions, assertRunnable, runCliAgent } from '../cli-run.ts';
 import { buildSessionEnv, type SessionEnvInput } from '../env.ts';
 import type { RunFacts, RunSummary } from '../judge.ts';
@@ -24,6 +24,8 @@ export interface CodexRunSpec extends Omit<CodexArgsSpec, 'cwd'> {
   limits?: Partial<ProcessLimits>;
   testCommands?: readonly string[];
   cgroup?: CgroupScope;
+  /** 直起按量计费：不给 true 就拒起。 */
+  allowMetered?: boolean;
 }
 
 export interface CodexRunReport extends AgentProcessResult {
@@ -34,6 +36,11 @@ export interface CodexRunReport extends AgentProcessResult {
 }
 
 export async function runCodex(spec: CodexRunSpec, options: AgentRunOptions): Promise<CodexRunReport> {
+  if (spec.allowMetered !== true) {
+    throw new Error(
+      'codex 不直起：直起走按量计费的 key，只经 Mirasim 中转走；真要直起得显式给 allowMetered: true',
+    );
+  }
   await assertRunnable(options.command, spec.prompt, spec.cwd);
   const args = buildCodexArgs({
     model: spec.model,

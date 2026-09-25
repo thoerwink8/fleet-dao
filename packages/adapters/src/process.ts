@@ -5,6 +5,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { basename } from 'node:path';
 import { LineSplitter } from './lines.ts';
 import {
+  assertScopeInProduction,
   type CgroupScope,
   HAS_PROC,
   RUN_MARKER_KEY,
@@ -47,8 +48,10 @@ export interface AgentProcessSpec {
   /** 会话编号：写进环境当标记（FLEET_RUN_ID），收尸时按它认出脱离了进程组的子孙。 */
   runId: string;
   /**
-   * 经 fleet-agent-scope 以会话专用用户的身份放进它自己的 scope（资源记账、收尸以 cgroup 为准）。命令要写绝对路径；
-   * 环境里 FLEET_* 这几类经 sudo 的环境传，PATH 改名 FLEET_SESSION_PATH，其余写成 /usr/bin/env 的参数（像凭据的一律拒）。
+   * 经 fleet-agent-scope 以会话专用用户的身份放进它自己的 scope（资源记账、收尸以 cgroup 为准）。生产配置下必须给
+   * （见 assertScopeInProduction），不给就不起。命令要写绝对路径；
+   * 环境里 FLEET_* 这几类经 sudo 的环境传，PATH 改名 FLEET_SESSION_PATH，白名单里的执行体开关写成 /usr/bin/env 的参数，
+   * 别的一律拒（见 scopeLaunch）。
    */
   scope?: CgroupScope;
   signal?: AbortSignal;
@@ -71,6 +74,8 @@ export interface SpawnInfo {
 
 export interface AgentProcessHooks {
   onLine(line: string, control: ProcessControl): void;
+  /** stdout 的原样字节（读文件用：按行切会吃掉 \r 和末尾的换行）。给了也照样按行交给 onLine。 */
+  onStdout?(chunk: Buffer): void;
   /** 有工具正在跑（比如一轮测试跑十几分钟）时返回 true，这段时间不算停滞。 */
   busy?(): boolean;
   onSpawn?(info: SpawnInfo): void;
@@ -144,7 +149,10 @@ export function guardCallback(
 function launchSpec(spec: AgentProcessSpec): { command: string[]; env: Record<string, string>; cwd: string } {
   if (spec.command.length === 0 || !spec.command[0]) throw new Error('没有给命令');
   const env = { ...spec.env, [RUN_MARKER_KEY]: spec.runId };
-  if (!spec.scope) return { command: [...spec.command], env, cwd: spec.cwd };
+  if (!spec.scope) {
+    assertScopeInProduction(spec.scope);
+    return { command: [...spec.command], env, cwd: spec.cwd };
+  }
   if (!spec.command[0].startsWith('/')) throw new Error(`放进 scope 的命令要写绝对路径：${spec.command[0]}`);
   const { sudoEnv, envArgs } = scopeLaunch(env);
   return {
@@ -311,6 +319,13 @@ export function runAgentProcess(
     });
     child.stdin.end(spec.stdin);
     child.stdout.on('data', (chunk: Buffer) => {
+      if (hooks.onStdout) {
+        try {
+          hooks.onStdout(chunk);
+        } catch (err) {
+          record(err);
+        }
+      }
       for (const line of splitter.push(chunk)) handleLine(line);
     });
     child.stderr.on('data', (chunk: Buffer) => {

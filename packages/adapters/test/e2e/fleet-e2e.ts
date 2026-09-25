@@ -1,6 +1,6 @@
 // 真跑验收：会话里敲 fleet 命令能不能到后端。经 reclaude 起一个极小的会话，PATH 里放 fleet，后端是本机假后端；
 // 会话结束后核对后端收到的请求（路径、通行证、内容）。
-// 在法国 VPS 上以执行体用户跑：node packages/adapters/test/e2e/fleet-e2e.ts <reclaude 绝对路径> <fleet 所在目录> [模型]
+// 在法国 VPS 上以登录好的会话用户跑（不进 scope）：FLEET_ENV=development node packages/adapters/test/e2e/fleet-e2e.ts <reclaude 绝对路径> <fleet 所在目录> [模型]
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';

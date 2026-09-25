@@ -150,15 +150,18 @@ export function parseReply(format: ShellFormat, body: unknown): ShellReply {
       return { id: str(call.id) ?? `call_${i}`, name, input: parseArgs(fn?.arguments) };
     });
     const usage = rec(root.usage);
+    const prompt = num(usage?.prompt_tokens);
+    const cached = num(rec(usage?.prompt_tokens_details)?.cached_tokens);
     return {
       text: typeof message.content === 'string' ? message.content : '',
       toolCalls,
       stopReason: str(choice.finish_reason) ?? (toolCalls.length ? 'tool_calls' : 'unknown'),
       ...(str(root.model) ? { model: str(root.model) as string } : {}),
       usage: {
-        ...numberOf('inputTokens', num(usage?.prompt_tokens)),
+        // OpenAI 的 prompt_tokens 含命中缓存的那部分；inputTokens 只记没命中的（types.ts 的口径），减掉
+        ...numberOf('inputTokens', prompt === undefined ? undefined : Math.max(0, prompt - (cached ?? 0))),
         ...numberOf('outputTokens', num(usage?.completion_tokens)),
-        ...numberOf('cacheReadTokens', num(rec(usage?.prompt_tokens_details)?.cached_tokens)),
+        ...numberOf('cacheReadTokens', cached),
       },
     };
   }

@@ -1,4 +1,4 @@
-// 假的 mirasim-server：只在测试里用，按脚本回帧。发起连接上答 getState / prompt / stop，
+// 假的 Mirasim 服务：只在测试里用，按脚本回帧。发起连接上答 getState / prompt / stop，
 // 订阅连接上把一份真跑记录里本会话的帧按序推过去（可以掺别的会话的帧）。
 
 import { readFileSync } from 'node:fs';
@@ -39,8 +39,8 @@ export function mirasimRecording(name: string): MirasimRecording {
 export interface FakeMirasimOptions {
   agents?: string[];
   version?: string;
-  /** 对 prompt 帧的应答；返回 undefined = 不应答（模拟没等到 accepted）。 */
-  reply?: (prompt: MirasimFrame) => MirasimFrame | undefined;
+  /** 对 prompt 帧的应答（可以是按序回的几帧）；返回 undefined = 不应答（模拟没等到 accepted）。 */
+  reply?: (prompt: MirasimFrame) => MirasimFrame | MirasimFrame[] | undefined;
   /** 第一次 subscribe 之后推的帧。 */
   stream?: MirasimFrame[];
   /** 收到 stop 之后往订阅连接推的帧。 */
@@ -88,7 +88,7 @@ export class FakeMirasim {
         break;
       case 'prompt': {
         const reply = this.options.reply?.(frame);
-        if (reply) wire.push(reply);
+        for (const f of Array.isArray(reply) ? reply : reply ? [reply] : []) wire.push(f);
         break;
       }
       case 'subscribe':

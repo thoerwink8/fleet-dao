@@ -1,6 +1,7 @@
 // 接口外壳：命令行够不到的模型，用一个最小的「读写文件 + 跑命令」循环直连它的接口（OpenAI 兼容或 Anthropic 格式）。
 // 循环在引擎进程里：发对话 → 模型要调工具就在工作树里做（放进 scope 时以会话用户的身份做）→ 把结果接回去 → 直到它说完。
 // 接口密钥只在这里发请求用，不进报告、不进子进程环境。没有服务端会话：续跑就是把上一轮的对话记录带回来。
+// 生产配置下必须给 cgroup（工具以会话用户的身份做），不给就拒起（见 tools.ts）。
 // 花钱红线：按量计费的接口不许真跑；这一轮没有已确认在套餐内的接口，所以只有假接口的测试（见 PR）。
 
 import { stat } from 'node:fs/promises';
@@ -238,9 +239,14 @@ export async function runApiShell(
       if (name === 'run_command') {
         const command = str(input.command);
         if (!command) return { output: 'command is required', ok: false };
-        const r = await host.run(command);
-        const head = r.timedOut ? 'timed out and was killed' : `exit code ${r.exitCode}`;
-        return { output: `${head}\n${r.output}`, ok: !r.timedOut && r.exitCode === 0 };
+        // 叫停要收掉正在跑的命令，不等它跑完（一轮测试可能跑十几分钟）
+        const r = await host.run(command, options.signal);
+        const head = r.aborted
+          ? 'stopped by the engine'
+          : r.timedOut
+            ? 'timed out and was killed'
+            : `exit code ${r.exitCode}`;
+        return { output: `${head}\n${r.output}`, ok: !r.aborted && !r.timedOut && r.exitCode === 0 };
       }
       return { output: `unknown tool: ${name}`, ok: false };
     } catch (err) {

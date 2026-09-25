@@ -4,7 +4,14 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { DEFAULT_PROCESS_LIMITS, runAgentProcess, type SpawnInfo } from '../src/process.ts';
-import { type CgroupScope, scopeLaunch, scopePrefix, scopeUnit } from '../src/procs.ts';
+import {
+  assertScopeInProduction,
+  type CgroupScope,
+  scopeLaunch,
+  scopePrefix,
+  scopeUnit,
+} from '../src/procs.ts';
+import { createHost } from '../src/shell/tools.ts';
 import { fakeAgent, fixturePath, tempDir } from './helpers.ts';
 
 const onPosix = process.platform !== 'win32';
@@ -78,18 +85,73 @@ describe('scope 的参数与环境', () => {
     expect(envArgs).toEqual(['GROK_DISABLE_AUTOUPDATER=1', 'BASH_DEFAULT_TIMEOUT_MS=600000']);
   });
 
-  it('像凭据的变量不许写上命令行（sudo 记日志、/proc 谁都看得到）', () => {
+  it('命令行上只放白名单里的执行体开关（sudo 记日志、/proc 别的用户读得到）：名字不像凭据的也拒', () => {
     for (const key of [
+      // 按名字猜「像不像凭据」时放过去的
+      'GITHUB_PAT',
+      'DB_PASS',
+      'DATABASE_URL',
+      'JWT',
+      'NODE_OPTIONS',
+      'CODEX_HOME',
       'CURSOR_API_KEY',
       'XAI_API_KEY',
-      'OPENAI_API_KEY',
       'SOME_TOKEN',
-      'DB_PASSWORD',
-      'AUTH_COOKIE',
     ]) {
-      expect(() => scopeLaunch({ [key]: 'x' })).toThrow(key);
+      expect(() => scopeLaunch({ [key]: 'x' })).toThrow(`${key} 进不了会话用户的会话`);
     }
-    expect(() => scopeLaunch({ BAD: 'a\nb' })).toThrow('写不进命令行');
+    expect(
+      scopeLaunch({ CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', BASH_MAX_TIMEOUT_MS: '1' }).envArgs,
+    ).toEqual(['CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1', 'BASH_MAX_TIMEOUT_MS=1']);
+  });
+
+  it('白名单里的值带任何控制字符（\\r、\\n、\\t、ESC、DEL）也拒；工作目录同样', () => {
+    for (const value of ['600000\r', '1\nX=2', '1\t', '\u001b[2J', '1\u007f', '\u0000']) {
+      expect(() => scopeLaunch({ BASH_DEFAULT_TIMEOUT_MS: value })).toThrow('控制字符');
+    }
+    expect(() => scopePrefix(scope, '/w/tree\r')).toThrow('控制字符');
+  });
+});
+
+describe('生产配置下不进 scope 就不起', () => {
+  it('FLEET_ENV 不给、给空、production、认不出都算生产；development / test / 单元测试放行；给了 scope 放行', () => {
+    for (const env of [{}, { FLEET_ENV: '' }, { FLEET_ENV: 'production' }, { FLEET_ENV: 'staging' }]) {
+      expect(() => assertScopeInProduction(undefined, env)).toThrow('必须进 scope');
+    }
+    for (const env of [{ FLEET_ENV: 'development' }, { FLEET_ENV: 'test' }, { VITEST: 'true' }]) {
+      expect(() => assertScopeInProduction(undefined, env)).not.toThrow();
+    }
+    expect(() =>
+      assertScopeInProduction({ id: 'r', user: 'fleet-agent-carpool' }, { FLEET_ENV: 'production' }),
+    ).not.toThrow();
+  });
+
+  it('接线：起进程、接口外壳的工具在生产配置下没给 scope 都拒', async () => {
+    const saved = { VITEST: process.env.VITEST, FLEET_ENV: process.env.FLEET_ENV };
+    delete process.env.VITEST;
+    delete process.env.FLEET_ENV;
+    try {
+      const report = await runAgentProcess(
+        {
+          command: [process.execPath, '-e', ''],
+          cwd: tempDir(),
+          env: {},
+          stdin: '',
+          limits: DEFAULT_PROCESS_LIMITS,
+          runId: 'run-p1',
+        },
+        { onLine: () => {} },
+      );
+      expect(report.spawnError).toContain('必须进 scope');
+      expect(() =>
+        createHost({ cwd: tempDir(), runId: 'r', env: {}, commandTimeoutMs: 1_000, maxOutputChars: 100 }),
+      ).toThrow('必须进 scope');
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
   });
 });
 
@@ -188,7 +250,24 @@ describe.skipIf(!onPosix)('经帮手起停（假帮手）', () => {
     ).toContainEqual(['run-s2']);
   }, 20_000);
 
-  it('命令没写绝对路径、环境里有凭据：不起会话，交报告说没起来', async () => {
+  it('接口外壳的读文件经帮手：原样返回（\\r、末尾换行都在），不混进 stderr；读不了时报 stderr', async () => {
+    const cwd = tempDir();
+    const host = createHost({
+      cwd,
+      runId: 'run-h1',
+      env: { PATH: '/usr/bin:/bin', FLEET_FAKE_SCOPE_LOG: log },
+      commandTimeoutMs: 10_000,
+      maxOutputChars: 1_000,
+      scope: scopeOf('run-h1'),
+    });
+    const content = 'a\r\nb\n\n';
+    await host.writeFile('d/x.txt', content);
+    expect(readFileSync(join(cwd, 'd', 'x.txt'), 'utf8')).toBe(content);
+    expect(await host.readFile('d/x.txt')).toBe(content);
+    await expect(host.readFile('nope.txt')).rejects.toThrow('nope.txt');
+  }, 20_000);
+
+  it('命令没写绝对路径、环境里有白名单以外的变量：不起会话，交报告说没起来', async () => {
     const base = {
       cwd: tempDir(),
       stdin: 'x',

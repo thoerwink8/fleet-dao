@@ -19,7 +19,10 @@ export interface CursorRunSpec {
   session: CursorSession;
   /** 见 CursorArgsSpec.force。 */
   force: boolean;
-  /** cursor 的登录态在 HOME 下；要用 CURSOR_API_KEY 就放进 env.extra（只给这个会话）。 */
+  /**
+   * cursor 的登录态在 HOME 下。进 scope 时要在会话用户家里登好——环境里的 key 进不去（见 scopeLaunch）；
+   * 不进 scope（开发机）才能把 CURSOR_API_KEY 放进 env.extra。
+   */
   env: SessionEnvInput;
   limits?: Partial<ProcessLimits>;
   testCommands?: readonly string[];

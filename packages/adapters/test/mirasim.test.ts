@@ -35,6 +35,18 @@ const spec = (extra: Partial<MirasimRunSpec> = {}): MirasimRunSpec => ({
   ...extra,
 });
 
+/** 中转路由要账本里起针之后有 2xx 才算数：给一份刚写好一行 200 的账本。 */
+function okLedger(sessionKey: string): string {
+  const dir = tempDir();
+  const uuid = sessionKey.split(':')[1] as string;
+  mkdirSync(join(dir, uuid));
+  writeFileSync(
+    join(dir, uuid, 'index-0.ndjson'),
+    `${JSON.stringify({ ts: new Date().toISOString(), status: 200, viaRelay: true })}\n`,
+  );
+  return dir;
+}
+
 function replay(recording: typeof kimi) {
   const session = new MirasimSession({
     runId: 'r1',
@@ -122,6 +134,7 @@ describe('Mirasim 起会话到判定（假服务端）', () => {
       connect: server.connect,
       onEvent: (e) => void events.push(e),
       onAccepted: (a) => void acceptedInfo.push(a),
+      ledgerDir: okLedger(kimi.sessionKey),
     });
     expect(server.framesOf('prompt')[0]).toMatchObject({
       agent: 'kimi',
@@ -328,7 +341,11 @@ describe('Mirasim 起会话到判定（假服务端）', () => {
     expect(noAgent.launchError).toContain('服务端没有 dsh');
     const refused = await runMirasim(spec(), {
       connect: new FakeMirasim({
-        reply: () => ({ type: 'error', message: '当前是「本地」档，而本机没有这个智能体的账号' }),
+        reply: (p) => ({
+          type: 'error',
+          clientRef: p.clientRef,
+          message: '当前是「本地」档，而本机没有这个智能体的账号',
+        }),
       }).connect,
     });
     expect(refused.launchError).toBe('服务端拒了这一针：当前是「本地」档，而本机没有这个智能体的账号');
@@ -340,10 +357,33 @@ describe('Mirasim 起会话到判定（假服务端）', () => {
       expect(judgeRun(mirasimRunSummary(r).facts).reason).toBe('spawn_failed');
   });
 
-  it('prompt 发出去没等到应答：标「没查成」，不当成确定没起（MS-18）', async () => {
+  it('prompt 发出去没等到应答：标「没查成」，不当成确定没起、不判成重派的那一类（MS-18）', async () => {
     const report = await runMirasim(spec(), { connect: new FakeMirasim({ reply: () => undefined }).connect });
     expect(report.launchUnknown).toBe(true);
     expect(report.launchError).toContain('别重发');
+    expect(judgeRun(mirasimRunSummary(report).facts)).toMatchObject({
+      outcome: 'failed',
+      reason: 'launch_unknown',
+    });
+  });
+
+  it('不带本次 clientRef 的 error 帧不算被拒：记下原话接着等，等到 accepted 照常跑，等不到按没查成收', async () => {
+    const stray = { type: 'error', message: 'Selected model is at capacity' };
+    const unknown = await runMirasim(spec(), {
+      connect: new FakeMirasim({
+        reply: (p) => [stray, { type: 'error', clientRef: `${String(p.clientRef)}-x`, message: '别人的' }],
+      }).connect,
+    });
+    expect(unknown.launchUnknown).toBe(true);
+    expect(unknown.launchError).toContain('Selected model is at capacity');
+    expect(judgeRun(mirasimRunSummary(unknown).facts).reason).toBe('launch_unknown');
+    const later = await runMirasim(spec(), {
+      connect: new FakeMirasim({ reply: (p) => [stray, accepted(kimi)(p)], stream: kimi.stream }).connect,
+      ledgerDir: okLedger(kimi.sessionKey),
+    });
+    expect(later.launchError).toBeUndefined();
+    expect(later.sessionKey).toBe(kimi.sessionKey);
+    expect(judgeRun(mirasimRunSummary(later).facts).reason).toBe('answered');
   });
 
   it('一直排队：起不来超时，停掉', async () => {
@@ -424,7 +464,7 @@ describe('Mirasim 起会话到判定（假服务端）', () => {
     ).rejects.toThrow('不是 kimi 的');
   });
 
-  it('中转路由：账本里起针之后没有 2xx，done 不算数；账本没查成就不下这个结论', async () => {
+  it('中转路由：账本里起针之后没有 2xx，done 不算数；账本没读成、没给账本目录判「中转没查成」', async () => {
     const ledgerDir = tempDir();
     const uuid = kimi.sessionKey.split(':')[1] as string;
     mkdirSync(join(ledgerDir, uuid));
@@ -448,7 +488,29 @@ describe('Mirasim 起会话到判定（假服务端）', () => {
       ledgerDir: join(ledgerDir, 'nowhere'),
     });
     expect(unknown.ledger?.state).toBe('unknown');
-    expect(judgeRun(mirasimRunSummary(unknown).facts).outcome).toBe('ok');
+    expect(judgeRun(mirasimRunSummary(unknown).facts)).toEqual({
+      outcome: 'failed',
+      reason: 'relay_unknown',
+      detail:
+        '中转没查成：账本没读成：账本里没有这个会话的目录（可能一次上游调用都没有，也可能账本换了地方）',
+    });
+    const noLedger = await runMirasim(spec(), {
+      connect: new FakeMirasim({ reply: accepted(kimi), stream: kimi.stream }).connect,
+    });
+    expect(noLedger.ledger).toBeUndefined();
+    expect(judgeRun(mirasimRunSummary(noLedger).facts).reason).toBe('relay_unknown');
+    // 交付查到了也一样：上游有没有真干活没核实，不判完成
+    const delivered = {
+      state: 'delivered' as const,
+      target: 'refs/remotes/origin/main',
+      detail: '这一轮新提交 1 个',
+    };
+    expect(judgeRun(mirasimRunSummary(noLedger).facts, delivered).reason).toBe('relay_unknown');
+    // 不走中转：不看账本
+    const local = await runMirasim(spec({ route: 'local' }), {
+      connect: new FakeMirasim({ reply: accepted(kimi), stream: kimi.stream }).connect,
+    });
+    expect(judgeRun(mirasimRunSummary(local).facts).reason).toBe('answered');
   });
 
   it('引擎重启后收旧会话：看到终态才算收好', async () => {
@@ -528,10 +590,13 @@ describe('Mirasim 账本', () => {
 });
 
 describe('Mirasim 连接', () => {
-  it('测试里连真服务的端口一律拒绝', () => {
+  it('测试里连真服务一律拒绝：旧服务的端口，或令牌在 .mirasim 目录下（新服务端口不定）', () => {
     expect(() => mirasimConnector({ port: 4316, tokenFile: '/nowhere' })).toThrow(
-      '测试里不许连真的 mirasim-server',
+      '测试里不许连真的 Mirasim 服务',
     );
+    expect(() =>
+      mirasimConnector({ port: 4400, tokenFile: '/home/someone/.mirasim/run/local-4400.token' }),
+    ).toThrow('测试里不许连真的 Mirasim 服务');
   });
 
   it('真 ws：每次建连现读令牌、帧来回、服务端关了之后 next 回 closed', async () => {

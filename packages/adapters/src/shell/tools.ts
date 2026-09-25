@@ -1,11 +1,11 @@
 // 接口外壳的三件工具：读文件、写文件、跑命令，只许碰工作树。
 // 放进 scope 时（生产）三件都以会话专用用户的身份做：命令、读、写都经 fleet-agent-scope 起一个短命进程，
-// 引擎用户自己不碰工作树里的文件——不然命令会以引擎的身份跑，读得到引擎的配置和凭据。
+// 引擎用户自己不碰工作树里的文件——不然命令会以引擎的身份跑，读得到引擎的配置和凭据。生产配置下不给 scope 就拒起。
 // 不放 scope 时（开发机、测试）在本进程里读写，路径按真实路径核对，符号链接也逃不出工作树。
 import { mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { DEFAULT_PROCESS_LIMITS, runAgentProcess } from '../process.ts';
-import type { CgroupScope } from '../procs.ts';
+import { assertScopeInProduction, type CgroupScope } from '../procs.ts';
 import type { ShellToolSpec } from './wire.ts';
 
 export const SHELL_TOOLS: readonly ShellToolSpec[] = [
@@ -50,13 +50,16 @@ export interface CommandResult {
   exitCode: number | null;
   output: string;
   timedOut: boolean;
+  /** 引擎叫停，命令跑到一半被收掉了。 */
+  aborted?: boolean;
 }
 
 /** 三件工具真正落地的地方。测试里可以整个换掉。 */
 export interface ShellHost {
   readFile(path: string): Promise<string>;
   writeFile(path: string, content: string): Promise<void>;
-  run(command: string): Promise<CommandResult>;
+  /** signal 叫停时正在跑的命令连同它的子孙一起收掉，不等它跑完。 */
+  run(command: string, signal?: AbortSignal): Promise<CommandResult>;
 }
 
 export interface HostOptions {
@@ -92,12 +95,32 @@ function tail(text: string, max: number): string {
   return text.length > max ? `…（前面省略 ${text.length - max} 字）\n${text.slice(-max)}` : text;
 }
 
+interface ExecResult {
+  exitCode: number | null;
+  /** raw 时是原样的字节解成的文字；否则是按行收的。 */
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+  aborted: boolean;
+}
+
+function combined(r: ExecResult): string {
+  return [r.stdout, r.stderr].filter((x) => x).join('\n');
+}
+
 export function createHost(options: HostOptions): ShellHost {
   const { cwd, scope } = options;
+  assertScopeInProduction(scope);
   let seq = 0;
-  const exec = async (command: string[], stdin: string, timeoutMs: number): Promise<CommandResult> => {
+  const exec = async (
+    command: string[],
+    stdin: string,
+    timeoutMs: number,
+    how: { raw?: boolean; signal?: AbortSignal | undefined } = {},
+  ): Promise<ExecResult> => {
     seq++;
     const lines: string[] = [];
+    const chunks: Buffer[] = [];
     const result = await runAgentProcess(
       {
         command,
@@ -113,25 +136,39 @@ export function createHost(options: HostOptions): ShellHost {
         },
         runId: `${options.runId}-t${seq}`,
         ...(scope ? { scope: { ...scope, id: `${scope.id}-${seq}`.slice(0, 63) } } : {}),
+        ...(how.signal ? { signal: how.signal } : {}),
       },
-      { onLine: (line) => void lines.push(line) },
+      how.raw
+        ? { onLine: () => {}, onStdout: (chunk) => void chunks.push(chunk) }
+        : { onLine: (line) => void lines.push(line) },
     );
     if (result.spawnError) throw new Error(`命令没起来：${result.spawnError}`);
-    const stderr = result.stderrTail.trim();
     return {
       exitCode: result.exitCode,
-      output: [lines.join('\n'), stderr].filter((x) => x).join('\n'),
+      stdout: how.raw ? Buffer.concat(chunks).toString('utf8') : lines.join('\n'),
+      stderr: result.stderrTail.trim(),
       timedOut: result.killed?.reason === 'wall_clock_timeout' || result.killed?.reason === 'startup_timeout',
+      aborted: result.killed?.reason === 'aborted',
     };
   };
   const bash = process.platform === 'win32' ? ['bash', '-c'] : ['/bin/bash', '-c'];
+  const run = async (command: string, signal?: AbortSignal): Promise<CommandResult> => {
+    const r = await exec([...bash, command], '', options.commandTimeoutMs, { signal });
+    return {
+      exitCode: r.exitCode,
+      output: tail(combined(r), options.maxOutputChars),
+      timedOut: r.timedOut,
+      ...(r.aborted ? { aborted: true } : {}),
+    };
+  };
 
   if (scope) {
     return {
       async readFile(path) {
-        const r = await exec(['/bin/cat', '--', insideTree(cwd, path)], '', 60_000);
-        if (r.exitCode !== 0) throw new Error(tail(r.output, 500) || `读不了（退出码 ${r.exitCode}）`);
-        return r.output;
+        // 文件内容只取 stdout 的原样字节：不混进 stderr，\r 和末尾的换行都留着
+        const r = await exec(['/bin/cat', '--', insideTree(cwd, path)], '', 60_000, { raw: true });
+        if (r.exitCode !== 0) throw new Error(tail(r.stderr, 500) || `读不了（退出码 ${r.exitCode}）`);
+        return r.stdout;
       },
       async writeFile(path, content) {
         const full = insideTree(cwd, path);
@@ -140,12 +177,9 @@ export function createHost(options: HostOptions): ShellHost {
           content,
           60_000,
         );
-        if (r.exitCode !== 0) throw new Error(tail(r.output, 500) || `写不进去（退出码 ${r.exitCode}）`);
+        if (r.exitCode !== 0) throw new Error(tail(combined(r), 500) || `写不进去（退出码 ${r.exitCode}）`);
       },
-      async run(command) {
-        const r = await exec([...bash, command], '', options.commandTimeoutMs);
-        return { ...r, output: tail(r.output, options.maxOutputChars) };
-      },
+      run,
     };
   }
   return {
@@ -160,9 +194,6 @@ export function createHost(options: HostOptions): ShellHost {
       await assertRealInside(cwd, dirname(full));
       await writeFile(full, content);
     },
-    async run(command) {
-      const r = await exec([...bash, command], '', options.commandTimeoutMs);
-      return { ...r, output: tail(r.output, options.maxOutputChars) };
-    },
+    run,
   };
 }

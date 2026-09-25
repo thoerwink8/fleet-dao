@@ -5,7 +5,7 @@
 import { delimiter } from 'node:path';
 
 /** 只从宿主环境抄这些。XDG_RUNTIME_DIR 给 systemd-run --user 用；后半截是 Windows 开发机上起 node 必需的系统变量。 */
-const BASE_KEYS = new Set([
+export const SESSION_BASE_KEYS: ReadonlySet<string> = new Set([
   'HOME',
   'USER',
   'LOGNAME',
@@ -58,7 +58,7 @@ export function buildSessionEnv(input: SessionEnvInput): Record<string, string> 
   for (const [key, value] of Object.entries(input.base)) {
     if (value === undefined) continue;
     const upper = key.toUpperCase();
-    if (BASE_KEYS.has(upper) || upper.startsWith('LC_')) env[key] = value;
+    if (SESSION_BASE_KEYS.has(upper) || upper.startsWith('LC_')) env[key] = value;
   }
   if (input.pathPrepend?.length) {
     const key = Object.keys(env).find((k) => k.toUpperCase() === 'PATH') ?? 'PATH';

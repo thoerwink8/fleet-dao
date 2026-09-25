@@ -1,5 +1,5 @@
 // codex 插头（直起 codex exec --json）：参数、过程记录解析（真 CLI 对假上游的夹具）、起停与判定（假执行体回放）。
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ProgressEvent } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
@@ -166,7 +166,19 @@ describe('codex 起停', () => {
       extra: { CODEX_HOME: join(cwd, '.codex-pool') },
     },
     testCommands: ['git commit'],
+    allowMetered: true,
     ...extra,
+  });
+
+  it('调用方没显式允许按量计费：拒起，一个进程都不起', async () => {
+    const out = tempDir();
+    const command = fakeAgent({ replay: fixturePath('codex', 'cx-edit'), stdinTo: join(out, 'stdin') });
+    const { allowMetered: _, ...notAllowed } = spec(tempDir());
+    await expect(runCodex(notAllowed, { command })).rejects.toThrow('codex 不直起');
+    await expect(runCodex({ ...notAllowed, allowMetered: false }, { command })).rejects.toThrow(
+      'allowMetered: true',
+    );
+    expect(existsSync(join(out, 'stdin'))).toBe(false);
   });
 
   it('回放真跑记录：参数、stdin、CODEX_HOME、摘要', async () => {

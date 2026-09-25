@@ -1,4 +1,4 @@
-// 到 mirasim-server 回环 ws 的连接（协议见 docs/reference/adapters.md 第八节）。
+// 到 Mirasim 服务回环 ws 的连接（协议见 docs/reference/adapters.md 第八节）。
 // - 令牌在服务写在本机的令牌文件里，服务每次起停都换：每次建连现读，不缓存；
 // - 起一个 codex 会话会把服务端单线程堵 40–58 秒：建连要重试到 90 秒左右，不是一次失败就放弃（MS-08）；
 // - 适配器只经这里的 MirasimWire 收发帧，测试给假的连接：单元测试结构上碰不到真服务（GEN-08）。
@@ -19,18 +19,22 @@ export type MirasimConnect = () => Promise<MirasimWire>;
 export interface MirasimEndpoint {
   /** 默认 127.0.0.1。 */
   host?: string;
-  /** VPS 上是 4316。 */
+  /** 旧系统那份是 4316；给会话用户单独起的那份按它自己的配置。 */
   port: number;
-  /** 回环令牌文件（~/.mirasim/run/local-<端口>.token，归 mirasim-server 的用户）。 */
+  /** 回环令牌文件（~/.mirasim/run/local-<端口>.token，在这份 Mirasim 服务的用户家里）。 */
   tokenFile: string;
   /** 建连总共重试多久，默认 90 秒。 */
   connectTimeoutMs?: number;
 }
 
-/** 单元测试里连真的 mirasim-server 一律拒绝：旧系统的假会话就是这么漏出去的。 */
+/**
+ * 单元测试里连真的 Mirasim 服务一律拒绝：旧系统的假会话就是这么漏出去的。
+ * 新起的服务端口不定，所以除了旧的 4316，令牌文件在 .mirasim 目录下（真服务写令牌的地方）也拒。
+ */
 export function assertNotRealMirasimInTests(endpoint: MirasimEndpoint): void {
-  if (process.env.VITEST && endpoint.port === 4316) {
-    throw new Error('测试里不许连真的 mirasim-server（4316）：换成假连接，真跑放到测试之外');
+  if (!process.env.VITEST) return;
+  if (endpoint.port === 4316 || /[\\/]\.mirasim[\\/]/.test(endpoint.tokenFile)) {
+    throw new Error('测试里不许连真的 Mirasim 服务：换成假连接，真跑放到测试之外');
   }
 }
 

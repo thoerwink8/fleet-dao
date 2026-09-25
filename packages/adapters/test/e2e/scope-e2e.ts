@@ -2,7 +2,7 @@
 // 1. 身份是会话用户，HOME 是它的；FLEET_* 经 sudo 的环境带进去，执行体自己的开关经 /usr/bin/env 带进去，引擎的 PATH 进不去；
 // 2. 孙进程 setsid 又不理 SIGTERM、父进程也不理 SIGTERM，强杀后 cgroup 必须清空；
 // 3. 执行体正常退出，留下一个 setsid 又清空了环境（会话标记也没了）的后台进程——只有 cgroup 找得到它，也要收掉；
-// 4. 像凭据的变量不许写上命令行：当场拒，不起会话。
+// 4. 白名单以外的变量不许写上命令行（名字不像凭据的也一样，例如 DATABASE_URL）：当场拒，不起会话。
 // 用法：sudo -u fleet node packages/adapters/test/e2e/scope-e2e.ts [会话用户]，默认 fleet-agent-carpool。只起假执行体，不花额度。
 import { randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -112,7 +112,7 @@ const exited = await run(
   },
   { killGraceMs: 300 },
 );
-const refused = await run('凭据上命令行', { replay: fixture }, {}, { CURSOR_API_KEY: 'not-a-key' });
+const refused = await run('白名单以外的变量上命令行', { replay: fixture }, {}, { DATABASE_URL: 'not-a-url' });
 rmSync(dir, { recursive: true, force: true });
 
 const uid = Number(
@@ -146,7 +146,7 @@ const checks: [string, boolean][] = [
     '正常退出后清空了环境的后台进程也收掉、cgroup 清空',
     !exited.grandchildAlive && exited.leftInScope === 0 && exited.report.stragglers >= 1,
   ],
-  ['像凭据的变量不上命令行：当场拒', Boolean(refused.report.spawnError?.includes('CURSOR_API_KEY'))],
+  ['白名单以外的变量不上命令行：当场拒', Boolean(refused.report.spawnError?.includes('DATABASE_URL'))],
 ];
 console.log(
   JSON.stringify(

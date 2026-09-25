@@ -5,6 +5,7 @@
 import { execFile, spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { SESSION_BASE_KEYS } from './env.ts';
 
 /** 会话标记的环境变量名：每个会话一个值，子孙进程都继承它，重启后的引擎也能按它认出旧会话的进程。 */
 export const RUN_MARKER_KEY = 'FLEET_RUN_ID';
@@ -137,6 +138,9 @@ export interface CgroupScope {
 
 const SCOPE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/;
 const SIZE = /^(0|[1-9][0-9]*[KMGT]?)$/;
+/** 写上 sudo 命令行的值不许带控制字符（\r、\n……会搅乱 sudo 的日志）。 */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: 就是要拦控制字符
+const CONTROL_CHAR = /[\u0000-\u001f\u007f]/;
 
 function assertScope(scope: CgroupScope): void {
   if (!SCOPE_ID.test(scope.id))
@@ -161,6 +165,21 @@ function assertScope(scope: CgroupScope): void {
   }
 }
 
+/**
+ * 生产配置下会话必须进 scope：不进就以引擎的身份跑，读得到引擎的配置和凭据。FLEET_ENV 的口径和后端一致
+ * （packages/api/src/config.ts：不给、给空、认不出都按 production）；开发机、测试显式设 development / test，
+ * 单元测试（VITEST）算测试。
+ */
+export function assertScopeInProduction(
+  scope: CgroupScope | undefined,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): void {
+  if (scope || env.VITEST || env.FLEET_ENV === 'development' || env.FLEET_ENV === 'test') return;
+  throw new Error(
+    '生产配置下会话必须进 scope（给 cgroup）：不进就以引擎的身份跑，读得到引擎的配置和凭据。开发机设 FLEET_ENV=development',
+  );
+}
+
 export function scopeUnit(scope: CgroupScope): string {
   return `fleet-agent-${scope.id}.scope`;
 }
@@ -173,6 +192,7 @@ function helperCall(scope: CgroupScope): string[] {
 export function scopePrefix(scope: CgroupScope, cwd: string): string[] {
   assertScope(scope);
   if (!cwd.startsWith('/')) throw new Error(`工作目录要写绝对路径：${cwd}`);
+  if (CONTROL_CHAR.test(cwd)) throw new Error('工作目录里有控制字符，不写上命令行');
   const l = scope.limits ?? {};
   return [
     ...helperCall(scope),
@@ -193,21 +213,28 @@ export function scopePrefix(scope: CgroupScope, cwd: string): string[] {
 
 /** 帮手脚本只把这几类环境变量放进会话（sudoers 的 env_keep 是同一张表）。 */
 export const SCOPE_ENV_KEEP = /^(FLEET_[A-Z0-9_]+|LANG|LANGUAGE|LC_[A-Z_]+|TZ|TERM|GIT_TERMINAL_PROMPT)$/;
-/** 帮手脚本自己给会话用户设的（HOME、USER……），或者只对引擎用户有意义的：不往里传。PATH 改走 FLEET_SESSION_PATH。 */
-const SCOPE_ENV_DROP =
-  /^(HOME|USER|LOGNAME|SHELL|TMPDIR|XDG_RUNTIME_DIR|SYSTEMROOT|WINDIR|COMSPEC|PATHEXT|USERPROFILE|APPDATA|LOCALAPPDATA|TEMP|TMP)$/i;
-const SECRET_NAME = /KEY|TOKEN|SECRET|PASSW|CREDENTIAL|COOKIE|AUTH/i;
+/**
+ * 能写上命令行的只有这几个执行体开关（值是固定的数字、开关）。命令行 sudo 会记日志，/proc 里别的用户也读得到
+ * （VPS 的 /proc 没开 hidepid），按名字猜「像不像凭据」拦不住 DATABASE_URL、JWT 这类，所以只放白名单。
+ */
+export const SCOPE_ENV_ARGS: ReadonlySet<string> = new Set([
+  'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC',
+  'BASH_DEFAULT_TIMEOUT_MS',
+  'BASH_MAX_TIMEOUT_MS',
+  'GROK_DISABLE_AUTOUPDATER',
+]);
 
 export interface ScopeLaunch {
   /** 调 sudo 时的环境：FLEET_* 这几类，加 FLEET_SESSION_PATH。 */
   sudoEnv: Record<string, string>;
-  /** 其余要给会话的变量（执行体自己的开关，例如 GROK_DISABLE_AUTOUPDATER）：写成 /usr/bin/env 的参数。 */
+  /** 白名单里的执行体开关（例如 GROK_DISABLE_AUTOUPDATER）：写成 /usr/bin/env 的参数。 */
   envArgs: string[];
 }
 
 /**
- * 把会话环境拆成「经 sudo 的环境传」和「写在命令行上」两份。命令行 sudo 会记日志、/proc 里谁都看得到，
- * 所以像凭据的变量名一律拒：会话用户的登录态要在它自己家里登好，不从引擎这边传。
+ * 把会话环境拆成「经 sudo 的环境传」和「写在命令行上」两份。宿主抄来的基础变量（HOME、USER……）是引擎的，
+ * 帮手脚本会给会话用户设它自己的，不往里传；PATH 改走 FLEET_SESSION_PATH；别的变量不在白名单里一律拒——
+ * 会话用户的登录态要在它自己家里登好，不从引擎这边传。
  */
 export function scopeLaunch(env: Record<string, string>): ScopeLaunch {
   const sudoEnv: Record<string, string> = { PATH: '/usr/sbin:/usr/bin:/sbin:/bin' };
@@ -215,13 +242,13 @@ export function scopeLaunch(env: Record<string, string>): ScopeLaunch {
   for (const [key, value] of Object.entries(env)) {
     if (SCOPE_ENV_KEEP.test(key)) sudoEnv[key] = value;
     else if (key === 'PATH') sudoEnv.FLEET_SESSION_PATH = value;
-    else if (SCOPE_ENV_DROP.test(key)) continue;
-    else if (SECRET_NAME.test(key)) {
+    else if (SESSION_BASE_KEYS.has(key.toUpperCase())) continue;
+    else if (!SCOPE_ENV_ARGS.has(key)) {
       throw new Error(
-        `${key} 进不了会话用户的会话：帮手脚本只放 FLEET_* 这几类环境变量，凭据又不能写在命令行上——在会话用户家里登录好`,
+        `${key} 进不了会话用户的会话：帮手脚本只放 FLEET_* 这几类环境变量，命令行上只放白名单里的执行体开关——登录态在会话用户家里登好`,
       );
-    } else if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || /[\0\n]/.test(value)) {
-      throw new Error(`环境变量写不进命令行：${key}`);
+    } else if (CONTROL_CHAR.test(value)) {
+      throw new Error(`${key} 的值里有控制字符，不写上命令行`);
     } else envArgs.push(`${key}=${value}`);
   }
   return { sudoEnv, envArgs };

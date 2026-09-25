@@ -1,5 +1,6 @@
-// Mirasim 插头：经本机 mirasim-server 的回环 ws 起一个会话，只留作「Mirasim 中转额度」这条路由的薄插头
-// （MS-28：中转不许反代，只能用它的客户端）。会话由服务端以它自己的身份（法国 VPS 上是旧系统的会话用户）起执行体，
+// Mirasim 插头：经本机 Mirasim 服务的回环 ws 起一个会话，只留作「Mirasim 中转额度」这条路由的薄插头
+// （MS-28：中转不许反代，只能用它的客户端）。执行体的工具跑在 Mirasim 服务的进程里，所以主线定的是给会话用户单独起一份
+// Mirasim 服务（各自登录一次），不借旧系统那份；配好之前 Mirasim 路由保持关闭（docs/design.md 第十四节）。
 // 引擎只收发帧：起会话、另开连接订阅状态、叫停、事后读账本核实走了哪条上游。
 // 协议与坑见 docs/reference/adapters.md 第八节（MS-01…28）。
 import { stat } from 'node:fs/promises';
@@ -44,9 +45,7 @@ export const DEFAULT_MIRASIM_LIMITS: MirasimLimits = {
 
 export interface MirasimRunSpec {
   runId: string;
-  /**
-   * 工作树。执行体以 mirasim-server 的身份在这里干活：这个用户要写得了（会话专用用户的树它进不去，见 PR 说明）。
-   */
+  /** 工作树。执行体以这份 Mirasim 服务的用户（会话用户）的身份在这里干活。 */
   cwd: string;
   prompt: string;
   /** 服务端的执行体名：kimi、pi、codex、grok、claude…… */
@@ -79,7 +78,10 @@ export interface MirasimRunOptions {
   onAccepted?: (info: MirasimAccepted) => unknown;
   signal?: AbortSignal;
   now?: () => Date;
-  /** 账本目录（mirasim-server 用户家里的 ~/.mirasim/traffic）；给了就在结束后读本会话的上游调用。 */
+  /**
+   * 账本目录（Mirasim 服务那个用户家里的 ~/.mirasim/traffic）：结束后读本会话的上游调用。
+   * 走中转（route=cloud）时不给就判「中转没查成」：快照说 done 不等于上游真干了活。
+   */
   ledgerDir?: string;
 }
 
@@ -94,9 +96,9 @@ export interface MirasimRunReport {
   serverVersion?: string;
   sessionKey?: string;
   taskId?: string;
-  /** 没起来：连不上、服务端没有这个执行体、服务端拒了这一针。 */
+  /** 没起来：连不上、服务端没有这个执行体、服务端拒了这一针。launchUnknown 时是「没查成」的原因。 */
   launchError?: string;
-  /** prompt 发出去了、没等到应答：可能已经在跑（MS-18：不许重发，去对账）。 */
+  /** prompt 发出去了、没等到带本次 clientRef 的应答：可能已经在跑（MS-18：不许重发，去对账）。 */
   launchUnknown?: boolean;
   killed?: { reason: KillReason; at: string };
   /** 叫停之后有没有看到它翻终态（MS-16：没看到就是「没查成」，不是停好了）。 */
@@ -105,6 +107,7 @@ export interface MirasimRunReport {
   watchError?: string;
   terminal?: { isError: boolean; detail: string };
   session: ReturnType<MirasimSession['summary']>;
+  /** 没给账本目录就没有。 */
   ledger?: LedgerReading;
   /** 订阅连接上收到的、不属于本会话的帧（GEN-10：一律不认）。 */
   foreignFrames: number;
@@ -249,17 +252,25 @@ export async function runMirasim(
     ...(spec.session.mode === 'resume' ? { sessionKey: spec.session.key } : {}),
     clientRef,
   });
+  // 被拒只认带本次 clientRef 的 error 帧。认不出是冲这一针来的报错不当成「被拒」：被拒的会重派，
+  // 而会话可能已经起了，重派就扣两次额度。记下原话接着等 accepted，等不到按「没查成」收。
+  let stray: string | undefined;
   const reply = await waitFor(
     control,
-    (f) =>
-      (f.type === 'accepted' && (f.clientRef === undefined || f.clientRef === clientRef)) ||
-      f.type === 'error',
+    (f) => {
+      if (f.type === 'accepted') return f.clientRef === undefined || f.clientRef === clientRef;
+      if (f.type !== 'error') return false;
+      if (f.clientRef === clientRef) return true;
+      stray ??= str(f.message) ?? JSON.stringify(f);
+      return false;
+    },
     limits.replyMs,
   );
   if (reply === 'timeout' || reply === 'closed') {
     report.launchUnknown = true;
-    report.launchError =
-      '起会话没查成：prompt 发出去了，没等到应答。它可能已经在跑——别重发（会烧两次额度），按工作目录和起针时间去 ~/.mirasim/sessions 对账';
+    report.launchError = `起会话没查成：prompt 发出去了，没等到应答${
+      stray ? `（收到过一条认不出是冲这一针来的报错：${stray}）` : ''
+    }。它可能已经在跑——别重发（会烧两次额度），按工作目录和起针时间去 ~/.mirasim/sessions 对账`;
     return done();
   }
   if (reply.type === 'error') {
@@ -465,20 +476,27 @@ export function mirasimRouting(report: MirasimRunReport): LedgerRouting | undefi
 }
 
 export function mirasimRunFacts(report: MirasimRunReport): RunFacts {
-  const routing = mirasimRouting(report);
   let terminal = report.terminal;
-  // 中转路由：快照说 done 还要账本里起针之后有 2xx 行（8.4）；账本没查成就不下这个结论
-  if (terminal && !terminal.isError && report.route === 'cloud' && routing && routing.ok === 0) {
-    terminal = { isError: true, detail: '快照说 done，但账本里起针之后没有一次 2xx 的上游调用' };
+  let relayUnknown: string | undefined;
+  // 中转路由：快照说 done 还要账本里起针之后有 2xx 行（8.4）。账本没读成、没给账本目录都是「没查成」，不当成干完了
+  if (terminal && !terminal.isError && report.route === 'cloud') {
+    const ledger = report.ledger;
+    if (!ledger) relayUnknown = '没给账本目录，上游有没有真的干活核实不了';
+    else if (ledger.state === 'unknown') relayUnknown = `账本没读成：${ledger.detail}`;
+    else if (ledgerRouting(ledger.rows).ok === 0) {
+      terminal = { isError: true, detail: '快照说 done，但账本里起针之后没有一次 2xx 的上游调用' };
+    }
   }
   const error = report.session.state.error;
   const words = report.watchError ?? error;
+  const launch = report.launchError;
   return {
-    ...(report.launchError ? { spawnError: report.launchError } : {}),
+    ...(launch ? (report.launchUnknown ? { launchUnknown: launch } : { spawnError: launch }) : {}),
     ...(report.killed ? { killed: report.killed.reason } : {}),
     ...(terminal ? { terminal } : {}),
     quotaExhausted: looksLikeQuotaExhausted(error),
     ...(words ? { lastWords: words } : {}),
+    ...(relayUnknown ? { relayUnknown } : {}),
   };
 }
 

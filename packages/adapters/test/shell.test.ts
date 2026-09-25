@@ -72,7 +72,11 @@ const oaTool = (id: string, name: string, args: object) => ({
   type: 'function',
   function: { name, arguments: JSON.stringify(args) },
 });
-const oaReply = (message: object, finish: string, usage = { prompt_tokens: 100, completion_tokens: 10 }) => ({
+const oaReply = (
+  message: object,
+  finish: string,
+  usage: object = { prompt_tokens: 100, completion_tokens: 10 },
+) => ({
   model: 'm-1-2026',
   choices: [{ message: { role: 'assistant', ...message }, finish_reason: finish }],
   usage,
@@ -191,6 +195,19 @@ describe('线格式', () => {
     expect(
       parseReply('openai-chat', { choices: [{ message: { content: 'x' }, finish_reason: 'stop' }] }).usage,
     ).toEqual({});
+  });
+
+  it('OpenAI 的 prompt_tokens 含命中缓存的部分：输入只记没命中的，缓存不算两遍', () => {
+    const cachedReply = oaReply({ content: 'ok' }, 'stop', {
+      prompt_tokens: 1000,
+      completion_tokens: 10,
+      prompt_tokens_details: { cached_tokens: 800 },
+    });
+    expect(parseReply('openai-chat', cachedReply).usage).toEqual({
+      inputTokens: 200,
+      outputTokens: 10,
+      cacheReadTokens: 800,
+    });
   });
 
   it('HTTP 错误按下一步动作分', () => {
@@ -401,6 +418,30 @@ describe('循环', () => {
     expect(judgeRun(apiShellSummary(report).facts).outcome).toBe('stopped');
   });
 
+  it('引擎叫停：信号传进正在跑的命令，不等它跑完', async () => {
+    const controller = new AbortController();
+    const f = fakeFetch([
+      {
+        body: oaReply(
+          { content: '', tool_calls: [oaTool('c', 'run_command', { command: 'pnpm test' })] },
+          'tool_calls',
+        ),
+      },
+    ]);
+    const host = memoryHost();
+    host.run = (_c, signal) =>
+      new Promise((resolve) => {
+        signal?.addEventListener('abort', () =>
+          resolve({ exitCode: null, output: '', timedOut: false, aborted: true }),
+        );
+      });
+    setTimeout(() => controller.abort(), 50);
+    const report = await runApiShell(spec(tempDir()), { fetch: f.fn, host, signal: controller.signal });
+    expect(report.killed?.reason).toBe('aborted');
+    const results = report.messages.find((m) => m.role === 'tool');
+    expect(results).toMatchObject({ results: [{ isError: true, output: 'stopped by the engine\n' }] });
+  });
+
   it('测试里不给假 fetch 就不许起', async () => {
     await expect(runApiShell(spec(tempDir()))).rejects.toThrow('测试里不许连真的模型接口');
   });
@@ -454,6 +495,12 @@ describe('本机工具：关在工作树里', () => {
       expect(long.output.endsWith('100')).toBe(true);
       const slow = await host.run('sleep 30');
       expect(slow.timedOut).toBe(true);
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), 200);
+      const t0 = Date.now();
+      const stopped = await host.run('sleep 30', controller.signal);
+      expect(stopped).toMatchObject({ aborted: true, timedOut: false });
+      expect(Date.now() - t0).toBeLessThan(1_400);
     },
     20_000,
   );

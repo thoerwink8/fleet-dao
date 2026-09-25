@@ -1,12 +1,17 @@
-// 判一次会话的结果。顺序即优先级：进程没起来 → 被我们杀掉 → 跑完才看出的不一致 → 额度用满 → 没有终帧
-// → 终帧报错 → 退出码 → 交付。各家插头把自己的记录整理成 RunFacts，判法只有这一份。
+// 判一次会话的结果。顺序即优先级：进程没起来 → 起没起来没查成 → 被我们杀掉 → 跑完才看出的不一致 → 额度用满
+// → 没有终帧 → 终帧报错 → 退出码 → 中转没查成 → 交付。各家插头把自己的记录整理成 RunFacts，判法只有这一份。
 import type { RunOutcome } from '@fleet-dao/shared';
 import type { DeliveryCheck } from './delivery.ts';
 import type { KillReason, RunUsage } from './types.ts';
 
 export interface RunFacts {
-  /** 没起来：进程起不来，或服务端（Mirasim）拒了这一针。 */
+  /** 确定没起来：进程起不来，或服务端（Mirasim）明确拒了这一针。 */
   spawnError?: string;
+  /**
+   * 起没起来没查成：请求发出去了、没等到应答（Mirasim）。它可能已经在跑——不能当「没起来」重派（会扣两次额度），
+   * 要先按工作目录和起针时间对账。
+   */
+  launchUnknown?: string;
   killed?: KillReason;
   /** 进程退出码。不是进程的插头（Mirasim、接口外壳）不带。 */
   exitCode?: number | null;
@@ -19,6 +24,11 @@ export interface RunFacts {
   quotaExhausted: boolean;
   /** 执行体最后说的话（stderr 末几行、报错原文）：没有终帧时拿它当原因，不写死一个占位词。 */
   lastWords?: string;
+  /**
+   * 走中转时，上游到底有没有真的干了活没查成（账本没读成、没给账本目录）：终帧说完成也不算数；
+   * 和交付没查成一样该重查，不算执行体失败。
+   */
+  relayUnknown?: string;
 }
 
 /** 交给引擎的统一摘要：判定事实、实际模型（只写观测值）、续跑用的会话号、这一轮的用量。 */
@@ -34,10 +44,12 @@ export type VerdictReason =
   | 'answered' // 不要求交付的活（审查、分诊……）正常结束
   | KillReason
   | 'spawn_failed'
+  | 'launch_unknown' // 起没起来没查成：先对账，别重派
   | 'quota_exhausted'
   | 'no_result'
   | 'agent_error'
   | 'exit_nonzero'
+  | 'relay_unknown' // 中转有没有真打到上游没查成：该重查，不该算执行体失败
   | 'not_delivered'
   | 'delivery_unknown'; // 交付没查成：该重查，不该算执行体失败
 
@@ -68,6 +80,7 @@ export function judgeRun(facts: RunFacts, delivery?: DeliveryCheck): RunVerdict 
     detail,
   });
   if (facts.spawnError) return failed('spawn_failed', `没起来：${facts.spawnError}`);
+  if (facts.launchUnknown) return failed('launch_unknown', facts.launchUnknown);
   if (facts.killed === 'aborted') return { outcome: 'stopped', reason: 'aborted', detail: KILL_TEXT.aborted };
   if (facts.killed === 'idle_timeout') {
     return { outcome: 'stalled', reason: 'idle_timeout', detail: KILL_TEXT.idle_timeout };
@@ -88,6 +101,7 @@ export function judgeRun(facts: RunFacts, delivery?: DeliveryCheck): RunVerdict 
   }
   if (facts.terminal.isError) return failed('agent_error', facts.terminal.detail);
   if (isProcess && facts.exitCode !== 0) return failed('exit_nonzero', `终帧说完成，但进程${exit}`);
+  if (facts.relayUnknown) return failed('relay_unknown', `中转没查成：${facts.relayUnknown}`);
   if (!delivery) return { outcome: 'ok', reason: 'answered', detail: '正常结束' };
   if (delivery.state === 'delivered') return { outcome: 'ok', reason: 'delivered', detail: delivery.detail };
   if (delivery.state === 'not_delivered') return failed('not_delivered', `说做完了，但${delivery.detail}`);
