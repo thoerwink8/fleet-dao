@@ -1,5 +1,5 @@
-// ask 的行为：只记不拦、真拦、把握不够、没判出来都走默认；每次都记一行；每日次数；喂全文、库里只留摘要。
-import { jevAnswers, jevQuestionStats, jevQuestions, settings } from '@fleet-dao/db';
+// ask 的行为：只记不拦、真拦、把握不够、没判出来都走默认；每次都记一行；每日上限；喂全文、库里只留脱敏的摘要。
+import { auditLog, jevAnswers, jevQuestionStats, jevQuestions, settings } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, expectTypeOf, it } from 'vitest';
@@ -16,7 +16,7 @@ import {
 } from '../src/bank.ts';
 import { createJev } from '../src/jev.ts';
 import { DEFAULT_POLICY } from '../src/policy.ts';
-import { renderPrompt } from '../src/questions.ts';
+import { defineQuestion, renderPrompt } from '../src/questions.ts';
 import { fakeBackend, HOUR, MODEL, ok } from './helpers.ts';
 
 let t: TestDb;
@@ -111,6 +111,21 @@ describe('只记不拦与真拦', () => {
       .set({ mode: 'enforce', prompt: '旧题面' })
       .where(eq(jevQuestions.id, 'triage-ui'));
     expect(await jev.ask(TRIAGE_UI, request, ctx)).toMatchObject({
+      judged: true,
+      enforced: false,
+      act: 'none',
+    });
+  });
+
+  it('只改了证据字段（给模型看的名字）还没同步：也算题面对不上，这次只记不拦', async () => {
+    const jev = jevWith(fakeBackend(() => ok({ 'triage-ui': ['ui', 0.99] })));
+    await jev.ask(TRIAGE_UI, request, ctx);
+    await setMode('triage-ui', 'enforce');
+    const relabeled = defineQuestion({
+      ...TRIAGE_UI,
+      evidence: [{ key: 'request', label: '需求原文（改过名字）', required: true }],
+    });
+    expect(await jev.ask(relabeled, request, ctx)).toMatchObject({
       judged: true,
       enforced: false,
       act: 'none',
@@ -217,6 +232,61 @@ describe('没判出来一律走默认，不当成「否」', () => {
   });
 });
 
+describe('真拦中的题漂了：当场退回只记不拦', () => {
+  const mode = async () => (await t.db.select().from(jevQuestions))[0]?.mode;
+  const drifts: [string, () => BackendResult][] = [
+    ['答了题面外的选项', () => ok({ 'triage-ui': ['maybe', 0.99] })],
+    ['回话的不是钉死的模型', () => ok({ 'triage-ui': ['ui', 0.99] }, { model: 'jev-1.14.0' })],
+  ];
+  for (const [what, reply] of drifts) {
+    it(`${what}：这一问当场退回、留操作记录（指着这一问），下一问就不真拦了`, async () => {
+      const good = fakeBackend(() => ok({ 'triage-ui': ['ui', 0.95] }));
+      await jevWith(good).ask(TRIAGE_UI, request, ctx);
+      await setMode('triage-ui', 'enforce');
+      const v = await jevWith(fakeBackend(reply)).ask(TRIAGE_UI, request, ctx);
+      expect(v).toMatchObject({ judged: false, act: 'none' });
+      expect(await mode()).toBe('shadow');
+      const logs = await t.db.select().from(auditLog);
+      expect(logs).toHaveLength(1);
+      expect(logs[0]).toMatchObject({
+        action: 'jev.mode',
+        target: 'jev:triage-ui',
+        before: { mode: 'enforce' },
+        after: { mode: 'shadow', answerId: v.answerId },
+      });
+      expect(await jevWith(good).ask(TRIAGE_UI, request, ctx)).toMatchObject({
+        judged: true,
+        enforced: false,
+        act: 'none',
+      });
+    });
+  }
+
+  it('考试里漂了也当场退回（不等考完再判，也不怕下一次考试把它洗掉）', async () => {
+    await jevWith().ask(TRIAGE_UI, request, ctx);
+    await setMode('triage-ui', 'enforce');
+    const drifting = fakeBackend(() => ok({ 'triage-ui': ['maybe', 0.99] }));
+    await jevWith(drifting).exam([TRIAGE_UI], request, {
+      runId: 'r1',
+      sampleId: 's1',
+      expect: { 'triage-ui': 'ui' },
+    });
+    expect(await mode()).toBe('shadow');
+  });
+
+  it('别的模型漂了不连累钉死的那个：题照旧真拦，不留记录', async () => {
+    await jevWith().ask(TRIAGE_UI, request, ctx);
+    await setMode('triage-ui', 'enforce');
+    const other = fakeBackend(
+      () => ok({ 'triage-ui': ['maybe', 0.99] }, { model: 'claude-opus-5-5' }),
+      'claude-opus-5-5',
+    );
+    expect(await jevWith(other).ask(TRIAGE_UI, request, ctx)).toMatchObject({ reason: 'bad_option' });
+    expect(await mode()).toBe('enforce');
+    expect(await t.db.select().from(auditLog)).toHaveLength(0);
+  });
+});
+
 describe('本地就拦下的：不问出去，也记一行', () => {
   it('停用的题：不问，记成 off', async () => {
     const backend = fakeBackend();
@@ -292,6 +362,79 @@ describe('每天的上限', () => {
       failReason: 'daily_cap',
       sample: expect.objectContaining({ detail: expect.stringContaining('因每日花费上限没问') }),
     });
+  });
+
+  it('发出去就记账：超时的调用按事前估算记花费（标明是估的），一直出错也照样被花费上限拦下', async () => {
+    const timeout: BackendResult = { ok: false, reason: 'timeout', detail: '8000 毫秒没回', latencyMs: 8000 };
+    const paid = { ...fakeBackend(() => timeout), usdPerMTok: 1 };
+    const short = { request: '改首页标题' };
+    await jevWith(paid).ask(TRIAGE_UI, short, ctx);
+    const [first] = await rows();
+    const estimated = first?.inputTokens ?? 0;
+    expect(estimated).toBeGreaterThan(0);
+    expect(first).toMatchObject({
+      ok: false,
+      failReason: 'timeout',
+      sample: expect.objectContaining({ tokensEstimated: true, costUsd: estimated / 1_000_000 }),
+    });
+    // 上限只够两问多一点：第二问照问；第三问时已花两问、再加这一问的估算就超了，不问。
+    await t.db.insert(settings).values({ key: 'judge.dailyUsdCap', value: (2.5 * estimated) / 1_000_000 });
+    await jevWith(paid).ask(TRIAGE_UI, short, ctx);
+    const third = await jevWith(paid).ask(TRIAGE_UI, short, ctx);
+    expect(third).toMatchObject({ judged: false, reason: 'daily_cap', act: 'none' });
+    if (!third.judged) expect(third.detail).toContain('因每日花费上限没问');
+    expect(paid.calls).toHaveLength(2);
+  });
+
+  it('发出去就记账：出错的回包里上游报了 token 数按报的记；后端抛异常按估算记', async () => {
+    const mismatch = {
+      ...fakeBackend(() => ({
+        ok: false,
+        reason: 'model_mismatch',
+        detail: '钉死的是 jev-1.13.0，回话的是 jev-1.14.0',
+        latencyMs: 30,
+        model: 'jev-1.14.0',
+        inputTokens: 700,
+      })),
+      usdPerMTok: 1,
+    };
+    await jevWith(mismatch).ask(TRIAGE_UI, request, ctx);
+    const throwing = {
+      ...fakeBackend(() => {
+        throw new Error('炸了');
+      }),
+      usdPerMTok: 1,
+    };
+    await jevWith(throwing).ask(TRIAGE_UI, request, ctx);
+    const [reported, thrown] = await rows();
+    expect(reported).toMatchObject({
+      inputTokens: 700,
+      sample: expect.objectContaining({ costUsd: 0.0007 }),
+    });
+    expect(reported?.sample).not.toHaveProperty('tokensEstimated');
+    expect(thrown).toMatchObject({
+      failReason: 'backend_error',
+      sample: expect.objectContaining({ tokensEstimated: true, costUsd: expect.any(Number) }),
+    });
+    expect(thrown?.inputTokens).toBeGreaterThan(0);
+  });
+
+  it('巡检考试另算次数：生产问满了不挡考试，考试按自己的上限数、不占生产的', async () => {
+    await t.db.insert(settings).values([
+      { key: 'judge.dailyCallLimit', value: 1 },
+      { key: 'judge.examDailyCallLimit', value: 2 },
+    ]);
+    const backend = fakeBackend();
+    const jev = jevWith(backend);
+    const exam = async (sampleId: string) =>
+      (await jev.exam([TRIAGE_UI], request, { runId: 'r1', sampleId, expect: { 'triage-ui': 'ui' } }))[0];
+    expect(await jev.ask(TRIAGE_UI, request, ctx)).toMatchObject({ judged: true });
+    expect(await jev.ask(TRIAGE_UI, request, ctx)).toMatchObject({ reason: 'daily_cap' });
+    expect([(await exam('s1'))?.judged, (await exam('s2'))?.judged]).toEqual([true, true]);
+    const capped = await exam('s3');
+    expect(capped).toMatchObject({ judged: false, reason: 'daily_cap' });
+    if (capped && !capped.judged) expect(capped.detail).toContain('因考试每日次数上限没问');
+    expect(backend.calls).toHaveLength(3);
   });
 
   it('订阅内的后端（没有单价）不受花费上限管', async () => {
@@ -395,6 +538,31 @@ describe('证据：喂全文，库里只留摘要', () => {
     expect(sample.evidence.request?.chars).toBe(long.length);
     expect(sample.evidence.request?.head).toBe(long.slice(0, 200));
     expect(JSON.stringify(row?.sample).length).toBeLessThan(2_000);
+  });
+
+  it('证据开头写库前脱敏（令牌、邮箱、IP）；喂给后端的还是原文', async () => {
+    const backend = fakeBackend();
+    const raw =
+      'Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123 发给 someone@example.com，机器 10.2.3.4';
+    await jevWith(backend).ask(TRIAGE_UI, { request: raw }, ctx);
+    expect(backend.calls[0]?.evidence[0]?.text).toBe(raw);
+    const sample = (await rows())[0]?.sample as { evidence: Record<string, { head?: string }> };
+    expect(sample.evidence.request?.head).toBe('Authorization: Bearer <令牌> 发给 <邮箱>，机器 <IP>');
+  });
+
+  it('上游报错原文进库、交回调用方之前脱敏', async () => {
+    const leak =
+      'HTTP 401：{"error":"bad key sk-live1234567890abcdef","echo":"Bearer abcdefghijklmnopqrstuvwxyz"}';
+    const jev = jevWith(fakeBackend(() => ({ ok: false, reason: 'auth', detail: leak, latencyMs: 20 })));
+    const v = await jev.ask(TRIAGE_UI, request, ctx);
+    const [row] = await rows();
+    const stored = (row?.sample as { detail?: string } | undefined)?.detail;
+    for (const detail of [v.judged ? '' : v.detail, stored ?? '']) {
+      expect(detail).toContain('<密钥>');
+      expect(detail).toContain('Bearer <令牌>');
+      expect(detail).not.toContain('sk-live');
+      expect(detail).not.toContain('abcdefghijklmnop');
+    }
   });
 
   it('私聊字段只留长度和哈希，不留开头', async () => {

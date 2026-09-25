@@ -1,6 +1,7 @@
 // 旧系统用的 Jev 服务（TypeSafe System One）。接口照官方文档 docs.typesafe.ai/api 与旧客户端 windsurf-dao scripts/lib/judge-client.mjs：
 // POST <地址>，Bearer 密钥，请求体 { state, model, questions }；回包 { model, answers: { 题号: { type, choice, probabilities, confidence } }, usage }。
 // 地址和密钥只从机器配置读（config.ts），这里没有默认值。按输入 token 计费，受每日花费上限管（JevPolicy.dailyUsdCap，到了就不问）。
+// 请求发出去就可能已经计费：出错的回包里报了 token 数也交回去，记账不按 0 算（ask 那边没报的按事前估算）。
 // 回包里的 model 是实际回话的版本号：和钉死的对不上就当没判（model_mismatch），不采纳。
 import { performance } from 'node:perf_hooks';
 import {
@@ -11,6 +12,7 @@ import {
   type BackendResult,
   estimateTokens,
   type JevBackend,
+  upstreamExcerpt,
 } from '../backend.ts';
 
 export interface TypesafeOptions {
@@ -48,12 +50,17 @@ export function createTypesafeBackend(options: TypesafeOptions): JevBackend {
       const payload = JSON.stringify(body);
       const t0 = performance.now();
       const elapsed = () => Math.round(performance.now() - t0);
-      const fail = (reason: BackendFailure, detail: string, model?: string): BackendResult => ({
+      const fail = (
+        reason: BackendFailure,
+        detail: string,
+        extra: { model?: string; inputTokens?: number | undefined } = {},
+      ): BackendResult => ({
         ok: false,
         reason,
         detail,
         latencyMs: elapsed(),
-        ...(model ? { model } : {}),
+        ...(extra.model ? { model: extra.model } : {}),
+        ...(extra.inputTokens === undefined ? {} : { inputTokens: extra.inputTokens }),
       });
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -80,18 +87,25 @@ export function createTypesafeBackend(options: TypesafeOptions): JevBackend {
       } catch (err) {
         return fail('network', `读回包时断了：${errorText(err)}`);
       }
-      if (res.status !== 200)
-        return fail(statusReason(res.status), `HTTP ${res.status}：${text.slice(0, 300)}`);
       let json: unknown;
       try {
         json = JSON.parse(text);
       } catch {
-        return fail('bad_answer', `回包不是 JSON：${text.slice(0, 200)}`);
+        json = undefined;
       }
+      if (res.status !== 200) {
+        return fail(statusReason(res.status), `HTTP ${res.status}：${upstreamExcerpt(text, 300)}`, {
+          inputTokens: reportedTokens(json),
+        });
+      }
+      if (json === undefined) return fail('bad_answer', `回包不是 JSON：${upstreamExcerpt(text, 200)}`);
       const parsed = parseTypesafeResponse(json, request);
-      if (!parsed.ok) return fail('bad_answer', parsed.why);
+      if (!parsed.ok) return fail('bad_answer', parsed.why, { inputTokens: reportedTokens(json) });
       if (parsed.model !== options.model) {
-        return fail('model_mismatch', `钉死的是 ${options.model}，回话的是 ${parsed.model}`, parsed.model);
+        return fail('model_mismatch', `钉死的是 ${options.model}，回话的是 ${parsed.model}`, {
+          model: parsed.model,
+          inputTokens: parsed.inputTokens,
+        });
       }
       return {
         ok: true,
@@ -139,6 +153,12 @@ function errorText(err: unknown): string {
 const rec = (v: unknown): Record<string, unknown> | undefined =>
   v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
 
+/** 回包 usage 里上游报的输入 token 数；没报或不是正数就是 undefined（由调用方估，不当 0）。 */
+export function reportedTokens(json: unknown): number | undefined {
+  const tokens = rec(rec(json)?.usage)?.input_tokens;
+  return typeof tokens === 'number' && Number.isFinite(tokens) && tokens > 0 ? tokens : undefined;
+}
+
 export function parseTypesafeResponse(
   json: unknown,
   request: BackendRequest,
@@ -161,11 +181,11 @@ export function parseTypesafeResponse(
     else if (typeof a.confidence !== 'number') out[q.id] = { invalid: '没有 confidence' };
     else out[q.id] = { option: a.choice, confidence: a.confidence };
   }
-  const tokens = rec(body.usage)?.input_tokens;
+  const tokens = reportedTokens(body);
   return {
     ok: true,
     model: body.model,
     answers: out,
-    ...(typeof tokens === 'number' && Number.isFinite(tokens) && tokens > 0 ? { inputTokens: tokens } : {}),
+    ...(tokens === undefined ? {} : { inputTokens: tokens }),
   };
 }

@@ -2,7 +2,7 @@
 // settings（每日次数、准确率线）、audit_log（状态变化留痕）。表结构在 @fleet-dao/db。
 // 每条判断的 sample 里带 rev（题目版本）和 model（钉死的模型）：准确率只按「当前版本 + 钉死的模型」算，换题或换模型都从头攒。
 import { auditLog, type Db, jevAnswers, jevQuestions, settings } from '@fleet-dao/db';
-import { and, asc, desc, eq, gt, gte, inArray, isNotNull, isNull, notInArray, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, notInArray, or, sql } from 'drizzle-orm';
 import type { FieldDigest } from './evidence.ts';
 import {
   decideMode,
@@ -99,7 +99,7 @@ export interface SyncChange {
 }
 
 /**
- * 把代码里的题库同步进库（引擎起来时跑一次）：没有的登记（只记不拦，钉在 model 上）；题面或选项改了的更新，
+ * 把代码里的题库同步进库（引擎起来时跑一次）：没有的登记（只记不拦，钉在 model 上）；题面、选项或证据字段改了的更新，
  * 在真拦的退回只记不拦——换了题，之前攒的准确率不算数。把握线、钉死的模型、状态都以库里为准，不覆盖。
  */
 export async function syncQuestionBank(
@@ -172,8 +172,9 @@ export async function pinModel(
   });
 }
 
-/** 从 since 起问出去了几道题（本地拦下、没问出去的不算）。 */
-export async function countAskedSince(db: Db, since: Date): Promise<number> {
+/** 从 since 起问出去了几道题（本地拦下、没问出去的不算）。巡检考试和生产分开数，各有各的上限。 */
+export async function countAskedSince(db: Db, since: Date, options: { exam: boolean }): Promise<number> {
+  const exam = sql`${jevAnswers.sample}->'exam'`;
   const [row] = await db
     .select({ n: sql<number>`count(*)::int` })
     .from(jevAnswers)
@@ -181,9 +182,10 @@ export async function countAskedSince(db: Db, since: Date): Promise<number> {
       and(
         gte(jevAnswers.askedAt, since),
         or(isNull(jevAnswers.failReason), notInArray(jevAnswers.failReason, [...LOCAL_REASONS])),
+        options.exam ? sql`${exam} is not null` : sql`${exam} is null`,
       ),
     );
-  return countOf(row, '今天问了几道');
+  return countOf(row, options.exam ? '今天考试问了几道' : '今天问了几道');
 }
 
 /** 从 since 起按量计费的后端一共花了多少美元（每条判断记录里分摊的 costUsd 加总）。 */
@@ -219,13 +221,49 @@ export async function readPolicy(
   return mergePolicy(base, Object.fromEntries(rows.map((r) => [r.key, r.value])));
 }
 
-export async function insertAnswers(db: Db, rows: readonly AnswerRow[]): Promise<number[]> {
+/** 真拦中的题这一问漂了（答了题面外的选项、回话的不是钉死的模型）：和这一批判断一起当场退回只记不拦。 */
+export interface DriftDemotion {
+  questionId: string;
+  why: string;
+}
+
+/**
+ * 记一批判断，返回每行的 id（顺序同 rows）。demote 里的题在同一个事务里从真拦退回只记不拦并留操作记录：
+ * 判断记上了、题却还在真拦的中间态不会有；记不上就整批都不算（调用方当没判）。
+ */
+export async function insertAnswers(
+  db: Db,
+  rows: readonly AnswerRow[],
+  demote: readonly DriftDemotion[] = [],
+): Promise<number[]> {
   if (rows.length === 0) return [];
-  const inserted = await db
-    .insert(jevAnswers)
-    .values([...rows])
-    .returning({ id: jevAnswers.id });
-  return inserted.map((r) => r.id);
+  return db.transaction(async (tx) => {
+    const inserted = await tx
+      .insert(jevAnswers)
+      .values([...rows])
+      .returning({ id: jevAnswers.id });
+    const ids = inserted.map((r) => r.id);
+    for (const d of demote) {
+      const changed = await tx
+        .update(jevQuestions)
+        .set({ mode: 'shadow' })
+        .where(and(eq(jevQuestions.id, d.questionId), eq(jevQuestions.mode, 'enforce')))
+        .returning({ id: jevQuestions.id });
+      if (changed.length === 0) continue;
+      const answerId = ids[rows.findIndex((r) => r.questionId === d.questionId)];
+      await tx.insert(auditLog).values({
+        actorKind: 'engine',
+        actorId: 'jev',
+        action: 'jev.mode',
+        target: `jev:${d.questionId}`,
+        before: { mode: 'enforce' },
+        after: { mode: 'shadow', answerId },
+        reason: d.why,
+        via: 'engine',
+      });
+    }
+    return ids;
+  });
 }
 
 export type TruthSource = 'human' | 'outcome' | 'canary';
@@ -276,7 +314,7 @@ export async function productionWindow(
   n: number,
 ): Promise<ProductionWindow> {
   const rows = await db
-    .select({ answer: jevAnswers.answer, truth: jevAnswers.truth })
+    .select({ answer: jevAnswers.answer, truth: jevAnswers.truth, askedAt: jevAnswers.askedAt })
     .from(jevAnswers)
     .where(
       and(
@@ -289,7 +327,12 @@ export async function productionWindow(
     )
     .orderBy(desc(jevAnswers.askedAt), desc(jevAnswers.id))
     .limit(n);
-  return { samples: rows.length, correct: rows.filter((r) => r.truth === r.answer).length };
+  const oldest = rows.at(-1)?.askedAt;
+  return {
+    samples: rows.length,
+    correct: rows.filter((r) => r.truth === r.answer).length,
+    ...(oldest ? { from: oldest } : {}),
+  };
 }
 
 /** 最近一次巡检考试里这道题的答卷；没考过就是 undefined。 */
@@ -330,7 +373,7 @@ export async function latestExam(
   };
 }
 
-/** since 之后（不给就是一直以来）答了题面外的选项、或回话模型不对的次数。 */
+/** since 起（不给就是一直以来）答了题面外的选项、或回话模型不对的次数，考试里的也算。 */
 export async function driftCount(
   db: Db,
   q: QuestionDef,
@@ -344,7 +387,7 @@ export async function driftCount(
       and(
         currentRev(q, state),
         inArray(jevAnswers.failReason, [...DRIFT_REASONS] as NotJudgedReason[]),
-        since ? gt(jevAnswers.askedAt, since) : undefined,
+        since ? gte(jevAnswers.askedAt, since) : undefined,
       ),
     );
   return countOf(row, '漂移次数');
@@ -421,7 +464,8 @@ export async function reviewModes(
     const state: QuestionState = row;
     const production = await productionWindow(db, q, state, policy.minSamples);
     const exam = await latestExam(db, q, state);
-    const drift = await driftCount(db, q, state, exam?.at);
+    // 漂移按这批生产判定覆盖的时间算，不按最近一次考试：那样再考一次（没考成也算）就把考前的漂移洗掉了。
+    const drift = await driftCount(db, q, state, production.from);
     const decision = decideMode(
       { mode: row.mode, production, exam: exam && examOutcome(exam, policy), drift },
       policy,

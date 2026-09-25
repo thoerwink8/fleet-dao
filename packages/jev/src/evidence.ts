@@ -1,15 +1,17 @@
 // 证据：按题目声明的字段收原文，原样喂给模型（不裁剪——缺信息比多信息伤得重，旧系统实测）。
 // 库里只记摘要：长度、哈希、开头（私聊字段不留开头），加上调用方给的能复原原文的引用（issue 号 + updated_at 之类）。
+// 开头先脱敏再截：驾驶舱看得到这一列，证据原文里可能夹着令牌、邮箱、IP。
 import { createHash } from 'node:crypto';
+import { redact } from '@fleet-dao/adapters';
 import type { EvidenceField, QuestionDef } from './questions.ts';
 
 export type EvidenceInput = Readonly<Record<string, string | undefined>>;
 
 export interface FieldDigest {
   chars: number;
-  /** sha256 前 16 位。 */
+  /** 原文 sha256 的前 16 位。 */
   sha: string;
-  /** 开头 HEAD_CHARS 个字；私聊字段没有。 */
+  /** 脱敏后的开头 HEAD_CHARS 个字（空白并成一个空格）；私聊字段没有。 */
   head?: string;
 }
 
@@ -41,7 +43,8 @@ export function digestEvidence(fields: readonly EvidenceField[], evidence: Evide
     out[f.key] = {
       chars: text.length,
       sha: createHash('sha256').update(text).digest('hex').slice(0, 16),
-      ...(f.private ? {} : { head: text.slice(0, HEAD_CHARS) }),
+      // 整段脱敏之后再截：先截会把跨过截断处的令牌截成半截，半截认不出、就原样漏进库。
+      ...(f.private ? {} : { head: redact(text, Number.POSITIVE_INFINITY).slice(0, HEAD_CHARS) }),
     };
   }
   return out;

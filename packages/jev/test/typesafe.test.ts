@@ -104,13 +104,31 @@ describe('TypeSafe 后端', () => {
     expect(result).toMatchObject({ ok: true, inputTokens: sent.length, tokensEstimated: true });
   });
 
-  it('回话的版本和钉死的不一样：当没判（model_mismatch），带上实际版本', async () => {
+  it('回话的版本和钉死的不一样：当没判（model_mismatch），带上实际版本和上游报的 token 数（照样要记账）', async () => {
     const f = fakeFetch(() => json({ ...good, model: 'jev-1.14.0' }));
     expect(await backend(f.fn).ask(request)).toMatchObject({
       ok: false,
       reason: 'model_mismatch',
       model: 'jev-1.14.0',
+      inputTokens: 318,
     });
+  });
+
+  it('出错的回包里报了 token 数就交回去；没报的不带（由提问那边按事前估算记，不当 0）', async () => {
+    const withUsage = [
+      json({ error: 'overloaded', usage: { input_tokens: 120 } }, 529),
+      json({ answers: {}, usage: { input_tokens: 90 } }),
+    ];
+    for (const res of withUsage) {
+      const result = await backend(fakeFetch(() => res).fn).ask(request);
+      expect(result).toMatchObject({ ok: false });
+      expect(result.ok ? undefined : result.inputTokens).toBeGreaterThan(0);
+    }
+    for (const res of [json({ error: 'boom' }, 500), new Response('not json', { status: 200 })]) {
+      const result = await backend(fakeFetch(() => res).fn).ask(request);
+      expect(result).toMatchObject({ ok: false });
+      expect(result).not.toHaveProperty('inputTokens');
+    }
   });
 
   it('HTTP 状态码分到原因上；报错原文带回来，不带密钥', async () => {
@@ -131,6 +149,17 @@ describe('TypeSafe 后端', () => {
         expect(result.detail).toContain(`HTTP ${status}`);
         expect(result.detail).not.toContain('test-key');
       }
+    }
+  });
+
+  it('报错回包先脱敏再截：跨过第 300 字的密钥不会截成认不出的半截留在原因里', async () => {
+    const body = `${'错'.repeat(290)} ${'S'.repeat(60)} 尾`;
+    const f = fakeFetch(() => new Response(body, { status: 500 }));
+    const result = await backend(f.fn).ask(request);
+    expect(result).toMatchObject({ ok: false, reason: 'overloaded' });
+    if (!result.ok) {
+      expect(result.detail).toContain('<长串>');
+      expect(result.detail).not.toContain('SSSS');
     }
   });
 

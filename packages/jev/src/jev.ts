@@ -2,10 +2,12 @@
 // - 真拦（题目在真拦、回话的就是钉死的模型、题面和库里一致、把握够）时是选项挂的效果；
 // - 只记不拦、把握不够、没判出来（连不上、超时、被限流、答了题面外的选项……）一律 none，当它不存在、照默认走，不当成「否」。
 // 每道题每次都记一行 jev_answers，包括本地就拦下的（停用、次数用完、证据不全）；记不上就当没判（store_error）。
+// 请求发出去了就记账（出错也记，上游没报 token 数按事前估算），每日花费上限才不会被出错的调用绕过去。
+// 真拦中的题答了题面外的选项、或回话的不是钉死的模型：和这一批判断一起当场退回只记不拦。
 // 只有调用方自己的代码错（题写坏了、没说判的是谁）不记：那种题登记不进库，测试里就该暴露。
 // 不抛：任何出错都变成一个没判出来的 verdict。
 import { randomUUID } from 'node:crypto';
-import { sameModel } from '@fleet-dao/adapters';
+import { redact, sameModel } from '@fleet-dao/adapters';
 import type { Db } from '@fleet-dao/db';
 import {
   type BackendRequest,
@@ -37,13 +39,22 @@ import {
   type AnswerRow,
   type AnswerSample,
   countAskedSince,
+  type DriftDemotion,
   ensureQuestions,
   insertAnswers,
   type QuestionState,
   readPolicy,
   usdSpentSince,
 } from './store.ts';
-import { type Judged, LOCAL_REASONS, type NotJudged, type NotJudgedReason, type Verdict } from './verdict.ts';
+import {
+  DRIFT_REASONS,
+  type Judged,
+  LOCAL_REASONS,
+  type NotJudged,
+  type NotJudgedReason,
+  REASON_TEXT,
+  type Verdict,
+} from './verdict.ts';
 
 export interface AskContext {
   /** 判的是谁：task:<id>、subtask:<id>、run:<id>、feishu:<消息号>…… */
@@ -90,12 +101,20 @@ export interface Jev {
 }
 
 const DETAIL_CHARS = 500;
-const cut = (s: string) => (s.length > DETAIL_CHARS ? `${s.slice(0, DETAIL_CHARS)}…` : s);
+/**
+ * 没判出来的原文进库、交回调用方之前一律过这一道：上游报错、认不出的回包里可能夹着令牌、邮箱、IP（驾驶舱看得到）。
+ * 整段脱敏之后再截到 500 字，免得截断处把令牌截成认不出的半截。
+ */
+function clean(detail: string): string {
+  const text = redact(detail, Number.POSITIVE_INFINITY);
+  return text.length > DETAIL_CHARS ? `${text.slice(0, DETAIL_CHARS)}…` : text;
+}
 const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
 const isLocal = (reason: NotJudgedReason) => (LOCAL_REASONS as readonly string[]).includes(reason);
+const isDrift = (reason: NotJudgedReason) => (DRIFT_REASONS as readonly string[]).includes(reason);
 
 function notJudged(q: QuestionDef, reason: NotJudgedReason, detail: string): NotJudged {
-  return { judged: false, questionId: q.id, reason, detail, act: 'none' };
+  return { judged: false, questionId: q.id, reason, detail: clean(detail), act: 'none' };
 }
 
 export function createJev(deps: JevDeps): Jev {
@@ -153,8 +172,11 @@ export function createJev(deps: JevDeps): Jev {
       ...(ctx.signal ? { signal: ctx.signal } : {}),
     };
 
-    // 每日上限：次数（一次问几道算几次）和按量后端的花费，考试也算。到了就不问、走默认，库里记「因上限没问」。
-    // 设置认不出也不问：拿默认值顶上等于假装读到了。
+    // 这一问要喂多少 token，事先按字符数保守估（一个字一个 token）：花费上限按它预判；上游没报 token 数时也按它记账。
+    const estimatedTokens = estimateTokens(requestTexts(request));
+
+    // 每日上限：次数（一次问几道算几次；巡检考试和生产各算各的）和按量后端的花费（考试也算在内）。
+    // 到了就不问、走默认，库里记「因上限没问」。设置认不出也不问：拿默认值顶上等于假装读到了。
     if (askable.length > 0) {
       try {
         const refuseAll = (reason: NotJudgedReason, detail: string) => {
@@ -165,16 +187,19 @@ export function createJev(deps: JevDeps): Jev {
         if (problems.length) {
           refuseAll('bad_setting', problems.join('；'));
         } else {
-          const used = await countAskedSince(db, today);
-          if (used + askable.length > policy.dailyCallLimit) {
+          const used = await countAskedSince(db, today, { exam: exam !== undefined });
+          const limit = exam ? policy.examDailyCallLimit : policy.dailyCallLimit;
+          if (used + askable.length > limit) {
             refuseAll(
               'daily_cap',
-              `因每日次数上限没问：今天已经问了 ${used} 道，上限 ${policy.dailyCallLimit}`,
+              exam
+                ? `因考试每日次数上限没问：今天考试已经问了 ${used} 道，上限 ${limit}`
+                : `因每日次数上限没问：今天已经问了 ${used} 道，上限 ${limit}`,
             );
           } else if (backend.usdPerMTok !== undefined) {
             const spent = await usdSpentSince(db, today);
-            // 这一问花多少事先按字符数保守估（一个字一个 token），宁可早停一问也不超。
-            const estimate = usdOf(estimateTokens(requestTexts(request)), backend.usdPerMTok);
+            // 宁可早停一问也不超。
+            const estimate = usdOf(estimatedTokens, backend.usdPerMTok);
             if (spent + estimate > policy.dailyUsdCap) {
               refuseAll(
                 'daily_cap',
@@ -204,6 +229,7 @@ export function createJev(deps: JevDeps): Jev {
 
     const batch = { id: randomUUID(), size: questions.length };
     const rows: AnswerRow[] = [];
+    const demote: DriftDemotion[] = [];
     for (const q of questions) {
       const state = states.get(q.id);
       if (!state) continue;
@@ -216,6 +242,18 @@ export function createJev(deps: JevDeps): Jev {
         outcome.get(q.id) ??
         (result ? judge(q, state, result, backend, enforceable) : notJudged(q, 'store_error', '没有结果'));
       outcome.set(q.id, verdict);
+      // 漂的是这道题钉死的那个模型（考试里漂也算）：当场退回，不等 reviewModes。别的模型漂了不连累它。
+      if (
+        !verdict.judged &&
+        isDrift(verdict.reason) &&
+        state.mode === 'enforce' &&
+        state.model === backend.model
+      ) {
+        demote.push({
+          questionId: q.id,
+          why: `${REASON_TEXT[verdict.reason]}（${verdict.detail}），当场退回只记不拦`,
+        });
+      }
       rows.push(
         answerRow(q, verdict, result, {
           askedAt,
@@ -226,13 +264,14 @@ export function createJev(deps: JevDeps): Jev {
           enforceable,
           backend,
           askedCount: askable.length,
+          estimatedTokens,
         }),
       );
     }
 
     let ids: number[];
     try {
-      ids = await insertAnswers(db, rows);
+      ids = await insertAnswers(db, rows, demote);
     } catch (err) {
       // 没记上就当没判：调用方照默认走，不带着一个库里查不到的判断去拦。
       return questions.map((q) => notJudged(q, 'store_error', `判断没记进库：${message(err)}`));
@@ -268,15 +307,15 @@ function judge(
   backend: JevBackend,
   enforceable: boolean,
 ): Verdict {
-  if (!result.ok) return notJudged(q, result.reason, cut(result.detail));
+  if (!result.ok) return notJudged(q, result.reason, result.detail);
   if (!sameModel(backend.model, result.model)) {
     return notJudged(q, 'model_mismatch', `钉死的是 ${backend.model}，回话的是 ${result.model}`);
   }
   const a = result.answers[q.id];
   if (a === undefined) return notJudged(q, 'no_answer', '回包里没有这道题');
-  if ('invalid' in a) return notJudged(q, 'bad_answer', cut(a.invalid));
+  if ('invalid' in a) return notJudged(q, 'bad_answer', a.invalid);
   const option = q.options.find((o) => o.id === a.option);
-  if (!option) return notJudged(q, 'bad_option', cut(`答了题面以外的选项「${a.option}」`));
+  if (!option) return notJudged(q, 'bad_option', `答了题面以外的选项「${a.option}」`);
   if (!Number.isFinite(a.confidence) || a.confidence < 0 || a.confidence > 1) {
     return notJudged(q, 'bad_answer', `把握度不在 0–1 之间：${a.confidence}`);
   }
@@ -320,13 +359,17 @@ function answerRow(
     enforceable: boolean;
     backend: JevBackend;
     askedCount: number;
+    /** 这一问事先估的输入 token（整批）。 */
+    estimatedTokens: number;
   },
 ): AnswerRow {
   const sent = result !== undefined && (verdict.judged || !isLocal(verdict.reason));
   // 把握不够也是答了：答案和把握度照记（统计里算「没把握」），只是不作数。
   const answered = verdict.judged || (verdict.reason === 'unsure' && verdict.option !== undefined);
+  // 发出去就记账：超时、回包认不出、回话模型不对时上游可能已经计费。上游报了 token 数按它，没报按事前估算、标明是估的。
+  const billed = sent && result ? billedTokens(result, c.estimatedTokens) : undefined;
   // 一次问几道题共用一次调用：token 和花费按道分摊。
-  const tokens = sent && result?.ok ? Math.ceil(result.inputTokens / Math.max(1, c.askedCount)) : undefined;
+  const tokens = billed === undefined ? undefined : Math.ceil(billed.tokens / Math.max(1, c.askedCount));
   const price = c.backend.usdPerMTok;
   const sample: AnswerSample = {
     rev: questionRev(q),
@@ -335,7 +378,7 @@ function answerRow(
     evidence: digestEvidence(q.evidence, c.evidence),
     ...(c.ctx.ref === undefined ? {} : { ref: c.ctx.ref }),
     batch: c.batch,
-    ...(sent && result?.ok && result.tokensEstimated ? { tokensEstimated: true } : {}),
+    ...(billed?.estimated ? { tokensEstimated: true } : {}),
     ...(tokens !== undefined && price !== undefined ? { costUsd: usdOf(tokens, price) } : {}),
     ...(c.exam ? { exam: { runId: c.exam.runId, sampleId: c.exam.sampleId } } : {}),
     ...(verdict.judged ? {} : { detail: verdict.detail }),
@@ -356,4 +399,14 @@ function answerRow(
     inputTokens: tokens ?? null,
     ...(truth === undefined ? {} : { truth, truthSource: 'canary' as const }),
   };
+}
+
+/**
+ * 一次发出去的调用记多少输入 token：成功的按回包（后端没报时它自己按字符估过，照它的 tokensEstimated）；
+ * 出错的，上游报了按它，没报按事前估算——不记 0，否则出错的调用不占花费上限。
+ */
+function billedTokens(result: BackendResult, estimated: number): { tokens: number; estimated: boolean } {
+  if (result.ok) return { tokens: result.inputTokens, estimated: result.tokensEstimated };
+  if (result.inputTokens !== undefined) return { tokens: result.inputTokens, estimated: false };
+  return { tokens: estimated, estimated: true };
 }

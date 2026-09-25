@@ -30,14 +30,14 @@ describe('只记不拦 → 真拦', () => {
     expect(d.why).toContain('90%');
   });
 
-  it('样本不够、准确率不到线、没考过、考试没考成或不及格、考后漂过：都不转', () => {
+  it('样本不够、准确率不到线、没考过、考试没考成或不及格、攒样本期间漂过：都不转', () => {
     const cases: [string, Partial<ModeInput>][] = [
       ['样本不够', { production: { samples: 49, correct: 49 } }],
       ['准确率不到线', { production: { samples: 50, correct: 44 } }],
       ['没考过', { exam: undefined }],
       ['考试没考成', { exam: voided }],
       ['考试不及格', { exam: fail }],
-      ['考后漂过', { drift: 1 }],
+      ['攒样本期间漂过', { drift: 1 }],
     ];
     for (const [what, over] of cases) {
       expect(decideMode(input(over), P), what).toMatchObject({ mode: 'shadow', changed: false });
@@ -142,5 +142,12 @@ describe('设置覆盖默认值', () => {
       minSamples: P.minSamples,
     });
     expect(problems).toHaveLength(2);
+  });
+
+  it('考试的每日次数单独一项：合法的用上，认不出的报出来', () => {
+    expect(mergePolicy(P, { 'judge.examDailyCallLimit': 900 }).policy.examDailyCallLimit).toBe(900);
+    const { policy, problems } = mergePolicy(P, { 'judge.examDailyCallLimit': 2.5 });
+    expect(policy.examDailyCallLimit).toBe(P.examDailyCallLimit);
+    expect(problems.join('')).toContain('judge.examDailyCallLimit');
   });
 });

@@ -10,4 +10,5 @@ export * from './judge.ts';
 export * from './lines.ts';
 export * from './process.ts';
 export * from './procs.ts';
+export { redact } from './quota/util.ts';
 export type * from './types.ts';

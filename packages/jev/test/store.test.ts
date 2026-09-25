@@ -10,7 +10,6 @@ import { defineQuestion, questionRev, renderPrompt } from '../src/questions.ts';
 import {
   driftCount,
   ensureQuestions,
-  latestExam,
   pinModel,
   productionWindow,
   recordTruth,
@@ -48,6 +47,20 @@ describe('同步题库', () => {
     expect(await questionRow('triage-ui')).toMatchObject({ mode: 'shadow', prompt: renderPrompt(rewritten) });
     const [log] = await t.db.select().from(auditLog);
     expect(log).toMatchObject({ action: 'jev.question.rewrite', target: 'jev:triage-ui', via: 'engine' });
+  });
+
+  it('只改证据字段（给模型看的名字）也算换题：真拦的退回只记不拦，准确率和题面一起从头算', async () => {
+    await syncQuestionBank(t.db, [TRIAGE_UI], { model: MODEL });
+    await t.db.update(jevQuestions).set({ mode: 'enforce' }).where(eq(jevQuestions.id, 'triage-ui'));
+    const relabeled = defineQuestion({
+      ...TRIAGE_UI,
+      evidence: [{ key: 'request', label: '需求原文（改过名字）', required: true }],
+    });
+    expect(questionRev(relabeled)).not.toBe(questionRev(TRIAGE_UI));
+    expect(await syncQuestionBank(t.db, [relabeled], { model: MODEL })).toEqual([
+      { id: 'triage-ui', change: 'rewritten', demoted: true },
+    ]);
+    expect(await questionRow('triage-ui')).toMatchObject({ mode: 'shadow', prompt: renderPrompt(relabeled) });
   });
 
   it('同步不覆盖库里的把握线、钉死的模型和状态', async () => {
@@ -101,7 +114,7 @@ describe('补真值', () => {
     expect(await recordTruth(t.db, { answerId, truth: 'no_ui', source: 'outcome' })).toEqual({ ok: true });
     const state = (await ensureQuestions(t.db, [TRIAGE_UI], MODEL)).get('triage-ui');
     if (!state) throw new Error('没登记');
-    expect(await productionWindow(t.db, TRIAGE_UI, state, 50)).toEqual({ samples: 1, correct: 0 });
+    expect(await productionWindow(t.db, TRIAGE_UI, state, 50)).toMatchObject({ samples: 1, correct: 0 });
   });
 });
 
@@ -137,7 +150,9 @@ async function seedAnswers(
       shadow: true,
     };
     if (over.failReason) {
-      return { ...base, ok: false, failReason: over.failReason };
+      // 考试的每一行都带真值（答没答出来都一样），latestExam 按它认出是哪一次考试。
+      const truth = over.exam ? { truth: 'ui', truthSource: 'canary' as const } : {};
+      return { ...base, ok: false, failReason: over.failReason, ...truth };
     }
     return {
       ...base,
@@ -164,13 +179,20 @@ describe('准确率只按当前版本、钉死的模型、有把握、人或结�
     await seedAnswers(5, { model: 'claude-opus-5-5' });
     await seedAnswers(6, { confidence: 0.5 });
     await seedAnswers(7, { source: 'canary', exam: 'run-0' });
-    expect(await productionWindow(t.db, TRIAGE_UI, await state(), 50)).toEqual({ samples: 3, correct: 3 });
+    expect(await productionWindow(t.db, TRIAGE_UI, await state(), 50)).toMatchObject({
+      samples: 3,
+      correct: 3,
+    });
   });
 
-  it('只看最近 n 条', async () => {
+  it('只看最近 n 条；from 是这 n 条里最早那一条的时刻（漂移从这里算）', async () => {
     await seedAnswers(10, { correct: 5, at: new Date(NOW.getTime() - DAY) });
     await seedAnswers(5);
-    expect(await productionWindow(t.db, TRIAGE_UI, await state(), 5)).toEqual({ samples: 5, correct: 5 });
+    expect(await productionWindow(t.db, TRIAGE_UI, await state(), 5)).toEqual({
+      samples: 5,
+      correct: 5,
+      from: new Date(NOW.getTime() - 5 * 60_000),
+    });
   });
 });
 
@@ -193,16 +215,40 @@ describe('逐题看要不要转真拦或退回', () => {
     expect(report).toMatchObject({ mode: 'shadow', changed: true, exam: { runId: 'run-2', correct: 3 } });
   });
 
-  it('考试之后答过题面外的选项：真拦的退回只记不拦', async () => {
+  it('攒样本期间答过题面外的选项：真拦的退回只记不拦（提问当场已经退过，这里兜底）', async () => {
     await seedAnswers(50);
     await seedAnswers(5, { source: 'canary', exam: 'run-3', at: new Date(NOW.getTime() - DAY) });
     await seedAnswers(1, { failReason: 'bad_option' });
     await t.db.update(jevQuestions).set({ mode: 'enforce' }).where(eq(jevQuestions.id, 'triage-ui'));
     const s = await state();
-    const exam = await latestExam(t.db, TRIAGE_UI, s);
-    expect(await driftCount(t.db, TRIAGE_UI, s, exam?.at)).toBe(1);
+    const window = await productionWindow(t.db, TRIAGE_UI, s, DEFAULT_POLICY.minSamples);
+    expect(await driftCount(t.db, TRIAGE_UI, s, window.from)).toBe(1);
     const [report] = await reviewModes(t.db, [TRIAGE_UI], { now: NOW, policy: DEFAULT_POLICY });
     expect(report).toMatchObject({ mode: 'shadow', drift: 1 });
+  });
+
+  it('再考一次洗不掉漂移：答过题面外的选项之后又考了一次（没考成），真拦的照样退回', async () => {
+    const ago = (h: number) => new Date(NOW.getTime() - h * 3_600_000);
+    await seedAnswers(50, { at: ago(3) });
+    await seedAnswers(1, { failReason: 'bad_option', at: ago(2) });
+    // 之后的考试一道都没答出来（上游超时）：没考成。
+    await seedAnswers(5, { exam: 'run-void', failReason: 'timeout', at: ago(1) });
+    await t.db.update(jevQuestions).set({ mode: 'enforce' }).where(eq(jevQuestions.id, 'triage-ui'));
+    const [report] = await reviewModes(t.db, [TRIAGE_UI], { now: NOW, policy: DEFAULT_POLICY });
+    expect(report?.exam).toMatchObject({ runId: 'run-void', answered: 0 });
+    expect(report).toMatchObject({ mode: 'shadow', changed: true, drift: 1 });
+  });
+
+  it('漂过之后考及格也不马上转真拦：要在漂移之后重新攒够一批样本', async () => {
+    const ago = (h: number) => new Date(NOW.getTime() - h * 3_600_000);
+    await seedAnswers(50, { at: ago(5) });
+    await seedAnswers(1, { failReason: 'bad_option', at: ago(4) });
+    await seedAnswers(5, { source: 'canary', exam: 'run-pass', at: ago(3) });
+    const [held] = await reviewModes(t.db, [TRIAGE_UI], { now: NOW, policy: DEFAULT_POLICY });
+    expect(held).toMatchObject({ mode: 'shadow', changed: false, drift: 1 });
+    await seedAnswers(50, { at: ago(1) });
+    const [promoted] = await reviewModes(t.db, [TRIAGE_UI], { now: NOW, policy: DEFAULT_POLICY });
+    expect(promoted).toMatchObject({ mode: 'enforce', changed: true, drift: 0 });
   });
 
   it('只记不拦挂了 14 天还没攒够：标影子停滞', async () => {

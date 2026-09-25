@@ -5,7 +5,6 @@ import { readFile } from 'node:fs/promises';
 import type { ClaudeEffort } from '@fleet-dao/adapters';
 import type { HostId } from '@fleet-dao/shared';
 import { checkPinnedModel, type JevBackend } from './backend.ts';
-import { createClaudeJudgeBackend } from './backends/claude.ts';
 import { createTypesafeBackend } from './backends/typesafe.ts';
 
 export const DEFAULT_JEV_CONFIG_PATH = '/etc/fleet-dao/jev.json';
@@ -122,6 +121,9 @@ export async function loadJevConfig(path: string): Promise<JevMachineConfig> {
   return parseJevConfig(raw);
 }
 
+export const CLAUDE_ROUTE_CLOSED =
+  '判断路由走 Claude 会话先不开：要经 fleet-agent-scope 以会话用户的身份起，插头 PR #14 合并、本包接上之前一律拒绝';
+
 /** 调度台「判断」阶段选中的路由：执行方式 + 具体模型（引擎把目录里的模型换成执行体认的型号）。 */
 export interface JudgeRoute {
   hostId: HostId;
@@ -129,7 +131,7 @@ export interface JudgeRoute {
 }
 
 /**
- * 按路由起后端。TypeSafe 走「接口 + 自研外壳」（api-shell）、模型 jev-*；Claude 走 claude-code。
+ * 按路由起后端。TypeSafe 走「接口 + 自研外壳」（api-shell）、模型 jev-*；Claude 走 claude-code（接上 fleet-agent-scope 之前关着）。
  * 配置缺了、模型没钉死、执行方式接不了判断题，都当场报错——这是装机问题，不该等到第一次提问才发现。
  */
 export async function backendForRoute(
@@ -158,14 +160,10 @@ export async function backendForRoute(
   if (route.hostId === 'claude-code') {
     const problem = checkPinnedModel('claude-code', route.model);
     if (problem) throw new JevConfigError([problem]);
-    if (!config.claude) throw new JevConfigError(['判断路由走 Claude 会话，但机器配置里没有 claude 一节']);
-    return createClaudeJudgeBackend({
-      command: config.claude.command,
-      model: route.model,
-      ...(config.claude.effort ? { effort: config.claude.effort } : {}),
-      ...(config.claude.workRoot ? { workRoot: config.claude.workRoot } : {}),
-      ...(config.claude.wallClockMs ? { wallClockMs: config.claude.wallClockMs } : {}),
-    });
+    // 先关着：Claude 判断会话要以会话用户的身份经 fleet-agent-scope 起（插头 PR #14 的 cgroup 参数），
+    // 本包的 Claude 后端现在还以调用方自己的身份直接起 reclaude。接上之后按 config.claude 起 createClaudeJudgeBackend，
+    // 连同这道闸的测试一起改掉。
+    throw new JevConfigError([CLAUDE_ROUTE_CLOSED]);
   }
   throw new JevConfigError([`这条路由接不了判断题：执行方式 ${route.hostId}、模型 ${route.model}`]);
 }

@@ -72,12 +72,24 @@ describe('题库', () => {
     expect(checkBatch([TRIAGE_UI, other]).join('')).toContain('名字不一样');
   });
 
-  it('题目版本：判据改一个字 rev 就变；库里存的题面带着每个选项的判据', () => {
+  it('题目版本：判据或证据字段改一个字 rev 就变；库里存的题面带着每个选项的判据和证据字段', () => {
     const changed = defineQuestion({
       ...TRIAGE_UI,
       options: [{ ...TRIAGE_UI.options[0], criteria: '改过的判据' }, TRIAGE_UI.options[1]],
     });
     expect(questionRev(changed)).not.toBe(questionRev(TRIAGE_UI));
     expect(renderPrompt(TRIAGE_UI)).toContain('- no_ui：');
+    // 真拦资格比题面、准确率按 rev 分版本：两边必须一起变，否则只改证据字段时准确率清零、题却照旧真拦。
+    const relabeled = defineQuestion({
+      ...TRIAGE_UI,
+      evidence: [{ ...TRIAGE_UI.evidence[0], label: '改过名字' }],
+    });
+    expect(renderPrompt(relabeled)).not.toBe(renderPrompt(TRIAGE_UI));
+    expect(questionRev(relabeled)).not.toBe(questionRev(TRIAGE_UI));
+    const optional = defineQuestion({
+      ...TRIAGE_UI,
+      evidence: [{ ...TRIAGE_UI.evidence[0], required: false }],
+    });
+    expect(renderPrompt(optional)).not.toBe(renderPrompt(TRIAGE_UI));
   });
 });

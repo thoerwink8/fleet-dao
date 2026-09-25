@@ -11,8 +11,14 @@ export interface JevPolicy {
   examAnsweredShare: number;
   /** 只记不拦超过这么多天还没攒够样本，日报报「影子停滞」。 */
   shadowStallDays: number;
-  /** 每天最多问几道题（一次问几道算几次）；设置里的 judge.dailyCallLimit 优先。 */
+  /** 生产里每天最多问几道题（一次问几道算几次，巡检考试不算在内）；设置里的 judge.dailyCallLimit 优先。 */
   dailyCallLimit: number;
+  /**
+   * 巡检考试每天最多问几道，和生产的分开算：满卷考下来不能把生产调用整天顶回默认。
+   * 默认留够一天四轮满卷（巡检每 6 小时一轮，设计「已定」第 15 条；满卷多少道由 exams/ 算，测试钉着）；
+   * 设置里的 judge.examDailyCallLimit 优先。
+   */
+  examDailyCallLimit: number;
   /**
    * 按量计费的后端（TypeSafe）每天最多花多少美元，到了就停调、走默认。默认沿用旧系统的日帽，
    * 也是额度读取器里 Jev 那个池的上限（deploy/examples/quota.example.json）；设置里的 judge.dailyUsdCap 优先。
@@ -27,15 +33,17 @@ export const DEFAULT_POLICY: JevPolicy = {
   examAnsweredShare: 0.8,
   shadowStallDays: 14,
   dailyCallLimit: 200,
+  examDailyCallLimit: 600,
   dailyUsdCap: 0.3,
 };
 
 /** 题库里每道题把握线的初值；登记进库之后以库里那一行为准（驾驶舱可以改）。 */
 export const DEFAULT_CONFIDENCE_LINE = 0.7;
 
-/** 设置表里的键（值是 JSON）。judge.dailyCallLimit 已在 @fleet-dao/shared 的 SETTING_SCHEMAS 里；其余三个待加。 */
+/** 设置表里的键（值是 JSON）。judge.dailyCallLimit 已在 @fleet-dao/shared 的 SETTING_SCHEMAS 里；其余四个待加。 */
 export const POLICY_SETTING_KEYS = {
   dailyCallLimit: 'judge.dailyCallLimit',
+  examDailyCallLimit: 'judge.examDailyCallLimit',
   dailyUsdCap: 'judge.dailyUsdCap',
   accuracyLine: 'judge.accuracyLine',
   minSamples: 'judge.minSamples',
@@ -48,10 +56,12 @@ export function mergePolicy(
 ): { policy: JevPolicy; problems: string[] } {
   const policy = { ...base };
   const problems: string[] = [];
-  const limit = settings[POLICY_SETTING_KEYS.dailyCallLimit];
-  if (limit !== undefined) {
-    if (Number.isInteger(limit) && (limit as number) >= 0) policy.dailyCallLimit = limit as number;
-    else problems.push(`${POLICY_SETTING_KEYS.dailyCallLimit} 要是非负整数，读到 ${JSON.stringify(limit)}`);
+  for (const field of ['dailyCallLimit', 'examDailyCallLimit'] as const) {
+    const key = POLICY_SETTING_KEYS[field];
+    const limit = settings[key];
+    if (limit === undefined) continue;
+    if (Number.isInteger(limit) && (limit as number) >= 0) policy[field] = limit as number;
+    else problems.push(`${key} 要是非负整数，读到 ${JSON.stringify(limit)}`);
   }
   const usd = settings[POLICY_SETTING_KEYS.dailyUsdCap];
   if (usd !== undefined) {

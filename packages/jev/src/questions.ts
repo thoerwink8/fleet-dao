@@ -1,5 +1,5 @@
 // 题的形状：题面、选项（每个选项挂一个 Effect）、要喂的证据字段、拿不准时的默认走向。
-// 题库本身在 bank.ts。改题面或选项 = 换了一道题：rev 会变，之前攒的准确率不再算数，真拦的题退回只记不拦（store.syncQuestionBank）。
+// 题库本身在 bank.ts。改题面、选项或证据字段 = 换了一道题：rev 会变，之前攒的准确率不再算数，真拦的题退回只记不拦（store.syncQuestionBank）。
 import { createHash } from 'node:crypto';
 import { type Effect, isEffect } from './effects.ts';
 
@@ -73,18 +73,22 @@ export type EvidenceOf<Q extends QuestionDef> = {
   [F in FieldOf<Q> as F['required'] extends true ? never : F['key']]?: string | undefined;
 };
 
-/** 库里 jev_questions.prompt 存的就是这个：题面加上每个选项的判据，改了哪个字都看得出来。 */
+/**
+ * 库里 jev_questions.prompt 存的就是这个：模型看得到的全部——题面、每个选项的判据、喂哪些证据字段（给模型看的名字、选填与否）。
+ * 真拦资格比的是它、准确率按它的哈希（questionRev）分版本：两边必须是同一份，否则只改证据字段时准确率清零、题却照旧真拦。
+ */
 export function renderPrompt(q: QuestionDef): string {
-  return [q.instructions, ...q.options.map((o) => `- ${o.id}：${o.criteria}`)].join('\n');
+  return [
+    q.instructions,
+    ...q.options.map((o) => `- ${o.id}：${o.criteria}`),
+    '证据字段：',
+    ...q.evidence.map((f) => `- ${f.key}：${f.label}${f.required ? '' : '（选填）'}`),
+  ].join('\n');
 }
 
-/** 题目版本：题面、选项、证据字段任何一处变了，rev 就变。每条判断记录都带着它，准确率只按当前版本算。 */
+/** 题目版本：renderPrompt 里任何一个字变了，rev 就变。每条判断记录都带着它，准确率只按当前版本算。 */
 export function questionRev(q: QuestionDef): string {
-  const fields = q.evidence.map((f) => `${f.key}=${f.label}${f.required ? '' : '?'}`).join(',');
-  return createHash('sha256')
-    .update(`${renderPrompt(q)}\n${fields}`)
-    .digest('hex')
-    .slice(0, 12);
+  return createHash('sha256').update(renderPrompt(q)).digest('hex').slice(0, 12);
 }
 
 const ID = /^[a-z][a-z0-9-]*$/;

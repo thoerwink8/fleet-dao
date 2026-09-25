@@ -20,6 +20,7 @@ import {
   type BackendResult,
   estimateTokens,
   type JevBackend,
+  upstreamExcerpt,
 } from '../backend.ts';
 
 export interface ClaudeJudgeOptions {
@@ -89,7 +90,8 @@ export function parseClaudeAnswers(
     }
   }
   if (!json || typeof json !== 'object' || Array.isArray(json)) {
-    return { ok: false, why: `回复里找不到 JSON：${trimmed.slice(0, 200)}` };
+    // 回复可能照抄了证据里的令牌：先脱敏再截。
+    return { ok: false, why: `回复里找不到 JSON：${upstreamExcerpt(trimmed, 200)}` };
   }
   const body = json as Record<string, unknown>;
   const answers: Record<string, BackendAnswer> = {};

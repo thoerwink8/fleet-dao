@@ -25,6 +25,14 @@ describe('证据', () => {
     expect(d.replying_to).toBeUndefined();
   });
 
+  it('开头先整段脱敏再截：跨过第 200 字的长串（密钥之类）也认得出来，不会截成半截漏进库', () => {
+    const filler = '填'.repeat(180);
+    const text = `${filler} ${'A'.repeat(60)} 尾巴`;
+    // 先截再脱敏会留下 19 个 A：不到 40 个字符，认不出是长串。
+    expect(text.slice(0, 200)).toContain('A'.repeat(19));
+    expect(digestEvidence(TRIAGE_UI.evidence, { request: text }).request?.head).toBe(`${filler} <长串> 尾巴`);
+  });
+
   it('「今天」从 UTC 0 点算（和额度读取器里 Jev 池的窗口一致）', () => {
     expect(dayStart(new Date('2026-09-25T00:00:00Z')).toISOString()).toBe('2026-09-25T00:00:00.000Z');
     expect(dayStart(new Date('2026-09-24T23:59:59Z')).toISOString()).toBe('2026-09-24T00:00:00.000Z');

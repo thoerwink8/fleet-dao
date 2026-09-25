@@ -151,6 +151,16 @@ describe('Claude 会话后端', () => {
     expect(parseClaudeAnswers('我觉得是 ui', request)).toMatchObject({ ok: false });
   });
 
+  it('回复里找不到 JSON：原文先脱敏再截，照抄了证据里的令牌也不会截成半截留下', () => {
+    const reply = `${'说'.repeat(190)} ${'K'.repeat(60)} 完`;
+    const parsed = parseClaudeAnswers(reply, request);
+    expect(parsed).toMatchObject({ ok: false });
+    if (!parsed.ok) {
+      expect(parsed.why).toContain('<长串>');
+      expect(parsed.why).not.toContain('KKKK');
+    }
+  });
+
   it('插头的结局变成没判的原因', async () => {
     const cases: [string, (spec: ClaudeCodeRunSpec) => ClaudeCodeRunReport, string][] = [
       [

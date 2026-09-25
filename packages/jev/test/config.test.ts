@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   backendForRoute,
+  CLAUDE_ROUTE_CLOSED,
   DEFAULT_JEV_CONFIG_PATH,
   JevConfigError,
   jevConfigPath,
@@ -78,12 +79,11 @@ describe('按路由起后端', () => {
     );
   });
 
-  it('claude-code：Claude 会话后端，模型就是路由上的具体型号', async () => {
-    const backend = await backendForRoute(
-      { hostId: 'claude-code', model: 'claude-opus-5-5' },
-      parseJevConfig(config),
-    );
-    expect(backend).toMatchObject({ kind: 'claude-code', model: 'claude-opus-5-5' });
+  it('claude-code：接上 fleet-agent-scope 之前一律不开，配置齐了也拒', async () => {
+    await expect(
+      backendForRoute({ hostId: 'claude-code', model: 'claude-opus-5-5' }, parseJevConfig(config)),
+    ).rejects.toThrow(CLAUDE_ROUTE_CLOSED);
+    expect(CLAUDE_ROUTE_CLOSED).toContain('fleet-agent-scope');
   });
 
   it('模型没钉死、配置缺那一节、密钥是空的、执行方式接不了：当场报错', async () => {

@@ -1,6 +1,7 @@
 // 每道题的状态怎么变：只记不拦（shadow）→ 真拦（enforce），以及掉回去。纯函数，读数由 store.ts 从库里取。
 // 规则（设计文档第十一节）：攒满 minSamples 条「有把握、有真值」的判定、准确率不低于线，且最近一次巡检考题及格，才转真拦；
 // 真拦之后，考题不及格、生产判定准确率掉到线下、或者答了题面外的选项 / 回话模型不对，自动退回只记不拦。
+// 答了题面外的选项 / 回话模型不对：提问当场就退回（jev.ts）；这里按这批样本覆盖的时间再兜一次底，考试洗不掉。
 // 人停的（off）只有人能开，这里从不动它。
 import type { JevPolicy } from './policy.ts';
 
@@ -10,6 +11,8 @@ export type JevMode = 'shadow' | 'enforce' | 'off';
 export interface ProductionWindow {
   samples: number;
   correct: number;
+  /** 这批判定里最早那一条的时刻：漂移从这里算起。一条都没有就不给（漂移按一直以来算）。 */
+  from?: Date;
 }
 
 /** 一次巡检考试里这道题的答卷。 */
@@ -68,7 +71,7 @@ export interface ModeInput {
   production: ProductionWindow;
   /** 最近一次巡检考试；一次都没考过就不给。 */
   exam?: ExamOutcome | undefined;
-  /** 最近一次考试之后（没考过就是一直以来）答了题面外的选项、或回话模型不对的次数。 */
+  /** 攒这批生产判定期间（ProductionWindow.from 起，考试里的也算）答了题面外的选项、或回话模型不对的次数。 */
   drift: number;
 }
 
@@ -106,7 +109,9 @@ export function decideMode(input: ModeInput, policy: JevPolicy): ModeDecision {
   }
   if (!exam) return stay('还没考过巡检考题');
   if (exam.state !== 'pass') return stay(`最近一次考试：${exam.why}`);
-  if (input.drift > 0) return stay(`考试之后答过题面外的选项或回话模型不对（${input.drift} 次）`);
+  if (input.drift > 0) {
+    return stay(`攒这批样本期间答过题面外的选项或回话模型不对（${input.drift} 次），要在那之后重新攒够`);
+  }
   return to(
     'enforce',
     `最近 ${p.samples} 条准确率 ${pct(prodAccuracy)} 不低于线 ${pct(policy.accuracyLine)}，${exam.why}，转真拦`,

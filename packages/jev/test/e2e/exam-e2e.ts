@@ -35,9 +35,10 @@ if (kind === 'claude') {
 }
 const limit = Number(limitArg);
 const sites = (sitesArg && sitesArg !== 'all' ? sitesArg.split(',') : Object.keys(SITES)) as SiteId[];
+// 考试的次数另算（examDailyCallLimit）；花费上限和生产共用，给了「今天还能花的美元」就按它。
 const policy = {
   ...DEFAULT_POLICY,
-  dailyCallLimit: 1_000,
+  examDailyCallLimit: 1_000,
   ...(usdArg === undefined ? {} : { dailyUsdCap: Number(usdArg) }),
 };
 
