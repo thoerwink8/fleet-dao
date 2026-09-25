@@ -1,4 +1,21 @@
 export {
+  checkOpenIssuesHaveSpecs,
+  checkSpecsDone,
+  DEFERRAL_PATTERNS,
+  type DebtProblem,
+  type DebtRun,
+  type Deferral,
+  debtFiles,
+  doneSection,
+  findDeferrals,
+  formatDebtProblem,
+  judgeDeferrals,
+  type RefState,
+  refStates,
+  runDebtCheck,
+  SPECS_GRACE_HOURS,
+} from './debt.ts';
+export {
   checkDocPointers,
   DOCS,
   docFiles,
@@ -9,16 +26,26 @@ export {
   type Report,
 } from './doc-pointers.ts';
 export {
+  type GitHubReader,
+  type IssueInfo,
+  liveGitHub,
+  type MilestoneInfo,
+  repoName,
+  toIssue,
+} from './github-api.ts';
+export {
   type Gh,
   type GhResult,
   ghRunner,
   type IssueNewDeps,
   type IssueNewResult,
   issueNew,
-  specsSkeleton,
+  issueSummary,
+  specsDoc,
   USAGE,
 } from './issue-new.ts';
 export { isKindLabel, KIND_LABELS, type KindLabel, milestonePhase } from './labels.ts';
+export { type CloseCheck, MILESTONE_USAGE, milestoneCloseCheck } from './milestone-close.ts';
 export { type PlanPhase, type PlanRef, parsePlanRefs, planPhases } from './plan.ts';
 export {
   annotation,

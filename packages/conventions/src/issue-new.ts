@@ -1,11 +1,15 @@
 // 开单脚本：pnpm issue:new --kind 需求 --milestone P1 --title "…" --body-file 正文.md [--specs 短名]
-// 缺类别或里程碑就不开。经 gh 开单时一次带上标签和里程碑（gh 先把名字换成编号再建单，对不上就一张也不建）。
-// 带 --specs 时，开完按新单号建 specs/<号>-<短名>/需求.md 骨架并打印路径。gh 出错原样报出来，退出码非 0。
+// 缺类别、里程碑，或正文里没有写了字的「## 怎么算做完」就不开（design 第三节第 35 条：以后要做的事得是一张
+// 带怎么算做完和里程碑的 issue）。经 gh 开单时一次带上标签和里程碑（gh 先把名字换成编号再建单，对不上就一张也不建）。
+// 带 --specs 时，完整正文写进 specs/<号>-<短名>/需求.md，issue 上只留第一个小标题之前那段（原话、AI 理解）
+// 和需求文档的路径（第七节：完整需求只在仓里存一份）。gh 出错原样报出来，退出码非 0。
 import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
+import { doneSection } from './debt.ts';
 import { isKindLabel, KIND_LABELS, milestonePhase } from './labels.ts';
+import { parseMd } from './markdown.ts';
 
 export interface GhResult {
   code: number;
@@ -27,23 +31,37 @@ export interface IssueNewResult {
   url: string;
   /** 实际挂上的里程碑全名。 */
   milestone: string;
-  /** 建了骨架时，它的仓内路径。 */
+  /** 建了需求文档时，它的仓内路径。 */
   specsFile: string | undefined;
 }
 
 export const USAGE =
-  '用法：pnpm issue:new --kind 需求|缺陷|杂项 --milestone P1 --title "一句话" --body-file 正文.md [--specs 短名]';
+  '用法：pnpm issue:new --kind 需求|缺陷|杂项 --milestone P1 --title "一句话" --body-file 正文.md [--specs 短名]' +
+  '（正文要有写了字的「## 怎么算做完」；带 --specs 时，第一个小标题之前写原话和 AI 理解）';
 
 export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Promise<IssueNewResult> {
   const o = parse(argv);
   const bodyPath = isAbsolute(o.bodyFile) ? o.bodyFile : resolve(deps.cwd, o.bodyFile);
+  let body: string;
   try {
-    readFileSync(bodyPath, 'utf8');
+    body = readFileSync(bodyPath, 'utf8').replace(/\r\n?/g, '\n');
   } catch (e) {
     throw new Error(`--body-file 读不到：${bodyPath}（${message(e)}），单没开。`);
   }
+  const done = doneSection(parseMd('body.md', body));
+  if (done !== 'ok') {
+    throw new Error(
+      `正文里${done === 'missing' ? '没有「## 怎么算做完」一节' : '「怎么算做完」一节是空的'}，单没开：以后要做的事得写清怎么算做完（测试名、脚本、真机上看到什么）。`,
+    );
+  }
+  const summary = o.specs === undefined ? undefined : issueSummary(body);
+  if (summary === '') {
+    throw new Error(
+      '--specs 时正文开头（第一个小标题之前）要写原话和 AI 理解：issue 上只留这一段和需求文档的路径，单没开。',
+    );
+  }
   if (o.specs !== undefined && !isDir(join(deps.root, 'specs'))) {
-    throw new Error(`仓根 ${deps.root} 下没有 specs/ 目录，--specs 建不了骨架，单没开。`);
+    throw new Error(`仓根 ${deps.root} 下没有 specs/ 目录，--specs 建不了需求文档，单没开。`);
   }
 
   const milestone = await resolveMilestone(deps.gh, o.milestone);
@@ -52,8 +70,9 @@ export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Pro
     'create',
     '--title',
     o.title,
-    '--body-file',
-    bodyPath,
+    ...(summary === undefined
+      ? ['--body-file', bodyPath]
+      : ['--body', `${summary}\n\n文档：\`specs/<本单号>-${o.specs}/需求.md\`（完整需求和怎么算做完）\n`]),
     '--label',
     o.kind,
     '--milestone',
@@ -69,7 +88,7 @@ export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Pro
   const n = /\/issues\/(\d+)$/.exec(url)?.[1];
   if (!n) {
     throw new Error(
-      `gh 退出码是 0，可输出里认不出单号：${detail(created)}。单多半已经开了，去 GitHub 按标题「${o.title}」找一下${o.specs === undefined ? '' : '；specs 骨架没建'}。`,
+      `gh 退出码是 0，可输出里认不出单号：${detail(created)}。单多半已经开了，去 GitHub 按标题「${o.title}」找一下${o.specs === undefined ? '' : '；需求文档没建'}。`,
     );
   }
   const number = Number(n);
@@ -79,10 +98,10 @@ export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Pro
       number,
       url,
       milestone,
-      specsFile: writeSkeleton(deps.root, number, o.specs, o.title, milestone),
+      specsFile: writeSpecs(deps.root, number, o.specs, specsDoc(o.title, number, milestone, body)),
     };
   } catch (e) {
-    throw new Error(`单开了（#${number} ${url}），可需求文档骨架没建成：${message(e)}。`);
+    throw new Error(`单开了（#${number} ${url}），可需求文档没建成：${message(e)}。`);
   }
 }
 
@@ -161,38 +180,43 @@ async function resolveMilestone(gh: Gh, want: string): Promise<string> {
   throw new Error(`「${want}」对上了好几个里程碑（${matches.join('、')}），单没开：写全名。`);
 }
 
-/** 需求文档骨架，照 specs/ 下已有的几份的样子。「对应计划」的引号故意空着：不填，文档指针检查会红。 */
-export function specsSkeleton(title: string, number: number, milestone: string): string {
+/** 正文里第一个小标题之前的那段（原话、AI 理解），去掉首尾空白。 */
+export function issueSummary(body: string): string {
+  const first = parseMd('body.md', body).headings[0];
+  return body
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .slice(0, first ? first.line - 1 : undefined)
+    .join('\n')
+    .trim();
+}
+
+/**
+ * 需求文档，照 specs/ 下已有的几份的样子：标题、「对应计划」「设计依据」两行，接着是整份正文；
+ * 正文里没有「## 现状」就补一节「未开工。」。「对应计划」的引号故意空着：不填就提交，文档指针检查会红。
+ */
+export function specsDoc(title: string, number: number, milestone: string, body: string): string {
   const phase = milestonePhase(milestone);
+  const text = body.replace(/\r\n?/g, '\n').trim();
+  const hasStatus = parseMd('body.md', text).headings.some((h) => h.title.trim() === '现状');
   return [
     `# ${title}（#${number}）`,
     '',
     `对应计划：${phase === undefined ? '' : `plan.md P${phase}「」`}`,
     '设计依据：',
     '',
-    '## 要什么',
-    '',
-    '## 怎么算做完',
-    '',
-    '## 现状',
-    '',
-    '未开工。',
+    text,
+    ...(hasStatus ? [] : ['', '## 现状', '', '未开工。']),
     '',
   ].join('\n');
 }
 
-function writeSkeleton(
-  root: string,
-  number: number,
-  short: string,
-  title: string,
-  milestone: string,
-): string {
+function writeSpecs(root: string, number: number, short: string, text: string): string {
   const name = `${number}-${short}`;
   const dir = join(root, 'specs', name);
   if (existsSync(dir)) throw new Error(`specs/${name}/ 已经在了，没覆盖`);
   mkdirSync(dir);
-  writeFileSync(join(dir, '需求.md'), specsSkeleton(title, number, milestone), { flag: 'wx' });
+  writeFileSync(join(dir, '需求.md'), text, { flag: 'wx' });
   return `specs/${name}/需求.md`;
 }
 

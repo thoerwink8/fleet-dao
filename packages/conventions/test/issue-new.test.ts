@@ -3,18 +3,31 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { checkDocPointers, formatProblem } from '../src/doc-pointers.ts';
-import { type GhResult, ghRunner, issueNew, specsSkeleton } from '../src/issue-new.ts';
+import { type GhResult, ghRunner, issueNew, issueSummary, specsDoc } from '../src/issue-new.ts';
 import { memRepo } from './helpers.ts';
 
 const MILESTONES = JSON.stringify([{ title: 'P0 地基' }, { title: 'P1 核心闭环' }, { title: 'P4 飞书 v2' }]);
 const ok = (stdout: string): GhResult => ({ code: 0, stdout, stderr: '' });
 const URL36 = 'https://github.com/o/r/issues/36';
+const BODY = [
+  '原话：给登录页加验证码（提出人：某某）',
+  'AI 理解：登录页发短信验证码，五分钟过期。',
+  '',
+  '## 要什么',
+  '',
+  '- 登录页多一个验证码框。',
+  '',
+  '## 怎么算做完',
+  '',
+  '- 测试：过期的验证码被拒。',
+  '',
+].join('\n');
 
 /** 假 gh：记下每次调用；读里程碑、开单各按给的回。 */
-function setup(opts: { milestones?: GhResult; create?: GhResult; specs?: boolean } = {}) {
+function setup(opts: { milestones?: GhResult; create?: GhResult; specs?: boolean; body?: string } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'fleet-issue-new-'));
   if (opts.specs !== false) mkdirSync(join(root, 'specs'));
-  writeFileSync(join(root, 'body.md'), '原话：给登录页加验证码\n');
+  writeFileSync(join(root, 'body.md'), opts.body ?? BODY);
   const calls: string[][] = [];
   const gh = async (args: string[]): Promise<GhResult> => {
     calls.push(args);
@@ -62,9 +75,37 @@ describe('开单脚本：缺类别或里程碑就不开', () => {
     expect(calls).toEqual([]);
   });
 
-  it('要建骨架可仓根下没有 specs/：不开', async () => {
+  it('要建需求文档可仓根下没有 specs/：不开', async () => {
     const { calls, run } = setup({ specs: false });
     await expect(run(...base, '--specs', '登录验证码')).rejects.toThrow('没有 specs/ 目录');
+    expect(calls).toEqual([]);
+  });
+});
+
+describe('开单脚本：以后要做的事得写清怎么算做完（design 第三节第 35 条）', () => {
+  it.each([
+    ['正文里没有「怎么算做完」', '原话：给登录页加验证码\n', '正文里没有「## 怎么算做完」一节，单没开'],
+    [
+      '「怎么算做完」只有标题、下面空着',
+      '原话：x\n\n## 怎么算做完\n\n\n## 现状\n\n未开工。\n',
+      '正文里「怎么算做完」一节是空的，单没开',
+    ],
+    [
+      '怎么算做完写在围栏代码块里不算小标题',
+      '原话：x\n\n```\n## 怎么算做完\n- 测试\n```\n',
+      '正文里没有「## 怎么算做完」一节',
+    ],
+  ])('%s：不开，gh 一次也不调', async (_name, body, message) => {
+    const { calls, run } = setup({ body });
+    await expect(run(...base)).rejects.toThrow(message);
+    expect(calls).toEqual([]);
+  });
+
+  it('带 --specs 可正文开头就是小标题（没有原话和 AI 理解）：不开', async () => {
+    const { calls, run } = setup({ body: '## 怎么算做完\n\n- 测试\n' });
+    await expect(run(...base, '--specs', '登录验证码')).rejects.toThrow(
+      '--specs 时正文开头（第一个小标题之前）要写原话和 AI 理解',
+    );
     expect(calls).toEqual([]);
   });
 });
@@ -136,7 +177,7 @@ describe('开单脚本：gh 出错照实报，不吞', () => {
     await expect(run(...base)).rejects.toThrow('gh 读回来的里程碑认不出');
   });
 
-  it('开单报错：带上 gh 的原话；不说死「没开」（超时、断连时可能已经建了），给标题让人先搜再重开；骨架不建', async () => {
+  it('开单报错：带上 gh 的原话；不说死「没开」（超时、断连时可能已经建了），给标题让人先搜再重开；需求文档不建', async () => {
     const { root, run } = setup({
       create: {
         code: 1,
@@ -151,10 +192,10 @@ describe('开单脚本：gh 出错照实报，不吞', () => {
     expect(existsSync(join(root, 'specs', '36-登录验证码'))).toBe(false);
   });
 
-  it('gh 说成功了可认不出单号：明说单可能开了、给标题、骨架没建', async () => {
+  it('gh 说成功了可认不出单号：明说单可能开了、给标题、需求文档没建', async () => {
     const { root, run } = setup({ create: ok('Creating issue in o/r\n') });
     await expect(run(...base, '--specs', '登录验证码')).rejects.toThrow(
-      '认不出单号：Creating issue in o/r。单多半已经开了，去 GitHub 按标题「登录页加验证码」找一下；specs 骨架没建。',
+      '认不出单号：Creating issue in o/r。单多半已经开了，去 GitHub 按标题「登录页加验证码」找一下；需求文档没建。',
     );
     expect(existsSync(join(root, 'specs', '36-登录验证码'))).toBe(false);
   });
@@ -166,35 +207,51 @@ describe('开单脚本：gh 出错照实报，不吞', () => {
   });
 });
 
-describe('开单脚本：--specs 按新单号建需求文档骨架', () => {
-  it('建 specs/<号>-<短名>/需求.md，返回路径', async () => {
-    const { root, run } = setup();
+describe('开单脚本：--specs 时完整需求进 specs/，issue 上只留原话、AI 理解和路径', () => {
+  it('建 specs/<号>-<短名>/需求.md（整份正文），返回路径；issue 正文是第一个小标题之前那段加文档路径', async () => {
+    const { root, calls, run } = setup();
     const r = await run(...base, '--specs', '登录验证码');
     expect(r.specsFile).toBe('specs/36-登录验证码/需求.md');
-    expect(readFileSync(join(root, 'specs', '36-登录验证码', '需求.md'), 'utf8')).toBe(
-      specsSkeleton('登录页加验证码', 36, 'P1 核心闭环'),
+    const doc = readFileSync(join(root, 'specs', '36-登录验证码', '需求.md'), 'utf8');
+    expect(doc).toBe(specsDoc('登录页加验证码', 36, 'P1 核心闭环', BODY));
+    expect(doc).toContain('## 怎么算做完\n\n- 测试：过期的验证码被拒。');
+    expect(doc.trimEnd().endsWith('## 现状\n\n未开工。')).toBe(true);
+    const create = calls[1] ?? [];
+    expect(create).not.toContain('--body-file');
+    expect(create[create.indexOf('--body') + 1]).toBe(
+      '原话：给登录页加验证码（提出人：某某）\nAI 理解：登录页发短信验证码，五分钟过期。\n\n' +
+        '文档：`specs/<本单号>-登录验证码/需求.md`（完整需求和怎么算做完）\n',
     );
+  });
+
+  it('正文自己有「## 现状」就不再补一节', () => {
+    const doc = specsDoc('t', 1, 'P1 核心闭环', `${BODY}\n## 现状\n\n依赖 #28。\n`);
+    expect(doc.match(/## 现状/g)).toHaveLength(1);
+    expect(doc).toContain('依赖 #28。');
+  });
+
+  it('issue 上留的那段：第一个小标题之前；没有小标题就是整份', () => {
+    expect(issueSummary(BODY)).toBe(
+      '原话：给登录页加验证码（提出人：某某）\nAI 理解：登录页发短信验证码，五分钟过期。',
+    );
+    expect(issueSummary('原话：x\r\nAI 理解：y\r\n')).toBe('原话：x\nAI 理解：y');
   });
 
   it('目录已经在了：不覆盖，明说单已经开了', async () => {
     const { root, run } = setup();
     mkdirSync(join(root, 'specs', '36-登录验证码'));
     await expect(run(...base, '--specs', '登录验证码')).rejects.toThrow(
-      `单开了（#36 ${URL36}），可需求文档骨架没建成：specs/36-登录验证码/ 已经在了，没覆盖。`,
+      `单开了（#36 ${URL36}），可需求文档没建成：specs/36-登录验证码/ 已经在了，没覆盖。`,
     );
   });
 
-  it('骨架里「对应计划」的引号空着：不填就提交，文档指针检查会红', () => {
-    const skeleton = specsSkeleton('登录页加验证码', 36, 'P1 核心闭环');
-    expect(skeleton.split('\n').slice(0, 3)).toEqual([
-      '# 登录页加验证码（#36）',
-      '',
-      '对应计划：plan.md P1「」',
-    ]);
+  it('需求文档里「对应计划」的引号空着：不填就提交，文档指针检查会红', () => {
+    const doc = specsDoc('登录页加验证码', 36, 'P1 核心闭环', BODY);
+    expect(doc.split('\n').slice(0, 3)).toEqual(['# 登录页加验证码（#36）', '', '对应计划：plan.md P1「」']);
     const report = checkDocPointers(
       memRepo({
         'docs/plan.md': '# 计划\n\n### P1 核心闭环\n\n- 工作流：需求。\n',
-        'specs/36-x/需求.md': skeleton,
+        'specs/36-x/需求.md': doc,
       }),
       ['specs/36-x/需求.md'],
     );
