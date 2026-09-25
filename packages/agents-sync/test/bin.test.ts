@@ -26,7 +26,7 @@ describe('agents-sync 可执行入口', () => {
 
   it('查出缺失退出 1；写完退出 0；再查退出 0', () => {
     const home = tempDir('home');
-    const repo = makeRepo(null);
+    const repo = makeRepo({});
     const bin = tempDir('bin');
     fakeBin(bin, 'claude');
     const before = run(['--check', '--home', home, '--repo', repo], bin);

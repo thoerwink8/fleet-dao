@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { manifestPath, readManifest } from '../src/manifest.ts';
 import { exitCode } from '../src/report.ts';
-import { applySkills, checkSkills } from '../src/sync.ts';
+import { applySkills, checkSkills, readSources } from '../src/sync.ts';
 import type { AgentId } from '../src/targets.ts';
 import {
   cleanup,
@@ -126,10 +126,10 @@ describe('仓里删掉的 skill 被撤', () => {
     expect(exitCode(m.check())).toBe(0);
   });
 
-  it('仓里的 agents/skills/ 整个没了：装过的照样撤', () => {
+  it('仓里的 agents/skills/ 删空了：装过的照样撤（目录整个不在是另一回事：判读不到，一个不撤，见 cli.test）', () => {
     const m = machine({ 'grill-me': GRILL });
     m.apply();
-    m.setRepo(null);
+    m.setRepo({});
     m.apply();
     expect(existsSync(join(m.home, '.claude', 'skills', 'grill-me'))).toBe(false);
     expect(kinds(m.check(), 'agents/skills')).toEqual(['skip']);
@@ -190,8 +190,14 @@ describe('不是本脚本装的一律不碰', () => {
 });
 
 describe('没有 skill、清单读不懂', () => {
-  it('仓里没有 agents/skills/：报「没有 skill 可分发」，不算失败，也不建清单', () => {
-    const m = machine(null);
+  it('仓里没有 agents/skills/ 这个目录：读不到，不当成「没有 skill」（检出不全时会把装过的都撤掉）', () => {
+    const read = readSources(makeRepo(null));
+    expect(read.ok).toBe(false);
+    expect(read.ok ? '' : read.why).toContain('没有 agents/skills/');
+  });
+
+  it('仓里的 agents/skills/ 是空的、清单里也没记：报「没有 skill 可分发」，不算失败，也不建清单', () => {
+    const m = machine({});
     for (const lines of [m.check(), m.apply()]) {
       expect(lines).toHaveLength(1);
       expectKind(lines, 'agents/skills', 'skip');
@@ -224,7 +230,7 @@ describe('没有 skill、清单读不懂', () => {
       const read = readManifest(file);
       expect(read.ok, bad).toBe(false);
     }
-    const m = machine(null);
+    const m = machine({});
     put(m.home, '.ssh/id_test', '别删我\n');
     put(
       m.home,

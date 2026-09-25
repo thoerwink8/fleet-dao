@@ -35,8 +35,8 @@ import { linkTarget, readTree, removeEntry, sameTree, type Tree, treeDiff, write
 export interface Sources {
   /** 通用段：含两行标记，\n 换行 */
   block: string;
-  /** agents/skills/ 下的各个 skill（目录名 → 文件）；null＝仓里没有这个目录 */
-  skills: Map<string, Tree> | null;
+  /** agents/skills/ 下的各个 skill（目录名 → 文件） */
+  skills: Map<string, Tree>;
 }
 
 export interface Ctx {
@@ -65,8 +65,9 @@ export function readSources(repo: string): { ok: true; value: Sources } | { ok: 
       .map((e) => e.name)
       .sort();
   } catch (err) {
+    // 目录不在不当成「没有 skill」：检出不全或 --repo 指错时，那样会把清单里装过的都当成仓里删了、一起撤掉
     if ((err as NodeJS.ErrnoException).code === 'ENOENT')
-      return { ok: true, value: { block: shared.block, skills: null } };
+      return { ok: false, why: '仓里没有 agents/skills/（检出不全，或 --repo 指错了）' };
     return { ok: false, why: `读不了仓里的 agents/skills/（${code(err)}）` };
   }
   const skills = new Map<string, Tree>();
@@ -265,13 +266,12 @@ function manifestKey(ctx: Ctx): string {
 
 /** 有没有 skill 可管：仓里有，或者清单里记着装过（仓里删了要撤） */
 function nothingToDo(src: Sources, m: Manifest): boolean {
-  const repoEmpty = src.skills === null || src.skills.size === 0;
+  const repoEmpty = src.skills.size === 0;
   return repoEmpty && Object.values(m.skills).every((names) => names.length === 0);
 }
 
-function noSkillsLine(src: Sources): Line {
-  const why = src.skills === null ? '仓里没有 agents/skills/' : '仓里的 agents/skills/ 是空的';
-  return line('skip', 'agents/skills', `${why}：没有 skill 可分发`);
+function noSkillsLine(): Line {
+  return line('skip', 'agents/skills', '仓里的 agents/skills/ 是空的：没有 skill 可分发');
 }
 
 export function checkSkills(ctx: Ctx, src: Sources, manifest: ManifestRead): Line[] {
@@ -284,10 +284,10 @@ export function checkSkills(ctx: Ctx, src: Sources, manifest: ManifestRead): Lin
       ),
     ];
   }
-  if (nothingToDo(src, manifest.value)) return [noSkillsLine(src)];
+  if (nothingToDo(src, manifest.value)) return [noSkillsLine()];
   const out: Line[] = [];
   const owner = expectedOwner(ctx);
-  const want = src.skills ?? new Map<string, Tree>();
+  const want = src.skills;
   for (const t of SKILL_TARGETS) {
     const { rel, abs, key } = relOf(ctx, t.dir);
     const { installed, who } = readersOf(ctx, t);
@@ -371,10 +371,10 @@ export function applySkills(ctx: Ctx, src: Sources, manifest: ManifestRead): Lin
       ),
     ];
   }
-  if (nothingToDo(src, manifest.value)) return [noSkillsLine(src)];
+  if (nothingToDo(src, manifest.value)) return [noSkillsLine()];
   const file = manifestPath(ctx.home, ctx.platform);
   const m: Manifest = { skills: { ...manifest.value.skills } };
-  const want = src.skills ?? new Map<string, Tree>();
+  const want = src.skills;
   const out: Line[] = [];
   for (const t of SKILL_TARGETS) {
     const { rel, abs, key } = relOf(ctx, t.dir);

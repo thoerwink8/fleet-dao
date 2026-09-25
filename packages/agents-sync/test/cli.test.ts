@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { type Deps, type PasswdEntry, runCli } from '../src/cli.ts';
-import { BLOCK, cleanup, fakeBin, get, IS_ROOT, makeRepo, PLATFORM, tempDir } from './helpers.ts';
+import { BLOCK, cleanup, fakeBin, get, IS_ROOT, makeRepo, PLATFORM, put, tempDir } from './helpers.ts';
 
 afterEach(cleanup);
 
@@ -33,7 +33,7 @@ function run(argv: string[], over: Partial<Deps> = {}): Run {
     homedir: () => {
       throw new Error('测试里不许落到真家目录');
     },
-    defaultRepo: makeRepo(null),
+    defaultRepo: makeRepo({}),
     getuid: () => 1000,
     lookupUser: () => undefined,
     becomeUser: (name, entry) => {
@@ -67,7 +67,7 @@ describe('用法', () => {
 describe('退出码', () => {
   it('缺失 1；写完 0；第二遍零改动；只装了 claude 的机器上其余各家列为没装', () => {
     const home = tempDir('home');
-    const repo = makeRepo(null);
+    const repo = makeRepo({});
     const first = run(['--check', '--home', home, '--repo', repo]);
     expect(first.code).toBe(1);
     expect(first.out).toContain('✗ ~/.claude/CLAUDE.md：缺失');
@@ -85,15 +85,27 @@ describe('退出码', () => {
 
   it('仓里的 AGENTS.md 没有通用段：没查成，退出 2，一个字不写', () => {
     const home = tempDir('home');
-    const repo = makeRepo(null, '# 没有标记的 AGENTS.md\n');
+    const repo = makeRepo({}, '# 没有标记的 AGENTS.md\n');
     const r = run(['--apply', '--home', home, '--repo', repo]);
     expect(r.code).toBe(2);
     expect(r.err).toContain('没查成');
     expect(existsSync(join(home, '.claude'))).toBe(false);
   });
 
+  it('仓里没有 agents/skills/（检出不全）：查和写都没查成、退出 2，装过的 skill 一个不撤', () => {
+    const home = tempDir('home');
+    put(home, '.claude/skills/grill-me/SKILL.md', '装过的\n');
+    put(home, '.fleet-dao/agents-sync.json', JSON.stringify({ skills: { '.claude/skills': ['grill-me'] } }));
+    for (const mode of ['--check', '--apply']) {
+      const r = run([mode, '--home', home, '--repo', makeRepo(null)]);
+      expect(r.code, mode).toBe(2);
+      expect(r.err, mode).toContain('没有 agents/skills/');
+    }
+    expect(get(home, '.claude/skills/grill-me/SKILL.md')).toBe('装过的\n');
+  });
+
   it('家目录不在：没查成，退出 2', () => {
-    const r = run(['--check', '--home', join(tempDir('x'), '没有这个目录'), '--repo', makeRepo(null)]);
+    const r = run(['--check', '--home', join(tempDir('x'), '没有这个目录'), '--repo', makeRepo({})]);
     expect(r.code).toBe(2);
     expect(r.err).toContain('家目录');
   });

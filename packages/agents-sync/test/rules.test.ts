@@ -29,7 +29,7 @@ const CODEX = '~/.codex/AGENTS.md';
 
 function setup(installed: Parameters<typeof ctxFor>[1] = ['claude', 'codex']) {
   const home = tempDir('home');
-  const src = sources(makeRepo(null));
+  const src = sources(makeRepo({}));
   const ctx = ctxFor(home, installed);
   const apply = () => applyRules(ctx, src, new Backups(home, PLATFORM, NOW));
   const check = () => checkRules(ctx, src);
