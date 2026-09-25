@@ -18,7 +18,7 @@ import { StatusChip, StatusDot } from '../components/status';
 import { ActionButtons, targetOf } from '../components/task-actions';
 import { Button } from '../components/ui/button';
 import { actionLabel, actorName, targetLabel, taskIndex } from '../lib/audit';
-import { isUseItOrLoseIt, poolTitle, utilOf, windowTitle } from '../lib/catalog';
+import { isUpstreamFull, isUseItOrLoseIt, poolTitle, utilOf, windowTitle } from '../lib/catalog';
 import { formatAgo, formatDuration, formatIn, formatPercent } from '../lib/format';
 import { useNow } from '../lib/hooks';
 import {
@@ -67,13 +67,17 @@ export default function Overview() {
     pool.windows.map((w) => ({ pool, w })),
   );
   const hot = windows.filter(({ w }) => !w.stale && isUseItOrLoseIt(w, now));
-  // 用量没读到、上游这次没报的窗不参与排序（不拿 0 冒充最空），单独数一下、写在面板底下。
-  const known = windows.flatMap((x) => {
+  // 上游说已用满的排最前面（没给比例也算最满）；用量没读到、上游这次没报的不参与排序（不拿 0 冒充最空），
+  // 单独数一下、写在面板底下。
+  const ranked = windows.flatMap((x) => {
     const util = utilOf(x.w);
-    return util === undefined || x.w.staleSince ? [] : [{ ...x, util }];
+    const full = isUpstreamFull(x.w);
+    return (util === undefined && !full) || x.w.staleSince ? [] : [{ ...x, util, full }];
   });
-  const unknownUse = windows.length - known.length;
-  const fullest = known.sort((a, b) => b.util - a.util).slice(0, 5);
+  const unknownUse = windows.length - ranked.length;
+  const fullest = ranked
+    .sort((a, b) => Number(b.full) - Number(a.full) || (b.util ?? 1) - (a.util ?? 1))
+    .slice(0, 5);
   const tasksById = taskIndex(all);
   const recent = audit.data?.pages[0]?.items.slice(0, 7) ?? [];
 
@@ -278,7 +282,7 @@ export default function Overview() {
           >
             {pools.error ? <LoadError what="额度" error={pools.error} /> : null}
             <ul className="space-y-3">
-              {fullest.map(({ pool, w, util }, i) => (
+              {fullest.map(({ pool, w, util, full }, i) => (
                 // biome-ignore lint/suspicious/noArrayIndexKey: 同一个池同一种窗可能有好几个（按模型组），契约里没有区分它们的字段。
                 <li key={`${pool.id}-${w.window}-${i}`}>
                   <div className="flex items-center justify-between gap-2 text-xs">
@@ -286,11 +290,16 @@ export default function Overview() {
                       {poolTitle(pool)}
                       <span className="text-muted-foreground"> · {windowTitle(w)}</span>
                     </span>
-                    <span className={cn('num', w.stale && 'text-muted-foreground line-through')}>
-                      {formatPercent(util)}
+                    <span
+                      className={cn(
+                        full ? 'font-medium text-ink-fail' : 'num',
+                        w.stale && 'text-muted-foreground line-through',
+                      )}
+                    >
+                      {full ? '已用满' : formatPercent(util ?? 0)}
                     </span>
                   </div>
-                  <QuotaBar util={util} className="mt-1" />
+                  <QuotaBar util={util ?? (full ? 1 : undefined)} className="mt-1" />
                   <div className="mt-1 text-[11px] text-muted-foreground">
                     {w.resetsAt ? (
                       <>

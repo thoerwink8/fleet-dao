@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, test } from 'vitest';
 import { createMockApi } from '../api/mock/server';
 import type { Board } from '../api/types';
-import { layoutGraph } from './layout';
+import { type ElkHandle, layoutGraph } from './layout';
 import { buildGraph, type Graph, nodeId } from './model';
 
 const NOW = Date.parse('2026-09-25T10:00:00Z');
@@ -110,5 +110,48 @@ describe('思维导图排版', () => {
     expect(one.nodes.filter((n) => n.side === 'left').map((n) => n.id)).toEqual([]);
     const pos = await layoutGraph(one);
     expect(pos.size).toBe(one.nodes.length);
+  });
+});
+
+describe('排版排不出来要报错，不能一直空着', () => {
+  /** 一套假 ELK：layout 永远不回话，或者 Worker 报错。 */
+  function fakeElk(kind: 'hang' | 'crash'): () => Promise<ElkHandle> {
+    return async () => {
+      const failed =
+        kind === 'crash'
+          ? Promise.reject(new Error('排版引擎出错：脚本没加载成'))
+          : new Promise<never>(() => {});
+      failed.catch(() => {});
+      return {
+        elk: { layout: () => new Promise(() => {}) } as unknown as ElkHandle['elk'],
+        failed,
+        dispose() {},
+      };
+    };
+  }
+
+  // structureKey 带上标记，免得命中前面测试排好的缓存。
+  const fresh = (tag: string): Graph => {
+    const g = buildGraph(boardOf('r-canary'), ALL);
+    return { ...g, structureKey: `${g.structureKey}#${tag}` };
+  };
+
+  test('卡住不回话：到点就拒绝，并写明超时', async () => {
+    await expect(layoutGraph(fresh('hang'), { elk: fakeElk('hang'), timeoutMs: 30 })).rejects.toThrow(
+      /排版超过 0 秒没出结果/,
+    );
+  });
+
+  test('Worker 出错：把原因原样报上来', async () => {
+    await expect(layoutGraph(fresh('crash'), { elk: fakeElk('crash'), timeoutMs: 5000 })).rejects.toThrow(
+      '排版引擎出错：脚本没加载成',
+    );
+  });
+
+  test('失败的那次不进缓存：重试用好的 ELK 照常排出来', async () => {
+    const g = fresh('retry');
+    await expect(layoutGraph(g, { elk: fakeElk('hang'), timeoutMs: 30 })).rejects.toThrow();
+    const pos = await layoutGraph(g);
+    expect(pos.size).toBe(g.nodes.length);
   });
 });

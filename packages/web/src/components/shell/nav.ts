@@ -49,7 +49,7 @@ export const NAV: { group: string; items: NavItem[] }[] = [
   {
     group: '运转',
     items: [
-      { to: '/schedules', label: '定时任务', icon: CalendarClock, hint: '上次成功、下次运行、失败高亮' },
+      { to: '/schedules', label: '定时任务', icon: CalendarClock, hint: '上次跑成、上次结局、失败高亮' },
       { to: '/jev', label: 'Jev 判断', icon: Scale, soon: true, hint: '判断题的记录与准确率' },
       { to: '/notifications', label: '通知中心', icon: Bell, hint: '要你拍、卡住报警、日报' },
     ],

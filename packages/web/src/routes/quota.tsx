@@ -9,6 +9,7 @@ import { Badge } from '../components/ui/badge';
 import {
   billingLabel,
   isNearlyExhausted,
+  isUpstreamFull,
   isUseItOrLoseIt,
   poolTitle,
   utilOf,
@@ -79,7 +80,9 @@ export default function Quota() {
   const full = cells.filter(({ w }) => isNearlyExhausted(w));
   const stale = cells.filter(({ w }) => w.stale);
   // 读成了但没有用量比例（只报了清零时间，或只有已用没有上限）：不参与「先用它」和排序，但要列出来。
-  const unknownUse = cells.filter(({ w }) => !w.stale && !w.staleSince && utilOf(w) === undefined);
+  const unknownUse = cells.filter(
+    ({ w }) => !w.stale && !w.staleSince && !isUpstreamFull(w) && utilOf(w) === undefined,
+  );
   // 读成过、但上游这次没再报：数是之前的，照样列出来。
   const unreported = cells.filter(({ w }) => !w.stale && w.staleSince);
   const unread = pools.filter((p) => p.quotaStatus === 'unread');

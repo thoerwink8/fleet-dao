@@ -19,7 +19,16 @@ import {
 import { Badge } from '../components/ui/badge';
 import { Switch } from '../components/ui/switch';
 import { Textarea } from '../components/ui/textarea';
-import { billingLabel, formatUtil, hostLabel, poolUsage, windowTitle } from '../lib/catalog';
+import {
+  billingLabel,
+  headlineBar,
+  headlineInk,
+  headlineText,
+  hostLabel,
+  poolUsage,
+  quotaHeadline,
+  windowTitle,
+} from '../lib/catalog';
 import { formatDate, formatInDays, TIME } from '../lib/format';
 import { useNow } from '../lib/hooks';
 import { cn } from '../lib/utils';
@@ -203,9 +212,10 @@ function ChannelCard({
 
 function PoolRow({ pool }: { pool: PoolView }) {
   const now = useNow();
+  // 和调度台、换模型对话框同一句话：没查成 / 已用满 / 最满的窗用了几成 / 用量没读到……
+  const h = quotaHeadline(pool);
   const usage = poolUsage(pool.windows);
-  const w = usage.tightest?.w ?? usage.unknown[0];
-  const util = usage.tightest?.util;
+  const w = 'w' in h ? h.w : undefined;
   const soon = pool.expiresAt ? Date.parse(pool.expiresAt) - now < 7 * TIME.DAY : false;
   const full = pool.maxConcurrency > 0 && pool.running >= pool.maxConcurrency;
   return (
@@ -221,27 +231,24 @@ function PoolRow({ pool }: { pool: PoolView }) {
         <div className="mt-0.5 text-[11px] text-muted-foreground">在跑 / 并发上限</div>
       </div>
       <div className="min-w-0">
-        {pool.quotaStatus === 'unread' ? (
-          <span className="text-xs text-ink-stall" title="一条读数都没有：是没查成，不是没用量">
-            没查成额度
-          </span>
-        ) : w ? (
+        {w ? (
           <>
             <div className="flex items-center justify-between gap-2 text-xs">
               <span className="truncate text-muted-foreground">{windowTitle(w)}</span>
               <span
+                data-quota={h.kind}
                 className={cn(
-                  util === undefined ? 'text-ink-stall' : 'num',
+                  h.kind === 'util' ? 'num' : cn('font-medium', headlineInk(h)),
                   w.stale && 'text-muted-foreground line-through',
                 )}
               >
-                {formatUtil(util)}
+                {headlineText(h)}
               </span>
             </div>
-            <QuotaBar util={util} className="mt-1" />
+            <QuotaBar util={headlineBar(h)} className="mt-1" />
             <div className="mt-1 flex items-center gap-1.5">
               <ReadingBadge w={w} />
-              {util !== undefined && usage.unknown.length ? (
+              {(h.kind === 'full' || h.kind === 'util') && usage.unknown.length ? (
                 <span className="text-[11px] text-ink-stall" title="这些窗不参与比较">
                   另有 <span className="num">{usage.unknown.length}</span> 个窗用量没读到
                 </span>
@@ -255,7 +262,13 @@ function PoolRow({ pool }: { pool: PoolView }) {
             </div>
           </>
         ) : (
-          <span className="text-xs text-muted-foreground">还没读到额度</span>
+          <span
+            data-quota={h.kind}
+            className={cn('text-xs', headlineInk(h))}
+            title={h.kind === 'unread' ? '一次都没读成过：是没查成，不是没用量' : undefined}
+          >
+            {headlineText(h)}
+          </span>
         )}
       </div>
       <div className={cn('text-right text-xs', soon && 'text-ink-stall')}>

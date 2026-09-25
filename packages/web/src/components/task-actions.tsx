@@ -15,8 +15,16 @@ import type {
   TaskActionBody,
   TaskState,
 } from '../api/types';
-import { billingLabel, poolUsage, routeInfo, routeProblem, stageLabel } from '../lib/catalog';
-import { formatPercent } from '../lib/format';
+import {
+  billingLabel,
+  headlineInk,
+  headlineText,
+  type QuotaHeadline,
+  quotaHeadline,
+  routeInfo,
+  routeProblem,
+  stageLabel,
+} from '../lib/catalog';
 import { isTaskFinished, letterOf } from '../lib/status';
 import { cn } from '../lib/utils';
 import {
@@ -219,10 +227,11 @@ export interface RouteOption {
   where: string;
   host: string;
   billing: string;
-  /** 池里用得最满的那个窗用了几成；没有池、或所有窗都没读到用量时是 undefined。 */
-  util: number | undefined;
-  /** 池有额度窗、但用量一个都没读到：界面写「用量没读到」，不写成 0%。 */
-  utilUnknown: boolean;
+  /**
+   * 这条路由的账号池额度，一句话（和调度台、渠道页同一套说法）：额度没查成 / 已用满 / 62% / 用量没读到……
+   * 额度表还没读到（在读或没读成）时是 undefined，对话框另有提示。
+   */
+  quota: QuotaHeadline | undefined;
   estimated: boolean;
   /** 选不了的原因：禁令、离线、渠道下架、模型下架。 */
   blocked: string | undefined;
@@ -231,7 +240,7 @@ export interface RouteOption {
 
 export function routeOptions(
   routing: Routing,
-  pools: PoolView[],
+  pools: PoolView[] | undefined,
   stage: StageKind,
   currentRouteId: string | undefined,
   now: number,
@@ -240,9 +249,8 @@ export function routeOptions(
   const toOption = (id: string): RouteOption | undefined => {
     const info = routeInfo(routing, id);
     if (!info) return undefined;
-    const pool = pools.find((p) => p.id === info.poolId);
-    const usage = pool ? poolUsage(pool.windows) : undefined;
-    const w = usage?.tightest?.w;
+    const pool = pools?.find((p) => p.id === info.poolId);
+    const quota = pools ? quotaHeadline(pool) : undefined;
     let blocked = routeProblem(routing, id, stage, now) ?? undefined;
     if (!blocked && !info.route.alive) blocked = '离线';
     if (!blocked && !info.channelEnabled) blocked = '渠道已下架';
@@ -256,9 +264,8 @@ export function routeOptions(
       where: `${info.channel} · ${info.poolId}`,
       host: info.host,
       billing: info.billing ? billingLabel[info.billing] : '计费未知',
-      util: usage?.tightest?.util,
-      utilUnknown: Boolean(usage && !usage.tightest && usage.unknown.length),
-      estimated: w?.reading === 'estimated',
+      quota,
+      estimated: quota?.kind === 'util' && quota.w.reading === 'estimated',
       blocked,
       note,
     };
@@ -289,7 +296,7 @@ function RoutePickerDialog({
   const current = activity?.routeId;
   const opts =
     routing && target
-      ? routeOptions(routing, pools?.pools ?? [], stage, current, Date.now())
+      ? routeOptions(routing, pools?.pools, stage, current, Date.now())
       : { ordered: [], others: [] };
 
   const item = (o: RouteOption) => (
@@ -317,13 +324,19 @@ function RoutePickerDialog({
           {o.blocked ? <span className="text-ink-fail">{o.blocked}</span> : null}
         </div>
       </div>
-      {o.util !== undefined ? (
-        <div className="w-20 shrink-0 text-right">
-          <div className="num text-xs">{formatPercent(o.util)}</div>
-          <div className="text-[10px] text-muted-foreground">{o.estimated ? '估算' : '实读'}</div>
+      {o.quota ? (
+        <div className="w-20 shrink-0 text-right" data-quota={o.quota.kind}>
+          <div
+            className={cn(
+              o.quota.kind === 'util' ? 'num text-xs' : cn('text-[11px] font-medium', headlineInk(o.quota)),
+            )}
+          >
+            {headlineText(o.quota)}
+          </div>
+          {o.quota.kind === 'util' ? (
+            <div className="text-[10px] text-muted-foreground">{o.estimated ? '估算' : '实读'}</div>
+          ) : null}
         </div>
-      ) : o.utilUnknown ? (
-        <div className="w-20 shrink-0 text-right text-[11px] text-ink-stall">用量没读到</div>
       ) : null}
     </CommandItem>
   );

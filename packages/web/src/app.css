@@ -93,7 +93,8 @@
   --grid: color-mix(in oklab, var(--fg) 13%, transparent);
   --shadow-color: color-mix(in oklab, #000 14%, transparent);
   /*
-   * 状态色当字用时的「墨色」：往前景色里混一点，保证 11px 小字在卡片、页面底、浮层和状态标签淡底上都 ≥ 4.5:1。
+   * 状态色当字用时的「墨色」：往前景色里混一点，保证 11px 小字在卡片、页面底、浮层、侧栏、muted，
+   * 以及叠在它们上面的同色淡底（最深 15%）上都 ≥ 4.5:1。
    * 每套主题需要混多少（--ink-*）写在各自的块里，默认不混；色块、圆点、进度条仍用原来的状态色。
    * 对比度由 src/lib/contrast.test.ts 逐套逐色验，新加主题不够就红。
    */
@@ -135,7 +136,10 @@
   --st-fail: #ff6369;
   --st-done: #3fcf8e;
   --st-stop: #6e6f78;
-  --ink-stop: 77%;
+  --ink-run: 98%;
+  --ink-wait: 90%;
+  --ink-fail: 98%;
+  --ink-stop: 69%;
 }
 [data-palette="graphite"][data-mode="light"] {
   --bg: #f4f4f5;
@@ -152,12 +156,13 @@
   --st-fail: #dc2f36;
   --st-done: #13925a;
   --st-stop: #a1a1aa;
-  --ink-run: 88%;
-  --ink-wait: 93%;
-  --ink-stall: 75%;
-  --ink-fail: 86%;
-  --ink-done: 81%;
-  --ink-stop: 64%;
+  --ink-run: 80%;
+  --ink-wait: 84%;
+  --ink-human: 92%;
+  --ink-stall: 70%;
+  --ink-fail: 80%;
+  --ink-done: 74%;
+  --ink-stop: 60%;
 }
 
 /* ---------- 青瓷：温润的青绿釉色 ---------- */
@@ -176,13 +181,13 @@
   --st-fail: #c8413b;
   --st-done: #22894a;
   --st-stop: #9aaba4;
-  --ink-run: 95%;
-  --ink-wait: 84%;
-  --ink-human: 95%;
-  --ink-stall: 73%;
-  --ink-fail: 87%;
-  --ink-done: 84%;
-  --ink-stop: 59%;
+  --ink-run: 85%;
+  --ink-wait: 75%;
+  --ink-human: 87%;
+  --ink-stall: 67%;
+  --ink-fail: 80%;
+  --ink-done: 75%;
+  --ink-stop: 54%;
 }
 [data-palette="celadon"][data-mode="dark"] {
   --bg: #0b1311;
@@ -199,8 +204,9 @@
   --st-fail: #ff7b72;
   --st-done: #56d08a;
   --st-stop: #5c6d67;
-  --ink-wait: 95%;
-  --ink-stop: 69%;
+  --ink-run: 98%;
+  --ink-wait: 80%;
+  --ink-stop: 61%;
 }
 
 /* ---------- 北境 Nord：极地蓝灰与霜色 ---------- */
@@ -219,12 +225,13 @@
   --st-fail: #d0747c;
   --st-done: #a3be8c;
   --st-stop: #616e88;
-  --ink-run: 67%;
-  --ink-wait: 58%;
-  --ink-human: 62%;
-  --ink-fail: 57%;
-  --ink-done: 90%;
-  --ink-stop: 42%;
+  --ink-run: 46%;
+  --ink-wait: 42%;
+  --ink-human: 45%;
+  --ink-stall: 87%;
+  --ink-fail: 44%;
+  --ink-done: 57%;
+  --ink-stop: 36%;
 }
 [data-palette="nord"][data-mode="light"] {
   --bg: #e5e9f0;
@@ -241,13 +248,13 @@
   --st-fail: #b04a55;
   --st-done: #6a8c4f;
   --st-stop: #9aa3b5;
-  --ink-run: 80%;
-  --ink-wait: 80%;
-  --ink-human: 78%;
-  --ink-stall: 59%;
-  --ink-fail: 88%;
-  --ink-done: 67%;
-  --ink-stop: 49%;
+  --ink-run: 65%;
+  --ink-wait: 65%;
+  --ink-human: 65%;
+  --ink-stall: 50%;
+  --ink-fail: 72%;
+  --ink-done: 56%;
+  --ink-stop: 43%;
 }
 
 /* ---------- 东京夜 Tokyo Night：霓虹夜色 ---------- */
@@ -266,8 +273,10 @@
   --st-fail: #f7768e;
   --st-done: #9ece6a;
   --st-stop: #545c7e;
-  --ink-wait: 72%;
-  --ink-stop: 51%;
+  --ink-wait: 57%;
+  --ink-human: 99%;
+  --ink-fail: 85%;
+  --ink-stop: 44%;
 }
 [data-palette="tokyo"][data-mode="light"] {
   --bg: #e1e2e7;
@@ -284,13 +293,13 @@
   --st-fail: #e5215b;
   --st-done: #587539;
   --st-stop: #a1a6c5;
-  --ink-run: 88%;
-  --ink-wait: 70%;
-  --ink-human: 64%;
-  --ink-stall: 86%;
-  --ink-fail: 62%;
-  --ink-done: 82%;
-  --ink-stop: 38%;
+  --ink-run: 62%;
+  --ink-wait: 53%;
+  --ink-human: 48%;
+  --ink-stall: 64%;
+  --ink-fail: 45%;
+  --ink-done: 60%;
+  --ink-stop: 34%;
 }
 
 /* ---------- 德古拉 Dracula：高饱和紫粉 ---------- */
@@ -309,10 +318,10 @@
   --st-fail: #ff5555;
   --st-done: #50fa7b;
   --st-stop: #6b6f86;
-  --ink-wait: 70%;
-  --ink-human: 91%;
-  --ink-fail: 75%;
-  --ink-stop: 58%;
+  --ink-wait: 57%;
+  --ink-human: 75%;
+  --ink-fail: 63%;
+  --ink-stop: 50%;
 }
 [data-palette="dracula"][data-mode="light"] {
   --bg: #f5f1e1;
@@ -329,8 +338,12 @@
   --st-fail: #cb3a2a;
   --st-done: #14710a;
   --st-stop: #a8a497;
-  --ink-fail: 89%;
-  --ink-stop: 61%;
+  --ink-run: 94%;
+  --ink-wait: 94%;
+  --ink-stall: 92%;
+  --ink-fail: 81%;
+  --ink-done: 97%;
+  --ink-stop: 56%;
 }
 
 /* ---------- 原子 One：Atom 编辑器的经典配色 ---------- */
@@ -349,11 +362,12 @@
   --st-fail: #e06c75;
   --st-done: #98c379;
   --st-stop: #5c6370;
-  --ink-run: 94%;
-  --ink-wait: 59%;
-  --ink-human: 70%;
-  --ink-fail: 66%;
-  --ink-stop: 42%;
+  --ink-run: 62%;
+  --ink-wait: 43%;
+  --ink-human: 52%;
+  --ink-fail: 50%;
+  --ink-done: 78%;
+  --ink-stop: 36%;
 }
 [data-palette="one"][data-mode="light"] {
   --bg: #f0f0f1;
@@ -370,12 +384,13 @@
   --st-fail: #e45649;
   --st-done: #50a14f;
   --st-stop: #b0b1b6;
-  --ink-run: 72%;
-  --ink-wait: 59%;
-  --ink-stall: 64%;
-  --ink-fail: 62%;
-  --ink-done: 58%;
-  --ink-stop: 44%;
+  --ink-run: 60%;
+  --ink-wait: 50%;
+  --ink-human: 89%;
+  --ink-stall: 56%;
+  --ink-fail: 53%;
+  --ink-done: 50%;
+  --ink-stop: 40%;
 }
 
 /* ---------- 日晒 Solarized：精确计算的低对比配色 ---------- */
@@ -394,13 +409,13 @@
   --st-fail: #dc322f;
   --st-done: #859900;
   --st-stop: #a3aba6;
-  --ink-run: 61%;
-  --ink-wait: 64%;
-  --ink-human: 77%;
-  --ink-stall: 61%;
-  --ink-fail: 77%;
-  --ink-done: 62%;
-  --ink-stop: 51%;
+  --ink-run: 55%;
+  --ink-wait: 57%;
+  --ink-human: 69%;
+  --ink-stall: 55%;
+  --ink-fail: 69%;
+  --ink-done: 55%;
+  --ink-stop: 47%;
 }
 [data-palette="solarized"][data-mode="dark"] {
   --bg: #002b36;
@@ -417,12 +432,13 @@
   --st-fail: #f0524f;
   --st-done: #9fb81a;
   --st-stop: #586e75;
-  --ink-run: 68%;
-  --ink-wait: 69%;
-  --ink-human: 71%;
-  --ink-stall: 95%;
-  --ink-fail: 67%;
-  --ink-stop: 48%;
+  --ink-run: 52%;
+  --ink-wait: 53%;
+  --ink-human: 56%;
+  --ink-stall: 75%;
+  --ink-fail: 59%;
+  --ink-done: 76%;
+  --ink-stop: 41%;
 }
 
 /* ---------- 炉火 Darcula：炭灰底上的一点橙 ---------- */
@@ -441,12 +457,13 @@
   --st-fail: #ff6b68;
   --st-done: #7ea56a;
   --st-stop: #606366;
-  --ink-run: 55%;
-  --ink-wait: 51%;
-  --ink-human: 52%;
-  --ink-fail: 61%;
-  --ink-done: 61%;
-  --ink-stop: 34%;
+  --ink-run: 36%;
+  --ink-wait: 34%;
+  --ink-human: 37%;
+  --ink-stall: 70%;
+  --ink-fail: 44%;
+  --ink-done: 39%;
+  --ink-stop: 29%;
 }
 [data-palette="darcula"][data-mode="light"] {
   --bg: #f2f2f2;
@@ -463,12 +480,12 @@
   --st-fail: #db3b4b;
   --st-done: #208a3c;
   --st-stop: #a8adbd;
-  --ink-run: 84%;
-  --ink-wait: 77%;
-  --ink-stall: 79%;
-  --ink-fail: 83%;
-  --ink-done: 86%;
-  --ink-stop: 58%;
+  --ink-run: 75%;
+  --ink-wait: 69%;
+  --ink-stall: 72%;
+  --ink-fail: 75%;
+  --ink-done: 76%;
+  --ink-stop: 54%;
 }
 
 /* ---------- 基础 ---------- */

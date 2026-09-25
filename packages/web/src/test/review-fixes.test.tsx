@@ -11,14 +11,17 @@ import { CommandMenu } from '../components/shell/command-menu';
 import { Topbar } from '../components/shell/topbar';
 import { routeOptions } from '../components/task-actions';
 import {
+  headlineText,
   isNearlyExhausted,
   isUseItOrLoseIt,
   poolUsage,
+  quotaHeadline,
   utilOf,
   windowLength,
   windowTitle,
 } from '../lib/catalog';
 import BoardPage from '../routes/board';
+import ChannelsPage from '../routes/channels';
 import DispatchPage from '../routes/dispatch';
 import OverviewPage from '../routes/overview';
 import QuotaPage from '../routes/quota';
@@ -143,8 +146,8 @@ describe('额度：用量没读到不当 0%', () => {
     const all = [...ordered, ...others];
     expect(all.length).toBeGreaterThan(0);
     for (const o of all) {
-      expect(o.util).toBeUndefined();
-      expect(o.utilUnknown).toBe(true);
+      expect(o.quota?.kind).toBe('unknown');
+      expect(o.quota && headlineText(o.quota)).toBe('用量没读到');
     }
   });
 
@@ -169,6 +172,84 @@ describe('额度：用量没读到不当 0%', () => {
     renderApp(<DispatchPage />, { api: withUnknownUsage(createMockApi({ live: false })) });
     expect((await screen.findAllByText('用量没读到')).length).toBeGreaterThan(0);
     expect(screen.queryByText('0%')).toBeNull();
+  });
+});
+
+/** 把假后端所有账号池换成同一种额度状况。 */
+function withPools(api: MockApi, patch: Pick<PoolView, 'quotaStatus' | 'windows'>): MockApi {
+  const pools = api.pools.bind(api);
+  api.pools = async () => {
+    const res = await pools();
+    return { ...res, pools: res.pools.map((p): PoolView => ({ ...p, ...patch })) };
+  };
+  return api;
+}
+
+describe('额度：一个池一句话，各页说法一致', () => {
+  // Claude 撞到限额时就是这样：5 小时窗上游说满了、不给比例；周窗才用了一半。
+  const halfAndFull: Pick<PoolView, 'quotaStatus' | 'windows'> = {
+    quotaStatus: 'fresh',
+    windows: [
+      noUsage({ window: '7d', label: '7d', utilization: 0.5, resetsAt: at(3000) }),
+      noUsage({ upstreamStatus: 'limit_reached', statusRaw: 'rejected' }),
+    ],
+  };
+  const neverRead: Pick<PoolView, 'quotaStatus' | 'windows'> = { quotaStatus: 'unread', windows: [] };
+
+  test('有窗上游说已用满：整个池说「已用满」（排在「用了一半」前面），不说 50%、不说「用量没读到」', async () => {
+    const h = quotaHeadline(halfAndFull);
+    expect(h.kind).toBe('full');
+    expect(headlineText(h)).toBe('已用满');
+    const u = poolUsage(halfAndFull.windows);
+    expect(u.full).toHaveLength(1);
+    expect(u.unknown).toEqual([]);
+    expect(u.tightest?.util).toBe(0.5);
+
+    const api = withPools(createMockApi({ live: false }), halfAndFull);
+    const [routing, pools] = await Promise.all([api.routing(), api.pools()]);
+    const { ordered } = routeOptions(routing, pools.pools, 'execute', undefined, NOW);
+    expect(ordered.length).toBeGreaterThan(0);
+    expect(new Set(ordered.map((o) => o.quota?.kind))).toEqual(new Set(['full']));
+
+    renderApp(<DispatchPage />, { api });
+    expect((await screen.findAllByText('已用满')).length).toBeGreaterThan(0);
+    expect(screen.queryByText('50%')).toBeNull();
+    cleanup();
+
+    renderApp(<ChannelsPage />, { api: withPools(createMockApi({ live: false }), halfAndFull) });
+    expect((await screen.findAllByText('已用满')).length).toBeGreaterThan(0);
+    expect(screen.queryByText('用量没读到')).toBeNull();
+    expect(screen.queryByText('50%')).toBeNull();
+  });
+
+  test('从没读成过的池：调度台、换模型、渠道页都写「额度没查成」，不是什么都不显示', async () => {
+    expect(headlineText(quotaHeadline(neverRead))).toBe('额度没查成');
+    // 额度表里查不到这个池，也一样说没查成；额度表本身还没读到时不下结论（对话框另有提示）。
+    expect(quotaHeadline(undefined).kind).toBe('unread');
+
+    const api = withPools(createMockApi({ live: false }), neverRead);
+    const [routing, pools] = await Promise.all([api.routing(), api.pools()]);
+    const { ordered } = routeOptions(routing, pools.pools, 'execute', undefined, NOW);
+    expect(new Set(ordered.map((o) => o.quota?.kind))).toEqual(new Set(['unread']));
+    expect(routeOptions(routing, undefined, 'execute', undefined, NOW).ordered.every((o) => !o.quota)).toBe(
+      true,
+    );
+
+    renderApp(<DispatchPage />, { api });
+    expect((await screen.findAllByText('额度没查成')).length).toBeGreaterThan(0);
+    cleanup();
+
+    renderApp(<ChannelsPage />, { api: withPools(createMockApi({ live: false }), neverRead) });
+    expect((await screen.findAllByText('额度没查成')).length).toBeGreaterThan(0);
+  });
+
+  test('额度格：上游说满了却没给比例，写「已用满」、条画满，不算「用量没读到」', () => {
+    const { container } = render(<QuotaCell w={noUsage({ upstreamStatus: 'limit_reached' })} now={NOW} />);
+    const el = container.firstElementChild as HTMLElement;
+    expect(el.dataset.full).toBe('true');
+    expect(el.dataset.unknown).toBeUndefined();
+    expect(screen.getByText('已用满')).toBeTruthy();
+    expect(container.textContent).not.toContain('用量没读到');
   });
 });
 

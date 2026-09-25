@@ -36,7 +36,7 @@ export default function Schedules() {
   return (
     <Page
       title="定时任务"
-      description="额度读取、巡检、对账、备份……每个都记下上次成功的时间。「查了 0 个问题」和「这次没查成」分开显示。"
+      description="额度读取、巡检、对账、备份……每个都记下上次跑成的时间。「查了 0 个问题」和「这次没查成」分开显示。"
     >
       <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-4">
         <Stat label="定时任务" value={count(jobs.length)} icon={CalendarClock} />
@@ -82,7 +82,7 @@ export default function Schedules() {
                 <TableHead className="pl-4">任务</TableHead>
                 <TableHead className="w-44">周期</TableHead>
                 <TableHead>上次运行</TableHead>
-                <TableHead className="w-36">上次成功</TableHead>
+                <TableHead className="w-36">上次跑成</TableHead>
                 <TableHead className="w-20 pr-4 text-right">耗时</TableHead>
               </TableRow>
             </TableHeader>

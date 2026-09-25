@@ -33,8 +33,10 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '../components/ui/toolti
 import { actorName } from '../lib/audit';
 import {
   billingLabel,
-  formatUtil,
-  poolUsage,
+  headlineBar,
+  headlineInk,
+  headlineText,
+  quotaHeadline,
   routeInfo,
   routeProblem,
   STAGES,
@@ -160,7 +162,7 @@ export default function Dispatch() {
                     hint={s.hint}
                     policy={policy}
                     routing={data}
-                    pools={pools.data?.pools ?? []}
+                    pools={pools.data?.pools}
                     now={now}
                     onSave={(to, message) => onSave(s.id, policy, to, message)}
                   />
@@ -249,7 +251,8 @@ function StageCard({
   hint: string;
   policy: StagePolicy;
   routing: Routing;
-  pools: PoolView[];
+  /** 额度表还没读到（在读或没读成）时是 undefined：路由行不显示用量，页面顶上另有提示。 */
+  pools: PoolView[] | undefined;
   now: number;
   onSave(to: PolicyValue, message: string): void;
 }) {
@@ -408,7 +411,8 @@ function RouteRow({
   count: number;
   stage: StageKind;
   routing: Routing;
-  pools: PoolView[];
+  /** 额度表还没读到（在读或没读成）时是 undefined：路由行不显示用量，页面顶上另有提示。 */
+  pools: PoolView[] | undefined;
   now: number;
   onDragEnd(): void;
   onMove(to: number): void;
@@ -416,10 +420,10 @@ function RouteRow({
 }) {
   const controls = useDragControls();
   const info = routeInfo(routing, rid);
-  const pool = info ? pools.find((p) => p.id === info.poolId) : undefined;
-  const usage = pool ? poolUsage(pool.windows) : undefined;
-  const w = usage ? (usage.tightest?.w ?? usage.unknown[0]) : undefined;
-  const util = usage?.tightest?.util;
+  const pool = info && pools ? pools.find((p) => p.id === info.poolId) : undefined;
+  // 和渠道页、换模型对话框同一句话。额度表读到了、却查不到这个池，也算「额度没查成」。
+  const h = info && pools ? quotaHeadline(pool) : undefined;
+  const w = h && 'w' in h ? h.w : undefined;
   const problem = routeProblem(routing, rid, stage, now);
   const offline = info ? !info.route.alive : true;
   const channelOff = info ? !info.channelEnabled : false;
@@ -477,30 +481,33 @@ function RouteRow({
           {problem ? <span className="text-ink-fail">{problem}</span> : null}
         </div>
       </div>
-      {w ? (
+      {h ? (
         <div
           className="hidden w-16 shrink-0 sm:block"
           title={
-            util === undefined
-              ? '用量没读到：不参与比较'
-              : w.stale
+            h.kind === 'util'
+              ? w?.stale
                 ? '读数过期'
-                : w.reading === 'measured'
+                : w?.reading === 'measured'
                   ? '实读'
                   : '估算'
+              : h.kind === 'full'
+                ? '上游说这个池有窗已用满，调度会先绕开'
+                : `${headlineText(h)}：不参与比较`
           }
         >
           <div
+            data-quota={h.kind}
             className={cn(
               'text-right text-[11px]',
-              util === undefined ? 'text-ink-stall' : 'num text-muted-foreground',
-              w.stale && 'line-through',
+              h.kind === 'util' ? 'num text-muted-foreground' : cn('font-medium', headlineInk(h)),
+              w?.stale && 'line-through',
             )}
           >
-            {formatUtil(util)}
-            {util !== undefined && w.reading === 'estimated' ? '·估' : ''}
+            {headlineText(h)}
+            {h.kind === 'util' && w?.reading === 'estimated' ? '·估' : ''}
           </div>
-          <QuotaBar util={util} className="mt-1" />
+          <QuotaBar util={headlineBar(h)} className="mt-1" />
         </div>
       ) : null}
       <div className="flex flex-col opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">

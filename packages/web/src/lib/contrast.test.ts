@@ -1,21 +1,17 @@
 // 状态色当小字用时的对比度闸：每套主题 × 深浅 × 七个状态，墨色（app.css 的 --st-*-ink）
-// 在卡片、页面底、浮层、状态标签淡底四种底上都要 ≥ 4.5:1（WCAG AA，11px 小字）。
+// 在页面上实际出现过的每种底上都要 ≥ 4.5:1（WCAG AA，11px 小字）：卡片、页面底、浮层、侧栏、muted，
+// 以及叠在卡片、页面底、浮层、muted 上的同色淡底（状态标签 12–14%，时间线的「在跑」15%，按最深的 15% 算）。
+// 复审实测漏过的两处——页面底上的「在干活」标签、时间线的「在跑」——都在这个范围里。
 // 这里的颜色算法（oklab 混色、sRGB 叠色、相对亮度）是独立写的，不读页面算出来的值。
 import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'vitest';
 import { PALETTES } from './theme';
 
 const TONES = ['run', 'wait', 'human', 'stall', 'fail', 'done', 'stop'] as const;
-/** 状态标签淡底的不透明度，和 status.ts 的 toneSoft（12% 或 14%）一致。 */
-const SOFT: Record<(typeof TONES)[number], number> = {
-  run: 0.12,
-  wait: 0.12,
-  human: 0.14,
-  stall: 0.14,
-  fail: 0.14,
-  done: 0.12,
-  stop: 0.14,
-};
+/** 状态色淡底最深用到多少：status.ts 的 toneSoft 是 12% 或 14%，run-timeline 的「在跑」是 15%。 */
+const TINT_MAX = 0.15;
+/** bg-muted：前景色 5% 叠在卡片上。 */
+const MUTED = 0.05;
 
 type Rgb = [number, number, number];
 
@@ -89,12 +85,19 @@ export function checkInkContrast(css: string): { blocks: string[]; findings: Fin
       if (!c) throw new Error(`${where} 缺 --${name}`);
       return c;
     };
-    const [fg, bg, surface, elev] = [need('fg'), need('bg'), need('surface'), need('elev')];
+    const [fg, bg, surface, elev, panel] = [
+      need('fg'),
+      need('bg'),
+      need('surface'),
+      need('elev'),
+      need('panel'),
+    ];
+    const muted = over(fg, MUTED, surface);
     for (const t of TONES) {
       const fill = need(`st-${t}`);
       const ink = mixOklab(fill, fg, inks.get(t) ?? 1);
-      const chip = over(fill, SOFT[t], surface);
-      const worst = Math.min(...[chip, surface, bg, elev].map((b) => contrast(ink, b)));
+      const tinted = [surface, bg, elev, muted].map((b) => over(fill, TINT_MAX, b));
+      const worst = Math.min(...[surface, bg, elev, panel, muted, ...tinted].map((b) => contrast(ink, b)));
       findings.push({ where: `${where}/${t}`, ratio: Math.round(worst * 100) / 100 });
     }
   }
@@ -110,17 +113,17 @@ describe('状态色当小字用，对比度够 4.5:1', () => {
     expect([...blocks].sort()).toEqual(expected);
   });
 
-  test('每套主题每个状态的墨色在四种底上都 ≥ 4.5', () => {
+  test('每套主题每个状态的墨色在每种底上都 ≥ 4.5', () => {
     const bad = checkInkContrast(css).findings.filter((f) => f.ratio < 4.5);
     expect(bad).toEqual([]);
   });
 
   test('故意造一套不够的主题：闸要拦下来', () => {
     const sample = `[data-palette="x"][data-mode="light"] {
-  --bg: #ffffff; --surface: #ffffff; --elev: #ffffff; --fg: #111111;
+  --bg: #ffffff; --surface: #ffffff; --elev: #ffffff; --panel: #ffffff; --fg: #111111;
   --st-run: #1d6ff2; --st-wait: #6b7280; --st-human: #7c3aed; --st-stall: #f5d90a;
   --st-fail: #dc2f36; --st-done: #13925a; --st-stop: #d4d4d8;
-  --ink-run: 88%; --ink-wait: 93%; --ink-fail: 86%; --ink-done: 81%;
+  --ink-run: 80%; --ink-wait: 84%; --ink-human: 92%; --ink-fail: 80%; --ink-done: 74%;
 }`;
     const bad = checkInkContrast(sample).findings.filter((f) => f.ratio < 4.5);
     expect(bad.map((f) => f.where)).toEqual(['x/light/stall', 'x/light/stop']);

@@ -2,6 +2,7 @@ import type { QuotaWindowView } from '../api/types';
 import {
   formatUtil,
   isNearlyExhausted,
+  isUpstreamFull,
   isUseItOrLoseIt,
   upstreamStatusLabel,
   utilOf,
@@ -75,10 +76,12 @@ export function amount(w: Pick<QuotaWindowView, 'unit'>, n: number): string {
   }
 }
 
-/** 一句话的用量：「$3.20 / $10.00」「40%」「已用 812，上限没读到」「用量没读到」。 */
+/** 一句话的用量：「已用满」「$3.20 / $10.00」「40%」「已用 812，上限没读到」「用量没读到」。 */
 export function quotaValue(w: QuotaWindowView): string {
-  if (w.used !== undefined && w.limit !== undefined) return `${amount(w, w.used)} / ${amount(w, w.limit)}`;
   const util = utilOf(w);
+  // 上游说已用满以它为准，排在数字前面说；有比例就顺带写上。
+  if (isUpstreamFull(w)) return util === undefined ? '已用满' : `已用满 · ${formatPercent(util)}`;
+  if (w.used !== undefined && w.limit !== undefined) return `${amount(w, w.used)} / ${amount(w, w.limit)}`;
   if (util !== undefined) return formatPercent(util);
   if (w.used !== undefined) return `已用 ${amount(w, w.used)}，上限没读到`;
   return '用量没读到';
@@ -90,6 +93,9 @@ export function QuotaCell({ w, now }: { w: QuotaWindowView; now: number }) {
   // 过期的读数不能当现值：不据此喊「先用它」。用量没读到的也不喊。
   const hot = !w.stale && isUseItOrLoseIt(w, now);
   const full = isNearlyExhausted(w);
+  // 上游说满了、却没给比例（Claude 撞限额时就这样）：照「已用满」写，条画满，不算「用量没读到」。
+  const upstreamFull = isUpstreamFull(w);
+  const known = util !== undefined || upstreamFull;
   return (
     <div
       className={cn(
@@ -100,7 +106,7 @@ export function QuotaCell({ w, now }: { w: QuotaWindowView; now: number }) {
       data-hot={hot || undefined}
       data-full={full || undefined}
       data-stale={w.stale || undefined}
-      data-unknown={util === undefined || undefined}
+      data-unknown={!known || undefined}
     >
       <div className="flex items-center justify-between gap-2">
         <span className="min-w-0 truncate text-[11px] text-muted-foreground" title={`上游原名：${w.label}`}>
@@ -120,6 +126,8 @@ export function QuotaCell({ w, now }: { w: QuotaWindowView; now: number }) {
           <span className={cn('num text-[17px] font-semibold', full && 'text-ink-fail')}>
             {formatPercent(util)}
           </span>
+        ) : upstreamFull ? (
+          <span className="text-[17px] font-semibold text-ink-fail">已用满</span>
         ) : w.used !== undefined ? (
           <span className="num min-w-0 truncate">
             <span className="text-[17px] font-semibold">{amount(w, w.used)}</span>
@@ -132,7 +140,7 @@ export function QuotaCell({ w, now }: { w: QuotaWindowView; now: number }) {
           <span className="num shrink-0 text-xs text-muted-foreground">{formatUtil(util)}</span>
         ) : null}
       </div>
-      <QuotaBar util={util} className="mt-1.5" />
+      <QuotaBar util={util ?? (upstreamFull ? 1 : undefined)} className="mt-1.5" />
       <div className="mt-1.5 flex flex-wrap items-center justify-between gap-x-2 text-[11px] text-muted-foreground">
         {w.resetsAt ? (
           <span className={cn(hot && 'font-medium text-foreground')}>
@@ -172,7 +180,7 @@ export function QuotaCell({ w, now }: { w: QuotaWindowView; now: number }) {
           上游从 <span className="num">{formatAgo(w.staleSince, now)}</span>
           起没再报这个窗，数是之前的，不参与排序
         </div>
-      ) : util === undefined ? (
+      ) : !known ? (
         <div className="mt-1.5 text-[11px] text-muted-foreground">不参与「先用它」和排序</div>
       ) : null}
     </div>

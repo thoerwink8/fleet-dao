@@ -207,17 +207,28 @@ function Canvas({ board, me }: { board: Board; me: Me | undefined }) {
   const fitted = useRef('');
 
   // 只有节点集合变了才重新排版；状态变化（颜色、文字）不动位置。
+  // 排不出来要说出来：之前排好的画面留着，上面压一条「排版没成」带重试；一次都没排成就在画布中间说。
+  const [layoutError, setLayoutError] = useState<Error | null>(null);
+  const [layoutTry, setLayoutTry] = useState(0);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: layoutTry 只用来触发重试。
   useEffect(() => {
     let alive = true;
     const g = graphRef.current;
     if (g.structureKey !== structureKey) return;
-    layoutGraph(g).then((p) => {
-      if (alive) setPositions(p);
-    });
+    layoutGraph(g).then(
+      (p) => {
+        if (!alive) return;
+        setLayoutError(null);
+        setPositions(p);
+      },
+      (err: unknown) => {
+        if (alive) setLayoutError(err instanceof Error ? err : new Error(String(err)));
+      },
+    );
     return () => {
       alive = false;
     };
-  }, [structureKey]);
+  }, [structureKey, layoutTry]);
 
   /**
    * 全部收进视野。位置和尺寸都是自己排的、已知的，直接按它们算，不等 React Flow 量卡片：
@@ -560,6 +571,21 @@ function Canvas({ board, me }: { board: Board; me: Me | undefined }) {
               center(id);
             }}
           />
+          {!positions && !layoutError ? (
+            <div className="pointer-events-none absolute inset-0 grid place-items-center text-sm text-muted-foreground">
+              正在排版…
+            </div>
+          ) : null}
+          {layoutError ? (
+            <LayoutFailed
+              error={layoutError}
+              blank={!positions}
+              onRetry={() => {
+                setLayoutError(null);
+                setLayoutTry((n) => n + 1);
+              }}
+            />
+          ) : null}
           {shownTasks === 0 && positions ? (
             <div className="pointer-events-none absolute inset-0 grid place-items-center">
               <div className="pointer-events-auto rounded-xl border bg-popover px-5 py-4 text-center shadow-lg">
@@ -589,6 +615,34 @@ function Canvas({ board, me }: { board: Board; me: Me | undefined }) {
         <ShortcutsDialog open={help} onOpenChange={setHelp} />
       </div>
     </BoardUiContext>
+  );
+}
+
+/** 排版没成：一次都没排成时在画布正中说；排成过（画面是之前的）就在工具条下面压一条。 */
+function LayoutFailed({ error, blank, onRetry }: { error: Error; blank: boolean; onRetry(): void }) {
+  return (
+    <div
+      className={cn(
+        'pointer-events-none absolute inset-x-0 z-20 flex justify-center px-3',
+        blank ? 'inset-y-0 items-center' : 'top-16',
+      )}
+    >
+      <div
+        role="alert"
+        className="pointer-events-auto flex max-w-xl items-center gap-2 rounded-lg border border-st-fail/40 bg-popover px-3 py-2 text-xs shadow-lg"
+      >
+        <TriangleAlert className="size-3.5 shrink-0 text-ink-fail" aria-hidden />
+        <span className="min-w-0">
+          <span className="font-medium text-ink-fail">看板排版没成</span>
+          <span className="text-muted-foreground">
+            ：{error.message}。{blank ? '画布先空着，' : '下面是上一次排好的画面，'}可以重试。
+          </span>
+        </span>
+        <Button size="sm" variant="outline" className="h-6 shrink-0 px-2 text-xs" onClick={onRetry}>
+          重试
+        </Button>
+      </div>
+    </div>
   );
 }
 
