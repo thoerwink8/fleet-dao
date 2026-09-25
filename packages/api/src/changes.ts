@@ -62,22 +62,29 @@ export interface PgChangeFeed extends ChangeFeed {
 
 const PROBE_EVERY_MS = 15_000;
 const PROBE_TIMEOUT_MS = 5_000;
+/**
+ * 一轮恢复只发一个 resync：postgres.js 断线后每次重连失败都给监听多排一条 LISTEN，恢复时这些 LISTEN 在同一条连接上
+ * 接连执行、每条调一次 onListen（停 20 秒 4 条、停 120 秒 8 条，审查看库日志证实）。最后一条回来后再等这么久才发，
+ * 中间再来的都并进这一个。
+ */
+const RESYNC_SETTLE_MS = 1_000;
 
 /**
  * LISTEN fleet_changes，再定时探活。
  * - 每个频道只调一次 listen：postgres.js 的 listen 失败后监听仍挂在它身上、断线后它自己重连（接上时调 onListen）。
- *   在外面再调一次就多挂一个监听——一条通知推好几遍、每次重连好几个 resync（审查在真库上实测过）。所以失败了只记状态。
+ *   在外面再调一次就多挂一个监听——一条通知推好几遍（审查在真库上实测过）。所以失败了只记状态。
  * - 断线 postgres.js 不告诉我们，所以靠定时发 ping 看收不收得回来。收不回来就报红，并记下「可能漏了」；
- *   恢复时（重连后的 onListen、或 ping 又收得回来）广播 resync：漏收不能装成没变化，订阅方要全量重拉。
+ *   恢复时（重连后的 onListen、或 ping 又收得回来）广播一个 resync：漏收不能装成没变化，订阅方要全量重拉。
  */
 export function startPgChangeFeed(
   pg: { listen: PgListen; notify: PgNotify },
   log: Logger,
-  options: { probeEveryMs?: number; probeTimeoutMs?: number } = {},
+  options: { probeEveryMs?: number; probeTimeoutMs?: number; resyncSettleMs?: number } = {},
 ): PgChangeFeed {
   const hub = createChangeHub(log);
   const probeEveryMs = options.probeEveryMs ?? PROBE_EVERY_MS;
   const defaultTimeoutMs = options.probeTimeoutMs ?? PROBE_TIMEOUT_MS;
+  const resyncSettleMs = options.resyncSettleMs ?? RESYNC_SETTLE_MS;
   /** ping 带上本进程这一轮的记号：新旧进程交接时，别把对方的 ping 当成自己的。 */
   const boot = randomToken(6);
   const handles: { unlisten: () => Promise<void> }[] = [];
@@ -89,21 +96,30 @@ export function startPgChangeFeed(
   let stopped = false;
   let seq = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let resyncTimer: ReturnType<typeof setTimeout> | undefined;
 
   const down = (reason: string) => {
     if (healthy) log.warn('实时推送断了；恢复时会通知订阅方全量重拉', { reason });
     healthy = false;
     missed = true;
     lastError = reason;
+    // 恢复到一半又断了：这一轮的 resync 先不发，下一轮恢复时一起发。
+    clearTimeout(resyncTimer);
+    resyncTimer = undefined;
   };
+  /** 又在收通知了。之前可能漏过就排一个 resync；同一轮恢复里接着来的都并进去，最后一次之后 resyncSettleMs 才发。 */
   const recovered = () => {
-    if (missed) {
-      log.warn('实时推送恢复了，通知订阅方全量重拉（断开期间的变化可能漏了）');
-      hub.publish({ type: 'resync' });
-    }
-    missed = false;
     healthy = true;
     lastError = undefined;
+    if (!missed) return;
+    clearTimeout(resyncTimer);
+    resyncTimer = setTimeout(() => {
+      resyncTimer = undefined;
+      missed = false;
+      log.warn('实时推送恢复了，通知订阅方全量重拉（断开期间的变化可能漏了）');
+      hub.publish({ type: 'resync' });
+    }, resyncSettleMs);
+    resyncTimer.unref?.();
   };
 
   const onNotify = (payload: string) => {
@@ -188,6 +204,7 @@ export function startPgChangeFeed(
     async stop() {
       stopped = true;
       clearTimeout(timer);
+      clearTimeout(resyncTimer);
       healthy = false;
       lastError = '已停止';
       await Promise.all(handles.splice(0).map((h) => h.unlisten()));

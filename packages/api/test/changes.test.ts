@@ -29,13 +29,15 @@ describe('NOTIFY 载荷（形状照 shared/realtime.ts）', () => {
 
 describe('LISTEN fleet_changes（替身照 postgres.js：失败后监听仍挂着、自己重连）', () => {
   const settle = (ms = 5) => new Promise((r) => setTimeout(r, ms));
-  /** 不让定时探活插进来：测试里手动 probe。 */
-  const manual = { probeEveryMs: 60 * 60_000 };
+  /** 不让定时探活插进来（测试里手动 probe）；一轮恢复等 10 毫秒没有新的 onListen 就发 resync。 */
+  const manual = { probeEveryMs: 60 * 60_000, resyncSettleMs: 10 };
+  /** 等过一轮恢复的收尾，resync 该发的已经发了。 */
+  const afterRecovery = () => settle(50);
   const change = (id: string) => JSON.stringify({ table: 'tasks', id });
 
   function start(
     pg: ReturnType<typeof fakePostgres>,
-    options: { probeEveryMs?: number; probeTimeoutMs?: number } = manual,
+    options: { probeEveryMs?: number; probeTimeoutMs?: number; resyncSettleMs?: number } = manual,
     log: Logger = silentLogger,
   ) {
     const feed = startPgChangeFeed(pg, log, options);
@@ -81,10 +83,67 @@ describe('LISTEN fleet_changes（替身照 postgres.js：失败后监听仍挂�
 
     pg.startDb();
     pg.fire(FLEET_CHANGES_CHANNEL, change('t1'));
-    expect(got).toEqual([{ type: 'resync' }, { type: 'change', table: 'tasks', id: 't1' }]);
     await feed.probe(50);
+    await afterRecovery();
     expect(feed.status().healthy).toBe(true);
-    expect(got).toHaveLength(2);
+    // 接上之后的通知照常推（只推一次）；这一轮恢复收尾时发一个 resync。
+    expect(got).toEqual([{ type: 'change', table: 'tasks', id: 't1' }, { type: 'resync' }]);
+    await feed.stop();
+  });
+
+  it('库停了一阵、其间重连失败好几次：恢复时排着的几条 LISTEN 逐条回来，同一轮恢复只发一个 resync', async () => {
+    const pg = fakePostgres();
+    const { feed, got } = start(pg);
+    await settle();
+    pg.stopDb();
+    pg.failReconnects(3);
+    pg.startDb();
+    await afterRecovery();
+    expect(got).toEqual([{ type: 'resync' }]);
+    expect(feed.status().healthy).toBe(true);
+    await feed.stop();
+  });
+
+  it('库没起来就启动、其间重连失败好几次：恢复时也只发一个 resync', async () => {
+    const pg = fakePostgres();
+    pg.stopDb();
+    const { feed, got } = start(pg);
+    await settle();
+    pg.failReconnects(7);
+    pg.startDb();
+    await afterRecovery();
+    expect(got).toEqual([{ type: 'resync' }]);
+    await feed.stop();
+  });
+
+  it('恢复到一半又断了：这一轮先不发，下一轮恢复时一起发一个', async () => {
+    const pg = fakePostgres();
+    const { feed, got } = start(pg);
+    await settle();
+    pg.stopDb();
+    pg.startDb();
+    pg.stopDb();
+    await expect(feed.probe(20)).rejects.toMatchObject({ code: 'not_listening' });
+    await afterRecovery();
+    expect(got).toEqual([]);
+    pg.failReconnects(2);
+    pg.startDb();
+    await afterRecovery();
+    expect(got).toEqual([{ type: 'resync' }]);
+    await feed.stop();
+  });
+
+  it('两轮分开的恢复各发一个 resync', async () => {
+    const pg = fakePostgres();
+    const { feed, got } = start(pg);
+    await settle();
+    for (const round of [1, 2]) {
+      pg.stopDb();
+      pg.failReconnects(2);
+      pg.startDb();
+      await afterRecovery();
+      expect(got).toHaveLength(round);
+    }
     await feed.stop();
   });
 
@@ -98,6 +157,7 @@ describe('LISTEN fleet_changes（替身照 postgres.js：失败后监听仍挂�
     expect(feed.status().healthy).toBe(false);
     pg.startDb();
     await feed.probe(50);
+    await afterRecovery();
     expect(got).toEqual([{ type: 'resync' }]);
     expect(feed.status().healthy).toBe(true);
     await feed.stop();
@@ -110,6 +170,7 @@ describe('LISTEN fleet_changes（替身照 postgres.js：失败后监听仍挂�
     pg.dropListenConnection();
     pg.fire(FLEET_CHANGES_CHANNEL, change('lost'));
     pg.startDb();
+    await afterRecovery();
     expect(got).toEqual([{ type: 'resync' }]);
     expect(feed.status().healthy).toBe(true);
     await feed.stop();
@@ -124,6 +185,7 @@ describe('LISTEN fleet_changes（替身照 postgres.js：失败后监听仍挂�
     await expect(feed.probe(30)).rejects.toMatchObject({ code: 'not_listening' });
     expect(feed.status().lastError).toContain('没收回来');
     pg.startDb();
+    await afterRecovery();
     expect(got).toEqual([{ type: 'resync' }]);
     await feed.stop();
   });
@@ -136,18 +198,20 @@ describe('LISTEN fleet_changes（替身照 postgres.js：失败后监听仍挂�
     await expect(feed.probe(30)).rejects.toMatchObject({ code: 'not_listening' });
     pg.setDelivering(true);
     await feed.probe(50);
+    await afterRecovery();
     expect(got).toEqual([{ type: 'resync' }]);
     await feed.stop();
   });
 
   it('定时探活：没人调健康检查也会发现断线，恢复后照样 resync', async () => {
     const pg = fakePostgres();
-    const { feed, got } = start(pg, { probeEveryMs: 10, probeTimeoutMs: 20 });
+    const { feed, got } = start(pg, { probeEveryMs: 10, probeTimeoutMs: 20, resyncSettleMs: 10 });
     await settle();
     pg.dropListenConnection();
     for (let i = 0; i < 100 && feed.status().healthy; i++) await settle(5);
     expect(feed.status().healthy).toBe(false);
     pg.startDb();
+    await afterRecovery();
     expect(got).toEqual([{ type: 'resync' }]);
     await feed.stop();
   });
