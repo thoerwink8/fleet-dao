@@ -61,7 +61,7 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 | `/srv/fleet-dao` | root:root 755 | 装机脚本所在的检出（git clone）。fleet 和会话用户都只读 |
 | `/srv/fleet-dao-releases` | root:root 755 | 应用的各版（第九节）：`<提交号>/`、`current` 链接、`.history`；每一版归 root，fleet 只读 |
 | `/var/lib/fleet-dao`、`/var/log/fleet-dao` | fleet:fleet 750 | 运行数据、日志（服务日志主要在 journald） |
-| `/etc/fleet-dao` | root:fleet 750 | 本机配置与密钥：`france.env`、`temporal.env`（库口令）、`temporal.yaml`、`nftables.nft`、`github/`（两个 GitHub 机器人的 json，手放）；应用的 `engine.env`、`api.env`、`release.env`（照仓里样例建一次，之后归人改），随机密钥 `agent-token.env`、`session-secret.env`、`gateway-token.env`（首次生成，之后不动）。卫生检查的已知敏感值名单 `sensitive-values.txt`（真实的组织编号、账号，一行一个，手放；引擎推分支前读，缺了一律不推，见 packages/hygiene）。文件一律 root:fleet 640；只有 `web-upload.key`（往香港传静态文件的钥匙）、`gateway-deploy.key`（往香港发飞书网关的钥匙）和 `hk-known-hosts`（钉住的香港主机钥匙）是 root:root 600 |
+| `/etc/fleet-dao` | root:fleet 750 | 本机配置与密钥：`france.env`、`temporal.env`（库口令）、`temporal.yaml`、`nftables.nft`、`github/`（两个 GitHub 机器人的 json，手放）、`catalog.json`（目录配置，从保险箱放上来，第九节「目录配置」）；应用的 `engine.env`、`api.env`、`release.env`（照仓里样例建一次，之后归人改），随机密钥 `agent-token.env`、`session-secret.env`、`gateway-token.env`（首次生成，之后不动）。卫生检查的已知敏感值名单 `sensitive-values.txt`（真实的组织编号、账号，一行一个，手放；引擎推分支前读，缺了一律不推，见 packages/hygiene）。文件一律 root:fleet 640；只有 `web-upload.key`（往香港传静态文件的钥匙）、`gateway-deploy.key`（往香港发飞书网关的钥匙）和 `hk-known-hosts`（钉住的香港主机钥匙）是 root:root 600 |
 | `/opt/fleet-dao/temporal` | root:root 755 | `server-1.32.0/`（temporal-server、temporal-sql-tool）、`cli-1.9.1/`（temporal），`bin/` 链接到在用的版本 |
 | `/usr/local/bin/fleet-temporal` | root 755 | 运维命令行：连 127.0.0.1:7243，默认命名空间 fleet（只有 root 和 fleet 用得了） |
 | `/usr/local/sbin/fleet-agent-scope`、`/etc/sudoers.d/fleet-dao` | root 755、root 440 | 起、收 AI 会话（第五节） |
@@ -106,7 +106,7 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 5. 先重跑香港、再重跑法国：隧道起来，法国读回里 `ping 10.99.0.1` 通；法国这一遍还会经隧道钉住香港 sshd 的主机钥匙。
 6. 发布钥匙：法国 france.sh 打印两把公钥，整行各填进香港 `hk.env`：上传钥匙的填 `FLEET_WEB_UPLOAD_PUBLIC_KEY`，发网关的填 `FLEET_GATEWAY_DEPLOY_PUBLIC_KEY`；重跑香港，再跑法国，读回里「往香港传文件的通路是通的」「香港飞书网关的入口是通的」。
 7. 飞书网关的通行证拷一份到香港（第九节「两台同一份」）；飞书凭据和创始人放进香港 `/etc/fleet-dao/feishu.env`，把机器人拉进团队群，重跑香港补齐其余几项（第十二节）。
-8. 手放密钥：两个 GitHub 机器人的 json 放进法国 `/etc/fleet-dao/github/`，root:fleet 640（读回会查权限）。
+8. 手放密钥：两个 GitHub 机器人的 json 放进法国 `/etc/fleet-dao/github/`，root:fleet 640（读回会查权限）。目录配置 `catalog.json` 从保险箱放上来（第九节「目录配置」），没有它发布会停在装目录那一步。
 9. 会话用户登录 reclaude（第五节，要创始人）。
 10. 各再跑一遍，结论应是「本次改动 0 处」。然后发布应用（第九节）。
 
@@ -280,7 +280,7 @@ bash /srv/fleet-dao/deploy/release.sh --check      # 只读：在用哪版、服
 1. 取代码：从 GitHub 取主线到 `/srv/fleet-dao-releases/.repo.git`（root 的裸仓）。只发主线上的提交；合并前要在真机上验，加 `--unmerged`，历史里会标出来。
 2. 构建：代码解到临时目录，以 fleet 跑 `pnpm install --frozen-lockfile`（依赖整份拷进来，不和 fleet 的 pnpm 仓库共用文件）；有 `packages/web` 就构建它（产出 `dist/client`），没有就用占位页；再放上健康页 `/health/`、版本标记 `release.json`。有 `packages/feishu` 就把飞书网关连同依赖打成一个文件 `gateway/gateway.mjs`（第十二节）。然后整棵树换成 root、fleet 只读，挪到 `/srv/fleet-dao-releases/<提交号>`。第三方代码不以 root 跑；root 照着起服务的单元文件，是换属主之后 root 才从 git 里取出来放进 `.units/` 的。构建日志在这一版目录的 `.fleet-build.log`。
 3. 先试通香港这次要发的那几样（`FLEET_HK_PARTS`，见本节末尾）：发静态文件就 `rsync -n`（什么都不传），发网关就问一次网关入口的 `status`。不通就停，不切版本——不然健康检查必不过，新旧两版会一起被记成不健康。
-4. 迁移：以 fleet 跑 `packages/db` 的迁移（库 fleet，本机 socket）。在切版本之前跑，只进不退（第八节）。每一版带几个迁移记在它的 `.fleet-release`（`migrations=`）。跑之前先比库：库里跑过的比这一版带的多（直接发了个老提交），就停、不切——drizzle 碰到比代码新的迁移记录什么也不做、也不报错，光靠迁移这一步拦不住。
+4. 迁移：以 fleet 跑 `packages/db` 的迁移（库 fleet，本机 socket）。在切版本之前跑，只进不退（第八节）。每一版带几个迁移记在它的 `.fleet-release`（`migrations=`）。跑之前先比库：库里跑过的比这一版带的多（直接发了个老提交），就停、不切——drizzle 碰到比代码新的迁移记录什么也不做、也不报错，光靠迁移这一步拦不住。迁移完装目录：以 fleet 跑这一版的目录装载器，把 `/etc/fleet-dao/catalog.json` 装进库（下面「目录配置」）；装不成、装完读不回就停、不切。
 5. 切版本：`current` 原子地指到这一版；`/etc/fleet-dao/release.env` 的 `FLEET_SERVICES` 里启用的服务装上这一版的单元、起来，没启用的停掉、撤掉单元。要不要重启看服务的主进程在哪个目录（`/proc/<主进程>/cwd`）：不在这一版的目录里就重启——所以上次切完 `current`、还没重启完就被打断，重跑同一版照样会重启；单元或环境文件变了也重启。
 6. 发静态文件（`FLEET_HK_PARTS` 里明写了 `web` 才发，默认不发）：经隧道用 rrsync 传到香港 `/srv/fleet-dao-web`（新文件先落临时名、最后一起换上，旧文件最后删；在香港属 root）。按内容比、不带修改时间：内容没变的文件不传、不算变化。目录里不是这一版的文件会被删掉——别往 `/srv/fleet-dao-web` 手放东西，下次发布就没了。接着发飞书网关（第十二节）。
 7. 健康检查：启用的服务 10 秒里没退出、没重启，主进程跑的是这一版的目录；`fleet-api` 的驾驶舱接口在答健康报告、切之前好的项没变坏，fleet 命令接口在听；`fleet-engine` 90 秒内到任务队列 fleet 上取活（工作流任务、活动任务都要有它）；发了静态文件的话，香港在发这一版（经隧道读 `release.json`、健康页 200）；这次切了飞书网关的话，它以这一版连上了飞书、起稳了（第十二节）。不过就自动退回上一版（同样的切法、同样的检查），报红；但库里跑过的迁移比上一版带的多时不退，停在新版报红等人（旧代码对着新表结构会出错，健康检查还查不出来）。
@@ -324,6 +324,19 @@ ssh <法国> 'cat /etc/fleet-dao/gateway-token.env' | ssh <香港> 'f=/etc/fleet
 # 核对：比指纹，不看值
 ssh <法国> 'sha256sum < /etc/fleet-dao/gateway-token.env'; ssh <香港> 'sha256sum < /etc/fleet-dao/gateway-token.env'
 ```
+
+目录配置（`/etc/fleet-dao/catalog.json`：族、渠道、账号池、模型、路由、各阶段的路由顺序）：真文件在保险箱仓的 `france/etc/fleet-dao/catalog.json.age`，取值和仓里的样例 `deploy/examples/catalog.example.json` 一样——目录里没有账号、邮箱、组织编号。法国解不开保险箱，所以在创始人电脑上、保险箱仓里放上去：
+
+```
+# 在创始人电脑上、保险箱仓里（解密钥匙 ~/.fleet-dao/vault-key.txt）
+age -d -i ~/.fleet-dao/vault-key.txt france/etc/fleet-dao/catalog.json.age | ssh <法国> 'f=/etc/fleet-dao/catalog.json; t=$(mktemp /etc/fleet-dao/.new.XXXXXX); cat > "$t" && chown root:fleet "$t" && chmod 640 "$t" && mv "$t" "$f"'
+# 核对：比指纹
+age -d -i ~/.fleet-dao/vault-key.txt france/etc/fleet-dao/catalog.json.age | sha256sum; ssh <法国> 'sha256sum < /etc/fleet-dao/catalog.json'
+```
+
+- 发布时迁移之后装进库（上面第 4 步）：只补缺——库里没有的行插进去，已有的只填空着的字段，驾驶舱里改过的不动；每个阶段只排一次，之后顺序、开关以驾驶舱为准。往这份文件里新加的路由装得进库，但不会自动挂到排过的阶段上（发布日志里点名「没挂上」，去驾驶舱加）。
+- 文件不在、是符号链接、不是 root:fleet 640、装不成（格式错、引用不存在、撞硬禁令）、装完读不回，发布都停下、不切版本、报红；装完账号池、路由、阶段、阶段里挂的路由哪张是 0 行也一样。同一版再发，这一步改动 0 处。
+- 在法国改了这份，就在创始人电脑上跑一遍保险箱仓的 `refresh.sh` 刷新副本。反过来，法国上还没有它的时候别跑 `refresh.sh`：它以服务器为准，会把保险箱里的这份删掉（git 历史里还找得回）。
 
 往香港传静态文件的钥匙：法国 `/etc/fleet-dao/web-upload.key`（root 600，france.sh 生成）；香港 root 的 `authorized_keys2` 里那一行限死成 `from="10.99.0.2",restrict,command="/usr/bin/rrsync -wo -munge /srv/fleet-dao-web"`：只许从隧道地址来、不给终端、只能往这一个目录写、读不走任何东西。`-munge`：传来的符号链接落地时改成无效的样子，法国 root 失守也没法借链接让 nginx 读出目录外的文件。香港 sshd 的主机钥匙由 france.sh 经隧道取来钉住（隧道两头靠 WireGuard 钥匙互认），发布时只认这一把。
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # shellcheck source-path=SCRIPTDIR
-# 发布（在法国以 root 跑）：把主线上的一个提交装成一版 → 跑数据库迁移 → 切过去、按本机配置起应用服务 → 经隧道把飞书网关发到香港
+# 发布（在法国以 root 跑）：把主线上的一个提交装成一版 → 跑数据库迁移、装目录 → 切过去、按本机配置起应用服务 → 经隧道把飞书网关发到香港
 # （release.env 里明写了 web，才连驾驶舱静态文件一起发）→ 健康检查；不过就自动退回上一版并报错（库的迁移比上一版新时不退）。
 # 幂等：同一个提交跑第二遍什么都不变。
 # 发布和退回自己交给 systemd 跑（临时服务），终端断了照样跑完；日志在 /srv/fleet-dao-releases/.logs/。
@@ -37,6 +37,9 @@ AGENT_API=127.0.0.1:8788       # fleet 命令接口（api.env 的 FLEET_AGENT_LI
 TASK_QUEUE=fleet               # 引擎工人取活的任务队列（engine.env 的 FLEET_TASK_QUEUE）
 # 迁移连本机库：unix socket + peer 认证（同 api.env；postgres.js 不认连接串里的 ?host=，主机走 PGHOST）
 DB_ENV=(DATABASE_URL=postgres:///fleet PGHOST=/var/run/postgresql PGUSER=fleet)
+# 目录配置（族、渠道、账号池、模型、路由、各阶段顺序）：从保险箱放上来（docs/ops.md 第九节「目录配置」），迁移之后装进库
+CATALOG=/etc/fleet-dao/catalog.json
+CATALOG_META="root:fleet 640" # 它该有的属主、权限；只有测试会改
 NODE=/usr/bin/node    # 法国的 node（france.sh 的前提里查过 22 以上）；只有测试会换成别处的
 SETTLE_SECONDS=10     # 服务起来后再看这么久：这段时间里退出过、重启过，就是没起稳
 ENGINE_POLL_WAIT=90   # 引擎工人起来后要先打包工作流，才去任务队列取活
@@ -398,6 +401,81 @@ migrate() { # 提交号
     ok "没有新迁移（库 fleet 已跑过 $after 个）"
   else
     changed "跑了新迁移：库 fleet 已跑过的从 $before 个到 $after 个"
+  fi
+}
+
+# ── 目录 ──
+
+# 目录那几张表的读回，一行「账号池|路由|阶段|阶段里挂的路由|装载器最近一笔操作记录的编号」。装载器只在改了库时记一笔
+# （catalog.load），编号只增不减：前后一比就知道这次改没改。读不到、认不出就失败，不当成 0
+catalog_readback() {
+  local out
+  out=$(pg_admin -d fleet -c "select (select count(*) from pools), (select count(*) from routes),
+    (select count(*) from stage_policies), (select count(*) from stage_policy_routes),
+    (select coalesce(max(id), 0) from audit_log where action = 'catalog.load')") || return 1
+  if [[ ! "$out" =~ ^[0-9]+\|[0-9]+\|[0-9]+\|[0-9]+\|[0-9]+$ ]]; then return 1; fi
+  printf '%s' "$out"
+}
+
+# 装目录：迁移之后、切版本之前，以 fleet 跑这一版的装载器（packages/db/src/bin/catalog.ts）。它只补缺——驾驶舱里改过的不动，
+# 每个阶段只排一次，跑几遍都一样；格式错、引用不存在都整批不写。文件不在、属主权限不对、装不成、读不回，都停下、不切版本
+# （在用的那版不受影响）。装完账号池、路由、阶段、阶段里挂的路由哪张是 0 行也判红：引擎没有它们派不出活
+load_catalog() { # 提交号
+  local dir=$RELEASES/$1 have before after out rc=0 line first i empty="" counts=()
+  local names=(账号池 路由 阶段 阶段里挂的路由)
+  step "装目录（$CATALOG → 库 fleet）"
+  if [[ ! -f "$dir/packages/db/src/bin/catalog.ts" ]]; then
+    ok "这一版没有目录装载器"
+    return 0
+  fi
+  if [[ -L "$CATALOG" ]]; then
+    red "$CATALOG 是符号链接，不读：放成普通文件（$CATALOG_META，见 docs/ops.md 第九节「目录配置」）；没切版本"
+    return 1
+  fi
+  if [[ ! -e "$CATALOG" ]]; then
+    red "没有 $CATALOG：先从保险箱放上来（docs/ops.md 第九节「目录配置」）再发布；没切版本"
+    return 1
+  fi
+  have=$(stat -c '%U:%G %a' -- "$CATALOG" 2>/dev/null) || have="读不到"
+  if [[ ! -f "$CATALOG" ]]; then
+    red "$CATALOG 不是普通文件（$have）：放成普通文件、$CATALOG_META；没切版本"
+    return 1
+  fi
+  if [[ "$have" != "$CATALOG_META" ]]; then
+    red "$CATALOG 是「$have」，应为 $CATALOG_META；没切版本"
+    return 1
+  fi
+  if ! before=$(catalog_readback); then
+    red "装目录之前读不到库 fleet 里目录那几张表的行数：没装，没切版本"
+    return 1
+  fi
+  out=$(cd -- "$dir" && runuser -u fleet -- env -i HOME=/home/fleet PATH=/usr/bin:/bin LANG=C.UTF-8 "${DB_ENV[@]}" \
+    "$NODE" packages/db/src/bin/catalog.ts "$CATALOG" 2>&1) || rc=$?
+  while IFS= read -r line; do
+    if [[ -n "$line" ]]; then printf '    %s\n' "$line"; fi
+  done <<<"$out"
+  if ((rc != 0)); then
+    first=$(head -1 <<<"$out")
+    red "目录没装成（装载器退出码 $rc，原话见上；它整批不写，库里一行没动；没切版本）：${first:-（没有输出）}"
+    return 1
+  fi
+  if ! after=$(catalog_readback); then
+    red "目录装完了，但读不回库 fleet 里目录那几张表的行数：没切版本"
+    return 1
+  fi
+  IFS='|' read -r -a counts <<<"$after"
+  for i in 0 1 2 3; do
+    if ((counts[i] == 0)); then empty+="${empty:+、}${names[i]}"; fi
+  done
+  if [[ -n "$empty" ]]; then
+    red "装完读回：库 fleet 里${empty}是 0 行（装载器说装好了，库里却没有，引擎派不出活）；没切版本"
+    return 1
+  fi
+  line="账号池 ${counts[0]}、路由 ${counts[1]}、阶段 ${counts[2]}、阶段里挂的路由 ${counts[3]}"
+  if [[ "${before##*|}" == "${counts[4]}" ]]; then
+    ok "目录已齐，这次一行没改（$line）"
+  else
+    changed "目录装进库（$line）"
   fi
 }
 
@@ -884,6 +962,7 @@ do_release() { # 要发的提交（空 = 主线最新）
   # 光靠迁移那一步拦不住）。放在迁移之前：老版本的迁移程序连库都不碰
   schema_allows "$SHA" 切到 || return 1
   migrate "$SHA"
+  load_catalog "$SHA" || return 1
   before=$(api_report_before)
   step "切到 ${SHA:0:12}（在用：$(short "$cur" 还没有)）"
   if activate "$SHA" release && health_gate "$SHA" "$before"; then
