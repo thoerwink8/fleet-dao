@@ -51,3 +51,27 @@ describe('buildClaudeArgs', () => {
     expect(() => buildClaudeArgs({ ...base, session: { mode: 'resume', id: 'latest' } })).toThrow('UUID');
   });
 });
+
+describe('fork（换会话用户接着干：带着旧会话的记录开一个新编号）', () => {
+  const FROM = '11111111-1111-4111-8111-111111111111';
+
+  it('拼成 --resume <旧编号> --fork-session --session-id <新编号>', () => {
+    const args = buildClaudeArgs({ ...base, session: { mode: 'fork', from: FROM, id: ID } });
+    expect(args.slice(-5)).toEqual(['--resume', FROM, '--fork-session', '--session-id', ID]);
+  });
+
+  it('from、id 都要是 UUID', () => {
+    expect(() => buildClaudeArgs({ ...base, session: { mode: 'fork', from: 'latest', id: ID } })).toThrow(
+      'UUID',
+    );
+    expect(() =>
+      buildClaudeArgs({ ...base, session: { mode: 'fork', from: FROM, id: 'not-a-uuid' } }),
+    ).toThrow('UUID');
+  });
+
+  it('from 和 id 不能一样（fork 出来的必须是新编号）', () => {
+    expect(() => buildClaudeArgs({ ...base, session: { mode: 'fork', from: FROM, id: FROM } })).toThrow(
+      '不能和旧会话号一样',
+    );
+  });
+});

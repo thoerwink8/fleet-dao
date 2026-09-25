@@ -50,6 +50,7 @@ import {
 } from './ports.ts';
 import { type CockpitEnv, requireSession } from './session.ts';
 import { eventsHandler, type SseRelay } from './sse.ts';
+import { requirementWorkflowIdForTask } from './temporal.ts';
 import {
   buildBoard,
   buildPools,
@@ -73,13 +74,15 @@ export function cockpitRoutes(deps: Deps, waiters: AskWaiters, relay: SseRelay):
   const actorOf = (c: Context<CockpitEnv>): Actor => ({ kind: 'user', id: c.get('user').id });
 
   /**
-   * 先记后做：操作记录写不进就抛错，信号不发。信号没发成再追加一条 ok=false 的记录（工作流不在了 409、
-   * Temporal 没接上或连不上 503、别的 502）；这一条也写不进时只能留日志，但不改变返回给人的结果。
+   * 先记后做：操作记录写不进就抛错，信号不发。命令按任务发给需求工作流，编号查库拼（requirementWorkflowIdForTask）。
+   * 信号没发成再追加一条 ok=false 的记录（工作流不在了 409、Temporal 没接上或连不上 503、别的 502）；
+   * 这一条也写不进时只能留日志，但不改变返回给人的结果。
    */
   async function signalAndAudit(taskId: string, signal: TaskSignal, audit: NewAuditEntry): Promise<void> {
     await store.appendAudit(audit);
     try {
-      await deps.workflows.signal(taskId, signal);
+      const workflowId = await requirementWorkflowIdForTask(store, taskId);
+      await deps.workflows.signal(workflowId, signal);
     } catch (err) {
       const gone = err instanceof WorkflowGoneError;
       const unavailable = err instanceof WorkflowUnavailableError;
@@ -277,7 +280,8 @@ export function cockpitRoutes(deps: Deps, waiters: AskWaiters, relay: SseRelay):
     if (result === 'already_answered') throw new ApiError(409, 'already_answered', '这条追问已经有人回答了');
     waiters.wake(askId);
     try {
-      await deps.workflows.signal(ask.taskId, { name: 'answer', by: actor.id, askId, answer });
+      const workflowId = await requirementWorkflowIdForTask(store, ask.taskId);
+      await deps.workflows.signal(workflowId, { name: 'answer', by: actor.id, askId, answer });
     } catch (err) {
       // 回答已经写库：阻塞等回答的 fleet ask 从库里读得到，工作流收不到信号也能按库补看。
       deps.log.warn('回答已记下，但叫醒工作流没成功', { askId, error: String(err) });

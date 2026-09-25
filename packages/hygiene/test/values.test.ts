@@ -144,4 +144,21 @@ describe('按名单比', () => {
     expect(report.findings.map(formatFinding)).toEqual(['docs/a.md:2 名单里的敏感值']);
     expect(JSON.stringify(report.findings.map(formatFinding))).not.toContain('5566778899');
   });
+
+  it('文件名（路径）里带名单上的值也报：记在打了码的路径上，报出来不带值；内容干净也照报', () => {
+    const report = scanFiles(
+      ['specs/acct-5566778899-login/需求.md', 'docs/ok.md', 'src/acct-5566778899.ts'],
+      (path) => Buffer.from(path.startsWith('src/') ? '\n用户 acct-5566778899\n' : '# 干净的内容\n'),
+      [],
+      ['acct-5566778899'],
+    );
+    expect(report.findings.map(formatFinding)).toEqual([
+      'specs/〔名单上的值〕-login/需求.md 名单里的敏感值',
+      // 名字带值的文件里内容也命中：内容那一条的位置同样用打了码的名字
+      'src/〔名单上的值〕.ts 名单里的敏感值',
+      'src/〔名单上的值〕.ts:2 名单里的敏感值',
+    ]);
+    // 命中的原文（match）只给程序比白名单用；报出来的位置里不带值
+    expect(report.findings.map((f) => f.path).join()).not.toContain('5566778899');
+  });
 });

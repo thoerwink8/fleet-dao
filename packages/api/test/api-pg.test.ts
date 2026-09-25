@@ -64,18 +64,25 @@ describe('接口跑在真库上', () => {
 
   it('fleet 命令带同一个幂等键重试：库里只有一条进度，只叫醒一次', async () => {
     const h = await start();
-    const say = () =>
+    // blocked 属于 AGENT_EVENT_WAKE_KINDS（会叫醒工作流），say 不会——用它才能证明「幂等键去重连带去重叫醒」
+    // 在真库（不只是内存版）上也成立。
+    const blocked = () =>
       h.agent.request(
-        '/agent/v1/say',
-        agentRequest(h.agentToken(), 'POST', { text: '真库上的一句' }, { 'idempotency-key': 'pg-key-1' }),
+        '/agent/v1/blocked',
+        agentRequest(
+          h.agentToken(),
+          'POST',
+          { reason: '真库上的一句', needs: 'access' },
+          { 'idempotency-key': 'pg-key-1' },
+        ),
       );
-    expect((await say()).status).toBe(200);
-    expect((await say()).status).toBe(200);
+    expect((await blocked()).status).toBe(200);
+    expect((await blocked()).status).toBe(200);
     const rows = await t.db
       .select()
       .from(progressEvents)
-      .where(and(eq(progressEvents.runId, DEV_RUN_ID), eq(progressEvents.kind, 'say')));
-    expect(rows.filter((r) => (r.payload as { text?: string }).text === '真库上的一句')).toHaveLength(1);
+      .where(and(eq(progressEvents.runId, DEV_RUN_ID), eq(progressEvents.kind, 'blocked')));
+    expect(rows.filter((r) => (r.payload as { reason?: string }).reason === '真库上的一句')).toHaveLength(1);
     expect(h.signals).toHaveLength(1);
   });
 
@@ -170,8 +177,9 @@ describe('接口跑在真库上', () => {
       checks: {
         database: { ok: true },
         realtime: { ok: true },
-        temporal: { ok: false, code: 'not_connected', message: 'Temporal 客户端还没接上（等引擎的 PR）' },
-        github_events: { ok: false, code: 'not_wired', message: 'GitHub 事件还没接到引擎（等引擎的 PR）' },
+        temporal: { ok: false, code: 'not_connected', message: 'Temporal 客户端还没接上' },
+        engine: { ok: false, code: 'not_connected', message: 'Temporal 客户端还没接上' },
+        github_events: { ok: false, code: 'not_wired', message: 'GitHub 事件还没接到引擎' },
       },
     });
     await h.feed.stop();

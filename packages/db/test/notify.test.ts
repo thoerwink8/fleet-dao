@@ -4,6 +4,7 @@ import { eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { savePoolQuota } from '../src/queries/quota.ts';
 import {
+  approvals,
   asks,
   auditLog,
   channels,
@@ -209,6 +210,15 @@ describe('写入即通知 fleet_changes', () => {
     });
     await t.db.insert(notifications).values({ level: 'daily', dedupeKey: 'daily:2026-09-25', title: '日报' });
     await t.db.insert(asks).values({ taskId: task.id, runId: run.id, question: '要不要兼容旧接口？' });
+    await t.db.insert(approvals).values({
+      taskId: task.id,
+      subtaskId: sub.id,
+      holds: ['release'],
+      prNumber: 1,
+      head: 'deadbeef',
+      title: '标题',
+      summary: '摘要',
+    });
     await t.db
       .insert(stagePolicyRoutes)
       .values({ stage: 'execute', routeId: 'r1', position: 0, enabled: true });

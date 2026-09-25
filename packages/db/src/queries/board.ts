@@ -117,10 +117,11 @@ export async function repoBoard(
       .from(stateChanges)
       .where(inArray(stateChanges.taskId, taskIds))
       .orderBy(stateChanges.entityId, desc(stateChanges.id)),
+    // 重拆方案作废的子任务（superseded_at 非空）不上看板：它们的 index 可能和现役子任务重复。
     db
       .select()
       .from(subtasks)
-      .where(inArray(subtasks.taskId, taskIds))
+      .where(and(inArray(subtasks.taskId, taskIds), isNull(subtasks.supersededAt)))
       .orderBy(asc(subtasks.taskId), asc(subtasks.index)),
     db.select().from(subtaskDeps).where(inArray(subtaskDeps.taskId, taskIds)),
     db

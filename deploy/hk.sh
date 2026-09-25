@@ -343,8 +343,9 @@ setup_site() {
   ensure_dir "$ACME_ROOT" root:root 755
   local name=${FLEET_DOMAIN:-$PLACEHOLDER_NAME} tpl=nginx-http.conf old="" had=0 site_changed before after why
   if [[ -n "$FLEET_DOMAIN" && -f "/etc/letsencrypt/live/$FLEET_DOMAIN/fullchain.pem" ]]; then tpl=nginx-https.conf; fi
+  # TUNNEL_PEER：法国在隧道上的地址，站点只把 release.json 给从它来的请求
   render "$DEPLOY_DIR/hk/$tpl" SERVER_NAME="$name" WEB_ROOT="$WEB_ROOT" ACME_ROOT="$ACME_ROOT" API_UPSTREAM="$API_UPSTREAM" \
-    DEMO_PATH="$FLEET_DEMO_PATH" DEMO_BASE="${FLEET_DEMO_PATH%/}"
+    DEMO_PATH="$FLEET_DEMO_PATH" DEMO_BASE="${FLEET_DEMO_PATH%/}" TUNNEL_PEER="$WG_PEER_ADDR"
   if [[ -f "$SITE_AVAILABLE" ]]; then
     old=$(<"$SITE_AVAILABLE")
     had=1

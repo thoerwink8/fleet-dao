@@ -82,4 +82,10 @@ describe('scanAdded', () => {
     const allow = [{ rule: 'known-value' as const, path: /^docs\//, reason: '测试用：放行 docs 里的。' }];
     expect(scanAdded(hunks, [], { values: ['fake-org-778899'], allowlist: allow })).toEqual([]);
   });
+
+  it('新出现的文件名里带名单上的值（推上去名字一样公开）：报，记在打了码的名字上', () => {
+    const found = scanAdded([], ['src/fake-org-778899.ts'], { values: ['fake-org-778899'], allowlist: [] });
+    expect(found.map(formatFinding)).toEqual(['src/〔名单上的值〕.ts 名单里的敏感值']);
+    expect(found.map((f) => f.path).join()).not.toContain('778899');
+  });
 });

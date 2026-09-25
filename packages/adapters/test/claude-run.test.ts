@@ -124,6 +124,57 @@ describe('runClaudeCode', { timeout: 30_000 }, () => {
     expect(report.killed?.reason).toBe('session_mismatch');
   });
 
+  it('fork：init 帧回来的是新编号（不是被换走的旧编号）就正常往下走；报告和摘要里的会话号都是新编号', async () => {
+    const id = fixtureInit('cc-haiku-read').sessionId;
+    const report = await runClaudeCode(
+      spec('cc-haiku-read', {
+        session: { mode: 'fork', from: '00000000-0000-4000-8000-000000000001', id },
+      }),
+      { command: fakeAgent({ replay: fixturePath('claude-code', 'cc-haiku-read') }) },
+    );
+    expect(report.killed).toBeUndefined();
+    expect(judgeClaudeRun(report).outcome).toBe('ok');
+    expect(report.session).toEqual({ mode: 'fork', from: '00000000-0000-4000-8000-000000000001', id });
+    expect(claudeRunSummary(report).sessionId).toBe(id);
+  });
+
+  it('fork 没续上：init 帧回来的还是旧编号（from），按会话不一致停掉（花的是旧账号的额度）', async () => {
+    const from = fixtureInit('cc-haiku-resume-b').sessionId; // 夹具里 init 真实回的就是这个号
+    const report = await runClaudeCode(
+      spec('cc-haiku-resume-b', {
+        session: { mode: 'fork', from, id: '00000000-0000-4000-8000-000000000002' },
+      }),
+      { command: fakeAgent({ replay: fixturePath('claude-code', 'cc-haiku-resume-b'), after: 'hang' }) },
+    );
+    expect(report.killed?.reason).toBe('session_mismatch');
+  });
+
+  it('fork 出来的会话不给花费：累计值是从 0 起算还是接着旧会话算没实测过，给不给 previous 都不带', async () => {
+    const id = fixtureInit('cc-haiku-resume-a').sessionId;
+    const report = await runClaudeCode(
+      spec('cc-haiku-resume-a', {
+        session: { mode: 'fork', from: '00000000-0000-4000-8000-000000000003', id },
+      }),
+      { command: fakeAgent({ replay: fixturePath('claude-code', 'cc-haiku-resume-a') }) },
+    );
+    expect(claudeRunSummary(report).usage).not.toHaveProperty('costUsd');
+    expect(claudeRunSummary(report, report.stream.result).usage).not.toHaveProperty('costUsd');
+  });
+
+  it('fork 的 from 和 id 一样，或 from 不是 UUID：起之前就拒', async () => {
+    const id = fixtureInit('cc-haiku-read').sessionId;
+    await expect(
+      runClaudeCode(spec('cc-haiku-read', { session: { mode: 'fork', from: id, id } }), {
+        command: fakeAgent({}),
+      }),
+    ).rejects.toThrow('不能和旧会话号一样');
+    await expect(
+      runClaudeCode(spec('cc-haiku-read', { session: { mode: 'fork', from: 'not-a-uuid', id } }), {
+        command: fakeAgent({}),
+      }),
+    ).rejects.toThrow('UUID');
+  });
+
   it('命令行版本低于要求：停', async () => {
     const report = await runClaudeCode(spec('cc-haiku-read'), {
       command: fakeAgent({ replay: fixturePath('claude-code', 'cc-haiku-read'), after: 'hang' }),

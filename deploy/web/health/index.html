@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>fleet-dao 健康检查</title>
+<title>驾驶舱健康检查</title>
 <style>
   :root { color-scheme: light dark; --ok: #1a7f37; --bad: #cf222e; --wait: #6e7781; --line: #d0d7de; }
   @media (prefers-color-scheme: dark) { :root { --ok: #3fb950; --bad: #f85149; --wait: #8b949e; --line: #30363d; } }
@@ -26,14 +26,13 @@
 </head>
 <body>
 <main>
-  <h1>fleet-dao 健康检查</h1>
+  <h1>驾驶舱健康检查</h1>
   <div id="banner" role="status" aria-live="polite">检查中…</div>
   <ul id="rows"></ul>
   <footer>
     <span id="checked">还没查过</span>
     <span>每 15 秒自动刷新</span>
     <button id="refresh" type="button">现在刷新</button>
-    <span id="release">页面版本：读取中</span>
   </footer>
 </main>
 <script type="module">
@@ -78,20 +77,8 @@
     }
   }
 
-  async function showRelease() {
-    const el = document.getElementById('release');
-    try {
-      const res = await fetch('/release.json', { cache: 'no-store' });
-      const { commit } = await res.json();
-      el.textContent = typeof commit === 'string' ? `页面版本：${commit.slice(0, 12)}` : '页面版本：读不出';
-    } catch {
-      el.textContent = '页面版本：读不到';
-    }
-  }
-
   document.getElementById('refresh').addEventListener('click', refresh);
   refresh();
-  showRelease();
   setInterval(refresh, REFRESH_MS);
 </script>
 </body>

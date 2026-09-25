@@ -102,6 +102,28 @@ export interface ValueMatcher {
   find(text: string): Hit[];
 }
 
+/** 名字（文件路径、分支名）里名单上的值打码后的写法：报出来的位置里不能带着值。 */
+const MASK = '〔名单上的值〕';
+
+/** 把名字里名单上的值换成打码的写法（报错、日志里要写名字的地方用）。 */
+export function maskValues(name: string, matcher: ValueMatcher): string {
+  let masked = name;
+  for (const hit of matcher.find(name)) masked = masked.split(hit.match).join(MASK);
+  return masked;
+}
+
+/**
+ * 名字本身带名单上的值（文件路径、要直写进主线的文档路径）：内容另有地方扫，名字要是只按「是不是密钥文件」判，
+ * 「specs/<组织编号>-…/需求.md」「src/<账号>.ts」这种就放过去了，推上去、写上去照样公开。
+ * 命中记在打了码的名字上（line = 0 表示名字本身），报出来的位置不带值。
+ */
+export function valueHitsInName(name: string, matcher: ValueMatcher): (Hit & { path: string })[] {
+  const hits = matcher.find(name);
+  if (hits.length === 0) return [];
+  const path = maskValues(name, matcher);
+  return hits.map((hit) => ({ ...hit, line: 0, path }));
+}
+
 /** 把名单编成一个比对器：6 个字符及以上的整词出现就算；更短的还要同一行有上下文词。 */
 export function valueMatcher(values: readonly string[]): ValueMatcher {
   const long = wholeWords(values.filter((v) => v.length >= SHORT_VALUE_LENGTH));

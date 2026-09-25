@@ -200,6 +200,95 @@ describe('issue 进度段原地更新', () => {
   });
 });
 
+describe('写进度段之前的卫生检查（公开的 issue 正文，推前扫描拦不到）', () => {
+  it('子任务标题（方案会话写的）里有名单上的值：不写（HYGIENE_BLOCKED，不可重试），一个请求都不发，报错只带位置不带值', async () => {
+    const { gh, fake } = setup();
+    const issue = fake.addIssue({ body: '原话' });
+    const before = fake.requests.length;
+    const err = await gh
+      .updateIssueProgress({
+        repo,
+        issueNumber: issue.number,
+        progress: progress({
+          subtasks: [
+            { key: 'A', title: '登录表单', state: 'merged', prNumber: 31 },
+            { key: 'B', title: '接到组织 fake-org-778899 的账号上', state: 'running', prNumber: null },
+          ],
+        }),
+      })
+      .catch((e: unknown) => e);
+    expect(err).toMatchObject({ code: 'HYGIENE_BLOCKED', retryable: false });
+    expect((err as Error).message).toContain('第 2 个子任务');
+    expect((err as Error).message).not.toContain('fake-org-778899');
+    expect(fake.requests.length).toBe(before);
+    expect(issue.body).toBe('原话');
+  });
+
+  it('「正在」那句（可能带着分诊追问的原话）里有也拦', async () => {
+    const { gh, fake } = setup();
+    const issue = fake.addIssue({ body: '原话' });
+    const before = fake.requests.length;
+    await expect(
+      gh.updateIssueProgress({
+        repo,
+        issueNumber: issue.number,
+        progress: progress({ current: '追问：是切到组织 fake-org-778899 吗' }),
+      }),
+    ).rejects.toMatchObject({ code: 'HYGIENE_BLOCKED' });
+    expect(fake.requests.length).toBe(before);
+  });
+
+  it('文档路径（引擎按 issue 标题定的）里带名单上的值：拦（HYGIENE_NAME_BLOCKED，不退回会话），一个请求都不发，路径打了码', async () => {
+    const { gh, fake } = setup();
+    const issue = fake.addIssue({ body: '原话' });
+    const before = fake.requests.length;
+    const err = await gh
+      .updateIssueProgress({
+        repo,
+        issueNumber: issue.number,
+        progress: progress({ docs: { requirement: 'specs/12-fake-org-778899-迁移/需求.md' } }),
+      })
+      .catch((e: unknown) => e);
+    expect(err).toMatchObject({ code: 'HYGIENE_NAME_BLOCKED', retryable: false });
+    expect((err as Error).message).toContain(
+      `#${issue.number} 的进度段：文档（requirement） specs/12-〔名单上的值〕-迁移/需求.md 名单里的敏感值`,
+    );
+    expect(`${(err as Error).message}${JSON.stringify((err as { details: unknown }).details)}`).not.toContain(
+      '778899',
+    );
+    expect(fake.requests.length).toBe(before);
+    expect(issue.body).toBe('原话');
+  });
+
+  it('名单没读到：不写（HYGIENE_LIST_MISSING），不当成查过没事', async () => {
+    const { gh, fake } = setup({
+      sensitiveValues: () => ({ ok: false, reason: '已知敏感值名单没读到', tried: ['/nonexistent'] }),
+    });
+    const issue = fake.addIssue({ body: '原话' });
+    const before = fake.requests.length;
+    await expect(
+      gh.updateIssueProgress({ repo, issueNumber: issue.number, progress: progress() }),
+    ).rejects.toMatchObject({ code: 'HYGIENE_LIST_MISSING', retryable: false });
+    expect(fake.requests.length).toBe(before);
+  });
+
+  it('标题里带 NUL（扫不成内容）：不写（HYGIENE_UNSCANNED），不当成扫过没事', async () => {
+    const { gh, fake } = setup();
+    const issue = fake.addIssue({ body: '原话' });
+    const before = fake.requests.length;
+    await expect(
+      gh.updateIssueProgress({
+        repo,
+        issueNumber: issue.number,
+        progress: progress({
+          subtasks: [{ key: 'A', title: '登录\u0000表单', state: 'running', prNumber: null }],
+        }),
+      }),
+    ).rejects.toMatchObject({ code: 'HYGIENE_UNSCANNED' });
+    expect(fake.requests.length).toBe(before);
+  });
+});
+
 describe('关单', () => {
   it('先写明去向再关，带 state_reason；回读 state 与 state_reason', async () => {
     const { gh, fake } = setup();

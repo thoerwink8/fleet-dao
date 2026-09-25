@@ -35,6 +35,29 @@ describe('配置', () => {
       askWaitMs: 240_000,
       databaseUrl: 'postgres://fleet@localhost/fleet',
       feishuGatewayToken: null,
+      temporalAddress: '127.0.0.1:7243',
+      temporalNamespace: 'fleet',
+      fleetTaskQueue: 'fleet',
+    });
+  });
+
+  it('Temporal 地址、命名空间、任务队列：不给用默认（和引擎同一套默认），给了用给的', () => {
+    expect(loadConfig(PROD)).toMatchObject({
+      temporalAddress: '127.0.0.1:7243',
+      temporalNamespace: 'fleet',
+      fleetTaskQueue: 'fleet',
+    });
+    expect(
+      loadConfig({
+        ...PROD,
+        TEMPORAL_ADDRESS: 'temporal.internal:7233',
+        TEMPORAL_NAMESPACE: 'fleet-prod',
+        FLEET_TASK_QUEUE: 'fleet-main',
+      }),
+    ).toMatchObject({
+      temporalAddress: 'temporal.internal:7233',
+      temporalNamespace: 'fleet-prod',
+      fleetTaskQueue: 'fleet-main',
     });
   });
 

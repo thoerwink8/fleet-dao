@@ -31,6 +31,14 @@ export interface FailureEvidence {
   modelId?: string;
   /** 执行方式（@fleet-dao/shared 的 HostId）。 */
   hostId?: string;
+  /**
+   * 主池 / 备池（选路的 PoolRole：拼车号是备池）。额度用满时两者走法不同（design 第一节、第九节）：
+   * 主池挂起到清零、续同一个会话；备池窗口小，先换到别的池接着干（fork 续），换不了再等清零。不给按主池。
+   */
+  poolRole?: 'primary' | 'backup';
+  /** 出事的机器（给人看的名字，例如「法国」）和会话用户：只有人能修的（重新登录）要写清去哪台机器、以谁的身份修。 */
+  machine?: string;
+  runAsUser?: string;
   /** 这一步跟路由绑不绑定（AI 会话绑定；建树、推分支、开 PR 不绑定）。不给：有 routeId 或 source 是 `session:` 就算绑定。 */
   routeBound?: boolean;
   /** 结构化错误码：插头判定的原因（quota_exhausted、model_mismatch……）、端口的 PortError.code、Temporal 的 TIMEOUT_*、mirasim 的结束码。 */
@@ -87,6 +95,20 @@ export interface FailureVerdict {
   alert: boolean;
   /** 调用方该给哪个计数加一；挂起时是 null（引擎挂起后清零重来）。 */
   counter: keyof AttemptCounters | null;
+  /**
+   * action 是 retry、延迟是在等上游恢复时给：quota = 等账号池额度清零（等人、排队一样不算墙钟预算），
+   * upstream = 等上游给的别的时间（限流、繁忙、GitHub 暂时不让访问）。
+   */
+  wait?: 'quota' | 'upstream';
+  /**
+   * 所有任务一起避开的（写进共享的路由 / 账号池状态），和这个任务下一步做什么无关：挂起的也要给——
+   * 设备被撤销时这个任务挂起，同一个池的别的任务也不该再派过去。
+   */
+  shared?: Avoid;
+  /** 只有人能修、修法确定时给：写给人看的一句（填好了机器、会话用户）。 */
+  humanFix?: string;
+  /** 这一步之后（等完、或挂起后人点「继续」）续同一个会话、同一条路由；false = 下一次照常选路。 */
+  resumeSame: boolean;
   avoid?: Avoid;
   /** 喂熔断：fail = 算这条路由的失败；neutral = 不算（我们自己停的、断流、账号池的事、任务自己的问题）。 */
   routeOutcome: 'fail' | 'neutral';

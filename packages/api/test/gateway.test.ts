@@ -1,4 +1,4 @@
-import { FEISHU_ACTING_HEADER, MeResponse } from '@fleet-dao/shared';
+import { FEISHU_ACTING_HEADER, MeResponse, requirementWorkflowId } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import {
   agentRequest,
@@ -29,7 +29,10 @@ describe('飞书网关通行证', () => {
     );
     expect(res.status).toBe(200);
     expect(h.signals).toEqual([
-      { taskId: IDS.task12, signal: { name: 'pause', by: DEV_USER_ID, reason: '飞书里点的暂停' } },
+      {
+        workflowId: requirementWorkflowId({ owner: 'example', name: 'canary' }, 12),
+        signal: { name: 'pause', by: DEV_USER_ID, reason: '飞书里点的暂停' },
+      },
     ]);
     expect(h.store.data.audit.at(-1)).toMatchObject({
       actor: { kind: 'user', id: DEV_USER_ID },
