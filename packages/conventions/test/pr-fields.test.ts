@@ -104,6 +104,24 @@ describe('PR 必填栏：齐了就过', () => {
     expect([...cols.keys()]).toEqual(['对应计划', 'specs']);
   });
 
+  it('栏写在正文开头、后面分了小标题：小标题截断上一栏，各节里提到的 specs 路径不当成 specs 这一栏', () => {
+    const text = [
+      '对应计划：P1「工作流」',
+      'specs：specs/12-登录验证码/',
+      '',
+      '## 改了什么',
+      '- `specs/99-别的/需求.md`：顺带提一句',
+    ].join('\n');
+    expect(prColumns(text).get('specs')).toBe('specs/12-登录验证码/');
+    expect(check({ body: text })).toEqual([]);
+  });
+
+  it('specs 路径后面紧跟全角冒号、句号：只取路径', () => {
+    for (const specs of ['`specs/12-登录验证码/需求.md`：照 #12 抄。', 'specs/12-登录验证码/。']) {
+      expect(check({ body: body('P1「工作流」', specs) }), specs).toEqual([]);
+    }
+  });
+
   it('不加粗认的栏名就是 PR 模板里的那几栏，顺序也一样', () => {
     expect([...prColumns(TEMPLATE).keys()]).toEqual([...PR_COLUMNS]);
   });
