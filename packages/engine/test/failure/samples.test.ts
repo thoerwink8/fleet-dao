@@ -1,7 +1,6 @@
-// 真实报错样本逐条过一遍规则表：每条样本都要分到对的下一步动作；每条规则都要有样本撑着；公开仓里的东西要干净。
-import { readdirSync, readFileSync } from 'node:fs';
-import { join, relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
+// 真实报错样本逐条过一遍规则表：每条样本都要分到对的下一步动作；每条规则都要有样本撑着。
+// 样本里有没有能认出人、账号、机器、组织的东西，由全仓的卫生检查（packages/hygiene）管。
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
   classifyFailure,
@@ -110,56 +109,5 @@ describe('规则表和夹具对得上', () => {
       })
       .map((s) => s.id);
     expect(drift).toEqual([]);
-  });
-});
-
-// 公开仓：引擎包的代码、测试、夹具里都不许有能认出人、账号、机器、组织的东西。
-const LEAKS: [string, RegExp][] = [
-  ['邮箱', /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g],
-  ['IP', /\b(?!(?:127\.0\.0\.1|0\.0\.0\.0)\b)(?:\d{1,3}\.){3}\d{1,3}\b/g],
-  ['家目录里的用户名', /\/home\/(?!agent\b)[A-Za-z0-9_.-]+/g],
-  ['Windows 用户目录', /[A-Za-z]:\\\\?Users\\\\?[^\\\s"]+/g],
-  ['令牌', /\b(?:ghp_|gho_|ghs_|ghu_|github_pat_|sk-ant-|xai-)[A-Za-z0-9_-]{8,}/g],
-  ['请求编号', /\breq_[A-Za-z0-9]{8,}/g],
-  ['组织编号', /(?:\borg(?:anization)?(?:[ _-]?id)?(?:\s+use)?|组织(?:编号)?)\s*[:=：]?\s*\d{3,}/gi],
-];
-
-function findLeaks(text: string): string[] {
-  return LEAKS.flatMap(([label, re]) => [...text.matchAll(re)].map((m) => `${label}：${m[0].slice(0, 60)}`));
-}
-
-const ENGINE = fileURLToPath(new URL('../../', import.meta.url));
-
-function filesUnder(dir: string): string[] {
-  return readdirSync(dir, { withFileTypes: true }).flatMap((d) =>
-    d.isDirectory() ? filesUnder(join(dir, d.name)) : [join(dir, d.name)],
-  );
-}
-
-describe('脱敏', () => {
-  it('引擎包 src/ 和 test/ 下每个文件都干净（代码、测试、夹具）', () => {
-    const files = ['src', 'test'].flatMap((d) => filesUnder(join(ENGINE, d)));
-    expect(files.some((f) => f.endsWith('failure-samples.json'))).toBe(true);
-    expect(files.some((f) => f.endsWith('rules.ts'))).toBe(true);
-    const leaks = files.flatMap((f) =>
-      findLeaks(readFileSync(f, 'utf8')).map((l) => `${relative(ENGINE, f)} ${l}`),
-    );
-    expect(leaks).toEqual([]);
-  });
-
-  it('故意放进去的违规样本都拦得住', () => {
-    // 全是假值，而且拼起来用：源码里不出现整段，上面那道扫描就不会扫到这个文件自己。
-    const planted = [
-      ['mail me: someone', 'example.com'].join('@'),
-      `host ${['10', '0', '0', '1'].join('.')}`,
-      `"auto":"${['', 'home', 'someone', '.claude'].join('/')}"`,
-      ['C:', 'Users', 'someone', 'AppData'].join('\\'),
-      `token ${['ghs', 'abcdefghijklmnop'].join('_')}`,
-      `（请求 ID: ${['req', 'AAAAAAAAAAAAAAAA'].join('_')}）`,
-      `reclaude org use ${'9'.repeat(4)}`,
-      `切到组织 ${'1'.repeat(3)}`,
-    ];
-    expect(planted.map((s) => findLeaks(s).length)).toEqual(planted.map(() => 1));
-    expect(findLeaks('127.0.0.1 · /home/agent · <请求ID> · gpt-5.6-terra · reclaude org use:')).toEqual([]);
   });
 });

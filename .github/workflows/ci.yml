@@ -18,6 +18,15 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # 卫生检查要的已知敏感值名单（真实的组织编号、账号，一行一个）：从 Actions 密钥写成临时文件再指过去。
+      # 密钥没配或是空的，检查会明确报「名单没读到」、退出码 2，不会当成干净。
+      - name: 已知敏感值名单
+        env:
+          FLEET_SENSITIVE_VALUES: ${{ secrets.FLEET_SENSITIVE_VALUES }}
+        run: |
+          f="$RUNNER_TEMP/sensitive-values.txt"
+          printf '%s\n' "$FLEET_SENSITIVE_VALUES" > "$f"
+          echo "FLEET_SENSITIVE_VALUES_FILE=$f" >> "$GITHUB_ENV"
       - run: pnpm check
       # 装机脚本的检查：退出码 2 = 有项没跑成，同样算红，别让「没跑」冒充「通过」
       - run: sudo bash deploy/test/run.sh

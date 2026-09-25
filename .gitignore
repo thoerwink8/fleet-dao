@@ -2,17 +2,36 @@ node_modules/
 dist/
 coverage/
 *.tsbuildinfo
-.env
-.env.*
 *.local
 .DS_Store
 .playwright-mcp/
 
-# 密钥和本机配置不进公开仓。加密副本在私有仓 fleet-dao-vault（README「密钥和本机配置在哪」）；
-# 这几条是多一层保险：密钥文件、保险箱的钥匙 vault-key.txt、密文 *.age 被误拷进来，git add 也不会带上。
+# >>> 密钥文件名单（公开仓，一律不进）
+# 密钥和本机配置不进公开仓，加密副本在私有仓 fleet-dao-vault（README「密钥和本机配置在哪」）。
+# 这一段是多一层保险：密钥文件、密钥的备份副本、保险箱的钥匙 vault-key.txt、密文 *.age 被误拷进来，git add 也不会带上。
+# 和 packages/hygiene/src/rules.ts 的 SECRET_FILES 是同一张名单：被 git add -f 强行加进来的，卫生检查（推送前的钩子、
+# pnpm check、CI）照样拦。只加密钥类的名字；两边对不上，packages/hygiene/test/secret-files.test.ts 会红。
 .secrets/
 *.pass
 *.key
 *.pem
 vault-key.txt
 *.age
+*.p12
+*.pfx
+*.ppk
+*.kdbx
+*.jks
+*.keystore
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+id_ecdsa_sk
+id_ed25519_sk
+.env
+.env.*
+.pgpass
+.netrc
+.credentials.json
+# <<< 密钥文件名单

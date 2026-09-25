@@ -7,7 +7,9 @@
     "node": ">=22.22"
   },
   "scripts": {
-    "check": "biome check . && tsc -b && vitest run",
+    "check": "biome check . && tsc -b && vitest run && node packages/hygiene/src/bin/check.ts",
+    "hygiene": "node packages/hygiene/src/bin/check.ts",
+    "prepare": "node packages/hygiene/src/bin/install-hooks.ts",
     "format": "biome check --write .",
     "typecheck": "tsc -b",
     "test": "vitest run"
