@@ -99,7 +99,10 @@ export interface OpenPrInput {
   /** 字符串原样用；给结构就按仓里的 PR 模板渲染（renderPrBody）。 */
   body: string | PrBodyInput;
   draft?: boolean | undefined;
-  /** design §7：把这张需求 issue 的类别标签、里程碑照抄到 PR 上（读不到 issue 就报错，不当「issue 没标签」）。 */
+  /**
+   * design §7：PR 的类别标签、里程碑对齐到这张需求 issue（以 issue 为准，复用的旧 PR 身上不对的会改掉；
+   * issue 自己贴了两个类别报 ISSUE_CATEGORY_CONFLICT；读不到 issue 就报错，不当「issue 没标签」）。
+   */
   inheritFrom?: { issueNumber: number } | undefined;
 }
 
@@ -117,7 +120,7 @@ export interface OpenPrResult {
   inherited?: { labels: string[]; milestone: string | null } | undefined;
 }
 
-/** design §7：需求 issue 的类别标签互斥，PR 照抄这个固定集合里 issue 有的那几个。 */
+/** design §7：类别标签互斥（这个固定集合里恰好一个），PR 跟 issue 贴同一个。 */
 export const CATEGORY_LABELS = ['需求', '缺陷', '杂项'] as const;
 
 const IssueLabelsAndMilestone = z.object({
@@ -126,8 +129,12 @@ const IssueLabelsAndMilestone = z.object({
 });
 
 /**
- * 把 issue 的类别标签、里程碑对到 PR 上：标签只加不删（POST 是追加，不是替换）；PR 已经有里程碑（不管是哪个）就不改，
- * 原样报回去。PR 在 GitHub 眼里也是一张 issue，标签/里程碑走 /issues/ 这一套接口，不是 /pulls/。
+ * 把 PR 的类别标签、里程碑对齐到 issue：以 issue 为准（人要改类别、换阶段就改 issue，PR 下一轮开 PR 时跟上）。
+ * 复用已有的 PR 时它身上可能是旧的（issue 后来改过类别、换过里程碑）：只加不减会留下两个类别、旧里程碑，pr-fields 一直红。
+ * 所以 PR 身上别的类别标签摘掉、issue 的补上，里程碑和 issue 的不是同一个就改成 issue 的；类别以外的标签不碰。
+ * issue 自己贴了不止一个类别：没法判以哪个为准，明确报 ISSUE_CATEGORY_CONFLICT 等人把 issue 改成一个，PR 一样不动。
+ * issue 没有类别、没有里程碑：没有可对齐的，PR 上原有的不动。
+ * PR 在 GitHub 眼里也是一张 issue，标签/里程碑走 /issues/ 这一套接口，不是 /pulls/。
  * 读 issue 或 PR 失败让它原样抛出去：读不到不等于「没有标签」。
  */
 async function inheritFromIssue(
@@ -149,29 +156,51 @@ async function inheritFromIssue(
   if (!pr.success) throw unexpected(`读 PR #${prNumber} 的标签与里程碑`, prRes.data);
 
   const issueLabels = new Set(issue.data.labels.map((l) => l.name));
-  const labels = CATEGORY_LABELS.filter((l) => issueLabels.has(l));
+  const wanted = CATEGORY_LABELS.filter((l) => issueLabels.has(l));
+  if (wanted.length > 1) {
+    throw new GitHubError(
+      'ISSUE_CATEGORY_CONFLICT',
+      `issue #${issueNumber} 同时贴了 ${wanted.join('、')}：类别只能有一个，PR #${prNumber} 没法照抄。在 issue 上只留一个再继续`,
+      { details: { issueNumber, prNumber, labels: wanted } },
+    );
+  }
   const prLabels = new Set(pr.data.labels.map((l) => l.name));
-  const toAdd = labels.filter((l) => !prLabels.has(l));
-  if (toAdd.length > 0) {
-    await deps.client.request({
-      method: 'POST',
-      path: `${base}/${prNumber}/labels`,
-      auth,
-      body: { labels: toAdd },
-      signal,
-    });
+  let labels: string[] = CATEGORY_LABELS.filter((l) => prLabels.has(l));
+  const [want] = wanted;
+  if (want !== undefined) {
+    for (const name of labels.filter((l) => l !== want)) {
+      // 404 = 已经不在了（别人刚摘掉）：要的就是它不在
+      await deps.client.request({
+        method: 'DELETE',
+        path: `${base}/${prNumber}/labels/${enc(name)}`,
+        auth,
+        allow: [404],
+        signal,
+      });
+    }
+    if (!prLabels.has(want)) {
+      await deps.client.request({
+        method: 'POST',
+        path: `${base}/${prNumber}/labels`,
+        auth,
+        body: { labels: [want] },
+        signal,
+      });
+    }
+    labels = [want];
   }
 
   let milestone = pr.data.milestone?.title ?? null;
-  if (!pr.data.milestone && issue.data.milestone) {
+  const target = issue.data.milestone;
+  if (target && pr.data.milestone?.number !== target.number) {
     await deps.client.request({
       method: 'PATCH',
       path: `${base}/${prNumber}`,
       auth,
-      body: { milestone: issue.data.milestone.number },
+      body: { milestone: target.number },
       signal,
     });
-    milestone = issue.data.milestone.title;
+    milestone = target.title;
   }
   return { labels, milestone };
 }
@@ -204,7 +233,8 @@ export async function openPr(
   const body = neutralizeCloseKeywords(rawBody);
   const title = neutralizeCloseKeywords(input.title.trim());
   assertBodySize('PR 正文', body);
-  // 标题和正文（会话交活时写的总结在里面）开出去就公开了，不经 git 推送、推前扫描拦不到：开之前过一遍
+  // 标题和正文（会话交活时写的总结在里面）开出去就公开了，不经 git 推送、推前扫描拦不到：开之前过一遍；
+  // PR 上也挂着分支名，一起按名单比（名字里查出来是 HYGIENE_NAME_BLOCKED，见 publish-check.ts）
   assertPublishable(
     `开 ${slug} 上 ${branch} 的 PR`,
     [
@@ -212,6 +242,7 @@ export async function openPr(
       { path: 'PR 正文', text: body },
     ],
     deps.sensitiveValues,
+    [{ label: '分支名', name: branch }],
   );
   const facts = await deps.facts.get(repo, 'agent', ctx.signal);
   if (branch.toLowerCase() === facts.defaultBranch.toLowerCase()) {

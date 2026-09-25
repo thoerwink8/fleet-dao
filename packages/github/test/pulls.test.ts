@@ -169,6 +169,27 @@ describe('开 PR', () => {
       expect(fake.requests).toHaveLength(0);
     });
 
+    it('分支名里带名单上的值（PR 上挂着分支名）：不开（HYGIENE_NAME_BLOCKED，不退回会话），一个请求都不发，分支名打了码', async () => {
+      const { gh, fake } = setup();
+      const branch = 'task/28-fake-org-778899';
+      fake.refs.set(branch, A);
+      const err = await gh
+        .openPr({
+          repo,
+          branch,
+          head: A,
+          title: '登录页加验证码',
+          body: { did: ['x'], verified: ['x'], plan: 'P1「工作流」', specs: 'specs/28-x/', changedFiles: [] },
+        })
+        .catch((e: unknown) => e);
+      expect(err).toMatchObject({ code: 'HYGIENE_NAME_BLOCKED', retryable: false });
+      expect((err as Error).message).toContain('分支名 task/28-〔名单上的值〕 名单里的敏感值');
+      expect(
+        `${(err as Error).message}${JSON.stringify((err as { details: unknown }).details)}`,
+      ).not.toContain('778899');
+      expect(fake.requests).toHaveLength(0);
+    });
+
     it('正文里带 NUL（扫不成内容，只能按二进制算）：不开（HYGIENE_UNSCANNED），一个请求都不发，不当成扫过没事', async () => {
       const { gh, fake } = setup();
       fake.refs.set('task/27-nul', A);
@@ -241,6 +262,70 @@ describe('开 PR', () => {
       expect(fake.pulls.get(res.number)?.labels).toEqual(['需求']);
       expect(fake.calls('POST', /\/labels$/)).toHaveLength(1);
       expect(fake.calls('PATCH', new RegExp(`/issues/${res.number}$`))).toHaveLength(1);
+    });
+
+    const reuseInput = (branch: string, issueNumber: number) => ({
+      repo,
+      branch,
+      head: A,
+      title: 'x',
+      body: { did: ['x'], verified: ['x'], plan: 'P1「工作流」', specs: 'specs/29-x/', changedFiles: [] },
+      inheritFrom: { issueNumber },
+    });
+
+    it('复用已有的 PR、它身上是旧的（缺陷 / P0），issue 已经改成需求 / P1：摘掉缺陷、贴上需求、里程碑改成 P1，别的标签不碰', async () => {
+      const { gh, fake } = setup();
+      const issue = fake.addIssue({ labels: ['需求'], milestone: { number: 8, title: 'P1' } });
+      const old = fake.addPull({
+        head: { ref: 'task/29-stale', sha: A },
+        labels: ['缺陷', '好上手'],
+        milestone: { number: 3, title: 'P0' },
+      });
+      const res = await gh.openPr(reuseInput('task/29-stale', issue.number));
+      expect(res).toMatchObject({ number: old.number, created: false });
+      expect(res.inherited).toEqual({ labels: ['需求'], milestone: 'P1' });
+      expect([...(fake.pulls.get(old.number)?.labels ?? [])].sort()).toEqual(['好上手', '需求'].sort());
+      expect(fake.pulls.get(old.number)?.milestone).toEqual({ number: 8, title: 'P1' });
+      expect(fake.calls('DELETE', /\/labels\//)).toHaveLength(1);
+
+      // 再开一次（下一轮推完）：已经对齐了，一个写请求都不再发
+      const writes = fake.requests.filter((r) => r.method !== 'GET').length;
+      const again = await gh.openPr(reuseInput('task/29-stale', issue.number));
+      expect(again.inherited).toEqual({ labels: ['需求'], milestone: 'P1' });
+      expect(fake.requests.filter((r) => r.method !== 'GET').length).toBe(writes);
+    });
+
+    it('要摘的类别标签刚被别人摘掉（DELETE 回 404）：要的就是它不在，照常对齐', async () => {
+      const { gh, fake } = setup();
+      const issue = fake.addIssue({ labels: ['需求'], milestone: { number: 8, title: 'P1' } });
+      const old = fake.addPull({ head: { ref: 'task/30-race', sha: A }, labels: ['缺陷'] });
+      fake.before.push((req) => {
+        // 别人抢在 DELETE 之前摘掉了：落到假服务自己的路由，身上已经没有，回 404
+        if (req.method === 'DELETE' && /\/labels\//.test(req.path)) old.labels = [];
+        return undefined;
+      });
+      const res = await gh.openPr(reuseInput('task/30-race', issue.number));
+      expect(res.inherited).toEqual({ labels: ['需求'], milestone: 'P1' });
+      expect(fake.pulls.get(old.number)?.labels).toEqual(['需求']);
+      expect(fake.calls('DELETE', /\/labels\//)).toHaveLength(1);
+    });
+
+    it('issue 自己同时贴了两个类别：明确报 ISSUE_CATEGORY_CONFLICT（等人把 issue 改成一个），PR 上的标签、里程碑一样不动', async () => {
+      const { gh, fake } = setup();
+      const issue = fake.addIssue({ labels: ['需求', '缺陷'], milestone: { number: 8, title: 'P1' } });
+      const old = fake.addPull({
+        head: { ref: 'task/31-conflict', sha: A },
+        labels: ['杂项'],
+        milestone: { number: 3, title: 'P0' },
+      });
+      const err = await gh.openPr(reuseInput('task/31-conflict', issue.number)).catch((e: unknown) => e);
+      expect(err).toMatchObject({ code: 'ISSUE_CATEGORY_CONFLICT', retryable: false });
+      expect((err as Error).message).toContain('需求、缺陷');
+      expect(fake.pulls.get(old.number)?.labels).toEqual(['杂项']);
+      expect(fake.pulls.get(old.number)?.milestone).toEqual({ number: 3, title: 'P0' });
+      expect(fake.calls('POST', /\/labels$/)).toHaveLength(0);
+      expect(fake.calls('DELETE', /\/labels\//)).toHaveLength(0);
+      expect(fake.calls('PATCH', new RegExp(`/issues/${old.number}$`))).toHaveLength(0);
     });
 
     it('issue 没有类别标签、没有里程碑：PR 也不挂，inherited 为空', async () => {

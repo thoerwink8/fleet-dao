@@ -113,12 +113,13 @@ export async function writeSpecDoc(deps: Deps, input: WriteSpecDocInput): Promis
       details: { length: bytes, limit: MAX_CONTENT_BYTES },
     });
   }
-  // 直写主线不经 git 推送，推前扫描拦不到：文件名、正文、提交说明写之前各过一遍
+  // 直写主线不经 git 推送，推前扫描拦不到：写之前正文、提交说明各过一遍，路径本身（是不是密钥文件、带没带名单上的值）
+  // 也过——路径是开工时按 issue 标题定的，名字里查出来报 HYGIENE_NAME_BLOCKED（publish-check.ts）
   assertPublishable(
     `写 ${path}`,
     [
       { path, text: input.content },
-      { path: `${path}（提交说明）`, text: input.message },
+      { path: '提交说明', text: input.message },
     ],
     deps.sensitiveValues,
   );

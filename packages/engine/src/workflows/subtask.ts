@@ -423,7 +423,8 @@ export async function subtaskWorkflow(input: SubtaskInput): Promise<SubtaskResul
         if (delivery.note) status.lastProblem = delivery.note;
         // 会话只在本地提交；推分支、开 PR 由引擎在会话外面做。推的端口先把最新主线并进会话的树（冲突退回会话解，MC1）；
         // 推之前的卫生检查拦下了会话交的内容：退回会话拿掉再交（同一处连续被拦两次挂起报警，HY1）；名单没读到、
-        // 没扫成是这一侧的问题，挂起报警、不退会话（HY2）。退回时的意见按认出的规则写（reworkFeedback）。
+        // 没扫成是这一侧的问题，挂起报警、不退会话（HY2）；分支名里查出来的会话也改不了，一样挂起（HY3）。
+        // 退回时的意见按认出的规则写（reworkFeedback）。
         const pushedOrRework = await attemptOrRework(
           kit,
           'pushBranch',

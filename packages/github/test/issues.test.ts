@@ -238,6 +238,28 @@ describe('写进度段之前的卫生检查（公开的 issue 正文，推前扫
     expect(fake.requests.length).toBe(before);
   });
 
+  it('文档路径（引擎按 issue 标题定的）里带名单上的值：拦（HYGIENE_NAME_BLOCKED，不退回会话），一个请求都不发，路径打了码', async () => {
+    const { gh, fake } = setup();
+    const issue = fake.addIssue({ body: '原话' });
+    const before = fake.requests.length;
+    const err = await gh
+      .updateIssueProgress({
+        repo,
+        issueNumber: issue.number,
+        progress: progress({ docs: { requirement: 'specs/12-fake-org-778899-迁移/需求.md' } }),
+      })
+      .catch((e: unknown) => e);
+    expect(err).toMatchObject({ code: 'HYGIENE_NAME_BLOCKED', retryable: false });
+    expect((err as Error).message).toContain(
+      `#${issue.number} 的进度段：文档（requirement） specs/12-〔名单上的值〕-迁移/需求.md 名单里的敏感值`,
+    );
+    expect(`${(err as Error).message}${JSON.stringify((err as { details: unknown }).details)}`).not.toContain(
+      '778899',
+    );
+    expect(fake.requests.length).toBe(before);
+    expect(issue.body).toBe('原话');
+  });
+
   it('名单没读到：不写（HYGIENE_LIST_MISSING），不当成查过没事', async () => {
     const { gh, fake } = setup({
       sensitiveValues: () => ({ ok: false, reason: '已知敏感值名单没读到', tried: ['/nonexistent'] }),

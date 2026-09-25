@@ -712,14 +712,45 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
       clearTimeout(timer);
     }
     const handle: SessionHandle = { pid: info.pid, ...(info.scope ? { scope: info.scope } : {}) };
-    const marked = await markSessionRunStarted(db, {
-      id: input.runId,
-      startedAt: new Date(info.startedAt),
-      sessionId,
-      handle,
-    });
-    if (marked === 'not_found') log('会话开工没记上：库里没这一行', { runId: input.runId });
+    // 进程已经起来了：开工（进程号、scope）必须记进库，工人重启后才能照记录收掉它。记不上就不能当成起好了——
+    // 先把这个会话停掉、scope 收掉（和上面「没起来」的收尾一样），再明确报错，不留一个库里查不到的孤儿会话。
+    let marked: 'ok' | 'not_found';
+    try {
+      marked = await markSessionRunStarted(db, {
+        id: input.runId,
+        startedAt: new Date(info.startedAt),
+        sessionId,
+        handle,
+      });
+    } catch (error) {
+      const stopped = await abandonStarted(live, user, '开工没记进库');
+      throw new PortError(
+        'SESSION_RECORD_FAILED',
+        `会话 ${input.runId} 起来了，开工却没记进库（${errorText(error)}）：已经停掉${stopped}`,
+        { retryable: true },
+      );
+    }
+    if (marked === 'not_found') {
+      const stopped = await abandonStarted(live, user, '库里没这一行');
+      throw new PortError(
+        'SESSION_RECORD_MISSING',
+        `会话 ${input.runId} 起来了，库里却没这一行：进程号和 scope 记不下，工人重启后收不掉它，已经停掉${stopped}`,
+        { retryable: false },
+      );
+    }
     return resultOf(live, info);
+  }
+
+  /**
+   * 起来了、却记不进库的会话：叫停它（插头收进程），再按编号让帮手把 scope 收掉，不等插头自己收完。
+   * 回一句收得怎么样（收不掉写明原因），拼进报错里。
+   */
+  async function abandonStarted(live: Live, user: SessionUser, reason: string): Promise<string> {
+    live.stop ??= { kind: 'stop', reason };
+    live.abort.abort();
+    registry.delete(live.runId);
+    const error = await stopScope({ id: live.runId, user, ...helperOpts });
+    return error ? `，但 scope 没收掉：${error}` : '';
   }
 
   // ---- 看守

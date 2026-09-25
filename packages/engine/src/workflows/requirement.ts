@@ -539,7 +539,7 @@ export async function requirementWorkflow(input: RequirementInput): Promise<Requ
 
     await setPhase('spec', '写需求文档');
     // 需求文档、方案直写进主线（公开）：写之前 github 包过卫生检查，拦下了退回写它的会话拿掉再交（HY1，同一处
-    // 连续两次挂起报警）；名单没读到、没扫成挂起报警（HY2）。
+    // 连续两次挂起报警）；名单没读到、没扫成挂起报警（HY2）；路径（开工时按标题定的）里查出来会话改不了，挂起（HY3）。
     let specFeedback: Feedback[] = [];
     let specRework: ReworkCarry = NO_REWORK;
     let specSession: string | undefined;

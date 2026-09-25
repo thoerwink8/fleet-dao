@@ -680,6 +680,22 @@ export class FakeGitHub {
         target.labels.map((name) => ({ name })),
       );
     }
+    x = /^\/issues\/(\d+)\/labels\/([^/]+)$/.exec(rest);
+    if (x && m === 'DELETE') {
+      const n = Number(x[1]);
+      const issue = this.issues.get(n);
+      const pr = issue ? undefined : this.pulls.get(n);
+      if (!issue && !pr) return this.notFound();
+      const target = issue ?? (pr as PullState);
+      const name = decodeURIComponent(x[2] ?? '');
+      // 和 GitHub 一样：身上没有这个标签回 404（Label does not exist）
+      if (!target.labels.includes(name)) return this.json(404, { message: 'Label does not exist' });
+      target.labels = target.labels.filter((l) => l !== name);
+      return this.json(
+        200,
+        target.labels.map((l) => ({ name: l })),
+      );
+    }
     x = /^\/issues\/(\d+)\/comments$/.exec(rest);
     if (x) {
       const issue = this.issues.get(Number(x[1]));

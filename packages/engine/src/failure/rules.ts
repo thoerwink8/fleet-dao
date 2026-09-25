@@ -344,6 +344,31 @@ export const RULES: readonly FailureRule[] = [
     alert: true,
     routeOutcome: 'neutral',
   },
+  // 卫生检查拦的是名字（需求文档的路径、分支名、进度段里的文档路径）：名字是开工时按 issue 标题、子任务的 key
+  // 定下的，会话改不了，原样重试还是它——退回会话只会白跑一轮。挂起报警，要人看。
+  {
+    id: 'HY3',
+    title: '卫生检查拦下了引擎起的名字',
+    codes: ['hygiene_name_blocked'],
+    codeFieldOnly: true,
+    ladder: ['park'],
+    alert: true,
+    routeOutcome: 'neutral',
+    humanFix:
+      '名字是开工时按 issue 标题、子任务的 key 定下的，点「继续」还是它：误报就把这一条加进卫生检查的白名单再继续；真带了值就叫停这张需求，改掉 issue 标题再重开',
+  },
+  // 开 PR 时照需求 issue 对齐类别标签，issue 自己贴了不止一个类别：没法判以哪个为准，照抄过去 pr-fields 会一直红。
+  // 只有人能改 issue：挂起报警，改成一个再点「继续」，PR 跟着对齐。
+  {
+    id: 'LB1',
+    title: '需求 issue 的类别标签不止一个',
+    codes: ['issue_category_conflict'],
+    codeFieldOnly: true,
+    ladder: ['park'],
+    alert: true,
+    routeOutcome: 'neutral',
+    humanFix: '在需求 issue 上只留一个类别标签（需求、缺陷、杂项里挑一个），再点「继续」',
+  },
   {
     id: 'HM1',
     title: '要人拍板或缺配置',

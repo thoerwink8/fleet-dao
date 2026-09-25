@@ -217,6 +217,8 @@ export interface FakeRunScript {
   spawnError?: string;
   /** 迟迟起不来：不调 onSpawn，等被叫停才收场（测「等进程起来」超时）。 */
   hangBeforeSpawn?: boolean;
+  /** 进程「起来」（调 onSpawn）之前做的事：比如把库里这一行删掉，测开工记不上。 */
+  beforeSpawn?: (spec: ClaudeCodeRunSpec) => Promise<void> | void;
   /** 起来之后做的事：发事件、改工作树、在库里写 done……abort 了要尽快返回。 */
   act?: (ctx: {
     spec: ClaudeCodeRunSpec;
@@ -305,6 +307,7 @@ export function fakeRun(script: (spec: ClaudeCodeRunSpec, n: number) => FakeRunS
         stream: stream([]),
       };
     }
+    await s.beforeSpawn?.(spec);
     await opts.onSpawn?.({
       pid: 4242,
       runId: spec.runId,

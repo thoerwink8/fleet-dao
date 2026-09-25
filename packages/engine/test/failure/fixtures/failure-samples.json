@@ -1095,6 +1095,32 @@
         "message": "等了 45 秒进程还没起来"
       },
       "expect": { "action": "retry", "rule": "ST1" }
+    },
+    {
+      "id": "X71",
+      "provenance": "format",
+      "origin": "github 包写需求文档进主线之前的卫生检查：路径（开工时按 issue 标题定的）里带名单上的值，正文干净；名字里查出来报 HYGIENE_NAME_BLOCKED，路径打了码",
+      "evidence": {
+        "source": "writeSpecDoc",
+        "routeBound": false,
+        "code": "HYGIENE_NAME_BLOCKED",
+        "retryable": false,
+        "message": "写 specs/22-〔名单上的值〕-迁移/需求.md被卫生检查拦下：名字里就有（specs/22-〔名单上的值〕-迁移/需求.md 名单里的敏感值）。名字是开工时按 issue 标题、子任务的 key 定下的，会话改不了，原样重试还是它"
+      },
+      "expect": { "action": "park", "rule": "HY3", "alert": true, "routeOutcome": "neutral" }
+    },
+    {
+      "id": "X72",
+      "provenance": "format",
+      "origin": "github 包开 PR 时照需求 issue 对齐类别标签，issue 自己同时贴了需求和缺陷：ISSUE_CATEGORY_CONFLICT，不可重试",
+      "evidence": {
+        "source": "openPr",
+        "routeBound": false,
+        "code": "ISSUE_CATEGORY_CONFLICT",
+        "retryable": false,
+        "message": "issue #12 同时贴了 需求、缺陷：类别只能有一个，PR #31 没法照抄。在 issue 上只留一个再继续"
+      },
+      "expect": { "action": "park", "rule": "LB1", "alert": true, "routeOutcome": "neutral" }
     }
   ],
   "skipped": [

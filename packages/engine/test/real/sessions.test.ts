@@ -643,6 +643,49 @@ describe('失败', () => {
     expect(fake.specs).toHaveLength(1);
   });
 
+  it('进程起来了、库里却没这一行（开工记不上）：停掉会话、收掉 scope，明确报 SESSION_RECORD_MISSING，不当成起好了', async () => {
+    const { ports, fake, scope } = setup(() => ({
+      // 起来之前这一行没了（被删、库回滚……）：进程号和 scope 记不下，工人重启后就收不掉它
+      beforeSpawn: async () => {
+        await t.db.delete(sessionRuns);
+      },
+      act: async ({ signal }) => untilAborted(signal),
+    }));
+    const input = launch();
+    const err = await ports.startSession(input, ctx()).catch((e: unknown) => e);
+    expect(err).toMatchObject({ code: 'SESSION_RECORD_MISSING', retryable: false });
+    expect((err as Error).message).toContain('已经停掉');
+    // 插头被叫停、scope 按编号收了：不留一个库里查不到的会话在跑
+    expect(fake.options[0]?.signal?.aborted).toBe(true);
+    expect(scope.calls().some((c) => c.action === 'stop' && c.args.includes(input.runId))).toBe(true);
+    expect(fake.count()).toBe(1);
+  });
+
+  it('进程起来了、开工写库时库报错：一样停掉会话、收掉 scope，报 SESSION_RECORD_FAILED（可重试），不留孤儿', async () => {
+    // 只拦「记开工」那一句（它改 handle）：库连不上、写超时之类
+    await t.client.exec(`
+      create function sessions_test_refuse() returns trigger language plpgsql as $$
+      begin raise exception 'sessions_test_refuse'; end $$;
+      create trigger sessions_test_refuse before update of handle on session_runs
+        for each row execute function sessions_test_refuse();
+    `);
+    try {
+      const { ports, fake, scope } = setup(() => ({ act: async ({ signal }) => untilAborted(signal) }));
+      const input = launch();
+      const err = await ports.startSession(input, ctx()).catch((e: unknown) => e);
+      expect(err).toMatchObject({ code: 'SESSION_RECORD_FAILED', retryable: true });
+      expect((err as Error).message).toContain('已经停掉');
+      expect(fake.options[0]?.signal?.aborted).toBe(true);
+      expect(scope.calls().some((c) => c.action === 'stop' && c.args.includes(input.runId))).toBe(true);
+      // 库里这一行还是没记开工的样子：重试照常从头起，不会被当成「上一个工人起过」
+      expect((await getSessionRun(t.db, input.runId))?.startedAt ?? null).toBeNull();
+    } finally {
+      await t.client.exec(
+        'drop trigger sessions_test_refuse on session_runs; drop function sessions_test_refuse();',
+      );
+    }
+  });
+
   it('进程迟迟起不来：到点明确报 SPAWN_TIMEOUT（不可重试），叫停它，库里这一行记上结局', async () => {
     const { ports } = setup(() => ({ hangBeforeSpawn: true }), { spawnTimeoutMs: 200 });
     const input = launch();
