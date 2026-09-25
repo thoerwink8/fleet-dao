@@ -53,7 +53,8 @@ describe('静态检查', () => {
     for (const [key, value] of assignments) {
       expect({ key, value, ok: allowed(value) }).toEqual({ key, value, ok: true });
     }
-    const unit = read(new URL('deploy/fleet-feishu.service', pkg));
+    // 香港真正装的单元在仓根 deploy/hk/（deploy/hk.sh 装；包里不再另放一份样例）
+    const unit = read(new URL('../../deploy/hk/fleet-feishu.service', pkg));
     expect(unit).toContain('User=fleet');
     expect(unit).toContain('Restart=always');
     expect(unit).toContain('EnvironmentFile=/etc/fleet-dao/feishu.env');

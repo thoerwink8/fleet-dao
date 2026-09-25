@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # shellcheck source-path=SCRIPTDIR
-# 发布（在法国以 root 跑）：把主线上的一个提交装成一版 → 跑数据库迁移 → 切过去、按本机配置起应用服务 → 把驾驶舱静态文件
-# 经隧道发到香港 → 健康检查；不过就自动退回上一版并报错（库的迁移比上一版新时不退）。幂等：同一个提交跑第二遍什么都不变。
+# 发布（在法国以 root 跑）：把主线上的一个提交装成一版 → 跑数据库迁移 → 切过去、按本机配置起应用服务 → 经隧道把飞书网关发到香港
+# （release.env 里明写了 web，才连驾驶舱静态文件一起发）→ 健康检查；不过就自动退回上一版并报错（库的迁移比上一版新时不退）。
+# 幂等：同一个提交跑第二遍什么都不变。
 # 发布和退回自己交给 systemd 跑（临时服务），终端断了照样跑完；日志在 /srv/fleet-dao-releases/.logs/。
 #   bash deploy/release.sh [<提交号>]            发布这个提交（不给就发主线最新）；只认主线上的提交
 #   bash deploy/release.sh --rollback            退回上一版（上一个在用过、没被判过不健康、目录还在的版本）
@@ -27,7 +28,10 @@ APP_UNITS=(fleet-engine fleet-api)
 RELEASE_ENV=/etc/fleet-dao/release.env
 UPLOAD_KEY=/etc/fleet-dao/web-upload.key
 HK_KNOWN_HOSTS=/etc/fleet-dao/hk-known-hosts
-HK_TUNNEL=10.99.0.1            # 香港在隧道上的地址：静态文件经它传，发完也经它核对（不依赖公网解析）
+HK_TUNNEL=10.99.0.1            # 香港在隧道上的地址：静态文件、飞书网关经它发，发完也经它核对（不依赖公网解析）
+GATEWAY_KEY=/etc/fleet-dao/gateway-deploy.key # 发飞书网关的钥匙：香港把它限死成只能跑 fleet-gateway-deploy
+HK_PARTS=(web gateway)         # 往香港发的两样：驾驶舱静态文件、飞书网关（release.env 的 FLEET_HK_PARTS 选）
+GATEWAY_WAIT=60                # 网关起来后等它连上飞书长连接，最多这么久
 COCKPIT=10.99.0.2:8787         # 驾驶舱接口（api.env 的 FLEET_COCKPIT_LISTEN）
 AGENT_API=127.0.0.1:8788       # fleet 命令接口（api.env 的 FLEET_AGENT_LISTEN）
 TASK_QUEUE=fleet               # 引擎工人取活的任务队列（engine.env 的 FLEET_TASK_QUEUE）
@@ -39,6 +43,10 @@ ENGINE_POLL_WAIT=90   # 引擎工人起来后要先打包工作流，才去任�
 
 FLEET_SERVICES=""
 FLEET_DOMAIN=""
+# release.env 里不写 FLEET_HK_PARTS 时只发飞书网关、不发静态页：发静态页会把香港根地址上的东西（现在是演示版）整个换成
+# 这一版的前端，等于对外发布，要先告诉创始人、在 release.env 里明写 web 才发
+FLEET_HK_PARTS="gateway"
+GATEWAY_ACTIVATED=0 # 这一版的网关这次切过去了没有（没有网关、配置没备齐就是 0，健康检查不查它）
 SHA=""
 ON_MAIN=1
 WEB_KIND=""
@@ -60,6 +68,7 @@ short() { # 提交号 没有时显示的字
   if [[ -n "$1" ]]; then printf '%s' "${1:0:12}"; else printf '%s' "$2"; fi
 }
 has_service() { [[ " $FLEET_SERVICES " == *" $1 "* ]]; }
+has_part() { [[ " $FLEET_HK_PARTS " == *" $1 "* ]]; }
 current_sha() {
   local s
   s=$(readlink -- "$RELEASES/current" 2>/dev/null) || return 0
@@ -121,8 +130,14 @@ preflight() {
     red "没有 /etc/fleet-dao/france.env 或 $RELEASE_ENV：发布只在装过 deploy/france.sh 的法国机器上跑，先跑一遍它"
     return 1
   fi
-  load_env "$RELEASE_ENV" FLEET_SERVICES FLEET_DOMAIN
+  load_env "$RELEASE_ENV" FLEET_SERVICES FLEET_DOMAIN FLEET_HK_PARTS
   local s c
+  for s in $FLEET_HK_PARTS; do
+    if [[ " ${HK_PARTS[*]} " != *" $s "* ]]; then
+      red "$RELEASE_ENV 的 FLEET_HK_PARTS 里有不认识的「$s」（认识的：${HK_PARTS[*]}）"
+      return 1
+    fi
+  done
   for s in $FLEET_SERVICES; do
     if [[ " ${APP_UNITS[*]} " != *" $s "* ]]; then
       red "$RELEASE_ENV 的 FLEET_SERVICES 里有不认识的服务「$s」（认识的：${APP_UNITS[*]}）"
@@ -139,7 +154,7 @@ preflight() {
       return 1
     fi
   done
-  ok "本机启用的服务：${FLEET_SERVICES:-（无：只发代码、跑迁移、发静态页）}；域名 $FLEET_DOMAIN"
+  ok "本机启用的服务：${FLEET_SERVICES:-（无：只发代码、跑迁移）}；往香港发：${FLEET_HK_PARTS:-（都不发）}；域名 $FLEET_DOMAIN"
 }
 
 # 同一时间只许一个发布在跑
@@ -198,7 +213,7 @@ fetch_code() { # 要发的提交（空 = 主线最新）
 # 装成一版：fleet 在临时目录里装依赖、构建前端（第三方代码不以 root 跑）；构建完整个目录换成 root 的、fleet 只读，
 # 再原子地挪到 <提交号>。root 要照着办事的东西（单元文件、完成标记）在换属主之后才由 root 从 git 里取、写，fleet 碰不到。
 build_release() { # 提交号
-  local sha=$1 dir=$RELEASES/$1 stage=$RELEASES/.build-$1 log u odd n
+  local sha=$1 dir=$RELEASES/$1 stage=$RELEASES/.build-$1 log u odd n gsum
   step "构建 ${sha:0:12}"
   if [[ -f "$dir/.fleet-release" ]]; then
     ok "已构建（$dir，$(marker_get "$sha" built) 建的）"
@@ -222,9 +237,13 @@ build_release() { # 提交号
     return 1
   fi
   build_web "$stage" "$log"
+  build_gateway "$stage" "$log"
   # 换属主：之后 fleet 只读。-h：符号链接只改它自己，不跟过去改别处
   chown -R -h root:root -- "$stage"
   chmod -R u+rwX,go+rX,go-w -- "$stage"
+  # 网关那个文件的 sha256：香港收下时照它核对，传坏了不收
+  gsum=""
+  if [[ -f "$stage/gateway/gateway.mjs" ]]; then gsum=$(sha256sum <"$stage/gateway/gateway.mjs" | cut -c1-64); fi
   # 静态文件要原样发到香港：不许有符号链接和特殊文件（rsync 不跟链接，也防借链接把本机文件带出去）
   odd=$(find "$stage/web" ! -type f ! -type d -print -quit)
   if [[ -n "$odd" ]]; then
@@ -246,10 +265,24 @@ build_release() { # 提交号
     return 1
   fi
   rm -f -- "$stage/.fleet-release"
-  printf 'commit=%s\nbuilt=%s\non_main=%s\nweb=%s\nmigrations=%s\n' "$sha" "$(date -u +%FT%TZ)" "$ON_MAIN" "$WEB_KIND" "$n" \
-    >"$stage/.fleet-release"
+  printf 'commit=%s\nbuilt=%s\non_main=%s\nweb=%s\nmigrations=%s\ngateway_sha256=%s\n' "$sha" "$(date -u +%FT%TZ)" \
+    "$ON_MAIN" "$WEB_KIND" "$n" "$gsum" >"$stage/.fleet-release"
   mv -T -- "$stage" "$dir"
-  changed "构建 ${sha:0:12}：依赖装好，静态文件是$WEB_KIND"
+  changed "构建 ${sha:0:12}：依赖装好，静态文件是$WEB_KIND${gsum:+，飞书网关打成了一个文件}"
+}
+
+# 飞书网关：这一版有 packages/feishu，就连同依赖打成一个文件 gateway/gateway.mjs（打包、冒烟都以 fleet 跑）。
+# 香港上只放这一个文件和固定版本的 node：不放仓库、不装依赖、不连 GitHub
+build_gateway() { # 临时目录 日志
+  local stage=$1 log=$2
+  if [[ ! -f "$stage/packages/feishu/src/main.ts" || ! -f "$stage/deploy/france/bundle-gateway.sh" ]]; then return 0; fi
+  echo "  打包飞书网关（packages/feishu → gateway/gateway.mjs，打完冒烟跑一次）"
+  as_fleet_in "$stage" mkdir -p gateway
+  if ! as_fleet_in "$stage" env FLEET_BUNDLE_NODE="$NODE" bash deploy/france/bundle-gateway.sh "$stage" \
+    "$stage/gateway/gateway.mjs" >>"$log" 2>&1; then
+    red "飞书网关没打成（没切版本）：$(tail -5 "$log" | tr '\n' ' ')"
+    return 1
+  fi
 }
 
 # 驾驶舱静态文件：有 packages/web 就构建它，没有就用占位页；健康页放在 /health/，版本标记 release.json 由 root 写
@@ -440,7 +473,97 @@ activate() { # 提交号 事件（release / rollback / auto-rollback）
     fi
     if ! ensure_unit_running "$u.service" "$restart"; then return 1; fi
   done
-  sync_web "$sha"
+  if has_part web; then sync_web "$sha" || return 1; fi
+  if has_part gateway; then deploy_gateway "$sha" || return 1; fi
+}
+
+gw() { gateway_ssh "$GATEWAY_KEY" "$HK_KNOWN_HOSTS" "root@$HK_TUNNEL" "$@"; }
+
+# fleet-gateway-deploy status 的输出里某一项的值
+status_field() { # 状态输出 键
+  local line
+  while IFS= read -r line; do
+    if [[ "$line" == "$2="* ]]; then
+      printf '%s' "${line#*=}"
+      return 0
+    fi
+  done <<<"$1"
+}
+
+# fleet-gateway-deploy 的输出：「changed …」记一笔改动，「ok …」照样报，别的原样列出来
+report_gateway_lines() { # 输出
+  local line
+  while IFS= read -r line; do
+    case $line in
+    "changed "*) changed "${line#changed }" ;;
+    "ok "*) ok "${line#ok }" ;;
+    "") ;;
+    *) echo "  · $line" ;;
+    esac
+  done <<<"$1"
+}
+
+# 切版本之前先试通要往香港发的那几样：不通就别切——切了健康检查必不过，新旧两版会一起被记成不健康
+hk_reachable() {
+  local bad=0
+  if has_part web; then web_reachable || bad=1; fi
+  if has_part gateway; then gateway_reachable || bad=1; fi
+  return "$bad"
+}
+
+# 问一次香港网关的状态，放进 GW_STATUS。问不到（ssh 没连上、那头报错）或回答认不出（没有 config= 那一行）就报红、返回 1：
+# 「没问到」不能当成「还没连上」去白等，红里也要说清是问不到
+GW_STATUS=""
+gw_status_or_red() { # 在做哪一步（写进红里）
+  local out rc=0
+  out=$(gw status 2>&1) || rc=$?
+  if ((rc != 0)) || [[ -z "$(status_field "$out" config)" ]]; then
+    red "$1：问不到香港飞书网关的状态（退出码 $rc）：$(tail -2 <<<"$out" | tr '\n' ' ')——查隧道、发网关的钥匙、香港的 fleet-gateway-deploy"
+    return 1
+  fi
+  GW_STATUS=$out
+}
+
+# 发之前先问一次香港网关的入口（隧道、钥匙、fleet-gateway-deploy）：问不通就别切
+gateway_reachable() {
+  gw_status_or_red "没切版本" || return 1
+  ok "香港飞书网关的入口是通的（在用 $(short "$(status_field "$GW_STATUS" current)" 还没有)）"
+}
+
+# 飞书网关发到香港：这一版有网关、香港的配置备齐了，才收下、切过去；进程由香港的 fleet-gateway-deploy 起、重启。
+# 配置没备齐（比如机器人还没进团队群）就先不起，记待配——起了也只会读完配置就退、反复重启
+deploy_gateway() { # 提交号
+  local sha=$1 sum st config out rc=0
+  GATEWAY_ACTIVATED=0
+  gw_status_or_red "发飞书网关" || return 1
+  st=$GW_STATUS
+  sum=$(marker_get "$sha" gateway_sha256)
+  if [[ -z "$sum" ]]; then
+    pending "${sha:0:12} 没有飞书网关（那时还没有 packages/feishu），香港网关不动（在跑 $(short "$(status_field "$st" running)" 没有)）"
+    return 0
+  fi
+  config=$(status_field "$st" config)
+  if [[ "$config" != ok ]]; then
+    pending "香港飞书网关的配置没备齐（${config#missing }），这次网关先不起；补齐后再发一次（docs/ops.md 第十二节）"
+    return 0
+  fi
+  gw has "$sha" >/dev/null 2>&1 || rc=$?
+  if ((rc == 1)); then
+    if ! out=$(gw receive "$sha" "$sum" <"$RELEASES/$sha/gateway/gateway.mjs" 2>&1); then
+      red "把飞书网关发到香港没成：$(tail -2 <<<"$out" | tr '\n' ' ')"
+      return 1
+    fi
+    report_gateway_lines "$out"
+  elif ((rc != 0)); then
+    red "问香港有没有 ${sha:0:12} 的网关没成（退出码 $rc）"
+    return 1
+  fi
+  if ! out=$(gw activate "$sha" 2>&1); then
+    red "香港飞书网关没切到 ${sha:0:12}：$(tail -2 <<<"$out" | tr '\n' ' ')"
+    return 1
+  fi
+  report_gateway_lines "$out"
+  GATEWAY_ACTIVATED=1
 }
 
 # 发之前先试通香港（隧道、钥匙、rrsync；-n 什么都不传）：不通就别切——切了健康检查必不过，新旧两版会一起被记成不健康
@@ -668,9 +791,50 @@ health_gate() { # 提交号 切之前后端的逐项结果
   fi
   if has_service fleet-api; then check_api "$before" || bad=1; fi
   if has_service fleet-engine; then check_engine || bad=1; fi
-  check_web "$sha" || bad=1
+  if has_part web; then check_web "$sha" || bad=1; fi
+  if has_part gateway && ((GATEWAY_ACTIVATED)); then check_gateway "$sha" || bad=1; fi
   check_chain
   return "$bad"
+}
+
+# 香港飞书网关：主进程跑的是这一版、这次起来之后连上了飞书长连接，而且起稳了（一段时间里没退出、没重启）。
+# 连不上法国后端不算这一版的错：法国 fleet-api 没起时就是这样，网关照实回「后端连不上」、不会崩——记待配
+check_gateway() { # 提交号
+  local sha=$1 st i pid restarts config
+  gw_status_or_red "飞书网关的健康检查" || return 1
+  st=$GW_STATUS
+  config=$(status_field "$st" config)
+  if [[ "$config" != ok ]]; then
+    pending "香港飞书网关的配置没备齐（${config#missing }），网关没起"
+    return 0
+  fi
+  for ((i = 0; ; i += 3)); do
+    if [[ "$(status_field "$st" running)" == "$sha" && "$(status_field "$st" active)" == active &&
+      "$(status_field "$st" connected)" == yes ]]; then break; fi
+    if ((i >= GATEWAY_WAIT)); then
+      red "香港飞书网关 ${GATEWAY_WAIT} 秒还没以 ${sha:0:12} 连上飞书（主进程在跑「$(status_field "$st" running)」，$(status_field "$st" active)，连上了：$(status_field "$st" connected)）：香港 journalctl -u fleet-feishu -n 50"
+      return 1
+    fi
+    sleep 3
+    gw_status_or_red "飞书网关的健康检查" || return 1
+    st=$GW_STATUS
+  done
+  pid=$(status_field "$st" pid)
+  restarts=$(status_field "$st" restarts)
+  sleep "$SETTLE_SECONDS"
+  gw_status_or_red "飞书网关的健康检查" || return 1
+  st=$GW_STATUS
+  if [[ "$(status_field "$st" pid)" != "$pid" || "$(status_field "$st" restarts)" != "$restarts" ||
+    "$(status_field "$st" active)" != active ]]; then
+    red "香港飞书网关连上飞书之后没稳住（${SETTLE_SECONDS} 秒里退出或重启过）：香港 journalctl -u fleet-feishu -n 50"
+    return 1
+  fi
+  ok "香港飞书网关 ${sha:0:12} 在跑、连上了飞书长连接（pid $pid，这次起来后处理过 $(status_field "$st" messages) 条消息）"
+  case $(status_field "$st" backend) in
+  reachable) ok "香港飞书网关经隧道连得上法国后端" ;;
+  refused) pending "香港飞书网关连不上法国后端（连接被拒：法国 fleet-api 没起）；网关照实回「后端连不上」，没有崩" ;;
+  *) pending "香港飞书网关连法国后端：$(status_field "$st" backend)" ;;
+  esac
 }
 
 mark_unhealthy() { # 提交号
@@ -715,7 +879,7 @@ do_release() { # 要发的提交（空 = 主线最新）
   fetch_code "$1"
   build_release "$SHA"
   cur=$(current_sha)
-  web_reachable
+  hk_reachable || return 1
   # 直接发一个老提交也一样把关：库里的迁移比它带的多就不切（drizzle 碰到比代码新的迁移记录什么也不做、也不报错，
   # 光靠迁移那一步拦不住）。放在迁移之前：老版本的迁移程序连库都不碰
   schema_allows "$SHA" 切到 || return 1
@@ -761,7 +925,7 @@ do_rollback() {
   fi
   step "退回 ${prev:0:12}（在用：$(short "$cur" 没有)）"
   schema_allows "$prev" || return 1
-  web_reachable || return 1
+  hk_reachable || return 1
   if activate "$prev" rollback && health_gate "$prev" ""; then
     ok "已退回 ${prev:0:12}"
   else
@@ -800,6 +964,7 @@ do_check() {
       echo "  · $s 本机没启用（$RELEASE_ENV 的 FLEET_SERVICES）"
     fi
   done
+  if has_part gateway && [[ -n "$(marker_get "$cur" gateway_sha256)" ]]; then GATEWAY_ACTIVATED=1; fi
   health_gate "$cur" "" || true
 }
 

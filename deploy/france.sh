@@ -84,6 +84,8 @@ APP_SECRETS=("agent-token:FLEET_AGENT_TOKEN_SECRET:签 fleet 通行证（引擎�
 # 发布脚本往香港传驾驶舱静态文件用的钥匙（只有 root 读得到），和钉住的香港 sshd 主机钥匙
 WEB_UPLOAD_KEY=/etc/fleet-dao/web-upload.key
 HK_KNOWN_HOSTS=/etc/fleet-dao/hk-known-hosts
+# 发布脚本发飞书网关用的钥匙（另一把）：香港把它限死成只能跑 fleet-gateway-deploy
+GATEWAY_DEPLOY_KEY=/etc/fleet-dao/gateway-deploy.key
 
 FLEET_WG_HK_ENDPOINT=""
 FLEET_WG_HK_PUBLIC_KEY=""
@@ -582,18 +584,23 @@ $key=$(openssl rand -hex 32)"
   done
 }
 
-setup_web_upload() {
-  step "往香港传驾驶舱静态文件的钥匙（发布脚本用；香港只许它经隧道往 /srv/fleet-dao-web 写）"
-  local line re
-  if [[ ! -s "$WEB_UPLOAD_KEY" ]]; then
-    rm -f -- "$WEB_UPLOAD_KEY" "$WEB_UPLOAD_KEY.pub"
-    ssh-keygen -q -t ed25519 -N '' -C fleet-dao-web-upload -f "$WEB_UPLOAD_KEY" >/dev/null
-    # 公钥随时能从私钥导出，不另存一份
-    rm -f -- "$WEB_UPLOAD_KEY.pub"
-    changed "生成上传钥匙 $WEB_UPLOAD_KEY"
+# 发布脚本登香港用的钥匙：没有就生成（只有 root 读得到），打印公钥给香港登记。公钥随时能从私钥导出，不另存一份
+ensure_deploy_key() { # 私钥文件 注释 香港 hk.env 里的键 用途
+  if [[ ! -s "$1" ]]; then
+    rm -f -- "$1" "$1.pub"
+    ssh-keygen -q -t ed25519 -N '' -C "$2" -f "$1" >/dev/null
+    rm -f -- "$1.pub"
+    changed "生成$4的钥匙 $1"
   fi
-  fix_meta "$WEB_UPLOAD_KEY" root:root 600
-  echo "  上传钥匙的公钥：$(ssh-keygen -y -f "$WEB_UPLOAD_KEY")（整行填进香港 /etc/fleet-dao/hk.env 的 FLEET_WEB_UPLOAD_PUBLIC_KEY）"
+  fix_meta "$1" root:root 600
+  echo "  $4的公钥：$(ssh-keygen -y -f "$1")（整行填进香港 /etc/fleet-dao/hk.env 的 $3）"
+}
+
+setup_web_upload() {
+  step "发布脚本登香港用的钥匙（香港只许它们经隧道来：一把只能往 /srv/fleet-dao-web 写，一把只能发飞书网关）"
+  local line re
+  ensure_deploy_key "$WEB_UPLOAD_KEY" fleet-dao-web-upload FLEET_WEB_UPLOAD_PUBLIC_KEY 传静态文件
+  ensure_deploy_key "$GATEWAY_DEPLOY_KEY" fleet-dao-gateway-deploy FLEET_GATEWAY_DEPLOY_PUBLIC_KEY 发飞书网关
   # 香港 sshd 的主机钥匙：经隧道取（隧道两头靠 WireGuard 钥匙互认，那头只可能是香港），钉住之后只认这一把
   if [[ -s "$HK_KNOWN_HOSTS" ]]; then
     fix_meta "$HK_KNOWN_HOSTS" root:root 600
@@ -756,6 +763,20 @@ readback_web_upload() {
     pending "香港还没认这把上传钥匙：把上面打印的公钥填进香港 hk.env 的 FLEET_WEB_UPLOAD_PUBLIC_KEY，重跑 hk.sh"
   else
     red "试着往香港传文件没成（rsync 退出码 $rc）：$(tail -2 <<<"$out" | tr '\n' ' ')"
+  fi
+  # 发网关的那把：问一次香港网关的状态（只读）
+  if [[ ! -s "$GATEWAY_DEPLOY_KEY" ]]; then
+    red "没有发网关用的钥匙 $GATEWAY_DEPLOY_KEY"
+    return 0
+  fi
+  rc=0
+  out=$(gateway_ssh "$GATEWAY_DEPLOY_KEY" "$HK_KNOWN_HOSTS" "root@$WG_HK_ADDR" status 2>&1) || rc=$?
+  if ((rc == 0)) && [[ "$out" == *$'\n'config=* || "$out" == config=* ]]; then
+    ok "法国经隧道问得到香港飞书网关的状态（fleet-gateway-deploy status）"
+  elif [[ "$out" == *"Permission denied"* ]]; then
+    pending "香港还没认发网关的钥匙：把上面打印的公钥填进香港 hk.env 的 FLEET_GATEWAY_DEPLOY_PUBLIC_KEY，重跑 hk.sh"
+  else
+    red "问香港飞书网关的状态没成（退出码 $rc）：$(tail -2 <<<"$out" | tr '\n' ' ')"
   fi
 }
 
