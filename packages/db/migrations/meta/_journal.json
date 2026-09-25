@@ -43,6 +43,13 @@
       "when": 1790370205371,
       "tag": "0005_github_intake",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1790372318471,
+      "tag": "0006_feishu",
+      "breakpoints": true
     }
   ]
 }

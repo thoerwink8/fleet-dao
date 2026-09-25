@@ -301,6 +301,21 @@ else
   check "回答认不出：不算" "$?" 1
 fi
 
+echo "== 切之后的健康报告逐项和切之前比：好的变坏了才算这一版的错；会随时间自己变红的项（待开单积压）只标待处理、不退回"
+before_items=$(printf 'database\tok\t\ndraft_backlog\tok\t\ntemporal\tbad\t没接上\n')
+reset
+compare_api_items "$before_items" \
+  "$(printf 'database\tok\t\ndraft_backlog\tbad\t最早一张待开单已经等了 16 分钟还没开成\ntemporal\tbad\t没接上\n')" >/dev/null
+check "待开单积压恰好在发版时跨过时限：不算这一版的错" "$?" 0
+check "积压：没有红" "${#REDS[@]}" 0
+check "积压：记成待处理、写明不退回" "$(printf '%s\n' "${PENDING[@]}" | grep -c 'draft_backlog 不好.*和换没换版无关，不退回')" 1
+reset
+compare_api_items "$before_items" \
+  "$(printf 'database\tbad\t连不上\ndraft_backlog\tok\t\ntemporal\tbad\t没接上\n')" >/dev/null
+check "库切之前好、切之后坏：算这一版的错" "$?" 1
+check "库变坏：报红" "$(printf '%s\n' "${REDS[@]}" | grep -c 'database 切之前是好的，换了这一版不好了：连不上')" 1
+check "切之前就不好的（temporal）：只标待处理" "$(printf '%s\n' "${PENDING[@]}" | grep -c 'temporal 不好：没接上（切之前就不好')" 1
+
 echo "== 飞书网关：这一版带网关、香港配置齐了才发过去切过去；香港已收下的不再传；配置不齐、这一版没网关都不动香港网关"
 rm -rf "${RELEASES:?}"/* "$RELEASES"/.history
 GATE=()

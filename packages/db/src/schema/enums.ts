@@ -19,7 +19,7 @@ import { pgEnum } from 'drizzle-orm/pg-core';
 type Missing<T, V extends readonly unknown[]> = Exclude<T, V[number]>;
 
 /** 值表必须恰好覆盖联合类型 T 的全部成员。 */
-function valuesOf<T extends string>() {
+export function valuesOf<T extends string>() {
   return <const V extends readonly [T, ...T[]]>(
     values: V & ([Missing<T, V>] extends [never] ? unknown : { missing: Missing<T, V> }),
   ): V => values;

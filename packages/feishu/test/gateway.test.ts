@@ -271,6 +271,34 @@ describe('随手记任务', () => {
     expect(buttonValue(cardId, '确认')).toMatchObject({ a: 'draft.confirm', r: 2 });
   });
 
+  it('改一下的补充超过约定的上限：照实说最长多少字，不发给后端（约定里就收不下）', async () => {
+    h = await harness();
+    h.backend.on('POST', '/feishu/messages', { body: { kind: 'draft', draft: draft() } });
+    const { msg } = await say('给登录页加手机验证码');
+    const cardId = cardReplyTo(msg.messageId);
+    await click(cardId, buttonValue(cardId, '改一下'), { form: { note: '补'.repeat(801) } });
+    expect(h.backend.calls('POST', '/feishu/drafts/draft-1/revise')).toHaveLength(0);
+    const text = textIn(h.feishu.cardOf(cardId));
+    expect(text).toContain('补充最长 800 字，这次 801 字，没有改');
+    expect(text).not.toContain('再试一次');
+  });
+
+  it('改一下被后端拒收：照后端说的写，不叫人「再试一次」（再试还是一样）；后端出错、连不上才叫人再试', async () => {
+    h = await harness();
+    h.backend.on('POST', '/feishu/messages', { body: { kind: 'draft', draft: draft() } });
+    let n = 0;
+    h.backend.on('POST', '/feishu/drafts/:draftId/revise', () =>
+      ++n === 1 ? apiError(404, 'draft_not_found', '没有这张草稿') : apiError(503, 'unavailable', '后端忙'),
+    );
+    const { msg } = await say('给登录页加手机验证码');
+    const cardId = cardReplyTo(msg.messageId);
+    await click(cardId, buttonValue(cardId, '改一下'), { form: { note: '只做网页版' } });
+    expect(textIn(h.feishu.cardOf(cardId))).toContain('没改成：没有这张草稿。');
+    expect(textIn(h.feishu.cardOf(cardId))).not.toContain('再试一次');
+    await click(cardId, buttonValue(cardId, '改一下'), { form: { note: '只做网页版' } });
+    expect(textIn(h.feishu.cardOf(cardId))).toContain('没改成：后端忙，再试一次。');
+  });
+
   it('写了补充却点了「确认」：先按补充改，请他再看一眼，不直接开任务', async () => {
     h = await harness();
     h.backend.on('POST', '/feishu/messages', { body: { kind: 'draft', draft: draft() } });
@@ -298,6 +326,26 @@ describe('随手记任务', () => {
     await click(cardId, buttonValue(cardId, '确认'), { form: {} });
     expect(textIn(h.feishu.cardOf(cardId))).toContain('乙改过的理解');
     expect(buttonValue(cardId, '确认')).toMatchObject({ r: 3 });
+  });
+
+  it('改一下时草稿已经确认了（409）：照后端说的写明在哪一步（待开单），不自己说「已经开成任务了」', async () => {
+    h = await harness();
+    h.backend.on('POST', '/feishu/messages', { body: { kind: 'draft', draft: draft() } });
+    const { task: _task, ...pendingIssue } = confirmed();
+    h.backend.on(
+      'POST',
+      '/feishu/drafts/:draftId/revise',
+      apiError(409, 'draft_confirmed', '已经确认了（待开单），这张卡改不了；开好后驾驶舱里就有这个任务', {
+        draft: pendingIssue,
+      }),
+    );
+    const { msg } = await say('给登录页加手机验证码');
+    const cardId = cardReplyTo(msg.messageId);
+    await click(cardId, buttonValue(cardId, '改一下'), { form: { note: '只做网页版' } });
+    const card = h.feishu.cardOf(cardId);
+    expect(titleOf(card)).toBe('已确认，待开单');
+    expect(textIn(card)).toContain('已经确认了（待开单），这张卡改不了');
+    expect(textIn(card)).not.toContain('已经开成任务');
   });
 
   it('回复确认卡 = 改一下：回复的是哪条交给后端（一次问完），改好的草稿原地更新那张卡，不发第二张', async () => {

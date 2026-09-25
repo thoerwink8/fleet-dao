@@ -104,11 +104,11 @@ describe('实时推送（SSE）', () => {
     await reader.cancel();
   });
 
-  it('没登录不给连；飞书网关的通行证可以连', async () => {
+  it('没登录不给连；飞书网关的通行证也不给连（网关只能调约定里那几条，推送走长轮询待推送）', async () => {
     const h = harness();
     expect(await errorCode(await h.cockpit.request('/api/events'))).toBe('unauthenticated');
     const res = await h.cockpit.request('/api/events', viaGateway('GET', 'ou_dev_founder_a'));
-    expect(res.status).toBe(200);
-    await res.body?.cancel();
+    expect(res.status).toBe(403);
+    expect(await errorCode(res)).toBe('gateway_route_not_allowed');
   });
 });

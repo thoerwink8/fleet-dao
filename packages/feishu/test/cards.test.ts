@@ -19,8 +19,8 @@ import {
   waitingListCard,
 } from '../src/cards.ts';
 import type { Card } from '../src/port.ts';
-import { SUBTASK_STATE_WORDS, TASK_STATE_WORDS } from '../src/words.ts';
-import { buttonsOf, textIn } from './fake-feishu.ts';
+import { clip, SUBTASK_STATE_WORDS, TASK_STATE_WORDS } from '../src/words.ts';
+import { buttonsOf, textIn, titleOf } from './fake-feishu.ts';
 import { confirmed, draft, outboxItem, snapshot, taskDetail } from './harness.ts';
 
 const ctx: RenderContext = { publicUrl: 'https://cockpit.example.test', now: Date.now(), nonce: 'n1' };
@@ -30,6 +30,7 @@ const SUBTASK_STATES = Object.keys(SUBTASK_STATE_WORDS) as SubtaskState[];
 
 function allCards(): Array<[string, Card]> {
   const d = draft();
+  const { task: _task, ...pendingIssue } = confirmed();
   const detail = taskDetail();
   const snap = snapshot();
   const empty = snapshot({
@@ -46,6 +47,7 @@ function allCards(): Array<[string, Card]> {
     ['草稿·正在开', draftCard(d, ctx, { state: 'confirming' })],
     ['草稿·正在改', draftCard(d, ctx, { state: 'revising' })],
     ['草稿·已确认', draftCard(confirmed(), ctx)],
+    ['草稿·已确认·待开单', draftCard(pendingIssue, ctx, { note: '已确认（乙），没有重复开任务。' })],
     ['正在理解', draftWaitCard(ctx, { title: '收到，正在理解…', rawText: '原话' })],
     ['没记成', draftWaitCard(ctx, { title: '这句话没记成', failed: true, lines: ['后端没回应'] })],
     ['回答', answerCard('在等 PR 合并。', ctx, 'task-12')],
@@ -163,6 +165,33 @@ describe('卡片', () => {
     expect(textIn(outboxCard(outboxItem({ kind: 'decision' }), ctx))).toContain('回复不算拍板');
     expect(textIn(outboxCard(outboxItem({ kind: 'decision' }), ctx))).not.toContain('回复这张卡片作答');
     expect(textIn(outboxCard(outboxItem({ kind: 'ask' }), ctx))).toContain('也可以直接回复这张卡片作答');
+  });
+
+  it('确认了、issue 还没开出来（后端的「待开单」）：写明待开单、会自动补开，不再出「确认」「改一下」', () => {
+    const { task: _task, ...pendingIssue } = confirmed();
+    const card = draftCard(pendingIssue, ctx);
+    expect(titleOf(card)).toBe('已确认，待开单');
+    expect(textIn(card)).toContain('后台会自动补开，不会丢');
+    // 和点确认那几秒的过渡卡分得开；驾驶舱里还没有这张草稿，不叫人去那里改。
+    expect(textIn(card)).not.toContain('正在开成任务');
+    expect(textIn(card)).not.toContain('请在驾驶舱里改');
+    expect(textIn(card)).toContain('确认：甲');
+    const actions = buttonsOf(card).map((b) => (b.value as { a?: string } | undefined)?.a);
+    expect(actions).not.toContain('draft.confirm');
+    expect(actions).not.toContain('draft.revise');
+    expect(buttonsOf(card).map((b) => b.url)).toEqual(['https://cockpit.example.test/overview']);
+  });
+
+  it('截断不切在 emoji 中间（半个代理对交给后端，写库时会被换成 � 或整条被拒）', () => {
+    expect(clip('a😀b', 3)).toBe('a…');
+    expect(clip('😀😀😀', 3)).toBe('😀…');
+    expect(clip('ab', 3)).toBe('ab');
+    const lone = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+    for (const s of ['😀'.repeat(50), `x${'😀'.repeat(50)}`]) {
+      const out = clip(s, 21);
+      expect(out.length).toBeLessThanOrEqual(21);
+      expect(lone.test(out)).toBe(false);
+    }
   });
 
   it('「打开驾驶舱」直达对应页', () => {
