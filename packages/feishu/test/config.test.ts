@@ -6,7 +6,7 @@ const GOOD = {
   FEISHU_APP_ID: 'cli_placeholder',
   FEISHU_APP_SECRET: 'secret-placeholder',
   FLEET_FEISHU_GATEWAY_TOKEN: 'x'.repeat(40),
-  FLEET_BACKEND_URL: 'http://10.99.0.2:8787',
+  FLEET_BACKEND_URL: 'http://backend.example.test:8787',
   FLEET_PUBLIC_URL: 'https://cockpit.example.test',
   FEISHU_TEAM_CHAT_ID: 'oc_team',
   FEISHU_FOUNDERS: 'ou_founder_a:甲, ou_founder_b:乙',
@@ -26,7 +26,7 @@ describe('配置', () => {
   it('齐全：读出来，默认值合理', () => {
     const c = loadConfig(GOOD);
     expect(c).toMatchObject({
-      backendUrl: 'http://10.99.0.2:8787',
+      backendUrl: 'http://backend.example.test:8787',
       publicUrl: 'https://cockpit.example.test',
       teamChatId: 'oc_team',
       testChatId: null,
@@ -60,7 +60,7 @@ describe('配置', () => {
       ...GOOD,
       FEISHU_APP_ID: 'app123',
       FLEET_FEISHU_GATEWAY_TOKEN: 'short',
-      FLEET_BACKEND_URL: 'http://10.99.0.2:8787/api',
+      FLEET_BACKEND_URL: 'http://backend.example.test:8787/api',
       FLEET_PUBLIC_URL: 'not a url',
       FEISHU_TEAM_CHAT_ID: 'team',
       FEISHU_TEST_CHAT_ID: 'test',

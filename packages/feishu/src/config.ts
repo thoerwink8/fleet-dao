@@ -11,7 +11,7 @@ export interface Config {
   appSecret: string;
   /** 调后端的通行证，和法国那边 FLEET_FEISHU_GATEWAY_TOKEN 是同一个值。 */
   gatewayToken: string;
-  /** 驾驶舱后端，经隧道：例如 http://10.99.0.2:8787。 */
+  /** 驾驶舱后端，经隧道（地址见 docs/ops.md）：例如 http://<法国的隧道地址>:8787。 */
   backendUrl: string;
   /** 驾驶舱在浏览器里的地址，卡片上「打开驾驶舱」用。 */
   publicUrl: string;
