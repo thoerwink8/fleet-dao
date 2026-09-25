@@ -143,7 +143,14 @@ export const toStagePolicy = (
   r: typeof stagePolicies.$inferSelect,
   routeIds: string[],
   disabledRouteIds: string[],
-): StagePolicy => build<StagePolicy>({ stage: r.stage, routeIds, pinned: r.pinned, disabledRouteIds });
+): StagePolicy =>
+  build<StagePolicy>({
+    stage: r.stage,
+    routeIds,
+    pinned: r.pinned,
+    // 没有关着的就不写这一项（和领域类型里「可选」一致）。
+    disabledRouteIds: disabledRouteIds.length > 0 ? disabledRouteIds : undefined,
+  });
 
 export const toBan = (r: typeof bans.$inferSelect): Ban =>
   build<Ban>({

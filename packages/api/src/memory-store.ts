@@ -535,9 +535,16 @@ export function createMemoryStore(
       };
       if (!sameValue(current, expected)) return 'conflict';
       checkAudit(entry);
+      // 关着的仍关着（还挂在新顺序里的）；这次新挂进来的开着。
+      const disabled = (current.disabledRouteIds ?? []).filter((id) => next.routeIds.includes(id));
       data.stagePolicies = [
         ...data.stagePolicies.filter((p) => p.stage !== stage),
-        { stage, routeIds: [...next.routeIds], pinned: next.pinned },
+        {
+          stage,
+          routeIds: [...next.routeIds],
+          pinned: next.pinned,
+          ...(disabled.length > 0 && { disabledRouteIds: disabled }),
+        },
       ];
       audit(entry);
       changed('stage_policies', stage);

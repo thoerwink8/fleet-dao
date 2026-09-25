@@ -93,6 +93,12 @@ function contractData(): Partial<MemoryData> {
     },
   ];
   data.pools = (data.pools ?? []).map((p) => (p.id === 'pool-mirasim' ? { ...p, lastReadOkAt: ago(1) } : p));
+  // review 里挂一条关着的：拖动排序时开关不许丢。
+  data.stagePolicies = (data.stagePolicies ?? []).map((p) =>
+    p.stage === 'review'
+      ? { ...p, routeIds: ['rt-mirasim-gpt', 'rt-mirasim-kimi'], disabledRouteIds: ['rt-mirasim-kimi'] }
+      : p,
+  );
   data.pullRequests = [
     {
       repoId: IDS.repo,
@@ -420,10 +426,10 @@ export function describeStoreContract(name: string, make: MakeStore): void {
           'rt-mirasim-kimi',
         ]);
         const policies = await store.listStagePolicies();
-        expect(policies.map((p) => [p.stage, p.routeIds, p.pinned])).toEqual([
-          ['execute', ['rt-claude-opus', 'rt-mirasim-kimi'], false],
-          ['ui', ['rt-claude-opus'], true],
-          ['review', ['rt-mirasim-gpt'], false],
+        expect(policies.map((p) => [p.stage, p.routeIds, p.pinned, p.disabledRouteIds])).toEqual([
+          ['execute', ['rt-claude-opus', 'rt-mirasim-kimi'], false, undefined],
+          ['ui', ['rt-claude-opus'], true, undefined],
+          ['review', ['rt-mirasim-gpt', 'rt-mirasim-kimi'], false, ['rt-mirasim-kimi']],
         ]);
         expect(await store.listBans()).toEqual([
           { family: 'kimi', stage: 'ui', reason: '（样例）库里另配的禁令：Kimi 暂不进 UI' },
@@ -494,6 +500,37 @@ export function describeStoreContract(name: string, make: MakeStore): void {
           pinned: true,
         });
         expect((await store.listAudit({ limit: 200 })).items.length).toBe(auditsBefore + 1);
+      });
+
+      it('拖动排序后关着的仍关着；新挂进来的开着，摘掉再挂回来的也按新挂算', async () => {
+        const review = async () => (await store.listStagePolicies()).find((p) => p.stage === 'review');
+        const move = async (expected: string[], next: string[]) =>
+          store.updateStagePolicy(
+            {
+              stage: 'review',
+              expected: { routeIds: expected, pinned: false },
+              next: { routeIds: next, pinned: false },
+            },
+            audit({ action: 'stage_policy.update', target: 'stage:review' }),
+          );
+        expect(
+          await move(
+            ['rt-mirasim-gpt', 'rt-mirasim-kimi'],
+            ['rt-mirasim-kimi', 'rt-claude-opus', 'rt-mirasim-gpt'],
+          ),
+        ).toBe('ok');
+        expect(await review()).toEqual({
+          stage: 'review',
+          routeIds: ['rt-mirasim-kimi', 'rt-claude-opus', 'rt-mirasim-gpt'],
+          pinned: false,
+          disabledRouteIds: ['rt-mirasim-kimi'],
+        });
+        expect(await move(['rt-mirasim-kimi', 'rt-claude-opus', 'rt-mirasim-gpt'], ['rt-claude-opus'])).toBe(
+          'ok',
+        );
+        expect(await review()).toEqual({ stage: 'review', routeIds: ['rt-claude-opus'], pinned: false });
+        expect(await move(['rt-claude-opus'], ['rt-claude-opus', 'rt-mirasim-kimi'])).toBe('ok');
+        expect((await review())?.disabledRouteIds).toBeUndefined();
       });
 
       it('还没有那一行的阶段：现值按空列表、没钉住算；两人同时第一次改，只有一个改得成', async () => {
