@@ -1,8 +1,9 @@
 // 飞书四张表的库级约束：接口这边按约定先查一遍，但库自己也得拦（换个人写库、手工改数据时照样成立）。
-// 直接写 SQL 造违规：drizzle 的类型挡住的不合写法，只有绕过去才试得出来。
+// 直接写 SQL 造违规：drizzle 的类型挡住的不合写法，只有绕过去才试得出来。库里的记录被改坏时库版怎么读，也在这里造。
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { IDS } from '../src/dev-fixtures.ts';
+import { createPgStore } from '../src/pg-store.ts';
 import { seedPg } from './pg-fixtures.ts';
 import { FEISHU_IDS, feishuData } from './store-contract-feishu.ts';
 
@@ -59,7 +60,7 @@ describe('飞书表的库级约束', () => {
       ['状态不认识', draftSql({ status: "'pending'" }), /status_known/],
       ['会话类型不认识', draftSql({ chat_type: "'guild'" }), /chat_type_known/],
       ['版本小于 1', draftSql({ revision: '0' }), /revision_positive/],
-      ['开单次数是负的', draftSql({ intake_attempts: '-1' }), /intake_attempts_nonneg/],
+      ['开单次数是负的', draftSql({ open_attempts: '-1' }), /open_attempts_nonneg/],
       ['确认了却没写确认人', draftSql({ ...confirmedOk, confirmed_by: 'null' }), /confirm_shape/],
       ['确认了却没选仓', draftSql({ ...confirmedOk, repo_id: 'null' }), /confirm_shape/],
       [
@@ -114,6 +115,27 @@ describe('飞书表的库级约束', () => {
         "insert into feishu_cards (message_id, chat_id, kind, sent_at) values ('om_2', 'oc_1', 'menu', now())",
       ),
     ).rejects.toThrow(/kind_known/);
+  });
+
+  it('收到的话的幂等记录被改坏、键被别的命令占着：库版读的时候明确报错，不当成「没处理过」再处理一遍', async () => {
+    const store = createPgStore(t.db);
+    await run(
+      "insert into idempotency_keys (key, action, completed_at, result) values ($1, 'feishu.message', now(), $2)",
+      ['feishu-message:om_broken', JSON.stringify({ userId: IDS.founderA, result: { kind: '别的' } })],
+    );
+    await run("insert into idempotency_keys (key, action) values ($1, 'fleet.say')", [
+      'feishu-message:om_taken',
+    ]);
+    await expect(store.getFeishuMessage('om_broken')).rejects.toThrow(/格式认不出/);
+    await expect(store.getFeishuMessage('om_taken')).rejects.toThrow(/被别的命令（fleet\.say）占着/);
+    // 回了一段话的记一笔时撞上：一样报错，不交回别人的结果。
+    await expect(
+      store.recordFeishuMessage({
+        message: { sourceMessageId: 'om_taken', userId: IDS.founderA, textHash: 'h' },
+        result: { kind: 'answer', text: '已记下' },
+      }),
+    ).rejects.toThrow(/占着/);
+    expect(await store.getFeishuMessage('om_never')).toBeNull();
   });
 
   it('关注：一个人对一个需求只有一行；需求没了关注跟着走（不挡删需求）', async () => {

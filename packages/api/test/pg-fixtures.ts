@@ -284,8 +284,8 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
         confirmedBy: d.confirmedBy ?? null,
         confirmedAt: dateOpt(d.confirmedAt),
         taskId: d.taskId ?? null,
-        intakeError: d.intakeError ?? null,
-        intakeTriedAt: dateOpt(d.intakeTriedAt),
+        openError: d.openError ?? null,
+        openTriedAt: dateOpt(d.openTriedAt),
       })),
     );
   }

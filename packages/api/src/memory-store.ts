@@ -19,12 +19,12 @@ import type {
   Task,
 } from '@fleet-dao/shared';
 import {
-  appendNote,
   feishuMessageKey,
   feishuReviseKey,
   messagePayload,
   parseMessageRecord,
   UNDERSTANDING_MAX,
+  withNote,
 } from './feishu-records.ts';
 import { isSerial, isUuid, parseCursor } from './ids.ts';
 import type {
@@ -123,9 +123,9 @@ export interface FeishuDraftRow {
   confirmedBy?: string | undefined;
   confirmedAt?: string | undefined;
   taskId?: string | undefined;
-  intakeAttempts: number;
-  intakeError?: string | undefined;
-  intakeTriedAt?: string | undefined;
+  openAttempts: number;
+  openError?: string | undefined;
+  openTriedAt?: string | undefined;
 }
 
 export interface FeishuFollowRow {
@@ -155,6 +155,18 @@ export interface FeishuOutboxRow {
 }
 
 export type FeishuCardRow = FeishuCardRecord & { updatedAt: string };
+
+const OUTBOX_TIME_KEYS: ReadonlySet<string> = new Set(['deliveredAt', 'holdUntil']);
+
+/** 按 next 改这一行会不会改动什么（时刻按毫秒比，和库版一样）。 */
+function changesOutboxRow(row: FeishuOutboxRow, next: Partial<FeishuOutboxRow>): boolean {
+  return Object.entries(next).some(([key, value]) => {
+    const before: unknown = row[key as keyof FeishuOutboxRow];
+    return OUTBOX_TIME_KEYS.has(key) && typeof value === 'string' && typeof before === 'string'
+      ? Date.parse(value) !== Date.parse(before)
+      : value !== before;
+  });
+}
 
 /** 和库里的表一一对应（去掉了库自己算的列）。 */
 export interface MemoryData {
@@ -422,7 +434,7 @@ export function createMemoryStore(
       confirmedAt: row.confirmedAt,
       taskId: row.taskId,
       cardMessageId: latestCard((c) => c.kind === 'draft' && c.ref.draftId === row.id)?.messageId,
-      intake: { attempts: row.intakeAttempts, error: row.intakeError, triedAt: row.intakeTriedAt },
+      opening: { attempts: row.openAttempts, error: row.openError, triedAt: row.openTriedAt },
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
     };
@@ -476,8 +488,13 @@ export function createMemoryStore(
             : undefined,
     };
   }
-  /** 通知类推送的回执同时记进这条通知的送达记录（去处 team），驾驶舱「通知」页看得到。 */
+  /**
+   * 通知类推送的回执同时记进这条通知的送达记录（去处 team），驾驶舱「通知」页看得到。
+   * 只记真试过的（发了、改了、没发成）：推迟和「不发了」不是没送成，原因记在推送本身（ackReason）。
+   */
   function mirrorDelivery(ack: FeishuOutboxAck, at: string): void {
+    const r = ack.result;
+    if (r.status === 'deferred' || r.status === 'dropped') return;
     if (!ack.itemId.startsWith('notification:')) return;
     const n = data.notifications.find((x) => x.id === ack.itemId.slice('notification:'.length));
     if (!n) return;
@@ -486,25 +503,13 @@ export function createMemoryStore(
       d = { channel: 'feishu', target: 'team', attempts: 0 };
       n.deliveries.push(d);
     }
-    const r = ack.result;
     d.lastAttemptAt = at;
-    switch (r.status) {
-      case 'sent':
-      case 'updated':
-        d.messageId = r.messageId;
-        d.attempts += 1;
-        d.error = undefined;
-        break;
-      case 'failed':
-        d.attempts += 1;
-        d.error = r.error;
-        break;
-      case 'dropped':
-        d.error = `不发了：${r.reason}`;
-        break;
-      case 'deferred':
-        d.error = `免打扰，推迟到 ${r.until}`;
-        break;
+    d.attempts += 1;
+    if (r.status === 'failed') {
+      d.error = r.error;
+    } else {
+      d.messageId = r.messageId;
+      d.error = undefined;
     }
   }
 
@@ -1005,7 +1010,7 @@ export function createMemoryStore(
         proposedBy: message.userId,
         createdAt: at,
         updatedAt: at,
-        intakeAttempts: 0,
+        openAttempts: 0,
       };
       data.feishuDrafts.push(row);
       data.idempotency.set(feishuMessageKey(message.sourceMessageId), {
@@ -1036,11 +1041,12 @@ export function createMemoryStore(
       if (row.status === 'confirmed') return { status: 'confirmed', draft: draftOut(row) };
       checkAudit(entry);
       if (repoId !== undefined) needRepo(repoId, 'feishu_drafts_repo_id_repos_id_fk');
-      const understanding = note ? appendNote(row.understanding, note) : row.understanding;
-      checkUnderstanding(understanding);
+      const next = note ? withNote(row, note) : row;
+      checkUnderstanding(next.understanding);
       const at = now().toISOString();
       row.revision += 1;
-      row.understanding = understanding;
+      row.rawText = next.rawText;
+      row.understanding = next.understanding;
       if (repoId !== undefined) row.repoId = repoId;
       row.updatedAt = at;
       data.idempotency.set(
@@ -1083,28 +1089,28 @@ export function createMemoryStore(
       audit(entry);
       return { status: 'confirmed', draft: draftOut(row) };
     },
-    async listPendingIntakes(limit) {
+    async listDraftsToOpen(limit) {
       return data.feishuDrafts
         .filter((d) => d.status === 'confirmed' && d.taskId === undefined)
         .sort((a, b) => (a.confirmedAt ?? '').localeCompare(b.confirmedAt ?? '') || compareIds(a.id, b.id))
         .slice(0, limit)
         .map(draftOut);
     },
-    async recordIntake({ draftId, taskId }) {
+    async recordDraftOpened({ draftId, taskId }) {
       const row = data.feishuDrafts.find((d) => d.id === draftId);
       if (row?.status !== 'confirmed' || row.taskId !== undefined) return 'not_pending';
       if (!data.tasks.some((t) => t.id === taskId)) return 'task_not_found';
       row.taskId = taskId;
-      row.intakeError = undefined;
+      row.openError = undefined;
       row.updatedAt = now().toISOString();
       return 'ok';
     },
-    async recordIntakeFailure({ draftId, error }) {
+    async recordDraftOpenFailure({ draftId, error }) {
       const row = data.feishuDrafts.find((d) => d.id === draftId);
       if (!row) return;
-      row.intakeAttempts += 1;
-      row.intakeError = error;
-      row.intakeTriedAt = now().toISOString();
+      row.openAttempts += 1;
+      row.openError = error;
+      row.openTriedAt = now().toISOString();
     },
     async getFeishuMessage(sourceMessageId) {
       const rec = data.idempotency.get(feishuMessageKey(sourceMessageId));
@@ -1254,11 +1260,14 @@ export function createMemoryStore(
           report.skipped.push({ itemId: ack.itemId, revision: ack.revision, why: 'stale_revision' });
           continue;
         }
+        const next: Partial<FeishuOutboxRow> = {};
         if (r.status === 'sent') {
-          row.deliveredMessageId = r.messageId;
-          row.deliveredChatId = r.chatId;
-          row.deliveredAt = r.sentAt;
-          row.deliveredRevision = ack.revision;
+          Object.assign(next, {
+            deliveredMessageId: r.messageId,
+            deliveredChatId: r.chatId,
+            deliveredAt: r.sentAt,
+            deliveredRevision: ack.revision,
+          });
         } else if (r.status === 'updated') {
           // 「改了」只带消息编号：会话和发出时刻取回执记过的，没记过就按卡片登记补；都查不到就不记这张卡。
           const known =
@@ -1268,24 +1277,35 @@ export function createMemoryStore(
               ? { chatId: row.deliveredChatId, sentAt: row.deliveredAt }
               : data.feishuCards.find((c) => c.messageId === r.messageId);
           if (known) {
-            row.deliveredMessageId = r.messageId;
-            row.deliveredChatId = known.chatId;
-            row.deliveredAt = known.sentAt;
-            row.deliveredRevision = ack.revision;
+            Object.assign(next, {
+              deliveredMessageId: r.messageId,
+              deliveredChatId: known.chatId,
+              deliveredAt: known.sentAt,
+              deliveredRevision: ack.revision,
+            });
           }
         }
         if (current) {
-          row.ackRevision = ack.revision;
-          row.ackStatus = r.status;
+          Object.assign(next, {
+            ackRevision: ack.revision,
+            ackStatus: r.status,
+            ackReason:
+              r.status === 'dropped' || r.status === 'deferred'
+                ? r.reason
+                : r.status === 'failed'
+                  ? r.error
+                  : undefined,
+            holdUntil: r.status === 'deferred' ? r.until : r.status === 'failed' ? r.retryAfter : undefined,
+          });
+        }
+        // 记下来什么都不变：同一条回执又来了一遍（网关重发、两批叠上），不再记一次（失败次数、送达尝试数都不加）。
+        if (!changesOutboxRow(row, next)) {
+          report.applied += 1;
+          continue;
+        }
+        Object.assign(row, next);
+        if (current) {
           row.ackedAt = at;
-          row.ackReason =
-            r.status === 'dropped' || r.status === 'deferred'
-              ? r.reason
-              : r.status === 'failed'
-                ? r.error
-                : undefined;
-          row.holdUntil =
-            r.status === 'deferred' ? r.until : r.status === 'failed' ? r.retryAfter : undefined;
           if (r.status === 'failed') row.failures += 1;
         }
         mirrorDelivery(ack, at);

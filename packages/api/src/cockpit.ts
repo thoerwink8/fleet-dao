@@ -36,6 +36,7 @@ import {
 } from '@fleet-dao/shared';
 import { type Context, Hono } from 'hono';
 import type { z } from 'zod';
+import { answerAsk } from './answer-ask.ts';
 import { meBody } from './auth.ts';
 import type { AskWaiters } from './changes.ts';
 import type { Deps } from './deps.ts';
@@ -47,7 +48,7 @@ import {
   WorkflowGoneError,
   WorkflowUnavailableError,
 } from './ports.ts';
-import { type CockpitEnv, requireSession } from './session.ts';
+import { type CockpitEnv, checkGatewayTaskAction, requireSession } from './session.ts';
 import { eventsHandler, type SseRelay } from './sse.ts';
 import {
   buildBoard,
@@ -181,6 +182,7 @@ export function cockpitRoutes(deps: Deps, waiters: AskWaiters, relay: SseRelay):
   app.post(WebRoutes.taskAction.path, async (c) => {
     const taskId = c.req.param('taskId');
     const body = await readJson(c, TaskActionRequest);
+    checkGatewayTaskAction(c, body.action);
     const task = await store.getTask(taskId);
     if (!task) throw new ApiError(404, 'task_not_found', '没有这个任务');
     if (isTaskFinished(task)) {
@@ -260,27 +262,15 @@ export function cockpitRoutes(deps: Deps, waiters: AskWaiters, relay: SseRelay):
     const { answer } = await readJson(c, AnswerAskRequest);
     const ask = await store.getAsk(askId);
     if (!ask) throw new ApiError(404, 'ask_not_found', '没有这条追问');
-    const actor = actorOf(c);
-    const result = await store.answerAsk(
-      { askId, answer, by: actor },
-      {
-        actor,
-        action: 'ask.answer',
-        target: `task:${ask.taskId}`,
-        after: { askId, answer },
-        via: c.get('via'),
-        ok: true,
-      },
-    );
+    const result = await answerAsk(deps, waiters, {
+      askId,
+      taskId: ask.taskId,
+      answer,
+      by: actorOf(c),
+      via: c.get('via'),
+    });
     if (result === 'not_found') throw new ApiError(404, 'ask_not_found', '没有这条追问');
     if (result === 'already_answered') throw new ApiError(409, 'already_answered', '这条追问已经有人回答了');
-    waiters.wake(askId);
-    try {
-      await deps.workflows.signal(ask.taskId, { name: 'answer', by: actor.id, askId, answer });
-    } catch (err) {
-      // 回答已经写库：阻塞等回答的 fleet ask 从库里读得到，工作流收不到信号也能按库补看。
-      deps.log.warn('回答已记下，但叫醒工作流没成功', { askId, error: String(err) });
-    }
     return reply(c, AnswerAskResponse, { ok: true });
   });
 

@@ -4,6 +4,7 @@ import {
   CSRF_HEADER,
   FEISHU_ACTING_HEADER,
   FEISHU_GATEWAY_WEB_ROUTES,
+  type TaskActionRequest,
   WEB_API_PREFIX,
   WebRoutes,
 } from '@fleet-dao/shared';
@@ -153,6 +154,20 @@ const GATEWAY_WEB_ROUTES = FEISHU_GATEWAY_WEB_ROUTES.map((name) => {
   return { method: route.method, pattern: routePattern(route.path) };
 });
 
+type TaskAction = z.infer<typeof TaskActionRequest>['action'];
+
+/**
+ * 网关能对需求做的动作只有叫停（design 第十四节：通行证只管查任务、叫停、回答追问）。taskAction 是一条路由，
+ * 按路径放行管不到动作，所以在这里再判：通行证漏了也不能替创始人暂停、继续、换路由。
+ */
+const GATEWAY_TASK_ACTIONS: ReadonlySet<TaskAction> = new Set(['stop']);
+
+/** 网关来的请求只能叫停；别的动作 403，什么都不做。驾驶舱（浏览器）来的不管。 */
+export function checkGatewayTaskAction(c: Context<CockpitEnv>, action: TaskAction): void {
+  if (c.get('via') !== 'feishu' || GATEWAY_TASK_ACTIONS.has(action)) return;
+  throw new ApiError(403, 'gateway_action_not_allowed', '网关只能替创始人叫停需求，不能暂停、继续或换路由');
+}
+
 /** `/tasks/:taskId` → 只认一段的正则（参数里不许有斜杠）。 */
 export function routePattern(path: string): RegExp {
   const escaped = path
@@ -167,7 +182,8 @@ export function routePattern(path: string): RegExp {
  * 1. 浏览器：登录 Cookie（写操作另过 CSRF）；
  * 2. 飞书网关：`Authorization: Bearer <网关通行证>` + `X-Fleet-Acting-Feishu: <飞书 open_id>`，按 open_id 认创始人，
  *    当作这位创始人操作（操作记录 via=feishu），不走 CSRF。只放行 GATEWAY_WEB_ROUTES 那几条，别的一律 403
- *    （通行证放在香港那台机器上，漏了也只能做飞书那几件事）。不在 /api 下的入口（退出登录）各自再判。
+ *    （通行证放在香港那台机器上，漏了也只能做飞书那几件事）；taskAction 里只放叫停（checkGatewayTaskAction）。
+ *    不在 /api 下的入口（退出登录）各自再判。
  * 带了 Authorization 却不是网关通行证的（例如 fleet 令牌）一律拒。通行证常量时间比较，不写进日志。
  */
 export function requireSession(config: Config, store: Store, now: () => Date): MiddlewareHandler<CockpitEnv> {

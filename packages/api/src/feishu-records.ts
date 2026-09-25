@@ -1,10 +1,20 @@
-// 两个 Store 共用的飞书记录写法：收到的话的幂等记录（存在 idempotency_keys 的 result 里）、改草稿时怎么追加补充。
+// 两个 Store 共用的飞书记录写法：收到的话的幂等记录（存在 idempotency_keys 的 result 里）、改草稿时怎么追加补充、
+// 进来的话怎么规范化。
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type { FeishuMessageKey, FeishuMessageRecord, FeishuMessageResult } from './ports.ts';
 
 /** 「我理解为」最长多少字（shared/feishu-api.ts 的 FeishuDraftSchema.understanding）。 */
 export const UNDERSTANDING_MAX = 1000;
+
+/** 「改一下」的补充接在原话和「我理解为」后面的样子。 */
+export const NOTE_MARKER = '\n补充：';
+
+/**
+ * 「改一下」新补的一句最长多少字：「我理解为」放不下时截旧的，新补的这句整句留着，旧的至少还剩一截（标题取第一行）。
+ * 更长的接口层直接拒（422）：截掉新补的，等于人说的话被吞了。
+ */
+export const UNDERSTANDING_NOTE_MAX = 800;
 
 export const feishuMessageKey = (sourceMessageId: string) => `feishu-message:${sourceMessageId}`;
 export const feishuReviseKey = (draftId: string, requestId: string) =>
@@ -76,7 +86,37 @@ export function clip(text: string, max: number): string {
   return `${t.slice(0, end)}…`;
 }
 
-/** 按补充改「我理解为」：还没接模型理解，先把补充原样接在后面（超长截断）。 */
-export function appendNote(understanding: string, note: string): string {
-  return clip(`${understanding}\n补充：${note.trim()}`, UNDERSTANDING_MAX);
+/**
+ * 按补充改草稿（还没接模型理解）：补充整句接在原话后面（原话没有长度上限，开单时整段交出去，一个字不丢）；
+ * 「我理解为」也整句接上，放不下时截旧的理解（截掉的原话里都有），不截新补的这句。
+ * 新补的超过 UNDERSTANDING_NOTE_MAX 放不下：接口层先拒，走到这里算写错了代码，抛错。
+ */
+export function withNote(
+  draft: { rawText: string; understanding: string },
+  note: string,
+): { rawText: string; understanding: string } {
+  const fresh = note.trim();
+  if (fresh.length === 0 || fresh.length > UNDERSTANDING_NOTE_MAX) {
+    throw new Error(`补充要 1–${UNDERSTANDING_NOTE_MAX} 字，接口层应当先拒（这次 ${fresh.length} 字）`);
+  }
+  const added = `${NOTE_MARKER}${fresh}`;
+  return {
+    rawText: `${draft.rawText}${added}`,
+    understanding: `${clip(draft.understanding, UNDERSTANDING_MAX - added.length)}${added}`,
+  };
+}
+
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
+
+/**
+ * 把孤立的半个代理对（emoji 被截成两半）换成 U+FFFD，报出换了几处。飞书这边进来的话在入口统一过一遍：
+ * 不换的话，写进 text 列时驱动会悄悄换掉（和原话、幂等摘要对不上），写进 jsonb（操作记录）时整条被库拒收。
+ */
+export function wellFormed(text: string): { text: string; replaced: number } {
+  let replaced = 0;
+  const out = text.replace(LONE_SURROGATE, () => {
+    replaced += 1;
+    return '�';
+  });
+  return { text: out, replaced };
 }

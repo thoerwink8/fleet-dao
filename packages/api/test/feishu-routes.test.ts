@@ -12,12 +12,14 @@ import {
 } from '@fleet-dao/shared';
 import { describe, expect, it, vi } from 'vitest';
 import { devFixtures } from '../src/dev-fixtures.ts';
+import { feishuMessageKey } from '../src/feishu-records.ts';
+import { ANSWER_TEXTS } from '../src/feishu-views.ts';
 import type { MemoryData } from '../src/memory-store.ts';
 import {
-  type IntakeRequest,
-  type IntakeResult,
-  IntakeUnavailableError,
-  type TaskIntake,
+  type DraftOpener,
+  DraftOpenerUnavailableError,
+  type DraftOpenRequest,
+  type DraftOpenResult,
 } from '../src/ports.ts';
 import { errorCode, GATEWAY_PASS, harness, IDS, T0 } from './harness.ts';
 import { FEISHU_IDS, feishuData } from './store-contract-feishu.ts';
@@ -25,6 +27,7 @@ import { FEISHU_IDS, feishuData } from './store-contract-feishu.ts';
 const A = 'ou_dev_founder_a';
 const B = 'ou_dev_founder_b';
 const MIN = 60_000;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function gw(
   method: 'GET' | 'POST' | 'PUT',
@@ -44,21 +47,22 @@ function gw(
 }
 
 /** 可以换行为的假开单：默认「还没接上」。 */
-function intakeStub() {
-  const calls: IntakeRequest[] = [];
-  let behave: (req: IntakeRequest) => Promise<IntakeResult> = async () => {
-    throw new IntakeUnavailableError('开单还没接上（测试）');
+function openerStub() {
+  const calls: DraftOpenRequest[] = [];
+  let behave: (req: DraftOpenRequest) => Promise<DraftOpenResult> = async () => {
+    throw new DraftOpenerUnavailableError('开单还没接上（测试）');
   };
-  const intake: TaskIntake = {
+  const opener: DraftOpener = {
     async open(req) {
       calls.push(req);
       return behave(req);
     },
+    async check() {},
   };
   return {
-    intake,
+    opener,
     calls,
-    set(fn: (req: IntakeRequest) => Promise<IntakeResult>) {
+    set(fn: (req: DraftOpenRequest) => Promise<DraftOpenResult>) {
       behave = fn;
     },
   };
@@ -68,7 +72,7 @@ type H = ReturnType<typeof harness>;
 
 /** 让假开单像真的一样建一行任务（内存版），返回它的号。 */
 function opensTask(h: () => H, issueNumber = 44) {
-  return async (req: IntakeRequest): Promise<IntakeResult> => {
+  return async (req: DraftOpenRequest): Promise<DraftOpenResult> => {
     const id = `b0000000-0000-4000-8000-0000000000${String(issueNumber).padStart(2, '0')}`;
     if (!h().store.data.tasks.some((t) => t.id === id)) {
       h().store.data.tasks.push({
@@ -317,9 +321,9 @@ describe('POST /feishu/messages：一句话', () => {
     expect(h.store.data.feishuDrafts).toHaveLength(1);
   });
 
-  it('回复已经确认的草稿卡：不改，回一句「已经开成任务 / 正在开」', async () => {
-    const stub = intakeStub();
-    const h = harness({ intake: stub.intake });
+  it('回复已经确认的草稿卡：不改，回一句「待开单（会自动补开）/ 已经开成任务」', async () => {
+    const stub = openerStub();
+    const h = harness({ draftOpener: stub.opener });
     const draft = await newDraft(h);
     await h.store.putCard({
       messageId: 'om_card',
@@ -334,10 +338,10 @@ describe('POST /feishu/messages：一句话', () => {
     );
     expect(pending).toEqual({
       kind: 'answer',
-      text: '这张卡已经确认、正在开成任务；开好后要改需求请在驾驶舱里改。',
+      text: '这张卡已经确认了，待开单：开 issue 那一步还没做成，后台会自动补开，不会丢；开好后驾驶舱里就有这个任务。',
     });
     stub.set(opensTask(() => h));
-    await h.intake.runPending(true);
+    await h.draftOpening.runPending(true);
     const opened = FeishuMessageResponse.parse(
       await (await say(h, '再加一条', { replyToMessageId: 'om_card' })).json(),
     );
@@ -451,6 +455,111 @@ describe('POST /feishu/messages：一句话', () => {
     expect(body.kind).toBe('draft');
   });
 
+  it('回复的草稿卡对应的草稿读不到：如实说这句没记下（记日志），不另起一张新草稿；重投回同一句', async () => {
+    const h = harness();
+    await h.store.putCard({
+      messageId: 'om_ghost_draft',
+      chatId: 'oc_team',
+      kind: 'draft',
+      ref: { draftId: FEISHU_IDS.draft2 },
+      sentAt: T0.toISOString(),
+    });
+    const reply = () =>
+      say(h, '验证码要 6 位', { replyToMessageId: 'om_ghost_draft', sourceMessageId: 'om_r' });
+    const body = FeishuMessageResponse.parse(await (await reply()).json());
+    expect(body).toEqual({ kind: 'answer', text: ANSWER_TEXTS.draftMissing });
+    expect(h.store.data.feishuDrafts).toHaveLength(0);
+    expect(h.logs.find((l) => l.message.includes('草稿读不到'))).toMatchObject({
+      level: 'warn',
+      fields: { draftId: FEISHU_IDS.draft2, cardMessageId: 'om_ghost_draft' },
+    });
+    expect(FeishuMessageResponse.parse(await (await reply()).json())).toEqual(body);
+    expect(h.store.data.feishuDrafts).toHaveLength(0);
+  });
+
+  it('回复没确认的草稿卡、改的那一刻草稿没了（改草稿回 not_found）：一样如实说没记下，不另起草稿', async () => {
+    const h = harness();
+    const draft = await newDraft(h);
+    await h.store.putCard({
+      messageId: 'om_card',
+      chatId: 'oc_team',
+      kind: 'draft',
+      ref: { draftId: draft.id },
+      sentAt: T0.toISOString(),
+    });
+    vi.spyOn(h.store, 'reviseDraft').mockResolvedValueOnce({ status: 'not_found' });
+    const body = FeishuMessageResponse.parse(
+      await (await say(h, '改成 6 位', { replyToMessageId: 'om_card' })).json(),
+    );
+    expect(body).toEqual({ kind: 'answer', text: ANSWER_TEXTS.draftMissing });
+    expect(h.store.data.feishuDrafts).toHaveLength(1);
+  });
+
+  it('回复的追问卡对应的追问读不到（登记里有、库里没有，或答的那一刻没了）：如实说没记成回答，不回「还答不了」把回答吞掉', async () => {
+    const h = harness({ data: feishuData() });
+    await h.store.putCard({
+      messageId: 'om_ghost_ask',
+      chatId: 'oc_team',
+      kind: 'ask',
+      ref: { askId: '10000000-0000-4000-8000-0000000000ff', taskId: IDS.task12 },
+      sentAt: T0.toISOString(),
+    });
+    const ghost = FeishuMessageResponse.parse(
+      await (await say(h, '6 位', { replyToMessageId: 'om_ghost_ask' })).json(),
+    );
+    expect(ghost).toEqual({ kind: 'answer', text: ANSWER_TEXTS.askMissing, taskId: IDS.task12 });
+    expect(h.logs.find((l) => l.message.includes('追问读不到'))?.level).toBe('warn');
+
+    await h.store.putCard({
+      messageId: 'om_ask_card',
+      chatId: 'oc_team',
+      kind: 'ask',
+      ref: { askId: FEISHU_IDS.askOpen },
+      sentAt: T0.toISOString(),
+    });
+    vi.spyOn(h.store, 'answerAsk').mockResolvedValueOnce('not_found');
+    const gone = FeishuMessageResponse.parse(
+      await (await say(h, '6 位', { replyToMessageId: 'om_ask_card' })).json(),
+    );
+    expect(gone).toEqual({ kind: 'answer', text: ANSWER_TEXTS.askMissing, taskId: IDS.task12 });
+    expect(h.signals).toEqual([]);
+    expect(h.store.data.asks.find((a) => a.id === FEISHU_IDS.askOpen)?.answer).toBeUndefined();
+  });
+
+  it('原话里有孤立的半个 emoji（被截成两半）：入口换成 �、记日志，照样记成草稿；回复草稿卡、改一下也一样', async () => {
+    const h = harness();
+    const res = await h.cockpit.request(
+      '/api/feishu/messages',
+      gw('POST', { sourceMessageId: 'om_lone', text: '加验证码\ud83d', chatType: 'p2p' }),
+    );
+    expect(res.status).toBe(200);
+    const body = FeishuMessageResponse.parse(await res.json());
+    if (body.kind !== 'draft') throw new Error('应当记成草稿');
+    expect(body.draft.rawText).toBe('加验证码�');
+    expect(body.draft.understanding).toBe('加验证码�');
+    expect(h.logs.find((l) => l.message.includes('半个 emoji'))?.fields).toMatchObject({
+      sourceMessageId: 'om_lone',
+      replaced: 1,
+    });
+    // 同一条消息再来（原话还是那半个 emoji）：认得出是同一条，不 409。
+    const again = await h.cockpit.request(
+      '/api/feishu/messages',
+      gw('POST', { sourceMessageId: 'om_lone', text: '加验证码\ud83d', chatType: 'p2p' }),
+    );
+    expect(FeishuMessageResponse.parse(await again.json())).toMatchObject({ draft: { id: body.draft.id } });
+
+    const revised = FeishuReviseDraftResponse.parse(
+      await (
+        await h.cockpit.request(
+          `/api/feishu/drafts/${body.draft.id}/revise`,
+          gw('POST', { requestId: 'r1', note: '\ude00要 6 位' }),
+        )
+      ).json(),
+    );
+    expect(revised.draft.understanding).toBe('加验证码�\n补充：�要 6 位');
+    expect(h.store.data.audit.at(-1)).toMatchObject({ action: 'draft.revise', after: { note: '�要 6 位' } });
+  });
+
   it('库读不到：500，不回草稿也不回「记下了」', async () => {
     const h = harness();
     vi.spyOn(h.store, 'getFeishuMessage').mockRejectedValueOnce(new Error('connection refused'));
@@ -459,6 +568,58 @@ describe('POST /feishu/messages：一句话', () => {
     expect(await errorCode(res)).toBe('internal');
     vi.spyOn(h.store, 'createDraft').mockRejectedValueOnce(new Error('connection refused'));
     expect((await say(h, '加个导出')).status).toBe(500);
+    expect(h.store.data.feishuDrafts).toHaveLength(0);
+  });
+
+  it('这条消息的幂等记录认不出、幂等键被别的命令占着：500，不当成「没处理过」再记一遍', async () => {
+    const h = harness();
+    h.store.data.idempotency.set(feishuMessageKey('om_broken'), {
+      action: 'feishu.message',
+      claimedAt: T0.toISOString(),
+      completedAt: T0.toISOString(),
+      result: { userId: IDS.founderA, result: { kind: '别的' } },
+    });
+    h.store.data.idempotency.set(feishuMessageKey('om_taken'), {
+      action: 'fleet.say',
+      claimedAt: T0.toISOString(),
+    });
+    for (const sourceMessageId of ['om_broken', 'om_taken']) {
+      const res = await say(h, '加个导出', { sourceMessageId });
+      expect({ sourceMessageId, status: res.status, code: await errorCode(res) }).toEqual({
+        sourceMessageId,
+        status: 500,
+        code: 'internal',
+      });
+    }
+    expect(h.logs.some((l) => String(l.fields?.error).includes('格式认不出'))).toBe(true);
+    expect(h.logs.some((l) => String(l.fields?.error).includes('被别的命令（fleet.say）占着'))).toBe(true);
+    expect(h.store.data.feishuDrafts).toHaveLength(0);
+  });
+
+  it('消息记成的草稿库里没有（draft_missing）、草稿读不全（draft_unreadable）：500，不编一张草稿', async () => {
+    const h = harness();
+    const draft = await newDraft(h, '加个导出', 'om_x');
+    // 草稿放的仓不在了：卡片要的仓名查不出来。
+    const repos = h.store.data.repos;
+    h.store.data.repos = [];
+    const unreadable = await h.cockpit.request(
+      '/api/feishu/messages',
+      gw('POST', { sourceMessageId: 'om_x', text: '加个导出', chatType: 'p2p' }),
+    );
+    expect({ status: unreadable.status, code: await errorCode(unreadable) }).toEqual({
+      status: 500,
+      code: 'draft_unreadable',
+    });
+    h.store.data.repos = repos;
+    h.store.data.feishuDrafts = h.store.data.feishuDrafts.filter((d) => d.id !== draft.id);
+    const missing = await h.cockpit.request(
+      '/api/feishu/messages',
+      gw('POST', { sourceMessageId: 'om_x', text: '加个导出', chatType: 'p2p' }),
+    );
+    expect({ status: missing.status, code: await errorCode(missing) }).toEqual({
+      status: 500,
+      code: 'draft_missing',
+    });
     expect(h.store.data.feishuDrafts).toHaveLength(0);
   });
 });
@@ -519,12 +680,101 @@ describe('POST /feishu/drafts/:draftId/revise：改一下', () => {
     await h.cockpit.request(`/api/feishu/drafts/${draft.id}/confirm`, gw('POST', { revision: 1 }));
     const late = await revise(draft.id, { requestId: 'r-late', note: '晚了' });
     expect(late.status).toBe(409);
-    const body = (await late.json()) as { error: { code: string; details: unknown } };
+    const body = (await late.json()) as { error: { code: string; message: string; details: unknown } };
     expect(body.error.code).toBe('draft_confirmed');
+    // 待开单时不说「已经开成任务」。
+    expect(body.error.message).toBe('已经确认了（待开单），这张卡改不了；开好后驾驶舱里就有这个任务');
     expect(FeishuDraftConflictDetails.parse(body.error.details).draft).toMatchObject({
       id: draft.id,
       status: 'confirmed',
     });
+  });
+
+  it('已开成任务的再改：409 写明开成了哪一号', async () => {
+    const stub = openerStub();
+    const h = harness({ draftOpener: stub.opener });
+    stub.set(opensTask(() => h));
+    const draft = await newDraft(h);
+    await h.cockpit.request(`/api/feishu/drafts/${draft.id}/confirm`, gw('POST', { revision: 1 }));
+    const late = await h.cockpit.request(
+      `/api/feishu/drafts/${draft.id}/revise`,
+      gw('POST', { requestId: 'r-late', note: '晚了' }),
+    );
+    const body = (await late.json()) as { error: { code: string; message: string } };
+    expect(body.error).toMatchObject({
+      code: 'draft_confirmed',
+      message: '已经确认了（已开成 #44），这张卡改不了；要改需求请在驾驶舱里改',
+    });
+  });
+
+  it('长原话（「我理解为」已经截满 1000 字）再改一下：补的这句整句留下（接在原话后面、理解里截旧的），不被吞', async () => {
+    const h = harness();
+    const long = '原'.repeat(1500);
+    const draft = await newDraft(h, long);
+    expect(draft.understanding).toHaveLength(1000);
+    const revised = FeishuReviseDraftResponse.parse(
+      await (
+        await h.cockpit.request(
+          `/api/feishu/drafts/${draft.id}/revise`,
+          gw('POST', { requestId: 'r1', note: '验证码要 6 位' }),
+        )
+      ).json(),
+    );
+    expect(revised.draft.revision).toBe(2);
+    expect(revised.draft.understanding.length).toBeLessThanOrEqual(1000);
+    expect(revised.draft.understanding.endsWith('…\n补充：验证码要 6 位')).toBe(true);
+    expect(revised.draft.rawText).toBe(`${long}\n补充：验证码要 6 位`);
+
+    // 回复确认卡补一句也一样。
+    await h.store.putCard({
+      messageId: 'om_card',
+      chatId: 'oc_team',
+      kind: 'draft',
+      ref: { draftId: draft.id },
+      sentAt: T0.toISOString(),
+    });
+    const replied = FeishuMessageResponse.parse(
+      await (await say(h, '同一手机号 60 秒只能发一次', { replyToMessageId: 'om_card' })).json(),
+    );
+    if (replied.kind !== 'draft') throw new Error('应当交回改好的草稿');
+    expect(replied.draft.understanding.endsWith('…\n补充：同一手机号 60 秒只能发一次')).toBe(true);
+    expect(replied.draft.rawText).toBe(`${long}\n补充：验证码要 6 位\n补充：同一手机号 60 秒只能发一次`);
+  });
+
+  it('补的这句本身超过 800 字：不改（「我理解为」放不下整句），卡上改一下 422、回复卡回一句说明；原来的草稿不动', async () => {
+    const h = harness();
+    const draft = await newDraft(h);
+    const tooLong = '补'.repeat(801);
+    const res = await h.cockpit.request(
+      `/api/feishu/drafts/${draft.id}/revise`,
+      gw('POST', { requestId: 'r1', note: tooLong }),
+    );
+    expect({ status: res.status, code: await errorCode(res) }).toEqual({
+      status: 422,
+      code: 'note_too_long',
+    });
+    await h.store.putCard({
+      messageId: 'om_card',
+      chatId: 'oc_team',
+      kind: 'draft',
+      ref: { draftId: draft.id },
+      sentAt: T0.toISOString(),
+    });
+    const replied = FeishuMessageResponse.parse(
+      await (await say(h, tooLong, { replyToMessageId: 'om_card' })).json(),
+    );
+    expect(replied).toEqual({ kind: 'answer', text: ANSWER_TEXTS.noteTooLong });
+    expect(h.store.data.feishuDrafts[0]).toMatchObject({ revision: 1, rawText: '给登录页加手机验证码' });
+    // 正好 800 字的照样整句留下。
+    const fits = FeishuReviseDraftResponse.parse(
+      await (
+        await h.cockpit.request(
+          `/api/feishu/drafts/${draft.id}/revise`,
+          gw('POST', { requestId: 'r2', note: '补'.repeat(800) }),
+        )
+      ).json(),
+    );
+    expect(fits.draft.understanding).toBe(`给登录页加手机验证码\n补充：${'补'.repeat(800)}`);
   });
 
   it('库读不到：500，不回旧草稿冒充改好了', async () => {
@@ -541,8 +791,8 @@ describe('POST /feishu/drafts/:draftId/revise：改一下', () => {
 
 describe('POST /feishu/drafts/:draftId/confirm：确认', () => {
   it('开单接上了：当场开成任务，记下确认人，查得到任务', async () => {
-    const stub = intakeStub();
-    const h = harness({ intake: stub.intake });
+    const stub = openerStub();
+    const h = harness({ draftOpener: stub.opener });
     stub.set(opensTask(() => h));
     const draft = await newDraft(h, '给登录页加手机验证码\n要 6 位');
     const res = await h.cockpit.request(
@@ -591,8 +841,8 @@ describe('POST /feishu/drafts/:draftId/confirm：确认', () => {
   });
 
   it('开单还没接上：确认照样记下，进「待开单」（原因记在草稿上）；接上后补开，不丢', async () => {
-    const stub = intakeStub();
-    const h = harness({ intake: stub.intake });
+    const stub = openerStub();
+    const h = harness({ draftOpener: stub.opener });
     const draft = await newDraft(h);
     const body = FeishuConfirmDraftResponse.parse(
       await (
@@ -603,16 +853,16 @@ describe('POST /feishu/drafts/:draftId/confirm：确认', () => {
     expect(body.draft.status).toBe('confirmed');
     expect(body.draft.task).toBeUndefined();
     expect(h.store.data.feishuDrafts[0]).toMatchObject({
-      intakeAttempts: 1,
-      intakeError: '开单还没接上（测试）',
+      openAttempts: 1,
+      openError: '开单还没接上（测试）',
     });
-    expect((await h.store.listPendingIntakes(10)).map((d) => d.id)).toEqual([draft.id]);
+    expect((await h.store.listDraftsToOpen(10)).map((d) => d.id)).toEqual([draft.id]);
 
     // 退避：刚失败过，这一轮不到点不试。
-    expect(await h.intake.runPending()).toEqual({ opened: 0, failed: 0 });
+    expect(await h.draftOpening.runPending()).toEqual({ opened: 0, failed: 0 });
     stub.set(opensTask(() => h));
-    expect(await h.intake.runPending(true)).toEqual({ opened: 1, failed: 0 });
-    expect(await h.store.listPendingIntakes(10)).toEqual([]);
+    expect(await h.draftOpening.runPending(true)).toEqual({ opened: 1, failed: 0 });
+    expect(await h.store.listDraftsToOpen(10)).toEqual([]);
     const again = FeishuConfirmDraftResponse.parse(
       await (
         await h.cockpit.request(`/api/feishu/drafts/${draft.id}/confirm`, gw('POST', { revision: 1 }, B))
@@ -625,8 +875,8 @@ describe('POST /feishu/drafts/:draftId/confirm：确认', () => {
   });
 
   it('开单出别的错、回的任务库里没有：都留在待开单、记下原因，不装作开成了', async () => {
-    const stub = intakeStub();
-    const h = harness({ intake: stub.intake });
+    const stub = openerStub();
+    const h = harness({ draftOpener: stub.opener });
     stub.set(async () => {
       throw new Error('GitHub 502');
     });
@@ -637,7 +887,7 @@ describe('POST /feishu/drafts/:draftId/confirm：确认', () => {
       ).json(),
     );
     expect(r1.draft.task).toBeUndefined();
-    expect(h.store.data.feishuDrafts[0]?.intakeError).toBe('开单出错：GitHub 502');
+    expect(h.store.data.feishuDrafts[0]?.openError).toBe('开单出错：GitHub 502');
     stub.set(async () => ({ taskId: '99999999-0000-4000-8000-000000000000', issueNumber: 9 }));
     const d2 = await newDraft(h, '第二句', 'om_2');
     const r2 = FeishuConfirmDraftResponse.parse(
@@ -646,8 +896,106 @@ describe('POST /feishu/drafts/:draftId/confirm：确认', () => {
       ).json(),
     );
     expect(r2.draft.task).toBeUndefined();
-    expect(h.store.data.feishuDrafts[1]?.intakeError).toContain('在库里找不到');
+    expect(h.store.data.feishuDrafts[1]?.openError).toContain('在库里找不到');
     expect(h.logs.some((l) => l.level === 'error' && l.message.includes('待开单'))).toBe(true);
+  });
+
+  it('开单实现永远不回：确认只等几秒就回「待开单」；到一次开单的时限记「开单超时」，算没成', async () => {
+    const stub = openerStub();
+    stub.set(() => new Promise(() => {}));
+    const h = harness({ draftOpener: stub.opener, draftOpenLimits: { confirmWaitMs: 50, callLimitMs: 200 } });
+    const draft = await newDraft(h);
+    const started = Date.now();
+    const body = FeishuConfirmDraftResponse.parse(
+      await (
+        await h.cockpit.request(`/api/feishu/drafts/${draft.id}/confirm`, gw('POST', { revision: 1 }))
+      ).json(),
+    );
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(body.draft.status).toBe('confirmed');
+    expect(body.draft.task).toBeUndefined();
+    // 没等到结果不等于没成：到时限之前不记失败。
+    expect(h.store.data.feishuDrafts[0]?.openAttempts).toBe(0);
+    await sleep(350);
+    expect(h.store.data.feishuDrafts[0]).toMatchObject({
+      openAttempts: 1,
+      openError: '开单超时：0.2 秒没回',
+    });
+    expect(h.logs.find((l) => l.fields?.error === '开单超时：0.2 秒没回')?.level).toBe('warn');
+  });
+
+  it('超时的那次调用还挂着：再点确认、补开都不开第二次，也不干等；补开一轮照样跑完', async () => {
+    const stub = openerStub();
+    stub.set(() => new Promise(() => {}));
+    const h = harness({
+      draftOpener: stub.opener,
+      draftOpenLimits: { confirmWaitMs: 300, callLimitMs: 100 },
+    });
+    const draft = await newDraft(h);
+    const confirm = (as: string) =>
+      h.cockpit.request(`/api/feishu/drafts/${draft.id}/confirm`, gw('POST', { revision: 1 }, as));
+    // 确认等得比一次开单的时限还久：到时限就记超时、回「待开单」。
+    expect((await confirm(A)).status).toBe(200);
+    expect(h.store.data.feishuDrafts[0]).toMatchObject({
+      openAttempts: 1,
+      openError: '开单超时：0.1 秒没回',
+    });
+    const t1 = Date.now();
+    const again = FeishuConfirmDraftResponse.parse(await (await confirm(B)).json());
+    expect(again).toMatchObject({ alreadyConfirmed: true, draft: { status: 'confirmed' } });
+    expect(Date.now() - t1).toBeLessThan(250);
+    expect(await h.draftOpening.runPending(true)).toEqual({ opened: 0, failed: 0 });
+    expect(stub.calls).toHaveLength(1);
+    expect(h.store.data.feishuDrafts[0]?.openAttempts).toBe(1);
+  });
+
+  it('超时之后实现又开成了：照样记上任务，不丢', async () => {
+    const stub = openerStub();
+    const h = harness({ draftOpener: stub.opener, draftOpenLimits: { confirmWaitMs: 20, callLimitMs: 50 } });
+    const open = opensTask(() => h);
+    stub.set(async (req) => {
+      await sleep(150);
+      return open(req);
+    });
+    const draft = await newDraft(h);
+    await h.cockpit.request(`/api/feishu/drafts/${draft.id}/confirm`, gw('POST', { revision: 1 }));
+    await sleep(100);
+    expect(h.store.data.feishuDrafts[0]).toMatchObject({
+      openAttempts: 1,
+      openError: '开单超时：0.05 秒没回',
+    });
+    await sleep(200);
+    expect(h.store.data.feishuDrafts[0]).toMatchObject({ taskId: 'b0000000-0000-4000-8000-000000000044' });
+    expect(h.store.data.feishuDrafts[0]?.openError).toBeUndefined();
+    expect(await h.store.listDraftsToOpen(10)).toEqual([]);
+  });
+
+  it('后台补开正开着（慢）时又点确认：确认只等几秒，不跟着后台等到网关超时；不开第二次', async () => {
+    const stub = openerStub();
+    const h = harness({
+      draftOpener: stub.opener,
+      draftOpenLimits: { confirmWaitMs: 50, callLimitMs: 5_000 },
+    });
+    const draft = await newDraft(h);
+    await h.cockpit.request(`/api/feishu/drafts/${draft.id}/confirm`, gw('POST', { revision: 1 }));
+    const open = opensTask(() => h);
+    stub.set(async (req) => {
+      await sleep(400);
+      return open(req);
+    });
+    const round = h.draftOpening.runPending(true);
+    await sleep(20);
+    const t1 = Date.now();
+    const again = FeishuConfirmDraftResponse.parse(
+      await (
+        await h.cockpit.request(`/api/feishu/drafts/${draft.id}/confirm`, gw('POST', { revision: 1 }, B))
+      ).json(),
+    );
+    expect(Date.now() - t1).toBeLessThan(300);
+    expect(again.draft.task).toBeUndefined();
+    expect(await round).toEqual({ opened: 1, failed: 0 });
+    // 一次「还没接上」加一次后台的慢调用：确认没有再开第二次。
+    expect(stub.calls).toHaveLength(2);
   });
 
   it('草稿刚被改过（版本对不上）409 带上新的；没选仓 422 带上草稿；没有这个仓 422；没有这张草稿 404；参数认不出 400', async () => {
@@ -728,7 +1076,7 @@ describe('GET /feishu/tasks：按 issue 号查', () => {
     expect(none.matches).toEqual([]);
   });
 
-  it('参数认不出 400；库读不到 500（不回空列表）', async () => {
+  it('参数认不出 400；库读不到 500（不回空列表）；任务挂的仓不在库里 500（不编仓名）', async () => {
     const h = harness();
     for (const q of ['', '?issue=', '?issue=abc', '?issue=0', '?issue=-3', '?issue=1.5']) {
       const res = await h.cockpit.request(`/api/feishu/tasks${q}`, gw('GET'));
@@ -738,6 +1086,14 @@ describe('GET /feishu/tasks：按 issue 号查', () => {
         code: 'invalid_query',
       });
     }
+    const repos = h.store.data.repos;
+    h.store.data.repos = [];
+    const orphan = await h.cockpit.request('/api/feishu/tasks?issue=12', gw('GET'));
+    expect({ status: orphan.status, code: await errorCode(orphan) }).toEqual({
+      status: 500,
+      code: 'repo_missing',
+    });
+    h.store.data.repos = repos;
     vi.spyOn(h.store, 'findTasksByIssue').mockRejectedValueOnce(new Error('connection refused'));
     const res = await h.cockpit.request('/api/feishu/tasks?issue=12', gw('GET'));
     expect({ status: res.status, code: await errorCode(res) }).toEqual({ status: 500, code: 'internal' });
@@ -996,6 +1352,8 @@ describe('GET /feishu/outbox 与 POST /feishu/outbox/acks：待推送与回执',
     const h = harness({ data: feishuData() });
     const [n1, ask1, decision] = (await outbox(h)).items;
     if (!n1 || !ask1 || !decision) throw new Error('应当有三件');
+    const alertNote = h.store.data.notifications.find((n) => n.id === IDS.notification1);
+    const alertDeliveriesBefore = structuredClone(alertNote?.deliveries);
     const until = new Date(T0.getTime() + 30 * MIN).toISOString();
     await ack(h, [
       { itemId: n1.id, revision: 1, result: { status: 'deferred', until, reason: 'quiet_hours' } },
@@ -1010,17 +1368,18 @@ describe('GET /feishu/outbox 与 POST /feishu/outbox/acks：待推送与回执',
       [n1.id, 1],
       [ask1.id, 1],
     ]);
-    // 通知类的回执记进通知的送达记录，驾驶舱「通知」页看得到原因。
+    // 「不发了」「推迟」都不是没送成：通知的送达记录不记这一笔（原因记在推送本身）。
     const decisionNote = h.store.data.notifications.find((n) => n.id === FEISHU_IDS.decision);
-    expect(decisionNote?.deliveries).toEqual([
-      {
-        channel: 'feishu',
-        target: 'team',
-        attempts: 0,
-        error: '不发了：over_budget',
-        lastAttemptAt: T0.toISOString(),
-      },
-    ]);
+    expect(decisionNote?.deliveries).toEqual([]);
+    expect(h.store.data.feishuOutbox.find((r) => r.id === decision.id)).toMatchObject({
+      ackStatus: 'dropped',
+      ackReason: 'over_budget',
+    });
+    expect(alertNote?.deliveries).toEqual(alertDeliveriesBefore);
+    expect(h.store.data.feishuOutbox.find((r) => r.id === n1.id)).toMatchObject({
+      ackStatus: 'deferred',
+      ackReason: 'quiet_hours',
+    });
   });
 
   it('回执没记上时按卡片登记补「上次送到的卡」：网关重启后改原卡，不再发一张', async () => {

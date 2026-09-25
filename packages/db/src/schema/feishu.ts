@@ -58,8 +58,9 @@ const inList = (values: readonly string[]) =>
   sql.raw(values.map((v) => `'${v.replaceAll("'", "''")}'`).join(', '));
 
 /**
- * 随手记的草稿：一句话 →「我理解为」→ 点确认。确认后不再改（要改需求去驾驶舱）。
+ * 随手记的草稿：一句话 →「我理解为」→ 点确认。确认后不再改（开成任务后要改需求去驾驶舱）。
  * 确认了还没有 task_id 就是「待开单」：开 issue、建任务、拉起工作流的那一步还没做成，后端定时补开，不丢。
+ * 「改一下」的补充整句接在 raw_text 后面（没有长度上限）；understanding 放不下时截旧的。
  */
 export const feishuDrafts = pgTable(
   'feishu_drafts',
@@ -87,9 +88,9 @@ export const feishuDrafts = pgTable(
     /** 开成的任务。 */
     taskId: uuid('task_id').references(() => tasks.id),
     /** 开单试过几次、最近一次为什么没成、什么时候试的（补开按它退避）。 */
-    intakeAttempts: integer('intake_attempts').notNull().default(0),
-    intakeError: text('intake_error'),
-    intakeTriedAt: timestamp('intake_tried_at', tz),
+    openAttempts: integer('open_attempts').notNull().default(0),
+    openError: text('open_error'),
+    openTriedAt: timestamp('open_tried_at', tz),
   },
   (t) => [
     check('feishu_drafts_status_known', sql`${t.status} in (${inList(FEISHU_DRAFT_STATUSES)})`),
@@ -102,8 +103,8 @@ export const feishuDrafts = pgTable(
       sql`(${t.status} = 'confirmed') = (${t.confirmedBy} is not null) and (${t.status} = 'confirmed') = (${t.confirmedAt} is not null) and (${t.status} <> 'confirmed' or ${t.repoId} is not null)`,
     ),
     check('feishu_drafts_task_needs_confirm', sql`${t.taskId} is null or ${t.status} = 'confirmed'`),
-    check('feishu_drafts_intake_attempts_nonneg', sql`${t.intakeAttempts} >= 0`),
-    index('feishu_drafts_pending_idx')
+    check('feishu_drafts_open_attempts_nonneg', sql`${t.openAttempts} >= 0`),
+    index('feishu_drafts_to_open_idx')
       .on(t.confirmedAt)
       .where(sql`${t.status} = 'confirmed' and ${t.taskId} is null`),
   ],

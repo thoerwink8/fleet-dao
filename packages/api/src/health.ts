@@ -57,7 +57,10 @@ export async function runHealthChecks(
   return report;
 }
 
-/** 生产要探的几项：库、实时推送（LISTEN）、Temporal、GitHub 事件的去处。main.ts 用它装配，测试也用它，是同一份代码。 */
+/**
+ * 生产要探的几项：库、实时推送（LISTEN）、Temporal、GitHub 事件的去处、飞书草稿开单（接没接上、有没有积压）。
+ * main.ts 用它装配，测试也用它，是同一份代码。
+ */
 export function serviceHealthChecks(parts: {
   /** 真去读几张常用表、带自己的超时（pg-store.ts 的 probeDb）；只 select 1 查不出表被锁住。 */
   probeDb: () => Promise<void>;
@@ -65,6 +68,10 @@ export function serviceHealthChecks(parts: {
   feed: { probe(timeoutMs?: number): Promise<void> };
   temporal: { check(): Promise<void> };
   githubEvents: () => Promise<void>;
+  /** 飞书草稿开单那一步（ports.ts 的 DraftOpener）：没接上、接了开不了都报红。 */
+  draftOpener: { check(): Promise<void> };
+  /** 最早一张待开单等太久就报红（draft-opening.ts 的 draftBacklogCheck）。 */
+  draftBacklog: () => Promise<void>;
 }): HealthCheck[] {
   return [
     { name: 'database', check: parts.probeDb },
@@ -72,6 +79,8 @@ export function serviceHealthChecks(parts: {
     { name: 'realtime', check: () => parts.feed.probe(CHECK_TIMEOUT_MS - 1_000) },
     { name: 'temporal', check: () => parts.temporal.check() },
     { name: 'github_events', check: parts.githubEvents },
+    { name: 'draft_opener', check: () => parts.draftOpener.check() },
+    { name: 'draft_backlog', check: parts.draftBacklog },
   ];
 }
 

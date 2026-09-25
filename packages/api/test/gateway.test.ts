@@ -23,18 +23,46 @@ describe('飞书网关通行证', () => {
 
     const res = await h.cockpit.request(
       `/api/tasks/${IDS.task12}/actions`,
-      viaGateway('POST', FOUNDER_A, { action: 'pause', reason: '飞书里点的暂停' }),
+      viaGateway('POST', FOUNDER_A, { action: 'stop', reason: '飞书里点的叫停' }),
     );
     expect(res.status).toBe(200);
     expect(h.signals).toEqual([
-      { taskId: IDS.task12, signal: { name: 'pause', by: DEV_USER_ID, reason: '飞书里点的暂停' } },
+      { taskId: IDS.task12, signal: { name: 'stop', by: DEV_USER_ID, reason: '飞书里点的叫停' } },
     ]);
     expect(h.store.data.audit.at(-1)).toMatchObject({
       actor: { kind: 'user', id: DEV_USER_ID },
-      action: 'task.pause',
+      action: 'task.stop',
       via: 'feishu',
       ok: true,
     });
+  });
+
+  it('网关对需求只能叫停：暂停、继续、换路由一律 403，什么都不做；驾驶舱里照常能暂停', async () => {
+    const h = harness();
+    for (const body of [
+      { action: 'pause', reason: '飞书里点的暂停' },
+      { action: 'resume' },
+      { action: 'reroute', routeId: 'route-x' },
+    ]) {
+      const res = await h.cockpit.request(
+        `/api/tasks/${IDS.task12}/actions`,
+        viaGateway('POST', FOUNDER_A, body),
+      );
+      expect({ action: body.action, status: res.status, code: await errorCode(res) }).toEqual({
+        action: body.action,
+        status: 403,
+        code: 'gateway_action_not_allowed',
+      });
+    }
+    expect(h.signals).toEqual([]);
+    expect(h.store.data.audit).toEqual([]);
+    const session = await h.login();
+    const res = await h.cockpit.request(
+      `/api/tasks/${IDS.task12}/actions`,
+      write('POST', session, { action: 'pause', reason: '驾驶舱里点的暂停' }),
+    );
+    expect(res.status).toBe(200);
+    expect(h.signals.map((s) => s.signal.name)).toEqual(['pause']);
   });
 
   it('通行证不对、格式不对、没配通行证：401；不会退回去认 Cookie', async () => {

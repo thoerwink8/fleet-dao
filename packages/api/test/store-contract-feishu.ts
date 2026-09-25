@@ -172,7 +172,7 @@ export function describeFeishuStoreContract(name: string, make: MakeStore): void
             unsure: true,
             repoId: IDS.repo,
             proposedBy: IDS.founderA,
-            intake: { attempts: 0 },
+            opening: { attempts: 0 },
             createdAt: T0.toISOString(),
             updatedAt: T0.toISOString(),
           },
@@ -272,6 +272,30 @@ export function describeFeishuStoreContract(name: string, make: MakeStore): void
             ),
           ).toEqual({ status: 'not_found' });
         }
+      });
+
+      it('按补充改长原话：补充整句接在原话后面（原话不截）；「我理解为」已经满了就截旧的，新补的整句留着', async () => {
+        const long = '原'.repeat(1500);
+        await store.createDraft(
+          {
+            message: msg('om_1'),
+            draft: newDraft({ rawText: long, understanding: `${'原'.repeat(999)}…` }),
+          },
+          audit(),
+        );
+        const r = await store.reviseDraft(
+          { draftId: FEISHU_IDS.draft1, note: '  要 6 位 ', key: { type: 'request', requestId: 'r1' } },
+          audit(),
+        );
+        if (r.status !== 'revised') throw new Error(`应当改成，却是 ${r.status}`);
+        expect(r.draft.rawText).toBe(`${long}\n补充：要 6 位`);
+        expect(r.draft.understanding).toHaveLength(1000);
+        expect(r.draft.understanding.endsWith('原…\n补充：要 6 位')).toBe(true);
+        expect(await store.getDraft(FEISHU_IDS.draft1)).toMatchObject({
+          revision: 2,
+          rawText: `${long}\n补充：要 6 位`,
+          understanding: r.draft.understanding,
+        });
       });
 
       it('按回复的消息改：同一条消息再来交回当时的结果（不再改）', async () => {
@@ -392,7 +416,7 @@ export function describeFeishuStoreContract(name: string, make: MakeStore): void
           { message: msg('om_2'), draft: newDraft({ id: FEISHU_IDS.draft2 }) },
           audit(),
         );
-        expect(await store.listPendingIntakes(10)).toEqual([]);
+        expect(await store.listDraftsToOpen(10)).toEqual([]);
         tick();
         await store.confirmDraft(
           { draftId: FEISHU_IDS.draft2, revision: 1, repoId: IDS.repo, by: IDS.founderA },
@@ -403,42 +427,47 @@ export function describeFeishuStoreContract(name: string, make: MakeStore): void
           { draftId: FEISHU_IDS.draft1, revision: 1, repoId: IDS.repo, by: IDS.founderA },
           audit(),
         );
-        expect((await store.listPendingIntakes(10)).map((d) => d.id)).toEqual([
+        expect((await store.listDraftsToOpen(10)).map((d) => d.id)).toEqual([
           FEISHU_IDS.draft2,
           FEISHU_IDS.draft1,
         ]);
-        expect((await store.listPendingIntakes(1)).map((d) => d.id)).toEqual([FEISHU_IDS.draft2]);
+        expect((await store.listDraftsToOpen(1)).map((d) => d.id)).toEqual([FEISHU_IDS.draft2]);
 
         tick();
-        await store.recordIntakeFailure({ draftId: FEISHU_IDS.draft2, error: '开单还没接上' });
-        await store.recordIntakeFailure({ draftId: FEISHU_IDS.draft2, error: '还是没接上' });
-        expect((await store.getDraft(FEISHU_IDS.draft2))?.intake).toEqual({
+        await store.recordDraftOpenFailure({ draftId: FEISHU_IDS.draft2, error: '开单还没接上' });
+        await store.recordDraftOpenFailure({ draftId: FEISHU_IDS.draft2, error: '还是没接上' });
+        expect((await store.getDraft(FEISHU_IDS.draft2))?.opening).toEqual({
           attempts: 2,
           error: '还是没接上',
           triedAt: clock.now.toISOString(),
         });
-        expect(await store.recordIntake({ draftId: FEISHU_IDS.draft2, taskId: OTHER_UUID })).toBe(
+        expect(await store.recordDraftOpened({ draftId: FEISHU_IDS.draft2, taskId: OTHER_UUID })).toBe(
           'task_not_found',
         );
-        expect(await store.recordIntake({ draftId: FEISHU_IDS.draft2, taskId: IDS.task13 })).toBe('ok');
+        expect(await store.recordDraftOpened({ draftId: FEISHU_IDS.draft2, taskId: IDS.task13 })).toBe('ok');
         expect(await store.getDraft(FEISHU_IDS.draft2)).toMatchObject({
           taskId: IDS.task13,
-          intake: { attempts: 2 },
+          opening: { attempts: 2 },
         });
-        expect((await store.getDraft(FEISHU_IDS.draft2))?.intake.error).toBeUndefined();
-        expect(await store.recordIntake({ draftId: FEISHU_IDS.draft2, taskId: IDS.task12 })).toBe(
+        expect((await store.getDraft(FEISHU_IDS.draft2))?.opening.error).toBeUndefined();
+        expect(await store.recordDraftOpened({ draftId: FEISHU_IDS.draft2, taskId: IDS.task12 })).toBe(
           'not_pending',
         );
-        expect((await store.listPendingIntakes(10)).map((d) => d.id)).toEqual([FEISHU_IDS.draft1]);
+        expect((await store.listDraftsToOpen(10)).map((d) => d.id)).toEqual([FEISHU_IDS.draft1]);
         // 没确认的草稿、没有的草稿：谈不上开单。
         await store.createDraft(
           { message: msg('om_3'), draft: newDraft({ id: '20000000-0000-4000-8000-000000000003' }) },
           audit(),
         );
         expect(
-          await store.recordIntake({ draftId: '20000000-0000-4000-8000-000000000003', taskId: IDS.task12 }),
+          await store.recordDraftOpened({
+            draftId: '20000000-0000-4000-8000-000000000003',
+            taskId: IDS.task12,
+          }),
         ).toBe('not_pending');
-        expect(await store.recordIntake({ draftId: OTHER_UUID, taskId: IDS.task12 })).toBe('not_pending');
+        expect(await store.recordDraftOpened({ draftId: OTHER_UUID, taskId: IDS.task12 })).toBe(
+          'not_pending',
+        );
       });
     });
 
@@ -755,6 +784,66 @@ export function describeFeishuStoreContract(name: string, make: MakeStore): void
         expect(state?.delivered).toBeUndefined();
       });
 
+      const deliveries = async () =>
+        (await store.listNotifications({ status: 'all', limit: 50 })).items.find(
+          (n) => n.id === FEISHU_IDS.decision,
+        )?.deliveries;
+
+      it('同一条回执重复到达（网关重发、两批叠上）：记过的不重复记，送达尝试数不加；同一版又没发成（等待期不同）算新的一次', async () => {
+        const id = `notification:${FEISHU_IDS.decision}`;
+        await store.syncOutbox([{ id, fingerprint: 'f1', create: true }]);
+        const fail1 = {
+          itemId: id,
+          revision: 1,
+          result: { status: 'failed', error: '飞书超时', retryAfter: T0.toISOString() },
+        } as const;
+        expect(await store.ackOutbox([fail1, fail1], T0.toISOString())).toEqual({ applied: 2, skipped: [] });
+        tick();
+        await store.ackOutbox([fail1], clock.now.toISOString());
+        expect(await deliveries()).toMatchObject([{ attempts: 1, lastAttemptAt: T0.toISOString() }]);
+        const fail2 = {
+          ...fail1,
+          result: { ...fail1.result, retryAfter: new Date(T0.getTime() + MIN).toISOString() },
+        };
+        await store.ackOutbox([fail2], clock.now.toISOString());
+        expect(await deliveries()).toMatchObject([{ attempts: 2 }]);
+        const sent = {
+          itemId: id,
+          revision: 1,
+          result: { status: 'sent', messageId: 'om_n', chatId: 'oc_team', sentAt: T0.toISOString() },
+        } as const;
+        await store.ackOutbox([sent], clock.now.toISOString());
+        await store.ackOutbox([sent, sent], clock.now.toISOString());
+        expect(await deliveries()).toMatchObject([{ attempts: 3, messageId: 'om_n' }]);
+        const state = (await store.syncOutbox([{ id, fingerprint: 'f1', create: true }])).get(id);
+        expect(state).toMatchObject({
+          ack: { revision: 1, status: 'sent' },
+          delivered: { messageId: 'om_n' },
+        });
+      });
+
+      it('推迟（免打扰）、不发了：不算送达尝试，通知的送达记录不动；原因记在推送本身', async () => {
+        const id = `notification:${FEISHU_IDS.decision}`;
+        await store.syncOutbox([{ id, fingerprint: 'f1', create: true }]);
+        const until = new Date(T0.getTime() + 8 * 60 * MIN).toISOString();
+        await store.ackOutbox(
+          [{ itemId: id, revision: 1, result: { status: 'deferred', until, reason: 'quiet_hours' } }],
+          T0.toISOString(),
+        );
+        expect(await deliveries()).toEqual([]);
+        await store.ackOutbox(
+          [{ itemId: id, revision: 1, result: { status: 'dropped', reason: 'over_budget' } }],
+          T0.toISOString(),
+        );
+        expect(await deliveries()).toEqual([]);
+        expect(
+          (await store.syncOutbox([{ id, fingerprint: 'f1', create: true }])).get(id)?.ack,
+        ).toMatchObject({
+          status: 'dropped',
+          reason: 'over_budget',
+        });
+      });
+
       it('通知类的回执同时记进这条通知的送达记录（驾驶舱「通知」页看得到）', async () => {
         const id = `notification:${FEISHU_IDS.decision}`;
         await store.syncOutbox([{ id, fingerprint: 'f1', create: true }]);
@@ -768,10 +857,6 @@ export function describeFeishuStoreContract(name: string, make: MakeStore): void
           ],
           T0.toISOString(),
         );
-        const deliveries = async () =>
-          (await store.listNotifications({ status: 'all', limit: 50 })).items.find(
-            (n) => n.id === FEISHU_IDS.decision,
-          )?.deliveries;
         expect(await deliveries()).toEqual([
           { channel: 'feishu', attempts: 1, error: '飞书超时', lastAttemptAt: T0.toISOString() },
         ]);

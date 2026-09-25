@@ -6,7 +6,7 @@ export {
   signAgentToken,
   verifyAgentToken,
 } from './agent-token.ts';
-export { type Apps, buildApps } from './app.ts';
+export { type Apps, type BuildOptions, buildApps } from './app.ts';
 export {
   type AskWaiters,
   type ChangeHub,
@@ -20,6 +20,17 @@ export {
 } from './changes.ts';
 export { type Config, ConfigError, loadConfig } from './config.ts';
 export type { Deps } from './deps.ts';
+export {
+  createDraftOpenRunner,
+  DRAFT_BACKLOG_ALERT_MS,
+  DRAFT_OPEN_CALL_LIMIT_MS,
+  DRAFT_OPEN_CONFIRM_WAIT_MS,
+  type DraftOpenLimits,
+  type DraftOpenOutcome,
+  type DraftOpenRunner,
+  draftBacklogCheck,
+  notWiredDraftOpener,
+} from './draft-opening.ts';
 export { createFeishuAuth, FeishuRejectedError, FeishuUnavailableError } from './feishu.ts';
 export { feishuRoutes } from './feishu-routes.ts';
 export {
@@ -35,13 +46,6 @@ export {
 } from './github.ts';
 export { type HealthReport, PublicHealthError, runHealthChecks, serviceHealthChecks } from './health.ts';
 export { isSerial, isUuid, parseCursor } from './ids.ts';
-export {
-  createIntakeRunner,
-  INTAKE_CONFIRM_WAIT_MS,
-  type IntakeOutcome,
-  type IntakeRunner,
-  notWiredTaskIntake,
-} from './intake.ts';
 export { jsonLogger, silentLogger } from './log.ts';
 export { createMemoryStore, emptyData, type MemoryData } from './memory-store.ts';
 export {

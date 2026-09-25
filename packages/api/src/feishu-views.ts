@@ -13,7 +13,7 @@ import type {
   TaskState,
 } from '@fleet-dao/shared';
 import type { z } from 'zod';
-import { clip, UNDERSTANDING_MAX } from './feishu-records.ts';
+import { clip, UNDERSTANDING_MAX, UNDERSTANDING_NOTE_MAX } from './feishu-records.ts';
 import type {
   DraftRecord,
   FeishuCardRecord,
@@ -130,10 +130,15 @@ export const ANSWER_TEXTS = {
   askRecorded: '已记下你的回答，AI 会接着干。',
   askTaken: (answer: string, by: string | undefined) =>
     `这个问题已经回答过了（${by ?? '另一位'}：${clip(answer, 60)}），这句没有记成新的回答。`,
+  askMissing:
+    '这张卡对应的追问在库里读不到，这句没有记成回答（已记日志）。打开驾驶舱看这个需求现在有没有要回答的追问。',
   draftConfirmed: (task: { issueNumber: number; repo: string } | undefined) =>
     task
       ? `这张卡已经开成任务 #${task.issueNumber}（${task.repo}），要补充或改需求请在驾驶舱里改。`
-      : '这张卡已经确认、正在开成任务；开好后要改需求请在驾驶舱里改。',
+      : '这张卡已经确认了，待开单：开 issue 那一步还没做成，后台会自动补开，不会丢；开好后驾驶舱里就有这个任务。',
+  draftMissing:
+    '这张卡对应的草稿在库里读不到，这句没有记下（已记日志）。要记新任务请直接发这句话，不要回复这张卡。',
+  noteTooLong: `补充太长（超过 ${UNDERSTANDING_NOTE_MAX} 字），这句没有改进草稿：请分几句回复这张卡。`,
   decision:
     '拍板请点卡上的按钮，回复不算拍板。我现在还答不了追问（理解问题的模型还没接上），详情打开驾驶舱看。',
   cannotAnswer: (hasTask: boolean) =>

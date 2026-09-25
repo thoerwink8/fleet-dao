@@ -28,9 +28,9 @@ CREATE TABLE "feishu_drafts" (
 	"confirmed_by" uuid,
 	"confirmed_at" timestamp with time zone,
 	"task_id" uuid,
-	"intake_attempts" integer DEFAULT 0 NOT NULL,
-	"intake_error" text,
-	"intake_tried_at" timestamp with time zone,
+	"open_attempts" integer DEFAULT 0 NOT NULL,
+	"open_error" text,
+	"open_tried_at" timestamp with time zone,
 	CONSTRAINT "feishu_drafts_source_message_id_unique" UNIQUE("source_message_id"),
 	CONSTRAINT "feishu_drafts_status_known" CHECK ("feishu_drafts"."status" in ('open', 'confirmed')),
 	CONSTRAINT "feishu_drafts_chat_type_known" CHECK ("feishu_drafts"."chat_type" in ('p2p', 'group')),
@@ -38,7 +38,7 @@ CREATE TABLE "feishu_drafts" (
 	CONSTRAINT "feishu_drafts_understanding_length" CHECK (char_length("feishu_drafts"."understanding") between 1 and 1000),
 	CONSTRAINT "feishu_drafts_confirm_shape" CHECK (("feishu_drafts"."status" = 'confirmed') = ("feishu_drafts"."confirmed_by" is not null) and ("feishu_drafts"."status" = 'confirmed') = ("feishu_drafts"."confirmed_at" is not null) and ("feishu_drafts"."status" <> 'confirmed' or "feishu_drafts"."repo_id" is not null)),
 	CONSTRAINT "feishu_drafts_task_needs_confirm" CHECK ("feishu_drafts"."task_id" is null or "feishu_drafts"."status" = 'confirmed'),
-	CONSTRAINT "feishu_drafts_intake_attempts_nonneg" CHECK ("feishu_drafts"."intake_attempts" >= 0)
+	CONSTRAINT "feishu_drafts_open_attempts_nonneg" CHECK ("feishu_drafts"."open_attempts" >= 0)
 );
 --> statement-breakpoint
 CREATE TABLE "feishu_follows" (
@@ -82,4 +82,4 @@ ALTER TABLE "feishu_follows" ADD CONSTRAINT "feishu_follows_user_id_users_id_fk"
 CREATE INDEX "feishu_cards_draft_idx" ON "feishu_cards" USING btree ("draft_id","sent_at");--> statement-breakpoint
 CREATE INDEX "feishu_cards_outbox_idx" ON "feishu_cards" USING btree ("outbox_id","sent_at");--> statement-breakpoint
 CREATE INDEX "feishu_cards_kind_idx" ON "feishu_cards" USING btree ("kind","sent_at");--> statement-breakpoint
-CREATE INDEX "feishu_drafts_pending_idx" ON "feishu_drafts" USING btree ("confirmed_at") WHERE "feishu_drafts"."status" = 'confirmed' and "feishu_drafts"."task_id" is null;
+CREATE INDEX "feishu_drafts_to_open_idx" ON "feishu_drafts" USING btree ("confirmed_at") WHERE "feishu_drafts"."status" = 'confirmed' and "feishu_drafts"."task_id" is null;

@@ -56,11 +56,11 @@ import {
 import type { ProgressKind, Step } from '@fleet-dao/shared';
 import { and, asc, countDistinct, desc, eq, gte, inArray, isNull, lt, or, sql } from 'drizzle-orm';
 import {
-  appendNote,
   feishuMessageKey,
   feishuReviseKey,
   messagePayload,
   parseMessageRecord,
+  withNote,
 } from './feishu-records.ts';
 import { PublicHealthError } from './health.ts';
 import { isSerial, isUuid, parseCursor } from './ids.ts';
@@ -153,6 +153,16 @@ function toOutboxState(
           ? { messageId: fallback.messageId, chatId: fallback.chatId, sentAt: iso(fallback.sentAt) }
           : undefined,
   };
+}
+
+/** 按 set 改这一行会不会改动什么（时刻按毫秒比）。 */
+function changesOutbox(row: OutboxRow, set: Partial<typeof feishuOutbox.$inferInsert>): boolean {
+  return Object.entries(set).some(([key, value]) => {
+    const before: unknown = row[key as keyof OutboxRow];
+    return value instanceof Date && before instanceof Date
+      ? value.getTime() !== before.getTime()
+      : value !== before;
+  });
 }
 
 function toUser(r: UserRow): User {
@@ -331,7 +341,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       confirmedAt: isoOpt(r.confirmedAt),
       taskId: opt(r.taskId),
       cardMessageId: card?.messageId,
-      intake: { attempts: r.intakeAttempts, error: opt(r.intakeError), triedAt: isoOpt(r.intakeTriedAt) },
+      opening: { attempts: r.openAttempts, error: opt(r.openError), triedAt: isoOpt(r.openTriedAt) },
       createdAt: iso(r.createdAt),
       updatedAt: iso(r.updatedAt),
     };
@@ -364,8 +374,13 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
     result: messagePayload(message, result),
   });
 
-  /** 通知类推送的回执同时记进这条通知的送达记录（去处 team），驾驶舱「通知」页看得到。 */
+  /**
+   * 通知类推送的回执同时记进这条通知的送达记录（去处 team），驾驶舱「通知」页看得到。
+   * 只记真试过的（发了、改了、没发成）：推迟和「不发了」不是没送成，原因记在推送本身（feishu_outbox.ack_reason）。
+   */
   async function mirrorDelivery(tx: Db, ack: FeishuOutboxAck, at: Date): Promise<void> {
+    const r = ack.result;
+    if (r.status === 'deferred' || r.status === 'dropped') return;
     if (!ack.itemId.startsWith('notification:')) return;
     const notificationId = ack.itemId.slice('notification:'.length);
     if (!isUuid(notificationId)) return;
@@ -374,28 +389,19 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       .from(notifications)
       .where(eq(notifications.id, notificationId));
     if (!exists) return;
-    const r = ack.result;
-    const delivered = r.status === 'sent' || r.status === 'updated';
-    const attempt = delivered || r.status === 'failed' ? 1 : 0;
-    const lastError =
-      r.status === 'failed'
-        ? r.error
-        : r.status === 'dropped'
-          ? `不发了：${r.reason}`
-          : r.status === 'deferred'
-            ? `免打扰，推迟到 ${r.until}`
-            : null;
+    const messageId = r.status === 'failed' ? null : r.messageId;
+    const lastError = r.status === 'failed' ? r.error : null;
     await tx
       .insert(notificationDeliveries)
       .values({
         notificationId,
         channel: 'feishu',
         target: 'team',
-        messageId: delivered ? r.messageId : null,
-        attempts: attempt,
+        messageId,
+        attempts: 1,
         lastError,
         lastAttemptAt: at,
-        deliveredAt: delivered ? at : null,
+        deliveredAt: messageId === null ? null : at,
       })
       .onConflictDoUpdate({
         target: [
@@ -404,8 +410,8 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
           notificationDeliveries.target,
         ],
         set: {
-          ...(delivered ? { messageId: r.messageId, deliveredAt: at } : {}),
-          attempts: sql`${notificationDeliveries.attempts} + ${attempt}`,
+          ...(messageId === null ? {} : { messageId, deliveredAt: at }),
+          attempts: sql`${notificationDeliveries.attempts} + 1`,
           lastError,
           lastAttemptAt: at,
         },
@@ -1136,7 +1142,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
           .update(feishuDrafts)
           .set({
             revision: row.revision + 1,
-            understanding: note ? appendNote(row.understanding, note) : row.understanding,
+            ...(note ? withNote(row, note) : {}),
             ...(repoId === undefined ? {} : { repoId }),
             updatedAt: at,
           })
@@ -1165,7 +1171,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         return { status: 'confirmed' as const, draft: await draftOut(tx, updated) };
       });
     },
-    async listPendingIntakes(limit) {
+    async listDraftsToOpen(limit) {
       const rows = await db
         .select()
         .from(feishuDrafts)
@@ -1174,7 +1180,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         .limit(limit);
       return Promise.all(rows.map((r) => draftOut(db, r)));
     },
-    async recordIntake({ draftId, taskId }) {
+    async recordDraftOpened({ draftId, taskId }) {
       if (!isUuid(draftId)) return 'not_pending';
       return db.transaction(async (tx) => {
         const [row] = await tx.select().from(feishuDrafts).where(eq(feishuDrafts.id, draftId)).for('update');
@@ -1184,19 +1190,19 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         if (!task) return 'task_not_found' as const;
         await tx
           .update(feishuDrafts)
-          .set({ taskId, intakeError: null, updatedAt: now() })
+          .set({ taskId, openError: null, updatedAt: now() })
           .where(eq(feishuDrafts.id, draftId));
         return 'ok' as const;
       });
     },
-    async recordIntakeFailure({ draftId, error }) {
+    async recordDraftOpenFailure({ draftId, error }) {
       if (!isUuid(draftId)) return;
       await db
         .update(feishuDrafts)
         .set({
-          intakeAttempts: sql`${feishuDrafts.intakeAttempts} + 1`,
-          intakeError: error,
-          intakeTriedAt: now(),
+          openAttempts: sql`${feishuDrafts.openAttempts} + 1`,
+          openError: error,
+          openTriedAt: now(),
         })
         .where(eq(feishuDrafts.id, draftId));
     },
@@ -1469,7 +1475,6 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
             Object.assign(set, {
               ackRevision: ack.revision,
               ackStatus: r.status,
-              ackedAt: at,
               ackReason:
                 r.status === 'dropped' || r.status === 'deferred'
                   ? r.reason
@@ -1482,12 +1487,18 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
                   : r.status === 'failed'
                     ? new Date(r.retryAfter)
                     : null,
-              ...(r.status === 'failed' ? { failures: row.failures + 1 } : {}),
             });
           }
-          if (Object.keys(set).length > 0) {
-            await tx.update(feishuOutbox).set(set).where(eq(feishuOutbox.id, ack.itemId));
+          // 记下来什么都不变：同一条回执又来了一遍（网关重发、两批叠上），不再记一次（失败次数、送达尝试数都不加）。
+          if (!changesOutbox(row, set)) {
+            report.applied += 1;
+            continue;
           }
+          if (current) {
+            set.ackedAt = at;
+            if (r.status === 'failed') set.failures = row.failures + 1;
+          }
+          await tx.update(feishuOutbox).set(set).where(eq(feishuOutbox.id, ack.itemId));
           await mirrorDelivery(tx, ack, at);
           report.applied += 1;
         }

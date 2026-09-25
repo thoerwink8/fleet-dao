@@ -1,17 +1,18 @@
 // 验收：网关的真客户端（packages/feishu 的 createBackend，香港那边跑的同一份代码）对着后端跑一遍，库是 PGlite 上的真迁移。
 // 记一句 → 回复确认卡改一句 → 卡上改一下 → 确认（开成任务）→ 查任务 → 关注 → 盘面 → 推送与回执 → 卡片登记。
-// 开单（开 issue、建任务、拉起工作流）归引擎那边接，这里用假的：像真的一样在库里建一行任务。
-import { feishuDrafts, feishuFollows, notificationDeliveries, tasks } from '@fleet-dao/db';
+// 开单（开 issue、建任务、拉起工作流）归 #43 接，这里用假的：像真的一样在库里建一行任务。
+// 只有真库才试得出的（半个 emoji 进 jsonb 被拒）也放这里。
+import { asks, feishuDrafts, feishuFollows, notificationDeliveries, tasks } from '@fleet-dao/db';
 import { createTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { BackendError, createBackend } from '@fleet-dao/feishu';
 import { AskResponse, FeishuDraftConflictDetails } from '@fleet-dao/shared';
 import { eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import {
-  type IntakeRequest,
-  type IntakeResult,
-  IntakeUnavailableError,
-  type TaskIntake,
+  type DraftOpener,
+  DraftOpenerUnavailableError,
+  type DraftOpenRequest,
+  type DraftOpenResult,
 } from '../src/ports.ts';
 import type { Harness } from './harness.ts';
 import { agentRequest, GATEWAY_PASS, IDS, pgHarness, T0 } from './harness.ts';
@@ -44,14 +45,17 @@ function gatewayClient(h: Harness) {
 }
 
 /** 假开单：没接上时抛「没接上」；接上后在库里建一行任务（像引擎那边的真实现一样），按草稿幂等。 */
-function fakeIntake() {
+function fakeOpener() {
   let wired = false;
-  const opened = new Map<string, IntakeResult>();
-  const calls: IntakeRequest[] = [];
-  const intake: TaskIntake = {
+  const opened = new Map<string, DraftOpenResult>();
+  const calls: DraftOpenRequest[] = [];
+  const opener: DraftOpener = {
+    async check() {
+      if (!wired) throw new Error('开单还没接上（测试）');
+    },
     async open(req) {
       calls.push(req);
-      if (!wired) throw new IntakeUnavailableError('开单还没接上（测试）');
+      if (!wired) throw new DraftOpenerUnavailableError('开单还没接上（测试）');
       const known = opened.get(req.draftId);
       if (known) return known;
       const issueNumber = 44 + opened.size;
@@ -73,7 +77,7 @@ function fakeIntake() {
     },
   };
   return {
-    intake,
+    opener,
     calls,
     wire() {
       wired = true;
@@ -93,9 +97,9 @@ async function rejected(p: Promise<unknown>): Promise<BackendError> {
 
 describe('网关的真客户端对着后端跑一遍（真库）', () => {
   it('记一句 → 确认 → 查任务 → 关注 → 盘面 → 推送与回执 → 卡片登记，全通', async () => {
-    const intake = fakeIntake();
-    intake.wire();
-    const h = await pgHarness(t, { intake: intake.intake });
+    const opener = fakeOpener();
+    opener.wire();
+    const h = await pgHarness(t, { draftOpener: opener.opener });
     current = h;
     const gateway = gatewayClient(h);
 
@@ -170,7 +174,7 @@ describe('网关的真客户端对着后端跑一遍（真库）', () => {
     });
     const taskId = confirmed.draft.task?.taskId;
     if (!taskId) throw new Error('应当开成任务');
-    expect(intake.calls.map((c) => [c.draftId, c.title, c.confirmedBy.name])).toEqual([
+    expect(opener.calls.map((c) => [c.draftId, c.title, c.confirmedBy.name])).toEqual([
       [draftId, '给登录页加手机验证码', '创始人乙'],
     ]);
     // 另一位也点了确认：同一个任务，不开第二个。
@@ -282,8 +286,8 @@ describe('网关的真客户端对着后端跑一遍（真库）', () => {
   });
 
   it('开单还没接上：确认照样记下、进「待开单」；接上后补开，任务查得到，不丢', async () => {
-    const intake = fakeIntake();
-    const h = await pgHarness(t, { intake: intake.intake });
+    const opener = fakeOpener();
+    const h = await pgHarness(t, { draftOpener: opener.opener });
     current = h;
     const gateway = gatewayClient(h);
     const said = await gateway.understand(A, {
@@ -296,15 +300,75 @@ describe('网关的真客户端对着后端跑一遍（真库）', () => {
     expect(pending).toMatchObject({ alreadyConfirmed: false, draft: { status: 'confirmed' } });
     expect(pending.draft.task).toBeUndefined();
     const [row] = await t.db.select().from(feishuDrafts).where(eq(feishuDrafts.id, said.draft.id));
-    expect(row).toMatchObject({ taskId: null, intakeAttempts: 1, intakeError: '开单还没接上（测试）' });
+    expect(row).toMatchObject({ taskId: null, openAttempts: 1, openError: '开单还没接上（测试）' });
 
-    intake.wire();
-    expect(await h.intake.runPending(true)).toEqual({ opened: 1, failed: 0 });
+    opener.wire();
+    expect(await h.draftOpening.runPending(true)).toEqual({ opened: 1, failed: 0 });
     const after = await gateway.confirmDraft(B, said.draft.id, { revision: 1 });
     expect(after).toMatchObject({
       alreadyConfirmed: true,
       draft: { confirmedBy: '创始人甲', task: { issueNumber: 44 } },
     });
     expect((await gateway.findTasks(A, 44)).matches.map((m) => m.title)).toEqual(['加个导出按钮']);
+  });
+
+  it('原话、补充、回答里有孤立的半个 emoji（被截成两半）：库版照样记下、读得回，不 500', async () => {
+    const h = await pgHarness(t, { draftOpener: fakeOpener().opener });
+    current = h;
+    const gateway = gatewayClient(h);
+    const said = await gateway.understand(A, {
+      sourceMessageId: 'om_lone_1',
+      text: '加验证码\ud83d',
+      chatType: 'group',
+    });
+    if (said.kind !== 'draft') throw new Error('应当记成草稿');
+    expect(said.draft.rawText).toBe('加验证码�');
+
+    // 回复确认卡补一句：补充写进操作记录（jsonb），半个代理对在那里会被库整条拒收。
+    await gateway.putCard({
+      messageId: 'om_card_lone',
+      chatId: 'oc_team',
+      kind: 'draft',
+      ref: { draftId: said.draft.id },
+      sentAt: T0.toISOString(),
+    });
+    expect(
+      await gateway.understand(A, {
+        sourceMessageId: 'om_lone_2',
+        text: '\udc00只做短信',
+        chatType: 'group',
+        replyToMessageId: 'om_card_lone',
+      }),
+    ).toMatchObject({
+      kind: 'draft',
+      draft: { revision: 2, understanding: '加验证码�\n补充：�只做短信' },
+    });
+
+    // 回复追问卡作答：回答同样写进操作记录。
+    const asked = AskResponse.parse(
+      await (
+        await h.agent.request(
+          '/agent/v1/ask',
+          agentRequest(h.agentToken(), 'POST', { question: '用哪家短信？', options: [], blocking: false }),
+        )
+      ).json(),
+    );
+    await gateway.putCard({
+      messageId: 'om_ask_lone',
+      chatId: 'oc_team',
+      kind: 'ask',
+      ref: { askId: asked.askId },
+      sentAt: T0.toISOString(),
+    });
+    expect(
+      await gateway.understand(A, {
+        sourceMessageId: 'om_lone_3',
+        text: '阿里云\ud83d',
+        chatType: 'group',
+        replyToMessageId: 'om_ask_lone',
+      }),
+    ).toMatchObject({ kind: 'answer', text: '已记下你的回答，AI 会接着干。' });
+    const [ask] = await t.db.select().from(asks).where(eq(asks.id, asked.askId));
+    expect(ask?.answer).toBe('阿里云�');
   });
 });

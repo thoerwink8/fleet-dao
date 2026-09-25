@@ -10,12 +10,13 @@ import { type ChangeHub, createChangeHub, type PgChangeFeed, startPgChangeFeed }
 import type { Config } from '../src/config.ts';
 import type { Deps } from '../src/deps.ts';
 import { DEV_RUN_ID, DEV_USER_ID, devFixtures, IDS } from '../src/dev-fixtures.ts';
+import { type DraftOpenLimits, type DraftOpenRunner, notWiredDraftOpener } from '../src/draft-opening.ts';
 import { FeishuRejectedError } from '../src/feishu.ts';
-import { type IntakeRunner, notWiredTaskIntake } from '../src/intake.ts';
 import { createMemoryStore, type MemoryData } from '../src/memory-store.ts';
 import { createPgStore } from '../src/pg-store.ts';
 import type {
   ChangeFeed,
+  DraftOpener,
   FeedEvent,
   FeishuAuth,
   FeishuIdentity,
@@ -23,7 +24,6 @@ import type {
   IngestedEvent,
   Logger,
   Store,
-  TaskIntake,
   TaskSignal,
   WorkflowControl,
 } from '../src/ports.ts';
@@ -79,7 +79,7 @@ export interface Harness<S extends Store = Store> {
   agent: Hono;
   relay: SseRelay;
   /** 飞书确认的草稿去开单（定时补开在测试里不起，要补就调 runPending）。 */
-  intake: IntakeRunner;
+  draftOpening: DraftOpenRunner;
   config: Config;
   store: S;
   changes: ChangeFeed;
@@ -103,7 +103,9 @@ export interface HarnessOptions {
   github?: (event: IngestedEvent) => Promise<void>;
   health?: HealthCheck[];
   /** 不给就是「开单还没接上」（和生产现在一样）。 */
-  intake?: TaskIntake;
+  draftOpener?: DraftOpener;
+  /** 开单的时限调小（测「实现不回」时不真等半分钟）。 */
+  draftOpenLimits?: Partial<DraftOpenLimits>;
 }
 
 function wire<S extends Store>(
@@ -146,15 +148,17 @@ function wire<S extends Store>(
           accepted.push(event);
         }),
     },
-    intake: options.intake ?? notWiredTaskIntake(),
+    draftOpener: options.draftOpener ?? notWiredDraftOpener(),
   };
-  const { cockpit, agent, relay, intake } = buildApps(deps);
+  const { cockpit, agent, relay, draftOpening } = buildApps(deps, {
+    draftOpenLimits: options.draftOpenLimits,
+  });
 
   return {
     cockpit,
     agent,
     relay,
-    intake,
+    draftOpening,
     config,
     store,
     changes,

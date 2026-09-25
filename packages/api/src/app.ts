@@ -10,11 +10,11 @@ import { authRoutes } from './auth.ts';
 import { createAskWaiters } from './changes.ts';
 import { cockpitRoutes } from './cockpit.ts';
 import type { Deps } from './deps.ts';
+import { createDraftOpenRunner, type DraftOpenLimits, type DraftOpenRunner } from './draft-opening.ts';
 import { feishuRoutes } from './feishu-routes.ts';
 import { createGitHubIntake, githubRoutes } from './github.ts';
 import { healthHandler } from './health.ts';
 import { errorBody, errorHandler, notFound } from './http.ts';
-import { createIntakeRunner, type IntakeRunner } from './intake.ts';
 import { createSseRelay, type SseRelay } from './sse.ts';
 
 /** 驾驶舱和 fleet 命令的请求体都很小；GitHub 事件另有自己的上限。 */
@@ -31,13 +31,24 @@ export interface Apps {
   /** SSE 的中转（带补发缓冲）：看在线连接数用。 */
   relay: SseRelay;
   /** 飞书确认的草稿去开单；main.ts 用它起定时补开。 */
-  intake: IntakeRunner;
+  draftOpening: DraftOpenRunner;
 }
 
-export function buildApps(deps: Deps): Apps {
+export interface BuildOptions {
+  /** 开单的时限（默认见 draft-opening.ts）；测试调小，免得真等半分钟。 */
+  draftOpenLimits?: Partial<DraftOpenLimits> | undefined;
+}
+
+export function buildApps(deps: Deps, options: BuildOptions = {}): Apps {
   const waiters = createAskWaiters(deps.changes);
   const relay = createSseRelay(deps.changes);
-  const intake = createIntakeRunner({ store: deps.store, intake: deps.intake, log: deps.log, now: deps.now });
+  const draftOpening = createDraftOpenRunner({
+    store: deps.store,
+    opener: deps.draftOpener,
+    log: deps.log,
+    now: deps.now,
+    limits: options.draftOpenLimits,
+  });
 
   const cockpit = new Hono();
   cockpit.onError(errorHandler(deps.log));
@@ -47,7 +58,7 @@ export function buildApps(deps: Deps): Apps {
   cockpit.use(`${AUTH_PREFIX}/*`, jsonLimit);
   cockpit.route(AUTH_PREFIX, authRoutes(deps));
   // 飞书接口挂在驾驶舱接口前面：它们只认网关通行证、按各自的 acting 放行，不走驾驶舱的登录门。
-  cockpit.route(WEB_API_PREFIX, feishuRoutes(deps, waiters, intake));
+  cockpit.route(WEB_API_PREFIX, feishuRoutes(deps, waiters, draftOpening));
   cockpit.route(WEB_API_PREFIX, cockpitRoutes(deps, waiters, relay));
   cockpit.route('/github', githubRoutes(deps, createGitHubIntake(deps)));
 
@@ -57,5 +68,5 @@ export function buildApps(deps: Deps): Apps {
   agent.use(`${AGENT_API_PREFIX}/*`, jsonLimit);
   agent.route(AGENT_API_PREFIX, agentRoutes(deps, waiters));
 
-  return { cockpit, agent, relay, intake };
+  return { cockpit, agent, relay, draftOpening };
 }

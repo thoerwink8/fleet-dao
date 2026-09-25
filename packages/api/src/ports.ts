@@ -380,7 +380,7 @@ export interface DraftRecord {
   /** 卡片登记里这张草稿最近登记的确认卡（kind=draft）。 */
   cardMessageId?: string | undefined;
   /** 开单试过几次、最近一次没成的原因、什么时候试的。 */
-  intake: { attempts: number; error?: string | undefined; triedAt?: string | undefined };
+  opening: { attempts: number; error?: string | undefined; triedAt?: string | undefined };
   createdAt: string;
   updatedAt: string;
 }
@@ -521,8 +521,8 @@ export interface FeishuStore {
     audit: NewAuditEntry,
   ): Promise<CreateDraftResult>;
   /**
-   * 改草稿：note 追加进「我理解为」，repoId 换仓；每改一次 revision 加 1。同一个幂等键只改一次。
-   * 已确认的不改。操作记录同一事务。
+   * 改草稿：note 整句接在原话和「我理解为」后面（feishu-records.ts 的 withNote），repoId 换仓；每改一次 revision 加 1。
+   * 同一个幂等键只改一次。已确认的不改。操作记录同一事务。
    */
   reviseDraft(
     input: {
@@ -539,11 +539,14 @@ export interface FeishuStore {
     audit: NewAuditEntry,
   ): Promise<ConfirmDraftResult>;
   /** 待开单的草稿（确认了、还没有任务），先确认的在前。 */
-  listPendingIntakes(limit: number): Promise<DraftRecord[]>;
+  listDraftsToOpen(limit: number): Promise<DraftRecord[]>;
   /** 开单成了：记上任务。草稿已经记过任务（或没确认）返回 not_pending；任务不在库里返回 task_not_found。 */
-  recordIntake(input: { draftId: string; taskId: string }): Promise<'ok' | 'not_pending' | 'task_not_found'>;
+  recordDraftOpened(input: {
+    draftId: string;
+    taskId: string;
+  }): Promise<'ok' | 'not_pending' | 'task_not_found'>;
   /** 开单没成：记下原因、次数、时刻。 */
-  recordIntakeFailure(input: { draftId: string; error: string }): Promise<void>;
+  recordDraftOpenFailure(input: { draftId: string; error: string }): Promise<void>;
 
   /** 这条飞书消息处理过没有。 */
   getFeishuMessage(sourceMessageId: string): Promise<FeishuMessageRecord | null>;
@@ -587,16 +590,17 @@ export interface FeishuStore {
 
 export type Store = UserStore & BoardStore & RoutingStore & OpsStore & AgentStore & GitHubStore & FeishuStore;
 
-// —— 开单 + 拉起需求工作流（飞书里确认的草稿用）——
+// —— 飞书草稿开单：开 issue + 建任务 + 拉起需求工作流（飞书里确认的草稿用）——
+// 和 GitHub 那边的接活（issue 已经在了，进来建任务）方向相反：这里从飞书草稿出发，由后端去开 issue。
 
 /** 飞书里确认了的草稿，交给开单的那一步：开 GitHub issue、建任务行、拉起需求工作流。 */
-export interface IntakeRequest {
+export interface DraftOpenRequest {
   /** 幂等键：同一个草稿再来，交回第一次开成的那张 issue 和那个任务，不开第二张。 */
   draftId: string;
   repo: Repo;
   /** issue 标题（「我理解为」的第一行截短）。 */
   title: string;
-  /** 创始人的原话。 */
+  /** 创始人的原话（「改一下」的补充整句接在后面）。 */
   rawText: string;
   /** 「我理解为」。 */
   understanding: string;
@@ -604,24 +608,28 @@ export interface IntakeRequest {
   confirmedBy: { userId: string; name: string };
 }
 
-export interface IntakeResult {
+export interface DraftOpenResult {
   /** 库里 tasks.id（开单那一步建的任务行）。 */
   taskId: string;
   issueNumber: number;
 }
 
 /**
- * 开单 + 拉起需求工作流。确认草稿时调一次；没成的草稿留在「待开单」，后端定时补开（intake.ts）。
- * 实现要按 draftId 幂等：确认时和补开时可能同时来。没接上或暂时开不成抛 IntakeUnavailableError；抛别的错也一样留着补开。
+ * 飞书草稿开单：开 issue + 建任务行 + 拉起需求工作流。确认草稿时调一次；没成的草稿留在「待开单」，后端定时补开
+ * （draft-opening.ts）。后端自己计时：到点没回算没成、那次调用挂着期间不再开第二次，所以 signal 中止后要尽快放手。
+ * 实现要按 draftId 幂等：确认时和补开时可能同时来、超时之后可能再来。没接上或暂时开不成抛 DraftOpenerUnavailableError；
+ * 抛别的错也一样留着补开。
  */
-export interface TaskIntake {
-  open(request: IntakeRequest, signal: AbortSignal): Promise<IntakeResult>;
+export interface DraftOpener {
+  open(request: DraftOpenRequest, signal: AbortSignal): Promise<DraftOpenResult>;
+  /** 健康检查（/healthz 的 draft_opener）：开不了单就抛（对外的原因用 PublicHealthError），接好了就返回。 */
+  check(): Promise<void>;
 }
 
-export class IntakeUnavailableError extends Error {
+export class DraftOpenerUnavailableError extends Error {
   constructor(message: string, cause?: unknown) {
     super(message, { cause });
-    this.name = 'IntakeUnavailableError';
+    this.name = 'DraftOpenerUnavailableError';
   }
 }
 

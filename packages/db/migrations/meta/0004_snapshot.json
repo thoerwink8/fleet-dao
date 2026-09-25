@@ -1,5 +1,5 @@
 {
-  "id": "564c8cae-5872-46e8-8e18-127c44bf2e69",
+  "id": "25b7c466-7c42-4233-be82-c1c7c1f09b87",
   "prevId": "4a5e0724-d8b4-45af-ae7d-199026ce6efd",
   "version": "7",
   "dialect": "postgresql",
@@ -866,29 +866,29 @@
           "primaryKey": false,
           "notNull": false
         },
-        "intake_attempts": {
-          "name": "intake_attempts",
+        "open_attempts": {
+          "name": "open_attempts",
           "type": "integer",
           "primaryKey": false,
           "notNull": true,
           "default": 0
         },
-        "intake_error": {
-          "name": "intake_error",
+        "open_error": {
+          "name": "open_error",
           "type": "text",
           "primaryKey": false,
           "notNull": false
         },
-        "intake_tried_at": {
-          "name": "intake_tried_at",
+        "open_tried_at": {
+          "name": "open_tried_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
         }
       },
       "indexes": {
-        "feishu_drafts_pending_idx": {
-          "name": "feishu_drafts_pending_idx",
+        "feishu_drafts_to_open_idx": {
+          "name": "feishu_drafts_to_open_idx",
           "columns": [
             {
               "expression": "confirmed_at",
@@ -976,9 +976,9 @@
           "name": "feishu_drafts_task_needs_confirm",
           "value": "\"feishu_drafts\".\"task_id\" is null or \"feishu_drafts\".\"status\" = 'confirmed'"
         },
-        "feishu_drafts_intake_attempts_nonneg": {
-          "name": "feishu_drafts_intake_attempts_nonneg",
-          "value": "\"feishu_drafts\".\"intake_attempts\" >= 0"
+        "feishu_drafts_open_attempts_nonneg": {
+          "name": "feishu_drafts_open_attempts_nonneg",
+          "value": "\"feishu_drafts\".\"open_attempts\" >= 0"
         }
       },
       "isRLSEnabled": false

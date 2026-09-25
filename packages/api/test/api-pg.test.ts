@@ -1,6 +1,6 @@
 // 整条链路跑在真库上：接口 → Postgres Store → PGlite（真迁移）→ 库里的触发器发 NOTIFY → LISTEN → SSE / 叫醒等回答的命令。
 // 语义细节在契约测试（store-contract.ts）和各接口的测试里按内存版测过；这里只证明「换成真库，接起来照样通」。
-import { asks, auditLog, progressEvents } from '@fleet-dao/db';
+import { asks, auditLog, feishuDrafts, progressEvents } from '@fleet-dao/db';
 import { createTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import {
   AskResponse,
@@ -11,6 +11,7 @@ import {
 } from '@fleet-dao/shared';
 import { and, eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { draftBacklogCheck, notWiredDraftOpener } from '../src/draft-opening.ts';
 import { notWiredGitHub } from '../src/github.ts';
 import { serviceHealthChecks } from '../src/health.ts';
 import { probeDb } from '../src/pg-store.ts';
@@ -24,6 +25,7 @@ import {
   pgHarness,
   readUntil,
   settle,
+  T0,
   write,
 } from './harness.ts';
 
@@ -152,7 +154,11 @@ describe('接口跑在真库上', () => {
     ]);
   });
 
-  it('健康检查（生产那一套）：库、实时推送是真探的；Temporal、GitHub 事件没接上如实报红；LISTEN 停了实时推送也报红', async () => {
+  it('健康检查（生产那一套）：库、实时推送是真探的；Temporal、GitHub 事件、飞书草稿开单没接上如实报红；LISTEN 停了实时推送也报红', async () => {
+    const pgStore = () => {
+      if (!current) throw new Error('还没起');
+      return current.store;
+    };
     const h = await start({
       health: serviceHealthChecks({
         probeDb: () => probeDb(t.db),
@@ -161,6 +167,8 @@ describe('接口跑在真库上', () => {
         },
         temporal: notConnectedTemporal(),
         githubEvents: notWiredGitHub().check,
+        draftOpener: notWiredDraftOpener(),
+        draftBacklog: () => draftBacklogCheck(pgStore(), () => new Date(T0))(),
       }),
     });
     const res = await h.cockpit.request('/healthz');
@@ -172,7 +180,35 @@ describe('接口跑在真库上', () => {
         realtime: { ok: true },
         temporal: { ok: false, code: 'not_connected', message: 'Temporal 客户端还没接上（等引擎的 PR）' },
         github_events: { ok: false, code: 'not_wired', message: 'GitHub 事件还没接到引擎（等引擎的 PR）' },
+        draft_opener: {
+          ok: false,
+          code: 'not_wired',
+          message: '飞书草稿开单还没接上（开 issue、拉起需求工作流那一步，等 #43）',
+        },
+        draft_backlog: { ok: true },
       },
+    });
+    // 一张草稿确认了 20 分钟还没开成：积压报红（库里真查出来的）。
+    await t.db.insert(feishuDrafts).values({
+      id: '20000000-0000-4000-8000-000000000001',
+      sourceMessageId: 'om_backlog',
+      chatType: 'p2p',
+      rawText: '加个导出按钮',
+      understanding: '加个导出按钮',
+      unsure: true,
+      repoId: IDS.repo,
+      proposedBy: IDS.founderA,
+      status: 'confirmed',
+      confirmedBy: IDS.founderA,
+      confirmedAt: new Date(T0.getTime() - 20 * 60_000),
+    });
+    const backlog = (await (await h.cockpit.request('/healthz')).json()) as {
+      checks: Record<string, unknown>;
+    };
+    expect(backlog.checks.draft_backlog).toEqual({
+      ok: false,
+      code: 'backlog',
+      message: '最早一张待开单已经等了 20 分钟还没开成',
     });
     await h.feed.stop();
     const after = (await (await h.cockpit.request('/healthz')).json()) as { checks: Record<string, unknown> };
