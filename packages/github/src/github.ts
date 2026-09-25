@@ -2,6 +2,7 @@
 // 生产：createGitHub({ ledger: pgLedger(db), locker: pgLocker(db) })——凭据从 /etc/fleet-dao/github 读（环境变量可改），
 // 推送用的裸仓放在 FLEET_GITHUB_STATE_DIR（默认 /var/lib/fleet-dao/github）下。
 import { join } from 'node:path';
+import type { LoadedValues } from '@fleet-dao/hygiene';
 import { z } from 'zod';
 import { GitHubClient, type Logger, type RepoRef, repoSlug, type Sleep, unexpected } from './client.ts';
 import { type AppCredentials, type AppRole, appFilesFromEnv, loadApps, ROLE_NAMES } from './credentials.ts';
@@ -68,6 +69,8 @@ export interface GitHubOptions {
   leaseRenewMs?: number;
   /** 会话交来的包最大多少字节，默认 MAX_BUNDLE_BYTES。 */
   maxBundleBytes?: number;
+  /** 推分支前卫生检查用的已知敏感值名单；不给就按 packages/hygiene 的顺序找（服务器上是 /etc/fleet-dao/sensitive-values.txt）。 */
+  sensitiveValues?: () => LoadedValues;
 }
 
 /** 各身份要有的权限（自检用）。「干活的」只推分支、开 PR；「引擎」合并、改 issue、续互动限制、读 CI。 */
@@ -152,6 +155,7 @@ export function createGitHub(options: GitHubOptions): GitHub {
     maxBundleBytes: options.maxBundleBytes ?? MAX_BUNDLE_BYTES,
     log: client.log,
     baseEnv: env,
+    ...(options.sensitiveValues && { sensitiveValues: options.sensitiveValues }),
   };
 
   return {

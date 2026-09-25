@@ -1,0 +1,4 @@
+#!/bin/sh
+# 推之前的卫生检查（公开仓：推上去就公开了）。pnpm install 的 prepare 把 core.hooksPath 设成了 .githooks。
+# 拦下来时先把东西拿掉再推，别用 --no-verify 硬推。判定在 packages/hygiene/src/prepush.ts。
+exec node packages/hygiene/src/bin/pre-push.ts "$@"

@@ -2,6 +2,7 @@
 // 假服务的形状是照着理解写的，这里拿 GitHub 真回的东西走同一段代码，证明解析与判断对得上真世界。
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { findHits } from '@fleet-dao/hygiene';
 import { describe, expect, it } from 'vitest';
 import { evaluateChecks } from '../src/checks.ts';
 import { type AppRole, isBot } from '../src/credentials.ts';
@@ -65,16 +66,8 @@ function replay(routes: Route[]) {
 
 describe('夹具脱敏（公开仓）', () => {
   const files = readdirSync(DIR).filter((f) => f.endsWith('.json'));
-  const RULES: [string, RegExp][] = [
-    ['邮箱', /[A-Za-z0-9._%+\-[\]]+@(?!example\.invalid\b)[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g],
-    ['IP', /\b(?!192\.0\.2\.)(?:\d{1,3}\.){3}\d{1,3}\b/g],
-    ['令牌', /\b(?:ghs|ghp|gho|ghu|ghr)_[A-Za-z0-9_]{8,}|\bgithub_pat_[A-Za-z0-9_]+/g],
-    ['JWT', /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\./g],
-    ['App 的 client_id', /"client_id":\s*"(?!Iv1\.CLIENT_ID")[^"]+"/g],
-    ['头像地址（带账号编号）', /avatars\.githubusercontent\.com/g],
-  ];
-  const leaks = (text: string) =>
-    RULES.flatMap(([label, re]) => [...text.matchAll(re)].map((m) => `${label}：${m[0].slice(0, 60)}`));
+  /** 邮箱、IP、令牌、JWT、App 的 client_id、头像地址里的账号编号……规则用全仓卫生检查那一份（packages/hygiene），这里不另写。 */
+  const leaks = (text: string) => findHits(text).map((h) => `${h.label}：第 ${h.line} 行`);
 
   it('录了东西（没扫到不能当干净）', () => {
     expect(files.length).toBeGreaterThanOrEqual(15);
@@ -101,14 +94,25 @@ describe('夹具脱敏（公开仓）', () => {
   });
 
   it('故意放进去的违规样本都拦得住', () => {
+    // 样本在运行时拼起来：整段写在源码里，全仓卫生检查会拦这个文件自己。值是随手编的、不指向任何人。
     const samples = [
-      'mail me: someone@corp.example.com',
-      'host 10.2.3.4',
-      'token ghs_abcdefghijklmnop',
-      '"client_id": "Iv23liAbCdEf"',
-      'https://avatars.githubusercontent.com/u/1?v=4',
+      `mail me: ${['zhang.san', 'corp-mail.co'].join('@')}`,
+      `host ${[51, 38, 4, 17].join('.')}`,
+      `token ${['ghs', 'q7Rz2LmX9vKp4TnB8wYc1HdF6jGs3NaEw5Yu'].join('_')}`,
+      `"client_id": "${['Iv23li', 'Q7rZ2mXw9vKp4T'].join('')}"`,
+      `https://avatars.githubusercontent.com/u/${['5832', '9147'].join('')}?v=4`,
     ];
     for (const s of samples) expect(leaks(s), s).not.toEqual([]);
+  });
+
+  it('夹具里的占位不算：示例域名的邮箱、文档段的 IP、Iv1.CLIENT_ID、编出来的令牌', () => {
+    const placeholders = [
+      'mail me: someone@example.invalid',
+      'host 192.0.2.10',
+      '"client_id": "Iv1.CLIENT_ID"',
+      'token ghs_abcdefghijklmnop',
+    ];
+    for (const s of placeholders) expect(leaks(s), s).toEqual([]);
   });
 });
 

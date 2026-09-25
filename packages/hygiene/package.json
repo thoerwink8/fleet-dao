@@ -1,0 +1,10 @@
+{
+  "name": "@fleet-dao/hygiene",
+  "version": "0.0.0",
+  "private": true,
+  "description": "公开仓卫生检查：进 git 的文件里不许有邮箱、公网 IP、私钥、令牌、账号编号",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

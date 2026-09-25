@@ -26,6 +26,9 @@
       "path": "packages/feishu"
     },
     {
+      "path": "packages/hygiene"
+    },
+    {
       "path": "packages/github"
     },
     {
