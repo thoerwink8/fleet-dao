@@ -65,8 +65,17 @@ run_end() { # 结局 扫到 问题 原因（空的记成 null）
 }
 
 # 报警：同一件事（前缀相同）还开着就原地改那一条，没有开着的才新开一条——好了再坏是新的一件事，发新卡，不去翻旧卡。
+# 正文写不进库（比如夹了库不认的字节）就改记一句短的：报警可以说得粗，但不能悄悄丢掉
 alert_raise() { # 前缀 标题 正文
   echo "报警：$2 —— $3" >&2
+  if alert_raise_sql "$@"; then return 0; fi
+  echo "报警写不进库，改记一句短的" >&2
+  alert_raise_sql "$1" "$2" "正文写不进库，看法国 journalctl -u $RUN_UNIT" && return 0
+  echo "报警还是写不进库：$2" >&2
+  return 1
+}
+
+alert_raise_sql() { # 前缀 标题 正文
   bk_sql fleet -v prefix="$1" -v title="$2" -v body="$3" -v run="$RUN_ID" -v link="$BK_LINK" <<'SQL' >/dev/null
 with cur as (
   select id from notifications
@@ -156,9 +165,18 @@ human() { numfmt --to=iec --from-unit=1024 "$1" 2>/dev/null || echo "${1}K"; }
 ssh_opts() { read -r -a SSH_OPTS <<<"$(bk_ssh_opts)"; }
 
 restic_() {
-  "$BK_RESTIC" --repo "sftp:$BK_HK_USER@$BK_HK_ADDR:$BK_HK_REPO" --password-file "$BK_PASS_FILE" \
+  "$BK_RESTIC" --repo "sftp:$BK_HK_USER@$BK_HK_ADDR:$BK_REPO_PATH" --password-file "$BK_PASS_FILE" \
     --cache-dir "$BK_STATE/cache" --retry-lock 30m \
     -o sftp.command="ssh $(bk_ssh_opts) $BK_HK_USER@$BK_HK_ADDR -s sftp" "$@"
+}
+
+# 断网、被杀的那一轮会在香港仓库里留下锁，restic 不会自己清；留下独占锁的话，之后每次都干等 30 分钟再失败，
+# systemd 重试也白搭。开跑前先清掉失效的锁：unlock 不带 --remove-all 只清失效的（没在刷新的、本机上进程已经没了的），
+# 还在跑的那一边每 5 分钟刷新一次，清不到它。清不成不算没做成：真连不上，下面那一步会说清楚
+unlock_stale() { # 放报错的暂存目录
+  if ! restic_ unlock >/dev/null 2>"$1/unlock.err"; then
+    echo "清失效的锁没成（接着跑）：$(tail_of "$1/unlock.err")"
+  fi
 }
 
 # 连哪个库用什么身份：fleet 走本机 socket 的 peer（fleet 就是库属主）；Temporal 的两个库用 temporal 角色经 127.0.0.1 + 口令
@@ -229,6 +247,7 @@ cmd_backup() {
   miss=$(need_readable "$BK_PASS_FILE" "$BK_KEY" "$BK_KNOWN_HOSTS" "$BK_TEMPORAL_ENV" "$BK_RESTIC") || bail "$miss"
   rm -rf -- "$NIGHTLY"
   mkdir -p -- "$BK_WORK" || bail "建不了暂存目录 $BK_WORK"
+  unlock_stale "$NIGHTLY"
   bk_read_config "$BK_TEMPORAL_ENV" "$BK_CONFIG_UID" FLEET_TEMPORAL_DB_PASSWORD 2>"$NIGHTLY/err" || bail "$(tail_of "$NIGHTLY/err")"
   bk_valid_temporal_password "${FLEET_TEMPORAL_DB_PASSWORD:-}" || bail "$BK_TEMPORAL_ENV 里的口令不是装机脚本生成的样子"
   printf '127.0.0.1:5432:*:temporal:%s\n' "$FLEET_TEMPORAL_DB_PASSWORD" >"$NIGHTLY/pgpass"
@@ -319,6 +338,7 @@ cmd_drill() {
   rm -rf -- "$DRILL"
   mkdir -p -- "$DRILL/files" || bail "建不了暂存目录 $DRILL"
   drop_drill_db 2>"$DRILL/err" || bail "上次演练留下的临时库 $BK_DRILL_DB 删不掉：$(tail_of "$DRILL/err")"
+  unlock_stale "$DRILL"
   out=$(restic_ snapshots --json --host "$BK_RESTIC_HOST" --tag "$BK_TAG" 2>"$DRILL/err") ||
     bail "列不出香港的备份：$(tail_of "$DRILL/err")"
   latest=$(bk_restic_latest "$(date -Is)" <<<"$out") || bail "香港的备份清单认不出"
@@ -387,7 +407,7 @@ WATCH_MISSING=()
 
 # 一块盘：到线就报警，回到线下自动解除
 check_disk() { # 机器名 机器键 路径 已用KB 可用KB
-  local pct key="disk:$2:$3"
+  local pct key="backup.disk:$2:$3"
   if ! pct=$(bk_usage_pct "$4" "$5" 2>&1); then
     WATCH_MISSING+=("$1 $3：$pct")
     return
@@ -470,10 +490,10 @@ SQL
       WATCH_FOUND=$((WATCH_FOUND + 1))
       if [[ "$age" == never ]]; then age="从没跑过"; else age="上次开跑在 $((age / 3600)) 小时前"; fi
       name=$(bk_job_name "$id")
-      alert_raise "stale:$id" "${name%%（*}超过 $((expect / 60)) 小时没开跑" \
+      alert_raise "backup.stale:$id" "${name%%（*}超过 $((expect / 60)) 小时没开跑" \
         "$age。定时器可能没在排班：法国 systemctl list-timers 'fleet-backup*'" || true
     else
-      alert_resolve "stale:$id" || true
+      alert_resolve "backup.stale:$id" || true
       echo "$id：$((age / 60)) 分钟前开跑过"
     fi
   done

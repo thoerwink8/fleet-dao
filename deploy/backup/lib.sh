@@ -8,8 +8,12 @@
 BK_HK_ADDR=10.99.0.1   # 香港在隧道里的地址（deploy/hk.sh 的 WG_ADDR）
 BK_FRANCE_ADDR=10.99.0.2 # 法国在隧道里的地址：香港只许备份钥匙从这里来
 BK_HK_USER=fleet-backup
-BK_HK_HOME=/srv/fleet-dao-backup # 属 root：fleet-backup 改不了自己的 .ssh
-BK_HK_REPO=$BK_HK_HOME/restic    # restic 仓库，香港只存密文
+BK_HK_HOME=/srv/fleet-dao-backup # 属 root：fleet-backup 改不了自己的 .ssh；也是它的 chroot，登上来只看得见这一层
+BK_HK_REPO=$BK_HK_HOME/restic    # restic 仓库（香港上的真实路径），香港只存密文
+# 法国连仓库用的路径：相对 sftp 的起始目录写。chroot 生效时起始目录是 chroot 的根，chroot 万一被撤掉、只剩钥匙那一行的
+# 限制时起始目录是 $BK_HK_HOME，两种情况都落到同一个 $BK_HK_REPO
+BK_REPO_PATH=restic
+BK_SSHD_DROPIN=/etc/ssh/sshd_config.d/60-fleet-dao-backup.conf
 BK_CONFIG=/etc/fleet-dao/backup.env
 BK_CONFIG_UID=0 # 配置和口令文件得归 root：谁能改它们，谁就能决定备份往哪送、报什么（测试里换成跑测试的人）
 BK_ETC=/etc/fleet-dao/backup # 法国：口令、钥匙、钉住的香港主机钥匙，都是 root:fleet 640
@@ -81,12 +85,74 @@ bk_ssh_opts() {
     "$BK_KEY" "$BK_KNOWN_HOSTS"
 }
 
-# 香港 authorized_keys 里那一行：只许从隧道来、什么都不给（终端、转发都没有），登上来只有 sftp
+# 香港 authorized_keys 里那一行：只许从隧道来、什么都不给（终端、转发都没有），登上来只有 sftp。
+# 正常时 sshd 的 Match 段（bk_sshd_dropin）还会把它关进 chroot；这一行是 Match 段万一没了时的底线
 bk_authorized_line() { # 法国的公钥（整行）
-  printf 'from="%s",restrict,command="internal-sftp -d %s" %s' "$BK_FRANCE_ADDR" "$BK_HK_REPO" "$1"
+  printf 'from="%s",restrict,command="internal-sftp -d %s" %s' "$BK_FRANCE_ADDR" "$BK_HK_HOME" "$1"
+}
+
+# 香港 sshd 的 drop-in：备份用户关进自己的家目录（chroot），只给 sftp，什么转发都不许。
+# Match 段只管这一个用户（在 OpenSSH 8.9 上实测：include 进来的 Match 只到文件末尾，root 的有效配置一项不变）
+bk_sshd_dropin() {
+  printf '%s\n' "# deploy/backup/install.sh 写的，别手改。只管 fleet-dao 的备份用户：关进 $BK_HK_HOME，只给 sftp。" \
+    "Match User $BK_HK_USER" \
+    "    ChrootDirectory $BK_HK_HOME" \
+    "    ForceCommand internal-sftp -d /" \
+    "    AllowTcpForwarding no" \
+    "    AllowAgentForwarding no" \
+    "    AllowStreamLocalForwarding no" \
+    "    X11Forwarding no" \
+    "    PermitTTY no" \
+    "    PermitTunnel no"
 }
 
 bk_valid_pubkey() { [[ "$1" =~ ^ssh-ed25519\ [A-Za-z0-9+/]+=*(\ [A-Za-z0-9@._-]+)?$ ]]; }
+
+# 仓库口令：装机脚本生成的是 64 位十六进制；换机时从密码管理器抄回来的也该是这个样子。空的、带空白的一律不认
+bk_valid_restic_password() { [[ "$1" =~ ^[0-9a-f]{64}$ ]]; }
+
+# 每晚备份能不能开（装机脚本开定时器、首跑都问它）。能开什么都不打印、返回 0；不能开打印原因、返回 1。
+# 仓库里已经有快照、这台却从没备份成功过的，当成换机恢复：这时首跑会把新机的空库备上去，保留规则还会把当天出事前那一份
+# 当成「同一天的旧份」删掉。先恢复库——恢复出来的库里带着旧机的运行记录——再开
+bk_backup_hold() { # 仓库连得上(1/0) 仓库里几份快照（读不出为空） 这台从没备份成功过(1/0)
+  local ready=$1 snaps=$2 never=$3
+  if [[ "$ready" != 1 ]]; then
+    echo "仓库还连不上"
+    return 1
+  fi
+  if [[ ! "$snaps" =~ ^[0-9]+$ ]]; then
+    echo "仓库里有几份快照没读出来，拿不准是不是换机恢复"
+    return 1
+  fi
+  if ((snaps > 0)) && [[ "$never" != 0 ]]; then
+    echo "香港仓库里已有 $snaps 份快照，这台却从没备份成功过——当成换机恢复：先按 docs/ops.md 第九节把库恢复回来（现在首跑会把空库备上去，还会删掉当天出事前那一份），再跑一遍本脚本"
+    return 1
+  fi
+}
+
+# 判一个定时任务健不健康（装机脚本 --check 用，和驾驶舱 scheduleHealth 一个先后：先看最近一次的结局，再看新鲜度）。
+# 打印「ok<TAB>说明」或「red<TAB>说明」。查出问题（found > 0）也是红：演练对不上、盘到线，都不许在读回里显示成通过。
+bk_judge_job() { # 任务 过期分钟 上次跑成距今秒数或never 最近结局或none 扫到 问题 原因
+  local job=$1 expect=$2 age=$3 outcome=$4 scanned=$5 found=$6 why=$7
+  if [[ ! "$expect" =~ ^[0-9]+$ || ! "$age" =~ ^([0-9]+|never)$ ]]; then
+    printf 'red\t%s 的读数认不出（过期分钟「%s」，距今「%s」）\n' "$job" "$expect" "$age"
+  elif [[ "$outcome" == failed ]]; then
+    printf 'red\t%s 最近一次没做成：%s\n' "$job" "$why"
+  elif [[ "$outcome" == unscanned ]]; then
+    printf 'red\t%s 最近一次一个对象都没扫到：%s\n' "$job" "$why"
+  elif [[ "$age" == never ]]; then
+    printf 'red\t%s 从没跑成过\n' "$job"
+  elif ((age > expect * 60)); then
+    printf 'red\t%s 上次跑成在 %d 小时前，超过 %d 小时\n' "$job" "$((age / 3600))" "$((expect / 60))"
+  elif [[ "$found" =~ ^[0-9]+$ ]] && ((found > 0)); then
+    printf 'red\t%s 最近一次查出 %s 个问题（看报警）：%s\n' "$job" "$found" "$why"
+  elif [[ "$outcome" == partial ]]; then
+    printf 'red\t%s 最近一次有一部分没查成：%s\n' "$job" "$why"
+  else
+    printf 'ok\t%s 上次跑成在 %d 分钟前（限 %d 小时）：%s，扫到 %s，查出问题 %s%s\n' "$job" "$((age / 60))" "$((expect / 60))" \
+      "$outcome" "$scanned" "$found" "${why:+。$why}"
+  fi
+}
 
 # 本机配置是 KEY=VALUE 文本，只当数据读、不 source。只认列出来的键；文件要属给定 uid、组和其他人不可写
 # （谁能改它，谁就能决定备份往哪报、报什么）。读成功才把值放进同名变量。

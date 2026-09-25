@@ -97,9 +97,40 @@ check "Temporal 口令：带冒号 → 不认（要原样写进 pgpass）" 1 "$(
 check "公钥：ed25519 带注释" 0 "$(rc_of bk_valid_pubkey "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIabc+/= fleet-dao-backup")"
 check "公钥：rsa → 不认" 1 "$(rc_of bk_valid_pubkey "ssh-rsa AAAAB3Nza")"
 check "公钥：带选项的整行 → 不认" 1 "$(rc_of bk_valid_pubkey 'command="sh" ssh-ed25519 AAAA')"
-check "authorized_keys 那一行：只许隧道、restrict、只有 sftp" \
-  'from="10.99.0.2",restrict,command="internal-sftp -d /srv/fleet-dao-backup/restic" ssh-ed25519 AAAA x' \
+check "authorized_keys 那一行：只许隧道、restrict、只有 sftp，起点在家目录（chroot 没了也落到同一个仓库）" \
+  'from="10.99.0.2",restrict,command="internal-sftp -d /srv/fleet-dao-backup" ssh-ed25519 AAAA x' \
   "$(bk_authorized_line "ssh-ed25519 AAAA x")"
+dropin=$(bk_sshd_dropin)
+check "sshd drop-in：Match 只管备份用户" 1 "$(grep -c '^Match User fleet-backup$' <<<"$dropin")"
+check "sshd drop-in：关进家目录" 1 "$(grep -c '^    ChrootDirectory /srv/fleet-dao-backup$' <<<"$dropin")"
+check "sshd drop-in：只给 sftp，起点是 chroot 的根" 1 "$(grep -c '^    ForceCommand internal-sftp -d /$' <<<"$dropin")"
+check "sshd drop-in：什么转发都不许" 4 "$(grep -cE '^    (AllowTcpForwarding|AllowAgentForwarding|AllowStreamLocalForwarding|X11Forwarding) no$' <<<"$dropin")"
+check "sshd drop-in：Match 之外没有别的设置（不碰别的用户）" 0 "$(grep -vcE '^(#|Match |    )' <<<"$dropin")"
+check "仓库路径是相对的：chroot 里外都落到 $BK_HK_REPO" "$BK_HK_HOME/$BK_REPO_PATH" "$BK_HK_REPO"
+
+check "仓库口令：64 位十六进制" 0 "$(rc_of bk_valid_restic_password "$(printf 'ab%.0s' {1..32})")"
+check "仓库口令：空的 → 不认（openssl 没了会写出空行）" 1 "$(rc_of bk_valid_restic_password "")"
+check "仓库口令：短了 → 不认" 1 "$(rc_of bk_valid_restic_password abc)"
+check "仓库口令：带空白 → 不认" 1 "$(rc_of bk_valid_restic_password "$(printf 'ab%.0s' {1..31}) a")"
+
+check "开每晚备份：新仓库（0 份快照）、从没备份过 → 开（第一次装机）" 0 "$(rc_of bk_backup_hold 1 0 1)"
+check "开每晚备份：仓库有快照、这台备份成功过 → 开（平常重跑装机脚本）" 0 "$(rc_of bk_backup_hold 1 5 0)"
+check "开每晚备份：仓库有快照、这台从没备份成功过 → 不开（换机恢复，首跑会备空库、删掉出事前那份）" 1 "$(rc_of bk_backup_hold 1 5 1)"
+check "开每晚备份：不开时说清是换机恢复、去看 ops.md" 1 "$(bk_backup_hold 1 5 1 | grep -c 'docs/ops.md 第九节')"
+check "开每晚备份：仓库连不上 → 不开" 1 "$(rc_of bk_backup_hold 0 "" 1)"
+check "开每晚备份：快照数读不出 → 不开（拿不准就不冒险）" 1 "$(rc_of bk_backup_hold 1 "" 0)"
+
+verdict() { bk_judge_job "$@" | cut -f1; }
+check "判活：新鲜、没问题 → 绿" ok "$(verdict backup.drill 10200 600 ok 3 0 '')"
+check "判活：演练对不上（查出问题）→ 红，不许判成通过" red "$(verdict backup.drill 10200 600 ok 3 1 '对不上')"
+check "判活：盘到线（查出问题）→ 红" red "$(verdict backup.watch 90 60 ok 4 1 '')"
+check "判活：最近一次没做成 → 红" red "$(verdict backup.nightly 1560 600 failed - - '传不上去')"
+check "判活：最近一次没扫到 → 红" red "$(verdict backup.drill 10200 600 unscanned 0 - '没备份')"
+check "判活：最近一次一部分没查成 → 红" red "$(verdict backup.watch 90 60 partial 3 0 '香港连不上')"
+check "判活：从没跑成过 → 红" red "$(verdict backup.nightly 1560 never none - - '')"
+check "判活：上次跑成太久了 → 红" red "$(verdict backup.nightly 1560 100000 ok 3 0 '')"
+check "判活：读数认不出 → 红" red "$(verdict backup.nightly x 600 ok 3 0 '')"
+check "判活：红的说出查出几个问题" 1 "$(bk_judge_job backup.drill 10200 600 ok 3 2 '对不上' | grep -c '查出 2 个问题')"
 
 check "报错收成一行：去掉回车换行和结尾空白" "a b c" "$(printf 'a\r\nb\nc\n\n' | bk_oneline)"
 long=$(printf '备份%.0s' {1..300})
@@ -195,6 +226,8 @@ reset_env() {
   rm -rf -- "$T/s"
   mkdir -p "$T/s/etc" "$T/s/state"
   : >"$T/log"
+  : >"$T/restic-calls"
+  UNLOCKED=0
   BK_STATE=$T/s/state NIGHTLY=$T/s/state/nightly DRILL=$T/s/state/drill WATCH=$T/s/state/watch
   BK_WORK=$NIGHTLY/dumps
   BK_PASS_FILE=$T/s/etc/restic.pass BK_KEY=$T/s/etc/key BK_KNOWN_HOSTS=$T/s/etc/known BK_RESTIC=$T/s/etc/restic
@@ -221,6 +254,25 @@ ended() { grep '^end ' "$T/log" | cut -c5-; }
 raised() { grep '^raise ' "$T/log" | cut -c7- | cut -d'|' -f1 | sort | paste -sd ' ' -; }
 resolved() { grep '^resolve ' "$T/log" | cut -c9- | sort | paste -sd ' ' -; }
 
+# 香港仓库的锁：每次调 restic 记一笔子命令；STALE_LOCK=1 时仓库里留着上一轮断网丢下的锁——没先 unlock 就动仓库，
+# 照 restic 的样子报「已经锁上了」；UNLOCK_FAIL=1 时 unlock 本身失败（连不上之类）
+restic_lock_gate() { # 子命令
+  echo "$1" >>"$T/restic-calls"
+  if [[ "$1" == unlock ]]; then
+    if ((${UNLOCK_FAIL:-0})); then
+      echo "Fatal: unable to open repository: connection refused" >&2
+      return 1
+    fi
+    UNLOCKED=1
+    return 0
+  fi
+  if ((${STALE_LOCK:-0})) && ((${UNLOCKED:-0} == 0)); then
+    echo "Fatal: unable to create lock in backend: repository is already locked exclusively by PID 4242 on fleet-france" >&2
+    return 1
+  fi
+}
+first_restic_call() { head -n 1 "$T/restic-calls" 2>/dev/null; }
+
 # 每晚备份的替身：导出照写文件和清单；restic 按 RS_* 决定成败
 stub_backup() { # backup 退出码 forget 退出码 快照里几个文件 哪个库导不出
   RS_BACKUP=$1 RS_FORGET=$2 RS_FILES=$3 RS_BADDB=${4:-}
@@ -233,6 +285,7 @@ stub_backup() { # backup 退出码 forget 退出码 快照里几个文件 哪个
     printf '%s\tpublic.t\trows\t1\n' "$1" >>"$2/manifest.tsv"
   }
   restic_() {
+    restic_lock_gate "$1" || return 1
     case $1 in
     backup)
       if ((RS_BACKUP)); then
@@ -263,6 +316,28 @@ if ((HAVE_NODE)); then
   check "备份：都成了 → 记 ok、扫到 3 个库" "ok|3|0" "$(ended | cut -d'|' -f1-3)"
   check "备份：都成了 → 解除没做成的报警" backup.nightly:run "$(resolved)"
   check "备份：都成了 → 不留导出的文件" 0 "$(find "$T/s/state" -name '*.dump' | wc -l)"
+  check "备份：碰仓库之前先清失效的锁" unlock "$(first_restic_call)"
+
+  reset_env
+  (
+    stub_books
+    stub_backup 0 0 4
+    STALE_LOCK=1
+    cmd_backup
+  ) >"$T/out" 2>&1
+  RC=$?
+  check "备份：香港留着上一轮断网丢下的锁 → 先清掉，照样备成" "0 ok" "$RC $(ended | cut -d'|' -f1)"
+
+  reset_env
+  (
+    stub_books
+    stub_backup 0 0 4
+    UNLOCK_FAIL=1
+    cmd_backup
+  ) >"$T/out" 2>&1
+  RC=$?
+  check "备份：清锁没成不算没做成（接着跑，真连不上由下一步说）" "0 ok" "$RC $(ended | cut -d'|' -f1)"
+  check "备份：清锁没成 → 日志里说一声" 1 "$(grep -c '清失效的锁没成' "$T/out")"
 
   reset_env
   (
@@ -320,6 +395,7 @@ if ((HAVE_NODE)); then
   stub_drill() { # 快照列表 JSON；取回退出码；自检退出码
     RS_SNAPS=$1 RS_RESTORE=$2 RS_CHECK=${3:-0}
     restic_() {
+      restic_lock_gate "$1" || return 1
       case $1 in
       snapshots) printf '%s\n' "$RS_SNAPS" ;;
       restore)
@@ -357,6 +433,17 @@ if ((HAVE_NODE)); then
   check "演练：三个库都对上 → 记 ok、扫到 3、问题 0" "0 ok|3|0" "$RC $(ended | cut -d'|' -f1-3)"
   check "演练：都对上 → 解除两种报警" "backup.drill:mismatch backup.drill:run" "$(resolved)"
   check "演练：跑完不留取回的文件" 0 "$(find "$T/s/state" -name '*.dump' | wc -l)"
+  check "演练：碰仓库之前先清失效的锁" unlock "$(first_restic_call)"
+
+  reset_env
+  (
+    stub_books
+    stub_drill "$one_snap" 0
+    STALE_LOCK=1
+    cmd_drill
+  ) >"$T/out" 2>&1
+  RC=$?
+  check "演练：香港留着断网丢下的锁 → 先清掉，照样练成" "0 ok|3|0" "$RC $(ended | cut -d'|' -f1-3)"
 
   reset_env
   (
@@ -450,7 +537,8 @@ reset_env
 ) >"$T/out" 2>&1
 RC=$?
 check "巡检：都正常 → ok，法国一块盘（两个路径同一块）+ 香港一块 + 两个任务" "0 ok|4|0" "$RC $(ended | cut -d'|' -f1-3)"
-check "巡检：都正常 → 解除所有相关报警" "backup.watch:run disk:france:/ disk:hk:/ stale:backup.drill stale:backup.nightly" "$(resolved)"
+check "巡检：都正常 → 解除所有相关报警（去重键都带 backup. 前缀）" \
+  "backup.disk:france:/ backup.disk:hk:/ backup.stale:backup.drill backup.stale:backup.nightly backup.watch:run" "$(resolved)"
 
 reset_env
 (
@@ -461,7 +549,7 @@ reset_env
 ) >"$T/out" 2>&1
 RC=$?
 check "巡检：法国盘到线 → 查出 1 个问题、任务照样 ok" "0 ok|4|1" "$RC $(ended | cut -d'|' -f1-3)"
-check "巡检：到线 → 报法国那块盘" disk:france:/ "$(raised)"
+check "巡检：到线 → 报法国那块盘" backup.disk:france:/ "$(raised)"
 
 reset_env
 (
@@ -485,7 +573,7 @@ reset_env
 ) >"$T/out" 2>&1
 RC=$?
 check "巡检：每晚备份从没跑过、演练过期 → 两个问题" "0 ok|4|2" "$RC $(ended | cut -d'|' -f1-3)"
-check "巡检：两个都报" "stale:backup.drill stale:backup.nightly" "$(raised)"
+check "巡检：两个都报" "backup.stale:backup.drill backup.stale:backup.nightly" "$(raised)"
 
 reset_env
 (
@@ -521,6 +609,50 @@ reset_env
 ) >"$T/out" 2>&1
 RC=$?
 check "巡检：什么都没查成 → 没做成" "1 failed" "$RC $(ended | cut -d'|' -f1)"
+
+# ── 写库的退回：原因、报警正文本身写不进库（比如夹了库不认的字节）时，改记一句短的，这一轮照样收上、报警照样发出去 ──
+
+# 库的替身：参数里原因或正文带「坏」字就当库拒收；写进去的参数记进 $T/sql；DB_DOWN=1 时什么都写不进
+stub_db() {
+  bk_sql() {
+    local a
+    cat >/dev/null
+    if ((${DB_DOWN:-0})); then return 2; fi
+    for a in "$@"; do
+      if [[ "$a" == why=*坏* || "$a" == body=*坏* ]]; then return 3; fi
+    done
+    printf '%s\n' "$*" >>"$T/sql"
+  }
+}
+
+: >"$T/sql"
+(
+  stub_db
+  RUN_ID=7 RUN_UNIT=fleet-backup.service
+  run_end failed "" "" "带坏字节的原因"
+  echo "run_end=$?"
+  alert_raise backup.nightly:run "每晚备份没做成" "带坏字节的正文"
+  echo "alert_raise=$?"
+) >"$T/out" 2>&1
+check "写库退回：原因写不进 → 这一轮照样收上" "run_end=0" "$(grep '^run_end=' "$T/out")"
+check "写库退回：收上时记的是短原因" 1 "$(grep -c 'why=原因写不进库，看法国 journalctl -u fleet-backup.service' "$T/sql")"
+check "写库退回：报警正文写不进 → 报警照样发出去" "alert_raise=0" "$(grep '^alert_raise=' "$T/out")"
+check "写库退回：发出去的是短正文、原标题" 1 "$(grep -c 'title=每晚备份没做成 -v body=正文写不进库，看法国 journalctl -u fleet-backup.service' "$T/sql")"
+check "写库退回：日志里说了改记短的" 2 "$(grep -c '改记一句短的' "$T/out")"
+
+: >"$T/sql"
+(
+  stub_db
+  DB_DOWN=1
+  RUN_ID=7 RUN_UNIT=fleet-backup.service
+  run_end failed "" "" "原因"
+  echo "run_end=$?"
+  alert_raise backup.nightly:run "标题" "正文"
+  echo "alert_raise=$?"
+) >"$T/out" 2>&1
+check "写库退回：库整个连不上 → run_end 如实返回失败" "run_end=1" "$(grep '^run_end=' "$T/out")"
+check "写库退回：库整个连不上 → alert_raise 如实返回失败（不冒充发出去了）" "alert_raise=1" "$(grep '^alert_raise=' "$T/out")"
+check "写库退回：库整个连不上 → 什么都没写进" 0 "$(wc -l <"$T/sql")"
 
 printf '备份的测试：通过 %d 条，不通过 %d 条\n' "$passes" "$fails"
 if ((fails)); then exit 1; fi

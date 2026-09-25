@@ -2,12 +2,13 @@
 # shellcheck source-path=SCRIPTDIR
 # 夜间备份与恢复演练的装机（以 root 跑；幂等：跑第二遍什么都不变）。独立于 deploy/france.sh、hk.sh，两台各跑一次：
 #   bash deploy/backup/install.sh france [--check]   法国：restic、口令与钥匙、任务脚本与定时器、演练用的库角色、登记定时任务、首跑
-#   bash deploy/backup/install.sh hk [--check]       香港：只收密文的 fleet-backup 用户、它的目录和那一行 authorized_keys
+#   bash deploy/backup/install.sh hk [--check]       香港：只收密文的 fleet-backup 用户、它的目录、那一行 authorized_keys、把它关进 chroot
 # 先后：法国先跑（生成备份钥匙、打印公钥）→ 公钥填进香港 /etc/fleet-dao/backup.env、跑香港 → 法国再跑一遍（钉香港的主机钥匙、
 # 建仓库、首跑）。--check 只读回，不改任何东西。退出码同 france.sh：0 全绿，1 有红，2 有待配或没查成。
+# 换机恢复（仓库里已有快照、这台从没备份成功过）时不开每晚备份、不首跑，见 docs/ops.md 第九节。
 # 只写这些地方——法国：/opt/fleet-dao/restic、/etc/fleet-dao/backup{,.env}、/usr/local/lib/fleet-dao/backup、/var/lib/fleet-dao/backup、
 # /etc/systemd/system/fleet-backup*、库角色 fleet_drill、scheduled_jobs 里的三行；香港：用户 fleet-backup、/srv/fleet-dao-backup、
-# /etc/fleet-dao/backup.env。别的一概不碰（旧系统正在清退，装机前后的旧系统快照比对会被清退动作搅乱，这里不做）。
+# /etc/fleet-dao/backup.env、/etc/ssh/sshd_config.d/60-fleet-dao-backup.conf（只管这一个用户的 Match 段）。别的一概不碰。
 set -Eeuo pipefail
 umask 022
 
@@ -25,6 +26,8 @@ UNITS=(fleet-backup.service fleet-backup.timer fleet-backup-drill.service fleet-
 TIMERS=(fleet-backup.timer:fleet-backup.service:backup.nightly fleet-backup-drill.timer:fleet-backup-drill.service:backup.drill
   fleet-backup-watch.timer:fleet-backup-watch.service:backup.watch)
 REPO_READY=0
+REPO_SNAPSHOTS=""
+PROBE_OUT=""
 
 usage() {
   echo "用法：bash $0 france|hk [--check]" >&2
@@ -75,7 +78,7 @@ preflight_france() {
     return 1
   fi
   local c lacking=""
-  for c in psql pg_dump pg_restore node ssh sftp ssh-keygen ssh-keyscan flock numfmt curl; do
+  for c in psql pg_dump pg_restore node ssh sftp ssh-keygen ssh-keyscan flock numfmt curl openssl iconv; do
     command -v "$c" >/dev/null || lacking+=" $c"
   done
   if [[ -n "$lacking" ]]; then
@@ -133,12 +136,25 @@ setup_dirs_france() {
 
 setup_secrets() {
   step "口令与钥匙（$BK_ETC，root:fleet 640：只有 root 和引擎用户 fleet 读得到）"
-  # restic 仓库口令：首次生成，之后再也不动——换了它，香港已有的备份就解不开了
+  # restic 仓库口令：首次生成，之后再也不动——换了它，香港已有的备份就解不开了。
+  # 先生成进变量再核对样子：写进文件的若是空行，restic init 会拿空口令建库
+  local pass
   if [[ ! -s "$BK_PASS_FILE" ]]; then
-    put_file "$BK_PASS_FILE" root:fleet 640 "$(openssl rand -hex 32)"
+    pass=$(openssl rand -hex 32)
+    if ! bk_valid_restic_password "$pass"; then
+      red "生成的仓库口令不是 64 位十六进制（openssl 出了什么事？），不写"
+      return 1
+    fi
+    put_file "$BK_PASS_FILE" root:fleet 640 "$pass"
   else
     fix_meta "$BK_PASS_FILE" root:fleet 640
   fi
+  pass=$(head -n 1 -- "$BK_PASS_FILE")
+  if ! bk_valid_restic_password "$pass"; then
+    red "$BK_PASS_FILE 的第一行不是 64 位十六进制（空的？换机时是不是没把密码管理器里那串整行抄回来？）"
+    return 1
+  fi
+  pass=""
   echo "  仓库口令在 $BK_PASS_FILE：抄一份进创始人的密码管理器——法国这台没了，香港的密文只有它解得开（这里不打印口令）"
   # 连香港的钥匙。fleet 读它靠组权限：ssh 只在钥匙文件归自己时才嫌 640 太松，归 root 的不嫌
   if [[ ! -s "$BK_KEY" ]]; then
@@ -234,7 +250,7 @@ SQL
 
 setup_units() {
   step "定时器（时区写在 OnCalendar 里，不靠机器时区）"
-  local u reload=0 t timer
+  local u reload=0 t timer job
   for u in "${UNITS[@]}"; do
     put_file "/etc/systemd/system/$u" root:root 644 "$(<"$BACKUP_DIR/units/$u")"
     reload=$((reload || WROTE))
@@ -242,6 +258,12 @@ setup_units() {
   if ((reload)); then systemctl daemon-reload; fi
   for t in "${TIMERS[@]}"; do
     timer=${t%%:*}
+    job=${t##*:}
+    # 每晚备份的定时器只在确定不会把空库备上去时才开；已经开着的不去关它（隧道一时不通时重跑装机脚本不该停掉备份）
+    if [[ "$job" == backup.nightly && "$(systemctl is-enabled "$timer" 2>/dev/null)" != enabled ]] && ! backup_allowed; then
+      pending "$timer 先不开：$BACKUP_HOLD"
+      continue
+    fi
     if [[ "$(systemctl is-enabled "$timer" 2>/dev/null)" != enabled ]]; then
       systemctl enable --quiet "$timer"
       changed "启用 $timer"
@@ -261,15 +283,26 @@ probe_repo() {
   return "$rc"
 }
 
-setup_repo() {
-  step "香港的 restic 仓库（$BK_HK_USER@$BK_HK_ADDR:$BK_HK_REPO，只存密文）"
+# 仓库里有几份快照（连不上、认不出都返回非 0，不拿 0 冒充）
+count_snapshots() {
+  local out n
+  out=$(as_fleet_job restic snapshots --json --host "$BK_RESTIC_HOST" --tag "$BK_TAG" 2>/dev/null) || return 1
+  n=$(node -e 'const a = JSON.parse(require("fs").readFileSync(0, "utf8")); if (!Array.isArray(a)) process.exit(1); console.log(a.length)' \
+    <<<"$out" 2>/dev/null) || return 1
+  [[ "$n" =~ ^[0-9]+$ ]] || return 1
+  echo "$n"
+}
+
+# 连一次仓库：REPO_READY（连得上、口令对）、REPO_SNAPSHOTS（几份快照，读不出为空）。init 为 1 时仓库不在就建一个
+detect_repo() { # init
   local rc=0
+  REPO_READY=0 REPO_SNAPSHOTS=""
   if [[ ! -s "$BK_KNOWN_HOSTS" ]]; then
-    pending "还没钉住香港 sshd 的主机钥匙，仓库等隧道通了再建"
+    PROBE_OUT="还没钉住香港 sshd 的主机钥匙（隧道通了再跑一遍本脚本）"
     return 0
   fi
   probe_repo || rc=$?
-  if ((rc == 10)); then
+  if ((rc == 10 && $1)); then
     rc=0
     as_fleet_job restic init >/dev/null 2>&1 || rc=$?
     if ((rc)); then
@@ -281,13 +314,33 @@ setup_repo() {
     probe_repo || rc=$?
   fi
   if ((rc == 0)); then
-    ok "仓库在，口令对得上"
     REPO_READY=1
+    REPO_SNAPSHOTS=$(count_snapshots) || REPO_SNAPSHOTS=""
   elif [[ "$PROBE_OUT" == *"Permission denied"* ]]; then
-    pending "香港还没认这把备份钥匙：把上面打印的公钥填进香港 $BK_CONFIG，在香港跑 install.sh hk"
+    PROBE_OUT="香港还没认这把备份钥匙：把上面打印的公钥填进香港 $BK_CONFIG，在香港跑 install.sh hk"
   else
-    red "连香港的仓库没成（restic 退出码 $rc）：$PROBE_OUT"
+    PROBE_OUT="连香港的仓库没成（restic 退出码 $rc）：$PROBE_OUT"
   fi
+}
+
+setup_repo() {
+  step "香港的 restic 仓库（$BK_HK_USER@$BK_HK_ADDR，香港上是 $BK_HK_REPO，只存密文）"
+  detect_repo 1
+  if ((REPO_READY)); then
+    ok "仓库在，口令对得上，里面 ${REPO_SNAPSHOTS:-（数没读出来）} 份快照"
+  else
+    pending "$PROBE_OUT"
+  fi
+}
+
+# 每晚备份能不能开（开定时器、首跑都问它），判法见 lib.sh 的 bk_backup_hold；不能开时原因放进 BACKUP_HOLD
+BACKUP_HOLD=""
+backup_allowed() {
+  local never=0
+  if never_succeeded backup.nightly; then never=1; fi
+  if BACKUP_HOLD=$(bk_backup_hold "$REPO_READY" "$REPO_SNAPSHOTS" "$never"); then return 0; fi
+  if ((REPO_READY == 0)); then BACKUP_HOLD+="（${PROBE_OUT:-没查成}）"; fi
+  return 1
 }
 
 # 最近一次跑的结局、上次跑成（ok 或 partial）距今几秒：任务编号<TAB>过期分钟<TAB>秒数或 never<TAB>结局<TAB>扫到<TAB>问题<TAB>原因
@@ -321,7 +374,11 @@ first_runs() {
       ok "$job 跑成过，不再首跑"
       continue
     fi
-    if ((REPO_READY == 0)) && [[ "$job" != backup.watch ]]; then
+    if [[ "$job" == backup.nightly ]] && ! backup_allowed; then
+      pending "$job 不首跑：$BACKUP_HOLD"
+      continue
+    fi
+    if ((REPO_READY == 0)) && [[ "$job" == backup.drill ]]; then
       pending "$job 还没跑成过：仓库好了再跑一遍本脚本"
       continue
     fi
@@ -335,7 +392,8 @@ first_runs() {
 
 readback_france() {
   step "读回"
-  local f have t timer service job rows line expect age outcome scanned found why user
+  local f have t timer service job rows line expect age outcome scanned found why user verdict pass
+  detect_repo 0 # 首跑之后快照数变了，重新连一次
   if [[ "$(readlink -f "$BK_RESTIC" 2>/dev/null)" == "$BK_RESTIC_HOME/$BK_RESTIC_VERSION/restic" ]] &&
     (cd "$BK_RESTIC_HOME/$BK_RESTIC_VERSION" && sha256sum --quiet --status -c .sha256) 2>/dev/null; then
     ok "restic：$("$BK_RESTIC" version 2>/dev/null | head -n 1)"
@@ -346,6 +404,13 @@ readback_france() {
     have=$(stat -c '%U:%G %a' -- "$f" 2>/dev/null) || have="没有"
     if [[ "$have" == "root:fleet 640" ]]; then ok "$f root:fleet 640"; else pending "$f 是「$have」，应为 root:fleet 640"; fi
   done
+  pass=$(head -n 1 -- "$BK_PASS_FILE" 2>/dev/null) || pass=""
+  if bk_valid_restic_password "$pass"; then
+    ok "仓库口令是 64 位十六进制（不打印）"
+  else
+    red "$BK_PASS_FILE 的第一行不是 64 位十六进制（空的？）"
+  fi
+  pass=""
   check_config_france
   for f in lib.sh fleet-backup.sh; do
     if cmp -s -- "$BACKUP_DIR/$f" "$BK_LIB_DIR/$f" && [[ "$(stat -c '%U' -- "$BK_LIB_DIR/$f")" == root ]]; then
@@ -364,23 +429,27 @@ readback_france() {
   else
     red "库角色 $BK_DRILL_ROLE 不在或权限不对"
   fi
+  if ((REPO_READY)); then
+    ok "香港的仓库连得上、口令对得上：${REPO_SNAPSHOTS:-（数没读出来）} 份快照"
+    readback_chroot
+  else
+    pending "香港的仓库还连不上：$PROBE_OUT"
+  fi
+  local held=0
+  if ! backup_allowed; then held=1; fi
   for t in "${TIMERS[@]}"; do
-    IFS=: read -r timer service _ <<<"$t"
+    IFS=: read -r timer service job <<<"$t"
     user=$(unit_prop "$service" User)
     if [[ "$user" != fleet ]]; then red "$service 的有效 User 是「$user」，应为 fleet"; fi
     if [[ "$(systemctl is-enabled "$timer" 2>/dev/null)" == enabled && "$(systemctl is-active "$timer" 2>/dev/null)" == active ]]; then
       ok "$timer 启用且在排班（$service 以 fleet 跑）"
+    elif [[ "$job" == backup.nightly ]] && ((held)); then
+      pending "$timer 没开：$BACKUP_HOLD"
     else
       red "$timer 没启用或没在排班"
     fi
   done
-  if [[ -s "$BK_KNOWN_HOSTS" ]] && probe_repo; then
-    ok "香港的仓库连得上、口令对得上：$(as_fleet_job restic snapshots --json --host "$BK_RESTIC_HOST" --tag "$BK_TAG" 2>/dev/null |
-      node -e 'const a = JSON.parse(require("fs").readFileSync(0, "utf8")); console.log(a.length + " 份快照" + (a.length ? "，最新 " + a[a.length - 1].time : ""))' 2>/dev/null || echo 快照数没读出来)"
-  else
-    pending "香港的仓库还连不上：${PROBE_OUT:-还没钉住主机钥匙}"
-  fi
-  # 判活：看上次跑成的时刻，超过登记的过期分钟就红；最近一次没做成、没扫到也红（和驾驶舱的 scheduleHealth 同一套先后）
+  # 判活：看上次跑成的时刻，超过登记的过期分钟就红；最近一次没做成、没扫到、查出问题也红（判法见 lib.sh 的 bk_judge_job）
   if ! rows=$(job_health 2>&1); then
     pending "运行记录读不出来：${rows:0:200}"
     return 0
@@ -393,20 +462,31 @@ readback_france() {
       continue
     fi
     IFS=$'\t' read -r _ expect age outcome scanned found why <<<"$line"
-    case $outcome in
-    failed) red "$job 最近一次没做成：$why" ;;
-    unscanned) red "$job 最近一次一个对象都没扫到：$why" ;;
-    *)
-      if [[ "$age" == never ]]; then
-        red "$job 从没跑成过"
-      elif ((age > expect * 60)); then
-        red "$job 上次跑成在 $((age / 3600)) 小时前，超过 $((expect / 60)) 小时"
-      else
-        ok "$job 上次跑成在 $((age / 60)) 分钟前（限 $((expect / 60)) 小时）：$outcome，扫到 $scanned，查出问题 $found${why:+。$why}"
-      fi
-      ;;
-    esac
+    verdict=$(bk_judge_job "$job" "$expect" "$age" "$outcome" "$scanned" "$found" "$why")
+    if [[ "$job" == backup.nightly && "$age" == never ]] && ((held)); then
+      pending "$job 还没跑过：$BACKUP_HOLD"
+    elif [[ "${verdict%%$'\t'*}" == ok ]]; then
+      ok "${verdict#*$'\t'}"
+    else
+      red "${verdict#*$'\t'}"
+    fi
   done
+}
+
+# 香港那边的备份用户真关在 chroot 里：登上来列根目录，应当只看得见备份目录，看不见 /etc
+readback_chroot() {
+  local out
+  local -a opts
+  read -r -a opts <<<"$(bk_ssh_opts)"
+  if ! out=$(printf 'ls -1 /\n' | as_user fleet sftp -b - "${opts[@]}" "$BK_HK_USER@$BK_HK_ADDR" 2>&1); then
+    pending "列不出香港备份用户看得见的根目录：$(tail -n 2 <<<"$out" | bk_oneline)"
+  elif grep -qE '^/?etc$' <<<"$out"; then
+    red "香港的备份用户看得见整台机器的文件（chroot 没生效）：在香港跑 install.sh hk"
+  elif grep -qE "^/?$BK_REPO_PATH\$" <<<"$out"; then
+    ok "香港的备份用户关在 chroot 里：根目录下只看得见备份目录"
+  else
+    pending "香港备份用户的根目录列出来认不出：$(bk_oneline <<<"$out")"
+  fi
 }
 
 main_france() {
@@ -418,11 +498,9 @@ main_france() {
     setup_config_france
     setup_scripts
     setup_db
-    setup_units
     setup_repo
+    setup_units
     first_runs
-  else
-    REPO_READY=1
   fi
   readback_france
   finish
@@ -501,9 +579,25 @@ setup_hk_key() {
 $(bk_authorized_line "$FLEET_BACKUP_FRANCE_PUBLIC_KEY")"
 }
 
+# 把备份用户关进 chroot：法国被打穿的话，拿着这把钥匙也只看得见备份目录，看不见香港别的文件。
+# 先 sshd -t 验整份配置，不过就把这份撤掉、不重载——sshd 配错了，连 root 都登不上来
+setup_hk_sshd() {
+  step "sshd：备份用户关进 $BK_HK_HOME（$BK_SSHD_DROPIN）"
+  local err
+  put_file "$BK_SSHD_DROPIN" root:root 644 "$(bk_sshd_dropin)"
+  if ((WROTE == 0)); then return 0; fi
+  if ! err=$(sshd -t 2>&1); then
+    rm -f -- "$BK_SSHD_DROPIN"
+    red "加上 $BK_SSHD_DROPIN 之后 sshd -t 不过，已撤掉、没重载：${err:0:300}"
+    return 1
+  fi
+  systemctl reload ssh.service
+  changed "重载 sshd（已登录的连接不受影响）"
+}
+
 readback_hk() {
   step "读回"
-  local cfg pub akf allow n size have pct
+  local cfg pub akf allow chroot force n size have pct
   if [[ "$(getent passwd "$BK_HK_USER" | cut -d: -f6,7)" == "$BK_HK_HOME:/usr/sbin/nologin" ]]; then
     ok "用户 $BK_HK_USER：家目录 $BK_HK_HOME，shell nologin"
   else
@@ -529,13 +623,30 @@ readback_hk() {
     pub=$(awk '$1 == "pubkeyauthentication" { print $2 }' <<<"$cfg")
     akf=$(awk '$1 == "authorizedkeysfile" { $1 = ""; print }' <<<"$cfg")
     allow=$(awk '$1 == "allowusers" || $1 == "allowgroups" { print }' <<<"$cfg")
+    chroot=$(awk '$1 == "chrootdirectory" { print $2 }' <<<"$cfg")
+    force=$(awk '$1 == "forcecommand" { $1 = ""; print }' <<<"$cfg")
     if [[ "$pub" == yes && " $akf " == *" .ssh/authorized_keys "* && -z "$allow" ]]; then
       ok "sshd 对 $BK_HK_USER：认钥匙、读 .ssh/authorized_keys、没有 AllowUsers 挡着"
     else
       red "sshd 对 $BK_HK_USER 的有效配置不对：pubkeyauthentication=$pub，authorizedkeysfile=${akf# }${allow:+，$allow}"
     fi
+    if [[ "$chroot" == "$BK_HK_HOME" && "${force# }" == "internal-sftp -d /" ]]; then
+      ok "sshd 把 $BK_HK_USER 关在 $BK_HK_HOME 里、只给 sftp"
+    else
+      red "sshd 没把 $BK_HK_USER 关进 chroot（chrootdirectory=$chroot，forcecommand=${force# }）"
+    fi
   else
     red "sshd -T 读不出对 $BK_HK_USER 生效的配置：${cfg:0:200}"
+  fi
+  # Match 段只该管备份用户：root 的有效配置里不许出现 chroot、强制命令
+  if cfg=$(sshd -T -C "user=root,host=admin,addr=127.0.0.1" 2>&1) &&
+    [[ "$(awk '$1 == "chrootdirectory" || $1 == "forcecommand" { print $2 }' <<<"$cfg" | sort -u)" == none ]]; then
+    ok "root 的 sshd 有效配置没被这段 Match 碰到"
+  else
+    red "root 的 sshd 有效配置里出现了 chroot 或强制命令：马上看 $BK_SSHD_DROPIN"
+  fi
+  if [[ "$(cat -- "$BK_SSHD_DROPIN" 2>/dev/null)" != "$(bk_sshd_dropin)" ]]; then
+    red "$BK_SSHD_DROPIN 不在或和仓里的不一样"
   fi
   if [[ -n "$(find "$BK_HK_REPO" ! -user "$BK_HK_USER" -print -quit 2>/dev/null)" ]]; then
     red "$BK_HK_REPO 里有不归 $BK_HK_USER 的文件（法国会写不进去，审计 P01）"
@@ -556,6 +667,7 @@ main_hk() {
   if ((CHECK_ONLY == 0)); then
     setup_hk_user
     setup_hk_key
+    setup_hk_sshd
   else
     load_env "$BK_CONFIG" "${BK_CONFIG_KEYS_HK[@]}"
   fi
