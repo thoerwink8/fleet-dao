@@ -50,7 +50,7 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 | 用户 | 在哪 | 干什么 |
 |---|---|---|
 | `fleet` | 两台 | 引擎、驾驶舱后端、Temporal（法国），飞书网关（香港）。系统用户，家 `/home/fleet`（750） |
-| `fleet-agent-dedicated`、`fleet-agent-carpool` | 法国 | AI 会话专用：各挂一个 reclaude 组织（独享、拼车），永不切号；引擎按选中的账号池挑用户。没有 sudo、不能提权、只在自己的组里、家里没有 GitHub 凭据、读不到 `/etc/fleet-dao`、连不上 Temporal 和库 |
+| `fleet-agent-dedicated`、`fleet-agent-carpool` | 法国 | AI 会话专用：各挂一个 reclaude 组织（独享、拼车）；独享号的用户永不切号，拼车号的用户额度用满时切到独享号、窗口回来再切回（design 第九节，#59）；引擎按选中的账号池挑用户。没有 sudo、不能提权、只在自己的组里、家里没有 GitHub 凭据、读不到 `/etc/fleet-dao`、连不上 Temporal 和库 |
 | `pilot` | 法国 | 创始人的登录用户：用 Mirasim 桌面端的 ssh 远程模式登进来干活（第五节）。系统用户，家 `/home/pilot`（750）；没有任何 sudo，只在自己的组和 `systemd-journal` 里（看日志）；读不到 `/etc/fleet-dao`、连不上 Temporal 和库 |
 | `root` | | 只装机 |
 
