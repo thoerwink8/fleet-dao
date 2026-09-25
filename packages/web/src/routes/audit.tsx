@@ -154,7 +154,7 @@ export default function Audit() {
             <LoadingRows rows={6} />
           </div>
         ) : !audit.data ? (
-          <p className="px-4 py-10 text-center text-sm text-st-fail">
+          <p className="px-4 py-10 text-center text-sm text-ink-fail">
             没读到操作记录，这里空着不代表没人操作过
           </p>
         ) : list.length === 0 ? (
@@ -173,7 +173,7 @@ export default function Audit() {
                     <span className="font-medium" title={a.actor.id}>
                       {actorName(a.actor, me)}
                     </span>
-                    <span className={cn(!a.ok && 'text-st-fail')} title={a.action}>
+                    <span className={cn(!a.ok && 'text-ink-fail')} title={a.action}>
                       {actionLabel(a.action)}
                     </span>
                     <button
@@ -185,7 +185,7 @@ export default function Audit() {
                       {targetLabel(a.target, tasks)}
                     </button>
                     {!a.ok ? (
-                      <Badge variant="outline" className="h-5 border-st-fail/50 text-[10px] text-st-fail">
+                      <Badge variant="outline" className="h-5 border-st-fail/50 text-[10px] text-ink-fail">
                         没做成
                       </Badge>
                     ) : null}
@@ -193,7 +193,7 @@ export default function Audit() {
                   {a.reason ? (
                     <p className="mt-0.5 text-[13px] text-muted-foreground">理由：{a.reason}</p>
                   ) : null}
-                  {a.error ? <p className="mt-0.5 text-[13px] text-st-fail">{a.error}</p> : null}
+                  {a.error ? <p className="mt-0.5 text-[13px] text-ink-fail">{a.error}</p> : null}
                   {a.before !== undefined || a.after !== undefined ? (
                     <details className="mt-1 text-xs text-muted-foreground">
                       <summary className="cursor-pointer select-none hover:text-foreground">

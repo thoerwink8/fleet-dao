@@ -55,19 +55,32 @@ export const windowLabel: Record<QuotaWindowKind, string> = {
   month_usd: '月度美元',
   points: '点数',
   period_usd: '周期美元',
+  other: '其他窗口',
 };
 
 /**
  * 各时间窗的长度，用来判断「快清零」。契约里的额度窗没带窗口起点，先按种类估；
- * 后端给出真实起止时间后改用真实值。
+ * 后端给出真实起止时间后改用真实值。other（上游新出的、还归不了类的窗）长度不知道：不据此喊「先用它」。
  */
-export const windowLength: Record<QuotaWindowKind, number> = {
+export const windowLength: Record<QuotaWindowKind, number | undefined> = {
   '5h': 5 * TIME.HOUR,
   '7d': 7 * TIME.DAY,
   '7d_model': 7 * TIME.DAY,
   month_usd: 30 * TIME.DAY,
   points: 30 * TIME.DAY,
   period_usd: 7 * TIME.DAY,
+  other: undefined,
+};
+
+/** 额度页矩阵的列序。写成全量映射：契约里加了新的窗口种类而这里没写，tsc 当场报错，不会悄悄少一列。 */
+export const windowRank: Record<QuotaWindowKind, number> = {
+  '5h': 0,
+  '7d': 1,
+  '7d_model': 2,
+  month_usd: 3,
+  period_usd: 4,
+  points: 5,
+  other: 6,
 };
 
 export interface RouteInfo {
@@ -135,27 +148,49 @@ export function poolTitle(pool: Pick<PoolView, 'id' | 'channelName'>): string {
   return `${pool.channelName} · ${pool.id}`;
 }
 
-export function utilOf(w: QuotaWindowView): number {
+/**
+ * 用了几成（0–1）。没读到就是 undefined：上游只报了清零时间、或只有已用没有上限（估算读法没配上限）时都会这样。
+ * 不拿 0 冒充——0% 会被当成「最空的池」，把人引向其实可能快满的池。
+ */
+export function utilOf(w: QuotaWindowView): number | undefined {
   if (w.utilization !== undefined) return w.utilization;
   if (w.used !== undefined && w.limit) return w.used / w.limit;
-  return 0;
+  return undefined;
 }
 
-/** 用得最满的那个窗。 */
-export function tightestWindow(windows: QuotaWindowView[]): QuotaWindowView | undefined {
-  let best: QuotaWindowView | undefined;
-  for (const w of windows) if (!best || utilOf(w) > utilOf(best)) best = w;
-  return best;
+/** 一个池的额度概况：读到用量的窗里用得最满的那个，加上用量没读到的窗（它们不参与比较，但要让人看见）。 */
+export interface PoolUsage {
+  tightest: { w: QuotaWindowView; util: number } | undefined;
+  unknown: QuotaWindowView[];
 }
 
-/** 快清零、还剩不少——该先用它。 */
+export function poolUsage(windows: QuotaWindowView[]): PoolUsage {
+  let tightest: PoolUsage['tightest'];
+  const unknown: QuotaWindowView[] = [];
+  for (const w of windows) {
+    const util = utilOf(w);
+    if (util === undefined) unknown.push(w);
+    else if (!tightest || util > tightest.util) tightest = { w, util };
+  }
+  return { tightest, unknown };
+}
+
+/** 快清零、还剩不少——该先用它。用量没读到、窗口长度不知道的都不算。 */
 export function isUseItOrLoseIt(w: QuotaWindowView, now: number): boolean {
-  if (!w.resetsAt) return false;
+  const util = utilOf(w);
+  const length = windowLength[w.window];
+  if (util === undefined || length === undefined || !w.resetsAt) return false;
   const left = Date.parse(w.resetsAt) - now;
   if (left <= 0) return false;
-  return left < windowLength[w.window] * 0.2 && utilOf(w) < 0.7;
+  return left < length * 0.2 && util < 0.7;
 }
 
 export function isNearlyExhausted(w: QuotaWindowView): boolean {
-  return utilOf(w) >= 0.9;
+  const util = utilOf(w);
+  return util !== undefined && util >= 0.9;
+}
+
+/** 百分比；没读到写「用量没读到」。 */
+export function formatUtil(util: number | undefined): string {
+  return util === undefined ? '用量没读到' : `${Math.round(util * 100)}%`;
 }

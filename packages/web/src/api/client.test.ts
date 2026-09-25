@@ -1,6 +1,6 @@
 import { QueryClient } from '@tanstack/react-query';
 import { describe, expect, test, vi } from 'vitest';
-import { applyLiveEvent, keys } from './client';
+import { applyLiveEvent, applyLiveEvents, createLiveBatcher, keys } from './client';
 
 function spy() {
   const qc = new QueryClient();
@@ -28,5 +28,46 @@ describe('推送到缓存：按表名决定重拉什么', () => {
     applyLiveEvent(qc, { type: 'resync' });
     applyLiveEvent(qc, { type: 'ready' });
     expect(called()).toEqual(['全部', '全部', '全部']);
+  });
+});
+
+describe('推送攒一小会儿再作废', () => {
+  test('窗口内来的多条只作废一次，窗口一到就作废（不会漏）', () => {
+    vi.useFakeTimers();
+    try {
+      const { qc, called } = spy();
+      const b = createLiveBatcher(qc, 400);
+      b.push({ type: 'change', table: 'progress_events', id: 'p1' });
+      b.push({ type: 'change', table: 'progress_events', id: 'p2' });
+      b.push({ type: 'change', table: 'notifications', id: 'n1' });
+      expect(called()).toEqual([]);
+      vi.advanceTimersByTime(400);
+      expect(called()).toEqual(['board', 'task', 'timeline', 'run-steps', 'notifications']);
+      b.push({ type: 'change', table: 'tasks', id: 't1' });
+      vi.advanceTimersByTime(400);
+      expect(called().slice(5)).toEqual(['board', 'task', 'timeline']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test('一批里有重连或认不出的表：全部作废一次', () => {
+    const { qc, called } = spy();
+    applyLiveEvents(qc, [{ type: 'change', table: 'tasks', id: 't1' }, { type: 'ready' }]);
+    expect(called()).toEqual(['全部']);
+  });
+
+  test('停掉以后攒着的不再作废', () => {
+    vi.useFakeTimers();
+    try {
+      const { qc, called } = spy();
+      const b = createLiveBatcher(qc, 400);
+      b.push({ type: 'resync' });
+      b.stop();
+      vi.advanceTimersByTime(1000);
+      expect(called()).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -41,21 +41,21 @@ export default function Schedules() {
           label="上次失败"
           value={count(failed)}
           icon={CircleX}
-          accent={failed ? 'text-st-fail' : undefined}
+          accent={failed ? 'text-ink-fail' : undefined}
         />
         <Stat
           label="上次没查成"
           value={count(unscanned)}
           icon={ScanSearch}
           hint="跑了，但一个对象都没扫到"
-          accent={unscanned ? 'text-st-stall' : undefined}
+          accent={unscanned ? 'text-ink-stall' : undefined}
         />
         <Stat
           label="不新鲜"
           value={count(notFresh)}
           icon={TimerOff}
           hint="超过两个周期没成功，或从没成功过"
-          accent={notFresh ? 'text-st-stall' : undefined}
+          accent={notFresh ? 'text-ink-stall' : undefined}
         />
       </div>
       {error ? (
@@ -69,7 +69,7 @@ export default function Schedules() {
             <LoadingRows rows={6} />
           </div>
         ) : !data ? (
-          <p className="px-4 py-10 text-center text-sm text-st-fail">没读到定时任务，说不准它们跑得怎么样</p>
+          <p className="px-4 py-10 text-center text-sm text-ink-fail">没读到定时任务，说不准它们跑得怎么样</p>
         ) : jobs.length === 0 ? (
           <Empty icon={CalendarClock} title="还没有定时任务" />
         ) : (
@@ -121,8 +121,8 @@ export default function Schedules() {
                       <span
                         className={cn(
                           'block truncate text-xs',
-                          r?.outcome === 'failed' && 'font-medium text-st-fail',
-                          r?.outcome === 'unscanned' && 'font-medium text-st-stall',
+                          r?.outcome === 'failed' && 'font-medium text-ink-fail',
+                          r?.outcome === 'unscanned' && 'font-medium text-ink-stall',
                           r?.outcome === 'ok' && 'text-muted-foreground',
                         )}
                         title={outcomeText(j)}
@@ -140,7 +140,7 @@ export default function Schedules() {
                             <span
                               className={cn(
                                 'num text-xs',
-                                j.status !== 'fresh' && 'font-medium text-st-stall',
+                                j.status !== 'fresh' && 'font-medium text-ink-stall',
                               )}
                             >
                               {formatAgo(j.lastSuccessAt, now)}
@@ -149,10 +149,10 @@ export default function Schedules() {
                           <TooltipContent>{formatDateTime(j.lastSuccessAt)}</TooltipContent>
                         </Tooltip>
                       ) : (
-                        <span className="text-xs text-st-stall">从没成功过</span>
+                        <span className="text-xs text-ink-stall">从没成功过</span>
                       )}
                       {j.status === 'overdue' ? (
-                        <div className="text-[11px] text-st-stall">{jobStatusLabel.overdue}</div>
+                        <div className="text-[11px] text-ink-stall">{jobStatusLabel.overdue}</div>
                       ) : null}
                     </TableCell>
                     <TableCell className="num pr-4 text-right text-xs text-muted-foreground">

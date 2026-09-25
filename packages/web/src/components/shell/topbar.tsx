@@ -79,7 +79,7 @@ export function Topbar({ onMenu, onSearch }: { onMenu(): void; onSearch(): void 
 }
 
 function RepoSwitcher() {
-  const { repo, repos, setRepoId } = useRepo();
+  const { repo, repos, setRepoId, error: reposError } = useRepo();
   const { boards, failed } = useAllBoards();
   const navigate = useNavigate();
   const countFor = (repoId: string) => {
@@ -94,7 +94,13 @@ function RepoSwitcher() {
       <DropdownMenuTrigger asChild>
         <Button variant="ghost" className="h-8 gap-1.5 px-2 text-[13px]" aria-label="切换仓">
           <span className="num hidden text-muted-foreground lg:inline">{repo?.owner}/</span>
-          <span className="num max-w-40 truncate font-semibold">{repo?.name ?? '…'}</span>
+          {repo ? (
+            <span className="num max-w-40 truncate font-semibold">{repo.name}</span>
+          ) : reposError ? (
+            <span className="text-ink-fail">仓列表没读成</span>
+          ) : (
+            <span className="num font-semibold">…</span>
+          )}
           <ChevronsUpDown className="size-3.5 text-muted-foreground" />
         </Button>
       </DropdownMenuTrigger>
@@ -102,6 +108,11 @@ function RepoSwitcher() {
         <DropdownMenuLabel className="text-xs text-muted-foreground">
           切换仓（看板按仓显示）
         </DropdownMenuLabel>
+        {reposError ? (
+          <DropdownMenuItem disabled className="text-xs text-ink-fail">
+            仓列表没读成{repos.length ? '，下面是上次读到的' : ''}：{errorText(reposError)}
+          </DropdownMenuItem>
+        ) : null}
         {repos.map((r) => {
           const c = countFor(r.id);
           return (
@@ -117,7 +128,7 @@ function RepoSwitcher() {
                 {r.name}
               </span>
               {failed.some((f) => f.id === r.id) ? (
-                <span className="text-xs text-st-fail">没读成</span>
+                <span className="text-xs text-ink-fail">没读成</span>
               ) : null}
               {c.run ? (
                 <span className="num flex items-center gap-1 text-xs text-muted-foreground">
@@ -126,7 +137,7 @@ function RepoSwitcher() {
                 </span>
               ) : null}
               {c.stuck ? (
-                <span className="num flex items-center gap-1 text-xs text-st-stall">
+                <span className="num flex items-center gap-1 text-xs text-ink-stall">
                   <TriangleAlert className="size-3" />
                   {c.stuck}
                 </span>
@@ -145,7 +156,10 @@ function RepoSwitcher() {
   );
 }
 
-/** 「实时」小灯：连着时是绿的、每收到一次推送闪一下；断线重连时变黄。 */
+/**
+ * 「实时」小灯：连着时是绿的、每收到一次推送闪一下；重连时变黄，被后端关掉（等着退避重连）时变红。
+ * 手机上也要看得见：连着时只留一个点，断了连字一起显示——页面停更时人得知道。
+ */
 function LiveIndicator() {
   const { status, lastEventAt } = useLiveState();
   const [flash, setFlash] = useState(false);
@@ -159,7 +173,14 @@ function LiveIndicator() {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <span className="hidden h-8 items-center gap-1.5 rounded-lg px-2 text-xs text-muted-foreground md:flex">
+        <span
+          role="status"
+          data-live={status}
+          className={cn(
+            'flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-1.5 text-xs whitespace-nowrap md:px-2',
+            ok ? 'text-muted-foreground' : status === 'down' ? 'text-ink-fail' : 'text-ink-stall',
+          )}
+        >
           <span
             className={cn(
               'size-1.5 rounded-full transition-[box-shadow,transform] duration-300',
@@ -167,14 +188,16 @@ function LiveIndicator() {
               flash && 'scale-125 shadow-[0_0_0_4px_color-mix(in_oklab,var(--st-done)_30%,transparent)]',
             )}
           />
-          {ok ? '实时' : status === 'down' ? '推送断了' : '连接中'}
+          <span className={cn(ok && 'sr-only md:not-sr-only')}>
+            {ok ? '实时' : status === 'down' ? '推送断了' : '连接中'}
+          </span>
         </span>
       </TooltipTrigger>
       <TooltipContent>
         {ok
           ? '实时推送连着：盘面有变化会自己刷新'
           : status === 'down'
-            ? '推送断了：页面不会自己刷新，刷新一下页面重连'
+            ? '推送被后端断开了，正在自动重连（间隔逐步拉长到 30 秒）；这段时间页面不会自己刷新，连上后全量重拉一次'
             : '推送在重连；连上后会全量重拉一次'}
       </TooltipContent>
     </Tooltip>
@@ -221,7 +244,7 @@ function NotificationBell() {
           <span className="num text-xs text-muted-foreground">{data ? items.length : '—'}</span>
         </div>
         {error && !data ? (
-          <p role="alert" className="px-3 py-6 text-center text-sm text-st-fail">
+          <p role="alert" className="px-3 py-6 text-center text-sm text-ink-fail">
             提醒没读成：{errorText(error)}
           </p>
         ) : data && items.length === 0 ? (

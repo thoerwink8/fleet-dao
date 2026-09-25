@@ -169,7 +169,7 @@ export default function Tasks() {
           </div>
         ) : rows.length === 0 ? (
           error ? (
-            <p className="px-4 py-10 text-center text-sm text-st-fail">看板没读全，这里空着不代表没有需求</p>
+            <p className="px-4 py-10 text-center text-sm text-ink-fail">看板没读全，这里空着不代表没有需求</p>
           ) : (
             <Empty icon={ListChecks} title="没有符合条件的需求" hint="换个过滤条件看看。" />
           )

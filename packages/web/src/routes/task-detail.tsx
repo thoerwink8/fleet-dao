@@ -346,7 +346,7 @@ function AskCard({ ask, t, now }: { ask: Ask; t: BoardTask; now: number }) {
   const { trigger } = useTaskActions();
   return (
     <div className="mb-4 flex flex-col gap-3 rounded-xl border border-st-human/50 bg-st-human/[0.07] p-4 md:flex-row md:items-center">
-      <div className="grid size-9 shrink-0 place-items-center rounded-full bg-st-human/15 text-st-human">
+      <div className="grid size-9 shrink-0 place-items-center rounded-full bg-st-human/15 text-ink-human">
         <MessageCircleQuestion className="size-5" />
       </div>
       <div className="min-w-0 flex-1">
@@ -508,7 +508,7 @@ function SubtaskSection({
                   {list.map((st) => (
                     <li key={st.index} className="flex items-center gap-2 text-sm">
                       {st.state === 'done' ? (
-                        <Check className="size-4 shrink-0 text-st-done" aria-hidden />
+                        <Check className="size-4 shrink-0 text-ink-done" aria-hidden />
                       ) : st.state === 'in_progress' ? (
                         <span className="grid size-4 place-items-center">
                           <StatusDot tone={tone} />
@@ -530,7 +530,7 @@ function SubtaskSection({
                 </ol>
               </>
             ) : steps.error ? (
-              <p role="alert" className="text-sm text-st-fail">
+              <p role="alert" className="text-sm text-ink-fail">
                 步骤清单没读成：{errorText(steps.error)}
               </p>
             ) : (

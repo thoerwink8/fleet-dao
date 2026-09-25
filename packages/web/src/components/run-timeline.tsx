@@ -67,7 +67,7 @@ export function RunTimeline({
                   <span
                     className={cn(
                       'rounded px-1 text-[10px]',
-                      running ? 'bg-st-run/15 text-st-run' : 'bg-muted text-muted-foreground',
+                      running ? 'bg-st-run/15 text-ink-run' : 'bg-muted text-muted-foreground',
                     )}
                   >
                     {running ? '在跑' : r.startedAt ? (outcomeText[r.outcome ?? ''] ?? '结束') : '排队中'}

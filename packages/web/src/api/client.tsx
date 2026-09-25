@@ -351,12 +351,49 @@ function isRealtimeTable(table: string): table is RealtimeTable {
 }
 
 export function applyLiveEvent(qc: QueryClient, e: LiveEvent) {
-  const targets = e.type === 'change' && isRealtimeTable(e.table) ? TABLE_KEYS[e.table] : undefined;
-  if (!targets) {
-    qc.invalidateQueries();
-    return;
+  applyLiveEvents(qc, [e]);
+}
+
+/** 一批推送一起作废：同一份缓存只作废一次；其中有认不出的、或是重连，就全部作废一次。 */
+export function applyLiveEvents(qc: QueryClient, events: readonly LiveEvent[]) {
+  const keysToDrop = new Map<string, readonly string[]>();
+  for (const e of events) {
+    const targets = e.type === 'change' && isRealtimeTable(e.table) ? TABLE_KEYS[e.table] : undefined;
+    if (!targets) {
+      qc.invalidateQueries();
+      return;
+    }
+    for (const k of targets) keysToDrop.set(k.join('/'), k);
   }
-  for (const queryKey of targets) qc.invalidateQueries({ queryKey: [...queryKey] });
+  for (const queryKey of keysToDrop.values()) qc.invalidateQueries({ queryKey: [...queryKey] });
+}
+
+/**
+ * 推送攒一小会儿再作废缓存：会话每报一步进度就来一条，几十个会话一起跑时每秒好几条；
+ * 每条都让看板整份重拉，页面就一直在拉、在比对。攒 wait 毫秒（从第一条算起）一起处理，最多晚这么久。
+ */
+export function createLiveBatcher(qc: QueryClient, wait = 400) {
+  let pending: LiveEvent[] = [];
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const flush = () => {
+    clearTimeout(timer);
+    timer = undefined;
+    const batch = pending;
+    pending = [];
+    if (batch.length) applyLiveEvents(qc, batch);
+  };
+  return {
+    push(e: LiveEvent) {
+      pending.push(e);
+      timer ??= setTimeout(flush, wait);
+    },
+    flush,
+    stop() {
+      clearTimeout(timer);
+      timer = undefined;
+      pending = [];
+    },
+  };
 }
 
 // 顶栏的「实时」小灯看这里：连接状态和最近一次收到推送的时间。
@@ -382,15 +419,18 @@ export function useLiveState() {
 export function useLiveSync() {
   const api = useApi();
   const qc = useQueryClient();
-  useEffect(
-    () =>
-      api.subscribe(
-        (e) => {
-          applyLiveEvent(qc, e);
-          setLive({ lastEventAt: Date.now() });
-        },
-        (status) => setLive({ status }),
-      ),
-    [api, qc],
-  );
+  useEffect(() => {
+    const batch = createLiveBatcher(qc);
+    const stop = api.subscribe(
+      (e) => {
+        batch.push(e);
+        setLive({ lastEventAt: Date.now() });
+      },
+      (status) => setLive({ status }),
+    );
+    return () => {
+      stop();
+      batch.stop();
+    };
+  }, [api, qc]);
 }

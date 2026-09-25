@@ -18,7 +18,7 @@ import { Kbd } from '../components/ui/kbd';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../components/ui/tooltip';
 import { routeInfo } from '../lib/catalog';
 import { formatDuration } from '../lib/format';
-import { useNow } from '../lib/hooks';
+import { useTimeText } from '../lib/hooks';
 import { taskPhases } from '../lib/phases';
 import {
   describeSubtask,
@@ -38,7 +38,7 @@ import {
   toneText,
 } from '../lib/status';
 import { cn } from '../lib/utils';
-import { nodeTarget, useBoardUi, useHoverIntent, useZoomLevel } from './board-ui';
+import { nodeTarget, useBoardUi, useHoverIntent, useNodeView, useZoomLevel } from './board-ui';
 import type { BoardNodeData, Side } from './model';
 
 export type BoardNode = Node<BoardNodeData>;
@@ -76,8 +76,7 @@ function Shell({
   const { hover, bind } = useHoverIntent();
   const target = nodeTarget(data);
   const actions = target ? availableActions(target) : [];
-  const selected = ui.selectedId === id;
-  const dimmed = ui.focus ? !ui.focus.has(id) : false;
+  const { selected, dimmed } = useNodeView(ui.view, id);
 
   return (
     <>
@@ -172,7 +171,7 @@ function QuickButton({
           aria-label={`${def.label} ${target.title}`}
           className={cn(
             'grid size-7 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground',
-            def.danger && 'hover:text-st-fail',
+            def.danger && 'hover:text-ink-fail',
           )}
           onClick={(e) => {
             e.stopPropagation();
@@ -240,9 +239,19 @@ function Requester({ requestedBy }: { requestedBy: string }) {
 
 // ---------- 需求 ----------
 
+/** 秒表走动的「干了多久」：只有这一小段跟着秒表重画。 */
+function Elapsed({ since }: { since: string }) {
+  return <>{useTimeText((now) => formatDuration(now - Date.parse(since)))}</>;
+}
+
+/** 卡片上随时间变的那句白话（「Opus 5.5 正在写测试，已 12 分钟」）。 */
+function TimeLine({ render }: { render: (now: number) => string }) {
+  return <>{useTimeText(render)}</>;
+}
+
 function PhaseStrip({ t }: { t: BoardTask }) {
-  const now = useNow();
-  const phases = taskPhases(t, now);
+  // 迷你时间线只画每段的状态，不显示时长：不用跟着秒表重画。
+  const phases = taskPhases(t, 0);
   return (
     <div className="flex gap-1">
       {phases.map((p) => (
@@ -270,9 +279,8 @@ function PhaseStrip({ t }: { t: BoardTask }) {
 }
 
 function PhaseRows({ t }: { t: BoardTask }) {
-  const now = useNow();
   const { routing } = useBoardUi();
-  const phases = taskPhases(t, now);
+  const phases = taskPhases(t, 0);
   return (
     <div className="space-y-[3px] text-[10.5px] leading-[14px]">
       {phases.map((p) => {
@@ -294,7 +302,9 @@ function PhaseRows({ t }: { t: BoardTask }) {
                 </span>
               )}
             </span>
-            <span className="num shrink-0 text-muted-foreground">{p.ms ? formatDuration(p.ms) : ''}</span>
+            <span className="num shrink-0 text-muted-foreground">
+              {p.state === 'active' && p.modelName && t.activity ? <Elapsed since={t.activity.since} /> : ''}
+            </span>
           </div>
         );
       })}
@@ -304,7 +314,6 @@ function PhaseRows({ t }: { t: BoardTask }) {
 
 export const TaskNode = memo(function TaskNode({ id, data }: Props) {
   const level = useZoomLevel();
-  const now = useNow();
   if (data.kind !== 'task') return null;
   const t = data.task;
   const tone = taskTone(t);
@@ -342,7 +351,7 @@ export const TaskNode = memo(function TaskNode({ id, data }: Props) {
               level === 'near' ? 'line-clamp-1' : 'line-clamp-2',
             )}
           >
-            {describeTask(t, now)}
+            <TimeLine render={(now) => describeTask(t, now)} />
           </p>
           <div className="mt-auto shrink-0 space-y-2 pt-2">
             {level === 'near' ? <PhaseRows t={t} /> : <PhaseStrip t={t} />}
@@ -391,7 +400,6 @@ function StepDots({ s, tone }: { s: BoardSubtask; tone: Tone }) {
 
 /** 近景：路由、排队或干活的时长、正在做的那一步。 */
 function SubNear({ s, siblings }: { s: BoardSubtask; siblings: BoardSubtask[] }) {
-  const now = useNow();
   const { routing } = useBoardUi();
   const a = s.activity;
   const p = s.progress;
@@ -404,7 +412,9 @@ function SubNear({ s, siblings }: { s: BoardSubtask; siblings: BoardSubtask[] })
           </div>
           <div className="shrink-0 truncate text-[10.5px] text-muted-foreground">
             {a.queued ? '排队' : '干活'}{' '}
-            <span className="num">{formatDuration(now - Date.parse(a.since))}</span>
+            <span className="num">
+              <Elapsed since={a.since} />
+            </span>
             {p?.total ? (
               <>
                 {' '}
@@ -414,13 +424,13 @@ function SubNear({ s, siblings }: { s: BoardSubtask; siblings: BoardSubtask[] })
             ) : null}
           </div>
           <p className="mt-1 line-clamp-2 shrink-0 text-[11.5px] leading-snug">
-            {a.step ? `正在：${a.step}` : describeSubtask(s, now, siblings)}
+            {a.step ? `正在：${a.step}` : <TimeLine render={(now) => describeSubtask(s, now, siblings)} />}
           </p>
         </>
       ) : (
         <>
           <p className="mt-1 line-clamp-2 shrink-0 text-[11.5px] leading-snug text-muted-foreground">
-            {describeSubtask(s, now, siblings)}
+            <TimeLine render={(now) => describeSubtask(s, now, siblings)} />
           </p>
           {s.touches.length ? (
             <div className="mt-1 shrink-0 space-y-px text-[10.5px] text-muted-foreground">
@@ -442,7 +452,6 @@ function SubNear({ s, siblings }: { s: BoardSubtask; siblings: BoardSubtask[] })
 
 export const SubNode = memo(function SubNode({ id, data }: Props) {
   const level = useZoomLevel();
-  const now = useNow();
   if (data.kind !== 'sub') return null;
   const s = data.sub;
   const tone = subtaskTone(s);
@@ -484,7 +493,7 @@ export const SubNode = memo(function SubNode({ id, data }: Props) {
           ) : (
             <>
               <p className="mt-1 line-clamp-2 shrink-0 text-[12px] leading-snug text-muted-foreground">
-                {describeSubtask(s, now, data.task.subtasks)}
+                <TimeLine render={(now) => describeSubtask(s, now, data.task.subtasks)} />
               </p>
               <div className="mt-auto flex shrink-0 items-center gap-2 pt-2">
                 <StepDots s={s} tone={tone} />

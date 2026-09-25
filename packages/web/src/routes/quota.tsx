@@ -13,6 +13,7 @@ import {
   poolTitle,
   utilOf,
   windowLabel,
+  windowRank,
 } from '../lib/catalog';
 import { formatAgo, formatDate, formatIn, formatInDays, formatPercent } from '../lib/format';
 import { useNow } from '../lib/hooks';
@@ -21,8 +22,6 @@ import { cn } from '../lib/utils';
 export function meta() {
   return [{ title: '额度 · fleet-dao 驾驶舱' }];
 }
-
-const ORDER: QuotaWindowKind[] = ['5h', '7d', '7d_model', 'month_usd', 'period_usd', 'points'];
 
 function Callout({
   icon: Icon,
@@ -72,11 +71,16 @@ export default function Quota() {
   const cells: Cell[] = pools.flatMap((pool) => pool.windows.map((w) => ({ pool, w })));
   const label = ({ pool, w }: Cell) => `${poolTitle(pool)} · ${windowLabel[w.window]}`;
   const key = ({ pool, w }: Cell, i: number) => `${pool.id}-${w.window}-${i}`;
-  const hot = cells.filter(({ w }) => !w.stale && isUseItOrLoseIt(w, now));
+  const hot = cells.flatMap((c) => {
+    const util = utilOf(c.w);
+    return !c.w.stale && util !== undefined && isUseItOrLoseIt(c.w, now) ? [{ ...c, util }] : [];
+  });
   const full = cells.filter(({ w }) => isNearlyExhausted(w));
   const stale = cells.filter(({ w }) => w.stale);
+  // 读成了但没有用量比例（只报了清零时间，或只有已用没有上限）：不参与「先用它」和排序，但要列出来。
+  const unknownUse = cells.filter(({ w }) => !w.stale && utilOf(w) === undefined);
   const unread = pools.filter((p) => p.quotaStatus === 'unread');
-  const kinds = ORDER.filter((k) => cells.some(({ w }) => w.window === k));
+  const kinds = [...new Set(cells.map(({ w }) => w.window))].sort((a, b) => windowRank[a] - windowRank[b]);
   const staleMinutes = data?.staleAfterMinutes ?? 30;
 
   return (
@@ -97,9 +101,7 @@ export default function Quota() {
               items={hot.map((c, i) => (
                 <li key={key(c, i)} className="flex items-center gap-2">
                   <span className="min-w-0 flex-1 truncate">{label(c)}</span>
-                  <span className="num shrink-0 text-muted-foreground">
-                    剩 {formatPercent(1 - utilOf(c.w))}
-                  </span>
+                  <span className="num shrink-0 text-muted-foreground">剩 {formatPercent(1 - c.util)}</span>
                   {c.w.resetsAt ? (
                     <span className="num shrink-0 text-xs">{formatIn(c.w.resetsAt, now)}</span>
                   ) : null}
@@ -110,30 +112,36 @@ export default function Quota() {
               icon={TriangleAlert}
               title="快用完"
               hint="用了九成以上，调度会先绕开"
-              tone="text-st-fail"
+              tone="text-ink-fail"
               items={full.map((c, i) => (
                 <li key={key(c, i)} className="flex items-center gap-2">
                   <span className="min-w-0 flex-1 truncate">{label(c)}</span>
-                  <span className="num shrink-0 text-st-fail">{quotaValue(c.w)}</span>
+                  <span className="num shrink-0 text-ink-fail">{quotaValue(c.w)}</span>
                 </li>
               ))}
             />
             <Callout
               icon={TimerOff}
               title="读数过期或没查成"
-              hint={`超过 ${staleMinutes} 分钟没读到新数的不能当现值用；一条都没读到的是「没查成」，不是「没用量」`}
-              tone="text-st-stall"
+              hint={`超过 ${staleMinutes} 分钟没读到新数的不能当现值用；一条都没读到的是「没查成」，不是「没用量」；只读到清零时间的是「用量没读到」`}
+              tone="text-ink-stall"
               items={[
                 ...unread.map((p) => (
                   <li key={`unread-${p.id}`} className="flex items-center gap-2">
                     <span className="min-w-0 flex-1 truncate">{poolTitle(p)}</span>
-                    <span className="shrink-0 text-st-stall">没查成</span>
+                    <span className="shrink-0 text-ink-stall">没查成</span>
+                  </li>
+                )),
+                ...unknownUse.map((c, i) => (
+                  <li key={`unknown-${key(c, i)}`} className="flex items-center gap-2">
+                    <span className="min-w-0 flex-1 truncate">{label(c)}</span>
+                    <span className="shrink-0 text-ink-stall">{quotaValue(c.w)}</span>
                   </li>
                 )),
                 ...stale.map((c, i) => (
                   <li key={key(c, i)} className="flex items-center gap-2">
                     <span className="min-w-0 flex-1 truncate">{label(c)}</span>
-                    <span className="num shrink-0 text-st-stall">{formatAgo(c.w.readAt, now)}读</span>
+                    <span className="num shrink-0 text-ink-stall">{formatAgo(c.w.readAt, now)}读</span>
                   </li>
                 )),
               ]}
@@ -230,7 +238,7 @@ function Matrix({ pools, kinds, now }: { pools: PoolView[]; kinds: QuotaWindowKi
                           <div
                             className={cn(
                               'grid h-full min-h-20 place-items-center text-xs',
-                              p.quotaStatus === 'unread' ? 'text-st-stall' : 'text-faint',
+                              p.quotaStatus === 'unread' ? 'text-ink-stall' : 'text-faint',
                             )}
                           >
                             {p.quotaStatus === 'unread' ? '没查成' : '—'}

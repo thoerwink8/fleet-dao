@@ -48,7 +48,7 @@ function Deliveries({ n }: { n: Notification }) {
             <span
               className={cn(
                 'inline-flex items-center gap-1 rounded px-1.5 text-[10px] leading-4',
-                d.delivered ? 'bg-muted text-muted-foreground' : 'bg-st-fail/10 text-st-fail',
+                d.delivered ? 'bg-muted text-muted-foreground' : 'bg-st-fail/10 text-ink-fail',
               )}
             >
               {d.delivered ? (

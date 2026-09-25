@@ -23,7 +23,7 @@ import { NAV_ITEMS } from './nav';
 export function CommandMenu({ open, onOpenChange }: { open: boolean; onOpenChange(o: boolean): void }) {
   const navigate = useNavigate();
   const { boards, failed } = useAllBoards();
-  const { repos, setRepoId } = useRepo();
+  const { repos, setRepoId, error: reposError } = useRepo();
   const theme = useTheme();
 
   useEffect(() => {
@@ -53,9 +53,17 @@ export function CommandMenu({ open, onOpenChange }: { open: boolean; onOpenChang
       <CommandList className="max-h-[440px]">
         <CommandEmpty>没找到</CommandEmpty>
         <CommandGroup heading="需求">
+          {reposError ? (
+            // 仓列表没读成：一个仓都不知道，需求自然也搜不到——照实说，不让空列表冒充「没有」。
+            <CommandItem disabled forceMount value="仓列表没读成 需求 仓">
+              <span className="text-xs text-ink-fail">
+                仓列表没读成，这里{repos.length ? '只有上次读到的仓的需求' : '搜不到任何需求'}
+              </span>
+            </CommandItem>
+          ) : null}
           {failed.length ? (
-            <CommandItem disabled value={`没读成 ${failed.map((r) => r.name).join(' ')}`}>
-              <span className="text-xs text-st-fail">
+            <CommandItem disabled forceMount value={`没读成 ${failed.map((r) => r.name).join(' ')}`}>
+              <span className="text-xs text-ink-fail">
                 仓 {failed.map((r) => r.name).join('、')} 的需求没读成，这里搜不到它们
               </span>
             </CommandItem>

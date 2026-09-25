@@ -1,5 +1,5 @@
 import type { QuotaWindowView } from '../api/types';
-import { isNearlyExhausted, isUseItOrLoseIt, utilOf, windowLabel } from '../lib/catalog';
+import { formatUtil, isNearlyExhausted, isUseItOrLoseIt, utilOf, windowLabel } from '../lib/catalog';
 import { formatAgo, formatIn, formatPercent, formatUsd } from '../lib/format';
 import { cn } from '../lib/utils';
 
@@ -10,7 +10,17 @@ export function quotaTone(util: number): string {
   return 'bg-foreground/55';
 }
 
-export function QuotaBar({ util, className }: { util: number; className?: string }) {
+/** 额度条。用量没读到（undefined）时只画虚线空槽，不画成 0%。 */
+export function QuotaBar({ util, className }: { util: number | undefined; className?: string }) {
+  if (util === undefined) {
+    return (
+      <div
+        className={cn('h-1.5 w-full rounded-full border border-dashed border-border-strong', className)}
+        title="用量没读到"
+        data-unknown="true"
+      />
+    );
+  }
   const pct = Math.max(0, Math.min(1, util));
   return (
     <div className={cn('h-1.5 w-full overflow-hidden rounded-full bg-foreground/[0.08]', className)}>
@@ -44,21 +54,29 @@ export function ReadingBadge({ w, className }: { w: QuotaWindowView; className?:
   );
 }
 
+function money(w: QuotaWindowView): boolean {
+  return w.window.endsWith('usd');
+}
+
+function amount(w: QuotaWindowView, n: number): string {
+  return money(w) ? formatUsd(n) : String(n);
+}
+
+/** 一句话的用量：「$3.20 / $10.00」「40%」「已用 812，上限没读到」「用量没读到」。 */
 export function quotaValue(w: QuotaWindowView): string {
-  if (w.used !== undefined && w.limit !== undefined) {
-    const money = w.window.endsWith('usd');
-    return money ? `${formatUsd(w.used)} / ${formatUsd(w.limit)}` : `${w.used} / ${w.limit}`;
-  }
-  return formatPercent(utilOf(w));
+  if (w.used !== undefined && w.limit !== undefined) return `${amount(w, w.used)} / ${amount(w, w.limit)}`;
+  const util = utilOf(w);
+  if (util !== undefined) return formatPercent(util);
+  if (w.used !== undefined) return `已用 ${amount(w, w.used)}，上限没读到`;
+  return '用量没读到';
 }
 
 /** 一个时间窗的一格：用量、条、清零倒计时、来源和读数新鲜度（stale 由后端按 30 分钟判）。 */
 export function QuotaCell({ w, now }: { w: QuotaWindowView; now: number }) {
   const util = utilOf(w);
-  // 过期的读数不能当现值：不据此喊「先用它」。
+  // 过期的读数不能当现值：不据此喊「先用它」。用量没读到的也不喊。
   const hot = !w.stale && isUseItOrLoseIt(w, now);
   const full = isNearlyExhausted(w);
-  const money = w.window.endsWith('usd');
   return (
     <div
       className={cn(
@@ -69,6 +87,7 @@ export function QuotaCell({ w, now }: { w: QuotaWindowView; now: number }) {
       data-hot={hot || undefined}
       data-full={full || undefined}
       data-stale={w.stale || undefined}
+      data-unknown={util === undefined || undefined}
     >
       <div className="flex items-center justify-between gap-2">
         <span className="text-[11px] text-muted-foreground">{windowLabel[w.window]}</span>
@@ -77,18 +96,25 @@ export function QuotaCell({ w, now }: { w: QuotaWindowView; now: number }) {
       <div className="mt-1.5 flex items-baseline justify-between gap-2">
         {w.used !== undefined && w.limit !== undefined ? (
           <span className="num min-w-0 truncate">
-            <span className={cn('text-[17px] font-semibold', full && 'text-st-fail')}>
-              {money ? formatUsd(w.used) : w.used}
+            <span className={cn('text-[17px] font-semibold', full && 'text-ink-fail')}>
+              {amount(w, w.used)}
             </span>
-            <span className="text-xs text-muted-foreground"> / {money ? formatUsd(w.limit) : w.limit}</span>
+            <span className="text-xs text-muted-foreground"> / {amount(w, w.limit)}</span>
           </span>
-        ) : (
-          <span className={cn('num text-[17px] font-semibold', full && 'text-st-fail')}>
+        ) : util !== undefined ? (
+          <span className={cn('num text-[17px] font-semibold', full && 'text-ink-fail')}>
             {formatPercent(util)}
           </span>
+        ) : w.used !== undefined ? (
+          <span className="num min-w-0 truncate">
+            <span className="text-[17px] font-semibold">{amount(w, w.used)}</span>
+            <span className="text-xs text-muted-foreground"> 已用，上限没读到</span>
+          </span>
+        ) : (
+          <span className="text-[13px] font-medium text-ink-stall">用量没读到</span>
         )}
-        {w.used !== undefined ? (
-          <span className="num shrink-0 text-xs text-muted-foreground">{formatPercent(util)}</span>
+        {w.used !== undefined && util !== undefined ? (
+          <span className="num shrink-0 text-xs text-muted-foreground">{formatUtil(util)}</span>
         ) : null}
       </div>
       <QuotaBar util={util} className="mt-1.5" />
@@ -101,19 +127,22 @@ export function QuotaCell({ w, now }: { w: QuotaWindowView; now: number }) {
           <span>清零时间没读到</span>
         )}
         <span
-          className={cn(w.stale && 'text-st-stall')}
+          className={cn(w.stale && 'text-ink-stall')}
           title={w.stale ? '读数太旧，不能当现值用' : undefined}
         >
           <span className="num">{formatAgo(w.readAt, now)}</span>读
         </span>
       </div>
-      {hot ? (
+      {hot && util !== undefined ? (
         <div className="mt-1.5 text-[11px] font-medium text-foreground">
           快清零还剩 <span className="num">{formatPercent(1 - util)}</span>，先用它
         </div>
       ) : null}
       {full ? (
-        <div className="mt-1.5 text-[11px] font-medium text-st-fail">快用完了，调度会先绕开</div>
+        <div className="mt-1.5 text-[11px] font-medium text-ink-fail">快用完了，调度会先绕开</div>
+      ) : null}
+      {util === undefined ? (
+        <div className="mt-1.5 text-[11px] text-muted-foreground">不参与「先用它」和排序</div>
       ) : null}
     </div>
   );

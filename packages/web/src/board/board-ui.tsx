@@ -1,5 +1,5 @@
 import { type ReactFlowState, useStore } from '@xyflow/react';
-import { createContext, useContext, useRef, useState } from 'react';
+import { createContext, useContext, useRef, useState, useSyncExternalStore } from 'react';
 import type { BoardSubtask, BoardTask, Me, Routing } from '../api/types';
 import { type ActionTarget, targetOf } from '../components/task-actions';
 import type { BoardNodeData } from './model';
@@ -22,10 +22,45 @@ export function useZoomLevel(): ZoomLevel {
   return useStore(levelSelector);
 }
 
+/**
+ * 选中哪张卡、聚焦哪一支。放在一个小仓库里、每张卡只订阅「我是不是被选中 / 是不是变暗」这两个是非：
+ * 点一下只重画前后两张卡，而不是几百张卡跟着上下文一起重画。
+ */
+export interface BoardView {
+  get(): { selectedId: string | null; focus: Set<string> | null };
+  set(selectedId: string | null, focus: Set<string> | null): void;
+  subscribe(cb: () => void): () => void;
+}
+
+export function createBoardView(): BoardView {
+  let state: { selectedId: string | null; focus: Set<string> | null } = { selectedId: null, focus: null };
+  const listeners = new Set<() => void>();
+  return {
+    get: () => state,
+    set(selectedId, focus) {
+      if (state.selectedId === selectedId && state.focus === focus) return;
+      state = { selectedId, focus };
+      for (const l of listeners) l();
+    },
+    subscribe(cb) {
+      listeners.add(cb);
+      return () => listeners.delete(cb);
+    },
+  };
+}
+
+/** 这张卡是不是选中、是不是被聚焦模式压暗。两个都是是非值，没变就不重画。 */
+export function useNodeView(view: BoardView, id: string): { selected: boolean; dimmed: boolean } {
+  const selected = useSyncExternalStore(view.subscribe, () => view.get().selectedId === id);
+  const dimmed = useSyncExternalStore(view.subscribe, () => {
+    const f = view.get().focus;
+    return f ? !f.has(id) : false;
+  });
+  return { selected, dimmed };
+}
+
 export interface BoardUi {
-  selectedId: string | null;
-  /** 聚焦模式下保持明亮的节点；null 表示没开聚焦。 */
-  focus: Set<string> | null;
+  view: BoardView;
   routing: Routing | undefined;
   me: Me | undefined;
   select(id: string | null): void;

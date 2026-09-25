@@ -137,7 +137,7 @@ export default function LoginPage() {
               {config.isPending ? (
                 <p className="mt-2 text-center text-xs text-muted-foreground">正在读登录配置…</p>
               ) : config.error ? (
-                <p className="mt-2 text-center text-xs text-st-fail">
+                <p className="mt-2 text-center text-xs text-ink-fail">
                   连不上驾驶舱后端：{errorText(config.error)}
                 </p>
               ) : !feishuReady ? (
@@ -167,7 +167,7 @@ export default function LoginPage() {
             </>
           )}
           {error ? (
-            <p role="alert" className="mt-3 rounded-lg bg-st-fail/10 px-3 py-2 text-sm text-st-fail">
+            <p role="alert" className="mt-3 rounded-lg bg-st-fail/10 px-3 py-2 text-sm text-ink-fail">
               {error}
             </p>
           ) : null}

@@ -50,7 +50,7 @@ describe('额度格', () => {
     });
     expect(el.dataset.hot).toBeUndefined();
     expect(el.dataset.stale).toBe('true');
-    expect(screen.getByText('42 分钟前').parentElement?.className).toContain('text-st-stall');
+    expect(screen.getByText('42 分钟前').parentElement?.className).toContain('text-ink-stall');
   });
 
   test('用了九成以上：标「快用完」', () => {

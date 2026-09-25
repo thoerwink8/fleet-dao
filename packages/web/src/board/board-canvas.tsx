@@ -22,25 +22,42 @@ import {
   User,
 } from 'lucide-react';
 import { AnimatePresence } from 'motion/react';
-import { type KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  type KeyboardEvent,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { useNavigate, useSearchParams } from 'react-router';
 import { useRouting } from '../api/client';
 import type { Board, Me, NowItem } from '../api/types';
 import { StatusDot } from '../components/status';
 import { ACTIONS, availableActions, useTaskActions } from '../components/task-actions';
+import { useTheme } from '../components/theme-provider';
 import { Button } from '../components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../components/ui/dialog';
 import { Kbd } from '../components/ui/kbd';
 import { Popover, PopoverContent, PopoverTrigger } from '../components/ui/popover';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../components/ui/tooltip';
 import { formatDuration } from '../lib/format';
-import { useNow } from '../lib/hooks';
+import { useLocalState, useMediaQuery, useTimeText } from '../lib/hooks';
 import { letterOf, subtaskTone, TONES, type Tone, taskTone, toneLabel, toneVar } from '../lib/status';
 import { cn } from '../lib/utils';
-import { BoardUiContext, hrefOf, nodeTarget, useZoomLevel, ZOOM_OF, type ZoomLevel } from './board-ui';
+import {
+  BoardUiContext,
+  createBoardView,
+  hrefOf,
+  nodeTarget,
+  useZoomLevel,
+  ZOOM_OF,
+  type ZoomLevel,
+} from './board-ui';
 import { DetailPanel } from './detail-panel';
 import { layoutGraph, type Positions } from './layout';
-import { type BoardNodeData, buildGraph, type Graph, lineage, nodeId } from './model';
+import { type BoardNodeData, buildGraph, type Graph, type GraphEdge, lineage, nodeId } from './model';
 import { type BoardNode, nodeTypes, prState } from './nodes';
 
 export function BoardCanvas(props: { board: Board; me: Me | undefined }) {
@@ -49,6 +66,69 @@ export function BoardCanvas(props: { board: Board; me: Me | undefined }) {
       <Canvas {...props} />
     </ReactFlowProvider>
   );
+}
+
+/** 同时流动的连线上限：再多就改成静止虚线（中景帧率的主要开销，见 PR #13 的压测）。 */
+const MAX_ANIMATED_EDGES = 60;
+/** 节点多于这个数时只渲染视野里的卡片和连线：中景、近景一屏只有几十张，没必要让几百张一起挂在页面上。 */
+const VISIBLE_ONLY_ABOVE = 150;
+
+/** 两份节点数据是否画出来一样：需求、子任务对象靠 React Query 的结构共享，没变就是同一个对象。 */
+export function sameNodeData(a: BoardNodeData, b: BoardNodeData): boolean {
+  if (a === b) return true;
+  switch (a.kind) {
+    case 'repo':
+      return (
+        b.kind === 'repo' &&
+        a.repo === b.repo &&
+        a.counts.running === b.counts.running &&
+        a.counts.stuck === b.counts.stuck &&
+        a.counts.human === b.counts.human &&
+        a.counts.done === b.counts.done &&
+        a.counts.total === b.counts.total
+      );
+    case 'task':
+      return b.kind === 'task' && a.task === b.task && a.side === b.side;
+    case 'sub':
+      return (
+        b.kind === 'sub' && a.sub === b.sub && a.task === b.task && a.side === b.side && a.letter === b.letter
+      );
+    case 'pr':
+      return (
+        b.kind === 'pr' &&
+        a.sub === b.sub &&
+        a.task === b.task &&
+        a.side === b.side &&
+        a.letter === b.letter &&
+        a.prNumber === b.prNumber
+      );
+  }
+}
+
+function toEdge(e: GraphEdge, o: { dim: boolean; fromRoot: boolean; animate: boolean }): Edge {
+  const colored = e.tone === 'run' || e.tone === 'stall' || e.tone === 'fail' || e.tone === 'human';
+  return {
+    id: e.id,
+    source: e.source,
+    target: e.target,
+    // 仓节点左右各一个接头。
+    ...(o.fromRoot ? { sourceHandle: e.side === 'left' ? 'l' : 'r' } : {}),
+    animated: e.live && o.animate,
+    style: {
+      stroke: colored ? `color-mix(in oklab, ${toneVar[e.tone]} 75%, transparent)` : 'var(--border-strong)',
+      strokeWidth: e.live ? 1.8 : 1.3,
+      // 在跑但不流动的线画成静止虚线，照样和普通连线分得开。
+      ...(e.live && !o.animate ? { strokeDasharray: '5 4' } : {}),
+      opacity: o.dim ? 0.1 : 1,
+    },
+  };
+}
+
+/** 「减少动效」：设置页的开关，或者系统的减少动态效果，任一个开着都算。 */
+function useReducedMotion(): boolean {
+  const { pref } = useTheme();
+  const system = useMediaQuery('(prefers-reduced-motion: reduce)');
+  return pref.motion === 'reduced' || system;
 }
 
 function toneOfData(d: BoardNodeData): Tone {
@@ -112,6 +192,7 @@ function Canvas({ board, me }: { board: Board; me: Me | undefined }) {
   const { trigger } = useTaskActions();
   const rf = useReactFlow();
   const wrapper = useRef<HTMLDivElement>(null);
+  const [view] = useState(createBoardView);
 
   const graph = useMemo(
     () => buildGraph(board, { stuck, mine: mine && me ? [me.user.id, me.user.displayName] : null }),
@@ -159,15 +240,35 @@ function Canvas({ board, me }: { board: Board; me: Me | undefined }) {
         y1 = Math.max(y1, p.y + n.height);
       }
       if (!Number.isFinite(x0)) return;
-      const { width, height } = el.getBoundingClientRect();
-      const vp = getViewportForBounds(
-        { x: x0, y: y0, width: x1 - x0, height: y1 - y0 },
-        width,
-        height,
-        0.15,
-        1,
-        0.14,
-      );
+      const box = el.getBoundingClientRect();
+      const bounds = { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
+      // 让开浮在画布上的东西：顶上的工具条，左下的「此刻」，右下的小地图。
+      // 左下右下两块要么从底边让（压矮），要么从两侧让（压窄）——哪样放得大用哪样。
+      const inset = (sel: string) => {
+        const r = el.querySelector(sel)?.getBoundingClientRect();
+        return r && r.width > 0 && r.height > 0 ? r : undefined;
+      };
+      const toolbar = inset('[data-board-toolbar]');
+      const nowBox = inset('[data-board-now]');
+      const mini = inset('.react-flow__minimap');
+      const top = toolbar ? toolbar.bottom - box.top + 12 : 16;
+      const gap = 12;
+      const bottomSpace = Math.max(nowBox?.height ?? 0, mini?.height ?? 0) + gap * 2;
+      const fits = [
+        { top, bottom: bottomSpace, left: 16, right: 16 },
+        {
+          top,
+          bottom: 16,
+          left: (nowBox ? nowBox.right - box.left : 0) + gap,
+          right: (mini ? box.right - mini.left : 0) + gap,
+        },
+      ].map((pad) => {
+        const w = Math.max(80, box.width - pad.left - pad.right);
+        const h = Math.max(80, box.height - pad.top - pad.bottom);
+        const vp = getViewportForBounds(bounds, w, h, 0.15, 1, 0.02);
+        return { ...vp, x: vp.x + pad.left, y: vp.y + pad.top };
+      });
+      const vp = fits.reduce((a, b) => (b.zoom > a.zoom ? b : a));
       void rf.setViewport(vp, { duration });
     },
     [positions, rf],
@@ -229,58 +330,64 @@ function Canvas({ board, me }: { board: Board; me: Me | undefined }) {
     [focusMode, selectedId, selectedExists, graph],
   );
 
+  // 选中和聚焦走小仓库（见 board-ui.tsx），不进上下文：换选中时只有前后两张卡重画。
+  useLayoutEffect(() => {
+    view.set(selectedId, focus);
+  }, [view, selectedId, focus]);
+
   const ui = useMemo(
-    () => ({ selectedId, focus, routing, me, select, open, focusOn }),
-    [selectedId, focus, routing, me, select, open, focusOn],
+    () => ({ view, routing, me, select, open, focusOn }),
+    [view, routing, me, select, open, focusOn],
   );
 
-  const nodes = useMemo<BoardNode[]>(
-    () =>
-      graph.nodes.flatMap((n) => {
-        const p = positions?.get(n.id);
-        if (!p) return [];
-        return [
-          {
-            id: n.id,
-            type: n.data.kind,
-            data: n.data,
-            position: p,
-            width: n.width,
-            height: n.height,
-            draggable: false,
-            selectable: false,
-            connectable: false,
-            focusable: false,
-          },
-        ];
-      }),
-    [graph, positions],
-  );
+  // 推送一来看板就重拉，但多数卡片没变：沿用上一轮的节点对象，React Flow 和卡片组件就都不重画它们。
+  const nodeCache = useRef(new Map<string, BoardNode>());
+  const nodes = useMemo<BoardNode[]>(() => {
+    const prev = nodeCache.current;
+    const next = new Map<string, BoardNode>();
+    for (const n of graph.nodes) {
+      const p = positions?.get(n.id);
+      if (!p) continue;
+      const old = prev.get(n.id);
+      const node: BoardNode =
+        old && old.position === p && sameNodeData(old.data, n.data)
+          ? old
+          : {
+              id: n.id,
+              type: n.data.kind,
+              data: n.data,
+              position: p,
+              width: n.width,
+              height: n.height,
+              draggable: false,
+              selectable: false,
+              connectable: false,
+              focusable: false,
+            };
+      next.set(n.id, node);
+    }
+    nodeCache.current = next;
+    return [...next.values()];
+  }, [graph, positions]);
 
-  const edges = useMemo<Edge[]>(
-    () =>
-      graph.edges.map((e) => {
-        const dim = focus ? !(focus.has(e.source) && focus.has(e.target)) : false;
-        const colored = e.tone === 'run' || e.tone === 'stall' || e.tone === 'fail' || e.tone === 'human';
-        const fromRoot = !graph.parentOf.has(e.source);
-        return {
-          id: e.id,
-          source: e.source,
-          target: e.target,
-          // 仓节点左右各一个接头。
-          ...(fromRoot ? { sourceHandle: e.side === 'left' ? 'l' : 'r' } : {}),
-          animated: e.live,
-          style: {
-            stroke: colored
-              ? `color-mix(in oklab, ${toneVar[e.tone]} 75%, transparent)`
-              : 'var(--border-strong)',
-            strokeWidth: e.live ? 1.8 : 1.3,
-            opacity: dim ? 0.1 : 1,
-          },
-        };
-      }),
-    [graph, focus],
-  );
+  const motion = useReducedMotion();
+  const edgeCache = useRef(new Map<string, { key: string; edge: Edge }>());
+  const edges = useMemo<Edge[]>(() => {
+    const prev = edgeCache.current;
+    const next = new Map<string, { key: string; edge: Edge }>();
+    // 流动的虚线每条都要逐帧重绘：条数多了（一两百条）中景掉到二三十帧。超过上限就只画成静止的虚线，
+    // 「在跑」照样看得出来；「减少动效」打开时一条都不动。
+    const animate = !motion && graph.edges.filter((e) => e.live).length <= MAX_ANIMATED_EDGES;
+    for (const e of graph.edges) {
+      const dim = focus ? !(focus.has(e.source) && focus.has(e.target)) : false;
+      const fromRoot = !graph.parentOf.has(e.source);
+      const key = `${e.source}|${e.target}|${e.side}|${e.tone}|${e.live}|${dim}|${fromRoot}|${animate}`;
+      const old = prev.get(e.id);
+      next.set(e.id, old && old.key === key ? old : { key, edge: toEdge(e, { dim, fromRoot, animate }) });
+    }
+    edgeCache.current = next;
+    return [...next.values()].map((x) => x.edge);
+  }, [graph, focus, motion]);
 
   const center = useCallback(
     (id: string, zoom?: number) => {
@@ -415,6 +522,7 @@ function Canvas({ board, me }: { board: Board; me: Me | undefined }) {
             edgesFocusable={false}
             disableKeyboardA11y
             zoomOnDoubleClick={false}
+            onlyRenderVisibleElements={graph.nodes.length > VISIBLE_ONLY_ABOVE}
             minZoom={0.15}
             maxZoom={2.4}
             attributionPosition="bottom-center"
@@ -559,7 +667,10 @@ function Toolbar({
     { id: 'near', label: '近', key: '3' },
   ];
   return (
-    <div className="pointer-events-none absolute inset-x-3 top-3 z-10 flex flex-wrap items-start gap-2">
+    <div
+      data-board-toolbar
+      className="pointer-events-none absolute inset-x-3 top-3 z-10 flex flex-wrap items-start gap-2"
+    >
       <div className="pointer-events-auto flex items-center gap-0.5 rounded-xl border bg-popover/90 p-1 shadow-sm backdrop-blur">
         <ToolButton
           label="只看卡住的：等人、停滞、失败"
@@ -692,8 +803,10 @@ function nowRow(board: Board, item: NowItem) {
 }
 
 function NowPanel({ board, onPick }: { board: Board; onPick(id: string): void }) {
-  const now = useNow();
-  const [open, setOpen] = useState(true);
+  // 矮屏（笔记本）默认收起，只留一行，免得盖住卡片；点开过、收起过就记住这个选择。
+  const tall = useMediaQuery('(min-height: 940px)');
+  const [stored, setStored] = useLocalState<boolean | null>('fleet-dao.board.now-open', null);
+  const open = stored ?? tall;
   const rows = board.now
     .map((n) => nowRow(board, n))
     .sort(
@@ -702,10 +815,13 @@ function NowPanel({ board, onPick }: { board: Board; onPick(id: string): void })
   const working = rows.filter((r) => !r.item.queued).length;
   const queued = rows.length - working;
   return (
-    <div className="pointer-events-auto absolute bottom-3 left-3 z-10 w-[360px] max-w-[calc(100%-24px)] overflow-hidden rounded-xl border bg-popover/92 shadow-lg backdrop-blur">
+    <div
+      data-board-now
+      className="pointer-events-auto absolute bottom-3 left-3 z-10 w-[360px] max-w-[calc(100%-24px)] overflow-hidden rounded-xl border bg-popover/92 shadow-lg backdrop-blur"
+    >
       <button
         type="button"
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => setStored(!open)}
         className="flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] font-medium"
         aria-expanded={open}
       >
@@ -741,7 +857,7 @@ function NowPanel({ board, onPick }: { board: Board; onPick(id: string): void })
                 <span className="min-w-0 flex-1 truncate text-muted-foreground">{r.what}</span>
                 <span className="num shrink-0 text-muted-foreground">
                   {r.item.queued ? '排 ' : ''}
-                  {formatDuration(now - Date.parse(r.item.since))}
+                  <NowElapsed since={r.item.since} />
                 </span>
               </button>
             </li>
@@ -750,6 +866,10 @@ function NowPanel({ board, onPick }: { board: Board; onPick(id: string): void })
       ) : null}
     </div>
   );
+}
+
+function NowElapsed({ since }: { since: string }) {
+  return <>{useTimeText((now) => formatDuration(now - Date.parse(since)))}</>;
 }
 
 // ---------- 快捷键说明 ----------

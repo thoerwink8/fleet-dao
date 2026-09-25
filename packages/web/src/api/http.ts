@@ -26,6 +26,11 @@ type Query = Record<string, string | number | undefined>;
 /** EventSource.readyState 的 CLOSED（测试环境里可能没有 EventSource 这个全局）。 */
 const ES_CLOSED = 2;
 
+/** 推送被后端关掉后第 n 次重连前等多久：1、2、4、8、16 秒，之后每 30 秒一次。 */
+export function sseRetryDelay(attempt: number): number {
+  return Math.min(30_000, 1000 * 2 ** attempt);
+}
+
 function fill(path: string, params: Record<string, string> = {}): string {
   return path.replace(/:(\w+)/g, (_, name: string) => {
     const v = params[name];
@@ -217,29 +222,80 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
     },
     subscribe(listener, onStatus) {
       const make = opts.eventSource ?? ((url: string) => new EventSource(url, { withCredentials: true }));
-      const es = make(apiUrl(R.events.path));
+      const url = apiUrl(R.events.path);
       const status = (s: LiveStatus) => onStatus?.(s);
-      status('connecting');
-      es.addEventListener(SSE_EVENTS.ready, () => {
-        status('open');
-        listener({ type: 'ready' });
-      });
-      es.addEventListener(SSE_EVENTS.resync, () => listener({ type: 'resync' }));
-      es.addEventListener(SSE_EVENTS.change, (ev) => {
-        let raw: unknown;
+      let es: EventSource | undefined;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let attempt = 0;
+      let stopped = false;
+
+      const connect = () => {
+        if (stopped) return;
+        status('connecting');
+        const src = make(url);
+        es = src;
+        src.addEventListener(SSE_EVENTS.ready, () => {
+          attempt = 0;
+          status('open');
+          // 每次（重新）连上都全量重拉：断开期间漏掉的变化靠这一下补上。
+          listener({ type: 'ready' });
+        });
+        src.addEventListener(SSE_EVENTS.resync, () => listener({ type: 'resync' }));
+        src.addEventListener(SSE_EVENTS.change, (ev) => {
+          let raw: unknown;
+          try {
+            raw = JSON.parse((ev as MessageEvent<string>).data);
+          } catch {
+            raw = undefined;
+          }
+          const parsed = ChangeEventSchema.safeParse(raw);
+          // 看不懂的变化也要重拉：当成 resync，不能当没发生。
+          const event: LiveEvent = parsed.success ? { type: 'change', ...parsed.data } : { type: 'resync' };
+          listener(event);
+        });
+        src.onerror = () => {
+          if (src !== es) return;
+          // 网络断了浏览器会自己重连（readyState 回到 CONNECTING）。
+          if (src.readyState !== ES_CLOSED) {
+            status('connecting');
+            return;
+          }
+          // 后端回了 401、502 之类，浏览器就此放弃、不再重连：我们自己退避重连，不然后端一重启页面就悄悄停更。
+          src.close();
+          es = undefined;
+          status('down');
+          schedule();
+        };
+      };
+
+      const schedule = () => {
+        timer = setTimeout(() => void retry(), sseRetryDelay(attempt));
+        attempt += 1;
+      };
+
+      // 先探一下 /api/me：是登录过期（401）就跳登录页（send 里的 onUnauthorized），不再空转重连；
+      // 后端还没起来就接着退避；探通了再连推送。
+      const retry = async () => {
+        timer = undefined;
+        if (stopped) return;
         try {
-          raw = JSON.parse((ev as MessageEvent<string>).data);
-        } catch {
-          raw = undefined;
+          await api.me();
+        } catch (err) {
+          if (stopped) return;
+          if (err instanceof ApiError && err.status === 401) return;
+          schedule();
+          return;
         }
-        const parsed = ChangeEventSchema.safeParse(raw);
-        // 看不懂的变化也要重拉：当成 resync，不能当没发生。
-        const event: LiveEvent = parsed.success ? { type: 'change', ...parsed.data } : { type: 'resync' };
-        listener(event);
-      });
-      // 断线后浏览器会自己重连；重连成功会再收到 ready，那时全量重拉。
-      es.onerror = () => status(es.readyState === ES_CLOSED ? 'down' : 'connecting');
-      return () => es.close();
+        connect();
+      };
+
+      connect();
+      return () => {
+        stopped = true;
+        clearTimeout(timer);
+        es?.close();
+        es = undefined;
+      };
     },
   };
   return api;

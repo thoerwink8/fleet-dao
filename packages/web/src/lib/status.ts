@@ -37,13 +37,13 @@ export const toneLabel: Record<Tone, string> = {
 
 // Tailwind 只认完整类名，所以逐个写全，不拼接。
 export const toneText: Record<Tone, string> = {
-  run: 'text-st-run',
-  wait: 'text-st-wait',
-  human: 'text-st-human',
-  stall: 'text-st-stall',
-  fail: 'text-st-fail',
-  done: 'text-st-done',
-  stop: 'text-st-stop',
+  run: 'text-ink-run',
+  wait: 'text-ink-wait',
+  human: 'text-ink-human',
+  stall: 'text-ink-stall',
+  fail: 'text-ink-fail',
+  done: 'text-ink-done',
+  stop: 'text-ink-stop',
 };
 export const toneBg: Record<Tone, string> = {
   run: 'bg-st-run',

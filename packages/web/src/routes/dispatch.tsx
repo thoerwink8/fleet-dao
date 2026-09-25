@@ -33,14 +33,14 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '../components/ui/toolti
 import { actorName } from '../lib/audit';
 import {
   billingLabel,
+  formatUtil,
+  poolUsage,
   routeInfo,
   routeProblem,
   STAGES,
   stageLabel,
-  tightestWindow,
-  utilOf,
 } from '../lib/catalog';
-import { formatAgo, formatPercent } from '../lib/format';
+import { formatAgo } from '../lib/format';
 import { useNow } from '../lib/hooks';
 import { describeChange, type PolicyValue, routeShort, samePolicy } from '../lib/policy';
 import { cn } from '../lib/utils';
@@ -116,14 +116,14 @@ export default function Dispatch() {
         <>
           <div className="mb-4 flex flex-wrap items-center gap-2 rounded-xl border bg-card px-4 py-3">
             <span className="flex items-center gap-1.5 text-sm font-semibold">
-              <BanIcon className="size-4 text-st-fail" aria-hidden />
+              <BanIcon className="size-4 text-ink-fail" aria-hidden />
               全局禁令
             </span>
             {data.hardBans.map((b) => (
               <Tooltip key={b.id}>
                 <TooltipTrigger asChild>
                   <span className="inline-flex h-7 items-center gap-1.5 rounded-lg border border-st-fail/40 bg-st-fail/[0.07] px-2.5 text-xs">
-                    <Lock className="size-3 text-st-fail" aria-hidden />
+                    <Lock className="size-3 text-ink-fail" aria-hidden />
                     {b.reason}
                   </span>
                 </TooltipTrigger>
@@ -145,8 +145,8 @@ export default function Dispatch() {
             </span>
           </div>
 
-          <div className="grid gap-4 xl:grid-cols-[1fr_320px]">
-            <div className="grid content-start gap-4 lg:grid-cols-2">
+          <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
+            <div className="grid min-w-0 grid-cols-1 content-start gap-4 lg:grid-cols-2">
               {STAGES.map((s) => {
                 const policy = data.stages.find((p) => p.stage === s.id) ?? {
                   stage: s.id,
@@ -199,11 +199,11 @@ export default function Dispatch() {
                         </span>
                         <span className="num ml-auto">{formatAgo(e.at, now)}</span>
                       </div>
-                      <div className={cn('mt-1 text-sm', !e.ok && 'text-st-fail')}>{c.summary}</div>
+                      <div className={cn('mt-1 text-sm', !e.ok && 'text-ink-fail')}>{c.summary}</div>
                       {e.reason ? (
                         <div className="mt-0.5 text-xs text-muted-foreground">理由：{e.reason}</div>
                       ) : null}
-                      {e.error ? <div className="mt-0.5 text-xs text-st-fail">没做成：{e.error}</div> : null}
+                      {e.error ? <div className="mt-0.5 text-xs text-ink-fail">没做成：{e.error}</div> : null}
                       {revertible && c.stage && c.before && c.after ? (
                         <Button
                           size="sm"
@@ -377,9 +377,9 @@ function StageCard({
                     {info?.channel} {info?.poolId}
                   </span>
                   {problem ? (
-                    <span className="text-st-fail">{problem}</span>
+                    <span className="text-ink-fail">{problem}</span>
                   ) : !r.alive ? (
-                    <span className="text-st-stall">离线</span>
+                    <span className="text-ink-stall">离线</span>
                   ) : null}
                 </SelectItem>
               );
@@ -417,7 +417,9 @@ function RouteRow({
   const controls = useDragControls();
   const info = routeInfo(routing, rid);
   const pool = info ? pools.find((p) => p.id === info.poolId) : undefined;
-  const w = pool ? tightestWindow(pool.windows) : undefined;
+  const usage = pool ? poolUsage(pool.windows) : undefined;
+  const w = usage ? (usage.tightest?.w ?? usage.unknown[0]) : undefined;
+  const util = usage?.tightest?.util;
   const problem = routeProblem(routing, rid, stage, now);
   const offline = info ? !info.route.alive : true;
   const channelOff = info ? !info.channelEnabled : false;
@@ -458,7 +460,7 @@ function RouteRow({
           {info ? (
             <span className="whitespace-nowrap">{info.host}</span>
           ) : (
-            <span className="text-st-fail">路由表里没有它</span>
+            <span className="text-ink-fail">路由表里没有它</span>
           )}
           {info ? (
             <span className="rounded bg-muted px-1">
@@ -470,21 +472,35 @@ function RouteRow({
               {pool.running}/{pool.maxConcurrency} 在跑
             </span>
           ) : null}
-          {offline && info ? <span className="text-st-stall">离线</span> : null}
-          {channelOff ? <span className="text-st-stall">渠道已下架</span> : null}
-          {problem ? <span className="text-st-fail">{problem}</span> : null}
+          {offline && info ? <span className="text-ink-stall">离线</span> : null}
+          {channelOff ? <span className="text-ink-stall">渠道已下架</span> : null}
+          {problem ? <span className="text-ink-fail">{problem}</span> : null}
         </div>
       </div>
       {w ? (
         <div
-          className="hidden w-14 shrink-0 sm:block"
-          title={w.stale ? '读数过期' : w.reading === 'measured' ? '实读' : '估算'}
+          className="hidden w-16 shrink-0 sm:block"
+          title={
+            util === undefined
+              ? '用量没读到：不参与比较'
+              : w.stale
+                ? '读数过期'
+                : w.reading === 'measured'
+                  ? '实读'
+                  : '估算'
+          }
         >
-          <div className={cn('num text-right text-[11px] text-muted-foreground', w.stale && 'line-through')}>
-            {formatPercent(utilOf(w))}
-            {w.reading === 'estimated' ? '·估' : ''}
+          <div
+            className={cn(
+              'text-right text-[11px]',
+              util === undefined ? 'text-ink-stall' : 'num text-muted-foreground',
+              w.stale && 'line-through',
+            )}
+          >
+            {formatUtil(util)}
+            {util !== undefined && w.reading === 'estimated' ? '·估' : ''}
           </div>
-          <QuotaBar util={utilOf(w)} className="mt-1" />
+          <QuotaBar util={util} className="mt-1" />
         </div>
       ) : null}
       <div className="flex flex-col opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
@@ -510,7 +526,7 @@ function RouteRow({
       <button
         type="button"
         onClick={onRemove}
-        className="grid size-6 place-items-center rounded text-faint opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100 hover:bg-accent hover:text-st-fail"
+        className="grid size-6 place-items-center rounded text-faint opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100 hover:bg-accent hover:text-ink-fail"
         aria-label="去掉这条路由"
       >
         <X className="size-3.5" />

@@ -11,10 +11,10 @@ const Toaster = (props: ToasterProps) => {
       theme={resolvedMode}
       className="toaster group"
       icons={{
-        success: <CircleCheckIcon className="size-4 text-st-done" />,
+        success: <CircleCheckIcon className="size-4 text-ink-done" />,
         info: <InfoIcon className="size-4" />,
-        warning: <TriangleAlertIcon className="size-4 text-st-stall" />,
-        error: <OctagonXIcon className="size-4 text-st-fail" />,
+        warning: <TriangleAlertIcon className="size-4 text-ink-stall" />,
+        error: <OctagonXIcon className="size-4 text-ink-fail" />,
         loading: <Loader2Icon className="size-4 animate-spin" />,
       }}
       style={

@@ -50,6 +50,14 @@
   --color-st-fail: var(--st-fail);
   --color-st-done: var(--st-done);
   --color-st-stop: var(--st-stop);
+  /* 状态色的字：text-ink-*（色块、边框、圆点仍用 st-*）。 */
+  --color-ink-run: var(--st-run-ink);
+  --color-ink-wait: var(--st-wait-ink);
+  --color-ink-human: var(--st-human-ink);
+  --color-ink-stall: var(--st-stall-ink);
+  --color-ink-fail: var(--st-fail-ink);
+  --color-ink-done: var(--st-done-ink);
+  --color-ink-stop: var(--st-stop-ink);
 
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
@@ -84,6 +92,25 @@
   --canvas: var(--bg);
   --grid: color-mix(in oklab, var(--fg) 13%, transparent);
   --shadow-color: color-mix(in oklab, #000 14%, transparent);
+  /*
+   * 状态色当字用时的「墨色」：往前景色里混一点，保证 11px 小字在卡片、页面底、浮层和状态标签淡底上都 ≥ 4.5:1。
+   * 每套主题需要混多少（--ink-*）写在各自的块里，默认不混；色块、圆点、进度条仍用原来的状态色。
+   * 对比度由 src/lib/contrast.test.ts 逐套逐色验，新加主题不够就红。
+   */
+  --ink-run: 100%;
+  --ink-wait: 100%;
+  --ink-human: 100%;
+  --ink-stall: 100%;
+  --ink-fail: 100%;
+  --ink-done: 100%;
+  --ink-stop: 100%;
+  --st-run-ink: color-mix(in oklab, var(--st-run) var(--ink-run), var(--fg));
+  --st-wait-ink: color-mix(in oklab, var(--st-wait) var(--ink-wait), var(--fg));
+  --st-human-ink: color-mix(in oklab, var(--st-human) var(--ink-human), var(--fg));
+  --st-stall-ink: color-mix(in oklab, var(--st-stall) var(--ink-stall), var(--fg));
+  --st-fail-ink: color-mix(in oklab, var(--st-fail) var(--ink-fail), var(--fg));
+  --st-done-ink: color-mix(in oklab, var(--st-done) var(--ink-done), var(--fg));
+  --st-stop-ink: color-mix(in oklab, var(--st-stop) var(--ink-stop), var(--fg));
   color: var(--foreground);
 }
 [data-mode="dark"] {
@@ -108,6 +135,7 @@
   --st-fail: #ff6369;
   --st-done: #3fcf8e;
   --st-stop: #6e6f78;
+  --ink-stop: 77%;
 }
 [data-palette="graphite"][data-mode="light"] {
   --bg: #f4f4f5;
@@ -124,6 +152,12 @@
   --st-fail: #dc2f36;
   --st-done: #13925a;
   --st-stop: #a1a1aa;
+  --ink-run: 88%;
+  --ink-wait: 93%;
+  --ink-stall: 75%;
+  --ink-fail: 86%;
+  --ink-done: 81%;
+  --ink-stop: 64%;
 }
 
 /* ---------- 青瓷：温润的青绿釉色 ---------- */
@@ -142,6 +176,13 @@
   --st-fail: #c8413b;
   --st-done: #22894a;
   --st-stop: #9aaba4;
+  --ink-run: 95%;
+  --ink-wait: 84%;
+  --ink-human: 95%;
+  --ink-stall: 73%;
+  --ink-fail: 87%;
+  --ink-done: 84%;
+  --ink-stop: 59%;
 }
 [data-palette="celadon"][data-mode="dark"] {
   --bg: #0b1311;
@@ -158,6 +199,8 @@
   --st-fail: #ff7b72;
   --st-done: #56d08a;
   --st-stop: #5c6d67;
+  --ink-wait: 95%;
+  --ink-stop: 69%;
 }
 
 /* ---------- 北境 Nord：极地蓝灰与霜色 ---------- */
@@ -176,6 +219,12 @@
   --st-fail: #d0747c;
   --st-done: #a3be8c;
   --st-stop: #616e88;
+  --ink-run: 67%;
+  --ink-wait: 58%;
+  --ink-human: 62%;
+  --ink-fail: 57%;
+  --ink-done: 90%;
+  --ink-stop: 42%;
 }
 [data-palette="nord"][data-mode="light"] {
   --bg: #e5e9f0;
@@ -192,6 +241,13 @@
   --st-fail: #b04a55;
   --st-done: #6a8c4f;
   --st-stop: #9aa3b5;
+  --ink-run: 80%;
+  --ink-wait: 80%;
+  --ink-human: 78%;
+  --ink-stall: 59%;
+  --ink-fail: 88%;
+  --ink-done: 67%;
+  --ink-stop: 49%;
 }
 
 /* ---------- 东京夜 Tokyo Night：霓虹夜色 ---------- */
@@ -210,6 +266,8 @@
   --st-fail: #f7768e;
   --st-done: #9ece6a;
   --st-stop: #545c7e;
+  --ink-wait: 72%;
+  --ink-stop: 51%;
 }
 [data-palette="tokyo"][data-mode="light"] {
   --bg: #e1e2e7;
@@ -226,6 +284,13 @@
   --st-fail: #e5215b;
   --st-done: #587539;
   --st-stop: #a1a6c5;
+  --ink-run: 88%;
+  --ink-wait: 70%;
+  --ink-human: 64%;
+  --ink-stall: 86%;
+  --ink-fail: 62%;
+  --ink-done: 82%;
+  --ink-stop: 38%;
 }
 
 /* ---------- 德古拉 Dracula：高饱和紫粉 ---------- */
@@ -244,6 +309,10 @@
   --st-fail: #ff5555;
   --st-done: #50fa7b;
   --st-stop: #6b6f86;
+  --ink-wait: 70%;
+  --ink-human: 91%;
+  --ink-fail: 75%;
+  --ink-stop: 58%;
 }
 [data-palette="dracula"][data-mode="light"] {
   --bg: #f5f1e1;
@@ -260,6 +329,8 @@
   --st-fail: #cb3a2a;
   --st-done: #14710a;
   --st-stop: #a8a497;
+  --ink-fail: 89%;
+  --ink-stop: 61%;
 }
 
 /* ---------- 原子 One：Atom 编辑器的经典配色 ---------- */
@@ -278,6 +349,11 @@
   --st-fail: #e06c75;
   --st-done: #98c379;
   --st-stop: #5c6370;
+  --ink-run: 94%;
+  --ink-wait: 59%;
+  --ink-human: 70%;
+  --ink-fail: 66%;
+  --ink-stop: 42%;
 }
 [data-palette="one"][data-mode="light"] {
   --bg: #f0f0f1;
@@ -294,6 +370,12 @@
   --st-fail: #e45649;
   --st-done: #50a14f;
   --st-stop: #b0b1b6;
+  --ink-run: 72%;
+  --ink-wait: 59%;
+  --ink-stall: 64%;
+  --ink-fail: 62%;
+  --ink-done: 58%;
+  --ink-stop: 44%;
 }
 
 /* ---------- 日晒 Solarized：精确计算的低对比配色 ---------- */
@@ -312,6 +394,13 @@
   --st-fail: #dc322f;
   --st-done: #859900;
   --st-stop: #a3aba6;
+  --ink-run: 61%;
+  --ink-wait: 64%;
+  --ink-human: 77%;
+  --ink-stall: 61%;
+  --ink-fail: 77%;
+  --ink-done: 62%;
+  --ink-stop: 51%;
 }
 [data-palette="solarized"][data-mode="dark"] {
   --bg: #002b36;
@@ -328,6 +417,12 @@
   --st-fail: #f0524f;
   --st-done: #9fb81a;
   --st-stop: #586e75;
+  --ink-run: 68%;
+  --ink-wait: 69%;
+  --ink-human: 71%;
+  --ink-stall: 95%;
+  --ink-fail: 67%;
+  --ink-stop: 48%;
 }
 
 /* ---------- 炉火 Darcula：炭灰底上的一点橙 ---------- */
@@ -346,6 +441,12 @@
   --st-fail: #ff6b68;
   --st-done: #7ea56a;
   --st-stop: #606366;
+  --ink-run: 55%;
+  --ink-wait: 51%;
+  --ink-human: 52%;
+  --ink-fail: 61%;
+  --ink-done: 61%;
+  --ink-stop: 34%;
 }
 [data-palette="darcula"][data-mode="light"] {
   --bg: #f2f2f2;
@@ -362,6 +463,12 @@
   --st-fail: #db3b4b;
   --st-done: #208a3c;
   --st-stop: #a8adbd;
+  --ink-run: 84%;
+  --ink-wait: 77%;
+  --ink-stall: 79%;
+  --ink-fail: 83%;
+  --ink-done: 86%;
+  --ink-stop: 58%;
 }
 
 /* ---------- 基础 ---------- */
@@ -407,18 +514,17 @@
   scrollbar-color: var(--border-strong) transparent;
 }
 
-/* ---------- 动效：在跑的东西会呼吸 ---------- */
+/* ---------- 动效：在跑的东西会呼吸 ----------
+ * 看板上同时在跑的卡片、圆点可能有几百个：动效只改 opacity / transform（交给合成器，不逐帧重绘），
+ * 不动 box-shadow——之前呼吸光圈直接改阴影，一两百张卡一起重绘，中景掉到二三十帧。
+ */
 @keyframes fd-breathe {
   0%,
   100% {
-    box-shadow:
-      0 0 0 1px color-mix(in oklab, var(--st-run) 55%, transparent),
-      0 0 0 0 color-mix(in oklab, var(--st-run) 0%, transparent);
+    opacity: 0;
   }
   50% {
-    box-shadow:
-      0 0 0 1px color-mix(in oklab, var(--st-run) 80%, transparent),
-      0 0 22px 2px color-mix(in oklab, var(--st-run) 28%, transparent);
+    opacity: 1;
   }
 }
 @keyframes fd-sweep {
@@ -431,13 +537,13 @@
 }
 @keyframes fd-pulse-dot {
   0% {
-    box-shadow: 0 0 0 0 color-mix(in oklab, currentColor 55%, transparent);
+    transform: scale(1);
+    opacity: 0.55;
   }
-  70% {
-    box-shadow: 0 0 0 6px color-mix(in oklab, currentColor 0%, transparent);
-  }
+  70%,
   100% {
-    box-shadow: 0 0 0 0 color-mix(in oklab, currentColor 0%, transparent);
+    transform: scale(3.2);
+    opacity: 0;
   }
 }
 @keyframes fd-rise {
@@ -453,7 +559,18 @@
 
 /* 放在 components 层：工具类（absolute 之类）要能覆盖这里的 position。 */
 @layer components {
-  .fd-live {
+  /* 卡片内侧一圈状态色的光，透明度一呼一吸。卡片本身是 relative + overflow-hidden，光画在里面。 */
+  .fd-live::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    pointer-events: none;
+    box-shadow:
+      inset 0 0 0 1px color-mix(in oklab, var(--st-run) 80%, transparent),
+      inset 0 0 22px 2px color-mix(in oklab, var(--st-run) 26%, transparent);
+    opacity: 0;
+    will-change: opacity;
     animation: fd-breathe 2.4s ease-in-out infinite;
   }
   .fd-sweep {
@@ -471,27 +588,22 @@
   [data-mode="dark"] .fd-sweep::after {
     background: linear-gradient(90deg, transparent, color-mix(in oklab, #fff 28%, transparent), transparent);
   }
+  /* 在跑的小圆点往外扩一圈：扩的是一个同色的伪元素（缩放 + 淡出），不改阴影。 */
   .fd-dot-live {
+    position: relative;
+  }
+  .fd-dot-live::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: currentColor;
+    pointer-events: none;
     animation: fd-pulse-dot 1.8s ease-out infinite;
   }
   .fd-rise {
     animation: fd-rise 0.28s ease-out both;
   }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .fd-live,
-  .fd-sweep::after,
-  .fd-dot-live,
-  .fd-rise {
-    animation: none;
-  }
-}
-:root[data-motion="reduced"] .fd-live,
-:root[data-motion="reduced"] .fd-sweep::after,
-:root[data-motion="reduced"] .fd-dot-live,
-:root[data-motion="reduced"] .fd-rise {
-  animation: none;
 }
 
 /* ---------- 看板画布（React Flow）跟随主题 ---------- */
@@ -539,4 +651,31 @@
 .react-flow__handle {
   opacity: 0;
   pointer-events: none;
+}
+
+/*
+ * 减少动效：设置页的开关（data-motion="reduced"）或系统设置，任一个开着都停。
+ * 看板上的连线流动、重新排版时卡片滑动也算动效，一起停（连线在代码里也不再标 animated，这里兜底）。
+ */
+@media (prefers-reduced-motion: reduce) {
+  .fd-live::after,
+  .fd-sweep::after,
+  .fd-dot-live::after,
+  .fd-rise,
+  :root .react-flow__edge.animated path {
+    animation: none;
+  }
+  :root .fd-board-ready .react-flow__node {
+    transition: none;
+  }
+}
+:root[data-motion="reduced"] .fd-live::after,
+:root[data-motion="reduced"] .fd-sweep::after,
+:root[data-motion="reduced"] .fd-dot-live::after,
+:root[data-motion="reduced"] .fd-rise,
+:root[data-motion="reduced"] .react-flow__edge.animated path {
+  animation: none;
+}
+:root[data-motion="reduced"] .fd-board-ready .react-flow__node {
+  transition: none;
 }

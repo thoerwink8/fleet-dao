@@ -45,10 +45,10 @@ function time(iso: string) {
 }
 
 function tone(item: TimelineItem): string | undefined {
-  if (item.kind === 'done') return 'text-st-done';
-  if (item.kind === 'blocked' || item.kind === 'done_rejected') return 'text-st-fail';
-  if (item.kind === 'ask') return 'text-st-human';
-  if (item.kind === 'test' && /没过/.test(item.text)) return 'text-st-fail';
+  if (item.kind === 'done') return 'text-ink-done';
+  if (item.kind === 'blocked' || item.kind === 'done_rejected') return 'text-ink-fail';
+  if (item.kind === 'ask') return 'text-ink-human';
+  if (item.kind === 'test' && /没过/.test(item.text)) return 'text-ink-fail';
   if (item.source === 'person') return 'text-foreground font-medium';
   if (item.source === 'engine') return 'text-muted-foreground';
   return undefined;
@@ -99,7 +99,7 @@ export function LogStream({
     <div className={cn('overflow-hidden rounded-lg border bg-background', className)}>
       <div className="flex items-center gap-2 border-b px-3 py-1.5 text-xs text-muted-foreground">
         <span
-          className={cn('size-1.5 rounded-full', live ? 'fd-dot-live bg-st-run text-st-run' : 'bg-st-wait')}
+          className={cn('size-1.5 rounded-full', live ? 'fd-dot-live bg-st-run text-ink-run' : 'bg-st-wait')}
         />
         {live ? '直播中' : '没有在跑的会话'}
         <span className="num">· {ordered.length} 条</span>
@@ -115,7 +115,7 @@ export function LogStream({
         aria-live="polite"
       >
         {error ? (
-          <p role="alert" className="mb-2 rounded-md bg-st-fail/10 px-2 py-1.5 text-xs text-st-fail">
+          <p role="alert" className="mb-2 rounded-md bg-st-fail/10 px-2 py-1.5 text-xs text-ink-fail">
             {ordered.length ? '更早的记录' : '日志'}没读成：
             {error instanceof Error ? error.message : String(error)}
           </p>

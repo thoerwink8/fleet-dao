@@ -1,0 +1,217 @@
+// @vitest-environment happy-dom
+// PR #13 审查意见的回归：用量没读到不冒充 0%、仓列表没读成不冒充「没有仓」、推送断了手机上也看得见、
+// 看板重拉失败保留旧画面。每条都故意造一次「读不到」。
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { afterEach, describe, expect, test, vi } from 'vitest';
+import { ApiError, type FleetApi, type LiveStatus, useLiveSync } from '../api/client';
+import { createMockApi, type MockApi } from '../api/mock/server';
+import type { PoolView, QuotaWindowView } from '../api/types';
+import { QuotaCell } from '../components/quota';
+import { CommandMenu } from '../components/shell/command-menu';
+import { Topbar } from '../components/shell/topbar';
+import { routeOptions } from '../components/task-actions';
+import { isNearlyExhausted, isUseItOrLoseIt, poolUsage, utilOf, windowLength } from '../lib/catalog';
+import BoardPage from '../routes/board';
+import DispatchPage from '../routes/dispatch';
+import OverviewPage from '../routes/overview';
+import QuotaPage from '../routes/quota';
+import SettingsPage from '../routes/settings';
+import { renderApp } from './harness';
+
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
+
+const NOW = Date.parse('2026-09-25T10:00:00Z');
+const at = (min: number) => new Date(NOW + min * 60_000).toISOString();
+const boom = () => Promise.reject(new ApiError(500, 'internal', '后端出错了'));
+
+/** 只报了清零时间的窗（Claude 只说「这是限制窗」时就这样）：用量没读到。 */
+const noUsage = (w: Partial<QuotaWindowView> = {}): QuotaWindowView => ({
+  window: '5h',
+  resetsAt: at(20),
+  reading: 'measured',
+  readAt: at(-1),
+  stale: false,
+  ...w,
+});
+
+/** 把假后端所有账号池的额度窗都换成「用量没读到」。 */
+function withUnknownUsage(api: MockApi): MockApi {
+  const pools = api.pools.bind(api);
+  api.pools = async () => {
+    const res = await pools();
+    return {
+      ...res,
+      pools: res.pools.map((p): PoolView => ({
+        ...p,
+        quotaStatus: 'fresh',
+        windows: [noUsage(), noUsage({ window: '7d', reading: 'estimated', used: 812, resetsAt: at(600) })],
+      })),
+    };
+  };
+  return api;
+}
+
+describe('额度：用量没读到不当 0%', () => {
+  test('只有清零时间、或只有已用没上限：用量是「不知道」，不参与高亮和「快用完」', () => {
+    const onlyReset = noUsage();
+    const onlyUsed = noUsage({ reading: 'estimated', used: 812 });
+    for (const w of [onlyReset, onlyUsed]) {
+      expect(utilOf(w)).toBeUndefined();
+      expect(isUseItOrLoseIt(w, NOW)).toBe(false);
+      expect(isNearlyExhausted(w)).toBe(false);
+    }
+    expect(utilOf(noUsage({ used: 3, limit: 4 }))).toBe(0.75);
+    expect(utilOf(noUsage({ used: 3, limit: 0 }))).toBeUndefined();
+  });
+
+  test('上游新出的窗口（other）长度不知道：不喊「先用它」', () => {
+    expect(windowLength.other).toBeUndefined();
+    expect(isUseItOrLoseIt(noUsage({ window: 'other', utilization: 0.1, resetsAt: at(1) }), NOW)).toBe(false);
+  });
+
+  test('比谁最满时只比读到用量的窗，没读到的单独列出', () => {
+    const u = poolUsage([noUsage(), noUsage({ window: '7d', utilization: 0.3 }), noUsage({ window: '7d_model' })]);
+    expect(u.tightest?.util).toBe(0.3);
+    expect(u.unknown.map((w) => w.window)).toEqual(['5h', '7d_model']);
+    expect(poolUsage([noUsage()]).tightest).toBeUndefined();
+  });
+
+  test('额度格写「用量没读到」、不高亮、不画成 0%', () => {
+    const { container } = render(<QuotaCell w={noUsage()} now={NOW} />);
+    const el = container.firstElementChild as HTMLElement;
+    expect(screen.getByText('用量没读到')).toBeTruthy();
+    expect(el.dataset.hot).toBeUndefined();
+    expect(el.dataset.unknown).toBe('true');
+    expect(container.textContent).not.toContain('0%');
+    expect(container.textContent).not.toContain('，先用它');
+  });
+
+  test('换模型的候选：池里用量全没读到时标「用量没读到」，不给 0%', async () => {
+    const api = withUnknownUsage(createMockApi({ live: false }));
+    const [routing, pools] = await Promise.all([api.routing(), api.pools()]);
+    const { ordered, others } = routeOptions(routing, pools.pools, 'execute', undefined, NOW);
+    const all = [...ordered, ...others];
+    expect(all.length).toBeGreaterThan(0);
+    for (const o of all) {
+      expect(o.util).toBeUndefined();
+      expect(o.utilUnknown).toBe(true);
+    }
+  });
+
+  test('总览：没读到用量的窗不排进「最满」、不算「快清零」，底下写明有几个没读到', async () => {
+    renderApp(<OverviewPage />, { api: withUnknownUsage(createMockApi({ live: false })) });
+    expect(await screen.findByText(/个窗用量没读到/)).toBeTruthy();
+    const stat = screen.getByText('额度快清零').closest('a');
+    expect(stat?.textContent).toContain('0');
+    expect(screen.queryByText('0%')).toBeNull();
+  });
+
+  test('额度页：没读到用量的窗列进「读数过期或没查成」，不进「先用它」', async () => {
+    renderApp(<QuotaPage />, { api: withUnknownUsage(createMockApi({ live: false })) });
+    const box = (await screen.findByText('读数过期或没查成')).closest('div.rounded-xl') as HTMLElement;
+    expect(within(box).getAllByText('用量没读到').length).toBeGreaterThan(0);
+    const hot = screen.getByText('先用它').closest('div.rounded-xl') as HTMLElement;
+    expect(within(hot).getByText('没有')).toBeTruthy();
+    expect(screen.queryByText('0%')).toBeNull();
+  });
+
+  test('调度台：路由行写「用量没读到」，不写 0%', async () => {
+    renderApp(<DispatchPage />, { api: withUnknownUsage(createMockApi({ live: false })) });
+    expect((await screen.findAllByText('用量没读到')).length).toBeGreaterThan(0);
+    expect(screen.queryByText('0%')).toBeNull();
+  });
+});
+
+describe('仓列表没读成，不冒充「没有仓」', () => {
+  function reposFail(): MockApi {
+    const api = createMockApi({ live: false });
+    api.repos = boom;
+    return api;
+  }
+
+  test('设置页：写「仓列表没读成」，不写「还没有仓」', async () => {
+    renderApp(<SettingsPage />, { api: reposFail() });
+    expect(await screen.findByText(/仓列表没读成/)).toBeTruthy();
+    expect(screen.queryByText('还没有仓')).toBeNull();
+  });
+
+  test('设置页：真读到一个空列表才说「还没有仓」', async () => {
+    const api = createMockApi({ live: false });
+    api.repos = async () => ({ repos: [] });
+    renderApp(<SettingsPage />, { api });
+    expect(await screen.findByText('还没有仓')).toBeTruthy();
+  });
+
+  test('⌘K：说明仓列表没读成、搜不到需求', async () => {
+    renderApp(<CommandMenu open onOpenChange={() => {}} />, { api: reposFail() });
+    expect(await screen.findByText(/仓列表没读成，这里搜不到任何需求/)).toBeTruthy();
+  });
+
+  test('顶栏的仓切换：写「仓列表没读成」，不是一直转圈', async () => {
+    renderApp(<Topbar onMenu={() => {}} onSearch={() => {}} />, { api: reposFail() });
+    expect(await screen.findByText('仓列表没读成')).toBeTruthy();
+  });
+});
+
+describe('推送断了：顶栏照实说，手机上也看得见', () => {
+  function LiveSync() {
+    useLiveSync();
+    return null;
+  }
+
+  test('后端把推送关掉（等着重连）：显示「推送断了」，文字不藏起来', async () => {
+    const api = createMockApi({ live: false });
+    let report: ((s: LiveStatus) => void) | undefined;
+    api.subscribe = ((_l, onStatus) => {
+      report = onStatus;
+      return () => {};
+    }) as FleetApi['subscribe'];
+    renderApp(
+      <>
+        <LiveSync />
+        <Topbar onMenu={() => {}} onSearch={() => {}} />
+      </>,
+      { api },
+    );
+    act(() => report?.('down'));
+    const text = await screen.findByText('推送断了');
+    expect(text.className).not.toContain('sr-only');
+    const indicator = text.closest('[role="status"]') as HTMLElement;
+    expect(indicator.className).not.toMatch(/(^|\s)hidden(\s|$)/);
+    act(() => report?.('open'));
+    expect(await screen.findByText('实时')).toBeTruthy();
+  });
+});
+
+describe('看板重拉失败：保留上次的画面', () => {
+  test('读成过之后重拉失败：树还在，上面一条「看板刷新没成」；重试成功提示消失', async () => {
+    // 手机宽度走树形列表（画布依赖浏览器排版，测试环境里不跑）。
+    vi.spyOn(window, 'matchMedia').mockImplementation(
+      (q: string) =>
+        ({
+          matches: q.includes('max-width'),
+          media: q,
+          addEventListener() {},
+          removeEventListener() {},
+        }) as unknown as MediaQueryList,
+    );
+    const api = createMockApi({ live: false });
+    const board = api.board.bind(api);
+    let fail = false;
+    api.board = (repoId) => (fail ? boom() : board(repoId));
+    const { qc } = renderApp(<BoardPage />, { api });
+    const title = (await screen.findAllByText('登录页加手机验证码'))[0];
+    expect(title).toBeTruthy();
+    fail = true;
+    await act(() => qc.refetchQueries({ queryKey: ['board'] }).catch(() => {}));
+    expect(await screen.findByText('看板刷新没成')).toBeTruthy();
+    expect(screen.getAllByText('登录页加手机验证码').length).toBeGreaterThan(0);
+    fail = false;
+    fireEvent.click(screen.getByRole('button', { name: '重试' }));
+    await waitFor(() => expect(screen.queryByText('看板刷新没成')).toBeNull());
+    expect(screen.getAllByText('登录页加手机验证码').length).toBeGreaterThan(0);
+  });
+});

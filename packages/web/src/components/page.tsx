@@ -88,7 +88,7 @@ export function Stat({
   hint?: ReactNode;
   icon?: LucideIcon | undefined;
   to?: string | undefined;
-  /** 数字的颜色类，例如 text-st-stall。 */
+  /** 数字的颜色类，例如 text-ink-stall。 */
   accent?: string | undefined;
 }) {
   const body = (
@@ -142,7 +142,7 @@ export function LoadError({ error, what }: { error: unknown; what?: string | und
   return (
     <div
       role="alert"
-      className="rounded-lg border border-st-fail/40 bg-st-fail/10 px-3 py-2 text-sm text-st-fail"
+      className="rounded-lg border border-st-fail/40 bg-st-fail/10 px-3 py-2 text-sm text-ink-fail"
     >
       {what ? `${what}没读成` : '没查成'}：{error instanceof Error ? error.message : String(error)}
     </div>

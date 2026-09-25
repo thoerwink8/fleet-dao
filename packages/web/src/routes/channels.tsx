@@ -19,8 +19,8 @@ import {
 import { Badge } from '../components/ui/badge';
 import { Switch } from '../components/ui/switch';
 import { Textarea } from '../components/ui/textarea';
-import { billingLabel, hostLabel, tightestWindow, utilOf, windowLabel } from '../lib/catalog';
-import { formatDate, formatInDays, formatPercent, TIME } from '../lib/format';
+import { billingLabel, formatUtil, hostLabel, poolUsage, windowLabel } from '../lib/catalog';
+import { formatDate, formatInDays, TIME } from '../lib/format';
 import { useNow } from '../lib/hooks';
 import { cn } from '../lib/utils';
 
@@ -166,7 +166,7 @@ function ChannelCard({
       </header>
       {!pools ? (
         poolsFailed ? (
-          <p className="px-4 py-3 text-xs text-st-fail">账号池没读到</p>
+          <p className="px-4 py-3 text-xs text-ink-fail">账号池没读到</p>
         ) : (
           <p className="px-4 py-3 text-xs text-muted-foreground">正在读账号池…</p>
         )
@@ -203,7 +203,9 @@ function ChannelCard({
 
 function PoolRow({ pool }: { pool: PoolView }) {
   const now = useNow();
-  const w = tightestWindow(pool.windows);
+  const usage = poolUsage(pool.windows);
+  const w = usage.tightest?.w ?? usage.unknown[0];
+  const util = usage.tightest?.util;
   const soon = pool.expiresAt ? Date.parse(pool.expiresAt) - now < 7 * TIME.DAY : false;
   const full = pool.maxConcurrency > 0 && pool.running >= pool.maxConcurrency;
   return (
@@ -214,27 +216,37 @@ function PoolRow({ pool }: { pool: PoolView }) {
       </div>
       <div>
         <div className="num text-sm">
-          <span className={cn(full && 'text-st-stall')}>{pool.running}</span>/{pool.maxConcurrency}
+          <span className={cn(full && 'text-ink-stall')}>{pool.running}</span>/{pool.maxConcurrency}
         </div>
         <div className="mt-0.5 text-[11px] text-muted-foreground">在跑 / 并发上限</div>
       </div>
       <div className="min-w-0">
         {pool.quotaStatus === 'unread' ? (
-          <span className="text-xs text-st-stall" title="一条读数都没有：是没查成，不是没用量">
+          <span className="text-xs text-ink-stall" title="一条读数都没有：是没查成，不是没用量">
             没查成额度
           </span>
         ) : w ? (
           <>
             <div className="flex items-center justify-between gap-2 text-xs">
               <span className="truncate text-muted-foreground">{windowLabel[w.window]}</span>
-              <span className={cn('num', w.stale && 'text-muted-foreground line-through')}>
-                {formatPercent(utilOf(w))}
+              <span
+                className={cn(
+                  util === undefined ? 'text-ink-stall' : 'num',
+                  w.stale && 'text-muted-foreground line-through',
+                )}
+              >
+                {formatUtil(util)}
               </span>
             </div>
-            <QuotaBar util={utilOf(w)} className="mt-1" />
+            <QuotaBar util={util} className="mt-1" />
             <div className="mt-1 flex items-center gap-1.5">
               <ReadingBadge w={w} />
-              {w.stale ? <span className="text-[11px] text-st-stall">读数过期</span> : null}
+              {util !== undefined && usage.unknown.length ? (
+                <span className="text-[11px] text-ink-stall" title="这些窗不参与比较">
+                  另有 <span className="num">{usage.unknown.length}</span> 个窗用量没读到
+                </span>
+              ) : null}
+              {w.stale ? <span className="text-[11px] text-ink-stall">读数过期</span> : null}
               {w.resetsAt ? (
                 <span className="truncate text-[11px] text-muted-foreground">
                   <span className="num">{formatInDays(w.resetsAt, now)}</span>清零
@@ -246,7 +258,7 @@ function PoolRow({ pool }: { pool: PoolView }) {
           <span className="text-xs text-muted-foreground">还没读到额度</span>
         )}
       </div>
-      <div className={cn('text-right text-xs', soon && 'text-st-stall')}>
+      <div className={cn('text-right text-xs', soon && 'text-ink-stall')}>
         {pool.expiresAt ? (
           <>
             <div className="flex items-center justify-end gap-1">
@@ -254,7 +266,7 @@ function PoolRow({ pool }: { pool: PoolView }) {
               <span className="num">{formatDate(pool.expiresAt)}</span>
             </div>
             <div className="text-[11px] text-muted-foreground">
-              <span className={cn('num', soon && 'font-medium text-st-stall')}>
+              <span className={cn('num', soon && 'font-medium text-ink-stall')}>
                 {formatInDays(pool.expiresAt, now)}
               </span>
               到期

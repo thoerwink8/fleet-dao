@@ -15,7 +15,7 @@ import type {
   TaskActionBody,
   TaskState,
 } from '../api/types';
-import { billingLabel, routeInfo, routeProblem, stageLabel, tightestWindow, utilOf } from '../lib/catalog';
+import { billingLabel, poolUsage, routeInfo, routeProblem, stageLabel } from '../lib/catalog';
 import { formatPercent } from '../lib/format';
 import { isTaskFinished, letterOf } from '../lib/status';
 import { cn } from '../lib/utils';
@@ -201,7 +201,7 @@ export function ActionButtons({ target, size = 'sm' }: { target: ActionTarget; s
             key={a}
             size={size}
             variant={a === 'answer' ? 'default' : 'outline'}
-            className={cn(def.danger && 'text-st-fail hover:text-st-fail')}
+            className={cn(def.danger && 'text-ink-fail hover:text-ink-fail')}
             onClick={() => trigger(a, target)}
           >
             <Icon aria-hidden />
@@ -219,7 +219,10 @@ export interface RouteOption {
   where: string;
   host: string;
   billing: string;
+  /** 池里用得最满的那个窗用了几成；没有池、或所有窗都没读到用量时是 undefined。 */
   util: number | undefined;
+  /** 池有额度窗、但用量一个都没读到：界面写「用量没读到」，不写成 0%。 */
+  utilUnknown: boolean;
   estimated: boolean;
   /** 选不了的原因：禁令、离线、渠道下架、模型下架。 */
   blocked: string | undefined;
@@ -238,7 +241,8 @@ export function routeOptions(
     const info = routeInfo(routing, id);
     if (!info) return undefined;
     const pool = pools.find((p) => p.id === info.poolId);
-    const w = pool ? tightestWindow(pool.windows) : undefined;
+    const usage = pool ? poolUsage(pool.windows) : undefined;
+    const w = usage?.tightest?.w;
     let blocked = routeProblem(routing, id, stage, now) ?? undefined;
     if (!blocked && !info.route.alive) blocked = '离线';
     if (!blocked && !info.channelEnabled) blocked = '渠道已下架';
@@ -252,7 +256,8 @@ export function routeOptions(
       where: `${info.channel} · ${info.poolId}`,
       host: info.host,
       billing: info.billing ? billingLabel[info.billing] : '计费未知',
-      util: w ? utilOf(w) : undefined,
+      util: usage?.tightest?.util,
+      utilUnknown: Boolean(usage && !usage.tightest && usage.unknown.length),
       estimated: w?.reading === 'estimated',
       blocked,
       note,
@@ -309,7 +314,7 @@ function RoutePickerDialog({
               {o.note}
             </Badge>
           ) : null}
-          {o.blocked ? <span className="text-st-fail">{o.blocked}</span> : null}
+          {o.blocked ? <span className="text-ink-fail">{o.blocked}</span> : null}
         </div>
       </div>
       {o.util !== undefined ? (
@@ -317,6 +322,8 @@ function RoutePickerDialog({
           <div className="num text-xs">{formatPercent(o.util)}</div>
           <div className="text-[10px] text-muted-foreground">{o.estimated ? '估算' : '实读'}</div>
         </div>
+      ) : o.utilUnknown ? (
+        <div className="w-20 shrink-0 text-right text-[11px] text-ink-stall">用量没读到</div>
       ) : null}
     </CommandItem>
   );
@@ -334,12 +341,14 @@ function RoutePickerDialog({
           </DialogDescription>
         </DialogHeader>
         {routingError ? (
-          <p role="alert" className="mx-4 rounded-md bg-st-fail/10 px-3 py-2 text-sm text-st-fail">
+          <p role="alert" className="mx-4 rounded-md bg-st-fail/10 px-3 py-2 text-sm text-ink-fail">
             路由没读成，现在没法换：{errorText(routingError)}
           </p>
         ) : null}
         {poolsError ? (
-          <p className="mx-4 text-xs text-st-stall">额度没读成：下面不显示用量，挑之前自己去额度页看一眼。</p>
+          <p className="mx-4 text-xs text-ink-stall">
+            额度没读成：下面不显示用量，挑之前自己去额度页看一眼。
+          </p>
         ) : null}
         <Command className="border-t">
           <CommandInput placeholder="搜模型、渠道、执行方式…" />
@@ -391,7 +400,7 @@ function AnswerDialog({ target, onClose }: { target: ActionTarget | null; onClos
         </DialogHeader>
         {detail.isLoading ? <p className="text-sm text-muted-foreground">正在读追问…</p> : null}
         {detail.error ? (
-          <p role="alert" className="text-sm text-st-fail">
+          <p role="alert" className="text-sm text-ink-fail">
             追问没读成：{errorText(detail.error)}
           </p>
         ) : null}

@@ -158,7 +158,7 @@ function TaskPanel({
             </div>
           </blockquote>
         ) : detail.error ? (
-          <p role="alert" className="text-xs text-st-fail">
+          <p role="alert" className="text-xs text-ink-fail">
             原话没读成：{errorText(detail.error)}
           </p>
         ) : (
@@ -318,7 +318,7 @@ function SubPanel({
             {steps.data.steps.map((st) => (
               <li key={st.index} className="flex items-center gap-2 text-[13px]">
                 {st.state === 'done' ? (
-                  <Check className="size-3.5 text-st-done" aria-hidden />
+                  <Check className="size-3.5 text-ink-done" aria-hidden />
                 ) : st.state === 'in_progress' ? (
                   <StatusDot tone={tone} className="mx-[3px]" />
                 ) : (
@@ -336,7 +336,7 @@ function SubPanel({
             ))}
           </ol>
         ) : steps.error || (!runId && detail.error) ? (
-          <p role="alert" className="text-xs text-st-fail">
+          <p role="alert" className="text-xs text-ink-fail">
             步骤清单没读成：{errorText(steps.error ?? detail.error)}
           </p>
         ) : (
@@ -361,7 +361,7 @@ function SubPanel({
 
       {detail.error ? (
         <Section title="会话">
-          <p role="alert" className="text-xs text-st-fail">
+          <p role="alert" className="text-xs text-ink-fail">
             会话没读成：{errorText(detail.error)}
           </p>
         </Section>

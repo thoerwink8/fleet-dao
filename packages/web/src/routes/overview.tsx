@@ -67,7 +67,13 @@ export default function Overview() {
     pool.windows.map((w) => ({ pool, w })),
   );
   const hot = windows.filter(({ w }) => !w.stale && isUseItOrLoseIt(w, now));
-  const fullest = [...windows].sort((a, b) => utilOf(b.w) - utilOf(a.w)).slice(0, 5);
+  // 用量没读到的窗不参与排序（不拿 0 冒充最空），单独数一下、写在面板底下。
+  const known = windows.flatMap((x) => {
+    const util = utilOf(x.w);
+    return util === undefined ? [] : [{ ...x, util }];
+  });
+  const unknownUse = windows.length - known.length;
+  const fullest = known.sort((a, b) => b.util - a.util).slice(0, 5);
   const tasksById = taskIndex(all);
   const recent = audit.data?.pages[0]?.items.slice(0, 7) ?? [];
 
@@ -85,7 +91,7 @@ export default function Overview() {
           label="卡住"
           value={count(byTone('stall') + byTone('fail'))}
           icon={TriangleAlert}
-          accent={boardsOk && byTone('stall') + byTone('fail') ? 'text-st-stall' : undefined}
+          accent={boardsOk && byTone('stall') + byTone('fail') ? 'text-ink-stall' : undefined}
           hint="停滞或失败"
           to="/?stuck=1"
         />
@@ -93,7 +99,7 @@ export default function Overview() {
           label="等你"
           value={count(byTone('human'))}
           icon={Hand}
-          accent={boardsOk && byTone('human') ? 'text-st-human' : undefined}
+          accent={boardsOk && byTone('human') ? 'text-ink-human' : undefined}
           hint="回答追问"
           to="/notifications"
         />
@@ -151,7 +157,7 @@ export default function Overview() {
                 hint="卡住或要你拍板时，这里和飞书都会提醒。"
               />
             ) : (
-              <p className="px-4 py-6 text-center text-sm text-st-fail">
+              <p className="px-4 py-6 text-center text-sm text-ink-fail">
                 看板没读全，说不准有没有等你处理的事
               </p>
             )}
@@ -162,7 +168,7 @@ export default function Overview() {
               <div key={repo.id} className="flex flex-col rounded-lg border border-st-fail/40 p-3">
                 <div className="num truncate text-[11px] text-muted-foreground">{repo.owner}/</div>
                 <div className="num truncate text-base font-semibold">{repo.name}</div>
-                <p className="mt-3 text-xs text-st-fail">这个仓的看板没读成</p>
+                <p className="mt-3 text-xs text-ink-fail">这个仓的看板没读成</p>
               </div>
             ))}
             {boards.map(({ repo, tasks }) => {
@@ -272,18 +278,19 @@ export default function Overview() {
           >
             {pools.error ? <LoadError what="额度" error={pools.error} /> : null}
             <ul className="space-y-3">
-              {fullest.map(({ pool, w }) => (
-                <li key={`${pool.id}-${w.window}`}>
+              {fullest.map(({ pool, w, util }, i) => (
+                // biome-ignore lint/suspicious/noArrayIndexKey: 同一个池同一种窗可能有好几个（按模型组），契约里没有区分它们的字段。
+                <li key={`${pool.id}-${w.window}-${i}`}>
                   <div className="flex items-center justify-between gap-2 text-xs">
                     <span className="truncate">
                       {poolTitle(pool)}
                       <span className="text-muted-foreground"> · {windowLabel[w.window]}</span>
                     </span>
                     <span className={cn('num', w.stale && 'text-muted-foreground line-through')}>
-                      {formatPercent(utilOf(w))}
+                      {formatPercent(util)}
                     </span>
                   </div>
-                  <QuotaBar util={utilOf(w)} className="mt-1" />
+                  <QuotaBar util={util} className="mt-1" />
                   <div className="mt-1 text-[11px] text-muted-foreground">
                     {w.resetsAt ? (
                       <>
@@ -296,8 +303,17 @@ export default function Overview() {
                 </li>
               ))}
             </ul>
-            {pools.data && !fullest.length ? (
+            {pools.data && !windows.length ? (
               <p className="text-center text-sm text-muted-foreground">还没有额度读数</p>
+            ) : null}
+            {unknownUse ? (
+              <p className="mt-3 text-xs text-ink-stall">
+                另有 <span className="num">{unknownUse}</span>{' '}
+                个窗用量没读到（只报了清零时间或没有上限），没排进来——
+                <Link to="/quota" className="underline underline-offset-2">
+                  去额度页看
+                </Link>
+              </p>
             ) : null}
           </Panel>
 
@@ -325,7 +341,7 @@ export default function Overview() {
                     <span className="shrink-0 font-medium" title={a.actor.id}>
                       {actorName(a.actor, me)}
                     </span>
-                    <span className={cn('shrink-0', !a.ok && 'text-st-fail')}>{actionLabel(a.action)}</span>
+                    <span className={cn('shrink-0', !a.ok && 'text-ink-fail')}>{actionLabel(a.action)}</span>
                     <span className="min-w-0 truncate text-muted-foreground">
                       {targetLabel(a.target, tasksById)}
                     </span>
@@ -333,7 +349,7 @@ export default function Overview() {
                   </div>
                   {a.reason || a.error ? (
                     <div
-                      className={cn('mt-0.5 truncate', a.error ? 'text-st-fail' : 'text-muted-foreground')}
+                      className={cn('mt-0.5 truncate', a.error ? 'text-ink-fail' : 'text-muted-foreground')}
                     >
                       {a.error ?? a.reason}
                     </div>

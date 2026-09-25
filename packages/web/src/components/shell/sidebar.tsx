@@ -29,7 +29,7 @@ function DataSource({ collapsed }: { collapsed: boolean }) {
     <Tooltip>
       <TooltipTrigger asChild>
         <span className="flex min-w-0 items-center gap-1.5 rounded-md px-1.5 py-1 text-[11px] text-muted-foreground">
-          <Database className={cn('size-3.5 shrink-0', mock && 'text-st-stall')} aria-hidden />
+          <Database className={cn('size-3.5 shrink-0', mock && 'text-ink-stall')} aria-hidden />
           {collapsed ? null : <span className="truncate">{mock ? '假数据（演示）' : '驾驶舱后端'}</span>}
         </span>
       </TooltipTrigger>

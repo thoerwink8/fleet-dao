@@ -1,7 +1,7 @@
 import { CSRF_HEADER } from '@fleet-dao/shared';
-import { describe, expect, test, vi } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 import { ApiError, type LiveStatus } from './client';
-import { createHttpApi } from './http';
+import { createHttpApi, sseRetryDelay } from './http';
 import type { LiveEvent } from './types';
 
 const ME = { user: { id: 'u-a', displayName: '甲', role: 'founder' }, csrfToken: 'tok-1' };
@@ -143,12 +143,19 @@ class FakeEventSource {
 }
 
 describe('接真后端：实时推送（SSE）', () => {
-  function setup() {
-    let es: FakeEventSource | undefined;
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function setup(routes: Parameters<typeof fakeFetch>[0] = {}, onUnauthorized = vi.fn()) {
+    const sources: FakeEventSource[] = [];
+    const { fn, calls } = fakeFetch(routes);
     const api = createHttpApi({
-      fetch: fakeFetch({}).fn,
+      fetch: fn,
+      onUnauthorized,
       eventSource: (url) => {
-        es = new FakeEventSource(url);
+        const es = new FakeEventSource(url);
+        sources.push(es);
         return es as unknown as EventSource;
       },
     });
@@ -158,8 +165,15 @@ describe('接真后端：实时推送（SSE）', () => {
       (e) => events.push(e),
       (s) => statuses.push(s),
     );
+    const es = sources[0];
     if (!es) throw new Error('没建 EventSource');
-    return { es, events, statuses, stop };
+    return { es, sources, events, statuses, stop, calls, onUnauthorized };
+  }
+
+  /** 后端回 502 / 401 之类：浏览器把连接关死（readyState=CLOSED）再报 error。 */
+  function killByBackend(es: FakeEventSource) {
+    es.readyState = 2;
+    es.onerror?.();
   }
 
   test('连 /api/events；收到 ready 才算连上', () => {
@@ -184,14 +198,94 @@ describe('接真后端：实时推送（SSE）', () => {
     expect(events).toEqual([{ type: 'resync' }, { type: 'resync' }]);
   });
 
-  test('断线：浏览器在重连时是「连接中」，彻底关了是「断了」；取消订阅会关掉连接', () => {
-    const { es, statuses, stop } = setup();
+  test('网络断了：浏览器自己在重连，是「连接中」，我们不另起连接', () => {
+    vi.useFakeTimers();
+    const { es, sources, statuses } = setup({ 'GET /api/me': () => ({ body: ME }) });
     es.readyState = 0;
     es.onerror?.();
-    es.readyState = 2;
-    es.onerror?.();
-    expect(statuses.slice(-2)).toEqual(['connecting', 'down']);
-    stop();
+    expect(statuses.at(-1)).toBe('connecting');
+    vi.advanceTimersByTime(60_000);
+    expect(sources).toHaveLength(1);
+    expect(es.closed).toBe(false);
+  });
+
+  test('后端回 502 把连接关死：显示「断了」，退避后先探 /api/me 再重连，连上收到 ready 全量重拉', async () => {
+    vi.useFakeTimers();
+    const { es, sources, statuses, events, calls } = setup({ 'GET /api/me': () => ({ body: ME }) });
+    es.emit('ready');
+    killByBackend(es);
     expect(es.closed).toBe(true);
+    expect(statuses.at(-1)).toBe('down');
+    expect(sources).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(sseRetryDelay(0));
+    expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual(['GET /api/me']);
+    expect(sources).toHaveLength(2);
+    sources[1]?.emit('ready');
+    expect(statuses.at(-1)).toBe('open');
+    expect(events).toEqual([{ type: 'ready' }, { type: 'ready' }]);
+  });
+
+  test('后端一直没起来：探 /api/me 失败就按 1、2、4 秒……拉长间隔再试，起来了再连', async () => {
+    vi.useFakeTimers();
+    let up = false;
+    const { es, sources, calls } = setup({
+      'GET /api/me': () => (up ? { body: ME } : { status: 502 }),
+    });
+    killByBackend(es);
+    await vi.advanceTimersByTimeAsync(sseRetryDelay(0));
+    expect(calls).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(sseRetryDelay(1) - 1);
+    expect(calls).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(calls).toHaveLength(2);
+    up = true;
+    await vi.advanceTimersByTimeAsync(sseRetryDelay(2));
+    expect(calls).toHaveLength(3);
+    expect(sources).toHaveLength(2);
+    expect([sseRetryDelay(0), sseRetryDelay(3), sseRetryDelay(10)]).toEqual([1000, 8000, 30_000]);
+  });
+
+  test('重连成功收到 ready 后退避清零：下次再断从 1 秒重新算', async () => {
+    vi.useFakeTimers();
+    const { es, sources, calls } = setup({ 'GET /api/me': () => ({ body: ME }) });
+    killByBackend(es);
+    await vi.advanceTimersByTimeAsync(sseRetryDelay(0));
+    const second = sources[1];
+    if (!second) throw new Error('没重连');
+    killByBackend(second);
+    await vi.advanceTimersByTimeAsync(sseRetryDelay(1));
+    const third = sources[2];
+    if (!third) throw new Error('没重连');
+    third.emit('ready');
+    killByBackend(third);
+    await vi.advanceTimersByTimeAsync(sseRetryDelay(0));
+    expect(sources).toHaveLength(4);
+    expect(calls).toHaveLength(3);
+  });
+
+  test('探 /api/me 回 401（登录过期）：跳登录页，不再重连', async () => {
+    vi.useFakeTimers();
+    const { es, sources, statuses, onUnauthorized } = setup({
+      'GET /api/me': () => ({ status: 401, body: { error: { code: 'unauthorized', message: '要先登录' } } }),
+    });
+    killByBackend(es);
+    await vi.advanceTimersByTimeAsync(sseRetryDelay(0));
+    expect(onUnauthorized).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    expect(sources).toHaveLength(1);
+    expect(statuses.at(-1)).toBe('down');
+  });
+
+  test('取消订阅：关掉连接，等着的重连也不再发生', async () => {
+    vi.useFakeTimers();
+    const { es, sources, stop, calls } = setup({ 'GET /api/me': () => ({ body: ME }) });
+    killByBackend(es);
+    stop();
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    expect(calls).toHaveLength(0);
+    expect(sources).toHaveLength(1);
+    const again = setup({ 'GET /api/me': () => ({ body: ME }) });
+    again.stop();
+    expect(again.es.closed).toBe(true);
   });
 });

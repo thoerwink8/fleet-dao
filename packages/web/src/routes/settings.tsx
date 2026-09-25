@@ -247,7 +247,7 @@ export default function Settings() {
   const theme = useTheme();
   const api = useApi();
   const { data: me } = useMe();
-  const { repos } = useRepo();
+  const { repos, loading: reposLoading, error: reposError } = useRepo();
   const settings = useSettings();
   const find = (k: SettingKey) => settings.data?.settings.find((s) => s.key === k);
 
@@ -348,7 +348,16 @@ export default function Settings() {
         title="仓库"
         description="接进来的仓。一个仓接进来要满足：测试能跑、有一页 AGENTS.md。"
       >
-        <ul className="max-w-xl divide-y rounded-xl border bg-card">
+        {reposError ? (
+          <div className="mb-3 max-w-xl">
+            <LoadError what="仓列表" error={reposError} />
+            {repos.length ? (
+              <p className="mt-1 text-xs text-muted-foreground">下面是上次读到的，可能不全。</p>
+            ) : null}
+          </div>
+        ) : null}
+        {reposLoading ? <LoadingRows rows={1} /> : null}
+        <ul className="max-w-xl divide-y rounded-xl border bg-card empty:hidden">
           {repos.map((r) => (
             <li key={r.id} className="flex items-center gap-3 px-4 py-3">
               <FolderGit2 className="size-4 text-muted-foreground" aria-hidden />
@@ -362,7 +371,10 @@ export default function Settings() {
               </div>
             </li>
           ))}
-          {repos.length === 0 ? <li className="px-4 py-3 text-sm text-muted-foreground">还没有仓</li> : null}
+          {/* 只有真读到了一个空列表才说「还没有仓」；没读成、还在读都不算。 */}
+          {repos.length === 0 && !reposLoading && !reposError ? (
+            <li className="px-4 py-3 text-sm text-muted-foreground">还没有仓</li>
+          ) : null}
         </ul>
       </Section>
 

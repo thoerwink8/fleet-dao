@@ -32,6 +32,18 @@ export function useNow(): number {
   );
 }
 
+/**
+ * 随时间变的一句话（「已 12 分钟」之类）：每秒按秒表算一次，文字真的变了才让组件重画。
+ * 看板上几百张卡各用各的，秒表走一下只重画文字变了的那几张，而不是全部。
+ */
+export function useTimeText(render: (now: number) => string): string {
+  return useSyncExternalStore(
+    subscribeClock,
+    () => render(clockNow),
+    () => render(clockNow),
+  );
+}
+
 export function useMediaQuery(query: string): boolean {
   const subscribe = useCallback(
     (cb: () => void) => {
