@@ -33,7 +33,7 @@ const exampleText = repoFile(EXAMPLE_PATH);
 const example = () => parseCatalog(exampleText, EXAMPLE_PATH);
 
 const CLAUDE_ROUTES = ['claude-solo:opus-5.5:claude-code', 'claude-carpool:opus-5.5:claude-code'];
-/** TypeSafe 的 Jev：只挂判断阶段（packages/jev 按判断阶段排第一的路由起后端）。 */
+/** TypeSafe 的 Jev：只挂判断阶段，排第一（packages/jev 接进引擎以后按判断阶段排第一的路由起后端）。 */
 const JEV_ROUTE = 'jev:jev-1.13:api-shell';
 
 let t: TestDb;
@@ -118,9 +118,16 @@ describe('示例配置 deploy/examples/catalog.example.json', () => {
     expect([rows.stagePolicies.length, rows.stagePolicyRoutes.length]).toEqual([8, 3 + 7 + 6 * 8]);
   });
 
-  it('拼车号是备池：会话用户 fleet-agent-carpool、并发 2（design 第九节「并发起步 2」）', () => {
-    const carpool = example().pools.find((p) => p.id === 'claude-carpool');
-    expect([carpool?.runAsUser, carpool?.maxConcurrency]).toEqual(['fleet-agent-carpool', 2]);
+  it('两个 Claude 池：独享号 4 + 拼车号 2 = 6，对上 design 第四节起步的 6 个会话；拼车号的会话用户是 fleet-agent-carpool（引擎按它认出备池）', () => {
+    const pool = (id: string) => example().pools.find((p) => p.id === id);
+    expect([pool('claude-solo')?.runAsUser, pool('claude-solo')?.maxConcurrency]).toEqual([
+      'fleet-agent-dedicated',
+      4,
+    ]);
+    expect([pool('claude-carpool')?.runAsUser, pool('claude-carpool')?.maxConcurrency]).toEqual([
+      'fleet-agent-carpool',
+      2,
+    ]);
   });
 
   it('账号池和额度读取器的配置样例一一对应（额度按池入库，池不在库里就写不进去）', () => {
@@ -179,6 +186,15 @@ describe('示例配置 deploy/examples/catalog.example.json', () => {
     ]);
   });
 
+  it('说明里指的 docs/ops.md 第九节「目录配置」在（那一段挪走、改名了这里会红）', () => {
+    expect(exampleText).toContain('docs/ops.md 第九节「目录配置」');
+    const ops = repoFile('docs/ops.md').split('\n');
+    const start = ops.findIndex((l) => l.startsWith('## 九、'));
+    const end = ops.findIndex((l, i) => i > start && l.startsWith('## '));
+    expect(start).toBeGreaterThan(-1);
+    expect(ops.slice(start, end === -1 ? undefined : end).some((l) => l.startsWith('目录配置（'))).toBe(true);
+  });
+
   it('不带账号信息：没有邮箱、IP、像密钥的长串', () => {
     expect(exampleText).not.toMatch(/[\w.+-]+@[\w-]+\.[\w.]+/);
     expect(exampleText).not.toMatch(/\b\d{1,3}(\.\d{1,3}){3}\b/);
@@ -234,7 +250,7 @@ describe('只补缺，跑几遍都一样', () => {
     expect(again.kept).toEqual(
       expect.arrayContaining([
         'channels.cursor.enabled：库里是 false，配置是 true，没动',
-        'pools.claude-solo.maxConcurrency：库里是 1，配置是 5，没动',
+        'pools.claude-solo.maxConcurrency：库里是 1，配置是 4，没动',
         `routes.${solo}.upstreamModel：库里是 "claude-opus-5-5[1m]"，配置是 "claude-opus-5-5"，没动`,
         '阶段 execute：装载器早先排过，之后不再动它，和配置不一样，没动',
       ]),

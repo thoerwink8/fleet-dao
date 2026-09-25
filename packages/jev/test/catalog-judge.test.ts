@@ -1,5 +1,5 @@
-// 目录样例（deploy/examples/catalog.example.json）的判断阶段照 packages/jev 排：它按判断阶段排第一的路由起后端，
-// 开着的每一条都得是这里起得了的；关着的两条 Claude 是因为 Claude 判断后端还没接上。
+// 目录样例（deploy/examples/catalog.example.json）的判断阶段照 packages/jev 排：接进引擎以后，它按判断阶段排第一的路由
+// 起后端（backendForRoute，现在还没有调用方），所以开着的每一条都得是这里起得了的；关着的两条 Claude 是因为 Claude 判断后端还没接上。
 import { readFileSync } from 'node:fs';
 import { parseCatalog } from '@fleet-dao/db';
 import { describe, expect, it } from 'vitest';
@@ -31,7 +31,7 @@ describe('目录样例的判断阶段照 packages/jev 排', () => {
     }
   });
 
-  it('关着的两条 Claude 现在确实接不了（哪天接上 fleet-agent-scope，这条会红：样例里把它们打开，法国在驾驶舱里开）', async () => {
+  it('关着的两条 Claude 现在确实接不了（哪天接上 fleet-agent-scope，这条会红：样例里把它们打开，法国库里的照 docs/ops.md 第九节「目录配置」改）', async () => {
     const off = judge.filter((e) => !e.enabled).map((e) => judgeRoute(e.routeId));
     expect(off.map((r) => r.hostId)).toEqual(['claude-code', 'claude-code']);
     for (const route of off) {

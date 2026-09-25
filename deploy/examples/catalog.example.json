@@ -24,10 +24,10 @@
   ],
   "pools": [
     {
-      "_说明": "Claude 订阅 · 独享组织，主池：AI 帅位、合并队列、长的写码活派这里。会话跑在 fleet-agent-dedicated（这个用户的 reclaude 挂着独享组织，从不切号）。并发 5 照 plan 风险表「每个账号池设并发上限，从 5 个起步」，没量过。",
+      "_说明": "Claude 订阅 · 独享组织，主池：AI 帅位、合并队列、长的写码活派这里。会话跑在 fleet-agent-dedicated（这个用户的 reclaude 挂着独享组织，从不切号）。并发 4：加上拼车号的 2 个共 6 个，对上 design 第四节起步的 6 个会话；每个会话按 1.2–1.6G 算，12G 的机器放 7 个太紧。没量过。",
       "id": "claude-solo",
       "channelId": "claude-sub",
-      "maxConcurrency": 5,
+      "maxConcurrency": 4,
       "runAsUser": "fleet-agent-dedicated"
     },
     {
@@ -147,7 +147,7 @@
     }
   ],
   "stages": {
-    "_说明": "构建期所有阶段都先用 Opus 5.5、经两个 Claude 池（设计文档「已定」表第 8 条）：独享号在前、拼车号在后；拼车号只接短而轻的活由引擎按会话用户管，不靠这里的排序。其余路由挂在后面、默认关着（P3 接好插头、登录之后在驾驶舱打开）。硬禁令（GPT 不做 UI、不用 Fable）由代码管，装载器也按它拒收：ui 单列一份、不挂 GPT（关着也不行）。judge 照 packages/jev：它按判断阶段排第一的路由起后端，眼下只接得了 TypeSafe；两条 Claude 在它的 Claude 后端接上 fleet-agent-scope 之前接不了，挂着、关着。每个阶段只在第一次装的时候排，之后驾驶舱里怎么改都不覆盖；要给某个阶段单排，就加一个以阶段名为键的列表。",
+    "_说明": "构建期除了判断阶段，都用 Opus 5.5、经两个 Claude 池（设计文档「已定」表第 8 条）：独享号在前、拼车号在后；拼车号只接短而轻的活由引擎按会话用户管，不靠这里的排序。其余路由挂在后面、默认关着，P3 接好插头、登录之后再打开。硬禁令（GPT 不做 UI、不用 Fable）由代码管，装载器也按它拒收：ui 单列一份、不挂 GPT（关着也不行）。judge：Claude 判断后端接上之前先用 TypeSafe 的 Jev（设计文档第十一节，2026-09-25 定）。packages/jev 接进引擎以后按判断阶段排第一的路由起后端（backendForRoute，现在还没有调用方）；它只接得了 TypeSafe，两条 Claude 挂着、关着。每个阶段只在第一次装的时候排，之后装载器不再动它；装进去之后怎么改见 docs/ops.md 第九节「目录配置」。要给某个阶段单排，就加一个以阶段名为键的列表。",
     "default": [
       { "routeId": "claude-solo:opus-5.5:claude-code", "enabled": true },
       { "routeId": "claude-carpool:opus-5.5:claude-code", "enabled": true },
