@@ -7,7 +7,7 @@
 // 只有调用方自己的代码错（题写坏了、没说判的是谁）不记：那种题登记不进库，测试里就该暴露。
 // 不抛：任何出错都变成一个没判出来的 verdict。
 import { randomUUID } from 'node:crypto';
-import { redact, sameModel } from '@fleet-dao/adapters';
+import { sameModel } from '@fleet-dao/adapters';
 import type { Db } from '@fleet-dao/db';
 import {
   type BackendRequest,
@@ -35,6 +35,7 @@ import {
   questionRev,
   renderPrompt,
 } from './questions.ts';
+import { scrubHead } from './scrub.ts';
 import {
   type AnswerRow,
   type AnswerSample,
@@ -103,10 +104,10 @@ export interface Jev {
 const DETAIL_CHARS = 500;
 /**
  * 没判出来的原文进库、交回调用方之前一律过这一道：上游报错、认不出的回包里可能夹着令牌、邮箱、IP（驾驶舱看得到）。
- * 整段脱敏之后再截到 500 字，免得截断处把令牌截成认不出的半截。
+ * 只脱敏开头一段、截到 500 字（scrubHead 截在令牌之外，不会留半截）。
  */
 function clean(detail: string): string {
-  const text = redact(detail, Number.POSITIVE_INFINITY);
+  const text = scrubHead(detail, DETAIL_CHARS + 1);
   return text.length > DETAIL_CHARS ? `${text.slice(0, DETAIL_CHARS)}…` : text;
 }
 const message = (err: unknown) => (err instanceof Error ? err.message : String(err));

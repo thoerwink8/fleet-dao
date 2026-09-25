@@ -2,8 +2,8 @@
 // 库里只记摘要：长度、哈希、开头（私聊字段不留开头），加上调用方给的能复原原文的引用（issue 号 + updated_at 之类）。
 // 开头先脱敏再截：驾驶舱看得到这一列，证据原文里可能夹着令牌、邮箱、IP。
 import { createHash } from 'node:crypto';
-import { redact } from '@fleet-dao/adapters';
 import type { EvidenceField, QuestionDef } from './questions.ts';
+import { scrubHead } from './scrub.ts';
 
 export type EvidenceInput = Readonly<Record<string, string | undefined>>;
 
@@ -43,8 +43,7 @@ export function digestEvidence(fields: readonly EvidenceField[], evidence: Evide
     out[f.key] = {
       chars: text.length,
       sha: createHash('sha256').update(text).digest('hex').slice(0, 16),
-      // 整段脱敏之后再截：先截会把跨过截断处的令牌截成半截，半截认不出、就原样漏进库。
-      ...(f.private ? {} : { head: redact(text, Number.POSITIVE_INFINITY).slice(0, HEAD_CHARS) }),
+      ...(f.private ? {} : { head: scrubHead(text, HEAD_CHARS) }),
     };
   }
   return out;

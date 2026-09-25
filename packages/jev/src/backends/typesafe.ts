@@ -12,8 +12,8 @@ import {
   type BackendResult,
   estimateTokens,
   type JevBackend,
-  upstreamExcerpt,
 } from '../backend.ts';
+import { scrubHead } from '../scrub.ts';
 
 export interface TypesafeOptions {
   /** 例如 https://api.typesafe.ai/v1/systemone，从机器配置读。 */
@@ -94,11 +94,11 @@ export function createTypesafeBackend(options: TypesafeOptions): JevBackend {
         json = undefined;
       }
       if (res.status !== 200) {
-        return fail(statusReason(res.status), `HTTP ${res.status}：${upstreamExcerpt(text, 300)}`, {
+        return fail(statusReason(res.status), `HTTP ${res.status}：${scrubHead(text, 300)}`, {
           inputTokens: reportedTokens(json),
         });
       }
-      if (json === undefined) return fail('bad_answer', `回包不是 JSON：${upstreamExcerpt(text, 200)}`);
+      if (json === undefined) return fail('bad_answer', `回包不是 JSON：${scrubHead(text, 200)}`);
       const parsed = parseTypesafeResponse(json, request);
       if (!parsed.ok) return fail('bad_answer', parsed.why, { inputTokens: reportedTokens(json) });
       if (parsed.model !== options.model) {

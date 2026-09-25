@@ -20,8 +20,8 @@ import {
   type BackendResult,
   estimateTokens,
   type JevBackend,
-  upstreamExcerpt,
 } from '../backend.ts';
+import { scrubHead } from '../scrub.ts';
 
 export interface ClaudeJudgeOptions {
   /** 起 reclaude 的命令（绝对路径）。没有默认值：谁要起真会话谁显式给。 */
@@ -91,7 +91,7 @@ export function parseClaudeAnswers(
   }
   if (!json || typeof json !== 'object' || Array.isArray(json)) {
     // 回复可能照抄了证据里的令牌：先脱敏再截。
-    return { ok: false, why: `回复里找不到 JSON：${upstreamExcerpt(trimmed, 200)}` };
+    return { ok: false, why: `回复里找不到 JSON：${scrubHead(trimmed, 200)}` };
   }
   const body = json as Record<string, unknown>;
   const answers: Record<string, BackendAnswer> = {};
@@ -196,10 +196,12 @@ function toResult(
   }
   const parsed = parseClaudeAnswers(result.text ?? '', request);
   if (!parsed.ok) return fail('bad_answer', parsed.why, observed);
+  // 插头对终帧里没有的 token 字段不拿 0 顶上：读到几项加几项，一项都没有就按字数估。
   const usage = result.usage;
-  const tokens = usage
-    ? usage.inputTokens + usage.cacheReadInputTokens + usage.cacheCreationInputTokens
-    : undefined;
+  const parts = [usage?.inputTokens, usage?.cacheReadInputTokens, usage?.cacheCreationInputTokens].filter(
+    (n): n is number => typeof n === 'number',
+  );
+  const tokens = parts.length > 0 ? parts.reduce((sum, n) => sum + n, 0) : undefined;
   return {
     ok: true,
     answers: parsed.answers,

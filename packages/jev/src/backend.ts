@@ -1,7 +1,6 @@
 // 判断题后端的接口：旧系统的 Jev 服务（TypeSafe）、经插头起的 Claude 会话都照这一份实现。
 // 后端只管把题问出去、把答案原样交回来；答案在不在题面里、把握够不够、要不要拦，由 ask 统一判（jev.ts）。
 // 后端不抛：出错一律返回 ok:false + 原因。用哪条路由、哪个模型由调度台的「判断」阶段配（backendForRoute）。
-import { redact } from '@fleet-dao/adapters';
 
 export interface BackendQuestion {
   /** 题号（jev_questions.id），答案按它交回。 */
@@ -65,14 +64,6 @@ export interface JevBackend {
   /** 按量计费的后端才有：每百万输入 token 多少美元（输出不计费）。有它就受每日花费上限管；订阅内的后端不给。 */
   readonly usdPerMTok?: number;
   ask(request: BackendRequest): Promise<BackendResult>;
-}
-
-/**
- * 上游原文（报错回包、认不出的回复）放进 detail 之前取一段：先整段脱敏再截。
- * 先截再脱敏会把跨过截断处的令牌截成认不出的半截，半截就原样漏进库。
- */
-export function upstreamExcerpt(text: string, max: number): string {
-  return redact(text, Number.POSITIVE_INFINITY).slice(0, max);
 }
 
 /** 按输入 token 折算的美元花费。 */
