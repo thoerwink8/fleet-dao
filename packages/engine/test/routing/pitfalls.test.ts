@@ -45,13 +45,17 @@ describe('Q11 读数过期不当现值', () => {
     expect(r.verdicts[1]?.nudges.map((n) => n.kind)).toEqual(['quota-unknown']);
   });
 
-  it('过期的备池不派', () => {
-    const stale = route('stale', {
-      poolRole: 'backup',
-      quota: 'unknown',
-      windows: [win({ state: 'stale' })],
+  it('过期的备池也不当「还够」：只放一个试探，已经有一个在跑就等', () => {
+    const stale = (inFlight: number) =>
+      route('stale', { poolRole: 'backup', quota: 'unknown', windows: [win({ state: 'stale' })], inFlight });
+    expect(chooseRoute(input([stale(0)], { stage: 'triage' }))).toMatchObject({
+      kind: 'dispatch',
+      trial: 'quota-probe',
     });
-    expect(chooseRoute(input([stale], { stage: 'triage' })).kind).toBe('wait');
+    expect(chooseRoute(input([stale(1)], { stage: 'triage' }))).toMatchObject({
+      kind: 'wait',
+      waitFor: 'slot',
+    });
   });
 });
 
@@ -131,7 +135,7 @@ describe('R2 改选路逻辑要对每个阶段读回首选', () => {
       plan: firstChoice('plan', ['solo', 'carpool']),
       execute: firstChoice('execute', ['solo', 'carpool', 'gpt']),
       ui: firstChoice('ui', ['gpt', 'solo']),
-      review: firstChoice('review', ['gpt', 'solo']),
+      review: firstChoice('review', ['gpt', 'solo', 'carpool']),
       research: firstChoice('research', ['shell', 'solo']),
     };
     expect(table).toEqual({
@@ -141,7 +145,7 @@ describe('R2 改选路逻辑要对每个阶段读回首选', () => {
       plan: 'solo', // 重活，拼车号不接
       execute: 'solo',
       ui: 'solo', // GPT 不做 UI
-      review: 'gpt',
+      review: 'carpool', // 审查算轻活（design §九：拼车号派审查），周额度快清零：提到最前
       research: 'solo', // 接口外壳不会读仓库
     });
   });

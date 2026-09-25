@@ -53,6 +53,15 @@ describe('输入认不出就明确失败', () => {
   it('认不出的被挡原因：不当成没被挡', () =>
     fails(() => one({ blockers: ['paused' as never] }), /被挡原因认不出/));
 
+  it('额度状态和被挡原因对不上：不按其中一边往下派（未知的备池会被放去试探，用满的主池会被照派）', () => {
+    fails(() => one({ quota: 'exhausted', blockers: [] }), /额度状态（exhausted）和被挡原因（无）对不上/);
+    fails(
+      () => one({ poolRole: 'backup', quota: 'unknown', blockers: ['quota-exhausted'] }),
+      /额度状态（unknown）和被挡原因（quota-exhausted）对不上/,
+    );
+    fails(() => one({ quota: 'ok', blockers: ['no-slot', 'quota-exhausted'] }), /对不上/);
+  });
+
   it('认不出的额度状态、池主备、熔断判定', () => {
     fails(() => one({ quota: 'fine' as never }), /额度状态认不出/);
     fails(() => one({ poolRole: 'spare' as never }), /池主备认不出/);
@@ -101,10 +110,10 @@ describe('策略给了但不对就报错，不悄悄换成默认', () => {
 
   it('只改给了的项，其余照默认', () => {
     const p = resolveRoutingPolicy({
-      stageWeight: { review: 'light' } as never,
+      stageWeight: { plan: 'light' } as never,
       backupNeedPerTask: { '5h': 0.2 },
     });
-    expect(p.stageWeight.review).toBe('light');
+    expect(p.stageWeight.plan).toBe('light');
     expect(p.stageWeight.execute).toBe('heavy');
     expect(p.backupNeedPerTask['5h']).toBe(0.2);
     expect(p.backupNeedPerTask['7d']).toBe(0.03);

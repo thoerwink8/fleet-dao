@@ -1,6 +1,6 @@
 // 过滤：每条规则一正一反。被挡的留原因，no-slot 不算坏（等空位），额度没读成的主池不挡。
 import { describe, expect, it } from 'vitest';
-import { blocksFor, type FilterContext, hostUnfit } from '../../src/routing/filter.ts';
+import { backupProbeReason, blocksFor, type FilterContext, hostUnfit } from '../../src/routing/filter.ts';
 import { groupOf } from '../../src/routing/group.ts';
 import {
   DEFAULT_ROUTING_POLICY,
@@ -209,15 +209,49 @@ describe('备池（拼车号）', () => {
     expect(codes(r, ctx({ weight: 'light' }))).toEqual(['backup-quota-short']);
   });
 
-  it('额度没读成：判不了够不够，不派（主池额度未知照常派）', () => {
-    const r = carpool({ quota: 'unknown', windows: [] });
-    const blocks = blocksFor(r, entry('c', 0), ctx({ weight: 'light' }));
-    expect(blocks.map((b) => b.code)).toEqual(['backup-quota-unknown']);
-    expect(blocks[0]?.text).toContain('额度未知');
-  });
+  describe('额度未知：只放一个轻活去试探', () => {
+    const light = ctx({ weight: 'light' });
+    const blind = (inFlight: number) => carpool({ quota: 'unknown', windows: [], inFlight });
 
-  it('已用比例算不出来：同样判不了，不派', () => {
-    const r = carpool({ windows: [win({ used: null })] });
-    expect(codes(r, ctx({ weight: 'light' }))).toEqual(['backup-quota-unknown']);
+    it('没有在跑的：放这一个', () => {
+      expect(codes(blind(0), light)).toEqual([]);
+    });
+
+    it('已经有一个在跑：等它的结果（等空位，不是等额度）', () => {
+      const blocks = blocksFor(blind(1), entry('c', 0), light);
+      expect(blocks.map((b) => b.code)).toEqual(['backup-quota-unknown']);
+      expect(blocks[0]?.text).toBe(
+        '拼车号额度未知（没读成或读数过期），只放一个试探，已经有 1 个在跑：等它的结果',
+      );
+      expect(groupOf(blocks)).toEqual({ kind: 'wait', waitFor: 'slot', until: null });
+    });
+
+    it('并发临时压到 1：读到了的在跑 1 个照样放（平时上限是 2）', () => {
+      expect(codes(carpool({ inFlight: 1 }), light)).toEqual([]);
+      expect(codes(blind(1), light)).toEqual(['backup-quota-unknown']);
+    });
+
+    it('重活不拿来试探', () => {
+      expect(codes(blind(0), ctx({ weight: 'heavy' }))).toEqual(['backup-heavy']);
+    });
+
+    it('已用比例算不出来：同样按额度未知，只放一个', () => {
+      const r = (inFlight: number) => carpool({ windows: [win({ used: null })], inFlight });
+      expect(codes(r(0), light)).toEqual([]);
+      expect(codes(r(1), light)).toEqual(['backup-quota-unknown']);
+      expect(backupProbeReason(r(0))).toBe('周额度算不出还剩多少');
+    });
+
+    it('读到了的、主池、已经用满的都不算试探', () => {
+      expect(backupProbeReason(carpool())).toBeNull();
+      expect(backupProbeReason(route('a', { quota: 'unknown', windows: [] }))).toBeNull();
+      const full = carpool({
+        quota: 'exhausted',
+        blockers: ['quota-exhausted'],
+        windows: [win({ state: 'exhausted', used: 1 })],
+      });
+      expect(backupProbeReason(full)).toBeNull();
+      expect(codes(full, light)).toEqual(['quota-exhausted']);
+    });
   });
 });

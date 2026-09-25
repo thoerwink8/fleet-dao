@@ -57,8 +57,8 @@ export interface RouteRecord {
 }
 
 /**
- * 主池 / 备池。独享号是主池，拼车号是备池：备池只接短而轻的活、并发另有上限、剩余不够跑一个活就不派。
- * 端口按池的 orgKind 填（carpool → backup），别的渠道默认 primary。
+ * 主池 / 备池。独享号是主池，拼车号是备池：备池只接短而轻的活、并发另有上限、剩余不够跑一个活就不派，
+ * 额度未知时只放一个试探。端口按池的 orgKind 填（carpool → backup），别的渠道默认 primary。
  */
 export type PoolRole = 'primary' | 'backup';
 
@@ -171,7 +171,9 @@ export type TrialKind =
   /** 熔断半开，这一单就是那一个试探。 */
   | 'breaker'
   /** 候选全都熔断：多半是共用的一层坏了，放最早到点的一条去试探，并报警。 */
-  | 'all-open';
+  | 'all-open'
+  /** 备池额度未知：只放这一个去试探，被拒就按原文的清零时刻避开这个池。 */
+  | 'quota-probe';
 
 export type ChooseRouteResult =
   | {
@@ -183,6 +185,7 @@ export type ChooseRouteResult =
       hostId: HostId;
       /** 一句「为什么派给它」，驾驶舱和飞书直接显示。 */
       why: string;
+      /** 几种试探同时成立时取排在前面的（explore → breaker → quota-probe），why 里都写。 */
       trial: TrialKind | null;
       /** 派了但要报警（候选全熔断时放的试探）。 */
       alarm: string | null;

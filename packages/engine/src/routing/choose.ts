@@ -1,7 +1,7 @@
 // 选路（设计 §九「选路」五条 + §十二「一条路由报繁忙，所有任务一起避开」由熔断判定带进来）。
 // 纯函数、确定性：同样输入同样输出；不取时钟、不随机——现在几点、试探用的随机数都由调用方给，引擎记进历史。
 
-import { blocksFor, type FilterContext } from './filter.ts';
+import { backupProbeReason, blocksFor, type FilterContext } from './filter.ts';
 import { type BlockGroup, groupOf } from './group.ts';
 import { routeLabel, STAGE_NAMES, stamp } from './names.ts';
 import { resolveRoutingPolicy } from './policy.ts';
@@ -70,10 +70,18 @@ export function chooseRoute(input: ChooseRouteInput): ChooseRouteResult {
     const explore = pickTrial(input, ready, policy);
     const chosen = explore ?? first;
     const breakerTrial = chosen.item.route.breaker.admit === 'trial';
-    const trial: TrialKind | null = explore ? 'explore' : breakerTrial ? 'breaker' : null;
+    const probe = probeNote(chosen.item.route);
+    const trial: TrialKind | null = explore
+      ? 'explore'
+      : breakerTrial
+        ? 'breaker'
+        : probe
+          ? 'quota-probe'
+          : null;
     let why = explore
       ? `试探：${stageName}阶段第 ${explore.item.humanIndex + 1} 条 ${routeLabel(explore.item.route)}（首选是 ${routeLabel(first.item.route)}；约 ${Math.round(policy.trialRatio * 100)}% 的任务派给非首选，攒战绩）`
       : whyFirst(stageName, chosen, judged);
+    if (explore && probe) why += `；${probe}`;
     if (breakerTrial) why += '；熔断半开，这一单当试探';
     return dispatch(chosen.item.route, why, trial, null, verdicts);
   }
@@ -132,8 +140,9 @@ function whyFirst(stageName: string, chosen: Judged, judged: Judged[]): string {
     if (fast && item.humanIndex > at)
       parts.push(fast.text.replace(/往前提$/, at === 0 ? '提到最前' : `提到第 ${at + 1}`));
   }
-  const unknown = item.nudges.find((n) => n.kind === 'quota-unknown');
-  if (unknown || (item.pinned && item.route.quota === 'unknown')) parts.push('额度未知（没读成或读数过期）');
+  const probe = probeNote(item.route);
+  if (probe) parts.push(probe);
+  else if (item.route.quota === 'unknown') parts.push(QUOTA_UNKNOWN);
   // 人排在它前面、这次没派的：各自为什么（被挡，或被微调挪到了后面）。
   const passed = judged.filter((j) => j !== chosen && j.item.humanIndex < item.humanIndex);
   const notes = passed.map((j) => {
@@ -256,6 +265,18 @@ function chooseTaskRoute(input: ChooseRouteInput, route: RouteFacts, ctx: Filter
     };
   }
   const breakerTrial = route.breaker.admit === 'trial';
-  const why = `任务指定的路由：${label}${breakerTrial ? '；熔断半开，这一单当试探' : ''}`;
-  return dispatch(route, why, breakerTrial ? 'breaker' : null, null, [verdict]);
+  const probe = probeNote(route);
+  const parts = [`任务指定的路由：${label}`];
+  if (probe) parts.push(probe);
+  else if (route.quota === 'unknown') parts.push(QUOTA_UNKNOWN);
+  if (breakerTrial) parts.push('熔断半开，这一单当试探');
+  const trial: TrialKind | null = breakerTrial ? 'breaker' : probe ? 'quota-probe' : null;
+  return dispatch(route, parts.join('；'), trial, null, [verdict]);
+}
+
+const QUOTA_UNKNOWN = '额度未知（没读成或读数过期）';
+
+/** 派给额度未知的备池：这一单就是那一个试探（filter.ts 的 backupBlocks 只放一个）。 */
+function probeNote(route: RouteFacts): string | null {
+  return backupProbeReason(route) === null ? null : `${route.poolName}额度未知，只放一个试探`;
 }

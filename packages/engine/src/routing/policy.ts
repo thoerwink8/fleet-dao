@@ -76,7 +76,10 @@ export interface RoutingPolicy {
    * 这是估的，没有量过；攒够会话用量后换成「该阶段在该池上的 p80 用量」。没列的种类按 other 算。
    */
   backupNeedPerTask: Partial<Record<QuotaWindowKind, number>>;
-  /** 各阶段默认的轻重（任务没给轻重时用）：分诊、判断题、写需求文档算短而轻，其余算重。 */
+  /**
+   * 各阶段默认的轻重（任务没给轻重时用）：分诊、判断题、写需求文档、审查算短而轻，其余算重。
+   * design §九「主池与备池」：拼车号派审查、判断题、巡检这类短而独立的活；巡检任务由引擎在任务上标 light。
+   */
   stageWeight: Record<StageKind, TaskWeight>;
 }
 
@@ -109,7 +112,7 @@ export const DEFAULT_ROUTING_POLICY: Readonly<RoutingPolicy> = Object.freeze<Rou
     plan: 'heavy',
     execute: 'heavy',
     ui: 'heavy',
-    review: 'heavy',
+    review: 'light',
     research: 'heavy',
   },
 });

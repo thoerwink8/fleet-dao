@@ -117,7 +117,11 @@ function avoidReason(route: RouteFacts, ctx: FilterContext): string | null {
 
 /**
  * 备池（拼车号）三条：只接短而轻的活；同时最多 backupMaxConcurrency 个（和池自己的上限取小的）；
- * 适用的每个窗口剩余都要够跑一个活。额度没读成的备池判不了够不够，不派（主池额度未知照常派、排后面）。
+ * 适用的每个窗口剩余都要够跑一个活。
+ * 额度未知时判不了够不够：只放一个轻活去试探，并发临时压到 1。拼车号的真实上限只有真实请求被拒最准
+ * （/usage 看不见成员上限，design §十），读取器一坏就整个停派，等于渠道静默闲置。那个会话被拒时，被拒原文记成
+ * 一条用满读数（清零时刻取原文），候选查询随之给出 quota-exhausted，所有任务避开到清零；被拒的任务由失败分流 QT1 换池。
+ * 主池额度未知照常派、排在读到了的后面（rank.ts）。
  */
 function backupBlocks(route: RouteFacts, ctx: FilterContext): Block[] {
   const out: Block[] = [];
@@ -125,42 +129,40 @@ function backupBlocks(route: RouteFacts, ctx: FilterContext): Block[] {
   if (ctx.weight !== 'light') {
     out.push(hard('backup-heavy', `${route.poolName}是备池，只接短而轻的活，这一单是重活`));
   }
-  const cap = Math.min(route.maxConcurrency, policy.backupMaxConcurrency);
+  const probe = backupProbeReason(route);
+  const cap = probe === null ? Math.min(route.maxConcurrency, policy.backupMaxConcurrency) : 1;
   if (route.inFlight >= cap && !route.blockers.includes('no-slot')) {
     out.push({
-      code: 'backup-no-slot',
-      text: `${route.poolName}是备池，同时最多 ${cap} 个，已经在跑 ${route.inFlight} 个`,
+      code: probe === null ? 'backup-no-slot' : 'backup-quota-unknown',
+      text:
+        probe === null
+          ? `${route.poolName}是备池，同时最多 ${cap} 个，已经在跑 ${route.inFlight} 个`
+          : `${route.poolName}额度未知（${probe}），只放一个试探，已经有 ${route.inFlight} 个在跑：等它的结果`,
       wait: 'slot',
       until: null,
     });
   }
-  if (route.blockers.includes('quota-exhausted')) return out;
-  const unknown = {
-    code: 'backup-quota-unknown',
-    wait: 'quota',
-    until: null,
-  } as const;
-  if (route.quota !== 'ok') {
-    out.push({
-      ...unknown,
-      text: `${route.poolName}是备池，额度未知（没读成或读数过期），够不够跑一个活判不了`,
-    });
-    return out;
-  }
+  if (probe !== null || route.blockers.includes('quota-exhausted')) return out;
   for (const w of route.windows) {
     if (w.applies !== 'yes' || w.state !== 'ok') continue;
     const left = remaining(w);
-    if (left === null) {
-      out.push({
-        ...unknown,
-        text: `${route.poolName}是备池，${windowName(w)}算不出还剩多少，够不够跑一个活判不了`,
-      });
-      continue;
-    }
+    // 算不出还剩多少的，上面已经按额度未知放试探了。
+    if (left === null) continue;
     const need = needPerTask(w, policy);
     if (left < need) out.push(shortBlock(route, w, left, need, ctx.now));
   }
   return out;
+}
+
+/**
+ * 备池额度未知（没读成、读数过期，或适用的窗口算不出还剩多少）的白话原因：这时只放一个试探。
+ * 主池、已经用满的、读到了的为空。
+ */
+export function backupProbeReason(route: RouteFacts): string | null {
+  if (route.poolRole !== 'backup' || route.quota === 'exhausted') return null;
+  if (route.quota === 'unknown') return '没读成或读数过期';
+  const blind = route.windows.find((w) => w.applies === 'yes' && w.state === 'ok' && remaining(w) === null);
+  return blind ? `${windowName(blind)}算不出还剩多少` : null;
 }
 
 function needPerTask(w: RouteWindow, policy: RoutingPolicy): number {

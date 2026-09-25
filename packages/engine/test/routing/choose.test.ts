@@ -171,6 +171,28 @@ describe('任务指定了路由', () => {
     const r = chooseRoute(input([route('a'), route('x')], { order: [entry('a', 0)], taskRouteId: 'x' }));
     expect(picked(r)).toBe('x');
   });
+
+  it('指定的主池额度未知：照派，理由写「额度未知」', () => {
+    const r = chooseRoute(
+      input([route('a'), route('b', { quota: 'unknown', windows: [] })], { taskRouteId: 'b' }),
+    );
+    expect(r).toMatchObject({ kind: 'dispatch', routeId: 'b', trial: null });
+    if (r.kind === 'dispatch')
+      expect(r.why).toBe('任务指定的路由：池b · Opus 5.5 · Claude Code；额度未知（没读成或读数过期）');
+  });
+
+  it('指定的备池额度未知：放这一个当试探；已经有一个在跑就等它，不换路由', () => {
+    const [solo, carpool] = soloAndCarpool({}, { quota: 'unknown', windows: [] });
+    const r = chooseRoute(input([solo, carpool], { stage: 'judge', taskRouteId: 'carpool' }));
+    expect(r).toMatchObject({ kind: 'dispatch', routeId: 'carpool', trial: 'quota-probe' });
+    if (r.kind === 'dispatch')
+      expect(r.why).toBe('任务指定的路由：拼车号 · Opus 5.5 · Claude Code；拼车号额度未知，只放一个试探');
+    const busy = { ...carpool, inFlight: 1 };
+    expect(chooseRoute(input([solo, busy], { stage: 'judge', taskRouteId: 'carpool' }))).toMatchObject({
+      kind: 'wait',
+      waitFor: 'slot',
+    });
+  });
 });
 
 describe('试探', () => {
@@ -222,6 +244,16 @@ describe('试探', () => {
       routeId: 'a',
     });
   });
+
+  it('试探落到额度未知的备池：记成 explore，理由两样都写', () => {
+    const rs = soloAndCarpool({}, { quota: 'unknown', windows: [] });
+    const r = chooseRoute(input(rs, { stage: 'judge', draw: 0.05, policy: on }));
+    expect(r).toMatchObject({ routeId: 'carpool', trial: 'explore' });
+    if (r.kind === 'dispatch') {
+      expect(r.why).toMatch(/^试探：/);
+      expect(r.why).toContain('拼车号额度未知，只放一个试探');
+    }
+  });
 });
 
 describe('熔断：trial 只放一个', () => {
@@ -256,6 +288,22 @@ describe('熔断：trial 只放一个', () => {
       ]),
     );
     expect(r).toMatchObject({ kind: 'wait', waitFor: 'slot' });
+  });
+
+  it('半开的又是额度未知的备池：标熔断试探，理由两样都写', () => {
+    const c = route('c', {
+      poolName: '拼车号',
+      poolRole: 'backup',
+      quota: 'unknown',
+      windows: [],
+      breaker: { state: 'half_open', admit: 'trial', reason: '冷却到点' },
+    });
+    const r = chooseRoute(input([c], { stage: 'triage' }));
+    expect(r).toMatchObject({ kind: 'dispatch', routeId: 'c', trial: 'breaker' });
+    if (r.kind === 'dispatch') {
+      expect(r.why).toContain('拼车号额度未知，只放一个试探');
+      expect(r.why).toContain('熔断半开，这一单当试探');
+    }
   });
 });
 
