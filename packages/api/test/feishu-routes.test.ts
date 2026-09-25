@@ -1126,6 +1126,46 @@ describe('POST /feishu/drafts/:draftId/confirm：确认', () => {
     expect({ status: res.status, code: await errorCode(res) }).toEqual({ status: 500, code: 'internal' });
     expect(h.store.data.feishuDrafts[0]?.status).toBe('open');
   });
+
+  it('确认记下了、记开单结果时库出错（记没成、记开成）或重读草稿读不到：500，不装作「待开单」；库好了重试回已确认', async () => {
+    for (const broken of ['recordDraftOpenFailure', 'recordDraftOpened', 'getDraft'] as const) {
+      const stub = openerStub();
+      const h = harness({ draftOpener: stub.opener });
+      if (broken === 'recordDraftOpenFailure') stub.set(async () => Promise.reject(new Error('GitHub 不通')));
+      else stub.set(opensTask(() => h));
+      const draft = await newDraft(h);
+      const confirm = () =>
+        h.cockpit.request(
+          `/api/feishu/drafts/${draft.id}/confirm`,
+          gw('POST', { revision: 1, repoId: IDS.repo }),
+        );
+      const real = h.store.getDraft.bind(h.store);
+      const spy = vi.spyOn(h.store, broken);
+      if (broken === 'getDraft') {
+        // 读三次：路由确认前、开单前重读、开单后重读。只让开单后那一次读不到。
+        let calls = 0;
+        vi.mocked(h.store.getDraft).mockImplementation(async (id) => {
+          calls += 1;
+          return calls === 3 ? null : real(id);
+        });
+      } else {
+        spy.mockRejectedValueOnce(new Error('connection refused'));
+      }
+      const res = await confirm();
+      expect({ broken, status: res.status, code: await errorCode(res) }).toEqual({
+        broken,
+        status: 500,
+        code: 'internal',
+      });
+      spy.mockRestore();
+      expect(h.store.data.feishuDrafts[0]?.status).toBe('confirmed');
+      const again = FeishuConfirmDraftResponse.parse(await (await confirm()).json());
+      expect({ broken, alreadyConfirmed: again.alreadyConfirmed }).toEqual({
+        broken,
+        alreadyConfirmed: true,
+      });
+    }
+  });
 });
 
 describe('GET /feishu/tasks：按 issue 号查', () => {

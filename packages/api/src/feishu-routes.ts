@@ -376,18 +376,16 @@ export function feishuRoutes(deps: Deps, waiters: AskWaiters, opening: DraftOpen
   });
 
   /**
-   * 开单试一次，最多等几秒（draft-opening.ts 的 DRAFT_OPEN_CONFIRM_WAIT_MS，网关等确认 15 秒）；没等到、没成都回
-   * 「已确认、待开单」，后台接着补。库出错也只记日志：确认本身已经记下了。
+   * 开单试一次，最多等几秒（draft-opening.ts 的 DRAFT_OPEN_CONFIRM_WAIT_MS，网关等确认 15 秒）；没等到、开单这一步没成
+   * 都回「已确认、待开单」，后台接着补（openOne 把这些记在草稿上、不抛）。openOne 抛出来的是库读写出错：照实报错，
+   * 不当成待开单——确认已经记下，网关重试会走「已经确认过」再开一次。
    */
   async function afterConfirm(draft: DraftRecord): Promise<DraftRecord> {
     if (draft.taskId !== undefined) return draft;
-    try {
-      await opening.openOne(draft.id);
-      return (await store.getDraft(draft.id)) ?? draft;
-    } catch (err) {
-      log.error('确认后开单那一步出错，草稿留在待开单', { draftId: draft.id, error: String(err) });
-      return draft;
-    }
+    await opening.openOne(draft.id);
+    const latest = await store.getDraft(draft.id);
+    if (!latest) throw new Error(`草稿 ${draft.id} 确认后读不到了`);
+    return latest;
   }
 
   on(FeishuRoutes.confirmDraft, async (c) => {
