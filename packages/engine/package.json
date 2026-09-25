@@ -15,7 +15,10 @@
     "start": "node src/main.ts"
   },
   "dependencies": {
+    "@fleet-dao/adapters": "workspace:*",
     "@fleet-dao/api": "workspace:*",
+    "@fleet-dao/db": "workspace:*",
+    "@fleet-dao/github": "workspace:*",
     "@fleet-dao/shared": "workspace:*",
     "@temporalio/activity": "1.24.0",
     "@temporalio/client": "1.24.0",
