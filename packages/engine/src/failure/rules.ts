@@ -439,10 +439,12 @@ export const RULES: readonly FailureRule[] = [
     hint: '先同步最新主线再解冲突',
   },
   // 远端分支比本地新：先抓远端、并好再推。原文要留全（旧系统只留 160 字，被拒原因正好截掉）。
+  // 推的不含最新主线（github 包的 BEHIND_MAINLINE）同一类：推分支的端口每次推之前先并主线，撞上只可能是并完到推之间
+  // 主线又动了，原地再推一遍（端口会再并一次）。
   {
     id: 'MC2',
     title: '推送落后于远端',
-    codes: ['non_fast_forward'],
+    codes: ['non_fast_forward', 'behind_mainline'],
     text: /non-fast-forward|\(fetch first\)|Updates were rejected because/i,
     ladder: ['retry', 'park'],
     routeOutcome: 'neutral',

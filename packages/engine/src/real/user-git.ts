@@ -253,6 +253,47 @@ export async function fastForward(
   return 'fast-forwarded';
 }
 
+/** 头是不是一个并提交、第一个父提交是 parent（推之前并主线那一步做出来的；那一步之后推没成、活动重试时认它）。 */
+export async function isMergeOnto(t: UserTree, head: string, parent: string): Promise<boolean> {
+  assertSha(head, '头');
+  assertSha(parent, '父提交');
+  const parents = text(await git(t, ['rev-list', '--parents', '-n', '1', head], '看父提交'))
+    .trim()
+    .split(/\s+/);
+  return parents.length === 3 && parents[1] === parent;
+}
+
+/**
+ * 把 sha（引擎取进来的最新主线头）并进当前分支（--no-ff，提交身份用树里设好的「干活的」机器人）。
+ * 有冲突（或没跟踪的文件挡着）就撤掉这次合并、树回到并之前的样子，回冲突的文件交给调用方退回会话；
+ * 别的失败照抛，不当成冲突、也不当成并好了。
+ */
+export async function mergeInto(
+  t: UserTree,
+  sha: string,
+): Promise<{ merged: string } | { conflict: string[] }> {
+  assertSha(sha, '要并的提交');
+  const r = await run(t, [t.git ?? GIT, 'merge', '--no-ff', '--no-edit', '-q', sha], { timeoutMs: 300_000 });
+  if (r.code === 0) return { merged: await headOf(t) };
+  const unmerged = lines(await git(t, ['diff', '--name-only', '--diff-filter=U'], '列冲突的文件'));
+  const mergeHead = await run(t, [t.git ?? GIT, 'rev-parse', '-q', '--verify', 'MERGE_HEAD']);
+  if (mergeHead.code === 0) await git(t, ['merge', '--abort'], '撤掉没并成的合并');
+  if (unmerged.length > 0) return { conflict: unmerged };
+  const stderr = r.stderr;
+  if (/would be overwritten by merge/.test(stderr)) {
+    const blocking = stderr
+      .split('\n')
+      .filter((l) => l.startsWith('\t'))
+      .map((l) => l.trim())
+      .filter(Boolean);
+    return { conflict: blocking.length > 0 ? blocking : ['（工作树里有文件挡着，没列出是哪几个）'] };
+  }
+  throw new PortError('GIT_FAILED', describeFailure(`并 ${sha.slice(0, 7)}`, r), {
+    retryable: !r.aborted,
+    details: { user: t.user, dir: t.dir },
+  });
+}
+
 /** 以会话用户的身份读目录里的一个文件；不在回 null（别的错照抛）。 */
 export async function readFileAs(t: UserTree, path: string): Promise<string | null> {
   if (path.startsWith('/') || path.split('/').includes('..')) {

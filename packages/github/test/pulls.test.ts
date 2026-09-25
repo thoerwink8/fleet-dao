@@ -129,6 +129,64 @@ describe('开 PR', () => {
     );
   });
 
+  describe('开之前的卫生检查：标题和正文开出去就公开了', () => {
+    it('正文里（会话交活时写的总结）有名单上的值：不开（HYGIENE_BLOCKED，不可重试），一个请求都不发', async () => {
+      const { gh, fake } = setup();
+      fake.refs.set('task/24-leak', A);
+      const err = await gh
+        .openPr({
+          repo,
+          branch: 'task/24-leak',
+          head: A,
+          title: '登录页加验证码',
+          body: {
+            did: ['在组织 fake-org-778899 下试过'],
+            verified: ['x'],
+            plan: 'P1「工作流」',
+            specs: 'specs/24-x/',
+            changedFiles: ['src/x.ts'],
+          },
+        })
+        .catch((e: unknown) => e);
+      expect(err).toMatchObject({ code: 'HYGIENE_BLOCKED', retryable: false });
+      expect((err as Error).message).toContain('PR 正文');
+      expect((err as Error).message).not.toContain('fake-org-778899');
+      expect(fake.requests).toHaveLength(0);
+    });
+
+    it('标题里有也拦', async () => {
+      const { gh, fake } = setup();
+      fake.refs.set('task/25-leak', A);
+      await expect(
+        gh.openPr({
+          repo,
+          branch: 'task/25-leak',
+          head: A,
+          title: '切到组织 fake-org-778899',
+          body: { did: ['x'], verified: ['x'], plan: 'P1「工作流」', specs: 'specs/25-x/', changedFiles: [] },
+        }),
+      ).rejects.toMatchObject({ code: 'HYGIENE_BLOCKED' });
+      expect(fake.requests).toHaveLength(0);
+    });
+
+    it('名单没读到：不开（HYGIENE_LIST_MISSING），不当成查过没事', async () => {
+      const { gh, fake } = setup({
+        sensitiveValues: () => ({ ok: false, reason: '已知敏感值名单没读到', tried: ['/nonexistent'] }),
+      });
+      fake.refs.set('task/26-nolist', A);
+      await expect(
+        gh.openPr({
+          repo,
+          branch: 'task/26-nolist',
+          head: A,
+          title: 'x',
+          body: { did: ['x'], verified: ['x'], plan: 'P1「工作流」', specs: 'specs/26-x/', changedFiles: [] },
+        }),
+      ).rejects.toMatchObject({ code: 'HYGIENE_LIST_MISSING', retryable: false });
+      expect(fake.requests).toHaveLength(0);
+    });
+  });
+
   describe('inheritFrom：照抄需求 issue 的类别标签与里程碑', () => {
     it('issue 有「需求」与里程碑：开出的 PR 也照抄上；重试不重复加', async () => {
       const { gh, fake } = setup();

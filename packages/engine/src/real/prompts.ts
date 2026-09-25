@@ -80,6 +80,7 @@ const FEEDBACK_KIND: Record<SessionBrief['feedback'][number]['kind'], string> = 
   'merge-return': '合并队列退回',
   plan: '和方案对不上',
   hygiene: '卫生检查拦下',
+  delivery: '交付没过核对',
 };
 
 function feedbackBlock(brief: SessionBrief): string {

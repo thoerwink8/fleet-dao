@@ -99,6 +99,50 @@ describe('writeSpecDoc', () => {
   });
 });
 
+describe('写主线之前的卫生检查（直写不经 git 推送，推前扫描拦不到）', () => {
+  it('正文里有名单上的值：不写（HYGIENE_BLOCKED，不可重试），一个请求都不发，报错只带位置不带值', async () => {
+    const { gh, fake } = setup();
+    const err = await gh
+      .writeSpecDoc({
+        repo,
+        path: 'specs/17-foo/需求.md',
+        content: '# 需求\n\n切到组织 fake-org-778899 再跑\n',
+        message: '写需求文档',
+      })
+      .catch((e: unknown) => e);
+    expect(err).toMatchObject({ code: 'HYGIENE_BLOCKED', retryable: false });
+    expect((err as Error).message).toContain('specs/17-foo/需求.md:3');
+    expect((err as Error).message).not.toContain('fake-org-778899');
+    expect((err as { details: unknown }).details).toMatchObject({
+      findings: [{ path: 'specs/17-foo/需求.md', line: 3, rule: 'known-value' }],
+    });
+    expect(fake.requests).toHaveLength(0);
+  });
+
+  it('提交说明里有也拦', async () => {
+    const { gh, fake } = setup();
+    await expect(
+      gh.writeSpecDoc({
+        repo,
+        path: 'specs/18-foo/需求.md',
+        content: '# 需求\n',
+        message: 'docs: 组织 fake-org-778899 的需求',
+      }),
+    ).rejects.toMatchObject({ code: 'HYGIENE_BLOCKED' });
+    expect(fake.requests).toHaveLength(0);
+  });
+
+  it('名单没读到：不写（HYGIENE_LIST_MISSING），不当成查过没事', async () => {
+    const { gh, fake } = setup({
+      sensitiveValues: () => ({ ok: false, reason: '已知敏感值名单没读到', tried: ['/nonexistent'] }),
+    });
+    await expect(
+      gh.writeSpecDoc({ repo, path: 'specs/19-foo/需求.md', content: '# 需求\n', message: 'm' }),
+    ).rejects.toMatchObject({ code: 'HYGIENE_LIST_MISSING', retryable: false });
+    expect(fake.requests).toHaveLength(0);
+  });
+});
+
 describe('readSpecDoc', () => {
   it('读默认分支上的需求文档：以「引擎」身份读，拿回正文', async () => {
     const { gh, fake } = setup();

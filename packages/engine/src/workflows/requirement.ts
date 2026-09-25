@@ -45,6 +45,7 @@ import {
   activitiesFor,
   askAndWait,
   attempt,
+  attemptOrRework,
   type Control,
   gate,
   installControl,
@@ -52,9 +53,12 @@ import {
   judge,
   type Kit,
   limitsFor,
+  NO_REWORK,
   newKit,
   park,
+  type ReworkCarry,
   recordWait,
+  reworkFeedback,
   runStage,
   stopActiveSessions,
   type Verdict,
@@ -532,22 +536,47 @@ export async function requirementWorkflow(input: RequirementInput): Promise<Requ
     }
 
     await setPhase('spec', '写需求文档');
-    const spec = await runStage(kit, { stage: 'spec', expect: 'doc', brief: brief(answers) });
-    const specDoc = await attempt(kit, 'writeSpecDoc', () =>
-      acts.writeSpecDoc({
-        ...kit.scope,
-        repo: input.repo,
-        issueNumber: input.issueNumber,
-        specDir,
-        doc: 'requirement',
-        markdown: spec.output.markdown,
-      }),
-    );
-    status.docs = { ...status.docs, requirement: specDoc.path };
+    // 需求文档、方案直写进主线（公开）：写之前 github 包过卫生检查，拦下了退回写它的会话拿掉再交（HY1，同一处
+    // 连续两次挂起报警）；名单没读到、没扫成挂起报警（HY2）。
+    let specFeedback: Feedback[] = [];
+    let specRework: ReworkCarry = NO_REWORK;
+    let specSession: string | undefined;
+    for (;;) {
+      const spec = await runStage(kit, {
+        stage: 'spec',
+        expect: 'doc',
+        brief: brief(answers, specFeedback),
+        resumeSessionId: specSession,
+      });
+      specSession = spec.sessionId;
+      const specDoc = await attemptOrRework(
+        kit,
+        'writeSpecDoc',
+        () =>
+          acts.writeSpecDoc({
+            ...kit.scope,
+            repo: input.repo,
+            issueNumber: input.issueNumber,
+            specDir,
+            doc: 'requirement',
+            markdown: spec.output.markdown,
+          }),
+        specRework,
+      );
+      if ('rework' in specDoc) {
+        specRework = specDoc.rework.carry;
+        specFeedback = [reworkFeedback('doc', specDoc.rework)];
+        status.lastProblem = specDoc.rework.reason;
+        continue;
+      }
+      status.docs = { ...status.docs, requirement: specDoc.ok.path };
+      break;
+    }
 
     await setPhase('plan', '写方案、拆子任务');
     let planFeedback: Feedback[] = [];
     let planTries = 0;
+    let planRework: ReworkCarry = NO_REWORK;
     let subtasks: SubtaskSpec[] = [];
     for (;;) {
       const plan = await runStage(kit, {
@@ -561,18 +590,28 @@ export async function requirementWorkflow(input: RequirementInput): Promise<Requ
         holds: requirementHolds,
       });
       if (checked.ok) {
-        subtasks = checked.subtasks;
-        const planDoc = await attempt(kit, 'writeSpecDoc', () =>
-          acts.writeSpecDoc({
-            ...kit.scope,
-            repo: input.repo,
-            issueNumber: input.issueNumber,
-            specDir,
-            doc: 'plan',
-            markdown: plan.output.markdown,
-          }),
+        const planDoc = await attemptOrRework(
+          kit,
+          'writeSpecDoc',
+          () =>
+            acts.writeSpecDoc({
+              ...kit.scope,
+              repo: input.repo,
+              issueNumber: input.issueNumber,
+              specDir,
+              doc: 'plan',
+              markdown: plan.output.markdown,
+            }),
+          planRework,
         );
-        status.docs = { ...status.docs, plan: planDoc.path };
+        if ('rework' in planDoc) {
+          planRework = planDoc.rework.carry;
+          planFeedback = [reworkFeedback('doc', planDoc.rework)];
+          status.lastProblem = planDoc.rework.reason;
+          continue;
+        }
+        subtasks = checked.subtasks;
+        status.docs = { ...status.docs, plan: planDoc.ok.path };
         break;
       }
       planFeedback = [{ kind: 'plan', summary: '方案不合格，按下面几条改', items: checked.problems }];

@@ -310,8 +310,8 @@ describe('认得出的：按各自的梯子走', () => {
     expect(classifyFailure(BANNED).rule).toBe('AU1');
   });
 
-  it('推之前的卫生检查拦下了新增内容：退回会话去掉再交（记返工账）；同一处连续被拦两次就挂起报警', () => {
-    const spots = '推之前的卫生检查拦下了新增内容：config/app.env:3 github-token';
+  it('卫生检查拦下了要公开的内容：退回会话去掉再交（记返工账）；同一处连续被拦两次就挂起报警', () => {
+    const spots = '卫生检查拦下了要公开的内容：config/app.env:3 github-token';
     const blocked = (over: FailureEvidence = {}) =>
       classifyFailure({
         source: 'pushBranch',
@@ -328,7 +328,7 @@ describe('认得出的：按各自的梯子走', () => {
     expect(
       blocked({
         attempts: { reworks: 1 },
-        previousMessage: '推之前的卫生检查拦下了新增内容：src/a.ts:9 email',
+        previousMessage: '卫生检查拦下了要公开的内容：src/a.ts:9 email',
       }).action,
     ).toBe('retry');
     // 同一处又被拦：挂起报警，不再退回。

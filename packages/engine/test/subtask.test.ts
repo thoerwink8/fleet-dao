@@ -637,13 +637,9 @@ describe('子任务工作流', { timeout: 60_000 }, () => {
     const world = createFakeWorld({
       push: (_input, n) =>
         n === 1
-          ? new PortError(
-              'HYGIENE_BLOCKED',
-              '推之前的卫生检查拦下了新增内容：config/app.env:3 github-token',
-              {
-                retryable: false,
-              },
-            )
+          ? new PortError('HYGIENE_BLOCKED', '卫生检查拦下了要公开的内容：config/app.env:3 github-token', {
+              retryable: false,
+            })
           : undefined,
     });
     const result = (await withWorker(env, world, async (q) =>
@@ -656,7 +652,7 @@ describe('子任务工作流', { timeout: 60_000 }, () => {
     expect(execs[1]?.input.resumeSessionId).toBe('s1');
     const feedback = execs[1]?.input.brief.feedback ?? [];
     expect(feedback.map((f) => f.kind)).toEqual(['hygiene']);
-    expect(feedback[0]?.items).toEqual(['推之前的卫生检查拦下了新增内容：config/app.env:3 github-token']);
+    expect(feedback[0]?.items).toEqual(['卫生检查拦下了要公开的内容：config/app.env:3 github-token']);
     expect(feedback[0]?.summary).toContain('改写提交');
     // 被拦的那次没原样再推：第二次推的是会话改过之后交的头。
     const pushes = world.callsOf('pushBranch');
@@ -668,7 +664,7 @@ describe('子任务工作流', { timeout: 60_000 }, () => {
 
   it('卫生检查同一处连续被拦两次：不再退回会话，挂起报警；人看过点继续，接着推', async () => {
     const blocked = () =>
-      new PortError('HYGIENE_BLOCKED', '推之前的卫生检查拦下了新增内容：config/app.env:3 github-token', {
+      new PortError('HYGIENE_BLOCKED', '卫生检查拦下了要公开的内容：config/app.env:3 github-token', {
         retryable: false,
       });
     const world = createFakeWorld({ push: (_input, n) => (n <= 2 ? blocked() : undefined) });
@@ -733,6 +729,112 @@ describe('子任务工作流', { timeout: 60_000 }, () => {
     expect(result.state).toBe('merged');
     expect(world.callsOf('startSession').filter((c) => c.input.stage === 'execute')).toHaveLength(1);
     expect(world.count('pushBranch')).toBe(2);
+  });
+
+  it('第一次推就报 BEHIND_MAINLINE（并完主线到推之间主线又动了）：原地再推一次，不退回会话、不挂起', async () => {
+    const world = createFakeWorld({
+      push: (_input, n) =>
+        n === 1
+          ? new PortError('BEHIND_MAINLINE', '1a2b3c4 不包含 main 的最新提交 5d6e7f8：先同步主线再推', {
+              retryable: true,
+            })
+          : undefined,
+    });
+    const result = (await withWorker(env, world, async (q) =>
+      (await startSubtask(q)).result(),
+    )) as SubtaskResult;
+    expect(result.state).toBe('merged');
+    expect(world.callsOf('startSession').filter((c) => c.input.stage === 'execute')).toHaveLength(1);
+    expect(world.count('pushBranch')).toBe(2);
+    expect(world.alerts).toEqual([]);
+  });
+
+  it('推之前并主线有冲突（MC1）：退回会话解冲突，意见说的是冲突，不是卫生检查', async () => {
+    const world = createFakeWorld({
+      push: (_input, n) =>
+        n === 1
+          ? new PortError(
+              'MERGE_CONFLICT',
+              '推之前把最新主线 5d6e7f8 并进来有冲突：src/a.ts。在树里 git merge 5d6e7f8 解掉冲突、提交后再交',
+              { retryable: false },
+            )
+          : undefined,
+    });
+    const result = (await withWorker(env, world, async (q) =>
+      (await startSubtask(q)).result(),
+    )) as SubtaskResult;
+    expect(result.state).toBe('merged');
+    const execs = world.callsOf('startSession').filter((c) => c.input.stage === 'execute');
+    expect(execs).toHaveLength(2);
+    const feedback = execs[1]?.input.brief.feedback ?? [];
+    expect(feedback.map((f) => f.kind)).toEqual(['conflict']);
+    expect(feedback[0]?.items[0]).toContain('src/a.ts');
+    expect(feedback[0]?.summary).not.toContain('卫生检查');
+  });
+
+  it('推的端口说没交付（有没提交的改动，DL1）：退回会话，意见说交付没过核对，不叫它去改写提交', async () => {
+    const world = createFakeWorld({
+      push: (_input, n) =>
+        n === 1
+          ? new PortError('NOT_DELIVERED', '工作树里有没提交的已跟踪改动，不推：M src/a.ts', {
+              retryable: false,
+            })
+          : undefined,
+    });
+    const result = (await withWorker(env, world, async (q) =>
+      (await startSubtask(q)).result(),
+    )) as SubtaskResult;
+    expect(result.state).toBe('merged');
+    const execs = world.callsOf('startSession').filter((c) => c.input.stage === 'execute');
+    expect(execs).toHaveLength(2);
+    const feedback = execs[1]?.input.brief.feedback ?? [];
+    expect(feedback.map((f) => f.kind)).toEqual(['delivery']);
+    expect(feedback[0]?.summary).not.toContain('改写提交');
+  });
+
+  it('开 PR 被卫生检查拦下（会话的总结里有）：退回会话只改总结——交付从建树时的主线头算起，再开就开成', async () => {
+    const world = createFakeWorld({
+      openPr: (_input, n) =>
+        n === 1
+          ? new PortError('HYGIENE_BLOCKED', '卫生检查拦下了要公开的内容：PR 正文:2 known-value', {
+              retryable: false,
+            })
+          : undefined,
+    });
+    const result = (await withWorker(env, world, async (q) =>
+      (await startSubtask(q)).result(),
+    )) as SubtaskResult;
+    expect(result.state).toBe('merged');
+    const execs = world.callsOf('startSession').filter((c) => c.input.stage === 'execute');
+    expect(execs).toHaveLength(2);
+    const feedback = execs[1]?.input.brief.feedback ?? [];
+    expect(feedback.map((f) => f.kind)).toEqual(['hygiene']);
+    expect(feedback[0]?.summary).toContain('fleet done');
+    // 只改总结的那一轮：提交早推上去了，交付核对从建树时的主线头算起（不然会判成没有新提交）
+    expect(execs[1]?.input.baseHead).toBe('base');
+    expect(world.count('openPr')).toBe(2);
+    expect(world.count('raiseAlert')).toBe(0);
+  });
+
+  it('开 PR 前卫生检查的名单没读到：挂起报警、不退回会话；名单放好点继续就开', async () => {
+    const world = createFakeWorld({
+      openPr: (_input, n) =>
+        n === 1
+          ? new PortError('HYGIENE_LIST_MISSING', '开 PR 之前的卫生检查没法做：已知敏感值名单没读到', {
+              retryable: false,
+            })
+          : undefined,
+    });
+    const result = await withWorker(env, world, async (q) => {
+      const handle = await startSubtask(q);
+      const parked = await queryUntil<SubtaskStatus>(handle, (s) => s.parked, '挂起');
+      expect(parked.lastProblem).toContain('名单没读到');
+      await handle.signal(resumeSignal, { by: 'founder' });
+      return (await handle.result()) as SubtaskResult;
+    });
+    expect(result.state).toBe('merged');
+    expect(world.callsOf('startSession').filter((c) => c.input.stage === 'execute')).toHaveLength(1);
+    expect(world.count('openPr')).toBe(2);
   });
 
   it('开 PR 的正文给结构（交给 github 包的 renderPrBody 按 PR 模板生成），不自己拼字', async () => {

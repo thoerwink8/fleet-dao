@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { enc, encRef, type RepoRef, unexpected } from './client.ts';
 import type { Deps } from './deps.ts';
 import { GitHubError, isGitHubError } from './errors.ts';
+import { assertPublishable } from './publish-check.ts';
 
 export interface WriteSpecDocInput {
   repo: RepoRef;
@@ -110,6 +111,15 @@ export async function writeSpecDoc(deps: Deps, input: WriteSpecDocInput): Promis
       details: { length: bytes, limit: MAX_CONTENT_BYTES },
     });
   }
+  // 直写主线不经 git 推送，推前扫描拦不到：文件名、正文、提交说明写之前各过一遍
+  assertPublishable(
+    `写 ${path}`,
+    [
+      { path, text: input.content },
+      { path: `${path}（提交说明）`, text: input.message },
+    ],
+    deps.sensitiveValues,
+  );
   const apiPath = `/repos/${enc(repo.owner)}/${enc(repo.name)}/contents/${encRef(path)}`;
   const auth = { as: 'engine' as const, repo };
 

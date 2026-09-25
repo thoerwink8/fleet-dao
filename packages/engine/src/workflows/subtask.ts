@@ -50,6 +50,7 @@ import {
   offClockMs,
   park,
   type ReworkCarry,
+  reworkFeedback,
   runStage,
   stopActiveSessions,
   type Verdict,
@@ -352,6 +353,10 @@ export async function subtaskWorkflow(input: SubtaskInput): Promise<SubtaskResul
     let verifiedHead = '';
     let offPlan = 0;
     let pushRework: ReworkCarry = NO_REWORK;
+    let prRework: ReworkCarry = NO_REWORK;
+    // 开 PR 被卫生检查拦下、退回会话只改总结的那一轮：提交早推上去了，交付核对从建树时的主线头算起
+    //（不然「起会话前的头之后没有新提交」会把只改总结的交付判成没交）。
+    let summaryOnly = false;
     // 墙钟预算：从开工算起，等人（暂停、挂起、回答、批准）和排队（空位、额度、合并队列）的时间不算；
     // 人看过（挂起后被放行）就重新计。
     let budget = { since: Date.now(), off: offClockMs(kit) };
@@ -370,8 +375,9 @@ export async function subtaskWorkflow(input: SubtaskInput): Promise<SubtaskResul
           brief: brief(feedback),
           resumeSessionId: sessionId,
           worktreePath: tree.path,
-          baseHead: status.head ?? tree.baseSha,
+          baseHead: summaryOnly ? tree.baseSha : (status.head ?? tree.baseSha),
         });
+        summaryOnly = false;
         sessionId = exec.sessionId;
         summary = exec.output.summary;
         // 交付对账：改的文件和方案点名的地方一个都对不上，就是假完成，不推也不进验证。
@@ -396,8 +402,9 @@ export async function subtaskWorkflow(input: SubtaskInput): Promise<SubtaskResul
           continue;
         }
         if (delivery.note) status.lastProblem = delivery.note;
-        // 会话只在本地提交；推分支、开 PR 由引擎在会话外面做。推之前的卫生检查拦下了会话交的内容：退回会话拿掉再交
-        // （同一处连续被拦两次挂起报警，失败分流 HY1）；名单没读到、没扫成是这一侧的问题，挂起报警、不退会话（HY2）。
+        // 会话只在本地提交；推分支、开 PR 由引擎在会话外面做。推的端口先把最新主线并进会话的树（冲突退回会话解，MC1）；
+        // 推之前的卫生检查拦下了会话交的内容：退回会话拿掉再交（同一处连续被拦两次挂起报警，HY1）；名单没读到、
+        // 没扫成是这一侧的问题，挂起报警、不退会话（HY2）。退回时的意见按认出的规则写（reworkFeedback）。
         const pushedOrRework = await attemptOrRework(
           kit,
           'pushBranch',
@@ -414,14 +421,7 @@ export async function subtaskWorkflow(input: SubtaskInput): Promise<SubtaskResul
         if ('rework' in pushedOrRework) {
           pushRework = pushedOrRework.rework.carry;
           status.lastProblem = pushedOrRework.rework.reason;
-          feedback = [
-            {
-              kind: 'hygiene',
-              summary:
-                '推之前的卫生检查拦下了你交的内容：公开仓推上去就公开了。把这些从提交里拿掉——要改写提交（推上去的是全部提交），不能只加一个删掉它的新提交',
-              items: [pushedOrRework.rework.message],
-            },
-          ];
+          feedback = [reworkFeedback('push', pushedOrRework.rework)];
           continue;
         }
         pushRework = NO_REWORK;
@@ -429,32 +429,45 @@ export async function subtaskWorkflow(input: SubtaskInput): Promise<SubtaskResul
         status.head = pushed.head;
         if (status.prNumber === null) {
           const changedFiles = exec.output.changedFiles;
-          const pr = await attempt(kit, 'openPr', () =>
-            acts.openPr({
-              ...kit.scope,
-              repo: input.repo,
-              branch,
-              head: pushed.head,
-              title: sub.title,
-              // 正文由 github 包的 renderPrBody 按 PR 模板的栏目生成；这里只给结构。「对应计划」「specs」两栏
-              // （#41）里的对应计划由端口开 PR 时去主线的需求文档里现读那一行，读不到就不开、挂起报警。
-              body: {
-                requirement: input.issueNumber,
-                subtask: `${sub.key} ${sub.title}`,
-                did: summaryItems(summary),
-                verified: [
-                  exec.output.testsPassed
-                    ? '会话里跑过测试，报通过（fleet done --tests passed）'
-                    : '会话报测试没过（fleet done --tests failed）',
-                  '合并前在最新主线上再等 CI（合并队列）',
-                ],
-                specs: input.specDir,
-                changedFiles: changedFiles ?? [],
-                ...(changedFiles ? {} : { owed: ['改了哪些文件没查成（交付没带文件清单）'] }),
-              },
-            }),
+          // 标题、正文（会话的总结在里面）开出去就公开了：开之前也过卫生检查，拦下了退回会话只改总结。
+          const opened = await attemptOrRework(
+            kit,
+            'openPr',
+            () =>
+              acts.openPr({
+                ...kit.scope,
+                repo: input.repo,
+                branch,
+                head: pushed.head,
+                title: sub.title,
+                // 正文由 github 包的 renderPrBody 按 PR 模板的栏目生成；这里只给结构。「对应计划」「specs」两栏
+                // （#41）里的对应计划由端口开 PR 时去主线的需求文档里现读那一行，读不到就不开、挂起报警。
+                body: {
+                  requirement: input.issueNumber,
+                  subtask: `${sub.key} ${sub.title}`,
+                  did: summaryItems(summary),
+                  verified: [
+                    exec.output.testsPassed
+                      ? '会话里跑过测试，报通过（fleet done --tests passed）'
+                      : '会话报测试没过（fleet done --tests failed）',
+                    '合并前在最新主线上再等 CI（合并队列）',
+                  ],
+                  specs: input.specDir,
+                  changedFiles: changedFiles ?? [],
+                  ...(changedFiles ? {} : { owed: ['改了哪些文件没查成（交付没带文件清单）'] }),
+                },
+              }),
+            prRework,
           );
-          status.prNumber = pr.prNumber;
+          if ('rework' in opened) {
+            prRework = opened.rework.carry;
+            status.lastProblem = opened.rework.reason;
+            feedback = [reworkFeedback('openPr', opened.rework)];
+            summaryOnly = true;
+            continue;
+          }
+          prRework = NO_REWORK;
+          status.prNumber = opened.ok.prNumber;
           notifyParent();
         }
         next = 'verify';

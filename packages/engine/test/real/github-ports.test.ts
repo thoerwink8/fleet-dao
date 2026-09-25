@@ -124,7 +124,10 @@ async function seededTree(trees: ReturnType<typeof setup>['trees']) {
   };
   const out = join(root, `seed-${Date.now()}.bundle`);
   const made = await m.gh.bundleCommits({ tips: [m.head], outPath: out });
-  await fetchBundle(t, readFileSync(made.path), made.refs[0]?.ref as string);
+  // 提交身份和真建树一样设在树里（sessions.ts 建树时设「干活的」机器人）：推之前并主线要用它提交
+  await fetchBundle(t, readFileSync(made.path), made.refs[0]?.ref as string, {
+    identity: { name: 't', email: 'fleet-test@localhost' },
+  });
   await checkoutBranch(t, BRANCH, m.head);
   return dir;
 }
@@ -153,7 +156,7 @@ describe('GitHubError → PortError', () => {
     expect(e).toBeInstanceOf(PortError);
     expect(e.code).toBe('HYGIENE_BLOCKED');
     expect(e.retryable).toBe(false);
-    expect(e.message).toBe('推之前的卫生检查拦下了新增内容：src/a.ts:9 ip；src/b.ts:3 email');
+    expect(e.message).toBe('卫生检查拦下了要公开的内容：src/a.ts:9 ip；src/b.ts:3 email');
   });
 
   it('workflows 权限的码按引擎的叫法；不是 GitHubError 的原样放行', () => {
@@ -239,6 +242,90 @@ describe('推分支', () => {
     await expect(
       ports.pushBranch({ taskId: 't1', repo, worktreePath: dir, branch: BRANCH, head }, ctx),
     ).rejects.toMatchObject({ code: 'HYGIENE_BLOCKED', retryable: false });
+  });
+});
+
+describe('推之前把最新主线并进会话的树', () => {
+  /** 会话干活期间主线又进了一个提交。 */
+  function advanceMain(file: string, content: string) {
+    writeFileSync(join(m.dir, file), content);
+    git(m.dir, 'add', '--', file);
+    git(m.dir, 'commit', '-q', '-m', `main: ${file}`);
+    return git(m.dir, 'rev-parse', 'HEAD');
+  }
+  const parentsOf = (dir: string, sha: string) =>
+    git(dir, 'rev-list', '--parents', '-n', '1', sha).split(' ').slice(1);
+
+  it('主线动过：先并进来（--no-ff，第一个父提交是会话交的头）再推并出来的头；推的包从新主线头起', async () => {
+    const { ports, calls, trees } = setup();
+    const dir = await seededTree(trees);
+    const head = commitIn(dir, 'login.ts');
+    const main = advanceMain('b.ts', 'export const b = 2;\n');
+    const r = await ports.pushBranch({ taskId: 't1', repo, worktreePath: dir, branch: BRANCH, head }, ctx);
+    expect(r.head).not.toBe(head);
+    expect(parentsOf(dir, r.head)).toEqual([head, main]);
+    expect(git(dir, 'rev-parse', 'refs/fleet/incoming')).toBe(main);
+    expect(calls.pushBranch?.[0]).toMatchObject({ head: r.head });
+  });
+
+  it('并完、推没成、活动重试：头是上一次并出来的（第一个父提交是会话交的头）就接着推它，不判头对不上', async () => {
+    let n = 0;
+    const { ports, calls, trees } = setup({
+      pushBranch: (input: { head: string }) => {
+        n += 1;
+        if (n === 1) throw new GitHubError('GIT_FAILED', '网断了', { retryable: true });
+        return { head: input.head, pushed: true };
+      },
+    });
+    const dir = await seededTree(trees);
+    const head = commitIn(dir, 'login.ts');
+    advanceMain('b.ts', 'export const b = 2;\n');
+    const input = { taskId: 't1', repo, worktreePath: dir, branch: BRANCH, head };
+    await expect(ports.pushBranch(input, ctx)).rejects.toMatchObject({ code: 'GIT_FAILED', retryable: true });
+    const merged = git(dir, 'rev-parse', 'HEAD');
+    expect(await ports.pushBranch(input, ctx)).toEqual({ head: merged });
+    expect(calls.pushBranch?.map((c) => (c as { head: string }).head)).toEqual([merged, merged]);
+  });
+
+  it('并出冲突：撤掉这次合并（树回到会话交的头、没有并了一半的状态），报 MERGE_CONFLICT 带冲突的文件，不推', async () => {
+    const { ports, calls, trees } = setup();
+    const dir = await seededTree(trees);
+    writeFileSync(join(dir, 'a.ts'), 'export const a = 100;\n');
+    git(dir, 'add', '--', 'a.ts');
+    git(dir, 'commit', '-q', '-m', 'feat: a');
+    const head = git(dir, 'rev-parse', 'HEAD');
+    const main = advanceMain('a.ts', 'export const a = 2;\n');
+    const err = await ports
+      .pushBranch({ taskId: 't1', repo, worktreePath: dir, branch: BRANCH, head }, ctx)
+      .catch((e: unknown) => e);
+    expect(err).toMatchObject({
+      code: 'MERGE_CONFLICT',
+      retryable: false,
+      details: { mainline: main, conflictFiles: ['a.ts'] },
+    });
+    expect((err as Error).message).toContain(`git merge ${main}`);
+    expect(git(dir, 'rev-parse', 'HEAD')).toBe(head);
+    // 没有并了一半的文件、没暂存东西（端口那边的 git 在 Windows 上带着系统级的 autocrlf，工作树里的换行符会跟着变：
+    // 这里也按 autocrlf 比，只看内容）
+    expect(git(dir, 'ls-files', '-u')).toBe('');
+    expect(git(dir, '-c', 'core.autocrlf=true', 'status', '--porcelain', '--untracked-files=no')).toBe('');
+    expect(existsSync(join(dir, '.git', 'MERGE_HEAD'))).toBe(false);
+    // 新主线的提交已经在树里：会话照着 git merge 就能解
+    expect(git(dir, 'cat-file', '-t', main)).toBe('commit');
+    expect(calls.pushBranch ?? []).toHaveLength(0);
+  });
+
+  it('github 包报 BEHIND_MAINLINE（并完到推之间主线又动了）：到引擎这层改成可重试，重来一遍会再并', async () => {
+    const { ports, trees } = setup({
+      pushBranch: () => {
+        throw new GitHubError('BEHIND_MAINLINE', '不包含最新主线：先同步主线再推', { retryable: false });
+      },
+    });
+    const dir = await seededTree(trees);
+    const head = commitIn(dir, 'login.ts');
+    await expect(
+      ports.pushBranch({ taskId: 't1', repo, worktreePath: dir, branch: BRANCH, head }, ctx),
+    ).rejects.toMatchObject({ code: 'BEHIND_MAINLINE', retryable: true });
   });
 });
 

@@ -16,7 +16,7 @@ import {
   WORKFLOW_TYPES,
 } from '../src/contract.ts';
 import { createFakeWorld, type FakeCall } from '../src/fakes.ts';
-import type { StartSessionInput, WaitTiming } from '../src/ports.ts';
+import { PortError, type StartSessionInput, type WaitTiming } from '../src/ports.ts';
 import {
   markerText,
   overlaps,
@@ -113,6 +113,63 @@ describe('需求工作流', { timeout: 60_000 }, () => {
     expect(result.subtasks.map((s) => s.subtaskId)).toEqual(last?.subtasks.map((s) => s.id));
     const lastProgress = world.callsOf('updateIssueProgress').at(-1)?.input.progress;
     expect(lastProgress).toMatchObject({ state: 'done', done: 2, total: 2 });
+  });
+
+  it('需求文档写进主线前被卫生检查拦下：退回写需求文档的会话（续同一个）拿掉再交，第二次写成', async () => {
+    const world = createFakeWorld({
+      specDoc: (input, n) =>
+        input.doc === 'requirement' && n === 1
+          ? new PortError('HYGIENE_BLOCKED', '卫生检查拦下了要公开的内容：specs/12-x/需求.md:3 known-value', {
+              retryable: false,
+            })
+          : undefined,
+    });
+    const result = await withWorker(
+      env,
+      world,
+      async (q) => (await (await startRequirement(q)).result()) as RequirementResult,
+    );
+    expect(result.state).toBe('done');
+    const specs = world.callsOf('startSession').filter((c) => c.input.stage === 'spec');
+    expect(specs).toHaveLength(2);
+    expect(specs[1]?.input.resumeSessionId).toBeTruthy();
+    const feedback = specs[1]?.input.brief.feedback ?? [];
+    expect(feedback.map((f) => f.kind)).toEqual(['hygiene']);
+    expect(feedback[0]?.items).toEqual(['卫生检查拦下了要公开的内容：specs/12-x/需求.md:3 known-value']);
+    expect(world.callsOf('writeSpecDoc').map((c) => c.input.doc)).toEqual([
+      'requirement',
+      'requirement',
+      'plan',
+      'result',
+    ]);
+  });
+
+  it('方案写进主线前被拦下：退回写方案的会话重写；名单没读到就挂起报警，放好点继续', async () => {
+    const world = createFakeWorld({
+      specDoc: (input, n) => {
+        if (input.doc !== 'plan') return undefined;
+        if (n === 2)
+          return new PortError('HYGIENE_BLOCKED', '卫生检查拦下了要公开的内容：specs/12-x/方案.md:9 ip', {
+            retryable: false,
+          });
+        if (n === 3)
+          return new PortError('HYGIENE_LIST_MISSING', '写之前的卫生检查没法做：已知敏感值名单没读到', {
+            retryable: false,
+          });
+        return undefined;
+      },
+    });
+    const result = await withWorker(env, world, async (q) => {
+      const handle = await startRequirement(q);
+      const parked = await queryUntil<RequirementStatus>(handle, (s) => s.parked, '挂起');
+      expect(parked.lastProblem).toContain('名单没读到');
+      await handle.signal(resumeSignal, { by: 'founder' });
+      return (await handle.result()) as RequirementResult;
+    });
+    expect(result.state).toBe('done');
+    const plans = world.callsOf('startSession').filter((c) => c.input.stage === 'plan');
+    expect(plans).toHaveLength(2);
+    expect((plans[1]?.input.brief.feedback ?? []).map((f) => f.kind)).toEqual(['hygiene']);
   });
 
   it('看不懂就在任务里追问：回答（后端的 answer 信号）之后重新分诊，再往下走', async () => {

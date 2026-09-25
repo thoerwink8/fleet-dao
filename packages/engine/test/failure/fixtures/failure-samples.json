@@ -986,7 +986,7 @@
         "routeBound": false,
         "code": "HYGIENE_BLOCKED",
         "retryable": false,
-        "message": "推之前的卫生检查拦下了新增内容：config/app.env:3 github-token"
+        "message": "卫生检查拦下了要公开的内容：config/app.env:3 github-token"
       },
       "expect": { "action": "retry", "rule": "HY1", "counter": "reworks", "delaySeconds": 0, "alert": false }
     },
@@ -1028,6 +1028,32 @@
         "message": "specs/28-接真端口/需求.md 里没有「对应计划：」那一行（开 PR 的正文这一栏是必填）"
       },
       "expect": { "action": "park", "rule": "SD1", "alert": true, "routeOutcome": "neutral" }
+    },
+    {
+      "id": "X66",
+      "provenance": "format",
+      "origin": "packages/github 的 pushBranch「推的必须含最新主线」（BEHIND_MAINLINE）；引擎推分支的端口推之前先并主线，撞上只可能是并完到推之间主线又动了",
+      "evidence": {
+        "source": "pushBranch",
+        "routeBound": false,
+        "code": "BEHIND_MAINLINE",
+        "retryable": true,
+        "message": "1a2b3c4 不包含 main 的最新提交 5d6e7f8：先同步主线再推"
+      },
+      "expect": { "action": "retry", "rule": "MC2" }
+    },
+    {
+      "id": "X67",
+      "provenance": "format",
+      "origin": "引擎推分支的端口推之前把最新主线并进会话的树，有冲突就撤掉、交回会话去解",
+      "evidence": {
+        "source": "pushBranch",
+        "routeBound": false,
+        "code": "MERGE_CONFLICT",
+        "retryable": false,
+        "message": "推之前把最新主线 5d6e7f8 并进来有冲突：src/a.ts。在树里 git merge 5d6e7f8 解掉冲突、提交后再交"
+      },
+      "expect": { "action": "retry", "rule": "MC1", "counter": "reworks", "delaySeconds": 0 }
     }
   ],
   "skipped": [

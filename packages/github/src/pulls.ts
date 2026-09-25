@@ -20,6 +20,7 @@ import type { ActivityContext, Deps } from './deps.ts';
 import { recordEcho } from './echo.ts';
 import { GitHubError, isGitHubError } from './errors.ts';
 import { idempotencyKey, once } from './idempotency.ts';
+import { assertPublishable } from './publish-check.ts';
 import {
   assertBodySize,
   hasCloseKeywords,
@@ -199,17 +200,26 @@ export async function openPr(
 ): Promise<OpenPrResult> {
   const { repo, branch } = input;
   const slug = repoSlug(repo);
+  const rawBody = typeof input.body === 'string' ? input.body : renderPrBody(input.body);
+  const body = neutralizeCloseKeywords(rawBody);
+  const title = neutralizeCloseKeywords(input.title.trim());
+  assertBodySize('PR 正文', body);
+  // 标题和正文（会话交活时写的总结在里面）开出去就公开了，不经 git 推送、推前扫描拦不到：开之前过一遍
+  assertPublishable(
+    `开 ${slug} 上 ${branch} 的 PR`,
+    [
+      { path: 'PR 标题', text: title },
+      { path: 'PR 正文', text: body },
+    ],
+    deps.sensitiveValues,
+  );
   const facts = await deps.facts.get(repo, 'agent', ctx.signal);
   if (branch.toLowerCase() === facts.defaultBranch.toLowerCase()) {
     throw new GitHubError('BRANCH_FORBIDDEN', `不能拿主线 ${facts.defaultBranch} 开 PR`);
   }
-  const rawBody = typeof input.body === 'string' ? input.body : renderPrBody(input.body);
-  const body = neutralizeCloseKeywords(rawBody);
-  const title = neutralizeCloseKeywords(input.title.trim());
   if (body !== rawBody || title !== input.title.trim()) {
     deps.log.warn('PR 标题或正文里有 GitHub 关单词，已改成「关联」', { repo: slug, branch });
   }
-  assertBodySize('PR 正文', body);
 
   const receipt = (p: Pull): PrReceipt => ({
     number: p.number,

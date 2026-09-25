@@ -10,6 +10,7 @@ import {
   type EnginePorts,
   type LaunchSessionInput,
   type MergePrInput,
+  type OpenPrInput,
   type PickRouteInput,
   type PickRouteResult,
   type PortContext,
@@ -27,6 +28,7 @@ import {
   type TaskStateSnapshot,
   type TimingEntry,
   type WaitCiInput,
+  type WriteSpecDocInput,
 } from './ports.ts';
 
 export interface FakeSessionPlan {
@@ -52,6 +54,10 @@ export interface FakeScript {
   merge: (input: MergePrInput, n: number) => Partial<MergeOutcome> | undefined;
   /** 推分支：给了就抛它（假的卫生检查拦下、名单没读到……）；n = 第几次推（从 1 开始）。 */
   push: (input: PushBranchInput, n: number) => PortError | undefined;
+  /** 开 PR：给了就抛它（假的卫生检查拦下标题或正文……）；n = 第几次开（从 1 开始）。 */
+  openPr: (input: OpenPrInput, n: number) => PortError | undefined;
+  /** 写需求文档、方案、结果进主线：给了就抛它；n = 第几次写（三种文档一起数，从 1 开始）。 */
+  specDoc: (input: WriteSpecDocInput, n: number) => PortError | undefined;
   route: (input: PickRouteInput, n: number) => PickRouteResult | undefined;
   /** 前 N 次调用抛可重试的 TRANSIENT。 */
   failFirst: Partial<Record<PortName, number>>;
@@ -338,6 +344,8 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
       return { passed: true, head: input.head, summary: '全绿', ...script.tests?.(input, next('runTests')) };
     },
     async openPr(input) {
+      const refused = script.openPr?.(input, next('openPr'));
+      if (refused) throw refused;
       let pr = prByBranch.get(input.branch);
       if (pr === undefined) {
         pr = 100 + prByBranch.size;
@@ -366,6 +374,8 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
     },
     async closeIssue() {},
     async writeSpecDoc(input) {
+      const refused = script.specDoc?.(input, next('writeSpecDoc'));
+      if (refused) throw refused;
       return { path: `${input.specDir}/${DOC_FILE[input.doc]}` };
     },
     async askHuman(input) {

@@ -16,8 +16,13 @@ import { PLAN_LINE_HINT, planLineOf, REQUIREMENT_DOC } from './spec-doc.ts';
 import {
   bundleSince,
   fastForward,
+  fetchBundle,
+  hasCommit,
   headOf,
   headOfIncoming,
+  isAncestor,
+  isMergeOnto,
+  mergeInto,
   type UserTree,
   uncommittedPatch,
   uncommittedTracked,
@@ -184,8 +189,9 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
     async pushBranch(input, ctx) {
       const user = await ownerOrFail(input.worktreePath);
       const t = treeAs(input.worktreePath, user, `push-${input.subtaskId ?? input.taskId}`, ctx);
-      const head = await headOf(t);
-      if (head !== input.head) {
+      let head = await headOf(t);
+      // 上一次这一步已经把主线并进来了（并提交的第一个父提交是会话交的头），只是没推成：接着推它
+      if (head !== input.head && !(await isMergeOnto(t, head, input.head))) {
         throw new PortError(
           'HEAD_MISMATCH',
           `工作树的头是 ${head.slice(0, 7)}，不是要推的 ${input.head.slice(0, 7)}`,
@@ -200,7 +206,39 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
           { retryable: false },
         );
       }
-      // 包的起点：树最后一次从引擎取的头（建树的主线头，或并主线后的新头）——引擎的镜像里一定有它。
+      // 推的必须含最新主线（github 包核，不含就拒）：主线在会话干活时动过，先把它并进会话的树再推。
+      // 并出冲突就撤掉，交失败分流退回会话去解（MC1）；树里已经有新主线的提交，会话照着 git merge 就行。
+      // 会话一个新提交都没有就不并（并出来的只有一个并提交，是空交付）。
+      const incoming = await headOfIncoming(t);
+      if (head === incoming) {
+        throw new PortError('EMPTY_DELIVERY', `起会话前的头 ${incoming.slice(0, 7)} 之后没有新提交`, {
+          retryable: false,
+        });
+      }
+      const main = await mapped(() => gh.fetchMainline({ repo: input.repo, signal: ctx.signal }, ctx));
+      if (!(await hasCommit(t, main.head))) {
+        const { bytes, ref } = await bundleFromMirror(
+          gh,
+          deps.tmpDir,
+          input.repo,
+          main.head,
+          [incoming],
+          ctx.signal,
+        );
+        await fetchBundle(t, bytes, ref);
+      }
+      if (!(await isAncestor(t, main.head, head))) {
+        const merged = await mergeInto(t, main.head);
+        if ('conflict' in merged) {
+          throw new PortError(
+            'MERGE_CONFLICT',
+            `推之前把最新主线 ${main.head.slice(0, 7)} 并进来有冲突：${merged.conflict.slice(0, 10).join('、')}。在树里 git merge ${main.head} 解掉冲突、提交后再交`,
+            { retryable: false, details: { mainline: main.head, conflictFiles: merged.conflict } },
+          );
+        }
+        head = merged.merged;
+      }
+      // 包的起点：树最后一次从引擎取的头（建树的主线头、并主线后的新头、或刚取进来的最新主线）——引擎的镜像里一定有它。
       const base = await headOfIncoming(t);
       const bundle = await bundleSince(t, head, base);
       await mkdir(deps.tmpDir, { recursive: true, mode: 0o700 });

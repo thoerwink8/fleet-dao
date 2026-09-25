@@ -2,7 +2,7 @@
 // 生产：createGitHub({ ledger: pgLedger(db), locker: pgLocker(db) })——凭据从 /etc/fleet-dao/github 读（环境变量可改），
 // 推送用的裸仓放在 FLEET_GITHUB_STATE_DIR（默认 /var/lib/fleet-dao/github）下。
 import { join } from 'node:path';
-import type { LoadedValues } from '@fleet-dao/hygiene';
+import { type LoadedValues, loadSensitiveValues } from '@fleet-dao/hygiene';
 import { z } from 'zod';
 import {
   type BundleCommitsInput,
@@ -161,6 +161,8 @@ export function createGitHub(options: GitHubOptions): GitHub {
     ...(options.writeSpacingMs !== undefined ? { writeSpacingMs: options.writeSpacingMs } : {}),
     ...(options.maxRateLimitWaitMs !== undefined ? { maxRateLimitWaitMs: options.maxRateLimitWaitMs } : {}),
   });
+  // 推分支、写需求文档、开 PR 之前的卫生检查用同一份名单
+  const sensitiveValues = options.sensitiveValues ?? (() => loadSensitiveValues({ env }));
   const deps: Deps = {
     client,
     facts: new RepoFactsCache(client),
@@ -169,6 +171,7 @@ export function createGitHub(options: GitHubOptions): GitHub {
     bots: new Bots(client),
     log: client.log,
     leaseRenewMs: options.leaseRenewMs,
+    sensitiveValues,
   };
   const stateDir = options.stateDir ?? env.FLEET_GITHUB_STATE_DIR ?? '/var/lib/fleet-dao/github';
   const gitHost = options.gitHost ?? 'https://github.com/';
@@ -183,7 +186,7 @@ export function createGitHub(options: GitHubOptions): GitHub {
     maxBundleBytes: options.maxBundleBytes ?? MAX_BUNDLE_BYTES,
     log: client.log,
     baseEnv: env,
-    ...(options.sensitiveValues && { sensitiveValues: options.sensitiveValues }),
+    sensitiveValues,
   };
 
   return {

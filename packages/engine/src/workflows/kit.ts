@@ -51,6 +51,7 @@ import {
 } from '../contract.ts';
 import type { FailureContext, FailureInfo, LadderCounters, NextAction } from '../decisions/failure.ts';
 import type { Decide, DecisionKind, DecisionMap } from '../decisions/index.ts';
+import type { Feedback } from '../decisions/verify.ts';
 import type { Limits } from '../limits.ts';
 import type {
   RouteChoice,
@@ -610,15 +611,53 @@ export interface ReworkCarry {
 export const NO_REWORK: ReworkCarry = { reworks: 0 };
 
 /**
+ * 退回会话的原因。rule 是失败分流认出的规则（HY1 卫生检查拦下、MC1 并主线冲突、DL1 交付不对……）：
+ * 调用方按它给会话写返工意见，不一律说成卫生检查（说错了会话会去改写本来没问题的提交）。
+ */
+export interface Rework {
+  reason: string;
+  message: string;
+  rule: string | undefined;
+  carry: ReworkCarry;
+}
+
+/** 哪一步把活退回会话：推分支、开 PR、写需求文档或方案进主线。 */
+export type ReworkStep = 'push' | 'openPr' | 'doc';
+
+const HYGIENE_SUMMARY: Record<ReworkStep, string> = {
+  push: '推之前的卫生检查拦下了你交的内容：公开仓推上去就公开了。把这些从提交里拿掉——要改写提交（推上去的是全部提交），不能只加一个删掉它的新提交',
+  openPr:
+    '开 PR 之前的卫生检查拦下了 PR 的标题或正文（你交活时 fleet done 写的总结就在正文里）：开出去就公开了。代码不用动，改好总结重新 fleet done',
+  doc: '写进主线之前的卫生检查拦下了你写的文档：公开仓写上去就公开了。把这些从文档里拿掉再交',
+};
+
+/** 退回会话时的返工意见：按认出的规则写（卫生检查、并主线冲突、交付不对各有各的改法），原文原样带上。 */
+export function reworkFeedback(
+  step: ReworkStep,
+  rework: Pick<Rework, 'rule' | 'reason' | 'message'>,
+): Feedback {
+  const items = [rework.message];
+  if (rework.rule === 'HY1') return { kind: 'hygiene', summary: HYGIENE_SUMMARY[step], items };
+  if (rework.rule === 'MC1') {
+    return {
+      kind: 'conflict',
+      summary: '推之前把最新主线并进你的树时有冲突：照下面写的在树里 git merge、解掉冲突、提交后再交',
+      items,
+    };
+  }
+  return { kind: 'delivery', summary: `交的东西没过核对：${rework.reason}`, items };
+}
+
+/**
  * 和 attempt 一样按失败分流走，多一种结局：分流说「返工」（记返工账的那一级，例如推之前的卫生检查拦下了会话交的内容），
- * 这一步不在原地重试——原样再推一次还是被拦——交回调用方退回会话，带上被拦的原文。carry 由调用方跨轮次带着。
+ * 这一步不在原地重试——原样再推一次还是被拦——交回调用方退回会话，带上被拦的原文和认出的规则。carry 由调用方跨轮次带着。
  */
 export async function attemptOrRework<T>(
   kit: Kit,
   source: string,
   fn: () => Promise<T>,
   carry: ReworkCarry,
-): Promise<{ ok: T } | { rework: { reason: string; message: string; carry: ReworkCarry } }> {
+): Promise<{ ok: T } | { rework: Rework }> {
   let counters: LadderCounters = { ...NO_LADDER, reworks: carry.reworks };
   let previousMessage = carry.previousMessage;
   for (;;) {
@@ -643,6 +682,7 @@ export async function attemptOrRework<T>(
           rework: {
             reason: next.reason,
             message: failure.message,
+            rule: next.rule,
             carry: { reworks: counters.reworks + 1, previousMessage: failure.message },
           },
         };
