@@ -3,6 +3,7 @@
 // - 有 DATABASE_URL：真库（Postgres Store + LISTEN fleet_changes）。生产必须有。
 // - 开发环境没有 DATABASE_URL：内存里的样例数据；飞书登录没配时可以用 POST /auth/dev-login 免登（只许本机回环监听）。
 // Temporal 客户端、GitHub 事件落库等引擎的 PR 合了再接；在那之前健康检查如实报红，发信号返回 503。
+// 飞书确认的草稿去开单（TaskIntake）也等引擎接：在那之前草稿留在「待开单」，这里定时补开，接上后自动开出来。
 import type { Server } from 'node:http';
 import { createDb } from '@fleet-dao/db';
 import { serve } from '@hono/node-server';
@@ -15,6 +16,7 @@ import { DEV_RUN_ID, DEV_USER_ID, devFixtures, IDS } from './dev-fixtures.ts';
 import { createFeishuAuth } from './feishu.ts';
 import { notWiredGitHub } from './github.ts';
 import { serviceHealthChecks } from './health.ts';
+import { notWiredTaskIntake } from './intake.ts';
 import { jsonLogger } from './log.ts';
 import { createMemoryStore } from './memory-store.ts';
 import { createPgStore, probeDb, withStatementTimeout } from './pg-store.ts';
@@ -63,6 +65,7 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
           log.info('（开发）收到 GitHub 事件', { event: event.event, repo: event.repo, wake: event.wake });
         },
       },
+      intake: notWiredTaskIntake(),
     };
     return { deps, close: async () => {} };
   }
@@ -88,6 +91,7 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
     feishu,
     workflows: temporal.control,
     github: github.sink,
+    intake: notWiredTaskIntake(),
     health: serviceHealthChecks({ probeDb: () => probeDb(db), feed, temporal, githubEvents: github.check }),
   };
   return {
@@ -101,7 +105,8 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
 }
 
 const { deps, close } = await assemble();
-const { cockpit, agent } = buildApps(deps);
+const { cockpit, agent, intake } = buildApps(deps);
+const stopIntake = intake.start();
 const servers = [
   serve({ fetch: cockpit.fetch, hostname: config.cockpitListen.host, port: config.cockpitListen.port }),
   serve({ fetch: agent.fetch, hostname: config.agentListen.host, port: config.agentListen.port }),
@@ -134,6 +139,7 @@ async function shutdown(signal: string) {
   if (stopping) return;
   stopping = true;
   log.info('收到退出信号，停止接新请求', { signal });
+  stopIntake();
   const drained = Promise.all(
     servers.map((server) => new Promise<void>((resolve) => (server as Server).close(() => resolve()))),
   );

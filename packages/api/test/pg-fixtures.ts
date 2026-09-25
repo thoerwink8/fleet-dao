@@ -7,6 +7,10 @@ import {
   channels,
   type Db,
   families,
+  feishuCards,
+  feishuDrafts,
+  feishuFollows,
+  feishuOutbox,
   insertSubtasks,
   models,
   notificationDeliveries,
@@ -205,7 +209,7 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
         n.deliveries.map((d, i) => ({
           notificationId: n.id,
           channel: d.channel,
-          target: `target-${i}`,
+          target: d.target ?? `target-${i}`,
           messageId: d.messageId ?? null,
           attempts: d.attempts,
           lastError: d.error ?? null,
@@ -267,6 +271,63 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
         summary: s.summary,
         resultSummary: s.resultSummary ?? null,
         mergedAt: dateOpt(s.mergedAt),
+      })),
+    );
+  }
+  if (data.feishuDrafts?.length) {
+    await db.insert(feishuDrafts).values(
+      data.feishuDrafts.map((d) => ({
+        ...d,
+        repoId: d.repoId ?? null,
+        createdAt: date(d.createdAt),
+        updatedAt: date(d.updatedAt),
+        confirmedBy: d.confirmedBy ?? null,
+        confirmedAt: dateOpt(d.confirmedAt),
+        taskId: d.taskId ?? null,
+        intakeError: d.intakeError ?? null,
+        intakeTriedAt: dateOpt(d.intakeTriedAt),
+      })),
+    );
+  }
+  if (data.feishuFollows?.length) {
+    await db
+      .insert(feishuFollows)
+      .values(data.feishuFollows.map((f) => ({ ...f, updatedAt: date(f.updatedAt) })));
+  }
+  if (data.feishuCards?.length) {
+    await db.insert(feishuCards).values(
+      data.feishuCards.map((c) => ({
+        messageId: c.messageId,
+        chatId: c.chatId,
+        kind: c.kind,
+        taskId: c.ref.taskId ?? null,
+        askId: c.ref.askId ?? null,
+        draftId: c.ref.draftId ?? null,
+        notificationId: c.ref.notificationId ?? null,
+        outboxId: c.ref.outboxId ?? null,
+        sentAt: date(c.sentAt),
+        updatedAt: date(c.updatedAt),
+      })),
+    );
+  }
+  if (data.feishuOutbox?.length) {
+    await db.insert(feishuOutbox).values(
+      data.feishuOutbox.map((o) => ({
+        id: o.id,
+        revision: o.revision,
+        fingerprint: o.fingerprint,
+        createdAt: date(o.createdAt),
+        updatedAt: date(o.updatedAt),
+        ackRevision: o.ackRevision ?? null,
+        ackStatus: o.ackStatus ?? null,
+        ackReason: o.ackReason ?? null,
+        ackedAt: dateOpt(o.ackedAt),
+        holdUntil: dateOpt(o.holdUntil),
+        failures: o.failures,
+        deliveredMessageId: o.deliveredMessageId ?? null,
+        deliveredChatId: o.deliveredChatId ?? null,
+        deliveredAt: dateOpt(o.deliveredAt),
+        deliveredRevision: o.deliveredRevision ?? null,
       })),
     );
   }

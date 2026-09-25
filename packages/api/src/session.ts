@@ -1,6 +1,12 @@
 // 驾驶舱登录态：HttpOnly Cookie（自签，带过期时间）+ 按会话派生的 CSRF 令牌。
 // 每个请求都回库查一次用户：从白名单里拿掉的人，下一个请求就进不来。
-import { CSRF_HEADER, FEISHU_ACTING_HEADER } from '@fleet-dao/shared';
+import {
+  CSRF_HEADER,
+  FEISHU_ACTING_HEADER,
+  FEISHU_GATEWAY_WEB_ROUTES,
+  WEB_API_PREFIX,
+  WebRoutes,
+} from '@fleet-dao/shared';
 import type { Context, MiddlewareHandler } from 'hono';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import { z } from 'zod';
@@ -139,17 +145,47 @@ export function checkCsrf(c: Context, config: Config, sid: string): void {
 }
 
 /**
+ * 网关通行证能进的驾驶舱接口：只有 shared 的 FEISHU_GATEWAY_WEB_ROUTES 这几条（都代表某位创始人）。
+ * 飞书接口（FeishuRoutes）在 feishu-routes.ts 里逐条按各自的 acting 放行，不经这里。
+ */
+const GATEWAY_WEB_ROUTES = FEISHU_GATEWAY_WEB_ROUTES.map((name) => {
+  const route = WebRoutes[name];
+  return { method: route.method, pattern: routePattern(route.path) };
+});
+
+/** `/tasks/:taskId` → 只认一段的正则（参数里不许有斜杠）。 */
+export function routePattern(path: string): RegExp {
+  const escaped = path
+    .split('/')
+    .map((part) => (part.startsWith(':') ? '[^/]+' : part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+    .join('/');
+  return new RegExp(`^${escaped}$`);
+}
+
+/**
  * 驾驶舱接口的门，两种进法：
  * 1. 浏览器：登录 Cookie（写操作另过 CSRF）；
  * 2. 飞书网关：`Authorization: Bearer <网关通行证>` + `X-Fleet-Acting-Feishu: <飞书 open_id>`，按 open_id 认创始人，
- *    当作这位创始人操作（操作记录 via=feishu），不走 CSRF。
+ *    当作这位创始人操作（操作记录 via=feishu），不走 CSRF。只放行 GATEWAY_WEB_ROUTES 那几条，别的一律 403
+ *    （通行证放在香港那台机器上，漏了也只能做飞书那几件事）。不在 /api 下的入口（退出登录）各自再判。
  * 带了 Authorization 却不是网关通行证的（例如 fleet 令牌）一律拒。通行证常量时间比较，不写进日志。
  */
 export function requireSession(config: Config, store: Store, now: () => Date): MiddlewareHandler<CockpitEnv> {
   return async (c, next) => {
     const authorization = c.req.header('authorization');
     if (authorization !== undefined) {
-      c.set('user', await gatewayUser(c, config, store, authorization));
+      checkGatewayPass(config, authorization);
+      if (c.req.path.startsWith(`${WEB_API_PREFIX}/`)) {
+        const path = c.req.path.slice(WEB_API_PREFIX.length);
+        if (!GATEWAY_WEB_ROUTES.some((r) => r.method === c.req.method && r.pattern.test(path))) {
+          throw new ApiError(
+            403,
+            'gateway_route_not_allowed',
+            '网关通行证只能调飞书接口，和查任务、叫停、回答追问这几条驾驶舱接口',
+          );
+        }
+      }
+      c.set('user', await actingFounder(c, store));
       c.set('via', 'feishu');
       c.set('session', undefined);
       await next();
@@ -167,12 +203,8 @@ export function requireSession(config: Config, store: Store, now: () => Date): M
   };
 }
 
-async function gatewayUser(
-  c: Context,
-  config: Config,
-  store: Store,
-  authorization: string,
-): Promise<CockpitUser> {
+/** 网关通行证对不对：没配、不是 Bearer、对不上都 401。 */
+export function checkGatewayPass(config: Config, authorization: string): void {
   const pass = config.feishuGatewayToken;
   const bearer = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length).trim() : '';
   if (pass === null || !safeEqual(bearer, pass)) {
@@ -182,6 +214,10 @@ async function gatewayUser(
       '驾驶舱接口只认登录 Cookie 或飞书网关通行证，fleet 令牌不能用在这里',
     );
   }
+}
+
+/** 网关代表的是哪位创始人（X-Fleet-Acting-Feishu 的 open_id）：没带 403，不是创始人 403。 */
+export async function actingFounder(c: Context, store: Store): Promise<CockpitUser> {
   const openId = c.req.header(FEISHU_ACTING_HEADER)?.trim();
   if (!openId)
     throw new ApiError(403, 'acting_missing', `网关请求要带 ${FEISHU_ACTING_HEADER}（代表哪位创始人）`);

@@ -21,6 +21,7 @@ export {
 export { type Config, ConfigError, loadConfig } from './config.ts';
 export type { Deps } from './deps.ts';
 export { createFeishuAuth, FeishuRejectedError, FeishuUnavailableError } from './feishu.ts';
+export { feishuRoutes } from './feishu-routes.ts';
 export {
   createGitHubIntake,
   type GitHubIntake,
@@ -34,6 +35,13 @@ export {
 } from './github.ts';
 export { type HealthReport, PublicHealthError, runHealthChecks, serviceHealthChecks } from './health.ts';
 export { isSerial, isUuid, parseCursor } from './ids.ts';
+export {
+  createIntakeRunner,
+  INTAKE_CONFIRM_WAIT_MS,
+  type IntakeOutcome,
+  type IntakeRunner,
+  notWiredTaskIntake,
+} from './intake.ts';
 export { jsonLogger, silentLogger } from './log.ts';
 export { createMemoryStore, emptyData, type MemoryData } from './memory-store.ts';
 export {

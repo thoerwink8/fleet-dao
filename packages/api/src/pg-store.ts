@@ -12,6 +12,10 @@ import {
   channels,
   claimIdempotencyKey,
   type Db,
+  feishuCards,
+  feishuDrafts,
+  feishuFollows,
+  feishuOutbox,
   idempotencyKeys,
   models,
   notificationDeliveries,
@@ -50,13 +54,29 @@ import {
   users,
 } from '@fleet-dao/db';
 import type { ProgressKind, Step } from '@fleet-dao/shared';
-import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
+import { and, asc, countDistinct, desc, eq, gte, inArray, isNull, lt, or, sql } from 'drizzle-orm';
+import {
+  appendNote,
+  feishuMessageKey,
+  feishuReviseKey,
+  messagePayload,
+  parseMessageRecord,
+} from './feishu-records.ts';
 import { PublicHealthError } from './health.ts';
 import { isSerial, isUuid, parseCursor } from './ids.ts';
 import type {
   AskRecord,
   AuditRecord,
   CommandClaim,
+  DraftRecord,
+  FeishuAckReport,
+  FeishuCardRecord,
+  FeishuMessageKey,
+  FeishuMessageRecord,
+  FeishuOutboxAck,
+  FeishuOutboxSources,
+  FeishuOutboxState,
+  FeishuTaskInfo,
   JobRecord,
   NewAuditEntry,
   NotificationRecord,
@@ -84,6 +104,56 @@ const seq15 = (n: number) => String(n).padStart(15, '0');
 type UserRow = typeof users.$inferSelect;
 type AskRow = typeof asks.$inferSelect;
 type AuditRow = typeof auditLog.$inferSelect;
+type DraftRow = typeof feishuDrafts.$inferSelect;
+type OutboxRow = typeof feishuOutbox.$inferSelect;
+type CardRow = typeof feishuCards.$inferSelect;
+
+function toCard(r: CardRow): FeishuCardRecord {
+  return {
+    messageId: r.messageId,
+    chatId: r.chatId,
+    kind: r.kind,
+    ref: {
+      taskId: opt(r.taskId),
+      askId: opt(r.askId),
+      draftId: opt(r.draftId),
+      notificationId: opt(r.notificationId),
+      outboxId: opt(r.outboxId),
+    },
+    sentAt: iso(r.sentAt),
+  };
+}
+
+function toOutboxState(
+  r: OutboxRow,
+  fallback: { messageId: string; chatId: string; sentAt: Date } | undefined,
+): FeishuOutboxState {
+  return {
+    id: r.id,
+    revision: r.revision,
+    createdAt: iso(r.createdAt),
+    ack:
+      r.ackRevision === null || r.ackStatus === null
+        ? undefined
+        : {
+            revision: r.ackRevision,
+            status: r.ackStatus,
+            reason: opt(r.ackReason),
+            holdUntil: isoOpt(r.holdUntil),
+          },
+    delivered:
+      r.deliveredMessageId !== null && r.deliveredChatId !== null && r.deliveredAt !== null
+        ? {
+            messageId: r.deliveredMessageId,
+            chatId: r.deliveredChatId,
+            sentAt: iso(r.deliveredAt),
+            revision: opt(r.deliveredRevision),
+          }
+        : fallback
+          ? { messageId: fallback.messageId, chatId: fallback.chatId, sentAt: iso(fallback.sentAt) }
+          : undefined,
+  };
+}
 
 function toUser(r: UserRow): User {
   return {
@@ -236,6 +306,150 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       isNull(idempotencyKeys.completedAt),
       eq(idempotencyKeys.claimedAt, new Date(token)),
     );
+
+  // —— 飞书用的小工具 ——
+
+  async function draftOut(tx: Db, r: DraftRow): Promise<DraftRecord> {
+    const [card] = await tx
+      .select({ messageId: feishuCards.messageId })
+      .from(feishuCards)
+      .where(and(eq(feishuCards.kind, 'draft'), eq(feishuCards.draftId, r.id)))
+      .orderBy(desc(feishuCards.sentAt), desc(feishuCards.messageId))
+      .limit(1);
+    return {
+      id: r.id,
+      revision: r.revision,
+      status: r.status,
+      sourceMessageId: r.sourceMessageId,
+      chatType: r.chatType,
+      rawText: r.rawText,
+      understanding: r.understanding,
+      unsure: r.unsure,
+      repoId: opt(r.repoId),
+      proposedBy: r.proposedBy,
+      confirmedBy: opt(r.confirmedBy),
+      confirmedAt: isoOpt(r.confirmedAt),
+      taskId: opt(r.taskId),
+      cardMessageId: card?.messageId,
+      intake: { attempts: r.intakeAttempts, error: opt(r.intakeError), triedAt: isoOpt(r.intakeTriedAt) },
+      createdAt: iso(r.createdAt),
+      updatedAt: iso(r.updatedAt),
+    };
+  }
+
+  async function loadMessage(tx: Db, sourceMessageId: string): Promise<FeishuMessageRecord | null> {
+    const [row] = await tx
+      .select()
+      .from(idempotencyKeys)
+      .where(eq(idempotencyKeys.key, feishuMessageKey(sourceMessageId)));
+    if (!row) return null;
+    if (row.action !== 'feishu.message') {
+      throw new Error(`飞书消息 ${sourceMessageId} 的幂等键被别的命令（${row.action}）占着`);
+    }
+    return parseMessageRecord(sourceMessageId, row.result, iso(row.completedAt ?? row.claimedAt));
+  }
+
+  async function mustLoadMessage(tx: Db, sourceMessageId: string): Promise<FeishuMessageRecord> {
+    const found = await loadMessage(tx, sourceMessageId);
+    if (!found) throw new Error(`飞书消息 ${sourceMessageId} 的幂等记录写不进也读不到`);
+    return found;
+  }
+
+  const messageClaim = (message: FeishuMessageKey, result: FeishuMessageRecord['result'], at: Date) => ({
+    key: feishuMessageKey(message.sourceMessageId),
+    action: 'feishu.message',
+    target: `user:${message.userId}`,
+    claimedAt: at,
+    completedAt: at,
+    result: messagePayload(message, result),
+  });
+
+  /** 通知类推送的回执同时记进这条通知的送达记录（去处 team），驾驶舱「通知」页看得到。 */
+  async function mirrorDelivery(tx: Db, ack: FeishuOutboxAck, at: Date): Promise<void> {
+    if (!ack.itemId.startsWith('notification:')) return;
+    const notificationId = ack.itemId.slice('notification:'.length);
+    if (!isUuid(notificationId)) return;
+    const [exists] = await tx
+      .select({ id: notifications.id })
+      .from(notifications)
+      .where(eq(notifications.id, notificationId));
+    if (!exists) return;
+    const r = ack.result;
+    const delivered = r.status === 'sent' || r.status === 'updated';
+    const attempt = delivered || r.status === 'failed' ? 1 : 0;
+    const lastError =
+      r.status === 'failed'
+        ? r.error
+        : r.status === 'dropped'
+          ? `不发了：${r.reason}`
+          : r.status === 'deferred'
+            ? `免打扰，推迟到 ${r.until}`
+            : null;
+    await tx
+      .insert(notificationDeliveries)
+      .values({
+        notificationId,
+        channel: 'feishu',
+        target: 'team',
+        messageId: delivered ? r.messageId : null,
+        attempts: attempt,
+        lastError,
+        lastAttemptAt: at,
+        deliveredAt: delivered ? at : null,
+      })
+      .onConflictDoUpdate({
+        target: [
+          notificationDeliveries.notificationId,
+          notificationDeliveries.channel,
+          notificationDeliveries.target,
+        ],
+        set: {
+          ...(delivered ? { messageId: r.messageId, deliveredAt: at } : {}),
+          attempts: sql`${notificationDeliveries.attempts} + ${attempt}`,
+          lastError,
+          lastAttemptAt: at,
+        },
+      });
+  }
+
+  async function taskInfos(tx: Db, taskIds: readonly string[]): Promise<Map<string, FeishuTaskInfo>> {
+    const ids = [...new Set(taskIds)].filter(isUuid);
+    if (ids.length === 0) return new Map();
+    const rows = await tx
+      .select({
+        id: tasks.id,
+        title: tasks.title,
+        issueNumber: tasks.issueNumber,
+        state: tasks.state,
+        owner: repos.owner,
+        name: repos.name,
+      })
+      .from(tasks)
+      .innerJoin(repos, eq(repos.id, tasks.repoId))
+      .where(inArray(tasks.id, ids));
+    return new Map(
+      rows.map((r) => [
+        r.id,
+        {
+          id: r.id,
+          title: r.title,
+          issueNumber: r.issueNumber,
+          state: r.state,
+          repo: `${r.owner}/${r.name}`,
+        },
+      ]),
+    );
+  }
+
+  async function displayNames(tx: Db, ids: readonly (string | null)[]): Promise<Map<string, string>> {
+    const uuids = [...new Set(ids.filter((id): id is string => id !== null && isUuid(id)))];
+    if (uuids.length === 0) return new Map();
+    const rows = await tx
+      .select({ id: users.id, name: users.displayName })
+      .from(users)
+      .where(inArray(users.id, uuids));
+    return new Map(rows.map((r) => [r.id, r.name]));
+  }
 
   return {
     // —— 人 ——
@@ -834,6 +1048,451 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
     },
     async releaseDelivery(id) {
       await releaseIdempotencyKey(db, `github-delivery:${id}`);
+    },
+
+    // —— 飞书 ——
+    async getDraft(id) {
+      if (!isUuid(id)) return null;
+      const [row] = await db.select().from(feishuDrafts).where(eq(feishuDrafts.id, id));
+      return row ? draftOut(db, row) : null;
+    },
+    async createDraft({ message, draft }, entry) {
+      return db.transaction(async (tx) => {
+        const at = now();
+        // 先占消息编号（和草稿同一事务）：同一条消息同时来两次，后一个等前一个提交后撞上，交回它的结果。
+        const claimed = await tx
+          .insert(idempotencyKeys)
+          .values(messageClaim(message, { kind: 'draft', draftId: draft.id }, at))
+          .onConflictDoNothing()
+          .returning({ key: idempotencyKeys.key });
+        if (claimed.length === 0) {
+          return { status: 'replayed' as const, message: await mustLoadMessage(tx, message.sourceMessageId) };
+        }
+        const [row] = await tx
+          .insert(feishuDrafts)
+          .values({
+            id: draft.id,
+            sourceMessageId: message.sourceMessageId,
+            chatType: draft.chatType,
+            rawText: draft.rawText,
+            understanding: draft.understanding,
+            unsure: draft.unsure,
+            repoId: draft.repoId ?? null,
+            proposedBy: message.userId,
+            createdAt: at,
+            updatedAt: at,
+          })
+          .returning();
+        if (!row) throw new Error(`草稿 ${draft.id} 没写进去`);
+        await insertAudit(tx, entry);
+        return { status: 'created' as const, draft: await draftOut(tx, row) };
+      });
+    },
+    async reviseDraft({ draftId, note, repoId, key }, entry) {
+      if (key.type === 'message') {
+        const handled = await loadMessage(db, key.message.sourceMessageId);
+        if (handled) return { status: 'replayed_message', message: handled };
+      }
+      if (!isUuid(draftId)) return { status: 'not_found' };
+      return db.transaction(async (tx) => {
+        // 锁住这张草稿：同一张草稿的改动、确认排队做。
+        const [row] = await tx.select().from(feishuDrafts).where(eq(feishuDrafts.id, draftId)).for('update');
+        if (!row) return { status: 'not_found' as const };
+        if (key.type === 'request') {
+          const [seen] = await tx
+            .select({ key: idempotencyKeys.key })
+            .from(idempotencyKeys)
+            .where(eq(idempotencyKeys.key, feishuReviseKey(draftId, key.requestId)));
+          if (seen) return { status: 'replayed' as const, draft: await draftOut(tx, row) };
+        }
+        if (row.status === 'confirmed')
+          return { status: 'confirmed' as const, draft: await draftOut(tx, row) };
+        const at = now();
+        const claimed = await tx
+          .insert(idempotencyKeys)
+          .values(
+            key.type === 'request'
+              ? {
+                  key: feishuReviseKey(draftId, key.requestId),
+                  action: 'feishu.revise',
+                  target: `draft:${draftId}`,
+                  claimedAt: at,
+                  completedAt: at,
+                  result: { revision: row.revision + 1 },
+                }
+              : messageClaim(key.message, { kind: 'draft', draftId }, at),
+          )
+          .onConflictDoNothing()
+          .returning({ key: idempotencyKeys.key });
+        if (claimed.length === 0) {
+          // 只有「同一条消息」会走到这里（请求编号上面已经查过、又锁着草稿）：别的请求刚处理完这条消息。
+          if (key.type === 'request') throw new Error(`改草稿的请求编号 ${key.requestId} 占不到也没查到`);
+          return {
+            status: 'replayed_message' as const,
+            message: await mustLoadMessage(tx, key.message.sourceMessageId),
+          };
+        }
+        const [updated] = await tx
+          .update(feishuDrafts)
+          .set({
+            revision: row.revision + 1,
+            understanding: note ? appendNote(row.understanding, note) : row.understanding,
+            ...(repoId === undefined ? {} : { repoId }),
+            updatedAt: at,
+          })
+          .where(eq(feishuDrafts.id, draftId))
+          .returning();
+        if (!updated) throw new Error(`草稿 ${draftId} 没改成`);
+        await insertAudit(tx, entry);
+        return { status: 'revised' as const, draft: await draftOut(tx, updated) };
+      });
+    },
+    async confirmDraft({ draftId, revision, repoId, by }, entry) {
+      if (!isUuid(draftId)) return { status: 'not_found' };
+      return db.transaction(async (tx) => {
+        const [row] = await tx.select().from(feishuDrafts).where(eq(feishuDrafts.id, draftId)).for('update');
+        if (!row) return { status: 'not_found' as const };
+        if (row.status === 'confirmed') return { status: 'already' as const, draft: await draftOut(tx, row) };
+        if (row.revision !== revision) return { status: 'changed' as const, draft: await draftOut(tx, row) };
+        const at = now();
+        const [updated] = await tx
+          .update(feishuDrafts)
+          .set({ status: 'confirmed', confirmedBy: by, confirmedAt: at, repoId, updatedAt: at })
+          .where(eq(feishuDrafts.id, draftId))
+          .returning();
+        if (!updated) throw new Error(`草稿 ${draftId} 没确认成`);
+        await insertAudit(tx, entry);
+        return { status: 'confirmed' as const, draft: await draftOut(tx, updated) };
+      });
+    },
+    async listPendingIntakes(limit) {
+      const rows = await db
+        .select()
+        .from(feishuDrafts)
+        .where(and(eq(feishuDrafts.status, 'confirmed'), isNull(feishuDrafts.taskId)))
+        .orderBy(asc(feishuDrafts.confirmedAt), asc(feishuDrafts.id))
+        .limit(limit);
+      return Promise.all(rows.map((r) => draftOut(db, r)));
+    },
+    async recordIntake({ draftId, taskId }) {
+      if (!isUuid(draftId)) return 'not_pending';
+      return db.transaction(async (tx) => {
+        const [row] = await tx.select().from(feishuDrafts).where(eq(feishuDrafts.id, draftId)).for('update');
+        if (row?.status !== 'confirmed' || row.taskId !== null) return 'not_pending' as const;
+        if (!isUuid(taskId)) return 'task_not_found' as const;
+        const [task] = await tx.select({ id: tasks.id }).from(tasks).where(eq(tasks.id, taskId));
+        if (!task) return 'task_not_found' as const;
+        await tx
+          .update(feishuDrafts)
+          .set({ taskId, intakeError: null, updatedAt: now() })
+          .where(eq(feishuDrafts.id, draftId));
+        return 'ok' as const;
+      });
+    },
+    async recordIntakeFailure({ draftId, error }) {
+      if (!isUuid(draftId)) return;
+      await db
+        .update(feishuDrafts)
+        .set({
+          intakeAttempts: sql`${feishuDrafts.intakeAttempts} + 1`,
+          intakeError: error,
+          intakeTriedAt: now(),
+        })
+        .where(eq(feishuDrafts.id, draftId));
+    },
+    async getFeishuMessage(sourceMessageId) {
+      return loadMessage(db, sourceMessageId);
+    },
+    async recordFeishuMessage({ message, result }) {
+      await db
+        .insert(idempotencyKeys)
+        .values(messageClaim(message, result, now()))
+        .onConflictDoNothing();
+      return mustLoadMessage(db, message.sourceMessageId);
+    },
+    async findTasksByIssue(issueNumber) {
+      const rows = await db
+        .select({ task: tasks })
+        .from(tasks)
+        .innerJoin(repos, eq(repos.id, tasks.repoId))
+        .where(eq(tasks.issueNumber, issueNumber))
+        .orderBy(asc(repos.owner), asc(repos.name), asc(tasks.id));
+      return rows.map((r) => toTask(r.task));
+    },
+    async setFollow({ taskId, userId, follow }, entry) {
+      if (!isUuid(taskId)) return 'task_not_found';
+      return db.transaction(async (tx) => {
+        const [task] = await tx.select({ id: tasks.id }).from(tasks).where(eq(tasks.id, taskId));
+        if (!task) return 'task_not_found' as const;
+        const at = now();
+        // 条件写：和现在一样就什么都不写（也不记操作记录），两个请求同时来只有一个算「改了」。
+        const changed = follow
+          ? await tx
+              .insert(feishuFollows)
+              .values({ taskId, userId, following: true, updatedAt: at })
+              .onConflictDoUpdate({
+                target: [feishuFollows.taskId, feishuFollows.userId],
+                set: { following: true, updatedAt: at },
+                setWhere: eq(feishuFollows.following, false),
+              })
+              .returning({ taskId: feishuFollows.taskId })
+          : await tx
+              .update(feishuFollows)
+              .set({ following: false, updatedAt: at })
+              .where(
+                and(
+                  eq(feishuFollows.taskId, taskId),
+                  eq(feishuFollows.userId, userId),
+                  eq(feishuFollows.following, true),
+                ),
+              )
+              .returning({ taskId: feishuFollows.taskId });
+        if (changed.length === 0) return 'unchanged' as const;
+        await insertAudit(tx, entry);
+        return 'changed' as const;
+      });
+    },
+    async putCard(record) {
+      const ref = {
+        taskId: record.ref.taskId ?? null,
+        askId: record.ref.askId ?? null,
+        draftId: record.ref.draftId ?? null,
+        notificationId: record.ref.notificationId ?? null,
+        outboxId: record.ref.outboxId ?? null,
+      };
+      const at = now();
+      await db
+        .insert(feishuCards)
+        .values({
+          messageId: record.messageId,
+          chatId: record.chatId,
+          kind: record.kind,
+          ...ref,
+          sentAt: new Date(record.sentAt),
+          updatedAt: at,
+        })
+        .onConflictDoUpdate({
+          target: feishuCards.messageId,
+          set: { kind: record.kind, ...ref, updatedAt: at },
+        });
+    },
+    async getCard(messageId) {
+      const [row] = await db.select().from(feishuCards).where(eq(feishuCards.messageId, messageId));
+      return row ? toCard(row) : null;
+    },
+    async latestBoardCard() {
+      const [row] = await db
+        .select({ messageId: feishuCards.messageId, sentAt: feishuCards.sentAt })
+        .from(feishuCards)
+        .where(eq(feishuCards.kind, 'board'))
+        .orderBy(desc(feishuCards.sentAt), desc(feishuCards.messageId))
+        .limit(1);
+      return row ? { messageId: row.messageId, sentAt: iso(row.sentAt) } : null;
+    },
+    async stateSince(entityIds) {
+      const ids = entityIds.filter(isUuid);
+      if (ids.length === 0) return new Map();
+      const rows = await db
+        .selectDistinctOn([stateChanges.entityId], { entityId: stateChanges.entityId, at: stateChanges.at })
+        .from(stateChanges)
+        .where(inArray(stateChanges.entityId, ids))
+        .orderBy(stateChanges.entityId, desc(stateChanges.id));
+      return new Map(rows.map((r) => [r.entityId, iso(r.at)]));
+    },
+    async countMergedSubtasksSince(since) {
+      const [row] = await db
+        .select({ n: countDistinct(stateChanges.entityId) })
+        .from(stateChanges)
+        .where(
+          and(
+            eq(stateChanges.entity, 'subtask'),
+            eq(stateChanges.toState, 'merged'),
+            gte(stateChanges.at, new Date(since)),
+          ),
+        );
+      return row?.n ?? 0;
+    },
+    async listOutboxSources(since): Promise<FeishuOutboxSources> {
+      const cutoff = new Date(since);
+      const [askRows, noteRows] = await Promise.all([
+        db
+          .select()
+          .from(asks)
+          .where(or(isNull(asks.answer), gte(asks.answeredAt, cutoff)))
+          .orderBy(asc(asks.askedAt), asc(asks.id)),
+        db
+          .select()
+          .from(notifications)
+          .where(or(isNull(notifications.resolvedAt), gte(notifications.resolvedAt, cutoff)))
+          .orderBy(asc(notifications.createdAt), asc(notifications.id)),
+      ]);
+      const [infos, names] = await Promise.all([
+        taskInfos(db, [
+          ...askRows.map((a) => a.taskId),
+          ...noteRows.flatMap((n) => (n.taskId ? [n.taskId] : [])),
+        ]),
+        displayNames(db, [...askRows.map((a) => a.answeredBy), ...noteRows.map((n) => n.resolvedBy)]),
+      ]);
+      return {
+        asks: askRows.map((a) => {
+          const task = infos.get(a.taskId);
+          if (!task) throw new Error(`追问 ${a.id} 的需求 ${a.taskId} 读不到`);
+          return { ask: toAsk(a), task, answeredByName: a.answeredBy ? names.get(a.answeredBy) : undefined };
+        }),
+        notifications: noteRows.map((n) => ({
+          notification: {
+            id: n.id,
+            level: n.level,
+            title: n.title,
+            body: n.body,
+            link: opt(n.link),
+            taskId: opt(n.taskId),
+            createdAt: iso(n.createdAt),
+            resolvedAt: isoOpt(n.resolvedAt),
+            resolvedBy: opt(n.resolvedBy),
+          },
+          task: n.taskId ? infos.get(n.taskId) : undefined,
+          resolvedByName: n.resolvedBy ? names.get(n.resolvedBy) : undefined,
+        })),
+      };
+    },
+    async syncOutbox(items) {
+      if (items.length === 0) return new Map();
+      const ids = items.map((i) => i.id);
+      return db.transaction(async (tx) => {
+        const before = new Map(
+          (await tx.select().from(feishuOutbox).where(inArray(feishuOutbox.id, ids))).map((r) => [r.id, r]),
+        );
+        const at = now();
+        for (const item of items) {
+          const row = before.get(item.id);
+          if (!row) {
+            if (!item.create) continue;
+            await tx
+              .insert(feishuOutbox)
+              .values({
+                id: item.id,
+                revision: 1,
+                fingerprint: item.fingerprint,
+                createdAt: at,
+                updatedAt: at,
+              })
+              .onConflictDoNothing();
+          } else if (row.fingerprint !== item.fingerprint) {
+            // 比较后再改：两个请求同时算出新指纹，只有一个把版本加上去。
+            await tx
+              .update(feishuOutbox)
+              .set({
+                revision: sql`${feishuOutbox.revision} + 1`,
+                fingerprint: item.fingerprint,
+                updatedAt: at,
+              })
+              .where(and(eq(feishuOutbox.id, item.id), eq(feishuOutbox.fingerprint, row.fingerprint)));
+          }
+        }
+        const after = await tx.select().from(feishuOutbox).where(inArray(feishuOutbox.id, ids));
+        const needCard = after.filter((r) => r.deliveredMessageId === null).map((r) => r.id);
+        const cards =
+          needCard.length === 0
+            ? []
+            : await tx
+                .selectDistinctOn([feishuCards.outboxId], {
+                  outboxId: feishuCards.outboxId,
+                  messageId: feishuCards.messageId,
+                  chatId: feishuCards.chatId,
+                  sentAt: feishuCards.sentAt,
+                })
+                .from(feishuCards)
+                .where(inArray(feishuCards.outboxId, needCard))
+                .orderBy(feishuCards.outboxId, desc(feishuCards.sentAt), desc(feishuCards.messageId));
+        const cardOf = new Map(cards.map((c) => [c.outboxId, c]));
+        return new Map(after.map((r) => [r.id, toOutboxState(r, cardOf.get(r.id))]));
+      });
+    },
+    async ackOutbox(acks, atIso) {
+      const at = new Date(atIso);
+      return db.transaction(async (tx) => {
+        const report: FeishuAckReport = { applied: 0, skipped: [] };
+        for (const ack of acks) {
+          const [row] = await tx
+            .select()
+            .from(feishuOutbox)
+            .where(eq(feishuOutbox.id, ack.itemId))
+            .for('update');
+          if (!row) {
+            report.skipped.push({ itemId: ack.itemId, revision: ack.revision, why: 'unknown_item' });
+            continue;
+          }
+          if (ack.revision > row.revision) {
+            report.skipped.push({ itemId: ack.itemId, revision: ack.revision, why: 'future_revision' });
+            continue;
+          }
+          const r = ack.result;
+          const current = ack.revision === row.revision;
+          if (!current && r.status !== 'sent' && r.status !== 'updated') {
+            report.skipped.push({ itemId: ack.itemId, revision: ack.revision, why: 'stale_revision' });
+            continue;
+          }
+          const set: Partial<typeof feishuOutbox.$inferInsert> = {};
+          if (r.status === 'sent') {
+            Object.assign(set, {
+              deliveredMessageId: r.messageId,
+              deliveredChatId: r.chatId,
+              deliveredAt: new Date(r.sentAt),
+              deliveredRevision: ack.revision,
+            });
+          } else if (r.status === 'updated') {
+            // 「改了」只带消息编号：会话和发出时刻取回执记过的，没记过就按卡片登记补；都查不到就不记这张卡。
+            let known: { chatId: string; sentAt: Date } | undefined =
+              row.deliveredMessageId === r.messageId &&
+              row.deliveredChatId !== null &&
+              row.deliveredAt !== null
+                ? { chatId: row.deliveredChatId, sentAt: row.deliveredAt }
+                : undefined;
+            if (!known) {
+              const [card] = await tx
+                .select({ chatId: feishuCards.chatId, sentAt: feishuCards.sentAt })
+                .from(feishuCards)
+                .where(eq(feishuCards.messageId, r.messageId));
+              known = card;
+            }
+            if (known) {
+              Object.assign(set, {
+                deliveredMessageId: r.messageId,
+                deliveredChatId: known.chatId,
+                deliveredAt: known.sentAt,
+                deliveredRevision: ack.revision,
+              });
+            }
+          }
+          if (current) {
+            Object.assign(set, {
+              ackRevision: ack.revision,
+              ackStatus: r.status,
+              ackedAt: at,
+              ackReason:
+                r.status === 'dropped' || r.status === 'deferred'
+                  ? r.reason
+                  : r.status === 'failed'
+                    ? r.error
+                    : null,
+              holdUntil:
+                r.status === 'deferred'
+                  ? new Date(r.until)
+                  : r.status === 'failed'
+                    ? new Date(r.retryAfter)
+                    : null,
+              ...(r.status === 'failed' ? { failures: row.failures + 1 } : {}),
+            });
+          }
+          if (Object.keys(set).length > 0) {
+            await tx.update(feishuOutbox).set(set).where(eq(feishuOutbox.id, ack.itemId));
+          }
+          await mirrorDelivery(tx, ack, at);
+          report.applied += 1;
+        }
+        return report;
+      });
     },
   };
 }

@@ -5,7 +5,8 @@ import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll } from 'vitest';
 import { createPgStore } from '../src/pg-store.ts';
 import { seedPg } from './pg-fixtures.ts';
-import { describeStoreContract } from './store-contract.ts';
+import { describeStoreContract, type MakeStore } from './store-contract.ts';
+import { describeFeishuStoreContract } from './store-contract-feishu.ts';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -13,7 +14,7 @@ beforeAll(async () => {
 }, TEST_DB_TIMEOUT_MS);
 afterAll(() => t.close());
 
-describeStoreContract('Postgres 版', async (data, clock) => {
+const make: MakeStore = async (data, clock) => {
   await resetTestDb(t);
   await seedPg(t.db, data);
   return {
@@ -22,4 +23,7 @@ describeStoreContract('Postgres 版', async (data, clock) => {
       await t.db.update(stateChanges).set({ at }).where(eq(stateChanges.entityId, taskId));
     },
   };
-});
+};
+
+describeStoreContract('Postgres 版', make);
+describeFeishuStoreContract('Postgres 版', make);

@@ -18,12 +18,28 @@ import type {
   Subtask,
   Task,
 } from '@fleet-dao/shared';
+import {
+  appendNote,
+  feishuMessageKey,
+  feishuReviseKey,
+  messagePayload,
+  parseMessageRecord,
+  UNDERSTANDING_MAX,
+} from './feishu-records.ts';
 import { isSerial, isUuid, parseCursor } from './ids.ts';
 import type {
   AgentSession,
   AskRecord,
   AuditRecord,
   CommandClaim,
+  DraftRecord,
+  FeishuAckReport,
+  FeishuCardRecord,
+  FeishuChatType,
+  FeishuMessageRecord,
+  FeishuOutboxAck,
+  FeishuOutboxState,
+  FeishuTaskInfo,
   JobRecord,
   NewAuditEntry,
   NotificationRecord,
@@ -90,6 +106,56 @@ interface IdempotencyRecord {
   result?: unknown;
 }
 
+/** feishu_drafts 的一行（草稿的确认卡编号不在表里，按卡片登记现查）。 */
+export interface FeishuDraftRow {
+  id: string;
+  revision: number;
+  status: 'open' | 'confirmed';
+  sourceMessageId: string;
+  chatType: FeishuChatType;
+  rawText: string;
+  understanding: string;
+  unsure: boolean;
+  repoId?: string | undefined;
+  proposedBy: string;
+  createdAt: string;
+  updatedAt: string;
+  confirmedBy?: string | undefined;
+  confirmedAt?: string | undefined;
+  taskId?: string | undefined;
+  intakeAttempts: number;
+  intakeError?: string | undefined;
+  intakeTriedAt?: string | undefined;
+}
+
+export interface FeishuFollowRow {
+  taskId: string;
+  userId: string;
+  following: boolean;
+  updatedAt: string;
+}
+
+/** feishu_outbox 的一行：推送的送达状态。 */
+export interface FeishuOutboxRow {
+  id: string;
+  revision: number;
+  fingerprint: string;
+  createdAt: string;
+  updatedAt: string;
+  ackRevision?: number | undefined;
+  ackStatus?: FeishuOutboxAck['result']['status'] | undefined;
+  ackReason?: string | undefined;
+  ackedAt?: string | undefined;
+  holdUntil?: string | undefined;
+  failures: number;
+  deliveredMessageId?: string | undefined;
+  deliveredChatId?: string | undefined;
+  deliveredAt?: string | undefined;
+  deliveredRevision?: number | undefined;
+}
+
+export type FeishuCardRow = FeishuCardRecord & { updatedAt: string };
+
 /** 和库里的表一一对应（去掉了库自己算的列）。 */
 export interface MemoryData {
   users: User[];
@@ -118,6 +184,10 @@ export interface MemoryData {
   pullRequests: PullRequestRecord[];
   specs: SpecRecord[];
   idempotency: Map<string, IdempotencyRecord>;
+  feishuDrafts: FeishuDraftRow[];
+  feishuFollows: FeishuFollowRow[];
+  feishuOutbox: FeishuOutboxRow[];
+  feishuCards: FeishuCardRow[];
 }
 
 export function emptyData(): MemoryData {
@@ -145,6 +215,10 @@ export function emptyData(): MemoryData {
     pullRequests: [],
     specs: [],
     idempotency: new Map(),
+    feishuDrafts: [],
+    feishuFollows: [],
+    feishuOutbox: [],
+    feishuCards: [],
   };
 }
 
@@ -309,6 +383,130 @@ export function createMemoryStore(
   /** 占用凭据就是这次占用的时刻（和库里的 claimed_at 一样）：接管会把它改新，旧凭据就对不上了。 */
   const heldBy = (record: IdempotencyRecord | undefined, token: string): record is IdempotencyRecord =>
     !!record && record.completedAt === undefined && record.claimedAt === token;
+
+  // —— 飞书用的小工具（照库的约束来）——
+
+  function needUser(id: string, constraint: string): void {
+    if (!data.users.some((u) => u.id === id)) throw new Error(`${constraint}：没有用户 ${id}`);
+  }
+  function needRepo(id: string, constraint: string): void {
+    if (!data.repos.some((r) => r.id === id)) throw new Error(`${constraint}：没有仓 ${id}`);
+  }
+  function checkUnderstanding(text: string): void {
+    if (text.length < 1 || text.length > UNDERSTANDING_MAX) {
+      throw new Error('feishu_drafts_understanding_length：「我理解为」要 1–1000 字');
+    }
+  }
+  function latestCard(pick: (c: FeishuCardRow) => boolean): FeishuCardRow | undefined {
+    return data.feishuCards
+      .filter(pick)
+      .sort((a, b) => a.sentAt.localeCompare(b.sentAt) || compareIds(a.messageId, b.messageId))
+      .at(-1);
+  }
+  function cardOut(c: FeishuCardRow): FeishuCardRecord {
+    return { messageId: c.messageId, chatId: c.chatId, kind: c.kind, ref: { ...c.ref }, sentAt: c.sentAt };
+  }
+  function draftOut(row: FeishuDraftRow): DraftRecord {
+    return {
+      id: row.id,
+      revision: row.revision,
+      status: row.status,
+      sourceMessageId: row.sourceMessageId,
+      chatType: row.chatType,
+      rawText: row.rawText,
+      understanding: row.understanding,
+      unsure: row.unsure,
+      repoId: row.repoId,
+      proposedBy: row.proposedBy,
+      confirmedBy: row.confirmedBy,
+      confirmedAt: row.confirmedAt,
+      taskId: row.taskId,
+      cardMessageId: latestCard((c) => c.kind === 'draft' && c.ref.draftId === row.id)?.messageId,
+      intake: { attempts: row.intakeAttempts, error: row.intakeError, triedAt: row.intakeTriedAt },
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    };
+  }
+  function messageOut(sourceMessageId: string, rec: IdempotencyRecord): FeishuMessageRecord {
+    if (rec.action !== 'feishu.message') {
+      throw new Error(`飞书消息 ${sourceMessageId} 的幂等键被别的命令（${rec.action}）占着`);
+    }
+    return parseMessageRecord(sourceMessageId, rec.result, rec.completedAt ?? rec.claimedAt);
+  }
+  function taskInfo(taskId: string): FeishuTaskInfo | undefined {
+    const task = data.tasks.find((t) => t.id === taskId);
+    const repo = task ? data.repos.find((r) => r.id === task.repoId) : undefined;
+    if (!task || !repo) return undefined;
+    return {
+      id: task.id,
+      title: task.title,
+      issueNumber: task.issueNumber,
+      state: task.state,
+      repo: `${repo.owner}/${repo.name}`,
+    };
+  }
+  function outboxStateOut(row: FeishuOutboxRow): FeishuOutboxState {
+    const fallback =
+      row.deliveredMessageId === undefined ? latestCard((c) => c.ref.outboxId === row.id) : undefined;
+    return {
+      id: row.id,
+      revision: row.revision,
+      createdAt: row.createdAt,
+      ack:
+        row.ackRevision === undefined || row.ackStatus === undefined
+          ? undefined
+          : {
+              revision: row.ackRevision,
+              status: row.ackStatus,
+              reason: row.ackReason,
+              holdUntil: row.holdUntil,
+            },
+      delivered:
+        row.deliveredMessageId !== undefined &&
+        row.deliveredChatId !== undefined &&
+        row.deliveredAt !== undefined
+          ? {
+              messageId: row.deliveredMessageId,
+              chatId: row.deliveredChatId,
+              sentAt: row.deliveredAt,
+              revision: row.deliveredRevision,
+            }
+          : fallback
+            ? { messageId: fallback.messageId, chatId: fallback.chatId, sentAt: fallback.sentAt }
+            : undefined,
+    };
+  }
+  /** 通知类推送的回执同时记进这条通知的送达记录（去处 team），驾驶舱「通知」页看得到。 */
+  function mirrorDelivery(ack: FeishuOutboxAck, at: string): void {
+    if (!ack.itemId.startsWith('notification:')) return;
+    const n = data.notifications.find((x) => x.id === ack.itemId.slice('notification:'.length));
+    if (!n) return;
+    let d = n.deliveries.find((x) => x.channel === 'feishu' && x.target === 'team');
+    if (!d) {
+      d = { channel: 'feishu', target: 'team', attempts: 0 };
+      n.deliveries.push(d);
+    }
+    const r = ack.result;
+    d.lastAttemptAt = at;
+    switch (r.status) {
+      case 'sent':
+      case 'updated':
+        d.messageId = r.messageId;
+        d.attempts += 1;
+        d.error = undefined;
+        break;
+      case 'failed':
+        d.attempts += 1;
+        d.error = r.error;
+        break;
+      case 'dropped':
+        d.error = `不发了：${r.reason}`;
+        break;
+      case 'deferred':
+        d.error = `免打扰，推迟到 ${r.until}`;
+        break;
+    }
+  }
 
   return {
     data,
@@ -590,7 +788,14 @@ export function createMemoryStore(
         .filter((n) => status === 'all' || n.resolvedAt === undefined)
         .map((n) => ({ ...n, at: n.createdAt }));
       const result = paginate(items, page, isUuid);
-      return { items: result.items.map(({ at: _at, ...n }) => n), nextCursor: result.nextCursor };
+      return {
+        // 送到哪（target）只用来认出同一条送达记录，和库版一样不往外给。
+        items: result.items.map(({ at: _at, ...n }) => ({
+          ...n,
+          deliveries: n.deliveries.map(({ target: _target, ...d }) => d),
+        })),
+        nextCursor: result.nextCursor,
+      };
     },
     async resolveNotification({ id, by }, entry) {
       const n = data.notifications.find((x) => x.id === id);
@@ -768,6 +973,325 @@ export function createMemoryStore(
     async releaseDelivery(id) {
       const k = `github-delivery:${id}`;
       if (data.idempotency.get(k)?.completedAt === undefined) data.idempotency.delete(k);
+    },
+
+    // —— 飞书 ——
+    async getDraft(id) {
+      const row = data.feishuDrafts.find((d) => d.id === id);
+      return row ? draftOut(row) : null;
+    },
+    async createDraft({ message, draft }, entry) {
+      const existing = data.idempotency.get(feishuMessageKey(message.sourceMessageId));
+      if (existing) return { status: 'replayed', message: messageOut(message.sourceMessageId, existing) };
+      // 先把库里的约束都查一遍，再改数据（模拟事务：违反了就整笔不做）。
+      checkAudit(entry);
+      needUser(message.userId, 'feishu_drafts_proposed_by_users_id_fk');
+      if (draft.repoId !== undefined) needRepo(draft.repoId, 'feishu_drafts_repo_id_repos_id_fk');
+      checkUnderstanding(draft.understanding);
+      if (data.feishuDrafts.some((d) => d.id === draft.id || d.sourceMessageId === message.sourceMessageId)) {
+        throw new Error('feishu_drafts_pkey / feishu_drafts_source_message_id_unique：草稿重复');
+      }
+      const at = now().toISOString();
+      const row: FeishuDraftRow = {
+        id: draft.id,
+        revision: 1,
+        status: 'open',
+        sourceMessageId: message.sourceMessageId,
+        chatType: draft.chatType,
+        rawText: draft.rawText,
+        understanding: draft.understanding,
+        unsure: draft.unsure,
+        repoId: draft.repoId,
+        proposedBy: message.userId,
+        createdAt: at,
+        updatedAt: at,
+        intakeAttempts: 0,
+      };
+      data.feishuDrafts.push(row);
+      data.idempotency.set(feishuMessageKey(message.sourceMessageId), {
+        action: 'feishu.message',
+        target: `user:${message.userId}`,
+        claimedAt: at,
+        completedAt: at,
+        result: messagePayload(message, { kind: 'draft', draftId: row.id }),
+      });
+      audit(entry);
+      return { status: 'created', draft: draftOut(row) };
+    },
+    async reviseDraft({ draftId, note, repoId, key }, entry) {
+      if (key.type === 'message') {
+        const handled = data.idempotency.get(feishuMessageKey(key.message.sourceMessageId));
+        if (handled) {
+          return {
+            status: 'replayed_message',
+            message: messageOut(key.message.sourceMessageId, handled),
+          };
+        }
+      }
+      const row = data.feishuDrafts.find((d) => d.id === draftId);
+      if (!row) return { status: 'not_found' };
+      if (key.type === 'request' && data.idempotency.has(feishuReviseKey(draftId, key.requestId))) {
+        return { status: 'replayed', draft: draftOut(row) };
+      }
+      if (row.status === 'confirmed') return { status: 'confirmed', draft: draftOut(row) };
+      checkAudit(entry);
+      if (repoId !== undefined) needRepo(repoId, 'feishu_drafts_repo_id_repos_id_fk');
+      const understanding = note ? appendNote(row.understanding, note) : row.understanding;
+      checkUnderstanding(understanding);
+      const at = now().toISOString();
+      row.revision += 1;
+      row.understanding = understanding;
+      if (repoId !== undefined) row.repoId = repoId;
+      row.updatedAt = at;
+      data.idempotency.set(
+        key.type === 'request'
+          ? feishuReviseKey(draftId, key.requestId)
+          : feishuMessageKey(key.message.sourceMessageId),
+        key.type === 'request'
+          ? {
+              action: 'feishu.revise',
+              target: `draft:${draftId}`,
+              claimedAt: at,
+              completedAt: at,
+              result: { revision: row.revision },
+            }
+          : {
+              action: 'feishu.message',
+              target: `user:${key.message.userId}`,
+              claimedAt: at,
+              completedAt: at,
+              result: messagePayload(key.message, { kind: 'draft', draftId }),
+            },
+      );
+      audit(entry);
+      return { status: 'revised', draft: draftOut(row) };
+    },
+    async confirmDraft({ draftId, revision, repoId, by }, entry) {
+      const row = data.feishuDrafts.find((d) => d.id === draftId);
+      if (!row) return { status: 'not_found' };
+      if (row.status === 'confirmed') return { status: 'already', draft: draftOut(row) };
+      if (row.revision !== revision) return { status: 'changed', draft: draftOut(row) };
+      checkAudit(entry);
+      needRepo(repoId, 'feishu_drafts_repo_id_repos_id_fk');
+      needUser(by, 'feishu_drafts_confirmed_by_users_id_fk');
+      const at = now().toISOString();
+      row.status = 'confirmed';
+      row.confirmedBy = by;
+      row.confirmedAt = at;
+      row.repoId = repoId;
+      row.updatedAt = at;
+      audit(entry);
+      return { status: 'confirmed', draft: draftOut(row) };
+    },
+    async listPendingIntakes(limit) {
+      return data.feishuDrafts
+        .filter((d) => d.status === 'confirmed' && d.taskId === undefined)
+        .sort((a, b) => (a.confirmedAt ?? '').localeCompare(b.confirmedAt ?? '') || compareIds(a.id, b.id))
+        .slice(0, limit)
+        .map(draftOut);
+    },
+    async recordIntake({ draftId, taskId }) {
+      const row = data.feishuDrafts.find((d) => d.id === draftId);
+      if (row?.status !== 'confirmed' || row.taskId !== undefined) return 'not_pending';
+      if (!data.tasks.some((t) => t.id === taskId)) return 'task_not_found';
+      row.taskId = taskId;
+      row.intakeError = undefined;
+      row.updatedAt = now().toISOString();
+      return 'ok';
+    },
+    async recordIntakeFailure({ draftId, error }) {
+      const row = data.feishuDrafts.find((d) => d.id === draftId);
+      if (!row) return;
+      row.intakeAttempts += 1;
+      row.intakeError = error;
+      row.intakeTriedAt = now().toISOString();
+    },
+    async getFeishuMessage(sourceMessageId) {
+      const rec = data.idempotency.get(feishuMessageKey(sourceMessageId));
+      return rec ? messageOut(sourceMessageId, rec) : null;
+    },
+    async recordFeishuMessage({ message, result }) {
+      const k = feishuMessageKey(message.sourceMessageId);
+      const existing = data.idempotency.get(k);
+      if (existing) return messageOut(message.sourceMessageId, existing);
+      const at = now().toISOString();
+      const rec: IdempotencyRecord = {
+        action: 'feishu.message',
+        target: `user:${message.userId}`,
+        claimedAt: at,
+        completedAt: at,
+        result: messagePayload(message, result),
+      };
+      data.idempotency.set(k, rec);
+      return messageOut(message.sourceMessageId, rec);
+    },
+    async findTasksByIssue(issueNumber) {
+      const repoName = (t: Task) => {
+        const r = data.repos.find((x) => x.id === t.repoId);
+        return r ? `${r.owner}/${r.name}` : '';
+      };
+      return data.tasks
+        .filter((t) => t.issueNumber === issueNumber)
+        .sort((a, b) => repoName(a).localeCompare(repoName(b)) || compareIds(a.id, b.id));
+    },
+    async setFollow({ taskId, userId, follow }, entry) {
+      if (!data.tasks.some((t) => t.id === taskId)) return 'task_not_found';
+      const existing = data.feishuFollows.find((f) => f.taskId === taskId && f.userId === userId);
+      if ((existing?.following ?? false) === follow) return 'unchanged';
+      checkAudit(entry);
+      needUser(userId, 'feishu_follows_user_id_users_id_fk');
+      const at = now().toISOString();
+      if (existing) {
+        existing.following = follow;
+        existing.updatedAt = at;
+      } else {
+        data.feishuFollows.push({ taskId, userId, following: follow, updatedAt: at });
+      }
+      audit(entry);
+      return 'changed';
+    },
+    async putCard(record) {
+      const at = now().toISOString();
+      const existing = data.feishuCards.find((c) => c.messageId === record.messageId);
+      if (existing) {
+        existing.kind = record.kind;
+        existing.ref = { ...record.ref };
+        existing.updatedAt = at;
+        return;
+      }
+      data.feishuCards.push({ ...record, ref: { ...record.ref }, updatedAt: at });
+    },
+    async getCard(messageId) {
+      const card = data.feishuCards.find((c) => c.messageId === messageId);
+      return card ? cardOut(card) : null;
+    },
+    async latestBoardCard() {
+      const card = latestCard((c) => c.kind === 'board');
+      return card ? { messageId: card.messageId, sentAt: card.sentAt } : null;
+    },
+    async stateSince(entityIds) {
+      const out = new Map<string, string>();
+      for (const id of entityIds) {
+        const latest = data.stateChanges
+          .filter((c) => c.entityId === id)
+          .sort(byAtThenId)
+          .at(-1);
+        if (latest) out.set(id, latest.at);
+      }
+      return out;
+    },
+    async countMergedSubtasksSince(since) {
+      const cutoff = Date.parse(since);
+      return new Set(
+        data.stateChanges
+          .filter((c) => c.entity === 'subtask' && c.to === 'merged' && Date.parse(c.at) >= cutoff)
+          .map((c) => c.entityId),
+      ).size;
+    },
+    async listOutboxSources(since) {
+      const cutoff = Date.parse(since);
+      const recent = (at: string | undefined) => at === undefined || Date.parse(at) >= cutoff;
+      const nameOf = (id: string | undefined) =>
+        id === undefined ? undefined : data.users.find((u) => u.id === id)?.displayName;
+      const asks = data.asks
+        .filter((a) => a.answer === undefined || recent(a.answeredAt))
+        .sort((a, b) => a.askedAt.localeCompare(b.askedAt) || compareIds(a.id, b.id))
+        .map((ask) => {
+          const task = taskInfo(ask.taskId);
+          if (!task) throw new Error(`asks_task_id_tasks_id_fk：追问 ${ask.id} 的需求不在库里`);
+          return { ask, task, answeredByName: nameOf(ask.answeredBy) };
+        });
+      const notifications = data.notifications
+        .filter((n) => n.resolvedAt === undefined || recent(n.resolvedAt))
+        .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || compareIds(a.id, b.id))
+        .map(({ deliveries: _d, ...notification }) => ({
+          notification,
+          task: notification.taskId === undefined ? undefined : taskInfo(notification.taskId),
+          resolvedByName: nameOf(notification.resolvedBy),
+        }));
+      return { asks, notifications };
+    },
+    async syncOutbox(items) {
+      const out = new Map<string, FeishuOutboxState>();
+      for (const item of items) {
+        let row = data.feishuOutbox.find((r) => r.id === item.id);
+        const at = now().toISOString();
+        if (!row) {
+          if (!item.create) continue;
+          row = {
+            id: item.id,
+            revision: 1,
+            fingerprint: item.fingerprint,
+            createdAt: at,
+            updatedAt: at,
+            failures: 0,
+          };
+          data.feishuOutbox.push(row);
+        } else if (row.fingerprint !== item.fingerprint) {
+          row.revision += 1;
+          row.fingerprint = item.fingerprint;
+          row.updatedAt = at;
+        }
+        out.set(item.id, outboxStateOut(row));
+      }
+      return out;
+    },
+    async ackOutbox(acks, at) {
+      const report: FeishuAckReport = { applied: 0, skipped: [] };
+      for (const ack of acks) {
+        const row = data.feishuOutbox.find((r) => r.id === ack.itemId);
+        if (!row) {
+          report.skipped.push({ itemId: ack.itemId, revision: ack.revision, why: 'unknown_item' });
+          continue;
+        }
+        if (ack.revision > row.revision) {
+          report.skipped.push({ itemId: ack.itemId, revision: ack.revision, why: 'future_revision' });
+          continue;
+        }
+        const r = ack.result;
+        const current = ack.revision === row.revision;
+        if (!current && r.status !== 'sent' && r.status !== 'updated') {
+          report.skipped.push({ itemId: ack.itemId, revision: ack.revision, why: 'stale_revision' });
+          continue;
+        }
+        if (r.status === 'sent') {
+          row.deliveredMessageId = r.messageId;
+          row.deliveredChatId = r.chatId;
+          row.deliveredAt = r.sentAt;
+          row.deliveredRevision = ack.revision;
+        } else if (r.status === 'updated') {
+          // 「改了」只带消息编号：会话和发出时刻取回执记过的，没记过就按卡片登记补；都查不到就不记这张卡。
+          const known =
+            row.deliveredMessageId === r.messageId &&
+            row.deliveredChatId !== undefined &&
+            row.deliveredAt !== undefined
+              ? { chatId: row.deliveredChatId, sentAt: row.deliveredAt }
+              : data.feishuCards.find((c) => c.messageId === r.messageId);
+          if (known) {
+            row.deliveredMessageId = r.messageId;
+            row.deliveredChatId = known.chatId;
+            row.deliveredAt = known.sentAt;
+            row.deliveredRevision = ack.revision;
+          }
+        }
+        if (current) {
+          row.ackRevision = ack.revision;
+          row.ackStatus = r.status;
+          row.ackedAt = at;
+          row.ackReason =
+            r.status === 'dropped' || r.status === 'deferred'
+              ? r.reason
+              : r.status === 'failed'
+                ? r.error
+                : undefined;
+          row.holdUntil =
+            r.status === 'deferred' ? r.until : r.status === 'failed' ? r.retryAfter : undefined;
+          if (r.status === 'failed') row.failures += 1;
+        }
+        mirrorDelivery(ack, at);
+        report.applied += 1;
+      }
+      return report;
     },
   };
 }

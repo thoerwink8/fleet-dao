@@ -6,6 +6,7 @@ import type {
   HealthCheck,
   Logger,
   Store,
+  TaskIntake,
   WorkflowControl,
 } from './ports.ts';
 
@@ -18,6 +19,8 @@ export interface Deps {
   /** null = 飞书登录没配置（只允许在开发环境）。 */
   feishu: FeishuAuth | null;
   github: GitHubEventSink;
+  /** 飞书里确认的草稿去开单（开 issue、建任务、拉起工作流）。没接上时用 notWiredTaskIntake：草稿留在待开单。 */
+  intake: TaskIntake;
   /** /healthz 逐项探的依赖；空 = 没有外部依赖（内存版）。 */
   health: HealthCheck[];
   log: Logger;
