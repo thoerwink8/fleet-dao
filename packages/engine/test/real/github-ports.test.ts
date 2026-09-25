@@ -203,6 +203,35 @@ describe('建树、收树', () => {
     expect(beats).toBe(after);
   });
 
+  it('建树时删同一位置留着的大旧树，删的时候也照常心跳', async () => {
+    const { ports, trees } = setup({}, { heartbeatEveryMs: 20 });
+    const stale = trees.trees.treeFor(repo, BRANCH);
+    await trees.trees.adopt(stale, 'fleet-agent-carpool');
+    const remove = trees.trees.remove.bind(trees.trees);
+    trees.trees.remove = async (dir) => {
+      await new Promise((r) => setTimeout(r, 120));
+      return remove(dir);
+    };
+    let beats = 0;
+    let beatsAtRemove = -1;
+    const counting: PortContext = {
+      ...ctx,
+      heartbeat: () => {
+        beats += 1;
+      },
+    };
+    const slowRemove = trees.trees.remove;
+    trees.trees.remove = async (dir) => {
+      beatsAtRemove = beats;
+      return slowRemove(dir);
+    };
+    await ports.createWorktree({ taskId: 't1', repo, branch: BRANCH }, counting);
+    expect(beatsAtRemove).toBeGreaterThanOrEqual(1);
+    // 删的那 120 毫秒里（每 20 毫秒一次）至少又报了两次
+    expect(beats - beatsAtRemove).toBeGreaterThanOrEqual(2);
+    expect(trees.owners.has(stale)).toBe(false);
+  });
+
   it('没合并就收：没提交的改动存档成补丁再删；本来就不在的正常返回', async () => {
     const { ports, trees } = setup();
     const dir = await seededTree(trees);
@@ -339,6 +368,89 @@ describe('推之前把最新主线并进会话的树', () => {
     // 新主线的提交已经在树里：会话照着 git merge 就能解
     expect(git(dir, 'cat-file', '-t', main)).toBe('commit');
     expect(calls.pushBranch ?? []).toHaveLength(0);
+  });
+
+  it('没跟踪的文件挡着并（主线加了同名文件）：撤掉、报 MERGE_CONFLICT 带挡着的文件名，树和那个文件都不动，不推', async () => {
+    const { ports, calls, trees } = setup();
+    const dir = await seededTree(trees);
+    const head = commitIn(dir, 'login.ts');
+    // 会话没提交、也没跟踪的草稿，和主线新加的文件同名
+    writeFileSync(join(dir, 'b.ts'), '// 会话的草稿\n');
+    const main = advanceMain('b.ts', 'export const b = 2;\n');
+    const err = await ports
+      .pushBranch({ taskId: 't1', repo, worktreePath: dir, branch: BRANCH, head }, ctx)
+      .catch((e: unknown) => e);
+    expect(err).toMatchObject({
+      code: 'MERGE_CONFLICT',
+      retryable: false,
+      details: { mainline: main, conflictFiles: ['b.ts'] },
+    });
+    expect((err as Error).message).toContain('b.ts');
+    expect(git(dir, 'rev-parse', 'HEAD')).toBe(head);
+    expect(readFileSync(join(dir, 'b.ts'), 'utf8')).toBe('// 会话的草稿\n');
+    expect(existsSync(join(dir, '.git', 'MERGE_HEAD'))).toBe(false);
+    expect(calls.pushBranch ?? []).toHaveLength(0);
+  });
+
+  it('并的时候 git 自己出错（.git/index.lock 被占着）：报 GIT_FAILED（可重试，不当成冲突），树不动、不推', async () => {
+    const { ports, calls, trees } = setup();
+    const dir = await seededTree(trees);
+    const head = commitIn(dir, 'login.ts');
+    advanceMain('b.ts', 'export const b = 2;\n');
+    writeFileSync(join(dir, '.git', 'index.lock'), '');
+    const err = await ports
+      .pushBranch({ taskId: 't1', repo, worktreePath: dir, branch: BRANCH, head }, ctx)
+      .catch((e: unknown) => e);
+    expect(err).toMatchObject({ code: 'GIT_FAILED', retryable: true });
+    // 原文随 git 的版本、配置不同（锁文件在、或 autostash 写不了索引）：只认是「并」这一步没做成
+    expect((err as Error).message).toMatch(/^并 [0-9a-f]{7}：/);
+    expect(git(dir, 'rev-parse', 'HEAD')).toBe(head);
+    expect(existsSync(join(dir, '.git', 'MERGE_HEAD'))).toBe(false);
+    expect(existsSync(join(dir, 'b.ts'))).toBe(false);
+    expect(calls.pushBranch ?? []).toHaveLength(0);
+  });
+
+  it('连着两次推没成、主线每次都动过（并了两层）：第三次认得出头是会话交的头之后只有并提交的一串，接着推', async () => {
+    let n = 0;
+    const { ports, calls, trees } = setup({
+      pushBranch: (input: { head: string }) => {
+        n += 1;
+        if (n <= 2) throw new GitHubError('GIT_FAILED', '网断了', { retryable: true });
+        return { head: input.head, pushed: true };
+      },
+    });
+    const dir = await seededTree(trees);
+    const head = commitIn(dir, 'login.ts');
+    const input = { taskId: 't1', repo, worktreePath: dir, branch: BRANCH, head };
+    advanceMain('b.ts', 'export const b = 2;\n');
+    await expect(ports.pushBranch(input, ctx)).rejects.toMatchObject({ code: 'GIT_FAILED' });
+    const first = git(dir, 'rev-parse', 'HEAD');
+    expect(parentsOf(dir, first)[0]).toBe(head);
+    const main = advanceMain('c.ts', 'export const c = 3;\n');
+    await expect(ports.pushBranch(input, ctx)).rejects.toMatchObject({ code: 'GIT_FAILED' });
+    const second = git(dir, 'rev-parse', 'HEAD');
+    expect(parentsOf(dir, second)).toEqual([first, main]);
+    expect(await ports.pushBranch(input, ctx)).toEqual({ head: second });
+    expect(calls.pushBranch?.map((c) => (c as { head: string }).head)).toEqual([first, second, second]);
+  });
+
+  it('并提交的那一串里夹着一个普通提交（交活之后树里又多了东西）：不认，HEAD_MISMATCH，不推', async () => {
+    let n = 0;
+    const { ports, calls, trees } = setup({
+      pushBranch: (input: { head: string }) => {
+        n += 1;
+        if (n === 1) throw new GitHubError('GIT_FAILED', '网断了', { retryable: true });
+        return { head: input.head, pushed: true };
+      },
+    });
+    const dir = await seededTree(trees);
+    const head = commitIn(dir, 'login.ts');
+    const input = { taskId: 't1', repo, worktreePath: dir, branch: BRANCH, head };
+    advanceMain('b.ts', 'export const b = 2;\n');
+    await expect(ports.pushBranch(input, ctx)).rejects.toMatchObject({ code: 'GIT_FAILED' });
+    commitIn(dir, 'extra.ts');
+    await expect(ports.pushBranch(input, ctx)).rejects.toMatchObject({ code: 'HEAD_MISMATCH' });
+    expect(calls.pushBranch).toHaveLength(1);
   });
 
   it('github 包报 BEHIND_MAINLINE（并完到推之间主线又动了）：到引擎这层改成可重试，重来一遍会再并', async () => {

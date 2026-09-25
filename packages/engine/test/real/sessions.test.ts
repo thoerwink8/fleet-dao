@@ -79,7 +79,7 @@ function ctx(): PortContext & { beats: number } {
 
 function setup(
   script: (spec: Parameters<ReturnType<typeof fakeRun>['run']>[0], n: number) => FakeRunScript,
-  options: { transcriptMissing?: boolean; spawnTimeoutMs?: number } = {},
+  options: { transcriptMissing?: boolean; spawnTimeoutMs?: number; gh?: typeof m.gh } = {},
 ) {
   const fake = fakeRun(script);
   const trees = fakeTrees(join(root, 'work'), options);
@@ -88,7 +88,7 @@ function setup(
     db: t.db,
     trees: trees.trees,
     exec: localExec(),
-    gh: m.gh,
+    gh: options.gh ?? m.gh,
     tmpDir: join(root, 'tmp'),
     machine: '法国',
     claudeCommand: (user) => [`/opt/fake/${user}/reclaude`],
@@ -263,6 +263,42 @@ describe('写码会话', () => {
     await ports.stopSession({ taskId, runId: stopped.runId, mode: 'kill', reason: '起之前就叫停' }, ctx());
     await expect(ports.startSession(stopped, ctx())).rejects.toMatchObject({ code: 'SESSION_STOPPED' });
     expect(fake.count()).toBe(1);
+  });
+
+  it('建树取包半截失败（仓建了、包是坏的）后同一个 runId 重试：照常取包、检出分支，不在空仓里起会话', async () => {
+    let bundles = 0;
+    const gh = {
+      ...m.gh,
+      async bundleCommits(input: Parameters<typeof m.gh.bundleCommits>[0]) {
+        const made = await m.gh.bundleCommits(input);
+        bundles += 1;
+        if (bundles === 1) writeFileSync(made.path, '这不是 bundle\n');
+        return made;
+      },
+    };
+    const { ports, fake } = setup(commitAndDone(), { gh });
+    const input = launch();
+    const dir = input.worktreePath as string;
+    await expect(ports.startSession(input, ctx())).rejects.toMatchObject({
+      code: 'GIT_FAILED',
+      retryable: true,
+    });
+    expect(fake.count()).toBe(0);
+    // 留下的是个空仓：.git 在，HEAD 解析不出来
+    expect(git(dir, 'rev-parse', '--git-dir')).toBe('.git');
+    expect(() => git(dir, 'rev-parse', '--verify', '--quiet', 'HEAD^{commit}')).toThrow();
+    // 活动重试：同一个 runId 再来
+    const started = await ports.startSession(input, ctx());
+    expect(fake.count()).toBe(1);
+    expect(bundles).toBe(2);
+    const end = await ports.awaitSession(
+      { taskId, runId: input.runId, sessionId: started.sessionId, stage: 'execute' },
+      ctx(),
+    );
+    expect(end.outcome).toBe('done');
+    // 会话是在检出好的分支上干的：分支在起会话前的头（baseHead）上，会话的提交接在它后面
+    expect(git(dir, 'symbolic-ref', '--short', 'HEAD')).toBe(BRANCH);
+    expect(git(dir, 'rev-parse', `${BRANCH}~1`)).toBe(m.head);
   });
 
   it('没用 fleet done 交活、有没提交的已跟踪改动、没有新提交：都判没交付，不当成做完', async () => {

@@ -80,6 +80,18 @@ export async function hasRepo(t: UserTree): Promise<boolean> {
   throw new PortError('GIT_FAILED', describeFailure('看目录里有没有仓', r), { retryable: true });
 }
 
+/**
+ * 目录里是不是一份检出好的仓：仓在，而且 HEAD 解析得出提交。建树是先 init 再从 bundle 取、再检出，取包半截失败的树
+ * 只有一个空仓（HEAD 指着还不存在的分支）——光看 .git 在不在会把它当成建好了，会话就在空树里干活。
+ */
+export async function hasCheckout(t: UserTree): Promise<boolean> {
+  if (!(await hasRepo(t))) return false;
+  const r = await run(t, [t.git ?? GIT, 'rev-parse', '--verify', '--quiet', 'HEAD^{commit}']);
+  if (r.code === 0) return true;
+  if (r.code === 1 || r.code === 128) return false;
+  throw new PortError('GIT_FAILED', describeFailure('看仓里检出了没有', r), { retryable: true });
+}
+
 export interface Identity {
   name: string;
   email: string;
@@ -98,14 +110,14 @@ export async function fetchBundle(
   if (!/^refs\/fleet\/[A-Za-z0-9/_.-]+$/.test(ref)) {
     throw new PortError('BAD_INPUT', `bundle 里的引用名不对：${ref}`, { retryable: false });
   }
-  if (!(await hasRepo(t))) {
-    await git(t, ['init', '-q'], '建仓');
-    if (options.identity) {
-      await git(t, ['config', 'user.name', options.identity.name], '设提交身份');
-      await git(t, ['config', 'user.email', options.identity.email], '设提交身份');
-    }
-    await git(t, ['config', 'commit.gpgsign', 'false'], '设提交身份');
+  const fresh = !(await hasRepo(t));
+  if (fresh) await git(t, ['init', '-q'], '建仓');
+  // 给了身份就每次都设（幂等）：建了仓、没设好身份就断了的树，同一个 runId 重试时也补得上
+  if (options.identity) {
+    await git(t, ['config', 'user.name', options.identity.name], '设提交身份');
+    await git(t, ['config', 'user.email', options.identity.email], '设提交身份');
   }
+  if (fresh || options.identity) await git(t, ['config', 'commit.gpgsign', 'false'], '设提交身份');
   const script =
     'f="$(git rev-parse --git-dir)/fleet-incoming.bundle" && cat > "$f" && ' +
     'git fetch --no-tags -q "$f" "+$1:refs/fleet/incoming"; rc=$?; rm -f "$f"; exit $rc';
@@ -253,14 +265,33 @@ export async function fastForward(
   return 'fast-forwarded';
 }
 
-/** 头是不是一个并提交、第一个父提交是 parent（推之前并主线那一步做出来的；那一步之后推没成、活动重试时认它）。 */
-export async function isMergeOnto(t: UserTree, head: string, parent: string): Promise<boolean> {
+/** 推没成、主线又动过、再并一层：顺着第一个父提交最多认这么多层并提交（再多就不是「只是重推」了）。 */
+const MAX_MERGE_CHAIN = 20;
+
+/**
+ * 头是不是「base 之后只有并提交的一串」：顺着第一个父提交往回走，每一步都得是并提交（两个父提交），直到走到 base。
+ * 推之前并主线那一步做出来的就是这样；并完推没成、活动重试时主线又动过，会再并一层——连着几次都照样认它，接着推。
+ * 中间夹着一个普通提交（会话交活之后树里又多了东西）就不认。
+ */
+export async function isMergeChainOnto(
+  t: UserTree,
+  head: string,
+  base: string,
+  maxDepth = MAX_MERGE_CHAIN,
+): Promise<boolean> {
   assertSha(head, '头');
-  assertSha(parent, '父提交');
-  const parents = text(await git(t, ['rev-list', '--parents', '-n', '1', head], '看父提交'))
-    .trim()
-    .split(/\s+/);
-  return parents.length === 3 && parents[1] === parent;
+  assertSha(base, '起点');
+  let cur = head;
+  for (let depth = 0; depth < maxDepth; depth += 1) {
+    const parents = text(await git(t, ['rev-list', '--parents', '-n', '1', cur], '看父提交'))
+      .trim()
+      .split(/\s+/);
+    if (parents.length !== 3) return false;
+    const first = parents[1] as string;
+    if (first === base) return true;
+    cur = first;
+  }
+  return false;
 }
 
 /**

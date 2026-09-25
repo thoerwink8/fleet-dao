@@ -21,7 +21,7 @@ import {
   headOf,
   headOfIncoming,
   isAncestor,
-  isMergeOnto,
+  isMergeChainOnto,
   mergeInto,
   type UserTree,
   uncommittedPatch,
@@ -176,13 +176,14 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
     async createWorktree(input, ctx): Promise<Worktree> {
       // 这里只定位置、记下主线的头：树等起会话时由那个会话用户自己从 bundle 建（sessions.ts）——
       // 建树的时候还不知道会派给哪个账号池、哪个会话用户。同一位置留着上一轮的旧树（同名分支）就先删掉。
-      // 这一档要心跳（activity-options 的 setup）：大仓第一次抓进镜像可能要好几分钟，抓的时候照常报活着。
+      // 这一档要心跳（activity-options 的 setup）：大仓第一次抓进镜像可能要好几分钟，删一棵大的旧树也可能要好一会儿，
+      // 这两步都照常报活着。
       const path = trees.treeFor(input.repo, input.branch);
-      const main = await withHeartbeat(ctx, heartbeatEveryMs, () =>
-        mapped(() => gh.fetchMainline({ repo: input.repo, signal: ctx.signal }, ctx)),
-      );
-      if ((await trees.ownerOf(path)) !== null) await trees.remove(path);
-      return { path, branch: input.branch, baseSha: main.head };
+      return withHeartbeat(ctx, heartbeatEveryMs, async () => {
+        const main = await mapped(() => gh.fetchMainline({ repo: input.repo, signal: ctx.signal }, ctx));
+        if ((await trees.ownerOf(path)) !== null) await trees.remove(path);
+        return { path, branch: input.branch, baseSha: main.head };
+      });
     },
 
     async removeWorktree(input, ctx) {
@@ -210,8 +211,8 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
       const user = await ownerOrFail(input.worktreePath);
       const t = treeAs(input.worktreePath, user, `push-${input.subtaskId ?? input.taskId}`, ctx);
       let head = await headOf(t);
-      // 上一次这一步已经把主线并进来了（并提交的第一个父提交是会话交的头），只是没推成：接着推它
-      if (head !== input.head && !(await isMergeOnto(t, head, input.head))) {
+      // 上一次（或上几次）这一步已经把主线并进来了、只是没推成：头是会话交的头之后只有并提交的一串，接着推它
+      if (head !== input.head && !(await isMergeChainOnto(t, head, input.head))) {
         throw new PortError(
           'HEAD_MISMATCH',
           `工作树的头是 ${head.slice(0, 7)}，不是要推的 ${input.head.slice(0, 7)}`,

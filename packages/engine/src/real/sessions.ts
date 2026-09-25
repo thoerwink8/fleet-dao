@@ -90,6 +90,7 @@ import {
   commitsSince,
   diffstatSince,
   fetchBundle,
+  hasCheckout,
   hasCommit,
   hasRepo,
   headOf,
@@ -353,7 +354,9 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     const identity = await identityOf(task.repo);
     const repoRef = { owner: task.repo.owner, name: task.repo.name };
     if (kind === 'delivery') {
-      if (!fresh && (await hasRepo(t))) return adopted;
+      // 续上一轮的树：检出过的原样接着用。只看 .git 在不在不够——建树时 init 之后取包失败、同一个 runId 重试，
+      // 留下的是个空仓；那样的照常取包、检出，不在空树里起会话。
+      if (!fresh && (await hasCheckout(t))) return adopted;
       const base = input.baseHead;
       const branch = input.brief.branch;
       if (!base || !SHA.test(base) || !branch) {
