@@ -73,11 +73,16 @@ export function maskEmails(text: string): string {
  * 错误信息里常夹着上游回包或命令输出——进日志和驾驶舱之前一律过这一道。
  */
 export function redact(text: string, max = 300): string {
-  const cleaned = maskEmails(String(text).replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer <令牌>'))
+  // 令牌、密钥先抹，邮箱后抹：两者之间没有分隔时（a@b.com.sk-…），邮箱规则会把 sk 当成域名吃掉，后半截密钥就漏出来。
+  // 反过来密钥紧贴着邮箱的前半截时（sk-…user@x.com），前半截跟着密钥抹掉了，剩下的「@域名」单独再抹一道。
+  const secretsMasked = String(text)
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer <令牌>')
     .replace(/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g, '<令牌>')
     .replace(/\b(?:sk|rk|pk|xai|tvly)-[A-Za-z0-9_-]{8,}/gi, '<密钥>')
     .replace(/\bAKIA[0-9A-Z]{16}\b/g, '<密钥>')
-    .replace(/([?&](?:token|key|access_token|api_key)=)[^&\s"']+/gi, '$1<令牌>')
+    .replace(/([?&](?:token|key|access_token|api_key)=)[^&\s"']+/gi, '$1<令牌>');
+  const cleaned = maskEmails(secretsMasked)
+    .replace(/(?<=<(?:密钥|令牌)>)@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '<邮箱>')
     .replace(/\b\d{1,3}(?:\.\d{1,3}){3}\b/g, '<IP>')
     .replace(/\b[0-9a-f]{32}\b/gi, '<长串>')
     .replace(/\b[A-Za-z0-9_-]{40,}\b/g, '<长串>')

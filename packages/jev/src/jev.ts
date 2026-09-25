@@ -35,7 +35,7 @@ import {
   questionRev,
   renderPrompt,
 } from './questions.ts';
-import { cutAt, scrubHead } from './scrub.ts';
+import { cutAt, scrubHead, storableRef, wellFormed } from './scrub.ts';
 import {
   type AnswerRow,
   type AnswerSample,
@@ -111,6 +111,9 @@ function clean(detail: string): string {
   return text.length > DETAIL_CHARS ? `${cutAt(text, DETAIL_CHARS)}…` : text;
 }
 const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
+/** 库报的错：drizzle 的报错开头是整条 SQL 和参数（截到 500 字就看不见原因了），真正的原因在 cause 里，有就用它。 */
+const dbError = (err: unknown) =>
+  err instanceof Error && err.cause instanceof Error ? err.cause.message : message(err);
 const isLocal = (reason: NotJudgedReason) => (LOCAL_REASONS as readonly string[]).includes(reason);
 const isDrift = (reason: NotJudgedReason) => (DRIFT_REASONS as readonly string[]).includes(reason);
 
@@ -142,7 +145,7 @@ export function createJev(deps: JevDeps): Jev {
     try {
       states = await ensureQuestions(db, questions, backend.model);
     } catch (err) {
-      return questions.map((q) => notJudged(q, 'store_error', message(err)));
+      return questions.map((q) => notJudged(q, 'store_error', dbError(err)));
     }
 
     // 本地先过一遍：证据字段不对、停用的、必填证据没给的，不问出去，但照样记一行。
@@ -210,7 +213,7 @@ export function createJev(deps: JevDeps): Jev {
           }
         }
       } catch (err) {
-        return questions.map((q) => notJudged(q, 'store_error', message(err)));
+        return questions.map((q) => notJudged(q, 'store_error', dbError(err)));
       }
     }
 
@@ -228,6 +231,8 @@ export function createJev(deps: JevDeps): Jev {
       }
     }
 
+    // 调用方给的引用：写进库之前转成库收得下的样子；转不了的不要了，原因记在这一行里。
+    const ref = ctx.ref === undefined ? undefined : storableRef(ctx.ref);
     const batch = { id: randomUUID(), size: questions.length };
     const rows: AnswerRow[] = [];
     const demote: DriftDemotion[] = [];
@@ -260,6 +265,7 @@ export function createJev(deps: JevDeps): Jev {
           askedAt,
           evidence,
           ctx,
+          ref,
           exam,
           batch,
           enforceable,
@@ -276,7 +282,7 @@ export function createJev(deps: JevDeps): Jev {
     } catch (err) {
       // 没记上就当没判：调用方照默认走，不带着一个库里查不到的判断去拦。
       // 这一问要是已经发出去了，花费另记一行；说明放在原因最前面（原因截到 500 字，库的报错可能很长）。
-      const lost = `判断没记进库：${message(err)}`;
+      const lost = `判断没记进库：${dbError(err)}`;
       const note = await recordSpendOnly(db, rows, demote, lost);
       return questions.map((q) => notJudged(q, 'store_error', `${note}${lost}`));
     }
@@ -358,6 +364,8 @@ function answerRow(
     askedAt: Date;
     evidence: EvidenceInput;
     ctx: AskContext;
+    /** 调用方给的引用，已转成库收得下的样子；转不了的是原因。没给就没有。 */
+    ref: { ref: unknown } | { problem: string } | undefined;
     exam: ExamContext | undefined;
     batch: { id: string; size: number };
     enforceable: boolean;
@@ -380,25 +388,26 @@ function answerRow(
     model: c.backend.model,
     backend: c.backend.kind,
     evidence: digestEvidence(q.evidence, c.evidence),
-    ...(c.ctx.ref === undefined ? {} : { ref: c.ctx.ref }),
+    ...(c.ref === undefined ? {} : 'ref' in c.ref ? { ref: c.ref.ref } : { refDropped: c.ref.problem }),
     batch: c.batch,
     ...(billed?.estimated ? { tokensEstimated: true } : {}),
     ...(tokens !== undefined && price !== undefined ? { costUsd: usdOf(tokens, price) } : {}),
-    ...(c.exam ? { exam: { runId: c.exam.runId, sampleId: c.exam.sampleId } } : {}),
+    ...(c.exam ? { exam: { runId: wellFormed(c.exam.runId), sampleId: wellFormed(c.exam.sampleId) } } : {}),
     ...(verdict.judged ? {} : { detail: verdict.detail }),
   };
   const truth = c.exam?.expect[q.id];
   return {
     questionId: q.id,
     askedAt: c.askedAt,
-    subject: c.exam ? `exam:${c.exam.sampleId}` : c.ctx.subject,
+    // subject 是调用方给的、modelVersion 是上游回的，都可能带 NUL（text 列收不下），写库前过一遍。
+    subject: wellFormed(c.exam ? `exam:${c.exam.sampleId}` : c.ctx.subject),
     sample,
     shadow: !c.enforceable,
     ok: answered,
     answer: answered ? (verdict.option ?? null) : null,
     confidence: answered ? (verdict.confidence ?? null) : null,
     failReason: answered || verdict.judged ? null : verdict.reason,
-    modelVersion: sent && result ? (result.model ?? null) : null,
+    modelVersion: sent && result?.model !== undefined ? wellFormed(result.model) : null,
     latencyMs: sent && result ? result.latencyMs : null,
     inputTokens: tokens ?? null,
     ...(truth === undefined ? {} : { truth, truthSource: 'canary' as const }),
@@ -463,6 +472,6 @@ async function recordSpendOnly(
     await insertAnswers(db, spendRows, demote);
     return '这一问已经发给后端，花费另记了一行。';
   } catch (err) {
-    return `这一问已经发给后端，花了钱没记上（补记也失败：${message(err)}）。`;
+    return `这一问已经发给后端，花了钱没记上（补记也失败：${dbError(err)}）。`;
   }
 }

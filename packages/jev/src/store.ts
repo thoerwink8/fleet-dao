@@ -34,8 +34,10 @@ export interface AnswerSample {
   model: string;
   backend: string;
   evidence: Record<string, FieldDigest>;
-  /** 调用方给的、能复原原文的引用，例如 { issue: 'owner/repo#12', updatedAt: '…' }。 */
+  /** 调用方给的、能复原原文的引用，例如 { issue: 'owner/repo#12', updatedAt: '…' }（库收不下的字已换成 U+FFFD）。 */
   ref?: unknown;
+  /** 引用转不成 JSON（BigInt、循环引用……）、没写进来：为什么。 */
+  refDropped?: string;
   /** 一次问了几道题（它们共用一次调用的耗时和 token）。 */
   batch: { id: string; size: number };
   tokensEstimated?: boolean;
