@@ -214,6 +214,45 @@ describe('会话外推分支', { timeout: 60_000 }, () => {
     expect(remoteHead('task/4-empty')).toBeNull();
   });
 
+  it('卫生检查：新增内容里有令牌、名单里的值、强行加进来的密钥文件，都不推；报错只有文件、行、规则名', async () => {
+    const { gh } = pushSetup();
+    const repo = { owner: 'acme', name: 'widgets' };
+    // 值在运行时拼：整段写在源码里，全仓卫生检查会拦这个文件自己。
+    const token = ['ghp', 'q7Rz2LmX9vKp4TnB8wYc1HdF6jGs3NaEw5Yu'].join('_');
+    const wt = worktree('task/12-leak', {
+      'deploy.md': `第一行\nexport GH_TOKEN=${token}\n`,
+      'who.md': '用户 fake-org-778899\n',
+    });
+    const err = await gh
+      .pushBranch({ repo, bundlePath: wt.bundle, branch: 'task/12-leak', head: wt.head })
+      .then(
+        () => null,
+        (e: unknown) => e as { code: string; message: string; retryable: boolean; details: unknown },
+      );
+    expect(err).toMatchObject({ code: 'HYGIENE_BLOCKED', retryable: false });
+    expect(err?.message).toContain('deploy.md:2 令牌');
+    expect(err?.message).toContain('who.md:1 名单里的敏感值');
+    expect(`${err?.message}${JSON.stringify(err?.details)}`).not.toContain(token.slice(4));
+    expect(`${err?.message}${JSON.stringify(err?.details)}`).not.toContain('fake-org-778899');
+    expect(remoteHead('task/12-leak')).toBeNull();
+  });
+
+  it('卫生检查：名单没读到就不推（HYGIENE_LIST_MISSING），不当成没问题', async () => {
+    const { gh } = pushSetup(undefined, {
+      sensitiveValues: () => ({
+        ok: false,
+        reason: '已知敏感值名单没读到',
+        tried: ['/etc/fleet-dao/sensitive-values.txt'],
+      }),
+    });
+    const repo = { owner: 'acme', name: 'widgets' };
+    const wt = worktree('task/13-no-list');
+    await expect(
+      gh.pushBranch({ repo, bundlePath: wt.bundle, branch: 'task/13-no-list', head: wt.head }),
+    ).rejects.toMatchObject({ code: 'HYGIENE_LIST_MISSING', retryable: false });
+    expect(remoteHead('task/13-no-list')).toBeNull();
+  });
+
   it('同一个头再推一次（重试）：什么都不做', async () => {
     const { gh } = pushSetup();
     const repo = { owner: 'acme', name: 'widgets' };

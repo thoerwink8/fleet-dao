@@ -1,5 +1,6 @@
 // 会话外推分支：AI 会话只在本地提交，这里用「干活的」机器人把会话交出来的提交推到远端任务分支。
-// 推之前核对四件事：不是主线（拒绝推默认分支）、包含此刻最新的主线、相对主线真有内容（不推空交付，C7）、
+// 推之前核对五件事：不是主线（拒绝推默认分支）、包含此刻最新的主线、相对主线真有内容（不推空交付，C7）、
+// 相对主线新增的行和文件名过卫生检查（公开仓推上去就公开了；这里推带 --no-verify，git 钩子不跑，只能在这儿拦）、
 // 远端分支要么没有、要么是我们的祖先（别人在上面推进过就报出来让引擎认领新头，分叉就停，绝不强推，C6）。
 // 会话的提交由会话用户打成包（git bundle）交出来，这里只把包导入引擎自己的裸仓；带令牌的 git 只在这个裸仓里跑
 // （为什么见 git.ts 开头）。
@@ -7,6 +8,14 @@ import { createHash, randomUUID } from 'node:crypto';
 import { constants, existsSync, lstatSync, mkdirSync, rmSync } from 'node:fs';
 import { type FileHandle, open } from 'node:fs/promises';
 import { join } from 'node:path';
+import {
+  addedHunks,
+  diffArgs,
+  formatFinding,
+  type LoadedValues,
+  loadSensitiveValues,
+  scanAdded,
+} from '@fleet-dao/hygiene';
 import type { GitHubClient, Logger, RepoRef } from './client.ts';
 import { repoSlug } from './client.ts';
 import { GitHubError, redact } from './errors.ts';
@@ -35,6 +44,8 @@ export interface PushDeps {
   maxBundleBytes: number;
   log: Logger;
   baseEnv?: Readonly<Record<string, string | undefined>>;
+  /** 卫生检查用的已知敏感值名单（真实的组织编号、账号）。不给就按 packages/hygiene 的顺序去找；没读到一律不推。 */
+  sensitiveValues?: () => LoadedValues;
 }
 
 export interface PushBranchInput {
@@ -190,10 +201,13 @@ export async function pushBranch(deps: PushDeps, input: PushBranchInput): Promis
         );
       }
 
-      // 6. 远端分支的状态
+      // 6. 卫生检查：相对主线新增的行和文件名（命中就不推，报文件、行、规则名，不带值）
+      await assertClean(git, local, mainline, head, slug, deps);
+
+      // 7. 远端分支的状态
       if (remoteBefore) await assertFastForward(git, local, remoteBefore, head, slug, branch);
 
-      // 7. 推（不强推：远端这时被别人推进了，GitHub 会拒，下面再判）
+      // 8. 推（不强推：远端这时被别人推进了，GitHub 会拒，下面再判）
       const pushed = await git(
         ['push', '--porcelain', '--no-verify', url, `${head}:refs/heads/${branch}`],
         net,
@@ -223,7 +237,7 @@ export async function pushBranch(deps: PushDeps, input: PushBranchInput): Promis
         throw fromPushFailure(kind, slug, branch, pushed);
       }
 
-      // 8. 回读：远端分支头就是它才算推成
+      // 9. 回读：远端分支头就是它才算推成
       const after = (await lsRemote(git, net, url, [branch])).get(branch) ?? null;
       if (after !== head) {
         throw new GitHubError(
@@ -241,6 +255,56 @@ export async function pushBranch(deps: PushDeps, input: PushBranchInput): Promis
       if (branchRefUsed) await git(['update-ref', '-d', branchRef], local).catch(() => undefined);
     }
   });
+}
+
+/** 最多在报错信息里列几条命中（全部命中在 details 里）。 */
+const MAX_LISTED_FINDINGS = 10;
+
+/**
+ * 推之前的卫生检查：主线到要推的提交之间新增的行、新出现的文件名，过 packages/hygiene 的规则和名单。
+ * 查出来就拒推（HYGIENE_BLOCKED，不可重试：得把东西从提交里拿掉）；名单没读到也拒推（HYGIENE_LIST_MISSING），
+ * 不当成「没问题」。报错只带文件、行、规则名，不带值。
+ */
+async function assertClean(
+  git: Git,
+  local: GitCall,
+  mainline: string,
+  head: string,
+  slug: string,
+  deps: PushDeps,
+): Promise<void> {
+  const values = (
+    deps.sensitiveValues ?? (() => loadSensitiveValues({ env: deps.baseEnv ?? process.env }))
+  )();
+  if (!values.ok) {
+    throw new GitHubError(
+      'HYGIENE_LIST_MISSING',
+      `推 ${slug} 之前的卫生检查没法做：${values.reason}。名单放好之前一律不推（引擎读 /etc/fleet-dao/sensitive-values.txt）`,
+      { details: { tried: values.tried } },
+    );
+  }
+  const args = diffArgs(mainline, head);
+  const patch = await git(args.patch, local);
+  if (patch.code !== 0) throw fromGitFailure('卫生检查取差异', slug, patch);
+  const names = await git(args.names, local);
+  if (names.code !== 0) throw fromGitFailure('卫生检查取文件名', slug, names);
+  const findings = scanAdded(addedHunks(patch.stdout), names.stdout.split('\0').filter(Boolean), {
+    values: values.values,
+  });
+  if (findings.length === 0) return;
+  const listed = findings.slice(0, MAX_LISTED_FINDINGS).map(formatFinding);
+  const more = findings.length > listed.length ? `；另有 ${findings.length - listed.length} 处` : '';
+  throw new GitHubError(
+    'HYGIENE_BLOCKED',
+    `${head.slice(0, 7)} 没推：卫生检查在相对 ${mainline.slice(0, 7)} 新增的内容里查出 ${findings.length} 处（${listed.join('；')}${more}）。公开仓推上去就公开了，先把这些从提交里拿掉`,
+    {
+      details: {
+        head,
+        mainline,
+        findings: findings.map((f) => ({ path: f.path, line: f.line, rule: f.rule })),
+      },
+    },
+  );
 }
 
 async function ensureMirror(deps: PushDeps, mirror: string): Promise<void> {

@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@fleet-dao/db": "workspace:*",
+    "@fleet-dao/hygiene": "workspace:*",
     "drizzle-orm": "^0.45.3",
     "zod": "^4.6.5"
   }
