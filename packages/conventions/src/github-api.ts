@@ -1,4 +1,5 @@
-// 欠账检查、阶段收口要读 GitHub 上 issue 和里程碑现在的样子：只读，走 REST 接口。
+// 欠账的定时任务、阶段收口要读 GitHub 上 issue 和里程碑现在的样子，欠账的定时任务还往单上留言：走 REST 接口。
+// 必过检查（pnpm check）不许用这里（#87：同一份代码什么时候跑结果都一样）。
 // 令牌按 GITHUB_TOKEN → GH_TOKEN → 本机 `gh auth token` 的顺序找，都没有就不带（公开仓不带令牌也读得到，
 // 只是每小时 60 次）。令牌只放进请求头，报错里不带。读不到、认不出一律抛，由调用方判「没查成」，不当成没问题。
 import { execFileSync } from 'node:child_process';
@@ -30,6 +31,13 @@ export interface GitHubReader {
   milestones(): Promise<MilestoneInfo[]>;
   /** 这个里程碑里开着的 issue 和 PR。 */
   openInMilestone(milestone: number): Promise<IssueInfo[]>;
+}
+
+/** 欠账的定时任务往单上留言用（要能写 issue 的令牌）。 */
+export interface GitHubCommenter {
+  /** 这张单上所有留言的正文。 */
+  comments(n: number): Promise<string[]>;
+  comment(n: number, body: string): Promise<void>;
 }
 
 type Env = Record<string, string | undefined>;
@@ -74,7 +82,7 @@ export function liveGitHub(
   repo: string,
   env: Env,
   opts: { fetchImpl?: typeof fetch; token?: () => string | undefined } = {},
-): GitHubReader {
+): GitHubReader & GitHubCommenter {
   const fetchImpl = opts.fetchImpl ?? fetch;
   const api = (env.GITHUB_API_URL || 'https://api.github.com').replace(/\/+$/, '');
   let token: string | undefined | null = null;
@@ -83,7 +91,7 @@ export function liveGitHub(
     return token;
   };
 
-  const get = async (path: string): Promise<Response> => {
+  const get = async (path: string, init: { method?: string; body?: string } = {}): Promise<Response> => {
     const t = auth();
     const headers: Record<string, string> = {
       accept: 'application/vnd.github+json',
@@ -94,7 +102,8 @@ export function liveGitHub(
     let res: Response;
     try {
       res = await fetchImpl(path.startsWith('http') ? path : `${api}${path}`, {
-        headers,
+        ...init,
+        headers: init.body === undefined ? headers : { ...headers, 'content-type': 'application/json' },
         signal: AbortSignal.timeout(20_000),
       });
     } catch (e) {
@@ -111,7 +120,7 @@ export function liveGitHub(
           ? '：被限流了'
           : '：被限流了（没带令牌时每小时 60 次；设 GITHUB_TOKEN，或本机 gh auth login）'
         : '';
-    return new Error(`读${what}，GitHub 回了 ${res.status}${hint}`);
+    return new Error(`${what.startsWith('在') ? what : `读${what}`}，GitHub 回了 ${res.status}${hint}`);
   };
 
   /** 逐页读完（按 Link 头的 next）。 */
@@ -151,6 +160,21 @@ export function liveGitHub(
         '里程碑里开着的单',
       );
       return rows.map((r) => toIssue(r, '里程碑里开着的单'));
+    },
+    async comments(n) {
+      const rows = await pages(`/repos/${repo}/issues/${n}/comments?per_page=100`, ` #${n} 的留言`);
+      return rows.map((r) => {
+        if (!isObject(r) || typeof r.body !== 'string')
+          throw new Error(`读 #${n} 的留言，有一条认不出（body）`);
+        return r.body;
+      });
+    },
+    async comment(n, body) {
+      const res = await get(`/repos/${repo}/issues/${n}/comments`, {
+        method: 'POST',
+        body: JSON.stringify({ body }),
+      });
+      if (res.status !== 201) throw failed(res, `在 #${n} 上留言`);
     },
   };
 }

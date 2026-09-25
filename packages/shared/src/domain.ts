@@ -74,6 +74,23 @@ export interface Repo {
   testCommand: string;
 }
 
+/**
+ * 拉起需求工作流的输入：后端（api 的 RequirementWorkflows.start）照它给，引擎 contract.ts 的 RequirementInput
+ * 在它上面只加可选字段——两边共用这一份，不各写一份。进了工作流历史：以后只许加可选字段，不许改老字段的意思。
+ */
+export interface RequirementStartInput {
+  schemaVersion: 1;
+  /** 库里的 tasks.id。 */
+  taskId: string;
+  repo: Repo;
+  issueNumber: number;
+  title: string;
+  /** 创始人原话（issue 正文去掉进度段；正文空就是标题）。 */
+  rawRequest: string;
+  /** issue 作者的 GitHub 登录名：结果文档里写「提出人」用，本来就公开在 issue 上。 */
+  requestedBy: string;
+}
+
 export interface Task {
   id: string;
   repoId: string;

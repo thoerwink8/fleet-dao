@@ -3,10 +3,9 @@ on:
   pull_request:
   push:
     branches: [main]
-# 令牌只给读：pnpm check 里的欠账检查要读 issue 开没开，别的步骤都不用令牌。
+# 令牌只给读代码：这里的检查都只看检出来的文件，不读 GitHub 上的现状（#87：必过检查必须确定）。
 permissions:
   contents: read
-  issues: read
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -73,10 +72,7 @@ jobs:
           "$cli" --version
           "$cli" --version | grep -qF "$VERSION"
           echo "FLEET_TEST_TEMPORAL_CLI=$cli" >> "$GITHUB_ENV"
-      # pnpm check 里的欠账检查要读 GitHub 上单子开没开（packages/conventions/src/debt.ts）：读不到算没查成，同样红。
       - run: pnpm check
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
       # 演示版打包，打包完扫产物：出现真名、内部叫法、GitHub 地址、源码对照文件就红（法国发布时也是这一道）
       - run: pnpm --filter ./packages/web run build:demo
       # 装机脚本的检查：退出码 2 = 有项没跑成，同样算红，别让「没跑」冒充「通过」
