@@ -39,9 +39,16 @@ export function readManifest(file: string): ManifestRead {
     if (!Array.isArray(names) || names.some((n) => typeof n !== 'string')) {
       return { ok: false, why: `skills["${dir}"] 不是名字列表` };
     }
+    // 名字会拼到 skill 目录后面去撤、去删：只认单个目录名，带路径的（../../.ssh）一律读不懂
+    const bad = names.find((n) => !isPlainName(n));
+    if (bad !== undefined) return { ok: false, why: `skills["${dir}"] 里的「${bad}」不是单个目录名` };
     out[dir] = [...names];
   }
   return { ok: true, value: { skills: out } };
+}
+
+function isPlainName(n: string): boolean {
+  return n !== '' && n !== '.' && n !== '..' && !/[\\/\0]/.test(n);
 }
 
 export function renderManifest(m: Manifest): string {

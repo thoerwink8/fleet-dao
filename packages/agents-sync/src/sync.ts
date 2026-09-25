@@ -332,6 +332,8 @@ export function checkSkills(ctx: Ctx, src: Sources, manifest: ManifestRead): Lin
             );
           } else if (owner !== undefined && have.owners.some((u) => u !== owner)) {
             out.push(line('drift', k, `漂移——里面有不归这个家主人（uid ${owner}）的文件`));
+          } else if (!mine.has(name)) {
+            out.push(line('drift', k, '漂移——同名目录不是本脚本装的（内容和仓里一样，也不接管）'));
           } else {
             same++;
           }
@@ -357,7 +359,6 @@ export function checkSkills(ctx: Ctx, src: Sources, manifest: ManifestRead): Lin
 type Step =
   | { do: 'install'; name: string; tree: Tree }
   | { do: 'replace'; name: string; tree: Tree; was: string }
-  | { do: 'adopt'; name: string }
   | { do: 'remove'; name: string };
 
 export function applySkills(ctx: Ctx, src: Sources, manifest: ManifestRead): Line[] {
@@ -398,8 +399,9 @@ export function applySkills(ctx: Ctx, src: Sources, manifest: ManifestRead): Lin
           if (mine.has(name)) steps.push({ do: 'replace', name, tree, was });
           else out.push(line('failed', k, `没动——同名的（${was}）不是本脚本装的`));
         } else if (sameTree(tree, readTree(dest).files)) {
+          // 不是本脚本装的，内容一样也不接管：接管了，仓里哪天删掉这个 skill，就会把本不归它管的目录一起撤掉
           if (mine.has(name)) same++;
-          else steps.push({ do: 'adopt', name });
+          else out.push(line('failed', k, '没动——同名目录不是本脚本装的（内容和仓里一样，也不接管）'));
         } else if (mine.has(name)) {
           steps.push({ do: 'replace', name, tree, was: '内容和仓里不一样' });
         } else {
@@ -433,8 +435,6 @@ export function applySkills(ctx: Ctx, src: Sources, manifest: ManifestRead): Lin
           removeEntry(dest);
           writeTree(dest, s.tree);
           out.push(line('changed', k, `换成了仓里的版本（原来${s.was}）`));
-        } else if (s.do === 'adopt') {
-          out.push(line('changed', k, '内容和仓里一样，记进清单（以后归本脚本管）'));
         } else {
           if (lstatOrNull(dest) !== null) {
             removeEntry(dest);

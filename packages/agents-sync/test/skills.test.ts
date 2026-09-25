@@ -172,14 +172,20 @@ describe('不是本脚本装的一律不碰', () => {
     expect(existsSync(join(m.home, '.claude', 'skills', 'grill-me'))).toBe(false);
   });
 
-  it('同名目录、内容和仓里一字不差（清单丢了的情形）：记进清单，之后归本脚本管', () => {
+  it('同名目录、内容和仓里一字不差，但清单里没记：不接管、判红——接管了，仓里删掉它时会连这个不归它管的目录一起撤', () => {
     const m = machine({ 'grill-me': GRILL });
     for (const [rel, content] of Object.entries(GRILL))
       put(m.home, `.claude/skills/grill-me/${rel}`, content);
     const lines = m.apply();
-    expectKind(lines, '~/.claude/skills/grill-me', 'changed');
-    expect(lines.find((l) => l.key === '~/.claude/skills/grill-me')?.text).toContain('记进清单');
-    expect(m.manifest()).toMatchObject({ ok: true, value: { skills: { '.claude/skills': ['grill-me'] } } });
+    expectKind(lines, '~/.claude/skills/grill-me', 'failed');
+    expect(lines.find((l) => l.key === '~/.claude/skills/grill-me')?.text).toContain('不接管');
+    const manifest = m.manifest();
+    expect(manifest.ok && (manifest.value.skills['.claude/skills'] ?? []).includes('grill-me')).toBe(false);
+    expectKind(m.check(), '~/.claude/skills/grill-me', 'drift');
+    m.setRepo({});
+    m.apply();
+    for (const [rel, content] of Object.entries(GRILL))
+      expect(get(m.home, `.claude/skills/grill-me/${rel}`)).toBe(content);
   });
 });
 
@@ -206,6 +212,20 @@ describe('没有 skill、清单读不懂', () => {
     expect(applied.map((l) => l.kind)).toEqual(['failed']);
     expect(get(m.home, '.claude/skills/grill-me/SKILL.md')).toBe('清单坏了时不许动我\n');
     expect(existsSync(join(m.home, '.agents', 'skills'))).toBe(false);
+  });
+
+  it('清单里的名字带路径（../../.ssh、a/b、..）：读不懂，写的时候一个都不撤——不许顺着名字删到 skill 目录外面', () => {
+    for (const bad of ['../../.ssh', 'a/b', 'a\\b', '..', '.', '']) {
+      const file = put(tempDir('m'), 'agents-sync.json', JSON.stringify({ skills: { '.claude/skills': [bad] } }));
+      const read = readManifest(file);
+      expect(read.ok, bad).toBe(false);
+    }
+    const m = machine(null);
+    put(m.home, '.ssh/id_test', '别删我\n');
+    put(m.home, '.fleet-dao/agents-sync.json', JSON.stringify({ skills: { '.claude/skills': ['../../.ssh'] } }));
+    const applied = m.apply();
+    expect(applied.map((l) => l.kind)).toEqual(['failed']);
+    expect(get(m.home, '.ssh/id_test')).toBe('别删我\n');
   });
 
   it('清单形状不对（skills 不是对象、名字不是字符串）：一样读不懂', () => {
