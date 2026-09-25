@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# deploy/ 的全部检查：语法、shellcheck、自检的违规样本、发布脚本的来回（换版、自动退回、只留几版）、
-# 健康页的判定、docs/ops.md 端口表和脚本对得上。
+# deploy/ 的全部检查：语法、shellcheck、自检的违规样本、发布脚本的来回（换版、自动退回、只留几版、飞书网关发不发）、
+# 香港网关入口（fleet-gateway-deploy）、飞书网关打包、健康页的判定、docs/ops.md 端口表和脚本对得上。
 # 用法：sudo bash deploy/test/run.sh（违规样本那项要 root）。退出码：0 通过，1 有不通过，2 有没跑成的。
 set -uo pipefail
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -39,12 +39,14 @@ case $? in
 *) fail=1 ;;
 esac
 
-bash "$HERE/release-flow.test.sh"
-case $? in
-0) ;;
-2) skipped=1 ;;
-*) fail=1 ;;
-esac
+for t in release-flow gateway-deploy gateway-bundle; do
+  bash "$HERE/$t.test.sh"
+  case $? in
+  0) ;;
+  2) skipped=1 ;;
+  *) fail=1 ;;
+  esac
+done
 
 bash "$DEPLOY/backup/test/backup.test.sh"
 case $? in

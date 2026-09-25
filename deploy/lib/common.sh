@@ -339,6 +339,15 @@ web_upload_ssh() { # 私钥 known_hosts
   printf 'ssh -i %s -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=%s -o ConnectTimeout=10' "$1" "$2"
 }
 
+# 法国登香港发飞书网关（france.sh 的读回和 release.sh 同一套）：另一把钥匙，香港那头限死成只能跑 fleet-gateway-deploy，
+# 要做的事（has / receive / activate / status）当成命令传过去，由它自己校验。退出码 255 是 ssh 本身没连上
+gateway_ssh() { # 私钥 known_hosts 目标 要做的事…
+  local key=$1 hosts=$2 target=$3
+  shift 3
+  ssh -i "$key" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$hosts" \
+    -o ConnectTimeout=10 "$target" "$@"
+}
+
 # 谁在监听这个端口：打印进程号（空格分隔；没人听就空）。协议 tcp 或 udp。
 port_pids() { # 协议 端口
   local flag=-ltnp

@@ -1,0 +1,42 @@
+# fleet-dao 飞书网关（香港）。deploy/hk.sh 装到 /etc/systemd/system/；改这份、再跑一遍装机脚本，别在机器上手改。
+# 代码：法国的发布脚本把网关连同依赖打成一个文件（deploy/france/bundle-gateway.sh），经隧道交给 fleet-gateway-deploy
+# 落到 /srv/fleet-dao-gateway/<提交号>/gateway.mjs，current 指着在用的那版；node 是 hk.sh 装的固定版本。
+# 启用、启动由 fleet-gateway-deploy activate 做（配置备齐了才起），hk.sh 只装单元文件。
+# 配置：/etc/fleet-dao/feishu.env（飞书凭据、创始人、团队群、后端和公网地址）、gateway-token.env（调后端的通行证，和法国同一份）。
+[Unit]
+Description=fleet-dao 飞书网关
+Documentation=https://github.com/thoerwink8/fleet-dao/blob/main/docs/ops.md
+Wants=network-online.target
+After=network-online.target wg-quick@wg-fleet.service
+# 飞书暂时连不上也一直重试，不在几次失败后放弃
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=fleet
+Group=fleet
+WorkingDirectory=/srv/fleet-dao-gateway/current
+EnvironmentFile=/etc/fleet-dao/feishu.env
+EnvironmentFile=/etc/fleet-dao/gateway-token.env
+ExecStart=/opt/fleet-dao/node/bin/node /srv/fleet-dao-gateway/current/gateway.mjs
+# always：干净退出也拉起来。停机时网关先断长连接、把手上的活做完（最多 20 秒）再退
+Restart=always
+RestartSec=3
+KillSignal=SIGTERM
+TimeoutStopSec=30
+# 网关只出站（连飞书、经隧道连法国），不监听端口、不写磁盘
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+UnsetEnvironment=GH_TOKEN GITHUB_TOKEN
+
+[Install]
+WantedBy=multi-user.target
