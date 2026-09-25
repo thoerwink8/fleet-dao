@@ -35,6 +35,8 @@ ENV_RE='^(FLEET_[A-Z0-9_]+|LANG|LANGUAGE|LC_[A-Z_]+|TZ|TERM|GIT_TERMINAL_PROMPT)
 # 把 fleet 用户环境里的 FLEET_* 原样带进这个以 root 跑的脚本，这个开关要是也叫 FLEET_*，fleet 用户自己在调用
 # sudo 前设一个同名变量就能把生产上的落点边界改掉；不在 env_keep 白名单里的名字，sudo 会在进来之前就擦掉它。
 WORK_BASE=${AGENT_SCOPE_TEST_WORK_BASE:-/var/lib/fleet-work}
+# fs.protected_hardlinks 的读取路径，理由同上：测试专用开关，故意不叫 FLEET_*。
+PROTECTED_HARDLINKS_PATH=${AGENT_SCOPE_TEST_PROTECTED_HARDLINKS_PATH:-/proc/sys/fs/protected_hardlinks}
 
 die() {
   printf 'fleet-agent-scope：%s\n' "$*" >&2
@@ -58,7 +60,8 @@ run() {
   while (($#)); do
     case $1 in
     --user)
-      user=${2:-}
+      (($# >= 2)) || die "$1 后面要给一个值"
+      user=$2
       shift 2
       ;;
     --memory-high | --memory-max | --memory-swap-max)
@@ -81,7 +84,8 @@ run() {
       shift 2
       ;;
     --cwd)
-      cwd=${2:-}
+      (($# >= 2)) || die "$1 后面要给一个值"
+      cwd=$2
       shift 2
       ;;
     --)
@@ -178,13 +182,21 @@ walk_parents() {
 
 # 把工作树交给 user：不在就建（归它、700），在就整棵改属主（不跟随符号链接）。
 ensure_tree() {
-  local dir=$1 user=$2 real
+  local dir=$1 user=$2 real hardlinks
   walk_parents "$dir" 1
   [[ ! -L "$dir" ]] || die "工作树路径上有符号链接：「$dir」"
   if [[ -e "$dir" ]]; then
     [[ -d "$dir" ]] || die "工作树不是目录：「$dir」"
     real=$(realpath -e -- "$dir" 2>/dev/null) || die "工作树不存在：「$dir」"
     [[ "$real" == "$dir" ]] || die "工作树路径上有符号链接：「$dir」解析成「$real」"
+    # chown -R 前先核这台开没开硬链接保护：没开的话，工作树里的会话用户能对自己读不到、写不到的文件建
+    # 硬链接，这次 chown -R 会连带把那个文件也改成会话用户的——读不到这个开关（没挂 procfs、路径不对……）
+    # 一律当没开处理，不能当「开着」放过去。
+    hardlinks=$(cat -- "$PROTECTED_HARDLINKS_PATH" 2>/dev/null) || hardlinks=""
+    [[ "$hardlinks" == 1 ]] || {
+      echo "fleet-agent-scope：fs.protected_hardlinks 没开（读到「${hardlinks:-读不到}」），不做 chown -R：$dir" >&2
+      exit 1
+    }
     chown -R --no-dereference "$user:$user" -- "$dir" || {
       echo "fleet-agent-scope：改属主失败：$dir" >&2
       exit 1
@@ -220,22 +232,25 @@ remove() {
 }
 
 adopt() {
-  local dir=${1:-} user="" from="" session="" u ok=0 from_home to_home src project_dir dest_dir
+  local dir=${1:-} user="" from="" session="" u ok=0 from_home to_home src project_dir dest_dir dest_path tmp_path
   local -a hits=() pstat=()
   [[ -n "$dir" ]] || die "用法：fleet-agent-scope adopt <工作树> --user <会话用户> [--from <会话用户> --session <会话编号>]"
   shift
   while (($#)); do
     case $1 in
     --user)
-      user=${2:-}
+      (($# >= 2)) || die "$1 后面要给一个值"
+      user=$2
       shift 2
       ;;
     --from)
-      from=${2:-}
+      (($# >= 2)) || die "$1 后面要给一个值"
+      from=$2
       shift 2
       ;;
     --session)
-      session=${2:-}
+      (($# >= 2)) || die "$1 后面要给一个值"
+      session=$2
       shift 2
       ;;
     *) die "不认识的参数：「$1」" ;;
@@ -270,17 +285,25 @@ adopt() {
     # 项目目录名照旧的来：工作树路径没变，新用户按同一个路径算出的名字和旧用户一样，不用我们自己重算
     project_dir=$(basename -- "$(dirname -- "$src")")
     dest_dir="$to_home/.claude/projects/$project_dir"
-    # pipefail 只留管道最后一段的退出码：右边就算读到空输入也能 mkdir+cat 成功，会把左边（旧用户）读失败
-    # 盖成「成功」，写出一份空的会话记录。两段的退出码都要看，用 PIPESTATUS（在 if 判完的下一句立刻取，
-    # 再跑别的命令它就被冲掉了）。
+    dest_path="$dest_dir/$session.jsonl"
+    tmp_path="$dest_dir/.$session.jsonl.tmp"
+    # 先写临时文件，两边都确认成功了才在下面单独 mv 成最终名字：管道右边看不到左边的退出码，旧用户读
+    # 失败时右边一样能拿空输入把 mkdir+cat+chmod 走成功，要是直接写最终文件名就会留一个空的 <会话>.jsonl。
+    # 两段的退出码都要看，用 PIPESTATUS（在 if 判完的下一句立刻取，再跑别的命令它就被冲掉了）。
     # 权限显式设（700 / 600），不只靠 umask：上级目录带默认 ACL 时 umask 不生效，新建的会是 775 / 664（CI 的机器就是）。
     # shellcheck disable=SC2016 # $1…$4 要由降权后的 sh 展开，不是这一层的
     if ! as_session_user "$from" cat -- "$src" |
       as_session_user "$user" /bin/sh -c \
         'umask 077 && install -d -m 700 -- "$1" "$2" "$3" && cat >"$4" && chmod 600 -- "$4"' sh \
-        "$to_home/.claude" "$to_home/.claude/projects" "$dest_dir" "$dest_dir/$session.jsonl"; then
+        "$to_home/.claude" "$to_home/.claude/projects" "$dest_dir" "$tmp_path"; then
       pstat=("${PIPESTATUS[@]}")
-      echo "fleet-agent-scope：拷会话记录失败（读 ${pstat[0]}，写 ${pstat[1]}）：$src → $dest_dir/$session.jsonl" >&2
+      as_session_user "$user" rm -f -- "$tmp_path" 2>/dev/null || true
+      echo "fleet-agent-scope：拷会话记录失败（读 ${pstat[0]}，写 ${pstat[1]}）：$src → $dest_path" >&2
+      exit 1
+    fi
+    if ! as_session_user "$user" mv -f -- "$tmp_path" "$dest_path"; then
+      as_session_user "$user" rm -f -- "$tmp_path" 2>/dev/null || true
+      echo "fleet-agent-scope：拷会话记录失败（换不成 $dest_path）：$src → $dest_path" >&2
       exit 1
     fi
   fi

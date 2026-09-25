@@ -124,8 +124,8 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 
 - `bash deploy/lib/snapshot.sh ours`：fleet-dao 管的东西的指纹。连跑两遍装机，两遍之间各拍一次，diff 为空才算第二遍零改动——和脚本自己数的「改动几处」是两套判据。
 - `bash deploy/lib/snapshot.sh others`：不归 fleet-dao 管的单元状态、监听端口、防火墙（系统自带的服务、MiraQuota 等）。装机脚本每次开头结尾自己比一遍：装机不许碰它们。
-- `sudo bash deploy/test/run.sh`：语法、shellcheck、自检的违规样本、发布脚本的来回（`release-flow.test.sh`）、香港网关的入口（`gateway-deploy.test.sh`）、网关打包（`gateway-bundle.test.sh`，要先 `pnpm install`）、健康页的判定（`health-page.test.mjs`）、本页端口表和脚本对得上。
-- `sudo bash deploy/test/agent-scope.e2e.sh`（法国）：会话通路真跑一遍，见第五节。
+- `sudo bash deploy/test/run.sh`：语法、shellcheck、自检的违规样本、发布脚本的来回（`release-flow.test.sh`）、香港网关的入口（`gateway-deploy.test.sh`）、网关打包（`gateway-bundle.test.sh`，要先 `pnpm install`）、健康页的判定（`health-page.test.mjs`）、本页端口表和脚本对得上、`adopt` 的用法校验和拷会话记录（`agent-scope-adopt.test.sh`）。后者要建、删真的系统账号（两个会话用户），这一段只在命令行上给了 `FLEET_TEST_SYSTEM_USERS=1` 时跑（`sudo FLEET_TEST_SYSTEM_USERS=1 bash deploy/test/run.sh`，只在 CI 的一次性机器上这么跑）；没给、或这两个用户、组、家目录有一样已经在，这一段报「没跑成」（退出码 2，不算通过），不碰已有的账号。
+- `sudo bash deploy/test/agent-scope.e2e.sh`（法国）：会话通路真跑一遍，见第五节。只测 `run`、`stop`、`list`；`adopt` 在真机上还没有这样的用例，只有上一条在 CI 里跑的。
 
 ## 五、AI 会话
 
@@ -146,9 +146,9 @@ sudo -n /usr/local/sbin/fleet-agent-scope adopt /var/lib/fleet-work/<仓>/<需�
 ```
 
 - `run` 最后 exec 成会话本身，标准输入输出还是引擎手里那一份。
-- `adopt`：换会话用户接着干（design.md 第十四节「工作树路径不随用户变」）。工作树路径不用换，只改属主：`chown -R --no-dereference`；`--user`、`--from`（要给就和 `--session` 一起给）只认这两个会话用户，且不能相同。校验：工作树必须是绝对路径、落在 `/var/lib/fleet-work` 之下、至少两层（仓/任务）、路径上每一段都不是符号链接（`realpath` 解出来要和给的路径一模一样）、是目录——不对就是用法错误，退出码 64。
-  给了 `--session`（会话编号，UUID）就把 Claude 的过程记录也拷过去：**不以 root 读旧用户的文件**——旧用户能把自己家里的文件换成指向 `/etc/shadow` 之类的符号链接，root 直接读就中招；改用 `setpriv` 先降成旧用户的身份，由它自己在自己的 `~/.claude/projects/*/` 下找 `<会话编号>.jsonl`（要求是普通文件、恰好一个，不是就说明状态不对，不该继续），再以旧用户身份 `cat` 出来，经管道交给以新用户身份跑的进程写到新用户的 `~/.claude/projects/<同一个项目目录名>/<会话编号>.jsonl`（`umask 077`，目录不存在就建）。项目目录名照旧的来，不用重算：工作树路径没变，Claude Code 按路径算出的目录名，新用户和旧用户会算出同一个，fork 续会话（design.md 第九节「拼车用完，手上的活原地接着干」）时就能接着找到它。找不到、不唯一都算「没有可拷的」，退出码 65（和用法错误、其它失败分开，调用方好按错误类型分流：65 说明状态本来就不对，不是脚本本身的问题）。
-  测试专用开关 `AGENT_SCOPE_TEST_WORK_BASE` 能把 `/var/lib/fleet-work` 换成临时目录：故意不叫 `FLEET_*`——sudoers 的 `env_keep` 会把 `fleet` 用户环境里的 `FLEET_*` 原样带进这个以 root 跑的脚本，这个开关要是也叫 `FLEET_*`，`fleet` 用户自己在调用 `sudo` 前设一个同名变量就能把生产上的落点边界改掉；不在 `env_keep` 白名单里的名字，`sudo` 会在进来之前就把它擦掉，所以只在直接跑这个脚本（不经 `sudo`）的测试里生效。
+- `adopt`：换会话用户接着干（design.md 第十四节「工作树路径不随用户变」）。工作树路径不用换，只改属主：`chown -R --no-dereference`。改属主之前先核这台开了 `fs.protected_hardlinks`（值是 1；读不到也当没开），没开就拒、退出码 1——没开时会话用户能在工作树里给自己读不到的文件建硬链接，root 的 `chown -R` 会把那个文件一起改成它的。`--user`、`--from`（要给就和 `--session` 一起给）只认这两个会话用户，且不能相同。校验：工作树必须是绝对路径、落在 `/var/lib/fleet-work` 之下、至少两层（仓/任务）、路径上每一段都不是符号链接（`realpath` 解出来要和给的路径一模一样）、是目录——不对就是用法错误，退出码 64。
+  给了 `--session`（会话编号，UUID）就把 Claude 的过程记录也拷过去：**不以 root 读旧用户的文件**——旧用户能把自己家里的文件换成指向 `/etc/shadow` 之类的符号链接，root 直接读就中招；改用 `setpriv` 先降成旧用户的身份，由它自己在自己的 `~/.claude/projects/*/` 下找 `<会话编号>.jsonl`（要求是普通文件、恰好一个，不是就说明状态不对，不该继续），再以旧用户身份 `cat` 出来，经管道交给以新用户身份跑的进程写到新用户的 `~/.claude/projects/<同一个项目目录名>/<会话编号>.jsonl`（`umask 077`，目录不存在就建）。先写同一目录下的临时文件 `.<会话编号>.jsonl.tmp`，读、写都成了才换成正式的名字；哪一边失败都删掉临时文件、退出码 1，不留一份空的记录。项目目录名照旧的来，不用重算：工作树路径没变，Claude Code 按路径算出的目录名，新用户和旧用户会算出同一个，fork 续会话（design.md 第九节「拼车用完，手上的活原地接着干」）时就能接着找到它。找不到、不唯一都算「没有可拷的」，退出码 65（和用法错误、其它失败分开，调用方好按错误类型分流：65 说明状态本来就不对，不是脚本本身的问题）。
+  测试专用开关 `AGENT_SCOPE_TEST_WORK_BASE` 能把 `/var/lib/fleet-work` 换成临时目录，`AGENT_SCOPE_TEST_PROTECTED_HARDLINKS_PATH` 能把 `/proc/sys/fs/protected_hardlinks` 换成临时文件：都故意不叫 `FLEET_*`——sudoers 的 `env_keep` 会把 `fleet` 用户环境里的 `FLEET_*` 原样带进这个以 root 跑的脚本，开关要是也叫 `FLEET_*`，`fleet` 用户自己在调用 `sudo` 前设一个同名变量就能把生产上的落点边界改掉、把硬链接保护的检查骗过去；不在 `env_keep` 白名单里的名字，`sudo` 会在进来之前就把它擦掉，所以只在直接跑这个脚本（不经 `sudo`）的测试里生效。
 - 环境变量不走命令行（sudo 会把命令行记进日志）：引擎把 `FLEET_*`、`LANG`、`LC_*`、`TZ`、`TERM`、`GIT_TERMINAL_PROMPT` 放进调 sudo 时的环境；会话的 PATH 用 `FLEET_SESSION_PATH` 给；HOME、USER 是会话用户的。GitHub 凭据（`GH_TOKEN` 之类）一概带不进去：推分支、开 PR 由引擎在会话外做。
 - 会话降权用 `setpriv --init-groups --no-new-privs`：只在自己的组里，会话里的 sudo、setuid 程序都提不了权。不用 `systemd-run --uid`：它在 scope 里不清附加组，会话会带着 root 组（法国实测）。
 - 内存要真封顶，`--memory-max` 和 `--memory-swap-max` 得一起给：只给前者，超出的部分被换进 swap，会话不会被杀（法国实测）。

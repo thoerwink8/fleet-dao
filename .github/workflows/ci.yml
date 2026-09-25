@@ -73,4 +73,7 @@ jobs:
       # 演示版打包，打包完扫产物：出现真名、内部叫法、GitHub 地址、源码对照文件就红（法国发布时也是这一道）
       - run: pnpm --filter ./packages/web run build:demo
       # 装机脚本的检查：退出码 2 = 有项没跑成，同样算红，别让「没跑」冒充「通过」
-      - run: sudo bash deploy/test/run.sh
+      # FLEET_TEST_SYSTEM_USERS=1：agent-scope-adopt.test.sh 建、删真系统账号的一段只在这里开（一次性的机器）。
+      # sudo 会清掉带进来的环境变量，所以写在 sudo 的命令行上（这里 runner 的 sudo 规则是 ALL，命令行上给的放行）；
+      # 万一没带过去，那一段报「没跑成」、这一步照样红，不会悄悄当成通过。
+      - run: sudo FLEET_TEST_SYSTEM_USERS=1 bash deploy/test/run.sh

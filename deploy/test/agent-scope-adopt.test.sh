@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # fleet-agent-scope 的 adopt 子命令（换会话用户接着干：改工作树属主，顺带拷过程记录）。
-# 校验失败路径不需要真的会话用户，靠 AGENT_SCOPE_TEST_WORK_BASE 把工作树的根换成临时目录就能测。
-# 正常路径（chown、拷会话记录）要两个真的会话用户：只在 fleet-agent-dedicated / fleet-agent-carpool 都还不存在的
-# 机器上（CI 的一次性容器）临时建、跑完删掉；这两个用户已经存在（真机）就跳过，不碰真账号——
-# 真机上的正常路径见 deploy/france/agent-scope.e2e.sh。
+# 校验失败路径不需要真的会话用户，靠 AGENT_SCOPE_TEST_WORK_BASE 把工作树的根换成临时目录、
+# AGENT_SCOPE_TEST_PROTECTED_HARDLINKS_PATH 把 fs.protected_hardlinks 的读取路径换成临时文件就能测。
+# 正常路径（chown、拷会话记录）要建、删系统账号（fleet-agent-dedicated / fleet-agent-carpool），只在明确
+# 开了 FLEET_TEST_SYSTEM_USERS=1 时跑（sudo 默认清环境变量，CI 里要 sudo FLEET_TEST_SYSTEM_USERS=1 bash ...）；
+# 没开这个开关、或这两个用户/组/家目录有任何一个已经在（不是这条测试建的，不碰）、或这台没有 useradd/userdel，
+# 都跳过、打「没跑成」。只收拾这条测试自己建出来的东西：建之前先记下要建哪些，退出时只删这些。
+# 真机上 adopt 还没有 e2e 覆盖（deploy/test/agent-scope.e2e.sh 只测 run/stop/list 那条通路）。
 # 用法：sudo bash deploy/test/agent-scope-adopt.test.sh。退出码：0 通过，1 不通过，2 有没跑成的。
 set -uo pipefail
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -24,8 +27,12 @@ flunk() {
 
 WORK=$(mktemp -d)
 OUTSIDE=$(mktemp -d)
-trap 'rm -rf -- "$WORK" "$OUTSIDE"' EXIT
+HARDLINKS_ON=$(mktemp)
+printf '1\n' >"$HARDLINKS_ON"
+trap 'rm -rf -- "$WORK" "$OUTSIDE"; rm -f -- "$HARDLINKS_ON"' EXIT
 export AGENT_SCOPE_TEST_WORK_BASE=$WORK
+# 下面除了专门测「没开」「读不到」的两条，都当 fs.protected_hardlinks 是开着的（1），不看这台真的设成什么
+export AGENT_SCOPE_TEST_PROTECTED_HARDLINKS_PATH=$HARDLINKS_ON
 
 echo "== 校验失败路径（不需要真的会话用户）"
 
@@ -89,6 +96,18 @@ else
   flunk "--session 不是 UUID 应退出码 64：退出码 $rc，输出「$out」"
 fi
 
+# 要值的选项后面什么都不给：以前 shift 2 在只剩这一个参数时会直接把脚本炸出去（set -e 接住 shift 的非零
+# 退出码），不会走到 die，得不到用法错误、退出码也不对；现在这三个都要先报用法错误、退出码 64。
+for opt in --user --from --session; do
+  out=$(bash "$BIN" adopt "$WORK/repo1/task-noval" "$opt" 2>&1)
+  rc=$?
+  if ((rc == 64)) && [[ "$out" == *"后面要给一个值"* ]]; then
+    pass "$opt 后面没给值：退出码 64"
+  else
+    flunk "$opt 后面没给值应退出码 64 且报用法：退出码 $rc，输出「$out」"
+  fi
+done
+
 touch "$WORK/afile"
 out=$(bash "$BIN" adopt "$WORK/afile/task" --user fleet-agent-dedicated 2>&1)
 rc=$?
@@ -151,25 +170,69 @@ else
   flunk "remove 在的应 0 + removed 且删干净：$rc「$out」"
 fi
 
+echo "== fs.protected_hardlinks（chown -R 前的内核前提，不需要真的会话用户——校验在 chown 之前就拦下）"
+
+mkdir -p "$WORK/repo1/task-hardlinks"
+HARDLINKS_OFF=$(mktemp)
+printf '0\n' >"$HARDLINKS_OFF"
+out=$(AGENT_SCOPE_TEST_PROTECTED_HARDLINKS_PATH=$HARDLINKS_OFF bash "$BIN" adopt "$WORK/repo1/task-hardlinks" \
+  --user fleet-agent-dedicated 2>&1)
+rc=$?
+if ((rc == 1)) && [[ "$out" == *protected_hardlinks* ]]; then
+  pass "fs.protected_hardlinks=0：拒绝 chown -R，退出码 1"
+else
+  flunk "fs.protected_hardlinks=0 应拒绝：退出码 $rc，输出「$out」"
+fi
+rm -f -- "$HARDLINKS_OFF"
+
+out=$(AGENT_SCOPE_TEST_PROTECTED_HARDLINKS_PATH="$WORK/no-such-hardlinks-file" bash "$BIN" adopt \
+  "$WORK/repo1/task-hardlinks" --user fleet-agent-dedicated 2>&1)
+rc=$?
+if ((rc == 1)) && [[ "$out" == *protected_hardlinks* ]]; then
+  pass "fs.protected_hardlinks 读不到：当没开处理，拒绝，退出码 1（不许当成「开着」）"
+else
+  flunk "fs.protected_hardlinks 读不到应拒绝：退出码 $rc，输出「$out」"
+fi
+
 echo "== 正常路径（chown、拷会话记录）"
 
-if id fleet-agent-dedicated >/dev/null 2>&1 || id fleet-agent-carpool >/dev/null 2>&1; then
-  echo "  没跑成：fleet-agent-dedicated / fleet-agent-carpool 已经存在——这条测试只在都不存在的机器（CI 的一次性容器）上
-      临时建，不碰已经存在的真账号；真机验收见 deploy/france/agent-scope.e2e.sh"
-  skipped=1
+sysusers_reason=""
+if [[ "${FLEET_TEST_SYSTEM_USERS:-}" != 1 ]]; then
+  sysusers_reason="没给 FLEET_TEST_SYSTEM_USERS=1（这段要建、删系统账号，只在明确开了这个开关时跑——CI 里
+      sudo FLEET_TEST_SYSTEM_USERS=1 bash deploy/test/run.sh；sudo 默认清环境变量，得显式带过去）"
+elif id fleet-agent-dedicated >/dev/null 2>&1 || id fleet-agent-carpool >/dev/null 2>&1; then
+  sysusers_reason="fleet-agent-dedicated / fleet-agent-carpool 已经存在——这条测试只在都不存在的机器（CI 的
+      一次性容器）上临时建，不碰已经存在的真账号；真机上 adopt 还没有 e2e 覆盖"
+elif getent group fleet-agent-dedicated >/dev/null 2>&1 || getent group fleet-agent-carpool >/dev/null 2>&1; then
+  sysusers_reason="fleet-agent-dedicated / fleet-agent-carpool 的组有一个已经在（用户不在但组在，状态不对）——不碰"
+elif [[ -e /home/fleet-agent-dedicated || -e /home/fleet-agent-carpool ]]; then
+  sysusers_reason="/home/fleet-agent-dedicated 或 /home/fleet-agent-carpool 已经在（用户不在但家目录在，状态不对）——不碰"
 elif ! command -v useradd >/dev/null || ! command -v userdel >/dev/null; then
-  echo "  没跑成：这台没有 useradd/userdel，建不了临时会话用户"
+  sysusers_reason="这台没有 useradd/userdel，建不了临时会话用户"
+fi
+
+if [[ -n "$sysusers_reason" ]]; then
+  echo "  没跑成：$sysusers_reason"
   skipped=1
 else
+  # 只收拾这条测试自己建出来的东西：上面已经确认这四样原本都不在，建之前先记下都要建哪些
+  built_groups=(fleet-agent-dedicated fleet-agent-carpool)
+  built_users=(fleet-agent-dedicated fleet-agent-carpool)
+  cleanup_sysusers() {
+    local u
+    for u in "${built_users[@]}"; do userdel -r "$u" 2>/dev/null; done
+    for u in "${built_groups[@]}"; do groupdel "$u" 2>/dev/null; done
+    rm -rf -- "$WORK" "$OUTSIDE"
+    rm -f -- "$HARDLINKS_ON"
+  }
+  trap cleanup_sysusers EXIT
+
   groupadd --system fleet-agent-dedicated
   useradd --system --gid fleet-agent-dedicated --home-dir /home/fleet-agent-dedicated --create-home \
     --shell /bin/bash fleet-agent-dedicated
   groupadd --system fleet-agent-carpool
   useradd --system --gid fleet-agent-carpool --home-dir /home/fleet-agent-carpool --create-home \
     --shell /bin/bash fleet-agent-carpool
-  trap 'userdel -r fleet-agent-dedicated 2>/dev/null; userdel -r fleet-agent-carpool 2>/dev/null;
-    groupdel fleet-agent-dedicated 2>/dev/null; groupdel fleet-agent-carpool 2>/dev/null;
-    rm -rf -- "$WORK" "$OUTSIDE"' EXIT
 
   WT1=$WORK/repo1/task1
   mkdir -p "$WT1"
@@ -234,6 +297,26 @@ else
     pass "会话记录没找到（编造的会话编号）：退出码 65"
   else
     flunk "会话记录没找到应退出码 65：退出码 $rc，输出「$out」"
+  fi
+
+  # 旧用户那边读失败（chmod 000）：以前右边照样能拿空输入把 mkdir+cat+chmod 走成功，退出码虽然对（pipefail
+  # 接住了左边的失败），却会在目标位置留一个空的 <会话>.jsonl；现在写的是临时文件，读失败要连临时文件一起删。
+  WT4=$WORK/repo1/task4
+  mkdir -p "$WT4"
+  SESSION4=$(cat /proc/sys/kernel/random/uuid)
+  PROJECT_DIR4=blockedproject
+  mkdir -p "$from_home/.claude/projects/$PROJECT_DIR4"
+  echo '{"type":"summary"}' >"$from_home/.claude/projects/$PROJECT_DIR4/$SESSION4.jsonl"
+  chown -R fleet-agent-carpool:fleet-agent-carpool "$from_home/.claude/projects/$PROJECT_DIR4"
+  chmod 000 "$from_home/.claude/projects/$PROJECT_DIR4/$SESSION4.jsonl"
+  out=$(bash "$BIN" adopt "$WT4" --user fleet-agent-dedicated --from fleet-agent-carpool --session "$SESSION4" 2>&1)
+  rc=$?
+  dest4="$to_home/.claude/projects/$PROJECT_DIR4/$SESSION4.jsonl"
+  tmp4="$to_home/.claude/projects/$PROJECT_DIR4/.$SESSION4.jsonl.tmp"
+  if ((rc == 1)) && [[ ! -e "$dest4" ]] && [[ ! -e "$tmp4" ]]; then
+    pass "旧用户读不了会话记录（chmod 000）：退出码 1，没留空的 .jsonl，没留临时文件"
+  else
+    flunk "旧用户读不了应退出码 1 且不留文件（退出码 $rc，dest 在$([[ -e "$dest4" ]] && echo 是 || echo 否)，tmp 在$([[ -e "$tmp4" ]] && echo 是 || echo 否)）：$out"
   fi
 fi
 
