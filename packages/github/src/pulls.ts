@@ -98,6 +98,8 @@ export interface OpenPrInput {
   /** 字符串原样用；给结构就按仓里的 PR 模板渲染（renderPrBody）。 */
   body: string | PrBodyInput;
   draft?: boolean | undefined;
+  /** design §7：把这张需求 issue 的类别标签、里程碑照抄到 PR 上（读不到 issue 就报错，不当「issue 没标签」）。 */
+  inheritFrom?: { issueNumber: number } | undefined;
 }
 
 export interface OpenPrResult {
@@ -110,6 +112,67 @@ export interface OpenPrResult {
   headMatches: boolean;
   /** PR 的作者（按分支找到别人开的 PR 时，不是「干活的」机器人）。 */
   author: string | null;
+  /** 没给 inheritFrom 时不存在。这次对齐到 PR 上的类别标签与里程碑；PR 原本已经有的也算在内（不是新加的才算）。 */
+  inherited?: { labels: string[]; milestone: string | null } | undefined;
+}
+
+/** design §7：需求 issue 的类别标签互斥，PR 照抄这个固定集合里 issue 有的那几个。 */
+export const CATEGORY_LABELS = ['需求', '缺陷', '杂项'] as const;
+
+const IssueLabelsAndMilestone = z.object({
+  labels: z.array(z.object({ name: z.string() })),
+  milestone: z.object({ number: z.number(), title: z.string() }).nullable(),
+});
+
+/**
+ * 把 issue 的类别标签、里程碑对到 PR 上：标签只加不删（POST 是追加，不是替换）；PR 已经有里程碑（不管是哪个）就不改，
+ * 原样报回去。PR 在 GitHub 眼里也是一张 issue，标签/里程碑走 /issues/ 这一套接口，不是 /pulls/。
+ * 读 issue 或 PR 失败让它原样抛出去：读不到不等于「没有标签」。
+ */
+async function inheritFromIssue(
+  deps: Deps,
+  repo: RepoRef,
+  prNumber: number,
+  issueNumber: number,
+  signal: AbortSignal | undefined,
+): Promise<{ labels: string[]; milestone: string | null }> {
+  const base = `/repos/${enc(repo.owner)}/${enc(repo.name)}/issues`;
+  const auth = { as: 'engine' as const, repo };
+  const [issueRes, prRes] = await Promise.all([
+    deps.client.request({ method: 'GET', path: `${base}/${issueNumber}`, auth, signal }),
+    deps.client.request({ method: 'GET', path: `${base}/${prNumber}`, auth, signal }),
+  ]);
+  const issue = IssueLabelsAndMilestone.safeParse(issueRes.data);
+  if (!issue.success) throw unexpected(`读 issue #${issueNumber} 的标签与里程碑`, issueRes.data);
+  const pr = IssueLabelsAndMilestone.safeParse(prRes.data);
+  if (!pr.success) throw unexpected(`读 PR #${prNumber} 的标签与里程碑`, prRes.data);
+
+  const issueLabels = new Set(issue.data.labels.map((l) => l.name));
+  const labels = CATEGORY_LABELS.filter((l) => issueLabels.has(l));
+  const prLabels = new Set(pr.data.labels.map((l) => l.name));
+  const toAdd = labels.filter((l) => !prLabels.has(l));
+  if (toAdd.length > 0) {
+    await deps.client.request({
+      method: 'POST',
+      path: `${base}/${prNumber}/labels`,
+      auth,
+      body: { labels: toAdd },
+      signal,
+    });
+  }
+
+  let milestone = pr.data.milestone?.title ?? null;
+  if (!pr.data.milestone && issue.data.milestone) {
+    await deps.client.request({
+      method: 'PATCH',
+      path: `${base}/${prNumber}`,
+      auth,
+      body: { milestone: issue.data.milestone.number },
+      signal,
+    });
+    milestone = issue.data.milestone.title;
+  }
+  return { labels, milestone };
 }
 
 interface PrReceipt {
@@ -250,6 +313,9 @@ export async function openPr(
   // 认回声：开 PR 的回执；再加上这次回读——引擎每推一轮都会调 openPr，推送带来的 PR 更新也就认得出
   if (!replay && value.updatedAt) await pullEcho(deps, repo, pr.number, value.updatedAt, 'agent');
   if (pr.head.sha === input.head) await pullEcho(deps, repo, pr.number, pr.updated_at, 'agent');
+  const inherited = input.inheritFrom
+    ? await inheritFromIssue(deps, repo, pr.number, input.inheritFrom.issueNumber, ctx.signal)
+    : undefined;
   return {
     number: pr.number,
     url: pr.html_url,
@@ -257,6 +323,7 @@ export async function openPr(
     created: !replay,
     headMatches: pr.head.sha === input.head,
     author,
+    inherited,
   };
 }
 

@@ -73,8 +73,8 @@ export interface PushBranchResult {
   defaultBranch: string;
 }
 
-const SHA = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
-const NET_TIMEOUT_MS = 5 * 60_000;
+export const SHA = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
+export const NET_TIMEOUT_MS = 5 * 60_000;
 
 /** 分支名：git 的规矩 + 不许 refs/ 开头、不许是 HEAD。 */
 export function validBranchName(name: string): boolean {
@@ -85,9 +85,14 @@ export function validBranchName(name: string): boolean {
   return name.split('/').every((part) => part && !part.startsWith('.') && !part.endsWith('.lock'));
 }
 
+/** 引擎自己这个仓的裸仓放哪：其他也要碰镜像的模块（并主线、打包）按同样的算法算路径，才会撞上同一把 withMirrorLock。 */
+export function mirrorPath(mirrorRoot: string, repo: RepoRef): string {
+  return join(mirrorRoot, repo.owner.toLowerCase(), `${repo.name.toLowerCase()}.git`);
+}
+
 const mirrorLocks = new Map<string, Promise<unknown>>();
 
-async function withMirrorLock<T>(dir: string, fn: () => Promise<T>): Promise<T> {
+export async function withMirrorLock<T>(dir: string, fn: () => Promise<T>): Promise<T> {
   const prev = mirrorLocks.get(dir) ?? Promise.resolve();
   const run = prev.then(fn, fn);
   const settled = run.catch(() => undefined);
@@ -330,7 +335,10 @@ async function assertClean(
   );
 }
 
-async function ensureMirror(deps: PushDeps, mirror: string): Promise<void> {
+export async function ensureMirror(
+  deps: Pick<PushDeps, 'git' | 'mirrorRoot' | 'baseEnv'>,
+  mirror: string,
+): Promise<void> {
   if (existsSync(join(mirror, 'HEAD'))) return;
   mkdirSync(mirror, { recursive: true });
   const init = await deps.git(['init', '--bare', '--quiet', mirror], {
@@ -344,7 +352,7 @@ async function ensureMirror(deps: PushDeps, mirror: string): Promise<void> {
   }
 }
 
-type Git = (args: string[], call: GitCall) => Promise<GitRun>;
+export type Git = (args: string[], call: GitCall) => Promise<GitRun>;
 
 /** 默认的包大小上限。单个文件过 100 MiB GitHub 本来就拒收；一次交付的包比这还大，已经不是 AI 会话的正常交付。 */
 export const MAX_BUNDLE_BYTES = 100 * 1024 * 1024;
@@ -354,7 +362,7 @@ export const MAX_BUNDLE_BYTES = 100 * 1024 * 1024;
  * （导入的时候会话再换包，也换不到引擎读的那份）。`bundle unbundle` 只写对象、不建引用、不执行包里的任何东西。
  * 导入失败一律当坏包、不可重试：拿同一个包重试只会再坏一次（原因不是网络，别让重试次数白白用完）；缺前置提交单说。
  */
-async function importBundle(
+export async function importBundle(
   git: Git,
   call: GitCall,
   mirror: string,
@@ -471,7 +479,7 @@ function mirrorFailed(path: string, err: unknown): GitHubError {
   );
 }
 
-async function lsRemote(
+export async function lsRemote(
   git: Git,
   call: GitCall,
   url: string,
@@ -487,14 +495,14 @@ async function lsRemote(
   return out;
 }
 
-async function revParse(git: Git, call: GitCall, ref: string): Promise<string> {
+export async function revParse(git: Git, call: GitCall, ref: string): Promise<string> {
   const res = await git(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], call);
   const sha = res.stdout.trim();
   if (res.code !== 0 || !SHA.test(sha)) throw fromGitFailure(`解析 ${ref}`, '', res);
   return sha;
 }
 
-async function isAncestor(git: Git, call: GitCall, ancestor: string, of: string): Promise<boolean> {
+export async function isAncestor(git: Git, call: GitCall, ancestor: string, of: string): Promise<boolean> {
   const res = await git(['merge-base', '--is-ancestor', ancestor, of], call);
   if (res.code === 0) return true;
   if (res.code === 1) return false;
@@ -524,7 +532,7 @@ async function assertFastForward(
   );
 }
 
-function fromGitFailure(what: string, where: string, res: GitRun): GitHubError {
+export function fromGitFailure(what: string, where: string, res: GitRun): GitHubError {
   const kind = classifyPushFailure(res.stderr);
   const text = `${what}${where ? `（${where}）` : ''}失败：${tail(res.stderr)}`;
   if (kind === 'auth') return new GitHubError('PUSH_FORBIDDEN', text, { details: { exitCode: res.code } });
@@ -532,7 +540,7 @@ function fromGitFailure(what: string, where: string, res: GitRun): GitHubError {
   return new GitHubError('GIT_FAILED', text, { retryable: true, details: { exitCode: res.code, kind } });
 }
 
-function fromPushFailure(
+export function fromPushFailure(
   kind: ReturnType<typeof classifyPushFailure>,
   slug: string,
   branch: string,

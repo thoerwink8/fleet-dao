@@ -4,7 +4,16 @@
 import { join } from 'node:path';
 import type { LoadedValues } from '@fleet-dao/hygiene';
 import { z } from 'zod';
+import {
+  type BundleCommitsInput,
+  type BundleCommitsResult,
+  bundleCommits,
+  type FetchMainlineInput,
+  type FetchMainlineResult,
+  fetchMainline,
+} from './bundle.ts';
 import { GitHubClient, type Logger, type RepoRef, repoSlug, type Sleep, unexpected } from './client.ts';
+import { type WriteSpecDocInput, type WriteSpecDocResult, writeSpecDoc } from './contents.ts';
 import { type AppCredentials, type AppRole, appFilesFromEnv, loadApps, ROLE_NAMES } from './credentials.ts';
 import {
   type ActivityContext,
@@ -44,6 +53,7 @@ import {
 import { MAX_BUNDLE_BYTES, type PushBranchInput, type PushBranchResult, pushBranch } from './push.ts';
 import { createReconciler, type Reconciler, type ReconcilerOptions } from './reconcile.ts';
 import { RepoFactsCache } from './repos.ts';
+import { type SyncMainlineInput, type SyncMainlineResult, syncMainline } from './sync.ts';
 
 export interface GitHubOptions {
   /** 防重复写的账、PR 镜像：生产用 pgLedger(db)。 */
@@ -102,6 +112,12 @@ export interface GitHub {
   client: GitHubClient;
   deps: Deps;
   pushBranch(input: PushBranchInput, ctx?: ActivityContext): Promise<PushBranchResult>;
+  /** 把最新主线并进 PR 分支、推上去（干净或本来就最新都算 clean；冲突、分支头对不上分别回 conflict / head_moved）。 */
+  syncMainline(input: SyncMainlineInput, ctx?: ActivityContext): Promise<SyncMainlineResult>;
+  /** 抓远端默认分支最新头进引擎的镜像（建工作树、并主线后快进都要先有这一步）。 */
+  fetchMainline(input: FetchMainlineInput, ctx?: ActivityContext): Promise<FetchMainlineResult>;
+  /** 从镜像打包给会话用户（`git fetch <bundle> <ref>` 用得到；会话读不到镜像本身）。 */
+  bundleCommits(input: BundleCommitsInput, ctx?: ActivityContext): Promise<BundleCommitsResult>;
   openPr(input: OpenPrInput, ctx?: ActivityContext): Promise<OpenPrResult>;
   waitCi(input: WaitCiInput, ctx?: ActivityContext): Promise<CiWaitResult>;
   mergePr(input: MergePrInput, ctx?: ActivityContext): Promise<MergePrResult>;
@@ -111,6 +127,8 @@ export interface GitHub {
   ): Promise<UpdateIssueProgressResult>;
   closeIssue(input: CloseIssueInput, ctx?: ActivityContext): Promise<CloseIssueResult>;
   renewInteractionLimit(input: InteractionLimitInput, ctx?: ActivityContext): Promise<InteractionLimitResult>;
+  /** 需求文档直接写进默认分支（「引擎」机器人身份，Contents API）。 */
+  writeSpecDoc(input: WriteSpecDocInput, ctx?: ActivityContext): Promise<WriteSpecDocResult>;
   /** 会话提交用的身份（「干活的」机器人）：引擎建工作树时写进 user.name / user.email。 */
   commitIdentity(repo: RepoRef): Promise<BotIdentity>;
   /** 两个机器人在这些仓上的权限够不够。读不到算没查成（ok=false、why 写原因），不算「没有差异」。 */
@@ -148,6 +166,7 @@ export function createGitHub(options: GitHubOptions): GitHub {
   const pushDeps = {
     client,
     facts: deps.facts,
+    bots: deps.bots,
     git: options.git ?? execGit,
     gitUrl: options.gitUrl ?? ((r: RepoRef) => `${gitHost.replace(/\/+$/, '')}/${r.owner}/${r.name}.git`),
     gitHost,
@@ -163,6 +182,18 @@ export function createGitHub(options: GitHubOptions): GitHub {
     deps,
     async pushBranch(input, ctx = {}) {
       return pushBranch(pushDeps, { ...input, signal: input.signal ?? ctx.signal });
+    },
+    async syncMainline(input, ctx = {}) {
+      return syncMainline(pushDeps, { ...input, signal: input.signal ?? ctx.signal });
+    },
+    async fetchMainline(input, ctx = {}) {
+      return fetchMainline(pushDeps, { ...input, signal: input.signal ?? ctx.signal });
+    },
+    async bundleCommits(input, ctx = {}) {
+      return bundleCommits(pushDeps, { ...input, signal: input.signal ?? ctx.signal });
+    },
+    async writeSpecDoc(input, ctx = {}) {
+      return writeSpecDoc(deps, { ...input, signal: input.signal ?? ctx.signal });
     },
     openPr: (input, ctx) => openPr(deps, input, ctx),
     waitCi: (input, ctx) => waitCi(deps, input, ctx),

@@ -128,6 +128,87 @@ describe('开 PR', () => {
       },
     );
   });
+
+  describe('inheritFrom：照抄需求 issue 的类别标签与里程碑', () => {
+    it('issue 有「需求」与里程碑：开出的 PR 也照抄上；重试不重复加', async () => {
+      const { gh, fake } = setup();
+      const issue = fake.addIssue({ labels: ['需求', '别的标签'], milestone: { number: 7, title: 'P1' } });
+      fake.refs.set('task/20-inherit', A);
+      const input = {
+        repo,
+        branch: 'task/20-inherit',
+        head: A,
+        title: 'x',
+        body: { did: ['x'], verified: ['x'] },
+        inheritFrom: { issueNumber: issue.number },
+      };
+      const res = await gh.openPr(input);
+      expect(res.inherited).toEqual({ labels: ['需求'], milestone: 'P1' });
+      const pr = fake.pulls.get(res.number);
+      expect(pr?.labels).toEqual(['需求']);
+      expect(pr?.milestone).toEqual({ number: 7, title: 'P1' });
+
+      // 重试（activity 重试会带同样的入参再调一次）：不重复加标签，milestone 也不会被覆盖
+      const again = await gh.openPr(input);
+      expect(again.inherited).toEqual({ labels: ['需求'], milestone: 'P1' });
+      expect(fake.pulls.get(res.number)?.labels).toEqual(['需求']);
+      expect(fake.calls('POST', /\/labels$/)).toHaveLength(1);
+      expect(fake.calls('PATCH', new RegExp(`/issues/${res.number}$`))).toHaveLength(1);
+    });
+
+    it('issue 没有类别标签、没有里程碑：PR 也不挂，inherited 为空', async () => {
+      const { gh, fake } = setup();
+      const issue = fake.addIssue({});
+      fake.refs.set('task/21-empty', A);
+      const res = await gh.openPr({
+        repo,
+        branch: 'task/21-empty',
+        head: A,
+        title: 'x',
+        body: { did: ['x'], verified: ['x'] },
+        inheritFrom: { issueNumber: issue.number },
+      });
+      expect(res.inherited).toEqual({ labels: [], milestone: null });
+      const pr = fake.pulls.get(res.number);
+      expect(pr?.labels).toEqual([]);
+      expect(pr?.milestone).toBeNull();
+    });
+
+    it('读 issue 403：明确报错，不当成「issue 没标签」', async () => {
+      const { gh, fake } = setup();
+      const issue = fake.addIssue({ labels: ['需求'] });
+      fake.refs.set('task/22-forbidden', A);
+      fake.before.push((req) =>
+        req.path.endsWith(`/issues/${issue.number}`)
+          ? json(403, { message: 'Resource not accessible by integration' })
+          : undefined,
+      );
+      await expect(
+        gh.openPr({
+          repo,
+          branch: 'task/22-forbidden',
+          head: A,
+          title: 'x',
+          body: { did: ['x'], verified: ['x'] },
+          inheritFrom: { issueNumber: issue.number },
+        }),
+      ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    });
+
+    it('不给 inheritFrom：不读 issue，结果里没有 inherited', async () => {
+      const { gh, fake } = setup();
+      fake.refs.set('task/23-no-inherit', A);
+      const res = await gh.openPr({
+        repo,
+        branch: 'task/23-no-inherit',
+        head: A,
+        title: 'x',
+        body: { did: ['x'], verified: ['x'] },
+      });
+      expect(res.inherited).toBeUndefined();
+      expect(fake.calls('GET', /\/issues\//)).toHaveLength(0);
+    });
+  });
 });
 
 describe('等 CI', () => {
