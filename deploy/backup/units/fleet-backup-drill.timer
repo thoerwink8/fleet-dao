@@ -1,0 +1,10 @@
+# deploy/backup/install.sh 装的。排在每晚备份（04:10）之后，练的是当天那份。
+[Unit]
+Description=每周日 05:40（北京时间）做一次 fleet-dao 的恢复演练
+
+[Timer]
+OnCalendar=Sun *-*-* 05:40:00 Asia/Shanghai
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,11 @@
+# deploy/backup/install.sh 装的。时区写在 OnCalendar 里，不靠机器时区。
+[Unit]
+Description=每晚 04:10（北京时间）备份 fleet-dao 的库到香港
+
+[Timer]
+OnCalendar=*-*-* 04:10:00 Asia/Shanghai
+# 机器关着错过了，开机后补跑一次
+Persistent=true
+
+[Install]
+WantedBy=timers.target
