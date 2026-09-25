@@ -1,0 +1,10 @@
+name: 需求
+description: 一句话说你要什么；没说清的，AI 会在这张 issue 里追问
+labels: ["需求"]
+body:
+  - type: textarea
+    id: want
+    attributes:
+      label: 你要什么（一句话就行）
+    validations:
+      required: true

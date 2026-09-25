@@ -68,6 +68,10 @@ const PROBE_TIMEOUT_MS = 5_000;
  * 中间再来的都并进这一个。
  */
 const RESYNC_SETTLE_MS = 1_000;
+/**
+ * 一次探活里，因为「等的时候 LISTEN 连回来过」最多重发几次 ping。连接一直断了又连的时候不能永远不判。
+ */
+const MAX_PING_RESENDS = 3;
 
 /**
  * LISTEN fleet_changes，再定时探活。
@@ -90,6 +94,8 @@ export function startPgChangeFeed(
   const handles: { unlisten: () => Promise<void> }[] = [];
   const pending = new Map<number, () => void>();
   let listenedOnce = false;
+  /** LISTEN（两个频道任一个）每接上一次就加一，包括重连。探活据此认出「这条 ping 发出去时还没人在听」。 */
+  let listens = 0;
   let missed = false;
   let healthy = false;
   let lastError: string | undefined = 'LISTEN fleet_changes 还没接上';
@@ -128,6 +134,7 @@ export function startPgChangeFeed(
     else log.warn('看不懂的 fleet_changes 载荷，丢弃', { payload: payload.slice(0, 200) });
   };
   const onListen = () => {
+    listens += 1;
     // 第一次之后每一次都是重连：断线期间的通知已经丢了。
     if (listenedOnce) missed = true;
     listenedOnce = true;
@@ -152,13 +159,15 @@ export function startPgChangeFeed(
   };
   void Promise.all([
     listenOnce(FLEET_CHANGES_CHANNEL, onNotify, onListen),
-    listenOnce(PROBE_CHANNEL, onPing, () => {}),
+    listenOnce(PROBE_CHANNEL, onPing, () => {
+      listens += 1;
+    }),
   ]);
 
-  async function probe(timeoutMs = defaultTimeoutMs): Promise<void> {
-    if (stopped) throw new PublicHealthError('not_listening', '实时推送已经停了');
+  /** 发一条 ping，等它 timeoutMs。发不出去（连不上库）直接报红抛错。 */
+  async function pingOnce(timeoutMs: number): Promise<'received' | 'late'> {
     const n = ++seq;
-    const received = new Promise<void>((resolve) => pending.set(n, resolve));
+    const received = new Promise<'received'>((resolve) => pending.set(n, () => resolve('received')));
     let deadline: ReturnType<typeof setTimeout> | undefined;
     try {
       try {
@@ -170,13 +179,23 @@ export function startPgChangeFeed(
       const late = new Promise<'late'>((resolve) => {
         deadline = setTimeout(() => resolve('late'), timeoutMs);
       });
-      if ((await Promise.race([received, late])) === 'late') {
-        down(`自己发的探活 ping ${timeoutMs} 毫秒内没收回来`);
-        throw new PublicHealthError('not_listening', '实时推送没在收数据库通知（探活 ping 收不回来）');
-      }
+      return await Promise.race([received, late]);
     } finally {
       clearTimeout(deadline);
       pending.delete(n);
+    }
+  }
+
+  async function probe(timeoutMs = defaultTimeoutMs): Promise<void> {
+    if (stopped) throw new PublicHealthError('not_listening', '实时推送已经停了');
+    for (let resends = 0; ; resends++) {
+      const listensBefore = listens;
+      if ((await pingOnce(timeoutMs)) === 'received') break;
+      // 等的时候 LISTEN 连回来过（postgres.js 按退避晚几秒才连回来）：这条 ping 发出去时还没人在听，注定收不到。
+      // 重发一条，不判红——判了红会把这一轮恢复刚排上的 resync 清掉，还要红到下一次定时探活。
+      if (listens !== listensBefore && resends < MAX_PING_RESENDS) continue;
+      down(`自己发的探活 ping ${timeoutMs} 毫秒内没收回来`);
+      throw new PublicHealthError('not_listening', '实时推送没在收数据库通知（探活 ping 收不回来）');
     }
     if (!listenedOnce) {
       down('LISTEN fleet_changes 还没接上');

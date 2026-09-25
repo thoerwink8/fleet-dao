@@ -1,0 +1,698 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+/*
+ * 主题 = 主题色 × 深浅。<html data-palette="…" data-mode="light|dark">，切换只改这两个属性。
+ * 每套主题色只给 16 个基色（底、侧栏、卡片、浮层、字、品牌色 + 7 个状态色），其余由下面的
+ * [data-palette] 规则用 color-mix 就地派生——设置页的预览卡片也挂这两个属性，所以能在同一页里同时显示多套。
+ * 颜色约定：界面框架只用品牌色和黑白灰；七个状态色只用来表达状态，不做装饰。
+ */
+
+@custom-variant dark (&:where([data-mode="dark"], [data-mode="dark"] *));
+
+@theme inline {
+  --font-sans:
+    "Inter Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei",
+    "Noto Sans SC", "Source Han Sans SC", system-ui, sans-serif;
+  --font-mono:
+    "JetBrains Mono Variable", ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, "PingFang SC",
+    "Microsoft YaHei", monospace;
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-faint: var(--faint);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-panel: var(--panel);
+  --color-canvas: var(--canvas);
+  --color-brand: var(--brand);
+  --color-brand-foreground: var(--brand-foreground);
+
+  --color-st-run: var(--st-run);
+  --color-st-wait: var(--st-wait);
+  --color-st-human: var(--st-human);
+  --color-st-stall: var(--st-stall);
+  --color-st-fail: var(--st-fail);
+  --color-st-done: var(--st-done);
+  --color-st-stop: var(--st-stop);
+  /* 状态色的字：text-ink-*（色块、边框、圆点仍用 st-*）。 */
+  --color-ink-run: var(--st-run-ink);
+  --color-ink-wait: var(--st-wait-ink);
+  --color-ink-human: var(--st-human-ink);
+  --color-ink-stall: var(--st-stall-ink);
+  --color-ink-fail: var(--st-fail-ink);
+  --color-ink-done: var(--st-done-ink);
+  --color-ink-stop: var(--st-stop-ink);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+/* ---------- 派生色：所有主题共用一套算法 ---------- */
+[data-palette] {
+  color-scheme: light;
+  --radius: 0.625rem;
+  --background: var(--bg);
+  --foreground: var(--fg);
+  --card: var(--surface);
+  --card-foreground: var(--fg);
+  --popover: var(--elev);
+  --popover-foreground: var(--fg);
+  --primary: var(--fg);
+  --primary-foreground: var(--bg);
+  --secondary: color-mix(in oklab, var(--fg) 7%, var(--surface));
+  --secondary-foreground: var(--fg);
+  --muted: color-mix(in oklab, var(--fg) 5%, var(--surface));
+  --muted-foreground: color-mix(in oklab, var(--fg) 64%, var(--bg));
+  --faint: color-mix(in oklab, var(--fg) 44%, var(--bg));
+  --accent: color-mix(in oklab, var(--fg) 7%, transparent);
+  --accent-foreground: var(--fg);
+  --destructive: var(--st-fail);
+  --border: color-mix(in oklab, var(--fg) 11%, transparent);
+  --border-strong: color-mix(in oklab, var(--fg) 20%, transparent);
+  --input: color-mix(in oklab, var(--fg) 15%, transparent);
+  --ring: color-mix(in oklab, var(--brand) 55%, transparent);
+  --canvas: var(--bg);
+  --grid: color-mix(in oklab, var(--fg) 13%, transparent);
+  --shadow-color: color-mix(in oklab, #000 14%, transparent);
+  /*
+   * 状态色当字用时的「墨色」：往前景色里混一点，保证 11px 小字在卡片、页面底、浮层、侧栏、muted，
+   * 以及叠在它们上面的同色淡底（最深 15%）上都 ≥ 4.5:1。
+   * 每套主题需要混多少（--ink-*）写在各自的块里，默认不混；色块、圆点、进度条仍用原来的状态色。
+   * 对比度由 src/lib/contrast.test.ts 逐套逐色验，新加主题不够就红。
+   */
+  --ink-run: 100%;
+  --ink-wait: 100%;
+  --ink-human: 100%;
+  --ink-stall: 100%;
+  --ink-fail: 100%;
+  --ink-done: 100%;
+  --ink-stop: 100%;
+  --st-run-ink: color-mix(in oklab, var(--st-run) var(--ink-run), var(--fg));
+  --st-wait-ink: color-mix(in oklab, var(--st-wait) var(--ink-wait), var(--fg));
+  --st-human-ink: color-mix(in oklab, var(--st-human) var(--ink-human), var(--fg));
+  --st-stall-ink: color-mix(in oklab, var(--st-stall) var(--ink-stall), var(--fg));
+  --st-fail-ink: color-mix(in oklab, var(--st-fail) var(--ink-fail), var(--fg));
+  --st-done-ink: color-mix(in oklab, var(--st-done) var(--ink-done), var(--fg));
+  --st-stop-ink: color-mix(in oklab, var(--st-stop) var(--ink-stop), var(--fg));
+  color: var(--foreground);
+}
+[data-mode="dark"] {
+  color-scheme: dark;
+  --shadow-color: color-mix(in oklab, #000 45%, transparent);
+  --grid: color-mix(in oklab, var(--fg) 11%, transparent);
+}
+
+/* ---------- 石墨：默认。框架只用黑白灰，颜色全部留给状态 ---------- */
+[data-palette="graphite"][data-mode="dark"] {
+  --bg: #0c0d0f;
+  --panel: #0f1013;
+  --surface: #15161a;
+  --elev: #1c1d22;
+  --fg: #ececef;
+  --brand: #ececef;
+  --brand-foreground: #0c0d0f;
+  --st-run: #4c9aff;
+  --st-wait: #8a91a0;
+  --st-human: #a78bfa;
+  --st-stall: #f2b24c;
+  --st-fail: #ff6369;
+  --st-done: #3fcf8e;
+  --st-stop: #6e6f78;
+  --ink-run: 98%;
+  --ink-wait: 90%;
+  --ink-fail: 98%;
+  --ink-stop: 69%;
+}
+[data-palette="graphite"][data-mode="light"] {
+  --bg: #f4f4f5;
+  --panel: #fafafa;
+  --surface: #ffffff;
+  --elev: #ffffff;
+  --fg: #18181b;
+  --brand: #18181b;
+  --brand-foreground: #fafafa;
+  --st-run: #1d6ff2;
+  --st-wait: #6b7280;
+  --st-human: #7c3aed;
+  --st-stall: #c27803;
+  --st-fail: #dc2f36;
+  --st-done: #13925a;
+  --st-stop: #a1a1aa;
+  --ink-run: 80%;
+  --ink-wait: 84%;
+  --ink-human: 92%;
+  --ink-stall: 70%;
+  --ink-fail: 80%;
+  --ink-done: 74%;
+  --ink-stop: 60%;
+}
+
+/* ---------- 青瓷：温润的青绿釉色 ---------- */
+[data-palette="celadon"][data-mode="light"] {
+  --bg: #edf2ef;
+  --panel: #f4f8f6;
+  --surface: #fbfdfc;
+  --elev: #ffffff;
+  --fg: #15241f;
+  --brand: #2f8a70;
+  --brand-foreground: #f4fbf8;
+  --st-run: #2767d6;
+  --st-wait: #6b7d76;
+  --st-human: #7b4fd0;
+  --st-stall: #b87712;
+  --st-fail: #c8413b;
+  --st-done: #22894a;
+  --st-stop: #9aaba4;
+  --ink-run: 85%;
+  --ink-wait: 75%;
+  --ink-human: 87%;
+  --ink-stall: 67%;
+  --ink-fail: 80%;
+  --ink-done: 75%;
+  --ink-stop: 54%;
+}
+[data-palette="celadon"][data-mode="dark"] {
+  --bg: #0b1311;
+  --panel: #0f1816;
+  --surface: #131f1c;
+  --elev: #1a2824;
+  --fg: #e2ede8;
+  --brand: #6fc9ad;
+  --brand-foreground: #07130f;
+  --st-run: #5ea3ff;
+  --st-wait: #7d938b;
+  --st-human: #b597ff;
+  --st-stall: #eab45c;
+  --st-fail: #ff7b72;
+  --st-done: #56d08a;
+  --st-stop: #5c6d67;
+  --ink-run: 98%;
+  --ink-wait: 80%;
+  --ink-stop: 61%;
+}
+
+/* ---------- 北境 Nord：极地蓝灰与霜色 ---------- */
+[data-palette="nord"][data-mode="dark"] {
+  --bg: #2e3440;
+  --panel: #292e39;
+  --surface: #353c4a;
+  --elev: #3f4758;
+  --fg: #eceff4;
+  --brand: #88c0d0;
+  --brand-foreground: #1d232b;
+  --st-run: #81a1c1;
+  --st-wait: #8591a8;
+  --st-human: #b48ead;
+  --st-stall: #ebcb8b;
+  --st-fail: #d0747c;
+  --st-done: #a3be8c;
+  --st-stop: #616e88;
+  --ink-run: 46%;
+  --ink-wait: 42%;
+  --ink-human: 45%;
+  --ink-stall: 87%;
+  --ink-fail: 44%;
+  --ink-done: 57%;
+  --ink-stop: 36%;
+}
+[data-palette="nord"][data-mode="light"] {
+  --bg: #e5e9f0;
+  --panel: #eceff4;
+  --surface: #f8f9fb;
+  --elev: #ffffff;
+  --fg: #2e3440;
+  --brand: #5e81ac;
+  --brand-foreground: #f5f7fa;
+  --st-run: #4c78a8;
+  --st-wait: #6b7689;
+  --st-human: #93678c;
+  --st-stall: #b38622;
+  --st-fail: #b04a55;
+  --st-done: #6a8c4f;
+  --st-stop: #9aa3b5;
+  --ink-run: 65%;
+  --ink-wait: 65%;
+  --ink-human: 65%;
+  --ink-stall: 50%;
+  --ink-fail: 72%;
+  --ink-done: 56%;
+  --ink-stop: 43%;
+}
+
+/* ---------- 东京夜 Tokyo Night：霓虹夜色 ---------- */
+[data-palette="tokyo"][data-mode="dark"] {
+  --bg: #1a1b26;
+  --panel: #16161e;
+  --surface: #1f2335;
+  --elev: #262b40;
+  --fg: #c8d1f7;
+  --brand: #7aa2f7;
+  --brand-foreground: #10121c;
+  --st-run: #7dcfff;
+  --st-wait: #7780a8;
+  --st-human: #bb9af7;
+  --st-stall: #e0af68;
+  --st-fail: #f7768e;
+  --st-done: #9ece6a;
+  --st-stop: #545c7e;
+  --ink-wait: 57%;
+  --ink-human: 99%;
+  --ink-fail: 85%;
+  --ink-stop: 44%;
+}
+[data-palette="tokyo"][data-mode="light"] {
+  --bg: #e1e2e7;
+  --panel: #e9e9ed;
+  --surface: #f4f4f7;
+  --elev: #ffffff;
+  --fg: #343b58;
+  --brand: #2e7de9;
+  --brand-foreground: #f4f6fd;
+  --st-run: #007197;
+  --st-wait: #6172b0;
+  --st-human: #9854f1;
+  --st-stall: #8f5e15;
+  --st-fail: #e5215b;
+  --st-done: #587539;
+  --st-stop: #a1a6c5;
+  --ink-run: 62%;
+  --ink-wait: 53%;
+  --ink-human: 48%;
+  --ink-stall: 64%;
+  --ink-fail: 45%;
+  --ink-done: 60%;
+  --ink-stop: 34%;
+}
+
+/* ---------- 德古拉 Dracula：高饱和紫粉 ---------- */
+[data-palette="dracula"][data-mode="dark"] {
+  --bg: #282a36;
+  --panel: #21222c;
+  --surface: #2f3141;
+  --elev: #383a4c;
+  --fg: #f8f8f2;
+  --brand: #bd93f9;
+  --brand-foreground: #1b1426;
+  --st-run: #8be9fd;
+  --st-wait: #7c86b3;
+  --st-human: #ff79c6;
+  --st-stall: #ffb86c;
+  --st-fail: #ff5555;
+  --st-done: #50fa7b;
+  --st-stop: #6b6f86;
+  --ink-wait: 57%;
+  --ink-human: 75%;
+  --ink-fail: 63%;
+  --ink-stop: 50%;
+}
+[data-palette="dracula"][data-mode="light"] {
+  --bg: #f5f1e1;
+  --panel: #faf7ea;
+  --surface: #fffdf5;
+  --elev: #ffffff;
+  --fg: #1f1f1f;
+  --brand: #644ac9;
+  --brand-foreground: #fffbeb;
+  --st-run: #036a96;
+  --st-wait: #635d97;
+  --st-human: #a3144d;
+  --st-stall: #a34d14;
+  --st-fail: #cb3a2a;
+  --st-done: #14710a;
+  --st-stop: #a8a497;
+  --ink-run: 94%;
+  --ink-wait: 94%;
+  --ink-stall: 92%;
+  --ink-fail: 81%;
+  --ink-done: 97%;
+  --ink-stop: 56%;
+}
+
+/* ---------- 原子 One：Atom 编辑器的经典配色 ---------- */
+[data-palette="one"][data-mode="dark"] {
+  --bg: #282c34;
+  --panel: #21252b;
+  --surface: #2c313a;
+  --elev: #353b45;
+  --fg: #d7dae0;
+  --brand: #61afef;
+  --brand-foreground: #0d1620;
+  --st-run: #56b6c2;
+  --st-wait: #7f848e;
+  --st-human: #c678dd;
+  --st-stall: #e5c07b;
+  --st-fail: #e06c75;
+  --st-done: #98c379;
+  --st-stop: #5c6370;
+  --ink-run: 62%;
+  --ink-wait: 43%;
+  --ink-human: 52%;
+  --ink-fail: 50%;
+  --ink-done: 78%;
+  --ink-stop: 36%;
+}
+[data-palette="one"][data-mode="light"] {
+  --bg: #f0f0f1;
+  --panel: #f7f7f8;
+  --surface: #fcfcfc;
+  --elev: #ffffff;
+  --fg: #383a42;
+  --brand: #4078f2;
+  --brand-foreground: #f6f8fe;
+  --st-run: #0184bc;
+  --st-wait: #8e8f96;
+  --st-human: #a626a4;
+  --st-stall: #b07800;
+  --st-fail: #e45649;
+  --st-done: #50a14f;
+  --st-stop: #b0b1b6;
+  --ink-run: 60%;
+  --ink-wait: 50%;
+  --ink-human: 89%;
+  --ink-stall: 56%;
+  --ink-fail: 53%;
+  --ink-done: 50%;
+  --ink-stop: 40%;
+}
+
+/* ---------- 日晒 Solarized：精确计算的低对比配色 ---------- */
+[data-palette="solarized"][data-mode="light"] {
+  --bg: #fdf6e3;
+  --panel: #f5eed9;
+  --surface: #fffbf0;
+  --elev: #fffcf4;
+  --fg: #073642;
+  --brand: #268bd2;
+  --brand-foreground: #fdf6e3;
+  --st-run: #2aa198;
+  --st-wait: #7f9194;
+  --st-human: #6c71c4;
+  --st-stall: #b58900;
+  --st-fail: #dc322f;
+  --st-done: #859900;
+  --st-stop: #a3aba6;
+  --ink-run: 55%;
+  --ink-wait: 57%;
+  --ink-human: 69%;
+  --ink-stall: 55%;
+  --ink-fail: 69%;
+  --ink-done: 55%;
+  --ink-stop: 47%;
+}
+[data-palette="solarized"][data-mode="dark"] {
+  --bg: #002b36;
+  --panel: #01252f;
+  --surface: #073642;
+  --elev: #0b3f4c;
+  --fg: #e4ddc8;
+  --brand: #3d9ee0;
+  --brand-foreground: #00151b;
+  --st-run: #2aa198;
+  --st-wait: #839496;
+  --st-human: #8b8fe0;
+  --st-stall: #d2a21a;
+  --st-fail: #f0524f;
+  --st-done: #9fb81a;
+  --st-stop: #586e75;
+  --ink-run: 52%;
+  --ink-wait: 53%;
+  --ink-human: 56%;
+  --ink-stall: 75%;
+  --ink-fail: 59%;
+  --ink-done: 76%;
+  --ink-stop: 41%;
+}
+
+/* ---------- 炉火 Darcula：炭灰底上的一点橙 ---------- */
+[data-palette="darcula"][data-mode="dark"] {
+  --bg: #2b2b2b;
+  --panel: #313335;
+  --surface: #353739;
+  --elev: #3c3f41;
+  --fg: #d0d4d9;
+  --brand: #cc7832;
+  --brand-foreground: #221202;
+  --st-run: #6897bb;
+  --st-wait: #8c8c8c;
+  --st-human: #a887bd;
+  --st-stall: #c9c238;
+  --st-fail: #ff6b68;
+  --st-done: #7ea56a;
+  --st-stop: #606366;
+  --ink-run: 36%;
+  --ink-wait: 34%;
+  --ink-human: 37%;
+  --ink-stall: 70%;
+  --ink-fail: 44%;
+  --ink-done: 39%;
+  --ink-stop: 29%;
+}
+[data-palette="darcula"][data-mode="light"] {
+  --bg: #f2f2f2;
+  --panel: #f7f8fa;
+  --surface: #ffffff;
+  --elev: #ffffff;
+  --fg: #1e1f22;
+  --brand: #c35b12;
+  --brand-foreground: #fff7ef;
+  --st-run: #3574f0;
+  --st-wait: #818594;
+  --st-human: #871094;
+  --st-stall: #9e7a00;
+  --st-fail: #db3b4b;
+  --st-done: #208a3c;
+  --st-stop: #a8adbd;
+  --ink-run: 75%;
+  --ink-wait: 69%;
+  --ink-stall: 72%;
+  --ink-fail: 75%;
+  --ink-done: 76%;
+  --ink-stop: 54%;
+}
+
+/* ---------- 基础 ---------- */
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html,
+  body {
+    height: 100%;
+  }
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    font-feature-settings: "cv11", "ss01";
+    text-rendering: optimizeLegibility;
+  }
+  ::selection {
+    background: color-mix(in oklab, var(--brand) 28%, transparent);
+  }
+}
+
+/*
+ * 切换主题的那一帧关掉过渡，免得几百个元素一起慢慢变色。
+ * 不用 !important：Tailwind 的工具类都在 @layer 里，这里的未分层规则天然压过它们。
+ */
+:root[data-theme-swap],
+:root[data-theme-swap] *,
+:root[data-theme-swap] *::before,
+:root[data-theme-swap] *::after {
+  transition: none;
+}
+
+/* 数字、编号、耗时、模型名、额度：一律等宽。 */
+@utility num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums slashed-zero;
+  letter-spacing: -0.01em;
+}
+
+/* 细滚动条 */
+@utility scrollbar-thin {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+/* ---------- 动效：在跑的东西会呼吸 ----------
+ * 看板上同时在跑的卡片、圆点可能有几百个：动效只改 opacity / transform（交给合成器，不逐帧重绘），
+ * 不动 box-shadow——之前呼吸光圈直接改阴影，一两百张卡一起重绘，中景掉到二三十帧。
+ */
+@keyframes fd-breathe {
+  0%,
+  100% {
+    opacity: 0;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+@keyframes fd-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(260%);
+  }
+}
+@keyframes fd-pulse-dot {
+  0% {
+    transform: scale(1);
+    opacity: 0.55;
+  }
+  70%,
+  100% {
+    transform: scale(3.2);
+    opacity: 0;
+  }
+}
+@keyframes fd-rise {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* 放在 components 层：工具类（absolute 之类）要能覆盖这里的 position。 */
+@layer components {
+  /* 卡片内侧一圈状态色的光，透明度一呼一吸。卡片本身是 relative + overflow-hidden，光画在里面。 */
+  .fd-live::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    pointer-events: none;
+    box-shadow:
+      inset 0 0 0 1px color-mix(in oklab, var(--st-run) 80%, transparent),
+      inset 0 0 22px 2px color-mix(in oklab, var(--st-run) 26%, transparent);
+    opacity: 0;
+    will-change: opacity;
+    animation: fd-breathe 2.4s ease-in-out infinite;
+  }
+  .fd-sweep {
+    position: relative;
+    overflow: hidden;
+  }
+  .fd-sweep::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    width: 40%;
+    background: linear-gradient(90deg, transparent, color-mix(in oklab, #fff 45%, transparent), transparent);
+    animation: fd-sweep 1.8s ease-in-out infinite;
+  }
+  [data-mode="dark"] .fd-sweep::after {
+    background: linear-gradient(90deg, transparent, color-mix(in oklab, #fff 28%, transparent), transparent);
+  }
+  /* 在跑的小圆点往外扩一圈：扩的是一个同色的伪元素（缩放 + 淡出），不改阴影。 */
+  .fd-dot-live {
+    position: relative;
+  }
+  .fd-dot-live::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: currentColor;
+    pointer-events: none;
+    animation: fd-pulse-dot 1.8s ease-out infinite;
+  }
+  .fd-rise {
+    animation: fd-rise 0.28s ease-out both;
+  }
+}
+
+/* ---------- 看板画布（React Flow）跟随主题 ---------- */
+.react-flow {
+  --xy-background-color: var(--canvas);
+  --xy-edge-stroke: var(--border-strong);
+  --xy-edge-stroke-width: 1.5;
+  --xy-edge-stroke-selected: var(--fg);
+  --xy-minimap-background-color: color-mix(in oklab, var(--surface) 92%, transparent);
+  --xy-minimap-mask-background-color: color-mix(in oklab, var(--bg) 62%, transparent);
+  --xy-minimap-mask-stroke-color: var(--border-strong);
+  --xy-minimap-mask-stroke-width: 1;
+  --xy-attribution-background-color: transparent;
+  --xy-node-border-radius: 12px;
+}
+.react-flow__node {
+  cursor: pointer;
+}
+.react-flow__node:focus-visible {
+  outline: none;
+}
+.react-flow__minimap {
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  overflow: hidden;
+  box-shadow: 0 8px 24px -12px var(--shadow-color);
+}
+.react-flow__attribution {
+  background: transparent;
+  font-size: 10px;
+  opacity: 0.45;
+}
+.react-flow__attribution a {
+  color: var(--muted-foreground);
+}
+/* 重新排版时卡片滑到新位置，而不是瞬移。 */
+.fd-board-ready .react-flow__node {
+  transition: transform 0.38s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.react-flow__edge-path {
+  transition:
+    stroke 0.2s ease,
+    opacity 0.2s ease;
+}
+.react-flow__handle {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/*
+ * 减少动效：设置页的开关（data-motion="reduced"）或系统设置，任一个开着都停。
+ * 看板上的连线流动、重新排版时卡片滑动也算动效，一起停（连线在代码里也不再标 animated，这里兜底）。
+ */
+@media (prefers-reduced-motion: reduce) {
+  .fd-live::after,
+  .fd-sweep::after,
+  .fd-dot-live::after,
+  .fd-rise,
+  :root .react-flow__edge.animated path {
+    animation: none;
+  }
+  :root .fd-board-ready .react-flow__node {
+    transition: none;
+  }
+}
+:root[data-motion="reduced"] .fd-live::after,
+:root[data-motion="reduced"] .fd-sweep::after,
+:root[data-motion="reduced"] .fd-dot-live::after,
+:root[data-motion="reduced"] .fd-rise,
+:root[data-motion="reduced"] .react-flow__edge.animated path {
+  animation: none;
+}
+:root[data-motion="reduced"] .fd-board-ready .react-flow__node {
+  transition: none;
+}

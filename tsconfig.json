@@ -24,6 +24,12 @@
     },
     {
       "path": "packages/github"
+    },
+    {
+      "path": "packages/jev"
+    },
+    {
+      "path": "packages/web"
     }
   ]
 }

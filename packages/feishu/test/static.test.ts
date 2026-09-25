@@ -43,13 +43,13 @@ describe('静态检查', () => {
       .filter((l) => /^[A-Z_]+=/.test(l))
       .map((l) => l.split('=', 2) as [string, string]);
     expect(assignments.length).toBeGreaterThan(5);
-    // 能出现的只有：空、占位符 <…>、数字默认值、默认表情、公开的驾驶舱域名（设计文档里就有）。
+    // 能出现的只有：空、占位符 <…>、数字默认值、默认表情、样例域名（真域名公开仓不写，见设计第十四节）。
     const allowed = (v: string) =>
       v === '' ||
       /<[^>]+>/.test(v) ||
       /^[0-9]+$/.test(v) ||
       v === 'Get' ||
-      v === 'https://fleetdao.dpdns.org';
+      v === 'https://cockpit.example.com';
     for (const [key, value] of assignments) {
       expect({ key, value, ok: allowed(value) }).toEqual({ key, value, ok: true });
     }

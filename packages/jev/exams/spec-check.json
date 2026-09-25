@@ -1,0 +1,96 @@
+[
+  {
+    "id": "spec-813",
+    "source": "windsurf-dao#813（取数 2026-09-24；spec=标题+正文（去掉末尾「来源消息」节的飞书 id）；request=评论2里补记的用户飞书原话）",
+    "evidence": {
+      "spec": "[飞书] 增加 dao-check 飞书群有效性检查\n\n## 现象\ndao-check 目前不会校验 host/machine/feishu-groups.json 里的 chat_id 是否仍有效；群查不到或已解散时检查不会报红，也指不出是哪个群。\n## 复现或来源\n口语需求（本批就做）：跑 dao-check 时要多一项 feishu-groups，用 lark-cli 逐个查上述 json 中的 chat_id；并要在 feishu-groups.json 注释和 docs 里写一句该检查的用途以及红了怎么修。\n## 期望\n跑 dao-check 时多一项 feishu-groups：用 lark-cli 逐个查 host/machine/feishu-groups.json 里的 chat_id，查不到或已解散就报红并写出是哪个群，四个群都在时为绿。在 feishu-groups.json 的注释和 docs 里各写一句：这条检查的用途，以及红了怎么修。\n## 三问答案\n- 做到什么算做完：做完的标准：跑 dao-check 时多一项 feishu-groups，它用 lark-cli 逐个查 host/machine/feishu-groups.json 里的 chat_id，查不到或已解散就报红并写出是哪个群；四个群都在时为绿。\n- 这批做还是以后：这批就做。\n- 是否 docs/memory 该记：要记文档：在 feishu-groups.json 的注释和 docs 里写一句这条检查的用途和红了怎么修。",
+      "request": "dao-check 能不能顺便检查飞书群还在不在？群解散了要报红。"
+    },
+    "expect": {
+      "spec-done": "checkable"
+    },
+    "why": {
+      "spec-done": "每条都能跑 dao-check 或目验：多一项 feishu-groups、查不到/已解散报红并写出群名、四个群都在为绿、注释和 docs 各写一句用途与修法；工人交卷逐条对上（dao-worker 评论1）。"
+    }
+  },
+  {
+    "id": "spec-1664",
+    "source": "windsurf-dao#1664（取数 2026-09-24；spec=标题+「用户拍板」「验收」两节原文；request=「用户拍板」节里引用的用户原话）",
+    "evidence": {
+      "spec": "任务时间线只留 24 小时就没了，也和单互相找不到——保留 30 天 + 互相挂链接 + 结束后导出精简记录（用户 2026-09-21 拍板）\n\n## 用户拍板（2026-09-21，弹窗）\n\n原话：「三件全做，我考虑的是 迁移的是新vps要有temporal cli，不能一头雾水不需要要装」\n\n三件：\n- ① 保留期调到 **30 天**，并写进安装脚本（新机器装出来就是 30 天，不靠手工）。\n- ② 时间线与单互相找得到：起任务时带上摘要（单标题 / 模式 / 主脑·副手·审查是谁），网页列表直接显示；关单评论里带时间线地址。\n- ③ 任务结束后自动导出一份**精简记录**（各步骤起止时间、谁干的、几轮、结局），一单一行，存 VPS、**不进 GitHub**；迁移时随用量账（#1231）一起带走。\n\n用户的顾虑（新 VPS 要有 Temporal CLI、不能一头雾水）：现状已满足一半——`scripts/install-fleet.sh` 会装固定版本 1.8.3 并校验 sha256、起好两只常驻单元，`NEW-MACHINE.md` 写了这一步。要补的是：保留期进脚本、网页端怎么看（SSH 隧道到 8233）进文档、换机表改成「Temporal 的库不搬：等在途清零再切，新机器全新起；带走的是导出的精简记录」。\n\n## 验收\n\n1. `temporal operator namespace describe default` 显示 720h；`install-fleet.sh` 重跑后仍是 720h（幂等）。\n2. 新起一张单：网页列表里能看到单标题与三条腿；关单评论里有时间线地址。\n3. 一张单结束后的下一轮同步：精简记录文件里多一行，字段含每一步的名字、起止、时长；重跑不重复追加。连不上 Temporal 时报「没查成」，不是「0 条」。\n4. `NEW-MACHINE.md` 同一次提交里更新。",
+      "request": "三件全做，我考虑的是 迁移的是新vps要有temporal cli，不能一头雾水不需要要装"
+    },
+    "expect": {
+      "spec-done": "checkable"
+    },
+    "why": {
+      "spec-done": "四条都给了命令或看得见的终态：namespace describe 显示 720h 且重跑幂等、网页列表能看到单标题与三条腿、精简记录多一行且不重复追加、连不上报「没查成」、NEW-MACHINE 同一次提交更新。"
+    }
+  },
+  {
+    "id": "spec-1675",
+    "source": "windsurf-dao#1675（取数 2026-09-24；spec=标题+现行正文（2026-09-22 重写版）的「做什么」「验收」两节；request=「用户拍板」节里引用的用户原话）",
+    "evidence": {
+      "spec": "选腿没有质量信号：成功率只说明腿跑得完，不说明活干得好不好（用户 2026-09-21：加入未来里程碑，不立刻做）\n\n## 做什么\n\n1. **时间线 schema 2**（`scripts/lib/fleet-timeline.mjs`，`TIMELINE_SCHEMA` 升 2；`scripts/fleet-timeline-export.mjs` 导出时带上）：\n   - 任务行加 `rounds[]`：直接带 `roundEntry` 产物（round / outcome / lead / executor / executorSwappedFrom / reviewer / head / blocking 与 advisory 的 `{id, severity}`）。**不带 detail 原文**——原文在 PR 正文。工作流结果或 state 里已有 rounds，导出从 Temporal 结果载荷取；取不到 = `rounds: null`，不猜。\n   - 任务行加 `scores[]`：每条 `{ name, value, dataType: 'numeric'|'categorical'|'boolean', role: 'lead'|'executor'|'reviewer', source: 'code'|'judge'|'human', rubric_version, evidence_ref, at }`。\n   - `source=code` 由导出时机械算：`rounds`、`p1_total`、`p2_total`、`ci_red`（outcome=checks-failed 的轮数）、`rework_rounds`、`resolved`（state=completed 且 PR merged）、`lead_time_ms`；`change_failed`（合并后 7 天内被 revert / fix 指回）先留字段填 null，另单做。\n   - `source=judge`：Jev 两题（读 rounds + PR 正文 + 审官意见原文）「这次交付质量：高/中/低」「主要拖累来自：工人/审官/都不是（外部环境）」，`caller:'task-quality'`，登记 `docs/jev/registry.json`（mayDo=report，stage=live），`rubric_version` 指 `docs/jev/rubrics/task-quality.v1.md`（新建，写清三档判据）。**没查成 = 不写这两条**，不写 null 占位。\n   - `source=human`：帅位终审对每条审官 P1 的「采/不采」（`p1_accepted` boolean，`evidence_ref` = 评论 URL），先留写入口（`scripts/fleet-timeline-export.mjs --annotate <taskId> --score ...`），抽检流程另单接。\n2. **读方兼容**：`scripts/lib/fleet-cycle.mjs` 的 `parseTimeline` 认 schema 1/2 两代行；schema 2 行 `scores[]` 里 `source=judge` 缺 `rubric_version` 的**拒读并说哪一条**。\n3. **leg-choice 用它**：`scripts/lib/leg-quality.mjs`（g1 已有三角色计数骨架，可留）改读 `rounds[]` + `scores[]`，不再从 `steps` 反推；聚合到**腿×阶段**；样本 <5 只报「样本不足」不动排序。\n4. **推荐表建议**：`scripts/leg-policy-tune.mjs` 读账本算每角色 prefer 排序建议 + 依据（样本数、均分、30 天趋势），打印 diff 到 `docs/leg-policy.json`；**不自动写入**，人看过用 `--apply` 才写。\n5. 规矩：Jev 只能拦不能放——分低只会往后排，不会把没过能力/异族门槛的腿排进来。\n\n## 验收\n\n- 一条真跑完的 fleet 任务导出后，时间线行含 `rounds[]`（与 PR 正文轮次表一致）与 ≥ 6 条 `source=code` 分；Jev 查成时含 2 条 `source=judge`，没查成时**没有**这两条且导出日志说了原因。\n- 故意违规：一条 `scores` 里 `source=judge` 缺 `rubric_version` 的行，`parseTimeline` 拒读并指出是哪一条。\n- `node scripts/leg-policy-tune.mjs` 在样本 <5 时明说「样本不足，不给建议」；构造 ≥5 条假账本时给出排序与依据；不带 `--apply` 不改任何文件。\n- leg-choice 单测：同能力两腿，均分低的排后；样本不足不影响原排序；一条 Jev 没查成的行不得把该腿算成 0 分。\n- `docs/jev/README.md` 重渲染含 `task-quality`；`tests/fleet-timeline.test.js` 加 schema 2 夹具；INDEX 的 `~/.dao/fleet/timeline` 那行说明 schema 2。",
+      "request": "每一次的任务完毕都要 jev 给质量打分，质量的打分由轮次、review 批红个数等各个维度，用来影响模型推荐表，模型推荐表要重新，达到最佳效果，与 jev 协调最佳。"
+    },
+    "expect": {
+      "spec-done": "checkable"
+    },
+    "why": {
+      "spec-done": "验收五条都落在可跑的测试/命令/文件上（parseTimeline 拒读并点名、样本<5 明说、不带 --apply 不改文件、单测排序、README 重渲染）。对照：提出人原话「达到最佳效果」是口号，但文档已把它落成可核对条目；同单旧正文（2026-09-21 版）没有验收节，g1 照旧正文做被关（现行正文「关联」节 PR #1727）。"
+    }
+  },
+  {
+    "id": "spec-94",
+    "source": "windsurf-dao#94（取数 2026-09-24；spec=标题+「缺的是什么」「可能的方向」「关闭条件」三节原文；request 为空）",
+    "evidence": {
+      "spec": "两个仓库互相依赖时验证结果可能对不上：这边测试通过时，用的可能是另一边的旧版本\n\n## 缺的是什么\n\n**可见性有了，一致性没有**。#535 加的版本抬头（打 dao 的 sha + 脏树标记）当场兑现了价值——dao 在那批期间连动三版，三次实跑各自记着对着哪一版，归因不用靠回忆。但那只解决「事后查得出」，不解决「验证期间它不许动」。\n\n## 可能的方向（未定，属判断档）\n\n1. **把 dao 的 sha 记进验证产物**（最小做法，已有一半：抬头打了，但没进机器可读的验证结论）\n2. **验证期锁 ref**（跑之前记下 dao sha，跑完复核没变，变了就重跑或报红）\n3. **接受现状 + 明写射程**（「跨仓道的绿只对当时那一版成立」）\n\n## 关闭条件\n\n跨仓依赖的验证有明确的一致性表述——要么机器保证（方案 1/2），要么射程明写且消费方（帅终审、subagent 复验）知道该怎么读。"
+    },
+    "expect": {
+      "spec-done": "vague"
+    },
+    "why": {
+      "spec-done": "关闭条件后一半「射程明写且消费方（帅终审、subagent 复验）知道该怎么读」没法核对真假；该单最后以「前提消亡」关单，这一条从没被验过（关单评论 2026-08-13）。"
+    }
+  },
+  {
+    "id": "spec-642",
+    "source": "windsurf-dao#642（取数 2026-09-24；spec=标题+「工人交付」「验收」两节原文；request 为空）",
+    "evidence": {
+      "spec": "换机地图 host/machine + 仓外路径闸\n\n## 工人交付\n\n1. `host/machine/INDEX.md`：A/B/C/D 路径地图，不复制会过期的值。\n2. `host/machine/ignore.md`（或 INDEX 内一节）：忽略的仓外路径，每条必须有 why。\n3. B 类模板：cursor-agent/agent/grok 的 shim；Orca hook 用 **conhost --headless**，禁止 EncodedCommand。可从现有 `scripts/grok-shim.cmd` 与 `~/.local/bin` 现用 shim 收编，不改行为。\n4. `scripts/dao-check.mjs` 新项：独立扫描仓内仓外路径（不读 INDEX 自己的解析器）；发现集合与 INDEX∪ignore 对不上就红；扫到 0 条路径 = 没查成（红）；扫完 0 条漏 = 绿。\n5. 先造违规样本（例如测试夹具里写 `~/.brand-new-cli/` 且不进 INDEX）必须被拦住，再把样本留在 tests 里当回归。\n6. NEW-MACHINE：host/machine 怎么用、闪屏避法（禁 Orca 默认 cursor hook install）、什么不能拷、Cursor 帅缺口。\n7. draft PR，标题 `[grok]`，dao-check 绿，自查后 `gh pr ready`。\n\n## 验收\n\n- 新机 AI 读 NEW-MACHINE + INDEX 知道装什么、不拷什么\n- `dao-check`：故意漏写新家目录 → 红；补上 → 绿\n- 本机现有 `~/` 引用要么进 INDEX 要么进 ignore（有 why）"
+    },
+    "expect": {
+      "spec-done": "vague"
+    },
+    "why": {
+      "spec-done": "三条里「新机 AI 读 NEW-MACHINE + INDEX 知道装什么、不拷什么」是感觉型条目，判不了真假；另两条（故意漏写新家目录→红、~/ 引用进 INDEX 或 ignore）可核对。工人交卷用 dao-check 与夹具证明了可测的两条，第一条只能交「NEW-MACHINE 写清地图怎么用」，证明不了（dao-worker 完工评论）。"
+    }
+  },
+  {
+    "id": "spec-1170",
+    "source": "windsurf-dao#1170（取数 2026-09-24；spec=标题+正文原文（去掉机器标记）；request 为空）",
+    "evidence": {
+      "spec": "收件箱从 hook 挪到 dao-check，skill 没改、新载体也没人跑\n\n起因：inbox-carrier-nobody-runs\n\n## 病\n\n2026-09-06 把收件箱从 Claude Code 的 `UserPromptSubmit` hook 挪到 `dao-check`（`d48ecc5d`），因为服务器上那个 hook 根本没装、现役执行体也没有这种钩子。skill 和 `global-CLAUDE.md` 仍写「每轮由全局 hook 提醒」；闸仍只验那份已死的 hook 文件。`dao-check` 只在 `land.mjs` **推默认分支**时才跑，机器上 `dao-land.timer` 从未装上，指挥官只在自己刚合完一张 PR 时调一次 land。于是「帅位每轮被提醒去读」这一层在这台机器上不存在。\n\n## 改法（观察原文建议）\n\n删掉「dao-check = 帅位每轮会看见收件箱」这一层。`checkInbox` 的调用点改到已经在跑的腿上：指挥官盘点（`commander-inventory` 每 6 小时）或巡检会话开工。skill / `global-CLAUDE.md` 那句「每轮由全局 hook 提醒」删掉或改成新腿的名字。`tests/inbox.test.js` 不要再把「钩子文件还在」锁成绿——锁「现役执行体的挂载面」或「盘点/巡检会调用 `assessInbox`」。\n\n来源：`docs/observations/2026-09-09-收件箱挪到dao-check没人跑.md`"
+    },
+    "expect": {
+      "spec-done": "missing"
+    },
+    "why": {
+      "spec-done": "正文只有「病」和「改法」两节，没写做完标准；关单评论（2026-09-11）原话「#1171 多一段…和整节「验收」。#1170 只有病和改法」。"
+    }
+  },
+  {
+    "id": "spec-848",
+    "source": "windsurf-dao#848（取数 2026-09-24；spec=标题+正文原文（一段话）；request 为空）；脱敏：/… 换成 /home/agent/…",
+    "evidence": {
+      "spec": "commander install 的 systemd 单元模板缺 PATH：orca/hub-say ENOENT，首轮全靠 drop-in 垫片\n\n2026-09-03 实咬：commander-act.service 首轮 orca not found（unscanned fail-closed 拦住了派单，闸有效），hub-say ENOENT（群通知全静默）。垫片=drop-in /etc/systemd/system/commander-{act,inventory}.service.d/path.conf 写 PATH=/home/agent/.local/bin:/home/agent/bin:...（已生效）。正式修复：commander.mjs install 模板加 Environment=PATH 或全部改绝对路径；合并时退役 drop-in。同类前科：agent-stall-watch 垫片同一坑（已改绝对路径）。"
+    },
+    "expect": {
+      "spec-done": "missing"
+    },
+    "why": {
+      "spec-done": "正文只有实咬现象、drop-in 垫片和「正式修复」（怎么改），没说做到什么样算完。设计第七节把「怎么算做完」（需求）和「怎么做」（方案）分开放：只写了怎么改，交活核实没有做完标准可对，算没写。"
+    }
+  }
+]

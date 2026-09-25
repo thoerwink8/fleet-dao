@@ -1,0 +1,181 @@
+[
+  {
+    "id": "vps-err-01-grok-500-unavailable",
+    "source": "/home/agent/.grok/sessions/<工作树 dao-issue-1231-g1>/01a0c699-76b2-7133-b765-4e7695da4640/updates.jsonl 第 9–12 次 retry_state（2026-09-22T00:56–00:58Z）；对应 /home/agent/.dao/execution/sessions/grok%3A105faf65-60fa-474f-913b-415ca332d737.json（failure: stall, no progress for 361s）；脱敏：服务用户家目录 换成 /home/agent",
+    "evidence": {
+      "step": "执行体会话（grok CLI，grok-4.7）向模型发请求，客户端已自动重试到第 12/15 次",
+      "code": "500",
+      "message": "API error (status 500 Internal Server Error): API error (status 500 Internal Server Error): error: Service temporarily unavailable. The model did not respond to this request."
+    },
+    "expect": {
+      "error-next": "retry"
+    },
+    "why": {
+      "error-next": "上游 5xx「暂时不可用」。这轮会话 6 分钟里一直被同一个 500 挡着，被看门狗以 no progress 361s 停掉；20 秒后同一任务重起的会话开头又碰到几次 500 自动重试，随后就跑通了（56 次工具调用，01:25Z 完成本轮）——等一等原样再来就好。"
+    }
+  },
+  {
+    "id": "vps-err-02-gateway-503-cpu-overloaded",
+    "source": "/home/agent/.pi/agent/sessions/--home-agent-<旧编排工作区>-windsurf-dao-ISSUE-891-ISSUE-891-快马905-工人替身树--/2026-09-04T18-10-12-616Z_01a06d9d-2e08-7445-9c69-6acae22f3850.jsonl 第 49 行（2026-09-04T18:48:06Z，stopReason=error）；脱敏：会话目录名里的服务用户名 换成 agent",
+    "evidence": {
+      "step": "返工工人会话（pi，经自家网关调 grok-4.6）向模型发请求",
+      "code": "503 system_cpu_overloaded",
+      "message": "503: {\"message\":\"system cpu overloaded (current: 98.7%, threshold: 90%)\",\"type\":\"new_api_error\",\"param\":\"\",\"code\":\"system_cpu_overloaded\"}"
+    },
+    "expect": {
+      "error-next": "retry"
+    },
+    "why": {
+      "error-next": "网关一时 CPU 过载的 503。2 分 39 秒后（18:50:45）同一会话接着往下改代码，19:05 交了 PR #905 的返工——暂时性过载，原样再来即可。"
+    }
+  },
+  {
+    "id": "vps-err-03-dispatcher-etimedout",
+    "source": "/home/agent/.dao/broadcast-digest.json items（2026-09-22 [dispatcher] 三条「派单器没查成」）；/home/agent/.dao/dispatcher/2026-09-22T17-22-21.397Z.json、18-22-25.636Z.json、19-22-19.984Z.json（exitCode 2）；脱敏：服务用户家目录 换成 /home/agent",
+    "evidence": {
+      "step": "派单器每 10 分钟一轮：读 fleet 在途任务列表（fleet list）",
+      "code": "ETIMEDOUT",
+      "message": "派单器没查成：fleet list 失败：spawnSync /usr/bin/node ETIMEDOUT，这一轮不派"
+    },
+    "expect": {
+      "error-next": "retry"
+    },
+    "why": {
+      "error-next": "子进程一时超时：三次（17:22、18:22、19:22Z）之后紧接着的下一轮（如 19:32）就不再超时，当天后面照常派出 #1734 等单。"
+    }
+  },
+  {
+    "id": "vps-err-04-claude-422-local-no-account",
+    "source": "/home/agent/.claude/projects/<dao-issue-1560-g2>/bb698345-3a8d-410b-8a72-8568565492b2.jsonl、d25ed159-5be0-4ada-a668-df72a5034cfc.jsonl、e785813d-8442-4657-a770-d60299e21018.jsonl（2026-09-20T00:04–00:06Z）；/home/agent/.dao/fleet-escalations/resolved/dao_<owner>_windsurf-dao_issue_1560_g2.json；脱敏：服务用户家目录 换成 /home/agent",
+    "evidence": {
+      "step": "起主脑（lead）会话：claude-fable-5-1，经 mirasim",
+      "code": "422",
+      "message": "API Error: 422 当前是「本地」档，而本机没有这个智能体的账号，本轮已停止，没有任何请求发往云端。为它登录一个自己的账号，或切换到「云端」。 (mirasim: Local mode is on and this agent has no account on this machine, so nothing was sent to the cloud route. Sign it in, or switch to Cloud.)"
+    },
+    "expect": {
+      "error-next": "swap_route"
+    },
+    "why": {
+      "error-next": "路由档位的问题（本地档这台机没这个智能体的账号），报错自己也让切到「云端」。当时 2 分钟内原样重起 4 次全是同一句，任务随后以 TRANSPORT_CLOSED：lead session failed 卡住升级——原样重试无用。"
+    }
+  },
+  {
+    "id": "vps-err-05-codex-429-retry-exhausted",
+    "source": "/home/agent/.codex/sessions/2026/09/08/rollout-2026-09-08T02-33-09-01a07d25-44e7-7511-89d9-3351e51603b0.jsonl 第 11 行（2026-09-07T18:33:14Z，task_complete.error）；脱敏：服务用户家目录 换成 /home/agent",
+    "evidence": {
+      "step": "审官会话续审（codex，gpt-5.6-sol，走 pqapi 渠道）向模型发请求",
+      "code": "429",
+      "message": "exceeded retry limit, last status: 429 Too Many Requests, request id: 8815a35d34f6c65412541e313b4ff1f2"
+    },
+    "expect": {
+      "error-next": "swap_route"
+    },
+    "why": {
+      "error-next": "这条渠道持续限流（客户端已自己重试到上限）：09-07/09-08 两天有 374 个 codex 会话以同一句结束；后来的修法是 pqapi 429 时落到 luna 渠道（VPS 会话里留的提交说明：「实测 gpt-5.6 在 pqapi 429 下落 luna 200」）。"
+    }
+  },
+  {
+    "id": "vps-err-06-codex-401-invalid-token",
+    "source": "/home/agent/.codex/sessions/2026/09/03/rollout-2026-09-03T00-25-39-01a062f0-bc69-7413-ae8d-a32d2fa02c95.jsonl（2026-09-02T16:25:50Z，task_complete）；脱敏：上游网关域名 换成 <上游网关>、服务用户家目录 换成 /home/agent",
+    "evidence": {
+      "step": "codex 连通探针（gpt-5.6-sol）：让模型只回一句 CODEX_OK",
+      "code": "401",
+      "message": "unexpected status 401 Unauthorized: Invalid token (request id: 989782bc8698fab6b71107bb092ab4ba), url: https://<上游网关>/v1/responses, cf-ray: a34ddf7858f7a061-FRA"
+    },
+    "expect": {
+      "error-next": "swap_route"
+    },
+    "why": {
+      "error-next": "令牌失效，属账号/凭据问题：44 秒后同一探针又 401 一次；1 分 42 秒后（16:27:21 那条会话）才回了 CODEX_OK——令牌失效不会自己好，期间应是换过凭据（这一点没在记录里直接看到）。"
+    }
+  },
+  {
+    "id": "vps-err-07-devin-model-absent",
+    "source": "/home/agent/.dao/execution/sessions/acp%3A2305019d-2900-41ec-95df-ff97f856f648.json（2026-09-24T16:06:59Z）及同句 5 条（09-21 21:44Z 起）；/home/agent/.dao/catalog-patrol.json diffs；/home/agent/.dao/leg-expiry.json 的 devin-acp-deepseek；脱敏：服务用户家目录 换成 /home/agent",
+    "evidence": {
+      "step": "起执行体会话（Devin ACP，deepseek-v4-flash-max）",
+      "code": "model_unavailable",
+      "message": "Requested concrete model ID is absent from the ACP model catalog"
+    },
+    "expect": {
+      "error-next": "swap_model"
+    },
+    "why": {
+      "error-next": "模型从目录里没了：09-21 到 09-24 六次起会话全是这一句；选型巡检把 devin-acp-deepseek 的 deepseek-v4-flash-max 标成 unlisted，这条腿最后一次答上来是 09-20。重试、换路都没用，要换模型。"
+    }
+  },
+  {
+    "id": "vps-err-08-cc-bad-model",
+    "source": "本地 fleet-dao 真跑夹具 fleet-dao 仓 packages/adapters/test/fixtures/claude-code/cc-bad-model.ndjson（Claude Code 真实输出；非 VPS）",
+    "evidence": {
+      "step": "起 Claude Code 会话（--model claude-nonexistent-0）",
+      "code": "404 model_not_found",
+      "message": "There's an issue with the selected model (claude-nonexistent-0). It may not exist or you may not have access to it. Run --model to pick a different model."
+    },
+    "expect": {
+      "error-next": "swap_model"
+    },
+    "why": {
+      "error-next": "模型不存在（结果行 api_error_status=404、error=model_not_found），报错自己就让换 --model；进程 exit 1。"
+    }
+  },
+  {
+    "id": "vps-err-09-model-label-retired",
+    "source": "/home/agent/.dao/feishu-threads.json hubPending 里 #1381 的两张卡（2026-09-17，19:56Z / 20:38Z 标已办结）；脱敏：卡片的 message_id 未带入",
+    "evidence": {
+      "step": "给 PR #1377 派返工工人：按 PR 上的 model/ 标签选执行模型",
+      "code": "model-not-in-routing",
+      "message": "PR #1377 要返工，但模型标签 model/claude-opus 不在当前选型（退役或未登记），不派"
+    },
+    "expect": {
+      "error-next": "swap_model"
+    },
+    "why": {
+      "error-next": "标签指的模型已退役或不在选型表里，重试和换路都绕不过，换一个在役模型就能派。当时这张卡被报给帅位，后来在别处处理掉。"
+    }
+  },
+  {
+    "id": "vps-err-10-pi-model-contract",
+    "source": "/home/agent/.dao/execution/sessions/launch%3Ab34e17e2-aa74-4fa0-9a06-0661ab8fc425.json（2026-09-24T02:38:51Z，failure.class=ours，原文在落盘时已截断）；脱敏：服务用户家目录 换成 /home/agent",
+    "evidence": {
+      "step": "起执行体会话（agent=pi，model=kimi-k3）",
+      "code": "contract",
+      "message": "mirasim 对 agent=pi 只认 model=\"profile:<模型档 id>\"，给 \"kimi-k3\" 会被**静默丢弃**（服务端 sanitizeModel），pi 会落回 ~/.pi/agent/settings.json 的默认腿，烧的是另一个账号而账面全绿。证据 docs/evidence/1460-pi-legs-carrier-and-account.json。拒起，不"
+    },
+    "expect": {
+      "error-next": "park"
+    },
+    "why": {
+      "error-next": "自家调用写错了参数格式，系统已主动拒起；重试、换路、换模型都绕不过，要改派工配置/代码。"
+    }
+  },
+  {
+    "id": "vps-err-11-ci-red-after-approve",
+    "source": "/home/agent/.dao/feishu-threads.json hubPending 里 #1183 的三张卡（2026-09-16 标已办结）；脱敏：卡片的 message_id 未带入",
+    "evidence": {
+      "step": "自动合并：审官已判绿，合并前核对 CI",
+      "code": "check FAILURE",
+      "message": "PR #1155 审官判绿但 CI 红（check FAILURE）——不自动合，报帅"
+    },
+    "expect": {
+      "error-next": "park"
+    },
+    "why": {
+      "error-next": "CI 红是代码或测试本身的问题，重试、换路、换模型都没用，要人或返工去修；PR #1155 后来修绿才合并（GitHub 显示 MERGED）。"
+    }
+  },
+  {
+    "id": "vps-err-12-injection-too-long",
+    "source": "/home/agent/.codex/sessions/2026/09/18/rollout-2026-09-18T06-44-52-01a0b18b-4fe6-7370-935f-adf7fa23052f.jsonl（帅位报告里原样贴出的派工返回，#1359 首次派工）；脱敏：服务用户家目录 换成 /home/agent",
+    "evidence": {
+      "step": "派工：起工人会话，把任务说明注入会话",
+      "message": "{\"ok\":false,\"error\":\"注入 568 字节超过上限 500（士兵注入）。正文挪去仓内文件或 GitHub，注入只给指针。\"}"
+    },
+    "expect": {
+      "error-next": "park"
+    },
+    "why": {
+      "error-next": "自家闸拦下的输入超限，原样重试必定再拦；当时是把注入改成一行指针后重派才成功（#1359 加审官席位）。"
+    }
+  }
+]

@@ -6,6 +6,24 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./failure": "./src/failure/index.ts"
+    "./failure": "./src/failure/index.ts",
+    "./routing": "./src/routing/index.ts",
+    "./worker": "./src/worker.ts",
+    "./fakes": "./src/fakes.ts"
+  },
+  "scripts": {
+    "start": "node src/main.ts"
+  },
+  "dependencies": {
+    "@fleet-dao/api": "workspace:*",
+    "@fleet-dao/shared": "workspace:*",
+    "@temporalio/activity": "1.24.0",
+    "@temporalio/client": "1.24.0",
+    "@temporalio/common": "1.24.0",
+    "@temporalio/worker": "1.24.0",
+    "@temporalio/workflow": "1.24.0"
+  },
+  "devDependencies": {
+    "@temporalio/testing": "1.24.0"
   }
 }

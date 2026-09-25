@@ -5,7 +5,7 @@
     "delivered_at": "2026-09-24T18:35:59.097Z",
     "redelivery": false,
     "duration": 0.62,
-    "status": "POST https://fleetdao.dpdns.org/gh/webhook giving up after 1 attempt(s): Post \"https://fleetdao.dpdns.org/gh/webhook\": tls: failed to verify certificate: x509: certificate is valid for host.example.invalid, not fleetdao.dpdns.org",
+    "status": "POST https://cockpit.example.com/gh/webhook giving up after 1 attempt(s): Post \"https://cockpit.example.com/gh/webhook\": tls: failed to verify certificate: x509: certificate is valid for host.example.invalid, not cockpit.example.com",
     "status_code": 500,
     "event": "ping",
     "action": null,

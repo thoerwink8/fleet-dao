@@ -319,6 +319,7 @@ try {
           subtask: 'A README 加一行',
           did: ['README 末尾加一行验收时间（HTML 注释，不影响显示）'],
           verified: ['CI 的 check（node --test）'],
+          changedFiles: ['README.md'],
         },
       }),
     (r) => (r.created && r.headMatches ? null : `created=${r.created} headMatches=${r.headMatches}`),
