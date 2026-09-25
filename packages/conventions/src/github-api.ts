@@ -1,4 +1,5 @@
-// 欠账的定时任务、阶段收口要读 GitHub 上 issue 和里程碑现在的样子，欠账的定时任务还往单上留言：走 REST 接口。
+// 欠账的定时任务、阶段收口要读 GitHub 上 issue 和里程碑现在的样子，欠账的定时任务还往单上留言，
+// PR 补贴（pr-labels）读 PR、往 PR 上补类别标签和里程碑：走 REST 接口。
 // 必过检查（pnpm check）不许用这里（#87：同一份代码什么时候跑结果都一样）。
 // 令牌按 GITHUB_TOKEN → GH_TOKEN → 本机 `gh auth token` 的顺序找，都没有就不带（公开仓不带令牌也读得到，
 // 只是每小时 60 次）。令牌只放进请求头，报错里不带。读不到、认不出一律抛，由调用方判「没查成」，不当成没问题。
@@ -38,6 +39,24 @@ export interface GitHubCommenter {
   /** 这张单上所有留言的正文。 */
   comments(n: number): Promise<string[]>;
   comment(n: number, body: string): Promise<void>;
+}
+
+/** PR 补贴（pr-labels.ts）用：读 PR 现在的样子，补类别标签和里程碑（要能写 PR 的令牌）。 */
+export interface GitHubPrLabeler {
+  /** PR 现在的样子；读不到（含没有这个号）就抛。 */
+  pull(n: number): Promise<PullInfo>;
+  /** 给 PR 加一个标签；返回加完以后 PR 上的全部标签（GitHub 回的）。 */
+  addLabel(n: number, name: string): Promise<string[]>;
+  /** 给 PR 挂里程碑（按里程碑的号）；返回挂完以后的里程碑名字（GitHub 回的）。 */
+  setMilestone(n: number, milestone: number): Promise<string | null>;
+}
+
+export interface PullInfo {
+  number: number;
+  title: string;
+  body: string;
+  labels: string[];
+  milestone: string | null;
 }
 
 type Env = Record<string, string | undefined>;
@@ -82,7 +101,7 @@ export function liveGitHub(
   repo: string,
   env: Env,
   opts: { fetchImpl?: typeof fetch; token?: () => string | undefined } = {},
-): GitHubReader & GitHubCommenter {
+): GitHubReader & GitHubCommenter & GitHubPrLabeler {
   const fetchImpl = opts.fetchImpl ?? fetch;
   const api = (env.GITHUB_API_URL || 'https://api.github.com').replace(/\/+$/, '');
   let token: string | undefined | null = null;
@@ -175,6 +194,39 @@ export function liveGitHub(
         body: JSON.stringify({ body }),
       });
       if (res.status !== 201) throw failed(res, `在 #${n} 上留言`);
+    },
+    async pull(n) {
+      const what = ` PR #${n} `;
+      const res = await get(`/repos/${repo}/pulls/${n}`);
+      if (!res.ok) throw failed(res, what);
+      const raw = await json(res, what);
+      if (!isObject(raw)) throw new Error(`读${what}，读回来的不是对象`);
+      if (raw.body !== null && typeof raw.body !== 'string') throw new Error(`读${what}，认不出（body）`);
+      const { number, title, labels, milestone } = toIssue({ ...raw, pull_request: {} }, what);
+      if (number !== n) throw new Error(`要读 PR #${n}，读回来的是 #${number}`);
+      return { number, title, body: raw.body ?? '', labels, milestone };
+    },
+    async addLabel(n, name) {
+      const what = `给 PR #${n} 加标签「${name}」`;
+      const res = await get(`/repos/${repo}/issues/${n}/labels`, {
+        method: 'POST',
+        body: JSON.stringify({ labels: [name] }),
+      });
+      if (!res.ok) throw failed(res, `在${what}时`);
+      const data = await json(res, what);
+      if (!Array.isArray(data) || !data.every((l) => isObject(l) && typeof l.name === 'string')) {
+        throw new Error(`${what}，GitHub 回的认不出（应当是标签列表）`);
+      }
+      return data.map((l) => String((l as { name: string }).name));
+    },
+    async setMilestone(n, milestone) {
+      const what = `给 PR #${n} 挂里程碑`;
+      const res = await get(`/repos/${repo}/issues/${n}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ milestone }),
+      });
+      if (!res.ok) throw failed(res, `在${what}时`);
+      return toIssue(await json(res, what), what).milestone;
     },
   };
 }
