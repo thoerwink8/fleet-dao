@@ -86,7 +86,8 @@ export const RULES_TARGETS: readonly RulesTarget[] = [
  *   pi 0.87 起也扫（dist/core/package-manager.js 的 userAgentsSkillsDir）。
  *   所以 ~/.pi/agent/skills 不另放：两处各一份拷贝，pi 会逐个报「name collision」。
  *   Devin 不扫 ~/.claude/skills（它借 Claude 的只有项目里的 .claude/skills），Grok 两处都扫、同名去重。
- * - ~/.gemini/antigravity-cli/skills：Antigravity 命令行的全局 skill（antigravity.google/docs/skills）。
+ * - ~/.gemini/config/skills：Antigravity 命令行的全局 skill。官方网页写的是 ~/.gemini/antigravity-cli/skills，
+ *   agy 1.2.11 程序里却只认 ~/.gemini/config/skills（和桌面版共用的全局配置目录，2026-09-25 本机核过）。
  */
 export const SKILL_TARGETS: readonly SkillTarget[] = [
   {
@@ -99,7 +100,7 @@ export const SKILL_TARGETS: readonly SkillTarget[] = [
     readers: ['codex', 'pi', 'kimi', 'devin', 'grok'],
   },
   {
-    dir: { win32: '.gemini\\antigravity-cli\\skills', linux: '.gemini/antigravity-cli/skills' },
+    dir: { win32: '.gemini\\config\\skills', linux: '.gemini/config/skills' },
     readers: ['agy'],
   },
 ];

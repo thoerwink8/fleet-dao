@@ -75,7 +75,7 @@ describe('装', () => {
   it('没装的那家（Antigravity）：跳过，不建它的目录', () => {
     const m = machine({ 'grill-me': GRILL }, ['claude']);
     const lines = m.apply();
-    expectKind(lines, '~/.gemini/antigravity-cli/skills', 'skip');
+    expectKind(lines, '~/.gemini/config/skills', 'skip');
     expectKind(lines, '~/.agents/skills', 'skip');
     expect(existsSync(join(m.home, '.gemini'))).toBe(false);
     expect(existsSync(join(m.home, '.agents'))).toBe(false);

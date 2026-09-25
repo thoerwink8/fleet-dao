@@ -193,7 +193,7 @@ snapshot_agents_sync() {
       .fleet-dao/agents-sync.json; do
       if [[ -e "$h/$p" || -L "$h/$p" ]]; then snapshot_tree_line "$u ~/$p" "$h/$p"; fi
     done
-    for d in .claude/skills .agents/skills .gemini/antigravity-cli/skills; do
+    for d in .claude/skills .agents/skills .gemini/config/skills; do
       for s in "${skills[@]}"; do
         if [[ -e "$h/$d/$s" || -L "$h/$d/$s" ]]; then snapshot_tree_line "$u ~/$d/$s" "$h/$d/$s"; fi
       done
