@@ -1,16 +1,26 @@
-import type { Repo, Task } from '@fleet-dao/shared';
+import {
+  REQUIREMENT_WORKFLOW_TYPE,
+  type Repo,
+  type RequirementStartInput,
+  requirementWorkflowId,
+  type Task,
+} from '@fleet-dao/shared';
+import { WorkflowExecutionAlreadyStartedError } from '@temporalio/client';
 import { describe, expect, it } from 'vitest';
 import type { BoardStore } from '../src/ports.ts';
 import { WorkflowGoneError, WorkflowTargetNotFoundError, WorkflowUnavailableError } from '../src/ports.ts';
 import {
   createEnginePollerCheck,
   createNamespaceCheck,
+  createTemporalRequirementWorkflows,
   createTemporalWorkflowControl,
   type EnginePollerSource,
   type NamespaceCheckClient,
+  notConnectedTemporal,
   type PollerSnapshot,
   requirementWorkflowIdForTask,
   type TemporalClientLike,
+  type WorkflowStarterLike,
 } from '../src/temporal.ts';
 
 /** withDeadline 透传给 fn：默认场景里连接本身不到点，只验证 signal 调用的成败。 */
@@ -90,10 +100,145 @@ describe('Temporal 信号', () => {
     expect(calledFn).toBe(true);
   });
 
+  it('真客户端把 gRPC 错误包成 ServiceError（原错误挂在 cause 上）：顺着 cause 认出连不上', async () => {
+    const wrapped = new Error('Failed to signal Workflow', {
+      cause: Object.assign(new Error('No connection established'), { code: 14 }),
+    });
+    const control = createTemporalWorkflowControl(fakeClient(wrapped).client);
+    await expect(control.signal('t1', { name: 'pause', by: 'u1' })).rejects.toBeInstanceOf(
+      WorkflowUnavailableError,
+    );
+  });
+
   it('别的错误原样抛，不装成上面两种', async () => {
     const boom = new Error('boom');
     const control = createTemporalWorkflowControl(fakeClient(boom).client);
     await expect(control.signal('t1', { name: 'pause', by: 'u1' })).rejects.toBe(boom);
+  });
+});
+
+describe('拉起需求工作流（createTemporalRequirementWorkflows）', () => {
+  const INPUT: RequirementStartInput = {
+    schemaVersion: 1,
+    taskId: 't1',
+    repo: { id: 'r1', owner: 'acme', name: 'demo', defaultBranch: 'main', testCommand: 'pnpm check' },
+    issueNumber: 12,
+    title: '登录页加验证码',
+    rawRequest: '给登录页加手机验证码',
+    requestedBy: 'founder',
+  };
+  type StartCall = { workflowType: string; options: Parameters<WorkflowStarterLike['workflow']['start']>[1] };
+
+  /** 像 Temporal 服务端那样按工作流编号去重：同一编号在跑就抛 WorkflowExecutionAlreadyStartedError。fail 给了就一律抛它。 */
+  function fakeStarter(fail?: unknown) {
+    const calls: StartCall[] = [];
+    const running = new Set<string>();
+    const client: WorkflowStarterLike = {
+      connection: {
+        async withDeadline(_deadline, fn) {
+          return fn();
+        },
+      },
+      workflow: {
+        async start(workflowType, options) {
+          calls.push({ workflowType, options });
+          if (fail) throw fail;
+          if (running.has(options.workflowId)) {
+            throw new WorkflowExecutionAlreadyStartedError(
+              'Workflow execution already started',
+              options.workflowId,
+              workflowType,
+            );
+          }
+          running.add(options.workflowId);
+          return {};
+        },
+      },
+    };
+    return { client, calls, finish: (id: string) => running.delete(id) };
+  }
+
+  it('按 requirementWorkflowId 起引擎的需求工作流：类型名、任务队列、输入原样、编号冲突报错、结束了的可以再起', async () => {
+    const { client, calls } = fakeStarter();
+    const requirements = createTemporalRequirementWorkflows(client, 'fleet-main');
+    expect(await requirements.start(INPUT)).toBe('started');
+    expect(calls).toEqual([
+      {
+        workflowType: REQUIREMENT_WORKFLOW_TYPE,
+        options: {
+          taskQueue: 'fleet-main',
+          workflowId: requirementWorkflowId(INPUT.repo, 12),
+          args: [INPUT],
+          workflowIdConflictPolicy: 'FAIL',
+          workflowIdReusePolicy: 'ALLOW_DUPLICATE',
+        },
+      },
+    ]);
+    expect(REQUIREMENT_WORKFLOW_TYPE).toBe('requirementWorkflow');
+  });
+
+  it('同一张 issue 再起一次（重投、重放）：already_running，不起第二条；上一条结束了（重开）就再起', async () => {
+    const { client, finish } = fakeStarter();
+    const requirements = createTemporalRequirementWorkflows(client, 'q');
+    expect(await requirements.start(INPUT)).toBe('started');
+    expect(await requirements.start({ ...INPUT, taskId: 't1-again' })).toBe('already_running');
+    // 别的 issue 不受影响
+    expect(await requirements.start({ ...INPUT, issueNumber: 13 })).toBe('started');
+    finish(requirementWorkflowId(INPUT.repo, 12));
+    expect(await requirements.start(INPUT)).toBe('started');
+  });
+
+  it('连不上（UNAVAILABLE，裸的或包在 ServiceError 的 cause 里）、超时（DEADLINE_EXCEEDED）：WorkflowUnavailableError，不回 started', async () => {
+    const failures = [
+      new Error('14 UNAVAILABLE: No connection established'),
+      new Error('Failed to start Workflow', {
+        cause: Object.assign(new Error('No connection established'), { code: 14 }),
+      }),
+      new Error('Failed to start Workflow', {
+        cause: Object.assign(new Error('deadline exceeded'), { code: 4 }),
+      }),
+    ];
+    for (const fail of failures) {
+      const requirements = createTemporalRequirementWorkflows(fakeStarter(fail).client, 'q');
+      await expect(requirements.start(INPUT), fail.message).rejects.toBeInstanceOf(WorkflowUnavailableError);
+    }
+  });
+
+  it('连接本身到点（withDeadline 以 DEADLINE_EXCEEDED 失败）：WorkflowUnavailableError，带着是哪条工作流', async () => {
+    const timesOut: WorkflowStarterLike = {
+      connection: {
+        async withDeadline() {
+          throw Object.assign(new Error('4 DEADLINE_EXCEEDED: deadline exceeded'), { code: 4 });
+        },
+      },
+      workflow: { start: () => new Promise(() => {}) },
+    };
+    const requirements = createTemporalRequirementWorkflows(timesOut, 'q', 20);
+    await expect(requirements.start(INPUT)).rejects.toThrow(
+      new WorkflowUnavailableError(
+        `拉起需求工作流 ${requirementWorkflowId(INPUT.repo, 12)}：Temporal 连不上或没回应`,
+      ),
+    );
+  });
+
+  it('认不出的错原样抛，不当成起来了，也不当成已经在跑', async () => {
+    const boom = new Error('namespace default is not found');
+    await expect(createTemporalRequirementWorkflows(fakeStarter(boom).client, 'q').start(INPUT)).rejects.toBe(
+      boom,
+    );
+    // 名字像、但不是客户端的那个类：不按名字猜成 already_running
+    const lookalike = Object.assign(new Error('already started?'), {
+      name: 'WorkflowExecutionAlreadyStartedError',
+    });
+    await expect(
+      createTemporalRequirementWorkflows(fakeStarter(lookalike).client, 'q').start(INPUT),
+    ).rejects.toBe(lookalike);
+  });
+
+  it('还没接上 Temporal：拉起一律 WorkflowUnavailableError', async () => {
+    await expect(notConnectedTemporal().requirements.start(INPUT)).rejects.toBeInstanceOf(
+      WorkflowUnavailableError,
+    );
   });
 });
 

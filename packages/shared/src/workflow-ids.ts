@@ -7,6 +7,12 @@ export interface WorkflowRepoRef {
   name: string;
 }
 
+/**
+ * 需求工作流的类型名：后端按它起工作流，引擎的 WORKFLOW_TYPES.requirement 就是它。
+ * 必须等于引擎 workflows/requirement.ts 导出的函数名（Temporal 按导出名找工作流）。
+ */
+export const REQUIREMENT_WORKFLOW_TYPE = 'requirementWorkflow';
+
 /** 一张 issue 一条需求工作流，例如 `req:acme/demo#12`。 */
 export function requirementWorkflowId(repo: WorkflowRepoRef, issueNumber: number): string {
   return `req:${repo.owner}/${repo.name}#${issueNumber}`;

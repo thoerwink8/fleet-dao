@@ -3,6 +3,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { requirementWorkflowId } from '@fleet-dao/shared';
+import { WorkflowExecutionAlreadyStartedError } from '@temporalio/client';
 import { describe, expect, it } from 'vitest';
 import { devFixtures, IDS } from '../src/dev-fixtures.ts';
 import { createGitHubIntake } from '../src/github.ts';
@@ -16,6 +17,7 @@ import {
   WorkflowGoneError,
   WorkflowUnavailableError,
 } from '../src/ports.ts';
+import { createTemporalRequirementWorkflows, type WorkflowStarterLike } from '../src/temporal.ts';
 import { deliverGithub as deliver, type HarnessOptions, harness, T0 } from './harness.ts';
 
 /** 样例里的仓：需求工作流编号按它拼。 */
@@ -217,6 +219,57 @@ describe('issue 进来：建任务行、拉起需求工作流', () => {
     });
     expect(h.store.data.tasks.filter((x) => x.issueNumber === 40)).toHaveLength(1);
     expect(starts).toEqual([t?.id]);
+  });
+
+  it('接上真的拉起实现（假 Temporal 客户端按编号去重）：同一张 issue 投两次只起一条；连不上记成出错，重放再起', async () => {
+    let down = false;
+    const started: string[] = [];
+    const client: WorkflowStarterLike = {
+      connection: {
+        async withDeadline(_deadline, fn) {
+          return fn();
+        },
+      },
+      workflow: {
+        async start(workflowType, options) {
+          if (down) {
+            throw new Error('Failed to start Workflow', {
+              cause: Object.assign(new Error('No connection established'), { code: 14 }),
+            });
+          }
+          if (started.includes(options.workflowId)) {
+            throw new WorkflowExecutionAlreadyStartedError(
+              'already started',
+              options.workflowId,
+              workflowType,
+            );
+          }
+          started.push(options.workflowId);
+          return {};
+        },
+      },
+    };
+    const { h } = setup({ requirements: createTemporalRequirementWorkflows(client, 'fleet-main') });
+    expect(await json(deliver(h, 'issues', issuesEvent('opened'), { delivery: 'a' }))).toMatchObject({
+      note: 'task=created, workflow=started',
+    });
+    // 同一张 issue 换个投递编号再来（比如补收）：任务还在排队，照样去拉起，Temporal 按编号挡下
+    expect(await json(deliver(h, 'issues', issuesEvent('labeled'), { delivery: 'b' }))).toMatchObject({
+      note: 'task=exists, workflow=already_running',
+    });
+    expect(started).toEqual([requirementWorkflowId(CANARY, 40)]);
+
+    down = true;
+    const res = await deliver(h, 'issues', issuesEvent('opened', issue({ number: 41 })), { delivery: 'c' });
+    expect(res.status).toBe(500);
+    expect(await h.store.getDelivery('c')).toMatchObject({ status: 'failed' });
+    expect(started).toEqual([requirementWorkflowId(CANARY, 40)]);
+    down = false;
+    expect(await createGitHubIntake(h.deps).replay('c')).toMatchObject({
+      verdict: 'accepted',
+      note: 'task=exists, workflow=started',
+    });
+    expect(started).toEqual([requirementWorkflowId(CANARY, 40), requirementWorkflowId(CANARY, 41)]);
   });
 
   it('/issues 列表里混进来的 PR：不建任务', async () => {

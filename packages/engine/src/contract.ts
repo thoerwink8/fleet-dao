@@ -2,15 +2,19 @@
 // 输入带 schemaVersion；以后加字段只许可选、读时给默认值，不许改老字段的含义（在途任务的输入是老样子）。
 // 编号的拼法（requirementWorkflowId、subtaskWorkflowId）进了在途任务的历史：改格式要用 patched()。
 
-import type { Repo, StageKind, SubtaskState, TaskState } from '@fleet-dao/shared';
-import { AGENT_EVENT_WAKE_KINDS as SHARED_WAKE_KINDS } from '@fleet-dao/shared/workflow-ids';
+import type { Repo, RequirementStartInput, StageKind, SubtaskState, TaskState } from '@fleet-dao/shared';
+import {
+  REQUIREMENT_WORKFLOW_TYPE,
+  AGENT_EVENT_WAKE_KINDS as SHARED_WAKE_KINDS,
+} from '@fleet-dao/shared/workflow-ids';
 import { defineQuery, defineSignal } from '@temporalio/workflow';
 import type { SubtaskSpec } from './decisions/plan.ts';
 import type { Limits } from './limits.ts';
 import type { WaitKind } from './ports.ts';
 
 export const WORKFLOW_TYPES = {
-  requirement: 'requirementWorkflow',
+  /** 后端起需求工作流也用这个名字（@fleet-dao/shared/workflow-ids）。 */
+  requirement: REQUIREMENT_WORKFLOW_TYPE,
   subtask: 'subtaskWorkflow',
   mergeQueue: 'mergeQueueWorkflow',
   /** P0 验收（deploy/hello.sh）：跑一次就知道引擎工人在接活。 */
@@ -41,16 +45,8 @@ export function defaultSpecDir(issueNumber: number, title: string): string {
 
 export type RouteOverrides = Partial<Record<StageKind, string>>;
 
-export interface RequirementInput {
-  schemaVersion: 1;
-  /** 库里的 tasks.id。 */
-  taskId: string;
-  repo: Repo;
-  issueNumber: number;
-  title: string;
-  /** 创始人原话。 */
-  rawRequest: string;
-  requestedBy: string;
+/** 后端给的那几样（RequirementStartInput，和后端共用一份）再加引擎自己的可选项。 */
+export interface RequirementInput extends RequirementStartInput {
   specDir?: string;
   limits?: Partial<Limits>;
   routeOverrides?: RouteOverrides;

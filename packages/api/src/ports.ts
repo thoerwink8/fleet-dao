@@ -12,6 +12,7 @@ import type {
   QuotaWindow,
   RealtimeTable,
   Repo,
+  RequirementStartInput,
   Route,
   ScheduleOutcome,
   SessionRun,
@@ -522,32 +523,22 @@ export class WorkflowGoneError extends Error {
 }
 
 /**
- * 拉起需求工作流要给的东西：和引擎 contract.ts 的 RequirementInput 同形（schemaVersion 1；limits、routeOverrides 不给，用引擎的默认）。
- * 这是进了工作流历史的输入：以后只许加可选字段，不许改老字段的意思。
+ * 拉起需求工作流要给的东西：就是 @fleet-dao/shared 的 RequirementStartInput，引擎 contract.ts 的 RequirementInput
+ * 在它上面只加可选字段（limits、routeOverrides 不给，用引擎的默认）。进了工作流历史：以后只许加可选字段。
  */
-export interface RequirementStart {
-  schemaVersion: 1;
-  /** 库里的 tasks.id。 */
-  taskId: string;
-  repo: Repo;
-  issueNumber: number;
-  title: string;
-  /** 创始人原话（issue 正文去掉进度段；正文空就是标题）。 */
-  rawRequest: string;
-  /** issue 作者的 GitHub 登录名：结果文档里写「提出人」用，本来就公开在 issue 上。 */
-  requestedBy: string;
-}
+export type RequirementStart = RequirementStartInput;
 
 /** 拉起需求工作流（一张 issue 一条，工作流编号 requirementWorkflowId(repo, issueNumber)）。 */
 export interface RequirementWorkflows {
   /**
    * 同一编号的工作流正在跑：already_running，不起第二条；上一条已经结束（需求重开）就再起一条。
-   * Temporal 没接上、连不上抛 WorkflowUnavailableError（调用方记成出错，重放时再来）。
+   * Temporal 没接上、连不上、超时抛 WorkflowUnavailableError；别的错原样抛。都不会回 started——
+   * 调用方把这条投递记成出错，重放时再来。真实现见 temporal.ts 的 createTemporalRequirementWorkflows。
    */
   start(input: RequirementStart): Promise<'started' | 'already_running'>;
 }
 
-/** 发不了信号：Temporal 客户端没接上、连不上或超时。 */
+/** 发不了信号、起不了工作流：Temporal 客户端没接上、连不上或超时。 */
 export class WorkflowUnavailableError extends Error {
   constructor(message: string, cause?: unknown) {
     super(message, { cause });
@@ -571,9 +562,10 @@ export class InvalidCursorError extends Error {
   }
 }
 
-/** 连 Temporal 的一份连接：发信号 + 给健康检查用的两项探活。用 @temporalio/client 实现，见 temporal.ts。 */
+/** 连 Temporal 的一份连接：发信号、拉起需求工作流 + 给健康检查用的两项探活。用 @temporalio/client 实现，见 temporal.ts。 */
 export interface TemporalConnection {
   control: WorkflowControl;
+  requirements: RequirementWorkflows;
   /** 连得上、命名空间也在就正常返回；连不上、超时、命名空间不存在都抛错（错误文字只进日志，不对外）。 */
   check(): Promise<void>;
   /** 查 FLEET_TASK_QUEUE 上 workflow、activity 两类 poller 在不在、新不新鲜；不在/太久没拉都抛错。 */
