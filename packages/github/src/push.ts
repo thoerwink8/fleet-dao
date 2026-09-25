@@ -1,9 +1,10 @@
-// 会话外推分支：AI 会话只在本地提交，这里用「干活的」机器人把工作树里的提交推到远端任务分支。
+// 会话外推分支：AI 会话只在本地提交，这里用「干活的」机器人把会话交出来的提交推到远端任务分支。
 // 推之前核对四件事：不是主线（拒绝推默认分支）、包含此刻最新的主线、相对主线真有内容（不推空交付，C7）、
 // 远端分支要么没有、要么是我们的祖先（别人在上面推进过就报出来让引擎认领新头，分叉就停，绝不强推，C6）。
-// 带令牌的 git 只在引擎自己的裸仓里跑，会话的提交按对象借读（为什么见 git.ts 开头）。
+// 会话的提交由会话用户打成包（git bundle）交出来，这里只把包导入引擎自己的裸仓；带令牌的 git 只在这个裸仓里跑
+// （为什么见 git.ts 开头）。
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import type { GitHubClient, Logger, RepoRef } from './client.ts';
 import { repoSlug } from './client.ts';
@@ -15,7 +16,6 @@ import {
   type GitRun,
   type GitRunner,
   gitEnv,
-  objectsDirOf,
   tail,
 } from './git.ts';
 import type { RepoFactsCache } from './repos.ts';
@@ -36,8 +36,11 @@ export interface PushDeps {
 
 export interface PushBranchInput {
   repo: RepoRef;
-  /** 会话的工作树（只读它的对象库，不在里面跑 git）。 */
-  worktreePath: string;
+  /**
+   * 会话用户交出来的包：起会话前的头之后的新提交（会话用户在树里跑 `git bundle create <文件> HEAD ^<起会话前的头>`）。
+   * 包的前置提交必须在主线或远端分支上。这里只读这个文件、导入引擎的裸仓；文件归调用方收。
+   */
+  bundlePath: string;
   branch: string;
   /** 要推的提交；推完远端分支头就是它。 */
   head: string;
@@ -96,7 +99,6 @@ export async function pushBranch(deps: PushDeps, input: PushBranchInput): Promis
   if (branch.toLowerCase() === defaultBranch.toLowerCase()) {
     throw new GitHubError('BRANCH_FORBIDDEN', `拒绝推 ${slug} 的主线 ${defaultBranch}：主线只经合并队列改`);
   }
-  const objects = objectsDirOf(input.worktreePath);
   const mirror = join(deps.mirrorRoot, repo.owner.toLowerCase(), `${repo.name.toLowerCase()}.git`);
 
   return withMirrorLock(mirror, async () => {
@@ -108,7 +110,7 @@ export async function pushBranch(deps: PushDeps, input: PushBranchInput): Promis
       env: gitEnv({ base: deps.baseEnv, config: authHeaderConfig(deps.gitHost, token) }),
       timeoutMs: NET_TIMEOUT_MS,
     };
-    const local: GitCall = { cwd: mirror, env: gitEnv({ base: deps.baseEnv, alternates: [objects] }) };
+    const local: GitCall = { cwd: mirror, env: gitEnv({ base: deps.baseEnv }) };
     const git = (args: string[], call: GitCall) => deps.git(args, call);
     const mainRef = 'refs/fleet/main';
     const branchRef = `refs/fleet/b/${createHash('sha1').update(branch).digest('hex').slice(0, 16)}`;
@@ -142,11 +144,12 @@ export async function pushBranch(deps: PushDeps, input: PushBranchInput): Promis
       if (fetched.code !== 0) throw fromGitFailure('抓取主线', slug, fetched);
       const mainline = await revParse(git, local, mainRef);
 
-      // 3. 要推的提交在不在
+      // 3. 导入会话交来的包（包的前置提交靠刚抓进来的主线和远端分支补齐），再看要推的提交在不在
+      await importBundle(git, local, input.bundlePath, slug);
       const exists = await git(['cat-file', '-e', `${head}^{commit}`], local);
       if (exists.code !== 0) {
-        throw new GitHubError('HEAD_NOT_FOUND', `工作树 ${input.worktreePath} 里没有提交 ${head}`, {
-          details: { worktreePath: input.worktreePath, head },
+        throw new GitHubError('HEAD_NOT_FOUND', `会话交来的包 ${input.bundlePath} 里没有提交 ${head}`, {
+          details: { bundlePath: input.bundlePath, head },
         });
       }
 
@@ -179,18 +182,9 @@ export async function pushBranch(deps: PushDeps, input: PushBranchInput): Promis
       if (remoteBefore) await assertFastForward(git, local, remoteBefore, head, slug, branch);
 
       // 7. 推（不强推：远端这时被别人推进了，GitHub 会拒，下面再判）
-      const pushEnv: GitCall = {
-        cwd: mirror,
-        env: gitEnv({
-          base: deps.baseEnv,
-          config: authHeaderConfig(deps.gitHost, token),
-          alternates: [objects],
-        }),
-        timeoutMs: NET_TIMEOUT_MS,
-      };
       const pushed = await git(
         ['push', '--porcelain', '--no-verify', url, `${head}:refs/heads/${branch}`],
-        pushEnv,
+        net,
       );
       if (pushed.code !== 0) {
         const kind = classifyPushFailure(`${pushed.stderr}\n${pushed.stdout}`);
@@ -252,6 +246,45 @@ async function ensureMirror(deps: PushDeps, mirror: string): Promise<void> {
 }
 
 type Git = (args: string[], call: GitCall) => Promise<GitRun>;
+
+/**
+ * 把会话交来的包导入镜像。包是会话用户写的，当数据读：`bundle unbundle` 只写对象、不建引用、不执行包里的任何东西。
+ * 读不到、不是包、缺前置提交各报各的错，都不当「导入了」往下走。
+ */
+async function importBundle(git: Git, call: GitCall, bundlePath: string, slug: string): Promise<void> {
+  let isFile = false;
+  try {
+    isFile = statSync(bundlePath).isFile();
+  } catch {
+    isFile = false;
+  }
+  if (!isFile) {
+    throw new GitHubError('BUNDLE_UNREADABLE', `读不到会话交来的包 ${bundlePath}：没导入成，这次不推`, {
+      details: { bundlePath },
+    });
+  }
+  const res = await git(['bundle', 'unbundle', bundlePath], call);
+  if (res.code === 0) return;
+  const why = res.stderr.toLowerCase();
+  if (why.includes('lacks these prerequisite commits')) {
+    throw new GitHubError(
+      'BUNDLE_INCOMPLETE',
+      `会话交来的包缺前置提交：包要从主线或远端分支上已有的提交之后打（${tail(res.stderr)}）`,
+      { details: { bundlePath, exitCode: res.code } },
+    );
+  }
+  if (why.includes('does not look like a v2 or v3 bundle') || why.includes('is not a bundle')) {
+    throw new GitHubError('BUNDLE_INVALID', `会话交来的 ${bundlePath} 不是 git 包：${tail(res.stderr)}`, {
+      details: { bundlePath, exitCode: res.code },
+    });
+  }
+  if (why.includes('could not open')) {
+    throw new GitHubError('BUNDLE_UNREADABLE', `打不开会话交来的包 ${bundlePath}：${tail(res.stderr)}`, {
+      details: { bundlePath, exitCode: res.code },
+    });
+  }
+  throw fromGitFailure('导入会话交来的包', slug, res);
+}
 
 async function lsRemote(
   git: Git,

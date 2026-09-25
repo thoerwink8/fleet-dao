@@ -49,7 +49,6 @@ export {
   execGit,
   type GitRunner,
   gitEnv,
-  objectsDirOf,
 } from './git.ts';
 export {
   createGitHub,

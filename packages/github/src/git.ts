@@ -3,11 +3,9 @@
 //
 // 改这里之前必须知道：带令牌的 git 进程绝不在 AI 会话的工作树里跑——工作树的 .git/config、钩子是会话写得到的，
 // 一条 core.hooksPath、reference-transaction 钩子、insteadOf 就能把令牌带走。推送在引擎自己的裸仓（镜像）里做，
-// 会话的提交经 GIT_ALTERNATE_OBJECT_DIRECTORIES 只按对象读进来：不在会话的仓里执行任何 git 命令、不读它的配置。
+// 会话的提交由会话用户打成包（git bundle）交出来、导入镜像：引擎不以自己的身份碰会话的仓（design 十四）。
 import { execFile } from 'node:child_process';
-import { readFileSync, statSync } from 'node:fs';
-import { isAbsolute, join, resolve } from 'node:path';
-import { GitHubError, redact } from './errors.ts';
+import { redact } from './errors.ts';
 
 export interface GitRun {
   code: number;
@@ -73,8 +71,6 @@ export interface GitEnvOptions {
   base?: Readonly<Record<string, string | undefined>> | undefined;
   /** 一次性配置（按顺序进 GIT_CONFIG_KEY_n/VALUE_n；同名多值的键，空值 = 清空之前的）。 */
   config?: readonly (readonly [string, string])[] | undefined;
-  /** 额外的对象库（只读地借会话仓里的提交）。 */
-  alternates?: readonly string[] | undefined;
 }
 
 export function gitEnv(options: GitEnvOptions = {}): Record<string, string> {
@@ -99,13 +95,7 @@ export function gitEnv(options: GitEnvOptions = {}): Record<string, string> {
     env[`GIT_CONFIG_KEY_${i}`] = key;
     env[`GIT_CONFIG_VALUE_${i}`] = value;
   });
-  if (options.alternates?.length)
-    env.GIT_ALTERNATE_OBJECT_DIRECTORIES = options.alternates.join(pathListSeparator());
   return env;
-}
-
-function pathListSeparator(): string {
-  return process.platform === 'win32' ? ';' : ':';
 }
 
 /**
@@ -119,58 +109,6 @@ export function authHeaderConfig(gitHost: string, token: string): [string, strin
     [`http.${prefix}.extraHeader`, ''],
     [`http.${prefix}.extraHeader`, `AUTHORIZATION: basic ${basic}`],
   ];
-}
-
-/**
- * 找工作树的对象库目录——只读文件，不跑 git（不在会话的仓里执行任何东西）。
- * 普通仓：<树>/.git/objects；加出来的工作树：.git 是个文件，指到主仓的 worktrees/<名>，再按 commondir 找到主仓。
- */
-export function objectsDirOf(worktreePath: string): string {
-  const dotGit = join(worktreePath, '.git');
-  let gitDir: string;
-  try {
-    const st = statSync(dotGit);
-    if (st.isDirectory()) {
-      gitDir = dotGit;
-    } else {
-      const m = /^gitdir:\s*(.+?)\s*$/m.exec(readFileSync(dotGit, 'utf8'));
-      if (!m?.[1]) throw new Error('.git 文件里没有 gitdir');
-      gitDir = isAbsolute(m[1]) ? m[1] : resolve(worktreePath, m[1]);
-    }
-  } catch (err) {
-    // 也许传进来的就是个裸仓
-    try {
-      if (
-        statSync(join(worktreePath, 'objects')).isDirectory() &&
-        statSync(join(worktreePath, 'HEAD')).isFile()
-      ) {
-        return join(worktreePath, 'objects');
-      }
-    } catch {
-      // 落到下面报错
-    }
-    throw new GitHubError(
-      'WORKTREE_UNREADABLE',
-      `找不到工作树 ${worktreePath} 的仓库目录：${redact(String(err))}`,
-    );
-  }
-  let commonDir = gitDir;
-  try {
-    const rel = readFileSync(join(gitDir, 'commondir'), 'utf8').trim();
-    if (rel) commonDir = isAbsolute(rel) ? rel : resolve(gitDir, rel);
-  } catch {
-    // 没有 commondir 就是主仓自己
-  }
-  const objects = join(commonDir, 'objects');
-  try {
-    if (!statSync(objects).isDirectory()) throw new Error('不是目录');
-  } catch (err) {
-    throw new GitHubError(
-      'WORKTREE_UNREADABLE',
-      `工作树 ${worktreePath} 的对象库 ${objects} 读不了：${redact(String(err))}`,
-    );
-  }
-  return objects;
 }
 
 export type PushFailure =

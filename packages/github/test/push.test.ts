@@ -1,4 +1,5 @@
 // 推分支用真 git、本地裸仓当远端（不出网）。GitHub 接口（默认分支、换令牌）走假服务。
+// 会话交出来的是包（git bundle）：这里在测试自己的树里打包，模拟会话用户那一步。
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -23,7 +24,7 @@ let root: string;
 let remote: string;
 let main: string;
 
-/** 在 main 上起一棵加出来的工作树（引擎就是这么给会话建树的），在里面提交一次。 */
+/** 在 main 上起一棵加出来的工作树（引擎就是这么给会话建树的），在里面提交一次，再像会话用户那样打包交出来。 */
 function worktree(
   branch: string,
   files: Record<string, string> = { [`${branch.replace(/\//g, '-')}.txt`]: branch },
@@ -31,10 +32,18 @@ function worktree(
   const path = join(root, `wt-${branch.replace(/\//g, '-')}-${Math.random().toString(36).slice(2, 7)}`);
   git(main, 'fetch', '-q', 'origin');
   git(main, 'worktree', 'add', '-q', '-b', branch, path, 'origin/main');
+  const start = git(path, 'rev-parse', 'HEAD');
   for (const [name, text] of Object.entries(files)) writeFileSync(join(path, name), text);
   git(path, 'add', '-A');
   git(path, 'commit', '-q', '-m', `work on ${branch}`);
-  return { path, head: git(path, 'rev-parse', 'HEAD') };
+  return { path, start, head: git(path, 'rev-parse', 'HEAD'), bundle: bundleOf(path, start) };
+}
+
+/** 会话用户那一步：把起会话前的头之后的新提交打成包。 */
+function bundleOf(tree: string, since: string): string {
+  const file = join(root, `delivery-${Math.random().toString(36).slice(2, 9)}.bundle`);
+  git(tree, 'bundle', 'create', '-q', file, 'HEAD', `^${since}`);
+  return file;
 }
 
 function advanceRemoteMain(): string {
@@ -85,7 +94,7 @@ describe('会话外推分支', { timeout: 60_000 }, () => {
     const wt = worktree('task/1-new');
     const res = await gh.pushBranch({
       repo: { owner: 'acme', name: 'widgets' },
-      worktreePath: wt.path,
+      bundlePath: wt.bundle,
       branch: 'task/1-new',
       head: wt.head,
     });
@@ -106,8 +115,13 @@ describe('会话外推分支', { timeout: 60_000 }, () => {
     expect(header).toBeDefined();
     const keyName = header?.[0].replace('VALUE', 'KEY') ?? '';
     expect(pushCall?.env[keyName]).toBe('http.https://github.com/.extraHeader');
-    // 带令牌的 git 从不在会话的工作树里跑
-    expect(calls.every((c) => !c.cwd.startsWith(wt.path))).toBe(true);
+    // 引擎不碰会话的工作树：不在里面跑 git、不借它的对象库，只读交出来的包；导入包那一步不带令牌
+    expect(calls.filter((c) => c.cwd.startsWith(wt.path))).toEqual([]);
+    expect(calls.filter((c) => c.args.some((a) => a.includes(wt.path)))).toEqual([]);
+    expect(calls.filter((c) => c.env.GIT_ALTERNATE_OBJECT_DIRECTORIES !== undefined)).toEqual([]);
+    const unbundle = calls.filter((c) => c.args[0] === 'bundle');
+    expect(unbundle.map((c) => c.args)).toEqual([['bundle', 'unbundle', wt.bundle]]);
+    expect(Object.values(unbundle[0]?.env ?? {}).filter((v) => v.startsWith('AUTHORIZATION'))).toEqual([]);
   });
 
   it('拒绝推主线；分支名不合规就不推', async () => {
@@ -115,12 +129,12 @@ describe('会话外推分支', { timeout: 60_000 }, () => {
     const wt = worktree('task/2-main');
     const repo = { owner: 'acme', name: 'widgets' };
     await expect(
-      gh.pushBranch({ repo, worktreePath: wt.path, branch: 'main', head: wt.head }),
+      gh.pushBranch({ repo, bundlePath: wt.bundle, branch: 'main', head: wt.head }),
     ).rejects.toMatchObject({
       code: 'BRANCH_FORBIDDEN',
     });
     await expect(
-      gh.pushBranch({ repo, worktreePath: wt.path, branch: 'MAIN', head: wt.head }),
+      gh.pushBranch({ repo, bundlePath: wt.bundle, branch: 'MAIN', head: wt.head }),
     ).rejects.toMatchObject({
       code: 'BRANCH_FORBIDDEN',
     });
@@ -137,7 +151,7 @@ describe('会话外推分支', { timeout: 60_000 }, () => {
     await expect(
       gh.pushBranch({
         repo: { owner: 'acme', name: 'widgets' },
-        worktreePath: wt.path,
+        bundlePath: wt.bundle,
         branch: 'task/3-behind',
         head: wt.head,
       }),
@@ -152,24 +166,31 @@ describe('会话外推分支', { timeout: 60_000 }, () => {
     git(wt.path, 'revert', '--no-edit', 'HEAD');
     const noDiff = git(wt.path, 'rev-parse', 'HEAD');
     await expect(
-      gh.pushBranch({ repo, worktreePath: wt.path, branch: 'task/4-empty', head: noDiff }),
+      gh.pushBranch({ repo, bundlePath: bundleOf(wt.path, wt.start), branch: 'task/4-empty', head: noDiff }),
     ).rejects.toMatchObject({
       code: 'EMPTY_DELIVERY',
     });
     const mainline = git(wt.path, 'rev-parse', 'origin/main');
     await expect(
-      gh.pushBranch({ repo, worktreePath: wt.path, branch: 'task/4-empty', head: mainline }),
+      gh.pushBranch({ repo, bundlePath: wt.bundle, branch: 'task/4-empty', head: mainline }),
     ).rejects.toMatchObject({
       code: 'EMPTY_DELIVERY',
     });
+    expect(remoteHead('task/4-empty')).toBeNull();
   });
 
   it('同一个头再推一次（重试）：什么都不做', async () => {
     const { gh } = pushSetup();
     const repo = { owner: 'acme', name: 'widgets' };
     const wt = worktree('task/5-again');
-    await gh.pushBranch({ repo, worktreePath: wt.path, branch: 'task/5-again', head: wt.head });
-    const again = await gh.pushBranch({ repo, worktreePath: wt.path, branch: 'task/5-again', head: wt.head });
+    await gh.pushBranch({ repo, bundlePath: wt.bundle, branch: 'task/5-again', head: wt.head });
+    // 回执丢了再来一次：包可能已经被调用方收走了，也不影响
+    const again = await gh.pushBranch({
+      repo,
+      bundlePath: join(root, 'already-collected.bundle'),
+      branch: 'task/5-again',
+      head: wt.head,
+    });
     expect(again).toMatchObject({ pushed: false, remoteBefore: wt.head });
   });
 
@@ -177,12 +198,18 @@ describe('会话外推分支', { timeout: 60_000 }, () => {
     const { gh } = pushSetup();
     const repo = { owner: 'acme', name: 'widgets' };
     const wt = worktree('task/6-ff');
-    await gh.pushBranch({ repo, worktreePath: wt.path, branch: 'task/6-ff', head: wt.head });
+    await gh.pushBranch({ repo, bundlePath: wt.bundle, branch: 'task/6-ff', head: wt.head });
+    // 返工：第二个会话从上次推上去的头起，只交这之后的新提交
     writeFileSync(join(wt.path, 'more.txt'), 'more');
     git(wt.path, 'add', '-A');
     git(wt.path, 'commit', '-q', '-m', 'more');
     const head2 = git(wt.path, 'rev-parse', 'HEAD');
-    const res = await gh.pushBranch({ repo, worktreePath: wt.path, branch: 'task/6-ff', head: head2 });
+    const res = await gh.pushBranch({
+      repo,
+      bundlePath: bundleOf(wt.path, wt.head),
+      branch: 'task/6-ff',
+      head: head2,
+    });
     expect(res).toMatchObject({ pushed: true, remoteBefore: wt.head });
     expect(remoteHead('task/6-ff')).toBe(head2);
   });
@@ -191,7 +218,7 @@ describe('会话外推分支', { timeout: 60_000 }, () => {
     const { gh } = pushSetup();
     const repo = { owner: 'acme', name: 'widgets' };
     const wt = worktree('task/7-ahead');
-    await gh.pushBranch({ repo, worktreePath: wt.path, branch: 'task/7-ahead', head: wt.head });
+    await gh.pushBranch({ repo, bundlePath: wt.bundle, branch: 'task/7-ahead', head: wt.head });
     const other = join(root, 'other-7');
     git(root, 'clone', '-q', '-b', 'task/7-ahead', remote, other);
     writeFileSync(join(other, 'by-someone.txt'), 'x');
@@ -200,7 +227,7 @@ describe('会话外推分支', { timeout: 60_000 }, () => {
     git(other, 'push', '-q', 'origin', 'HEAD:task/7-ahead');
     const theirs = git(other, 'rev-parse', 'HEAD');
     await expect(
-      gh.pushBranch({ repo, worktreePath: wt.path, branch: 'task/7-ahead', head: wt.head }),
+      gh.pushBranch({ repo, bundlePath: wt.bundle, branch: 'task/7-ahead', head: wt.head }),
     ).rejects.toMatchObject({
       code: 'REMOTE_AHEAD',
       details: { remoteHead: theirs },
@@ -212,7 +239,7 @@ describe('会话外推分支', { timeout: 60_000 }, () => {
     const { gh } = pushSetup();
     const repo = { owner: 'acme', name: 'widgets' };
     const wt = worktree('task/8-fork');
-    await gh.pushBranch({ repo, worktreePath: wt.path, branch: 'task/8-fork', head: wt.head });
+    await gh.pushBranch({ repo, bundlePath: wt.bundle, branch: 'task/8-fork', head: wt.head });
     const other = join(root, 'other-8');
     git(root, 'clone', '-q', '-b', 'task/8-fork', remote, other);
     writeFileSync(join(other, 'theirs.txt'), 'x');
@@ -225,24 +252,65 @@ describe('会话外推分支', { timeout: 60_000 }, () => {
     git(wt.path, 'commit', '-q', '-m', 'ours');
     const ours = git(wt.path, 'rev-parse', 'HEAD');
     await expect(
-      gh.pushBranch({ repo, worktreePath: wt.path, branch: 'task/8-fork', head: ours }),
+      gh.pushBranch({ repo, bundlePath: bundleOf(wt.path, wt.head), branch: 'task/8-fork', head: ours }),
     ).rejects.toMatchObject({
       code: 'DIVERGED',
     });
     expect(remoteHead('task/8-fork')).toBe(theirs);
   });
 
-  it('工作树里没有这个提交：报 HEAD_NOT_FOUND', async () => {
+  it('包里没有这个提交：报 HEAD_NOT_FOUND', async () => {
     const { gh } = pushSetup();
     const wt = worktree('task/9-missing');
     await expect(
       gh.pushBranch({
         repo: { owner: 'acme', name: 'widgets' },
-        worktreePath: wt.path,
+        bundlePath: wt.bundle,
         branch: 'task/9-missing',
         head: 'f'.repeat(40),
       }),
     ).rejects.toMatchObject({ code: 'HEAD_NOT_FOUND' });
+    expect(remoteHead('task/9-missing')).toBeNull();
+  });
+
+  it('包读不到、不是包、缺前置提交：各报各的错，一个都不推', async () => {
+    const { gh } = pushSetup();
+    const repo = { owner: 'acme', name: 'widgets' };
+    const wt = worktree('task/11-bad-bundle');
+
+    await expect(
+      gh.pushBranch({
+        repo,
+        bundlePath: join(root, 'no-such.bundle'),
+        branch: 'task/11-bad-bundle',
+        head: wt.head,
+      }),
+    ).rejects.toMatchObject({ code: 'BUNDLE_UNREADABLE', retryable: false });
+    await expect(
+      gh.pushBranch({ repo, bundlePath: root, branch: 'task/11-bad-bundle', head: wt.head }),
+    ).rejects.toMatchObject({ code: 'BUNDLE_UNREADABLE' });
+
+    const junk = join(root, 'junk.bundle');
+    writeFileSync(junk, 'not a bundle\n');
+    await expect(
+      gh.pushBranch({ repo, bundlePath: junk, branch: 'task/11-bad-bundle', head: wt.head }),
+    ).rejects.toMatchObject({ code: 'BUNDLE_INVALID', retryable: false });
+
+    // 上一个会话的提交从没推上去，这次只交了它之后的：引擎这边补不齐
+    writeFileSync(join(wt.path, 'later.txt'), 'later');
+    git(wt.path, 'add', '-A');
+    git(wt.path, 'commit', '-q', '-m', 'later');
+    const later = git(wt.path, 'rev-parse', 'HEAD');
+    await expect(
+      gh.pushBranch({
+        repo,
+        bundlePath: bundleOf(wt.path, wt.head),
+        branch: 'task/11-bad-bundle',
+        head: later,
+      }),
+    ).rejects.toMatchObject({ code: 'BUNDLE_INCOMPLETE', retryable: false });
+
+    expect(remoteHead('task/11-bad-bundle')).toBeNull();
   });
 
   it('C3：推送因 workflows 权限被拒，一次判「要人」，不当可重试', async () => {
@@ -256,7 +324,7 @@ describe('会话外推分支', { timeout: 60_000 }, () => {
     await expect(
       gh.pushBranch({
         repo: { owner: 'acme', name: 'widgets' },
-        worktreePath: wt.path,
+        bundlePath: wt.bundle,
         branch: 'task/10-wf',
         head: wt.head,
       }),

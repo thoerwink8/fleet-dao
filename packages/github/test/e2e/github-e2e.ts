@@ -277,16 +277,19 @@ try {
     `巡检：真机验收 ${stamp}`,
   );
   const head = git(tree, 'rev-parse', 'HEAD');
+  // 会话用户那一步：把起会话前的头之后的新提交打成包交出来（引擎不碰这棵树）
+  const bundlePath = join(root, 'delivery.bundle');
+  git(tree, 'bundle', 'create', '-q', bundlePath, 'HEAD', '^origin/main');
 
   // 3. 推（会话外，「干活的」机器人）
   await step(
-    '推分支（干活的）',
-    () => github.pushBranch({ repo, worktreePath: tree, branch, head }),
+    '推分支（干活的，从会话交来的包）',
+    () => github.pushBranch({ repo, bundlePath, branch, head }),
     (r) => (r.pushed && r.head === head ? null : `pushed=${r.pushed} head=${r.head}`),
   );
   await step(
     '推两次：第二次什么都不做',
-    () => github.pushBranch({ repo, worktreePath: tree, branch, head }),
+    () => github.pushBranch({ repo, bundlePath, branch, head }),
     (r) => (r.pushed ? '又推了一次' : null),
   );
   await step(
@@ -382,12 +385,12 @@ try {
   };
   await step(
     '拒绝推主线',
-    () => refused({ repo, worktreePath: tree, branch: 'main', head }),
+    () => refused({ repo, bundlePath, branch: 'main', head }),
     (code) => (code === 'BRANCH_FORBIDDEN' ? null : `应当拒绝，实际：${code}`),
   );
   await step(
     '主线已经前进：旧头不许推（先同步主线）',
-    () => refused({ repo, worktreePath: tree, branch: `${branch}-stale`, head }),
+    () => refused({ repo, bundlePath, branch: `${branch}-stale`, head }),
     (code) => (code === 'BEHIND_MAINLINE' ? null : `应当报 BEHIND_MAINLINE，实际：${code}`),
   );
 
