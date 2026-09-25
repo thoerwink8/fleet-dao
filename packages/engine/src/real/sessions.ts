@@ -657,8 +657,10 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
       (report) => {
         if (!spawnedYet) {
           spawnReject(
+            // 不可重试：活动原地重试用的是同一个 runId，库里这一行已经记了结局，第二次只会报「已经结束过」，
+            // 把起不来的真原因（reclaude 不在之类，失败分流 CF1 认它）吞掉。交回工作流，由它换新 runId 再起。
             new PortError('SPAWN_FAILED', `会话没起来：${report.spawnError ?? '进程起不来'}`, {
-              retryable: true,
+              retryable: false,
             }),
           );
         }
@@ -680,7 +682,12 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
         spawned,
         new Promise<never>((_, reject) => {
           timer = setTimeout(
-            () => reject(new PortError('SPAWN_TIMEOUT', `等了 ${spawnTimeoutMs / 1000} 秒进程还没起来`)),
+            () =>
+              reject(
+                new PortError('SPAWN_TIMEOUT', `等了 ${spawnTimeoutMs / 1000} 秒进程还没起来`, {
+                  retryable: false,
+                }),
+              ),
             spawnTimeoutMs,
           );
         }),

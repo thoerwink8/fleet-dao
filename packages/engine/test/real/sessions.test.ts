@@ -79,7 +79,7 @@ function ctx(): PortContext & { beats: number } {
 
 function setup(
   script: (spec: Parameters<ReturnType<typeof fakeRun>['run']>[0], n: number) => FakeRunScript,
-  options: { transcriptMissing?: boolean } = {},
+  options: { transcriptMissing?: boolean; spawnTimeoutMs?: number } = {},
 ) {
   const fake = fakeRun(script);
   const trees = fakeTrees(join(root, 'work'), options);
@@ -100,7 +100,7 @@ function setup(
     tickMs: 10,
     stallCheckMs: 30,
     flushMs: 5,
-    spawnTimeoutMs: 5000,
+    spawnTimeoutMs: options.spawnTimeoutMs ?? 5000,
     stallPolicy: { noProgressSeconds: 1 },
     log: () => {},
   });
@@ -586,13 +586,37 @@ describe('失败', () => {
     await ports.stopSession({ taskId, runId: input.runId, mode: 'kill', reason: '收尾' }, ctx());
   });
 
-  it('进程起不来：明确报 SPAWN_FAILED，库里这一行记上结局', async () => {
-    const { ports } = setup(() => ({ spawnError: 'spawn /opt/fake/reclaude ENOENT' }));
+  it('进程起不来：明确报 SPAWN_FAILED（不可重试：原因原样交工作流），库里这一行记上结局', async () => {
+    const { ports, fake } = setup(() => ({ spawnError: 'spawn /opt/fake/reclaude ENOENT' }));
     const input = launch();
-    await expect(ports.startSession(input, ctx())).rejects.toMatchObject({ code: 'SPAWN_FAILED' });
+    await expect(ports.startSession(input, ctx())).rejects.toMatchObject({
+      code: 'SPAWN_FAILED',
+      retryable: false,
+      message: expect.stringContaining('ENOENT'),
+    });
     expect(await getSessionRun(t.db, input.runId)).toMatchObject({
       outcome: 'failed',
       failureCode: 'SPAWN_FAILED',
+    });
+    // 同一个 runId 再起一次（活动原地重试就是这样）：库里已经记了结局，明确报已经结束过、不再起进程——
+    // 所以 SPAWN_FAILED 不能标可重试，不然真原因被这一句盖掉；换新 runId 重起是工作流的事
+    await expect(ports.startSession(input, ctx())).rejects.toMatchObject({
+      code: 'SESSION_ENDED',
+      retryable: false,
+    });
+    expect(fake.specs).toHaveLength(1);
+  });
+
+  it('进程迟迟起不来：到点明确报 SPAWN_TIMEOUT（不可重试），叫停它，库里这一行记上结局', async () => {
+    const { ports } = setup(() => ({ hangBeforeSpawn: true }), { spawnTimeoutMs: 200 });
+    const input = launch();
+    await expect(ports.startSession(input, ctx())).rejects.toMatchObject({
+      code: 'SPAWN_TIMEOUT',
+      retryable: false,
+    });
+    expect(await getSessionRun(t.db, input.runId)).toMatchObject({
+      outcome: 'failed',
+      failureCode: 'SPAWN_TIMEOUT',
     });
   });
 

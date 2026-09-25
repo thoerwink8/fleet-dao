@@ -215,6 +215,8 @@ export function fakeTrees(root: string, options: { transcriptMissing?: boolean }
 export interface FakeRunScript {
   /** 进程起不来（spawnError），不调 onSpawn。 */
   spawnError?: string;
+  /** 迟迟起不来：不调 onSpawn，等被叫停才收场（测「等进程起来」超时）。 */
+  hangBeforeSpawn?: boolean;
   /** 起来之后做的事：发事件、改工作树、在库里写 done……abort 了要尽快返回。 */
   act?: (ctx: {
     spec: ClaudeCodeRunSpec;
@@ -286,6 +288,22 @@ export function fakeRun(script: (spec: ClaudeCodeRunSpec, n: number) => FakeRunS
     if (s.spawnError) {
       const endedAt = new Date().toISOString();
       return { ...base, exitCode: null, spawnError: s.spawnError, endedAt, wallMs: 0, stream: stream([]) };
+    }
+    if (s.hangBeforeSpawn) {
+      const signal = opts.signal ?? new AbortController().signal;
+      await new Promise<void>((resolve) => {
+        if (signal.aborted) resolve();
+        else signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+      const endedAt = new Date().toISOString();
+      return {
+        ...base,
+        exitCode: null,
+        spawnError: '起到一半被叫停',
+        endedAt,
+        wallMs: 0,
+        stream: stream([]),
+      };
     }
     await opts.onSpawn?.({
       pid: 4242,

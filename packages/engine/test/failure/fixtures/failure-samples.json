@@ -1054,6 +1054,20 @@
         "message": "推之前把最新主线 5d6e7f8 并进来有冲突：src/a.ts。在树里 git merge 5d6e7f8 解掉冲突、提交后再交"
       },
       "expect": { "action": "retry", "rule": "MC1", "counter": "reworks", "delaySeconds": 0 }
+    },
+    {
+      "id": "X68",
+      "provenance": "format",
+      "origin": "真会话端口起会话时进程没起来（SPAWN_FAILED，不可重试：原因原样交工作流，同一个 runId 重试只会报已经结束过）；原文带着插头报的 ENOENT",
+      "evidence": {
+        "source": "session:execute",
+        "routeBound": true,
+        "hostId": "claude-code",
+        "code": "SPAWN_FAILED",
+        "retryable": false,
+        "message": "会话没起来：spawn /opt/fleet/bin/reclaude ENOENT"
+      },
+      "expect": { "action": "swapRoute", "rule": "CF1", "alert": true }
     }
   ],
   "skipped": [
