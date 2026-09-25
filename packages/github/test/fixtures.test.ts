@@ -96,7 +96,7 @@ describe('夹具脱敏（公开仓）', () => {
   it('故意放进去的违规样本都拦得住', () => {
     // 样本在运行时拼起来：整段写在源码里，全仓卫生检查会拦这个文件自己。值是随手编的、不指向任何人。
     const samples = [
-      `mail me: ${['someone', 'corp-mail.co'].join('@')}`,
+      `mail me: ${['zhang.san', 'corp-mail.co'].join('@')}`,
       `host ${[51, 38, 4, 17].join('.')}`,
       `token ${['ghs', 'q7Rz2LmX9vKp4TnB8wYc1HdF6jGs3NaEw5Yu'].join('_')}`,
       `"client_id": "${['Iv23li', 'Q7rZ2mXw9vKp4T'].join('')}"`,

@@ -120,6 +120,11 @@ function harmlessEmail(address: string): boolean {
   const local = lower.slice(0, at);
   const domain = lower.slice(at + 1);
   if (domain === 'users.noreply.github.com' || /^no-?reply(?:\+[\w.-]*)?$/.test(local)) return true;
+  // 玩具地址：本地部分、域名每段都不超过三个字符（a@b.com、x.y+z@q-r.io，连写的 a@b.com_c@d.com 会被认成 b.com_c@d.com），
+  // 或者本地部分是 user / someone 这类泛称。
+  const labels = domain.split('.').slice(0, -1);
+  if (local.split(/[^a-z0-9]+/).every((run) => run.length <= 3) && labels.every((l) => l.length <= 3)) return true;
+  if (/^(?:user|username|someone|somebody|name|foo|bar|baz|me|you)$/.test(local)) return true;
   if (local === 'git' && /^(?:github\.com|gitlab\.com|bitbucket\.org|ssh\.dev\.azure\.com)$/.test(domain))
     return true;
   if (/^(?:.+\.)?example\.(?:com|org|net)$/.test(domain)) return true;

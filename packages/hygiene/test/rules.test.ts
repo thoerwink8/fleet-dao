@@ -88,6 +88,7 @@ describe('形状像、但不算的', () => {
     ['不回信的系统地址', 'Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>'],
     ['git 远端', 'git clone git@github.com:thoerwink8/fleet-dao.git'],
     ['示例域名', 'someone@example.com · a@b.example.org · x@y.test · z@w.invalid · x@corp.example.com'],
+    ['玩具地址和泛称', 'a@b.com_c@d.com · x.y+z@q-r.io · 9x@y.com · a@b.co · user@corp.io'],
     ['systemd 模板单元', 'postgresql@16-main.service · wg-quick@wg-fleet.service'],
     ['npm 包的版本号', '@esbuild-kit/core-utils@3.3.2 · agents-md@builtin · npm i foo@^4.2.1'],
     ['内网和回环', '10.0.0.1 · 172.16.5.4 · 192.168.1.1 · 127.0.0.1 · 0.0.0.0 · 169.254.1.1 · 100.64.0.1'],

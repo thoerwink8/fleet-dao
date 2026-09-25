@@ -20,7 +20,7 @@ const run = (files: Record<string, Buffer>, allowlist: readonly Allow[] = [], va
     mustInclude: 'packages/hygiene/src/rules.ts',
     values,
   });
-const leakEmail = ['someone', 'mail.co'].join('@');
+const leakEmail = ['zhang.san', 'mail.co'].join('@');
 
 describe('runCheck', () => {
   it('扫了、名单读到了、没查出东西：退出码 0，写明扫了几个、名单几条', () => {
