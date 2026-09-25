@@ -24,6 +24,9 @@
     },
     {
       "path": "packages/github"
+    },
+    {
+      "path": "packages/jev"
     }
   ]
 }

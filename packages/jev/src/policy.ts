@@ -1,0 +1,83 @@
+// 管住 Jev 的几条线。默认值只在这一处；驾驶舱设置里配了就以设置为准（readPolicy），页面和文档从这里读，不手写数字。
+
+export interface JevPolicy {
+  /** 攒满多少条「有把握、有真值」的判定，才考虑从只记不拦转真拦。 */
+  minSamples: number;
+  /** 准确率线：生产判定和巡检考题都要不低于它。 */
+  accuracyLine: number;
+  /** 一次巡检考试至少答出几道才作数，少于它算「没考成」。 */
+  examMinAnswered: number;
+  /** 一次巡检考试至少答出几成才作数（答出 = 答在题面选项里，不论把握）。 */
+  examAnsweredShare: number;
+  /** 只记不拦超过这么多天还没攒够样本，日报报「影子停滞」。 */
+  shadowStallDays: number;
+  /** 生产里每天最多问几道题（一次问几道算几次，巡检考试不算在内）；设置里的 judge.dailyCallLimit 优先。 */
+  dailyCallLimit: number;
+  /**
+   * 巡检考试每天最多问几道，和生产的分开算：满卷考下来不能把生产调用整天顶回默认。
+   * 默认留够一天四轮满卷（巡检每 6 小时一轮，设计「已定」第 15 条；满卷多少道由 exams/ 算，测试钉着）；
+   * 设置里的 judge.examDailyCallLimit 优先。
+   */
+  examDailyCallLimit: number;
+  /**
+   * 按量计费的后端（TypeSafe）每天最多花多少美元，到了就停调、走默认。默认沿用旧系统的日帽，
+   * 也是额度读取器里 Jev 那个池的上限（deploy/examples/quota.example.json）；设置里的 judge.dailyUsdCap 优先。
+   */
+  dailyUsdCap: number;
+}
+
+export const DEFAULT_POLICY: JevPolicy = {
+  minSamples: 50,
+  accuracyLine: 0.9,
+  examMinAnswered: 3,
+  examAnsweredShare: 0.8,
+  shadowStallDays: 14,
+  dailyCallLimit: 200,
+  examDailyCallLimit: 600,
+  dailyUsdCap: 0.3,
+};
+
+/** 题库里每道题把握线的初值；登记进库之后以库里那一行为准（驾驶舱可以改）。 */
+export const DEFAULT_CONFIDENCE_LINE = 0.7;
+
+/** 设置表里的键（值是 JSON）。judge.dailyCallLimit 已在 @fleet-dao/shared 的 SETTING_SCHEMAS 里；其余四个待加。 */
+export const POLICY_SETTING_KEYS = {
+  dailyCallLimit: 'judge.dailyCallLimit',
+  examDailyCallLimit: 'judge.examDailyCallLimit',
+  dailyUsdCap: 'judge.dailyUsdCap',
+  accuracyLine: 'judge.accuracyLine',
+  minSamples: 'judge.minSamples',
+} as const;
+
+/** 设置里读到的值合并进默认值；读到的不合法就不用它（照默认），并把问题交给调用方记下。 */
+export function mergePolicy(
+  base: JevPolicy,
+  settings: Readonly<Record<string, unknown>>,
+): { policy: JevPolicy; problems: string[] } {
+  const policy = { ...base };
+  const problems: string[] = [];
+  for (const field of ['dailyCallLimit', 'examDailyCallLimit'] as const) {
+    const key = POLICY_SETTING_KEYS[field];
+    const limit = settings[key];
+    if (limit === undefined) continue;
+    if (Number.isInteger(limit) && (limit as number) >= 0) policy[field] = limit as number;
+    else problems.push(`${key} 要是非负整数，读到 ${JSON.stringify(limit)}`);
+  }
+  const usd = settings[POLICY_SETTING_KEYS.dailyUsdCap];
+  if (usd !== undefined) {
+    if (typeof usd === 'number' && Number.isFinite(usd) && usd >= 0) policy.dailyUsdCap = usd;
+    else problems.push(`${POLICY_SETTING_KEYS.dailyUsdCap} 要是非负的美元数，读到 ${JSON.stringify(usd)}`);
+  }
+  const line = settings[POLICY_SETTING_KEYS.accuracyLine];
+  if (line !== undefined) {
+    if (typeof line === 'number' && line > 0 && line <= 1) policy.accuracyLine = line;
+    else
+      problems.push(`${POLICY_SETTING_KEYS.accuracyLine} 要是 (0, 1] 之间的数，读到 ${JSON.stringify(line)}`);
+  }
+  const min = settings[POLICY_SETTING_KEYS.minSamples];
+  if (min !== undefined) {
+    if (Number.isInteger(min) && (min as number) > 0) policy.minSamples = min as number;
+    else problems.push(`${POLICY_SETTING_KEYS.minSamples} 要是正整数，读到 ${JSON.stringify(min)}`);
+  }
+  return { policy, problems };
+}

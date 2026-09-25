@@ -43,11 +43,15 @@ export function isRecord(v: unknown): v is Record<string, unknown> {
 export function redact(text: string, max = 300): string {
   const cleaned = String(text)
     .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer <令牌>')
-    .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '<邮箱>')
+    // 邮箱只从一段字符的开头试：从中间起能配上的，从开头起也一定配得上（字符集一样），结果不变；
+    // 不加这一条，几万字不断开的长串会被逐位重试，耗时按长度的平方涨（5 万字约 1 秒）。
+    .replace(/(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '<邮箱>')
     .replace(/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g, '<令牌>')
-    .replace(/\b(?:sk|rk|pk|xai)-[A-Za-z0-9_-]{8,}/gi, '<密钥>')
+    .replace(/\b(?:sk|rk|pk|xai|tvly)-[A-Za-z0-9_-]{8,}/gi, '<密钥>')
+    .replace(/\bAKIA[0-9A-Z]{16}\b/g, '<密钥>')
     .replace(/([?&](?:token|key|access_token|api_key)=)[^&\s"']+/gi, '$1<令牌>')
     .replace(/\b\d{1,3}(?:\.\d{1,3}){3}\b/g, '<IP>')
+    .replace(/\b[0-9a-f]{32}\b/gi, '<长串>')
     .replace(/\b[A-Za-z0-9_-]{40,}\b/g, '<长串>')
     .replace(/\s+/g, ' ')
     .trim();

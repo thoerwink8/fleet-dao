@@ -1,0 +1,158 @@
+[
+  {
+    "id": "vps-fs-01-hello",
+    "source": "/home/agent/.dao/hub-chat/2026-09-04.ndjson 第 1 条（2026-09-04T04:15:26Z，总控群）；脱敏：chat_id/open_id/message_id 未带入（原记录为 oc_xxx / ou_xxx / om_xxx）",
+    "evidence": {
+      "message": "你好",
+      "replying_to": "没有",
+      "recent_tasks": "#787 通用提交和版本号方案落地\n#833 限流探测搬上服务器并接回自动换人\n#860 定时任务盘点"
+    },
+    "expect": {
+      "feishu-intent": "chat"
+    },
+    "why": {
+      "feishu-intent": "纯打招呼，没提任何要求。旧系统判 other，却回了一整段盘面和 5 张待拍（多做了）；recent_tasks 取自那条回复里列的待拍单。"
+    }
+  },
+  {
+    "id": "vps-fs-03-anything-to-decide-1",
+    "source": "/home/agent/.dao/hub-chat/2026-09-06.ndjson 第 1 条（2026-09-06T08:26:07Z，总控群）；脱敏：chat_id/open_id/message_id 未带入",
+    "evidence": {
+      "message": "有什么需要我拍板的吗",
+      "replying_to": "没有",
+      "recent_tasks": "#999 合并闸铺到全部仓库——先缩小范围再做分发器\n#819 Windows 录像工具上线前，模拟点击录像这段谁来点\n#966 待办是平的，「先过渡、以后再接」没有落点\n#967 有的修好了只留在那台服务器上、没进仓库\n#948 会话在跑不等于能接管"
+    },
+    "expect": {
+      "feishu-intent": "progress"
+    },
+    "why": {
+      "feishu-intent": "判据原文「有什么要他拍板」即 progress。旧系统判 situation，回了 5 件待拍。GitHub #1029 记载：半小时前发出的 5 张待拍板卡已被消息流冲上去，创始人问的就是这句。"
+    }
+  },
+  {
+    "id": "vps-fs-04-anything-to-decide-2",
+    "source": "/home/agent/.dao/hub-chat/2026-09-06.ndjson 第 2 条（2026-09-06T15:18:29Z，另一个群 oc_xxx）；脱敏：chat_id 换成 oc_xxx、open_id/message_id 未带入",
+    "evidence": {
+      "message": "有什么让我拍板的",
+      "replying_to": "没有"
+    },
+    "expect": {
+      "feishu-intent": "progress"
+    },
+    "why": {
+      "feishu-intent": "问有哪些事等他拍板，属 progress；旧系统判 situation，回「有 12 张等你拍板」。"
+    }
+  },
+  {
+    "id": "vps-fs-07-answer-docs",
+    "source": "/home/agent/.dao/feishu-threads.json threads 里唯一话题 msgs 第 1 条（2026-09-02T19:11:27Z）；answers.docs；脱敏：chat_id/open_id/message_id 未带入",
+    "evidence": {
+      "message": "要记文档：在 feishu-groups.json 的注释和 docs 里写一句这条检查的用途和红了怎么修。",
+      "replying_to": "机器人在这个话题里追问的三问之一：「是否 docs/memory 该记」"
+    },
+    "expect": {
+      "feishu-intent": "answer"
+    },
+    "why": {
+      "feishu-intent": "回答机器人「要不要记文档」的追问；随后原样写进 #813 正文「三问答案」。"
+    }
+  },
+  {
+    "id": "vps-fs-08-answer-done",
+    "source": "/home/agent/.dao/feishu-threads.json threads 里唯一话题 msgs 第 2 条（2026-09-02T19:26:15Z）；answers.done；脱敏：chat_id/open_id/message_id 未带入",
+    "evidence": {
+      "message": "做完的标准：跑 dao-check 时多一项 feishu-groups，它用 lark-cli 逐个查 host/machine/feishu-groups.json 里的 chat_id，查不到或已解散就报红并写出是哪个群；四个群都在时为绿。",
+      "replying_to": "机器人在这个话题里追问的三问之一：「做到什么算做完」"
+    },
+    "expect": {
+      "feishu-intent": "answer"
+    },
+    "why": {
+      "feishu-intent": "回答机器人「做到什么算做完」的追问；后来写进 #813 的「期望」和「三问答案」。"
+    }
+  },
+  {
+    "id": "vps-fs-09-answer-batch",
+    "source": "/home/agent/.dao/feishu-threads.json threads 里唯一话题 msgs 第 3 条（2026-09-02T19:32:34Z）；answers.batch；GitHub #813 正文「来源消息」即此条；脱敏：chat_id/open_id/message_id 未带入",
+    "evidence": {
+      "message": "这批就做。",
+      "replying_to": "机器人在这个话题里追问的三问之一：「这批做还是以后」"
+    },
+    "expect": {
+      "feishu-intent": "answer"
+    },
+    "why": {
+      "feishu-intent": "回答机器人的追问，不是对一件等批准的事点头；35 秒后机器人据此建单 #813，正文「三问答案」记为「这批做还是以后：这批就做。」"
+    }
+  },
+  {
+    "id": "vps-fs-10-card-approve-1295",
+    "source": "/home/agent/.dao/feishu-threads.json hubPending 里 #1295 卡的 decided（2026-09-16 09:46 服务器本地时间 = 01:46Z）；/var/log/syslog.1 同刻 gh_comment 动作；脱敏：open_id 换成 ou_xxx、chat_id/message_id 未带入",
+    "evidence": {
+      "message": "按推荐执行",
+      "replying_to": "总控群待拍板卡片：#1295「[闸] 两张开放 PR 改同一个导出符号要当场红——同一修法被独立写了第 2 次」"
+    },
+    "expect": {
+      "feishu-intent": "command"
+    },
+    "why": {
+      "feishu-intent": "在等他点头的卡片上选了推荐方案＝批准；机器人随即往 #1295 写评论「【飞书拍板】… 点了「按推荐执行」」。注意这是卡片按钮点击，不是打字消息，故 medium。"
+    }
+  },
+  {
+    "id": "vps-fs-12-card-approve-1182",
+    "source": "/var/log/syslog.2.gz（2026-09-11T19:45:40Z，feishu-triage 的 gh_comment 动作）；/home/agent/.dao/feishu-threads.json hubPending 里 #1182 卡的 decided；脱敏：open_id 换成 ou_xxx、chat_id/message_id 未带入",
+    "evidence": {
+      "message": "按推荐执行",
+      "replying_to": "总控群待拍板卡片：#1182「[待拍板] reviewer-label-missing」"
+    },
+    "expect": {
+      "feishu-intent": "command"
+    },
+    "why": {
+      "feishu-intent": "同 fs-10：批准卡片上的推荐处置。按钮点击，非打字；卡片标题是内部代号，模型得靠「按推荐执行」判。"
+    }
+  },
+  {
+    "id": "fs-813-original",
+    "source": "windsurf-dao#813 的来源消息：创始人在飞书项目群里说的原话（2026-09-02），机器人据此追问三问后建单 #813；同一句 19:59 又发过一次，被挂到 #813 评论里（取数 2026-09-24）；脱敏：chat_id/message_id 未带入",
+    "evidence": {
+      "message": "dao-check 能不能顺便检查飞书群还在不在？群解散了要报红。",
+      "replying_to": "没有"
+    },
+    "expect": {
+      "feishu-intent": "new_task"
+    },
+    "why": {
+      "feishu-intent": "要加一项新检查（改代码），机器人追问完做完标准、这批做不做之后建单 #813，工人当天交了 PR #814。"
+    }
+  },
+  {
+    "id": "fs-1029-menu-quote",
+    "source": "windsurf-dao#1029 评论1 引用的创始人原话（2026-09-06）。原记录没写这句是不是在飞书里对机器人说的，这里当作发给机器人的一句话（取数 2026-09-24）",
+    "evidence": {
+      "message": "希望群下方是不是还可以有那种快捷方式，能马上看见。比如点一下快捷方式或子菜单，就能马上把待拍板全都重新列一遍。",
+      "replying_to": "没有"
+    },
+    "expect": {
+      "feishu-intent": "new_task"
+    },
+    "why": {
+      "feishu-intent": "要新做一个群菜单（改现有的东西），帅位 15 分钟内把它写成方案追加进 #1029 的范围，后来由 PR #1103 做成「看待拍板」菜单。"
+    }
+  },
+  {
+    "id": "fs-818-view-quote",
+    "source": "windsurf-dao#818 评论8 引用的创始人原话（2026-09-05）。原记录没写这句是不是在飞书里对机器人说的，这里当作发给机器人的一句话（取数 2026-09-24）",
+    "evidence": {
+      "message": "我觉得需要记录一下，我们后面的看板里面也需要有这个方式能看得到，比如：1. 历史的 LLM 查出了什么问题；2. Token 额度消耗；3. 派发的是什么模型。我觉得这是一种非常高效的看板方式，要加入到未来的计划里面。",
+      "replying_to": "没有"
+    },
+    "expect": {
+      "feishu-intent": "new_task"
+    },
+    "why": {
+      "feishu-intent": "要在看板里加一个新视图，帅位据此在 #818 加了「AI 自己干了什么」三列视图的计划。"
+    }
+  }
+]
