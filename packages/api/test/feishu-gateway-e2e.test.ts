@@ -2,11 +2,18 @@
 // 记一句 → 回复确认卡改一句 → 卡上改一下 → 确认（开成任务）→ 查任务 → 关注 → 盘面 → 推送与回执 → 卡片登记。
 // 开单（开 issue、建任务、拉起工作流）归 #43 接，这里用假的：像真的一样在库里建一行任务。
 // 只有真库才试得出的（半个 emoji 进 jsonb 被拒）也放这里。
-import { asks, feishuDrafts, feishuFollows, notificationDeliveries, tasks } from '@fleet-dao/db';
+import {
+  asks,
+  feishuDrafts,
+  feishuFollows,
+  idempotencyKeys,
+  notificationDeliveries,
+  tasks,
+} from '@fleet-dao/db';
 import { createTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { BackendError, createBackend } from '@fleet-dao/feishu';
 import { AskResponse, FeishuDraftConflictDetails } from '@fleet-dao/shared';
-import { eq } from 'drizzle-orm';
+import { count, eq, like } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import {
   type DraftOpener,
@@ -44,10 +51,14 @@ function gatewayClient(h: Harness) {
   });
 }
 
-/** 假开单：没接上时抛「没接上」；接上后在库里建一行任务（像引擎那边的真实现一样），按草稿幂等。 */
+/**
+ * 假开单：没接上时抛「没接上」；接上后在库里建一行任务（像 #43 的真实现一样）。按草稿编号幂等，而且记在库里
+ * （idempotency_keys）：后端发版重启后会马上再调（ports.ts 的 DraftOpener），记在进程内存里的扛不住。
+ * 这里的「issue」就是库里那行任务，和记号同一个事务写；真实现的 issue 开在 GitHub 上、进不了这个事务，
+ * 要先在库里占住再开、开出来马上记下 issue 号，或者 issue 正文带上草稿编号、再来时查回来。
+ */
 function fakeOpener() {
   let wired = false;
-  const opened = new Map<string, DraftOpenResult>();
   const calls: DraftOpenRequest[] = [];
   const opener: DraftOpener = {
     async check() {
@@ -56,24 +67,40 @@ function fakeOpener() {
     async open(req) {
       calls.push(req);
       if (!wired) throw new DraftOpenerUnavailableError('开单还没接上（测试）');
-      const known = opened.get(req.draftId);
-      if (known) return known;
-      const issueNumber = 44 + opened.size;
-      const [row] = await t.db
-        .insert(tasks)
-        .values({
-          repoId: req.repo.id,
-          issueNumber,
-          title: req.title,
-          rawRequest: req.rawText,
-          requestedBy: req.proposedBy.userId,
-          priority: 5,
-        })
-        .returning({ id: tasks.id });
-      if (!row) throw new Error('任务行没建成');
-      const result = { taskId: row.id, issueNumber };
-      opened.set(req.draftId, result);
-      return result;
+      return t.db.transaction(async (tx) => {
+        const key = `test-draft-open:${req.draftId}`;
+        const [seen] = await tx
+          .select({ result: idempotencyKeys.result })
+          .from(idempotencyKeys)
+          .where(eq(idempotencyKeys.key, key));
+        if (seen) return seen.result as DraftOpenResult;
+        const [before] = await tx
+          .select({ n: count() })
+          .from(idempotencyKeys)
+          .where(like(idempotencyKeys.key, 'test-draft-open:%'));
+        const issueNumber = 44 + (before?.n ?? 0);
+        const [row] = await tx
+          .insert(tasks)
+          .values({
+            repoId: req.repo.id,
+            issueNumber,
+            title: req.title,
+            rawRequest: req.rawText,
+            requestedBy: req.proposedBy.userId,
+            priority: 5,
+          })
+          .returning({ id: tasks.id });
+        if (!row) throw new Error('任务行没建成');
+        const result: DraftOpenResult = { taskId: row.id, issueNumber };
+        await tx.insert(idempotencyKeys).values({
+          key,
+          action: 'test.draft_open',
+          target: `draft:${req.draftId}`,
+          completedAt: new Date(),
+          result,
+        });
+        return result;
+      });
     },
   };
   return {
@@ -310,6 +337,17 @@ describe('网关的真客户端对着后端跑一遍（真库）', () => {
       draft: { confirmedBy: '创始人甲', task: { issueNumber: 44 } },
     });
     expect((await gateway.findTasks(A, 44)).matches.map((m) => m.title)).toEqual(['加个导出按钮']);
+
+    // 发版重启后同一张草稿又来（新进程里的开单器，手上什么都没记）：按库里记下的交回同一个任务，不开第二张。
+    const request = opener.calls.at(-1);
+    if (!request) throw new Error('应当调过开单');
+    const restarted = fakeOpener();
+    restarted.wire();
+    expect(await restarted.opener.open(request, new AbortController().signal)).toEqual({
+      taskId: after.draft.task?.taskId,
+      issueNumber: 44,
+    });
+    expect(await t.db.select({ id: tasks.id }).from(tasks).where(eq(tasks.issueNumber, 44))).toHaveLength(1);
   });
 
   it('原话、补充、回答里有孤立的半个 emoji（被截成两半）：库版照样记下、读得回，不 500', async () => {

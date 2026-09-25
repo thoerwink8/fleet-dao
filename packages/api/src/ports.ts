@@ -595,7 +595,7 @@ export type Store = UserStore & BoardStore & RoutingStore & OpsStore & AgentStor
 
 /** 飞书里确认了的草稿，交给开单的那一步：开 GitHub issue、建任务行、拉起需求工作流。 */
 export interface DraftOpenRequest {
-  /** 幂等键：同一个草稿再来，交回第一次开成的那张 issue 和那个任务，不开第二张。 */
+  /** 幂等键：同一个草稿再来（包括后端重启之后），交回第一次开成的那张 issue 和那个任务，不开第二张。 */
   draftId: string;
   repo: Repo;
   /** issue 标题（「我理解为」的第一行截短）。 */
@@ -617,8 +617,11 @@ export interface DraftOpenResult {
 /**
  * 飞书草稿开单：开 issue + 建任务行 + 拉起需求工作流。确认草稿时调一次；没成的草稿留在「待开单」，后端定时补开
  * （draft-opening.ts）。后端自己计时：到点没回算没成、那次调用挂着期间不再开第二次，所以 signal 中止后要尽快放手。
- * 实现要按 draftId 幂等：确认时和补开时可能同时来、超时之后可能再来。没接上或暂时开不成抛 DraftOpenerUnavailableError；
- * 抛别的错也一样留着补开。
+ * 实现要按 draftId 幂等：确认时和补开时可能同时来、超时之后可能再来，发版重启后后端一起来就会马上再调一遍
+ * （「正在开」只记在后端进程里，重启就没了）。所以幂等要记在重启后还查得到的地方，不能靠进程内存：比如开 issue 之前
+ * 先在库里按草稿编号占住、开出来马上记下 issue 号，或者 issue 正文带上草稿编号、再来时能查回来。issue 已经开出来、
+ * 还没交回结果时进程没了，再来也得认出那张 issue，交回它，不开第二张。
+ * 没接上或暂时开不成抛 DraftOpenerUnavailableError；抛别的错也一样留着补开。
  */
 export interface DraftOpener {
   open(request: DraftOpenRequest, signal: AbortSignal): Promise<DraftOpenResult>;

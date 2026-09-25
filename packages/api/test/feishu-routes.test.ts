@@ -10,7 +10,7 @@ import {
   FeishuRoutes,
   FeishuTaskLookupResponse,
 } from '@fleet-dao/shared';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { devFixtures } from '../src/dev-fixtures.ts';
 import { feishuMessageKey } from '../src/feishu-records.ts';
 import { ANSWER_TEXTS } from '../src/feishu-views.ts';
@@ -900,102 +900,132 @@ describe('POST /feishu/drafts/:draftId/confirm：确认', () => {
     expect(h.logs.some((l) => l.level === 'error' && l.message.includes('待开单'))).toBe(true);
   });
 
-  it('开单实现永远不回：确认只等几秒就回「待开单」；到一次开单的时限记「开单超时」，算没成', async () => {
-    const stub = openerStub();
-    stub.set(() => new Promise(() => {}));
-    const h = harness({ draftOpener: stub.opener, draftOpenLimits: { confirmWaitMs: 50, callLimitMs: 200 } });
-    const draft = await newDraft(h);
-    const started = Date.now();
-    const body = FeishuConfirmDraftResponse.parse(
-      await (
-        await h.cockpit.request(`/api/feishu/drafts/${draft.id}/confirm`, gw('POST', { revision: 1 }))
-      ).json(),
-    );
-    expect(Date.now() - started).toBeLessThan(1_000);
-    expect(body.draft.status).toBe('confirmed');
-    expect(body.draft.task).toBeUndefined();
-    // 没等到结果不等于没成：到时限之前不记失败。
-    expect(h.store.data.feishuDrafts[0]?.openAttempts).toBe(0);
-    await sleep(350);
-    expect(h.store.data.feishuDrafts[0]).toMatchObject({
-      openAttempts: 1,
-      openError: '开单超时：0.2 秒没回',
+  describe('开单的时限（假计时器：拨到哪个时刻就看那个时刻，机器忙也不会偶发红）', () => {
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     });
-    expect(h.logs.find((l) => l.fields?.error === '开单超时：0.2 秒没回')?.level).toBe('warn');
-  });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+    /** 拨钟：先让排着的 promise 跑完（真的一轮事件循环，内存库没有真 I/O），拨过去，再跑完一轮。 */
+    const advance = async (ms: number) => {
+      await new Promise((r) => setImmediate(r));
+      await vi.advanceTimersByTimeAsync(ms);
+      await new Promise((r) => setImmediate(r));
+    };
 
-  it('超时的那次调用还挂着：再点确认、补开都不开第二次，也不干等；补开一轮照样跑完', async () => {
-    const stub = openerStub();
-    stub.set(() => new Promise(() => {}));
-    const h = harness({
-      draftOpener: stub.opener,
-      draftOpenLimits: { confirmWaitMs: 300, callLimitMs: 100 },
+    it('开单实现永远不回：确认只等到确认的时限就回「待开单」；到一次开单的时限记「开单超时」，算没成', async () => {
+      const stub = openerStub();
+      stub.set(() => new Promise(() => {}));
+      const h = harness({
+        draftOpener: stub.opener,
+        draftOpenLimits: { confirmWaitMs: 50, callLimitMs: 200 },
+      });
+      const draft = await newDraft(h);
+      const confirming = h.cockpit.request(
+        `/api/feishu/drafts/${draft.id}/confirm`,
+        gw('POST', { revision: 1 }),
+      );
+      await advance(50);
+      const body = FeishuConfirmDraftResponse.parse(await (await confirming).json());
+      expect(body.draft.status).toBe('confirmed');
+      expect(body.draft.task).toBeUndefined();
+      // 没等到结果不等于没成：到一次开单的时限之前不记失败。
+      expect(h.store.data.feishuDrafts[0]?.openAttempts).toBe(0);
+      await advance(149);
+      expect(h.store.data.feishuDrafts[0]?.openAttempts).toBe(0);
+      await advance(1);
+      expect(h.store.data.feishuDrafts[0]).toMatchObject({
+        openAttempts: 1,
+        openError: '开单超时：0.2 秒没回',
+      });
+      expect(h.logs.find((l) => l.fields?.error === '开单超时：0.2 秒没回')?.level).toBe('warn');
     });
-    const draft = await newDraft(h);
-    const confirm = (as: string) =>
-      h.cockpit.request(`/api/feishu/drafts/${draft.id}/confirm`, gw('POST', { revision: 1 }, as));
-    // 确认等得比一次开单的时限还久：到时限就记超时、回「待开单」。
-    expect((await confirm(A)).status).toBe(200);
-    expect(h.store.data.feishuDrafts[0]).toMatchObject({
-      openAttempts: 1,
-      openError: '开单超时：0.1 秒没回',
-    });
-    const t1 = Date.now();
-    const again = FeishuConfirmDraftResponse.parse(await (await confirm(B)).json());
-    expect(again).toMatchObject({ alreadyConfirmed: true, draft: { status: 'confirmed' } });
-    expect(Date.now() - t1).toBeLessThan(250);
-    expect(await h.draftOpening.runPending(true)).toEqual({ opened: 0, failed: 0 });
-    expect(stub.calls).toHaveLength(1);
-    expect(h.store.data.feishuDrafts[0]?.openAttempts).toBe(1);
-  });
 
-  it('超时之后实现又开成了：照样记上任务，不丢', async () => {
-    const stub = openerStub();
-    const h = harness({ draftOpener: stub.opener, draftOpenLimits: { confirmWaitMs: 20, callLimitMs: 50 } });
-    const open = opensTask(() => h);
-    stub.set(async (req) => {
-      await sleep(150);
-      return open(req);
+    it('超时的那次调用还挂着：再点确认、补开都不开第二次，也不干等（不拨钟就回来）', async () => {
+      const stub = openerStub();
+      stub.set(() => new Promise(() => {}));
+      const h = harness({
+        draftOpener: stub.opener,
+        draftOpenLimits: { confirmWaitMs: 300, callLimitMs: 100 },
+      });
+      const draft = await newDraft(h);
+      const confirm = (as: string) =>
+        h.cockpit.request(`/api/feishu/drafts/${draft.id}/confirm`, gw('POST', { revision: 1 }, as));
+      // 确认等得比一次开单的时限还久：到时限就记超时、回「待开单」。
+      const first = confirm(A);
+      await advance(100);
+      expect((await first).status).toBe(200);
+      expect(h.store.data.feishuDrafts[0]).toMatchObject({
+        openAttempts: 1,
+        openError: '开单超时：0.1 秒没回',
+      });
+      const again = FeishuConfirmDraftResponse.parse(await (await confirm(B)).json());
+      expect(again).toMatchObject({ alreadyConfirmed: true, draft: { status: 'confirmed' } });
+      expect(await h.draftOpening.runPending(true)).toEqual({ opened: 0, failed: 0 });
+      expect(stub.calls).toHaveLength(1);
+      expect(h.store.data.feishuDrafts[0]?.openAttempts).toBe(1);
     });
-    const draft = await newDraft(h);
-    await h.cockpit.request(`/api/feishu/drafts/${draft.id}/confirm`, gw('POST', { revision: 1 }));
-    await sleep(100);
-    expect(h.store.data.feishuDrafts[0]).toMatchObject({
-      openAttempts: 1,
-      openError: '开单超时：0.05 秒没回',
-    });
-    await sleep(200);
-    expect(h.store.data.feishuDrafts[0]).toMatchObject({ taskId: 'b0000000-0000-4000-8000-000000000044' });
-    expect(h.store.data.feishuDrafts[0]?.openError).toBeUndefined();
-    expect(await h.store.listDraftsToOpen(10)).toEqual([]);
-  });
 
-  it('后台补开正开着（慢）时又点确认：确认只等几秒，不跟着后台等到网关超时；不开第二次', async () => {
-    const stub = openerStub();
-    const h = harness({
-      draftOpener: stub.opener,
-      draftOpenLimits: { confirmWaitMs: 50, callLimitMs: 5_000 },
+    it('超时之后实现又开成了：照样记上任务，不丢', async () => {
+      const stub = openerStub();
+      const h = harness({
+        draftOpener: stub.opener,
+        draftOpenLimits: { confirmWaitMs: 20, callLimitMs: 50 },
+      });
+      const open = opensTask(() => h);
+      stub.set(async (req) => {
+        await sleep(150);
+        return open(req);
+      });
+      const draft = await newDraft(h);
+      const confirming = h.cockpit.request(
+        `/api/feishu/drafts/${draft.id}/confirm`,
+        gw('POST', { revision: 1 }),
+      );
+      await advance(20);
+      expect((await confirming).status).toBe(200);
+      await advance(30);
+      expect(h.store.data.feishuDrafts[0]).toMatchObject({
+        openAttempts: 1,
+        openError: '开单超时：0.05 秒没回',
+      });
+      expect(h.store.data.feishuDrafts[0]?.taskId).toBeUndefined();
+      await advance(100);
+      expect(h.store.data.feishuDrafts[0]).toMatchObject({ taskId: 'b0000000-0000-4000-8000-000000000044' });
+      expect(h.store.data.feishuDrafts[0]?.openError).toBeUndefined();
+      expect(await h.store.listDraftsToOpen(10)).toEqual([]);
     });
-    const draft = await newDraft(h);
-    await h.cockpit.request(`/api/feishu/drafts/${draft.id}/confirm`, gw('POST', { revision: 1 }));
-    const open = opensTask(() => h);
-    stub.set(async (req) => {
-      await sleep(400);
-      return open(req);
+
+    it('后台补开正开着（慢）时又点确认：确认只等到确认的时限，不跟着后台等到网关超时；不开第二次', async () => {
+      const stub = openerStub();
+      const h = harness({
+        draftOpener: stub.opener,
+        draftOpenLimits: { confirmWaitMs: 50, callLimitMs: 5_000 },
+      });
+      const draft = await newDraft(h);
+      const first = h.cockpit.request(`/api/feishu/drafts/${draft.id}/confirm`, gw('POST', { revision: 1 }));
+      await advance(0);
+      expect((await first).status).toBe(200);
+      const open = opensTask(() => h);
+      stub.set(async (req) => {
+        await sleep(400);
+        return open(req);
+      });
+      const round = h.draftOpening.runPending(true);
+      await advance(0);
+      const confirming = h.cockpit.request(
+        `/api/feishu/drafts/${draft.id}/confirm`,
+        gw('POST', { revision: 1 }, B),
+      );
+      await advance(50);
+      const again = FeishuConfirmDraftResponse.parse(await (await confirming).json());
+      expect(again.draft.task).toBeUndefined();
+      await advance(350);
+      expect(await round).toEqual({ opened: 1, failed: 0 });
+      // 一次「还没接上」加一次后台的慢调用：确认没有再开第二次。
+      expect(stub.calls).toHaveLength(2);
     });
-    const round = h.draftOpening.runPending(true);
-    await sleep(20);
-    const t1 = Date.now();
-    const again = FeishuConfirmDraftResponse.parse(
-      await (
-        await h.cockpit.request(`/api/feishu/drafts/${draft.id}/confirm`, gw('POST', { revision: 1 }, B))
-      ).json(),
-    );
-    expect(Date.now() - t1).toBeLessThan(300);
-    expect(again.draft.task).toBeUndefined();
-    expect(await round).toEqual({ opened: 1, failed: 0 });
-    // 一次「还没接上」加一次后台的慢调用：确认没有再开第二次。
-    expect(stub.calls).toHaveLength(2);
   });
 
   it('草稿刚被改过（版本对不上）409 带上新的；没选仓 422 带上草稿；没有这个仓 422；没有这张草稿 404；参数认不出 400', async () => {

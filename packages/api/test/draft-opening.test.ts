@@ -1,6 +1,6 @@
 // 飞书草稿开单（draft-opening.ts）：时限自己掐（实现不回也不卡住等它的人）、超时之后开成了照样记上、
 // 同一张草稿不同时开两次、补开一轮没跑完不叠第二轮、健康检查（draft_opener / draft_backlog）如实报红。
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { IDS } from '../src/dev-fixtures.ts';
 import {
   createDraftOpenRunner,
@@ -83,16 +83,31 @@ function runner(store: Store, opener: DraftOpener, limits: { confirmWaitMs: numb
   return createDraftOpenRunner({ store, opener, log: silentLogger, now: () => new Date(T0), limits });
 }
 
-describe('开单的时限', () => {
+describe('开单的时限（假计时器：拨到哪个时刻就看那个时刻，机器忙也不会偶发红）', () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+  /** 拨钟：先让排着的 promise 跑完（真的一轮事件循环），拨过去，再跑完一轮。 */
+  const advance = async (ms: number) => {
+    await new Promise((r) => setImmediate(r));
+    await vi.advanceTimersByTimeAsync(ms);
+    await new Promise((r) => setImmediate(r));
+  };
+
   it('实现永远不回：只等到给的时限就返回「没等到」；到一次开单的时限记「开单超时」、算一次没成', async () => {
     const fake = fakeStore();
     const never = neverReturns();
     const r = runner(fake.store, never.opener, { confirmWaitMs: 20, callLimitMs: 60 });
-    const started = Date.now();
-    expect(await r.openOne(FEISHU_IDS.draft1)).toBe('pending');
-    expect(Date.now() - started).toBeLessThan(500);
+    const opening = r.openOne(FEISHU_IDS.draft1);
+    await advance(20);
+    expect(await opening).toBe('pending');
     expect(fake.failures).toEqual([]);
-    await sleep(150);
+    await advance(39);
+    expect(fake.failures).toEqual([]);
+    await advance(1);
     expect(fake.failures).toEqual([{ draftId: FEISHU_IDS.draft1, error: '开单超时：0.06 秒没回' }]);
     expect(fake.opened).toEqual([]);
     expect(never.calls).toEqual([FEISHU_IDS.draft1]);
@@ -108,38 +123,27 @@ describe('开单的时限', () => {
       async check() {},
     };
     const r = runner(fake.store, slow, { confirmWaitMs: 20, callLimitMs: 60 });
-    expect(await r.openOne(FEISHU_IDS.draft1)).toBe('pending');
-    await sleep(250);
+    const opening = r.openOne(FEISHU_IDS.draft1);
+    await advance(20);
+    expect(await opening).toBe('pending');
+    await advance(40);
     expect(fake.failures).toEqual([{ draftId: FEISHU_IDS.draft1, error: '开单超时：0.06 秒没回' }]);
+    expect(fake.opened).toEqual([]);
+    await advance(90);
     expect(fake.opened).toEqual([{ draftId: FEISHU_IDS.draft1, taskId: 'task-44' }]);
   });
 
-  it('上一次超时还挂着：再开、补开都不调第二次，也不干等', async () => {
+  it('上一次超时还挂着：再开、补开都不调第二次，也不干等（不拨钟就回来）', async () => {
     const fake = fakeStore();
     const never = neverReturns();
     const r = runner(fake.store, never.opener, { confirmWaitMs: 200, callLimitMs: 20 });
-    expect(await r.openOne(FEISHU_IDS.draft1)).toBe('failed');
-    const started = Date.now();
+    const opening = r.openOne(FEISHU_IDS.draft1);
+    await advance(20);
+    expect(await opening).toBe('failed');
     expect(await r.openOne(FEISHU_IDS.draft1)).toBe('skipped');
-    expect(Date.now() - started).toBeLessThan(100);
     expect(await r.runPending(true)).toEqual({ opened: 0, failed: 0 });
     expect(never.calls).toEqual([FEISHU_IDS.draft1]);
     expect(fake.failures).toHaveLength(1);
-  });
-
-  it('开之前重读草稿：列出来之后已经开成了的不再开', async () => {
-    const fake = fakeStore(pendingDraft({ taskId: 'task-1' }));
-    const calls: string[] = [];
-    const opener: DraftOpener = {
-      async open(request) {
-        calls.push(request.draftId);
-        return { taskId: 'task-2', issueNumber: 2 };
-      },
-      async check() {},
-    };
-    const r = runner(fake.store, opener, { confirmWaitMs: 50, callLimitMs: 100 });
-    expect(await r.openOne(FEISHU_IDS.draft1)).toBe('skipped');
-    expect(calls).toEqual([]);
   });
 
   it('补开上一轮还没跑完：这一轮跳过，只提一次；跑完了下一轮照常', async () => {
@@ -165,13 +169,59 @@ describe('开单的时限', () => {
       now: () => new Date(T0),
     });
     const stop = r.start(10);
-    await sleep(80);
+    await advance(35);
     expect(lists).toBe(1);
     expect(warnings.filter((m) => m.includes('上一轮还没跑完'))).toHaveLength(1);
     release([]);
-    await sleep(60);
+    await advance(10);
     stop();
-    expect(lists).toBeGreaterThan(1);
+    expect(lists).toBe(2);
+  });
+});
+
+describe('重启、重读', () => {
+  it('进程重启（新的开单器、同一个库）：上一次调用没回的草稿一起来就再调一次——所以实现必须按草稿编号幂等、记在库里', async () => {
+    const fake = fakeStore();
+    const never = neverReturns();
+    const before = runner(fake.store, never.opener, { confirmWaitMs: 20, callLimitMs: 60_000 });
+    // 重启前：调出去了、一直没回（issue 可能已经在 GitHub 上开出来了），「正在开」只记在这个进程里。
+    expect(await before.openOne(FEISHU_IDS.draft1)).toBe('pending');
+    expect(never.calls).toEqual([FEISHU_IDS.draft1]);
+
+    const again: string[] = [];
+    const afterRestart = createDraftOpenRunner({
+      store: fake.store,
+      opener: {
+        async open(request) {
+          again.push(request.draftId);
+          return { taskId: 'task-44', issueNumber: 44 };
+        },
+        async check() {},
+      },
+      log: silentLogger,
+      now: () => new Date(T0),
+    });
+    const stop = afterRestart.start(60_000);
+    for (let i = 0; i < 100 && fake.opened.length === 0; i++) await sleep(10);
+    stop();
+    // 同一张草稿又交给实现一次：实现要认出上一次开的那张 issue，交回它，不开第二张。
+    expect(again).toEqual([FEISHU_IDS.draft1]);
+    expect(fake.opened).toEqual([{ draftId: FEISHU_IDS.draft1, taskId: 'task-44' }]);
+  });
+
+  it('开之前重读草稿：列出来之后已经开成了的不再开', async () => {
+    const fake = fakeStore(pendingDraft({ taskId: 'task-1' }));
+    const calls: string[] = [];
+    const opener: DraftOpener = {
+      async open(request) {
+        calls.push(request.draftId);
+        return { taskId: 'task-2', issueNumber: 2 };
+      },
+      async check() {},
+    };
+    const r = runner(fake.store, opener, { confirmWaitMs: 50, callLimitMs: 100 });
+    expect(await r.openOne(FEISHU_IDS.draft1)).toBe('skipped');
+    expect(calls).toEqual([]);
   });
 });
 
