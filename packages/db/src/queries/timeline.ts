@@ -1,7 +1,7 @@
 // 某个需求的时间线：状态变化、每次会话的排队 / 开工 / 结束、进度、操作记录、通知，按时间排好。
 // 全部从 Postgres 读，不靠 Temporal 历史（它只留 30 天）。
 import type { ProgressKind } from '@fleet-dao/shared';
-import { and, asc, eq, inArray } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { PROGRESS_KINDS } from '../schema/enums.ts';
 import {
@@ -112,7 +112,11 @@ export async function taskTimeline(
       .innerJoin(routes, eq(routes.id, sessionRuns.routeId))
       .where(eq(sessionRuns.taskId, taskId))
       .orderBy(asc(sessionRuns.queuedAt)),
-    db.select({ id: subtasks.id }).from(subtasks).where(eq(subtasks.taskId, taskId)),
+    // 重拆方案作废的子任务不再计入操作记录的 target 范围。
+    db
+      .select({ id: subtasks.id })
+      .from(subtasks)
+      .where(and(eq(subtasks.taskId, taskId), isNull(subtasks.supersededAt))),
     db
       .select()
       .from(notifications)

@@ -10,11 +10,14 @@ import {
   type EnginePorts,
   type LaunchSessionInput,
   type MergePrInput,
+  type OpenPrInput,
   type PickRouteInput,
   type PickRouteResult,
   type PortContext,
   PortError,
   type PortName,
+  type PushBranchInput,
+  type RaiseAlertInput,
   type RequestApprovalInput,
   type RouteChoice,
   type RunTestsInput,
@@ -24,7 +27,9 @@ import {
   type SyncMainlineInput,
   type TaskStateSnapshot,
   type TimingEntry,
+  type UpdateIssueProgressInput,
   type WaitCiInput,
+  type WriteSpecDocInput,
 } from './ports.ts';
 
 export interface FakeSessionPlan {
@@ -48,6 +53,14 @@ export interface FakeScript {
   sync: (input: SyncMainlineInput, n: number) => Partial<SyncResult> | undefined;
   tests: (input: RunTestsInput, n: number) => Partial<TestResult> | undefined;
   merge: (input: MergePrInput, n: number) => Partial<MergeOutcome> | undefined;
+  /** 推分支：给了就抛它（假的卫生检查拦下、名单没读到……）；n = 第几次推（从 1 开始）。 */
+  push: (input: PushBranchInput, n: number) => PortError | undefined;
+  /** 开 PR：给了就抛它（假的卫生检查拦下标题或正文……）；n = 第几次开（从 1 开始）。 */
+  openPr: (input: OpenPrInput, n: number) => PortError | undefined;
+  /** 写需求文档、方案、结果进主线：给了就抛它；n = 第几次写（三种文档一起数，从 1 开始）。 */
+  specDoc: (input: WriteSpecDocInput, n: number) => PortError | undefined;
+  /** 写 issue 进度段：给了就抛它（假的卫生检查拦下子任务标题……）；n = 第几次写（从 1 开始）。 */
+  progress: (input: UpdateIssueProgressInput, n: number) => PortError | undefined;
   route: (input: PickRouteInput, n: number) => PickRouteResult | undefined;
   /** 前 N 次调用抛可重试的 TRANSIENT。 */
   failFirst: Partial<Record<PortName, number>>;
@@ -95,6 +108,8 @@ export interface FakeWorld {
   asks: AskHumanInput[];
   /** 发出去的批准卡片（按 approvalId 去重后的）。 */
   approvals: RequestApprovalInput[];
+  /** 报过的警（按调用顺序，含重复的 dedupeKey）。 */
+  alerts: RaiseAlertInput[];
   callsOf<P extends PortName>(port: P): (FakeCall & { input: Parameters<EnginePorts[P]>[0] })[];
   count(port: PortName): number;
   /** 放行一个挂着的会话。 */
@@ -139,6 +154,7 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
   const spawned: string[] = [];
   const asks: AskHumanInput[] = [];
   const approvals: RequestApprovalInput[] = [];
+  const alerts: RaiseAlertInput[] = [];
   /** 和真实现一样按 runId 幂等：起过的原样返回，叫停过的不再起。 */
   const byRun = new Map<string, StartSessionResult>();
   const stoppedRuns = new Set<string>();
@@ -240,9 +256,15 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
       const preferred = input.preferRouteId
         ? usable.find((r) => r.routeId === input.preferRouteId)
         : undefined;
-      const route = preferred ?? usable[0];
+      // 续同一个会话：还是那一条（和真选路一样，避开的照样不派）。
+      const stuck = input.stickRouteId ? usable.find((r) => r.routeId === input.stickRouteId) : undefined;
+      const route = preferred ?? stuck ?? usable[0];
       if (!route) return { ok: false, waitFor: 'none', detail: '能用的路由都被避开了' };
-      return { ok: true, route, why: preferred ? '点名的路由' : '排第一的可用路由' };
+      return {
+        ok: true,
+        route,
+        why: preferred ? '点名的路由' : stuck ? '续同一个会话' : '排第一的可用路由',
+      };
     },
     async startSession(input) {
       const known = byRun.get(input.runId);
@@ -317,12 +339,16 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
       };
     },
     async pushBranch(input) {
+      const refused = script.push?.(input, next('pushBranch'));
+      if (refused) throw refused;
       return { head: input.head };
     },
     async runTests(input) {
       return { passed: true, head: input.head, summary: '全绿', ...script.tests?.(input, next('runTests')) };
     },
     async openPr(input) {
+      const refused = script.openPr?.(input, next('openPr'));
+      if (refused) throw refused;
       let pr = prByBranch.get(input.branch);
       if (pr === undefined) {
         pr = 100 + prByBranch.size;
@@ -345,12 +371,17 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
       const n = next('mergePr');
       return { merged: true, mergeCommit: `mc-${input.prNumber}-${n}`, ...script.merge?.(input, n) };
     },
-    async updateIssueProgress() {},
+    async updateIssueProgress(input) {
+      const refused = script.progress?.(input, next('updateIssueProgress'));
+      if (refused) throw refused;
+    },
     async saveTaskState(input) {
       states.push(input);
     },
     async closeIssue() {},
     async writeSpecDoc(input) {
+      const refused = script.specDoc?.(input, next('writeSpecDoc'));
+      if (refused) throw refused;
       return { path: `${input.specDir}/${DOC_FILE[input.doc]}` };
     },
     async askHuman(input) {
@@ -359,7 +390,8 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
     async requestApproval(input) {
       if (!approvals.some((a) => a.approvalId === input.approvalId)) approvals.push(input);
     },
-    async raiseAlert() {
+    async raiseAlert(input) {
+      alerts.push(input);
       return { alertId: `alert-${next('alert')}` };
     },
     async recordTiming(input) {
@@ -407,6 +439,7 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
     spawned,
     asks,
     approvals,
+    alerts,
     callsOf: (<P extends PortName>(port: P) => calls.filter((c) => c.port === port)) as FakeWorld['callsOf'],
     count: (port) => calls.filter((c) => c.port === port).length,
     release(sessionId) {

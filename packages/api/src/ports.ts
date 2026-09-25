@@ -374,24 +374,36 @@ export type TaskSignal =
     };
 
 export interface WorkflowControl {
-  /** 发给这个需求的工作流。工作流不存在或已结束时抛 WorkflowGoneError；Temporal 还没接上时抛 WorkflowUnavailableError。 */
-  signal(taskId: string, signal: TaskSignal): Promise<void>;
+  /**
+   * 发给这条工作流（编号已经算好：调用方按 requirementWorkflowIdForTask 查库拼需求工作流编号，或
+   * subtaskWorkflowId 直接拼子任务编号，见 temporal.ts）。
+   * 工作流不存在或已结束时抛 WorkflowGoneError；Temporal 连不上、超时时抛 WorkflowUnavailableError。
+   */
+  signal(workflowId: string, signal: TaskSignal): Promise<void>;
 }
 
 export class WorkflowGoneError extends Error {
-  readonly taskId: string;
-  constructor(taskId: string, cause?: unknown) {
-    super(`任务 ${taskId} 的工作流不存在或已结束`, { cause });
+  readonly workflowId: string;
+  constructor(workflowId: string, cause?: unknown) {
+    super(`工作流 ${workflowId} 不存在或已结束`, { cause });
     this.name = 'WorkflowGoneError';
-    this.taskId = taskId;
+    this.workflowId = workflowId;
   }
 }
 
-/** 发不了信号：Temporal 客户端没接上或连不上。 */
+/** 发不了信号：Temporal 客户端没接上、连不上或超时。 */
 export class WorkflowUnavailableError extends Error {
   constructor(message: string, cause?: unknown) {
     super(message, { cause });
     this.name = 'WorkflowUnavailableError';
+  }
+}
+
+/** 把任务/子任务解成工作流编号时，任务或它所在的仓不在库里：拼不出编号，不瞎拼，明确报错。 */
+export class WorkflowTargetNotFoundError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'WorkflowTargetNotFoundError';
   }
 }
 
@@ -403,11 +415,13 @@ export class InvalidCursorError extends Error {
   }
 }
 
-/** 连 Temporal 的一份连接：发信号 + 给健康检查用的探活。引擎的 PR 合了以后用 @temporalio/client 实现。 */
+/** 连 Temporal 的一份连接：发信号 + 给健康检查用的两项探活。用 @temporalio/client 实现，见 temporal.ts。 */
 export interface TemporalConnection {
   control: WorkflowControl;
-  /** 连得上就正常返回，连不上抛错（错误文字只进日志，不对外）。 */
+  /** 连得上、命名空间也在就正常返回；连不上、超时、命名空间不存在都抛错（错误文字只进日志，不对外）。 */
   check(): Promise<void>;
+  /** 查 FLEET_TASK_QUEUE 上 workflow、activity 两类 poller 在不在、新不新鲜；不在/太久没拉都抛错。 */
+  checkEngine(): Promise<void>;
   close(): Promise<void>;
 }
 

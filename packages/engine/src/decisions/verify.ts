@@ -4,7 +4,11 @@ import type { Limits } from '../limits.ts';
 
 /** 回主会话的一条返工意见。 */
 export interface Feedback {
-  kind: 'ci' | 'review' | 'conflict' | 'merge-return' | 'plan';
+  /**
+   * hygiene = 卫生检查拦下了会话交的内容（密钥、账号编号……），要拿掉；delivery = 交的东西没过引擎的核对
+   * （没提交的改动、空交付……）。
+   */
+  kind: 'ci' | 'review' | 'conflict' | 'merge-return' | 'plan' | 'hygiene' | 'delivery';
   summary: string;
   items: string[];
 }

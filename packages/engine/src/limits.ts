@@ -1,6 +1,8 @@
 // 一次运行用到的上限与超时。全部可配（驾驶舱设置 → 工作流输入）；缺的字段读时现算默认值，不写回输入。
 // 工作流开头经 decide 本地活动解析一次，结果进历史：以后改默认值，在途任务照旧用它开工时那一套（windsurf-dao#1813）。
 
+import { QUICK_TIMEOUT_SECONDS } from './activity-options.ts';
+
 export interface Limits {
   /** 一个需求同时最多跑几个子任务。 */
   maxParallelSubtasks: number;
@@ -50,6 +52,11 @@ export interface Limits {
   mergeQueueBatch: number;
   /** 合并队列空闲多久就收工（有新条目时会被重新拉起）。 */
   mergeQueueIdleMinutes: number;
+  /**
+   * 一条工作流的事件数到这么多就报一次警（需求、子任务不换历史）。Temporal 每条执行 1 万个信号封顶、事件数 1 万出警告、
+   * 5 万多封死：到那一步连叫停都发不进去，所以在一半之前就要有人知道。
+   */
+  historyAlertEvents: number;
 }
 
 export const DEFAULT_LIMITS: Readonly<Limits> = Object.freeze({
@@ -77,15 +84,36 @@ export const DEFAULT_LIMITS: Readonly<Limits> = Object.freeze({
   mergeWaitMinutes: 360,
   mergeQueueBatch: 50,
   mergeQueueIdleMinutes: 60,
+  historyAlertEvents: 5000,
 });
 
-/** 缺的、非法的（非有限数、负数）一律取默认值。 */
+/**
+ * 有下限的项：给了比下限小的取下限。
+ * 合并队列空闲收工不能早于排队活动一次尝试的限时：排队的那一下最晚在限时内落地（带截止时间），
+ * 队列记下的撤回至少要活到那时候才挡得住它。
+ */
+export const LIMIT_MINIMUMS: Readonly<Partial<Record<keyof Limits, number>>> = Object.freeze({
+  mergeQueueIdleMinutes: QUICK_TIMEOUT_SECONDS / 60,
+});
+
+/** 缺的、非法的（非有限数、负数）一律取默认值；比下限小的取下限。 */
 export function resolveLimits(partial: Partial<Limits> | null | undefined): Limits {
   const out: Limits = { ...DEFAULT_LIMITS };
   if (!partial) return out;
   for (const key of Object.keys(DEFAULT_LIMITS) as (keyof Limits)[]) {
     const value: unknown = partial[key];
-    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) out[key] = value;
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+      out[key] = Math.max(value, LIMIT_MINIMUMS[key] ?? 0);
+    }
   }
   return out;
+}
+
+/**
+ * 工作流事件数的报警线。上限在工作流开头解析一次、记进历史：这一项加进来之前开工的在途任务，记下的那一套里没有它，
+ * 读出来是 undefined——那样一比就报「报警线 undefined」。缺了按现在的默认值。
+ */
+export function historyAlertLine(limits: Partial<Limits>): number {
+  const value = limits.historyAlertEvents;
+  return typeof value === 'number' && Number.isFinite(value) ? value : DEFAULT_LIMITS.historyAlertEvents;
 }

@@ -55,6 +55,8 @@ interface Plan {
   unknown: boolean;
   /** 原路再试时怎么试。 */
   hint?: string | undefined;
+  humanFix?: string | undefined;
+  resumeAfterPark?: true | undefined;
   notes: string[];
 }
 
@@ -103,7 +105,7 @@ export function classifyFailure(
   const hit = matchRule(scan);
   if (hit) {
     plan = {
-      ladder: hit.rule.ladder,
+      ladder: (evidence.poolRole === 'backup' ? hit.rule.backupLadder : undefined) ?? hit.rule.ladder,
       rule: hit.rule.id,
       title: hit.rule.title,
       via: hit.via,
@@ -117,6 +119,8 @@ export function classifyFailure(
       routeOutcome: hit.rule.routeOutcome,
       unknown: false,
       hint: hit.rule.hint,
+      humanFix: hit.rule.humanFix,
+      resumeAfterPark: hit.rule.resumeAfterPark,
       notes: [],
     };
   } else {
@@ -165,9 +169,11 @@ export function classifyFailure(
   const step = walk(plan, ctx);
   const alert = plan.alert || step.action === 'park';
   const how = plan.hint && step.action === 'retry' && !step.wait ? `，${plan.hint}` : '';
+  const humanFix = plan.humanFix ? fillFix(plan.humanFix, evidence) : undefined;
   const reason = `${plan.title}（${plan.hit}）：${actionText(step, plan, ctx)}${how}${
     alert && step.action !== 'park' ? '，并报警' : ''
-  }${plan.notes.length > 0 ? `（${plan.notes.join('；')}）` : ''}`;
+  }${humanFix ? `；要人：${humanFix}` : ''}${plan.notes.length > 0 ? `（${plan.notes.join('；')}）` : ''}`;
+  const shared = sharedAvoid(plan, ctx);
   return {
     action: step.action,
     delaySeconds: step.delaySeconds,
@@ -178,11 +184,39 @@ export function classifyFailure(
     classifiedAs: plan.unknown && plan.rule === 'FB' ? 'unknown' : firstChoice(plan, ctx),
     alert,
     counter: step.counter,
+    ...(step.wait && step.action === 'retry'
+      ? { wait: plan.avoid?.scope === 'pool' ? ('quota' as const) : ('upstream' as const) }
+      : {}),
     ...(step.avoid ? { avoid: step.avoid } : {}),
+    ...(shared ? { shared } : {}),
+    ...(humanFix ? { humanFix } : {}),
+    // 原路再试（含等上游）续同一个会话；挂起的只有规则写明「修的是机器或账号池」才续。
+    resumeSame: step.action === 'retry' || (step.action === 'park' && plan.resumeAfterPark === true),
     routeOutcome: plan.routeOutcome,
     ...(missingReason ? { missingReason: true as const } : {}),
     ...(jevQuestion ? { jevQuestion } : {}),
   };
+}
+
+/** 规则写明所有任务一起避开的，不管这一步做什么都给出（挂起时也要让别的任务别再派过去）。 */
+function sharedAvoid(plan: Plan, ctx: Ctx): Avoid | undefined {
+  const spec = plan.avoid;
+  if (!spec?.shared) return undefined;
+  const out: Avoid = { scope: spec.scope, shared: true };
+  if (spec.until !== 'none' && ctx.nowMs !== undefined) {
+    const cooldown = spec.scope === 'pool' ? ctx.policy.poolCooldownSeconds : ctx.policy.routeCooldownSeconds;
+    const seconds = spec.until === 'upstream' && ctx.upstreamWait !== undefined ? ctx.upstreamWait : cooldown;
+    out.until = new Date(ctx.nowMs + seconds * 1000).toISOString();
+  }
+  return out;
+}
+
+function fillFix(template: string, e: FailureEvidence): string {
+  const missing = '（没报）';
+  return template
+    .replaceAll('{machine}', e.machine?.trim() ? `「${e.machine.trim()}」` : `机器${missing}`)
+    .replaceAll('{user}', e.runAsUser?.trim() ? `会话用户 ${e.runAsUser.trim()} ` : `会话用户${missing}`)
+    .replaceAll('{pool}', e.poolId?.trim() ? `账号池 ${e.poolId.trim()}` : `账号池${missing}`);
 }
 
 /** 顺着梯子往下走，第一级还有次数的就是它；走完就挂起。走过哪些级、为什么跳过，记进 plan.notes。 */

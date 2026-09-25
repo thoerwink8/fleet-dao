@@ -5,7 +5,8 @@
   "description": "共用的类型、数据结构校验（zod）与常量",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./workflow-ids": "./src/workflow-ids.ts"
   },
   "dependencies": {
     "zod": "^4.6.5"

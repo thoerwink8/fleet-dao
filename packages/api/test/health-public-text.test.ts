@@ -13,7 +13,7 @@ import { type HealthReport, runHealthChecks } from '../src/health.ts';
 import { silentLogger } from '../src/log.ts';
 import { probeDb } from '../src/pg-store.ts';
 import type { Logger } from '../src/ports.ts';
-import { notConnectedTemporal } from '../src/temporal.ts';
+import { createEnginePollerCheck, createNamespaceCheck, notConnectedTemporal } from '../src/temporal.ts';
 import { fakePostgres } from './fake-postgres.ts';
 
 interface Hit {
@@ -101,6 +101,24 @@ async function publicFailures(log: Logger) {
 
   await run('workflow-client', true, () => notConnectedTemporal().check());
   await run('events', true, notWiredGitHub().check);
+  // 引擎工人不在、命名空间查不到：队列名、命名空间名只进日志
+  await run(
+    'engine-offline',
+    true,
+    createEnginePollerCheck({ listPollers: async () => [] }, () => new Date()),
+  );
+  await run(
+    'namespace',
+    true,
+    createNamespaceCheck(
+      {
+        describeNamespace: async () => {
+          throw Object.assign(new Error('not found'), { code: 5 });
+        },
+      },
+      'fleet-dao',
+    ),
+  );
   return { reports, sites };
 }
 

@@ -383,6 +383,8 @@ const TABLE_KEYS: Record<RealtimeTable, readonly (readonly string[])[]> = {
   session_runs: [['board'], ['task'], ['timeline'], ['run-steps'], ['pools']],
   progress_events: [['board'], ['task'], ['timeline'], ['run-steps']],
   asks: [['board'], ['task'], ['timeline']],
+  // approvals 还没有专门的页面查询键；按它和 asks 一样挂在任务 / 子任务上，先失效这三处。
+  approvals: [['board'], ['task'], ['timeline']],
   quota_windows: [['pools']],
   channels: [['routing'], ['pools']],
   stage_policies: [['routing']],

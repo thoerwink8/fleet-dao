@@ -6,7 +6,7 @@ import { TestWorkflowEnvironment } from '@temporalio/testing';
 import { DefaultLogger, Runtime, type WorkflowBundle } from '@temporalio/worker';
 import type { EngineActivities } from '../src/activity-options.ts';
 import type { RequirementInput, SubtaskInput } from '../src/contract.ts';
-import type { Classifier } from '../src/decisions/failure.ts';
+import type { FailureTriage } from '../src/decisions/failure.ts';
 import type { Decide } from '../src/decisions/index.ts';
 import type { SubtaskSpec } from '../src/decisions/plan.ts';
 import type { FakeWorld } from '../src/fakes.ts';
@@ -33,6 +33,13 @@ export function createEnv(): Promise<TestWorkflowEnvironment> {
  */
 export function createRealEnv(): Promise<TestWorkflowEnvironment> {
   const cli = process.env.FLEET_TEST_TEMPORAL_CLI?.trim();
+  // CI 按 deploy/france.sh 钉的版本装好命令行再交过来（.github/workflows/ci.yml）；没给说明那几步坏了，
+  // 不许悄悄退回 SDK 默认版本（和法国不同版，测过也不算数）。
+  if (!cli && process.env.CI) {
+    throw new Error(
+      'CI 里没给 FLEET_TEST_TEMPORAL_CLI：Temporal 命令行没按法国的版本装上，这条真服务端的测试不算数',
+    );
+  }
   return TestWorkflowEnvironment.createLocal(
     cli ? { server: { executable: { type: 'existing-path', path: cli } } } : {},
   );
@@ -40,7 +47,7 @@ export function createRealEnv(): Promise<TestWorkflowEnvironment> {
 
 export interface WorkerOptions {
   taskQueue?: string;
-  classify?: Classifier;
+  triage?: FailureTriage;
   /** 换掉判断入口（演练「判断出错」）。 */
   decide?: Decide;
   /** 包一层活动（让某个活动卡在半路）。 */
@@ -75,7 +82,7 @@ export async function withWorker<T>(
       `token:${claims.taskId}:${claims.subtaskId ?? '-'}:${claims.runId}:${claims.ttlSeconds}`,
     connection: env.nativeConnection,
     workflowBundle: await engineBundle(),
-    ...(options.classify ? { classify: options.classify } : {}),
+    ...(options.triage ? { triage: options.triage } : {}),
     ...(options.decide ? { decide: options.decide } : {}),
     ...(options.wrapActivities ? { wrapActivities: options.wrapActivities } : {}),
     ...(options.maxCachedWorkflows === undefined ? {} : { maxCachedWorkflows: options.maxCachedWorkflows }),

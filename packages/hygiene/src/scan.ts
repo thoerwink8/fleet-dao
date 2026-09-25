@@ -1,10 +1,10 @@
-// 全仓扫：进 git 的每个文件（外加还没提交、也没被忽略的新文件）先按文件名判是不是密钥文件，
+// 全仓扫：进 git 的每个文件（外加还没提交、也没被忽略的新文件）先按文件名判是不是密钥文件、名字里有没有名单上的值，
 // 再把内容过一遍 rules.ts 和已知敏感值名单（values.ts），最后按 allowlist.ts 放行。
 // 只读本地文件、跑一次 git ls-files，不出网。任何输出只报文件、行和规则名，不打命中的值。
 import { execFileSync } from 'node:child_process';
 import { ALLOWLIST, type Allow } from './allowlist.ts';
 import { findHits, findSecretFile, type Hit } from './rules.ts';
-import { valueMatcher } from './values.ts';
+import { maskValues, valueHitsInName, valueMatcher } from './values.ts';
 
 export interface Finding extends Hit {
   /** 相对仓库根。 */
@@ -70,9 +70,12 @@ export function scanFiles(
   const matcher = valueMatcher(values);
   for (const path of paths) {
     const hits: Finding[] = [];
-    // 先按文件名判：密钥文件不管是不是二进制、工作树里还在不在（还在 git 里就算），都要拦。
+    // 名字里带名单上的值：这个文件的命中一律记在打了码的名字上，报出来的位置不带值。
+    const shown = maskValues(path, matcher);
+    // 先按文件名判：密钥文件不管是不是二进制、工作树里还在不在（还在 git 里就算），都要拦；名字里带名单上的值也拦。
     const secretFile = findSecretFile(path);
-    if (secretFile) hits.push({ ...secretFile, path });
+    if (secretFile) hits.push({ ...secretFile, path: shown });
+    hits.push(...valueHitsInName(path, matcher));
     let content: Buffer | undefined;
     try {
       content = read(path);
@@ -84,7 +87,7 @@ export function scanFiles(
     else if (content) {
       report.scanned.push(path);
       const text = content.toString('utf8');
-      for (const hit of [...findHits(text), ...matcher.find(text)]) hits.push({ ...hit, path });
+      for (const hit of [...findHits(text), ...matcher.find(text)]) hits.push({ ...hit, path: shown });
     }
     report.findings.push(...applyAllowlist(hits, allowlist, used));
   }

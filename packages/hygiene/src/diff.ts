@@ -3,7 +3,7 @@
 import { ALLOWLIST, type Allow } from './allowlist.ts';
 import { findHits, findSecretFile } from './rules.ts';
 import { applyAllowlist, type Finding } from './scan.ts';
-import { valueMatcher } from './values.ts';
+import { maskValues, valueHitsInName, valueMatcher } from './values.ts';
 
 export interface AddedHunk {
   path: string;
@@ -86,13 +86,16 @@ export function scanAdded(
 ): Finding[] {
   const matcher = valueMatcher(options.values);
   const found: Finding[] = [];
+  // 名字里带名单上的值（推上去文件名一样公开）也算；这样的文件报出来的位置一律用打了码的名字，不把值带出去
   for (const path of changedPaths) {
     const hit = findSecretFile(path);
-    if (hit) found.push({ ...hit, path });
+    if (hit) found.push({ ...hit, path: maskValues(path, matcher) });
+    found.push(...valueHitsInName(path, matcher));
   }
   for (const hunk of hunks) {
+    const shown = maskValues(hunk.path, matcher);
     for (const hit of [...findHits(hunk.text), ...matcher.find(hunk.text)]) {
-      found.push({ ...hit, path: hunk.path, line: hunk.startLine + hit.line - 1 });
+      found.push({ ...hit, path: shown, line: hunk.startLine + hit.line - 1 });
     }
   }
   return applyAllowlist(found, options.allowlist ?? ALLOWLIST, new Set());
