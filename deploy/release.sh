@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # shellcheck source-path=SCRIPTDIR
-# 发布（在法国以 root 跑）：把主线上的一个提交装成一版 → 跑数据库迁移 → 切过去、按本机配置起应用服务 → 经隧道把驾驶舱静态文件
-# 和飞书网关发到香港 → 健康检查；不过就自动退回上一版并报错（库的迁移比上一版新时不退）。幂等：同一个提交跑第二遍什么都不变。
+# 发布（在法国以 root 跑）：把主线上的一个提交装成一版 → 跑数据库迁移 → 切过去、按本机配置起应用服务 → 经隧道把飞书网关发到香港
+# （release.env 里明写了 web，才连驾驶舱静态文件一起发）→ 健康检查；不过就自动退回上一版并报错（库的迁移比上一版新时不退）。
+# 幂等：同一个提交跑第二遍什么都不变。
 # 发布和退回自己交给 systemd 跑（临时服务），终端断了照样跑完；日志在 /srv/fleet-dao-releases/.logs/。
 #   bash deploy/release.sh [<提交号>]            发布这个提交（不给就发主线最新）；只认主线上的提交
 #   bash deploy/release.sh --rollback            退回上一版（上一个在用过、没被判过不健康、目录还在的版本）
@@ -42,7 +43,9 @@ ENGINE_POLL_WAIT=90   # 引擎工人起来后要先打包工作流，才去任�
 
 FLEET_SERVICES=""
 FLEET_DOMAIN=""
-FLEET_HK_PARTS="web gateway"
+# release.env 里不写 FLEET_HK_PARTS 时只发飞书网关、不发静态页：发静态页会把香港根地址上的东西（现在是演示版）整个换成
+# 这一版的前端，等于对外发布，要先告诉创始人、在 release.env 里明写 web 才发
+FLEET_HK_PARTS="gateway"
 GATEWAY_ACTIVATED=0 # 这一版的网关这次切过去了没有（没有网关、配置没备齐就是 0，健康检查不查它）
 SHA=""
 ON_MAIN=1
@@ -508,14 +511,23 @@ hk_reachable() {
   return "$bad"
 }
 
-# 发之前先问一次香港网关的入口（隧道、钥匙、fleet-gateway-deploy）：问不通就别切
-gateway_reachable() {
-  local st
-  if ! st=$(gw status 2>&1) || [[ -z "$(status_field "$st" config)" ]]; then
-    red "问香港飞书网关的状态没成（没切版本）：$(tail -2 <<<"$st" | tr '\n' ' ')"
+# 问一次香港网关的状态，放进 GW_STATUS。问不到（ssh 没连上、那头报错）或回答认不出（没有 config= 那一行）就报红、返回 1：
+# 「没问到」不能当成「还没连上」去白等，红里也要说清是问不到
+GW_STATUS=""
+gw_status_or_red() { # 在做哪一步（写进红里）
+  local out rc=0
+  out=$(gw status 2>&1) || rc=$?
+  if ((rc != 0)) || [[ -z "$(status_field "$out" config)" ]]; then
+    red "$1：问不到香港飞书网关的状态（退出码 $rc）：$(tail -2 <<<"$out" | tr '\n' ' ')——查隧道、发网关的钥匙、香港的 fleet-gateway-deploy"
     return 1
   fi
-  ok "香港飞书网关的入口是通的（在用 $(short "$(status_field "$st" current)" 还没有)）"
+  GW_STATUS=$out
+}
+
+# 发之前先问一次香港网关的入口（隧道、钥匙、fleet-gateway-deploy）：问不通就别切
+gateway_reachable() {
+  gw_status_or_red "没切版本" || return 1
+  ok "香港飞书网关的入口是通的（在用 $(short "$(status_field "$GW_STATUS" current)" 还没有)）"
 }
 
 # 飞书网关发到香港：这一版有网关、香港的配置备齐了，才收下、切过去；进程由香港的 fleet-gateway-deploy 起、重启。
@@ -523,10 +535,8 @@ gateway_reachable() {
 deploy_gateway() { # 提交号
   local sha=$1 sum st config out rc=0
   GATEWAY_ACTIVATED=0
-  if ! st=$(gw status 2>&1); then
-    red "问香港飞书网关的状态没成：$(tail -2 <<<"$st" | tr '\n' ' ')"
-    return 1
-  fi
+  gw_status_or_red "发飞书网关" || return 1
+  st=$GW_STATUS
   sum=$(marker_get "$sha" gateway_sha256)
   if [[ -z "$sum" ]]; then
     pending "${sha:0:12} 没有飞书网关（那时还没有 packages/feishu），香港网关不动（在跑 $(short "$(status_field "$st" running)" 没有)）"
@@ -790,27 +800,30 @@ health_gate() { # 提交号 切之前后端的逐项结果
 # 香港飞书网关：主进程跑的是这一版、这次起来之后连上了飞书长连接，而且起稳了（一段时间里没退出、没重启）。
 # 连不上法国后端不算这一版的错：法国 fleet-api 没起时就是这样，网关照实回「后端连不上」、不会崩——记待配
 check_gateway() { # 提交号
-  local sha=$1 st="" i pid restarts config
-  st=$(gw status 2>/dev/null) || st=""
+  local sha=$1 st i pid restarts config
+  gw_status_or_red "飞书网关的健康检查" || return 1
+  st=$GW_STATUS
   config=$(status_field "$st" config)
-  if [[ -n "$config" && "$config" != ok ]]; then
+  if [[ "$config" != ok ]]; then
     pending "香港飞书网关的配置没备齐（${config#missing }），网关没起"
     return 0
   fi
-  for ((i = 0; i < GATEWAY_WAIT; i += 3)); do
-    st=$(gw status 2>/dev/null) || st=""
+  for ((i = 0; ; i += 3)); do
     if [[ "$(status_field "$st" running)" == "$sha" && "$(status_field "$st" active)" == active &&
       "$(status_field "$st" connected)" == yes ]]; then break; fi
+    if ((i >= GATEWAY_WAIT)); then
+      red "香港飞书网关 ${GATEWAY_WAIT} 秒还没以 ${sha:0:12} 连上飞书（主进程在跑「$(status_field "$st" running)」，$(status_field "$st" active)，连上了：$(status_field "$st" connected)）：香港 journalctl -u fleet-feishu -n 50"
+      return 1
+    fi
     sleep 3
+    gw_status_or_red "飞书网关的健康检查" || return 1
+    st=$GW_STATUS
   done
-  if [[ "$(status_field "$st" running)" != "$sha" || "$(status_field "$st" connected)" != yes ]]; then
-    red "香港飞书网关 ${GATEWAY_WAIT} 秒还没以 ${sha:0:12} 连上飞书（主进程在跑「$(status_field "$st" running)」，$(status_field "$st" active)，连上了：$(status_field "$st" connected)）：香港 journalctl -u fleet-feishu -n 50"
-    return 1
-  fi
   pid=$(status_field "$st" pid)
   restarts=$(status_field "$st" restarts)
   sleep "$SETTLE_SECONDS"
-  st=$(gw status 2>/dev/null) || st=""
+  gw_status_or_red "飞书网关的健康检查" || return 1
+  st=$GW_STATUS
   if [[ "$(status_field "$st" pid)" != "$pid" || "$(status_field "$st" restarts)" != "$restarts" ||
     "$(status_field "$st" active)" != active ]]; then
     red "香港飞书网关连上飞书之后没稳住（${SETTLE_SECONDS} 秒里退出或重启过）：香港 journalctl -u fleet-feishu -n 50"

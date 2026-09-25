@@ -187,19 +187,29 @@ prune() {
   done
 }
 
-# 后端（经隧道）连不连得上：只试 TCP 连接。连得上 reachable；被拒 refused（法国后端没起）；超时 timeout（隧道断了）
+# 后端（经隧道）连不连得上：只试 TCP 连接。连得上 reachable；被拒 refused（法国后端没起）；超时 timeout（隧道断了）；
+# 没配地址 unknown；地址认不出 invalid（要写成 http://主机:端口）。
+# 地址是配置里的字、status 又是法国远程触发、以 root 跑：主机只认字母数字点横线、端口只认数字，而且只当参数交给 bash，
+# 不拼进命令里——拼进去的话，地址里夹一段 $(…) 就会以 root 执行
 backend_state() {
-  local url hostport host port rc=0
+  local url host port rc=0
   url=$(env_value FLEET_BACKEND_URL)
-  hostport=${url#*://}
-  hostport=${hostport%%/*}
-  host=${hostport%:*}
-  port=${hostport##*:}
-  if [[ -z "$url" || ! "$port" =~ ^[0-9]+$ || "$host" == "$hostport" ]]; then
+  if [[ -z "$url" ]]; then
     echo unknown
     return 0
   fi
-  timeout 3 bash -c "exec 3<>/dev/tcp/$host/$port" 2>/dev/null || rc=$?
+  if [[ ! "$url" =~ ^https?://([A-Za-z0-9.-]+):([0-9]{1,5})(/[^[:space:]]*)?$ ]]; then
+    echo invalid
+    return 0
+  fi
+  host=${BASH_REMATCH[1]}
+  port=${BASH_REMATCH[2]}
+  if ((10#$port < 1 || 10#$port > 65535)); then
+    echo invalid
+    return 0
+  fi
+  # shellcheck disable=SC2016 # 单引号是故意的：$1、$2 由里面那个 bash 展开成参数，不由这里拼
+  timeout 3 bash -c 'exec 3<>"/dev/tcp/$1/$2"' _ "$host" "$port" 2>/dev/null || rc=$?
   case $rc in
   0) echo reachable ;;
   124) echo timeout ;;

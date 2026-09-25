@@ -1,4 +1,5 @@
-// 进程入口（香港，以 fleet 用户跑；单元样例见 deploy/fleet-feishu.service，配置样例见 deploy/feishu.env.example）：
+// 进程入口（香港，以 fleet 用户跑；单元在仓根 deploy/hk/fleet-feishu.service，怎么装、怎么发见 docs/ops.md 第十二节；
+// 配置样例见 deploy/feishu.env.example）：
 //   node packages/feishu/src/main.ts
 // 停机：先断开长连接不再收新事件，再把手上的活做完（最多 20 秒）才退——重启时不掐断正在回的话。
 import { createBackend } from './backend.ts';

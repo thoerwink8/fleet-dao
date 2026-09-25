@@ -25,6 +25,7 @@ TOKEN_ENV=$TMP/gateway-token.env
 KEEP=3
 
 fail=0
+skipped=0
 check() { # 说明 实际 期望
   if [[ "$2" == "$3" ]]; then
     printf '  ✓ %s\n' "$1"
@@ -225,6 +226,34 @@ INVOCATION=0123456789abcdef0123456789abcdef
 PID=0
 check "主进程没了：running 空、connected=no（不拿旧日志冒充）" "$(cmd_status | grep -E '^(running|connected)=' | tr '\n' ' ')" \
   "running= connected=no "
+echo "== 后端地址：连得上、连不上、认不出分开报；地址里夹命令不执行（status 以 root 跑、由法国远程触发）"
+port=""
+if command -v node >/dev/null; then
+  node -e 'const s = require("node:net").createServer((c) => c.end()).listen(0, "127.0.0.1", () => console.log(s.address().port));' \
+    >"$TMP/port" 2>/dev/null &
+  PIDS+=("$!")
+  for ((i = 0; i < 50; i++)); do
+    if [[ -s "$TMP/port" ]]; then break; fi
+    sleep 0.1
+  done
+  port=$(<"$TMP/port")
+fi
+if [[ "$port" =~ ^[0-9]+$ ]]; then
+  printf 'FLEET_BACKEND_URL=http://127.0.0.1:%s/\n' "$port" >>"$FEISHU_ENV"
+  check "后端在听：reachable" "$(cmd_status | grep '^backend=')" "backend=reachable"
+else
+  echo "  … 没跑成：起不了当后端用的监听（要 node）"
+  skipped=1
+fi
+# 夹带的命令不能带斜杠（地址在第一个斜杠处截断），落在当前目录：在 $TMP 里跑 status，执行了就会多出这个文件
+# shellcheck disable=SC2016 # 单引号是故意的：$(…) 要原样写进配置，看它会不会被执行
+printf 'FLEET_BACKEND_URL=http://x$(touch pwned):9\n' >>"$FEISHU_ENV"
+check "地址里夹 \$(…)：认不出（invalid）" "$(cd "$TMP" && cmd_status | grep '^backend=')" "backend=invalid"
+check "夹的命令没被执行" "$([[ -e "$TMP/pwned" ]] && echo 执行了 || echo 没执行)" 没执行
+for bad in 'http://127.0.0.1:9;id' 'http://127.0.0.1:99999' 'http://127.0.0.1' 'ftp://127.0.0.1:9' 'http://127.0.0.1:9 x'; do
+  printf 'FLEET_BACKEND_URL=%s\n' "$bad" >>"$FEISHU_ENV"
+  check "认不出：$bad" "$(cmd_status | grep '^backend=')" "backend=invalid"
+done
 printf 'FLEET_BACKEND_URL=\n' >>"$FEISHU_ENV"
 st=$(cmd_status)
 check "后端地址空了：unknown，不冒充连得上" "$(grep '^backend=' <<<"$st")" "backend=unknown"
@@ -249,5 +278,9 @@ check "本机 root 手动跑（从参数读）：认" "$?" 0
 if ((fail)); then
   echo "gateway-deploy：不通过"
   exit 1
+fi
+if ((skipped)); then
+  echo "gateway-deploy：其余通过，有项没跑成（见上面的「没跑成」）"
+  exit 2
 fi
 echo "gateway-deploy：通过"

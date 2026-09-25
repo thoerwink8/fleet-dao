@@ -24,18 +24,32 @@ Restart=always
 RestartSec=3
 KillSignal=SIGTERM
 TimeoutStopSec=30
-# 网关只出站（连飞书、经隧道连法国），不监听端口、不写磁盘
+# 网关只出站（连飞书、经隧道连法国），不监听端口、不写磁盘；配置全从环境变量来（上面两个文件由 systemd 在起进程之前读），
+# 所以进程自己连 /etc/fleet-dao 都看不见——网关被打穿也读不到这台上别的密钥
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
+InaccessiblePaths=/etc/fleet-dao
+ProtectProc=invisible
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
+ProtectKernelLogs=yes
 ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
 RestrictSUIDSGID=yes
 RestrictRealtime=yes
 LockPersonality=yes
+SystemCallArchitectures=native
+# 名单外的系统调用回 EPERM、不杀进程：真撞上了日志里看得到是哪一步报错。
+# 不开 MemoryDenyWriteExecute：node 的即时编译要可写可执行的内存
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
 UnsetEnvironment=GH_TOKEN GITHUB_TOKEN
 
 [Install]

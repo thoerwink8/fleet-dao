@@ -18,8 +18,10 @@ export FLEET_RELEASES_DIR=$TMP/releases
 source "$HERE/../release.sh"
 set +e # release.sh 开了 -e；这里自己判每一步
 mkdir -p "$RELEASES"
+SCRIPT_HK_PARTS=$FLEET_HK_PARTS # release.env 里不写 FLEET_HK_PARTS 时用的默认值（后面各段会改这个变量）
 
 fail=0
+skipped=0 # 有要 root 的段没跑成
 check() { # 说明 实际 期望
   if [[ "$2" == "$3" ]]; then
     printf '  ✓ %s\n' "$1"
@@ -76,6 +78,10 @@ gw() {
     if [[ -f "$GWD/down" ]]; then
       echo "ssh: connect to host 10.99.0.1 port 22: Connection timed out" >&2
       return 255
+    fi
+    if [[ -f "$GWD/garbled" ]]; then
+      echo "<html>502 Bad Gateway</html>"
+      return 0
     fi
     if [[ -f "$GWD/flapping" ]]; then echo $(($(cat "$GWD/restarts" 2>/dev/null || echo 0) + 1)) >"$GWD/restarts"; fi
     printf 'current=%s\nenabled=enabled\nactive=active\npid=42\nrestarts=%s\nrunning=%s\nconnected=%s\nmessages=0\n' \
@@ -356,12 +362,23 @@ with_gateway "$E"
 reset
 do_release "$E" >/dev/null
 check "香港网关的入口问不通：不切，还在 C" "$(current_sha)" "$C"
-check "问不通：报红" "$(printf '%s\n' "${REDS[@]}" | grep -c '问香港飞书网关的状态没成')" 1
+check "问不通：报红，说是问不到" "$(printf '%s\n' "${REDS[@]}" | grep -c '没切版本：问不到香港飞书网关的状态')" 1
 check "问不通：历史没变" "$(events)" "$before"
 rm -f -- "$GWD/down"
 
-echo "== 只发网关（FLEET_HK_PARTS=gateway）：不碰香港的静态文件，也不试通那条路"
-FLEET_HK_PARTS=gateway
+echo "== 往香港发哪几样：release.env 里不写就只发网关——静态页不发、也不试通（发了会换掉根地址的演示版，要人明写 web）"
+check "脚本里的默认值只有 gateway" "$SCRIPT_HK_PARTS" gateway
+if ((EUID == 0)); then
+  # 照样例重建、或者那一行被删掉之后的 release.env：没有 FLEET_HK_PARTS 这一项
+  printf 'FLEET_SERVICES=\nFLEET_DOMAIN=cockpit.example.com\n' >"$TMP/release.env"
+  FLEET_HK_PARTS=$SCRIPT_HK_PARTS
+  load_env "$TMP/release.env" FLEET_SERVICES FLEET_DOMAIN FLEET_HK_PARTS
+  check "release.env 里没写这一项：读完还是只发 gateway" "$FLEET_HK_PARTS" gateway
+else
+  echo "  … 没跑成：读 release.env 要 root（只认属 root 的文件）"
+  skipped=1
+  FLEET_HK_PARTS=$SCRIPT_HK_PARTS
+fi
 SYNCED=0
 PROBED=0
 reset
@@ -370,13 +387,18 @@ check "在用 E" "$(current_sha)" "$E"
 check "静态文件一次都没发" "$SYNCED" 0
 check "传静态文件的路一次都没试" "$PROBED" 0
 check "网关照样发过去" "$(cat "$GWD/current")" "$E"
+FLEET_HK_PARTS="web gateway"
+reset
+do_release "$A" >/dev/null
+check "明写了 web：先试通、再发静态文件" "$PROBED:$SYNCED" "1:1"
 FLEET_HK_PARTS=""
+SYNCED=0
 reset
 : >"$GWD/calls"
-do_release "$A" >/dev/null
+do_release "$E" >/dev/null
 check "两样都不发：香港网关一次都没问" "$(grep -c . "$GWD/calls")" 0
 check "两样都不发：静态文件没发" "$SYNCED" 0
-FLEET_HK_PARTS="web gateway"
+FLEET_HK_PARTS=$SCRIPT_HK_PARTS
 
 echo "== 网关的健康检查：主进程是这一版、连上了飞书、起稳了才过；连不上后端记待配（不算这一版的错）"
 GATEWAY_WAIT=0
@@ -410,14 +432,28 @@ reset
 check_gateway "$A" >/dev/null
 check "配置没备齐（网关没起）：不算不过，记待配" "$?:${#PENDING[@]}" "0:1"
 GW_CONFIG=ok
+# 问不到就当场报红：不白等（等的那 60 秒用 sleep 桩数出来），红里说的是「问不到」，不是「没连上飞书」
+GATEWAY_WAIT=60
+SLEPT=0
+sleep() { SLEPT=$((SLEPT + 1)); }
 touch "$GWD/down"
 reset
 check_gateway "$A" >/dev/null
 check "问不到网关的状态：不过（不当成没事）" "$?" 1
+check "红里说的是问不到，不是没连上飞书" "$(printf '%s\n' "${REDS[@]}" | grep -c '问不到香港飞书网关的状态')" 1
+check "问不到就不等（一次都没睡）" "$SLEPT" 0
 rm -f -- "$GWD/down"
+touch "$GWD/garbled"
+reset
+check_gateway "$A" >/dev/null
+rc=$?
+check "回答认不出（不是状态的样子）：不过，也说是问不到" \
+  "$rc:$(printf '%s\n' "${REDS[@]}" | grep -c '问不到香港飞书网关的状态')" "1:1"
+rm -f -- "$GWD/garbled"
+unset -f sleep
+GATEWAY_WAIT=0
 
 echo "== 真起一个服务：切完 current 没重启就被打断，再跑同一版会重启；主进程跑的是哪一版，健康检查查得出"
-skipped=0
 if ((EUID != 0)) || [[ ! -d /run/systemd/system ]]; then
   echo "  … 没跑成：要 root 和 systemd（sudo bash deploy/test/run.sh）"
   skipped=1
@@ -465,7 +501,7 @@ if ((fail)); then
   exit 1
 fi
 if ((skipped)); then
-  echo "release-flow：其余通过，真起服务那段没跑成"
+  echo "release-flow：其余通过，要 root 的段没跑成（见上面的「没跑成」）"
   exit 2
 fi
 echo "release-flow：通过"
