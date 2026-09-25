@@ -603,6 +603,18 @@ else
 fi
 rm -f -- "$CATALOG"
 mv -- "$TMP/catalog.real" "$CATALOG"
+# 读不到属主权限（stat 失败）：桩只对 $CATALOG 失败，别的文件照常；这一轮完就撤掉
+stat() {
+  if [[ "${*: -1}" == "$CATALOG" ]]; then return 1; fi
+  command stat "$@"
+}
+check "stat 的桩：只有读 $CATALOG 失败，别的文件照常" \
+  "$(stat -c %a -- "$CATALOG" >/dev/null 2>&1 && echo 读到 || echo 读不到):$(stat -c %a -- "$FAKE/node" >/dev/null 2>&1 && echo 读到 || echo 读不到)" \
+  "读不到:读到"
+round changed
+blocked "读不到属主权限（stat 失败）" "$CATALOG 是「读不到」，应为 $CATALOG_META；没切版本" 0
+unset -f stat
+check "stat 的桩撤掉了" "$(stat -c %a -- "$CATALOG" >/dev/null 2>&1 && echo 读到 || echo 读不到)" 读到
 PG_BEFORE=fail
 round changed
 blocked "装之前连不上库" "装目录之前读不到库 fleet 里目录那几张表的行数" 0
