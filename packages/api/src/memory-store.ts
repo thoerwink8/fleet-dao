@@ -19,25 +19,27 @@ import type {
   Task,
 } from '@fleet-dao/shared';
 import { isSerial, isUuid, parseCursor } from './ids.ts';
-import type {
-  AgentSession,
-  AskRecord,
-  AuditRecord,
-  CommandClaim,
-  JobRecord,
-  NewAuditEntry,
-  NotificationRecord,
-  Page,
-  PageRequest,
-  PullRequestRecord,
-  QuotaWindowRecord,
-  RunPlan,
-  SettingRecord,
-  StagePolicyValue,
-  Store,
-  TestRunRecord,
-  TimelineRecord,
-  User,
+import {
+  type AgentSession,
+  type AskRecord,
+  type AuditRecord,
+  type CommandClaim,
+  type GitHubDelivery,
+  type JobRecord,
+  type NewAuditEntry,
+  type NotificationRecord,
+  type Page,
+  type PageRequest,
+  type PullRequestRecord,
+  type QuotaWindowRecord,
+  REPO_NOT_MANAGED,
+  type RunPlan,
+  type SettingRecord,
+  type StagePolicyValue,
+  type Store,
+  type TestRunRecord,
+  type TimelineRecord,
+  type User,
 } from './ports.ts';
 
 export interface ProgressRecord {
@@ -90,10 +92,13 @@ interface IdempotencyRecord {
   result?: unknown;
 }
 
+/** repos 表的一行：多一个自动派活开关（打开的时刻，不填 = 关着）。列仓的接口不带它。 */
+export type RepoRecord = Repo & { autoDispatchSince?: string | undefined };
+
 /** 和库里的表一一对应（去掉了库自己算的列）。 */
 export interface MemoryData {
   users: User[];
-  repos: Repo[];
+  repos: RepoRecord[];
   tasks: Task[];
   subtasks: Subtask[];
   runs: SessionRun[];
@@ -118,6 +123,8 @@ export interface MemoryData {
   pullRequests: PullRequestRecord[];
   specs: SpecRecord[];
   idempotency: Map<string, IdempotencyRecord>;
+  /** 收到的 GitHub 事件（github_events），按投递编号。 */
+  githubEvents: Map<string, GitHubDelivery>;
 }
 
 export function emptyData(): MemoryData {
@@ -145,6 +152,7 @@ export function emptyData(): MemoryData {
     pullRequests: [],
     specs: [],
     idempotency: new Map(),
+    githubEvents: new Map(),
   };
 }
 
@@ -170,6 +178,26 @@ const RECENT_TERMINAL_MS = 7 * 24 * 60 * 60_000;
 
 /** 自增编号补零：按字面比较就是按数值比较（和库里时间线事件编号的写法一致）。 */
 const seq15 = (n: string | number): string => String(n).padStart(15, '0');
+
+const repoOnly = ({ autoDispatchSince: _switch, ...repo }: RepoRecord): Repo => repo;
+
+/** 给出去的是副本：调用方改了不影响库里的。对象版本按对象排（和库版一样）。 */
+const copyDelivery = (e: GitHubDelivery): GitHubDelivery => ({
+  ...e,
+  versions: e.versions
+    .map((v) => ({ ...v }))
+    .sort((a, b) => (a.object < b.object ? -1 : a.object > b.object ? 1 : 0)),
+});
+
+/** 同一时刻不同写法（秒 / 毫秒）算同一个。 */
+const sameInstant = (a: string, b: string) => Date.parse(a) === Date.parse(b);
+
+/** 上次出错的、在等着的、处理中但占用早于 staleBefore 的（那一次多半死了），可以接过来重做。时刻都是 toISOString 的写法，按字面比就是按先后比。 */
+const reclaimable = (e: GitHubDelivery, staleBefore: string) =>
+  e.status === 'failed' || e.status === 'waiting' || (e.status === 'processing' && e.claimedAt < staleBefore);
+
+/** 接过来重做：次数加一；从等着接回来的不加（等上一轮不占自动重放的次数）。 */
+const reclaimedAttempts = (e: GitHubDelivery) => e.attempts + (e.status === 'waiting' ? 0 : 1);
 
 function sameValue(a: StagePolicyValue, b: StagePolicyValue): boolean {
   return (
@@ -329,10 +357,13 @@ export function createMemoryStore(
 
     // —— 看板 ——
     async listRepos() {
-      return [...data.repos].sort((a, b) => a.owner.localeCompare(b.owner) || a.name.localeCompare(b.name));
+      return [...data.repos]
+        .sort((a, b) => a.owner.localeCompare(b.owner) || a.name.localeCompare(b.name))
+        .map(repoOnly);
     },
     async getRepo(id) {
-      return data.repos.find((r) => r.id === id) ?? null;
+      const repo = data.repos.find((r) => r.id === id);
+      return repo ? repoOnly(repo) : null;
     },
     async listBoardTasks(repoId) {
       const cutoff = now().getTime() - RECENT_TERMINAL_MS;
@@ -758,16 +789,180 @@ export function createMemoryStore(
       if (heldBy(data.idempotency.get(k), token)) data.idempotency.delete(k);
     },
 
-    // —— GitHub ——
-    async claimDelivery({ id, event, source }) {
-      const k = `github-delivery:${id}`;
-      if (data.idempotency.has(k)) return 'duplicate';
-      data.idempotency.set(k, { action: `github.${event}`, target: source, claimedAt: now().toISOString() });
-      return 'new';
+    // —— GitHub 事件 ——
+    async claimDelivery(delivery, { staleBefore, skipIfSeen }) {
+      const at = now().toISOString();
+      // 先看别的投递带没带过这一版（和 Postgres 版同一个次序：不管这条自己在不在库里）
+      let seenBefore = false;
+      if (skipIfSeen) {
+        const carriers = [...data.githubEvents.values()].filter(
+          (e) =>
+            e.id !== delivery.id &&
+            e.versions.some(
+              (v) => v.object === skipIfSeen.object && sameInstant(v.version, skipIfSeen.version),
+            ),
+        );
+        if (carriers.some((e) => e.status !== 'ignored')) return { status: 'duplicate' };
+        seenBefore = carriers.some((e) => e.reason !== REPO_NOT_MANAGED);
+      }
+      const seen = seenBefore ? { seenBefore } : {};
+      const existing = data.githubEvents.get(delivery.id);
+      if (!existing) {
+        if (new Set(delivery.versions.map((v) => v.object)).size !== delivery.versions.length) {
+          throw new Error('github_event_versions_delivery_id_object_pk：同一条投递里同一个对象只能有一版');
+        }
+        data.githubEvents.set(delivery.id, {
+          ...delivery,
+          versions: delivery.versions.map((v) => ({ ...v })),
+          status: 'processing',
+          attempts: 1,
+          receivedAt: at,
+          claimedAt: at,
+        });
+        return { status: 'claimed', token: at, retry: false, ...seen };
+      }
+      if (!reclaimable(existing, staleBefore)) return { status: 'duplicate' };
+      Object.assign(existing, { status: 'processing', attempts: reclaimedAttempts(existing), claimedAt: at });
+      existing.finishedAt = undefined;
+      return { status: 'claimed', token: at, retry: true, ...seen };
     },
-    async releaseDelivery(id) {
-      const k = `github-delivery:${id}`;
-      if (data.idempotency.get(k)?.completedAt === undefined) data.idempotency.delete(k);
+    async reclaimDelivery(id, { staleBefore, force }) {
+      const existing = data.githubEvents.get(id);
+      if (!existing) return { status: 'not_found' };
+      if (!reclaimable(existing, staleBefore)) {
+        if (existing.status === 'processing') return { status: 'in_flight' };
+        if (!force) return { status: 'finished' };
+      }
+      const at = now().toISOString();
+      Object.assign(existing, { status: 'processing', attempts: reclaimedAttempts(existing), claimedAt: at });
+      existing.finishedAt = undefined;
+      return { status: 'claimed', token: at, delivery: copyDelivery(existing) };
+    },
+    async finishDelivery(id, token, outcome) {
+      const existing = data.githubEvents.get(id);
+      if (existing?.status !== 'processing' || existing.claimedAt !== token) return false;
+      if (outcome.status !== 'accepted' && !outcome.reason) {
+        throw new Error('github_events_reason_when_not_taken：不收、出错都得写原因');
+      }
+      existing.status = outcome.status;
+      existing.reason = outcome.status === 'accepted' ? undefined : outcome.reason;
+      existing.note = outcome.status === 'accepted' ? outcome.note : undefined;
+      existing.finishedAt = now().toISOString();
+      return true;
+    },
+    async getDelivery(id) {
+      const existing = data.githubEvents.get(id);
+      return existing ? copyDelivery(existing) : null;
+    },
+    async listUnfinishedDeliveries({ staleBefore, limit }) {
+      return [...data.githubEvents.values()]
+        .filter((e) => reclaimable(e, staleBefore))
+        .sort(
+          (a, b) =>
+            a.attempts - b.attempts || a.receivedAt.localeCompare(b.receivedAt) || a.id.localeCompare(b.id),
+        )
+        .slice(0, limit)
+        .map(copyDelivery);
+    },
+    async existingDeliveryIds(ids) {
+      return new Set(ids.filter((id) => data.githubEvents.has(id)));
+    },
+    async findSupersedingVersion({ object, version, state, excludeDeliveryId }) {
+      let newest: { deliveryId: string; version: string; state: 'open' | 'closed' } | null = null;
+      for (const e of data.githubEvents.values()) {
+        if (e.id === excludeDeliveryId || e.status !== 'accepted') continue;
+        for (const v of e.versions) {
+          if (v.object !== object || !v.state || v.state === state) continue;
+          if (Date.parse(v.version) <= Date.parse(version)) continue;
+          if (!newest || Date.parse(v.version) > Date.parse(newest.version)) {
+            newest = { deliveryId: e.id, version: v.version, state: v.state };
+          }
+        }
+      }
+      return newest;
+    },
+    async countStuckDeliveries({ staleBefore, maxAttempts }) {
+      const all = [...data.githubEvents.values()];
+      return {
+        exhausted: all.filter((e) => e.status === 'failed' && e.attempts >= maxAttempts).length,
+        stale: all.filter((e) => e.status === 'processing' && e.claimedAt < staleBefore).length,
+      };
+    },
+
+    // —— 接活 ——
+    async findRepoByName(owner, name) {
+      const repo = data.repos.find(
+        (r) => r.owner.toLowerCase() === owner.toLowerCase() && r.name.toLowerCase() === name.toLowerCase(),
+      );
+      return repo ? { ...repoOnly(repo), autoDispatchSince: repo.autoDispatchSince ?? null } : null;
+    },
+    async findTaskByIssue(repoId, issueNumber) {
+      return data.tasks.find((t) => t.repoId === repoId && t.issueNumber === issueNumber) ?? null;
+    },
+    async createTaskFromIssue(input, entry) {
+      const existing = data.tasks.find(
+        (t) => t.repoId === input.repoId && t.issueNumber === input.issueNumber,
+      );
+      if (existing) return { task: existing, created: false };
+      if (!data.repos.some((r) => r.id === input.repoId))
+        throw new Error(`tasks_repo_id_fk：没有仓 ${input.repoId}`);
+      if (!(input.issueNumber > 0)) throw new Error('tasks_issue_number_positive：issue 号要大于 0');
+      checkAudit(entry);
+      const inRepo = data.tasks.filter((t) => t.repoId === input.repoId).map((t) => t.priority);
+      const task: Task = {
+        id: input.id,
+        repoId: input.repoId,
+        issueNumber: input.issueNumber,
+        title: input.title,
+        rawRequest: input.rawRequest,
+        requestedBy: input.requestedBy,
+        state: 'queued',
+        // 排在这个仓最后
+        priority: Math.max(0, ...inRepo) + 1,
+        acceptance: [],
+        createdAt: now().toISOString(),
+      };
+      data.tasks.push(task);
+      data.stateChanges.push({
+        id: nextId(),
+        entity: 'task',
+        entityId: task.id,
+        taskId: task.id,
+        to: task.state,
+        at: task.createdAt,
+      });
+      audit(entry);
+      changed('tasks', task.id);
+      return { task, created: true };
+    },
+    async updateTaskRequest({ taskId, title, rawRequest }, entry) {
+      const task = data.tasks.find((t) => t.id === taskId);
+      if (!task) return 'not_found';
+      if (task.title === title && task.rawRequest === rawRequest) return 'unchanged';
+      checkAudit(entry);
+      task.title = title;
+      task.rawRequest = rawRequest;
+      audit(entry);
+      changed('tasks', taskId);
+      return 'ok';
+    },
+    async stopQueuedTask(taskId, entry) {
+      const task = data.tasks.find((t) => t.id === taskId);
+      if (task?.state !== 'queued') return 'not_queued';
+      checkAudit(entry);
+      task.state = 'stopped';
+      data.stateChanges.push({
+        id: nextId(),
+        entity: 'task',
+        entityId: task.id,
+        taskId: task.id,
+        from: 'queued',
+        to: 'stopped',
+        at: now().toISOString(),
+      });
+      audit(entry);
+      changed('tasks', task.id);
+      return 'ok';
     },
   };
 }

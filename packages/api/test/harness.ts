@@ -1,8 +1,9 @@
 // 测试用的装配：Store（内存版，或 PGlite 上的 Postgres 版）+ 假飞书 + 记录信号的假工作流 + 变化源。
 // 每个测试自己起一份，互不干扰。
+import { createHmac } from 'node:crypto';
 import type { TestDb } from '@fleet-dao/db/testing';
 import { resetTestDb } from '@fleet-dao/db/testing';
-import { FLEET_CHANGES_CHANNEL } from '@fleet-dao/shared';
+import { FLEET_CHANGES_CHANNEL, requirementWorkflowId } from '@fleet-dao/shared';
 import type { Hono } from 'hono';
 import { signAgentToken } from '../src/agent-token.ts';
 import { buildApps } from '../src/app.ts';
@@ -22,6 +23,8 @@ import type {
   HealthCheck,
   IngestedEvent,
   Logger,
+  RequirementStart,
+  RequirementWorkflows,
   Store,
   TaskSignal,
   WorkflowControl,
@@ -41,7 +44,7 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     agentListen: { host: '127.0.0.1', port: 0 },
     sessionSecret: 'session-secret-for-tests-0123456789abcdef',
     agentTokenSecret: 'agent-secret-for-tests-0123456789abcdef',
-    githubWebhookSecret: 'webhook-secret-for-tests',
+    githubWebhookSecret: WEBHOOK_SECRET,
     feishu: { appId: 'cli_test_app', appSecret: 'feishu-secret-for-tests' },
     databaseUrl: null,
     feishuGatewayToken: GATEWAY_PASS,
@@ -81,11 +84,15 @@ export interface Harness<S extends Store = Store> {
   cockpit: Hono;
   agent: Hono;
   relay: SseRelay;
+  /** 装配好的全部依赖（自己另起 GitHubIntake、对账时用）。 */
+  deps: Deps;
   config: Config;
   store: S;
   changes: ChangeFeed;
   /** workflowId 是目标工作流的编号（req:owner/name#issueNumber 或 sub:subtaskId），不是调用方传的原始 taskId。 */
   signals: { workflowId: string; signal: TaskSignal }[];
+  /** 真拉起了的需求工作流（假的：同一张 issue 的还在跑、没被叫停，再拉回 already_running，不记在这里）。 */
+  starts: RequirementStart[];
   accepted: IngestedEvent[];
   logs: { level: string; message: string; fields?: Record<string, unknown> | undefined }[];
   feishuCalls: Parameters<FeishuAuth['identify']>[0][];
@@ -101,6 +108,7 @@ export interface HarnessOptions {
   config?: Partial<Config>;
   data?: Partial<MemoryData>;
   workflows?: WorkflowControl;
+  requirements?: RequirementWorkflows;
   feishu?: 'fake' | null;
   github?: (event: IngestedEvent) => Promise<void>;
   health?: HealthCheck[];
@@ -117,6 +125,7 @@ function wire<S extends Store>(
   const now = () => new Date(clock.now);
   const config = testConfig(options.config);
   const signals: Harness['signals'] = [];
+  const starts: RequirementStart[] = [];
   const accepted: IngestedEvent[] = [];
   const logs: Harness['logs'] = [];
   const log: Logger = {
@@ -142,6 +151,23 @@ function wire<S extends Store>(
         signals.push({ workflowId, signal });
       },
     },
+    requirements: options.requirements ?? {
+      async start(input) {
+        // 像 Temporal 按工作流编号去重：同一张 issue 的工作流还在跑（没被叫停）就不起第二条
+        const running = starts.some(
+          (s) =>
+            s.repo.id === input.repo.id &&
+            s.issueNumber === input.issueNumber &&
+            !signals.some(
+              (x) =>
+                x.workflowId === requirementWorkflowId(s.repo, s.issueNumber) && x.signal.name === 'stop',
+            ),
+        );
+        if (running) return 'already_running';
+        starts.push(input);
+        return 'started';
+      },
+    },
     github: {
       accept:
         options.github ??
@@ -156,10 +182,12 @@ function wire<S extends Store>(
     cockpit,
     agent,
     relay,
+    deps,
     config,
     store,
     changes,
     signals,
+    starts,
     accepted,
     logs,
     feishuCalls: feishu.calls,
@@ -343,6 +371,41 @@ export function agentRequest(
 export async function errorCode(res: Response): Promise<string> {
   const body = (await res.json()) as { error?: { code?: string } };
   return body.error?.code ?? '(no code)';
+}
+
+/** 和 testConfig 里的 githubWebhookSecret 同一把。 */
+export const WEBHOOK_SECRET = 'webhook-secret-for-tests';
+
+export function signGithub(body: string, secret = WEBHOOK_SECRET): string {
+  return `sha256=${createHmac('sha256', secret).update(body).digest('hex')}`;
+}
+
+let deliverySeq = 0;
+
+/**
+ * 像香港那样把一条 GitHub 事件原样转进来。签名按请求体的原始字节算：body 给了就用它的字节，
+ * 不从 payload 重新序列化；signature 给 null 就不带签名头。
+ */
+export function deliverGithub(
+  h: Pick<Harness, 'cockpit'>,
+  event: string,
+  payload: unknown,
+  options: {
+    delivery?: string;
+    signature?: string | null;
+    body?: string;
+    headers?: Record<string, string>;
+  } = {},
+): Promise<Response> {
+  const body = options.body ?? JSON.stringify(payload);
+  const headers: Record<string, string> = {
+    'content-type': 'application/json',
+    'x-github-event': event,
+    'x-github-delivery': options.delivery ?? `d-${++deliverySeq}`,
+    ...options.headers,
+  };
+  if (options.signature !== null) headers['x-hub-signature-256'] = options.signature ?? signGithub(body);
+  return Promise.resolve(h.cockpit.request('/github/webhook', { method: 'POST', headers, body }));
 }
 
 export type { FeedEvent };

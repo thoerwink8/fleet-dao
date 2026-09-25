@@ -152,7 +152,7 @@ describe('读不到 ≠ 没有', () => {
     expect(merged.problems.some((p) => p.startsWith(`#${pr.number} 没查成`))).toBe(true);
   });
 
-  it('CI 事件回 GitHub 重读失败：事件处理报错（后端会撤掉投递登记，等重投或补收），不把镜像写成「没有 CI」', async () => {
+  it('CI 事件回 GitHub 重读失败：事件处理报错（后端把这条投递记成出错、原文留着，对账时重放），不把镜像写成「没有 CI」', async () => {
     const { gh, fake, ledger } = setup();
     const sink = gh.eventSink({ wake: async () => {} });
     await sink.accept({

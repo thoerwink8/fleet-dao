@@ -109,7 +109,7 @@ describe('事件之后的处理', () => {
     ]);
   });
 
-  it('叫醒失败就抛：后端会撤掉投递登记，让重投或补收再来', async () => {
+  it('叫醒失败就抛：后端把这条投递记成出错、原文留着，对账时按原文重放', async () => {
     const { gh } = setup();
     const sink = gh.eventSink({ wake: async () => Promise.reject(new Error('Temporal 连不上')) });
     await expect(sink.accept(event({ event: 'issues', payload: { issue: { number: 1 } } }))).rejects.toThrow(
@@ -199,6 +199,77 @@ describe('对账与补漏', () => {
     });
   });
 
+  it('重投前先问后端库里有没有：原文已经在库里的不叫 GitHub 重投，交给后端按原文重放', async () => {
+    const { gh, fake } = setup();
+    fake.deliveries = [
+      { id: 11, guid: 'g-stored', delivered_at: '2026-09-25T11:00:00Z', status_code: 500, event: 'issues' },
+      { id: 12, guid: 'g-missing', delivered_at: '2026-09-25T11:00:00Z', status_code: 502, event: 'issues' },
+    ];
+    const { intake } = fakeIntake(() => true);
+    const asked: string[][] = [];
+    const storedDeliveries = async (guids: readonly string[]) => {
+      asked.push([...guids]);
+      return new Set(['g-stored']);
+    };
+    const report = await gh
+      .reconciler({ intake, pollDeliveryId, storedDeliveries })
+      .redeliverFailed(new Date('2026-09-25T10:00:00Z'));
+    expect(asked.map((guids) => guids.sort())).toEqual([['g-missing', 'g-stored']]);
+    expect(fake.redelivered).toEqual([12]);
+    expect(report).toEqual({ outcome: 'ok', checked: 2, recovered: 1, why: undefined });
+  });
+
+  it('查后端库有没有这些投递失败：重投这一步报 failed，一条都不重投（宁可不重投，也不让 GitHub 送第二遍）', async () => {
+    const { gh, fake } = setup();
+    fake.deliveries = [
+      { id: 12, guid: 'g-missing', delivered_at: '2026-09-25T11:00:00Z', status_code: 502, event: 'issues' },
+    ];
+    const { intake } = fakeIntake(() => true);
+    const report = await gh
+      .reconciler({
+        intake,
+        pollDeliveryId,
+        storedDeliveries: async () => {
+          throw new Error('库连不上');
+        },
+      })
+      .redeliverFailed(new Date('2026-09-25T10:00:00Z'));
+    expect(report).toMatchObject({ outcome: 'failed', checked: 1, recovered: 0 });
+    expect(report.why).toContain('库连不上');
+    expect(fake.redelivered).toEqual([]);
+  });
+
+  it('补收看到的评论：从没改过的带上作者（自家的回声认得出），改过的看不出是谁改的不带', async () => {
+    const { gh, fake } = setup();
+    const unedited = fake.addIssue();
+    const edited = fake.addIssue();
+    unedited.comments.push({
+      id: 91,
+      body: '自家机器人发的',
+      user: fake.bots.engine,
+      created_at: '2026-09-25T11:00:00Z',
+      updated_at: '2026-09-25T11:00:00Z',
+    });
+    edited.comments.push({
+      id: 92,
+      body: '外人改过',
+      user: fake.human,
+      created_at: '2026-09-25T11:00:00Z',
+      updated_at: '2026-09-25T12:00:00Z',
+    });
+    const { intake, ingested } = fakeIntake(() => true);
+    await gh.reconciler({ intake, pollDeliveryId }).poll('acme/widgets', new Date(0));
+    const comment = (id: number) =>
+      ingested.find((i) => i.event === 'issue_comment' && (i.payload.comment as { id: number }).id === id)
+        ?.payload;
+    expect(comment(91)?.sender).toEqual(fake.bots.engine);
+    expect(comment(92)).not.toHaveProperty('sender');
+    // 补收拼出来的评论都记成 synced：后端认 synced 的回答，还要它从没改过（updated_at 等于 created_at）
+    expect(
+      ingested.filter((i) => i.event === 'issue_comment').every((i) => i.payload.action === 'synced'),
+    ).toBe(true);
+  });
+
   it('轮询：issue、评论、PR 逐条过后端那道门；同一版本只收一次', async () => {
     const { gh, fake } = setup();
     fake.addIssue({ title: '人开的' });
@@ -216,6 +287,34 @@ describe('对账与补漏', () => {
     );
     const second = await rec.poll('acme/widgets', new Date('2026-09-25T00:00:00Z'));
     expect(second).toEqual({ outcome: 'ok', checked: 3, recovered: 0 });
+  });
+
+  it('轮询把 issue、评论整条原样送进门：标题、正文、开关状态、建立时刻都在（后端建任务、认回答要用）', async () => {
+    const { gh, fake } = setup();
+    const opened = fake.addIssue({ title: '人开的', body: '原话' });
+    opened.comments.push({
+      id: 78,
+      body: '5 分钟',
+      user: fake.human,
+      created_at: '2026-09-25T11:00:00Z',
+      updated_at: '2026-09-25T12:00:00Z',
+    });
+    const { intake, ingested } = fakeIntake(() => true);
+    await gh.reconciler({ intake, pollDeliveryId }).poll('acme/widgets', new Date('2026-09-25T00:00:00Z'));
+    expect(ingested.find((i) => i.event === 'issues')?.payload.issue).toMatchObject({
+      number: opened.number,
+      title: '人开的',
+      body: '原话',
+      state: 'open',
+      created_at: opened.created_at,
+      user: fake.human,
+    });
+    expect(ingested.find((i) => i.event === 'issue_comment')?.payload.comment).toMatchObject({
+      id: 78,
+      body: '5 分钟',
+      created_at: '2026-09-25T11:00:00Z',
+      user: fake.human,
+    });
   });
 
   it('轮询认得出自家的回声：引擎改进度段、关单、发的评论、开和合的 PR 都不叫醒；人改的、人写的照样叫醒', async () => {
@@ -277,6 +376,16 @@ describe('对账与补漏', () => {
     expect(report).toMatchObject({ outcome: 'ok', scanned: 3, found: 1, fixed: 1 });
     expect(report.problems).toEqual([`#${orphan.number} 是白名单作者开的，却没有工作流（已重新送进引擎）`]);
     expect(ingested.map((i) => i.payload.action)).toEqual(['reconcile', 'reconcile']);
+    // 投递编号按 issue 的这一版起（不带这一轮的时刻）：同一版每轮都来核对，后端投递账里也只有一条
+    expect(ingested.map((i) => i.deliveryId)).toEqual([
+      pollDeliveryId('acme/widgets', 'issue-audit', orphan.number, orphan.updated_at),
+      pollDeliveryId(
+        'acme/widgets',
+        'issue-audit',
+        orphan.number + 1,
+        fake.issues.get(orphan.number + 1)?.updated_at ?? '',
+      ),
+    ]);
   });
 
   it('合并的 PR：镜像里没记的补上；不是「引擎」合的报出来（C21/C22）', async () => {
