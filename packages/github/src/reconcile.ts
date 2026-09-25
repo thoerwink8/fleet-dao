@@ -2,10 +2,11 @@
 // - 重投：GitHub 不自动重投失败的投递。用 App 身份拉投递日志，同一次投递（guid）一次都没成功的就重投（重投时编号不变，后端去重认得出）。
 // - 轮询：按 updated_at 拉 issue、评论、PR，逐条交给后端的同一道门（白名单、去重），漏收的事件这样补回来。
 // - 核对：白名单作者开的开放 issue 都有工作流；合并的 PR 都记在镜像里、都是「引擎」机器人合的（C21/C22）。
-// 每一项都分清「查了、0 个问题」和「这次没查成」：读不到 GitHub 就报 unscanned，不报 ok。
+// 每一项都分清「查了、0 个问题」和「这次没查成」：读不到 GitHub 就报 unscanned，不报 ok；做了一半报 partial，全没做成报 failed。
 import { z } from 'zod';
 import { enc, type Logger, parseRepoSlug, repoSlug } from './client.ts';
 import type { Deps } from './deps.ts';
+import { type EchoKind, echoOf } from './echo.ts';
 import { mergeKey, readPull } from './pulls.ts';
 
 /** 和 @fleet-dao/api 的 GitHubIntake 同形：补收的东西走同一道门、同一本投递账。 */
@@ -20,10 +21,13 @@ export interface Intake {
   >;
 }
 
-/** 和 @fleet-dao/api 的 ReconcileReport 同形。 */
+/**
+ * 重投、轮询的结果。和 @fleet-dao/api 的 ReconcileReport 同形，只是 outcome 多两态（和定时任务的结局 ScheduleOutcome 一致）：
+ * ok = 查完了、该做的都做成了；partial = 做了一部分（有的重投失败、翻到一半断了）；
+ * unscanned = 这次没查成（和「查了没发现」分开）；failed = 该做的一件都没做成。
+ */
 export interface ReconcileReport {
-  /** ok = 查完了；unscanned = 这次没查成（和「查了没发现」分开）。 */
-  outcome: 'ok' | 'unscanned';
+  outcome: 'ok' | 'partial' | 'unscanned' | 'failed';
   checked: number;
   recovered: number;
   why?: string | undefined;
@@ -143,11 +147,15 @@ export function createReconciler(deps: Deps, options: ReconcilerOptions): Reconc
         }
       }
       if (todo.length > 0) log.warn('有投递一直没成功，已重投', { failed: todo.length, recovered });
+      const attempted = Math.min(todo.length, limit);
       const notes = [
         todo.length > limit ? `还有 ${todo.length - limit} 个没重投（一次最多 ${limit} 个）` : '',
         errors.length ? `重投失败 ${errors.length} 个：${errors.slice(0, 3).join('；')}` : '',
       ].filter(Boolean);
-      return { outcome: 'ok', checked, recovered, why: notes.length ? notes.join('；') : undefined };
+      // 重投失败如实报：一个都没成是 failed，成了一部分或还剩着没重投是 partial
+      const outcome =
+        attempted > 0 && errors.length === attempted ? 'failed' : notes.length > 0 ? 'partial' : 'ok';
+      return { outcome, checked, recovered, why: notes.length ? notes.join('；') : undefined };
     },
 
     async poll(repoFullName, since) {
@@ -162,6 +170,14 @@ export function createReconciler(deps: Deps, options: ReconcilerOptions): Reconc
         checked += 1;
         const res = await options.intake.ingest({ deliveryId, event, payload, source: 'poll' });
         if (res.verdict === 'accepted') recovered += 1;
+      };
+      // 列表里没有「是谁改的」：这一版是自家机器人写出来的（按写入回执记过 updated_at），就把机器人当 sender，
+      // 后端据此不叫醒工作流；认不出的不带 sender（后端当别人改的，叫醒）
+      const senderOf = async (kind: EchoKind, number: number, updatedAt: string) => {
+        const role = await echoOf(ledger.idempotency, repo, kind, number, updatedAt);
+        if (!role) return {};
+        const bot = await deps.bots.identity(role, repo);
+        return { sender: { login: bot.login, id: bot.userId, type: 'Bot' } };
       };
       try {
         const sinceIso = since.toISOString();
@@ -178,6 +194,7 @@ export function createReconciler(deps: Deps, options: ReconcilerOptions): Reconc
               action: 'synced',
               issue: it,
               repository,
+              ...(await senderOf('issue', it.number, it.updated_at)),
             });
           }
         }
@@ -196,6 +213,8 @@ export function createReconciler(deps: Deps, options: ReconcilerOptions): Reconc
               comment: c,
               ...(m?.[1] ? { issue: { number: Number(m[1]) } } : {}),
               repository,
+              // 评论是谁写的就是谁：自家机器人发的关单评论，后端认得出是回声
+              ...(c.user ? { sender: c.user } : {}),
             });
           }
         }
@@ -212,11 +231,18 @@ export function createReconciler(deps: Deps, options: ReconcilerOptions): Reconc
               action: 'synced',
               pull_request: pr,
               repository,
+              ...(await senderOf('pull', pr.number, pr.updated_at)),
             });
           }
         }
       } catch (err) {
-        return { outcome: 'unscanned', checked, recovered, why: `轮询 ${slug} 没做完：${why(err)}` };
+        // 翻到一半断了：前面送进门的算数，但这次没查全
+        return {
+          outcome: checked > 0 ? 'partial' : 'unscanned',
+          checked,
+          recovered,
+          why: `轮询 ${slug} 没做完：${why(err)}`,
+        };
       }
       return { outcome: 'ok', checked, recovered };
     },

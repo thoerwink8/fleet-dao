@@ -1,5 +1,6 @@
 // 这个包抛的错误。形状和引擎的 PortError 对齐（code、retryable、details），引擎的活动层原样转过 Temporal 边界即可。
-// 改这里之前：code 是给程序分流用的，别改名；message 是给人看的白话，不许带任何凭据（出口统一过 redact）。
+// 改这里之前：code 是给程序分流用的，别改名；message 与 details 都会原样进 Temporal 历史、落库，
+// 所以两者在构造时统一打码（details 逐层打，GitHub 回显的原文就放在 details 里）。
 
 export interface GitHubErrorOptions {
   retryable?: boolean;
@@ -21,7 +22,7 @@ export class GitHubError extends Error {
     this.name = 'GitHubError';
     this.code = code;
     this.retryable = options.retryable ?? false;
-    this.details = options.details;
+    this.details = redactDeep(options.details);
     this.status = options.status;
     this.maybeLanded = options.maybeLanded ?? false;
   }
@@ -65,5 +66,18 @@ export function redact(text: string): string {
       typeof prefix === 'string' ? `${prefix}<redacted>` : '<redacted>',
     );
   }
+  return out;
+}
+
+/** 逐层打码：对象、数组里的每个字符串都过 redact；错误对象只留打过码的名字和信息。 */
+export function redactDeep(value: unknown, seen: WeakSet<object> = new WeakSet()): unknown {
+  if (typeof value === 'string') return redact(value);
+  if (value === null || typeof value !== 'object' || value instanceof Date) return value;
+  if (seen.has(value)) return '[循环引用]';
+  seen.add(value);
+  if (Array.isArray(value)) return value.map((v) => redactDeep(v, seen));
+  if (value instanceof Error) return redact(`${value.name}: ${value.message}`);
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value)) out[k] = redactDeep(v, seen);
   return out;
 }

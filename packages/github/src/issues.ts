@@ -3,9 +3,11 @@
 // 内容没变就不写（省 GitHub 的内容创建配额）。GitHub 的写没有「版本不对就拒」，所以写完用编辑历史核对：
 // 我们读和写之间要是插进了人手编辑（被我们这次盖掉了），把人写的那一版找回来、重新放进进度段，并报警。
 // 关单：先发一条写明去向的评论（带标记，幂等），再关（带 state_reason），回读 state 与 state_reason 才算成（A8）。
+// 每次写完都把回执里的 updated_at 记成「自家的回声」（echo.ts），轮询补收时据此不叫醒自己。
 import { z } from 'zod';
 import { enc, type RepoRef, repoSlug, unexpected } from './client.ts';
 import type { ActivityContext, Deps } from './deps.ts';
+import { recordEcho } from './echo.ts';
 import { GitHubError } from './errors.ts';
 import { digest, idempotencyKey, once } from './idempotency.ts';
 import {
@@ -39,7 +41,17 @@ export const CommentSchema = z.object({
   html_url: z.string(),
   body: z.string().nullable(),
   user: User.nullable(),
+  updated_at: z.string(),
 });
+
+/** issue 这个版本是「引擎」写出来的（updated_at 取写入回执）。 */
+function issueEcho(deps: Deps, repo: RepoRef, number: number, updatedAt: string) {
+  return recordEcho(
+    deps.ledger.idempotency,
+    { repo, kind: 'issue', number, updatedAt, role: 'engine' },
+    deps.client.now(),
+  );
+}
 
 export async function readIssue(
   deps: Deps,
@@ -150,6 +162,7 @@ async function patchBody(deps: Deps, repo: RepoRef, issueNumber: number, body: s
       },
     );
   }
+  await issueEcho(deps, repo, issueNumber, parsed.data.updated_at);
 }
 
 const EditsQuery = `query($owner: String!, $name: String!, $number: Int!) {
@@ -264,6 +277,8 @@ export interface CloseIssueResult {
 interface CommentReceipt {
   id: number;
   url: string;
+  /** 回执里评论的 updated_at（按标记找回的旧评论也带；老账上可能没有）。 */
+  updatedAt?: string | undefined;
 }
 
 export async function closeIssue(
@@ -305,7 +320,7 @@ export async function closeIssue(
         const hit = parsed.data.find(
           (c) => (c.body ?? '').includes(marker) && deps.bots.is('engine', c.user),
         );
-        if (hit) return { id: hit.id, url: hit.html_url };
+        if (hit) return { id: hit.id, url: hit.html_url, updatedAt: hit.updated_at };
       }
       return null;
     },
@@ -333,19 +348,24 @@ export async function closeIssue(
           },
         );
       }
-      return { id: parsed.data.id, url: parsed.data.html_url };
+      return { id: parsed.data.id, url: parsed.data.html_url, updatedAt: parsed.data.updated_at };
     },
   });
+  // 新评论会把 issue 的 updated_at 推到评论的时刻：这一版也是自家的回声（重记一遍无妨）
+  if (value.updatedAt) await issueEcho(deps, repo, issueNumber, value.updatedAt);
 
   const alreadyClosed = issue.state === 'closed' && issue.state_reason === reason;
   if (!alreadyClosed) {
-    await deps.client.request({
+    const res = await deps.client.request({
       method: 'PATCH',
       path: base,
       auth,
       body: { state: 'closed', state_reason: reason },
       signal: ctx.signal,
     });
+    const closed = IssueSchema.safeParse(res.data);
+    if (!closed.success) throw unexpected(`关 #${issueNumber} 的回执`, res.data);
+    await issueEcho(deps, repo, issueNumber, closed.data.updated_at);
   }
   const after = await readIssue(deps, repo, issueNumber, ctx.signal);
   if (after.state !== 'closed' || after.state_reason !== reason) {

@@ -34,7 +34,8 @@ export {
   loadApps,
 } from './credentials.ts';
 export { type ActivityContext, type BotIdentity, type Locker, memoryLocker } from './deps.ts';
-export { GitHubError, isGitHubError, redact } from './errors.ts';
+export { type EchoKind, echoKey, echoOf, recordEcho } from './echo.ts';
+export { GitHubError, isGitHubError, redact, redactDeep } from './errors.ts';
 export {
   createEventSink,
   type EventSink,
@@ -89,9 +90,12 @@ export {
 } from './progress.ts';
 export {
   type CiWaitResult,
+  defaultCommitMessage,
   type MergePrInput,
   type MergePrResult,
+  type MergeReceipt,
   type MergeRefusal,
+  mergeKey,
   mergePr,
   type OpenPrInput,
   type OpenPrResult,

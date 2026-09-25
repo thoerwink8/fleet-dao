@@ -14,11 +14,12 @@ import { repos } from '@fleet-dao/db';
 import { createTestDb } from '@fleet-dao/db/testing';
 import {
   createGitHub,
+  defaultCommitMessage,
   type GitHub,
   isBot,
+  memoryLocker,
   parseRepoSlug,
   pgLedger,
-  pgLocker,
   redact,
   repoSlug,
 } from '../../src/index.ts';
@@ -201,7 +202,8 @@ try {
   await t.db.insert(repos).values({ owner: repo.owner, name: repo.name, testCommand: 'node --test' });
   const github = createGitHub({
     ledger: pgLedger(t.db),
-    locker: pgLocker(t.db),
+    // PGlite 只有一条连接：pgLocker 的事务占着它时，锁里的幂等账读写会自己等自己。单进程验收用进程内的锁
+    locker: memoryLocker(),
     fetch: recordingFetch,
     stateDir: join(root, 'state'),
     log: {
@@ -332,10 +334,23 @@ try {
   );
 
   // 6. 合并（「引擎」机器人）
-  await step(
+  const mergedPr = await step(
     '合并（引擎，squash，带头约束）',
     () => github.mergePr({ repo, prNumber: pr.number, expectedHead: head }),
     (r) => (r.merged && r.mergedByEngine && r.branchDeleted ? null : brief(r)),
+  );
+  await step(
+    'squash 提交的正文是我们给的（不是 GitHub 拼的默认正文）',
+    async () => {
+      const sha = mergedPr.merged ? mergedPr.mergeCommit : '';
+      const res = await client.request<{ commit: { message: string } }>({
+        method: 'GET',
+        path: `/repos/${repo.owner}/${repo.name}/commits/${sha}`,
+        auth: { as: 'engine', repo },
+      });
+      return res.data.commit.message;
+    },
+    (message) => (message.includes(defaultCommitMessage(pr.number)) ? null : `提交信息是：${message}`),
   );
   await step(
     '合并重试：认下已合并，不再合',
@@ -454,25 +469,33 @@ try {
     },
   );
 
-  // 10. 轮询补收（只读）：这次验收产生的 issue、评论、PR 都能按 updated_at 捞回来，逐条交给门
-  const seen: { event: string; deliveryId: string }[] = [];
+  // 10. 轮询补收（只读）：这次验收产生的 issue、评论、PR 都能按 updated_at 捞回来，逐条交给门；
+  // 这些全是自家机器人写的，照后端的规矩（sender 是自家机器人就不叫醒）一条都不该叫醒
+  const botIds = new Set([
+    (await github.deps.bots.identity('agent', repo)).userId,
+    (await github.deps.bots.identity('engine', repo)).userId,
+  ]);
+  const seen: { event: string; deliveryId: string; wake: boolean }[] = [];
   const intake = {
-    ingest: async (i: { deliveryId: string; event: string }) => {
-      seen.push({ event: i.event, deliveryId: i.deliveryId });
-      return { verdict: 'accepted' as const, wake: true };
+    ingest: async (i: { deliveryId: string; event: string; payload: unknown }) => {
+      const sender = (i.payload as { sender?: { id?: number; type?: string } }).sender;
+      const wake = !(sender?.type === 'Bot' && sender.id !== undefined && botIds.has(sender.id));
+      seen.push({ event: i.event, deliveryId: i.deliveryId, wake });
+      return { verdict: 'accepted' as const, wake };
     },
   };
   const pollId = (r: string, kind: string, id: number | string, at: string) =>
     `poll:${r}:${kind}:${id}:${at}`;
   await step(
-    '轮询补收（只读）：捞得回这次的 issue、评论、PR',
+    '轮询补收（只读）：捞得回这次的 issue、评论、PR，都认得出是自家的回声',
     () => github.reconciler({ intake, pollDeliveryId: pollId }).poll(repoSlug(repo), started),
     (r) => {
       const kinds = new Set(seen.map((s) => s.event));
       const want = ['issues', 'issue_comment', 'pull_request'].filter((k) => !kinds.has(k));
-      return r.outcome === 'ok' && want.length === 0
+      const woke = seen.filter((s) => s.wake).map((s) => s.deliveryId.replace(/^poll:[^:]+:/, ''));
+      return r.outcome === 'ok' && want.length === 0 && woke.length === 0
         ? null
-        : `outcome=${r.outcome} 缺 ${want.join('、')} ${r.why ?? ''}`;
+        : `outcome=${r.outcome} 缺 ${want.join('、')} 会叫醒 ${woke.join('、')} ${r.why ?? ''}`;
     },
   );
   await step(

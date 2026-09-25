@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { IngestedEvent, WakeEvent } from '../src/events.ts';
 import { mergeKey } from '../src/pulls.ts';
 import type { Intake } from '../src/reconcile.ts';
-import { REPO_ID, repo, setup, sha } from './helpers.ts';
+import { json, REPO_ID, repo, setup, sha } from './helpers.ts';
 
 const A = sha('a');
 const B = sha('b');
@@ -169,6 +169,36 @@ describe('对账与补漏', () => {
     expect(report.outcome).toBe('unscanned');
   });
 
+  it('重投失败如实报：一个都没重投成是 failed，成了一部分是 partial，不报 ok', async () => {
+    const failing = (ids: number[]) => {
+      const { gh, fake } = setup();
+      fake.deliveries = ids.map((id) => ({
+        id,
+        guid: `g-${id}`,
+        delivered_at: '2026-09-25T11:00:00Z',
+        status_code: 502,
+        event: 'issues',
+      }));
+      fake.before.push((req) =>
+        req.path === '/app/hook/deliveries/1/attempts' || req.path === '/app/hook/deliveries/2/attempts'
+          ? json(422, { message: 'Validation Failed' })
+          : undefined,
+      );
+      const { intake } = fakeIntake(() => true);
+      return gh.reconciler({ intake, pollDeliveryId }).redeliverFailed(new Date('2026-09-25T10:00:00Z'));
+    };
+    expect(await failing([1, 2])).toMatchObject({
+      outcome: 'failed',
+      recovered: 0,
+      why: expect.stringContaining('重投失败 2 个'),
+    });
+    expect(await failing([1, 3])).toMatchObject({
+      outcome: 'partial',
+      recovered: 1,
+      why: expect.stringContaining('重投失败 1 个'),
+    });
+  });
+
   it('轮询：issue、评论、PR 逐条过后端那道门；同一版本只收一次', async () => {
     const { gh, fake } = setup();
     fake.addIssue({ title: '人开的' });
@@ -186,6 +216,54 @@ describe('对账与补漏', () => {
     );
     const second = await rec.poll('acme/widgets', new Date('2026-09-25T00:00:00Z'));
     expect(second).toEqual({ outcome: 'ok', checked: 3, recovered: 0 });
+  });
+
+  it('轮询认得出自家的回声：引擎改进度段、关单、发的评论、开和合的 PR 都不叫醒；人改的、人写的照样叫醒', async () => {
+    const { gh, fake, clock } = setup();
+    const progress = { state: 'running', current: 'x', done: 0, total: 1, subtasks: [], docs: {} };
+    const edited = fake.addIssue({ body: '原话' });
+    await gh.updateIssueProgress({ repo, issueNumber: edited.number, progress });
+    const closed = fake.addIssue();
+    await gh.closeIssue({ repo, issueNumber: closed.number, reason: 'completed', comment: '去向：并入 #9' });
+    const touched = fake.addIssue({ body: '原话' });
+    await gh.updateIssueProgress({ repo, issueNumber: touched.number, progress });
+    clock.advance(5000);
+    fake.editBody(touched, '原话\n人后来补的一句', fake.human);
+    edited.comments.push({
+      id: 88,
+      body: '人问了一句',
+      user: fake.human,
+      updated_at: clock.now().toISOString(),
+    });
+    fake.refs.set('task/9', A);
+    const opened = await gh.openPr({ repo, branch: 'task/9', head: A, title: 't', body: 'b' });
+    fake.addCheck(A, 'check', 'success');
+    await gh.mergePr({ repo, prNumber: opened.number, expectedHead: A });
+
+    // 照后端 screenGithubEvent 的规矩判要不要叫醒：sender 是自家机器人就不叫醒
+    const botIds = new Set([fake.bots.agent.id, fake.bots.engine.id]);
+    const seen: { event: string; wake: boolean; payload: Record<string, unknown> }[] = [];
+    const intake: Intake = {
+      async ingest({ event, payload }) {
+        const p = payload as Record<string, unknown> & { sender?: { id: number; type: string } };
+        const wake = !(p.sender?.type === 'Bot' && botIds.has(p.sender.id));
+        seen.push({ event, wake, payload: p });
+        return { verdict: 'accepted', wake };
+      },
+    };
+    const report = await gh.reconciler({ intake, pollDeliveryId }).poll('acme/widgets', new Date(0));
+    expect(report.outcome).toBe('ok');
+    const wakeOf = (event: string, match: (p: Record<string, unknown>) => boolean) =>
+      seen.filter((s) => s.event === event && match(s.payload)).map((s) => s.wake);
+    const issueNo = (p: Record<string, unknown>) => (p.issue as { number?: number } | undefined)?.number;
+    expect(wakeOf('issues', (p) => issueNo(p) === edited.number)).toEqual([false]);
+    expect(wakeOf('issues', (p) => issueNo(p) === closed.number)).toEqual([false]);
+    expect(wakeOf('issues', (p) => issueNo(p) === touched.number)).toEqual([true]);
+    expect(wakeOf('issue_comment', (p) => issueNo(p) === closed.number)).toEqual([false]);
+    expect(wakeOf('issue_comment', (p) => issueNo(p) === edited.number)).toEqual([true]);
+    expect(
+      wakeOf('pull_request', (p) => (p.pull_request as { number: number }).number === opened.number),
+    ).toEqual([false]);
   });
 
   it('白名单作者开的开放 issue 没有工作流：重新送进引擎；陌生人的不算问题', async () => {

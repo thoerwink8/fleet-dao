@@ -243,6 +243,14 @@ export class GitHubClient {
       const link = nextLink(res.headers.get('link'));
       next = link ? { ...req, url: link, query: undefined } : null;
     }
+    // 调用方自己停下（break）走不到这里；走到这里还有下一页 = 翻到上限没翻完，不能当「全看过了」
+    if (next) {
+      throw new GitHubError(
+        'TOO_MANY_PAGES',
+        `${req.method} ${req.path} 翻了 ${maxPages} 页还没翻完：这次没查全（没查成）`,
+        { details: { maxPages } },
+      );
+    }
   }
 
   /** 把所有页的数组拼起来。itemsOf 从一页的返回体里取数组（有的接口包在对象里）。 */

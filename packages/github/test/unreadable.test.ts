@@ -106,7 +106,7 @@ describe('读不到 ≠ 没有', () => {
   const noIntake = { ingest: async () => ({ verdict: 'duplicate' as const }) };
   const pollDeliveryId = () => 'x';
 
-  it('轮询：issue 列表读不到、评论列表认不出，都报 unscanned', async () => {
+  it('轮询：一开头就读不到报 unscanned；送进去一部分后断了报 partial（不报 ok）', async () => {
     const denied = setup();
     denied.fake.before.push((req) =>
       req.path.endsWith('/issues') ? json(403, { message: 'nope' }) : undefined,
@@ -122,7 +122,7 @@ describe('读不到 ≠ 没有', () => {
     const r2 = await odd.gh
       .reconciler({ intake: noIntake, pollDeliveryId })
       .poll('acme/widgets', new Date(0));
-    expect(r2.outcome).toBe('unscanned');
+    expect(r2).toMatchObject({ outcome: 'partial', checked: 1, why: expect.stringContaining('没做完') });
   });
 
   it('对账：列表读不到报 unscanned；单张读不到报 partial 并写明哪张没查成', async () => {

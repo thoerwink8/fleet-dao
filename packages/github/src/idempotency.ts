@@ -25,8 +25,8 @@ export interface IdempotencyStore {
   release(key: string): Promise<boolean>;
   /** 占着的人大概死了：把占用抢过来。只有 claimedAt 还是看到的那个时才成功（两个重试同时来只有一个抢得到）。 */
   takeOver(key: string, seenClaimedAt: Date, now: Date): Promise<boolean>;
-  /** 只读：这个键的账（对账用）；没有返回 null。 */
-  peek(key: string): Promise<{ completedAt: Date | null; result: unknown } | null>;
+  /** 只读：这个键的账（对账、认回声用）；没有返回 null。 */
+  peek(key: string): Promise<{ claimedAt: Date; completedAt: Date | null; result: unknown } | null>;
 }
 
 export function pgIdempotencyStore(db: Db): IdempotencyStore {
@@ -36,7 +36,11 @@ export function pgIdempotencyStore(db: Db): IdempotencyStore {
     release: (key) => releaseIdempotencyKey(db, key),
     async peek(key) {
       const [row] = await db
-        .select({ completedAt: idempotencyKeys.completedAt, result: idempotencyKeys.result })
+        .select({
+          claimedAt: idempotencyKeys.claimedAt,
+          completedAt: idempotencyKeys.completedAt,
+          result: idempotencyKeys.result,
+        })
         .from(idempotencyKeys)
         .where(eq(idempotencyKeys.key, key));
       return row ?? null;
@@ -94,7 +98,9 @@ export function memoryIdempotencyStore(): IdempotencyStore & {
     },
     async peek(key) {
       const row = rows.get(key);
-      return row ? { completedAt: row.completedAt ?? null, result: row.result } : null;
+      return row
+        ? { claimedAt: row.claimedAt, completedAt: row.completedAt ?? null, result: row.result }
+        : null;
     },
   };
 }
@@ -127,8 +133,13 @@ export interface OnceSpec<T> {
   /** 真去写。只放「写」这一个请求，回读自证放在 once 外面：回读失败不能被当成「没写成」而放键。 */
   write: () => Promise<T>;
   now: () => Date;
-  /** 「写到一半」的占用超过这么久、远端又找不到，就当写的人死了，抢过来重写。默认 2 分钟。 */
+  /** 「写到一半」的占用超过这么久没续、远端又找不到，就当写的人死了，抢过来重写。默认 2 分钟。 */
   staleAfterMs?: number;
+  /**
+   * 写的时候每隔这么久续一次占用（把 claimedAt 挪到现在），默认 30 秒。写请求要排队、撞了限流还要等，
+   * 等多久没有上限；只靠「占了多久」判死活，活着的写方会被重试抢走、同一条评论落两次。
+   */
+  renewEveryMs?: number;
 }
 
 export interface OnceResult<T> {
@@ -138,7 +149,8 @@ export interface OnceResult<T> {
 }
 
 export async function once<T>(store: IdempotencyStore, spec: OnceSpec<T>): Promise<OnceResult<T>> {
-  const claim = await store.claim({ key: spec.key, action: spec.action, target: spec.target }, spec.now());
+  let held = spec.now();
+  const claim = await store.claim({ key: spec.key, action: spec.action, target: spec.target }, held);
   if (claim.status === 'done') return { value: claim.result as T, replay: true };
 
   const found = await spec.lookup();
@@ -158,7 +170,8 @@ export async function once<T>(store: IdempotencyStore, spec: OnceSpec<T>): Promi
         },
       );
     }
-    if (!(await store.takeOver(spec.key, claim.claimedAt, spec.now()))) {
+    held = spec.now();
+    if (!(await store.takeOver(spec.key, claim.claimedAt, held))) {
       throw new GitHubError(
         'IN_FLIGHT',
         `同一个写操作（${spec.action} ${spec.target}）刚被别的重试抢走，稍后重试`,
@@ -170,6 +183,7 @@ export async function once<T>(store: IdempotencyStore, spec: OnceSpec<T>): Promi
     }
   }
 
+  const lease = keepClaimed(store, spec, held);
   let value: T;
   try {
     value = await spec.write();
@@ -177,9 +191,33 @@ export async function once<T>(store: IdempotencyStore, spec: OnceSpec<T>): Promi
     // 可能已经写成的，键留着让下次先回查；确定没写成的放键。
     if (!(isGitHubError(err) && err.maybeLanded)) await store.release(spec.key).catch(() => false);
     throw err;
+  } finally {
+    lease.stop();
   }
   await record(store, spec, value);
   return { value, replay: false };
+}
+
+/** 写的期间定时续占用。续不上（被抢走、库一时连不上）就等下一轮再试，不打断写。 */
+function keepClaimed<T>(store: IdempotencyStore, spec: OnceSpec<T>, held: Date): { stop(): void } {
+  let current = held;
+  let busy = false;
+  const timer = setInterval(() => {
+    if (busy) return;
+    busy = true;
+    const next = spec.now();
+    store
+      .takeOver(spec.key, current, next)
+      .then((ok) => {
+        if (ok) current = next;
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        busy = false;
+      });
+  }, spec.renewEveryMs ?? 30_000);
+  timer.unref?.();
+  return { stop: () => clearInterval(timer) };
 }
 
 async function record<T>(store: IdempotencyStore, spec: OnceSpec<T>, value: T): Promise<void> {

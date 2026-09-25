@@ -231,18 +231,69 @@ describe('写请求', () => {
     });
     expect(all).toHaveLength(230);
   });
+
+  it('翻到页数上限还没翻完：报「没查成」，不悄悄截断当全看过了', async () => {
+    const { gh, fake } = setup();
+    const issue = fake.addIssue();
+    for (let i = 0; i < 230; i += 1)
+      issue.comments.push({ id: i + 1, body: `c${i}`, user: fake.human, updated_at: '2026-09-25T00:00:00Z' });
+    const req = {
+      method: 'GET' as const,
+      path: `/repos/acme/widgets/issues/${issue.number}/comments`,
+      auth: { as: 'engine' as const, repo },
+      query: { per_page: 100 },
+    };
+    await expect(gh.client.all(req, (d) => d, 2)).rejects.toMatchObject({ code: 'TOO_MANY_PAGES' });
+    // 调用方自己中途停下（找到了要的）不算没翻完
+    let pages = 0;
+    for await (const _ of gh.client.pages(req, 2)) {
+      pages += 1;
+      break;
+    }
+    expect(pages).toBe(1);
+  });
 });
 
 describe('凭据不外泄', () => {
-  it('GitHub 把令牌回显在报错里，也会被打码', async () => {
+  // details 要原样转成 PortError、进 Temporal 历史、落库：和 message 一样必须打过码
+  const echo = (req: { headers: Headers }) =>
+    json(422, {
+      message: `bad token ${req.headers.get('authorization')}`,
+      errors: [{ message: `raw ${req.headers.get('authorization')}` }],
+    });
+
+  it('GitHub 把安装令牌回显在报错里：message、details 都打码', async () => {
     const { gh, fake, logs } = setup();
-    fake.before.push((req) => json(422, { message: `bad token ${req.headers.get('authorization')}` }));
+    fake.before.push((req) => (req.path === '/repos/acme/widgets' ? echo(req) : undefined));
     const err = (await gh.client
       .request({ ...get, method: 'PATCH', body: {} })
-      .catch((e: unknown) => e)) as Error;
+      .catch((e: unknown) => e)) as GitHubError;
     expect(err.message).not.toMatch(/ghs_/);
     expect(err.message).toContain('<redacted>');
+    const details = JSON.stringify(err.details);
+    expect(details).not.toMatch(/ghs_|eyJ/);
+    expect(details).toContain('Bearer <redacted>');
     expect(JSON.stringify(logs)).not.toMatch(/ghs_|eyJ/);
+  });
+
+  it('GitHub 把 App 的 JWT 回显在报错里：details 也打码', async () => {
+    const { gh, fake } = setup();
+    fake.before.push((req) => (req.path.endsWith('/installation') ? echo(req) : undefined));
+    const err = (await gh.client.request(get).catch((e: unknown) => e)) as GitHubError;
+    expect(err).toBeInstanceOf(GitHubError);
+    const details = JSON.stringify(err.details);
+    expect(details).not.toMatch(/eyJ[A-Za-z0-9_-]{8,}\./);
+    expect(details).toContain('<redacted>');
+  });
+
+  it('逐层打码：嵌套的对象、数组、错误对象都不漏', () => {
+    const jwt = `eyJ${'a'.repeat(20)}.${'b'.repeat(20)}.${'c'.repeat(20)}`;
+    const err = new GitHubError('X', 'x', {
+      details: { a: [{ b: `token ghs_${'x'.repeat(20)}` }], c: new Error(`boom ${jwt}`), d: 3 },
+    });
+    expect(JSON.stringify(err.details)).toBe(
+      JSON.stringify({ a: [{ b: 'token <redacted>' }], c: 'Error: boom <redacted>', d: 3 }),
+    );
   });
 });
 

@@ -624,6 +624,8 @@ export class FakeGitHub {
           updated_at: this.iso(),
         };
         issue.comments.push(c);
+        // 和真 GitHub 一样：新评论把 issue 的 updated_at 推到评论的时刻
+        issue.updated_at = c.updated_at;
         return this.json(201, view(c));
       }
     }

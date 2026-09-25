@@ -12,6 +12,15 @@ let repoId: string;
 let now = new Date('2026-09-25T12:00:00Z');
 const clock = () => now;
 
+/** 等一个条件成立（真时间，最多 2 秒）；等不到就让测试失败，不假装成立。 */
+async function waitFor(cond: () => Promise<boolean>): Promise<void> {
+  for (let i = 0; i < 200; i += 1) {
+    if (await cond()) return;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  throw new Error('等了 2 秒条件还不成立');
+}
+
 beforeAll(async () => {
   t = await createTestDb();
 }, TEST_DB_TIMEOUT_MS);
@@ -78,6 +87,46 @@ describe('防重复写（idempotency_keys）', () => {
       value: { n: 2 },
       replay: false,
     });
+  });
+
+  it('写得慢（排队、撞限流在等）时一直续占用：重试不会当它死了再写一份', async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let writes = 0;
+    const slow = once(
+      ledger.idempotency,
+      spec({
+        renewEveryMs: 5,
+        write: async () => {
+          writes += 1;
+          await gate;
+          return { n: 1 };
+        },
+      }),
+    );
+    // 钟往前拨 5 分钟（远过 2 分钟的过期线），等它续上
+    await waitFor(async () => (await ledger.idempotency.peek('gh:test:acme/widgets#1')) !== null);
+    now = new Date(now.getTime() + 5 * 60_000);
+    await waitFor(
+      async () =>
+        (await ledger.idempotency.peek('gh:test:acme/widgets#1'))?.claimedAt.getTime() === now.getTime(),
+    );
+    await expect(
+      once(
+        ledger.idempotency,
+        spec({
+          write: async () => {
+            writes += 1;
+            return { n: 2 };
+          },
+        }),
+      ),
+    ).rejects.toMatchObject({ code: 'IN_FLIGHT' });
+    release();
+    expect(await slow).toEqual({ value: { n: 1 }, replay: false });
+    expect(writes).toBe(1);
   });
 
   it('GitHub 明确拒了（没写成）：放键，下次能重新写', async () => {

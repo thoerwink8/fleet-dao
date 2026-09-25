@@ -17,6 +17,7 @@ import {
 } from './checks.ts';
 import { enc, encRef, type RepoRef, repoSlug, unexpected } from './client.ts';
 import type { ActivityContext, Deps } from './deps.ts';
+import { recordEcho } from './echo.ts';
 import { GitHubError, isGitHubError } from './errors.ts';
 import { idempotencyKey, once } from './idempotency.ts';
 import {
@@ -115,6 +116,17 @@ interface PrReceipt {
   number: number;
   url: string;
   nodeId: string;
+  /** 回执里 PR 的 updated_at（认回声用；老账上可能没有）。 */
+  updatedAt?: string | undefined;
+}
+
+/** PR 这个版本是自家机器人写出来的（开 PR、改正文、合并、删分支之后）。 */
+function pullEcho(deps: Deps, repo: RepoRef, number: number, updatedAt: string, role: 'agent' | 'engine') {
+  return recordEcho(
+    deps.ledger.idempotency,
+    { repo, kind: 'pull', number, updatedAt, role },
+    deps.client.now(),
+  );
 }
 
 export async function openPr(
@@ -136,7 +148,12 @@ export async function openPr(
   }
   assertBodySize('PR 正文', body);
 
-  const receipt = (p: Pull): PrReceipt => ({ number: p.number, url: p.html_url, nodeId: p.node_id });
+  const receipt = (p: Pull): PrReceipt => ({
+    number: p.number,
+    url: p.html_url,
+    nodeId: p.node_id,
+    updatedAt: p.updated_at,
+  });
   const lookup = async (): Promise<PrReceipt | null> => {
     const found = await findOpenPull(deps, repo, branch, ctx.signal);
     if (!found) return null;
@@ -229,6 +246,9 @@ export async function openPr(
       author,
     });
   }
+  // 认回声：开 PR 的回执；再加上这次回读——引擎每推一轮都会调 openPr，推送带来的 PR 更新也就认得出
+  if (!replay && value.updatedAt) await pullEcho(deps, repo, pr.number, value.updatedAt, 'agent');
+  if (pr.head.sha === input.head) await pullEcho(deps, repo, pr.number, pr.updated_at, 'agent');
   return {
     number: pr.number,
     url: pr.html_url,
@@ -539,19 +559,19 @@ export async function mergePr(
     }
     return afterMerge(deps, input, pr, true, ctx);
   }
-  const refused = (reason: MergeRefusal, detail: string): MergePrResult => {
+  const refuse = (reason: MergeRefusal, detail: string): MergePrResult => {
     deps.log.info('不合并', { repo: slug, prNumber, reason, detail });
     return { merged: false, reason, detail };
   };
-  if (pr.state !== 'open') return refused('not_open', `PR #${prNumber} 已经关了`);
+  if (pr.state !== 'open') return refuse('not_open', `PR #${prNumber} 已经关了`);
   if (pr.head.sha !== expectedHead) {
-    return refused(
+    return refuse(
       'head_moved',
       `PR #${prNumber} 的头是 ${pr.head.sha.slice(0, 7)}，不是审过的 ${expectedHead.slice(0, 7)}`,
     );
   }
   if (pr.base.ref !== facts.defaultBranch) {
-    return refused('wrong_base', `PR #${prNumber} 的目标是 ${pr.base.ref}，不是主线 ${facts.defaultBranch}`);
+    return refuse('wrong_base', `PR #${prNumber} 的目标是 ${pr.base.ref}，不是主线 ${facts.defaultBranch}`);
   }
 
   // mergeable 是 GitHub 后台算的：null = 还没算完，重读几次（C10）
@@ -563,132 +583,154 @@ export async function mergePr(
     }
     await deps.client.sleep(2000 * 2 ** i, ctx.signal);
     pr = await readPull(deps, repo, prNumber, 'engine', ctx.signal);
-    if (pr.head.sha !== expectedHead) return refused('head_moved', `PR #${prNumber} 的头刚变了`);
+    if (pr.head.sha !== expectedHead) return refuse('head_moved', `PR #${prNumber} 的头刚变了`);
   }
   if (pr.mergeable === false || pr.mergeable_state === 'dirty') {
-    return refused('conflict', `PR #${prNumber} 和主线冲突`);
+    return refuse('conflict', `PR #${prNumber} 和主线冲突`);
   }
 
-  // 基于最新主线
-  const cmp = await deps.client.request<{ behind_by?: number; ahead_by?: number }>({
-    method: 'GET',
-    path: `${base}/compare/${encRef(facts.defaultBranch)}...${expectedHead}`,
-    auth,
-    query: { per_page: 1 },
-    signal: ctx.signal,
-  });
-  const behindBy = cmp.data?.behind_by;
-  if (typeof behindBy !== 'number')
-    throw unexpected(`比较 ${facts.defaultBranch}...${expectedHead.slice(0, 7)}`, cmp.data);
-  if (behindBy > 0) {
-    return refused('behind_main', `主线比 PR #${prNumber} 多 ${behindBy} 个提交：先同步主线、在新头上重测`);
-  }
-
-  // 合并前再确认一次：CI 在这个头上是绿的
-  const required = await requiredChecksFor(deps, repo, input.checks, ctx.signal);
-  const ci = await readCi(deps, repo, expectedHead, required, ctx.signal);
-  if (ci.evaluation.overall !== 'green') {
-    const e = ci.evaluation;
-    const parts = [
-      e.failed.length ? `红：${e.failed.join('、')}` : '',
-      e.pending.length ? `没跑完：${e.pending.join('、')}` : '',
-      e.missing.length ? `没出现：${e.missing.join('、')}` : '',
-    ].filter(Boolean);
-    return refused(
-      'ci_not_green',
-      `PR #${prNumber} 的 CI 在 ${expectedHead.slice(0, 7)} 上不是全绿（${parts.join('；')}）`,
-    );
-  }
-
-  if (pr.draft) {
-    await deps.client.graphql(
+  // 从「核对不落后主线」到「发出合并请求」按仓加锁：同一个仓同时只有一张 PR 走这一段，
+  // 否则两张都核过「不落后」、先后合进去，后一张就是在旧主线上测的
+  type Locked = { refused: MergePrResult } | { merged: Pull };
+  const outcome = await deps.locker.withLock(`merge:${slug.toLowerCase()}`, async (): Promise<Locked> => {
+    const refused = (reason: MergeRefusal, detail: string): Locked => ({ refused: refuse(reason, detail) });
+    const cmp = await deps.client.request<{ behind_by?: number; ahead_by?: number }>({
+      method: 'GET',
+      path: `${base}/compare/${encRef(facts.defaultBranch)}...${expectedHead}`,
       auth,
-      'mutation($id: ID!) { markPullRequestReadyForReview(input: { pullRequestId: $id }) { pullRequest { isDraft } } }',
-      { id: pr.node_id },
-      { mutation: true, signal: ctx.signal },
-    );
-  }
-
-  // 关单词：正文里的「Closes #N」合并时会让 GitHub 自己关单（C13）
-  const title = neutralizeCloseKeywords(pr.title);
-  const prBody = pr.body ?? '';
-  if (hasCloseKeywords(prBody) || title !== pr.title) {
-    await deps.client.request({
-      method: 'PATCH',
-      path: `${base}/pulls/${prNumber}`,
-      auth,
-      body: { title, body: neutralizeCloseKeywords(prBody) },
+      query: { per_page: 1 },
       signal: ctx.signal,
     });
-    deps.log.warn('PR 正文里有关单词，合并前已改成「关联」', { repo: slug, prNumber });
-  }
-
-  const commitTitle = neutralizeCloseKeywords(input.commitTitle ?? `${title} (#${prNumber})`);
-  const commitMessage = neutralizeCloseKeywords(input.commitMessage ?? '');
-  const mergedNow = async (): Promise<MergeReceipt | null> => {
-    const p = await readPull(deps, repo, prNumber, 'engine', ctx.signal);
-    return p.merged && p.head.sha === expectedHead ? mergeReceipt(p) : null;
-  };
-  try {
-    // 合并也记进幂等账：对账靠它核「合并的 PR 都是合并队列合的」（C21）
-    await once<MergeReceipt>(deps.ledger.idempotency, {
-      key: mergeKey(repo, prNumber, expectedHead),
-      action: 'github.merge_pr',
-      target: `${slug}#${prNumber}`,
-      now: deps.client.now,
-      lookup: mergedNow,
-      write: async () => {
-        const res = await deps.client.request<{ merged?: boolean; sha?: string; message?: string }>({
-          method: 'PUT',
-          path: `${base}/pulls/${prNumber}/merge`,
-          auth,
-          body: {
-            merge_method: 'squash',
-            sha: expectedHead,
-            commit_title: commitTitle,
-            commit_message: commitMessage,
-          },
-          allow: [405, 409, 422],
-          signal: ctx.signal,
-        });
-        // 不看文案：重读一遍再分类。只有冲突是「必然失败」，其余交给重试（C11）
-        const again = await readPull(deps, repo, prNumber, 'engine', ctx.signal);
-        if (again.merged && again.head.sha === expectedHead) return mergeReceipt(again);
-        const message = res.data?.message ?? '';
-        if (res.status === 200) {
-          throw new GitHubError('READBACK_MISMATCH', `合并接口回了成功，回读 PR #${prNumber} 却不是已合并`, {
-            retryable: true,
-            maybeLanded: true,
-          });
-        }
-        if (again.head.sha !== expectedHead) {
-          throw refusal('head_moved', `合并时 PR #${prNumber} 的头变了（${message}）`);
-        }
-        if (again.mergeable === false || again.mergeable_state === 'dirty') {
-          throw refusal('conflict', `合并时 PR #${prNumber} 和主线冲突（${message}）`);
-        }
-        if (res.status === 422) {
-          throw new GitHubError('MERGE_REJECTED', `GitHub 不收这次合并（422）：${message}`, { status: 422 });
-        }
-        throw new GitHubError(
-          'MERGE_NOT_ALLOWED',
-          `PR #${prNumber} 现在合不了（${res.status}）：${message}`,
-          {
-            retryable: true,
-            status: res.status,
-          },
-        );
-      },
-    });
-  } catch (err) {
-    if (isGitHubError(err, 'MERGE_REFUSED')) {
-      const d = err.details as { reason: MergeRefusal; detail: string };
-      return refused(d.reason, d.detail);
+    const behindBy = cmp.data?.behind_by;
+    if (typeof behindBy !== 'number')
+      throw unexpected(`比较 ${facts.defaultBranch}...${expectedHead.slice(0, 7)}`, cmp.data);
+    if (behindBy > 0) {
+      return refused('behind_main', `主线比 PR #${prNumber} 多 ${behindBy} 个提交：先同步主线、在新头上重测`);
     }
-    throw err;
-  }
-  const merged = await readPull(deps, repo, prNumber, 'engine', ctx.signal);
-  return afterMerge(deps, input, merged, false, ctx);
+
+    // 合并前再确认一次：CI 在这个头上是绿的
+    const required = await requiredChecksFor(deps, repo, input.checks, ctx.signal);
+    const ci = await readCi(deps, repo, expectedHead, required, ctx.signal);
+    if (ci.evaluation.overall !== 'green') {
+      const e = ci.evaluation;
+      const parts = [
+        e.failed.length ? `红：${e.failed.join('、')}` : '',
+        e.pending.length ? `没跑完：${e.pending.join('、')}` : '',
+        e.missing.length ? `没出现：${e.missing.join('、')}` : '',
+      ].filter(Boolean);
+      return refused(
+        'ci_not_green',
+        `PR #${prNumber} 的 CI 在 ${expectedHead.slice(0, 7)} 上不是全绿（${parts.join('；')}）`,
+      );
+    }
+
+    if (pr.draft) {
+      await deps.client.graphql(
+        auth,
+        'mutation($id: ID!) { markPullRequestReadyForReview(input: { pullRequestId: $id }) { pullRequest { isDraft } } }',
+        { id: pr.node_id },
+        { mutation: true, signal: ctx.signal },
+      );
+    }
+
+    // 关单词：正文里的「Closes #N」合并时会让 GitHub 自己关单（C13）
+    const title = neutralizeCloseKeywords(pr.title);
+    const prBody = pr.body ?? '';
+    if (hasCloseKeywords(prBody) || title !== pr.title) {
+      const patched = await deps.client.request({
+        method: 'PATCH',
+        path: `${base}/pulls/${prNumber}`,
+        auth,
+        body: { title, body: neutralizeCloseKeywords(prBody) },
+        signal: ctx.signal,
+      });
+      const p = PullSchema.safeParse(patched.data);
+      if (!p.success) throw unexpected(`改 PR #${prNumber} 正文的回执`, patched.data);
+      await pullEcho(deps, repo, prNumber, p.data.updated_at, 'engine');
+      deps.log.warn('PR 正文里有关单词，合并前已改成「关联」', { repo: slug, prNumber });
+    }
+
+    const commitTitle = neutralizeCloseKeywords(input.commitTitle ?? `${title} (#${prNumber})`);
+    // 正文一定给非空的：给空串时 GitHub 可能换成默认正文，把分支上提交信息里的「Fixes #N」带进主线、自动关单
+    const commitMessage = neutralizeCloseKeywords(
+      input.commitMessage?.trim() || defaultCommitMessage(prNumber),
+    );
+    const mergedNow = async (): Promise<MergeReceipt | null> => {
+      const p = await readPull(deps, repo, prNumber, 'engine', ctx.signal);
+      return p.merged && p.head.sha === expectedHead ? mergeReceipt(p) : null;
+    };
+    try {
+      // 合并也记进幂等账：对账靠它核「合并的 PR 都是合并队列合的」（C21）
+      await once<MergeReceipt>(deps.ledger.idempotency, {
+        key: mergeKey(repo, prNumber, expectedHead),
+        action: 'github.merge_pr',
+        target: `${slug}#${prNumber}`,
+        now: deps.client.now,
+        lookup: mergedNow,
+        write: async () => {
+          const res = await deps.client.request<{ merged?: boolean; sha?: string; message?: string }>({
+            method: 'PUT',
+            path: `${base}/pulls/${prNumber}/merge`,
+            auth,
+            body: {
+              merge_method: 'squash',
+              sha: expectedHead,
+              commit_title: commitTitle,
+              commit_message: commitMessage,
+            },
+            allow: [405, 409, 422],
+            signal: ctx.signal,
+          });
+          // 不看文案：重读一遍再分类。只有冲突是「必然失败」，其余交给重试（C11）
+          const again = await readPull(deps, repo, prNumber, 'engine', ctx.signal);
+          if (again.merged && again.head.sha === expectedHead) return mergeReceipt(again);
+          const message = res.data?.message ?? '';
+          if (res.status === 200) {
+            throw new GitHubError(
+              'READBACK_MISMATCH',
+              `合并接口回了成功，回读 PR #${prNumber} 却不是已合并`,
+              {
+                retryable: true,
+                maybeLanded: true,
+              },
+            );
+          }
+          if (again.head.sha !== expectedHead) {
+            throw refusal('head_moved', `合并时 PR #${prNumber} 的头变了（${message}）`);
+          }
+          if (again.mergeable === false || again.mergeable_state === 'dirty') {
+            throw refusal('conflict', `合并时 PR #${prNumber} 和主线冲突（${message}）`);
+          }
+          if (res.status === 422) {
+            throw new GitHubError('MERGE_REJECTED', `GitHub 不收这次合并（422）：${message}`, {
+              status: 422,
+            });
+          }
+          throw new GitHubError(
+            'MERGE_NOT_ALLOWED',
+            `PR #${prNumber} 现在合不了（${res.status}）：${message}`,
+            {
+              retryable: true,
+              status: res.status,
+            },
+          );
+        },
+      });
+    } catch (err) {
+      if (isGitHubError(err, 'MERGE_REFUSED')) {
+        const d = err.details as { reason: MergeRefusal; detail: string };
+        return refused(d.reason, d.detail);
+      }
+      throw err;
+    }
+    return { merged: await readPull(deps, repo, prNumber, 'engine', ctx.signal) };
+  });
+  if ('refused' in outcome) return outcome.refused;
+  return afterMerge(deps, input, outcome.merged, false, ctx);
+}
+
+export function defaultCommitMessage(prNumber: number): string {
+  return `由 fleet 引擎经合并队列 squash 合并（PR #${prNumber}）。`;
 }
 
 /** 合并记录：幂等账里 action=github.merge_pr，键由仓、PR 号、合的头推出来（对账按同样的方法找）。 */
@@ -738,9 +780,16 @@ async function afterMerge(
   const mergedByEngine = deps.bots.is('engine', pr.merged_by ?? null);
   if (!mergedByEngine)
     deps.log.warn('PR 不是「引擎」机器人合的', { repo: repoSlug(repo), prNumber, mergedBy });
+  // 认回声：合并接口的回执里没有 updated_at，取合并后的回读；删分支还会再动一次 PR，删完再读一次
+  if (mergedByEngine) await pullEcho(deps, repo, prNumber, pr.updated_at, 'engine');
   let branchDeleted = false;
-  if (input.deleteBranch !== false)
+  if (input.deleteBranch !== false) {
     branchDeleted = await deleteBranch(deps, repo, pr, expectedHead, ctx.signal);
+    if (branchDeleted && mergedByEngine) {
+      const after = await readPull(deps, repo, prNumber, 'engine', ctx.signal);
+      await pullEcho(deps, repo, prNumber, after.updated_at, 'engine');
+    }
+  }
   return { merged: true, mergeCommit, alreadyMerged: already, branchDeleted, mergedBy, mergedByEngine };
 }
 

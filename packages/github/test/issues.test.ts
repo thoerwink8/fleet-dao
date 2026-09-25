@@ -256,7 +256,20 @@ describe('关单', () => {
     const { gh, fake } = setup();
     const issue = fake.addIssue();
     fake.before.push((req) => {
-      if (req.method === 'PATCH') return json(200, { number: issue.number });
+      // 回 200、回执形状也对，但其实没关（状态没变）
+      if (req.method === 'PATCH') {
+        return json(200, {
+          number: issue.number,
+          node_id: 'I_x',
+          html_url: 'u',
+          state: 'open',
+          state_reason: null,
+          title: issue.title,
+          body: issue.body,
+          user: issue.user,
+          updated_at: issue.updated_at,
+        });
+      }
       return undefined;
     });
     await expect(

@@ -8,8 +8,9 @@ import type { Locker } from './deps.ts';
 import { type IdempotencyStore, memoryIdempotencyStore, pgIdempotencyStore } from './idempotency.ts';
 
 /**
- * 跨工人的锁：事务级 advisory lock，事务结束自动放。锁住期间占着一条库连接（fn 里是几次 HTTP，秒级）。
- * fn 里别再用同一个 db 做事：PGlite 这类单连接的库会自己等自己。
+ * 跨工人的锁：事务级 advisory lock，事务结束自动放。锁住期间占着一条库连接（fn 里是几次 HTTP，秒级）；
+ * fn 里的库读写（合并时的幂等账）走连接池里别的连接，所以池至少要两条（createDb 默认 10 条）。
+ * PGlite 只有一条连接，会自己等自己：测试和单进程的验收用 memoryLocker。
  */
 export function pgLocker(db: Db): Locker {
   return {

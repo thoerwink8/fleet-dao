@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { mergeKey } from '../src/pulls.ts';
+import { hasCloseKeywords } from '../src/text.ts';
 import { json, repo, setup, sha } from './helpers.ts';
 
 const A = sha('a');
@@ -282,7 +283,7 @@ describe('合并', () => {
       merge_method: 'squash',
       sha: A,
       commit_title: `登录页加验证码 (#${pr.number})`,
-      commit_message: '',
+      commit_message: `由 fleet 引擎经合并队列 squash 合并（PR #${pr.number}）。`,
     });
     expect(fake.refs.has('task/1')).toBe(false);
     expect(fake.calls('DELETE', /\/git\/refs\/heads\/task\/1$/).map((r) => r.as)).toEqual(['engine']);
@@ -444,7 +445,7 @@ describe('合并', () => {
     expect(fake.calls('POST', /^\/graphql$/).map((r) => r.as)).toEqual(['engine']);
   });
 
-  it('C13：正文里的关单词合并前改掉；提交正文显式给空，不让 GitHub 拼默认的', async () => {
+  it('C13：正文里的关单词合并前改掉', async () => {
     const { gh, fake } = setup();
     const pr = ready(fake, { head: { ref: 'task/1', sha: A }, body: 'Closes #5\n别的说明' });
     await gh.mergePr({ repo, prNumber: pr.number, expectedHead: A });
@@ -453,6 +454,33 @@ describe('合并', () => {
       .filter((r) => r.method === 'PATCH' || r.method === 'PUT')
       .map((r) => r.method);
     expect(order).toEqual(['PATCH', 'PUT']);
+  });
+
+  it('C13：squash 的提交正文一定非空（空串 GitHub 会换成默认正文，把分支提交里的 Fixes #N 带进主线）', async () => {
+    for (const commitMessage of [undefined, '', '   ', 'Fixes #3，顺手修了登录']) {
+      const { gh, fake } = setup();
+      const pr = ready(fake);
+      await gh.mergePr({ repo, prNumber: pr.number, expectedHead: A, commitMessage });
+      const put = fake.calls('PUT', /\/merge$/);
+      expect(put).toHaveLength(1);
+      const sent = String((put[0]?.body as { commit_message?: unknown } | undefined)?.commit_message ?? '');
+      expect(sent.trim(), String(commitMessage)).not.toBe('');
+      expect(hasCloseKeywords(sent), sent).toBe(false);
+    }
+  });
+
+  it('同一个仓的两张 PR 同时合：从核对主线到发合并请求按仓串行，不交错', async () => {
+    const { gh, fake } = setup();
+    const one = ready(fake, { head: { ref: 'task/1', sha: A } });
+    const two = ready(fake, { head: { ref: 'task/2', sha: B } });
+    await Promise.all([
+      gh.mergePr({ repo, prNumber: one.number, expectedHead: A }),
+      gh.mergePr({ repo, prNumber: two.number, expectedHead: B }),
+    ]);
+    const steps = fake.requests
+      .filter((r) => r.path.includes('/compare/') || r.method === 'PUT')
+      .map((r) => (r.method === 'PUT' ? 'merge' : 'compare'));
+    expect(steps).toEqual(['compare', 'merge', 'compare', 'merge']);
   });
 
   it('分支上合并后又有了新提交：不删', async () => {
