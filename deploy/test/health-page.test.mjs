@@ -39,6 +39,9 @@ test('香港转不到法国（502、504）、后端没有这个接口（404）�
     judge({ status: 404, body: '{"error":"not_found"}' }).summary,
     /^HTTP 404：后端还没有健康检查接口/,
   );
+  const limited = judge({ status: 429, body: '<html>Too Many Requests</html>' });
+  assert.equal(limited.ok, false);
+  assert.match(limited.summary, /^HTTP 429：这个地址刷得太勤/);
   const v = judge({ status: 500, body: report(true, allOk) });
   assert.equal(v.ok, false);
   assert.equal(v.summary, '后端回了 HTTP 500');

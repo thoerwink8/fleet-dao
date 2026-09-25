@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # shellcheck source-path=SCRIPTDIR
 # 发布（在法国以 root 跑）：把主线上的一个提交装成一版 → 跑数据库迁移 → 切过去、按本机配置起应用服务 → 把驾驶舱静态文件
-# 经隧道发到香港 → 健康检查；不过就自动退回上一版并报错。幂等：同一个提交跑第二遍什么都不变。
+# 经隧道发到香港 → 健康检查；不过就自动退回上一版并报错（库的迁移比上一版新时不退）。幂等：同一个提交跑第二遍什么都不变。
+# 发布和退回自己交给 systemd 跑（临时服务），终端断了照样跑完；日志在 /srv/fleet-dao-releases/.logs/。
 #   bash deploy/release.sh [<提交号>]            发布这个提交（不给就发主线最新）；只认主线上的提交
 #   bash deploy/release.sh --rollback            退回上一版（上一个在用过、没被判过不健康、目录还在的版本）
 #   bash deploy/release.sh --check               只读：在用哪版、有哪几版、服务与健康检查，不改任何东西
@@ -197,7 +198,7 @@ fetch_code() { # 要发的提交（空 = 主线最新）
 # 装成一版：fleet 在临时目录里装依赖、构建前端（第三方代码不以 root 跑）；构建完整个目录换成 root 的、fleet 只读，
 # 再原子地挪到 <提交号>。root 要照着办事的东西（单元文件、完成标记）在换属主之后才由 root 从 git 里取、写，fleet 碰不到。
 build_release() { # 提交号
-  local sha=$1 dir=$RELEASES/$1 stage=$RELEASES/.build-$1 log u odd
+  local sha=$1 dir=$RELEASES/$1 stage=$RELEASES/.build-$1 log u odd n
   step "构建 ${sha:0:12}"
   if [[ -f "$dir/.fleet-release" ]]; then
     ok "已构建（$dir，$(marker_get "$sha" built) 建的）"
@@ -239,8 +240,14 @@ build_release() { # 提交号
       git -C "$CACHE" show "$sha:deploy/france/$u.service" >"$stage/.units/$u.service"
     fi
   done
+  # 这一版带几个迁移：退回时拿它和库里跑过的条数比（见 schema_allows）
+  if ! n=$(count_migrations "$stage"); then
+    red "读不出 ${sha:0:12} 带几个迁移（packages/db/migrations/meta/_journal.json）"
+    return 1
+  fi
   rm -f -- "$stage/.fleet-release"
-  printf 'commit=%s\nbuilt=%s\non_main=%s\nweb=%s\n' "$sha" "$(date -u +%FT%TZ)" "$ON_MAIN" "$WEB_KIND" >"$stage/.fleet-release"
+  printf 'commit=%s\nbuilt=%s\non_main=%s\nweb=%s\nmigrations=%s\n' "$sha" "$(date -u +%FT%TZ)" "$ON_MAIN" "$WEB_KIND" "$n" \
+    >"$stage/.fleet-release"
   mv -T -- "$stage" "$dir"
   changed "构建 ${sha:0:12}：依赖装好，静态文件是$WEB_KIND"
 }
@@ -291,7 +298,49 @@ migrations_applied() {
   pg_admin -d fleet -c 'select count(*) from drizzle.__drizzle_migrations'
 }
 
-# 迁移在切版本之前跑、只进不退：新迁移要写成旧代码照样能跑（先加后删），退回上一版时不撤迁移
+# 一份代码带几个迁移：drizzle 的迁移账 packages/db/migrations/meta/_journal.json 有几条（库里每跑一个记一行，两边可比）。
+# 没有迁移入口就是 0；有入口却读不出条数就失败，不当成 0
+count_migrations() { # 代码目录
+  if [[ ! -f "$1/packages/db/src/bin/migrate.ts" ]]; then
+    echo 0
+    return 0
+  fi
+  "$NODE" -e '
+    const j = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+    if (!Array.isArray(j.entries)) process.exit(1);
+    console.log(j.entries.length);' "$1/packages/db/migrations/meta/_journal.json" 2>/dev/null
+}
+
+# 某一版带几个迁移：构建时记在 .fleet-release 里；早先构建、没记的，现场数它目录里的迁移账
+release_migrations() { # 提交号
+  local n
+  n=$(marker_get "$1" migrations)
+  if [[ "$n" =~ ^[0-9]+$ ]]; then
+    echo "$n"
+    return 0
+  fi
+  count_migrations "$RELEASES/$1"
+}
+
+# 迁移只进不退：退到某一版之前先比库。库里跑过的比那一版带的多，旧代码就要对着它不认识的表结构跑
+# （比如新迁移改了主键、加了 NOT NULL 列，旧代码一写就报错，健康检查还查不出来）——不退，报红等人。读不清也不退
+schema_allows() { # 提交号
+  local have want
+  if ! have=$(migrations_applied); then
+    red "读不到库 fleet 里跑过几个迁移，不敢退到 ${1:0:12}"
+    return 1
+  fi
+  if ! want=$(release_migrations "$1"); then
+    red "读不出 ${1:0:12} 带几个迁移，不敢退到它"
+    return 1
+  fi
+  if ((have > want)); then
+    red "不退到 ${1:0:12}：库 fleet 已跑过 $have 个迁移，那一版只带 $want 个（迁移只进不退，旧代码对着新表结构会出错）"
+    return 1
+  fi
+}
+
+# 迁移在切版本之前跑、只进不退：新迁移要写成旧代码照样能跑（先加后删）；退回时由 schema_allows 把关
 migrate() { # 提交号
   local dir=$RELEASES/$1 before after out
   step "数据库迁移"
@@ -333,10 +382,19 @@ env_changed_since_start() { # 单元
   return 1
 }
 
-# 切到这一版：current 指过去；本机启用的服务装上这一版的单元、起来（换了代码、单元或环境文件就重启）；
-# 没启用的停掉撤掉；静态文件发到香港。哪一步不成就记红、返回 1，退不退由调用方定。
+# 服务的主进程跑的是哪一版：它的当前目录。单元的 WorkingDirectory 是 current，起进程那一刻解成 <提交号> 目录，
+# 之后 current 再怎么切，已经在跑的进程还在老目录里。没在跑就打印空
+running_release() { # 单元
+  local pid
+  pid=$(unit_prop "$1" MainPID)
+  if [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then readlink -- "/proc/$pid/cwd" 2>/dev/null || true; fi
+}
+
+# 切到这一版：current 指过去；本机启用的服务装上这一版的单元、起来——主进程不在这一版的目录里（包括上次切完
+# current、还没重启完就被打断）、或单元、环境文件变了，就重启；没启用的停掉撤掉；静态文件发到香港。
+# 哪一步不成就记红、返回 1，退不退由调用方定。
 activate() { # 提交号 事件（release / rollback / auto-rollback）
-  local sha=$1 how=$2 dir=$RELEASES/$1 u reload=0 code=0 restart unit_file
+  local sha=$1 how=$2 dir=$RELEASES/$1 u reload=0 restart unit_file running
   local -A fresh=()
   if [[ "$(readlink -- "$RELEASES/current" 2>/dev/null)" != "$sha" ]]; then
     if ! ln -sfn -- "$sha" "$RELEASES/.current.new" || ! mv -Tf -- "$RELEASES/.current.new" "$RELEASES/current"; then
@@ -345,7 +403,6 @@ activate() { # 提交号 事件（release / rollback / auto-rollback）
     fi
     record "$sha" "$how"
     changed "current → ${sha:0:12}（$how）"
-    code=1
   else
     ok "current 已是 ${sha:0:12}"
   fi
@@ -375,10 +432,28 @@ activate() { # 提交号 事件（release / rollback / auto-rollback）
   fi
   for u in $FLEET_SERVICES; do
     restart=0
-    if ((code)) || [[ "${fresh[$u]:-0}" == 1 ]] || env_changed_since_start "$u.service"; then restart=1; fi
+    if [[ "${fresh[$u]:-0}" == 1 ]] || env_changed_since_start "$u.service"; then restart=1; fi
+    running=$(running_release "$u.service")
+    if [[ -n "$running" && "$running" != "$dir" ]]; then
+      echo "  · $u 的主进程还在跑 ${running##*/}（不是这一版），要重启"
+      restart=1
+    fi
     if ! ensure_unit_running "$u.service" "$restart"; then return 1; fi
   done
   sync_web "$sha"
+}
+
+# 发之前先试通香港（隧道、钥匙、rrsync；-n 什么都不传）：不通就别切——切了健康检查必不过，新旧两版会一起被记成不健康
+web_reachable() {
+  local empty out rc=0
+  empty=$(mktemp -d)
+  out=$(rsync -n -r -e "$(web_upload_ssh "$UPLOAD_KEY" "$HK_KNOWN_HOSTS")" -- "$empty/" "root@$HK_TUNNEL:/" 2>&1) || rc=$?
+  rmdir -- "$empty"
+  if ((rc != 0)); then
+    red "试着往香港传文件没通（rsync 退出码 $rc，没切版本）：$(tail -2 <<<"$out" | tr '\n' ' ')"
+    return 1
+  fi
+  ok "往香港传静态文件的路是通的（试跑，没传东西）"
 }
 
 # 静态文件经隧道发到香港（那头 rrsync 把路径限死在 /srv/fleet-dao-web、只许写）。先落临时名、最后一起换上，
@@ -449,6 +524,21 @@ settle_services() {
       bad=1
     else
       ok "$u 起稳了（pid ${pid[$u]}，${SETTLE_SECONDS} 秒没退出）"
+    fi
+  done
+  return "$bad"
+}
+
+# 起着的服务跑的真是这一版：主进程的当前目录就是这一版的目录（不是 current 指过去了、进程还是旧的）
+check_running_release() { # 提交号
+  local u running bad=0
+  for u in $FLEET_SERVICES; do
+    running=$(running_release "$u.service")
+    if [[ "$running" == "$RELEASES/$1" ]]; then
+      ok "$u 的主进程跑的是这一版（${1:0:12}）"
+    else
+      red "$u 的主进程跑的不是这一版：在「${running:-没在跑}」"
+      bad=1
     fi
   done
   return "$bad"
@@ -571,6 +661,7 @@ health_gate() { # 提交号 切之前后端的逐项结果
   step "健康检查（${sha:0:12}）"
   if [[ -n "$FLEET_SERVICES" ]]; then
     settle_services || bad=1
+    check_running_release "$sha" || bad=1
   fi
   if has_service fleet-api; then check_api "$before" || bad=1; fi
   if has_service fleet-engine; then check_engine || bad=1; fi
@@ -621,6 +712,7 @@ do_release() { # 要发的提交（空 = 主线最新）
   fetch_code "$1"
   build_release "$SHA"
   cur=$(current_sha)
+  web_reachable
   migrate "$SHA"
   before=$(api_report_before)
   step "切到 ${SHA:0:12}（在用：$(short "$cur" 还没有)）"
@@ -639,13 +731,16 @@ do_release() { # 要发的提交（空 = 主线最新）
   else
     mark_unhealthy "$SHA"
     step "自动退回上一版 ${cur:0:12}"
-    if activate "$cur" auto-rollback && health_gate "$cur" ""; then
+    if ! schema_allows "$cur"; then
+      red "${SHA:0:12} 没过健康检查，也没自动退回（库的迁移比上一版新，见上）：停在 ${SHA:0:12}，要人来看"
+    elif activate "$cur" auto-rollback && health_gate "$cur" ""; then
       ok "已退回 ${cur:0:12}，健康检查过了"
+      red "${SHA:0:12} 没过健康检查，已自动退回 ${cur:0:12}（原因见上面的红）"
     else
       mark_unhealthy "$cur"
       red "退回 ${cur:0:12} 之后健康检查也没过：要人来看"
+      red "${SHA:0:12} 没过健康检查，已自动退回 ${cur:0:12}（原因见上面的红）"
     fi
-    red "${SHA:0:12} 没过健康检查，已自动退回 ${cur:0:12}（原因见上面的红）"
   fi
   prune
 }
@@ -659,6 +754,8 @@ do_rollback() {
     return 1
   fi
   step "退回 ${prev:0:12}（在用：$(short "$cur" 没有)）"
+  schema_allows "$prev" || return 1
+  web_reachable || return 1
   if activate "$prev" rollback && health_gate "$prev" ""; then
     ok "已退回 ${prev:0:12}"
   else
@@ -700,6 +797,40 @@ do_check() {
   health_gate "$cur" "" || true
 }
 
+# 发布交给 systemd 跑（一个临时服务 fleet-dao-release-<时间>），这个终端只跟着看日志：跳板断线、终端关了，
+# 发布照样跑完，不会停在「切完 current、服务还没重启完」的半截。断了之后看进度：tail -f 那份日志（开头会打印路径）
+detach() { # 原样的参数…
+  local id unit log line rc=""
+  id=$(date -u +%Y%m%dT%H%M%SZ)-$$
+  unit=fleet-dao-release-$id
+  install -d -o root -g root -m 750 "$RELEASES/.logs"
+  log=$RELEASES/.logs/$id.log
+  : >"$log"
+  if ! systemd-run --quiet --unit="$unit" --collect --setenv=FLEET_RELEASE_DETACHED=1 --setenv=HOME=/root \
+    -p StandardOutput="append:$log" -p StandardError="append:$log" \
+    /bin/bash -c 'bash "$@"; echo "fleet-dao-release-exit=$?"' _ "$DEPLOY_DIR/release.sh" "$@"; then
+    echo "起不了发布用的临时服务（systemd-run）" >&2
+    exit 1
+  fi
+  echo "发布在临时服务 $unit 里跑，日志 $log（这个终端断了也不影响它）"
+  tail -n +1 -f -- "$log" &
+  local tailer=$!
+  while [[ "$(systemctl is-active "$unit" 2>/dev/null)" =~ ^(active|activating|deactivating)$ ]]; do sleep 1; done
+  sleep 1
+  kill "$tailer" 2>/dev/null || true
+  wait "$tailer" 2>/dev/null || true
+  line=$(grep -a '^fleet-dao-release-exit=' -- "$log" | tail -1) || line=""
+  rc=${line#fleet-dao-release-exit=}
+  if [[ ! "$rc" =~ ^[0-9]+$ ]]; then
+    echo "发布的临时服务结束了，但没留下退出码：看 $log、journalctl -u $unit" >&2
+    exit 1
+  fi
+  # 日志只留最近 30 份
+  find "$RELEASES/.logs" -maxdepth 1 -name '*.log' -printf '%T@ %p\n' | sort -rn | tail -n +31 | cut -d' ' -f2- |
+    while IFS= read -r line; do rm -f -- "$line"; done
+  exit "$rc"
+}
+
 main() {
   local mode=release target="" arg
   UNMERGED=0
@@ -728,6 +859,14 @@ main() {
   if [[ "$mode" != release && (-n "$target" || "$UNMERGED" == 1) ]]; then
     usage >&2
     exit 64
+  fi
+  if [[ "$mode" != check && -z "${FLEET_RELEASE_DETACHED:-}" ]]; then
+    if ((EUID != 0)); then
+      echo "要 root：sudo bash $0" >&2
+      exit 64
+    fi
+    install -d -o root -g root -m 755 "$RELEASES"
+    detach "$@"
   fi
   trap 'on_error "$LINENO" "$BASH_COMMAND"' ERR
   preflight

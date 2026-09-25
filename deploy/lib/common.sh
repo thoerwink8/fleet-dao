@@ -326,7 +326,7 @@ wait_active() { # 单元 次数
 }
 
 # 法国往香港传驾驶舱静态文件用的 ssh（france.sh 的读回和 release.sh 同一套）：只用那一把钥匙、只认钉住的主机钥匙、
-# 不交互。香港那头把这把钥匙限死成 rrsync -wo /srv/fleet-dao-web，只许从隧道地址来（hk.sh）。
+# 不交互。香港那头把这把钥匙限死成 rrsync -wo -munge /srv/fleet-dao-web，只许从隧道地址来（hk.sh）。
 web_upload_ssh() { # 私钥 known_hosts
   printf 'ssh -i %s -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=%s -o ConnectTimeout=10' "$1" "$2"
 }

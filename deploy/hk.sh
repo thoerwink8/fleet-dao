@@ -113,8 +113,9 @@ setup_web_upload() {
   fi
   if [[ ! -d /root/.ssh ]]; then install -d -o root -g root -m 700 /root/.ssh; fi
   put_file "$UPLOAD_KEYS_FILE" root:root 600 "# fleet-dao（deploy/hk.sh 写的，整份归它管，别手改）：法国的发布脚本经隧道往 $WEB_ROOT 传驾驶舱静态文件。
-# 只许从隧道地址 $WG_PEER_ADDR 来；不给终端、不许转发；登上来只能跑 rrsync，且只能往 $WEB_ROOT 里写（-wo：读不走任何东西）。
-from=\"$WG_PEER_ADDR\",restrict,command=\"/usr/bin/rrsync -wo $WEB_ROOT\" $FLEET_WEB_UPLOAD_PUBLIC_KEY"
+# 只许从隧道地址 $WG_PEER_ADDR 来；不给终端、不许转发；登上来只能跑 rrsync，且只能往 $WEB_ROOT 里写（-wo：读不走任何东西；
+# -munge：传来的符号链接落地时改成无效的样子，nginx 跟着它读不到目录外的文件）。
+from=\"$WG_PEER_ADDR\",restrict,command=\"/usr/bin/rrsync -wo -munge $WEB_ROOT\" $FLEET_WEB_UPLOAD_PUBLIC_KEY"
 }
 
 load_config() {
@@ -276,7 +277,7 @@ readback_web_upload() {
   fi
   if [[ "$(stat -c '%U:%G %a' -- "$UPLOAD_KEYS_FILE" 2>/dev/null)" != "root:root 600" ]]; then
     red "$UPLOAD_KEYS_FILE 不是 root:root 600（$(stat -c '%U:%G %a' -- "$UPLOAD_KEYS_FILE" 2>&1)）"
-  elif ! grep -qxF "from=\"$WG_PEER_ADDR\",restrict,command=\"/usr/bin/rrsync -wo $WEB_ROOT\" $FLEET_WEB_UPLOAD_PUBLIC_KEY" -- "$UPLOAD_KEYS_FILE"; then
+  elif ! grep -qxF "from=\"$WG_PEER_ADDR\",restrict,command=\"/usr/bin/rrsync -wo -munge $WEB_ROOT\" $FLEET_WEB_UPLOAD_PUBLIC_KEY" -- "$UPLOAD_KEYS_FILE"; then
     red "$UPLOAD_KEYS_FILE 里没有带限制的那一行上传钥匙"
   elif [[ ! -x /usr/bin/rrsync ]]; then
     red "没有 /usr/bin/rrsync：上传钥匙登得上也什么都做不了"

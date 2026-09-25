@@ -3,9 +3,10 @@
 # shellcheck disable=SC2034 # APP_UNITS、SHA 这些是给 source 进来的 release.sh 里的函数读写的
 # deploy/release.sh 的来回：换版、健康检查不过自动退回、一键退回、不退到判过不健康的版本、只留最近几版。
 # 取代码、构建、迁移、健康检查、往香港传文件换成桩（按提交号预先定好健康不健康）；切 current、记历史、挑上一版、
-# 清旧版用的是 release.sh 里的真代码，目录落在临时目录，不碰 systemd、不连网、不用 root。
+# 清旧版、迁移把关用的是 release.sh 里的真代码，目录落在临时目录、不连网；最后一段以 root 真起一个临时服务
+# （fleet-release-test-<进程号>），验「主进程跑的是哪一版」，跑完撤掉；不是 root 就那段记「没跑成」、退出 2。
 # 真机上的那一半（真起服务、真传文件、真健康检查）在法国、香港上实测，记录在引入本文件的 PR 里。
-# 用法：bash deploy/test/release-flow.test.sh。退出码：0 通过，1 不通过。
+# 用法：sudo bash deploy/test/release-flow.test.sh。退出码：0 通过，1 不通过，2 有没跑成的。
 set -uo pipefail
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 TMP=$(mktemp -d)
@@ -35,15 +36,23 @@ fetch_code() {
   SHA=$1
   ON_MAIN=1
 }
+declare -A MIG=() # 提交号 → 这一版带几个迁移
+DB_MIG=0          # 库里跑过几个迁移；fail = 读不到
 build_release() {
   if [[ -f "$RELEASES/$1/.fleet-release" ]]; then return 0; fi
   mkdir -p "$RELEASES/$1/web"
-  printf 'commit=%s\nbuilt=%s\non_main=1\nweb=桩\n' "$1" "$(date -u +%FT%TZ)" >"$RELEASES/$1/.fleet-release"
+  printf 'commit=%s\nbuilt=%s\non_main=1\nweb=桩\nmigrations=%s\n' "$1" "$(date -u +%FT%TZ)" "${MIG[$1]:-0}" \
+    >"$RELEASES/$1/.fleet-release"
   changed "构建 ${1:0:12}"
 }
-migrate() { :; }
+migrations_applied() {
+  if [[ "$DB_MIG" == fail ]]; then return 1; fi
+  echo "$DB_MIG"
+}
+migrate() { if [[ "${MIG[$1]:-0}" -gt "$DB_MIG" ]]; then DB_MIG=${MIG[$1]}; fi; }
 api_report_before() { :; }
 sync_web() { :; }
+web_reachable() { :; }
 health_gate() {
   if [[ "${GATE[$1]:-ok}" == ok ]]; then return 0; fi
   red "桩：${1:0:12} 健康检查不过"
@@ -149,6 +158,62 @@ reset
 do_release "$C" >/dev/null
 check "发 C 之后，上一版是记回健康的 B" "$(previous_sha)" "$B"
 
+echo "== 迁移只进不退：库里跑过的迁移比上一版带的多，自动退回、一键退回都不退，报红"
+rm -rf "${RELEASES:?}"/* "$RELEASES"/.history
+GATE=()
+MIG=([$A]=2 [$B]=3 [$C]=3)
+DB_MIG=0
+reset
+do_release "$A" >/dev/null
+check "发 A（带 2 个迁移）：库跑到 2 个" "$DB_MIG" 2
+GATE[$B]=bad
+reset
+do_release "$B" >/dev/null
+check "B 带第 3 个迁移、健康检查不过：不自动退回，还停在 B" "$(current_sha)" "$B"
+check "报了红" "$((${#REDS[@]} > 0))" 1
+check "红里说了为什么不退" "$(printf '%s\n' "${REDS[@]}" | grep -c '库 fleet 已跑过 3 个迁移，那一版只带 2 个')" 1
+check "历史：B 发了、不健康，没有退回" "$(events)" "a:release b:release b:unhealthy "
+GATE[$B]=ok
+reset
+do_release "$B" >/dev/null
+check "B 修好（配置备齐）再发：记回健康" "$(last_event "$B")" recovered
+reset
+do_rollback >/dev/null 2>&1
+check "一键退回：上一版 A 只带 2 个，不退，还在 B" "$(current_sha)" "$B"
+check "报了红" "$((${#REDS[@]} > 0))" 1
+reset
+do_release "$C" >/dev/null
+check "发 C（也是 3 个迁移）：在用 C" "$(current_sha)" "$C"
+reset
+do_rollback >/dev/null 2>&1
+check "一键退回：上一版 B 也带 3 个，退得过去" "$(current_sha)" "$B"
+check "没有红" "${#REDS[@]}" 0
+DB_MIG=fail
+reset
+do_rollback >/dev/null 2>&1
+check "读不到库里跑过几个迁移：不退" "$(current_sha)" "$B"
+check "报了红" "$((${#REDS[@]} > 0))" 1
+DB_MIG=3
+
+echo "== 这一版带几个迁移：记在标记里；早先构建、没记的，现场数它的迁移账；读不出就失败"
+NODE=$(command -v node) || NODE=""
+F=$(printf 'f%.0s' {1..40})
+mkdir -p "$RELEASES/$F/packages/db/src/bin" "$RELEASES/$F/packages/db/migrations/meta"
+: >"$RELEASES/$F/packages/db/src/bin/migrate.ts"
+printf 'commit=%s\n' "$F" >"$RELEASES/$F/.fleet-release"
+printf '{"version":"7","entries":[{"idx":0},{"idx":1},{"idx":2},{"idx":3}]}' >"$RELEASES/$F/packages/db/migrations/meta/_journal.json"
+if [[ -z "$NODE" ]]; then
+  echo "  ✗ 没跑成：这台没有 node"
+  fail=1
+else
+  check "标记里记着的：直接用" "$(release_migrations "$A")" 2
+  check "标记里没记：数迁移账" "$(release_migrations "$F")" 4
+  printf 'not json' >"$RELEASES/$F/packages/db/migrations/meta/_journal.json"
+  release_migrations "$F" >/dev/null
+  check "迁移账读不出：失败" "$?" 1
+  check "没有迁移入口：0" "$(count_migrations "$TMP")" 0
+fi
+
 echo "== 后端的健康报告、任务队列的回答：认得出才逐项给，认不出就是认不出（不当成「没问题」）"
 NODE=$(command -v node) || NODE=""
 if [[ -z "$NODE" ]]; then
@@ -174,8 +239,56 @@ else
   check "回答认不出：不算" "$?" 1
 fi
 
+echo "== 真起一个服务：切完 current 没重启就被打断，再跑同一版会重启；主进程跑的是哪一版，健康检查查得出"
+skipped=0
+if ((EUID != 0)) || [[ ! -d /run/systemd/system ]]; then
+  echo "  … 没跑成：要 root 和 systemd（sudo bash deploy/test/run.sh）"
+  skipped=1
+else
+  U=fleet-release-test-$$
+  G=$(printf '1%.0s' {1..40})
+  H=$(printf '2%.0s' {1..40})
+  cleanup_unit() {
+    systemctl disable --now --quiet "$U.service" 2>/dev/null
+    rm -f "/etc/systemd/system/$U.service"
+    systemctl daemon-reload
+    rm -rf -- "$TMP"
+  }
+  trap cleanup_unit EXIT
+  APP_UNITS=("$U")
+  FLEET_SERVICES=$U
+  for s in "$G" "$H"; do
+    mkdir -p "$RELEASES/$s/.units"
+    printf 'commit=%s\non_main=1\nmigrations=0\n' "$s" >"$RELEASES/$s/.fleet-release"
+    printf '[Service]\nWorkingDirectory=%s/current\nExecStart=/bin/sleep infinity\n\n[Install]\nWantedBy=multi-user.target\n' \
+      "$RELEASES" >"$RELEASES/$s/.units/$U.service"
+  done
+  reset
+  activate "$G" release >/dev/null
+  check "切到 G、起服务：主进程在 G 的目录里" "$(running_release "$U.service")" "$RELEASES/$G"
+  # 被打断：current 已经指到 H，服务还没重启
+  ln -sfn "$H" "$RELEASES/current"
+  reset
+  check_running_release "$H" >/dev/null
+  check "健康检查查出主进程跑的还是旧版" "$?" 1
+  reset
+  activate "$H" release >/dev/null
+  check "再跑一遍 H（current 早就是 H）：照样重启，主进程到了 H" "$(running_release "$U.service")" "$RELEASES/$H"
+  check_running_release "$H" >/dev/null
+  check "健康检查认可" "$?" 0
+  pid=$(unit_prop "$U.service" MainPID)
+  reset
+  activate "$H" release >/dev/null
+  check "再跑一遍：不重启（主进程没换）" "$(unit_prop "$U.service" MainPID)" "$pid"
+  check "再跑一遍：改动 0 处" "${#CHANGES[@]}" 0
+fi
+
 if ((fail)); then
   echo "release-flow：不通过"
   exit 1
+fi
+if ((skipped)); then
+  echo "release-flow：其余通过，真起服务那段没跑成"
+  exit 2
 fi
 echo "release-flow：通过"

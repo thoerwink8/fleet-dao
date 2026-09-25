@@ -78,6 +78,7 @@ function describeStatus(status) {
   if (status === 502) return 'HTTP 502：香港连不上法国的驾驶舱后端（后端没起，或隧道断了）';
   if (status === 504) return 'HTTP 504：香港等法国的驾驶舱后端超时（隧道断了，或后端卡住）';
   if (status === 404) return 'HTTP 404：后端还没有健康检查接口';
+  if (status === 429) return 'HTTP 429：这个地址刷得太勤，香港限了流，稍后自动再查';
   return `后端回了 HTTP ${status}`;
 }
 
