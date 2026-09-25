@@ -193,6 +193,17 @@ describe('ClaudeStreamReader · 真跑夹具', () => {
     expect(b.result?.text).toBe('392');
   });
 
+  it('lastContextTokens：最后一条助手消息的 input + 缓存读 + 缓存写；不是累计只加最后一条', () => {
+    // cc-haiku-edit 里有 3 轮助手消息（工具调用来回一轮一轮变长），取的是最后一轮，不是第一轮或累加
+    const { summary } = readAll('cc-haiku-edit');
+    expect(summary.lastContextTokens).toBe(8 + 243 + 21149);
+  });
+
+  it('模型不存在：合成的 <synthetic> 助手消息不算数（is_api_error_message 那一支提前返回），没有主会话回复就不给', () => {
+    const { summary } = readAll('cc-bad-model');
+    expect(summary.lastContextTokens).toBeUndefined();
+  });
+
   it('花费是整个会话的累计值：续会话那一轮的 total_cost_usd 含上一轮，本轮要减掉上一轮；token 是本轮的', () => {
     const a = readAll('cc-haiku-resume-a').summary.result;
     const b = readAll('cc-haiku-resume-b').summary.result;
@@ -287,6 +298,33 @@ describe('ClaudeStreamReader · 夹具里没有的帧（手造，依据写在用
       windows: [],
     });
     expect(effect.activity).toBe(false);
+  });
+
+  it('子代理（Task 工具）的助手消息不进 lastContextTokens：它是另一个上下文窗口，不是要 fork 续跑的主会话', () => {
+    const reader = new ClaudeStreamReader({ runId: 'r', cwd: '/w' });
+    reader.read(
+      JSON.stringify({
+        type: 'assistant',
+        parent_tool_use_id: 'toolu_task_1',
+        message: {
+          model: 'claude-haiku-4-5-20251001',
+          content: [],
+          usage: { input_tokens: 999_999, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+        },
+      }),
+    );
+    expect(reader.summary().lastContextTokens).toBeUndefined();
+    reader.read(
+      JSON.stringify({
+        type: 'assistant',
+        message: {
+          model: 'claude-haiku-4-5-20251001',
+          content: [],
+          usage: { input_tokens: 10, cache_read_input_tokens: 5, cache_creation_input_tokens: 1 },
+        },
+      }),
+    );
+    expect(reader.summary().lastContextTokens).toBe(16);
   });
 
   it('上游重试帧只计数，不算开工也不算在干活（审计里 2.1.281 本机实跑的原文）', () => {

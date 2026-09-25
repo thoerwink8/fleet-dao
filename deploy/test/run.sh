@@ -57,6 +57,13 @@ case $? in
 *) fail=1 ;;
 esac
 
+bash "$HERE/agent-scope-adopt.test.sh"
+case $? in
+0) ;;
+2) skipped=1 ;;
+*) fail=1 ;;
+esac
+
 if command -v node >/dev/null; then
   if node --test "$HERE/health-page.test.mjs"; then echo "健康页的判定：通过"; else fail=1; fi
 else

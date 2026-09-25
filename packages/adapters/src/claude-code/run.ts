@@ -155,12 +155,17 @@ export function judgeClaudeRun(report: ClaudeCodeRunReport, delivery?: DeliveryC
 
 /**
  * 交给引擎的统一摘要。终帧的花费是整个会话的累计值：续会话要给上一轮的终帧才算得出本轮花费，
- * 不给就不带花费（不把累计值当本轮的记）。
+ * 不给就不带花费（不把累计值当本轮的记）。fork 出来的会话不知道累计值是从 0 起算还是接着旧会话算
+ * （没有实测确认过），一律不给花费——宁可不知道，也不拿旧会话的累计去减出一个可能错的数。
  */
 export function claudeRunSummary(report: ClaudeCodeRunReport, previous?: ClaudeResult): RunSummary {
   const r = report.stream.result;
   const cost =
-    report.session.mode === 'resume' && previous === undefined ? undefined : costOfThisRun(r, previous);
+    report.session.mode === 'fork'
+      ? undefined
+      : report.session.mode === 'resume' && previous === undefined
+        ? undefined
+        : costOfThisRun(r, previous);
   return {
     facts: claudeRunFacts(report),
     ...(report.stream.observedModel ? { actualModel: report.stream.observedModel } : {}),
@@ -170,6 +175,7 @@ export function claudeRunSummary(report: ClaudeCodeRunReport, previous?: ClaudeR
       ...optional('outputTokens', r?.usage?.outputTokens),
       ...optional('cacheReadTokens', r?.usage?.cacheReadInputTokens),
       ...optional('cacheWriteTokens', r?.usage?.cacheCreationInputTokens),
+      ...optional('contextTokens', report.stream.lastContextTokens),
       ...(cost === undefined ? {} : { costUsd: cost }),
     },
   };

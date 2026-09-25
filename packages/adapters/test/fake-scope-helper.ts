@@ -30,6 +30,11 @@ if (action === 'run') {
   });
   child.on('exit', (code, signal) => process.exit(code ?? (signal ? 1 : 0)));
   process.on('SIGTERM', () => child.kill('SIGTERM'));
+} else if (action === 'adopt') {
+  // 退出码由测试摆布：验 adoptWorktree 把各个退出码翻成哪种 AdoptWorktreeResult
+  if (process.env.FLEET_FAKE_SCOPE_ADOPT_STDERR)
+    process.stderr.write(process.env.FLEET_FAKE_SCOPE_ADOPT_STDERR);
+  process.exit(Number(process.env.FLEET_FAKE_SCOPE_ADOPT_EXIT ?? '0'));
 } else {
   process.exit(0);
 }

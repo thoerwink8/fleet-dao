@@ -141,9 +141,14 @@ sudo -n /usr/local/sbin/fleet-agent-scope run <编号> --user fleet-agent-dedica
         [--cwd /某目录] -- /绝对路径/命令 参数…
 sudo -n /usr/local/sbin/fleet-agent-scope stop <编号>     # 已经没了也返回 0
 sudo -n /usr/local/sbin/fleet-agent-scope list            # 编号 状态，一行一个
+sudo -n /usr/local/sbin/fleet-agent-scope adopt /var/lib/fleet-work/<仓>/<需求号>-<子任务> \
+        --user fleet-agent-dedicated|fleet-agent-carpool [--from <另一个会话用户> --session <会话编号>]
 ```
 
 - `run` 最后 exec 成会话本身，标准输入输出还是引擎手里那一份。
+- `adopt`：换会话用户接着干（design.md 第十四节「工作树路径不随用户变」）。工作树路径不用换，只改属主：`chown -R --no-dereference`；`--user`、`--from`（要给就和 `--session` 一起给）只认这两个会话用户，且不能相同。校验：工作树必须是绝对路径、落在 `/var/lib/fleet-work` 之下、至少两层（仓/任务）、路径上每一段都不是符号链接（`realpath` 解出来要和给的路径一模一样）、是目录——不对就是用法错误，退出码 64。
+  给了 `--session`（会话编号，UUID）就把 Claude 的过程记录也拷过去：**不以 root 读旧用户的文件**——旧用户能把自己家里的文件换成指向 `/etc/shadow` 之类的符号链接，root 直接读就中招；改用 `setpriv` 先降成旧用户的身份，由它自己在自己的 `~/.claude/projects/*/` 下找 `<会话编号>.jsonl`（要求是普通文件、恰好一个，不是就说明状态不对，不该继续），再以旧用户身份 `cat` 出来，经管道交给以新用户身份跑的进程写到新用户的 `~/.claude/projects/<同一个项目目录名>/<会话编号>.jsonl`（`umask 077`，目录不存在就建）。项目目录名照旧的来，不用重算：工作树路径没变，Claude Code 按路径算出的目录名，新用户和旧用户会算出同一个，fork 续会话（design.md 第九节「拼车用完，手上的活原地接着干」）时就能接着找到它。找不到、不唯一都算「没有可拷的」，退出码 65（和用法错误、其它失败分开，调用方好按错误类型分流：65 说明状态本来就不对，不是脚本本身的问题）。
+  测试专用开关 `AGENT_SCOPE_TEST_WORK_BASE` 能把 `/var/lib/fleet-work` 换成临时目录：故意不叫 `FLEET_*`——sudoers 的 `env_keep` 会把 `fleet` 用户环境里的 `FLEET_*` 原样带进这个以 root 跑的脚本，这个开关要是也叫 `FLEET_*`，`fleet` 用户自己在调用 `sudo` 前设一个同名变量就能把生产上的落点边界改掉；不在 `env_keep` 白名单里的名字，`sudo` 会在进来之前就把它擦掉，所以只在直接跑这个脚本（不经 `sudo`）的测试里生效。
 - 环境变量不走命令行（sudo 会把命令行记进日志）：引擎把 `FLEET_*`、`LANG`、`LC_*`、`TZ`、`TERM`、`GIT_TERMINAL_PROMPT` 放进调 sudo 时的环境；会话的 PATH 用 `FLEET_SESSION_PATH` 给；HOME、USER 是会话用户的。GitHub 凭据（`GH_TOKEN` 之类）一概带不进去：推分支、开 PR 由引擎在会话外做。
 - 会话降权用 `setpriv --init-groups --no-new-privs`：只在自己的组里，会话里的 sudo、setuid 程序都提不了权。不用 `systemd-run --uid`：它在 scope 里不清附加组，会话会带着 root 组（法国实测）。
 - 内存要真封顶，`--memory-max` 和 `--memory-swap-max` 得一起给：只给前者，超出的部分被换进 swap，会话不会被杀（法国实测）。

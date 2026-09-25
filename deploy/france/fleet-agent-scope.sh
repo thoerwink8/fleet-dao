@@ -9,6 +9,10 @@
 #                                 [--tasks-max 数] [--cpu-weight 数] [--cwd 目录] -- /绝对路径/命令 参数…
 #   sudo -n fleet-agent-scope stop <编号>     没有这个会话也算收好，返回 0
 #   sudo -n fleet-agent-scope list            在册的会话：编号 状态，一行一个
+#   sudo -n fleet-agent-scope adopt <工作树> --user <会话用户> [--from <会话用户> --session <会话编号>]
+#                                    换会话用户接着干：改工作树属主，给了 --session 就顺带把过程记录拷过去
+#                                    （--from 和 --session 要么都给要么都不给）。退出码：0 成功；64 校验不过；
+#                                    65 会话记录没找到或不唯一；其余失败 1。
 #
 # 两个会话用户各挂一个 reclaude 组织、永不切号：fleet-agent-dedicated（独享）、fleet-agent-carpool（拼车）；
 # 引擎按选中的账号池挑用户。reclaude 的组织写在各自家里的 ~/.reclaude/device.json，对这个用户的所有会话一起生效。
@@ -24,6 +28,10 @@ SESSION_USERS=(fleet-agent-dedicated fleet-agent-carpool)
 SLICE=fleet-agents.slice
 PREFIX=fleet-agent-
 ENV_RE='^(FLEET_[A-Z0-9_]+|LANG|LANGUAGE|LC_[A-Z_]+|TZ|TERM|GIT_TERMINAL_PROMPT)$'
+# AI 会话工作树的根（docs/design.md 第十四节「安全」）。测试专用开关，故意不叫 FLEET_*：sudoers 的 env_keep
+# 把 fleet 用户环境里的 FLEET_* 原样带进这个以 root 跑的脚本，这个开关要是也叫 FLEET_*，fleet 用户自己在调用
+# sudo 前设一个同名变量就能把生产上的落点边界改掉；不在 env_keep 白名单里的名字，sudo 会在进来之前就擦掉它。
+WORK_BASE=${AGENT_SCOPE_TEST_WORK_BASE:-/var/lib/fleet-work}
 
 die() {
   printf 'fleet-agent-scope：%s\n' "$*" >&2
@@ -121,6 +129,89 @@ list() {
     awk -v p="$PREFIX" '{ id = $1; sub("^" p, "", id); sub(/[.]scope$/, "", id); print id, $3 }'
 }
 
+# 换会话用户接着干（docs/design.md 第十四节）：工作树路径不变，只改属主；给了 --session 就把过程记录也拷过去，
+# 新用户按同一个路径算出的项目目录名和旧用户一样，fork 续会话时就能接着找到它。
+# 退出码：0 成功；64 用法/校验不过（下面全部经 die）；65 会话记录没找到或不唯一；其余失败 1。
+adopt() {
+  local dir=${1:-} user="" from="" session="" u ok=0 rel real from_home to_home src project_dir dest_dir
+  local -a hits=() pstat=()
+  [[ -n "$dir" ]] || die "用法：fleet-agent-scope adopt <工作树> --user <会话用户> [--from <会话用户> --session <会话编号>]"
+  shift
+  while (($#)); do
+    case $1 in
+    --user)
+      user=${2:-}
+      shift 2
+      ;;
+    --from)
+      from=${2:-}
+      shift 2
+      ;;
+    --session)
+      session=${2:-}
+      shift 2
+      ;;
+    *) die "不认识的参数：「$1」" ;;
+    esac
+  done
+  # 先验和文件系统无关的：user/from/session 的形状，不用等工作树存在就能测
+  for u in "${SESSION_USERS[@]}"; do if [[ "$user" == "$u" ]]; then ok=1; fi; done
+  ((ok)) || die "--user 只能是 ${SESSION_USERS[*]} 之一，给的是「$user」"
+  if [[ -n "$from" || -n "$session" ]]; then
+    [[ -n "$from" && -n "$session" ]] || die "--from 和 --session 要么都给，要么都不给（拷会话记录要知道从哪个用户拷）"
+    ok=0
+    for u in "${SESSION_USERS[@]}"; do if [[ "$from" == "$u" ]]; then ok=1; fi; done
+    ((ok)) || die "--from 只能是 ${SESSION_USERS[*]} 之一，给的是「$from」"
+    [[ "$from" != "$user" ]] || die "--from 和 --user 不能一样：「$user」"
+    [[ "$session" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] ||
+      die "--session 要是 UUID：「$session」"
+  fi
+  # 工作树落点：绝对路径、在 WORK_BASE 之下、至少两层（仓/任务）、路径上每一段都不是符号链接、是目录
+  [[ "$dir" == /* ]] || die "工作树要写绝对路径：「$dir」"
+  case $dir in
+  "$WORK_BASE"/*) ;;
+  *) die "工作树要在 $WORK_BASE 之下：「$dir」" ;;
+  esac
+  rel=${dir#"$WORK_BASE"/}
+  [[ "$rel" == */* ]] || die "工作树至少要在 $WORK_BASE 下两层（仓/任务）：「$dir」"
+  real=$(realpath -e -- "$dir" 2>/dev/null) || die "工作树不存在：「$dir」"
+  [[ "$real" == "$dir" ]] || die "工作树路径上有符号链接：「$dir」解析成「$real」"
+  [[ -d "$dir" ]] || die "工作树不是目录：「$dir」"
+
+  chown -R --no-dereference "$user:$user" -- "$dir" || {
+    echo "fleet-agent-scope：改属主失败：$dir" >&2
+    exit 1
+  }
+
+  if [[ -n "$session" ]]; then
+    from_home=$(getent passwd "$from" | cut -d: -f6) || die "找不到用户 $from 的家目录"
+    to_home=$(getent passwd "$user" | cut -d: -f6) || die "找不到用户 $user 的家目录"
+    # 不以 root 读旧用户的文件：旧用户能把文件换成指向 /etc/shadow 这类的链接，改由它自己的身份去找、去读
+    mapfile -t hits < <(as_session_user "$from" /usr/bin/find "$from_home/.claude/projects" \
+      -mindepth 2 -maxdepth 2 -type f -name "$session.jsonl" 2>/dev/null)
+    if ((${#hits[@]} != 1)); then
+      echo "fleet-agent-scope：$from 名下找不到唯一的会话记录 $session.jsonl（命中 ${#hits[@]} 个）" >&2
+      exit 65
+    fi
+    src=${hits[0]}
+    # 项目目录名照旧的来：工作树路径没变，新用户按同一个路径算出的名字和旧用户一样，不用我们自己重算
+    project_dir=$(basename -- "$(dirname -- "$src")")
+    dest_dir="$to_home/.claude/projects/$project_dir"
+    # pipefail 只留管道最后一段的退出码：右边就算读到空输入也能 mkdir+cat 成功，会把左边（旧用户）读失败
+    # 盖成「成功」，写出一份空的会话记录。两段的退出码都要看，用 PIPESTATUS（在 if 判完的下一句立刻取，
+    # 再跑别的命令它就被冲掉了）。
+    # shellcheck disable=SC2016 # $1 要由降权后的 sh 展开，不是这一层的
+    if ! as_session_user "$from" cat -- "$src" |
+      as_session_user "$user" /bin/sh -c 'umask 077 && mkdir -p -- "$(dirname -- "$1")" && cat >"$1"' sh \
+        "$dest_dir/$session.jsonl"; then
+      pstat=("${PIPESTATUS[@]}")
+      echo "fleet-agent-scope：拷会话记录失败（读 ${pstat[0]}，写 ${pstat[1]}）：$src → $dest_dir/$session.jsonl" >&2
+      exit 1
+    fi
+  fi
+  echo "已把 $dir 交给 $user"
+}
+
 case ${1:-} in
 run)
   shift
@@ -131,5 +222,9 @@ stop)
   stop "$@"
   ;;
 list) list ;;
-*) die "用法：fleet-agent-scope run <编号> --user <会话用户> [选项] -- /绝对路径/命令 参数… | stop <编号> | list" ;;
+adopt)
+  shift
+  adopt "$@"
+  ;;
+*) die "用法：fleet-agent-scope run <编号> --user <会话用户> [选项] -- /绝对路径/命令 参数… | stop <编号> | list | adopt <工作树> --user <会话用户> [--from <会话用户> --session <会话编号>]" ;;
 esac
