@@ -288,6 +288,7 @@ describe('routeFactsForStage', () => {
     const on = facts.routes.find((r) => r.routeId === 'on');
     expect(on).toMatchObject({
       poolId: 'relay-a',
+      channelName: '中转',
       modelName: 'Opus 5.5',
       upstreamModel: 'claude-opus-5-5',
       reserved: 1,

@@ -16,6 +16,7 @@ import type { Db } from '../client.ts';
 import {
   approvals,
   asks,
+  channels,
   models,
   notifications,
   pools,
@@ -705,7 +706,8 @@ export async function appendProgressEvents(
     throw new Error(`一批进度事件 ${events.length} 条，超过上限 ${PROGRESS_BATCH_MAX}`);
   }
   for (const [i, e] of events.entries()) {
-    if (!(e.at instanceof Date) || Number.isNaN(e.at.getTime())) throw new Error(`第 ${i + 1} 条进度事件的时刻读不出`);
+    if (!(e.at instanceof Date) || Number.isNaN(e.at.getTime()))
+      throw new Error(`第 ${i + 1} 条进度事件的时刻读不出`);
     if (e.kind === 'plan' && !Array.isArray(asRecord(e.payload)?.steps)) {
       throw new Error(`第 ${i + 1} 条进度事件是 plan，但 payload 里没有 steps 数组`);
     }
@@ -713,7 +715,9 @@ export async function appendProgressEvents(
   const [run] = await db.select({ id: sessionRuns.id }).from(sessionRuns).where(eq(sessionRuns.id, runId));
   if (!run) return 'run_not_found';
   if (events.length === 0) return 'written';
-  await db.insert(progressEvents).values(events.map((e) => ({ runId, at: e.at, kind: e.kind, payload: e.payload })));
+  await db
+    .insert(progressEvents)
+    .values(events.map((e) => ({ runId, at: e.at, kind: e.kind, payload: e.payload })));
   return 'written';
 }
 
@@ -1028,6 +1032,8 @@ export interface StageRouteFacts {
   routes: {
     routeId: string;
     channelId: string;
+    /** 渠道的显示名（channels.name，例如「Claude 订阅」）：选路给人看的池名从它拼，不带账号。 */
+    channelName: string;
     poolId: string;
     poolRunAsUser: string | null;
     modelId: string;
@@ -1088,10 +1094,12 @@ export async function routeFactsForStage(
         upstreamAliases: routes.upstreamAliases,
         poolRunAsUser: pools.runAsUser,
         modelName: models.displayName,
+        channelName: channels.name,
       })
       .from(routes)
       .innerJoin(pools, eq(pools.id, routes.poolId))
       .innerJoin(models, eq(models.id, routes.modelId))
+      .innerJoin(channels, eq(channels.id, routes.channelId))
       .where(inArray(routes.id, routeIds)),
     db.select().from(quotaWindows).where(inArray(quotaWindows.poolId, poolIds)),
     db
@@ -1111,6 +1119,7 @@ export async function routeFactsForStage(
     return {
       routeId: c.routeId,
       channelId: c.channelId,
+      channelName: detail.channelName,
       poolId: c.poolId,
       poolRunAsUser: detail.poolRunAsUser,
       modelId: c.modelId,
