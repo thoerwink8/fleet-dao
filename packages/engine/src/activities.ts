@@ -2,6 +2,7 @@
 // 起会话前现签 fleet 通行证、把 fleet 命令放进会话的 PATH（通行证不进工作流历史）。
 
 import { Context } from '@temporalio/activity';
+import type { Client } from '@temporalio/client';
 import { ApplicationFailure, CancelledFailure, type SignalDefinition } from '@temporalio/common';
 import type { EngineActivities } from './activity-options.ts';
 import {
@@ -11,6 +12,11 @@ import {
   WORKFLOW_TYPES,
   withdrawSignal,
 } from './contract.ts';
+import {
+  GitHubReconcileFailedError,
+  type GitHubReconcileJobDeps,
+  runGitHubReconcileJob,
+} from './jobs/github-reconcile.ts';
 import type { Limits } from './limits.ts';
 import {
   type ActivityTiming,
@@ -218,7 +224,46 @@ function withdrawMerge(input: Parameters<EngineActivities['withdrawMerge']>[0]):
   });
 }
 
-export function createActivities(ports: EnginePorts, launch: SessionLaunchConfig): EngineActivities {
+/**
+ * 定时任务要的东西（真端口才有：库、GitHub）。给的是工厂：发信号、拉起工作流要用这次活动自己的 Temporal 客户端。
+ * 不给（假端口）就不跑，活动明确报 JOB_NOT_CONFIGURED——定时任务是真端口那边建的，假端口的工人接到了也不装作跑过。
+ */
+export interface EngineJobs {
+  /** taskQueue：这个工人取活的任务队列，补回来的需求工作流起在这里。 */
+  githubReconcile?: (client: Client, taskQueue: string) => GitHubReconcileJobDeps;
+}
+
+/** 引擎自己的活动：对账补漏跑一轮。没跑成的已经记进 schedule_runs，这里再报成不重试的失败（下一轮 15 分钟后照来）。 */
+async function reconcileGitHub(jobs: EngineJobs): Promise<unknown> {
+  const make = jobs.githubReconcile;
+  if (!make) {
+    throw new PortError(
+      'JOB_NOT_CONFIGURED',
+      '这个引擎工人没装对账补漏（假端口，或真端口没接上库和 GitHub）',
+      {
+        retryable: false,
+      },
+    );
+  }
+  try {
+    const ctx = Context.current();
+    return await runGitHubReconcileJob(make(ctx.client, ctx.info.taskQueue));
+  } catch (error) {
+    if (error instanceof GitHubReconcileFailedError) {
+      throw new PortError('RECONCILE_FAILED', error.message, {
+        retryable: false,
+        details: { runId: error.runId },
+      });
+    }
+    throw error;
+  }
+}
+
+export function createActivities(
+  ports: EnginePorts,
+  launch: SessionLaunchConfig,
+  jobs: EngineJobs = {},
+): EngineActivities {
   const record = ports.recordTiming.bind(ports);
   const out: Record<string, (input: unknown) => Promise<unknown>> = {};
   for (const name of PORT_NAMES) {
@@ -262,5 +307,6 @@ export function createActivities(ports: EnginePorts, launch: SessionLaunchConfig
   }
   out.enqueueMerge = timed('enqueueMerge', (input) => enqueueMerge(input as never), record);
   out.withdrawMerge = timed('withdrawMerge', (input) => withdrawMerge(input as never), record);
+  out.reconcileGitHub = timed('reconcileGitHub', () => reconcileGitHub(jobs), record);
   return out as unknown as EngineActivities;
 }

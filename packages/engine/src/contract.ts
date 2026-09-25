@@ -2,7 +2,14 @@
 // 输入带 schemaVersion；以后加字段只许可选、读时给默认值，不许改老字段的含义（在途任务的输入是老样子）。
 // 编号的拼法（requirementWorkflowId、subtaskWorkflowId）进了在途任务的历史：改格式要用 patched()。
 
-import type { Repo, RequirementStartInput, StageKind, SubtaskState, TaskState } from '@fleet-dao/shared';
+import type {
+  Repo,
+  RequirementStartInput,
+  ScheduleOutcome,
+  StageKind,
+  SubtaskState,
+  TaskState,
+} from '@fleet-dao/shared';
 import {
   REQUIREMENT_WORKFLOW_TYPE,
   AGENT_EVENT_WAKE_KINDS as SHARED_WAKE_KINDS,
@@ -19,7 +26,23 @@ export const WORKFLOW_TYPES = {
   mergeQueue: 'mergeQueueWorkflow',
   /** P0 验收（deploy/hello.sh）：跑一次就知道引擎工人在接活。 */
   hello: 'helloWorkflow',
+  /** 定时对账补漏（#43）：Temporal Schedule 每 15 分钟起一条，见 jobs/schedules.ts。 */
+  githubReconcile: 'githubReconcileWorkflow',
 } as const;
+
+/** 对账补漏一轮的输入：往回看到哪一刻由活动按当时的时刻算（工作流里不取时刻）。 */
+export interface GitHubReconcileInput {
+  schemaVersion: 1;
+}
+
+/** 对账补漏一轮的结局：和记进 schedule_runs 的是同一份（runId 是那一行的编号）。 */
+export interface GitHubReconcileRun {
+  runId: number;
+  outcome: ScheduleOutcome;
+  scanned: number;
+  found: number;
+  why?: string | undefined;
+}
 
 // 编号的拼法和驾驶舱后端共用一份（@fleet-dao/shared/workflow-ids）：后端按它给会话所属的工作流发叫醒。
 export {

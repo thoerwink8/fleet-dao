@@ -4,6 +4,7 @@ import type { Repo } from '@fleet-dao/shared';
 import type { WorkflowHandle } from '@temporalio/client';
 import { TestWorkflowEnvironment } from '@temporalio/testing';
 import { DefaultLogger, Runtime, type WorkflowBundle } from '@temporalio/worker';
+import type { EngineJobs } from '../src/activities.ts';
 import type { EngineActivities } from '../src/activity-options.ts';
 import type { RequirementInput, SubtaskInput } from '../src/contract.ts';
 import type { FailureTriage } from '../src/decisions/failure.ts';
@@ -57,6 +58,8 @@ export interface WorkerOptions {
    * 真服务端会（工人停机时通知服务端，或粘性队列超时后挪回）。
    */
   maxCachedWorkflows?: number;
+  /** 定时任务要的东西（对账补漏）；不给就是假端口那样，定时任务的活动报 JOB_NOT_CONFIGURED。 */
+  jobs?: EngineJobs;
 }
 
 /** 起一个真的引擎 worker（假端口），跑完 fn 就关。 */
@@ -86,6 +89,7 @@ export async function withWorker<T>(
     ...(options.decide ? { decide: options.decide } : {}),
     ...(options.wrapActivities ? { wrapActivities: options.wrapActivities } : {}),
     ...(options.maxCachedWorkflows === undefined ? {} : { maxCachedWorkflows: options.maxCachedWorkflows }),
+    ...(options.jobs ? { jobs: options.jobs } : {}),
   });
   return worker.runUntil(fn(taskQueue));
 }
