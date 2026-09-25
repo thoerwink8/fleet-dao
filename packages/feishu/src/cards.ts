@@ -3,6 +3,7 @@
 // 按钮回传值带 _n（每次渲染一个新值）：SDK 按「卡片 + 点击人 + 回传值的前 128 个字符」去重 12 小时，
 // 卡片一刷新同一个按钮就能再点。_n 一律排在最前面：button() 里按插入顺序放第一；飞书要是把回传值按键名排序再回给我们，
 // 「_」也排在所有小写字母前面。回传值再长也截不掉它。
+import { FEISHU_NOTE_MAX } from '@fleet-dao/shared';
 import { z } from 'zod';
 import type { BoardSnapshot, Draft, OutboxItem, TaskDetail, TaskLookup } from './backend.ts';
 import type { Card } from './port.ts';
@@ -211,7 +212,7 @@ export function draftCard(
       tag: 'input',
       name: FORM.note,
       placeholder: { tag: 'plain_text', content: '哪里不对？写一句再点「改一下」' },
-      max_length: 500,
+      max_length: FEISHU_NOTE_MAX,
       width: 'fill',
     },
   ];

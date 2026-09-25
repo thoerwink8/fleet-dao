@@ -4,7 +4,7 @@
 // 回复某张卡：网关不自己判它是改草稿、回答还是追问，把回复的消息编号交给后端一次问完（后端按卡片登记处理，
 // 规矩见 shared/feishu-api.ts 的 FeishuMessageRequest）；尤其不在回复里替人拍板——拍板只认卡上的按钮。
 
-import { FeishuDraftConflictDetails } from '@fleet-dao/shared';
+import { FEISHU_NOTE_MAX, FeishuDraftConflictDetails } from '@fleet-dao/shared';
 import {
   type Acting,
   type Backend,
@@ -422,6 +422,18 @@ export function createGateway(o: GatewayOptions): Gateway {
     requestId: string,
   ): Promise<void> {
     const cached = drafts.get(draftId);
+    if (change.note !== undefined && change.note.length > FEISHU_NOTE_MAX) {
+      // 输入框本来就限了这么长；万一绕过来（旧卡、客户端没拦住），照实说，不发给后端（约定里就收不下）。
+      const note = `补充最长 ${FEISHU_NOTE_MAX} 字，这次 ${change.note.length} 字，没有改：删短一点再点「改一下」，或者分几句回复这张卡片说。`;
+      await patch(
+        cardMessageId,
+        cached
+          ? draftCard(cached, ctx(), { note })
+          : draftWaitCard(ctx(), { title: '没改成', failed: true, lines: [note] }),
+        'revise-too-long',
+      );
+      return;
+    }
     await patch(
       cardMessageId,
       cached
@@ -446,10 +458,11 @@ export function createGateway(o: GatewayOptions): Gateway {
       const latest = draftIn(err);
       if (latest) drafts.set(latest.id, latest);
       // 已确认的：后端写明了现在在哪一步（待开单 / 已开成 #n），照它说，不自己猜「已经开成任务了」。
+      // 别的：只有多半是暂时的（连不上、超时、后端出错）才叫人再试，被拒收的再试一次还是一样。
       const note =
         err instanceof BackendError && err.code === 'draft_confirmed'
           ? `${err.said ?? '已经确认了，这张卡改不了'}。`
-          : `没改成：${describe(err)}，再试一次。`;
+          : `没改成：${describe(err)}${isTransient(err) ? '，再试一次' : ''}。`;
       const base = latest ?? cached;
       await patch(
         cardMessageId,

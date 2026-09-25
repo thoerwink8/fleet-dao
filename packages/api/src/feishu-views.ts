@@ -1,19 +1,20 @@
 // 飞书接口要的样子（shared/feishu-api.ts）：草稿卡、盘面快照、推送条目。纯函数，不碰数据库，测试直接喂数据。
 import { createHash } from 'node:crypto';
-import type {
-  Channel,
-  FeishuBoardSnapshotSchema,
-  FeishuDraftSchema,
-  FeishuOutboxItemSchema,
-  Pool,
-  Repo,
-  SessionRun,
-  Subtask,
-  Task,
-  TaskState,
+import {
+  type Channel,
+  FEISHU_NOTE_MAX,
+  type FeishuBoardSnapshotSchema,
+  type FeishuDraftSchema,
+  type FeishuOutboxItemSchema,
+  type Pool,
+  type Repo,
+  type SessionRun,
+  type Subtask,
+  type Task,
+  type TaskState,
 } from '@fleet-dao/shared';
 import type { z } from 'zod';
-import { clip, UNDERSTANDING_MAX, UNDERSTANDING_NOTE_MAX } from './feishu-records.ts';
+import { clip, UNDERSTANDING_MAX } from './feishu-records.ts';
 import type {
   DraftRecord,
   FeishuCardRecord,
@@ -138,7 +139,7 @@ export const ANSWER_TEXTS = {
       : '这张卡已经确认了，待开单：开 issue 那一步还没做成，后台会自动补开，不会丢；开好后驾驶舱里就有这个任务。',
   draftMissing:
     '这张卡对应的草稿在库里读不到，这句没有记下（已记日志）。要记新任务请直接发这句话，不要回复这张卡。',
-  noteTooLong: `补充太长（超过 ${UNDERSTANDING_NOTE_MAX} 字），这句没有改进草稿：请分几句回复这张卡。`,
+  noteTooLong: `补充太长（超过 ${FEISHU_NOTE_MAX} 字），这句没有改进草稿：请分几句回复这张卡。`,
   decision:
     '拍板请点卡上的按钮，回复不算拍板。我现在还答不了追问（理解问题的模型还没接上），详情打开驾驶舱看。',
   cannotAnswer: (hasTask: boolean) =>

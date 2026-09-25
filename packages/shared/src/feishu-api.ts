@@ -148,6 +148,12 @@ export const FeishuMessageResponse = z.discriminatedUnion('kind', [
 ]);
 
 /**
+ * 「改一下」的补充最长多少字（卡上的输入框、这条接口、回复确认卡补的一句都按它）：后端把补充整句接进「我理解为」
+ * （最多 1000 字），放不下时截旧的、不截新补的，旧的还得留一截。回复确认卡补的超过它：后端回一句说明，不改草稿。
+ */
+export const FEISHU_NOTE_MAX = 800;
+
+/**
  * POST /feishu/drafts/:draftId/revise（acting=required）：卡上的「改一下」——按补充重新理解，或只换个仓。
  * 要在 FEISHU_UNDERSTAND_MS 之内回。草稿已确认时 409（code=draft_confirmed），错误体 details 是 FeishuDraftConflictDetails。
  */
@@ -155,7 +161,7 @@ export const FeishuReviseDraftRequest = z
   .object({
     /** 幂等键：同一个编号再来只改一次（网关超时重试用）。 */
     requestId: z.string().min(1).max(100),
-    note: z.string().max(2000).optional(),
+    note: z.string().max(FEISHU_NOTE_MAX).optional(),
     repoId: Id.optional(),
   })
   .refine((v) => (v.note?.trim() ?? '') !== '' || v.repoId !== undefined, {

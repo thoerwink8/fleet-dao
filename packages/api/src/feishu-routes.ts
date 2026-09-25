@@ -3,6 +3,7 @@
 // 还没接模型理解：一句话按原话记成草稿、标「拿不准」；回复别的卡时答不了的明说，不编；回复的卡对应的东西读不到也明说，
 // 不悄悄当成别的事（另起草稿、吞掉回答）。进来的话先规范化（wellFormed）。
 import {
+  FEISHU_NOTE_MAX,
   type FeishuActing,
   FeishuBoardSnapshotSchema,
   FeishuConfirmDraftRequest,
@@ -31,7 +32,7 @@ import { answerAsk } from './answer-ask.ts';
 import type { AskWaiters } from './changes.ts';
 import type { Deps } from './deps.ts';
 import type { DraftOpenRunner } from './draft-opening.ts';
-import { textHash, UNDERSTANDING_NOTE_MAX, wellFormed } from './feishu-records.ts';
+import { textHash, wellFormed } from './feishu-records.ts';
 import {
   ANSWER_TEXTS,
   beijingDayStart,
@@ -216,7 +217,7 @@ export function feishuRoutes(deps: Deps, waiters: AskWaiters, opening: DraftOpen
     const draft = await store.getDraft(draftId);
     if (draft?.status === 'confirmed') return confirmed(draft);
     if (draft) {
-      if (text.trim().length > UNDERSTANDING_NOTE_MAX) {
+      if (text.trim().length > FEISHU_NOTE_MAX) {
         return answerWith(c, message, { kind: 'answer', text: ANSWER_TEXTS.noteTooLong });
       }
       const r = await store.reviseDraft(
@@ -341,17 +342,11 @@ export function feishuRoutes(deps: Deps, waiters: AskWaiters, opening: DraftOpen
     if (body.repoId !== undefined && !(await store.getRepo(body.repoId))) {
       throw new ApiError(422, 'repo_not_found', '没有这个仓');
     }
+    // 长度约定里已经卡在 FEISHU_NOTE_MAX（读请求时就 400），这里只规范化。
     const note =
       body.note === undefined
         ? undefined
         : cleaned(body.note, { draftId, requestId: body.requestId }).trim() || undefined;
-    if (note !== undefined && note.length > UNDERSTANDING_NOTE_MAX) {
-      throw new ApiError(
-        422,
-        'note_too_long',
-        `补充太长（超过 ${UNDERSTANDING_NOTE_MAX} 字），没有改：请分几次补充`,
-      );
-    }
     const r = await store.reviseDraft(
       { draftId, note, repoId: body.repoId, key: { type: 'request', requestId: body.requestId } },
       auditOf(founder, 'draft.revise', `draft:${draftId}`, { note, repoId: body.repoId }),

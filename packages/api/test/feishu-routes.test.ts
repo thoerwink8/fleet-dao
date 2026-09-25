@@ -1,5 +1,6 @@
 // 飞书网关的 9 条接口（shared/feishu-api.ts）：按路由表放行；每条的正常路径，和故意造出来的「参数认不出、库读不到、状态冲突」。
 import {
+  FEISHU_NOTE_MAX,
   FeishuBoardSnapshotSchema,
   FeishuConfirmDraftResponse,
   FeishuDraftConflictDetails,
@@ -741,17 +742,18 @@ describe('POST /feishu/drafts/:draftId/revise：改一下', () => {
     expect(replied.draft.rawText).toBe(`${long}\n补充：验证码要 6 位\n补充：同一手机号 60 秒只能发一次`);
   });
 
-  it('补的这句本身超过 800 字：不改（「我理解为」放不下整句），卡上改一下 422、回复卡回一句说明；原来的草稿不动', async () => {
+  it('补的这句本身超过约定的上限（FEISHU_NOTE_MAX，「我理解为」放不下整句）：不改，卡上改一下 400、回复卡回一句说明；原来的草稿不动', async () => {
     const h = harness();
     const draft = await newDraft(h);
-    const tooLong = '补'.repeat(801);
+    expect(FEISHU_NOTE_MAX).toBe(800);
+    const tooLong = '补'.repeat(FEISHU_NOTE_MAX + 1);
     const res = await h.cockpit.request(
       `/api/feishu/drafts/${draft.id}/revise`,
       gw('POST', { requestId: 'r1', note: tooLong }),
     );
     expect({ status: res.status, code: await errorCode(res) }).toEqual({
-      status: 422,
-      code: 'note_too_long',
+      status: 400,
+      code: 'invalid_request',
     });
     await h.store.putCard({
       messageId: 'om_card',
