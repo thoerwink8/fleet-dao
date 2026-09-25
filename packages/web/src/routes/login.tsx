@@ -109,9 +109,7 @@ export default function LoginPage() {
       <div className="w-full max-w-sm">
         <div className="flex flex-col items-center text-center">
           <LogoMark className="size-12" />
-          <h1 className="mt-4 text-xl font-semibold tracking-tight">
-            登录 {brand.name} {brand.product}
-          </h1>
+          <h1 className="mt-4 text-xl font-semibold tracking-tight">登录{brand.product}</h1>
           <p className="mt-1.5 text-sm text-muted-foreground">
             {brand.product}只放行创始人，用飞书账号登录。
           </p>
