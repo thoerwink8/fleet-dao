@@ -82,13 +82,44 @@ export interface ExamReport {
   questions: QuestionExamReport[];
 }
 
-/** 考一个接入点：按考题文件里的顺序取前 limit 道（不给就全考），逐道问、逐题记分。 */
+/**
+ * 只考一部分时挑哪几道：按标准答案轮着取——每次取能考到「目前考得最少的那个标准答案」的一道，一样少就按文件顺序。
+ * 考题文件是按答案排的，直接取前几道会全是同一个答案，考出来的准确率说明不了什么。
+ */
+export function pickSamples(all: readonly ExamSample[], limit: number): ExamSample[] {
+  const seen = new Map<string, number>();
+  const pairs = (s: ExamSample) => Object.entries(s.expect).map(([q, o]) => `${q}=${o}`);
+  const left = [...all];
+  const picked: ExamSample[] = [];
+  while (picked.length < limit && left.length > 0) {
+    let best = 0;
+    let bestSeen = Number.POSITIVE_INFINITY;
+    left.forEach((s, i) => {
+      const least = Math.min(...pairs(s).map((p) => seen.get(p) ?? 0));
+      if (least < bestSeen) {
+        bestSeen = least;
+        best = i;
+      }
+    });
+    const [s] = left.splice(best, 1);
+    if (!s) break;
+    picked.push(s);
+    for (const p of pairs(s)) seen.set(p, (seen.get(p) ?? 0) + 1);
+  }
+  return picked;
+}
+
+/** 考一个接入点：给了 limit 就按 pickSamples 挑那么多道，不给就全考；逐道问、逐题记分。 */
 export async function runExam(
   jev: Jev,
   site: SiteId,
   options: { limit?: number; runId?: string; now?: () => Date; samples?: readonly ExamSample[] } = {},
 ): Promise<ExamReport> {
   if (!(site in SITES)) throw new Error(`没有这个接入点：${site}`);
+  const { limit } = options;
+  if (limit !== undefined && !(Number.isInteger(limit) && limit > 0)) {
+    throw new Error(`考几道要是正整数，给的是 ${String(limit)}`);
+  }
   const runId = options.runId ?? randomUUID();
   const now = options.now ?? (() => new Date());
   const all = options.samples ?? loadExam(site);
@@ -96,7 +127,7 @@ export async function runExam(
   const problems = checkExam(site, all);
   if (problems.length) throw new Error(`${site} 的考题写得不对，不考：\n- ${problems.join('\n- ')}`);
   if (all.length === 0) throw new Error(`${site} 一道考题都没有，不考`);
-  const samples = options.limit === undefined ? all : all.slice(0, options.limit);
+  const samples = limit === undefined ? all : pickSamples(all, limit);
   const questions: readonly QuestionDef[] = questionsOfSite(site);
   const reports = new Map<string, QuestionExamReport>(
     questions.map((q) => [

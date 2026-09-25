@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { createTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { BANK, questionsOfSite } from '../src/bank.ts';
-import { checkExam, EXAMS_DIR, loadExam, runExam } from '../src/exam.ts';
+import { checkExam, EXAMS_DIR, loadExam, pickSamples, runExam } from '../src/exam.ts';
 import { createJev } from '../src/jev.ts';
 import { DEFAULT_POLICY } from '../src/policy.ts';
 import { SITES, type SiteId } from '../src/questions.ts';
@@ -138,7 +138,7 @@ describe('考一个接入点', () => {
   }, TEST_DB_TIMEOUT_MS);
   afterAll(() => t.close());
 
-  it('逐题记分：答对、答错、把握不够、答了题面外的选项分开数；limit 按文件顺序取前几道', async () => {
+  it('逐题记分：答对、答错、把握不够、答了题面外的选项分开数；标准答案都一样时 limit 按文件顺序取', async () => {
     const samples = [1, 2, 3, 4, 5].map((i) => ({
       id: `e${i}`,
       source: '测试',
@@ -186,6 +186,30 @@ describe('考一个接入点', () => {
     ];
     await expect(runExam(jev, 'error-route', { samples: broken })).rejects.toThrow(/没有选项 later/);
     await expect(runExam(jev, 'error-route', { samples: [] })).rejects.toThrow(/一道考题都没有/);
+    await expect(runExam(jev, 'error-route', { limit: 0 })).rejects.toThrow(/正整数/);
+    await expect(runExam(jev, 'error-route', { limit: Number.NaN })).rejects.toThrow(/正整数/);
     expect(backend.calls).toHaveLength(0);
+  });
+});
+
+describe('只考一部分时挑哪几道', () => {
+  it('考题文件按答案排：前几道全是同一个答案，挑的时候按标准答案轮着取', () => {
+    const review = loadExam('review-grade');
+    expect(review.slice(0, 2).map((s) => s.expect['review-severity'])).toEqual(['must_fix', 'must_fix']);
+    expect(pickSamples(review, 2).map((s) => s.expect['review-severity'])).toEqual(['must_fix', 'minor']);
+    const errors = pickSamples(loadExam('error-route'), 4).map((s) => s.expect['error-next']);
+    expect(errors).toEqual(['retry', 'swap_route', 'swap_model', 'park']);
+  });
+
+  it('一道考好几题（分诊）：先把每道题的每个标准答案都考到', () => {
+    const triage = loadExam('triage');
+    const answers = (samples: typeof triage) =>
+      new Set(samples.flatMap((s) => Object.entries(s.expect).map(([q, o]) => `${q}=${o}`)));
+    const everything = answers(triage);
+    const picked = pickSamples(triage, triage.length);
+    const upTo = picked.findIndex((_, i) => answers(picked.slice(0, i + 1)).size === everything.size);
+    expect(upTo).toBeGreaterThanOrEqual(0);
+    expect(upTo + 1).toBeLessThanOrEqual(8);
+    expect(new Set(picked.map((s) => s.id)).size).toBe(triage.length);
   });
 });

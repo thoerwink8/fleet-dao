@@ -1,6 +1,6 @@
 // 旧系统用的 Jev 服务（TypeSafe System One）。接口照官方文档 docs.typesafe.ai/api 与旧客户端 windsurf-dao scripts/lib/judge-client.mjs：
 // POST <地址>，Bearer 密钥，请求体 { state, model, questions }；回包 { model, answers: { 题号: { type, choice, probabilities, confidence } }, usage }。
-// 地址和密钥只从机器配置读（config.ts），这里没有默认值。按输入 token 计费（按量）：真调要先有创始人定的上限。
+// 地址和密钥只从机器配置读（config.ts），这里没有默认值。按输入 token 计费，受每日花费上限管（JevPolicy.dailyUsdCap，到了就不问）。
 // 回包里的 model 是实际回话的版本号：和钉死的对不上就当没判（model_mismatch），不采纳。
 import { performance } from 'node:perf_hooks';
 import {
@@ -21,10 +21,14 @@ export interface TypesafeOptions {
   model: string;
   /** 默认 TYPESAFE_DEFAULT_TIMEOUT_MS（旧客户端的取值；旧系统实测单次不到 1 秒，生产各题平均一秒多）。 */
   timeoutMs?: number;
+  /** 每百万输入 token 多少美元，默认 TYPESAFE_USD_PER_MTOK（官方价目，docs.typesafe.ai/models）。 */
+  usdPerMTok?: number;
   fetch?: typeof fetch;
 }
 
 export const TYPESAFE_DEFAULT_TIMEOUT_MS = 8_000;
+/** jev-1.13 的官方价：每百万输入 token 0.042 美元，输出不收费。 */
+export const TYPESAFE_USD_PER_MTOK = 0.042;
 
 export function createTypesafeBackend(options: TypesafeOptions): JevBackend {
   assertPinnedModel('typesafe', options.model);
@@ -38,6 +42,7 @@ export function createTypesafeBackend(options: TypesafeOptions): JevBackend {
   return {
     kind: 'typesafe',
     model: options.model,
+    usdPerMTok: options.usdPerMTok ?? TYPESAFE_USD_PER_MTOK,
     async ask(request: BackendRequest): Promise<BackendResult> {
       const body = typesafeBody(options.model, request);
       const payload = JSON.stringify(body);

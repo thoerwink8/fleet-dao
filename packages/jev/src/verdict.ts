@@ -42,7 +42,7 @@ export const DRIFT_REASONS = ['bad_option', 'model_mismatch'] as const satisfies
 
 export const REASON_TEXT: Record<NotJudgedReason, string> = {
   off: '这道题停用了',
-  daily_cap: '今天的调用次数用完了',
+  daily_cap: '到了每日上限（次数或花费），这次没问',
   missing_evidence: '必填的证据没给',
   bad_evidence: '给了这道题不认识的证据字段',
   bad_setting: '驾驶舱设置里的判断题参数认不出',

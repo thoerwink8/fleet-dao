@@ -7,7 +7,14 @@
 import { randomUUID } from 'node:crypto';
 import { sameModel } from '@fleet-dao/adapters';
 import type { Db } from '@fleet-dao/db';
-import type { BackendResult, JevBackend } from './backend.ts';
+import {
+  type BackendRequest,
+  type BackendResult,
+  estimateTokens,
+  type JevBackend,
+  requestTexts,
+  usdOf,
+} from './backend.ts';
 import type { Effect } from './effects.ts';
 import {
   dayStart,
@@ -34,6 +41,7 @@ import {
   insertAnswers,
   type QuestionState,
   readPolicy,
+  usdSpentSince,
 } from './store.ts';
 import { type Judged, LOCAL_REASONS, type NotJudged, type NotJudgedReason, type Verdict } from './verdict.ts';
 
@@ -133,19 +141,46 @@ export function createJev(deps: JevDeps): Jev {
       else askable.push(q);
     }
 
-    // 每天的次数：一次问几道算几次，考试也算。设置认不出就不问：拿默认值顶上等于假装读到了。
+    const request: BackendRequest = {
+      questions: askable.map((q) => ({
+        id: q.id,
+        instructions: q.instructions,
+        options: q.options.map((o) => ({ id: o.id, criteria: o.criteria })),
+      })),
+      evidence: fieldsOf(askable)
+        .filter((f) => evidence[f.key] !== undefined)
+        .map((f) => ({ label: f.label, text: evidence[f.key] ?? '' })),
+      ...(ctx.signal ? { signal: ctx.signal } : {}),
+    };
+
+    // 每日上限：次数（一次问几道算几次）和按量后端的花费，考试也算。到了就不问、走默认，库里记「因上限没问」。
+    // 设置认不出也不问：拿默认值顶上等于假装读到了。
     if (askable.length > 0) {
       try {
         const refuseAll = (reason: NotJudgedReason, detail: string) => {
           for (const q of askable.splice(0)) outcome.set(q.id, notJudged(q, reason, detail));
         };
         const { policy, problems } = await readPolicy(db, deps.policy ?? DEFAULT_POLICY);
+        const today = dayStart(askedAt);
         if (problems.length) {
           refuseAll('bad_setting', problems.join('；'));
         } else {
-          const used = await countAskedSince(db, dayStart(askedAt));
+          const used = await countAskedSince(db, today);
           if (used + askable.length > policy.dailyCallLimit) {
-            refuseAll('daily_cap', `今天已经问了 ${used} 道，上限 ${policy.dailyCallLimit}`);
+            refuseAll(
+              'daily_cap',
+              `因每日次数上限没问：今天已经问了 ${used} 道，上限 ${policy.dailyCallLimit}`,
+            );
+          } else if (backend.usdPerMTok !== undefined) {
+            const spent = await usdSpentSince(db, today);
+            // 这一问花多少事先按字符数保守估（一个字一个 token），宁可早停一问也不超。
+            const estimate = usdOf(estimateTokens(requestTexts(request)), backend.usdPerMTok);
+            if (spent + estimate > policy.dailyUsdCap) {
+              refuseAll(
+                'daily_cap',
+                `因每日花费上限没问：今天已花 $${spent.toFixed(6)}，这一问估 $${estimate.toFixed(6)}，上限 $${policy.dailyUsdCap}`,
+              );
+            }
           }
         }
       } catch (err) {
@@ -155,17 +190,8 @@ export function createJev(deps: JevDeps): Jev {
 
     let result: BackendResult | undefined;
     if (askable.length > 0) {
-      const fields = fieldsOf(askable).filter((f) => evidence[f.key] !== undefined);
       try {
-        result = await backend.ask({
-          questions: askable.map((q) => ({
-            id: q.id,
-            instructions: q.instructions,
-            options: q.options.map((o) => ({ id: o.id, criteria: o.criteria })),
-          })),
-          evidence: fields.map((f) => ({ label: f.label, text: evidence[f.key] ?? '' })),
-          ...(ctx.signal ? { signal: ctx.signal } : {}),
-        });
+        result = await backend.ask(request);
       } catch (err) {
         result = {
           ok: false,
@@ -299,6 +325,9 @@ function answerRow(
   const sent = result !== undefined && (verdict.judged || !isLocal(verdict.reason));
   // 把握不够也是答了：答案和把握度照记（统计里算「没把握」），只是不作数。
   const answered = verdict.judged || (verdict.reason === 'unsure' && verdict.option !== undefined);
+  // 一次问几道题共用一次调用：token 和花费按道分摊。
+  const tokens = sent && result?.ok ? Math.ceil(result.inputTokens / Math.max(1, c.askedCount)) : undefined;
+  const price = c.backend.usdPerMTok;
   const sample: AnswerSample = {
     rev: questionRev(q),
     model: c.backend.model,
@@ -307,6 +336,7 @@ function answerRow(
     ...(c.ctx.ref === undefined ? {} : { ref: c.ctx.ref }),
     batch: c.batch,
     ...(sent && result?.ok && result.tokensEstimated ? { tokensEstimated: true } : {}),
+    ...(tokens !== undefined && price !== undefined ? { costUsd: usdOf(tokens, price) } : {}),
     ...(c.exam ? { exam: { runId: c.exam.runId, sampleId: c.exam.sampleId } } : {}),
     ...(verdict.judged ? {} : { detail: verdict.detail }),
   };
@@ -323,8 +353,7 @@ function answerRow(
     failReason: answered || verdict.judged ? null : verdict.reason,
     modelVersion: sent && result ? (result.model ?? null) : null,
     latencyMs: sent && result ? result.latencyMs : null,
-    // 一次问几道题共用一次调用：按道分摊。
-    inputTokens: sent && result?.ok ? Math.ceil(result.inputTokens / Math.max(1, c.askedCount)) : null,
+    inputTokens: tokens ?? null,
     ...(truth === undefined ? {} : { truth, truthSource: 'canary' as const }),
   };
 }

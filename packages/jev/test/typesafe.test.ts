@@ -1,7 +1,12 @@
 // TypeSafe（旧系统的 Jev 服务）后端：请求形状照官方接口，出错一律变成「没判」的原因，不出网（假 fetch）。
 import { describe, expect, it } from 'vitest';
 import type { BackendRequest } from '../src/backend.ts';
-import { createTypesafeBackend, parseTypesafeResponse, typesafeBody } from '../src/backends/typesafe.ts';
+import {
+  createTypesafeBackend,
+  parseTypesafeResponse,
+  TYPESAFE_USD_PER_MTOK,
+  typesafeBody,
+} from '../src/backends/typesafe.ts';
 
 const ENDPOINT = 'https://jev.example.invalid/v1/systemone';
 const request: BackendRequest = {
@@ -76,6 +81,20 @@ describe('TypeSafe 后端', () => {
       inputTokens: 318,
       tokensEstimated: false,
     });
+  });
+
+  it('按量计费：后端带着官方单价，每日花费上限按它算', () => {
+    const f = fakeFetch(() => json(good));
+    expect(backend(f.fn).usdPerMTok).toBe(TYPESAFE_USD_PER_MTOK);
+    expect(
+      createTypesafeBackend({
+        endpoint: ENDPOINT,
+        apiKey: 'k',
+        model: 'jev-1.13.0',
+        fetch: f.fn,
+        usdPerMTok: 0.05,
+      }).usdPerMTok,
+    ).toBe(0.05);
   });
 
   it('回包没带 token 数：按字符数保守估，标明是估的，不记 0', async () => {

@@ -15,6 +15,7 @@ import {
   TRIAGE_UI,
 } from '../src/bank.ts';
 import { createJev } from '../src/jev.ts';
+import { DEFAULT_POLICY } from '../src/policy.ts';
 import { renderPrompt } from '../src/questions.ts';
 import { fakeBackend, HOUR, MODEL, ok } from './helpers.ts';
 
@@ -251,19 +252,60 @@ describe('本地就拦下的：不问出去，也记一行', () => {
   });
 });
 
-describe('每天的次数', () => {
-  it('到上限就不再问出去；本地拦下的不占次数；「今天」按北京时间 0 点算', async () => {
+describe('每天的上限', () => {
+  it('次数到上限就不再问出去；本地拦下的不占次数；「今天」从 UTC 0 点算', async () => {
     await t.db.insert(settings).values({ key: 'judge.dailyCallLimit', value: 2 });
     const backend = fakeBackend();
     const at = (iso: string) => createJev({ db: t.db, backend, now: () => new Date(iso) });
-    // 北京时间 9 月 25 日 0 点 = UTC 9 月 24 日 16 点：前一天问的不算今天。
-    await at('2026-09-24T15:59:00Z').ask(TRIAGE_UI, request, ctx);
-    await at('2026-09-24T16:10:00Z').ask(TRIAGE_UI, request, ctx);
-    await at('2026-09-24T16:20:00Z').ask(ERROR_NEXT, { step: 's', message: '' }, ctx); // 本地拦下
-    await at('2026-09-24T16:30:00Z').ask(TRIAGE_UI, request, ctx);
-    const capped = await at('2026-09-24T16:40:00Z').ask(TRIAGE_UI, request, ctx);
+    // 前一天问的不算今天。
+    await at('2026-09-24T23:59:00Z').ask(TRIAGE_UI, request, ctx);
+    await at('2026-09-25T00:10:00Z').ask(TRIAGE_UI, request, ctx);
+    await at('2026-09-25T00:20:00Z').ask(ERROR_NEXT, { step: 's', message: '' }, ctx); // 本地拦下
+    await at('2026-09-25T00:30:00Z').ask(TRIAGE_UI, request, ctx);
+    const capped = await at('2026-09-25T00:40:00Z').ask(TRIAGE_UI, request, ctx);
     expect(capped).toMatchObject({ judged: false, reason: 'daily_cap', act: 'none' });
+    if (!capped.judged) expect(capped.detail).toContain('因每日次数上限没问');
     expect(backend.calls).toHaveLength(3);
+  });
+
+  it('按量计费的后端：花费按回包的 token 记进库；再问会超每日花费上限就停调、走默认，库里记「因上限没问」', async () => {
+    // 价格定成每百万 token 1 美元：回包报 400 token = 0.0004 美元一问；事先按字数估每问约 0.0001 美元。
+    // 上限 0.0009：第三问时已花 0.0008 + 估 0.0001 超了，不问。
+    await t.db.insert(settings).values({ key: 'judge.dailyUsdCap', value: 0.0009 });
+    const paid = { ...fakeBackend(), usdPerMTok: 1 };
+    const short = { request: '改首页标题' };
+    const first = await jevWith(paid).ask(TRIAGE_UI, short, ctx);
+    const second = await jevWith(paid).ask(TRIAGE_UI, short, ctx);
+    expect([first.judged, second.judged]).toEqual([true, true]);
+    const third = await jevWith(paid).ask(TRIAGE_UI, short, ctx);
+    expect(third).toMatchObject({ judged: false, reason: 'daily_cap', act: 'none' });
+    if (!third.judged) expect(third.detail).toContain('因每日花费上限没问');
+    expect(paid.calls).toHaveLength(2);
+    const recorded = await rows();
+    expect(recorded.map((r) => (r.sample as { costUsd?: number }).costUsd)).toEqual([
+      0.0004,
+      0.0004,
+      undefined,
+    ]);
+    expect(recorded[2]).toMatchObject({
+      ok: false,
+      failReason: 'daily_cap',
+      sample: expect.objectContaining({ detail: expect.stringContaining('因每日花费上限没问') }),
+    });
+  });
+
+  it('订阅内的后端（没有单价）不受花费上限管', async () => {
+    await t.db.insert(settings).values({ key: 'judge.dailyUsdCap', value: 0 });
+    const backend = fakeBackend();
+    expect(await jevWith(backend).ask(TRIAGE_UI, request, ctx)).toMatchObject({ judged: true });
+    expect((await rows())[0]?.sample).not.toHaveProperty('costUsd');
+  });
+
+  it('花费上限默认就是旧系统的日帽，设置里配了以设置为准', async () => {
+    expect(DEFAULT_POLICY.dailyUsdCap).toBe(0.3);
+    await t.db.insert(settings).values({ key: 'judge.dailyUsdCap', value: -1 });
+    const v = await jevWith({ ...fakeBackend(), usdPerMTok: 1 }).ask(TRIAGE_UI, request, ctx);
+    expect(v).toMatchObject({ judged: false, reason: 'bad_setting' });
   });
 
   it('一次问几道算几道：剩的次数不够这一批就整批不问', async () => {
@@ -285,14 +327,7 @@ describe('每天的次数', () => {
       db: t.db,
       backend,
       now: () => NOW,
-      policy: {
-        minSamples: 50,
-        accuracyLine: 0.9,
-        examMinAnswered: 3,
-        examAnsweredShare: 0.8,
-        shadowStallDays: 14,
-        dailyCallLimit: 1,
-      },
+      policy: { ...DEFAULT_POLICY, dailyCallLimit: 1 },
     });
     await jev.ask(TRIAGE_UI, request, ctx);
     expect(await jev.ask(TRIAGE_UI, request, ctx)).toMatchObject({ reason: 'daily_cap' });

@@ -39,6 +39,8 @@ export interface AnswerSample {
   /** 一次问了几道题（它们共用一次调用的耗时和 token）。 */
   batch: { id: string; size: number };
   tokensEstimated?: boolean;
+  /** 按量计费的后端才有：这一问分摊到的美元花费（输入 token × 单价）。每日花费上限按它加总。 */
+  costUsd?: number;
   /** 考试：哪一次、哪一道考题。 */
   exam?: { runId: string; sampleId: string };
   /** 没判出来时的原文（上游报错、认不出的回包、题面外的选项……），截到 500 字。 */
@@ -182,6 +184,21 @@ export async function countAskedSince(db: Db, since: Date): Promise<number> {
       ),
     );
   return countOf(row, '今天问了几道');
+}
+
+/** 从 since 起按量计费的后端一共花了多少美元（每条判断记录里分摊的 costUsd 加总）。 */
+export async function usdSpentSince(db: Db, since: Date): Promise<number> {
+  const [row] = await db
+    .select({
+      usd: sql<number>`coalesce(sum((${jevAnswers.sample}->>'costUsd')::float8), 0)::float8`,
+      n: sql<number>`count(*)::int`,
+    })
+    .from(jevAnswers)
+    .where(and(gte(jevAnswers.askedAt, since), sql`(${jevAnswers.sample}->>'costUsd') is not null`));
+  countOf(row, '今天花了多少');
+  const usd = Number(row?.usd);
+  if (!Number.isFinite(usd)) throw new Error(`今天花了多少没查成：读到 ${String(row?.usd)}`);
+  return usd;
 }
 
 /** count(*) 一定回一行；没回就是没查成，不当成 0。 */

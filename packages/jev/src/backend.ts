@@ -59,12 +59,31 @@ export interface JevBackend {
   readonly kind: string;
   /** 钉死的模型版本，不许是 latest 这类别名。 */
   readonly model: string;
+  /** 按量计费的后端才有：每百万输入 token 多少美元（输出不计费）。有它就受每日花费上限管；订阅内的后端不给。 */
+  readonly usdPerMTok?: number;
   ask(request: BackendRequest): Promise<BackendResult>;
+}
+
+/** 按输入 token 折算的美元花费。 */
+export function usdOf(inputTokens: number, usdPerMTok: number): number {
+  return (inputTokens * usdPerMTok) / 1_000_000;
 }
 
 /** 没有 usage 时的保守估算：按一个字一个 token 算（中文大致如此，英文会多估），宁可多记不记少。 */
 export function estimateTokens(texts: readonly string[]): number {
   return texts.reduce((sum, t) => sum + t.length, 0);
+}
+
+/** 一次请求里会喂给模型的全部文字（证据、题面、选项），事先估花费用。 */
+export function requestTexts(request: BackendRequest): string[] {
+  return [
+    ...request.evidence.flatMap((e) => [e.label, e.text]),
+    ...request.questions.flatMap((q) => [
+      q.id,
+      q.instructions,
+      ...q.options.flatMap((o) => [o.id, o.criteria]),
+    ]),
+  ];
 }
 
 const ALIAS = /latest|preview|stable|default/i;

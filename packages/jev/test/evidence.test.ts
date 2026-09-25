@@ -1,4 +1,4 @@
-// 证据的小工具：字段合并、缺什么、多什么、摘要、「今天」从北京时间 0 点算。
+// 证据的小工具：字段合并、缺什么、多什么、摘要、每日上限的「今天」从哪算。
 import { describe, expect, it } from 'vitest';
 import { DELIVERY_MET, FEISHU_INTENT, TRIAGE_KIND, TRIAGE_UI } from '../src/bank.ts';
 import { dayStart, digestEvidence, fieldsOf, missingKeys, unknownKeys } from '../src/evidence.ts';
@@ -25,9 +25,9 @@ describe('证据', () => {
     expect(d.replying_to).toBeUndefined();
   });
 
-  it('「今天」从北京时间 0 点算（UTC 前一天 16 点）', () => {
-    expect(dayStart(new Date('2026-09-24T16:00:00Z')).toISOString()).toBe('2026-09-24T16:00:00.000Z');
-    expect(dayStart(new Date('2026-09-24T15:59:59Z')).toISOString()).toBe('2026-09-23T16:00:00.000Z');
-    expect(dayStart(new Date('2026-09-25T04:00:00Z')).toISOString()).toBe('2026-09-24T16:00:00.000Z');
+  it('「今天」从 UTC 0 点算（和额度读取器里 Jev 池的窗口一致）', () => {
+    expect(dayStart(new Date('2026-09-25T00:00:00Z')).toISOString()).toBe('2026-09-25T00:00:00.000Z');
+    expect(dayStart(new Date('2026-09-24T23:59:59Z')).toISOString()).toBe('2026-09-24T00:00:00.000Z');
+    expect(dayStart(new Date('2026-09-25T16:30:00Z')).toISOString()).toBe('2026-09-25T00:00:00.000Z');
   });
 });
