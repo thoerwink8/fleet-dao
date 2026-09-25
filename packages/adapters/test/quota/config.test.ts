@@ -57,7 +57,7 @@ describe('配置校验：一次列全，不撞到第一个就停', () => {
     expect(got).toEqual([
       'pools[0] 有不认识的键 tokenfile',
       'pools[1].poolId a 重复',
-      'pools[2].reader 要是 claude-usage / mirasim-relay / cursor-dashboard / grok-billing / estimate 之一',
+      'pools[2].reader 要是 claude-usage / reclaude-carpool / mirasim-relay / cursor-dashboard / grok-billing / estimate 之一',
     ]);
   });
 

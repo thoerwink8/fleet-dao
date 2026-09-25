@@ -6,6 +6,10 @@ coverage/
 *.local
 .DS_Store
 .playwright-mcp/
+# 本机工具和临时文件：临时目录、Claude Code 的工作树、Mirasim 的本机定时任务
+_tmp/
+.claude/worktrees/
+.mirasim/
 
 # >>> 密钥文件名单（公开仓，一律不进）
 # 密钥和本机配置不进公开仓，加密副本在私有仓 fleet-dao-vault（README「密钥和本机配置在哪」）。

@@ -13,14 +13,12 @@
       "timeoutMs": 120000
     },
     {
-      "_说明": "Claude 订阅·拼车组织。和独享号是同一个 reclaude 账号下的两个组织；这台机器挂的不是它时会报 not_current，读取器不切号。",
+      "_说明": "Claude 订阅·拼车组织。读 reclaude 开放接口里拼车成员的 5 小时美元上限（/usage 看不见它），Key 是账号级的：不看这台机器挂哪个组织。Key 文件里只放 rck_ 开头的那一行。",
       "poolId": "claude-carpool",
       "channelId": "claude-sub",
       "name": "Claude 订阅 · 拼车组织",
-      "reader": "claude-usage",
-      "command": ["/home/<服务用户>/.local/bin/reclaude"],
-      "orgKind": "carpool",
-      "timeoutMs": 120000
+      "reader": "reclaude-carpool",
+      "keyFile": "/etc/fleet-dao/reclaude-api.key"
     },
     {
       "_说明": "Mirasim 中转账号：Opus、GPT（codex）、Kimi、DeepSeek 等走中转的路由共扣这一份（5h、7d），另有只扣某一族的窗口（7d_claude…）。",

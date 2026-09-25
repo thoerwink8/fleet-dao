@@ -1,0 +1,10 @@
+{
+  "account_id": 1111,
+  "enabled": true,
+  "notice_i18n_key": "billing:carpool_5h.notice_provisional",
+  "quota_usd": "80.00",
+  "resets_at_ms": 1790379000338,
+  "state": "active",
+  "status": "active",
+  "used_usd": "9.3835775000"
+}

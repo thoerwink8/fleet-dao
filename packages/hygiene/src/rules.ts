@@ -245,7 +245,7 @@ const PEM_BODY =
 // —— 令牌 ——
 
 const TOKEN_PREFIX =
-  /^(?:gh[pousr]_|github_pat_|sk-ant-(?:[a-z]+\d+-)?|sk-(?:proj-|svcacct-|admin-)?|xai-|AKIA|xox[abprs]-|xapp-\d-|AIza|glpat-|npm_|tvly-|\d{6,10}:|Bearer\s+)/;
+  /^(?:gh[pousr]_|github_pat_|sk-ant-(?:[a-z]+\d+-)?|sk-(?:proj-|svcacct-|admin-)?|xai-|AKIA|xox[abprs]-|xapp-\d-|AIza|glpat-|npm_|tvly-|rck_|\d{6,10}:|Bearer\s+)/;
 
 // —— 键名像密钥 ——
 
@@ -310,7 +310,7 @@ export const RULES: readonly Rule[] = [
     id: 'token',
     label: '令牌',
     pattern:
-      /\b(?:gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{22,}|sk-ant-[A-Za-z0-9_-]{16,}|sk-[A-Za-z0-9_-]{20,}|xai-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|xox[abprs]-[A-Za-z0-9-]{10,}|xapp-\d-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}|glpat-[A-Za-z0-9_-]{20,}|npm_[A-Za-z0-9]{36}|tvly-[A-Za-z0-9_-]{20,}|\d{6,10}:AA[0-9A-Za-z_-]{30,}|Bearer\s+[A-Za-z0-9._~+/-]{20,}=*)/g,
+      /\b(?:gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{22,}|sk-ant-[A-Za-z0-9_-]{16,}|sk-[A-Za-z0-9_-]{20,}|xai-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|xox[abprs]-[A-Za-z0-9-]{10,}|xapp-\d-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}|glpat-[A-Za-z0-9_-]{20,}|npm_[A-Za-z0-9]{36}|tvly-[A-Za-z0-9_-]{20,}|rck_[A-Za-z0-9_-]{30,}|\d{6,10}:AA[0-9A-Za-z_-]{30,}|Bearer\s+[A-Za-z0-9._~+/-]{20,}=*)/g,
     harmless: (token) => isFakeValue(token.replace(TOKEN_PREFIX, '')),
   },
   {
