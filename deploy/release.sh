@@ -417,11 +417,19 @@ catalog_readback() {
   printf '%s' "$out"
 }
 
+# 读回的一行说成人话（不带操作记录编号）
+catalog_words() { # catalog_readback 的一行
+  local c=()
+  IFS='|' read -r -a c <<<"$1"
+  printf '账号池 %s、路由 %s、阶段 %s、阶段里挂的路由 %s' "${c[0]}" "${c[1]}" "${c[2]}" "${c[3]}"
+}
+
 # 装目录：迁移之后、切版本之前，以 fleet 跑这一版的装载器（packages/db/src/bin/catalog.ts）。它只补缺——驾驶舱里改过的不动，
-# 每个阶段只排一次，跑几遍都一样；格式错、引用不存在都整批不写。文件不在、属主权限不对、装不成、读不回，都停下、不切版本
-# （在用的那版不受影响）。装完账号池、路由、阶段、阶段里挂的路由哪张是 0 行也判红：引擎没有它们派不出活
+# 每个阶段只排一次，跑几遍都一样；格式错、引用不存在它整批不写（装不成时这里再读回一次核对，不光信它）。文件不在、属主权限
+# 不对、装不成、读不回，都停下、不切版本（在用的那版不受影响）。装完账号池、路由、阶段、阶段里挂的路由哪张是 0 行也判红：
+# 引擎没有它们派不出活
 load_catalog() { # 提交号
-  local dir=$RELEASES/$1 have before after out rc=0 line first i empty="" counts=()
+  local dir=$RELEASES/$1 have before after out rc=0 line first i empty="" counts=() was=()
   local names=(账号池 路由 阶段 阶段里挂的路由)
   step "装目录（$CATALOG → 库 fleet）"
   if [[ ! -f "$dir/packages/db/src/bin/catalog.ts" ]]; then
@@ -456,7 +464,15 @@ load_catalog() { # 提交号
   done <<<"$out"
   if ((rc != 0)); then
     first=$(head -1 <<<"$out")
-    red "目录没装成（装载器退出码 $rc，原话见上；它整批不写，库里一行没动；没切版本）：${first:-（没有输出）}"
+    # 装载器是一个事务、出错整批不写；这里不光信它，再读回一次和装之前比，照实说库变没变
+    if ! after=$(catalog_readback); then
+      line="装完读不回库，库里变没变没查成"
+    elif [[ "$after" == "$before" ]]; then
+      line="读回核过：几张表的行数、装载器的操作记录都和装之前一样"
+    else
+      line="库变了（装之前 $(catalog_words "$before")，装载器的操作记录到 ${before##*|} 号；现在 $(catalog_words "$after")，到 ${after##*|} 号），要人看"
+    fi
+    red "目录没装成（装载器退出码 $rc，原话见上；$line；没切版本）：${first:-（没有输出）}"
     return 1
   fi
   if ! after=$(catalog_readback); then
@@ -464,14 +480,18 @@ load_catalog() { # 提交号
     return 1
   fi
   IFS='|' read -r -a counts <<<"$after"
+  IFS='|' read -r -a was <<<"$before"
   for i in 0 1 2 3; do
-    if ((counts[i] == 0)); then empty+="${empty:+、}${names[i]}"; fi
+    if ((counts[i] == 0)); then empty+="${empty:+、}${names[i]} 0 行（装之前 ${was[i]} 行）"; fi
   done
   if [[ -n "$empty" ]]; then
-    red "装完读回：库 fleet 里${empty}是 0 行（装载器说装好了，库里却没有，引擎派不出活）；没切版本"
+    # 驾驶舱只摘得掉阶段里挂的路由（池、路由、阶段它删不了）；装载器又只补缺，阶段排过一次就不再动
+    line="要人看"
+    if [[ "$empty" == "${names[3]}"* ]]; then line="阶段排过一次装载器就不再动：是驾驶舱里摘光的，就去驾驶舱挂上"; fi
+    red "装完读回：库 fleet 里${empty}，引擎派不出活（$line）；没切版本"
     return 1
   fi
-  line="账号池 ${counts[0]}、路由 ${counts[1]}、阶段 ${counts[2]}、阶段里挂的路由 ${counts[3]}"
+  line=$(catalog_words "$after")
   if [[ "${before##*|}" == "${counts[4]}" ]]; then
     ok "目录已齐，这次一行没改（$line）"
   else
