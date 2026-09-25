@@ -102,12 +102,40 @@ describe('worker 进程', { timeout: 120_000 }, () => {
     return { proc, out };
   };
 
-  it('没接上真实现就明说起不来，退出码 1，不假装在干活', async () => {
+  it('没说用哪套端口就明说起不来，退出码 1，不假装在干活', async () => {
     const { proc, out } = run({ FLEET_ENGINE_PORTS: '' });
     child = proc;
     const code = await new Promise((resolve) => proc.once('exit', resolve));
     expect(code).toBe(1);
-    expect(out.join('')).toContain('FLEET_ENGINE_PORTS=fake');
+    expect(out.join('')).toContain('FLEET_ENGINE_PORTS 要写 real');
+  });
+
+  it('真端口缺配置（后端地址、通行证钥匙、机器名、库）：一次列全，退出码 1，不连 Temporal', async () => {
+    const { proc, out } = run({
+      FLEET_ENGINE_PORTS: 'real',
+      FLEET_AGENT_API_URL: '',
+      FLEET_AGENT_TOKEN_SECRET: '',
+      TEMPORAL_ADDRESS: '127.0.0.1:1',
+    });
+    child = proc;
+    const code = await new Promise((resolve) => proc.once('exit', resolve));
+    expect(code).toBe(1);
+    expect(out.join('')).toContain('FLEET_AGENT_API_URL');
+    expect(out.join('')).toContain('FLEET_AGENT_TOKEN_SECRET');
+
+    const second = run({
+      FLEET_ENGINE_PORTS: 'real',
+      FLEET_AGENT_API_URL: 'http://127.0.0.1:1',
+      FLEET_AGENT_TOKEN_SECRET: 'x'.repeat(40),
+      FLEET_MACHINE_NAME: '',
+      DATABASE_URL: '',
+      TEMPORAL_ADDRESS: '127.0.0.1:1',
+    });
+    child = second.proc;
+    const secondCode = await new Promise((resolve) => second.proc.once('exit', resolve));
+    expect(secondCode).toBe(1);
+    expect(second.out.join('')).toContain('FLEET_MACHINE_NAME');
+    expect(second.out.join('')).toContain('DATABASE_URL');
   });
 
   it('按环境变量连上服务端，用假实现把一个需求从头跑到关单', async () => {

@@ -35,7 +35,7 @@ describe('健康检查', () => {
       ok: false,
       checks: {
         database: { ok: false, code: 'unreachable', message: '连不上' },
-        temporal: { ok: false, code: 'not_connected', message: 'Temporal 客户端还没接上（等引擎的 PR）' },
+        temporal: { ok: false, code: 'not_connected', message: 'Temporal 客户端还没接上' },
         realtime: { ok: true },
       },
     });

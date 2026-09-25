@@ -1,6 +1,6 @@
 // 本地假 GitHub：内存里的一个仓，按真接口的路径与形状回话（形状对照 test/fixtures 里录的真返回）。不出网。
 // 校验两个 App 的 JWT 签名、按令牌认身份，每个请求都记下来（谁、调了什么、带了什么），测试据此断言「用的是哪个机器人」。
-import { createPublicKey, generateKeyPairSync, type KeyObject, verify } from 'node:crypto';
+import { createHash, createPublicKey, generateKeyPairSync, type KeyObject, verify } from 'node:crypto';
 import type { AppCredentials, AppRole } from '../src/credentials.ts';
 
 export const OWNER = 'acme';
@@ -67,6 +67,9 @@ export interface PullState {
   base: { ref: string };
   updated_at: string;
   merged_at: string | null;
+  /** PR 在 GitHub 眼里也是一张 issue：标签/里程碑走 /issues/ 那一套接口，这里跟着记。 */
+  labels: string[];
+  milestone: { number: number; title: string } | null;
 }
 
 export interface CheckRunState {
@@ -93,6 +96,8 @@ export interface IssueState {
   comments: { id: number; body: string; user: GhUser; updated_at: string; created_at?: string }[];
   /** 编辑历史，新的在前（和 GraphQL userContentEdits 一样）。 */
   edits: { diff: string; editor: GhUser }[];
+  labels: string[];
+  milestone: { number: number; title: string } | null;
 }
 
 type Handler = (req: Recorded) => Response | undefined | Promise<Response | undefined>;
@@ -123,6 +128,10 @@ export class FakeGitHub {
   };
   pulls = new Map<number, PullState>();
   issues = new Map<number, IssueState>();
+  /** 里程碑编号 → 标题：PATCH 里程碑只带编号，靠这张表把标题配回去。 */
+  milestones = new Map<number, string>();
+  /** 需求文档（Contents API），键是仓内路径。 */
+  specs = new Map<string, { sha: string; content: string }>();
   checkRuns: CheckRunState[] = [];
   statuses: { sha: string; context: string; state: string; updated_at: string }[] = [];
   workflowRuns = new Map<string, number>();
@@ -163,7 +172,10 @@ export class FakeGitHub {
       updated_at: this.iso(),
       comments: init.comments ?? [],
       edits: init.edits ?? [],
+      labels: init.labels ?? [],
+      milestone: init.milestone ?? null,
     };
+    if (issue.milestone) this.milestones.set(issue.milestone.number, issue.milestone.title);
     this.issues.set(n, issue);
     return issue;
   }
@@ -186,7 +198,10 @@ export class FakeGitHub {
       base: init.base ?? { ref: this.defaultBranch },
       updated_at: init.updated_at ?? this.iso(),
       merged_at: init.merged_at ?? null,
+      labels: init.labels ?? [],
+      milestone: init.milestone ?? null,
     };
+    if (pr.milestone) this.milestones.set(pr.milestone.number, pr.milestone.title);
     this.pulls.set(n, pr);
     this.refs.set(pr.head.ref, pr.head.sha);
     return pr;
@@ -281,6 +296,13 @@ export class FakeGitHub {
     return this.now().toISOString();
   }
 
+  /** 和 git 算 blob sha 一样的算法（`blob <字节数>\0<内容>` 的 sha1），不是随便凑的假值。 */
+  private blobSha(content: string): string {
+    return createHash('sha1')
+      .update(`blob ${Buffer.byteLength(content)}\0${content}`)
+      .digest('hex');
+  }
+
   private json(status: number, data: unknown, headers: Record<string, string> = {}): Response {
     return new Response(data === undefined ? null : JSON.stringify(data), {
       status,
@@ -332,7 +354,30 @@ export class FakeGitHub {
       user: i.user,
       created_at: i.created_at,
       updated_at: i.updated_at,
+      labels: i.labels.map((name) => ({ name })),
+      milestone: i.milestone,
     };
+  }
+
+  /** PR 用 /issues/{n} 查、改标签和里程碑时，回的形状（PR 在 GitHub 眼里也是一张 issue）。 */
+  private prAsIssueJson(p: PullState) {
+    return {
+      number: p.number,
+      node_id: `I_${p.number}`,
+      html_url: `https://github.test/${OWNER}/${REPO}/issues/${p.number}`,
+      state: p.state,
+      title: p.title,
+      body: p.body,
+      user: p.user,
+      updated_at: p.updated_at,
+      labels: p.labels.map((name) => ({ name })),
+      milestone: p.milestone,
+    };
+  }
+
+  /** PATCH 里程碑只带编号；标题从 addIssue/addPull 时注册的表里配回来。 */
+  private milestoneOf(number: number): { number: number; title: string } {
+    return { number, title: this.milestones.get(number) ?? `M${number}` };
   }
 
   private page<T>(req: Recorded, items: T[]): Response {
@@ -597,17 +642,64 @@ export class FakeGitHub {
     }
     x = /^\/issues\/(\d+)$/.exec(rest);
     if (x) {
-      const issue = this.issues.get(Number(x[1]));
-      if (!issue) return this.notFound();
-      if (m === 'GET') return this.json(200, this.issueJson(issue));
-      if (m === 'PATCH') {
-        const b = req.body as { body?: string; state?: 'open' | 'closed'; state_reason?: string };
-        if (b.body !== undefined && b.body !== issue.body) this.editBody(issue, b.body, this.user(role));
-        if (b.state) issue.state = b.state;
-        if (b.state_reason !== undefined) issue.state_reason = b.state_reason;
-        issue.updated_at = this.iso();
-        return this.json(200, this.issueJson(issue));
+      const n = Number(x[1]);
+      const issue = this.issues.get(n);
+      // PR 在 GitHub 眼里也是一张 issue：issue 表里没有这个号就查 PR 表（读它的标签/里程碑用得到）
+      const pr = issue ? undefined : this.pulls.get(n);
+      if (!issue && !pr) return this.notFound();
+      if (m === 'GET') {
+        return this.json(200, issue ? this.issueJson(issue) : this.prAsIssueJson(pr as PullState));
       }
+      if (m === 'PATCH') {
+        const b = req.body as {
+          body?: string;
+          state?: 'open' | 'closed';
+          state_reason?: string;
+          milestone?: number;
+        };
+        if (issue) {
+          if (b.body !== undefined && b.body !== issue.body) this.editBody(issue, b.body, this.user(role));
+          if (b.state) issue.state = b.state;
+          if (b.state_reason !== undefined) issue.state_reason = b.state_reason;
+          if (b.milestone !== undefined) issue.milestone = this.milestoneOf(b.milestone);
+          issue.updated_at = this.iso();
+          return this.json(200, this.issueJson(issue));
+        }
+        const p = pr as PullState;
+        if (b.milestone !== undefined) p.milestone = this.milestoneOf(b.milestone);
+        return this.json(200, this.prAsIssueJson(p));
+      }
+    }
+    x = /^\/issues\/(\d+)\/labels$/.exec(rest);
+    if (x && m === 'POST') {
+      const n = Number(x[1]);
+      const issue = this.issues.get(n);
+      const pr = issue ? undefined : this.pulls.get(n);
+      if (!issue && !pr) return this.notFound();
+      const target = issue ?? (pr as PullState);
+      const add = (req.body as { labels?: string[] }).labels ?? [];
+      // 只加不删：POST 是追加，不是替换
+      target.labels = [...new Set([...target.labels, ...add])];
+      return this.json(
+        200,
+        target.labels.map((name) => ({ name })),
+      );
+    }
+    x = /^\/issues\/(\d+)\/labels\/([^/]+)$/.exec(rest);
+    if (x && m === 'DELETE') {
+      const n = Number(x[1]);
+      const issue = this.issues.get(n);
+      const pr = issue ? undefined : this.pulls.get(n);
+      if (!issue && !pr) return this.notFound();
+      const target = issue ?? (pr as PullState);
+      const name = decodeURIComponent(x[2] ?? '');
+      // 和 GitHub 一样：身上没有这个标签回 404（Label does not exist）
+      if (!target.labels.includes(name)) return this.json(404, { message: 'Label does not exist' });
+      target.labels = target.labels.filter((l) => l !== name);
+      return this.json(
+        200,
+        target.labels.map((l) => ({ name: l })),
+      );
     }
     x = /^\/issues\/(\d+)\/comments$/.exec(rest);
     if (x) {
@@ -633,6 +725,42 @@ export class FakeGitHub {
         // 和真 GitHub 一样：新评论把 issue 的 updated_at 推到评论的时刻
         issue.updated_at = c.updated_at;
         return this.json(201, view(c));
+      }
+    }
+
+    // —— 需求文档（Contents API）——
+    x = /^\/contents\/(.+)$/.exec(rest);
+    if (x) {
+      const path = decodeURIComponent(x[1] ?? '');
+      const existing = this.specs.get(path);
+      const htmlUrl = `https://github.test/${OWNER}/${REPO}/blob/${this.defaultBranch}/${path}`;
+      if (m === 'GET') {
+        if (!existing) return this.notFound();
+        return this.json(200, {
+          type: 'file',
+          encoding: 'base64',
+          path,
+          sha: existing.sha,
+          content: Buffer.from(existing.content, 'utf8').toString('base64'),
+          html_url: htmlUrl,
+        });
+      }
+      if (m === 'PUT') {
+        const b = req.body as { message?: string; content?: string; sha?: string };
+        if (b.sha !== undefined) {
+          if (!existing || existing.sha !== b.sha) {
+            return this.json(409, { message: `${path} does not match ${b.sha}` });
+          }
+        } else if (existing) {
+          return this.json(422, { message: 'Invalid request.\n\n"sha" wasn\'t supplied.' });
+        }
+        const content = Buffer.from(b.content ?? '', 'base64').toString('utf8');
+        const sha = this.blobSha(content);
+        this.specs.set(path, { sha, content });
+        return this.json(existing ? 200 : 201, {
+          content: { sha, path, html_url: htmlUrl },
+          commit: { sha: this.blobSha(`commit:${path}:${this.nextId++}`) },
+        });
       }
     }
 

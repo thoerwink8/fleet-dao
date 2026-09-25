@@ -46,8 +46,9 @@ describe('真实样本逐条分对', () => {
     it(`${s.id}（${s.provenance}）→ ${s.expect.rule} ${s.expect.action}`, () => {
       const v = run(s);
       expect({ rule: v.rule, action: v.action }).toEqual({ rule: s.expect.rule, action: s.expect.action });
-      if (s.expect.avoid !== undefined) expect(v.avoid?.scope).toBe(s.expect.avoid);
-      if (s.expect.until !== undefined) expect(v.avoid?.until).toBe(s.expect.until);
+      // 避开的范围：换路由时是这一步的 avoid；等清零、挂起时没有这一步的 avoid，看所有任务一起避开的 shared。
+      if (s.expect.avoid !== undefined) expect((v.avoid ?? v.shared)?.scope).toBe(s.expect.avoid);
+      if (s.expect.until !== undefined) expect((v.avoid ?? v.shared)?.until).toBe(s.expect.until);
       if (s.expect.alert !== undefined) expect(v.alert).toBe(s.expect.alert);
       if (s.expect.routeOutcome !== undefined) expect(v.routeOutcome).toBe(s.expect.routeOutcome);
       if (s.expect.counter !== undefined) expect(v.counter).toBe(s.expect.counter);

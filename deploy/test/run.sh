@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # deploy/ 的全部检查：语法、shellcheck、自检的违规样本、发布脚本的来回（换版、自动退回、只留几版、飞书网关发不发）、
 # 香港网关入口（fleet-gateway-deploy）、飞书网关打包、静态文件发到香港哪几处（演示版、根地址、可见范围不删）、
-# 演示版的可见范围推到香港、健康页的判定、docs/ops.md 端口表和脚本对得上、
-# docs/ops.md 里放文件的命令收到空的或半截的不换（place-file）。
+# 演示版的可见范围推到香港、公网上看得到的几样（占位页、健康页不带真名，release.json 只给隧道，整站不让搜索引擎收录）、
+# 健康页的判定、docs/ops.md 端口表和脚本对得上、docs/ops.md 里放文件的命令收到空的或半截的不换（place-file）。
 # 用法：sudo bash deploy/test/run.sh（违规样本那项要 root）。退出码：0 通过，1 有不通过，2 有没跑成的。
 set -uo pipefail
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -41,7 +41,7 @@ case $? in
 *) fail=1 ;;
 esac
 
-for t in release-flow gateway-deploy gateway-bundle web-publish demo-scopes place-file; do
+for t in release-flow gateway-deploy gateway-bundle web-publish demo-scopes place-file public-site; do
   bash "$HERE/$t.test.sh"
   case $? in
   0) ;;
@@ -57,12 +57,28 @@ case $? in
 *) fail=1 ;;
 esac
 
+bash "$HERE/agent-scope-adopt.test.sh"
+case $? in
+0) ;;
+2) skipped=1 ;;
+*) fail=1 ;;
+esac
+
 if command -v node >/dev/null; then
   if node --test "$HERE/health-page.test.mjs"; then echo "健康页的判定：通过"; else fail=1; fi
 else
   echo "没跑成：这台没有 node，健康页的判定没测"
   skipped=1
 fi
+
+for t in agents-sync agents-sync-account cli-tools; do
+  bash "$HERE/$t.test.sh"
+  case $? in
+  0) ;;
+  2) skipped=1 ;;
+  *) fail=1 ;;
+  esac
+done
 
 # 端口表：脚本里定的每个端口号都要出现在 docs/ops.md 里（改了端口忘了改文档，这里会红）
 ports=$(grep -hoE '^[A-Z_]*PORT=[0-9]+' "$DEPLOY/france.sh" "$DEPLOY/hk.sh" | cut -d= -f2 | sort -u)

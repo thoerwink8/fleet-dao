@@ -2,6 +2,7 @@
 // 走真的 webhook 接口（验签、落库、白名单），工作流用 harness 里记录调用的假的。
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { requirementWorkflowId } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import { devFixtures, IDS } from '../src/dev-fixtures.ts';
 import { createGitHubIntake } from '../src/github.ts';
@@ -16,6 +17,9 @@ import {
   WorkflowUnavailableError,
 } from '../src/ports.ts';
 import { deliverGithub as deliver, type HarnessOptions, harness, T0 } from './harness.ts';
+
+/** 样例里的仓：需求工作流编号按它拼。 */
+const CANARY = { owner: 'example', name: 'canary' };
 
 const REPO = { full_name: 'example/canary' };
 const founderA = { login: 'founder-a', id: 1001, type: 'User' };
@@ -247,7 +251,10 @@ describe('issue 关了、重开、改了', () => {
     const t = await task();
     if (!t) throw new Error('没建任务');
     expect(h.signals).toEqual([
-      { taskId: t.id, signal: { name: 'stop', by: IDS.founderA, reason: 'GitHub 上关了这张 issue' } },
+      {
+        workflowId: requirementWorkflowId(CANARY, t.issueNumber),
+        signal: { name: 'stop', by: IDS.founderA, reason: 'GitHub 上关了这张 issue' },
+      },
     ]);
     expect((await auditsOf(t.id))[0]).toMatchObject({
       action: 'task.stop',
@@ -479,7 +486,7 @@ describe('评论 → 回答追问', () => {
     expect(await h.store.getAsk(ask().id)).toMatchObject({ answer: '5 分钟', answeredBy: IDS.founderA });
     expect(h.signals).toEqual([
       {
-        taskId: IDS.task12,
+        workflowId: requirementWorkflowId(CANARY, 12),
         signal: { name: 'answer', by: IDS.founderA, askId: ask().id, answer: '5 分钟' },
       },
     ]);

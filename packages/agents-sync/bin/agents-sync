@@ -1,0 +1,4 @@
+#!/usr/bin/env node
+// agents-sync 入口：直接跑 TypeScript 源码（Node 22.18 起自带类型剥离），不另编译、不装依赖。
+// 不带扩展名；用 import() 而不是顶层 await，不管被当成 CJS 还是 ESM 都能跑。用法：node <本文件> --help
+import('../src/main.ts');

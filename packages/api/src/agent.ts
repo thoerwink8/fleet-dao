@@ -1,6 +1,7 @@
 // fleet 命令的接口（/agent/v1，照 shared/agent-api.ts）：只认 fleet 令牌，只能动令牌对应的那一次会话。
 // 每条命令先写库、再叫醒工作流；库是准，信号只是叫醒。
 import {
+  AGENT_EVENT_WAKE_KINDS,
   AgentRoutes,
   AskRequest,
   AskResponse,
@@ -11,6 +12,7 @@ import {
   IDEMPOTENCY_KEY_HEADER,
   PlanRequest,
   SayRequest,
+  subtaskWorkflowId,
   TaskResponse,
 } from '@fleet-dao/shared';
 import { Hono, type MiddlewareHandler } from 'hono';
@@ -21,6 +23,7 @@ import type { Deps } from './deps.ts';
 import { checkDone } from './done-check.ts';
 import { ApiError, readJson, reply } from './http.ts';
 import type { AgentSession, AskRecord, TaskSignal } from './ports.ts';
+import { requirementWorkflowIdForTask } from './temporal.ts';
 
 export type AgentEnv = { Variables: { agent: AgentSession } };
 
@@ -101,6 +104,13 @@ const TOKEN_PROBLEMS = {
   ttl_too_long: '令牌有效期超过上限，不认',
 } as const;
 
+type AgentEventKind = Extract<TaskSignal, { name: 'agentEvent' }>['kind'];
+
+/** 这一类 fleet 命令值不值得叫醒工作流（say、plan 不值得，只进库）。 */
+function isWakeKind(kind: AgentEventKind): kind is (typeof AGENT_EVENT_WAKE_KINDS)[number] {
+  return (AGENT_EVENT_WAKE_KINDS as readonly string[]).includes(kind);
+}
+
 export function agentAuth(deps: Deps): MiddlewareHandler<AgentEnv> {
   return async (c, next) => {
     const header = c.req.header('authorization');
@@ -139,14 +149,19 @@ export function agentRoutes(deps: Deps, waiters: AskWaiters): Hono<AgentEnv> {
   app.use('*', agentAuth(deps));
   const ok = { ok: true } as const;
 
-  /** 叫醒工作流失败不挡命令：记录已经写库，引擎按库补看；但要留日志，不能悄悄吞掉。 */
-  async function wake(
-    session: AgentSession,
-    kind: Extract<TaskSignal, { name: 'agentEvent' }>['kind'],
-    askId?: string,
-  ) {
+  /**
+   * 叫醒工作流：只有 AGENT_EVENT_WAKE_KINDS 这几类（ask、done、blocked）才发，say、plan 只进库、不发信号
+   * （每条都发的话，一个需求二十来个子任务能把需求的历史撑到上万条事件，撞上 Temporal 的信号上限）。
+   * 直接发给会话所属的工作流：子任务会话发它的子任务工作流（编号直接拼），需求自己的会话（分诊、需求文档、方案）
+   * 发需求工作流（编号查库拼）。叫醒失败不挡命令：记录已经写库，引擎按库补看；但要留日志，不能悄悄吞掉。
+   */
+  async function wake(session: AgentSession, kind: AgentEventKind, askId?: string) {
+    if (!isWakeKind(kind)) return;
     try {
-      await deps.workflows.signal(session.taskId, { name: 'agentEvent', runId: session.runId, kind, askId });
+      const workflowId = session.subtaskId
+        ? subtaskWorkflowId(session.subtaskId)
+        : await requirementWorkflowIdForTask(store, session.taskId);
+      await deps.workflows.signal(workflowId, { name: 'agentEvent', runId: session.runId, kind, askId });
     } catch (err) {
       log.warn('fleet 命令已写库，但叫醒工作流没成功', { runId: session.runId, kind, error: String(err) });
     }

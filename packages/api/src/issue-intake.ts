@@ -5,7 +5,7 @@
 // 抛错 = 没处理成：这条投递记成出错，对账重放时整条再来一遍（GitHub 自己不重投）。
 import { randomUUID } from 'node:crypto';
 import { humanPart } from '@fleet-dao/github';
-import { AnswerAskRequest, type Repo, type Task } from '@fleet-dao/shared';
+import { AnswerAskRequest, type Repo, requirementWorkflowId, type Task } from '@fleet-dao/shared';
 import { z } from 'zod';
 import type { Deps } from './deps.ts';
 import {
@@ -119,6 +119,7 @@ export function createIssueIntake(
     ({ actor, action, target: `task:${taskId}`, via: 'github', ok: true, ...extra }) satisfies NewAuditEntry;
 
   async function stop(
+    repo: IntakeRepo,
     task: Task,
     event: IngestedEvent,
     p: z.infer<typeof IssuePayload>,
@@ -135,7 +136,11 @@ export function createIssueIntake(
           ? 'issue 转到别的仓了'
           : 'GitHub 上关了这张 issue';
     try {
-      await deps.workflows.signal(task.id, { name: 'stop', by: actor.id, reason });
+      await deps.workflows.signal(requirementWorkflowId(repo, task.issueNumber), {
+        name: 'stop',
+        by: actor.id,
+        reason,
+      });
     } catch (err) {
       if (!(err instanceof WorkflowGoneError)) throw err;
       // 工作流不在：从没派出去的（还在排队）直接记成叫停；派出去过的多半刚结束，状态由引擎写
@@ -166,7 +171,7 @@ export function createIssueIntake(
     let task = await store.findTaskByIssue(repo.id, issue.number);
 
     if (issue.state === 'closed' || p.action === 'deleted' || p.action === 'transferred') {
-      return task ? stop(task, event, p, users) : 'task=none';
+      return task ? stop(repo, task, event, p, users) : 'task=none';
     }
 
     const notes: string[] = [];
@@ -332,7 +337,12 @@ export function createIssueIntake(
       askId = mine.id;
     }
     try {
-      await deps.workflows.signal(task.id, { name: 'answer', by: actor.id, askId, answer });
+      await deps.workflows.signal(requirementWorkflowId(repo, task.issueNumber), {
+        name: 'answer',
+        by: actor.id,
+        askId,
+        answer,
+      });
     } catch (err) {
       // 回答已经写进库（fleet ask 从库里读得到）；工作流不在就不用叫醒，连不上就记成出错、重放时补发
       if (err instanceof WorkflowGoneError) return 'ask=answered, workflow=gone';

@@ -171,7 +171,42 @@ snapshot_ours() {
   else
     echo "wg-fleet: 没起"
   fi
+  snapshot_agents_sync
   snapshot_firewall
+}
+
+# 同步脚本（packages/agents-sync）写进会话用户和 pilot 家里的：通用段所在的几份全局文件、它装的 skill、它的清单。
+# 每处一行，把名字、大小、修改时间、属主、权限压成一个指纹：内容没变却被重写了一遍，第二遍照样查得出。
+# 各家自己的东西（claude.ai 同步来的 skill、插件链进来的）自己会变，不记。落点照 packages/agents-sync/src/targets.ts
+# 另抄一份（自己查自己查不出错）：那边加了落点这里没跟上，packages/agents-sync/test/snapshot-list.test.ts 会红
+SNAPSHOT_REPO=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
+snapshot_agents_sync() {
+  local u h p d s skills=()
+  echo "## agents-sync"
+  for s in "$SNAPSHOT_REPO"/agents/skills/*/; do
+    if [[ -d "$s" ]]; then skills+=("$(basename -- "$s")"); fi
+  done
+  for u in fleet-agent-dedicated fleet-agent-carpool pilot; do
+    h=$(getent passwd "$u" | cut -d: -f6) || h=""
+    if [[ -z "$h" || ! -d "$h" ]]; then continue; fi
+    for p in .claude/CLAUDE.md .codex/AGENTS.md .pi/agent/AGENTS.md .kimi-code/AGENTS.md .dsh/AGENTS.md .gemini/GEMINI.md \
+      .fleet-dao/agents-sync.json; do
+      if [[ -e "$h/$p" || -L "$h/$p" ]]; then snapshot_tree_line "$u ~/$p" "$h/$p"; fi
+    done
+    for d in .claude/skills .agents/skills .gemini/config/skills; do
+      for s in "${skills[@]}"; do
+        if [[ -e "$h/$d/$s" || -L "$h/$d/$s" ]]; then snapshot_tree_line "$u ~/$d/$s" "$h/$d/$s"; fi
+      done
+    done
+    # ddgs（france.sh 以他的身份用 uv 装的，lib/cli-tools.sh）：只记命令入口和 uv 的安装记录，不记整个虚拟环境
+    for p in .local/bin/ddgs .local/share/uv/tools/ddgs/uv-receipt.toml; do
+      if [[ -e "$h/$p" || -L "$h/$p" ]]; then snapshot_tree_line "$u ~/$p" "$h/$p"; fi
+    done
+  done
+}
+
+snapshot_tree_line() { # 标签 路径
+  printf '%s %s\n' "$1" "$(find "$2" -printf '%P %y %s %T@ %U:%G %m\n' 2>&1 | LC_ALL=C sort | sha256sum | cut -c1-16)"
 }
 
 if [[ "${BASH_SOURCE[0]:-$0}" == "$0" ]]; then

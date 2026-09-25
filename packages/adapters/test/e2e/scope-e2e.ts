@@ -137,7 +137,10 @@ const checks: [string, boolean][] = [
       killed.env.GROK_DISABLE_AUTOUPDATER === '1' &&
       Boolean(killed.env.FLEET_RUN_ID),
   ],
-  ['PATH 用的是 FLEET_SESSION_PATH', killed.env.PATH === '/usr/local/bin:/usr/bin:/bin'],
+  [
+    'PATH 用的是 FLEET_SESSION_PATH，会话用户自己写得动的 ~/.local/bin 接在最后',
+    killed.env.PATH === `/usr/local/bin:/usr/bin:/bin:/home/${user}/.local/bin`,
+  ],
   [
     '强杀后孙进程没了、cgroup 清空',
     !killed.grandchildAlive && killed.leftInScope === 0 && killed.report.leftovers === 0,

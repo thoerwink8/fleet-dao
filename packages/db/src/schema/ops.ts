@@ -14,6 +14,7 @@ import {
   text,
   timestamp,
   unique,
+  uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
 import {
@@ -347,6 +348,67 @@ export const scheduleRuns = pgTable(
       sql`coalesce(${t.scanned}, 0) >= 0 and coalesce(${t.found}, 0) >= 0`,
     ),
     index('schedule_runs_job_started_idx').on(t.job, t.startedAt),
+  ],
+);
+
+/**
+ * 每次活动尝试、每段工作流层面的等待，看门狗和驾驶舱的耗时图表按它画。不设 task_id / subtask_id 外键：
+ * 计时不能因为任务行还没建就丢。活动重试会重复写同一笔，靠部分唯一索引去重，不当错误。
+ */
+export const stepTimings = pgTable(
+  'step_timings',
+  {
+    id: bigint('id', { mode: 'number' }).primaryKey().generatedAlwaysAsIdentity(),
+    kind: text('kind').notNull().$type<'activity' | 'wait'>(),
+    workflowId: text('workflow_id').notNull(),
+    temporalRunId: text('temporal_run_id').notNull(),
+    workflowType: text('workflow_type').notNull(),
+    taskId: uuid('task_id'),
+    subtaskId: uuid('subtask_id'),
+    subtaskKey: text('subtask_key'),
+    /** activity 行必填。 */
+    activity: text('activity'),
+    attempt: integer('attempt'),
+    /** wait 行必填：等什么（deps / slot / quota / human……）。 */
+    waitFor: text('wait_for'),
+    detail: text('detail'),
+    scheduledAt: timestamp('scheduled_at', tz),
+    startedAt: timestamp('started_at', tz).notNull(),
+    endedAt: timestamp('ended_at', tz).notNull(),
+    queueMs: bigint('queue_ms', { mode: 'number' }),
+    runMs: bigint('run_ms', { mode: 'number' }),
+    waitMs: bigint('wait_ms', { mode: 'number' }),
+    outcome: text('outcome').$type<'ok' | 'failed' | 'cancelled'>(),
+    errorCode: text('error_code'),
+    recordedAt: timestamp('recorded_at', tz).notNull().defaultNow(),
+  },
+  (t) => [
+    check('step_timings_kind_known', sql`${t.kind} in ('activity', 'wait')`),
+    check('step_timings_ended_after_started', sql`${t.endedAt} >= ${t.startedAt}`),
+    check(
+      'step_timings_activity_shape',
+      sql`${t.kind} <> 'activity' or (${t.activity} is not null and ${t.attempt} is not null and ${t.scheduledAt} is not null and ${t.queueMs} is not null and ${t.runMs} is not null and ${t.outcome} is not null)`,
+    ),
+    check(
+      'step_timings_wait_shape',
+      sql`${t.kind} <> 'wait' or (${t.waitFor} is not null and ${t.waitMs} is not null)`,
+    ),
+    check(
+      'step_timings_outcome_known',
+      sql`${t.outcome} is null or ${t.outcome} in ('ok', 'failed', 'cancelled')`,
+    ),
+    check(
+      'step_timings_ms_nonneg',
+      sql`coalesce(${t.queueMs}, 0) >= 0 and coalesce(${t.runMs}, 0) >= 0 and coalesce(${t.waitMs}, 0) >= 0`,
+    ),
+    // 活动重试会重复写同一笔（同一次尝试），去重不当错误；wait 行同理（返工时会重新等同一件事，靠 started_at 区分不同的那一次）。
+    uniqueIndex('step_timings_activity_unique')
+      .on(t.workflowId, t.temporalRunId, t.activity, t.attempt, t.scheduledAt)
+      .where(sql`${t.kind} = 'activity'`),
+    uniqueIndex('step_timings_wait_unique')
+      .on(t.workflowId, t.temporalRunId, t.waitFor, t.startedAt)
+      .where(sql`${t.kind} = 'wait'`),
+    index('step_timings_task_started_idx').on(t.taskId, t.startedAt),
   ],
 );
 

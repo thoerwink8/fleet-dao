@@ -2,6 +2,15 @@
 // 引擎的活动接口怎么对上这里，见 PR 正文；报错一律是 GitHubError（code / retryable / details，和引擎的 PortError 同形）。
 export { signAppJwt, TokenCache } from './app-auth.ts';
 export {
+  type BundleCommitsInput,
+  type BundleCommitsResult,
+  bundleCommits,
+  type FetchMainlineInput,
+  type FetchMainlineResult,
+  fetchMainline,
+  type MirrorReadDeps,
+} from './bundle.ts';
+export {
   type CheckVerdict,
   type CiEvaluation,
   evaluateChecks,
@@ -22,6 +31,15 @@ export {
   repoSlug,
   silentLogger,
 } from './client.ts';
+export {
+  type ReadSpecDocInput,
+  type ReadSpecDocResult,
+  readSpecDoc,
+  validSpecPath,
+  type WriteSpecDocInput,
+  type WriteSpecDocResult,
+  writeSpecDoc,
+} from './contents.ts';
 export {
   type AppCredentials,
   type AppFiles,
@@ -99,6 +117,7 @@ export {
   spliceProgress,
 } from './progress.ts';
 export {
+  CATEGORY_LABELS,
   type CiWaitResult,
   defaultCommitMessage,
   type MergePrInput,
@@ -129,6 +148,12 @@ export {
   type ReconcilerOptions,
 } from './reconcile.ts';
 export { type BranchRules, type RepoFacts, RepoFactsCache } from './repos.ts';
+export {
+  type SyncMainlineDeps,
+  type SyncMainlineInput,
+  type SyncMainlineResult,
+  syncMainline,
+} from './sync.ts';
 export {
   assertBodySize,
   BODY_LIMIT,

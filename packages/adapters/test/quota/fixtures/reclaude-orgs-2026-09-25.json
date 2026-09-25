@@ -1,0 +1,25 @@
+{
+  "current_org_id": 3333,
+  "items": [
+    {
+      "id": 2222,
+      "name": "<邮箱>",
+      "type": "personal",
+      "role": "owner",
+      "subscription_expires_at": 1800231668449,
+      "seat_count": 1,
+      "has_assigned_account": true,
+      "account_email": "<邮箱>"
+    },
+    {
+      "id": 3333,
+      "name": "<拼车组织>",
+      "type": "team",
+      "role": "member",
+      "subscription_expires_at": 1795055565859,
+      "seat_count": 1,
+      "has_assigned_account": true,
+      "account_email": "<邮箱>"
+    }
+  ]
+}

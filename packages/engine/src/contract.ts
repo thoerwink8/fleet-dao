@@ -3,6 +3,7 @@
 // 编号的拼法（requirementWorkflowId、subtaskWorkflowId）进了在途任务的历史：改格式要用 patched()。
 
 import type { Repo, StageKind, SubtaskState, TaskState } from '@fleet-dao/shared';
+import { AGENT_EVENT_WAKE_KINDS as SHARED_WAKE_KINDS } from '@fleet-dao/shared/workflow-ids';
 import { defineQuery, defineSignal } from '@temporalio/workflow';
 import type { SubtaskSpec } from './decisions/plan.ts';
 import type { Limits } from './limits.ts';
@@ -12,25 +13,16 @@ export const WORKFLOW_TYPES = {
   requirement: 'requirementWorkflow',
   subtask: 'subtaskWorkflow',
   mergeQueue: 'mergeQueueWorkflow',
+  /** P0 验收（deploy/hello.sh）：跑一次就知道引擎工人在接活。 */
+  hello: 'helloWorkflow',
 } as const;
 
-/** 一张 issue 一条需求工作流，例如 `req:acme/demo#12`。驾驶舱后端发信号按它找。 */
-export function requirementWorkflowId(repo: Pick<Repo, 'owner' | 'name'>, issueNumber: number): string {
-  return `req:${repo.owner}/${repo.name}#${issueNumber}`;
-}
-
-/**
- * 子任务工作流编号 = `sub:<subtasks.id>`。后端手里有 session_runs.subtask_id 就拼得出来，不用查别的；
- * subtasks.id 每次拆方案新生成，需求重开也不会和上一轮已关闭的子任务撞编号。
- */
-export function subtaskWorkflowId(subtaskId: string): string {
-  return `sub:${subtaskId}`;
-}
-
-/** 每个仓一条合并队列，例如 `mq:acme/demo`。 */
-export function mergeQueueWorkflowId(repo: Pick<Repo, 'owner' | 'name'>): string {
-  return `mq:${repo.owner}/${repo.name}`;
-}
+// 编号的拼法和驾驶舱后端共用一份（@fleet-dao/shared/workflow-ids）：后端按它给会话所属的工作流发叫醒。
+export {
+  mergeQueueWorkflowId,
+  requirementWorkflowId,
+  subtaskWorkflowId,
+} from '@fleet-dao/shared/workflow-ids';
 
 export function subtaskBranch(issueNumber: number, key: string): string {
   return `fleet/${issueNumber}-${key}`;
@@ -302,12 +294,8 @@ export interface AgentEventCommand {
   askId?: string | undefined;
 }
 
-/** 会改变走向、才值得叫醒工作流的几类 fleet 命令；其余（say、plan）只进库，发来了引擎也不理。 */
-export const AGENT_EVENT_WAKE_KINDS = [
-  'ask',
-  'done',
-  'blocked',
-] as const satisfies readonly AgentEventCommand['kind'][];
+/** 会改变走向、才值得叫醒工作流的几类 fleet 命令；其余（say、plan）只进库，发来了引擎也不理。和后端共用一份。 */
+export const AGENT_EVENT_WAKE_KINDS: readonly AgentEventCommand['kind'][] = SHARED_WAKE_KINDS;
 
 /** 批准或拒绝人闸。点名批准编号（卡片上带的）或子任务；都不点名的不受理（一次批一张，不一把全批）。 */
 export interface ApprovalCommand {

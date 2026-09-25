@@ -27,8 +27,53 @@ jobs:
           f="$RUNNER_TEMP/sensitive-values.txt"
           printf '%s\n' "$FLEET_SENSITIVE_VALUES" > "$f"
           echo "FLEET_SENSITIVE_VALUES_FILE=$f" >> "$GITHUB_ENV"
+      # 引擎有几条测试要真的 Temporal 开发服务端（测试服务端和真服务端行为不同的地方）：用和法国同一版的命令行起，
+      # 版本和校验和从 deploy/france.sh 读（只有一份），缓存按版本 + 校验和。测试里 CI 没给这个变量就直接红（test/support.ts）。
+      - name: Temporal 命令行的版本（和法国同版）
+        id: temporal
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^TEMPORAL_CLI_VERSION=//p' deploy/france.sh)
+          sha=$(sed -n 's/^TEMPORAL_CLI_SHA256=//p' deploy/france.sh)
+          if [[ ! $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || ! $sha =~ ^[0-9a-f]{64}$ ]]; then
+            echo "deploy/france.sh 里没读到 Temporal 命令行的版本或校验和（version=$version sha=$sha）" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        id: temporal-cache
+        with:
+          path: ~/.cache/fleet-temporal-cli/${{ steps.temporal.outputs.version }}
+          key: temporal-cli-${{ runner.os }}-${{ steps.temporal.outputs.version }}-${{ steps.temporal.outputs.sha }}
+      - name: 下载 Temporal 命令行（缓存没命中时；校验和对不上就红）
+        if: steps.temporal-cache.outputs.cache-hit != 'true'
+        env:
+          VERSION: ${{ steps.temporal.outputs.version }}
+          SHA: ${{ steps.temporal.outputs.sha }}
+        run: |
+          set -euo pipefail
+          dir="$HOME/.cache/fleet-temporal-cli/$VERSION"
+          mkdir -p "$dir"
+          tgz="$RUNNER_TEMP/temporal-cli.tgz"
+          curl -fsSL --retry 3 -o "$tgz" \
+            "https://github.com/temporalio/cli/releases/download/v$VERSION/temporal_cli_${VERSION}_linux_amd64.tar.gz"
+          echo "$SHA  $tgz" | sha256sum -c -
+          tar -xzf "$tgz" -C "$dir" temporal
+      - name: 核对版本，交给测试
+        env:
+          VERSION: ${{ steps.temporal.outputs.version }}
+        run: |
+          set -euo pipefail
+          cli="$HOME/.cache/fleet-temporal-cli/$VERSION/temporal"
+          "$cli" --version
+          "$cli" --version | grep -qF "$VERSION"
+          echo "FLEET_TEST_TEMPORAL_CLI=$cli" >> "$GITHUB_ENV"
       - run: pnpm check
       # 演示版打包，打包完扫产物：出现真名、内部叫法、GitHub 地址、源码对照文件就红（法国发布时也是这一道）
       - run: pnpm --filter ./packages/web run build:demo
       # 装机脚本的检查：退出码 2 = 有项没跑成，同样算红，别让「没跑」冒充「通过」
-      - run: sudo bash deploy/test/run.sh
+      # FLEET_TEST_SYSTEM_USERS=1：agent-scope-adopt.test.sh 建、删真系统账号的一段只在这里开（一次性的机器）。
+      # sudo 会清掉带进来的环境变量，所以写在 sudo 的命令行上（这里 runner 的 sudo 规则是 ALL，命令行上给的放行）；
+      # 万一没带过去，那一段报「没跑成」、这一步照样红，不会悄悄当成通过。
+      - run: sudo FLEET_TEST_SYSTEM_USERS=1 bash deploy/test/run.sh

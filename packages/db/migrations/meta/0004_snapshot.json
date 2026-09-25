@@ -1,5 +1,5 @@
 {
-  "id": "1b3fe79a-8daf-4cf2-a0ce-2479116254ff",
+  "id": "d671b9b0-5af9-4f1e-8e45-0da9d44a4fdb",
   "prevId": "4a5e0724-d8b4-45af-ae7d-199026ce6efd",
   "version": "7",
   "dialect": "postgresql",
@@ -763,223 +763,6 @@
         "audit_log_failure_has_error": {
           "name": "audit_log_failure_has_error",
           "value": "\"audit_log\".\"ok\" or \"audit_log\".\"error\" is not null"
-        }
-      },
-      "isRLSEnabled": false
-    },
-    "public.github_event_versions": {
-      "name": "github_event_versions",
-      "schema": "",
-      "columns": {
-        "delivery_id": {
-          "name": "delivery_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "object": {
-          "name": "object",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "version": {
-          "name": "version",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "state": {
-          "name": "state",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        }
-      },
-      "indexes": {
-        "github_event_versions_object_idx": {
-          "name": "github_event_versions_object_idx",
-          "columns": [
-            {
-              "expression": "object",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "version",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "github_event_versions_delivery_id_github_events_delivery_id_fk": {
-          "name": "github_event_versions_delivery_id_github_events_delivery_id_fk",
-          "tableFrom": "github_event_versions",
-          "tableTo": "github_events",
-          "columnsFrom": ["delivery_id"],
-          "columnsTo": ["delivery_id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {
-        "github_event_versions_delivery_id_object_pk": {
-          "name": "github_event_versions_delivery_id_object_pk",
-          "columns": ["delivery_id", "object"]
-        }
-      },
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "github_event_versions_state_known": {
-          "name": "github_event_versions_state_known",
-          "value": "\"github_event_versions\".\"state\" is null or \"github_event_versions\".\"state\" in ('open', 'closed')"
-        }
-      },
-      "isRLSEnabled": false
-    },
-    "public.github_events": {
-      "name": "github_events",
-      "schema": "",
-      "columns": {
-        "delivery_id": {
-          "name": "delivery_id",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "event": {
-          "name": "event",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "action": {
-          "name": "action",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "source": {
-          "name": "source",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "repo": {
-          "name": "repo",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "payload": {
-          "name": "payload",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "status": {
-          "name": "status",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "reason": {
-          "name": "reason",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "note": {
-          "name": "note",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "attempts": {
-          "name": "attempts",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 1
-        },
-        "received_at": {
-          "name": "received_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "claimed_at": {
-          "name": "claimed_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "finished_at": {
-          "name": "finished_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        }
-      },
-      "indexes": {
-        "github_events_unfinished_idx": {
-          "name": "github_events_unfinished_idx",
-          "columns": [
-            {
-              "expression": "attempts",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "received_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "where": "\"github_events\".\"status\" in ('processing', 'failed', 'waiting')",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "github_events_status_known": {
-          "name": "github_events_status_known",
-          "value": "\"github_events\".\"status\" in ('processing', 'accepted', 'ignored', 'failed', 'waiting')"
-        },
-        "github_events_source_known": {
-          "name": "github_events_source_known",
-          "value": "\"github_events\".\"source\" in ('webhook', 'poll', 'redelivery')"
-        },
-        "github_events_reason_when_not_taken": {
-          "name": "github_events_reason_when_not_taken",
-          "value": "\"github_events\".\"status\" not in ('ignored', 'failed', 'waiting') or coalesce(length(\"github_events\".\"reason\"), 0) > 0"
-        },
-        "github_events_finished_iff_done": {
-          "name": "github_events_finished_iff_done",
-          "value": "(\"github_events\".\"status\" = 'processing') = (\"github_events\".\"finished_at\" is null)"
-        },
-        "github_events_attempts_positive": {
-          "name": "github_events_attempts_positive",
-          "value": "\"github_events\".\"attempts\" > 0"
         }
       },
       "isRLSEnabled": false
@@ -1778,6 +1561,278 @@
       },
       "isRLSEnabled": false
     },
+    "public.step_timings": {
+      "name": "step_timings",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "bigint",
+          "primaryKey": true,
+          "notNull": true,
+          "identity": {
+            "type": "always",
+            "name": "step_timings_id_seq",
+            "schema": "public",
+            "increment": "1",
+            "startWith": "1",
+            "minValue": "1",
+            "maxValue": "9223372036854775807",
+            "cache": "1",
+            "cycle": false
+          }
+        },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "workflow_id": {
+          "name": "workflow_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "temporal_run_id": {
+          "name": "temporal_run_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "workflow_type": {
+          "name": "workflow_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "task_id": {
+          "name": "task_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "subtask_id": {
+          "name": "subtask_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "subtask_key": {
+          "name": "subtask_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "activity": {
+          "name": "activity",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "attempt": {
+          "name": "attempt",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "wait_for": {
+          "name": "wait_for",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "detail": {
+          "name": "detail",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "scheduled_at": {
+          "name": "scheduled_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "started_at": {
+          "name": "started_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "ended_at": {
+          "name": "ended_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "queue_ms": {
+          "name": "queue_ms",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "run_ms": {
+          "name": "run_ms",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "wait_ms": {
+          "name": "wait_ms",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "outcome": {
+          "name": "outcome",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "error_code": {
+          "name": "error_code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "recorded_at": {
+          "name": "recorded_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "step_timings_activity_unique": {
+          "name": "step_timings_activity_unique",
+          "columns": [
+            {
+              "expression": "workflow_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "temporal_run_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "activity",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "attempt",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "scheduled_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"step_timings\".\"kind\" = 'activity'",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "step_timings_wait_unique": {
+          "name": "step_timings_wait_unique",
+          "columns": [
+            {
+              "expression": "workflow_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "temporal_run_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "wait_for",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "started_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"step_timings\".\"kind\" = 'wait'",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "step_timings_task_started_idx": {
+          "name": "step_timings_task_started_idx",
+          "columns": [
+            {
+              "expression": "task_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "started_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "step_timings_kind_known": {
+          "name": "step_timings_kind_known",
+          "value": "\"step_timings\".\"kind\" in ('activity', 'wait')"
+        },
+        "step_timings_ended_after_started": {
+          "name": "step_timings_ended_after_started",
+          "value": "\"step_timings\".\"ended_at\" >= \"step_timings\".\"started_at\""
+        },
+        "step_timings_activity_shape": {
+          "name": "step_timings_activity_shape",
+          "value": "\"step_timings\".\"kind\" <> 'activity' or (\"step_timings\".\"activity\" is not null and \"step_timings\".\"attempt\" is not null and \"step_timings\".\"scheduled_at\" is not null and \"step_timings\".\"queue_ms\" is not null and \"step_timings\".\"run_ms\" is not null and \"step_timings\".\"outcome\" is not null)"
+        },
+        "step_timings_wait_shape": {
+          "name": "step_timings_wait_shape",
+          "value": "\"step_timings\".\"kind\" <> 'wait' or (\"step_timings\".\"wait_for\" is not null and \"step_timings\".\"wait_ms\" is not null)"
+        },
+        "step_timings_outcome_known": {
+          "name": "step_timings_outcome_known",
+          "value": "\"step_timings\".\"outcome\" is null or \"step_timings\".\"outcome\" in ('ok', 'failed', 'cancelled')"
+        },
+        "step_timings_ms_nonneg": {
+          "name": "step_timings_ms_nonneg",
+          "value": "coalesce(\"step_timings\".\"queue_ms\", 0) >= 0 and coalesce(\"step_timings\".\"run_ms\", 0) >= 0 and coalesce(\"step_timings\".\"wait_ms\", 0) >= 0"
+        }
+      },
+      "isRLSEnabled": false
+    },
     "public.users": {
       "name": "users",
       "schema": "",
@@ -1869,6 +1924,131 @@
       },
       "policies": {},
       "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.approvals": {
+      "name": "approvals",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "task_id": {
+          "name": "task_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "subtask_id": {
+          "name": "subtask_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "holds": {
+          "name": "holds",
+          "type": "text[]",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "pr_number": {
+          "name": "pr_number",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "head": {
+          "name": "head",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "title": {
+          "name": "title",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "summary": {
+          "name": "summary",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "requested_at": {
+          "name": "requested_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "decision": {
+          "name": "decision",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "decided_by": {
+          "name": "decided_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "decided_at": {
+          "name": "decided_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "reason": {
+          "name": "reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "approvals_task_id_tasks_id_fk": {
+          "name": "approvals_task_id_tasks_id_fk",
+          "tableFrom": "approvals",
+          "tableTo": "tasks",
+          "columnsFrom": ["task_id"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "approvals_subtask_in_task_fk": {
+          "name": "approvals_subtask_in_task_fk",
+          "tableFrom": "approvals",
+          "tableTo": "subtasks",
+          "columnsFrom": ["task_id", "subtask_id"],
+          "columnsTo": ["task_id", "id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "approvals_pr_number_positive": {
+          "name": "approvals_pr_number_positive",
+          "value": "\"approvals\".\"pr_number\" > 0"
+        },
+        "approvals_decision_shape": {
+          "name": "approvals_decision_shape",
+          "value": "(\"approvals\".\"decision\" is null) = (\"approvals\".\"decided_by\" is null) and (\"approvals\".\"decision\" is null) = (\"approvals\".\"decided_at\" is null)"
+        },
+        "approvals_decision_known": {
+          "name": "approvals_decision_known",
+          "value": "\"approvals\".\"decision\" is null or \"approvals\".\"decision\" in ('approved', 'rejected')"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.asks": {
@@ -2221,12 +2401,6 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true
-        },
-        "auto_dispatch_since": {
-          "name": "auto_dispatch_since",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {},
@@ -2360,6 +2534,66 @@
             "as": "(extract(epoch from (ended_at - started_at)) * 1000)::bigint",
             "type": "stored"
           }
+        },
+        "session_id": {
+          "name": "session_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "workflow_id": {
+          "name": "workflow_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "run_as_user": {
+          "name": "run_as_user",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "worktree_path": {
+          "name": "worktree_path",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "handle": {
+          "name": "handle",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "failure_code": {
+          "name": "failure_code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "failure_message": {
+          "name": "failure_message",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "route_outcome": {
+          "name": "route_outcome",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "session_cost_usd": {
+          "name": "session_cost_usd",
+          "type": "numeric(14, 6)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "context_tokens": {
+          "name": "context_tokens",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {
@@ -2396,6 +2630,21 @@
           ],
           "isUnique": false,
           "where": "\"session_runs\".\"ended_at\" is null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "session_runs_session_id_idx": {
+          "name": "session_runs_session_id_idx",
+          "columns": [
+            {
+              "expression": "session_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -2458,9 +2707,49 @@
         },
         "session_runs_usage_nonneg": {
           "name": "session_runs_usage_nonneg",
-          "value": "coalesce(\"session_runs\".\"input_tokens\", 0) >= 0 and coalesce(\"session_runs\".\"output_tokens\", 0) >= 0 and coalesce(\"session_runs\".\"cost_usd\", 0) >= 0"
+          "value": "coalesce(\"session_runs\".\"input_tokens\", 0) >= 0 and coalesce(\"session_runs\".\"output_tokens\", 0) >= 0 and coalesce(\"session_runs\".\"cost_usd\", 0) >= 0 and coalesce(\"session_runs\".\"session_cost_usd\", 0) >= 0 and coalesce(\"session_runs\".\"context_tokens\", 0) >= 0"
+        },
+        "session_runs_run_as_user_known": {
+          "name": "session_runs_run_as_user_known",
+          "value": "\"session_runs\".\"run_as_user\" is null or \"session_runs\".\"run_as_user\" in ('fleet-agent-dedicated', 'fleet-agent-carpool')"
+        },
+        "session_runs_route_outcome_known": {
+          "name": "session_runs_route_outcome_known",
+          "value": "\"session_runs\".\"route_outcome\" is null or \"session_runs\".\"route_outcome\" in ('ok', 'fail', 'neutral')"
         }
       },
+      "isRLSEnabled": false
+    },
+    "public.session_stops": {
+      "name": "session_stops",
+      "schema": "",
+      "columns": {
+        "run_id": {
+          "name": "run_id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "requested_at": {
+          "name": "requested_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "reason": {
+          "name": "reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
       "isRLSEnabled": false
     },
     "public.specs": {
@@ -2753,9 +3042,57 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
+        },
+        "key": {
+          "name": "key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "workflow_id": {
+          "name": "workflow_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "holds": {
+          "name": "holds",
+          "type": "text[]",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::text[]"
+        },
+        "superseded_at": {
+          "name": "superseded_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
         }
       },
-      "indexes": {},
+      "indexes": {
+        "subtasks_task_index_unique": {
+          "name": "subtasks_task_index_unique",
+          "columns": [
+            {
+              "expression": "task_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "index",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"subtasks\".\"superseded_at\" is null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "subtasks_task_id_tasks_id_fk": {
           "name": "subtasks_task_id_tasks_id_fk",
@@ -2769,11 +3106,6 @@
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
-        "subtasks_task_index_unique": {
-          "name": "subtasks_task_index_unique",
-          "nullsNotDistinct": false,
-          "columns": ["task_id", "index"]
-        },
         "subtasks_task_id_id_unique": {
           "name": "subtasks_task_id_id_unique",
           "nullsNotDistinct": false,
@@ -2858,6 +3190,37 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
+        },
+        "phase": {
+          "name": "phase",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "doing": {
+          "name": "doing",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "docs": {
+          "name": "docs",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::jsonb"
+        },
+        "last_problem": {
+          "name": "last_problem",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {},

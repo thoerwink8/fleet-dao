@@ -138,9 +138,13 @@ else
   NGINX=new
   serve() { # 站内路径 → 打印要给的文件；没有返回 1
     local p=${1%%\?*}
-    if [[ "$p" == /release.json && -f "$HKD/release.json" ]]; then
-      echo "$HKD/release.json"
-      return 0
+    # 香港站点里它单有一段：没有这个文件（或不是从隧道来的）就是 404，不回落到首页
+    if [[ "$p" == /release.json ]]; then
+      if [[ -f "$HKD/release.json" ]]; then
+        echo "$HKD/release.json"
+        return 0
+      fi
+      return 1
     fi
     if [[ "$p" == */ && -f "$HKD${p}index.html" ]]; then
       echo "$HKD${p}index.html"
@@ -219,16 +223,25 @@ else
   reset
   check_web "$A" >/dev/null
   check "web：版本标记还是别的版本：不过" "$?" 1
+  hk_as "$A" '<html>驾驶舱 a</html>'
+  rm -f -- "$HKD/release.json"
+  reset
+  check_web "$A" >/dev/null
+  check "web：香港对版本标记回 404（比如站点放行的不是法国的隧道地址）：不过" "$?" 1
+  check "红里说的是取不到，不当成「在发一个空版本」" "$(printf '%s\n' "${REDS[@]}" | grep -c '从香港取不到')" 1
 fi
 
 echo "== 香港的站点配置：演示版那一段（两份模板都有，占位都换得掉）"
+block() { # 开头那一行：打印 $RENDERED 里从这一行到它那个「}」的一段
+  awk -v h="$1" 'index($0, h) { on = 1 } on { print } on && /^ *}$/ { exit }' <<<"$RENDERED"
+}
 for tpl in nginx-http.conf nginx-https.conf; do
   render "$HERE/../hk/$tpl" SERVER_NAME=cockpit.example.test WEB_ROOT=/srv/fleet-dao-web ACME_ROOT=/var/www/acme \
-    API_UPSTREAM=10.99.0.2:8787 DEMO_PATH=/demo/ DEMO_BASE=/demo >/dev/null
+    API_UPSTREAM=10.99.0.2:8787 DEMO_PATH=/demo/ DEMO_BASE=/demo TUNNEL_PEER=10.99.0.2 >/dev/null
   check "$tpl：占位都换掉了" "$?" 0
   check "$tpl：深链接回落到演示版自己的首页" "$(grep -c 'try_files $uri /demo/index.html;' <<<"$RENDERED")" 1
-  check "$tpl：可见范围查不到就 404、不缓存" "$(grep -A3 'location ^~ /demo/scopes/ {' <<<"$RENDERED" | grep -c -e 'no-store' -e 'try_files $uri =404;')" 2
-  check "$tpl：演示版首页不缓存" "$(grep -A2 -e 'location = /demo/ {' -e 'location = /demo/index.html {' <<<"$RENDERED" | grep -c 'no-cache')" 2
+  check "$tpl：可见范围查不到就 404、不缓存" "$(block 'location ^~ /demo/scopes/ {' | grep -c -e 'no-store' -e 'try_files $uri =404;')" 2
+  check "$tpl：演示版首页不缓存" "$( (block 'location = /demo/ {' && block 'location = /demo/index.html {') | grep -c 'no-cache')" 2
   check "$tpl：/demo 跳到 /demo/" "$(grep -A1 'location = /demo {' <<<"$RENDERED" | grep -c 'return 301 /demo/$is_args$args;')" 1
   reset
   render "$HERE/../hk/$tpl" SERVER_NAME=x WEB_ROOT=/w ACME_ROOT=/a API_UPSTREAM=u DEMO_PATH=/demo/ >/dev/null

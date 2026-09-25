@@ -1,9 +1,11 @@
 // 进程入口：两个监听——驾驶舱接口（生产上是法国机器的隧道地址，香港经它访问）与 fleet 命令接口（只本机回环）。
 // 地址、端口、密钥都从本机配置（环境变量）读，见 config.ts。
-// - 有 DATABASE_URL：真库（Postgres Store + LISTEN fleet_changes）。生产必须有。GitHub 事件原文落库、issue 变成任务；
+// - 有 DATABASE_URL：真库（Postgres Store + LISTEN fleet_changes）+ 真 Temporal（懒连接，Temporal 没起来时
+//   这一步不报错，健康检查会如实报红）。生产必须有。GitHub 事件原文落库、issue 变成任务；
 //   PR、CI 事件经 @fleet-dao/github 写镜像（机器人凭据在 /etc/fleet-dao/github，读不到时如实失败、健康检查报红）。
-// - 开发环境没有 DATABASE_URL：内存里的样例数据；飞书登录没配时可以用 POST /auth/dev-login 免登（只许本机回环监听）。
-// Temporal 客户端（发信号、拉起需求工作流）没接上：健康检查如实报红，发信号返回 503，拉起工作流的投递记成出错。
+// - 开发环境没有 DATABASE_URL：内存里的样例数据；飞书登录没配时可以用 POST /auth/dev-login 免登（只许本机回环监听）；
+//   发给工作流的信号、拉起需求工作流都只记日志，不接 Temporal。
+// 拉起需求工作流还没接到 Temporal 客户端：拉起工作流的投递如实记成出错，接上后由对账重放。
 import type { Server } from 'node:http';
 import { createDb, type Db } from '@fleet-dao/db';
 import { createGitHub, pgLedger, pgLocker } from '@fleet-dao/github';
@@ -22,7 +24,7 @@ import { jsonLogger } from './log.ts';
 import { createMemoryStore } from './memory-store.ts';
 import { createPgStore, probeDb, withStatementTimeout } from './pg-store.ts';
 import { type GitHubEventSink, type RequirementWorkflows, WorkflowUnavailableError } from './ports.ts';
-import { notConnectedTemporal } from './temporal.ts';
+import { connectTemporal } from './temporal.ts';
 
 const log = jsonLogger();
 
@@ -83,8 +85,8 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
       demo,
       health: [],
       workflows: {
-        async signal(taskId, signal) {
-          log.info('（开发）发给工作流的信号', { taskId, signal: signal.name });
+        async signal(workflowId, signal) {
+          log.info('（开发）发给工作流的信号', { workflowId, signal: signal.name });
         },
       },
       requirements: {
@@ -112,7 +114,11 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
     },
     log,
   );
-  const temporal = notConnectedTemporal();
+  const temporal = connectTemporal({
+    address: config.temporalAddress,
+    namespace: config.temporalNamespace,
+    taskQueue: config.fleetTaskQueue,
+  });
   const github = githubMirror(db);
   const store = createPgStore(db, { now });
   const deps: Deps = {

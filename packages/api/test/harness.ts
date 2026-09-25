@@ -3,7 +3,7 @@
 import { createHmac } from 'node:crypto';
 import type { TestDb } from '@fleet-dao/db/testing';
 import { resetTestDb } from '@fleet-dao/db/testing';
-import { FLEET_CHANGES_CHANNEL } from '@fleet-dao/shared';
+import { FLEET_CHANGES_CHANNEL, requirementWorkflowId } from '@fleet-dao/shared';
 import type { Hono } from 'hono';
 import { signAgentToken } from '../src/agent-token.ts';
 import { buildApps } from '../src/app.ts';
@@ -54,6 +54,9 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     quotaStaleAfterMs: 30 * 60_000,
     sseHeartbeatMs: 60_000,
     demoDir: null,
+    temporalAddress: '127.0.0.1:7243',
+    temporalNamespace: 'fleet',
+    fleetTaskQueue: 'fleet',
     ...overrides,
   };
 }
@@ -86,7 +89,8 @@ export interface Harness<S extends Store = Store> {
   config: Config;
   store: S;
   changes: ChangeFeed;
-  signals: { taskId: string; signal: TaskSignal }[];
+  /** workflowId 是目标工作流的编号（req:owner/name#issueNumber 或 sub:subtaskId），不是调用方传的原始 taskId。 */
+  signals: { workflowId: string; signal: TaskSignal }[];
   /** 真拉起了的需求工作流（假的：同一张 issue 的还在跑、没被叫停，再拉回 already_running，不记在这里）。 */
   starts: RequirementStart[];
   accepted: IngestedEvent[];
@@ -143,8 +147,8 @@ function wire<S extends Store>(
     demo: options.demo ?? null,
     feishu: options.feishu === null ? null : feishu.auth,
     workflows: options.workflows ?? {
-      async signal(taskId, signal) {
-        signals.push({ taskId, signal });
+      async signal(workflowId, signal) {
+        signals.push({ workflowId, signal });
       },
     },
     requirements: options.requirements ?? {
@@ -154,7 +158,10 @@ function wire<S extends Store>(
           (s) =>
             s.repo.id === input.repo.id &&
             s.issueNumber === input.issueNumber &&
-            !signals.some((x) => x.taskId === s.taskId && x.signal.name === 'stop'),
+            !signals.some(
+              (x) =>
+                x.workflowId === requirementWorkflowId(s.repo, s.issueNumber) && x.signal.name === 'stop',
+            ),
         );
         if (running) return 'already_running';
         starts.push(input);

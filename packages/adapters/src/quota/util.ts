@@ -79,6 +79,7 @@ export function redact(text: string, max = 300): string {
     .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer <令牌>')
     .replace(/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g, '<令牌>')
     .replace(/\b(?:sk|rk|pk|xai|tvly)-[A-Za-z0-9_-]{8,}/gi, '<密钥>')
+    .replace(/\brck_[A-Za-z0-9_-]{8,}/g, '<密钥>')
     .replace(/\bAKIA[0-9A-Z]{16}\b/g, '<密钥>')
     .replace(/([?&](?:token|key|access_token|api_key)=)[^&\s"']+/gi, '$1<令牌>');
   const cleaned = maskEmails(secretsMasked)

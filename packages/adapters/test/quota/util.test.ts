@@ -37,6 +37,10 @@ describe('redact', () => {
     expect(all('编号 ABCDIOSFODNN7EXAMPLE')).toBe('编号 ABCDIOSFODNN7EXAMPLE');
   });
 
+  it('reclaude 的 API Key（rck_ 开头，下划线连着）', () => {
+    expect(all('key rck_abcDEF12_-xyz 失效')).toBe('key <密钥> 失效');
+  });
+
   it('几个邮箱连着写、中间没有分隔：一个个都抹掉（只在一段开头试一遍，第二个起会漏）', () => {
     expect(all('a@b.com_c@d.com')).toBe('<邮箱><邮箱>');
     expect(all('a@b.com+c@d.com')).toBe('<邮箱><邮箱>');

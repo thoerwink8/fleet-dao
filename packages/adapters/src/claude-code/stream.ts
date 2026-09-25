@@ -70,6 +70,13 @@ export interface ClaudeStreamSummary {
   initModel?: string;
   /** 第一条真实模型回复里的模型，判「实际用的哪个模型」只认它。 */
   observedModel?: string;
+  /**
+   * 最后一条主会话助手消息的上下文大小（input_tokens + cache_read_input_tokens + cache_creation_input_tokens）：
+   * 判「这段上下文还小不小」只认它，不认累计花费。子代理（Task 工具）里的助手消息不算——它们是另一个上下文窗口，
+   * 不是要 fork 续跑的这个主会话。一条消息按内容块拆成多帧、用量相同，每帧都会覆盖，最终留下真正最后一条的读数；
+   * 没有 usage 字段的帧（未开始 API 调用的帧）不覆盖。
+   */
+  lastContextTokens?: number;
   cliVersion?: string;
   permissionMode?: string;
   tools?: string[];
@@ -276,6 +283,14 @@ export class ClaudeStreamReader {
     }
     effect.activity = true;
     const subagent = Boolean(str(frame.parent_tool_use_id));
+    // 子代理是另一个上下文窗口，不算进「主会话最后一条消息」；没有 usage 的帧（这条消息还没跑完 API 调用）不覆盖
+    const usage = subagent ? undefined : rec(message.usage);
+    if (usage) {
+      this.#s.lastContextTokens =
+        (num(usage.input_tokens) ?? 0) +
+        (num(usage.cache_read_input_tokens) ?? 0) +
+        (num(usage.cache_creation_input_tokens) ?? 0);
+    }
     for (const raw of blocks) {
       const block = rec(raw);
       if (!block) continue;

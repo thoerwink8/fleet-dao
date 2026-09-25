@@ -359,9 +359,9 @@ describe('0003：目录装载器要的三列', () => {
   );
 });
 
-describe('0004：接活入口（GitHub 事件原文、自动派活开关）', () => {
+describe('0005：接活入口（GitHub 事件原文、自动派活开关）', () => {
   const entries = [...journal.entries].sort((a, b) => a.idx - b.idx);
-  const target = entries.findIndex((e) => e.tag === '0004_github_intake');
+  const target = entries.findIndex((e) => e.tag === '0005_github_intake');
   const runMigration = async (pg: PGlite, tag: string) => {
     const text = readFileSync(join(MIGRATIONS_FOLDER, `${tag}.sql`), 'utf8');
     for (const statement of text.split('--> statement-breakpoint')) await pg.exec(statement);
@@ -378,7 +378,7 @@ describe('0004：接活入口（GitHub 事件原文、自动派活开关）', ()
           `insert into repos (owner, name, test_command) values ('acme', 'widgets', 'pnpm check')`,
         );
         // github_events 是这一条建的表，装之前不存在；升级时的仓和别的行都留着
-        await runMigration(pg, '0004_github_intake');
+        await runMigration(pg, '0005_github_intake');
 
         expect((await pg.query(`select auto_dispatch_since from repos`)).rows).toEqual([
           { auto_dispatch_since: null },

@@ -30,6 +30,7 @@
 | `packages/jev` | Jev 判断题服务：题库、提问接口、从只记不拦转到真拦 |
 | `packages/feishu` | 飞书网关（跑在香港） |
 | `packages/conventions` | design 第七节的约定写成检查：PR 必填栏（CI 的 pr-fields）、开单脚本、文档指针检查 |
+| `packages/agents-sync` | 同步脚本：把 `AGENTS.md` 上半段和 `agents/skills/` 写进这台机器上各家 AI 的全局入口，另能查漂移、撤旧仓留下的东西 |
 | `deploy/` | 装机、发版、健康页，和它们的检查 |
 | `docs/` | 设计、计划、运维；`docs/reference/` 是旧系统的坑 |
 | `specs/` | 需求文档，每个需求一个文件夹（需求、方案、结果） |
@@ -50,6 +51,7 @@
 - 开发：`pnpm install`，Node 和 pnpm 的版本钉在 `package.json`；给 AI 的约定在 [AGENTS.md](AGENTS.md)。
 - 跑检查：`pnpm check`（文档里的路径、章节指针也在里面查）；CI 跑哪些见 `.github/workflows/`。
 - 开单：`pnpm issue:new --kind 需求 --milestone P1 --title "一句话" --body-file 正文.md`，缺类别或里程碑不开；加 `--specs 短名` 顺带建需求文档骨架。
+- 各家 AI 的全局说明：`node packages/agents-sync/bin/agents-sync --check`（只读），`--apply` 写；`--help` 看全部用法，法国怎么跑见 ops 第五节。
 
 ## 文档各管什么
 
@@ -60,7 +62,7 @@
 | [docs/ops.md](docs/ops.md) | 两台机器怎么装、怎么发版、怎么看、怎么退 | 跟着 `deploy/` 一起改 |
 | [docs/plan.md](docs/plan.md) | 各阶段的验收标准（进度看里程碑） | 验收标准变了 |
 | [docs/reference/](docs/reference/README.md) | 旧系统的坑和接线细节 | 做某一块之前先读对应那份 |
-| [AGENTS.md](AGENTS.md) | 给 AI 的一页约定：偏好、人闸、底线 | 规则变了 |
+| [AGENTS.md](AGENTS.md) | 给 AI 的一页约定：上半段各仓通用（同步脚本写进各家 AI 的全局说明），下半段只管本仓 | 规则变了；改上半段要各台机器重跑同步脚本 |
 
 ## 协作
 

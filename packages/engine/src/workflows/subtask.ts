@@ -9,6 +9,7 @@ import {
   getExternalWorkflowHandle,
   isCancellation,
   log,
+  patched,
   setHandler,
   sleep,
   TemporalFailure,
@@ -36,6 +37,7 @@ import type { SessionBrief, Worktree } from '../ports.ts';
 import {
   activitiesFor,
   attempt,
+  attemptOrRework,
   type Control,
   gate,
   installControl,
@@ -43,10 +45,13 @@ import {
   judge,
   type Kit,
   limitsFor,
+  NO_REWORK,
   newId,
   newKit,
   offClockMs,
   park,
+  type ReworkCarry,
+  reworkFeedback,
   runStage,
   stopActiveSessions,
   type Verdict,
@@ -348,6 +353,11 @@ export async function subtaskWorkflow(input: SubtaskInput): Promise<SubtaskResul
     let fingerprints: { ci?: string; review?: string } = {};
     let verifiedHead = '';
     let offPlan = 0;
+    let pushRework: ReworkCarry = NO_REWORK;
+    let prRework: ReworkCarry = NO_REWORK;
+    // 开 PR 被卫生检查拦下、退回会话只改总结的那一轮：提交早推上去了，交付核对从建树时的主线头算起
+    //（不然「起会话前的头之后没有新提交」会把只改总结的交付判成没交）。
+    let summaryOnly = false;
     // 墙钟预算：从开工算起，等人（暂停、挂起、回答、批准）和排队（空位、额度、合并队列）的时间不算；
     // 人看过（挂起后被放行）就重新计。
     let budget = { since: Date.now(), off: offClockMs(kit) };
@@ -355,6 +365,24 @@ export async function subtaskWorkflow(input: SubtaskInput): Promise<SubtaskResul
     const parkAndReset = async (reason: string, detail: string) => {
       await park(kit, reason, detail);
       budget = { since: Date.now(), off: offClockMs(kit) };
+    };
+    // 合并队列退回来、要回会话接着改之前：队列那边可能已经把主线并进分支推上去了（并提交的第一个父提交是 verifiedHead），
+    // 会话的树里却没有它——会话在旧头上改完一推，就和远端分叉（DIVERGED，不可重试）。先照 verifiedHead 同步一次：
+    // github 包认得自己推过的那个并提交（只回它、不再并），端口带着树就把树快进过去，会话起在并好的头上。
+    const followBranchHead = async (prNumber: number) => {
+      if (!patched('merge-return-follows-head')) return;
+      const sync = await attempt(kit, 'syncMainline', () =>
+        acts.syncMainline({
+          ...kit.scope,
+          repo: input.repo,
+          prNumber,
+          branch,
+          head: verifiedHead,
+          worktreePath: tree.path,
+        }),
+      );
+      // 冲突：队列没推成什么，树还在 verifiedHead 上；会话照退回的意见改，推的端口推之前再并主线
+      if (sync.state === 'clean') status.head = sync.head;
     };
     let next: Next = 'execute';
     while (next !== 'done') {
@@ -366,8 +394,9 @@ export async function subtaskWorkflow(input: SubtaskInput): Promise<SubtaskResul
           brief: brief(feedback),
           resumeSessionId: sessionId,
           worktreePath: tree.path,
-          baseHead: status.head ?? tree.baseSha,
+          baseHead: summaryOnly ? tree.baseSha : (status.head ?? tree.baseSha),
         });
+        summaryOnly = false;
         sessionId = exec.sessionId;
         summary = exec.output.summary;
         // 交付对账：改的文件和方案点名的地方一个都对不上，就是假完成，不推也不进验证。
@@ -392,29 +421,73 @@ export async function subtaskWorkflow(input: SubtaskInput): Promise<SubtaskResul
           continue;
         }
         if (delivery.note) status.lastProblem = delivery.note;
-        // 会话只在本地提交；推分支、开 PR 由引擎在会话外面做。
-        const pushed = await attempt(kit, 'pushBranch', () =>
-          acts.pushBranch({
-            ...kit.scope,
-            repo: input.repo,
-            worktreePath: tree.path,
-            branch,
-            head: exec.output.head,
-          }),
-        );
-        status.head = pushed.head;
-        if (status.prNumber === null) {
-          const pr = await attempt(kit, 'openPr', () =>
-            acts.openPr({
+        // 会话只在本地提交；推分支、开 PR 由引擎在会话外面做。推的端口先把最新主线并进会话的树（冲突退回会话解，MC1）；
+        // 推之前的卫生检查拦下了会话交的内容：退回会话拿掉再交（同一处连续被拦两次挂起报警，HY1）；名单没读到、
+        // 没扫成是这一侧的问题，挂起报警、不退会话（HY2）；分支名里查出来的会话也改不了，一样挂起（HY3）。
+        // 退回时的意见按认出的规则写（reworkFeedback）。
+        const pushedOrRework = await attemptOrRework(
+          kit,
+          'pushBranch',
+          () =>
+            acts.pushBranch({
               ...kit.scope,
               repo: input.repo,
+              worktreePath: tree.path,
               branch,
-              head: pushed.head,
-              title: sub.title,
-              body: `需求 #${input.issueNumber} 的子任务「${sub.key}」\n\n${summary}`,
+              head: exec.output.head,
             }),
+          pushRework,
+        );
+        if ('rework' in pushedOrRework) {
+          pushRework = pushedOrRework.rework.carry;
+          status.lastProblem = pushedOrRework.rework.reason;
+          feedback = [reworkFeedback('push', pushedOrRework.rework)];
+          continue;
+        }
+        pushRework = NO_REWORK;
+        const pushed = pushedOrRework.ok;
+        status.head = pushed.head;
+        if (status.prNumber === null) {
+          const changedFiles = exec.output.changedFiles;
+          // 标题、正文（会话的总结在里面）开出去就公开了：开之前也过卫生检查，拦下了退回会话只改总结。
+          const opened = await attemptOrRework(
+            kit,
+            'openPr',
+            () =>
+              acts.openPr({
+                ...kit.scope,
+                repo: input.repo,
+                branch,
+                head: pushed.head,
+                title: sub.title,
+                // 正文由 github 包的 renderPrBody 按 PR 模板的栏目生成；这里只给结构。「对应计划」「specs」两栏
+                // （#41）里的对应计划由端口开 PR 时去主线的需求文档里现读那一行，读不到就不开、挂起报警。
+                body: {
+                  requirement: input.issueNumber,
+                  subtask: `${sub.key} ${sub.title}`,
+                  did: summaryItems(summary),
+                  verified: [
+                    exec.output.testsPassed
+                      ? '会话里跑过测试，报通过（fleet done --tests passed）'
+                      : '会话报测试没过（fleet done --tests failed）',
+                    '合并前在最新主线上再等 CI（合并队列）',
+                  ],
+                  specs: input.specDir,
+                  changedFiles: changedFiles ?? [],
+                  ...(changedFiles ? {} : { owed: ['改了哪些文件没查成（交付没带文件清单）'] }),
+                },
+              }),
+            prRework,
           );
-          status.prNumber = pr.prNumber;
+          if ('rework' in opened) {
+            prRework = opened.rework.carry;
+            status.lastProblem = opened.rework.reason;
+            feedback = [reworkFeedback('openPr', opened.rework)];
+            summaryOnly = true;
+            continue;
+          }
+          prRework = NO_REWORK;
+          status.prNumber = opened.ok.prNumber;
           notifyParent();
         }
         next = 'verify';
@@ -515,10 +588,12 @@ export async function subtaskWorkflow(input: SubtaskInput): Promise<SubtaskResul
         await waitFor(kit, 'retry', after.reason, () => sleep(`${after.delaySeconds} seconds`));
         next = 'merge';
       } else if (after.action === 'rework') {
+        await followBranchHead(prNumber);
         feedback = after.feedback;
         next = 'execute';
       } else {
         await parkAndReset(after.reason, after.detail);
+        await followBranchHead(prNumber);
         status.rounds = { ...status.rounds, mergeReturn: 0 };
         feedback = [
           { kind: 'merge-return', summary: `人看过后接着干：${after.reason}`, items: [after.detail] },
@@ -609,4 +684,13 @@ export async function subtaskWorkflow(input: SubtaskInput): Promise<SubtaskResul
     problem,
     rounds: status.rounds,
   };
+}
+
+/** 会话交活时的总结 → PR 正文「做了什么」的几条：按换行、分号切，去掉列表记号，最多 5 条。 */
+function summaryItems(summary: string): string[] {
+  return summary
+    .split(/\r?\n|；|;/)
+    .map((line) => line.replace(/^[\s\-*•]+/, '').trim())
+    .filter(Boolean)
+    .slice(0, 5);
 }

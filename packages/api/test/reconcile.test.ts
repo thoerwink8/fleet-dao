@@ -2,6 +2,7 @@
 // 补回来的东西走真的 GitHubIntake（同一道门、同一本投递账），落到同一个 Store。
 import { generateKeyPairSync } from 'node:crypto';
 import { type AppCredentials, createGitHub, memoryLedger } from '@fleet-dao/github';
+import { requirementWorkflowId } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import { devFixtures, IDS } from '../src/dev-fixtures.ts';
 import { createGitHubIntake, githubEventsCheck, pollDeliveryId } from '../src/github.ts';
@@ -317,7 +318,12 @@ describe('对账补漏', () => {
     });
     expect(h.signals).toEqual([]);
     const result = await run();
-    expect(h.signals).toEqual([{ taskId: task.id, signal: expect.objectContaining({ name: 'stop' }) }]);
+    expect(h.signals).toEqual([
+      {
+        workflowId: requirementWorkflowId({ owner: 'example', name: 'canary' }, 40),
+        signal: expect.objectContaining({ name: 'stop' }),
+      },
+    ]);
     expect(result).toMatchObject({ outcome: 'ok', found: 0 });
   });
 

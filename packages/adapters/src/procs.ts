@@ -265,6 +265,163 @@ export function stopScope(scope: CgroupScope): Promise<string | undefined> {
   });
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export interface AdoptWorktreeInput {
+  /**
+   * AI 会话的工作树，绝对路径。帮手脚本以 root 再核实一遍（落在 /var/lib/fleet-work 之下、至少两层、
+   * 路径上没有符号链接、是目录）——这里的校验只挡明显不对的调用，真正的边界在以 root 跑的帮手脚本里。
+   */
+  dir: string;
+  user: SessionUser;
+  /** 给了才拷会话记录：从这个用户的 ~/.claude/projects 下找。要给就和 sessionId 一起给。 */
+  from?: SessionUser;
+  /** 给了才拷会话记录：要拷的会话编号（UUID）。要给就和 from 一起给。 */
+  sessionId?: string;
+  /** 帮手脚本，默认 SCOPE_HELPER。 */
+  helper?: string;
+  /** 调帮手的前缀，默认 ['/usr/bin/sudo', '-n']；测试里给 [] 直接起假帮手。 */
+  sudo?: readonly string[];
+}
+
+export type AdoptWorktreeResult =
+  | { ok: true }
+  | { ok: false; code: 'usage' | 'transcript_missing' | 'failed'; exitCode: number | null; detail: string };
+
+function assertAdoptInput(input: AdoptWorktreeInput): void {
+  if (!input.dir.startsWith('/')) throw new Error(`工作树要写绝对路径：${input.dir}`);
+  if (CONTROL_CHAR.test(input.dir)) throw new Error('工作树路径里有控制字符，不写上命令行');
+  if (!SESSION_USERS.includes(input.user))
+    throw new Error(`会话用户只能是 ${SESSION_USERS.join('、')} 之一：${input.user}`);
+  if (input.from !== undefined && !SESSION_USERS.includes(input.from))
+    throw new Error(`会话用户只能是 ${SESSION_USERS.join('、')} 之一：${input.from}`);
+  if ((input.from === undefined) !== (input.sessionId === undefined))
+    throw new Error('from 和 sessionId 要么都给，要么都不给（拷会话记录要知道从哪个用户拷）');
+  if (input.from !== undefined && input.from === input.user)
+    throw new Error(`from 和 user 不能一样：${input.user}`);
+  if (input.sessionId !== undefined && !UUID.test(input.sessionId))
+    throw new Error(`会话编号必须是 UUID：${input.sessionId}`);
+}
+
+/**
+ * 换会话用户接着干：把一棵 AI 会话工作树交给另一个会话用户——改属主，给了会话编号就顺带把过程记录拷过去
+ * （帮手脚本不以 root 读旧用户的文件：旧用户能把文件换成指向 /etc/shadow 的链接，改由它以旧用户身份读出来）。
+ * 和 stopScope 同一种调法：调用方（引擎）不是 root，经 `sudo -n` 调以 root 装好的帮手脚本。
+ */
+export function adoptWorktree(input: AdoptWorktreeInput): Promise<AdoptWorktreeResult> {
+  assertAdoptInput(input);
+  const [bin, ...rest] = [
+    ...(input.sudo ?? ['/usr/bin/sudo', '-n']),
+    input.helper ?? SCOPE_HELPER,
+    'adopt',
+    input.dir,
+    '--user',
+    input.user,
+    ...(input.from ? ['--from', input.from] : []),
+    ...(input.sessionId ? ['--session', input.sessionId] : []),
+  ];
+  return new Promise((resolve) => {
+    execFile(bin as string, rest, { encoding: 'utf8', timeout: 60_000 }, (err, _stdout, stderr) => {
+      if (!err) {
+        resolve({ ok: true });
+        return;
+      }
+      const exitCode = typeof err.code === 'number' ? err.code : null;
+      const detail = `${stderr || ''}${err.message}`.trim();
+      const code = exitCode === 64 ? 'usage' : exitCode === 65 ? 'transcript_missing' : 'failed';
+      resolve({ ok: false, code, exitCode, detail });
+    });
+  });
+}
+
+export interface ListAgentScopesOptions {
+  helper?: string;
+  sudo?: readonly string[];
+}
+
+export type ListAgentScopesResult =
+  | { ok: true; scopes: { id: string; state: string }[] }
+  | { ok: false; exitCode: number | null; detail: string };
+
+/**
+ * 在册的会话 scope（`fleet-agent-scope list`：一行一个「编号 状态」）。引擎重启后按它收掉上一轮留下的会话。
+ * 查不了（帮手没装、sudo 没放行）明确回失败，不当成「一个都没有」；认不出的行也算失败。
+ */
+export function listAgentScopes(options: ListAgentScopesOptions = {}): Promise<ListAgentScopesResult> {
+  const [bin, ...rest] = [
+    ...(options.sudo ?? ['/usr/bin/sudo', '-n']),
+    options.helper ?? SCOPE_HELPER,
+    'list',
+  ];
+  return new Promise((resolve) => {
+    execFile(bin as string, rest, { encoding: 'utf8', timeout: 60_000 }, (err, stdout, stderr) => {
+      if (err) {
+        const exitCode = typeof err.code === 'number' ? err.code : null;
+        resolve({ ok: false, exitCode, detail: `${stderr || ''}${err.message}`.trim() });
+        return;
+      }
+      const scopes: { id: string; state: string }[] = [];
+      for (const line of stdout.split('\n')) {
+        if (!line.trim()) continue;
+        const [id, state, ...extra] = line.trim().split(/\s+/);
+        if (!id || !state || extra.length > 0 || !SCOPE_ID.test(id)) {
+          resolve({ ok: false, exitCode: 0, detail: `认不出帮手列出的这一行：「${line.slice(0, 200)}」` });
+          return;
+        }
+        scopes.push({ id, state });
+      }
+      resolve({ ok: true, scopes });
+    });
+  });
+}
+
+export interface RemoveWorktreeDirInput {
+  /** AI 会话的工作树，绝对路径；帮手脚本以 root 再核实一遍（同 adoptWorktree）。 */
+  dir: string;
+  helper?: string;
+  sudo?: readonly string[];
+}
+
+export type RemoveWorktreeDirResult =
+  /** gone = 本来就不在（清理动作对已消失的对象正常返回，不当失败）。 */
+  | { ok: true; gone: boolean }
+  | { ok: false; code: 'usage' | 'failed'; exitCode: number | null; detail: string };
+
+/**
+ * 删一棵 AI 会话工作树：会话用户的目录（700）引擎自己进不去，经 `sudo -n fleet-agent-scope remove` 以 root 删。
+ * 帮手的标准输出最后一行是 `removed <路径>` 或 `gone <路径>`；退出码 0 却认不出这一行也算失败（不当成删好了）。
+ */
+export function removeWorktreeDir(input: RemoveWorktreeDirInput): Promise<RemoveWorktreeDirResult> {
+  if (!input.dir.startsWith('/')) throw new Error(`工作树要写绝对路径：${input.dir}`);
+  if (CONTROL_CHAR.test(input.dir)) throw new Error('工作树路径里有控制字符，不写上命令行');
+  const [bin, ...rest] = [
+    ...(input.sudo ?? ['/usr/bin/sudo', '-n']),
+    input.helper ?? SCOPE_HELPER,
+    'remove',
+    input.dir,
+  ];
+  return new Promise((resolve) => {
+    execFile(bin as string, rest, { encoding: 'utf8', timeout: 120_000 }, (err, stdout, stderr) => {
+      if (err) {
+        const exitCode = typeof err.code === 'number' ? err.code : null;
+        const detail = `${stderr || ''}${err.message}`.trim();
+        resolve({ ok: false, code: exitCode === 64 ? 'usage' : 'failed', exitCode, detail });
+        return;
+      }
+      const last = stdout.trimEnd().split('\n').at(-1) ?? '';
+      if (last === `removed ${input.dir}`) resolve({ ok: true, gone: false });
+      else if (last === `gone ${input.dir}`) resolve({ ok: true, gone: true });
+      else
+        resolve({
+          ok: false,
+          code: 'failed',
+          exitCode: 0,
+          detail: `帮手退出码 0，但没报 removed / gone（最后一行：「${last.slice(0, 200)}」）`,
+        });
+    });
+  });
+}
+
 /** scope 的 cgroup 里还有几个进程。scope 已不在 = 0；查不了（没有 systemctl、读不了 cgroup）= undefined。 */
 export function scopeProcCount(scope: CgroupScope): number | undefined {
   const res = spawnSync('systemctl', ['show', '-p', 'ControlGroup', '--value', scopeUnit(scope)], {
