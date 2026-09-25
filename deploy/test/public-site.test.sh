@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck source-path=SCRIPTDIR
 # shellcheck disable=SC2016 # 单引号里是给 node 的 JS、nginx 配置里的字面量，本来就不该由 shell 展开
+# shellcheck disable=SC2034 # REDS、CHANGES、PENDING 是给 source 进来的 release.sh（common.sh）里的函数读写的
 # 从公网看得到的几样不带仓名、GitHub 账号名和地址（创始人 2026-09-25，#54 第 4 条），也不让搜索引擎收录：
 # - 发布脚本生成的静态目录（这一版没有 packages/web 时：占位页当首页 + 健康页）拿演示版打包扫描的同一份名单扫
 #   （packages/web/src/build/scan.ts 的 BUILTIN_TERMS）。构建用的是 release.sh 里的真代码 build_web，只把「以 fleet 身份跑」换成原地跑。
