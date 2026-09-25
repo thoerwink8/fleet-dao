@@ -12,7 +12,8 @@ if (action === 'run') {
   const at = rest.indexOf('--');
   const cwdAt = rest.indexOf('--cwd');
   const command = rest.slice(at + 1);
-  // 和真帮手一样：环境只剩 FLEET_* 这几类，PATH 取 FLEET_SESSION_PATH
+  // 和真帮手一样：环境只剩 FLEET_* 这几类；PATH 取 FLEET_SESSION_PATH（没给用同一个默认），会话用户自己写得动的
+  // ~/.local/bin 接在最后
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) {
     if (
@@ -21,8 +22,8 @@ if (action === 'run') {
     )
       env[k] = v;
   }
-  env.PATH = process.env.FLEET_SESSION_PATH ?? '/usr/bin:/bin';
   env.HOME = '/home/fake-session-user';
+  env.PATH = `${process.env.FLEET_SESSION_PATH ?? '/usr/local/bin:/usr/bin:/bin'}:${env.HOME}/.local/bin`;
   const child = spawn(command[0] as string, command.slice(1), {
     cwd: cwdAt >= 0 ? rest[cwdAt + 1] : '/',
     env,
