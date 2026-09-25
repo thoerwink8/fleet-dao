@@ -18,7 +18,7 @@ export interface JevMachineConfig {
   typesafe?: {
     /** 例如 https://api.typesafe.ai/v1/systemone。 */
     endpoint: string;
-    /** 密钥文件（一行），权限 0600，属主是跑引擎的用户。 */
+    /** 密钥文件（一行），root:fleet 0640：引擎读得到，会话用户读不到。 */
     keyFile: string;
     timeoutMs?: number;
   };
@@ -86,7 +86,7 @@ export function parseJevConfig(raw: unknown): JevMachineConfig {
       const command = c.command;
       const commandOk = Array.isArray(command) && command.length > 0 && command.every(isText);
       if (!commandOk)
-        problems.push('claude.command 要是非空的字符串数组，例如 ["/home/<执行体用户>/.local/bin/reclaude"]');
+        problems.push('claude.command 要是非空的字符串数组，例如 ["/home/<会话用户>/.local/bin/reclaude"]');
       if (c.effort !== undefined && !EFFORTS.includes(c.effort as ClaudeEffort))
         problems.push(`claude.effort 要是 ${EFFORTS.join(' / ')} 之一`);
       if (c.workRoot !== undefined && !isText(c.workRoot)) problems.push('claude.workRoot 要是目录路径');

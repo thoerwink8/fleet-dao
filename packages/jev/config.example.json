@@ -1,14 +1,14 @@
 {
-  "_说明": "判断题后端的机器配置样例。真配置放 /etc/fleet-dao/jev.json（或用 FLEET_JEV_CONFIG 指定），不进 git。用哪一个、哪个模型由调度台「判断」阶段排第一的路由定；这里只放地址、密钥文件和起会话的命令。以 _ 开头的键是注释。",
+  "_说明": "判断题后端的机器配置样例。真配置放 /etc/fleet-dao/jev.json（或用 FLEET_JEV_CONFIG 指定），root:fleet 0640，不进 git。用哪一个、哪个模型由调度台「判断」阶段排第一的路由定；这里只放地址、密钥文件和起会话的命令。以 _ 开头的键是注释。",
   "typesafe": {
-    "_说明": "旧系统用的 Jev 服务（TypeSafe System One）。按输入 token 计费（按量）：路由打开前先由创始人定月度上限。密钥文件一行，0600，属主是跑引擎的用户。",
+    "_说明": "旧系统用的 Jev 服务（TypeSafe System One），按输入 token 计价，算在套餐内（设计「已定」第 21 条）；每天花到 judge.dailyUsdCap（默认 0.3 美元）就停调。密钥文件只有一行，root:fleet 0640：引擎（fleet）读得到，会话用户读不到。",
     "endpoint": "https://api.typesafe.ai/v1/systemone",
-    "keyFile": "/etc/fleet-dao/secrets/typesafe.key",
+    "keyFile": "/etc/fleet-dao/typesafe.key",
     "timeoutMs": 8000
   },
   "claude": {
-    "_说明": "经插头起 Claude Code 会话来答（构建期先用 Opus 5.5，走 Claude 订阅）。命令写执行体用户的 reclaude 绝对路径。",
-    "command": ["/home/<执行体用户>/.local/bin/reclaude"],
+    "_说明": "经插头起 Claude Code 会话来答（构建期先用 Opus 5.5，走 Claude 订阅）。以会话用户起：判断路由挂哪个账号池就用哪个（fleet-agent-dedicated / fleet-agent-carpool），命令写它家里 reclaude 的绝对路径。",
+    "command": ["/home/<会话用户>/.local/bin/reclaude"],
     "effort": "low",
     "wallClockMs": 300000
   }

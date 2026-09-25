@@ -1,5 +1,5 @@
 // 真跑验收：用真的后端答考题，走提问接口、记库、每日上限、考试记分、状态判定的全部代码路径。
-// 在法国 VPS 上以执行体用户跑，库用内存里的 PGlite，不连任何真库、不碰任何配置：
+// 在法国 VPS 上跑（Claude 后端以会话用户，TypeSafe 以读得到密钥文件的用户），库用内存里的 PGlite，不连任何真库、不碰任何配置：
 //   node packages/jev/test/e2e/exam-e2e.ts <后端> [每个接入点考几道（按标准答案轮着取），默认 1] [接入点,…，默认全部] [今天还能花的美元，默认按上限]
 //   后端：claude:<reclaude 绝对路径>[@模型，默认 claude-opus-5-5]
 //        typesafe:<机器配置文件>[@模型，默认 jev-1.13.0]（配置格式见 packages/jev/config.example.json；按量计费，受每日花费上限管）
