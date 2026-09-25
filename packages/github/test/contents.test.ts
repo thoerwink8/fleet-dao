@@ -98,3 +98,54 @@ describe('writeSpecDoc', () => {
     ).rejects.toMatchObject({ code: 'FORBIDDEN' });
   });
 });
+
+describe('readSpecDoc', () => {
+  it('读默认分支上的需求文档：以「引擎」身份读，拿回正文', async () => {
+    const { gh, fake } = setup();
+    const path = 'specs/12-登录验证码/需求.md';
+    fake.specs.set(path, { sha: 'a'.repeat(40), content: '对应计划：plan.md P1「工作流」\n' });
+    const res = await gh.readSpecDoc({ repo, path });
+    expect(res?.content).toBe('对应计划：plan.md P1「工作流」\n');
+    expect(res?.url).toContain('/blob/main/');
+    const gets = fake.calls('GET', /\/contents\//);
+    expect(gets).toHaveLength(1);
+    expect(gets[0]?.as).toBe('engine');
+  });
+
+  it('文件不在：回 null（不当成空文档）', async () => {
+    const { gh } = setup();
+    await expect(gh.readSpecDoc({ repo, path: 'specs/13-没有的/需求.md' })).resolves.toBeNull();
+  });
+
+  it('路径出了 specs/：拒收，一个请求都不发', async () => {
+    const { gh, fake } = setup();
+    await expect(gh.readSpecDoc({ repo, path: 'docs/x.md' })).rejects.toMatchObject({
+      code: 'BAD_INPUT',
+    });
+    expect(fake.requests).toHaveLength(0);
+  });
+
+  it('拿回来的不是文件（目录、子模块）：报「回的东西不对」，不当成空文档', async () => {
+    const { gh, fake } = setup();
+    fake.before.push((req) =>
+      req.method === 'GET' && req.path.includes('/contents/')
+        ? json(200, [{ type: 'file', path: 'specs/14-foo/需求.md' }])
+        : undefined,
+    );
+    await expect(gh.readSpecDoc({ repo, path: 'specs/14-foo/需求.md' })).rejects.toMatchObject({
+      code: 'UNEXPECTED_RESPONSE',
+    });
+  });
+
+  it('读不了（403）：明确报错，不当成「文件不在」', async () => {
+    const { gh, fake } = setup();
+    fake.before.push((req) =>
+      req.method === 'GET' && req.path.includes('/contents/')
+        ? json(403, { message: 'Resource not accessible by integration' })
+        : undefined,
+    );
+    await expect(gh.readSpecDoc({ repo, path: 'specs/15-foo/需求.md' })).rejects.toMatchObject({
+      code: 'FORBIDDEN',
+    });
+  });
+});

@@ -139,7 +139,13 @@ describe('开 PR', () => {
         branch: 'task/20-inherit',
         head: A,
         title: 'x',
-        body: { did: ['x'], verified: ['x'], changedFiles: ['src/x.ts'] },
+        body: {
+          did: ['x'],
+          verified: ['x'],
+          plan: 'P1「工作流」',
+          specs: 'specs/20-x/',
+          changedFiles: ['src/x.ts'],
+        },
         inheritFrom: { issueNumber: issue.number },
       };
       const res = await gh.openPr(input);
@@ -165,7 +171,13 @@ describe('开 PR', () => {
         branch: 'task/21-empty',
         head: A,
         title: 'x',
-        body: { did: ['x'], verified: ['x'], changedFiles: ['src/x.ts'] },
+        body: {
+          did: ['x'],
+          verified: ['x'],
+          plan: 'P1「工作流」',
+          specs: 'specs/20-x/',
+          changedFiles: ['src/x.ts'],
+        },
         inheritFrom: { issueNumber: issue.number },
       });
       expect(res.inherited).toEqual({ labels: [], milestone: null });
@@ -189,7 +201,13 @@ describe('开 PR', () => {
           branch: 'task/22-forbidden',
           head: A,
           title: 'x',
-          body: { did: ['x'], verified: ['x'], changedFiles: ['src/x.ts'] },
+          body: {
+            did: ['x'],
+            verified: ['x'],
+            plan: 'P1「工作流」',
+            specs: 'specs/20-x/',
+            changedFiles: ['src/x.ts'],
+          },
           inheritFrom: { issueNumber: issue.number },
         }),
       ).rejects.toMatchObject({ code: 'FORBIDDEN' });
@@ -203,7 +221,13 @@ describe('开 PR', () => {
         branch: 'task/23-no-inherit',
         head: A,
         title: 'x',
-        body: { did: ['x'], verified: ['x'], changedFiles: ['src/x.ts'] },
+        body: {
+          did: ['x'],
+          verified: ['x'],
+          plan: 'P1「工作流」',
+          specs: 'specs/20-x/',
+          changedFiles: ['src/x.ts'],
+        },
       });
       expect(res.inherited).toBeUndefined();
       expect(fake.calls('GET', /\/issues\//)).toHaveLength(0);

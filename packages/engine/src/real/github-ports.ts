@@ -12,6 +12,7 @@ import type { CiResult } from '../decisions/verify.ts';
 import { type EnginePorts, type PortContext, PortError, type PrBody, type Worktree } from '../ports.ts';
 import type { UserExec } from './exec.ts';
 import { bundleFromMirror, mapped } from './mirror.ts';
+import { PLAN_LINE_HINT, planLineOf, REQUIREMENT_DOC } from './spec-doc.ts';
 import {
   bundleSince,
   fastForward,
@@ -39,6 +40,7 @@ export type EngineGitHub = Pick<
   | 'fetchMainline'
   | 'bundleCommits'
   | 'writeSpecDoc'
+  | 'readSpecDoc'
 >;
 
 export interface GitHubPortsDeps {
@@ -70,9 +72,9 @@ type GitHubPorts = Pick<
   | 'writeSpecDoc'
 >;
 
-const DOC_FILE = { requirement: '需求.md', plan: '方案.md', result: '结果.md' } as const;
+const DOC_FILE = { requirement: REQUIREMENT_DOC, plan: '方案.md', result: '结果.md' } as const;
 
-function prBody(body: PrBody): PrBodyInput {
+function prBody(body: PrBody, plan: string, specs: string): PrBodyInput {
   return {
     ...(body.requirement === undefined ? {} : { requirement: body.requirement }),
     ...(body.subtask === undefined ? {} : { subtask: body.subtask }),
@@ -80,6 +82,8 @@ function prBody(body: PrBody): PrBodyInput {
     verified: body.verified,
     ...(body.owed ? { owed: body.owed } : {}),
     ...(body.risks ? { risks: body.risks } : {}),
+    plan,
+    specs,
     changedFiles: body.changedFiles,
   };
 }
@@ -217,7 +221,35 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
 
     async openPr(input, ctx) {
       // 需求 issue 的类别标签和里程碑照抄到 PR 上（design 第七节）；读不到 issue 由 github 包明确报错，不当成「没有标签」。
+      // 「对应计划」「specs」两栏必填（#41）：specs 是需求文档的目录，对应计划现读主线上那份需求文档里的那一行。
       const issueNumber = input.body.requirement;
+      const specs = `${input.body.specs.trim().replace(/\/+$/, '')}/`;
+      if (specs === '/') {
+        throw new PortError(
+          'SPEC_PLAN_MISSING',
+          '开 PR 没给需求文档的目录：「specs」「对应计划」两栏都没法填',
+          {
+            retryable: false,
+          },
+        );
+      }
+      const path = `${specs}${REQUIREMENT_DOC}`;
+      const doc = await mapped(() => gh.readSpecDoc({ repo: input.repo, path, signal: ctx.signal }, ctx));
+      if (!doc) {
+        throw new PortError(
+          'SPEC_PLAN_MISSING',
+          `主线上没有 ${path}：开 PR 要照它写「对应计划」一栏（需求文档还没进主线？）`,
+          { retryable: false },
+        );
+      }
+      const plan = planLineOf(doc.content);
+      if ('error' in plan) {
+        throw new PortError(
+          'SPEC_PLAN_MISSING',
+          `${path} 里${plan.error}：开 PR 的「对应计划」一栏照它写，缺了不开。${PLAN_LINE_HINT}`,
+          { retryable: false },
+        );
+      }
       const r = await mapped(() =>
         gh.openPr(
           {
@@ -225,7 +257,7 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
             branch: input.branch,
             head: input.head,
             title: input.title,
-            body: prBody(input.body),
+            body: prBody(input.body, plan.ok, specs),
             ...(issueNumber === undefined ? {} : { inheritFrom: { issueNumber } }),
           },
           ctx,

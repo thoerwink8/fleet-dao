@@ -32,6 +32,9 @@ export {
   silentLogger,
 } from './client.ts';
 export {
+  type ReadSpecDocInput,
+  type ReadSpecDocResult,
+  readSpecDoc,
   validSpecPath,
   type WriteSpecDocInput,
   type WriteSpecDocResult,

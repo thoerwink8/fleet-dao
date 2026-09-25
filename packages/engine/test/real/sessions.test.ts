@@ -410,6 +410,41 @@ describe('分诊、需求文档、方案、审查：读结论文件', () => {
       expect(end.failure?.code).toBe('wrong_output');
     }
   });
+
+  it('需求文档：「对应计划：」那一行对得上检出副本里的 plan.md 才收；没有这一行、对不上都判交错了（开 PR 要照它填）', async () => {
+    const doc = (text: string, plan?: string): FakeRunScript => ({
+      act: ({ spec }) => {
+        mkdirSync(join(spec.cwd, '.fleet-out'), { recursive: true });
+        writeFileSync(join(spec.cwd, '.fleet-out', 'doc.md'), text);
+        if (plan !== undefined) {
+          mkdirSync(join(spec.cwd, 'docs'), { recursive: true });
+          writeFileSync(join(spec.cwd, 'docs', 'plan.md'), plan);
+        }
+      },
+    });
+    const specLaunch = () => {
+      const { subtaskKey: _k, worktreePath: _w, baseHead: _b, ...rest } = launch({ stage: 'spec' });
+      return rest;
+    };
+    const plan = '# 计划\n\n### P1 核心闭环\n\n- 工作流：需求、子任务。\n';
+    const good = '# 登录页加验证码\n\n对应计划：plan.md P1「工作流」\n\n要验证码';
+    const ok = setup(() => doc(good, plan));
+    expect((await runOnce(ok.ports, specLaunch())).end).toMatchObject({
+      outcome: 'done',
+      output: { kind: 'doc', markdown: good },
+    });
+    for (const [text, withPlan, why] of [
+      ['# 登录页加验证码\n\n要验证码', plan, '没有「对应计划：」那一行'],
+      ['# 登录页加验证码\n\n对应计划：plan.md P1「没有这一条」\n', plan, '找不到'],
+      // 仓里没有 plan.md：不许瞎凑一条
+      [good, undefined, '仓里没有'],
+    ] as const) {
+      const bad = setup(() => doc(text, withPlan));
+      const { end } = await runOnce(bad.ports, specLaunch());
+      expect(end.outcome).toBe('failed');
+      expect(end.failure).toMatchObject({ code: 'wrong_output', message: expect.stringContaining(why) });
+    }
+  });
 });
 
 describe('失败', () => {

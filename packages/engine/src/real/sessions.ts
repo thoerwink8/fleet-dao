@@ -35,6 +35,7 @@ import {
   type ToolPayload,
 } from '@fleet-dao/adapters';
 import { readingsFromRateLimit } from '@fleet-dao/adapters/quota';
+import { PLAN_DOC } from '@fleet-dao/conventions';
 import {
   appendProgressEvents,
   type Db,
@@ -74,8 +75,8 @@ import {
   type OutputKind,
   outputKindOf,
   type Parsed,
-  parseDoc,
   parsePlan,
+  parseRequirementDoc,
   parseReview,
   parseTriage,
   type RelayFacts,
@@ -859,7 +860,9 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
         case 'doc': {
           const text = await read(OUTPUT_FILES.doc[0]);
           if (text === null) return { error: `会话结束了，但没写 ${OUTPUT_FILES.doc[0]}` };
-          const v = parseDoc(text);
+          // 「对应计划：」那一行要对得上检出副本里的 plan.md（仓里没有就只要写清）
+          const plan = await read(PLAN_DOC);
+          const v = parseRequirementDoc(text, plan ?? undefined);
           return 'error' in v ? v : { ok: { kind: 'doc', markdown: v.ok } };
         }
         case 'plan': {

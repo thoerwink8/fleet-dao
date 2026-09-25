@@ -360,6 +360,23 @@ describe('认得出的：按各自的梯子走', () => {
     });
   });
 
+  it('卫生检查没扫成：同样不推、不当成查过没事，挂起报警（和名单没读到一条规则）', () => {
+    const v = classifyFailure({
+      source: 'pushBranch',
+      routeBound: false,
+      code: 'HYGIENE_UNSCANNED',
+      retryable: false,
+      message: '推之前的卫生检查没扫成：要推的 1a2b3c4 不在扫过的提交里',
+      now: NOW,
+    });
+    expect({ rule: v.rule, action: v.action, alert: v.alert, counter: v.counter }).toEqual({
+      rule: 'HY2',
+      action: 'park',
+      alert: true,
+      counter: null,
+    });
+  });
+
   it('限流：上游给了不长的等待就原地等，没给或太长就换路由并让所有任务避开', () => {
     const short = classifyFailure(session({ message: '429 Too Many Requests', retryAfterSeconds: 30 }));
     expect({ action: short.action, delay: short.delaySeconds }).toEqual({ action: 'retry', delay: 30 });

@@ -8,6 +8,7 @@ import type { PlannedSubtask, Risk, SubtaskStage } from '../decisions/plan.ts';
 import type { TriageVerdict } from '../decisions/triage.ts';
 import type { Finding, ReviewResult } from '../decisions/verify.ts';
 import type { SessionBrief } from '../ports.ts';
+import { checkPlanLine, PLAN_LINE_HINT, planLineOf } from './spec-doc.ts';
 
 /** 非写码阶段的结论写在检出副本的这个目录下（相对路径）。 */
 export const OUT_DIR = '.fleet-out';
@@ -141,6 +142,7 @@ function deliverBlock(input: PromptInput): string {
     case 'doc':
       return `## 你要做的：写需求文档
 按原话写这份需求的「需求.md」：要什么、怎么算做完（一页以内，写给人和以后的 AI 看，不写套话）。先翻一下仓里以前改过同一块地方的需求（specs/ 下），再写。
+标题下面${PLAN_LINE_HINT}（照 plan.md 里那一条抄原话；引擎开 PR 时照这一行填「对应计划」，缺了会退回来补）。
 写进 \`${OUT_DIR}/doc.md\`（只写这一个文件，不改仓里别的文件）。写完就结束，不用 fleet done。`;
     case 'plan':
       return `## 你要做的：写方案、拆子任务
@@ -259,6 +261,21 @@ export function parseDoc(text: string, what = `${OUT_DIR}/doc.md`): Parsed<strin
   if (markdown.length > DOC_MAX_CHARS)
     return { error: `${what} 太长（${markdown.length} 字，上限 ${DOC_MAX_CHARS}）` };
   return { ok: markdown };
+}
+
+/**
+ * 需求文档：除了不空、不过长，还要有「对应计划：」那一行，而且指得到仓里 plan.md 的哪一条（和 #41 的 pr-fields
+ * 判同一套；仓里没有 plan.md 就写「无」）。planMarkdown 是检出副本里 plan.md 的内容，没有传 undefined。
+ */
+export function parseRequirementDoc(text: string, planMarkdown?: string | undefined): Parsed<string> {
+  const doc = parseDoc(text);
+  if ('error' in doc) return doc;
+  const plan = planLineOf(doc.ok);
+  if ('error' in plan) return { error: `${OUT_DIR}/doc.md ${plan.error}：${PLAN_LINE_HINT}` };
+  const problem = checkPlanLine(plan.ok, planMarkdown);
+  if (problem)
+    return { error: `${OUT_DIR}/doc.md 的「对应计划：${plan.ok}」对不上：${problem}。${PLAN_LINE_HINT}` };
+  return doc;
 }
 
 const STAGES: readonly SubtaskStage[] = ['execute', 'ui'];

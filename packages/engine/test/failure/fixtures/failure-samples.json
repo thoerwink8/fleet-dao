@@ -1002,6 +1002,32 @@
         "message": "推 acme/widgets 之前的卫生检查没法做：没找到已知敏感值名单。名单放好之前一律不推（引擎读 /etc/fleet-dao/sensitive-values.txt）"
       },
       "expect": { "action": "park", "rule": "HY2", "alert": true, "routeOutcome": "neutral" }
+    },
+    {
+      "id": "X64",
+      "provenance": "format",
+      "origin": "packages/github 的 pushBranch 推前卫生检查（PR #21）：没扫成一律不推",
+      "evidence": {
+        "source": "pushBranch",
+        "routeBound": false,
+        "code": "HYGIENE_UNSCANNED",
+        "retryable": false,
+        "message": "推 acme/widgets 之前的卫生检查没扫成：要推的 1a2b3c4 不在扫过的提交里。没扫成一律不推"
+      },
+      "expect": { "action": "park", "rule": "HY2", "alert": true, "routeOutcome": "neutral" }
+    },
+    {
+      "id": "X65",
+      "provenance": "format",
+      "origin": "引擎开 PR 的端口取需求文档的「对应计划」那一行（#41 的 pr-fields）：文档没有、那一行没有、后面空着都不填",
+      "evidence": {
+        "source": "openPr",
+        "routeBound": false,
+        "code": "SPEC_PLAN_MISSING",
+        "retryable": false,
+        "message": "specs/28-接真端口/需求.md 里没有「对应计划：」那一行（开 PR 的正文这一栏是必填）"
+      },
+      "expect": { "action": "park", "rule": "SD1", "alert": true, "routeOutcome": "neutral" }
     }
   ],
   "skipped": [

@@ -22,8 +22,10 @@ export { isKindLabel, KIND_LABELS, type KindLabel, milestonePhase } from './labe
 export { type PlanPhase, type PlanRef, parsePlanRefs, planPhases } from './plan.ts';
 export {
   annotation,
+  checkPlanValue,
   checkPrFields,
   PLAN_COLUMN,
+  PLAN_DOC,
   type PrEvent,
   type PrFacts,
   prColumns,

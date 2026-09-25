@@ -8,6 +8,8 @@ import { fsRepo } from './repo.ts';
 
 export const PLAN_COLUMN = '对应计划';
 export const SPECS_COLUMN = 'specs';
+/** plan.md 在仓里的位置：pr-fields 判「对应计划」、引擎收需求文档时核那一行，都按它找。 */
+export const PLAN_DOC = 'docs/plan.md';
 /** PR 模板（.github/pull_request_template.md）的各栏，顺序同模板；测试里对着模板查，两边对不上就红。 */
 export const PR_COLUMNS = [
   '做了什么',
@@ -144,6 +146,17 @@ function checkPlan(
   return problems;
 }
 
+/**
+ * 只核「对应计划」这一栏的值（不看里程碑）：阶段在 plan.md 里有、引号里是那一阶段某一条的原话——和 PR 上
+ * pr-fields 判的是同一套。引擎收写需求文档的会话交回来的「对应计划：」那一行时先核一遍：开出来的 PR 这一栏红了，
+ * 会话改不了正文。plan.md 里一个阶段都认不出也算一条问题，不当成过了。
+ */
+export function checkPlanValue(value: string, planMarkdown: string): string[] {
+  const phases = planPhases(parseMd(PLAN_DOC, planMarkdown));
+  if (phases.size === 0) return [`${PLAN_DOC} 里一个阶段（### P0 …）也没认出来`];
+  return checkPlan(value, undefined, { phases, exists: () => false }, phaseRange(phases));
+}
+
 function checkSpecs(value: string | undefined, repo: RepoFacts): string[] {
   if (value === undefined) {
     return [
@@ -267,10 +280,10 @@ export async function runPrFields(opts: {
   if (typeof pr === 'string') return fail(`PR #${fromEvent.number} 读回来认不出：${pr}`);
   if (pr.number !== fromEvent.number) return fail(`要的是 PR #${fromEvent.number}，读回来的是 #${pr.number}`);
   const repo = fsRepo(opts.root);
-  const planText = repo.read('docs/plan.md');
-  if (planText === undefined) return fail('docs/plan.md 读不到');
-  const phases = planPhases(parseMd('docs/plan.md', planText));
-  if (phases.size === 0) return fail('docs/plan.md 里一个阶段（### P0 …）也没认出来');
+  const planText = repo.read(PLAN_DOC);
+  if (planText === undefined) return fail(`${PLAN_DOC} 读不到`);
+  const phases = planPhases(parseMd(PLAN_DOC, planText));
+  if (phases.size === 0) return fail(`${PLAN_DOC} 里一个阶段（### P0 …）也没认出来`);
   const problems = checkPrFields(pr, { phases, exists: repo.exists });
   if (problems.length === 0) {
     return { code: 0, lines: [`PR #${pr.number}：类别标签、里程碑、对应计划、specs 都齐了。`] };

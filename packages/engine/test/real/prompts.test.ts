@@ -6,12 +6,16 @@ import {
   outputKindOf,
   parseDoc,
   parsePlan,
+  parseRequirementDoc,
   parseReview,
   parseTriage,
   stagePrompt,
 } from '../../src/real/prompts.ts';
+import { planLineOf } from '../../src/real/spec-doc.ts';
 
 const repo = { owner: 'acme', name: 'widgets', defaultBranch: 'main', testCommand: 'pnpm check' };
+/** 检出副本里的 docs/plan.md（和 conventions 的测试同一个样子）。 */
+const PLAN = '# 计划\n\n### P1 核心闭环\n\n- 工作流：需求、子任务。\n';
 const brief = (over: Partial<SessionBrief> = {}): SessionBrief => ({
   title: '登录页加验证码',
   request: '给登录页加手机验证码',
@@ -141,6 +145,59 @@ describe('认交回来的东西', () => {
     expect(parseDoc('# 需求\n要验证码')).toEqual({ ok: '# 需求\n要验证码' });
     expect(parseDoc('  \n')).toMatchObject({ error: expect.stringContaining('空的') });
     expect(parseDoc('x'.repeat(200_001))).toMatchObject({ error: expect.stringContaining('太长') });
+  });
+
+  it('需求文档：还要有「对应计划：」那一行（开 PR 照它填），缺了、空着、骨架没填都算交错了', () => {
+    const ok = '# 需求\n\n对应计划：plan.md P1「工作流」\n\n要验证码';
+    expect(parseRequirementDoc(ok, PLAN)).toEqual({ ok });
+    expect(parseRequirementDoc('# 需求\n要验证码', PLAN)).toMatchObject({
+      error: expect.stringContaining('没有「对应计划：」那一行'),
+    });
+    expect(parseRequirementDoc('# 需求\n对应计划：  \n', PLAN)).toMatchObject({
+      error: expect.stringContaining('后面是空的'),
+    });
+    expect(parseRequirementDoc('# 需求\n对应计划：plan.md P1「」\n', PLAN)).toMatchObject({
+      error: expect.stringContaining('引号是空的'),
+    });
+    // 空的、太长的照旧先拦
+    expect(parseRequirementDoc('  \n', PLAN)).toMatchObject({ error: expect.stringContaining('空的') });
+  });
+
+  it('需求文档的「对应计划」要对得上仓里的 plan.md（和 PR 上的 pr-fields 同一套判法）；仓里没有 plan.md 只认「无」', () => {
+    // 条目在 plan.md 里找不到、只写了阶段没写哪一条：都退回去（开出来的 PR 这一栏会红，会话改不了正文）
+    expect(parseRequirementDoc('# 需求\n对应计划：plan.md P1「没有这一条」\n', PLAN)).toMatchObject({
+      error: expect.stringContaining('找不到'),
+    });
+    expect(parseRequirementDoc('# 需求\n对应计划：plan.md P1 的工作流\n', PLAN)).toMatchObject({
+      error: expect.stringContaining('没写是哪一条'),
+    });
+    expect(parseRequirementDoc('# 需求\n对应计划：无\n', PLAN)).toMatchObject({
+      error: expect.stringContaining('认不出'),
+    });
+    // 仓里没有 plan.md：写「无」就收；瞎凑一条不收
+    expect(parseRequirementDoc('# 需求\n对应计划：无\n', undefined)).toEqual({
+      ok: '# 需求\n对应计划：无\n',
+    });
+    expect(parseRequirementDoc('# 需求\n对应计划：P1「工作流」\n', undefined)).toMatchObject({
+      error: expect.stringContaining('仓里没有'),
+    });
+  });
+
+  it('「对应计划」那一行：取第一行，半角冒号、行首空白都认；仓里没有 plan.md 写「无」也算写了', () => {
+    expect(planLineOf('对应计划：plan.md P0 的验收（「你好」工作流）\n对应计划：P6「规则」')).toEqual({
+      ok: 'plan.md P0 的验收（「你好」工作流）',
+    });
+    expect(planLineOf('  对应计划: P2「驾驶舱」')).toEqual({ ok: 'P2「驾驶舱」' });
+    expect(planLineOf('对应计划：无')).toEqual({ ok: '无' });
+    // 第一行空着就是空着，不往下找别的
+    expect(planLineOf('对应计划：\n对应计划：P1「工作流」')).toMatchObject({ error: expect.any(String) });
+    // 正文里提到「对应计划」这个词不算那一行
+    expect(planLineOf('PR 正文的对应计划一栏照它写')).toMatchObject({ error: expect.any(String) });
+  });
+
+  it('写需求文档的提示词里交代了「对应计划」那一行', () => {
+    const prompt = stagePrompt({ stage: 'spec', brief: brief(), repo, issueNumber: 12, mode: 'new' });
+    expect(prompt).toContain('对应计划：plan.md P<阶段>');
   });
 
   it('方案：子任务清单逐条核对形状（深的校验在 decide 的 validatePlan）', () => {

@@ -397,7 +397,7 @@ export async function subtaskWorkflow(input: SubtaskInput): Promise<SubtaskResul
         }
         if (delivery.note) status.lastProblem = delivery.note;
         // 会话只在本地提交；推分支、开 PR 由引擎在会话外面做。推之前的卫生检查拦下了会话交的内容：退回会话拿掉再交
-        // （同一处连续被拦两次挂起报警，失败分流 HY1）；名单没读到是配置问题，挂起报警、不退会话（HY2）。
+        // （同一处连续被拦两次挂起报警，失败分流 HY1）；名单没读到、没扫成是这一侧的问题，挂起报警、不退会话（HY2）。
         const pushedOrRework = await attemptOrRework(
           kit,
           'pushBranch',
@@ -436,7 +436,8 @@ export async function subtaskWorkflow(input: SubtaskInput): Promise<SubtaskResul
               branch,
               head: pushed.head,
               title: sub.title,
-              // 正文由 github 包的 renderPrBody 按 PR 模板的栏目生成；这里只给结构。
+              // 正文由 github 包的 renderPrBody 按 PR 模板的栏目生成；这里只给结构。「对应计划」「specs」两栏
+              // （#41）里的对应计划由端口开 PR 时去主线的需求文档里现读那一行，读不到就不开、挂起报警。
               body: {
                 requirement: input.issueNumber,
                 subtask: `${sub.key} ${sub.title}`,
@@ -447,6 +448,7 @@ export async function subtaskWorkflow(input: SubtaskInput): Promise<SubtaskResul
                     : '会话报测试没过（fleet done --tests failed）',
                   '合并前在最新主线上再等 CI（合并队列）',
                 ],
+                specs: input.specDir,
                 changedFiles: changedFiles ?? [],
                 ...(changedFiles ? {} : { owed: ['改了哪些文件没查成（交付没带文件清单）'] }),
               },

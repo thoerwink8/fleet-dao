@@ -251,7 +251,7 @@ AI 理解：……（三行以内）
 
 issue 模板只有一个「需求」（`.github/ISSUE_TEMPLATE/requirement.yml`），默认贴 `需求`；空白 issue 也能开。上面的 AI 理解、进度、子任务、文档链接由引擎写进正文，模板里不放。
 
-PR 正文的栏目以 `.github/pull_request_template.md` 为准，15 行以内：人开的 PR 由 GitHub 套这份模板；引擎开的 PR 由 `packages/github` 的 `renderPrBody` 按同样的栏目生成，两边对不上测试会红。「文档」一栏写改了 README、design、ops、plan 的哪份，或「不适用」；哪份什么时候该改，见 README「文档各管什么」。「对应计划」写 plan.md 的阶段加那一条的原话开头（如 `P1「工作流」`，跨两条用顿号隔开），里程碑的阶段要在里面；「specs」写需求目录（`specs/<号>-<短名>/`）或「不适用」。
+PR 正文的栏目以 `.github/pull_request_template.md` 为准，15 行以内：人开的 PR 由 GitHub 套这份模板；引擎开的 PR 由 `packages/github` 的 `renderPrBody` 按同样的栏目生成，两边对不上测试会红。「文档」一栏写改了 README、design、ops、plan 的哪份，或「不适用」；哪份什么时候该改，见 README「文档各管什么」。「对应计划」写 plan.md 的阶段加那一条的原话开头（如 `P1「工作流」`，跨两条用顿号隔开），里程碑的阶段要在里面；「specs」写需求目录（`specs/<号>-<短名>/`）或「不适用」。引擎开的 PR：「specs」是这条需求的需求目录，「对应计划」照需求文档里「对应计划：」那一行抄——写需求文档的会话交回来时就按 pr-fields 同一套判法核它对得上 plan.md，对不上退回去改；开 PR 时从主线现读，读不到不开、挂起等人。
 
 ### 标签与里程碑（2026-09-25 定）
 

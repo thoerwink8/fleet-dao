@@ -301,6 +301,11 @@ export interface PrBody {
   /** 还欠什么；空 = 无。 */
   owed?: string[];
   risks?: string[];
+  /**
+   * 需求文档的目录（specs/<号>-<短名>/）：「specs」一栏照写；「对应计划」一栏由端口开 PR 时现读这个目录下需求.md 的
+   * 「对应计划：」那一行（读不到、没填就明确报错，不填空的）。
+   */
+  specs: string;
   /** 改到的文件（仓内相对路径）：「文档」一栏按它写。 */
   changedFiles: string[];
 }

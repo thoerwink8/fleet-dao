@@ -331,12 +331,13 @@ export const RULES: readonly FailureRule[] = [
     routeOutcome: 'neutral',
     hint: '退回会话把这些内容从提交里拿掉再交',
   },
-  // 卫生检查的名单（法国上是 /etc/fleet-dao/sensitive-values.txt）没读到：不推，也不当成「查过没事」。
-  // 是这台机器的配置问题，不是会话的错：不退回会话，整条推送路挂起报警，等人把名单放好后点「继续」。
+  // 卫生检查的名单（法国上是 /etc/fleet-dao/sensitive-values.txt）没读到，或根本扫不成（git 的输出认不出、要推的头
+  // 不在扫过的提交里）：不推，也不当成「查过没事」。都是这台机器这一侧的事，不是会话的错：不退回会话，挂起报警，
+  // 等人把名单放好、或看过之后点「继续」。
   {
     id: 'HY2',
-    title: '卫生检查的名单没读到',
-    codes: ['hygiene_list_missing'],
+    title: '卫生检查做不了（名单没读到、或没扫成）',
+    codes: ['hygiene_list_missing', 'hygiene_unscanned'],
     codeFieldOnly: true,
     ladder: ['park'],
     alert: true,
@@ -349,6 +350,20 @@ export const RULES: readonly FailureRule[] = [
     ladder: ['park'],
     alert: true,
     routeOutcome: 'neutral',
+  },
+  // 开 PR 要填「对应计划」（#41 的 pr-fields 缺了就红，正文对不上就只有人改），那一行要从需求文档里取。
+  // 文档还没进主线、文档里没有那一行、那一行后面空着——都是人写文档的事，会话改不了它，重试、退回会话都没用：
+  // 挂起报警，等人把「对应计划：plan.md P<阶段>「…」」补上再点「继续」。
+  {
+    id: 'SD1',
+    title: '需求文档里没有可用的「对应计划」那一行',
+    codes: ['spec_plan_missing'],
+    codeFieldOnly: true,
+    ladder: ['park'],
+    alert: true,
+    routeOutcome: 'neutral',
+    humanFix:
+      '在需求文档的「对应计划：」那一行写上 plan.md 的阶段加那一条的原话，比如 P1「工作流」；没有 plan.md 就写「无」',
   },
   // 无头会话没人批权限：同一会话里会一直被拒（原文自己说了别重试），是这条路由的起法不对。
   {

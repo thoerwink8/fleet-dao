@@ -54,6 +54,48 @@ interface Existing {
   url: string;
 }
 
+export interface ReadSpecDocInput {
+  repo: RepoRef;
+  /** 仓内路径，必须在 specs/ 下，例如 specs/12-登录验证码/需求.md */
+  path: string;
+  signal?: AbortSignal | undefined;
+}
+
+export interface ReadSpecDocResult {
+  path: string;
+  content: string;
+  url: string;
+}
+
+/**
+ * 读默认分支上的需求文档。开 PR 的正文要写「对应计划」「specs」两栏（#41 的 pr-fields 缺了就红），对应计划那一行在
+ * 需求文档里（人写了之后也可能手改），所以每次现读一份，不把值抄到工作流的历史里（抄了会和文件分家）。
+ * 文件不在返回 null——调用方要说清「需求文档还没进主线」，不当成空文档。
+ */
+export async function readSpecDoc(deps: Deps, input: ReadSpecDocInput): Promise<ReadSpecDocResult | null> {
+  const { repo, path } = input;
+  if (!validSpecPath(path)) {
+    throw new GitHubError(
+      'BAD_INPUT',
+      `需求文档路径「${path}」不合规：必须是 specs/ 下的相对路径，不含 ..、反斜杠或控制字符，也不能以 / 开头`,
+    );
+  }
+  const apiPath = `/repos/${enc(repo.owner)}/${enc(repo.name)}/contents/${encRef(path)}`;
+  const res = await deps.client.request({
+    method: 'GET',
+    path: apiPath,
+    auth: { as: 'engine' as const, repo },
+    allow: [404],
+    signal: input.signal,
+  });
+  if (res.status === 404) return null;
+  const parsed = ContentsFile.safeParse(res.data);
+  // 目录、子模块、链接拿回来的不是带 content 的文件：认不出，照「回的东西不对」报，不当成空文档
+  if (!parsed.success || parsed.data.content === undefined) throw unexpected(`读 ${path}`, res.data);
+  const content = Buffer.from(parsed.data.content.replace(/\n/g, ''), 'base64').toString('utf8');
+  return { path, content, url: parsed.data.html_url };
+}
+
 export async function writeSpecDoc(deps: Deps, input: WriteSpecDocInput): Promise<WriteSpecDocResult> {
   const { repo, path } = input;
   if (!validSpecPath(path)) {

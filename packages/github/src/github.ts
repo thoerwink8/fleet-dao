@@ -13,7 +13,14 @@ import {
   fetchMainline,
 } from './bundle.ts';
 import { GitHubClient, type Logger, type RepoRef, repoSlug, type Sleep, unexpected } from './client.ts';
-import { type WriteSpecDocInput, type WriteSpecDocResult, writeSpecDoc } from './contents.ts';
+import {
+  type ReadSpecDocInput,
+  type ReadSpecDocResult,
+  readSpecDoc,
+  type WriteSpecDocInput,
+  type WriteSpecDocResult,
+  writeSpecDoc,
+} from './contents.ts';
 import { type AppCredentials, type AppRole, appFilesFromEnv, loadApps, ROLE_NAMES } from './credentials.ts';
 import {
   type ActivityContext,
@@ -129,6 +136,8 @@ export interface GitHub {
   renewInteractionLimit(input: InteractionLimitInput, ctx?: ActivityContext): Promise<InteractionLimitResult>;
   /** 需求文档直接写进默认分支（「引擎」机器人身份，Contents API）。 */
   writeSpecDoc(input: WriteSpecDocInput, ctx?: ActivityContext): Promise<WriteSpecDocResult>;
+  /** 读默认分支上的需求文档；文件不在回 null。 */
+  readSpecDoc(input: ReadSpecDocInput, ctx?: ActivityContext): Promise<ReadSpecDocResult | null>;
   /** 会话提交用的身份（「干活的」机器人）：引擎建工作树时写进 user.name / user.email。 */
   commitIdentity(repo: RepoRef): Promise<BotIdentity>;
   /** 两个机器人在这些仓上的权限够不够。读不到算没查成（ok=false、why 写原因），不算「没有差异」。 */
@@ -194,6 +203,9 @@ export function createGitHub(options: GitHubOptions): GitHub {
     },
     async writeSpecDoc(input, ctx = {}) {
       return writeSpecDoc(deps, { ...input, signal: input.signal ?? ctx.signal });
+    },
+    async readSpecDoc(input, ctx = {}) {
+      return readSpecDoc(deps, { ...input, signal: input.signal ?? ctx.signal });
     },
     openPr: (input, ctx) => openPr(deps, input, ctx),
     waitCi: (input, ctx) => waitCi(deps, input, ctx),

@@ -711,6 +711,30 @@ describe('子任务工作流', { timeout: 60_000 }, () => {
     expect(world.count('pushBranch')).toBe(2);
   });
 
+  it('卫生检查没扫成：同样挂起报警、不退回会话（不当成查过没事）；人看过点继续就推', async () => {
+    const world = createFakeWorld({
+      push: (_input, n) =>
+        n === 1
+          ? new PortError(
+              'HYGIENE_UNSCANNED',
+              '推 acme/widgets 之前的卫生检查没扫成：要推的 1a2b3c4 不在扫过的提交里。没扫成一律不推',
+              { retryable: false },
+            )
+          : undefined,
+    });
+    const result = await withWorker(env, world, async (q) => {
+      const handle = await startSubtask(q);
+      const parked = await queryUntil<SubtaskStatus>(handle, (s) => s.parked, '挂起');
+      expect(parked.lastProblem).toContain('没扫成');
+      expect(world.alerts.map((a) => a.level)).toEqual(['stuck']);
+      await handle.signal(resumeSignal, { by: 'founder' });
+      return (await handle.result()) as SubtaskResult;
+    });
+    expect(result.state).toBe('merged');
+    expect(world.callsOf('startSession').filter((c) => c.input.stage === 'execute')).toHaveLength(1);
+    expect(world.count('pushBranch')).toBe(2);
+  });
+
   it('开 PR 的正文给结构（交给 github 包的 renderPrBody 按 PR 模板生成），不自己拼字', async () => {
     const world = createFakeWorld();
     const input = subtaskInput(spec('a'));
@@ -724,6 +748,8 @@ describe('子任务工作流', { timeout: 60_000 }, () => {
         '会话里跑过测试，报通过（fleet done --tests passed）',
         '合并前在最新主线上再等 CI（合并队列）',
       ],
+      // 「specs」一栏给需求文档的目录；「对应计划」由端口开 PR 时去那份需求文档里现读
+      specs: input.specDir,
       changedFiles: ['src/a/changed.ts'],
     });
   });

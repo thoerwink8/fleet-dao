@@ -85,6 +85,11 @@ function fakeGh(over: Partial<Record<keyof EngineGitHub, (input: never) => unkno
       changed: true,
       url: 'x',
     })),
+    readSpecDoc: record('readSpecDoc', (input: { path: string }) => ({
+      path: input.path,
+      content: '# 需求\n\n对应计划：plan.md P1「工作流」\n',
+      url: 'x',
+    })),
   } as unknown as EngineGitHub;
   return { gh, calls };
 }
@@ -243,6 +248,7 @@ describe('开 PR、CI、合并', () => {
     subtask: 'login 登录',
     did: ['加了验证码'],
     verified: ['pnpm check'],
+    specs: 'specs/28-接真端口/',
     changedFiles: ['src/login.ts'],
   };
 
@@ -255,13 +261,92 @@ describe('开 PR、CI、合并', () => {
       url: 'https://github.com/acme/widgets/pull/101',
     });
     expect(calls.openPr?.[0]).toMatchObject({
-      body: { requirement: 12, did: ['加了验证码'] },
+      body: {
+        requirement: 12,
+        did: ['加了验证码'],
+        plan: 'plan.md P1「工作流」',
+        specs: 'specs/28-接真端口/',
+      },
       inheritFrom: { issueNumber: 12 },
     });
+    // 「对应计划」是现读主线上那份需求文档里的那一行（人改了文件，下一次开 PR 就跟上）
+    expect(calls.readSpecDoc?.[0]).toMatchObject({ path: 'specs/28-接真端口/需求.md' });
     const { ports: p2, calls: c2 } = setup();
     const { requirement: _dropped, ...noIssue } = body;
     await p2.openPr({ taskId: 't1', repo, branch: BRANCH, head: m.head, title: '杂活', body: noIssue }, ctx);
     expect(c2.openPr?.[0]).not.toHaveProperty('inheritFrom');
+  });
+
+  it('需求文档没有「对应计划」那一行：不开 PR，明确报错（SPEC_PLAN_MISSING，不重试）', async () => {
+    const { ports } = setup({
+      readSpecDoc: (input: { path: string }) => ({
+        path: input.path,
+        content: '# 需求\n要验证码\n',
+        url: 'x',
+      }),
+    });
+    await expect(
+      ports.openPr({ taskId: 't1', repo, branch: BRANCH, head: m.head, title: '登录', body }, ctx),
+    ).rejects.toMatchObject({ code: 'SPEC_PLAN_MISSING', retryable: false });
+  });
+
+  it('那一行后面空着：「对应计划」不许填空的，明确报错（不重试）', async () => {
+    const { ports } = setup({
+      readSpecDoc: (input: { path: string }) => ({
+        path: input.path,
+        content: '# 需求\n\n对应计划：\n',
+        url: 'x',
+      }),
+    });
+    await expect(
+      ports.openPr({ taskId: 't1', repo, branch: BRANCH, head: m.head, title: '登录', body }, ctx),
+    ).rejects.toMatchObject({ code: 'SPEC_PLAN_MISSING', retryable: false });
+  });
+
+  it('需求文档还没进主线（读回 null）：明确报错，不当成空文档', async () => {
+    const { ports } = setup({ readSpecDoc: () => null });
+    await expect(
+      ports.openPr({ taskId: 't1', repo, branch: BRANCH, head: m.head, title: '登录', body }, ctx),
+    ).rejects.toMatchObject({ code: 'SPEC_PLAN_MISSING', retryable: false });
+  });
+
+  it('读需求文档读不了（403）：原样带过，不当成「没有那一行」', async () => {
+    const { ports } = setup({
+      readSpecDoc: () => {
+        throw new GitHubError('FORBIDDEN', 'Resource not accessible by integration');
+      },
+    });
+    await expect(
+      ports.openPr({ taskId: 't1', repo, branch: BRANCH, head: m.head, title: '登录', body }, ctx),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+  });
+
+  it('specs 目录给的是空串：明确报错，连需求文档都不去读', async () => {
+    const { ports, calls } = setup();
+    await expect(
+      ports.openPr(
+        { taskId: 't1', repo, branch: BRANCH, head: m.head, title: '登录', body: { ...body, specs: '  ' } },
+        ctx,
+      ),
+    ).rejects.toMatchObject({ code: 'SPEC_PLAN_MISSING', retryable: false });
+    expect(calls.readSpecDoc).toBeUndefined();
+  });
+
+  it('specs 目录末尾没带斜杠：补上（PR 模板里就带斜杠）', async () => {
+    const { ports, calls } = setup();
+    await ports.openPr(
+      {
+        taskId: 't1',
+        repo,
+        branch: BRANCH,
+        head: m.head,
+        title: '登录',
+        body: { ...body, specs: 'specs/28-接真端口' },
+      },
+      ctx,
+    );
+    expect(calls.readSpecDoc?.[0]).toMatchObject({ path: 'specs/28-接真端口/需求.md' });
+    expect(calls.openPr?.[0]).toMatchObject({ body: { specs: 'specs/28-接真端口/' } });
   });
 
   it('在新头上跑测试 = 等这个头的 CI：没查成抛 CI_UNKNOWN（不退回会话），红了写明哪几项', async () => {

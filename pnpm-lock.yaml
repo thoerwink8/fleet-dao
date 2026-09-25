@@ -99,6 +99,9 @@ importers:
       '@fleet-dao/api':
         specifier: workspace:*
         version: link:../api
+      '@fleet-dao/conventions':
+        specifier: workspace:*
+        version: link:../conventions
       '@fleet-dao/db':
         specifier: workspace:*
         version: link:../db
