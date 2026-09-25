@@ -195,11 +195,11 @@ export function startPgChangeFeed(
       // 重发一条，不判红——判了红会把这一轮恢复刚排上的 resync 清掉，还要红到下一次定时探活。
       if (listens !== listensBefore && resends < MAX_PING_RESENDS) continue;
       down(`自己发的探活 ping ${timeoutMs} 毫秒内没收回来`);
-      throw new PublicHealthError('not_listening', '实时推送没在收数据库通知（探活 ping 收不回来）');
+      throw new PublicHealthError('not_listening', '实时推送没在收数据库通知');
     }
     if (!listenedOnce) {
       down('LISTEN fleet_changes 还没接上');
-      throw new PublicHealthError('not_listening', '实时推送还没接上数据库（LISTEN fleet_changes）');
+      throw new PublicHealthError('not_listening', '实时推送还没接上数据库');
     }
     recovered();
   }

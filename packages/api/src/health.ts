@@ -3,7 +3,11 @@
 import type { Context } from 'hono';
 import type { HealthCheck, Logger } from './ports.ts';
 
-/** 可以原样告诉外面的失败原因（不含地址、账号、堆栈）。别的错误对外一律只说「连不上」。 */
+/**
+ * 可以原样告诉外面的失败原因：/healthz 公网打得到，健康页原样显示。只写一句中性的话——不含地址、账号、堆栈，
+ * 也不带内部名（频道、表、仓名）和开发进度，这些只进日志。有测试拿演示版打包扫描的名单扫每一种公开原因：
+ * 新加一种，要补进那条测试。别的错误对外一律只说「连不上」。
+ */
 export class PublicHealthError extends Error {
   readonly code: string;
   constructor(code: string, message: string) {
