@@ -965,8 +965,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         jobs: st.jobs.map(({ nextRunAt: _n, keepsFailing: _k, ...j }) => {
           let status: 'fresh' | 'overdue' | 'never' = 'never';
           if (j.lastSuccessAt) {
-            status =
-              t - Date.parse(j.lastSuccessAt) > 2 * j.expectEveryMinutes * 60_000 ? 'overdue' : 'fresh';
+            status = t - Date.parse(j.lastSuccessAt) > j.expectEveryMinutes * 60_000 ? 'overdue' : 'fresh';
           }
           return { ...j, status };
         }),

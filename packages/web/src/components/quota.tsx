@@ -1,6 +1,13 @@
 import type { QuotaWindowView } from '../api/types';
-import { formatUtil, isNearlyExhausted, isUseItOrLoseIt, utilOf, windowLabel } from '../lib/catalog';
-import { formatAgo, formatIn, formatPercent, formatUsd } from '../lib/format';
+import {
+  formatUtil,
+  isNearlyExhausted,
+  isUseItOrLoseIt,
+  upstreamStatusLabel,
+  utilOf,
+  windowTitle,
+} from '../lib/catalog';
+import { formatAgo, formatCount, formatIn, formatPercent, formatUsd } from '../lib/format';
 import { cn } from '../lib/utils';
 
 /** 额度条的颜色：够用是中性色，75% 以上黄，90% 以上红。 */
@@ -54,12 +61,18 @@ export function ReadingBadge({ w, className }: { w: QuotaWindowView; className?:
   );
 }
 
-function money(w: QuotaWindowView): boolean {
-  return w.window.endsWith('usd');
-}
-
-function amount(w: QuotaWindowView, n: number): string {
-  return money(w) ? formatUsd(n) : String(n);
+/** 按单位写数：美元、百分比、token、点数。 */
+export function amount(w: Pick<QuotaWindowView, 'unit'>, n: number): string {
+  switch (w.unit) {
+    case 'usd':
+      return formatUsd(n);
+    case 'percent':
+      return `${Math.round(n)}%`;
+    case 'tokens':
+      return formatCount(n);
+    case 'points':
+      return formatCount(n);
+  }
 }
 
 /** 一句话的用量：「$3.20 / $10.00」「40%」「已用 812，上限没读到」「用量没读到」。 */
@@ -90,7 +103,9 @@ export function QuotaCell({ w, now }: { w: QuotaWindowView; now: number }) {
       data-unknown={util === undefined || undefined}
     >
       <div className="flex items-center justify-between gap-2">
-        <span className="text-[11px] text-muted-foreground">{windowLabel[w.window]}</span>
+        <span className="min-w-0 truncate text-[11px] text-muted-foreground" title={`上游原名：${w.label}`}>
+          {windowTitle(w)}
+        </span>
         <ReadingBadge w={w} />
       </div>
       <div className="mt-1.5 flex items-baseline justify-between gap-2">
@@ -141,7 +156,23 @@ export function QuotaCell({ w, now }: { w: QuotaWindowView; now: number }) {
       {full ? (
         <div className="mt-1.5 text-[11px] font-medium text-ink-fail">快用完了，调度会先绕开</div>
       ) : null}
-      {util === undefined ? (
+      {w.upstreamStatus && w.upstreamStatus !== 'allowed' ? (
+        <div
+          className={cn(
+            'mt-1.5 text-[11px] font-medium',
+            w.upstreamStatus === 'limit_reached' ? 'text-ink-fail' : 'text-ink-stall',
+          )}
+          title={w.statusRaw ? `上游原话：${w.statusRaw}` : undefined}
+        >
+          {upstreamStatusLabel[w.upstreamStatus]}
+        </div>
+      ) : null}
+      {w.staleSince ? (
+        <div className="mt-1.5 text-[11px] text-ink-stall">
+          上游从 <span className="num">{formatAgo(w.staleSince, now)}</span>
+          起没再报这个窗，数是之前的，不参与排序
+        </div>
+      ) : util === undefined ? (
         <div className="mt-1.5 text-[11px] text-muted-foreground">不参与「先用它」和排序</div>
       ) : null}
     </div>

@@ -13,10 +13,11 @@ export function meta() {
   return [{ title: '定时任务 · fleet-dao 驾驶舱' }];
 }
 
-/** 一行该用什么颜色提醒：失败红，没查成、不新鲜黄。 */
+/** 一行该用什么颜色提醒：失败红，没查成、只查了一部分、过期黄。 */
 function rowTone(j: JobView): 'fail' | 'stall' | null {
   if (j.lastRun?.outcome === 'failed') return 'fail';
-  if (j.lastRun?.outcome === 'unscanned' || j.status !== 'fresh') return 'stall';
+  if (j.lastRun?.outcome === 'unscanned' || j.lastRun?.outcome === 'partial' || j.status !== 'fresh')
+    return 'stall';
   return null;
 }
 
@@ -25,7 +26,9 @@ export default function Schedules() {
   const now = useNow();
   const jobs = data?.jobs ?? [];
   const failed = jobs.filter((j) => j.lastRun?.outcome === 'failed').length;
-  const unscanned = jobs.filter((j) => j.lastRun?.outcome === 'unscanned').length;
+  const unscanned = jobs.filter(
+    (j) => j.lastRun?.outcome === 'unscanned' || j.lastRun?.outcome === 'partial',
+  ).length;
   const notFresh = jobs.filter((j) => j.status !== 'fresh').length;
   // 没读到就显示「—」，不拿 0 冒充「没有失败」。
   const count = (n: number) => (data ? n : '—');
@@ -44,17 +47,17 @@ export default function Schedules() {
           accent={failed ? 'text-ink-fail' : undefined}
         />
         <Stat
-          label="上次没查成"
+          label="上次没查全"
           value={count(unscanned)}
           icon={ScanSearch}
-          hint="跑了，但一个对象都没扫到"
+          hint="跑了，但一个都没扫到，或有一部分没查成"
           accent={unscanned ? 'text-ink-stall' : undefined}
         />
         <Stat
-          label="不新鲜"
+          label="过期"
           value={count(notFresh)}
           icon={TimerOff}
-          hint="超过两个周期没成功，或从没成功过"
+          hint="超过期望间隔没跑成，或从没跑成过"
           accent={notFresh ? 'text-ink-stall' : undefined}
         />
       </div>
@@ -122,7 +125,8 @@ export default function Schedules() {
                         className={cn(
                           'block truncate text-xs',
                           r?.outcome === 'failed' && 'font-medium text-ink-fail',
-                          r?.outcome === 'unscanned' && 'font-medium text-ink-stall',
+                          (r?.outcome === 'unscanned' || r?.outcome === 'partial') &&
+                            'font-medium text-ink-stall',
                           r?.outcome === 'ok' && 'text-muted-foreground',
                         )}
                         title={outcomeText(j)}
@@ -149,7 +153,7 @@ export default function Schedules() {
                           <TooltipContent>{formatDateTime(j.lastSuccessAt)}</TooltipContent>
                         </Tooltip>
                       ) : (
-                        <span className="text-xs text-ink-stall">从没成功过</span>
+                        <span className="text-xs text-ink-stall">{jobStatusLabel.never}</span>
                       )}
                       {j.status === 'overdue' ? (
                         <div className="text-[11px] text-ink-stall">{jobStatusLabel.overdue}</div>

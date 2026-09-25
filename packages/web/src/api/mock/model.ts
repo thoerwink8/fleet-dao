@@ -7,6 +7,7 @@ import type {
   QuotaWindow,
   Repo,
   Route,
+  ScheduleOutcome,
   SessionRun,
   StagePolicy,
   Step,
@@ -67,7 +68,8 @@ export interface MJob {
   lastRun?: {
     startedAt: string;
     endedAt?: string;
-    outcome?: 'ok' | 'unscanned' | 'failed';
+    outcome?: ScheduleOutcome;
+    scanned?: number;
     found?: number;
     why?: string;
   };

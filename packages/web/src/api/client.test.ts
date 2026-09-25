@@ -1,3 +1,4 @@
+import type { RealtimeTable } from '@fleet-dao/shared';
 import { QueryClient } from '@tanstack/react-query';
 import { describe, expect, test, vi } from 'vitest';
 import { applyLiveEvent, applyLiveEvents, createLiveBatcher, keys } from './client';
@@ -24,7 +25,8 @@ describe('推送到缓存：按表名决定重拉什么', () => {
 
   test('认不出的表、断线重连：全部重拉——宁可多拉，不把漏收当没变化', () => {
     const { qc, called } = spy();
-    applyLiveEvent(qc, { type: 'change', table: 'some_new_table', id: 'x' });
+    // 后端比前端先上新表时（部署先后），表名会不在这份名单里。
+    applyLiveEvent(qc, { type: 'change', table: 'some_new_table' as RealtimeTable, id: 'x' });
     applyLiveEvent(qc, { type: 'resync' });
     applyLiveEvent(qc, { type: 'ready' });
     expect(called()).toEqual(['全部', '全部', '全部']);

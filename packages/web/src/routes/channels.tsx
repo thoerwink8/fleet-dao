@@ -19,7 +19,7 @@ import {
 import { Badge } from '../components/ui/badge';
 import { Switch } from '../components/ui/switch';
 import { Textarea } from '../components/ui/textarea';
-import { billingLabel, formatUtil, hostLabel, poolUsage, windowLabel } from '../lib/catalog';
+import { billingLabel, formatUtil, hostLabel, poolUsage, windowTitle } from '../lib/catalog';
 import { formatDate, formatInDays, TIME } from '../lib/format';
 import { useNow } from '../lib/hooks';
 import { cn } from '../lib/utils';
@@ -228,7 +228,7 @@ function PoolRow({ pool }: { pool: PoolView }) {
         ) : w ? (
           <>
             <div className="flex items-center justify-between gap-2 text-xs">
-              <span className="truncate text-muted-foreground">{windowLabel[w.window]}</span>
+              <span className="truncate text-muted-foreground">{windowTitle(w)}</span>
               <span
                 className={cn(
                   util === undefined ? 'text-ink-stall' : 'num',

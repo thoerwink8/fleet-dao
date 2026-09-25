@@ -14,6 +14,7 @@ import {
   utilOf,
   windowLabel,
   windowRank,
+  windowTitle,
 } from '../lib/catalog';
 import { formatAgo, formatDate, formatIn, formatInDays, formatPercent } from '../lib/format';
 import { useNow } from '../lib/hooks';
@@ -69,7 +70,7 @@ export default function Quota() {
 
   const pools = data?.pools ?? [];
   const cells: Cell[] = pools.flatMap((pool) => pool.windows.map((w) => ({ pool, w })));
-  const label = ({ pool, w }: Cell) => `${poolTitle(pool)} · ${windowLabel[w.window]}`;
+  const label = ({ pool, w }: Cell) => `${poolTitle(pool)} · ${windowTitle(w)}`;
   const key = ({ pool, w }: Cell, i: number) => `${pool.id}-${w.window}-${i}`;
   const hot = cells.flatMap((c) => {
     const util = utilOf(c.w);
@@ -78,7 +79,9 @@ export default function Quota() {
   const full = cells.filter(({ w }) => isNearlyExhausted(w));
   const stale = cells.filter(({ w }) => w.stale);
   // 读成了但没有用量比例（只报了清零时间，或只有已用没有上限）：不参与「先用它」和排序，但要列出来。
-  const unknownUse = cells.filter(({ w }) => !w.stale && utilOf(w) === undefined);
+  const unknownUse = cells.filter(({ w }) => !w.stale && !w.staleSince && utilOf(w) === undefined);
+  // 读成过、但上游这次没再报：数是之前的，照样列出来。
+  const unreported = cells.filter(({ w }) => !w.stale && w.staleSince);
   const unread = pools.filter((p) => p.quotaStatus === 'unread');
   const kinds = [...new Set(cells.map(({ w }) => w.window))].sort((a, b) => windowRank[a] - windowRank[b]);
   const staleMinutes = data?.staleAfterMinutes ?? 30;
@@ -136,6 +139,12 @@ export default function Quota() {
                   <li key={`unknown-${key(c, i)}`} className="flex items-center gap-2">
                     <span className="min-w-0 flex-1 truncate">{label(c)}</span>
                     <span className="shrink-0 text-ink-stall">{quotaValue(c.w)}</span>
+                  </li>
+                )),
+                ...unreported.map((c, i) => (
+                  <li key={`unreported-${key(c, i)}`} className="flex items-center gap-2">
+                    <span className="min-w-0 flex-1 truncate">{label(c)}</span>
+                    <span className="shrink-0 text-ink-stall">上游这次没报</span>
                   </li>
                 )),
                 ...stale.map((c, i) => (

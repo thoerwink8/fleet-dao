@@ -158,37 +158,58 @@ export function utilOf(w: QuotaWindowView): number | undefined {
   return undefined;
 }
 
+/** 额度窗的名字：归得了类的用中文名，归不了类（other）的用上游原名；只扣一组模型的窗后面写组名。 */
+export function windowTitle(w: Pick<QuotaWindowView, 'window' | 'label' | 'scope'>): string {
+  const base = w.window === 'other' ? w.label : windowLabel[w.window];
+  return w.scope ? `${base} · ${w.scope}` : base;
+}
+
 /** 一个池的额度概况：读到用量的窗里用得最满的那个，加上用量没读到的窗（它们不参与比较，但要让人看见）。 */
 export interface PoolUsage {
   tightest: { w: QuotaWindowView; util: number } | undefined;
   unknown: QuotaWindowView[];
+  /** 读成过、但上游这次没再报的窗（staleSince）：照样显示，不参与比较。 */
+  unreported: QuotaWindowView[];
 }
 
 export function poolUsage(windows: QuotaWindowView[]): PoolUsage {
   let tightest: PoolUsage['tightest'];
   const unknown: QuotaWindowView[] = [];
+  const unreported: QuotaWindowView[] = [];
   for (const w of windows) {
     const util = utilOf(w);
-    if (util === undefined) unknown.push(w);
+    if (w.staleSince) unreported.push(w);
+    else if (util === undefined) unknown.push(w);
     else if (!tightest || util > tightest.util) tightest = { w, util };
   }
-  return { tightest, unknown };
+  return { tightest, unknown, unreported };
 }
 
-/** 快清零、还剩不少——该先用它。用量没读到、窗口长度不知道的都不算。 */
+/** 快清零、还剩不少——该先用它。用量没读到、窗口长度不知道、上游这次没报、上游说已用满的都不算。 */
 export function isUseItOrLoseIt(w: QuotaWindowView, now: number): boolean {
   const util = utilOf(w);
   const length = windowLength[w.window];
   if (util === undefined || length === undefined || !w.resetsAt) return false;
+  if (w.staleSince || w.upstreamStatus === 'limit_reached') return false;
   const left = Date.parse(w.resetsAt) - now;
   if (left <= 0) return false;
   return left < length * 0.2 && util < 0.7;
 }
 
+/** 快用完：上游自己说用满了（以它为准，实测 99% 就可能已经满了），或者用了九成以上。上游这次没报的不算。 */
 export function isNearlyExhausted(w: QuotaWindowView): boolean {
+  if (w.staleSince) return false;
+  if (w.upstreamStatus === 'limit_reached') return true;
   const util = utilOf(w);
   return util !== undefined && util >= 0.9;
 }
+
+/** 上游自己说的状态，白话；没说就是 undefined。 */
+export const upstreamStatusLabel: Record<NonNullable<QuotaWindowView['upstreamStatus']>, string> = {
+  allowed: '上游说还能用',
+  warning: '上游提醒快满了',
+  limit_reached: '上游说已用满',
+};
 
 /** 百分比；没读到写「用量没读到」。 */
 export function formatUtil(util: number | undefined): string {

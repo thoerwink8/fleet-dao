@@ -25,6 +25,34 @@ describe('「查了 0 个问题」和「这次没查成」分开写', () => {
     ).toBe('跑成了 · 查到 3 条');
   });
 
+  test('写了扫了几个就照说', () => {
+    expect(
+      outcomeText({
+        ...base,
+        lastRun: { startedAt: started, endedAt: ended, outcome: 'ok', scanned: 12, found: 0 },
+      }),
+    ).toBe('跑成了 · 扫了 12 个，0 个问题');
+  });
+
+  test('只查了一部分（partial）：写明没查成的原因，不当「全查过没事」', () => {
+    expect(
+      outcomeText({
+        ...base,
+        lastRun: {
+          startedAt: started,
+          endedAt: ended,
+          outcome: 'partial',
+          scanned: 12,
+          found: 0,
+          why: '3 个仓的分支列表没读到',
+        },
+      }),
+    ).toBe('只查了一部分 · 扫了 12 个，查到 0 条：3 个仓的分支列表没读到');
+    expect(
+      outcomeText({ ...base, lastRun: { startedAt: started, endedAt: ended, outcome: 'partial' } }),
+    ).toBe('只查了一部分：没查成的原因没记下');
+  });
+
   test('跑了但一个都没扫到：是「没查成」，不是「没问题」', () => {
     expect(
       outcomeText({

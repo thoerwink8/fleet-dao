@@ -9,8 +9,18 @@ afterEach(cleanup);
 const NOW = Date.parse('2026-09-25T10:00:00Z');
 const at = (min: number) => new Date(NOW + min * 60_000).toISOString();
 
-function cell(w: Omit<QuotaWindowView, 'stale'> & { stale?: boolean }) {
-  const { container } = render(<QuotaCell w={{ stale: false, ...w }} now={NOW} />);
+function cell(
+  w: Omit<QuotaWindowView, 'stale' | 'label' | 'unit' | 'source'> &
+    Partial<Pick<QuotaWindowView, 'stale' | 'label' | 'unit' | 'source'>>,
+) {
+  const full: QuotaWindowView = {
+    stale: false,
+    label: w.window,
+    unit: 'percent',
+    source: 'claude-usage',
+    ...w,
+  };
+  const { container } = render(<QuotaCell w={full} now={NOW} />);
   return container.firstElementChild as HTMLElement;
 }
 
@@ -68,6 +78,7 @@ describe('额度格', () => {
   test('每个数都写明来源：估算的标「估算」，美元窗写金额', () => {
     cell({
       window: 'month_usd',
+      unit: 'usd',
       used: 12.5,
       limit: 20,
       resetsAt: at(20_000),

@@ -18,7 +18,7 @@ import { StatusChip, StatusDot } from '../components/status';
 import { ActionButtons, targetOf } from '../components/task-actions';
 import { Button } from '../components/ui/button';
 import { actionLabel, actorName, targetLabel, taskIndex } from '../lib/audit';
-import { isUseItOrLoseIt, poolTitle, utilOf, windowLabel } from '../lib/catalog';
+import { isUseItOrLoseIt, poolTitle, utilOf, windowTitle } from '../lib/catalog';
 import { formatAgo, formatDuration, formatIn, formatPercent } from '../lib/format';
 import { useNow } from '../lib/hooks';
 import {
@@ -67,10 +67,10 @@ export default function Overview() {
     pool.windows.map((w) => ({ pool, w })),
   );
   const hot = windows.filter(({ w }) => !w.stale && isUseItOrLoseIt(w, now));
-  // 用量没读到的窗不参与排序（不拿 0 冒充最空），单独数一下、写在面板底下。
+  // 用量没读到、上游这次没报的窗不参与排序（不拿 0 冒充最空），单独数一下、写在面板底下。
   const known = windows.flatMap((x) => {
     const util = utilOf(x.w);
-    return util === undefined ? [] : [{ ...x, util }];
+    return util === undefined || x.w.staleSince ? [] : [{ ...x, util }];
   });
   const unknownUse = windows.length - known.length;
   const fullest = known.sort((a, b) => b.util - a.util).slice(0, 5);
@@ -284,7 +284,7 @@ export default function Overview() {
                   <div className="flex items-center justify-between gap-2 text-xs">
                     <span className="truncate">
                       {poolTitle(pool)}
-                      <span className="text-muted-foreground"> · {windowLabel[w.window]}</span>
+                      <span className="text-muted-foreground"> · {windowTitle(w)}</span>
                     </span>
                     <span className={cn('num', w.stale && 'text-muted-foreground line-through')}>
                       {formatPercent(util)}
@@ -308,8 +308,7 @@ export default function Overview() {
             ) : null}
             {unknownUse ? (
               <p className="mt-3 text-xs text-ink-stall">
-                另有 <span className="num">{unknownUse}</span>{' '}
-                个窗用量没读到（只报了清零时间或没有上限），没排进来——
+                另有 <span className="num">{unknownUse}</span> 个窗没排进来（用量没读到，或上游这次没报）——
                 <Link to="/quota" className="underline underline-offset-2">
                   去额度页看
                 </Link>

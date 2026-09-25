@@ -10,7 +10,14 @@ import { QuotaCell } from '../components/quota';
 import { CommandMenu } from '../components/shell/command-menu';
 import { Topbar } from '../components/shell/topbar';
 import { routeOptions } from '../components/task-actions';
-import { isNearlyExhausted, isUseItOrLoseIt, poolUsage, utilOf, windowLength } from '../lib/catalog';
+import {
+  isNearlyExhausted,
+  isUseItOrLoseIt,
+  poolUsage,
+  utilOf,
+  windowLength,
+  windowTitle,
+} from '../lib/catalog';
 import BoardPage from '../routes/board';
 import DispatchPage from '../routes/dispatch';
 import OverviewPage from '../routes/overview';
@@ -30,6 +37,9 @@ const boom = () => Promise.reject(new ApiError(500, 'internal', '后端出错了
 /** 只报了清零时间的窗（Claude 只说「这是限制窗」时就这样）：用量没读到。 */
 const noUsage = (w: Partial<QuotaWindowView> = {}): QuotaWindowView => ({
   window: '5h',
+  label: '5h',
+  unit: 'percent',
+  source: 'claude-usage',
   resetsAt: at(20),
   reading: 'measured',
   readAt: at(-1),
@@ -44,11 +54,13 @@ function withUnknownUsage(api: MockApi): MockApi {
     const res = await pools();
     return {
       ...res,
-      pools: res.pools.map((p): PoolView => ({
-        ...p,
-        quotaStatus: 'fresh',
-        windows: [noUsage(), noUsage({ window: '7d', reading: 'estimated', used: 812, resetsAt: at(600) })],
-      })),
+      pools: res.pools.map(
+        (p): PoolView => ({
+          ...p,
+          quotaStatus: 'fresh',
+          windows: [noUsage(), noUsage({ window: '7d', reading: 'estimated', used: 812, resetsAt: at(600) })],
+        }),
+      ),
     };
   };
   return api;
@@ -70,10 +82,45 @@ describe('额度：用量没读到不当 0%', () => {
   test('上游新出的窗口（other）长度不知道：不喊「先用它」', () => {
     expect(windowLength.other).toBeUndefined();
     expect(isUseItOrLoseIt(noUsage({ window: 'other', utilization: 0.1, resetsAt: at(1) }), NOW)).toBe(false);
+    expect(windowTitle({ window: 'other', label: 'auto_percent', scope: 'auto' })).toBe(
+      'auto_percent · auto',
+    );
+    expect(windowTitle({ window: '7d_model', label: '7d_opus', scope: 'opus' })).toBe('周窗 · 单模型 · opus');
+  });
+
+  test('上游说已用满就算快用完（以上游为准），也不喊「先用它」', () => {
+    const w = noUsage({ utilization: 0.4, upstreamStatus: 'limit_reached', resetsAt: at(10) });
+    expect(isNearlyExhausted(w)).toBe(true);
+    expect(isUseItOrLoseIt(w, NOW)).toBe(false);
+  });
+
+  test('上游这次没报的窗（staleSince）：照样显示、注明，不参与比较和报警', () => {
+    const gone = noUsage({ utilization: 0.95, staleSince: at(-30) });
+    expect(isNearlyExhausted(gone)).toBe(false);
+    const u = poolUsage([gone, noUsage({ window: '7d', utilization: 0.2 })]);
+    expect(u.tightest?.util).toBe(0.2);
+    expect(u.unreported).toEqual([gone]);
+    const { container } = render(<QuotaCell w={gone} now={NOW} />);
+    expect(container.textContent).toContain('起没再报这个窗');
+  });
+
+  test('按单位写数：token 用万、美元带 $，超额照实写', () => {
+    const { container } = render(
+      <>
+        <QuotaCell w={noUsage({ unit: 'tokens', used: 1_250_000, limit: 2_000_000 })} now={NOW} />
+        <QuotaCell w={noUsage({ utilization: 1.12 })} now={NOW} />
+      </>,
+    );
+    expect(container.textContent).toContain('125.0 万');
+    expect(container.textContent).toContain('112%');
   });
 
   test('比谁最满时只比读到用量的窗，没读到的单独列出', () => {
-    const u = poolUsage([noUsage(), noUsage({ window: '7d', utilization: 0.3 }), noUsage({ window: '7d_model' })]);
+    const u = poolUsage([
+      noUsage(),
+      noUsage({ window: '7d', utilization: 0.3 }),
+      noUsage({ window: '7d_model' }),
+    ]);
     expect(u.tightest?.util).toBe(0.3);
     expect(u.unknown.map((w) => w.window)).toEqual(['5h', '7d_model']);
     expect(poolUsage([noUsage()]).tightest).toBeUndefined();
@@ -103,7 +150,7 @@ describe('额度：用量没读到不当 0%', () => {
 
   test('总览：没读到用量的窗不排进「最满」、不算「快清零」，底下写明有几个没读到', async () => {
     renderApp(<OverviewPage />, { api: withUnknownUsage(createMockApi({ live: false })) });
-    expect(await screen.findByText(/个窗用量没读到/)).toBeTruthy();
+    expect(await screen.findByText(/个窗没排进来/)).toBeTruthy();
     const stat = screen.getByText('额度快清零').closest('a');
     expect(stat?.textContent).toContain('0');
     expect(screen.queryByText('0%')).toBeNull();
