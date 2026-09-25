@@ -2,9 +2,10 @@
 # shellcheck source-path=SCRIPTDIR
 # shellcheck disable=SC2034 # APP_UNITS、SHA 这些是给 source 进来的 release.sh 里的函数读写的
 # deploy/release.sh 的来回：换版、健康检查不过自动退回、一键退回、不退到判过不健康的版本、只留最近几版；
-# 飞书网关什么时候发、什么时候不动香港，网关的健康检查怎么判。
-# 取代码、构建、迁移、健康检查、往香港传文件、香港网关的入口换成桩（按提交号预先定好健康不健康）；切 current、记历史、
-# 挑上一版、清旧版、迁移把关、发网关的决定、网关健康检查用的是 release.sh 里的真代码，目录落在临时目录、不连网；
+# 飞书网关什么时候发、什么时候不动香港，网关的健康检查怎么判；装目录的每条失败路径。
+# 取代码、构建、迁移、健康检查、往香港传文件、香港网关的入口、目录装载器和库的读回换成桩（按提交号预先定好健康不健康）；
+# 切 current、记历史、挑上一版、清旧版、迁移把关、装目录的检查、发网关的决定、网关健康检查用的是 release.sh 里的真代码，
+# 目录落在临时目录、不连网；
 # 最后一段以 root 真起一个临时服务
 # （fleet-release-test-<进程号>），验「主进程跑的是哪一版」，跑完撤掉；不是 root 就那段记「没跑成」、退出 2。
 # 真机上的那一半（真起服务、真传文件、真健康检查）在法国、香港上实测，记录在引入本文件的 PR 里。
@@ -452,6 +453,218 @@ check "回答认不出（不是状态的样子）：不过，也说是问不到"
 rm -f -- "$GWD/garbled"
 unset -f sleep
 GATEWAY_WAIT=0
+
+echo "== 装目录：迁移之后、切版本之前；文件不对、读不到、装不成、装完读不回或是 0 行，都停下不切；同一版再发改动 0 处"
+rm -rf "${RELEASES:?}"/* "$RELEASES"/.history
+GATE=()
+MIG=()
+DB_MIG=0
+FLEET_HK_PARTS="" # 不碰香港（网关那几段另测）
+CATALOG=$TMP/catalog.json
+# 装载器的桩放在「这一版的 node」的位置。发布脚本以 env -i 起它，环境里只剩库连接，所以桩要的东西都在它自己的目录里：
+# mode 定它这次怎么答（changed 装进去了、same 已齐、别的就报错），calls 每次记一行「参数|当前目录|库连接」，
+# audit 是装载器最近一笔操作记录的编号（装进去时加一），读回的桩照它答；order 记迁移、装载器谁先跑，
+# 和装载器跑的那一刻 current 指着哪一版
+FAKE=$TMP/catalog-fake
+mkdir -p "$FAKE"
+cat >"$FAKE/node" <<'EOF'
+#!/bin/bash
+d=$(dirname "$0")
+printf '%s|%s|%s %s %s\n' "$*" "$PWD" "${DATABASE_URL:-}" "${PGHOST:-}" "${PGUSER:-}" >>"$d/calls"
+printf 'catalog current=%s\n' "$(readlink ../current 2>/dev/null)" >>"$d/order"
+case $(cat "$d/mode") in
+changed)
+  echo "新写入 pools（6）：claude-solo、claude-carpool、mirasim-relay、cursor、grok、jev"
+  echo $(($(cat "$d/audit") + 1)) >"$d/audit"
+  ;;
+same) echo "库里已经齐了，这次一行没改" ;;
+*)
+  echo "目录配置里引用了不存在的东西"
+  echo "- stages.judge 的路由 jev:jev-1.13:api-shel 不存在"
+  exit 1
+  ;;
+esac
+EOF
+chmod +x "$FAKE/node"
+NODE=$FAKE/node
+echo 0 >"$FAKE/audit"
+# 以 fleet 身份跑的那一下：桩只核对身份参数，后面的 env -i … 照原样执行（真 env，环境真的清空）
+runuser() {
+  if [[ "$1 $2 $3" != "-u fleet --" ]]; then
+    echo "桩：runuser 的参数不对：$*" >&2
+    return 99
+  fi
+  shift 3
+  "$@"
+}
+# 读回的桩：装载器这一轮还没跑时按 PG_BEFORE 答，跑过了按 PG_AFTER 答。ok 是账号池 6、路由 9、阶段 8、阶段里挂的路由 58；
+# fail 连不上库；garbage 答的不是数；zero-<第几张> 那张表 0 行；grown 多出一个账号池（库被人改了）
+PG_BEFORE=ok
+PG_AFTER=ok
+pg_admin() {
+  local mode=$PG_BEFORE c=(6 9 8 58)
+  if [[ -s "$FAKE/calls" ]]; then mode=$PG_AFTER; fi
+  case $mode in
+  fail)
+    echo 'psql: error: connection to server on socket "/var/run/postgresql/.s.PGSQL.5432" failed' >&2
+    return 2
+    ;;
+  garbage)
+    echo 'ERROR:  relation "pools" does not exist'
+    return 0
+    ;;
+  zero-*) c[${mode#zero-}]=0 ;;
+  grown) c[0]=7 ;;
+  esac
+  printf '%s|%s|%s|%s|%s\n' "${c[@]}" "$(cat "$FAKE/audit")"
+}
+# 迁移的桩照旧，另把「迁移跑过了」记进 order：装载器得排在它后面
+migrate() {
+  MIGRATE_RUNS+=("$1")
+  if [[ "${MIG[$1]:-0}" -gt "$DB_MIG" ]]; then DB_MIG=${MIG[$1]}; fi
+  echo "migrate ${1:0:1}" >>"$FAKE/order"
+}
+with_loader() { # 提交号：构建这一版（桩），带上目录装载器
+  build_release "$1" >/dev/null
+  mkdir -p "$RELEASES/$1/packages/db/src/bin"
+  : >"$RELEASES/$1/packages/db/src/bin/catalog.ts"
+}
+loader_runs() { if [[ -f "$FAKE/calls" ]]; then grep -c . "$FAKE/calls"; else echo 0; fi; }
+round() { # 装载器这一轮怎么答；清掉上一轮的记录
+  printf '%s' "$1" >"$FAKE/mode"
+  rm -f -- "$FAKE/calls" "$FAKE/order"
+  reset
+}
+said() { grep -cF -- "$1" "$TMP/out"; }           # 这一轮的输出里有几行带这些字
+reds_with() { printf '%s\n' "${REDS[@]}" | grep -cF -- "$1"; }
+printf '{}\n' >"$CATALOG"
+chmod 640 "$CATALOG"
+CATALOG_META=$(stat -c '%U:%G %a' -- "$CATALOG") # 桩机上没有 fleet 组：该有的属主、权限按这台上造出来的算
+with_loader "$A"
+round changed
+do_release "$A" >"$TMP/out"
+check "装进去了：切到 A、没有红" "$(current_sha):${#REDS[@]}" "$A:0"
+IFS='|' read -r got_args got_cwd got_db <"$FAKE/calls"
+check "装载器收到的：这一版的命令、真文件的路径" "$got_args" "packages/db/src/bin/catalog.ts $CATALOG"
+# 只比结尾：Windows 上的 Git Bash 清空环境后，同一个临时目录会换一种写法
+check "装载器在这一版的目录里跑" "$([[ "$got_cwd" == */releases/"$A" ]] && echo 是 || echo "不是（$got_cwd）")" 是
+check "装载器连的是本机库（unix socket、peer 认证）" "$got_db" "postgres:///fleet /var/run/postgresql fleet"
+check "装载器的话打出来了" "$(said '新写入 pools（6）')" 1
+check "记一处改动，带上读回的行数" \
+  "$(printf '%s\n' "${CHANGES[@]}" | grep -c '^目录装进库（账号池 6、路由 9、阶段 8、阶段里挂的路由 58）$')" 1
+round same
+do_release "$A" >"$TMP/out"
+check "同一版再发：装载器照样跑，库里一行没改，改动 0 处" "$(loader_runs):${#CHANGES[@]}:${#REDS[@]}" "1:0:0"
+check "同一版再发：说的是已齐" "$(said '目录已齐，这次一行没改（账号池 6、路由 9、阶段 8、阶段里挂的路由 58）')" 1
+with_loader "$B"
+before=$(events)
+blocked() { # 说明 红里要有的字 装载器该跑几次：发 B，应当停下、不切、历史不变
+  do_release "$B" >"$TMP/out"
+  check "$1：不切，还在 A" "$(current_sha)" "$A"
+  check "$1：报红，说清是哪一种" "$(reds_with "$2")" 1
+  check "$1：历史没变" "$(events)" "$before"
+  check "$1：装载器跑了 $3 次" "$(loader_runs)" "$3"
+}
+mv -- "$CATALOG" "$TMP/catalog.saved"
+round changed
+blocked "文件不在" "没有 $CATALOG：先从保险箱放上来" 0
+mkdir -- "$CATALOG"
+chmod 640 "$CATALOG"
+round changed
+blocked "放成了目录" "$CATALOG 不是普通文件" 0
+rmdir -- "$CATALOG"
+mv -- "$TMP/catalog.saved" "$CATALOG"
+chmod 644 "$CATALOG"
+if [[ "$(stat -c '%U:%G %a' -- "$CATALOG")" == "$CATALOG_META" ]]; then
+  echo "  … 没跑成：这台改不了文件权限（chmod 不生效），「权限不对」没测"
+  skipped=1
+else
+  round changed
+  blocked "权限不对（644）" "应为 $CATALOG_META；没切版本" 0
+fi
+chmod 640 "$CATALOG"
+if ((EUID == 0)); then
+  chown 65534 -- "$CATALOG" # nobody：属主换成别人，权限不变
+  round changed
+  blocked "属主不对（换成别的用户）" "应为 $CATALOG_META；没切版本" 0
+  chown 0 -- "$CATALOG"
+else
+  echo "  … 没跑成：「属主不对」要 root 才造得出来（chown 成别人）"
+  skipped=1
+fi
+mv -- "$CATALOG" "$TMP/catalog.real"
+ln -s -- "$TMP/catalog.real" "$CATALOG"
+if [[ ! -L "$CATALOG" ]]; then
+  echo "  … 没跑成：这台建不了符号链接，「是符号链接」没测"
+  skipped=1
+else
+  round changed
+  blocked "是符号链接" "是符号链接，不读" 0
+fi
+rm -f -- "$CATALOG"
+mv -- "$TMP/catalog.real" "$CATALOG"
+# 读不到属主权限（stat 失败）：桩只对 $CATALOG 失败，别的文件照常；这一轮完就撤掉
+stat() {
+  if [[ "${*: -1}" == "$CATALOG" ]]; then return 1; fi
+  command stat "$@"
+}
+check "stat 的桩：只有读 $CATALOG 失败，别的文件照常" \
+  "$(stat -c %a -- "$CATALOG" >/dev/null 2>&1 && echo 读到 || echo 读不到):$(stat -c %a -- "$FAKE/node" >/dev/null 2>&1 && echo 读到 || echo 读不到)" \
+  "读不到:读到"
+round changed
+blocked "读不到属主权限（stat 失败）" "$CATALOG 是「读不到」，应为 $CATALOG_META；没切版本" 0
+unset -f stat
+check "stat 的桩撤掉了" "$(stat -c %a -- "$CATALOG" >/dev/null 2>&1 && echo 读到 || echo 读不到)" 读到
+PG_BEFORE=fail
+round changed
+blocked "装之前连不上库" "装目录之前读不到库 fleet 里目录那几张表的行数" 0
+PG_BEFORE=garbage
+round changed
+blocked "装之前读回的不是数" "装目录之前读不到库 fleet 里目录那几张表的行数" 0
+PG_BEFORE=ok
+round fail
+blocked "装载器报错（引用不存在），读回和装之前一样" "目录没装成（装载器退出码 1，原话见上；读回核过：几张表的行数、装载器的操作记录都和装之前一样；没切版本）：目录配置里引用了不存在的东西" 1
+check "装载器报错：它的原话一条条打出来了" "$(said '- stages.judge 的路由 jev:jev-1.13:api-shel 不存在')" 1
+PG_AFTER=grown
+round fail
+blocked "装载器报错，读回库却变了" "；现在 账号池 7、路由 9、阶段 8、阶段里挂的路由 58，到" 1
+check "装载器报错，读回库却变了：说要人看，不说「一行没动」" "$(reds_with '要人看；没切版本'):$(reds_with '一样')" "1:0"
+PG_AFTER=fail
+round fail
+blocked "装载器报错，读回也读不到" "装完读不回库，库里变没变没查成；没切版本" 1
+round changed
+blocked "装完连不上库" "目录装完了，但读不回库 fleet 里目录那几张表的行数" 1
+PG_AFTER=garbage
+round changed
+blocked "装完读回的不是数" "目录装完了，但读不回库 fleet 里目录那几张表的行数" 1
+tables=(账号池 路由 阶段 阶段里挂的路由)
+had=(6 9 8 58)
+for i in 0 1 2; do
+  PG_AFTER=zero-$i
+  round changed
+  blocked "装完${tables[i]}是 0 行" "库 fleet 里${tables[i]} 0 行（装之前 ${had[i]} 行），引擎派不出活（要人看）；没切版本" 1
+done
+PG_AFTER=zero-3
+round changed
+blocked "装完阶段里挂的路由是 0 行" "库 fleet 里阶段里挂的路由 0 行（装之前 58 行），引擎派不出活（阶段排过一次装载器就不再动" 1
+PG_BEFORE=zero-3
+round changed
+blocked "阶段里挂的路由装之前就是 0 行（驾驶舱里摘光的）" "阶段里挂的路由 0 行（装之前 0 行），引擎派不出活（阶段排过一次装载器就不再动：是驾驶舱里摘光的，就去驾驶舱挂上）；没切版本" 1
+PG_BEFORE=ok
+PG_AFTER=ok
+round changed
+do_release "$B" >"$TMP/out"
+check "都齐了再发 B：切到 B、没有红" "$(current_sha):${#REDS[@]}" "$B:0"
+check "先跑迁移、再装目录，装的时候还没切版本（current 还指着 A）" "$(tr '\n' '|' <"$FAKE/order")" \
+  "migrate b|catalog current=$A|"
+build_release "$C" >/dev/null # 老提交：这一版没有目录装载器
+round changed
+do_release "$C" >"$TMP/out"
+check "这一版没有装载器：照常切到 C" "$(current_sha)" "$C"
+check "这一版没有装载器：没跑装载器、没有红" "$(loader_runs):${#REDS[@]}" "0:0"
+check "这一版没有装载器：说了一声" "$(said '这一版没有目录装载器')" 1
+# runuser、pg_admin 的桩留着：后面那段不用它们（unset 掉 shellcheck 会当成桩从没被调过）
+NODE=$(command -v node) || NODE=""
 
 echo "== 真起一个服务：切完 current 没重启就被打断，再跑同一版会重启；主进程跑的是哪一版，健康检查查得出"
 if ((EUID != 0)) || [[ ! -d /run/systemd/system ]]; then
