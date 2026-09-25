@@ -39,7 +39,7 @@ function scopesBase(): string {
   return import.meta.env.FLEET_DEMO_SCOPES ?? `${import.meta.env.BASE_URL}scopes/`;
 }
 
-/** 口令记在本机：在页面里点来点去、刷新，都还是这条链接的范围；链接作废或过期后就忘掉它。 */
+/** 口令记在本机：在页面里点来点去、刷新，都还是这条链接的范围；链接作废或过期后才忘掉它。 */
 const TOKEN_KEY = `${brand.storagePrefix}k`;
 
 function storedToken(): string | null {
@@ -68,7 +68,8 @@ export function loadDemoScope(): Promise<LoadedScope | null> {
     const token = fromUrl ?? storedToken();
     const result = await resolveScope({ token, base: scopesBase(), now: new Date() });
     if (fromUrl && result.source === 'link') storeToken(fromUrl);
-    if (token && result.source !== 'link') storeToken(null);
+    // 链接作废、过期了才忘掉；没读成（网络一闪）的留着，下回打开再试。
+    if (token && (result.link === 'missing' || result.link === 'expired')) storeToken(null);
     loaded = result;
     return result;
   })();

@@ -18,7 +18,8 @@ export interface ScanResult {
 }
 
 /**
- * 内置的禁用词，按子串比、不分大小写：项目的真名和旧名、创始人的 GitHub 用户名、GitHub 地址、内部叫法。
+ * 内置的禁用词，按子串比、不分大小写：项目的真名和旧名、创始人的 GitHub 用户名、GitHub 地址、内部叫法、
+ * 规矩原话（拿一句去 GitHub 搜就能对上公开仓）。
  * 真域名不写在公开仓里：发布时从服务器配置传进来（FLEET_DEMO_FORBID，逗号或空白分隔），见 forbiddenTerms。
  */
 export const BUILTIN_TERMS: readonly string[] = [
@@ -35,6 +36,17 @@ export const BUILTIN_TERMS: readonly string[] = [
   'temporal',
   '驾驶舱',
   '帅位',
+  '人闸',
+  '拼车',
+  '独享',
+  '总指挥',
+  '指挥官',
+  '审官',
+  '出比 5.1',
+  '不做 UI 类活',
+  'GPT 族不碰',
+  'GPT 不碰',
+  '不用 Fable',
 ];
 
 /** 三个字母的短名按整词比（前后不是字母、数字、_、$），免得误伤别的词。 */

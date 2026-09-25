@@ -57,6 +57,30 @@ describe('演示版产物扫描', () => {
     }
   });
 
+  test('先红后绿：本项目自己的叫法和规矩原话也拦得住（拿一句去 GitHub 搜就能对上公开仓）', () => {
+    const words = [
+      '人闸',
+      '拼车',
+      '独享',
+      '总指挥',
+      '指挥官',
+      '审官',
+      '出比 5.1',
+      '不做 UI 类活',
+      'GPT 族不碰',
+      'GPT 不碰',
+      '不用 Fable',
+    ];
+    const d = out({ ...CLEAN, 'assets/x.js': `x=${JSON.stringify(words.join('，'))}` });
+    expect(
+      scanDir(d)
+        .hits.map((h) => h.term)
+        .sort(),
+    ).toEqual(words.map((w) => w.toLowerCase()).sort());
+    writeFileSync(join(d, 'assets/x.js'), 'x="要不要人来拍板；样例禁令：这一类模型不接界面活"');
+    expect(scanDir(d).hits).toEqual([]);
+  });
+
   test('GitHub 地址、创始人的用户名、内部叫法', () => {
     const r = scanDir(
       out({

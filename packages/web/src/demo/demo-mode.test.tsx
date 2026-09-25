@@ -13,7 +13,7 @@ import { SidebarNav } from '../components/shell/sidebar';
 import Shell from '../routes/shell';
 import TaskDetailPage from '../routes/task-detail';
 import { renderApp } from '../test/harness';
-import { setDemoScopeForTest } from './access';
+import { loadDemoScope, setDemoScopeForTest } from './access';
 import { createDemoApi } from './api';
 import type { DemoDetail, DemoModule } from './scope';
 
@@ -124,6 +124,45 @@ describe('演示版：数据层', () => {
     expect(api.source).toBe('demo');
     expect((await api.me()).user.displayName).toBe('访客');
     expect(((await api.devLogin('u-lan').catch((e: unknown) => e)) as ApiError).code).toBe('demo_no_login');
+  });
+});
+
+describe('演示版：本机记着的口令', () => {
+  const KEY = 'meridian-demo.k';
+  const TOKEN = 'B'.repeat(43);
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    localStorage.clear();
+  });
+  /** 带着本机记的口令打开一次；范围文件照 respond 回。 */
+  const open = (respond: (url: string) => Response) => {
+    localStorage.setItem(KEY, TOKEN);
+    vi.stubGlobal('fetch', async (url: string | URL | Request) => respond(String(url)));
+    setDemoScopeForTest(null);
+    return loadDemoScope();
+  };
+  const notFound = () => new Response('not found', { status: 404 });
+
+  test('没读成（网络一闪）：口令留着，下回打开再试', async () => {
+    const r = await open(() => {
+      throw new TypeError('Failed to fetch');
+    });
+    expect(r?.link).toBe('broken');
+    expect(localStorage.getItem(KEY)).toBe(TOKEN);
+  });
+
+  test('链接作废（404）、过期了：忘掉本机记的口令', async () => {
+    expect((await open(notFound))?.link).toBe('missing');
+    expect(localStorage.getItem(KEY)).toBeNull();
+
+    const old = { v: 1, modules: ['board'], detail: 'status', expiresAt: '2000-01-01T00:00:00Z' };
+    const r = await open((url) =>
+      url.endsWith('default.json')
+        ? notFound()
+        : new Response(JSON.stringify(old), { headers: { 'content-type': 'application/json' } }),
+    );
+    expect(r?.link).toBe('expired');
+    expect(localStorage.getItem(KEY)).toBeNull();
   });
 });
 

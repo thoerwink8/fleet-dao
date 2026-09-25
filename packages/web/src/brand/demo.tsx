@@ -37,5 +37,9 @@ export const brand: Brand = {
     marshal: 'AI 调度员',
     marshalShort: '调度员',
   },
+  stageHints: {
+    triage: '判断是哪类活、说没说清、多大、要不要人来拍板',
+    ui: '界面类写码；GPT 族不接',
+  },
   repoLink: () => undefined,
 };

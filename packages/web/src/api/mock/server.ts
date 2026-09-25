@@ -563,7 +563,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
           source: 'session',
           kind: 'done',
           runId: front.id,
-          text: '交活：分诊完成——写码类、说清楚了、不碰人闸',
+          text: '交活：分诊完成——写码类、说清楚了、不用等人拍板',
         });
         startRun(tv, undefined, 'spec', pickRoute('spec') ?? front.routeId, '需求文档阶段排第一');
         setTaskState(tv, 'planning');

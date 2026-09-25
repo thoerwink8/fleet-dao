@@ -30,6 +30,11 @@ export interface Brand {
     /** 同上，句子里的短说法：「已交××诊断」。 */
     marshalShort: string;
   };
+  /**
+   * 调度台里转述本项目规矩的两条阶段说明：正式版照原话，演示版换成样例说法
+   * （原话拿一句去 GitHub 搜就能对上公开仓）。
+   */
+  stageHints: { triage: string; ui: string };
   /** 仓库里某个 PR、issue 的外链；演示版一律不给（不带任何外链）。 */
   repoLink(repo: { owner: string; name: string }, kind: 'pull' | 'issues', n: number): string | undefined;
 }

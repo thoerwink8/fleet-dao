@@ -2,31 +2,21 @@ import { fileURLToPath } from 'node:url';
 import { reactRouter } from '@react-router/dev/vite';
 import tailwindcss from '@tailwindcss/vite';
 import { defineConfig, type Plugin } from 'vite';
+import { demoRenamed } from './src/build/demo-renames.ts';
 import { LICENSE_DATA, thirdPartyLicenses } from './src/build/licenses.ts';
 
 // 开发时 /api、/auth 转给本机的驾驶舱后端（packages/api，默认 127.0.0.1:8787），页面和接口同源。
 // 后端按 FLEET_PUBLIC_URL（开发默认 http://localhost:5173）核对写请求的来源，所以浏览器要开 localhost:5173。
 const backend = process.env.FLEET_API_ORIGIN ?? 'http://127.0.0.1:8787';
 
-/**
- * 演示版的包里要换掉的几处（换完由 src/build/scan.ts 再扫一遍，新冒出来的扫描会拦）：
- * - 契约里绕不开的内部编号换成通用编号（执行方式的编号 mirasim 进了 zod 校验和假数据）。
- *   整个演示版的包自成一体（假数据、不连后端），两头一起换不会对不上。
- * - 第三方库报错提示里带的 GitHub 地址（react-router 缺 URLSearchParams 时的提示）：演示版里一个 GitHub 地址都不留。
- */
-const DEMO_RENAMES: [RegExp, string][] = [
-  [/\bmirasim\b/g, 'relay'],
-  [/https:\/\/github\.com\/ungap\/url-search-params/g, 'a URLSearchParams polyfill'],
-];
-
+/** 演示版的包里要换掉的几处，表在 src/build/demo-renames.ts。 */
 function demoRename(): Plugin {
   return {
     name: 'demo-rename',
     apply: 'build',
     enforce: 'post',
     renderChunk(code) {
-      let out = code;
-      for (const [re, to] of DEMO_RENAMES) out = out.replace(re, to);
+      const out = demoRenamed(code);
       return out === code ? null : { code: out, map: null };
     },
   };

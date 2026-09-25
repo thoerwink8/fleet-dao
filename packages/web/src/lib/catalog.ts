@@ -16,11 +16,11 @@ import type {
 import { TIME } from './format';
 
 export const STAGES: { id: StageKind; label: string; hint: string }[] = [
-  { id: 'triage', label: '分诊', hint: '判断是哪类活、说没说清、多大、碰不碰人闸' },
+  { id: 'triage', label: '分诊', hint: brand.stageHints.triage },
   { id: 'spec', label: '需求文档', hint: '按原话写「要什么、怎么算做完」' },
   { id: 'plan', label: '方案', hint: '怎么做、拆几块、各改哪里、先后依赖' },
   { id: 'execute', label: '写码', hint: '改文件、跑测试、开 PR；执行方式要能改文件' },
-  { id: 'ui', label: 'UI', hint: '界面类写码；GPT 族不碰' },
+  { id: 'ui', label: 'UI', hint: brand.stageHints.ui },
   { id: 'review', label: '第二意见', hint: '全新会话看改动，最多 2 轮' },
   { id: 'research', label: '调研', hint: '查资料、比方案' },
   { id: 'judge', label: '判断', hint: `${brand.terms.judgeQuiz}：选择题 + 把握度` },

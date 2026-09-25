@@ -17,6 +17,11 @@ export interface LoadedScope {
   source: 'link' | 'default' | 'builtin';
   /** 给游客看的一句话：链接过期了、作废了、没读到……没事就没有。 */
   notice?: string;
+  /**
+   * 带了口令却没按链接看的原因：expired 过期、missing 作废或不存在（这两种该忘掉本机记的口令）；
+   * broken 没读成（网络一闪、文件坏了），口令留着下回再试。
+   */
+  link?: 'expired' | 'missing' | 'broken';
 }
 
 /** 口令的样子：后端发的是 32 字节的 base64url（43 个字符）；别的一律不认，也不拿去拼地址。 */
@@ -84,23 +89,18 @@ export async function resolveScope(opts: {
   fetch?: typeof fetch;
 }): Promise<LoadedScope> {
   const fetchFn = opts.fetch ?? fetch;
-  let notice: string | undefined;
+  let why: Pick<LoadedScope, 'notice' | 'link'> = {};
   if (opts.token) {
     const link = await readScope(`${opts.base}${await sha256Hex(opts.token)}.json`, fetchFn);
     if (link.ok && !expired(link.scope, opts.now)) return { scope: link.scope, source: 'link' };
-    notice = link.ok
-      ? '这条演示链接已过期，下面按默认范围展示。'
+    why = link.ok
+      ? { link: 'expired', notice: '这条演示链接已过期，下面按默认范围展示。' }
       : link.why === 'missing'
-        ? '这条演示链接已作废或不存在，下面按默认范围展示。'
-        : `这条演示链接的范围没读到（${link.detail}），下面按默认范围展示。`;
+        ? { link: 'missing', notice: '这条演示链接已作废或不存在，下面按默认范围展示。' }
+        : { link: 'broken', notice: `这条演示链接的范围没读到（${link.detail}），下面按默认范围展示。` };
   }
   const fallback = await readScope(`${opts.base}${DEMO_DEFAULT_SCOPE_FILE}`, fetchFn);
-  if (fallback.ok && !expired(fallback.scope, opts.now)) {
-    return notice
-      ? { scope: fallback.scope, source: 'default', notice }
-      : { scope: fallback.scope, source: 'default' };
-  }
-  return notice
-    ? { scope: DEMO_STRICT_DEFAULT, source: 'builtin', notice }
-    : { scope: DEMO_STRICT_DEFAULT, source: 'builtin' };
+  if (fallback.ok && !expired(fallback.scope, opts.now))
+    return { scope: fallback.scope, source: 'default', ...why };
+  return { scope: DEMO_STRICT_DEFAULT, source: 'builtin', ...why };
 }

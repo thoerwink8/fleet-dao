@@ -38,5 +38,9 @@ export const brand: Brand = {
     marshal: 'AI 帅位',
     marshalShort: '帅位',
   },
+  stageHints: {
+    triage: '判断是哪类活、说没说清、多大、碰不碰人闸',
+    ui: '界面类写码；GPT 族不碰',
+  },
   repoLink: (repo, kind, n) => `https://github.com/${repo.owner}/${repo.name}/${kind}/${n}`,
 };

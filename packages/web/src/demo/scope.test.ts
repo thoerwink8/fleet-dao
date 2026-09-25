@@ -63,12 +63,14 @@ describe('定下这次按哪份范围', () => {
     expect(r.source).toBe('default');
     expect(r.scope).toEqual(DEFAULT);
     expect(r.notice).toMatch(/作废/);
+    expect(r.link).toBe('missing');
   });
 
   test('门面把查不到的路径回落成了单页（200 + HTML）：也算作废，不当成读坏了', async () => {
     const s = server({ [linkUrl]: html, [defaultUrl]: () => json(DEFAULT) });
     const r = await resolveScope({ token: TOKEN, base: BASE, now: NOW, fetch: s.fetchFn });
     expect(r.notice).toMatch(/作废/);
+    expect(r.link).toBe('missing');
   });
 
   test('链接过期了：文件还在也不认（防游客改时钟之外，还防后端没来得及撤）', async () => {
@@ -79,6 +81,7 @@ describe('定下这次按哪份范围', () => {
     const r = await resolveScope({ token: TOKEN, base: BASE, now: NOW, fetch: s.fetchFn });
     expect(r.source).toBe('default');
     expect(r.notice).toMatch(/过期/);
+    expect(r.link).toBe('expired');
   });
 
   test('范围文件内容不合约定、或者没连上：照实说没读到，退回默认范围', async () => {
@@ -88,11 +91,13 @@ describe('定下这次按哪份范围', () => {
     });
     const r1 = await resolveScope({ token: TOKEN, base: BASE, now: NOW, fetch: bad.fetchFn });
     expect(r1.notice).toMatch(/没读到（内容不合约定）/);
+    expect(r1.link).toBe('broken');
     const down = (async () => {
       throw new TypeError('Failed to fetch');
     }) as typeof fetch;
     const r2 = await resolveScope({ token: TOKEN, base: BASE, now: NOW, fetch: down });
     expect(r2.notice).toMatch(/没读到（Failed to fetch）/);
+    expect(r2.link).toBe('broken');
     expect(r2.source).toBe('builtin');
     expect(r2.scope).toEqual(DEMO_STRICT_DEFAULT);
   });
