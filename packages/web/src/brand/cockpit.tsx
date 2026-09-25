@@ -1,4 +1,4 @@
-// 正式驾驶舱的品牌。
+// 正式驾驶舱的品牌。页面上看得见的名字、标签页标题只写「驾驶舱」，不带仓名：登录页是公开的（#54）。
 import { cn } from '../lib/utils';
 import type { Brand } from './types';
 
@@ -23,9 +23,9 @@ function Mark({ className }: { className?: string }) {
 
 export const brand: Brand = {
   kind: 'cockpit',
-  name: 'fleet·dao',
+  name: '驾驶舱',
   product: '驾驶舱',
-  title: (page) => (page ? `${page} · fleet-dao 驾驶舱` : 'fleet-dao 驾驶舱'),
+  title: (page) => (page ? `${page} · 驾驶舱` : '驾驶舱'),
   storagePrefix: 'fleet-dao.',
   Mark,
   favicon: `data:image/svg+xml,${encodeURIComponent(

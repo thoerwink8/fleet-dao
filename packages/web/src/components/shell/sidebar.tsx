@@ -129,7 +129,9 @@ export function SidebarNav({
         {collapsed ? null : (
           <div className="min-w-0 leading-tight">
             <div className="num text-[14px] font-semibold tracking-tight">{brand.name}</div>
-            <div className="text-[11px] text-muted-foreground">{brand.product}</div>
+            {brand.product === brand.name ? null : (
+              <div className="text-[11px] text-muted-foreground">{brand.product}</div>
+            )}
           </div>
         )}
       </div>
