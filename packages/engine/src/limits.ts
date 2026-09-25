@@ -1,6 +1,8 @@
 // 一次运行用到的上限与超时。全部可配（驾驶舱设置 → 工作流输入）；缺的字段读时现算默认值，不写回输入。
 // 工作流开头经 decide 本地活动解析一次，结果进历史：以后改默认值，在途任务照旧用它开工时那一套（windsurf-dao#1813）。
 
+import { QUICK_TIMEOUT_SECONDS } from './activity-options.ts';
+
 export interface Limits {
   /** 一个需求同时最多跑几个子任务。 */
   maxParallelSubtasks: number;
@@ -79,13 +81,24 @@ export const DEFAULT_LIMITS: Readonly<Limits> = Object.freeze({
   mergeQueueIdleMinutes: 60,
 });
 
-/** 缺的、非法的（非有限数、负数）一律取默认值。 */
+/**
+ * 有下限的项：给了比下限小的取下限。
+ * 合并队列空闲收工不能早于排队活动一次尝试的限时：排队的那一下最晚在限时内落地（带截止时间），
+ * 队列记下的撤回至少要活到那时候才挡得住它。
+ */
+export const LIMIT_MINIMUMS: Readonly<Partial<Record<keyof Limits, number>>> = Object.freeze({
+  mergeQueueIdleMinutes: QUICK_TIMEOUT_SECONDS / 60,
+});
+
+/** 缺的、非法的（非有限数、负数）一律取默认值；比下限小的取下限。 */
 export function resolveLimits(partial: Partial<Limits> | null | undefined): Limits {
   const out: Limits = { ...DEFAULT_LIMITS };
   if (!partial) return out;
   for (const key of Object.keys(DEFAULT_LIMITS) as (keyof Limits)[]) {
     const value: unknown = partial[key];
-    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) out[key] = value;
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+      out[key] = Math.max(value, LIMIT_MINIMUMS[key] ?? 0);
+    }
   }
   return out;
 }

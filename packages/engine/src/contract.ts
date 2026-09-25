@@ -12,6 +12,8 @@ export const WORKFLOW_TYPES = {
   requirement: 'requirementWorkflow',
   subtask: 'subtaskWorkflow',
   mergeQueue: 'mergeQueueWorkflow',
+  /** P0 验收（deploy/hello.sh）：跑一次就知道引擎工人在接活。 */
+  hello: 'helloWorkflow',
 } as const;
 
 /** 一张 issue 一条需求工作流，例如 `req:acme/demo#12`。驾驶舱后端发信号按它找。 */

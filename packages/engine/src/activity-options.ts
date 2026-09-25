@@ -64,6 +64,9 @@ export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
   runTests: 'tests',
 };
 
+/** quick 一档（含排进合并队列、撤出）一次尝试的限时。合并队列的空闲收工时长不能比它短（limits.ts 的下限）。 */
+export const QUICK_TIMEOUT_SECONDS = 30;
+
 /** 重试也治不好的错误码：直接交给失败分流。 */
 export const NON_RETRYABLE_CODES: readonly string[] = [
   'NEEDS_HUMAN',
@@ -87,7 +90,10 @@ export function profileOptions(profile: Profile, limits: Limits): ActivityOption
   const heartbeatTimeout = `${limits.heartbeatSeconds} seconds`;
   switch (profile) {
     case 'quick':
-      return { startToCloseTimeout: '30 seconds', retry: retry(5, '1 second', '30 seconds') };
+      return {
+        startToCloseTimeout: `${QUICK_TIMEOUT_SECONDS} seconds`,
+        retry: retry(5, '1 second', '30 seconds'),
+      };
     case 'git':
       return { startToCloseTimeout: '5 minutes', retry: retry(3, '5 seconds', '1 minute') };
     case 'setup':

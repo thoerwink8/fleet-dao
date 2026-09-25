@@ -51,7 +51,14 @@ const CALLS_DECIDE = /\bdecide\s*\(/;
 
 describe('工作流文件的规矩', () => {
   it('扫到了工作流文件和它们的 import（不是空扫一遍就算过）', () => {
-    expect(files.sort()).toEqual(['index.ts', 'kit.ts', 'merge-queue.ts', 'requirement.ts', 'subtask.ts']);
+    expect(files.sort()).toEqual([
+      'hello.ts',
+      'index.ts',
+      'kit.ts',
+      'merge-queue.ts',
+      'requirement.ts',
+      'subtask.ts',
+    ]);
     expect(all.length).toBeGreaterThan(10);
   });
 

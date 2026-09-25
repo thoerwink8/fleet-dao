@@ -1,5 +1,6 @@
 // 流程判断全是纯函数：不起 Temporal 直接测。
 import { describe, expect, it } from 'vitest';
+import { activityOptions, QUICK_TIMEOUT_SECONDS } from '../src/activity-options.ts';
 import {
   afterMergeReturn,
   checkDelivery,
@@ -39,6 +40,18 @@ describe('上限：读时现算默认值', () => {
     expect(old).toEqual({ reviewRounds: 5 });
     expect(resolveLimits({ ciFixRounds: -1, heartbeatSeconds: Number.NaN }).ciFixRounds).toBe(3);
     expect(resolveLimits(undefined)).toEqual(DEFAULT_LIMITS);
+  });
+
+  it('合并队列空闲收工有下限：不短于排队活动一次尝试的限时（30 秒），给小了取下限', () => {
+    const floor = QUICK_TIMEOUT_SECONDS / 60;
+    expect(floor).toBe(0.5);
+    expect(
+      [0, 0.1, 0.5, 5].map((m) => resolveLimits({ mergeQueueIdleMinutes: m }).mergeQueueIdleMinutes),
+    ).toEqual([0.5, 0.5, 0.5, 5]);
+    // 下限和排队活动的真实限时是同一个数（改了一边另一边跟着变）。
+    expect(activityOptions('enqueueMerge', DEFAULT_LIMITS).startToCloseTimeout).toBe(
+      `${QUICK_TIMEOUT_SECONDS} seconds`,
+    );
   });
 });
 
