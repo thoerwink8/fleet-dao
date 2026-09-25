@@ -11,7 +11,9 @@ try {
   });
   console.log(`开了 #${r.number}（${r.milestone}）：${r.url}`);
   if (r.specsFile)
-    console.log(`需求文档骨架：${r.specsFile}（「对应计划」的引号里填上 plan.md 那一条再提交）`);
+    console.log(
+      `需求文档：${r.specsFile}（「对应计划」的引号里填上 plan.md 那一条、「设计依据」写上 design 哪一节再提交）`,
+    );
 } catch (e) {
   console.error(e instanceof Error ? e.message : String(e));
   process.exitCode = 1;
