@@ -10,6 +10,7 @@ import {
   FeishuReviseDraftResponse,
   FeishuRoutes,
   FeishuTaskLookupResponse,
+  requirementWorkflowId,
 } from '@fleet-dao/shared';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { devFixtures } from '../src/dev-fixtures.ts';
@@ -382,7 +383,7 @@ describe('POST /feishu/messages：一句话', () => {
     });
     expect(h.signals).toEqual([
       {
-        taskId: IDS.task12,
+        workflowId: requirementWorkflowId({ owner: 'example', name: 'canary' }, 12),
         signal: { name: 'answer', by: IDS.founderA, askId: FEISHU_IDS.askOpen, answer: '6 位' },
       },
     ]);

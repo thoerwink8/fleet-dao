@@ -1,6 +1,6 @@
 // GitHub 事件过了后端的门（签名、去重、白名单，packages/api 的 github.ts）之后的处理：写 PR 镜像、叫醒工作流。
 // 事件只当「叫醒」：里面的文字不当指令，CI 结论回 GitHub 重读，不信事件里带的（事件会乱序、会晚到、会被补收重放）。
-// 抛错 = 没处理成：后端会撤掉投递登记，让重投或补收再进来一次，所以这里的每一步都要能重放。
+// 抛错 = 没处理成：后端把这条投递记成出错、原文留着，对账时按原文重放，所以这里的每一步都要能重放。
 import { z } from 'zod';
 import { mirrorChecks } from './checks.ts';
 import { parseRepoSlug, type RepoRef, repoSlug } from './client.ts';

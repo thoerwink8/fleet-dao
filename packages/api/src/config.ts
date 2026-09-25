@@ -48,6 +48,12 @@ export interface Config {
    * 演示版的地址不归后端管：发布脚本构建驾驶舱时写进前端（FLEET_DEMO_URL），链接由前端拼。
    */
   demoDir: string | null;
+  /** Temporal 服务地址（hostname:port）；不给用本机默认（和引擎的 configFromEnv 同一个默认值）。 */
+  temporalAddress: string;
+  /** Temporal 命名空间；不给用 fleet。 */
+  temporalNamespace: string;
+  /** 引擎工人取活的任务队列；只给健康检查的 engine 项（查这条队列上有没有 poller）用，发信号按工作流编号直接找。 */
+  fleetTaskQueue: string;
 }
 
 export class ConfigError extends Error {
@@ -63,6 +69,10 @@ const MIN_SECRET_LENGTH = 32;
 /** Node 自带 fetch 默认 300 秒收不到响应头就断开；阻塞等回答要比它短，命令端才收得到 pending。 */
 const MAX_ASK_WAIT_SECONDS = 290;
 const LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1']);
+/** 法国本机的 Temporal；和引擎 worker.ts 的 configFromEnv 用同一套默认值，两边不用都配。 */
+const DEFAULT_TEMPORAL_ADDRESS = '127.0.0.1:7243';
+const DEFAULT_TEMPORAL_NAMESPACE = 'fleet';
+const DEFAULT_FLEET_TASK_QUEUE = 'fleet';
 
 type Env = Record<string, string | undefined>;
 
@@ -139,6 +149,11 @@ export function loadConfig(env: Env): Config {
     problems,
   );
 
+  // 都有默认值，两个环境都不强制配（和引擎 worker.ts 的 configFromEnv 同一套默认，Temporal 没起来也不挡后端启动）。
+  const temporalAddress = env.TEMPORAL_ADDRESS?.trim() || DEFAULT_TEMPORAL_ADDRESS;
+  const temporalNamespace = env.TEMPORAL_NAMESPACE?.trim() || DEFAULT_TEMPORAL_NAMESPACE;
+  const fleetTaskQueue = env.FLEET_TASK_QUEUE?.trim() || DEFAULT_FLEET_TASK_QUEUE;
+
   if (
     problems.length > 0 ||
     !publicUrl ||
@@ -166,6 +181,9 @@ export function loadConfig(env: Env): Config {
     quotaStaleAfterMs: QUOTA_STALE_AFTER_MS,
     sseHeartbeatMs: 25 * 1000,
     demoDir,
+    temporalAddress,
+    temporalNamespace,
+    fleetTaskQueue,
   };
 }
 

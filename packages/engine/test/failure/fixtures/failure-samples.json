@@ -59,7 +59,7 @@
         "hostId": "claude-code",
         "message": "API Error: 400 此设备已被解绑，请在终端重新运行 reclaude 完成登录（请勿在 Claude Code 内使用 /login 登录）（请求 ID: <请求ID>）"
       },
-      "expect": { "action": "swapRoute", "rule": "AU2", "avoid": "pool", "alert": true }
+      "expect": { "action": "park", "rule": "DV1", "avoid": "pool", "alert": true }
     },
     {
       "id": "S06",
@@ -259,14 +259,14 @@
       "provenance": "test-only",
       "origin": "旧仓 tests/go-fallback.test.js",
       "evidence": { "message": "GoUsageLimitError: Monthly usage limit reached" },
-      "expect": { "action": "swapRoute", "rule": "QT1", "avoid": "pool", "alert": false }
+      "expect": { "action": "retry", "rule": "QT1", "avoid": "pool", "alert": false }
     },
     {
       "id": "S32",
       "provenance": "test-only",
       "origin": "旧仓 tests/go-fallback.test.js",
       "evidence": { "message": "You've reached your 5-hour usage limit" },
-      "expect": { "action": "swapRoute", "rule": "QT1", "avoid": "pool" }
+      "expect": { "action": "retry", "rule": "QT1", "avoid": "pool" }
     },
     {
       "id": "S35",
@@ -404,9 +404,10 @@
     {
       "id": "X03",
       "provenance": "observed",
-      "origin": "ai-gateway-stack deploy/reclaude-org-switch.test.mjs 的 REAL_EXHAUSTED_ERR（2026-09-23 拼车号当场用满实测，同时收到 rate_limit_event status:rejected）。前半句是 Claude Code 自带的临时限流说法，后半句是 reclaude 说的额度用满；认的是后半句，按上游给的 20 分钟避开这个池",
+      "origin": "ai-gateway-stack deploy/reclaude-org-switch.test.mjs 的 REAL_EXHAUSTED_ERR（2026-09-23 拼车号当场用满实测，同时收到 rate_limit_event status:rejected）。前半句是 Claude Code 自带的临时限流说法，后半句是 reclaude 说的额度用满；认的是后半句，按上游给的 20 分钟避开这个池。出在拼车号（备池）：先换到别的池接着干",
       "evidence": {
         "hostId": "claude-code",
+        "poolRole": "backup",
         "message": "API Error: Server is temporarily limiting requests (not your usage limit) · 拼车 5 小时额度已用完，约 20 分钟后重置，请稍后再来（请求 ID: <请求ID>）"
       },
       "expect": {
@@ -439,14 +440,14 @@
           "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"rejected\",\"isUsingOverage\":false},\"uuid\":\"<uuid>\",\"session_id\":\"<会话编号>\"}"
         ]
       },
-      "expect": { "action": "swapRoute", "rule": "QT1", "avoid": "pool" }
+      "expect": { "action": "retry", "rule": "QT1", "avoid": "pool" }
     },
     {
       "id": "X05",
       "provenance": "observed",
-      "origin": "ai-gateway-stack docs/DECISIONS.md（同号多机高频触发，设备被解绑）；docs/reference/adapters.md 2.5",
+      "origin": "ai-gateway-stack docs/DECISIONS.md（同号多机高频触发，设备被解绑）；docs/reference/adapters.md 2.5；reclaude 文档「设备被自动撤销」：这台机器再发请求会拿到 401 device_revoked",
       "evidence": { "hostId": "claude-code", "message": "401 device_revoked" },
-      "expect": { "action": "swapRoute", "rule": "AU2", "avoid": "pool", "alert": true }
+      "expect": { "action": "park", "rule": "DV1", "avoid": "pool", "alert": true }
     },
     {
       "id": "X06",
@@ -825,21 +826,27 @@
         "now": "2026-09-22T06:00:00.000Z",
         "message": "usage limit reached, resets at 2026-09-22T08:00:00Z"
       },
-      "expect": { "action": "swapRoute", "rule": "QT1", "avoid": "pool", "until": "2026-09-22T08:00:00.000Z" }
+      "expect": {
+        "action": "retry",
+        "rule": "QT1",
+        "avoid": "pool",
+        "until": "2026-09-22T08:00:00.000Z",
+        "delaySeconds": 7200
+      }
     },
     {
       "id": "X48",
       "provenance": "test-only",
       "origin": "旧仓 tests/failure-class.test.js",
       "evidence": { "message": "本周额度已用完" },
-      "expect": { "action": "swapRoute", "rule": "QT1", "avoid": "pool" }
+      "expect": { "action": "retry", "rule": "QT1", "avoid": "pool" }
     },
     {
       "id": "X49",
       "provenance": "observed",
       "origin": "windsurf-dao docs/observations/2026-09-05-mirasim叠reclaude的接法.md：mirasim 自己的额度错",
       "evidence": { "hostId": "mirasim", "message": "Cloud quota is exhausted" },
-      "expect": { "action": "swapRoute", "rule": "QT1", "avoid": "pool" }
+      "expect": { "action": "retry", "rule": "QT1", "avoid": "pool" }
     },
     {
       "id": "X50",
@@ -969,6 +976,151 @@
         "alert": false,
         "routeOutcome": "neutral"
       }
+    },
+    {
+      "id": "X62",
+      "provenance": "format",
+      "origin": "packages/github 的 pushBranch 推前卫生检查（PR #21）的码；原文是引擎推分支端口把命中处整理成的一句（文件:行 规则名，不带值）",
+      "evidence": {
+        "source": "pushBranch",
+        "routeBound": false,
+        "code": "HYGIENE_BLOCKED",
+        "retryable": false,
+        "message": "卫生检查拦下了要公开的内容：config/app.env:3 github-token"
+      },
+      "expect": { "action": "retry", "rule": "HY1", "counter": "reworks", "delaySeconds": 0, "alert": false }
+    },
+    {
+      "id": "X63",
+      "provenance": "format",
+      "origin": "packages/github 的 pushBranch 推前卫生检查（PR #21）：名单没读到一律不推",
+      "evidence": {
+        "source": "pushBranch",
+        "routeBound": false,
+        "code": "HYGIENE_LIST_MISSING",
+        "retryable": false,
+        "message": "推 acme/widgets 之前的卫生检查没法做：没找到已知敏感值名单。名单放好之前一律不推（引擎读 /etc/fleet-dao/sensitive-values.txt）"
+      },
+      "expect": { "action": "park", "rule": "HY2", "alert": true, "routeOutcome": "neutral" }
+    },
+    {
+      "id": "X64",
+      "provenance": "format",
+      "origin": "packages/github 的 pushBranch 推前卫生检查（PR #21）：没扫成一律不推",
+      "evidence": {
+        "source": "pushBranch",
+        "routeBound": false,
+        "code": "HYGIENE_UNSCANNED",
+        "retryable": false,
+        "message": "推 acme/widgets 之前的卫生检查没扫成：要推的 1a2b3c4 不在扫过的提交里。没扫成一律不推"
+      },
+      "expect": { "action": "park", "rule": "HY2", "alert": true, "routeOutcome": "neutral" }
+    },
+    {
+      "id": "X65",
+      "provenance": "format",
+      "origin": "引擎开 PR 的端口取需求文档的「对应计划」那一行（#41 的 pr-fields）：文档没有、那一行没有、后面空着都不填",
+      "evidence": {
+        "source": "openPr",
+        "routeBound": false,
+        "code": "SPEC_PLAN_MISSING",
+        "retryable": false,
+        "message": "specs/28-接真端口/需求.md 里没有「对应计划：」那一行（开 PR 的正文这一栏是必填）"
+      },
+      "expect": { "action": "park", "rule": "SD1", "alert": true, "routeOutcome": "neutral" }
+    },
+    {
+      "id": "X66",
+      "provenance": "format",
+      "origin": "packages/github 的 pushBranch「推的必须含最新主线」（BEHIND_MAINLINE）；引擎推分支的端口推之前先并主线，撞上只可能是并完到推之间主线又动了",
+      "evidence": {
+        "source": "pushBranch",
+        "routeBound": false,
+        "code": "BEHIND_MAINLINE",
+        "retryable": true,
+        "message": "1a2b3c4 不包含 main 的最新提交 5d6e7f8：先同步主线再推"
+      },
+      "expect": { "action": "retry", "rule": "MC2" }
+    },
+    {
+      "id": "X67",
+      "provenance": "format",
+      "origin": "引擎推分支的端口推之前把最新主线并进会话的树，有冲突就撤掉、交回会话去解",
+      "evidence": {
+        "source": "pushBranch",
+        "routeBound": false,
+        "code": "MERGE_CONFLICT",
+        "retryable": false,
+        "message": "推之前把最新主线 5d6e7f8 并进来有冲突：src/a.ts。在树里 git merge 5d6e7f8 解掉冲突、提交后再交"
+      },
+      "expect": { "action": "retry", "rule": "MC1", "counter": "reworks", "delaySeconds": 0 }
+    },
+    {
+      "id": "X68",
+      "provenance": "format",
+      "origin": "真会话端口起会话时进程没起来（SPAWN_FAILED，不可重试：原因原样交工作流，同一个 runId 重试只会报已经结束过）；原文带着插头报的 ENOENT",
+      "evidence": {
+        "source": "session:execute",
+        "routeBound": true,
+        "hostId": "claude-code",
+        "code": "SPAWN_FAILED",
+        "retryable": false,
+        "message": "会话没起来：spawn /opt/fleet/bin/reclaude ENOENT"
+      },
+      "expect": { "action": "swapRoute", "rule": "CF1", "alert": true }
+    },
+    {
+      "id": "X69",
+      "provenance": "format",
+      "origin": "github 包写需求文档进主线时 GitHub 回 409「Repository rule violations found」（规则集不让直写）：不是 sha 过期，SPEC_DOC_REJECTED 不可重试",
+      "evidence": {
+        "source": "writeSpecDoc",
+        "routeBound": false,
+        "code": "SPEC_DOC_REJECTED",
+        "retryable": false,
+        "message": "GitHub 拒绝写 specs/12-x/需求.md（409：Repository rule violations found）：不是 sha 过期，重试没用"
+      },
+      "expect": { "action": "park", "rule": "PM1", "alert": true }
+    },
+    {
+      "id": "X70",
+      "provenance": "format",
+      "origin": "真会话端口起会话时进程迟迟没起来（SPAWN_TIMEOUT，不可重试：同一个 runId 重试只会报已经起过）；工作流换新 runId 原路重起一次，再起不来才换路由",
+      "evidence": {
+        "source": "session:execute",
+        "routeBound": true,
+        "hostId": "claude-code",
+        "code": "SPAWN_TIMEOUT",
+        "retryable": false,
+        "message": "等了 45 秒进程还没起来"
+      },
+      "expect": { "action": "retry", "rule": "ST1" }
+    },
+    {
+      "id": "X71",
+      "provenance": "format",
+      "origin": "github 包写需求文档进主线之前的卫生检查：路径（开工时按 issue 标题定的）里带名单上的值，正文干净；名字里查出来报 HYGIENE_NAME_BLOCKED，路径打了码",
+      "evidence": {
+        "source": "writeSpecDoc",
+        "routeBound": false,
+        "code": "HYGIENE_NAME_BLOCKED",
+        "retryable": false,
+        "message": "写 specs/22-〔名单上的值〕-迁移/需求.md被卫生检查拦下：名字里就有（specs/22-〔名单上的值〕-迁移/需求.md 名单里的敏感值）。名字是开工时按 issue 标题、子任务的 key 定下的，会话改不了，原样重试还是它"
+      },
+      "expect": { "action": "park", "rule": "HY3", "alert": true, "routeOutcome": "neutral" }
+    },
+    {
+      "id": "X72",
+      "provenance": "format",
+      "origin": "github 包开 PR 时照需求 issue 对齐类别标签，issue 自己同时贴了需求和缺陷：ISSUE_CATEGORY_CONFLICT，不可重试",
+      "evidence": {
+        "source": "openPr",
+        "routeBound": false,
+        "code": "ISSUE_CATEGORY_CONFLICT",
+        "retryable": false,
+        "message": "issue #12 同时贴了 需求、缺陷：类别只能有一个，PR #31 没法照抄。在 issue 上只留一个再继续"
+      },
+      "expect": { "action": "park", "rule": "LB1", "alert": true, "routeOutcome": "neutral" }
     }
   ],
   "skipped": [

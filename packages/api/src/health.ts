@@ -3,13 +3,20 @@
 import type { Context } from 'hono';
 import type { HealthCheck, Logger } from './ports.ts';
 
-/** 可以原样告诉外面的失败原因（不含地址、账号、堆栈）。别的错误对外一律只说「连不上」。 */
+/**
+ * 可以原样告诉外面的失败原因：/healthz 公网打得到，健康页原样显示。只写一句中性的话——不含地址、账号、堆栈，
+ * 也不带内部名（频道、表、仓名）和开发进度，这些只进日志。有测试拿演示版打包扫描的名单扫每一种公开原因：
+ * 新加一种，要补进那条测试。别的错误对外一律只说「连不上」。
+ */
 export class PublicHealthError extends Error {
   readonly code: string;
-  constructor(code: string, message: string) {
+  /** 只进日志的细节（队列名、命名空间名这类），不对外。 */
+  readonly detail: string | undefined;
+  constructor(code: string, message: string, detail?: string) {
     super(message);
     this.name = 'PublicHealthError';
     this.code = code;
+    this.detail = detail;
   }
 }
 
@@ -41,7 +48,11 @@ export async function runHealthChecks(
         ]);
         return [name, { ok: true }] as const;
       } catch (err) {
-        log.warn('健康检查没过', { check: name, error: err instanceof Error ? err.message : String(err) });
+        log.warn('健康检查没过', {
+          check: name,
+          error: err instanceof Error ? err.message : String(err),
+          ...(err instanceof PublicHealthError && err.detail ? { detail: err.detail } : {}),
+        });
         return [
           name,
           err instanceof PublicHealthError
@@ -58,7 +69,7 @@ export async function runHealthChecks(
 }
 
 /**
- * 生产要探的几项：库、实时推送（LISTEN）、Temporal、GitHub 事件的去处、飞书草稿开单（接没接上、有没有积压）。
+ * 生产要探的几项：库、实时推送（LISTEN）、Temporal、引擎工人、GitHub 事件的去处、飞书草稿开单（接没接上、有没有积压）。
  * main.ts 用它装配，测试也用它，是同一份代码。
  */
 export function serviceHealthChecks(parts: {
@@ -66,7 +77,8 @@ export function serviceHealthChecks(parts: {
   probeDb: () => Promise<void>;
   /** 真探：发一条 ping 看 LISTEN 那条连接收不收得回来（changes.ts）。只看「接上过」的标记会在库停时照样报好。 */
   feed: { probe(timeoutMs?: number): Promise<void> };
-  temporal: { check(): Promise<void> };
+  /** Temporal 本身，和它上面查引擎工人在不在（两项都来自同一份连接，见 temporal.ts 的 TemporalConnection）。 */
+  temporal: { check(): Promise<void>; checkEngine(): Promise<void> };
   githubEvents: () => Promise<void>;
   /** 飞书草稿开单那一步（ports.ts 的 DraftOpener）：没接上、接了开不了都报红。 */
   draftOpener: { check(): Promise<void> };
@@ -78,6 +90,7 @@ export function serviceHealthChecks(parts: {
     // 留出余量：比单项上限（CHECK_TIMEOUT_MS）早到点，报出来的是「ping 收不回来」而不是笼统的超时。
     { name: 'realtime', check: () => parts.feed.probe(CHECK_TIMEOUT_MS - 1_000) },
     { name: 'temporal', check: () => parts.temporal.check() },
+    { name: 'engine', check: () => parts.temporal.checkEngine() },
     { name: 'github_events', check: parts.githubEvents },
     { name: 'draft_opener', check: () => parts.draftOpener.check() },
     { name: 'draft_backlog', check: parts.draftBacklog },

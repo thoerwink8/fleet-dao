@@ -1,6 +1,6 @@
 // 子任务的读写：依赖关系存在 subtask_deps，这里负责和领域对象 Subtask.dependsOn 互转。
 import type { Subtask } from '@fleet-dao/shared';
-import { asc, eq } from 'drizzle-orm';
+import { and, asc, eq, isNull } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { toSubtask } from '../domain-map.ts';
 import { subtaskDeps, subtasks } from '../schema/index.ts';
@@ -30,9 +30,14 @@ export async function insertSubtasks(db: Db, taskId: string, items: readonly New
   });
 }
 
+/** 重拆方案作废的子任务（subtasks.superseded_at 非空）不返回：它们的 index 可能和现役子任务重复。 */
 export async function getSubtasks(db: Db, taskId: string): Promise<Subtask[]> {
   const [rows, deps] = await Promise.all([
-    db.select().from(subtasks).where(eq(subtasks.taskId, taskId)).orderBy(asc(subtasks.index)),
+    db
+      .select()
+      .from(subtasks)
+      .where(and(eq(subtasks.taskId, taskId), isNull(subtasks.supersededAt)))
+      .orderBy(asc(subtasks.index)),
     db.select().from(subtaskDeps).where(eq(subtaskDeps.taskId, taskId)),
   ]);
   return rows.map((r) =>

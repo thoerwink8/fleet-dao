@@ -30,17 +30,25 @@ importers:
         specifier: workspace:*
         version: link:../shared
 
+  packages/agents-sync: {}
+
   packages/api:
     dependencies:
       '@fleet-dao/db':
         specifier: workspace:*
         version: link:../db
+      '@fleet-dao/github':
+        specifier: workspace:*
+        version: link:../github
       '@fleet-dao/shared':
         specifier: workspace:*
         version: link:../shared
       '@hono/node-server':
         specifier: ^2.1.1
         version: 2.1.1(hono@4.13.9)
+      '@temporalio/client':
+        specifier: 1.24.0
+        version: 1.24.0
       drizzle-orm:
         specifier: ^0.45.3
         version: 0.45.3(@electric-sql/pglite@0.5.8)(postgres@3.4.9)
@@ -94,9 +102,21 @@ importers:
 
   packages/engine:
     dependencies:
+      '@fleet-dao/adapters':
+        specifier: workspace:*
+        version: link:../adapters
       '@fleet-dao/api':
         specifier: workspace:*
         version: link:../api
+      '@fleet-dao/conventions':
+        specifier: workspace:*
+        version: link:../conventions
+      '@fleet-dao/db':
+        specifier: workspace:*
+        version: link:../db
+      '@fleet-dao/github':
+        specifier: workspace:*
+        version: link:../github
       '@fleet-dao/shared':
         specifier: workspace:*
         version: link:../shared

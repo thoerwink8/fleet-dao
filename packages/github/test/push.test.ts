@@ -253,6 +253,25 @@ describe('会话外推分支', { timeout: 60_000 }, () => {
     expect(remoteHead('task/13-no-list')).toBeNull();
   });
 
+  it('分支名里带名单上的值（提交干净）：不推（HYGIENE_NAME_BLOCKED：分支名是引擎拼的，会话改不了），一个请求都不发，分支名打了码', async () => {
+    const record: { args: string[]; cwd: string; env: Record<string, string> }[] = [];
+    const { gh, fake } = pushSetup(record);
+    const repo = { owner: 'acme', name: 'widgets' };
+    const branch = 'task/30-fake-org-778899';
+    const wt = worktree(branch, { 'ok.md': '干净的内容\n' });
+    const err = await gh.pushBranch({ repo, bundlePath: wt.bundle, branch, head: wt.head }).then(
+      () => null,
+      (e: unknown) => e as { code: string; message: string; retryable: boolean; details: unknown },
+    );
+    expect(err).toMatchObject({ code: 'HYGIENE_NAME_BLOCKED', retryable: false });
+    expect(err?.message).toContain('分支名 task/30-〔名单上的值〕 名单里的敏感值');
+    expect(`${err?.message}${JSON.stringify(err?.details)}`).not.toContain('778899');
+    // 名单先比、再干别的：git 一次没跑，GitHub 接口一个没调
+    expect(record).toEqual([]);
+    expect(fake.requests).toHaveLength(0);
+    expect(remoteHead(branch)).toBeNull();
+  });
+
   it('卫生检查逐个提交扫：先加后删（最后的样子干净）、写进提交说明的，照样不推，报出是哪个提交', async () => {
     const { gh } = pushSetup();
     const repo = { owner: 'acme', name: 'widgets' };

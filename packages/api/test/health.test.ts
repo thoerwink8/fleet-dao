@@ -36,7 +36,7 @@ describe('健康检查', () => {
       ok: false,
       checks: {
         database: { ok: false, code: 'unreachable', message: '连不上' },
-        temporal: { ok: false, code: 'not_connected', message: 'Temporal 客户端还没接上（等引擎的 PR）' },
+        temporal: { ok: false, code: 'not_connected', message: 'Temporal 客户端还没接上' },
         realtime: { ok: true },
       },
     });
@@ -76,7 +76,7 @@ describe('健康检查', () => {
     const names = serviceHealthChecks({
       probeDb: async () => {},
       feed: { probe: async () => {} },
-      temporal: { check: async () => {} },
+      temporal: { check: async () => {}, checkEngine: async () => {} },
       githubEvents: async () => {},
       draftOpener: { check: async () => {} },
       draftBacklog: async () => {},

@@ -6,6 +6,7 @@ import { parseMd } from '../src/markdown.ts';
 import { planPhases } from '../src/plan.ts';
 import {
   annotation,
+  checkPlanValue,
   checkPrFields,
   type FetchPr,
   livePr,
@@ -237,6 +238,27 @@ describe('PR 必填栏：缺一样报一句，说清缺什么、怎么补', () =
     expect(check({ body: TEMPLATE })).toEqual([
       '「对应计划」一栏是空的：写 plan.md 的阶段加那一条的原话开头，比如 P1「工作流」。',
       '「specs」一栏是空的：写需求文档的目录（specs/<号>-<短名>/），杂活写「不适用」。',
+    ]);
+  });
+});
+
+describe('只核「对应计划」一栏的值（引擎收需求文档时用，和 PR 上判的同一套）', () => {
+  it('对得上 plan.md 的条目就没问题；带不带 plan.md 前缀、跨两条都认', () => {
+    expect(checkPlanValue('plan.md P1「工作流」', PLAN)).toEqual([]);
+    expect(checkPlanValue('P0「仓骨架」、P1「错误按」', PLAN)).toEqual([]);
+  });
+
+  it('认不出、没写哪一条、引号空着、条目不在、阶段不在：各报一句', () => {
+    expect(checkPlanValue('plan.md P0 的验收', PLAN)).toEqual([expect.stringContaining('P0 没写是哪一条')]);
+    expect(checkPlanValue('P1「」', PLAN)).toEqual([expect.stringContaining('引号里是空的')]);
+    expect(checkPlanValue('P1「没有这一条」', PLAN)).toEqual([expect.stringContaining('找不到')]);
+    expect(checkPlanValue('P9「工作流」', PLAN)).toEqual([expect.stringContaining('没有 P9 这个阶段')]);
+    expect(checkPlanValue('无', PLAN)).toEqual([expect.stringContaining('认不出是 plan.md 哪一条')]);
+  });
+
+  it('plan.md 里一个阶段都认不出：算一条问题，不当成过了', () => {
+    expect(checkPlanValue('P1「工作流」', '# 计划\n\n没有阶段标题')).toEqual([
+      expect.stringContaining('一个阶段'),
     ]);
   });
 });

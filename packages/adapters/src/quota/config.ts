@@ -21,6 +21,7 @@ export class QuotaConfigError extends Error {
 
 const READER_TYPES: readonly ReaderType[] = [
   'claude-usage',
+  'reclaude-carpool',
   'mirasim-relay',
   'cursor-dashboard',
   'grok-billing',
@@ -38,6 +39,7 @@ const WINDOW_KINDS: readonly ReadingWindowKind[] = [
 const COMMON_KEYS = ['poolId', 'channelId', 'name', 'reader', 'timeoutMs'];
 const READER_KEYS: Record<ReaderType, string[]> = {
   'claude-usage': ['command', 'orgKind', 'cwd', 'env'],
+  'reclaude-carpool': ['keyFile', 'baseUrl'],
   'mirasim-relay': ['port', 'tokenFile'],
   'cursor-dashboard': ['authFile', 'baseUrl'],
   'grok-billing': ['authFile', 'baseUrl', 'clientVersion'],
@@ -137,6 +139,10 @@ function checkPool(p: unknown, i: number, problems: string[]): void {
       }
       break;
     }
+    case 'reclaude-carpool':
+      if (!isNonEmptyString(p.keyFile)) problems.push(`${where}.keyFile 要有：reclaude API Key 文件的路径`);
+      checkUrl(p.baseUrl, `${where}.baseUrl`, problems);
+      break;
     case 'mirasim-relay':
       if (p.port !== undefined && !(isPositiveInt(p.port) && p.port <= 65535))
         problems.push(`${where}.port 要是 1–65535`);

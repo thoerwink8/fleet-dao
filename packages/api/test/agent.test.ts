@@ -1,4 +1,11 @@
-import { AskResponse, HistoryResponse, TaskResponse, TimelineResponse } from '@fleet-dao/shared';
+import {
+  AskResponse,
+  HistoryResponse,
+  requirementWorkflowId,
+  subtaskWorkflowId,
+  TaskResponse,
+  TimelineResponse,
+} from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import { AGENT_TOKEN_MAX_TTL_SECONDS, signAgentToken, verifyAgentToken } from '../src/agent-token.ts';
 import { signPayload } from '../src/tokens.ts';
@@ -133,7 +140,7 @@ describe('/agent/v1 的七个动作', () => {
     expect(body.plan.map((s) => s.state)).toEqual(['done', 'in_progress', 'pending']);
   });
 
-  it('plan：整张替换，写进度，叫醒工作流；同时两步在进行就 400', async () => {
+  it('plan：整张替换，写进度，不叫醒工作流（只有 ask/done/blocked 才叫醒）；同时两步在进行就 400', async () => {
     const h = harness();
     const token = h.agentToken();
     const bad = await h.agent.request(
@@ -161,12 +168,10 @@ describe('/agent/v1 的七个动作', () => {
       { index: 1, title: '写实现', state: 'in_progress' },
     ]);
     expect(h.store.data.progress.at(-1)).toMatchObject({ runId: DEV_RUN_ID, kind: 'plan' });
-    expect(h.signals).toEqual([
-      { taskId: IDS.task12, signal: { name: 'agentEvent', runId: DEV_RUN_ID, kind: 'plan' } },
-    ]);
+    expect(h.signals).toHaveLength(0);
   });
 
-  it('say 与 blocked：写进度并叫醒工作流', async () => {
+  it('say 不叫醒工作流，blocked 叫醒（写进度都照常）', async () => {
     const h = harness();
     const token = h.agentToken();
     expect(
@@ -179,7 +184,6 @@ describe('/agent/v1 的七个动作', () => {
     expect(blocked.status).toBe(200);
     expect(h.store.data.progress.slice(-2).map((p) => p.kind)).toEqual(['say', 'blocked']);
     expect(h.signals.map((s) => (s.signal.name === 'agentEvent' ? s.signal.kind : s.signal.name))).toEqual([
-      'say',
       'blocked',
     ]);
   });
@@ -193,8 +197,8 @@ describe('/agent/v1 的七个动作', () => {
       },
     });
     const res = await h.agent.request(
-      '/agent/v1/say',
-      agentRequest(h.agentToken(), 'POST', { text: '进度' }),
+      '/agent/v1/blocked',
+      agentRequest(h.agentToken(), 'POST', { reason: '缺短信服务的测试账号', needs: 'access' }),
     );
     expect(res.status).toBe(200);
     expect(h.logs.some((l) => l.level === 'warn' && l.message.includes('叫醒工作流没成功'))).toBe(true);
@@ -208,6 +212,71 @@ describe('/agent/v1 的七个动作', () => {
     );
     const body = HistoryResponse.parse(await res.json());
     expect(body.items.map((i) => i.taskId)).toEqual([IDS.task13]);
+  });
+});
+
+describe('叫醒目标：只有 ask/done/blocked 才发信号，且发给会话所属的工作流', () => {
+  it('say、plan 不发任何信号', async () => {
+    const h = harness();
+    const token = h.agentToken();
+    await h.agent.request('/agent/v1/say', agentRequest(token, 'POST', { text: '写好测试了' }));
+    await h.agent.request(
+      '/agent/v1/plan',
+      agentRequest(token, 'POST', { steps: [{ title: '写实现', state: 'in_progress' }] }),
+    );
+    expect(h.signals).toHaveLength(0);
+  });
+
+  it('子任务会话（session.subtaskId 有值）的 done 直接拼子任务工作流编号 sub:<subtaskId>，不用查库', async () => {
+    const h = harness();
+    const token = h.agentToken(); // 默认样例会话就带 subtaskId: IDS.sub12a
+    h.store.data.progress.push({
+      id: 'wake-target-test-run',
+      runId: DEV_RUN_ID,
+      at: h.clock.now.toISOString(),
+      kind: 'test',
+      payload: { passed: true, command: 'pnpm check' },
+    });
+    const res = await h.agent.request(
+      '/agent/v1/done',
+      agentRequest(token, 'POST', { summary: '写完了', testsPassed: true }),
+    );
+    expect(res.status).toBe(200);
+    expect(h.signals).toEqual([
+      {
+        workflowId: subtaskWorkflowId(IDS.sub12a),
+        signal: { name: 'agentEvent', runId: DEV_RUN_ID, kind: 'done' },
+      },
+    ]);
+  });
+
+  it('需求自己的会话（session.subtaskId 没有值）的 ask 查库拼需求工作流编号 req:owner/name#issueNumber', async () => {
+    const h = harness();
+    const requirementRunId = 'run-requirement-triage';
+    h.store.data.runs.push({
+      id: requirementRunId,
+      taskId: IDS.task12,
+      stage: 'triage',
+      routeId: 'rt-claude-opus',
+      whyRoute: '分诊阶段排第一',
+      queuedAt: h.clock.now.toISOString(),
+      startedAt: h.clock.now.toISOString(),
+    });
+    // 故意不传 subtaskId：这次会话不属于任何子任务（分诊、需求文档、方案这几步都是这样）。
+    const token = signAgentToken(h.config.agentTokenSecret, {
+      taskId: IDS.task12,
+      runId: requirementRunId,
+      ttlSeconds: 3600,
+      now: h.clock.now,
+    });
+    const res = await h.agent.request(
+      '/agent/v1/ask',
+      agentRequest(token, 'POST', { question: '要不要支持邮箱验证码？', blocking: false }),
+    );
+    expect(res.status).toBe(200);
+    expect(h.signals).toHaveLength(1);
+    expect(h.signals[0]?.workflowId).toBe(requirementWorkflowId({ owner: 'example', name: 'canary' }, 12));
+    expect(h.signals[0]?.signal).toMatchObject({ name: 'agentEvent', runId: requirementRunId, kind: 'ask' });
   });
 });
 
@@ -226,7 +295,7 @@ describe('幂等键（插头重试同一条命令用同一个键）', () => {
       payload: { passed: true, command: 'pnpm check' },
     });
 
-  it('say / plan / blocked / done 重试：直接回第一次的结果，只记一条、只叫醒一次；ask 同一句也只开一条', async () => {
+  it('say / plan / blocked / done 重试：直接回第一次的结果，只记一条；blocked/done 只叫醒一次（say/plan 不叫醒）；ask 同一句也只开一条', async () => {
     const h = harness();
     passingTest(h);
     const before = h.store.data.progress.length;
@@ -248,7 +317,11 @@ describe('幂等键（插头重试同一条命令用同一个键）', () => {
       'blocked',
       'done',
     ]);
-    expect(h.signals).toHaveLength(4);
+    // say、plan 各重试了一次也一个信号都不发；blocked、done 各只发一次（幂等键去重）。
+    expect(h.signals.map((s) => (s.signal.name === 'agentEvent' ? s.signal.kind : s.signal.name))).toEqual([
+      'blocked',
+      'done',
+    ]);
 
     const asked = [await post(h, 'ask', { question: '几位？', blocking: false }, 'key-ask')];
     asked.push(await post(h, 'ask', { question: '几位？', blocking: false }, 'key-ask'));
@@ -318,9 +391,10 @@ describe('幂等键（插头重试同一条命令用同一个键）', () => {
 
   it('同一个键用在别的命令上：409，这次不执行，也不回上一条命令的结果', async () => {
     const h = harness();
-    expect((await post(h, 'say', { text: '一' }, 'key-x')).status).toBe(200);
+    // say 不叫醒工作流：这里改用 blocked 起手，才能顺带证明「409 不执行」连信号也没多发一条。
+    expect((await post(h, 'blocked', { reason: '一', needs: 'access' }, 'key-x')).status).toBe(200);
     const before = h.store.data.progress.length;
-    const res = await post(h, 'blocked', { reason: '缺账号', needs: 'access' }, 'key-x');
+    const res = await post(h, 'done', { summary: '写完了', testsPassed: true }, 'key-x');
     expect(res.status).toBe(409);
     expect(await errorCode(res)).toBe('idempotency_key_reused');
     expect(h.store.data.progress).toHaveLength(before);
@@ -338,18 +412,23 @@ describe('幂等键（插头重试同一条命令用同一个键）', () => {
         },
       },
     });
-    const says = () =>
-      h.store.data.progress.filter((p) => p.kind === 'say').map((p) => (p.payload as { text: string }).text);
-    const stuck = post(h, 'say', { text: '卡住的那次' }, 'key-slow');
+    // 用 blocked（叫醒工作流的一类）：靠假 workflows.signal 卡住来模拟「上一次还没做完」，say 不叫醒、卡不住。
+    const reasons = () =>
+      h.store.data.progress
+        .filter((p) => p.kind === 'blocked')
+        .map((p) => (p.payload as { reason: string }).reason);
+    const stuck = post(h, 'blocked', { reason: '卡住的那次', needs: 'access' }, 'key-slow');
     for (let i = 0; i < 100 && calls === 0; i++) await new Promise((r) => setTimeout(r, 5));
     h.clock.now = new Date(h.clock.now.getTime() + 61_000);
-    expect((await post(h, 'say', { text: '接管的那次' }, 'key-slow')).status).toBe(200);
+    expect((await post(h, 'blocked', { reason: '接管的那次', needs: 'access' }, 'key-slow')).status).toBe(
+      200,
+    );
     release();
     expect((await stuck).status).toBe(200);
     expect(h.logs.some((l) => l.message.includes('已被别的请求接管'))).toBe(true);
-    expect((await post(h, 'say', { text: '第三次' }, 'key-slow')).status).toBe(200);
-    expect(says()).toContain('接管的那次');
-    expect(says()).not.toContain('第三次');
+    expect((await post(h, 'blocked', { reason: '第三次', needs: 'access' }, 'key-slow')).status).toBe(200);
+    expect(reasons()).toContain('接管的那次');
+    expect(reasons()).not.toContain('第三次');
   });
 
   it('键太长：400', async () => {

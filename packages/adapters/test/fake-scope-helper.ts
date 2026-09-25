@@ -12,7 +12,8 @@ if (action === 'run') {
   const at = rest.indexOf('--');
   const cwdAt = rest.indexOf('--cwd');
   const command = rest.slice(at + 1);
-  // 和真帮手一样：环境只剩 FLEET_* 这几类，PATH 取 FLEET_SESSION_PATH
+  // 和真帮手一样：环境只剩 FLEET_* 这几类；PATH 取 FLEET_SESSION_PATH（没给用同一个默认），会话用户自己写得动的
+  // ~/.local/bin 接在最后
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) {
     if (
@@ -21,8 +22,8 @@ if (action === 'run') {
     )
       env[k] = v;
   }
-  env.PATH = process.env.FLEET_SESSION_PATH ?? '/usr/bin:/bin';
   env.HOME = '/home/fake-session-user';
+  env.PATH = `${process.env.FLEET_SESSION_PATH ?? '/usr/local/bin:/usr/bin:/bin'}:${env.HOME}/.local/bin`;
   const child = spawn(command[0] as string, command.slice(1), {
     cwd: cwdAt >= 0 ? rest[cwdAt + 1] : '/',
     env,
@@ -30,6 +31,20 @@ if (action === 'run') {
   });
   child.on('exit', (code, signal) => process.exit(code ?? (signal ? 1 : 0)));
   process.on('SIGTERM', () => child.kill('SIGTERM'));
+} else if (action === 'adopt') {
+  // 退出码由测试摆布：验 adoptWorktree 把各个退出码翻成哪种 AdoptWorktreeResult
+  if (process.env.FLEET_FAKE_SCOPE_ADOPT_STDERR)
+    process.stderr.write(process.env.FLEET_FAKE_SCOPE_ADOPT_STDERR);
+  process.exit(Number(process.env.FLEET_FAKE_SCOPE_ADOPT_EXIT ?? '0'));
+} else if (action === 'list') {
+  process.stdout.write(process.env.FLEET_FAKE_SCOPE_LIST_STDOUT ?? '');
+  process.exit(Number(process.env.FLEET_FAKE_SCOPE_LIST_EXIT ?? '0'));
+} else if (action === 'remove') {
+  // 标准输出和退出码由测试摆布：验 removeWorktreeDir 怎么认 removed / gone / 认不出
+  process.stdout.write(process.env.FLEET_FAKE_SCOPE_REMOVE_STDOUT ?? `removed ${rest[0]}\n`);
+  if (process.env.FLEET_FAKE_SCOPE_REMOVE_STDERR)
+    process.stderr.write(process.env.FLEET_FAKE_SCOPE_REMOVE_STDERR);
+  process.exit(Number(process.env.FLEET_FAKE_SCOPE_REMOVE_EXIT ?? '0'));
 } else {
   process.exit(0);
 }

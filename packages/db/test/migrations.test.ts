@@ -359,6 +359,90 @@ describe('0003：目录装载器要的三列', () => {
   );
 });
 
+describe('0005：接活入口（GitHub 事件原文、自动派活开关）', () => {
+  const entries = [...journal.entries].sort((a, b) => a.idx - b.idx);
+  const target = entries.findIndex((e) => e.tag === '0005_github_intake');
+  const runMigration = async (pg: PGlite, tag: string) => {
+    const text = readFileSync(join(MIGRATIONS_FOLDER, `${tag}.sql`), 'utf8');
+    for (const statement of text.split('--> statement-breakpoint')) await pg.exec(statement);
+  };
+
+  it(
+    '已有的仓一律是关着的（不会一升级就开始自动派活）；事件表不收没原因的「不收」「出错」、处理中不许有收尾时刻',
+    async () => {
+      expect(target).toBeGreaterThan(0);
+      const pg = new PGlite();
+      try {
+        for (const e of entries.slice(0, target)) await runMigration(pg, e.tag);
+        await pg.exec(
+          `insert into repos (owner, name, test_command) values ('acme', 'widgets', 'pnpm check')`,
+        );
+        // github_events 是这一条建的表，装之前不存在；升级时的仓和别的行都留着
+        await runMigration(pg, '0005_github_intake');
+
+        expect((await pg.query(`select auto_dispatch_since from repos`)).rows).toEqual([
+          { auto_dispatch_since: null },
+        ]);
+        const insert = (id: string, status: string, reason: string | null, finished: boolean) =>
+          pg.query(
+            `insert into github_events (delivery_id, event, source, payload, status, reason, finished_at)
+             values ($1, 'issues', 'webhook', '{}'::jsonb, $2, $3, ${finished ? 'now()' : 'null'})`,
+            [id, status, reason],
+          );
+        await insert('ok-processing', 'processing', null, false);
+        await insert('ok-accepted', 'accepted', null, true);
+        await insert('ok-failed', 'failed', '库连不上', true);
+        await expect(insert('no-reason', 'failed', null, true)).rejects.toThrow(
+          /github_events_reason_when_not_taken/,
+        );
+        await expect(insert('empty-reason', 'ignored', '', true)).rejects.toThrow(
+          /github_events_reason_when_not_taken/,
+        );
+        await expect(insert('processing-done', 'processing', null, true)).rejects.toThrow(
+          /github_events_finished_iff_done/,
+        );
+        await expect(insert('accepted-open', 'accepted', null, false)).rejects.toThrow(
+          /github_events_finished_iff_done/,
+        );
+        await expect(insert('odd-status', 'lost', 'x', true)).rejects.toThrow(/github_events_status_known/);
+        // 等着（重开时上一轮还没结束）：也得写在等什么、也得有收尾时刻
+        await insert('ok-waiting', 'waiting', '上一轮还没结束', true);
+        await expect(insert('waiting-no-reason', 'waiting', null, true)).rejects.toThrow(
+          /github_events_reason_when_not_taken/,
+        );
+        await expect(insert('waiting-open', 'waiting', '上一轮还没结束', false)).rejects.toThrow(
+          /github_events_finished_iff_done/,
+        );
+
+        // 每次投递带着的对象版本：一次投递里一个对象只记一版；开关状态只认 open/closed；投递删了版本跟着删
+        const version = (id: string, object: string, state: string | null) =>
+          pg.query(
+            `insert into github_event_versions (delivery_id, object, version, state) values ($1, $2, now(), $3)`,
+            [id, object, state],
+          );
+        await version('ok-accepted', 'acme/widgets:issue:1', 'open');
+        await version('ok-accepted', 'acme/widgets:comment:9', null);
+        await expect(version('ok-accepted', 'acme/widgets:issue:1', 'closed')).rejects.toThrow(
+          /github_event_versions_delivery_id_object_pk/,
+        );
+        await expect(version('ok-failed', 'acme/widgets:pull:2', 'merged')).rejects.toThrow(
+          /github_event_versions_state_known/,
+        );
+        await expect(version('never-delivered', 'acme/widgets:issue:3', 'open')).rejects.toThrow(
+          /github_event_versions_delivery_id_github_events_delivery_id_fk/,
+        );
+        await pg.exec(`delete from github_events where delivery_id = 'ok-accepted'`);
+        expect((await pg.query(`select count(*)::int as n from github_event_versions`)).rows).toEqual([
+          { n: 0 },
+        ]);
+      } finally {
+        await pg.close();
+      }
+    },
+    TEST_DB_TIMEOUT_MS,
+  );
+});
+
 describe('测试库', () => {
   it(
     '在内存里，两份测试库互相看不见对方的数据',

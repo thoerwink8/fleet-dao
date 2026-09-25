@@ -212,10 +212,12 @@ describe('拼车号额度读不到：只放一个轻活去试探，被拒就一�
 
   it('试探被拒：被拒的任务换池，别的任务按原文的时间一起避开，过了清零时刻再放一个试探', () => {
     // 2026-09-23 拼车号当场用满的真实原文（失败样本 X03）。
+    // 拼车号是备池：用满了先换池接着干（失败分流 QT1 的备池梯子）；主池用满是等清零、续同一个会话。
     const verdict = classifyFailure({
       source: 'session:triage',
       hostId: 'claude-code',
       poolId: 'claude-carpool',
+      poolRole: 'backup',
       routeId: 'carpool-opus',
       message:
         'API Error: Server is temporarily limiting requests (not your usage limit) · 拼车 5 小时额度已用完，约 20 分钟后重置，请稍后再来（请求 ID: <请求ID>）',

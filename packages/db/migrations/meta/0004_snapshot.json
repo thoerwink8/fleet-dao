@@ -1,5 +1,5 @@
 {
-  "id": "25b7c466-7c42-4233-be82-c1c7c1f09b87",
+  "id": "d671b9b0-5af9-4f1e-8e45-0da9d44a4fdb",
   "prevId": "4a5e0724-d8b4-45af-ae7d-199026ce6efd",
   "version": "7",
   "dialect": "postgresql",
@@ -621,557 +621,6 @@
         "stage_policy_routes_position_nonneg": {
           "name": "stage_policy_routes_position_nonneg",
           "value": "\"stage_policy_routes\".\"position\" >= 0"
-        }
-      },
-      "isRLSEnabled": false
-    },
-    "public.feishu_cards": {
-      "name": "feishu_cards",
-      "schema": "",
-      "columns": {
-        "message_id": {
-          "name": "message_id",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "chat_id": {
-          "name": "chat_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "kind": {
-          "name": "kind",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "task_id": {
-          "name": "task_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "ask_id": {
-          "name": "ask_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "draft_id": {
-          "name": "draft_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "notification_id": {
-          "name": "notification_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "outbox_id": {
-          "name": "outbox_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "sent_at": {
-          "name": "sent_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "feishu_cards_draft_idx": {
-          "name": "feishu_cards_draft_idx",
-          "columns": [
-            {
-              "expression": "draft_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "sent_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "feishu_cards_outbox_idx": {
-          "name": "feishu_cards_outbox_idx",
-          "columns": [
-            {
-              "expression": "outbox_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "sent_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "feishu_cards_kind_idx": {
-          "name": "feishu_cards_kind_idx",
-          "columns": [
-            {
-              "expression": "kind",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "sent_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "feishu_cards_kind_known": {
-          "name": "feishu_cards_kind_known",
-          "value": "\"feishu_cards\".\"kind\" in ('draft', 'progress', 'board', 'list', 'answer', 'decision', 'alert', 'daily', 'follow', 'ask')"
-        }
-      },
-      "isRLSEnabled": false
-    },
-    "public.feishu_drafts": {
-      "name": "feishu_drafts",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "revision": {
-          "name": "revision",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 1
-        },
-        "status": {
-          "name": "status",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'open'"
-        },
-        "source_message_id": {
-          "name": "source_message_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "chat_type": {
-          "name": "chat_type",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "raw_text": {
-          "name": "raw_text",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "understanding": {
-          "name": "understanding",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "unsure": {
-          "name": "unsure",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "repo_id": {
-          "name": "repo_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "proposed_by": {
-          "name": "proposed_by",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "confirmed_by": {
-          "name": "confirmed_by",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "confirmed_at": {
-          "name": "confirmed_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "task_id": {
-          "name": "task_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "open_attempts": {
-          "name": "open_attempts",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "open_error": {
-          "name": "open_error",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "open_tried_at": {
-          "name": "open_tried_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        }
-      },
-      "indexes": {
-        "feishu_drafts_to_open_idx": {
-          "name": "feishu_drafts_to_open_idx",
-          "columns": [
-            {
-              "expression": "confirmed_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "where": "\"feishu_drafts\".\"status\" = 'confirmed' and \"feishu_drafts\".\"task_id\" is null",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "feishu_drafts_repo_id_repos_id_fk": {
-          "name": "feishu_drafts_repo_id_repos_id_fk",
-          "tableFrom": "feishu_drafts",
-          "tableTo": "repos",
-          "columnsFrom": ["repo_id"],
-          "columnsTo": ["id"],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        },
-        "feishu_drafts_proposed_by_users_id_fk": {
-          "name": "feishu_drafts_proposed_by_users_id_fk",
-          "tableFrom": "feishu_drafts",
-          "tableTo": "users",
-          "columnsFrom": ["proposed_by"],
-          "columnsTo": ["id"],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        },
-        "feishu_drafts_confirmed_by_users_id_fk": {
-          "name": "feishu_drafts_confirmed_by_users_id_fk",
-          "tableFrom": "feishu_drafts",
-          "tableTo": "users",
-          "columnsFrom": ["confirmed_by"],
-          "columnsTo": ["id"],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        },
-        "feishu_drafts_task_id_tasks_id_fk": {
-          "name": "feishu_drafts_task_id_tasks_id_fk",
-          "tableFrom": "feishu_drafts",
-          "tableTo": "tasks",
-          "columnsFrom": ["task_id"],
-          "columnsTo": ["id"],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {
-        "feishu_drafts_source_message_id_unique": {
-          "name": "feishu_drafts_source_message_id_unique",
-          "nullsNotDistinct": false,
-          "columns": ["source_message_id"]
-        }
-      },
-      "policies": {},
-      "checkConstraints": {
-        "feishu_drafts_status_known": {
-          "name": "feishu_drafts_status_known",
-          "value": "\"feishu_drafts\".\"status\" in ('open', 'confirmed')"
-        },
-        "feishu_drafts_chat_type_known": {
-          "name": "feishu_drafts_chat_type_known",
-          "value": "\"feishu_drafts\".\"chat_type\" in ('p2p', 'group')"
-        },
-        "feishu_drafts_revision_positive": {
-          "name": "feishu_drafts_revision_positive",
-          "value": "\"feishu_drafts\".\"revision\" >= 1"
-        },
-        "feishu_drafts_understanding_length": {
-          "name": "feishu_drafts_understanding_length",
-          "value": "char_length(\"feishu_drafts\".\"understanding\") between 1 and 1000"
-        },
-        "feishu_drafts_confirm_shape": {
-          "name": "feishu_drafts_confirm_shape",
-          "value": "(\"feishu_drafts\".\"status\" = 'confirmed') = (\"feishu_drafts\".\"confirmed_by\" is not null) and (\"feishu_drafts\".\"status\" = 'confirmed') = (\"feishu_drafts\".\"confirmed_at\" is not null) and (\"feishu_drafts\".\"status\" <> 'confirmed' or \"feishu_drafts\".\"repo_id\" is not null)"
-        },
-        "feishu_drafts_task_needs_confirm": {
-          "name": "feishu_drafts_task_needs_confirm",
-          "value": "\"feishu_drafts\".\"task_id\" is null or \"feishu_drafts\".\"status\" = 'confirmed'"
-        },
-        "feishu_drafts_open_attempts_nonneg": {
-          "name": "feishu_drafts_open_attempts_nonneg",
-          "value": "\"feishu_drafts\".\"open_attempts\" >= 0"
-        }
-      },
-      "isRLSEnabled": false
-    },
-    "public.feishu_follows": {
-      "name": "feishu_follows",
-      "schema": "",
-      "columns": {
-        "task_id": {
-          "name": "task_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "user_id": {
-          "name": "user_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "following": {
-          "name": "following",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "feishu_follows_task_id_tasks_id_fk": {
-          "name": "feishu_follows_task_id_tasks_id_fk",
-          "tableFrom": "feishu_follows",
-          "tableTo": "tasks",
-          "columnsFrom": ["task_id"],
-          "columnsTo": ["id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "feishu_follows_user_id_users_id_fk": {
-          "name": "feishu_follows_user_id_users_id_fk",
-          "tableFrom": "feishu_follows",
-          "tableTo": "users",
-          "columnsFrom": ["user_id"],
-          "columnsTo": ["id"],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {
-        "feishu_follows_task_id_user_id_pk": {
-          "name": "feishu_follows_task_id_user_id_pk",
-          "columns": ["task_id", "user_id"]
-        }
-      },
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.feishu_outbox": {
-      "name": "feishu_outbox",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "revision": {
-          "name": "revision",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "fingerprint": {
-          "name": "fingerprint",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "ack_revision": {
-          "name": "ack_revision",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "ack_status": {
-          "name": "ack_status",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "ack_reason": {
-          "name": "ack_reason",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "acked_at": {
-          "name": "acked_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "hold_until": {
-          "name": "hold_until",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "failures": {
-          "name": "failures",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "delivered_message_id": {
-          "name": "delivered_message_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "delivered_chat_id": {
-          "name": "delivered_chat_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "delivered_at": {
-          "name": "delivered_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "delivered_revision": {
-          "name": "delivered_revision",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "feishu_outbox_revision_positive": {
-          "name": "feishu_outbox_revision_positive",
-          "value": "\"feishu_outbox\".\"revision\" >= 1"
-        },
-        "feishu_outbox_ack_status_known": {
-          "name": "feishu_outbox_ack_status_known",
-          "value": "\"feishu_outbox\".\"ack_status\" is null or \"feishu_outbox\".\"ack_status\" in ('sent', 'updated', 'deferred', 'dropped', 'failed')"
-        },
-        "feishu_outbox_ack_shape": {
-          "name": "feishu_outbox_ack_shape",
-          "value": "(\"feishu_outbox\".\"ack_revision\" is null) = (\"feishu_outbox\".\"ack_status\" is null) and (\"feishu_outbox\".\"ack_revision\" is null) = (\"feishu_outbox\".\"acked_at\" is null) and (\"feishu_outbox\".\"ack_revision\" is null or \"feishu_outbox\".\"ack_revision\" between 1 and \"feishu_outbox\".\"revision\")"
-        },
-        "feishu_outbox_hold_only_when_waiting": {
-          "name": "feishu_outbox_hold_only_when_waiting",
-          "value": "\"feishu_outbox\".\"hold_until\" is null or \"feishu_outbox\".\"ack_status\" in ('deferred', 'failed')"
-        },
-        "feishu_outbox_delivered_shape": {
-          "name": "feishu_outbox_delivered_shape",
-          "value": "(\"feishu_outbox\".\"delivered_message_id\" is null) = (\"feishu_outbox\".\"delivered_chat_id\" is null) and (\"feishu_outbox\".\"delivered_message_id\" is null) = (\"feishu_outbox\".\"delivered_at\" is null)"
-        },
-        "feishu_outbox_failures_nonneg": {
-          "name": "feishu_outbox_failures_nonneg",
-          "value": "\"feishu_outbox\".\"failures\" >= 0"
         }
       },
       "isRLSEnabled": false
@@ -2112,6 +1561,278 @@
       },
       "isRLSEnabled": false
     },
+    "public.step_timings": {
+      "name": "step_timings",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "bigint",
+          "primaryKey": true,
+          "notNull": true,
+          "identity": {
+            "type": "always",
+            "name": "step_timings_id_seq",
+            "schema": "public",
+            "increment": "1",
+            "startWith": "1",
+            "minValue": "1",
+            "maxValue": "9223372036854775807",
+            "cache": "1",
+            "cycle": false
+          }
+        },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "workflow_id": {
+          "name": "workflow_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "temporal_run_id": {
+          "name": "temporal_run_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "workflow_type": {
+          "name": "workflow_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "task_id": {
+          "name": "task_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "subtask_id": {
+          "name": "subtask_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "subtask_key": {
+          "name": "subtask_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "activity": {
+          "name": "activity",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "attempt": {
+          "name": "attempt",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "wait_for": {
+          "name": "wait_for",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "detail": {
+          "name": "detail",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "scheduled_at": {
+          "name": "scheduled_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "started_at": {
+          "name": "started_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "ended_at": {
+          "name": "ended_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "queue_ms": {
+          "name": "queue_ms",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "run_ms": {
+          "name": "run_ms",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "wait_ms": {
+          "name": "wait_ms",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "outcome": {
+          "name": "outcome",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "error_code": {
+          "name": "error_code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "recorded_at": {
+          "name": "recorded_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "step_timings_activity_unique": {
+          "name": "step_timings_activity_unique",
+          "columns": [
+            {
+              "expression": "workflow_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "temporal_run_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "activity",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "attempt",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "scheduled_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"step_timings\".\"kind\" = 'activity'",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "step_timings_wait_unique": {
+          "name": "step_timings_wait_unique",
+          "columns": [
+            {
+              "expression": "workflow_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "temporal_run_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "wait_for",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "started_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"step_timings\".\"kind\" = 'wait'",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "step_timings_task_started_idx": {
+          "name": "step_timings_task_started_idx",
+          "columns": [
+            {
+              "expression": "task_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "started_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "step_timings_kind_known": {
+          "name": "step_timings_kind_known",
+          "value": "\"step_timings\".\"kind\" in ('activity', 'wait')"
+        },
+        "step_timings_ended_after_started": {
+          "name": "step_timings_ended_after_started",
+          "value": "\"step_timings\".\"ended_at\" >= \"step_timings\".\"started_at\""
+        },
+        "step_timings_activity_shape": {
+          "name": "step_timings_activity_shape",
+          "value": "\"step_timings\".\"kind\" <> 'activity' or (\"step_timings\".\"activity\" is not null and \"step_timings\".\"attempt\" is not null and \"step_timings\".\"scheduled_at\" is not null and \"step_timings\".\"queue_ms\" is not null and \"step_timings\".\"run_ms\" is not null and \"step_timings\".\"outcome\" is not null)"
+        },
+        "step_timings_wait_shape": {
+          "name": "step_timings_wait_shape",
+          "value": "\"step_timings\".\"kind\" <> 'wait' or (\"step_timings\".\"wait_for\" is not null and \"step_timings\".\"wait_ms\" is not null)"
+        },
+        "step_timings_outcome_known": {
+          "name": "step_timings_outcome_known",
+          "value": "\"step_timings\".\"outcome\" is null or \"step_timings\".\"outcome\" in ('ok', 'failed', 'cancelled')"
+        },
+        "step_timings_ms_nonneg": {
+          "name": "step_timings_ms_nonneg",
+          "value": "coalesce(\"step_timings\".\"queue_ms\", 0) >= 0 and coalesce(\"step_timings\".\"run_ms\", 0) >= 0 and coalesce(\"step_timings\".\"wait_ms\", 0) >= 0"
+        }
+      },
+      "isRLSEnabled": false
+    },
     "public.users": {
       "name": "users",
       "schema": "",
@@ -2203,6 +1924,131 @@
       },
       "policies": {},
       "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.approvals": {
+      "name": "approvals",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "task_id": {
+          "name": "task_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "subtask_id": {
+          "name": "subtask_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "holds": {
+          "name": "holds",
+          "type": "text[]",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "pr_number": {
+          "name": "pr_number",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "head": {
+          "name": "head",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "title": {
+          "name": "title",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "summary": {
+          "name": "summary",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "requested_at": {
+          "name": "requested_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "decision": {
+          "name": "decision",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "decided_by": {
+          "name": "decided_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "decided_at": {
+          "name": "decided_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "reason": {
+          "name": "reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "approvals_task_id_tasks_id_fk": {
+          "name": "approvals_task_id_tasks_id_fk",
+          "tableFrom": "approvals",
+          "tableTo": "tasks",
+          "columnsFrom": ["task_id"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "approvals_subtask_in_task_fk": {
+          "name": "approvals_subtask_in_task_fk",
+          "tableFrom": "approvals",
+          "tableTo": "subtasks",
+          "columnsFrom": ["task_id", "subtask_id"],
+          "columnsTo": ["task_id", "id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "approvals_pr_number_positive": {
+          "name": "approvals_pr_number_positive",
+          "value": "\"approvals\".\"pr_number\" > 0"
+        },
+        "approvals_decision_shape": {
+          "name": "approvals_decision_shape",
+          "value": "(\"approvals\".\"decision\" is null) = (\"approvals\".\"decided_by\" is null) and (\"approvals\".\"decision\" is null) = (\"approvals\".\"decided_at\" is null)"
+        },
+        "approvals_decision_known": {
+          "name": "approvals_decision_known",
+          "value": "\"approvals\".\"decision\" is null or \"approvals\".\"decision\" in ('approved', 'rejected')"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.asks": {
@@ -2688,6 +2534,66 @@
             "as": "(extract(epoch from (ended_at - started_at)) * 1000)::bigint",
             "type": "stored"
           }
+        },
+        "session_id": {
+          "name": "session_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "workflow_id": {
+          "name": "workflow_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "run_as_user": {
+          "name": "run_as_user",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "worktree_path": {
+          "name": "worktree_path",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "handle": {
+          "name": "handle",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "failure_code": {
+          "name": "failure_code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "failure_message": {
+          "name": "failure_message",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "route_outcome": {
+          "name": "route_outcome",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "session_cost_usd": {
+          "name": "session_cost_usd",
+          "type": "numeric(14, 6)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "context_tokens": {
+          "name": "context_tokens",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {
@@ -2724,6 +2630,21 @@
           ],
           "isUnique": false,
           "where": "\"session_runs\".\"ended_at\" is null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "session_runs_session_id_idx": {
+          "name": "session_runs_session_id_idx",
+          "columns": [
+            {
+              "expression": "session_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -2786,9 +2707,49 @@
         },
         "session_runs_usage_nonneg": {
           "name": "session_runs_usage_nonneg",
-          "value": "coalesce(\"session_runs\".\"input_tokens\", 0) >= 0 and coalesce(\"session_runs\".\"output_tokens\", 0) >= 0 and coalesce(\"session_runs\".\"cost_usd\", 0) >= 0"
+          "value": "coalesce(\"session_runs\".\"input_tokens\", 0) >= 0 and coalesce(\"session_runs\".\"output_tokens\", 0) >= 0 and coalesce(\"session_runs\".\"cost_usd\", 0) >= 0 and coalesce(\"session_runs\".\"session_cost_usd\", 0) >= 0 and coalesce(\"session_runs\".\"context_tokens\", 0) >= 0"
+        },
+        "session_runs_run_as_user_known": {
+          "name": "session_runs_run_as_user_known",
+          "value": "\"session_runs\".\"run_as_user\" is null or \"session_runs\".\"run_as_user\" in ('fleet-agent-dedicated', 'fleet-agent-carpool')"
+        },
+        "session_runs_route_outcome_known": {
+          "name": "session_runs_route_outcome_known",
+          "value": "\"session_runs\".\"route_outcome\" is null or \"session_runs\".\"route_outcome\" in ('ok', 'fail', 'neutral')"
         }
       },
+      "isRLSEnabled": false
+    },
+    "public.session_stops": {
+      "name": "session_stops",
+      "schema": "",
+      "columns": {
+        "run_id": {
+          "name": "run_id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "requested_at": {
+          "name": "requested_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "reason": {
+          "name": "reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
       "isRLSEnabled": false
     },
     "public.specs": {
@@ -3081,9 +3042,57 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
+        },
+        "key": {
+          "name": "key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "workflow_id": {
+          "name": "workflow_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "holds": {
+          "name": "holds",
+          "type": "text[]",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::text[]"
+        },
+        "superseded_at": {
+          "name": "superseded_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
         }
       },
-      "indexes": {},
+      "indexes": {
+        "subtasks_task_index_unique": {
+          "name": "subtasks_task_index_unique",
+          "columns": [
+            {
+              "expression": "task_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "index",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"subtasks\".\"superseded_at\" is null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "subtasks_task_id_tasks_id_fk": {
           "name": "subtasks_task_id_tasks_id_fk",
@@ -3097,11 +3106,6 @@
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
-        "subtasks_task_index_unique": {
-          "name": "subtasks_task_index_unique",
-          "nullsNotDistinct": false,
-          "columns": ["task_id", "index"]
-        },
         "subtasks_task_id_id_unique": {
           "name": "subtasks_task_id_id_unique",
           "nullsNotDistinct": false,
@@ -3186,6 +3190,37 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
+        },
+        "phase": {
+          "name": "phase",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "doing": {
+          "name": "doing",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "docs": {
+          "name": "docs",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::jsonb"
+        },
+        "last_problem": {
+          "name": "last_problem",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {},

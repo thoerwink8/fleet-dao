@@ -1,6 +1,6 @@
 // 会话外推分支：AI 会话只在本地提交，这里用「干活的」机器人把会话交出来的提交推到远端任务分支。
 // 推之前核对五件事：不是主线（拒绝推默认分支）、包含此刻最新的主线、相对主线真有内容（不推空交付，C7）、
-// 还没推上去的提交逐个过卫生检查（公开仓推上去就公开了；这里推带 --no-verify，git 钩子不跑，只能在这儿拦）、
+// 还没推上去的提交逐个过卫生检查、分支名也按名单比（公开仓推上去就公开了；这里推带 --no-verify，git 钩子不跑，只能在这儿拦）、
 // 远端分支要么没有、要么是我们的祖先（别人在上面推进过就报出来让引擎认领新头，分叉就停，绝不强推，C6）。
 // 会话的提交由会话用户打成包（git bundle）交出来，这里只把包导入引擎自己的裸仓；带令牌的 git 只在这个裸仓里跑
 // （为什么见 git.ts 开头）。
@@ -29,6 +29,7 @@ import {
   gitEnv,
   tail,
 } from './git.ts';
+import { assertPublishable } from './publish-check.ts';
 import type { RepoFactsCache } from './repos.ts';
 
 export interface PushDeps {
@@ -73,8 +74,8 @@ export interface PushBranchResult {
   defaultBranch: string;
 }
 
-const SHA = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
-const NET_TIMEOUT_MS = 5 * 60_000;
+export const SHA = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
+export const NET_TIMEOUT_MS = 5 * 60_000;
 
 /** 分支名：git 的规矩 + 不许 refs/ 开头、不许是 HEAD。 */
 export function validBranchName(name: string): boolean {
@@ -85,9 +86,14 @@ export function validBranchName(name: string): boolean {
   return name.split('/').every((part) => part && !part.startsWith('.') && !part.endsWith('.lock'));
 }
 
+/** 引擎自己这个仓的裸仓放哪：其他也要碰镜像的模块（并主线、打包）按同样的算法算路径，才会撞上同一把 withMirrorLock。 */
+export function mirrorPath(mirrorRoot: string, repo: RepoRef): string {
+  return join(mirrorRoot, repo.owner.toLowerCase(), `${repo.name.toLowerCase()}.git`);
+}
+
 const mirrorLocks = new Map<string, Promise<unknown>>();
 
-async function withMirrorLock<T>(dir: string, fn: () => Promise<T>): Promise<T> {
+export async function withMirrorLock<T>(dir: string, fn: () => Promise<T>): Promise<T> {
   const prev = mirrorLocks.get(dir) ?? Promise.resolve();
   const run = prev.then(fn, fn);
   const settled = run.catch(() => undefined);
@@ -109,6 +115,10 @@ export async function pushBranch(deps: PushDeps, input: PushBranchInput): Promis
     );
   }
   if (!SHA.test(head)) throw new GitHubError('BAD_INPUT', `要推的提交「${head}」不是完整的提交号`);
+  // 卫生检查的名单先读（没读到一律不推），分支名推上去一样公开：一个请求都不发之前先按名单比一遍
+  // （查出来 HYGIENE_NAME_BLOCKED：分支名是引擎按子任务的 key 拼的，会话改不了）。后面逐个提交扫用同一份名单。
+  const values = loadValues(deps, slug);
+  assertPublishable(`推 ${slug} 上的 ${branch}`, [], () => values, [{ label: '分支名', name: branch }]);
   const facts = await deps.facts.get(repo, 'agent', input.signal);
   const defaultBranch = facts.defaultBranch;
   if (branch.toLowerCase() === defaultBranch.toLowerCase()) {
@@ -203,7 +213,7 @@ export async function pushBranch(deps: PushDeps, input: PushBranchInput): Promis
       }
 
       // 6. 卫生检查：主线和远端分支上都没有的提交逐个扫（命中就不推，报文件、行、规则名、提交号，不带值）
-      await assertClean(git, local, { head, mainline, remoteBefore }, slug, deps);
+      await assertClean(git, local, { head, mainline, remoteBefore }, slug, values.values);
 
       // 7. 远端分支的状态
       if (remoteBefore) await assertFastForward(git, local, remoteBefore, head, slug, branch);
@@ -261,20 +271,8 @@ export async function pushBranch(deps: PushDeps, input: PushBranchInput): Promis
 /** 最多在报错信息里列几条命中（全部命中在 details 里）。 */
 const MAX_LISTED_FINDINGS = 10;
 
-/**
- * 推之前的卫生检查：主线和远端分支上都还没有的提交，逐个把新增的行、文件名、提交说明和作者过 packages/hygiene 的
- * 规则和名单（推上去的是整段历史，先加后删的也在里面）。查出来就拒推（HYGIENE_BLOCKED，不可重试：得改写那几个提交）；
- * 名单没读到（HYGIENE_LIST_MISSING）、git 的输出认不出（HYGIENE_UNSCANNED）也拒推，不当成「没问题」。
- * 报错只带文件、行、规则名和提交号，不带值。
- */
-async function assertClean(
-  git: Git,
-  local: GitCall,
-  range: { head: string; mainline: string; remoteBefore: string | null },
-  slug: string,
-  deps: PushDeps,
-): Promise<void> {
-  const { head, mainline, remoteBefore } = range;
+/** 卫生检查用的已知敏感值名单：没读到（HYGIENE_LIST_MISSING）一律不推，不当成「没问题」。 */
+function loadValues(deps: PushDeps, slug: string): Extract<LoadedValues, { ok: true }> {
   const values = (
     deps.sensitiveValues ?? (() => loadSensitiveValues({ env: deps.baseEnv ?? process.env }))
   )();
@@ -285,6 +283,22 @@ async function assertClean(
       { details: { tried: values.tried } },
     );
   }
+  return values;
+}
+
+/**
+ * 推之前的卫生检查：主线和远端分支上都还没有的提交，逐个把新增的行、文件名、提交说明和作者过 packages/hygiene 的
+ * 规则和名单（推上去的是整段历史，先加后删的也在里面）。查出来就拒推（HYGIENE_BLOCKED，不可重试：得改写那几个提交）；
+ * git 的输出认不出（HYGIENE_UNSCANNED）也拒推，不当成「没问题」。报错只带文件、行、规则名和提交号，不带值。
+ */
+async function assertClean(
+  git: Git,
+  local: GitCall,
+  range: { head: string; mainline: string; remoteBefore: string | null },
+  slug: string,
+  values: readonly string[],
+): Promise<void> {
+  const { head, mainline, remoteBefore } = range;
   const args = historyArgs([head, '--not', mainline, ...(remoteBefore ? [remoteBefore] : [])]);
   const patch = await git(args.patch, local);
   if (patch.code !== 0) throw fromGitFailure('卫生检查取逐个提交的差异', slug, patch);
@@ -294,10 +308,7 @@ async function assertClean(
   if (messages.code !== 0) throw fromGitFailure('卫生检查取提交说明', slug, messages);
   let scan: HistoryScan;
   try {
-    scan = scanHistory(
-      { patch: patch.stdout, names: names.stdout, messages: messages.stdout },
-      { values: values.values },
-    );
+    scan = scanHistory({ patch: patch.stdout, names: names.stdout, messages: messages.stdout }, { values });
   } catch (e) {
     throw new GitHubError(
       'HYGIENE_UNSCANNED',
@@ -330,7 +341,10 @@ async function assertClean(
   );
 }
 
-async function ensureMirror(deps: PushDeps, mirror: string): Promise<void> {
+export async function ensureMirror(
+  deps: Pick<PushDeps, 'git' | 'mirrorRoot' | 'baseEnv'>,
+  mirror: string,
+): Promise<void> {
   if (existsSync(join(mirror, 'HEAD'))) return;
   mkdirSync(mirror, { recursive: true });
   const init = await deps.git(['init', '--bare', '--quiet', mirror], {
@@ -344,7 +358,7 @@ async function ensureMirror(deps: PushDeps, mirror: string): Promise<void> {
   }
 }
 
-type Git = (args: string[], call: GitCall) => Promise<GitRun>;
+export type Git = (args: string[], call: GitCall) => Promise<GitRun>;
 
 /** 默认的包大小上限。单个文件过 100 MiB GitHub 本来就拒收；一次交付的包比这还大，已经不是 AI 会话的正常交付。 */
 export const MAX_BUNDLE_BYTES = 100 * 1024 * 1024;
@@ -354,7 +368,7 @@ export const MAX_BUNDLE_BYTES = 100 * 1024 * 1024;
  * （导入的时候会话再换包，也换不到引擎读的那份）。`bundle unbundle` 只写对象、不建引用、不执行包里的任何东西。
  * 导入失败一律当坏包、不可重试：拿同一个包重试只会再坏一次（原因不是网络，别让重试次数白白用完）；缺前置提交单说。
  */
-async function importBundle(
+export async function importBundle(
   git: Git,
   call: GitCall,
   mirror: string,
@@ -471,7 +485,7 @@ function mirrorFailed(path: string, err: unknown): GitHubError {
   );
 }
 
-async function lsRemote(
+export async function lsRemote(
   git: Git,
   call: GitCall,
   url: string,
@@ -487,14 +501,14 @@ async function lsRemote(
   return out;
 }
 
-async function revParse(git: Git, call: GitCall, ref: string): Promise<string> {
+export async function revParse(git: Git, call: GitCall, ref: string): Promise<string> {
   const res = await git(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], call);
   const sha = res.stdout.trim();
   if (res.code !== 0 || !SHA.test(sha)) throw fromGitFailure(`解析 ${ref}`, '', res);
   return sha;
 }
 
-async function isAncestor(git: Git, call: GitCall, ancestor: string, of: string): Promise<boolean> {
+export async function isAncestor(git: Git, call: GitCall, ancestor: string, of: string): Promise<boolean> {
   const res = await git(['merge-base', '--is-ancestor', ancestor, of], call);
   if (res.code === 0) return true;
   if (res.code === 1) return false;
@@ -524,7 +538,7 @@ async function assertFastForward(
   );
 }
 
-function fromGitFailure(what: string, where: string, res: GitRun): GitHubError {
+export function fromGitFailure(what: string, where: string, res: GitRun): GitHubError {
   const kind = classifyPushFailure(res.stderr);
   const text = `${what}${where ? `（${where}）` : ''}失败：${tail(res.stderr)}`;
   if (kind === 'auth') return new GitHubError('PUSH_FORBIDDEN', text, { details: { exitCode: res.code } });
@@ -532,7 +546,7 @@ function fromGitFailure(what: string, where: string, res: GitRun): GitHubError {
   return new GitHubError('GIT_FAILED', text, { retryable: true, details: { exitCode: res.code, kind } });
 }
 
-function fromPushFailure(
+export function fromPushFailure(
   kind: ReturnType<typeof classifyPushFailure>,
   slug: string,
   branch: string,

@@ -6,6 +6,7 @@ export * from './domain-map.ts';
 export * from './migrate.ts';
 export * from './queries/board.ts';
 export * from './queries/candidates.ts';
+export * from './queries/engine.ts';
 export * from './queries/history.ts';
 export * from './queries/idempotency.ts';
 export * from './queries/jev.ts';
