@@ -62,7 +62,7 @@ else
   skipped=1
 fi
 
-for t in agents-sync cli-tools; do
+for t in agents-sync agents-sync-account cli-tools; do
   bash "$HERE/$t.test.sh"
   case $? in
   0) ;;

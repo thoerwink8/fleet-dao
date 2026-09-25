@@ -23,6 +23,8 @@ source "$DEPLOY_DIR/lib/root-exec-check.sh"
 source "$DEPLOY_DIR/lib/login-user.sh"
 # shellcheck source=lib/cli-tools.sh
 source "$DEPLOY_DIR/lib/cli-tools.sh"
+# shellcheck source=lib/agents-sync.sh
+source "$DEPLOY_DIR/lib/agents-sync.sh"
 trap 'on_error "$LINENO" "$BASH_COMMAND"' ERR
 
 # ── 钉死的版本与校验和：外部二进制装上机器就进了信任面，不用 latest ──
@@ -80,6 +82,7 @@ WRITER_IDENTITIES=(fleet "${SESSION_USERS[@]}" "$PILOT_USER")
 # 同步脚本以各用户自己的身份写（文件归他们），只动标记圈起来的那一块和它清单里记着的 skill（docs/ops.md 第五节）
 AGENT_RULES_USERS=("${SESSION_USERS[@]}" "$PILOT_USER")
 AGENTS_SYNC=$DEPLOY_DIR/../packages/agents-sync/bin/agents-sync
+AGENTS_SYNC_CMD=(/usr/bin/node "$AGENTS_SYNC")
 AGENT_SCOPE_BIN=/usr/local/sbin/fleet-agent-scope
 SUDOERS_FILE=/etc/sudoers.d/fleet-dao
 ENV_FILE=/etc/fleet-dao/france.env
@@ -637,33 +640,7 @@ setup_web_upload() {
 $line"
 }
 
-# 跑一遍同步脚本（packages/agents-sync），把它逐行的结论接进本脚本的账：↻ 改了、✗ 红、… 没查成、✓ 对、· 没装跳过。
-# 它以 --user 换成那个用户再动手，写出来的东西归那个用户。
-# 写（--apply）的时候只记「改了」，✗ 和 … 照打不记账：读回那一步的 --check 会把同一件事再判一次，记两遍就重了
-agents_sync() { # 模式 用户
-  local mode=$1 u=$2 out rc=0 line said=0
-  out=$(/usr/bin/node "$AGENTS_SYNC" "$mode" --user "$u" 2>&1) || rc=$?
-  while IFS= read -r line; do
-    case $line in
-    '  ↻ '*) changed "$u ${line#  ↻ }" ;;
-    '  ✗ '*)
-      said=1
-      if [[ "$mode" == --check ]]; then red "$u ${line#  ✗ }"; else printf '  ✗ %s %s\n' "$u" "${line#  ✗ }"; fi
-      ;;
-    '  … '*)
-      said=1
-      if [[ "$mode" == --check ]]; then pending "$u ${line#  … }"; else printf '  … %s %s\n' "$u" "${line#  … }"; fi
-      ;;
-    '  ✓ '*) ok "$u ${line#  ✓ }" ;;
-    '  · '*) if [[ "$mode" == --check ]]; then printf '  · %s %s\n' "$u" "${line#  · }"; fi ;;
-    esac
-  done <<<"$out"
-  # 退出码不是 0 却一行 ✗、… 都没给（崩了、node 起不来）：别当成没事
-  if ((rc != 0 && said == 0)); then
-    red "$u：同步脚本 $mode 退出 $rc，没给出逐项结论：$(tail -3 <<<"$out" | tr '\n' ' ')"
-  fi
-}
-
+# agents_sync（跑同步脚本、把逐行结论记进账）在 lib/agents-sync.sh
 setup_agent_rules() {
   step "各家 AI 的全局说明与方法类 skill（${AGENT_RULES_USERS[*]}；仓根 AGENTS.md 的通用段、agents/skills/）"
   local u
