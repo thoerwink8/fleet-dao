@@ -169,6 +169,29 @@ describe('开 PR', () => {
       expect(fake.requests).toHaveLength(0);
     });
 
+    it('正文里带 NUL（扫不成内容，只能按二进制算）：不开（HYGIENE_UNSCANNED），一个请求都不发，不当成扫过没事', async () => {
+      const { gh, fake } = setup();
+      fake.refs.set('task/27-nul', A);
+      const err = await gh
+        .openPr({
+          repo,
+          branch: 'task/27-nul',
+          head: A,
+          title: '登录页加验证码',
+          body: {
+            did: ['做完了\u0000'],
+            verified: ['x'],
+            plan: 'P1「工作流」',
+            specs: 'specs/27-x/',
+            changedFiles: ['src/x.ts'],
+          },
+        })
+        .catch((e: unknown) => e);
+      expect(err).toMatchObject({ code: 'HYGIENE_UNSCANNED' });
+      expect((err as Error).message).toContain('PR 正文');
+      expect(fake.requests).toHaveLength(0);
+    });
+
     it('名单没读到：不开（HYGIENE_LIST_MISSING），不当成查过没事', async () => {
       const { gh, fake } = setup({
         sensitiveValues: () => ({ ok: false, reason: '已知敏感值名单没读到', tried: ['/nonexistent'] }),

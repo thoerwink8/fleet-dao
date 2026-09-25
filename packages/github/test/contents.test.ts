@@ -157,6 +157,21 @@ describe('写主线之前的卫生检查（直写不经 git 推送，推前扫�
     ).rejects.toMatchObject({ code: 'HYGIENE_LIST_MISSING', retryable: false });
     expect(fake.requests).toHaveLength(0);
   });
+
+  it('正文里带 NUL（扫不成内容，只能按二进制算）：不写（HYGIENE_UNSCANNED），一个请求都不发，不当成扫过没事', async () => {
+    const { gh, fake } = setup();
+    const err = await gh
+      .writeSpecDoc({
+        repo,
+        path: 'specs/21-foo/需求.md',
+        content: '# 需求\n\u0000\n',
+        message: '写需求文档',
+      })
+      .catch((e: unknown) => e);
+    expect(err).toMatchObject({ code: 'HYGIENE_UNSCANNED' });
+    expect((err as Error).message).toContain('specs/21-foo/需求.md');
+    expect(fake.requests).toHaveLength(0);
+  });
 });
 
 describe('readSpecDoc', () => {
