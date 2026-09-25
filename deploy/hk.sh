@@ -476,7 +476,8 @@ readback_gateway() {
     return 0
   fi
   if [[ "${s[active]:-}" != active ]]; then
-    red "飞书网关（${s[current]:0:12}）没在跑：journalctl -u $GATEWAY_UNIT -n 50"
+    # 配置没备齐时网关本来就不起（上面已记待配）；备齐了还没在跑才是毛病
+    if [[ "${s[config]:-}" == ok ]]; then red "飞书网关（${s[current]:0:12}）没在跑：journalctl -u $GATEWAY_UNIT -n 50"; fi
     return 0
   fi
   if [[ "${s[running]:-}" != "${s[current]}" ]]; then red "飞书网关的主进程跑的是「${s[running]:-别处}」，不是在用的 ${s[current]:0:12}"; fi
