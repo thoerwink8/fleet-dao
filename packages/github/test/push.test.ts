@@ -253,6 +253,79 @@ describe('会话外推分支', { timeout: 60_000 }, () => {
     expect(remoteHead('task/13-no-list')).toBeNull();
   });
 
+  it('卫生检查逐个提交扫：先加后删（最后的样子干净）、写进提交说明的，照样不推，报出是哪个提交', async () => {
+    const { gh } = pushSetup();
+    const repo = { owner: 'acme', name: 'widgets' };
+    const token = ['ghp', 'Zt4wQ9mB2xKc7RvN1pLs8HdJ3fGy6TaEu5Vo'].join('_');
+    const wt = worktree('task/14-add-then-remove', { 'deploy.md': `export GH_TOKEN=${token}\n` });
+    git(wt.path, 'rm', '-q', 'deploy.md');
+    writeFileSync(join(wt.path, 'ok.md'), '没问题\n');
+    git(wt.path, 'add', '-A');
+    git(wt.path, 'commit', '-q', '-m', '去掉 deploy.md');
+    const head = git(wt.path, 'rev-parse', 'HEAD');
+    // 总差异里没有令牌：只看总差异的闸会放过去。
+    expect(git(wt.path, 'diff', wt.start, head)).not.toContain('GH_TOKEN');
+    const err = await gh
+      .pushBranch({ repo, bundlePath: bundleOf(wt.path, wt.start), branch: 'task/14-add-then-remove', head })
+      .then(
+        () => null,
+        (e: unknown) => e as { code: string; message: string; details: { findings: { commit: string }[] } },
+      );
+    expect(err).toMatchObject({ code: 'HYGIENE_BLOCKED' });
+    expect(err?.message).toContain(`deploy.md:1 令牌（提交 ${wt.head.slice(0, 7)}）`);
+    expect(err?.message).toContain('只在后面补一个删掉它的提交不算');
+    expect(err?.details.findings.every((f) => f.commit === wt.head)).toBe(true);
+    expect(`${err?.message}${JSON.stringify(err?.details)}`).not.toContain(token.slice(4));
+    expect(remoteHead('task/14-add-then-remove')).toBeNull();
+
+    const said = worktree('task/15-message');
+    git(said.path, 'commit', '-q', '--amend', '-m', '顺手切到 fake-org-778899');
+    const saidHead = git(said.path, 'rev-parse', 'HEAD');
+    await expect(
+      gh.pushBranch({
+        repo,
+        bundlePath: bundleOf(said.path, said.start),
+        branch: 'task/15-message',
+        head: saidHead,
+      }),
+    ).rejects.toMatchObject({
+      code: 'HYGIENE_BLOCKED',
+      message: expect.stringContaining(`提交说明:1 名单里的敏感值（提交 ${saidHead.slice(0, 7)}）`),
+    });
+    expect(remoteHead('task/15-message')).toBeNull();
+  });
+
+  it('卫生检查认不出 git 的输出：不推（HYGIENE_UNSCANNED），不当成扫过没事', async () => {
+    const garbled: GitRunner = async (args, call) =>
+      args.includes('log') ? { code: 0, stdout: '+不是 git log 的输出\n', stderr: '' } : execGit(args, call);
+    const { gh } = pushSetup(undefined, { git: garbled });
+    const wt = worktree('task/16-garbled');
+    await expect(
+      gh.pushBranch({
+        repo: { owner: 'acme', name: 'widgets' },
+        bundlePath: wt.bundle,
+        branch: 'task/16-garbled',
+        head: wt.head,
+      }),
+    ).rejects.toMatchObject({ code: 'HYGIENE_UNSCANNED', retryable: false });
+    // git log 什么都没吐：要推的头不在扫过的提交里，也是没扫成。
+    const silent: GitRunner = async (args, call) =>
+      args.includes('log') ? { code: 0, stdout: '', stderr: '' } : execGit(args, call);
+    const quiet = pushSetup(undefined, { git: silent });
+    await expect(
+      quiet.gh.pushBranch({
+        repo: { owner: 'acme', name: 'widgets' },
+        bundlePath: wt.bundle,
+        branch: 'task/16-garbled',
+        head: wt.head,
+      }),
+    ).rejects.toMatchObject({
+      code: 'HYGIENE_UNSCANNED',
+      message: expect.stringContaining('不在扫过的提交里'),
+    });
+    expect(remoteHead('task/16-garbled')).toBeNull();
+  });
+
   it('同一个头再推一次（重试）：什么都不做', async () => {
     const { gh } = pushSetup();
     const repo = { owner: 'acme', name: 'widgets' };

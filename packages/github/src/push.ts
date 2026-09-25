@@ -1,6 +1,6 @@
 // 会话外推分支：AI 会话只在本地提交，这里用「干活的」机器人把会话交出来的提交推到远端任务分支。
 // 推之前核对五件事：不是主线（拒绝推默认分支）、包含此刻最新的主线、相对主线真有内容（不推空交付，C7）、
-// 相对主线新增的行和文件名过卫生检查（公开仓推上去就公开了；这里推带 --no-verify，git 钩子不跑，只能在这儿拦）、
+// 还没推上去的提交逐个过卫生检查（公开仓推上去就公开了；这里推带 --no-verify，git 钩子不跑，只能在这儿拦）、
 // 远端分支要么没有、要么是我们的祖先（别人在上面推进过就报出来让引擎认领新头，分叉就停，绝不强推，C6）。
 // 会话的提交由会话用户打成包（git bundle）交出来，这里只把包导入引擎自己的裸仓；带令牌的 git 只在这个裸仓里跑
 // （为什么见 git.ts 开头）。
@@ -9,12 +9,13 @@ import { constants, existsSync, lstatSync, mkdirSync, rmSync } from 'node:fs';
 import { type FileHandle, open } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
-  addedHunks,
-  diffArgs,
   formatFinding,
+  type HistoryScan,
+  historyArgs,
   type LoadedValues,
   loadSensitiveValues,
-  scanAdded,
+  REWRITE_HINT,
+  scanHistory,
 } from '@fleet-dao/hygiene';
 import type { GitHubClient, Logger, RepoRef } from './client.ts';
 import { repoSlug } from './client.ts';
@@ -201,8 +202,8 @@ export async function pushBranch(deps: PushDeps, input: PushBranchInput): Promis
         );
       }
 
-      // 6. 卫生检查：相对主线新增的行和文件名（命中就不推，报文件、行、规则名，不带值）
-      await assertClean(git, local, mainline, head, slug, deps);
+      // 6. 卫生检查：主线和远端分支上都没有的提交逐个扫（命中就不推，报文件、行、规则名、提交号，不带值）
+      await assertClean(git, local, { head, mainline, remoteBefore }, slug, deps);
 
       // 7. 远端分支的状态
       if (remoteBefore) await assertFastForward(git, local, remoteBefore, head, slug, branch);
@@ -261,18 +262,19 @@ export async function pushBranch(deps: PushDeps, input: PushBranchInput): Promis
 const MAX_LISTED_FINDINGS = 10;
 
 /**
- * 推之前的卫生检查：主线到要推的提交之间新增的行、新出现的文件名，过 packages/hygiene 的规则和名单。
- * 查出来就拒推（HYGIENE_BLOCKED，不可重试：得把东西从提交里拿掉）；名单没读到也拒推（HYGIENE_LIST_MISSING），
- * 不当成「没问题」。报错只带文件、行、规则名，不带值。
+ * 推之前的卫生检查：主线和远端分支上都还没有的提交，逐个把新增的行、文件名、提交说明和作者过 packages/hygiene 的
+ * 规则和名单（推上去的是整段历史，先加后删的也在里面）。查出来就拒推（HYGIENE_BLOCKED，不可重试：得改写那几个提交）；
+ * 名单没读到（HYGIENE_LIST_MISSING）、git 的输出认不出（HYGIENE_UNSCANNED）也拒推，不当成「没问题」。
+ * 报错只带文件、行、规则名和提交号，不带值。
  */
 async function assertClean(
   git: Git,
   local: GitCall,
-  mainline: string,
-  head: string,
+  range: { head: string; mainline: string; remoteBefore: string | null },
   slug: string,
   deps: PushDeps,
 ): Promise<void> {
+  const { head, mainline, remoteBefore } = range;
   const values = (
     deps.sensitiveValues ?? (() => loadSensitiveValues({ env: deps.baseEnv ?? process.env }))
   )();
@@ -283,25 +285,46 @@ async function assertClean(
       { details: { tried: values.tried } },
     );
   }
-  const args = diffArgs(mainline, head);
+  const args = historyArgs([head, '--not', mainline, ...(remoteBefore ? [remoteBefore] : [])]);
   const patch = await git(args.patch, local);
-  if (patch.code !== 0) throw fromGitFailure('卫生检查取差异', slug, patch);
+  if (patch.code !== 0) throw fromGitFailure('卫生检查取逐个提交的差异', slug, patch);
   const names = await git(args.names, local);
-  if (names.code !== 0) throw fromGitFailure('卫生检查取文件名', slug, names);
-  const findings = scanAdded(addedHunks(patch.stdout), names.stdout.split('\0').filter(Boolean), {
-    values: values.values,
-  });
+  if (names.code !== 0) throw fromGitFailure('卫生检查取逐个提交的文件名', slug, names);
+  const messages = await git(args.messages, local);
+  if (messages.code !== 0) throw fromGitFailure('卫生检查取提交说明', slug, messages);
+  let scan: HistoryScan;
+  try {
+    scan = scanHistory(
+      { patch: patch.stdout, names: names.stdout, messages: messages.stdout },
+      { values: values.values },
+    );
+  } catch (e) {
+    throw new GitHubError(
+      'HYGIENE_UNSCANNED',
+      `推 ${slug} 之前的卫生检查没扫成：${e instanceof Error ? e.message : String(e)}。没扫成一律不推`,
+      { details: { head, mainline } },
+    );
+  }
+  // 头自己必须在扫过的提交里：主线不包含它（前面核过），它不在清单里只可能是远端分支已经有它了。
+  if (!scan.commits.includes(head) && !(remoteBefore && (await isAncestor(git, local, head, remoteBefore)))) {
+    throw new GitHubError(
+      'HYGIENE_UNSCANNED',
+      `推 ${slug} 之前的卫生检查没扫成：要推的 ${head.slice(0, 7)} 不在扫过的提交里。没扫成一律不推`,
+      { details: { head, mainline, scanned: scan.commits.length } },
+    );
+  }
+  const { findings } = scan;
   if (findings.length === 0) return;
   const listed = findings.slice(0, MAX_LISTED_FINDINGS).map(formatFinding);
   const more = findings.length > listed.length ? `；另有 ${findings.length - listed.length} 处` : '';
   throw new GitHubError(
     'HYGIENE_BLOCKED',
-    `${head.slice(0, 7)} 没推：卫生检查在相对 ${mainline.slice(0, 7)} 新增的内容里查出 ${findings.length} 处（${listed.join('；')}${more}）。公开仓推上去就公开了，先把这些从提交里拿掉`,
+    `${head.slice(0, 7)} 没推：卫生检查在还没推上去的 ${scan.commits.length} 个提交里查出 ${findings.length} 处（${listed.join('；')}${more}）。公开仓推上去就公开了。${REWRITE_HINT}`,
     {
       details: {
         head,
         mainline,
-        findings: findings.map((f) => ({ path: f.path, line: f.line, rule: f.rule })),
+        findings: findings.map((f) => ({ path: f.path, line: f.line, rule: f.rule, commit: f.commit })),
       },
     },
   );

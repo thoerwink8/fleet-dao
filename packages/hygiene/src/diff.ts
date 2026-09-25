@@ -1,5 +1,5 @@
-// 推送前的闸只看这次新增的东西：git diff 里加出来的行（按文件、按连续的一段，跨行的规则如私钥正文照样认得出），
-// 加上这次新增、改动、改名的文件名。和全仓扫同一套规则、名单、白名单。
+// 只看新增的东西：一段 diff 里加出来的行（按文件、按连续的一段，跨行的规则如私钥正文照样认得出），
+// 加上新增、改动、改名的文件名。和全仓扫同一套规则、名单、白名单。推送前逐个提交扫（history.ts）用它。
 import { ALLOWLIST, type Allow } from './allowlist.ts';
 import { findHits, findSecretFile } from './rules.ts';
 import { applyAllowlist, type Finding } from './scan.ts';
@@ -13,7 +13,7 @@ export interface AddedHunk {
 }
 
 /** git 在路径里有特殊字符时会加引号、用 C 的转义（\t、\"、\\、八进制字节）。 */
-function unquotePath(raw: string): string {
+export function unquotePath(raw: string): string {
   if (!raw.startsWith('"')) return raw;
   const bytes: number[] = [];
   const body = raw.slice(1, -1);
@@ -96,13 +96,4 @@ export function scanAdded(
     }
   }
   return applyAllowlist(found, options.allowlist ?? ALLOWLIST, new Set());
-}
-
-/** 取「从 base 到 head 新增了什么」要跑的两条 git 命令的参数（推送前的钩子和会话外推分支共用）。 */
-export function diffArgs(base: string, head: string): { patch: string[]; names: string[] } {
-  const common = ['--no-color', '--no-ext-diff', '-M', '--diff-filter=ACMRT'];
-  return {
-    patch: ['-c', 'core.quotePath=false', 'diff', ...common, '-U0', base, head],
-    names: ['-c', 'core.quotePath=false', 'diff', ...common, '--name-only', '-z', base, head],
-  };
 }

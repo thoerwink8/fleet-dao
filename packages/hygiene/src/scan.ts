@@ -92,7 +92,8 @@ export function scanFiles(
   return report;
 }
 
-/** 一条命中打成一行：只有文件、行和规则名，值一律不打（检查的输出会进 CI 日志、会话记录）。 */
-export function formatFinding(f: Pick<Finding, 'path' | 'line' | 'label'>): string {
-  return `${f.line > 0 ? `${f.path}:${f.line}` : f.path} ${f.label}`;
+/** 一条命中打成一行：只有文件、行和规则名（逐个提交扫的再带提交号），值一律不打（检查的输出会进 CI 日志、会话记录）。 */
+export function formatFinding(f: Pick<Finding, 'path' | 'line' | 'label'> & { commit?: string }): string {
+  const where = f.line > 0 ? `${f.path}:${f.line}` : f.path;
+  return `${where} ${f.label}${f.commit ? `（提交 ${f.commit.slice(0, 7)}）` : ''}`;
 }
