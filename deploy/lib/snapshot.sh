@@ -73,12 +73,14 @@ snapshot_file_list() {
 snapshot_ours() {
   local u
   echo "## identity"
-  for u in fleet fleet-agent-dedicated fleet-agent-carpool; do
+  for u in fleet fleet-agent-dedicated fleet-agent-carpool pilot; do
     getent passwd "$u" || echo "passwd $u: 无"
     getent group "$u" || echo "group $u: 无"
   done
+  # pilot 在这个组里才看得了日志
+  getent group systemd-journal || echo "group systemd-journal: 无"
   echo "## files"
-  snapshot_file_list /etc/fleet-dao /opt/fleet-dao /srv/fleet-dao-web /var/www/fleet-dao-acme \
+  snapshot_file_list /etc/fleet-dao /opt/fleet-dao /srv/fleet-dao-web /var/www/fleet-dao-acme /home/pilot/.local/bin \
     /etc/wireguard /etc/postgresql/16/main /etc/apt/sources.list.d /etc/apt/keyrings \
     /usr/local/bin/fleet-temporal /usr/local/sbin/fleet-agent-scope /etc/sudoers.d/fleet-dao /home/fleet/.local/bin \
     /home/fleet-agent-dedicated/.local/bin /home/fleet-agent-carpool/.local/bin \
@@ -91,7 +93,7 @@ snapshot_ours() {
   fi
   find /etc/systemd/system /etc/letsencrypt/live /etc/letsencrypt/renewal -maxdepth 2 -name '*fleet*' -print0 2>/dev/null |
     sort -z | while IFS= read -r -d '' f; do snapshot_file_list "$f"; done
-  for d in /srv/fleet-dao /var/lib/fleet-dao /var/log/fleet-dao /home/fleet /home/fleet-agent-dedicated /home/fleet-agent-carpool; do
+  for d in /srv/fleet-dao /var/lib/fleet-dao /var/log/fleet-dao /home/fleet /home/fleet-agent-dedicated /home/fleet-agent-carpool /home/pilot; do
     if [[ -e "$d" ]]; then printf 'dir  %s %s\n' "$(stat -c '%U:%G %a' "$d")" "$d"; fi
   done
   echo "## packages"
