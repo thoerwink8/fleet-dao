@@ -1,6 +1,6 @@
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { checkDocPointers, DOCS, formatProblem, type PointerKind, quoteFits } from '../src/doc-pointers.ts';
+import { checkDocPointers, DOCS, formatProblem, type PointerKind } from '../src/doc-pointers.ts';
 import { fsRepo } from '../src/repo.ts';
 import { memRepo } from './helpers.ts';
 
@@ -12,6 +12,7 @@ const DESIGN = [
   '## 一、一句话',
   '',
   '写任务。',
+  '- **会话断了接着干**：续上原会话。',
   '',
   '## 二、为什么',
   '',
@@ -193,16 +194,37 @@ describe('文档指针：故意弄断的，逐条报 文件:行', () => {
     expect(report.problems).toEqual([{ file, line: first, message }]);
   });
 
-  it('引的话写个大意可以，可小标题改了名、章节号指错了一节照样抓', () => {
-    // 「做成命令不是 MCP」是上下两行的大意（main 上真有这样写的）；「仓库目录」是「仓库结构」改名后的样子
-    const { report, first } = withLines('docs/design.md', [
-      '见第八节「做成命令不是 MCP」。',
-      '见第三节「仓库目录」。',
-      '见第十五节「为什么是命令不是 MCP」。',
+  it('引的话只认原文：写大意、小标题改了名、指到别的节都报，原文照过', () => {
+    const spec = 'specs/1-demo/需求.md';
+    const { report, first } = withLines(spec, [
+      '见 design 第八节「为什么是命令不是 MCP」。', // 原文
+      '见 design 第八节「做成命令不是 MCP」。', // 上下两条拼出来的大意
+      '见 design 第三节「仓库目录」。', // 「仓库结构」改名后的样子
+      '见 design 第十五节「为什么是命令不是 MCP」。', // 指到别的节
     ]);
     expect(report.problems.map(formatProblem)).toEqual([
-      `docs/design.md:${first + 1}  docs/design.md 第三节里找不到「仓库目录」`,
-      `docs/design.md:${first + 2}  docs/design.md 第十五节里找不到「为什么是命令不是 MCP」`,
+      `${spec}:${first + 1}  docs/design.md 第八节里找不到「做成命令不是 MCP」`,
+      `${spec}:${first + 2}  docs/design.md 第三节里找不到「仓库目录」`,
+      `${spec}:${first + 3}  docs/design.md 第十五节里找不到「为什么是命令不是 MCP」`,
+    ]);
+  });
+
+  it('#41 审查在真文档上造的三种断法都报：删掉引的那一条、改掉半个标签、意思改反', () => {
+    const spec = 'specs/1-demo/需求.md';
+    const pointers = [
+      '见 design 第八节「为什么是命令不是 MCP」。',
+      '见 design 第八节「再主动，做成 fleet 命令」。',
+      '见 design 第一节「会话断了接着干」。',
+    ];
+    expect(withLines(spec, pointers).report.problems).toEqual([]);
+    const broken = DESIGN.replace('  - 为什么是命令不是 MCP：各家都会跑命令。\n', '')
+      .replace('做成 `fleet` 命令', '做成 `fleet` 配置')
+      .replace('会话断了接着干', '会话断了从头干');
+    const { report, first } = withLines(spec, pointers, { 'docs/design.md': broken });
+    expect(report.problems.map(formatProblem)).toEqual([
+      `${spec}:${first}  docs/design.md 第八节里找不到「为什么是命令不是 MCP」`,
+      `${spec}:${first + 1}  docs/design.md 第八节里找不到「再主动，做成 fleet 命令」`,
+      `${spec}:${first + 2}  docs/design.md 第一节里找不到「会话断了接着干」`,
     ]);
   });
 
@@ -231,31 +253,6 @@ describe('文档指针：故意弄断的，逐条报 文件:行', () => {
     delete files['specs/1-demo/需求.md'];
     const report = checkDocPointers(memRepo(files));
     expect(report.problems.map(formatProblem)).toEqual(['specs/:0  列不出这个目录下的文件，里面的文档没查']);
-  });
-});
-
-describe('章节后面引的话：写大意可以，差太多不行（样本照 main 上的原文）', () => {
-  const six = [
-    '3. 不撞车的调度：会动同一块地方的子任务不同时跑——排队，或交给同一个会话连着做；互不相干的才并行。',
-  ];
-  const eight = [
-    '- 再主动，做成 fleet 命令：只有 AI 自己知道的事才让它主动说。',
-    '- 为什么是命令不是 MCP：所有写码助手都会跑命令，一条命令各家通用。',
-  ];
-
-  it('原样在那一节里：过', () => {
-    expect(quoteFits('不撞车的调度', six)).toBe(true);
-  });
-
-  it('少一个「的」、拼了上下两条意思的大意：过', () => {
-    expect(quoteFits('不撞车调度', six)).toBe(true);
-    expect(quoteFits('做成命令不是 MCP', eight)).toBe(true);
-  });
-
-  it('小标题改了名、指到不相干的一节、引号是空的：不过', () => {
-    expect(quoteFits('仓库结构', ['### 仓库目录', '| 存结构不固定的数据 | 弱 |'])).toBe(false);
-    expect(quoteFits('做成命令不是 MCP', six)).toBe(false);
-    expect(quoteFits('', six)).toBe(false);
   });
 });
 

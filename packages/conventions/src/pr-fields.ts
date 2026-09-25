@@ -8,6 +8,17 @@ import { fsRepo } from './repo.ts';
 
 export const PLAN_COLUMN = '对应计划';
 export const SPECS_COLUMN = 'specs';
+/** PR 模板（.github/pull_request_template.md）的各栏，顺序同模板；测试里对着模板查，两边对不上就红。 */
+export const PR_COLUMNS = [
+  '做了什么',
+  '怎么验证的',
+  '还欠什么',
+  '需求',
+  PLAN_COLUMN,
+  SPECS_COLUMN,
+  '文档',
+] as const;
+const KNOWN = new Set<string>(PR_COLUMNS.map((c) => c.toLowerCase()));
 
 export interface PrFacts {
   labels: readonly string[];
@@ -23,8 +34,13 @@ export interface RepoFacts {
   exists(rel: string): boolean;
 }
 
+/** 「**对应计划**：」「**对应计划：**」：加粗的，冒号在里在外都算一栏的开头。 */
+const BOLD_COLUMN = /^\s*(?:[-*+]\s+)?\*\*\s*([^*：:\n]+?)\s*(?:\*\*\s*[：:]|[：:]\s*\*\*)\s*(.*)$/;
+/** 「对应计划：」：不加粗的只认模板里有的栏名，免得把正文里带冒号的一句话当成新的一栏。 */
+const PLAIN_COLUMN = /^\s*(?:[-*+]\s+)?([^\s*：:][^*：:\n]*?)\s*[：:]\s*(.*)$/;
+
 /**
- * 正文里的各栏：行首「**标题**：」起，到下一栏为止；标题不分大小写。
+ * 正文里的各栏：从一栏的开头起，到下一栏为止；栏名不分大小写。
  * HTML 注释（模板里的提示）先去掉：只留着模板提示没填，这一栏就是空的。
  */
 export function prColumns(body: string): Map<string, string> {
@@ -35,7 +51,9 @@ export function prColumns(body: string): Map<string, string> {
     if (current !== undefined && !cols.has(current)) cols.set(current, buf.join('\n').trim());
   };
   for (const line of stripComments(body.replace(/\r\n?/g, '\n')).split('\n')) {
-    const m = /^\s*\*\*([^*\n]+?)\*\*\s*[：:]\s*(.*)$/.exec(line);
+    const bold = BOLD_COLUMN.exec(line);
+    const plain = bold ? null : PLAIN_COLUMN.exec(line);
+    const m = bold ?? (plain?.[1] && KNOWN.has(plain[1].toLowerCase()) ? plain : null);
     if (m?.[1] !== undefined) {
       flush();
       current = m[1].trim().toLowerCase();
@@ -88,14 +106,14 @@ function checkPlan(
 ): string[] {
   if (value === undefined) {
     return [
-      '正文没有「对应计划」一栏：照 PR 模板加一行 **对应计划**：P1「工作流」（plan.md 的阶段加那一条的原话开头）。',
+      '正文里认不出「对应计划」一栏：要写成 对应计划：P1「工作流」（单独起一行；plan.md 的阶段加那一条的原话开头）。',
     ];
   }
   if (!value) return ['「对应计划」一栏是空的：写 plan.md 的阶段加那一条的原话开头，比如 P1「工作流」。'];
   const refs = parsePlanRefs(value);
   if (refs.length === 0) {
     return [
-      `「对应计划」写的「${oneLine(value)}」认不出是 plan.md 哪一条：写成 P1「工作流」这样，阶段加那一条的原话开头。`,
+      `「对应计划」写的「${oneLine(value)}」认不出是 plan.md 哪一条：要写成 对应计划：P1「工作流」，阶段加那一条的原话开头。`,
     ];
   }
   const problems: string[] = [];
@@ -128,7 +146,9 @@ function checkPlan(
 
 function checkSpecs(value: string | undefined, repo: RepoFacts): string[] {
   if (value === undefined) {
-    return ['正文没有「specs」一栏：照 PR 模板加一行 **specs**：specs/<号>-<短名>/，杂活写「不适用」。'];
+    return [
+      '正文里认不出「specs」一栏：要写成 specs：specs/<号>-<短名>/（单独起一行），杂活写 specs：不适用。',
+    ];
   }
   const v = value.replace(/`/g, '').trim();
   if (!v) return ['「specs」一栏是空的：写需求文档的目录（specs/<号>-<短名>/），杂活写「不适用」。'];
@@ -160,13 +180,13 @@ function oneLine(s: string): string {
   return t.length > 60 ? `${t.slice(0, 60)}…` : t;
 }
 
-// —— CI 入口用：读 GitHub 发来的 pull_request 事件 ——
+// —— CI 入口用：事件只拿来认是哪个 PR，标签、里程碑、正文按 PR 现在的样子判 ——
 
 export interface PrEvent extends PrFacts {
   number: number;
 }
 
-/** 从事件里取 PR；认不出返回一句为什么。 */
+/** 从事件（或接口读回来的 PR，包成 { pull_request }）里取 PR；认不出返回一句为什么。 */
 export function prFromEvent(event: unknown): PrEvent | string {
   const pr = isObject(event) ? event.pull_request : undefined;
   if (!isObject(pr)) return '事件里没有 pull_request（这条检查只接 pull_request 事件）';
@@ -187,36 +207,70 @@ export function prFromEvent(event: unknown): PrEvent | string {
   };
 }
 
+/** 读 PR 现在的样子；读不到就抛（调用方判「没查成」）。 */
+export type FetchPr = (number: number) => Promise<unknown>;
+
+/**
+ * 用 GITHUB_TOKEN 读 GitHub 上 PR 现在的样子。事件里的标签、正文是事件那一刻的：手动重跑一个旧的绿 run，
+ * 用的还是当时的，后来撕了标签照样绿。所以每次都现读一遍。令牌只放进请求头，报错里不带。
+ */
+export function livePr(env: Record<string, string | undefined>, fetchImpl: typeof fetch = fetch): FetchPr {
+  return async (number) => {
+    const token = env.GITHUB_TOKEN;
+    const repo = env.GITHUB_REPOSITORY;
+    if (!token) throw new Error('没有 GITHUB_TOKEN');
+    if (!repo || !/^[\w.-]+\/[\w.-]+$/.test(repo)) throw new Error('没有 GITHUB_REPOSITORY（owner/名字）');
+    const api = (env.GITHUB_API_URL || 'https://api.github.com').replace(/\/+$/, '');
+    const res = await fetchImpl(`${api}/repos/${repo}/pulls/${number}`, {
+      headers: {
+        authorization: `Bearer ${token}`,
+        accept: 'application/vnd.github+json',
+        'x-github-api-version': '2022-11-28',
+        'user-agent': 'fleet-dao-pr-fields',
+      },
+      signal: AbortSignal.timeout(20_000),
+    });
+    if (!res.ok) throw new Error(`GitHub 回了 ${res.status}`);
+    return await res.json();
+  };
+}
+
 export interface RunResult {
-  /** 0 = 都齐了；1 = 缺了；2 = 没查成（读不到事件或 plan.md），不能当成过了。 */
+  /** 0 = 都齐了；1 = 缺了；2 = 没查成（读不到事件、PR 现在的样子或 plan.md），不能当成过了。 */
   code: 0 | 1 | 2;
   lines: string[];
 }
 
-export function runPrFields(opts: { eventPath: string | undefined; root: string }): RunResult {
-  if (!opts.eventPath) {
-    return {
-      code: 2,
-      lines: ['没查成：没有 GITHUB_EVENT_PATH（这条检查在 GitHub Actions 的 pull_request 事件里跑）。'],
-    };
-  }
+export async function runPrFields(opts: {
+  eventPath: string | undefined;
+  root: string;
+  fetchPr: FetchPr;
+}): Promise<RunResult> {
+  const fail = (why: string): RunResult => ({ code: 2, lines: [`没查成：${why}。`] });
+  if (!opts.eventPath)
+    return fail('没有 GITHUB_EVENT_PATH（这条检查在 GitHub Actions 的 pull_request 事件里跑）');
   let event: unknown;
   try {
     event = JSON.parse(readFileSync(opts.eventPath, 'utf8'));
   } catch (e) {
-    return {
-      code: 2,
-      lines: [`没查成：事件文件 ${opts.eventPath} 读不出来（${e instanceof Error ? e.message : e}）。`],
-    };
+    return fail(`事件文件 ${opts.eventPath} 读不出来（${message(e)}）`);
   }
-  const pr = prFromEvent(event);
-  if (typeof pr === 'string') return { code: 2, lines: [`没查成：${pr}。`] };
+  const fromEvent = prFromEvent(event);
+  if (typeof fromEvent === 'string') return fail(fromEvent);
+  let live: unknown;
+  try {
+    live = await opts.fetchPr(fromEvent.number);
+  } catch (e) {
+    return fail(`读不到 PR #${fromEvent.number} 现在的样子（${message(e)}）`);
+  }
+  const pr = prFromEvent({ pull_request: live });
+  if (typeof pr === 'string') return fail(`PR #${fromEvent.number} 读回来认不出：${pr}`);
+  if (pr.number !== fromEvent.number) return fail(`要的是 PR #${fromEvent.number}，读回来的是 #${pr.number}`);
   const repo = fsRepo(opts.root);
   const planText = repo.read('docs/plan.md');
-  if (planText === undefined) return { code: 2, lines: ['没查成：docs/plan.md 读不到。'] };
+  if (planText === undefined) return fail('docs/plan.md 读不到');
   const phases = planPhases(parseMd('docs/plan.md', planText));
-  if (phases.size === 0)
-    return { code: 2, lines: ['没查成：docs/plan.md 里一个阶段（### P0 …）也没认出来。'] };
+  if (phases.size === 0) return fail('docs/plan.md 里一个阶段（### P0 …）也没认出来');
   const problems = checkPrFields(pr, { phases, exists: repo.exists });
   if (problems.length === 0) {
     return { code: 0, lines: [`PR #${pr.number}：类别标签、里程碑、对应计划、specs 都齐了。`] };
@@ -225,8 +279,12 @@ export function runPrFields(opts: { eventPath: string | undefined; root: string 
 }
 
 /** GitHub Actions 的报错注解（在 PR 的检查页上直接显示）；% 和换行要转义。 */
-export function annotation(message: string): string {
-  return `::error::${message.replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A')}`;
+export function annotation(text: string): string {
+  return `::error::${text.replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A')}`;
+}
+
+function message(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
 }
 
 function isObject(v: unknown): v is Record<string, unknown> {

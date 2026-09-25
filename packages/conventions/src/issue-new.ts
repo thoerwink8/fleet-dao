@@ -59,13 +59,17 @@ export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Pro
     '--milestone',
     milestone,
   ]);
-  if (created.code !== 0)
-    throw new Error(`gh 开单失败（退出码 ${created.code}），单没开：${detail(created)}`);
+  // 开单这一步报错，单不一定没建：超时、断连时 GitHub 那边可能已经建好了，照着重跑会开出重复的单
+  if (created.code !== 0) {
+    throw new Error(
+      `gh 开单报错（退出码 ${created.code}）：${detail(created)}。单多半没开，可超时、断连时也可能已经建了：先去 GitHub 按标题「${o.title}」搜一下，没有再重开。`,
+    );
+  }
   const url = created.stdout.trim().split('\n').pop()?.trim() ?? '';
   const n = /\/issues\/(\d+)$/.exec(url)?.[1];
   if (!n) {
     throw new Error(
-      `gh 退出码是 0，可输出里认不出单号：${detail(created)}。单多半已经开了，去 GitHub 上看一眼${o.specs === undefined ? '' : '；specs 骨架没建'}。`,
+      `gh 退出码是 0，可输出里认不出单号：${detail(created)}。单多半已经开了，去 GitHub 按标题「${o.title}」找一下${o.specs === undefined ? '' : '；specs 骨架没建'}。`,
     );
   }
   const number = Number(n);

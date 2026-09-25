@@ -136,20 +136,25 @@ describe('开单脚本：gh 出错照实报，不吞', () => {
     await expect(run(...base)).rejects.toThrow('gh 读回来的里程碑认不出');
   });
 
-  it('开单失败：带上 gh 的原话，骨架不建', async () => {
+  it('开单报错：带上 gh 的原话；不说死「没开」（超时、断连时可能已经建了），给标题让人先搜再重开；骨架不建', async () => {
     const { root, run } = setup({
-      create: { code: 1, stdout: '', stderr: "could not add label: '需求' not found\n" },
+      create: {
+        code: 1,
+        stdout: '',
+        stderr: 'Post "https://api.github.com/graphql": context deadline exceeded\n',
+      },
     });
     await expect(run(...base, '--specs', '登录验证码')).rejects.toThrow(
-      "gh 开单失败（退出码 1），单没开：could not add label: '需求' not found",
+      'gh 开单报错（退出码 1）：Post "https://api.github.com/graphql": context deadline exceeded。' +
+        '单多半没开，可超时、断连时也可能已经建了：先去 GitHub 按标题「登录页加验证码」搜一下，没有再重开。',
     );
     expect(existsSync(join(root, 'specs', '36-登录验证码'))).toBe(false);
   });
 
-  it('gh 说成功了可认不出单号：明说单可能开了、骨架没建', async () => {
+  it('gh 说成功了可认不出单号：明说单可能开了、给标题、骨架没建', async () => {
     const { root, run } = setup({ create: ok('Creating issue in o/r\n') });
     await expect(run(...base, '--specs', '登录验证码')).rejects.toThrow(
-      '认不出单号：Creating issue in o/r。单多半已经开了，去 GitHub 上看一眼；specs 骨架没建。',
+      '认不出单号：Creating issue in o/r。单多半已经开了，去 GitHub 按标题「登录页加验证码」找一下；specs 骨架没建。',
     );
     expect(existsSync(join(root, 'specs', '36-登录验证码'))).toBe(false);
   });
