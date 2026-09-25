@@ -36,20 +36,53 @@ export function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
+/** 邮箱「@」前面那一段能用的字符。 */
+const EMAIL_LOCAL_CHAR = /[A-Za-z0-9._%+-]/;
+/** 在一段这种字符的开头起配（前一个字不是它）。 */
+const EMAIL_AT_RUN_START = /(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+/** 就在这一处起配（紧接着上一个邮箱、字符没断开）。 */
+const EMAIL_RIGHT_HERE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/y;
+
+/**
+ * 抹邮箱。认出来的和整段跑一遍 /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g 一样（从最左边起配，配上一个就从它末尾接着找），
+ * 但那样会在几万字不断开的长串里逐位重试，耗时按长度的平方涨（5 万字约 1 秒）。所以只在两种地方起配：
+ * 一段字符的开头；紧接着上一个邮箱、字符没断开的地方（a@b.com_c@d.com 的第二个）。一段中间别处能配上的，
+ * 从这段开头或紧接处起也一定配得上、而且更靠左，不用试。只在段开头试一遍不够：连写的第二个、第三个会漏。
+ */
+export function maskEmails(text: string): string {
+  let out = '';
+  let from = 0;
+  for (;;) {
+    let m: RegExpExecArray | null = null;
+    if (from > 0 && EMAIL_LOCAL_CHAR.test(text.charAt(from))) {
+      EMAIL_RIGHT_HERE.lastIndex = from;
+      m = EMAIL_RIGHT_HERE.exec(text);
+    }
+    if (!m) {
+      EMAIL_AT_RUN_START.lastIndex = from;
+      m = EMAIL_AT_RUN_START.exec(text);
+    }
+    if (!m) return out + text.slice(from);
+    out += `${text.slice(from, m.index)}<邮箱>`;
+    from = m.index + m[0].length;
+  }
+}
+
 /**
  * 把可能带凭据或身份的片段抹掉，再截到末尾 max 个字符。
  * 错误信息里常夹着上游回包或命令输出——进日志和驾驶舱之前一律过这一道。
  */
 export function redact(text: string, max = 300): string {
-  const cleaned = String(text)
+  // 令牌、密钥先抹，邮箱后抹：两者之间没有分隔时（a@b.com.sk-…），邮箱规则会把 sk 当成域名吃掉，后半截密钥就漏出来。
+  // 反过来密钥紧贴着邮箱的前半截时（sk-…user@x.com），前半截跟着密钥抹掉了，剩下的「@域名」单独再抹一道。
+  const secretsMasked = String(text)
     .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer <令牌>')
-    // 邮箱只从一段字符的开头试：从中间起能配上的，从开头起也一定配得上（字符集一样），结果不变；
-    // 不加这一条，几万字不断开的长串会被逐位重试，耗时按长度的平方涨（5 万字约 1 秒）。
-    .replace(/(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '<邮箱>')
     .replace(/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g, '<令牌>')
     .replace(/\b(?:sk|rk|pk|xai|tvly)-[A-Za-z0-9_-]{8,}/gi, '<密钥>')
     .replace(/\bAKIA[0-9A-Z]{16}\b/g, '<密钥>')
-    .replace(/([?&](?:token|key|access_token|api_key)=)[^&\s"']+/gi, '$1<令牌>')
+    .replace(/([?&](?:token|key|access_token|api_key)=)[^&\s"']+/gi, '$1<令牌>');
+  const cleaned = maskEmails(secretsMasked)
+    .replace(/(?<=<(?:密钥|令牌)>)@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '<邮箱>')
     .replace(/\b\d{1,3}(?:\.\d{1,3}){3}\b/g, '<IP>')
     .replace(/\b[0-9a-f]{32}\b/gi, '<长串>')
     .replace(/\b[A-Za-z0-9_-]{40,}\b/g, '<长串>')

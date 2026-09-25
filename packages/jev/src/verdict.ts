@@ -3,7 +3,10 @@
 import type { Effect } from './effects.ts';
 import type { EffectOf, OptionOf, QuestionDef } from './questions.ts';
 
-/** 没判出来的原因。前六个是本地就拦下、没问出去的（不占每日次数）。 */
+/**
+ * 没判出来的原因。前六个是本地就拦下、没问出去的（不占每日次数）。
+ * 最后的 unrecorded 只出现在库里：发出去了、判断却没记进库时补记花费的那一行（调用方拿到的是 store_error）。
+ */
 export const NOT_JUDGED_REASONS = [
   'off',
   'daily_cap',
@@ -24,6 +27,7 @@ export const NOT_JUDGED_REASONS = [
   'bad_option',
   'no_answer',
   'model_mismatch',
+  'unrecorded',
 ] as const;
 export type NotJudgedReason = (typeof NOT_JUDGED_REASONS)[number];
 
@@ -60,6 +64,7 @@ export const REASON_TEXT: Record<NotJudgedReason, string> = {
   bad_option: '答了题面以外的选项',
   no_answer: '回包里没有这道题的答案',
   model_mismatch: '回话的模型不是钉死的那个',
+  unrecorded: '发给后端了，但判断没记进库，这一行只补记花费',
 };
 
 /** 判出来了：答在题面里，而且把握度不低于把握线。 */
