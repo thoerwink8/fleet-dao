@@ -52,8 +52,15 @@ export async function requirementWorkflowIdForTask(
   return requirementWorkflowId(repo, task.issueNumber);
 }
 
-/** 发信号用得到的最小一块 Temporal 客户端形状；真客户端 `new Client(...)` 满足它。 */
+/** 发信号用得到的最小一块 Temporal 客户端形状；真客户端 `new Client(...)` 满足它（BaseClient.connection 就是 ConnectionLike）。 */
 export interface TemporalClientLike {
+  /**
+   * 发信号的调用要挂在这份连接的 deadline 下：到点由连接本身取消调用（gRPC DEADLINE_EXCEEDED），不是本地空等——
+   * 本地空等只是不再等回应，调用还在后端跑，回应可能晚到，调用方这时候如果重发就可能发两次。
+   */
+  connection: {
+    withDeadline<R>(deadline: number | Date, fn: () => Promise<R>): Promise<R>;
+  };
   workflow: {
     getHandle(workflowId: string): { signal(name: string, arg: unknown): Promise<void> };
   };
@@ -70,7 +77,9 @@ export function createTemporalWorkflowControl(
     async signal(workflowId, signal) {
       const { name, ...arg } = signal;
       try {
-        await withTimeout(client.workflow.getHandle(workflowId).signal(name, arg), timeoutMs);
+        await client.connection.withDeadline(Date.now() + timeoutMs, () =>
+          client.workflow.getHandle(workflowId).signal(name, arg),
+        );
       } catch (err) {
         if (isGone(err)) throw new WorkflowGoneError(workflowId, err);
         if (isUnavailable(err)) throw new WorkflowUnavailableError('Temporal 连不上或没回应', err);
@@ -88,19 +97,9 @@ function isGone(err: unknown): boolean {
   );
 }
 
-/** 连不上或超时：gRPC UNAVAILABLE / DEADLINE_EXCEEDED（真客户端），或本地这层加的超时。 */
+/** 连不上或超时：gRPC UNAVAILABLE / DEADLINE_EXCEEDED（真客户端 withDeadline 到点取消调用也报这个）。 */
 function isUnavailable(err: unknown): boolean {
   return err instanceof Error && /UNAVAILABLE|DEADLINE_EXCEEDED|秒没回应/.test(err.message);
-}
-
-function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
-  return Promise.race([
-    p,
-    new Promise<T>((_, reject) => {
-      const timer = setTimeout(() => reject(new Error(`${ms / 1000} 秒没回应`)), ms);
-      timer.unref();
-    }),
-  ]);
 }
 
 // ---- 引擎在不在：查任务队列上 workflow、activity 两类 poller ----

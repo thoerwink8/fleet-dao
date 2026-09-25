@@ -13,9 +13,15 @@ import {
   type TemporalClientLike,
 } from '../src/temporal.ts';
 
+/** withDeadline 透传给 fn：默认场景里连接本身不到点，只验证 signal 调用的成败。 */
 function fakeClient(fail?: Error) {
   const sent: { workflowId: string; name: string; arg: unknown }[] = [];
   const client: TemporalClientLike = {
+    connection: {
+      async withDeadline(_deadline, fn) {
+        return fn();
+      },
+    },
     workflow: {
       getHandle: (workflowId) => ({
         async signal(name, arg) {
@@ -63,14 +69,25 @@ describe('Temporal 信号', () => {
     }
   });
 
-  it('发一次信号超过时限：按连不上处理（WorkflowUnavailableError），不是无限等下去', async () => {
-    const neverResolves: TemporalClientLike = {
+  it('连接本身到点：调用以 DEADLINE_EXCEEDED 失败（不是本地空等——调用发出去了，只是不再等它），按连不上处理', async () => {
+    let calledFn = false;
+    // 模拟 Connection.withDeadline 的真实行为：deadline 到点由连接本身判定失败，不是「答复来不来都不管」的本地竞速；
+    // fn（真实场景里是那次 gRPC 调用）还是被调用了，只是这层不再等它决议。
+    const timesOut: TemporalClientLike = {
+      connection: {
+        async withDeadline(_deadline, fn) {
+          calledFn = true;
+          void fn();
+          throw Object.assign(new Error('4 DEADLINE_EXCEEDED: deadline exceeded'), { code: 4 });
+        },
+      },
       workflow: { getHandle: () => ({ signal: () => new Promise(() => {}) }) },
     };
-    const control = createTemporalWorkflowControl(neverResolves, 20);
+    const control = createTemporalWorkflowControl(timesOut, 20);
     await expect(control.signal('t1', { name: 'pause', by: 'u1' })).rejects.toBeInstanceOf(
       WorkflowUnavailableError,
     );
+    expect(calledFn).toBe(true);
   });
 
   it('别的错误原样抛，不装成上面两种', async () => {
