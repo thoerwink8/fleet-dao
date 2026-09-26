@@ -9,6 +9,9 @@ import type { FeishuAuth, FeishuIdentity } from './ports.ts';
 
 export const FEISHU_AUTHORIZE_URL = 'https://accounts.feishu.cn/open-apis/authen/v1/authorize';
 export const FEISHU_TOKEN_URL = 'https://accounts.feishu.cn/oauth/v3/token';
+// 带 PKCE 的浏览器登录只能用 v2 令牌端点换：飞书授权页文档写明「使用 PKCE 时暂时搭配 v2 换取 Token，后续支持最新端点」，
+// 拿 v3 换会报 20049「PKCE code challenge failed」（2026-09-26 线上实测）。v2 只收 JSON 请求体。
+export const FEISHU_TOKEN_URL_PKCE = 'https://open.feishu.cn/open-apis/authen/v2/oauth/token';
 export const FEISHU_USER_INFO_URL = 'https://open.feishu.cn/open-apis/authen/v1/user_info';
 
 /** 飞书那边拒了（授权码无效、过期、用户没权限等）：让用户重新登录。 */
@@ -95,11 +98,20 @@ export function createFeishuAuth(options: { appId: string; appSecret: string; fe
       if (redirectUri) form.set('redirect_uri', redirectUri);
       if (codeVerifier) form.set('code_verifier', codeVerifier);
       const token = TokenResponse.safeParse(
-        await call(FEISHU_TOKEN_URL, {
-          method: 'POST',
-          headers: { 'content-type': 'application/x-www-form-urlencoded' },
-          body: form.toString(),
-        }),
+        await call(
+          codeVerifier ? FEISHU_TOKEN_URL_PKCE : FEISHU_TOKEN_URL,
+          codeVerifier
+            ? {
+                method: 'POST',
+                headers: { 'content-type': 'application/json; charset=utf-8' },
+                body: JSON.stringify(Object.fromEntries(form)),
+              }
+            : {
+                method: 'POST',
+                headers: { 'content-type': 'application/x-www-form-urlencoded' },
+                body: form.toString(),
+              },
+        ),
       );
       if (!token.success) throw new FeishuUnavailableError('飞书令牌接口返回的格式看不懂');
       if (token.data.code !== 0 || !token.data.access_token) {
