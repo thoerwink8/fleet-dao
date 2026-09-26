@@ -70,6 +70,7 @@ import { isSerial, isUuid, parseCursor } from './ids.ts';
 import {
   type AskRecord,
   type AuditRecord,
+  type AutoDispatchChange,
   type CommandClaim,
   type DraftRecord,
   type FeishuAckReport,
@@ -1866,6 +1867,33 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         if (stopped.length === 0) return 'not_queued';
         await insertAudit(tx, entry);
         return 'ok';
+      });
+    },
+    async setAutoDispatch({ repoId, on }, entry) {
+      if (!isUuid(repoId)) return 'not_found';
+      return db.transaction(async (tx): Promise<AutoDispatchChange | 'not_found'> => {
+        // 锁住这一行：同一个仓的开、关排队做，before 就是改之前库里真正的值
+        const [row] = await tx
+          .select({ since: repos.autoDispatchSince })
+          .from(repos)
+          .where(eq(repos.id, repoId))
+          .for('update');
+        if (!row) return 'not_found';
+        const before = row.since ? iso(row.since) : null;
+        if ((before !== null) === on) return { changed: false, autoDispatchSince: before };
+        const [updated] = await tx
+          .update(repos)
+          .set({ autoDispatchSince: on ? now() : null })
+          .where(eq(repos.id, repoId))
+          .returning({ since: repos.autoDispatchSince });
+        if (!updated) throw new Error(`仓 ${repoId} 锁住了却没改成`);
+        const after = updated.since ? iso(updated.since) : null;
+        const auditId = await insertAudit(tx, {
+          ...entry,
+          before: { autoDispatchSince: before },
+          after: { autoDispatchSince: after },
+        });
+        return { changed: true, autoDispatchSince: after, auditId };
       });
     },
   };
