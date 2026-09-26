@@ -113,7 +113,7 @@ describe('按改动算要跑什么', () => {
     }
   });
 
-  it('纯文档（docs、specs、README、开单表单）：只剩 hygiene 那一个 job（它每次都跑）', () => {
+  it('纯文档（docs、specs、README、开单表单）：只剩每次都跑的 hygiene、docs', () => {
     const p = pr(
       'docs/design.md',
       'docs/plan.md',
@@ -192,7 +192,7 @@ describe('按改动算要跑什么', () => {
 });
 
 describe('测试读包外的文件，改那个文件的 PR 一定测到它（漏记一条这里就红）', () => {
-  // hygiene job 每个 PR 都跑的两份：它们读哪都不用记；本文件是扫描器自己（注释里举的例子会被当成读）
+  // docs job 每个 PR 都跑的两份：它们读哪都不用记；本文件是扫描器自己（注释里举的例子会被当成读）
   const ALWAYS = new Set([
     'packages/conventions/test/doc-pointers.test.ts',
     'agents/test/skills.test.ts',
@@ -310,6 +310,7 @@ describe('汇总（必过检查 check）：该跑的跑了且绿，不该跑的�
   const needs = (over: Record<string, unknown> = {}, p: CiPlan = plan) => ({
     changes: { result: 'success', outputs: planOutputs(p) },
     hygiene: { result: 'success', outputs: {} },
+    docs: { result: 'success', outputs: {} },
     lint: { result: 'success', outputs: {} },
     test: { result: 'success', outputs: {} },
     web: { result: 'skipped', outputs: {} },
@@ -323,7 +324,7 @@ describe('汇总（必过检查 check）：该跑的跑了且绿，不该跑的�
     expect(v.lines).toHaveLength(ALWAYS_JOBS.length + PLANNED_JOBS.length);
   });
 
-  it('纯文档：只有 changes、hygiene 跑了', () => {
+  it('纯文档：只有 changes、hygiene、docs 跑了', () => {
     const docs = pr('docs/plan.md');
     const skipped = { result: 'skipped' };
     expect(ciVerdict(needs({ lint: skipped, test: skipped }, docs)).ok).toBe(true);
@@ -345,6 +346,7 @@ describe('汇总（必过检查 check）：该跑的跑了且绿，不该跑的�
   it('changes 没算成、hygiene 红了、少了某个 job 的结果：不过', () => {
     expect(ciVerdict(needs({ changes: { result: 'failure', outputs: {} } })).ok).toBe(false);
     expect(ciVerdict(needs({ hygiene: { result: 'failure' } })).ok).toBe(false);
+    expect(ciVerdict(needs({ docs: { result: 'skipped' } })).ok).toBe(false);
     const { deploy: _, ...rest } = needs();
     expect(ciVerdict(rest).lines.join('\n')).toContain('✗ deploy：没有这个 job 的结果');
   });
@@ -410,6 +412,7 @@ describe('入口', () => {
     const base = {
       changes: { result: 'success', outputs: p },
       hygiene: { result: 'success' },
+      docs: { result: 'success' },
       lint: { result: 'skipped' },
       test: { result: 'skipped' },
       web: { result: 'skipped' },
@@ -440,14 +443,30 @@ describe('ci.yml 和这里对得上', () => {
     expect(check).toContain('node packages/conventions/src/bin/ci-verdict.ts');
   });
 
-  it('按开关跑的几个 job 都看 changes 给的开关；hygiene 不看、每次都跑', () => {
+  it('按开关跑的几个 job 都看 changes 给的开关；hygiene、docs 不看、每次都跑', () => {
     for (const j of PLANNED_JOBS) {
       expect(job(j), j).toMatch(/^ {4}needs: changes$/m);
       expect(job(j), j).toMatch(/^ {4}if: .*needs\.changes\.outputs\./m);
     }
-    expect(job('hygiene')).not.toMatch(/^ {4}(if|needs):/m);
+    for (const j of ['hygiene', 'docs']) expect(job(j), j).not.toMatch(/^ {4}(if|needs):/m);
     expect(job('changes')).toContain('fetch-depth: 0');
     expect(job('changes')).toContain('node packages/conventions/src/bin/ci-plan.ts');
+  });
+
+  it('真的已知敏感值名单只给 hygiene job，它不装依赖、不跑 PR 里别的代码（#115 第二意见：测试代码能读到就能泄露）', () => {
+    const ids = [...yml.matchAll(/^ {2}([\w-]+):$/gm)].map((m) => m[1] as string);
+    expect(ids).toContain('hygiene');
+    for (const id of ids) {
+      if (id !== 'hygiene') expect(job(id), id).not.toContain('secrets.');
+    }
+    const h = job('hygiene');
+    expect(h).toContain('secrets.FLEET_SENSITIVE_VALUES');
+    expect(h).not.toMatch(/pnpm|npm |npx|vitest|cache:/);
+    // 单行的 run 只有卫生检查那一句；多行的（run: |）只有写名单那一段
+    expect(h.match(/^ +(?:- )?run: (?!\|).*$/gm)?.map((s) => s.trim())).toEqual([
+      '- run: node packages/hygiene/src/bin/check.ts',
+    ]);
+    expect(h.match(/run: \|/g)).toHaveLength(1);
   });
 
   it('不用工作流级 paths 过滤（必过检查要永远触发）', () => {
