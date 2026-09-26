@@ -767,6 +767,8 @@ export interface DraftOpener {
   open(request: DraftOpenRequest, signal: AbortSignal): Promise<DraftOpenResult>;
   /** 健康检查（/healthz 的 draft_opener）：开不了单就抛（对外的原因用 PublicHealthError），接好了就返回。 */
   check(): Promise<void>;
+  /** 只有 notWiredDraftOpener 设：开单压根没接上，健康检查报「未接」（公网看得到的那句话）。真实现不设。 */
+  readonly notWired?: string;
 }
 
 export class DraftOpenerUnavailableError extends Error {
@@ -883,6 +885,12 @@ export interface ChangeFeed {
 export interface HealthCheck {
   name: string;
   check(): Promise<void>;
+  /**
+   * 这一项对应的功能压根还没接上（装配时就知道，不是跑出来的）：给了就不跑 check，报「未接」、不算失败。
+   * 只由 serviceHealthChecks 按「没接上的那个实现」自带的标记填（比如 notWiredDraftOpener 的 notWired）；
+   * check 抛什么都判不成「未接」，接上以后出错照样红。公网看得到：一句中性的话，可以带单号。
+   */
+  notWired?: string;
 }
 
 // —— 飞书登录 ——

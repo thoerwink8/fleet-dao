@@ -25,7 +25,12 @@ const CHECK_TIMEOUT_MS = 3_000;
 
 export type HealthReport = {
   ok: boolean;
-  checks: Record<string, { ok: true } | { ok: false; code: string; message: string }>;
+  checks: Record<
+    string,
+    | { ok: true }
+    | { ok: true; status: 'not_wired'; message: string }
+    | { ok: false; code: string; message: string }
+  >;
 };
 
 export async function runHealthChecks(
@@ -34,7 +39,10 @@ export async function runHealthChecks(
   timeoutMs = CHECK_TIMEOUT_MS,
 ): Promise<HealthReport> {
   const results = await Promise.all(
-    checks.map(async ({ name, check }) => {
+    checks.map(async ({ name, check, notWired }) => {
+      // 功能压根没接上（装配时定的标记）：不跑、不算失败。只看这个标记，check 抛什么都判不成「未接」
+      if (notWired !== undefined)
+        return [name, { ok: true, status: 'not_wired', message: notWired }] as const;
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         await Promise.race([
@@ -80,8 +88,8 @@ export function serviceHealthChecks(parts: {
   /** Temporal 本身，和它上面查引擎工人在不在（两项都来自同一份连接，见 temporal.ts 的 TemporalConnection）。 */
   temporal: { check(): Promise<void>; checkEngine(): Promise<void> };
   githubEvents: () => Promise<void>;
-  /** 飞书草稿开单那一步（ports.ts 的 DraftOpener）：没接上、接了开不了都报红。 */
-  draftOpener: { check(): Promise<void> };
+  /** 飞书草稿开单那一步（ports.ts 的 DraftOpener）：接了开不了报红；压根没接上（带 notWired）报「未接」。 */
+  draftOpener: { check(): Promise<void>; readonly notWired?: string };
   /** 最早一张待开单等太久就报红（draft-opening.ts 的 draftBacklogCheck）。 */
   draftBacklog: () => Promise<void>;
 }): HealthCheck[] {
@@ -92,9 +100,18 @@ export function serviceHealthChecks(parts: {
     { name: 'temporal', check: () => parts.temporal.check() },
     { name: 'engine', check: () => parts.temporal.checkEngine() },
     { name: 'github_events', check: parts.githubEvents },
-    { name: 'draft_opener', check: () => parts.draftOpener.check() },
-    { name: 'draft_backlog', check: parts.draftBacklog },
+    { name: 'draft_opener', check: () => parts.draftOpener.check(), ...notWired(parts.draftOpener.notWired) },
+    // 开单压根没接上时积压是必然的，不是坏了；接上以后等太久照样红
+    {
+      name: 'draft_backlog',
+      check: parts.draftBacklog,
+      ...notWired(parts.draftOpener.notWired && `${parts.draftOpener.notWired}：确认了的草稿先留在待开单`),
+    },
   ];
+}
+
+function notWired(message: string | undefined): { notWired?: string } {
+  return message === undefined ? {} : { notWired: message };
 }
 
 export function healthHandler(checks: readonly HealthCheck[], log: Logger) {

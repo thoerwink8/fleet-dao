@@ -53,7 +53,7 @@
       ...verdict.rows.map((r) => {
         const li = document.createElement('li');
         const dot = document.createElement('span');
-        dot.className = `dot ${r.ok ? 'ok' : 'bad'}`;
+        dot.className = `dot ${r.notWired ? 'wait' : r.ok ? 'ok' : 'bad'}`;
         const label = document.createElement('span');
         label.className = 'label';
         label.textContent = r.label;

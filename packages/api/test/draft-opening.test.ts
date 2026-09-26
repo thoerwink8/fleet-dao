@@ -229,6 +229,7 @@ describe('健康检查', () => {
   it('开单没接上：open 如实没成、check 报 not_wired（不装作好了）', async () => {
     const opener = notWiredDraftOpener();
     await expect(opener.check()).rejects.toMatchObject({ name: 'PublicHealthError', code: 'not_wired' });
+    expect(opener.notWired).toBe('飞书草稿开成 issue 还没接上（#91）');
     await expect(opener.open(pendingDraft() as never, new AbortController().signal)).rejects.toMatchObject({
       name: 'DraftOpenerUnavailableError',
     });

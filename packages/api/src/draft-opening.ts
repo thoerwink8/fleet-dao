@@ -15,10 +15,17 @@ import {
   type Store,
 } from './ports.ts';
 
-/** 开单还没接上时的去处：一律如实没成（草稿留在待开单），健康检查报红，不装作开成了。真开单记在 #91（#43 已合、没接这一步）。 */
+/** 健康检查里「未接」那一句（公网看得到）。 */
+export const DRAFT_OPENER_NOT_WIRED = '飞书草稿开成 issue 还没接上（#91）';
+
+/**
+ * 开单还没接上时的去处：一律如实没成（草稿留在待开单），不装作开成了。带着 notWired 标记：健康检查据此报「未接」、
+ * 不把整体拖红（serviceHealthChecks）；check 本身照旧报红，万一被直接调也不会装作好了。真开单记在 #91。
+ */
 export function notWiredDraftOpener(): DraftOpener {
-  const why = '飞书草稿开单还没接上（开 issue、拉起需求工作流那一步，等 #43）';
+  const why = '飞书草稿开单还没接上（开 issue、拉起需求工作流那一步，等 #91）';
   return {
+    notWired: DRAFT_OPENER_NOT_WIRED,
     async open() {
       throw new DraftOpenerUnavailableError(why);
     },
