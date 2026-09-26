@@ -601,7 +601,7 @@ setup_pnpm() {
 
 setup_app_config() {
   step "应用的本机配置（/etc/fleet-dao 下的环境文件；应用本身由 deploy/release.sh 发布）"
-  local name spec file key what
+  local name spec file key what content
   # 样例只在第一次照着建：之后这些文件归人改（填飞书、GitHub 的凭据，选本机起哪些服务），脚本只管属主和权限、
   # 补样例后来加的键（只补缺）、按「引擎」App 填空着的 webhook 密钥（lib/app-config.sh）
   for name in "${APP_ENV_FILES[@]}"; do
@@ -611,7 +611,12 @@ setup_app_config() {
       # 样例后来加的键补上（只补缺，已有的不动）；release.env 不补：它的每一项都要人定
       if [[ "$name" != release ]]; then add_missing_keys "$file" "$DEPLOY_DIR/france/$name.env.example"; fi
     else
-      put_file "$file" root:fleet 640 "$(<"$DEPLOY_DIR/france/$name.env.example")"
+      # 要人定的键（FLEET_ENGINE_PORTS）建出来是注释掉的，读回判红等人定
+      if content=$(example_for_new_file "$DEPLOY_DIR/france/$name.env.example"); then
+        put_file "$file" root:fleet 640 "$content"
+      else
+        red "建不了 $file：读不了样例 $DEPLOY_DIR/france/$name.env.example"
+      fi
     fi
   done
   fill_webhook_secret /etc/fleet-dao/api.env "$ENGINE_APP_JSON"

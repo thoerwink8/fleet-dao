@@ -490,6 +490,27 @@ fi
 call check_env_duplicates "$T/no-such-dup.env"
 if ((RC != 0 && ${#REDS[@]} == 1)); then pass "文件不在：判红"; else flunk "文件不在该判红：$OUT"; fi
 
+echo "== 第一次照样例建：要人定的键不替人选"
+printf '# 说明\nFLEET_ENGINE_PORTS=real\nTEMPORAL_ADDRESS=127.0.0.1:7243\n' >"$T/new-example.env"
+if new_content=$(example_for_new_file "$T/new-example.env"); then
+  printf '%s\n' "$new_content" >"$T/new-engine.env"
+  call check_engine_env "$T/new-engine.env" "$LIST" "$WORK" "$STATE"
+  if ((RC != 0)) && [[ "$(env_value "$T/new-engine.env" TEMPORAL_ADDRESS)" == 127.0.0.1:7243 && "$OUT" == *"FLEET_ENGINE_PORTS"* ]]; then
+    pass "样例里的 FLEET_ENGINE_PORTS=real 建出来是注释，读回判红；别的键照抄"
+  else
+    flunk "建出来的文件该没有生效的端口实现、读回判红（返回 $RC）：$OUT"
+  fi
+  call add_missing_keys "$T/new-engine.env" "$T/new-example.env"
+  if [[ "$(env_value "$T/new-engine.env" FLEET_ENGINE_PORTS 2>/dev/null)" == "" ]]; then
+    pass "补键也不把它补回来"
+  else
+    flunk "补键把要人定的键补回来了"
+  fi
+else
+  flunk "读得到的样例该建得出来"
+fi
+if example_for_new_file "$T/no-such-example.env" >/dev/null; then flunk "样例不在该回非 0"; else pass "样例不在：回非 0，不建"; fi
+
 echo "== 要退役的垫片"
 printf '#!/bin/sh\n' >"$T/carpool-run.sh"
 call check_retired "$T/carpool-run.sh" 派活垫片

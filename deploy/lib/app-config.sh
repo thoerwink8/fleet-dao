@@ -224,6 +224,29 @@ app_config_must_set() { # 键
   return 1
 }
 
+# 第一次照样例建环境文件时用的内容：要人定的键（APP_CONFIG_MUST_SET）那一行改成注释，不替人选——样例里的
+# FLEET_ENGINE_PORTS=real 原样抄过去，就等于没人确认就让引擎碰真仓、真会话。注释掉以后补键不会补回来（算出现过），
+# 读回判红，等人放开。样例读不到回 1（APP_CONFIG_WHY 写明），调用方不建文件
+example_for_new_file() { # 样例
+  local example=$1 content line k out="" re
+  APP_CONFIG_WHY=""
+  if [[ ! -f "$example" ]] || ! { content=$(<"$example"); } 2>/dev/null; then
+    APP_CONFIG_WHY="读不了样例 $example"
+    return 1
+  fi
+  while IFS= read -r line; do
+    for k in "${APP_CONFIG_MUST_SET[@]}"; do
+      re="^[[:space:]]*${k}[[:space:]]*="
+      if [[ "$line" =~ $re ]]; then
+        line="# $line    # 要人定，装机脚本不替人选：放开这一行再发布"
+        break
+      fi
+    done
+    out+="$line"$'\n'
+  done <<<"$content"
+  printf '%s' "${out%$'\n'}"
+}
+
 # 样例里有、文件里一次都没出现过的键，照样例（连同样例给的值）补在文件末尾，前面加一行说明是哪几个。要人定的键不补。
 # 第二遍零改动。文件、样例读不到或认不出：判红、返回 1、文件不动（不当成「一个键都没有」把样例整份补进去）
 add_missing_keys() { # 文件 样例
