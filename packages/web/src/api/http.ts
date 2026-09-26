@@ -10,6 +10,7 @@ import {
   CSRF_HEADER,
   DevLoginRequest,
   FeishuAccessRequest,
+  PasswordLoginRequest,
   SSE_EVENTS,
   TaskActionRequest,
   UpdateChannelRequest,
@@ -143,6 +144,14 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
       });
       csrf = me.csrfToken;
       return me;
+    },
+    async passwordLogin(username, password) {
+      // 成功是 204 + 会话 Cookie，没有响应体；再读一次 /api/me 拿登录的人和 CSRF 令牌。
+      await send('POST', authUrl(AuthRoutes.passwordLogin.path), null, {
+        body: PasswordLoginRequest.parse({ username, password }),
+        csrf: false,
+      });
+      return api.me();
     },
     async logout() {
       await send('POST', authUrl(AuthRoutes.logout.path), null);

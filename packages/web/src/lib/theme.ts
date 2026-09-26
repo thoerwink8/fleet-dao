@@ -9,7 +9,8 @@ export type PaletteId =
   | 'dracula'
   | 'one'
   | 'solarized'
-  | 'darcula';
+  | 'darcula'
+  | 'feishu';
 export type ModePref = 'light' | 'dark' | 'system';
 export type MotionPref = 'system' | 'reduced';
 export type ResolvedMode = 'light' | 'dark';
@@ -33,6 +34,7 @@ export const PALETTES: { id: PaletteId; name: string; en: string; blurb: string 
   { id: 'one', name: '原子', en: 'One', blurb: 'Atom 编辑器的经典配色。' },
   { id: 'solarized', name: '日晒', en: 'Solarized', blurb: '精确计算的低对比，护眼。' },
   { id: 'darcula', name: '炉火', en: 'Darcula', blurb: '炭灰底上的一点橙。' },
+  { id: 'feishu', name: '飞书蓝', en: 'Feishu Blue', blurb: '中性灰底配白卡片，主按钮是那一抹蓝。' },
 ];
 
 const PALETTE_IDS = PALETTES.map((p) => p.id);

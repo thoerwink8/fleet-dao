@@ -25,6 +25,7 @@ export function createDemoApi(inner: MockApi): FleetApi {
     authConfig: () => Promise.resolve({ devLogin: false }),
     devLogin: noLogin,
     feishuAccess: noLogin,
+    passwordLogin: () => Promise.reject(new ApiError(400, 'demo_no_login', '演示版里不会真的发生')),
     logout: () => Promise.resolve(),
     async me() {
       const me = await inner.me();

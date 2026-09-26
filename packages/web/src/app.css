@@ -488,6 +488,58 @@
   --ink-stop: 54%;
 }
 
+/* ---------- 飞书蓝：中性灰底、白卡片、蓝色主按钮、圆角小一号 ---------- */
+[data-palette="feishu"][data-mode="light"] {
+  --bg: #f2f3f5;
+  --panel: #f8f9fa;
+  --surface: #ffffff;
+  --elev: #ffffff;
+  --fg: #1f2329;
+  --brand: #3370ff;
+  --brand-foreground: #ffffff;
+  --st-run: #3370ff;
+  --st-wait: #8f959e;
+  --st-human: #7f3bf5;
+  --st-stall: #de7802;
+  --st-fail: #f54a45;
+  --st-done: #2ea121;
+  --st-stop: #bbbfc4;
+  --ink-run: 80%;
+  --ink-wait: 60%;
+  --ink-human: 88%;
+  --ink-stall: 62%;
+  --ink-fail: 68%;
+  --ink-done: 62%;
+  --ink-stop: 45%;
+}
+[data-palette="feishu"][data-mode="dark"] {
+  --bg: #161718;
+  --panel: #1b1c1e;
+  --surface: #232426;
+  --elev: #2a2b2e;
+  --fg: #ebebeb;
+  --brand: #4c88ff;
+  --brand-foreground: #ffffff;
+  --st-run: #4c88ff;
+  --st-wait: #8f959e;
+  --st-human: #9f6fff;
+  --st-stall: #ffa53d;
+  --st-fail: #f76964;
+  --st-done: #51ba43;
+  --st-stop: #5f6368;
+  --ink-run: 80%;
+  --ink-wait: 80%;
+  --ink-human: 80%;
+  --ink-fail: 85%;
+  --ink-stop: 60%;
+}
+[data-palette="feishu"] {
+  --radius: 0.5rem;
+  --primary: var(--brand);
+  --primary-foreground: var(--brand-foreground);
+  --ring: color-mix(in oklab, var(--brand) 60%, transparent);
+}
+
 /* ---------- 基础 ---------- */
 @layer base {
   * {
@@ -695,4 +747,79 @@
 }
 :root[data-motion="reduced"] .fd-board-ready .react-flow__node {
   transition: none;
+}
+
+/* ---------- 登录页：底图漂动、卡片依次浮现、「等你点头」轻轻呼吸 ---------- */
+@keyframes fd-drift {
+  from {
+    transform: translate3d(-12px, 0, 0);
+  }
+  to {
+    transform: translate3d(12px, -10px, 0);
+  }
+}
+@keyframes fd-bob {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-6px);
+  }
+}
+@keyframes fd-enter {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes fd-breath {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--st-human) 0%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 5px color-mix(in oklab, var(--st-human) 16%, transparent);
+  }
+}
+@keyframes fd-flow-dash {
+  to {
+    stroke-dashoffset: -24;
+  }
+}
+.fd-drift {
+  animation: fd-drift 18s ease-in-out infinite alternate;
+}
+.fd-bob {
+  animation: fd-bob 7s ease-in-out infinite;
+}
+.fd-enter {
+  animation: fd-enter 0.5s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+.fd-breath {
+  animation: fd-breath 2.8s ease-in-out infinite;
+}
+.fd-flow-dash {
+  stroke-dasharray: 4 8;
+  animation: fd-flow-dash 1.6s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .fd-drift,
+  .fd-bob,
+  .fd-enter,
+  .fd-breath,
+  .fd-flow-dash {
+    animation: none;
+  }
+}
+:root[data-motion="reduced"] .fd-drift,
+:root[data-motion="reduced"] .fd-bob,
+:root[data-motion="reduced"] .fd-enter,
+:root[data-motion="reduced"] .fd-breath,
+:root[data-motion="reduced"] .fd-flow-dash {
+  animation: none;
 }

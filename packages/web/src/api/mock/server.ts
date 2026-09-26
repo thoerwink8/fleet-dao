@@ -80,6 +80,8 @@ const ACTION_WORDS = { pause: '暂停', resume: '继续', stop: '叫停', rerout
 const STALE_MS = 30 * 60_000;
 const TERMINAL = new Set(['done', 'stopped', 'failed']);
 const GENERIC_STEPS = ['读相关代码', '改代码', '写测试', '跑测试并开 PR'];
+/** 假数据模式下能登上的那一个账号（登录页上写明了，好让人点着试）。 */
+export const MOCK_LOGIN = { username: 'demo', password: 'demo-password' } as const;
 
 /** 可复现的随机数（mulberry32）。 */
 function rng(seed: number) {
@@ -712,6 +714,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
   let timer: ReturnType<typeof setInterval> | undefined;
   if (opts.live) timer = setInterval(tick, opts.tickMs ?? 2600);
 
+  const pwFails = new Map<string, { n: number; until: number }>();
   const api: MockApi = {
     source: 'mock',
     tick,
@@ -723,7 +726,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
 
     async authConfig() {
       await wait();
-      return AuthConfigResponse.parse({ devLogin: false });
+      return AuthConfigResponse.parse({ devLogin: false, passwordLogin: true });
     },
     async devLogin() {
       await wait();
@@ -732,6 +735,26 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     async feishuAccess() {
       await wait();
       return MeResponse.parse(st.me);
+    },
+    async passwordLogin(username, password) {
+      await wait();
+      // 和后端一样：同一用户名连错 5 次锁 15 分钟，锁期内对的也不放；错误不区分「没这人」和「密码错」。
+      const key = username.trim().toLowerCase();
+      const f = pwFails.get(key) ?? { n: 0, until: 0 };
+      if (f.until > now()) {
+        throw new ApiError(429, 'locked', '试错太多次，先锁住了', { until: new Date(f.until).toISOString() });
+      }
+      if (key === MOCK_LOGIN.username && password === MOCK_LOGIN.password) {
+        pwFails.delete(key);
+        return MeResponse.parse(st.me);
+      }
+      f.n += 1;
+      if (f.n >= 5) {
+        f.n = 0;
+        f.until = now() + 15 * 60_000;
+      }
+      pwFails.set(key, f);
+      throw new ApiError(401, 'bad_credentials', '用户名或密码不对');
     },
     async logout() {
       await wait();

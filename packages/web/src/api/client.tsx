@@ -50,6 +50,8 @@ export interface FleetApi {
   authConfig(): Promise<AuthConfig>;
   devLogin(userId: string): Promise<Me>;
   feishuAccess(code: string): Promise<Me>;
+  /** 账密登录（#120）：成功后带回登录的人；失败是 ApiError（401 bad_credentials、429 locked 带 details.until）。 */
+  passwordLogin(username: string, password: string): Promise<Me>;
   logout(): Promise<void>;
   me(): Promise<Me>;
   repos(): Promise<{ repos: Repo[] }>;
