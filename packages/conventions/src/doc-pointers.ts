@@ -1,6 +1,7 @@
 // 文档指针检查：docs/design.md、docs/plan.md、docs/ops.md、README.md 和 specs/ 下的文档里，指向仓内文件的路径、
 // 「第 X 节」「X.Y」这类章节、「「X」一节」「README「X」」这类标题、plan.md 的阶段和条目，都要指得到；指不到的报 文件:行。
-// 只认本仓文档在用的写法。故意不查的：围栏代码块和 HTML 注释（示例、占位）、别的仓的路径（「windsurf-dao 仓 `docs/…`」）、
+// 只认本仓文档在用的写法。故意不查的：围栏代码块和 HTML 注释（示例、占位）、plan.md 里 pnpm plan:snapshot 生成的快照段
+// （照抄 GitHub 上的标题和里程碑说明，要改去 GitHub 改；它的标题照样能被别处指到）、别的仓的路径（「windsurf-dao 仓 `docs/…`」）、
 // 不以仓里现有的顶层目录或文件开头的路径（/etc/…、~/…、标签名 model/ 这类）、所在文档没有小节编号时的小数（版本号）。
 // specs/<目录>/需求.md、方案.md 写在动手之前，指到别的文件、文档里还没有的东西不报（PLANNED_DOC）；写法本身的毛病照报。
 // 有误报就收窄这里的规则，不往文档里加豁免。pnpm check 里由 test/doc-pointers.test.ts 对全仓跑一遍。
@@ -191,7 +192,7 @@ class Checker {
       return;
     }
     doc.lines.forEach((raw, i) => {
-      if (doc.fenced[i]) return;
+      if (doc.fenced[i] || doc.generated[i]) return;
       const line = i + 1;
       for (const m of raw.matchAll(CODE_RE)) {
         if (otherRepo(raw.slice(0, m.index))) continue;
