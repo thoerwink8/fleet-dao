@@ -1,13 +1,15 @@
 // 路由探针（#129，design 第九节「路由探针」）：一轮 = 记下开始 → 读全部路由 → 逐条定探不探 → 该探的真起一次最小会话
-// → 每条写一条结论（只有 ok 在线，其余一律不在线、写明原因）→ 结局记进 schedule_runs。
-// scanned = 这一轮写下结论的路由条数，found = 其中不在线的条数（驾驶舱「定时任务」页和调度台的在线数对得上）。
-// 没跑成、一条都没写进去、只写进去一部分，照实记 failed / unscanned / partial，不记成 ok（没跑成 ≠ 没问题）。
+// → 每条写一条结论（只有 ok 在线，其余一律不在线、写明原因）→ 结局记进 schedule_runs。按一次的成本放慢的执行方式
+// （cursor-agent），上一次探通了、还没到再探的时候，这一轮不探、不重写，结论照旧（它的过期线也跟着放宽，routeProbeStaleMinutes）。
+// scanned = 这一轮看过的路由条数（写下结论的，加上结论照旧的），found = 其中不在线的条数（驾驶舱「定时任务」页和调度台的
+// 在线数对得上）。没跑成、一条都没写进去、只写进去一部分，照实记 failed / unscanned / partial，不记成 ok（没跑成 ≠ 没问题）。
 import type { RouteProbeTarget, ScheduleResult } from '@fleet-dao/db';
 import {
   type HostId,
   type OrgKind,
   ROUTE_PROBE_EVERY_MINUTES,
   type RouteProbeState,
+  routeProbeEveryMinutes,
 } from '@fleet-dao/shared';
 import type { RouteProbeRun } from '../contract.ts';
 import { hostName, ORG_NAMES } from '../routing/names.ts';
@@ -89,10 +91,15 @@ const message = (err: unknown) => (err instanceof Error ? err.message : String(e
 const clip = (text: string, max = ROUTE_PROBE_DETAIL_MAX) =>
   text.length > max ? `${text.slice(0, max - 1)}…` : text;
 
-export type ProbePlan = { probe: Prober } | { state: 'not_wired' | 'skipped'; detail: string };
+export type ProbePlan =
+  | { probe: Prober }
+  | { state: 'not_wired' | 'skipped'; detail: string }
+  /** 按一次的成本放慢的执行方式，上一次探通了、还没到再探的时候：这一轮不探、不重写，结论照旧（原因只进日志）。 */
+  | { kept: string };
 
 /**
- * 这条路由这一轮探不探。先后就是优先级：按量计费 → 插头没接 → 渠道下架 → 模型下架 → 没有阶段在用 → 会话用户挂着别的组织。
+ * 这条路由这一轮探不探。先后就是优先级：按量计费 → 插头没接 → 渠道下架 → 模型下架 → 没有阶段在用 → 会话用户挂着别的组织
+ * → 放慢的执行方式还没到再探的时候（ROUTE_PROBE_HOST_EVERY_MINUTES：只看上一次探通了的；没通的每轮都探）。
  * 按量计费排第一：不管插头接没接都不探（判断阶段的 Jev 就是按量的，它不经会话插头，说「派不了」反而误导）。
  * 不探的一律不在线（写明原因）；要探的交给这种执行方式的探法。
  */
@@ -133,6 +140,17 @@ export function planProbe(
       detail: `会话用户现在挂的是${live}组织：这时探${ORG_NAMES[t.orgKind]}池，扣的是${live}的额度、探的也是${live}，不探（切号见 #59）`,
     };
   }
+  const every = routeProbeEveryMinutes(t.hostId);
+  const last = t.previous;
+  if (every > ROUTE_PROBE_EVERY_MINUTES && t.alive && last?.state === 'ok') {
+    const age = now.getTime() - last.at.getTime();
+    // 每轮开跑的时刻差几秒到几十秒：差半轮以内算到点，不拖到下一轮
+    if (age >= 0 && age < (every - ROUTE_PROBE_EVERY_MINUTES / 2) * 60_000) {
+      return {
+        kept: `${hostName(t.hostId)} 按一次的成本放慢，探通了隔 ${every} 分钟再真探；上一次探通是 ${Math.round(age / 60_000)} 分钟前`,
+      };
+    }
+  }
   return { probe };
 }
 
@@ -149,10 +167,16 @@ interface Conclusion {
   state: RouteProbeState;
   detail: string;
   at: Date;
+  /** 放慢的执行方式还没到再探的时候：不写库，上一次探通的结论照旧（算在线）。 */
+  kept?: boolean;
 }
 
 async function conclude(deps: RouteProbeJobDeps, t: ProbeTarget): Promise<Conclusion> {
   const plan = planProbe(t, deps.probers, deps.liveOrg, deps.now());
+  if ('kept' in plan) {
+    deps.log('info', '路由探针：还没到再探的时候，结论照旧', { routeId: t.routeId, detail: plan.kept });
+    return { target: t, state: 'ok', detail: plan.kept, at: deps.now(), kept: true };
+  }
   if (!('probe' in plan)) return { target: t, state: plan.state, detail: plan.detail, at: deps.now() };
   let attempt = await attemptOf(plan.probe, t);
   if (attempt.kind === 'failed' && !attempt.poolHold) {
@@ -221,7 +245,13 @@ async function probeRound(deps: RouteProbeJobDeps): Promise<{ result: ScheduleRe
   const unsaved: string[] = [];
   const gone: string[] = [];
   let offline = 0;
+  let kept = 0;
   for (const c of conclusions) {
+    if (c.kept) {
+      kept += 1;
+      online.push(c.target.routeId);
+      continue;
+    }
     let saved: 'saved' | 'route_not_found';
     try {
       saved = await deps.save({ routeId: c.target.routeId, state: c.state, at: c.at, detail: c.detail });
@@ -236,9 +266,9 @@ async function probeRound(deps: RouteProbeJobDeps): Promise<{ result: ScheduleRe
     if (c.state === 'ok') online.push(c.target.routeId);
     else offline += 1;
   }
-  const written = online.length + offline;
+  const written = online.length - kept + offline;
   const goneNote = gone.length > 0 ? `；探的时候被删掉的路由：${gone.join('、')}` : '';
-  if (written === 0) {
+  if (written === 0 && (kept === 0 || unsaved.length > 0)) {
     return {
       result:
         unsaved.length > 0
@@ -247,18 +277,20 @@ async function probeRound(deps: RouteProbeJobDeps): Promise<{ result: ScheduleRe
       online,
     };
   }
+  // 结论照旧的也算看过了（上一次探通、在线），不算不在线的
+  const scanned = written + kept;
   if (unsaved.length > 0) {
     return {
       result: {
         outcome: 'partial',
         why: `${unsaved.length} 条路由的结论没写进库（它们还是上一轮的样子）：${unsaved.join('；')}${goneNote}`,
-        scanned: written,
+        scanned,
         found: offline,
       },
       online,
     };
   }
-  return { result: { outcome: 'ok', scanned: written, found: offline }, online };
+  return { result: { outcome: 'ok', scanned, found: offline }, online };
 }
 
 /**

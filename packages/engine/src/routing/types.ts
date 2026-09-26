@@ -94,7 +94,7 @@ export interface RouteFacts {
   upstreamAliases: string[];
   /**
    * 路由探针最近一次下结论的时刻（routes.probed_at），探针还没看过为空。在线（被挡原因里没有 offline）的一定有：
-   * 库里约束 alive 为真时结论必须是 ok，没有就是输入拼错了（validate.ts 抛）。超过 ROUTE_PROBE_STALE_MINUTES
+   * 库里约束 alive 为真时结论必须是 ok，没有就是输入拼错了（validate.ts 抛）。超过 routeProbeStaleMinutes(hostId)
    * 没更新（探针可能停了）照派，派工理由里写明（choose.ts 的 probeNote）。
    */
   probedAt: string | null;

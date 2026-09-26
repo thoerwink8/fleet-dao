@@ -149,6 +149,112 @@ describe('探不探（planProbe）', () => {
   });
 });
 
+describe('按一次的成本放慢（cursor-agent：探通了隔 2 小时再真探）', () => {
+  const minutesAgo = (m: number) => new Date(NOW.getTime() - m * 60_000);
+  const ok = (m: number) => ({ state: 'ok' as const, at: minutesAgo(m), detail: '答上了：OK · 用时 4 秒' });
+  const cursor = (over: Partial<RouteProbeTarget> = {}) =>
+    target({
+      routeId: 'cursor:cursor-auto:cursor-agent',
+      hostId: 'cursor-agent',
+      channelId: 'cursor',
+      channelName: 'Cursor 订阅',
+      poolId: 'cursor',
+      runAsUser: null,
+      orgKind: null,
+      modelId: 'cursor-auto',
+      modelName: 'Cursor Auto',
+      upstreamModel: 'auto',
+      alive: true,
+      previous: ok(30),
+      ...over,
+    });
+  const probers = { 'claude-code': answered, 'cursor-agent': answered };
+  const plan = (t: RouteProbeTarget) => planProbe(t, probers, 'carpool', NOW);
+
+  it('上一次探通、还没到 2 小时：这一轮不探，结论照旧（写明为什么）', () => {
+    expect(plan(cursor())).toEqual({
+      kept: expect.stringContaining('隔 120 分钟再真探；上一次探通是 30 分钟前'),
+    });
+    // 差半轮以内算没到
+    expect('kept' in plan(cursor({ previous: ok(112) }))).toBe(true);
+  });
+
+  it('到点了（差半轮以内也算）：探', () => {
+    expect('probe' in plan(cursor({ previous: ok(113) }))).toBe(true);
+    expect('probe' in plan(cursor({ previous: ok(300) }))).toBe(true);
+  });
+
+  it('上一次没通、没探过、按规矩没探、结论 ok 却不在线、结论的时刻在未来：每轮都探（没通的报错走不到模型，不扣用量）', () => {
+    for (const previous of [
+      { state: 'failed' as const, at: minutesAgo(10), detail: '没登录' },
+      { state: 'skipped' as const, at: minutesAgo(10), detail: '没有阶段在用' },
+      null,
+    ]) {
+      expect('probe' in plan(cursor({ previous, alive: false }))).toBe(true);
+    }
+    expect('probe' in plan(cursor({ alive: false }))).toBe(true);
+    expect('probe' in plan(cursor({ previous: ok(-5) }))).toBe(true);
+  });
+
+  it('不放慢的执行方式（Claude Code）：上一次刚探通也每轮都探', () => {
+    expect('probe' in plan(target({ alive: true, previous: ok(10) }))).toBe(true);
+  });
+
+  it('放慢只管该探的：没有阶段在用、渠道下架的照样写不探的原因（不在线）', () => {
+    expect(plan(cursor({ inUse: false }))).toMatchObject({ state: 'skipped', detail: /没有哪个阶段在用/ });
+    expect(plan(cursor({ channelEnabled: false }))).toMatchObject({ state: 'skipped' });
+  });
+
+  it('一轮：结论照旧的不写库、不起会话，算看过、算在线；scanned、found 照算', async () => {
+    let calls = 0;
+    const counting: Prober = async () => {
+      calls += 1;
+      return { kind: 'answered', detail: '答上了：OK · 用时 4 秒' };
+    };
+    const h = harness([carpool, cursor(), solo], counting, {
+      probers: { 'claude-code': counting, 'cursor-agent': counting },
+    });
+    const run = await runRouteProbeJob(h.deps);
+    expect(calls).toBe(1);
+    expect(run).toMatchObject({
+      outcome: 'ok',
+      scanned: 3,
+      found: 1,
+      online: ['claude-carpool:opus-5.5:claude-code', 'cursor:cursor-auto:cursor-agent'],
+    });
+    expect(h.saved.map((s) => s.routeId)).toEqual([
+      'claude-carpool:opus-5.5:claude-code',
+      'claude-solo:opus-5.5:claude-code',
+    ]);
+    expect(h.after.map((a) => a.routeId)).toEqual(['claude-carpool:opus-5.5:claude-code']);
+    expect(h.logs).toContain('info:路由探针：还没到再探的时候，结论照旧');
+  });
+
+  it('一轮里只有结论照旧的：记 ok（看过了、都在线），不记成一条都没扫到', async () => {
+    const h = harness([cursor()], answered, { probers });
+    const run = await runRouteProbeJob(h.deps);
+    expect(run).toMatchObject({
+      outcome: 'ok',
+      scanned: 1,
+      found: 0,
+      online: ['cursor:cursor-auto:cursor-agent'],
+    });
+    expect(h.saved).toEqual([]);
+    expect(h.finished).toEqual([{ id: 11, result: { outcome: 'ok', scanned: 1, found: 0 } }]);
+  });
+
+  it('结论照旧的之外、该写的一条都没写进库：照样记 failed（不拿照旧的那几条冒充这一轮跑成了）', async () => {
+    const h = harness([cursor(), carpool], answered, {
+      probers,
+      save: async () => {
+        throw new Error('库连不上');
+      },
+    });
+    await expect(runRouteProbeJob(h.deps)).rejects.toThrow('一条结论都没写进库');
+    expect(h.finished[0]?.result).toMatchObject({ outcome: 'failed' });
+  });
+});
+
 describe('一轮（runRouteProbeJob，不起 Temporal）', () => {
   it('探通的写 ok（在线），没探的写原因（不在线）；scanned、found 和写下的对得上', async () => {
     const h = harness([carpool, solo, mirasim], answered);

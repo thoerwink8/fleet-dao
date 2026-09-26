@@ -1180,7 +1180,7 @@
     {
       "id": "X77",
       "provenance": "format",
-      "origin": "cursor 的池用完了（创始人 2026-09-27：走订阅、没开按量计费，用完就是请求被拒、不扣钱）：插头在 stderr 里认出额度用满（cursorRunFacts），会话端口交来的码是 quota_exhausted、后面接执行体原话。原话的样子没查到真样本（发行包里额度类报错的原话是服务端给的），法国真撞一次再补",
+      "origin": "cursor 的池用完了（创始人 2026-09-27：走订阅、没开按量计费，用完就是请求被拒、不扣钱）：插头在 stderr 里认出额度用满（cursorRunFacts），会话端口交来的码是 quota_exhausted、后面接执行体原话。原话照论坛用户贴的命令行输出（forum.cursor.com/t/cursor-agent-cli-limit-hit/128577）；发行包里额度类报错的正文是服务端给的，我们自己还没撞上过",
       "evidence": {
         "hostId": "cursor-agent",
         "code": "quota_exhausted",

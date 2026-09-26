@@ -176,13 +176,21 @@ reclaude 按用户记设备：组织写在家里的 `~/.reclaude/device.json`，
 3. 选拼车组织：`sudo -iu fleet-agent-carpool reclaude org list`，找到拼车（team）那个，`sudo -iu fleet-agent-carpool reclaude org use <组织编号>`。之后切独享、切回拼车由引擎做（#59），人不手动切：一切号这个家目录下在跑的会话全断。
 4. 重跑 `deploy/france.sh`：读回里「reclaude 还没登录」消失。
 
+会话用户装、登录 cursor-agent（#212 接上了 cursor-agent；要创始人做，一次；Cursor 的路由接真流量之前）：
+
+cursor-agent 装在会话用户自己家里（官方安装脚本：一个版本一个目录，在 `~/.local/share/cursor-agent/versions/<版本>/`），登录态也在它家里；不往会话环境里塞 `CURSOR_API_KEY`。引擎每次起 cursor 会话，由会话用户自己在 `FLEET_CURSOR_VERSIONS_DIR`（engine.env，默认 `/home/{user}/.local/share/cursor-agent/versions`）下按 `current` → 最新版本目录现找（升级会删掉旧版本目录，所以不钉版本）；一个能跑的都没有就退出 127、报「没装 cursor-agent」，失败分流按执行方式配置不对（CF1）认，这条路由记一次失败。
+
+1. 装（`france.sh` 现在不装它）：`sudo -iu fleet-agent-carpool bash -c 'curl https://cursor.com/install -fsS | bash'`。
+2. 登录：`sudo -iu fleet-agent-carpool cursor-agent login`。终端里会打印一个链接：在自己电脑的浏览器里打开，用 Cursor 账号登录、批准；批准完终端自己往下走。
+3. 查：`sudo -iu fleet-agent-carpool cursor-agent status` 说已登录。之后调度台哪个阶段挂上 Cursor 的路由、开着，下一轮探针就探它。
+
 路由探针（#129，design 第九节「路由探针」）：
 
-- 引擎每 15 分钟（每小时 7、22、37、52 分）以会话用户在 `/var/lib/fleet-work/_route-probe/<会话用户>` 起一次最小的 reclaude 会话、问一句「只回 OK」，结论写进 `routes` 的 `alive`、`probe_state`、`probed_at`、`probe_detail`。派工只派在线的路由：一上线（换机器、库清空也一样）第一轮探完之前，引擎一条活都派不出去。发布完不想等，手动跑一轮：`fleet-temporal schedule trigger --schedule-id route-probe`。
+- 引擎每 15 分钟（每小时 7、22、37、52 分）以会话用户在 `/var/lib/fleet-work/_route-probe/<会话用户>` 起一次最小的会话（Claude 的路由起 reclaude，Cursor 的起 cursor-agent，模型照路由上写的）、问一句「只回 OK」，结论写进 `routes` 的 `alive`、`probe_state`、`probed_at`、`probe_detail`。Cursor 的路由探通了隔 2 小时才再真探（一次扣的是按月的包含用量），中间那几轮结论照旧；没通的每轮都探。派工只派在线的路由：一上线（换机器、库清空也一样）第一轮探完之前，引擎一条活都派不出去。发布完不想等，手动跑一轮：`fleet-temporal schedule trigger --schedule-id route-probe`。
 - 看结论：驾驶舱调度台顶上「路由在线状态」；库里 `runuser -u fleet -- psql -d fleet -c "select id, alive, probe_state, probed_at, probe_detail from routes order by id"`；每一轮的结局在驾驶舱「定时任务」页（库里 `schedule_runs`、`job = 'route-probe'`）。
-- 离线了看 `probe_detail`：登录失效、设备被撤销的，照原因里写的重跑上面第 2 步的 reclaude 登录，下一轮探通就回在线，那条「整池暂停」自动撤掉。按量计费、插头没接、会话用户挂着别的组织的是按规矩不探，不是坏了。
-- 派工理由末尾出现「在线是探针 N 前的结论，之后它没再给新结论（探针可能停了）」：探针连着三轮（45 分钟）没给这条路由写新结论，引擎照上一次的结论接着派（不停工）。看驾驶舱「定时任务」页路由探针那一行（没跑、没跑成还是只写进去一部分，`why` 写了原因），再手动跑一轮（上面那条命令）看它报什么。
-- 探针不存会话记录（`--no-session-persistence`），会话用户家里不攒它的记录；目录由引擎经 `fleet-agent-scope adopt` 建，归会话用户、700。
+- 离线了看 `probe_detail`：登录失效、设备被撤销的，照原因里写的重新登录（Claude 的是上面 reclaude 那节第 2 步，Cursor 的是 cursor-agent 那节第 2 步），下一轮探通就回在线，那条「整池暂停」自动撤掉。按量计费、插头没接、会话用户挂着别的组织的是按规矩不探，不是坏了。
+- 派工理由末尾出现「在线是探针 N 前的结论，之后它没再给新结论（探针可能停了）」：探针连着三轮（45 分钟；Cursor 的路由是 2 小时 30 分，它探通了隔 2 小时才再探）没给这条路由写新结论，引擎照上一次的结论接着派（不停工）。看驾驶舱「定时任务」页路由探针那一行（没跑、没跑成还是只写进去一部分，`why` 写了原因），再手动跑一轮（上面那条命令）看它报什么。
+- Claude 的探针不存会话记录（`--no-session-persistence`），会话用户家里不攒它的记录；cursor-agent 没有这个开关，探针的会话留在会话用户家里的 `~/.cursor/chats` 下（一条路由一天约 12 个）。目录由引擎经 `fleet-agent-scope adopt` 建，归会话用户、700。
 
 已知口子（会话用户的 reclaude 代理端口，2026-09-25 审查官发现，待定机制修，#35）：会话用户的 reclaude 守护在 `127.0.0.1` 上开两个临时端口（一个 HTTP CONNECT 代理，会话的 `HTTPS_PROXY` 指它；一个 MITM TLS 口），端口号每次重启会变。代理口不认客户端身份——本机**别的用户**（`pilot`、`fleet`）也连得上、也会被转发，等于借用这个账号的订阅（从 pilot 借会话用户的额度）。`HTTPS_PROXY` 里没有令牌，靠的是绑回环 + 会话本该只有自己碰，但回环对所有本机用户都通。
 

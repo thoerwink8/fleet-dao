@@ -1,12 +1,23 @@
 // 路由在线状态（#129）：路由探针写进库的结论——在线几条、最近一次探测是什么时候、每条在线 / 离线（原因）/ 还没探过。
 // 探针停了（结论太久没更新）照实说「可能停了」，不拿上一次的结论当现在。
 
-import { ROUTE_PROBE_EVERY_MINUTES, ROUTE_PROBE_STALE_MINUTES } from '@fleet-dao/shared';
+import {
+  type HostId,
+  ROUTE_PROBE_EVERY_MINUTES,
+  ROUTE_PROBE_HOST_EVERY_MINUTES,
+  ROUTE_PROBE_STALE_MINUTES,
+} from '@fleet-dao/shared';
 import { ChevronDown } from 'lucide-react';
 import { useState } from 'react';
 import { Link } from 'react-router';
 import type { Routing } from '../api/types';
-import { probeSummary, routeStatus } from '../lib/catalog';
+import { hostLabel, probeSummary, routeStatus } from '../lib/catalog';
+
+/** 「，Cursor Agent 探通了隔 2 小时再探」：按一次的成本放慢的执行方式，免得看着某几条的结论老、以为探针漏了它。 */
+const SLOWER = Object.entries(ROUTE_PROBE_HOST_EVERY_MINUTES)
+  .map(([host, minutes]) => `${hostLabel[host as HostId] ?? host} 探通了隔 ${minutes / 60} 小时再探`)
+  .join('、');
+
 import { formatAgo, TIME } from '../lib/format';
 import { cn } from '../lib/utils';
 import { RouteLabel } from './route-label';
@@ -55,7 +66,7 @@ export function RouteHealth({
           ) : (
             '探针还没出过结论'
           )}
-          {` · 每 ${ROUTE_PROBE_EVERY_MINUTES} 分钟一轮`}
+          {` · 每 ${ROUTE_PROBE_EVERY_MINUTES} 分钟一轮${SLOWER ? `（${SLOWER}）` : ''}`}
         </span>
         {probeStale ? (
           <span className="text-xs text-ink-stall">

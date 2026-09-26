@@ -363,6 +363,11 @@ describe('cursor-agent 的路由（#212）：和干活的会话同一个驱动�
   let routeId: string;
   beforeEach(async () => {
     ({ routeId } = await addCursorRoute(t.db, { stages: ['execute'] }));
+    // 上一次探通是 3 小时前：cursor 探通了隔 2 小时再探，这一轮到点了
+    await t.client.query('update routes set probed_at = $2::timestamptz where id = $1', [
+      routeId,
+      new Date(NOW.getTime() - 3 * 60 * 60_000).toISOString(),
+    ]);
   });
   const cursorHold = async () =>
     (await t.db.select().from(notifications)).find((n) => n.dedupeKey === poolHoldKey('cursor'));
@@ -397,6 +402,27 @@ describe('cursor-agent 的路由（#212）：和干活的会话同一个驱动�
       `${join(root, 'work').replaceAll('\\', '/')}/${PROBE_DIR}/fleet-agent-carpool`,
     );
     expect(s.cursor.options[0]?.command).toEqual(['/opt/fake/fleet-agent-carpool/cursor-agent']);
+  });
+
+  it('探通了：15 分钟后那一轮不再真探、不重写，结论照旧（还在线）；到 2 小时再真探（一次扣的是按月的包含用量）', async () => {
+    const s = setup(answered, { cursor: () => replied() });
+    await s.round();
+    expect(s.cursor.count()).toBe(1);
+    const first = await row(routeId);
+    expect(first).toMatchObject({ alive: true, probeState: 'ok', probedAt: NOW });
+
+    s.advance(15);
+    const second = await s.round();
+    expect(s.cursor.count()).toBe(1);
+    expect(second.online).toContain(routeId);
+    expect(await row(routeId)).toMatchObject({ alive: true, probeState: 'ok', probedAt: NOW });
+    // Claude 的路由照样每轮探
+    expect(s.fake.count()).toBe(2);
+
+    s.advance(105);
+    await s.round();
+    expect(s.cursor.count()).toBe(2);
+    expect((await row(routeId))?.probedAt).toEqual(new Date(NOW.getTime() + 120 * 60_000));
   });
 
   it('路由上点名了具体模型：探针就用它（不限定 auto）', async () => {
