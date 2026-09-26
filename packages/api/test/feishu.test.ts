@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   createFeishuAuth,
   FEISHU_TOKEN_URL,
+  FEISHU_TOKEN_URL_PKCE,
   FEISHU_USER_INFO_URL,
   FeishuRejectedError,
   FeishuUnavailableError,
@@ -53,8 +54,8 @@ describe('飞书登录客户端', () => {
     });
   });
 
-  it('浏览器登录：表单换令牌（带回调地址和 verifier），再用令牌取身份；邮箱不往外带', async () => {
-    const { fetch, calls } = fakeFetch({ [FEISHU_TOKEN_URL]: okToken, [FEISHU_USER_INFO_URL]: okUser });
+  it('浏览器登录（PKCE）：走 v2 令牌端点、JSON 请求体（v3 会报 20049），再用令牌取身份；邮箱不往外带', async () => {
+    const { fetch, calls } = fakeFetch({ [FEISHU_TOKEN_URL_PKCE]: okToken, [FEISHU_USER_INFO_URL]: okUser });
     const auth = createFeishuAuth({ appId: 'cli_x', appSecret: 'sec', fetch });
     const identity = await auth.identify({
       code: 'c1',
@@ -62,8 +63,9 @@ describe('飞书登录客户端', () => {
       codeVerifier: 'v'.repeat(43),
     });
     expect(identity).toEqual({ openId: 'ou_1', unionId: 'on_1', name: '甲', avatarUrl: 'https://a' });
-    const form = new URLSearchParams(String(calls[0]?.init?.body));
-    expect(Object.fromEntries(form)).toEqual({
+    expect(String(calls[0]?.url)).toBe(FEISHU_TOKEN_URL_PKCE);
+    expect(new Headers(calls[0]?.init?.headers).get('content-type')).toMatch(/application\/json/);
+    expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({
       grant_type: 'authorization_code',
       client_id: 'cli_x',
       client_secret: 'sec',
