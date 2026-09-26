@@ -4,7 +4,6 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { recordFile } from '../src/position.ts';
 import { RULES_TARGETS, SKILL_TARGETS } from '../src/targets.ts';
 
 const SNAPSHOT = join(
@@ -26,13 +25,12 @@ function agentsSyncSection(): string {
 }
 
 describe('snapshot.sh 里的落点跟得上 targets.ts', () => {
-  it('每一份全局文件、每一个 skill 目录、清单、同步位置都在', () => {
+  it('每一份全局文件、每一个 skill 目录、清单都在', () => {
     const section = agentsSyncSection();
     const want = [
       ...RULES_TARGETS.map((t) => t.file.linux),
       ...SKILL_TARGETS.map((t) => t.dir.linux),
       '.fleet-dao/agents-sync.json',
-      recordFile('', 'linux').key.replace(/^~\//, ''),
     ];
     expect(want.filter((p) => !section.includes(p))).toEqual([]);
   });

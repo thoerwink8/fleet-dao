@@ -3,7 +3,20 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { type Deps, type PasswdEntry, runCli } from '../src/cli.ts';
-import { BLOCK, cleanup, fakeBin, get, IS_ROOT, makeRepo, PLATFORM, put, tempDir } from './helpers.ts';
+import {
+  BLOCK,
+  cleanup,
+  fakeBin,
+  get,
+  git,
+  gitify,
+  IS_ROOT,
+  makeRepo,
+  PLATFORM,
+  pushAhead,
+  put,
+  tempDir,
+} from './helpers.ts';
 
 afterEach(cleanup);
 
@@ -169,6 +182,28 @@ describe('--user：替别的用户写', () => {
     expect(existsSync(join(home, '.claude', 'settings.json'))).toBe(false);
     expect(existsSync(join(home, '.fleet-dao', 'hooks'))).toBe(false);
     expect(r.code).toBe(0);
+  });
+
+  // 法国的检出停在自动发布发出去的那个提交上，落后主线是常态（等 CI、等引擎空闲）：拿主线比会让自动发布
+  // 每次都误报「规矩同步没成」，所以替别的用户写时不记、不判同步位置（法国的看自动发布的读数）
+  it('检出落后主线也照样退出 0、不记同步位置', { timeout: 60_000 }, () => {
+    const home = aliceHome();
+    const repo = makeRepo({});
+    const origin = gitify(repo);
+    pushAhead(origin, 'AGENTS.md', '# 主线上新的规矩\n');
+    git(repo, 'fetch', '-q', 'origin');
+    const deps = {
+      platform: 'linux' as const,
+      getuid: () => 0,
+      lookupUser: () => ({ uid: 1001, gid: 1001, home }),
+    };
+    for (const mode of ['--apply', '--check']) {
+      const r = run([mode, '--user', 'alice', '--repo', repo], deps);
+      expect(r.out, mode).toContain('· 同步位置：替别的用户写（--user）时不记同步位置');
+      expect(r.out, mode).not.toContain('✗');
+      expect(r.code, mode).toBe(0);
+    }
+    expect(existsSync(join(home, '.fleet-dao', 'synced.json'))).toBe(false);
   });
 
   it('本来就是那个用户：不用换身份', () => {

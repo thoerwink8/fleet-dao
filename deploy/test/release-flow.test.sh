@@ -315,6 +315,12 @@ compare_api_items "$(printf 'database\tok\t\njudge\tok\t\n')" \
 check "判断题恰好在发版时调用没成（跟着上游变红）：不算这一版的错" "$?" 0
 check "判断题：记成待处理、写明不退回" "$(printf '%s\n' "${PENDING[@]}" | grep -c 'judge 不好.*和换没换版无关，不退回')" 1
 reset
+compare_api_items "$(printf 'database\tok\t\ndeploy_lag\tok\t\n')" \
+  "$(printf 'database\tok\t\ndeploy_lag\tbad\t落后主线 3 个提交、1 小时 40 分钟（在等引擎空闲）\n')" >/dev/null
+check "跟上主线（deploy_lag）恰好在发版时变红（主线又动了）：不算这一版的错" "$?" 0
+check "跟上主线：记成待处理、写明不退回" \
+  "$(printf '%s\n' "${PENDING[@]}" | grep -c 'deploy_lag 不好.*和换没换版无关，不退回')" 1
+reset
 compare_api_items "$before_items" \
   "$(printf 'database\tbad\t连不上\ndraft_backlog\tok\t\ntemporal\tbad\t没接上\n')" >/dev/null
 check "库切之前好、切之后坏：算这一版的错" "$?" 1
@@ -685,6 +691,207 @@ check "这一版没有装载器：没跑装载器、没有红" "$(loader_runs):$
 check "这一版没有装载器：说了一声" "$(said '这一版没有目录装载器')" 1
 # runuser、pg_admin 的桩留着：后面那段不用它们（unset 掉 shellcheck 会当成桩从没被调过）
 NODE=$(command -v node) || NODE=""
+
+echo "== 自动发布（--auto）：演示版不发（对外，要人确认）；历史行带 auto；切之前看会话——在跑、读不到、认不出都不切，什么都没动（退出码 76）；--busy-ok 照切；另一个发布在跑是 75"
+rm -rf "${RELEASES:?}"/* "$RELEASES"/.history
+GATE=()
+MIG=()
+DB_MIG=0
+FLEET_HK_PARTS=""
+: >"$FAKE/order" # 迁移的桩（上一段换的）往这里记跑过哪一版
+# 会话列表（fleet-agent-scope list）的桩：照旁边 .mode 文件答，问一次记一行进 .calls
+SCOPE=$TMP/agent-scope
+cat >"$SCOPE" <<'EOF'
+#!/bin/bash
+echo "$*" >>"$0.calls"
+case $(cat "$0.mode") in
+idle) printf '7 inactive\n9 failed\n' ;;
+none) ;;
+busy) printf '7 inactive\n12 active\n13 activating\n' ;;
+garbled) echo 'Failed to connect to bus: No such file or directory' ;;
+*)
+  echo 'sudo: fleet-agent-scope: command not found' >&2
+  exit 1
+  ;;
+esac
+EOF
+chmod +x "$SCOPE"
+AGENT_SCOPE=$SCOPE
+scope() { # 会话列表这一轮怎么答；清掉问过几次的记录
+  printf '%s' "$1" >"$SCOPE.mode"
+  rm -f -- "$SCOPE.calls"
+}
+scope_calls() { if [[ -f "$SCOPE.calls" ]]; then grep -c . "$SCOPE.calls"; else echo 0; fi; }
+last_line() { tail -1 "$HISTORY" | cut -d' ' -f3-; } # 历史最后一行去掉时间、提交号：「事件 [标记…]」
+
+AUTO=1
+FLEET_HK_PARTS="web demo gateway"
+reset
+auto_parts >"$TMP/out"
+check "自动发布：要发的里去掉演示版，驾驶舱静态文件、网关照发" "$FLEET_HK_PARTS" "web gateway"
+check "自动发布：说了演示版这次不动" "$(said '自动发布不发演示版')" 1
+FLEET_HK_PARTS="demo"
+auto_parts >/dev/null
+check "只配了演示版：自动发布什么都不往香港发" "$FLEET_HK_PARTS" ""
+FLEET_HK_PARTS="gateway"
+auto_parts >"$TMP/out"
+check "没配演示版：不变、不多说" "$FLEET_HK_PARTS:$(said '演示版')" "gateway:0"
+AUTO=0
+FLEET_HK_PARTS="web demo gateway"
+auto_parts >/dev/null
+check "人手动发：演示版照发" "$FLEET_HK_PARTS" "web demo gateway"
+FLEET_HK_PARTS=""
+
+AUTO=1
+scope idle
+reset
+do_release "$A" >"$TMP/out"
+check "会话都停了：切到 A" "$(current_sha)" "$A"
+check "会话都停了：切之前问过一次会话列表" "$(scope_calls)" 1
+check "历史这一行带 auto（自动发布据此分得清哪次是人手动切的）" "$(last_line)" "release auto"
+scope none
+reset
+do_release "$B" >"$TMP/out"
+check "一个会话都没有：切到 B" "$(current_sha)" "$B"
+
+scope busy
+before=$(events)
+reset
+(do_release "$C") >"$TMP/out" 2>&1
+rc=$?
+check "会话在跑：退出码 76（没动，不是没成）" "$rc" 76
+check "会话在跑：不切，还在 B" "$(current_sha)" "$B"
+check "会话在跑：历史没变" "$(events)" "$before"
+check "会话在跑：说出是哪几个、这次没发" "$(said '这次没发：引擎有会话在跑（12 13），这次不切')" 1
+check "会话在跑：结论写明什么都没动" "$(said '什么都没动')" 1
+check "会话在跑：构建留着，下一轮直接用" "$([[ -f "$RELEASES/$C/.fleet-release" ]] && echo 在 || echo 没了)" 在
+check "会话在跑：迁移没跑" "$(grep -c 'migrate c' "$FAKE/order")" 0
+scope broken
+reset
+(do_release "$C") >"$TMP/out" 2>&1
+rc=$?
+check "会话列表读不到（fleet-agent-scope 没成）：按在跑算，退出码 76" "$rc" 76
+check "读不到：说没查成，不当成没有会话" "$(said '这次没发：会话在不在跑没查成')" 1
+check "读不到：它的原话进了日志" "$(said 'command not found')" 1
+check "读不到：还在 B" "$(current_sha)" "$B"
+scope garbled
+reset
+(do_release "$C") >"$TMP/out" 2>&1
+rc=$?
+check "会话列表认不出（退出码 0，却不是「编号 状态」）：按在跑算，退出码 76" "$rc" 76
+check "认不出：说认不出、带上那一行" "$(said '这次没发：会话列表认不出（有一行是「Failed to connect to bus')" 1
+check "认不出：还在 B、历史没变" "$(current_sha):$(events)" "$B:$before"
+
+BUSY_OK=1
+scope busy
+reset
+do_release "$C" >"$TMP/out"
+check "等空闲到了上限（--busy-ok）：会话在跑也切到 C" "$(current_sha)" "$C"
+check "--busy-ok：不去问会话列表" "$(scope_calls)" 0
+check "--busy-ok：说了照切、会话按编号续上" "$(said '等空闲到了上限，引擎有会话在跑也切')" 1
+BUSY_OK=0
+
+scope idle
+GATE[$D]=bad
+reset
+do_release "$D" >"$TMP/out"
+check "自动发布的新版不过健康检查：退回 C" "$(current_sha)" "$C"
+check "自动发布里的发布、不健康、自动退回都带 auto（不算人手动切的）" \
+  "$(tail -3 "$HISTORY" | cut -d' ' -f3- | tr '\n' '|')" "release auto|unhealthy auto|auto-rollback auto|"
+GATE[$D]=ok
+
+AUTO=0
+scope busy
+reset
+do_release "$E" >"$TMP/out"
+check "人手动发：不看会话（人自己定），照切到 E" "$(scope_calls):$(current_sha)" "0:$E"
+check "人手动发的：历史行不带 auto" "$(last_line)" release
+
+if command -v flock >/dev/null; then
+  exec 8>>"$RELEASES/.lock"
+  flock -n 8
+  AUTO=1
+  (take_lock) >"$TMP/out" 2>&1
+  rc=$?
+  check "另一个发布拿着锁：自动发布退出码 75（没动）" "$rc" 75
+  check "另一个发布拿着锁：结论写明这次没发" "$(said '这次没发：另一个发布正在跑')" 1
+  AUTO=0
+  reset
+  (
+    take_lock >/dev/null
+    echo "rc=$? reds=${#REDS[@]}"
+  ) >"$TMP/out" 2>&1
+  check "人手动发、锁被占：照旧报红、返回 1" "$(grep '^rc=' "$TMP/out")" "rc=1 reds=1"
+  flock -u 8
+  exec 8>&-
+else
+  echo "  … 没跑成：这台没有 flock，「另一个发布在跑」没测"
+  skipped=1
+fi
+
+echo "== 自动发布的参数：--auto 只跟一个主线上的提交，--busy-ok 只跟着 --auto；不对就用法错（64），什么都不做"
+AUTO=0
+BUSY_OK=0
+for args in "--auto" "$A --auto --unmerged" "$A --busy-ok" "--auto --busy-ok" "--check --auto" "--rollback --auto" \
+  "--rollback --busy-ok"; do
+  # shellcheck disable=SC2086 # 故意按空格拆成几个参数
+  (main $args) >/dev/null 2>&1
+  rc=$?
+  check "「${args//$A/<提交号>}」：退出 64" "$rc" 64
+done
+
+echo "== --check 列出自动发布的读数：定时器没在跑、还没有读数、读数认不出，都照实记待处理（不当成没事）"
+if [[ -z "$NODE" ]]; then
+  echo "  ✗ 没跑成：这台没有 node"
+  fail=1
+else
+  TIMER=inactive
+  systemctl() { # 只换掉「定时器在不在跑」这一问；别的照走真的
+    if [[ "$*" == "is-active fleet-auto-release.timer" ]]; then
+      echo "$TIMER"
+    else
+      command systemctl "$@"
+    fi
+  }
+  check "systemctl 的桩：定时器在不在跑照 TIMER 答" "$(systemctl is-active fleet-auto-release.timer)" inactive
+  mkdir -p "$(dirname "$AUTO_STATE")"
+  rm -f -- "$AUTO_STATE"
+  reset
+  check_auto_release >"$TMP/out"
+  check "定时器没在跑：记待处理" "$(printf '%s\n' "${PENDING[@]}" | grep -c 'fleet-auto-release.timer 没在跑')" 1
+  check "还没有读数：记待处理" "$(printf '%s\n' "${PENDING[@]}" | grep -c '还没有自动发布的读数')" 1
+  cat >"$AUTO_STATE" <<EOF
+{"schema":1,"ranAt":"2026-09-27T01:00:00.000Z",
+ "main":{"checkedAt":"2026-09-27T01:00:00.000Z","head":"$B","headAt":"2026-09-27T00:50:00.000Z",
+  "commits":[["$B","2026-09-27T00:50:00.000Z"],["$A","2026-09-27T00:40:00.000Z"]]},
+ "mainError":null,"current":"$A",
+ "ci":{"sha":"$B","verdict":"pending","detail":"CI 在跑（in_progress）","checkedAt":"2026-09-27T01:00:00.000Z"},
+ "hold":null,"waitingSince":null,"busy":null,"attempt":null,
+ "rules":{"commit":"$A","at":"2026-09-27T00:45:00.000Z","result":"ok","detail":""},
+ "system":{"appliedSha":"$A","behind":0,"oldestAt":null},"alerts":[],"resolve":[],
+ "last":{"action":"ci-pending","detail":"CI 在跑（in_progress）","at":"2026-09-27T01:00:00.000Z"}}
+EOF
+  TIMER=active
+  reset
+  check_auto_release >"$TMP/out"
+  check "定时器在跑、读数认得出：没有待处理" "${#PENDING[@]}" 0
+  check "读数：上一轮什么时候跑的" "$(said '· 上一轮 2026-09-27T01:00:00.000Z')" 1
+  check "读数：主线头和它的 CI" "$(said '· 主线头 bbbbbbbbbbbb，CI pending')" 1
+  check "读数：在用的落后几个提交" "$(said '· 在用 aaaaaaaaaaaa，落后 1 个提交')" 1
+  check "读数：这一轮在等 CI" "$(said '· 这轮：ci-pending（CI 在跑（in_progress））')" 1
+  check "读数：规矩同步到哪个提交" "$(said '· 规矩同步到 aaaaaaaaaaaa（ok）')" 1
+  check "读数：装机脚本装到哪" "$(said '· 装机脚本装到 aaaaaaaaaaaa，之后相关提交 0 个')" 1
+  printf '{"schema":2}\n' >"$AUTO_STATE"
+  reset
+  check_auto_release >"$TMP/out"
+  check "读数的格式认不出（schema 不对）：记待处理、说认不出" \
+    "$(printf '%s\n' "${PENDING[@]}" | grep -c '自动发布的读数认不出.*格式认不出（schema 2，应为 1）')" 1
+  printf 'not json' >"$AUTO_STATE"
+  reset
+  check_auto_release >"$TMP/out"
+  check "读数不是 JSON：记待处理、说认不出" "$(printf '%s\n' "${PENDING[@]}" | grep -c '自动发布的读数认不出')" 1
+  unset -f systemctl
+fi
 
 echo "== 真起一个服务：切完 current 没重启就被打断，再跑同一版会重启；主进程跑的是哪一版，健康检查查得出"
 if ((EUID != 0)) || [[ ! -d /run/systemd/system ]]; then

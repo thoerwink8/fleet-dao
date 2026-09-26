@@ -78,7 +78,7 @@ export async function runHealthChecks(
 
 /**
  * 生产要探的几项：库、实时推送（LISTEN）、Temporal、引擎工人、GitHub 事件的去处、飞书草稿开单（接没接上、有没有积压）、
- * 判断题（接没接、调不调得通）。main.ts 用它装配，测试也用它，是同一份代码。
+ * 判断题（接没接、调不调得通）、线上版本跟不跟得上主线。main.ts 用它装配，测试也用它，是同一份代码。
  */
 export function serviceHealthChecks(parts: {
   /** 真去读几张常用表、带自己的超时（pg-store.ts 的 probeDb）；只 select 1 查不出表被锁住。 */
@@ -94,6 +94,8 @@ export function serviceHealthChecks(parts: {
   draftBacklog: () => Promise<void>;
   /** 判断题（judge-health.ts）：没配报「未接」；配置起不来、最近一次真调用没成报红。 */
   judge: { check(): Promise<void>; readonly notWired?: string };
+  /** 线上版本跟不跟得上主线（deploy-lag.ts）：只在法国的正式机器上查，别处报「未接」。 */
+  deployLag: { check(): Promise<void>; readonly notWired?: string };
 }): HealthCheck[] {
   return [
     { name: 'database', check: parts.probeDb },
@@ -111,6 +113,8 @@ export function serviceHealthChecks(parts: {
     },
     // 最近一次调用没成会随上游自己变红（发版脚本对它只标待处理，见 deploy/release.sh 的 DRIFTING_HEALTH_ITEMS）
     { name: 'judge', check: () => parts.judge.check(), ...notWired(parts.judge.notWired) },
+    // 主线一动就可能落后，也会自己变红：发版脚本同样只标待处理、不退回
+    { name: 'deploy_lag', check: () => parts.deployLag.check(), ...notWired(parts.deployLag.notWired) },
   ];
 }
 

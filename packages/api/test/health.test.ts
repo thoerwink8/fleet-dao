@@ -59,6 +59,7 @@ describe('健康检查', () => {
       draftOpener,
       draftBacklog: draftBacklogCheck(backlogStore, () => new Date()),
       judge: { check: async () => {} },
+      deployLag: { check: async () => {} },
     });
 
   it('还没接上的功能报「未接」：整体照样 200，这一项看得到「未接」和单号，积压也不算坏', async () => {
@@ -142,6 +143,8 @@ describe('健康检查', () => {
     expect(listed).toContain('draft_backlog');
     // 判断题「最近一次调用没成」跟着上游自己变红，和换没换版无关
     expect(listed).toContain('judge');
+    // 主线一动就可能落后：自动发布正在追，和这一版好不好无关；少了它，每次发布都可能被它退回
+    expect(listed).toContain('deploy_lag');
     const names = serviceHealthChecks({
       probeDb: async () => {},
       feed: { probe: async () => {} },
@@ -150,6 +153,7 @@ describe('健康检查', () => {
       draftOpener: { check: async () => {} },
       draftBacklog: async () => {},
       judge: { check: async () => {} },
+      deployLag: { check: async () => {} },
     }).map((c) => c.name);
     for (const name of listed) expect(names, name).toContain(name);
   });

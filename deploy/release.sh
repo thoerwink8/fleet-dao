@@ -8,8 +8,12 @@
 #   bash deploy/release.sh --rollback            退回上一版（上一个在用过、没被判过不健康、目录还在的版本）
 #   bash deploy/release.sh --check               只读：在用哪版、有哪几版、服务与健康检查，不改任何东西
 #   bash deploy/release.sh <提交号> --unmerged   发还没合进主线的提交（只用来合并前在真机上验；历史里会标出来）
+#   bash deploy/release.sh <提交号> --auto [--busy-ok]
+#                                                自动发布（fleet-auto-release）用：不发演示版（对外，人闸）、历史行带 auto、
+#                                                切之前引擎有会话在跑就不切（--busy-ok 照切）；这两种「没动」单给退出码
 # 每一版在 /srv/fleet-dao-releases/<提交号>，current 指着在用的那版；留最近 5 版。目录、单元、本机配置、怎么看、
-# 怎么退：docs/ops.md 第九节。退出码同装机脚本：0 全绿，1 有红（含「没过健康检查、已退回」），2 没红但有待配。
+# 怎么退：docs/ops.md 第九节。退出码同装机脚本：0 全绿，1 有红（含「没过健康检查、已退回」），2 没红但有待配；
+# 只有 --auto 才有的：75 另一个发布在跑、76 切之前看到会话在跑——这两种什么都没动（构建留着，下次直接用）。
 set -Eeuo pipefail
 umask 022
 
@@ -43,6 +47,13 @@ CATALOG_META="root:fleet 640" # 它该有的属主、权限；只有测试会改
 NODE=/usr/bin/node    # 法国的 node（france.sh 的前提里查过 22 以上）；只有测试会换成别处的
 SETTLE_SECONDS=10     # 服务起来后再看这么久：这段时间里退出过、重启过，就是没起稳
 ENGINE_POLL_WAIT=90   # 引擎工人起来后要先打包工作流，才去任务队列取活
+AGENT_SCOPE=/usr/local/sbin/fleet-agent-scope # 列 AI 会话（--auto 切之前看有没有会话在跑）；只有测试会换
+AUTO_STATE=$RELEASES/.auto/state.json         # 自动发布每一轮的读数（deploy/france/auto-release 写，--check 列出来）
+# 自动发布（--auto）的两种「这次不发、什么都没动」：退出码单列，自动发布据此分得清「没动」和「没成」（没成的不再试）
+EXIT_RELEASE_BUSY=75
+EXIT_SESSIONS_BUSY=76
+AUTO=0    # --auto：自动发布起的
+BUSY_OK=0 # --busy-ok：等空闲到了上限，引擎有会话在跑也切
 
 FLEET_SERVICES=""
 FLEET_DOMAIN=""
@@ -61,9 +72,18 @@ usage() {
 用法（法国，root）：
   bash deploy/release.sh [<提交号>]            发布（不给提交号就发主线最新）
   bash deploy/release.sh <提交号> --unmerged   发还没合进主线的提交（合并前在真机上验）
+  bash deploy/release.sh <提交号> --auto [--busy-ok]
+                                               自动发布用（fleet-auto-release 起，人不用）
   bash deploy/release.sh --rollback            退回上一版
   bash deploy/release.sh --check               只读：看在用哪版、服务与健康
 EOF
+}
+
+# --auto 这次不发、什么都没动（另一个发布在跑、会话在跑）：照样给出结论，退出码单列
+not_now() { # 退出码 原因
+  pending "$2"
+  printf '\n== 结论\n这次没发：%s。什么都没动\n' "$2"
+  exit "$1"
 }
 
 # ── 小零件 ──
@@ -98,9 +118,11 @@ last_event() { # 提交号
   if [[ -f "$HISTORY" ]]; then awk -v s="$1" '$2 == s { e = $3 } END { printf "%s", e }' "$HISTORY"; fi
 }
 
+# 自动发布起的（--auto）带 auto：自动发布据此分得清哪次是人手动切的——人最近手动切过、主线上还没有更新的提交，它就不动
 record() { # 提交号 事件
   local tag=""
   if [[ "$(marker_get "$1" on_main)" == 0 ]]; then tag=" unmerged"; fi
+  if ((AUTO)); then tag+=" auto"; fi
   printf '%s %s %s%s\n' "$(date -u +%FT%TZ)" "$1" "$2" "$tag" >>"$HISTORY"
 }
 
@@ -160,8 +182,21 @@ preflight() {
       return 1
     fi
   done
+  auto_parts
   ok "本机启用的服务：${FLEET_SERVICES:-（无：只发代码、跑迁移）}；往香港发：${FLEET_HK_PARTS:-（都不发）}；域名 $FLEET_DOMAIN"
   if has_part demo; then ok "演示版发在香港站点的 $FLEET_DEMO_PATH"; fi
+}
+
+# 自动发布（--auto）不发演示版：演示版是对外的（链接发给了很多人），换它是对外发布，按版本由人确认（人闸，
+# docs/decisions/0003 第 18 条）；香港上的演示版这时不动、也不查。驾驶舱前端（web）和飞书网关是自家用的，和后端同一版一起跟
+auto_parts() {
+  local p kept=""
+  if ((AUTO == 0)) || ! has_part demo; then return 0; fi
+  for p in $FLEET_HK_PARTS; do
+    if [[ "$p" != demo ]]; then kept+="${kept:+ }$p"; fi
+  done
+  FLEET_HK_PARTS=$kept
+  ok "自动发布不发演示版（对外，要人确认）：香港上的演示版这次不动"
 }
 
 # 演示版在哪个路径：没写取默认 /demo/；不是一级路径、和根上已有的东西撞，报红
@@ -177,9 +212,34 @@ demo_config_ok() {
 take_lock() {
   exec 9>>"$RELEASES/.lock"
   if ! flock -n 9; then
+    if ((AUTO)); then not_now "$EXIT_RELEASE_BUSY" "另一个发布正在跑（$RELEASES/.lock）"; fi
     red "另一个发布正在跑（$RELEASES/.lock）"
     return 1
   fi
+}
+
+# 自动发布切之前最后看一眼：引擎有会话在跑就不切（切版本要重启引擎，会话跟着断），构建留着、下一轮直接用。
+# 放在构建之后、迁移之前：构建要几分钟，这一眼离切版本越近，看完又起新会话的空当越小。读不到、认不出会话列表都按「在跑」算。
+# 等空闲到了上限（fleet-auto-release 定的），它带 --busy-ok 来，照切：会话按编号续上（design 第四节「会话断了接着干」）
+auto_gate() {
+  local out busy bad
+  if ((BUSY_OK)); then
+    ok "自动发布：等空闲到了上限，引擎有会话在跑也切（会话按编号续上）"
+    return 0
+  fi
+  # 只拿标准输出来认（一行「编号 状态」）；它的报错照样进日志
+  if ! out=$("$AGENT_SCOPE" list); then
+    not_now "$EXIT_SESSIONS_BUSY" "会话在不在跑没查成（$AGENT_SCOPE list 没成，原话见上），按在跑算，这次不切"
+  fi
+  bad=$(awk 'NF && !/^[^ ]+ [a-z-]+$/ { print; exit }' <<<"$out")
+  if [[ -n "$bad" ]]; then
+    not_now "$EXIT_SESSIONS_BUSY" "会话列表认不出（有一行是「${bad:0:80}」），按在跑算，这次不切"
+  fi
+  busy=$(awk 'NF && $2 != "inactive" && $2 != "failed" { printf "%s ", $1 }' <<<"$out")
+  if [[ -n "$busy" ]]; then
+    not_now "$EXIT_SESSIONS_BUSY" "引擎有会话在跑（${busy% }），这次不切；构建留着，下一轮直接用"
+  fi
+  ok "自动发布：引擎没有会话在跑，切"
 }
 
 # ── 取代码、构建 ──
@@ -843,8 +903,9 @@ check_running_release() { # 提交号
 # 会随时间自己变红、和换没换版无关的健康项：只标待处理，不当成这一版的错去退回。
 # draft_backlog = 最早一张待开单等得太久：发版那一两分钟里恰好跨过时限，好版本也会被退回。
 # judge = 判断题最近一次真调用没成：跟着上游（连不上、限流、钥匙失效）自己变红；判断题只是帮着判，红了引擎照规则走。
+# deploy_lag = 线上版本跟不上主线：主线一动就可能落后（自动发布正在追、在等 CI 或空闲），和这一版好不好无关。
 # 这里的名字都得是后端真报的项（packages/api 的 health.test.ts 核对，改了名那边报警）
-DRIFTING_HEALTH_ITEMS="draft_backlog judge"
+DRIFTING_HEALTH_ITEMS="draft_backlog judge deploy_lag"
 
 # 切之后的健康报告逐项和切之前比：之前好的变坏了才算这一版的错（返回 1）；会自己变红的那几项只标待处理
 compare_api_items() { # 切之前的逐项结果 切之后的逐项结果
@@ -1100,6 +1161,7 @@ do_release() { # 要发的提交（空 = 主线最新）
   local cur before=""
   fetch_code "$1"
   build_release "$SHA"
+  if ((AUTO)); then auto_gate; fi
   cur=$(current_sha)
   hk_reachable || return 1
   # 直接发一个老提交也一样把关：库里的迁移比它带的多就不切（drizzle 碰到比代码新的迁移记录什么也不做、也不报错，
@@ -1175,6 +1237,7 @@ do_check() {
     echo "  最近的切换："
     tail -5 -- "$HISTORY" | sed 's/^/    /'
   fi
+  check_auto_release
   step "服务"
   for s in "${APP_UNITS[@]}"; do
     if has_service "$s"; then
@@ -1189,6 +1252,40 @@ do_check() {
   done
   if has_part gateway && [[ -n "$(marker_get "$cur" gateway_sha256)" ]]; then GATEWAY_ACTIVATED=1; fi
   health_gate "$cur" "" || true
+}
+
+# 自动发布的读数（fleet-auto-release 每一轮写的状态文件）照实列出来：主线头、CI、在用的落后几个、这一轮干了什么、规矩同步到哪、
+# 装机脚本装到哪。跟不跟得上主线的判定在后端 /healthz 的 deploy_lag 一项（下面健康检查里逐项列出）
+check_auto_release() {
+  local out line
+  step "自动发布"
+  if [[ "$(systemctl is-active fleet-auto-release.timer 2>/dev/null)" == active ]]; then
+    ok "fleet-auto-release.timer 在跑（每 5 分钟看一轮主线）"
+  else
+    pending "fleet-auto-release.timer 没在跑：不会自动跟上主线（装：bash /srv/fleet-dao/deploy/france.sh）"
+  fi
+  if [[ ! -f "$AUTO_STATE" ]]; then
+    pending "还没有自动发布的读数（$AUTO_STATE）"
+    return 0
+  fi
+  # shellcheck disable=SC2016 # 单引号里是给 node 的 JS，模板字符串不归 shell 展开
+  if ! out=$("$NODE" --input-type=module -e '
+    const [lib, file] = process.argv.slice(1);
+    try {
+      const { STATE_SCHEMA, summary } = await import((await import("node:url")).pathToFileURL(lib).href);
+      const st = JSON.parse((await import("node:fs")).readFileSync(file, "utf8"));
+      if (st?.schema !== STATE_SCHEMA) throw new Error(`格式认不出（schema ${st?.schema}，应为 ${STATE_SCHEMA}）`);
+      console.log(`上一轮 ${st.ranAt}`);
+      for (const part of summary(st).split("；")) console.log(part);
+    } catch (e) {
+      console.log(e instanceof Error ? e.message : String(e));
+      process.exit(1);
+    }' \
+    "$DEPLOY_DIR/france/auto-release/lib.mjs" "$AUTO_STATE" 2>&1); then
+    pending "自动发布的读数认不出（$AUTO_STATE）：$(tail -1 <<<"$out")"
+    return 0
+  fi
+  while IFS= read -r line; do printf '  · %s\n' "$line"; done <<<"$out"
 }
 
 # 发布交给 systemd 跑（一个临时服务 fleet-dao-release-<时间>），这个终端只跟着看日志：跳板断线、终端关了，
@@ -1233,6 +1330,8 @@ main() {
     --rollback) mode=rollback ;;
     --check) mode=check ;;
     --unmerged) UNMERGED=1 ;;
+    --auto) AUTO=1 ;;
+    --busy-ok) BUSY_OK=1 ;;
     -h | --help)
       usage
       exit 0
@@ -1250,7 +1349,12 @@ main() {
       ;;
     esac
   done
-  if [[ "$mode" != release && (-n "$target" || "$UNMERGED" == 1) ]]; then
+  if [[ "$mode" != release && (-n "$target" || "$UNMERGED" == 1 || "$AUTO" == 1) ]]; then
+    usage >&2
+    exit 64
+  fi
+  # 自动发布只发给定的、主线上的提交；--busy-ok 只跟着 --auto
+  if { ((AUTO)) && [[ -z "$target" || "$UNMERGED" == 1 ]]; } || { ((BUSY_OK)) && ((AUTO == 0)); }; then
     usage >&2
     exit 64
   fi

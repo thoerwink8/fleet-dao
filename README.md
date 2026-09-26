@@ -30,7 +30,7 @@
 | `packages/jev` | Jev 判断题服务：题库、提问接口、从只记不拦转到真拦 |
 | `packages/feishu` | 飞书网关（跑在香港） |
 | `packages/conventions` | design 第七节的约定写成检查：合并闸 merge-gate（必填栏提醒、先审后合路径等第二意见）、开单脚本、文档指针检查、欠账检查、阶段收口 |
-| `packages/agents-sync` | 同步脚本：把 `AGENTS.md` 上半段和 `agents/skills/` 写进这台机器上各家 AI 的全局入口，另能查漂移、撤旧仓留下的东西 |
+| `packages/agents-sync` | 同步脚本：把 `AGENTS.md` 上半段、`agents/skills/`、`agents/hooks/` 装进这台机器上各家 AI 的全局入口，记下这台同步到哪个提交，另能查漂移、撤旧仓留下的东西 |
 | `deploy/` | 装机、发版、健康页，和它们的检查 |
 | `docs/` | 设计、计划、运维；`docs/reference/` 是旧系统的坑 |
 | `specs/` | 需求文档，每个需求一个文件夹（需求、方案、结果） |

@@ -36,7 +36,7 @@ export const USAGE = `agents-sync —— 把 fleet-dao 仓里 AGENTS.md 的通�
 
 选项：
   --home <目录>      家目录（默认：当前用户的家；带 --user 时是那个用户的家）
-  --user <用户名>    替这个用户做（Linux，要 root）：先换成他的身份再动手，写出来的东西都归他；钩子不装
+  --user <用户名>    替这个用户做（Linux，要 root）：先换成他的身份再动手，写出来的东西都归他；钩子不装、同步位置不记
   --repo <目录>      fleet-dao 仓的位置（默认：本脚本所在的仓）
   --old-repo <目录>  旧仓在这台机器上的位置（--retire-old 要）
 
@@ -160,6 +160,10 @@ function planIdentity(args: Args, deps: Deps): Identity {
 /** 替别的用户写（法国装机）时钩子整段不装的原因 */
 const HOOKS_OFF_FOR_USER =
   '替别的用户写（--user）时不装钩子：开会话钩子要在这个用户自己能拉、能写的 fleet-dao 检出里快进、同步；法国的会话由引擎管';
+// 法国的检出由自动发布推进，停在发出去的那个提交上，本来就可能落后主线（等 CI、等引擎空闲）：
+// 拿主线比会把正常的等待判红、让自动发布误报「规矩同步没成」。同步到哪个提交记在自动发布的读数里（ops 第九节）。
+const POSITION_OFF_FOR_USER =
+  '替别的用户写（--user）时不记同步位置：法国的规矩跟着自动发布走，同步到哪个提交、落后主线多少看自动发布的读数（release.sh --check）';
 
 export function runCli(argv: readonly string[], deps: Deps): number {
   let args: Args | 'help';
@@ -209,7 +213,9 @@ export function runCli(argv: readonly string[], deps: Deps): number {
   }
   // 同步位置：记录和 git 的事在换身份之前问好（换过去之后未必读得到仓，git 也会因为属主不同拒读）
   const position: Position | undefined =
-    args.mode === '--retire-old' ? undefined : readPosition(repo, id.home, deps.platform, deps.git ?? runGit);
+    args.mode === '--retire-old' || args.user !== undefined
+      ? undefined
+      : readPosition(repo, id.home, deps.platform, deps.git ?? runGit);
   try {
     id.become?.();
   } catch (err) {
@@ -254,7 +260,7 @@ export function runCli(argv: readonly string[], deps: Deps): number {
       );
     } else {
       const src = sources as Sources;
-      const pos = position as Position;
+      const positionOff = [line('skip', '同步位置', POSITION_OFF_FOR_USER)];
       const ctx: Ctx = {
         home,
         platform: deps.platform,
@@ -266,7 +272,7 @@ export function runCli(argv: readonly string[], deps: Deps): number {
         section('通用段（AGENTS.md 上半段）', checkRules(ctx, src));
         section('skill（agents/skills/）', checkSkills(ctx, src, readManifest(mf)));
         section('钩子（agents/hooks/）', checkHooks(ctx, src, hooksOff));
-        section('同步位置', checkPosition(pos));
+        section('同步位置', position ? checkPosition(position) : positionOff);
       } else {
         const rules = applyRules(ctx, src, backups);
         section('通用段（AGENTS.md 上半段）', rules);
@@ -281,7 +287,7 @@ export function runCli(argv: readonly string[], deps: Deps): number {
         ];
         const bad = verify([...rules, ...skills, ...hooks], after);
         if (bad.length) section('读回', bad);
-        section('同步位置', applyPosition(pos, all, deps.now()));
+        section('同步位置', position ? applyPosition(position, all, deps.now()) : positionOff);
       }
     }
   } finally {
