@@ -72,10 +72,22 @@ function parseHash(stored: string) {
   ) {
     throw new PasswordHashFormatError('scrypt 参数认不出或超出上限');
   }
-  const salt = Buffer.from(parts[4] ?? '', 'base64url');
-  const key = Buffer.from(parts[5] ?? '', 'base64url');
+  const salt = strictBase64url(parts[4] ?? '');
+  const key = strictBase64url(parts[5] ?? '');
   if (salt.length < SALT_BYTES || key.length < KEY_BYTES) throw new PasswordHashFormatError('盐或哈希太短');
   return { N, r, p, salt, key };
+}
+
+/**
+ * Buffer.from(…, 'base64url') 遇到非法字符会悄悄跳过：盐后面多个「!」也能照常解出来、照常验过。
+ * 这里只认规范写法（只含 base64url 字符、解出来再编回去一字不差），否则按格式认不出处理。
+ */
+function strictBase64url(text: string): Buffer {
+  const buf = Buffer.from(text, 'base64url');
+  if (!/^[A-Za-z0-9_-]+$/.test(text) || buf.toString('base64url') !== text) {
+    throw new PasswordHashFormatError('盐或哈希不是规范的 base64url');
+  }
+  return buf;
 }
 
 /** 对不对；库里的哈希格式认不出时抛 PasswordHashFormatError（不当成「密码错」糊过去）。比较用 timingSafeEqual。 */

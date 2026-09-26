@@ -82,6 +82,11 @@ describe('密码哈希（crypto.scrypt）', () => {
       ['scrypt', 2 ** 22, ...parts.slice(2)].join('$'), // N 超上限：不许拿库里的值吃光内存
       ['scrypt', parts[1], 99, ...parts.slice(3)].join('$'),
       [...parts.slice(0, 4), 'c2FsdA', parts[5]].join('$'), // 盐太短
+      // 规范哈希后面多个非法字符：Buffer.from 会悄悄跳过，必须按格式认不出处理（第二意见第 1 轮）
+      [...parts.slice(0, 4), `${parts[4]}!`, parts[5]].join('$'),
+      [...parts.slice(0, 5), `${parts[5]}!`].join('$'),
+      [...parts.slice(0, 5), `${parts[5]}=`].join('$'),
+      [...parts.slice(0, 5), ` ${parts[5]}`].join('$'),
     ];
     for (const stored of bad) {
       await expect(verifyPassword(PASSWORD, stored), stored).rejects.toBeInstanceOf(PasswordHashFormatError);
