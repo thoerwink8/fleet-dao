@@ -94,12 +94,13 @@ export const COMMAND_HELP: Record<string, string> = {
   总结写清做了什么、怎么验证的、还欠什么（4000 字以内）。
   --tests passed|failed   测试有没有全过，必填，如实写
 
-  后端会核实本次会话真跑过测试、而且最后一次是过的；核实不过会拒收（退出码 4）。
-  跑测试别接管道（例如 pnpm check | tail）：退出码是管道最后一段的，结果会记成「未知」。
+  后端会核实本次会话真跑过仓的测试命令（起会话时的任务里写着；fleet-dao 是 pnpm test:changed，只跑改动影响到的测试），
+  而且最后一次是过的；别的测试命令不算，核实不过会拒收（退出码 4）。
+  原样跑，别接管道（例如 pnpm test:changed | tail）、别放后台：退出码不是测试的，结果记成「认不出」，同样拒收。
 
 例子：
   git add -A && git commit -m "登录：验证码 5 分钟过期"
-  fleet done "加了验证码过期逻辑和 3 个测试；pnpm check 全绿" --tests passed
+  fleet done "加了验证码过期逻辑和 3 个测试；pnpm test:changed 全绿" --tests passed
 `,
   blocked: `fleet blocked —— 报卡住
 

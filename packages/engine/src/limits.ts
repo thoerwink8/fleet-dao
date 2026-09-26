@@ -36,7 +36,7 @@ export interface Limits {
   sessionMinutes: number;
   /** 会话里没有工具在跑、又这么久没动静就判停滞（交给插头的 idle 超时）。 */
   stallSeconds: number;
-  /** 一个会话（连同它跑的测试）的内存软上限，超了先回收（fleet-agent-scope --memory-high）。 */
+  /** 一个会话（连同它跑的测试）的内存软上限，超了先回收（fleet-agent-scope --memory-high）。默认值怎么算见 SESSION_MEMORY_MAX_MB。 */
   sessionMemoryHighMb: number;
   /** 内存硬上限，连 swap 一起封（--memory-max，--memory-swap-max 0）。 */
   sessionMemoryMaxMb: number;
@@ -59,6 +59,32 @@ export interface Limits {
   historyAlertEvents: number;
 }
 
+/** 法国 VPS 能分给会话的内存（MiB）：机器约 11.7G，给内核和系统留约 0.7G。 */
+export const FRANCE_USABLE_MB = 11 * 1024;
+/** 平台常驻的四个服务合计（MiB，2026-09-26 实测）：引擎 0.27G、后端 0.09G、Temporal 0.12G、库 0.13G。 */
+export const FRANCE_RESIDENT_MB = 600;
+/**
+ * 同一时刻最多几个会话在跑测试（内存的大头）：Fusion 的估算是法国同时约 3 张单，每张同一时间只一个模型写代码、跑测试
+ * （docs/decisions/0002-fusion.md「容量」；design 第四节的「同时跑测试 2–3 份」）。在线的会话可以更多（不跑测试时一个约
+ * 0.3G），但现在没有东西限着「同时跑测试的不超过 3 个」：真撞上了，每个会话照样被自己的硬上限封住，整机却可能不够——
+ * 账号池的并发（目录配置里的 maxConcurrency）加起来比 3 大时要一起看（specs/164-会话内存与交活测试/方案.md「还没做的」）。
+ */
+export const CONCURRENT_SESSIONS = 3;
+/**
+ * 会话（连同它跑的测试）的内存硬上限 =（能分的 - 常驻）÷ 同时跑测试的会话数 = (11264 - 600) ÷ 3 ≈ 3554 MiB。
+ * 原来的 2G（照旧仓估的）连 1 个测试进程加 Claude Code 都放不下：法国实测 fleet-dao 的测试开 1、2、3 个进程峰值约
+ * 1.6、2.5、3.2G，会话里的 Claude Code 约 0.27G（specs/164-会话内存与交活测试/）。
+ */
+export const SESSION_MEMORY_MAX_MB = Math.floor(
+  (FRANCE_USABLE_MB - FRANCE_RESIDENT_MB) / CONCURRENT_SESSIONS,
+);
+/**
+ * 软上限只比硬上限低 256 MiB：超了软上限、又没 swap 可换，内核就压着这个会话回收，半死不活（#160 在软 1.5G、硬 2G 之间
+ * 一动不动十几分钟）；夹缝留窄，真超了就撞硬上限被明确杀掉。测试开几个进程按它算（packages/conventions/src/test-run.ts：
+ * 3298 放得下 2 个）。
+ */
+export const SESSION_MEMORY_HIGH_MB = SESSION_MEMORY_MAX_MB - 256;
+
 export const DEFAULT_LIMITS: Readonly<Limits> = Object.freeze({
   maxParallelSubtasks: 3,
   maxSubtasks: 12,
@@ -76,8 +102,8 @@ export const DEFAULT_LIMITS: Readonly<Limits> = Object.freeze({
   routePollSeconds: 30,
   sessionMinutes: 90,
   stallSeconds: 360,
-  sessionMemoryHighMb: 1536,
-  sessionMemoryMaxMb: 2048,
+  sessionMemoryHighMb: SESSION_MEMORY_HIGH_MB,
+  sessionMemoryMaxMb: SESSION_MEMORY_MAX_MB,
   heartbeatSeconds: 120,
   ciMinutes: 40,
   testsMinutes: 30,

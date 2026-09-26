@@ -134,6 +134,31 @@ async function headOfRef(t: UserTree, ref: string): Promise<string> {
   return sha;
 }
 
+const BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
+
+/** 会话树里主线的引用名：refs/remotes/origin/<主线分支>，git 里写 origin/<主线分支> 就认得。 */
+export function mainlineRef(defaultBranch: string): string {
+  if (!BRANCH.test(defaultBranch) || defaultBranch.includes('..') || defaultBranch.endsWith('.lock')) {
+    throw new PortError('BAD_INPUT', `主线分支名不对：${defaultBranch}`, { retryable: false });
+  }
+  return `refs/remotes/origin/${defaultBranch}`;
+}
+
+/**
+ * 把「主线」钉在树里的一个主线提交上。树是从 bundle 建的、没有远端，git diff origin/main...HEAD 和 pnpm test:changed
+ * （和 origin/main 比改了什么，specs/164-会话内存与交活测试/）都靠这个引用；没有它 test:changed 明确报「认不出 origin/main」。
+ * 三个点的比法只看分叉点：钉得比分支并进来的主线旧，会把并进来的主线改动也算成这次改的（多跑测试，不会少跑），
+ * 所以引擎每次把新的主线取进树里都跟着重钉。sha 必须已经在树里（git 拒绝把引用指到没有的提交上，抛 GIT_FAILED）。
+ */
+export async function pinMainline(t: UserTree, defaultBranch: string, sha: string): Promise<void> {
+  assertSha(sha, '主线的提交');
+  await git(
+    t,
+    ['update-ref', mainlineRef(defaultBranch), sha],
+    `把 origin/${defaultBranch} 钉到 ${sha.slice(0, 7)}`,
+  );
+}
+
 /** 仓里有没有这个提交（换检出之前先看：已经有了就不用再从镜像取，取了反而是空包）。 */
 export async function hasCommit(t: UserTree, sha: string): Promise<boolean> {
   assertSha(sha, '提交');

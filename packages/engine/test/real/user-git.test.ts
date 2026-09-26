@@ -16,6 +16,8 @@ import {
   fastForward,
   fetchBundle,
   headOf,
+  mainlineRef,
+  pinMainline,
   readFileAs,
   type UserTree,
   uncommittedTracked,
@@ -147,6 +149,36 @@ describe('会话目录里的 git', { timeout: 60_000 }, () => {
     execFileSync('git', ['add', '.'], { cwd: u.dir });
     execFileSync('git', ['commit', '-q', '-m', 'local'], { cwd: u.dir, env: ENV });
     expect(await fastForward(u, m.bundle(next, m.head), 'refs/fleet/export/0', next)).toBe('diverged');
+  });
+
+  it('钉主线：origin/main 指到给的主线提交，git diff origin/main...HEAD 只列分支自己的改动（pnpm test:changed 靠它）', async () => {
+    const m = mirror();
+    const t = tree('work');
+    await fetchBundle(t, m.bundle(m.head), 'refs/fleet/export/0');
+    await checkoutBranch(t, 'fleet/12-a', m.head);
+    expect(() => sh(t.dir, 'rev-parse', '--verify', '--quiet', 'origin/main')).toThrow();
+    await pinMainline(t, 'main', m.head);
+    expect(sh(t.dir, 'rev-parse', 'origin/main')).toBe(m.head);
+    expect(mainlineRef('main')).toBe('refs/remotes/origin/main');
+
+    writeFileSync(join(t.dir, 'b.ts'), 'export const b = 1;\n');
+    execFileSync('git', ['add', '.'], { cwd: t.dir });
+    execFileSync('git', ['commit', '-q', '-m', 'add b'], { cwd: t.dir, env: ENV });
+    expect(sh(t.dir, 'diff', '--name-only', 'origin/main...HEAD')).toBe('b.ts');
+  });
+
+  it('钉主线：提交不在树里、提交号不对、分支名不对都明确报错，原来钉的不动', async () => {
+    const m = mirror();
+    const t = tree('work');
+    await fetchBundle(t, m.bundle(m.head), 'refs/fleet/export/0');
+    await checkoutBranch(t, 'fleet/12-a', m.head);
+    await pinMainline(t, 'main', m.head);
+    await expect(pinMainline(t, 'main', 'f'.repeat(40))).rejects.toMatchObject({ code: 'GIT_FAILED' });
+    await expect(pinMainline(t, 'main', 'HEAD')).rejects.toMatchObject({ code: 'BAD_INPUT' });
+    for (const bad of ['../evil', 'main..x', '-main', 'a b', 'x.lock', '']) {
+      await expect(pinMainline(t, bad, m.head), bad).rejects.toMatchObject({ code: 'BAD_INPUT' });
+    }
+    expect(sh(t.dir, 'rev-parse', 'origin/main')).toBe(m.head);
   });
 
   it('只读检出：分离头、清掉上一轮留下的文件', async () => {

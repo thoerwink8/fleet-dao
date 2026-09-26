@@ -194,6 +194,8 @@ export interface AgentSession {
   subtaskId?: string | undefined;
   stage: StageKind;
   repoId: string;
+  /** 仓的测试命令（repos.test_command）：交活核对只认会话里跑过它，退回时写明要跑哪一条。 */
+  testCommand: string;
   /** 引擎给这次会话建了分支才有。 */
   branch?: string | undefined;
   /** 做完标准（需求上的 acceptance）。 */
@@ -211,11 +213,16 @@ export interface PullRequestRecord {
   checks: 'success' | 'failure' | 'pending' | 'none';
 }
 
-/** 会话里跑过的一次测试：从 kind=test 的进度里读出来的，载荷带布尔 passed 的才算（读不出结果的不算证据）。 */
+/**
+ * 会话里跑过的一次测试：从 kind=test 的进度里读出来的。passed 为 null 是结果认不出（接了管道、放了后台……，
+ * 插头写明了原因），照样列出来：交活核对以最后一次为准，认不出的那一次不能被它前面一次「通过」顶掉。
+ */
 export interface TestRunRecord {
   at: string;
-  passed: boolean;
+  passed: boolean | null;
   command?: string | undefined;
+  /** passed 为 null 时：为什么认不出。 */
+  unknownBecause?: string | undefined;
 }
 
 export type HistoryItem = z.infer<typeof HistoryResponse>['items'][number];

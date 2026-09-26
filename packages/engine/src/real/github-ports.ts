@@ -23,6 +23,7 @@ import {
   isAncestor,
   isMergeChainOnto,
   mergeInto,
+  pinMainline,
   type UserTree,
   uncommittedPatch,
   uncommittedTracked,
@@ -249,6 +250,8 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
         );
         await fetchBundle(t, bytes, ref);
       }
+      // 最新主线已经在树里：先钉上再并（并出冲突退回会话时，会话照着 git merge 它，pnpm test:changed 也和它比）
+      await pinMainline(t, input.repo.defaultBranch, main.head);
       if (!(await isAncestor(t, main.head, head))) {
         const merged = await mergeInto(t, main.head);
         if ('conflict' in merged) {
@@ -373,6 +376,8 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
             { retryable: false },
           );
         }
+        // 并进来的主线跟着新头进了树：重钉，接着返工时 pnpm test:changed 只算分支自己的改动
+        await pinMainline(t, input.repo.defaultBranch, r.mainline);
       }
       return { state: 'clean', head: r.head, conflictFiles: [] };
     },

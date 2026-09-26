@@ -55,6 +55,7 @@ import {
 } from '@fleet-dao/db';
 import type { ProgressKind, Step } from '@fleet-dao/shared';
 import { and, asc, countDistinct, desc, eq, gt, gte, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
+import { testRunOf } from './done-check.ts';
 import {
   feishuMessageKey,
   feishuReviseKey,
@@ -93,7 +94,6 @@ import {
   type RunPlan,
   type SettingRecord,
   type Store,
-  type TestRunRecord,
   type TimelineRecord,
   type User,
 } from './ports.ts';
@@ -1021,9 +1021,10 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
     async getAgentSession(runId) {
       if (!isUuid(runId)) return null;
       const [row] = await db
-        .select({ run: sessionRuns, task: tasks })
+        .select({ run: sessionRuns, task: tasks, testCommand: repos.testCommand })
         .from(sessionRuns)
         .innerJoin(tasks, eq(tasks.id, sessionRuns.taskId))
+        .innerJoin(repos, eq(repos.id, tasks.repoId))
         .where(eq(sessionRuns.id, runId));
       if (!row) return null;
       return {
@@ -1032,6 +1033,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         subtaskId: opt(row.run.subtaskId),
         stage: row.run.stage,
         repoId: row.task.repoId,
+        testCommand: row.testCommand,
         branch: opt(row.run.branch),
         acceptance: row.task.acceptance,
         endedAt: isoOpt(row.run.endedAt),
@@ -1094,17 +1096,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         .from(progressEvents)
         .where(and(eq(progressEvents.runId, runId), eq(progressEvents.kind, 'test')))
         .orderBy(asc(progressEvents.at), asc(progressEvents.id));
-      return rows.flatMap((r): TestRunRecord[] => {
-        const payload = r.payload as { passed?: unknown; command?: unknown } | null;
-        if (typeof payload?.passed !== 'boolean') return [];
-        return [
-          {
-            at: iso(r.at),
-            passed: payload.passed,
-            command: typeof payload.command === 'string' ? payload.command : undefined,
-          },
-        ];
-      });
+      return rows.map((r) => testRunOf(iso(r.at), r.payload));
     },
     async claimCommand({ runId, key, action, takeOverBefore }): Promise<CommandClaim> {
       const k = commandKey(runId, key);

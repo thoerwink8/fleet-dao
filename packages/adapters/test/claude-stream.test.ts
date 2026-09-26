@@ -10,6 +10,7 @@ import {
   sameModel,
   versionAtLeast,
 } from '../src/claude-code/stream.ts';
+import { invokesTestCommand } from '../src/stream-kit.ts';
 import type { FilePayload, SayPayload, TestPayload, ToolPayload } from '../src/types.ts';
 import { fixtureFrames, fixtureInit, fixtureLines } from './helpers.ts';
 
@@ -414,6 +415,63 @@ describe('测试结果只认可信的退出码', () => {
     'pnpm vitest run -t "a | b; c"',
   ])('%j → 退出码可信', (command) => {
     expect(exitStatusUntrusted(command)).toBeUndefined();
+  });
+});
+
+describe('哪些命令算「跑了测试」：测试命令要在某一段命令的开头', () => {
+  it.each([
+    'pnpm test:changed',
+    'pnpm test:changed 2>&1',
+    'pnpm test:changed &> t.log',
+    'cd packages/api && pnpm test:changed',
+    'set -o pipefail; pnpm test:changed | tail -5',
+    'CI=1 FOO=bar pnpm test:changed',
+    'timeout 600 pnpm test:changed',
+    '(cd /repo && pnpm test:changed)',
+    'pnpm test:changed && echo PASS',
+  ])('%j → 跑了', (command) => {
+    expect(invokesTestCommand(command, 'pnpm test:changed')).toBe(true);
+  });
+
+  it.each([
+    // 会话常干的：翻文档、找脚本名——原先按「命令里含测试命令」算，会被记成跑了测试、而且通过
+    'grep -n "pnpm test:changed" AGENTS.md',
+    'grep -rn pnpm test:changed docs',
+    "echo 'pnpm test:changed'",
+    'cat package.json | grep test:changed',
+    'pnpm test:changed2',
+    'pnpm test',
+    'pnpm check',
+  ])('%j → 没跑', (command) => {
+    expect(invokesTestCommand(command, 'pnpm test:changed')).toBe(false);
+  });
+
+  it('grep 出测试命令不记成一次测试（交活核对就不会把它当成跑过、通过）', () => {
+    const { cwd } = fixtureInit('cc-haiku-bash');
+    const reader = new ClaudeStreamReader({ runId: 'r', cwd, testCommands: ['pnpm test:changed'] });
+    const events = fixtureLines('claude-code', 'cc-haiku-bash')
+      .map((line) => {
+        const frame = JSON.parse(line) as {
+          type?: string;
+          message?: { content?: Record<string, unknown>[] };
+        };
+        const block = frame.message?.content?.[0];
+        if (frame.type === 'assistant' && block?.type === 'tool_use') {
+          block.input = { command: 'grep -n "pnpm test:changed" AGENTS.md' };
+        }
+        return JSON.stringify(frame);
+      })
+      .flatMap((line) => reader.read(line).events);
+    expect(ofKind<TestPayload>(events, 'test')).toEqual([]);
+  });
+
+  it('仓的测试命令本身是几条串起来的：照原来按「含」认，不拆', () => {
+    expect(invokesTestCommand('pnpm build && pnpm test', 'pnpm build && pnpm test')).toBe(true);
+    expect(invokesTestCommand('pnpm build', 'pnpm build && pnpm test')).toBe(false);
+  });
+
+  it('测试命令是空的：什么都不算', () => {
+    expect(invokesTestCommand('pnpm test', '  ')).toBe(false);
   });
 });
 

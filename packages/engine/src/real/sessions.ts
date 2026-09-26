@@ -100,6 +100,7 @@ import {
   hasRepo,
   headOf,
   headOfIncoming,
+  pinMainline,
   readFileAs,
   type UserTree,
   uncommittedTracked,
@@ -403,6 +404,9 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
       const { bytes, ref } = await bundleFromMirror(gh, deps.tmpDir, repoRef, base, [], signal);
       await fetchBundle(t, bytes, ref, { identity });
       await checkoutBranch(t, branch, base);
+      // 第一轮的 base 就是建树时记下的主线头（createWorktree 的 baseSha）。树丢了、从返工时的分支头重建的，钉的是分支头：
+      // test:changed 只算这一轮的改动——前几轮的在那几轮的会话里测过，CI 还会全测。
+      await pinMainline(t, task.repo.defaultBranch, base);
       return;
     }
     // 分诊、需求文档、方案、审查：检出副本。续同一个会话（resume / fork）不动它；开新会话从干净的检出起。
@@ -430,6 +434,16 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
       await fetchBundle(t, bytes, ref, { identity });
     }
     await checkoutDetached(t, sha);
+    // 分诊、文档、方案检出的就是主线头；审查检出的是 PR 的头，主线另取进来再钉（审查的提示词让它 git diff origin/<主线>...HEAD）。
+    let mainline = sha;
+    if (kind === 'review') {
+      mainline = (await mapped(() => gh.fetchMainline({ repo: repoRef, signal }))).head;
+      if (!(await hasCommit(t, mainline))) {
+        const { bytes, ref } = await bundleFromMirror(gh, deps.tmpDir, repoRef, mainline, [sha], signal);
+        await fetchBundle(t, bytes, ref);
+      }
+    }
+    await pinMainline(t, task.repo.defaultBranch, mainline);
   }
 
   async function relayFacts(

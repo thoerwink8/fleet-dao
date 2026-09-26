@@ -91,8 +91,8 @@ describe('子任务工作流', { timeout: 60_000 }, () => {
       expect(launch.pathPrepend).toEqual(['/repo/packages/cli/bin']);
       expect(launch.fleetApi).toBe('http://127.0.0.1:8788');
       expect(stallSeconds).toBe(360);
-      // 内存上限连 swap 一起封。
-      expect(resources).toEqual({ memoryHighMb: 1536, memoryMaxMb: 2048, swapMaxMb: 0 });
+      // 内存上限连 swap 一起封（默认值按法国实测容量算，见 src/limits.ts）。
+      expect(resources).toEqual({ memoryHighMb: 3298, memoryMaxMb: 3554, swapMaxMb: 0 });
     }
     // 写码会话带上起会话前的头（交付判据用）；审查会话不带。
     expect(starts.map((c) => c.input.baseHead)).toEqual(['base', undefined]);
