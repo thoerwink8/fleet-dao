@@ -191,7 +191,7 @@ reclaude 按用户记设备：组织写在家里的 `~/.reclaude/device.json`，
 - **pilot 不登录 reclaude**（创始人 2026-09-26）：创始人在 VPS 上不开会话，而 reclaude 一个账户最多挂 4 台设备、法国只占 1 台，给了会话用户。reclaude 二进制照装，将来真要在 pilot 下开会话，得先腾出一台设备再登录。
 - 家里不预装任何凭据。第一次要 root 帮一件事（以 pilot 自己的身份写，家里不留 root 属主的文件）：放创始人的 ssh 公钥：`sudo -iu pilot sh -c 'umask 077; mkdir -p ~/.ssh; cat >> ~/.ssh/authorized_keys' < <创始人的公钥>.pub`
 - Mirasim 的 ssh 远程模式在 pilot 家里自己装服务端：`~/.mirasim-remote/servers/<版本>/`（自带 node 和 node-pty，不用系统的 node），`current` 指在用的那版，`run/` 下是进程号、日志和 unix socket，数据在 `~/.mirasim/`；桌面端经 ssh 把本机一个端口转到那个 socket。服务器这头要的：公钥登得进来、sshd 允许转发到 unix socket（`AllowStreamLocalForwarding`，Ubuntu 默认开）、`curl`（直接下服务端包，下不了由桌面端经 scp 传）、`tar`、`gzip`、`sha256sum`。不需要系统的 node，也不需要另起一个 systemd 管的 mirasim-server。它按登录 shell（`$SHELL -ilc`）取 PATH，Ubuntu 默认的 `~/.profile` 把 `~/.local/bin` 加了进去，所以找得到 reclaude。
-- 经 Mirasim 起 Claude 会话、启动命令写 `reclaude` 的，先在 pilot 的 `~/.local/bin` 装 ai-gateway-stack 仓的 reclaude-mirasim 启动器（该仓 `docs/RECLAUDE-IN-MIRASIM.md` 第四节）：不装的话 Mirasim 把自己网关的地址塞给 claude，reclaude 回 non_cc_client 并上报，攒多了设备会被解绑。本仓不装它。
+- 经 Mirasim 起 Claude 会话、启动命令写 `reclaude` 的，先在 pilot 的 `~/.local/bin` 装 ai-gateway-stack 仓的 reclaude-mirasim 启动器（装法与原理见 `docs/reclaude-in-mirasim.md`）：不装的话 Mirasim 把自己网关的地址塞给 claude，reclaude 回 non_cc_client 并上报，攒多了设备会被解绑。本仓不装它。
 - 已知的口子：桌面端起远端服务端时把 `MIRASIM_SECRET_KEY` 写在 ssh 执行的命令行里，那几秒里本机别的用户（包括会话用户）用 `ps` 看得到；要堵得给 `/proc` 加 `hidepid`，还没做。
 - 撤掉：`userdel -r pilot`。家里是创始人的活和登录态，删之前先问人。
 
