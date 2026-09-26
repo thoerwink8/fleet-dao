@@ -7,10 +7,12 @@ import type { SessionUser } from '@fleet-dao/adapters';
 import { createDb, type Db } from '@fleet-dao/db';
 import { createGitHub, pgLedger, pgLocker } from '@fleet-dao/github';
 import type { EngineJobs } from '../activities.ts';
+import type { JevPort } from '../failure/jev.ts';
 import type { EnginePorts } from '../ports.ts';
 import { scopeExec, type UserExec } from './exec.ts';
 import { createGitHubPorts, type EngineGitHub } from './github-ports.ts';
 import { githubReconcileJob, registerEngineJobs } from './github-reconcile.ts';
+import { engineJevFromEnv } from './jev-port.ts';
 import { createSessionPorts, DEFAULT_FORK_MAX_CONTEXT_TOKENS, type SessionPortsDeps } from './sessions.ts';
 import { createStorePorts } from './store-ports.ts';
 import { DEFAULT_WORK_ROOT, helperWorkTrees, type WorkTrees } from './worktrees.ts';
@@ -26,6 +28,8 @@ export interface RealPortsDeps {
   machine: string;
   claudeCommand(user: SessionUser): string[];
   forkMaxContextTokens?: number;
+  /** 错误分流、停滞预判问 Jev 用（real/jev-port.ts）；不给就不问，照规则走。 */
+  jev?: JevPort;
   /** 以下测试用。 */
   session?: Partial<
     Pick<
@@ -77,6 +81,7 @@ export function createRealPorts(deps: RealPortsDeps): RealPorts {
     claudeCommand: deps.claudeCommand,
     ...(deps.forkMaxContextTokens === undefined ? {} : { forkMaxContextTokens: deps.forkMaxContextTokens }),
     ...(deps.log ? { log: deps.log } : {}),
+    ...(deps.jev ? { jev: deps.jev } : {}),
     ...deps.session,
   });
   const ports: EnginePorts = {
@@ -138,7 +143,10 @@ export function realPortsConfigFromEnv(env: Readonly<Record<string, string | und
   return { machine, workRoot, stateDir, claudeBin, forkMaxContextTokens };
 }
 
-/** 生产：按环境变量装真端口，连同定时任务要的东西（jobs）和登记定时任务（registerJobs）。返回的 close 在工人停下后关库连接。 */
+/**
+ * 生产：按环境变量装真端口，连同定时任务要的东西（jobs）和起来时的登记（registerJobs：定时任务、判断题）。
+ * 返回的 close 在工人停下后关库连接。
+ */
 export function realPortsFromEnv(
   env: Readonly<Record<string, string | undefined>> = process.env,
 ): RealPorts & { jobs: EngineJobs; registerJobs(): Promise<void>; close(): Promise<void> } {
@@ -149,8 +157,12 @@ export function realPortsFromEnv(
     locker: pgLocker(db),
     env: env as Record<string, string | undefined>,
   });
+  // 判断题：起来时读一遍 jev.json、建一遍后端、登记两道题（registerJobs）；之后每次问都现找一遍（改了配置、调度台换了
+  // 判断路由不用重启，和 /healthz 的 judge 项同一个判法）。默认位置上没有 jev.json 才算没接、不问；别的读不成都报错。
+  const jev = engineJevFromEnv(db, env);
   const real = createRealPorts({
     db,
+    jev: jev.port,
     gh,
     trees: helperWorkTrees({ root: config.workRoot }),
     exec: scopeExec(),
@@ -163,5 +175,16 @@ export function realPortsFromEnv(
   const jobs: EngineJobs = {
     githubReconcile: githubReconcileJob({ db, gh }),
   };
-  return { ...real, jobs, registerJobs: () => registerEngineJobs(db), close };
+  return {
+    ...real,
+    jobs,
+    registerJobs: async () => {
+      await registerEngineJobs(db);
+      // 判断题起不来、登记不上只报错（error 级日志 + /healthz 的 judge 项红），不挡引擎接活：照规则走一样能干。
+      const registered = await jev.register();
+      if (registered.level === 'error') console.error(registered.message);
+      else console.info(registered.message);
+    },
+    close,
+  };
 }

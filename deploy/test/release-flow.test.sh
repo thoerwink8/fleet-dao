@@ -310,6 +310,11 @@ check "待开单积压恰好在发版时跨过时限：不算这一版的错" "$
 check "积压：没有红" "${#REDS[@]}" 0
 check "积压：记成待处理、写明不退回" "$(printf '%s\n' "${PENDING[@]}" | grep -c 'draft_backlog 不好.*和换没换版无关，不退回')" 1
 reset
+compare_api_items "$(printf 'database\tok\t\njudge\tok\t\n')" \
+  "$(printf 'database\tok\t\njudge\tbad\t判断题最近一次调用没成\n')" >/dev/null
+check "判断题恰好在发版时调用没成（跟着上游变红）：不算这一版的错" "$?" 0
+check "判断题：记成待处理、写明不退回" "$(printf '%s\n' "${PENDING[@]}" | grep -c 'judge 不好.*和换没换版无关，不退回')" 1
+reset
 compare_api_items "$before_items" \
   "$(printf 'database\tbad\t连不上\ndraft_backlog\tok\t\ntemporal\tbad\t没接上\n')" >/dev/null
 check "库切之前好、切之后坏：算这一版的错" "$?" 1

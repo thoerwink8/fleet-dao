@@ -33,6 +33,8 @@ export interface AnswerSample {
   /** 这次问的钉死模型（后端报的实际版本在 model_version 列）。 */
   model: string;
   backend: string;
+  /** 调度台判断阶段的哪条路由（routes.id）；调用方没说就没有。 */
+  route?: string;
   evidence: Record<string, FieldDigest>;
   /** 调用方给的、能复原原文的引用，例如 { issue: 'owner/repo#12', updatedAt: '…' }（库收不下的字已换成 U+FFFD）。 */
   ref?: unknown;
@@ -203,6 +205,41 @@ export async function usdSpentSince(db: Db, since: Date): Promise<number> {
   const usd = Number(row?.usd);
   if (!Number.isFinite(usd)) throw new Error(`今天花了多少没查成：读到 ${String(row?.usd)}`);
   return usd;
+}
+
+/** 一次真发给后端的调用（jev_answers 的一行）。 */
+export interface SentCall {
+  answerId: number;
+  questionId: string;
+  at: Date;
+  /** 后端答了（把握不够也算答了）。 */
+  ok: boolean;
+  /** 没成的原因（verdict.ts 的 NotJudgedReason）；成了是 null。 */
+  reason: string | null;
+  /** 没成时的原文（截过、脱过敏）。 */
+  detail: string | null;
+}
+
+/**
+ * 最近一次真发给后端的调用（生产和考试都算）。本地就拦下、没发出去的（停用、到了上限、证据不全、库出错）不算；
+ * 只补记花费的那一行（unrecorded）说明的是库出了问题、不是调用成没成，也不算。/healthz 的 judge 项看它：没成就报红。
+ */
+export async function lastSentCall(db: Db): Promise<SentCall | undefined> {
+  const notSent = [...LOCAL_REASONS, 'unrecorded'] as NotJudgedReason[];
+  const [row] = await db
+    .select({
+      answerId: jevAnswers.id,
+      questionId: jevAnswers.questionId,
+      at: jevAnswers.askedAt,
+      ok: jevAnswers.ok,
+      reason: jevAnswers.failReason,
+      detail: sql<string | null>`${jevAnswers.sample}->>'detail'`,
+    })
+    .from(jevAnswers)
+    .where(or(isNull(jevAnswers.failReason), notInArray(jevAnswers.failReason, notSent)))
+    .orderBy(desc(jevAnswers.askedAt), desc(jevAnswers.id))
+    .limit(1);
+  return row;
 }
 
 /** count(*) 一定回一行；没回就是没查成，不当成 0。 */

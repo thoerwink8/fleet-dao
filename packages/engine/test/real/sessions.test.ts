@@ -16,6 +16,7 @@ import {
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { JevAskContext, JevPort, JevQuestion, JevReply } from '../../src/failure/jev.ts';
 import type { LaunchSessionInput, PortContext, SessionEnd } from '../../src/ports.ts';
 import { localExec } from '../../src/real/exec.ts';
 import { createSessionPorts } from '../../src/real/sessions.ts';
@@ -79,7 +80,13 @@ function ctx(): PortContext & { beats: number } {
 
 function setup(
   script: (spec: Parameters<ReturnType<typeof fakeRun>['run']>[0], n: number) => FakeRunScript,
-  options: { spawnTimeoutMs?: number; gh?: typeof m.gh } = {},
+  options: {
+    spawnTimeoutMs?: number;
+    gh?: typeof m.gh;
+    jev?: JevPort;
+    jevTimeoutMs?: number;
+    stallJevEveryMs?: number;
+  } = {},
 ) {
   const fake = fakeRun(script);
   const trees = fakeTrees(join(root, 'work'));
@@ -102,6 +109,9 @@ function setup(
     flushMs: 5,
     spawnTimeoutMs: options.spawnTimeoutMs ?? 5000,
     stallPolicy: { noProgressSeconds: 1 },
+    ...(options.jev ? { jev: options.jev } : {}),
+    ...(options.jevTimeoutMs === undefined ? {} : { jevTimeoutMs: options.jevTimeoutMs }),
+    ...(options.stallJevEveryMs === undefined ? {} : { stallJevEveryMs: options.stallJevEveryMs }),
     log: () => {},
   });
   return { ports, fake, trees, scope };
@@ -729,5 +739,132 @@ describe('收孤儿', () => {
     expect(scope.calls().filter((c) => c.action === 'stop')).toHaveLength(2);
     process.env.FAKE_SCOPE_LIST_EXIT = '1';
     await expect(ports.reapOrphanSessions()).rejects.toThrow('查不了上一轮留下的会话');
+  });
+});
+
+describe('Jev（判断题）：只在看守活动里问', () => {
+  /** 记下每一问的假 Jev；answer 抛错、永不返回都照原样。 */
+  function fakeJev(answer: (q: JevQuestion) => JevReply | Promise<JevReply>) {
+    const asked: { question: JevQuestion; ctx: JevAskContext | undefined }[] = [];
+    const port: JevPort = {
+      async ask(question, ctx) {
+        asked.push({ question, ctx });
+        return (await answer(question)) as never;
+      },
+    };
+    return { port, asked };
+  }
+  /** 执行体报错收场，原文是规则表里没有的一句。 */
+  const oddFailure = (): FakeRunScript => ({
+    result: { isError: true, terminalReason: 'api_error', text: '上游回了一句谁也没见过的话 zq-17' },
+    exitCode: 1,
+  });
+  const shadowSwap: JevReply = {
+    asked: true,
+    ok: true,
+    choice: 'swapRoute',
+    confidence: 0.9,
+    shadow: true,
+    modelVersion: 'jev-1.13.0',
+  };
+
+  it('规则认不出的失败：问一次（带上是哪次会话、哪个任务的哪一步），回答随结局交给工作流；只记不拦的不改路由的账', async () => {
+    const jev = fakeJev(() => shadowSwap);
+    const { ports } = setup(oddFailure, { jev: jev.port });
+    const input = launch();
+    const { end } = await runOnce(ports, input);
+    expect(end.outcome).toBe('failed');
+    expect(jev.asked).toHaveLength(1);
+    expect(jev.asked[0]?.question.questionId).toBe('failure-triage');
+    expect(jev.asked[0]?.question.sample).toContain('zq-17');
+    expect(jev.asked[0]?.ctx).toEqual({
+      subject: `run:${input.runId}`,
+      about: `任务 ${taskId} 的 execute 阶段（会话失败）`,
+    });
+    expect(end.failure?.jev).toEqual(shadowSwap);
+    // 认不出的失败照旧算这条路由的账（问没问 Jev 都一样）。
+    expect((await runRow(input.runId))?.routeOutcome).toBe('fail');
+  });
+
+  it('规则认得出的失败（设备被撤销）：不问，结局里也没有 Jev 的回答', async () => {
+    const jev = fakeJev(() => {
+      throw new Error('不该问');
+    });
+    const { ports } = setup(
+      () => ({
+        result: { isError: true, terminalReason: 'api_error', apiErrorStatus: 401, text: 'device_revoked' },
+        apiError: { code: 'device_revoked', text: '401 device_revoked' },
+        exitCode: 1,
+      }),
+      { jev: jev.port },
+    );
+    const { end } = await runOnce(ports, launch());
+    expect(end.outcome).toBe('failed');
+    expect(jev.asked).toHaveLength(0);
+    expect(end.failure?.jev).toBeUndefined();
+  });
+
+  it('Jev 卡住、抛错：当没判出来，结局照常交回（带着没判出来的原因）', async () => {
+    const hanging = fakeJev(() => new Promise<JevReply>(() => {}));
+    const slow = setup(oddFailure, { jev: hanging.port, jevTimeoutMs: 50 });
+    const a = await runOnce(slow.ports, launch());
+    expect(a.end.outcome).toBe('failed');
+    expect(a.end.failure?.jev).toEqual({ asked: true, ok: false, reason: '超过 50 毫秒没回' });
+
+    const throwing = fakeJev(() => {
+      throw new Error('连不上');
+    });
+    const broken = setup(oddFailure, { jev: throwing.port });
+    const b = await runOnce(broken.ports, launch());
+    expect(b.end.failure?.jev).toEqual({ asked: true, ok: false, reason: '调用出错：连不上' });
+  });
+
+  /** 有动静、没推进、看不出在重复（拿不准）：跑两条不同的命令，然后干等。 */
+  const unsureStall = (until: (signal: AbortSignal) => Promise<void>) => (): FakeRunScript => ({
+    act: async ({ emit, signal }) => {
+      for (const [i, summary] of ['pnpm test', 'pnpm lint'].entries()) {
+        emit('tool', { phase: 'start', toolUseId: `u${i}`, name: 'Bash', action: 'run', summary });
+        emit('tool', { phase: 'end', toolUseId: `u${i}`, name: 'Bash', action: 'run', summary, ok: false });
+      }
+      await until(signal);
+    },
+  });
+  const waitFor = async (cond: () => boolean, signal: AbortSignal, ms = 8000) => {
+    const end = Date.now() + ms;
+    while (!cond() && !signal.aborted && Date.now() < end) await new Promise((r) => setTimeout(r, 20));
+  };
+
+  it('停滞拿不准：问 Jev；只记不拦的「在绕圈」不停会话，同一个会话隔一阵才再问', async () => {
+    const jev = fakeJev(() => ({ asked: true, ok: true, choice: 'looping', confidence: 0.9, shadow: true }));
+    const { ports } = setup(
+      unsureStall(async (signal) => {
+        await waitFor(() => jev.asked.length > 0, signal);
+        // 问过之后再多跑几轮停滞判断（每 30 毫秒一轮）：不该停、也不该再问。
+        await new Promise((r) => setTimeout(r, 300));
+      }),
+      { jev: jev.port },
+    );
+    const input = launch();
+    const { end } = await runOnce(ports, input);
+    expect(jev.asked).toHaveLength(1);
+    expect(jev.asked[0]?.question.questionId).toBe('stall-predict');
+    expect(jev.asked[0]?.ctx).toEqual({
+      subject: `run:${input.runId}`,
+      about: `任务 ${taskId} 的 execute 阶段（会话没推进）`,
+    });
+    expect(end.outcome).not.toBe('stalled');
+  });
+
+  it('停滞拿不准、Jev 在真拦且有把握判「在绕圈」：停掉会话，结局 stalled（规则 LJ）', async () => {
+    const jev = fakeJev(() => ({ asked: true, ok: true, choice: 'looping', confidence: 0.9, shadow: false }));
+    const { ports } = setup(
+      unsureStall(async (signal) => {
+        await Promise.race([untilAborted(signal), new Promise((r) => setTimeout(r, 10_000))]);
+      }),
+      { jev: jev.port },
+    );
+    const { end } = await runOnce(ports, launch());
+    expect(end.outcome).toBe('stalled');
+    expect(end.failure?.message).toMatch(/^LJ：/);
   });
 });

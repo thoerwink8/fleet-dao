@@ -53,6 +53,18 @@ test('「未接」的项：不算不在线，整体照样绿，写明未接和�
   assert.equal(byKey(w).draft_opener.ok, false);
 });
 
+test('判断题（judge）：显示成「判断题」；没配是「未接」不算坏，调用没成照实报红', () => {
+  const notWired = { ok: true, status: 'not_wired', message: '这台机器没配判断题' };
+  const v = judge({ status: 200, body: report(true, { ...allOk, judge: notWired }) });
+  assert.equal(v.ok, true);
+  assert.equal(byKey(v).judge.label, '判断题');
+  assert.equal(byKey(v).judge.reason, '未接：这台机器没配判断题');
+  const failing = { ok: false, code: 'judge_failing', message: '判断题最近一次调用没成' };
+  const w = judge({ status: 503, body: report(false, { ...allOk, judge: failing }) });
+  assert.equal(w.ok, false);
+  assert.equal(byKey(w).judge.reason, '判断题最近一次调用没成（judge_failing）');
+});
+
 test('连不上后端：三项都红，说出原因', () => {
   const v = judge({ error: 'Failed to fetch' });
   assert.equal(v.ok, false);

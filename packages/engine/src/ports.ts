@@ -27,6 +27,8 @@ import type { MergeOutcome, TestResult } from './decisions/merge.ts';
 import type { PlannedSubtask } from './decisions/plan.ts';
 import type { TriageVerdict } from './decisions/triage.ts';
 import type { CiResult, Feedback, ReviewResult, SyncResult } from './decisions/verify.ts';
+import type { JevReply } from './failure/jev.ts';
+import type { TriageChoice } from './failure/types.ts';
 
 export type {
   CiResult,
@@ -224,6 +226,11 @@ export interface SessionEnd {
     /** 会话跑在哪台机器（给人看的名字）、哪个会话用户：只有人能修的（重新登录）要写清去哪修。 */
     machine?: string;
     runAsUser?: string;
+    /**
+     * 看守活动问过 Jev 才有（规则认不出的失败）：工作流的失败分流带着它判，不在工作流里再问。
+     * 只记不拦、把握不够、没判出来的，分流照兜底梯走，只在原因里写一句。
+     */
+    jev?: JevReply<TriageChoice>;
   };
   /** 这一次会话的 token（执行体终帧报的就是这一次的）。 */
   usage?: { inputTokens?: number; outputTokens?: number };
