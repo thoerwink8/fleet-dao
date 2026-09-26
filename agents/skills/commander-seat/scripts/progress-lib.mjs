@@ -498,13 +498,32 @@ export function parsePort(argv, env) {
   return Number.isInteger(n) && n >= 0 && n <= 65535 ? n : `端口要是 0–65535 的整数，「${raw}」不行`;
 }
 
-async function isOurs(port) {
+export async function isOurs(port) {
   try {
     const r = await fetch(`http://127.0.0.1:${port}/api/ping`, { signal: AbortSignal.timeout(2000) });
     return r.ok && (await r.json()).app === APP_ID;
   } catch {
     return false;
   }
+}
+
+/**
+ * 写完进度顺手看页面还在不在：不在就拉起来（2026-09-27 查断链：页面进程退出后没人拉，数据照写、页面打不开，
+ * 创始人看不到也没人知道）。isUp(port) 查是不是我们的页面在听，launch() 起一个脱离的服务进程。
+ * 返回 { state: 'up' | 'started' } 或 { state: 'failed', why }：拉不起来要明说，不当没事。
+ */
+export async function ensureServer({ port, isUp = isOurs, launch, waitMs = 3000, stepMs = 200 }) {
+  if (await isUp(port)) return { state: 'up' };
+  try {
+    launch();
+  } catch (e) {
+    return { state: 'failed', why: `起服务进程没成：${e instanceof Error ? e.message : String(e)}` };
+  }
+  for (let waited = 0; waited < waitMs; waited += stepMs) {
+    await new Promise((r) => setTimeout(r, stepMs));
+    if (await isUp(port)) return { state: 'started' };
+  }
+  return { state: 'failed', why: `起了服务进程，等了 ${waitMs / 1000} 秒端口 ${port} 上还不是进度页` };
 }
 
 /**

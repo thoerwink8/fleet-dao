@@ -64,6 +64,14 @@ interface ProgressLib {
     err: (text: string) => void;
   }): Promise<{ code: number; server?: Server; port?: number }>;
   parsePort(argv: string[], env: Record<string, string | undefined>): number | string;
+  isOurs(port: number): Promise<boolean>;
+  ensureServer(opts: {
+    port: number;
+    isUp?: (port: number) => Promise<boolean>;
+    launch: () => void;
+    waitMs?: number;
+    stepMs?: number;
+  }): Promise<{ state: 'up' | 'started' } | { state: 'failed'; why: string }>;
 }
 interface Claim {
   id: number;
@@ -359,7 +367,7 @@ describe('写锁：同一个项目同时两条命令，一条都不丢', () => {
   it('六条 p.mjs 同时往一个项目里加动态：都成功，六条都在', async () => {
     const home = tempHome();
     p(home, 'demo', 'init');
-    const env = { ...process.env, HOME: home, USERPROFILE: home };
+    const env = { ...process.env, HOME: home, USERPROFILE: home, FLEET_PROGRESS_AUTOSTART: '0' };
     const codes = await Promise.all(
       [0, 1, 2, 3, 4, 5].map(
         (i) =>
@@ -489,10 +497,96 @@ describe('页面服务', () => {
   });
 });
 
+describe('写进度顺手拉起页面（页面进程退出后没人拉，数据照写、页面打不开）', () => {
+  it('页面在：不起新的', async () => {
+    let launched = 0;
+    const r = await progress.ensureServer({ port: 1, isUp: async () => true, launch: () => launched++ });
+    expect(r).toEqual({ state: 'up' });
+    expect(launched).toBe(0);
+  });
+
+  it('页面不在：起一个，等它答了算拉起', async () => {
+    let up = false;
+    const r = await progress.ensureServer({
+      port: 1,
+      isUp: async () => up,
+      launch: () => {
+        up = true;
+      },
+      stepMs: 10,
+    });
+    expect(r).toEqual({ state: 'started' });
+  });
+
+  it('起进程就报错：明说没成，不当没事', async () => {
+    const r = await progress.ensureServer({
+      port: 1,
+      isUp: async () => false,
+      launch: () => {
+        throw new Error('node 找不到');
+      },
+    });
+    expect(r.state).toBe('failed');
+    expect(r.state === 'failed' && r.why).toContain('node 找不到');
+  });
+
+  it('起了进程、等不到它答：明说没成', async () => {
+    const r = await progress.ensureServer({
+      port: 1,
+      isUp: async () => false,
+      launch: () => {},
+      waitMs: 50,
+      stepMs: 10,
+    });
+    expect(r.state).toBe('failed');
+    expect(r.state === 'failed' && r.why).toContain('还不是进度页');
+  });
+
+  it('真服务：关掉之后再拉起来，页面又能打开', async () => {
+    const home = tempHome();
+    const log = () => {};
+    const first = await progress.startServer({ port: 0, home, htmlFile: HTML, out: log, err: log });
+    const port = first.port ?? -1;
+    expect(await progress.isOurs(port)).toBe(true);
+    await new Promise((r) => first.server?.close(r));
+    expect(await progress.isOurs(port)).toBe(false);
+    const r = await progress.ensureServer({
+      port,
+      launch: () => {
+        void progress.startServer({ port, home, htmlFile: HTML, out: log, err: log }).then((s) => {
+          if (s.server) servers.push(s.server);
+        });
+      },
+    });
+    expect(r).toEqual({ state: 'started' });
+  });
+
+  it('p.mjs：端口被别的程序占着、拉不起来，数据照写，退出码 2 并写明原因', async () => {
+    const home = tempHome();
+    const other = createServer((_req, res) => res.end('别人的'));
+    servers.push(other);
+    await new Promise<void>((resolve) => other.listen(0, '127.0.0.1', resolve));
+    const address = other.address();
+    if (address === null || typeof address === 'string') throw new Error('没拿到端口');
+    const env = { ...process.env, HOME: home, USERPROFILE: home, FLEET_PROGRESS_PORT: String(address.port) };
+    const r = await new Promise<{ status: number | null; stderr: string }>((resolve) => {
+      const child = spawn(process.execPath, [join(SCRIPTS, 'p.mjs'), 'demo', 'init'], { env });
+      let stderr = '';
+      child.stderr.on('data', (d) => {
+        stderr += String(d);
+      });
+      child.on('close', (status) => resolve({ status, stderr }));
+    });
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain('进度写好了，但进度页没开着');
+    expect(existsSync(join(home, '.local', 'share', 'fleet-progress', 'demo', 'progress.json'))).toBe(true);
+  }, 20_000);
+});
+
 describe('命令行外壳：数据按 os.homedir() 放', () => {
   it('p.mjs：写进这个家目录下；不带参数给用法、退出码 1', () => {
     const home = tempHome();
-    const env = { ...process.env, HOME: home, USERPROFILE: home };
+    const env = { ...process.env, HOME: home, USERPROFILE: home, FLEET_PROGRESS_AUTOSTART: '0' };
     const run = (...argv: string[]) =>
       spawnSync(process.execPath, [join(SCRIPTS, 'p.mjs'), ...argv], { env, encoding: 'utf8' });
     expect(run().status).toBe(1);
