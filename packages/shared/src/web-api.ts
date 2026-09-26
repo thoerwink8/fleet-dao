@@ -11,6 +11,7 @@ import type {
   QuotaUnit,
   QuotaWindowKind,
   ReadingKind,
+  RouteProbeState,
   RunOutcome,
   ScheduleOutcome,
   StageKind,
@@ -88,6 +89,7 @@ export const ProgressKindSchema = z.enum(['plan', 'say', 'tool', 'file', 'test',
 export const QuotaStatusSchema = z.enum(['allowed', 'warning', 'limit_reached']);
 export const QuotaUnitSchema = z.enum(['percent', 'usd', 'tokens', 'points']);
 export const ScheduleOutcomeSchema = z.enum(['ok', 'partial', 'unscanned', 'failed']);
+export const RouteProbeStateSchema = z.enum(['ok', 'failed', 'not_wired', 'skipped']);
 
 type Same<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
 /** 编译期闸：上面的枚举和 domain.ts 的联合类型必须一字不差，改了一边没改另一边 `tsc` 当场报错。 */
@@ -105,7 +107,8 @@ export const ENUMS_MATCH_DOMAIN: [
   Same<z.infer<typeof QuotaStatusSchema>, QuotaStatus>,
   Same<z.infer<typeof QuotaUnitSchema>, QuotaUnit>,
   Same<z.infer<typeof ScheduleOutcomeSchema>, ScheduleOutcome>,
-] = [true, true, true, true, true, true, true, true, true, true, true, true, true];
+  Same<z.infer<typeof RouteProbeStateSchema>, RouteProbeState>,
+] = [true, true, true, true, true, true, true, true, true, true, true, true, true, true];
 
 // —— 通用 ——
 
@@ -403,14 +406,29 @@ export const ModelSchema = z.object({
   retiredAt: Time.optional(),
 });
 
+/** 探针多久一轮（design 第九节「路由探针」：Claude 订阅起步 15 分钟，和对账补漏错开）。 */
+export const ROUTE_PROBE_EVERY_MINUTES = 15;
+/** 结论超过这么久没更新（连着三轮没跑）：驾驶舱标「探测过期」，探针可能停了。 */
+export const ROUTE_PROBE_STALE_MINUTES = 45;
+
+/** 路由探针最近一次的结论（domain.ts 的 RouteProbe）。 */
+export const RouteProbeSchema = z.object({
+  state: RouteProbeStateSchema,
+  at: Time,
+  /** 不是 ok 必须写原因；ok 也带一句（回答、用时）。 */
+  detail: z.string().optional(),
+});
+
 export const RouteSchema = z.object({
   id: Id,
   channelId: Id,
   poolId: Id,
   modelId: Id,
   hostId: HostIdSchema,
-  /** 只由探针和熔断写。 */
+  /** 只由探针和熔断写：为真时 probe 一定是 ok（库里有约束）。 */
   alive: z.boolean(),
+  /** 没有 = 探针还没看过这条路由（上线后第一轮之前），不是离线。 */
+  probe: RouteProbeSchema.optional(),
 });
 
 export const StagePolicySchema = z.object({
@@ -460,8 +478,6 @@ export const RoutingResponse = z.object({
   hardBans: z.array(z.object({ id: z.string(), reason: z.string() })),
   /** 库里另外配的禁令，和 hardBans 一起生效。 */
   bans: z.array(BanSchema),
-  /** 路由探针还没做：路由在线状态整块显示待实现；有它时 alive=false 是「没人探过」，不是离线。 */
-  routeProbeNotWired: NotWiredSchema.optional(),
 });
 
 const RouteIdList = z

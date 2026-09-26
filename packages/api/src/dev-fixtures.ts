@@ -74,6 +74,7 @@ export function devFixtures(now: Date): Partial<MemoryData> {
         modelId: 'opus-5.5',
         hostId: 'claude-code',
         alive: true,
+        probe: { state: 'ok', at: ago(4), detail: '答上了：OK · 用时 9 秒' },
       },
       {
         id: 'rt-mirasim-fable',
@@ -82,6 +83,7 @@ export function devFixtures(now: Date): Partial<MemoryData> {
         modelId: 'fable-5.1',
         hostId: 'mirasim',
         alive: true,
+        probe: { state: 'ok', at: ago(4), detail: '答上了：OK · 用时 9 秒' },
       },
       {
         id: 'rt-mirasim-gpt',
@@ -90,6 +92,7 @@ export function devFixtures(now: Date): Partial<MemoryData> {
         modelId: 'gpt-5.6',
         hostId: 'codex',
         alive: true,
+        probe: { state: 'ok', at: ago(4), detail: '答上了：OK · 用时 9 秒' },
       },
       {
         id: 'rt-mirasim-kimi',
@@ -98,6 +101,7 @@ export function devFixtures(now: Date): Partial<MemoryData> {
         modelId: 'kimi-k3',
         hostId: 'mirasim',
         alive: true,
+        probe: { state: 'ok', at: ago(4), detail: '答上了：OK · 用时 9 秒' },
       },
     ],
     stagePolicies: [

@@ -10,7 +10,9 @@ import type { EngineJobs } from '../activities.ts';
 import type { EnginePorts } from '../ports.ts';
 import { scopeExec, type UserExec } from './exec.ts';
 import { createGitHubPorts, type EngineGitHub } from './github-ports.ts';
-import { githubReconcileJob, registerEngineJobs } from './github-reconcile.ts';
+import { githubReconcileJob } from './github-reconcile.ts';
+import { registerEngineJobs } from './jobs.ts';
+import { routeProbeJob } from './route-probe.ts';
 import { createSessionPorts, DEFAULT_FORK_MAX_CONTEXT_TOKENS, type SessionPortsDeps } from './sessions.ts';
 import { createStorePorts } from './store-ports.ts';
 import { DEFAULT_WORK_ROOT, helperWorkTrees, type WorkTrees } from './worktrees.ts';
@@ -149,19 +151,23 @@ export function realPortsFromEnv(
     locker: pgLocker(db),
     env: env as Record<string, string | undefined>,
   });
+  const trees = helperWorkTrees({ root: config.workRoot });
+  const claudeCommand = (user: SessionUser) => [config.claudeBin.replaceAll('{user}', user)];
   const real = createRealPorts({
     db,
     gh,
-    trees: helperWorkTrees({ root: config.workRoot }),
+    trees,
     exec: scopeExec(),
     tmpDir: join(config.stateDir, 'tmp'),
     archiveDir: join(config.stateDir, 'archive'),
     machine: config.machine,
-    claudeCommand: (user) => [config.claudeBin.replaceAll('{user}', user)],
+    claudeCommand,
     forkMaxContextTokens: config.forkMaxContextTokens,
   });
   const jobs: EngineJobs = {
     githubReconcile: githubReconcileJob({ db, gh }),
+    // 路由探针和干活的会话用同一份 reclaude、同一个工作树的根（探针目录在它下面）
+    routeProbe: routeProbeJob({ db, trees, claudeCommand, machine: config.machine }),
   };
   return { ...real, jobs, registerJobs: () => registerEngineJobs(db), close };
 }

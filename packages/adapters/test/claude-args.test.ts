@@ -45,6 +45,25 @@ describe('buildClaudeArgs', () => {
     expect(buildClaudeArgs(base)).not.toContain('--bare');
   });
 
+  it('默认存会话记录（干活的会话要能续）；persistSession: false 才带 --no-session-persistence', () => {
+    expect(buildClaudeArgs(base)).not.toContain('--no-session-persistence');
+    expect(buildClaudeArgs({ ...base, persistSession: true })).not.toContain('--no-session-persistence');
+    expect(buildClaudeArgs({ ...base, persistSession: false })).toContain('--no-session-persistence');
+  });
+
+  it('不存记录又要续会话、fork：写错了，当场拒（不存的会话续不上）', () => {
+    expect(() =>
+      buildClaudeArgs({ ...base, persistSession: false, session: { mode: 'resume', id: ID } }),
+    ).toThrow('只能是新会话');
+    expect(() =>
+      buildClaudeArgs({
+        ...base,
+        persistSession: false,
+        session: { mode: 'fork', from: '11111111-1111-4111-8111-111111111111', id: ID },
+      }),
+    ).toThrow('只能是新会话');
+  });
+
   it('拒绝不合法的模型名和会话号', () => {
     expect(() => buildClaudeArgs({ ...base, model: '--bare' })).toThrow('模型名');
     expect(() => buildClaudeArgs({ ...base, model: 'opus 5' })).toThrow('模型名');

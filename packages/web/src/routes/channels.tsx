@@ -29,6 +29,7 @@ import {
   hostLabel,
   poolUsage,
   quotaHeadline,
+  routeStatus,
   windowTitle,
 } from '../lib/catalog';
 import { formatDate, formatInDays, TIME } from '../lib/format';
@@ -72,9 +73,6 @@ export default function Channels() {
       ) : null}
       {pools.data?.quotaNotWired ? (
         <NotBuilt compact notWired={pools.data.quotaNotWired} className="mb-3" />
-      ) : null}
-      {data?.routeProbeNotWired ? (
-        <NotBuilt compact notWired={data.routeProbeNotWired} className="mb-3" />
       ) : null}
       {!data ? (
         routing.error ? null : (
@@ -156,8 +154,7 @@ function ChannelCard({
 }) {
   const routes = routing.routes.filter((r) => r.channelId === ch.id);
   const alive = routes.filter((r) => r.alive).length;
-  // 路由探针还没做：没人写过 alive，不数「几条在线」、不把路由划掉（页面顶上有待实现占位）
-  const probeNotWired = Boolean(routing.routeProbeNotWired);
+  const now = useNow();
   const running = (pools ?? []).reduce((n, p) => n + p.running, 0);
   return (
     <section
@@ -168,16 +165,8 @@ function ChannelCard({
         <h2 className="text-[15px] font-semibold">{ch.name}</h2>
         <Badge variant={ch.billing === 'metered' ? 'outline' : 'secondary'}>{billingLabel[ch.billing]}</Badge>
         <span className="text-xs text-muted-foreground">
-          {probeNotWired ? (
-            <>
-              路由 <span className="num">{routes.length}</span> 条
-            </>
-          ) : (
-            <>
-              路由 <span className="num text-foreground">{alive}</span>/
-              <span className="num">{routes.length}</span> 在线
-            </>
-          )}
+          路由 <span className="num text-foreground">{alive}</span>/
+          <span className="num">{routes.length}</span> 在线
           {running ? (
             <>
               {' '}
@@ -213,14 +202,18 @@ function ChannelCard({
       <div className="flex flex-wrap gap-1.5 border-t px-4 py-2.5">
         {routes.map((r) => {
           const m = routing.models.find((x) => x.id === r.modelId);
+          // 离线的划掉；还没探过的只画虚线框（不说成离线）。原因在悬停提示里，调度台顶上有每条的全文。
+          const st = routeStatus(r, now);
           return (
             <span
               key={r.id}
+              data-route-status={st.kind}
               className={cn(
                 'inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[11px]',
-                !r.alive && !probeNotWired && 'border-dashed text-muted-foreground line-through',
+                st.kind === 'offline' && 'border-dashed text-muted-foreground line-through',
+                st.kind === 'unprobed' && 'border-dashed',
               )}
-              title={`${hostLabel[r.hostId]} · 账号池 ${r.poolId}${r.alive || probeNotWired ? '' : ' · 离线'}`}
+              title={`${hostLabel[r.hostId]} · 账号池 ${r.poolId} · ${st.label}：${st.detail}`}
             >
               <span className="num">{m?.displayName ?? r.modelId}</span>
               <span className="text-muted-foreground">· {hostLabel[r.hostId]}</span>

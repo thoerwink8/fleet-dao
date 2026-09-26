@@ -8,6 +8,7 @@ import type {
   QuotaUnit,
   QuotaWindowKind,
   ReadingKind,
+  RouteProbeState,
   RunAsUser,
   RunOutcome,
   ScheduleOutcome,
@@ -92,6 +93,8 @@ export type RetiredRunAsUser = (typeof RETIRED_RUN_AS_USERS)[number];
 export const ORG_KINDS = valuesOf<OrgKind>()(['solo', 'carpool']);
 export const RUN_OUTCOMES = valuesOf<RunOutcome>()(['ok', 'failed', 'stopped', 'stalled']);
 export const SCHEDULE_OUTCOMES = valuesOf<ScheduleOutcome>()(['ok', 'partial', 'unscanned', 'failed']);
+/** 路由探针的结论（domain.ts 的 RouteProbeState）：只有 ok 让路由在线。 */
+export const ROUTE_PROBE_STATES = valuesOf<RouteProbeState>()(['ok', 'failed', 'not_wired', 'skipped']);
 export const PROGRESS_KINDS = valuesOf<ProgressKind>()([
   'plan',
   'say',
@@ -119,6 +122,8 @@ export const runOutcome = pgEnum('run_outcome', RUN_OUTCOMES);
 export const progressKind = pgEnum('progress_kind', PROGRESS_KINDS);
 /** 还在跑时为空。 */
 export const scheduleOutcome = pgEnum('schedule_outcome', SCHEDULE_OUTCOMES);
+/** 探针还没看过的路由为空。 */
+export const routeProbeState = pgEnum('route_probe_state', ROUTE_PROBE_STATES);
 
 // 下面几个不是 domain.ts 的对象；取值和驾驶舱接口（@fleet-dao/shared 的 web-api）用同一套写法。
 /** 创始人、协作者、自家机器人（机器人不登录驾驶舱，只当 GitHub 作者白名单）。 */

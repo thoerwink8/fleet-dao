@@ -3,4 +3,5 @@ export { githubReconcileWorkflow } from './github-reconcile.ts';
 export { helloWorkflow } from './hello.ts';
 export { mergeQueueWorkflow } from './merge-queue.ts';
 export { requirementWorkflow } from './requirement.ts';
+export { routeProbeWorkflow } from './route-probe.ts';
 export { subtaskWorkflow } from './subtask.ts';

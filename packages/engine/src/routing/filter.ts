@@ -2,7 +2,16 @@
 // 等得来的原因带「最早几点能好」，一定晚于现在：那个时刻已经过了（读数、熔断状态慢了一步）就按不知道算，
 // 调用方按轮询间隔再选一次——给一个过去的时刻，等待秒数成了负数，选路循环会空转。
 import { hardBanFor, type OrgKind, type StageKind } from '@fleet-dao/shared';
-import { duration, hostName, percent, remaining, STAGE_NAMES, stamp, windowName } from './names.ts';
+import {
+  duration,
+  hostName,
+  ORG_NAMES,
+  percent,
+  remaining,
+  STAGE_NAMES,
+  stamp,
+  windowName,
+} from './names.ts';
 import { ABILITY_NAMES, HOST_ABILITIES, type RoutingPolicy, STAGE_NEEDS } from './policy.ts';
 import type {
   Block,
@@ -155,8 +164,6 @@ export function hostUnfit(hostId: string, stage: StageKind): string | null {
   if (missing.length === 0) return null;
   return `${hostName(hostId)}不会${missing.map((a) => ABILITY_NAMES[a]).join('、')}，${STAGE_NAMES[stage]}阶段要`;
 }
-
-const ORG_NAMES: Record<OrgKind, string> = { solo: '独享', carpool: '拼车' };
 
 /**
  * 会话用户同一时刻只挂一个 reclaude 组织（design 第九节）：不是它挂着的那个组织的 Claude 池，派过去会话照样扣挂着的

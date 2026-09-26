@@ -24,6 +24,7 @@ import {
   quotaWindowKind,
   RUN_AS_USERS,
   readingKind,
+  routeProbeState,
   stageKind,
 } from './enums.ts';
 
@@ -108,8 +109,14 @@ export const routes = pgTable(
       .notNull()
       .references(() => models.id),
     hostId: hostId('host_id').notNull(),
-    /** 只由探针和熔断写。新路由没探过，默认不在线。 */
+    /** 只由探针和熔断写。新路由没探过，默认不在线；为真时探针的结论必须是 ok（下面的约束）。 */
     alive: boolean('alive').notNull().default(false),
+    /** 路由探针最近一次的结论（design 第九节「路由探针」）；空 = 探针还没看过这条路由。 */
+    probeState: routeProbeState('probe_state'),
+    /** 探针下这个结论的时刻（没探的也记：这一轮看过、没探）。和 probe_state 同空同有。 */
+    probedAt: timestamp('probed_at', tz),
+    /** 不是 ok 必须写原因；ok 也带一句（回答、用时）。 */
+    probeDetail: text('probe_detail'),
     /** 插头实际发给上游的模型串（目录原文）。额度成员表只和它、和别名比；都没填，扣哪个桶判不了。 */
     upstreamModel: text('upstream_model'),
     /** 上游在别处（额度接口的成员表）对这条路由的叫法，和上面的模型串不同名时填。 */
@@ -123,6 +130,14 @@ export const routes = pgTable(
     }),
     // 同一模型换一种执行方式就是另一条路由；同池同模型同执行方式不许重复。
     unique('routes_pool_model_host_unique').on(t.poolId, t.modelId, t.hostId),
+    // 不许拿默认值、手改冒充在线：在线必须是探针这一轮真探通了。结论为空时比较得 NULL、CHECK 会放行，所以包一层 coalesce。
+    check('routes_alive_needs_probe_ok', sql`not ${t.alive} or coalesce(${t.probeState} = 'ok', false)`),
+    check('routes_probe_state_at_together', sql`(${t.probeState} is null) = (${t.probedAt} is null)`),
+    // 不在线、没探的都要写原因（没跑成 ≠ 没问题）。
+    check(
+      'routes_probe_not_ok_has_detail',
+      sql`${t.probeState} is null or ${t.probeState} = 'ok' or coalesce(${t.probeDetail}, '') <> ''`,
+    ),
   ],
 );
 

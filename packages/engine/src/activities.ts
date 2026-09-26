@@ -17,6 +17,7 @@ import {
   type GitHubReconcileJobDeps,
   runGitHubReconcileJob,
 } from './jobs/github-reconcile.ts';
+import { RouteProbeFailedError, type RouteProbeJobDeps, runRouteProbeJob } from './jobs/route-probe.ts';
 import type { Limits } from './limits.ts';
 import {
   type ActivityTiming,
@@ -231,6 +232,8 @@ function withdrawMerge(input: Parameters<EngineActivities['withdrawMerge']>[0]):
 export interface EngineJobs {
   /** taskQueue：这个工人取活的任务队列，补回来的需求工作流起在这里。 */
   githubReconcile?: (client: Client, taskQueue: string) => GitHubReconcileJobDeps;
+  /** 路由探针（#129）：读路由、真起最小会话、写结论。 */
+  routeProbe?: () => RouteProbeJobDeps;
 }
 
 /** 引擎自己的活动：对账补漏跑一轮。没跑成的已经记进 schedule_runs，这里再报成不重试的失败（下一轮 15 分钟后照来）。 */
@@ -251,6 +254,29 @@ async function reconcileGitHub(jobs: EngineJobs): Promise<unknown> {
   } catch (error) {
     if (error instanceof GitHubReconcileFailedError) {
       throw new PortError('RECONCILE_FAILED', error.message, {
+        retryable: false,
+        details: { runId: error.runId },
+      });
+    }
+    throw error;
+  }
+}
+
+/** 引擎自己的活动：路由探针跑一轮。没跑成的已经记进 schedule_runs，这里再报成不重试的失败（下一轮 15 分钟后照来）。 */
+async function probeRoutes(jobs: EngineJobs): Promise<unknown> {
+  const make = jobs.routeProbe;
+  if (!make) {
+    throw new PortError(
+      'JOB_NOT_CONFIGURED',
+      '这个引擎工人没装路由探针（假端口，或真端口没接上库和会话）：不装作探过',
+      { retryable: false },
+    );
+  }
+  try {
+    return await runRouteProbeJob(make());
+  } catch (error) {
+    if (error instanceof RouteProbeFailedError) {
+      throw new PortError('ROUTE_PROBE_FAILED', error.message, {
         retryable: false,
         details: { runId: error.runId },
       });
@@ -308,5 +334,6 @@ export function createActivities(
   out.enqueueMerge = timed('enqueueMerge', (input) => enqueueMerge(input as never), record);
   out.withdrawMerge = timed('withdrawMerge', (input) => withdrawMerge(input as never), record);
   out.reconcileGitHub = timed('reconcileGitHub', () => reconcileGitHub(jobs), record);
+  out.probeRoutes = timed('probeRoutes', () => probeRoutes(jobs), record);
   return out as unknown as EngineActivities;
 }

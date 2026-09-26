@@ -88,6 +88,63 @@ describe('路由与账号池', () => {
     });
     const [row] = await t.db.select().from(routes).where(eq(routes.id, 'fresh'));
     expect(row?.alive).toBe(false);
+    expect(row?.probeState).toBeNull();
+  });
+
+  describe('路由探针的结论（#129）', () => {
+    const fresh = {
+      id: 'fresh',
+      channelId: 'relay',
+      poolId: 'relay-a',
+      modelId: 'opus-5.5',
+      hostId: 'claude-code' as const,
+    };
+
+    it('不许拿默认值、手改冒充在线：没有探针的 ok 结论，alive 写不成真', async () => {
+      await expectViolation(
+        t.db.insert(routes).values({ ...fresh, alive: true }),
+        'routes_alive_needs_probe_ok',
+      );
+      await t.db.insert(routes).values(fresh);
+      await expectViolation(
+        t.db.update(routes).set({ alive: true }).where(eq(routes.id, 'fresh')),
+        'routes_alive_needs_probe_ok',
+      );
+      // 探针说没探通，也不能在线
+      await expectViolation(
+        t.db
+          .update(routes)
+          .set({ alive: true, probeState: 'failed', probedAt: NOW, probeDetail: '登录失效' })
+          .where(eq(routes.id, 'fresh')),
+        'routes_alive_needs_probe_ok',
+      );
+    });
+
+    it('结论和时刻同空同有', async () => {
+      await expectViolation(
+        t.db.insert(routes).values({ ...fresh, probeState: 'ok' }),
+        'routes_probe_state_at_together',
+      );
+      await expectViolation(
+        t.db.insert(routes).values({ ...fresh, probedAt: NOW }),
+        'routes_probe_state_at_together',
+      );
+    });
+
+    it('不在线、没探的都要写原因（没写、写空串都拒）', async () => {
+      for (const state of ['failed', 'not_wired', 'skipped'] as const) {
+        await expectViolation(
+          t.db.insert(routes).values({ ...fresh, probeState: state, probedAt: NOW }),
+          'routes_probe_not_ok_has_detail',
+        );
+        await expectViolation(
+          t.db.insert(routes).values({ ...fresh, probeState: state, probedAt: NOW, probeDetail: '' }),
+          'routes_probe_not_ok_has_detail',
+        );
+      }
+      // ok 可以不带原因；在线要连 ok 一起写
+      await t.db.insert(routes).values({ ...fresh, alive: true, probeState: 'ok', probedAt: NOW });
+    });
   });
 });
 

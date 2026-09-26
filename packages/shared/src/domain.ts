@@ -221,8 +221,10 @@ export interface Route {
   poolId: string;
   modelId: string;
   hostId: HostId;
-  /** 只由探针和熔断写，不许手填。 */
+  /** 只由探针和熔断写，不许手填；库里约束 alive 为真时探针的结论必须是 ok。 */
   alive: boolean;
+  /** 路由探针最近一次的结论（#129，design 第九节「路由探针」）；没有 = 探针还没看过这条路由。 */
+  probe?: RouteProbe;
   /**
    * 插头实际发给上游的模型串（目录原文，例如 claude-opus-5-5、grok-4.7[context=256k,…]）。
    * 额度的模型组成员表只和它、和 upstreamAliases 比；两样都没填，这条路由扣哪个桶判不了，额度按未知算。
@@ -230,6 +232,23 @@ export interface Route {
   upstreamModel?: string;
   /** 上游在别处对这条路由的叫法，和上面的模型串不同名时填，例如 Cursor 额度接口里 Auto 叫 default。 */
   upstreamAliases?: string[];
+}
+
+/**
+ * 路由探针对一条路由的结论（design 第九节「路由探针」）：
+ * ok = 真起了一次最小会话、答上了（额度用满被拒也算：登录、组织、上游都通，额度另有额度那一套挡）；
+ * failed = 探了、没探通（原因写在 detail）；not_wired = 这种执行方式引擎还没接，探不了、也派不了；
+ * skipped = 这一轮没探（按量计费、渠道下架、会话用户挂着别的组织……原因写在 detail），不算探过。
+ * 只有 ok 让 alive 为真，其余一律不在线。
+ */
+export type RouteProbeState = 'ok' | 'failed' | 'not_wired' | 'skipped';
+
+export interface RouteProbe {
+  state: RouteProbeState;
+  /** 探针下这个结论的时刻（没探的也记：这一轮看过、没探）。 */
+  at: string;
+  /** 不是 ok 必须写原因；ok 也带一句（回答原文、用时）。 */
+  detail?: string;
 }
 
 /** 每个阶段类型挂一串有序路由，驾驶舱拖动排序。 */

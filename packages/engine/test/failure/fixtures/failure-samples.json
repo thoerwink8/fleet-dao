@@ -1121,6 +1121,23 @@
         "message": "issue #12 同时贴了 需求、缺陷：类别只能有一个，PR #31 没法照抄。在 issue 上只留一个再继续"
       },
       "expect": { "action": "park", "rule": "LB1", "alert": true, "routeOutcome": "neutral" }
+    },
+    {
+      "id": "X73",
+      "provenance": "production",
+      "origin": "fleet-dao 法国 VPS 真跑（2026-09-26，#129）：会话用户的 reclaude 没有有效登录时 -p 不报错退出，开始设备授权、打出授权链接后一直等，插头按「起来之后迟迟没有第一帧」强杀；后半句是 stderr 最后三行原文",
+      "evidence": {
+        "hostId": "claude-code",
+        "code": "startup_timeout",
+        "message": "起来之后迟迟没有第一帧 · Syncing config… ⏎ reclaude: no valid login detected, starting device authorization flow… ⏎ Connecting to reclaude.ai…"
+      },
+      "expect": {
+        "action": "swapRoute",
+        "rule": "AU2",
+        "avoid": "pool",
+        "alert": true,
+        "routeOutcome": "neutral"
+      }
     }
   ],
   "skipped": [

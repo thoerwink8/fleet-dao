@@ -462,10 +462,9 @@ describe('账号池、定时任务、通知、操作记录、设置', () => {
     expect(body.staleAfterMinutes).toBe(30);
   });
 
-  it('还没做的读取器：额度表、路由表带上「待实现」（阶段、单号，单开在 fleet-dao 仓就链过去）；接上了就不带', async () => {
+  it('还没做的读取器：额度表带上「待实现」（阶段、单号，单开在 fleet-dao 仓就链过去）；接上了就不带', async () => {
     const mark = {
       quota: { what: '额度读数', phase: 'P3', issue: 76 },
-      routeProbe: { what: '路由在线状态', phase: 'P1', issue: 129 },
     };
     const data = devFixtures(T0);
     data.repos = [
@@ -481,10 +480,6 @@ describe('账号池、定时任务、通知、操作记录、设置', () => {
       ...mark.quota,
       issueRepo: { owner: 'someone', name: 'fleet-dao' },
     });
-    const routing = RoutingResponse.parse(
-      await (await h.cockpit.request('/api/routing', { headers: { cookie } })).json(),
-    );
-    expect(routing.routeProbeNotWired).toMatchObject({ issue: 129, phase: 'P1' });
 
     // 受管的仓里没有 fleet-dao：照样给，只是不带链接
     const bare = harness({ notWired: mark });
@@ -502,10 +497,40 @@ describe('账号池、定时任务、通知、操作记录、设置', () => {
     );
     expect(p3.quotaNotWired).toBeUndefined();
     expect(p3.pools.some((p) => p.quotaStatus === 'unread')).toBe(true);
-    const r3 = RoutingResponse.parse(
-      await (await wired.cockpit.request('/api/routing', { headers: { cookie: c3 } })).json(),
+  });
+
+  it('路由表带上探针的结论（#129）：在线的带 ok 和时刻，离线的带原因，探针还没看过的不带（不说成离线）', async () => {
+    const data = devFixtures(T0);
+    const at = new Date(T0.getTime() - 5 * 60_000).toISOString();
+    data.routes = (data.routes ?? []).map((r) => {
+      if (r.id === 'rt-mirasim-kimi') {
+        return {
+          ...r,
+          alive: false,
+          probe: { state: 'failed' as const, at, detail: '登录失效：进程退出（退出码 1）' },
+        };
+      }
+      if (r.id === 'rt-mirasim-gpt') {
+        const { probe: _probe, ...rest } = r;
+        return { ...rest, alive: false };
+      }
+      return r;
+    });
+    const h = harness({ data });
+    const { cookie } = await h.login();
+    const routing = RoutingResponse.parse(
+      await (await h.cockpit.request('/api/routing', { headers: { cookie } })).json(),
     );
-    expect(r3.routeProbeNotWired).toBeUndefined();
+    const byId = new Map(routing.routes.map((r) => [r.id, r]));
+    expect(byId.get('rt-claude-opus')).toMatchObject({ alive: true, probe: { state: 'ok' } });
+    expect(byId.get('rt-mirasim-kimi')).toMatchObject({
+      alive: false,
+      probe: { state: 'failed', at, detail: '登录失效：进程退出（退出码 1）' },
+    });
+    expect(byId.get('rt-mirasim-gpt')?.alive).toBe(false);
+    expect(byId.get('rt-mirasim-gpt')?.probe).toBeUndefined();
+    // 探针接上了：不再带「待实现」
+    expect(JSON.stringify(routing)).not.toContain('NotWired');
   });
 
   it('额度按池判新旧：读成了、但上游的数冻住没前进，也算过期（看 dataAt）', async () => {

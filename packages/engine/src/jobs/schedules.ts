@@ -9,10 +9,12 @@ import {
   type ScheduleUpdateOptions,
 } from '@temporalio/client';
 import type { Workflow } from '@temporalio/common';
-import { type GitHubReconcileInput, WORKFLOW_TYPES } from '../contract.ts';
+import { type GitHubReconcileInput, type RouteProbeInput, WORKFLOW_TYPES } from '../contract.ts';
 import { GITHUB_RECONCILE_EVERY_MINUTES, GITHUB_RECONCILE_JOB } from './github-reconcile.ts';
+import { ROUTE_PROBE_EVERY_MINUTES, ROUTE_PROBE_JOB, ROUTE_PROBE_OFFSET_MINUTES } from './route-probe.ts';
 
 export const GITHUB_RECONCILE_SCHEDULE_ID = GITHUB_RECONCILE_JOB.id;
+export const ROUTE_PROBE_SCHEDULE_ID = ROUTE_PROBE_JOB.id;
 
 interface EngineSchedule {
   scheduleId: string;
@@ -24,6 +26,7 @@ interface EngineSchedule {
 /** 引擎要有的定时任务。 */
 export function engineSchedules(taskQueue: string): EngineSchedule[] {
   const input: GitHubReconcileInput = { schemaVersion: 1 };
+  const probeInput: RouteProbeInput = { schemaVersion: 1 };
   return [
     {
       scheduleId: GITHUB_RECONCILE_SCHEDULE_ID,
@@ -44,6 +47,31 @@ export function engineSchedules(taskQueue: string): EngineSchedule[] {
         // Temporal 停了一阵再起来：只补最近一轮，不把错过的全补一遍（每轮本来就往回看 2 小时）
         catchupWindow: `${GITHUB_RECONCILE_EVERY_MINUTES} minutes`,
         // 一轮失败不停掉定时：下一轮照样来，失败记在 schedule_runs 里由看门狗报
+        pauseOnFailure: false,
+      },
+    },
+    {
+      // 路由探针（#129）：频率按渠道成本定（design 第九节「路由探针」）；和对账错开几分钟，不在整点挤着起会话
+      scheduleId: ROUTE_PROBE_SCHEDULE_ID,
+      spec: {
+        intervals: [
+          { every: `${ROUTE_PROBE_EVERY_MINUTES} minutes`, offset: `${ROUTE_PROBE_OFFSET_MINUTES} minutes` },
+        ],
+      },
+      action: {
+        type: 'startWorkflow',
+        workflowType: WORKFLOW_TYPES.routeProbe,
+        workflowId: ROUTE_PROBE_SCHEDULE_ID,
+        taskQueue,
+        args: [probeInput],
+        // 一轮最多 10 分钟（活动的限时）；卡死的不拖到下一轮
+        workflowRunTimeout: '15 minutes',
+      },
+      policies: {
+        // 上一轮还没完就跳过这一轮：两轮叠着跑会同时起两个探针会话、后写的盖掉先写的
+        overlap: ScheduleOverlapPolicy.SKIP,
+        // Temporal 停了一阵再起来：只补最近一轮（结论只看最新的，补旧的只是白花额度）
+        catchupWindow: `${ROUTE_PROBE_EVERY_MINUTES} minutes`,
         pauseOnFailure: false,
       },
     },

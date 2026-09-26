@@ -9,6 +9,7 @@ import type {
   ClaudeCodeRunOptions,
   ClaudeCodeRunReport,
   ClaudeCodeRunSpec,
+  KillReason,
   RateLimitReading,
   SessionUser,
 } from '@fleet-dao/adapters';
@@ -18,6 +19,13 @@ import { layout, type WorkTrees } from '../../src/real/worktrees.ts';
 
 export const NOW = new Date('2026-09-25T08:00:00.000Z');
 export const MIN = 60_000;
+
+/** 在线的路由必须带着探针的 ok 结论（库里约束 routes_alive_needs_probe_ok）。 */
+export const PROBED_OK = {
+  probeState: 'ok' as const,
+  probedAt: new Date(NOW.getTime() - 5 * MIN),
+  probeDetail: '答上了：OK',
+};
 
 const GIT_ENV = {
   ...process.env,
@@ -61,6 +69,7 @@ export async function world(db: Db, options: { order?: string[]; stages?: StageK
       modelId: 'opus-5.5',
       hostId: 'claude-code',
       alive: true,
+      ...PROBED_OK,
       upstreamModel: 'claude-opus-5-5',
     },
     {
@@ -70,6 +79,7 @@ export async function world(db: Db, options: { order?: string[]; stages?: StageK
       modelId: 'opus-5.5',
       hostId: 'claude-code',
       alive: true,
+      ...PROBED_OK,
       upstreamModel: 'claude-opus-5-5',
     },
     {
@@ -79,6 +89,7 @@ export async function world(db: Db, options: { order?: string[]; stages?: StageK
       modelId: 'gpt-5.6-luna',
       hostId: 'codex',
       alive: true,
+      ...PROBED_OK,
       upstreamModel: 'gpt-5.6-luna',
     },
   ]);
@@ -235,6 +246,8 @@ export interface FakeRunScript {
   apiError?: { code?: string; text: string };
   lastContextTokens?: number;
   stderrTail?: string;
+  /** 插头强杀了它（起不来、总时长到顶……）：退出码空、信号 SIGKILL，终帧照 result。 */
+  killed?: Exclude<KillReason, 'aborted'>;
 }
 
 /** 假插头：不起进程，按剧本走；被 abort 就当成「引擎叫停」收场（和真插头一样 killed=aborted）。 */
@@ -336,6 +349,17 @@ export function fakeRun(script: (spec: ClaudeCodeRunSpec, n: number) => FakeRunS
         exitCode: null,
         signal: 'SIGTERM',
         killed: { reason: 'aborted', at: endedAt },
+        endedAt,
+        wallMs: 1,
+        stream: stream(readings),
+      };
+    }
+    if (s.killed) {
+      return {
+        ...base,
+        exitCode: null,
+        signal: 'SIGKILL',
+        killed: { reason: s.killed, at: endedAt },
         endedAt,
         wallMs: 1,
         stream: stream(readings),

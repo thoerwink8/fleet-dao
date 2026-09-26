@@ -3,7 +3,13 @@
 
 import type { Repo } from '@fleet-dao/shared';
 import type { ActivityOptions, RetryPolicy } from '@temporalio/common';
-import type { GitHubReconcileInput, GitHubReconcileRun, MergeItem } from './contract.ts';
+import type {
+  GitHubReconcileInput,
+  GitHubReconcileRun,
+  MergeItem,
+  RouteProbeInput,
+  RouteProbeRun,
+} from './contract.ts';
 import type { Limits } from './limits.ts';
 import type { EnginePorts, StartSessionInput, StartSessionResult } from './ports.ts';
 
@@ -30,6 +36,8 @@ export type EngineActivities = PortActivities & {
   }): Promise<void>;
   /** 引擎自己的活动：对账补漏跑一轮，结局记进 schedule_runs（jobs/github-reconcile.ts）。 */
   reconcileGitHub(input: GitHubReconcileInput): Promise<GitHubReconcileRun>;
+  /** 引擎自己的活动：路由探针跑一轮，每条路由的结论写进 routes、结局记进 schedule_runs（jobs/route-probe.ts）。 */
+  probeRoutes(input: RouteProbeInput): Promise<RouteProbeRun>;
 };
 
 export type ActivityName = keyof EngineActivities;
@@ -39,6 +47,7 @@ export type ActivityName = keyof EngineActivities;
  * git：推分支、开 PR、合并这类几秒到几分钟的——5 分钟，幂等，重试 3 次。
  * setup / watch / ci / tests：长活动——限时按活来，必须心跳，心跳超时 = 工人丢了。
  * job：定时任务的一轮——10 分钟，不重试：每次尝试都记一行 schedule_runs，没跑成的等下一轮（间隔 15 分钟），不在这一轮里补。
+ * 路由探针一轮里每条路由最长几分钟（起会话、等回答、没通隔 20 秒再探一次），同时探两条，也在 10 分钟里。
  */
 export type Profile = 'quick' | 'git' | 'setup' | 'watch' | 'ci' | 'tests' | 'job';
 
@@ -66,6 +75,7 @@ export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
   waitCi: 'ci',
   runTests: 'tests',
   reconcileGitHub: 'job',
+  probeRoutes: 'job',
 };
 
 /** quick 一档（含排进合并队列、撤出）一次尝试的限时。合并队列的空闲收工时长不能比它短（limits.ts 的下限）。 */

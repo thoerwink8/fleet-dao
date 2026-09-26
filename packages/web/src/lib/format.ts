@@ -96,3 +96,8 @@ export function span(startIso: string | undefined, endIso: string | undefined, n
   const end = endIso ? Date.parse(endIso) : now;
   return Math.max(0, end - Date.parse(startIso));
 }
+
+/** 太长的一句截到 max 个字，末尾补「…」（完整的放悬停提示里）。 */
+export function clipText(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}

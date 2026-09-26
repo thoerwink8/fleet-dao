@@ -20,8 +20,14 @@ import {
   runGitHubReconcileJob,
   toScheduleResult,
 } from '../src/jobs/github-reconcile.ts';
-import { ensureEngineSchedules, GITHUB_RECONCILE_SCHEDULE_ID } from '../src/jobs/schedules.ts';
-import { githubReconcileJob, registerEngineJobs } from '../src/real/github-reconcile.ts';
+import {
+  engineSchedules,
+  ensureEngineSchedules,
+  GITHUB_RECONCILE_SCHEDULE_ID,
+  ROUTE_PROBE_SCHEDULE_ID,
+} from '../src/jobs/schedules.ts';
+import { githubReconcileJob } from '../src/real/github-reconcile.ts';
+import { ENGINE_JOBS, registerEngineJobs } from '../src/real/jobs.ts';
 import { createRealEnv, useEnv, withWorker } from './helpers.ts';
 
 const API = 'https://api.github.test';
@@ -365,7 +371,7 @@ describe('对账补漏一轮的记账（不起 Temporal）', () => {
 describe('定时任务按固定编号建：重启、重复部署不多出第二个', () => {
   function fakeScheduleClient(existing: boolean, failWith?: Error) {
     const calls: string[] = [];
-    let updated: unknown;
+    const updated = new Map<string, unknown>();
     const client = {
       schedule: {
         async create(options: { scheduleId: string }) {
@@ -378,32 +384,50 @@ describe('定时任务按固定编号建：重启、重复部署不多出第二�
           return {
             async update(fn: (prev: unknown) => unknown) {
               calls.push(`update:${id}`);
-              updated = fn({ state: { paused: true, note: '人停的' }, spec: {}, action: {}, policies: {} });
+              updated.set(
+                id,
+                fn({ state: { paused: true, note: '人停的' }, spec: {}, action: {}, policies: {} }),
+              );
             },
           };
         },
       },
     } as unknown as Pick<Client, 'schedule'>;
-    return { client, calls, updated: () => updated };
+    return { client, calls, updated: (id: string) => updated.get(id) };
   }
+
+  it('登记表和 Temporal 定时任务一一对得上：每个定时任务都登记了（一次没跑过也在看门狗名单上）', () => {
+    expect(engineSchedules('fleet').map((s) => s.scheduleId)).toEqual(ENGINE_JOBS.map((j) => j.id));
+  });
 
   it('没有就建；已经有了就按声明更新、人手动暂停的照旧停着', async () => {
     const fresh = fakeScheduleClient(false);
     expect(await ensureEngineSchedules(fresh.client, 'fleet')).toEqual({
       [GITHUB_RECONCILE_SCHEDULE_ID]: 'created',
+      [ROUTE_PROBE_SCHEDULE_ID]: 'created',
     });
     const again = fakeScheduleClient(true);
     expect(await ensureEngineSchedules(again.client, 'fleet')).toEqual({
       [GITHUB_RECONCILE_SCHEDULE_ID]: 'updated',
+      [ROUTE_PROBE_SCHEDULE_ID]: 'updated',
     });
     expect(again.calls).toEqual([
       `create:${GITHUB_RECONCILE_SCHEDULE_ID}`,
       `update:${GITHUB_RECONCILE_SCHEDULE_ID}`,
+      `create:${ROUTE_PROBE_SCHEDULE_ID}`,
+      `update:${ROUTE_PROBE_SCHEDULE_ID}`,
     ]);
-    expect(again.updated()).toMatchObject({
+    expect(again.updated(GITHUB_RECONCILE_SCHEDULE_ID)).toMatchObject({
       state: { paused: true, note: '人停的' },
       spec: { intervals: [{ every: '15 minutes' }] },
       action: { workflowType: WORKFLOW_TYPES.githubReconcile, taskQueue: 'fleet' },
+      policies: { overlap: 'SKIP' },
+    });
+    // 路由探针：同样每 15 分钟，错开 7 分钟（和对账不在整点挤着起会话）
+    expect(again.updated(ROUTE_PROBE_SCHEDULE_ID)).toMatchObject({
+      state: { paused: true, note: '人停的' },
+      spec: { intervals: [{ every: '15 minutes', offset: '7 minutes' }] },
+      action: { workflowType: WORKFLOW_TYPES.routeProbe, taskQueue: 'fleet' },
       policies: { overlap: 'SKIP' },
     });
   });
@@ -413,7 +437,7 @@ describe('定时任务按固定编号建：重启、重复部署不多出第二�
     await expect(ensureEngineSchedules(broken.client, 'fleet')).rejects.toThrow('UNAVAILABLE');
   });
 
-  it('真 Temporal 开发服务端：对两遍只有一个定时任务，每 15 分钟起一条对账工作流', {
+  it('真 Temporal 开发服务端：对两遍各只有一个定时任务，对账每 15 分钟、路由探针每 15 分钟错开 7 分钟', {
     timeout: 300_000,
   }, async () => {
     const real = await createRealEnv();
@@ -421,16 +445,22 @@ describe('定时任务按固定编号建：重启、重复部署不多出第二�
       const { client } = real;
       expect(await ensureEngineSchedules(client, 'fleet-a')).toEqual({
         [GITHUB_RECONCILE_SCHEDULE_ID]: 'created',
+        [ROUTE_PROBE_SCHEDULE_ID]: 'created',
       });
       await client.schedule.getHandle(GITHUB_RECONCILE_SCHEDULE_ID).pause('人停的');
       expect(await ensureEngineSchedules(client, 'fleet-b')).toEqual({
         [GITHUB_RECONCILE_SCHEDULE_ID]: 'updated',
+        [ROUTE_PROBE_SCHEDULE_ID]: 'updated',
       });
       const d = await client.schedule.getHandle(GITHUB_RECONCILE_SCHEDULE_ID).describe();
       expect(d.spec.intervals?.map((i) => i.every)).toEqual([15 * 60_000]);
       expect(d.action).toMatchObject({ workflowType: WORKFLOW_TYPES.githubReconcile, taskQueue: 'fleet-b' });
       // 第二次是在同一个编号上改（编号固定，建第二个会撞 ScheduleAlreadyRunning），人停的照旧停着
       expect(d.state.paused).toBe(true);
+      const probe = await client.schedule.getHandle(ROUTE_PROBE_SCHEDULE_ID).describe();
+      expect(probe.spec.intervals?.map((i) => [i.every, i.offset])).toEqual([[15 * 60_000, 7 * 60_000]]);
+      expect(probe.action).toMatchObject({ workflowType: WORKFLOW_TYPES.routeProbe, taskQueue: 'fleet-b' });
+      expect(probe.state.paused).toBe(false);
     } finally {
       await real.teardown();
     }

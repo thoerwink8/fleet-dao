@@ -28,6 +28,7 @@ import type { Ban, PoolView, Routing, StageKind, StagePolicy } from '../api/type
 import { NotBuilt } from '../components/not-built';
 import { LoadError, LoadingRows, Page, Panel } from '../components/page';
 import { QuotaBar } from '../components/quota';
+import { RouteHealth } from '../components/route-health';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger } from '../components/ui/select';
@@ -41,6 +42,7 @@ import {
   routeInfo,
   routeProblem,
   routeQuotaHeadline,
+  routeStatus,
   STAGES,
   stageLabel,
 } from '../lib/catalog';
@@ -109,9 +111,7 @@ export default function Dispatch() {
       description="每个阶段挂一串路由，派工时从上往下挑第一条能用的：在线、额度够、有空位、不犯禁令。拖动调整先后。"
     >
       {routing.error ? <LoadError what="路由" error={routing.error} /> : null}
-      {routing.data?.routeProbeNotWired ? (
-        <NotBuilt compact notWired={routing.data.routeProbeNotWired} className="mb-3" />
-      ) : null}
+      {routing.data ? <RouteHealth routing={routing.data} now={now} className="mb-3" /> : null}
       {pools.data?.quotaNotWired ? (
         <NotBuilt compact notWired={pools.data.quotaNotWired} className="mb-3" />
       ) : null}
@@ -400,8 +400,8 @@ function StageCard({
                   </span>
                   {problem ? (
                     <span className="text-ink-fail">{problem}</span>
-                  ) : !r.alive && !routing.routeProbeNotWired ? (
-                    <span className="text-ink-stall">离线</span>
+                  ) : !r.alive ? (
+                    <span className="text-ink-stall">{routeStatus(r, now).label}</span>
                   ) : null}
                 </SelectItem>
               );
@@ -453,8 +453,9 @@ function RouteRow({
       : undefined;
   const w = h && 'w' in h ? h.w : undefined;
   const problem = routeProblem(routing, rid, stage, now);
-  // 路由探针还没做：没人写过 alive，不说「离线」、不画成灰的（页面顶上有待实现占位）
-  const offline = info ? !info.route.alive && !routing.routeProbeNotWired : true;
+  // 在不在线照路由探针的结论（页面顶上有每条的原因）；还没探过的也派不了，一样画成灰的。
+  const status = info ? routeStatus(info.route, now) : undefined;
+  const offline = status ? status.kind !== 'online' : true;
   const channelOff = info ? !info.channelEnabled : false;
   const faint = offline || channelOff || Boolean(problem);
   return (
@@ -505,7 +506,17 @@ function RouteRow({
               {pool.running}/{pool.maxConcurrency} 在跑
             </span>
           ) : null}
-          {offline && info ? <span className="text-ink-stall">离线</span> : null}
+          {status && status.kind !== 'online' ? (
+            <span
+              className={cn(
+                'min-w-0 max-w-full truncate',
+                status.tone === 'fail' ? 'text-ink-fail' : 'text-ink-stall',
+              )}
+              title={status.detail}
+            >
+              {status.label}：{status.detail}
+            </span>
+          ) : null}
           {channelOff ? <span className="text-ink-stall">渠道已下架</span> : null}
           {problem ? <span className="text-ink-fail">{problem}</span> : null}
         </div>

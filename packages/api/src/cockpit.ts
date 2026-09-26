@@ -295,17 +295,8 @@ export function cockpitRoutes(deps: Deps, waiters: AskWaiters, relay: SseRelay):
       (stage) => byStage.get(stage) ?? { stage, routeIds: [], pinned: false },
     );
     const hardBans = HARD_BANS.map(({ id, reason }) => ({ id, reason }));
-    const routeProbeNotWired = await notWiredView(store, deps.notWired?.routeProbe);
-    return reply(c, RoutingResponse, {
-      channels,
-      pools,
-      models,
-      routes,
-      stages,
-      hardBans,
-      bans,
-      ...(routeProbeNotWired ? { routeProbeNotWired } : {}),
-    });
+    // 路由在线状态就是库里探针的结论（routes.alive、probe_*，#129），原样给驾驶舱
+    return reply(c, RoutingResponse, { channels, pools, models, routes, stages, hardBans, bans });
   });
 
   app.put(WebRoutes.updateStagePolicy.path, async (c) => {

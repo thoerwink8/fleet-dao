@@ -235,7 +235,9 @@ export const RULES: readonly FailureRule[] = [
       'auth',
     ],
     // 只认说「要重新登录」的整句：原文里随便一个带 /login 的网址不能让整个池停下。
-    text: /not logged in|please run \/login|重新登录|完成登录|token (?:has )?expired|invalid (?:x-)?api[ _-]?key|authentication (?:failed|required)|unauthori[sz]ed|unauthenticated/i,
+    // reclaude 没有有效登录时不报错退出，而是开始设备授权、打出授权链接后一直等，直到起不来被强杀（法国实测 2026-09-26）：
+    // 它 stderr 里那句「no valid login detected」就是登录失效，不能按「会话起不来」原路重起。
+    text: /not logged in|please run \/login|no valid login detected|重新登录|完成登录|token (?:has )?expired|invalid (?:x-)?api[ _-]?key|authentication (?:failed|required)|unauthori[sz]ed|unauthenticated/i,
     statuses: [401],
     ladder: ['swapRoute', 'park'],
     avoid: { scope: 'pool', shared: true, until: 'none' },
