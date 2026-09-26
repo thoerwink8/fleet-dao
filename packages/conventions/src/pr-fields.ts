@@ -1,8 +1,9 @@
-// PR 必填栏：恰好一个类别标签、挂一个里程碑；正文「对应计划」写明 plan.md 的哪一条，「specs」写需求目录或「不适用」，
-// 「档位」写档位加理由。每缺一样给一句话：缺什么、怎么补。design 第七节「标签和里程碑不靠人记得贴」。
+// PR 必填栏：恰好一个类别标签、挂一个里程碑（版本，如 v1 Fusion 接活；旧的 P 阶段仍认）；正文「对应计划」写
+// 版本全名、#<单号>、未排期，或 plan.md 的哪一条（旧写法），「specs」写需求目录或「不适用」，「档位」写档位加理由。
+// 每缺一样给一句话：缺什么、怎么补——没挂里程碑但「对应计划」写着未排期就不提醒。design 第七节「标签和里程碑不靠人记得贴」。
 // 纯判断，不碰网络：合并闸（merge-gate.ts）现读 PR 和仓里的文件后调这里；这些只是提醒，不挡合并（创始人 2026-09-26）。
 
-import { isKindLabel, KIND_LABELS, milestonePhase } from './labels.ts';
+import { isKindLabel, KIND_LABELS, milestonePhase, milestoneVersion } from './labels.ts';
 import { parseMd, stripComments } from './markdown.ts';
 import { parseTier, TIER_COLUMN } from './merge-gates.ts';
 import { findItem, itemExample, type PlanPhase, parsePlanRefs, phaseRange, planPhases } from './plan.ts';
@@ -91,10 +92,13 @@ export function checkPrFields(pr: PrFacts, repo: RepoFacts): string[] {
     problems.push(`类别标签贴了 ${kinds.length} 个（${kinds.join('、')}）：只留一个。`);
   }
 
+  const cols = prColumns(pr.body);
   let milestone: number | undefined;
   if (pr.milestone === null || !pr.milestone.trim()) {
-    problems.push(`没挂里程碑：在 PR 右边的 Milestone 里挑这块活属于的阶段（${range}）。`);
-  } else {
+    if (!isUnscheduled(cols.get(PLAN_COLUMN))) {
+      problems.push('没挂里程碑：在 PR 右边的 Milestone 里挂上对应单所在的版本；对应的单未排期就不用挂。');
+    }
+  } else if (milestoneVersion(pr.milestone) === undefined) {
     milestone = milestonePhase(pr.milestone);
     if (milestone === undefined) {
       problems.push(`里程碑「${pr.milestone}」认不出是哪个阶段：换成 plan.md 的阶段（${range}）之一。`);
@@ -104,12 +108,16 @@ export function checkPrFields(pr: PrFacts, repo: RepoFacts): string[] {
     }
   }
 
-  const cols = prColumns(pr.body);
   problems.push(...checkPlan(cols.get(PLAN_COLUMN), milestone, repo, range));
   problems.push(...checkSpecs(cols.get(SPECS_COLUMN), repo));
   const tier = parseTier(cols.get(TIER_COLUMN));
   if ('problem' in tier) problems.push(tier.problem);
   return problems;
+}
+
+/** 「对应计划」写「未排期」（可以带别的字）：这一单本来就没排版本。判不了（没这一栏、写的是别的）时不算未排期。 */
+function isUnscheduled(value: string | undefined): boolean {
+  return (value ?? '').replace(/`/g, '').trim().startsWith('未排期');
 }
 
 function checkPlan(
@@ -124,10 +132,12 @@ function checkPlan(
     ];
   }
   if (!value) return ['「对应计划」一栏是空的：写 plan.md 的阶段加那一条的原话开头，比如 P1「工作流」。'];
+  const v = value.replace(/`/g, '').trim();
+  if (v.startsWith('未排期') || /^#\d+/.test(v) || milestoneVersion(v) !== undefined) return [];
   const refs = parsePlanRefs(value);
   if (refs.length === 0) {
     return [
-      `「对应计划」写的「${oneLine(value)}」认不出是 plan.md 哪一条：要写成 对应计划：P1「工作流」，阶段加那一条的原话开头。`,
+      `「对应计划」写的「${oneLine(value)}」认不出：写版本全名、#<单号>、未排期，或旧写法 P1「工作流」（阶段加那一条的原话开头）。`,
     ];
   }
   const problems: string[] = [];
@@ -159,9 +169,9 @@ function checkPlan(
 }
 
 /**
- * 只核「对应计划」这一栏的值（不看里程碑）：阶段在 plan.md 里有、引号里是那一阶段某一条的原话——和 PR 上
- * pr-fields 判的是同一套。引擎收写需求文档的会话交回来的「对应计划：」那一行时先核一遍：开出来的 PR 这一栏红了，
- * 会话改不了正文。plan.md 里一个阶段都认不出也算一条问题，不当成过了。
+ * 只核「对应计划」这一栏的值（不看里程碑）：版本全名、#<单号>、未排期都直接算过；旧写法要阶段在 plan.md 里有、
+ * 引号里是那一阶段某一条的原话——和 PR 上 pr-fields 判的是同一套。引擎收写需求文档的会话交回来的「对应计划：」
+ * 那一行时先核一遍：开出来的 PR 这一栏红了，会话改不了正文。plan.md 里一个阶段都认不出也算一条问题，不当成过了。
  */
 export function checkPlanValue(value: string, planMarkdown: string): string[] {
   const phases = planPhases(parseMd(PLAN_DOC, planMarkdown));

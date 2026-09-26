@@ -51,9 +51,17 @@ export {
   issueNew,
   issueSummary,
   specsDoc,
+  specsHint,
   USAGE,
 } from './issue-new.ts';
-export { isKindLabel, KIND_LABELS, type KindLabel, milestonePhase } from './labels.ts';
+export {
+  isKindLabel,
+  KIND_LABELS,
+  type KindLabel,
+  MOTHER_LABEL,
+  milestonePhase,
+  milestoneVersion,
+} from './labels.ts';
 export { type GateResult, type GitHubReads, gateGitHub, gatePr, runMergeGate } from './merge-gate.ts';
 export {
   GATE_CONTEXT,
