@@ -33,10 +33,12 @@ export {
 } from './doc-pointers.ts';
 export {
   type GitHubCommenter,
+  type GitHubPrLabeler,
   type GitHubReader,
   type IssueInfo,
   liveGitHub,
   type MilestoneInfo,
+  type PullInfo,
   repoName,
   toIssue,
 } from './github-api.ts';
@@ -69,4 +71,13 @@ export {
   runPrFields,
   SPECS_COLUMN,
 } from './pr-fields.ts';
+export {
+  ISSUE_COLUMN,
+  type LabelPlan,
+  type LabelRun,
+  linkedIssue,
+  type PrState,
+  planLabels,
+  runPrLabels,
+} from './pr-labels.ts';
 export { fsRepo, type RepoView } from './repo.ts';

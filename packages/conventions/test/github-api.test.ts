@@ -201,3 +201,59 @@ describe('读 GitHub：单上的留言（欠账的定时任务用）', () => {
     ).rejects.toThrow('读 #1 的留言，有一条认不出（body）');
   });
 });
+
+describe('读写 GitHub：PR 补贴用（pr-labels）', () => {
+  it('读 PR：标题、正文、标签、里程碑；正文是 null 当空', async () => {
+    const { impl } = fakeFetch({
+      [`${API}/pulls/96`]: () => json({ ...row(96), body: '正文' }),
+      [`${API}/pulls/97`]: () => json({ ...row(97), body: null }),
+    });
+    const gh = liveGitHub('o/r', { GITHUB_TOKEN: TOKEN }, { fetchImpl: impl });
+    expect(await gh.pull(96)).toEqual({
+      number: 96,
+      title: '单 96',
+      body: '正文',
+      labels: ['需求'],
+      milestone: 'P1 核心闭环',
+    });
+    expect((await gh.pull(97)).body).toBe('');
+  });
+
+  it('读 PR：404、502、正文认不出、号对不上，一律抛', async () => {
+    const { impl } = fakeFetch({
+      [`${API}/pulls/1`]: () => new Response('{}', { status: 404 }),
+      [`${API}/pulls/2`]: () => new Response('{}', { status: 502 }),
+      [`${API}/pulls/3`]: () => json({ ...row(3), body: 5 }),
+      [`${API}/pulls/4`]: () => json({ ...row(5), body: '' }),
+    });
+    const gh = liveGitHub('o/r', { GITHUB_TOKEN: TOKEN }, { fetchImpl: impl });
+    await expect(gh.pull(1)).rejects.toThrow('读 PR #1 ，GitHub 回了 404');
+    await expect(gh.pull(2)).rejects.toThrow('GitHub 回了 502');
+    await expect(gh.pull(3)).rejects.toThrow('认不出（body）');
+    await expect(gh.pull(4)).rejects.toThrow('要读 PR #4，读回来的是 #5');
+  });
+
+  it('加标签用 POST、挂里程碑用 PATCH，返回 GitHub 回的样子；回错码、认不出就抛', async () => {
+    const sent: { url: string; method: string | undefined; body: unknown }[] = [];
+    const impl = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      sent.push({ url, method: init?.method, body: JSON.parse(String(init?.body)) });
+      if (url === `${API}/issues/96/labels`) return json([{ name: 'x' }, { name: '杂项' }]);
+      if (url === `${API}/issues/96`) return json(row(96));
+      if (url === `${API}/issues/98/labels`) return new Response('{}', { status: 403 });
+      if (url === `${API}/issues/99/labels`) return json({ message: 'x' });
+      if (url === `${API}/issues/98`) return new Response('{}', { status: 422 });
+      throw new Error(`没料到的请求 ${url}`);
+    }) as typeof fetch;
+    const gh = liveGitHub('o/r', { GITHUB_TOKEN: TOKEN }, { fetchImpl: impl });
+    expect(await gh.addLabel(96, '杂项')).toEqual(['x', '杂项']);
+    expect(await gh.setMilestone(96, 2)).toBe('P1 核心闭环');
+    expect(sent).toEqual([
+      { url: `${API}/issues/96/labels`, method: 'POST', body: { labels: ['杂项'] } },
+      { url: `${API}/issues/96`, method: 'PATCH', body: { milestone: 2 } },
+    ]);
+    await expect(gh.addLabel(98, '杂项')).rejects.toThrow('在给 PR #98 加标签「杂项」时，GitHub 回了 403');
+    await expect(gh.addLabel(99, '杂项')).rejects.toThrow('GitHub 回的认不出');
+    await expect(gh.setMilestone(98, 2)).rejects.toThrow('在给 PR #98 挂里程碑时，GitHub 回了 422');
+  });
+});
