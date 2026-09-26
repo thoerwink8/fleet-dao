@@ -396,20 +396,22 @@ describe('推之前把最新主线并进会话的树', () => {
     expect(calls.pushBranch ?? []).toHaveLength(0);
   });
 
-  it('并的时候 git 自己出错（.git/index.lock 被占着）：报 GIT_FAILED（可重试，不当成冲突），树不动、不推', async () => {
+  it('并的时候 git 自己出错（.git/index.lock 被占着）：报 GIT_FAILED（可重试，不当成冲突），以「并」开头，树里留下的照实写，不推', async () => {
     const { ports, calls, trees } = setup();
     const dir = await seededTree(trees);
     const head = commitIn(dir, 'login.ts');
-    advanceMain('b.ts', 'export const b = 2;\n');
+    const main = advanceMain('b.ts', 'export const b = 2;\n');
     writeFileSync(join(dir, '.git', 'index.lock'), '');
     const err = await ports
       .pushBranch({ taskId: 't1', repo, worktreePath: dir, branch: BRANCH, head }, ctx)
       .catch((e: unknown) => e);
     expect(err).toMatchObject({ code: 'GIT_FAILED', retryable: true });
-    // 原文随 git 的版本、配置不同（锁文件在、或 autostash 写不了索引）：只认是「并」这一步没做成
-    expect((err as Error).message).toMatch(/^并 [0-9a-f]{7}：/);
+    // git 2.45 及以前（法国的 2.43）写不了索引时留下 MERGE_HEAD、撤销又被同一把锁挡住；2.46 起直接退出、什么都不留。
+    // 原文也随版本、配置不同（锁文件在、或 autostash 写不了索引）。哪种都以「并」这一步开头，留没留下 MERGE_HEAD 和报的对得上
+    const message = (err as Error).message;
+    expect(message).toMatch(new RegExp(`^并 ${main.slice(0, 7)}：`));
+    expect(message.includes('还留着没并完的合并')).toBe(existsSync(join(dir, '.git', 'MERGE_HEAD')));
     expect(git(dir, 'rev-parse', 'HEAD')).toBe(head);
-    expect(existsSync(join(dir, '.git', 'MERGE_HEAD'))).toBe(false);
     expect(existsSync(join(dir, 'b.ts'))).toBe(false);
     expect(calls.pushBranch ?? []).toHaveLength(0);
   });
