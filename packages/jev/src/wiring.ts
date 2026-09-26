@@ -1,7 +1,8 @@
 // 本机的判断题接没接、接了用哪个后端、调不调得通：引擎（提问）和驾驶舱后端（/healthz 的 judge 项）共用这一份，两边判法才一致。
 // 只有一种算「未接」：没写 FLEET_JEV_CONFIG、默认位置上也没有配置文件。别的一律算坏了、要报出来，不许当成没配悄悄不问：
 // FLEET_JEV_CONFIG 明写的文件不在、文件在却读不到（权限不够、是个目录）、内容认不出、调度台判断阶段没有开着的路由、钥匙读不到。
-// 判断阶段挂的路由不看 alive：alive 只由路由探针写（#129 还没做），全是「不在线」；问不通会记成没判出来，照默认走。
+// 判断阶段挂的路由不看 alive：alive 只由路由探针写（#129），而 Jev 是按量计费的渠道，探针按规矩不探、一直写「不在线」
+// （design 第九节「路由探针」）。在这里看 alive，Jev 就永远问不到；问不通会记成没判出来，照默认走。
 import { type Stats, statSync } from 'node:fs';
 import { type Db, routes, stagePolicyRoutes } from '@fleet-dao/db';
 import { and, asc, eq } from 'drizzle-orm';
