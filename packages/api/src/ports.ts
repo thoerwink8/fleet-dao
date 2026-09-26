@@ -52,6 +52,19 @@ export interface User {
   githubId?: number | undefined;
 }
 
+/**
+ * 账密登录要用的几列（#120）。不放进 User：密码哈希不该跟着用户信息到处传。
+ * failedLogins / lockedUntil 是按用户名的防暴力计数：连续输错到上限就锁一段时间，锁期内对的密码也不放。
+ */
+export interface PasswordCredentials {
+  userId: string;
+  username?: string | undefined;
+  passwordHash?: string | undefined;
+  passwordChangedAt?: string | undefined;
+  failedLogins: number;
+  lockedUntil?: string | undefined;
+}
+
 /** 谁做的。user = 驾驶舱用户；ai = AI 帅位；engine = 引擎；agent = 会话里的 AI。 */
 export interface Actor {
   kind: 'user' | 'ai' | 'engine' | 'agent';
@@ -231,6 +244,30 @@ export interface UserStore {
   getUser(id: string): Promise<User | null>;
   findUserByFeishu(ids: { openId: string; unionId?: string | undefined }): Promise<User | null>;
   listUsers(): Promise<User[]>;
+  /** 按账密登录的用户名找人，大小写不敏感。 */
+  findUserByUsername(username: string): Promise<User | null>;
+  /** 没这个人（含编号不是 uuid）是 null。 */
+  getPasswordCredentials(userId: string): Promise<PasswordCredentials | null>;
+  /**
+   * 设或改用户名、密码哈希（给了哪样改哪样；给了哈希就记改密时间 at），同时把输错计数和锁清零。和操作记录同一事务。
+   * 用户名大小写不敏感地被别人占了：username_taken，什么都不改。
+   */
+  setPasswordCredentials(
+    input: { userId: string; username?: string | undefined; passwordHash?: string | undefined; at: Date },
+    audit: NewAuditEntry,
+  ): Promise<'ok' | 'not_found' | 'username_taken'>;
+  /**
+   * 记一次输错（一条语句原子地做）：锁已过期的先清零再记；记到 maxFails 次就锁到 at + lockMs、计数清零；
+   * 正锁着的什么都不改。返回现在锁到什么时候（没锁着 = 没有 lockedUntil）。没这个人返回 null。
+   */
+  recordPasswordFailure(input: {
+    userId: string;
+    at: Date;
+    maxFails: number;
+    lockMs: number;
+  }): Promise<{ lockedUntil?: string | undefined } | null>;
+  /** 登录成功：输错计数和锁清零。 */
+  recordPasswordSuccess(userId: string): Promise<void>;
 }
 
 export interface BoardStore {

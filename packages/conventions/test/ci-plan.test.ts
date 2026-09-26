@@ -184,11 +184,15 @@ describe('按改动算要跑什么', () => {
   it('测试会读的包外文件：AGENTS.md、docs/ops.md、agents/、PR 模板、.gitignore 各自带上读它的包', () => {
     expect(pr('AGENTS.md')).toMatchObject({
       lint: false,
-      deploy: 'all',
+      deploy: 'none',
       tests: [{ args: ['packages/agents-sync/'] }],
     });
     expect(pr('docs/ops.md')).toMatchObject({ deploy: 'ops', tests: [{ name: 'db' }] });
     expect(testArgs(pr('agents/skills/discuss/SKILL.md'))).toEqual(['agents/', 'packages/agents-sync/']);
+    // 只改说明文字不拖上 2 分钟的 deploy/test（#121 只改 AGENTS.md 和 skill 就跑了 2 分 13 秒）
+    expect(pr('agents/skills/discuss/SKILL.md').deploy).toBe('none');
+    expect(pr('AGENTS.md', 'agents/skills/discuss/SKILL.md', 'docs/design.md').deploy).toBe('none');
+    expect(pr('AGENTS.md', 'docs/ops.md').deploy).toBe('ops');
     expect(testArgs(pr('.github/pull_request_template.md'))).toEqual(
       expect.arrayContaining(['packages/conventions/', 'packages/github/']),
     );

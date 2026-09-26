@@ -39,6 +39,7 @@ import type { z } from 'zod';
 import { answerAsk } from './answer-ask.ts';
 import { meBody } from './auth.ts';
 import type { AskWaiters } from './changes.ts';
+import { registerCredentialRoutes } from './credentials.ts';
 import { registerDemoRoutes } from './demo.ts';
 import type { Deps } from './deps.ts';
 import { ApiError, readJson, readQuery, reply } from './http.ts';
@@ -431,6 +432,7 @@ export function cockpitRoutes(deps: Deps, waiters: AskWaiters, relay: SseRelay):
     return reply(c, UpdateSettingResponse, { setting });
   });
 
+  registerCredentialRoutes(app, deps);
   registerDemoRoutes(app, deps, actorOf);
 
   /** 表里每一项都返回；没设过的 version=0、value=null。 */

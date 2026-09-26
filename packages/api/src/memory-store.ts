@@ -49,6 +49,7 @@ import {
   type NotificationRecord,
   type Page,
   type PageRequest,
+  type PasswordCredentials,
   type PullRequestRecord,
   type QuotaWindowRecord,
   REPO_NOT_MANAGED,
@@ -209,6 +210,8 @@ export interface MemoryData {
   feishuCards: FeishuCardRow[];
   /** 收到的 GitHub 事件（github_events），按投递编号。 */
   githubEvents: Map<string, GitHubDelivery>;
+  /** 账密登录的几列（库里是 users 表上的列），按用户编号；没设过的人不在里面。 */
+  credentials: Map<string, PasswordCredentials>;
 }
 
 export function emptyData(): MemoryData {
@@ -241,6 +244,7 @@ export function emptyData(): MemoryData {
     feishuOutbox: [],
     feishuCards: [],
     githubEvents: new Map(),
+    credentials: new Map(),
   };
 }
 
@@ -558,6 +562,59 @@ export function createMemoryStore(
     },
     async listUsers() {
       return data.users;
+    },
+    async findUserByUsername(username) {
+      const want = username.toLowerCase();
+      for (const c of data.credentials.values()) {
+        if (c.username?.toLowerCase() === want) return data.users.find((u) => u.id === c.userId) ?? null;
+      }
+      return null;
+    },
+    async getPasswordCredentials(userId) {
+      if (!data.users.some((u) => u.id === userId)) return null;
+      return { ...(data.credentials.get(userId) ?? { userId, failedLogins: 0 }) };
+    },
+    async setPasswordCredentials({ userId, username, passwordHash, at }, entry) {
+      if (!data.users.some((u) => u.id === userId)) return 'not_found';
+      if (username !== undefined) {
+        const want = username.toLowerCase();
+        for (const c of data.credentials.values()) {
+          if (c.userId !== userId && c.username?.toLowerCase() === want) return 'username_taken';
+        }
+      }
+      const current = data.credentials.get(userId) ?? { userId, failedLogins: 0 };
+      const next: PasswordCredentials = {
+        ...current,
+        ...(username !== undefined && { username }),
+        ...(passwordHash !== undefined && { passwordHash, passwordChangedAt: at.toISOString() }),
+        failedLogins: 0,
+        lockedUntil: undefined,
+      };
+      // 和库里的约束 users_password_needs_username 一样：有密码就得有用户名
+      if (next.passwordHash !== undefined && next.username === undefined) {
+        throw new Error('users_password_needs_username：设密码之前要先有用户名');
+      }
+      checkAudit(entry);
+      data.credentials.set(userId, next);
+      audit(entry);
+      return 'ok';
+    },
+    async recordPasswordFailure({ userId, at, maxFails, lockMs }) {
+      if (!data.users.some((u) => u.id === userId)) return null;
+      const c = data.credentials.get(userId) ?? { userId, failedLogins: 0 };
+      const lockedMs = c.lockedUntil === undefined ? undefined : Date.parse(c.lockedUntil);
+      if (lockedMs !== undefined && lockedMs > at.getTime()) return { lockedUntil: c.lockedUntil };
+      const count = (lockedMs === undefined ? c.failedLogins : 0) + 1;
+      const next: PasswordCredentials =
+        count >= maxFails
+          ? { ...c, failedLogins: 0, lockedUntil: new Date(at.getTime() + lockMs).toISOString() }
+          : { ...c, failedLogins: count, lockedUntil: undefined };
+      data.credentials.set(userId, next);
+      return { lockedUntil: next.lockedUntil };
+    },
+    async recordPasswordSuccess(userId) {
+      const c = data.credentials.get(userId);
+      if (c) data.credentials.set(userId, { ...c, failedLogins: 0, lockedUntil: undefined });
     },
 
     // —— 看板 ——
