@@ -94,6 +94,17 @@ describe('checkDone', () => {
     }
   });
 
+  it('【失败】写码会话开工时没记下测试命令（加这一列之前开的会话）：退回，不拿仓此刻的命令顶；测试是绿的也不收', () => {
+    const { testCommand: _none, ...noCommand } = base;
+    const v = checkDone({ ...noCommand, request: req(), pr: null, tests: [test(true)] });
+    expect(v).toMatchObject({ ok: false, status: 422, code: 'done_rejected' });
+    expect(reasonsOf(v)).toBe(
+      '这次会话开工时没记下要跑的测试命令（加这一列之前开的会话），核对不了测试：别再交，用 fleet blocked 说明，由引擎重开一轮',
+    );
+    // 不写码的阶段没有测试命令照常收
+    expect(checkDone({ ...noCommand, stage: 'spec', request: req(), pr: null, tests: [] }).ok).toBe(true);
+  });
+
   it('写需求文档、调研这类活不要求测试证据', () => {
     expect(
       checkDone({

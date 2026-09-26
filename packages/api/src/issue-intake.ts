@@ -3,7 +3,10 @@
 // 只有「重开」「编辑」这两件边沿上的事只认 webhook 带来的动作：补收看不出是谁、什么时候改的。
 // 每一步都能重放：任务行按（仓, issue 号）唯一，起工作流按工作流编号去重，叫停重发引擎回「已经在叫停」。
 // 抛错 = 没处理成：这条投递记成出错，对账重放时整条再来一遍（GitHub 自己不重投）。
+// 拉起之前看这个仓的流程配置副本（docs/decisions/0003-fusion-flow.md 第 9 条）：认不出、太旧就停派，这条记成等着，
+// 副本好了由对账重放再拉起（判法在 @fleet-dao/core 的 replica.ts）。
 import { randomUUID } from 'node:crypto';
+import { replicaVerdict } from '@fleet-dao/core';
 import { humanPart } from '@fleet-dao/github';
 import { AnswerAskRequest, type Repo, requirementWorkflowId, type Task } from '@fleet-dao/shared';
 import { z } from 'zod';
@@ -103,7 +106,7 @@ export interface IssueIntake {
 }
 
 export function createIssueIntake(
-  deps: Pick<Deps, 'store' | 'workflows' | 'requirements' | 'log'>,
+  deps: Pick<Deps, 'store' | 'workflows' | 'requirements' | 'log' | 'now'>,
 ): IssueIntake {
   const { store, log } = deps;
 
@@ -218,7 +221,20 @@ export function createIssueIntake(
       notes.push(`workflow=${decision}`);
       return notes.join(', ');
     }
-    const { autoDispatchSince: _switch, ...repoOnly } = repo;
+    // 这个项目停派（流程配置认不出、从没同步过、太久没同步成）：不拉起，也不丢——记成等着（不占自动重放的次数），
+    // 每轮对账先同步副本、再重放，副本好了那一轮就拉起
+    const flow = replicaVerdict(repo.flow, deps.now());
+    if (!flow.ok) {
+      log.warn('流程配置副本不能用，这个项目停派：这张单等副本好了由对账重放再拉起', {
+        deliveryId: event.deliveryId,
+        repo: event.repo,
+        issueNumber: issue.number,
+        why: flow.why,
+      });
+      throw new RetryLaterError(`这个项目停派：${flow.why}。副本好了由对账重放再拉起`);
+    }
+    // 开关、副本都不进工作流的历史
+    const { autoDispatchSince: _switch, flow: _flow, ...repoOnly } = repo;
     const started = await deps.requirements.start({
       schemaVersion: 1,
       taskId: task.id,

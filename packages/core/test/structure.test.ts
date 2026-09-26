@@ -25,6 +25,7 @@ describe('core 只放纯判断', () => {
       'config.ts',
       'flow.ts',
       'index.ts',
+      'replica.ts',
       'verdict.ts',
     ]);
   });

@@ -1,6 +1,7 @@
 // 内存里的 Store：测试和本地开发用，也是 ports.ts 语义的参照实现。数据按 Postgres 的表来摆（packages/db 的 schema），
 // 行为照库的约束来（比较后再改、和操作记录同一「事务」、同一会话同一句追问只一条、ok=false 的操作记录必须带原因……），
 // 和 pg-store.ts 过同一套契约测试（test/store-contract.ts）。onChange 模拟数据库的 NOTIFY fleet_changes。
+import { type FlowReplica, UNSYNCED_REPLICA } from '@fleet-dao/core';
 import type {
   Ban,
   Channel,
@@ -173,8 +174,11 @@ function changesOutboxRow(row: FeishuOutboxRow, next: Partial<FeishuOutboxRow>):
       : value !== before;
   });
 }
-/** repos 表的一行：多一个自动派活开关（打开的时刻，不填 = 关着）。列仓的接口不带它。 */
-export type RepoRecord = Repo & { autoDispatchSince?: string | undefined };
+/**
+ * repos 表的一行：多一个自动派活开关（打开的时刻，不填 = 关着）和流程配置副本（不填 = 还没同步过，和库里刚加上这几列
+ * 一样按停派算）。列仓的接口不带这两样。
+ */
+export type RepoRecord = Repo & { autoDispatchSince?: string | undefined; flow?: FlowReplica | undefined };
 
 /** 和库里的表一一对应（去掉了库自己算的列）。 */
 export interface MemoryData {
@@ -271,7 +275,7 @@ const RECENT_TERMINAL_MS = 7 * 24 * 60 * 60_000;
 /** 自增编号补零：按字面比较就是按数值比较（和库里时间线事件编号的写法一致）。 */
 const seq15 = (n: string | number): string => String(n).padStart(15, '0');
 
-const repoOnly = ({ autoDispatchSince: _switch, ...repo }: RepoRecord): Repo => repo;
+const repoOnly = ({ autoDispatchSince: _switch, flow: _flow, ...repo }: RepoRecord): Repo => repo;
 
 /** 给出去的是副本：调用方改了不影响库里的。对象版本按对象排（和库版一样）。 */
 const copyDelivery = (e: GitHubDelivery): GitHubDelivery => ({
@@ -959,7 +963,8 @@ export function createMemoryStore(
         subtaskId: run.subtaskId,
         stage: run.stage,
         repoId: task.repoId,
-        testCommand: repo.testCommand,
+        // 和库里一样认起会话时记下的那条，不读仓此刻的
+        testCommand: run.testCommand,
         branch: run.branch,
         acceptance: task.acceptance ?? [],
         endedAt: run.endedAt,
@@ -1169,7 +1174,13 @@ export function createMemoryStore(
       const repo = data.repos.find(
         (r) => r.owner.toLowerCase() === owner.toLowerCase() && r.name.toLowerCase() === name.toLowerCase(),
       );
-      return repo ? { ...repoOnly(repo), autoDispatchSince: repo.autoDispatchSince ?? null } : null;
+      return repo
+        ? {
+            ...repoOnly(repo),
+            autoDispatchSince: repo.autoDispatchSince ?? null,
+            flow: repo.flow ?? UNSYNCED_REPLICA,
+          }
+        : null;
     },
     async findTaskByIssue(repoId, issueNumber) {
       return data.tasks.find((t) => t.repoId === repoId && t.issueNumber === issueNumber) ?? null;

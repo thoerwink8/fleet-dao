@@ -507,6 +507,65 @@ describe('0007：法国只留一个会话用户（创始人 2026-09-26）', () =
   );
 });
 
+describe('0011：流程配置副本、会话记下的测试命令（只加列）', () => {
+  const entries = [...journal.entries].sort((a, b) => a.idx - b.idx);
+  const target = entries.findIndex((e) => e.tag === '0011_flow_replica');
+  const runMigration = async (pg: PGlite, tag: string) => {
+    const text = readFileSync(join(MIGRATIONS_FOLDER, `${tag}.sql`), 'utf8');
+    for (const statement of text.split('--> statement-breakpoint')) await pg.exec(statement);
+  };
+
+  it(
+    '升级时已有的仓一律是「还没同步过」（派活前按停派算，等对账读成一次），手写的 test_command 照留；已有的会话行没记测试命令',
+    async () => {
+      expect(target).toBeGreaterThan(0);
+      const pg = new PGlite();
+      try {
+        for (const e of entries.slice(0, target)) await runMigration(pg, e.tag);
+        await pg.exec(`
+        insert into repos (owner, name, test_command) values ('acme', 'widgets', 'pnpm check');
+        insert into families (id, display_name, vendor) values ('claude', 'Claude', 'Anthropic');
+        insert into channels (id, name, billing) values ('sub', '订阅', 'subscription');
+        insert into pools (id, channel_id, max_concurrency) values ('relay', 'sub', 5);
+        insert into models (id, family, display_name) values ('opus', 'claude', 'Opus');
+        insert into routes (id, channel_id, pool_id, model_id, host_id) values ('r1', 'sub', 'relay', 'opus', 'claude-code');
+        insert into session_runs (stage, route_id, why_route) values ('execute', 'r1', '测试');
+      `);
+        await runMigration(pg, '0011_flow_replica');
+
+        expect(
+          (
+            await pg.query(
+              `select test_command, flow_config, flow_source, flow_commit, flow_synced_at, flow_error, flow_checked_at, flow_unread from repos`,
+            )
+          ).rows,
+        ).toEqual([
+          {
+            test_command: 'pnpm check',
+            flow_config: null,
+            flow_source: null,
+            flow_commit: null,
+            flow_synced_at: null,
+            flow_error: null,
+            flow_checked_at: null,
+            flow_unread: null,
+          },
+        ]);
+        expect((await pg.query(`select test_command from session_runs`)).rows).toEqual([
+          { test_command: null },
+        ]);
+        // 只有配置、没有读自哪个提交、什么时候读的：进不了库
+        await expect(pg.exec(`update repos set flow_config = '{"formatVersion": 1}'::jsonb`)).rejects.toThrow(
+          /repos_flow_synced_together/,
+        );
+      } finally {
+        await pg.close();
+      }
+    },
+    TEST_DB_TIMEOUT_MS,
+  );
+});
+
 describe('测试库', () => {
   it(
     '在内存里，两份测试库互相看不见对方的数据',

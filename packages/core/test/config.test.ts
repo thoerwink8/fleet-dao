@@ -53,6 +53,18 @@ describe('流程配置', () => {
     ]);
   });
 
+  it('fleet-dao 自己仓根的 .fleet/flow.json 认得出：测试命令是只跑改动影响到的那条', () => {
+    const own = readFileSync(new URL('../../../.fleet/flow.json', import.meta.url), 'utf8');
+    const got = ok(resolveFlowConfig(org, { kind: 'text', text: own }));
+    expect(got.usedOrgDefault).toBe(false);
+    expect(got.config.testCommand).toBe('pnpm test:changed');
+  });
+
+  it('全组织默认里没有测试命令：项目不写，合并出来的就没有（不拿别的仓的命令顶）', () => {
+    const got = ok(resolveFlowConfig(org, project({ formatVersion: 1, uiPaths: ['packages/web/'] })));
+    expect(got.config.testCommand).toBeUndefined();
+  });
+
   it('单上临时指定的配置优先', () => {
     const got = ok(resolveFlowConfig(org, { kind: 'missing' }));
     expect(profileFor(got.config, '需求', 'single')).toMatchObject({ ok: true, name: 'single' });
@@ -107,6 +119,13 @@ describe('流程配置', () => {
       { kind: 'missing' },
       'org',
       /whatever|Unrecognized/i,
+    ],
+    [
+      '全组织默认里写了测试命令（会顶掉没写的项目）',
+      orgWith((o) => (o.testCommand = 'pnpm check')),
+      { kind: 'missing' },
+      'org',
+      /测试命令只能写在各项目仓里/,
     ],
     ['项目配置读不了', org, { kind: 'unreadable', error: 'EIO' }, 'project', /读不了（EIO）/],
     ['项目配置不是 JSON', org, { kind: 'text', text: 'formatVersion: 1' }, 'project', /不是 JSON/],

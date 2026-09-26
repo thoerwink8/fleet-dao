@@ -666,6 +666,68 @@ describe('评论 → 回答追问', () => {
   });
 });
 
+describe('流程配置副本不能用：这个项目停派（0003 第 9 条，判法在 core 的 replica.ts）', () => {
+  function canary(h: ReturnType<typeof setup>['h']) {
+    const repo = h.store.data.repos.find((r) => r.id === IDS.repo);
+    if (!repo) throw new Error('样例里没有 canary');
+    return repo;
+  }
+
+  it('【失败】副本认不出：建了任务行但不拉起，投递记成等着（503），原因写明；改好、对账同步之后重放就拉起', async () => {
+    const { h, task } = setup();
+    canary(h).flow = {
+      syncedAt: at(-5),
+      error: '项目配置 .fleet/flow.json：不是 JSON（提交 0123456）',
+      unread: null,
+      testCommand: 'pnpm test:changed',
+    };
+    const res = await deliver(h, 'issues', issuesEvent('opened'), { delivery: 'blocked' });
+    expect(res.status).toBe(503);
+    expect(await h.store.getDelivery('blocked')).toMatchObject({
+      status: 'waiting',
+      reason: expect.stringContaining('这个项目停派：流程配置认不出：项目配置 .fleet/flow.json：不是 JSON'),
+    });
+    expect((await task())?.state).toBe('queued');
+    expect(h.starts).toEqual([]);
+    expect(h.logs.some((l) => l.level === 'warn' && l.message.includes('这个项目停派'))).toBe(true);
+
+    // 仓里改好了：对账把副本同步好，同一轮里重放等着的投递——这回拉起，不丢这次派活
+    canary(h).flow = { syncedAt: at(0), error: null, unread: null, testCommand: 'pnpm test:changed' };
+    expect(await createGitHubIntake(h.deps).replay('blocked')).toMatchObject({
+      verdict: 'accepted',
+      note: 'task=exists, workflow=started',
+    });
+    expect(h.starts).toHaveLength(1);
+  });
+
+  it.each<[string, MemoryData['repos'][number]['flow'], RegExp]>([
+    ['从没同步过（刚加上副本这几列、对账还没读成过）', undefined, /还没从仓里同步过流程配置/],
+    [
+      '太久没同步成',
+      { syncedAt: at(-50), error: null, unread: 'GitHub 回 502', testCommand: 'pnpm test:changed' },
+      /50 分钟没同步成.*最近一次没查成：GitHub 回 502/,
+    ],
+  ])('【失败】副本%s：不拉起，投递记成等着，原因写明', async (_name, flow, why) => {
+    const { h } = setup();
+    canary(h).flow = flow;
+    const res = await deliver(h, 'issues', issuesEvent('opened'), { delivery: 'd1' });
+    expect(res.status).toBe(503);
+    expect(await h.store.getDelivery('d1')).toMatchObject({
+      status: 'waiting',
+      reason: expect.stringMatching(why),
+    });
+    expect(h.starts).toEqual([]);
+  });
+
+  it('开关关着的仓不看副本：照旧只收单，不记成等着', async () => {
+    const off = setup({ switchOn: null });
+    canary(off.h).flow = undefined;
+    expect(await json(deliver(off.h, 'issues', issuesEvent('opened')))).toMatchObject({
+      note: 'task=created, workflow=dispatch_off',
+    });
+  });
+});
+
 describe('开关的判法', () => {
   const on = { autoDispatchSince: SWITCH_ON };
   it('关着不派；开关以前开的不派；排队中的派；已结束的只在重开时派；在跑的不再派；建立时刻认不出不派', () => {

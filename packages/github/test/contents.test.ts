@@ -1,7 +1,7 @@
 // 需求文档写进主线：Contents API，全走假服务（不出网、不碰真 git）。
 import { describe, expect, it } from 'vitest';
-import { validSpecPath } from '../src/contents.ts';
-import { json, repo, setup } from './helpers.ts';
+import { validRepoFilePath, validSpecPath } from '../src/contents.ts';
+import { json, repo, setup, sha } from './helpers.ts';
 
 describe('validSpecPath', () => {
   it('必须在 specs/ 下、是相对路径，不含 .. 、反斜杠、控制字符', () => {
@@ -243,5 +243,90 @@ describe('readSpecDoc', () => {
     await expect(gh.readSpecDoc({ repo, path: 'specs/15-foo/需求.md' })).rejects.toMatchObject({
       code: 'FORBIDDEN',
     });
+  });
+});
+
+describe('readRepoFile（仓的流程配置 .fleet/flow.json 这样读）', () => {
+  const HEAD = sha('d');
+  const PATH = '.fleet/flow.json';
+
+  it('先读默认分支头、再按这个提交读文件（两样对得上），以「引擎」身份', async () => {
+    const { gh, fake } = setup();
+    fake.refs.set('main', HEAD);
+    fake.specs.set(PATH, { sha: sha('a'), content: '{"formatVersion":1}\n' });
+    await expect(gh.readRepoFile({ repo, path: PATH })).resolves.toEqual({
+      defaultBranch: 'main',
+      commit: HEAD,
+      file: { kind: 'text', text: '{"formatVersion":1}\n' },
+    });
+    const [read] = fake.calls('GET', /\/contents\//);
+    expect(read?.as).toBe('engine');
+    expect(read?.query.get('ref')).toBe(HEAD);
+    expect(fake.calls('GET', /\/git\/ref\/heads\/main$/)).toHaveLength(1);
+  });
+
+  it('文件不在：missing，照样带上读的是哪个提交', async () => {
+    const { gh, fake } = setup();
+    fake.refs.set('main', HEAD);
+    await expect(gh.readRepoFile({ repo, path: PATH })).resolves.toEqual({
+      defaultBranch: 'main',
+      commit: HEAD,
+      file: { kind: 'missing' },
+    });
+  });
+
+  it.each<[string, unknown, RegExp]>([
+    ['是个目录', [{ type: 'file', path: '.fleet/flow.json/x' }], /是个目录/],
+    ['是子模块', { type: 'submodule', path: '.fleet/flow.json' }, /不是普通文件（是 submodule）/],
+    [
+      '太大拿不回内容',
+      { type: 'file', encoding: 'none', content: '', path: '.fleet/flow.json' },
+      /拿不回内容（encoding none/,
+    ],
+  ])('那个路径%s：not_file（仓里的东西不对，由调用方判认不出），不是没查成', async (_name, body, why) => {
+    const { gh, fake } = setup();
+    fake.refs.set('main', HEAD);
+    fake.before.push((req) =>
+      req.method === 'GET' && req.path.includes('/contents/') ? json(200, body) : undefined,
+    );
+    const got = await gh.readRepoFile({ repo, path: PATH });
+    expect(got.file).toMatchObject({ kind: 'not_file', why: expect.stringMatching(why) });
+  });
+
+  it('【失败】默认分支头读不到（404）：抛错，不当成文件不在', async () => {
+    const { gh } = setup();
+    await expect(gh.readRepoFile({ repo, path: PATH })).rejects.toMatchObject({ name: 'GitHubError' });
+  });
+
+  it('【失败】分支头的形状认不出：抛 UNEXPECTED_RESPONSE（没查成）', async () => {
+    const { gh, fake } = setup();
+    fake.before.push((req) =>
+      req.method === 'GET' && /\/git\/ref\/heads\//.test(req.path)
+        ? json(200, { object: { sha: 'not-a-sha', type: 'commit' } })
+        : undefined,
+    );
+    await expect(gh.readRepoFile({ repo, path: PATH })).rejects.toMatchObject({
+      code: 'UNEXPECTED_RESPONSE',
+    });
+  });
+
+  it('【失败】读文件时 GitHub 出错（403）：抛错，不当成文件不在', async () => {
+    const { gh, fake } = setup();
+    fake.refs.set('main', HEAD);
+    fake.before.push((req) =>
+      req.method === 'GET' && req.path.includes('/contents/')
+        ? json(403, { message: 'Resource not accessible by integration' })
+        : undefined,
+    );
+    await expect(gh.readRepoFile({ repo, path: PATH })).rejects.toMatchObject({ code: 'FORBIDDEN' });
+  });
+
+  it('【失败】路径不合规：拒收，一个请求都不发', async () => {
+    const { gh, fake } = setup();
+    for (const bad of ['', '/etc/passwd', '../x.json', '.fleet/../x', '.fleet\\flow.json', '.fleet/']) {
+      await expect(gh.readRepoFile({ repo, path: bad })).rejects.toMatchObject({ code: 'BAD_INPUT' });
+    }
+    expect(fake.requests).toHaveLength(0);
+    expect(validRepoFilePath(PATH)).toBe(true);
   });
 });

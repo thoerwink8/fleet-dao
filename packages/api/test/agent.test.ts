@@ -550,7 +550,7 @@ describe('fleet done 要核实', () => {
     const h = harness();
     const noTests = await done(h, { summary: 's', testsPassed: true });
     expect(noTests.status).toBe(422);
-    expect(await reasonsOf(noTests)).toContain('没查到本次会话跑过 `pnpm check` 的记录');
+    expect(await reasonsOf(noTests)).toContain('没查到本次会话跑过 `pnpm test:changed` 的记录');
 
     testRun(h, true);
     testRun(h, false, 5);
@@ -606,7 +606,7 @@ describe('fleet done 要核实', () => {
       ).json(),
     );
     expect(timeline.items[0]).toMatchObject({ source: 'session', kind: 'done_rejected' });
-    expect(timeline.items[0]?.text).toContain('交活被退回：没查到本次会话跑过 `pnpm check`');
+    expect(timeline.items[0]?.text).toContain('交活被退回：没查到本次会话跑过 `pnpm test:changed`');
   });
 
   it('带的 PR 还没同步进库：409，过一会儿再交（也落库）', async () => {
