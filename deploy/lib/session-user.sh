@@ -51,7 +51,7 @@ readback_session_user() { # 用户
     ok "$u：没有 sudo、只在自己的组里、家里没有 GitHub 凭据和 ssh 钥匙"
   fi
   if [[ ! -x "$home/.local/bin/reclaude" ]]; then
-    pending "$u 还没有 reclaude 二进制（~/.local/bin/reclaude）：见 docs/ops.md「会话用户登录 reclaude」"
+    red "$u 没有 reclaude 二进制（~/.local/bin/reclaude）：引擎起不了 Claude 会话；重跑 bash deploy/france.sh 装上"
   elif [[ ! -s "$home/.reclaude/device.json" ]]; then
     pending "$u 的 reclaude 还没登录：要创始人在浏览器里授权，见 docs/ops.md「会话用户登录 reclaude」"
   else

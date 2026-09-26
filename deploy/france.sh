@@ -38,8 +38,8 @@ TEMPORAL_SERVER_SHA256=ca1ccbb1d1545b68eb4523de463c51ffcd80f7e0bccd14a9b2c56fc7e
 TEMPORAL_CLI_VERSION=1.9.1
 TEMPORAL_CLI_SHA256=09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5
 PG_MAJOR=16 # Temporal 官方测过的最高大版本（13.18/14.15/15.10/16.6）；Ubuntu 24.04 自带的源里就是 16
-# pilot 的 reclaude：和会话用户手上那份同一个（dl.reclaude.ai/stable.json 列的 linux-amd64）。只在没有时装，
-# 之后由 pilot 自己 reclaude update，脚本不盖
+# 会话用户和 pilot 的 reclaude（dl.reclaude.ai/stable.json 列的 linux-amd64）。只在没有时装，
+# 之后由各用户自己 reclaude update，脚本不盖
 RECLAUDE_VERSION=v1.4.0
 RECLAUDE_SHA256=4f5d683b695ea392f53d4e8f2a916f092794f8d4196d5b7356afb0c9a9392f0a
 # uv：只用来给会话用户和 pilot 各装一份 ddgs（lib/cli-tools.sh）。装在 /opt/fleet-dao/uv/<版本>，归 root，不进谁的 PATH
@@ -194,9 +194,12 @@ setup_identity() {
   ensure_dir /etc/fleet-dao/github root:fleet 750
   ensure_dir /opt/fleet-dao root:root 755
   local u
+  ensure_pkgs curl # 下会话用户的 reclaude 要它
   for u in "${SESSION_USERS[@]}"; do
     ensure_service_user "$u" "/home/$u"
     ensure_dir "/home/$u" "$u:$u" 750
+    # 引擎起 Claude 会话用的就是它家里这份 reclaude（engine.env 的 {user} 路径）：新机器上没有就装，登录仍由人做（ops 第五节）
+    ensure_user_reclaude "$u" "/home/$u" "https://dl.reclaude.ai/$RECLAUDE_VERSION/reclaude-linux-amd64" "$RECLAUDE_SHA256"
   done
   if [[ -e "$ENV_FILE" ]]; then
     fix_meta "$ENV_FILE" root:fleet 640

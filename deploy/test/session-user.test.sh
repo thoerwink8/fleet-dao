@@ -6,7 +6,7 @@
 #   2. 干净的家 + 登录过：两条都绿，没有红和待配
 #   3. 故意造错：家目录不在 /home/<用户>、是符号链接、属主或权限不对、有 sudo 条目、多一个组、家里有 ~/.ssh、
 #      用户不在——都判红，不当成没事
-#   4. 没装 reclaude、装了没登录：记「待配」，不判绿
+#   4. 没装 reclaude：红（france.sh 该装，引擎起不了会话）；装了没登录：记「待配」，不判绿
 #   5. pilot 不登录 reclaude：它的判据（lib/login-user.sh）不看登没登录
 # 用法：bash deploy/test/session-user.test.sh。退出码：0 通过，1 不通过。
 set -uo pipefail
@@ -125,12 +125,12 @@ rm -rf -- "$FAKE_HOME/.ssh"
 FAKE_HOME=""
 check "用户不在（getent 查不到）：红，不当成没事" 1 0 0 "不在"
 
-echo "== 4. 没装、没登录：待配，不判绿"
+echo "== 4. 没装：红；没登录：待配，不判绿"
 FAKE_HOME=$SESSION_USER_HOME_ROOT/$U
 clean_home "$FAKE_HOME" 0
 check "装了 reclaude 没登录：待配" 0 1 1 "还没登录"
 rm -f -- "$FAKE_HOME/.local/bin/reclaude"
-check "没装 reclaude：待配" 0 1 1 "还没有 reclaude 二进制"
+check "新机器上会话用户缺 reclaude：红（引擎起不了 Claude 会话）" 1 0 1 "没有 reclaude 二进制"
 mkdir -p "$FAKE_HOME/.reclaude"
 : >"$FAKE_HOME/.reclaude/device.json"
 printf '#!/bin/sh\n' >"$FAKE_HOME/.local/bin/reclaude"

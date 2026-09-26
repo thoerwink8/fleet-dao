@@ -15,7 +15,7 @@ LOGIN_USER_BAD=()    # check_login_user 的结论，每条：代号<TAB>说明�
 # 核对 sha256，写进它家里的事以它自己的身份做（审计 P01）。不从会话用户家里拷：会话改得了自己那份，拷过来就是
 # 一条从 AI 会话摸进创始人账号的路。
 setup_login_user() { # 用户 家目录 reclaude下载地址 sha256
-  local user=$1 home=$2 url=$3 sum=$4 bin tmp
+  local user=$1 home=$2 url=$3 sum=$4
   ensure_service_user "$user" "$home" login # 人用的账号，普通用户（UID ≥ 1000），不占系统号段
   ensure_dir "$home" "$user:$user" 750
   if ! getent group "$LOGIN_USER_LOG_GROUP" >/dev/null; then
@@ -26,6 +26,13 @@ setup_login_user() { # 用户 家目录 reclaude下载地址 sha256
     usermod -a -G "$LOGIN_USER_LOG_GROUP" "$user"
     changed "把 $user 加进 $LOGIN_USER_LOG_GROUP 组（看日志）"
   fi
+  ensure_user_reclaude "$user" "$home" "$url" "$sum"
+}
+
+# 给一个用户装 reclaude 二进制（pilot 和会话用户都用）：只在没有时装（之后由这个用户自己 reclaude update）；
+# 从给的地址下、核对 sha256，写进它家里的事以它自己的身份做。登录不在这里：要人在浏览器里点。
+ensure_user_reclaude() { # 用户 家目录 下载地址 sha256
+  local user=$1 home=$2 url=$3 sum=$4 bin tmp
   bin=$home/.local/bin/reclaude
   if runuser -u "$user" -- test -x "$bin"; then
     ok "$user 已有 reclaude（$bin）"
