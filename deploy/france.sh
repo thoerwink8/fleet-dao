@@ -871,7 +871,7 @@ readback_app_config() {
   # api.env 不在的话上面已经判红
   if [[ -f /etc/fleet-dao/api.env ]]; then check_webhook_secret /etc/fleet-dao/api.env "$ENGINE_APP_JSON" || :; fi
   check_sensitive_values "$SENSITIVE_VALUES" || :
-  check_engine_env /etc/fleet-dao/engine.env "$SENSITIVE_VALUES" || :
+  check_engine_env /etc/fleet-dao/engine.env "$SENSITIVE_VALUES" "$WORK_DIR" "$ENGINE_STATE_DIR" || :
   check_retired "$CARPOOL_SHIM" 拼车用户家里的派活垫片
 }
 

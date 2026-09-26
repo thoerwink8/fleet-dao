@@ -400,11 +400,14 @@ check_sensitive_values() { # 名单文件
 
 # 读回引擎的 engine.env（fleet-engine.service 的 EnvironmentFile），按 systemd 的读法：
 #   FLEET_ENGINE_PORTS 要人定（real / fake；缺了引擎起不来，装机脚本不补）；
+#   下面三个键要钉在约定的值上，补键只补缺、不改已有的，所以旧值（比如 FLEET_WORK_DIR=/tmp）只有读回拦得住：
 #   FLEET_SENSITIVE_VALUES_FILE 要钉在读回核的那份名单上：不钉的话引擎按 packages/hygiene 的顺序先找 fleet 家里的
-#   ~/.fleet-dao/sensitive-values.txt，那里有一份就悄悄换成那份。
+#   ~/.fleet-dao/sensitive-values.txt，那里有一份就悄悄换成那份；
+#   FLEET_WORK_DIR 要是 fleet-agent-scope 认的工作树的根（它只认这一个，引擎算到别处建树、交树都会被拒）；
+#   FLEET_ENGINE_STATE_DIR 要是 france.sh 建好、属 fleet 的那个目录。
 # 文件读不到、认不出，和键没写、写了几行、值不认识，各报各的
-check_engine_env() { # engine.env 名单文件
-  local file=$1 list=$2 rc=0 bad=0
+check_engine_env() { # engine.env 名单文件 工作树的根 引擎状态目录
+  local file=$1 list=$2 work=$3 state=$4 rc=0 bad=0
   env_get "$file" FLEET_ENGINE_PORTS || rc=$?
   if ((rc == 2)); then
     red "核对不了引擎的配置：$APP_CONFIG_WHY"
@@ -426,28 +429,38 @@ check_engine_env() { # engine.env 名单文件
       ;;
     esac
   fi
-  rc=0
-  env_get "$file" FLEET_SENSITIVE_VALUES_FILE || rc=$?
+  pin_engine_key "$file" FLEET_SENSITIVE_VALUES_FILE "$list" "卫生检查的名单" || bad=1
+  pin_engine_key "$file" FLEET_WORK_DIR "$work" "AI 会话的工作树的根（fleet-agent-scope 只认这一个）" || bad=1
+  pin_engine_key "$file" FLEET_ENGINE_STATE_DIR "$state" "引擎状态目录" || bad=1
+  ((bad == 0))
+}
+
+# engine.env 里一个要钉在约定值上的键：等于约定值通过；没写、被注释掉记待配（没写时 france.sh 照样例补）；
+# 写了几行、值不对判红、返回 1。文件读不到、认不出也判红（调用方前面已经读过一次，这里照样不装没事）
+pin_engine_key() { # engine.env 键 约定值 是什么
+  local file=$1 key=$2 want=$3 what=$4 rc=0
+  env_get "$file" "$key" || rc=$?
   if ((rc == 2)); then
     red "核对不了引擎的配置：$APP_CONFIG_WHY"
     return 1
   fi
   if ((rc == 1)); then
-    if env_mentioned FLEET_SENSITIVE_VALUES_FILE; then
-      pending "$file 里的 FLEET_SENSITIVE_VALUES_FILE 被注释掉了：引擎按 packages/hygiene 的顺序找名单，fleet 家里有一份就会用那份"
+    if env_mentioned "$key"; then
+      pending "$file 里的 $key 被注释掉了（$what 要是 $want）：放开那一行"
     else
-      pending "$file 没写 FLEET_SENSITIVE_VALUES_FILE：引擎按 packages/hygiene 的顺序找名单，fleet 家里有一份就会用那份；跑一遍 france.sh 会照样例补上"
+      pending "$file 没写 $key（$what 要是 $want）：跑一遍 france.sh 会照样例补上"
     fi
-  elif ((APP_ENV_COUNT > 1)); then
-    red "$file 里 FLEET_SENSITIVE_VALUES_FILE 写了 $APP_ENV_COUNT 行（服务里生效的是最后一行）：删成一行"
-    bad=1
-  elif [[ "$APP_ENV_VALUE" != "$list" ]]; then
-    red "$file 的 FLEET_SENSITIVE_VALUES_FILE 是「$APP_ENV_VALUE」，读回核的名单是 $list：引擎读的和这里核的不是同一份"
-    bad=1
-  else
-    ok "engine.env：卫生检查的名单钉在 $list"
+    return 0
   fi
-  ((bad == 0))
+  if ((APP_ENV_COUNT > 1)); then
+    red "$file 里 $key 写了 $APP_ENV_COUNT 行（服务里生效的是最后一行）：删成一行"
+    return 1
+  fi
+  if [[ "$APP_ENV_VALUE" != "$want" ]]; then
+    red "$file 的 $key 是「$APP_ENV_VALUE」，约定是 $want（$what）：引擎用的和机器上建好的不是同一处，改成 $want 再发布"
+    return 1
+  fi
+  ok "engine.env：$what钉在 $want"
 }
 
 # 读回：上线后要退役的垫片还在不在。在就记待配（等引擎接真活以后删），不在就通过

@@ -347,10 +347,16 @@ fi
 
 echo "== 引擎的 engine.env"
 LIST=/etc/fleet-dao/sensitive-values.txt
+WORK=/var/lib/fleet-work
+STATE=/var/lib/fleet-dao/engine
+# 工作树的根、引擎状态目录钉对了的两行：前面的用例只看端口和名单，都带上它们；看这两个键的用例把 TAIL 换掉
+PINS="FLEET_WORK_DIR=$WORK
+FLEET_ENGINE_STATE_DIR=$STATE"
+TAIL=$PINS
 engine_case() { # 说明 期望（ok / pending / red） 文件内容 [输出里要有的字]
   local what=$1 want=$2 words=${4:-} got=ok rc_ok=0
-  printf '%s\n' "$3" >"$T/check-engine.env"
-  call check_engine_env "$T/check-engine.env" "$LIST"
+  printf '%s\n%s\n' "$3" "$TAIL" >"$T/check-engine.env"
+  call check_engine_env "$T/check-engine.env" "$LIST" "$WORK" "$STATE"
   if ((${#REDS[@]})); then
     got=red
   elif ((${#PENDING[@]})); then
@@ -385,20 +391,39 @@ FLEET_SENSITIVE_VALUES_FILE=$LIST" '注释'
 engine_case '端口实现不认识' red "FLEET_ENGINE_PORTS=maybe
 FLEET_SENSITIVE_VALUES_FILE=$LIST" '「maybe」'
 engine_case '名单钉在别处' red "FLEET_ENGINE_PORTS=real
-FLEET_SENSITIVE_VALUES_FILE=/home/fleet/.fleet-dao/sensitive-values.txt" '不是同一份'
+FLEET_SENSITIVE_VALUES_FILE=/home/fleet/.fleet-dao/sensitive-values.txt" '不是同一处'
 engine_case '没钉名单' pending 'FLEET_ENGINE_PORTS=real' '补上'
 engine_case '名单那一行被注释掉' pending "FLEET_ENGINE_PORTS=real
 # FLEET_SENSITIVE_VALUES_FILE=$LIST" '注释'
+# 补键只补缺、不改已有的：机器上留着的旧值只有读回拦得住
+TAIL="FLEET_ENGINE_STATE_DIR=$STATE"
+engine_case '工作树的根是旧值 /tmp' red "FLEET_ENGINE_PORTS=real
+FLEET_SENSITIVE_VALUES_FILE=$LIST
+FLEET_WORK_DIR=/tmp" '「/tmp」'
+engine_case '没写工作树的根' pending "FLEET_ENGINE_PORTS=real
+FLEET_SENSITIVE_VALUES_FILE=$LIST" 'FLEET_WORK_DIR'
+engine_case '工作树的根写了两行' red "FLEET_ENGINE_PORTS=real
+FLEET_SENSITIVE_VALUES_FILE=$LIST
+FLEET_WORK_DIR=$WORK
+FLEET_WORK_DIR=/tmp" '写了 2 行'
+TAIL="FLEET_WORK_DIR=$WORK"
+engine_case '引擎状态目录不对' red "FLEET_ENGINE_PORTS=real
+FLEET_SENSITIVE_VALUES_FILE=$LIST
+FLEET_ENGINE_STATE_DIR=/var/tmp/engine" '「/var/tmp/engine」'
+engine_case '引擎状态目录被注释掉' pending "FLEET_ENGINE_PORTS=real
+FLEET_SENSITIVE_VALUES_FILE=$LIST
+# FLEET_ENGINE_STATE_DIR=$STATE" '注释'
+TAIL=$PINS
 
-call check_engine_env "$T/no-such-engine.env" "$LIST"
+call check_engine_env "$T/no-such-engine.env" "$LIST" "$WORK" "$STATE"
 missing_out=$OUT
 expect_red_untouched "engine.env 不在" "$T/no-such-engine.env" "不在"
-call check_engine_env "$T/dir.env" "$LIST"
+call check_engine_env "$T/dir.env" "$LIST" "$WORK" "$STATE"
 dir_out=$OUT
 expect_red_untouched "engine.env 是个目录" "$T/dir.env" "目录"
 printf 'FLEET_ENGINE_PORTS="real\n' >"$T/openquote-engine.env"
 before=$(digest "$T/openquote-engine.env")
-call check_engine_env "$T/openquote-engine.env" "$LIST"
+call check_engine_env "$T/openquote-engine.env" "$LIST" "$WORK" "$STATE"
 open_out=$OUT
 expect_red_untouched "engine.env 引号没配上" "$T/openquote-engine.env" "$before"
 if [[ "$missing_out" == *"没有"* && "$dir_out" == *"读不了"* && "$open_out" == *"认不出"* ]]; then
