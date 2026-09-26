@@ -385,7 +385,7 @@ describe('入口：认出要算哪些 PR、写状态、退出码', () => {
     expect(w.written).toHaveLength(3);
   });
 
-  it('只报不写（pr.yml）：能合 0、不能合 1、没查成 2，一条状态都不写', async () => {
+  it('只报不写（--no-write）：能合 0、不能合 1、没查成 2，一条状态都不写', async () => {
     const ev = { pull_request: { number: 80 } };
     const ok = world();
     expect((await run(ok, 'pull_request', ev, { write: false })).code).toBe(0);
@@ -549,6 +549,18 @@ describe('读写 GitHub（假的 fetch）', () => {
     await expect(gateGitHub(ghApi(env, short.fn)).statuses(HEAD)).rejects.toThrow('只读到 0 条');
     const junk = fakeFetch(() => ({ json: [] }));
     await expect(gateGitHub(ghApi(env, junk.fn)).statuses(HEAD)).rejects.toThrow('认不出');
+  });
+
+  it('提交关联的 PR 翻页读完；某一页认不出、翻不完都抛（调用方判没查成）', async () => {
+    const page1 = Array.from({ length: 100 }, (_, i) => ({ number: i + 1 }));
+    const f = fakeFetch((url) => (url.endsWith('&page=1') ? { json: page1 } : { json: [{ number: 999 }] }));
+    const got = await gateGitHub(ghApi(env, f.fn)).prsForCommit(HEAD);
+    expect(got).toHaveLength(101);
+    expect(got.at(-1)).toEqual({ number: 999 });
+    const junk = fakeFetch((url) => (url.endsWith('&page=1') ? { json: page1 } : { json: { message: 'x' } }));
+    await expect(gateGitHub(ghApi(env, junk.fn)).prsForCommit(HEAD)).rejects.toThrow('第 2 页认不出');
+    const endless = fakeFetch(() => ({ json: page1 }));
+    await expect(gateGitHub(ghApi(env, endless.fn)).prsForCommit(HEAD)).rejects.toThrow('没读完');
   });
 
   it('主线头：先问默认分支再读它的头；认不出的抛', async () => {

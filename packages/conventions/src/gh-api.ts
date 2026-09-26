@@ -1,4 +1,4 @@
-// 合并闸在 Actions 里读写 GitHub 用的小客户端：只用 Node 自带的 fetch，不装依赖（merge-gate.yml、pr.yml 不跑 pnpm install）。
+// 合并闸在 Actions 里读写 GitHub 用的小客户端：只用 Node 自带的 fetch，不装依赖（merge-gate.yml 不跑 pnpm install）。
 // 令牌只放进请求头，报错里不带；非 2xx 一律抛（getOrNull 的 404 除外），由调用方判「没查成」。
 
 export interface GhApi {

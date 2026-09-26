@@ -2,7 +2,6 @@
 // 判红只有：草稿、和主线冲突、改到先审后合的三种路径（删改迁移、部署生产、密钥鉴权含 CI 和卫生检查）而当前头上没有通过的
 // second-opinion；读不到、认不出写 failure（没查成），GitHub 还没算完冲突写 pending。必填栏（标签、里程碑、对应计划、specs、
 // 档位）只提醒。merge-gate.yml 在 PR 事件、主线推送（逐个重算所有开着的 PR）、second-opinion 状态写上来时跑它；
-// pr.yml 的 pr-fields 在主线必过检查换成 merge-gate 之前用同一套判法、只报不写。
 // 不检出、不跑 PR 里的代码：判法和清单都用跑这段代码的那一份（主线的）。
 import { readFileSync } from 'node:fs';
 import type { GhApi } from './gh-api.ts';
@@ -129,9 +128,16 @@ export function gateGitHub(api: GhApi): GitHubReads {
       throw new Error(`开着的 PR 超过 ${PRS_MAX_PAGES * 100} 个，没读完`);
     },
     async prsForCommit(sha) {
-      const got = await api.get(`/commits/${sha}/pulls?per_page=100`);
-      if (!Array.isArray(got)) throw new Error(`提交 ${sha.slice(0, 7)} 的 PR 列表认不出（不是列表）`);
-      return got;
+      // 翻页读完：只读第一页，排在后面的那个 PR 就漏算了
+      const all: unknown[] = [];
+      for (let page = 1; page <= PRS_MAX_PAGES; page++) {
+        const got = await api.get(`/commits/${sha}/pulls?per_page=100&page=${page}`);
+        if (!Array.isArray(got))
+          throw new Error(`提交 ${sha.slice(0, 7)} 的 PR 列表第 ${page} 页认不出（不是列表）`);
+        all.push(...got);
+        if (got.length < 100) return all;
+      }
+      throw new Error(`提交 ${sha.slice(0, 7)} 的 PR 超过 ${PRS_MAX_PAGES * 100} 个，没读完`);
     },
     async mainHead() {
       const repo = await api.get('');
@@ -339,7 +345,7 @@ export async function reminders(live: unknown, meta: LiveMeta, gh: GitHubReads):
 export interface RunResult {
   /**
    * 写状态时：0 = 每个 PR 都写上了（写的是通过还是不通过都算）；2 = 有没写上、没算成的。
-   * 只报不写时（pr.yml）：0 = 能合；1 = 不能合；2 = 没查成。
+   * 只报不写时（--no-write）：0 = 能合；1 = 不能合；2 = 没查成。
    */
   code: 0 | 1 | 2;
   lines: string[];
@@ -409,7 +415,7 @@ export async function runMergeGate(opts: {
   /** 高风险清单的文本；读不到是 undefined。 */
   riskListText: string | undefined;
   gh: GitHubReads;
-  /** true = 把结果写成 merge-gate 状态；false = 只报（pr.yml）。 */
+  /** true = 把结果写成 merge-gate 状态；false = 只报（--no-write）。 */
   write: boolean;
   /** 状态上「详情」链到的地方（这次运行的页面）。 */
   targetUrl?: string;

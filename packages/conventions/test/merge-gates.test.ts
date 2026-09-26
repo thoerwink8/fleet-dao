@@ -138,6 +138,18 @@ describe('高风险路径清单', () => {
       `  ADD CONSTRAINT "c" CHECK ("a" in ('p', 'q'));`,
     ].join('\n');
     expect(riskyFiles([add(create), changed('packages/db/migrations/meta/_journal.json')], list)).toEqual([]);
+    // IF NOT EXISTS、带 schema 名、CONCURRENTLY 这类只加不改的写法照样放行
+    const ifNotExists = [
+      'CREATE TABLE IF NOT EXISTS "public"."y" ("id" int);',
+      'CREATE INDEX IF NOT EXISTS "y_idx" ON "y" ("id");',
+      'CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS "y_u" ON "y" ("id");',
+      'ALTER TABLE "public"."y" ADD COLUMN IF NOT EXISTS "a" text;',
+      'CREATE SEQUENCE IF NOT EXISTS s;',
+      'CREATE EXTENSION IF NOT EXISTS pgcrypto;',
+    ].join('\n');
+    expect(riskyFiles([add(ifNotExists)], list)).toEqual([]);
+    // DO 块里什么都能跑：不放行
+    expect(riskyFiles([add('DO $$ BEGIN DELETE FROM x; END $$;')], list)[0]?.note).toMatch(/^有「DO/);
 
     const hit = (f: ChangedFile) => riskyFiles([f], list)[0]?.note;
     expect(hit(add('ALTER TABLE "tasks" DROP COLUMN "note";'))).toBe('有「ALTER TABLE "TASKS" DROP」');
