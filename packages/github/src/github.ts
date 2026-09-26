@@ -14,8 +14,11 @@ import {
 } from './bundle.ts';
 import { GitHubClient, type Logger, type RepoRef, repoSlug, type Sleep, unexpected } from './client.ts';
 import {
+  type ReadRepoFileInput,
+  type ReadRepoFileResult,
   type ReadSpecDocInput,
   type ReadSpecDocResult,
+  readRepoFile,
   readSpecDoc,
   type WriteSpecDocInput,
   type WriteSpecDocResult,
@@ -138,6 +141,8 @@ export interface GitHub {
   writeSpecDoc(input: WriteSpecDocInput, ctx?: ActivityContext): Promise<WriteSpecDocResult>;
   /** 读默认分支上的需求文档；文件不在回 null。 */
   readSpecDoc(input: ReadSpecDocInput, ctx?: ActivityContext): Promise<ReadSpecDocResult | null>;
+  /** 读默认分支头上的一个文件，带上读的是哪个提交（仓的流程配置 .fleet/flow.json 这样读）。读不到抛错，不当成文件不在。 */
+  readRepoFile(input: ReadRepoFileInput, ctx?: ActivityContext): Promise<ReadRepoFileResult>;
   /** 会话提交用的身份（「干活的」机器人）：引擎建工作树时写进 user.name / user.email。 */
   commitIdentity(repo: RepoRef): Promise<BotIdentity>;
   /** 两个机器人在这些仓上的权限够不够。读不到算没查成（ok=false、why 写原因），不算「没有差异」。 */
@@ -209,6 +214,9 @@ export function createGitHub(options: GitHubOptions): GitHub {
     },
     async readSpecDoc(input, ctx = {}) {
       return readSpecDoc(deps, { ...input, signal: input.signal ?? ctx.signal });
+    },
+    async readRepoFile(input, ctx = {}) {
+      return readRepoFile(deps, { ...input, signal: input.signal ?? ctx.signal });
     },
     openPr: (input, ctx) => openPr(deps, input, ctx),
     waitCi: (input, ctx) => waitCi(deps, input, ctx),

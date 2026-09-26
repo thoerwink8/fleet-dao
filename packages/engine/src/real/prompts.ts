@@ -61,7 +61,13 @@ export interface RelayFacts {
 export interface PromptInput {
   stage: StageKind;
   brief: SessionBrief;
-  repo: Pick<Repo, 'owner' | 'name' | 'defaultBranch' | 'testCommand'>;
+  repo: Pick<Repo, 'owner' | 'name' | 'defaultBranch'> & {
+    /**
+     * 这次交代的测试命令（仓的流程配置副本里的，起会话时记进 session_runs、交活核对认它）。写码阶段一定有——项目没写
+     * 就起不来（flow-gate.ts）；别的阶段项目没写就是 null，提示词里不提跑测试。
+     */
+    testCommand: string | null;
+  };
   issueNumber: number;
   /** new = 新会话；resume / fork = 带着上下文接着干（只补新东西）；relay = 新会话 + 接力任务书。 */
   mode: 'new' | 'resume' | 'fork' | 'relay';
@@ -157,18 +163,24 @@ function deliverBlock(input: PromptInput): string {
 一个子任务一个会话能做完、各自能单独合进主线。只写这两个文件，不改仓里别的文件。写完就结束，不用 fleet done。`;
     case 'review':
       return `## 你要做的：审查（第二意见）
-审 PR #${brief.prNumber ?? '?'} 的头 ${brief.head ?? '（没给）'}：当前目录已经检出这个头，主线在 origin/${repo.defaultBranch}（git diff origin/${repo.defaultBranch}...HEAD 就是这个 PR 改的）。对照上面的需求和做完标准：做对了没有、有没有漏、有没有会出事的地方。可以跑测试（${repo.testCommand}）。不改任何文件。
+审 PR #${brief.prNumber ?? '?'} 的头 ${brief.head ?? '（没给）'}：当前目录已经检出这个头，主线在 origin/${repo.defaultBranch}（git diff origin/${repo.defaultBranch}...HEAD 就是这个 PR 改的）。对照上面的需求和做完标准：做对了没有、有没有漏、有没有会出事的地方。${repo.testCommand ? `可以跑测试（${repo.testCommand}）。` : ''}不改任何文件。
 结论写进 \`${OUT_DIR}/review.json\`，形如：
 {"verdict": "pass", "findings": [{"severity": "blocking", "text": "……", "file": "src/a.ts"}]}
 - verdict：能合 "pass"，要改 "changes"。blocking = 必须改才能合；minor = 小毛病，不挡合并。
 写完就结束，不用 fleet done。`;
-    case 'delivery':
+    case 'delivery': {
+      const test = repo.testCommand;
+      // 写码阶段（execute、ui）一定有测试命令（没有起不来）；只有调研这类不核对测试的活会走到「没写」
+      const tests = test
+        ? `跑 \`${test}\` 看过。
+- 交活只认会话里原样跑的 \`${test}\`、以最后一次为准：别接管道、别放后台（结果会记成「认不出」），别的测试命令不算。`
+        : `这个项目没写测试命令（仓里 .fleet/flow.json 的 testCommand），交活不核对测试。`;
       return `## 你要做的：写码
-在当前目录（分支 ${brief.branch ?? '（没给）'}）上把活干完：改代码、补测试，跑 \`${repo.testCommand}\` 看过。
-- 交活只认会话里原样跑的 \`${repo.testCommand}\`、以最后一次为准：别接管道、别放后台（结果会记成「认不出」），别的测试命令不算。主线在 origin/${repo.defaultBranch}。
+在当前目录（分支 ${brief.branch ?? '（没给）'}）上把活干完：改代码、补测试，${tests}主线在 origin/${repo.defaultBranch}。
 - 改动用 git commit 提交在本地（可以多次提交）；交活前工作区里不能有没提交的已跟踪改动。
 - 做完标准都满足了再交：\`fleet done "<一两句总结：做了什么>" --tests passed\`（测试没过就写 --tests failed，并在总结里说清）。后端会核实，没核实过会退回。
 - 做不下去就 \`fleet blocked "<卡在哪>" --needs human|info|access|other\`，别硬交。`;
+    }
   }
 }
 
