@@ -204,7 +204,7 @@ describe('接口跑在真库上', () => {
     await reader.cancel();
   });
 
-  it('健康检查（生产那一套）：库、实时推送是真探的；Temporal 没接上、机器人凭据没读到、飞书草稿开单没接上如实报红；LISTEN 停了实时推送也报红', async () => {
+  it('健康检查（生产那一套）：库、实时推送是真探的；Temporal 没接上、机器人凭据没读到如实报红，飞书草稿开单没接上报「未接」；LISTEN 停了实时推送也报红', async () => {
     const pgStore = () => {
       if (!current) throw new Error('还没起');
       return current.store;
@@ -235,11 +235,7 @@ describe('接口跑在真库上', () => {
           code: 'app_credentials_missing',
           message: 'GitHub 机器人的凭据没读到，PR 和 CI 事件写不进镜像',
         },
-        draft_opener: {
-          ok: false,
-          code: 'not_wired',
-          message: '飞书草稿开单还没接上（开 issue、拉起需求工作流那一步，等 #43）',
-        },
+        draft_opener: { ok: true, status: 'not_wired', message: '飞书草稿开成 issue 还没接上（#91）' },
         draft_backlog: { ok: true },
       },
     });

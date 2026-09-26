@@ -1,12 +1,18 @@
 import { readFileSync } from 'node:fs';
 import { createDb, type Db } from '@fleet-dao/db';
 import { describe, expect, it } from 'vitest';
-import { PublicHealthError, runHealthChecks, serviceHealthChecks } from '../src/health.ts';
+import { draftBacklogCheck, notWiredDraftOpener } from '../src/draft-opening.ts';
+import { NotWiredHealth, PublicHealthError, runHealthChecks, serviceHealthChecks } from '../src/health.ts';
 import { silentLogger } from '../src/log.ts';
 import { probeDb, sqlState, withStatementTimeout } from '../src/pg-store.ts';
-import type { Logger } from '../src/ports.ts';
+import type { Logger, Store } from '../src/ports.ts';
 import { notConnectedTemporal } from '../src/temporal.ts';
 import { errorCode, harness, IDS, write } from './harness.ts';
+
+/** 有一张确认了很久的待开单。 */
+const backlogStore = {
+  listDraftsToOpen: async () => [{ id: 'd1', confirmedAt: new Date(0).toISOString() }],
+} as unknown as Pick<Store, 'listDraftsToOpen'>;
 
 describe('健康检查', () => {
   it('没有外部依赖（内存版）：200', async () => {
@@ -41,6 +47,61 @@ describe('健康检查', () => {
       },
     });
     expect(h.logs.some((l) => String(l.fields?.error).includes(internal))).toBe(true);
+  });
+
+  it('还没接上的功能报「未接」：整体照样 200，这一项看得到「未接」和单号', async () => {
+    const opener = notWiredDraftOpener();
+    const h = harness({
+      health: [
+        { name: 'database', check: async () => {} },
+        { name: 'draft_opener', check: () => opener.check() },
+        {
+          name: 'draft_backlog',
+          check: draftBacklogCheck(backlogStore, () => new Date(), undefined, opener),
+        },
+      ],
+    });
+    const res = await h.cockpit.request('/healthz');
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      ok: true,
+      checks: {
+        database: { ok: true },
+        draft_opener: { ok: true, status: 'not_wired', message: '飞书草稿开成 issue 还没接上（#91）' },
+        draft_backlog: {
+          ok: true,
+          status: 'not_wired',
+          message: '飞书草稿开成 issue 还没接上（#91）：确认了的草稿先留在待开单',
+        },
+      },
+    });
+  });
+
+  it('接上以后出错照样红：真实现的 check 抛错、接上后积压太久，整体 503', async () => {
+    const wired = {
+      open: async () => ({}) as never,
+      check: async () => Promise.reject(new Error('GitHub 连不上')),
+    };
+    const report = await runHealthChecks(
+      [
+        { name: 'draft_opener', check: () => wired.check() },
+        {
+          name: 'draft_backlog',
+          check: draftBacklogCheck(backlogStore, () => new Date(), undefined, wired),
+        },
+        {
+          name: 'other',
+          check: async () => {
+            throw new NotWiredHealth('还没做');
+          },
+        },
+      ],
+      silentLogger,
+    );
+    expect(report.ok).toBe(false);
+    expect(report.checks.draft_opener).toEqual({ ok: false, code: 'unreachable', message: '连不上' });
+    expect(report.checks.draft_backlog).toMatchObject({ ok: false, code: 'backlog' });
+    expect(report.checks.other).toEqual({ ok: true, status: 'not_wired', message: '还没做' });
   });
 
   it('一项卡住不拖死整个检查：超时就报红', async () => {

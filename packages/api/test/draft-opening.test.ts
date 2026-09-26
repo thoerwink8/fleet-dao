@@ -6,6 +6,7 @@ import {
   createDraftOpenRunner,
   DRAFT_BACKLOG_ALERT_MS,
   draftBacklogCheck,
+  isDraftOpenerWired,
   notWiredDraftOpener,
 } from '../src/draft-opening.ts';
 import { silentLogger } from '../src/log.ts';
@@ -226,9 +227,11 @@ describe('重启、重读', () => {
 });
 
 describe('健康检查', () => {
-  it('开单没接上：open 如实没成、check 报 not_wired（不装作好了）', async () => {
+  it('开单没接上：open 如实没成、check 报「未接」（不装作好了，也不算坏了）', async () => {
     const opener = notWiredDraftOpener();
-    await expect(opener.check()).rejects.toMatchObject({ name: 'PublicHealthError', code: 'not_wired' });
+    await expect(opener.check()).rejects.toMatchObject({ name: 'NotWiredHealth' });
+    expect(isDraftOpenerWired(opener)).toBe(false);
+    expect(isDraftOpenerWired({ open: opener.open, check: async () => {} })).toBe(true);
     await expect(opener.open(pendingDraft() as never, new AbortController().signal)).rejects.toMatchObject({
       name: 'DraftOpenerUnavailableError',
     });

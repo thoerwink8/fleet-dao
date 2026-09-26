@@ -22,6 +22,23 @@ test('三项都明说在线、HTTP 200：全绿', () => {
   );
 });
 
+test('「未接」的项：不算不在线，整体照样绿，写明未接和单号', () => {
+  const checks = { ...allOk, draft_opener: { ok: true, status: 'not_wired', message: '飞书草稿开成 issue 还没接上（#91）' } };
+  const v = judge({ status: 200, body: report(true, checks) });
+  assert.equal(v.ok, true);
+  assert.equal(v.summary, '全部在线（1 项还没接上）');
+  const row = byKey(v).draft_opener;
+  assert.equal(row.label, '飞书草稿开单');
+  assert.equal(row.ok, true);
+  assert.equal(row.notWired, true);
+  assert.equal(row.reason, '未接：飞书草稿开成 issue 还没接上（#91）');
+  // 接上以后出错：照样红
+  const broken = { ...allOk, draft_opener: { ok: false, code: 'unreachable', message: '连不上' } };
+  const w = judge({ status: 503, body: report(false, broken) });
+  assert.equal(w.ok, false);
+  assert.equal(byKey(w).draft_opener.ok, false);
+});
+
 test('连不上后端：三项都红，说出原因', () => {
   const v = judge({ error: 'Failed to fetch' });
   assert.equal(v.ok, false);

@@ -1,6 +1,7 @@
 // 健康页的取数与判定（浏览器里的页面和 deploy/test/health-page.test.mjs 用的是这同一份）。
 // 规矩：只有后端明说 ok 的项才算在线；连不上、超时、回的不是健康报告、缺项、结论和逐项对不上，一律报红，并说出是哪一种。
-// /healthz 的样子（packages/api 的 health.ts）：{ ok, checks: { <项>: { ok: true } | { ok: false, code, message } } }，
+// /healthz 的样子（packages/api 的 health.ts）：{ ok, checks: { <项>: { ok: true } | { ok: true, status: 'not_wired', message }
+// | { ok: false, code, message } } }。「未接」是功能还没做，不算不在线，照样显示出来（写明未接和原因），
 // 全好回 200，有一项不好回 503。香港 nginx 把 /healthz 经隧道转给法国的驾驶舱后端（deploy/hk/nginx-https.conf）。
 
 /** P0 验收要看到的三项：法国的数据库、Temporal、引擎工人。后端没报的项照样列出来、报红。 */
@@ -11,7 +12,12 @@ export const REQUIRED = [
 ];
 
 /** 后端多报的项用这些名字显示；认不出的照原名。 */
-const EXTRA_LABELS = { realtime: '实时推送', github_events: 'GitHub 事件' };
+const EXTRA_LABELS = {
+  realtime: '实时推送',
+  github_events: 'GitHub 事件',
+  draft_opener: '飞书草稿开单',
+  draft_backlog: '待开单积压',
+};
 
 export const HEALTH_URL = '/healthz';
 export const TIMEOUT_MS = 8000;
@@ -71,7 +77,8 @@ export function judge(fetched) {
     return { ok: false, summary: `后端的报告自相矛盾：${contradictions.join('；')}`, rows };
   }
   if (bad > 0) return { ok: false, summary: `${bad} 项不在线`, rows };
-  return { ok: true, summary: '全部在线', rows };
+  const notWired = rows.filter((r) => r.notWired).length;
+  return { ok: true, summary: notWired > 0 ? `全部在线（${notWired} 项还没接上）` : '全部在线', rows };
 }
 
 function describeStatus(status) {
@@ -102,6 +109,10 @@ function row(key, label, check) {
   if (check === undefined) return { key, label, ok: false, reason: '后端没报这一项' };
   if (!isObject(check) || typeof check.ok !== 'boolean') {
     return { key, label, ok: false, reason: '这一项的格式认不出' };
+  }
+  if (check.ok === true && check.status === 'not_wired') {
+    const why = typeof check.message === 'string' && check.message ? check.message : '后端没给原因';
+    return { key, label, ok: true, notWired: true, reason: `未接：${why}` };
   }
   if (check.ok === true) return { key, label, ok: true, reason: '在线' };
   const message =

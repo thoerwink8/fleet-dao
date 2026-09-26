@@ -4,7 +4,7 @@
 // 期间这张草稿不开第二次。一直开不成由健康检查（draft_opener、draft_backlog）报红。
 import { clip } from './feishu-records.ts';
 import { issueTitle } from './feishu-views.ts';
-import { PublicHealthError } from './health.ts';
+import { NotWiredHealth, PublicHealthError } from './health.ts';
 import {
   type DraftOpener,
   DraftOpenerUnavailableError,
@@ -15,17 +15,31 @@ import {
   type Store,
 } from './ports.ts';
 
-/** 开单还没接上时的去处：一律如实没成（草稿留在待开单），健康检查报红，不装作开成了。真开单记在 #91（#43 已合、没接这一步）。 */
+/** 健康检查里「未接」那一句（公网看得到）。 */
+export const DRAFT_OPENER_NOT_WIRED = '飞书草稿开成 issue 还没接上（#91）';
+
+const notWiredOpeners = new WeakSet<DraftOpener>();
+
+/**
+ * 开单还没接上时的去处：一律如实没成（草稿留在待开单），不装作开成了；健康检查报「未接」，不把整体拖红。
+ * 真开单记在 #91。接上以后换成真实现，它的 check 出错照样报红。
+ */
 export function notWiredDraftOpener(): DraftOpener {
-  const why = '飞书草稿开单还没接上（开 issue、拉起需求工作流那一步，等 #43）';
-  return {
+  const opener: DraftOpener = {
     async open() {
-      throw new DraftOpenerUnavailableError(why);
+      throw new DraftOpenerUnavailableError(DRAFT_OPENER_NOT_WIRED);
     },
     async check() {
-      throw new PublicHealthError('not_wired', why);
+      throw new NotWiredHealth(DRAFT_OPENER_NOT_WIRED);
     },
   };
+  notWiredOpeners.add(opener);
+  return opener;
+}
+
+/** 是不是 notWiredDraftOpener 给的那个（开单压根没接上）。 */
+export function isDraftOpenerWired(opener: DraftOpener): boolean {
+  return !notWiredOpeners.has(opener);
 }
 
 /** 确认时当场等开单最多这么久（网关等确认 15 秒）；没等到先回「已确认、待开单」，这次调用在后台接着跑。 */
@@ -265,10 +279,15 @@ export function draftBacklogCheck(
   store: Pick<Store, 'listDraftsToOpen'>,
   now: () => Date,
   alertAfterMs = DRAFT_BACKLOG_ALERT_MS,
+  opener?: DraftOpener,
 ): () => Promise<void> {
   return async () => {
     const [oldest] = await store.listDraftsToOpen(1);
     if (!oldest) return;
+    // 开单压根没接上：积压是必然的，不是坏了，报「未接」；接上以后等太久照样红
+    if (opener && !isDraftOpenerWired(opener)) {
+      throw new NotWiredHealth(`${DRAFT_OPENER_NOT_WIRED}：确认了的草稿先留在待开单`);
+    }
     const confirmedAt = oldest.confirmedAt === undefined ? Number.NaN : Date.parse(oldest.confirmedAt);
     if (Number.isNaN(confirmedAt)) throw new Error(`待开单的草稿 ${oldest.id} 的确认时刻认不出`);
     const waited = now().getTime() - confirmedAt;

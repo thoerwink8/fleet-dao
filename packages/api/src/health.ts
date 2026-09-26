@@ -20,12 +20,29 @@ export class PublicHealthError extends Error {
   }
 }
 
+/**
+ * 这一项对应的功能还没做（没配置、没实现）：报「未接」，不算失败、不把整体拖红——还没有的东西谈不上坏了。
+ * 只给「压根没接上」用；接上以后读不到、出错一律抛 PublicHealthError 或普通错误，照样报红。
+ * message 公网看得到，同 PublicHealthError 的规矩：一句中性的话，可以带单号。
+ */
+export class NotWiredHealth extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'NotWiredHealth';
+  }
+}
+
 /** 单项探活的上限：一项卡住不能把整个健康检查拖死。 */
 const CHECK_TIMEOUT_MS = 3_000;
 
 export type HealthReport = {
   ok: boolean;
-  checks: Record<string, { ok: true } | { ok: false; code: string; message: string }>;
+  checks: Record<
+    string,
+    | { ok: true }
+    | { ok: true; status: 'not_wired'; message: string }
+    | { ok: false; code: string; message: string }
+  >;
 };
 
 export async function runHealthChecks(
@@ -48,6 +65,10 @@ export async function runHealthChecks(
         ]);
         return [name, { ok: true }] as const;
       } catch (err) {
+        if (err instanceof NotWiredHealth) {
+          log.info('健康检查：这一项还没接上', { check: name, message: err.message });
+          return [name, { ok: true, status: 'not_wired', message: err.message }] as const;
+        }
         log.warn('健康检查没过', {
           check: name,
           error: err instanceof Error ? err.message : String(err),

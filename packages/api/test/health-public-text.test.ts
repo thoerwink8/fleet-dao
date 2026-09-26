@@ -9,6 +9,7 @@ import { FLEET_CHANGES_CHANNEL } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import { startPgChangeFeed } from '../src/changes.ts';
 import { draftBacklogCheck, notWiredDraftOpener } from '../src/draft-opening.ts';
+// notWiredDraftOpener 报的是「未接」，不算失败：它的话也公网看得到，在下面单独扫
 import { githubAppMissing, githubEventsCheck } from '../src/github.ts';
 import { type HealthReport, runHealthChecks } from '../src/health.ts';
 import { silentLogger } from '../src/log.ts';
@@ -124,7 +125,6 @@ async function publicFailures(log: Logger) {
     ),
   );
   // 飞书草稿开单：没接上；最早一张待开单等太久
-  await run('draft-opener', true, () => notWiredDraftOpener().check());
   const backlogStore = {
     listDraftsToOpen: async () => [{ id: 'd1', confirmedAt: new Date(0).toISOString() }],
   } as unknown as Store;
@@ -162,6 +162,39 @@ describe('公开的健康报告', () => {
     expect(logs.some((l) => l.includes('LISTEN fleet_changes'))).toBe(true);
     expect(logs.some((l) => l.includes('10.0.0.9:5432'))).toBe(true);
     expect(JSON.stringify(reports)).not.toContain('10.0.0.9');
+  });
+
+  it('「未接」的话也公网看得到：同一份名单扫，带单号可以', async () => {
+    const scan = await loadScan();
+    const opener = notWiredDraftOpener();
+    const pending = {
+      opener: await runHealthChecks([{ name: 'item', check: () => opener.check() }], silentLogger),
+      backlog: await runHealthChecks(
+        [
+          {
+            name: 'item',
+            check: draftBacklogCheck(
+              {
+                listDraftsToOpen: async () => [{ id: 'd1', confirmedAt: new Date(0).toISOString() }],
+              } as unknown as Store,
+              () => new Date(),
+              undefined,
+              opener,
+            ),
+          },
+        ],
+        silentLogger,
+      ),
+    };
+    for (const [name, report] of Object.entries(pending)) {
+      expect(report.checks.item, name).toMatchObject({
+        ok: true,
+        status: 'not_wired',
+        message: expect.stringContaining('#91'),
+      });
+    }
+    const hits = scanReports(scan, pending);
+    expect(hits, scan.formatHits(hits)).toEqual([]);
   });
 
   it('这道查法查得出：改之前的原因（带 LISTEN fleet_changes）会红', async () => {
