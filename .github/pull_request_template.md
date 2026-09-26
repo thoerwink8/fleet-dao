@@ -11,6 +11,6 @@
 
 **specs**：<!-- 需求文档的目录，如 specs/12-登录验证码/；杂活写「不适用」 -->
 
-**档位**：<!-- CI 绿就合 或 先审后合，后面跟理由（design 第五节）。只作说明：合并闸按改动路径判，改到 packages/conventions/high-risk-paths.json 里的三种地方，当前头上的第二意见通过才能合 -->
+**档位**：<!-- CI 绿就合 或 先审后合，后面跟理由（design 第五节）。只作说明：合并闸按改动路径判，改到 packages/conventions/high-risk-paths.json 里的地方，当前头上的第二意见通过才能合 -->
 
 **文档**：<!-- 改了 README、design、ops、plan 的哪份；都没改写「不适用」。改了行为要改 design，改了 deploy/ 要改 ops -->

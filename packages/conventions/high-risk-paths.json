@@ -1,5 +1,5 @@
 {
-  "说明": "先审后合的路径（design 第五节「流程只为快」：只有三种——迁移里有删改语句、部署和生产脚本、密钥与登录鉴权含卫生检查和 CI 工作流本身；引擎代码、必填栏判法都不算）。PR 改到这里的文件，当前头上要有通过的 second-opinion，合并闸（merge-gate）才放行；按路径判，不看 PR 自己写的档位。合并闸用的是主线上的这一份，PR 里改了要合进主线之后才算数。以 / 结尾的是目录（下面所有文件都算），否则是单个文件；kind 是三种之一；mode 为 migrations 的目录里，新加的迁移只建表、加列不算。加一条要写为什么。",
+  "说明": "先审后合的路径（design 第五节「流程只为快」：只有两种——迁移里有删改语句；碰安全：密钥与登录鉴权、卫生检查和 CI 工作流本身，外加对公网开口子和提权的生产配置（法国防火墙、sudoers、香港 nginx）。deploy/ 里其余的部署脚本和引擎代码、必填栏判法一样不算，CI 绿就合，创始人 2026-09-26 下午拍）。PR 改到这里的文件，当前头上要有通过的 second-opinion，合并闸（merge-gate）才放行；按路径判，不看 PR 自己写的档位。合并闸用的是主线上的这一份，PR 里改了要合进主线之后才算数。以 / 结尾的是目录（下面所有文件都算），否则是单个文件；kind 是两种之一；mode 为 migrations 的目录里，新加的迁移只建表、加列不算。加一条要写为什么。",
   "paths": [
     {
       "path": "packages/db/migrations/",
@@ -8,9 +8,29 @@
       "why": "合进去就在真库上跑：改、删已有的迁移，或新迁移里删、改已有的表、列、数据，回滚难"
     },
     {
-      "path": "deploy/",
-      "kind": "动生产",
-      "why": "部署脚本和生产机器上的配置（systemd、防火墙、nginx、sudoers），直接改法国、香港的真机和对公网开的口子"
+      "path": "deploy/france/fleet-dao.nft",
+      "kind": "碰安全",
+      "why": "法国防火墙规则：哪些端口对公网开，改错一行机器就敞开了"
+    },
+    {
+      "path": "deploy/france/fleet-firewall.service",
+      "kind": "碰安全",
+      "why": "开机加载防火墙规则的服务：它起不来，防火墙等于没有"
+    },
+    {
+      "path": "deploy/france/sudoers-fleet-dao",
+      "kind": "碰安全",
+      "why": "谁能用 root 跑什么：放宽一条就是提权"
+    },
+    {
+      "path": "deploy/hk/nginx-http.conf",
+      "kind": "碰安全",
+      "why": "香港对公网的入口：哪些路径放出去、转给法国"
+    },
+    {
+      "path": "deploy/hk/nginx-https.conf",
+      "kind": "碰安全",
+      "why": "香港对公网的入口（HTTPS）：哪些路径放出去、转给法国"
     },
     {
       "path": "packages/api/src/auth.ts",

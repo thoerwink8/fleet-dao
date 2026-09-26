@@ -46,14 +46,23 @@ const changed = (filename: string, status = 'modified', over: Partial<ChangedFil
   ...over,
 });
 
+/** 对公网开口子和提权的生产配置：部署脚本 CI 绿就合之后，deploy/ 里只有这几份还要先审（design 第五节）。 */
+const EXPOSURE_CONFIGS = [
+  'deploy/france/fleet-dao.nft',
+  'deploy/france/fleet-firewall.service',
+  'deploy/france/sudoers-fleet-dao',
+  'deploy/hk/nginx-http.conf',
+  'deploy/hk/nginx-https.conf',
+];
+
 describe('高风险路径清单', () => {
   const list: RiskPath[] = [
     { path: 'packages/db/migrations/', kind: '改数据库', why: '真库', mode: 'migrations' },
-    { path: 'deploy/', kind: '动生产', why: '真机' },
+    { path: 'deploy/', kind: '碰安全', why: '真机' },
     { path: 'packages/api/src/auth.ts', kind: '碰安全', why: '登录' },
   ];
 
-  it('仓里那份认得出：只有三种、每条有理由、指的路径都在；引擎代码不在里面', () => {
+  it('仓里那份认得出：每条有理由、指的路径都在；引擎代码和部署脚本不在里面，对公网开口子和提权的 5 份生产配置在', () => {
     const text = readFileSync(new URL('../high-risk-paths.json', import.meta.url), 'utf8');
     const parsed = parseRiskPaths(text);
     if (typeof parsed === 'string') throw new Error(parsed);
@@ -62,13 +71,23 @@ describe('高风险路径清单', () => {
     const paths = parsed.map((r) => r.path);
     for (const must of [
       'packages/db/migrations/',
-      'deploy/',
       'packages/hygiene/',
       'packages/api/src/auth.ts',
+      ...EXPOSURE_CONFIGS,
     ]) {
       expect(paths).toContain(must);
     }
     expect(paths.filter((p) => p.startsWith('packages/engine/'))).toEqual([]);
+    // 创始人 2026-09-26 下午拍：部署脚本 CI 绿就合（design 第五节）；整个 deploy/ 加回来就又全挡住了
+    expect(paths).not.toContain('deploy/');
+    expect(
+      riskyFiles(
+        [changed('deploy/france.sh'), changed('deploy/release.sh'), changed('deploy/hk.sh')],
+        parsed,
+      ),
+    ).toEqual([]);
+    for (const f of EXPOSURE_CONFIGS)
+      expect(riskyFiles([changed(f)], parsed), f).toEqual([{ file: f, rule: f, kind: '碰安全' }]);
   });
 
   it('合并闸决定结论的判法都在清单里：从入口顺着相对导入走一遍，每个文件都得落进清单（漏一个，PR 改它就能放松门槛）；只做提醒的必填栏那一套不走进去', () => {
@@ -111,9 +130,9 @@ describe('高风险路径清单', () => {
         list,
       ),
     ).toEqual([
-      { file: 'deploy/france.sh', rule: 'deploy/', kind: '动生产' },
+      { file: 'deploy/france.sh', rule: 'deploy/', kind: '碰安全' },
       { file: 'packages/api/src/auth.ts', rule: 'packages/api/src/auth.ts', kind: '碰安全' },
-      { file: 'deploy/old.sh', rule: 'deploy/', kind: '动生产' },
+      { file: 'deploy/old.sh', rule: 'deploy/', kind: '碰安全' },
     ]);
   });
 
@@ -190,13 +209,13 @@ describe('高风险路径清单', () => {
     expect(parseRiskPaths('{"paths":[]}')).toBe('paths 是空的（一条都没有等于什么都不拦）');
     expect(one({ path: 'deploy/' })).toBe('paths 第 1 条 认不出（要有 path、kind、why 三个字符串）');
     expect(one({ path: 'deploy/', kind: '引擎核心', why: 'x' })).toBe(
-      'paths 第 1 条（deploy/）的 kind「引擎核心」不是「改数据库」「动生产」「碰安全」之一',
+      'paths 第 1 条（deploy/）的 kind「引擎核心」不是「改数据库」「碰安全」之一',
     );
-    expect(one({ path: 'deploy/', kind: '动生产', why: ' ' })).toBe('paths 第 1 条（deploy/）没写为什么');
+    expect(one({ path: 'deploy/', kind: '碰安全', why: ' ' })).toBe('paths 第 1 条（deploy/）没写为什么');
     expect(one({ path: 'x.sql', kind: '改数据库', why: 'x', mode: 'migrations' })).toMatch(/mode 认不出/);
     expect(one({ path: 'db/', kind: '改数据库', why: 'x', mode: 'sql' })).toMatch(/mode 认不出/);
     for (const bad of ['/etc/', '../x', '']) {
-      expect(one({ path: bad, kind: '动生产', why: 'x' })).toMatch(/不是仓内相对路径/);
+      expect(one({ path: bad, kind: '碰安全', why: 'x' })).toMatch(/不是仓内相对路径/);
     }
   });
 });
@@ -217,7 +236,7 @@ describe('第二意见状态', () => {
     expect(secondOpinionFrom([status('ok')])).toBe('second-opinion 的 state「ok」认不出');
   });
 
-  it('没改到那三种地方不要第二意见；改到了：通过不报，没有、还在跑、没过各报一句，带上是哪几个文件', () => {
+  it('没改到先审后合的地方不要第二意见；改到了：通过不报，没有、还在跑、没过各报一句，带上是哪几个文件', () => {
     const hits = riskyFiles(
       [
         { filename: 'packages/db/migrations/0009_x.sql', status: 'added', patch: '+DROP TABLE "old";' },
@@ -225,11 +244,11 @@ describe('第二意见状态', () => {
       ],
       [
         { path: 'packages/db/migrations/', kind: '改数据库', why: '真库', mode: 'migrations' },
-        { path: 'deploy/', kind: '动生产', why: '真机' },
+        { path: 'deploy/', kind: '碰安全', why: '真机' },
       ],
     );
     const where =
-      '改到了先审后合的地方：packages/db/migrations/0009_x.sql（改数据库：有「DROP TABLE "OLD"」）、deploy/france.sh（动生产）（清单和理由见 packages/conventions/high-risk-paths.json）';
+      '改到了先审后合的地方：packages/db/migrations/0009_x.sql（改数据库：有「DROP TABLE "OLD"」）、deploy/france.sh（碰安全）（清单和理由见 packages/conventions/high-risk-paths.json）';
     expect(checkSecondOpinion(HEAD, null, [])).toEqual([]);
     expect(checkSecondOpinion(HEAD, { state: 'success', description: '' }, hits)).toEqual([]);
     expect(checkSecondOpinion(HEAD, null, hits)).toEqual([

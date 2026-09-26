@@ -18,7 +18,7 @@ const MERGE = 'b'.repeat(40);
 const MAIN = 'c'.repeat(40);
 const PLAN = ['# 计划', '', '### P1 核心闭环', '', '- GitHub：两个新机器人。', ''].join('\n');
 const RISK: RiskPath[] = [
-  { path: 'deploy/', kind: '动生产', why: '真机' },
+  { path: 'deploy/', kind: '碰安全', why: '真机' },
   { path: 'packages/api/src/auth.ts', kind: '碰安全', why: '登录' },
 ];
 const RISK_TEXT = JSON.stringify({ paths: RISK });
@@ -182,7 +182,7 @@ describe('合并闸：验收场景', () => {
       const r = await gatePr(80, deps(world({ files, prOver: { body: body(tier) } })));
       expect(r.state, String(tier)).toBe('failure');
       expect(r.lines[0]).toMatch(
-        /^等第二意见：当前头 aaaaaaa 上还没有 second-opinion 状态，改到了先审后合的地方：deploy\/france\.sh（动生产）/,
+        /^等第二意见：当前头 aaaaaaa 上还没有 second-opinion 状态，改到了先审后合的地方：deploy\/france\.sh（碰安全）/,
       );
     }
     const passed = await gatePr(80, deps(world({ files, statuses: SO_OK })));
@@ -190,7 +190,7 @@ describe('合并闸：验收场景', () => {
     expect(passed.lines[0]).toBe('能合：不是草稿、没冲突，改到 1 个先审后合的地方，当前头上第二意见已通过。');
   });
 
-  it('没改到那三种地方：档位写「先审后合」也不等第二意见', async () => {
+  it('没改到先审后合的地方：档位写「先审后合」也不等第二意见', async () => {
     const r = await gatePr(80, deps(world({ prOver: { body: body('先审后合——拿不准') } })));
     expect(r.state).toBe('success');
   });
@@ -283,13 +283,13 @@ describe('合并闸：提醒那一半坏了也改不了结论（所以必填栏�
     ['specs 目录问的时候出错', { broken: { exists: '403' } }, /或 specs 目录（403）/],
   ];
 
-  it.each(cases)('%s：没改到那三种地方照样通过，提醒里写明没查成', async (_name, over, line) => {
+  it.each(cases)('%s：没改到先审后合的地方照样通过，提醒里写明没查成', async (_name, over, line) => {
     const r = await gatePr(80, deps(world(over)));
     expect(r.state).toBe('success');
     expect(r.lines.join('\n')).toMatch(line);
   });
 
-  it('改到那三种地方、没有第二意见：提醒那一半坏了照样不通过', async () => {
+  it('改到先审后合的地方、没有第二意见：提醒那一半坏了照样不通过', async () => {
     const r = await gatePr(80, deps(world({ files: ['deploy/x.sh'], broken: { fileAt: '超时' } })));
     expect(r.state).toBe('failure');
     expect(r.lines[0]).toMatch(/^等第二意见/);
