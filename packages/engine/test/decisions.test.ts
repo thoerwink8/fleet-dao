@@ -1,4 +1,5 @@
 // 流程判断全是纯函数：不起 Temporal 直接测。
+import { startFlow } from '@fleet-dao/core';
 import { describe, expect, it } from 'vitest';
 import { activityOptions, QUICK_TIMEOUT_SECONDS } from '../src/activity-options.ts';
 import {
@@ -745,5 +746,31 @@ describe('编号（库主键）', () => {
     }
     expect(new Set(ids).size).toBe(3);
     expect(await decide('newIds', { count: 0 })).toEqual([]);
+  });
+});
+
+describe('Fusion 的判断经 decide 调（core 包，0003 第 12 条）', () => {
+  const decide = createDecide();
+
+  it('状态机、简报、验收、验证、流程配置都接上了', async () => {
+    const state = startFlow('fusion', false);
+    const step = await decide('fusionFlow', { state, event: { kind: 'discussed' } });
+    expect(step).toMatchObject({ ok: true, action: 'intake' });
+    expect((await decide('brief', { goal: 'x' })).ok).toBe(false);
+    expect(await decide('parallelBriefs', [])).toEqual({ ok: true });
+    const verdict = await decide('verdict', {
+      criteria: ['a'],
+      sentHead: 'abc1234',
+      report: { head: 'abc1234', results: [{ criterion: 'a', answer: 'done', evidence: 'e' }], findings: [] },
+      verifierFamily: 'gpt',
+      authorFamilies: ['claude'],
+      rebuttals: [],
+    });
+    expect(verdict.verdict).toBe('pass');
+  });
+
+  it('【故意造出的失败】全组织默认读不到：判停派，不拿空配置顶', async () => {
+    const got = await decide('flowConfig', { org: { kind: 'missing' }, project: { kind: 'missing' } });
+    expect(got).toMatchObject({ ok: false, scope: 'org' });
   });
 });

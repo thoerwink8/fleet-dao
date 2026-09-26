@@ -1,0 +1,148 @@
+// 流程配置的边界表：全组织默认坏了全部停派，项目的坏了这个项目停派，都不拿默认顶；禁令项目改不掉。
+import { readFileSync } from 'node:fs';
+import { describe, expect, it } from 'vitest';
+import {
+  type ConfigDecision,
+  ORG_DEFAULT_PATH,
+  profileFor,
+  resolveFlowConfig,
+  type Source,
+  touchesHighRisk,
+  uiFiles,
+} from '../src/config.ts';
+
+const ORG_TEXT = readFileSync(new URL('../flow.default.json', import.meta.url), 'utf8');
+const org: Source = { kind: 'text', text: ORG_TEXT };
+const orgWith = (patch: (o: Record<string, unknown>) => void): Source => {
+  const o = JSON.parse(ORG_TEXT) as Record<string, unknown>;
+  patch(o);
+  return { kind: 'text', text: JSON.stringify(o) };
+};
+const project = (o: unknown): Source => ({ kind: 'text', text: JSON.stringify(o) });
+const ok = (d: ConfigDecision) => {
+  if (!d.ok) throw new Error(d.why);
+  return d;
+};
+
+describe('流程配置', () => {
+  it('仓里的全组织默认本身认得出（路径也对得上）', () => {
+    expect(ORG_DEFAULT_PATH).toBe('packages/core/flow.default.json');
+    const got = ok(resolveFlowConfig(org, { kind: 'missing' }));
+    expect(got.usedOrgDefault).toBe(true);
+    expect(got.config.bans.map((b) => b.id).sort()).toEqual(['gpt-no-ui', 'no-fable']);
+  });
+
+  it('项目只写不同的：整套换掉同名配置、改测试命令，其余照默认', () => {
+    const got = ok(
+      resolveFlowConfig(
+        org,
+        project({
+          formatVersion: 1,
+          testCommand: 'pnpm test:changed',
+          uiPaths: ['packages/web/'],
+          categoryProfiles: { 杂项: 'single' },
+        }),
+      ),
+    );
+    expect(got.usedOrgDefault).toBe(false);
+    expect(got.config.testCommand).toBe('pnpm test:changed');
+    expect(got.config.categoryProfiles).toEqual({ 需求: 'default', 缺陷: 'default', 杂项: 'single' });
+    expect(profileFor(got.config, '杂项')).toMatchObject({ ok: true, name: 'single' });
+    expect(uiFiles(got.config, ['packages/web/src/a.tsx', 'packages/api/src/b.ts'])).toEqual([
+      'packages/web/src/a.tsx',
+    ]);
+  });
+
+  it('单上临时指定的配置优先', () => {
+    const got = ok(resolveFlowConfig(org, { kind: 'missing' }));
+    expect(profileFor(got.config, '需求', 'single')).toMatchObject({ ok: true, name: 'single' });
+    expect(profileFor(got.config, '需求', '没有这套')).toEqual({
+      ok: false,
+      why: '没有叫「没有这套」的配置',
+    });
+  });
+
+  it('高风险路径按目录算', () => {
+    const got = ok(
+      resolveFlowConfig(org, project({ formatVersion: 1, highRiskPaths: ['packages/db/migrations/'] })),
+    );
+    expect(touchesHighRisk(got.config, ['packages/db/migrations/0009.sql'])).toBe(true);
+    expect(touchesHighRisk(got.config, ['packages/db/src/x.ts'])).toBe(false);
+  });
+
+  it.each<[string, Source, Source, 'org' | 'project', RegExp]>([
+    ['全组织默认不在', { kind: 'missing' }, { kind: 'missing' }, 'org', /找不到/],
+    [
+      '全组织默认读不了',
+      { kind: 'unreadable', error: 'EACCES' },
+      { kind: 'missing' },
+      'org',
+      /读不了（EACCES）/,
+    ],
+    ['全组织默认不是 JSON', { kind: 'text', text: '{' }, { kind: 'missing' }, 'org', /不是 JSON/],
+    [
+      '全组织默认格式版本认不出',
+      orgWith((o) => (o.formatVersion = 9)),
+      { kind: 'missing' },
+      'org',
+      /格式版本 9/,
+    ],
+    [
+      '全组织默认少了写死的禁令',
+      orgWith((o) => (o.bans = [])),
+      { kind: 'missing' },
+      'org',
+      /少了写死的禁令：gpt-no-ui、no-fable/,
+    ],
+    [
+      '全组织默认的类别指到不存在的配置',
+      orgWith((o) => (o.categoryProfiles = { 需求: 'x', 缺陷: 'default', 杂项: 'default' })),
+      { kind: 'missing' },
+      'org',
+      /「需求」用的配置「x」不存在/,
+    ],
+    [
+      '全组织默认多了认不出的字段',
+      orgWith((o) => (o.whatever = 1)),
+      { kind: 'missing' },
+      'org',
+      /whatever|Unrecognized/i,
+    ],
+    ['项目配置读不了', org, { kind: 'unreadable', error: 'EIO' }, 'project', /读不了（EIO）/],
+    ['项目配置不是 JSON', org, { kind: 'text', text: 'formatVersion: 1' }, 'project', /不是 JSON/],
+    ['项目配置格式版本认不出', org, project({ formatVersion: 2 }), 'project', /格式版本 2/],
+    ['项目想改禁令', org, project({ formatVersion: 1, bans: [] }), 'project', /禁令只能写在全组织默认里/],
+    [
+      '项目配置里用了 Fable',
+      org,
+      project({
+        formatVersion: 1,
+        profiles: {
+          default: {
+            steps: { lead: ['fable-5.1'], sidekick: [], review: [], verify: [], discuss: [] },
+            review: { vendors: 0, rounds: 1 },
+            verify: { rounds: 1 },
+            discuss: { vendors: 1, rounds: 1 },
+          },
+        },
+      }),
+      'project',
+      /禁用的模型 fable-5\.1/,
+    ],
+    [
+      '项目的类别指到不存在的配置',
+      org,
+      project({ formatVersion: 1, categoryProfiles: { 缺陷: 'nope' } }),
+      'project',
+      /不存在/,
+    ],
+    ['项目路径跳出仓', org, project({ formatVersion: 1, uiPaths: ['../web/'] }), 'project', /相对路径/],
+  ])('【失败】%s → 停派', (_name, orgSource, projectSource, scope, why) => {
+    const got = resolveFlowConfig(orgSource, projectSource);
+    expect(got.ok).toBe(false);
+    if (!got.ok) {
+      expect(got.scope).toBe(scope);
+      expect(got.why).toMatch(why);
+    }
+  });
+});
