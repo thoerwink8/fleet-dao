@@ -67,8 +67,14 @@ export interface ReconcilerOptions {
   maxRedeliveries?: number | undefined;
 }
 
+// 投递编号已超出 JS 安全整数（19 位）：client 按原文留成字符串，小的照旧是数字；一律转成原文拼重投的路径。
+// 丢了精度的数字（没拿到原文）不认：拿它重投只会 404，宁可这一轮报「形状不认识」。
+const DeliveryId = z
+  .union([z.number().int().nonnegative().refine(Number.isSafeInteger), z.string().regex(/^\d+$/)])
+  .transform(String);
+
 const Delivery = z.object({
-  id: z.number(),
+  id: DeliveryId,
   guid: z.string(),
   delivered_at: z.string(),
   status_code: z.number().nullable().optional(),
@@ -113,7 +119,7 @@ export function createReconciler(deps: Deps, options: ReconcilerOptions): Reconc
 
   return {
     async redeliverFailed(since) {
-      const failed = new Map<string, number>();
+      const failed = new Map<string, string>();
       const ok = new Set<string>();
       let checked = 0;
       try {

@@ -218,6 +218,32 @@ describe('写请求', () => {
     expect((await gh.client.request(get)).status).toBe(200);
   });
 
+  it('超出 JS 安全整数的数字按原文留成字符串，别的数字照旧（GitHub 的投递编号已是 19 位）', async () => {
+    const { gh, fake } = setup();
+    const raw =
+      '{"big":3844860628254588928,"neg":-9007199254740993,"safe":9007199254740991,"small":42,"float":1.5,"exp":1e21,"nested":[{"id":3844859849449931234}]}';
+    fake.before.push((req) =>
+      req.path === '/app/hook/deliveries'
+        ? new Response(raw, { status: 200, headers: { 'content-type': 'application/json' } })
+        : undefined,
+    );
+    const res = await gh.client.request<Record<string, unknown>>({
+      method: 'GET',
+      path: '/app/hook/deliveries',
+      auth: { as: 'app', role: 'engine' },
+    });
+    expect(res.data).toEqual({
+      big: '3844860628254588928',
+      neg: '-9007199254740993',
+      safe: 9007199254740991,
+      small: 42,
+      float: 1.5,
+      // 写成指数的不是整数原文：不改，照旧是数字
+      exp: 1e21,
+      nested: [{ id: '3844859849449931234' }],
+    });
+  });
+
   it('翻页跟着 Link 头走完', async () => {
     const { gh, fake } = setup();
     const issue = fake.addIssue();

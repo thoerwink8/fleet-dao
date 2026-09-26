@@ -156,6 +156,44 @@ describe('对账与补漏', () => {
     expect(fake.calls('POST', /attempts$/).map((r) => r.as)).toEqual(['app:engine']);
   });
 
+  it('重投：19 位的投递编号按原文拼路径，不丢精度（法国实测 …928 被改成 …000，重投全 404）', async () => {
+    const { gh, fake } = setup();
+    // 原文里的数字超出 JS 安全整数：只能手写 JSON 文本，JSON.stringify 一个 number 已经丢了精度
+    const raw =
+      '[{"id":3844860628254588928,"guid":"g-big","delivered_at":"2026-09-25T11:00:00Z","status_code":502,"event":"issues"},' +
+      '{"id":7,"guid":"g-small","delivered_at":"2026-09-25T11:00:00Z","status_code":500,"event":"issues"}]';
+    fake.before.push((req) =>
+      req.path === '/app/hook/deliveries' && req.method === 'GET'
+        ? new Response(raw, { status: 200, headers: { 'content-type': 'application/json' } })
+        : undefined,
+    );
+    const { intake } = fakeIntake(() => true);
+    const report = await gh
+      .reconciler({ intake, pollDeliveryId })
+      .redeliverFailed(new Date('2026-09-25T10:00:00Z'));
+    expect(report).toMatchObject({ outcome: 'ok', recovered: 2 });
+    expect(fake.calls('POST', /attempts$/).map((r) => r.path)).toEqual([
+      '/app/hook/deliveries/3844860628254588928/attempts',
+      '/app/hook/deliveries/7/attempts',
+    ]);
+  });
+
+  it('投递编号认不出（负数、小数、不是数字）：报「没查成」，一个都不重投', async () => {
+    for (const id of ['-1', '1.5', '"abc"', 'null']) {
+      const { gh, fake } = setup();
+      const raw = `[{"id":${id},"guid":"g-x","delivered_at":"2026-09-25T11:00:00Z","status_code":502,"event":"issues"}]`;
+      fake.before.push((req) =>
+        req.path === '/app/hook/deliveries' && req.method === 'GET'
+          ? new Response(raw, { status: 200, headers: { 'content-type': 'application/json' } })
+          : undefined,
+      );
+      const { intake } = fakeIntake(() => true);
+      const report = await gh.reconciler({ intake, pollDeliveryId }).redeliverFailed(new Date(0));
+      expect(report.outcome, `id=${id}`).toBe('unscanned');
+      expect(fake.calls('POST', /attempts$/), `id=${id}`).toEqual([]);
+    }
+  });
+
   it('投递日志读不到：报「没查成」，不报 ok', async () => {
     const { gh, fake } = setup();
     fake.permissions.engine = {};
