@@ -504,11 +504,11 @@
   --st-fail: #f54a45;
   --st-done: #2ea121;
   --st-stop: #bbbfc4;
-  --ink-run: 80%;
+  --ink-run: 70%;
   --ink-wait: 60%;
   --ink-human: 88%;
   --ink-stall: 62%;
-  --ink-fail: 68%;
+  --ink-fail: 60%;
   --ink-done: 62%;
   --ink-stop: 45%;
 }
@@ -527,11 +527,12 @@
   --st-fail: #f76964;
   --st-done: #51ba43;
   --st-stop: #5f6368;
-  --ink-run: 80%;
-  --ink-wait: 80%;
-  --ink-human: 80%;
-  --ink-fail: 85%;
-  --ink-stop: 60%;
+  --ink-run: 66%;
+  --ink-wait: 66%;
+  --ink-human: 64%;
+  --ink-fail: 70%;
+  --ink-done: 80%;
+  --ink-stop: 46%;
 }
 [data-palette="feishu"] {
   --radius: 0.5rem;
