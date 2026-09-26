@@ -375,8 +375,8 @@ site_keepalive_gaps() { # 站点文件
 # rrsync 同一时刻只让一个进来，后来的直接被拒（「Another instance of rrsync is already accessing this directory」，
 # rsync 报退出码 12；2026-09-26 发布试通香港时就这样撞上了 fleet-demo-scopes 的推送，没切版本）。france.sh 读回的试跑
 # 也一样。都在法国先拿同一把锁再推；等 HK_RSYNC_WAIT 秒还没轮到就照实失败（75），不硬推。fleet-demo-scopes.sh 单独装、
-# 不引本文件，里面抄了一份（deploy/test/demo-scopes.test.sh 核对两边一样；它的单元开了 ProtectSystem=strict，
-# 靠 ReadWritePaths=/run/lock 才拿得到锁）。FLEET_HK_RSYNC_LOCK 只给测试换位置用
+# 不引本文件，自己拿同一把锁、整趟推送只排一次（deploy/test/demo-scopes.test.sh 核对是同一把；它的单元开了 ProtectSystem=strict，
+# 靠 ReadWritePaths=/run/lock 才拿得到锁，启动超时也要盖住等锁的时间）。FLEET_HK_RSYNC_LOCK 只给测试换位置用
 HK_RSYNC_LOCK=${FLEET_HK_RSYNC_LOCK:-/run/lock/fleet-dao-hk-rsync.lock}
 HK_RSYNC_WAIT=120
 hk_rsync() { # rsync 参数…

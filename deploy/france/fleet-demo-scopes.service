@@ -10,9 +10,11 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/fleet-demo-scopes
-TimeoutStartSec=120
+# 要比脚本最坏跑的时间长：等锁 120 秒 + 5 轮 ×（ssh 连上 10 秒 + rsync 没动静就停 30 秒）= 320 秒，再留余量；
+# 短了 systemd 会先把它杀掉，报不出「等锁超时」，刚拿到锁也来不及推完（deploy/test/demo-scopes.test.sh 核对）
+TimeoutStartSec=420
 ProtectSystem=strict
-# 往香港推之前要拿 /run/lock/fleet-dao-hk-rsync.lock（和发布脚本排同一个队，见 fleet-demo-scopes.sh 的 hk_rsync）
+# 往香港推之前要拿 /run/lock/fleet-dao-hk-rsync.lock（和发布脚本排同一个队，见 fleet-demo-scopes.sh）
 ReadWritePaths=/run/lock
 ProtectHome=yes
 PrivateTmp=yes
