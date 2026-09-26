@@ -72,7 +72,12 @@ export interface ProbeContext {
 }
 
 /**
- * 一次探针会话的报告 → 结论。答上了、答的是 OK 才算通；额度用满被拒算通（quota）；其余按失败分流的同一张规则表
+ * 探通的回答：去掉首尾空白后整句就是 OK（不分大小写）。只要「含 OK」会把「Not OK」「OK, but…」这类回答也当成探通。
+ */
+const PROBE_ANSWER = /^ok$/i;
+
+/**
+ * 一次探针会话的报告 → 结论。答上了、整句只回 OK 才算通；额度用满被拒算通（quota）；其余按失败分流的同一张规则表
  * 认出是什么事（登录失效、设备被撤销……），要人修的整池问题带上 poolHold。
  */
 export function probeVerdict(report: ClaudeCodeRunReport, t: ProbeTarget, ctx: ProbeContext): ProbeAttempt {
@@ -80,10 +85,10 @@ export function probeVerdict(report: ClaudeCodeRunReport, t: ProbeTarget, ctx: P
   const result = report.stream.result;
   const text = (result?.text ?? '').trim();
   if (verdict.outcome === 'ok') {
-    if (!/\bok\b/i.test(text)) {
+    if (!PROBE_ANSWER.test(text)) {
       return {
         kind: 'failed',
-        detail: `回答认不出（要的是 OK）：${text ? clip(withoutQueries(text), 80) : '回答是空的'}`,
+        detail: `回答认不出（要的是只回 OK）：${text ? clip(withoutQueries(text), 80) : '回答是空的'}`,
       };
     }
     const secs = Math.max(1, Math.round(report.wallMs / 1000));

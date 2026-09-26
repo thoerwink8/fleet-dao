@@ -246,6 +246,28 @@ describe('没探通的：离线，写明是哪一种（不许拿默认值、上�
     expect(down?.probeDetail).toContain('连探两次都没通');
   });
 
+  // 只要「含 OK」就算通，会把这几种也写成在线（#148 合并后补审）：整句必须就是 OK
+  it.each(['Not OK', 'OK, but I cannot run tools here', 'ok.', 'OK OK', '`OK`'])(
+    '回答「%s」不是只回 OK：不算探通，离线、原因里带着原话',
+    async (reply) => {
+      const s = setup(() => ({ result: { text: reply } }));
+      await s.round();
+      const down = await row('carpool');
+      expect(down).toMatchObject({ alive: false, probeState: 'failed' });
+      expect(down?.probeDetail).toContain('回答认不出（要的是只回 OK）');
+      expect(down?.probeDetail).toContain(reply);
+    },
+  );
+
+  it.each(['OK', 'ok', '  OK\n'])(
+    '回答「%s」（去掉首尾空白后整句是 OK，不分大小写）：探通',
+    async (reply) => {
+      const s = setup(() => ({ result: { text: reply } }));
+      await s.round();
+      expect(await row('carpool')).toMatchObject({ alive: true, probeState: 'ok' });
+    },
+  );
+
   it('进程起不来（reclaude 不在）：离线，原因写起不来', async () => {
     const s = setup(() => ({ spawnError: 'spawn /home/fleet-agent-carpool/.local/bin/reclaude ENOENT' }));
     await s.round();
