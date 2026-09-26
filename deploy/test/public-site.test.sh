@@ -14,9 +14,14 @@ set -uo pipefail
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO=$(cd -- "$HERE/../.." && pwd)
 TMP=$(mktemp -d)
-NGX_PID="" # 起了测试用的 nginx 就是它的 pid 文件，收尾时停掉
+NGX_PIDS=() # 起了的测试用 nginx 的 pid 文件，收尾时停掉
+STUB_PID="" # 假后端的进程号，收尾时停掉
 cleanup() {
-  if [[ -n "$NGX_PID" && -f "$NGX_PID" ]]; then kill "$(cat -- "$NGX_PID")" 2>/dev/null; fi
+  local p
+  for p in "${NGX_PIDS[@]}"; do
+    if [[ -f "$p" ]]; then kill "$(cat -- "$p")" 2>/dev/null; fi
+  done
+  if [[ -n "$STUB_PID" ]]; then kill "$STUB_PID" 2>/dev/null; fi
   rm -rf -- "$TMP"
 }
 trap cleanup EXIT
@@ -231,6 +236,34 @@ else
   check "一个 server 都没有：没查成" "$?" 2
 fi
 
+echo "== 往法国后端的连接复用（hk.sh 读回用的 site_keepalive_gaps）：https 模板齐了；缺哪样查得出哪样，认不出不当成齐了"
+reset
+render_site nginx-https.conf 10.99.0.2 >/dev/null
+printf '%s\n' "$RENDERED" >"$TMP/ka.conf"
+check "https 模板：upstream fleet_dao_api 带 keepalive，每一处 proxy_pass 都走它" "$(site_keepalive_gaps "$TMP/ka.conf")" ""
+check "实时推送单列一段、读超时 1 小时；其余转发 1 分钟没回音回 504" \
+  "$(grep -A1 'location = /api/events {' "$TMP/ka.conf" | grep -c 'proxy_read_timeout 1h;') $(grep -cx '    proxy_read_timeout 1m;' "$TMP/ka.conf")" "1 1"
+grep -v 'keepalive 16;' "$TMP/ka.conf" >"$TMP/ka-bad.conf"
+check "去掉 keepalive：查得出" "$(site_keepalive_gaps "$TMP/ka-bad.conf")" \
+  "upstream fleet_dao_api 里没有 keepalive：连接用完就关，不复用"
+sed 's/^    keepalive 16;/    # keepalive 16;/' "$TMP/ka.conf" >"$TMP/ka-bad.conf"
+check "keepalive 注释掉了：不算有" "$(site_keepalive_gaps "$TMP/ka-bad.conf")" \
+  "upstream fleet_dao_api 里没有 keepalive：连接用完就关，不复用"
+grep -v 'keepalive_timeout' "$TMP/ka.conf" >"$TMP/ka-bad.conf"
+check "没写 keepalive_timeout：查得出" "$(site_keepalive_gaps "$TMP/ka-bad.conf")" \
+  "upstream fleet_dao_api 里没写 keepalive_timeout：要写明，而且比法国后端的空闲超时短"
+sed '0,/proxy_pass http:\/\/fleet_dao_api;/s//proxy_pass http:\/\/10.99.0.2:8787;/' "$TMP/ka.conf" >"$TMP/ka-bad.conf"
+check "有一处直接转给地址、绕开了 upstream：查得出是哪一句" "$(site_keepalive_gaps "$TMP/ka-bad.conf")" \
+  "有 proxy_pass 没走 upstream fleet_dao_api：proxy_pass http://10.99.0.2:8787;"
+sed 's/upstream fleet_dao_api/upstream other_api/' "$TMP/ka.conf" >"$TMP/ka-bad.conf"
+check "没有这个 upstream：查得出" "$(site_keepalive_gaps "$TMP/ka-bad.conf")" \
+  "没有 upstream fleet_dao_api：往法国的请求每次都新建连接"
+render_site nginx-http.conf 10.99.0.2 >/dev/null
+printf '%s\n' "$RENDERED" >"$TMP/ka-bad.conf"
+check "一处 proxy_pass 都没有（只开 80 的模板）：说认不出，不说齐了" \
+  "$(site_keepalive_gaps "$TMP/ka-bad.conf" | grep -c '一处 proxy_pass 都没有')" 1
+check "文件读不到：说读不到，不说齐了" "$(site_keepalive_gaps "$TMP/nowhere.conf")" "读不到站点配置 $TMP/nowhere.conf"
+
 echo "== 真起一个 nginx：release.json 只给隧道那头（127.0.0.2 当法国）、别处来的 404；每种回应都带 noindex；robots.txt 不禁抓"
 no_tools=""
 for c in nginx openssl curl; do
@@ -292,7 +325,7 @@ EOF
   elif ! out=$(nginx -p "$NG/" -c "$NG/nginx.conf" 2>&1); then
     check "测试用的 nginx 起来了" "$(tail -3 <<<"$out" | tr '\n' ' ')" "（起来了）"
   else
-    NGX_PID=$NG/nginx.pid
+    NGX_PIDS+=("$NG/nginx.pid")
     started=1
   fi
   if ((started)); then
@@ -337,6 +370,121 @@ EOF
     if ((fail)); then
       echo "  测试用的 nginx 的错误日志（最后 10 行）："
       tail -10 "$NG/error.log" 2>/dev/null | sed 's/^/    /'
+    fi
+  fi
+fi
+
+echo "== 真起 nginx 接一个假后端：三个请求走同一条往后端的连接；实时推送边收边转；去掉 keepalive 就成了三条连接（查法本身查得出）"
+no_tools=""
+for c in nginx openssl curl; do
+  if ! command -v "$c" >/dev/null; then no_tools+=" $c"; fi
+done
+if [[ -z "$NODE" ]]; then no_tools+=" node"; fi
+if [[ -n "$no_tools" ]]; then
+  echo "  … 没跑成：这台没有$no_tools"
+  skipped=1
+else
+  KA=$TMP/keepalive
+  mkdir -p "$KA"
+  chmod 755 "$TMP" "$KA" # root 起的 nginx，干活的进程不是 root，要进得来
+  # 假后端：给每条连进来的连接编号，每个请求记一行「路径 连接号」；/api/events 回一条 ready 之后不结束，像真的实时推送
+  BACK=$((20000 + RANDOM % 20000))
+  "$NODE" -e '
+    const http = require("node:http");
+    const fs = require("node:fs");
+    const [port, log] = process.argv.slice(1);
+    let conns = 0;
+    const server = http.createServer((req, res) => {
+      fs.appendFileSync(log, `${req.url} ${req.socket.fleetConn}\n`);
+      if (req.url === "/api/events") {
+        res.writeHead(200, { "Content-Type": "text/event-stream" });
+        res.write("event: ready\ndata: {}\n\n");
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end("{}");
+    });
+    server.on("connection", (s) => {
+      conns += 1;
+      s.fleetConn = conns;
+    });
+    server.keepAliveTimeout = 60000;
+    server.listen(Number(port), "127.0.0.1", () => fs.writeFileSync(`${log}.ready`, ""));
+  ' "$BACK" "$KA/backend.log" >"$KA/backend.out" 2>&1 &
+  STUB_PID=$!
+  for _ in $(seq 50); do
+    if [[ -f "$KA/backend.log.ready" ]]; then break; fi
+    sleep 0.1
+  done
+  # 起一个测试用的 nginx，只含这一份站点（listen 换成临时端口、证书换成自签的）。起不来把原因放进 KA_WHY、返回 1
+  # （别在 $(…) 里调：pid 文件要记进 NGX_PIDS，子 shell 里记了收尾时看不到）
+  KA_WHY=""
+  ka_nginx() { # 目录 站点内容 80口 443口
+    local dir=$1 s=$2 out
+    mkdir -p "$dir"
+    s=${s//"listen 80;"/"listen 127.0.0.1:$3;"}
+    s=${s//"listen 443 ssl;"/"listen 127.0.0.1:$4 ssl;"}
+    s=${s//"/etc/letsencrypt/live/cockpit.example.test/fullchain.pem"/"$KA/cert.pem"}
+    s=${s//"/etc/letsencrypt/live/cockpit.example.test/privkey.pem"/"$KA/key.pem"}
+    printf '%s\n' "$s" >"$dir/site.conf"
+    cat >"$dir/nginx.conf" <<EOF
+pid $dir/nginx.pid;
+error_log $dir/error.log;
+events {}
+http {
+    access_log off;
+    client_body_temp_path $dir/body;
+    proxy_temp_path $dir/proxy;
+    fastcgi_temp_path $dir/fastcgi;
+    uwsgi_temp_path $dir/uwsgi;
+    scgi_temp_path $dir/scgi;
+    include $dir/site.conf;
+}
+EOF
+    if ! out=$(nginx -t -p "$dir/" -c "$dir/nginx.conf" 2>&1) || ! out=$(nginx -p "$dir/" -c "$dir/nginx.conf" 2>&1); then
+      KA_WHY=$(tail -3 <<<"$out" | tr '\n' ' ')
+      return 1
+    fi
+    NGX_PIDS+=("$dir/nginx.pid")
+  }
+  # 连发三个 /api/me，每个用一条新的客户端连接（像浏览器开了几条）；打印「三个状态码 后端看到这三个请求来自几条连接」
+  ka_three() { # 443口
+    local codes="" _
+    : >"$KA/backend.log"
+    for _ in 1 2 3; do
+      codes+="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 5 \
+        --resolve "cockpit.example.test:$1:127.0.0.1" "https://cockpit.example.test:$1/api/me") "
+    done
+    printf '%s%s' "$codes" "$(awk '$1 == "/api/me" { print $2 }' "$KA/backend.log" | sort -u | wc -l | tr -d ' ')"
+  }
+  K1=$((20000 + RANDOM % 20000))
+  reset
+  render "$HERE/../hk/nginx-https.conf" SERVER_NAME=cockpit.example.test WEB_ROOT="$SITE" ACME_ROOT="$ACME" \
+    API_UPSTREAM="127.0.0.1:$BACK" DEMO_PATH=/demo/ DEMO_BASE=/demo TUNNEL_PEER=127.0.0.2 >/dev/null
+  good=$RENDERED
+  check "带假后端地址的 https 模板渲染成了" "${#REDS[@]}" 0
+  if [[ ! -f "$KA/backend.log.ready" ]]; then
+    check "假后端起来了" "$(tail -3 "$KA/backend.out" 2>/dev/null | tr '\n' ' ')" "（起来了）"
+  elif ! openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=cockpit.example.test \
+    -keyout "$KA/key.pem" -out "$KA/cert.pem" >"$KA/openssl.log" 2>&1; then
+    check "自签证书做出来了" "$(tail -2 "$KA/openssl.log" | tr '\n' ' ')" "（做出来了）"
+  elif ! ka_nginx "$KA/good" "$good" "$K1" $((K1 + 1)); then
+    check "测试用的 nginx（仓里的模板）起来了" "$KA_WHY" "（起来了）"
+  else
+    TLS=(-k --resolve "cockpit.example.test:$((K1 + 1)):127.0.0.1")
+    check "仓里的模板：三个请求都 200，后端看到的是同一条连接" "$(ka_three $((K1 + 1)))" "200 200 200 1"
+    out=$(curl -s -N --max-time 2 "${TLS[@]}" "https://cockpit.example.test:$((K1 + 1))/api/events" 2>/dev/null)
+    check "实时推送：后端发的第一条事件当场转到（不攒着等连接结束）" "$(grep -cx 'event: ready' <<<"$out")" 1
+    check "实时推送的连接留着没断（curl 是自己到点才停的）" \
+      "$(curl -s -o /dev/null -N --max-time 2 "${TLS[@]}" "https://cockpit.example.test:$((K1 + 1))/api/events" >/dev/null 2>&1; echo $?)" 28
+    if ! ka_nginx "$KA/bad" "$(grep -v 'keepalive 16;' <<<"$good")" $((K1 + 2)) $((K1 + 3)); then
+      check "测试用的 nginx（去掉 keepalive 的）起来了" "$KA_WHY" "（起来了）"
+    else
+      check "故意去掉 keepalive：后端看到三条连接（上面那条查法抓得到不复用）" "$(ka_three $((K1 + 3)))" "200 200 200 3"
+    fi
+    if ((fail)); then
+      echo "  测试用的 nginx 的错误日志（最后 10 行）："
+      tail -10 "$KA/good/error.log" "$KA/bad/error.log" 2>/dev/null | sed 's/^/    /'
     fi
   fi
 fi

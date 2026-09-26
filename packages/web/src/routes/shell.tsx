@@ -29,11 +29,26 @@ function Screen({ children }: { children: ReactNode }) {
   );
 }
 
-/** 没登录就不进外壳：401 时 API 层已经在跳登录页，这里只负责别把半截页面露出来。 */
+/**
+ * 没登录就不进外壳：401 时 API 层已经在跳登录页，这里只负责别把半截页面露出来。
+ * 确认登录的同时外壳和页面已经挂上（看不见）：它们的读取和 /api/me 一起发出去，确认完直接显示。经香港转到法国的
+ * 每个请求都要一趟往返（约 0.2 秒），等确认完再发就白白多等一轮。没登录的话这些读取也是 401，照样跳登录页。
+ */
 function AuthGate({ children }: { children: ReactNode }) {
   const me = useMe();
-  if (me.data) return children;
-  if (me.isPending) return <Screen>正在确认登录…</Screen>;
+  if (me.data || me.isPending) {
+    return (
+      <>
+        {/* 同一个包裹层一直在：确认完只是变可见，页面不重挂 */}
+        <div className={cn('contents', me.isPending && 'invisible')}>{children}</div>
+        {me.isPending ? (
+          <div className="fixed inset-0 z-50">
+            <Screen>正在确认登录…</Screen>
+          </div>
+        ) : null}
+      </>
+    );
+  }
   const unauthenticated = me.error instanceof ApiError && me.error.status === 401;
   return (
     <Screen>
@@ -86,7 +101,9 @@ function Frame() {
   const [collapsed, setCollapsed] = useLocalState(`${brand.storagePrefix}sidebar-collapsed`, false);
   const [mobileNav, setMobileNav] = useState(false);
   const [cmdk, setCmdk] = useState(false);
-  useLiveSync();
+  // 推送等确认登录之后再连：连上时的全量重拉不和首屏的读取挤在一起，没登录也不去连
+  const { data: me } = useMe();
+  useLiveSync(Boolean(me));
   useNoticeToasts();
 
   // 演示版：这一页所在的模块没开放，就不渲染它（它的数据也就不去读）。

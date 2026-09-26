@@ -25,6 +25,7 @@ import { createFeishuAuth } from './feishu.ts';
 import { githubAppMissing, githubEventsCheck } from './github.ts';
 import { serviceHealthChecks } from './health.ts';
 import { judgeHealthCheck } from './judge-health.ts';
+import { serveCockpit } from './keep-alive.ts';
 import { jsonLogger } from './log.ts';
 import { createMemoryStore } from './memory-store.ts';
 import { createPgStore, probeDb, withStatementTimeout } from './pg-store.ts';
@@ -163,7 +164,7 @@ const { deps, close } = await assemble();
 const { cockpit, agent, draftOpening } = buildApps(deps);
 const stopDraftOpening = draftOpening.start();
 const servers = [
-  serve({ fetch: cockpit.fetch, hostname: config.cockpitListen.host, port: config.cockpitListen.port }),
+  serveCockpit(cockpit.fetch, config.cockpitListen),
   serve({ fetch: agent.fetch, hostname: config.agentListen.host, port: config.agentListen.port }),
 ];
 

@@ -300,8 +300,9 @@ function RoutePickerDialog({
   onClose(): void;
   onPick(routeId: string): void;
 }) {
-  const { data: routing, error: routingError } = useRouting();
-  const { data: pools, error: poolsError } = usePools();
+  // 对话框一直挂着：只在打开时读，不然每一页的首屏都白拉这两份、路由还每分钟重拉一次
+  const { data: routing, error: routingError } = useRouting({ enabled: Boolean(target) });
+  const { data: pools, error: poolsError } = usePools({ enabled: Boolean(target) });
   const activity = target ? (target.sub ? target.sub.activity : target.activity) : undefined;
   const stage: StageKind = activity?.stage ?? 'execute';
   const current = activity?.routeId;

@@ -339,6 +339,38 @@ demo_path_ok() { # 路径
   [[ "$1" =~ ^/[a-z0-9][a-z0-9-]*/$ ]] && [[ " /assets/ /health/ /healthz/ /api/ /auth/ /github/ " != *" $1 "* ]]
 }
 
+# 香港站点往法国的连接复用（deploy/hk/nginx-https.conf 的 upstream fleet_dao_api）缺了什么：一样一行，全齐什么都不打印。
+# 要齐的：这个 upstream 在、里面有 keepalive 和 keepalive_timeout，每一处 proxy_pass 都走它。文件读不到、一处 proxy_pass
+# 都没有，也照实打印——认不出不能当成「齐了」。hk.sh 的读回、deploy/test/public-site.test.sh 用它
+site_keepalive_gaps() { # 站点文件
+  if [[ ! -f "$1" || ! -r "$1" ]]; then
+    printf '读不到站点配置 %s\n' "$1"
+    return 0
+  fi
+  awk '
+    { sub(/#.*/, "") }
+    /^[ \t]*upstream[ \t]+fleet_dao_api[ \t]*\{/ { up = 1; seen = 1; next }
+    up && /^[ \t]*\}/ { up = 0; next }
+    up && /^[ \t]*keepalive[ \t]+[1-9][0-9]*;/ { ka = 1 }
+    up && /^[ \t]*keepalive_timeout[ \t]+[0-9]+[smh]?;/ { kt = 1 }
+    /^[ \t]*proxy_pass[ \t]/ {
+      n++
+      if ($0 !~ /^[ \t]*proxy_pass[ \t]+http:\/\/fleet_dao_api;[ \t]*$/) {
+        gsub(/^[ \t]+|[ \t]+$/, "")
+        bad = (bad == "" ? $0 : bad "；" $0)
+      }
+    }
+    END {
+      if (!seen) print "没有 upstream fleet_dao_api：往法国的请求每次都新建连接"
+      else {
+        if (!ka) print "upstream fleet_dao_api 里没有 keepalive：连接用完就关，不复用"
+        if (!kt) print "upstream fleet_dao_api 里没写 keepalive_timeout：要写明，而且比法国后端的空闲超时短"
+      }
+      if (!n) print "一处 proxy_pass 都没有：认不出这份站点配置"
+      if (bad != "") print "有 proxy_pass 没走 upstream fleet_dao_api：" bad
+    }' "$1"
+}
+
 # 法国往香港传驾驶舱静态文件用的 ssh（france.sh 的读回和 release.sh 同一套）：只用那一把钥匙、只认钉住的主机钥匙、
 # 不交互。香港那头把这把钥匙限死成 rrsync -wo -munge /srv/fleet-dao-web，只许从隧道地址来（hk.sh）。
 web_upload_ssh() { # 私钥 known_hosts
