@@ -1,5 +1,6 @@
 import type { TestWorkflowEnvironment } from '@temporalio/testing';
 import { beforeEach, describe, expect, it } from 'vitest';
+import type { EngineActivities } from '../src/activity-options.ts';
 import {
   agentEventSignal,
   answerSignal,
@@ -279,43 +280,78 @@ describe('需求工作流', { timeout: 60_000 }, () => {
     expect(waits.map((w) => w.waitFor)).toContain('deps');
   });
 
-  it('会改同一块地方的不同时跑，互不相干的并行', async () => {
-    const world = createFakeWorld({
-      plan: [
-        { key: 'form', title: '登录表单', touches: ['src/login'] },
-        { key: 'form-style', title: '表单样式', touches: ['src/login/form.css'] },
-        { key: 'readme', title: '说明', touches: ['README.md'] },
-      ],
-      // 登录表单的写码会话挂住，好在它跑着的时候看别的子任务。
-      session: (input, n) =>
-        input.subtaskKey === 'form' && input.stage === 'execute' && n === 1 ? { hold: true } : {},
-    });
-    const result = await withWorker(env, world, async (q) => {
-      const handle = await startRequirement(q);
-      await waitUntil(() => world.held().length === 1, 'form 的写码会话挂着');
-      // readme 不相干，照样做完；form-style 改的地方被 form 占着，排队等。
-      await queryUntil<RequirementStatus>(
-        handle,
-        (s) => s.subtasks.find((x) => x.key === 'readme')?.state === 'merged',
-        'readme 合并',
+  // form、readme 互不相干、同时开工，谁的写码会话先起是赛跑（#88：原来按所有子任务一起数的 n 挑 form 的会话，readme
+  // 先起时 form 那次成了 2、挂不住）：两种先后都钉死各跑一遍。等的都是假世界的变化，不按钟点轮询。
+  for (const first of ['form', 'readme'] as const) {
+    it(`会改同一块地方的不同时跑，互不相干的并行（${first} 的写码会话先起）`, async () => {
+      const second = first === 'form' ? 'readme' : 'form';
+      const world = createFakeWorld({
+        plan: [
+          { key: 'form', title: '登录表单', touches: ['src/login'] },
+          { key: 'form-style', title: '表单样式', touches: ['src/login/form.css'] },
+          { key: 'readme', title: '说明', touches: ['README.md'] },
+        ],
+        // 登录表单的第一个写码会话挂住，好在它跑着的时候看别的子任务。
+        session: (input, _n, own) =>
+          input.subtaskKey === 'form' && input.stage === 'execute' && own === 1 ? { hold: true } : {},
+      });
+      const execStarted = (key: string) => () => sessionsOf(world.calls, key).length > 0;
+      // 钉先后：second 的写码会话等 first 的记下了才起；readme 的会话等 form 的起了才往下走，所以 readme 合并时
+      // form 一定已经在写码——最后比时间段靠这两道。
+      const pinned = (acts: EngineActivities): EngineActivities => ({
+        ...acts,
+        startSession: async (input) => {
+          if (input.subtaskKey === second && input.stage === 'execute') {
+            await world.until(execStarted(first), `${first} 的写码会话先起`);
+          }
+          return acts.startSession(input);
+        },
+        awaitSession: async (input) => {
+          if (input.subtaskKey === 'readme' && input.stage === 'execute') {
+            await world.until(execStarted('form'), 'form 的写码会话起了');
+          }
+          return acts.awaitSession(input);
+        },
+      });
+      const result = await withWorker(
+        env,
+        world,
+        async (q) => {
+          const handle = await startRequirement(q);
+          await world.until(
+            () => world.held().some((s) => s.input.subtaskKey === 'form'),
+            'form 的写码会话挂着',
+          );
+          // readme 不相干，照样做完；form-style 改的地方被 form 占着，排队等。
+          await world.until(
+            () => world.states.at(-1)?.subtasks.find((s) => s.key === 'readme')?.state === 'merged',
+            'readme 合并',
+          );
+          const status = (await handle.query('status')) as RequirementStatus;
+          const style = status.subtasks.find((x) => x.key === 'form-style');
+          expect(style?.state).toBe('waiting_slot');
+          expect(style?.waiting).toMatchObject({ kind: 'overlap', on: ['form'] });
+          expect(sessionsOf(world.calls, 'form-style')).toHaveLength(0);
+          const held = world.held();
+          expect(held.map((s) => s.input.subtaskKey)).toEqual(['form']);
+          for (const s of held) world.release(s.id);
+          return (await handle.result()) as RequirementResult;
+        },
+        { wrapActivities: pinned },
       );
-      const status = (await handle.query('status')) as RequirementStatus;
-      const style = status.subtasks.find((x) => x.key === 'form-style');
-      expect(style?.state).toBe('waiting_slot');
-      expect(style?.waiting).toMatchObject({ kind: 'overlap', on: ['form'] });
-      expect(sessionsOf(world.calls, 'form-style')).toHaveLength(0);
-      const held = world.held()[0];
-      if (held) world.release(held.id);
-      return (await handle.result()) as RequirementResult;
+      expect(result.state).toBe('done');
+      // 真按钉的先后起的（钉不住的话两条就成了同一种先后）。
+      const firstAt = world.calls.indexOf(sessionsOf(world.calls, first)[0] as FakeCall);
+      expect(firstAt).toBeGreaterThanOrEqual(0);
+      expect(world.calls.indexOf(sessionsOf(world.calls, second)[0] as FakeCall)).toBeGreaterThan(firstAt);
+      const pr = (key: string) => result.subtasks.find((s) => s.key === key)?.prNumber ?? -1;
+      const form = spanOf(world.calls, 'form', pr('form'));
+      const style = spanOf(world.calls, 'form-style', pr('form-style'));
+      const readme = spanOf(world.calls, 'readme', pr('readme'));
+      expect(overlaps(form, style)).toBe(false);
+      expect(overlaps(form, readme)).toBe(true);
     });
-    expect(result.state).toBe('done');
-    const pr = (key: string) => result.subtasks.find((s) => s.key === key)?.prNumber ?? -1;
-    const form = spanOf(world.calls, 'form', pr('form'));
-    const style = spanOf(world.calls, 'form-style', pr('form-style'));
-    const readme = spanOf(world.calls, 'readme', pr('readme'));
-    expect(overlaps(form, style)).toBe(false);
-    expect(overlaps(form, readme)).toBe(true);
-  });
+  }
 
   it('叫停：在跑的子任务停会话、收树，需求以 stopped 结束，不关单', async () => {
     const world = createFakeWorld({
