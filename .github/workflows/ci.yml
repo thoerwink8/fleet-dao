@@ -1,4 +1,11 @@
 name: ci
+# 按改动跑、并行跑（design 第五节「CI 按改动跑」）：changes 算出这次改了什么、哪几个 job 要跑（packages/conventions/src/ci-plan.ts），
+# lint、test、web、deploy 看它给的开关；hygiene 每次都跑；check 汇总核对「该跑的跑了且绿、不该跑的确实跳过」。
+# 主线推送一律全跑，兜底按改动算漏了的。
+# 改这里之前必须知道：
+# - 必过检查（规则集「主线保护」）只认 check 这一个 job 名，别改名；它 needs 全部 job、if: always()，少 needs 一个就等于不拦那个。
+# - 不用工作流级的 paths 过滤：必过检查要每个 PR 都触发，跳过的 job 由汇总核对（test/ci-plan.test.ts 核这份文件的结构）。
+# - 加 job 要同时加进 ci-plan.ts 的 PLANNED_JOBS（或 ALWAYS_JOBS）和 check 的 needs。
 on:
   pull_request:
   push:
@@ -10,11 +17,40 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 jobs:
-  check:
+  # 这次改了什么 → 各 job 的开关。PR 按 git diff origin/<目标分支>...HEAD 算（HEAD 是 GitHub 造的合并提交，比的就是合进去会带进来的改动）；
+  # base 拿不到、diff 失败都判红（退出码 2），认不出的路径、读不出的依赖图升成全跑。
+  changes:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
+    outputs:
+      plan: ${{ steps.plan.outputs.plan }}
+      lint: ${{ steps.plan.outputs.lint }}
+      tsc: ${{ steps.plan.outputs.tsc }}
+      tests: ${{ steps.plan.outputs.tests }}
+      web: ${{ steps.plan.outputs.web }}
+      deploy: ${{ steps.plan.outputs.deploy }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.base_ref }}
+        run: node packages/conventions/src/bin/ci-plan.ts --event "$EVENT" --base "origin/$BASE"
+
+  # 卫生检查 + 文档指针、skill 指针：每个 PR 都跑、不裁剪（改名挪文件也会让文档里的指针指空）。不等 changes。
+  hygiene:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -30,9 +66,66 @@ jobs:
           f="$RUNNER_TEMP/sensitive-values.txt"
           printf '%s\n' "$FLEET_SENSITIVE_VALUES" > "$f"
           echo "FLEET_SENSITIVE_VALUES_FILE=$f" >> "$GITHUB_ENV"
+      - run: node packages/hygiene/src/bin/check.ts
+      - run: pnpm exec vitest run packages/conventions/test/doc-pointers.test.ts agents/test/
+
+  lint:
+    needs: changes
+    if: needs.changes.outputs.lint == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec biome check .
+      # tsc -b 只查受影响的项目（各自 tsconfig 的 include 里跨包导入的源码一起查）；全跑时查整棵树
+      - name: tsc
+        if: needs.changes.outputs.tsc != ''
+        env:
+          TSC: ${{ needs.changes.outputs.tsc }}
+        run: |
+          set -euo pipefail
+          if [[ $TSC == all ]]; then pnpm exec tsc -b; else read -ra projects <<<"$TSC"; pnpm exec tsc -b "${projects[@]}"; fi
+
+  # engine、db 各一台（最慢的两个），其余一台；只跑受影响的包（改到的 + 依赖它们的）。
+  test:
+    needs: changes
+    if: needs.changes.outputs.tests != '[]'
+    name: test (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.changes.outputs.tests) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: 已知敏感值名单
+        env:
+          FLEET_SENSITIVE_VALUES: ${{ secrets.FLEET_SENSITIVE_VALUES }}
+        run: |
+          f="$RUNNER_TEMP/sensitive-values.txt"
+          printf '%s\n' "$FLEET_SENSITIVE_VALUES" > "$f"
+          echo "FLEET_SENSITIVE_VALUES_FILE=$f" >> "$GITHUB_ENV"
       # 引擎有几条测试要真的 Temporal 开发服务端（测试服务端和真服务端行为不同的地方）：用和法国同一版的命令行起，
       # 版本和校验和从 deploy/france.sh 读（只有一份），缓存按版本 + 校验和。测试里 CI 没给这个变量就直接红（test/support.ts）。
       - name: Temporal 命令行的版本（和法国同版）
+        if: matrix.temporal
         id: temporal
         run: |
           set -euo pipefail
@@ -45,12 +138,13 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@v4
+        if: matrix.temporal
         id: temporal-cache
         with:
           path: ~/.cache/fleet-temporal-cli/${{ steps.temporal.outputs.version }}
           key: temporal-cli-${{ runner.os }}-${{ steps.temporal.outputs.version }}-${{ steps.temporal.outputs.sha }}
       - name: 下载 Temporal 命令行（缓存没命中时；校验和对不上就红）
-        if: steps.temporal-cache.outputs.cache-hit != 'true'
+        if: matrix.temporal && steps.temporal-cache.outputs.cache-hit != 'true'
         env:
           VERSION: ${{ steps.temporal.outputs.version }}
           SHA: ${{ steps.temporal.outputs.sha }}
@@ -64,6 +158,7 @@ jobs:
           echo "$SHA  $tgz" | sha256sum -c -
           tar -xzf "$tgz" -C "$dir" temporal
       - name: 核对版本，交给测试
+        if: matrix.temporal
         env:
           VERSION: ${{ steps.temporal.outputs.version }}
         run: |
@@ -72,11 +167,67 @@ jobs:
           "$cli" --version
           "$cli" --version | grep -qF "$VERSION"
           echo "FLEET_TEST_TEMPORAL_CLI=$cli" >> "$GITHUB_ENV"
-      - run: pnpm check
-      # 演示版打包，打包完扫产物：出现真名、内部叫法、GitHub 地址、源码对照文件就红（法国发布时也是这一道）
+      # 参数是 ci-plan 给的包目录（或全跑时 rest 的 --exclude）；经环境变量传、按数组展开，不拼进命令行
+      - env:
+          ARGS: ${{ join(matrix.args, ' ') }}
+        run: |
+          set -euo pipefail
+          read -ra args <<<"$ARGS"
+          pnpm exec vitest run "${args[@]}"
+
+  # 演示版打包，打包完扫产物：出现真名、内部叫法、GitHub 地址、源码对照文件就红（法国发布时也是这一道）
+  web:
+    needs: changes
+    if: needs.changes.outputs.web == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
       - run: pnpm --filter ./packages/web run build:demo
-      # 装机脚本的检查：退出码 2 = 有项没跑成，同样算红，别让「没跑」冒充「通过」
-      # FLEET_TEST_SYSTEM_USERS=1：agent-scope-adopt.test.sh 建、删真系统账号的一段只在这里开（一次性的机器）。
-      # sudo 会清掉带进来的环境变量，所以写在 sudo 的命令行上（这里 runner 的 sudo 规则是 ALL，命令行上给的放行）；
-      # 万一没带过去，那一段报「没跑成」、这一步照样红，不会悄悄当成通过。
+
+  # 装机脚本的检查：退出码 2 = 有项没跑成，同样算红，别让「没跑」冒充「通过」
+  # FLEET_TEST_SYSTEM_USERS=1：agent-scope-adopt.test.sh 建、删真系统账号的一段只在这里开（一次性的机器）。
+  # sudo 会清掉带进来的环境变量，所以写在 sudo 的命令行上（这里 runner 的 sudo 规则是 ALL，命令行上给的放行）；
+  # 万一没带过去，那一段报「没跑成」、这一步照样红，不会悄悄当成通过。
+  deploy:
+    needs: changes
+    if: needs.changes.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
       - run: sudo FLEET_TEST_SYSTEM_USERS=1 bash deploy/test/run.sh
+
+  # 必过检查。逐个核对：changes、hygiene 必须绿；lint、test、web、deploy 本该跑的必须绿、本该跳过的必须是跳过（packages/conventions/src/ci-plan.ts 的 ciVerdict）。
+  check:
+    if: always()
+    needs: [changes, hygiene, lint, test, web, deploy]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          sparse-checkout: packages/conventions
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - env:
+          CI_NEEDS: ${{ toJSON(needs) }}
+        run: node packages/conventions/src/bin/ci-verdict.ts
