@@ -24,6 +24,16 @@ async function startBrowserLogin(h: ReturnType<typeof harness>, next = `/tasks/$
 }
 
 describe('飞书浏览器登录（授权码 + PKCE）', () => {
+  it('飞书拒绝授权码时，错误码记进日志并显示给用户（不吞掉）', async () => {
+    const h = harness();
+    const { state, cookie } = await startBrowserLogin(h);
+    const cb = await h.cockpit.request(`/auth/feishu/callback?code=not-a-real-code&state=${state}`, {
+      headers: { cookie },
+    });
+    const body = await cb.text();
+    expect(body).toContain('20003');
+  });
+
   it('白名单里的人登录后拿到 HttpOnly 会话 Cookie，跳回原来要去的页', async () => {
     const h = harness();
     const { location, state, cookie, res } = await startBrowserLogin(h);
