@@ -427,7 +427,12 @@ describe('入口：认出要算哪些 PR、写状态、退出码', () => {
   });
 
   it('第二意见状态：PR 列表里有一条认不出，判没查成，不筛掉了当成没事', async () => {
-    for (const junk of [{ number: 80 }, { number: 80, state: 'open', head: {} }, 'x']) {
+    for (const junk of [
+      { number: 80 },
+      { number: 80, state: 'open', head: {} },
+      { number: 82, state: 'open', head: { sha: 'abc' } },
+      'x',
+    ]) {
       const w = world({ forCommit: [{ number: 81, state: 'open', head: { sha: HEAD } }, junk] });
       const r = await run(w, 'status', { context: 'second-opinion', sha: HEAD });
       expect(r.code, JSON.stringify(junk)).toBe(2);

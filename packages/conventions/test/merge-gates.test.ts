@@ -131,8 +131,8 @@ describe('高风险路径清单', () => {
       'ALTER TABLE "tasks" ADD COLUMN "note" text;',
       'ALTER TABLE "x" ADD CONSTRAINT "x_fk" FOREIGN KEY ("id") REFERENCES "tasks"("id");',
       'CREATE INDEX "x_idx" ON "x" ("id");',
-      'DROP TRIGGER IF EXISTS tasks_touch ON "tasks";',
-      'CREATE OR REPLACE FUNCTION f() RETURNS trigger AS $$ BEGIN DELETE FROM x; RETURN NEW; END; $$ LANGUAGE plpgsql;',
+      'CREATE FUNCTION f() RETURNS trigger AS $$ BEGIN DELETE FROM x; RETURN NEW; END; $$ LANGUAGE plpgsql;',
+      'CREATE TRIGGER t AFTER INSERT ON "x" FOR EACH ROW EXECUTE FUNCTION f();',
       'ALTER TABLE "x"',
       '  ADD COLUMN "a" text,',
       `  ADD CONSTRAINT "c" CHECK ("a" in ('p', 'q'));`,
@@ -159,6 +159,12 @@ describe('高风险路径清单', () => {
     expect(hit(add('CREATE TABLE "y" ("id" int);\nDROP TRIGGER t ON "x";'))).toMatch(
       /^有「DROP TRIGGER T ON/,
     );
+    // 替换、删掉已有的函数、视图、触发器也算改
+    expect(hit(add('CREATE OR REPLACE FUNCTION f() RETURNS int AS $$ SELECT 1; $$ LANGUAGE sql;'))).toMatch(
+      /^有「CREATE OR REPLACE FUNCTION/,
+    );
+    expect(hit(add('CREATE OR REPLACE VIEW v AS SELECT 1;'))).toMatch(/^有「CREATE OR REPLACE VIEW/);
+    expect(hit(add('DROP TRIGGER IF EXISTS t ON "x";'))).toMatch(/^有「DROP TRIGGER IF EXISTS/);
     expect(hit(changed('packages/db/migrations/0009_x.sql', 'added'))).toBe('看不到改动内容');
     expect(hit(changed('packages/db/migrations/0003_catalog.sql'))).toBe('改了已有的迁移');
     expect(hit(changed('packages/db/migrations/0003_catalog.sql', 'removed'))).toBe('删了已有的迁移');

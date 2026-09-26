@@ -372,7 +372,8 @@ export async function targetPrs(
           typeof p.number !== 'number' ||
           typeof p.state !== 'string' ||
           !isObject(p.head) ||
-          typeof p.head.sha !== 'string'
+          typeof p.head.sha !== 'string' ||
+          !/^[0-9a-f]{40}$/.test(p.head.sha)
         ) {
           throw new Error(`提交 ${sha.slice(0, 7)} 的 PR 列表里有一条认不出（要有 number、state、head.sha）`);
         }

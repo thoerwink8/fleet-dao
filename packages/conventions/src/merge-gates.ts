@@ -97,17 +97,17 @@ export interface RiskyFile {
 }
 
 /**
- * 新迁移里只放行明确是「只加不改」的语句：建表、建索引、建类型、建或替换函数和触发器、重建触发器前的 DROP TRIGGER IF EXISTS、
- * 插数据、写注释、给枚举加值、ALTER TABLE 里只有 ADD COLUMN / ADD CONSTRAINT 这类动作。别的一律算删改（宁可多拦：
- * 认不准的写法由第二意见看一眼，漏拦一次删数据就回不来）。按整段 SQL 分语句判，语句跨几行都一样。
+ * 新迁移里只放行明确是「只加不改」的语句：建表、建索引、建类型、新建函数和触发器（不带 OR REPLACE：同名已有就报错，
+ * 改不了已有的）、插数据、写注释、给枚举加值、ALTER TABLE 里只有 ADD COLUMN / ADD CONSTRAINT 这类动作。替换或删掉已有的
+ * 函数、视图、触发器（CREATE OR REPLACE、DROP TRIGGER）也算改。别的一律算删改（宁可多拦：认不准的写法由第二意见看一眼，
+ * 漏拦一次删数据就回不来）。按整段 SQL 分语句判，语句跨几行都一样。
  */
 const ADDITIVE = [
   /^CREATE (UNIQUE )?INDEX\b/,
   /^CREATE TABLE\b/,
   /^CREATE TYPE\b/,
-  /^CREATE (OR REPLACE )?(FUNCTION|TRIGGER|VIEW)\b/,
+  /^CREATE (FUNCTION|TRIGGER|VIEW)\b/,
   /^CREATE (SEQUENCE|EXTENSION|SCHEMA)\b/,
-  /^DROP TRIGGER IF EXISTS\b/,
   /^INSERT INTO\b/,
   /^COMMENT ON\b/,
   /^ALTER TYPE \S+ ADD VALUE\b/,
