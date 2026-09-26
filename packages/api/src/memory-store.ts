@@ -1246,6 +1246,21 @@ export function createMemoryStore(
       changed('tasks', task.id);
       return 'ok';
     },
+    async setAutoDispatch({ repoId, on }, entry) {
+      const repo = data.repos.find((r) => r.id === repoId);
+      if (!repo) return 'not_found';
+      const before = repo.autoDispatchSince ?? null;
+      if ((before !== null) === on) return { changed: false, autoDispatchSince: before };
+      const after = on ? now().toISOString() : null;
+      const full: NewAuditEntry = {
+        ...entry,
+        before: { autoDispatchSince: before },
+        after: { autoDispatchSince: after },
+      };
+      checkAudit(full);
+      repo.autoDispatchSince = after ?? undefined;
+      return { changed: true, autoDispatchSince: after, auditId: audit(full) };
+    },
 
     // —— 飞书 ——
     async getDraft(id) {

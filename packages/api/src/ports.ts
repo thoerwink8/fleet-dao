@@ -500,6 +500,16 @@ export interface IntakeRepo extends Repo {
   autoDispatchSince: string | null;
 }
 
+/** 改「让 AI 接活」开关的结果（setAutoDispatch）。 */
+export interface AutoDispatchChange {
+  /** false = 本来就是要的状态：什么都没改，也没记操作记录。 */
+  changed: boolean;
+  /** 现在库里的值：打开的时刻，null = 关着。 */
+  autoDispatchSince: string | null;
+  /** 改了才有：同一事务里记下的那条操作记录的编号。 */
+  auditId?: string | undefined;
+}
+
 /** 从 issue 建的任务行。id 由调用方生成（操作记录的 target 要用）；这张 issue 已经有任务就不建、回已有的那行。 */
 export interface NewIssueTask {
   id: string;
@@ -525,6 +535,17 @@ export interface IntakeStore {
   ): Promise<'ok' | 'unchanged' | 'not_found'>;
   /** 还在排队（从没派出去）的任务直接记成叫停；已经不在排队了就不动，返回 not_queued。 */
   stopQueuedTask(taskId: string, audit: NewAuditEntry): Promise<'ok' | 'not_queued'>;
+  /**
+   * 「让 AI 接活」开关（repos.auto_dispatch_since，design 第九节「在哪能做与接活开关」）的写入口，
+   * 服务器上的 fleet-api dispatch 和以后驾驶舱的开关（#131）都走这里。on 打开、记下此刻（只有这之后开的 issue
+   * 自动派，见 issue-intake.ts 的 dispatchDecision）；off 关上、设为空。已经是要的状态就不改、不记（changed=false）：
+   * 开着时再开不重设时刻——重设会把已经能派的单变成「开关打开以前开的」。改了就和操作记录同一事务：先锁住这一行，
+   * 操作记录的 before/after（开关原来、现在的值）由这里按库里的值填。没这个仓（含编号不是 uuid）：not_found。
+   */
+  setAutoDispatch(
+    input: { repoId: string; on: boolean },
+    audit: Omit<NewAuditEntry, 'before' | 'after'>,
+  ): Promise<AutoDispatchChange | 'not_found'>;
 }
 
 // —— 飞书网关（shared/feishu-api.ts 的 9 条接口）——
