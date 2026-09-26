@@ -29,6 +29,8 @@ const SessionClaims = z.object({
   sid: z.string().min(1),
   iat: z.number().int(),
   exp: z.number().int(),
+  /** 怎么登进来的（feishu-oauth / feishu-in-app / password / dev-login）。#120 之前发的会话没有这一项。 */
+  m: z.string().max(40).optional(),
 });
 export type SessionClaims = z.infer<typeof SessionClaims>;
 
@@ -75,9 +77,21 @@ export function csrfTokenFor(config: Config, sid: string): string {
 }
 
 /** 登录成功：发新的会话 Cookie，返回会话（其中 sid 用来派生 CSRF 令牌）。 */
-export function startSession(c: Context, config: Config, userId: string, now: Date): SessionClaims {
+export function startSession(
+  c: Context,
+  config: Config,
+  userId: string,
+  now: Date,
+  method: string,
+): SessionClaims {
   const iat = nowSeconds(now);
-  const claims: SessionClaims = { uid: userId, sid: randomToken(16), iat, exp: iat + SESSION_TTL_SECONDS };
+  const claims: SessionClaims = {
+    uid: userId,
+    sid: randomToken(16),
+    iat,
+    exp: iat + SESSION_TTL_SECONDS,
+    m: method,
+  };
   setCookie(c, cookieNames(config).session, signPayload(config.sessionSecret, SESSION_PURPOSE, claims), {
     httpOnly: true,
     secure: config.cookieSecure,

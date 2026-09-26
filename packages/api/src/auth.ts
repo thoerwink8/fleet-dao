@@ -1,5 +1,12 @@
-// 登录：飞书账号 OAuth（浏览器）、飞书客户端内免登、开发环境免登、退出。只放行 users 表白名单里的人。
-import { AuthConfigResponse, DevLoginRequest, FeishuAccessRequest, MeResponse } from '@fleet-dao/shared';
+// 登录：飞书账号 OAuth（浏览器）、飞书客户端内免登、用户名 + 密码（#120）、开发环境免登、退出。
+// 只放行 users 表白名单里的人。
+import {
+  AuthConfigResponse,
+  DevLoginRequest,
+  FeishuAccessRequest,
+  MeResponse,
+  PasswordLoginRequest,
+} from '@fleet-dao/shared';
 import { type Context, Hono } from 'hono';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import type { z } from 'zod';
@@ -7,7 +14,15 @@ import type { Config } from './config.ts';
 import type { Deps } from './deps.ts';
 import { FeishuRejectedError, FeishuUnavailableError } from './feishu.ts';
 import { ApiError, readJson, reply } from './http.ts';
-import type { FeishuIdentity } from './ports.ts';
+import {
+  createLoginThrottle,
+  LOCK_MS,
+  MAX_FAILED_LOGINS,
+  sourceKey,
+  unknownUsernameKey,
+} from './login-throttle.ts';
+import { burnPasswordCheck, PasswordHashFormatError, verifyPassword } from './password.ts';
+import type { FeishuIdentity, NewAuditEntry, PasswordCredentials } from './ports.ts';
 import {
   type CockpitEnv,
   type CockpitUser,
@@ -91,7 +106,7 @@ export function authRoutes(deps: Deps): Hono<CockpitEnv> {
       via: 'cockpit',
       ok: true,
     });
-    return startSession(c, config, user.id, deps.now());
+    return startSession(c, config, user.id, deps.now(), method);
   }
 
   async function identify(input: Parameters<NonNullable<Deps['feishu']>['identify']>[0]) {
@@ -117,8 +132,134 @@ export function authRoutes(deps: Deps): Hono<CockpitEnv> {
   }
 
   app.get('/config', (c) =>
-    reply(c, AuthConfigResponse, { feishuAppId: config.feishu?.appId, devLogin: config.devLogin }),
+    reply(c, AuthConfigResponse, {
+      feishuAppId: config.feishu?.appId,
+      devLogin: config.devLogin,
+      passwordLogin: true,
+    }),
   );
+
+  // 来源、库里没有的用户名各一份计数：一份被刷满也挤不到另一份的锁
+  const sourceThrottle = createLoginThrottle();
+  const nameThrottle = createLoginThrottle();
+
+  /** 没登成也要留记录；记录写不进只记日志，不改变给人的答复（不然库一抖就把「密码错」变成 500）。 */
+  async function auditFailure(actorId: string, error: string, extra: Record<string, unknown> = {}) {
+    const entry: NewAuditEntry = {
+      actor: { kind: 'user', id: actorId },
+      action: 'login',
+      target: 'cockpit',
+      after: { method: 'password', ...extra },
+      via: 'cockpit',
+      ok: false,
+      error,
+    };
+    try {
+      await store.appendAudit(entry);
+    } catch (err) {
+      log.error('账密登录失败的操作记录没写成', { error: String(err) });
+    }
+  }
+
+  function locked(until: number | string): never {
+    const at = typeof until === 'string' ? until : new Date(until).toISOString();
+    throw new ApiError(429, 'locked', '输错次数太多，已临时锁住，稍后再试', { until: at });
+  }
+
+  function badCredentials(): never {
+    throw new ApiError(401, 'bad_credentials', '用户名或密码不对');
+  }
+
+  /**
+   * 用户名 + 密码登录。顺序：来源被锁 → 用户名被锁 → 验密码（没这人、没设过密码也照样算一次哈希，响应快慢看不出差别）。
+   * 答复只有三种：204（登上了）、401 bad_credentials（不区分为什么）、429 locked。
+   * 日志、操作记录里不写密码；没这个人时也不写输入的用户名（常有人把密码敲进用户名栏）。
+   */
+  app.post('/password/login', async (c) => {
+    checkLoginOrigin(c);
+    const { username, password } = await readJson(c, PasswordLoginRequest);
+    const nowMs = deps.now().getTime();
+    const source = sourceKey(config.sessionSecret, c.req.header('x-real-ip')?.trim() || 'unknown');
+    const sourceTag = source.slice(3, 15);
+
+    const sourceLock = sourceThrottle.lockedUntil(source, nowMs);
+    if (sourceLock !== undefined) {
+      await auditFailure('password:unknown', 'locked', { by: 'source', source: sourceTag });
+      locked(sourceLock);
+    }
+
+    const found = await store.findUserByUsername(username);
+    const user: CockpitUser | null = isCockpitUser(found) ? found : null;
+    const creds: PasswordCredentials | null = user ? await store.getPasswordCredentials(user.id) : null;
+    const nameKey = unknownUsernameKey(config.sessionSecret, username);
+    if (user && !creds) {
+      // 过了白名单的人却读不到登录信息：是库出事了，不当成「没设密码」答 401、也不记输错
+      log.error('账密登录读不到这个人的登录信息', { userId: user.id });
+      await auditFailure(user.id, 'credentials_missing');
+      throw new ApiError(500, 'credentials_missing', '读不到这个账号的登录信息，已记日志，请先用飞书登录');
+    }
+
+    if (user && creds) {
+      if (creds.lockedUntil !== undefined && Date.parse(creds.lockedUntil) > nowMs) {
+        await auditFailure(user.id, 'locked', { by: 'username', source: sourceTag });
+        locked(creds.lockedUntil);
+      }
+    } else {
+      const nameLock = nameThrottle.lockedUntil(nameKey, nowMs);
+      if (nameLock !== undefined) {
+        await auditFailure('password:unknown', 'locked', { by: 'username', source: sourceTag });
+        locked(nameLock);
+      }
+    }
+
+    let ok = false;
+    try {
+      if (user && creds?.passwordHash !== undefined) ok = await verifyPassword(password, creds.passwordHash);
+      else await burnPasswordCheck(password);
+    } catch (err) {
+      if (err instanceof PasswordHashFormatError) {
+        // 库里的哈希坏了：不当「密码错」糊过去（那样人永远登不上还查不出原因），照实 500 并记下是谁的
+        log.error('库里的密码哈希格式认不出', { userId: user?.id, error: err.message });
+        await auditFailure(user?.id ?? 'password:unknown', 'password_hash_unreadable');
+        throw new ApiError(
+          500,
+          'password_hash_unreadable',
+          '这个账号的密码数据坏了，已记日志，请先用飞书登录',
+        );
+      }
+      throw err;
+    }
+
+    if (ok && user) {
+      await store.recordPasswordSuccess(user.id);
+      sourceThrottle.clear(source);
+      await startRecordedSession(c, user, 'password');
+      return c.body(null, 204);
+    }
+
+    const sourceUntil = sourceThrottle.fail(source, nowMs);
+    let nameUntil: number | string | undefined;
+    if (user) {
+      const r = await store.recordPasswordFailure({
+        userId: user.id,
+        at: new Date(nowMs),
+        maxFails: MAX_FAILED_LOGINS,
+        lockMs: LOCK_MS,
+      });
+      nameUntil = r?.lockedUntil;
+    } else {
+      nameUntil = nameThrottle.fail(nameKey, nowMs);
+    }
+    await auditFailure(user?.id ?? 'password:unknown', 'bad_credentials', {
+      source: sourceTag,
+      ...(user && !creds?.passwordHash && { reason: 'no_password' }),
+      ...(found && !user && { reason: 'not_whitelisted' }),
+    });
+    // 这一下正好锁上的，直接告诉人锁了（第 5 次就答 429，不等第 6 次）
+    const until = nameUntil ?? sourceUntil;
+    if (until !== undefined) locked(until);
+    badCredentials();
+  });
 
   app.get('/feishu/login', (c) => {
     if (!deps.feishu) throw new ApiError(503, 'feishu_not_configured', '飞书登录还没配置');

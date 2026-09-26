@@ -34,20 +34,37 @@ const tz = { withTimezone: true, mode: 'date' } as const;
 /**
  * 成员：驾驶舱登录白名单，也是 GitHub 作者白名单。登录只认飞书 open_id / union_id（不认邮箱、手机号）；
  * GitHub 有数字编号就只按编号认（登录名可改、可被别人注册）。机器人不登录驾驶舱。
+ * 另可用户名 + 密码登录（#120），白名单还是这张表。
  */
-export const users = pgTable('users', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  displayName: text('display_name').notNull(),
-  role: userRole('role').notNull(),
-  active: boolean('active').notNull().default(true),
-  avatarUrl: text('avatar_url'),
-  feishuOpenId: text('feishu_open_id').unique(),
-  feishuUnionId: text('feishu_union_id').unique(),
-  /** 可以没有：创始人不需要 GitHub 账号。 */
-  githubLogin: text('github_login'),
-  githubId: bigint('github_id', { mode: 'number' }).unique(),
-  createdAt: timestamp('created_at', tz).notNull().defaultNow(),
-});
+export const users = pgTable(
+  'users',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    displayName: text('display_name').notNull(),
+    role: userRole('role').notNull(),
+    active: boolean('active').notNull().default(true),
+    avatarUrl: text('avatar_url'),
+    feishuOpenId: text('feishu_open_id').unique(),
+    feishuUnionId: text('feishu_union_id').unique(),
+    /** 可以没有：创始人不需要 GitHub 账号。 */
+    githubLogin: text('github_login'),
+    githubId: bigint('github_id', { mode: 'number' }).unique(),
+    createdAt: timestamp('created_at', tz).notNull().defaultNow(),
+    /** 账密登录的用户名：大小写不敏感地唯一（按 lower() 建的唯一索引）；没设过是空。 */
+    username: text('username'),
+    /** 加盐慢哈希，格式由 packages/api 的 password.ts 定；不存明文。没设过是空。 */
+    passwordHash: text('password_hash'),
+    passwordChangedAt: timestamp('password_changed_at', tz),
+    /** 连续输错几次，登录成功清零；到上限记 locked_until，锁期内对的密码也不放。 */
+    failedLogins: integer('failed_logins').notNull().default(0),
+    lockedUntil: timestamp('locked_until', tz),
+  },
+  (t) => [
+    uniqueIndex('users_username_lower_unique').on(sql`lower(${t.username})`),
+    check('users_password_needs_username', sql`${t.passwordHash} is null or ${t.username} is not null`),
+    check('users_failed_logins_nonneg', sql`${t.failedLogins} >= 0`),
+  ],
+);
 
 /** 提醒中心。同一件事只有一条（dedupe_key），状态变了原地更新，不另发。 */
 export const notifications = pgTable(
