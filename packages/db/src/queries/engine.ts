@@ -1047,6 +1047,8 @@ export interface StageRouteFacts {
     hostId: HostId;
     upstreamModel: string | null;
     upstreamAliases: string[];
+    /** 路由探针最近一次下结论的时刻（候选查询的 probedAt）：在线的一定有，过没过期由选路判。 */
+    probedAt: Date | null;
     quota: 'ok' | 'exhausted' | 'unknown';
     windows: {
       label: string;
@@ -1135,6 +1137,7 @@ export async function routeFactsForStage(
       hostId: c.hostId,
       upstreamModel: detail.upstreamModel,
       upstreamAliases: detail.upstreamAliases,
+      probedAt: c.probedAt,
       quota: c.quota,
       windows: c.windows.map((w) => {
         const raw = windowByKey.get(`${c.poolId}\u0000${w.label}`);

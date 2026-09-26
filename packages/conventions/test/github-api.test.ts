@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { liveGitHub, repoName, toIssue } from '../src/github-api.ts';
+import { githubToken, liveGitHub, repoName, toIssue } from '../src/github-api.ts';
 
 const TOKEN = 'test-token-value';
 
@@ -255,5 +255,102 @@ describe('读写 GitHub：PR 补贴用（pr-labels）', () => {
     await expect(gh.addLabel(98, '杂项')).rejects.toThrow('在给 PR #98 加标签「杂项」时，GitHub 回了 403');
     await expect(gh.addLabel(99, '杂项')).rejects.toThrow('GitHub 回的认不出');
     await expect(gh.setMilestone(98, 2)).rejects.toThrow('在给 PR #98 挂里程碑时，GitHub 回了 422');
+  });
+});
+
+describe('读 GitHub：版本快照要的几样（plan-snapshot）', () => {
+  const ms = (extra: Record<string, unknown> = {}) => ({
+    number: 8,
+    title: 'v1 接活',
+    state: 'open',
+    description: '目标',
+    closed_at: null,
+    ...extra,
+  });
+
+  it('里程碑带说明、关掉的时间；说明是 null 当空', async () => {
+    const { impl } = fakeFetch({
+      [`${API}/milestones?state=all&per_page=100`]: () =>
+        json([
+          ms(),
+          ms({
+            number: 9,
+            title: 'v0',
+            state: 'closed',
+            description: null,
+            closed_at: '2026-09-20T16:30:00Z',
+          }),
+        ]),
+    });
+    const gh = liveGitHub('o/r', { GITHUB_TOKEN: TOKEN }, { fetchImpl: impl });
+    expect(await gh.milestoneDetails()).toEqual([
+      { number: 8, title: 'v1 接活', state: 'open', description: '目标', closedAt: null },
+      { number: 9, title: 'v0', state: 'closed', description: '', closedAt: '2026-09-20T16:30:00Z' },
+    ]);
+  });
+
+  it.each([
+    ['说明不是字', { description: 5 }, '认不出（description）'],
+    ['关掉的时间认不出', { closed_at: '昨天' }, '认不出（closed_at）'],
+    ['没有 title', { title: undefined }, '读里程碑，有一条认不出'],
+  ])('里程碑%s：抛', async (_name, extra, message) => {
+    const { impl } = fakeFetch({ [`${API}/milestones?state=all&per_page=100`]: () => json([ms(extra)]) });
+    await expect(
+      liveGitHub('o/r', { GITHUB_TOKEN: TOKEN }, { fetchImpl: impl }).milestoneDetails(),
+    ).rejects.toThrow(message);
+  });
+
+  it('开着的单、版本里的单：去掉 PR，带上关单原因和子单数（没给子单数是 undefined）', async () => {
+    const { impl, seen } = fakeFetch({
+      [`${API}/issues?state=open&per_page=100`]: () =>
+        json([
+          row(191, { sub_issues_summary: { total: 2, completed: 0, percent_completed: 0 } }),
+          row(200, { pull_request: {}, sub_issues_summary: null }),
+          row(43),
+        ]),
+      [`${API}/issues?milestone=8&state=all&per_page=100`]: () =>
+        json([row(164, { state: 'closed', state_reason: 'completed', sub_issues_summary: { total: 0 } })]),
+    });
+    const gh = liveGitHub('o/r', { GITHUB_TOKEN: TOKEN }, { fetchImpl: impl });
+    expect((await gh.openPlanIssues()).map((i) => [i.number, i.subIssues, i.stateReason])).toEqual([
+      [191, 2, null],
+      [43, undefined, null],
+    ]);
+    expect(await gh.milestonePlanIssues(8)).toMatchObject([
+      { number: 164, state: 'closed', stateReason: 'completed', subIssues: 0 },
+    ]);
+    expect(seen.map((s) => s.auth)).toEqual([`Bearer ${TOKEN}`, `Bearer ${TOKEN}`]);
+  });
+
+  it.each([
+    ['子单数不是整数', { sub_issues_summary: { total: '2' } }, 'sub_issues_summary'],
+    ['子单数是负的', { sub_issues_summary: { total: -1 } }, 'sub_issues_summary'],
+    ['关单原因不是字', { state_reason: 3 }, 'state_reason'],
+  ])('单子%s：抛', async (_name, extra, field) => {
+    const { impl } = fakeFetch({ [`${API}/issues?state=open&per_page=100`]: () => json([row(1, extra)]) });
+    await expect(
+      liveGitHub('o/r', { GITHUB_TOKEN: TOKEN }, { fetchImpl: impl }).openPlanIssues(),
+    ).rejects.toThrow(`有一条认不出（${field}）`);
+  });
+
+  it('子单按 Link 头翻页读完，顺序照 GitHub 回的；读不到就抛', async () => {
+    const page2 = 'https://api.github.com/repositories/1/issues/197/sub_issues?per_page=100&page=2';
+    const { impl } = fakeFetch({
+      [`${API}/issues/197/sub_issues?per_page=100`]: () =>
+        json([row(44), row(45)], { headers: { link: `<${page2}>; rel="next"` } }),
+      [page2]: () => json([row(31)]),
+      [`${API}/issues/198/sub_issues?per_page=100`]: () => new Response('{}', { status: 404 }),
+    });
+    const gh = liveGitHub('o/r', { GITHUB_TOKEN: TOKEN }, { fetchImpl: impl });
+    expect((await gh.subIssues(197)).map((i) => i.number)).toEqual([44, 45, 31]);
+    await expect(gh.subIssues(198)).rejects.toThrow('读 #198 的子单，GitHub 回了 404');
+  });
+
+  it('令牌：GITHUB_TOKEN → GH_TOKEN → gh auth token；都没有是 undefined（没登录）', () => {
+    expect(githubToken({ GITHUB_TOKEN: 'a', GH_TOKEN: 'b' }, () => 'c')).toBe('a');
+    expect(githubToken({ GH_TOKEN: 'b' }, () => 'c')).toBe('b');
+    expect(githubToken({ GITHUB_TOKEN: '' }, () => 'c')).toBe('c');
+    expect(githubToken({}, () => undefined)).toBeUndefined();
+    expect(githubToken({ GITHUB_TOKEN: '' }, () => '')).toBeUndefined();
   });
 });

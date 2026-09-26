@@ -58,6 +58,16 @@ describe('输入认不出就明确失败', () => {
   it('认不出的被挡原因：不当成没被挡', () =>
     fails(() => one({ blockers: ['paused' as never] }), /被挡原因认不出/));
 
+  it('在线的路由没带探针下结论的时刻：不当成刚探过（库里约束 alive 要有探针的 ok 结论）', () => {
+    fails(() => one({ probedAt: null }), /路由 a 在线，却没有探针下结论的时刻/);
+    fails(() => one({ probedAt: undefined as never }), /探针时刻认不出/);
+    // 探针还没看过、不在线的没有时刻是正常的：照常挡掉它、派下一条
+    const r = chooseRoute(input([route('a', { probedAt: null, blockers: ['offline'] }), route('b')]));
+    expect(r).toMatchObject({ kind: 'dispatch', routeId: 'b' });
+  });
+
+  it('探针时刻认不出：不当成没过期', () => fails(() => one({ probedAt: 'last round' }), /探针时刻认不出/));
+
   it('额度状态和被挡原因对不上：不按其中一边往下派（未知的备池会被放去试探，用满的主池会被照派）', () => {
     fails(() => one({ quota: 'exhausted', blockers: [] }), /额度状态（exhausted）和被挡原因（无）对不上/);
     fails(

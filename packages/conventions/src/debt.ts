@@ -9,7 +9,8 @@
 // 推后的说法用一张写死的词表认（检查要每次一样、测试不出网，见 judge-or-code 第 3 问），宁漏不误：
 // 「以后加机器就是加工人」「先说结果，再说要我做什么」「它以后再发一次」这类不是推后，都不认。
 // 故意不查的：围栏代码块、HTML 注释、反引号里、「」引号里（那是在提这个词，不是在推后）、docs/reference/
-// （旧系统审计的快照，记的是当时的待查项；新系统要做的已经搬进 design、plan 和 specs）。
+// （旧系统审计的快照，记的是当时的待查项；新系统要做的已经搬进 design、plan 和 specs）、plan.md 里
+// pnpm plan:snapshot 生成的快照段（照抄 GitHub 上的单子标题和里程碑说明，每一行本来就是一张单）。
 // 有误报就收窄词表，不往文档里加豁免；漏了就补进词表，并在测试里加一条。
 
 import { createHash } from 'node:crypto';
@@ -114,7 +115,7 @@ export function findDeferrals(doc: MdDoc): Deferral[] {
   const found: Deferral[] = [];
   const owner = specsOwner(doc.path);
   doc.lines.forEach((raw, i) => {
-    if (doc.fenced[i]) return;
+    if (doc.fenced[i] || doc.generated[i]) return;
     const masked = maskMentions(raw);
     let start = 0;
     for (const piece of masked.split(/(?<=[。；！？])/)) {

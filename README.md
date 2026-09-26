@@ -53,6 +53,7 @@
 - 跑检查：本机推前只跑改动影响到的测试（`pnpm test:changed`，和 origin/main 比、按 CI 那套判法选包，引擎的会话交活只认它；它要全跑时本机改成单跑 `pnpm exec vitest run packages/<包>`）和格式、类型；`pnpm check` 是全量（格式、类型、全部测试、卫生检查；文档里的路径、章节指针也在里面查），本机一般不跑。CI 按改动跑受影响的部分、并行跑，main 上全量（`.github/workflows/ci.yml`，见 design 第五节「CI 按改动跑」）；想先看一个分支 CI 会跑什么：`node packages/conventions/src/bin/ci-plan.ts`。
 - 开单：`pnpm issue:new --kind 需求 --milestone v1 --title "一句话" --body-file 正文.md`（未排期写 `--milestone 未排期`，母单加 `--mother`），缺类别、里程碑，或正文里没写「## 怎么算做完」都不开；加 `--specs 短名` 时完整正文进 `specs/<号>-<短名>/需求.md`，issue 上只留原话、AI 理解和路径。
 - 欠账：`pnpm debt:check` 只看文件，查文档里推后的话带着单号、需求.md 写了怎么算做完（PR 和主线上 debt.yml 也跑，只报告、不挡合并，不读 GitHub）；加 `--live` 另读 GitHub，查挂的单号开没开着、开着的单都有需求文档（定时任务 debt.yml 用，它再加 `--comment` 留言到单上）；关里程碑之前跑 `pnpm milestone:close-check P1`，还有开着的单就不关。见 design 第七节「欠账不漏」「阶段收口」。
+- 计划快照：每个版本开始和结束时由总指挥跑 `pnpm plan:snapshot`（加 `--at 2026-09-27T09:00+08:00` 定快照时间，不加取现在），从 GitHub 读版本、先后、母单和子单，重写 `docs/plan.md` 两行快照标记之间的几节，标记外面不动，改动照常开 PR；没登录、GitHub 读不到、先后标记认不出都不写、退出码 2。
 - 各家 AI 的全局说明：`node packages/agents-sync/bin/agents-sync --check`（只读），`--apply` 写；`--help` 看全部用法，法国怎么跑见 ops 第五节。
 
 ## 文档各管什么
@@ -62,7 +63,7 @@
 | `README.md` | 门口：是什么、入口、东西在哪 | 入口或目录变了 |
 | [docs/design.md](docs/design.md) | 为什么这样定；「已定」表是拍板记录 | 改行为的 PR 同时改它 |
 | [docs/ops.md](docs/ops.md) | 两台机器怎么装、怎么发版、怎么看、怎么退 | 跟着 `deploy/` 一起改 |
-| [docs/plan.md](docs/plan.md) | 各阶段的验收标准（进度看里程碑） | 验收标准变了 |
+| [docs/plan.md](docs/plan.md) | 版本快照：每个版本的目标、先后、母单和子单，未排期的单（`pnpm plan:snapshot` 从 GitHub 生成，别手改）；下面留着迁到版本之前 P0–P6 的原计划 | 每个版本开始和结束时，总指挥重新生成 |
 | `docs/decisions/` | 拍板记录：一个决定一个文件，只增不改，被推翻标「已被 xx 替代」（design 第三节的决定表拆过来，#139） | 创始人拍板的那一轮 |
 | [docs/reference/](docs/reference/README.md) | 旧系统的坑和接线细节 | 做某一块之前先读对应那份 |
 | [docs/reclaude-in-mirasim.md](docs/reclaude-in-mirasim.md) | reclaude 这条线怎么接上：Mirasim 里让「自有」claude 会话真吃 reclaude 订阅（装法、换机、服务器上装） | 装法或启动器变了 |
