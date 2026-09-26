@@ -337,7 +337,7 @@ describe('开发环境免登', () => {
     });
     expect(res.status).toBe(404);
     const config = AuthConfigResponse.parse(await (await h.cockpit.request('/auth/config')).json());
-    expect(config).toEqual({ feishuAppId: 'cli_test_app', devLogin: false });
+    expect(config).toEqual({ feishuAppId: 'cli_test_app', devLogin: false, passwordLogin: true });
   });
 
   it('打开时仍只放白名单里的创始人，也照样先留操作记录', async () => {

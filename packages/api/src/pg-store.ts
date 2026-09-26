@@ -86,6 +86,7 @@ import {
   type NewAuditEntry,
   type NotificationRecord,
   type Page,
+  type PasswordCredentials,
   type PullRequestRecord,
   REPO_NOT_MANAGED,
   type RunPlan,
@@ -182,6 +183,17 @@ function toUser(r: UserRow): User {
     feishuUnionId: opt(r.feishuUnionId),
     githubLogin: opt(r.githubLogin),
     githubId: opt(r.githubId),
+  };
+}
+
+function toCredentials(r: UserRow): PasswordCredentials {
+  return {
+    userId: r.id,
+    username: opt(r.username),
+    passwordHash: opt(r.passwordHash),
+    passwordChangedAt: isoOpt(r.passwordChangedAt),
+    failedLogins: r.failedLogins,
+    lockedUntil: isoOpt(r.lockedUntil),
   };
 }
 
@@ -498,6 +510,64 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
     },
     async listUsers() {
       return (await db.select().from(users).orderBy(asc(users.createdAt), asc(users.id))).map(toUser);
+    },
+    async findUserByUsername(username) {
+      const [row] = await db
+        .select()
+        .from(users)
+        .where(sql`lower(${users.username}) = lower(${username})`)
+        .limit(1);
+      return row ? toUser(row) : null;
+    },
+    async getPasswordCredentials(userId) {
+      if (!isUuid(userId)) return null;
+      const [row] = await db.select().from(users).where(eq(users.id, userId));
+      return row ? toCredentials(row) : null;
+    },
+    async setPasswordCredentials({ userId, username, passwordHash, at }, entry) {
+      if (!isUuid(userId)) return 'not_found';
+      try {
+        return await db.transaction(async (tx) => {
+          const updated = await tx
+            .update(users)
+            .set({
+              ...(username !== undefined && { username }),
+              ...(passwordHash !== undefined && { passwordHash, passwordChangedAt: at }),
+              failedLogins: 0,
+              lockedUntil: null,
+            })
+            .where(eq(users.id, userId))
+            .returning({ id: users.id });
+          if (updated.length === 0) return 'not_found' as const;
+          await insertAudit(tx, entry);
+          return 'ok' as const;
+        });
+      } catch (err) {
+        // 23505 = 唯一约束：只有用户名那一个会在这里撞（lower(username) 的唯一索引）
+        if (sqlState(err) === '23505') return 'username_taken';
+        throw err;
+      }
+    },
+    async recordPasswordFailure({ userId, at, maxFails, lockMs }) {
+      if (!isUuid(userId)) return null;
+      const atIso = at.toISOString();
+      const until = new Date(at.getTime() + lockMs).toISOString();
+      const lockedNow = sql`(${users.lockedUntil} is not null and ${users.lockedUntil} > ${atIso}::timestamptz)`;
+      const expired = sql`(${users.lockedUntil} is not null and ${users.lockedUntil} <= ${atIso}::timestamptz)`;
+      const count = sql`((case when ${expired} then 0 else ${users.failedLogins} end) + 1)`;
+      const [row] = await db
+        .update(users)
+        .set({
+          failedLogins: sql`case when ${lockedNow} then ${users.failedLogins} when ${count} >= ${maxFails}::int then 0 else ${count} end`,
+          lockedUntil: sql`case when ${lockedNow} then ${users.lockedUntil} when ${count} >= ${maxFails}::int then ${until}::timestamptz else null end`,
+        })
+        .where(eq(users.id, userId))
+        .returning({ lockedUntil: users.lockedUntil });
+      return row ? { lockedUntil: isoOpt(row.lockedUntil) } : null;
+    },
+    async recordPasswordSuccess(userId) {
+      if (!isUuid(userId)) return;
+      await db.update(users).set({ failedLogins: 0, lockedUntil: null }).where(eq(users.id, userId));
     },
 
     // —— 看板 ——

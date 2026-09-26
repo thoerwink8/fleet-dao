@@ -6,6 +6,7 @@ import { afterAll, beforeAll } from 'vitest';
 import { createPgStore } from '../src/pg-store.ts';
 import { seedPg } from './pg-fixtures.ts';
 import { describeStoreContract, type MakeStore } from './store-contract.ts';
+import { describeCredentialsStoreContract } from './store-contract-credentials.ts';
 import { describeFeishuStoreContract } from './store-contract-feishu.ts';
 
 let t: TestDb;
@@ -27,3 +28,4 @@ const make: MakeStore = async (data, clock) => {
 
 describeStoreContract('Postgres 版', make);
 describeFeishuStoreContract('Postgres 版', make);
+describeCredentialsStoreContract('Postgres 版', make);

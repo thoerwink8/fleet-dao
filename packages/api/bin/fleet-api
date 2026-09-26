@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# 法国上后端的管理命令（docs/ops.md 第九节「账密登录」）：以 root 跑，
+#   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api set-password <飞书名或用户 id> [--username <用户名>]
+# 换成 fleet 身份、带上 fleet-api.service 同一份 /etc/fleet-dao/api.env（连库用的 DATABASE_URL、PGHOST）去跑：
+# 库只认 fleet 这个本机用户（peer 认证），环境文件按 systemd 的读法读，和服务里生效的一模一样。
+# 标准输入是终端就给它一个伪终端（--pty：密码不回显），是管道就原样接过去（--pipe：脚本里用）。
+set -euo pipefail
+if [[ $EUID -ne 0 ]]; then
+  echo "要以 root 跑（它会换成 fleet 身份连库）" >&2
+  exit 2
+fi
+root=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../.." && pwd)
+if [[ -t 0 ]]; then io=--pty; else io=--pipe; fi
+exec systemd-run --quiet --wait --collect "$io" --uid=fleet --gid=fleet \
+  -p EnvironmentFile=/etc/fleet-dao/api.env -p WorkingDirectory="$root" \
+  /usr/bin/node "$root/packages/api/src/bin/fleet-api.ts" "$@"
