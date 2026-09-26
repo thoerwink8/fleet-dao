@@ -43,7 +43,7 @@ export const repos = pgTable(
     defaultBranch: text('default_branch').notNull().default('main'),
     testCommand: text('test_command').notNull(),
     /**
-     * 自动派活开关（design 第九节「在哪能做与仓级开关」）：打开的时刻，空 = 关着。关着只收单、显示；
+     * 自动派活开关（design 第九节「在哪能做与接活开关」）：打开的时刻，空 = 关着。关着只收单、显示；
      * 打开以前就开着的 issue 也不自动派，要人点「交给 fleet」。
      */
     autoDispatchSince: timestamp('auto_dispatch_since', tz),
