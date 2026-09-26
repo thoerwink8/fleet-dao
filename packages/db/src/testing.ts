@@ -42,8 +42,39 @@ export async function createTestDb(): Promise<TestDb> {
   if (client.dataDir !== undefined && !client.dataDir.startsWith('memory://')) {
     throw new Error(`测试库必须在内存里，现在是 ${client.dataDir}`);
   }
+  rejectDateParams(client);
   const db = drizzle(client, { schema });
   return { db, client, close: () => client.close() };
+}
+
+/**
+ * 生产用的 postgres.js 驱动（drizzle 关掉了它的日期转换）收到 Date 参数会直接报错，PGlite 却照收：
+ * 原样写在 sql`` 模板里的 Date 在测试里全绿、上了生产才炸（09-26 健康检查的 github_events 就是这么红的）。
+ * 测试库照生产的样子拒收；列映射过的值 drizzle 会先转成字符串，到不了这里。要传时刻就写 `${d.toISOString()}::timestamptz`。
+ */
+export function rejectDateParams(client: PGlite): void {
+  const check = (params: unknown[] | undefined) => {
+    if (params?.some((p) => p instanceof Date)) {
+      throw new TypeError(
+        'SQL 参数里有 Date：生产的 postgres.js 驱动会拒收（The "string" argument must be of type string…）。改成 d.toISOString() 再在 SQL 里 ::timestamptz',
+      );
+    }
+  };
+  const query = client.query.bind(client);
+  client.query = ((q: string, params?: unknown[], options?: unknown) => {
+    check(params);
+    return query(q, params, options as never);
+  }) as PGlite['query'];
+  const transaction = client.transaction.bind(client);
+  client.transaction = ((callback: Parameters<PGlite['transaction']>[0]) =>
+    transaction((tx) => {
+      const txQuery = tx.query.bind(tx);
+      tx.query = ((q: string, params?: unknown[], options?: unknown) => {
+        check(params);
+        return txQuery(q, params, options as never);
+      }) as typeof tx.query;
+      return callback(tx);
+    })) as PGlite['transaction'];
 }
 
 /** 清空所有表（迁移记录在 drizzle 模式里，不动），自增序号从头来。比每个测试克隆一份快一个数量级。 */

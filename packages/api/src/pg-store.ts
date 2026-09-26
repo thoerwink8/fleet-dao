@@ -1690,7 +1690,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       const [row] = await db
         .select({
           exhausted: sql<number>`count(*) filter (where ${githubEvents.status} = 'failed' and ${githubEvents.attempts} >= ${maxAttempts})::int`,
-          stale: sql<number>`count(*) filter (where ${githubEvents.status} = 'processing' and ${githubEvents.claimedAt} < ${new Date(staleBefore)})::int`,
+          stale: sql<number>`count(*) filter (where ${githubEvents.status} = 'processing' and ${githubEvents.claimedAt} < ${new Date(staleBefore).toISOString()}::timestamptz)::int`,
         })
         .from(githubEvents)
         .where(inArray(githubEvents.status, ['processing', 'failed']));
