@@ -1,0 +1,453 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>帅位进度</title>
+<link rel="icon" href="data:,">
+<!-- 帅位本机进度页（commander-seat 技能）。数据每 5 秒从同一个服务的 /api 现读；读不到照实显示原因，不显示成空的。不连外网（不用网络字体）。 -->
+<style>
+  :root {
+    --ground: #edf1f4;
+    --surface: #ffffff;
+    --ink: #14202a;
+    --muted: #586674;
+    --line: #d3dbe3;
+    --accent: #1d5ba6;
+    --done: #2b7a4b;
+    --done-bg: #e4f2e9;
+    --doing: #1d5ba6;
+    --doing-bg: #e2ecf8;
+    --wait: #6f7d8b;
+    --wait-bg: #eceff3;
+    --needs: #a8520a;
+    --needs-bg: #fbeedf;
+    --block: #b3261e;
+    --block-bg: #fae6e4;
+    --font-body: "PingFang SC", "Microsoft YaHei", "Noto Sans SC", "Noto Sans CJK SC", system-ui, sans-serif;
+    --font-mono: ui-monospace, "SFMono-Regular", "Cascadia Mono", Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --ground: #0d1318;
+      --surface: #151d25;
+      --ink: #e4ebf1;
+      --muted: #93a2b0;
+      --line: #25313c;
+      --accent: #74aaea;
+      --done: #62c38e;
+      --done-bg: #16291f;
+      --doing: #74aaea;
+      --doing-bg: #172637;
+      --wait: #8795a3;
+      --wait-bg: #1c252e;
+      --needs: #f0a24e;
+      --needs-bg: #2e2112;
+      --block: #f2776d;
+      --block-bg: #331a18;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --ground: #0d1318;
+    --surface: #151d25;
+    --ink: #e4ebf1;
+    --muted: #93a2b0;
+    --line: #25313c;
+    --accent: #74aaea;
+    --done: #62c38e;
+    --done-bg: #16291f;
+    --doing: #74aaea;
+    --doing-bg: #172637;
+    --wait: #8795a3;
+    --wait-bg: #1c252e;
+    --needs: #f0a24e;
+    --needs-bg: #2e2112;
+    --block: #f2776d;
+    --block-bg: #331a18;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--font-body);
+    font-size: 15px;
+    line-height: 1.6;
+    padding: 24px 16px 56px;
+  }
+  a { color: var(--accent); text-decoration: none; overflow-wrap: anywhere; }
+  a:hover { text-decoration: underline; }
+  a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+  h1 { font-size: clamp(24px, 5vw, 32px); line-height: 1.25; margin: 0; font-weight: 700; }
+  small { font-weight: 400; color: var(--muted); font-size: 13px; }
+
+  .wrap { max-width: 1100px; margin: 0 auto; display: grid; gap: 20px; min-width: 0; }
+  .board { display: grid; gap: 20px; min-width: 0; }
+  .top { display: grid; gap: 6px; min-width: 0; }
+  .eyebrow { font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.06em; color: var(--muted); }
+  .headline { margin: 0; font-size: 17px; max-width: 62ch; overflow-wrap: anywhere; }
+  .headline.error { color: var(--block); }
+  .meta-row { display: flex; flex-wrap: wrap; gap: 4px 16px; color: var(--muted); font-size: 13px; }
+  .conn { font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
+  .conn.error { color: var(--block); }
+
+  .projects { display: flex; flex-wrap: wrap; gap: 6px; }
+  .project-link { font-size: 13px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); background: var(--surface); }
+  .project-link[aria-current="page"] { border-color: var(--accent); color: var(--accent); }
+  .project-link.has-needs::after { content: " ●"; color: var(--needs); }
+
+  .ask { border: 1px solid var(--line); border-left: 4px solid var(--wait); background: var(--surface); border-radius: 6px; padding: 14px 16px; display: grid; gap: 6px; }
+  .ask.has { border-left-color: var(--needs); background: var(--needs-bg); }
+  .ask-title { margin: 0; font-size: 15px; }
+  .ask-list { margin: 0; padding-left: 20px; display: grid; gap: 4px; overflow-wrap: anywhere; }
+
+  .grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: 20px; align-items: start; }
+  @media (max-width: 780px) { .grid { grid-template-columns: minmax(0, 1fr); } }
+  .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 16px 16px 6px; min-width: 0; }
+  .panel-title { margin: 0 0 12px; font-size: 16px; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; align-items: baseline; }
+  .side { display: grid; gap: 20px; min-width: 0; }
+  .empty { color: var(--muted); font-size: 14px; margin: 0 0 12px; }
+
+  .steps { list-style: none; margin: 0; padding: 0; }
+  .step { display: grid; grid-template-columns: 2.2em minmax(0, 1fr); gap: 4px 10px; padding: 12px 0; border-top: 1px solid var(--line); }
+  .step:first-child { border-top: 0; padding-top: 2px; }
+  .step-no { font-family: var(--font-mono); color: var(--muted); font-size: 13px; padding-top: 2px; }
+  .step-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; min-width: 0; }
+  .step-title { font-weight: 500; overflow-wrap: anywhere; }
+  .step.is-done .step-title { color: var(--muted); }
+  .step-detail { grid-column: 2; color: var(--muted); font-size: 14px; margin: 0; overflow-wrap: anywhere; }
+  .step-links { grid-column: 2; display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 13px; }
+
+  .pill { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; line-height: 1; padding: 4px 8px; border-radius: 999px; white-space: nowrap; }
+  .pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .pill.done { color: var(--done); background: var(--done-bg); }
+  .pill.doing { color: var(--doing); background: var(--doing-bg); }
+  .pill.waiting { color: var(--wait); background: var(--wait-bg); }
+  .pill.needs { color: var(--needs); background: var(--needs-bg); }
+  .pill.blocked { color: var(--block); background: var(--block-bg); }
+  @media (prefers-reduced-motion: no-preference) {
+    .pill.doing::before { animation: pulse 1.6s ease-in-out infinite; }
+  }
+  @keyframes pulse { 50% { opacity: 0.25; } }
+
+  .ver { display: grid; gap: 10px; padding-bottom: 12px; }
+  .ver + .ver { border-top: 1px solid var(--line); padding-top: 12px; }
+  .ver-title { margin: 0; font-size: 14px; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  .items { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+  .item { display: grid; gap: 4px; }
+  .item-head { overflow-wrap: anywhere; }
+  .tag { display: inline-block; margin-right: 8px; line-height: 1.4; font-size: 11px; padding: 1px 6px; border-radius: 4px; border: 1px solid var(--line); color: var(--muted); }
+  .tag.mother { border-color: var(--accent); color: var(--accent); }
+  .kids { list-style: none; margin: 0; padding: 0 0 0 14px; border-left: 2px solid var(--line); display: grid; gap: 2px; font-size: 13px; color: var(--muted); }
+
+  .log { list-style: none; margin: 0; padding: 0; display: grid; }
+  .log-entry { display: grid; grid-template-columns: 3.4em minmax(0, 1fr); gap: 10px; padding: 7px 0; border-top: 1px solid var(--line); font-size: 14px; overflow-wrap: anywhere; }
+  .log-entry:first-child { border-top: 0; }
+  .log-time { font-family: var(--font-mono); font-size: 12px; color: var(--muted); padding-top: 2px; }
+
+  .cards { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr)); }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; display: grid; gap: 4px; min-width: 0; }
+  .card.has-needs { border-left: 4px solid var(--needs); }
+  .card.bad { border-left: 4px solid var(--block); }
+  .card-title { margin: 0; font-size: 16px; }
+  .card-line { margin: 0; overflow-wrap: anywhere; }
+  .card-sub { margin: 0; color: var(--muted); font-size: 13px; }
+  .card-why { margin: 0; color: var(--block); font-size: 14px; overflow-wrap: anywhere; }
+
+  /* 放最后：上面的块自己写了 display，会盖掉 hidden 属性；它们都是单个类，同分时后写的赢 */
+  [hidden] { display: none; }
+</style>
+</head><body>
+<div class="wrap">
+  <header class="top">
+    <div class="eyebrow" id="eyebrow">帅位 · 本机</div>
+    <h1>帅位进度</h1>
+    <nav class="projects" id="projects" aria-label="项目" hidden></nav>
+    <p class="headline" id="headline">正在读进度……</p>
+    <div class="meta-row">
+      <span id="updated"></span>
+      <span id="tally"></span>
+    </div>
+    <div class="conn" id="conn" role="status"></div>
+  </header>
+
+  <section id="overview" aria-label="各项目" hidden>
+    <ul class="cards" id="cards"></ul>
+  </section>
+
+  <div class="board" id="board" hidden>
+    <div class="ask" id="ask">
+      <h2 class="ask-title" id="ask-title">要你定的</h2>
+      <ul class="ask-list" id="ask-list"></ul>
+    </div>
+
+    <div class="grid">
+      <section class="panel" aria-labelledby="steps-h">
+        <h2 class="panel-title" id="steps-h">这一轮的步骤 <small>按顺序做</small></h2>
+        <ol class="steps" id="steps"></ol>
+        <p class="empty" id="steps-empty" hidden>还没有步骤。</p>
+      </section>
+
+      <div class="side">
+        <section class="panel" aria-labelledby="struct-h">
+          <h2 class="panel-title" id="struct-h">版本和母单 <small id="struct-note"></small></h2>
+          <div id="structure"></div>
+          <p class="empty" id="struct-empty">还没写版本和母单。</p>
+        </section>
+
+        <section class="panel" aria-labelledby="log-h">
+          <h2 class="panel-title" id="log-h">最近动态 <small>新的在上面</small></h2>
+          <ul class="log" id="log"></ul>
+          <p class="empty" id="log-empty" hidden>还没有动态。</p>
+        </section>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const STATUS = { done: "做完了", doing: "在做", waiting: "排着", needs: "等你拍", blocked: "卡住了" };
+  const NOTE = "每 5 秒自己刷新。本机临时版，只在这台电脑上看得到；驾驶舱帅位栏做好后搬过去。";
+  const chosen = new URLSearchParams(location.search).get("p");
+  let lastOk = null;
+
+  const $ = (id) => document.getElementById(id);
+  const el = (tag, cls, text) => {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined && text !== null) e.textContent = text;
+    return e;
+  };
+  const web = (url) => (typeof url === "string" && /^https?:\/\/\S+$/i.test(url) ? url : null);
+  const link = (label, url) => {
+    const u = web(url);
+    if (!u) return el("span", null, label);
+    const a = el("a", null, label);
+    a.href = u;
+    a.target = "_blank";
+    a.rel = "noopener";
+    return a;
+  };
+  const pad = (n) => String(n).padStart(2, "0");
+  const clock = (iso) => {
+    const d = new Date(iso);
+    return Number.isNaN(d.getTime()) ? "—" : `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  };
+  const ago = (iso) => {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return "";
+    const m = Math.round((Date.now() - d.getTime()) / 60000);
+    if (m < 1) return "刚刚";
+    if (m < 60) return `${m} 分钟前`;
+    const h = Math.floor(m / 60);
+    return h < 48 ? `${h} 小时 ${m % 60} 分钟前` : `${Math.floor(h / 24)} 天前`;
+  };
+  const conn = (text, bad) => {
+    const c = $("conn");
+    c.textContent = text;
+    c.className = bad ? "conn error" : "conn";
+  };
+  const projectHref = (name) => (name ? `?p=${encodeURIComponent(name)}` : location.pathname);
+
+  async function api(path) {
+    let r;
+    try {
+      r = await fetch(path, { cache: "no-store" });
+    } catch {
+      throw new Error("连不上本机进度服务");
+    }
+    let body = null;
+    try {
+      body = await r.json();
+    } catch {
+      throw new Error(`HTTP ${r.status}，回的不是 JSON`);
+    }
+    if (!r.ok) throw new Error(body?.error ?? `HTTP ${r.status}`);
+    return body;
+  }
+
+  function renderNav(projects, current) {
+    const nav = $("projects");
+    nav.replaceChildren();
+    nav.hidden = projects.length < 2;
+    if (nav.hidden) return;
+    const all = el("a", "project-link", "全部");
+    all.href = projectHref(null);
+    if (!current) all.setAttribute("aria-current", "page");
+    nav.appendChild(all);
+    for (const p of projects) {
+      const a = el("a", p.ok && p.needs ? "project-link has-needs" : "project-link", p.name);
+      a.href = projectHref(p.name);
+      if (p.name === current) a.setAttribute("aria-current", "page");
+      nav.appendChild(a);
+    }
+  }
+
+  function renderOverview(projects) {
+    $("board").hidden = true;
+    $("overview").hidden = false;
+    $("eyebrow").textContent = "帅位 · 本机";
+    document.title = "帅位进度";
+    $("updated").textContent = "";
+    $("tally").textContent = "";
+    const h = $("headline");
+    h.className = "headline";
+    h.textContent = projects.length
+      ? `这台机器上坐着 ${projects.length} 个项目的帅位。`
+      : "这台机器上还没有项目的进度：帅位会话开场会用 p.mjs <项目> init 建。";
+    const cards = $("cards");
+    cards.replaceChildren();
+    for (const p of projects) {
+      const li = el("li", !p.ok ? "card bad" : p.needs ? "card has-needs" : "card");
+      const title = el("h2", "card-title");
+      const a = el("a", null, p.name);
+      a.href = projectHref(p.name);
+      title.appendChild(a);
+      li.appendChild(title);
+      if (!p.ok) {
+        li.appendChild(el("p", "card-why", `进度读不到：${p.why}`));
+      } else {
+        li.appendChild(el("p", "card-line", p.headline || "（没写现状）"));
+        const needs = p.needs ? `要你定的 ${p.needs} 件 · ` : "";
+        li.appendChild(el("p", "card-sub", needs + (p.updatedAt ? `更新于 ${ago(p.updatedAt)}` : "")));
+      }
+      cards.appendChild(li);
+    }
+  }
+
+  function renderBoard(name, data) {
+    $("overview").hidden = true;
+    $("board").hidden = false;
+    const m = data.meta ?? {};
+    const repo = web(m.repo);
+    $("eyebrow").textContent = `${name} · 帅位`;
+    document.title = `${name} · 帅位进度`;
+    const h = $("headline");
+    h.className = "headline";
+    h.textContent = m.headline || "（还没写现状）";
+    $("updated").textContent = m.updatedAt ? `最后更新：${clock(m.updatedAt)}（${ago(m.updatedAt)}）` : "最后更新：—";
+
+    const asks = Array.isArray(m.needsYou) ? m.needsYou : [];
+    const askList = $("ask-list");
+    askList.replaceChildren();
+    $("ask").className = asks.length ? "ask has" : "ask";
+    $("ask-title").textContent = asks.length ? `要你定的（${asks.length} 件）` : "现在不用你做什么";
+    if (asks.length) for (const a of asks) askList.appendChild(el("li", null, String(a)));
+    else askList.appendChild(el("li", null, "有要你拍的，会先出现在这里。"));
+
+    const steps = data.steps.slice().sort((a, b) => a.order - b.order);
+    const ol = $("steps");
+    ol.replaceChildren();
+    const counts = {};
+    steps.forEach((s, i) => {
+      const st = STATUS[s.status] ? s.status : "waiting";
+      counts[st] = (counts[st] ?? 0) + 1;
+      const li = el("li", st === "done" ? "step is-done" : "step");
+      li.appendChild(el("span", "step-no", pad(i + 1)));
+      const head = el("div", "step-head");
+      head.appendChild(el("span", "step-title", s.title || "（没写标题）"));
+      head.appendChild(el("span", `pill ${st}`, STATUS[st]));
+      li.appendChild(head);
+      if (s.detail) li.appendChild(el("p", "step-detail", s.detail));
+      if (Array.isArray(s.links) && s.links.length) {
+        const ls = el("div", "step-links");
+        for (const l of s.links) ls.appendChild(link(l.label || l.url, l.url));
+        li.appendChild(ls);
+      }
+      ol.appendChild(li);
+    });
+    $("steps-empty").hidden = steps.length > 0;
+    const parts = ["done", "doing", "needs", "blocked", "waiting"]
+      .filter((k) => counts[k])
+      .map((k) => `${STATUS[k]} ${counts[k]}`);
+    $("tally").textContent = steps.length ? `${steps.length} 步：${parts.join(" · ")}` : "";
+
+    const issue = (n, title) => {
+      const span = el("span");
+      span.appendChild(repo ? link(`#${n}`, `${repo}/issues/${n}`) : el("span", null, `#${n}`));
+      if (title) span.appendChild(document.createTextNode(` ${title}`));
+      return span;
+    };
+    const box = $("structure");
+    box.replaceChildren();
+    const s = data.structure;
+    const groups = Array.isArray(s?.groups) ? s.groups : [];
+    for (const g of groups) {
+      const v = el("div", "ver");
+      const title = el("h3", "ver-title");
+      title.appendChild(link(g.title, g.url));
+      if (g.note) title.appendChild(el("small", null, g.note));
+      v.appendChild(title);
+      const ul = el("ul", "items");
+      for (const it of g.items ?? []) {
+        const li = el("li", "item");
+        const head = el("div", "item-head");
+        head.appendChild(el("span", it.mother ? "tag mother" : "tag", it.mother ? "母单" : "小单"));
+        head.appendChild(issue(it.n, it.title));
+        li.appendChild(head);
+        if (Array.isArray(it.children) && it.children.length) {
+          const kids = el("ul", "kids");
+          for (const c of it.children) {
+            const k = el("li");
+            k.appendChild(issue(c.n, c.title));
+            kids.appendChild(k);
+          }
+          li.appendChild(kids);
+        }
+        ul.appendChild(li);
+      }
+      v.appendChild(ul);
+      box.appendChild(v);
+    }
+    $("struct-empty").hidden = groups.length > 0;
+    $("struct-note").textContent = s?.note ?? "";
+
+    const entries = data.log
+      .slice()
+      .sort((a, b) => String(b.t).localeCompare(String(a.t)))
+      .slice(0, 40);
+    const logList = $("log");
+    logList.replaceChildren();
+    for (const e of entries) {
+      const li = el("li", "log-entry");
+      const t = el("time", "log-time", clock(e.t));
+      t.dateTime = e.t;
+      li.appendChild(t);
+      li.appendChild(el("span", null, e.text));
+      logList.appendChild(li);
+    }
+    $("log-empty").hidden = entries.length > 0;
+  }
+
+  function showError(message) {
+    if (lastOk === null) {
+      $("board").hidden = true;
+      $("overview").hidden = true;
+      const h = $("headline");
+      h.className = "headline error";
+      h.textContent = `进度读不到：${message}`;
+      conn("本机进度服务可能没在跑（帅位会话开场会起它）。每 5 秒重试。", true);
+    } else {
+      conn(`进度读不到：${message}（页面上是 ${ago(new Date(lastOk).toISOString())} 的样子）。每 5 秒重试。`, true);
+    }
+  }
+
+  async function poll() {
+    try {
+      const list = await api("/api/projects");
+      if (!Array.isArray(list?.projects)) throw new Error("项目列表认不出");
+      const current = chosen || (list.projects.length === 1 ? list.projects[0].name : null);
+      renderNav(list.projects, current);
+      if (current) renderBoard(current, await api(`/api/p/${encodeURIComponent(current)}`));
+      else renderOverview(list.projects);
+      lastOk = Date.now();
+      conn(NOTE);
+    } catch (e) {
+      showError(e?.message ?? String(e));
+    }
+  }
+  poll();
+  setInterval(poll, 5000);
+})();
+</script>
+</body></html>
