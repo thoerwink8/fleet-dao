@@ -1,6 +1,6 @@
 // 路由探针的真装配（#129）：内存库上跑真迁移、假插头（不起真执行体）、假工作树管家。
 // 探通 → 在线；登录失效、设备被撤销 → 离线写明原因、整池暂停报警，恢复后下一轮转回在线、撤掉报警；额度用满被拒 → 算通、
-// 额度读数记账；回答认不出、起不来、工作目录交不出去、账号池没定会话用户 → 离线写明原因。每条都故意造一次。
+// 额度读数记账；回答认不出、超时、起不来、连不上、工作目录交不出去、账号池没定会话用户 → 离线写明原因。每条都故意造一次。
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -267,6 +267,25 @@ describe('没探通的：离线，写明是哪一种（不许拿默认值、上�
       expect(await row('carpool')).toMatchObject({ alive: true, probeState: 'ok' });
     },
   );
+
+  // 超时三种（插头强杀）：迟迟没有第一帧（reclaude 卡在同步配置上）、总时长到顶、长时间没动静。都不是要人修的整池问题：
+  // 隔一会儿同一轮再探一次，还不通才离线，原因写明是哪种超时和执行体最后说的话；不写「整池暂停」。
+  it.each([
+    ['startup_timeout', '起来之后迟迟没有第一帧'],
+    ['wall_clock_timeout', '总时长到顶'],
+    ['idle_timeout', '长时间没有动静'],
+  ] as const)('超时（%s）：同一轮再探一次，还不通就离线、写明超时，不当成整池问题', async (killed, text) => {
+    const s = setup(() => ({ result: null, killed, stderrTail: 'Syncing config…' }));
+    const run = await s.round();
+    expect(run).toMatchObject({ outcome: 'ok', online: [] });
+    expect(s.fake.count()).toBe(2);
+    const down = await row('carpool');
+    expect(down).toMatchObject({ alive: false, probeState: 'failed' });
+    expect(down?.probeDetail).toContain('连探两次都没通');
+    expect(down?.probeDetail).toContain(text);
+    expect(down?.probeDetail).toContain('Syncing config');
+    expect(await hold()).toBeUndefined();
+  });
 
   it('进程起不来（reclaude 不在）：离线，原因写起不来', async () => {
     const s = setup(() => ({ spawnError: 'spawn /home/fleet-agent-carpool/.local/bin/reclaude ENOENT' }));

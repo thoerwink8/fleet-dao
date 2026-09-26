@@ -161,6 +161,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
       hostId: r.hostId,
       upstreamModel: r.upstreamModel,
       upstreamAliases: r.upstreamAliases,
+      probedAt: r.probedAt?.toISOString() ?? null,
       quota: r.quota,
       windows: r.windows.map((w) => ({
         label: w.label,
