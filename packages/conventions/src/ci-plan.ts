@@ -35,9 +35,12 @@ export interface CiPlan {
   tests: TestShard[];
   /** 演示版打包 + 扫产物。 */
   web: boolean;
-  /** deploy/test/run.sh。 */
-  deploy: boolean;
+  /** deploy/test/run.sh：all 全套；ops 只跑读 docs/ops.md 的两块（`run.sh --ops`：端口表、place-file）；none 不跑。 */
+  deploy: DeployMode;
 }
+
+export const DEPLOY_MODES = ['all', 'ops', 'none'] as const;
+export type DeployMode = (typeof DEPLOY_MODES)[number];
 
 /** 这些包的测试或打包被 deploy/test 直接跑（agents-sync 的同步脚本、飞书网关打包、web 的扫描脚本）。 */
 export const DEPLOY_READS_PACKAGES = ['agents-sync', 'feishu', 'web'] as const;
@@ -51,7 +54,7 @@ export const TEST_READS: Record<string, string[]> = { api: ['web'], feishu: ['we
 
 type Rule =
   | { match: (f: string) => boolean; full: string }
-  | { match: (f: string) => boolean; units: string[]; deploy?: true; why: string };
+  | { match: (f: string) => boolean; units: string[]; deploy?: 'all' | 'ops'; why: string };
 
 const exact = (p: string) => (f: string) => f === p;
 const under = (p: string) => (f: string) => f.startsWith(p);
@@ -74,12 +77,18 @@ export const PATH_RULES: readonly Rule[] = [
     full: '测试夹具，别的包的测试也读',
   },
   { match: under('deploy/'), full: '装机脚本：deploy/test 全跑，好几个包的测试也直接读 deploy/ 下的文件' },
-  { match: exact('docs/ops.md'), units: ['db'], deploy: true, why: 'deploy/test 核对端口表、db 的测试读它' },
-  { match: exact('AGENTS.md'), units: ['agents-sync'], deploy: true, why: '通用段由 agents-sync 分发' },
+  // deploy/test 里读 docs/ops.md 的只有端口表那段和 place-file.test.sh：只改文档跑这两块（run.sh --ops），不拖上全套
+  {
+    match: exact('docs/ops.md'),
+    units: ['db'],
+    deploy: 'ops',
+    why: 'deploy/test 核对端口表、放文件的命令，db 的测试读它',
+  },
+  { match: exact('AGENTS.md'), units: ['agents-sync'], deploy: 'all', why: '通用段由 agents-sync 分发' },
   {
     match: under('agents/'),
     units: [AGENTS_UNIT, 'agents-sync'],
-    deploy: true,
+    deploy: 'all',
     why: 'skill 由 agents-sync 分发',
   },
   {
@@ -161,7 +170,7 @@ function fullPlan(reasons: string[]): CiPlan {
       },
     ],
     web: true,
-    deploy: true,
+    deploy: 'all',
   };
 }
 
@@ -201,7 +210,8 @@ export function planCi({ event, changed, graph }: PlanInput): CiPlan {
   const units = new Set<string>();
   /** 测试读了改到的包外文件的单元：只测它们自己（依赖它们的包不读那个文件）。 */
   const readers = new Set<string>();
-  let deploy = false;
+  /** 取最大的：有一条要全套就全套。 */
+  let deploy: DeployMode = 'none';
   for (const f of changed) {
     const rule = PATH_RULES.find((r) => r.match(f));
     if (rule && 'full' in rule) {
@@ -210,7 +220,7 @@ export function planCi({ event, changed, graph }: PlanInput): CiPlan {
     }
     if (rule) {
       for (const u of rule.units) readers.add(u);
-      if (rule.deploy) deploy = true;
+      if (rule.deploy === 'all' || (rule.deploy === 'ops' && deploy === 'none')) deploy = rule.deploy;
       reasons.push(`${f}：${rule.why}${rule.units.length > 0 ? `，测 ${rule.units.join('、')}` : ''}`);
       continue;
     }
@@ -244,7 +254,7 @@ export function planCi({ event, changed, graph }: PlanInput): CiPlan {
     tsc: lint ? all.map(unitProject) : [],
     tests,
     web: closure.has('web'),
-    deploy: deploy || DEPLOY_READS_PACKAGES.some((p) => closure.has(p)),
+    deploy: DEPLOY_READS_PACKAGES.some((p) => closure.has(p)) ? 'all' : deploy,
   };
 }
 
@@ -256,7 +266,7 @@ export function planOutputs(plan: CiPlan): Record<string, string> {
     tsc: plan.tsc === 'all' ? 'all' : plan.tsc.join(' '),
     tests: JSON.stringify(plan.tests),
     web: String(plan.web),
-    deploy: String(plan.deploy),
+    deploy: plan.deploy,
   };
 }
 
@@ -266,6 +276,7 @@ export const ALWAYS_JOBS = ['changes', 'hygiene', 'docs'] as const;
 
 function expected(plan: CiPlan, job: (typeof PLANNED_JOBS)[number]): boolean {
   if (job === 'test') return plan.tests.length > 0;
+  if (job === 'deploy') return plan.deploy !== 'none';
   return plan[job];
 }
 
@@ -284,7 +295,7 @@ function parsePlan(text: unknown): CiPlan | string {
     typeof o.full !== 'boolean' ||
     typeof o.lint !== 'boolean' ||
     typeof o.web !== 'boolean' ||
-    typeof o.deploy !== 'boolean' ||
+    !(DEPLOY_MODES as readonly unknown[]).includes(o.deploy) ||
     !Array.isArray(o.tests) ||
     !(o.tsc === 'all' || Array.isArray(o.tsc))
   ) {
@@ -317,7 +328,8 @@ export function ciVerdict(needs: unknown): { ok: boolean; lines: string[] } {
     bad(plan);
     return { ok: false, lines };
   }
-  if (plan.full && PLANNED_JOBS.some((j) => !expected(plan, j))) bad('plan 说全跑，却有 job 没开');
+  if (plan.full && (PLANNED_JOBS.some((j) => !expected(plan, j)) || plan.deploy !== 'all'))
+    bad('plan 说全跑，却有 job 没开（或 deploy 不是全套）');
   for (const job of PLANNED_JOBS) {
     const want = expected(plan, job) ? 'success' : 'skipped';
     const r = n[job]?.result;
