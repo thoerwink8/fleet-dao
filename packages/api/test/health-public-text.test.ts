@@ -10,6 +10,7 @@ import { createTestDb, TEST_DB_TIMEOUT_MS } from '@fleet-dao/db/testing';
 import { FLEET_CHANGES_CHANNEL } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import { startPgChangeFeed } from '../src/changes.ts';
+import { DEPLOY_LAG_NOT_HERE, deployLagCheck } from '../src/deploy-lag.ts';
 import { draftBacklogCheck, notWiredDraftOpener } from '../src/draft-opening.ts';
 import { githubAppMissing, githubEventsCheck } from '../src/github.ts';
 import { type HealthReport, runHealthChecks, serviceHealthChecks } from '../src/health.ts';
@@ -177,6 +178,19 @@ async function publicFailures(log: Logger) {
     judged.cleanup();
     await judgeDb.close();
   }
+  // 线上版本跟不上主线：只有一处 new PublicHealthError，这里造一种；每一种对外的说法都在 deploy-lag.test.ts 用同一份名单扫
+  await run(
+    'deploy-lag',
+    true,
+    deployLagCheck(
+      () => ({
+        current: { sha: null },
+        currentOnMain: null,
+        state: { error: '/srv/fleet-dao-releases/.auto 读不到' },
+      }),
+      () => new Date(),
+    ),
+  );
   return { reports, sites };
 }
 
@@ -227,6 +241,7 @@ describe('公开的健康报告', () => {
           draftOpener: notWiredDraftOpener(),
           draftBacklog: async () => {},
           judge: judgeHealthCheck({ db: {} as Db, location: NO_JUDGE }),
+          deployLag: { check: async () => {}, notWired: DEPLOY_LAG_NOT_HERE },
         }),
         silentLogger,
       ),

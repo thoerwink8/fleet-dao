@@ -18,6 +18,7 @@ const EXTRA_LABELS = {
   draft_opener: '飞书草稿开单',
   draft_backlog: '待开单积压',
   judge: '判断题',
+  deploy_lag: '跟上主线',
 };
 
 export const HEALTH_URL = '/healthz';
