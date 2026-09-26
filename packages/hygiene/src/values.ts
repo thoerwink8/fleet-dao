@@ -6,7 +6,7 @@
 // 三处都没有、也没设环境变量时 absent 为 true：这台机器压根没放名单。本机推前的钩子据此改成「明说没查名单、交给 CI」
 // （创始人 2026-09-26 拍）；CI、引擎推分支、写单子照旧必须有名单。放了但读不了、是空的、环境变量指错，都不算 absent。
 // 名单里的值永远不打印：命中只报文件、行和规则名。
-import { existsSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { type Hit, lineLocator } from './rules.ts';
@@ -20,7 +20,6 @@ export type LoadedValues =
 export interface LoadOptions {
   env?: Readonly<Record<string, string | undefined>>;
   home?: string;
-  exists?: (path: string) => boolean;
   read?: (path: string) => string;
 }
 
@@ -49,26 +48,28 @@ export function parseSensitiveValues(text: string): string[] {
 /**
  * 找第一个存在的名单读进来。存在但读不了、或者读出来是空的，都算没读到（不往下一个找，免得悄悄换了名单）；
  * 环境变量指了文件、文件却不在，也算没读到（多半是路径写错了，同样不能悄悄换成家目录那份）。
+ * 「在不在」靠直接读、看错误码判，不用 existsSync：目录没权限时 existsSync 也回 false，放了读不了的名单会被当成没放
+ * （#184 第二意见）。只有 ENOENT、ENOTDIR 算没有这个文件；EACCES 这类都算放了却读不了。
  */
 export function loadSensitiveValues(options: LoadOptions = {}): LoadedValues {
   const env = options.env ?? process.env;
-  const exists = options.exists ?? existsSync;
   const read = options.read ?? ((path: string) => readFileSync(path, 'utf8'));
   const fromEnv = env[SENSITIVE_VALUES_ENV]?.trim();
-  if (fromEnv && !exists(fromEnv))
-    return {
-      ok: false,
-      reason: `环境变量 ${SENSITIVE_VALUES_ENV} 指的已知敏感值名单 ${fromEnv} 不在`,
-      tried: [fromEnv],
-    };
   const tried = sensitiveValuesPaths(env, options.home ?? homedir());
   for (const path of tried) {
-    if (!exists(path)) continue;
     let text: string;
     try {
       text = read(path);
     } catch (e) {
       const code = (e as NodeJS.ErrnoException).code ?? (e instanceof Error ? e.message : String(e));
+      const missing = code === 'ENOENT' || code === 'ENOTDIR';
+      if (missing && fromEnv && path === fromEnv)
+        return {
+          ok: false,
+          reason: `环境变量 ${SENSITIVE_VALUES_ENV} 指的已知敏感值名单 ${fromEnv} 不在`,
+          tried: [fromEnv],
+        };
+      if (missing) continue;
       return { ok: false, reason: `已知敏感值名单 ${path} 读不了（${code}）`, tried };
     }
     const values = parseSensitiveValues(text);

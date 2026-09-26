@@ -14,11 +14,10 @@ const IN_HOME = '/home/tester/.fleet-dao/sensitive-values.txt';
 const IN_ETC = '/etc/fleet-dao/sensitive-values.txt';
 const norm = (p: string) => p.replace(/\\/g, '/');
 
-/** 假的文件系统：路径 → 内容；内容是 Error 就当读不了。 */
+/** 假的文件系统：路径 → 内容；内容是 Error 就当读不了；没列的路径读的时候报 ENOENT（和真文件系统一样）。 */
 function fakeFs(files: Record<string, string | Error>) {
   const get = (p: string) => files[norm(p)];
   return {
-    exists: (p: string) => get(p) !== undefined,
     read: (p: string) => {
       const c = get(p);
       if (c instanceof Error) throw c;
@@ -103,6 +102,23 @@ describe('找名单', () => {
       ...fakeFs({}),
     });
     expect(absent(wrongEnv)).toBeUndefined();
+  });
+
+  it('目录没权限（EACCES）不算没放：#184 第二意见——existsSync 在这种时候也回 false，会把放了读不了的名单当成没放', () => {
+    const locked = fakeFs({ [IN_ETC]: Object.assign(new Error('denied'), { code: 'EACCES' }) });
+    const result = loadSensitiveValues({ env: {}, home: HOME, ...locked });
+    expect(result).toMatchObject({ ok: false });
+    expect(result.ok ? true : result.absent).toBeUndefined();
+    expect(result.ok ? '' : result.reason).toContain(`${IN_ETC} 读不了（EACCES）`);
+    // ENOTDIR（路径里有一段是文件）和 ENOENT 一样算没有这个文件，照常往下找。
+    const notDir = fakeFs({
+      [IN_HOME]: Object.assign(new Error('not a directory'), { code: 'ENOTDIR' }),
+      [IN_ETC]: 'etc-value-1\n',
+    });
+    expect(loadSensitiveValues({ env: {}, home: HOME, ...notDir })).toMatchObject({
+      ok: true,
+      values: ['etc-value-1'],
+    });
   });
 });
 
