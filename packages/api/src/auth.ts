@@ -100,7 +100,9 @@ export function authRoutes(deps: Deps): Hono<CockpitEnv> {
       return await deps.feishu.identify(input);
     } catch (err) {
       if (err instanceof FeishuRejectedError) {
-        throw new ApiError(401, 'feishu_rejected', '飞书没认这个授权码（可能过期或用过了），请重新登录');
+        // 飞书的错误码必须记下来并带给用户：不带就查不出是过期、重定向地址不对还是 PKCE 对不上
+        log.warn('飞书拒绝了登录', { feishuCode: err.feishuCode, error: err.message });
+        throw new ApiError(401, 'feishu_rejected', `飞书没认这个授权码（飞书错误码 ${err.feishuCode}），请重新登录`);
       }
       if (err instanceof FeishuUnavailableError) {
         log.warn('飞书登录接口出错', { error: err.message });
