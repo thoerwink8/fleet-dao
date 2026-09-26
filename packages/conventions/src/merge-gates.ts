@@ -1,4 +1,4 @@
-// 合并闸的判法（design 第五节「流程只为快」，#74）：改到的文件碰没碰先审后合的三种路径、碰了的当前头上有没有通过的第二意见，
+// 合并闸的判法（design 第五节「流程只为快」，#74）：改到的文件碰没碰先审后合的路径、碰了的当前头上有没有通过的第二意见，
 // 草稿、冲突的说法；PR 正文的档位只做提醒（parseTier 给 pr-fields 用）。纯判断，不碰网络；读写 GitHub 的在 merge-gate.ts。
 // 三态纪律：读不到、认不出由调用方判「没查成」（退出码 2），不当成「没问题」。
 
@@ -17,8 +17,11 @@ const TIER_LIST = TIERS.slice(0, 2)
   .map((t) => `「${t}」`)
   .join('');
 
-/** 先审后合只有这三种（design 第五节：删改迁移、部署生产、密钥鉴权含 CI 工作流和卫生检查）。 */
-export const RISK_KINDS = ['改数据库', '动生产', '碰安全'] as const;
+/**
+ * 先审后合只有这两种（design 第五节：删改迁移；碰安全——密钥鉴权、CI 工作流和卫生检查、对公网开口子和提权的生产配置）。
+ * 原来的「动生产」2026-09-26 下午取消：部署脚本 CI 绿就合，只有防火墙、sudoers、香港 nginx 并进碰安全。
+ */
+export const RISK_KINDS = ['改数据库', '碰安全'] as const;
 export type RiskKind = (typeof RISK_KINDS)[number];
 
 export interface RiskPath {
@@ -245,7 +248,7 @@ function listHits(hits: readonly RiskyFile[]): string {
 }
 
 /**
- * 改到先审后合的三种地方：当前头上要有通过的第二意见。按路径判，不看 PR 自己写的档位；旧头上的不算——调用方只拿当前头的状态来判。
+ * 改到先审后合的地方：当前头上要有通过的第二意见。按路径判，不看 PR 自己写的档位；旧头上的不算——调用方只拿当前头的状态来判。
  */
 export function checkSecondOpinion(
   head: string,

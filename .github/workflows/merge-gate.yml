@@ -1,6 +1,6 @@
 name: merge-gate
 # 合并闸（#74）：在 PR 当前头上写提交状态 merge-gate，「按我们的规矩能不能合」只看它一个——不是草稿、和主线没冲突、
-# 改到先审后合的三种路径（packages/conventions/high-risk-paths.json）时当前头上有通过的 second-opinion；必填栏只提醒
+# 改到先审后合的路径（packages/conventions/high-risk-paths.json）时当前头上有通过的 second-opinion；必填栏只提醒
 # （packages/conventions/src/merge-gate.ts，design 第五节「流程只为快」）。
 # 三处触发：
 # - PR 事件用 pull_request_target：有冲突的 PR 上 pull_request 跑不起来，fork 来的 PR 在 pull_request 里也拿不到写状态的令牌。

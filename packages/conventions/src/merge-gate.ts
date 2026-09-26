@@ -1,5 +1,5 @@
 // 合并闸（#74）：在 PR 当前头上写提交状态 merge-gate，「按我们的规矩能不能合」只看它一个（design 第五节「流程只为快」）。
-// 判红只有：草稿、和主线冲突、改到先审后合的三种路径（删改迁移、部署生产、密钥鉴权含 CI 和卫生检查）而当前头上没有通过的
+// 判红只有：草稿、和主线冲突、改到先审后合的路径（删改迁移；碰安全：密钥鉴权、CI 和卫生检查、对公网开口子和提权的生产配置）而当前头上没有通过的
 // second-opinion；读不到、认不出写 failure（没查成），GitHub 还没算完冲突写 pending。必填栏（标签、里程碑、对应计划、specs、
 // 档位）只提醒。merge-gate.yml 在 PR 事件、主线推送（逐个重算所有开着的 PR）、second-opinion 状态写上来时跑它；
 // 不检出、不跑 PR 里的代码：判法和清单都用跑这段代码的那一份（主线的）。
@@ -221,7 +221,7 @@ export interface GateDeps {
 }
 
 /**
- * 判一个 PR。只读，不写状态。判红只有：草稿、和主线冲突（这两样 GitHub 本来就合不了）、改到先审后合的三种路径
+ * 判一个 PR。只读，不写状态。判红只有：草稿、和主线冲突（这两样 GitHub 本来就合不了）、改到先审后合的路径
  * 而当前头上没有通过的 second-opinion；读不到、认不出也判红（没查成）。必填栏只提醒。
  */
 export async function gatePr(number: number, deps: GateDeps): Promise<GateResult> {
@@ -262,7 +262,7 @@ export async function gatePr(number: number, deps: GateDeps): Promise<GateResult
 
   let hits: RiskyFile[] = [];
   if (typeof deps.riskList === 'string') {
-    notChecked.push(`先审后合的路径清单 ${RISK_PATHS_FILE} ${deps.riskList}，没法判改没改到那三种地方`);
+    notChecked.push(`先审后合的路径清单 ${RISK_PATHS_FILE} ${deps.riskList}，没法判改没改到先审后合的地方`);
   } else {
     try {
       const files = await gh.files(number);
