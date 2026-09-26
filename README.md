@@ -42,7 +42,7 @@
 - **服务器上**：`/etc/fleet-dao/`，不进 git；每个文件放什么见 ops 第三节（用户、目录、库）。
 - **加密副本**：私有仓 [fleet-dao-vault](https://github.com/thoerwink8/fleet-dao-vault)，age 加密，一个文件一个 `.age`，仓里只有密文和公钥。在创始人电脑上跑那个仓里的 `bash refresh.sh` 刷新；怎么解开、机器没了怎么恢复，见那个仓 README 的「解开一个文件」和「法国整机没了怎么恢复」两节。
 - **创始人电脑上**：`~/.fleet-dao/`，放解密钥匙 `vault-key.txt` 和 age；只有拿着这把钥匙的人解得开。钥匙还要抄一份进创始人的密码管理器（plan 第五节）。
-- **已知敏感值名单**（`sensitive-values.txt`，一行一个真实的账号、组织编号、域名、IP，给卫生检查认「光看形状认不出」的值）：法国 `/etc/fleet-dao/sensitive-values.txt`（引擎推分支、写单子前必读，缺了不推不写）；CI 的 Actions 密钥 `FLEET_SENSITIVE_VALUES`（每个 PR 都查）；保险箱里有加密副本 `france/etc/fleet-dao/sensitive-values.txt.age`；创始人电脑 `~/.fleet-dao/sensitive-values.txt`。新机器可以不放：推之前的钩子会写明「这台没放名单、交给 CI 查」照样放行，令牌、密钥文件照拦；想本机也查，只把这一个文件拷过去放到同样位置，别为它把保险箱的解密钥匙拷过去（那把钥匙能解开全部）。
+- **已知敏感值名单**（`sensitive-values.txt`，一行一个真实的账号、组织编号、域名、IP，给卫生检查认「光看形状认不出」的值）：法国 `/etc/fleet-dao/sensitive-values.txt`（引擎推分支、写单子前必读，缺了不推不写）；CI 的 Actions 密钥 `FLEET_SENSITIVE_VALUES`（每个 PR 都查，不光扫文件树，还按提交、连 PR 标题正文一起查；推任何非 main 分支哪怕没开 PR 也按提交查一遍，见 `.github/workflows/hygiene-push.yml`）；保险箱里有加密副本 `france/etc/fleet-dao/sensitive-values.txt.age`；创始人电脑 `~/.fleet-dao/sensitive-values.txt`。新机器可以不放：推之前的钩子会写明「这台没放名单、交给 CI 查」照样放行，令牌、密钥文件照拦；想本机也查，只把这一个文件拷过去放到同样位置，别为它把保险箱的解密钥匙拷过去（那把钥匙能解开全部）。
 - 数据库备份不在保险箱里，见 plan 第二节「备份」。
 
 ## 常用

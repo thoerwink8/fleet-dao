@@ -1,0 +1,52 @@
+name: hygiene-push
+# 推任何非 main 分支时的兜底。本机 pre-push 钩子会在推之前拦一次，但没装钩子的新机器、被 --no-verify 跳过的推送都
+# 会漏过；开 PR 才轮到 ci.yml 的 hygiene job，中间那段时间内容已经推上去、已经公开了。这里在服务器侧按提交把这个
+# 分支上 main 还没有的部分重扫一遍：和 pre-push 钩子、ci.yml 同一份判定（packages/hygiene/src/ci-history.ts），
+# 同样要真的已知敏感值名单；执行的是主线（origin/main）上那份卫生检查代码，不跑这个分支自己的 packages/hygiene
+# ——分支本身可能就是想绕过检查而改坏了它。
+# 不是必过检查：推分支这一步本身不是 PR，GitHub 没有能挂必过检查的地方；查出来就让这次运行标红，GitHub 按它自己
+# 的规则通知推的人。权限只给读代码——不写状态、不留言，用不上更多权限。
+on:
+  push:
+    branches-ignore: [main]
+concurrency:
+  group: hygiene-push-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  hygiene-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # 要 origin/main 和这个分支的完整提交图才能算 origin/main..HEAD：fetch-depth 0 会连全部分支一起取（GitHub
+      # 文档：0 = 取全部分支和标签的完整历史），默认的浅克隆只有推上来的这一个提交，main 都不在里面。
+      - uses: actions/checkout@v4
+        with:
+          path: pushed
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          path: trusted
+          sparse-checkout: packages/hygiene
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # 和 ci.yml 的 hygiene job 一样：名单从 Actions 密钥写成临时文件。没配或是空的，检查明确报「名单没读到」、
+      # 退出码 2，不会当成干净。
+      - name: 已知敏感值名单
+        env:
+          FLEET_SENSITIVE_VALUES: ${{ secrets.FLEET_SENSITIVE_VALUES }}
+        run: |
+          f="$RUNNER_TEMP/sensitive-values.txt"
+          printf '%s\n' "$FLEET_SENSITIVE_VALUES" > "$f"
+          echo "FLEET_SENSITIVE_VALUES_FILE=$f" >> "$GITHUB_ENV"
+      - name: 卫生检查（主线上的代码，按提交扫这个分支上 main 还没有的部分）
+        working-directory: pushed
+        env:
+          TRUSTED: ${{ github.workspace }}/trusted
+        run: |
+          node "$TRUSTED/packages/hygiene/src/bin/ci-history.ts" --base origin/main --head "$GITHUB_SHA"
