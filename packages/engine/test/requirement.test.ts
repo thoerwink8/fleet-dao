@@ -283,7 +283,11 @@ describe('需求工作流', { timeout: 60_000 }, () => {
   // form、readme 互不相干、同时开工，谁的写码会话先起是赛跑（#88：原来按所有子任务一起数的 n 挑 form 的会话，readme
   // 先起时 form 那次成了 2、挂不住）：两种先后都钉死各跑一遍。等的都是假世界的变化，不按钟点轮询。
   for (const first of ['form', 'readme'] as const) {
-    it(`会改同一块地方的不同时跑，互不相干的并行（${first} 的写码会话先起）`, async () => {
+    // 临时（#88 取证，合并前撤掉）：在 CI 上各连跑 20 遍。
+    it(`会改同一块地方的不同时跑，互不相干的并行（${first} 的写码会话先起）`, {
+      repeats: 19,
+      timeout: 600_000,
+    }, async () => {
       const second = first === 'form' ? 'readme' : 'form';
       const world = createFakeWorld({
         plan: [
