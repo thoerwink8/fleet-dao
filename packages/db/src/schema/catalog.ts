@@ -73,6 +73,8 @@ export const pools = pgTable(
       'pools_org_kind_known',
       sql`${t.orgKind} is null or ${t.orgKind} in (${sql.raw(ORG_KINDS.map((k) => `'${k}'`).join(', '))})`,
     ),
+    // 跑会话的池必须写明是哪个组织：漏了选路判不了会话用户挂没挂着它（会派到没挂着的池、额度记错池）。
+    check('pools_session_pool_has_org_kind', sql`${t.runAsUser} is null or ${t.orgKind} is not null`),
     // 给 routes 的组合外键用：路由挂的池必须属于路由写的渠道。
     unique('pools_channel_id_id_unique').on(t.channelId, t.id),
     check('pools_max_concurrency_positive', sql`${t.maxConcurrency} > 0`),

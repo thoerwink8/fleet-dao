@@ -31,8 +31,8 @@ export const git = (cwd: string, ...args: string[]) =>
   execFileSync('git', args, { cwd, env: GIT_ENV, encoding: 'utf8' }).trim();
 
 /**
- * 目录：两个 Claude 订阅池各一条 Claude Code 路由（同一个会话用户），一条 codex 路由（没接上）。两个池故意不标组织类型
- * （orgKind）：这里测一般的选路，会话用户挂哪个组织、哪个池才派的那一条在 store-ports.test.ts 里单测。
+ * 目录：两个 Claude 订阅池各一条 Claude Code 路由（同一个会话用户），一条 codex 路由（没接上）。两个池都标成会话用户挂着的
+ * 拼车组织：这里测一般的选路（两条都派得出去）；只派挂着的那个组织、另一个挡掉，在 store-ports.test.ts 里单测。
  */
 export async function world(db: Db, options: { order?: string[]; stages?: StageKind[] } = {}) {
   await seed(db);
@@ -42,12 +42,14 @@ export async function world(db: Db, options: { order?: string[]; stages?: StageK
       channelId: 'claude-subscription',
       maxConcurrency: 3,
       runAsUser: 'fleet-agent-carpool',
+      orgKind: 'carpool',
     },
     {
       id: 'claude-carpool',
       channelId: 'claude-subscription',
       maxConcurrency: 3,
       runAsUser: 'fleet-agent-carpool',
+      orgKind: 'carpool',
     },
     { id: 'relay', channelId: 'mirasim-cloud', maxConcurrency: 3 },
   ]);

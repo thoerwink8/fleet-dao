@@ -1,5 +1,5 @@
 {
-  "id": "05a8785f-ffa3-4d54-a01c-c6b8dad6423e",
+  "id": "3c9aeff7-3c3f-4572-abd1-69f72ea0f8ef",
   "prevId": "c0ac5582-1894-40ce-8cbc-479fb9ef9ccc",
   "version": "7",
   "dialect": "postgresql",
@@ -288,6 +288,10 @@
         "pools_org_kind_known": {
           "name": "pools_org_kind_known",
           "value": "\"pools\".\"org_kind\" is null or \"pools\".\"org_kind\" in ('solo', 'carpool')"
+        },
+        "pools_session_pool_has_org_kind": {
+          "name": "pools_session_pool_has_org_kind",
+          "value": "\"pools\".\"run_as_user\" is null or \"pools\".\"org_kind\" is not null"
         },
         "pools_max_concurrency_positive": {
           "name": "pools_max_concurrency_positive",

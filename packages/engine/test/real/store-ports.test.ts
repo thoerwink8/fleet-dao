@@ -62,7 +62,6 @@ describe('选路', () => {
   it('会话用户挂着拼车组织：独享池挡着不派（写明为什么），拼车池照派；池名按组织类型分', async () => {
     await world(t.db);
     await t.client.query(`update pools set org_kind = 'solo' where id = 'claude-solo'`);
-    await t.client.query(`update pools set org_kind = 'carpool' where id = 'claude-carpool'`);
     expect(await pick({ stage: 'execute' })).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
     const none = await pick({ stage: 'execute', avoidRouteIds: ['carpool'] });
     expect(none).toMatchObject({ ok: false, waitFor: 'none' });

@@ -416,7 +416,15 @@ describe('拒收：撞约束、撞硬禁令、写到一半失败，库里一行�
       /pools\.0\.runAsUser：fleet-agent-dedicated 已停用.*改成 fleet-agent-carpool/,
     );
     expect(() => parseCatalog(JSON.stringify(withPool({ orgKind: 'team' })))).toThrow(/pools\.0\.orgKind/);
+    // 带会话用户、漏写组织类型：装载失败，不当成「不是 Claude 池」放过去（放过去就会派到会话用户没挂着的池）
+    const noKind = { ...base, pools: base.pools.map((p, i) => (i === 0 ? { ...p, orgKind: undefined } : p)) };
+    expect(() => parseCatalog(JSON.stringify(noKind))).toThrow(
+      /pools\.0\.orgKind：带会话用户（runAsUser）的池要写 orgKind/,
+    );
     await load();
+    await expect(t.client.query(`update pools set org_kind = null where id = 'claude-solo'`)).rejects.toThrow(
+      /pools_session_pool_has_org_kind/,
+    );
     await expect(
       t.client.query(`update pools set run_as_user = 'root' where id = 'claude-solo'`),
     ).rejects.toThrow(/pools_run_as_user_known/);

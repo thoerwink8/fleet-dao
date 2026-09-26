@@ -55,14 +55,21 @@ export const CatalogSchema = z.strictObject({
     .min(1),
   pools: z
     .array(
-      z.strictObject({
-        id: Id,
-        channelId: Id,
-        maxConcurrency: z.int().positive(),
-        runAsUser: RunAsUserField.optional(),
-        orgKind: z.enum(ORG_KINDS).optional(),
-        expiresAt: z.iso.datetime({ offset: true }).optional(),
-      }),
+      z
+        .strictObject({
+          id: Id,
+          channelId: Id,
+          maxConcurrency: z.int().positive(),
+          runAsUser: RunAsUserField.optional(),
+          orgKind: z.enum(ORG_KINDS).optional(),
+          expiresAt: z.iso.datetime({ offset: true }).optional(),
+        })
+        // 跑会话的池（带会话用户的就是 Claude 订阅池）必须写明是哪个组织：漏了选路判不了会话用户挂没挂着它，
+        // 挂着拼车也会派到独享池，额度记错池（库里也有同样的约束 pools_session_pool_has_org_kind）。
+        .refine((p) => p.runAsUser === undefined || p.orgKind !== undefined, {
+          message: `带会话用户（runAsUser）的池要写 orgKind（${ORG_KINDS.join(' / ')}）：会话用户同一时刻只挂一个组织，不写就判不了这个池能不能派`,
+          path: ['orgKind'],
+        }),
     )
     .min(1),
   models: z.array(z.strictObject({ id: Id, family: Id, displayName: Text })).default([]),
@@ -410,8 +417,9 @@ export async function loadCatalog(
             .onConflictDoNothing({ target: pools.id })
             .returning({ id: pools.id }),
         ),
-      ['channelId', 'maxConcurrency', 'runAsUser', 'orgKind', 'expiresAt'],
-      ['runAsUser', 'orgKind', 'expiresAt'],
+      ['channelId', 'maxConcurrency', 'orgKind', 'runAsUser', 'expiresAt'],
+      // orgKind 排在 runAsUser 前面补：库里的约束要求有会话用户就得有组织类型，先补会话用户会被拒。
+      ['orgKind', 'runAsUser', 'expiresAt'],
       async (id, field, value) => {
         const [set, empty] =
           field === 'runAsUser'
