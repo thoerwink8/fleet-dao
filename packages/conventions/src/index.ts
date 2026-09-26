@@ -35,12 +35,18 @@ export {
   type GitHubCommenter,
   type GitHubPrLabeler,
   type GitHubReader,
+  githubToken,
   type IssueInfo,
   liveGitHub,
+  type MilestoneDetail,
   type MilestoneInfo,
+  type PlanIssue,
+  type PlanReader,
   type PullInfo,
   repoName,
   toIssue,
+  toMilestoneDetail,
+  toPlanIssue,
 } from './github-api.ts';
 export {
   type Gh,
@@ -74,6 +80,25 @@ export {
 } from './merge-gates.ts';
 export { type CloseCheck, MILESTONE_USAGE, milestoneCloseCheck } from './milestone-close.ts';
 export { type PlanPhase, type PlanRef, parsePlanRefs, planPhases } from './plan.ts';
+export {
+  escapeText,
+  findSnapshot,
+  formatAt,
+  type OrderParse,
+  type PlanSnapshotDeps,
+  parseAt,
+  parseOrder,
+  planSnapshot,
+  readSnapshot,
+  renderSnapshot,
+  SNAPSHOT_BEGIN,
+  SNAPSHOT_END,
+  SNAPSHOT_USAGE,
+  type Snapshot,
+  type SnapshotRun,
+  type SnapshotVersion,
+  spliceSnapshot,
+} from './plan-snapshot.ts';
 export {
   annotation,
   checkPlanValue,
