@@ -67,4 +67,4 @@
 
 ## 协作
 
-GitHub 上只用标签和里程碑：每个标签的意思写在[标签页](https://github.com/thoerwink8/fleet-dao/labels)，里程碑就是 plan 的 P0–P6；怎么用、为什么这样定，见 design 第七节。开 issue 用上面的 `pnpm issue:new`；开 PR 照模板填，贴一个类别标签、挂一个里程碑、写明「对应计划」和「specs」，缺一样 CI 的 pr-fields 就红；最后一栏「文档」写改了哪份文档，或「不适用」。
+GitHub 上只用标签和里程碑：每个标签的意思写在[标签页](https://github.com/thoerwink8/fleet-dao/labels)，里程碑就是 plan 的 P0–P6；怎么用、为什么这样定，见 design 第七节。开 issue 用上面的 `pnpm issue:new`；开 PR 照模板填，写明「对应计划」和「specs」；类别标签、里程碑缺了由 pr-labels 按对应 issue 自动补，这几栏缺了只在合并闸里提醒、不挡合并（能不能合只看 merge-gate，见 design 第五节）；最后一栏「文档」写改了哪份文档，或「不适用」。
