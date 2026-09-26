@@ -488,9 +488,12 @@ describe('0007：法国只留一个会话用户（创始人 2026-09-26）', () =
         );
         // 跑会话的池必须写明组织类型：漏了选路判不了会话用户挂没挂着它
         await expect(pg.exec(`update pools set org_kind = null where id = 'solo'`)).rejects.toThrow(
-          /pools_session_pool_has_org_kind/,
+          /pools_session_pool_org_kind_together/,
         );
-        await pg.exec(`update pools set org_kind = 'solo' where id = 'relay'`);
+        // 反过来：不跑会话的池不许写组织类型（会被选路当成 Claude 组织池错挡、错放）
+        await expect(pg.exec(`update pools set org_kind = 'solo' where id = 'relay'`)).rejects.toThrow(
+          /pools_session_pool_org_kind_together/,
+        );
         await expect(
           pg.exec(
             `insert into session_runs (stage, route_id, why_route, run_as_user) values ('execute', 'r1', '测试', 'root')`,

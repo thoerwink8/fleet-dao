@@ -3,7 +3,7 @@
 // 配置和库里不一样的列进 kept 给人看。阶段顺序每个阶段只排一次（stage_policies.catalog_applied_at），之后怎么改都不覆盖。
 // 配置文件缺失、格式错、引用不存在都明确报错，库里一行不写——不许当成空目录继续。
 import { readFile } from 'node:fs/promises';
-import { type BanSubject, hardBanFor, type OrgKind, type RunAsUser, type StageKind } from '@fleet-dao/shared';
+import { type BanSubject, hardBanFor, type RunAsUser, type StageKind } from '@fleet-dao/shared';
 import { and, asc, eq, isNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { Db } from './client.ts';
@@ -69,6 +69,11 @@ export const CatalogSchema = z.strictObject({
         .refine((p) => p.runAsUser === undefined || p.orgKind !== undefined, {
           message: `带会话用户（runAsUser）的池要写 orgKind（${ORG_KINDS.join(' / ')}）：会话用户同一时刻只挂一个组织，不写就判不了这个池能不能派`,
           path: ['orgKind'],
+        })
+        // 反过来也不行：只写 orgKind 的池会被选路当成 Claude 组织池，按会话用户挂的组织挡掉或放出去，而它根本不跑会话。
+        .refine((p) => p.orgKind === undefined || p.runAsUser !== undefined, {
+          message: 'orgKind 只给跑会话的 Claude 订阅池写，要和 runAsUser 一起给',
+          path: ['runAsUser'],
         }),
     )
     .min(1),
@@ -399,6 +404,7 @@ export async function loadCatalog(
         ),
       ['name', 'billing', 'enabled'],
     );
+    const sessionFilled = new Set<string>();
     await upsertMissing(
       'pools',
       config.pools,
@@ -417,16 +423,26 @@ export async function loadCatalog(
             .onConflictDoNothing({ target: pools.id })
             .returning({ id: pools.id }),
         ),
-      ['channelId', 'maxConcurrency', 'orgKind', 'runAsUser', 'expiresAt'],
-      // orgKind 排在 runAsUser 前面补：库里的约束要求有会话用户就得有组织类型，先补会话用户会被拒。
-      ['orgKind', 'runAsUser', 'expiresAt'],
+      ['channelId', 'maxConcurrency', 'runAsUser', 'orgKind', 'expiresAt'],
+      ['runAsUser', 'orgKind', 'expiresAt'],
       async (id, field, value) => {
-        const [set, empty] =
-          field === 'runAsUser'
-            ? [{ runAsUser: value as RunAsUser }, isNull(pools.runAsUser)]
-            : field === 'orgKind'
-              ? [{ orgKind: value as OrgKind }, isNull(pools.orgKind)]
-              : [{ expiresAt: new Date(value as string) }, isNull(pools.expiresAt)];
+        // 会话用户和组织类型要么都有要么都没有（库里约束 pools_session_pool_org_kind_together）：两格一起补，
+        // 只在两格都空着时写；第二个字段来的时候这一行已经在这次补过了，照样算补上。
+        if (field === 'runAsUser' || field === 'orgKind') {
+          if (sessionFilled.has(id)) return true;
+          const want = config.pools.find((p) => p.id === id);
+          if (!want?.runAsUser || !want.orgKind) return false;
+          const ok = wrote(
+            await tx
+              .update(pools)
+              .set({ runAsUser: want.runAsUser, orgKind: want.orgKind })
+              .where(and(eq(pools.id, id), isNull(pools.runAsUser), isNull(pools.orgKind)))
+              .returning({ id: pools.id }),
+          );
+          if (ok) sessionFilled.add(id);
+          return ok;
+        }
+        const [set, empty] = [{ expiresAt: new Date(value as string) }, isNull(pools.expiresAt)];
         return wrote(
           await tx
             .update(pools)

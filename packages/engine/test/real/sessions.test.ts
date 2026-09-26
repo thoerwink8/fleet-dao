@@ -709,9 +709,11 @@ describe('失败', () => {
         ctx(),
       ),
     ).rejects.toMatchObject({ code: 'HOST_NOT_WIRED' });
-    await t.client.query("update pools set run_as_user = null where id = 'claude-solo'");
+    await t.client.query("update pools set run_as_user = null, org_kind = null where id = 'claude-solo'");
     await expect(ports.startSession(launch(), ctx())).rejects.toMatchObject({ code: 'CONFIG_MISSING' });
-    await t.client.query("update pools set run_as_user = 'fleet-agent-carpool' where id = 'claude-solo'");
+    await t.client.query(
+      "update pools set run_as_user = 'fleet-agent-carpool', org_kind = 'carpool' where id = 'claude-solo'",
+    );
     await expect(ports.startSession(launch({ taskId: randomUUID() }), ctx())).rejects.toMatchObject({
       code: 'TASK_NOT_FOUND',
     });

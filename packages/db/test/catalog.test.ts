@@ -421,9 +421,21 @@ describe('拒收：撞约束、撞硬禁令、写到一半失败，库里一行�
     expect(() => parseCatalog(JSON.stringify(noKind))).toThrow(
       /pools\.0\.orgKind：带会话用户（runAsUser）的池要写 orgKind/,
     );
+    // 反过来：不跑会话的池（没有 runAsUser）写了 orgKind 也拒（会被选路当成 Claude 组织池错挡、错放）
+    const relayIdx = base.pools.findIndex((p) => p.runAsUser === undefined);
+    const kindOnly = {
+      ...base,
+      pools: base.pools.map((p, i) => (i === relayIdx ? { ...p, orgKind: 'solo' as const } : p)),
+    };
+    expect(() => parseCatalog(JSON.stringify(kindOnly))).toThrow(
+      new RegExp(`pools\\.${relayIdx}\\.runAsUser：orgKind 只给跑会话的 Claude 订阅池写`),
+    );
     await load();
     await expect(t.client.query(`update pools set org_kind = null where id = 'claude-solo'`)).rejects.toThrow(
-      /pools_session_pool_has_org_kind/,
+      /pools_session_pool_org_kind_together/,
+    );
+    await expect(t.client.query(`update pools set org_kind = 'solo' where id = 'jev'`)).rejects.toThrow(
+      /pools_session_pool_org_kind_together/,
     );
     await expect(
       t.client.query(`update pools set run_as_user = 'root' where id = 'claude-solo'`),
