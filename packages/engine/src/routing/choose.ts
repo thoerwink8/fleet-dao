@@ -1,9 +1,10 @@
 // 选路（设计 §九「选路」五条 + §十二「一条路由报繁忙，所有任务一起避开」由熔断判定带进来）。
 // 纯函数、确定性：同样输入同样输出；不取时钟、不随机——现在几点、试探用的随机数都由调用方给，引擎记进历史。
 
+import { ROUTE_PROBE_STALE_MINUTES } from '@fleet-dao/shared';
 import { backupProbeReason, blocksFor, type FilterContext } from './filter.ts';
 import { type BlockGroup, groupOf } from './group.ts';
-import { routeLabel, STAGE_NAMES, stamp } from './names.ts';
+import { duration, routeLabel, STAGE_NAMES, stamp } from './names.ts';
 import { resolveRoutingPolicy } from './policy.ts';
 import { type Ranked, rank } from './rank.ts';
 import type {
@@ -86,7 +87,7 @@ export function chooseRoute(input: ChooseRouteInput): ChooseRouteResult {
           breakerTrial ? BREAKER_TRIAL : null,
         )
       : withNotes(whyFirst(stageName, chosen, judged), breakerTrial ? BREAKER_TRIAL : null);
-    return dispatch(route, why, trial, null, verdicts);
+    return dispatch(route, why, trial, null, verdicts, now);
   }
 
   const allOpen = allOpenTrial(judged);
@@ -95,18 +96,20 @@ export function chooseRoute(input: ChooseRouteInput): ChooseRouteResult {
       `${stageName}阶段的候选路由全都熔断，多半是共用的一层坏了（本机网络、中转服务）：放最早到点的 ${routeLabel(allOpen.item.route)} 去试探`,
       quotaNote(allOpen.item.route),
     );
-    return dispatch(allOpen.item.route, why, 'all-open', why, verdicts);
+    return dispatch(allOpen.item.route, why, 'all-open', why, verdicts, now);
   }
 
   return waitOrNone(stageName, judged, verdicts);
 }
 
+/** 每条派出去的路径都经这里：理由末尾补上探针结论过期的那句（probeNote）。 */
 function dispatch(
   route: RouteFacts,
   why: string,
   trial: TrialKind | null,
   alarm: string | null,
   verdicts: RouteVerdict[],
+  now: number,
 ): ChooseRouteResult {
   return {
     kind: 'dispatch',
@@ -115,11 +118,24 @@ function dispatch(
     modelId: route.modelId,
     family: route.family,
     hostId: route.hostId,
-    why,
+    why: withNotes(why, probeNote(route, now)),
     trial,
     alarm,
     verdicts,
   };
+}
+
+/**
+ * 派出去的这条路由的「在线」是探针多久前的结论（design 第九节「路由探针」）。超过 ROUTE_PROBE_STALE_MINUTES 没更新
+ * （连着三轮没给新结论，探针可能停了）照上一次的结论派：探针是看门的，它自己坏了不该把活全挡住（额度没读成不挡是
+ * 同一个道理，真坏了的路由由会话的失败分流兜住）；但理由里写明，不拿上一次的结论冒充现在。和驾驶舱标「探测过期」同一条线。
+ */
+function probeNote(route: RouteFacts, now: number): string | null {
+  // 在线的一定有时刻（validate.ts 已拦）；派得出去的都在线。
+  if (route.probedAt === null) return null;
+  const age = now - Date.parse(route.probedAt);
+  if (age <= ROUTE_PROBE_STALE_MINUTES * 60_000) return null;
+  return `在线是探针 ${duration(age)}前的结论，之后它没再给新结论（探针可能停了），照上一次的结论派`;
 }
 
 function verdictOf(j: Judged, index: number): RouteVerdict {
@@ -285,7 +301,7 @@ function chooseTaskRoute(input: ChooseRouteInput, route: RouteFacts, ctx: Filter
       ? 'quota-probe'
       : null;
   const why = withNotes(`任务指定的路由：${label}`, quotaNote(route), breakerTrial ? BREAKER_TRIAL : null);
-  return dispatch(route, why, trial, null, [verdict]);
+  return dispatch(route, why, trial, null, [verdict], ctx.now);
 }
 
 const BREAKER_TRIAL = '熔断半开，这一单当试探';

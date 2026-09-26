@@ -1,7 +1,8 @@
 // chooseRoute 的三种结果、任务指定路由、试探、熔断，以及「为什么派给它」。
+import { ROUTE_PROBE_STALE_MINUTES } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import { type ChooseRouteResult, chooseRoute, type RouteFacts } from '../../src/routing/index.ts';
-import { at, entry, halfOpenBreaker, input, route, soloAndCarpool, win } from './helpers.ts';
+import { at, entry, halfOpenBreaker, input, NOW, route, soloAndCarpool, win } from './helpers.ts';
 
 function picked(result: ChooseRouteResult): string {
   if (result.kind !== 'dispatch') throw new Error(`没派出去：${result.kind} ${result.reason}`);
@@ -397,5 +398,62 @@ describe('为什么派给它：人看得懂', () => {
     const off = (id: string) => route(id, { blockers: ['offline'] });
     const r = chooseRoute(input([off('a'), off('b'), off('c'), off('d'), route('e')] as RouteFacts[]));
     expect(r.kind === 'dispatch' && r.why).toContain('另有 2 条也没派');
+  });
+});
+
+// design 第九节「路由探针」：探针连着三轮没给新结论（探针可能停了），照上一次的结论派——探针是看门的，它自己坏了
+// 不该把活全挡住；但理由里写明「在线」是多久前的结论，不拿上一次的结论冒充现在。
+describe('探针结论过期：照上一次的结论派，理由里写明', () => {
+  const minutesAgo = (m: number) => new Date(Date.parse(NOW) - m * 60_000).toISOString();
+  const NOTE = /；在线是探针 .+前的结论，之后它没再给新结论（探针可能停了），照上一次的结论派$/;
+
+  it('上一轮刚探过（没过期）：理由里不提探针', () => {
+    const r = chooseRoute(input([route('a')]));
+    expect(r.kind === 'dispatch' && r.why).toBe('写码阶段第 1 条：池a · Opus 5.5 · Claude Code');
+  });
+
+  it('两小时没有新结论：照派（不停工），理由末尾写明在线是两小时前的结论', () => {
+    const r = chooseRoute(input([route('a', { probedAt: at(-2) })]));
+    expect(r).toMatchObject({ kind: 'dispatch', routeId: 'a', trial: null, alarm: null });
+    expect(r.kind === 'dispatch' && r.why).toBe(
+      '写码阶段第 1 条：池a · Opus 5.5 · Claude Code；在线是探针 2 小时前的结论，之后它没再给新结论（探针可能停了），照上一次的结论派',
+    );
+  });
+
+  it('过期线和驾驶舱同一条：整 45 分钟不算过期，多 1 分钟就算', () => {
+    const edge = chooseRoute(input([route('a', { probedAt: minutesAgo(ROUTE_PROBE_STALE_MINUTES) })]));
+    expect(edge.kind === 'dispatch' && edge.why).not.toContain('探针');
+    const over = chooseRoute(input([route('a', { probedAt: minutesAgo(ROUTE_PROBE_STALE_MINUTES + 1) })]));
+    expect(over.kind === 'dispatch' && over.why).toContain('在线是探针 46 分钟前的结论');
+  });
+
+  it('派出去的每条路径都写：任务指定的路由、试探、全熔断时放的试探', () => {
+    const stale = { probedAt: at(-3) };
+    const pinned = chooseRoute(input([route('a'), route('b', stale)], { taskRouteId: 'b' }));
+    expect(pinned).toMatchObject({ kind: 'dispatch', routeId: 'b' });
+    expect(pinned.kind === 'dispatch' && pinned.why).toMatch(NOTE);
+
+    const explore = chooseRoute(
+      input([route('a'), route('b', stale), route('c', stale)], {
+        draw: 0.01,
+        policy: { trialEnabled: true },
+      }),
+    );
+    expect(explore).toMatchObject({ kind: 'dispatch', routeId: 'b', trial: 'explore' });
+    expect(explore.kind === 'dispatch' && explore.why).toMatch(NOTE);
+
+    const open = (id: string, probe: number) =>
+      route(id, {
+        ...stale,
+        breaker: { state: 'open', admit: 'none', reason: '连续失败 3 次', probeAt: at(probe) },
+      });
+    const allOpen = chooseRoute(input([open('a', 0.5), open('b', 0.2)]));
+    expect(allOpen).toMatchObject({ kind: 'dispatch', routeId: 'b', trial: 'all-open' });
+    expect(allOpen.kind === 'dispatch' && allOpen.why).toMatch(NOTE);
+  });
+
+  it('只说派出去的这条：没派的那条过期了不提', () => {
+    const r = chooseRoute(input([route('a', { probedAt: at(-5), blockers: ['offline'] }), route('b')]));
+    expect(r.kind === 'dispatch' && r.why).not.toContain('探针');
   });
 });

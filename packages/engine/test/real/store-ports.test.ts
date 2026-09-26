@@ -8,6 +8,7 @@ import {
   markSessionRunStarted,
   notifications,
   openSessionRun,
+  saveRouteProbe,
   sessionRuns,
   stepTimings,
   upsertAlert,
@@ -68,6 +69,44 @@ describe('选路', () => {
     expect(!none.ok && none.detail).toContain(
       '会话用户现在挂的是拼车组织，Claude 订阅 · 独享要等切过去才能派',
     );
+  });
+
+  it('只派探针判在线的（#129）：探针写了离线的挡掉、写明原因；只剩它时派不出', async () => {
+    await world(t.db);
+    await saveRouteProbe(t.db, {
+      routeId: 'solo',
+      state: 'failed',
+      at: NOW,
+      detail: '登录失效：Not logged in · Please run /login',
+    });
+    const r = await pick();
+    expect(r).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+    expect(r.ok && r.why).toContain(
+      '第 1 条 Claude 订阅 · 拼车 · Opus 5.5 · Claude Code：不在线（探活或熔断判的）',
+    );
+    expect(r.ok && r.why).not.toContain('在线是探针');
+    const none = await pick({ avoidRouteIds: ['carpool'] });
+    expect(none).toMatchObject({ ok: false, waitFor: 'none' });
+    expect(!none.ok && none.detail).toContain('不在线（探活或熔断判的）');
+  });
+
+  it('在线是很久以前探的（探针可能停了）：照上一次的结论派，理由里写明是多久前的结论', async () => {
+    await world(t.db);
+    await saveRouteProbe(t.db, {
+      routeId: 'solo',
+      state: 'ok',
+      at: new Date(NOW.getTime() - 120 * MIN),
+      detail: '答上了：OK',
+    });
+    const r = await pick();
+    expect(r).toMatchObject({ ok: true, route: { routeId: 'solo' } });
+    expect(r.ok && r.why).toContain(
+      '在线是探针 2 小时前的结论，之后它没再给新结论（探针可能停了），照上一次的结论派',
+    );
+    // 另一条 5 分钟前刚探过：理由里不提
+    const fresh = await pick({ avoidRouteIds: ['solo'] });
+    expect(fresh).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+    expect(fresh.ok && fresh.why).not.toContain('在线是探针');
   });
 
   it('执行方式还没接上的路由不派；只剩它时派不出，理由里写明', async () => {

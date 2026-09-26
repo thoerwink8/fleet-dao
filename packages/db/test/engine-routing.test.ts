@@ -291,6 +291,8 @@ describe('routeFactsForStage', () => {
       channelName: '中转',
       modelName: 'Opus 5.5',
       upstreamModel: 'claude-opus-5-5',
+      // 探针下结论的时刻原样透出去：过没过期由选路按现在判
+      probedAt: ago(MIN),
       reserved: 1,
       inFlight: 0,
     });
