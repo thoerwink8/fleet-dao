@@ -89,6 +89,21 @@ describe('找名单', () => {
     const result = loadSensitiveValues({ env: {}, home: HOME, ...empty });
     expect(result.ok ? '' : result.reason).toContain('是空的');
   });
+
+  it('只有「一个都没有、也没设环境变量」才算 absent（本机钩子据此放行）；放了却坏了、环境变量指错都不算', () => {
+    const absent = (r: ReturnType<typeof loadSensitiveValues>) => (r.ok ? undefined : r.absent);
+    expect(absent(loadSensitiveValues({ env: {}, home: HOME, ...fakeFs({}) }))).toBe(true);
+    const denied = fakeFs({ [IN_HOME]: Object.assign(new Error('denied'), { code: 'EACCES' }) });
+    expect(absent(loadSensitiveValues({ env: {}, home: HOME, ...denied }))).toBeUndefined();
+    const empty = fakeFs({ [IN_ETC]: '\n' });
+    expect(absent(loadSensitiveValues({ env: {}, home: HOME, ...empty }))).toBeUndefined();
+    const wrongEnv = loadSensitiveValues({
+      env: { [SENSITIVE_VALUES_ENV]: '/nope.txt' },
+      home: HOME,
+      ...fakeFs({}),
+    });
+    expect(absent(wrongEnv)).toBeUndefined();
+  });
 });
 
 describe('按名单比', () => {

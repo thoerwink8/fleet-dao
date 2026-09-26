@@ -3,6 +3,8 @@
 // ~/.fleet-dao/sensitive-values.txt、/etc/fleet-dao/sensitive-values.txt。CI 把 Actions 密钥 FLEET_SENSITIVE_VALUES
 // 写成临时文件再用环境变量指过来（.github/workflows/ci.yml）。
 // 名单没读到、读不了、是空的，都不许当成「没问题」：调用方拿到 ok:false 要明确报出来，退出码和「查出问题」分开。
+// 三处都没有、也没设环境变量时 absent 为 true：这台机器压根没放名单。本机推前的钩子据此改成「明说没查名单、交给 CI」
+// （创始人 2026-09-26 拍）；CI、引擎推分支、写单子照旧必须有名单。放了但读不了、是空的、环境变量指错，都不算 absent。
 // 名单里的值永远不打印：命中只报文件、行和规则名。
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -13,7 +15,7 @@ export const SENSITIVE_VALUES_ENV = 'FLEET_SENSITIVE_VALUES_FILE';
 
 export type LoadedValues =
   | { ok: true; source: string; values: readonly string[] }
-  | { ok: false; reason: string; tried: readonly string[] };
+  | { ok: false; reason: string; tried: readonly string[]; absent?: true };
 
 export interface LoadOptions {
   env?: Readonly<Record<string, string | undefined>>;
@@ -73,7 +75,7 @@ export function loadSensitiveValues(options: LoadOptions = {}): LoadedValues {
     if (values.length === 0) return { ok: false, reason: `已知敏感值名单 ${path} 是空的`, tried };
     return { ok: true, source: path, values };
   }
-  return { ok: false, reason: `已知敏感值名单没读到（找过：${tried.join('、')}）`, tried };
+  return { ok: false, reason: `已知敏感值名单没读到（找过：${tried.join('、')}）`, tried, absent: true };
 }
 
 /**

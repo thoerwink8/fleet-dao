@@ -295,13 +295,53 @@ describe('prePushCheck', { timeout: 30_000 }, () => {
     }
   });
 
-  it('名单没读到：退出码 2，不推', () => {
+  it('名单放了却读不了、是空的、环境变量指错（不是 absent）：退出码 2，不推', () => {
     fresh();
     const result = check(commit({ 'docs/ok.md': '没问题\n' }), {
-      values: { ok: false, reason: '已知敏感值名单没读到', tried: [] },
+      values: { ok: false, reason: '已知敏感值名单 /x 是空的', tried: ['/x'] },
     });
     expect(result.code).toBe(2);
-    expect(result.lines.at(-1)).toMatch(/^没扫全：已知敏感值名单没读到/);
+    expect(result.lines.at(-1)).toMatch(/^没扫全：已知敏感值名单 \/x 是空的/);
+  });
+
+  // 这台机器压根没放名单：不拒推，但要明说没查名单、交给 CI；不靠名单的规则照拦（创始人 2026-09-26 拍）。
+  const ABSENT: LoadedValues = {
+    ok: false,
+    reason: '已知敏感值名单没读到（找过：/nope）',
+    tried: ['/nope'],
+    absent: true,
+  };
+
+  it('没放名单、内容干净：放行，并写明没查名单、交给 CI', () => {
+    fresh();
+    const result = check(commit({ 'docs/ok.md': '没问题\n' }), { values: ABSENT });
+    expect(result.code).toBe(0);
+    expect(result.lines.at(-1)).toMatch(
+      /^这台机器没放已知敏感值名单，这次没查名单上的值.*CI 会在 PR 上用名单再查/,
+    );
+  });
+
+  it('没放名单也照拦令牌和密钥文件：退出码 1', () => {
+    fresh();
+    const token = ['ghp', pseudoRandom(36, 402)].join('_');
+    const head = commit({ 'docs/deploy.md': `export GH_TOKEN=${token}\n`, '.secrets/vault.pass': 'x\n' });
+    const result = check(head, { values: ABSENT });
+    expect(result.code).toBe(1);
+    expect(result.lines).toEqual(
+      expect.arrayContaining([
+        `.secrets/vault.pass 密钥文件（提交 ${short(head)}）`,
+        `docs/deploy.md:1 令牌（提交 ${short(head)}）`,
+      ]),
+    );
+    expect(result.lines.join('\n')).not.toContain(token);
+  });
+
+  it('没放名单时名单上的值本机查不出（有意接受：交给 CI），但照样写明没查', () => {
+    fresh();
+    const result = check(commit({ 'docs/who.md': '用户 fake-org-778899\n' }), { values: ABSENT });
+    expect(result.code).toBe(0);
+    expect(result.lines.some((l) => l.includes('名单里的敏感值'))).toBe(false);
+    expect(result.lines.at(-1)).toContain('这次没查名单上的值');
   });
 
   it('git 出错、输出认不出：退出码 2，不当成扫过没事', () => {
