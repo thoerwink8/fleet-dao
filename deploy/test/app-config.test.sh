@@ -459,17 +459,21 @@ for n in m1 m2; do
 done
 call check_app_file_meta "$T/m1.env" "$T/m2.env"
 if ((RC == 0 && ${#REDS[@]} == 0)); then pass "都是 640：通过"; else flunk "都是 640 该通过：$OUT"; fi
-meta_case() { # 说明 怎么弄坏 m2
+meta_case() { # 说明 怎么弄坏 m2（600 / 644 / missing / symlink）
   printf 'X=1\n' >"$T/m2.env"
   chmod 640 "$T/m2.env"
-  eval "$2"
+  case $2 in
+  600 | 644) chmod "$2" "$T/m2.env" ;;
+  missing) rm -f "$T/m2.env" ;;
+  symlink) rm -f "$T/m2.env" && ln -s "$T/m1.env" "$T/m2.env" ;;
+  esac
   call check_app_file_meta "$T/m1.env" "$T/m2.env"
   if ((RC != 0 && ${#REDS[@]} == 1)); then pass "$1：判红、返回非 0"; else flunk "$1：该判红（返回 $RC，红 ${#REDS[@]}）：$OUT"; fi
 }
-meta_case '组读不到（600，root 读回照样读得到、服务读不到）' 'chmod 600 "$T/m2.env"'
-meta_case '谁都能读（644）' 'chmod 644 "$T/m2.env"'
-meta_case '不在' 'rm -f "$T/m2.env"'
-meta_case '是符号链接' 'rm -f "$T/m2.env"; ln -s "$T/m1.env" "$T/m2.env"'
+meta_case '组读不到（600，root 读回照样读得到、服务读不到）' 600
+meta_case '谁都能读（644）' 644
+meta_case '不在' missing
+meta_case '是符号链接' symlink
 rm -f "$T/m2.env"
 
 echo "== 整份文件里写了几行的键"
