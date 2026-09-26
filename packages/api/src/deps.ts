@@ -31,4 +31,16 @@ export interface Deps {
   now: () => Date;
   /** 演示版可见范围的发布处；null = 没配（FLEET_DEMO_DIR）。 */
   demo: DemoPublisher | null;
+  /**
+   * 还没做的读取器（装配时定）：驾驶舱对应那一块整块显示「待实现」占位（阶段 + 单号），不说成「没查成」「离线」。
+   * quota = 额度读取；routeProbe = 路由探针（routes.alive 只由它和熔断写）。接上哪个就删掉哪一项。
+   */
+  notWired?: { quota?: NotWiredMark; routeProbe?: NotWiredMark };
+}
+
+/** 一块还没做的功能：是什么、排在哪个阶段、哪张单（单开在 fleet-dao 自己这个仓）。 */
+export interface NotWiredMark {
+  what: string;
+  phase: string;
+  issue: number;
 }

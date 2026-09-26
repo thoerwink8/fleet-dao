@@ -244,6 +244,8 @@ export function routeOptions(
   stage: StageKind,
   currentRouteId: string | undefined,
   now: number,
+  /** 额度读取还没做（额度表的 quotaNotWired）：不写「额度没查成」，这一行不显示用量。 */
+  quotaNotWired = false,
 ): { ordered: RouteOption[]; others: RouteOption[] } {
   const policy = routing.stages.find((p) => p.stage === stage);
   const toOption = (id: string): RouteOption | undefined => {
@@ -251,14 +253,17 @@ export function routeOptions(
     if (!info) return undefined;
     const pool = pools?.find((p) => p.id === info.poolId);
     // 按这条路由算：只扣别的模型组的窗满了不算它满，和调度台同一句话。
-    const quota = pools
-      ? routeQuotaHeadline(
-          pool,
-          routing.models.find((m) => m.id === info.route.modelId),
-        )
-      : undefined;
+    const quota =
+      pools && !quotaNotWired
+        ? routeQuotaHeadline(
+            pool,
+            routing.models.find((m) => m.id === info.route.modelId),
+          )
+        : undefined;
     let blocked = routeProblem(routing, id, stage, now) ?? undefined;
-    if (!blocked && !info.route.alive) blocked = '离线';
+    // 路由探针还没做时没人写过 alive：选不了，但原因是「还没探过」，不是离线
+    if (!blocked && !info.route.alive)
+      blocked = routing.routeProbeNotWired ? `还没探过（#${routing.routeProbeNotWired.issue}）` : '离线';
     if (!blocked && !info.channelEnabled) blocked = '渠道已下架';
     let note: string | undefined;
     if (id === currentRouteId) note = '正在用';
@@ -302,7 +307,7 @@ function RoutePickerDialog({
   const current = activity?.routeId;
   const opts =
     routing && target
-      ? routeOptions(routing, pools?.pools, stage, current, Date.now())
+      ? routeOptions(routing, pools?.pools, stage, current, Date.now(), Boolean(pools?.quotaNotWired))
       : { ordered: [], others: [] };
 
   const item = (o: RouteOption) => (

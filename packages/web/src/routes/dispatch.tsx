@@ -25,6 +25,7 @@ import {
   useUpdateStagePolicy,
 } from '../api/client';
 import type { Ban, PoolView, Routing, StageKind, StagePolicy } from '../api/types';
+import { NotBuilt } from '../components/not-built';
 import { LoadError, LoadingRows, Page, Panel } from '../components/page';
 import { QuotaBar } from '../components/quota';
 import { Badge } from '../components/ui/badge';
@@ -108,6 +109,12 @@ export default function Dispatch() {
       description="每个阶段挂一串路由，派工时从上往下挑第一条能用的：在线、额度够、有空位、不犯禁令。拖动调整先后。"
     >
       {routing.error ? <LoadError what="路由" error={routing.error} /> : null}
+      {routing.data?.routeProbeNotWired ? (
+        <NotBuilt compact notWired={routing.data.routeProbeNotWired} className="mb-3" />
+      ) : null}
+      {pools.data?.quotaNotWired ? (
+        <NotBuilt compact notWired={pools.data.quotaNotWired} className="mb-3" />
+      ) : null}
       {pools.error ? (
         <div className="mb-3">
           <LoadError what="额度和并发（下面的路由不显示用量和在跑数）" error={pools.error} />
@@ -166,6 +173,7 @@ export default function Dispatch() {
                     policy={policy}
                     routing={data}
                     pools={pools.data?.pools}
+                    quotaNotWired={Boolean(pools.data?.quotaNotWired)}
                     now={now}
                     onSave={(to, message) => onSave(s.id, policy, to, message)}
                   />
@@ -247,6 +255,7 @@ function StageCard({
   policy,
   routing,
   pools,
+  quotaNotWired,
   now,
   onSave,
 }: {
@@ -256,6 +265,8 @@ function StageCard({
   routing: Routing;
   /** 额度表还没读到（在读或没读成）时是 undefined：路由行不显示用量，页面顶上另有提示。 */
   pools: PoolView[] | undefined;
+  /** 额度读取还没做：路由行不显示用量（页面顶上有待实现占位），不说「额度没查成」。 */
+  quotaNotWired: boolean;
   now: number;
   onSave(to: PolicyValue, message: string): void;
 }) {
@@ -344,6 +355,7 @@ function StageCard({
             stage={stage}
             routing={routing}
             pools={pools}
+            quotaNotWired={quotaNotWired}
             now={now}
             onDragEnd={() => commit(orderRef.current)}
             onMove={(to) => move(i, to)}
@@ -388,7 +400,7 @@ function StageCard({
                   </span>
                   {problem ? (
                     <span className="text-ink-fail">{problem}</span>
-                  ) : !r.alive ? (
+                  ) : !r.alive && !routing.routeProbeNotWired ? (
                     <span className="text-ink-stall">离线</span>
                   ) : null}
                 </SelectItem>
@@ -408,6 +420,7 @@ function RouteRow({
   stage,
   routing,
   pools,
+  quotaNotWired,
   now,
   onDragEnd,
   onMove,
@@ -420,6 +433,7 @@ function RouteRow({
   routing: Routing;
   /** 额度表还没读到（在读或没读成）时是 undefined：路由行不显示用量，页面顶上另有提示。 */
   pools: PoolView[] | undefined;
+  quotaNotWired: boolean;
   now: number;
   onDragEnd(): void;
   onMove(to: number): void;
@@ -431,7 +445,7 @@ function RouteRow({
   // 和换模型对话框同一句话，按这条路由算：只扣别的模型组的窗满了不算它满（routeQuotaHeadline）。
   // 额度表读到了、却查不到这个池，也算「额度没查成」。
   const h =
-    info && pools
+    info && pools && !quotaNotWired
       ? routeQuotaHeadline(
           pool,
           routing.models.find((m) => m.id === info.route.modelId),
@@ -439,7 +453,8 @@ function RouteRow({
       : undefined;
   const w = h && 'w' in h ? h.w : undefined;
   const problem = routeProblem(routing, rid, stage, now);
-  const offline = info ? !info.route.alive : true;
+  // 路由探针还没做：没人写过 alive，不说「离线」、不画成灰的（页面顶上有待实现占位）
+  const offline = info ? !info.route.alive && !routing.routeProbeNotWired : true;
   const channelOff = info ? !info.channelEnabled : false;
   const faint = offline || channelOff || Boolean(problem);
   return (

@@ -12,6 +12,7 @@ import { Link, useNavigate } from 'react-router';
 import { brand } from '#brand';
 import { useAllBoards, useAudit, useMe, usePools } from '../api/client';
 import type { Board, BoardTask, NowItem, PoolView, QuotaWindowView } from '../api/types';
+import { NotBuilt } from '../components/not-built';
 import { BoardsError, Empty, LoadError, LoadingRows, Page, Panel, Stat } from '../components/page';
 import { QuotaBar } from '../components/quota';
 import { useRepo } from '../components/repo-context';
@@ -119,9 +120,15 @@ export default function Overview() {
         {canSee('quota') ? (
           <Stat
             label="额度快清零"
-            value={pools.data ? hot.length : '—'}
+            value={pools.data && !pools.data.quotaNotWired ? hot.length : '—'}
             icon={GaugeCircle}
-            hint={pools.error ? '额度没读成' : '还剩不少，该先用它'}
+            hint={
+              pools.error
+                ? '额度没读成'
+                : pools.data?.quotaNotWired
+                  ? `待实现 · #${pools.data.quotaNotWired.issue}`
+                  : '还剩不少，该先用它'
+            }
             to="/quota"
           />
         ) : null}
@@ -317,7 +324,9 @@ export default function Overview() {
                   </li>
                 ))}
               </ul>
-              {pools.data && !windows.length ? (
+              {pools.data?.quotaNotWired ? (
+                <NotBuilt compact notWired={pools.data.quotaNotWired} />
+              ) : pools.data && !windows.length ? (
                 <p className="text-center text-sm text-muted-foreground">还没有额度读数</p>
               ) : null}
               {unknownUse ? (

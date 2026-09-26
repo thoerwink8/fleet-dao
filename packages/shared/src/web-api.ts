@@ -433,6 +433,22 @@ export const PoolSchema = z.object({
   expiresAt: Time.optional(),
 });
 
+/**
+ * 一块功能还没做（装配时定，不是跑出来的；和 /healthz 的「未接」同一个做法）：驾驶舱整块显示「待实现」占位，
+ * 写明排在哪个阶段、哪张单，不把「没读到」说成「没查成」「离线」。接上以后后端不再给这一项。
+ */
+export const NotWiredSchema = z.object({
+  /** 这块是什么：额度读数、路由在线状态…… */
+  what: z.string(),
+  /** 排在 plan.md 的哪个阶段，如 P3。 */
+  phase: z.string(),
+  /** 对应的单号。 */
+  issue: z.number().int().positive(),
+  /** 单开在哪个仓（驾驶舱据此链过去）；受管的仓里找不到它就不给，只显示单号。 */
+  issueRepo: z.object({ owner: z.string(), name: z.string() }).optional(),
+});
+export type NotWired = z.infer<typeof NotWiredSchema>;
+
 export const RoutingResponse = z.object({
   channels: z.array(ChannelSchema),
   pools: z.array(PoolSchema),
@@ -443,6 +459,8 @@ export const RoutingResponse = z.object({
   hardBans: z.array(z.object({ id: z.string(), reason: z.string() })),
   /** 库里另外配的禁令，和 hardBans 一起生效。 */
   bans: z.array(BanSchema),
+  /** 路由探针还没做：路由在线状态整块显示待实现；有它时 alive=false 是「没人探过」，不是离线。 */
+  routeProbeNotWired: NotWiredSchema.optional(),
 });
 
 const RouteIdList = z
@@ -530,6 +548,8 @@ export const PoolViewSchema = z.object({
 
 export const PoolsResponse = z.object({
   pools: z.array(PoolViewSchema),
+  /** 额度读取还没做：额度那一块整块显示待实现；有它时 unread 不代表读失败。 */
+  quotaNotWired: NotWiredSchema.optional(),
   staleAfterMinutes: z.number().int().positive(),
   asOf: Time,
 });
