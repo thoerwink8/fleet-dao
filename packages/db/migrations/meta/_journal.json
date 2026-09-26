@@ -64,6 +64,13 @@
       "when": 1790388260227,
       "tag": "0008_password_login",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1790389766556,
+      "tag": "0009_session_version",
+      "breakpoints": true
     }
   ]
 }

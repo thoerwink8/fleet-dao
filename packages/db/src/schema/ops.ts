@@ -58,6 +58,11 @@ export const users = pgTable(
     /** 连续输错几次，登录成功清零；到上限记 locked_until，锁期内对的密码也不放。 */
     failedLogins: integer('failed_logins').notNull().default(0),
     lockedUntil: timestamp('locked_until', tz),
+    /**
+     * 会话版本：设密码、改密码、退出时加 1。会话 Cookie 里带着签发时的版本，对不上就作废——
+     * 会话是自签 Cookie，不在库里，要让别处已登的会话失效只能靠这个。
+     */
+    sessionVersion: integer('session_version').notNull().default(0),
   },
   (t) => [
     uniqueIndex('users_username_lower_unique').on(sql`lower(${t.username})`),

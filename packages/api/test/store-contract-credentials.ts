@@ -154,6 +154,22 @@ export function describeCredentialsStoreContract(name: string, make: MakeStore):
       expect((await store.getPasswordCredentials(DEV_USER_ID))?.failedLogins).toBe(0);
     });
 
+    it('会话版本：设密码加 1、只改用户名不加、bumpSessionVersion 加 1；没这个人 false', async () => {
+      const version = async () => (await store.getUser(DEV_USER_ID))?.sessionVersion ?? 0;
+      expect(await version()).toBe(0);
+      await store.setPasswordCredentials(
+        { userId: DEV_USER_ID, username: 'ver', passwordHash: HASH, at: T0 },
+        audit(),
+      );
+      expect(await version()).toBe(1);
+      await store.setPasswordCredentials({ userId: DEV_USER_ID, username: 'ver2', at: T0 }, audit());
+      expect(await version()).toBe(1);
+      expect(await store.bumpSessionVersion(DEV_USER_ID)).toBe(true);
+      expect(await version()).toBe(2);
+      expect(await store.bumpSessionVersion(OTHER_UUID)).toBe(false);
+      expect(await store.bumpSessionVersion('not-a-uuid')).toBe(false);
+    });
+
     it('设密码把计数和锁清零（root 用 set-password 就能解锁）', async () => {
       await store.setPasswordCredentials(
         { userId: DEV_USER_ID, username: 'lock-me', passwordHash: HASH, at: T0 },

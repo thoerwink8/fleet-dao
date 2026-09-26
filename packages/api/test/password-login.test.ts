@@ -11,6 +11,7 @@ import {
   SCRYPT_PARAMS,
   verifyPassword,
 } from '../src/password.ts';
+import { signPayload } from '../src/tokens.ts';
 import {
   cookieHeader,
   DEV_USER_ID,
@@ -45,7 +46,8 @@ async function setFirst(h: H, username = 'Founder-A', password = PASSWORD) {
     write('PUT', session, { username, newPassword: password }),
   );
   expect(res.status, await res.clone().text()).toBe(204);
-  return session;
+  // 设密码让会话版本加了 1：接着用响应里换上的新 Cookie（CSRF 令牌不变）
+  return { cookie: cookieHeader(res), csrf: session.csrf };
 }
 
 async function body(res: Response) {
@@ -461,5 +463,99 @@ describe('防暴力计数（内存里的那一份）', () => {
     for (let i = 0; i < 100; i++) t.fail(`spam-${i}`, 2000);
     expect(t.lockedUntil('locked-source', 3000)).toBe(1000 + LOCK_MS);
     expect(t.size()).toBeLessThanOrEqual(2);
+  });
+});
+
+describe('会话作废（会话版本）', () => {
+  const me = (h: H, cookie: string) => h.cockpit.request('/api/me', { headers: { cookie } });
+
+  it('改密码后：别处的旧 Cookie 401 session_revoked；改密码的这一处换上新 Cookie 接着用', async () => {
+    const h = harness();
+    await setFirst(h);
+    const other = await passwordLogin(h, 'founder-a', PASSWORD);
+    const oldCookie = cookieHeader(other);
+    expect((await me(h, oldCookie)).status).toBe(200);
+
+    const here = await h.login();
+    const res = await h.cockpit.request(
+      '/api/me/credentials',
+      write('PUT', here, { newPassword: NEW_PASSWORD, currentPassword: PASSWORD }),
+    );
+    expect(res.status).toBe(204);
+
+    const stale = await me(h, oldCookie);
+    expect(stale.status).toBe(401);
+    expect(await errorCode(stale)).toBe('session_revoked');
+    // 改密码前在这一处拿的 Cookie 也作废了，响应里换的新 Cookie 能用，CSRF 令牌不变
+    expect((await me(h, here.cookie)).status).toBe(401);
+    const renewed = { cookie: cookieHeader(res), csrf: here.csrf };
+    expect((await me(h, renewed.cookie)).status).toBe(200);
+    const again = await h.cockpit.request(
+      '/api/me/credentials',
+      write('PUT', renewed, { username: 'boss', currentPassword: NEW_PASSWORD }),
+    );
+    expect(again.status).toBe(204);
+  });
+
+  it('退出后：退出前留下的那份 Cookie（包括别的设备上的）401', async () => {
+    const h = harness();
+    const a = await h.login();
+    const b = await h.login();
+    const logout = await h.cockpit.request('/auth/logout', write('POST', a));
+    expect(logout.status).toBe(204);
+    for (const cookie of [a.cookie, b.cookie]) {
+      const res = await me(h, cookie);
+      expect(res.status).toBe(401);
+      expect(await errorCode(res)).toBe('session_revoked');
+    }
+    // 重新登录拿到的是新版本，能用
+    expect((await me(h, (await h.login()).cookie)).status).toBe(200);
+  });
+
+  it('服务器上 set-password（重）设密码：已登的会话也作废', async () => {
+    const h = harness();
+    const s = await h.login();
+    await h.store.setPasswordCredentials(
+      {
+        userId: DEV_USER_ID,
+        username: 'founder-a',
+        passwordHash: await hashPassword(PASSWORD),
+        at: new Date(),
+      },
+      {
+        actor: { kind: 'engine', id: 'ops:set-password' },
+        action: 'credentials.set',
+        target: 't',
+        via: 'engine',
+        ok: true,
+      },
+    );
+    expect((await me(h, s.cookie)).status).toBe(401);
+  });
+
+  it('只改用户名不作废会话', async () => {
+    const h = harness();
+    const s = await setFirst(h);
+    const renamed = await h.cockpit.request(
+      '/api/me/credentials',
+      write('PUT', s, { username: 'boss', currentPassword: PASSWORD }),
+    );
+    expect(renamed.status).toBe(204);
+    expect((await me(h, s.cookie)).status).toBe(200);
+  });
+
+  it('#120 之前发的会话（没带版本）：这个人版本还是 0 时照常能用，版本一变就作废', async () => {
+    const h = harness();
+    const iat = Math.floor(h.clock.now.getTime() / 1000);
+    const legacy = signPayload(h.config.sessionSecret, 'fleet-session/v1', {
+      uid: DEV_USER_ID,
+      sid: 'legacy-sid',
+      iat,
+      exp: iat + 3600,
+    });
+    const cookie = `__Host-fleet_session=${legacy}`;
+    expect((await me(h, cookie)).status).toBe(200);
+    await h.store.bumpSessionVersion(DEV_USER_ID);
+    expect((await me(h, cookie)).status).toBe(401);
   });
 });

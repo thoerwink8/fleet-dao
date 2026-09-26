@@ -106,7 +106,7 @@ export function authRoutes(deps: Deps): Hono<CockpitEnv> {
       via: 'cockpit',
       ok: true,
     });
-    return startSession(c, config, user.id, deps.now(), method);
+    return startSession(c, config, user.id, deps.now(), method, user.sessionVersion ?? 0);
   }
 
   async function identify(input: Parameters<NonNullable<Deps['feishu']>['identify']>[0]) {
@@ -311,6 +311,10 @@ export function authRoutes(deps: Deps): Hono<CockpitEnv> {
       via: 'cockpit',
       ok: true,
     });
+    // 退出 = 这个人所有设备上的会话都作废（会话是自签 Cookie，光删这一处的 Cookie，偷走的那份照样能用）
+    if (!(await deps.store.bumpSessionVersion(c.get('user').id))) {
+      throw new ApiError(500, 'session_revoke_failed', '退出没做成：库里找不到这个账号，已记日志');
+    }
     endSession(c, config);
     return c.body(null, 204);
   });

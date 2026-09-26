@@ -193,6 +193,7 @@ export const CredentialsResponse = z.object({
 
 /**
  * 设或改用户名、密码（PUT，写操作带 X-CSRF-Token），成功 204。已设过密码的，改什么都要带 currentPassword。
+ * 设、改了密码：这个人别处已登的会话全部作废（接口回 401 session_revoked）；这一处的响应里换上新 Cookie，CSRF 令牌不变。
  * 用户名 3–32 位（字母或数字开头，字母、数字、点、下划线、连字符），大小写不敏感地唯一；密码至少 10 位。
  * 失败（ApiErrorBody，details.field 指明哪一栏）：
  * - 400 invalid_username / username_taken（field=username）、username_required（第一次设密码没给用户名，field=username）；
@@ -869,6 +870,7 @@ export const AuthRoutes = {
   },
   /** 成功 204 + 会话 Cookie，没有响应体。 */
   passwordLogin: { method: 'POST', path: '/password/login', request: PasswordLoginRequest },
+  /** 退出 = 这个人所有设备上的会话都作废（之后拿旧 Cookie 请求回 401 session_revoked）。 */
   logout: { method: 'POST', path: '/logout' },
   devLogin: { method: 'POST', path: '/dev-login', request: DevLoginRequest, response: MeResponse },
 } as const;

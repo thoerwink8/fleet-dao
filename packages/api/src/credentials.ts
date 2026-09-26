@@ -14,7 +14,7 @@ import {
   verifyPassword,
 } from './password.ts';
 import type { PasswordCredentials } from './ports.ts';
-import type { CockpitEnv, SessionClaims } from './session.ts';
+import { type CockpitEnv, reissueSession, type SessionClaims } from './session.ts';
 import { nowSeconds } from './tokens.ts';
 
 /** 没设过密码时，飞书登录之后多久内能不带当前密码设第一次。 */
@@ -151,6 +151,12 @@ export function registerCredentialRoutes(app: Hono<CockpitEnv>, deps: Deps): voi
       throw new ApiError(400, 'username_taken', '这个用户名已经有人用了', { field: 'username' });
     }
     if (result === 'not_found') throw new ApiError(500, 'credentials_missing', '读不到这个账号的登录信息');
+    if (passwordHash !== undefined) {
+      // 设、改密码时库里的会话版本加了 1：别处已登的全作废，这一处换上新版本接着用（会话编号、CSRF 令牌不变）
+      const fresh = await store.getUser(user.id);
+      if (!fresh) throw new ApiError(500, 'credentials_missing', '读不到这个账号的登录信息');
+      reissueSession(c, deps.config, session, fresh.sessionVersion ?? 0, now);
+    }
     return c.body(null, 204);
   });
 }

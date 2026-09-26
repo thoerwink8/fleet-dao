@@ -371,6 +371,15 @@ export function createMemoryStore(
   }
 
   /** 库里的约束：ok=false 必须写原因。违反就整笔不做（模拟事务回滚），所以调用方要先校验再改数据。 */
+  /** 用户对象换一个新的（不原地改）：外面拿着的旧对象不跟着变，和库版读出来的是快照一样。 */
+  function bumpVersion(userId: string): boolean {
+    const i = data.users.findIndex((u) => u.id === userId);
+    const u = data.users[i];
+    if (!u) return false;
+    data.users[i] = { ...u, sessionVersion: (u.sessionVersion ?? 0) + 1 };
+    return true;
+  }
+
   function checkAudit(entry: NewAuditEntry): void {
     if (!entry.ok && !entry.error)
       throw new Error('audit_log_failure_has_error：ok=false 的操作记录必须带 error');
@@ -596,6 +605,7 @@ export function createMemoryStore(
       }
       checkAudit(entry);
       data.credentials.set(userId, next);
+      if (passwordHash !== undefined) bumpVersion(userId);
       audit(entry);
       return 'ok';
     },
@@ -611,6 +621,9 @@ export function createMemoryStore(
           : { ...c, failedLogins: count, lockedUntil: undefined };
       data.credentials.set(userId, next);
       return { lockedUntil: next.lockedUntil };
+    },
+    async bumpSessionVersion(userId) {
+      return bumpVersion(userId);
     },
     async recordPasswordSuccess(userId) {
       const c = data.credentials.get(userId);
