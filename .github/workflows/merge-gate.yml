@@ -32,9 +32,11 @@ on:
       pr:
         description: PR 号；留空算所有开着的
         required: false
+# PR 事件按 PR 排、新的顶掉旧的；主线推送、第二意见状态、手动运行共用一个组排队（不中途打断，只留最新一个等着），
+# 旧的不会在新的之后写回。另外写回前还会核一遍主线头没变（merge-gate.ts），变了就不写，交给新一轮。
 concurrency:
-  group: merge-gate-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: true
+  group: merge-gate-${{ github.event_name == 'pull_request_target' && github.event.pull_request.number || 'all' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
 permissions:
   contents: read
   pull-requests: read

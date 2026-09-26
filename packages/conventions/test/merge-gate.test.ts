@@ -15,6 +15,7 @@ import type { RiskPath } from '../src/merge-gates.ts';
 
 const HEAD = 'a'.repeat(40);
 const MERGE = 'b'.repeat(40);
+const MAIN = 'c'.repeat(40);
 const PLAN = ['# 计划', '', '### P1 核心闭环', '', '- GitHub：两个新机器人。', ''].join('\n');
 const RISK: RiskPath[] = [
   { path: 'deploy/', kind: '动生产', why: '真机' },
@@ -44,7 +45,9 @@ interface World {
   /** 前几次读 PR 时 mergeable 还是 null。 */
   unknownReads: number;
   open: Record<string, unknown>[];
-  forCommit: Record<string, unknown>[];
+  forCommit: unknown[];
+  /** 每次读主线头依次回这些，读完了一直回最后一个。 */
+  mains: string[];
 }
 
 function world(
@@ -76,6 +79,7 @@ function world(
     unknownReads: 0,
     open: [],
     forCommit: [],
+    mains: [MAIN],
     ...over,
   };
   if (over.files && !over.prOver?.changed_files) w.pr.changed_files = over.files.length;
@@ -115,6 +119,10 @@ function world(
     async prsForCommit() {
       boom('prsForCommit');
       return w.forCommit;
+    },
+    async mainHead() {
+      boom('mainHead');
+      return (w.mains.length > 1 ? w.mains.shift() : w.mains[0]) as string;
     },
     async writeStatus(sha, s) {
       boom('writeStatus');
@@ -417,6 +425,30 @@ describe('入口：认出要算哪些 PR、写状态、退出码', () => {
     expect(bad[9]?.lines).toContain('  没写上状态：连 PR 的头都没读到。');
     expect(w.written).toEqual([]);
   });
+
+  it('第二意见状态：PR 列表里有一条认不出，判没查成，不筛掉了当成没事', async () => {
+    for (const junk of [{ number: 80 }, { number: 80, state: 'open', head: {} }, 'x']) {
+      const w = world({ forCommit: [{ number: 81, state: 'open', head: { sha: HEAD } }, junk] });
+      const r = await run(w, 'status', { context: 'second-opinion', sha: HEAD });
+      expect(r.code, JSON.stringify(junk)).toBe(2);
+      expect(r.lines[0]).toMatch(/PR 列表里有一条认不出/);
+      expect(w.written).toEqual([]);
+    }
+  });
+
+  it('主线在这次运行里变了：不写回（旧结果不盖新结果）；读不到主线头：没查成、一条都不写', async () => {
+    const moved = world({ open: [{ number: 80 }, { number: 81 }], mains: [MAIN, MAIN, MERGE] });
+    const r = await run(moved, 'push', {});
+    expect(r.code).toBe(0);
+    expect(moved.written.map((x) => x.sha)).toEqual([HEAD]);
+    expect(r.lines.at(-1)).toMatch(/^主线在这次运行里变了（ccccccc → bbbbbbb），剩下的不写回/);
+
+    const blind = world({ broken: { mainHead: 'GitHub 回了 502' } });
+    const b = await run(blind, 'pull_request_target', { pull_request: { number: 80 } });
+    expect(b.code).toBe(2);
+    expect(b.lines[0]).toMatch(/^没查成：读不到主线现在的头（GitHub 回了 502）/);
+    expect(blind.written).toEqual([]);
+  });
 });
 
 describe('读写 GitHub（假的 fetch）', () => {
@@ -512,6 +544,23 @@ describe('读写 GitHub（假的 fetch）', () => {
     await expect(gateGitHub(ghApi(env, short.fn)).statuses(HEAD)).rejects.toThrow('只读到 0 条');
     const junk = fakeFetch(() => ({ json: [] }));
     await expect(gateGitHub(ghApi(env, junk.fn)).statuses(HEAD)).rejects.toThrow('认不出');
+  });
+
+  it('主线头：先问默认分支再读它的头；认不出的抛', async () => {
+    const answer = (repo: unknown, ref: unknown) =>
+      fakeFetch((url) => (url.endsWith('/repos/o/r') ? { json: repo } : { json: ref }));
+    const ok = answer({ default_branch: 'main' }, { object: { sha: MAIN } });
+    await expect(gateGitHub(ghApi(env, ok.fn)).mainHead()).resolves.toBe(MAIN);
+    expect(ok.calls.map((c) => c.url)).toEqual([
+      'https://api.example/repos/o/r',
+      'https://api.example/repos/o/r/git/ref/heads/main',
+    ]);
+    await expect(gateGitHub(ghApi(env, answer({}, {}).fn)).mainHead()).rejects.toThrow(
+      'default_branch 认不出',
+    );
+    await expect(
+      gateGitHub(ghApi(env, answer({ default_branch: 'main' }, { object: {} }).fn)).mainHead(),
+    ).rejects.toThrow('主线 main 的头认不出');
   });
 
   it('没有令牌、没有仓名、GitHub 回错都抛，报错里不带令牌', async () => {

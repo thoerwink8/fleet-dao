@@ -132,16 +132,33 @@ describe('高风险路径清单', () => {
       'ALTER TABLE "x" ADD CONSTRAINT "x_fk" FOREIGN KEY ("id") REFERENCES "tasks"("id");',
       'CREATE INDEX "x_idx" ON "x" ("id");',
       'DROP TRIGGER IF EXISTS tasks_touch ON "tasks";',
+      'CREATE OR REPLACE FUNCTION f() RETURNS trigger AS $$ BEGIN DELETE FROM x; RETURN NEW; END; $$ LANGUAGE plpgsql;',
+      'ALTER TABLE "x"',
+      '  ADD COLUMN "a" text,',
+      `  ADD CONSTRAINT "c" CHECK ("a" in ('p', 'q'));`,
     ].join('\n');
     expect(riskyFiles([add(create), changed('packages/db/migrations/meta/_journal.json')], list)).toEqual([]);
 
     const hit = (f: ChangedFile) => riskyFiles([f], list)[0]?.note;
-    expect(hit(add('ALTER TABLE "tasks" DROP COLUMN "note";'))).toBe('有 DROP COLUMN');
-    expect(hit(add('drop table "old";'))).toBe('有 DROP TABLE');
-    expect(hit(add('DELETE FROM "tasks" WHERE true;'))).toBe('有 DELETE FROM');
-    expect(hit(add('UPDATE "tasks" SET "x" = 1;'))).toBe('有 UPDATE');
-    expect(hit(add('ALTER TABLE "tasks" ALTER COLUMN "x" SET NOT NULL;'))).toBe('有 ALTER COLUMN');
-    expect(hit(add('ALTER TABLE "a" RENAME TO "b";'))).toBe('有 RENAME');
+    expect(hit(add('ALTER TABLE "tasks" DROP COLUMN "note";'))).toBe('有「ALTER TABLE "TASKS" DROP」');
+    expect(hit(add('drop table "old";'))).toBe('有「DROP TABLE "OLD"」');
+    expect(hit(add('DELETE FROM "tasks" WHERE true;'))).toBe('有「DELETE FROM "TASKS" WHERE」');
+    expect(hit(add('UPDATE "tasks" SET "x" = 1;'))).toBe('有「UPDATE "TASKS" SET "X"」');
+    expect(hit(add('ALTER TABLE "tasks" ALTER COLUMN "x" SET NOT NULL;'))).toMatch(
+      /^有「ALTER TABLE "TASKS" ALTER」/,
+    );
+    expect(hit(add('ALTER TABLE "a" RENAME TO "b";'))).toMatch(/^有「ALTER TABLE "A" RENAME」/);
+    // 跨行、省掉关键字、和加列混在一个 ALTER 里、跟在注释和建表后面的，都认得出
+    expect(hit(add('UPDATE\n  "tasks"\nSET "x" = 1;'))).toBe('有「UPDATE "TASKS" SET "X"」');
+    expect(hit(add('ALTER TABLE "t" ALTER "x" TYPE int;'))).toMatch(/^有「ALTER TABLE "T" ALTER/);
+    expect(hit(add('ALTER TABLE "t" DROP "x";'))).toMatch(/^有「ALTER TABLE "T" DROP/);
+    expect(hit(add('ALTER TABLE "t" ADD COLUMN "a" text, DROP COLUMN "b";'))).toMatch(/^有「ALTER TABLE/);
+    expect(hit(add('CREATE TABLE "y" ("id" int); -- 建表\nTRUNCATE "tasks";'))).toBe(
+      '有「TRUNCATE "TASKS"」',
+    );
+    expect(hit(add('CREATE TABLE "y" ("id" int);\nDROP TRIGGER t ON "x";'))).toMatch(
+      /^有「DROP TRIGGER T ON/,
+    );
     expect(hit(changed('packages/db/migrations/0009_x.sql', 'added'))).toBe('看不到改动内容');
     expect(hit(changed('packages/db/migrations/0003_catalog.sql'))).toBe('改了已有的迁移');
     expect(hit(changed('packages/db/migrations/0003_catalog.sql', 'removed'))).toBe('删了已有的迁移');
@@ -194,7 +211,7 @@ describe('第二意见状态', () => {
       ],
     );
     const where =
-      '改到了先审后合的地方：packages/db/migrations/0009_x.sql（改数据库：有 DROP TABLE）、deploy/france.sh（动生产）（清单和理由见 packages/conventions/high-risk-paths.json）';
+      '改到了先审后合的地方：packages/db/migrations/0009_x.sql（改数据库：有「DROP TABLE "OLD"」）、deploy/france.sh（动生产）（清单和理由见 packages/conventions/high-risk-paths.json）';
     expect(checkSecondOpinion(HEAD, null, [])).toEqual([]);
     expect(checkSecondOpinion(HEAD, { state: 'success', description: '' }, hits)).toEqual([]);
     expect(checkSecondOpinion(HEAD, null, hits)).toEqual([

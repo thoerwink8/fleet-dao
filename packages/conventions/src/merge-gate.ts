@@ -44,6 +44,8 @@ export interface GitHubReads {
   openPrs(): Promise<unknown[]>;
   /** 和某个提交有关的 PR。 */
   prsForCommit(sha: string): Promise<unknown[]>;
+  /** 主线（默认分支）现在的头提交。 */
+  mainHead(): Promise<string>;
   writeStatus(
     sha: string,
     status: { state: GateState; description: string; targetUrl?: string },
@@ -130,6 +132,16 @@ export function gateGitHub(api: GhApi): GitHubReads {
       const got = await api.get(`/commits/${sha}/pulls?per_page=100`);
       if (!Array.isArray(got)) throw new Error(`提交 ${sha.slice(0, 7)} 的 PR 列表认不出（不是列表）`);
       return got;
+    },
+    async mainHead() {
+      const repo = await api.get('');
+      const branch = isObject(repo) ? repo.default_branch : undefined;
+      if (typeof branch !== 'string' || !branch) throw new Error('仓的 default_branch 认不出');
+      const ref = await api.get(`/git/ref/heads/${encodePath(branch)}`);
+      const sha = isObject(ref) && isObject(ref.object) ? ref.object.sha : undefined;
+      if (typeof sha !== 'string' || !/^[0-9a-f]{40}$/.test(sha))
+        throw new Error(`主线 ${branch} 的头认不出`);
+      return sha;
     },
     async writeStatus(sha, s) {
       await api.post(`/statuses/${sha}`, {
@@ -352,10 +364,20 @@ export async function targetPrs(
       if (ev.context !== SECOND_OPINION_CONTEXT) return [];
       const sha = ev.sha;
       if (typeof sha !== 'string' || !/^[0-9a-f]{40}$/.test(sha)) return '事件里的 sha 认不出';
-      return numbersOf(
-        await gh.prsForCommit(sha),
-        (p) => p.state === 'open' && isObject(p.head) && p.head.sha === sha,
-      );
+      const list = await gh.prsForCommit(sha);
+      // 先把每一条认全了再筛：认不出的一条就判没查成，不许被筛掉后当成「没有要算的 PR」
+      for (const p of list) {
+        if (
+          !isObject(p) ||
+          typeof p.number !== 'number' ||
+          typeof p.state !== 'string' ||
+          !isObject(p.head) ||
+          typeof p.head.sha !== 'string'
+        ) {
+          throw new Error(`提交 ${sha.slice(0, 7)} 的 PR 列表里有一条认不出（要有 number、state、head.sha）`);
+        }
+      }
+      return numbersOf(list, (p) => p.state === 'open' && isObject(p.head) && p.head.sha === sha);
     }
     case 'workflow_dispatch': {
       const input = isObject(ev.inputs) ? String(ev.inputs.pr ?? '').trim() : '';
@@ -421,6 +443,15 @@ export async function runMergeGate(opts: {
   };
   const lines: string[] = [];
   let code: 0 | 1 | 2 = 0;
+  // 写回前确认主线头没变：主线一变冲突就可能变，主线推送会起一轮新的重算；旧的运行晚写回会盖掉新结果，所以不写
+  let startMain: string | undefined;
+  if (opts.write) {
+    try {
+      startMain = await opts.gh.mainHead();
+    } catch (e) {
+      return fail(`读不到主线现在的头（${message(e)}），不写状态（写了可能是过期的）`);
+    }
+  }
   for (const n of numbers) {
     const r = await gatePr(n, deps);
     if (r.closed) {
@@ -437,6 +468,20 @@ export async function runMergeGate(opts: {
       lines.push('  没写上状态：连 PR 的头都没读到。');
       code = 2;
       continue;
+    }
+    let nowMain: string;
+    try {
+      nowMain = await opts.gh.mainHead();
+    } catch (e) {
+      lines.push(`  没写上状态：写之前读不到主线现在的头（${message(e)}）。`);
+      code = 2;
+      continue;
+    }
+    if (nowMain !== startMain) {
+      lines.push(
+        `主线在这次运行里变了（${String(startMain).slice(0, 7)} → ${nowMain.slice(0, 7)}），剩下的不写回，交给主线推送起的那轮重算。`,
+      );
+      break;
     }
     try {
       await opts.gh.writeStatus(r.head, {

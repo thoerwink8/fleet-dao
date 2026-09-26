@@ -97,20 +97,62 @@ export interface RiskyFile {
 }
 
 /**
- * 新迁移里删、改已有表列数据的语句（只看加的行，注释去掉）。建表、建索引、加列、加约束、重建触发器不算。
- * 宁可多拦：认不准的写法人会在第二意见里看到，漏拦一次删数据就回不来。
+ * 新迁移里只放行明确是「只加不改」的语句：建表、建索引、建类型、建或替换函数和触发器、重建触发器前的 DROP TRIGGER IF EXISTS、
+ * 插数据、写注释、给枚举加值、ALTER TABLE 里只有 ADD COLUMN / ADD CONSTRAINT 这类动作。别的一律算删改（宁可多拦：
+ * 认不准的写法由第二意见看一眼，漏拦一次删数据就回不来）。按整段 SQL 分语句判，语句跨几行都一样。
  */
-const DESTRUCTIVE_SQL =
-  /\b(DROP\s+(?:TABLE|COLUMN|TYPE|SCHEMA|VIEW|MATERIALIZED\s+VIEW|CONSTRAINT|INDEX|FUNCTION|DEFAULT|NOT\s+NULL)|RENAME\b|TRUNCATE\b|DELETE\s+FROM|UPDATE(?=\s+["\w])|ALTER\s+COLUMN|ALTER\s+TYPE)/i;
+const ADDITIVE = [
+  /^CREATE (UNIQUE )?INDEX\b/,
+  /^CREATE TABLE\b/,
+  /^CREATE TYPE\b/,
+  /^CREATE (OR REPLACE )?(FUNCTION|TRIGGER|VIEW)\b/,
+  /^CREATE (SEQUENCE|EXTENSION|SCHEMA)\b/,
+  /^DROP TRIGGER IF EXISTS\b/,
+  /^INSERT INTO\b/,
+  /^COMMENT ON\b/,
+  /^ALTER TYPE \S+ ADD VALUE\b/,
+];
+const ADDITIVE_ACTION = /^ADD (COLUMN|CONSTRAINT|PRIMARY KEY|FOREIGN KEY|UNIQUE|CHECK)\b/;
+const ALTER_TABLE = /^ALTER TABLE (?:IF EXISTS )?(?:ONLY )?(?:"[^"]*"|[\w.]+)(?:\.(?:"[^"]*"|\w+))? (.+)$/;
+/** 函数体（$$…$$、$tag$…$tag$）：里面的分号不是语句分隔。 */
+const DOLLAR_BODY = /\$(\w*)\$[\s\S]*?\$\1\$/g;
 
-/** 新加的迁移文件里删、改已有东西的第一条语句；看不到改动内容回 '看不到改动内容'；都没有回 undefined。 */
+/** 按最外层的逗号切（括号里的逗号不算）。 */
+function topLevelSplit(text: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let cur = '';
+  for (const ch of text) {
+    if (ch === '(') depth++;
+    else if (ch === ')') depth--;
+    if (ch === ',' && depth === 0) {
+      out.push(cur);
+      cur = '';
+    } else cur += ch;
+  }
+  out.push(cur);
+  return out.map((x) => x.trim());
+}
+
+function additive(stmt: string): boolean {
+  if (ADDITIVE.some((r) => r.test(stmt))) return true;
+  const actions = ALTER_TABLE.exec(stmt)?.[1];
+  return actions !== undefined && topLevelSplit(actions).every((a) => ADDITIVE_ACTION.test(a));
+}
+
+/** 新加的迁移文件里删、改已有东西的第一条语句；看不到改动内容回 '看不到改动内容'；都是只加不改回 undefined。 */
 export function destructiveIn(patch: string | undefined): string | undefined {
   if (patch === undefined) return '看不到改动内容';
-  for (const line of patch.split('\n')) {
-    if (!line.startsWith('+') || line.startsWith('+++')) continue;
-    const code = line.slice(1).replace(/--.*$/, '');
-    const m = DESTRUCTIVE_SQL.exec(code);
-    if (m?.[1]) return `有 ${m[1].replace(/\s+/g, ' ').toUpperCase()}`;
+  const sql = patch
+    .split('\n')
+    .filter((l) => l.startsWith('+') && !l.startsWith('+++'))
+    .map((l) => l.slice(1).replace(/--.*$/, ''))
+    .join('\n')
+    .replace(DOLLAR_BODY, "''");
+  for (const raw of sql.split(';')) {
+    const stmt = raw.replace(/\s+/g, ' ').trim().toUpperCase();
+    if (!stmt || additive(stmt)) continue;
+    return `有「${stmt.split(' ').slice(0, 4).join(' ')}」`;
   }
   return undefined;
 }
