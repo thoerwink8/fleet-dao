@@ -13,6 +13,7 @@ import {
 } from '@fleet-dao/shared';
 import { and, eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { DEPLOY_LAG_NOT_HERE } from '../src/deploy-lag.ts';
 import { devFixtures } from '../src/dev-fixtures.ts';
 import { draftBacklogCheck, notWiredDraftOpener } from '../src/draft-opening.ts';
 import { githubAppMissing } from '../src/github.ts';
@@ -226,6 +227,8 @@ describe('接口跑在真库上', () => {
           db: t.db,
           location: { path: join(tmpdir(), 'fleet-api-pg-nowhere', 'jev.json'), explicit: false },
         }),
+        // 和 main.ts 在法国以外的装配一样：没有发布目录、没有自动发布
+        deployLag: { check: async () => {}, notWired: DEPLOY_LAG_NOT_HERE },
       }),
     });
     const res = await h.cockpit.request('/healthz');
@@ -249,6 +252,7 @@ describe('接口跑在真库上', () => {
           message: '飞书草稿开成 issue 还没接上（#91）：确认了的草稿先留在待开单',
         },
         judge: { ok: true, status: 'not_wired', message: JUDGE_NOT_WIRED },
+        deploy_lag: { ok: true, status: 'not_wired', message: DEPLOY_LAG_NOT_HERE },
       },
     });
     // 一张草稿确认了 20 分钟还没开成：积压报红（库里真查出来的）。

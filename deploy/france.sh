@@ -123,6 +123,13 @@ GATEWAY_DEPLOY_KEY=/etc/fleet-dao/gateway-deploy.key
 DEMO_DIR=/var/lib/fleet-dao/demo
 DEMO_SCOPES_BIN=/usr/local/sbin/fleet-demo-scopes
 DEMO_UNITS=(fleet-demo-scopes.service fleet-demo-scopes.path fleet-demo-scopes.timer)
+# 自动发布（docs/ops.md 第九节「自动发布」）：主线上 CI 全绿的新提交等引擎空闲后发到本机、发完同步规矩。装的是副本：
+# 主线上改了它，要重跑本脚本才换。它每一轮的读数、本脚本装到哪个提交（下面 APPLIED_FILE）都放在 AUTO_DIR，后端的 /healthz 读
+AUTO_RELEASE_LIB=/usr/local/lib/fleet-dao/auto-release
+AUTO_RELEASE_FILES=(lib.mjs fleet-auto-release.mjs)
+AUTO_RELEASE_UNITS=(fleet-auto-release.service fleet-auto-release.timer)
+AUTO_DIR=$RELEASES_DIR/.auto
+APPLIED_FILE=$AUTO_DIR/france-applied
 
 FLEET_WG_HK_ENDPOINT=""
 FLEET_WG_HK_PUBLIC_KEY=""
@@ -697,6 +704,37 @@ setup_demo_scopes() {
   ensure_unit_running fleet-demo-scopes.timer "$unit_changed"
 }
 
+# 自动发布：定时器每 5 分钟拉起一轮（deploy/france/auto-release），以 root 跑 release.sh --auto、替会话用户同步规矩。
+# 脚本放 /usr/local/lib 下的副本（全链归 root），不从检出直接跑：检出它自己会快进，主线上一个坏提交不该把自动发布本身弄坏
+setup_auto_release() {
+  step "自动发布（主线上 CI 全绿的新提交等引擎空闲后发到本机，发完同步规矩；读数在 $AUTO_DIR）"
+  local f u unit_changed=0
+  ensure_dir "$AUTO_DIR" root:root 755
+  ensure_dir /usr/local/lib/fleet-dao root:root 755
+  ensure_dir "$AUTO_RELEASE_LIB" root:root 755
+  for f in "${AUTO_RELEASE_FILES[@]}"; do
+    put_file "$AUTO_RELEASE_LIB/$f" root:root 644 "$(<"$DEPLOY_DIR/france/auto-release/$f")"
+  done
+  for u in "${AUTO_RELEASE_UNITS[@]}"; do
+    put_file "/etc/systemd/system/$u" root:root 644 "$(<"$DEPLOY_DIR/france/$u")"
+    if ((WROTE)); then unit_changed=1; fi
+  done
+  if ((unit_changed)); then systemctl daemon-reload; fi
+  ensure_unit_running fleet-auto-release.timer "$unit_changed"
+}
+
+# 本脚本跑完没红：记下装到了哪个提交（检出的 HEAD）。自动发布拿它和主线比，数装机相关的文件后来改过几次，
+# 后端的 /healthz 据此标「装机脚本落后」（这层碰防火墙、sudoers，不自动跑）。同一个提交再跑不改
+record_applied() {
+  local head
+  if ! head=$(git -C "$DEPLOY_DIR/.." rev-parse HEAD 2>/dev/null) || [[ ! "$head" =~ ^[0-9a-f]{40}$ ]]; then
+    pending "读不到检出在哪个提交，没记装到哪了（$APPLIED_FILE）：后端会报装机层没查成"
+    return 0
+  fi
+  if [[ ! -d "$AUTO_DIR" ]]; then return 0; fi
+  put_file "$APPLIED_FILE" root:root 644 "commit=$head"
+}
+
 # agents_sync（跑同步脚本、把逐行结论记进账）在 lib/agents-sync.sh
 setup_agent_rules() {
   step "各家 AI 的全局说明与方法类 skill（${AGENT_RULES_USERS[*]}；仓根 AGENTS.md 的通用段、agents/skills/）"
@@ -756,8 +794,34 @@ readback() {
   readback_app_config
   readback_web_upload
   readback_demo_scopes
+  readback_auto_release
   readback_proxy_headers
   readback_service_home
+}
+
+# 自动发布：定时器在等、装上去的副本和仓里一样、上一轮跑完了没有（跟不跟得上主线由后端 /healthz 的 deploy_lag 判）
+readback_auto_release() {
+  local f result status at
+  if [[ "$(systemctl is-active fleet-auto-release.timer 2>/dev/null)" != active ]]; then
+    red "fleet-auto-release.timer 没在跑：主线上的新提交不会自动发到本机"
+  fi
+  for f in "${AUTO_RELEASE_FILES[@]}"; do
+    if ! cmp -s -- "$AUTO_RELEASE_LIB/$f" "$DEPLOY_DIR/france/auto-release/$f"; then
+      red "$AUTO_RELEASE_LIB/$f 和仓里的不一样（或没装）：重跑本脚本"
+    fi
+  done
+  at=$(unit_prop fleet-auto-release.service ExecMainExitTimestamp)
+  if [[ -z "$at" ]]; then
+    pending "自动发布还一轮都没跑过（定时器装上 2 分钟后跑第一轮；现在跑：systemctl start fleet-auto-release）"
+    return 0
+  fi
+  result=$(unit_prop fleet-auto-release.service Result)
+  status=$(unit_prop fleet-auto-release.service ExecMainStatus)
+  if [[ "$result" == success ]]; then
+    ok "自动发布上一轮跑完是 $at（读数：bash /srv/fleet-dao/deploy/release.sh --check）"
+  else
+    red "自动发布上一轮没跑完（$at，退出码 ${status:-读不到}）：journalctl -u fleet-auto-release -n 30"
+  fi
 }
 
 # 演示版的可见范围：两个触发单元在等、上一次推成了没有（一次都没推过是「待配」，推不成、有文件认不出是红）
@@ -1161,6 +1225,7 @@ main() {
     setup_app_config
     setup_web_upload
     setup_demo_scopes
+    setup_auto_release
     setup_agent_rules
     setup_cli_tools
   else
@@ -1169,6 +1234,7 @@ main() {
   readback
   self_check_root_exec
   if ((CHECK_ONLY == 0)); then compare_others "$before"; fi
+  if ((CHECK_ONLY == 0 && ${#REDS[@]} == 0)); then record_applied; fi
   finish
 }
 
