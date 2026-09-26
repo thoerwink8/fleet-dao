@@ -129,9 +129,16 @@ export function gateGitHub(api: GhApi): GitHubReads {
       throw new Error(`开着的 PR 超过 ${PRS_MAX_PAGES * 100} 个，没读完`);
     },
     async prsForCommit(sha) {
-      const got = await api.get(`/commits/${sha}/pulls?per_page=100`);
-      if (!Array.isArray(got)) throw new Error(`提交 ${sha.slice(0, 7)} 的 PR 列表认不出（不是列表）`);
-      return got;
+      // 翻页读完：只读第一页，排在后面的那个 PR 就漏算了
+      const all: unknown[] = [];
+      for (let page = 1; page <= PRS_MAX_PAGES; page++) {
+        const got = await api.get(`/commits/${sha}/pulls?per_page=100&page=${page}`);
+        if (!Array.isArray(got))
+          throw new Error(`提交 ${sha.slice(0, 7)} 的 PR 列表第 ${page} 页认不出（不是列表）`);
+        all.push(...got);
+        if (got.length < 100) return all;
+      }
+      throw new Error(`提交 ${sha.slice(0, 7)} 的 PR 超过 ${PRS_MAX_PAGES * 100} 个，没读完`);
     },
     async mainHead() {
       const repo = await api.get('');
