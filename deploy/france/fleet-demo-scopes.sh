@@ -32,13 +32,17 @@ hk_ssh() {
 
 # 和发布脚本往香港推排同一个队（同 deploy/lib/common.sh 的 HK_RSYNC_LOCK，为什么要排队见那边；测试核对是同一把锁）：
 # 香港的 rrsync 同一时刻只让一个进来，不排队就会被拒。整趟推送（最多 MAX_ROUNDS 轮）只排一次，轮与轮之间不让发布插进来。
-# 改这里之前必须知道：最坏要跑 等锁 HK_RSYNC_WAIT + 每轮（ssh 连上 ConnectTimeout + rsync 没动静就停 PUSH_IO_TIMEOUT）
-# × MAX_ROUNDS 秒，fleet-demo-scopes.service 的 TimeoutStartSec 必须比它大，不然 systemd 先把它杀了，报不出「等锁超时」、
-# 刚拿到锁也来不及推完（deploy/test/demo-scopes.test.sh 核对）。
+# 改这里之前必须知道：最坏要跑 等锁 HK_RSYNC_WAIT + 每轮（读范围目录 STAGE_LIMIT + 最后读的那个文件 READ_TIMEOUT
+# + ssh 连上 ConnectTimeout + rsync 没动静就停 PUSH_IO_TIMEOUT）× MAX_ROUNDS 秒，fleet-demo-scopes.service 的
+# TimeoutStartSec 必须比它大，不然 systemd 先把它杀了，报不出「等锁超时」、刚拿到锁也来不及推完（deploy/test/demo-scopes.test.sh 核对）。
 HK_RSYNC_LOCK=${FLEET_HK_RSYNC_LOCK:-/run/lock/fleet-dao-hk-rsync.lock}
 HK_RSYNC_WAIT=120
 MAX_ROUNDS=5
 PUSH_IO_TIMEOUT=30
+# 读一个范围文件最多 READ_TIMEOUT 秒（查完是普通文件、读的那一下被换成管道也卡不死）；一轮读范围目录合起来最多
+# STAGE_LIMIT 秒，超了这一轮不推、照实退出 2——推半截会把没读到的链接当成作废，在香港删掉
+READ_TIMEOUT=5
+STAGE_LIMIT=20
 
 # 演示版在香港站点上的路径：release.env 的 FLEET_DEMO_PATH（同发布脚本），没写就是 /demo/
 demo_path() {
@@ -61,14 +65,15 @@ listing() {
   if [[ -d "$SRC" ]]; then find "$SRC" -maxdepth 1 -mindepth 1 -printf '%f %s %T@\n' | sort; fi
 }
 
-# 认得的文件抄进暂存目录（root 的）的 scopes/ 下；认不出的记进 SKIPPED
+# 认得的文件抄进暂存目录（root 的）的 scopes/ 下；认不出的记进 SKIPPED。读了 STAGE_LIMIT 秒还没读完返回 1（调用方不推）
 SKIPPED=()
 stage_scopes() { # 暂存目录
-  local stage=$1/scopes f name body
+  local stage=$1/scopes f name body start=$SECONDS
   SKIPPED=()
   mkdir -p -- "$stage"
   if [[ ! -d "$SRC" ]]; then return 0; fi
   for f in "$SRC"/* "$SRC"/.[!.]*; do
+    if ((SECONDS - start >= STAGE_LIMIT)); then return 1; fi
     if [[ ! -e "$f" && ! -L "$f" ]]; then continue; fi
     name=${f##*/}
     if [[ ! "$name" =~ ^([0-9a-f]{64}|default)[.]json$ ]]; then
@@ -79,8 +84,8 @@ stage_scopes() { # 暂存目录
       SKIPPED+=("$name（不是普通文件）")
       continue
     fi
-    # 读的那一下被换成了链接、管道也不怕：只读头 MAX_BYTES+1 个字节、5 秒为限，内容不对就不推
-    if ! body=$(timeout 5 head -c $((MAX_BYTES + 1)) -- "$f" 2>/dev/null); then
+    # 读的那一下被换成了链接、管道也不怕：只读头 MAX_BYTES+1 个字节、READ_TIMEOUT 秒为限，内容不对就不推
+    if ! body=$(timeout "$READ_TIMEOUT" head -c $((MAX_BYTES + 1)) -- "$f" 2>/dev/null); then
       SKIPPED+=("$name（读不出）")
       continue
     fi
@@ -115,7 +120,11 @@ main() {
   for ((round = 1; round <= MAX_ROUNDS; round++)); do
     before=$(listing)
     stage=$(mktemp -d)
-    stage_scopes "$stage"
+    if ! stage_scopes "$stage"; then
+      rm -rf -- "$stage"
+      echo "读范围目录 $SRC 读了 $STAGE_LIMIT 秒还没读完（里面的东西不对劲？），这次没推：推半截会把没读到的链接当成作废" >&2
+      exit 2
+    fi
     n=$(find "$stage/scopes" -type f | wc -l)
     if ! out=$(push "$stage" "$path" 2>&1); then
       rm -rf -- "$stage"

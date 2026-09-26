@@ -178,8 +178,9 @@ check "两边默认是同一把锁" "$lock" "$(default_lock "$HERE/../lib/common
 check "单元开了 ProtectSystem=strict，锁所在的目录要放开写" \
   "$(grep -cx "ReadWritePaths=${lock%/*}" "$HERE/../france/fleet-demo-scopes.service")" 1
 
-echo "== 单元的启动超时盖得住脚本最坏要跑的时间：等锁 + 轮数 ×（ssh 连上 + rsync 没动静就停）；短了 systemd 先把它杀掉"
-# 打印单元的超时哪里不够，够了什么都不打印。读不出来（没写、不是整秒数、脚本的常数认不出）也照实打印，不当成够
+echo "== 单元的启动超时盖得住脚本最坏要跑的时间：等锁 + 轮数 ×（读范围目录 + 最后读的那个文件 + ssh 连上 + rsync 没动静就停）"
+# 打印单元的超时哪里不够，够了什么都不打印。读不出来（没写、不是整秒数、脚本的常数认不出）也照实打印，不当成够。
+# #149 合并后补审：原先的算法漏了每轮读范围目录的时间（每个文件最多等 READ_TIMEOUT 秒），420 秒的单元其实不够
 timeout_gap() { # 单元文件 脚本
   local unit need
   unit=$(sed -nE 's/^TimeoutStartSec=([0-9]+)$/\1/p' "$1")
@@ -189,8 +190,10 @@ timeout_gap() { # 单元文件 脚本
     source "$2" || exit 1
     [[ "$(hk_ssh)" =~ ConnectTimeout=([0-9]+) ]] || exit 1
     conn=${BASH_REMATCH[1]}
-    for v in "$HK_RSYNC_WAIT" "$MAX_ROUNDS" "$PUSH_IO_TIMEOUT"; do [[ "$v" =~ ^[0-9]+$ ]] || exit 1; done
-    echo $((HK_RSYNC_WAIT + MAX_ROUNDS * (conn + PUSH_IO_TIMEOUT)))
+    for v in "$HK_RSYNC_WAIT" "$MAX_ROUNDS" "$STAGE_LIMIT" "$READ_TIMEOUT" "$PUSH_IO_TIMEOUT"; do
+      [[ "$v" =~ ^[0-9]+$ ]] || exit 1
+    done
+    echo $((HK_RSYNC_WAIT + MAX_ROUNDS * (STAGE_LIMIT + READ_TIMEOUT + conn + PUSH_IO_TIMEOUT)))
   )
   if [[ -z "$unit" ]]; then
     echo "单元里读不出 TimeoutStartSec（只认整秒数）"
@@ -203,18 +206,44 @@ timeout_gap() { # 单元文件 脚本
 UNIT=$HERE/../france/fleet-demo-scopes.service
 SCRIPT=$HERE/../france/fleet-demo-scopes.sh
 check "仓里的单元：够" "$(timeout_gap "$UNIT" "$SCRIPT")" ""
+sed 's/^TimeoutStartSec=.*/TimeoutStartSec=420/' "$UNIT" >"$TMP/unit-short"
+check "改回上一版的 420 秒（没算读范围目录的时间）：查得出不够" "$(timeout_gap "$TMP/unit-short" "$SCRIPT")" \
+  "TimeoutStartSec=420 不够：脚本最坏要跑 445 秒"
 sed 's/^TimeoutStartSec=.*/TimeoutStartSec=120/' "$UNIT" >"$TMP/unit-short"
-check "改回修之前的 120 秒：查得出不够" "$(timeout_gap "$TMP/unit-short" "$SCRIPT")" \
-  "TimeoutStartSec=120 不够：脚本最坏要跑 320 秒"
-sed 's/^PUSH_IO_TIMEOUT=.*/PUSH_IO_TIMEOUT=90/' "$SCRIPT" >"$TMP/script-slow.sh"
-check "脚本改慢了、单元没跟着改：查得出" "$(timeout_gap "$UNIT" "$TMP/script-slow.sh")" \
-  "TimeoutStartSec=420 不够：脚本最坏要跑 620 秒"
+check "改回最早的 120 秒：查得出不够" "$(timeout_gap "$TMP/unit-short" "$SCRIPT")" \
+  "TimeoutStartSec=120 不够：脚本最坏要跑 445 秒"
+sed 's/^STAGE_LIMIT=.*/STAGE_LIMIT=60/' "$SCRIPT" >"$TMP/script-slow.sh"
+check "读范围目录的上限改长了、单元没跟着改：查得出" "$(timeout_gap "$UNIT" "$TMP/script-slow.sh")" \
+  "TimeoutStartSec=540 不够：脚本最坏要跑 645 秒"
 sed 's/^TimeoutStartSec=.*/TimeoutStartSec=7min/' "$UNIT" >"$TMP/unit-weird"
 check "写成 7min 这类认不出的：说读不出，不当成够" "$(timeout_gap "$TMP/unit-weird" "$SCRIPT")" \
   "单元里读不出 TimeoutStartSec（只认整秒数）"
-sed 's/^PUSH_IO_TIMEOUT=.*/PUSH_IO_TIMEOUT=/' "$SCRIPT" >"$TMP/script-weird.sh"
-check "脚本的常数认不出：说读不出" "$(timeout_gap "$UNIT" "$TMP/script-weird.sh")" "读不出脚本最坏要跑多久"
+for c in PUSH_IO_TIMEOUT STAGE_LIMIT READ_TIMEOUT; do
+  sed "s/^$c=.*/$c=/" "$SCRIPT" >"$TMP/script-weird.sh"
+  check "脚本的常数 $c 认不出：说读不出" "$(timeout_gap "$UNIT" "$TMP/script-weird.sh")" "读不出脚本最坏要跑多久"
+done
 check "推的时候带着 rsync 的「没动静就停」" "$(grep -c -- "--timeout=$PUSH_IO_TIMEOUT " "$TMP/rsync.log")" 1
+
+echo "== 读范围目录慢得不对劲（查完是普通文件、读的那一下被换成管道之类）：一轮读了 STAGE_LIMIT 秒还没读完就不推、退出 2"
+had=$(published)
+timeout() { # 桩：每读一个文件慢 0.6 秒，照样读（真脚本里是 timeout 秒数 head …）
+  sleep 0.6
+  shift
+  "$@"
+}
+STAGE_LIMIT=1
+for d in 1 2 3 4 5; do
+  printf '{"v":1,"modules":["board"],"detail":"status"}\n' >"$SRC/$(printf '%064d' 0 | tr 0 "$d").json"
+done
+run
+check "退出码 2" "$RC" 2
+check "说了是读得太久、这次没推" "$(grep -c '还没读完.*这次没推' <<<"$OUT")" 1
+check "一次都没推（推半截会把没读到的链接当成作废删掉）" "$(grep -c . "$TMP/rsync.log")" 0
+check "香港上的原样不动" "$(published)" "$had"
+unset -f timeout
+STAGE_LIMIT=20
+run
+check "读得快了照常推：6 份都上去" "$RC $(published | wc -w)" "0 6"
 
 # shellcheck source=../lib/common.sh
 source "$HERE/../lib/common.sh"
