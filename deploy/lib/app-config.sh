@@ -260,7 +260,8 @@ add_missing_keys() { # 文件 样例
 }
 
 # 从 GitHub App 的 json 取 webhook_secret（打印到标准输出，只给调用方收进变量）。取不到、样子不对回 1，原因在 APP_CONFIG_WHY。
-# 只收字母、数字和 . _ ~ -：systemd 读环境文件会处理引号、反斜杠，别的字符写进去读出来就不是原样了
+# 只拒绝写进环境文件会变样的字符：空白、控制字符（行尾的空白被去掉、换行断成两行）、引号、反斜杠（systemd 当引号和转义处理）、
+# $ 和反引号（防着被当成展开）、非 ASCII；+ / = 这类照原样读回，照收（GitHub 的 webhook secret 允许任意字符）
 app_webhook_secret() { # json
   local out rc=0
   APP_CONFIG_WHY=""
@@ -273,7 +274,7 @@ app_webhook_secret() { # json
     try { j = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); } catch { process.exit(3); }
     const s = j && typeof j === "object" ? j.webhook_secret : undefined;
     if (typeof s !== "string" || s === "") process.exit(4);
-    if (!/^[A-Za-z0-9._~-]{16,200}$/.test(s)) process.exit(5);
+    if (s.length < 16 || s.length > 200 || !/^[!#%&(-\[\]-_a-~]+$/.test(s)) process.exit(5);
     process.stdout.write(s);' "$1" 2>/dev/null) || rc=$?
   case $rc in
   0)
@@ -282,7 +283,7 @@ app_webhook_secret() { # json
     ;;
   3) APP_CONFIG_WHY="$1 不是 JSON" ;;
   4) APP_CONFIG_WHY="$1 里没有 webhook_secret" ;;
-  5) APP_CONFIG_WHY="$1 里的 webhook_secret 样子不对（要 16 到 200 个字母、数字或 . _ ~ -），写不进环境文件" ;;
+  5) APP_CONFIG_WHY="$1 里的 webhook_secret 样子不对（要 16 到 200 个可见的 ASCII 字符，不能有空白、引号、反斜杠、$、反引号），写进环境文件会变样" ;;
   *) APP_CONFIG_WHY="读不了 $1（退出码 $rc）" ;;
   esac
   return 1
@@ -365,6 +366,30 @@ check_webhook_secret() { # api.env 引擎App的json
     return 1
   fi
   ok "api.env 的 $key 和「引擎」App 的 webhook_secret 一致（值不打印）"
+}
+
+# 读回：服务读的环境文件（单元的 EnvironmentFile，服务以 fleet 跑）要 root:fleet 640。组读不到，root 读回照样通过、
+# 服务却起不来；别人读得到就漏了密钥。不在、是符号链接、读不了属主权限，一律判红。只看属主权限，不读内容
+check_app_file_meta() { # 文件…
+  local f meta bad=0
+  for f in "$@"; do
+    if [[ -L "$f" || ! -f "$f" ]]; then
+      red "$f 不在或不是普通文件：服务读不到它就起不来"
+      bad=1
+      continue
+    fi
+    if ! meta=$(stat -c '%U:%G %a' -- "$f" 2>/dev/null); then
+      red "读不了 $f 的属主权限"
+      bad=1
+      continue
+    fi
+    if [[ "$meta" != "$APP_CONFIG_OWNER 640" ]]; then
+      red "$f 是「$meta」，要 $APP_CONFIG_OWNER 640：组读不到服务起不来，别人读得到就漏了密钥（跑一遍 france.sh 改回来）"
+      bad=1
+    fi
+  done
+  if ((bad == 0)); then ok "应用的 $# 个环境文件都是 $APP_CONFIG_OWNER 640"; fi
+  ((bad == 0))
 }
 
 # 读回：卫生检查的已知敏感值名单（真实的组织编号、账号，一行一个，手放）。引擎推分支、写需求文档、开 PR 之前都读它，

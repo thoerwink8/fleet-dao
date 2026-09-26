@@ -868,6 +868,10 @@ readback_app_config() {
     bad=1
   fi
   if ((bad == 0)); then ok "应用的环境文件都在（${APP_ENV_FILES[*]}），三个随机密钥已生成、互不相同（值不打印）"; fi
+  local metas=()
+  for name in "${APP_ENV_FILES[@]}"; do metas+=("/etc/fleet-dao/$name.env"); done
+  for spec in "${APP_SECRETS[@]}"; do metas+=("/etc/fleet-dao/${spec%%:*}.env"); done
+  check_app_file_meta "${metas[@]}" || :
   # api.env 不在的话上面已经判红
   if [[ -f /etc/fleet-dao/api.env ]]; then check_webhook_secret /etc/fleet-dao/api.env "$ENGINE_APP_JSON" || :; fi
   check_sensitive_values "$SENSITIVE_VALUES" || :

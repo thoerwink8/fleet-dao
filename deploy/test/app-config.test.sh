@@ -11,6 +11,7 @@
 #   4. 读回引擎的 engine.env：端口实现（要人定）、名单的路径（钉在读回核的那一份上）
 #   5. 每一种读不到（文件不在、是个目录）、认不出（引号没配上、样例里有看不懂的行）：判红、返回非 0、文件没动
 #   6. 读回要退役的垫片：在记待配，不在通过
+#   7. 读回环境文件的属主权限：不是 640（组读不到、谁都能读）、不在、是符号链接，判红
 # 要 root（put_file 要改属主）。用法：sudo bash deploy/test/app-config.test.sh。退出码：0 通过，1 不通过，2 没跑成。
 set -uo pipefail
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -192,6 +193,23 @@ if ((RC == 0 && ${#CHANGES[@]} == 0)) && [[ "$(digest "$T/api.env")" == "$before
   pass "第二遍零改动"
 else
   flunk "第二遍动了文件：$OUT"
+fi
+
+# GitHub 的 webhook secret 可以是任意字符：+ / = # ; 这类写进环境文件照原样读回，要照填，不能当成「样子不对」
+ODD='aB3+/=x#y;z%&*()!@^_{}[]|<>?,.~-9'
+printf '{"webhook_secret": "%s"}\n' "$ODD" >"$T/odd-app.json"
+printf 'FLEET_GITHUB_WEBHOOK_SECRET=\n' >"$T/api-odd.env"
+call fill_webhook_secret "$T/api-odd.env" "$T/odd-app.json"
+if ((RC == 0 && ${#CHANGES[@]} > 0 && ${#PENDING[@]} == 0)) && [[ "$(env_value "$T/api-odd.env" FLEET_GITHUB_WEBHOOK_SECRET)" == "$ODD" && "$OUT" != *"$ODD"* ]]; then
+  pass "带 + / = # ; 的密钥照填，按 systemd 的读法读回和 json 里一字不差"
+else
+  flunk "带 + / = 的密钥该照填、读回一字不差（返回 $RC，改动 ${#CHANGES[@]}，待配 ${#PENDING[@]}）"
+fi
+call check_webhook_secret "$T/api-odd.env" "$T/odd-app.json"
+if ((RC == 0 && ${#REDS[@]} == 0 && ${#PENDING[@]} == 0)); then
+  pass "带 + / = 的密钥读回两边一致"
+else
+  flunk "带 + / = 的密钥读回该一致：$RC"
 fi
 
 call check_webhook_secret "$T/api.env" "$T/engine-app.json"
@@ -431,6 +449,27 @@ if [[ "$missing_out" == *"没有"* && "$dir_out" == *"读不了"* && "$open_out"
 else
   flunk "读不到和认不出混成了一句：$missing_out / $dir_out / $open_out"
 fi
+
+echo "== 环境文件的属主权限"
+for n in m1 m2; do
+  printf 'X=1\n' >"$T/$n.env"
+  chown root:root "$T/$n.env"
+  chmod 640 "$T/$n.env"
+done
+call check_app_file_meta "$T/m1.env" "$T/m2.env"
+if ((RC == 0 && ${#REDS[@]} == 0)); then pass "都是 640：通过"; else flunk "都是 640 该通过：$OUT"; fi
+meta_case() { # 说明 怎么弄坏 m2
+  printf 'X=1\n' >"$T/m2.env"
+  chmod 640 "$T/m2.env"
+  eval "$2"
+  call check_app_file_meta "$T/m1.env" "$T/m2.env"
+  if ((RC != 0 && ${#REDS[@]} == 1)); then pass "$1：判红、返回非 0"; else flunk "$1：该判红（返回 $RC，红 ${#REDS[@]}）：$OUT"; fi
+}
+meta_case '组读不到（600，root 读回照样读得到、服务读不到）' 'chmod 600 "$T/m2.env"'
+meta_case '谁都能读（644）' 'chmod 644 "$T/m2.env"'
+meta_case '不在' 'rm -f "$T/m2.env"'
+meta_case '是符号链接' 'rm -f "$T/m2.env"; ln -s "$T/m1.env" "$T/m2.env"'
+rm -f "$T/m2.env"
 
 echo "== 要退役的垫片"
 printf '#!/bin/sh\n' >"$T/carpool-run.sh"
