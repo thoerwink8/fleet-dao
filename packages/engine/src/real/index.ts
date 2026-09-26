@@ -1,6 +1,6 @@
-// 真端口的装配：库（packages/db）、GitHub（packages/github）、会话（packages/adapters 的 Claude Code 插头）、
-// 工作树（fleet-agent-scope）各一份，拼成 EnginePorts。生产按环境变量装（realPortsFromEnv，见 deploy/france/engine.env.example）；
-// 缺了哪一项就不起，讲清楚缺什么，不带着半套配置接活。
+// 真端口的装配：库（packages/db）、GitHub（packages/github）、会话（packages/adapters 的插头，按执行方式分派：Claude Code、
+// cursor-agent，real/hosts.ts）、工作树（fleet-agent-scope）各一份，拼成 EnginePorts。生产按环境变量装（realPortsFromEnv，
+// 见 deploy/france/engine.env.example）；缺了哪一项就不起，讲清楚缺什么，不带着半套配置接活。
 
 import { join } from 'node:path';
 import type { SessionUser } from '@fleet-dao/adapters';
@@ -12,6 +12,7 @@ import type { EnginePorts } from '../ports.ts';
 import { scopeExec, type UserExec } from './exec.ts';
 import { createGitHubPorts, type EngineGitHub } from './github-ports.ts';
 import { githubReconcileJob } from './github-reconcile.ts';
+import { cursorLaunchCommand, DEFAULT_CURSOR_VERSIONS_DIR } from './hosts.ts';
 import { engineJevFromEnv } from './jev-port.ts';
 import { registerEngineJobs } from './jobs.ts';
 import { routeProbeJob } from './route-probe.ts';
@@ -29,6 +30,7 @@ export interface RealPortsDeps {
   archiveDir: string;
   machine: string;
   claudeCommand(user: SessionUser): string[];
+  cursorCommand(user: SessionUser): string[];
   forkMaxContextTokens?: number;
   /** 错误分流、停滞预判问 Jev 用（real/jev-port.ts）；不给就不问，照规则走。 */
   jev?: JevPort;
@@ -81,6 +83,7 @@ export function createRealPorts(deps: RealPortsDeps): RealPorts {
     tmpDir: deps.tmpDir,
     machine: deps.machine,
     claudeCommand: deps.claudeCommand,
+    cursorCommand: deps.cursorCommand,
     ...(deps.forkMaxContextTokens === undefined ? {} : { forkMaxContextTokens: deps.forkMaxContextTokens }),
     ...(deps.log ? { log: deps.log } : {}),
     ...(deps.jev ? { jev: deps.jev } : {}),
@@ -120,6 +123,8 @@ export interface RealPortsConfig {
   workRoot: string;
   stateDir: string;
   claudeBin: string;
+  /** 会话用户家里 cursor-agent 的版本目录（{user} 换成会话用户）：每次起都在这下面现找 current → 最新版本。 */
+  cursorVersionsDir: string;
   forkMaxContextTokens: number;
 }
 
@@ -136,13 +141,31 @@ export function realPortsConfigFromEnv(env: Readonly<Record<string, string | und
   if (!stateDir.startsWith('/')) problems.push(`FLEET_ENGINE_STATE_DIR 要写绝对路径（现在是 ${stateDir}）`);
   const claudeBin = env.FLEET_CLAUDE_BIN?.trim() || DEFAULT_CLAUDE_BIN;
   if (!claudeBin.startsWith('/')) problems.push(`FLEET_CLAUDE_BIN 要写绝对路径（现在是 ${claudeBin}）`);
+  const cursorVersionsDir = env.FLEET_CURSOR_VERSIONS_DIR?.trim() || DEFAULT_CURSOR_VERSIONS_DIR;
+  if (!cursorVersionsDir.startsWith('/')) {
+    problems.push(`FLEET_CURSOR_VERSIONS_DIR 要写绝对路径（现在是 ${cursorVersionsDir}）`);
+  }
   const rawFork = env.FLEET_FORK_MAX_CONTEXT_TOKENS?.trim();
   const forkMaxContextTokens = rawFork ? Number(rawFork) : DEFAULT_FORK_MAX_CONTEXT_TOKENS;
   if (!Number.isInteger(forkMaxContextTokens) || forkMaxContextTokens <= 0) {
     problems.push(`FLEET_FORK_MAX_CONTEXT_TOKENS 要是正整数（现在是 ${rawFork}）`);
   }
   if (problems.length > 0) throw new Error(`真端口起不来，本机配置缺这些或不对：${problems.join('；')}`);
-  return { machine, workRoot, stateDir, claudeBin, forkMaxContextTokens };
+  return { machine, workRoot, stateDir, claudeBin, cursorVersionsDir, forkMaxContextTokens };
+}
+
+/**
+ * 起执行体的命令（绝对路径），会话和探针同一份：reclaude、cursor-agent 都装在会话用户自己家里，{user} 换成会话用户。
+ * cursor-agent 不钉版本：以会话用户的身份在版本目录下现找 current → 最新版本（hosts.ts 的 cursorLaunchCommand）。
+ */
+export function agentCommands(config: Pick<RealPortsConfig, 'claudeBin' | 'cursorVersionsDir'>): {
+  claudeCommand(user: SessionUser): string[];
+  cursorCommand(user: SessionUser): string[];
+} {
+  return {
+    claudeCommand: (user) => [config.claudeBin.replaceAll('{user}', user)],
+    cursorCommand: (user) => cursorLaunchCommand(config.cursorVersionsDir.replaceAll('{user}', user)),
+  };
 }
 
 /**
@@ -160,7 +183,7 @@ export function realPortsFromEnv(
     env: env as Record<string, string | undefined>,
   });
   const trees = helperWorkTrees({ root: config.workRoot });
-  const claudeCommand = (user: SessionUser) => [config.claudeBin.replaceAll('{user}', user)];
+  const { claudeCommand, cursorCommand } = agentCommands(config);
   // 判断题：起来时读一遍 jev.json、建一遍后端、登记两道题（registerJobs）；之后每次问都现找一遍（改了配置、调度台换了
   // 判断路由不用重启，和 /healthz 的 judge 项同一个判法）。默认位置上没有 jev.json 才算没接、不问；别的读不成都报错。
   const jev = engineJevFromEnv(db, env);
@@ -174,12 +197,13 @@ export function realPortsFromEnv(
     archiveDir: join(config.stateDir, 'archive'),
     machine: config.machine,
     claudeCommand,
+    cursorCommand,
     forkMaxContextTokens: config.forkMaxContextTokens,
   });
   const jobs: EngineJobs = {
     githubReconcile: githubReconcileJob({ db, gh }),
-    // 路由探针和干活的会话用同一份 reclaude、同一个工作树的根（探针目录在它下面）
-    routeProbe: routeProbeJob({ db, trees, claudeCommand, machine: config.machine }),
+    // 路由探针和干活的会话用同一份执行体（reclaude、cursor-agent）、同一个工作树的根（探针目录在它下面）
+    routeProbe: routeProbeJob({ db, trees, claudeCommand, cursorCommand, machine: config.machine }),
   };
   return {
     ...real,

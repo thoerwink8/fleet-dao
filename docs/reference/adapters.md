@@ -262,6 +262,8 @@ codex exec --json -C <工作树> -m gpt-5.6-sol \
 | 原文 | 出处 |
 |---|---|
 | `✗ Failed to reach the Cursor API. Check that your proxy (http://<回环>:7890/) is reachable.`（stderr、退出 1、没有任何 JSON） | 本机实跑（`-p --output-format stream-json`，不可达端点） |
+| `Error: Authentication required. Please run 'cursor-agent login' first, or set CURSOR_API_KEY environment variable.`、`Authentication required to use Cursor Agent. Please run 'cursor-agent login' to authenticate.`、`… Please run 'cursor-agent login' to authenticate.`（跑到一半登录失效）；ACP 是 `Error: [unauthenticated] Backend rejected authentication…`。命令名是 `CURSOR_INVOKED_AS` 或 argv0，也可能是 `agent`。stderr、退出 1、没有 JSON | 发行包原文（2026.09.23、2026.09.26 的 `index.js`、`4507.index.js`）；失败分流 AU5（#212） |
+| `Error: You've hit your usage limit`，后面跟一段服务端给的说明（何时清零、换 Auto、设花费上限）。额度类报错的正文由服务端给（发行包里只有 `PRO_USER_USAGE_LIMIT` 这类错误码，文案是服务端 details 的 title + detail），引擎按「usage limit」认成额度用满（QT1） | 论坛用户贴的 CLI 输出（forum.cursor.com/t/cursor-agent-cli-limit-hit/128577）；我们还没撞上过，撞上时把原话记成失败样本（#230） |
 | `Requested concrete model ID is absent from the ACP model catalog`（`model_unavailable`） | WD `docs/evidence/1576-grok-4.7-probe.json`；runner:736 |
 | `agent_unconfigured`（新工作树弹 Workspace Trust） | WD `docs/cli-notes/cursor.md:15`（#649） |
 | `Invalid params`（ACP 握手停在 authenticate） | AGS `docs/DECISIONS.md:950-956` |
@@ -686,7 +688,7 @@ dsh --profile headless "<task>"
 |---|---|
 | Claude Code | `tool_use` / `tool_result` 与 `result` 帧的完整字段；无头模式下有没有能被动读取的步骤清单（2.1.281 无 TodoWrite）；额度用满时的退出码与 `result.is_error`；`--session-id` + `--resume` 的续跑在 reclaude 下是否可用 |
 | codex | `exec --json` 的 item 类型（命令、改文件、计划）、`turn.completed` 的 usage 字段、失败终态事件；`exec` 会不会挂到共享 daemon（`--no-daemon` 只出现在顶层 help） |
-| cursor-agent | `-p --output-format stream-json` 的事件全集与 usage；`-p` 下模型串接不接受 ACP 的方括号写法；`-p` 的额度与认证报错原文 |
+| cursor-agent | `-p` 下模型串接不接受 ACP 的方括号写法；`-p` 的额度报错原文（真撞上一次，见 4.5）。事件全集与 usage、认证报错原文 #212 已查实（法国真跑夹具 `packages/adapters/test/fixtures/cursor-agent/`，4.5） |
 | Grok | streaming-json 真实样本（文档有，旧仓没跑过）；1.0.41 会话存储改成 SQLite 之后，旧采集器读 `updates.jsonl` 的办法是否已失效；OAuth 订阅路径的额度窗口从哪读 |
 | pi | `--mode json` 事件格式；直起时的完成信号与 token 用量 |
 | dsh | 是否有比 headless 更结构化的输出方式；token 用量 |

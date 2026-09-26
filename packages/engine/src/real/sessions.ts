@@ -1,9 +1,14 @@
-// 引擎端口 → AI 会话（目前只接了 Claude Code，经 reclaude 无头起）：起会话、看守、叫停、收孤儿。
+// 引擎端口 → AI 会话：起会话、看守、叫停、收孤儿。按路由的执行方式分派给驱动（real/hosts.ts）：接上了 Claude Code
+// （经 reclaude）和 cursor-agent，都是无头起；别的执行方式明确报 HOST_NOT_WIRED。下面只认驱动交回的同一个形状（HostReport）。
 //
-// 起会话：按 runId 幂等（库里 session_runs 一行；叫停过的 runId 不再起）。会话用户按账号池定（pools.run_as_user）。
+// 起会话：按 runId 幂等（库里 session_runs 一行；叫停过的 runId 不再起）。会话用户：Claude 按账号池定（pools.run_as_user，
+// 它绑着 reclaude 组织）；Cursor 的池不绑，用法国唯一的会话用户（hosts.ts 的 sessionUserOf）。
+// 会话号：Claude 的由我们定；cursor 开新会话的号是它 init 帧里自己起的，开工先记临时号（cursor-pending:<runId>），真号到了
+// 记在看守上，结束时交给工作流、写进库（下次 latestRunOfSession(真号) 查得到）。
 // 会话断了接着干（design 第一节、第九节、第十四节）：法国只有一个会话用户，续会话都在同一个家目录里。同一个账号池
 // （同一个 reclaude 组织）--resume 续上；换了池（切号后原会话绑在旧组织上，直接续会被拒）、上下文还小
-// （< forkMaxContextTokens）就 --fork-session 续；上下文大了、或上一轮跑在已停用的会话用户下，开新会话、带接力任务书
+// （< forkMaxContextTokens）就 --fork-session 续（只有 Claude 能 fork）；上下文大了、cursor 换了池、上一轮跑在已停用的
+// 会话用户下、换了执行方式、换了目录（会话记录按目录存）、续的号不是 UUID（cursor 的临时号），开新会话、带接力任务书
 // （做到哪了、已提交了什么）。工作树由会话用户自己从引擎镜像打的 bundle 建，
 // 引擎不以自己的身份在会话目录里跑 git。进程起来（onSpawn）才算开工：记进程号和 scope，交回工作流。
 //
@@ -12,25 +17,20 @@
 // 所以写得要快）；额度读数顺手记账；每分钟按进展判一次停滞（failure/stall.ts），在绕圈、工具卡死就停掉，结局 stalled
 // （光是没动静由插头自己的 idle 超时管）。结束后：写码类看 fleet done 和工作树（有新提交、没有没提交的已跟踪改动）；
 // 分诊、需求文档、方案、审查读 .fleet-out/ 下的结论文件，形状不对算交错了。
-// 失败原样交给工作流的失败分流；这里只按同一张规则表认出「要人修的整池问题」（设备被撤销、封号、登录失效、欠费）：
-// 写一条 pool-hold:<池> 的「要人拍」提醒，选路就避开整个池；续会话的那一单是试探，跑通了就撤掉这条提醒。
+// 失败原样交给工作流的失败分流（只在 stderr 里的报错原话接在失败信息后面：cursor 的认证、额度、网络报错就只有它）；
+// 这里只按同一张规则表认出「要人修的整池问题」（设备被撤销、封号、登录失效、欠费）：写一条 pool-hold:<池> 的「要人拍」
+// 提醒（写清去哪台机器、以哪个会话用户重新登录），选路就避开整个池；续会话的那一单是试探，跑通了就撤掉这条提醒。
 // Jev（判断题）只在这个活动里问（design 第十一节「错误分流」「停滞预判」）：规则认不出的失败问一次，回答随结局交给工作流的
 // 失败分流；停滞拿不准时问，同一个会话隔 stallJevEveryMs 才再问。只记不拦的题、没判出来的一律照规则走。
 
-import { randomUUID } from 'node:crypto';
 import {
   type CgroupScope,
-  type ClaudeCodeRunOptions,
-  type ClaudeCodeRunReport,
-  type ClaudeCodeRunSpec,
-  type ClaudeSession,
   type DeliveryCheck,
-  judgeClaudeRun,
+  judgeRun,
   listAgentScopes,
   type PlanPayload,
   type RateLimitReading,
   reapSession,
-  runClaudeCode,
   SESSION_USERS,
   type SessionUser,
   type SpawnInfo,
@@ -73,8 +73,21 @@ import {
   type SessionOutput,
   type StartSessionResult,
 } from '../ports.ts';
+import { hostName } from '../routing/names.ts';
 import type { UserExec } from './exec.ts';
 import { sessionTestCommandOrStop } from './flow-gate.ts';
+import {
+  type ContinueMode,
+  type HostDriver,
+  type HostReport,
+  type HostRunners,
+  type HostSession,
+  hostDrivers,
+  isWiredHost,
+  sessionUserOf,
+  type WiredHost,
+  wiredHostNames,
+} from './hosts.ts';
 import { bundleFromMirror, type MirrorGitHub, mapped } from './mirror.ts';
 import {
   OUTPUT_FILES,
@@ -111,7 +124,67 @@ import type { WorkTrees } from './worktrees.ts';
 /** 上下文比这个小才 fork 续到别的会话用户；大了开新会话带接力任务书（design 第九节「上下文越长越贵」）。 */
 export const DEFAULT_FORK_MAX_CONTEXT_TOKENS = 100_000;
 
-export type ContinueMode = 'new' | 'resume' | 'fork' | 'relay';
+export type { ContinueMode };
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export interface ContinuationFacts {
+  /** 工作流要接着的会话号（可能是 cursor 的临时号）。 */
+  resumeId: string;
+  /** 这个号最近一轮的记录（latestRunOfSession）；查不到 = null。 */
+  prior: Pick<SessionRunState, 'runAsUser' | 'routeId' | 'worktreePath' | 'contextTokens'> | null;
+  /** 上一轮的路由现在的样子（routeLaunchFacts）；查不到 = null。 */
+  before: { hostId: string; poolId: string } | null;
+  /** 这次的路由。 */
+  route: { poolId: string };
+  driver: Pick<HostDriver, 'hostId' | 'canFork'>;
+  user: SessionUser;
+  /** 这次会话的工作目录。 */
+  dir: string;
+  forkMax: number;
+}
+
+/**
+ * 续上一个会话的方式：同池、同会话用户、同执行方式、同一个目录、真号 → --resume；只换了池、执行方式能 fork、上一轮上下文还小
+ * → fork；别的一律接力（开新会话带接力任务书），why 写清为什么续不上。先后就是判断的先后，每个分支都有测试。
+ * 不硬续的理由：会话记录存在会话用户家里、按工作目录分（Claude 的 ~/.claude/projects/<目录>、cursor 的 ~/.cursor/chats/<目录的哈希>），
+ * 换了用户、目录、执行方式都找不到；cursor 的临时号不是它的会话号；cursor 没有 fork，切了池原会话续不上。
+ */
+export function decideContinuation(x: ContinuationFacts): { mode: ContinueMode; why: string } {
+  const { resumeId, prior, before } = x;
+  const relay = (why: string) => ({ mode: 'relay' as const, why });
+  if (!prior) return relay(`上一个会话 ${resumeId} 的记录查不到`);
+  if (asSessionUser(prior.runAsUser) !== x.user) {
+    return relay(
+      `上一个会话 ${resumeId} 跑在 ${prior.runAsUser ?? '没记'} 下，不是现在的会话用户 ${x.user}，续不上`,
+    );
+  }
+  if (!before) {
+    return relay(`上一个会话 ${resumeId} 的路由 ${prior.routeId} 已不在，不知道它是哪种执行方式、哪个账号池`);
+  }
+  if (before.hostId !== x.driver.hostId) {
+    return relay(
+      `上一个会话 ${resumeId} 是 ${hostName(before.hostId)} 的，这次是 ${hostName(x.driver.hostId)}：换了执行方式，续不上`,
+    );
+  }
+  if (!UUID.test(resumeId)) {
+    return relay(`上一个会话的号 ${resumeId} 不是执行体自己的会话号（会话在报出会话号之前就断了），续不上`);
+  }
+  if (prior.worktreePath !== x.dir) {
+    return relay(
+      `上一个会话 ${resumeId} 在 ${prior.worktreePath ?? '没记的目录'} 里跑，这次在 ${x.dir}：过程记录按目录存，换了目录续不上`,
+    );
+  }
+  if (before.poolId === x.route.poolId) return { mode: 'resume', why: '' };
+  const moved = `换了账号池（${before.poolId} → ${x.route.poolId}）`;
+  if (!x.driver.canFork) return relay(`${moved}，${hostName(x.driver.hostId)} 不能 fork`);
+  if (prior.contextTokens !== null && prior.contextTokens < x.forkMax) return { mode: 'fork', why: '' };
+  return relay(
+    prior.contextTokens === null
+      ? `${moved}，上一轮的上下文大小不知道`
+      : `${moved}，上一轮的上下文有 ${prior.contextTokens} 个 token，大了不 fork`,
+  );
+}
 
 export interface SessionPortsDeps {
   db: Db;
@@ -127,6 +200,8 @@ export interface SessionPortsDeps {
   machine: string;
   /** 起 Claude Code 的命令（绝对路径）：reclaude 装在会话用户自己家里。 */
   claudeCommand(user: SessionUser): string[];
+  /** 起 cursor-agent 的命令（绝对路径）：装在会话用户自己家里，生产用 hosts.ts 的 cursorLaunchCommand 现找版本目录。 */
+  cursorCommand(user: SessionUser): string[];
   forkMaxContextTokens?: number;
   /** 经 sudo 调的帮手（fleet-agent-scope）；测试里换成假的。 */
   helper?: string;
@@ -136,8 +211,8 @@ export interface SessionPortsDeps {
   shBin?: string;
   /** 宿主环境（会话环境只从里面抄一小撮基础变量，见 adapters/env.ts）。 */
   baseEnv?: Readonly<Record<string, string | undefined>>;
-  /** 起会话的插头；测试里换成假的（不起真执行体）。 */
-  run?: (spec: ClaudeCodeRunSpec, options: ClaudeCodeRunOptions) => Promise<ClaudeCodeRunReport>;
+  /** 起会话的插头，按执行方式给；测试里换成假的（不起真执行体）。没给的用真插头。 */
+  run?: HostRunners;
   stallPolicy?: Partial<StallPolicy>;
   /** 规则认不出的失败、拿不准的停滞去问 Jev（real/jev-port.ts）；不给就不问，照默认走。 */
   jev?: JevPort;
@@ -161,7 +236,12 @@ export type SessionPorts = Pick<EnginePorts, 'startSession' | 'awaitSession' | '
 
 interface Live {
   runId: string;
+  /** 起会话时回给工作流的号（看守拿它对会话）：cursor 开新会话时是临时号。 */
   sessionId: string;
+  /** 执行体真用的会话号：Claude、续会话一开始就知道；cursor 开新会话要等 init 帧报上来，没报就一直没有。 */
+  agentSessionId: string | undefined;
+  hostId: WiredHost;
+  driver: HostDriver;
   taskId: string;
   stage: StageKind;
   kind: OutputKind;
@@ -176,7 +256,7 @@ interface Live {
   previousCost: number | null | undefined;
   startedAt: number;
   spawned: Promise<SpawnInfo>;
-  report: Promise<ClaudeCodeRunReport>;
+  report: Promise<HostReport>;
   abort: AbortController;
   stop: { kind: 'stop'; reason: string } | { kind: 'stall'; rule: string; basis: string } | undefined;
   pending: ProgressEvent[];
@@ -193,7 +273,6 @@ interface Live {
   recent: StallToolCall[];
   says: string[];
   plan: Map<string, string>;
-  rateLimits: RateLimitReading[];
   quotaError: string | undefined;
 }
 
@@ -215,14 +294,13 @@ function asSessionUser(user: string | null | undefined): SessionUser | undefined
   return (SESSION_USERS as readonly string[]).includes(user ?? '') ? (user as SessionUser) : undefined;
 }
 
-function claudeSession(mode: ContinueMode, id: string, from: string | undefined): ClaudeSession {
-  if (mode === 'resume') return { mode: 'resume', id };
-  if (mode === 'fork' && from) return { mode: 'fork', from, id };
-  return { mode: 'new', id };
-}
-
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** 失败信息接上执行体只在 stderr 里说的原话（已经在里面的不重复）：cursor 的认证、额度、网络报错就只有它。 */
+function withRawError(message: string, raw: string | undefined): string {
+  return raw && !message.includes(raw) ? `${message}（执行体原话：${raw}）` : message;
 }
 
 /**
@@ -250,7 +328,11 @@ function scopeLimitsOf(r: LaunchSessionInput['resources']): NonNullable<CgroupSc
 export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
   const { db, trees, gh } = deps;
   const clock = deps.now ?? (() => new Date());
-  const run = deps.run ?? runClaudeCode;
+  const drivers = hostDrivers({
+    claudeCommand: deps.claudeCommand,
+    cursorCommand: deps.cursorCommand,
+    ...(deps.run ? { run: deps.run } : {}),
+  });
   const forkMax = deps.forkMaxContextTokens ?? DEFAULT_FORK_MAX_CONTEXT_TOKENS;
   const tickMs = deps.tickMs ?? 5_000;
   const stallCheckMs = deps.stallCheckMs ?? 60_000;
@@ -360,7 +442,6 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
   };
 
   const onRateLimit = (live: Live, reading: RateLimitReading) => {
-    live.rateLimits.push(reading);
     const windows = readingsFromRateLimit(reading, { poolId: live.poolId });
     if (!windows?.length) return;
     // 会话里顺带读到的只是几个窗口：complete=false，不标别的窗口过期、不算一次读成。
@@ -471,6 +552,26 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     handle: { pid: info.pid, ...(info.scope ? { scope: info.scope } : {}) },
   });
 
+  /**
+   * 接着干的方式：看这个会话上一次跑在哪（哪种执行方式、哪个账号池、哪个会话用户、哪个目录）。同一个池 --resume；
+   * 换了池，原会话绑在旧组织上、直接续会被拒：能 fork 的（Claude）上下文还小就 --fork-session 续（同一个家目录，过程记录
+   * 就在），不能 fork 的（cursor）、上下文大了，开新会话带接力任务书。下面几种也一律接力：上一轮的记录查不到、跑在已停用的
+   * 会话用户下（过程记录在已删的家目录里）、上一轮的路由已不在（不知道是哪种执行方式、哪个池）、换了执行方式、换了目录
+   * （两家的过程记录都按工作目录存：Claude 在 ~/.claude/projects/<目录>，cursor 在 ~/.cursor/chats/<目录的哈希>）、
+   * 续的号不是 UUID（cursor 在报出真号之前就断了，手里只有临时号）。
+   */
+  async function continuation(
+    resumeId: string,
+    route: NonNullable<Awaited<ReturnType<typeof routeLaunchFacts>>>,
+    driver: HostDriver,
+    user: SessionUser,
+    dir: string,
+  ): Promise<{ mode: ContinueMode; prior: SessionRunState | null; why: string }> {
+    const prior = await latestRunOfSession(db, resumeId);
+    const before = prior ? await routeLaunchFacts(db, prior.routeId) : null;
+    return { ...decideContinuation({ resumeId, prior, before, route, driver, user, dir, forkMax }), prior };
+  }
+
   async function startSession(input: LaunchSessionInput, ctx: Parameters<EnginePorts['startSession']>[1]) {
     const known = registry.get(input.runId);
     if (known) return resultOf(known, await known.spawned);
@@ -479,21 +580,21 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     if (!route) {
       throw new PortError('ROUTE_NOT_FOUND', `库里没有路由 ${input.route.routeId}`, { retryable: false });
     }
-    if (route.hostId !== 'claude-code') {
+    if (!isWiredHost(route.hostId)) {
       throw new PortError(
         'HOST_NOT_WIRED',
-        `执行方式 ${route.hostId} 引擎还没接上（目前只接了 Claude Code）`,
-        {
-          retryable: false,
-        },
+        `执行方式 ${hostName(route.hostId)}（${route.hostId}）引擎还没接上（现在接了 ${wiredHostNames()}）`,
+        { retryable: false },
       );
     }
-    const user = asSessionUser(route.runAsUser);
-    if (!user) {
-      throw new PortError('CONFIG_MISSING', `账号池 ${route.poolId} 没定会话用户（pools.run_as_user）`, {
+    const driver = drivers[route.hostId];
+    const who = sessionUserOf(driver, route.runAsUser);
+    if ('missing' in who) {
+      throw new PortError('CONFIG_MISSING', `账号池 ${route.poolId} ${who.missing}，起不了会话`, {
         retryable: false,
       });
     }
+    const { user } = who;
     const task = await taskContext(db, input.taskId);
     if (!task) throw new PortError('TASK_NOT_FOUND', `库里没有任务 ${input.taskId}`, { retryable: false });
     let kind: OutputKind;
@@ -552,38 +653,24 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
       };
     }
 
-    // 接着干的方式：看这个会话上一次跑在哪个账号池（哪个 reclaude 组织）下。同一个池 --resume；换了池，原会话绑在
-    // 旧组织上、直接续会被拒，--fork-session 续（同一个家目录，过程记录就在）；上一轮跑在已停用的会话用户下
-    // （过程记录在已删的家目录里）或上下文大了，开新会话带接力任务书。
-    let mode: ContinueMode = 'new';
-    let sessionId: string = randomUUID();
-    let from: string | undefined;
-    let prior: SessionRunState | null = null;
-    let why = '';
-    if (input.resumeSessionId) {
-      prior = await latestRunOfSession(db, input.resumeSessionId);
-      const priorPool = prior ? (await routeLaunchFacts(db, prior.routeId))?.poolId : undefined;
-      if (!prior) {
-        mode = 'relay';
-        why = `上一个会话 ${input.resumeSessionId} 的记录查不到`;
-      } else if (asSessionUser(prior.runAsUser) !== user) {
-        mode = 'relay';
-        why = `上一个会话 ${input.resumeSessionId} 跑在 ${prior.runAsUser ?? '没记'} 下，不是现在的会话用户 ${user}，续不上`;
-      } else if (priorPool === route.poolId) {
-        mode = 'resume';
-        sessionId = input.resumeSessionId;
-      } else if (prior.contextTokens !== null && prior.contextTokens < forkMax) {
-        mode = 'fork';
-        from = input.resumeSessionId;
-      } else {
-        const moved = `换了账号池（${priorPool ?? '上一轮的路由已不在'} → ${route.poolId}）`;
-        mode = 'relay';
-        why =
-          prior.contextTokens === null
-            ? `${moved}，上一轮的上下文大小不知道`
-            : `${moved}，上一轮的上下文有 ${prior.contextTokens} 个 token，大了不 fork`;
-      }
+    const { mode, prior, why } = input.resumeSessionId
+      ? await continuation(input.resumeSessionId, route, driver, user, dir)
+      : { mode: 'new' as const, prior: null, why: '' };
+    // 这次的会话号：续会话就是原来那个；开新会话、fork 由驱动给——Claude 的号我们定，cursor 的先给临时号、真号 init 帧里报。
+    const fresh = driver.newSessionId(input.runId);
+    let sessionId: string;
+    let session: HostSession;
+    if (mode === 'resume' && input.resumeSessionId) {
+      sessionId = input.resumeSessionId;
+      session = { mode: 'resume', id: sessionId };
+    } else if (mode === 'fork' && input.resumeSessionId) {
+      sessionId = fresh.id;
+      session = { mode: 'fork', from: input.resumeSessionId, id: sessionId };
+    } else {
+      sessionId = fresh.id;
+      session = { mode: 'new', id: sessionId };
     }
+    const agentSessionId = session.mode === 'resume' || fresh.known ? sessionId : undefined;
     await prepareTree(input, task, kind, dir, user, mode, ctx.signal);
     const t = treeAs(dir, user, `prep-${input.runId}`, ctx.signal);
     const relay =
@@ -623,6 +710,9 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     const live: Live = {
       runId: input.runId,
       sessionId,
+      agentSessionId,
+      hostId: route.hostId,
+      driver,
       taskId: input.taskId,
       stage: input.stage,
       kind,
@@ -636,7 +726,7 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
       previousCost: mode === 'resume' ? (prior?.sessionCostUsd ?? null) : undefined,
       startedAt: clock().getTime(),
       spawned,
-      report: Promise.resolve(undefined as unknown as ClaudeCodeRunReport),
+      report: Promise.resolve(undefined as unknown as HostReport),
       abort,
       stop: undefined,
       pending: [],
@@ -651,66 +741,71 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
       recent: [],
       says: [],
       plan: new Map(),
-      rateLimits: [],
       quotaError: undefined,
     };
     const cgroup: CgroupScope = { id: input.runId, user, limits, ...helperOpts };
     registry.set(input.runId, live);
     let spawnedYet = false;
-    live.report = run(
-      {
-        runId: input.runId,
-        cwd: dir,
-        prompt,
-        env: {
-          base: deps.baseEnv ?? process.env,
-          fleetApi: input.launch.fleetApi,
-          fleetToken: input.launch.fleetToken,
-          pathPrepend: input.launch.pathPrepend,
+    live.report = driver
+      .run(
+        {
+          runId: input.runId,
+          user,
+          cwd: dir,
+          prompt,
+          env: {
+            base: deps.baseEnv ?? process.env,
+            fleetApi: input.launch.fleetApi,
+            fleetToken: input.launch.fleetToken,
+            pathPrepend: input.launch.pathPrepend,
+          },
+          limits: {
+            // 插头自己的 idle 超时管「光是没动静」；总时长比看守的限时（sessionMinutes）早一分钟到，插头先收场。
+            idleMs: input.stallSeconds * 1000,
+            wallClockMs: Math.max(60_000, input.sessionMinutes * 60_000 - 60_000),
+          },
+          testCommands: task.repo.testCommand ? [task.repo.testCommand] : [],
+          cgroup,
+          model: route.upstreamModel ?? route.modelId,
+          session,
+          // 会话用户读不到引擎的配置和机器人凭据（design 第十四节），无头会话没人批权限：放开（驱动按执行方式给参数）。
+          purpose: 'work',
         },
-        limits: {
-          // 插头自己的 idle 超时管「光是没动静」；总时长比看守的限时（sessionMinutes）早一分钟到，插头先收场。
-          idleMs: input.stallSeconds * 1000,
-          wallClockMs: Math.max(60_000, input.sessionMinutes * 60_000 - 60_000),
+        {
+          signal: abort.signal,
+          ...(deps.now ? { now: deps.now } : {}),
+          onEvent: (e) => onEvent(live, e),
+          onRateLimit: (reading) => onRateLimit(live, reading),
+          onSpawn: (info) => {
+            spawnedYet = true;
+            spawnResolve(info);
+          },
+          // cursor 开新会话：真号到了才知道。先到的算（插头续会话时对不上的号不报，直接停）。
+          onSessionId: (id) => {
+            live.agentSessionId ??= id;
+          },
         },
-        testCommands: task.repo.testCommand ? [task.repo.testCommand] : [],
-        cgroup,
-        model: route.upstreamModel ?? route.modelId,
-        session: claudeSession(mode, sessionId, from),
-        // 会话用户读不到引擎的配置和机器人凭据（design 第十四节），无头会话没人批权限：放开。
-        permissionMode: 'bypassPermissions',
-      },
-      {
-        command: deps.claudeCommand(user),
-        signal: abort.signal,
-        ...(deps.now ? { now: deps.now } : {}),
-        onEvent: (e) => onEvent(live, e),
-        onRateLimit: (reading) => onRateLimit(live, reading),
-        onSpawn: (info) => {
-          spawnedYet = true;
-          spawnResolve(info);
+      )
+      .then(
+        (report) => {
+          if (!spawnedYet) {
+            spawnReject(
+              // 不可重试：活动原地重试用的是同一个 runId，库里这一行已经记了结局，第二次只会报「已经结束过」，
+              // 把起不来的真原因（reclaude 不在之类，失败分流 CF1 认它）吞掉。交回工作流，由它换新 runId 再起。
+              new PortError('SPAWN_FAILED', `会话没起来：${report.facts.spawnError ?? '进程起不来'}`, {
+                retryable: false,
+              }),
+            );
+          }
+          return report;
         },
-      },
-    ).then(
-      (report) => {
-        if (!spawnedYet) {
+        (error: unknown) => {
           spawnReject(
-            // 不可重试：活动原地重试用的是同一个 runId，库里这一行已经记了结局，第二次只会报「已经结束过」，
-            // 把起不来的真原因（reclaude 不在之类，失败分流 CF1 认它）吞掉。交回工作流，由它换新 runId 再起。
-            new PortError('SPAWN_FAILED', `会话没起来：${report.spawnError ?? '进程起不来'}`, {
-              retryable: false,
-            }),
+            new PortError('LAUNCH_FAILED', `起会话之前就被拦下了：${errorText(error)}`, { retryable: false }),
           );
-        }
-        return report;
-      },
-      (error: unknown) => {
-        spawnReject(
-          new PortError('LAUNCH_FAILED', `起会话之前就被拦下了：${errorText(error)}`, { retryable: false }),
-        );
-        throw error;
-      },
-    );
+          throw error;
+        },
+      );
     live.report.catch(() => undefined);
 
     let info: SpawnInfo;
@@ -1023,7 +1118,7 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
           stage: live.stage,
           poolId: live.poolId,
           routeId: live.routeId,
-          hostId: 'claude-code',
+          hostId: live.hostId,
           code: f.code,
           message: f.message,
           ...(f.httpStatus === undefined ? {} : { httpStatus: f.httpStatus }),
@@ -1050,14 +1145,18 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     }
     const jevPart = asked ? { jev: asked } : {};
     if (verdict.shared?.scope === 'pool' && verdict.shared.until === undefined) {
-      // 要人修的整池问题：所有任务一起避开这个池，等人修好（或续会话的试探跑通）。
+      // 要人修的整池问题：所有任务一起避开这个池，等人修好（或续会话的试探跑通）。规则没写修法的登录失效（AU2 管各家的
+      // 登录），修法照执行方式写：去哪台机器、以哪个会话用户重新登录哪一家。
+      const fix =
+        verdict.humanFix ??
+        (verdict.rule === 'AU2' ? live.driver.loginFix(`「${deps.machine}」`, live.user) : undefined);
       try {
         await upsertAlert(db, {
           dedupeKey: poolHoldKey(live.poolId),
           level: 'decision',
           taskId: live.taskId,
           title: `账号池 ${live.poolId} 整池暂停：${verdict.title}`,
-          body: [verdict.humanFix, verdict.reason].filter(Boolean).join('。'),
+          body: [fix, verdict.reason].filter(Boolean).join('。'),
         });
       } catch (error) {
         log('账号池暂停没写进库（选路照样会派过去）', { poolId: live.poolId, error: errorText(error) });
@@ -1066,41 +1165,39 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     return { routeOutcome: verdict.routeOutcome, ...jevPart };
   }
 
-  async function endOf(live: Live, report: ClaudeCodeRunReport): Promise<SessionEnd> {
-    const r = report.stream.result;
-    const usage = {
-      ...(r?.usage?.inputTokens === undefined ? {} : { inputTokens: r.usage.inputTokens }),
-      ...(r?.usage?.outputTokens === undefined ? {} : { outputTokens: r.usage.outputTokens }),
-    };
+  /**
+   * 交给工作流的会话号：执行体真用的那个（Claude、续会话一开始就知道；cursor 开新会话要 init 帧或终帧报上来）。
+   * 没报出来就是空串：工作流保留上一个，不拿临时号去续。
+   */
+  const agentIdOf = (live: Live, report?: HostReport): string =>
+    live.agentSessionId ?? report?.sessionId ?? '';
+
+  async function endOf(live: Live, report: HostReport): Promise<SessionEnd> {
     const common = {
-      sessionId: live.sessionId,
-      usage,
-      ...(r?.sessionCostUsd === undefined ? {} : { sessionCostUsd: r.sessionCostUsd }),
+      sessionId: agentIdOf(live, report),
+      // 终帧报的这一轮的 token（含缓存读写）；读不到的不给，不记成 0。
+      usage: report.usage,
+      ...(report.sessionCostUsd === undefined ? {} : { sessionCostUsd: report.sessionCostUsd }),
     };
     const notes = [
       live.writeError ? `进度事件没写进库：${live.writeError}` : '',
       live.dropped > 0 ? `丢了 ${live.dropped} 条进度事件` : '',
     ].filter(Boolean);
-    const failed = (code: string, message: string): SessionEnd => {
-      const exhausted = [...live.rateLimits].reverse().find((x) => x.exhausted);
-      const resetsAt =
-        exhausted?.resetsAt ?? exhausted?.windows.find((w) => w.name === exhausted.rateLimitType)?.resetsAt;
-      return {
-        ...common,
-        outcome: 'failed',
-        failure: {
-          code,
-          message: [message, ...notes].join('；'),
-          ...(resetsAt ? { resetsAt } : {}),
-          ...(r?.apiErrorStatus === undefined ? {} : { httpStatus: r.apiErrorStatus }),
-          exitCode: report.exitCode,
-          signal: report.signal,
-          transcriptTail: live.says.slice(-6),
-          machine: deps.machine,
-          runAsUser: live.user,
-        },
-      };
-    };
+    const failed = (code: string, message: string): SessionEnd => ({
+      ...common,
+      outcome: 'failed',
+      failure: {
+        code,
+        message: [withRawError(message, report.rawError), ...notes].join('；'),
+        ...(report.resetsAt ? { resetsAt: report.resetsAt } : {}),
+        ...(report.httpStatus === undefined ? {} : { httpStatus: report.httpStatus }),
+        exitCode: report.facts.exitCode ?? null,
+        signal: report.facts.signal ?? null,
+        transcriptTail: live.says.slice(-6),
+        machine: deps.machine,
+        runAsUser: live.user,
+      },
+    });
 
     if (live.stop?.kind === 'stop') return { ...common, outcome: 'stopped' };
     if (live.stop?.kind === 'stall') {
@@ -1132,7 +1229,7 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
 
     if (live.kind === 'delivery') {
       const delivery = await deliveryCheck(live);
-      const verdict = judgeClaudeRun(report, delivery.check);
+      const verdict = judgeRun(report.facts, delivery.check);
       if (verdict.outcome === 'stalled') {
         return {
           ...common,
@@ -1159,7 +1256,7 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
       };
     }
 
-    const verdict = judgeClaudeRun(report);
+    const verdict = judgeRun(report.facts);
     if (verdict.outcome === 'stalled') {
       return {
         ...common,
@@ -1246,13 +1343,13 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     live.flushTimer = undefined;
     await flush(live);
     let end: SessionEnd;
-    let report: ClaudeCodeRunReport | undefined;
+    let report: HostReport | undefined;
     try {
       report = await live.report;
       end = await endOf(live, report);
     } catch (error) {
       end = {
-        sessionId: live.sessionId,
+        sessionId: agentIdOf(live, report),
         outcome: 'failed',
         failure: {
           code: error instanceof PortError ? error.code : 'LAUNCH_FAILED',
@@ -1267,14 +1364,16 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     // 问过 Jev 的（规则认不出的失败）：回答随结局交给工作流，工作流的失败分流带着它判，不在工作流里再问。
     if (asked && end.failure) end = { ...end, failure: { ...end.failure, jev: asked } };
     const cost = costOfThisRun(live, end.sessionCostUsd);
-    const contextTokens = report?.stream.lastContextTokens;
-    const actualModel = report?.stream.observedModel;
+    const contextTokens = report?.contextTokens;
+    const actualModel = report?.actualModel;
     try {
       await finishSessionRun(db, {
         id: live.runId,
         outcome: OUTCOME[end.outcome],
         endedAt: clock(),
-        sessionId: live.sessionId,
+        // 执行体真用的号（cursor 开新会话是 init 帧里的真号，下次 latestRunOfSession(真号) 查得到）；没报出来就不改，
+        // 库里留着开工时记的临时号（接不上时工作流拿它来续，照它找得到这一轮、开新会话带接力任务书）。
+        ...(end.sessionId ? { sessionId: end.sessionId } : {}),
         ...(actualModel ? { actualModel } : {}),
         ...(end.usage?.inputTokens === undefined ? {} : { inputTokens: end.usage.inputTokens }),
         ...(end.usage?.outputTokens === undefined ? {} : { outputTokens: end.usage.outputTokens }),

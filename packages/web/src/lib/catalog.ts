@@ -3,7 +3,7 @@
 import {
   hardBanFor,
   ROUTE_PROBE_EVERY_MINUTES,
-  ROUTE_PROBE_STALE_MINUTES,
+  routeProbeStaleMinutes,
   windowAppliesTo,
 } from '@fleet-dao/shared';
 import { brand } from '#brand';
@@ -167,14 +167,20 @@ export interface RouteStatus {
   detail: string;
   /** 探针下结论的时刻；还没探过就没有。 */
   at: string | undefined;
-  /** 结论超过 ROUTE_PROBE_STALE_MINUTES 没更新：探针可能停了，这个在线 / 离线不一定还对。 */
+  /**
+   * 结论超过 routeProbeStaleMinutes 没更新：探针可能停了，这个在线 / 离线不一定还对。放慢的执行方式（cursor-agent 探通了
+   * 2 小时再探）按它自己的间隔算；不知道执行方式的按每轮都探算。
+   */
   stale: boolean;
 }
 
-export function routeStatus(route: Pick<Route, 'alive' | 'probe'>, now: number): RouteStatus {
+export function routeStatus(
+  route: Pick<Route, 'alive' | 'probe'> & { hostId?: Route['hostId'] },
+  now: number,
+): RouteStatus {
   const p = route.probe;
   const at = p?.at;
-  const stale = at !== undefined && now - Date.parse(at) > ROUTE_PROBE_STALE_MINUTES * TIME.MIN;
+  const stale = at !== undefined && now - Date.parse(at) > routeProbeStaleMinutes(route.hostId) * TIME.MIN;
   if (route.alive) {
     return { kind: 'online', label: '在线', tone: 'done', detail: p?.detail ?? '在线', at, stale };
   }

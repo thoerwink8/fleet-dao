@@ -79,6 +79,24 @@ describe('routeStatus', () => {
     // 过期了照样说在线（派工照 alive 派），另外标过期
     expect(stale.kind).toBe('online');
   });
+
+  test('放慢的执行方式（cursor-agent 探通了隔 2 小时再探）按它自己的线：2 小时 30 分以内不标过期', () => {
+    const cursor = (min: number) =>
+      routeStatus(
+        { alive: true, hostId: 'cursor-agent', probe: { state: 'ok', at: ago(min), detail: 'OK' } },
+        NOW,
+      );
+    expect(cursor(ROUTE_PROBE_STALE_MINUTES + 60).stale).toBe(false);
+    expect(cursor(150).stale).toBe(false);
+    expect(cursor(151).stale).toBe(true);
+    // Claude Code 还是 45 分钟
+    expect(
+      routeStatus(
+        { alive: true, hostId: 'claude-code', probe: { state: 'ok', at: ago(46), detail: 'OK' } },
+        NOW,
+      ).stale,
+    ).toBe(true);
+  });
 });
 
 describe('probeSummary', () => {

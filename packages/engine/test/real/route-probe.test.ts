@@ -8,10 +8,22 @@ import { notifications, quotaWindows, routes, scheduleRuns, toRoute } from '@fle
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { ROUTE_PROBE_JOB, runRouteProbeJob } from '../../src/jobs/route-probe.ts';
+import { CURSOR_MISSING } from '../../src/real/hosts.ts';
 import { registerEngineJobs } from '../../src/real/jobs.ts';
 import { PROBE_DIR, PROBE_PROMPT, routeProbeJob } from '../../src/real/route-probe.ts';
 import { poolHoldKey } from '../../src/real/store-ports.ts';
-import { type FakeRunScript, fakeRun, fakeTrees, NOW, world } from './fixtures.ts';
+import {
+  addCursorRoute,
+  CURSOR_NO_LOGIN,
+  CURSOR_SESSION,
+  type FakeCursorScript,
+  type FakeRunScript,
+  fakeCursorRun,
+  fakeRun,
+  fakeTrees,
+  NOW,
+  world,
+} from './fixtures.ts';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -32,8 +44,15 @@ afterEach(() => rmSync(root, { recursive: true, force: true }));
 
 const quiet = () => {};
 
-function setup(script: (n: number) => FakeRunScript, over: { adoptFails?: string; runThrows?: string } = {}) {
+function setup(
+  script: (n: number) => FakeRunScript,
+  over: { adoptFails?: string; runThrows?: string; cursor?: (n: number) => FakeCursorScript } = {},
+) {
   const fake = fakeRun((_, n) => script(n));
+  const cursor = fakeCursorRun((_, n) => {
+    if (!over.cursor) throw new Error('这条用例不该起 cursor-agent');
+    return over.cursor(n);
+  });
   const trees = fakeTrees(join(root, 'work'));
   if (over.adoptFails) {
     const message = over.adoptFails;
@@ -42,23 +61,26 @@ function setup(script: (n: number) => FakeRunScript, over: { adoptFails?: string
     };
   }
   let clock = NOW.getTime();
+  const thrower = async (): Promise<never> => {
+    throw new Error(over.runThrows);
+  };
   const job = routeProbeJob({
     db: t.db,
     trees: trees.trees,
     claudeCommand: (user) => [`/opt/fake/${user}/reclaude`],
+    cursorCommand: (user) => [`/opt/fake/${user}/cursor-agent`],
     machine: '法国',
     now: () => new Date(clock),
     log: quiet,
     sleep: async () => {},
     retryDelayMs: 0,
     run: over.runThrows
-      ? async () => {
-          throw new Error(over.runThrows);
-        }
-      : fake.run,
+      ? { 'claude-code': thrower, 'cursor-agent': thrower }
+      : { 'claude-code': fake.run, 'cursor-agent': cursor.run },
   });
   return {
     fake,
+    cursor,
     trees,
     round: async () => runRouteProbeJob(job()),
     advance: (minutes: number) => {
@@ -334,5 +356,158 @@ describe('没探通的：离线，写明是哪一种（不许拿默认值、上�
     const down = await row('carpool');
     expect(down).toMatchObject({ alive: false, probeState: 'failed' });
     expect(down?.probeDetail).toContain('没定会话用户');
+  });
+});
+
+describe('cursor-agent 的路由（#212）：和干活的会话同一个驱动探，判法同一套', () => {
+  let routeId: string;
+  beforeEach(async () => {
+    ({ routeId } = await addCursorRoute(t.db, { stages: ['execute'] }));
+    // 上一次探通是 3 小时前：cursor 探通了隔 2 小时再探，这一轮到点了
+    await t.client.query('update routes set probed_at = $2::timestamptz where id = $1', [
+      routeId,
+      new Date(NOW.getTime() - 3 * 60 * 60_000).toISOString(),
+    ]);
+  });
+  const cursorHold = async () =>
+    (await t.db.select().from(notifications)).find((n) => n.dedupeKey === poolHoldKey('cursor'));
+  /** 法国真跑夹具的 init 帧，接一个只回 text 的终帧。 */
+  const replied = (text = 'OK'): FakeCursorScript => ({
+    replay: 'cursor-edit-commit',
+    replayLines: 1,
+    frames: [
+      { type: 'result', subtype: 'success', is_error: false, result: text, session_id: CURSOR_SESSION },
+    ],
+  });
+  const failing = (stderr: string, exitCode = 1): FakeCursorScript => ({ stderr, exitCode });
+
+  it('探通：在线；以唯一的会话用户、不放开命令（不带 --force）、照路由上的模型问一句 OK，不给 fleet 命令的地址', async () => {
+    const s = setup(answered, { cursor: () => replied() });
+    const run = await s.round();
+    expect(run.online).toEqual(expect.arrayContaining(['carpool', routeId]));
+    const up = await row(routeId);
+    expect(up).toMatchObject({ alive: true, probeState: 'ok' });
+    expect(up?.probeDetail).toMatch(/^答上了：OK · 用时 \d+ 秒$/);
+    expect(s.cursor.count()).toBe(1);
+    const [spec] = s.cursor.specs;
+    expect(spec).toMatchObject({
+      prompt: PROBE_PROMPT,
+      model: 'auto',
+      force: false,
+      session: { mode: 'new' },
+      cgroup: { user: 'fleet-agent-carpool' },
+      env: { fleetApi: '', fleetToken: '' },
+    });
+    expect(spec?.cwd.replaceAll('\\', '/')).toBe(
+      `${join(root, 'work').replaceAll('\\', '/')}/${PROBE_DIR}/fleet-agent-carpool`,
+    );
+    expect(s.cursor.options[0]?.command).toEqual(['/opt/fake/fleet-agent-carpool/cursor-agent']);
+  });
+
+  it('探通了：15 分钟后那一轮不再真探、不重写，结论照旧（还在线）；到 2 小时再真探（一次扣的是按月的包含用量）', async () => {
+    const s = setup(answered, { cursor: () => replied() });
+    await s.round();
+    expect(s.cursor.count()).toBe(1);
+    const first = await row(routeId);
+    expect(first).toMatchObject({ alive: true, probeState: 'ok', probedAt: NOW });
+
+    s.advance(15);
+    const second = await s.round();
+    expect(s.cursor.count()).toBe(1);
+    expect(second.online).toContain(routeId);
+    expect(await row(routeId)).toMatchObject({ alive: true, probeState: 'ok', probedAt: NOW });
+    // Claude 的路由照样每轮探
+    expect(s.fake.count()).toBe(2);
+
+    s.advance(105);
+    await s.round();
+    expect(s.cursor.count()).toBe(2);
+    expect((await row(routeId))?.probedAt).toEqual(new Date(NOW.getTime() + 120 * 60_000));
+  });
+
+  it('路由上点名了具体模型：探针就用它（不限定 auto）', async () => {
+    await t.client.query("update routes set upstream_model = 'composer-2' where id = $1", [routeId]);
+    const s = setup(answered, { cursor: () => replied() });
+    await s.round();
+    expect(s.cursor.specs[0]?.model).toBe('composer-2');
+    expect(await row(routeId)).toMatchObject({ alive: true, probeState: 'ok' });
+  });
+
+  it('连不上 Cursor（只在 stderr 报、没有 JSON）：隔一会儿再探一次，还不通就离线，原因带原话；不整池暂停', async () => {
+    const s = setup(answered, {
+      cursor: () =>
+        failing(
+          '✗ Failed to reach the Cursor API. Check that your proxy (http://<回环>:7890/) is reachable.',
+        ),
+    });
+    await s.round();
+    expect(s.cursor.count()).toBe(2);
+    const down = await row(routeId);
+    expect(down).toMatchObject({ alive: false, probeState: 'failed' });
+    expect(down?.probeDetail).toContain('连探两次都没通');
+    expect(down?.probeDetail).toContain('Failed to reach the Cursor API');
+    expect(await cursorHold()).toBeUndefined();
+  });
+
+  it('没登录（-p 模式的原话）：同一轮不再试；离线写清去哪台机器、以谁跑 cursor-agent login，整池暂停；登好后下一轮转回在线、撤掉', async () => {
+    const s = setup(answered, { cursor: (n) => (n === 1 ? failing(CURSOR_NO_LOGIN) : replied()) });
+    await s.round();
+    expect(s.cursor.count()).toBe(1);
+    const down = await row(routeId);
+    expect(down).toMatchObject({ alive: false, probeState: 'failed' });
+    expect(down?.probeDetail).toContain('Cursor 登录失效');
+    expect(down?.probeDetail).toContain('法国');
+    expect(down?.probeDetail).toContain('fleet-agent-carpool');
+    expect(down?.probeDetail).toContain('cursor-agent login');
+    const alert = await cursorHold();
+    expect(alert).toMatchObject({ level: 'decision', resolvedAt: null });
+    expect(alert?.title).toContain('Cursor 登录失效');
+    // 拼车池的 Claude 路由不受牵连
+    expect(await row('carpool')).toMatchObject({ alive: true, probeState: 'ok' });
+
+    s.advance(15);
+    await s.round();
+    expect(await row(routeId)).toMatchObject({ alive: true, probeState: 'ok' });
+    expect((await cursorHold())?.resolvedAt).not.toBeNull();
+  });
+
+  it('会话用户家里没装 cursor-agent（找版本目录的那段 sh 退出 127）：离线，原因写没装；不整池暂停', async () => {
+    const s = setup(answered, {
+      cursor: () =>
+        failing(
+          `${CURSOR_MISSING}：/home/fleet-agent-carpool/.local/share/cursor-agent/versions 下既没有 current，也没有能跑的版本目录（会话用户家里没装 cursor-agent）`,
+          127,
+        ),
+    });
+    await s.round();
+    const down = await row(routeId);
+    expect(down).toMatchObject({ alive: false, probeState: 'failed' });
+    expect(down?.probeDetail).toContain('没装 cursor-agent');
+    expect(await cursorHold()).toBeUndefined();
+  });
+
+  it('订阅里的用量用完（请求被拒、不扣钱）：算通（在线），原因写额度用满、带原话，同一轮不再试', async () => {
+    const s = setup(answered, {
+      cursor: () =>
+        failing(
+          "Error: You've hit your usage limit. Your usage limits will reset when your monthly cycle ends on 10/5/2026.",
+        ),
+    });
+    const run = await s.round();
+    expect(run.online).toContain(routeId);
+    const up = await row(routeId);
+    expect(up).toMatchObject({ alive: true, probeState: 'ok' });
+    expect(up?.probeDetail).toContain('额度用满');
+    expect(up?.probeDetail).toContain('hit your usage limit');
+    expect(s.cursor.count()).toBe(1);
+    expect(await cursorHold()).toBeUndefined();
+  });
+
+  it('答了、但答的不是 OK：和 Claude 一样不算探通', async () => {
+    const s = setup(answered, { cursor: () => replied('OK, but I cannot run tools here') });
+    await s.round();
+    const down = await row(routeId);
+    expect(down).toMatchObject({ alive: false, probeState: 'failed' });
+    expect(down?.probeDetail).toContain('回答认不出（要的是只回 OK）');
   });
 });

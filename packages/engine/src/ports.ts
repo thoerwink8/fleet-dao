@@ -178,7 +178,10 @@ export interface SessionHandle {
 }
 
 export interface StartSessionResult {
-  /** 执行体自己的会话编号（续会话用）。 */
+  /**
+   * 执行体自己的会话编号（续会话用）。cursor 开新会话的号是它在 init 帧里自己起的，事先定不了：这里先给一个一眼看得出
+   * 不是 UUID 的临时号（cursor-pending:<runId>），看守拿它对会话；真号由结束时的 SessionEnd.sessionId 给。
+   */
   sessionId: string;
   resumed: boolean;
   handle?: SessionHandle;
@@ -200,6 +203,10 @@ export type SessionOutput =
   | { kind: 'review'; review: ReviewResult };
 
 export interface SessionEnd {
+  /**
+   * 执行体自己的会话号，下次续会话就拿它。cursor 开新会话、还没报出号就结束了的是空串：工作流保留上一个（没有就开新会话）。
+   * 工人重启、接不上（SESSION_LOST）时回的是开工时那个号，可能是临时号：拿它续时会话端口认得出不是 UUID，开新会话带接力任务书。
+   */
   sessionId: string;
   /** stopped = 被 stopSession 停下（暂停、换路由、叫停）。 */
   outcome: 'done' | 'blocked' | 'failed' | 'stalled' | 'stopped';
@@ -232,8 +239,16 @@ export interface SessionEnd {
      */
     jev?: JevReply<TriageChoice>;
   };
-  /** 这一次会话的 token（执行体终帧报的就是这一次的）。 */
-  usage?: { inputTokens?: number; outputTokens?: number };
+  /**
+   * 这一次会话的 token（执行体终帧报的就是这一次的；Claude、cursor 都报缓存读写）。读不到的字段不给，不记成 0。
+   * 缓存读写进库、折成额度当量归 #216。
+   */
+  usage?: {
+    inputTokens?: number;
+    outputTokens?: number;
+    cacheReadTokens?: number;
+    cacheWriteTokens?: number;
+  };
   /** 整个会话（sessionId）到目前为止的累计花费（续会话时含前几轮）；这一次的由引擎按上一轮求差。 */
   sessionCostUsd?: number;
 }

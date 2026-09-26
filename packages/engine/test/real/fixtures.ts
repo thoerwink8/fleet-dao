@@ -1,6 +1,7 @@
 // 真端口测试共用的底子：内存库里的一份目录（两个 Claude 池：独享、拼车；一个没接上的执行方式）、一个需求，
 // 一个本地 git「镜像」（顶替 github 包的 fetchMainline / bundleCommits），一个记属主的假工作树管家，
-// 一个不起真执行体的假插头（按剧本发事件、改工作树、交报告）。
+// 两个不起真执行体的假插头：Claude 的按剧本发事件、改工作树、交报告；cursor 的拿法国真跑的过程记录
+// （packages/adapters/test/fixtures/cursor-agent）逐行喂给真的读取器，事件、会话号、终帧用量都是真解析出来的。
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -9,6 +10,10 @@ import {
   type ClaudeCodeRunOptions,
   type ClaudeCodeRunReport,
   type ClaudeCodeRunSpec,
+  type CursorRunOptions,
+  type CursorRunReport,
+  type CursorRunSpec,
+  CursorStreamReader,
   type KillReason,
   type RateLimitReading,
   type SessionUser,
@@ -407,6 +412,150 @@ export function fakeRun(script: (spec: ClaudeCodeRunSpec, n: number) => FakeRunS
     };
   };
   return { run, specs, options, count: () => n };
+}
+
+// ---- cursor-agent
+
+const CURSOR_FIXTURES = new URL('../../../adapters/test/fixtures/cursor-agent/', import.meta.url);
+
+/** 法国上真跑的 cursor-agent 过程记录（一行一帧）和当时的工作目录（读取器按它把路径换成相对的）。 */
+export function cursorFixture(name: string): { lines: string[]; cwd: string } {
+  const lines = readFileSync(new URL(`${name}.ndjson`, CURSOR_FIXTURES), 'utf8')
+    .split('\n')
+    .filter((l) => l.trim());
+  const meta = JSON.parse(readFileSync(new URL(`${name}.meta.json`, CURSOR_FIXTURES), 'utf8')) as {
+    cwd: string;
+  };
+  return { lines, cwd: meta.cwd };
+}
+
+/** 真跑夹具里 cursor 自己起的会话号（cursor-edit-commit 开的会话，cursor-resume 续的就是它）。 */
+export const CURSOR_SESSION = 'e06fc62e-72a6-4020-9144-01155dbba6db';
+
+/** cursor-agent 没有登录态时 -p 模式的原话（2026.09.23 发行包；stderr、退出 1、没有 JSON）。 */
+export const CURSOR_NO_LOGIN =
+  "Error: Authentication required. Please run 'cursor-agent login' first, or set CURSOR_API_KEY environment variable.";
+
+export interface FakeCursorScript {
+  /** 回放哪一份真跑夹具（不带后缀）；不给 = 一帧都没有（只在 stderr 报错就退出的那种）。 */
+  replay?: string;
+  /** 只回放前几行（比如只要 init 帧，后面接自己写的终帧）。 */
+  replayLines?: number;
+  /** 接在回放后面的帧（探针要的「只回 OK」终帧、没有用量的终帧……）。 */
+  frames?: Record<string, unknown>[];
+  /** 进程起不来：不调 onSpawn。 */
+  spawnError?: string;
+  /** 起来之后、回放之前做的事：改工作树、写结论文件、在库里写 done……abort 了要尽快返回。 */
+  act?: (ctx: { spec: CursorRunSpec; signal: AbortSignal }) => Promise<void> | void;
+  stderr?: string;
+  exitCode?: number | null;
+  killed?: Exclude<KillReason, 'aborted'>;
+}
+
+/**
+ * 假的 cursor 插头：不起进程，把夹具逐行喂给真的读取器（CursorStreamReader），事件照读取器给的发、init 帧的会话号照真插头的
+ * 规矩报（续会话对不上就停、不报），报告里的 stream 就是读取器的摘要。被 abort 当成引擎叫停收场。
+ */
+export function fakeCursorRun(script: (spec: CursorRunSpec, n: number) => FakeCursorScript) {
+  const specs: CursorRunSpec[] = [];
+  const options: CursorRunOptions[] = [];
+  let n = 0;
+  const run = async (spec: CursorRunSpec, opts: CursorRunOptions): Promise<CursorRunReport> => {
+    n += 1;
+    specs.push(spec);
+    options.push(opts);
+    const s = script(spec, n);
+    const startedAt = new Date().toISOString();
+    const fixture = s.replay ? cursorFixture(s.replay) : { lines: [], cwd: spec.cwd };
+    const reader = new CursorStreamReader({
+      runId: spec.runId,
+      cwd: fixture.cwd,
+      testCommands: spec.testCommands ?? [],
+    });
+    const finish = (extra: Partial<CursorRunReport> & Pick<CursorRunReport, 'exitCode' | 'signal'>) => ({
+      runId: spec.runId,
+      requestedModel: spec.model,
+      session: spec.session,
+      stragglers: 0,
+      leftovers: 0,
+      stderrTail: s.stderr ?? '',
+      startedAt,
+      endedAt: new Date().toISOString(),
+      wallMs: 1,
+      lines: 0,
+      droppedLines: 0,
+      stream: reader.summary(),
+      ...extra,
+    });
+    // 和真插头一样先过帮手的参数校验（见 fakeRun）。
+    let scopeError: string | undefined;
+    if (spec.cgroup) {
+      try {
+        scopePrefix(spec.cgroup, '/fleet-test-cwd');
+      } catch (err) {
+        scopeError = err instanceof Error ? err.message : String(err);
+      }
+    }
+    const spawnError = scopeError ?? s.spawnError;
+    if (spawnError) return finish({ exitCode: null, signal: null, spawnError });
+    await opts.onSpawn?.({
+      pid: 4343,
+      runId: spec.runId,
+      scope: `fleet-agent-${spec.runId}.scope`,
+      startedAt,
+    });
+    const signal = opts.signal ?? new AbortController().signal;
+    await s.act?.({ spec, signal });
+    const resumeId = spec.session.mode === 'resume' ? spec.session.id : undefined;
+    const lines = [
+      ...fixture.lines.slice(0, s.replayLines ?? fixture.lines.length),
+      ...(s.frames ?? []).map((f) => JSON.stringify(f)),
+    ];
+    for (const line of lines) {
+      if (signal.aborted) break;
+      const effect = reader.read(line);
+      const id = effect.init?.sessionId;
+      if (id && resumeId && id !== resumeId) {
+        const at = new Date().toISOString();
+        return finish({ exitCode: null, signal: 'SIGTERM', killed: { reason: 'session_mismatch', at } });
+      }
+      if (id) opts.onSessionId?.(id);
+      for (const event of effect.events) void opts.onEvent?.(event);
+    }
+    const at = new Date().toISOString();
+    if (signal.aborted)
+      return finish({ exitCode: null, signal: 'SIGTERM', killed: { reason: 'aborted', at } });
+    if (s.killed) return finish({ exitCode: null, signal: 'SIGKILL', killed: { reason: s.killed, at } });
+    return finish({ exitCode: s.exitCode === undefined ? 0 : s.exitCode, signal: null });
+  };
+  return { run, specs, options, count: () => n };
+}
+
+/**
+ * 一条 cursor-agent 路由（和目录样例同一个样子）：池不绑会话用户（库里约束会话用户和 reclaude 组织类型同有同无），
+ * 模型 auto。stages 给了就挂进这些阶段的调度台（探针只探有阶段在用的路由）。
+ */
+export async function addCursorRoute(
+  db: Db,
+  over: { poolId?: string; stages?: StageKind[]; upstreamModel?: string } = {},
+): Promise<{ routeId: string; poolId: string }> {
+  const poolId = over.poolId ?? 'cursor';
+  const routeId = `${poolId}:cursor-auto:cursor-agent`;
+  await db.insert(pools).values({ id: poolId, channelId: 'cursor', maxConcurrency: 6 }).onConflictDoNothing();
+  await db.insert(routes).values({
+    id: routeId,
+    channelId: 'cursor',
+    poolId,
+    modelId: 'cursor-auto',
+    hostId: 'cursor-agent',
+    alive: true,
+    ...PROBED_OK,
+    upstreamModel: over.upstreamModel ?? 'auto',
+  });
+  for (const stage of over.stages ?? []) {
+    await db.insert(stagePolicyRoutes).values({ stage, routeId, position: 9, enabled: true });
+  }
+  return { routeId, poolId };
 }
 
 /**
