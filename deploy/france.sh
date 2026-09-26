@@ -872,6 +872,7 @@ readback_app_config() {
   for name in "${APP_ENV_FILES[@]}"; do metas+=("/etc/fleet-dao/$name.env"); done
   for spec in "${APP_SECRETS[@]}"; do metas+=("/etc/fleet-dao/${spec%%:*}.env"); done
   check_app_file_meta "${metas[@]}" || :
+  check_env_duplicates /etc/fleet-dao/engine.env /etc/fleet-dao/api.env /etc/fleet-dao/release.env || :
   # api.env 不在的话上面已经判红
   if [[ -f /etc/fleet-dao/api.env ]]; then check_webhook_secret /etc/fleet-dao/api.env "$ENGINE_APP_JSON" || :; fi
   check_sensitive_values "$SENSITIVE_VALUES" || :

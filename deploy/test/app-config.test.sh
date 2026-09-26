@@ -12,6 +12,7 @@
 #   5. 每一种读不到（文件不在、是个目录）、认不出（引号没配上、样例里有看不懂的行）：判红、返回非 0、文件没动
 #   6. 读回要退役的垫片：在记待配，不在通过
 #   7. 读回环境文件的属主权限：不是 640（组读不到、谁都能读）、不在、是符号链接，判红
+#   8. 读回整份环境文件里写了几行的键：任一个都判红、只报键名；文件不在判红
 # 要 root（put_file 要改属主）。用法：sudo bash deploy/test/app-config.test.sh。退出码：0 通过，1 不通过，2 没跑成。
 set -uo pipefail
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -470,6 +471,20 @@ meta_case '谁都能读（644）' 'chmod 644 "$T/m2.env"'
 meta_case '不在' 'rm -f "$T/m2.env"'
 meta_case '是符号链接' 'rm -f "$T/m2.env"; ln -s "$T/m1.env" "$T/m2.env"'
 rm -f "$T/m2.env"
+
+echo "== 整份文件里写了几行的键"
+printf 'TEMPORAL_ADDRESS=127.0.0.1:7243\nFLEET_ENV=production\n' >"$T/dup-ok.env"
+printf 'FLEET_SERVICES=fleet-api\nX=1\n  FLEET_SERVICES = dup-value-secret\n' >"$T/dup-bad.env"
+call check_env_duplicates "$T/dup-ok.env"
+if ((RC == 0 && ${#REDS[@]} == 0)); then pass "没有写两行的键：通过"; else flunk "干净的文件该通过：$OUT"; fi
+call check_env_duplicates "$T/dup-ok.env" "$T/dup-bad.env"
+if ((RC != 0 && ${#REDS[@]} == 1)) && [[ "$OUT" == *"FLEET_SERVICES"* && "$OUT" != *"dup-value-secret"* ]]; then
+  pass "任一个键写了两行（缩进、KEY = 值也算）：判红、点名键、不打印值"
+else
+  flunk "写了两行的键该判红：$OUT"
+fi
+call check_env_duplicates "$T/no-such-dup.env"
+if ((RC != 0 && ${#REDS[@]} == 1)); then pass "文件不在：判红"; else flunk "文件不在该判红：$OUT"; fi
 
 echo "== 要退役的垫片"
 printf '#!/bin/sh\n' >"$T/carpool-run.sh"

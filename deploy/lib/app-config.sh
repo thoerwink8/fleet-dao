@@ -392,6 +392,32 @@ check_app_file_meta() { # 文件…
   ((bad == 0))
 }
 
+# 读回：同一个键写了几行判红，对整份文件的每一个生效的键（不只几个挑出来的）：服务里生效的是最后一行，人改了前一行
+# 以为改好了，其实没生效。按 systemd 的读法（env_parse）数；读不到、认不出也判红。只报键名，不打印值
+check_env_duplicates() { # 文件…
+  local f k bad=0 dups
+  local -A seen
+  for f in "$@"; do
+    if ! env_parse "$f"; then
+      red "查不了 $f 里有没有写了几行的键：$APP_CONFIG_WHY"
+      bad=1
+      continue
+    fi
+    seen=()
+    dups=""
+    for k in "${APP_ENV_KEYS[@]}"; do
+      seen[$k]=$((${seen[$k]:-0} + 1))
+      if ((${seen[$k]} == 2)); then dups+=" $k"; fi
+    done
+    if [[ -n "$dups" ]]; then
+      red "$f 里这些键写了不止一行（服务里生效的是最后一行）：${dups# }。删成一行"
+      bad=1
+    fi
+  done
+  if ((bad == 0)); then ok "$# 份环境文件里没有写了几行的键"; fi
+  ((bad == 0))
+}
+
 # 读回：卫生检查的已知敏感值名单（真实的组织编号、账号，一行一个，手放）。引擎推分支、写需求文档、开 PR 之前都读它，
 # 缺了、空的一律不推不写（packages/hygiene）：没有、空的记待配；属主权限不对、读不了判红（里面是真值）。只看，不打印内容
 check_sensitive_values() { # 名单文件
