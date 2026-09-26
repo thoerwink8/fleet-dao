@@ -122,6 +122,8 @@ export interface HarnessOptions {
   draftOpenLimits?: Partial<DraftOpenLimits>;
   /** 演示版的发布处；不给就是没配。 */
   demo?: DemoPublisher | null;
+  /** 还没做的读取器；不给就是都接上了。 */
+  notWired?: Deps['notWired'];
 }
 
 function wire<S extends Store>(
@@ -153,6 +155,7 @@ function wire<S extends Store>(
     now,
     health: options.health ?? [],
     demo: options.demo ?? null,
+    ...(options.notWired ? { notWired: options.notWired } : {}),
     feishu: options.feishu === null ? null : feishu.auth,
     workflows: options.workflows ?? {
       async signal(workflowId, signal) {

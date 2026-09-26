@@ -462,6 +462,52 @@ describe('账号池、定时任务、通知、操作记录、设置', () => {
     expect(body.staleAfterMinutes).toBe(30);
   });
 
+  it('还没做的读取器：额度表、路由表带上「待实现」（阶段、单号，单开在 fleet-dao 仓就链过去）；接上了就不带', async () => {
+    const mark = {
+      quota: { what: '额度读数', phase: 'P3', issue: 76 },
+      routeProbe: { what: '路由在线状态', phase: 'P1', issue: 129 },
+    };
+    const data = devFixtures(T0);
+    data.repos = [
+      ...(data.repos ?? []),
+      { id: 'r-self', owner: 'someone', name: 'fleet-dao', defaultBranch: 'main', testCommand: 'pnpm check' },
+    ];
+    const h = harness({ data, notWired: mark });
+    const { cookie } = await h.login();
+    const pools = PoolsResponse.parse(
+      await (await h.cockpit.request('/api/pools', { headers: { cookie } })).json(),
+    );
+    expect(pools.quotaNotWired).toEqual({
+      ...mark.quota,
+      issueRepo: { owner: 'someone', name: 'fleet-dao' },
+    });
+    const routing = RoutingResponse.parse(
+      await (await h.cockpit.request('/api/routing', { headers: { cookie } })).json(),
+    );
+    expect(routing.routeProbeNotWired).toMatchObject({ issue: 129, phase: 'P1' });
+
+    // 受管的仓里没有 fleet-dao：照样给，只是不带链接
+    const bare = harness({ notWired: mark });
+    const c2 = (await bare.login()).cookie;
+    const p2 = PoolsResponse.parse(
+      await (await bare.cockpit.request('/api/pools', { headers: { cookie: c2 } })).json(),
+    );
+    expect(p2.quotaNotWired).toEqual(mark.quota);
+
+    // 接上了（不给 notWired）：一次没读成的池照实是 unread，不带待实现
+    const wired = harness();
+    const c3 = (await wired.login()).cookie;
+    const p3 = PoolsResponse.parse(
+      await (await wired.cockpit.request('/api/pools', { headers: { cookie: c3 } })).json(),
+    );
+    expect(p3.quotaNotWired).toBeUndefined();
+    expect(p3.pools.some((p) => p.quotaStatus === 'unread')).toBe(true);
+    const r3 = RoutingResponse.parse(
+      await (await wired.cockpit.request('/api/routing', { headers: { cookie: c3 } })).json(),
+    );
+    expect(r3.routeProbeNotWired).toBeUndefined();
+  });
+
   it('额度按池判新旧：读成了、但上游的数冻住没前进，也算过期（看 dataAt）', async () => {
     const h = harness();
     const { cookie } = await h.login();

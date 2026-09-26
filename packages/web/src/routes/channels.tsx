@@ -4,6 +4,7 @@ import { toast } from 'sonner';
 import { brand } from '#brand';
 import { errorText, usePools, useRouting, useUpdateChannel } from '../api/client';
 import type { Channel, PoolView, Routing } from '../api/types';
+import { NotBuilt } from '../components/not-built';
 import { Empty, LoadError, LoadingRows, Page } from '../components/page';
 import { QuotaBar, ReadingBadge } from '../components/quota';
 import { StatusDot } from '../components/status';
@@ -69,6 +70,12 @@ export default function Channels() {
           <LoadError what="账号池" error={pools.error} />
         </div>
       ) : null}
+      {pools.data?.quotaNotWired ? (
+        <NotBuilt compact notWired={pools.data.quotaNotWired} className="mb-3" />
+      ) : null}
+      {data?.routeProbeNotWired ? (
+        <NotBuilt compact notWired={data.routeProbeNotWired} className="mb-3" />
+      ) : null}
       {!data ? (
         routing.error ? null : (
           <LoadingRows rows={5} />
@@ -84,6 +91,7 @@ export default function Channels() {
               routing={data}
               pools={pools.data?.pools.filter((p) => p.channelId === ch.id)}
               poolsFailed={Boolean(pools.error)}
+              quotaNotWired={Boolean(pools.data?.quotaNotWired)}
               busy={update.isPending}
               onToggle={(on) => {
                 if (on) toggle(ch, true);
@@ -132,6 +140,7 @@ function ChannelCard({
   routing,
   pools,
   poolsFailed,
+  quotaNotWired,
   busy,
   onToggle,
 }: {
@@ -140,11 +149,15 @@ function ChannelCard({
   /** undefined = 账号池还没读到或没读成（不是「没有账号池」），看 poolsFailed。 */
   pools: PoolView[] | undefined;
   poolsFailed: boolean;
+  /** 额度读取还没做：每个池的额度格子只画一道杠，页面顶上有待实现占位。 */
+  quotaNotWired: boolean;
   busy: boolean;
   onToggle(on: boolean): void;
 }) {
   const routes = routing.routes.filter((r) => r.channelId === ch.id);
   const alive = routes.filter((r) => r.alive).length;
+  // 路由探针还没做：没人写过 alive，不数「几条在线」、不把路由划掉（页面顶上有待实现占位）
+  const probeNotWired = Boolean(routing.routeProbeNotWired);
   const running = (pools ?? []).reduce((n, p) => n + p.running, 0);
   return (
     <section
@@ -155,8 +168,16 @@ function ChannelCard({
         <h2 className="text-[15px] font-semibold">{ch.name}</h2>
         <Badge variant={ch.billing === 'metered' ? 'outline' : 'secondary'}>{billingLabel[ch.billing]}</Badge>
         <span className="text-xs text-muted-foreground">
-          路由 <span className="num text-foreground">{alive}</span>/
-          <span className="num">{routes.length}</span> 在线
+          {probeNotWired ? (
+            <>
+              路由 <span className="num">{routes.length}</span> 条
+            </>
+          ) : (
+            <>
+              路由 <span className="num text-foreground">{alive}</span>/
+              <span className="num">{routes.length}</span> 在线
+            </>
+          )}
           {running ? (
             <>
               {' '}
@@ -183,7 +204,7 @@ function ChannelCard({
       ) : pools.length ? (
         <ul className="divide-y">
           {pools.map((p) => (
-            <PoolRow key={p.id} pool={p} />
+            <PoolRow key={p.id} pool={p} quotaNotWired={quotaNotWired} />
           ))}
         </ul>
       ) : (
@@ -197,9 +218,9 @@ function ChannelCard({
               key={r.id}
               className={cn(
                 'inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[11px]',
-                !r.alive && 'border-dashed text-muted-foreground line-through',
+                !r.alive && !probeNotWired && 'border-dashed text-muted-foreground line-through',
               )}
-              title={`${hostLabel[r.hostId]} · 账号池 ${r.poolId}${r.alive ? '' : ' · 离线'}`}
+              title={`${hostLabel[r.hostId]} · 账号池 ${r.poolId}${r.alive || probeNotWired ? '' : ' · 离线'}`}
             >
               <span className="num">{m?.displayName ?? r.modelId}</span>
               <span className="text-muted-foreground">· {hostLabel[r.hostId]}</span>
@@ -211,7 +232,7 @@ function ChannelCard({
   );
 }
 
-function PoolRow({ pool }: { pool: PoolView }) {
+function PoolRow({ pool, quotaNotWired }: { pool: PoolView; quotaNotWired: boolean }) {
   const now = useNow();
   // 和调度台、换模型对话框同一句话：没查成 / 已用满 / 最满的窗用了几成 / 用量没读到……
   const h = quotaHeadline(pool);
@@ -232,7 +253,9 @@ function PoolRow({ pool }: { pool: PoolView }) {
         <div className="mt-0.5 text-[11px] text-muted-foreground">在跑 / 并发上限</div>
       </div>
       <div className="min-w-0">
-        {w ? (
+        {quotaNotWired ? (
+          <span className="text-xs text-faint">—</span>
+        ) : w ? (
           <>
             <div className="flex items-center justify-between gap-2 text-xs">
               <span className="truncate text-muted-foreground">{windowTitle(w)}</span>

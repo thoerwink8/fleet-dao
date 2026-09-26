@@ -11,6 +11,7 @@ import {
   MeResponse,
   NotificationsQuery,
   NotificationsResponse,
+  type NotWired,
   PageQuery,
   PoolsResponse,
   ReposResponse,
@@ -41,11 +42,12 @@ import { meBody } from './auth.ts';
 import type { AskWaiters } from './changes.ts';
 import { registerCredentialRoutes } from './credentials.ts';
 import { registerDemoRoutes } from './demo.ts';
-import type { Deps } from './deps.ts';
+import type { Deps, NotWiredMark } from './deps.ts';
 import { ApiError, readJson, readQuery, reply } from './http.ts';
 import {
   type Actor,
   type NewAuditEntry,
+  type Store,
   type TaskSignal,
   WorkflowGoneError,
   WorkflowUnavailableError,
@@ -293,7 +295,17 @@ export function cockpitRoutes(deps: Deps, waiters: AskWaiters, relay: SseRelay):
       (stage) => byStage.get(stage) ?? { stage, routeIds: [], pinned: false },
     );
     const hardBans = HARD_BANS.map(({ id, reason }) => ({ id, reason }));
-    return reply(c, RoutingResponse, { channels, pools, models, routes, stages, hardBans, bans });
+    const routeProbeNotWired = await notWiredView(store, deps.notWired?.routeProbe);
+    return reply(c, RoutingResponse, {
+      channels,
+      pools,
+      models,
+      routes,
+      stages,
+      hardBans,
+      bans,
+      ...(routeProbeNotWired ? { routeProbeNotWired } : {}),
+    });
   });
 
   app.put(WebRoutes.updateStagePolicy.path, async (c) => {
@@ -361,8 +373,10 @@ export function cockpitRoutes(deps: Deps, waiters: AskWaiters, relay: SseRelay):
       store.listRuns({ active: true }),
     ]);
     const now = deps.now();
+    const quotaNotWired = await notWiredView(store, deps.notWired?.quota);
     return reply(c, PoolsResponse, {
       pools: buildPools({ pools, channels, windows, routes, activeRuns }, now, config.quotaStaleAfterMs),
+      ...(quotaNotWired ? { quotaNotWired } : {}),
       staleAfterMinutes: Math.round(config.quotaStaleAfterMs / 60_000),
       asOf: now.toISOString(),
     });
@@ -451,4 +465,13 @@ export function cockpitRoutes(deps: Deps, waiters: AskWaiters, relay: SseRelay):
   }
 
   return app;
+}
+
+/** 这些单开在 fleet-dao 自己这个仓：在受管的仓里按名字找它，找到了驾驶舱才链得过去（找不到只显示单号）。 */
+const SELF_REPO_NAME = 'fleet-dao';
+
+async function notWiredView(store: Store, mark: NotWiredMark | undefined): Promise<NotWired | undefined> {
+  if (!mark) return undefined;
+  const self = (await store.listRepos()).find((r) => r.name === SELF_REPO_NAME);
+  return { ...mark, ...(self ? { issueRepo: { owner: self.owner, name: self.name } } : {}) };
 }

@@ -4,6 +4,7 @@ import type { ReactNode } from 'react';
 import { brand } from '#brand';
 import { usePools } from '../api/client';
 import type { PoolView, QuotaWindowKind, QuotaWindowView } from '../api/types';
+import { NotBuilt } from '../components/not-built';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
 import { QuotaCell, quotaValue } from '../components/quota';
 import { Badge } from '../components/ui/badge';
@@ -97,6 +98,9 @@ export default function Quota() {
     >
       {isLoading || !data ? (
         <LoadingRows rows={6} />
+      ) : data.quotaNotWired ? (
+        // 额度读取还没做：整块换成待实现占位，不在格子里写「没查成」
+        <NotBuilt notWired={data.quotaNotWired} />
       ) : (
         <>
           <div className="grid gap-3 md:grid-cols-3">
