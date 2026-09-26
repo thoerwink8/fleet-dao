@@ -18,7 +18,7 @@ import {
   saveTaskSnapshot,
   upsertAlert,
 } from '@fleet-dao/db';
-import type { HostId, StageKind } from '@fleet-dao/shared';
+import type { HostId, OrgKind, StageKind } from '@fleet-dao/shared';
 import { routeBreaker } from '../failure/breaker.ts';
 import { type EnginePorts, type PickRouteResult, PortError, type RouteChoice } from '../ports.ts';
 import {
@@ -39,6 +39,12 @@ export const poolHoldKey = (poolId: string) => `${POOL_HOLD_PREFIX}${poolId}`;
 
 /** 目前接上的执行方式：只有 Claude Code（经 reclaude）。别的执行方式的路由不派，派不出时理由里写明。 */
 export const WIRED_HOSTS: readonly HostId[] = ['claude-code'];
+
+/**
+ * 会话用户此刻挂的 reclaude 组织（design 第九节）。切号（拼车用满切独享、到点切回）归 #59，还没做：在那之前会话用户
+ * 一直挂拼车，独享池的路由按 org-not-live 挡着不派。#59 接上之后改成读真实状态，不再是常量。
+ */
+export const SESSION_USER_ORG: OrgKind = 'carpool';
 
 /** 战绩和熔断看最近几天的会话结局。 */
 export const RECORD_DAYS = 7;
@@ -63,10 +69,10 @@ type StorePorts = Pick<
   'pickRoute' | 'askHuman' | 'requestApproval' | 'raiseAlert' | 'recordTiming' | 'saveTaskState'
 >;
 
-/** 给人看的池名：从渠道名拼，独享、拼车按会话用户分；不带账号、组织编号。 */
-export function poolNameOf(channelName: string, runAsUser: string | null): string {
-  if (runAsUser === 'fleet-agent-dedicated') return `${channelName} · 独享`;
-  if (runAsUser === 'fleet-agent-carpool') return `${channelName} · 拼车`;
+/** 给人看的池名：从渠道名拼，独享、拼车按池的组织类型分（两个 Claude 池是同一个会话用户）；不带账号、组织编号。 */
+export function poolNameOf(channelName: string, orgKind: OrgKind | null): string {
+  if (orgKind === 'solo') return `${channelName} · 独享`;
+  if (orgKind === 'carpool') return `${channelName} · 拼车`;
   return channelName;
 }
 
@@ -145,8 +151,10 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
       routeId: r.routeId,
       channelId: r.channelId,
       poolId: r.poolId,
-      poolName: poolNameOf(r.channelName, r.poolRunAsUser),
-      poolRole: r.poolRunAsUser === 'fleet-agent-carpool' ? 'backup' : 'primary',
+      poolName: poolNameOf(r.channelName, r.poolOrgKind),
+      // 两个 Claude 池合成一个会话用户后不再同时跑，没有备池了（routing/types.ts 的 PoolRole）。
+      poolRole: 'primary',
+      orgKind: r.poolOrgKind,
       modelId: r.modelId,
       modelName: r.modelName,
       family: r.family,
@@ -227,6 +235,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         routes: facts.routes,
         now: now.toISOString(),
         draw: draw(),
+        liveOrg: SESSION_USER_ORG,
         ...(deps.routingPolicy ? { policy: deps.routingPolicy } : {}),
       } satisfies Omit<ChooseRouteInput, 'avoid' | 'taskRouteId'>;
       const notes: string[] = [];

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # shellcheck source-path=SCRIPTDIR
-# 法国机器装机（以 root 跑；幂等：跑第二遍什么都不变）。装的是：引擎用户 fleet、两个会话专用用户、创始人的登录用户 pilot、目录、
+# 法国机器装机（以 root 跑；幂等：跑第二遍什么都不变）。装的是：引擎用户 fleet、会话专用用户（一个）、创始人的登录用户 pilot、目录、
 # PostgreSQL 16（Ubuntu 自带的源，吃得到自动安全更新）、Temporal 服务端 1.32.0（Postgres 持久化，端口和旧系统错开）、
 # 本机上只许 root 和 fleet 连 Temporal 与库的 nft 表、AI 会话资源池 fleet-agents.slice 与起会话的脚本、
 # fleet 用户的 pnpm（corepack）、WireGuard 客户端（主动连香港，法国不开任何入站端口）、
@@ -22,6 +22,8 @@ source "$DEPLOY_DIR/lib/snapshot.sh"
 source "$DEPLOY_DIR/lib/root-exec-check.sh"
 # shellcheck source=lib/login-user.sh
 source "$DEPLOY_DIR/lib/login-user.sh"
+# shellcheck source=lib/session-user.sh
+source "$DEPLOY_DIR/lib/session-user.sh"
 # shellcheck source=lib/cli-tools.sh
 source "$DEPLOY_DIR/lib/cli-tools.sh"
 # shellcheck source=lib/agents-sync.sh
@@ -36,8 +38,8 @@ TEMPORAL_SERVER_SHA256=ca1ccbb1d1545b68eb4523de463c51ffcd80f7e0bccd14a9b2c56fc7e
 TEMPORAL_CLI_VERSION=1.9.1
 TEMPORAL_CLI_SHA256=09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5
 PG_MAJOR=16 # Temporal 官方测过的最高大版本（13.18/14.15/15.10/16.6）；Ubuntu 24.04 自带的源里就是 16
-# pilot 的 reclaude：和会话用户手上那份同一个（dl.reclaude.ai/stable.json 列的 linux-amd64）。只在没有时装，
-# 之后由 pilot 自己 reclaude update，脚本不盖
+# 会话用户和 pilot 的 reclaude（dl.reclaude.ai/stable.json 列的 linux-amd64）。只在没有时装，
+# 之后由各用户自己 reclaude update，脚本不盖
 RECLAUDE_VERSION=v1.4.0
 RECLAUDE_SHA256=4f5d683b695ea392f53d4e8f2a916f092794f8d4196d5b7356afb0c9a9392f0a
 # uv：只用来给会话用户和 pilot 各装一份 ddgs（lib/cli-tools.sh）。装在 /opt/fleet-dao/uv/<版本>，归 root，不进谁的 PATH
@@ -73,9 +75,10 @@ API_PORT=8787
 # 本机上只许 root 和 fleet 连的端口：Temporal 没开认证，库和驾驶舱后端也不该让会话直接碰（nft 表 inet fleet_dao）
 PROTECTED_PORTS=("$PG_PORT" "${TEMPORAL_PORTS[@]}" "$API_PORT")
 NFT_FILE=/etc/fleet-dao/nftables.nft
-# AI 会话跑在两个专用用户下，各挂一个 reclaude 组织、永不切号（独享、拼车）；引擎（fleet）经 sudo 只能调 fleet-agent-scope 起会话。
-# 会话用户：没有 sudo、不能提权、家目录干净、没有 GitHub 凭据、读不到 /etc/fleet-dao。旧系统的会话用户不用、不碰。
-SESSION_USERS=(fleet-agent-dedicated fleet-agent-carpool)
+# AI 会话跑在一个专用用户下（lib/session-user.sh：reclaude 设备上限，法国只占 1 台）；引擎（fleet）经 sudo 只能调
+# fleet-agent-scope 起会话。会话用户：没有 sudo、不能提权、家目录干净、没有 GitHub 凭据、读不到 /etc/fleet-dao。
+# 旧系统的会话用户不用、不碰；停用的 fleet-agent-dedicated 不建、不查（已删）。
+SESSION_USERS=("$SESSION_USER")
 # 创始人的登录用户：经 Mirasim 的 ssh 远程模式登进来干活。没有 sudo、只在自己的组和 systemd-journal 里，
 # 家里只放 reclaude 二进制、不放任何凭据（lib/login-user.sh）。它改得了的 root 执行文件一样要清零，所以也算写入身份
 PILOT_USER=pilot
@@ -191,9 +194,12 @@ setup_identity() {
   ensure_dir /etc/fleet-dao/github root:fleet 750
   ensure_dir /opt/fleet-dao root:root 755
   local u
+  ensure_pkgs curl # 下会话用户的 reclaude 要它
   for u in "${SESSION_USERS[@]}"; do
     ensure_service_user "$u" "/home/$u"
     ensure_dir "/home/$u" "$u:$u" 750
+    # 引擎起 Claude 会话用的就是它家里这份 reclaude（engine.env 的 {user} 路径）：新机器上没有就装，登录仍由人做（ops 第五节）
+    ensure_user_reclaude "$u" "/home/$u" "https://dl.reclaude.ai/$RECLAUDE_VERSION/reclaude-linux-amd64" "$RECLAUDE_SHA256"
   done
   if [[ -e "$ENV_FILE" ]]; then
     fix_meta "$ENV_FILE" root:fleet 640
@@ -928,30 +934,10 @@ readback_web_upload() {
   fi
 }
 
-# 会话用户：没有 sudo、只在自己的组里、家里没有 GitHub 凭据；reclaude 登录要创始人在浏览器里点，没登录记「待配」
+# 会话用户：判据在 lib/session-user.sh（没有 sudo、只在自己的组里、家里没有 GitHub 凭据；reclaude 没登录记「待配」）
 readback_session_users() {
-  local u home bad f
-  for u in "${SESSION_USERS[@]}"; do
-    home=$(getent passwd "$u" | cut -d: -f6)
-    bad=""
-    if [[ "$(sudo -l -U "$u" 2>&1)" != *"not allowed to run sudo"* ]]; then bad+="有 sudo 条目；"; fi
-    if [[ "$(id -nG "$u")" != "$u" ]]; then bad+="附加组「$(id -nG "$u")」；"; fi
-    for f in .config/gh .git-credentials .netrc .ssh; do
-      if [[ -e "$home/$f" ]]; then bad+="家里有 ~/$f；"; fi
-    done
-    if [[ -n "$bad" ]]; then
-      red "$u：$bad"
-    else
-      ok "$u：没有 sudo、只在自己的组里、家里没有 GitHub 凭据和 ssh 钥匙"
-    fi
-    if [[ ! -x "$home/.local/bin/reclaude" ]]; then
-      pending "$u 还没有 reclaude 二进制（~/.local/bin/reclaude）：见 docs/ops.md「会话用户登录 reclaude」"
-    elif [[ ! -s "$home/.reclaude/device.json" ]]; then
-      pending "$u 的 reclaude 还没登录：要创始人在浏览器里授权，见 docs/ops.md「会话用户登录 reclaude」"
-    else
-      ok "$u 的 reclaude 已登录"
-    fi
-  done
+  local u
+  for u in "${SESSION_USERS[@]}"; do readback_session_user "$u"; done
 }
 
 # 创始人的登录用户：判据在 lib/login-user.sh。reclaude 登没登录、家里放了什么钥匙是创始人自己的事，不查

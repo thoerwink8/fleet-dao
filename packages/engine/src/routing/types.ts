@@ -1,6 +1,6 @@
 // 选路的输入与结果。输入由引擎的 pickRoute 端口从库里取齐（候选路由、熔断、战绩），结果只有三种：派、等、派不出。
 // 时刻一律 ISO 字符串（和熔断一样），认不出就抛 RoutingInputError，不当成「没有」。
-import type { HostId, QuotaWindowKind, StageKind } from '@fleet-dao/shared';
+import type { HostId, OrgKind, QuotaWindowKind, StageKind } from '@fleet-dao/shared';
 import type { RoutingPolicy } from './policy.ts';
 
 /**
@@ -62,8 +62,9 @@ export interface RouteRecord {
 }
 
 /**
- * 主池 / 备池。独享号是主池，拼车号是备池：备池只接短而轻的活、并发另有上限、剩余不够跑一个活就不派，
- * 额度未知时只放一个试探。端口按池的会话用户填（pools.run_as_user = fleet-agent-carpool → backup），其余 primary。
+ * 主池 / 备池：备池只接短而轻的活、并发另有上限、剩余不够跑一个活就不派，额度未知时只放一个试探。
+ * 原先两个会话用户同时跑时拼车号是备池；法国合成一个会话用户后（创始人 2026-09-26）两个 Claude 池不再同时跑，
+ * 平时挂着的拼车池要接全部的活，所以端口一律填 primary。这套备池规则改成什么、删不删归 #59（specs/59-拼车切独享）。
  */
 export type PoolRole = 'primary' | 'backup';
 
@@ -75,6 +76,11 @@ export interface RouteFacts {
   /** 给人看的池名，例如「独享号」「拼车号」「Mirasim 中转」。不许带账号、组织编号、邮箱。 */
   poolName: string;
   poolRole: PoolRole;
+  /**
+   * Claude 订阅池对应的 reclaude 组织类型（pools.org_kind）。会话用户同一时刻只挂一个组织，只有和它挂着的一样的池
+   * 能派（ChooseRouteInput.liveOrg）。不是 Claude 订阅池的不填。
+   */
+  orgKind?: OrgKind | null;
   modelId: string;
   /** 模型目录的显示名，例如 Opus 5.5（硬禁令也按它认 Fable）。 */
   modelName: string;
@@ -133,6 +139,11 @@ export interface ChooseRouteInput {
   weight?: TaskWeight;
   /** 这个任务要避开的（换路由、换模型时引擎给）。 */
   avoid?: { routeIds?: string[]; poolIds?: string[]; modelIds?: string[] };
+  /**
+   * 会话用户此刻挂的 reclaude 组织（design 第九节：法国只有一个会话用户，同一时刻只挂一个组织）。带 orgKind 的池
+   * 只有和它一样的才派；不给 = 不知道挂的是哪个，带 orgKind 的池一律不派。
+   */
+  liveOrg?: OrgKind;
   /** [0, 1) 的随机数，试探用；由工作流经 decide 生成、记进历史。试探开着时必须给。 */
   draw?: number;
   now: string;
@@ -149,6 +160,7 @@ export type BlockCode =
   | 'breaker-open'
   | 'avoided'
   | 'quota-short'
+  | 'org-not-live'
   | 'backup-heavy'
   | 'backup-no-slot'
   | 'backup-quota-unknown';

@@ -171,7 +171,7 @@ describe.skipIf(!onPosix)('经帮手起停（假帮手）', () => {
       .map((l) => JSON.parse(l) as { action: string; args: string[]; env: Record<string, string> });
   const scopeOf = (id: string): CgroupScope => ({
     id,
-    user: 'fleet-agent-dedicated',
+    user: 'fleet-agent-carpool',
     helper: HELPER,
     sudo: [process.execPath],
   });
@@ -205,7 +205,7 @@ describe.skipIf(!onPosix)('经帮手起停（假帮手）', () => {
     expect(run?.args).toEqual([
       'run-s1',
       '--user',
-      'fleet-agent-dedicated',
+      'fleet-agent-carpool',
       '--cwd',
       cwd,
       '--',

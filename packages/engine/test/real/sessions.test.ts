@@ -79,10 +79,10 @@ function ctx(): PortContext & { beats: number } {
 
 function setup(
   script: (spec: Parameters<ReturnType<typeof fakeRun>['run']>[0], n: number) => FakeRunScript,
-  options: { transcriptMissing?: boolean; spawnTimeoutMs?: number; gh?: typeof m.gh } = {},
+  options: { spawnTimeoutMs?: number; gh?: typeof m.gh } = {},
 ) {
   const fake = fakeRun(script);
-  const trees = fakeTrees(join(root, 'work'), options);
+  const trees = fakeTrees(join(root, 'work'));
   const scope = fakeScopeHelper(root);
   const ports = createSessionPorts({
     db: t.db,
@@ -205,18 +205,18 @@ describe('写码会话', () => {
     const input = launch();
     const started = await ports.startSession(input, ctx());
     expect(started).toMatchObject({ resumed: false, handle: { pid: 4242 } });
-    expect(trees.adopts).toEqual([{ dir: input.worktreePath, user: 'fleet-agent-dedicated' }]);
+    expect(trees.adopts).toEqual([{ dir: input.worktreePath, user: 'fleet-agent-carpool' }]);
     const spec = fake.specs[0];
     expect(spec?.session).toEqual({ mode: 'new', id: started.sessionId });
     expect(spec?.cwd).toBe(input.worktreePath);
     expect(spec?.cgroup).toMatchObject({
       id: input.runId,
-      user: 'fleet-agent-dedicated',
+      user: 'fleet-agent-carpool',
       limits: { memoryHigh: '1536M', memoryMax: '2048M', memorySwapMax: '0M' },
     });
     expect(spec?.model).toBe('claude-opus-5-5');
     expect(spec?.prompt).toContain('需求 #12');
-    expect(fake.options[0]?.command).toEqual(['/opt/fake/fleet-agent-dedicated/reclaude']);
+    expect(fake.options[0]?.command).toEqual(['/opt/fake/fleet-agent-carpool/reclaude']);
     // 树是会话用户从镜像的 bundle 建的：分支在起会话前的头上。
     expect(git(input.worktreePath as string, 'rev-parse', `${BRANCH}~1`)).toBe(m.head);
 
@@ -235,7 +235,7 @@ describe('写码会话', () => {
     expect(row).toMatchObject({
       sessionId: started.sessionId,
       outcome: 'ok',
-      runAsUser: 'fleet-agent-dedicated',
+      runAsUser: 'fleet-agent-carpool',
       routeOutcome: 'ok',
       costUsd: 0.5,
     });
@@ -346,7 +346,7 @@ describe('会话断了接着干', () => {
     expect((await runRow(input.runId))?.costUsd).toBeCloseTo(0.3);
   });
 
-  it('换了会话用户、上一轮上下文还小：把树和过程记录交给新用户，--fork-session 续', async () => {
+  it('换了账号池（切号后原会话绑在旧组织上）、上一轮上下文还小：同一个会话用户 --fork-session 续，不改属主、不拷记录', async () => {
     const { ports, fake, trees } = setup((_, n) => commitAndDone(n === 1 ? { contextTokens: 5_000 } : {})());
     const carpool = {
       routeId: 'carpool',
@@ -358,12 +358,10 @@ describe('会话断了接着干', () => {
     const first = await runOnce(ports, launch({ route: carpool }));
     const input = launch({ resumeSessionId: first.sessionId });
     const started = await ports.startSession(input, ctx());
-    expect(trees.adopts.at(-1)).toEqual({
-      dir: input.worktreePath,
-      user: 'fleet-agent-dedicated',
-      transcript: { from: 'fleet-agent-carpool', sessionId: first.sessionId },
-    });
+    // 树第一次起会话时交给了会话用户，之后还是它：不再改属主
+    expect(trees.adopts).toEqual([{ dir: input.worktreePath, user: 'fleet-agent-carpool' }]);
     expect(fake.specs[1]?.session).toEqual({ mode: 'fork', from: first.sessionId, id: started.sessionId });
+    expect(fake.specs[1]?.cgroup?.user).toBe('fleet-agent-carpool');
     expect(started.resumed).toBe(true);
     expect(started.sessionId).not.toBe(first.sessionId);
     await ports.awaitSession(
@@ -374,7 +372,7 @@ describe('会话断了接着干', () => {
     expect((await runRow(input.runId))?.costUsd).toBeNull();
   });
 
-  it('换了会话用户、上一轮上下文大了：开新会话，带接力任务书（已提交的不重做）', async () => {
+  it('换了账号池、上一轮上下文大了：开新会话，带接力任务书（已提交的不重做）', async () => {
     const { ports, fake } = setup((_, n) => commitAndDone(n === 1 ? { contextTokens: 200_000 } : {})());
     const carpool = {
       routeId: 'carpool',
@@ -392,21 +390,17 @@ describe('会话断了接着干', () => {
     expect(spec?.prompt).toContain('大了不 fork');
   });
 
-  it('要 fork 但过程记录没拷过去：改成开新会话带接力任务书，不硬续', async () => {
-    const { ports, fake } = setup((_, n) => commitAndDone(n === 1 ? { contextTokens: 5_000 } : {})(), {
-      transcriptMissing: true,
-    });
-    const carpool = {
-      routeId: 'carpool',
-      poolId: 'claude-carpool',
-      modelId: 'opus-5.5',
-      family: 'claude',
-      hostId: 'claude-code' as const,
-    };
-    const first = await runOnce(ports, launch({ route: carpool }));
+  it('上一轮跑在已停用的会话用户下（过程记录在已删的家目录里）：同一个池也不硬续，开新会话带接力任务书', async () => {
+    const { ports, fake } = setup((_, n) => commitAndDone(n === 1 ? { contextTokens: 5_000 } : {})());
+    const first = await runOnce(ports, launch());
+    await t.client.query(
+      `update session_runs set run_as_user = 'fleet-agent-dedicated' where session_id = $1`,
+      [first.sessionId],
+    );
     await runOnce(ports, launch({ resumeSessionId: first.sessionId }));
     expect(fake.specs[1]?.session.mode).toBe('new');
-    expect(fake.specs[1]?.prompt).toContain('过程记录没找到');
+    expect(fake.specs[1]?.prompt).toContain('接力');
+    expect(fake.specs[1]?.prompt).toContain('不是现在的会话用户');
   });
 });
 
@@ -503,7 +497,7 @@ describe('失败', () => {
     const { end } = await runOnce(ports, launch());
     expect(end).toMatchObject({
       outcome: 'failed',
-      failure: { code: 'quota_exhausted', resetsAt, machine: '法国', runAsUser: 'fleet-agent-dedicated' },
+      failure: { code: 'quota_exhausted', resetsAt, machine: '法国', runAsUser: 'fleet-agent-carpool' },
     });
     const windows = (await t.db.select().from(quotaWindows)).filter(
       (w) => w.poolId === 'claude-solo' && w.label === 'five_hour',
@@ -536,7 +530,7 @@ describe('失败', () => {
     );
     expect(hold).toMatchObject({ level: 'decision', resolvedAt: null });
     expect(hold?.body).toContain('法国');
-    expect(hold?.body).toContain('fleet-agent-dedicated');
+    expect(hold?.body).toContain('fleet-agent-carpool');
     expect(hold?.body).toContain('reclaude login');
     // 账号池的事不算这条路由的账（不喂熔断）。
     expect((await runRow(firstInput.runId))?.routeOutcome).toBe('neutral');
@@ -715,9 +709,11 @@ describe('失败', () => {
         ctx(),
       ),
     ).rejects.toMatchObject({ code: 'HOST_NOT_WIRED' });
-    await t.client.query("update pools set run_as_user = null where id = 'claude-solo'");
+    await t.client.query("update pools set run_as_user = null, org_kind = null where id = 'claude-solo'");
     await expect(ports.startSession(launch(), ctx())).rejects.toMatchObject({ code: 'CONFIG_MISSING' });
-    await t.client.query("update pools set run_as_user = 'fleet-agent-dedicated' where id = 'claude-solo'");
+    await t.client.query(
+      "update pools set run_as_user = 'fleet-agent-carpool', org_kind = 'carpool' where id = 'claude-solo'",
+    );
     await expect(ports.startSession(launch({ taskId: randomUUID() }), ctx())).rejects.toMatchObject({
       code: 'TASK_NOT_FOUND',
     });

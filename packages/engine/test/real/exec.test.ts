@@ -66,7 +66,7 @@ describe('以会话用户的身份跑命令', { timeout: 30_000 }, () => {
   it('帮手拒了（退出码 64）：结果带退出码和它说的话，不当成功', async () => {
     const exec = scopeExec({ helper, sudo: [process.execPath] });
     const r = await exec({
-      user: 'fleet-agent-dedicated',
+      user: 'fleet-agent-carpool',
       cwd: '/var/lib/fleet-work/x/y',
       argv: ['/usr/bin/git', '--fail'],
       timeoutMs: 10_000,
@@ -78,7 +78,7 @@ describe('以会话用户的身份跑命令', { timeout: 30_000 }, () => {
 
   it('命令行拼不出来的（相对工作目录、坏的 scope 编号、别的用户）：起之前就拒', () => {
     const exec = scopeExec({ helper, sudo: [process.execPath] });
-    const base = { user: 'fleet-agent-dedicated' as const, argv: ['/usr/bin/git'], timeoutMs: 1000 };
+    const base = { user: 'fleet-agent-carpool' as const, argv: ['/usr/bin/git'], timeoutMs: 1000 };
     expect(() => exec({ ...base, cwd: 'relative', scopeId: 'ok' })).toThrow('绝对路径');
     expect(() => exec({ ...base, cwd: '/x', scopeId: 'bad id' })).toThrow('会话编号');
     expect(() => exec({ ...base, user: 'root' as never, cwd: '/x', scopeId: 'ok' })).toThrow('会话用户');
@@ -87,7 +87,7 @@ describe('以会话用户的身份跑命令', { timeout: 30_000 }, () => {
   it('起不来、超时：结果讲清楚是哪一种', async () => {
     const missing = scopeExec({ helper: join(dir, 'nope'), sudo: [join(dir, 'no-such-binary')] });
     const r = await missing({
-      user: 'fleet-agent-dedicated',
+      user: 'fleet-agent-carpool',
       cwd: '/x',
       argv: ['/usr/bin/true'],
       timeoutMs: 5000,
@@ -98,7 +98,7 @@ describe('以会话用户的身份跑命令', { timeout: 30_000 }, () => {
 
     const slow = localExec();
     const t = await slow({
-      user: 'fleet-agent-dedicated',
+      user: 'fleet-agent-carpool',
       cwd: dir,
       argv: [process.execPath, '-e', 'setTimeout(() => {}, 10_000)'],
       timeoutMs: 200,

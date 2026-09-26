@@ -7,7 +7,14 @@ import { type BanSubject, hardBanFor, type RunAsUser, type StageKind } from '@fl
 import { and, asc, eq, isNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { Db } from './client.ts';
-import { BILLING_KINDS, HOST_IDS, RUN_AS_USERS, STAGE_KINDS } from './schema/enums.ts';
+import {
+  BILLING_KINDS,
+  HOST_IDS,
+  ORG_KINDS,
+  RETIRED_RUN_AS_USERS,
+  RUN_AS_USERS,
+  STAGE_KINDS,
+} from './schema/enums.ts';
 import {
   auditLog,
   channels,
@@ -26,6 +33,21 @@ const Text = z.string().trim().min(1);
 
 const StageEntry = z.strictObject({ routeId: Id, enabled: z.boolean() });
 
+/** 停用的会话用户（fleet-agent-dedicated）写进来要明确报错、说清改成什么：法国已经没有这个用户，装进去会话起不来。 */
+const RunAsUserField = z
+  .string()
+  .superRefine((value, ctx) => {
+    if ((RETIRED_RUN_AS_USERS as readonly string[]).includes(value)) {
+      ctx.addIssue({
+        code: 'custom',
+        message: `${value} 已停用（法国只留一个会话用户，docs/design.md 第十节），改成 ${RUN_AS_USERS.join('、')}，并用 orgKind 标明是拼车还是独享池`,
+      });
+    } else if (!(RUN_AS_USERS as readonly string[]).includes(value)) {
+      ctx.addIssue({ code: 'custom', message: `会话用户只能是 ${RUN_AS_USERS.join('、')}，给的是 ${value}` });
+    }
+  })
+  .transform((value) => value as RunAsUser);
+
 export const CatalogSchema = z.strictObject({
   families: z.array(z.strictObject({ id: Id, displayName: Text, vendor: Text })).default([]),
   channels: z
@@ -33,13 +55,26 @@ export const CatalogSchema = z.strictObject({
     .min(1),
   pools: z
     .array(
-      z.strictObject({
-        id: Id,
-        channelId: Id,
-        maxConcurrency: z.int().positive(),
-        runAsUser: z.enum(RUN_AS_USERS).optional(),
-        expiresAt: z.iso.datetime({ offset: true }).optional(),
-      }),
+      z
+        .strictObject({
+          id: Id,
+          channelId: Id,
+          maxConcurrency: z.int().positive(),
+          runAsUser: RunAsUserField.optional(),
+          orgKind: z.enum(ORG_KINDS).optional(),
+          expiresAt: z.iso.datetime({ offset: true }).optional(),
+        })
+        // 跑会话的池（带会话用户的就是 Claude 订阅池）必须写明是哪个组织：漏了选路判不了会话用户挂没挂着它，
+        // 挂着拼车也会派到独享池，额度记错池（库里也有同样的约束 pools_session_pool_has_org_kind）。
+        .refine((p) => p.runAsUser === undefined || p.orgKind !== undefined, {
+          message: `带会话用户（runAsUser）的池要写 orgKind（${ORG_KINDS.join(' / ')}）：会话用户同一时刻只挂一个组织，不写就判不了这个池能不能派`,
+          path: ['orgKind'],
+        })
+        // 反过来也不行：只写 orgKind 的池会被选路当成 Claude 组织池，按会话用户挂的组织挡掉或放出去，而它根本不跑会话。
+        .refine((p) => p.orgKind === undefined || p.runAsUser !== undefined, {
+          message: 'orgKind 只给跑会话的 Claude 订阅池写，要和 runAsUser 一起给',
+          path: ['runAsUser'],
+        }),
     )
     .min(1),
   models: z.array(z.strictObject({ id: Id, family: Id, displayName: Text })).default([]),
@@ -369,6 +404,7 @@ export async function loadCatalog(
         ),
       ['name', 'billing', 'enabled'],
     );
+    const sessionFilled = new Set<string>();
     await upsertMissing(
       'pools',
       config.pools,
@@ -381,18 +417,32 @@ export async function loadCatalog(
               channelId: p.channelId,
               maxConcurrency: p.maxConcurrency,
               runAsUser: p.runAsUser ?? null,
+              orgKind: p.orgKind ?? null,
               expiresAt: p.expiresAt ? new Date(p.expiresAt) : null,
             })
             .onConflictDoNothing({ target: pools.id })
             .returning({ id: pools.id }),
         ),
-      ['channelId', 'maxConcurrency', 'runAsUser', 'expiresAt'],
-      ['runAsUser', 'expiresAt'],
+      ['channelId', 'maxConcurrency', 'runAsUser', 'orgKind', 'expiresAt'],
+      ['runAsUser', 'orgKind', 'expiresAt'],
       async (id, field, value) => {
-        const [set, empty] =
-          field === 'runAsUser'
-            ? [{ runAsUser: value as RunAsUser }, isNull(pools.runAsUser)]
-            : [{ expiresAt: new Date(value as string) }, isNull(pools.expiresAt)];
+        // 会话用户和组织类型要么都有要么都没有（库里约束 pools_session_pool_org_kind_together）：两格一起补，
+        // 只在两格都空着时写；第二个字段来的时候这一行已经在这次补过了，照样算补上。
+        if (field === 'runAsUser' || field === 'orgKind') {
+          if (sessionFilled.has(id)) return true;
+          const want = config.pools.find((p) => p.id === id);
+          if (!want?.runAsUser || !want.orgKind) return false;
+          const ok = wrote(
+            await tx
+              .update(pools)
+              .set({ runAsUser: want.runAsUser, orgKind: want.orgKind })
+              .where(and(eq(pools.id, id), isNull(pools.runAsUser), isNull(pools.orgKind)))
+              .returning({ id: pools.id }),
+          );
+          if (ok) sessionFilled.add(id);
+          return ok;
+        }
+        const [set, empty] = [{ expiresAt: new Date(value as string) }, isNull(pools.expiresAt)];
         return wrote(
           await tx
             .update(pools)

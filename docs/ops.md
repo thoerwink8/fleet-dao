@@ -51,7 +51,7 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 | 用户 | 在哪 | 干什么 |
 |---|---|---|
 | `fleet` | 两台 | 引擎、驾驶舱后端、Temporal（法国），飞书网关（香港）。系统用户，家 `/home/fleet`（750） |
-| `fleet-agent-dedicated`、`fleet-agent-carpool` | 法国 | AI 会话专用：各挂一个 reclaude 组织（独享、拼车）；独享号的用户永不切号，拼车号的用户额度用满时切到独享号、窗口回来再切回（design 第九节，#59）；引擎按选中的账号池挑用户。没有 sudo、不能提权、只在自己的组里、家里没有 GitHub 凭据、读不到 `/etc/fleet-dao`、连不上 Temporal 和库 |
+| `fleet-agent-carpool` | 法国 | AI 会话专用，**只有这一个**（称「会话用户」；名字是历史沿用，不改名免得重新登录）：reclaude 一个账户最多挂 4 台设备、一个家目录算一台，本机和另一台机器已占掉两台，法国只能占 1 台（创始人 2026-09-26）。引擎的全部会话都跑在它下面；它平时挂拼车组织，拼车用满时整个用户切到独享组织、手上的会话 fork 续上，拼车窗口恢复再切回（design 第九节，切号 #59 还没做）。没有 sudo、不能提权、只在自己的组里、家里没有 GitHub 凭据、读不到 `/etc/fleet-dao`、连不上 Temporal 和库。原先的 `fleet-agent-dedicated`（挂独享号的第二个会话用户）已删，2026-09-26；france.sh 不再建它、读回不查它 |
 | `pilot` | 法国 | 创始人的登录用户：用 Mirasim 桌面端的 ssh 远程模式登进来干活（第五节）。系统用户，家 `/home/pilot`（750）；没有任何 sudo，只在自己的组和 `systemd-journal` 里（看日志）；读不到 `/etc/fleet-dao`、连不上 Temporal 和库 |
 | `root` | | 只装机 |
 
@@ -75,8 +75,8 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 | `/etc/systemd/system/`：`fleet-temporal.service`、`fleet-agents.slice`、`fleet-firewall.service`、`postgresql@16-main.service.d/fleet.conf` | root 644 | 单元；最后那个让库的进程没了（干净退出也算）就拉起来——装包自带的是 `Restart=no` |
 | `/etc/systemd/system/`：`fleet-engine.service`、`fleet-api.service` | root 644 | 应用单元，发布脚本从要发的那版里取来装上，只装 `release.env` 启用了的（第九节） |
 | `/home/fleet/.local/bin/pnpm` | fleet | corepack 的垫片，版本跟仓根 `package.json` 的 `packageManager` |
-| `/home/fleet-agent-*/.local/bin/reclaude` | 各会话用户 | reclaude 二进制；登录见第五节 |
-| `/home/pilot/.local/bin/reclaude` | pilot 755 | reclaude 二进制：france.sh 只在没有时装（版本和 sha256 钉在脚本顶部），之后 pilot 自己 `reclaude update` |
+| `/home/fleet-agent-carpool/.local/bin/reclaude` | 会话用户 | reclaude 二进制：france.sh 只在没有时装（和 pilot 同一个版本、sha256），缺了读回判红；登录见第五节 |
+| `/home/pilot/.local/bin/reclaude` | pilot 755 | reclaude 二进制：france.sh 只在没有时装（版本和 sha256 钉在脚本顶部），之后 pilot 自己 `reclaude update`。pilot 不登录 reclaude（第五节），读回也不查登没登录 |
 | `/home/pilot/.mirasim-remote/`、`/home/pilot/.mirasim/` | pilot | Mirasim 桌面端连进来时自己装的服务端和它的数据（第五节），不归装机脚本管 |
 
 香港：
@@ -127,7 +127,7 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 
 - `bash deploy/lib/snapshot.sh ours`：fleet-dao 管的东西的指纹。连跑两遍装机，两遍之间各拍一次，diff 为空才算第二遍零改动——和脚本自己数的「改动几处」是两套判据。
 - `bash deploy/lib/snapshot.sh others`：不归 fleet-dao 管的单元状态、监听端口、防火墙（系统自带的服务、MiraQuota 等）。装机脚本每次开头结尾自己比一遍：装机不许碰它们。
-- `sudo bash deploy/test/run.sh`：语法、shellcheck、自检的违规样本、发布脚本的来回（`release-flow.test.sh`）、香港网关的入口（`gateway-deploy.test.sh`）、网关打包（`gateway-bundle.test.sh`，要先 `pnpm install`）、公网上看得到的几样（`public-site.test.sh`：占位页、健康页不带仓名，`release.json` 只给隧道、整站 noindex；真起 nginx 那段要这台装了 nginx）、健康页的判定（`health-page.test.mjs`）、同步脚本以 root 替别的用户写（`agents-sync.test.sh`）、ddgs 的装和查（`cli-tools.test.sh`）、本页端口表和脚本对得上、`adopt` 的用法校验和拷会话记录（`agent-scope-adopt.test.sh`）。后者要建、删真的系统账号（两个会话用户），这一段只在命令行上给了 `FLEET_TEST_SYSTEM_USERS=1` 时跑（`sudo FLEET_TEST_SYSTEM_USERS=1 bash deploy/test/run.sh`，只在 CI 的一次性机器上这么跑）；没给、或这两个用户、组、家目录有一样已经在，这一段报「没跑成」（退出码 2，不算通过），不碰已有的账号。
+- `sudo bash deploy/test/run.sh`：语法、shellcheck、自检的违规样本、发布脚本的来回（`release-flow.test.sh`）、香港网关的入口（`gateway-deploy.test.sh`）、网关打包（`gateway-bundle.test.sh`，要先 `pnpm install`）、公网上看得到的几样（`public-site.test.sh`：占位页、健康页不带仓名，`release.json` 只给隧道、整站 noindex；真起 nginx 那段要这台装了 nginx）、健康页的判定（`health-page.test.mjs`）、同步脚本以 root 替别的用户写（`agents-sync.test.sh`）、ddgs 的装和查（`cli-tools.test.sh`）、本页端口表和脚本对得上、只有一个会话用户且它的读回拦得下故意造的错（`session-user.test.sh`：不要 root，假的 getent、sudo、id）、`adopt` 的用法校验和改属主（`agent-scope-adopt.test.sh`）。后者改属主那段要建、删真的系统账号（会话用户），只在命令行上给了 `FLEET_TEST_SYSTEM_USERS=1` 时跑（`sudo FLEET_TEST_SYSTEM_USERS=1 bash deploy/test/run.sh`，只在 CI 的一次性机器上这么跑）；没给、或这个用户、组、家目录有一样已经在，这一段报「没跑成」（退出码 2，不算通过），不碰已有的账号。
 - `sudo bash deploy/test/agent-scope.e2e.sh`（法国）：会话通路真跑一遍，见第五节；含引擎给的 PATH 里没有会话用户的 `~/.local/bin` 时，会话里照样先找那儿、找得到 ddgs。只测 `run`、`stop`、`list`；`adopt` 在真机上还没有这样的用例，只有上一条在 CI 里跑的。
 
 ## 五、AI 会话
@@ -135,26 +135,25 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 资源池与起会话：
 
 - 池子 `fleet-agents.slice`（cgroup 路径 `/fleet.slice/fleet-agents.slice`）：只记账（CPU、内存、进程数、IO），池子本身不设上限（按 windsurf-dao 仓 `docs/decisions/2026-09-24-agent-isolation-and-error-routing.md` 的「先观测」）。
-- 每个会话一个 scope：`fleet-agent-<编号>.scope`，身份是两个会话用户之一，上限由引擎起会话时给。
+- 每个会话一个 scope：`fleet-agent-<编号>.scope`，身份是会话用户，上限由引擎起会话时给。
 - 引擎（fleet）自己建不了系统级 scope，会话还得换成会话用户。polkit 管不窄——systemd 255 建临时单元时不把单元名交给 polkit，放行就等于放行任何单元、任何身份——所以 sudoers 只放行 fleet 以 root 跑一个脚本：
 
 ```
-sudo -n /usr/local/sbin/fleet-agent-scope run <编号> --user fleet-agent-dedicated|fleet-agent-carpool
+sudo -n /usr/local/sbin/fleet-agent-scope run <编号> --user fleet-agent-carpool
         [--memory-high 1536M] [--memory-max 2G --memory-swap-max 0] [--tasks-max 512] [--cpu-weight 100]
         [--cwd /某目录] -- /绝对路径/命令 参数…
 sudo -n /usr/local/sbin/fleet-agent-scope stop <编号>     # 已经没了也返回 0
 sudo -n /usr/local/sbin/fleet-agent-scope list            # 编号 状态，一行一个
-sudo -n /usr/local/sbin/fleet-agent-scope adopt /var/lib/fleet-work/<owner>_<name>/<树> \
-        --user fleet-agent-dedicated|fleet-agent-carpool [--from <另一个会话用户> --session <会话编号>]
+sudo -n /usr/local/sbin/fleet-agent-scope adopt /var/lib/fleet-work/<owner>_<name>/<树>         --user fleet-agent-carpool
 sudo -n /usr/local/sbin/fleet-agent-scope remove /var/lib/fleet-work/<owner>_<name>/<树>   # 本来就不在也返回 0
 ```
 
 - `run` 最后 exec 成会话本身，标准输入输出还是引擎手里那一份。
-- 工作树的路径见第三节目录表的 `/var/lib/fleet-work` 一行。引擎建树、换人、收树都经下面两个子命令。
-- `adopt`：把工作树交给一个会话用户。工作树不在就建：中间各级 `root:root 755`，最后一级归这个会话用户、700（引擎建树走的就是这一条）。在就只改属主——换会话用户接着干（design.md 第十四节「工作树路径不随用户变」），工作树路径不用换：`chown -R --no-dereference`。改属主之前先核这台开了 `fs.protected_hardlinks`（值是 1；读不到也当没开），没开就拒、退出码 1——没开时会话用户能在工作树里给自己读不到的文件建硬链接，root 的 `chown -R` 会把那个文件一起改成它的。`--user`、`--from`（要给就和 `--session` 一起给）只认这两个会话用户，且不能相同。校验：工作树必须是绝对路径、落在 `/var/lib/fleet-work` 之下、至少两层（仓/任务）、路径上每一段都不是符号链接（`realpath` 解出来要和给的路径一模一样）、在的话是目录——不对就是用法错误，退出码 64。
-  给了 `--session`（会话编号，UUID）就把 Claude 的过程记录也拷过去：**不以 root 读旧用户的文件**——旧用户能把自己家里的文件换成指向 `/etc/shadow` 之类的符号链接，root 直接读就中招；改用 `setpriv` 先降成旧用户的身份，由它自己在自己的 `~/.claude/projects/*/` 下找 `<会话编号>.jsonl`（要求是普通文件、恰好一个，不是就说明状态不对，不该继续），再以旧用户身份 `cat` 出来，经管道交给以新用户身份跑的进程写到新用户的 `~/.claude/projects/<同一个项目目录名>/<会话编号>.jsonl`（`umask 077`，目录不存在就建）。先写同一目录下的临时文件 `.<会话编号>.jsonl.tmp`，读、写都成了才换成正式的名字；哪一边失败都删掉临时文件、退出码 1，不留一份空的记录。项目目录名照旧的来，不用重算：工作树路径没变，Claude Code 按路径算出的目录名，新用户和旧用户会算出同一个，fork 续会话（design.md 第九节「拼车用完，手上的活原地接着干」）时就能接着找到它。找不到、不唯一都算「没有可拷的」，退出码 65（和用法错误、其它失败分开，调用方好按错误类型分流：65 说明状态本来就不对，不是脚本本身的问题）。
+- 工作树的路径见第三节目录表的 `/var/lib/fleet-work` 一行。引擎建树、收树都经下面两个子命令。
+- `adopt`：把工作树交给会话用户。工作树不在就建：中间各级 `root:root 755`，最后一级归会话用户、700（引擎建树走的就是这一条）。在就只改属主（引擎建的、还不归它的树）：`chown -R --no-dereference`。改属主之前先核这台开了 `fs.protected_hardlinks`（值是 1；读不到也当没开），没开就拒、退出码 1——没开时会话用户能在工作树里给自己读不到的文件建硬链接，root 的 `chown -R` 会把那个文件一起改成它的。`--user` 只认会话用户（停用的 `fleet-agent-dedicated` 也拒）。校验：工作树必须是绝对路径、落在 `/var/lib/fleet-work` 之下、至少两层（仓/任务）、路径上每一段都不是符号链接（`realpath` 解出来要和给的路径一模一样）、在的话是目录——不对就是用法错误，退出码 64。
+  原先的 `--from <另一个会话用户> --session <会话编号>`（换会话用户时以旧用户身份把过程记录拷给新用户）随第二个会话用户一起拿掉了：只有一个会话用户，续会话、切号后的 fork 都在同一个家目录里，记录就在；旧调用方还带这两个参数一律按「不认识的参数」拒（退出码 64），不悄悄当成只改属主。
   测试专用开关 `AGENT_SCOPE_TEST_WORK_BASE` 能把 `/var/lib/fleet-work` 换成临时目录，`AGENT_SCOPE_TEST_PROTECTED_HARDLINKS_PATH` 能把 `/proc/sys/fs/protected_hardlinks` 换成临时文件：都故意不叫 `FLEET_*`——sudoers 的 `env_keep` 会把 `fleet` 用户环境里的 `FLEET_*` 原样带进这个以 root 跑的脚本，开关要是也叫 `FLEET_*`，`fleet` 用户自己在调用 `sudo` 前设一个同名变量就能把生产上的落点边界改掉、把硬链接保护的检查骗过去；不在 `env_keep` 白名单里的名字，`sudo` 会在进来之前就把它擦掉，所以只在直接跑这个脚本（不经 `sudo`）的测试里生效。
-- `remove`：删一棵工作树（引擎收树时用）。路径的校验和 `adopt` 一样；以 root `rm -rf --one-file-system`，不跟随符号链接、不跨文件系统。本来就不在也返回 0。标准输出最后一行是 `removed <路径>` 或 `gone <路径>`，退出码同 `adopt`（没有 65）。
+- `remove`：删一棵工作树（引擎收树时用）。路径的校验和 `adopt` 一样；以 root `rm -rf --one-file-system`，不跟随符号链接、不跨文件系统。本来就不在也返回 0。标准输出最后一行是 `removed <路径>` 或 `gone <路径>`，退出码同 `adopt`。
 - 环境变量不走命令行（sudo 会把命令行记进日志）：引擎把 `FLEET_*`、`LANG`、`LC_*`、`TZ`、`TERM`、`GIT_TERMINAL_PROMPT` 放进调 sudo 时的环境；会话的 PATH 用 `FLEET_SESSION_PATH` 给，帮手脚本再把会话用户家里的 `~/.local/bin` 接在最后（引擎给的是它自己的 PATH，里面没有；ddgs 这些各用户自己装的命令在那儿。会话自己写得动的目录一律排最后：放在前面，会话放个同名程序就能顶掉 fleet 命令和系统命令）；HOME、USER 是会话用户的。GitHub 凭据（`GH_TOKEN` 之类）一概带不进去：推分支、开 PR 由引擎在会话外做。
 - 会话降权用 `setpriv --init-groups --no-new-privs`：只在自己的组里，会话里的 sudo、setuid 程序都提不了权。不用 `systemd-run --uid`：它在 scope 里不清附加组，会话会带着 root 组（法国实测）。
 - 内存要真封顶，`--memory-max` 和 `--memory-swap-max` 得一起给：只给前者，超出的部分被换进 swap，会话不会被杀（法国实测）。
@@ -163,38 +162,36 @@ sudo -n /usr/local/sbin/fleet-agent-scope remove /var/lib/fleet-work/<owner>_<na
 - 看用量（不用 root）：`systemctl status fleet-agents.slice`、`systemd-cgtop /fleet.slice/fleet-agents.slice`、`systemctl show fleet-agent-<编号>.scope -p MemoryCurrent,CPUUsageNSec,TasksCurrent`。
 - 给池子加上限：写 `/etc/systemd/system/fleet-agents.slice.d/limits.conf`（MemoryHigh、MemoryMax、MemorySwapMax…）再 `systemctl daemon-reload`；回滚就删掉它。
 
-会话用户登录 reclaude（要创始人做，每个会话用户各一次）：
+会话用户登录 reclaude（要创始人做，一次；`fleet-agent-carpool` 已登录、挂拼车组织，2026-09-26）：
 
-reclaude 按用户记设备：组织写在各自家里的 `~/.reclaude/device.json`，对这个用户的所有会话一起生效，请求按设备签名。所以不拷别的用户的 `~/.reclaude`（同一设备号从两个家目录跑会互相打架），每个会话用户各自登录一次。
+reclaude 按用户记设备：组织写在家里的 `~/.reclaude/device.json`，对这个用户的所有会话一起生效，请求按设备签名。一个账户最多挂 4 台设备、一个家目录算一台，所以法国只登录这一个用户（pilot 不登录，见下面）；不拷别的用户的 `~/.reclaude`（同一设备号从两个家目录跑会互相打架）。
 
-1. 准备（装机这边做，已做完）：reclaude 二进制放在 `/home/<会话用户>/.local/bin/reclaude`，属这个用户。换机时从任何一个装了 reclaude 的用户那儿拷二进制本身（只拷这一个文件，不拷 `~/.reclaude`）。
-2. 创始人以 root 登法国，对 `fleet-agent-dedicated` 跑：`sudo -iu fleet-agent-dedicated reclaude login`。终端里会打印一行「Open this URL in your browser to authorize this CLI session」和一个链接：在浏览器里打开，用 reclaude 账号登录，授权这个命令行会话；授权完终端自己往下走。
-3. 同一个用户接着选组织：`sudo -iu fleet-agent-dedicated reclaude org list`，找到独享的那个组织，`sudo -iu fleet-agent-dedicated reclaude org use <组织编号>`。
-4. `fleet-agent-carpool` 照 2、3 再做一遍，第 3 步选拼车的组织。
-5. 重跑 `deploy/france.sh`：读回里两个会话用户的「reclaude 还没登录」消失。
+1. 准备（装机这边做）：`france.sh` 给会话用户装 reclaude 二进制到 `/home/fleet-agent-carpool/.local/bin/reclaude`（只在没有时装，版本和 sha256 钉在脚本顶部，以这个用户自己的身份写，之后它自己 `reclaude update`）；读回里它缺了判红——引擎起 Claude 会话用的就是这一份。不拷别的用户的 `~/.reclaude`。
+2. 创始人以 root 登法国跑：`sudo -iu fleet-agent-carpool reclaude login`。终端里会打印一行「Open this URL in your browser to authorize this CLI session」和一个链接：在浏览器里打开，用 reclaude 账号登录，授权这个命令行会话；授权完终端自己往下走。
+3. 选拼车组织：`sudo -iu fleet-agent-carpool reclaude org list`，找到拼车（team）那个，`sudo -iu fleet-agent-carpool reclaude org use <组织编号>`。之后切独享、切回拼车由引擎做（#59），人不手动切：一切号这个家目录下在跑的会话全断。
+4. 重跑 `deploy/france.sh`：读回里「reclaude 还没登录」消失。
 
-已知口子（会话用户的 reclaude 代理端口，2026-09-25 审查官发现，待定机制修，#35）：每个会话用户的 reclaude 守护在 `127.0.0.1` 上开两个临时端口（一个 HTTP CONNECT 代理，会话的 `HTTPS_PROXY` 指它；一个 MITM TLS 口），端口号每次重启会变。代理口不认客户端身份——本机**别的用户**（`pilot`、`fleet`、另一个会话用户）也连得上、也会被转发，等于借用这个账号的订阅（拿另一个号的额度、或从 pilot 借会话号的额度）。`HTTPS_PROXY` 里没有令牌，靠的是绑回环 + 会话本该只有自己碰，但回环对所有本机用户都通。
+已知口子（会话用户的 reclaude 代理端口，2026-09-25 审查官发现，待定机制修，#35）：会话用户的 reclaude 守护在 `127.0.0.1` 上开两个临时端口（一个 HTTP CONNECT 代理，会话的 `HTTPS_PROXY` 指它；一个 MITM TLS 口），端口号每次重启会变。代理口不认客户端身份——本机**别的用户**（`pilot`、`fleet`）也连得上、也会被转发，等于借用这个账号的订阅（从 pilot 借会话用户的额度）。`HTTPS_PROXY` 里没有令牌，靠的是绑回环 + 会话本该只有自己碰，但回环对所有本机用户都通。
 
 - 验证（只读、无害，不打真实模型调用）：`runuser -u fleet -- bash -c 'exec 3<>/dev/tcp/127.0.0.1/<代理口>; printf "CONNECT 127.0.0.1:1 HTTP/1.1\r\nHost: x\r\n\r\n" >&3; head -1 <&3'`。回 `502 Bad Gateway`（而不是 `407 Proxy Authentication Required`）＝它接了别的用户、没要身份，能借。代理口是两个端口里对这个探测回 502 的那个（`ss -ltnp` 看 reclaude 的两个口，逐个试）。
-- nft 挡不干净：端口是临时的、每次变，而 nft 的 `skuid` 只认「发起连接的是谁」，认不出「监听口归谁」，没法表达「只许本人连自己的 reclaude」。粗暴地按 `skuid` 挡住 `pilot`、`fleet` 连临时端口段能挡住这两个借用方（fleet-dao 自己的口都 < 32768，不受影响），但挡不住两个会话用户互相借——把会话用户也挡了就断了它连自己 reclaude 的正路。
+- nft 挡不干净：端口是临时的、每次变，而 nft 的 `skuid` 只认「发起连接的是谁」，认不出「监听口归谁」，没法表达「只许本人连自己的 reclaude」。粗暴地按 `skuid` 挡住 `pilot`、`fleet` 连临时端口段能挡住这两个借用方（fleet-dao 自己的口都 < 32768，不受影响）；会话用户自己不能挡，挡了就断了它连自己 reclaude 的正路。只剩一个会话用户后，「两个会话用户互相借」这条没了。
 - 真正的修法在别处、要单独拍：每个会话一个网络命名空间（回环各自独立，`fleet-agent-scope` 起会话时加，属编排/隔离机制），或请 ai-gateway-stack 让 reclaude 给代理加一个每实例令牌（`HTTPS_PROXY` 带 `token@`，代理验 `Proxy-Authorization`）/ 改绑 0700 的 unix socket。本 PR 不动它，已上报编排。
 
 创始人的登录用户 pilot（创始人用 Mirasim 桌面端的 ssh 远程模式连 `pilot@<法国>` 干活）：
 
 - 装机脚本管的（`deploy/lib/login-user.sh`）：建用户、加进 `systemd-journal` 组（`journalctl -u 'fleet-*'` 看日志）、装 `~/.local/bin/reclaude`（只在没有时装，写的事以 pilot 自己的身份做）、确保有 git、ssh 客户端、curl。不给它写任何 sudoers；它也不在 fleet 组里，所以读不到 `/etc/fleet-dao`，连不上 Temporal 和库（nft 表只放行 root 和 fleet）。
-- 读回（`--check`）查：用户在、家目录 750、只在自己的组和 `systemd-journal` 里、`sudo -l -U pilot` 说没有、reclaude 它自己执行得了而且登录 shell 里找得到；缺了报红，写明怎么补。reclaude 登没登录、家里放了什么钥匙是创始人自己的事，不查。
-- 家里不预装任何凭据。第一次要 root 帮两件事（都以 pilot 自己的身份写，家里不留 root 属主的文件）：
-  1. 放创始人的 ssh 公钥：`sudo -iu pilot sh -c 'umask 077; mkdir -p ~/.ssh; cat >> ~/.ssh/authorized_keys' < <创始人的公钥>.pub`
-  2. 登录 reclaude：`sudo -iu pilot reclaude login`，把打印的链接发给创始人在浏览器里授权；用哪个组织由创始人定（`reclaude org list`、`reclaude org use`）。
+- 读回（`--check`）查：用户在、家目录 750、只在自己的组和 `systemd-journal` 里、`sudo -l -U pilot` 说没有、reclaude 它自己执行得了而且登录 shell 里找得到；缺了报红，写明怎么补。reclaude 登没登录、家里放了什么钥匙不查。
+- **pilot 不登录 reclaude**（创始人 2026-09-26）：创始人在 VPS 上不开会话，而 reclaude 一个账户最多挂 4 台设备、法国只占 1 台，给了会话用户。reclaude 二进制照装，将来真要在 pilot 下开会话，得先腾出一台设备再登录。
+- 家里不预装任何凭据。第一次要 root 帮一件事（以 pilot 自己的身份写，家里不留 root 属主的文件）：放创始人的 ssh 公钥：`sudo -iu pilot sh -c 'umask 077; mkdir -p ~/.ssh; cat >> ~/.ssh/authorized_keys' < <创始人的公钥>.pub`
 - Mirasim 的 ssh 远程模式在 pilot 家里自己装服务端：`~/.mirasim-remote/servers/<版本>/`（自带 node 和 node-pty，不用系统的 node），`current` 指在用的那版，`run/` 下是进程号、日志和 unix socket，数据在 `~/.mirasim/`；桌面端经 ssh 把本机一个端口转到那个 socket。服务器这头要的：公钥登得进来、sshd 允许转发到 unix socket（`AllowStreamLocalForwarding`，Ubuntu 默认开）、`curl`（直接下服务端包，下不了由桌面端经 scp 传）、`tar`、`gzip`、`sha256sum`。不需要系统的 node，也不需要另起一个 systemd 管的 mirasim-server。它按登录 shell（`$SHELL -ilc`）取 PATH，Ubuntu 默认的 `~/.profile` 把 `~/.local/bin` 加了进去，所以找得到 reclaude。
 - 经 Mirasim 起 Claude 会话、启动命令写 `reclaude` 的，先在 pilot 的 `~/.local/bin` 装 ai-gateway-stack 仓的 reclaude-mirasim 启动器（该仓 `docs/RECLAUDE-IN-MIRASIM.md` 第四节）：不装的话 Mirasim 把自己网关的地址塞给 claude，reclaude 回 non_cc_client 并上报，攒多了设备会被解绑。本仓不装它。
 - 已知的口子：桌面端起远端服务端时把 `MIRASIM_SECRET_KEY` 写在 ssh 执行的命令行里，那几秒里本机别的用户（包括会话用户）用 `ps` 看得到；要堵得给 `/proc` 加 `hidepid`，还没做。
 - 撤掉：`userdel -r pilot`。家里是创始人的活和登录态，删之前先问人。
 
-各家 AI 的全局说明与方法类 skill（`packages/agents-sync`，两个会话用户和 pilot 各一份）：
+各家 AI 的全局说明与方法类 skill（`packages/agents-sync`，会话用户和 pilot 各一份）：
 
 - 写什么：仓根 `AGENTS.md` 上半段（两行 `fleet-dao:通用段` 标记圈起来的那一块）写进各家的全局文件，`agents/skills/` 下的每个 skill 拷进各家的 skill 目录。哪家读哪份、为什么这样放，见 `packages/agents-sync/src/targets.ts`（Windows、Linux 各一列）。
-- 法国：`france.sh` 最后一步以 root 跑 `node packages/agents-sync/bin/agents-sync --apply --user <用户>`，给 `fleet-agent-dedicated`、`fleet-agent-carpool`、`pilot` 各写一份：同步脚本先换成那个用户再动手，写出来的都归他。读回里的 `--check` 逐人逐项列出。只写这台装了的那几家（按 PATH 和家里的 `.local/bin` 找命令），没装的列为「没装，跳过」。
+- 法国：`france.sh` 最后一步以 root 跑 `node packages/agents-sync/bin/agents-sync --apply --user <用户>`，给 `fleet-agent-carpool`、`pilot` 各写一份：同步脚本先换成那个用户再动手，写出来的都归他。读回里的 `--check` 逐人逐项列出。只写这台装了的那几家（按 PATH 和家里的 `.local/bin` 找命令），没装的列为「没装，跳过」。
 - 只动两样：文件里标记圈起来的那一块（标记外的内容原样留着；第一次接管、文件里还没有标记时，先把原文件整份备份，再整份换成受管块），和清单 `~/.fleet-dao/agents-sync.json` 里记着是它装的 skill（仓里删了的会撤掉；插件链进来的、claude.ai 同步来的一律不碰；同名、但清单里没记的，内容和仓里一样也不接管，判红等人处置）。备份在各用户家里的 `~/.fleet-dao/backups/<时间>/`，照原来的相对路径摆。
 - 改了 `AGENTS.md` 上半段或 `agents/skills/`：合进主线、机器上 pull 之后重跑 `france.sh`（或只跑上面那条命令）才生效。
 - ddgs（skill docs-lookup 首选的搜索命令行）：装机最后一步以各用户自己的身份 `uv tool install ddgs==<版本>`，依赖用 `--with` 写死版本一起装（`france.sh` 顶部的 `DDGS_DEPS`），装在他家里（`~/.local/share/uv/tools/ddgs`，命令在 `~/.local/bin/ddgs`），只用系统的 Python；命令能跑、版本对、虚拟环境里的包和钉住的一样，就不动。用的 uv 装在 `/opt/fleet-dao/uv/<版本>/uv`（钉版本、核 sha256），带 `--no-config` 跑（不读他家里的 `uv.toml`：那里能改装包来源、绕过钉版本）；ddgs 和它的依赖是 PyPI 上的包，只钉版本、不核校验和。读回以各用户的身份跑 `ddgs version`，再按虚拟环境里的 dist-info 逐个核对依赖：没装、跑不起来、卡住、输出认不出、版本不对、依赖不一样、虚拟环境没了都判红（`deploy/lib/cli-tools.sh`）。装和读回用的 PATH 和会话的一样，他写得动的 `~/.local/bin` 排最后；ddgs 他改得动，读回照登录 shell 那一问的做法防卡：输出落进 root 建的临时文件、不带控制终端、10 秒叫停再过 5 秒强杀。下载 uv 失败按装机的规矩判红停下；这一步排在最后，规矩已经写完。
@@ -255,7 +252,7 @@ ufw delete allow in on wg-fleet from 10.99.0.1 to 10.99.0.2 port 8787 proto tcp
 systemctl daemon-reload
 ```
 
-3. 删数据（先问人）：`pg_dropcluster --stop 16 main`、`apt purge postgresql-16`，删 `/opt/fleet-dao`、`/etc/fleet-dao`、`/srv/fleet-dao-releases`、`/var/lib/fleet-dao`、`/var/log/fleet-dao`、`/etc/wireguard/wg-fleet.*`，`userdel -r fleet`、`userdel -r fleet-agent-dedicated`、`userdel -r fleet-agent-carpool`（会话用户家里有 reclaude 的设备，删之前先在 reclaude 里注销）。
+3. 删数据（先问人）：`pg_dropcluster --stop 16 main`、`apt purge postgresql-16`，删 `/opt/fleet-dao`、`/etc/fleet-dao`、`/srv/fleet-dao-releases`、`/var/lib/fleet-dao`、`/var/log/fleet-dao`、`/etc/wireguard/wg-fleet.*`，`userdel -r fleet`、`userdel -r fleet-agent-carpool`（会话用户家里有 reclaude 的设备，删之前先在 reclaude 里注销，腾出一台设备）。原先的 `fleet-agent-dedicated` 已删，2026-09-26。
 
 香港：
 
@@ -390,7 +387,8 @@ ssh <法国> 'sha256sum < /etc/fleet-dao/gateway-token.env'; ssh <香港> 'sha25
 ~/.fleet-dao/bin/age -d -i ~/.fleet-dao/vault-key.txt france/etc/fleet-dao/catalog.json.age | sha256sum; ssh <法国> 'sha256sum < /etc/fleet-dao/catalog.json'
 ```
 
-- 发布时迁移之后装进库（上面第 4 步）：只补缺——库里没有的行插进去；已有的行只补空着的会话用户、到期日、上游名字，别的字段配置和库里不一样也不动（发布日志里一处一行，照实写成「没动：pools.claude-solo.maxConcurrency：库里是 3，配置是 4，没动」这样）；每个阶段只排一次。
+- 2026-09-26 起（法国只留一个会话用户）：账号池的 `runAsUser` 只收 `fleet-agent-carpool`，Claude 订阅池还要带 `orgKind`（`carpool` / `solo`，照样例）。旧的这份里写着 `fleet-agent-dedicated`，装载器会明确拒收、发布停在装目录那一步：先把它改成 `fleet-agent-carpool`、两个 Claude 池补上 `orgKind`，放上来、刷新保险箱，再发。库里已有的行由迁移 0007 改好（挂在停用用户下的池改到会话用户，按原来的用户记下组织类型），不用手改。
+- 发布时迁移之后装进库（上面第 4 步）：只补缺——库里没有的行插进去；已有的行只补空着的会话用户、组织类型（`orgKind`）、到期日、上游名字，别的字段配置和库里不一样也不动（发布日志里一处一行，照实写成「没动：pools.claude-solo.maxConcurrency：库里是 3，配置是 4，没动」这样）；每个阶段只排一次。
 - 文件不在、是符号链接、不是 root:fleet 640、装不成（格式错、引用不存在、撞硬禁令）、装完读不回，发布都停下、不切版本、报红；装完账号池、路由、阶段、阶段里挂的路由哪张是 0 行也一样。装不成时发布再读回一次，红里写明库和装之前一样、库变了要人看，还是没查成。同一版再发，这一步改动 0 处。
 - 装进去之后怎么改。这份文件里已有的行改了值，已经装进库的不跟着变，只管以后换机重装；新加的行发布时会装进去（下面第二条）：
   - 阶段的顺序、挂上摘下、钉住，和渠道的开关：在驾驶舱里改（驾驶舱后端写目录只写这两样）。阶段里单条路由的开关驾驶舱还没有：先摘下、再挂上，挂上的就是开着的。

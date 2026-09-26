@@ -37,6 +37,7 @@ export function chooseRoute(input: ChooseRouteInput): ChooseRouteResult {
       poolIds: new Set(input.avoid?.poolIds ?? []),
       modelIds: new Set(input.avoid?.modelIds ?? []),
     },
+    liveOrg: input.liveOrg,
   };
   const factsOf = new Map(input.routes.map((r) => [r.routeId, r]));
   const fact = (id: string) => factsOf.get(id) as RouteFacts;

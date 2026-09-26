@@ -148,12 +148,24 @@ export interface Pool {
   scopeModels?: Record<string, ScopeMembership>;
   /** 最近一次读成额度的时刻，读失败不动。每小时对账按池看它是否超过 30 分钟，不逐窗口看。 */
   lastReadOkAt?: string;
-  /** 这个池的会话跑在哪个系统用户下（Claude 订阅一个组织一个用户，引擎按池挑、从不切号）。没填 = 还没定。 */
+  /** 这个池的会话跑在哪个系统用户下。法国只有一个会话用户，两个 Claude 池都填它（design 第十节）。没填 = 还没定。 */
   runAsUser?: RunAsUser;
+  /**
+   * Claude 订阅池对应 reclaude 的哪一类组织：拼车（team）、独享（personal）。会话用户同一时刻只挂一个组织，
+   * 只有挂着的那个池能派（design 第九节）。不是 Claude 订阅池就不填。
+   */
+  orgKind?: OrgKind;
 }
 
-/** 会话只许跑在这两个系统用户下（装机脚本建的，docs/ops.md）；库里有同样的检查约束（db 的 RUN_AS_USERS）。 */
-export type RunAsUser = 'fleet-agent-dedicated' | 'fleet-agent-carpool';
+/**
+ * 会话只许跑在这个系统用户下（装机脚本建的，docs/ops.md）；库里有同样的检查约束（db 的 RUN_AS_USERS）。
+ * 法国只留一个会话用户：reclaude 一个账户最多挂 4 台设备、一个家目录算一台（创始人 2026-09-26）。名字是历史沿用，
+ * 不改名免得重新登录；原先的 fleet-agent-dedicated 已停用、已删。
+ */
+export type RunAsUser = 'fleet-agent-carpool';
+
+/** reclaude 组织的类型：org list 里 team = 拼车、personal = 独享。 */
+export type OrgKind = 'solo' | 'carpool';
 
 /** 每个账号池、每个时间窗各一行——只存「最紧的那个」就做不到「快清零的先用」。 */
 export interface QuotaWindow {

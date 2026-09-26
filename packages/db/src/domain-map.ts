@@ -97,6 +97,7 @@ export const toPool = (r: typeof pools.$inferSelect): Pool =>
     scopeModels: opt(r.scopeModels),
     lastReadOkAt: isoOpt(r.lastReadOkAt),
     runAsUser: opt(r.runAsUser),
+    orgKind: opt(r.orgKind),
   });
 
 export const toQuotaWindow = (r: typeof quotaWindows.$inferSelect): QuotaWindow =>

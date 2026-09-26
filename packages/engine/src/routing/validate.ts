@@ -7,6 +7,7 @@ const WINDOW_STATES = ['ok', 'exhausted', 'stale', 'reset'];
 const QUOTA_STATES = ['ok', 'exhausted', 'unknown'];
 const ADMITS = ['all', 'trial', 'none'];
 const ROLES = ['primary', 'backup'];
+const ORGS = ['solo', 'carpool'];
 
 export function time(iso: unknown, what: string): number {
   const ms = typeof iso === 'string' ? Date.parse(iso) : Number.NaN;
@@ -27,6 +28,9 @@ export function validateInput(input: ChooseRouteInput, trialEnabled: boolean): n
   }
   if (input.weight !== undefined && input.weight !== 'light' && input.weight !== 'heavy') {
     throw new RoutingInputError(`选路判不了：活的轻重认不出（${String(input.weight)}）`);
+  }
+  if (input.liveOrg !== undefined && !ORGS.includes(input.liveOrg)) {
+    throw new RoutingInputError(`选路判不了：会话用户挂的组织认不出（${String(input.liveOrg)}）`);
   }
   if (trialEnabled) {
     const d = input.draw;
@@ -53,6 +57,8 @@ export function validateInput(input: ChooseRouteInput, trialEnabled: boolean): n
       throw new RoutingInputError(`选路判不了：${who} 的额度状态认不出（${r.quota}）`);
     if (!ROLES.includes(r.poolRole))
       throw new RoutingInputError(`选路判不了：${who} 的池主备认不出（${r.poolRole}）`);
+    if (r.orgKind !== undefined && r.orgKind !== null && !ORGS.includes(r.orgKind))
+      throw new RoutingInputError(`选路判不了：${who} 的组织类型认不出（${String(r.orgKind)}）`);
     count(r.inFlight, `${who} 的在途数`);
     // 读不到不能当 0：一批任务同时来时，每个都会看到「没人占着」，拼车号就放出不止一个试探。
     count(r.reserved, `${who} 的已选定还没开工数`);

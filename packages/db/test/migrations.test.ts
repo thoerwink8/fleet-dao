@@ -443,6 +443,70 @@ describe('0005：接活入口（GitHub 事件原文、自动派活开关）', ()
   );
 });
 
+describe('0007：法国只留一个会话用户（创始人 2026-09-26）', () => {
+  const entries = [...journal.entries].sort((a, b) => a.idx - b.idx);
+  const target = entries.findIndex((e) => e.tag === '0007_one_session_user');
+  const runMigration = async (pg: PGlite, tag: string) => {
+    const text = readFileSync(join(MIGRATIONS_FOLDER, `${tag}.sql`), 'utf8');
+    for (const statement of text.split('--> statement-breakpoint')) await pg.exec(statement);
+  };
+
+  it(
+    '挂在停用用户下的池改到唯一的会话用户、按原来的用户记下组织类型；历史会话行照留；之后池只收这一个用户',
+    async () => {
+      expect(target).toBeGreaterThan(0);
+      const pg = new PGlite();
+      try {
+        for (const e of entries.slice(0, target)) await runMigration(pg, e.tag);
+        await pg.exec(`
+        insert into families (id, display_name, vendor) values ('claude', 'Claude', 'Anthropic');
+        insert into channels (id, name, billing) values ('sub', '订阅', 'subscription');
+        insert into pools (id, channel_id, max_concurrency, run_as_user) values
+          ('solo', 'sub', 4, 'fleet-agent-dedicated'),
+          ('car', 'sub', 2, 'fleet-agent-carpool'),
+          ('relay', 'sub', 5, null);
+        insert into models (id, family, display_name) values ('opus', 'claude', 'Opus');
+        insert into routes (id, channel_id, pool_id, model_id, host_id) values ('r1', 'sub', 'solo', 'opus', 'claude-code');
+        insert into session_runs (stage, route_id, why_route, run_as_user) values ('execute', 'r1', '测试', 'fleet-agent-dedicated');
+      `);
+        await runMigration(pg, '0007_one_session_user');
+
+        expect((await pg.query(`select id, run_as_user, org_kind from pools order by id`)).rows).toEqual([
+          { id: 'car', run_as_user: 'fleet-agent-carpool', org_kind: 'carpool' },
+          { id: 'relay', run_as_user: null, org_kind: null },
+          { id: 'solo', run_as_user: 'fleet-agent-carpool', org_kind: 'solo' },
+        ]);
+        // 历史会话行不改写：那一轮确实跑在旧用户下
+        expect((await pg.query(`select run_as_user from session_runs`)).rows).toEqual([
+          { run_as_user: 'fleet-agent-dedicated' },
+        ]);
+        await expect(
+          pg.exec(`update pools set run_as_user = 'fleet-agent-dedicated' where id = 'solo'`),
+        ).rejects.toThrow(/pools_run_as_user_known/);
+        await expect(pg.exec(`update pools set org_kind = 'team' where id = 'solo'`)).rejects.toThrow(
+          /pools_org_kind_known/,
+        );
+        // 跑会话的池必须写明组织类型：漏了选路判不了会话用户挂没挂着它
+        await expect(pg.exec(`update pools set org_kind = null where id = 'solo'`)).rejects.toThrow(
+          /pools_session_pool_org_kind_together/,
+        );
+        // 反过来：不跑会话的池不许写组织类型（会被选路当成 Claude 组织池错挡、错放）
+        await expect(pg.exec(`update pools set org_kind = 'solo' where id = 'relay'`)).rejects.toThrow(
+          /pools_session_pool_org_kind_together/,
+        );
+        await expect(
+          pg.exec(
+            `insert into session_runs (stage, route_id, why_route, run_as_user) values ('execute', 'r1', '测试', 'root')`,
+          ),
+        ).rejects.toThrow(/session_runs_run_as_user_known/);
+      } finally {
+        await pg.close();
+      }
+    },
+    TEST_DB_TIMEOUT_MS,
+  );
+});
+
 describe('测试库', () => {
   it(
     '在内存里，两份测试库互相看不见对方的数据',

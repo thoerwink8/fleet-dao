@@ -50,6 +50,11 @@ describe('输入认不出就明确失败', () => {
     fails(() => input([route('a'), route('a')], { order: [entry('a', 0)] }), /事实给了两份/);
   });
 
+  it('池的组织类型、会话用户挂的组织认不出：不当成不是 Claude 池、不当成挂着', () => {
+    fails(() => one({ orgKind: 'team' as never }), /组织类型认不出（team）/);
+    fails(() => input([route('a')], { liveOrg: 'personal' as never }), /会话用户挂的组织认不出（personal）/);
+  });
+
   it('认不出的被挡原因：不当成没被挡', () =>
     fails(() => one({ blockers: ['paused' as never] }), /被挡原因认不出/));
 

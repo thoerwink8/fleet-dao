@@ -30,19 +30,16 @@ describe('落点', () => {
 });
 
 describe('会话用户的 uid', () => {
-  it('从 passwd 读两个会话用户', () => {
+  it('从 passwd 读会话用户；已停用的 fleet-agent-dedicated 不认', () => {
     const passwd = [
       'root:x:0:0:root:/root:/bin/bash',
       'fleet-agent-dedicated:x:1101:1101::/nonexistent:/bin/bash',
       'fleet-agent-carpool:x:1102:1102::/nonexistent:/bin/bash',
     ].join('\n');
-    expect([...sessionUserUids(passwd).entries()]).toEqual([
-      [1101, 'fleet-agent-dedicated'],
-      [1102, 'fleet-agent-carpool'],
-    ]);
+    expect([...sessionUserUids(passwd).entries()]).toEqual([[1102, 'fleet-agent-carpool']]);
   });
 
-  it('缺一个会话用户：明确报错（france.sh 没跑过），不当成只有一个', () => {
+  it('没有会话用户：明确报错（france.sh 没跑过），不当成没有属主', () => {
     expect(() => sessionUserUids('fleet-agent-dedicated:x:1101:1101::/h:/bin/bash')).toThrow(
       'fleet-agent-carpool',
     );

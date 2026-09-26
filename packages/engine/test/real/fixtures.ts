@@ -30,7 +30,10 @@ const GIT_ENV = {
 export const git = (cwd: string, ...args: string[]) =>
   execFileSync('git', args, { cwd, env: GIT_ENV, encoding: 'utf8' }).trim();
 
-/** 目录：独享池（fleet-agent-dedicated）、拼车池（fleet-agent-carpool）各一条 Claude Code 路由，一条 codex 路由（没接上）。 */
+/**
+ * 目录：两个 Claude 订阅池各一条 Claude Code 路由（同一个会话用户），一条 codex 路由（没接上）。两个池都标成会话用户挂着的
+ * 拼车组织：这里测一般的选路（两条都派得出去）；只派挂着的那个组织、另一个挡掉，在 store-ports.test.ts 里单测。
+ */
 export async function world(db: Db, options: { order?: string[]; stages?: StageKind[] } = {}) {
   await seed(db);
   await db.insert(pools).values([
@@ -38,13 +41,15 @@ export async function world(db: Db, options: { order?: string[]; stages?: StageK
       id: 'claude-solo',
       channelId: 'claude-subscription',
       maxConcurrency: 3,
-      runAsUser: 'fleet-agent-dedicated',
+      runAsUser: 'fleet-agent-carpool',
+      orgKind: 'carpool',
     },
     {
       id: 'claude-carpool',
       channelId: 'claude-subscription',
       maxConcurrency: 3,
       runAsUser: 'fleet-agent-carpool',
+      orgKind: 'carpool',
     },
     { id: 'relay', channelId: 'mirasim-cloud', maxConcurrency: 3 },
   ]);
@@ -186,21 +191,19 @@ export function mirror(root: string) {
   };
 }
 
-/** 假的工作树管家：目录真建在临时目录里，属主记在表里；adopt 记下每一次（含拷没拷过程记录）。 */
-export function fakeTrees(root: string, options: { transcriptMissing?: boolean } = {}) {
+/** 假的工作树管家：目录真建在临时目录里，属主记在表里；adopt 记下每一次。 */
+export function fakeTrees(root: string) {
   const owners = new Map<string, SessionUser>();
-  const adopts: { dir: string; user: SessionUser; transcript?: { from: SessionUser; sessionId: string } }[] =
-    [];
+  const adopts: { dir: string; user: SessionUser }[] = [];
   const trees: WorkTrees = {
     ...layout(root),
     async ownerOf(dir) {
       return owners.get(dir) ?? null;
     },
-    async adopt(dir, user, transcript) {
-      adopts.push({ dir, user, ...(transcript ? { transcript } : {}) });
+    async adopt(dir, user) {
+      adopts.push({ dir, user });
       mkdirSync(dir, { recursive: true });
       owners.set(dir, user);
-      return transcript && options.transcriptMissing ? 'transcript_missing' : 'ok';
     },
     async remove(dir) {
       const gone = !owners.has(dir);

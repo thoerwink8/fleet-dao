@@ -93,7 +93,7 @@ snapshot_releases() {
 snapshot_ours() {
   local u
   echo "## identity"
-  for u in fleet fleet-agent-dedicated fleet-agent-carpool pilot; do
+  for u in fleet fleet-agent-carpool pilot; do
     getent passwd "$u" || echo "passwd $u: 无"
     getent group "$u" || echo "group $u: 无"
   done
@@ -106,7 +106,7 @@ snapshot_ours() {
     /etc/wireguard /etc/postgresql/16/main /etc/apt/sources.list.d /etc/apt/keyrings \
     /usr/local/bin/fleet-temporal /usr/local/sbin/fleet-agent-scope /usr/local/sbin/fleet-gateway-deploy \
     /etc/sudoers.d/fleet-dao /home/fleet/.local/bin \
-    /home/fleet-agent-dedicated/.local/bin /home/fleet-agent-carpool/.local/bin \
+    /home/fleet-agent-carpool/.local/bin \
     /etc/nginx/sites-available/fleet-dao /etc/nginx/sites-enabled/fleet-dao /root/.ssh/authorized_keys2
   snapshot_releases
   echo "## nft"
@@ -118,7 +118,7 @@ snapshot_ours() {
   find /etc/systemd/system /etc/letsencrypt/live /etc/letsencrypt/renewal -maxdepth 2 -name '*fleet*' -print0 2>/dev/null |
     sort -z | while IFS= read -r -d '' f; do snapshot_file_list "$f"; done
   for d in /srv/fleet-dao /var/lib/fleet-dao /var/lib/fleet-dao/engine /var/lib/fleet-dao/demo /var/lib/fleet-work /var/log/fleet-dao \
-    /home/fleet /home/fleet-agent-dedicated /home/fleet-agent-carpool /home/pilot; do
+    /home/fleet /home/fleet-agent-carpool /home/pilot; do
     if [[ -e "$d" ]]; then printf 'dir  %s %s\n' "$(stat -c '%U:%G %a' "$d")" "$d"; fi
   done
   echo "## pilot-reclaude"
@@ -187,7 +187,7 @@ snapshot_agents_sync() {
   for s in "$SNAPSHOT_REPO"/agents/skills/*/; do
     if [[ -d "$s" ]]; then skills+=("$(basename -- "$s")"); fi
   done
-  for u in fleet-agent-dedicated fleet-agent-carpool pilot; do
+  for u in fleet-agent-carpool pilot; do
     h=$(getent passwd "$u" | cut -d: -f6) || h=""
     if [[ -z "$h" || ! -d "$h" ]]; then continue; fi
     for p in .claude/CLAUDE.md .codex/AGENTS.md .pi/agent/AGENTS.md .kimi-code/AGENTS.md .dsh/AGENTS.md .gemini/GEMINI.md \
