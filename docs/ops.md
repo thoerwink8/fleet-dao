@@ -370,7 +370,7 @@ FLEET_DEMO_PATH=/demo/                  # 演示版的路径，和香港 hk.env 
   ```
   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api set-password <飞书显示名或用户 id> [--username <用户名>]
   ```
-  它换成 fleet、带上 `api.env` 连库（和 `fleet-api.service` 同一份环境），密码从终端读两遍、不回显；不收命令行参数传密码（会进 shell 历史）。标准输入是管道时按行读两行（脚本里用：`printf '%s\n%s\n' "$pw" "$pw" | bash …/fleet-api set-password …`）。只能给在用的创始人设，别的人拒；这个人还没有用户名的，要带 `--username` 或按提示输一个。设完输错计数和锁清零，操作记录里记一条 `credentials.set`（来源记成 engine，reason 写明是这条命令）。退出码：0 设上了；1 被拒（不在白名单、两遍不一样、太短、用户名被占……，一句话说原因）；2 参数不对或没带上库连接。
+  它换成 fleet、带上 `api.env` 连库（和 `fleet-api.service` 同一份环境），密码从终端读两遍、不回显；不收命令行参数传密码（会进 shell 历史）。标准输入是管道时按行读两行（脚本里用：`printf '%s\n%s\n' "$pw" "$pw" | bash …/fleet-api set-password …`）。只能给在用的创始人设，别的人拒；这个人还没有用户名的，要带 `--username` 或按提示输一个。设完输错计数和锁清零、他所有设备上已登的会话作废（要重新登录），操作记录里记一条 `credentials.set`（来源记成 engine，reason 写明是这条命令）。退出码：0 设上了；1 被拒（不在白名单、两遍不一样、太短、用户名被占……，一句话说原因）；2 参数不对或没带上库连接。
   核对（只看有没有，不看值）：`runuser -u fleet -- psql -d fleet -Atc "select display_name, username is not null, password_hash is not null, locked_until from users where role = 'founder'"`。
 - 后端收 GitHub 事件：原文一次投递一行落进库里的 `github_events`（状态、原因、做了什么都在）。PR、CI 事件要用 `github/` 里两个机器人的凭据写镜像，凭据只在后端启动时读一次：读不到时后端照样起、issue 照收，PR 和 CI 事件记成出错，健康检查的 `github_events` 报红；补上凭据后要重启 `fleet-api` 才读得到。记成出错、等着（重开时上一轮还没结束）的投递原文还在，但对账还没接上定时（`specs/43-接活入口/方案.md`「谁来定时调对账」），现在没有东西自动重放它们；自动重放到头（5 次）的也没有手动再推的入口，只在健康检查里报红。
 - GitHub 不会自己重投没送到的 webhook：漏收的靠对账调它的重投接口、再按仓轮询补回，对账没接上之前收不回来。

@@ -50,6 +50,8 @@ export interface User {
   githubLogin?: string | undefined;
   /** 有数字编号就只按编号认（登录名可改、可被别人注册）。 */
   githubId?: number | undefined;
+  /** 会话版本（设密码、改密码、退出时加 1）：会话 Cookie 里的版本对不上就作废。没有按 0 算。 */
+  sessionVersion?: number | undefined;
 }
 
 /**
@@ -248,8 +250,11 @@ export interface UserStore {
   findUserByUsername(username: string): Promise<User | null>;
   /** 没这个人（含编号不是 uuid）是 null。 */
   getPasswordCredentials(userId: string): Promise<PasswordCredentials | null>;
+  /** 会话版本加 1：这个人别处已登的会话全部作废。没这个人返回 false。 */
+  bumpSessionVersion(userId: string): Promise<boolean>;
   /**
-   * 设或改用户名、密码哈希（给了哪样改哪样；给了哈希就记改密时间 at），同时把输错计数和锁清零。和操作记录同一事务。
+   * 设或改用户名、密码哈希（给了哪样改哪样；给了哈希就记改密时间 at、会话版本加 1——别处已登的会话作废），
+   * 同时把输错计数和锁清零。和操作记录同一事务。
    * 用户名大小写不敏感地被别人占了：username_taken，什么都不改。
    */
   setPasswordCredentials(

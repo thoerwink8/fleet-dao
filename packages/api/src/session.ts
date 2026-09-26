@@ -31,6 +31,8 @@ const SessionClaims = z.object({
   exp: z.number().int(),
   /** 怎么登进来的（feishu-oauth / feishu-in-app / password / dev-login）。#120 之前发的会话没有这一项。 */
   m: z.string().max(40).optional(),
+  /** 签发时这个人的会话版本（users.session_version）；对不上就作废。#120 之前发的没有，按 0 算。 */
+  v: z.number().int().min(0).optional(),
 });
 export type SessionClaims = z.infer<typeof SessionClaims>;
 
@@ -83,6 +85,7 @@ export function startSession(
   userId: string,
   now: Date,
   method: string,
+  version: number,
 ): SessionClaims {
   const iat = nowSeconds(now);
   const claims: SessionClaims = {
@@ -91,15 +94,34 @@ export function startSession(
     iat,
     exp: iat + SESSION_TTL_SECONDS,
     m: method,
+    v: version,
   };
+  writeSessionCookie(c, config, claims, now);
+  return claims;
+}
+
+/**
+ * 同一个会话换上新的版本号（本人改了密码：别处的作废，这一处接着用）。会话编号不变，CSRF 令牌也就不变；
+ * 到期时间照旧。
+ */
+export function reissueSession(
+  c: Context,
+  config: Config,
+  claims: SessionClaims,
+  version: number,
+  now: Date,
+): void {
+  writeSessionCookie(c, config, { ...claims, v: version }, now);
+}
+
+function writeSessionCookie(c: Context, config: Config, claims: SessionClaims, now: Date): void {
   setCookie(c, cookieNames(config).session, signPayload(config.sessionSecret, SESSION_PURPOSE, claims), {
     httpOnly: true,
     secure: config.cookieSecure,
     sameSite: 'Lax',
     path: '/',
-    maxAge: SESSION_TTL_SECONDS,
+    maxAge: Math.max(0, claims.exp - nowSeconds(now)),
   });
-  return claims;
 }
 
 export function endSession(c: Context, config: Config): void {
@@ -225,6 +247,9 @@ export function requireSession(config: Config, store: Store, now: () => Date): M
     if (!session) throw new ApiError(401, 'unauthenticated', '没登录或登录已过期');
     const user = await store.getUser(session.uid);
     if (!isCockpitUser(user)) throw new ApiError(403, 'not_whitelisted', '这个账号不在白名单里');
+    if ((session.v ?? 0) !== (user.sessionVersion ?? 0)) {
+      throw new ApiError(401, 'session_revoked', '这个登录已失效（改过密码或退出过），请重新登录');
+    }
     if (!SAFE_METHODS.has(c.req.method)) checkCsrf(c, config, session.sid);
     c.set('user', user);
     c.set('via', 'cockpit');

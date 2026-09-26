@@ -183,6 +183,7 @@ function toUser(r: UserRow): User {
     feishuUnionId: opt(r.feishuUnionId),
     githubLogin: opt(r.githubLogin),
     githubId: opt(r.githubId),
+    sessionVersion: r.sessionVersion,
   };
 }
 
@@ -532,7 +533,11 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
             .update(users)
             .set({
               ...(username !== undefined && { username }),
-              ...(passwordHash !== undefined && { passwordHash, passwordChangedAt: at }),
+              ...(passwordHash !== undefined && {
+                passwordHash,
+                passwordChangedAt: at,
+                sessionVersion: sql`${users.sessionVersion} + 1`,
+              }),
               failedLogins: 0,
               lockedUntil: null,
             })
@@ -564,6 +569,15 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         .where(eq(users.id, userId))
         .returning({ lockedUntil: users.lockedUntil });
       return row ? { lockedUntil: isoOpt(row.lockedUntil) } : null;
+    },
+    async bumpSessionVersion(userId) {
+      if (!isUuid(userId)) return false;
+      const updated = await db
+        .update(users)
+        .set({ sessionVersion: sql`${users.sessionVersion} + 1` })
+        .where(eq(users.id, userId))
+        .returning({ id: users.id });
+      return updated.length > 0;
     },
     async recordPasswordSuccess(userId) {
       if (!isUuid(userId)) return;
