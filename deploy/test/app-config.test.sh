@@ -13,6 +13,7 @@
 #   6. 读回要退役的垫片：在记待配，不在通过
 #   7. 读回环境文件的属主权限：不是 640（组读不到、谁都能读）、不在、是符号链接，判红
 #   8. 读回整份环境文件里写了几行的键：任一个都判红、只报键名；文件不在判红
+#   9. 配置文件的路径是目录、符号链接、断链：判红、背后的东西不动；france.sh 改之前都先判
 # 要 root（put_file 要改属主）。用法：sudo bash deploy/test/app-config.test.sh。退出码：0 通过，1 不通过，2 没跑成。
 set -uo pipefail
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -510,6 +511,35 @@ else
   flunk "读得到的样例该建得出来"
 fi
 if example_for_new_file "$T/no-such-example.env" >/dev/null; then flunk "样例不在该回非 0"; else pass "样例不在：回非 0，不建"; fi
+
+echo "== 配置文件的路径不是普通文件：判红、什么都不改"
+printf 'X=1\n' >"$T/target.env"
+chmod 600 "$T/target.env"
+target_before="$(digest "$T/target.env") $(stat -c '%U:%G %a' "$T/target.env")"
+mkdir -p "$T/is-dir.env"
+ln -s "$T/target.env" "$T/link.env"
+ln -s "$T/gone.env" "$T/broken.env"
+for bad in is-dir link broken; do
+  call app_config_path_ok "$T/$bad.env"
+  if ((RC != 0 && ${#REDS[@]} == 1)); then pass "$bad：判红、返回非 0"; else flunk "$bad：该判红（返回 $RC）：$OUT"; fi
+done
+if [[ "$(digest "$T/target.env") $(stat -c '%U:%G %a' "$T/target.env")" == "$target_before" && ! -e "$T/gone.env" && -d "$T/is-dir.env" ]]; then
+  pass "链接指的文件、断链指的地方、目录都没被动"
+else
+  flunk "坏路径背后的东西被动了"
+fi
+call app_config_path_ok "$T/target.env"
+ok_file=$RC
+call app_config_path_ok "$T/not-yet.env"
+if ((ok_file == 0 && RC == 0 && ${#REDS[@]} == 0)); then pass "普通文件、还不在（第一次建）：可以动"; else flunk "普通文件、还不在该可以动"; fi
+# france.sh 的两个循环都先过这一关，再 fix_meta、put_file（改之前必须先判路径）
+setup_body=$(sed -n '/^setup_app_config() {/,/^}/p' "$HERE/../france.sh")
+# shellcheck disable=SC2016 # 找的就是字面上的 $file
+if [[ "$(grep -c 'app_config_path_ok "$file"' <<<"$setup_body")" == 2 && "$setup_body" == *'if ((api_ok)); then fill_webhook_secret'* ]]; then
+  pass "france.sh 建、补环境文件和随机密钥之前都先判路径，api.env 坏了不填 webhook 密钥"
+else
+  flunk "france.sh 的 setup_app_config 没有在两个循环里先判路径"
+fi
 
 echo "== 要退役的垫片"
 printf '#!/bin/sh\n' >"$T/carpool-run.sh"
