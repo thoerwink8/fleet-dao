@@ -22,6 +22,8 @@ import {
   prChecks,
   progressKind,
   prState,
+  RETIRED_RUN_AS_USERS,
+  type RetiredRunAsUser,
   RUN_AS_USERS,
   runOutcome,
   stageKind,
@@ -175,8 +177,8 @@ export const sessionRuns = pgTable(
     /** 执行体自己的会话编号（续会话用）。 */
     sessionId: text('session_id'),
     workflowId: text('workflow_id'),
-    /** 这次会话跑在哪个系统用户下（引擎按池挑，从不切号）。 */
-    runAsUser: text('run_as_user').$type<RunAsUser>(),
+    /** 这次会话跑在哪个系统用户下。历史行可能是已停用的 fleet-agent-dedicated（RETIRED_RUN_AS_USERS）。 */
+    runAsUser: text('run_as_user').$type<RunAsUser | RetiredRunAsUser>(),
     worktreePath: text('worktree_path'),
     /** 起出来的会话进程在哪（插头的 onSpawn 报上来的），工人重启后看守和收尾靠它找回旧会话。 */
     handle: jsonb('handle').$type<{ pid?: number; scope?: string }>(),
@@ -216,7 +218,7 @@ export const sessionRuns = pgTable(
     ),
     check(
       'session_runs_run_as_user_known',
-      sql`${t.runAsUser} is null or ${t.runAsUser} in (${sql.raw(RUN_AS_USERS.map((u) => `'${u}'`).join(', '))})`,
+      sql`${t.runAsUser} is null or ${t.runAsUser} in (${sql.raw([...RETIRED_RUN_AS_USERS, ...RUN_AS_USERS].map((u) => `'${u}'`).join(', '))})`,
     ),
     check(
       'session_runs_route_outcome_known',

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # shellcheck source-path=SCRIPTDIR
-# 法国机器装机（以 root 跑；幂等：跑第二遍什么都不变）。装的是：引擎用户 fleet、两个会话专用用户、创始人的登录用户 pilot、目录、
+# 法国机器装机（以 root 跑；幂等：跑第二遍什么都不变）。装的是：引擎用户 fleet、会话专用用户（一个）、创始人的登录用户 pilot、目录、
 # PostgreSQL 16（Ubuntu 自带的源，吃得到自动安全更新）、Temporal 服务端 1.32.0（Postgres 持久化，端口和旧系统错开）、
 # 本机上只许 root 和 fleet 连 Temporal 与库的 nft 表、AI 会话资源池 fleet-agents.slice 与起会话的脚本、
 # fleet 用户的 pnpm（corepack）、WireGuard 客户端（主动连香港，法国不开任何入站端口）、
@@ -22,6 +22,8 @@ source "$DEPLOY_DIR/lib/snapshot.sh"
 source "$DEPLOY_DIR/lib/root-exec-check.sh"
 # shellcheck source=lib/login-user.sh
 source "$DEPLOY_DIR/lib/login-user.sh"
+# shellcheck source=lib/session-user.sh
+source "$DEPLOY_DIR/lib/session-user.sh"
 # shellcheck source=lib/cli-tools.sh
 source "$DEPLOY_DIR/lib/cli-tools.sh"
 # shellcheck source=lib/agents-sync.sh
@@ -73,9 +75,10 @@ API_PORT=8787
 # 本机上只许 root 和 fleet 连的端口：Temporal 没开认证，库和驾驶舱后端也不该让会话直接碰（nft 表 inet fleet_dao）
 PROTECTED_PORTS=("$PG_PORT" "${TEMPORAL_PORTS[@]}" "$API_PORT")
 NFT_FILE=/etc/fleet-dao/nftables.nft
-# AI 会话跑在两个专用用户下，各挂一个 reclaude 组织、永不切号（独享、拼车）；引擎（fleet）经 sudo 只能调 fleet-agent-scope 起会话。
-# 会话用户：没有 sudo、不能提权、家目录干净、没有 GitHub 凭据、读不到 /etc/fleet-dao。旧系统的会话用户不用、不碰。
-SESSION_USERS=(fleet-agent-dedicated fleet-agent-carpool)
+# AI 会话跑在一个专用用户下（lib/session-user.sh：reclaude 设备上限，法国只占 1 台）；引擎（fleet）经 sudo 只能调
+# fleet-agent-scope 起会话。会话用户：没有 sudo、不能提权、家目录干净、没有 GitHub 凭据、读不到 /etc/fleet-dao。
+# 旧系统的会话用户不用、不碰；停用的 fleet-agent-dedicated 不建、不查（已删）。
+SESSION_USERS=("$SESSION_USER")
 # 创始人的登录用户：经 Mirasim 的 ssh 远程模式登进来干活。没有 sudo、只在自己的组和 systemd-journal 里，
 # 家里只放 reclaude 二进制、不放任何凭据（lib/login-user.sh）。它改得了的 root 执行文件一样要清零，所以也算写入身份
 PILOT_USER=pilot
@@ -928,30 +931,10 @@ readback_web_upload() {
   fi
 }
 
-# 会话用户：没有 sudo、只在自己的组里、家里没有 GitHub 凭据；reclaude 登录要创始人在浏览器里点，没登录记「待配」
+# 会话用户：判据在 lib/session-user.sh（没有 sudo、只在自己的组里、家里没有 GitHub 凭据；reclaude 没登录记「待配」）
 readback_session_users() {
-  local u home bad f
-  for u in "${SESSION_USERS[@]}"; do
-    home=$(getent passwd "$u" | cut -d: -f6)
-    bad=""
-    if [[ "$(sudo -l -U "$u" 2>&1)" != *"not allowed to run sudo"* ]]; then bad+="有 sudo 条目；"; fi
-    if [[ "$(id -nG "$u")" != "$u" ]]; then bad+="附加组「$(id -nG "$u")」；"; fi
-    for f in .config/gh .git-credentials .netrc .ssh; do
-      if [[ -e "$home/$f" ]]; then bad+="家里有 ~/$f；"; fi
-    done
-    if [[ -n "$bad" ]]; then
-      red "$u：$bad"
-    else
-      ok "$u：没有 sudo、只在自己的组里、家里没有 GitHub 凭据和 ssh 钥匙"
-    fi
-    if [[ ! -x "$home/.local/bin/reclaude" ]]; then
-      pending "$u 还没有 reclaude 二进制（~/.local/bin/reclaude）：见 docs/ops.md「会话用户登录 reclaude」"
-    elif [[ ! -s "$home/.reclaude/device.json" ]]; then
-      pending "$u 的 reclaude 还没登录：要创始人在浏览器里授权，见 docs/ops.md「会话用户登录 reclaude」"
-    else
-      ok "$u 的 reclaude 已登录"
-    fi
-  done
+  local u
+  for u in "${SESSION_USERS[@]}"; do readback_session_user "$u"; done
 }
 
 # 创始人的登录用户：判据在 lib/login-user.sh。reclaude 登没登录、家里放了什么钥匙是创始人自己的事，不查

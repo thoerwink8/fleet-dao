@@ -75,7 +75,7 @@ function mirror(): { dir: string; head: string; bundle: (tip: string, exclude?: 
 function tree(name: string): UserTree {
   const dir = join(root, name);
   mkdirSync(dir, { recursive: true });
-  return { exec: localExec(), user: 'fleet-agent-dedicated', dir, scopePrefix: 'test', git: 'git', sh: 'sh' };
+  return { exec: localExec(), user: 'fleet-agent-carpool', dir, scopePrefix: 'test', git: 'git', sh: 'sh' };
 }
 
 describe('会话目录里的 git', { timeout: 60_000 }, () => {

@@ -57,7 +57,7 @@ describe('openSessionRun', () => {
       branch: 'task/1-x',
       queuedAt: NOW,
       workflowId: 'wf-1',
-      runAsUser: 'fleet-agent-dedicated',
+      runAsUser: 'fleet-agent-carpool',
       worktreePath: '/work/1',
     });
     expect(created).toBe(true);
@@ -70,7 +70,7 @@ describe('openSessionRun', () => {
       branch: 'task/1-x',
       sessionId: null,
       workflowId: 'wf-1',
-      runAsUser: 'fleet-agent-dedicated',
+      runAsUser: 'fleet-agent-carpool',
       worktreePath: '/work/1',
       handle: null,
       queuedAt: NOW,
@@ -385,11 +385,12 @@ describe('latestRunOfSession', () => {
 
 describe('openSessionRuns', () => {
   it('只要还没结束的；给了 runAsUser 就只要那个会话用户的', async () => {
-    const dedicated = runId();
+    // 另一个用户用停用的 fleet-agent-dedicated：库里只剩历史行会带它
+    const retired = runId();
     const carpool = runId();
     const ended = runId();
     await openSessionRun(t.db, {
-      id: dedicated,
+      id: retired,
       taskId: null,
       subtaskId: null,
       stage: 'judge',
@@ -430,7 +431,7 @@ describe('openSessionRuns', () => {
     await markSessionRunStarted(t.db, { id: ended, startedAt: NOW, sessionId: 's', handle: null });
     await finishSessionRun(t.db, { id: ended, outcome: 'ok', endedAt: later(MIN) });
 
-    expect(new Set((await openSessionRuns(t.db)).map((r) => r.id))).toEqual(new Set([dedicated, carpool]));
+    expect(new Set((await openSessionRuns(t.db)).map((r) => r.id))).toEqual(new Set([retired, carpool]));
     expect((await openSessionRuns(t.db, { runAsUser: 'fleet-agent-carpool' })).map((r) => r.id)).toEqual([
       carpool,
     ]);
@@ -490,7 +491,10 @@ describe('taskContext', () => {
 describe('routeLaunchFacts', () => {
   it('给出池、会话用户、执行方式、上游模型串', async () => {
     // relay-a、opus-5.5、claude-code 这一组合在 beforeEach 里已经被 r1 占了，另找 relay-b 避免撞 routes_pool_model_host_unique。
-    await t.db.update(pools).set({ runAsUser: 'fleet-agent-dedicated' }).where(eq(pools.id, 'relay-b'));
+    await t.db
+      .update(pools)
+      .set({ runAsUser: 'fleet-agent-carpool', orgKind: 'solo' })
+      .where(eq(pools.id, 'relay-b'));
     await addRoute(t.db, {
       id: 'r2',
       poolId: 'relay-b',
@@ -504,7 +508,8 @@ describe('routeLaunchFacts', () => {
       modelId: 'opus-5.5',
       hostId: 'claude-code',
       upstreamModel: 'claude-opus-5-5',
-      runAsUser: 'fleet-agent-dedicated',
+      runAsUser: 'fleet-agent-carpool',
+      orgKind: 'solo',
     });
   });
 

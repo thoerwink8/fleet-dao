@@ -50,6 +50,13 @@
       "when": 1790372318471,
       "tag": "0006_feishu",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1790382116423,
+      "tag": "0007_one_session_user",
+      "breakpoints": true
     }
   ]
 }

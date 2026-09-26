@@ -18,10 +18,37 @@ function ctx(overrides: Partial<FilterContext> = {}): FilterContext {
     policy: { ...DEFAULT_ROUTING_POLICY },
     now: Date.parse(NOW),
     avoid: { routeIds: new Set(), poolIds: new Set(), modelIds: new Set() },
+    liveOrg: 'carpool',
     ...overrides,
   };
 }
 const codes = (r: RouteFacts, c = ctx(), e = entry(r.routeId, 0)) => blocksFor(r, e, c).map((b) => b.code);
+
+describe('会话用户挂着哪个组织（design 第九节：一个会话用户，同一时刻只挂一个组织）', () => {
+  it('挂着的那个组织的池能派；没标组织类型的池（不是 Claude 订阅池）不受影响', () => {
+    expect(codes(route('car', { orgKind: 'carpool' }))).toEqual([]);
+    expect(codes(route('relay', { orgKind: null }))).toEqual([]);
+    expect(codes(route('relay2'))).toEqual([]);
+  });
+
+  it('没挂的组织的池：硬挡，写明现在挂的是哪个', () => {
+    const blocks = blocksFor(route('solo', { orgKind: 'solo', poolName: '独享号' }), entry('solo', 0), ctx());
+    expect(blocks.map((b) => b.code)).toEqual(['org-not-live']);
+    expect(blocks[0]?.text).toBe('会话用户现在挂的是拼车组织，独享号要等切过去才能派');
+    expect(groupOf(blocks)).toEqual({ kind: 'hard' });
+    expect(codes(route('car', { orgKind: 'carpool' }), ctx({ liveOrg: 'solo' }))).toEqual(['org-not-live']);
+  });
+
+  it('不知道会话用户挂的是哪个组织：带组织类型的池一律不派，不当成挂着', () => {
+    const blocks = blocksFor(route('car', { orgKind: 'carpool', poolName: '拼车号' }), entry('car', 0), {
+      ...ctx(),
+      liveOrg: undefined,
+    });
+    expect(blocks.map((b) => b.code)).toEqual(['org-not-live']);
+    expect(blocks[0]?.text).toContain('不知道会话用户现在挂的是哪个组织');
+    expect(codes(route('relay'), { ...ctx(), liveOrg: undefined })).toEqual([]);
+  });
+});
 
 describe('候选查询给的被挡原因', () => {
   it('没被挡的能派', () => {

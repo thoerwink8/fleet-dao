@@ -2,6 +2,7 @@
 import type {
   BillingKind,
   HostId,
+  OrgKind,
   ProgressKind,
   QuotaStatus,
   QuotaUnit,
@@ -80,8 +81,15 @@ export const HOST_IDS = valuesOf<HostId>()([
   'mirasim',
   'api-shell',
 ]);
-/** 会话能跑在哪些系统用户下：pools.run_as_user 的检查约束用它（不是 pg 枚举，值表写在约束里）。 */
-export const RUN_AS_USERS = valuesOf<RunAsUser>()(['fleet-agent-dedicated', 'fleet-agent-carpool']);
+/** 会话能跑在哪些系统用户下：pools.run_as_user 的检查约束用它（不是 pg 枚举，值表写在约束里）。法国只有一个会话用户。 */
+export const RUN_AS_USERS = valuesOf<RunAsUser>()(['fleet-agent-carpool']);
+/**
+ * 停用的会话用户（创始人 2026-09-26：reclaude 设备上限，法国只留一个会话用户；机器上已删）。只留在 session_runs
+ * 的检查约束里认历史行，新写入一律不收（引擎只按 RUN_AS_USERS 起会话，目录配置里填它装载器明确报错）。
+ */
+export const RETIRED_RUN_AS_USERS = ['fleet-agent-dedicated'] as const;
+export type RetiredRunAsUser = (typeof RETIRED_RUN_AS_USERS)[number];
+export const ORG_KINDS = valuesOf<OrgKind>()(['solo', 'carpool']);
 export const RUN_OUTCOMES = valuesOf<RunOutcome>()(['ok', 'failed', 'stopped', 'stalled']);
 export const SCHEDULE_OUTCOMES = valuesOf<ScheduleOutcome>()(['ok', 'partial', 'unscanned', 'failed']);
 export const PROGRESS_KINDS = valuesOf<ProgressKind>()([

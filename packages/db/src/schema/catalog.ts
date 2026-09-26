@@ -1,6 +1,6 @@
 // 调度台要的配置：族、渠道、账号池、模型、路由、每个阶段的路由顺序、禁令，外加额度窗（机器写的现值）。
 
-import type { RunAsUser, ScopeMembership } from '@fleet-dao/shared';
+import type { OrgKind, RunAsUser, ScopeMembership } from '@fleet-dao/shared';
 import { sql } from 'drizzle-orm';
 import {
   boolean,
@@ -18,6 +18,7 @@ import {
 import {
   billingKind,
   hostId,
+  ORG_KINDS,
   quotaStatus,
   quotaUnit,
   quotaWindowKind,
@@ -57,14 +58,20 @@ export const pools = pgTable(
     scopeModels: jsonb('scope_models').$type<Record<string, ScopeMembership>>(),
     /** 最近一次读成额度的时刻（savePoolQuota 写，读失败不动）。每小时对账看它是否超过 30 分钟。 */
     lastReadOkAt: timestamp('last_read_ok_at', tz),
-    /** 这个池的会话跑在哪个系统用户下（Claude 订阅一个组织一个用户，引擎按池挑、从不切号）。空 = 还没定。 */
+    /** 这个池的会话跑在哪个系统用户下（法国只有一个会话用户，两个 Claude 池都是它）。空 = 还没定。 */
     // 不叫 session_user：那是 Postgres 保留字，裸写 select 拿到的是连接角色。
     runAsUser: text('run_as_user').$type<RunAsUser>(),
+    /** Claude 订阅池对应哪类 reclaude 组织（拼车 / 独享）：会话用户挂着哪个组织，只有那个池能派。别的池空着。 */
+    orgKind: text('org_kind').$type<OrgKind>(),
   },
   (t) => [
     check(
       'pools_run_as_user_known',
       sql`${t.runAsUser} is null or ${t.runAsUser} in (${sql.raw(RUN_AS_USERS.map((u) => `'${u}'`).join(', '))})`,
+    ),
+    check(
+      'pools_org_kind_known',
+      sql`${t.orgKind} is null or ${t.orgKind} in (${sql.raw(ORG_KINDS.map((k) => `'${k}'`).join(', '))})`,
     ),
     // 给 routes 的组合外键用：路由挂的池必须属于路由写的渠道。
     unique('pools_channel_id_id_unique').on(t.channelId, t.id),

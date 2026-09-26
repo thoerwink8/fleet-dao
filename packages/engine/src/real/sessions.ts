@@ -1,9 +1,10 @@
 // 引擎端口 → AI 会话（目前只接了 Claude Code，经 reclaude 无头起）：起会话、看守、叫停、收孤儿。
 //
 // 起会话：按 runId 幂等（库里 session_runs 一行；叫停过的 runId 不再起）。会话用户按账号池定（pools.run_as_user）。
-// 会话断了接着干（design 第一节、第九节、第十四节）：同一个会话用户 --resume 续上；换了会话用户、上下文还小
-// （< forkMaxContextTokens）就把工作树和过程记录交给新用户（fleet-agent-scope adopt）再 --fork-session 续；上下文大了
-// 或记录没拷成，开新会话、带接力任务书（做到哪了、已提交了什么）。工作树由会话用户自己从引擎镜像打的 bundle 建，
+// 会话断了接着干（design 第一节、第九节、第十四节）：法国只有一个会话用户，续会话都在同一个家目录里。同一个账号池
+// （同一个 reclaude 组织）--resume 续上；换了池（切号后原会话绑在旧组织上，直接续会被拒）、上下文还小
+// （< forkMaxContextTokens）就 --fork-session 续；上下文大了、或上一轮跑在已停用的会话用户下，开新会话、带接力任务书
+// （做到哪了、已提交了什么）。工作树由会话用户自己从引擎镜像打的 bundle 建，
 // 引擎不以自己的身份在会话目录里跑 git。进程起来（onSpawn）才算开工：记进程号和 scope，交回工作流。
 //
 // 看守：进程是这个工人进程起的（registry）。接不上（工人重启过、输出管道断了）就按记下的 scope 收掉旧会话，回
@@ -343,20 +344,18 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     dir: string,
     user: SessionUser,
     mode: ContinueMode,
-    transcript: { from: SessionUser; sessionId: string } | undefined,
     signal: AbortSignal,
-  ): Promise<'ok' | 'transcript_missing'> {
+  ): Promise<void> {
     const owner = await trees.ownerOf(dir);
-    let adopted: 'ok' | 'transcript_missing' = 'ok';
     const fresh = owner === null;
-    if (owner !== user || transcript) adopted = await trees.adopt(dir, user, transcript);
+    if (owner !== user) await trees.adopt(dir, user);
     const t = treeAs(dir, user, `prep-${input.runId}`, signal);
     const identity = await identityOf(task.repo);
     const repoRef = { owner: task.repo.owner, name: task.repo.name };
     if (kind === 'delivery') {
       // 续上一轮的树：检出过的原样接着用。只看 .git 在不在不够——建树时 init 之后取包失败、同一个 runId 重试，
       // 留下的是个空仓；那样的照常取包、检出，不在空树里起会话。
-      if (!fresh && (await hasCheckout(t))) return adopted;
+      if (!fresh && (await hasCheckout(t))) return;
       const base = input.baseHead;
       const branch = input.brief.branch;
       if (!base || !SHA.test(base) || !branch) {
@@ -367,10 +366,10 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
       const { bytes, ref } = await bundleFromMirror(gh, deps.tmpDir, repoRef, base, [], signal);
       await fetchBundle(t, bytes, ref, { identity });
       await checkoutBranch(t, branch, base);
-      return adopted;
+      return;
     }
     // 分诊、需求文档、方案、审查：检出副本。续同一个会话（resume / fork）不动它；开新会话从干净的检出起。
-    if (!fresh && (mode === 'resume' || mode === 'fork') && adopted === 'ok') return adopted;
+    if (!fresh && (mode === 'resume' || mode === 'fork')) return;
     let sha: string;
     if (kind === 'review') {
       sha = input.brief.head ?? '';
@@ -394,7 +393,6 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
       await fetchBundle(t, bytes, ref, { identity });
     }
     await checkoutDetached(t, sha);
-    return adopted;
   }
 
   async function relayFacts(
@@ -497,7 +495,9 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
       };
     }
 
-    // 接着干的方式：看这个会话上一次跑在哪个会话用户下。
+    // 接着干的方式：看这个会话上一次跑在哪个账号池（哪个 reclaude 组织）下。同一个池 --resume；换了池，原会话绑在
+    // 旧组织上、直接续会被拒，--fork-session 续（同一个家目录，过程记录就在）；上一轮跑在已停用的会话用户下
+    // （过程记录在已删的家目录里）或上下文大了，开新会话带接力任务书。
     let mode: ContinueMode = 'new';
     let sessionId: string = randomUUID();
     let from: string | undefined;
@@ -505,41 +505,29 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     let why = '';
     if (input.resumeSessionId) {
       prior = await latestRunOfSession(db, input.resumeSessionId);
-      const priorUser = asSessionUser(prior?.runAsUser);
-      if (!prior || !priorUser) {
+      const priorPool = prior ? (await routeLaunchFacts(db, prior.routeId))?.poolId : undefined;
+      if (!prior) {
         mode = 'relay';
         why = `上一个会话 ${input.resumeSessionId} 的记录查不到`;
-      } else if (priorUser === user) {
+      } else if (asSessionUser(prior.runAsUser) !== user) {
+        mode = 'relay';
+        why = `上一个会话 ${input.resumeSessionId} 跑在 ${prior.runAsUser ?? '没记'} 下，不是现在的会话用户 ${user}，续不上`;
+      } else if (priorPool === route.poolId) {
         mode = 'resume';
         sessionId = input.resumeSessionId;
       } else if (prior.contextTokens !== null && prior.contextTokens < forkMax) {
         mode = 'fork';
         from = input.resumeSessionId;
       } else {
+        const moved = `换了账号池（${priorPool ?? '上一轮的路由已不在'} → ${route.poolId}）`;
         mode = 'relay';
         why =
           prior.contextTokens === null
-            ? `换了账号池（${priorUser} → ${user}），上一轮的上下文大小不知道`
-            : `换了账号池（${priorUser} → ${user}），上一轮的上下文有 ${prior.contextTokens} 个 token，大了不 fork`;
+            ? `${moved}，上一轮的上下文大小不知道`
+            : `${moved}，上一轮的上下文有 ${prior.contextTokens} 个 token，大了不 fork`;
       }
     }
-    const priorUser = asSessionUser(prior?.runAsUser);
-    const adopted = await prepareTree(
-      input,
-      task,
-      kind,
-      dir,
-      user,
-      mode,
-      mode === 'fork' && priorUser && from ? { from: priorUser, sessionId: from } : undefined,
-      ctx.signal,
-    );
-    if (mode === 'fork' && adopted === 'transcript_missing') {
-      mode = 'relay';
-      sessionId = randomUUID();
-      from = undefined;
-      why = `换了账号池，上一个会话的过程记录没找到（拷不过去）`;
-    }
+    await prepareTree(input, task, kind, dir, user, mode, ctx.signal);
     const t = treeAs(dir, user, `prep-${input.runId}`, ctx.signal);
     const relay =
       mode === 'relay'

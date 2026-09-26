@@ -1,5 +1,5 @@
-// 会话的目录在哪、归谁（design 十四：/var/lib/fleet-work/<仓>/<需求号>-<子任务>/，谁在干归谁、700；路径不随用户变，
-// 换用户接着干时由 fleet-agent-scope 改属主）。引擎只看属主（stat 目录本身，不进去）、叫助手建 / 改属主 / 删，
+// 会话的目录在哪、归谁（design 十四：/var/lib/fleet-work/<仓>/<需求号>-<子任务>/，归会话用户、700；还不归它的
+// 由 fleet-agent-scope 建或改属主）。引擎只看属主（stat 目录本身，不进去）、叫助手建 / 改属主 / 删，
 // 目录里的东西一律由会话用户自己碰（user-git.ts）。
 
 import { readFileSync } from 'node:fs';
@@ -23,12 +23,8 @@ export interface WorkTrees {
   ): string;
   /** 目录归哪个会话用户；不在回 null。归了别人（不是会话用户）明确报错。 */
   ownerOf(dir: string): Promise<SessionUser | null>;
-  /** 交给这个会话用户（不在就建）；给了 transcript 就把旧用户的会话记录拷过去（fork 续用）。 */
-  adopt(
-    dir: string,
-    user: SessionUser,
-    transcript?: { from: SessionUser; sessionId: string },
-  ): Promise<'ok' | 'transcript_missing'>;
+  /** 交给这个会话用户（不在就建）。 */
+  adopt(dir: string, user: SessionUser): Promise<void>;
   remove(dir: string): Promise<{ gone: boolean }>;
 }
 
@@ -65,7 +61,7 @@ export function layout(root: string): Pick<WorkTrees, 'root' | 'treeFor' | 'scra
   };
 }
 
-/** /etc/passwd 里两个会话用户的 uid（引擎读得到 passwd，读不到会话用户的家）。缺一个都明确报错。 */
+/** /etc/passwd 里会话用户的 uid（引擎读得到 passwd，读不到会话用户的家）。缺了明确报错。 */
 export function sessionUserUids(passwd = readFileSync('/etc/passwd', 'utf8')): Map<number, SessionUser> {
   const out = new Map<number, SessionUser>();
   for (const line of passwd.split('\n')) {
@@ -117,15 +113,9 @@ export function helperWorkTrees(options: HelperWorkTreesOptions = {}): WorkTrees
       }
       return user;
     },
-    async adopt(dir, user, transcript) {
-      const r = await adoptWorktree({
-        dir,
-        user,
-        ...(transcript ? { from: transcript.from, sessionId: transcript.sessionId } : {}),
-        ...helperOpts,
-      });
-      if (r.ok) return 'ok';
-      if (r.code === 'transcript_missing') return 'transcript_missing';
+    async adopt(dir, user) {
+      const r = await adoptWorktree({ dir, user, ...helperOpts });
+      if (r.ok) return;
       throw new PortError('ADOPT_FAILED', `把 ${dir} 交给 ${user} 没成：${r.detail}`, {
         retryable: r.code !== 'usage',
         details: { exitCode: r.exitCode },

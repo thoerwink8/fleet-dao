@@ -33,7 +33,6 @@ const pick = (over: Partial<PickRouteInput> = {}) =>
   ports().pickRoute(
     {
       taskId: randomUUID(),
-      // 分诊是轻活：独享号用不了时拼车号（备池，只接轻活）接得住，好看出「换到了下一条」。
       stage: 'triage',
       avoidRouteIds: [],
       avoidPoolIds: [],
@@ -44,7 +43,7 @@ const pick = (over: Partial<PickRouteInput> = {}) =>
   );
 
 describe('选路', () => {
-  it('按调度台的顺序派；池名不带账号，拼车号标成备池', async () => {
+  it('按调度台的顺序派；两个 Claude 池是同一个会话用户，不再分主池、备池', async () => {
     await world(t.db);
     const r = await pick();
     expect(r).toMatchObject({
@@ -52,14 +51,24 @@ describe('选路', () => {
       route: { routeId: 'solo', poolId: 'claude-solo', poolRole: 'primary' },
     });
     const carpool = await pick({ avoidRouteIds: ['solo'] });
-    expect(carpool).toMatchObject({ ok: true, route: { routeId: 'carpool', poolRole: 'backup' } });
+    expect(carpool).toMatchObject({ ok: true, route: { routeId: 'carpool', poolRole: 'primary' } });
+    // 写码这种重活照样派得出去：平时挂着的拼车池要接全部的活
+    expect(await pick({ stage: 'execute', avoidRouteIds: ['solo'] })).toMatchObject({
+      ok: true,
+      route: { routeId: 'carpool' },
+    });
   });
 
-  it('写码是重活：独享号用不了时不派给拼车号（备池只接轻活）', async () => {
+  it('会话用户挂着拼车组织：独享池挡着不派（写明为什么），拼车池照派；池名按组织类型分', async () => {
     await world(t.db);
-    expect(await pick({ stage: 'execute' })).toMatchObject({ ok: true, route: { routeId: 'solo' } });
-    const r = await pick({ stage: 'execute', avoidRouteIds: ['solo'] });
-    expect(r.ok).toBe(false);
+    await t.client.query(`update pools set org_kind = 'solo' where id = 'claude-solo'`);
+    await t.client.query(`update pools set org_kind = 'carpool' where id = 'claude-carpool'`);
+    expect(await pick({ stage: 'execute' })).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+    const none = await pick({ stage: 'execute', avoidRouteIds: ['carpool'] });
+    expect(none).toMatchObject({ ok: false, waitFor: 'none' });
+    expect(!none.ok && none.detail).toContain(
+      '会话用户现在挂的是拼车组织，Claude 订阅 · 独享要等切过去才能派',
+    );
   });
 
   it('执行方式还没接上的路由不派；只剩它时派不出，理由里写明', async () => {
@@ -77,7 +86,7 @@ describe('选路', () => {
       level: 'decision',
       taskId: null,
       title: '账号池 claude-solo 整池暂停',
-      body: '在「法国」上以会话用户 fleet-agent-dedicated 重跑 reclaude login',
+      body: '在「法国」上以会话用户 fleet-agent-carpool 重跑 reclaude login',
     });
     expect(await pick()).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
     const probe = await pick({ stickRouteId: 'solo' });
@@ -100,7 +109,7 @@ describe('选路', () => {
         branch: null,
         queuedAt: new Date(NOW.getTime() - 10 * MIN),
         workflowId: null,
-        runAsUser: 'fleet-agent-dedicated',
+        runAsUser: 'fleet-agent-carpool',
         worktreePath: null,
       });
     }
@@ -142,7 +151,7 @@ describe('选路', () => {
         branch: null,
         queuedAt: new Date(NOW.getTime() - (10 - i) * MIN),
         workflowId: null,
-        runAsUser: 'fleet-agent-dedicated',
+        runAsUser: 'fleet-agent-carpool',
         worktreePath: null,
       });
       await markSessionRunStarted(t.db, {
@@ -305,7 +314,7 @@ describe('计时、快照', () => {
       branch: null,
       queuedAt: NOW,
       workflowId: null,
-      runAsUser: 'fleet-agent-dedicated',
+      runAsUser: 'fleet-agent-carpool',
       worktreePath: null,
     });
     const record = {

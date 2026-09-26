@@ -118,16 +118,11 @@ describe('示例配置 deploy/examples/catalog.example.json', () => {
     expect([rows.stagePolicies.length, rows.stagePolicyRoutes.length]).toEqual([8, 3 + 7 + 6 * 8]);
   });
 
-  it('两个 Claude 池：独享号 4 + 拼车号 2 = 6，对上 design 第四节起步的 6 个会话；拼车号的会话用户是 fleet-agent-carpool（引擎按它认出备池）', () => {
+  it('两个 Claude 池跑在同一个会话用户下、按组织类型分（法国只留一个会话用户，design 第十节）；同一时刻只有一个在跑，各 4', () => {
     const pool = (id: string) => example().pools.find((p) => p.id === id);
-    expect([pool('claude-solo')?.runAsUser, pool('claude-solo')?.maxConcurrency]).toEqual([
-      'fleet-agent-dedicated',
-      4,
-    ]);
-    expect([pool('claude-carpool')?.runAsUser, pool('claude-carpool')?.maxConcurrency]).toEqual([
-      'fleet-agent-carpool',
-      2,
-    ]);
+    const facts = (id: string) => [pool(id)?.runAsUser, pool(id)?.orgKind, pool(id)?.maxConcurrency];
+    expect(facts('claude-solo')).toEqual(['fleet-agent-carpool', 'solo', 4]);
+    expect(facts('claude-carpool')).toEqual(['fleet-agent-carpool', 'carpool', 4]);
   });
 
   it('账号池和额度读取器的配置样例一一对应（额度按池入库，池不在库里就写不进去）', () => {
@@ -269,7 +264,7 @@ describe('只补缺，跑几遍都一样', () => {
     await load({ ...example(), routes: example().routes.map((r) => ({ ...r, upstreamAliases: [] })) });
     // 模拟装载器之前手工建的：上游名字、会话用户都空着；execute 阶段有人排过。
     await t.db.update(routes).set({ upstreamModel: null, upstreamAliases: [] });
-    await t.db.update(pools).set({ runAsUser: null });
+    await t.db.update(pools).set({ runAsUser: null, orgKind: null });
     await t.db
       .update(stagePolicies)
       .set({ catalogAppliedAt: null })
@@ -283,7 +278,9 @@ describe('只补缺，跑几遍都一样', () => {
     expect(result.filled).toEqual(
       expect.arrayContaining([
         'pools.claude-solo.runAsUser',
+        'pools.claude-solo.orgKind',
         'pools.claude-carpool.runAsUser',
+        'pools.claude-carpool.orgKind',
         'routes.claude-solo:opus-5.5:claude-code.upstreamModel',
         'routes.cursor:cursor-auto:cursor-agent.upstreamAliases',
         'routes.grok:grok-4.7:grok.upstreamAliases',
@@ -292,7 +289,7 @@ describe('只补缺，跑几遍都一样', () => {
     const [auto] = await t.db.select().from(routes).where(eq(routes.id, 'cursor:cursor-auto:cursor-agent'));
     expect([auto?.upstreamModel, auto?.upstreamAliases]).toEqual(['auto', ['default']]);
     const [solo] = await t.db.select().from(pools).where(eq(pools.id, 'claude-solo'));
-    expect(solo?.runAsUser).toBe('fleet-agent-dedicated');
+    expect([solo?.runAsUser, solo?.orgKind]).toEqual(['fleet-agent-carpool', 'solo']);
     // 有人排过的 execute 接手下来，不改；以后也不再动。
     expect(result.adoptedStages).toEqual(['execute']);
     expect(await stageOrder('execute')).toEqual([['grok:grok-4.7:grok', true]]);
@@ -337,7 +334,7 @@ describe('只补缺，跑几遍都一样', () => {
     );
     expect(rows).toEqual([
       { id: 'claude-carpool', run_as_user: 'fleet-agent-carpool' },
-      { id: 'claude-solo', run_as_user: 'fleet-agent-dedicated' },
+      { id: 'claude-solo', run_as_user: 'fleet-agent-carpool' },
     ]);
   });
 });
@@ -406,10 +403,19 @@ describe('拒收：撞约束、撞硬禁令、写到一半失败，库里一行�
     expect(await empty()).toBe(true);
   });
 
-  it('会话用户只许 fleet-agent-dedicated / fleet-agent-carpool：配置里写别的报错，库里也有约束', async () => {
+  it('会话用户只许 fleet-agent-carpool：写别的报错，写已停用的 fleet-agent-dedicated 报错并说清改成什么；库里也有约束', async () => {
     const base = example();
-    const bad = { ...base, pools: base.pools.map((p, i) => (i === 0 ? { ...p, runAsUser: 'root' } : p)) };
-    expect(() => parseCatalog(JSON.stringify(bad))).toThrow(/pools\.0\.runAsUser/);
+    const withPool = (over: Record<string, string>) => ({
+      ...base,
+      pools: base.pools.map((p, i) => (i === 0 ? { ...p, ...over } : p)),
+    });
+    expect(() => parseCatalog(JSON.stringify(withPool({ runAsUser: 'root' })))).toThrow(
+      /pools\.0\.runAsUser/,
+    );
+    expect(() => parseCatalog(JSON.stringify(withPool({ runAsUser: 'fleet-agent-dedicated' })))).toThrow(
+      /pools\.0\.runAsUser：fleet-agent-dedicated 已停用.*改成 fleet-agent-carpool/,
+    );
+    expect(() => parseCatalog(JSON.stringify(withPool({ orgKind: 'team' })))).toThrow(/pools\.0\.orgKind/);
     await load();
     await expect(
       t.client.query(`update pools set run_as_user = 'root' where id = 'claude-solo'`),

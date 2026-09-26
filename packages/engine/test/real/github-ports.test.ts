@@ -114,10 +114,10 @@ function setup(over: Parameters<typeof fakeGh>[0] = {}, opts: { heartbeatEveryMs
 /** 会话用户那边的树：从镜像取主线头、检出分支（和 sessions.ts 建树一样）。 */
 async function seededTree(trees: ReturnType<typeof setup>['trees']) {
   const dir = trees.trees.treeFor(repo, BRANCH);
-  await trees.trees.adopt(dir, 'fleet-agent-dedicated');
+  await trees.trees.adopt(dir, 'fleet-agent-carpool');
   const t = {
     exec: localExec(),
-    user: 'fleet-agent-dedicated' as const,
+    user: 'fleet-agent-carpool' as const,
     dir,
     scopePrefix: 'test',
     git: 'git',

@@ -1,7 +1,7 @@
 // 过滤：一条路由这次派不派得出去，挡在哪（每个原因一条，白话 + 等不等得来）。被挡的不删，带原因留给驾驶舱。
 // 等得来的原因带「最早几点能好」，一定晚于现在：那个时刻已经过了（读数、熔断状态慢了一步）就按不知道算，
 // 调用方按轮询间隔再选一次——给一个过去的时刻，等待秒数成了负数，选路循环会空转。
-import { hardBanFor, type StageKind } from '@fleet-dao/shared';
+import { hardBanFor, type OrgKind, type StageKind } from '@fleet-dao/shared';
 import { duration, hostName, percent, remaining, STAGE_NAMES, stamp, windowName } from './names.ts';
 import { ABILITY_NAMES, HOST_ABILITIES, type RoutingPolicy, STAGE_NEEDS } from './policy.ts';
 import type {
@@ -19,6 +19,8 @@ export interface FilterContext {
   policy: RoutingPolicy;
   now: number;
   avoid: { routeIds: ReadonlySet<string>; poolIds: ReadonlySet<string>; modelIds: ReadonlySet<string> };
+  /** 会话用户此刻挂的组织；不知道为 undefined（ChooseRouteInput.liveOrg）。 */
+  liveOrg: OrgKind | undefined;
 }
 
 /** 这条路由此刻的全部被挡原因；空数组 = 能派。entry 是调度台上的那一行（任务指定、不在顺序里的没有）。 */
@@ -38,6 +40,8 @@ export function blocksFor(
   if (route.breaker.admit === 'none') out.push(breakerBlock(route, ctx.now));
   const avoided = avoidReason(route, ctx);
   if (avoided) out.push(hard('avoided', avoided));
+  const notLive = orgNotLive(route, ctx.liveOrg);
+  if (notLive) out.push(hard('org-not-live', notLive));
   if (route.poolRole === 'backup') out.push(...backupBlocks(route, ctx));
   out.push(...shortBlocks(route, ctx));
   return out;
@@ -150,6 +154,20 @@ export function hostUnfit(hostId: string, stage: StageKind): string | null {
   const missing = STAGE_NEEDS[stage].filter((a) => !abilities.includes(a));
   if (missing.length === 0) return null;
   return `${hostName(hostId)}不会${missing.map((a) => ABILITY_NAMES[a]).join('、')}，${STAGE_NAMES[stage]}阶段要`;
+}
+
+const ORG_NAMES: Record<OrgKind, string> = { solo: '独享', carpool: '拼车' };
+
+/**
+ * 会话用户同一时刻只挂一个 reclaude 组织（design 第九节）：不是它挂着的那个组织的 Claude 池，派过去会话照样扣挂着的
+ * 那个组织，额度账就记错了池。不知道挂的是哪个，带组织类型的池一律不派。
+ */
+function orgNotLive(route: RouteFacts, liveOrg: OrgKind | undefined): string | null {
+  const kind = route.orgKind;
+  if (kind === undefined || kind === null) return null;
+  if (liveOrg === undefined) return `不知道会话用户现在挂的是哪个组织，${route.poolName}不派`;
+  if (kind === liveOrg) return null;
+  return `会话用户现在挂的是${ORG_NAMES[liveOrg]}组织，${route.poolName}要等切过去才能派`;
 }
 
 function avoidReason(route: RouteFacts, ctx: FilterContext): string | null {

@@ -24,18 +24,20 @@
   ],
   "pools": [
     {
-      "_说明": "Claude 订阅 · 独享组织，主池：AI 帅位、合并队列、长的写码活派这里。会话跑在 fleet-agent-dedicated（这个用户的 reclaude 挂着独享组织，从不切号）。并发 4：加上拼车号的 2 个共 6 个，对上 design 第四节起步的 6 个会话；每个会话按 1.2–1.6G 算，12G 的机器放 7 个太紧。没量过。",
+      "_说明": "Claude 订阅 · 独享组织。法国只有一个会话用户 fleet-agent-carpool（名字是历史沿用；reclaude 一个账户最多挂 4 台设备，法国只占 1 台，design 第十节），两个 Claude 池都跑在它下面，它同一时刻只挂一个组织：平时挂拼车，拼车用满才切到独享（#59），所以这个池只在切过去以后才派（引擎按 orgKind 认，没挂着的挡掉）。并发 4：两个池不同时跑，每个会话按 1.2–1.6G 算，12G 的机器留出余量。没量过。",
       "id": "claude-solo",
       "channelId": "claude-sub",
       "maxConcurrency": 4,
-      "runAsUser": "fleet-agent-dedicated"
+      "runAsUser": "fleet-agent-carpool",
+      "orgKind": "solo"
     },
     {
-      "_说明": "Claude 订阅 · 拼车组织，备池：窗口小（design 第十节实测约为独享号的八分之一），派短而独立的活。会话跑在 fleet-agent-carpool；引擎按这个会话用户认出备池：只派短而轻的活、同时最多 2 个、排在主池后面。并发起步 2（design 第九节「主池与备池」）。",
+      "_说明": "Claude 订阅 · 拼车组织：会话用户平时挂着它，引擎的全部会话先用它（窗口小，design 第十节实测约为独享号的八分之一；用满切独享见 #59）。并发 4，理由同独享池。没量过。",
       "id": "claude-carpool",
       "channelId": "claude-sub",
-      "maxConcurrency": 2,
-      "runAsUser": "fleet-agent-carpool"
+      "maxConcurrency": 4,
+      "runAsUser": "fleet-agent-carpool",
+      "orgKind": "carpool"
     },
     {
       "_说明": "Mirasim 中转账号：Opus、GPT（codex）、Kimi、DeepSeek 都扣这一份（5h、7d），另有只扣某一族的窗口（7d_claude、7d_fable）。经 Mirasim 起的会话要给会话用户单独起一份 Mirasim 服务，配好之前这些路由保持关着（docs/design.md）。并发 5 是旧系统拍的，没量过。",
@@ -44,13 +46,13 @@
       "maxConcurrency": 5
     },
     {
-      "_说明": "Cursor：Auto、API 两个桶是只扣对应模型组的窗口，成员表由额度读取器读来。并发 6 是旧系统实测（docs/reference/quota.md）。两个会话用户各登录一次 Cursor（docs/plan.md），不绑某一个用户。",
+      "_说明": "Cursor：Auto、API 两个桶是只扣对应模型组的窗口，成员表由额度读取器读来。并发 6 是旧系统实测（docs/reference/quota.md）。会话用户登录一次 Cursor（docs/plan.md），不绑池。",
       "id": "cursor",
       "channelId": "cursor",
       "maxConcurrency": 6
     },
     {
-      "_说明": "Grok Build 订阅，按周的额度百分比。并发 6 是旧系统实测（docs/reference/quota.md）。两个会话用户各登录一次 Grok（docs/plan.md），不绑某一个用户。",
+      "_说明": "Grok Build 订阅，按周的额度百分比。并发 6 是旧系统实测（docs/reference/quota.md）。会话用户登录一次 Grok（docs/plan.md），不绑池。",
       "id": "grok",
       "channelId": "xai",
       "maxConcurrency": 6
@@ -147,7 +149,7 @@
     }
   ],
   "stages": {
-    "_说明": "构建期除了判断阶段，都用 Opus 5.5、经两个 Claude 池（设计文档「已定」表第 8 条）：独享号在前、拼车号在后；拼车号只接短而轻的活由引擎按会话用户管，不靠这里的排序。其余路由挂在后面、默认关着，P3 接好插头、登录之后再打开。硬禁令（GPT 不做 UI、不用 Fable）由代码管，装载器也按它拒收：ui 单列一份、不挂 GPT（关着也不行）。judge：Claude 判断后端接上之前先用 TypeSafe 的 Jev（设计文档第十一节，2026-09-25 定）。packages/jev 接进引擎以后按判断阶段排第一的路由起后端（backendForRoute，现在还没有调用方）；它只接得了 TypeSafe，两条 Claude 挂着、关着。每个阶段只在第一次装的时候排，之后装载器不再动它；装进去之后怎么改见 docs/ops.md 第九节「目录配置」。要给某个阶段单排，就加一个以阶段名为键的列表。",
+    "_说明": "构建期除了判断阶段，都用 Opus 5.5、经两个 Claude 池（设计文档「已定」表第 8 条）：两条都开着；会话用户同一时刻只挂一个组织，没挂着的那个池由引擎按 orgKind 挡掉，不靠这里的排序。其余路由挂在后面、默认关着，P3 接好插头、登录之后再打开。硬禁令（GPT 不做 UI、不用 Fable）由代码管，装载器也按它拒收：ui 单列一份、不挂 GPT（关着也不行）。judge：Claude 判断后端接上之前先用 TypeSafe 的 Jev（设计文档第十一节，2026-09-25 定）。packages/jev 接进引擎以后按判断阶段排第一的路由起后端（backendForRoute，现在还没有调用方）；它只接得了 TypeSafe，两条 Claude 挂着、关着。每个阶段只在第一次装的时候排，之后装载器不再动它；装进去之后怎么改见 docs/ops.md 第九节「目录配置」。要给某个阶段单排，就加一个以阶段名为键的列表。",
     "default": [
       { "routeId": "claude-solo:opus-5.5:claude-code", "enabled": true },
       { "routeId": "claude-carpool:opus-5.5:claude-code", "enabled": true },

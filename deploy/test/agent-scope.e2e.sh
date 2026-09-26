@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 真机验收（法国，root 跑）：会话通路 fleet → sudo → fleet-agent-scope → 会话专用用户 真跑一遍。
-#   1. 落点与身份：两个会话用户各起一次，会话在 fleet-agents.slice 下自己的 scope 里，身份对、只在自己的组里、提不了权、上限写进 cgroup
+#   1. 落点与身份：会话用户起一次，会话在 fleet-agents.slice 下自己的 scope 里，身份对、只在自己的组里、提不了权、上限写进 cgroup
 #   2. 会话里的边界：读不到 /etc/fleet-dao、sudo 失败、没有 GitHub 凭据（调用方塞了也带不进去）、连得上 fleet 命令接口、
 #      连不上 Temporal 和库；引擎给的 PATH 原样在前、会话用户的 ~/.local/bin 接在最后，找得到 ddgs
 #   3. 上限生效：内存（连 swap 一起封）超了只杀它，进程数到顶 fork 失败
@@ -9,7 +9,7 @@
 # 用法：sudo bash deploy/test/agent-scope.e2e.sh。退出码 0 通过、1 不通过、2 没跑成。只起临时单元，结束时收干净。
 set -uo pipefail
 BIN=/usr/local/sbin/fleet-agent-scope
-SESSION_USERS=(fleet-agent-dedicated fleet-agent-carpool)
+SESSION_USERS=(fleet-agent-carpool) # 法国只有一个会话用户（docs/design.md 第十节）
 U=${SESSION_USERS[0]}
 AGENT_API_PORT=8788 # fleet 命令接口（packages/api 的 FLEET_AGENT_LISTEN）
 TAG=e2e-$$
@@ -202,8 +202,8 @@ echo "== 5. 不该放行的"
 if as_fleet sudo -n "$BIN" run "$TAG-bad" --user "$U" -- sleep 1 2>/dev/null; then flunk "相对路径的命令被放行了"; else pass "相对路径的命令被拒"; fi
 if as_fleet sudo -n "$BIN" run "../x" --user "$U" -- /bin/true 2>/dev/null; then flunk "带 ../ 的编号被放行了"; else pass "带 ../ 的编号被拒"; fi
 if as_fleet sudo -n "$BIN" run "$TAG-cwd" --user "$U" --cwd /root -- /bin/true 2>/dev/null; then flunk "会话用户进不去的目录被放行了"; else pass "会话用户进不去的 --cwd /root 被拒"; fi
-for other in root nobody; do
-  if as_fleet sudo -n "$BIN" run "$TAG-$other" --user "$other" -- /bin/true 2>/dev/null; then flunk "--user $other 被放行了"; else pass "--user 只认两个会话用户（$other 被拒）"; fi
+for other in root nobody fleet-agent-dedicated; do
+  if as_fleet sudo -n "$BIN" run "$TAG-$other" --user "$other" -- /bin/true 2>/dev/null; then flunk "--user $other 被放行了"; else pass "--user 只认会话用户（$other 被拒；fleet-agent-dedicated 已停用）"; fi
 done
 if as_fleet sudo -n "$BIN" run "$TAG-nouser" -- /bin/true 2>/dev/null; then flunk "没给 --user 也放行了"; else pass "没给 --user 被拒"; fi
 if as_fleet sudo -n /bin/true 2>/dev/null; then flunk "fleet 能 sudo 别的命令"; else pass "fleet 不能 sudo 别的命令"; fi

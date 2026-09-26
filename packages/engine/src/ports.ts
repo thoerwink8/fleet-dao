@@ -13,7 +13,7 @@
 //    pushBranch 由会话用户把起会话前的头之后的新提交打成包（git bundle），引擎导入自己的仓库、核实交付再推；
 //    syncMainline 在引擎自己的仓库里并主线、推上去，再由会话用户把工作树快进到新头。
 // 4. 会话一律经 fleet-agent-scope 起（scope 名用 runId，内存上限按 input.resources，swap 一起封），跑在按
-//    input.route.poolId 挑的会话专用用户下（一个 Claude 组织一个用户，从不切号）；
+//    input.route.poolId 那个池定的会话专用用户下（法国只有一个，两个 Claude 池共用；它同一时刻只挂一个组织，design 第九节）；
 //    startSession 先按 input.runId 在库里建这一次会话（session_runs），再起进程，把进程号和 scope 交回（handle）。
 //    stopSession 按 runId 停（起会话还没返回时工作流只知道 runId）：停掉这个 runId 名下的进程，并记下「这个 runId 已叫停」——
 //    之后（或同时在跑的）startSession 再拿这个 runId 来，不起进程，抛 SESSION_STOPPED。

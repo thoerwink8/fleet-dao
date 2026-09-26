@@ -3,11 +3,18 @@
 // 配置和库里不一样的列进 kept 给人看。阶段顺序每个阶段只排一次（stage_policies.catalog_applied_at），之后怎么改都不覆盖。
 // 配置文件缺失、格式错、引用不存在都明确报错，库里一行不写——不许当成空目录继续。
 import { readFile } from 'node:fs/promises';
-import { type BanSubject, hardBanFor, type RunAsUser, type StageKind } from '@fleet-dao/shared';
+import { type BanSubject, hardBanFor, type OrgKind, type RunAsUser, type StageKind } from '@fleet-dao/shared';
 import { and, asc, eq, isNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { Db } from './client.ts';
-import { BILLING_KINDS, HOST_IDS, RUN_AS_USERS, STAGE_KINDS } from './schema/enums.ts';
+import {
+  BILLING_KINDS,
+  HOST_IDS,
+  ORG_KINDS,
+  RETIRED_RUN_AS_USERS,
+  RUN_AS_USERS,
+  STAGE_KINDS,
+} from './schema/enums.ts';
 import {
   auditLog,
   channels,
@@ -26,6 +33,21 @@ const Text = z.string().trim().min(1);
 
 const StageEntry = z.strictObject({ routeId: Id, enabled: z.boolean() });
 
+/** 停用的会话用户（fleet-agent-dedicated）写进来要明确报错、说清改成什么：法国已经没有这个用户，装进去会话起不来。 */
+const RunAsUserField = z
+  .string()
+  .superRefine((value, ctx) => {
+    if ((RETIRED_RUN_AS_USERS as readonly string[]).includes(value)) {
+      ctx.addIssue({
+        code: 'custom',
+        message: `${value} 已停用（法国只留一个会话用户，docs/design.md 第十节），改成 ${RUN_AS_USERS.join('、')}，并用 orgKind 标明是拼车还是独享池`,
+      });
+    } else if (!(RUN_AS_USERS as readonly string[]).includes(value)) {
+      ctx.addIssue({ code: 'custom', message: `会话用户只能是 ${RUN_AS_USERS.join('、')}，给的是 ${value}` });
+    }
+  })
+  .transform((value) => value as RunAsUser);
+
 export const CatalogSchema = z.strictObject({
   families: z.array(z.strictObject({ id: Id, displayName: Text, vendor: Text })).default([]),
   channels: z
@@ -37,7 +59,8 @@ export const CatalogSchema = z.strictObject({
         id: Id,
         channelId: Id,
         maxConcurrency: z.int().positive(),
-        runAsUser: z.enum(RUN_AS_USERS).optional(),
+        runAsUser: RunAsUserField.optional(),
+        orgKind: z.enum(ORG_KINDS).optional(),
         expiresAt: z.iso.datetime({ offset: true }).optional(),
       }),
     )
@@ -381,18 +404,21 @@ export async function loadCatalog(
               channelId: p.channelId,
               maxConcurrency: p.maxConcurrency,
               runAsUser: p.runAsUser ?? null,
+              orgKind: p.orgKind ?? null,
               expiresAt: p.expiresAt ? new Date(p.expiresAt) : null,
             })
             .onConflictDoNothing({ target: pools.id })
             .returning({ id: pools.id }),
         ),
-      ['channelId', 'maxConcurrency', 'runAsUser', 'expiresAt'],
-      ['runAsUser', 'expiresAt'],
+      ['channelId', 'maxConcurrency', 'runAsUser', 'orgKind', 'expiresAt'],
+      ['runAsUser', 'orgKind', 'expiresAt'],
       async (id, field, value) => {
         const [set, empty] =
           field === 'runAsUser'
             ? [{ runAsUser: value as RunAsUser }, isNull(pools.runAsUser)]
-            : [{ expiresAt: new Date(value as string) }, isNull(pools.expiresAt)];
+            : field === 'orgKind'
+              ? [{ orgKind: value as OrgKind }, isNull(pools.orgKind)]
+              : [{ expiresAt: new Date(value as string) }, isNull(pools.expiresAt)];
         return wrote(
           await tx
             .update(pools)

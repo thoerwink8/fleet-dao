@@ -3,6 +3,7 @@
 // 不经 JSON 边界）。
 import type {
   HostId,
+  OrgKind,
   ProgressKind,
   QuotaWindowKind,
   RunAsUser,
@@ -347,6 +348,7 @@ export interface RouteLaunchFacts {
   hostId: HostId;
   upstreamModel: string | null;
   runAsUser: RunAsUser | null;
+  orgKind: OrgKind | null;
 }
 
 /** 起会话要的：这条路由的池、会话用户、执行方式、上游模型串。路由不在返回 null。 */
@@ -365,6 +367,7 @@ export async function routeLaunchFacts(db: Db, routeId: string): Promise<RouteLa
     hostId: row.route.hostId,
     upstreamModel: row.route.upstreamModel,
     runAsUser: row.pool.runAsUser,
+    orgKind: row.pool.orgKind,
   };
 }
 
@@ -1036,6 +1039,8 @@ export interface StageRouteFacts {
     channelName: string;
     poolId: string;
     poolRunAsUser: string | null;
+    /** Claude 订阅池对应的组织类型（pools.org_kind）：会话用户挂着哪个组织，只有那个池能派。别的池 null。 */
+    poolOrgKind: OrgKind | null;
     modelId: string;
     modelName: string;
     family: string;
@@ -1093,6 +1098,7 @@ export async function routeFactsForStage(
         upstreamModel: routes.upstreamModel,
         upstreamAliases: routes.upstreamAliases,
         poolRunAsUser: pools.runAsUser,
+        poolOrgKind: pools.orgKind,
         modelName: models.displayName,
         channelName: channels.name,
       })
@@ -1122,6 +1128,7 @@ export async function routeFactsForStage(
       channelName: detail.channelName,
       poolId: c.poolId,
       poolRunAsUser: detail.poolRunAsUser,
+      poolOrgKind: detail.poolOrgKind,
       modelId: c.modelId,
       modelName: detail.modelName,
       family: c.family,

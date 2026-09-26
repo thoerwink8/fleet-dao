@@ -2,23 +2,22 @@
 # fleet-agent-scope：引擎（fleet 用户）经 sudo 调它，把一个 AI 会话以会话专用用户的身份放进 fleet-agents.slice 下它自己的
 # scope，或者收掉一个（引擎重启后按 scope 名找回旧会话再收）。deploy/france.sh 装到 /usr/local/sbin/（root 755），
 # /etc/sudoers.d/fleet-dao 只放行 fleet 以 root 跑这一个文件。
-# 它以 root 跑，所以只做这一件事：身份只能是下面两个会话用户之一、slice 写死、单元名写死 fleet-agent-<编号>.scope，
+# 它以 root 跑，所以只做这一件事：身份只能是下面的会话用户、slice 写死、单元名写死 fleet-agent-<编号>.scope，
 # 参数逐个按白名单验。环境变量不走命令行（sudo 会把命令行记进日志，/proc 里谁都看得到），只收 sudoers 的 env_keep 放过来的那几类。
 #
 #   sudo -n fleet-agent-scope run <编号> --user <会话用户> [--memory-high 大小] [--memory-max 大小] [--memory-swap-max 大小]
 #                                 [--tasks-max 数] [--cpu-weight 数] [--cwd 目录] -- /绝对路径/命令 参数…
 #   sudo -n fleet-agent-scope stop <编号>     没有这个会话也算收好，返回 0
 #   sudo -n fleet-agent-scope list            在册的会话：编号 状态，一行一个
-#   sudo -n fleet-agent-scope adopt <工作树> --user <会话用户> [--from <会话用户> --session <会话编号>]
+#   sudo -n fleet-agent-scope adopt <工作树> --user <会话用户>
 #                                    把工作树交给这个会话用户：不在就建（中间各级 root:root 755，最后一级归它、700），
-#                                    在就改属主；给了 --session 就顺带把过程记录从 --from 那里拷过去
-#                                    （--from 和 --session 要么都给要么都不给）。退出码：0 成功；64 校验不过；
-#                                    65 会话记录没找到或不唯一；其余失败 1。
+#                                    在就改属主。退出码：0 成功；64 校验不过；其余失败 1。
 #   sudo -n fleet-agent-scope remove <工作树>  删掉一棵工作树（不跟随符号链接、不跨文件系统）。本来就不在也返回 0；
 #                                    标准输出最后一行是 removed <路径> 或 gone <路径>。退出码同 adopt。
 #
-# 两个会话用户各挂一个 reclaude 组织、永不切号：fleet-agent-dedicated（独享）、fleet-agent-carpool（拼车）；
-# 引擎按选中的账号池挑用户。reclaude 的组织写在各自家里的 ~/.reclaude/device.json，对这个用户的所有会话一起生效。
+# 法国只有一个会话用户 fleet-agent-carpool（reclaude 一个账户最多挂 4 台设备、一个家目录算一台，创始人 2026-09-26；
+# 名字是历史沿用）。它的组织写在家里的 ~/.reclaude/device.json，对它的所有会话一起生效：平时挂拼车，用满切独享（#59）。
+# 原先的 fleet-agent-dedicated 已停用、已删，这里不再认。
 # 内存要真封顶，--memory-max 和 --memory-swap-max 得一起给：只给前者，超出的部分会被换进 swap，会话不会被杀（法国实测）。
 # run 会 exec 成会话本身：进程号、标准输入输出都还是调用方拿着的那一份。会话看得到的环境：HOME/USER/LOGNAME/SHELL 是会话用户的；
 # PATH 取 FLEET_SESSION_PATH（没给就用默认），末尾总接上会话用户家里的 ~/.local/bin（引擎传来的是它自己的 PATH，
@@ -29,7 +28,7 @@
 # no-new-privs 让会话里的 sudo、setuid 程序都提不了权。
 set -euo pipefail
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
-SESSION_USERS=(fleet-agent-dedicated fleet-agent-carpool)
+SESSION_USERS=(fleet-agent-carpool)
 SLICE=fleet-agents.slice
 PREFIX=fleet-agent-
 ENV_RE='^(FLEET_[A-Z0-9_]+|LANG|LANGUAGE|LC_[A-Z_]+|TZ|TERM|GIT_TERMINAL_PROMPT)$'
@@ -98,7 +97,7 @@ run() {
     esac
   done
   for u in "${SESSION_USERS[@]}"; do if [[ "$user" == "$u" ]]; then ok=1; fi; done
-  ((ok)) || die "--user 只能是会话用户 ${SESSION_USERS[*]} 之一，给的是「$user」"
+  ((ok)) || die "--user 只能是会话用户 ${SESSION_USERS[*]}，给的是「$user」"
   (($#)) || die "-- 后面要有要跑的命令"
   [[ "$1" == /* ]] || die "命令要写绝对路径：「$1」"
   [[ "$cwd" == /* ]] || die "--cwd 要写绝对路径：「$cwd」"
@@ -139,9 +138,8 @@ list() {
     awk -v p="$PREFIX" '{ id = $1; sub("^" p, "", id); sub(/[.]scope$/, "", id); print id, $3 }'
 }
 
-# 换会话用户接着干（docs/design.md 第十四节）：工作树路径不变，只改属主；给了 --session 就把过程记录也拷过去，
-# 新用户按同一个路径算出的项目目录名和旧用户一样，fork 续会话时就能接着找到它。
-# 退出码：0 成功；64 用法/校验不过（下面全部经 die）；65 会话记录没找到或不唯一；其余失败 1。
+# 把工作树交给会话用户（docs/design.md 第十四节）：不在就建，在就改属主。只有一个会话用户，续会话（含切号后的
+# fork）都在同一个家目录里，过程记录不用拷。退出码：0 成功；64 用法/校验不过（下面全部经 die）；其余失败 1。
 # 工作树落点（docs/design.md 第十四节）：绝对路径、在 WORK_BASE 之下、至少两层（仓/任务）、每一段只许字母数字和 . _ -
 # （不许 . 和 ..）。WORK_BASE 和中间各级都归 root、别人写不进，会话用户没法在路径上塞符号链接；这里照样逐段核对。
 check_tree_path() {
@@ -235,9 +233,8 @@ remove() {
 }
 
 adopt() {
-  local dir=${1:-} user="" from="" session="" u ok=0 from_home to_home src project_dir dest_dir dest_path tmp_path
-  local -a hits=() pstat=()
-  [[ -n "$dir" ]] || die "用法：fleet-agent-scope adopt <工作树> --user <会话用户> [--from <会话用户> --session <会话编号>]"
+  local dir=${1:-} user="" u ok=0
+  [[ -n "$dir" ]] || die "用法：fleet-agent-scope adopt <工作树> --user <会话用户>"
   shift
   while (($#)); do
     case $1 in
@@ -246,70 +243,14 @@ adopt() {
       user=$2
       shift 2
       ;;
-    --from)
-      (($# >= 2)) || die "$1 后面要给一个值"
-      from=$2
-      shift 2
-      ;;
-    --session)
-      (($# >= 2)) || die "$1 后面要给一个值"
-      session=$2
-      shift 2
-      ;;
     *) die "不认识的参数：「$1」" ;;
     esac
   done
-  # 先验和文件系统无关的：user/from/session 的形状，不用等工作树存在就能测
+  # 先验和文件系统无关的：user 的形状，不用等工作树存在就能测
   for u in "${SESSION_USERS[@]}"; do if [[ "$user" == "$u" ]]; then ok=1; fi; done
-  ((ok)) || die "--user 只能是会话用户 ${SESSION_USERS[*]} 之一，给的是「$user」"
-  if [[ -n "$from" || -n "$session" ]]; then
-    [[ -n "$from" && -n "$session" ]] || die "--from 和 --session 要么都给，要么都不给（拷会话记录要知道从哪个用户拷）"
-    ok=0
-    for u in "${SESSION_USERS[@]}"; do if [[ "$from" == "$u" ]]; then ok=1; fi; done
-    ((ok)) || die "--from 只能是会话用户 ${SESSION_USERS[*]} 之一，给的是「$from」"
-    [[ "$from" != "$user" ]] || die "--from 和 --user 不能一样：「$user」"
-    [[ "$session" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] ||
-      die "--session 要是 UUID：「$session」"
-  fi
+  ((ok)) || die "--user 只能是会话用户 ${SESSION_USERS[*]}，给的是「$user」"
   check_tree_path "$dir"
   ensure_tree "$dir" "$user"
-
-  if [[ -n "$session" ]]; then
-    from_home=$(getent passwd "$from" | cut -d: -f6) || die "找不到用户 $from 的家目录"
-    to_home=$(getent passwd "$user" | cut -d: -f6) || die "找不到用户 $user 的家目录"
-    # 不以 root 读旧用户的文件：旧用户能把文件换成指向 /etc/shadow 这类的链接，改由它自己的身份去找、去读
-    mapfile -t hits < <(as_session_user "$from" /usr/bin/find "$from_home/.claude/projects" \
-      -mindepth 2 -maxdepth 2 -type f -name "$session.jsonl" 2>/dev/null)
-    if ((${#hits[@]} != 1)); then
-      echo "fleet-agent-scope：$from 名下找不到唯一的会话记录 $session.jsonl（命中 ${#hits[@]} 个）" >&2
-      exit 65
-    fi
-    src=${hits[0]}
-    # 项目目录名照旧的来：工作树路径没变，新用户按同一个路径算出的名字和旧用户一样，不用我们自己重算
-    project_dir=$(basename -- "$(dirname -- "$src")")
-    dest_dir="$to_home/.claude/projects/$project_dir"
-    dest_path="$dest_dir/$session.jsonl"
-    tmp_path="$dest_dir/.$session.jsonl.tmp"
-    # 先写临时文件，两边都确认成功了才在下面单独 mv 成最终名字：管道右边看不到左边的退出码，旧用户读
-    # 失败时右边一样能拿空输入把 mkdir+cat+chmod 走成功，要是直接写最终文件名就会留一个空的 <会话>.jsonl。
-    # 两段的退出码都要看，用 PIPESTATUS（在 if 判完的下一句立刻取，再跑别的命令它就被冲掉了）。
-    # 权限显式设（700 / 600），不只靠 umask：上级目录带默认 ACL 时 umask 不生效，新建的会是 775 / 664（CI 的机器就是）。
-    # shellcheck disable=SC2016 # $1…$4 要由降权后的 sh 展开，不是这一层的
-    if ! as_session_user "$from" cat -- "$src" |
-      as_session_user "$user" /bin/sh -c \
-        'umask 077 && install -d -m 700 -- "$1" "$2" "$3" && cat >"$4" && chmod 600 -- "$4"' sh \
-        "$to_home/.claude" "$to_home/.claude/projects" "$dest_dir" "$tmp_path"; then
-      pstat=("${PIPESTATUS[@]}")
-      as_session_user "$user" rm -f -- "$tmp_path" 2>/dev/null || true
-      echo "fleet-agent-scope：拷会话记录失败（读 ${pstat[0]}，写 ${pstat[1]}）：$src → $dest_path" >&2
-      exit 1
-    fi
-    if ! as_session_user "$user" mv -f -- "$tmp_path" "$dest_path"; then
-      as_session_user "$user" rm -f -- "$tmp_path" 2>/dev/null || true
-      echo "fleet-agent-scope：拷会话记录失败（换不成 $dest_path）：$src → $dest_path" >&2
-      exit 1
-    fi
-  fi
   echo "已把 $dir 交给 $user"
 }
 
@@ -331,5 +272,5 @@ remove)
   shift
   remove "$@"
   ;;
-*) die "用法：fleet-agent-scope run <编号> --user <会话用户> [选项] -- /绝对路径/命令 参数… | stop <编号> | list | adopt <工作树> --user <会话用户> [--from <会话用户> --session <会话编号>] | remove <工作树>" ;;
+*) die "用法：fleet-agent-scope run <编号> --user <会话用户> [选项] -- /绝对路径/命令 参数… | stop <编号> | list | adopt <工作树> --user <会话用户> | remove <工作树>" ;;
 esac
