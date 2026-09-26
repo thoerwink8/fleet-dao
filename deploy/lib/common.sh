@@ -371,6 +371,24 @@ site_keepalive_gaps() { # 站点文件
     }' "$1"
 }
 
+# 法国往香港 rrsync 推文件要排队：发布脚本发静态文件、fleet-demo-scopes 推可见范围用的是同一把上传钥匙，香港那头的
+# rrsync 同一时刻只让一个进来，后来的直接被拒（「Another instance of rrsync is already accessing this directory」，
+# rsync 报退出码 12；2026-09-26 发布试通香港时就这样撞上了 fleet-demo-scopes 的推送，没切版本）。france.sh 读回的试跑
+# 也一样。都在法国先拿同一把锁再推；等 HK_RSYNC_WAIT 秒还没轮到就照实失败（75），不硬推。fleet-demo-scopes.sh 单独装、
+# 不引本文件，自己拿同一把锁、整趟推送只排一次（deploy/test/demo-scopes.test.sh 核对是同一把；它的单元开了 ProtectSystem=strict，
+# 靠 ReadWritePaths=/run/lock 才拿得到锁，启动超时也要盖住等锁的时间）。FLEET_HK_RSYNC_LOCK 只给测试换位置用
+HK_RSYNC_LOCK=${FLEET_HK_RSYNC_LOCK:-/run/lock/fleet-dao-hk-rsync.lock}
+HK_RSYNC_WAIT=120
+hk_rsync() { # rsync 参数…
+  (
+    if ! flock -w "$HK_RSYNC_WAIT" 9; then
+      echo "等了 $HK_RSYNC_WAIT 秒还没轮到往香港推文件：$HK_RSYNC_LOCK 一直被别的推送占着" >&2
+      exit 75
+    fi
+    rsync "$@"
+  ) 9>>"$HK_RSYNC_LOCK"
+}
+
 # 法国往香港传驾驶舱静态文件用的 ssh（france.sh 的读回和 release.sh 同一套）：只用那一把钥匙、只认钉住的主机钥匙、
 # 不交互。香港那头把这把钥匙限死成 rrsync -wo -munge /srv/fleet-dao-web，只许从隧道地址来（hk.sh）。
 web_upload_ssh() { # 私钥 known_hosts

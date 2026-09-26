@@ -13,6 +13,7 @@ HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 TMP=$(mktemp -d)
 trap 'rm -rf -- "$TMP"' EXIT
 export FLEET_RELEASES_DIR=$TMP/releases
+export FLEET_HK_RSYNC_LOCK=$TMP/hk-rsync.lock
 # shellcheck source=../release.sh
 source "$HERE/../release.sh"
 set +e # release.sh 开了 -e；这里自己判每一步
@@ -95,8 +96,19 @@ config web /show/
 check "根地址那一处护着的是现在配的演示版目录" "$(web_plan "$A" | grep -c -- '--exclude=/show/')" 1
 
 echo "== sync_web 照着发：顺序、源、参数一样；发不出去报红、后面的不发"
+ONE_AT_A_TIME=0
 rsync() {
   printf '%s\n' "$*" >>"$TMP/rsync.log"
+  if ((ONE_AT_A_TIME)); then
+    # 像香港的 rrsync：同一时刻只让一个进来（mkdir 当它的锁），占 0.4 秒；后到的照 rrsync 的原话拒掉、退出码 12
+    if ! mkdir -- "$TMP/rrsync.busy" 2>/dev/null; then
+      echo "/usr/bin/rrsync error: Another instance of rrsync is already accessing this directory." >&2
+      return 12
+    fi
+    sleep 0.4
+    rmdir -- "$TMP/rrsync.busy"
+    return 0
+  fi
   if [[ -n "${RSYNC_FAIL_AT:-}" && "${*: -1}" == *"$RSYNC_FAIL_AT" ]]; then
     echo "rsync: connection unexpectedly closed" >&2
     return 12
@@ -127,6 +139,45 @@ config demo /demo/
 reset
 sync_web "$B" >/dev/null
 check "这一版没带演示版：记一项待配，香港上的演示版不动" "${#PENDING[@]}" 1
+
+echo "== 往香港推要排队：香港的 rrsync 同一时刻只让一个进来，法国这头先拿同一把锁（2026-09-26 发布撞上过 fleet-demo-scopes）"
+ONE_AT_A_TIME=1
+both() { # 命令：同时跑两次，打印两个退出码（从小到大）
+  local a b ra rb
+  "$@" x y 2>/dev/null &
+  a=$!
+  "$@" x y 2>/dev/null &
+  b=$!
+  wait "$a"
+  ra=$?
+  wait "$b"
+  rb=$?
+  printf '%s\n%s\n' "$ra" "$rb" | sort -n | tr '\n' ' '
+}
+check "不排队（修之前直接 rsync）：两个同时推，后到的被拒" "$(both rsync)" "0 12 "
+check "排队（hk_rsync）：两个同时推都成" "$(both hk_rsync)" "0 0 "
+# 锁一直被别人占着：等到点就照实失败（75），不硬推；发布的试通、发静态文件都走这把锁
+exec 8>>"$HK_RSYNC_LOCK"
+flock 8
+HK_RSYNC_WAIT=1
+: >"$TMP/rsync.log"
+out=$(hk_rsync x y 2>&1)
+check "锁被占着：等 1 秒就退出 75，说清楚" "$? $(grep -c '还没轮到往香港推文件' <<<"$out")" "75 1"
+reset
+web_reachable >/dev/null
+check "试通香港也排队：轮不到就报红（没切版本），一次都没推" \
+  "${#REDS[@]} $(printf '%s\n' "${REDS[@]}" | grep -c '还没轮到') $(grep -c . "$TMP/rsync.log")" "1 1 0"
+config web /demo/
+reset
+sync_web "$A" >/dev/null
+check "发静态文件也排队：轮不到就报红，一次都没推" \
+  "${#REDS[@]} $(printf '%s\n' "${REDS[@]}" | grep -c '还没轮到') $(grep -c . "$TMP/rsync.log")" "1 1 0"
+HK_RSYNC_WAIT=120
+exec 8>&-
+reset
+web_reachable >/dev/null
+check "锁放开了：试通香港照常过" "${#REDS[@]} $(grep -c . "$TMP/rsync.log")" "0 1"
+ONE_AT_A_TIME=0
 
 echo "== 健康检查：演示版的首页是不是这一版、深链接回落到哪"
 if [[ -z "$NODE" ]]; then

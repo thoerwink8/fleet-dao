@@ -30,6 +30,16 @@ hk_ssh() {
     "$UPLOAD_KEY" "$HK_KNOWN_HOSTS"
 }
 
+# 和发布脚本往香港推排同一个队（同 deploy/lib/common.sh 的 HK_RSYNC_LOCK，为什么要排队见那边；测试核对是同一把锁）：
+# 香港的 rrsync 同一时刻只让一个进来，不排队就会被拒。整趟推送（最多 MAX_ROUNDS 轮）只排一次，轮与轮之间不让发布插进来。
+# 改这里之前必须知道：最坏要跑 等锁 HK_RSYNC_WAIT + 每轮（ssh 连上 ConnectTimeout + rsync 没动静就停 PUSH_IO_TIMEOUT）
+# × MAX_ROUNDS 秒，fleet-demo-scopes.service 的 TimeoutStartSec 必须比它大，不然 systemd 先把它杀了，报不出「等锁超时」、
+# 刚拿到锁也来不及推完（deploy/test/demo-scopes.test.sh 核对）。
+HK_RSYNC_LOCK=${FLEET_HK_RSYNC_LOCK:-/run/lock/fleet-dao-hk-rsync.lock}
+HK_RSYNC_WAIT=120
+MAX_ROUNDS=5
+PUSH_IO_TIMEOUT=30
+
 # 演示版在香港站点上的路径：release.env 的 FLEET_DEMO_PATH（同发布脚本），没写就是 /demo/
 demo_path() {
   local line v=""
@@ -89,7 +99,7 @@ stage_scopes() { # 暂存目录
 # 推到香港演示版目录下的 scopes/：只碰 scopes/ 里的 .json（演示版别的文件由发布脚本管，这里一个不动；
 # 演示版的目录还没有时顺手建上）。里面不是这一份的文件删掉：作废、到期就是这么生效的
 push() { # 暂存目录 香港上演示版的路径
-  rsync -rpc --delete --delay-updates --chmod=D755,F644 --itemize-changes \
+  rsync -rpc --delete --delay-updates --chmod=D755,F644 --itemize-changes --timeout="$PUSH_IO_TIMEOUT" \
     --include=/scopes/ --include='/scopes/*.json' --exclude='*' \
     -e "$(hk_ssh)" -- "$1/" "root@$HK_TUNNEL:$2"
 }
@@ -97,7 +107,12 @@ push() { # 暂存目录 香港上演示版的路径
 main() {
   local path stage before after n round out
   if ! path=$(demo_path); then exit 2; fi
-  for round in 1 2 3 4 5; do
+  exec 9>>"$HK_RSYNC_LOCK"
+  if ! flock -w "$HK_RSYNC_WAIT" 9; then
+    echo "等了 $HK_RSYNC_WAIT 秒还没轮到往香港推文件：$HK_RSYNC_LOCK 一直被别的推送占着，这次没推" >&2
+    exit 2
+  fi
+  for ((round = 1; round <= MAX_ROUNDS; round++)); do
     before=$(listing)
     stage=$(mktemp -d)
     stage_scopes "$stage"

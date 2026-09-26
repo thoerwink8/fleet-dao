@@ -9,6 +9,7 @@ set -uo pipefail
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 TMP=$(mktemp -d)
 trap 'rm -rf -- "$TMP"' EXIT
+export FLEET_HK_RSYNC_LOCK=$TMP/hk-rsync.lock
 # shellcheck source=../france/fleet-demo-scopes.sh
 source "$HERE/../france/fleet-demo-scopes.sh"
 set +e # 脚本开了 -e；这里自己判每一步
@@ -148,7 +149,73 @@ run
 check "目录不在：退出码 0" "$RC" 0
 check "目录不在：香港上也没有" "$(published)" ""
 
-echo "== 和发布脚本用同一套 ssh 参数（本文件装到 /usr/local/sbin 单独跑，不引 common.sh）"
+echo "== 推之前和发布脚本排同一个队：锁被占着（发布正在往香港发）就等，等到点还轮不到就退出 2、一次都不推"
+exec 8>>"$HK_RSYNC_LOCK"
+flock 8
+HK_RSYNC_WAIT=1
+mkdir -p "$SRC"
+printf '{"v":1,"modules":["board"],"detail":"status"}\n' >"$SRC/default.json"
+run
+check "锁被占着：退出码 2" "$RC" 2
+check "说了是在等锁" "$(grep -c '还没轮到往香港推文件' <<<"$OUT")" 1
+check "一次都没推" "$(grep -c . "$TMP/rsync.log")" 0
+HK_RSYNC_WAIT=120
+exec 8>&-
+run
+check "锁放开了：推成" "$RC $(published)" "0 default.json "
+
+echo "== 和发布脚本用同一套 ssh 参数、排同一个队（本文件装到 /usr/local/sbin 单独跑，不引 common.sh）"
+default_lock() { # 脚本：不设 FLEET_HK_RSYNC_LOCK 时它用哪把锁
+  (
+    unset FLEET_HK_RSYNC_LOCK
+    # shellcheck source=/dev/null
+    source "$1"
+    printf '%s' "$HK_RSYNC_LOCK"
+  )
+}
+lock=$(default_lock "$HERE/../france/fleet-demo-scopes.sh")
+check "两边默认是同一把锁" "$lock" "$(default_lock "$HERE/../lib/common.sh")"
+check "单元开了 ProtectSystem=strict，锁所在的目录要放开写" \
+  "$(grep -cx "ReadWritePaths=${lock%/*}" "$HERE/../france/fleet-demo-scopes.service")" 1
+
+echo "== 单元的启动超时盖得住脚本最坏要跑的时间：等锁 + 轮数 ×（ssh 连上 + rsync 没动静就停）；短了 systemd 先把它杀掉"
+# 打印单元的超时哪里不够，够了什么都不打印。读不出来（没写、不是整秒数、脚本的常数认不出）也照实打印，不当成够
+timeout_gap() { # 单元文件 脚本
+  local unit need
+  unit=$(sed -nE 's/^TimeoutStartSec=([0-9]+)$/\1/p' "$1")
+  need=$(
+    unset FLEET_HK_RSYNC_LOCK
+    # shellcheck source=/dev/null
+    source "$2" || exit 1
+    [[ "$(hk_ssh)" =~ ConnectTimeout=([0-9]+) ]] || exit 1
+    conn=${BASH_REMATCH[1]}
+    for v in "$HK_RSYNC_WAIT" "$MAX_ROUNDS" "$PUSH_IO_TIMEOUT"; do [[ "$v" =~ ^[0-9]+$ ]] || exit 1; done
+    echo $((HK_RSYNC_WAIT + MAX_ROUNDS * (conn + PUSH_IO_TIMEOUT)))
+  )
+  if [[ -z "$unit" ]]; then
+    echo "单元里读不出 TimeoutStartSec（只认整秒数）"
+  elif [[ -z "$need" ]]; then
+    echo "读不出脚本最坏要跑多久"
+  elif ((unit <= need)); then
+    echo "TimeoutStartSec=$unit 不够：脚本最坏要跑 $need 秒"
+  fi
+}
+UNIT=$HERE/../france/fleet-demo-scopes.service
+SCRIPT=$HERE/../france/fleet-demo-scopes.sh
+check "仓里的单元：够" "$(timeout_gap "$UNIT" "$SCRIPT")" ""
+sed 's/^TimeoutStartSec=.*/TimeoutStartSec=120/' "$UNIT" >"$TMP/unit-short"
+check "改回修之前的 120 秒：查得出不够" "$(timeout_gap "$TMP/unit-short" "$SCRIPT")" \
+  "TimeoutStartSec=120 不够：脚本最坏要跑 320 秒"
+sed 's/^PUSH_IO_TIMEOUT=.*/PUSH_IO_TIMEOUT=90/' "$SCRIPT" >"$TMP/script-slow.sh"
+check "脚本改慢了、单元没跟着改：查得出" "$(timeout_gap "$UNIT" "$TMP/script-slow.sh")" \
+  "TimeoutStartSec=420 不够：脚本最坏要跑 620 秒"
+sed 's/^TimeoutStartSec=.*/TimeoutStartSec=7min/' "$UNIT" >"$TMP/unit-weird"
+check "写成 7min 这类认不出的：说读不出，不当成够" "$(timeout_gap "$TMP/unit-weird" "$SCRIPT")" \
+  "单元里读不出 TimeoutStartSec（只认整秒数）"
+sed 's/^PUSH_IO_TIMEOUT=.*/PUSH_IO_TIMEOUT=/' "$SCRIPT" >"$TMP/script-weird.sh"
+check "脚本的常数认不出：说读不出" "$(timeout_gap "$UNIT" "$TMP/script-weird.sh")" "读不出脚本最坏要跑多久"
+check "推的时候带着 rsync 的「没动静就停」" "$(grep -c -- "--timeout=$PUSH_IO_TIMEOUT " "$TMP/rsync.log")" 1
+
 # shellcheck source=../lib/common.sh
 source "$HERE/../lib/common.sh"
 check "两边的 ssh 参数一样" "$(hk_ssh)" "$(web_upload_ssh "$UPLOAD_KEY" "$HK_KNOWN_HOSTS")"
