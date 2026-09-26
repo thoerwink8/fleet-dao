@@ -43,14 +43,22 @@ jobs:
           BASE: ${{ github.base_ref }}
         run: node packages/conventions/src/bin/ci-plan.ts --event "$EVENT" --base "origin/$BASE"
 
-  # 卫生检查：每个 PR 都跑、不裁剪。只用 Node 自带的，不装依赖——这个 job 拿着真的已知敏感值名单，
-  # 不跑 PR 里除卫生检查（packages/hygiene，先审后合）以外的代码，也不跑依赖的安装脚本（#115 第二意见）。不等 changes。
+  # 卫生检查：每个 PR 都跑、不裁剪。这个 job 拿着真的已知敏感值名单，所以一行 PR 里的代码都不执行（#115 第二意见）：
+  # PR 检出到 pr/ 只当数据扫；执行的是目标分支（主线）上那份 packages/hygiene，检出到 trusted/；不装依赖、不跑安装脚本。
+  # 代价：PR 改卫生检查的规则、白名单，要合进主线之后才用上——要加白名单的，先单独合一个只改白名单的 PR。不等 changes。
   hygiene:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
         with:
+          path: pr
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          path: trusted
+          sparse-checkout: packages/hygiene
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
@@ -64,7 +72,19 @@ jobs:
           f="$RUNNER_TEMP/sensitive-values.txt"
           printf '%s\n' "$FLEET_SENSITIVE_VALUES" > "$f"
           echo "FLEET_SENSITIVE_VALUES_FILE=$f" >> "$GITHUB_ENV"
-      - run: node packages/hygiene/src/bin/check.ts
+      # 和 packages/hygiene/src/bin/check.ts 做的一样，只是代码取 trusted/、扫的是 pr/。退出码 2 = 没扫全，同样是红
+      - name: 卫生检查（主线上的代码，扫 PR 的文件）
+        working-directory: pr
+        env:
+          TRUSTED: ${{ github.workspace }}/trusted
+        run: |
+          node --input-type=module -e '
+          import { pathToFileURL } from "node:url";
+          const { runCheck } = await import(pathToFileURL(`${process.env.TRUSTED}/packages/hygiene/src/check.ts`).href);
+          const { code, lines } = runCheck({ root: process.cwd(), mustInclude: "packages/hygiene/src/rules.ts" });
+          for (const line of lines) (code === 0 ? console.log : console.error)(line);
+          process.exitCode = code;
+          '
 
   # 文档指针、skill 指针：每个 PR 都跑、不裁剪（改名挪文件也会让文档里的指针指空）。不等 changes。
   docs:

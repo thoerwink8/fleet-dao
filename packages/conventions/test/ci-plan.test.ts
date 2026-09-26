@@ -15,6 +15,7 @@ import {
   planOutputs,
   readGraph,
 } from '../src/ci-plan.ts';
+import { parseRiskPaths, RISK_PATHS_FILE } from '../src/merge-gates.ts';
 import { fsRepo } from '../src/repo.ts';
 import { memRepo } from './helpers.ts';
 
@@ -453,7 +454,7 @@ describe('ci.yml 和这里对得上', () => {
     expect(job('changes')).toContain('node packages/conventions/src/bin/ci-plan.ts');
   });
 
-  it('真的已知敏感值名单只给 hygiene job，它不装依赖、不跑 PR 里别的代码（#115 第二意见：测试代码能读到就能泄露）', () => {
+  it('真的已知敏感值名单只给 hygiene job，它一行 PR 里的代码都不执行：代码取目标分支上的 trusted/，PR 检出到 pr/ 只当数据扫（#115 第二意见）', () => {
     const ids = [...yml.matchAll(/^ {2}([\w-]+):$/gm)].map((m) => m[1] as string);
     expect(ids).toContain('hygiene');
     for (const id of ids) {
@@ -462,11 +463,40 @@ describe('ci.yml 和这里对得上', () => {
     const h = job('hygiene');
     expect(h).toContain('secrets.FLEET_SENSITIVE_VALUES');
     expect(h).not.toMatch(/pnpm|npm |npx|vitest|cache:/);
-    // 单行的 run 只有卫生检查那一句；多行的（run: |）只有写名单那一段
-    expect(h.match(/^ +(?:- )?run: (?!\|).*$/gm)?.map((s) => s.trim())).toEqual([
-      '- run: node packages/hygiene/src/bin/check.ts',
-    ]);
-    expect(h.match(/run: \|/g)).toHaveLength(1);
+    // 两次检出：PR 的在 pr/，执行的代码在 trusted/，取目标分支的提交
+    expect(h).toMatch(/path: pr\n/);
+    expect(h).toMatch(
+      /ref: \$\{\{ github\.event\.pull_request\.base\.sha \|\| github\.sha \}\}\n\s+path: trusted\n/,
+    );
+    // 没有单行的 run（像 node packages/… 那样跑 PR 里的文件）；动态 import 的只有 TRUSTED 下的卫生检查
+    expect(h.match(/^ +(?:- )?run: (?!\|).*$/gm)).toBeNull();
+    expect(h).toContain('working-directory: pr');
+    expect(h).toMatch(/TRUSTED: \$\{\{ github\.workspace \}\}\/trusted\n/);
+    const imports = [...h.matchAll(/import\(([^)]*)\)/g)].map((m) => m[1]);
+    expect(imports).toHaveLength(1);
+    expect(imports[0]).toMatch(
+      /^pathToFileURL\(`\$\{process\.env\.TRUSTED\}\/packages\/hygiene\/src\/check\.ts`$/,
+    );
+  });
+
+  it('CI 按改动少跑的判法：从两个入口顺着相对导入走到的文件都在先审后合清单里（漏一个，PR 改它就能让测试少跑）', () => {
+    const parsed = parseRiskPaths(readFileSync(join(ROOT, RISK_PATHS_FILE), 'utf8'));
+    if (typeof parsed === 'string') throw new Error(parsed);
+    const covered = (f: string) =>
+      parsed.some((r) => (r.path.endsWith('/') ? f.startsWith(r.path) : f === r.path));
+    const todo = ['packages/conventions/src/bin/ci-plan.ts', 'packages/conventions/src/bin/ci-verdict.ts'];
+    const seen = new Set<string>();
+    while (todo.length > 0) {
+      const rel = todo.pop() as string;
+      if (seen.has(rel)) continue;
+      seen.add(rel);
+      const text = readFileSync(join(ROOT, rel), 'utf8');
+      for (const m of text.matchAll(/from '(\.{1,2}\/[^']+)'/g)) {
+        todo.push(posix.join(posix.dirname(rel), m[1] as string));
+      }
+    }
+    expect([...seen]).toContain('packages/conventions/src/repo.ts');
+    expect([...seen].filter((f) => !covered(f))).toEqual([]);
   });
 
   it('不用工作流级 paths 过滤（必过检查要永远触发）', () => {

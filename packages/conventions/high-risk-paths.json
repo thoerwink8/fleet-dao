@@ -116,6 +116,11 @@
       "path": "packages/conventions/src/bin/ci-verdict.ts",
       "kind": "碰安全",
       "why": "CI 汇总 job（必过检查 check）的入口"
+    },
+    {
+      "path": "packages/conventions/src/repo.ts",
+      "kind": "碰安全",
+      "why": "CI 的 changes job 经它读 package.json 算依赖图：改它能伪造依赖图，让受影响的包不测"
     }
   ]
 }
