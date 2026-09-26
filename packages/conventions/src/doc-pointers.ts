@@ -2,6 +2,7 @@
 // 「第 X 节」「X.Y」这类章节、「「X」一节」「README「X」」这类标题、plan.md 的阶段和条目，都要指得到；指不到的报 文件:行。
 // 只认本仓文档在用的写法。故意不查的：围栏代码块和 HTML 注释（示例、占位）、别的仓的路径（「windsurf-dao 仓 `docs/…`」）、
 // 不以仓里现有的顶层目录或文件开头的路径（/etc/…、~/…、标签名 model/ 这类）、所在文档没有小节编号时的小数（版本号）。
+// specs/<目录>/需求.md、方案.md 写在动手之前，指到别的文件、文档里还没有的东西不报（PLANNED_DOC）；写法本身的毛病照报。
 // 有误报就收窄这里的规则，不往文档里加豁免。pnpm check 里由 test/doc-pointers.test.ts 对全仓跑一遍。
 import { posix } from 'node:path';
 import {
@@ -20,6 +21,15 @@ import type { RepoView } from './repo.ts';
 
 /** 要查的几份文档；另加 specs/ 下所有的 .md。 */
 export const DOCS = ['docs/design.md', 'docs/plan.md', 'docs/ops.md', 'README.md'] as const;
+
+/**
+ * 写在动手之前的文档：方案本来就要写「新建哪个文件、ops 哪一段加什么」，指的东西这时还没有是正常的。它们指到别的文件、
+ * 别的文档里的节、标题、引的话、条目、plan 的阶段和条目，指不到不报——引擎把它们直写进主线，不经 PR 的检查，
+ * 报了挡的是之后所有别人的 PR。照报的：写法本身的毛病
+ * （「第 X 节」没说哪份、plan 条目的空引号——开单骨架故意留空等人填）、指自己这份文档里的标题、design 这几份读不到。
+ * 结果.md 写在做完之后，和 design、plan、ops、README 一样严查。只看文件名，不看单子开没开、写了多久（必过检查必须确定）。
+ */
+const PLANNED_DOC = /^specs\/[^/]+\/(?:需求|方案)\.md$/;
 
 export type PointerKind =
   | 'link'
@@ -46,13 +56,18 @@ export interface Pointer {
   line: number;
   /** 认出来的样子，例如「docs/design.md 第七节」「P1「工作流」」「deploy/france.sh」。 */
   text: string;
+  /** 指的东西不在时报不报：需求.md、方案.md 里指到别处的是 false（PLANNED_DOC）。 */
+  strict: boolean;
 }
 
 export interface Report {
   files: string[];
   problems: Problem[];
   pointers: Pointer[];
-  /** 每一类指针查了几个：某一类是 0，说明规则认不出了，不能当成「全都指得到」。 */
+  /**
+   * 每一类指针查了几个，只数 strict 的（指不到会报的）：某一类是 0，说明规则认不出了、或者只在需求.md、方案.md 里
+   * 认出来过，都不能当成「这一类全都指得到」。
+   */
   checked: Record<PointerKind, number>;
 }
 
@@ -143,7 +158,7 @@ export function checkDocPointers(repo: RepoView, files?: readonly string[]): Rep
   checker.problems.push(...listed.problems);
   for (const file of listed.files) checker.checkFile(file);
   const checked = emptyCounts();
-  for (const p of checker.pointers) checked[p.kind]++;
+  for (const p of checker.pointers) if (p.strict) checked[p.kind]++;
   return { files: listed.files, problems: checker.problems, pointers: checker.pointers, checked };
 }
 
@@ -198,8 +213,8 @@ class Checker {
     if (!t || /[<>{}$|"'=\\]/.test(t) || /^[~/]/.test(t) || t.startsWith('..')) return;
     if (/^[a-z][a-z0-9+.-]*:/i.test(t)) return; // 网址、host:port
     if (!this.tops.has(t.split('/')[0] ?? '')) return;
-    this.note('path', file, line, t);
-    if (!this.pathExists(t)) this.problem(file, line, `${t} 在仓里没有`);
+    this.note('path', file, line, t, t);
+    if (!this.pathExists(t)) this.missing(file, line, t, `${t} 在仓里没有`);
   }
 
   private checkBarePaths(file: string, line: number, prose: string): void {
@@ -221,9 +236,9 @@ class Checker {
       // 不是合法的百分号编码：按原样找
     }
     const rel = posix.normalize(posix.join(posix.dirname(file), p));
-    this.note('link', file, line, target);
+    this.note('link', file, line, target, rel);
     if (rel === '..' || rel.startsWith('../') || !this.pathExists(rel)) {
-      this.problem(file, line, `链接 ${target} 指的 ${rel} 在仓里没有`);
+      this.missing(file, line, rel, `链接 ${target} 指的 ${rel} 在仓里没有`);
     }
   }
 
@@ -292,11 +307,11 @@ class Checker {
     }
     const quote = readQuote(text, at);
     if (!quote) return undefined;
-    this.note('title', file, line, `${target}「${quote.text}」`);
+    this.note('title', file, line, `${target}「${quote.text}」`, target);
     const doc = this.doc(target);
     if (!doc) this.problem(file, line, `读不到 ${target}`);
     else if (!this.hasTitle(doc, quote.text, true))
-      this.problem(file, line, `${target} 里没有叫「${quote.text}」的标题`);
+      this.missing(file, line, target, `${target} 里没有叫「${quote.text}」的标题`);
     return text.startsWith('一节', quote.end) ? quote.end + 2 : quote.end;
   }
 
@@ -324,11 +339,11 @@ class Checker {
   private bareTitle(file: string, line: number, text: string, here: string, at: number): number | undefined {
     const quote = readQuote(text, at);
     if (!quote || !text.startsWith('一节', quote.end)) return undefined;
-    this.note('title', file, line, `${here}「${quote.text}」一节`);
+    this.note('title', file, line, `${here}「${quote.text}」一节`, here);
     const doc = this.doc(here);
     if (!doc) this.problem(file, line, `读不到 ${here}`);
     else if (!this.hasTitle(doc, quote.text, false))
-      this.problem(file, line, `${here} 里没有叫「${quote.text}」的一节`);
+      this.missing(file, line, here, `${here} 里没有叫「${quote.text}」的一节`);
     return quote.end + 2;
   }
 
@@ -341,7 +356,7 @@ class Checker {
     end: number,
     bare: boolean,
   ): number {
-    this.note('section', file, line, `${target} 第${numeral}节`);
+    this.note('section', file, line, `${target} 第${numeral}节`, target);
     const doc = this.doc(target);
     if (!doc) {
       this.problem(file, line, `读不到 ${target}`);
@@ -351,13 +366,14 @@ class Checker {
     const h = n === undefined ? undefined : doc.headings.find((x) => x.chapter === n);
     if (!h) {
       const hasChapters = doc.headings.some((x) => x.chapter !== undefined);
-      this.problem(
-        file,
-        line,
-        bare && !hasChapters
-          ? `「第${numeral}节」没说是哪份文档（${target} 自己没有编号的节）：前面写上 design、plan 或 ops`
-          : `${target} 里没有第${numeral}节`,
-      );
+      // 没说哪份是写法的毛病，不是「那一节还没写」：在哪份文档里都报
+      if (bare && !hasChapters) {
+        this.problem(
+          file,
+          line,
+          `「第${numeral}节」没说是哪份文档（${target} 自己没有编号的节）：前面写上 design、plan 或 ops`,
+        );
+      } else this.missing(file, line, target, `${target} 里没有第${numeral}节`);
     }
     return this.tail(file, line, text, doc, h, end, `${target} 第${numeral}节`);
   }
@@ -375,13 +391,13 @@ class Checker {
     const subs = doc?.headings.filter((x) => x.sub !== undefined) ?? [];
     // 没写文档名、这份文档又没有小节编号：多半是版本号之类的小数，不当指针
     if (bare && subs.length === 0) return undefined;
-    this.note('subsection', file, line, `${target} ${xy}`);
+    this.note('subsection', file, line, `${target} ${xy}`, target);
     if (!doc) {
       this.problem(file, line, `读不到 ${target}`);
       return this.tail(file, line, text, undefined, undefined, end, '');
     }
     const h = subs.find((x) => x.sub === xy);
-    if (!h) this.problem(file, line, `${target} 里没有 ${xy} 这一小节`);
+    if (!h) this.missing(file, line, target, `${target} 里没有 ${xy} 这一小节`);
     return this.tail(file, line, text, doc, h, end, `${target} ${xy}`);
   }
 
@@ -398,9 +414,9 @@ class Checker {
     let e = end;
     for (let q = readQuote(text, e); q; q = readQuote(text, e)) {
       if (doc && h) {
-        this.note('quote', file, line, `${label}「${q.text}」`);
+        this.note('quote', file, line, `${label}「${q.text}」`, doc.path);
         if (!this.sectionHas(doc, h, q.text, doc.path === file ? line : undefined)) {
-          this.problem(file, line, `${label}里找不到「${q.text}」`);
+          this.missing(file, line, doc.path, `${label}里找不到「${q.text}」`);
         }
       }
       e = q.end;
@@ -409,9 +425,9 @@ class Checker {
     const item = ITEM_RE.exec(text);
     if (item?.[1]) {
       if (doc && h) {
-        this.note('item', file, line, `${label} 第 ${item[1]} ${item[2]}`);
+        this.note('item', file, line, `${label} 第 ${item[1]} ${item[2]}`, doc.path);
         if (!this.sectionHasItem(doc, h, item[1]))
-          this.problem(file, line, `${label}里没有第 ${item[1]} ${item[2]}`);
+          this.missing(file, line, doc.path, `${label}里没有第 ${item[1]} ${item[2]}`);
       }
       e = ITEM_RE.lastIndex;
     }
@@ -419,23 +435,24 @@ class Checker {
   }
 
   private phaseRef(file: string, line: number, text: string, n: number, end: number): number {
-    this.note('plan', file, line, `P${n}`);
+    this.note('plan', file, line, `P${n}`, PLAN);
     const doc = this.doc(PLAN);
     if (!doc) {
       this.problem(file, line, `读不到 ${PLAN}`);
       return end;
     }
     const phase = this.planPhases(doc).get(n);
-    if (!phase) this.problem(file, line, `plan.md 里没有 P${n} 这个阶段`);
+    if (!phase) this.missing(file, line, PLAN, `plan.md 里没有 P${n} 这个阶段`);
     PHASE_ITEM_RE.lastIndex = end;
     PHASE_ITEM_RE.exec(text);
     const quote = readQuote(text, PHASE_ITEM_RE.lastIndex);
     if (!quote) return end;
     if (phase) {
-      this.note('planItem', file, line, `P${n}「${quote.text}」`);
+      this.note('planItem', file, line, `P${n}「${quote.text}」`, PLAN);
+      // 空引号是没填（开单骨架故意留空，不填就提交会红），不是「那一条还没有」：在哪份文档里都报
       if (!quote.text.trim()) this.problem(file, line, `plan.md P${n}「」引号里是空的，没写是哪一条`);
       else if (findItem(phase, quote.text) === undefined) {
-        this.problem(file, line, `plan.md 的 P${n} 里找不到「${quote.text}」`);
+        this.missing(file, line, PLAN, `plan.md 的 P${n} 里找不到「${quote.text}」`);
       }
     }
     return quote.end;
@@ -502,8 +519,19 @@ class Checker {
     return this.docs.get(path) ?? undefined;
   }
 
-  private note(kind: PointerKind, file: string, line: number, text: string): void {
-    this.pointers.push({ kind, file, line, text });
+  /** target：指到的文件或文档（仓内路径），用来判指不到时报不报。 */
+  private note(kind: PointerKind, file: string, line: number, text: string, target: string): void {
+    this.pointers.push({ kind, file, line, text, strict: this.strict(file, target) });
+  }
+
+  /** 指不到时报不报：写在动手之前的文档指到别处的不报（PLANNED_DOC），指它自己的照报。 */
+  private strict(file: string, target: string): boolean {
+    return target === file || !PLANNED_DOC.test(file);
+  }
+
+  /** 指的东西没有（文件、节、标题、引的话、条目、阶段）。写法本身的毛病、文档读不到不走这里，直接 problem。 */
+  private missing(file: string, line: number, target: string, message: string): void {
+    if (this.strict(file, target)) this.problem(file, line, message);
   }
 
   private problem(file: string, line: number, message: string): void {
