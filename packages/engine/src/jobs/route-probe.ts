@@ -110,9 +110,10 @@ export function planProbe(
   }
   const probe = probers[t.hostId];
   if (!probe) {
+    const wired = Object.keys(probers).map(hostName).join('、') || '一种都没有';
     return {
       state: 'not_wired',
-      detail: `执行方式「${hostName(t.hostId)}」的插头引擎还没接（现在只接了 Claude Code）：探不了，派工也派不到它`,
+      detail: `执行方式「${hostName(t.hostId)}」的插头引擎还没接（现在接了 ${wired}）：探不了，派工也派不到它`,
     };
   }
   if (!t.channelEnabled) return { state: 'skipped', detail: `渠道「${t.channelName}」已下架，不探` };

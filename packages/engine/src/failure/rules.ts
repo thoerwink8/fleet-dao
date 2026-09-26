@@ -218,7 +218,25 @@ export const RULES: readonly FailureRule[] = [
     alert: true,
     routeOutcome: 'fail',
   },
-  // 登录失效要人重新登录（设备被撤销单独归 DV1）。
+  // cursor-agent 没有登录态（会话用户家里没登、登录过期）：-p 模式下 stderr 一句、退出 1、没有任何 JSON。原话取自
+  // cursor-agent 2026.09.23 的发行包：「Error: Authentication required. Please run 'cursor-agent login' first, or set
+  // CURSOR_API_KEY environment variable.」「Authentication required to use Cursor Agent. Please run 'cursor-agent login'
+  // to authenticate.」（命令名随起法变，agent / cursor-agent）；ACP 那条路上是「Backend rejected authentication」。
+  // 和 AU2 一样整池暂停，修法是确定的：到那台机器上以会话用户重跑 cursor-agent login（登录态在它家里，不往会话环境里塞
+  // CURSOR_API_KEY）。排在 AU2 前面：AU2 的「authentication required」也认得它，但 AU2 管各家的登录，没写修法。
+  {
+    id: 'AU5',
+    title: 'Cursor 登录失效',
+    text: /run '(?:cursor-)?agent login'|Authentication required to use Cursor Agent|Backend rejected authentication/i,
+    ladder: ['swapRoute', 'park'],
+    avoid: { scope: 'pool', shared: true, until: 'none' },
+    alert: true,
+    routeOutcome: 'neutral',
+    humanFix:
+      '在{machine}上以{user}跑 cursor-agent login，按提示在浏览器里批准（登录态在它家里，不往会话环境里塞 CURSOR_API_KEY）；然后在驾驶舱点「继续」',
+    resumeAfterPark: true,
+  },
+  // 登录失效要人重新登录（设备被撤销单独归 DV1，Cursor 的归 AU5）。
   {
     id: 'AU2',
     title: '登录失效',
