@@ -223,6 +223,28 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * 以 MB 计的上限 → 帮手脚本（fleet-agent-scope）认的写法：0 只能写「0」（它和插头的校验都不认「0M」，
+ * 2026-09-26 法国第一次真起会话就卡在交换区上限「0M」上），别的写「<整数>M」。
+ * 不是非负整数的明确拒：不起会话，也不悄悄取整。
+ */
+export function scopeSize(name: string, mb: number): string {
+  if (!Number.isSafeInteger(mb) || mb < 0) {
+    throw new PortError('BAD_INPUT', `会话的资源上限 ${name} 要是非负整数（MB）：${mb}`, {
+      retryable: false,
+    });
+  }
+  return mb === 0 ? '0' : `${mb}M`;
+}
+
+function scopeLimitsOf(r: LaunchSessionInput['resources']): NonNullable<CgroupScope['limits']> {
+  return {
+    memoryHigh: scopeSize('memoryHighMb', r.memoryHighMb),
+    memoryMax: scopeSize('memoryMaxMb', r.memoryMaxMb),
+    memorySwapMax: scopeSize('swapMaxMb', r.swapMaxMb),
+  };
+}
+
 export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
   const { db, trees, gh } = deps;
   const clock = deps.now ?? (() => new Date());
@@ -465,6 +487,8 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     } catch (error) {
       throw new PortError('BAD_INPUT', errorText(error), { retryable: false });
     }
+    // 资源上限先换算、先校验：不对就在登记这一行之前拒，库里不留没起也没结束的会话
+    const limits = scopeLimitsOf(input.resources);
     let dir: string;
     if (kind === 'delivery') {
       if (!input.worktreePath) {
@@ -612,17 +636,7 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
       rateLimits: [],
       quotaError: undefined,
     };
-    const r = input.resources;
-    const cgroup: CgroupScope = {
-      id: input.runId,
-      user,
-      limits: {
-        memoryHigh: `${r.memoryHighMb}M`,
-        memoryMax: `${r.memoryMaxMb}M`,
-        memorySwapMax: `${r.swapMaxMb}M`,
-      },
-      ...helperOpts,
-    };
+    const cgroup: CgroupScope = { id: input.runId, user, limits, ...helperOpts };
     registry.set(input.runId, live);
     let spawnedYet = false;
     live.report = run(

@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { scopePrefix } from '@fleet-dao/adapters';
 import {
   appendProgressEvents,
   getSessionRun,
@@ -222,7 +223,8 @@ describe('写码会话', () => {
     expect(spec?.cgroup).toMatchObject({
       id: input.runId,
       user: 'fleet-agent-carpool',
-      limits: { memoryHigh: '1536M', memoryMax: '2048M', memorySwapMax: '0M' },
+      // 交换区上限 0 写「0」：帮手脚本和插头都不认「0M」（2026-09-26 法国第一次真起会话就卡在这）
+      limits: { memoryHigh: '1536M', memoryMax: '2048M', memorySwapMax: '0' },
     });
     expect(spec?.model).toBe('claude-opus-5-5');
     expect(spec?.prompt).toContain('需求 #12');
@@ -728,6 +730,35 @@ describe('失败', () => {
       code: 'TASK_NOT_FOUND',
     });
     expect(fake.count()).toBe(0);
+  });
+
+  it('资源上限不是非负整数（小数、负数、不是数）：起之前明确拒，不悄悄取整，库里不留这一行', async () => {
+    const { ports, fake } = setup(() => ({}));
+    for (const resources of [
+      { memoryHighMb: 1536.5, memoryMaxMb: 2048, swapMaxMb: 0 },
+      { memoryHighMb: 1536, memoryMaxMb: -1, swapMaxMb: 0 },
+      { memoryHighMb: 1536, memoryMaxMb: 2048, swapMaxMb: Number.NaN },
+    ]) {
+      const input = launch({ resources });
+      await expect(ports.startSession(input, ctx()), JSON.stringify(resources)).rejects.toMatchObject({
+        code: 'BAD_INPUT',
+        retryable: false,
+      });
+      expect(await getSessionRun(t.db, input.runId)).toBeNull();
+    }
+    expect(fake.count()).toBe(0);
+  });
+
+  it('交给插头的上限帮手认得：交换区上限 0 写「0」，写成「0M」帮手会拒、会话起不来（法国 2026-09-26 实测）', async () => {
+    const { ports, fake } = setup(commitAndDone());
+    const input = launch({ resources: { memoryHighMb: 1536, memoryMaxMb: 2048, swapMaxMb: 0 } });
+    const started = await ports.startSession(input, ctx());
+    expect(started.handle).toMatchObject({ pid: 4242 });
+    const cgroup = fake.specs[0]?.cgroup;
+    expect(cgroup?.limits).toEqual({ memoryHigh: '1536M', memoryMax: '2048M', memorySwapMax: '0' });
+    // 和真插头同一道校验：不抛就是帮手认得
+    expect(() => scopePrefix(cgroup as NonNullable<typeof cgroup>, '/fleet-test-cwd')).not.toThrow();
+    await ports.stopSession({ taskId, runId: input.runId, mode: 'kill', reason: '收尾' }, ctx());
   });
 });
 

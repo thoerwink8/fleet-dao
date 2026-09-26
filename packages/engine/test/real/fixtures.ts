@@ -5,13 +5,14 @@ import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type {
-  ClaudeCodeRunOptions,
-  ClaudeCodeRunReport,
-  ClaudeCodeRunSpec,
-  KillReason,
-  RateLimitReading,
-  SessionUser,
+import {
+  type ClaudeCodeRunOptions,
+  type ClaudeCodeRunReport,
+  type ClaudeCodeRunSpec,
+  type KillReason,
+  type RateLimitReading,
+  type SessionUser,
+  scopePrefix,
 } from '@fleet-dao/adapters';
 import { type Db, pools, repos, routes, savePoolQuota, seed, stagePolicyRoutes, tasks } from '@fleet-dao/db';
 import type { ProgressEvent, StageKind } from '@fleet-dao/shared';
@@ -303,9 +304,21 @@ export function fakeRun(script: (spec: ClaudeCodeRunSpec, n: number) => FakeRunS
       nonJsonLines: 0,
       unknownFrames: {},
     });
-    if (s.spawnError) {
+    // 和真插头一样先过帮手的参数校验（runAgentProcess 里 scopePrefix 抛错 = spawnError，不起进程）：
+    // 引擎给的上限写法帮手不认时，这里就起不来，不再让假插头照单全收（2026-09-26 的「0M」就是这么漏的）。
+    // 工作目录另给一个固定的绝对路径：只校验 scope 本身，测试的临时目录在 Windows 上不是 / 开头。
+    let scopeError: string | undefined;
+    if (spec.cgroup) {
+      try {
+        scopePrefix(spec.cgroup, '/fleet-test-cwd');
+      } catch (err) {
+        scopeError = err instanceof Error ? err.message : String(err);
+      }
+    }
+    const spawnError = scopeError ?? s.spawnError;
+    if (spawnError) {
       const endedAt = new Date().toISOString();
-      return { ...base, exitCode: null, spawnError: s.spawnError, endedAt, wallMs: 0, stream: stream([]) };
+      return { ...base, exitCode: null, spawnError, endedAt, wallMs: 0, stream: stream([]) };
     }
     if (s.hangBeforeSpawn) {
       const signal = opts.signal ?? new AbortController().signal;
