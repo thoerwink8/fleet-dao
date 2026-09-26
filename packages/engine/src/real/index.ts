@@ -104,7 +104,7 @@ export function createRealPorts(deps: RealPortsDeps): RealPorts {
   return { ports, reapOrphanSessions: sessions.reapOrphanSessions };
 }
 
-/** reclaude 装在各会话用户自己家里（docs/ops.md 第五节）；{user} 换成会话用户。 */
+/** reclaude 装在会话用户自己家里（docs/ops.md 第五节）；{user} 换成会话用户。 */
 export const DEFAULT_CLAUDE_BIN = '/home/{user}/.local/bin/reclaude';
 export const DEFAULT_ENGINE_STATE_DIR = '/var/lib/fleet-dao/engine';
 

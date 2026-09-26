@@ -119,7 +119,7 @@ export interface SessionPortsDeps {
   tmpDir: string;
   /** 这台机器给人看的名字（例如「法国」）：只有人能修的（重新登录）要写清去哪台机器。 */
   machine: string;
-  /** 起 Claude Code 的命令（绝对路径）：reclaude 装在各会话用户自己家里。 */
+  /** 起 Claude Code 的命令（绝对路径）：reclaude 装在会话用户自己家里。 */
   claudeCommand(user: SessionUser): string[];
   forkMaxContextTokens?: number;
   /** 经 sudo 调的帮手（fleet-agent-scope）；测试里换成假的。 */
