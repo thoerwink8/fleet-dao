@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { checkDocPointers, formatProblem } from '../src/doc-pointers.ts';
-import { type GhResult, ghRunner, issueNew, issueSummary, specsDoc } from '../src/issue-new.ts';
+import { type GhResult, ghRunner, issueNew, issueSummary, specsDoc, specsHint } from '../src/issue-new.ts';
 import { memRepo } from './helpers.ts';
 
 const MILESTONES = JSON.stringify([{ title: 'P0 地基' }, { title: 'P1 核心闭环' }, { title: 'P4 飞书 v2' }]);
@@ -159,6 +159,81 @@ describe('开单脚本：一次带上标签和里程碑', () => {
     );
     expect(calls).toHaveLength(1);
   });
+
+  it('v1 换成版本全名（里程碑＝版本，创始人 2026-09-26 拍，替代 P 阶段）', async () => {
+    const { calls, run } = setup({
+      milestones: ok(JSON.stringify([{ title: 'P1 核心闭环' }, { title: 'v1 Fusion 接活' }])),
+    });
+    await expect(run(...base.slice(0, 3), 'v1', ...base.slice(4))).resolves.toMatchObject({
+      milestone: 'v1 Fusion 接活',
+    });
+    expect(calls[1]?.slice(-2)).toEqual(['--milestone', 'v1 Fusion 接活']);
+  });
+
+  it('v1 对上两个版本：要写全名，不开', async () => {
+    const { calls, run } = setup({
+      milestones: ok(JSON.stringify([{ title: 'v1 Fusion 接活' }, { title: 'v1 旧的' }])),
+    });
+    await expect(run(...base.slice(0, 3), 'v1', ...base.slice(4))).rejects.toThrow(
+      '「v1」对上了好几个里程碑（v1 Fusion 接活、v1 旧的），单没开：写全名。',
+    );
+    expect(calls).toHaveLength(1);
+  });
+
+  it('没有这个开放版本：列出开放的，不开', async () => {
+    const { calls, run } = setup({
+      milestones: ok(JSON.stringify([{ title: 'v1 Fusion 接活' }])),
+    });
+    await expect(run(...base.slice(0, 3), 'v9', ...base.slice(4))).rejects.toThrow(
+      '没有叫「v9」的开放里程碑，单没开：开放的有 v1 Fusion 接活。',
+    );
+    expect(calls).toHaveLength(1);
+  });
+});
+
+describe('开单脚本：--milestone 未排期，不挂里程碑', () => {
+  it('不查里程碑列表、建单不带 --milestone，结果里 milestone 记「未排期」', async () => {
+    const { root, calls, run } = setup();
+    await expect(run(...base.slice(0, 3), '未排期', ...base.slice(4))).resolves.toEqual({
+      number: 36,
+      url: URL36,
+      milestone: '未排期',
+      specsFile: undefined,
+    });
+    expect(calls).toEqual([
+      [
+        'issue',
+        'create',
+        '--title',
+        '登录页加验证码',
+        '--body-file',
+        join(root, 'body.md'),
+        '--label',
+        '需求',
+      ],
+    ]);
+  });
+});
+
+describe('开单脚本：--mother 多贴「母单」标签', () => {
+  it('同一次 gh issue create 里多带 --label 母单；类别标签还是只有一个', async () => {
+    const { root, calls, run } = setup();
+    await run(...base, '--mother');
+    expect(calls[1]).toEqual([
+      'issue',
+      'create',
+      '--title',
+      '登录页加验证码',
+      '--body-file',
+      join(root, 'body.md'),
+      '--label',
+      '需求',
+      '--label',
+      '母单',
+      '--milestone',
+      'P1 核心闭环',
+    ]);
+  });
 });
 
 describe('开单脚本：gh 出错照实报，不吞', () => {
@@ -258,5 +333,18 @@ describe('开单脚本：--specs 时完整需求进 specs/，issue 上只留原�
     expect(report.problems.map(formatProblem)).toEqual([
       'specs/36-x/需求.md:3  plan.md P1「」引号里是空的，没写是哪一条',
     ]);
+  });
+
+  it('里程碑是版本或未排期：「对应计划」直接写版本全名或「未排期」，不留 plan.md 的空引号', () => {
+    expect(specsDoc('t', 1, 'v1 Fusion 接活', BODY).split('\n')[2]).toBe('对应计划：v1 Fusion 接活');
+    expect(specsDoc('t', 1, '未排期', BODY).split('\n')[2]).toBe('对应计划：未排期');
+  });
+
+  it('specsHint：P 阶段（旧写法）才提示填 plan.md 的引号，版本、未排期不用', () => {
+    expect(specsHint('P1 核心闭环')).toBe(
+      '「对应计划」的引号里填上 plan.md 那一条、「设计依据」写上 design 哪一节再提交',
+    );
+    expect(specsHint('v1 Fusion 接活')).toBe('「设计依据」写上 design 哪一节再提交');
+    expect(specsHint('未排期')).toBe('「设计依据」写上 design 哪一节再提交');
   });
 });

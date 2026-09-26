@@ -71,6 +71,22 @@ describe('PR 必填栏：齐了就过', () => {
     }
   });
 
+  it('对应计划的新写法（里程碑＝版本，创始人 2026-09-26 拍）：版本全名、#<单号>、未排期都直接过', () => {
+    for (const plan of ['v1 Fusion 接活', '#189', '未排期', '未排期（等版本规划定下来再挂）', '`#189`']) {
+      expect(check({ body: body(plan, 'specs/12-登录验证码/') }), plan).toEqual([]);
+    }
+  });
+
+  it('里程碑是版本：算合格，不拿 plan.md 的阶段核（哪怕 plan.md 里压根没有对应的 P 阶段）', () => {
+    const plan = (m: string) => body(m, 'specs/12-登录验证码/');
+    expect(check({ milestone: 'v1 Fusion 接活', body: plan('v1 Fusion 接活') })).toEqual([]);
+    expect(check({ milestone: 'v9 还没建的版本', body: plan('v9 还没建的版本') })).toEqual([]);
+  });
+
+  it('没挂里程碑但「对应计划」写着未排期：不提醒（这条工作本来就没有版本）', () => {
+    expect(check({ milestone: null, body: body('未排期', 'specs/12-登录验证码/') })).toEqual([]);
+  });
+
   it('specs 的几种写法：「不适用」、反引号、链接、指到里面的文件', () => {
     for (const specs of [
       '不适用',
@@ -141,7 +157,11 @@ describe('PR 必填栏：缺一样报一句，说清缺什么、怎么补', () =
       '没贴类别标签：在 PR 右边的 Labels 里从「需求」「缺陷」「杂项」里挑一个贴上。',
     ],
     ['贴了两个类别标签', { labels: ['需求', '缺陷'] }, '类别标签贴了 2 个（需求、缺陷）：只留一个。'],
-    ['没挂里程碑', { milestone: null }, '没挂里程碑：在 PR 右边的 Milestone 里挑这块活属于的阶段（P0–P1）。'],
+    [
+      '没挂里程碑',
+      { milestone: null },
+      '没挂里程碑：在 PR 右边的 Milestone 里挂上对应单所在的版本；对应的单未排期就不用挂。',
+    ],
     [
       '里程碑不是阶段',
       { milestone: '以后再说' },
@@ -170,7 +190,7 @@ describe('PR 必填栏：缺一样报一句，说清缺什么、怎么补', () =
     [
       '对应计划写的认不出',
       { body: body('plan.md 的核心闭环', '不适用') },
-      '「对应计划」写的「plan.md 的核心闭环」认不出是 plan.md 哪一条：要写成 对应计划：P1「工作流」，阶段加那一条的原话开头。',
+      '「对应计划」写的「plan.md 的核心闭环」认不出：写版本全名、#<单号>、未排期，或旧写法 P1「工作流」（阶段加那一条的原话开头）。',
     ],
     [
       '只写了阶段',
@@ -228,6 +248,12 @@ describe('PR 必填栏：缺一样报一句，说清缺什么、怎么补', () =
     expect(check(over)).toEqual([message]);
   });
 
+  it('没挂里程碑、正文也没有「对应计划」这一栏：判不了对应单，照旧提醒', () => {
+    expect(check({ milestone: null, body: body(null, '不适用') })).toContain(
+      '没挂里程碑：在 PR 右边的 Milestone 里挂上对应单所在的版本；对应的单未排期就不用挂。',
+    );
+  });
+
   it('全缺：五样各一句，按标签、里程碑、对应计划、specs、档位的顺序', () => {
     const problems = checkPrFields({ labels: [], milestone: null, body: '' }, repo);
     expect(problems.map((p) => p.slice(0, p.indexOf('：')))).toEqual([
@@ -267,7 +293,13 @@ describe('只核「对应计划」一栏的值（引擎收需求文档时用，�
     expect(checkPlanValue('P1「」', PLAN)).toEqual([expect.stringContaining('引号里是空的')]);
     expect(checkPlanValue('P1「没有这一条」', PLAN)).toEqual([expect.stringContaining('找不到')]);
     expect(checkPlanValue('P9「工作流」', PLAN)).toEqual([expect.stringContaining('没有 P9 这个阶段')]);
-    expect(checkPlanValue('无', PLAN)).toEqual([expect.stringContaining('认不出是 plan.md 哪一条')]);
+    expect(checkPlanValue('无', PLAN)).toEqual([expect.stringContaining('认不出：写版本全名')]);
+  });
+
+  it('版本全名、#<单号>、未排期：不用 plan.md 核，直接过', () => {
+    expect(checkPlanValue('v1 Fusion 接活', PLAN)).toEqual([]);
+    expect(checkPlanValue('#189', PLAN)).toEqual([]);
+    expect(checkPlanValue('未排期', PLAN)).toEqual([]);
   });
 
   it('plan.md 里一个阶段都认不出：算一条问题，不当成过了', () => {
