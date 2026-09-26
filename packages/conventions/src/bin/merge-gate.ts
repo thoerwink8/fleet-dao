@@ -1,6 +1,6 @@
 // 合并闸入口：node packages/conventions/src/bin/merge-gate.ts [--no-write]
 // merge-gate.yml 里跑：按事件（GITHUB_EVENT_NAME、GITHUB_EVENT_PATH）认出要算哪些 PR，算完在各自当前头上写 merge-gate 状态。
-// pr.yml 里带 --no-write 跑：只算这个 PR、只报不写，退出码 0 能合 / 1 不能合 / 2 没查成（主线必过检查换成 merge-gate 之前的过渡）。
+// 带 --no-write：只算这个 PR、只报不写，退出码 0 能合 / 1 不能合 / 2 没查成（手动看用，要 pull_request 类的事件文件）。
 // 高风险清单读跑这段代码的那一份检出（merge-gate.yml 检出的是主线，PR 改不了自己的门槛）。
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';

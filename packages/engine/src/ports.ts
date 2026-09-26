@@ -307,8 +307,8 @@ export interface PrBody {
    */
   specs: string;
   /**
-   * 「档位」一栏（design 第五节三档之一加理由）：CI 的 pr-fields 查它，改到高风险路径的必须是「先审后合」，
-   * 「先审后合」要当前头上有通过的 second-opinion 提交状态。
+   * 「档位」一栏（design 第五节的档位加理由）：只作说明、合并闸只提醒；合并闸按改动路径判要不要等第二意见
+   * （当前头上通过的 second-opinion 提交状态），不看这一栏。
    */
   tier: string;
   /** 改到的文件（仓内相对路径）：「文档」一栏按它写。 */

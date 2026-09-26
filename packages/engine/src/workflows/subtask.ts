@@ -474,7 +474,7 @@ export async function subtaskWorkflow(input: SubtaskInput): Promise<SubtaskResul
                   ],
                   specs: input.specDir,
                   // 「档位」按方案里标的风险写（decisions/plan.ts：没标按高风险算）。高风险这一档的 second-opinion
-                  // 提交状态引擎还没写（#74 第 1 条），在那之前这类 PR 的 pr-fields 会一直等第二意见
+                  // 提交状态引擎还没写（#74 第 1 条），在那之前改到先审后合路径的 PR，合并闸会一直等第二意见
                   tier: sub.secondOpinion
                     ? '先审后合——方案里标了高风险，合并前第二意见'
                     : 'CI 绿就合——方案里标了一般改动',

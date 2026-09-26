@@ -7,7 +7,7 @@ name: pr-labels
 # - 用 pull_request_target 是为了拿到能写 PR 的令牌（别人仓 fork 来的 PR 在 pull_request 下只有只读令牌）。代价是这个令牌能写，
 #   所以绝不检出、绝不执行 PR 的代码：下面检出的是主线（default_branch），跑的是主线上的脚本；PR 的标题、正文只当数据读，
 #   不往 run: 里用 ${{ }} 拼。这个文件本身也按主线上的算，PR 改它不影响它自己那次。
-# - 用 GITHUB_TOKEN 贴的标签、挂的里程碑不会再触发别的工作流（GitHub 的规定），pr.yml 不会因为这里补了就重跑。
+# - 用 GITHUB_TOKEN 贴的标签、挂的里程碑不会再触发别的工作流（GitHub 的规定），合并闸不会因为这里补了就重算（标签只是提醒，不影响结论）。
 on:
   pull_request_target:
     types: [opened, edited, reopened, synchronize]

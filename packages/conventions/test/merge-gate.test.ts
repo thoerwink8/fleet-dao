@@ -385,7 +385,7 @@ describe('入口：认出要算哪些 PR、写状态、退出码', () => {
     expect(w.written).toHaveLength(3);
   });
 
-  it('只报不写（pr.yml）：能合 0、不能合 1、没查成 2，一条状态都不写', async () => {
+  it('只报不写（--no-write）：能合 0、不能合 1、没查成 2，一条状态都不写', async () => {
     const ev = { pull_request: { number: 80 } };
     const ok = world();
     expect((await run(ok, 'pull_request', ev, { write: false })).code).toBe(0);

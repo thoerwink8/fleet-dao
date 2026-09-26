@@ -29,7 +29,7 @@
 | `packages/github` | 引擎对 GitHub 的读写：推分支、开 PR、等 CI、合并、issue 进度段与关单、对账补漏 |
 | `packages/jev` | Jev 判断题服务：题库、提问接口、从只记不拦转到真拦 |
 | `packages/feishu` | 飞书网关（跑在香港） |
-| `packages/conventions` | design 第七节的约定写成检查：PR 必填栏（CI 的 pr-fields）、开单脚本、文档指针检查、欠账检查、阶段收口 |
+| `packages/conventions` | design 第七节的约定写成检查：合并闸 merge-gate（必填栏提醒、先审后合路径等第二意见）、开单脚本、文档指针检查、欠账检查、阶段收口 |
 | `packages/agents-sync` | 同步脚本：把 `AGENTS.md` 上半段和 `agents/skills/` 写进这台机器上各家 AI 的全局入口，另能查漂移、撤旧仓留下的东西 |
 | `deploy/` | 装机、发版、健康页，和它们的检查 |
 | `docs/` | 设计、计划、运维；`docs/reference/` 是旧系统的坑 |
