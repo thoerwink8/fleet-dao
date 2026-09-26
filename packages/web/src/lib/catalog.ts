@@ -1,6 +1,11 @@
 // 路由、模型、账号池、额度窗的查询与白话名。各页都从这里拿名字，不各拼各的。
 
-import { hardBanFor, windowAppliesTo } from '@fleet-dao/shared';
+import {
+  hardBanFor,
+  ROUTE_PROBE_EVERY_MINUTES,
+  ROUTE_PROBE_STALE_MINUTES,
+  windowAppliesTo,
+} from '@fleet-dao/shared';
 import { brand } from '#brand';
 import type {
   BillingKind,
@@ -14,6 +19,7 @@ import type {
   StageKind,
 } from '../api/types';
 import { TIME } from './format';
+import type { Tone } from './status';
 
 export const STAGES: { id: StageKind; label: string; hint: string }[] = [
   { id: 'triage', label: '分诊', hint: brand.stageHints.triage },
@@ -144,6 +150,67 @@ export function routeProblem(
   if (ban) return `禁令：${ban.reason}`;
   if (model.retiredAt && Date.parse(model.retiredAt) <= now) return '模型已下架';
   return null;
+}
+
+/**
+ * 一条路由在不在线，照路由探针写进库的结论说（design 第九节「路由探针」）：
+ * online = 在线（探针真起了会话、答上了）；offline = 离线，原因是探针写的原话（没探通、插头没接、按量计费不探……）；
+ * unprobed = 探针还没看过它（上线后第一轮之前）——不说成离线，也不当在线。
+ * 在不在线以 alive 为准（派工只看它），探针的结论只给原因和时刻。
+ */
+export interface RouteStatus {
+  kind: 'online' | 'offline' | 'unprobed';
+  /** 一个词：在线 / 离线 / 还没探过。 */
+  label: string;
+  tone: Tone;
+  /** 在线：回答和用时；离线：原因；还没探过：一句说明。 */
+  detail: string;
+  /** 探针下结论的时刻；还没探过就没有。 */
+  at: string | undefined;
+  /** 结论超过 ROUTE_PROBE_STALE_MINUTES 没更新：探针可能停了，这个在线 / 离线不一定还对。 */
+  stale: boolean;
+}
+
+export function routeStatus(route: Pick<Route, 'alive' | 'probe'>, now: number): RouteStatus {
+  const p = route.probe;
+  const at = p?.at;
+  const stale = at !== undefined && now - Date.parse(at) > ROUTE_PROBE_STALE_MINUTES * TIME.MIN;
+  if (route.alive) {
+    return { kind: 'online', label: '在线', tone: 'done', detail: p?.detail ?? '在线', at, stale };
+  }
+  if (!p) {
+    return {
+      kind: 'unprobed',
+      label: '还没探过',
+      tone: 'wait',
+      detail: `路由探针还没看过这条路由：每 ${ROUTE_PROBE_EVERY_MINUTES} 分钟一轮，下一轮探完就有结论`,
+      at,
+      stale: false,
+    };
+  }
+  const detail = p.state === 'ok' ? '探针上一轮探通了，但它现在标着不在线' : (p.detail ?? '探针没写原因');
+  // 真探了没通的标红（要人看）；插头没接、这一轮没探的是按规矩不在线，标灰。
+  return { kind: 'offline', label: '离线', tone: p.state === 'failed' ? 'fail' : 'stop', detail, at, stale };
+}
+
+/** 路由表里在线几条、探针最近一次下结论是什么时候（没有任何结论就是 undefined）。 */
+export function probeSummary(routes: Pick<Route, 'alive' | 'probe'>[]): {
+  online: number;
+  total: number;
+  unprobed: number;
+  lastAt: string | undefined;
+} {
+  let lastAt: string | undefined;
+  for (const r of routes) {
+    const at = r.probe?.at;
+    if (at && (!lastAt || Date.parse(at) > Date.parse(lastAt))) lastAt = at;
+  }
+  return {
+    online: routes.filter((r) => r.alive).length,
+    total: routes.length,
+    unprobed: routes.filter((r) => !r.alive && !r.probe).length,
+    lastAt,
+  };
 }
 
 /** 账号池的名字：契约里账号池只有编号，显示成「渠道 · 编号」。 */

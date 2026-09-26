@@ -23,8 +23,10 @@ import {
   routeInfo,
   routeProblem,
   routeQuotaHeadline,
+  routeStatus,
   stageLabel,
 } from '../lib/catalog';
+import { clipText } from '../lib/format';
 import { isTaskFinished, letterOf } from '../lib/status';
 import { cn } from '../lib/utils';
 import {
@@ -261,9 +263,11 @@ export function routeOptions(
           )
         : undefined;
     let blocked = routeProblem(routing, id, stage, now) ?? undefined;
-    // 路由探针还没做时没人写过 alive：选不了，但原因是「还没探过」，不是离线
-    if (!blocked && !info.route.alive)
-      blocked = routing.routeProbeNotWired ? `还没探过（#${routing.routeProbeNotWired.issue}）` : '离线';
+    // 不在线的选不了：原因照路由探针写的（还没探过的说「还没探过」，不说成离线）
+    if (!blocked && !info.route.alive) {
+      const st = routeStatus(info.route, now);
+      blocked = st.kind === 'unprobed' ? st.label : `${st.label}：${clipText(st.detail, 60)}`;
+    }
     if (!blocked && !info.channelEnabled) blocked = '渠道已下架';
     let note: string | undefined;
     if (id === currentRouteId) note = '正在用';

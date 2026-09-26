@@ -135,6 +135,14 @@ export const toRoute = (r: typeof routes.$inferSelect): Route =>
     modelId: r.modelId,
     hostId: r.hostId,
     alive: r.alive,
+    probe:
+      r.probeState === null || r.probedAt === null
+        ? undefined
+        : {
+            state: r.probeState,
+            at: r.probedAt.toISOString(),
+            ...(r.probeDetail ? { detail: r.probeDetail } : {}),
+          },
     upstreamModel: opt(r.upstreamModel),
     upstreamAliases: r.upstreamAliases,
   });

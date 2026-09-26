@@ -1268,6 +1268,7 @@ export function createSeed(now: number): MockState {
         modelId: 'opus-5.5',
         hostId: 'claude-code',
         alive: true,
+        probe: { state: 'ok', at: at(-4), detail: '答上了：OK · 用时 9 秒 · 按 API 价折合 $0.021' },
       },
       {
         id: 'r-cb-opus',
@@ -1276,6 +1277,7 @@ export function createSeed(now: number): MockState {
         modelId: 'opus-5.5',
         hostId: 'claude-code',
         alive: true,
+        probe: { state: 'ok', at: at(-4), detail: '答上了：OK · 用时 11 秒 · 按 API 价折合 $0.023' },
       },
       {
         id: 'r-ca-sonnet',
@@ -1284,6 +1286,7 @@ export function createSeed(now: number): MockState {
         modelId: 'sonnet-5',
         hostId: 'claude-code',
         alive: true,
+        probe: { state: 'ok', at: at(-4), detail: '答上了：OK · 用时 6 秒 · 按 API 价折合 $0.004' },
       },
       {
         id: 'r-ca-opus5',
@@ -1292,6 +1295,7 @@ export function createSeed(now: number): MockState {
         modelId: 'opus-5',
         hostId: 'claude-code',
         alive: false,
+        probe: { state: 'skipped', at: at(-4), detail: '模型「Opus 5」已下架，不探' },
       },
       {
         id: 'r-rl-opus',
@@ -1300,6 +1304,7 @@ export function createSeed(now: number): MockState {
         modelId: 'opus-5.5',
         hostId: 'mirasim',
         alive: true,
+        probe: { state: 'ok', at: at(-5), detail: '答上了：OK · 用时 14 秒' },
       },
       {
         id: 'r-rl-gpt',
@@ -1308,6 +1313,7 @@ export function createSeed(now: number): MockState {
         modelId: 'gpt-5.6-luna',
         hostId: 'codex',
         alive: true,
+        probe: { state: 'ok', at: at(-5), detail: '答上了：OK · 用时 8 秒' },
       },
       {
         id: 'r-rl-kimi',
@@ -1316,6 +1322,7 @@ export function createSeed(now: number): MockState {
         modelId: 'kimi-k3',
         hostId: 'mirasim',
         alive: true,
+        probe: { state: 'ok', at: at(-5), detail: '答上了：OK · 用时 7 秒' },
       },
       {
         id: 'r-rl-fable',
@@ -1323,7 +1330,12 @@ export function createSeed(now: number): MockState {
         poolId: 'relay',
         modelId: 'fable-5.1',
         hostId: 'mirasim',
-        alive: true,
+        alive: false,
+        probe: {
+          state: 'skipped',
+          at: at(-5),
+          detail: '没有哪个阶段在用这条路由（挂着但关着的不算），不花额度去探；哪个阶段用上它，下一轮就探',
+        },
       },
       {
         id: 'r-cursor',
@@ -1331,7 +1343,12 @@ export function createSeed(now: number): MockState {
         poolId: 'cursor-pro',
         modelId: 'cursor-auto',
         hostId: 'cursor-agent',
-        alive: true,
+        alive: false,
+        probe: {
+          state: 'failed',
+          at: at(-5),
+          detail: '连探两次都没通：等了 150 秒还没起来（第一次：进程退出（退出码 1），没有终帧）',
+        },
       },
       {
         id: 'r-grok',
@@ -1340,6 +1357,7 @@ export function createSeed(now: number): MockState {
         modelId: 'grok-4.7',
         hostId: 'grok',
         alive: true,
+        probe: { state: 'ok', at: at(-5), detail: '答上了：OK · 用时 13 秒' },
       },
       {
         id: 'r-ds',
@@ -1347,7 +1365,12 @@ export function createSeed(now: number): MockState {
         poolId: 'deepseek',
         modelId: 'deepseek-v4.1-flash',
         hostId: 'api-shell',
-        alive: true,
+        alive: false,
+        probe: {
+          state: 'skipped',
+          at: at(-5),
+          detail: '按量计费的渠道不自动探：探一次就多一笔账（design 第三节第 21 条）',
+        },
       },
     ],
     stages: [

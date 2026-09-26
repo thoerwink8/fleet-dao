@@ -12,10 +12,10 @@ import {
   reconcileGitHub,
   reconcilerOptions,
 } from '@fleet-dao/api';
-import { type Db, finishScheduleRun, registerScheduledJobs, startScheduleRun } from '@fleet-dao/db';
+import { type Db, finishScheduleRun, startScheduleRun } from '@fleet-dao/db';
 import type { GitHub } from '@fleet-dao/github';
 import type { Client } from '@temporalio/client';
-import { GITHUB_RECONCILE_JOB, type GitHubReconcileJobDeps } from '../jobs/github-reconcile.ts';
+import type { GitHubReconcileJobDeps } from '../jobs/github-reconcile.ts';
 
 export interface GitHubReconcileWiring {
   db: Db;
@@ -55,9 +55,4 @@ export function githubReconcileJob(
       log: (level, message, fields) => log[level](message, fields),
     };
   };
-}
-
-/** 引擎启动时登记定时任务：一次都没跑过的也在驾驶舱「定时任务」页和看门狗的名单上（标 never）。 */
-export async function registerEngineJobs(db: Db): Promise<void> {
-  await registerScheduledJobs(db, [GITHUB_RECONCILE_JOB]);
 }

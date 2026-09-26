@@ -222,6 +222,7 @@ describe('库里的行 → 领域对象', () => {
       modelId: 'opus-5.5',
       hostId: 'claude-code',
       alive: true,
+      probe: { state: 'ok', at: ago(MIN).toISOString(), detail: '答上了：OK' },
       upstreamModel: 'claude-opus-5-5',
       upstreamAliases: ['opus'],
     });

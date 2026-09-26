@@ -1,5 +1,5 @@
 // 给人看的名字与白话：阶段、执行方式、额度窗、时长、比例。「为什么派给它」一句话由这些拼成。
-import type { HostId, StageKind } from '@fleet-dao/shared';
+import type { HostId, OrgKind, StageKind } from '@fleet-dao/shared';
 import type { RouteFacts, RouteWindow } from './types.ts';
 
 export const STAGE_NAMES: Readonly<Record<StageKind, string>> = {
@@ -21,6 +21,9 @@ export const HOST_NAMES: Readonly<Record<HostId, string>> = {
   mirasim: 'Mirasim',
   'api-shell': '接口外壳',
 };
+
+/** reclaude 组织类型的白话名。 */
+export const ORG_NAMES: Readonly<Record<OrgKind, string>> = { solo: '独享', carpool: '拼车' };
 
 export function hostName(hostId: string): string {
   return (HOST_NAMES as Record<string, string>)[hostId] ?? hostId;

@@ -58,6 +58,7 @@ describe('工作流文件的规矩', () => {
       'kit.ts',
       'merge-queue.ts',
       'requirement.ts',
+      'route-probe.ts',
       'subtask.ts',
     ]);
     expect(all.length).toBeGreaterThan(10);

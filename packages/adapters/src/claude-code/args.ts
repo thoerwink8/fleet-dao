@@ -36,6 +36,11 @@ export interface ClaudeArgsSpec {
   allowedTools?: readonly string[];
   effort?: ClaudeEffort;
   appendSystemPrompt?: string;
+  /**
+   * false = 不把这次会话的记录存进执行体用户家里（`--no-session-persistence`，只对 -p 有效；之后续不上）。
+   * 路由探针用：每 15 分钟一次的一问一答不留记录。干活的会话要能续，不给（默认存）。
+   */
+  persistSession?: boolean;
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -76,6 +81,12 @@ export function buildClaudeArgs(spec: ClaudeArgsSpec): string[] {
     'none',
     ...sessionArgs(spec.session),
   ];
+  if (spec.persistSession === false) {
+    // 不存的会话续不上：续会话、fork 要的正是上一轮存下的记录，两样一起给是写错了
+    if (spec.session.mode !== 'new')
+      throw new Error(`不存记录的会话只能是新会话，给的是 ${spec.session.mode}`);
+    args.push('--no-session-persistence');
+  }
   if (spec.effort) args.push('--effort', spec.effort);
   if (spec.appendSystemPrompt) args.push('--append-system-prompt', spec.appendSystemPrompt);
   // 变长参数放最后、值并成一个参数：它后面再没有东西可吞

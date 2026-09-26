@@ -68,13 +68,16 @@ export async function addRoute(
     upstreamAliases?: string[];
   },
 ) {
+  const alive = r.alive ?? true;
   await db.insert(routes).values({
     id: r.id,
     channelId: r.channelId ?? 'relay',
     poolId: r.poolId,
     modelId: r.modelId,
     hostId: r.hostId ?? 'claude-code',
-    alive: r.alive ?? true,
+    alive,
+    // 在线必须是探针探通了（库里约束 routes_alive_needs_probe_ok）
+    ...(alive ? { probeState: 'ok' as const, probedAt: ago(MIN), probeDetail: '答上了：OK' } : {}),
     upstreamModel: r.upstreamModel ?? null,
     upstreamAliases: r.upstreamAliases ?? [],
   });

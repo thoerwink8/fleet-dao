@@ -11,8 +11,10 @@ import type { JevPort } from '../failure/jev.ts';
 import type { EnginePorts } from '../ports.ts';
 import { scopeExec, type UserExec } from './exec.ts';
 import { createGitHubPorts, type EngineGitHub } from './github-ports.ts';
-import { githubReconcileJob, registerEngineJobs } from './github-reconcile.ts';
+import { githubReconcileJob } from './github-reconcile.ts';
 import { engineJevFromEnv } from './jev-port.ts';
+import { registerEngineJobs } from './jobs.ts';
+import { routeProbeJob } from './route-probe.ts';
 import { createSessionPorts, DEFAULT_FORK_MAX_CONTEXT_TOKENS, type SessionPortsDeps } from './sessions.ts';
 import { createStorePorts } from './store-ports.ts';
 import { DEFAULT_WORK_ROOT, helperWorkTrees, type WorkTrees } from './worktrees.ts';
@@ -157,6 +159,8 @@ export function realPortsFromEnv(
     locker: pgLocker(db),
     env: env as Record<string, string | undefined>,
   });
+  const trees = helperWorkTrees({ root: config.workRoot });
+  const claudeCommand = (user: SessionUser) => [config.claudeBin.replaceAll('{user}', user)];
   // 判断题：起来时读一遍 jev.json、建一遍后端、登记两道题（registerJobs）；之后每次问都现找一遍（改了配置、调度台换了
   // 判断路由不用重启，和 /healthz 的 judge 项同一个判法）。默认位置上没有 jev.json 才算没接、不问；别的读不成都报错。
   const jev = engineJevFromEnv(db, env);
@@ -164,16 +168,18 @@ export function realPortsFromEnv(
     db,
     jev: jev.port,
     gh,
-    trees: helperWorkTrees({ root: config.workRoot }),
+    trees,
     exec: scopeExec(),
     tmpDir: join(config.stateDir, 'tmp'),
     archiveDir: join(config.stateDir, 'archive'),
     machine: config.machine,
-    claudeCommand: (user) => [config.claudeBin.replaceAll('{user}', user)],
+    claudeCommand,
     forkMaxContextTokens: config.forkMaxContextTokens,
   });
   const jobs: EngineJobs = {
     githubReconcile: githubReconcileJob({ db, gh }),
+    // 路由探针和干活的会话用同一份 reclaude、同一个工作树的根（探针目录在它下面）
+    routeProbe: routeProbeJob({ db, trees, claudeCommand, machine: config.machine }),
   };
   return {
     ...real,

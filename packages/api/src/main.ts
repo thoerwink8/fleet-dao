@@ -134,10 +134,9 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
     requirements: temporal.requirements,
     github: github.sink,
     draftOpener,
-    // 还没做的读取器：驾驶舱那一块整块显示「待实现」，不说成「没查成」「离线」。接上哪个就删掉哪一项
+    // 还没做的读取器：驾驶舱那一块整块显示「待实现」，不说成「没查成」。接上了就删掉这一项
     notWired: {
       quota: { what: '额度读数', phase: 'P3', issue: 76 },
-      routeProbe: { what: '路由在线状态', phase: 'P1', issue: 129 },
     },
     health: serviceHealthChecks({
       probeDb: () => probeDb(db),
