@@ -77,7 +77,7 @@ export type DispatchDecision =
   | 'finished';
 
 /**
- * 自动派活开关（design 第九节「在哪能做与仓级开关」）：关着不派；开关打开以前就开着的 issue 不自动派（要人点「交给 fleet」）。
+ * 自动派活开关（design 第九节「在哪能做与接活开关」）：关着不派；开关打开以前就开着的 issue 不自动派（要人点「交给 fleet」）。
  * 开关允许时：还在排队（从没派过）的拉起；已经结束的只在 GitHub 上重开时再拉起一次；重开时上一轮还没结束的，等它结束。
  */
 export function dispatchDecision(
