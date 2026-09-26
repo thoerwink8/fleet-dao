@@ -52,8 +52,12 @@ export interface FakeSessionPlan {
 export interface FakeScript {
   plan: PlannedSubtask[];
   triage: (n: number) => TriageVerdict;
-  /** n = 这个阶段第几次起会话（从 1 开始）。 */
-  session: (input: LaunchSessionInput, n: number) => FakeSessionPlan | undefined;
+  /**
+   * n = 这个阶段第几次起会话，所有子任务一起数；own = 这个子任务自己这个阶段第几次起（分诊、写需求、写方案这些不属于
+   * 子任务的算一份）。都从 1 开始。几个子任务并行时谁的会话先起是赛跑：要挑「某个子任务的第几次」看 own，拿 n 配
+   * subtaskKey 会随先后错位（#88：readme 先起就拿走了 1，form 的那次成了 2）。
+   */
+  session: (input: LaunchSessionInput, n: number, own: number) => FakeSessionPlan | undefined;
   review: (input: LaunchSessionInput, n: number) => Omit<ReviewResult, 'head'> | undefined;
   ci: (input: WaitCiInput, n: number) => Partial<CiResult> | undefined;
   sync: (input: SyncMainlineInput, n: number) => Partial<SyncResult> | undefined;
@@ -124,6 +128,12 @@ export interface FakeWorld {
   releasePort(port: PortName): void;
   /** 正挂着、有人在看守的会话。 */
   held(): FakeSession[];
+  /**
+   * 等到 check 成立：假世界每变一下（端口调用开始、结束，会话开始看守，放行）当场重查，不按钟点轮询。check 只能看假世界里的
+   * 东西（调用、会话、写进库的状态……），要看 Temporal 查询结果的用 test/support.ts 的 queryUntil。
+   * timeoutMs 内没等到就报错、写明在等什么，不无限挂着；check 抛错原样报出来。
+   */
+  until(check: () => boolean, what: string, timeoutMs?: number): Promise<void>;
 }
 
 export const FAKE_ROUTES: readonly RouteChoice[] = [
@@ -174,6 +184,11 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
     const n = (counters.get(key) ?? 0) + 1;
     counters.set(key, n);
     return n;
+  };
+  /** until 挂着的等待：假世界每变一下都叫一遍，各自重查自己的条件。 */
+  const waiters = new Set<() => void>();
+  const changed = () => {
+    for (const probe of [...waiters]) probe();
   };
 
   const outputFor = (s: FakeSession): SessionOutput => {
@@ -280,13 +295,14 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
         throw new PortError('SESSION_STOPPED', `会话 ${input.runId} 已经叫停，不再起`, { retryable: false });
       }
       const n = next(`session:${input.stage}`);
+      const own = next(`session:${input.stage}:${input.subtaskKey ?? '-'}`);
       const id = input.resumeSessionId ?? `s${next('sessionId')}`;
       sessions.set(id, {
         id,
         runId: input.runId,
         stage: input.stage,
         input,
-        plan: script.session?.(input, n) ?? {},
+        plan: script.session?.(input, n, own) ?? {},
         n,
         released: false,
         stopped: false,
@@ -312,6 +328,7 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
         throw new Error('看守随工人一起没了');
       }
       s.watching = true;
+      changed();
       try {
         while (s.plan.hold && !s.released && !s.stopped && !ctx.signal.aborted) {
           ctx.heartbeat({ sessionId: s.id });
@@ -412,6 +429,7 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
     ports[name] = async (input, ctx) => {
       const call: FakeCall = { port: name, input, attempt: ctx.attempt, at: Date.now(), end: null, ok: null };
       calls.push(call);
+      changed();
       try {
         while (heldPorts.has(name) && !ctx.signal.aborted) await pause(heartbeatMs, ctx.signal);
         const delay = script.delayMs?.[name] ?? 0;
@@ -433,6 +451,7 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
         throw error;
       } finally {
         call.end = Date.now();
+        changed();
       }
     };
   }
@@ -452,10 +471,35 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
     release(sessionId) {
       const s = sessions.get(sessionId);
       if (s) s.released = true;
+      changed();
     },
     releasePort(port) {
       heldPorts.delete(port);
+      changed();
     },
     held: () => [...sessions.values()].filter((s) => s.plan.hold && !s.released && !s.stopped && s.watching),
+    until(check, what, timeoutMs = 20_000) {
+      return new Promise<void>((resolve, reject) => {
+        const settle = (error?: unknown) => {
+          waiters.delete(probe);
+          clearTimeout(timer);
+          if (error === undefined) resolve();
+          else reject(error);
+        };
+        const probe = () => {
+          try {
+            if (check()) settle();
+          } catch (error) {
+            settle(error ?? new Error(`查「${what}」时出错`));
+          }
+        };
+        const timer = setTimeout(
+          () => settle(new Error(`等了 ${timeoutMs} 毫秒还没等到：${what}`)),
+          timeoutMs,
+        );
+        waiters.add(probe);
+        probe();
+      });
+    },
   };
 }
