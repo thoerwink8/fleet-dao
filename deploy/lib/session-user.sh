@@ -9,19 +9,36 @@
 # 这里不建、读回也不查它。pilot（创始人的登录用户）不登录 reclaude，它的读回在 lib/login-user.sh，也不查登没登录。
 SESSION_USER=fleet-agent-carpool
 
-# 这三样单拎出来，测试换成假的（不用 root、不用真账号）
+# 家目录该在哪：/home/<用户>（france.sh 就这么建）。测试换成临时目录
+SESSION_USER_HOME_ROOT=/home
+
+# 这几样单拎出来，测试换成假的（不用 root、不用真账号）
 session_user_home() { getent passwd "$1" | cut -d: -f6; }
+session_user_home_meta() { stat -c '%U:%G %a' -- "$1" 2>/dev/null; } # 属主:组 权限
 session_user_sudo_list() { sudo -l -U "$1" 2>&1; }
 session_user_groups() { id -nG "$1" 2>&1; }
 
-# 读回一个会话用户：没有 sudo、只在自己的组里、家里没有 GitHub 凭据和 ssh 钥匙；reclaude 登录要创始人在浏览器里点，
-# 没登录记「待配」。用户不在记红（france.sh 建过它，不在就是状态不对，不当成没事）。
+# 读回一个会话用户：家目录就是 /home/<用户>、不是符号链接、归它自己、750（别人读得到的话，reclaude 的登录态
+# ~/.reclaude 就漏了）；没有 sudo、只在自己的组里、家里没有 GitHub 凭据和 ssh 钥匙；reclaude 登录要创始人在
+# 浏览器里点，没登录记「待配」。用户不在记红（france.sh 建过它，不在就是状态不对，不当成没事）。
 readback_session_user() { # 用户
-  local u=$1 home bad="" f
+  local u=$1 home bad="" f meta
   home=$(session_user_home "$u")
   if [[ -z "$home" ]]; then
     red "$u 不在（getent 查不到）：france.sh 该建它，重跑一遍"
     return 0
+  fi
+  if [[ "$home" != "$SESSION_USER_HOME_ROOT/$u" ]]; then
+    red "$u 的家目录是「$home」，不是 $SESSION_USER_HOME_ROOT/$u：france.sh 按后者建、按后者管权限，别处的不认"
+    return 0
+  fi
+  if [[ -L "$home" ]]; then
+    red "$u 的家目录 $home 是符号链接：权限和内容都看不准，不认"
+    return 0
+  fi
+  meta=$(session_user_home_meta "$home")
+  if [[ "$meta" != "$u:$u 750" ]]; then
+    bad+="家目录 $home 是「${meta:-读不到}」（要 $u:$u 750，不然别人读得到 reclaude 的登录态）；"
   fi
   if [[ "$(session_user_sudo_list "$u")" != *"not allowed to run sudo"* ]]; then bad+="有 sudo 条目；"; fi
   if [[ "$(session_user_groups "$u")" != "$u" ]]; then bad+="附加组「$(session_user_groups "$u")」；"; fi

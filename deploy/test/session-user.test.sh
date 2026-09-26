@@ -4,7 +4,8 @@
 # getent / sudo -l / id 三样换成假的，家目录在临时目录里造。
 #   1. 只有一个会话用户 fleet-agent-carpool；france.sh 不建、不查停用的 fleet-agent-dedicated（重新加回来这里会红）
 #   2. 干净的家 + 登录过：两条都绿，没有红和待配
-#   3. 故意造错：有 sudo 条目、多一个组、家里有 ~/.ssh、用户不在——都判红，不当成没事
+#   3. 故意造错：家目录不在 /home/<用户>、是符号链接、属主或权限不对、有 sudo 条目、多一个组、家里有 ~/.ssh、
+#      用户不在——都判红，不当成没事
 #   4. 没装 reclaude、装了没登录：记「待配」，不判绿
 #   5. pilot 不登录 reclaude：它的判据（lib/login-user.sh）不看登没登录
 # 用法：bash deploy/test/session-user.test.sh。退出码：0 通过，1 不通过。
@@ -29,7 +30,11 @@ flunk() {
 FAKE_HOME=""
 FAKE_SUDO=""
 FAKE_GROUPS=""
+FAKE_META=""
+SESSION_USER_HOME_ROOT=$T/home
+mkdir -p "$SESSION_USER_HOME_ROOT"
 session_user_home() { printf '%s' "$FAKE_HOME"; }
+session_user_home_meta() { printf '%s' "$FAKE_META"; }
 session_user_sudo_list() { printf '%s' "$FAKE_SUDO"; }
 session_user_groups() { printf '%s' "$FAKE_GROUPS"; }
 
@@ -80,13 +85,34 @@ else
 fi
 
 echo "== 2. 干净、登录过"
-FAKE_HOME=$T/home-ok
+FAKE_HOME=$SESSION_USER_HOME_ROOT/$U
 FAKE_SUDO="User $U is not allowed to run sudo on france."
 FAKE_GROUPS=$U
+FAKE_META="$U:$U 750"
 clean_home "$FAKE_HOME" 1
 check "没有 sudo、只在自己的组里、没有凭据、reclaude 已登录：两条都绿" 0 0 2
 
 echo "== 3. 故意造错：都判红"
+FAKE_META="$U:$U 755"
+check "家目录 755（别人读得到登录态）：红" 1 0 1 "要 $U:$U 750"
+FAKE_META="root:root 750"
+check "家目录归 root：红" 1 0 1 "要 $U:$U 750"
+FAKE_META=""
+check "家目录的属主权限读不到：红，不当成对" 1 0 1 "读不到"
+FAKE_META="$U:$U 750"
+mkdir -p "$T/elsewhere"
+ln -s "$T/elsewhere" "$T/linked"
+FAKE_HOME=$T/linked
+check "家目录不在 /home/<用户>：红" 1 0 0 "不是 $SESSION_USER_HOME_ROOT/$U"
+# 符号链接放在另一个假的 /home 下，不动上面那个真目录
+mkdir -p "$T/altroot" "$T/real-home"
+ln -s "$T/real-home" "$T/altroot/$U"
+if [[ -L "$T/altroot/$U" ]]; then
+  SESSION_USER_HOME_ROOT=$T/altroot FAKE_HOME=$T/altroot/$U check "家目录是符号链接：红" 1 0 0 "是符号链接"
+else
+  echo "  （这台建不了真的符号链接，跳过这一条；CI 的 Linux 上会跑）"
+fi
+FAKE_HOME=$SESSION_USER_HOME_ROOT/$U
 FAKE_SUDO="User $U may run the following commands on france: (ALL) NOPASSWD: ALL"
 check "有 sudo 条目：红" 1 0 1 "有 sudo 条目"
 FAKE_SUDO="User $U is not allowed to run sudo on france."
@@ -100,7 +126,7 @@ FAKE_HOME=""
 check "用户不在（getent 查不到）：红，不当成没事" 1 0 0 "不在"
 
 echo "== 4. 没装、没登录：待配，不判绿"
-FAKE_HOME=$T/home-nologin
+FAKE_HOME=$SESSION_USER_HOME_ROOT/$U
 clean_home "$FAKE_HOME" 0
 check "装了 reclaude 没登录：待配" 0 1 1 "还没登录"
 rm -f -- "$FAKE_HOME/.local/bin/reclaude"
