@@ -1,7 +1,7 @@
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { checkDocPointers, DOCS, formatProblem, type PointerKind } from '../src/doc-pointers.ts';
-import { fsRepo } from '../src/repo.ts';
+import { fsRepo, type RepoView } from '../src/repo.ts';
 import { memRepo } from './helpers.ts';
 
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
@@ -141,6 +141,12 @@ describe('文档指针：故意弄断的，逐条报 文件:行', () => {
       'deploy/France.sh 在仓里没有',
     ],
     ['通配一个也对不上', 'docs/ops.md', '单元是 `deploy/*.service`。', 'deploy/*.service 在仓里没有'],
+    [
+      '路径穿过一个文件：算没有，不算读不到',
+      'docs/ops.md',
+      '见 `deploy/france.sh/x`。',
+      'deploy/france.sh/x 在仓里没有',
+    ],
     [
       '链接指的文件不在',
       'README.md',
@@ -422,6 +428,54 @@ describe('文档指针：故意不查的', () => {
     const mine = report.pointers.filter((p) => p.file === file && p.line >= first);
     // 「不是指针」那条里的 docs/plan.md 本身是个真路径，照查；别的一条都不该认
     expect(mine.filter((p) => p.text !== 'docs/plan.md')).toEqual([]);
+  });
+});
+
+describe('文档指针：读不到的明确报「没查成」，不当成「没有」（需求.md、方案.md 里也照报）', () => {
+  // 列目录回 undefined 有两种：不是目录（路径穿过了一个文件，算没有）、是目录却读不到（在不在没查成）。
+  // 读不到当成「没有」，需求.md、方案.md 里「没有」又不报，读不到就被悄悄吞了（#162 合并后补审）。
+  function broken(file: string, lines: string[], breakRepo: (repo: RepoView) => RepoView) {
+    const base = BASE[file] ?? '';
+    const first = base.split('\n').length;
+    const repo = memRepo({ ...BASE, [file]: `${base}${lines.join('\n')}\n` });
+    return { report: checkDocPointers(breakRepo(repo)), first };
+  }
+  /** dir 是目录，却列不出来。 */
+  const unlistable =
+    (dir: string) =>
+    (repo: RepoView): RepoView => ({ ...repo, list: (rel) => (rel === dir ? undefined : repo.list(rel)) });
+
+  it.each(['specs/1-demo/需求.md', 'specs/1-demo/方案.md', RESULT_DOC, 'docs/design.md'])(
+    '%s：路径、链接经过的目录列不出来',
+    (file) => {
+      const link = `${'../'.repeat(file.split('/').length - 1)}packages/x/README.md`;
+      const { report, first } = broken(
+        file,
+        ['新建 `packages/x/src/new.ts`。', `见 [说明](${link})。`],
+        unlistable('packages/x'),
+      );
+      expect(report.problems.map(formatProblem)).toEqual([
+        `${file}:${first}  packages/x/src/new.ts 在不在没查成：读不到 packages/x/`,
+        `${file}:${first + 1}  链接 ${link} 指的 packages/x/README.md 在不在没查成：读不到 packages/x/`,
+      ]);
+    },
+  );
+
+  it('指的是目录、却连它是不是目录都看不出（stat 失灵）', () => {
+    const statBroken = (repo: RepoView): RepoView => ({
+      ...repo,
+      isDir: (rel) => rel !== 'deploy' && repo.isDir(rel),
+      exists: (rel) => rel !== 'deploy' && repo.exists(rel),
+    });
+    const { report, first } = broken('specs/1-demo/需求.md', ['装法放 `deploy/` 下。'], statBroken);
+    expect(report.problems.map(formatProblem)).toEqual([
+      `specs/1-demo/需求.md:${first}  deploy/ 在不在没查成：读不到 deploy/`,
+    ]);
+  });
+
+  it('仓根列不出来：报出来，不当成「没有路径指针」', () => {
+    const { report } = broken('docs/ops.md', ['装法在 `deploy/nope.sh`。'], unlistable(''));
+    expect(report.problems.map(formatProblem)).toEqual(['.:0  列不出仓根下的文件：路径、链接指针都没法查']);
   });
 });
 

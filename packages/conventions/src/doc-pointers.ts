@@ -26,7 +26,8 @@ export const DOCS = ['docs/design.md', 'docs/plan.md', 'docs/ops.md', 'README.md
  * 写在动手之前的文档：方案本来就要写「新建哪个文件、ops 哪一段加什么」，指的东西这时还没有是正常的。它们指到别的文件、
  * 别的文档里的节、标题、引的话、条目、plan 的阶段和条目，指不到不报——引擎把它们直写进主线，不经 PR 的检查，
  * 报了挡的是之后所有别人的 PR。照报的：写法本身的毛病
- * （「第 X 节」没说哪份、plan 条目的空引号——开单骨架故意留空等人填）、指自己这份文档里的标题、design 这几份读不到。
+ * （「第 X 节」没说哪份、plan 条目的空引号——开单骨架故意留空等人填）、指自己这份文档里的标题、读不到（design 这几份、
+ * 路径经过的目录：在不在没查成，不是「没有」）。
  * 结果.md 写在做完之后，和 design、plan、ops、README 一样严查。只看文件名，不看单子开没开、写了多久（必过检查必须确定）。
  */
 const PLANNED_DOC = /^specs\/[^/]+\/(?:需求|方案)\.md$/;
@@ -120,6 +121,13 @@ const THIS_REPO = new Set(['本', '这个', '此', 'fleet-dao']);
 /** 仓根下不当成「仓里的东西」的名字。 */
 const IGNORED_TOP = new Set(['.git', 'node_modules']);
 
+/** 路径找没找到；unreadable 是读不到的那一级（仓内路径，'' 是仓根）：在不在没查成，不能当成没有。 */
+type Lookup = 'found' | 'missing' | { unreadable: string };
+
+function notChecked(found: { unreadable: string }): string {
+  return `在不在没查成：读不到 ${found.unreadable ? `${found.unreadable}/` : '仓根'}`;
+}
+
 const emptyCounts = (): Record<PointerKind, number> => ({
   link: 0,
   path: 0,
@@ -175,7 +183,10 @@ class Checker {
 
   constructor(repo: RepoView) {
     this.repo = repo;
-    const entries = (repo.list('') ?? []).filter((name) => !IGNORED_TOP.has(name));
+    const root = repo.list('');
+    // 认路径靠仓根下的名字：列不出来就一个路径指针都认不出，得报，不能当成「没有路径指针」
+    if (root === undefined) this.problem('.', 0, '列不出仓根下的文件：路径、链接指针都没法查');
+    const entries = (root ?? []).filter((name) => !IGNORED_TOP.has(name));
     this.tops = new Set(entries);
     const dirs = entries.filter((name) => repo.isDir(name));
     // 正文里不带反引号的路径只认「顶层目录/…」，而且只认 ASCII：specs 的目录名带中文，截不准的宁可不查
@@ -214,7 +225,9 @@ class Checker {
     if (/^[a-z][a-z0-9+.-]*:/i.test(t)) return; // 网址、host:port
     if (!this.tops.has(t.split('/')[0] ?? '')) return;
     this.note('path', file, line, t, t);
-    if (!this.pathExists(t)) this.missing(file, line, t, `${t} 在仓里没有`);
+    const found = this.locate(t);
+    if (found === 'missing') this.missing(file, line, t, `${t} 在仓里没有`);
+    else if (found !== 'found') this.problem(file, line, `${t} ${notChecked(found)}`);
   }
 
   private checkBarePaths(file: string, line: number, prose: string): void {
@@ -237,24 +250,41 @@ class Checker {
     }
     const rel = posix.normalize(posix.join(posix.dirname(file), p));
     this.note('link', file, line, target, rel);
-    if (rel === '..' || rel.startsWith('../') || !this.pathExists(rel)) {
-      this.missing(file, line, rel, `链接 ${target} 指的 ${rel} 在仓里没有`);
-    }
+    const found: Lookup = rel === '..' || rel.startsWith('../') ? 'missing' : this.locate(rel);
+    if (found === 'missing') this.missing(file, line, rel, `链接 ${target} 指的 ${rel} 在仓里没有`);
+    else if (found !== 'found') this.problem(file, line, `链接 ${target} 指的 ${rel} ${notChecked(found)}`);
   }
 
-  /** 逐段按目录列表比名字（大小写也要对上，和 CI 的 Linux 一样）；段里的 * 当通配。 */
-  private pathExists(rel: string): boolean {
+  /**
+   * 逐段按目录列表比名字（大小写也要对上，和 CI 的 Linux 一样）；段里的 * 当通配。
+   * 列目录回 undefined 有两种：那一级是文件（路径穿过了文件）算没有；是目录却列不出来、或连是不是目录都看不出，
+   * 回 unreadable——当成没有的话，需求.md、方案.md 里「没有」不报，读不到就被悄悄吞了。
+   */
+  private locate(rel: string): Lookup {
     const dirOnly = rel.endsWith('/');
     const segs = rel.split('/').filter((s) => s && s !== '.');
-    const walk = (base: string, rest: string[]): boolean => {
+    const walk = (base: string, rest: string[]): Lookup => {
       const [seg, ...more] = rest;
-      if (seg === undefined) return !dirOnly || base === '' || this.repo.isDir(base);
+      if (seg === undefined) {
+        if (!dirOnly || base === '' || this.repo.isDir(base)) return 'found';
+        return this.repo.exists(base) ? 'missing' : { unreadable: base };
+      }
+      const names = this.list(base);
+      if (names === undefined) {
+        const isFile = base !== '' && this.repo.exists(base) && !this.repo.isDir(base);
+        return isFile ? 'missing' : { unreadable: base };
+      }
       const glob = seg.includes('*')
         ? new RegExp(`^${seg.split('*').map(escapeRe).join('[^/]*')}$`)
         : undefined;
-      return (this.list(base) ?? []).some(
-        (name) => (glob ? glob.test(name) : name === seg) && walk(base ? `${base}/${name}` : name, more),
-      );
+      let result: Lookup = 'missing';
+      for (const name of names) {
+        if (!(glob ? glob.test(name) : name === seg)) continue;
+        const r = walk(base ? `${base}/${name}` : name, more);
+        if (r === 'found') return r;
+        if (result === 'missing') result = r; // 记下头一处读不到的；别的分支找到了照样算找到
+      }
+      return result;
     };
     return walk('', segs);
   }
@@ -529,7 +559,7 @@ class Checker {
     return target === file || !PLANNED_DOC.test(file);
   }
 
-  /** 指的东西没有（文件、节、标题、引的话、条目、阶段）。写法本身的毛病、文档读不到不走这里，直接 problem。 */
+  /** 指的东西没有（文件、节、标题、引的话、条目、阶段）。写法本身的毛病、文档或目录读不到不走这里，直接 problem。 */
   private missing(file: string, line: number, target: string, message: string): void {
     if (this.strict(file, target)) this.problem(file, line, message);
   }
