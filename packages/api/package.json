@@ -14,6 +14,7 @@
   "dependencies": {
     "@fleet-dao/db": "workspace:*",
     "@fleet-dao/github": "workspace:*",
+    "@fleet-dao/jev": "workspace:*",
     "@fleet-dao/shared": "workspace:*",
     "@hono/node-server": "^2.1.1",
     "@temporalio/client": "1.24.0",

@@ -552,6 +552,39 @@ describe('子任务工作流', { timeout: 60_000 }, () => {
     expect(world.count('raiseAlert')).toBe(0);
   });
 
+  it('会话失败带回看守活动问的 Jev 答案：只记不拦的照兜底梯走、理由里写明；真拦且有把握的照它换路由', async () => {
+    const shadow = { asked: true, ok: true, choice: 'swapRoute', confidence: 0.9, shadow: true } as const;
+    const world = createFakeWorld({
+      session: (input, n) => {
+        if (input.stage !== 'execute') return {};
+        if (n === 1)
+          return { outcome: 'failed', failure: { code: 'WEIRD', message: '没见过的错', jev: shadow } };
+        if (n === 2) {
+          return {
+            outcome: 'failed',
+            failure: { code: 'WEIRD', message: '又一句没见过的错', jev: { ...shadow, shadow: false } },
+          };
+        }
+        return {};
+      },
+    });
+    const history = await withWorker(env, world, async (q) => {
+      const handle = await startSubtask(q);
+      expect(((await handle.result()) as SubtaskResult).state).toBe('merged');
+      return handle.fetchHistory();
+    });
+    const execs = world.callsOf('startSession').filter((c) => c.input.stage === 'execute');
+    // 第一次只记不拦：和没问一样原路重试（还是 r1）；第二次真拦、判换路由：换到 r2，不先原路重试。
+    expect(execs.map((c) => (c.input as StartSessionInput).route.routeId)).toEqual(['r1', 'r1', 'r2']);
+    const decided = markerText(history);
+    expect(decided).toContain('Jev 判「swapRoute」，这道题还在只记不拦');
+    expect(decided).toContain('Jev 判的');
+    // 工作流自己不问：判断都在本地活动 decide 的记录里，答案是看守活动带回来的。
+    expect(
+      world.callsOf('pickRoute').filter((c) => c.input.stage === 'execute')[2]?.input.avoidRouteIds,
+    ).toEqual(['r1']);
+  });
+
   it('封号这类账号池的事：整个池避开，同一个池的别的路由再空着也不选', async () => {
     const route = (routeId: string, poolId: string) =>
       ({ routeId, poolId, modelId: 'm1', family: 'claude', hostId: 'claude-code' }) as const;

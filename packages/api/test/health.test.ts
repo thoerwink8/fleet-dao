@@ -49,7 +49,7 @@ describe('健康检查', () => {
     expect(h.logs.some((l) => String(l.fields?.error).includes(internal))).toBe(true);
   });
 
-  /** serviceHealthChecks 的一套：库、实时推送、Temporal、GitHub 事件都好，只看飞书草稿开单这两项。 */
+  /** serviceHealthChecks 的一套：库、实时推送、Temporal、GitHub 事件、判断题都好，只看飞书草稿开单这两项。 */
   const services = (draftOpener: { check(): Promise<void>; readonly notWired?: string }) =>
     serviceHealthChecks({
       probeDb: async () => {},
@@ -58,6 +58,7 @@ describe('健康检查', () => {
       githubEvents: async () => {},
       draftOpener,
       draftBacklog: draftBacklogCheck(backlogStore, () => new Date()),
+      judge: { check: async () => {} },
     });
 
   it('还没接上的功能报「未接」：整体照样 200，这一项看得到「未接」和单号，积压也不算坏', async () => {
@@ -139,6 +140,8 @@ describe('健康检查', () => {
     const script = readFileSync(new URL('../../../deploy/release.sh', import.meta.url), 'utf8');
     const listed = /^DRIFTING_HEALTH_ITEMS="([^"]*)"$/m.exec(script)?.[1]?.trim().split(/\s+/) ?? [];
     expect(listed).toContain('draft_backlog');
+    // 判断题「最近一次调用没成」跟着上游自己变红，和换没换版无关
+    expect(listed).toContain('judge');
     const names = serviceHealthChecks({
       probeDb: async () => {},
       feed: { probe: async () => {} },
@@ -146,6 +149,7 @@ describe('健康检查', () => {
       githubEvents: async () => {},
       draftOpener: { check: async () => {} },
       draftBacklog: async () => {},
+      judge: { check: async () => {} },
     }).map((c) => c.name);
     for (const name of listed) expect(names, name).toContain(name);
   });

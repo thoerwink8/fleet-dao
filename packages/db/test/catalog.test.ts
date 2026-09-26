@@ -33,7 +33,7 @@ const exampleText = repoFile(EXAMPLE_PATH);
 const example = () => parseCatalog(exampleText, EXAMPLE_PATH);
 
 const CLAUDE_ROUTES = ['claude-solo:opus-5.5:claude-code', 'claude-carpool:opus-5.5:claude-code'];
-/** TypeSafe 的 Jev：只挂判断阶段，排第一（packages/jev 接进引擎以后按判断阶段排第一的路由起后端）。 */
+/** TypeSafe 的 Jev：只挂判断阶段，排第一（引擎每次提问按判断阶段排第一、开着的路由起后端，见 packages/jev 的 wiring.ts）。 */
 const JEV_ROUTE = 'jev:jev-1.13:api-shell';
 
 let t: TestDb;

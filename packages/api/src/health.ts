@@ -77,8 +77,8 @@ export async function runHealthChecks(
 }
 
 /**
- * 生产要探的几项：库、实时推送（LISTEN）、Temporal、引擎工人、GitHub 事件的去处、飞书草稿开单（接没接上、有没有积压）。
- * main.ts 用它装配，测试也用它，是同一份代码。
+ * 生产要探的几项：库、实时推送（LISTEN）、Temporal、引擎工人、GitHub 事件的去处、飞书草稿开单（接没接上、有没有积压）、
+ * 判断题（接没接、调不调得通）。main.ts 用它装配，测试也用它，是同一份代码。
  */
 export function serviceHealthChecks(parts: {
   /** 真去读几张常用表、带自己的超时（pg-store.ts 的 probeDb）；只 select 1 查不出表被锁住。 */
@@ -92,6 +92,8 @@ export function serviceHealthChecks(parts: {
   draftOpener: { check(): Promise<void>; readonly notWired?: string };
   /** 最早一张待开单等太久就报红（draft-opening.ts 的 draftBacklogCheck）。 */
   draftBacklog: () => Promise<void>;
+  /** 判断题（judge-health.ts）：没配报「未接」；配置起不来、最近一次真调用没成报红。 */
+  judge: { check(): Promise<void>; readonly notWired?: string };
 }): HealthCheck[] {
   return [
     { name: 'database', check: parts.probeDb },
@@ -107,6 +109,8 @@ export function serviceHealthChecks(parts: {
       check: parts.draftBacklog,
       ...notWired(parts.draftOpener.notWired && `${parts.draftOpener.notWired}：确认了的草稿先留在待开单`),
     },
+    // 最近一次调用没成会随上游自己变红（发版脚本对它只标待处理，见 deploy/release.sh 的 DRIFTING_HEALTH_ITEMS）
+    { name: 'judge', check: () => parts.judge.check(), ...notWired(parts.judge.notWired) },
   ];
 }
 

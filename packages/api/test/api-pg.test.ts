@@ -1,5 +1,7 @@
 // 整条链路跑在真库上：接口 → Postgres Store → PGlite（真迁移）→ 库里的触发器发 NOTIFY → LISTEN → SSE / 叫醒等回答的命令。
 // 语义细节在契约测试（store-contract.ts）和各接口的测试里按内存版测过；这里只证明「换成真库，接起来照样通」。
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { asks, auditLog, feishuDrafts, githubEvents, progressEvents, tasks } from '@fleet-dao/db';
 import { createTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import {
@@ -15,6 +17,7 @@ import { devFixtures } from '../src/dev-fixtures.ts';
 import { draftBacklogCheck, notWiredDraftOpener } from '../src/draft-opening.ts';
 import { githubAppMissing } from '../src/github.ts';
 import { serviceHealthChecks } from '../src/health.ts';
+import { JUDGE_NOT_WIRED, judgeHealthCheck } from '../src/judge-health.ts';
 import { probeDb } from '../src/pg-store.ts';
 import { notConnectedTemporal } from '../src/temporal.ts';
 import {
@@ -219,6 +222,10 @@ describe('接口跑在真库上', () => {
         githubEvents: githubAppMissing('没有 /etc/fleet-dao/github/gh-app-fleet-dao-engine.json').check,
         draftOpener: notWiredDraftOpener(),
         draftBacklog: () => draftBacklogCheck(pgStore(), () => new Date(T0))(),
+        judge: judgeHealthCheck({
+          db: t.db,
+          location: { path: join(tmpdir(), 'fleet-api-pg-nowhere', 'jev.json'), explicit: false },
+        }),
       }),
     });
     const res = await h.cockpit.request('/healthz');
@@ -241,6 +248,7 @@ describe('接口跑在真库上', () => {
           status: 'not_wired',
           message: '飞书草稿开成 issue 还没接上（#91）：确认了的草稿先留在待开单',
         },
+        judge: { ok: true, status: 'not_wired', message: JUDGE_NOT_WIRED },
       },
     });
     // 一张草稿确认了 20 分钟还没开成：积压报红（库里真查出来的）。

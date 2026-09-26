@@ -1,5 +1,6 @@
-// 目录样例（deploy/examples/catalog.example.json）的判断阶段照 packages/jev 排：接进引擎以后，它按判断阶段排第一的路由
-// 起后端（backendForRoute，现在还没有调用方），所以开着的每一条都得是这里起得了的；关着的两条 Claude 是因为 Claude 判断后端还没接上。
+// 目录样例（deploy/examples/catalog.example.json）的判断阶段照 packages/jev 排：引擎每次提问都按判断阶段排第一、开着的路由
+// 起后端（wiring.ts 的 resolveJevBackend → backendForRoute），所以开着的每一条都得是这里起得了的；关着的两条 Claude 是因为
+// Claude 判断后端还没接上。
 import { readFileSync } from 'node:fs';
 import { parseCatalog } from '@fleet-dao/db';
 import { describe, expect, it } from 'vitest';

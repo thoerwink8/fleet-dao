@@ -1,5 +1,6 @@
 // Jev 判断题服务：题库、提问接口、可换的后端（TypeSafe / Claude 会话）、只记不拦与转真拦、考题。
-// 这一版不接进引擎和飞书，只提供它们要调的函数和类型；接入点由谁、在哪一步调用见 PR 正文。
+// 接上的只有引擎的错误分流、停滞预判两处（packages/engine/src/real/jev-port.ts，先只记不拦），/healthz 的 judge 项看它
+// 接没接、调不调得通（wiring.ts）；design 第十一节表里其余接入点还没接。
 export * from './backend.ts';
 export * from './backends/claude.ts';
 export * from './backends/typesafe.ts';
@@ -14,3 +15,4 @@ export * from './policy.ts';
 export * from './questions.ts';
 export * from './store.ts';
 export * from './verdict.ts';
+export * from './wiring.ts';

@@ -34,7 +34,13 @@ import {
 
 export interface FakeSessionPlan {
   outcome?: 'done' | 'failed' | 'stalled' | 'blocked';
-  failure?: { code: string; message?: string; retryable?: boolean };
+  /** jev = 看守活动问回来的 Jev 答案（真端口在规则认不出时才问），原样随结局交给工作流。 */
+  failure?: {
+    code: string;
+    message?: string;
+    retryable?: boolean;
+    jev?: NonNullable<SessionEnd['failure']>['jev'];
+  };
   blocked?: { reason?: string; question?: string; options?: string[] };
   /** 会话挂着不结束，直到 release()、stopSession 或取消。 */
   hold?: boolean;
@@ -239,6 +245,7 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
         code: failure.code,
         message: failure.message ?? `假会话${outcome === 'stalled' ? '没动静' : '失败'}`,
         ...(failure.retryable === undefined ? {} : { retryable: failure.retryable }),
+        ...(failure.jev ? { jev: failure.jev } : {}),
       },
     };
   };
