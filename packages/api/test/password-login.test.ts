@@ -257,6 +257,17 @@ describe('账密登录', () => {
     expect(h.logs.some((l) => l.level === 'error' && l.message.includes('哈希'))).toBe(true);
   });
 
+  it('白名单里的人却读不到登录信息：500 credentials_missing 并记日志，不装成「没设密码」、不记输错（第二意见第 2 轮）', async () => {
+    const h = harness();
+    await setFirst(h);
+    h.store.getPasswordCredentials = async () => null;
+    const res = await passwordLogin(h, 'founder-a', PASSWORD);
+    expect(res.status).toBe(500);
+    expect(await errorCode(res)).toBe('credentials_missing');
+    expect(h.logs.some((l) => l.level === 'error' && l.message.includes('读不到'))).toBe(true);
+    expect(h.store.data.credentials.get(DEV_USER_ID)?.failedLogins).toBe(0);
+  });
+
   it('别的站发来的登录请求（Origin 不是驾驶舱）：403，不验密码', async () => {
     const h = harness();
     await setFirst(h);
@@ -441,5 +452,14 @@ describe('防暴力计数（内存里的那一份）', () => {
     expect(t.fail('k', 1000 + LOCK_MS)).toBeUndefined();
     for (const k of ['a', 'b', 'c', 'd']) t.fail(k, 5000);
     expect(t.size()).toBeLessThanOrEqual(3);
+  });
+
+  it('键满了也不扔正锁着的：拿一批新键刷不掉已有的锁（第二意见第 2 轮）', () => {
+    const t = createLoginThrottle({ maxKeys: 2 });
+    for (let i = 0; i < 5; i++) t.fail('locked-source', 1000);
+    expect(t.lockedUntil('locked-source', 1000)).toBe(1000 + LOCK_MS);
+    for (let i = 0; i < 100; i++) t.fail(`spam-${i}`, 2000);
+    expect(t.lockedUntil('locked-source', 3000)).toBe(1000 + LOCK_MS);
+    expect(t.size()).toBeLessThanOrEqual(2);
   });
 });

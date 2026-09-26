@@ -7,8 +7,12 @@ import { derive } from './tokens.ts';
 
 export const MAX_FAILED_LOGINS = 5;
 export const LOCK_MS = 15 * 60_000;
-/** 内存里最多记这么多个键：被人拿大量来源地址刷，也吃不光内存（先扔最久没动的）。 */
-const MAX_KEYS = 10_000;
+/**
+ * 一份计数最多记这么多个键，被人拿大量来源地址、用户名刷也吃不光内存。满了先扔过期的、再扔最久没动的「还没锁上」的；
+ * 正锁着的一个都不扔（不然别人刷一批新键就能把锁挤掉、绕过 15 分钟）——全是锁时新键这次不记，已锁的照样锁着。
+ * 来源和用户名各用一份（auth.ts），拿用户名刷挤不到来源的锁。
+ */
+const MAX_KEYS = 50_000;
 
 interface Entry {
   fails: number;
@@ -40,14 +44,15 @@ export function createLoginThrottle(options: { maxKeys?: number } = {}): LoginTh
     return e;
   }
 
-  function evict(now: number): void {
+  /** 腾出一个位置；腾不出（全是正锁着的）返回 false。 */
+  function makeRoom(now: number): boolean {
     for (const key of [...entries.keys()]) live(key, now);
-    // Map 按插入顺序：fail 里先删再插，最前面的就是最久没动的
-    while (entries.size >= maxKeys) {
-      const oldest = entries.keys().next().value;
-      if (oldest === undefined) break;
-      entries.delete(oldest);
+    // Map 按插入顺序：fail 里先删再插，前面的就是最久没动的
+    for (const [key, e] of entries) {
+      if (entries.size < maxKeys) break;
+      if (e.lockedUntil === undefined) entries.delete(key);
     }
+    return entries.size < maxKeys;
   }
 
   return {
@@ -58,7 +63,7 @@ export function createLoginThrottle(options: { maxKeys?: number } = {}): LoginTh
       const e = live(key, now) ?? { fails: 0, lockedUntil: undefined, touched: now };
       if (e.lockedUntil !== undefined) return e.lockedUntil;
       entries.delete(key);
-      if (entries.size >= maxKeys) evict(now);
+      if (entries.size >= maxKeys && !makeRoom(now)) return undefined;
       e.fails += 1;
       e.touched = now;
       if (e.fails >= MAX_FAILED_LOGINS) {

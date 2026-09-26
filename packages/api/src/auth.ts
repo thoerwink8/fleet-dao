@@ -139,7 +139,9 @@ export function authRoutes(deps: Deps): Hono<CockpitEnv> {
     }),
   );
 
-  const throttle = createLoginThrottle();
+  // 来源、库里没有的用户名各一份计数：一份被刷满也挤不到另一份的锁
+  const sourceThrottle = createLoginThrottle();
+  const nameThrottle = createLoginThrottle();
 
   /** 没登成也要留记录；记录写不进只记日志，不改变给人的答复（不然库一抖就把「密码错」变成 500）。 */
   async function auditFailure(actorId: string, error: string, extra: Record<string, unknown> = {}) {
@@ -180,7 +182,7 @@ export function authRoutes(deps: Deps): Hono<CockpitEnv> {
     const source = sourceKey(config.sessionSecret, c.req.header('x-real-ip')?.trim() || 'unknown');
     const sourceTag = source.slice(3, 15);
 
-    const sourceLock = throttle.lockedUntil(source, nowMs);
+    const sourceLock = sourceThrottle.lockedUntil(source, nowMs);
     if (sourceLock !== undefined) {
       await auditFailure('password:unknown', 'locked', { by: 'source', source: sourceTag });
       locked(sourceLock);
@@ -190,6 +192,12 @@ export function authRoutes(deps: Deps): Hono<CockpitEnv> {
     const user: CockpitUser | null = isCockpitUser(found) ? found : null;
     const creds: PasswordCredentials | null = user ? await store.getPasswordCredentials(user.id) : null;
     const nameKey = unknownUsernameKey(config.sessionSecret, username);
+    if (user && !creds) {
+      // 过了白名单的人却读不到登录信息：是库出事了，不当成「没设密码」答 401、也不记输错
+      log.error('账密登录读不到这个人的登录信息', { userId: user.id });
+      await auditFailure(user.id, 'credentials_missing');
+      throw new ApiError(500, 'credentials_missing', '读不到这个账号的登录信息，已记日志，请先用飞书登录');
+    }
 
     if (user && creds) {
       if (creds.lockedUntil !== undefined && Date.parse(creds.lockedUntil) > nowMs) {
@@ -197,7 +205,7 @@ export function authRoutes(deps: Deps): Hono<CockpitEnv> {
         locked(creds.lockedUntil);
       }
     } else {
-      const nameLock = throttle.lockedUntil(nameKey, nowMs);
+      const nameLock = nameThrottle.lockedUntil(nameKey, nowMs);
       if (nameLock !== undefined) {
         await auditFailure('password:unknown', 'locked', { by: 'username', source: sourceTag });
         locked(nameLock);
@@ -224,12 +232,12 @@ export function authRoutes(deps: Deps): Hono<CockpitEnv> {
 
     if (ok && user) {
       await store.recordPasswordSuccess(user.id);
-      throttle.clear(source);
+      sourceThrottle.clear(source);
       await startRecordedSession(c, user, 'password');
       return c.body(null, 204);
     }
 
-    const sourceUntil = throttle.fail(source, nowMs);
+    const sourceUntil = sourceThrottle.fail(source, nowMs);
     let nameUntil: number | string | undefined;
     if (user) {
       const r = await store.recordPasswordFailure({
@@ -240,7 +248,7 @@ export function authRoutes(deps: Deps): Hono<CockpitEnv> {
       });
       nameUntil = r?.lockedUntil;
     } else {
-      nameUntil = throttle.fail(nameKey, nowMs);
+      nameUntil = nameThrottle.fail(nameKey, nowMs);
     }
     await auditFailure(user?.id ?? 'password:unknown', 'bad_credentials', {
       source: sourceTag,
