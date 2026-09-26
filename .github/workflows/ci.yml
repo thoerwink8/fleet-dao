@@ -221,12 +221,15 @@ jobs:
       - run: pnpm --filter ./packages/web run build:demo
 
   # 装机脚本的检查：退出码 2 = 有项没跑成，同样算红，别让「没跑」冒充「通过」
+  # deploy=all 跑全套；deploy=ops（只改了 docs/ops.md 这类）只跑读 ops.md 的两块（run.sh --ops：端口表、place-file），
+  # 不装依赖、不用 sudo（ops-only.test.sh 在全套里核对 --ops 两块真跑了、改坏 ops.md 会红）。
   # FLEET_TEST_SYSTEM_USERS=1：agent-scope-adopt.test.sh 建、删真系统账号的一段只在这里开（一次性的机器）。
   # sudo 会清掉带进来的环境变量，所以写在 sudo 的命令行上（这里 runner 的 sudo 规则是 ALL，命令行上给的放行）；
   # 万一没带过去，那一段报「没跑成」、这一步照样红，不会悄悄当成通过。
   deploy:
     needs: changes
-    if: needs.changes.outputs.deploy == 'true'
+    if: needs.changes.outputs.deploy == 'all' || needs.changes.outputs.deploy == 'ops'
+    name: deploy (${{ needs.changes.outputs.deploy }})
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -234,12 +237,17 @@ jobs:
         with:
           persist-credentials: false
       - uses: pnpm/action-setup@v4
+        if: needs.changes.outputs.deploy == 'all'
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: sudo FLEET_TEST_SYSTEM_USERS=1 bash deploy/test/run.sh
+          cache: ${{ needs.changes.outputs.deploy == 'all' && 'pnpm' || '' }}
+      - if: needs.changes.outputs.deploy == 'all'
+        run: pnpm install --frozen-lockfile
+      - if: needs.changes.outputs.deploy == 'all'
+        run: sudo FLEET_TEST_SYSTEM_USERS=1 bash deploy/test/run.sh
+      - if: needs.changes.outputs.deploy == 'ops'
+        run: bash deploy/test/run.sh --ops
 
   # 必过检查。逐个核对：changes、hygiene、docs 必须绿；lint、test、web、deploy 本该跑的必须绿、本该跳过的必须是跳过（packages/conventions/src/ci-plan.ts 的 ciVerdict）。
   check:

@@ -78,7 +78,7 @@ describe('按改动算要跑什么', () => {
     for (const event of ['push', 'workflow_dispatch', 'merge_group']) {
       const p = planCi({ event, changed: ['README.md'], graph: graph() });
       expect(p.full, event).toBe(true);
-      expect(p).toMatchObject({ lint: true, tsc: 'all', web: true, deploy: true });
+      expect(p).toMatchObject({ lint: true, tsc: 'all', web: true, deploy: 'all' });
       expect(shards(p)).toEqual(['engine', 'db', 'rest']);
     }
   });
@@ -122,7 +122,7 @@ describe('按改动算要跑什么', () => {
       'README.md',
       '.github/ISSUE_TEMPLATE/requirement.yml',
     );
-    expect(p).toMatchObject({ full: false, tests: [], web: false, deploy: false, tsc: [] });
+    expect(p).toMatchObject({ full: false, tests: [], web: false, deploy: 'none', tsc: [] });
     // .yml 不是 md：biome 会看它
     expect(p.lint).toBe(true);
     expect(pr('docs/design.md', 'specs/1-x/方案.md').lint).toBe(false);
@@ -130,7 +130,7 @@ describe('按改动算要跑什么', () => {
 
   it('只改一个没人依赖的包（cli）：只测它、只类型检查它，不打包 web、不跑 deploy', () => {
     const p = pr('packages/cli/src/help.ts');
-    expect(p).toMatchObject({ full: false, lint: true, tsc: ['packages/cli'], web: false, deploy: false });
+    expect(p).toMatchObject({ full: false, lint: true, tsc: ['packages/cli'], web: false, deploy: 'none' });
     expect(p.tests).toEqual([{ name: 'rest', args: ['packages/cli/'], temporal: false }]);
   });
 
@@ -160,27 +160,39 @@ describe('按改动算要跑什么', () => {
 
   it('改了 web：打包演示版、跑 deploy（发布、扫产物用它）；api、feishu 的测试读 web 的文件，也测，但不往下传到 engine', () => {
     const p = pr('packages/web/src/build/scan.ts');
-    expect(p).toMatchObject({ web: true, deploy: true });
+    expect(p).toMatchObject({ web: true, deploy: 'all' });
     expect(testArgs(p)).toEqual(['packages/api/', 'packages/feishu/', 'packages/web/']);
   });
 
   it('改了 feishu、agents-sync：deploy/test 打包网关、跑同步脚本，要跑 deploy', () => {
-    expect(pr('packages/feishu/src/gateway.ts').deploy).toBe(true);
-    expect(pr('packages/agents-sync/src/sync.ts').deploy).toBe(true);
-    expect(pr('packages/jev/src/index.ts').deploy).toBe(false);
+    expect(pr('packages/feishu/src/gateway.ts').deploy).toBe('all');
+    expect(pr('packages/agents-sync/src/sync.ts').deploy).toBe('all');
+    expect(pr('packages/jev/src/index.ts').deploy).toBe('none');
+  });
+
+  it('只改 docs/ops.md：deploy 只跑读它的两块（run.sh --ops），和要全套的一起改照旧全套', () => {
+    expect(pr('docs/ops.md').deploy).toBe('ops');
+    expect(pr('docs/ops.md', 'docs/design.md', 'specs/1-x/方案.md').deploy).toBe('ops');
+    // 顺序不影响：全套压过 ops
+    expect(pr('docs/ops.md', 'packages/feishu/src/gateway.ts').deploy).toBe('all');
+    expect(pr('packages/agents-sync/src/sync.ts', 'docs/ops.md').deploy).toBe('all');
+    expect(pr('docs/ops.md', 'deploy/france.sh').full).toBe(true);
+    expect(pr('docs/ops.md', 'deploy/france.sh').deploy).toBe('all');
+    expect(planOutputs(pr('docs/ops.md')).deploy).toBe('ops');
   });
 
   it('测试会读的包外文件：AGENTS.md、docs/ops.md、agents/、PR 模板、.gitignore 各自带上读它的包', () => {
     expect(pr('AGENTS.md')).toMatchObject({
       lint: false,
-      deploy: false,
+      deploy: 'none',
       tests: [{ args: ['packages/agents-sync/'] }],
     });
-    expect(pr('docs/ops.md')).toMatchObject({ deploy: true, tests: [{ name: 'db' }] });
+    expect(pr('docs/ops.md')).toMatchObject({ deploy: 'ops', tests: [{ name: 'db' }] });
     expect(testArgs(pr('agents/skills/discuss/SKILL.md'))).toEqual(['agents/', 'packages/agents-sync/']);
     // 只改说明文字不拖上 2 分钟的 deploy/test（#121 只改 AGENTS.md 和 skill 就跑了 2 分 13 秒）
-    expect(pr('agents/skills/discuss/SKILL.md').deploy).toBe(false);
-    expect(pr('AGENTS.md', 'agents/skills/discuss/SKILL.md', 'docs/design.md').deploy).toBe(false);
+    expect(pr('agents/skills/discuss/SKILL.md').deploy).toBe('none');
+    expect(pr('AGENTS.md', 'agents/skills/discuss/SKILL.md', 'docs/design.md').deploy).toBe('none');
+    expect(pr('AGENTS.md', 'docs/ops.md').deploy).toBe('ops');
     expect(testArgs(pr('.github/pull_request_template.md'))).toEqual(
       expect.arrayContaining(['packages/conventions/', 'packages/github/']),
     );
@@ -343,6 +355,17 @@ describe('汇总（必过检查 check）：该跑的跑了且绿，不该跑的�
     }
   });
 
+  it('deploy=ops：deploy job 要跑且绿（只跑两块也是跑），跳过、红了都不过', () => {
+    const ops = pr('docs/ops.md');
+    const over = { lint: { result: 'skipped' }, test: { result: 'success' } };
+    expect(ciVerdict(needs({ ...over, deploy: { result: 'success' } }, ops)).ok).toBe(true);
+    for (const result of ['skipped', 'failure']) {
+      const v = ciVerdict(needs({ ...over, deploy: { result } }, ops));
+      expect(v.ok, result).toBe(false);
+      expect(v.lines.join('\n')).toContain(`✗ deploy：${result}，本该 success`);
+    }
+  });
+
   it('本该跳过的却跑了（开关和 if 对不上）：不过', () => {
     expect(ciVerdict(needs({ web: { result: 'success' } })).ok).toBe(false);
   });
@@ -356,7 +379,8 @@ describe('汇总（必过检查 check）：该跑的跑了且绿，不该跑的�
   });
 
   it('plan 读不出（空、不是 JSON、缺字段）、needs 不是对象：不过，不当成全跳过', () => {
-    for (const bad of ['', '{', '{"full":true}', undefined]) {
+    const withDeploy = (d: unknown) => JSON.stringify({ ...pr('docs/ops.md'), deploy: d });
+    for (const bad of ['', '{', '{"full":true}', undefined, withDeploy(true), withDeploy('some')]) {
       const n = needs();
       n.changes.outputs = { ...n.changes.outputs, plan: bad as string };
       expect(ciVerdict(n).ok, String(bad)).toBe(false);
@@ -371,6 +395,15 @@ describe('汇总（必过检查 check）：该跑的跑了且绿，不该跑的�
     expect(ciVerdict(needs({ web: { result: 'skipped' }, lint: { result: 'success' } }, broken)).ok).toBe(
       false,
     );
+    // 全跑却只跑 deploy 的两块：job 照样 success，但 plan 本身不对
+    const opsOnly: CiPlan = { ...full, deploy: 'ops' };
+    const allGreen = {
+      web: { result: 'success' },
+      lint: { result: 'success' },
+      deploy: { result: 'success' },
+    };
+    expect(ciVerdict(needs(allGreen, full)).ok).toBe(true);
+    expect(ciVerdict(needs(allGreen, opsOnly)).ok).toBe(false);
   });
 });
 
@@ -398,7 +431,7 @@ describe('入口', () => {
     const r = run(plan, ['--event', 'push'], { GITHUB_OUTPUT: out });
     expect(r.status).toBe(0);
     const text = readFileSync(out, 'utf8');
-    for (const line of ['lint=true', 'tsc=all', 'web=true', 'deploy=true'])
+    for (const line of ['lint=true', 'tsc=all', 'web=true', 'deploy=all'])
       expect(text).toContain(`${line}\n`);
     expect(text).toMatch(/^tests=\[.*"engine".*\]$/m);
   });
@@ -500,6 +533,21 @@ describe('ci.yml 和这里对得上', () => {
     }
     expect([...seen]).toContain('packages/conventions/src/repo.ts');
     expect([...seen].filter((f) => !covered(f))).toEqual([]);
+  });
+
+  it('deploy job：all 跑全套、ops 跑 run.sh --ops，两种都开 job；run.sh 认 --ops、全套里带着 ops-only 自检', () => {
+    const d = job('deploy');
+    expect(d).toContain("if: needs.changes.outputs.deploy == 'all' || needs.changes.outputs.deploy == 'ops'");
+    expect(d).toMatch(
+      /- if: needs\.changes\.outputs\.deploy == 'all'\n\s+run: sudo FLEET_TEST_SYSTEM_USERS=1 bash deploy\/test\/run\.sh\n/,
+    );
+    expect(d).toMatch(
+      /- if: needs\.changes\.outputs\.deploy == 'ops'\n\s+run: bash deploy\/test\/run\.sh --ops\n/,
+    );
+    const runSh = readFileSync(join(ROOT, 'deploy/test/run.sh'), 'utf8');
+    expect(runSh).toMatch(/^--ops\) only_ops=1 ;;$/m);
+    expect(runSh).toMatch(/\bops-only\b.*; do$/m);
+    expect(existsSync(join(ROOT, 'deploy/test/ops-only.test.sh'))).toBe(true);
   });
 
   it('不用工作流级 paths 过滤（必过检查要永远触发）', () => {
