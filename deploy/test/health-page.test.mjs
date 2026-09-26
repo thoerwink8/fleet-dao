@@ -23,7 +23,10 @@ test('三项都明说在线、HTTP 200：全绿', () => {
 });
 
 test('「未接」的项：不算不在线，整体照样绿，写明未接和单号', () => {
-  const checks = { ...allOk, draft_opener: { ok: true, status: 'not_wired', message: '飞书草稿开成 issue 还没接上（#91）' } };
+  const checks = {
+    ...allOk,
+    draft_opener: { ok: true, status: 'not_wired', message: '飞书草稿开成 issue 还没接上（#91）' },
+  };
   const v = judge({ status: 200, body: report(true, checks) });
   assert.equal(v.ok, true);
   assert.equal(v.summary, '全部在线（1 项还没接上）');
