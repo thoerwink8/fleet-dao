@@ -2,20 +2,27 @@
 // 拿演示版打包扫描的同一份名单扫（packages/web/src/build/scan.ts 的 BUILTIN_TERMS，别另抄）。
 // 名单在别的包里：写成静态 import，tsc 会把 web 的源文件算进 api 这个 composite 项目报错，所以在运行时 import。
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Db, PgListen } from '@fleet-dao/db';
+import { createTestDb, TEST_DB_TIMEOUT_MS } from '@fleet-dao/db/testing';
 import { FLEET_CHANGES_CHANNEL } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import { startPgChangeFeed } from '../src/changes.ts';
 import { draftBacklogCheck, notWiredDraftOpener } from '../src/draft-opening.ts';
 import { githubAppMissing, githubEventsCheck } from '../src/github.ts';
 import { type HealthReport, runHealthChecks, serviceHealthChecks } from '../src/health.ts';
+import { judgeHealthCheck } from '../src/judge-health.ts';
 import { silentLogger } from '../src/log.ts';
 import { probeDb } from '../src/pg-store.ts';
 import type { Logger, Store } from '../src/ports.ts';
 import { createEnginePollerCheck, createNamespaceCheck, notConnectedTemporal } from '../src/temporal.ts';
 import { fakePostgres } from './fake-postgres.ts';
+import { judgeCatalog, judgeMachine, makeFakeBackend, recordJudgeCall } from './judge-fixture.ts';
+
+/** 默认位置上没有的判断题配置（「未接」）。 */
+const NO_JUDGE = { path: join(tmpdir(), 'fleet-public-text-nowhere', 'jev.json'), explicit: false };
 
 interface Hit {
   file: string;
@@ -145,36 +152,68 @@ async function publicFailures(log: Logger) {
     true,
     draftBacklogCheck(backlogStore, () => new Date()),
   );
+  // 判断题：配置起不来（FLEET_JEV_CONFIG 明写的文件不在）；最近一次真调用没成（上游回的原文带着钥匙不对这类话，只进日志）
+  await run(
+    'judge-config',
+    true,
+    judgeHealthCheck({ db: {} as Db, location: { ...NO_JUDGE, explicit: true } }).check,
+  );
+  const judgeDb = await createTestDb();
+  const judged = judgeMachine();
+  try {
+    await judgeCatalog(judgeDb.db);
+    await recordJudgeCall(judgeDb.db, {
+      ok: false,
+      reason: 'auth',
+      detail: 'HTTP 401 TypeSafe key rejected for fleet-dao',
+      latencyMs: 4,
+    });
+    await run(
+      'judge-failing',
+      true,
+      judgeHealthCheck({ db: judgeDb.db, location: judged.location, makeBackend: makeFakeBackend }).check,
+    );
+  } finally {
+    judged.cleanup();
+    await judgeDb.close();
+  }
   return { reports, sites };
 }
 
 describe('公开的健康报告', () => {
-  it('每一种对外的失败原因：照实报红，原因里没有演示版打包扫描名单上的词；内部细节只进日志', async () => {
-    const scan = await loadScan();
-    // 名单读到了：空名单什么都扫不出来，不能当成干净
-    expect(scan.BUILTIN_TERMS.length).toBeGreaterThan(0);
-    const logs: string[] = [];
-    const keep = (message: string, fields?: Record<string, unknown>) => {
-      logs.push(`${message} ${JSON.stringify(fields ?? {})}`);
-    };
-    const { reports, sites } = await publicFailures({ info: keep, warn: keep, error: keep });
-    // 每一种都真造出来了（外加兜底的「连不上」）：一份都没有，下面就什么都扫不出来
-    expect(Object.keys(reports)).toHaveLength(sites + 1);
-    for (const [name, report] of Object.entries(reports)) {
-      expect(report.ok, name).toBe(false);
-      expect(report.checks.item, name).toMatchObject({
-        ok: false,
-        code: expect.stringMatching(/\S/),
-        message: expect.stringMatching(/\S/),
-      });
-    }
-    const hits = scanReports(scan, reports);
-    expect(hits, scan.formatHits(hits)).toEqual([]);
-    // 频道名、原始错误（带地址）没丢：只进了日志，报告里没有
-    expect(logs.some((l) => l.includes('LISTEN fleet_changes'))).toBe(true);
-    expect(logs.some((l) => l.includes('10.0.0.9:5432'))).toBe(true);
-    expect(JSON.stringify(reports)).not.toContain('10.0.0.9');
-  });
+  it(
+    '每一种对外的失败原因：照实报红，原因里没有演示版打包扫描名单上的词；内部细节只进日志',
+    async () => {
+      const scan = await loadScan();
+      // 名单读到了：空名单什么都扫不出来，不能当成干净
+      expect(scan.BUILTIN_TERMS.length).toBeGreaterThan(0);
+      const logs: string[] = [];
+      const keep = (message: string, fields?: Record<string, unknown>) => {
+        logs.push(`${message} ${JSON.stringify(fields ?? {})}`);
+      };
+      const { reports, sites } = await publicFailures({ info: keep, warn: keep, error: keep });
+      // 每一种都真造出来了（外加兜底的「连不上」）：一份都没有，下面就什么都扫不出来
+      expect(Object.keys(reports)).toHaveLength(sites + 1);
+      for (const [name, report] of Object.entries(reports)) {
+        expect(report.ok, name).toBe(false);
+        expect(report.checks.item, name).toMatchObject({
+          ok: false,
+          code: expect.stringMatching(/\S/),
+          message: expect.stringMatching(/\S/),
+        });
+      }
+      const hits = scanReports(scan, reports);
+      expect(hits, scan.formatHits(hits)).toEqual([]);
+      // 频道名、原始错误（带地址）没丢：只进了日志，报告里没有
+      expect(logs.some((l) => l.includes('LISTEN fleet_changes'))).toBe(true);
+      expect(logs.some((l) => l.includes('10.0.0.9:5432'))).toBe(true);
+      expect(JSON.stringify(reports)).not.toContain('10.0.0.9');
+      // 判断题上游的原文（带上游和仓的名字）只进日志
+      expect(logs.some((l) => l.includes('TypeSafe key rejected'))).toBe(true);
+      expect(JSON.stringify(reports)).not.toContain('key rejected');
+    },
+    TEST_DB_TIMEOUT_MS,
+  );
 
   it('「未接」的话也公网看得到：同一份名单扫，带单号可以', async () => {
     const scan = await loadScan();
@@ -187,12 +226,15 @@ describe('公开的健康报告', () => {
           githubEvents: async () => {},
           draftOpener: notWiredDraftOpener(),
           draftBacklog: async () => {},
+          judge: judgeHealthCheck({ db: {} as Db, location: NO_JUDGE }),
         }),
         silentLogger,
       ),
     };
     expect(pending.services.checks.draft_opener).toMatchObject({ ok: true, status: 'not_wired' });
     expect(pending.services.checks.draft_backlog).toMatchObject({ ok: true, status: 'not_wired' });
+    // 项名叫 judge 不叫 jev：jev 在公开页的禁用词名单上
+    expect(pending.services.checks.judge).toMatchObject({ ok: true, status: 'not_wired' });
     const hits = scanReports(scan, pending);
     expect(hits, scan.formatHits(hits)).toEqual([]);
   });
@@ -212,27 +254,31 @@ describe('公开的健康报告', () => {
     expect(scanReports(scan, { old }).map((h) => h.term)).toContain('fleet');
   });
 
-  it('src 里每一处 new PublicHealthError 上面都造过：多一处这条就红，提醒补进来', async () => {
-    const packages = fileURLToPath(new URL('../../', import.meta.url));
-    let files = 0;
-    let found = 0;
-    const walk = (dir: string) => {
-      for (const name of readdirSync(dir)) {
-        const p = join(dir, name);
-        if (statSync(p).isDirectory()) walk(p);
-        else if (/\.tsx?$/.test(name)) {
-          files++;
-          found += readFileSync(p, 'utf8').match(/new PublicHealthError\(/g)?.length ?? 0;
+  it(
+    'src 里每一处 new PublicHealthError 上面都造过：多一处这条就红，提醒补进来',
+    async () => {
+      const packages = fileURLToPath(new URL('../../', import.meta.url));
+      let files = 0;
+      let found = 0;
+      const walk = (dir: string) => {
+        for (const name of readdirSync(dir)) {
+          const p = join(dir, name);
+          if (statSync(p).isDirectory()) walk(p);
+          else if (/\.tsx?$/.test(name)) {
+            files++;
+            found += readFileSync(p, 'utf8').match(/new PublicHealthError\(/g)?.length ?? 0;
+          }
         }
+      };
+      for (const pkg of readdirSync(packages)) {
+        const src = join(packages, pkg, 'src');
+        if (existsSync(src)) walk(src);
       }
-    };
-    for (const pkg of readdirSync(packages)) {
-      const src = join(packages, pkg, 'src');
-      if (existsSync(src)) walk(src);
-    }
-    // 读不到源文件不能当成「一处都没有」
-    expect(files).toBeGreaterThan(0);
-    const { sites } = await publicFailures(silentLogger);
-    expect(found, `src 里有 ${found} 处 new PublicHealthError，上面只造了 ${sites} 种`).toBe(sites);
-  });
+      // 读不到源文件不能当成「一处都没有」
+      expect(files).toBeGreaterThan(0);
+      const { sites } = await publicFailures(silentLogger);
+      expect(found, `src 里有 ${found} 处 new PublicHealthError，上面只造了 ${sites} 种`).toBe(sites);
+    },
+    TEST_DB_TIMEOUT_MS,
+  );
 });

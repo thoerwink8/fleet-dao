@@ -11,6 +11,7 @@
 import type { Server } from 'node:http';
 import { createDb, type Db } from '@fleet-dao/db';
 import { createGitHub, pgLedger, pgLocker } from '@fleet-dao/github';
+import { jevConfigLocation } from '@fleet-dao/jev';
 import { serve } from '@hono/node-server';
 import { signAgentToken } from './agent-token.ts';
 import { buildApps } from './app.ts';
@@ -23,6 +24,8 @@ import { draftBacklogCheck, notWiredDraftOpener } from './draft-opening.ts';
 import { createFeishuAuth } from './feishu.ts';
 import { githubAppMissing, githubEventsCheck } from './github.ts';
 import { serviceHealthChecks } from './health.ts';
+import { judgeHealthCheck } from './judge-health.ts';
+import { serveCockpit } from './keep-alive.ts';
 import { jsonLogger } from './log.ts';
 import { createMemoryStore } from './memory-store.ts';
 import { createPgStore, probeDb, withStatementTimeout } from './pg-store.ts';
@@ -142,6 +145,8 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
       githubEvents: githubEventsCheck({ store, now, credentialsMissing: github.credentialsMissing }),
       draftOpener,
       draftBacklog: draftBacklogCheck(store, now),
+      // 和引擎读同一份位置（FLEET_JEV_CONFIG，默认 /etc/fleet-dao/jev.json）：引擎问得了、这里才报绿
+      judge: judgeHealthCheck({ db, location: jevConfigLocation(process.env) }),
     }),
   };
   return {
@@ -158,7 +163,7 @@ const { deps, close } = await assemble();
 const { cockpit, agent, draftOpening } = buildApps(deps);
 const stopDraftOpening = draftOpening.start();
 const servers = [
-  serve({ fetch: cockpit.fetch, hostname: config.cockpitListen.host, port: config.cockpitListen.port }),
+  serveCockpit(cockpit.fetch, config.cockpitListen),
   serve({ fetch: agent.fetch, hostname: config.agentListen.host, port: config.agentListen.port }),
 ];
 

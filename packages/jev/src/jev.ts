@@ -75,6 +75,8 @@ export interface ExamContext {
 export interface JevDeps {
   db: Db;
   backend: JevBackend;
+  /** 这个后端是调度台判断阶段的哪条路由（routes.id）：记进每条判断的样本，驾驶舱改了顺序看得出下一道换没换。 */
+  route?: string;
   now?: () => Date;
   /** 设置表里没配时用的默认值。 */
   policy?: JevPolicy;
@@ -270,6 +272,7 @@ export function createJev(deps: JevDeps): Jev {
           batch,
           enforceable,
           backend,
+          route: deps.route,
           askedCount: askable.length,
           estimatedTokens,
         }),
@@ -370,6 +373,7 @@ function answerRow(
     batch: { id: string; size: number };
     enforceable: boolean;
     backend: JevBackend;
+    route: string | undefined;
     askedCount: number;
     /** 这一问事先估的输入 token（整批）。 */
     estimatedTokens: number;
@@ -387,6 +391,7 @@ function answerRow(
     rev: questionRev(q),
     model: c.backend.model,
     backend: c.backend.kind,
+    ...(c.route ? { route: wellFormed(c.route) } : {}),
     evidence: digestEvidence(q.evidence, c.evidence),
     ...(c.ref === undefined ? {} : 'ref' in c.ref ? { ref: c.ref.ref } : { refDropped: c.ref.problem }),
     batch: c.batch,
@@ -445,6 +450,7 @@ async function recordSpendOnly(
       rev: s.rev,
       model: s.model,
       backend: s.backend,
+      ...(s.route ? { route: s.route } : {}),
       evidence: Object.fromEntries(
         Object.entries(s.evidence).map(([k, d]) => [k, { chars: d.chars, sha: d.sha }]),
       ),

@@ -14,6 +14,8 @@
 // 分诊、需求文档、方案、审查读 .fleet-out/ 下的结论文件，形状不对算交错了。
 // 失败原样交给工作流的失败分流；这里只按同一张规则表认出「要人修的整池问题」（设备被撤销、封号、登录失效、欠费）：
 // 写一条 pool-hold:<池> 的「要人拍」提醒，选路就避开整个池；续会话的那一单是试探，跑通了就撤掉这条提醒。
+// Jev（判断题）只在这个活动里问（design 第十一节「错误分流」「停滞预判」）：规则认不出的失败问一次，回答随结局交给工作流的
+// 失败分流；停滞拿不准时问，同一个会话隔 stallJevEveryMs 才再问。只记不拦的题、没判出来的一律照规则走。
 
 import { randomUUID } from 'node:crypto';
 import {
@@ -57,8 +59,10 @@ import {
   upsertAlert,
 } from '@fleet-dao/db';
 import type { ProgressEvent, RunOutcome, StageKind } from '@fleet-dao/shared';
-import { classifyFailure } from '../failure/classify.ts';
+import { judgeStallWithJev, NO_JEV, triageFailureAsked } from '../failure/ask.ts';
+import type { JevPort, JevReply } from '../failure/jev.ts';
 import { judgeStall, type StallPolicy, type StallToolCall } from '../failure/stall.ts';
+import type { FailureVerdict, TriageChoice } from '../failure/types.ts';
 import {
   type AwaitSessionInput,
   type EnginePorts,
@@ -133,6 +137,12 @@ export interface SessionPortsDeps {
   /** 起会话的插头；测试里换成假的（不起真执行体）。 */
   run?: (spec: ClaudeCodeRunSpec, options: ClaudeCodeRunOptions) => Promise<ClaudeCodeRunReport>;
   stallPolicy?: Partial<StallPolicy>;
+  /** 规则认不出的失败、拿不准的停滞去问 Jev（real/jev-port.ts）；不给就不问，照默认走。 */
+  jev?: JevPort;
+  /** 问一次 Jev 最多等多久，默认 askJev 的 2 秒；超了当没判出来（后台那一问答回来照样记进判断记录）。 */
+  jevTimeoutMs?: number;
+  /** 同一个会话的停滞题多久最多问一次 Jev（看守每分钟判一次，拿不准的区间有半个多小时）。 */
+  stallJevEveryMs?: number;
   now?: () => Date;
   /** 看守多久醒一次（心跳、写进度）、多久判一次停滞、进度攒多久写一次、等进程起来最多多久。 */
   tickMs?: number;
@@ -173,6 +183,8 @@ interface Live {
   writeError: string | undefined;
   dropped: number;
   lastEventAt: number | null;
+  /** 上次为停滞题问 Jev 的时刻（Date.now()）；没问过是 undefined。 */
+  stallJevAt?: number;
   lastStepAt: number | undefined;
   lastFileAt: number | undefined;
   tools: Map<string, { name: string; since: number }>;
@@ -218,6 +230,9 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
   const forkMax = deps.forkMaxContextTokens ?? DEFAULT_FORK_MAX_CONTEXT_TOKENS;
   const tickMs = deps.tickMs ?? 5_000;
   const stallCheckMs = deps.stallCheckMs ?? 60_000;
+  const jev = deps.jev ?? NO_JEV;
+  const jevTimeout = deps.jevTimeoutMs === undefined ? {} : { timeoutMs: deps.jevTimeoutMs };
+  const stallJevEveryMs = deps.stallJevEveryMs ?? 10 * 60_000;
   const flushMs = deps.flushMs ?? 300;
   const spawnTimeoutMs = deps.spawnTimeoutMs ?? 120_000;
   const log = deps.log ?? ((message, fields) => console.warn(message, fields ?? {}));
@@ -769,29 +784,45 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
       return;
     }
     const iso = (ms: number) => new Date(ms).toISOString();
-    const verdict = judgeStall(
-      {
-        now: clock().toISOString(),
-        startedAt: iso(live.startedAt),
-        lastEventAt: live.lastEventAt === null ? null : iso(live.lastEventAt),
-        ...(live.lastStepAt === undefined ? {} : { lastStepAt: iso(live.lastStepAt) }),
-        ...(live.lastFileAt === undefined ? {} : { lastFileChangeAt: iso(live.lastFileAt) }),
-        processAlive: true,
-        toolsInFlight: [...live.tools.values()].map((t) => ({ name: t.name, since: iso(t.since) })),
-        ...(pendingAsk
-          ? {
-              waiting: {
-                on: 'human' as const,
-                since: pendingAsk.askedAt.toISOString(),
-                detail: pendingAsk.question,
-              },
-            }
-          : {}),
-        recentTools: live.recent,
-        transcriptTail: live.says.slice(-5),
-      },
-      deps.stallPolicy,
-    );
+    const facts = {
+      now: clock().toISOString(),
+      startedAt: iso(live.startedAt),
+      lastEventAt: live.lastEventAt === null ? null : iso(live.lastEventAt),
+      ...(live.lastStepAt === undefined ? {} : { lastStepAt: iso(live.lastStepAt) }),
+      ...(live.lastFileAt === undefined ? {} : { lastFileChangeAt: iso(live.lastFileAt) }),
+      processAlive: true,
+      toolsInFlight: [...live.tools.values()].map((t) => ({ name: t.name, since: iso(t.since) })),
+      ...(pendingAsk
+        ? {
+            waiting: {
+              on: 'human' as const,
+              since: pendingAsk.askedAt.toISOString(),
+              detail: pendingAsk.question,
+            },
+          }
+        : {}),
+      recentTools: live.recent,
+      transcriptTail: live.says.slice(-5),
+    };
+    // 拿不准的停滞才问 Jev（judgeStallWithJev 先照规则判一次）；同一个会话 stallJevEveryMs 内只问一次，其余照规则判。
+    // Jev 只能把拿不准的判成停滞（在绕圈、死了），不能把规则判的停滞判回正常；只记不拦的题、把握不够的答案都不算数。
+    const mayAsk = live.stallJevAt === undefined || Date.now() - live.stallJevAt >= stallJevEveryMs;
+    const verdict = mayAsk
+      ? await judgeStallWithJev(facts, {
+          jev: {
+            ask: (question, ctx) => {
+              live.stallJevAt = Date.now();
+              return jev.ask(question, ctx);
+            },
+          },
+          ctx: {
+            subject: `run:${live.runId}`,
+            about: `任务 ${live.taskId} 的 ${live.stage} 阶段（会话没推进）`,
+          },
+          ...jevTimeout,
+          ...(deps.stallPolicy ? { policy: deps.stallPolicy } : {}),
+        })
+      : judgeStall(facts, deps.stallPolicy);
     // 光是没动静（D5）交给插头的 idle 超时：它按真实活动（包括思考帧）计时，这里只看得到进度事件。
     const act = verdict.state === 'looping' || (verdict.state === 'dead' && verdict.rule !== 'D5');
     if (act && !live.stop) {
@@ -929,7 +960,14 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     return Math.max(0, sessionCost - live.previousCost);
   }
 
-  async function holdOrRelease(live: Live, end: SessionEnd): Promise<'ok' | 'fail' | 'neutral'> {
+  /**
+   * 会话结束后：跑通了撤掉整池暂停；失败了过一遍失败分流，认出要人修的整池问题就整池暂停，并定这次算不算路由的账。
+   * 规则认不出的失败在这里问 Jev（活动里问，工作流不问）：回答交回去，由 awaitSession 带给工作流的失败分流。
+   */
+  async function holdOrRelease(
+    live: Live,
+    end: SessionEnd,
+  ): Promise<{ routeOutcome: 'ok' | 'fail' | 'neutral'; jev?: JevReply<TriageChoice> }> {
     if (end.outcome === 'done' || end.outcome === 'blocked') {
       // 这个池能跑通了（续会话的试探成了）：撤掉整池暂停。
       try {
@@ -940,33 +978,45 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
       } catch (error) {
         log('账号池的暂停没撤掉', { poolId: live.poolId, error: errorText(error) });
       }
-      return 'ok';
+      return { routeOutcome: 'ok' };
     }
-    if (end.outcome !== 'failed' || !end.failure) return 'neutral';
+    if (end.outcome !== 'failed' || !end.failure) return { routeOutcome: 'neutral' };
     const f = end.failure;
-    let verdict: ReturnType<typeof classifyFailure>;
+    let verdict: FailureVerdict;
+    let asked: JevReply<TriageChoice> | undefined;
     try {
-      verdict = classifyFailure({
-        source: `session:${live.stage}`,
-        stage: live.stage,
-        poolId: live.poolId,
-        routeId: live.routeId,
-        hostId: 'claude-code',
-        code: f.code,
-        message: f.message,
-        ...(f.httpStatus === undefined ? {} : { httpStatus: f.httpStatus }),
-        ...(f.exitCode === undefined ? {} : { exitCode: f.exitCode }),
-        ...(f.signal === undefined ? {} : { signal: f.signal }),
-        ...(f.transcriptTail ? { transcriptTail: f.transcriptTail } : {}),
-        ...(f.resetsAt ? { resetsAt: f.resetsAt } : {}),
-        machine: deps.machine,
-        runAsUser: live.user,
-        now: clock().toISOString(),
-      });
+      ({ verdict, jev: asked } = await triageFailureAsked(
+        {
+          source: `session:${live.stage}`,
+          stage: live.stage,
+          poolId: live.poolId,
+          routeId: live.routeId,
+          hostId: 'claude-code',
+          code: f.code,
+          message: f.message,
+          ...(f.httpStatus === undefined ? {} : { httpStatus: f.httpStatus }),
+          ...(f.exitCode === undefined ? {} : { exitCode: f.exitCode }),
+          ...(f.signal === undefined ? {} : { signal: f.signal }),
+          ...(f.transcriptTail ? { transcriptTail: f.transcriptTail } : {}),
+          ...(f.resetsAt ? { resetsAt: f.resetsAt } : {}),
+          machine: deps.machine,
+          runAsUser: live.user,
+          now: clock().toISOString(),
+        },
+        {
+          jev,
+          ...jevTimeout,
+          ctx: {
+            subject: `run:${live.runId}`,
+            about: `任务 ${live.taskId} 的 ${live.stage} 阶段（会话失败）`,
+          },
+        },
+      ));
     } catch (error) {
       log('失败分流判不了这次会话（按不算路由账记）', { runId: live.runId, error: errorText(error) });
-      return 'neutral';
+      return { routeOutcome: 'neutral' };
     }
+    const jevPart = asked ? { jev: asked } : {};
     if (verdict.shared?.scope === 'pool' && verdict.shared.until === undefined) {
       // 要人修的整池问题：所有任务一起避开这个池，等人修好（或续会话的试探跑通）。
       try {
@@ -981,7 +1031,7 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
         log('账号池暂停没写进库（选路照样会派过去）', { poolId: live.poolId, error: errorText(error) });
       }
     }
-    return verdict.routeOutcome;
+    return { routeOutcome: verdict.routeOutcome, ...jevPart };
   }
 
   async function endOf(live: Live, report: ClaudeCodeRunReport): Promise<SessionEnd> {
@@ -1181,7 +1231,9 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
       };
     }
     registry.delete(live.runId);
-    const routeOutcome = await holdOrRelease(live, end);
+    const { routeOutcome, jev: asked } = await holdOrRelease(live, end);
+    // 问过 Jev 的（规则认不出的失败）：回答随结局交给工作流，工作流的失败分流带着它判，不在工作流里再问。
+    if (asked && end.failure) end = { ...end, failure: { ...end.failure, jev: asked } };
     const cost = costOfThisRun(live, end.sessionCostUsd);
     const contextTokens = report?.stream.lastContextTokens;
     const actualModel = report?.stream.observedModel;

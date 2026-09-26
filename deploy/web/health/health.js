@@ -17,6 +17,7 @@ const EXTRA_LABELS = {
   github_events: 'GitHub 事件',
   draft_opener: '飞书草稿开单',
   draft_backlog: '待开单积压',
+  judge: '判断题',
 };
 
 export const HEALTH_URL = '/healthz';

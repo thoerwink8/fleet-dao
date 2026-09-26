@@ -15,6 +15,7 @@ import {
   TRIAGE_OPTIONS,
   type TriageChoice,
   triageFailure,
+  triageFailureAsked,
 } from '../../src/failure/index.ts';
 
 const NOW = '2026-09-25T00:00:00.000Z';
@@ -188,6 +189,32 @@ describe('问 Jev 的那一步（默认不问）', () => {
     expect((await triageFailure(UNKNOWN, { jev })).action).toBe('swapRoute');
     expect((await triageFailure(NETWORK, { jev })).rule).toBe('NT1');
     expect(asked).toBe(1);
+  });
+
+  it('问过就把回答一起交回来（会话端口要带给工作流的失败分流）；认得出的不问、没有回答', async () => {
+    const reply: JevReply<TriageChoice> = {
+      asked: true,
+      ok: true,
+      choice: 'swapModel',
+      confidence: 0.9,
+      shadow: true,
+    };
+    const jev = port(async () => reply as never);
+    const unknown = await triageFailureAsked(UNKNOWN, { jev });
+    expect(unknown.jev).toEqual(reply);
+    // 只记不拦：结论和没问一样走兜底梯，原因里写明 Jev 判了什么
+    expect({ rule: unknown.verdict.rule, action: unknown.verdict.action }).toEqual({
+      rule: 'FB',
+      action: 'retry',
+    });
+    expect(unknown.verdict.reason).toContain('Jev 判「swapModel」，这道题还在只记不拦');
+    // 工作流拿着这份回答重判：和活动里判的一模一样，而且不会再出题
+    const replayed = classifyFailure({ ...UNKNOWN, jev: reply });
+    expect(replayed).toEqual(unknown.verdict);
+    expect(replayed.jevQuestion).toBeUndefined();
+    const known = await triageFailureAsked(NETWORK, { jev });
+    expect(known.jev).toBeUndefined();
+    expect(known.verdict.rule).toBe('NT1');
   });
 
   it('Jev 抛错或超时：当没判出来，照样走兜底梯', async () => {

@@ -26,7 +26,8 @@ WG_IF=wg-fleet
 WG_PORT=4500
 WG_ADDR=10.99.0.1/24
 WG_PEER_ADDR=10.99.0.2
-# 法国驾驶舱后端（packages/api 的 FLEET_COCKPIT_LISTEN）：/api、/auth、/github/webhook、/healthz 经隧道转到这里
+# 法国驾驶舱后端（packages/api 的 FLEET_COCKPIT_LISTEN）：/api、/auth、/github/webhook、/healthz 经隧道转到这里。
+# 站点里它是 upstream fleet_dao_api 唯一的 server，连接留着复用（nginx-https.conf 开头）；飞书网关直接连它、不经 nginx
 API_UPSTREAM=$WG_PEER_ADDR:8787
 ENV_FILE=/etc/fleet-dao/hk.env
 ENV_KEYS=(FLEET_DOMAIN FLEET_ACME_EMAIL FLEET_WG_FRANCE_PUBLIC_KEY FLEET_WEB_UPLOAD_PUBLIC_KEY
@@ -580,7 +581,7 @@ readback_wireguard() {
 }
 
 readback_site() {
-  local name=${FLEET_DOMAIN:-$PLACEHOLDER_NAME} code probe token body
+  local name=${FLEET_DOMAIN:-$PLACEHOLDER_NAME} code probe token body gaps
   if [[ "$(systemctl is-active nginx 2>/dev/null)" != active ]]; then
     red "nginx 没在跑"
     return 0
@@ -592,6 +593,13 @@ readback_site() {
     if [[ "$code" == 200 ]]; then ok "https://$name/ 返回 200（证书校验通过）"; else red "https://$name/ 返回「$code」"; fi
     code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 --resolve "$name:80:127.0.0.1" "http://$name/" || true)
     if [[ "$code" == 301 ]]; then ok "http://$name/ 跳 https（301）"; else red "http://$name/ 返回「$code」，应为 301"; fi
+    # 往法国的连接复用：少了它每个请求多等一趟隧道往返（约 0.2 秒）
+    gaps=$(site_keepalive_gaps "$SITE_AVAILABLE")
+    if [[ -z "$gaps" ]]; then
+      ok "往法国后端的连接复用（upstream fleet_dao_api 带 keepalive，转给法国的每一处都走它）"
+    else
+      red "往法国后端的连接不复用：$(tr '\n' ' ' <<<"$gaps")"
+    fi
   else
     code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -H "Host: $name" http://127.0.0.1/ || true)
     if [[ "$code" == 200 ]]; then ok "http://$name/（本机）返回 200"; else red "http://$name/（本机）返回「$code」"; fi

@@ -13,6 +13,18 @@ export function jevConfigPath(env: Readonly<Record<string, string | undefined>> 
   return env.FLEET_JEV_CONFIG?.trim() || DEFAULT_JEV_CONFIG_PATH;
 }
 
+/** 配置文件在哪；explicit = FLEET_JEV_CONFIG 明写的（那个文件不在算配错了，不算「这台机器没接」）。 */
+export interface JevConfigLocation {
+  path: string;
+  explicit: boolean;
+}
+
+export function jevConfigLocation(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): JevConfigLocation {
+  return { path: jevConfigPath(env), explicit: Boolean(env.FLEET_JEV_CONFIG?.trim()) };
+}
+
 export interface JevMachineConfig {
   typesafe?: {
     /** 例如 https://api.typesafe.ai/v1/systemone。 */

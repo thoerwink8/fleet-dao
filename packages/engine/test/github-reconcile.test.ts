@@ -181,7 +181,8 @@ const runsOf = async () =>
     .sort((a, b) => a.id - b.id);
 const healthOf = async () => (await scheduleHealth(t.db)).find((h) => h.job.id === GITHUB_RECONCILE_JOB.id);
 
-describe('对账补漏的工作流（真 Temporal 测试服务端）', () => {
+// 起工人、真起需求工作流，整包一起跑时一条用例能到 6–7 秒，超过默认的 5 秒（和「你好」工作流的用例同一个上限）。
+describe('对账补漏的工作流（真 Temporal 测试服务端）', { timeout: 60_000 }, () => {
   const env = useEnv();
 
   async function runOnce(jobs: EngineJobs | undefined): Promise<GitHubReconcileRun> {

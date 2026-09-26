@@ -40,6 +40,9 @@ importers:
       '@fleet-dao/github':
         specifier: workspace:*
         version: link:../github
+      '@fleet-dao/jev':
+        specifier: workspace:*
+        version: link:../jev
       '@fleet-dao/shared':
         specifier: workspace:*
         version: link:../shared
@@ -117,6 +120,9 @@ importers:
       '@fleet-dao/github':
         specifier: workspace:*
         version: link:../github
+      '@fleet-dao/jev':
+        specifier: workspace:*
+        version: link:../jev
       '@fleet-dao/shared':
         specifier: workspace:*
         version: link:../shared

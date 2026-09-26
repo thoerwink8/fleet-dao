@@ -1136,6 +1136,8 @@ function failureContext(
     ...(f?.machine ? { machine: f.machine } : {}),
     ...(f?.runAsUser ? { runAsUser: f.runAsUser } : {}),
     ...(previousMessage ? { previousMessage } : {}),
+    // 看守活动问回来的 Jev 答案（规则认不出的失败才有）：进判断的输入、结果记进历史，工作流自己不问。
+    ...(f?.jev ? { jev: f.jev } : {}),
     now: iso(Date.now()),
   };
 }

@@ -1,5 +1,5 @@
-// 问 Jev 的接口（设计第十一节「错误分流」「停滞预判」两个接入点）。Jev 本身在别的包里做；这里只定题目和回答的形状，
-// 默认实现是「不问」（ask.ts 的 NO_JEV）。
+// 问 Jev 的接口（设计第十一节「错误分流」「停滞预判」两个接入点）。这里只定题目和回答的形状；生产实现在
+// real/jev-port.ts（交给 packages/jev 的题库问），默认实现是「不问」（ask.ts 的 NO_JEV）。
 // 能拦不能放：选项里只有能撤回的动作——挂起、停账号池、合并、删东西都不在选项里，Jev 选不出来。
 // 把握低、只记不拦、连不上、答了题面外的，一律当「没判出来」走默认，不当成「否」。
 
@@ -28,8 +28,15 @@ export type JevReply<C extends string = string> =
   /** shadow = 这道题还在「只记不拦」，答案不拿来做决定。 */
   | { asked: true; ok: true; choice: C; confidence: number; shadow: boolean; modelVersion?: string };
 
+/** 问的是谁、在干什么：记进判断记录（subject），喂给题里「出错的步骤」「会话在做什么」这类证据（about）。 */
+export interface JevAskContext {
+  /** 例如 run:<会话编号>。 */
+  subject: string;
+  about?: string;
+}
+
 export interface JevPort {
-  ask<C extends string>(question: JevQuestion<C>): Promise<JevReply<C>>;
+  ask<C extends string>(question: JevQuestion<C>, ctx?: JevAskContext): Promise<JevReply<C>>;
 }
 
 /** 回答能不能拿来做决定：能用给出选项，不能用给出白话原因（写进结论的原因里）。 */

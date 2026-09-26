@@ -4,7 +4,8 @@
 
 import type { StageKind } from '@fleet-dao/shared';
 import { classifyFailure } from '../failure/classify.ts';
-import type { FailureEvidence, FailurePolicy, FailureVerdict } from '../failure/types.ts';
+import type { JevReply } from '../failure/jev.ts';
+import type { FailureEvidence, FailurePolicy, FailureVerdict, TriageChoice } from '../failure/types.ts';
 import type { Limits } from '../limits.ts';
 
 export type ActionClass = 'retry' | 'swapRoute' | 'swapModel' | 'park';
@@ -63,6 +64,11 @@ export interface FailureContext {
   runAsUser?: string | undefined;
   /** 工作流里的「现在」（ISO）：算等到几点、避到几点。 */
   now?: string | undefined;
+  /**
+   * 看守活动问回来的 Jev 答案（规则认不出的会话失败才有，ports.ts 的 SessionEnd.failure.jev）。分流只在规则认不出时看它；
+   * 只记不拦、把握不够、没判出来的照兜底梯走。
+   */
+  jev?: JevReply<TriageChoice> | undefined;
 }
 
 export interface FailureInput {
@@ -145,6 +151,7 @@ export function evidenceOf(input: FailureInput): FailureEvidence {
     ...set('machine', c.machine),
     ...set('runAsUser', c.runAsUser),
     ...set('now', c.now),
+    ...set('jev', c.jev),
     attempts: {
       retries: count(counters.retries),
       reworks: count(counters.reworks),

@@ -1307,6 +1307,79 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         );
         expect(states.map((r) => (r.payload as { to?: string }).to)).toEqual(['stopped', 'queued']);
       });
+
+      describe('「让 AI 接活」开关', () => {
+        const target = `repo:${IDS.repo}`;
+        const enable = audit({
+          actor: { kind: 'engine', id: 'ops:dispatch' },
+          action: 'repo.auto_dispatch.enable',
+          target,
+          via: 'engine',
+        });
+        const disable = { ...enable, action: 'repo.auto_dispatch.disable' };
+        const since = async () => (await store.findRepoByName('example', 'canary'))?.autoDispatchSince;
+        const switchAudits = async () => (await store.listAudit({ target, limit: 10 })).items;
+
+        it('关着的打开：记下此刻、同一事务写一条带前后值的操作记录；开着再开不重设时刻、不记', async () => {
+          tick();
+          const openedAt = clock.now.toISOString();
+          expect(await store.setAutoDispatch({ repoId: IDS.repo, on: true }, enable)).toEqual({
+            changed: true,
+            autoDispatchSince: openedAt,
+            auditId: expect.any(String),
+          });
+          expect(await since()).toBe(openedAt);
+          const [entry, ...rest] = await switchAudits();
+          expect(rest).toEqual([]);
+          expect(entry).toMatchObject({
+            at: openedAt,
+            actor: { kind: 'engine', id: 'ops:dispatch' },
+            action: 'repo.auto_dispatch.enable',
+            via: 'engine',
+            ok: true,
+            before: { autoDispatchSince: null },
+            after: { autoDispatchSince: openedAt },
+          });
+          tick();
+          expect(await store.setAutoDispatch({ repoId: IDS.repo, on: true }, enable)).toEqual({
+            changed: false,
+            autoDispatchSince: openedAt,
+          });
+          expect(await since()).toBe(openedAt);
+          expect(await switchAudits()).toHaveLength(1);
+        });
+
+        it('开着的关上：设为空，操作记录记下原来的时刻；关着再关不记；没这个仓 not_found、不留记录', async () => {
+          tick();
+          const openedAt = clock.now.toISOString();
+          await store.setAutoDispatch({ repoId: IDS.repo, on: true }, enable);
+          tick();
+          expect(await store.setAutoDispatch({ repoId: IDS.repo, on: false }, disable)).toEqual({
+            changed: true,
+            autoDispatchSince: null,
+            auditId: expect.any(String),
+          });
+          expect(await since()).toBeNull();
+          expect((await switchAudits()).map((a) => [a.action, a.before, a.after])).toEqual([
+            ['repo.auto_dispatch.disable', { autoDispatchSince: openedAt }, { autoDispatchSince: null }],
+            ['repo.auto_dispatch.enable', { autoDispatchSince: null }, { autoDispatchSince: openedAt }],
+          ]);
+          expect(await store.setAutoDispatch({ repoId: IDS.repo, on: false }, disable)).toEqual({
+            changed: false,
+            autoDispatchSince: null,
+          });
+          for (const repoId of [OTHER_UUID, 'nope'])
+            expect(await store.setAutoDispatch({ repoId, on: true }, enable), repoId).toBe('not_found');
+          const all = (await store.listAudit({ limit: 200 })).items;
+          expect(all.filter((a) => a.action.startsWith('repo.auto_dispatch.'))).toHaveLength(2);
+        });
+
+        it('操作记录写不进：开关也不改', async () => {
+          await expect(store.setAutoDispatch({ repoId: IDS.repo, on: true }, badAudit())).rejects.toThrow();
+          expect(await since()).toBeNull();
+          expect(await switchAudits()).toEqual([]);
+        });
+      });
     });
   });
 }

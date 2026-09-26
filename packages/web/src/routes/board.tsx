@@ -2,7 +2,7 @@ import { FolderGit2, TriangleAlert } from 'lucide-react';
 import { lazy, Suspense } from 'react';
 import { useSearchParams } from 'react-router';
 import { brand } from '#brand';
-import { errorText, useBoard, useMe } from '../api/client';
+import { errorText, useBoard, useMe, useRouting } from '../api/client';
 import { BoardTree } from '../board/board-tree';
 import { Empty, LoadError } from '../components/page';
 import { useRepo } from '../components/repo-context';
@@ -36,6 +36,8 @@ export default function BoardPage() {
   const board = useBoard(repoId);
   const { data: me } = useMe();
   const isMobile = useIsMobile();
+  // 画布上每个节点要写路由：和看板同时拉，别等画布（按需加载）挂上了才拉，那样又多等一轮。手机上的树形列表用不到
+  useRouting({ enabled: !isMobile });
   const [params, setParams] = useSearchParams();
 
   // 一次都没读成才整块换成报错。读成过、之后重拉失败：保留上次的画面（视角也不动），上面压一条提示。

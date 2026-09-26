@@ -7,6 +7,7 @@ import {
   createDecide,
   decideAfterVerify,
   decideTriage,
+  evidenceOf,
   fingerprint,
   mergeStep,
   nextAction,
@@ -234,6 +235,31 @@ describe('失败分流：接的是规则表（failure/classify.ts），认不出
       }).rule,
     ).toBe('DV1');
     expect(nextAction({ failure: failure('什么鬼'), limits, routeBound: true }).classifiedAs).toBe('unknown');
+  });
+
+  it('会话失败带回的 Jev 答案进分流：只记不拦的照兜底梯（理由里写明），真拦有把握的按它走；规则认得出的不看它', () => {
+    const jev = { asked: true, ok: true, choice: 'swapRoute', confidence: 0.9, shadow: true } as const;
+    expect(evidenceOf({ failure: failure('WEIRD'), limits, routeBound: true, context: { jev } }).jev).toEqual(
+      jev,
+    );
+    const shadowed = nextAction({ failure: failure('WEIRD'), limits, routeBound: true, context: { jev } });
+    expect(shadowed).toMatchObject({ action: 'retry', rule: 'FB' });
+    expect(shadowed.reason).toContain('这道题还在只记不拦');
+    const enforced = nextAction({
+      failure: failure('WEIRD'),
+      limits,
+      routeBound: true,
+      context: { jev: { ...jev, shadow: false } },
+    });
+    expect(enforced).toMatchObject({ action: 'swapRoute', rule: 'JV', avoid: 'route' });
+    const known = nextAction({
+      failure: failure('route_busy'),
+      limits,
+      routeBound: true,
+      context: { jev: { ...jev, choice: 'swapModel', shadow: false } },
+    });
+    expect(known).toMatchObject({ action: 'swapRoute', avoid: 'route' });
+    expect(known.rule).not.toBe('JV');
   });
 
   it('认不出的从重试爬起：重试 → 换路由 → 换模型 → 挂起，每级额度用完才往下走', () => {
