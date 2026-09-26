@@ -601,11 +601,16 @@ setup_pnpm() {
 
 setup_app_config() {
   step "应用的本机配置（/etc/fleet-dao 下的环境文件；应用本身由 deploy/release.sh 发布）"
-  local name spec file key what content
+  local name spec file key what content api_ok=1
   # 样例只在第一次照着建：之后这些文件归人改（填飞书、GitHub 的凭据，选本机起哪些服务），脚本只管属主和权限、
   # 补样例后来加的键（只补缺）、按「引擎」App 填空着的 webhook 密钥（lib/app-config.sh）
   for name in "${APP_ENV_FILES[@]}"; do
     file=/etc/fleet-dao/$name.env
+    # 目录、符号链接（含断链）判红、跳过：fix_meta 会跟着链接改属主，put_file 会把链接换掉
+    if ! app_config_path_ok "$file"; then
+      if [[ "$name" == api ]]; then api_ok=0; fi
+      continue
+    fi
     if [[ -e "$file" ]]; then
       fix_meta "$file" root:fleet 640
       # 样例后来加的键补上（只补缺，已有的不动）；release.env 不补：它的每一项都要人定
@@ -619,11 +624,12 @@ setup_app_config() {
       fi
     fi
   done
-  fill_webhook_secret /etc/fleet-dao/api.env "$ENGINE_APP_JSON"
+  if ((api_ok)); then fill_webhook_secret /etc/fleet-dao/api.env "$ENGINE_APP_JSON"; fi
   # 随机密钥：首次生成，之后不再动（换了会让已发出的登录、通行证全部作废；真要换就删掉文件再跑）。值不进日志
   for spec in "${APP_SECRETS[@]}"; do
     IFS=: read -r name key what <<<"$spec"
     file=/etc/fleet-dao/$name.env
+    if ! app_config_path_ok "$file"; then continue; fi
     if [[ -s "$file" ]]; then
       fix_meta "$file" root:fleet 640
     else
