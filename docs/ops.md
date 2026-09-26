@@ -387,6 +387,7 @@ ssh <法国> 'sha256sum < /etc/fleet-dao/gateway-token.env'; ssh <香港> 'sha25
 ~/.fleet-dao/bin/age -d -i ~/.fleet-dao/vault-key.txt france/etc/fleet-dao/catalog.json.age | sha256sum; ssh <法国> 'sha256sum < /etc/fleet-dao/catalog.json'
 ```
 
+- 2026-09-26 起（法国只留一个会话用户）：账号池的 `runAsUser` 只收 `fleet-agent-carpool`，Claude 订阅池还要带 `orgKind`（`carpool` / `solo`，照样例）。旧的这份里写着 `fleet-agent-dedicated`，装载器会明确拒收、发布停在装目录那一步：先把它改成 `fleet-agent-carpool`、两个 Claude 池补上 `orgKind`，放上来、刷新保险箱，再发。库里已有的行由迁移 0007 改好（挂在停用用户下的池改到会话用户，按原来的用户记下组织类型），不用手改。
 - 发布时迁移之后装进库（上面第 4 步）：只补缺——库里没有的行插进去；已有的行只补空着的会话用户、组织类型（`orgKind`）、到期日、上游名字，别的字段配置和库里不一样也不动（发布日志里一处一行，照实写成「没动：pools.claude-solo.maxConcurrency：库里是 3，配置是 4，没动」这样）；每个阶段只排一次。
 - 文件不在、是符号链接、不是 root:fleet 640、装不成（格式错、引用不存在、撞硬禁令）、装完读不回，发布都停下、不切版本、报红；装完账号池、路由、阶段、阶段里挂的路由哪张是 0 行也一样。装不成时发布再读回一次，红里写明库和装之前一样、库变了要人看，还是没查成。同一版再发，这一步改动 0 处。
 - 装进去之后怎么改。这份文件里已有的行改了值，已经装进库的不跟着变，只管以后换机重装；新加的行发布时会装进去（下面第二条）：
