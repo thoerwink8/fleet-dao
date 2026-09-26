@@ -274,6 +274,18 @@ export function githubEventsCheck(
 ): () => Promise<void> {
   return async () => {
     await parts.credentialsMissing?.();
+    // 收得进来之前的两样：有受管的仓、白名单里有带 GitHub 账号的人。缺一样，事件和对账补回来的单全被门挡掉
+    // （仓不受管、作者不在白名单），投递账上是「不收」、不算出错，光看卡住的条数永远是好的
+    if ((await parts.store.listRepos()).length === 0) {
+      throw new PublicHealthError('no_repos', '还没有受管的仓：GitHub 上的单进不来');
+    }
+    const members = githubWhitelist(await parts.store.listUsers());
+    if (members.userIds.size === 0 && members.logins.size === 0) {
+      throw new PublicHealthError(
+        'no_github_members',
+        '白名单里没有带 GitHub 账号的成员：GitHub 上开的单都会被挡在门外',
+      );
+    }
     const staleBefore = new Date(parts.now().getTime() - DELIVERY_STALE_MS).toISOString();
     const { exhausted, stale } = await parts.store.countStuckDeliveries({
       staleBefore,

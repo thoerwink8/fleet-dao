@@ -445,9 +445,20 @@ describe('健康检查的 github_events 一项', () => {
   });
   async function healthOf(
     deliveries: GitHubDelivery[],
-    options: { credentialsMissing?: () => Promise<void>; breakStore?: boolean } = {},
+    options: {
+      credentialsMissing?: () => Promise<void>;
+      breakStore?: boolean;
+      noRepos?: boolean;
+      noGithubMembers?: boolean;
+    } = {},
   ) {
     const data = devFixtures(T0);
+    if (options.noRepos) data.repos = [];
+    if (options.noGithubMembers) {
+      data.users = (data.users ?? []).map((u) =>
+        u.role === 'bot' ? u : { ...u, githubId: undefined, githubLogin: undefined },
+      );
+    }
     data.githubEvents = new Map(deliveries.map((d) => [d.id, d]));
     const h = harness({ data });
     if (options.breakStore) {
@@ -499,6 +510,22 @@ describe('健康检查的 github_events 一项', () => {
     ]);
     expect(r.status).toBe(200);
     expect(r.body.checks.github_events).toEqual({ ok: true });
+  });
+
+  it('一个受管的仓都没有：报红（事件、对账补回来的单全被「仓不受管」挡掉，投递账上不算出错）', async () => {
+    const r = await healthOf([], { noRepos: true });
+    expect(r.status).toBe(503);
+    expect(r.body.checks.github_events).toEqual({
+      ok: false,
+      code: 'no_repos',
+      message: '还没有受管的仓：GitHub 上的单进不来',
+    });
+  });
+
+  it('白名单里没有带 GitHub 账号的人（只有机器人）：报红（人开的单全被当成陌生人挡掉）', async () => {
+    const r = await healthOf([], { noGithubMembers: true });
+    expect(r.status).toBe(503);
+    expect(r.body.checks.github_events).toMatchObject({ ok: false, code: 'no_github_members' });
   });
 
   it('机器人凭据没读到：报红（先于卡住的投递报）', async () => {

@@ -103,8 +103,20 @@ async function publicFailures(log: Logger) {
   await run('workflow-client', true, () => notConnectedTemporal().check());
   // GitHub 事件：机器人凭据没读到；有投递重放到顶还出错、处理中卡住
   await run('events-no-credentials', true, githubAppMissing('ENOENT /etc/fleet-dao/github/app.json').check);
-  const stuckStore = { countStuckDeliveries: async () => ({ exhausted: 2, stale: 1 }) } as unknown as Store;
+  const intake = {
+    listRepos: async () => [{ id: 'r1', owner: 'o', name: 'n', defaultBranch: 'main' }],
+    listUsers: async () => [{ id: 'u1', displayName: '甲', role: 'founder', active: true, githubId: 1 }],
+  };
+  const stuckStore = {
+    ...intake,
+    countStuckDeliveries: async () => ({ exhausted: 2, stale: 1 }),
+  } as unknown as Store;
   await run('events-stuck', true, githubEventsCheck({ store: stuckStore, now: () => new Date() }));
+  // GitHub 事件：一个受管的仓都没有；白名单里没有带 GitHub 账号的人
+  const noRepos = { ...stuckStore, listRepos: async () => [] } as unknown as Store;
+  await run('events-no-repos', true, githubEventsCheck({ store: noRepos, now: () => new Date() }));
+  const noMembers = { ...stuckStore, listUsers: async () => [] } as unknown as Store;
+  await run('events-no-members', true, githubEventsCheck({ store: noMembers, now: () => new Date() }));
   // 引擎工人不在、命名空间查不到：队列名、命名空间名只进日志
   await run(
     'engine-offline',
