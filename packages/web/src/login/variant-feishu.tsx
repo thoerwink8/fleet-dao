@@ -21,16 +21,18 @@ import { Showcase } from './showcase';
 const enter = (i: number): CSSProperties => ({ animationDelay: `${80 + i * 90}ms` });
 
 /** 底图：点阵上漂着流程图的几个节点和连线。原话照 design 第五节。 */
+// 只在留白处漂：左右两边的空当和最底下一条；标题、副标题那块不放（卡片是不透明的，漂到下面会被盖住）。
+// 前七个按流程顺序连线，后两个不连。坐标是顶栏以下那块的百分比。
 const NODES: { label: string; tone: Tone; x: number; y: number }[] = [
-  { label: '收单', tone: 'wait', x: 6, y: 18 },
-  { label: '分诊', tone: 'run', x: 22, y: 8 },
-  { label: '拍板期', tone: 'human', x: 40, y: 20 },
-  { label: '写码', tone: 'run', x: 58, y: 9 },
-  { label: '验证', tone: 'run', x: 76, y: 22 },
-  { label: '合并', tone: 'done', x: 92, y: 12 },
-  { label: '收尾', tone: 'done', x: 88, y: 84 },
-  { label: '要人拍吗', tone: 'human', x: 68, y: 90 },
-  { label: '规划', tone: 'run', x: 12, y: 88 },
+  { label: '收单', tone: 'wait', x: 5.5, y: 52 },
+  { label: '分诊', tone: 'run', x: 16, y: 95 },
+  { label: '拍板期', tone: 'human', x: 33, y: 97 },
+  { label: '写码', tone: 'run', x: 50, y: 95 },
+  { label: '验证', tone: 'run', x: 67, y: 97 },
+  { label: '合并', tone: 'done', x: 84, y: 95 },
+  { label: '收尾', tone: 'done', x: 94.5, y: 60 },
+  { label: '规划', tone: 'run', x: 94.5, y: 24 },
+  { label: '要人拍吗', tone: 'human', x: 5.5, y: 20 },
 ];
 const TONE_VAR: Record<Tone, string> = {
   run: 'var(--st-run)',
@@ -44,14 +46,14 @@ const TONE_VAR: Record<Tone, string> = {
 
 function Backdrop() {
   return (
-    <div aria-hidden className="pointer-events-none fixed inset-0 overflow-hidden">
+    <div aria-hidden className="pointer-events-none fixed inset-x-0 top-14 bottom-0 overflow-hidden">
       <div className="absolute inset-0 bg-[radial-gradient(var(--grid)_1px,transparent_1.2px)] [background-size:22px_22px] opacity-70" />
-      <div className="fd-drift absolute -inset-6">
+      <div className="fd-drift absolute -inset-3 hidden md:block">
         <svg className="absolute inset-0 h-full w-full" preserveAspectRatio="none" viewBox="0 0 100 100">
           <title>流程连线</title>
-          {NODES.slice(0, 6).map((n, i) => {
+          {NODES.slice(0, 7).map((n, i) => {
             const m = NODES[i + 1];
-            if (!m || i >= 5) return null;
+            if (!m || i >= 6) return null;
             return (
               <path
                 key={n.label}
@@ -94,6 +96,8 @@ const TASKS = [
   { n: 12, title: '登录页加手机验证码', model: 'Opus 5.5' },
   { n: 14, title: '支付对账表：每个渠道 × 每一天', model: 'Kimi k3' },
   { n: 17, title: '站内通知 7 天没读再提醒一次', model: 'Sonnet 5' },
+  { n: 19, title: '退款单导出加上退款原因', model: 'Kimi k3' },
+  { n: 21, title: '商品详情页图片懒加载', model: 'Opus 5.5' },
 ];
 
 function Flowing() {
@@ -283,7 +287,7 @@ export function FeishuLogin({ next }: { next: string }) {
             <span className="font-semibold">驾驶舱</span>
             <ThemeToggle className="ml-auto" />
           </header>
-          <main className="mx-auto grid max-w-[1240px] grid-cols-1 gap-4 px-4 py-4 md:grid-cols-[minmax(0,1fr)_600px] md:gap-12 md:px-8 md:py-14">
+          <main className="mx-auto grid max-w-[1240px] grid-cols-1 gap-4 px-4 py-4 md:min-h-[calc(100dvh-3.5rem)] md:grid-cols-[minmax(0,1fr)_600px] md:content-center md:gap-12 md:px-8 md:py-10">
             <div className="order-2 grid min-w-0 grid-cols-1 content-start gap-3 md:order-1">
               <h1 style={enter(0)} className="fd-enter hidden text-3xl leading-tight font-semibold md:block">
                 一群 AI 自己接需求、写码、合并
