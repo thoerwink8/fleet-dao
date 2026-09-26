@@ -7,7 +7,6 @@ export default defineConfig({
       'packages/*/test/**/*.test.{ts,tsx}',
       'agents/test/**/*.test.ts',
     ],
-    // 骨架期各包还没有测试；各包补上测试后删掉这一行。
-    passWithNoTests: true,
+    // 不开 passWithNoTests：CI 按改动只跑几个包（packages/conventions/src/ci-plan.ts），路径一个测试都没匹配上要红，不能当通过。
   },
 });
