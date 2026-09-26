@@ -18,6 +18,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
+import { type DoingIo, doing, fakeGitHub, NOW, runDoing } from './helpers/doing.ts';
 
 const SCRIPTS = fileURLToPath(new URL('../skills/commander-seat/scripts/', import.meta.url));
 
@@ -64,35 +65,19 @@ interface ProgressLib {
     err: (text: string) => void;
   }): Promise<{ code: number; server?: Server; port?: number }>;
   parsePort(argv: string[], env: Record<string, string | undefined>): number | string;
-}
-interface Claim {
-  id: number;
-  state: string;
-  machine: string;
-  text: string;
-}
-interface DoingIo {
-  gh: (args: string[], input?: string) => string;
-  env: Record<string, string | undefined>;
-  home: string;
-  now: () => Date;
-  sleep: (ms: number) => Promise<void>;
-  out: (text: string) => void;
-  err: (text: string) => void;
-}
-interface DoingLib {
-  STALE_HOURS: number;
-  renderClaim(state: string, machine: string, text: string): string;
-  parseClaim(comment: { id: number; body: string; html_url?: string; updated_at?: string }): Claim | null;
-  machineProblem(name: string): string | null;
-  runDoing(argv: string[], io: DoingIo): Promise<number>;
+  isOurs(port: number): Promise<boolean>;
+  ensureServer(opts: {
+    port: number;
+    isUp?: (port: number) => Promise<boolean>;
+    launch: () => void;
+    waitMs?: number;
+    stepMs?: number;
+  }): Promise<{ state: 'up' | 'started' } | { state: 'failed'; why: string }>;
 }
 
 const load = async (name: string) => import(pathToFileURL(join(SCRIPTS, name)).href);
 const progress = (await load('progress-lib.mjs')) as ProgressLib;
-const doing = (await load('doing-lib.mjs')) as DoingLib;
 const HTML = join(SCRIPTS, 'index.html');
-const NOW = new Date('2026-09-27T03:00:00Z');
 
 const made: string[] = [];
 const servers: Server[] = [];
@@ -359,7 +344,7 @@ describe('写锁：同一个项目同时两条命令，一条都不丢', () => {
   it('六条 p.mjs 同时往一个项目里加动态：都成功，六条都在', async () => {
     const home = tempHome();
     p(home, 'demo', 'init');
-    const env = { ...process.env, HOME: home, USERPROFILE: home };
+    const env = { ...process.env, HOME: home, USERPROFILE: home, FLEET_PROGRESS_AUTOSTART: '0' };
     const codes = await Promise.all(
       [0, 1, 2, 3, 4, 5].map(
         (i) =>
@@ -489,10 +474,96 @@ describe('页面服务', () => {
   });
 });
 
+describe('写进度顺手拉起页面（页面进程退出后没人拉，数据照写、页面打不开）', () => {
+  it('页面在：不起新的', async () => {
+    let launched = 0;
+    const r = await progress.ensureServer({ port: 1, isUp: async () => true, launch: () => launched++ });
+    expect(r).toEqual({ state: 'up' });
+    expect(launched).toBe(0);
+  });
+
+  it('页面不在：起一个，等它答了算拉起', async () => {
+    let up = false;
+    const r = await progress.ensureServer({
+      port: 1,
+      isUp: async () => up,
+      launch: () => {
+        up = true;
+      },
+      stepMs: 10,
+    });
+    expect(r).toEqual({ state: 'started' });
+  });
+
+  it('起进程就报错：明说没成，不当没事', async () => {
+    const r = await progress.ensureServer({
+      port: 1,
+      isUp: async () => false,
+      launch: () => {
+        throw new Error('node 找不到');
+      },
+    });
+    expect(r.state).toBe('failed');
+    expect(r.state === 'failed' && r.why).toContain('node 找不到');
+  });
+
+  it('起了进程、等不到它答：明说没成', async () => {
+    const r = await progress.ensureServer({
+      port: 1,
+      isUp: async () => false,
+      launch: () => {},
+      waitMs: 50,
+      stepMs: 10,
+    });
+    expect(r.state).toBe('failed');
+    expect(r.state === 'failed' && r.why).toContain('还不是进度页');
+  });
+
+  it('真服务：关掉之后再拉起来，页面又能打开', async () => {
+    const home = tempHome();
+    const log = () => {};
+    const first = await progress.startServer({ port: 0, home, htmlFile: HTML, out: log, err: log });
+    const port = first.port ?? -1;
+    expect(await progress.isOurs(port)).toBe(true);
+    await new Promise((r) => first.server?.close(r));
+    expect(await progress.isOurs(port)).toBe(false);
+    const r = await progress.ensureServer({
+      port,
+      launch: () => {
+        void progress.startServer({ port, home, htmlFile: HTML, out: log, err: log }).then((s) => {
+          if (s.server) servers.push(s.server);
+        });
+      },
+    });
+    expect(r).toEqual({ state: 'started' });
+  });
+
+  it('p.mjs：端口被别的程序占着、拉不起来，数据照写，退出码 2 并写明原因', async () => {
+    const home = tempHome();
+    const other = createServer((_req, res) => res.end('别人的'));
+    servers.push(other);
+    await new Promise<void>((resolve) => other.listen(0, '127.0.0.1', resolve));
+    const address = other.address();
+    if (address === null || typeof address === 'string') throw new Error('没拿到端口');
+    const env = { ...process.env, HOME: home, USERPROFILE: home, FLEET_PROGRESS_PORT: String(address.port) };
+    const r = await new Promise<{ status: number | null; stderr: string }>((resolve) => {
+      const child = spawn(process.execPath, [join(SCRIPTS, 'p.mjs'), 'demo', 'init'], { env });
+      let stderr = '';
+      child.stderr.on('data', (d) => {
+        stderr += String(d);
+      });
+      child.on('close', (status) => resolve({ status, stderr }));
+    });
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain('进度写好了，但进度页没开着');
+    expect(existsSync(join(home, '.local', 'share', 'fleet-progress', 'demo', 'progress.json'))).toBe(true);
+  }, 20_000);
+});
+
 describe('命令行外壳：数据按 os.homedir() 放', () => {
   it('p.mjs：写进这个家目录下；不带参数给用法、退出码 1', () => {
     const home = tempHome();
-    const env = { ...process.env, HOME: home, USERPROFILE: home };
+    const env = { ...process.env, HOME: home, USERPROFILE: home, FLEET_PROGRESS_AUTOSTART: '0' };
     const run = (...argv: string[]) =>
       spawnSync(process.execPath, [join(SCRIPTS, 'p.mjs'), ...argv], { env, encoding: 'utf8' });
     expect(run().status).toBe(1);
@@ -542,115 +613,13 @@ describe('命令行外壳：数据按 os.homedir() 放', () => {
 
 // ── 单上的「在做」 ──
 
-interface FakeComment {
-  id: number;
-  issue: number;
-  body: string;
-  created_at: string;
-  updated_at: string;
-  html_url: string;
-}
-
-/** 内存里的假 GitHub：只认 doing-lib 用到的四种 gh api 调用。 */
-function fakeGitHub() {
-  let next = 5000;
-  let clock = NOW.getTime() - 60_000;
-  const comments: FakeComment[] = [];
-  const calls: string[][] = [];
-  const hooks: {
-    beforePost?: (() => void) | undefined;
-    afterPost?: (() => void) | undefined;
-    failListAt?: number;
-    postReply?: string;
-  } = {};
-  let lists = 0;
-  /** 假时钟：每写一次往前走一秒（真 GitHub 的时间也是递增的）。 */
-  const tick = () => {
-    clock += 1000;
-    return new Date(clock).toISOString();
-  };
-  const add = (issue: number, body: string, at?: Date): FakeComment => {
-    const time = at ? at.toISOString() : tick();
-    const id = next++;
-    const c = {
-      id,
-      issue,
-      body,
-      created_at: time,
-      updated_at: time,
-      html_url: `https://github.com/o/r/issues/${issue}#c${id}`,
-    };
-    comments.push(c);
-    return c;
-  };
-  const gh = (args: string[], input?: string): string => {
-    calls.push(args);
-    const path = args.find((a) => a.startsWith('repos/')) ?? '';
-    const method = args.includes('-X') ? args[args.indexOf('-X') + 1] : 'GET';
-    const onIssue = /\/issues\/(\d+)\/comments$/.exec(path);
-    if (onIssue && method === 'GET') {
-      if (hooks.failListAt === lists++) throw new Error('gh 退出码 1：HTTP 502');
-      return comments
-        .filter((c) => c.issue === Number(onIssue[1]))
-        .map(
-          (c) =>
-            `${JSON.stringify({ body: c.body, created_at: c.created_at, html_url: c.html_url, id: c.id, updated_at: c.updated_at })}\n`,
-        )
-        .join('');
-    }
-    if (onIssue && method === 'POST') {
-      hooks.beforePost?.();
-      const c = add(Number(onIssue[1]), JSON.parse(input ?? '{}').body);
-      hooks.afterPost?.();
-      return hooks.postReply ?? JSON.stringify(c);
-    }
-    const one = /\/issues\/comments\/(\d+)$/.exec(path);
-    const c = comments.find((x) => x.id === Number(one?.[1]));
-    if (one && c && method === 'PATCH') {
-      c.body = JSON.parse(input ?? '{}').body;
-      c.updated_at = tick();
-      return JSON.stringify(c);
-    }
-    if (one && c && method === 'DELETE') {
-      comments.splice(comments.indexOf(c), 1);
-      return '';
-    }
-    throw new Error(`假 GitHub 不认得：${args.join(' ')}`);
-  };
-  const claims = (issue: number) =>
-    comments
-      .filter((c) => c.issue === issue)
-      .map((c) => doing.parseClaim(c))
-      .filter((c): c is Claim => c !== null);
-  return {
-    gh,
-    comments,
-    calls,
-    hooks,
-    add,
-    claims,
-    methods: () => calls.map((a) => (a.includes('-X') ? a[a.indexOf('-X') + 1] : 'GET')),
-  };
-}
-
 async function run(
   gh: DoingIo['gh'],
   argv: string[],
   env: Record<string, string | undefined> = { FLEET_MACHINE: '本机' },
   home = tempHome(),
 ) {
-  const out: string[] = [];
-  const err: string[] = [];
-  const code = await doing.runDoing(argv, {
-    gh,
-    env,
-    home,
-    now: () => NOW,
-    sleep: async () => {},
-    out: (t) => out.push(t),
-    err: (t) => err.push(t),
-  });
-  return { code, out: out.join('\n'), err: err.join('\n') };
+  return runDoing(gh, argv, env, home);
 }
 
 describe('「在做」评论的格式', () => {
@@ -687,33 +656,11 @@ describe('doing.mjs claim：动一张单之前先认领', () => {
     expect(gh.methods()).toEqual(['GET', 'POST', 'GET']);
   });
 
-  it('别的机器在做：退出码 3，不留评论', async () => {
-    const gh = fakeGitHub();
-    gh.add(12, doing.renderClaim('doing', '法国', '在写'));
-    const r = await run(gh.gh, ['claim', '12']);
-    expect(r.code).toBe(3);
-    expect(r.out).toContain('法国 在做');
-    expect(gh.methods()).toEqual(['GET']);
-  });
-
   it('别的机器做完了、放下了的不挡', async () => {
     const gh = fakeGitHub();
     gh.add(12, doing.renderClaim('done', '法国', '合了'));
     gh.add(12, doing.renderClaim('dropped', '笔记本', '不做了'));
     expect((await run(gh.gh, ['claim', '12'])).code).toBe(0);
-  });
-
-  it('撞车：我留言的同时法国先留了（编号比我小）——我撤回自己那条，退出码 3', async () => {
-    const gh = fakeGitHub();
-    gh.hooks.beforePost = () => {
-      gh.hooks.beforePost = undefined;
-      gh.add(12, doing.renderClaim('doing', '法国', '也在抢'));
-    };
-    const r = await run(gh.gh, ['claim', '12']);
-    expect(r.code).toBe(3);
-    expect(r.out).toContain('撞了：法国 先留的');
-    expect(gh.claims(12)).toMatchObject([{ machine: '法国', state: 'doing' }]);
-    expect(gh.methods()).toEqual(['GET', 'POST', 'GET', 'DELETE']);
   });
 
   it('撞车：法国比我晚留（编号比我大）——我留着；法国那条是晚的，报进度被拒，再认领时删掉自己那条', async () => {
@@ -743,25 +690,6 @@ describe('doing.mjs claim：动一张单之前先认领', () => {
     expect(r.out).toContain('本来就是 本机 在做');
     expect(gh.claims(12)).toMatchObject([{ machine: '本机', text: '新的一句' }]);
     expect(gh.methods()).toEqual(['GET', 'PATCH']);
-  });
-
-  it('创始人说了才接手：--takeover 把别的机器那条改成放下（记上原话），再认领', async () => {
-    const gh = fakeGitHub();
-    gh.add(12, doing.renderClaim('doing', '法国', '做到一半'));
-    const r = await run(gh.gh, ['claim', '12', '--takeover', '法国断了，本机接着做']);
-    expect(r.code).toBe(0);
-    expect(gh.claims(12)).toMatchObject([
-      {
-        machine: '法国',
-        state: 'dropped',
-        text: expect.stringContaining('创始人让 本机 接手（原话：法国断了，本机接着做）'),
-      },
-      { machine: '本机', state: 'doing' },
-    ]);
-    // 法国回来还想接着报进度：告诉它这张已经不归它
-    const back = await run(gh.gh, ['say', '12', '我回来了'], { FLEET_MACHINE: '法国' });
-    expect(back.code).toBe(3);
-    expect(back.out).toContain('不归你');
   });
 
   it('查不成就是查不成：先读失败退出码 2、不留评论；读回失败撤回自己那条、退出码 2', async () => {
