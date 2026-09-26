@@ -909,14 +909,14 @@ readback_web_upload() {
     return 0
   fi
   empty=$(mktemp -d)
-  out=$(rsync -n -r -e "$(web_upload_ssh "$WEB_UPLOAD_KEY" "$HK_KNOWN_HOSTS")" "$empty/" "root@$WG_HK_ADDR:/" 2>&1) || rc=$?
+  out=$(hk_rsync -n -r -e "$(web_upload_ssh "$WEB_UPLOAD_KEY" "$HK_KNOWN_HOSTS")" "$empty/" "root@$WG_HK_ADDR:/" 2>&1) || rc=$?
   rmdir -- "$empty"
   if ((rc == 0)); then
     ok "法国经隧道往香港 /srv/fleet-dao-web 传文件的通路是通的（试跑，没传东西）"
   elif [[ "$out" == *"Permission denied"* ]]; then
     pending "香港还没认这把上传钥匙：把上面打印的公钥填进香港 hk.env 的 FLEET_WEB_UPLOAD_PUBLIC_KEY，重跑 hk.sh"
   else
-    red "试着往香港传文件没成（rsync 退出码 $rc）：$(tail -2 <<<"$out" | tr '\n' ' ')"
+    red "试着往香港传文件没成（rsync 退出码 $rc）：$(tail -3 <<<"$out" | tr '\n' ' ')"
   fi
   # 发网关的那把：问一次香港网关的状态（只读）
   if [[ ! -s "$GATEWAY_DEPLOY_KEY" ]]; then

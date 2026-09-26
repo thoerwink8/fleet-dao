@@ -30,6 +30,20 @@ hk_ssh() {
     "$UPLOAD_KEY" "$HK_KNOWN_HOSTS"
 }
 
+# 同 deploy/lib/common.sh 的 hk_rsync（为什么要排队见那边；测试核对两边一样）：和发布脚本发静态文件排同一个队，
+# 不然香港的 rrsync 会拒掉后到的那个
+HK_RSYNC_LOCK=${FLEET_HK_RSYNC_LOCK:-/run/lock/fleet-dao-hk-rsync.lock}
+HK_RSYNC_WAIT=120
+hk_rsync() { # rsync 参数…
+  (
+    if ! flock -w "$HK_RSYNC_WAIT" 9; then
+      echo "等了 $HK_RSYNC_WAIT 秒还没轮到往香港推文件：$HK_RSYNC_LOCK 一直被别的推送占着" >&2
+      exit 75
+    fi
+    rsync "$@"
+  ) 9>>"$HK_RSYNC_LOCK"
+}
+
 # 演示版在香港站点上的路径：release.env 的 FLEET_DEMO_PATH（同发布脚本），没写就是 /demo/
 demo_path() {
   local line v=""
@@ -89,7 +103,7 @@ stage_scopes() { # 暂存目录
 # 推到香港演示版目录下的 scopes/：只碰 scopes/ 里的 .json（演示版别的文件由发布脚本管，这里一个不动；
 # 演示版的目录还没有时顺手建上）。里面不是这一份的文件删掉：作废、到期就是这么生效的
 push() { # 暂存目录 香港上演示版的路径
-  rsync -rpc --delete --delay-updates --chmod=D755,F644 --itemize-changes \
+  hk_rsync -rpc --delete --delay-updates --chmod=D755,F644 --itemize-changes \
     --include=/scopes/ --include='/scopes/*.json' --exclude='*' \
     -e "$(hk_ssh)" -- "$1/" "root@$HK_TUNNEL:$2"
 }

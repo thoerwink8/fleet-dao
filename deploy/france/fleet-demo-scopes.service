@@ -12,6 +12,8 @@ Type=oneshot
 ExecStart=/usr/local/sbin/fleet-demo-scopes
 TimeoutStartSec=120
 ProtectSystem=strict
+# 往香港推之前要拿 /run/lock/fleet-dao-hk-rsync.lock（和发布脚本排同一个队，见 fleet-demo-scopes.sh 的 hk_rsync）
+ReadWritePaths=/run/lock
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes

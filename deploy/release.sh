@@ -707,10 +707,10 @@ deploy_gateway() { # 提交号
 web_reachable() {
   local empty out rc=0
   empty=$(mktemp -d)
-  out=$(rsync -n -r -e "$(web_upload_ssh "$UPLOAD_KEY" "$HK_KNOWN_HOSTS")" -- "$empty/" "root@$HK_TUNNEL:/" 2>&1) || rc=$?
+  out=$(hk_rsync -n -r -e "$(web_upload_ssh "$UPLOAD_KEY" "$HK_KNOWN_HOSTS")" -- "$empty/" "root@$HK_TUNNEL:/" 2>&1) || rc=$?
   rmdir -- "$empty"
   if ((rc != 0)); then
-    red "试着往香港传文件没通（rsync 退出码 $rc，没切版本）：$(tail -2 <<<"$out" | tr '\n' ' ')"
+    red "试着往香港传文件没通（rsync 退出码 $rc，没切版本）：$(tail -3 <<<"$out" | tr '\n' ' ')"
     return 1
   fi
   ok "往香港传静态文件的路是通的（试跑，没传东西）"
@@ -750,7 +750,7 @@ sync_web() { # 提交号
   fi
   while read -r src dest args; do
     read -ra extra <<<"$args"
-    if ! out=$(rsync -rpc -O --itemize-changes "${extra[@]}" \
+    if ! out=$(hk_rsync -rpc -O --itemize-changes "${extra[@]}" \
       -e "$(web_upload_ssh "$UPLOAD_KEY" "$HK_KNOWN_HOSTS")" -- "$src" "root@$HK_TUNNEL:$dest" 2>&1); then
       red "把静态文件发到香港 $dest 没成：$(tail -3 <<<"$out" | tr '\n' ' ')"
       return 1
