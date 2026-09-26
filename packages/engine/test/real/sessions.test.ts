@@ -229,8 +229,9 @@ describe('写码会话', () => {
     expect(spec?.model).toBe('claude-opus-5-5');
     expect(spec?.prompt).toContain('需求 #12');
     expect(fake.options[0]?.command).toEqual(['/opt/fake/fleet-agent-carpool/reclaude']);
-    // 树是会话用户从镜像的 bundle 建的：分支在起会话前的头上。
+    // 树是会话用户从镜像的 bundle 建的：分支在起会话前的头上；主线钉成 origin/main（pnpm test:changed 和它比）。
     expect(git(input.worktreePath as string, 'rev-parse', `${BRANCH}~1`)).toBe(m.head);
+    expect(git(input.worktreePath as string, 'rev-parse', 'refs/remotes/origin/main')).toBe(m.head);
 
     const beat = ctx();
     const end = await ports.awaitSession(
@@ -442,6 +443,38 @@ describe('分诊、需求文档、方案、审查：读结论文件', () => {
     const dir = fake.specs[0]?.cwd as string;
     expect(dir).toBe(layout(join(root, 'work')).scratchFor(repo, 12, 'triage'));
     expect(git(dir, 'rev-parse', 'HEAD')).toBe(m.head);
+    expect(git(dir, 'rev-parse', 'refs/remotes/origin/main')).toBe(m.head);
+  });
+
+  it('审查：检出 PR 的头；主线另取进来钉成 origin/main，git diff origin/main...HEAD 只列 PR 自己的改动', async () => {
+    // PR 从主线分出去多一个提交；之后主线又进了一个提交（不在 PR 的历史里，得另取进树）
+    git(m.dir, 'checkout', '-q', '-b', 'pr');
+    writeFileSync(join(m.dir, 'pr.ts'), 'export const pr = 1;\n');
+    git(m.dir, 'add', '.');
+    git(m.dir, 'commit', '-q', '-m', 'pr');
+    const prHead = git(m.dir, 'rev-parse', 'HEAD');
+    git(m.dir, 'checkout', '-q', 'main');
+    writeFileSync(join(m.dir, 'later.ts'), 'export const later = 1;\n');
+    git(m.dir, 'add', '.');
+    git(m.dir, 'commit', '-q', '-m', 'main moved');
+    const mainHead = git(m.dir, 'rev-parse', 'HEAD');
+    const { ports, fake } = setup(() => ({
+      act: ({ spec }) => {
+        mkdirSync(join(spec.cwd, '.fleet-out'), { recursive: true });
+        writeFileSync(join(spec.cwd, '.fleet-out', 'review.json'), '{"verdict": "pass", "findings": []}');
+      },
+    }));
+    const base = launch({ stage: 'review' });
+    const { worktreePath: _w, baseHead: _b, ...rest } = base;
+    const { end } = await runOnce(ports, { ...rest, brief: { ...base.brief, prNumber: 101, head: prHead } });
+    expect(end).toMatchObject({
+      outcome: 'done',
+      output: { kind: 'review', review: { verdict: 'pass', head: prHead } },
+    });
+    const dir = fake.specs[0]?.cwd as string;
+    expect(git(dir, 'rev-parse', 'HEAD')).toBe(prHead);
+    expect(git(dir, 'rev-parse', 'refs/remotes/origin/main')).toBe(mainHead);
+    expect(git(dir, 'diff', '--name-only', 'origin/main...HEAD')).toBe('pr.ts');
   });
 
   it('没写结论文件、写的不是 JSON、说不清却没写要问的：都判交错了（wrong_output）', async () => {

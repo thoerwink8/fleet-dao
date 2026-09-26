@@ -247,17 +247,24 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         expect(await store.lastSay(IDS.run0)).toBeNull();
       });
 
-      it('测试记录：只认载荷里 passed 是布尔的，按时间正序', async () => {
+      it('测试记录：按时间正序；结果认不出的（插头写了原因、或载荷坏了）也列出来、passed 为 null，不悄悄丢掉', async () => {
         tick();
         await store.appendProgress(IDS.run1, 'test', { passed: false, command: 'pnpm check' });
         tick();
         await store.appendProgress(IDS.run1, 'test', { passed: 'maybe' });
         tick();
         await store.appendProgress(IDS.run1, 'test', { passed: true });
+        tick();
+        await store.appendProgress(IDS.run1, 'test', {
+          command: 'pnpm check | tail',
+          unknownBecause: '带管道又没开 pipefail，退出码是管道最后一段的',
+        });
         const runs = await store.listTestRuns(IDS.run1);
-        expect(runs.map((r) => [r.passed, r.command])).toEqual([
-          [false, 'pnpm check'],
-          [true, undefined],
+        expect(runs.map((r) => [r.passed, r.command, r.unknownBecause])).toEqual([
+          [false, 'pnpm check', undefined],
+          [null, undefined, '记录里没有结果'],
+          [true, undefined, undefined],
+          [null, 'pnpm check | tail', '带管道又没开 pipefail，退出码是管道最后一段的'],
         ]);
       });
     });
@@ -679,13 +686,14 @@ export function describeStoreContract(name: string, make: MakeStore): void {
     });
 
     describe('fleet 命令', () => {
-      it('会话：分支、做完标准（从需求来）、仓；不属于需求的会话、看不懂的编号都没有', async () => {
+      it('会话：分支、做完标准（从需求来）、仓和它的测试命令；不属于需求的会话、看不懂的编号都没有', async () => {
         expect(await store.getAgentSession(IDS.run1)).toEqual({
           runId: IDS.run1,
           taskId: IDS.task12,
           subtaskId: IDS.sub12a,
           stage: 'execute',
           repoId: IDS.repo,
+          testCommand: 'pnpm check',
           branch: 'fleet/12-a',
           acceptance: ['验证码 5 分钟过期', '同一手机号 60 秒内只能发一次'],
         });

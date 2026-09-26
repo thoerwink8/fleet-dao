@@ -18,6 +18,7 @@ import type {
   Subtask,
   Task,
 } from '@fleet-dao/shared';
+import { testRunOf } from './done-check.ts';
 import {
   feishuMessageKey,
   feishuReviseKey,
@@ -57,7 +58,6 @@ import {
   type SettingRecord,
   type StagePolicyValue,
   type Store,
-  type TestRunRecord,
   type TimelineRecord,
   type User,
 } from './ports.ts';
@@ -950,13 +950,16 @@ export function createMemoryStore(
     async getAgentSession(runId) {
       const run = data.runs.find((r) => r.id === runId);
       const task = run?.taskId === undefined ? undefined : data.tasks.find((t) => t.id === run.taskId);
-      if (!run || !task) return null;
+      // 和库里一样：任务挂的仓不在就当没有这个会话（库里是 inner join）
+      const repo = task ? data.repos.find((r) => r.id === task.repoId) : undefined;
+      if (!run || !task || !repo) return null;
       const session: AgentSession = {
         runId: run.id,
         taskId: task.id,
         subtaskId: run.subtaskId,
         stage: run.stage,
         repoId: task.repoId,
+        testCommand: repo.testCommand,
         branch: run.branch,
         acceptance: task.acceptance ?? [],
         endedAt: run.endedAt,
@@ -1031,17 +1034,7 @@ export function createMemoryStore(
       return data.progress
         .filter((p) => p.runId === runId && p.kind === 'test')
         .sort(byAtThenId)
-        .flatMap((p): TestRunRecord[] => {
-          const payload = p.payload as { passed?: unknown; command?: unknown } | null;
-          if (typeof payload?.passed !== 'boolean') return [];
-          return [
-            {
-              at: p.at,
-              passed: payload.passed,
-              command: typeof payload.command === 'string' ? payload.command : undefined,
-            },
-          ];
-        });
+        .map((p) => testRunOf(p.at, p.payload));
     },
     async claimCommand({ runId, key, action, takeOverBefore }): Promise<CommandClaim> {
       const k = commandKey(runId, key);

@@ -91,7 +91,7 @@ export function planFromTodos(
 }
 
 /**
- * 命令里含仓库的测试命令就记一次「跑了测试」；只有整条命令的退出码可信时，工具报的成败才能当测试的成败。
+ * 命令真的跑了仓库的测试命令就记一次「跑了测试」；只有整条命令的退出码可信时，工具报的成败才能当测试的成败。
  * 不是测试命令返回 undefined。
  */
 export function testRun(
@@ -100,9 +100,39 @@ export function testRun(
   testCommands: readonly string[],
   unknownBecause?: string,
 ): TestPayload | undefined {
-  if (!testCommands.some((t) => command.includes(t))) return undefined;
+  if (!testCommands.some((t) => invokesTestCommand(command, t))) return undefined;
   const why = unknownBecause ?? exitStatusUntrusted(command);
   return { command: cut(command, 500), ...(why === undefined ? { passed: ok } : { unknownBecause: why }) };
+}
+
+const ENV_ASSIGN = /^[A-Za-z_][A-Za-z0-9_]*=\S*\s+/;
+const WRAPPER = /^(?:time|command|exec|timeout(?:\s+-\S+)*\s+\S+)\s+/;
+
+/**
+ * 命令是不是真的跑了这条测试命令：按 && || ; | & 换行拆成一段段（引号里的先抹掉），测试命令要在某一段的开头
+ * （段首的环境变量赋值、cd 之后、time / timeout 这类包一层的不算数）。只在字里出现不算：
+ * grep "pnpm test:changed" AGENTS.md、echo、cat 这类会话常干的事，原先按「命令里含测试命令」算，会被记成
+ * 「跑了测试、通过」，交活核对就收下一个根本没跑过测试的会话。
+ */
+export function invokesTestCommand(command: string, testCommand: string): boolean {
+  const want = testCommand.trim();
+  if (!want) return false;
+  // 仓的测试命令本身就是几条串起来的（pnpm build && pnpm test）：拆开就对不上了，照原来按「含」认
+  if (/[;&|\n]/.test(want)) return command.includes(want);
+  const bare = command.replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, "''");
+  for (const segment of bare.split(/&&|\|\||[;|&\n]/)) {
+    let s = segment
+      .trim()
+      .replace(/^\(+\s*/, '')
+      .replace(/\s*\)+$/, '');
+    for (let prev = ''; prev !== s; ) {
+      prev = s;
+      s = s.replace(ENV_ASSIGN, '').replace(WRAPPER, '');
+    }
+    if (s === want || s.startsWith(`${want} `) || s.startsWith(`${want}\t`) || s.startsWith(`${want}>`))
+      return true;
+  }
+  return false;
 }
 
 export function cleanTestCommands(testCommands: readonly string[] | undefined): string[] {

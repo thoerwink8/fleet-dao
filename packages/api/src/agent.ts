@@ -262,7 +262,14 @@ export function agentRoutes(deps: Deps, waiters: AskWaiters): Hono<AgentEnv> {
         : store.getPullRequest(session.repoId, request.prNumber),
       store.listTestRuns(session.runId),
     ]);
-    const verdict = checkDone({ stage: session.stage, branch: session.branch, request, pr, tests });
+    const verdict = checkDone({
+      stage: session.stage,
+      branch: session.branch,
+      testCommand: session.testCommand,
+      request,
+      pr,
+      tests,
+    });
     if (!verdict.ok) {
       // 退回也落库（任务时间线和操作记录里看得到），不只打日志：「交了几次、为什么被退」是判假完成的依据。
       await store.appendAudit({

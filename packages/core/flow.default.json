@@ -1,0 +1,39 @@
+{
+  "说明": "全组织默认的流程配置（docs/decisions/0003-fusion-flow.md 第 9 条；格式见 packages/core/src/config.ts）。各项目仓里的 .fleet/flow.json 只写和这里不同的；禁令只能写在这里，项目改不掉。改这份算改标准（人闸第四类），PR 等创始人同意再合。模型顺序是起步值，跑出战绩后再调。",
+  "formatVersion": 1,
+  "profiles": {
+    "default": {
+      "mode": "fusion",
+      "steps": {
+        "lead": ["opus-5.5"],
+        "sidekick": ["cursor-auto", "kimi-k3", "deepseek-flash", "opus-5.5"],
+        "review": ["gpt-5.6-luna", "kimi-k3"],
+        "verify": ["gpt-5.6-luna", "kimi-k3"],
+        "discuss": ["gpt-5.6-luna"]
+      },
+      "review": { "vendors": 2, "rounds": 1 },
+      "verify": { "rounds": 2 },
+      "discuss": { "vendors": 1, "rounds": 5 }
+    },
+    "single": {
+      "mode": "single",
+      "steps": {
+        "lead": ["opus-5.5", "kimi-k3"],
+        "sidekick": [],
+        "review": [],
+        "verify": ["gpt-5.6-luna", "kimi-k3"],
+        "discuss": ["gpt-5.6-luna"]
+      },
+      "review": { "vendors": 0, "rounds": 1 },
+      "verify": { "rounds": 1 },
+      "discuss": { "vendors": 1, "rounds": 5 }
+    }
+  },
+  "categoryProfiles": { "需求": "default", "缺陷": "default", "杂项": "default" },
+  "bans": [
+    { "id": "gpt-no-ui", "reason": "GPT 不做界面类的活（含审界面）：改到 uiPaths 的活不派给 GPT" },
+    { "id": "no-fable", "reason": "不用 Fable（出比 5.1 更高的版本之前）" }
+  ],
+  "highRiskPaths": [],
+  "uiPaths": []
+}

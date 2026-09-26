@@ -321,6 +321,9 @@ describe('推之前把最新主线并进会话的树', () => {
     expect(parentsOf(dir, r.head)).toEqual([head, main]);
     expect(git(dir, 'rev-parse', 'refs/fleet/incoming')).toBe(main);
     expect(calls.pushBranch?.[0]).toMatchObject({ head: r.head });
+    // 主线跟着钉到新头：返工时 pnpm test:changed 只算分支自己的改动，不把并进来的主线也算上
+    expect(git(dir, 'rev-parse', 'refs/remotes/origin/main')).toBe(main);
+    expect(git(dir, 'diff', '--name-only', 'origin/main...HEAD')).toBe('src/login.ts');
   });
 
   it('并完、推没成、活动重试：头是上一次并出来的（第一个父提交是会话交的头）就接着推它，不判头对不上', async () => {
@@ -365,8 +368,9 @@ describe('推之前把最新主线并进会话的树', () => {
     expect(git(dir, 'ls-files', '-u')).toBe('');
     expect(git(dir, '-c', 'core.autocrlf=true', 'status', '--porcelain', '--untracked-files=no')).toBe('');
     expect(existsSync(join(dir, '.git', 'MERGE_HEAD'))).toBe(false);
-    // 新主线的提交已经在树里：会话照着 git merge 就能解
+    // 新主线的提交已经在树里：会话照着 git merge 就能解；origin/main 也钉到了它（test:changed 和它比）
     expect(git(dir, 'cat-file', '-t', main)).toBe('commit');
+    expect(git(dir, 'rev-parse', 'refs/remotes/origin/main')).toBe(main);
     expect(calls.pushBranch ?? []).toHaveLength(0);
   });
 
@@ -646,6 +650,8 @@ describe('并主线', () => {
       ),
     ).toEqual({ state: 'clean', head: merged, conflictFiles: [] });
     expect(git(clean.dir, 'rev-parse', 'HEAD')).toBe(merged);
+    // 并进来的主线钉成 origin/main
+    expect(git(clean.dir, 'rev-parse', 'refs/remotes/origin/main')).toBe(merged);
 
     const conflict = await setupTree({
       syncMainline: () => ({ state: 'conflict', head: m.head, conflictFiles: ['a.ts'], mainline: merged }),

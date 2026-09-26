@@ -78,6 +78,27 @@ describe('提示词', () => {
     }
   });
 
+  it('写码：交活只认原样跑的测试命令（别接管道、别放后台）；审查：和 origin/<主线> 比（引擎在树里钉好了）', () => {
+    const exec = stagePrompt({
+      stage: 'execute',
+      brief: brief({ branch: 'fleet/12-login' }),
+      repo: { ...repo, testCommand: 'pnpm test:changed' },
+      issueNumber: 12,
+      mode: 'new',
+    });
+    expect(exec).toContain('交活只认会话里原样跑的 `pnpm test:changed`');
+    expect(exec).toContain('别接管道、别放后台');
+    expect(exec).toContain('origin/main');
+    const review = stagePrompt({
+      stage: 'review',
+      brief: brief({ prNumber: 31, head: 'abc' }),
+      repo,
+      issueNumber: 12,
+      mode: 'new',
+    });
+    expect(review).toContain('git diff origin/main...HEAD');
+  });
+
   it('续会话：只补新东西（返工意见、回答、上一轮的问题），不重复整份任务', () => {
     const text = stagePrompt({
       stage: 'execute',

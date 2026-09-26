@@ -1,0 +1,15 @@
+{
+  "name": "@fleet-dao/core",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Fusion 流程的纯判断：执行状态机、任务简报、副手验收、验证结论、流程配置。不碰网络和库，引擎、后端、网页、fleet 命令都调它判（docs/decisions/0003-fusion-flow.md 第 12 条）",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./flow.default.json": "./flow.default.json"
+  },
+  "dependencies": {
+    "@fleet-dao/shared": "workspace:*",
+    "zod": "^4.6.5"
+  }
+}
