@@ -71,6 +71,7 @@ describe('退出码', () => {
     const first = run(['--check', '--home', home, '--repo', repo]);
     expect(first.code).toBe(1);
     expect(first.out).toContain('✗ ~/.claude/CLAUDE.md：缺失');
+    expect(first.out).toContain('✗ ~/.claude/settings.json：缺失');
     expect(first.out).toContain('· ~/.codex/AGENTS.md：没装');
     const applied = run(['--apply', '--home', home, '--repo', repo]);
     expect(applied.code).toBe(0);
@@ -163,6 +164,11 @@ describe('--user：替别的用户写', () => {
     expect(r.became).toEqual([{ name: 'alice', entry }]);
     expect(r.out).toContain('用户 alice');
     expect(get(home, '.claude/CLAUDE.md')).toBe(`${BLOCK}\n`);
+    // 替别的用户写（法国装机）不装钩子：开会话钩子要在那个用户自己能写的检出里快进、同步
+    expect(r.out).toContain('· 钩子：替别的用户写（--user）时不装钩子');
+    expect(existsSync(join(home, '.claude', 'settings.json'))).toBe(false);
+    expect(existsSync(join(home, '.fleet-dao', 'hooks'))).toBe(false);
+    expect(r.code).toBe(0);
   });
 
   it('本来就是那个用户：不用换身份', () => {

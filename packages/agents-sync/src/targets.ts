@@ -105,6 +105,68 @@ export const SKILL_TARGETS: readonly SkillTarget[] = [
   },
 ];
 
+/** agents/hooks/ 下的脚本整份拷到这里（相对家目录）；各家设置里登记的命令指向这里。整个目录归本脚本管 */
+export const HOOKS_DIR: Place = { win32: '.fleet-dao\\hooks', linux: '.fleet-dao/hooks' };
+
+/** 一条钩子：什么事件、匹配哪些工具、跑 agents/hooks/ 下的哪个脚本、最多等几秒 */
+export interface HookSpec {
+  event: string;
+  /** 不写 = 这个事件全都跑 */
+  matcher?: string;
+  script: string;
+  timeout: number;
+}
+
+export interface HookTarget {
+  /** 登记钩子的设置文件（JSON，钩子在它的 hooks 里） */
+  settings: Place;
+  /** 读这份的各家；只要装了其中一家就写 */
+  readers: readonly AgentId[];
+  /** readers 里借道读这份的 */
+  borrowed?: readonly AgentId[];
+  hooks: readonly HookSpec[];
+}
+
+/**
+ * 钩子装到哪。Claude Code 的用户级钩子在 ~/.claude/settings.json 的 hooks 里（code.claude.com/docs/en/hooks）：
+ * SessionStart 的输出进会话上下文；PreToolUse 退出码 2 拦下、stderr 给模型看。开会话那条要取远端、快进、跑一遍同步，给足 90 秒。
+ * 借道读这份的：Grok 默认扫 ~/.claude/settings.json 的钩子（~/.grok/docs/user-guide/10-hooks.md「Hook Locations」，
+ * 输入是 camelCase、终端工具叫 run_terminal_command，开会话钩子的输出不进上下文）；Devin CLI 默认 read_config_from.claude
+ * （docs.devin.ai/cli/extensibility/hooks/overview，终端工具叫 exec）。Cursor 的命令行默认也读（cursor.com/docs/reference/third-party-hooks，
+ * Bash 对应它的 Shell），它不在本脚本分发的各家里。脚本按这几种输入都认得（agents/hooks/pretool.mjs 的 SHELL_TOOLS）。
+ */
+export const HOOK_TARGETS: readonly HookTarget[] = [
+  {
+    settings: { win32: '.claude\\settings.json', linux: '.claude/settings.json' },
+    readers: ['claude', 'grok', 'devin'],
+    borrowed: ['grok', 'devin'],
+    hooks: [
+      { event: 'SessionStart', script: 'session-start.mjs', timeout: 90 },
+      { event: 'PreToolUse', matcher: 'Bash|PowerShell', script: 'pretool.mjs', timeout: 10 },
+    ],
+  },
+];
+
+/**
+ * 装了、但没装钩子的各家，逐家报一行为什么（不假装装了）。能接的几家接上是 #232。2026-09-26 查的各家文档和本机装的版本：
+ * - Codex：~/.codex/hooks.json 和 Claude 同一个格式，可每条非托管的钩子都要人在 Codex 里 /hooks 审过、信任了才跑
+ *   （learn.chatgpt.com/docs/hooks）。
+ * - Kimi Code：~/.kimi-code/config.toml 的 [[hooks]]（TOML，事件名和 Claude 一样）。
+ * - Antigravity：~/.gemini/config/hooks.json，没有开会话事件，调工具前的输入输出是另一套 JSON（antigravity.google/docs/hooks）。
+ * - Gemini CLI：~/.gemini/settings.json 的 hooks，调工具前叫 BeforeTool、终端工具叫 run_shell_command（gemini-cli docs/hooks）。
+ * - pi：没有配置式钩子，要写成 TypeScript 扩展（pi-coding-agent docs/extensions.md）。
+ * - dsh：没有自带的全局钩子，只有要手动挂的桥接插件（deepseek-harness packages/hooks）。
+ */
+export const HOOK_GAPS: Partial<Record<AgentId, string>> = {
+  codex: '它有钩子（~/.codex/hooks.json），可每条都要人在 Codex 里用 /hooks 审过、信任了才跑，本脚本还没接',
+  kimi: '它有钩子（~/.kimi-code/config.toml 的 [[hooks]]，TOML），本脚本还没接',
+  agy: '它的钩子是另一套（~/.gemini/config/hooks.json：没有开会话事件，调工具前的输入输出是另一种 JSON），本脚本还没接',
+  gemini:
+    '它的钩子是另一套（~/.gemini/settings.json：调工具前叫 BeforeTool，终端工具叫 run_shell_command），本脚本还没接',
+  pi: '它没有配置式的钩子（要写成 TypeScript 扩展）',
+  dsh: '它没有自带的全局钩子（只有要手动挂的桥接插件）',
+};
+
 /** --retire-old 在这些 skill 目录里找指向旧仓的链接（各家的都扫，不只本脚本分发的那几个） */
 export const RETIRE_SKILL_DIRS: readonly Place[] = [
   ...SKILL_TARGETS.map((t) => t.dir),

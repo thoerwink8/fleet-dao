@@ -54,7 +54,7 @@
 - 开单：`pnpm issue:new --kind 需求 --milestone v1 --title "一句话" --body-file 正文.md`（未排期写 `--milestone 未排期`，母单加 `--mother`），缺类别、里程碑，或正文里没写「## 怎么算做完」都不开；加 `--specs 短名` 时完整正文进 `specs/<号>-<短名>/需求.md`，issue 上只留原话、AI 理解和路径。
 - 欠账：`pnpm debt:check` 只看文件，查文档里推后的话带着单号、需求.md 写了怎么算做完（PR 和主线上 debt.yml 也跑，只报告、不挡合并，不读 GitHub）；加 `--live` 另读 GitHub，查挂的单号开没开着、开着的单都有需求文档（定时任务 debt.yml 用，它再加 `--comment` 留言到单上）；关里程碑之前跑 `pnpm milestone:close-check P1`，还有开着的单就不关。见 design 第七节「欠账不漏」「阶段收口」。
 - 计划快照：每个版本开始和结束时由总指挥跑 `pnpm plan:snapshot`（加 `--at 2026-09-27T09:00+08:00` 定快照时间，不加取现在），从 GitHub 读版本、先后、母单和子单，重写 `docs/plan.md` 两行快照标记之间的几节，标记外面不动，改动照常开 PR；没登录、GitHub 读不到、先后标记认不出都不写、退出码 2。
-- 各家 AI 的全局说明：`node packages/agents-sync/bin/agents-sync --check`（只读），`--apply` 写；`--help` 看全部用法，法国怎么跑见 ops 第五节。
+- 各家 AI 的全局说明、技能和钩子：`node packages/agents-sync/bin/agents-sync --check`（只读，最后报这台同步到哪个提交、落后主线几个），`--apply` 写；开发机装过一次以后，每次开会话由开会话钩子自动同步；`--help` 看全部用法，法国怎么跑见 ops 第五节。
 
 ## 文档各管什么
 
