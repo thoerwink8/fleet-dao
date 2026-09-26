@@ -1,0 +1,23 @@
+name: conflicts
+# 主线一变，给和主线冲突的 PR 贴「有冲突」，解掉了自动撕（#74；起因：#56、#58 在 PR 列表上是两个绿勾，其实冲突合不进去）。
+# 只是显示，不当闸：冲突了 GitHub 本来就合不进去，这里只让 PR 列表上看得见。
+# pull_request_target 拿得到写标签的令牌（fork 来的 PR 在 pull_request 里只有只读令牌）；这里不检出、不跑 PR 里的代码，只读合并状态。
+# 用 GITHUB_TOKEN 贴撕标签不会触发 pr.yml 的 labeled 重跑。第三方 Action 钉死提交号，升级时换号并核对发布说明。
+on:
+  push:
+    branches: [main]
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+permissions: {}
+jobs:
+  label-conflicts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: eps1lon/actions-label-merge-conflict@0273be72a0bbd58fcd71d0d6c02c209b50d1e5e1 # v3.1.0
+        with:
+          dirtyLabel: 有冲突
+          repoToken: ${{ secrets.GITHUB_TOKEN }}

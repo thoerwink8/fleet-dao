@@ -1,6 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { parseMd } from '../src/markdown.ts';
 import { planPhases } from '../src/plan.ts';
@@ -8,14 +6,12 @@ import {
   annotation,
   checkPlanValue,
   checkPrFields,
-  type FetchPr,
-  livePr,
   PR_COLUMNS,
   type PrFacts,
   prColumns,
   prFromEvent,
   type RepoFacts,
-  runPrFields,
+  specsPaths,
 } from '../src/pr-fields.ts';
 
 const PLAN = [
@@ -47,6 +43,7 @@ function body(plan: string | null, specs: string | null): string {
     '**需求**：#12',
     ...(plan === null ? [] : [`**对应计划**：${plan}`]),
     ...(specs === null ? [] : [`**specs**：${specs}`]),
+    '**档位**：直接合——只加了一个输入框',
     '**文档**：不适用',
   ].join('\n');
 }
@@ -88,11 +85,11 @@ describe('PR 必填栏：齐了就过', () => {
 
   it('栏的几种写法都认：**对应计划**：、**对应计划：**、不加粗的「对应计划：」（#39、#46 这么写）、列表里的、英文冒号、Specs 大写', () => {
     for (const text of [
-      '**对应计划**：P1「工作流」\n**specs**：不适用',
-      '**对应计划：** P1「工作流」\n**specs：** 不适用',
-      '对应计划：plan.md P1「工作流」（本 PR 新加这一条）\nspecs：`specs/12-登录验证码/`',
-      '- 对应计划：P1「工作流」\n- specs：不适用',
-      '**对应计划**: P1「工作流」\nSpecs: 不适用',
+      '**对应计划**：P1「工作流」\n**specs**：不适用\n**档位**：直接合（纯文档）',
+      '**对应计划：** P1「工作流」\n**specs：** 不适用\n**档位：** 先合后看——一般改动',
+      '对应计划：plan.md P1「工作流」（本 PR 新加这一条）\nspecs：`specs/12-登录验证码/`\n档位：先审后合，碰了引擎核心',
+      '- 对应计划：P1「工作流」\n- specs：不适用\n- 档位：`直接合` 只改测试',
+      '**对应计划**: P1「工作流」\nSpecs: 不适用\n档位: 直接合 - 纯文档',
     ]) {
       expect(check({ body: text }), text).toEqual([]);
     }
@@ -109,6 +106,7 @@ describe('PR 必填栏：齐了就过', () => {
     const text = [
       '对应计划：P1「工作流」',
       'specs：specs/12-登录验证码/',
+      '档位：直接合——只改文档',
       '',
       '## 改了什么',
       '- `specs/99-别的/需求.md`：顺带提一句',
@@ -125,6 +123,13 @@ describe('PR 必填栏：齐了就过', () => {
 
   it('不加粗认的栏名就是 PR 模板里的那几栏，顺序也一样', () => {
     expect([...prColumns(TEMPLATE).keys()]).toEqual([...PR_COLUMNS]);
+  });
+
+  it('specsPaths 取出的路径和 specs 一栏认的一样（合并闸先按它去 GitHub 上问在不在）', () => {
+    expect(
+      specsPaths('`specs/12-登录验证码/`、[specs/13-x/](https://github.com/o/r/tree/main/specs/13-x)。'),
+    ).toEqual(['specs/12-登录验证码/', 'specs/13-x/']);
+    expect(specsPaths('不适用')).toEqual([]);
   });
 });
 
@@ -223,21 +228,30 @@ describe('PR 必填栏：缺一样报一句，说清缺什么、怎么补', () =
     expect(check(over)).toEqual([message]);
   });
 
-  it('全缺：四样各一句，按标签、里程碑、对应计划、specs 的顺序', () => {
+  it('全缺：五样各一句，按标签、里程碑、对应计划、specs、档位的顺序', () => {
     const problems = checkPrFields({ labels: [], milestone: null, body: '' }, repo);
     expect(problems.map((p) => p.slice(0, p.indexOf('：')))).toEqual([
       '没贴类别标签',
       '没挂里程碑',
       '正文里认不出「对应计划」一栏',
       '正文里认不出「specs」一栏',
+      '正文里认不出「档位」一栏',
     ]);
     for (const p of problems) expect(p).not.toContain('\n');
   });
 
-  it('照仓里的 PR 模板开、一个字没填：两栏都在，都判成空的（模板提示不算填了）', () => {
+  it('没写档位：说清怎么写（三档、跟理由、拿不准写先审后合）', () => {
+    const noTier = good.body.replace(/\*\*档位\*\*：.*\n/, '');
+    expect(check({ body: noTier })).toEqual([
+      '正文里认不出「档位」一栏：要写成 档位：CI 绿就合——理由（单独起一行；两档是「CI 绿就合」「先审后合」，见 design 第五节，拿不准写「先审后合」）。',
+    ]);
+  });
+
+  it('照仓里的 PR 模板开、一个字没填：三栏都在，都判成空的（模板提示不算填了）', () => {
     expect(check({ body: TEMPLATE })).toEqual([
       '「对应计划」一栏是空的：写 plan.md 的阶段加那一条的原话开头，比如 P1「工作流」。',
       '「specs」一栏是空的：写需求文档的目录（specs/<号>-<短名>/），杂活写「不适用」。',
+      '「档位」一栏是空的：写「CI 绿就合」「先审后合」之一，后面跟理由（拿不准写「先审后合」）。',
     ]);
   });
 });
@@ -263,7 +277,7 @@ describe('只核「对应计划」一栏的值（引擎收需求文档时用，�
   });
 });
 
-describe('PR 事件和 PR 现在的样子', () => {
+describe('从事件或读回来的 PR 里取必填栏要的东西', () => {
   const pr = {
     number: 33,
     labels: [{ name: '杂项' }],
@@ -293,106 +307,11 @@ describe('PR 事件和 PR 现在的样子', () => {
       'pull_request.milestone 认不出（应当是 null 或带 title 的对象）',
     );
   });
+});
 
-  function tempRepo(plan: string | undefined): string {
-    const root = mkdtempSync(join(tmpdir(), 'fleet-pr-fields-'));
-    if (plan !== undefined) {
-      mkdirSync(join(root, 'docs'));
-      writeFileSync(join(root, 'docs', 'plan.md'), plan);
-    }
-    mkdirSync(join(root, 'specs', '12-登录验证码'), { recursive: true });
-    return root;
-  }
-  function eventFile(event: unknown): string {
-    const path = join(mkdtempSync(join(tmpdir(), 'fleet-pr-event-')), 'event.json');
-    writeFileSync(path, typeof event === 'string' ? event : JSON.stringify(event));
-    return path;
-  }
-  /** 假的「现读 PR」：记下要的是几号，回给定的样子。 */
-  function liveAs(live: unknown): { fetchPr: FetchPr; asked: number[] } {
-    const asked: number[] = [];
-    return {
-      asked,
-      fetchPr: async (n) => {
-        asked.push(n);
-        return live;
-      },
-    };
-  }
-
-  it('退出码：齐了 0，缺了 1（每样一行）', async () => {
-    const root = tempRepo(PLAN);
-    const eventPath = eventFile({ pull_request: pr });
-    const { fetchPr, asked } = liveAs(pr);
-    expect(await runPrFields({ eventPath, root, fetchPr })).toEqual({
-      code: 0,
-      lines: ['PR #33：类别标签、里程碑、对应计划、specs 都齐了。'],
-    });
-    expect(asked).toEqual([33]);
-    const bad = await runPrFields({ eventPath, root, fetchPr: liveAs({ ...pr, labels: [] }).fetchPr });
-    expect(bad).toEqual({ code: 1, lines: [expect.stringMatching(/^没贴类别标签/)] });
-  });
-
-  it('按 PR 现在的样子判，不按事件那一刻的（重跑旧 run：事件里还贴着标签，其实已经撕了）', async () => {
-    const root = tempRepo(PLAN);
-    const eventPath = eventFile({ pull_request: pr });
-    const now = { ...pr, labels: [], milestone: null };
-    expect(await runPrFields({ eventPath, root, fetchPr: liveAs(now).fetchPr })).toEqual({
-      code: 1,
-      lines: [expect.stringMatching(/^没贴类别标签/), expect.stringMatching(/^没挂里程碑/)],
-    });
-  });
-
-  it('没查成都是 2：没有事件路径、事件读不到或认不出、PR 现在的样子读不到或认不出、plan.md 读不到或认不出阶段', async () => {
-    const root = tempRepo(PLAN);
-    const eventPath = eventFile({ pull_request: pr });
-    const { fetchPr } = liveAs(pr);
-    const down: FetchPr = async () => {
-      throw new Error('GitHub 回了 502');
-    };
-    const runs = await Promise.all([
-      runPrFields({ eventPath: undefined, root, fetchPr }),
-      runPrFields({ eventPath: join(root, 'nope.json'), root, fetchPr }),
-      runPrFields({ eventPath: eventFile('{不是 json'), root, fetchPr }),
-      runPrFields({ eventPath: eventFile({ issue: {} }), root, fetchPr }),
-      runPrFields({ eventPath, root, fetchPr: down }),
-      runPrFields({ eventPath, root, fetchPr: liveAs({ message: 'Not Found' }).fetchPr }),
-      runPrFields({ eventPath, root, fetchPr: liveAs({ ...pr, number: 34 }).fetchPr }),
-      runPrFields({ eventPath, root: tempRepo(undefined), fetchPr }),
-      runPrFields({ eventPath, root: tempRepo('# 计划\n\n没有阶段。\n'), fetchPr }),
-    ]);
-    for (const r of runs) {
-      expect(r.code).toBe(2);
-      expect(r.lines[0]).toMatch(/^没查成：/);
-    }
-    expect(runs[4]?.lines).toEqual(['没查成：读不到 PR #33 现在的样子（GitHub 回了 502）。']);
-  });
-
-  it('现读 PR：按仓和号拼地址，令牌只在请求头里；没有令牌、没有仓名、GitHub 回错都抛，报错里不带令牌', async () => {
-    const calls: { url: string; init: RequestInit | undefined }[] = [];
-    const fake = (status: number) =>
-      (async (url: string | URL | Request, init?: RequestInit) => {
-        calls.push({ url: String(url), init });
-        return new Response(JSON.stringify(pr), { status });
-      }) as typeof fetch;
-    const env = {
-      GITHUB_TOKEN: 'token-for-test',
-      GITHUB_REPOSITORY: 'o/r',
-      GITHUB_API_URL: 'https://api.example/',
-    };
-    await expect(livePr(env, fake(200))(33)).resolves.toEqual(pr);
-    expect(calls[0]?.url).toBe('https://api.example/repos/o/r/pulls/33');
-    expect(new Headers(calls[0]?.init?.headers).get('authorization')).toBe('Bearer token-for-test');
-    const errors = await Promise.all([
-      livePr(env, fake(404))(33).catch((e: Error) => e.message),
-      livePr({ ...env, GITHUB_TOKEN: '' }, fake(200))(33).catch((e: Error) => e.message),
-      livePr({ ...env, GITHUB_REPOSITORY: undefined }, fake(200))(33).catch((e: Error) => e.message),
-    ]);
-    expect(errors).toEqual(['GitHub 回了 404', '没有 GITHUB_TOKEN', '没有 GITHUB_REPOSITORY（owner/名字）']);
-    for (const m of errors) expect(m).not.toContain('token-for-test');
-  });
-
-  it('报错注解里的 % 和换行转义掉', () => {
+describe('Actions 注解', () => {
+  it('报错是 error、提醒是 warning；% 和换行转义掉', () => {
     expect(annotation('缺了 100%\n第二行')).toBe('::error::缺了 100%25%0A第二行');
+    expect(annotation('提醒：没贴类别标签', 'warning')).toBe('::warning::提醒：没贴类别标签');
   });
 });

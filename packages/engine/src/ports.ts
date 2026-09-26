@@ -306,6 +306,11 @@ export interface PrBody {
    * 「对应计划：」那一行（读不到、没填就明确报错，不填空的）。
    */
   specs: string;
+  /**
+   * 「档位」一栏（design 第五节三档之一加理由）：CI 的 pr-fields 查它，改到高风险路径的必须是「先审后合」，
+   * 「先审后合」要当前头上有通过的 second-opinion 提交状态。
+   */
+  tier: string;
   /** 改到的文件（仓内相对路径）：「文档」一栏按它写。 */
   changedFiles: string[];
 }
