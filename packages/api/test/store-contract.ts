@@ -686,20 +686,22 @@ export function describeStoreContract(name: string, make: MakeStore): void {
     });
 
     describe('fleet 命令', () => {
-      it('会话：分支、做完标准（从需求来）、仓和它的测试命令；不属于需求的会话、看不懂的编号都没有', async () => {
+      it('会话：分支、做完标准（从需求来）、起会话时交代的测试命令；不属于需求的会话、看不懂的编号都没有', async () => {
+        // 测试命令是这次会话开工时记下的（session_runs.test_command），不是仓那一行给人看的旧值 pnpm check
         expect(await store.getAgentSession(IDS.run1)).toEqual({
           runId: IDS.run1,
           taskId: IDS.task12,
           subtaskId: IDS.sub12a,
           stage: 'execute',
           repoId: IDS.repo,
-          testCommand: 'pnpm check',
+          testCommand: 'pnpm test:changed',
           branch: 'fleet/12-a',
           acceptance: ['验证码 5 分钟过期', '同一手机号 60 秒内只能发一次'],
         });
-        expect((await store.getAgentSession(IDS.run0))?.endedAt).toBe(
-          new Date(T0.getTime() - 20 * MIN).toISOString(),
-        );
+        const planRun = await store.getAgentSession(IDS.run0);
+        expect(planRun?.endedAt).toBe(new Date(T0.getTime() - 20 * MIN).toISOString());
+        // 开工时没记（加这一列之前开的会话）：没有就是没有，不拿仓的命令顶
+        expect(planRun?.testCommand).toBeUndefined();
         expect(await store.getAgentSession(TASKLESS_RUN)).toBeNull();
         expect(await store.getAgentSession('run-1')).toBeNull();
       });
@@ -1213,7 +1215,7 @@ export function describeStoreContract(name: string, make: MakeStore): void {
       const created = (over: Partial<NewAuditEntry> = {}) =>
         audit({ action: 'task.create', target: `task:${NEW_TASK}`, via: 'github', ...over });
 
-      it('按名字找仓：不分大小写，带自动派活开关（没开是 null）；没有就是 null', async () => {
+      it('按名字找仓：不分大小写，带自动派活开关（没开是 null）和流程配置副本；没有就是 null', async () => {
         expect(await store.findRepoByName('Example', 'CANARY')).toEqual({
           id: IDS.repo,
           owner: 'example',
@@ -1221,6 +1223,12 @@ export function describeStoreContract(name: string, make: MakeStore): void {
           defaultBranch: 'main',
           testCommand: 'pnpm check',
           autoDispatchSince: null,
+          flow: {
+            syncedAt: new Date(T0.getTime() - 5 * MIN).toISOString(),
+            error: null,
+            unread: null,
+            testCommand: 'pnpm test:changed',
+          },
         });
         expect(await store.findRepoByName('example', 'other')).toBeNull();
       });

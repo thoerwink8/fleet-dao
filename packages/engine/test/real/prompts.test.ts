@@ -97,6 +97,30 @@ describe('提示词', () => {
       mode: 'new',
     });
     expect(review).toContain('git diff origin/main...HEAD');
+    expect(review).toContain('可以跑测试（pnpm check）');
+  });
+
+  it('项目没写测试命令（只有不写码的阶段起得来）：提示词里不出现 null、不叫它跑测试', () => {
+    const none = { ...repo, testCommand: null };
+    const review = stagePrompt({
+      stage: 'review',
+      brief: brief({ prNumber: 31, head: 'abc' }),
+      repo: none,
+      issueNumber: 12,
+      mode: 'new',
+    });
+    expect(review).not.toContain('可以跑测试');
+    const research = stagePrompt({
+      stage: 'research',
+      brief: brief(),
+      repo: none,
+      issueNumber: 12,
+      mode: 'new',
+    });
+    expect(research).toContain(
+      '这个项目没写测试命令（仓里 .fleet/flow.json 的 testCommand），交活不核对测试',
+    );
+    for (const text of [review, research]) expect(text).not.toContain('null');
   });
 
   it('续会话：只补新东西（返工意见、回答、上一轮的问题），不重复整份任务', () => {

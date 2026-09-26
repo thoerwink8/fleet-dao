@@ -32,13 +32,17 @@ import {
   type RoutingPolicy,
   routeLabel,
 } from '../routing/index.ts';
+import { WIRED_HOSTS as WIRED_HOST_IDS } from './hosts.ts';
 
 /** 账号池整池暂停（设备被撤销、封号、登录失效、欠费：要人修）的提醒：dedupe_key = pool-hold:<池>。 */
 export const POOL_HOLD_PREFIX = 'pool-hold:';
 export const poolHoldKey = (poolId: string) => `${POOL_HOLD_PREFIX}${poolId}`;
 
-/** 目前接上的执行方式：只有 Claude Code（经 reclaude）。别的执行方式的路由不派，派不出时理由里写明。 */
-export const WIRED_HOSTS: readonly HostId[] = ['claude-code'];
+/**
+ * 接上的执行方式（会话端口的驱动清单，real/hosts.ts）：Claude Code（经 reclaude）、cursor-agent。别的执行方式的路由不派，
+ * 派不出时理由里写明。
+ */
+export const WIRED_HOSTS: readonly HostId[] = WIRED_HOST_IDS;
 
 /**
  * 会话用户此刻挂的 reclaude 组织（design 第九节）。切号（拼车用满切独享、到点切回）归 #59，还没做：在那之前会话用户

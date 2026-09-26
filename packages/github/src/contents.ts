@@ -99,6 +99,100 @@ export async function readSpecDoc(deps: Deps, input: ReadSpecDocInput): Promise<
   return { path, content, url: parsed.data.html_url };
 }
 
+/** 仓里任意一个文件的路径：相对路径，不含 `..`、反斜杠、控制字符，不以 / 开头或结尾。 */
+export function validRepoFilePath(path: string): boolean {
+  if (!path || path.length > 400) return false;
+  if (path.startsWith('/') || path.endsWith('/') || path.includes('\\') || CONTROL_CHARS.test(path))
+    return false;
+  return !path.split('/').some((seg) => seg === '' || seg === '.' || seg === '..');
+}
+
+export interface ReadRepoFileInput {
+  repo: RepoRef;
+  /** 仓内相对路径，例如 .fleet/flow.json。 */
+  path: string;
+  signal?: AbortSignal | undefined;
+}
+
+/**
+ * 默认分支头上一个文件的样子：读的是哪个提交（先读分支头、再按这个提交读文件，两样对得上）；文件在（text）、
+ * 不在（missing）、在却不是能读的文本文件（not_file：目录、子模块、太大拿不回内容）。
+ */
+export interface ReadRepoFileResult {
+  defaultBranch: string;
+  commit: string;
+  file: { kind: 'text'; text: string } | { kind: 'missing' } | { kind: 'not_file'; why: string };
+}
+
+const BranchRef = z.object({
+  object: z.object({ sha: z.string().regex(/^[0-9a-f]{40}$/), type: z.string().optional() }),
+});
+
+const ContentsEntry = z.object({
+  type: z.string(),
+  encoding: z.string().optional(),
+  content: z.string().optional(),
+});
+
+/**
+ * 读默认分支头上的一个文件（「引擎」身份，Contents API）。仓的流程配置 .fleet/flow.json 就这样读：对账每轮读一次，
+ * 合并校验后写进库里的副本（引擎 jobs/flow-config.ts）。
+ * 读不到（没权限、GitHub 出错、分支头的形状认不出）一律抛 GitHubError——调用方记成「没查成」，不当成文件不在；
+ * 只有按提交读文件回 404 才是 missing。
+ */
+export async function readRepoFile(deps: Deps, input: ReadRepoFileInput): Promise<ReadRepoFileResult> {
+  const { repo, path, signal } = input;
+  if (!validRepoFilePath(path)) {
+    throw new GitHubError(
+      'BAD_INPUT',
+      `仓里的文件路径「${path}」不合规：要是相对路径，不含 .. 、反斜杠或控制字符，不以 / 开头或结尾`,
+    );
+  }
+  const auth = { as: 'engine' as const, repo };
+  const base = `/repos/${enc(repo.owner)}/${enc(repo.name)}`;
+  const { defaultBranch } = await deps.facts.get(repo, 'engine', signal);
+  const head = await deps.client.request({
+    method: 'GET',
+    path: `${base}/git/ref/heads/${encRef(defaultBranch)}`,
+    auth,
+    signal,
+  });
+  const ref = BranchRef.safeParse(head.data);
+  if (!ref.success || (ref.data.object.type !== undefined && ref.data.object.type !== 'commit')) {
+    throw unexpected(`读默认分支 ${defaultBranch} 的头`, head.data);
+  }
+  const commit = ref.data.object.sha;
+  const res = await deps.client.request({
+    method: 'GET',
+    path: `${base}/contents/${encRef(path)}`,
+    query: { ref: commit },
+    auth,
+    allow: [404],
+    signal,
+  });
+  const at = { defaultBranch, commit };
+  if (res.status === 404) return { ...at, file: { kind: 'missing' } };
+  // 目录拿回来的是一个列表
+  if (Array.isArray(res.data)) return { ...at, file: { kind: 'not_file', why: `${path} 是个目录` } };
+  const entry = ContentsEntry.safeParse(res.data);
+  if (!entry.success) throw unexpected(`读 ${path}`, res.data);
+  if (entry.data.type !== 'file') {
+    return { ...at, file: { kind: 'not_file', why: `${path} 不是普通文件（是 ${entry.data.type}）` } };
+  }
+  // 超过 1 MB 的文件 Contents API 不给内容（encoding 是 none）
+  if (entry.data.encoding !== 'base64' || entry.data.content === undefined) {
+    return {
+      ...at,
+      file: {
+        kind: 'not_file',
+        why: `${path} 拿不回内容（encoding ${entry.data.encoding ?? '没给'}，多半太大）`,
+      },
+    };
+  }
+  const text = Buffer.from(entry.data.content.replace(/\n/g, ''), 'base64').toString('utf8');
+  return { ...at, file: { kind: 'text', text } };
+}
+
 export async function writeSpecDoc(deps: Deps, input: WriteSpecDocInput): Promise<WriteSpecDocResult> {
   const { repo, path } = input;
   if (!validSpecPath(path)) {

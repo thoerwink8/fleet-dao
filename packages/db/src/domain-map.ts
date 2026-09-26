@@ -186,6 +186,7 @@ export const toSessionRun = (r: typeof sessionRuns.$inferSelect): SessionRun =>
     inputTokens: opt(r.inputTokens),
     outputTokens: opt(r.outputTokens),
     costUsd: opt(r.costUsd),
+    testCommand: opt(r.testCommand),
   });
 
 export const toProgressEvent = (r: typeof progressEvents.$inferSelect): ProgressEvent =>

@@ -15,6 +15,7 @@ import {
   feishuDrafts,
   feishuFollows,
   feishuOutbox,
+  flowReplicaOf,
   githubEvents,
   githubEventVersions,
   idempotencyKeys,
@@ -1020,8 +1021,9 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
     // —— fleet 命令 ——
     async getAgentSession(runId) {
       if (!isUuid(runId)) return null;
+      // 测试命令认起会话时记下的那条（session_runs.test_command），不读仓此刻的：开工后仓里改了命令也照旧
       const [row] = await db
-        .select({ run: sessionRuns, task: tasks, testCommand: repos.testCommand })
+        .select({ run: sessionRuns, task: tasks })
         .from(sessionRuns)
         .innerJoin(tasks, eq(tasks.id, sessionRuns.taskId))
         .innerJoin(repos, eq(repos.id, tasks.repoId))
@@ -1033,7 +1035,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         subtaskId: opt(row.run.subtaskId),
         stage: row.run.stage,
         repoId: row.task.repoId,
-        testCommand: row.testCommand,
+        testCommand: opt(row.run.testCommand),
         branch: opt(row.run.branch),
         acceptance: row.task.acceptance,
         endedAt: isoOpt(row.run.endedAt),
@@ -1783,9 +1785,18 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         .from(repos)
         .where(and(sql`lower(${repos.owner}) = lower(${owner})`, sql`lower(${repos.name}) = lower(${name})`))
         .limit(1);
-      return row
-        ? { ...toRepo(row), autoDispatchSince: row.autoDispatchSince ? iso(row.autoDispatchSince) : null }
-        : null;
+      if (!row) return null;
+      const flow = flowReplicaOf(row);
+      return {
+        ...toRepo(row),
+        autoDispatchSince: row.autoDispatchSince ? iso(row.autoDispatchSince) : null,
+        flow: {
+          syncedAt: flow.syncedAt ? iso(flow.syncedAt) : null,
+          error: flow.error,
+          unread: flow.unread,
+          testCommand: flow.testCommand,
+        },
+      };
     },
     async findTaskByIssue(repoId, issueNumber) {
       if (!isUuid(repoId)) return null;
