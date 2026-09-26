@@ -101,6 +101,26 @@
       "path": "packages/conventions/src/bin/merge-gate.ts",
       "kind": "碰安全",
       "why": "合并闸在 Actions 里跑的入口"
+    },
+    {
+      "path": "packages/conventions/src/ci-plan.ts",
+      "kind": "碰安全",
+      "why": "CI 检查本身：按改动算哪几个 job 跑、测哪几个包，汇总 check 的结论也在这；判「少跑」等于放行没测过的改动"
+    },
+    {
+      "path": "packages/conventions/src/bin/ci-plan.ts",
+      "kind": "碰安全",
+      "why": "CI 的 changes job 入口：git diff 算改动、写各 job 的开关"
+    },
+    {
+      "path": "packages/conventions/src/bin/ci-verdict.ts",
+      "kind": "碰安全",
+      "why": "CI 汇总 job（必过检查 check）的入口"
+    },
+    {
+      "path": "packages/conventions/src/repo.ts",
+      "kind": "碰安全",
+      "why": "CI 的 changes job 经它读 package.json 算依赖图：改它能伪造依赖图，让受影响的包不测"
     }
   ]
 }
