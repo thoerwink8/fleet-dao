@@ -207,15 +207,15 @@ export function useRunSteps(runId: string | undefined) {
   });
 }
 
-/** 路由的在线状态由探针写、不推送，所以每分钟重拉一次。 */
-export function useRouting() {
+/** 路由的在线状态由探针写、不推送，所以每分钟重拉一次。enabled 为假时不读（比如换模型的对话框没打开）。 */
+export function useRouting({ enabled = true }: { enabled?: boolean } = {}) {
   const api = useApi();
-  return useQuery({ queryKey: keys.routing, queryFn: () => api.routing(), refetchInterval: 60_000 });
+  return useQuery({ queryKey: keys.routing, queryFn: () => api.routing(), refetchInterval: 60_000, enabled });
 }
 
-export function usePools() {
+export function usePools({ enabled = true }: { enabled?: boolean } = {}) {
   const api = useApi();
-  return useQuery({ queryKey: keys.pools, queryFn: () => api.pools() });
+  return useQuery({ queryKey: keys.pools, queryFn: () => api.pools(), enabled });
 }
 
 /** 定时任务不在推送名单里，每 30 秒重拉一次。 */
@@ -401,18 +401,43 @@ export function applyLiveEvent(qc: QueryClient, e: LiveEvent) {
   applyLiveEvents(qc, [e]);
 }
 
+/** 已经挂上「读完再拉一次」的缓存（同一份只挂一次）。 */
+const refetchWhenDone = new WeakSet<object>();
+
+/**
+ * 作废并重拉，但不打断正在读的那一次：打断了要从头再等一整轮（香港到法国一趟往返约 0.2 秒）——首屏刚发出去的读取
+ * 会被连上推送时的全量重拉打断，推送一密看板就一直读不完。正在读的那一次可能是变化之前读的，所以等它读完再补拉一次。
+ */
+function refresh(qc: QueryClient, queryKey?: readonly string[]) {
+  const cache = qc.getQueryCache();
+  for (const query of cache.findAll(queryKey ? { queryKey: [...queryKey] } : {})) {
+    if (query.state.fetchStatus !== 'fetching' || refetchWhenDone.has(query)) continue;
+    refetchWhenDone.add(query);
+    const stop = cache.subscribe((ev) => {
+      if (ev.query !== query) return;
+      if (ev.type !== 'removed' && query.state.fetchStatus === 'fetching') return;
+      stop();
+      refetchWhenDone.delete(query);
+      if (ev.type !== 'removed') {
+        queueMicrotask(() => void qc.invalidateQueries({ queryKey: query.queryKey, exact: true }));
+      }
+    });
+  }
+  void qc.invalidateQueries(queryKey ? { queryKey: [...queryKey] } : undefined, { cancelRefetch: false });
+}
+
 /** 一批推送一起作废：同一份缓存只作废一次；其中有认不出的、或是重连，就全部作废一次。 */
 export function applyLiveEvents(qc: QueryClient, events: readonly LiveEvent[]) {
   const keysToDrop = new Map<string, readonly string[]>();
   for (const e of events) {
     const targets = e.type === 'change' && isRealtimeTable(e.table) ? TABLE_KEYS[e.table] : undefined;
     if (!targets) {
-      qc.invalidateQueries();
+      refresh(qc);
       return;
     }
     for (const k of targets) keysToDrop.set(k.join('/'), k);
   }
-  for (const queryKey of keysToDrop.values()) qc.invalidateQueries({ queryKey: [...queryKey] });
+  for (const queryKey of keysToDrop.values()) refresh(qc, queryKey);
 }
 
 /**
@@ -462,11 +487,12 @@ export function useLiveState() {
   );
 }
 
-/** 把推送接到缓存。整个应用只挂一次（在外壳里）。 */
-export function useLiveSync() {
+/** 把推送接到缓存。整个应用只挂一次（在外壳里）。enabled 为假时先不连（外壳在确认登录之前就挂上了，确认了再连）。 */
+export function useLiveSync(enabled = true) {
   const api = useApi();
   const qc = useQueryClient();
   useEffect(() => {
+    if (!enabled) return;
     const batch = createLiveBatcher(qc);
     const stop = api.subscribe(
       (e) => {
@@ -479,5 +505,5 @@ export function useLiveSync() {
       stop();
       batch.stop();
     };
-  }, [api, qc]);
+  }, [api, qc, enabled]);
 }
