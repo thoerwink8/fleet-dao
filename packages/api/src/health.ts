@@ -20,18 +20,6 @@ export class PublicHealthError extends Error {
   }
 }
 
-/**
- * 这一项对应的功能还没做（没配置、没实现）：报「未接」，不算失败、不把整体拖红——还没有的东西谈不上坏了。
- * 只给「压根没接上」用；接上以后读不到、出错一律抛 PublicHealthError 或普通错误，照样报红。
- * message 公网看得到，同 PublicHealthError 的规矩：一句中性的话，可以带单号。
- */
-export class NotWiredHealth extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'NotWiredHealth';
-  }
-}
-
 /** 单项探活的上限：一项卡住不能把整个健康检查拖死。 */
 const CHECK_TIMEOUT_MS = 3_000;
 
@@ -51,7 +39,10 @@ export async function runHealthChecks(
   timeoutMs = CHECK_TIMEOUT_MS,
 ): Promise<HealthReport> {
   const results = await Promise.all(
-    checks.map(async ({ name, check }) => {
+    checks.map(async ({ name, check, notWired }) => {
+      // 功能压根没接上（装配时定的标记）：不跑、不算失败。只看这个标记，check 抛什么都判不成「未接」
+      if (notWired !== undefined)
+        return [name, { ok: true, status: 'not_wired', message: notWired }] as const;
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         await Promise.race([
@@ -65,10 +56,6 @@ export async function runHealthChecks(
         ]);
         return [name, { ok: true }] as const;
       } catch (err) {
-        if (err instanceof NotWiredHealth) {
-          log.info('健康检查：这一项还没接上', { check: name, message: err.message });
-          return [name, { ok: true, status: 'not_wired', message: err.message }] as const;
-        }
         log.warn('健康检查没过', {
           check: name,
           error: err instanceof Error ? err.message : String(err),
@@ -101,8 +88,8 @@ export function serviceHealthChecks(parts: {
   /** Temporal 本身，和它上面查引擎工人在不在（两项都来自同一份连接，见 temporal.ts 的 TemporalConnection）。 */
   temporal: { check(): Promise<void>; checkEngine(): Promise<void> };
   githubEvents: () => Promise<void>;
-  /** 飞书草稿开单那一步（ports.ts 的 DraftOpener）：没接上、接了开不了都报红。 */
-  draftOpener: { check(): Promise<void> };
+  /** 飞书草稿开单那一步（ports.ts 的 DraftOpener）：接了开不了报红；压根没接上（带 notWired）报「未接」。 */
+  draftOpener: { check(): Promise<void>; readonly notWired?: string };
   /** 最早一张待开单等太久就报红（draft-opening.ts 的 draftBacklogCheck）。 */
   draftBacklog: () => Promise<void>;
 }): HealthCheck[] {
@@ -113,9 +100,18 @@ export function serviceHealthChecks(parts: {
     { name: 'temporal', check: () => parts.temporal.check() },
     { name: 'engine', check: () => parts.temporal.checkEngine() },
     { name: 'github_events', check: parts.githubEvents },
-    { name: 'draft_opener', check: () => parts.draftOpener.check() },
-    { name: 'draft_backlog', check: parts.draftBacklog },
+    { name: 'draft_opener', check: () => parts.draftOpener.check(), ...notWired(parts.draftOpener.notWired) },
+    // 开单压根没接上时积压是必然的，不是坏了；接上以后等太久照样红
+    {
+      name: 'draft_backlog',
+      check: parts.draftBacklog,
+      ...notWired(parts.draftOpener.notWired && `${parts.draftOpener.notWired}：确认了的草稿先留在待开单`),
+    },
   ];
+}
+
+function notWired(message: string | undefined): { notWired?: string } {
+  return message === undefined ? {} : { notWired: message };
 }
 
 export function healthHandler(checks: readonly HealthCheck[], log: Logger) {

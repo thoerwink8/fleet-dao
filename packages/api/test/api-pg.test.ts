@@ -236,7 +236,11 @@ describe('接口跑在真库上', () => {
           message: 'GitHub 机器人的凭据没读到，PR 和 CI 事件写不进镜像',
         },
         draft_opener: { ok: true, status: 'not_wired', message: '飞书草稿开成 issue 还没接上（#91）' },
-        draft_backlog: { ok: true },
+        draft_backlog: {
+          ok: true,
+          status: 'not_wired',
+          message: '飞书草稿开成 issue 还没接上（#91）：确认了的草稿先留在待开单',
+        },
       },
     });
     // 一张草稿确认了 20 分钟还没开成：积压报红（库里真查出来的）。
@@ -253,11 +257,8 @@ describe('接口跑在真库上', () => {
       confirmedBy: IDS.founderA,
       confirmedAt: new Date(T0.getTime() - 20 * 60_000),
     });
-    const backlog = (await (await h.cockpit.request('/healthz')).json()) as {
-      checks: Record<string, unknown>;
-    };
-    expect(backlog.checks.draft_backlog).toEqual({
-      ok: false,
+    // 开单没接上时 /healthz 里这一项是「未接」；检查本身在真库上照样查得出积压（接上以后就报这个）
+    await expect(draftBacklogCheck(pgStore(), () => new Date(T0))()).rejects.toMatchObject({
       code: 'backlog',
       message: '最早一张待开单已经等了 20 分钟还没开成',
     });

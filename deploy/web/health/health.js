@@ -110,9 +110,12 @@ function row(key, label, check) {
   if (!isObject(check) || typeof check.ok !== 'boolean') {
     return { key, label, ok: false, reason: '这一项的格式认不出' };
   }
-  if (check.ok === true && check.status === 'not_wired') {
-    const why = typeof check.message === 'string' && check.message ? check.message : '后端没给原因';
-    return { key, label, ok: true, notWired: true, reason: `未接：${why}` };
+  // 「未接」必须样子完整（status 就是 not_wired、带一句原因）：带了 status 却认不出、缺原因，都不算绿
+  if (check.ok === true && 'status' in check) {
+    if (check.status !== 'not_wired' || typeof check.message !== 'string' || !check.message.trim()) {
+      return { key, label, ok: false, reason: '这一项的格式认不出' };
+    }
+    return { key, label, ok: true, notWired: true, reason: `未接：${check.message}` };
   }
   if (check.ok === true) return { key, label, ok: true, reason: '在线' };
   const message =

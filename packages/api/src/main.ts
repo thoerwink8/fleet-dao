@@ -137,7 +137,7 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
       temporal,
       githubEvents: githubEventsCheck({ store, now, credentialsMissing: github.credentialsMissing }),
       draftOpener,
-      draftBacklog: draftBacklogCheck(store, now, undefined, draftOpener),
+      draftBacklog: draftBacklogCheck(store, now),
     }),
   };
   return {

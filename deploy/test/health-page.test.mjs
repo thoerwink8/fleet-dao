@@ -35,6 +35,17 @@ test('「未接」的项：不算不在线，整体照样绿，写明未接和�
   assert.equal(row.ok, true);
   assert.equal(row.notWired, true);
   assert.equal(row.reason, '未接：飞书草稿开成 issue 还没接上（#91）');
+  // 「未接」样子不完整（缺原因、原因是空的、status 认不出）：不算绿
+  for (const bad of [
+    { ok: true, status: 'not_wired' },
+    { ok: true, status: 'not_wired', message: ' ' },
+    { ok: true, status: 'someday', message: '还没做' },
+  ]) {
+    const u = judge({ status: 200, body: report(true, { ...allOk, draft_opener: bad }) });
+    assert.equal(u.ok, false, JSON.stringify(bad));
+    assert.equal(byKey(u).draft_opener.ok, false);
+    assert.equal(byKey(u).draft_opener.reason, '这一项的格式认不出');
+  }
   // 接上以后出错：照样红
   const broken = { ...allOk, draft_opener: { ok: false, code: 'unreachable', message: '连不上' } };
   const w = judge({ status: 503, body: report(false, broken) });
