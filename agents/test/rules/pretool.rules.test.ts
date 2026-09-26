@@ -1,4 +1,5 @@
-// 钉住调工具前钩子（agents/hooks/pretool.mjs）拦的几条规矩：fleet-dao 里不用 git stash（list、show 放行）；
+// 钉住调工具前钩子（agents/hooks/pretool.mjs）拦的规矩（改标准：改这个文件要创始人同意，packages/conventions/standard-paths.json）。
+// 几条规矩：fleet-dao 里不用 git stash（list、show 放行）；
 // 本机不切号、不登录、不退出（ssh 到别处的放行）；bash 里会被当命令执行的反引号全机都拦（单引号、带引号的 heredoc 里放行，
 // PowerShell 不管）；fleet-dao 开单走 pnpm issue:new；认不出的输入按拦处理。脚本改了这些判断，这里会红。
 // 命令字符串拆开拼：免得跑这条测试的命令、或者有人 grep 它时，本机的护栏把自己拦下。

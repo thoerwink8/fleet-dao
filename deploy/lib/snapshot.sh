@@ -176,7 +176,8 @@ snapshot_ours() {
   snapshot_firewall
 }
 
-# 同步脚本（packages/agents-sync）写进会话用户和 pilot 家里的：通用段所在的几份全局文件、它装的 skill、它的清单。
+# 同步脚本（packages/agents-sync）写进会话用户和 pilot 家里的：通用段所在的几份全局文件、它装的 skill、它的清单、
+# 同步位置（同一个提交再跑一遍不该重写）。
 # 每处一行，把名字、大小、修改时间、属主、权限压成一个指纹：内容没变却被重写了一遍，第二遍照样查得出。
 # 各家自己的东西（claude.ai 同步来的 skill、插件链进来的）自己会变，不记。落点照 packages/agents-sync/src/targets.ts
 # 另抄一份（自己查自己查不出错）：那边加了落点这里没跟上，packages/agents-sync/test/snapshot-list.test.ts 会红
@@ -191,7 +192,7 @@ snapshot_agents_sync() {
     h=$(getent passwd "$u" | cut -d: -f6) || h=""
     if [[ -z "$h" || ! -d "$h" ]]; then continue; fi
     for p in .claude/CLAUDE.md .codex/AGENTS.md .pi/agent/AGENTS.md .kimi-code/AGENTS.md .dsh/AGENTS.md .gemini/GEMINI.md \
-      .fleet-dao/agents-sync.json; do
+      .fleet-dao/agents-sync.json .fleet-dao/synced.json; do
       if [[ -e "$h/$p" || -L "$h/$p" ]]; then snapshot_tree_line "$u ~/$p" "$h/$p"; fi
     done
     for d in .claude/skills .agents/skills .gemini/config/skills; do
