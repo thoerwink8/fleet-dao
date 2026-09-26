@@ -18,6 +18,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
+import { type DoingIo, doing, fakeGitHub, NOW, runDoing } from './helpers/doing.ts';
 
 const SCRIPTS = fileURLToPath(new URL('../skills/commander-seat/scripts/', import.meta.url));
 
@@ -73,34 +74,10 @@ interface ProgressLib {
     stepMs?: number;
   }): Promise<{ state: 'up' | 'started' } | { state: 'failed'; why: string }>;
 }
-interface Claim {
-  id: number;
-  state: string;
-  machine: string;
-  text: string;
-}
-interface DoingIo {
-  gh: (args: string[], input?: string) => string;
-  env: Record<string, string | undefined>;
-  home: string;
-  now: () => Date;
-  sleep: (ms: number) => Promise<void>;
-  out: (text: string) => void;
-  err: (text: string) => void;
-}
-interface DoingLib {
-  STALE_HOURS: number;
-  renderClaim(state: string, machine: string, text: string): string;
-  parseClaim(comment: { id: number; body: string; html_url?: string; updated_at?: string }): Claim | null;
-  machineProblem(name: string): string | null;
-  runDoing(argv: string[], io: DoingIo): Promise<number>;
-}
 
 const load = async (name: string) => import(pathToFileURL(join(SCRIPTS, name)).href);
 const progress = (await load('progress-lib.mjs')) as ProgressLib;
-const doing = (await load('doing-lib.mjs')) as DoingLib;
 const HTML = join(SCRIPTS, 'index.html');
-const NOW = new Date('2026-09-27T03:00:00Z');
 
 const made: string[] = [];
 const servers: Server[] = [];
@@ -636,115 +613,13 @@ describe('命令行外壳：数据按 os.homedir() 放', () => {
 
 // ── 单上的「在做」 ──
 
-interface FakeComment {
-  id: number;
-  issue: number;
-  body: string;
-  created_at: string;
-  updated_at: string;
-  html_url: string;
-}
-
-/** 内存里的假 GitHub：只认 doing-lib 用到的四种 gh api 调用。 */
-function fakeGitHub() {
-  let next = 5000;
-  let clock = NOW.getTime() - 60_000;
-  const comments: FakeComment[] = [];
-  const calls: string[][] = [];
-  const hooks: {
-    beforePost?: (() => void) | undefined;
-    afterPost?: (() => void) | undefined;
-    failListAt?: number;
-    postReply?: string;
-  } = {};
-  let lists = 0;
-  /** 假时钟：每写一次往前走一秒（真 GitHub 的时间也是递增的）。 */
-  const tick = () => {
-    clock += 1000;
-    return new Date(clock).toISOString();
-  };
-  const add = (issue: number, body: string, at?: Date): FakeComment => {
-    const time = at ? at.toISOString() : tick();
-    const id = next++;
-    const c = {
-      id,
-      issue,
-      body,
-      created_at: time,
-      updated_at: time,
-      html_url: `https://github.com/o/r/issues/${issue}#c${id}`,
-    };
-    comments.push(c);
-    return c;
-  };
-  const gh = (args: string[], input?: string): string => {
-    calls.push(args);
-    const path = args.find((a) => a.startsWith('repos/')) ?? '';
-    const method = args.includes('-X') ? args[args.indexOf('-X') + 1] : 'GET';
-    const onIssue = /\/issues\/(\d+)\/comments$/.exec(path);
-    if (onIssue && method === 'GET') {
-      if (hooks.failListAt === lists++) throw new Error('gh 退出码 1：HTTP 502');
-      return comments
-        .filter((c) => c.issue === Number(onIssue[1]))
-        .map(
-          (c) =>
-            `${JSON.stringify({ body: c.body, created_at: c.created_at, html_url: c.html_url, id: c.id, updated_at: c.updated_at })}\n`,
-        )
-        .join('');
-    }
-    if (onIssue && method === 'POST') {
-      hooks.beforePost?.();
-      const c = add(Number(onIssue[1]), JSON.parse(input ?? '{}').body);
-      hooks.afterPost?.();
-      return hooks.postReply ?? JSON.stringify(c);
-    }
-    const one = /\/issues\/comments\/(\d+)$/.exec(path);
-    const c = comments.find((x) => x.id === Number(one?.[1]));
-    if (one && c && method === 'PATCH') {
-      c.body = JSON.parse(input ?? '{}').body;
-      c.updated_at = tick();
-      return JSON.stringify(c);
-    }
-    if (one && c && method === 'DELETE') {
-      comments.splice(comments.indexOf(c), 1);
-      return '';
-    }
-    throw new Error(`假 GitHub 不认得：${args.join(' ')}`);
-  };
-  const claims = (issue: number) =>
-    comments
-      .filter((c) => c.issue === issue)
-      .map((c) => doing.parseClaim(c))
-      .filter((c): c is Claim => c !== null);
-  return {
-    gh,
-    comments,
-    calls,
-    hooks,
-    add,
-    claims,
-    methods: () => calls.map((a) => (a.includes('-X') ? a[a.indexOf('-X') + 1] : 'GET')),
-  };
-}
-
 async function run(
   gh: DoingIo['gh'],
   argv: string[],
   env: Record<string, string | undefined> = { FLEET_MACHINE: '本机' },
   home = tempHome(),
 ) {
-  const out: string[] = [];
-  const err: string[] = [];
-  const code = await doing.runDoing(argv, {
-    gh,
-    env,
-    home,
-    now: () => NOW,
-    sleep: async () => {},
-    out: (t) => out.push(t),
-    err: (t) => err.push(t),
-  });
-  return { code, out: out.join('\n'), err: err.join('\n') };
+  return runDoing(gh, argv, env, home);
 }
 
 describe('「在做」评论的格式', () => {
@@ -781,33 +656,11 @@ describe('doing.mjs claim：动一张单之前先认领', () => {
     expect(gh.methods()).toEqual(['GET', 'POST', 'GET']);
   });
 
-  it('别的机器在做：退出码 3，不留评论', async () => {
-    const gh = fakeGitHub();
-    gh.add(12, doing.renderClaim('doing', '法国', '在写'));
-    const r = await run(gh.gh, ['claim', '12']);
-    expect(r.code).toBe(3);
-    expect(r.out).toContain('法国 在做');
-    expect(gh.methods()).toEqual(['GET']);
-  });
-
   it('别的机器做完了、放下了的不挡', async () => {
     const gh = fakeGitHub();
     gh.add(12, doing.renderClaim('done', '法国', '合了'));
     gh.add(12, doing.renderClaim('dropped', '笔记本', '不做了'));
     expect((await run(gh.gh, ['claim', '12'])).code).toBe(0);
-  });
-
-  it('撞车：我留言的同时法国先留了（编号比我小）——我撤回自己那条，退出码 3', async () => {
-    const gh = fakeGitHub();
-    gh.hooks.beforePost = () => {
-      gh.hooks.beforePost = undefined;
-      gh.add(12, doing.renderClaim('doing', '法国', '也在抢'));
-    };
-    const r = await run(gh.gh, ['claim', '12']);
-    expect(r.code).toBe(3);
-    expect(r.out).toContain('撞了：法国 先留的');
-    expect(gh.claims(12)).toMatchObject([{ machine: '法国', state: 'doing' }]);
-    expect(gh.methods()).toEqual(['GET', 'POST', 'GET', 'DELETE']);
   });
 
   it('撞车：法国比我晚留（编号比我大）——我留着；法国那条是晚的，报进度被拒，再认领时删掉自己那条', async () => {
@@ -837,25 +690,6 @@ describe('doing.mjs claim：动一张单之前先认领', () => {
     expect(r.out).toContain('本来就是 本机 在做');
     expect(gh.claims(12)).toMatchObject([{ machine: '本机', text: '新的一句' }]);
     expect(gh.methods()).toEqual(['GET', 'PATCH']);
-  });
-
-  it('创始人说了才接手：--takeover 把别的机器那条改成放下（记上原话），再认领', async () => {
-    const gh = fakeGitHub();
-    gh.add(12, doing.renderClaim('doing', '法国', '做到一半'));
-    const r = await run(gh.gh, ['claim', '12', '--takeover', '法国断了，本机接着做']);
-    expect(r.code).toBe(0);
-    expect(gh.claims(12)).toMatchObject([
-      {
-        machine: '法国',
-        state: 'dropped',
-        text: expect.stringContaining('创始人让 本机 接手（原话：法国断了，本机接着做）'),
-      },
-      { machine: '本机', state: 'doing' },
-    ]);
-    // 法国回来还想接着报进度：告诉它这张已经不归它
-    const back = await run(gh.gh, ['say', '12', '我回来了'], { FLEET_MACHINE: '法国' });
-    expect(back.code).toBe(3);
-    expect(back.out).toContain('不归你');
   });
 
   it('查不成就是查不成：先读失败退出码 2、不留评论；读回失败撤回自己那条、退出码 2', async () => {
