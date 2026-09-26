@@ -12,7 +12,7 @@ import type {
   SubtaskState,
   TaskState,
 } from '@fleet-dao/shared';
-import { and, asc, desc, eq, gte, inArray, isNull, max, notInArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, getTableColumns, gte, inArray, isNull, max, notInArray, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import {
   approvals,
@@ -33,6 +33,7 @@ import {
   tasks,
 } from '../schema/index.ts';
 import { type Blocker, stageCandidates } from './candidates.ts';
+import { type FlowReplicaState, flowReplicaOf } from './flow.ts';
 
 /** 起出来的会话进程在哪；会话状态、markSessionRunStarted 的输入用同一个形状。 */
 type RunHandle = { pid?: number; scope?: string };
@@ -68,6 +69,8 @@ export interface SessionRunState {
   failureMessage: string | null;
   contextTokens: number | null;
   sessionCostUsd: number | null;
+  /** 起会话时交代的测试命令（交活核对认它）。 */
+  testCommand: string | null;
   /** session_stops 里有这一行就给出。 */
   stopRequested: { at: Date; reason: string } | null;
 }
@@ -96,6 +99,7 @@ function mapSessionRun(
     failureMessage: row.failureMessage,
     contextTokens: row.contextTokens,
     sessionCostUsd: row.sessionCostUsd,
+    testCommand: row.testCommand,
     stopRequested: stop ? { at: stop.requestedAt, reason: stop.reason } : null,
   };
 }
@@ -117,14 +121,21 @@ export interface OpenSessionRunInput {
   workflowId: string | null;
   runAsUser: string | null;
   worktreePath: string | null;
+  /** 这次交代给会话的测试命令（副本里的，taskContext 读出来、起会话前核过）；没有就是 null。 */
+  testCommand?: string | null;
 }
 
-/** 按 id 幂等：已有就不动、原样返回（created=false）。外键不满足（任务、子任务、路由不在库里）照常抛，别吞。 */
+/**
+ * 按 id 幂等：已有就原样返回（created=false）。外键不满足（任务、子任务、路由不在库里）照常抛，别吞。
+ * 唯一的例外是测试命令：已有的这一行还没开工（上一次尝试没把会话起来），就改成这一次交代的——交活核对认的必须是
+ * 真起来的那次会话被告知的命令；已经开工的不改。
+ */
 export async function openSessionRun(
   db: Db,
   input: OpenSessionRunInput,
 ): Promise<{ created: boolean; run: SessionRunState }> {
-  const [inserted] = await db
+  const testCommand = input.testCommand ?? null;
+  const [written] = await db
     .insert(sessionRuns)
     .values({
       id: input.id,
@@ -138,14 +149,20 @@ export async function openSessionRun(
       workflowId: input.workflowId,
       runAsUser: input.runAsUser as RunAsUser | null,
       worktreePath: input.worktreePath,
+      testCommand,
     })
-    .onConflictDoNothing({ target: sessionRuns.id })
-    .returning();
-  const row = inserted ?? (await db.select().from(sessionRuns).where(eq(sessionRuns.id, input.id)))[0];
+    .onConflictDoUpdate({
+      target: sessionRuns.id,
+      set: { testCommand },
+      setWhere: sql`${sessionRuns.startedAt} is null and ${sessionRuns.endedAt} is null`,
+    })
+    // xmax = 0 只在这一行是刚插入（不是走 on conflict 更新）时成立
+    .returning({ ...getTableColumns(sessionRuns), created: sql<boolean>`(xmax = 0)` });
+  const row = written ?? (await db.select().from(sessionRuns).where(eq(sessionRuns.id, input.id)))[0];
   if (!row) throw new Error(`会话 ${input.id} 写不进也读不到`);
   // 叫停可能早于这一行插入：不管这行是刚插的还是已有的，都要把已经记下的叫停请求带出去。
   const stop = await currentStop(db, input.id);
-  return { created: inserted !== undefined, run: mapSessionRun(row, stop) };
+  return { created: written?.created === true, run: mapSessionRun(row, stop) };
 }
 
 /** 只在 started_at 为空时写 started_at；session_id、handle 每次覆盖。行不在返回 'not_found'。 */
@@ -312,10 +329,22 @@ export interface TaskContext {
   rawRequest: string;
   specDir: string | null;
   acceptance: string[];
-  repo: { id: string; owner: string; name: string; defaultBranch: string; testCommand: string };
+  repo: {
+    id: string;
+    owner: string;
+    name: string;
+    defaultBranch: string;
+    /**
+     * 流程配置副本里的测试命令（flow_config 的 testCommand，不是给人看的 test_command 列）；项目没写、从没同步成过
+     * 都是 null。起会话前按 core 的 sessionTestCommand 核过再用（packages/engine/src/real/flow-gate.ts）。
+     */
+    testCommand: string | null;
+    /** 副本此刻的样子：派活前判能不能用。 */
+    flow: FlowReplicaState;
+  };
 }
 
-/** 起会话、拼接力任务书要的：任务属于哪个仓、哪张 issue。任务不在返回 null。 */
+/** 起会话、拼接力任务书要的：任务属于哪个仓、哪张 issue，连同仓的流程配置副本。任务不在返回 null。 */
 export async function taskContext(db: Db, taskId: string): Promise<TaskContext | null> {
   const [row] = await db
     .select({ task: tasks, repo: repos })
@@ -323,6 +352,7 @@ export async function taskContext(db: Db, taskId: string): Promise<TaskContext |
     .innerJoin(repos, eq(repos.id, tasks.repoId))
     .where(eq(tasks.id, taskId));
   if (!row) return null;
+  const flow = flowReplicaOf(row.repo);
   return {
     taskId: row.task.id,
     issueNumber: row.task.issueNumber,
@@ -335,7 +365,8 @@ export async function taskContext(db: Db, taskId: string): Promise<TaskContext |
       owner: row.repo.owner,
       name: row.repo.name,
       defaultBranch: row.repo.defaultBranch,
-      testCommand: row.repo.testCommand,
+      testCommand: flow.testCommand,
+      flow,
     },
   };
 }

@@ -74,6 +74,7 @@ import {
   type StartSessionResult,
 } from '../ports.ts';
 import type { UserExec } from './exec.ts';
+import { sessionTestCommandOrStop } from './flow-gate.ts';
 import { bundleFromMirror, type MirrorGitHub, mapped } from './mirror.ts';
 import {
   OUTPUT_FILES,
@@ -503,6 +504,8 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     }
     // 资源上限先换算、先校验：不对就在登记这一行之前拒，库里不留没起也没结束的会话
     const limits = scopeLimitsOf(input.resources);
+    // 流程配置副本也先核（flow-gate.ts）：坏了、太旧不起；写码阶段项目没写测试命令明确失败。交代的命令记进这一行，交活认它
+    const testCommand = sessionTestCommandOrStop(task, input.stage, clock());
     let dir: string;
     if (kind === 'delivery') {
       if (!input.worktreePath) {
@@ -525,6 +528,7 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
       workflowId: null,
       runAsUser: user,
       worktreePath: dir,
+      testCommand,
     });
     const existing = opened.run;
     if (existing.stopRequested) {

@@ -55,8 +55,6 @@ export type Profile = z.infer<typeof ProfileSchema>;
 const BanSchema = z.object({ id: z.string().trim().min(1), reason: z.string().trim().min(1) }).strict();
 
 const optionalFields = {
-  /** 交活核对跑的测试命令（只跑改动影响到的）。 */
-  testCommand: z.string().trim().min(1).optional(),
   /** 一个干活会话的内存上限（MB）。 */
   sessionMemoryMb: z.number().int().positive().optional(),
   /** 高风险路径：单模型模式下第 5 步只对碰到它们的开。以 / 结尾的是目录。 */
@@ -83,6 +81,11 @@ export const ProjectConfigSchema = z
     /** 整套加上或整套换掉同名的。 */
     profiles: z.record(z.string().trim().min(1), ProfileSchema).optional(),
     categoryProfiles: z.partialRecord(z.enum(CATEGORIES), z.string().trim().min(1)).optional(),
+    /**
+     * 写码会话交活要跑的测试命令（只跑改动影响到的）。只能写在项目里：各仓的命令不一样，全组织默认放一条会顶掉
+     * 没写的项目（拿别的仓的命令去跑），所以全组织默认里写了算认不出。项目没写，写码会话起不来（replica.ts）。
+     */
+    testCommand: z.string().trim().min(1).optional(),
     ...optionalFields,
   })
   .strict();
@@ -92,6 +95,7 @@ export interface FlowConfig {
   profiles: Record<string, Profile>;
   categoryProfiles: Record<Category, string>;
   bans: { id: string; reason: string }[];
+  /** 只来自项目的配置；没写就没有（不拿全组织默认或旧值顶）。 */
   testCommand?: string;
   sessionMemoryMb?: number;
   highRiskPaths: string[];
@@ -122,6 +126,8 @@ function issues(error: z.ZodError): string {
       const where = i.path.join('.') || '整份';
       if (i.code === 'unrecognized_keys' && i.keys.includes('bans'))
         return '禁令只能写在全组织默认里，项目改不掉';
+      if (i.code === 'unrecognized_keys' && i.keys.includes('testCommand'))
+        return `测试命令只能写在各项目仓里的 ${PROJECT_CONFIG_PATH}（各仓不一样），全组织默认不放`;
       return `${where}：${i.message}`;
     })
     .join('；');
@@ -170,7 +176,6 @@ export function resolveFlowConfig(org: Source, project: Source): ConfigDecision 
     profiles: { ...base.profiles },
     categoryProfiles: { ...(base.categoryProfiles as Record<Category, string>) },
     bans: base.bans,
-    ...(base.testCommand !== undefined ? { testCommand: base.testCommand } : {}),
     ...(base.sessionMemoryMb !== undefined ? { sessionMemoryMb: base.sessionMemoryMb } : {}),
     highRiskPaths: base.highRiskPaths ?? [],
     uiPaths: base.uiPaths ?? [],

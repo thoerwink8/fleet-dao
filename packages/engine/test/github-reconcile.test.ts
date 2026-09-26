@@ -3,7 +3,16 @@
 // 没跑成、没查成、认不出，都要记成明确的结局（failed / unscanned / partial），不记成 ok。
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
 import { type RequirementStart, type RequirementWorkflows, WorkflowUnavailableError } from '@fleet-dao/api';
-import { repos, scheduleHealth, scheduleRuns, tasks, users } from '@fleet-dao/db';
+import type { Source } from '@fleet-dao/core';
+import {
+  githubEvents,
+  notifications,
+  repos,
+  scheduleHealth,
+  scheduleRuns,
+  tasks,
+  users,
+} from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { type AppCredentials, createGitHub, pgLedger } from '@fleet-dao/github';
 import { requirementWorkflowId } from '@fleet-dao/shared';
@@ -19,6 +28,7 @@ import {
   type GitHubReconcileJobDeps,
   runGitHubReconcileJob,
   toScheduleResult,
+  withFlowSync,
 } from '../src/jobs/github-reconcile.ts';
 import {
   engineSchedules,
@@ -60,9 +70,20 @@ interface GitHubState {
   issues: unknown[];
   /** 设了就所有接口都这样回（读不到 GitHub）。 */
   down?: number;
+  /** 默认分支头上的 .fleet/flow.json：给了是正文，不给（undefined）是没有这个文件。 */
+  flowFile?: string;
+  /** 设了就只有读 .fleet/flow.json 这样回（读流程配置没查成）。 */
+  flowDown?: number;
+  /** 默认分支头的提交。 */
+  head?: string;
 }
 
-/** 只答对账会问的几条：安装、令牌、issue 列表、评论列表、PR 列表、投递日志。since 照 GitHub 的规矩过滤。 */
+const HEAD_A = 'a'.repeat(40);
+
+/**
+ * 只答对账会问的几条：安装、令牌、仓（默认分支）、默认分支头、.fleet/flow.json、issue 列表、评论列表、PR 列表、投递日志。
+ * since 照 GitHub 的规矩过滤。
+ */
 function githubApi(state: GitHubState): typeof fetch {
   return async (input, init) => {
     const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
@@ -84,6 +105,22 @@ function githubApi(state: GitHubState): typeof fetch {
       x === null ||
       String((x as { updated_at?: unknown }).updated_at) >= since;
     const base = `/repos/${SLUG}`;
+    if (url.pathname === base) return reply(200, { default_branch: 'main', full_name: SLUG, private: false });
+    if (url.pathname === `${base}/git/ref/heads/main`) {
+      return reply(200, { ref: 'refs/heads/main', object: { sha: state.head ?? HEAD_A, type: 'commit' } });
+    }
+    if (url.pathname === `${base}/contents/.fleet/flow.json`) {
+      if (state.flowDown) return reply(state.flowDown, { message: 'Server Error' });
+      if (url.searchParams.get('ref') !== (state.head ?? HEAD_A))
+        return reply(400, { message: '读的不是分支头' });
+      if (state.flowFile === undefined) return reply(404, { message: 'Not Found' });
+      return reply(200, {
+        type: 'file',
+        encoding: 'base64',
+        path: '.fleet/flow.json',
+        content: Buffer.from(state.flowFile, 'utf8').toString('base64'),
+      });
+    }
     if (url.pathname === `${base}/issues`) {
       const open = url.searchParams.get('state') === 'open';
       return reply(
@@ -142,7 +179,12 @@ beforeEach(async () => {
 async function wiring(
   state: GitHubState,
   /** requirements：'real' = 真的经 Temporal 起需求工作流（后端的 createTemporalRequirementWorkflows）；不给就是只记下的假的。 */
-  options: { requirements?: RequirementWorkflows | 'real'; register?: boolean } = {},
+  options: {
+    requirements?: RequirementWorkflows | 'real';
+    register?: boolean;
+    /** 换掉全组织默认（不给就读代码里带的 packages/core/flow.default.json）。 */
+    orgDefault?: () => Promise<Source>;
+  } = {},
 ) {
   const [repo] = await t.db
     .insert(repos)
@@ -170,6 +212,7 @@ async function wiring(
     db: t.db,
     gh,
     ...(options.requirements === 'real' ? {} : { requirements: options.requirements ?? fake.requirements }),
+    ...(options.orgDefault ? { orgDefault: options.orgDefault } : {}),
     log: quiet,
   });
   return { repoId: repo?.id ?? '', starts: fake.starts, job };
@@ -310,13 +353,150 @@ describe('对账补漏的工作流（真 Temporal 测试服务端）', { timeout
   });
 });
 
+// 流程配置副本（0003 第 9 条）：每轮对账先读仓里默认分支头上的 .fleet/flow.json，合并校验后写进 repos 的 flow_* 列，
+// 接活拉起工作流前看它。不起 Temporal：直接跑一轮（拉起需求工作流用只记下的假的），库是 PGlite 上跑真迁移。
+describe('流程配置副本：每轮对账从仓里同步（真库、照 GitHub 回话的假服务）', () => {
+  const HEAD_B = 'b'.repeat(40);
+  const KEY = `flow-config:${SLUG}`;
+  const config = (o: Record<string, unknown>) => JSON.stringify({ formatVersion: 1, ...o });
+  const round = (w: Awaited<ReturnType<typeof wiring>>) =>
+    runGitHubReconcileJob(w.job({} as unknown as Client, 'fleet-test'));
+  const row = async () => {
+    const [r] = await t.db.select().from(repos);
+    if (!r) throw new Error('库里没有这个仓');
+    return r;
+  };
+  const alertOf = async (key: string) =>
+    (await t.db.select().from(notifications)).find((n) => n.dedupeKey === key);
+
+  it('仓里没有 .fleet/flow.json：副本用全组织默认、标成 org_default，记下读的提交；给人看的 test_command 不动；单照常拉起', async () => {
+    const w = await wiring({ issues: [issue(41, -20)] });
+    expect(await round(w)).toMatchObject({ outcome: 'ok', scanned: 1, found: 1 });
+    const r = await row();
+    expect(r).toMatchObject({
+      flowSource: 'org_default',
+      flowCommit: HEAD_A,
+      flowError: null,
+      flowUnread: null,
+      testCommand: 'pnpm check',
+    });
+    expect(r.flowSyncedAt).toBeInstanceOf(Date);
+    expect(r.flowConfig).toMatchObject({ formatVersion: 1, categoryProfiles: { 需求: 'default' } });
+    // 全组织默认里不放测试命令：这个仓的写码会话会停下说「项目没写测试命令」（real/flow-gate.ts）
+    expect(r.flowConfig).not.toHaveProperty('testCommand');
+    expect(w.starts.map((s) => s.issueNumber)).toEqual([41]);
+  });
+
+  it('仓里写了测试命令、后来改了：副本整份跟着变（测试命令、读的提交），给人看的 test_command 也改成一样的', async () => {
+    const state: GitHubState = { issues: [], flowFile: config({ testCommand: 'pnpm test:changed' }) };
+    const w = await wiring(state);
+    await round(w);
+    expect(await row()).toMatchObject({
+      flowSource: 'project',
+      flowCommit: HEAD_A,
+      testCommand: 'pnpm test:changed',
+      flowConfig: expect.objectContaining({ testCommand: 'pnpm test:changed' }),
+    });
+    state.flowFile = config({ testCommand: 'pnpm test' });
+    state.head = HEAD_B;
+    await round(w);
+    expect(await row()).toMatchObject({
+      flowCommit: HEAD_B,
+      testCommand: 'pnpm test',
+      flowConfig: expect.objectContaining({ testCommand: 'pnpm test' }),
+    });
+  });
+
+  it('【失败】坏 JSON：这个项目停派、报一条提醒，单子建了行但不拉起（投递记成等着）；改好之后下一轮自动恢复、补拉起、撤掉提醒', async () => {
+    const state: GitHubState = { issues: [issue(41, -20)], flowFile: '{"formatVersion": 1,' };
+    const w = await wiring(state);
+    const first = await round(w);
+    // 轮询到这张单时接活说「等着」，这个仓这一轮没轮询完：不记 ok，原因里两样都写明
+    expect(first.outcome).not.toBe('ok');
+    expect(first.why).toContain(`流程配置 ${SLUG} 认不出、停派`);
+    expect(first.why).toContain('这个项目停派：流程配置认不出');
+    const r = await row();
+    expect(r.flowError).toMatch(/项目配置 \.fleet\/flow\.json：不是 JSON.*（提交 aaaaaaa）/);
+    expect(r.flowSyncedAt).toBeNull();
+    expect(await alertOf(KEY)).toMatchObject({
+      level: 'alert',
+      resolvedAt: null,
+      title: `${SLUG} 的流程配置认不出：这个项目停派`,
+    });
+    expect((await t.db.select().from(tasks)).map((x) => x.issueNumber)).toEqual([41]);
+    expect(w.starts).toEqual([]);
+    const waiting = (await t.db.select().from(githubEvents)).filter((e) => e.status === 'waiting');
+    expect(waiting.map((e) => e.reason)).toEqual([expect.stringContaining('这个项目停派：流程配置认不出')]);
+
+    // 仓里改好了：下一轮先同步副本，再重放等着的投递——这回拉起，提醒撤掉
+    state.flowFile = config({ testCommand: 'pnpm test:changed' });
+    await round(w);
+    expect(await row()).toMatchObject({ flowError: null, testCommand: 'pnpm test:changed' });
+    expect((await alertOf(KEY))?.resolvedAt).toBeInstanceOf(Date);
+    expect(w.starts.map((s) => s.issueNumber)).toEqual([41]);
+  });
+
+  it('【失败】读 .fleet/flow.json 时 GitHub 出错：记下没查成，副本一样不动（不当成没有这个文件）；这一轮记成没查全', async () => {
+    const state: GitHubState = { issues: [], flowFile: config({ testCommand: 'pnpm test:changed' }) };
+    const w = await wiring(state);
+    await round(w);
+    const before = await row();
+    state.flowDown = 502;
+    delete state.flowFile; // 就算文件真没了，没查成也看不出来：不许写成「没有」
+    const run = await round(w);
+    expect(run.outcome).toBe('partial');
+    expect(run.why).toContain(`流程配置 ${SLUG} 没查成`);
+    const after = await row();
+    expect(after.flowUnread).toMatch(/502/);
+    const same = (x: typeof after) => ({ ...x, flowUnread: null, flowCheckedAt: null });
+    expect(same(after)).toEqual(same(before));
+    // 还在时限里：照样能派，不报提醒
+    expect(await alertOf(KEY)).toBeUndefined();
+  });
+
+  it('【失败】没查成、副本又已经超过 45 分钟没同步成：停派并报提醒；读成一次就撤掉', async () => {
+    const state: GitHubState = { issues: [], flowFile: config({ testCommand: 'pnpm test:changed' }) };
+    const w = await wiring(state);
+    await round(w);
+    await t.db.update(repos).set({ flowSyncedAt: new Date(Date.now() - 50 * 60_000) });
+    state.flowDown = 502;
+    await round(w);
+    expect(await alertOf(KEY)).toMatchObject({
+      resolvedAt: null,
+      body: expect.stringMatching(/5\d 分钟没同步成.*最近一次没查成/),
+    });
+    delete state.flowDown;
+    await round(w);
+    expect((await alertOf(KEY))?.resolvedAt).toBeInstanceOf(Date);
+  });
+
+  it('【失败】全组织默认坏了：所有仓停派，只报一条全组织的提醒（不按仓各报一条）', async () => {
+    const w = await wiring(
+      { issues: [], flowFile: config({ testCommand: 'pnpm test:changed' }) },
+      { orgDefault: async () => ({ kind: 'text', text: '{' }) },
+    );
+    // 这一轮查全了（ok），认不出算发现的问题；原因在提醒和副本里
+    expect(await round(w)).toMatchObject({ outcome: 'ok', found: 1 });
+    expect((await row()).flowError).toMatch(/^全组织默认：不是 JSON/);
+    expect(await alertOf('flow-config:org')).toMatchObject({
+      resolvedAt: null,
+      title: '全组织默认的流程配置认不出：所有项目停派',
+    });
+    expect(await alertOf(KEY)).toBeUndefined();
+  });
+});
+
 describe('对账补漏一轮的记账（不起 Temporal）', () => {
   const NOW = new Date('2026-09-25T08:00:00.000Z');
 
-  function deps(reconcile: GitHubReconcileJobDeps['reconcile']) {
+  function deps(
+    reconcile: GitHubReconcileJobDeps['reconcile'],
+    syncFlowConfigs: GitHubReconcileJobDeps['syncFlowConfigs'] = async () => ({ repos: [] }),
+  ) {
     const finished: { id: number; result: unknown }[] = [];
     const logs: string[] = [];
     const d: GitHubReconcileJobDeps = {
+      syncFlowConfigs,
       reconcile,
       runs: {
         async start() {
@@ -366,6 +546,65 @@ describe('对账补漏一轮的记账（不起 Temporal）', () => {
       throw new Error('库连不上');
     };
     await expect(runGitHubReconcileJob(d)).rejects.toThrow('库连不上');
+  });
+
+  it('先同步流程配置副本、再对账（同一轮里重放等着的投递看到的是新副本）', async () => {
+    const order: string[] = [];
+    const { d } = deps(
+      async () => {
+        order.push('reconcile');
+        return { outcome: 'ok', scanned: 1, found: 0, steps: [] };
+      },
+      async () => {
+        order.push('flow');
+        return { repos: [{ repo: 'example/canary', outcome: 'synced', source: 'project', blocked: false }] };
+      },
+    );
+    expect(await runGitHubReconcileJob(d)).toEqual({ runId: 7, outcome: 'ok', scanned: 1, found: 0 });
+    expect(order).toEqual(['flow', 'reconcile']);
+  });
+
+  it('【失败】有仓的流程配置没查成：这一轮记成 partial（没查全），原因写明；认不出的算发现的问题', async () => {
+    const { d, finished } = deps(
+      async () => ({ outcome: 'ok', scanned: 2, found: 0, steps: [] }),
+      async () => ({
+        repos: [
+          { repo: 'example/canary', outcome: 'unread', why: 'GitHub 回 502', blocked: false },
+          {
+            repo: 'example/other',
+            outcome: 'invalid',
+            why: '项目配置 .fleet/flow.json：不是 JSON',
+            blocked: true,
+          },
+        ],
+      }),
+    );
+    const run = await runGitHubReconcileJob(d);
+    expect(run).toMatchObject({ outcome: 'partial', scanned: 2, found: 1 });
+    expect(run.why).toContain('流程配置 example/canary 没查成（GitHub 回 502）');
+    expect(run.why).toContain('流程配置 example/other 认不出、停派（项目配置 .fleet/flow.json：不是 JSON）');
+    expect(finished[0]?.result).toMatchObject({ outcome: 'partial', found: 1 });
+  });
+
+  it('【失败】流程配置整步没跑成（读仓列表出错）：不挡对账本身，这一轮记成 partial 写明原因', async () => {
+    let reconciled = false;
+    const { d } = deps(
+      async () => {
+        reconciled = true;
+        return { outcome: 'ok', scanned: 1, found: 0, steps: [] };
+      },
+      async () => {
+        throw new Error('读 repos 表超时');
+      },
+    );
+    const run = await runGitHubReconcileJob(d);
+    expect(reconciled).toBe(true);
+    expect(run).toMatchObject({ outcome: 'partial', why: '流程配置没同步成：读 repos 表超时' });
+  });
+
+  it('流程配置全同步成、没问题：这一轮的结局照对账的原样', () => {
+    const r = { outcome: 'unscanned' as const, scanned: 0, found: 0, why: '没有受管的仓', steps: [] };
+    expect(withFlowSync(r, { repos: [] })).toBe(r);
   });
 });
 

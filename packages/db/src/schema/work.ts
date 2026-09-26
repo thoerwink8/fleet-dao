@@ -41,14 +41,54 @@ export const repos = pgTable(
     owner: text('owner').notNull(),
     name: text('name').notNull(),
     defaultBranch: text('default_branch').notNull().default('main'),
+    /**
+     * 给人看的测试命令：对账从仓里 .fleet/flow.json 读成、配置里写了测试命令时跟着改成它（建仓时先填个占位）。
+     * 派活不读这一列——起会话、交活核对认的是副本 flow_config 里的 testCommand（项目没写就是没有，这一列的旧值不顶）。
+     */
     testCommand: text('test_command').notNull(),
     /**
      * 自动派活开关（design 第九节「在哪能做与接活开关」）：打开的时刻，空 = 关着。关着只收单、显示；
      * 打开以前就开着的 issue 也不自动派，要人点「交给 fleet」。
      */
     autoDispatchSince: timestamp('auto_dispatch_since', tz),
+    // —— 流程配置的副本（docs/decisions/0003-fusion-flow.md 第 9 条：以仓里的 .fleet/flow.json 为准，这里只是副本）。
+    // 只由引擎的对账写（packages/engine/src/jobs/flow-config.ts），怎么判在 packages/core/src/replica.ts。
+    /** 合并了全组织默认、校验过的整份配置（core 的 FlowConfig）。从没读成过是空。 */
+    flowConfig: jsonb('flow_config').$type<Record<string, unknown>>(),
+    /** project = 仓里有自己的 .fleet/flow.json；org_default = 没有，用的全组织默认（驾驶舱要标出来）。 */
+    flowSource: text('flow_source').$type<'project' | 'org_default'>(),
+    /** 副本读自默认分支的哪个提交。 */
+    flowCommit: text('flow_commit'),
+    /** 最近一次读成、认得出的时刻：派活看它新不新鲜（太旧就停派）。 */
+    flowSyncedAt: timestamp('flow_synced_at', tz),
+    /** 仓里的配置认不出（或全组织默认坏了）的原因：非空就这个项目停派。读成、认得出时清空。 */
+    flowError: text('flow_error'),
+    /** 最近一次去读的时刻（读没读成都记）。 */
+    flowCheckedAt: timestamp('flow_checked_at', tz),
+    /** 最近一次没查成（GitHub 接口出错）的原因：副本不动、不当成「没有这个文件」。下一次读成时清空。 */
+    flowUnread: text('flow_unread'),
   },
-  (t) => [unique('repos_owner_name_unique').on(t.owner, t.name)],
+  (t) => [
+    unique('repos_owner_name_unique').on(t.owner, t.name),
+    check(
+      'repos_flow_source_known',
+      sql`${t.flowSource} is null or ${t.flowSource} in ('project', 'org_default')`,
+    ),
+    // 读成过就四样都有，没读成过就都没有：不许出现「有配置、不知道读自哪个提交、什么时候读的」
+    check(
+      'repos_flow_synced_together',
+      sql`(${t.flowSyncedAt} is null) = (${t.flowConfig} is null) and (${t.flowSyncedAt} is null) = (${t.flowSource} is null) and (${t.flowSyncedAt} is null) = (${t.flowCommit} is null)`,
+    ),
+    check(
+      'repos_flow_reasons_not_blank',
+      sql`(${t.flowError} is null or ${t.flowError} <> '') and (${t.flowUnread} is null or ${t.flowUnread} <> '')`,
+    ),
+    // 起会话按副本里的 testCommand 交代、交活按它核对：要么没有，要么是不空的字符串，读的地方不用再猜
+    check(
+      'repos_flow_config_shape',
+      sql`${t.flowConfig} is null or (jsonb_typeof(${t.flowConfig}) = 'object' and (jsonb_typeof(${t.flowConfig} -> 'testCommand') is null or (jsonb_typeof(${t.flowConfig} -> 'testCommand') = 'string' and ${t.flowConfig} ->> 'testCommand' <> '')))`,
+    ),
+  ],
 );
 
 /** 需求：一张 GitHub issue 一行。 */
@@ -191,6 +231,11 @@ export const sessionRuns = pgTable(
     /** 执行体报的会话累计花费（续会话时含前几轮），对账用；不知道就是空，不记 0。 */
     sessionCostUsd: numeric('session_cost_usd', { precision: 14, scale: 6, mode: 'number' }),
     contextTokens: bigint('context_tokens', { mode: 'number' }),
+    /**
+     * 起会话时交代给它的测试命令（当时副本里的）：交活核对只认这一条。开工后仓里改了命令，这次会话照旧按开工时的交活，
+     * 不会被新命令退回。空 = 开工时项目没写测试命令（只有不写码的阶段起得来），或是加这一列之前开的会话。
+     */
+    testCommand: text('test_command'),
   },
   (t) => [
     foreignKey({
@@ -224,6 +269,7 @@ export const sessionRuns = pgTable(
       'session_runs_route_outcome_known',
       sql`${t.routeOutcome} is null or ${t.routeOutcome} in ('ok', 'fail', 'neutral')`,
     ),
+    check('session_runs_test_command_not_blank', sql`${t.testCommand} is null or ${t.testCommand} <> ''`),
     index('session_runs_task_idx').on(t.taskId, t.queuedAt),
     // 在途会话（还没结束的）按路由查，算账号池的并发。
     index('session_runs_open_idx').on(t.routeId).where(sql`${t.endedAt} is null`),
