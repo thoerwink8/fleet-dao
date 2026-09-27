@@ -4,6 +4,7 @@
 import type { SessionUser } from '@fleet-dao/adapters';
 import { PortError } from '../ports.ts';
 import { describeFailure, type UserCommandResult, type UserExec } from './exec.ts';
+import { OUT_DIR } from './prompts.ts';
 
 export const GIT = '/usr/bin/git';
 const SH = '/bin/sh';
@@ -464,13 +465,19 @@ export async function readFileAs(t: UserTree, path: string): Promise<string | nu
 
 /** 一棵没有在跑的任务在用的树里还剩什么（每小时对账删树之前看，jobs/worktree-sweep.ts）。 */
 export type TreeLeftovers =
-  /** 这一层不是 git 仓，里面什么都没有（建树建到一半）：删了不丢东西。 */
+  /** 这一层不是 git 仓，里面什么都没有（建树建到一半），或者只剩 DISPOSABLE 里的东西：删了不丢东西。 */
   | { kind: 'empty' }
-  /** 这一层不是 git 仓，里面却有东西（前几个名字）：认不出是什么，不删。 */
-  | { kind: 'not-repo'; entries: string[] }
+  /**
+   * 这一层不是 git 仓，里面有 DISPOSABLE 以外的文件：认不出是什么，不删。files 是排好序的前几个（相对这一层的路径），
+   * 一共几个在 fileCount。
+   */
+  | { kind: 'not-repo'; files: string[]; fileCount: number }
   | {
       kind: 'repo';
-      /** 没提交的改动（git status --porcelain：改了的、暂存了的、没跟踪也没被忽略的新文件），前几行。 */
+      /**
+       * 没提交的改动，前几行：跟踪着的文件改了、暂存了、删了（git status --porcelain 的行），没跟踪也没被忽略的新文件
+       * 一个一个列（?? <路径>；DISPOSABLE 里的不算）。
+       */
       dirty: string[];
       dirtyCount: number;
       /** 存着几个 stash。 */
@@ -480,8 +487,90 @@ export type TreeLeftovers =
       unpushedCount: number;
     };
 
-/** 报「树里还剩什么」时每样最多列几个。 */
-export const LEFTOVER_LIST_MAX = 5;
+/** 报「树里还剩什么」时每样（文件、提交）最多列几个。 */
+export const LEFTOVER_LIST_MAX = 10;
+
+/**
+ * 删了不丢东西的：能重新生成的编译和工具缓存，和引擎已经读走的结论文件。每小时对账看树里还剩什么时当成什么都不剩，
+ * 只剩这些的树照空树删（jobs/worktree-sweep.ts）；git 仓里也一样。写法和 .gitignore 一样：/ 结尾的是目录（整个跳过、
+ * 不往里走），别的是文件名（可带 *），名字在哪一层都算。只跳过 git 不跟踪的（仓外的、仓里没跟踪的），仓里跟踪着的文件
+ * 改了照算：仓把它当源码提交了。
+ * 改之前必须知道：名单以外的一律算剩着、交人拍；加一条要写明为什么删了不丢东西，只许单层名字（find、git 各认一遍）。
+ */
+export const DISPOSABLE: readonly { pattern: string; why: string }[] = [
+  { pattern: '*.tsbuildinfo', why: 'TypeScript 增量编译的缓存：下次 tsc 编译时重新生成' },
+  { pattern: 'node_modules/', why: '装好的依赖：pnpm install 按锁文件原样装回来' },
+  { pattern: 'dist/', why: '编译产物：重新 build 就有' },
+  { pattern: '.turbo/', why: 'Turborepo 的任务缓存：下次跑任务时重新生成' },
+  { pattern: '.vite/', why: 'Vite、Vitest 的预构建和结果缓存：下次跑时重新生成' },
+  { pattern: 'coverage/', why: '测试覆盖率报告：重跑测试就有' },
+  {
+    pattern: `${OUT_DIR}/`,
+    why: '会话交给引擎的结论文件（分诊、需求文档、方案、审查、验证）：会话一结束引擎就读走了',
+  },
+];
+
+/**
+ * 名单里一条的名字：单层，字母数字和 . _ - *，不以 - 开头，至少有一个字母或数字（「*」「.」这种会把什么都跳过）。
+ */
+const DISPOSABLE_NAME = /^(?=.*[A-Za-z0-9])[A-Za-z0-9._*][A-Za-z0-9._*-]*$/;
+
+/**
+ * 名单换成两种写法：git ls-files 的 --exclude（.gitignore 的写法原样给）；find 的表达式（名单里的目录剪掉不往里走、
+ * 名单里的文件名跳过，剩下的非目录 \0 分隔打出来）。写法认不出照抛（BAD_INPUT），不当成名单是空的。
+ */
+export function disposableArgs(patterns: readonly string[]): { git: string[]; find: string[] } {
+  const dirs: string[] = [];
+  const files: string[] = [];
+  for (const p of patterns) {
+    const isDir = p.endsWith('/');
+    const name = isDir ? p.slice(0, -1) : p;
+    if (!DISPOSABLE_NAME.test(name)) {
+      throw new PortError('BAD_INPUT', `不算剩着的名单里有认不出的写法（只许单层名字，/ 结尾是目录）：${p}`, {
+        retryable: false,
+      });
+    }
+    (isDir ? dirs : files).push(name);
+  }
+  const anyOf = (names: string[]) => names.flatMap((n, i) => [...(i > 0 ? ['-o'] : []), '-name', n]);
+  return {
+    git: patterns.map((p) => `--exclude=${p}`),
+    find: [
+      ...(dirs.length > 0 ? ['-type', 'd', '(', ...anyOf(dirs), ')', '-prune', '-o'] : []),
+      ...(files.length > 0 ? ['(', ...anyOf(files), ')', '-o'] : []),
+      '!',
+      '-type',
+      'd',
+      '-print0',
+    ],
+  };
+}
+
+/**
+ * git 碰上读不了的地方不退出：没跟踪的目录打不开只警告一句（warning: could not open directory '<目录>': Permission denied）、
+ * 跟踪着的文件看不了只打一行（<路径>: Permission denied），照样退出 0，把那里当成什么都没有。GIT_ENV 把语言钉成 C，
+ * 认得出这两种。
+ */
+const UNREADABLE = /: (?:Permission denied|Operation not permitted)$/;
+
+/** 跑一条看工作树的 git：没跑成照 git() 抛；跑成了、却有读不了的地方，抛 READ_FAILED（没查成，不当成那里什么都没有）。 */
+async function gitReading(t: UserTree, args: string[], what: string): Promise<UserCommandResult> {
+  const r = await git(t, args, what);
+  const unreadable = r.stderr
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => UNREADABLE.test(l));
+  if (unreadable.length > 0) {
+    throw new PortError('READ_FAILED', `${what}：有读不了的地方（${unreadable.slice(0, 3).join(' / ')}）`, {
+      retryable: true,
+      details: { user: t.user, dir: t.dir },
+    });
+  }
+  return r;
+}
+
+/** \0 分隔的输出（-z、-print0）：一段一个，空的不要。 */
+const nulSeparated = (r: UserCommandResult) => r.stdout.toString('utf8').split('\0').filter(Boolean);
 
 /** 检出副本往回看多少条检出记录（HEAD 的 reflog）：一个副本一轮一次检出，够用；更早的只会多算。 */
 const CHECKOUT_LOG_MAX = 200;
@@ -489,17 +578,18 @@ const CHECKOUT_LOG_MAX = 200;
 export interface LeftoverOptions {
   /**
    * 引擎的检出副本（分诊、需求文档、方案、审查、开 PR 前验证：sessions.ts 每起一个新会话都 checkout --force + clean -fdx
-   * 从头来）：它在这里检出过的提交（HEAD 的检出记录）都是从引擎的镜像取的，算推过；ignore 里的路径（会话交给引擎的
-   * 结论文件 .fleet-out/，引擎读过了）不算没提交的改动。写码的树不给：那里的检出记录可能是会话自己切的。
+   * 从头来）：它在这里检出过的提交（HEAD 的检出记录）都是从引擎的镜像取的，算推过。写码的树不给：那里的检出记录
+   * 可能是会话自己切的。
    */
-  scratch?: { ignore: readonly string[] };
+  scratch?: boolean;
 }
 
 /**
  * 以会话用户的身份看这棵树里还有什么没推、没提交的。known = 推上去过的头（PR 镜像里这条分支的头）；树自己的
  * refs/fleet/incoming（引擎交给它的主线头或 PR 头）和 refs/remotes/*（钉的主线）也算推过的。没推的提交 = HEAD、本地分支、
  * 标签走得到，上面这些都走不到的提交；给的头树里没有就跳过（--ignore-missing）：只会多算、不会少算，多算的交人拍。
- * 还没有提交的仓（建树时 init 之后取包没成）只看分支和标签。git 没跑成一律抛 PortError，不拿空结果冒充「什么都没剩」。
+ * 还没有提交的仓（建树时 init 之后取包没成）只看分支和标签。DISPOSABLE 里的不算剩着。git 没跑成、有读不了的目录，
+ * 一律抛 PortError，不拿空结果冒充「什么都没剩」。
  */
 export async function treeLeftovers(
   t: UserTree,
@@ -507,6 +597,7 @@ export async function treeLeftovers(
   options: LeftoverOptions = {},
 ): Promise<TreeLeftovers> {
   for (const sha of known) assertSha(sha, '推上去过的头');
+  const skip = disposableArgs(DISPOSABLE.map((d) => d.pattern));
   const bin = t.git ?? GIT;
   // 这一层是不是仓的顶：--show-prefix 在顶上打空行，在子目录里打相对路径；不是仓（往上也找不到）退出 128
   const top = await run(t, [bin, 'rev-parse', '--show-prefix']);
@@ -514,14 +605,18 @@ export async function treeLeftovers(
     throw new PortError('GIT_FAILED', describeFailure('看这一层是不是 git 仓', top), { retryable: true });
   }
   if (top.code === 128 || text(top).trim() !== '') {
-    const listed = await run(t, [t.sh ?? SH, '-c', 'ls -A1']);
+    // 不是仓：一层层往下列，剩下的非目录（文件、链接……）都算，空目录不算（git 也不认空目录）。find 碰上读不了的目录
+    // 照样往下列、最后退出非 0：没查成，不当成那里什么都没有
+    const listed = await run(t, [t.sh ?? SH, '-c', 'exec find . -mindepth 1 "$@"', 'sh', ...skip.find]);
     if (listed.code !== 0) {
       throw new PortError('READ_FAILED', describeFailure('列树里的东西', listed), { retryable: true });
     }
-    const entries = lines(listed);
-    return entries.length === 0
+    const files = nulSeparated(listed)
+      .map((p) => p.replace(/^\.\//, ''))
+      .sort();
+    return files.length === 0
       ? { kind: 'empty' }
-      : { kind: 'not-repo', entries: entries.slice(0, LEFTOVER_LIST_MAX) };
+      : { kind: 'not-repo', files: files.slice(0, LEFTOVER_LIST_MAX), fileCount: files.length };
   }
   // 有没有检出过提交：退出 1 = 还没有（HEAD 指着一个还没生出来的分支），别的非 0 是 git 没跑成
   const born = await run(t, [bin, 'rev-parse', '-q', '--verify', 'HEAD^{commit}']);
@@ -529,19 +624,18 @@ export async function treeLeftovers(
     throw new PortError('GIT_FAILED', describeFailure('看树里检出过提交没有', born), { retryable: true });
   }
   const hasHead = born.code === 0;
-  const excluded = (options.scratch?.ignore ?? []).map((p) => `:(exclude)${p}`);
-  const dirty = lines(
-    await git(
-      t,
-      [
-        'status',
-        '--porcelain=v1',
-        '--untracked-files=normal',
-        ...(excluded.length ? ['--', '.', ...excluded] : []),
-      ],
-      '看有没有没提交的改动',
-    ),
+  // 跟踪着的文件的改动一律算；没跟踪的新文件另列（名单里的跳过、不往里走），一个一个列，没跟踪的目录不折成一行
+  const changed = await gitReading(
+    t,
+    ['status', '--porcelain=v1', '--untracked-files=no'],
+    '看有没有没提交的改动',
   );
+  const untracked = await gitReading(
+    t,
+    ['ls-files', '-z', '--others', '--exclude-standard', ...skip.git],
+    '列没跟踪的新文件',
+  );
+  const dirty = [...lines(changed), ...nulSeparated(untracked).map((f) => `?? ${f}`)];
   const stashes = lines(await git(t, ['stash', 'list'], '看有没有存着的 stash')).length;
   const checkouts =
     options.scratch && hasHead
