@@ -21,8 +21,9 @@ export interface CursorRunSpec {
   /** 见 CursorArgsSpec.force。 */
   force: boolean;
   /**
-   * cursor 的登录态在 HOME 下。进 scope 时要在会话用户家里登好——环境里的 key 进不去（见 scopeLaunch）；
-   * 不进 scope（开发机）才能把 CURSOR_API_KEY 放进 env.extra。
+   * 认证：进 scope 时引擎这边环境里的 key 进不去（见 scopeLaunch）——法国的 API 密钥是会话用户家里的一个文件，由起它的命令
+   * 以会话用户的身份读出来、放进环境再 exec（engine 的 cursorLaunchCommand），不经这里。不进 scope（开发机）可以把
+   * CURSOR_API_KEY 放进 env.extra，或者用本机的登录态。
    */
   env: SessionEnvInput;
   limits?: Partial<ProcessLimits>;
@@ -95,9 +96,28 @@ export async function runCursorAgent(
   };
 }
 
+/** 终端控制符（颜色这类）：有几句报错不管有没有终端都带颜色，比如「⚠ Warning: The provided API key is invalid.」。 */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: 就是要去掉终端控制符
+const TERMINAL_CONTROL = /\u001b\[[0-9;?]*[A-Za-z]/g;
+
+/**
+ * 没信任过的工作目录、又没带 --trust / --force 时，-p 在 stderr 打一段提示就退出（2026.09.26 发行包里退出码是 1；不管是几，
+ * 没有终帧都判没跑成）。最后几行只剩「怎么办」，认得出是这一种的只有开头那一句：单独捞出来接在最后几行前面（失败分流 CF1 认它）。
+ */
+const WORKSPACE_TRUST = /^.*Workspace Trust Required.*$/m;
+
+/** stderr 的最后几行，去掉终端控制符；Workspace Trust 那段的开头一句挤出了最后几行的话另接上。 */
+function cursorLastWords(stderrTail: string): string | undefined {
+  const plain = stderrTail.replace(TERMINAL_CONTROL, '');
+  const words = lastLines(plain);
+  const trust = plain.match(WORKSPACE_TRUST)?.[0]?.trim();
+  if (!trust || words?.includes(trust)) return words;
+  return words ? cut(`${trust} ⏎ ${words}`, 600) : trust;
+}
+
 export function cursorRunFacts(report: CursorRunReport): RunFacts {
   const r = report.stream.result;
-  const words = lastLines(report.stderrTail);
+  const words = cursorLastWords(report.stderrTail);
   return {
     ...(report.spawnError ? { spawnError: report.spawnError } : {}),
     ...(report.killed ? { killed: report.killed.reason } : {}),

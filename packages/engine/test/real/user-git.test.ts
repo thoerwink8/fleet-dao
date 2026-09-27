@@ -20,6 +20,7 @@ import {
   mergeInto,
   pinMainline,
   readFileAs,
+  treeLeftovers,
   type UserTree,
   uncommittedTracked,
 } from '../../src/real/user-git.ts';
@@ -306,5 +307,178 @@ describe('并主线没并成（不是冲突）', { timeout: 60_000 }, () => {
     expect(message).toContain('有没有留下没并完的合并没查成');
     expect(message).toContain('故意造的读不了');
     expect(message).not.toContain('已撤掉');
+  });
+});
+
+// 每小时对账删一棵没人用的树之前，以会话用户的身份看里面还剩什么：剩着没推的提交、没提交的改动、stash 就不删、交人拍。
+// 只会多算不会少算；git 没跑成明确报错，不拿空结果冒充「什么都不剩」（那样会把人的活删掉）。
+describe('树里还剩什么（每小时对账删树之前看）', { timeout: 60_000 }, () => {
+  /** 和引擎建的一样：从 bundle 建树、检出分支、钉主线。 */
+  async function checkedOut(name = 'left', from?: ReturnType<typeof mirror>) {
+    const m = from ?? mirror();
+    const t = tree(name);
+    await fetchBundle(t, m.bundle(m.head), 'refs/fleet/export/0');
+    await checkoutBranch(t, 'fleet/12-a', m.head);
+    await pinMainline(t, 'main', m.head);
+    return { m, t };
+  }
+  const commit = (dir: string, file: string, msg: string) => {
+    writeFileSync(join(dir, file), `${msg}\n`);
+    execFileSync('git', ['add', '.'], { cwd: dir });
+    execFileSync('git', ['commit', '-q', '-m', msg], { cwd: dir, env: ENV });
+    return sh(dir, 'rev-parse', 'HEAD');
+  };
+
+  it('空目录（建树建到一半）：什么都不剩；不是仓却有东西：列出名字，不当成空的', async () => {
+    const t = tree('half');
+    expect(await treeLeftovers(t, [])).toEqual({ kind: 'empty' });
+    writeFileSync(join(t.dir, 'notes.md'), 'x\n');
+    expect(await treeLeftovers(t, [])).toEqual({ kind: 'not-repo', entries: ['notes.md'] });
+  });
+
+  it('检出好了、会话没动过（写码的树、分离头的检出副本）：什么都不剩——引擎交给它的头、钉的主线都算推过', async () => {
+    const { m, t } = await checkedOut();
+    expect(await treeLeftovers(t, [])).toEqual({
+      kind: 'repo',
+      dirty: [],
+      dirtyCount: 0,
+      stashes: 0,
+      unpushed: [],
+      unpushedCount: 0,
+    });
+    const s = tree('scratch');
+    await fetchBundle(s, m.bundle(m.head), 'refs/fleet/export/0');
+    await checkoutDetached(s, m.head);
+    expect(await treeLeftovers(s, [])).toMatchObject({ kind: 'repo', unpushedCount: 0, dirtyCount: 0 });
+  });
+
+  it('会话提交了没推：数出来、列出来；推上去过（PR 镜像里的头）就不算', async () => {
+    const { t } = await checkedOut();
+    commit(t.dir, 'b.ts', 'add b');
+    const head = commit(t.dir, 'c.ts', 'add c');
+    const left = await treeLeftovers(t, []);
+    expect(left).toMatchObject({ kind: 'repo', unpushedCount: 2 });
+    expect(left.kind === 'repo' ? left.unpushed.map((l) => l.replace(/^\w+ /, '')) : []).toEqual([
+      'add c',
+      'add b',
+    ]);
+    expect(await treeLeftovers(t, [head])).toMatchObject({ kind: 'repo', unpushedCount: 0 });
+  });
+
+  it('给的头树里没有：跳过、只会多算（照样算没推）；提交号不对明确拒', async () => {
+    const { t } = await checkedOut();
+    commit(t.dir, 'b.ts', 'add b');
+    expect(await treeLeftovers(t, ['f'.repeat(40)])).toMatchObject({ kind: 'repo', unpushedCount: 1 });
+    await expect(treeLeftovers(t, ['HEAD'])).rejects.toMatchObject({ code: 'BAD_INPUT' });
+  });
+
+  it('另开的本地分支上的提交、没提交的改动、没跟踪的新文件、stash 都算剩着；被忽略的不算', async () => {
+    const { m, t } = await checkedOut();
+    sh(t.dir, 'checkout', '-q', '-b', 'side');
+    commit(t.dir, 'side.ts', 'on side');
+    sh(t.dir, 'checkout', '-q', 'fleet/12-a');
+    expect(await treeLeftovers(t, [])).toMatchObject({ unpushedCount: 1 });
+
+    const u = (await checkedOut('dirty', m)).t;
+    writeFileSync(join(u.dir, 'a.ts'), 'changed\n');
+    writeFileSync(join(u.dir, 'new.ts'), 'new\n');
+    writeFileSync(join(u.dir, '.git', 'info', 'exclude'), 'ignored.log\n');
+    writeFileSync(join(u.dir, 'ignored.log'), 'noise\n');
+    const left = await treeLeftovers(u, []);
+    expect(left).toMatchObject({ kind: 'repo', dirtyCount: 2, stashes: 0, unpushedCount: 0 });
+    expect(left.kind === 'repo' ? left.dirty : []).toEqual([' M a.ts', '?? new.ts']);
+
+    execFileSync('git', ['stash', '-q', '--include-untracked'], { cwd: u.dir, env: ENV });
+    expect(await treeLeftovers(u, [])).toMatchObject({ dirtyCount: 0, stashes: 1 });
+  });
+
+  it('git 没跑成、列不了目录：明确报错，不当成什么都不剩', async () => {
+    const { t } = await checkedOut();
+    const real = localExec();
+    const failWith = (code: number, stderr: string) =>
+      Promise.resolve({ code, stdout: Buffer.alloc(0), stderr, timedOut: false, aborted: false });
+    const statusFails: UserTree['exec'] = (c) =>
+      c.argv.includes('status') ? failWith(128, 'fatal: 故意造的读不了索引\n') : real(c);
+    await expect(treeLeftovers({ ...t, exec: statusFails }, [])).rejects.toMatchObject({
+      code: 'GIT_FAILED',
+    });
+    const listFails: UserTree['exec'] = (c) => (c.argv[0] === 'sh' ? failWith(2, 'ls: 读不了\n') : real(c));
+    await expect(treeLeftovers({ ...tree('half'), exec: listFails }, [])).rejects.toMatchObject({
+      code: 'READ_FAILED',
+    });
+    const bornFails: UserTree['exec'] = (c) =>
+      c.argv.includes('HEAD^{commit}') ? failWith(129, 'fatal: 故意造的\n') : real(c);
+    await expect(treeLeftovers({ ...t, exec: bornFails }, [])).rejects.toMatchObject({ code: 'GIT_FAILED' });
+    const reflogFails: UserTree['exec'] = (c) =>
+      c.argv.includes('reflog') ? failWith(128, 'fatal: 故意造的读不了检出记录\n') : real(c);
+    const scratch = { scratch: { ignore: ['.fleet-out'] } };
+    await expect(treeLeftovers({ ...t, exec: reflogFails }, [], scratch)).rejects.toMatchObject({
+      code: 'GIT_FAILED',
+      message: expect.stringContaining('读检出记录'),
+    });
+  });
+
+  it('检出副本（引擎从镜像检出、会话只写 .fleet-out/）：检出过的提交算推过、结论文件不算剩着；会话自己的提交和别的改动照算', async () => {
+    const m = mirror();
+    // 子任务分支上一个提交（PR 头），之后主线又往前走了一步
+    sh(m.dir, 'checkout', '-q', '-b', 'fleet/12-a');
+    writeFileSync(join(m.dir, 'pr.ts'), 'export const pr = 1;\n');
+    sh(m.dir, 'add', '.');
+    sh(m.dir, 'commit', '-q', '-m', 'pr work');
+    const pr = sh(m.dir, 'rev-parse', 'HEAD');
+    sh(m.dir, 'checkout', '-q', 'main');
+    writeFileSync(join(m.dir, 'main2.ts'), 'export const m = 2;\n');
+    sh(m.dir, 'add', '.');
+    sh(m.dir, 'commit', '-q', '-m', 'mainline moved');
+    const main2 = sh(m.dir, 'rev-parse', 'HEAD');
+    // 和引擎给审查会话备的一样：检出 PR 头，主线另取进来再钉（refs/fleet/incoming 换成了主线头）
+    const s = tree('12.review.a');
+    await fetchBundle(s, m.bundle(pr), 'refs/fleet/export/0');
+    await checkoutDetached(s, pr);
+    await fetchBundle(s, m.bundle(main2, pr), 'refs/fleet/export/0');
+    await pinMainline(s, 'main', main2);
+    mkdirSync(join(s.dir, '.fleet-out'));
+    writeFileSync(join(s.dir, '.fleet-out', 'review.json'), '{}\n');
+    const scratch = { scratch: { ignore: ['.fleet-out'] } };
+
+    // 当成写码的树看：PR 头那个提交和结论文件都算剩着（只会多算）
+    expect(await treeLeftovers(s, [])).toMatchObject({ unpushedCount: 1, dirtyCount: 1 });
+    expect(await treeLeftovers(s, [], scratch)).toEqual({
+      kind: 'repo',
+      dirty: [],
+      dirtyCount: 0,
+      stashes: 0,
+      unpushed: [],
+      unpushedCount: 0,
+    });
+
+    // 会话在副本里自己提交了、还留了别的文件：照算，结论文件照旧不算
+    writeFileSync(join(s.dir, 'extra.ts'), 'x\n');
+    sh(s.dir, 'add', 'extra.ts');
+    sh(s.dir, 'commit', '-q', '-m', 'session commit in scratch');
+    writeFileSync(join(s.dir, 'stray.ts'), 'y\n');
+    const left = await treeLeftovers(s, [], scratch);
+    expect(left).toMatchObject({ kind: 'repo', unpushedCount: 1, dirtyCount: 1, dirty: ['?? stray.ts'] });
+    expect(left.kind === 'repo' ? left.unpushed.map((l) => l.replace(/^\w+ /, '')) : []).toEqual([
+      'session commit in scratch',
+    ]);
+  });
+
+  it('建树时 init 之后取包没成（还没有提交的仓）：不报错，只看分支、标签和没提交的文件', async () => {
+    const t = tree('unborn');
+    sh(t.dir, 'init', '-q');
+    expect(await treeLeftovers(t, [])).toEqual({
+      kind: 'repo',
+      dirty: [],
+      dirtyCount: 0,
+      stashes: 0,
+      unpushed: [],
+      unpushedCount: 0,
+    });
+    expect(await treeLeftovers(t, [], { scratch: { ignore: ['.fleet-out'] } })).toMatchObject({
+      unpushedCount: 0,
+    });
+    writeFileSync(join(t.dir, 'x.ts'), 'x\n');
+    expect(await treeLeftovers(t, [])).toMatchObject({ dirtyCount: 1, unpushedCount: 0 });
   });
 });

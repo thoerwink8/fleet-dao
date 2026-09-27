@@ -263,6 +263,8 @@ codex exec --json -C <工作树> -m gpt-5.6-sol \
 |---|---|
 | `✗ Failed to reach the Cursor API. Check that your proxy (http://<回环>:7890/) is reachable.`（stderr、退出 1、没有任何 JSON） | 本机实跑（`-p --output-format stream-json`，不可达端点） |
 | `Error: Authentication required. Please run 'cursor-agent login' first, or set CURSOR_API_KEY environment variable.`、`Authentication required to use Cursor Agent. Please run 'cursor-agent login' to authenticate.`、`… Please run 'cursor-agent login' to authenticate.`（跑到一半登录失效）；ACP 是 `Error: [unauthenticated] Backend rejected authentication…`。命令名是 `CURSOR_INVOKED_AS` 或 argv0，也可能是 `agent`。stderr、退出 1、没有 JSON | 发行包原文（2026.09.23、2026.09.26 的 `index.js`、`4507.index.js`）；失败分流 AU5（#212） |
+| API 密钥被拒（无效、被撤、过期）：`⚠ Warning: The provided API key is invalid.`（头一行带终端颜色）、`The API key was loaded from the CURSOR_API_KEY environment variable.`、`Please check you have the right key, create a new one, or authenticate without it.`，stderr、退出 1、没有 JSON；列模型那条路是 `Authentication failed: your Cursor credentials or API key are invalid or expired. …`，跑到一半是 `Your authentication is invalid.` | 发行包原文（2026.09.26-dd393fe 的 `index.js`）；失败分流 AU5（#212，法国改用 API 密钥） |
+| `⚠ Workspace Trust Required`，下面几行说怎么办，最后一行 `• Pass --trust, --yolo, or -f if you trust this directory`（没信任过的目录里、不带 `--trust` / `--force` / `--yolo` 时 `-p` 只打这一段，stderr，什么都不干就退出）；信任不上是 `Error: Failed to trust workspace at <目录>. Please check permissions.` | 发行包原文（2026.09.26-dd393fe）；法国手动实跑（帅位 2026-09-27，退出 0）；失败分流 CF1。插头固定带 `--trust`（CU-01），探针也带 |
 | `Error: You've hit your usage limit`，后面跟一段服务端给的说明（何时清零、换 Auto、设花费上限）。额度类报错的正文由服务端给（发行包里只有 `PRO_USER_USAGE_LIMIT` 这类错误码，文案是服务端 details 的 title + detail），引擎按「usage limit」认成额度用满（QT1） | 论坛用户贴的 CLI 输出（forum.cursor.com/t/cursor-agent-cli-limit-hit/128577）；我们还没撞上过，撞上时把原话记成失败样本（#230） |
 | `Requested concrete model ID is absent from the ACP model catalog`（`model_unavailable`） | WD `docs/evidence/1576-grok-4.7-probe.json`；runner:736 |
 | `agent_unconfigured`（新工作树弹 Workspace Trust） | WD `docs/cli-notes/cursor.md:15`（#649） |
@@ -275,6 +277,8 @@ codex exec --json -C <工作树> -m gpt-5.6-sol \
 
 - 登录态文件（含 accessToken；Dashboard 采样读它，WD `INDEX.md:55`；`execution-usage.mjs:650-651`）。
 - 登录：`cursor-agent login`，要真 TTY 和浏览器；`cursor-agent status / whoami` 查状态（WD `NEW-MACHINE.md` §7c）。也可用 `--api-key` / `CURSOR_API_KEY`（help）。
+- 没桌面的 Linux 服务器上登录态存不下：cursor-agent 把凭据交给系统钥匙串（libsecret），没有 Secret Service 就落不了盘，批准了 `status` 照样说没登录（法国 2026-09-27 实测；https://dev.to/milkyway008/why-your-cli-says-youre-not-logged-in-on-a-headless-linux-server-j1o ）。法国改用 API 密钥（创始人 2026-09-27 拍；https://cursor.com/docs/cli/reference/authentication ）：Cursor 后台 API Keys 页生成，放在会话用户的 `~/.cursor/fleet-api-key`（600），起 cursor-agent 前由会话用户自己读进 `CURSOR_API_KEY`；不走 `--api-key`（上了命令行，sudo 日志、`/proc` 里都看得到）。做法、放法、换法见 ops 第五节「会话用户的 Cursor 密钥」。
+- 上面那份登录态文件在 API 密钥下没有：额度读取器 `cursor-dashboard`（`packages/adapters/src/quota/readers/cursor.ts`）读的就是它，拿 API 密钥调 Dashboard 接口行不行没核实；读取器还没接进引擎（#76），接的时候要定 Cursor 池怎么读。
 - 国内 IP 下模型选择器只剩 Grok / Composer / Kimi / GLM，要走代理才看得到别的（WD `NEW-MACHINE.md` §7c）。
 
 ### 4.7 已知的坑 → 测试用例

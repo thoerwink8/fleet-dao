@@ -17,6 +17,11 @@ import {
   type GitHubReconcileJobDeps,
   runGitHubReconcileJob,
 } from './jobs/github-reconcile.ts';
+import {
+  HourlyReconcileFailedError,
+  type HourlyReconcileJobDeps,
+  runHourlyReconcileJob,
+} from './jobs/hourly-reconcile.ts';
 import { RouteProbeFailedError, type RouteProbeJobDeps, runRouteProbeJob } from './jobs/route-probe.ts';
 import type { Limits } from './limits.ts';
 import {
@@ -239,6 +244,8 @@ export interface EngineJobs {
   githubReconcile?: (client: Client, taskQueue: string) => GitHubReconcileJobDeps;
   /** 路由探针（#129）：读路由、真起最小会话、写结论。 */
   routeProbe?: () => RouteProbeJobDeps;
+  /** 每小时对账：看工作树、撤过时的提醒、再推没人处理的（查工作流在不在跑、挂没挂着用这次活动的 Temporal 客户端）。 */
+  hourlyReconcile?: (client: Client) => HourlyReconcileJobDeps;
 }
 
 /** 引擎自己的活动：对账补漏跑一轮。没跑成的已经记进 schedule_runs，这里再报成不重试的失败（下一轮 15 分钟后照来）。 */
@@ -282,6 +289,29 @@ async function probeRoutes(jobs: EngineJobs): Promise<unknown> {
   } catch (error) {
     if (error instanceof RouteProbeFailedError) {
       throw new PortError('ROUTE_PROBE_FAILED', error.message, {
+        retryable: false,
+        details: { runId: error.runId },
+      });
+    }
+    throw error;
+  }
+}
+
+/** 引擎自己的活动：每小时对账跑一轮。没跑成的已经记进 schedule_runs，这里再报成不重试的失败（下一轮一小时后照来）。 */
+async function reconcileHourly(jobs: EngineJobs): Promise<unknown> {
+  const make = jobs.hourlyReconcile;
+  if (!make) {
+    throw new PortError(
+      'JOB_NOT_CONFIGURED',
+      '这个引擎工人没装每小时对账（假端口，或真端口没接上库和工作树）：不装作对过',
+      { retryable: false },
+    );
+  }
+  try {
+    return await runHourlyReconcileJob(make(Context.current().client));
+  } catch (error) {
+    if (error instanceof HourlyReconcileFailedError) {
+      throw new PortError('HOURLY_RECONCILE_FAILED', error.message, {
         retryable: false,
         details: { runId: error.runId },
       });
@@ -340,5 +370,6 @@ export function createActivities(
   out.withdrawMerge = timed('withdrawMerge', (input) => withdrawMerge(input as never), record);
   out.reconcileGitHub = timed('reconcileGitHub', () => reconcileGitHub(jobs), record);
   out.probeRoutes = timed('probeRoutes', () => probeRoutes(jobs), record);
+  out.reconcileHourly = timed('reconcileHourly', () => reconcileHourly(jobs), record);
   return out as unknown as EngineActivities;
 }

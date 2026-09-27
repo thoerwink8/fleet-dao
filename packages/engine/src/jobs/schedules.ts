@@ -9,12 +9,23 @@ import {
   type ScheduleUpdateOptions,
 } from '@temporalio/client';
 import type { Workflow } from '@temporalio/common';
-import { type GitHubReconcileInput, type RouteProbeInput, WORKFLOW_TYPES } from '../contract.ts';
+import {
+  type GitHubReconcileInput,
+  type HourlyReconcileInput,
+  type RouteProbeInput,
+  WORKFLOW_TYPES,
+} from '../contract.ts';
 import { GITHUB_RECONCILE_EVERY_MINUTES, GITHUB_RECONCILE_JOB } from './github-reconcile.ts';
+import {
+  HOURLY_RECONCILE_EVERY_MINUTES,
+  HOURLY_RECONCILE_JOB,
+  HOURLY_RECONCILE_OFFSET_MINUTES,
+} from './hourly-reconcile.ts';
 import { ROUTE_PROBE_EVERY_MINUTES, ROUTE_PROBE_JOB, ROUTE_PROBE_OFFSET_MINUTES } from './route-probe.ts';
 
 export const GITHUB_RECONCILE_SCHEDULE_ID = GITHUB_RECONCILE_JOB.id;
 export const ROUTE_PROBE_SCHEDULE_ID = ROUTE_PROBE_JOB.id;
+export const HOURLY_RECONCILE_SCHEDULE_ID = HOURLY_RECONCILE_JOB.id;
 
 interface EngineSchedule {
   scheduleId: string;
@@ -27,6 +38,7 @@ interface EngineSchedule {
 export function engineSchedules(taskQueue: string): EngineSchedule[] {
   const input: GitHubReconcileInput = { schemaVersion: 1 };
   const probeInput: RouteProbeInput = { schemaVersion: 1 };
+  const hourlyInput: HourlyReconcileInput = { schemaVersion: 1 };
   return [
     {
       scheduleId: GITHUB_RECONCILE_SCHEDULE_ID,
@@ -72,6 +84,34 @@ export function engineSchedules(taskQueue: string): EngineSchedule[] {
         overlap: ScheduleOverlapPolicy.SKIP,
         // Temporal 停了一阵再起来：只补最近一轮（结论只看最新的，补旧的只是白花额度）
         catchupWindow: `${ROUTE_PROBE_EVERY_MINUTES} minutes`,
+        pauseOnFailure: false,
+      },
+    },
+    {
+      // 每小时对账（工作树残留、提醒按条件撤和再推）：和对账补漏、路由探针错开
+      scheduleId: HOURLY_RECONCILE_SCHEDULE_ID,
+      spec: {
+        intervals: [
+          {
+            every: `${HOURLY_RECONCILE_EVERY_MINUTES} minutes`,
+            offset: `${HOURLY_RECONCILE_OFFSET_MINUTES} minutes`,
+          },
+        ],
+      },
+      action: {
+        type: 'startWorkflow',
+        workflowType: WORKFLOW_TYPES.hourlyReconcile,
+        workflowId: HOURLY_RECONCILE_SCHEDULE_ID,
+        taskQueue,
+        args: [hourlyInput],
+        // 一轮最多 10 分钟（活动的限时）；卡死的不拖到下一轮
+        workflowRunTimeout: '15 minutes',
+      },
+      policies: {
+        // 上一轮还没完就跳过：两轮叠着删同一棵树、写同一条再提醒没意义
+        overlap: ScheduleOverlapPolicy.SKIP,
+        // Temporal 停了一阵再起来：只补最近一轮（每轮都是看当时的目录和库，补旧的没意义）
+        catchupWindow: `${HOURLY_RECONCILE_EVERY_MINUTES} minutes`,
         pauseOnFailure: false,
       },
     },

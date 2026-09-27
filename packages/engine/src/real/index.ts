@@ -12,7 +12,8 @@ import type { EnginePorts } from '../ports.ts';
 import { scopeExec, type UserExec } from './exec.ts';
 import { createGitHubPorts, type EngineGitHub } from './github-ports.ts';
 import { githubReconcileJob } from './github-reconcile.ts';
-import { cursorLaunchCommand, DEFAULT_CURSOR_VERSIONS_DIR } from './hosts.ts';
+import { cursorLaunchCommand, DEFAULT_CURSOR_API_KEY_FILE, DEFAULT_CURSOR_VERSIONS_DIR } from './hosts.ts';
+import { hourlyReconcileJob } from './hourly-reconcile.ts';
 import { engineJevFromEnv } from './jev-port.ts';
 import { registerEngineJobs } from './jobs.ts';
 import { routeProbeJob } from './route-probe.ts';
@@ -167,7 +168,8 @@ export function realPortsConfigFromEnv(env: Readonly<Record<string, string | und
 
 /**
  * 起执行体的命令（绝对路径），会话和探针同一份：reclaude、cursor-agent 都装在会话用户自己家里，{user} 换成会话用户。
- * cursor-agent 不钉版本：以会话用户的身份在版本目录下现找 current → 最新版本（hosts.ts 的 cursorLaunchCommand）。
+ * cursor-agent 不钉版本：以会话用户的身份先读它家里的 API 密钥（DEFAULT_CURSOR_API_KEY_FILE，不做成配置），再在版本目录下
+ * 现找 current → 最新版本（hosts.ts 的 cursorLaunchCommand）。
  */
 export function agentCommands(config: Pick<RealPortsConfig, 'claudeBin' | 'cursorVersionsDir'>): {
   claudeCommand(user: SessionUser): string[];
@@ -175,7 +177,11 @@ export function agentCommands(config: Pick<RealPortsConfig, 'claudeBin' | 'curso
 } {
   return {
     claudeCommand: (user) => [config.claudeBin.replaceAll('{user}', user)],
-    cursorCommand: (user) => cursorLaunchCommand(config.cursorVersionsDir.replaceAll('{user}', user)),
+    cursorCommand: (user) =>
+      cursorLaunchCommand(
+        config.cursorVersionsDir.replaceAll('{user}', user),
+        DEFAULT_CURSOR_API_KEY_FILE.replaceAll('{user}', user),
+      ),
   };
 }
 
@@ -198,6 +204,7 @@ export function realPortsFromEnv(
   // 判断题：起来时读一遍 jev.json、建一遍后端、登记两道题（registerJobs）；之后每次问都现找一遍（改了配置、调度台换了
   // 判断路由不用重启，和 /healthz 的 judge 项同一个判法）。默认位置上没有 jev.json 才算没接、不问；别的读不成都报错。
   const jev = engineJevFromEnv(db, env);
+  const exec = scopeExec();
   const real = createRealPorts({
     db,
     jev: jev.port,
@@ -205,7 +212,7 @@ export function realPortsFromEnv(
     // 发给别家的验证材料和推分支、开 PR 用同一份已知敏感值名单（createGitHub 按环境变量找的那份）
     screen: (what, texts) => assertPublishable(what, texts, gh.deps.sensitiveValues),
     trees,
-    exec: scopeExec(),
+    exec,
     tmpDir: join(config.stateDir, 'tmp'),
     archiveDir: join(config.stateDir, 'archive'),
     machine: config.machine,
@@ -217,6 +224,8 @@ export function realPortsFromEnv(
     githubReconcile: githubReconcileJob({ db, gh }),
     // 路由探针和干活的会话用同一份执行体（reclaude、cursor-agent）、同一个工作树的根（探针目录在它下面）
     routeProbe: routeProbeJob({ db, trees, claudeCommand, cursorCommand, machine: config.machine }),
+    // 每小时对账：同一个工作树管家（删树经 fleet-agent-scope）、同一个会话用户执行器（看树里还剩什么）
+    hourlyReconcile: hourlyReconcileJob({ db, trees, exec, machine: config.machine }),
   };
   return {
     ...real,

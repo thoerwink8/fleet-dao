@@ -44,9 +44,16 @@ describe('活动外壳', () => {
   it('活动表齐全：工作流会调的每个名字 worker 都挂上了（windsurf-dao#1422）', () => {
     const activities = createActivities(createFakeWorld().ports, launch);
     expect(Object.keys(activities).sort()).toEqual(Object.keys(ACTIVITY_PROFILE).sort());
-    expect([...PORT_NAMES, 'enqueueMerge', 'withdrawMerge', 'reconcileGitHub', 'probeRoutes'].sort()).toEqual(
-      Object.keys(ACTIVITY_PROFILE).sort(),
-    );
+    expect(
+      [
+        ...PORT_NAMES,
+        'enqueueMerge',
+        'withdrawMerge',
+        'reconcileGitHub',
+        'probeRoutes',
+        'reconcileHourly',
+      ].sort(),
+    ).toEqual(Object.keys(ACTIVITY_PROFILE).sort());
   });
 
   it('每次尝试记一笔：排队（排进队列 → 开始）和干活（开始 → 结束）分开', async () => {
