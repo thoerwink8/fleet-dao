@@ -99,7 +99,7 @@ function lived(): Settings {
 }
 
 describe('装', () => {
-  it('脚本拷进 ~/.fleet-dao/hooks/，settings.json 里登记两条；查判一致；第二遍零改动', () => {
+  it('脚本拷进 ~/.fleet-dao/hooks/，settings.json 里登记三条；查判一致；第二遍零改动', () => {
     const m = machine();
     const lines = m.apply();
     expectKind(lines, SCRIPTS, 'changed');
@@ -110,6 +110,7 @@ describe('装', () => {
       { hooks: [{ type: 'command', command: m.cmd('session-start.mjs'), timeout: 90 }] },
     ]);
     expect(s.hooks.PreToolUse).toEqual(pretoolGroups(m.cmd('pretool.mjs')));
+    expect(s.hooks.Stop).toEqual([{ hooks: [{ type: 'command', command: m.cmd('stop.mjs'), timeout: 10 }] }]);
     expect(m.cmd('pretool.mjs')).toMatch(/^node ".*\/\.fleet-dao\/hooks\/pretool\.mjs"$/);
     const checked = m.check();
     expectKind(checked, SCRIPTS, 'ok');
@@ -221,7 +222,7 @@ describe('调工具前那条挂在哪些工具上', () => {
     }
   });
 
-  it('替别的用户写（法国装机）：开会话那条不登记、说清为什么，调工具前那条照装', () => {
+  it('替别的用户写（法国装机）：开会话那条不登记、说清为什么，调工具前、Stop 那两条照装', () => {
     const skip: HookSkip = { event: 'SessionStart', why: '开会话钩子要在那个用户自己能写的检出里快进' };
     const m = machine(['claude'], HOOK_FILES, skip);
     const lines = m.apply();
@@ -232,8 +233,9 @@ describe('调工具前那条挂在哪些工具上', () => {
       text: `SessionStart：${skip.why}`,
     });
     const s = m.settings();
-    expect(Object.keys(s.hooks)).toEqual(['PreToolUse']);
+    expect(Object.keys(s.hooks)).toEqual(['PreToolUse', 'Stop']);
     expect(s.hooks.PreToolUse).toEqual(pretoolGroups(m.cmd('pretool.mjs')));
+    expect(s.hooks.Stop).toEqual([{ hooks: [{ type: 'command', command: m.cmd('stop.mjs'), timeout: 10 }] }]);
     expect(exitCode(m.check())).toBe(0);
     expect(m.apply().filter((l) => l.kind === 'changed')).toEqual([]);
   });
