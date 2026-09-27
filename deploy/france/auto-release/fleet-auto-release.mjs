@@ -10,6 +10,8 @@ import {
   APPLIED_FILE,
   AUTO_DIR,
   CHECKOUT,
+  CI_RUNS_PAGE,
+  CI_WORKFLOW,
   INSTALL_PATHS,
   MAIN_HISTORY,
   RELEASES,
@@ -154,8 +156,12 @@ export const realIo = {
       throw e;
     }
   },
-  async ciRuns(sha) {
-    const url = `https://api.github.com/repos/${REPO}/actions/runs?head_sha=${sha}&event=push&per_page=30`;
+  /** 主线上 ci.yml 最近 CI_RUNS_PAGE 次 push 触发的运行（新的在前）：一轮只问这一次，候选都从这一份里判。 */
+  async ciRuns() {
+    const workflow = CI_WORKFLOW.split('/').pop();
+    const url =
+      `https://api.github.com/repos/${REPO}/actions/workflows/${workflow}/runs` +
+      `?branch=main&event=push&exclude_pull_requests=true&per_page=${CI_RUNS_PAGE}`;
     const res = await fetch(url, {
       headers: {
         Accept: 'application/vnd.github+json',

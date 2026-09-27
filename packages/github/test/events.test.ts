@@ -156,6 +156,24 @@ describe('对账与补漏', () => {
     expect(fake.calls('POST', /attempts$/).map((r) => r.as)).toEqual(['app:engine']);
   });
 
+  it('重投名额不够时老的优先：新失败的不该把老的挤出去，不然老的等 since 窗口一过就永久补不回来', async () => {
+    const { gh, fake } = setup();
+    // 翻页新的在前（GitHub 真接口就是这个顺序）：先给最新失败的，最后给最老的
+    fake.deliveries = [
+      { id: 3, guid: 'g-new', delivered_at: '2026-09-25T11:30:00Z', status_code: 502, event: 'issues' },
+      { id: 2, guid: 'g-mid', delivered_at: '2026-09-25T11:20:00Z', status_code: 502, event: 'issues' },
+      { id: 1, guid: 'g-old', delivered_at: '2026-09-25T11:10:00Z', status_code: 502, event: 'issues' },
+    ];
+    const { intake } = fakeIntake(() => true);
+    const report = await gh
+      .reconciler({ intake, pollDeliveryId, maxRedeliveries: 2 })
+      .redeliverFailed(new Date('2026-09-25T10:00:00Z'));
+    // 一轮只够重投 2 个：该保离窗口边界最近的两个（g-old、g-mid），把离过期还早的 g-new 留到下一轮
+    expect(fake.redelivered).toEqual([1, 2]);
+    expect(report).toMatchObject({ outcome: 'partial', checked: 3, recovered: 2 });
+    expect(report.why).toContain('还有 1 个没重投（一次最多 2 个）');
+  });
+
   it('重投：19 位的投递编号按原文拼路径，不丢精度（法国实测 …928 被改成 …000，重投全 404）', async () => {
     const { gh, fake } = setup();
     // 原文里的数字超出 JS 安全整数：只能手写 JSON 文本，JSON.stringify 一个 number 已经丢了精度
@@ -426,7 +444,7 @@ describe('对账与补漏', () => {
     ]);
   });
 
-  it('合并的 PR：镜像里没记的补上；不是「引擎」合的报出来（C21/C22）', async () => {
+  it('我们机器人开的、合并的 PR：镜像里没记的补上；不是「引擎」合的报出来（C21/C22）', async () => {
     const { gh, fake, ledger } = setup();
     const byEngine = fake.addPull({
       head: { ref: 'task/1', sha: A },
@@ -468,7 +486,36 @@ describe('对账与补漏', () => {
         `#${byAgent.number} 合并了，但账上没有合并队列的合并记录`,
       ].sort(),
     );
+    // 每小时对账按种类分（不认上面那几句字）：种类和 PR 号要对得上
+    expect(report.findings.map((f) => `${f.number} ${f.kind}`).sort()).toEqual(
+      [
+        `${byEngine.number} mirror_fixed`,
+        `${byAgent.number} not_merged_by_engine`,
+        `${byAgent.number} no_merge_record`,
+      ].sort(),
+    );
+    expect(report.problems).toEqual(report.findings.map((f) => f.text));
     expect((await ledger.getPullRequest(REPO_ID, byEngine.number))?.state).toBe('merged');
+  });
+
+  it('人开的 PR：镜像没记的照样补上；不报合并人、也不报没有合并记录', async () => {
+    const { gh, fake, ledger } = setup();
+    const byHuman = fake.addPull({
+      user: fake.human,
+      head: { ref: 'task/9', sha: A },
+      state: 'closed',
+      merged: true,
+      merged_at: '2026-09-25T11:00:00Z',
+      merge_commit_sha: sha('c'),
+      merged_by: fake.human,
+    });
+    const report = await gh.auditMergedPrs('acme/widgets', new Date('2026-09-25T00:00:00Z'));
+    expect(report).toMatchObject({ outcome: 'ok', scanned: 1, found: 1, fixed: 1 });
+    expect(report.problems).toEqual([`#${byHuman.number} 合并了但镜像里没有（已补）`]);
+    expect(report.findings).toEqual([
+      { number: byHuman.number, kind: 'mirror_fixed', text: `#${byHuman.number} 合并了但镜像里没有（已补）` },
+    ]);
+    expect((await ledger.getPullRequest(REPO_ID, byHuman.number))?.state).toBe('merged');
   });
 
   it('自检：两个机器人的权限够不够；「干活的」能改 issue 要标出来；读不到算没查成', async () => {

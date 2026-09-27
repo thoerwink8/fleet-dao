@@ -491,6 +491,11 @@ describe('ci.yml 和这里对得上', () => {
     expect(group).toBe(['ci-$', '{{ github.event.pull_request.number || github.ref }}'].join(''));
   });
 
+  it('【故意造出的失败】只有 PR 上新的一轮挤掉旧的，主线推送不挤掉在跑的全量：挤了的话合并一密一个全绿的提交都没有，自动发布无可发（#362）', () => {
+    const cancel = /^concurrency:\n {2}group: .+\n {2}cancel-in-progress: (.+)$/m.exec(yml)?.[1];
+    expect(cancel).toBe(['$', "{{ github.event_name == 'pull_request' }}"].join(''));
+  });
+
   it('按开关跑的几个 job 都看 changes 给的开关；hygiene、docs 不看、每次都跑', () => {
     for (const j of PLANNED_JOBS) {
       expect(job(j), j).toMatch(/^ {4}needs: changes$/m);

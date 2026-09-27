@@ -1,0 +1,807 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>法国引擎</title>
+<link rel="icon" href="data:,">
+<!-- 法国引擎页（commander-seat 技能，#328）：驾驶舱正式版（#216、#199）上线前的过渡页，电脑浏览器优先（1280–1920 宽）。
+     数据每 5 秒从同一个服务的 /api/france 取，服务在页面开着时每 30 秒左右经 ssh 在法国只读地查一次。
+     读不到照实写原因，不显示成空的、0。不连外网。 -->
+<style>
+  :root {
+    --ground: #edf1f4;
+    --surface: #ffffff;
+    --sunken: #f5f7f9;
+    --ink: #14202a;
+    --muted: #586674;
+    --line: #d3dbe3;
+    --accent: #1d5ba6;
+    --done: #2b7a4b;
+    --done-bg: #e4f2e9;
+    --doing: #1d5ba6;
+    --doing-bg: #e2ecf8;
+    --wait: #6f7d8b;
+    --wait-bg: #eceff3;
+    --needs: #a8520a;
+    --needs-bg: #fbeedf;
+    --block: #b3261e;
+    --block-bg: #fae6e4;
+    --font-body: "PingFang SC", "Microsoft YaHei", "Noto Sans SC", "Noto Sans CJK SC", system-ui, sans-serif;
+    --font-mono: ui-monospace, "SFMono-Regular", "Cascadia Mono", Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --ground: #0d1318;
+      --surface: #151d25;
+      --sunken: #111820;
+      --ink: #e4ebf1;
+      --muted: #93a2b0;
+      --line: #25313c;
+      --accent: #74aaea;
+      --done: #62c38e;
+      --done-bg: #16291f;
+      --doing: #74aaea;
+      --doing-bg: #172637;
+      --wait: #8795a3;
+      --wait-bg: #1c252e;
+      --needs: #f0a24e;
+      --needs-bg: #2e2112;
+      --block: #f2776d;
+      --block-bg: #331a18;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --ground: #0d1318;
+    --surface: #151d25;
+    --sunken: #111820;
+    --ink: #e4ebf1;
+    --muted: #93a2b0;
+    --line: #25313c;
+    --accent: #74aaea;
+    --done: #62c38e;
+    --done-bg: #16291f;
+    --doing: #74aaea;
+    --doing-bg: #172637;
+    --wait: #8795a3;
+    --wait-bg: #1c252e;
+    --needs: #f0a24e;
+    --needs-bg: #2e2112;
+    --block: #f2776d;
+    --block-bg: #331a18;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--font-body);
+    font-size: 14px;
+    line-height: 1.55;
+    padding: 20px 28px 48px;
+  }
+  a { color: var(--accent); text-decoration: none; overflow-wrap: anywhere; }
+  a:hover { text-decoration: underline; }
+  a:focus-visible, summary:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+  h1 { font-size: 26px; line-height: 1.25; margin: 0; font-weight: 700; }
+  small { font-weight: 400; color: var(--muted); font-size: 12.5px; }
+  code { font-family: var(--font-mono); font-size: 12.5px; }
+
+  /* 电脑宽度优先：用满宽，几块并排；窄了再一块一行 */
+  .wrap { max-width: 1880px; margin: 0 auto; display: grid; gap: 16px; min-width: 0; }
+  .row { display: grid; gap: 16px; align-items: start; min-width: 0; }
+  .row-a { grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); }
+  .row-half { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  /* 字多的表（定时任务、路由、提醒、日志）：1700 宽以下一块占一行，更宽才并排 */
+  .row-wide { grid-template-columns: minmax(0, 1fr); }
+  @media (min-width: 1700px) { .row-wide { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  .stack { display: grid; gap: 16px; min-width: 0; }
+  @media (max-width: 1100px) {
+    body { padding: 16px 16px 40px; }
+    .row-a, .row-half { grid-template-columns: minmax(0, 1fr); }
+  }
+
+  .top { display: grid; gap: 4px; min-width: 0; }
+  .top-row { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 8px 24px; }
+  .eyebrow { font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.06em; color: var(--muted); }
+  .tabs { display: flex; flex-wrap: wrap; gap: 6px; }
+  .tabs a { font-size: 13px; padding: 3px 12px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); background: var(--surface); }
+  .tabs a[aria-current="page"] { border-color: var(--accent); color: var(--accent); }
+  .headline { margin: 4px 0 0; font-size: 16px; overflow-wrap: anywhere; }
+  .headline.error { color: var(--block); }
+  .meta-row { display: flex; flex-wrap: wrap; gap: 2px 18px; color: var(--muted); font-size: 12.5px; }
+  .conn { overflow-wrap: anywhere; }
+  .conn.error { color: var(--block); }
+  .conn.busy { color: var(--doing); }
+
+  .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; min-width: 0; }
+  .panel-title { margin: 0 0 10px; font-size: 15px; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 2px 12px; align-items: baseline; }
+  .empty { color: var(--muted); margin: 0; }
+  .why { color: var(--block); margin: 0; overflow-wrap: anywhere; }
+  .sub { color: var(--muted); font-size: 12.5px; margin: 8px 0 0; overflow-wrap: anywhere; }
+  .trouble.has-bad { border-left: 4px solid var(--block); }
+  .trouble.all-clear { border-left: 4px solid var(--done); }
+
+  .pill { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; line-height: 1; padding: 4px 8px; border-radius: 999px; white-space: nowrap; }
+  .pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .pill.ok { color: var(--done); background: var(--done-bg); }
+  .pill.run { color: var(--doing); background: var(--doing-bg); }
+  .pill.idle { color: var(--wait); background: var(--wait-bg); }
+  .pill.warn { color: var(--needs); background: var(--needs-bg); }
+  .pill.bad { color: var(--block); background: var(--block-bg); }
+  @media (prefers-reduced-motion: no-preference) {
+    .pill.run::before { animation: pulse 1.6s ease-in-out infinite; }
+  }
+  @keyframes pulse { 50% { opacity: 0.25; } }
+
+  /* 表：一行一条，字段分列 */
+  .scroll { overflow-x: auto; min-width: 0; }
+  table.data { border-collapse: collapse; width: 100%; font-size: 13px; }
+  table.data th, table.data td { padding: 5px 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+  table.data th { color: var(--muted); font-weight: 500; white-space: nowrap; background: var(--sunken); }
+  table.data td.num, table.data th.num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  table.data td.nowrap { white-space: nowrap; }
+  table.data td.muted { color: var(--muted); }
+  table.data td.problem { color: var(--block); }
+  table.data td .small { display: block; color: var(--muted); font-size: 12px; }
+  table.data tr.fail-row td { color: var(--block); padding-top: 0; font-size: 12.5px; overflow-wrap: anywhere; }
+  table.data tr.has-fail td { border-bottom: 0; }
+  table.data tr.task-detail > td { background: var(--sunken); padding: 10px 12px 14px; }
+  table.data tr.task-row { cursor: pointer; }
+  table.data tr.task-row:hover td { background: var(--sunken); }
+  table.data tr.task-row.open td { background: var(--doing-bg); border-bottom: 0; }
+  .clamp { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; cursor: pointer; overflow-wrap: anywhere; }
+  .clamp.open { display: block; }
+  button.toggle { border: 1px solid var(--line); background: var(--surface); color: var(--muted); border-radius: 4px; width: 22px; height: 22px; line-height: 1; padding: 0; cursor: pointer; font-size: 12px; }
+  .missing { color: var(--muted); }
+
+  .sub-title { margin: 12px 0 6px; font-size: 13px; color: var(--muted); font-weight: 600; }
+  .sub-title:first-child { margin-top: 0; }
+  details.fold { margin-top: 12px; }
+  details.fold > summary { list-style: none; cursor: pointer; font-size: 13px; color: var(--muted); font-weight: 600; padding: 2px 0; }
+  details.fold > summary::-webkit-details-marker { display: none; }
+  details.fold > summary::before { content: "▸ "; }
+  details.fold[open] > summary::before { content: "▾ "; }
+  details.fold[open] > summary { margin-bottom: 6px; }
+
+  .kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 3px 14px; margin: 0; font-size: 13px; }
+  .kv dt { color: var(--muted); white-space: nowrap; }
+  .kv dd { margin: 0; overflow-wrap: anywhere; }
+  .inline-list { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; }
+
+  /* 放最后：上面的块自己写了 display，会盖掉 hidden 属性 */
+  [hidden] { display: none; }
+</style>
+</head><body>
+<div class="wrap">
+  <header class="top">
+    <div class="top-row">
+      <div>
+        <div class="eyebrow">法国引擎 · 过渡页（驾驶舱 #216、#199 上线后停用）</div>
+        <h1>法国引擎</h1>
+      </div>
+      <nav class="tabs" aria-label="页面"><a href="/">帅位进度</a><a href="/france" aria-current="page">法国引擎</a></nav>
+    </div>
+    <p class="headline" id="headline">正在从法国读……</p>
+    <div class="meta-row"><span id="fresh"></span><span id="took"></span><span class="conn" id="conn" role="status"></span></div>
+  </header>
+  <div class="wrap" id="content"></div>
+</div>
+
+<script>
+(() => {
+  const POLL_MS = 5000;
+  const LEVEL = { bad: ["bad", "异常"], unread: ["bad", "没读到"], note: ["warn", "留意"] };
+  /** 整份没读到的几种（france-lib.mjs 的 kind）。 */
+  const KIND = {
+    "not-configured": "没配 ssh 名字",
+    "bad-config": "ssh 名字认不出",
+    "no-script": "本机的查询脚本读不到",
+    "ssh-failed": "ssh 连不上",
+    timeout: "超时",
+    "query-failed": "法国上的脚本没跑成",
+    "bad-json": "回来的不是 JSON",
+    "bad-shape": "回来的认不出",
+    crashed: "本机这头出错",
+  };
+  const opened = new Set();
+  let shownAt = null;
+  let lastState = null;
+
+  const $ = (id) => document.getElementById(id);
+  const el = (tag, cls, text) => {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined && text !== null) e.textContent = text;
+    return e;
+  };
+  const add = (parent, ...kids) => {
+    for (const k of kids) if (k !== null && k !== undefined && k !== false) parent.appendChild(typeof k === "string" ? document.createTextNode(k) : k);
+    return parent;
+  };
+  const link = (label, url) => {
+    if (typeof url !== "string" || !/^https?:\/\/\S+$/i.test(url)) return el("span", null, label);
+    const a = el("a", null, label);
+    a.href = url;
+    a.target = "_blank";
+    a.rel = "noopener";
+    return a;
+  };
+  const pill = (cls, text) => el("span", `pill ${cls}`, text);
+  const sentence = (s) => (/[。！？.!?]$/.test(String(s).trim()) ? String(s).trim() : `${String(s).trim()}。`);
+  const pad = (n) => String(n).padStart(2, "0");
+  const t = (iso) => new Date(iso).getTime();
+  const clock = (iso) => {
+    const d = new Date(iso);
+    return Number.isNaN(d.getTime()) ? "—" : `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  };
+  const stamp = (iso) => {
+    const d = new Date(iso);
+    return Number.isNaN(d.getTime()) ? "—" : `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  };
+  /** 时长（毫秒）：表里用紧凑写法。 */
+  const dur = (ms) => {
+    if (ms === null || ms === undefined || !Number.isFinite(ms)) return "—";
+    const s = Math.round(ms / 1000);
+    if (s < 60) return `${s}秒`;
+    const m = Math.floor(s / 60);
+    if (m < 60) return `${m}分${pad(s % 60)}秒`;
+    const h = Math.floor(m / 60);
+    return h < 48 ? `${h}时${pad(m % 60)}分` : `${Math.floor(h / 24)}天${h % 24}时`;
+  };
+  /** 多久以前：相对「法国查的那一刻」算，不拿本机时钟。 */
+  const agoFrom = (iso, base) => {
+    const d = t(iso);
+    if (!Number.isFinite(d)) return "";
+    const m = Math.floor((base - d) / 60000);
+    if (m < 1) return "刚刚";
+    if (m < 60) return `${m} 分钟前`;
+    const h = Math.floor(m / 60);
+    return h < 48 ? `${h} 小时 ${m % 60} 分钟前` : `${Math.floor(h / 24)} 天前`;
+  };
+  const tok = (n) => {
+    if (n === null || n === undefined) return "—";
+    if (n < 10000) return n.toLocaleString("zh-CN");
+    if (n < 1e8) return `${(n / 1e4).toFixed(n < 1e5 ? 1 : 0)}万`;
+    return `${(n / 1e8).toFixed(2)}亿`;
+  };
+  const usd = (n) => (n === null || n === undefined ? "—" : n > 0 && n < 0.005 ? "<$0.01" : `$${n.toFixed(2)}`);
+  /** 长的字：先露两行，点一下全展开。 */
+  const clamp = (text) => {
+    const d = el("div", "clamp", text);
+    d.title = "点一下看全文";
+    d.addEventListener("click", (e) => {
+      e.stopPropagation();
+      d.classList.toggle("open");
+    });
+    return d;
+  };
+
+  function table(headers, rows) {
+    const wrap = el("div", "scroll");
+    const tb = el("table", "data");
+    const thead = el("thead");
+    const tr = el("tr");
+    for (const h of headers) {
+      const th = el("th", h.num ? "num" : null, h.label);
+      th.scope = "col";
+      if (h.width) th.style.width = h.width;
+      tr.appendChild(th);
+    }
+    thead.appendChild(tr);
+    tb.appendChild(thead);
+    const body = el("tbody");
+    for (const r of rows) body.appendChild(r);
+    tb.appendChild(body);
+    wrap.appendChild(tb);
+    return wrap;
+  }
+  function row(cells, cls) {
+    const tr = el("tr", cls ?? null);
+    for (const c of cells) {
+      const td = el("td", c.cls ?? null);
+      if (c.node) td.appendChild(c.node);
+      else td.textContent = c.text ?? "—";
+      if (c.small) td.appendChild(el("span", "small", c.small));
+      if (c.span) td.colSpan = c.span;
+      tr.appendChild(td);
+    }
+    return tr;
+  }
+  function panel(title, note, cls) {
+    const p = el("section", `panel${cls ? ` ${cls}` : ""}`);
+    const h = el("h2", "panel-title");
+    add(h, title, note ? el("small", null, note) : null);
+    p.appendChild(h);
+    return p;
+  }
+  const unread = (p, why) => {
+    p.appendChild(el("p", "why", `没读到：${why}`));
+    return p;
+  };
+  /** 可折叠的一段（最近结束的、排队的）：开合按 key 记住，每轮重画不会把人点开的收回去。 */
+  function fold(key, summary, bodyFn) {
+    const d = el("details", "fold");
+    if (opened.has(key)) d.open = true;
+    d.appendChild(el("summary", null, summary));
+    let filled = false;
+    const fill = () => {
+      if (!filled) {
+        filled = true;
+        d.appendChild(bodyFn());
+      }
+    };
+    if (d.open) fill();
+    d.addEventListener("toggle", () => {
+      if (d.open) {
+        opened.add(key);
+        fill();
+      } else opened.delete(key);
+    });
+    return d;
+  }
+
+  // —— 断链排查 ——
+  function troublePanel(view) {
+    const { bad, unread: missing, note } = view.counts;
+    const p = panel("断链排查", `${bad} 处异常 · ${missing} 处没读到 · ${note} 处留意`, `trouble ${bad + missing > 0 ? "has-bad" : "all-clear"}`);
+    if (view.anomalies.length === 0) {
+      p.appendChild(el("p", "empty", "没发现断链。查过的：服务、版本和自动发布、定时任务、路由探针、没处理的提醒、会话、单子。"));
+      return p;
+    }
+    const rows = view.anomalies.map((a) => {
+      const [cls, word] = LEVEL[a.level] ?? ["warn", a.level];
+      return row([{ node: pill(cls, word) }, { text: a.what }, { text: a.where, cls: "muted" }]);
+    });
+    p.appendChild(table([{ label: "级别", width: "5.5em" }, { label: "是什么" }, { label: "去哪看", width: "36%" }], rows));
+    return p;
+  }
+
+  // —— 版本和自动发布、服务、挂的号 ——
+  const lastRound = (last) => {
+    const name = last.actionName ?? last.action;
+    const detail = (last.detail ?? "").trim();
+    if (!detail) return name;
+    return detail.startsWith(name) ? detail : `${name}：${detail}`;
+  };
+  function kv(pairs) {
+    const dl = el("dl", "kv");
+    for (const [k, v] of pairs) {
+      if (v === null || v === undefined) continue;
+      dl.appendChild(el("dt", null, k));
+      const dd = el("dd");
+      if (typeof v === "string") dd.textContent = v;
+      else dd.appendChild(v);
+      dl.appendChild(dd);
+    }
+    return dl;
+  }
+  /** 法国配置和仓里期望对账（#323）的结论；不一致、没查成的另有提醒在「没处理的提醒」里。 */
+  function configLine(c, base) {
+    if (!c) return "还没对过账";
+    const when = `（${agoFrom(c.checkedAt, base)}）`;
+    if (c.result === "ok") return `和期望一致${when}`;
+    const parts = [];
+    if (c.drift.length) parts.push(`${c.drift.length} 项和期望不一致：${c.drift.slice(0, 5).join("、")}${c.drift.length > 5 ? " 等" : ""}`);
+    if (c.unchecked.length) parts.push(`没查成：${c.unchecked.join("；")}`);
+    const s = el("span", "why", `${parts.join("；") || c.result}${when}`);
+    return s;
+  }
+  function releasePanel(h, base) {
+    const p = panel("版本和自动发布");
+    const r = h.release;
+    if (!r.ok) {
+      unread(p, r.why);
+      if (r.current) p.appendChild(el("p", "sub", `在用：${r.current}`));
+      return p;
+    }
+    let lag;
+    if (!r.current) lag = el("span", "missing", `没读到在用的版本：${r.currentWhy ?? ""}`);
+    else if (r.behind === 0) lag = pill("ok", "跟上主线了");
+    else if (r.behind > 0) lag = pill("warn", `落后 ${r.behind} 个，最早没发的等了 ${agoFrom(r.oldestUnreleasedAt, base).replace("前", "")}${r.waiting ? `（${r.waiting}）` : ""}`);
+    else lag = pill("bad", `不在主线最近 ${r.recentCount} 个提交里`);
+    const cur = el("span", "inline-list");
+    add(cur, r.current ? el("code", null, r.current) : null, lag);
+    const attempt = r.attempt
+      ? `${r.attempt.sha} ${r.attempt.result === "running" ? `在发（${agoFrom(r.attempt.startedAt, base)}开始）` : r.attempt.result === "ok" ? `发成了（${agoFrom(r.attempt.endedAt ?? r.attempt.startedAt, base)}）` : `没成：${r.attempt.detail ?? ""}`}`
+      : "没有";
+    const pairs = [
+      ["在用", cur],
+      ["主线头", r.head ? `${r.head}（提交于 ${agoFrom(r.headAt, base)}，读于 ${agoFrom(r.checkedAt, base)}）` : `还没读到${r.mainError ? `：${r.mainError}` : ""}`],
+      ["CI", r.ci ? `${{ green: "绿", red: "红", pending: "在跑" }[r.ci.verdict] ?? "读不到"}：${r.ci.detail}` : "还没查过"],
+      ["最近一轮", r.last ? `${clock(r.last.at)} ${lastRound(r.last)}` : "没有"],
+      ["上一次发布", attempt],
+      ["规矩同步", r.rules ? `${{ ok: "同步到", failed: "没成：", unchecked: "没查成：" }[r.rules.result] ?? r.rules.result} ${r.rules.commit ?? ""} ${r.rules.detail ?? ""}`.trim() : "没有记录"],
+      ["装机脚本", r.system ? ("error" in r.system ? `没读到：${r.system.error}` : `装到 ${r.system.appliedSha}，之后相关提交 ${r.system.behind} 个`) : "没有记录"],
+      ["自动发布", `上一轮跑于 ${agoFrom(r.ranAt, base)}（应每 5 分钟一轮）`],
+      ["配置对账", configLine(r.config, base)],
+    ];
+    if (r.hold) pairs.push(["手动切过", `${r.hold.sha}（${r.hold.event}，${agoFrom(r.hold.since, base)}）`]);
+    p.appendChild(kv(pairs));
+    return p;
+  }
+  function enginePanel(h, base) {
+    const p = panel("服务、会话用户挂的号、让 AI 接活");
+    const pairs = [];
+    if (!h.services.ok) pairs.push(["服务", el("span", "why", `没读到：${h.services.why}`)]);
+    else {
+      const s = el("span", "inline-list");
+      for (const u of h.services.units) add(s, pill(u.state === "active" ? "ok" : "bad", `${u.unit} ${u.state}`));
+      pairs.push(["服务", s]);
+    }
+    const o = h.org;
+    if (!o.ok) pairs.push(["挂的号", el("span", "why", `没读到：${o.why}`)]);
+    else {
+      const s = el("span");
+      add(s, el("strong", null, o.name), `（${o.how}，${agoFrom(o.at, base)}）`);
+      pairs.push(["挂的号", s]);
+    }
+    if (o.recent) {
+      pairs.push([
+        "最近切号",
+        o.recent.length === 0
+          ? "没有"
+          : o.recent
+              .slice(0, 3)
+              .map((a) => `${stamp(a.at)} ${a.action}${a.from ? ` ${a.from} →` : ""}${a.to ? ` ${a.to}` : ""}${a.ok ? "" : `（没成：${a.error ?? ""}）`}`)
+              .join("；"),
+      ]);
+    } else if (o.recentWhy) pairs.push(["最近切号", el("span", "why", `没读到：${o.recentWhy}`)]);
+    if (!h.repos.ok) pairs.push(["让 AI 接活", el("span", "why", `没读到：${h.repos.why}`)]);
+    else {
+      const s = el("span", "inline-list");
+      for (const r of h.repos.rows) add(s, pill(r.on ? "ok" : "idle", `${r.repoName} ${r.on ? "开" : "关"}`));
+      pairs.push(["让 AI 接活", s]);
+    }
+    p.appendChild(kv(pairs));
+    return p;
+  }
+
+  // —— 单子 ——
+  const STAGE_HEAD = [
+    { label: "环节" }, { label: "会话", num: true }, { label: "排队", num: true }, { label: "干活", num: true },
+    { label: "输入", num: true }, { label: "输出", num: true }, { label: "缓存读", num: true }, { label: "缓存写", num: true },
+    { label: "当量", num: true }, { label: "花费", num: true },
+  ];
+  function totalsCells(u) {
+    return [
+      { text: `${u.runs + u.running}${u.running ? `（在跑 ${u.running}）` : ""}`, cls: "num" },
+      { text: dur(u.queueMs), cls: "num" },
+      { text: dur(u.runMs), cls: "num" },
+      { text: tok(u.inputTokens), cls: "num", small: u.missingTokens ? `${u.missingTokens} 次没读到` : null },
+      { text: tok(u.outputTokens), cls: "num" },
+      { text: tok(u.cacheReadTokens), cls: "num", small: u.missingCache ? `${u.missingCache} 次没读到` : null },
+      { text: tok(u.cacheWriteTokens), cls: "num" },
+      { text: tok(u.inputEquivalent), cls: "num", small: u.missingEquivalent ? `${u.missingEquivalent} 次没读到` : null },
+      { text: usd(u.costUsd), cls: "num", small: u.missingCost ? `${u.missingCost} 次没报` : null },
+    ];
+  }
+  function runTable(runs, base) {
+    const head = [
+      { label: "排进队" }, { label: "环节" }, { label: "路由 · 模型" }, { label: "排队", num: true }, { label: "干活", num: true },
+      { label: "输入", num: true }, { label: "输出", num: true }, { label: "缓存读", num: true }, { label: "缓存写", num: true },
+      { label: "当量", num: true }, { label: "花费", num: true }, { label: "结局" },
+    ];
+    const rows = [];
+    for (const r of runs) {
+      const failed = r.failureCode || r.failureMessage;
+      const outcomeCls = !r.endedAt ? "run" : r.outcome === "ok" ? "ok" : r.outcome === "stopped" ? "idle" : "bad";
+      const route = [r.pool, r.modelName ?? r.model, r.hostName].filter(Boolean).join(" · ") || r.routeId;
+      rows.push(
+        row(
+          [
+            { text: stamp(r.queuedAt), cls: "nowrap" },
+            { text: r.stageName, small: r.subtaskIndex !== null ? `子任务 ${r.subtaskIndex + 1}${r.subtaskTitle ? `：${r.subtaskTitle}` : ""}` : null },
+            { text: route, small: r.actualModel ? `实际：${r.actualModel}` : null },
+            { text: dur(r.queueMs), cls: "num" },
+            { text: r.startedAt ? `${dur(r.runMs)}${r.endedAt ? "" : "…"}` : "没起来", cls: "num" },
+            { text: tok(r.inputTokens), cls: "num" },
+            { text: tok(r.outputTokens), cls: "num" },
+            { text: tok(r.cacheReadTokens), cls: "num" },
+            { text: tok(r.cacheWriteTokens), cls: "num" },
+            { text: tok(r.inputEquivalent), cls: "num" },
+            { text: usd(r.costUsd), cls: "num", small: r.costUsd === null ? null : r.billing === "subscription" ? "套餐内折合" : r.billing === "metered" ? "按量真花的" : null },
+            { node: pill(outcomeCls, r.endedAt ? r.outcomeName : `在跑 ${agoFrom(r.startedAt ?? r.queuedAt, base).replace("前", "")}`) },
+          ],
+          failed ? "has-fail" : null,
+        ),
+      );
+      if (failed) rows.push(row([{ text: `${r.failureCode ?? ""}${r.failureCode && r.failureMessage ? "：" : ""}${r.failureMessage ?? ""}`, span: head.length }], "fail-row"));
+    }
+    return table(head, rows);
+  }
+  function taskBody(task, base) {
+    const box = el("div");
+    const times = [`收单 ${stamp(task.createdAt)}（${agoFrom(task.createdAt, base)}）`];
+    if (task.firstRunAt) times.push(`第一个会话 ${agoFrom(task.firstRunAt, base)}`);
+    if (task.updatedAt) times.push(`引擎最后更新 ${agoFrom(task.updatedAt, base)}`);
+    box.appendChild(el("p", "sub-title", times.join(" · ")));
+    if (!task.runs) {
+      box.appendChild(el("p", "why", `会话没读到：${task.runsWhy}`));
+      return box;
+    }
+    if (task.runs.length === 0) {
+      box.appendChild(el("p", "empty", "还没有会话。"));
+      return box;
+    }
+    box.appendChild(el("p", "sub-title", "各环节"));
+    box.appendChild(table(STAGE_HEAD, task.usage.byStage.map((s) => row([{ text: s.stageName ?? s.stage }, ...totalsCells(s)]))));
+    box.appendChild(el("p", "sub-title", "每一次会话"));
+    box.appendChild(runTable(task.runs, base));
+    return box;
+  }
+  const stateCls = (s) => ({ stalled: "bad", failed: "bad", done: "ok", stopped: "idle", queued: "idle", asking: "warn" })[s] ?? "run";
+  /** 单子一行一张：点一行展开这张单的各环节和每一次会话。 */
+  function taskTable(tasks, base) {
+    const head = [
+      { label: "", width: "30px" }, { label: "单" }, { label: "标题" }, { label: "状态" }, { label: "在第几步" },
+      { label: "在做什么" }, { label: "最近的问题" }, { label: "收单" }, { label: "会话", num: true },
+      { label: "排队", num: true }, { label: "干活", num: true }, { label: "当量", num: true }, { label: "花费", num: true },
+    ];
+    const rows = [];
+    for (const task of tasks) {
+      const key = `task:${task.key}`;
+      const open = opened.has(key);
+      const u = task.usage?.total;
+      const none = !u || u.runs + u.running === 0;
+      const btn = el("button", "toggle", open ? "▾" : "▸");
+      btn.type = "button";
+      btn.setAttribute("aria-expanded", String(open));
+      btn.setAttribute("aria-label", `展开 #${task.n} 的每一次会话`);
+      const tr = row(
+        [
+          { node: btn },
+          { node: link(`#${task.n}`, task.url), small: task.repoName, cls: "nowrap" },
+          { text: task.title },
+          { node: pill(stateCls(task.state), task.stateName) },
+          { text: task.phase ?? "—", cls: "nowrap" },
+          { text: task.doing ?? "—" },
+          task.lastProblem && !["done", "stopped"].includes(task.state) ? { node: clamp(task.lastProblem), cls: "problem" } : { text: "", cls: "muted" },
+          { text: agoFrom(task.createdAt, base), cls: "nowrap" },
+          { text: !task.usage ? "没读到" : none ? "0" : `${u.runs + u.running}${u.running ? `（在跑 ${u.running}）` : ""}`, cls: "num" },
+          { text: none ? "—" : dur(u.queueMs), cls: "num" },
+          { text: none ? "—" : dur(u.runMs), cls: "num" },
+          { text: none ? "—" : tok(u.inputEquivalent), cls: "num", small: !none && u.missingEquivalent ? `${u.missingEquivalent} 次没读到` : null },
+          { text: none ? "—" : usd(u.costUsd), cls: "num", small: !none && u.missingCost ? `${u.missingCost} 次没报` : null },
+        ],
+        open ? "task-row open" : "task-row",
+      );
+      const detail = el("tr", "task-detail");
+      const td = el("td");
+      td.colSpan = head.length;
+      detail.appendChild(td);
+      detail.hidden = !open;
+      let filled = false;
+      const fill = () => {
+        if (!filled) {
+          filled = true;
+          td.appendChild(taskBody(task, base));
+        }
+      };
+      if (open) fill();
+      const toggle = () => {
+        const nowOpen = detail.hidden;
+        detail.hidden = !nowOpen;
+        tr.classList.toggle("open", nowOpen);
+        btn.textContent = nowOpen ? "▾" : "▸";
+        btn.setAttribute("aria-expanded", String(nowOpen));
+        if (nowOpen) {
+          opened.add(key);
+          fill();
+        } else opened.delete(key);
+      };
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        toggle();
+      });
+      tr.addEventListener("click", (e) => {
+        if (e.target.closest("a, button, .clamp")) return;
+        toggle();
+      });
+      rows.push(tr, detail);
+    }
+    return table(head, rows);
+  }
+  function tasksPanel(view, base) {
+    const tasks = view.tasks;
+    const p = panel("单子", "点一行展开：每个环节、每一次会话用哪条路由、哪个模型，排队多久、干活多久，token 和花费");
+    if (!tasks.ok) return unread(p, tasks.why);
+    p.appendChild(el("p", "sub-title", `在跑的单（${tasks.active.length}）`));
+    p.appendChild(tasks.active.length ? taskTable(tasks.active, base) : el("p", "empty", "现在没有在跑的单。"));
+    p.appendChild(fold("group:finished", `最近三天结束的（${tasks.finished.length}）`, () => (tasks.finished.length ? taskTable(tasks.finished, base) : el("p", "empty", "没有。"))));
+    p.appendChild(
+      fold("group:queued", `排队的（${tasks.queued.length}）`, () =>
+        tasks.queued.length
+          ? table(
+              [{ label: "单" }, { label: "标题" }, { label: "收单" }],
+              tasks.queued.map((task) => row([{ node: link(`#${task.n}`, task.url), small: task.repoName, cls: "nowrap" }, { text: task.title }, { text: agoFrom(task.createdAt, base), cls: "nowrap" }])),
+            )
+          : el("p", "empty", "没有。"),
+      ),
+    );
+    return p;
+  }
+
+  // —— 近 24 小时 ——
+  function usagePanels(view) {
+    const u = view.usage24h;
+    if (!u.ok) return [unread(panel("近 24 小时"), `会话：${u.why}`)];
+    const total = u.total;
+    const notes = [`会话 ${total.runs + total.running} 次，没成 ${u.failed} 次`];
+    if (u.orphanRuns) notes.push(`${u.orphanRuns} 次不属于任何单`);
+    if (total.cost.metered.usd > 0) notes.push(`按量真花的 ${usd(total.cost.metered.usd)}`);
+    notes.push(`套餐内折合 ${usd(total.cost.subscription.usd)}`);
+    const byStage = panel("近 24 小时 · 按环节", notes.join(" · "));
+    const byModel = panel("近 24 小时 · 按模型", "路由上的模型");
+    if (total.runs + total.running === 0) {
+      byStage.appendChild(el("p", "empty", "近 24 小时没有会话。"));
+      byModel.appendChild(el("p", "empty", "近 24 小时没有会话。"));
+      return [byStage, byModel];
+    }
+    byStage.appendChild(table(STAGE_HEAD, [...u.byStage.map((s) => row([{ text: s.stageName ?? s.stage }, ...totalsCells(s)])), row([{ text: "合计" }, ...totalsCells(total)])]));
+    byStage.appendChild(el("p", "sub", "当量＝输入 + 缓存写×1.25 + 缓存读×0.1 + 输出×5（和驾驶舱同一把尺子，比各步花了多少额度，不是钱）；「没读到」的不当 0 加进去。"));
+    byModel.appendChild(table([{ label: "模型" }, ...STAGE_HEAD.slice(1)], u.byModel.map((m) => row([{ text: m.modelName ?? m.model }, ...totalsCells(m)]))));
+    return [byStage, byModel];
+  }
+
+  // —— 定时任务、路由、提醒、日志 ——
+  function jobsPanel(h, base) {
+    const p = panel("定时任务", "和看门狗 #203、驾驶舱定时任务页同一条线");
+    if (!h.jobs.ok) return unread(p, h.jobs.why);
+    const rows = h.jobs.rows.map((j) => {
+      const fin = j.lastFinished;
+      return row([
+        { text: j.name, small: j.id },
+        { text: j.schedule, small: `${j.every} 分钟内要跑成一次` },
+        { text: j.lastRun ? agoFrom(j.lastRun.started_at, base) : "从没跑过", cls: "nowrap", small: j.running ? "还在跑" : null },
+        fin ? { node: el("span", null, fin.outcome), small: fin.why ?? null } : { text: "—" },
+        { text: j.lastSuccess?.ended_at ? agoFrom(j.lastSuccess.ended_at, base) : "从没跑成过", cls: "nowrap" },
+        { node: pill(j.status === "ok" ? "ok" : "bad", j.statusName) },
+      ]);
+    });
+    p.appendChild(table([{ label: "任务" }, { label: "计划" }, { label: "上次开跑" }, { label: "上次结局" }, { label: "上次跑成" }, { label: "新不新鲜" }], rows));
+    return p;
+  }
+  function routesPanel(h, base) {
+    const p = panel("路由", "在线的结论过了「再探间隔 + 30 分钟」算旧");
+    if (!h.routes.ok) return unread(p, h.routes.why);
+    const org = { carpool: "拼车池", solo: "独享池" };
+    const rows = h.routes.rows.map((r) =>
+      row([
+        { text: r.id, small: r.orgKind ? (org[r.orgKind] ?? r.orgKind) : null },
+        { node: pill(r.stale ? "bad" : r.alive ? "ok" : "idle", r.stale ? "在线（旧）" : r.alive ? "在线" : "不在线") },
+        { text: r.stateName },
+        { text: r.probedAt ? agoFrom(r.probedAt, base) : "还没探过", cls: "nowrap" },
+        { text: r.inUse ? "在用" : "没用", cls: "nowrap" },
+        r.detail ? { node: clamp(r.detail), cls: "muted" } : { text: "" },
+      ]),
+    );
+    p.appendChild(table([{ label: "路由" }, { label: "在线" }, { label: "结论" }, { label: "探于" }, { label: "阶段" }, { label: "说明", width: "40%" }], rows));
+    return p;
+  }
+  function notesPanel(h, base) {
+    const n = h.notifications;
+    const p = panel("没处理的提醒", n.ok ? `${n.count} 条` : null);
+    if (!n.ok) return unread(p, n.why);
+    if (n.count === 0) {
+      p.appendChild(el("p", "empty", "没有。"));
+      return p;
+    }
+    const level = { alert: ["bad", "报警"], decision: ["warn", "等人拍"], daily: ["idle", "日报"] };
+    const rows = n.rows.map((x) => {
+      const [cls, word] = level[x.level] ?? ["warn", x.level];
+      return row([
+        { node: pill(cls, word) },
+        { text: x.n ? `#${x.n}` : "—", cls: "nowrap" },
+        { node: x.link ? link(x.title, x.link) : el("span", null, x.title), small: x.dedupe_key },
+        { text: agoFrom(x.created_at, base), cls: "nowrap" },
+        x.body ? { node: clamp(x.body), cls: "muted" } : { text: "" },
+      ]);
+    });
+    p.appendChild(table([{ label: "级别" }, { label: "单" }, { label: "标题" }, { label: "多久前" }, { label: "内容", width: "45%" }], rows));
+    if (n.count > n.rows.length) p.appendChild(el("p", "sub", `还有 ${n.count - n.rows.length} 条没列出来。`));
+    return p;
+  }
+  function roundsPanel(h) {
+    const r = h.rounds;
+    const p = panel("自动发布最近几轮", "日志里每轮一行");
+    if (!r.ok) return unread(p, r.why);
+    if (r.rows.length === 0) {
+      p.appendChild(el("p", "empty", "6 小时内日志里没有一轮的记录。"));
+      return p;
+    }
+    p.appendChild(table([{ label: "时间", width: "4em" }, { label: "这一轮" }], r.rows.slice().reverse().map((x) => row([{ text: clock(x.at), cls: "nowrap" }, { text: x.text }]))));
+    return p;
+  }
+
+  function rowOf(cls, ...kids) {
+    const r = el("div", `row ${cls}`);
+    add(r, ...kids);
+    return r;
+  }
+  function render(view) {
+    const base = t(view.at);
+    const h = view.health;
+    const right = el("div", "stack");
+    add(right, releasePanel(h, base), enginePanel(h, base));
+    $("content").replaceChildren(
+      rowOf("row-a", troublePanel(view), right),
+      tasksPanel(view, base),
+      rowOf("row-half", ...usagePanels(view)),
+      rowOf("row-wide", notesPanel(h, base), jobsPanel(h, base)),
+      rowOf("row-wide", routesPanel(h, base), roundsPanel(h)),
+    );
+    const parts = [];
+    const { bad, unread: missing } = view.counts;
+    parts.push(bad + missing > 0 ? `断链排查有 ${bad + missing} 处要看` : "没发现断链");
+    if (view.tasks.ok) parts.push(`在跑 ${view.tasks.active.length} 张单`, `排队 ${view.tasks.queued.length} 张`);
+    if (view.usage24h.ok) parts.push(`近 24 小时会话 ${view.usage24h.total.runs + view.usage24h.total.running} 次、花费 ${usd(view.usage24h.total.costUsd)}`);
+    const hl = $("headline");
+    hl.className = bad + missing > 0 ? "headline error" : "headline";
+    hl.textContent = parts.join(" · ");
+    document.title = bad + missing > 0 ? `(${bad + missing}) 法国引擎` : "法国引擎";
+  }
+
+  function status(state) {
+    const now = Date.now();
+    const good = state.good;
+    const conn = $("conn");
+    const secs = (iso) => Math.max(0, Math.round((now - t(iso)) / 1000));
+    if (good) {
+      $("fresh").textContent = `法国 ${clock(good.view.at)} 的数据（${secs(good.fetchedAt)} 秒前读回来的）`;
+      $("took").textContent = `这次读用了 ${(good.tookMs / 1000).toFixed(1)} 秒`;
+    } else {
+      $("fresh").textContent = "";
+      $("took").textContent = "";
+    }
+    const last = state.lastTry;
+    const retry = `每 ${state.refreshMs / 1000} 秒左右重试。`;
+    if (last && !last.ok) {
+      const kind = KIND[last.kind] ?? last.kind;
+      conn.className = "conn error";
+      if (good) {
+        conn.textContent = `最近一次没读到（${clock(last.endedAt)}，${kind}）：${sentence(last.why)}上面是 ${Math.round(secs(good.fetchedAt) / 60)} 分钟前读到的。${retry}`;
+      } else {
+        conn.textContent = `最近一次试在 ${clock(last.endedAt)}（${kind}）。${retry}`;
+        const hl = $("headline");
+        hl.className = "headline error";
+        hl.textContent = `没读到法国：${last.why}`;
+      }
+    } else if (state.loading) {
+      const s = secs(state.loading.since);
+      conn.className = "conn busy";
+      conn.textContent = `正在从法国读（已 ${s} 秒${s > 20 ? "，比平时慢" : ""}）……`;
+    } else {
+      conn.className = "conn";
+      conn.textContent = `页面开着时每 ${state.refreshMs / 1000} 秒左右经 ssh 从法国只读地查一次。`;
+    }
+  }
+
+  async function poll() {
+    let state;
+    try {
+      const r = await fetch("/api/france", { cache: "no-store" });
+      state = await r.json();
+      if (!r.ok) throw new Error(state?.error ?? `HTTP ${r.status}`);
+    } catch (e) {
+      const conn = $("conn");
+      conn.className = "conn error";
+      conn.textContent = `连不上本机进度服务（${e?.message ?? e}）：帅位会话开场会起它。${lastState?.good ? "下面是之前读到的。" : ""}每 5 秒重试。`;
+      if (!lastState?.good) {
+        const hl = $("headline");
+        hl.className = "headline error";
+        hl.textContent = "本机进度服务没在跑，读不到法国。";
+      }
+      return;
+    }
+    lastState = state;
+    if (state.good && state.good.fetchedAt !== shownAt) {
+      render(state.good.view);
+      shownAt = state.good.fetchedAt;
+    }
+    status(state);
+  }
+  poll();
+  setInterval(poll, POLL_MS);
+})();
+</script>
+</body></html>
