@@ -3,13 +3,17 @@
 // 各返回一个 SweepPart，由 hourly-reconcile 的 combineParts 并进这一轮。提醒自己报、自己撤，不进 alert-sweep 的判法表。
 // 补拉只对排队中的单：照对账补漏重放同一份实现（接活那道门）再判一次派不派；在做的单工作流断了不自动重起（会和残留的
 // 会话、分支撞，接活也不会再拉起在做的单），直接报要人看。记账对不上只报、不补：补账要从会话记录重算，不在这里猜。
+// 改这里之前必须知道：接活新加一种「不派」的原因（@fleet-dao/core 的 dispatch.ts），INTAKE_HOLDS 不跟着补，类型检查就过不去——
+// 要定它算不算「记着为什么不派」；不补就会把这种单当成没着落、每小时补拉一次再报卡住。
+import type { AutoDispatchGate, DispatchDecision } from '@fleet-dao/core';
 import {
   type ActiveTaskRef,
   type IssueDeliveryRef,
+  type LedgerSession,
   type MergedPrLedger,
-  type ReconcileRepoRef,
   TERMINAL_TASK_STATES,
 } from '@fleet-dao/db';
+import type { MergedPrAuditReport, MergedPrFinding, RepoRef } from '@fleet-dao/github';
 import type { TaskState } from '@fleet-dao/shared';
 import { requirementWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import type { AlertSweepDeps } from './alert-sweep.ts';
@@ -40,6 +44,8 @@ const TASK_STATE_WORDS: Readonly<Record<TaskState, string>> = {
 export const WORKFLOW_ALERT_PREFIX = 'reconcile:workflow:';
 /** 合了的 PR 对上的单记账不全。后面是 <owner>/<name>#<PR 号>。 */
 export const LEDGER_ALERT_PREFIX = 'reconcile:ledger:';
+/** 我们机器人开的 PR 合并人不是「引擎」、或没有合并队列的合并记录。后面是 <owner>/<name>#<PR 号>。 */
+export const PR_ALERT_PREFIX = 'reconcile:pr:';
 /**
  * 工作流刚收尾、库里的状态还没写上的那一下：单在这之内更新过，不查、也不撤旧的。
  * 再短会把正常收尾报出来，再长会把真断了的单多瞒一阵。
@@ -52,41 +58,42 @@ export const MERGED_PR_LOOKBACK_MS = 26 * 60 * 60_000;
 /** 和 hourly-reconcile 的 OPEN_ALERT_LIMIT 同一个上限：多出来的照实记没看全，不当成没有。 */
 const ALERT_LIST_LIMIT = 500;
 
+/** 接活在投递上记 `workflow=<原因>` 的那些「没派」：开关那道（dispatchDecision）和版本、母单子单、本机做那几道。 */
+export type IntakeHold =
+  | Exclude<DispatchDecision, 'start' | 'restart' | 'wait_previous_run'>
+  | Extract<AutoDispatchGate, { ok: false }>['reason'];
+
 /**
- * 接活在投递上记的「为什么不派」（`workflow=<原因>`，packages/api/src/issue-intake.ts；判法在 @fleet-dao/core 的
- * dispatch.ts）里算数的几种：排队中的单记着其中一种，没派是有意的。开关关着（dispatch_off）不在这里：项目开关开着
- * 还记着它是旧的，要重判；读不出版本、读不出建单时刻的是没判成，也要重判。
+ * 每一种「没派」算不算有着落：写的是给人看的原因（撤提醒时写进去）；null = 不算，要补拉重判。接活记的原因在
+ * packages/api/src/issue-intake.ts，判法在 @fleet-dao/core 的 dispatch.ts。
  */
-export const HELD_REASONS: Readonly<Record<string, string>> = {
+export const INTAKE_HOLDS: Readonly<Record<IntakeHold, string | null>> = {
   opened_before_switch: '开关打开以前开的单，要人明说交给 fleet',
   unscheduled: '未排期',
   not_current_version: '不是当前版本',
   mother_ticket: '母单',
   sub_issue: '子单',
+  reserved_local: '贴着「本机做」，帅位留给本机做',
+  // 开关关着的项目这里不查：项目开关现在开着，这条是开关打开以前记的，要重判
+  dispatch_off: null,
+  // 没判成（读不出建单时刻、认不出里程碑的版本号），要重判
+  created_at_unreadable: null,
+  version_unreadable: null,
+  // 排队中的单接活不会这样记；万一记着也不算，重判
+  in_progress: null,
+  finished: null,
 };
 
 export function prAlertKey(owner: string, name: string, number: number): string {
-  return `reconcile:pr:${owner}/${name}#${number}`;
+  return `${PR_ALERT_PREFIX}${owner}/${name}#${number}`;
 }
 
 export function ledgerAlertKey(owner: string, name: string, number: number): string {
   return `${LEDGER_ALERT_PREFIX}${owner}/${name}#${number}`;
 }
 
-/** 合并 PR 对账的结果，和 @fleet-dao/github 的 AuditReport 同形（这里不引那个包）。 */
-export interface MergedPrAudit {
-  outcome: 'ok' | 'partial' | 'unscanned';
-  scanned: number;
-  found: number;
-  fixed: number;
-  problems: string[];
-  why?: string | undefined;
-}
-
-/** 补拉（重放这张 issue 最近一次的 issues 投递）的结果。 */
+/** 补拉（重放这张 issue 最近一次接活处理过的投递）的结果。 */
 export type RepullResult =
-  /** 库里没有这张 issue 的 issues 投递，没东西可重放。 */
-  | { kind: 'no_delivery' }
   /** 那条投递正在处理：这一轮不动。 */
   | { kind: 'busy' }
   /** 接活处理完了，note 是它记的（`workflow=started` 之类）。 */
@@ -97,16 +104,22 @@ export type RepullResult =
   | { kind: 'not_taken'; why: string };
 
 type IssueRef = { owner: string; name: string; issueNumber: number };
+type DeliveryFacts = Pick<IssueDeliveryRef, 'deliveryId' | 'status' | 'reason' | 'note'>;
 
 export interface ReconcileCheckDeps
   extends Pick<AlertSweepDeps, 'workflows' | 'taskState' | 'alerts' | 'now' | 'log'> {
   activeTasks(): Promise<ActiveTaskRef[]>;
-  /** 这张 issue 最近一次的 issues 投递（@fleet-dao/db 的 latestIssueDelivery）。 */
-  latestDelivery(ref: IssueRef): Promise<Pick<IssueDeliveryRef, 'status' | 'reason' | 'note'> | null>;
-  /** 照对账补漏重放同一份实现，把这张 issue 最近一次的投递重放一次（带 force）。 */
-  repull(ref: IssueRef): Promise<RepullResult>;
-  repos(): Promise<ReconcileRepoRef[]>;
-  auditMergedPrs(repoFullName: string, since: Date): Promise<MergedPrAudit>;
+  /**
+   * 这张 issue 最近一次接活处理过的 issues 投递（@fleet-dao/db 的 latestIssueDelivery；一版都没处理过才回门口没收的那条）；
+   * 一条都没有是 null。
+   */
+  latestDelivery(ref: IssueRef): Promise<DeliveryFacts | null>;
+  /** 照对账补漏重放同一份实现，把这条投递重放一次（带 force）。 */
+  repull(deliveryId: string): Promise<RepullResult>;
+  /** 受管的仓（库里的 repos 表）。 */
+  repos(): Promise<RepoRef[]>;
+  /** @fleet-dao/github 的 GitHub.auditMergedPrs。 */
+  auditMergedPrs(repoFullName: string, since: Date): Promise<MergedPrAuditReport>;
   ledgers(input: {
     since: Date;
     prs: { owner: string; name: string; number: number }[];
@@ -130,13 +143,19 @@ export function intakeResult(note: string | null): string | null {
   return note ? (/(?:^|,\s*)workflow=([a-z_]+)/.exec(note)?.[1] ?? null) : null;
 }
 
-/** 投递上记着的「为什么不派」：算数的原因（见 HELD_REASONS）、或记成等着的原因；都不是是 null。 */
+/** 接活记的结果是不是一种算数的「不派」：是的回给人看的原因，不是（拉起了、没判成、认不出）回 null。 */
+function heldBy(result: string | null): string | null {
+  if (!result || !Object.hasOwn(INTAKE_HOLDS, result)) return null;
+  return INTAKE_HOLDS[result as IntakeHold];
+}
+
+/** 投递上记着的「为什么不派」：算数的原因（见 INTAKE_HOLDS）、或记成等着的原因；都不是是 null。 */
 export function heldWhy(d: Pick<IssueDeliveryRef, 'status' | 'reason' | 'note'> | null): string | null {
   if (!d) return null;
   if (d.status === 'waiting') return `投递记成等着：${d.reason ?? '没写原因'}`;
   if (d.status !== 'accepted') return null;
-  const r = intakeResult(d.note);
-  return r && Object.hasOwn(HELD_REASONS, r) ? `投递上记着不派：${HELD_REASONS[r]}` : null;
+  const why = heldBy(intakeResult(d.note));
+  return why ? `投递上记着不派：${why}` : null;
 }
 
 type Verdict =
@@ -145,27 +164,28 @@ type Verdict =
   | { kind: 'stuck'; why: string };
 
 /** 排队中的单工作流不在跑、投递上也没记为什么不派：补拉一次，看结果。 */
-async function repullQueued(deps: ReconcileCheckDeps, task: ActiveTaskRef, where: string): Promise<Verdict> {
+async function repullQueued(
+  deps: ReconcileCheckDeps,
+  task: ActiveTaskRef,
+  delivery: DeliveryFacts,
+  where: string,
+): Promise<Verdict> {
   let r: RepullResult;
   try {
-    r = await deps.repull(task);
+    r = await deps.repull(delivery.deliveryId);
   } catch (err) {
     return { kind: 'stuck', why: `补拉了一次没成：${message(err)}` };
   }
   switch (r.kind) {
     case 'busy':
       return { kind: 'hold' };
-    case 'no_delivery':
-      return { kind: 'stuck', why: '库里没有这张 issue 的投递，补拉不了（接活从没收到过它？）' };
     case 'not_taken':
       return { kind: 'stuck', why: `补拉时接活没收：${r.why}` };
     case 'waiting':
       return { kind: 'ok', why: `补拉了一次，接活记成等着（${r.why}），对账补漏每轮再来`, fixed: true };
     case 'processed': {
-      const got = intakeResult(r.note);
-      if (got && Object.hasOwn(HELD_REASONS, got)) {
-        return { kind: 'ok', why: `补拉了一次，接活判不派：${HELD_REASONS[got]}`, fixed: true };
-      }
+      const held = heldBy(intakeResult(r.note));
+      if (held) return { kind: 'ok', why: `补拉了一次，接活判不派：${held}`, fixed: true };
       const wf = requirementWorkflowId({ owner: task.owner, name: task.name }, task.issueNumber);
       let st: WorkflowState;
       try {
@@ -227,7 +247,7 @@ export async function checkWorkflows(deps: ReconcileCheckDeps): Promise<SweepPar
     }
     let verdict: Verdict;
     if (task.state === 'queued') {
-      let delivery: Awaited<ReturnType<ReconcileCheckDeps['latestDelivery']>>;
+      let delivery: DeliveryFacts | null;
       try {
         delivery = await deps.latestDelivery(task);
       } catch (err) {
@@ -236,7 +256,10 @@ export async function checkWorkflows(deps: ReconcileCheckDeps): Promise<SweepPar
         continue;
       }
       const held = heldWhy(delivery);
-      verdict = held ? { kind: 'ok', why: held, fixed: false } : await repullQueued(deps, task, where);
+      if (held) verdict = { kind: 'ok', why: held, fixed: false };
+      else if (!delivery) {
+        verdict = { kind: 'stuck', why: '库里没有这张 issue 的投递，补拉不了（接活从没收到过它？）' };
+      } else verdict = await repullQueued(deps, task, delivery, where);
     } else {
       verdict = {
         kind: 'stuck',
@@ -330,45 +353,23 @@ async function resolveOne(deps: ReconcileCheckDeps, part: SweepPart, dedupeKey: 
   }
 }
 
-interface Classified {
-  fixed: string[];
-  failed: string[];
-  /** 认不出的句子：不当成没事，写进 unchecked。 */
-  odd: string[];
-  alerts: Map<number, string[]>;
-}
-
-function classifyProblems(problems: readonly string[]): Classified {
-  const fixed: string[] = [];
-  const failed: string[] = [];
-  const odd: string[] = [];
-  const alerts = new Map<number, string[]>();
-  for (const p of problems) {
-    if (p.includes('没查成')) {
-      failed.push(p);
-      continue;
-    }
-    if (p.includes('（已补）')) {
-      fixed.push(p);
-      continue;
-    }
-    const n = /^#(\d+)\s/.exec(p)?.[1];
-    if (!n) {
-      odd.push(p);
-      continue;
-    }
-    const number = Number(n);
-    const list = alerts.get(number) ?? [];
-    list.push(p);
-    alerts.set(number, list);
+/** 按 PR 归拢要报的两种（合并人不是「引擎」、没有合并记录）。 */
+function prProblems(findings: readonly MergedPrFinding[]): Map<number, string[]> {
+  const byPr = new Map<number, string[]>();
+  for (const f of findings) {
+    if (f.kind !== 'not_merged_by_engine' && f.kind !== 'no_merge_record') continue;
+    byPr.set(f.number, [...(byPr.get(f.number) ?? []), f.text]);
   }
-  return { fixed, failed, odd, alerts };
+  return byPr;
 }
 
-/** 每个受管的仓，最近 26 小时合了的 PR：镜像补上算发现；机器人开的合并人、合并记录不对按 PR 报一条，不自动撤。 */
+/**
+ * 每个受管的仓，最近 26 小时合了的 PR：镜像补上算发现（记账那一部分靠镜像认合了的 PR，放在它前面跑）；我们机器人开的
+ * 合并人、合并记录不对按 PR 报一条（条件就是「发生过」，只报一次、不自动撤）。
+ */
 export async function checkMergedPrs(deps: ReconcileCheckDeps): Promise<SweepPart> {
   const part = empty();
-  let repos: ReconcileRepoRef[];
+  let repos: RepoRef[];
   try {
     repos = await deps.repos();
   } catch (err) {
@@ -377,7 +378,7 @@ export async function checkMergedPrs(deps: ReconcileCheckDeps): Promise<SweepPar
   const since = new Date(deps.now().getTime() - MERGED_PR_LOOKBACK_MS);
   for (const repo of repos) {
     const slug = `${repo.owner}/${repo.name}`;
-    let report: MergedPrAudit;
+    let report: MergedPrAuditReport;
     try {
       report = await deps.auditMergedPrs(slug, since);
     } catch (err) {
@@ -386,39 +387,52 @@ export async function checkMergedPrs(deps: ReconcileCheckDeps): Promise<SweepPar
     }
     part.scanned += report.scanned;
     part.found += report.found;
-    const { fixed, failed, odd, alerts } = classifyProblems(report.problems);
+    const fixed = report.findings.filter((f) => f.kind === 'mirror_fixed');
     if (fixed.length > 0) {
       deps.log('info', '每小时对账：合并的 PR 镜像补记成已合并', {
         repo: slug,
-        fixed: report.fixed,
-        problems: fixed.slice(0, 5),
+        fixed: fixed.length,
+        problems: fixed.slice(0, 5).map((f) => f.text),
       });
     }
+    const failed = report.findings.filter((f) => f.kind === 'unchecked').map((f) => f.text);
     if (report.outcome === 'unscanned') {
       part.unchecked.push(`${slug}：${report.why ?? '合并的 PR 这次没查成'}`);
     } else if (report.outcome === 'partial' || failed.length > 0) {
       const detail = failed.length > 0 ? failed.join('；') : (report.why ?? '有的没查成');
       part.unchecked.push(`${slug} 合并的 PR 没查全：${detail}`);
     }
-    if (odd.length > 0) part.unchecked.push(`${slug} 有认不出的对账结果：${odd.join('；')}`);
-    for (const [number, lines] of alerts) {
+    for (const [number, lines] of prProblems(report.findings)) {
       const dedupeKey = prAlertKey(repo.owner, repo.name, number);
       try {
-        await deps.alerts.insertOnce({
+        const { created } = await deps.alerts.insertOnce({
           dedupeKey,
           level: 'alert',
           taskId: null,
-          title: clip(`合并的 PR 合并人或合并记录对不上：${slug}#${number}`, 300),
-          body: lines.join('\n'),
+          title: clip(`机器人开的 PR 没经合并队列合：${slug}#${number}`, 300),
+          body: [
+            ...lines,
+            '我们机器人开的 PR 该由合并队列以「引擎」机器人合、账上留合并记录；不是这样合的，合并前那几道核对（不落后主线、' +
+              'CI 全绿、人闸）可能没走。这条不会自己撤，看过点「处理」。',
+          ].join('\n'),
           link: `https://github.com/${slug}/pull/${number}`,
         });
-        deps.log('info', '每小时对账：合并的 PR 合并人或合并记录对不上', { dedupeKey });
+        if (created) deps.log('info', '每小时对账：机器人开的 PR 没经合并队列合', { dedupeKey });
       } catch (err) {
         part.unchecked.push(`${dedupeKey} 没报成：${message(err)}`);
       }
     }
   }
   return part;
+}
+
+/**
+ * 读到了、却是 0：跑成了的会话一定花了 token，记成 0 就是拿 0 冒充读到了（读不到要留空，关单评论写「没读到」）。
+ * 没跑成的（出错、叫停、停滞）可能真的一个 token 都没花（比如刚起就被限流），0 是照实记的，不算缺。
+ */
+function zeroUsage(s: LedgerSession): boolean {
+  const recorded = s.inputTokens !== null || s.outputTokens !== null;
+  return s.outcome === 'ok' && recorded && (s.inputTokens ?? 0) + (s.outputTokens ?? 0) === 0;
 }
 
 /** 一条合了的 PR 对上的单缺什么；都齐是空的。 */
@@ -428,13 +442,11 @@ export function ledgerGaps(l: MergedPrLedger): string[] {
   if (open.length > 0) {
     gaps.push(`${open.length} 次会话没有结局（${[...new Set(open.map((s) => s.stage))].join('、')}）`);
   }
-  // 读不到的用量留空（不记 0），关单评论照写「没读到」；真跑过的会话 token 记成 0 就是拿 0 冒充读到了
-  const zero = l.sessions.filter(
-    (s) => s.endedAt !== null && s.startedAt !== null && s.inputTokens === 0 && s.outputTokens === 0,
-  );
+  const zero = l.sessions.filter(zeroUsage);
   if (zero.length > 0) {
-    gaps.push(`${zero.length} 次跑过的会话用量记成了 0（读不到要留空、写明没读到，不记 0）`);
+    gaps.push(`${zero.length} 次跑成了的会话用量记成了 0（读不到要留空、写明没读到，不记 0）`);
   }
+  // 0003 第 7 步：合并、关单（关单评论写用量、耗时），收尾时把单记成做完。#252 母单按块合多条 PR 之后，这一条要改成按块认。
   if (l.taskState !== 'done') {
     gaps.push(`合并关单那一步没写完：库里这张单是「${TASK_STATE_WORDS[l.taskState]}」，不是「做完了」`);
   }
@@ -447,8 +459,8 @@ function parseLedgerKey(key: string): { owner: string; name: string; number: num
 }
 
 /**
- * 合了的 PR 对上的单（引擎开的：PR 头分支上有这张单的会话）：会话都有结局、用量不拿 0 冒充、关单那一步写完（单记成做完）。
- * 缺的按 PR 报一条，写明哪张单缺什么；不自动补。都齐了（还开着的提醒复查，出了回看窗口也查）就撤。
+ * 合了的 PR 对上的单（引擎开的：PR 头分支上有这张单的会话）：这条分支上的会话都有结局、用量不拿 0 冒充、关单那一步写完
+ * （单记成做完）。缺的按 PR 报一条，写明哪张单缺什么；不自动补。都齐了（还开着的提醒复查，出了回看窗口也查）就撤。
  */
 export async function checkLedgers(deps: ReconcileCheckDeps): Promise<SweepPart> {
   const part = empty();

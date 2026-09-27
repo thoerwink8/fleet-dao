@@ -1,7 +1,17 @@
 // 后端依赖的外部能力，一律按接口写：数据库（pg-store.ts 用 @fleet-dao/db 实现）、Temporal、飞书、GitHub 补收
 // 由各自的实现接进来；测试和本地开发用 memory-store.ts。两个 Store 实现过同一套契约测试（test/store-contract.ts），
 // 改这里的语义要两边一起改、契约测试跟着改。
-import type { AskHold, AskScope, FlowReplica, IssueFamily, IssueMilestones, IssueNow } from '@fleet-dao/core';
+import type {
+  AskHold,
+  AskScope,
+  FlowReplica,
+  IssueClaim,
+  IssueFamily,
+  IssueMilestones,
+  IssueNow,
+  SeatLease,
+  SeatSettingsRead,
+} from '@fleet-dao/core';
 import type {
   AuditEntrySchema,
   Ban,
@@ -815,6 +825,109 @@ export interface FeishuStore {
   ackOutbox(acks: readonly FeishuOutboxAck[], at: string): Promise<FeishuAckReport>;
 }
 
+// —— 帅位只一个（#299，specs/299-帅位只一个/方案.md 第二、三节）——
+// 帅位租约一个座位一行（任期号只增不减，就是栅栏号），认领每张单一行（认领号是工人的栅栏号）。时间一律是库的 now()：
+// 每个结果都带着库的 now（ISO），判过期用它（判法在 core 的 seat.ts），不用调用方的钟。内存版用 Store 的钟顶替。
+
+/** 本机的帅位、工人是谁：经 ssh 调命令时放在参数里（进来的一律是 root，看不出是谁）。 */
+export interface SeatIdentity {
+  machine: string;
+  session: string;
+}
+
+/** 带着任期号来做事的帅位。 */
+export interface SeatActor extends SeatIdentity {
+  scope: string;
+  term: number;
+}
+
+/** 要认领的这张单：仓（库里的编号）和单号。操作记录记成 claim:<仓的编号>#<单号>。 */
+export interface ClaimTarget {
+  repoId: string;
+  issueNumber: number;
+}
+
+export interface SeatSnapshot {
+  lease: SeatLease | null;
+  /** 库的 now()。 */
+  now: string;
+  /** settings 表里租期、宽限期那两项（认不出就明确失败，不拿默认顶）。 */
+  settings: SeatSettingsRead;
+}
+
+export type RenewSeatResult =
+  | { ok: true; lease: SeatLease; now: string }
+  /** 任期、持有人对不上：lease 是座位此刻的样子（可能没人）。 */
+  | { ok: false; lease: SeatLease | null; now: string };
+
+export type WriteHandoffResult =
+  | { ok: true; lease: SeatLease }
+  | { ok: false; lease: SeatLease | null; now: string };
+
+export type TakeClaimResult =
+  | { ok: true; claim: IssueClaim; now: string }
+  /** 不是帅位（换了人、过了期、座位上没人）：这张单一点没动。 */
+  | { ok: false; reason: 'not_seat'; why: string; now: string }
+  /** 别人（引擎、别的工人）拿着还没结束：这张单一点没动。 */
+  | { ok: false; reason: 'held'; claim: IssueClaim; now: string }
+  /** 租期、宽限期的设置认不出：什么都没做。 */
+  | { ok: false; reason: 'settings'; why: string; now: string };
+
+export type ClaimUpdateResult =
+  | { ok: true; claim: IssueClaim; now: string }
+  /** 认领号对不上、已经结束了、这张单没有认领：claim 是此刻的样子（没有是 null），什么都没改。 */
+  | { ok: false; claim: IssueClaim | null; now: string };
+
+export interface SeatStore {
+  /** 座位此刻的样子、库的 now、租期和宽限期的设置。 */
+  readSeat(scope: string): Promise<SeatSnapshot>;
+  /** 接班：座位上没人就当第 1 任，有人就任期加一、原来的抄进上一任；不看旧的同不同意。和操作记录（seat.take）同一事务。 */
+  takeSeat(input: SeatIdentity & { scope: string }): Promise<{ lease: SeatLease; now: string }>;
+  /** 续约：任期、持有人对得上才续（过了期也续得上：过期只说明联系不上）。不记操作记录（每 15 分钟一次）。 */
+  renewSeat(input: SeatActor): Promise<RenewSeatResult>;
+  /**
+   * 写交接说明：现任（任期、持有人对得上）整份换掉；刚被换下的上一任（上一任是它、任期是现任的）接在现有的后面补一段
+   * （旧帅位退役时把没记的话转进交接）。别的一律不写。和操作记录（seat.handoff）同一事务。
+   */
+  writeHandoff(input: SeatActor & { text: string }): Promise<WriteHandoffResult>;
+  /**
+   * 帅位认领一张单（受保护动作）：同一个事务里锁住座位、按库的 now 核任期没换、没过期，再抢这一行——结束了的整行换成
+   * 新的认领号，还活着的不动。owner 是 seat（帅位自己动手）或 worker（派的工人，在帅位同一台机器上）。
+   * graceMinutes 不给用设置里的。和操作记录（claim.take）同一事务。
+   */
+  takeClaim(
+    input: ClaimTarget & {
+      seat: SeatActor;
+      owner: { kind: 'seat' | 'worker'; label: string };
+      graceMinutes?: number | undefined;
+      note?: string | undefined;
+    },
+  ): Promise<TakeClaimResult>;
+  /**
+   * 工人报一步（心跳）：认领号对得上、还活着才写；note 给了换成这一句，pr 给了记进这份认领开过的 PR、到「开了 PR」。
+   * 带了 note 或 pr 的记操作记录（claim.step / claim.pr），光心跳不记。
+   */
+  stepClaim(
+    input: ClaimTarget & { claimId: string; note?: string | undefined; pr?: number | undefined },
+  ): Promise<ClaimUpdateResult>;
+  /** 工人做完、放下：认领号对得上、还活着才写。和操作记录（claim.done / claim.release）同一事务。 */
+  endClaim(
+    input: ClaimTarget & { claimId: string; state: 'done' | 'released'; reason: string },
+  ): Promise<ClaimUpdateResult>;
+  /**
+   * 作废过了宽限期没心跳的本机认领（按库的 now；引擎的不按心跳作废），一次最多 limit 张。每张一条操作记录（claim.void，
+   * 记在引擎名下）。回作废了的那几张。
+   */
+  voidExpiredClaims(input: { limit: number }): Promise<{ voided: IssueClaim[]; now: string }>;
+  /** 一张单的认领（没有是 null）。 */
+  getClaim(repoId: string, issueNumber: number): Promise<{ claim: IssueClaim | null; now: string }>;
+  /** 列认领：默认只要还活着的；可以只看一个仓。按仓、单号排。 */
+  listClaims(input: {
+    repoId?: string | undefined;
+    activeOnly: boolean;
+  }): Promise<{ claims: IssueClaim[]; now: string }>;
+}
+
 export type Store = UserStore &
   BoardStore &
   RoutingStore &
@@ -822,7 +935,8 @@ export type Store = UserStore &
   AgentStore &
   GitHubStore &
   IntakeStore &
-  FeishuStore;
+  FeishuStore &
+  SeatStore;
 
 // —— 飞书草稿开单：开 issue + 建任务 + 拉起需求工作流（飞书里确认的草稿用）——
 // 和 GitHub 那边的接活（issue 已经在了，进来建任务）方向相反：这里从飞书草稿出发，由后端去开 issue。

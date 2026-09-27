@@ -118,6 +118,17 @@ test('会话账号切换（session_org）：显示成「会话账号切换」；
   assert.equal(byKey(w).session_org.reason, '会话账号切换有要人看的问题（session_org）');
 });
 
+test('GitHub 机器人权限（github_app）：显示成「GitHub 机器人权限」；有要人看的问题照实报红', () => {
+  const v = judge({ status: 200, body: report(true, { ...allOk, github_app: { ok: true } }) });
+  assert.equal(v.ok, true);
+  assert.equal(byKey(v).github_app.label, 'GitHub 机器人权限');
+  assert.equal(byKey(v).github_app.reason, '在线');
+  const bad = { ok: false, code: 'github_app', message: 'GitHub 机器人的权限有要人看的问题' };
+  const w = judge({ status: 503, body: report(false, { ...allOk, github_app: bad }) });
+  assert.equal(w.ok, false);
+  assert.equal(byKey(w).github_app.reason, 'GitHub 机器人的权限有要人看的问题（github_app）');
+});
+
 test('全流程巡检（canary）：显示成「全流程巡检」；通过写明几点、用了多久，断了照实报红、写明断在哪一步', () => {
   const pass = { ok: true, message: '最近一轮 09-27 20:26 通过（用时 43 分钟）' };
   const v = judge({ status: 200, body: report(true, { ...allOk, canary: pass }) });

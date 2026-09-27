@@ -53,6 +53,23 @@ export interface AuditReport {
   why?: string | undefined;
 }
 
+/** 合了的 PR 对账查出来的一条：哪条 PR、哪一种（调用方按 kind 分，不去认 text 里的字）。 */
+export interface MergedPrFinding {
+  number: number;
+  /**
+   * mirror_fixed：镜像没记成已合并，已经补上（人开的、机器人开的都补）；not_merged_by_engine：我们机器人开的，合并人却不是
+   * 「引擎」（C22）；no_merge_record：我们机器人开的，账上却没有合并队列的合并记录（C21）；unchecked：这一条没查成。
+   */
+  kind: 'mirror_fixed' | 'not_merged_by_engine' | 'no_merge_record' | 'unchecked';
+  /** 给人看的一句，也原样进 problems。 */
+  text: string;
+}
+
+/** 合了的 PR 对账的结果：problems 是 findings 的 text 按顺序排下来。 */
+export interface MergedPrAuditReport extends AuditReport {
+  findings: MergedPrFinding[];
+}
+
 export interface ReconcilerOptions {
   intake: Intake;
   /** 轮询用的投递编号：用后端的 pollDeliveryId，保证和后端的去重账是同一套写法。 */
@@ -110,7 +127,7 @@ export interface Reconciler {
   redeliverFailed(since: Date): Promise<ReconcileReport>;
   poll(repoFullName: string, since: Date): Promise<ReconcileReport>;
   auditOpenIssues(repoFullName: string): Promise<AuditReport>;
-  auditMergedPrs(repoFullName: string, since: Date): Promise<AuditReport>;
+  auditMergedPrs(repoFullName: string, since: Date): Promise<MergedPrAuditReport>;
 }
 
 export function createReconciler(deps: Deps, options: ReconcilerOptions): Reconciler {
@@ -365,7 +382,11 @@ export function createReconciler(deps: Deps, options: ReconcilerOptions): Reconc
  * 合并人必须是「引擎」、账上必须有合并队列的合并记录：只查我们两个机器人开的 PR。人开的没有合并队列这一步，
  * 查了会把帅位本机开的、GitHub 自动合并的每一张都报出来。
  */
-export async function auditMergedPrs(deps: Deps, repoFullName: string, since: Date): Promise<AuditReport> {
+export async function auditMergedPrs(
+  deps: Deps,
+  repoFullName: string,
+  since: Date,
+): Promise<MergedPrAuditReport> {
   const { client, ledger } = deps;
   const log: Logger = deps.log;
   const why = (err: unknown) => (err instanceof Error ? err.message : String(err));
@@ -379,14 +400,21 @@ export async function auditMergedPrs(deps: Deps, repoFullName: string, since: Da
       found: 0,
       fixed: 0,
       problems: [],
+      findings: [],
       why: `${slug} 不归本系统管`,
     };
   }
-  const problems: string[] = [];
+  const findings: MergedPrFinding[] = [];
+  const note = (number: number, kind: MergedPrFinding['kind'], text: string) =>
+    findings.push({ number, kind, text: `#${number} ${text}` });
   let scanned = 0;
-  let found = 0;
-  let fixed = 0;
-  let failures = 0;
+  const report = (): Omit<MergedPrAuditReport, 'outcome' | 'why'> => ({
+    scanned,
+    found: findings.filter((f) => f.kind !== 'unchecked').length,
+    fixed: findings.filter((f) => f.kind === 'mirror_fixed').length,
+    problems: findings.map((f) => f.text),
+    findings,
+  });
   try {
     outer: for await (const page of client.pages({
       method: 'GET',
@@ -401,7 +429,6 @@ export async function auditMergedPrs(deps: Deps, repoFullName: string, since: Da
         try {
           const mirror = await ledger.getPullRequest(repoId, item.number);
           if (mirror?.state !== 'merged') {
-            found += 1;
             await ledger.upsertPullRequest({
               repoId,
               number: item.number,
@@ -410,9 +437,10 @@ export async function auditMergedPrs(deps: Deps, repoFullName: string, since: Da
               headSha: item.head.sha,
               updatedAt: new Date(item.updated_at),
             });
-            fixed += 1;
-            problems.push(
-              `#${item.number} 合并了但镜像里${mirror ? `记的是 ${mirror.state}` : '没有'}（已补）`,
+            note(
+              item.number,
+              'mirror_fixed',
+              `合并了但镜像里${mirror ? `记的是 ${mirror.state}` : '没有'}（已补）`,
             );
           }
           const openedByUs = deps.bots.is('engine', item.user) || deps.bots.is('agent', item.user);
@@ -420,35 +448,32 @@ export async function auditMergedPrs(deps: Deps, repoFullName: string, since: Da
           // 合并人只有单张读才有
           const pr = await readPull(deps, repo, item.number, 'engine');
           if (!deps.bots.is('engine', pr.merged_by ?? null)) {
-            found += 1;
-            problems.push(
-              `#${item.number} 不是「引擎」机器人合的（合并人 ${pr.merged_by?.login ?? '读不到'}）`,
+            note(
+              item.number,
+              'not_merged_by_engine',
+              `不是「引擎」机器人合的（合并人 ${pr.merged_by?.login ?? '读不到'}）`,
             );
           }
           // 合并队列合的每一张都在幂等账里留了合并记录（C21）
           const record = await ledger.idempotency.peek(mergeKey(repo, item.number, pr.head.sha));
           if (!record?.completedAt) {
-            found += 1;
-            problems.push(`#${item.number} 合并了，但账上没有合并队列的合并记录`);
+            note(item.number, 'no_merge_record', '合并了，但账上没有合并队列的合并记录');
           }
         } catch (err) {
-          failures += 1;
-          problems.push(`#${item.number} 没查成：${why(err)}`);
+          note(item.number, 'unchecked', `没查成：${why(err)}`);
         }
       }
     }
   } catch (err) {
-    return {
-      outcome: 'unscanned',
-      scanned,
-      found,
-      fixed,
-      problems,
-      why: `列合并的 PR 失败：${why(err)}`,
-    };
+    return { outcome: 'unscanned', ...report(), why: `列合并的 PR 失败：${why(err)}` };
   }
-  if (found > 0) {
-    log.warn('合并的 PR 对账有问题', { repo: slug, found, problems: problems.slice(0, 5).join('；') });
+  const result = report();
+  if (result.found > 0) {
+    log.warn('合并的 PR 对账有问题', {
+      repo: slug,
+      found: result.found,
+      problems: result.problems.slice(0, 5).join('；'),
+    });
   }
-  return { outcome: failures > 0 ? 'partial' : 'ok', scanned, found, fixed, problems };
+  return { outcome: findings.some((f) => f.kind === 'unchecked') ? 'partial' : 'ok', ...result };
 }

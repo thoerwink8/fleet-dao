@@ -1,9 +1,10 @@
 // 每小时对账的真装配：工作树按目录真列（根和仓这两级归 root、755，引擎自己读得了）、属主和删经 fleet-agent-scope
 // （real/worktrees.ts）、树里还剩什么以会话用户的身份看（real/user-git.ts 的 treeLeftovers：仓里跑 git，不是仓的用 find
-// 一层层列）；需求、子任务、PR 头、批准、没结束的单、投递、受管的仓、合了的 PR 和会话记账从库里读；合了的 PR 问这次传进来的
-// GitHub（auditMergedPrs，和 githubReconcile 同一个）；排队的单补拉走对账补漏同一道接活的门（real/github-reconcile.ts 的
-// reconcileIntake：重放这张 issue 最近一次的投递）；工作流在不在跑、挂没挂着问这次活动的 Temporal 客户端；这个阶段派不派得
-// 出去问选路（store-ports 的 pickRoute：和任务挂起时用的同一套）；提醒的读写、操作记录、结局记账是同一个库。
+// 一层层列）；需求、子任务、PR 头、批准、没结束的单、投递、受管的仓、合了的 PR 和会话记账从库里读；合了的 PR 问传进来的
+// GitHub（auditMergedPrs，和对账补漏同一个）；排队的单补拉走对账补漏同一道接活的门（real/github-reconcile.ts 的
+// reconcileIntake：重放这张 issue 最近一次接活处理过的投递）；工作流在不在跑、挂没挂着问这次活动的 Temporal 客户端；这个
+// 阶段派不派得出去问选路（store-ports 的 pickRoute：和任务挂起时用的同一套）；GitHub 两个机器人的权限自检问
+// @fleet-dao/github 的 selfCheck（受管的仓从库里的 repos 表列）；提醒的读写、操作记录、结局记账是同一个库。
 import { readdir } from 'node:fs/promises';
 import {
   createPgStore,
@@ -22,11 +23,11 @@ import {
   issueWorkFacts,
   latestAlertByPrefix,
   latestIssueDelivery,
+  listFlowReplicas,
   listOpenAlerts,
   mergedPrLedgers,
   openSessionTrees,
   prHeadsOfBranch,
-  reconcileRepos,
   resolveAlertWithReason,
   startScheduleRun,
   subtaskTreeRefs,
@@ -38,11 +39,12 @@ import {
 import type { GitHub } from '@fleet-dao/github';
 import { requirementWorkflowId, subtaskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { type Client, WorkflowNotFoundError } from '@temporalio/client';
+import type { GitHubAppCheckDeps } from '../jobs/github-app-check.ts';
 import type { HourlyReconcileJobDeps } from '../jobs/hourly-reconcile.ts';
 import type { WorkflowReader, WorkflowView } from '../jobs/reconcile-common.ts';
 import type { PortContext } from '../ports.ts';
 import type { UserExec } from './exec.ts';
-import { type GitHubReconcileWiring, reconcileIntake } from './github-reconcile.ts';
+import { type IntakeGitHub, reconcileIntake } from './github-reconcile.ts';
 import { PROBE_DIR } from './route-probe.ts';
 import type { SessionOrgReader } from './session-org.ts';
 import { createStorePorts } from './store-ports.ts';
@@ -113,14 +115,16 @@ const NO_CTX: PortContext = {
 
 export interface HourlyReconcileWiring {
   db: Db;
-  /** 和 githubReconcile 同一个：审最近合了的 PR（镜像、合并人、合并记录）；补拉经接活那道门时现读挂在哪个版本。 */
-  gh: Pick<GitHub, 'auditMergedPrs'> & GitHubReconcileWiring['gh'];
+  /** 和对账补漏同一个：审最近合了的 PR（镜像、合并人、合并记录）；补拉经接活那道门时现读挂在哪个版本。 */
+  gh: Pick<GitHub, 'auditMergedPrs'> & IntakeGitHub;
   trees: WorkTrees;
   exec: UserExec;
   /** 会话用户此刻挂的组织（real/session-org.ts）：判阶段派不派得出去和选路同一套，也要它。 */
   sessionOrg: SessionOrgReader;
   /** 这台机器给人看的名字（FLEET_MACHINE_NAME）。 */
   machine: string;
+  /** GitHub 两个机器人在这些仓上的权限够不够（生产是 createGitHub 的 selfCheck）。 */
+  selfCheck: GitHubAppCheckDeps['apps']['selfCheck'];
   now?: () => Date;
   log?: HourlyReconcileJobDeps['log'];
   /** 以下测试用。 */
@@ -128,11 +132,13 @@ export interface HourlyReconcileWiring {
   shBin?: string;
   listDir?: HourlyReconcileJobDeps['listDir'];
   stageRoutable?: HourlyReconcileJobDeps['stageRoutable'];
+  /** 测试用：不给就用选路同一份事实的只读判法（store.stageAllOpen）。 */
+  stageAllOpen?: HourlyReconcileJobDeps['stageAllOpen'];
   workflows?: WorkflowReader;
   inspectMax?: number;
   /** 测试用：换掉补拉时拉起工作流（不给就是真的，经这次活动的 Temporal 客户端起 Fusion）。 */
   requirements?: RequirementWorkflows;
-  /** 测试用：接活那道门的日志。 */
+  /** 测试用：接活那道门的日志（不给就是和对账补漏一样的 JSON 日志）。 */
   intakeLog?: Logger;
 }
 
@@ -144,8 +150,8 @@ export function hourlyReconcileJob(
   const log: HourlyReconcileJobDeps['log'] =
     w.log ?? ((level, text, fields) => console[level === 'info' ? 'info' : level](text, fields ?? {}));
   const store = createStorePorts({ db: w.db, now, sessionOrg: w.sessionOrg });
-  // 和点「继续」以后选路会怎么选是同一套：全熔断时它放一条去试探，也算派得出去——它这时还会顺手把「全熔断」那条提醒
-  // 再报一次（条件确实还在）；要一个不写库的判法见 #246。
+  // 和点「继续」以后选路会怎么选是同一套：全熔断时它放一条去试探，也算派得出去。这时它还会顺手把「全熔断」那条提醒
+  // 再报一次（条件确实还在）。这条提醒撤不撤不在这里判，走下面的 stageAllOpen（只读，不写库、不报警）。
   const stageRoutable: HourlyReconcileJobDeps['stageRoutable'] =
     w.stageRoutable ??
     (async (stage, taskId) => {
@@ -156,10 +162,16 @@ export function hourlyReconcileJob(
       if (r.ok) return { kind: 'dispatch' };
       return r.waitFor === 'none' ? { kind: 'none', detail: r.detail } : { kind: 'wait', detail: r.detail };
     });
-  const pgStore = createPgStore(w.db, { now });
+  const stageAllOpen: HourlyReconcileJobDeps['stageAllOpen'] =
+    w.stageAllOpen ?? ((stage) => store.stageAllOpen(stage));
+  // 受管的仓：两处核对里审合并的 PR、机器人权限自检都按这一份（库里的 repos 表）
+  const managedRepos = async () =>
+    (await listFlowReplicas(w.db)).map((r) => ({ owner: r.owner, name: r.name }));
+  // 补拉用的接活那道门：和对账补漏同一份实现（后端的 Store 是同一个库）
+  const intakeStore = createPgStore(w.db, { now });
   const intakeLog = w.intakeLog ?? jsonLogger();
   return (client, taskQueue) => {
-    const intake = reconcileIntake(w, { store: pgStore, log: intakeLog, now }, client, taskQueue);
+    const intake = reconcileIntake(w, { store: intakeStore, log: intakeLog, now }, client, taskQueue);
     return {
       root: w.trees.root,
       probeDir: PROBE_DIR,
@@ -188,18 +200,16 @@ export function hourlyReconcileJob(
       openSessions: () => openSessionTrees(w.db),
       taskState: (taskId) => taskStateOf(w.db, taskId),
       activeTasks: () => activeTaskRefs(w.db),
-      repos: () => reconcileRepos(w.db),
+      repos: managedRepos,
       auditMergedPrs: (repo, since) => w.gh.auditMergedPrs(repo, since),
       latestDelivery: (ref) => latestIssueDelivery(w.db, ref),
-      async repull(ref) {
-        const d = await latestIssueDelivery(w.db, ref);
-        if (!d) return { kind: 'no_delivery' };
+      async repull(deliveryId) {
         try {
-          const r = await intake.replay(d.deliveryId, { force: true });
+          const r = await intake.replay(deliveryId, { force: true });
           if (r.verdict === 'accepted') return { kind: 'processed', note: r.note ?? '' };
           if (r.verdict === 'in_flight') return { kind: 'busy' };
-          if (r.verdict === 'ignored') return { kind: 'not_taken', why: r.reason };
-          return { kind: 'not_taken', why: `重放投递 ${d.deliveryId} 回的是 ${r.verdict}` };
+          if (r.verdict === 'ignored') return { kind: 'not_taken', why: `门口没收（${r.reason}）` };
+          return { kind: 'not_taken', why: `重放投递 ${deliveryId} 回的是 ${r.verdict}` };
         } catch (err) {
           // 现在做不了、要等（上一轮还没结束、项目停派）：接活已经把这条记成等着，对账补漏每轮重放
           if (err instanceof RetryLaterError) return { kind: 'waiting', why: err.message };
@@ -220,6 +230,7 @@ export function hourlyReconcileJob(
       },
       workflows: w.workflows ?? temporalWorkflows(client),
       stageRoutable,
+      stageAllOpen,
       alerts: {
         listOpen: (limit) => listOpenAlerts(w.db, { limit }),
         byKey: (key) => alertByKey(w.db, key),
@@ -244,6 +255,10 @@ export function hourlyReconcileJob(
         },
         insertOnce: (x) => insertAlertOnce(w.db, x),
         updateOpen: (x) => updateOpenAlert(w.db, { ...x, at: now() }),
+      },
+      apps: {
+        repos: managedRepos,
+        selfCheck: (repos) => w.selfCheck(repos),
       },
       runs: {
         start: (job, at) => startScheduleRun(w.db, job, at),

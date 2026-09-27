@@ -129,12 +129,15 @@ export function askIssueJob(w: GitHubReconcileWiring, log: Logger, now: () => Da
   };
 }
 
+/** 接活那道门要的 GitHub：写镜像（PR、CI 事件）、现读 issue 挂在哪个版本、是不是母单子单。 */
+export type IntakeGitHub = Pick<GitHub, 'eventSink' | 'readIssuePlan'>;
+
 /**
  * 接活那道门（createGitHubIntake，和 webhook 同一份实现）：对账补漏的重放、补收，每小时对账给排队的单补拉，都经它。
  * 拉起工作流用这次活动的 Temporal 客户端，起在 taskQueue 上。
  */
 export function reconcileIntake(
-  w: Pick<GitHubReconcileWiring, 'gh' | 'requirements'>,
+  w: { gh: IntakeGitHub; requirements?: RequirementWorkflows | undefined },
   parts: { store: Store; log: Logger; now: () => Date },
   client: Client,
   taskQueue: string,

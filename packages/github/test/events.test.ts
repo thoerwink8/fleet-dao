@@ -468,6 +468,15 @@ describe('对账与补漏', () => {
         `#${byAgent.number} 合并了，但账上没有合并队列的合并记录`,
       ].sort(),
     );
+    // 每小时对账按种类分（不认上面那几句字）：种类和 PR 号要对得上
+    expect(report.findings.map((f) => `${f.number} ${f.kind}`).sort()).toEqual(
+      [
+        `${byEngine.number} mirror_fixed`,
+        `${byAgent.number} not_merged_by_engine`,
+        `${byAgent.number} no_merge_record`,
+      ].sort(),
+    );
+    expect(report.problems).toEqual(report.findings.map((f) => f.text));
     expect((await ledger.getPullRequest(REPO_ID, byEngine.number))?.state).toBe('merged');
   });
 
@@ -485,6 +494,9 @@ describe('对账与补漏', () => {
     const report = await gh.auditMergedPrs('acme/widgets', new Date('2026-09-25T00:00:00Z'));
     expect(report).toMatchObject({ outcome: 'ok', scanned: 1, found: 1, fixed: 1 });
     expect(report.problems).toEqual([`#${byHuman.number} 合并了但镜像里没有（已补）`]);
+    expect(report.findings).toEqual([
+      { number: byHuman.number, kind: 'mirror_fixed', text: `#${byHuman.number} 合并了但镜像里没有（已补）` },
+    ]);
     expect((await ledger.getPullRequest(REPO_ID, byHuman.number))?.state).toBe('merged');
   });
 
@@ -500,5 +512,21 @@ describe('对账与补漏', () => {
     fake.installed.engine = false;
     const [, engine] = await gh.selfCheck([repo]);
     expect(engine).toMatchObject({ ok: false, why: expect.stringContaining('没装到') });
+  });
+
+  it('【故意造出的失败】「引擎」只有 statuses:read（App 设置里改了、安装处没点接受）：自检报缺 statuses:write——贴不了「认领对得上」（#299）', async () => {
+    const { gh, fake } = setup();
+    fake.permissions.engine = { ...fake.permissions.engine, statuses: 'read' };
+    const [, engine] = await gh.selfCheck([repo]);
+    expect(engine).toEqual({
+      role: 'engine',
+      repo: 'acme/widgets',
+      ok: false,
+      missing: ['statuses:write'],
+      extra: [],
+    });
+    const { statuses: _gone, ...without } = fake.permissions.engine;
+    fake.permissions.engine = without;
+    expect((await gh.selfCheck([repo]))[1]).toMatchObject({ ok: false, missing: ['statuses:write'] });
   });
 });

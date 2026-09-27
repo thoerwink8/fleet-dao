@@ -263,32 +263,34 @@ grok 装在会话用户自己家里：官方安装脚本把二进制放在 `~/.g
 - 派工理由末尾出现「在线是探针 N 前的结论，之后它没再给新结论（探针可能停了）」：探针连着三轮（45 分钟；Cursor、Grok 的路由是 2 小时 30 分，它们探通了隔 2 小时才再探）没给这条路由写新结论，引擎照上一次的结论接着派（不停工）。看驾驶舱「定时任务」页路由探针那一行（没跑、没跑成还是只写进去一部分，`why` 写了原因），再手动跑一轮（上面那条命令）看它报什么。
 - Claude 的探针不存会话记录（`--no-session-persistence`），会话用户家里不攒它的记录；cursor-agent、grok 没有这个开关，探针的会话留在会话用户家里的 `~/.cursor/chats`、`~/.grok/sessions` 下（一条路由一天约 12 个）。Grok 的探针不带 `--always-approve`：要权限的工具一律被拒（无头模式没人批就取消），什么命令都跑不了。目录由引擎经 `fleet-agent-scope adopt` 建，归会话用户、700。
 
-每小时对账（工作树残留、两处核对、提醒按条件撤和再推；design 第六节第 4 层、第十四节「AI 会话」的目录那条、15.3）：
+每小时对账（工作树残留、两处核对、提醒按条件撤和再推、GitHub 两个机器人的权限自检；design 第十四节「AI 会话」的目录那条、15.3、第六节「断链怎么被发现」第 4 条）：
 
 - 引擎每小时 41 分跑一轮（定时任务 `hourly-reconcile`）。发布完不想等，手动跑一轮：`fleet-temporal schedule trigger --schedule-id hourly-reconcile`。
 - 工作树：`/var/lib/fleet-work/<owner>_<name>/` 下每一棵（子任务的树 `<需求号>-<子任务>`、检出副本 `<需求号>.<阶段>[.<子任务>]`），这张需求的工作流和它的子任务工作流都不在跑了、树里也没有没结束的会话（`session_runs` 里 `ended_at` 为空的），才算残留；有没结束的会话却没有在跑的工作流，记「没查成」写明是哪个会话（多半是被强行终止的工作流留下的，#247）。残留的以会话用户的身份看里面还剩什么：什么都不剩就经 `fleet-agent-scope remove` 删掉，子任务报的「工作树没收掉」跟着撤；能重新生成的编译和工具缓存（`*.tsbuildinfo`、`node_modules/`、`dist/`、`.turbo/`、`.vite/`、`coverage/`）和 `.fleet-out/`（会话交给引擎的结论文件）不算剩着，是不是 git 仓都一样，只剩这些的照空树删（名单在 `packages/engine/src/real/user-git.ts` 的 `DISPOSABLE`）；还剩没推的提交、没提交的改动、stash、名单以外的文件的不删，报一条「要人拍」（`worktree:<owner>_<name>/<树>`），正文写着哪棵树、剩什么（文件列前 10 个、写明一共几个）、怎么删、怎么留。检出副本里引擎检出过的提交也不算剩着。树里有目录读不了的记「没查成」、不删。`_route-probe/`、`_tmp/` 不碰。一轮最多看 80 棵，多的下一轮再看。
 - 收到「要人拍」的树：先看里面，`sudo -u fleet-agent-carpool git -C <路径> status`、`sudo -u fleet-agent-carpool git -C <路径> log --oneline -5`；提醒里写着「这一层不是 git 仓」的，看 `sudo -u fleet-agent-carpool find <路径> ! -type d`。要删：以 root 跑 `/usr/local/sbin/fleet-agent-scope remove <路径>`，下一轮看它不在了就撤掉那条；要留：驾驶舱点「处理」，之后这棵树不再提醒，里面的东西推走或清掉以后下一轮会自己删。
 - 提醒：条件没了的撤掉（正文开头「已撤：为什么」，处理人 `engine:hourly-reconcile`，操作记录 `notification.resolve`）；卡住报警超过 24 小时没人处理，每天最多再推一条「还没处理：<原标题>」（`remind:<原提醒编号>:<北京日期>`）。哪种提醒谁撤，清单在 `packages/engine/src/jobs/alert-sweep.ts` 开头。
-- 两处核对（判法见 design 第六节第 4 层）：`reconcile:workflow:<任务>`「开着的单没有着落」——看正文写的卡在哪：在做的单工作流断了，要人判是在驾驶舱重开还是叫停；排队的单补拉没成，照正文的原因处理（作者不在白名单、仓不受管、读不了里程碑……），好了下一轮自己撤。`reconcile:ledger:<仓>#<号>`「合了的 PR 记账不全」——正文写着哪张单缺什么（会话没结局、用量记成 0、单没记成做完），不自动补，补齐了下一轮自己撤。`reconcile:pr:<仓>#<号>`（机器人开的 PR 合并人不是引擎、没有合并记录）不自动撤，看过点「处理」。额度读数那处随 #76 做。
+- 两处核对（怎么判见 design 第六节「断链怎么被发现」第 4 条）：`reconcile:workflow:<任务>`「开着的单没有着落」——看正文写的卡在哪：在做的单工作流断了，要人判是在驾驶舱重开还是叫停；排队的单补拉没成，照正文的原因处理（门口没收：作者不在白名单、外人改了单子；读不了挂在哪个版本；拉起来了又不在跑……），好了下一轮自己撤。`reconcile:ledger:<仓>#<号>`「合了的 PR 记账不全」——正文写着哪张单缺什么（会话没结局、跑成了的会话用量记成 0、单没记成做完），不自动补，补齐了下一轮自己撤。`reconcile:pr:<仓>#<号>`「机器人开的 PR 没经合并队列合」（合并人不是「引擎」、账上没有合并记录）只报一次、不自动撤，看过点「处理」。额度读数那处随 #76 做。
+  - 这两处报了什么：`runuser -u fleet -- psql -d fleet -c "select updated_at, dedupe_key, left(title, 60) from notifications where resolved_at is null and dedupe_key like 'reconcile:%' order by updated_at desc"`
+- 机器人权限：每个受管的仓（`repos` 表）上，「干活的」「引擎」两个机器人的安装实际拿到的权限和 `packages/github/src/github.ts` 的 `REQUIRED_PERMISSIONS` 比，缺的、「干活的」多了 `issues:write`、没查成的（没装到这个仓、凭据读不到）各报一条「要人看」（`github-app:<机器人>:<仓>`，正文写缺什么、去哪改），健康页「GitHub 机器人权限」一项（`github_app`）跟着红；在 GitHub 的 App 设置里改好、再到装它的地方（Settings → Applications → Installed GitHub Apps → Configure）点接受新权限，下一轮自己撤、跟着回绿。没查成的这一轮记没查全。
 - 出了事去哪看：驾驶舱「定时任务」页每小时对账那一行（没跑、没跑成、没查全，`why` 写了哪里没查成：读不了的目录、查不了的工作流、删不掉的树都在这里，不算跑成）。库里：
   - 最近几轮：`runuser -u fleet -- psql -d fleet -c "select started_at, outcome, scanned, found, why from schedule_runs where job = 'hourly-reconcile' order by id desc limit 5"`
   - 它撤了什么：`runuser -u fleet -- psql -d fleet -c "select resolved_at, dedupe_key, left(body, 80) from notifications where resolved_by = 'engine:hourly-reconcile' order by resolved_at desc limit 20"`
   - 等人拍的树、再推的提醒：`runuser -u fleet -- psql -d fleet -c "select created_at, dedupe_key, title from notifications where resolved_at is null and (dedupe_key like 'worktree:%' or dedupe_key like 'remind:%') order by created_at"`
   - 日志：`journalctl -u fleet-engine --since '-2h' | grep 每小时对账`
-- 还没做的：被强行终止的工作流留下的会话要等引擎下一次起来才收（#247）；路由全熔断那条提醒还不会自己撤（#246）。
+- 还没做的：被强行终止的工作流留下的会话要等引擎下一次起来才收（#247）；额度读数不超过 30 分钟那处核对随 #76 做。
 
 全流程巡检（#223，design 第六节「断链怎么被发现」第 3 层）：
 
 - 引擎每 6 小时（北京时间 2、8、14、20 点 26 分，定时任务 `canary`）在巡检仓开一张固定的小单（往 `巡检记录.md` 追加一行），看它从收单一路走到派活、规划、执行、验证、开 PR 过 CI、合并、关单、记账、驾驶舱显示。每一步有期限（`packages/engine/src/jobs/canary.ts` 的 `CANARY_STAGE_LIMIT_MINUTES`；等并发空位、等额度的时间不算），一轮最长 5 小时。超时或出事（挂起等人、工作流没做完、单子被关成不做了）推一条卡住报警「全流程巡检断在「<哪一步>」」（`canary:broken`，正文写为什么、走到哪了、单子在哪），下一轮通过了自己撤。断的那张单留着给人看，下一轮开始时叫停它的工作流、关掉（不做了）。
-- **现在还开不了单**：巡检单的需求文档要先进主线，引擎不直写主线（0003），得经 PR 合进去——这条路和引擎对账开的单共用，随 #295 接上。接上之前每一轮在开单之前就记没跑成（写明等 #295），一张单都不开，健康页这一项红着；接上以后在 `packages/engine/src/real/canary.ts` 给 `canaryJob` 传 `specDoc`。
+- 巡检单的需求写全在正文里（#295 的写法：起因、要什么，最后是写了字的「## 怎么算做完」），没有「文档：」那一行、也不先在巡检仓里建需求文档：收单照正文写需求文档，Lead 随那张单的 PR 提交进 `specs/<号>-<照标题取的短名>/`，开 PR 前验证照正文核。开单时就挂上巡检仓的当前版本。
 - 要配齐的（缺一样，这一轮就记没跑成或断在派活，照写的原因补）：
   1. 引擎配置 `/etc/fleet-dao/engine.env` 写 `FLEET_CANARY_REPO=<owner>/<巡检仓>`（公开仓里不写真值），引擎下次起来（自动发布切版本）读到；读回 `grep -c '^FLEET_CANARY_REPO=' /etc/fleet-dao/engine.env`。
   2. 巡检仓受管（在 `repos` 表里）、「让 AI 接活」开着：`fleet-api dispatch <owner>/<巡检仓> on`（第九节），读回 `... dispatch <owner>/<巡检仓> status`。
-  3. 巡检仓有一个一直开着的 `v1 巡检` 里程碑：接活只自动派挂在当前版本上的单（design 第九节「在哪能做与接活开关」），巡检开单后挂它。别关它。
+  3. 巡检仓有一个一直开着的 `v1 巡检` 里程碑：接活只自动派挂在当前版本上的单（design 第九节「在哪能做与接活开关」），巡检开单时挂它。别关它。
   4. 巡检仓里 `.fleet/flow.json` 写了测试命令（巡检单的验收是 `node --test` 过）。
 - 手动跑一轮：`fleet-temporal schedule trigger --schedule-id canary`。看结论：健康页「全流程巡检」一项（最近一轮的结论和时间；断了、没跑成、12 小时没通过一轮都红）；驾驶舱「定时任务」页 `canary` 一行（巡检自己跑没跑成）；库里 `runuser -u fleet -- psql -d fleet -c "select id, started_at, ended_at, verdict, stage, issue_number, left(why, 120) from canary_runs order by id desc limit 5"`；日志 `journalctl -u fleet-engine --since '-6h' | grep 全流程巡检`。
-- 「没跑成」和「断了」分开：没配巡检仓、巡检仓读不到、没有当前版本、开不了单、需求文档没进主线（包括 #295 接上之前）、连着 10 回查不成、一轮的工作流没收尾就没了（被终止、工人丢了；下一轮开始时补记），都记没跑成（`schedule_runs` 里 `failed`，看门狗 #203 照登记表报）；断了的这一轮巡检本身跑成了（`schedule_runs` 记 ok、发现 1 个），报警由巡检推。
-- 演练（故意弄断一次，#295 接上之后才做得了）：挑巡检仓里没有在做的巡检单时，`fleet-api dispatch <owner>/<巡检仓> off`、手动跑一轮：开单后当场断在「派活」（开关关着），推一条卡住报警。再 `on`、手动跑一轮：通过，那条报警自己撤。
+- 「没跑成」和「断了」分开：没配巡检仓、巡检仓读不到、没有当前版本、开不了单、连着 10 回查不成、一轮的工作流没收尾就没了（被终止、工人丢了；下一轮开始时补记），都记没跑成（`schedule_runs` 里 `failed`，看门狗 #203 照登记表报）；断了的这一轮巡检本身跑成了（`schedule_runs` 记 ok、发现 1 个），报警由巡检推。
+- 演练（故意弄断一次）：挑巡检仓里没有在做的巡检单时，`fleet-api dispatch <owner>/<巡检仓> off`、手动跑一轮：开单后当场断在「派活」（开关关着），推一条卡住报警。再 `on`、手动跑一轮：通过，那条报警自己撤。
 - 停：`fleet-temporal schedule toggle --schedule-id canary --pause --reason "<为什么>"`，恢复换成 `--unpause`。引擎重启只按声明改间隔、要起的工作流，不替人把暂停的恢复。
 
 已知口子（会话用户的 reclaude 代理端口，2026-09-25 审查官发现，待定机制修，#35）：会话用户的 reclaude 守护在 `127.0.0.1` 上开两个临时端口（一个 HTTP CONNECT 代理，会话的 `HTTPS_PROXY` 指它；一个 MITM TLS 口），端口号每次重启会变。代理口不认客户端身份——本机**别的用户**（`pilot`、`fleet`）也连得上、也会被转发，等于借用这个账号的订阅（从 pilot 借会话用户的额度）。`HTTPS_PROXY` 里没有令牌，靠的是绑回环 + 会话本该只有自己碰，但回环对所有本机用户都通。
@@ -440,7 +442,7 @@ bash /srv/fleet-dao/deploy/release.sh --check      # 只读：在用哪版、自
    - `FLEET_HK_PARTS` 里有 `demo`（只有人手动发布、退回才发；自动发布不发，本节末尾「自动发布」）：演示版发到 `FLEET_DEMO_PATH`（默认 `/demo/`），只动这一个目录，根地址不碰；它下面的 `scopes/` 是可见范围，归 `fleet-demo-scopes` 推，发布不删。发成了当场记下香港上的演示版是哪一版：`/srv/fleet-dao-releases/.demo-published`（提交号、发的时间、路径、首页的 sha256），之后的健康检查、`--check` 都照它比；同一版再发一遍不重写。这一版没带演示版（老提交），或演示版是按别的路径构建的（改过 `FLEET_DEMO_PATH`），这次不发、记一项待配。
    - 明写了 `web`（默认不发）：驾驶舱静态文件连健康页、`release.json` 整套发到根地址，根上不是这一版的文件会被删掉，但演示版的目录一概不碰。放在演示版后面：`release.json` 换了就说明这次要发的都发完了。
    在演示版的目录里、根地址上（发 `web` 时）手放的东西，下次发布就没了。接着发飞书网关（第十二节）。
-7. 健康检查：启用的服务 10 秒里没退出、没重启，主进程跑的是这一版的目录；`fleet-api` 的驾驶舱接口在答健康报告、切之前好的项没变坏（会随时间自己变红的项除外：待开单积压 `draft_backlog`、判断题 `judge`（最近一次调用没成跟着上游变红）、跟上主线 `deploy_lag`（主线一动就可能落后）、飞书网关 `feishu_gateway`（网关、隧道、香港出事就红，后端刚重启、网关还在退避重连时是「没查成」）、会话账号切换 `session_org`（引擎切号没成、切完读回不在线、拼车恢复时刻读不到，跟着上游额度、登录变红）、全流程巡检 `canary`（跟着每 6 小时一轮的结论变红）只记待处理，不退回），fleet 命令接口在听；`fleet-engine` 90 秒内到任务队列 fleet 上取活（工作流任务、活动任务都要有它）；发了静态文件的话，香港在发这一版（经隧道读 `release.json`、健康页 200）；配了演示版的话（自动发布不发也照样查），香港上的演示版首页和发演示版的记录（`.demo-published`）一字不差——人手动发布刚发的，这时就是这一版的；自动发布不发，就该还是上次人发的那份，和在用的这一版不一样不算错，只列一行「还没发」（对外，按版本由人确认后手动发）。对不上（被改过、没发全）、取不到、记录认不出，报红；还没有记录（没人发过）、记录里的路径不是现在配的，记待处理（没查成，不当成好了）。深链接（`/demo/tasks/…`）要回落到演示版自己的首页——回落到根上的，是香港的站点还是旧的，记一项待配：香港 `git pull` 后重跑 `hk.sh`；这次切了飞书网关的话，它以这一版连上了飞书、起稳了（第十二节）。不过就自动退回上一版（同样的切法、同样的检查），报红；但库里跑过的迁移比上一版带的多时不退，停在新版报红等人（旧代码对着新表结构会出错，健康检查还查不出来）。
+7. 健康检查：启用的服务 10 秒里没退出、没重启，主进程跑的是这一版的目录；`fleet-api` 的驾驶舱接口在答健康报告、切之前好的项没变坏（会随时间自己变红的项除外：待开单积压 `draft_backlog`、判断题 `judge`（最近一次调用没成跟着上游变红）、跟上主线 `deploy_lag`（主线一动就可能落后）、飞书网关 `feishu_gateway`（网关、隧道、香港出事就红，后端刚重启、网关还在退避重连时是「没查成」）、会话账号切换 `session_org`（引擎切号没成、切完读回不在线、拼车恢复时刻读不到，跟着上游额度、登录变红）、全流程巡检 `canary`（跟着每 6 小时一轮的结论变红）、GitHub 机器人权限 `github_app`（GitHub 上的 App 权限被改了、新权限没点接受，引擎每小时自检一次）只记待处理，不退回），fleet 命令接口在听；`fleet-engine` 90 秒内到任务队列 fleet 上取活（工作流任务、活动任务都要有它）；发了静态文件的话，香港在发这一版（经隧道读 `release.json`、健康页 200）；配了演示版的话（自动发布不发也照样查），香港上的演示版首页和发演示版的记录（`.demo-published`）一字不差——人手动发布刚发的，这时就是这一版的；自动发布不发，就该还是上次人发的那份，和在用的这一版不一样不算错，只列一行「还没发」（对外，按版本由人确认后手动发）。对不上（被改过、没发全）、取不到、记录认不出，报红；还没有记录（没人发过）、记录里的路径不是现在配的，记待处理（没查成，不当成好了）。深链接（`/demo/tasks/…`）要回落到演示版自己的首页——回落到根上的，是香港的站点还是旧的，记一项待配：香港 `git pull` 后重跑 `hk.sh`；这次切了飞书网关的话，它以这一版连上了飞书、起稳了（第十二节）。不过就自动退回上一版（同样的切法、同样的检查），报红；但库里跑过的迁移比上一版带的多时不退，停在新版报红等人（旧代码对着新表结构会出错，健康检查还查不出来）。
 8. 清旧版：留 5 版——在用的、上一版，再按最近用过的补满。
 
 同一个提交跑第二遍，结论是「本次改动 0 处」；两遍之间各拍一次 `bash deploy/lib/snapshot.sh ours`，diff 为空（快照里每一版整棵树的名字、大小、修改时间、属主、权限压成一个指纹，重新构建一定会变）。这样比之前先停自动发布（`systemctl stop fleet-auto-release.timer`，比完 `start`）：两遍之间它可能发了新版。
@@ -517,6 +519,15 @@ FLEET_DEMO_PATH=/demo/                  # 演示版的路径，和香港 hk.env 
   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api handover --help   # 只打印用法
   ```
   和 dispatch 一样换成 fleet、带上 `api.env`：连库；还要连 Temporal 起工作流（`TEMPORAL_ADDRESS` 这几项，和后端同一份），读 `/etc/fleet-dao/github` 下「引擎」机器人的凭据去 GitHub 上看这张单此刻开没开着、挂在哪个版本、是不是母单子单（交母单不带上它的子单，子单要一张一张交）。`--reason` 必带（写进操作记录，最多 500 字），issue 号写 `214` 或 `#214` 都行。依次查、不对就拒（什么都不派）：库里有这个仓；「让 AI 接活」开着（关着一律拒，写明先 `dispatch … on`，开不开由创始人拍）；流程配置副本能用（停派的项目不派）；库里有这张单的任务行（接活收进来过；还没有就等下一轮对账补收）；读得到 GitHub 上这张单（读不到说「没查成」）。再按这张单此刻的样子（判法在 `packages/core/src/dispatch.ts` 的 `handoverDecision`）：GitHub 上关着的拒（任务还在跑也拒：关单会叫停它）；还在排队的拉起 Fusion 工作流；在跑的不重复起（退出码 0）；已经结束的只有 GitHub 上重开过才再起一轮，没重开的拒（要再做一轮先在 GitHub 上关了再开）。没被拒的（起了、没起成、本来就在跑）都记一条操作记录 `task.handover`（target 是 `task:<任务 id>`，来源记成 engine，reason 写明谁跑的和 `--reason` 原话，before 是任务原来的状态，after 是工作流编号、起没起成（`started` / `already_running` / `in_progress` / `failed`）、挂在哪个版本、父单号和子单数（`parent`、`subIssues`）），从库里读回再打印；驾驶舱这张单的时间线显示「交给 fleet：…」。退出码：0 起了，或本来就在跑；1 没交成（被拒、没查成、Temporal 连不上、操作记录没写进去，一句话说原因）；2 参数不对或没带上库连接。
+- 帅位和认领（#299 帅位只一个，`specs/299-帅位只一个/方案.md` 第三节）：本机的帅位、工人经 ssh 以 root 调同一个管理命令，机器名、会话号放参数里（经 ssh 进来的一律是 root，看不出是谁）：
+
+  ```
+  ssh <法国> 'bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api seat check --machine <机器名> --session <会话号> --term <任期> --json'
+  bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api seat show                  # 帅位、在做的认领、引擎在跑的单、没答的提问、交接说明
+  bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api claim show <owner>/<仓名> --all
+  bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api seat --help                # seat、claim 的全部写法
+  ```
+  帅位一个座位一行（`seat_leases`，真帅位 `main`、演练 `drill:<名字>`），认领每张单一行（`issue_claims`）；心跳、续约、过期都用库的时钟。租期、认领宽限期是 `settings` 表的 `seat.leaseMinutes`（默认 45）、`seat.claimGraceMinutes`（默认 120），没写用默认，写了认不出这几条命令明确失败、不拿默认顶。接班、认领、报进度、结束、作废各记一条操作记录（`seat.take`、`claim.take`、`claim.step`、`claim.pr`、`claim.done`、`claim.release`、`claim.void`；target 是 `seat:<座位>`、`claim:<仓的 id>#<单号>`，本机的记成 `ai` 这一类、编号 `<机器名>/<会话或工人>`）。退出码：0 好了、是帅位；3 不是你的（不是帅位、过了租期、别人拿着、认领号对不上）；1 没做成（连不上库、库出错、设置认不出）；2 参数不对（不连库）。带 `--json` 只往标准输出打一行 JSON，给本机脚本读。核对：`runuser -u fleet -- psql -d fleet -Atc "select scope, term, holder_machine, renewed_at from seat_leases"`。
 - 后端收 GitHub 事件：原文一次投递一行落进库里的 `github_events`（状态、原因、做了什么都在）。PR、CI 事件要用 `github/` 里两个机器人的凭据写镜像，凭据只在后端启动时读一次：读不到时后端照样起、issue 照收，PR 和 CI 事件记成出错，健康检查的 `github_events` 报红；补上凭据后要重启 `fleet-api` 才读得到。记成出错、等着的投递原文还在，每轮对账（引擎的定时任务 `github-reconcile`，每 15 分钟）按原文重放：出错的最多自动重放 5 次；等着的（重开时上一轮还没结束、这个项目停派）每轮都重放、不占次数。重放到头的没有手动再推的入口，只在健康检查里报红。
 - GitHub 不会自己重投没送到的 webhook：漏收的靠对账调它的重投接口、再按仓轮询补回。
 - 对账顺带给问创始人的提问另开单（design 第五节「没人拍板」，#259）：每轮「引擎」机器人给他合并后才改选了别的的开后续单（挂原单的同一个版本，挂在当前版本上的接活照常自动派），给超出那张单范围的开未排期单，单号回写 `asks.follow_up_issue`；超出范围的那张开了以后他在卡片上回答了，回答写到那张单的评论里，写上了记 `applied_at`、之后不再看。按提问编号幂等，开不出两张。开单、写评论没成（GitHub 报错、卫生检查拦下、机器人没权限）：驾驶舱「定时任务」页这一轮记没查全，`why` 写明「#<原单号> 的提问 <编号前 8 位> 开后续单（另开单、把回答写到 #N 上）没成：…」，提醒中心报一条 `ask-issue:<提问编号>`（写回答的是 `ask-answer:<提问编号>`），好了下一轮自动撤。引擎开的单需求写全在正文里、没有单独的需求文档，不用人补：接手时引擎照正文写，随那张单的 PR 进主线（#295）。看还有哪些该开没开：`sudo -u fleet psql fleet -c "select a.id, t.issue_number, t.state, a.scope, a.recommended, a.answer from asks a join tasks t on t.id = a.task_id where a.follow_up_issue is null and (a.scope = 'outside' or (a.scope in ('task', 'hold') and a.answer is not null and a.applied_at is null and t.state = 'done' and btrim(a.answer) <> btrim(a.recommended))) order by a.asked_at desc limit 20"`。
@@ -565,6 +576,7 @@ ssh <法国> 'sha256sum < /etc/fleet-dao/gateway-token.env'; ssh <香港> 'sha25
 - 跟上主线（`deploy_lag` 项）：线上版本落后主线多少、自动发布在不在跑，判法见本节末尾「自动发布」的落后读数。
 - 飞书网关（`feishu_gateway` 项）：香港的网关还来不来。网关带通行证调飞书接口，后端在门口记下每条接口最后一次来的时刻（只在进程里）；好的时候写「推送轮询 12 秒前来过，盘面快照 22 秒前来过」，推送轮询 5 分钟没来报红（`silent`），后端刚起、网关还没来过报「没查成」（`unchecked`，一般半分钟内就好），没配网关通行证报「未接」。判法在 `packages/api/src/gateway-seen.ts`；网关那边自己的心跳和报警见第十二节。
 - 会话账号切换（`session_org` 项，健康页写「会话账号切换」）：引擎切会话用户挂的组织出了要人看的（第五节「会话用户挂的组织」那三种 `session-org:*` 提醒）就红，对外只说「会话账号切换有要人看的问题」，是哪一条只进 `journalctl -u fleet-api`；提醒撤了自己回绿。判法在 `packages/api/src/session-org-health.ts`。
+- GitHub 机器人权限（`github_app` 项，健康页写「GitHub 机器人权限」）：引擎每小时对账自检两个机器人的权限，缺的、多了不该有的、没查成的开着 `github-app:*` 提醒就红（第五节「每小时对账」），对外只说「GitHub 机器人的权限有要人看的问题」，哪个仓、缺哪样只进 `journalctl -u fleet-api`；权限改好、提醒撤了自己回绿。判法在 `packages/api/src/github-app-health.ts`。
 - 全流程巡检（`canary` 项，健康页写「全流程巡检」）：最近一轮巡检的结论和时间（第五节「全流程巡检」）。通过、而且 12 小时内通过过：绿，写「最近一轮 09-27 20:26 通过（用时 43 分钟）」；最近一轮断了（写断在哪一步）、巡检自己没跑成、一轮过了 5.5 小时还没有结论（巡检自己没收尾）、12 小时没通过一轮、一轮都还没跑完：红。断的原因原文只进 `journalctl -u fleet-api`，细节看卡住报警。不在法国的正式机器上报「未接」。判法在 `packages/api/src/canary-health.ts`。
 - 必看三项：数据库、Temporal、引擎工人。只有后端明说在线的才绿；连不上（香港回 502、504）、回的不是健康报告、后端没报这一项、后端的结论和逐项对不上，一律红，并写明是哪一种。判定在 `deploy/web/health/health.js`，`deploy/test/health-page.test.mjs` 把每一种「没查成」都造了一遍。
 - 从公网打开的，健康页和占位页上都不写仓名、GitHub 账号名和地址（设计文档第十四节「演示版」），也不显示版本号（`release.json` 公网上读不到）。`deploy/test/public-site.test.sh` 拿演示版打包扫描的同一份名单（`packages/web/src/build/scan.ts`）扫发布脚本生成的这几页；改了文字，下次发 `web` 才到香港。

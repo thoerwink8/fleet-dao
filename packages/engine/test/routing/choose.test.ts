@@ -1,7 +1,12 @@
 // chooseRoute 的三种结果、任务指定路由、试探、熔断，以及「为什么派给它」。
 import { ROUTE_PROBE_STALE_MINUTES, routeProbeStaleMinutes } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
-import { type ChooseRouteResult, chooseRoute, type RouteFacts } from '../../src/routing/index.ts';
+import {
+  type ChooseRouteResult,
+  chooseRoute,
+  type RouteFacts,
+  stageAllOpen,
+} from '../../src/routing/index.ts';
 import { at, entry, halfOpenBreaker, input, NOW, route, soloAndCarpool, win } from './helpers.ts';
 
 function picked(result: ChooseRouteResult): string {
@@ -364,6 +369,47 @@ describe('熔断：trial 只放一个', () => {
       expect(r.why).toContain('额度未知（没读成或读数过期）');
       expect(r.why).toContain('熔断半开，这一单当试探');
     }
+  });
+});
+
+describe('全熔断只读判定（stageAllOpen）：和选路同一段，不派、不抽签', () => {
+  const open = (id: string, probe: number, extra: Partial<RouteFacts> = {}) =>
+    route(id, {
+      breaker: { state: 'open', admit: 'none', reason: '连续失败 3 次', probeAt: at(probe) },
+      ...extra,
+    });
+
+  it('chooseRoute 给出 trial all-open 的输入，stageAllOpen 也判全熔断；指定路由、随机数不影响', () => {
+    const rows = [open('a', 0.5), open('b', 0.2)];
+    expect(chooseRoute(input(rows))).toMatchObject({ kind: 'dispatch', routeId: 'b', trial: 'all-open' });
+    expect(stageAllOpen(input(rows))).toEqual({ allOpen: true });
+    // 任务指定了路由时 chooseRoute 不走全熔断那一支；这个判断不看它，也不看试探用的随机数。
+    const pinned = input(rows, { taskRouteId: 'a', draw: 0.01, policy: { trialEnabled: true } });
+    expect(chooseRoute(pinned)).not.toMatchObject({ trial: 'all-open' });
+    expect(stageAllOpen(pinned)).toEqual({ allOpen: true });
+    expect(stageAllOpen(input(rows, { draw: 0.99 }))).toEqual({ allOpen: true });
+  });
+
+  it('有一条熔断解了（ready）：不是全熔断，detail 写出是哪条', () => {
+    const check = stageAllOpen(input([open('a', 0.5), route('b')]));
+    expect(check).toEqual({
+      allOpen: false,
+      detail: '第 2 条 池b · Opus 5.5 · Claude Code 不在熔断',
+    });
+  });
+
+  it('某条不只被熔断挡着：不是全熔断，detail 写明被挡原因', () => {
+    const check = stageAllOpen(input([open('a', 0.5), open('b', 0.2, { blockers: ['offline'] })]));
+    expect(check.allOpen).toBe(false);
+    if (!check.allOpen) {
+      expect(check.detail).toContain('不再是只被熔断挡着');
+      expect(check.detail).toContain('不在线');
+    }
+  });
+
+  it('阶段没配顺序、一条都没配：不是全熔断', () => {
+    expect(stageAllOpen(input([open('a', 0.5), open('b', 0.2)], { configured: false })).allOpen).toBe(false);
+    expect(stageAllOpen(input([], { order: [] })).allOpen).toBe(false);
   });
 });
 

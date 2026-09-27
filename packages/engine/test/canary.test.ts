@@ -2,6 +2,7 @@
 // 真库上的装配（real/canary.ts）；真 Temporal 测试服务端上的工作流。需求里的两条故意造出的失败都在这里：
 // 巡检仓的路由全关，这一轮必须报「断在派活」；巡检自己起不来，这一轮记没跑成、登记表上是 failing（看门狗 #203 照它报）。
 import { randomUUID } from 'node:crypto';
+import { bodyCriteria, specOf } from '@fleet-dao/core';
 import type { CanaryDbFacts, CanaryStage, ScheduleResult } from '@fleet-dao/db';
 import {
   canaryRunById,
@@ -33,13 +34,12 @@ import {
   type CanaryState,
   type CanaryView,
   canaryIssue,
+  canaryLogLine,
   canaryNext,
-  canarySpec,
-  canarySpecPath,
   checkCanaryRound,
   openCanaryRound,
 } from '../src/jobs/canary.ts';
-import { CANARY_SPEC_DOC_PENDING, canaryJob, canaryRepoFrom, canaryViewOf } from '../src/real/canary.ts';
+import { canaryJob, canaryRepoFrom, canaryViewOf } from '../src/real/canary.ts';
 import { registerEngineJobs } from '../src/real/jobs.ts';
 import { useEnv, withWorker } from './helpers.ts';
 
@@ -309,15 +309,29 @@ describe('走到哪一步、断没断（canaryNext）', () => {
 });
 
 describe('巡检单本身', () => {
-  it('正文里「文档：」那一行用 <本单号> 占位（开单时还不知道号）；需求文档的「怎么算做完」逐条可核', () => {
-    const issue = canaryIssue(T0);
-    expect(issue.title).toContain('巡检');
-    expect(issue.body).toContain('文档：`specs/<本单号>-巡检/需求.md`');
-    expect(canarySpecPath(12)).toBe('specs/12-巡检/需求.md');
-    const spec = canarySpec(12, T0);
-    expect(spec).toContain('对应计划：无');
-    expect(spec).toContain('## 怎么算做完');
-    expect(spec).toContain('`- #12 2026-09-27T12:26:00Z`');
+  it('正文照 #295 写全需求：收单认得出（照正文写需求文档，目录按标题取短名）、验证照正文读出三条验收条；没有「文档：」那一行', () => {
+    const issue = canaryIssue(7, T0);
+    expect(issue.title).toBe('巡检第 7 轮：往巡检记录追加一行');
+    expect(issue.body).not.toContain('文档：');
+    expect(canaryLogLine(7, T0)).toBe('- 第 7 轮 2026-09-27T12:26:00Z');
+    // 收单、验证用的就是 core 这两个判法（Fusion 第 1 步、第 5 步）
+    const spec = specOf({ body: issue.body, issueNumber: 12, title: issue.title });
+    expect(spec).toMatchObject({ ok: 'specs/12-巡检第7轮往巡检记录追加一行' });
+    expect('requirement' in spec && spec.requirement).toContain('`- 第 7 轮 2026-09-27T12:26:00Z`');
+    const criteria = bodyCriteria(issue.body);
+    expect('ok' in criteria && criteria.ok).toHaveLength(3);
+    expect('ok' in criteria && criteria.ok[0]).toBe(
+      '`巡检记录.md` 的最后一行是 `- 第 7 轮 2026-09-27T12:26:00Z`，一字不差。',
+    );
+    // 开单留的隐藏标记（openIssue 追加在正文末尾）不算一条验收条
+    expect(bodyCriteria(`${issue.body}\n\n<!-- fleet:issue:0123456789abcdef -->`)).toEqual(criteria);
+  });
+
+  it('【故意造出的失败】正文要是丢了「怎么算做完」：收单认不出、停下等人（巡检会报断在派活），不当成写全了', () => {
+    const cut = canaryIssue(7, T0).body.split('## 怎么算做完')[0] ?? '';
+    expect(specOf({ body: cut, issueNumber: 12, title: '巡检' })).toMatchObject({
+      error: expect.any(String),
+    });
   });
 });
 
@@ -369,23 +383,14 @@ function harness(over: Partial<CanaryDeps> = {}, gh: Partial<CanaryDeps['github'
         { number: 1, title: 'v1 巡检' },
       ],
       openIssue: async (input) => {
-        calls.push(`open:${input.dedupe}`);
+        calls.push(`open:${input.dedupe}:${input.milestone}`);
         return { number: 12, url: 'https://github.test/acme/canary/issues/12' };
-      },
-      setMilestone: async (n, m) => {
-        calls.push(`milestone:${n}:${m}`);
       },
       issueState: async () => ({ state: 'closed', stateReason: 'completed' }),
       closeIssue: async (n) => {
         calls.push(`close:${n}`);
       },
       ...gh,
-    },
-    // 需求文档经 PR 进主线（#295 那条路）：假的，记下调过
-    specDoc: {
-      land: async (input) => {
-        calls.push(`spec:${input.path}`);
-      },
     },
     facts: async () => current,
     workflows: {
@@ -429,11 +434,11 @@ function harness(over: Partial<CanaryDeps> = {}, gh: Partial<CanaryDeps['github'
 }
 
 describe('开单、看一回、记结论（假的库、GitHub、Temporal）', () => {
-  it('开单：先开单（不挂里程碑）、再让需求文档经 PR 进主线、最后挂当前版本（v1，不是 v2）；去重键带着这一轮的编号', async () => {
+  it('开单：开单时就挂上当前版本（v1，不是 v2）；去重键带着这一轮的编号', async () => {
     const h = harness();
     const r = await openCanaryRound(h.deps);
     expect(r.done).toBe(false);
-    expect(h.calls).toEqual(['open:canary:7', 'spec:specs/12-巡检/需求.md', 'milestone:12:1']);
+    expect(h.calls).toEqual(['open:canary:7:1']);
     expect(!r.done && r.state).toMatchObject({ stage: 'intake', issueNumber: 12, runId: 1, canaryRunId: 7 });
   });
 
@@ -454,28 +459,19 @@ describe('开单、看一回、记结论（假的库、GitHub、Temporal）', ()
     expect(h.calls).toEqual([]);
   });
 
-  it('【故意造出的失败】需求文档经 PR 进主线的路还没接上（#295）：没跑成、写明等什么，一张单都不开（不开注定停住的单）', async () => {
-    const h = harness({ specDoc: { unavailable: CANARY_SPEC_DOC_PENDING } });
-    const r = await openCanaryRound(h.deps);
-    expect(r).toMatchObject({ done: true, run: { verdict: 'not_run', stage: 'open', issueNumber: null } });
-    expect(r.done && r.run.why).toContain('#295');
-    expect(r.done && r.run.why).toContain('不直写主线');
-    expect(h.calls).toEqual([]);
-    expect(h.runsFinished[0]?.result.outcome).toBe('failed');
-  });
-
-  it('【故意造出的失败】需求文档的 PR 没合进去：没跑成，开出来的那张单关掉作废（不留半截单）', async () => {
-    const h = harness({
-      specDoc: {
-        land: async () => {
-          throw new Error('需求文档的 PR CI 红了');
+  it('【故意造出的失败】开不了单（卫生检查拦了、GitHub 拒了）：没跑成、写明原因，不当成开成了', async () => {
+    const h = harness(
+      {},
+      {
+        openIssue: async () => {
+          throw new Error('HYGIENE_BLOCKED：单子正文里有名单上的值');
         },
       },
-    });
+    );
     const r = await openCanaryRound(h.deps);
-    expect(r).toMatchObject({ done: true, run: { verdict: 'not_run', issueNumber: 12 } });
-    expect(r.done && r.run.why).toContain('CI 红了');
-    expect(h.calls).toEqual(['open:canary:7', 'close:12']);
+    expect(r).toMatchObject({ done: true, run: { verdict: 'not_run', stage: 'open', issueNumber: null } });
+    expect(r.done && r.run.why).toContain('开不了单');
+    expect(r.done && r.run.why).toContain('HYGIENE_BLOCKED');
     expect(h.runsFinished[0]?.result.outcome).toBe('failed');
   });
 
@@ -633,23 +629,14 @@ describe('真库上的一轮（PGlite 跑真迁移；GitHub、Temporal 是假的
     await resetTestDb(t);
   });
 
-  /** 假的「引擎」机器人：开单发 #12，别的都照做；需求文档经 PR 进主线那条路（#295）也是假的，记下调过。 */
+  /** 假的「引擎」机器人：开单发 #12，别的都照做。 */
   function fakeGh(over: Partial<Parameters<typeof canaryJob>[0]['gh']> = {}) {
     const calls: string[] = [];
-    const specDoc: CanaryDeps['specDoc'] = {
-      land: async (input) => {
-        calls.push(`spec:${input.path}`);
-      },
-    };
     const gh: Parameters<typeof canaryJob>[0]['gh'] = {
       readOpenMilestones: async () => [{ number: 1, title: 'v1 巡检' }],
       openIssue: async (input) => {
         calls.push(`open:${input.key}:${input.labels.length}:${input.milestone}`);
         return { number: 12, url: 'https://github.test/acme/canary/issues/12', created: true };
-      },
-      setIssueMilestone: async () => {
-        calls.push('milestone');
-        return { changed: true };
       },
       readIssueState: async () => ({ state: 'open', stateReason: null }),
       closeIssue: async () => {
@@ -658,7 +645,7 @@ describe('真库上的一轮（PGlite 跑真迁移；GitHub、Temporal 是假的
       },
       ...over,
     };
-    return { gh, calls, specDoc };
+    return { gh, calls };
   }
 
   /** 假的 Temporal 客户端：这张单的工作流在跑、挂着等人。 */
@@ -691,12 +678,11 @@ describe('真库上的一轮（PGlite 跑真迁移；GitHub、Temporal 是假的
       await t.db
         .insert(repos)
         .values({ ...REPO, testCommand: 'node --test', autoDispatchSince: new Date(T0.getTime() - 60_000) });
-      const { gh, calls, specDoc } = fakeGh();
+      const { gh, calls } = fakeGh();
       let clock = T0.getTime();
       const make = canaryJob({
         db: t.db,
         gh,
-        specDoc,
         repo: 'acme/canary',
         now: () => {
           clock += 60_000;
@@ -707,8 +693,8 @@ describe('真库上的一轮（PGlite 跑真迁移；GitHub、Temporal 是假的
       const deps = make(parkedClient());
       const opened = await openCanaryRound(deps);
       if (opened.done) throw new Error(`应当开成：${opened.run.why}`);
-      // 开单不贴标签、不挂里程碑（去重键带这一轮的编号），需求文档进了主线才挂
-      expect(calls).toEqual(['open:canary:1:0:null', 'spec:specs/12-巡检/需求.md', 'milestone']);
+      // 开单不贴标签、开单时就挂上当前版本（去重键带这一轮的编号）
+      expect(calls).toEqual(['open:canary:1:0:1']);
       // 接活收进来了这张单、派出去了；Fusion 起来了，Lead 选路一条都没有：挂起、报警（kit.ts 的 park）
       const [repo] = await t.db.select().from(repos);
       const [task] = await t.db
@@ -771,15 +757,6 @@ describe('真库上的一轮（PGlite 跑真迁移；GitHub、Temporal 是假的
       health = (await scheduleHealth(t.db, T0)).find((h) => h.job.id === CANARY_JOB.id);
       expect(health?.status).toBe('failing');
       expect(health?.lastRun?.why).toContain('GitHub 回了 502');
-      // 需求文档经 PR 进主线的路还没接上（真装配不给 specDoc 就是这样，等 #295）：没跑成、写明等什么，一张单都不开
-      const fine = fakeGh();
-      const pending = canaryJob({ db: t.db, gh: fine.gh, repo: 'acme/canary', now: () => T0, log: () => {} });
-      const c = await openCanaryRound(pending(parkedClient()));
-      expect(c).toMatchObject({ done: true, run: { verdict: 'not_run', issueNumber: null } });
-      expect(fine.calls).toEqual([]);
-      health = (await scheduleHealth(t.db, T0)).find((h) => h.job.id === CANARY_JOB.id);
-      expect(health?.status).toBe('failing');
-      expect(health?.lastRun?.why).toContain('#295');
       // 没跑成的和「跑了没问题」分开：健康页读到的最近一轮是没跑成
       expect((await latestCanaryRuns(t.db)).finished).toMatchObject({ verdict: 'not_run' });
     },

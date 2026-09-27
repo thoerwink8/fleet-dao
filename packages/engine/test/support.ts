@@ -1,6 +1,5 @@
 // 测试共用（不依赖 vitest，录重放夹具的脚本也用）：可跳时间的 Temporal 测试服务端 + 真的工作流包 + 假端口。
 import { randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { Repo } from '@fleet-dao/shared';
 import type { WorkflowHandle } from '@temporalio/client';
@@ -46,14 +45,10 @@ export function createEnv(): Promise<TestWorkflowEnvironment> {
  * 真的 Temporal 开发服务端（temporal server start-dev），不能跳时间。只给「测试服务端和真服务端行为不同」的用例用：
  * 比如测试服务端不会让已经请求叫停、又不心跳的活动超时（一直等工人回话），真服务端到了限时就判超时。
  * FLEET_TEST_TEMPORAL_CLI 指向本机的 temporal 命令就用它（最好和法国同一版），否则按 SDK 默认的版本下载一份（缓存一天）。
- * 引擎会话会把 CI 设上、却不一定把这条路径交过来：本机已经按法国版本装了 fleet-temporal 就用它，没有才拒绝。
  */
-const FLEET_TEMPORAL = '/usr/local/bin/fleet-temporal';
-
 export function createRealEnv(): Promise<TestWorkflowEnvironment> {
-  const cli =
-    process.env.FLEET_TEST_TEMPORAL_CLI?.trim() || (existsSync(FLEET_TEMPORAL) ? FLEET_TEMPORAL : '');
-  // CI 按 deploy/france.sh 钉的版本装好命令行再交过来（.github/workflows/ci.yml）；没给、本机也没装，说明那几步坏了，
+  const cli = process.env.FLEET_TEST_TEMPORAL_CLI?.trim();
+  // CI 按 deploy/france.sh 钉的版本装好命令行再交过来（.github/workflows/ci.yml）；没给说明那几步坏了，
   // 不许悄悄退回 SDK 默认版本（和法国不同版，测过也不算数）。
   if (!cli && process.env.CI) {
     throw new Error(

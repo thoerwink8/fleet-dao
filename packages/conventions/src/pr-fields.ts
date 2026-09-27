@@ -10,6 +10,12 @@ import { findItem, itemExample, type PlanPhase, parsePlanRefs, phaseRange, planP
 
 export const PLAN_COLUMN = '对应计划';
 export const SPECS_COLUMN = 'specs';
+/**
+ * 「这个 PR 做完就关单」：是 = 合进去这张单就做完了，正文另写 Closes #号、由 GitHub 合并时关，这个 PR 要带 结果.md（合并闸
+ * 要不要挡没带的，#325 等创始人拍）；否 = 还有后续，或结果不在这个 PR 里写（合完用 pnpm issue:close 关）。引擎开的 PR 一律写否（#241）。
+ * 这一栏缺了、写的认不出只提醒（必填栏只提醒）。
+ */
+export const CLOSE_COLUMN = '这个 PR 做完就关单';
 /** plan.md 在仓里的位置：pr-fields 判「对应计划」、引擎收需求文档时核那一行，都按它找。 */
 export const PLAN_DOC = 'docs/plan.md';
 /** PR 模板（.github/pull_request_template.md）的各栏，顺序同模板；测试里对着模板查，两边对不上就红。 */
@@ -19,6 +25,7 @@ export const PR_COLUMNS = [
   '还欠什么',
   '按推荐先做了',
   '需求',
+  CLOSE_COLUMN,
   PLAN_COLUMN,
   SPECS_COLUMN,
   TIER_COLUMN,
@@ -113,7 +120,35 @@ export function checkPrFields(pr: PrFacts, repo: RepoFacts): string[] {
   problems.push(...checkSpecs(cols.get(SPECS_COLUMN), repo));
   const tier = parseTier(cols.get(TIER_COLUMN));
   if ('problem' in tier) problems.push(tier.problem);
+  const close = closeColumnOf(cols);
+  if (close.value !== 'yes' && close.value !== 'no') problems.push(closeColumnProblem(close));
   return problems;
+}
+
+/** 「这个 PR 做完就关单」填的什么：是、否、空的、写了认不出的；没有这一栏是 missing。 */
+export type CloseColumn = { value: 'yes' | 'no' | 'empty' | 'missing' } | { value: 'other'; text: string };
+
+export function closeColumnValue(body: string): CloseColumn {
+  return closeColumnOf(prColumns(body));
+}
+
+function closeColumnOf(cols: Map<string, string>): CloseColumn {
+  const raw = cols.get(CLOSE_COLUMN.toLowerCase());
+  if (raw === undefined) return { value: 'missing' };
+  const v = raw.replace(/[`*]/g, '').trim();
+  if (!v) return { value: 'empty' };
+  if (v.startsWith('是')) return { value: 'yes' };
+  if (v.startsWith('否')) return { value: 'no' };
+  return { value: 'other', text: oneLine(v) };
+}
+
+function closeColumnProblem(c: CloseColumn): string {
+  const how =
+    '合进去这张单就做完了写「是」，正文另起一行写 Closes #<单号>（GitHub 合并时关）；还有后续、或者合完用 pnpm issue:close 关的写「否」';
+  if (c.value === 'missing')
+    return `正文里认不出「${CLOSE_COLUMN}」一栏：单独起一行写 ${CLOSE_COLUMN}：是 或 否（${how}）。`;
+  if (c.value === 'other') return `「${CLOSE_COLUMN}」写的「${c.text}」认不出：${how}。`;
+  return `「${CLOSE_COLUMN}」一栏是空的：${how}。`;
 }
 
 /** 「对应计划」写「未排期」（可以带别的字）：这一单本来就没排版本。判不了（没这一栏、写的是别的）时不算未排期。 */

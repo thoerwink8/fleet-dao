@@ -53,8 +53,6 @@ import {
   type OpenIssueResult,
   openIssue,
   readIssue,
-  type SetIssueMilestoneInput,
-  setIssueMilestone,
   type UpdateIssueProgressInput,
   type UpdateIssueProgressResult,
   updateIssueProgress,
@@ -73,9 +71,9 @@ import {
 } from './pulls.ts';
 import { MAX_BUNDLE_BYTES, type PushBranchInput, type PushBranchResult, pushBranch } from './push.ts';
 import {
-  type AuditReport,
   auditMergedPrs,
   createReconciler,
+  type MergedPrAuditReport,
   type Reconciler,
   type ReconcilerOptions,
 } from './reconcile.ts';
@@ -110,7 +108,10 @@ export interface GitHubOptions {
   sensitiveValues?: () => LoadedValues;
 }
 
-/** 各身份要有的权限（自检用）。「干活的」只推分支、开 PR；「引擎」合并、改 issue、续互动限制、读 CI。 */
+/**
+ * 各身份要有的权限（自检用，引擎每小时对账跑一次、缺了报提醒、健康页 github_app 跟着红）。「干活的」只推分支、开 PR；
+ * 「引擎」合并、改 issue、续互动限制、读 CI，还要在 PR 头上贴「认领对得上」（#299，commit status 要 statuses:write）。
+ */
 export const REQUIRED_PERMISSIONS: Record<AppRole, Record<string, 'read' | 'write'>> = {
   agent: { contents: 'write', pull_requests: 'write', metadata: 'read' },
   engine: {
@@ -120,6 +121,7 @@ export const REQUIRED_PERMISSIONS: Record<AppRole, Record<string, 'read' | 'writ
     administration: 'write',
     checks: 'read',
     actions: 'read',
+    statuses: 'write',
     metadata: 'read',
   },
 };
@@ -180,8 +182,6 @@ export interface GitHub {
     issueNumber: number;
     signal?: AbortSignal | undefined;
   }): Promise<{ state: 'open' | 'closed'; stateReason: string | null }>;
-  /** 给一张单挂里程碑（「引擎」机器人），按回执核对挂上的就是这个编号。 */
-  setIssueMilestone(input: SetIssueMilestoneInput, ctx?: ActivityContext): Promise<{ changed: boolean }>;
   /** 会话提交用的身份（「干活的」机器人）：引擎建工作树时写进 user.name / user.email。 */
   commitIdentity(repo: RepoRef): Promise<BotIdentity>;
   /** 两个机器人在这些仓上的权限够不够。读不到算没查成（ok=false、why 写原因），不算「没有差异」。 */
@@ -190,9 +190,9 @@ export interface GitHub {
   reconciler(options: ReconcilerOptions): Reconciler;
   /**
    * 一段时间里合了的 PR：镜像没记成已合并的补上；我们两个机器人开的，还要是「引擎」合的、账上有合并记录。
-   * 不用接活那道门。每小时对账调它。
+   * 不用接活那道门。每小时对账调它（按 findings 的 kind 分，不认 problems 里的字）。
    */
-  auditMergedPrs(repoFullName: string, since: Date): Promise<AuditReport>;
+  auditMergedPrs(repoFullName: string, since: Date): Promise<MergedPrAuditReport>;
 }
 
 const LEVEL: Record<string, number> = { read: 1, write: 2, admin: 3 };
@@ -281,7 +281,6 @@ export function createGitHub(options: GitHubOptions): GitHub {
         stateReason: issue.state === 'open' ? null : (issue.state_reason ?? null),
       };
     },
-    setIssueMilestone: (input, ctx) => setIssueMilestone(deps, input, ctx),
     openPr: (input, ctx) => openPr(deps, input, ctx),
     waitCi: (input, ctx) => waitCi(deps, input, ctx),
     mergePr: (input, ctx) => mergePr(deps, input, ctx),

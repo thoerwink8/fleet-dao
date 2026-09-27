@@ -278,9 +278,17 @@ export function realPortsFromEnv(
       orgSwitch,
       machine: config.machine,
     }),
-    // 每小时对账：同一个工作树管家（删树经 fleet-agent-scope）、同一个会话用户执行器（看树里还剩什么）、
-    // 同一个 gh（合了的 PR 对账、排队的单补拉）
-    hourlyReconcile: hourlyReconcileJob({ db, gh, trees, exec, sessionOrg, machine: config.machine }),
+    // 每小时对账：同一个工作树管家（删树经 fleet-agent-scope）、同一个会话用户执行器（看树里还剩什么）；引擎这份 GitHub
+    // （同一套 App 凭据）审合了的 PR、给排队的单补拉时现读挂在哪个版本、做两个机器人的权限自检
+    hourlyReconcile: hourlyReconcileJob({
+      db,
+      gh,
+      trees,
+      exec,
+      sessionOrg,
+      machine: config.machine,
+      selfCheck: (repos) => gh.selfCheck(repos),
+    }),
     // 全流程巡检（#223）：巡检仓写在引擎配置 FLEET_CANARY_REPO（没配这一轮记没跑成，看门狗报）；开单、写需求文档、挂版本都是「引擎」机器人
     canary: canaryJob({ db, gh, repo: env.FLEET_CANARY_REPO }),
   };
