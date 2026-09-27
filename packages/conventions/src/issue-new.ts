@@ -1,11 +1,13 @@
-// 开单脚本：pnpm issue:new --kind 需求 --milestone v1 --title "…" --body-file 正文.md [--specs 短名] [--mother] [--parent 母单号]
+// 开单脚本：pnpm issue:new --kind 需求 --milestone v1 --title "…" --body-file 正文.md [--specs 短名] [--mother] [--parent 母单号] [--local]
 // 缺类别、里程碑，或正文里没有写了字的「## 怎么算做完」就不开（design 第三节第 35 条：以后要做的事得是一张
 // 带怎么算做完和里程碑的 issue）。经 gh 开单时一次带上标签和里程碑（gh 先把名字换成编号再建单，对不上就一张也不建）。
 // 里程碑＝版本（创始人 2026-09-26 拍，替代 P 阶段）：--milestone 认全名、v<N> 简写、旧的 P<N> 简写，或「未排期」——
 // 未排期时不挂里程碑（建单不带 --milestone），结果里 milestone 记「未排期」。--mother 给这张单多贴「母单」标签
 // （一组能一起验收的子单，用 GitHub 自带子议题挂在它下面）。--parent 开的是子单：先不带里程碑建单、挂到母单下面，
 // 再挂里程碑——接活只派挂在当前版本上的独立单（design 第九节「在哪能做与接活开关」，母单、子单不派），带着当前版本先建、
-// 事后再挂到母单下面的，中间那一下是一张挂在当前版本上的独立单，开关开着就被派走了。
+// 事后再挂到母单下面的，中间那一下是一张挂在当前版本上的独立单，开关开着就被派走了。--local 给这张单多贴「本机做」标签
+// （帅位留给本机做的，接活不自动派；#299 认领进库之前的止血）：和类别标签在同一次建单里贴上，不事后补——开单那个事件
+// 一到，没贴的已经被派走了。
 // 带 --specs 时，完整正文写进 specs/<号>-<短名>/需求.md，issue 上只留第一个小标题之前那段（原话、AI 理解）
 // 和需求文档的路径（第七节：完整需求只在仓里存一份）。gh 出错原样报出来，退出码非 0。
 import { execFile } from 'node:child_process';
@@ -13,7 +15,14 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'no
 import { isAbsolute, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { doneSection } from './debt.ts';
-import { isKindLabel, KIND_LABELS, MOTHER_LABEL, milestonePhase, milestoneVersion } from './labels.ts';
+import {
+  isKindLabel,
+  KIND_LABELS,
+  LOCAL_LABEL,
+  MOTHER_LABEL,
+  milestonePhase,
+  milestoneVersion,
+} from './labels.ts';
 import { parseMd } from './markdown.ts';
 
 export interface GhResult {
@@ -40,13 +49,15 @@ export interface IssueNewResult {
   specsFile: string | undefined;
   /** 开的是子单时，挂在哪张母单下面（--parent）。 */
   parent?: number | undefined;
+  /** 贴了「本机做」（--local）时是 true。 */
+  local?: true | undefined;
 }
 
 export const USAGE =
-  '用法：pnpm issue:new --kind 需求|缺陷|杂项 --milestone v1 --title "一句话" --body-file 正文.md [--specs 短名] [--mother] [--parent 母单号]' +
+  '用法：pnpm issue:new --kind 需求|缺陷|杂项 --milestone v1 --title "一句话" --body-file 正文.md [--specs 短名] [--mother] [--parent 母单号] [--local]' +
   '（--milestone 认全名、v<N>、旧的 P<N>，或「未排期」；正文要有写了字的「## 怎么算做完」；' +
   '带 --specs 时，第一个小标题之前写原话和 AI 理解；--mother 多贴「母单」标签；' +
-  '--parent 开子单：先挂到那张母单下面再挂里程碑）';
+  '--parent 开子单：先挂到那张母单下面再挂里程碑；--local 多贴「本机做」：帅位留给本机做，接活不自动派）';
 
 /** --milestone 写这个值：这张单没有版本（未排期）。不去查 GitHub 的里程碑列表，建单也不带 --milestone。 */
 const UNSCHEDULED = '未排期';
@@ -89,6 +100,8 @@ export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Pro
     '--label',
     o.kind,
     ...(o.mother ? ['--label', MOTHER_LABEL] : []),
+    // 「本机做」和建单同一次贴上：开单事件一到接活就判，事后补贴的已经被派走了
+    ...(o.local ? ['--label', LOCAL_LABEL] : []),
     // 子单先不带里程碑：挂到母单下面以后再挂（attachToParent）
     ...(milestone === UNSCHEDULED || o.parent !== undefined ? [] : ['--milestone', milestone]),
   ]);
@@ -107,8 +120,9 @@ export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Pro
   }
   const number = Number(n);
   const { parent } = o;
+  const local = o.local || undefined;
   if (parent !== undefined) await attachToParent(deps.gh, { number, url, parent, milestone, specs: o.specs });
-  if (o.specs === undefined) return { number, url, milestone, specsFile: undefined, parent };
+  if (o.specs === undefined) return { number, url, milestone, specsFile: undefined, parent, local };
   try {
     return {
       number,
@@ -116,6 +130,7 @@ export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Pro
       milestone,
       specsFile: writeSpecs(deps.root, number, o.specs, specsDoc(o.title, number, milestone, body)),
       parent,
+      local,
     };
   } catch (e) {
     throw new Error(`单开了（#${number} ${url}），可需求文档没建成：${message(e)}。`);
@@ -132,6 +147,8 @@ interface Options {
   mother: boolean;
   /** 开的是子单：挂到这张母单下面。 */
   parent: number | undefined;
+  /** 多贴「本机做」标签：帅位留给本机做，接活不自动派（#299 止血）。 */
+  local: boolean;
 }
 
 function parse(argv: readonly string[]): Options {
@@ -148,6 +165,7 @@ function parse(argv: readonly string[]): Options {
         specs: { type: 'string' },
         mother: { type: 'boolean' },
         parent: { type: 'string' },
+        local: { type: 'boolean' },
       },
       strict: true,
       allowPositionals: false,
@@ -180,7 +198,7 @@ function parse(argv: readonly string[]): Options {
       throw new Error(`--parent 写母单的号（比如 --parent 192），「${values.parent}」认不出。${USAGE}`);
     parent = Number(m[1]);
   }
-  return { kind, milestone, title, bodyFile, specs, mother, parent };
+  return { kind, milestone, title, bodyFile, specs, mother, parent, local: values.local === true };
 }
 
 /** 挂子单之前先看母单：开着的 issue、贴了「母单」标签（design 第七节：有子单的必须带）。不对就不开单。 */

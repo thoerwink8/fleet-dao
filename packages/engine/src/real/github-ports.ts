@@ -110,6 +110,8 @@ function prBody(body: PrBody, plan: string, specs: string): PrBodyInput {
     verified: body.verified,
     ...(body.owed ? { owed: body.owed } : {}),
     ...(body.risks ? { risks: body.risks } : {}),
+    // 「按推荐先做了」一栏（#259）：漏传了正文里就永远是「无」
+    ...(body.assumed ? { assumed: body.assumed } : {}),
     plan,
     specs,
     tier: body.tier,

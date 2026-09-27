@@ -15,6 +15,7 @@ import { jevConfigLocation } from '@fleet-dao/jev';
 import { serve } from '@hono/node-server';
 import { signAgentToken } from './agent-token.ts';
 import { buildApps } from './app.ts';
+import { CANARY_NOT_HERE, canaryHealthCheck } from './canary-health.ts';
 import { createChangeHub, startPgChangeFeed } from './changes.ts';
 import { ConfigError, loadConfig } from './config.ts';
 import { createDirDemoPublisher, sweepExpiredDemoLinks } from './demo.ts';
@@ -193,6 +194,10 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
         : { check: async () => {}, notWired: GATEWAY_NO_PASS },
       // 引擎切号（#157）写的提醒：只有法国的引擎会写，别处一直是好的
       sessionOrg: sessionOrgHealthCheck(db),
+      // 全流程巡检（#223）：引擎每 6 小时在巡检仓跑一轮、结论写进库；只有法国的正式机器上有
+      canary: onFrance
+        ? { check: canaryHealthCheck(db, now) }
+        : { check: async () => {}, notWired: CANARY_NOT_HERE },
     }),
   };
   return {

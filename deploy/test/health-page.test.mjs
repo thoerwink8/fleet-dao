@@ -118,6 +118,18 @@ test('会话账号切换（session_org）：显示成「会话账号切换」；
   assert.equal(byKey(w).session_org.reason, '会话账号切换有要人看的问题（session_org）');
 });
 
+test('全流程巡检（canary）：显示成「全流程巡检」；通过写明几点、用了多久，断了照实报红、写明断在哪一步', () => {
+  const pass = { ok: true, message: '最近一轮 09-27 20:26 通过（用时 43 分钟）' };
+  const v = judge({ status: 200, body: report(true, { ...allOk, canary: pass }) });
+  assert.equal(v.ok, true);
+  assert.equal(byKey(v).canary.label, '全流程巡检');
+  assert.equal(byKey(v).canary.reason, '在线：最近一轮 09-27 20:26 通过（用时 43 分钟）');
+  const broken = { ok: false, code: 'canary_broken', message: '最近一轮（09-27 20:31 有结论）断在「派活」' };
+  const w = judge({ status: 503, body: report(false, { ...allOk, canary: broken }) });
+  assert.equal(w.ok, false);
+  assert.equal(byKey(w).canary.reason, '最近一轮（09-27 20:31 有结论）断在「派活」（canary_broken）');
+});
+
 test('连不上后端：三项都红，说出原因', () => {
   const v = judge({ error: 'Failed to fetch' });
   assert.equal(v.ok, false);

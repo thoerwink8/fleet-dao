@@ -39,7 +39,22 @@ export const WORKFLOW_TYPES = {
   routeProbe: 'routeProbeWorkflow',
   /** 每小时对账（工作树残留、两处核对、提醒按条件撤和再推）：Temporal Schedule 每小时起一条，见 jobs/schedules.ts。 */
   hourlyReconcile: 'hourlyReconcileWorkflow',
+  /** 全流程巡检（#223）：Temporal Schedule 每 6 小时起一条，开一张巡检单一路看到有结论，见 jobs/canary.ts。 */
+  canary: 'canaryWorkflow',
 } as const;
+
+/** 全流程巡检一轮的输入：巡检哪个仓、几点开单，都由活动按引擎配置和当时的时刻定（工作流里不取时刻）。 */
+export interface CanaryInput {
+  schemaVersion: 1;
+}
+
+/** 巡检开单以后每隔多久看一回（秒）。工作流和活动共用这一个数。 */
+export const CANARY_POLL_SECONDS = 120;
+/**
+ * 连着这么多回没查成，这一轮算巡检自己没跑成：活动里读不到库、问不了 Temporal 的，由活动记成没跑成；活动本身连着失败
+ * （工人丢了、记结论没成）的，工作流停下，这一轮在库里停在「在跑」，登记表上过期、看门狗照样看得见。
+ */
+export const CANARY_CHECK_FAILURE_LIMIT = 10;
 
 /** 对账补漏一轮的输入：往回看到哪一刻由活动按当时的时刻算（工作流里不取时刻）。 */
 export interface GitHubReconcileInput {

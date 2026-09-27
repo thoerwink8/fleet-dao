@@ -1,9 +1,9 @@
 // 派不派一张单（0003 第 2、4、8 条；design 第九节「在哪能做与接活开关」）：接活自动派（后端 packages/api/src/issue-intake.ts，
 // 引擎的对账重放用同一份）和人明说交给引擎（fleet-api handover，packages/api/src/cli.ts）都在这里判。
 // 读库、读 GitHub、起工作流是外壳的事，这里只判。
-// 自动派要过四道：开关开着、issue 是开关打开以后开的（dispatchDecision）、挂在当前版本上（versionGate）、不是母单也不是子单
-// （familyGate；后两道合起来是 autoDispatchGate）；交给 fleet 是人替后三道放行，只看这张单此刻的样子（handoverDecision），
-// 开关、流程配置副本那两道外壳照样先查。
+// 自动派要过五道：开关开着、issue 是开关打开以后开的（dispatchDecision）、挂在当前版本上（versionGate）、不是母单也不是子单
+// （familyGate）、没贴「本机做」（localGate；后三道合起来是 autoDispatchGate）；交给 fleet 是人替后四道放行，只看这张单此刻的
+// 样子（handoverDecision），开关、流程配置副本那两道外壳照样先查。
 import type { TaskState } from '@fleet-dao/shared';
 
 /** 结束了的任务：接活只在 GitHub 上重开时再拉起一轮。 */
@@ -175,15 +175,45 @@ export function familyGate(issue: IssueFamily): FamilyGate {
   return { ok: true };
 }
 
-/** 过了是按哪个版本派的；没过是版本那道或母单子单那道的原因。 */
-export type AutoDispatchGate = VersionGate | Extract<FamilyGate, { ok: false }>;
+// —— 本机做这一道 ——
 
-/** 自动派在开关那道之后的两道合起来：先看版本（versionGate），再看母单、子单（familyGate）。 */
+/**
+ * 「本机做」标签：和开单脚本 `pnpm issue:new --local` 贴的 @fleet-dao/conventions labels.ts 的 LOCAL_LABEL 是同一个
+ * （那个包不依赖 core）。
+ */
+const LOCAL_LABEL = '本机做';
+
+export type LocalGate = { ok: true } | { ok: false; reason: 'reserved_local'; why: string };
+
+/**
+ * 「本机做」这一道（#299 止血，帅位 2026-09-27 定）：开关一开，挂在当前版本上的独立单一开出来（或挪进当前版本）就被接活
+ * 派走，帅位要留给本机做的也一样（#293、#299 都这样被接走过）。贴了「本机做」的，自动派一律不派；人明说交（fleet-api handover）
+ * 照交，不拦。标签要开单那一刻就贴上（`pnpm issue:new --local`）：事后补贴时，开单那个事件已经把它派走了。
+ * 认领进库（#299）之后，这个标签改成库里认领的镜子，或者删掉，到时候改这里。
+ */
+export function localGate(issue: Pick<IssueFamily, 'labels'>): LocalGate {
+  if (!issue.labels.includes(LOCAL_LABEL)) return { ok: true };
+  return {
+    ok: false,
+    reason: 'reserved_local',
+    why: `帅位留给本机做（贴着「${LOCAL_LABEL}」）；要交给引擎，先去掉标签再 handover`,
+  };
+}
+
+/** 过了是按哪个版本派的；没过是版本那道、母单子单那道或本机做那道的原因。 */
+export type AutoDispatchGate =
+  | VersionGate
+  | Extract<FamilyGate, { ok: false }>
+  | Extract<LocalGate, { ok: false }>;
+
+/** 自动派在开关那道之后的三道合起来：先看版本（versionGate），再看母单、子单（familyGate），再看本机做（localGate）。 */
 export function autoDispatchGate(plan: IssueMilestones & IssueFamily): AutoDispatchGate {
   const version = versionGate(plan);
   if (!version.ok) return version;
   const family = familyGate(plan);
   if (!family.ok) return family;
+  const local = localGate(plan);
+  if (!local.ok) return local;
   return version;
 }
 
@@ -206,7 +236,7 @@ export type HandoverDecision =
 
 /**
  * 人明说把一张单交给引擎（fleet-api handover；驾驶舱的「交给 fleet」按钮以后也照这个判）：开关打开以前开的、别的版本的、
- * 未排期的都能交。这里只看任务和 issue 此刻的样子，照接活的老规矩：这个号其实是 PR 的、issue 关着的，拒（关着的哪怕
+ * 未排期的、母单子单、贴了「本机做」的都能交（明着交的不拦）。这里只看任务和 issue 此刻的样子，照接活的老规矩：这个号其实是 PR 的、issue 关着的，拒（关着的哪怕
  * 任务还在跑也拒：关单会叫停它，说「已经在跑」是骗人）；还在排队（从没派过）的拉起；在跑的不重复起；已经结束的只有
  * GitHub 上重开过才再起一轮（和接活「结束的只在重开时再拉起」是同一条），没重开的拒。
  */

@@ -413,6 +413,48 @@ describe('开 PR 前验证', () => {
     expect(parseVerify(JSON.stringify(good), CRITERIA, HEAD)).toEqual({ ok: good });
   });
 
+  it('#246：结论文件里 criterion 只差反引号 → 认得，交回的是清单原文，不是模型去掉反引号的那份', () => {
+    const ticked = [
+      '`packages/engine/src/jobs/alert-sweep.ts` 加一条规则：读不了记这一轮没查全，不撤。',
+      ...CRITERIA.slice(1),
+    ];
+    const answer = (criterion: string) => ({
+      criterion,
+      answer: 'done',
+      evidence: 'alert-sweep.ts 第 30 行',
+    });
+    const written = { head: HEAD, results: ticked.map((c) => answer(c.replaceAll('`', ''))), findings: [] };
+    expect(parseVerify(JSON.stringify(written), ticked, HEAD)).toEqual({
+      ok: { head: HEAD, results: ticked.map(answer), findings: [] },
+    });
+  });
+
+  it('#246：交代里写明 criterion、驳回的 target 照原文逐字抄、连反引号', () => {
+    const verify = stagePrompt({ stage: 'verify', brief: verifyBrief(), repo, issueNumber: 12, mode: 'new' });
+    expect(verify).toContain('criterion 照清单原文逐字抄，连反引号');
+    const rebut = stagePrompt({
+      stage: 'plan',
+      brief: brief({
+        branch: 'fleet/12-fabc12345',
+        specDir: 'specs/12-login',
+        lead: {
+          step: 'rebut',
+          mode: 'fusion',
+          docs: {
+            requirement: 'specs/12-login/需求.md',
+            plan: 'specs/12-login/方案.md',
+            result: 'specs/12-login/结果.md',
+          },
+          blocking: [{ target: '`a.ts` 加一条规则', kind: 'not-done', evidence: 'test/ 下没有' }],
+        },
+      }),
+      repo,
+      issueNumber: 12,
+      mode: 'resume',
+    });
+    expect(rebut).toContain('照抄上面那一条的原文，连反引号');
+  });
+
   it('【故意造出的失败】结论文件解析不出、审的不是送检的头、漏答、答了清单外的：都明确算交错了', () => {
     expect(parseVerify('不是 JSON', CRITERIA, HEAD)).toMatchObject({
       error: expect.stringContaining('不是合法的 JSON'),

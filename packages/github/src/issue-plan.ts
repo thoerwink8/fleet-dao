@@ -87,6 +87,46 @@ export interface IssuePlan {
   subIssues: number;
 }
 
+/** 只查仓里还开着的里程碑（巡检开单前找巡检仓的当前版本，引擎 jobs/canary.ts）。 */
+export const OPEN_MILESTONES_QUERY = `query OpenMilestones($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
+    milestones(states: [OPEN], first: 100) { totalCount nodes { number title } }
+  }
+}`;
+
+const MilestonesData = z.object({
+  repository: z
+    .object({
+      milestones: z.object({ totalCount: z.number().int().nonnegative(), nodes: z.array(Milestone) }),
+    })
+    .nullable(),
+});
+
+/** 仓里此刻还开着的全部里程碑（「引擎」机器人现读）。读不到、认不出、没翻完一律抛错，不拿「一个都没有」顶。 */
+export async function readOpenMilestones(
+  client: GitHubClient,
+  input: { repo: RepoRef; signal?: AbortSignal | undefined },
+): Promise<{ number: number; title: string }[]> {
+  const { repo, signal } = input;
+  const data = await client.graphql<unknown>(
+    { as: 'engine', repo },
+    OPEN_MILESTONES_QUERY,
+    { owner: repo.owner, name: repo.name },
+    { signal },
+  );
+  const parsed = MilestonesData.safeParse(data);
+  if (!parsed.success) throw unexpected(`读 ${repo.owner}/${repo.name} 还开着的里程碑`, data);
+  const r = parsed.data.repository;
+  if (!r) throw new GitHubError('NOT_FOUND', `读不到仓 ${repo.owner}/${repo.name}（App 没装到这个仓？）`);
+  if (r.milestones.totalCount > r.milestones.nodes.length) {
+    throw new GitHubError(
+      'TOO_MANY_PAGES',
+      `还开着的里程碑有 ${r.milestones.totalCount} 个，只读了前 ${r.milestones.nodes.length} 个：没查全（没查成）`,
+    );
+  }
+  return r.milestones.nodes.map((m) => ({ number: m.number, title: m.title }));
+}
+
 export async function readIssuePlan(client: GitHubClient, input: ReadIssuePlanInput): Promise<IssuePlan> {
   const { repo, issueNumber, signal } = input;
   const data = await client.graphql<unknown>(

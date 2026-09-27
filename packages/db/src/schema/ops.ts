@@ -20,6 +20,9 @@ import {
 import {
   actorKind,
   auditVia,
+  CANARY_VERDICTS,
+  type CanaryStage,
+  type CanaryVerdict,
   jevMode,
   jevQuestionType,
   jevTruthSource,
@@ -370,6 +373,57 @@ export const scheduleRuns = pgTable(
       sql`coalesce(${t.scanned}, 0) >= 0 and coalesce(${t.found}, 0) >= 0`,
     ),
     index('schedule_runs_job_started_idx').on(t.job, t.startedAt),
+  ],
+);
+
+/**
+ * 全流程巡检（#223）一轮一行：巡检在巡检仓开一张固定的小单，看它从收单一路走到合并、关单、记账、驾驶舱显示
+ * （步骤见 enums.ts 的 CANARY_STAGES）。结论三种（CANARY_VERDICTS），还在跑时 verdict、ended_at 为空、stage 是走到哪一步。
+ * 这一轮本身跑没跑成记在 schedule_runs（没跑成是 failed，看门狗照登记表报）；链断在哪记在这里，巡检自己报「卡住报警」。
+ */
+export const canaryRuns = pgTable(
+  'canary_runs',
+  {
+    id: bigint('id', { mode: 'number' }).primaryKey().generatedAlwaysAsIdentity(),
+    /** 这一轮在 schedule_runs 里的那一行。 */
+    scheduleRunId: bigint('schedule_run_id', { mode: 'number' })
+      .notNull()
+      .references(() => scheduleRuns.id),
+    /** 巡检仓（owner/name）；没配是空。 */
+    repo: text('repo'),
+    /** 这一轮开的单；没开成是空。 */
+    issueNumber: integer('issue_number'),
+    /** 那张单在库里的任务行（收单以后才有）。 */
+    taskId: uuid('task_id').references(() => tasks.id),
+    startedAt: timestamp('started_at', tz).notNull().defaultNow(),
+    endedAt: timestamp('ended_at', tz),
+    verdict: text('verdict').$type<CanaryVerdict>(),
+    /** 在跑：走到哪一步；broken：断在哪一步；not_run：停在哪一步；pass：最后一步。 */
+    stage: text('stage').$type<CanaryStage>().notNull(),
+    /** broken、not_run 写为什么；pass 可以带一句备注（比如上一轮留下的单没收掉）。 */
+    why: text('why'),
+    /** 每一步走到的时刻（按走到的先后）：[{ stage, at }]。 */
+    steps: jsonb('steps').$type<{ stage: CanaryStage; at: string }[]>().notNull().default(sql`'[]'::jsonb`),
+    /** 下一轮开始时把这一轮留下的单收掉（叫停工作流、关单）的时刻；通过的不用收，是空。 */
+    cleanedAt: timestamp('cleaned_at', tz),
+    updatedAt: timestamp('updated_at', tz).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      'canary_runs_verdict_known',
+      sql`${t.verdict} is null or ${t.verdict} in (${inList(CANARY_VERDICTS)})`,
+    ),
+    // 结束了就有结论，有结论就结束了：不许「结束了但不知道怎样」
+    check('canary_runs_verdict_iff_ended', sql`(${t.endedAt} is null) = (${t.verdict} is null)`),
+    // 没通过的必须写为什么（空字符串不算）
+    check(
+      'canary_runs_not_pass_has_why',
+      sql`${t.verdict} is null or ${t.verdict} = 'pass' or coalesce(length(${t.why}), 0) > 0`,
+    ),
+    check('canary_runs_stage_not_blank', sql`length(${t.stage}) > 0`),
+    check('canary_runs_steps_array', sql`jsonb_typeof(${t.steps}) = 'array'`),
+    check('canary_runs_issue_positive', sql`${t.issueNumber} is null or ${t.issueNumber} > 0`),
+    index('canary_runs_started_idx').on(t.startedAt),
   ],
 );
 

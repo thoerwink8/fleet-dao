@@ -9,6 +9,7 @@ import { assertPublishable, createGitHub, pgLedger, pgLocker } from '@fleet-dao/
 import type { EngineJobs } from '../activities.ts';
 import type { JevPort } from '../failure/jev.ts';
 import type { EnginePorts } from '../ports.ts';
+import { canaryJob } from './canary.ts';
 import { scopeExec, type UserExec } from './exec.ts';
 import { createGitHubPorts, type EngineGitHub } from './github-ports.ts';
 import { githubReconcileJob } from './github-reconcile.ts';
@@ -278,8 +279,10 @@ export function realPortsFromEnv(
       machine: config.machine,
     }),
     // 每小时对账：同一个工作树管家（删树经 fleet-agent-scope）、同一个会话用户执行器（看树里还剩什么）、
-    // 同一个 gh（合了的 PR 对账）
+    // 同一个 gh（合了的 PR 对账、排队的单补拉）
     hourlyReconcile: hourlyReconcileJob({ db, gh, trees, exec, sessionOrg, machine: config.machine }),
+    // 全流程巡检（#223）：巡检仓写在引擎配置 FLEET_CANARY_REPO（没配这一轮记没跑成，看门狗报）；开单、写需求文档、挂版本都是「引擎」机器人
+    canary: canaryJob({ db, gh, repo: env.FLEET_CANARY_REPO }),
   };
   return {
     ...real,

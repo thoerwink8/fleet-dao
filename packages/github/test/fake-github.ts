@@ -853,6 +853,14 @@ export class FakeGitHub {
           };
       return this.json(200, { data: { repository: { issueOrPullRequest: node, milestones } } });
     }
+    if (query.includes('query OpenMilestones')) {
+      const open = [...this.milestones]
+        .filter(([number]) => !this.closedMilestones.has(number))
+        .map(([number, title]) => ({ number, title }));
+      return this.json(200, {
+        data: { repository: { milestones: { totalCount: open.length, nodes: open } } },
+      });
+    }
     if (query.includes('markPullRequestReadyForReview')) {
       const n = Number(String(variables.id).replace('PR_', ''));
       const pr = this.pulls.get(n);
