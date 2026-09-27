@@ -23,14 +23,17 @@ import {
 import type { FailureVerdict } from '../src/failure/index.ts';
 import { describeHolds, normalizeHolds } from '../src/holds.ts';
 import {
-  CONCURRENT_SESSIONS,
+  assertSessionFitsSlice,
   DEFAULT_LIMITS,
   FRANCE_RESIDENT_MB,
   FRANCE_USABLE_MB,
   historyAlertLine,
+  LimitsConfigError,
   resolveLimits,
   SESSION_MEMORY_HIGH_MB,
   SESSION_MEMORY_MAX_MB,
+  SLICE_MEMORY_HIGH_MB,
+  SLICE_MEMORY_MAX_MB,
 } from '../src/limits.ts';
 import { costOfRun } from '../src/usage.ts';
 
@@ -53,16 +56,25 @@ describe('上限：读时现算默认值', () => {
     expect(resolveLimits(undefined)).toEqual(DEFAULT_LIMITS);
   });
 
-  it('会话内存上限按法国实测容量算：(11G - 常驻 0.6G) ÷ 同时 3 个会话；软上限只比硬上限低 256', () => {
-    expect(SESSION_MEMORY_MAX_MB).toBe(Math.floor((11 * 1024 - 600) / 3));
-    expect(DEFAULT_LIMITS).toMatchObject({ sessionMemoryMaxMb: 3554, sessionMemoryHighMb: 3298 });
-    // 同时跑满的会话都顶到硬上限，加上常驻服务也不超过能分的
-    expect(CONCURRENT_SESSIONS * DEFAULT_LIMITS.sessionMemoryMaxMb + FRANCE_RESIDENT_MB).toBeLessThanOrEqual(
-      FRANCE_USABLE_MB,
-    );
+  it('会话内存上限（法国 2026-09-28 #307 断链之后的新推导）：父节点 fleet-agents.slice 兜总量，单会话放宽到约一半', () => {
+    // 父节点总上限 = 能分给会话的 - 平台常驻服务，软上限只比它低 512
+    expect(SLICE_MEMORY_MAX_MB).toBe(FRANCE_USABLE_MB - FRANCE_RESIDENT_MB);
+    expect(SLICE_MEMORY_HIGH_MB).toBe(SLICE_MEMORY_MAX_MB - 512);
+    // 单会话硬上限比旧的三等分值（3554M）宽松得多——旧值连「tsc -b + 测试 + 代理」这一种会话内部的组合都放不下
+    expect(SESSION_MEMORY_MAX_MB).toBeGreaterThan(3554);
+    expect(DEFAULT_LIMITS).toMatchObject({ sessionMemoryMaxMb: 6144, sessionMemoryHighMb: 5888 });
+    expect(DEFAULT_LIMITS.sessionMemoryHighMb).toBe(SESSION_MEMORY_HIGH_MB);
+    // 但单会话的硬上限仍明显小于父节点的总上限：多个会话同时冲高时父节点兜得住，不是形同虚设
+    expect(SESSION_MEMORY_MAX_MB).toBeLessThan(SLICE_MEMORY_MAX_MB);
     // 放得下法国实测开 2 个测试进程的峰值（约 2493 MiB，含页缓存）加 Claude Code（约 270）：原来的 1.5G / 2G 连 1 个都放不下
     expect(DEFAULT_LIMITS.sessionMemoryHighMb).toBeGreaterThan(2493 + 270);
-    expect(DEFAULT_LIMITS.sessionMemoryHighMb).toBe(SESSION_MEMORY_HIGH_MB);
+  });
+
+  it('【故意造出的失败】单会话硬上限配得比父节点总上限还大：校验要报错，不能悄悄用（否则父节点这道总闸形同没设）', () => {
+    expect(() => assertSessionFitsSlice(SLICE_MEMORY_MAX_MB + 1, SLICE_MEMORY_MAX_MB)).toThrow(
+      LimitsConfigError,
+    );
+    expect(() => assertSessionFitsSlice(SESSION_MEMORY_MAX_MB, SLICE_MEMORY_MAX_MB)).not.toThrow();
   });
 
   it('事件数报警线：在途任务记下的那一套里没有这一项（它加进来之前开工的），按现在的默认值，不报「报警线 undefined」', () => {

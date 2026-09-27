@@ -145,13 +145,13 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 
 资源池与起会话：
 
-- 池子 `fleet-agents.slice`（cgroup 路径 `/fleet.slice/fleet-agents.slice`）：只记账（CPU、内存、进程数、IO），池子本身不设上限（按 windsurf-dao 仓 `docs/decisions/2026-09-24-agent-isolation-and-error-routing.md` 的「先观测」）。
+- 池子 `fleet-agents.slice`（cgroup 路径 `/fleet.slice/fleet-agents.slice`）：CPU、内存、进程数、IO 都记账（按 windsurf-dao 仓 `docs/decisions/2026-09-24-agent-isolation-and-error-routing.md` 的「先观测」起步），内存设了总量上限（2026-09-28 起，#307 断链之后：见下面「会话的内存上限和测试进程数」）；CPUWeight、TasksMax 还没实测画像，先不设。
 - 每个会话一个 scope：`fleet-agent-<编号>.scope`，身份是会话用户，上限由引擎起会话时给。
 - 引擎（fleet）自己建不了系统级 scope，会话还得换成会话用户。polkit 管不窄——systemd 255 建临时单元时不把单元名交给 polkit，放行就等于放行任何单元、任何身份——所以 sudoers 只放行 fleet 以 root 跑一个脚本：
 
 ```
 sudo -n /usr/local/sbin/fleet-agent-scope run <编号> --user fleet-agent-carpool
-        [--memory-high 3298M] [--memory-max 3554M --memory-swap-max 0] [--tasks-max 512] [--cpu-weight 100]
+        [--memory-high 5888M] [--memory-max 6144M --memory-swap-max 0] [--tasks-max 512] [--cpu-weight 100]
         [--cwd /某目录] -- /绝对路径/命令 参数…
 sudo -n /usr/local/sbin/fleet-agent-scope stop <编号>     # 已经没了也返回 0
 sudo -n /usr/local/sbin/fleet-agent-scope list            # 编号 状态，一行一个
@@ -171,12 +171,14 @@ sudo -n /usr/local/sbin/fleet-agent-scope remove /var/lib/fleet-work/<owner>_<na
 - 引擎正常停（SIGTERM）：sudo 把信号转给会话，会话跟着退。引擎崩了（SIGKILL）：会话留在自己的 scope 里；引擎起来后 `list` 找回、`stop` 收掉。
 - 引擎的 systemd 单元不能开 `NoNewPrivileges`：开了 sudo 提不了权。
 - 看用量（不用 root）：`systemctl status fleet-agents.slice`、`systemd-cgtop /fleet.slice/fleet-agents.slice`、`systemctl show fleet-agent-<编号>.scope -p MemoryCurrent,CPUUsageNSec,TasksCurrent`。
-- 给池子加上限：写 `/etc/systemd/system/fleet-agents.slice.d/limits.conf`（MemoryHigh、MemoryMax、MemorySwapMax…）再 `systemctl daemon-reload`；回滚就删掉它。
+- 池子的总量上限写在 `deploy/france/fleet-agents.slice` 里（`MemoryHigh`、`MemoryMax`），由 `deploy/france.sh` 装到 `/etc/systemd/system/`；改了这份文件重跑一遍 france.sh 再 `systemctl daemon-reload`（脚本会自己做）。临时想加别的（CPUWeight、TasksMax…）不改主文件，写 `/etc/systemd/system/fleet-agents.slice.d/override.conf` 再 `systemctl daemon-reload`；回滚就删掉它。
 
-会话的内存上限和测试进程数（#164，按 2026-09-26 的实测定，依据和复测办法见 `specs/164-会话内存与交活测试/方案.md`）：
+会话的内存上限和测试进程数（#164 按 2026-09-26 的实测定，2026-09-28 按 #307 断链改过推导，依据见 `specs/164-会话内存与交活测试/方案.md` 和 `packages/engine/src/limits.ts` 的注释）：
 
-- 每个会话 scope 的上限是引擎的默认值（`packages/engine/src/limits.ts` 的 `sessionMemoryHighMb`、`sessionMemoryMaxMb`，驾驶舱设置里能改）：硬上限 =（能分给会话的 11G − 平台常驻服务约 0.6G）÷ 同时跑测试的 3 个会话 ≈ 3554M；软上限只比它低 256M（3298M），超了软上限、又没有 swap 可换，内核就压着回收、会话半死不活，夹缝留窄。原来的软 1.5G、硬 2G 连 1 个测试进程加 Claude Code 都放不下（#160 卡在那里十几分钟）。现在没有东西限着「同时跑测试的不超过 3 个」，账号池的并发加起来比 3 大时要一起看。
-- 会话里跑测试开几个进程，由仓根的 `vitest.config.ts` 按本进程所在 cgroup 的上限算（`packages/conventions/src/test-run.ts`：每个进程按 900M、给主进程和 Claude Code 留 1300M）：3298M 放得下 2 个；没有上限（本机、CI）照 vitest 默认；读不到、认不出上限直接报错，要硬跑就给 `VITEST_MAX_WORKERS=<进程数>`。
+- 安全垫分两层：父节点 `fleet-agents.slice` 兜「总量不超」，单会话的上限只管「一次放得下最坏情形」，不再严格三等分（cgroup v2 的常见做法：kernel 文档 memory.high/memory.max 一节，k8s requests/limits 同理）。
+  - 父节点总上限 =（能分给会话的 11G − 平台常驻服务约 0.6G）≈ 10664M（`packages/engine/src/limits.ts` 的 `SLICE_MEMORY_MAX_MB`），软上限低 512M（`SLICE_MEMORY_HIGH_MB`，10152M）；数值写在 `deploy/france/fleet-agents.slice`，两处对不上 `packages/engine/test/slice-unit.test.ts` 会红。
+  - 单会话 scope 的上限是引擎的默认值（`sessionMemoryHighMb`、`sessionMemoryMaxMb`，驾驶舱设置里能改）：硬上限取 tsc -b 全仓约 1.9G + 测试 2–3 个进程约 2.5–3.2G + 代理本身约 0.3–1G 这种最坏组合，取整到 6144M（约总量的一半，比旧的三等分值 3554M 宽松得多，仍明显小于父节点总上限）；软上限只比它低 256M（5888M），超了软上限、又没有 swap 可换，内核就压着回收、会话半死不活，夹缝留窄。原来的软 1.5G、硬 2G 连 1 个测试进程加 Claude Code 都放不下（#160 卡在那里十几分钟）；后来的软 3298M、硬 3554M 又连「tsc -b + 测试 + 代理」这种会话内部的组合都放不下（法国 2026-09-28 06:35–06:45，#307：单会话被自己那道窄墙卡死，整机却还有 6.8G 空闲）。现在同时跑测试的会话数没有单独限着——多个会话同时冲高时由父节点的总上限兜住，不再靠单会话早早卡死自己；账号池的并发（目录配置里的 maxConcurrency）多了终究要看父节点扛不扛得住。
+- 会话里跑测试开几个进程，由仓根的 `vitest.config.ts` 按本进程所在 cgroup 的上限算（`packages/conventions/src/test-run.ts`：每个进程按 900M、给主进程和 Claude Code 留 1300M）：新的 5888M 软上限放得下 5 个（一般机器 vitest 默认的「核数 − 1」就到头了，不再被内存上限额外砍）；没有上限（本机、CI）照 vitest 默认；读不到、认不出上限直接报错，要硬跑就给 `VITEST_MAX_WORKERS=<进程数>`。
 
 会话的 PATH 与 pnpm（#164 在法国复测时查出：引擎给会话的 PATH 和会话用户的登录 shell 里都没有 pnpm，会话跑不了 `pnpm test:changed`，交活核对又只认命令开头就是它，绕成 `corepack pnpm …` 不算）：
 

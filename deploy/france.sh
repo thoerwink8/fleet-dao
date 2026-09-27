@@ -577,7 +577,7 @@ setup_temporal() {
 }
 
 setup_slice() {
-  step "AI 会话资源池 fleet-agents.slice（池子只记账；每个会话的上限由引擎起会话时给）"
+  step "AI 会话资源池 fleet-agents.slice（池子设总量上限；每个会话各自的上限由引擎起会话时给）"
   put_file /etc/systemd/system/fleet-agents.slice root:root 644 "$(<"$DEPLOY_DIR/france/fleet-agents.slice")"
   if ((WROTE)); then systemctl daemon-reload; fi
   ensure_unit_running fleet-agents.slice 0
@@ -1334,10 +1334,12 @@ readback_slice() {
   fi
   props=$(systemctl show fleet-agents.slice -p CPUAccounting,MemoryAccounting,TasksAccounting,IOAccounting,MemoryHigh,MemoryMax,TasksMax,CPUQuotaPerSecUSec |
     sort | tr '\n' ' ')
-  if [[ "$props" == "CPUAccounting=yes CPUQuotaPerSecUSec=infinity IOAccounting=yes MemoryAccounting=yes MemoryHigh=infinity MemoryMax=infinity TasksAccounting=yes TasksMax=infinity " ]]; then
-    ok "fleet-agents.slice：记账全开，没有任何上限"
+  # MemoryHigh=10645143552（10152M）、MemoryMax=11182014464（10664M）：deploy/france/fleet-agents.slice 里写的数值，
+  # 和 packages/engine/src/limits.ts 的 SLICE_MEMORY_HIGH_MB / SLICE_MEMORY_MAX_MB 是同一份推导（改一处两处都要改）。
+  if [[ "$props" == "CPUAccounting=yes CPUQuotaPerSecUSec=infinity IOAccounting=yes MemoryAccounting=yes MemoryHigh=10645143552 MemoryMax=11182014464 TasksAccounting=yes TasksMax=infinity " ]]; then
+    ok "fleet-agents.slice：记账全开，总量上限 MemoryHigh=10152M MemoryMax=10664M"
   else
-    red "fleet-agents.slice 的设置不是「只记账」：$props"
+    red "fleet-agents.slice 的设置不对：$props"
   fi
 }
 
