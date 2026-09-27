@@ -1,6 +1,6 @@
-// 自动发布（法国，root；fleet-auto-release.timer 每 5 分钟拉起一轮）：主线上 CI 全绿的新提交，等引擎空闲后用
-// deploy/release.sh 发到本机，发完把各家 AI 的规矩同步给会话用户；每一轮的读数写进状态文件，后端的 /healthz 读它现算
-// 「跟不跟得上主线」。规矩和由来见 docs/ops.md 第九节「自动发布」。
+// 自动发布（法国，root；fleet-auto-release.timer 每 5 分钟拉起一轮）：主线上比在用的新、CI 全绿的最新一个提交（主线头的
+// CI 还在跑、红了，就沿主线往回找），等引擎空闲后用 deploy/release.sh 发到本机，发完把各家 AI 的规矩同步给会话用户；
+// 每一轮的读数写进状态文件，后端的 /healthz 读它现算「跟不跟得上主线」。规矩和由来见 docs/ops.md 第九节「自动发布」。
 // 这里是判断和「跑一轮」的流程；和系统打交道的（git、GitHub 接口、会话、发布脚本、库）都从 io 进来：真的在
 // fleet-auto-release.mjs，测试换成假的（deploy/test/auto-release.test.mjs）。
 // 改这里之前必须知道：
@@ -26,6 +26,11 @@ export const MAIN_HISTORY = 300;
 export const IDLE_WAIT_MS = 60 * 60_000;
 /** 只认这个工作流在 main 上那次 push 的结论（其余几个工作流看的是 GitHub 上的现状，不是这份代码好不好）。 */
 export const CI_WORKFLOW = '.github/workflows/ci.yml';
+/**
+ * 一轮读一次主线最近这么多次 ci.yml 的运行（一次问完，候选都从这一份里判；不带凭据一个钟头只有 60 次）。
+ * 比这更早的提交查不到结论，当没查成、跳过——落后这么多，后端早就报红了。
+ */
+export const CI_RUNS_PAGE = 100;
 /** 提交落到主线这么久还查不到它的 CI 记录：不再当「还没开跑」，记没查成。 */
 export const CI_NO_RUN_MS = 30 * 60_000;
 /** 规矩同步给谁：和 deploy/france.sh 的 AGENT_RULES_USERS 同一份（会话用户、创始人的登录用户）。 */
@@ -96,16 +101,23 @@ export function parseHistory(text) {
   return out;
 }
 
+/** 人最近一次手动切的版本（不带 auto 的 release / rollback / auto-rollback）；没有就是 null。 */
+export function lastManualSwitch(history) {
+  let last = null;
+  for (const h of history) if (!h.tags.includes('auto') && SWITCHES.has(h.event)) last = h;
+  if (!last) return null;
+  return { since: last.at, sha: last.sha, event: last.event, unmerged: last.tags.includes('unmerged') };
+}
+
 /**
- * 人最近一次手动切的版本（不带 auto 的 release / rollback / auto-rollback）之后，主线上还没有更新的提交：不自动发——
- * 不跟人打架（手动退回了坏版本、合并前在真机上验）。主线出了新提交（修复、那个 PR 合进来）再接着自动发。
+ * 人最近一次手动切的版本之后，主线上还没有更新的提交：不自动发——不跟人打架（手动退回了坏版本、合并前在真机上验）。
+ * 主线出了新提交（修复、那个 PR 合进来）再接着自动发，那之前合进来的（含人退回掉的那个）一律不自动发（releasable）。
  * 对照：Argo CD 开着自动同步不许手动回滚，要先关自动同步；这里不用关，人切一下就算按住。
  */
 export function manualHold(history, headAt) {
-  let last = null;
-  for (const h of history) if (!h.tags.includes('auto') && SWITCHES.has(h.event)) last = h;
-  if (!last || Date.parse(headAt) > Date.parse(last.at)) return null;
-  return { since: last.at, sha: last.sha, event: last.event, unmerged: last.tags.includes('unmerged') };
+  const last = lastManualSwitch(history);
+  if (!last || Date.parse(headAt) > Date.parse(last.since)) return null;
+  return last;
 }
 
 /** 这个提交在历史里最后一件事是「不健康」（发过、没过健康检查）：不自动再发，等新提交。 */
@@ -116,10 +128,51 @@ export function judgedUnhealthy(history, sha) {
 }
 
 /**
- * GitHub「列出工作流运行」的回答（不带凭据，按 head_sha、event=push 过滤过）里，这个提交在 main 上那次 ci.yml 的结论：
- * green 全绿 / red 跑完了但不是 success / pending 还没跑完或还没开跑 / unknown 认不出、查不到。只有 green 能发。
+ * 这一轮能发的提交 candidates（新的在前，有的话第一个就是主线头）。hold：人按住了、主线头也在按住之前（这时 candidates
+ * 是空的）；failed：往回找停在了哪个发过没成的提交上（它是主线头时 candidates 是空的）；stop：停在人按住、发过没成那儿时
+ * 人看的一句（停在在用的那儿不用说）。只往前走，往回找到下面三处里最近的一处就停：
+ * - 在用的：主线按 --first-parent 排，排在它前面的都是它的后代。在用的不在主线最近的提交里（还没发布过、落后太多、
+ *   没合进主线的），主线上的都算比它新——没合进主线的是人手动发的，由下一条管住。
+ * - 人最近一次手动切版本那一刻：那之前合进主线的（含人退回掉的那个）一律不自动发（manualHold）。
+ * - 发过没成的：自动发布没成（attempt）、发过没过健康检查（历史里最后是 unhealthy，状态文件丢了也认得）——它和比它旧的
+ *   都不再自动试，等主线出比它新的全绿提交。不往回挑它前面没试过的：没成的原因可能在机器上（香港不通、配置坏了），
+ *   往回一个个试就是一轮轮重启服务、一条条报警。
  */
-export function ciVerdict(body, sha, headAt, now) {
+export function releasable(commits, current, history, attempt) {
+  const at = commits.findIndex((c) => c.sha === current);
+  let end = at >= 0 ? at : commits.length;
+  let hold = null;
+  let stop = '';
+  const manual = lastManualSwitch(history);
+  if (manual) {
+    const i = commits.findIndex((c) => Date.parse(c.at) <= Date.parse(manual.since));
+    if (i >= 0 && i < end) {
+      end = i;
+      if (i === 0) hold = manual;
+      stop = `人 ${manual.since} 手动${manual.event === 'rollback' ? '退回' : '切'}版本之前合进来的不自动发`;
+    }
+  }
+  let failed = null;
+  for (let i = 0; i < end; i++) {
+    const { sha } = commits[i];
+    if (attempt?.sha === sha && attempt.result === 'failed') {
+      failed = { sha, why: `自动发过、没成（${attempt.endedAt ?? attempt.startedAt}）` };
+    } else if (judgedUnhealthy(history, sha)) {
+      failed = { sha, why: '发过、没过健康检查' };
+    } else continue;
+    end = i;
+    stop = `${short(sha)} ${failed.why}，它和比它旧的不再自动发`;
+    break;
+  }
+  return { candidates: commits.slice(0, end), hold, failed, stop };
+}
+
+/**
+ * GitHub「列出工作流运行」的回答（不带凭据：主线上 ci.yml 最近那些次 push 触发的运行）里，这个提交在 main 上那次 ci.yml
+ * 的结论：green 全绿 / red 跑完了但不是 success（含被后面的推送挤掉的 cancelled）/ pending 还没跑完或还没开跑 /
+ * unknown 认不出、查不到。只有 green 能发。at 是这个提交落到主线的时间（刚合进来查不到算还没开跑）。
+ */
+export function ciVerdict(body, sha, at, now) {
   if (typeof body !== 'object' || body === null || !Array.isArray(body.workflow_runs)) {
     return { verdict: 'unknown', detail: 'GitHub 回的不是运行列表' };
   }
@@ -134,10 +187,10 @@ export function ciVerdict(body, sha, headAt, now) {
       (r.path === CI_WORKFLOW || r.path.startsWith(`${CI_WORKFLOW}@`)),
   );
   if (runs.length === 0) {
-    if (now - Date.parse(headAt) < CI_NO_RUN_MS) return { verdict: 'pending', detail: 'CI 还没开跑' };
+    if (now - Date.parse(at) < CI_NO_RUN_MS) return { verdict: 'pending', detail: 'CI 还没开跑' };
     return {
       verdict: 'unknown',
-      detail: `提交落到主线 ${minutes(now - Date.parse(headAt))} 分钟了还查不到它的 CI`,
+      detail: `CI 查不到（落到主线 ${minutes(now - Date.parse(at))} 分钟了还没有它的运行记录）`,
     };
   }
   const n = (v) => (Number.isFinite(v) ? v : -1);
@@ -150,7 +203,7 @@ export function ciVerdict(body, sha, headAt, now) {
   const run = runs[0];
   if (run.status !== 'completed') return { verdict: 'pending', detail: `CI 在跑（${run.status}）` };
   if (run.conclusion === 'success') return { verdict: 'green', detail: `CI 全绿（第 ${run.run_number} 次）` };
-  return { verdict: 'red', detail: `CI 的结论是 ${run.conclusion ?? '空'}（第 ${run.run_number} 次）` };
+  return { verdict: 'red', detail: `CI 结论是 ${run.conclusion ?? '空'}（第 ${run.run_number} 次）` };
 }
 
 /** fleet-agent-scope list 的输出：一行「编号 状态」。返回还没停的会话编号；认不出一行就抛（调用方按忙算）。 */
@@ -295,41 +348,33 @@ async function deployStep(io, st, now) {
     act(st, now, 'history-unreadable', why(e));
     return current;
   }
-  const hold = manualHold(history, head.at);
-  if (hold) {
-    // 这几种「这个头不发」：之前等空闲的钟不接着走，下一个要发的头从头等
+  const { candidates, hold, failed, stop } = releasable(commits, current, history, st.attempt);
+  if (candidates.length === 0) {
+    // 这几种「主线头不发」：之前等空闲的钟不接着走，下一个要发的从头等
     st.waitingSince = null;
-    st.hold = hold;
-    act(
-      st,
-      now,
-      'hold',
-      `人 ${hold.since} 手动${hold.event === 'rollback' ? '退回' : '切'}到 ${short(hold.sha)}${hold.unmerged ? '（没合进主线的提交）' : ''}，主线上还没有更新的提交`,
-    );
-    return current;
-  }
-  if (st.attempt?.sha === head.sha && st.attempt.result === 'failed') {
-    st.waitingSince = null;
-    act(
-      st,
-      now,
-      'failed-before',
-      `这个提交自动发过、没成（${st.attempt.endedAt ?? st.attempt.startedAt}），等主线出新提交`,
-    );
-    return current;
-  }
-  if (judgedUnhealthy(history, head.sha)) {
-    st.waitingSince = null;
-    act(st, now, 'failed-before', '这个提交发过、没过健康检查，等主线出新提交');
+    if (hold) {
+      st.hold = hold;
+      act(
+        st,
+        now,
+        'hold',
+        `人 ${hold.since} 手动${hold.event === 'rollback' ? '退回' : '切'}到 ${short(hold.sha)}${hold.unmerged ? '（没合进主线的提交）' : ''}，主线上还没有更新的提交`,
+      );
+    } else {
+      act(st, now, 'failed-before', `这个提交${failed?.why ?? '找不到能发的'}，等主线出新提交`);
+    }
     return current;
   }
 
-  const ci = await ciFor(io, st, now, head);
-  if (ci.verdict !== 'green') {
-    if (ci.verdict === 'red') st.waitingSince = null;
-    act(st, now, `ci-${ci.verdict}`, ci.detail);
+  const pick = await pickTarget(io, st, now, candidates, stop);
+  if (!pick.target) {
+    if (pick.verdict === 'red') st.waitingSince = null;
+    act(st, now, `ci-${pick.verdict}`, pick.detail);
     return current;
   }
+  // 要发的：主线头全绿就是它；不然是往回找到的最新全绿提交（via 说为什么不是主线头）
+  const target = pick.target.sha;
+  const via = pick.via ? `：${pick.via}` : '';
 
   let releaseBusy;
   try {
@@ -345,7 +390,7 @@ async function deployStep(io, st, now) {
 
   let checkout;
   try {
-    checkout = await io.prepareCheckout(head.sha);
+    checkout = await io.prepareCheckout(target);
   } catch (e) {
     checkout = { ok: false, why: why(e) };
   }
@@ -370,7 +415,7 @@ async function deployStep(io, st, now) {
         st,
         now,
         'wait-idle',
-        `引擎有会话在跑（${st.busy}），等空闲，最多等到 ${iso(Date.parse(st.waitingSince) + IDLE_WAIT_MS)}`,
+        `引擎有会话在跑（${st.busy}），等空闲，最多等到 ${iso(Date.parse(st.waitingSince) + IDLE_WAIT_MS)}；要发的是 ${short(target)}${via}`,
       );
       return current;
     }
@@ -378,7 +423,7 @@ async function deployStep(io, st, now) {
 
   const before = st.attempt;
   st.attempt = {
-    sha: head.sha,
+    sha: target,
     startedAt: iso(now),
     endedAt: null,
     result: 'running',
@@ -387,7 +432,12 @@ async function deployStep(io, st, now) {
     detail: '',
     log: '',
   };
-  act(st, now, 'releasing', busyOk ? `等空闲等了 ${minutes(waited)} 分钟，照发` : '');
+  act(
+    st,
+    now,
+    'releasing',
+    `${busyOk ? `等空闲等了 ${minutes(waited)} 分钟，照发；` : ''}发 ${short(target)}${via}`,
+  );
   try {
     await io.save(st);
   } catch (e) {
@@ -398,7 +448,7 @@ async function deployStep(io, st, now) {
   }
   let r;
   try {
-    r = await io.runRelease(head.sha, busyOk);
+    r = await io.runRelease(target, busyOk);
   } catch (e) {
     r = { code: -1, detail: `发布脚本起不来：${why(e)}`, log: '' };
   }
@@ -432,20 +482,20 @@ async function deployStep(io, st, now) {
   st.waitingSince = null;
   if (st.attempt.result === 'ok') {
     resolveLater(st, FAILED_PREFIX);
-    act(st, end, 'released', `发了 ${short(head.sha)}（退出码 ${r.code}）`);
+    act(st, end, 'released', `发了 ${short(target)}（退出码 ${r.code}）${via}`);
     return after;
   }
   const where =
-    after === head.sha ? `停在新版 ${short(head.sha)}（没退回：见日志里的红）` : `在用的还是 ${short(after)}`;
+    after === target ? `停在新版 ${short(target)}（没退回：见日志里的红）` : `在用的还是 ${short(after)}`;
   raise(
     st,
-    `${FAILED_PREFIX}${head.sha}`,
-    `自动发布 ${short(head.sha)} 没成`,
+    `${FAILED_PREFIX}${target}`,
+    `自动发布 ${short(target)} 没成`,
     `release.sh 退出码 ${r.code}：${r.detail || '没给原因'}。${where}。日志：${r.log || '（没拿到路径）'}。` +
-      '这个提交不再自动试，主线出了新提交再发；要现在重试，在法国以 root 跑 ' +
-      `bash ${CHECKOUT}/deploy/release.sh ${head.sha}`,
+      '这个提交和比它旧的不再自动试，主线出了比它新的全绿提交再发；要现在重试，在法国以 root 跑 ' +
+      `bash ${CHECKOUT}/deploy/release.sh ${target}`,
   );
-  act(st, end, 'release-failed', `退出码 ${r.code}：${r.detail}`);
+  act(st, end, 'release-failed', `${short(target)} 退出码 ${r.code}：${r.detail}`);
   return after;
 }
 
@@ -465,34 +515,68 @@ function settleDangling(st, now, current) {
       `${FAILED_PREFIX}${a.sha}`,
       `自动发布 ${short(a.sha)} 没等到结果`,
       `上一轮跑到一半没了（被杀、机器重启），发布锁已空，在用的是 ${short(current)}、不是它。` +
-        `这个提交不再自动试；日志在 ${RELEASES}/.logs/。要现在重试，在法国以 root 跑 bash ${CHECKOUT}/deploy/release.sh ${a.sha}`,
+        `这个提交和比它旧的不再自动试；日志在 ${RELEASES}/.logs/。要现在重试，在法国以 root 跑 bash ${CHECKOUT}/deploy/release.sh ${a.sha}`,
     );
   }
 }
 
-async function ciFor(io, st, now, head) {
-  if (st.ci?.sha === head.sha && (st.ci.verdict === 'green' || st.ci.verdict === 'red')) return st.ci;
-  let v;
+/**
+ * 要发哪个：候选（新的在前，candidates[0] 是主线头）里第一个 CI 全绿的——持续交付「发最新的绿构建」（Google SRE 书
+ * 「Release Engineering」：在最近一次全部测试都过了的那个修订上出版本；Chromium 的 LKGR）。主线头的 CI 还在跑、红了、
+ * 被后面的推送挤掉了，都往回找，不等它：合并一密（主线全量 CI 要 3–4 分钟），只看主线头就一轮轮跳过，一直发不出去。
+ * GitHub 一轮最多问一次：一次读回主线最近 CI_RUNS_PAGE 次 ci.yml 的运行，候选都从这一份里判；主线头全绿了记下，等空闲的
+ * 那几轮不再问。整份读不到（限流、连不上、回的认不出）这一轮一个都不发、写明没查成，不当成绿；单个提交查不到它的运行，
+ * 那一个跳过（刚合进来的当还没开跑）。st.ci 记主线头的结论（读数、后端用）。
+ * 找到了返回 { target, via }（via：发的不是主线头时，写明主线头和跳过的那几个怎么了）；没找到返回
+ * { target: null, verdict（主线头的结论）, detail }。stop：往回找停在哪（人按住、发过没成），写进读数。
+ */
+async function pickTarget(io, st, now, candidates, stop) {
+  const head = candidates[0];
+  if (st.ci?.sha === head.sha && st.ci.verdict === 'green') return { target: head, via: '' };
+  let body = null;
+  let unread = '';
   try {
-    const r = await io.ciRuns(head.sha);
+    const r = await io.ciRuns();
     if (r.status === 200) {
-      let body;
       try {
         body = JSON.parse(r.body);
       } catch {
         body = null;
       }
-      v = ciVerdict(body, head.sha, head.at, now);
+      if (typeof body !== 'object' || body === null || !Array.isArray(body.workflow_runs)) {
+        unread = 'GitHub 回的不是运行列表';
+      }
     } else if (r.status === 403 || r.status === 429) {
-      v = { verdict: 'unknown', detail: `GitHub 限流（HTTP ${r.status}${r.rate ? `，${r.rate}` : ''}）` };
+      unread = `GitHub 限流（HTTP ${r.status}${r.rate ? `，${r.rate}` : ''}）`;
     } else {
-      v = { verdict: 'unknown', detail: `GitHub 回 HTTP ${r.status}` };
+      unread = `GitHub 回 HTTP ${r.status}`;
     }
   } catch (e) {
-    v = { verdict: 'unknown', detail: `连不上 GitHub：${why(e)}` };
+    unread = `连不上 GitHub：${why(e)}`;
   }
-  st.ci = { sha: head.sha, verdict: v.verdict, detail: v.detail, checkedAt: iso(now) };
-  return st.ci;
+  if (unread) {
+    st.ci = { sha: head.sha, verdict: 'unknown', detail: unread, checkedAt: iso(now) };
+    return { target: null, verdict: 'unknown', detail: `CI 的结论没查成：${unread}；这一轮不发` };
+  }
+  const seen = candidates.map((c) => ({ c, v: ciVerdict(body, c.sha, c.at, now) }));
+  const top = seen[0].v;
+  st.ci = { sha: head.sha, verdict: top.verdict, detail: top.detail, checkedAt: iso(now) };
+  const at = seen.findIndex((s) => s.v.verdict === 'green');
+  // 跳过的几个各一句：主线头打头，太多了只写前几个
+  const told = (list) => {
+    const said = list
+      .slice(0, 4)
+      .map((s) => `${s.c === head ? '主线头 ' : ''}${short(s.c.sha)} 的 ${s.v.detail}`);
+    if (list.length > 4) said.push(`等 ${list.length} 个`);
+    return said.join('、');
+  };
+  if (at === 0) return { target: head, via: '' };
+  if (at > 0) {
+    return { target: seen[at].c, via: `${told(seen.slice(0, at))}，往回找到最近全绿的是它` };
+  }
+  const lead = top.verdict === 'unknown' ? `没查成：${top.detail}` : top.detail;
+  const rest = seen.length > 1 ? `；往回 ${seen.length - 1} 个也没全绿（${told(seen.slice(1))}）` : '';
+  return { target: null, verdict: top.verdict, detail: `${lead}${rest}${stop ? `；${stop}` : ''}` };
 }
 
 /** 装机层：france.sh 装到哪个提交、那之后主线上它管的文件改过几次。读不到记 error，不挡发布。 */
