@@ -37,6 +37,11 @@ const CLAUDE_ROUTES = ['claude-solo:opus-5.5:claude-code', 'claude-carpool:opus-
 const JEV_ROUTE = 'jev:jev-1.13:api-shell';
 /** Cursor 上钉住的 GPT-5.6 Luna：只挂开 PR 前的验证，排第一、开着（创始人 2026-09-27 拍，specs/212 方案「真流量」）。 */
 const LUNA_ROUTE = 'cursor:gpt-5.6-luna:cursor-agent';
+/**
+ * SuperGrok 的 Grok 4.7（创始人 2026-09-27 拍，specs/266）：验证阶段排在 Luna 后面、开着（碰界面的单 GPT 被挡掉，轮到它）；
+ * 写码、界面阶段排第一、开着（副手在这两个阶段派）；别的阶段照 default 挂在最后、关着。
+ */
+const GROK_ROUTE = 'grok:grok-4.7:grok';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -75,7 +80,7 @@ async function stageOrder(stage: (typeof STAGE_KINDS)[number]) {
 }
 
 describe('示例配置 deploy/examples/catalog.example.json', () => {
-  it('装得进空库：每个阶段先是独享号、拼车号的 Opus（开着），其余挂在后面关着；开 PR 前验证 Cursor 的 GPT-5.6 Luna 排第一、开着；判断阶段 TypeSafe 在前', async () => {
+  it('装得进空库：每个阶段先是独享号、拼车号的 Opus（开着），其余挂在后面关着；开 PR 前验证 Cursor 的 GPT-5.6 Luna 排第一、Grok 4.7 第二，写码、界面 Grok 4.7 排第一，都开着；判断阶段 TypeSafe 在前', async () => {
     const result = await load();
     expect(result.inserted.stages).toEqual([...STAGE_KINDS]);
     const config = example();
@@ -84,26 +89,31 @@ describe('示例配置 deploy/examples/catalog.example.json', () => {
     const expected = config.routes
       .filter((r) => r.id !== JEV_ROUTE && r.id !== LUNA_ROUTE)
       .map((r) => [r.id, CLAUDE_ROUTES.includes(r.id)]);
+    expect(expected.at(-1)).toEqual([GROK_ROUTE, false]);
+    const withoutGrok = expected.filter(([id]) => id !== GROK_ROUTE);
     for (const stage of STAGE_KINDS) {
       // ui 单列一份，不挂 GPT（硬禁令，关着也不挂）。judge 照 packages/jev：TypeSafe 开着在前，两条 Claude 关着
       // （Claude 判断会话接上 fleet-agent-scope 之前 packages/jev 接不了，见 packages/jev/test/catalog-judge.test.ts）。
-      // verify 单列一份：GPT-5.6 Luna 开着在前，后面照 default。
+      // verify 单列一份：GPT-5.6 Luna 开着在前、Grok 4.7 开着第二，后面照 default。execute、ui 单列：Grok 4.7 开着在前。
       const want =
         stage === 'judge'
           ? [[JEV_ROUTE, true], ...CLAUDE_ROUTES.map((id) => [id, false])]
           : stage === 'ui'
-            ? expected.filter(([id]) => !String(id).includes('gpt'))
+            ? [[GROK_ROUTE, true], ...withoutGrok.filter(([id]) => !String(id).includes('gpt'))]
             : stage === 'verify'
-              ? [[LUNA_ROUTE, true], ...expected]
-              : expected;
+              ? [[LUNA_ROUTE, true], [GROK_ROUTE, true], ...withoutGrok]
+              : stage === 'execute'
+                ? [[GROK_ROUTE, true], ...withoutGrok]
+                : expected;
       expect(await stageOrder(stage)).toEqual(want);
     }
     expect((await stageOrder('ui')).length).toBe(expected.length - 1);
     // 关着的照样列在候选表里、带着原因。
     const execute = await stageCandidates(t.db, 'execute', { now: NOW });
-    expect(execute.candidates.map((c) => [c.routeId, !c.blockers.includes('switched-off')])).toEqual(
-      expected,
-    );
+    expect(execute.candidates.map((c) => [c.routeId, !c.blockers.includes('switched-off')])).toEqual([
+      [GROK_ROUTE, true],
+      ...withoutGrok,
+    ]);
   });
 
   it('装进空库，每张表的行数和样例对得上', async () => {
@@ -121,7 +131,7 @@ describe('示例配置 deploy/examples/catalog.example.json', () => {
       stagePolicyRoutes: orders.reduce((n, o) => n + o.length, 0),
     });
     // 两边都从样例算，再钉一遍样例本身：9 个阶段都排了；判断阶段 3 条、UI 7 条、开 PR 前验证 9 条（多一条 Cursor 的
-    // GPT-5.6 Luna）、其余 6 个阶段各 8 条。
+    // GPT-5.6 Luna）、其余 6 个阶段各 8 条（写码阶段单列，条数和 default 一样，只是 Grok 挪到第一）。
     expect([rows.stagePolicies.length, rows.stagePolicyRoutes.length]).toEqual([9, 3 + 7 + 9 + 6 * 8]);
   });
 
@@ -227,13 +237,18 @@ describe('只补缺，跑几遍都一样', () => {
   it('驾驶舱改过的不被覆盖：排序、开关、删掉的、清空的阶段，池的并发、路由的上游名字、渠道开关', async () => {
     await load();
     const [solo, carpool] = CLAUDE_ROUTES as [string, string];
-    // execute：两条 Claude 调个个儿，再打开 Grok。
+    // execute（样例里 Grok 第一、两条 Claude 第二第三）：两条 Claude 调个个儿，再关掉 Grok。
     const inExecute = (routeId: string) =>
       and(eq(stagePolicyRoutes.stage, 'execute'), eq(stagePolicyRoutes.routeId, routeId));
+    expect((await stageOrder('execute')).slice(0, 3)).toEqual([
+      [GROK_ROUTE, true],
+      [solo, true],
+      [carpool, true],
+    ]);
     await t.db.update(stagePolicyRoutes).set({ position: 99 }).where(inExecute(solo));
-    await t.db.update(stagePolicyRoutes).set({ position: 0 }).where(inExecute(carpool));
-    await t.db.update(stagePolicyRoutes).set({ position: 1 }).where(inExecute(solo));
-    await t.db.update(stagePolicyRoutes).set({ enabled: true }).where(inExecute('grok:grok-4.7:grok'));
+    await t.db.update(stagePolicyRoutes).set({ position: 1 }).where(inExecute(carpool));
+    await t.db.update(stagePolicyRoutes).set({ position: 2 }).where(inExecute(solo));
+    await t.db.update(stagePolicyRoutes).set({ enabled: false }).where(inExecute(GROK_ROUTE));
     // plan 清空（驾驶舱把这个阶段的路由全摘了），review 只留一条。
     await t.db.delete(stagePolicyRoutes).where(eq(stagePolicyRoutes.stage, 'plan'));
     await t.db.delete(stagePolicyRoutes).where(eq(stagePolicyRoutes.stage, 'review'));
@@ -328,10 +343,12 @@ describe('只补缺，跑几遍都一样', () => {
       },
     });
     expect(result.inserted.routes).toEqual(['solo-2']);
+    // plan 照 default 排（execute 在样例里单列了，default 新加的不算它的）。
+    expect(base.stages.plan).toBeUndefined();
     expect(result.kept).toContain(
-      '阶段 execute：装载器早先排过，之后不再动它，配置里的 solo-2 没挂上（要用就在驾驶舱里加）',
+      '阶段 plan：装载器早先排过，之后不再动它，配置里的 solo-2 没挂上（要用就在驾驶舱里加）',
     );
-    expect((await stageOrder('execute')).map(([id]) => id)).not.toContain('solo-2');
+    expect((await stageOrder('plan')).map(([id]) => id)).not.toContain('solo-2');
   });
 
   it('会话用户那一列按名字读得回来（session_user 是保留字，裸写会读到连接角色）', async () => {
