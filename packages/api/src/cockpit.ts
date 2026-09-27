@@ -55,6 +55,7 @@ import { type CockpitEnv, checkGatewayTaskAction, requireSession } from './sessi
 import { eventsHandler, type SseRelay } from './sse.ts';
 import { requirementWorkflowIdForTask } from './temporal.ts';
 import {
+  askLate,
   buildBoard,
   buildPools,
   describeTimeline,
@@ -162,6 +163,11 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
         answer: a.answer,
         answeredBy: a.answeredBy,
         answeredAt: a.answeredAt,
+        scope: a.scope,
+        recommended: a.recommended,
+        hold: a.hold,
+        effect: askLate(a, task.state),
+        followUpIssue: a.followUpIssue,
       })),
       usage: usageView(runs, route),
     });

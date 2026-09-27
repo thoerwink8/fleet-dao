@@ -15,6 +15,7 @@ import {
   type AnswerCommand,
   type CommandMeta,
   type NEW_TASK_SIGNAL_NAMES,
+  type RequireApprovalCommand,
   type RequirementResult,
   type RequirementStatus,
   type RerouteCommand,
@@ -42,7 +43,8 @@ const argsFit: [
   ArgOf<'reroute'> extends RerouteCommand ? true : false,
   ArgOf<'answer'> extends AnswerCommand ? true : false,
   ArgOf<'agentEvent'> extends AgentEventCommand ? true : false,
-] = [true, true, true, true, true, true];
+  ArgOf<'requireApproval'> extends RequireApprovalCommand ? true : false,
+] = [true, true, true, true, true, true, true];
 // 引擎先收、后端还没发的（人闸）：后端加进 TaskSignal 的那天这里编译报错，提醒把名字挪进 TASK_SIGNAL_NAMES、补上参数对拍。
 type AlreadySent = Extract<(typeof NEW_TASK_SIGNAL_NAMES)[number], ApiName>;
 const noneSentYet: [AlreadySent] extends [never] ? true : AlreadySent = true;
@@ -76,20 +78,10 @@ describe('后端发来的信号', { timeout: 60_000 }, () => {
   });
 
   it('编译期对上了名字和参数', () => {
-    expect([noneMissing, noneExtra, noneSentYet, ...argsFit]).toEqual([
-      true,
-      true,
-      true,
-      true,
-      true,
-      true,
-      true,
-      true,
-      true,
-    ]);
+    expect([noneMissing, noneExtra, noneSentYet, ...argsFit]).toEqual(Array(10).fill(true));
   });
 
-  it('用后端真的发信号代码发：暂停、换路由、叫醒、回答、继续、叫停，引擎都收得到、有回执', async () => {
+  it('用后端真的发信号代码发：暂停、换路由、叫醒、回答、加人闸、继续、叫停，引擎都收得到、有回执', async () => {
     const world = createFakeWorld({
       // 两次写码会话都挂住：叫停时子任务正停在「等会话」上。可跳时间的测试服务端取消「已排队、还没开始」的活动会报
       // ACTIVITY_UNKNOWN、把工作流任务卡死（真服务端没有这个问题），所以别在活动刚排上队的那一瞬间叫停。
@@ -144,6 +136,14 @@ describe('后端发来的信号', { timeout: 60_000 }, () => {
         askId: 'ask-nobody',
         answer: '好',
       });
+      // 会话问创始人时碰了人闸（#259）：后端点名这次会话的子任务加人闸
+      await control.signal(requirementId, {
+        name: 'requireApproval',
+        by: 'session:run-1',
+        holds: ['spend'],
+        subtaskId: sub?.id ?? '',
+        reason: '会话问创始人时碰了人闸',
+      });
       await control.signal(requirementId, { name: 'resume', by: 'founder' });
       await waitUntil(() => world.held().length === 1 && world.held()[0]?.n === 2, '按新路由接着写');
       const receipts = ((await handle.query('status')) as RequirementStatus).commands;
@@ -154,6 +154,7 @@ describe('后端发来的信号', { timeout: 60_000 }, () => {
       ['pause', true, 'founder'],
       ['reroute', true, 'founder'],
       ['answer', true, 'founder'],
+      ['requireApproval', true, 'session:run-1'],
       ['resume', true, 'founder'],
     ]);
     const execs = world.callsOf('startSession').filter((c) => c.input.stage === 'execute');

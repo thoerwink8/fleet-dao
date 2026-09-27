@@ -1,4 +1,6 @@
 // 把库里的记录拼成驾驶舱要的样子。纯函数，不碰数据库，测试直接喂数据。
+
+import { type LateAnswer, lateAnswer } from '@fleet-dao/core';
 import { poolDataTimes, quotaReadOverdue } from '@fleet-dao/db';
 import {
   type ActivitySchema,
@@ -23,13 +25,33 @@ import {
   type Subtask,
   summarizeUsage,
   type Task,
+  type TaskState,
   type TaskUsage,
 } from '@fleet-dao/shared';
 import type { z } from 'zod';
-import type { JobRecord, NotificationRecord, QuotaWindowRecord, RunPlan, TimelineRecord } from './ports.ts';
+import type {
+  AskRecord,
+  JobRecord,
+  NotificationRecord,
+  QuotaWindowRecord,
+  RunPlan,
+  TimelineRecord,
+} from './ports.ts';
 
 type Activity = z.input<typeof ActivitySchema>;
 type Progress = z.input<typeof ProgressSchema>;
+
+/** 按推荐先做了的（task、hold）这条回答算哪种（core 的 lateAnswer）；没回答的、另开单的、老式的没有。 */
+export function askLate(ask: AskRecord, taskState: TaskState): LateAnswer | undefined {
+  if (ask.answer === undefined || ask.recommended === undefined) return undefined;
+  if (ask.scope !== 'task' && ask.scope !== 'hold') return undefined;
+  return lateAnswer({
+    recommended: ask.recommended,
+    answer: ask.answer,
+    applied: ask.appliedAt !== undefined,
+    taskState,
+  });
+}
 
 export const STAGE_WORDS: Record<StageKind, string> = {
   triage: '分诊',

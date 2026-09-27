@@ -5,7 +5,7 @@
 // 他晚到的回答：选的就是推荐的只记一笔；选了别的，单子还没合就在下一个存档点交给主导改，已经合了就开后续单。
 // 这里只判，不碰库和网络：后端收提问、引擎走存档点、对账开后续单、卡片写什么都照这里。
 
-import type { TaskState } from '@fleet-dao/shared';
+import { ASK_MAX_OPTIONS, type TaskState } from '@fleet-dao/shared';
 
 /** 人闸四类：碰到的只挡那一步（合并前等人批）。 */
 export const ASK_HOLDS = ['release', 'spend', 'delete', 'standard'] as const;
@@ -21,8 +21,8 @@ export const ASK_HOLD_NAMES: Readonly<Record<AskHold, string>> = {
 /** task = 这张单范围内的岔路；outside = 超出这张单的范围（另开单）；hold = 碰人闸四类。 */
 export type AskScope = 'task' | 'outside' | 'hold';
 
-/** 一次最多几个选项（飞书卡片一排按钮放得下的）。 */
-export const ASK_MAX_OPTIONS = 4;
+/** 一次最多几个选项：和命令行本地挡的是同一个数（shared 的 agent-api.ts）。 */
+export { ASK_MAX_OPTIONS };
 
 /** 会话里怎么问（退回时原样告诉它）。 */
 export const ASK_USAGE = 'fleet ask "<问题>" -o <甲> -o <乙> --recommend <甲>';

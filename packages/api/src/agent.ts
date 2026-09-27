@@ -1,5 +1,7 @@
 // fleet 命令的接口（/agent/v1，照 shared/agent-api.ts）：只认 fleet 令牌，只能动令牌对应的那一次会话。
 // 每条命令先写库、再叫醒工作流；库是准，信号只是叫醒。
+
+import { ASK_HOLD_NAMES, type AskHold, type AskScope, checkAsk } from '@fleet-dao/core';
 import {
   AGENT_EVENT_WAKE_KINDS,
   AgentRoutes,
@@ -15,7 +17,6 @@ import {
   subtaskWorkflowId,
   TaskResponse,
 } from '@fleet-dao/shared';
-import { type AskScope, checkAsk } from '@fleet-dao/core';
 import { Hono, type MiddlewareHandler } from 'hono';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import type { z } from 'zod';
@@ -23,7 +24,13 @@ import { verifyAgentToken } from './agent-token.ts';
 import type { Deps } from './deps.ts';
 import { checkDone } from './done-check.ts';
 import { ApiError, readJson, reply } from './http.ts';
-import type { AgentSession, AskRecord, TaskSignal } from './ports.ts';
+import {
+  type AgentSession,
+  type AskRecord,
+  type TaskSignal,
+  WorkflowGoneError,
+  WorkflowUnavailableError,
+} from './ports.ts';
 import { requirementWorkflowIdForTask } from './temporal.ts';
 
 export type AgentEnv = { Variables: { agent: AgentSession } };
@@ -115,11 +122,7 @@ function isWakeKind(kind: AgentEventKind): kind is (typeof AGENT_EVENT_WAKE_KIND
  * 这张单范围内的按推荐先做，超出范围的另开单，碰人闸的先按推荐做、合并前等批。
  * 同一句在这之前按老问法问过（库里那一条没有范围）：照这次带的范围回。
  */
-function askReply(
-  ask: AskRecord,
-  scope: AskScope,
-  recommended: string,
-): z.input<typeof AskResponse> {
+function askReply(ask: AskRecord, scope: AskScope, recommended: string): z.input<typeof AskResponse> {
   if (ask.answer !== undefined) return { askId: ask.id, status: 'answered', answer: ask.answer };
   switch (ask.scope ?? scope) {
     case 'outside':
@@ -187,6 +190,41 @@ export function agentRoutes(deps: Deps): Hono<AgentEnv> {
     }
   }
 
+  /**
+   * 碰了人闸的提问（scope = hold）：给这张单的工作流加人闸，合并前等创始人批（和驾驶舱加人闸同一个信号）。
+   * 发给需求那一层（Fusion 就是它本身）：子任务会话点名自己的子任务。引擎连不上就明说没加上（503，fleet 会重试，
+   * 重试时问题去重、人闸再加一次），不回「已按推荐先做、合并前等批」装作拦住了；工作流已经结束的，这张单不会再合并，只记日志。
+   */
+  async function holdMerge(session: AgentSession, hold: AskHold, askId: string) {
+    let workflowId: string;
+    try {
+      workflowId = await requirementWorkflowIdForTask(store, session.taskId);
+      await deps.workflows.signal(workflowId, {
+        name: 'requireApproval',
+        by: `session:${session.runId}`,
+        holds: [hold],
+        ...(session.subtaskId ? { subtaskId: session.subtaskId } : {}),
+        reason: `会话问创始人时碰了人闸（追问 ${askId}）`,
+      });
+    } catch (err) {
+      if (err instanceof WorkflowGoneError) {
+        log.warn('碰了人闸的提问已记下，但工作流已经结束，人闸没处加', { runId: session.runId, askId, hold });
+        return;
+      }
+      log.error('碰了人闸的提问已记下，但人闸没加上', {
+        runId: session.runId,
+        askId,
+        hold,
+        error: String(err),
+      });
+      const why = err instanceof WorkflowUnavailableError ? '引擎这会儿连不上' : String(err);
+      throw new ApiError(
+        err instanceof WorkflowUnavailableError ? 503 : 500,
+        'hold_not_set',
+        `问题已经记下，但人闸（${ASK_HOLD_NAMES[hold]}）没加上：${why}。重跑同一条 fleet ask 会再加一次`,
+      );
+    }
+  }
 
   app.get(AgentRoutes.task.path, async (c) => {
     const session = c.get('agent');
@@ -248,6 +286,9 @@ export function agentRoutes(deps: Deps): Hono<AgentEnv> {
     });
     // 追问和它的 ask 进度在 openAsk 里同一事务写进去了，这里只叫醒工作流。
     if (created) await wake(session, 'ask', ask.id);
+    // 碰了人闸：每次问（含重试、同一句再问）都给工作流加一次人闸，加过的工作流自己认「已经有了」。
+    const hold = ask.hold ?? q.hold;
+    if (hold) await holdMerge(session, hold, ask.id);
     return reply(c, AskResponse, askReply(ask, q.scope, q.recommended));
   });
 

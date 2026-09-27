@@ -328,7 +328,11 @@ export function createIssueIntake(
     const actor = actorFor(memberFor(users, p.comment.user));
     // 只有评论之前就问了的才算：评论不会回答它之后才问的问题
     const asked = (await store.listAsks(task.id)).filter((a) => Date.parse(a.askedAt) <= at);
-    const open = asked.filter((a) => a.answer === undefined);
+    // 按推荐先做了的（#259，带范围）不等回答、整张单做完前一直开着：随手一句评论（问进度、帅位的「在做」）
+    // 不能当成改选，只有和某个选项一字不差的才算回答它；老式的（会话停着等）照旧任何一句都算
+    const open = asked.filter(
+      (a) => a.answer === undefined && (a.scope === undefined || a.options.includes(answer)),
+    );
     if (open.length > 1) {
       log.warn('评论对不上是回答哪一条追问（有好几条没答），没当回答', {
         deliveryId: event.deliveryId,

@@ -886,6 +886,14 @@ export type TaskSignal =
       reason?: string | undefined;
     }
   | { name: 'answer'; by: string; askId: string; answer: string }
+  /** 加人闸（合并前等人批）：会话问创始人时碰了人闸四类（#259）。不点名子任务就是整个需求。 */
+  | {
+      name: 'requireApproval';
+      by: string;
+      holds: string[];
+      subtaskId?: string | undefined;
+      reason?: string | undefined;
+    }
   /** fleet 命令写库之后叫醒工作流（按进展判死活要用）。 */
   | {
       name: 'agentEvent';

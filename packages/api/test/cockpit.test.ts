@@ -114,6 +114,59 @@ describe('看板与任务', () => {
     });
   });
 
+  it('任务详情的追问（#259）：带范围、推荐、人闸、后续单；回了的按推荐先做的带「回答之后会怎样」，老式的不带', async () => {
+    const h = harness();
+    const { cookie } = await h.login();
+    const base = { taskId: IDS.task12, runId: DEV_RUN_ID, askedAt: h.clock.now.toISOString() };
+    const answered = { answeredBy: DEV_USER_ID, answeredAt: h.clock.now.toISOString() };
+    h.store.data.asks.push(
+      { ...base, id: 'ask-a', question: '甲', options: ['4 位', '6 位'], scope: 'task', recommended: '4 位' },
+      {
+        ...base,
+        ...answered,
+        id: 'ask-b',
+        question: '乙',
+        options: ['4 位', '6 位'],
+        scope: 'task',
+        recommended: '4 位',
+        answer: '6 位',
+      },
+      {
+        ...base,
+        ...answered,
+        id: 'ask-c',
+        question: '丙',
+        options: ['留着', '删'],
+        scope: 'hold',
+        hold: 'delete',
+        recommended: '留着',
+        answer: '留着',
+      },
+      {
+        ...base,
+        id: 'ask-d',
+        question: '丁',
+        options: ['要', '不要'],
+        scope: 'outside',
+        recommended: '不要',
+        followUpIssue: 40,
+      },
+      { ...base, ...answered, id: 'ask-e', question: '戊', options: [], answer: '随便' },
+    );
+    const { asks } = TaskDetailResponse.parse(
+      await (await h.cockpit.request(`/api/tasks/${IDS.task12}`, { headers: { cookie } })).json(),
+    );
+    const byId = Object.fromEntries(asks.map((a) => [a.id, a]));
+    expect(byId['ask-a']).toMatchObject({ status: 'pending', scope: 'task', recommended: '4 位' });
+    expect(byId['ask-a']?.effect).toBeUndefined();
+    expect(byId['ask-b']).toMatchObject({ status: 'answered', effect: 'change' });
+    expect(byId['ask-c']).toMatchObject({ scope: 'hold', hold: 'delete', effect: 'confirmed' });
+    expect(byId['ask-d']).toMatchObject({ scope: 'outside', followUpIssue: 40 });
+    expect(byId['ask-d']?.effect).toBeUndefined();
+    expect(byId['ask-e']?.scope).toBeUndefined();
+    expect(byId['ask-e']?.effect).toBeUndefined();
+  });
+
   it('任务详情带用量汇总：按模型、按阶段、整张合计；没读到的花费记次数，不当成 0；还在跑的只记在跑', async () => {
     const h = harness();
     const { cookie } = await h.login();

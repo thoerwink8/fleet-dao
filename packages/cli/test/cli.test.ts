@@ -254,17 +254,25 @@ describe('ask', () => {
     ];
     let n = 0;
     const b = await backend(() => ({ status: 200, body: replies[n++] }));
-    const outside = await fleet(['ask', '顺手改注册页？', '-o', '改', '-o', '不改', '-r', '不改', '--outside'], {
-      url: b.url,
-    });
+    const outside = await fleet(
+      ['ask', '顺手改注册页？', '-o', '改', '-o', '不改', '-r', '不改', '--outside'],
+      {
+        url: b.url,
+      },
+    );
     expect(b.requests[0]?.body).toMatchObject({ outside: true, recommend: '不改' });
     expect(outside.out).toContain('另开一张单等创始人拍（问题编号 A2）');
-    const held = await fleet(['ask', '短信用哪家？', '-o', '阿里云', '-o', '腾讯云', '-r', '阿里云', '--hold', 'spend'], {
-      url: b.url,
-    });
+    const held = await fleet(
+      ['ask', '短信用哪家？', '-o', '阿里云', '-o', '腾讯云', '-r', '阿里云', '--hold', 'spend'],
+      {
+        url: b.url,
+      },
+    );
     expect(b.requests[1]?.body).toMatchObject({ hold: 'spend' });
     expect(held.out).toContain('先按推荐做（阿里云），合并前等创始人批');
-    const answered = await fleet(['ask', '验证码几位？', '-o', '4 位', '-o', '6 位', '-r', '4 位'], { url: b.url });
+    const answered = await fleet(['ask', '验证码几位？', '-o', '4 位', '-o', '6 位', '-r', '4 位'], {
+      url: b.url,
+    });
     expect(answered.out).toBe('创始人回过这一句：6 位\n');
   });
 

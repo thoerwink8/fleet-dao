@@ -250,7 +250,7 @@ describe('网关的真客户端对着后端跑一遍（真库）', () => {
           agentRequest(h.agentToken(), 'POST', {
             question: '验证码用哪家短信？',
             options: ['阿里云', '腾讯云'],
-            blocking: false,
+            recommend: '阿里云',
           }),
         )
       ).json(),
@@ -264,6 +264,8 @@ describe('网关的真客户端对着后端跑一遍（真库）', () => {
       kind: 'ask',
       revision: 1,
       title: '验证码用哪家短信？',
+      // 问他不挡路（#259）：推荐的排第一个（主按钮），第一行写明已经按推荐先做了
+      lines: expect.arrayContaining(['已按推荐先做：阿里云。改选别的，下个存档点交给 AI 改。']),
       options: ['阿里云', '腾讯云'],
       askId: asked.askId,
       issueNumber: 12,
@@ -292,7 +294,7 @@ describe('网关的真客户端对着后端跑一遍（真库）', () => {
       id: askItemId,
       revision: 2,
       status: 'done',
-      doneText: expect.stringContaining('已回答：阿里云 · 创始人甲'),
+      doneText: expect.stringContaining('你选了：阿里云（就是推荐的），已生效 · 创始人甲'),
       delivered: { chatId: 'oc_team', revision: 1 },
     });
     const done = next.items[0];
@@ -409,7 +411,8 @@ describe('网关的真客户端对着后端跑一遍（真库）', () => {
         chatType: 'group',
         replyToMessageId: 'om_ask_lone',
       }),
-    ).toMatchObject({ kind: 'answer', text: '已记下你的回答，AI 会接着干。' });
+      // 回的和推荐的不一样（多了半个 emoji 换成的 �）：说清下个存档点交给 AI 改
+    ).toMatchObject({ kind: 'answer', text: '已记下：和 AI 先做的不一样，下个存档点交给 AI 改。' });
     const [ask] = await t.db.select().from(asks).where(eq(asks.id, asked.askId));
     expect(ask?.answer).toBe('阿里云�');
   });

@@ -567,6 +567,32 @@ describe('评论 → 回答追问', () => {
     expect((await later.h.store.getAsk(ask().id))?.answer).toBeUndefined();
   });
 
+  it('【故意造出的失败】按推荐先做了的追问（#259）一直开着：随手的评论（问进度、「在做」）不当改选，和某个选项一字不差的才算', async () => {
+    // 每个场景一份新的：内存库原地改记录，共用一个对象会串
+    const assumed = () => ask({ options: ['5 分钟', '10 分钟'], scope: 'task', recommended: '5 分钟' });
+    const { id } = assumed();
+    const chat = setup({ asks: [assumed()] });
+    expect(await json(deliver(chat.h, 'issue_comment', comment('本机 在做：进度怎么样？')))).toMatchObject({
+      note: 'ask=none_open',
+    });
+    expect((await chat.h.store.getAsk(id))?.answer).toBeUndefined();
+    expect(chat.h.signals).toEqual([]);
+    const pick = setup({ asks: [assumed()] });
+    expect(await json(deliver(pick.h, 'issue_comment', comment(' 10 分钟 ')))).toMatchObject({
+      note: 'ask=answered',
+    });
+    expect((await pick.h.store.getAsk(id))?.answer).toBe('10 分钟');
+    // 老式的（会话停着等）和按推荐先做了的都开着：一句普通评论只可能是回答老式的那条
+    const both = setup({
+      asks: [assumed(), ask({ id: 'f1000000-0000-4000-8000-000000000003', question: '几位？' })],
+    });
+    expect(await json(deliver(both.h, 'issue_comment', comment('6 位')))).toMatchObject({
+      note: 'ask=answered',
+    });
+    expect((await both.h.store.getAsk('f1000000-0000-4000-8000-000000000003'))?.answer).toBe('6 位');
+    expect((await both.h.store.getAsk(id))?.answer).toBeUndefined();
+  });
+
   it('自家机器人的评论、改过的评论、空评论、PR 上的评论：都不当回答', async () => {
     const { h } = setup({ asks: [ask()] });
     expect(await json(deliver(h, 'issue_comment', comment('做完了', {}, engineBot)))).toMatchObject({

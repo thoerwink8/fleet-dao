@@ -14,7 +14,7 @@ import type {
   Subtask,
   Task,
 } from '@fleet-dao/shared';
-import type { AuditEntry, Me, Notification, Setting } from '../types';
+import type { Ask, AuditEntry, Me, Notification, Setting } from '../types';
 
 export interface MSubtask {
   subtask: Subtask;
@@ -36,6 +36,12 @@ export interface MAsk {
   answer?: string;
   answeredBy?: string;
   answeredAt?: string;
+  /** 问他不挡路（#259）：带了范围的是按推荐先做了的，见 shared 的 AskSchema。 */
+  scope?: Ask['scope'];
+  recommended?: string;
+  hold?: Ask['hold'];
+  followUpIssue?: number;
+  appliedAt?: string;
 }
 
 export interface MTask {

@@ -35,9 +35,13 @@ export const SayRequest = z.object({ text: z.string().min(1).max(500) });
  * hold = 碰了人闸四类（release 对外发布、spend 花钱、delete 删数据、standard 改标准），也先按推荐做，合并前等他批。
  * 合不合格由 core 的 checkAsk 判：不合格回 400（ask_incomplete），message 写明怎么补。
  */
+/** 一次提问最多几个选项（飞书卡片一排放得下的按钮数）：命令行本地先挡，后端 core 的 checkAsk 照它判。 */
+export const ASK_MAX_OPTIONS = 4;
+
 export const AskRequest = z.object({
   question: z.string().min(1).max(2000),
-  options: z.array(z.string().min(1).max(200)).max(4).optional(),
+  /** 至少 2 个、最多 4 个由后端判（core 的 checkAsk，退回时写清怎么补）；这里只挡离谱的大小。 */
+  options: z.array(z.string().min(1).max(200)).max(20).optional(),
   /** 推荐哪个：照抄其中一个选项。 */
   recommend: z.string().min(1).max(200).optional(),
   outside: z.boolean().optional(),

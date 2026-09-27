@@ -392,6 +392,79 @@ describe('POST /feishu/messages：一句话', () => {
     expect(h.store.data.audit.filter((a) => a.action === 'ask.answer')).toHaveLength(1);
   });
 
+  it('回复按推荐先做了的追问卡（#259）：照这张单走到哪说清回答之后会怎样', async () => {
+    const cases = [
+      { state: 'running' as const, text: '4 位', said: '已记下：你选的就是 AI 先做的那个，不用改。' },
+      { state: 'running' as const, text: '6 位', said: '已记下：和 AI 先做的不一样，下个存档点交给 AI 改。' },
+      {
+        state: 'done' as const,
+        text: '6 位',
+        said: '已记下：这张单已经合进去了，会另开一张后续单照你选的改。',
+      },
+      {
+        state: 'stopped' as const,
+        text: '6 位',
+        said: '已记下：这张单没做成就停了，只记下，重开时照你选的做。',
+      },
+    ];
+    for (const { state, text, said } of cases) {
+      const h = harness({ data: feishuData() });
+      const ask = h.store.data.asks.find((a) => a.id === FEISHU_IDS.askOpen);
+      const task12 = h.store.data.tasks.find((t) => t.id === IDS.task12);
+      if (!ask || !task12) throw new Error('样例里应当有 12 和它的追问');
+      Object.assign(ask, { options: ['4 位', '6 位'], scope: 'task', recommended: '4 位' });
+      task12.state = state;
+      await h.store.putCard({
+        messageId: 'om_ask_card',
+        chatId: 'oc_team',
+        kind: 'ask',
+        ref: { askId: FEISHU_IDS.askOpen, taskId: IDS.task12 },
+        sentAt: T0.toISOString(),
+      });
+      const body = FeishuMessageResponse.parse(
+        await (
+          await h.cockpit.request(
+            '/api/feishu/messages',
+            gw('POST', {
+              sourceMessageId: `om_answer_${state}_${text}`,
+              text,
+              chatType: 'group',
+              replyToMessageId: 'om_ask_card',
+            }),
+          )
+        ).json(),
+      );
+      expect(body, `${state} ${text}`).toEqual({ kind: 'answer', text: said, taskId: IDS.task12 });
+    }
+    // 另开单的：记在那张单上
+    const h = harness({ data: feishuData() });
+    const ask = h.store.data.asks.find((a) => a.id === FEISHU_IDS.askOpen);
+    if (!ask) throw new Error('样例里应当有追问');
+    Object.assign(ask, { options: ['4 位', '6 位'], scope: 'outside', recommended: '4 位' });
+    await h.store.putCard({
+      messageId: 'om_ask_card',
+      chatId: 'oc_team',
+      kind: 'ask',
+      ref: { askId: FEISHU_IDS.askOpen, taskId: IDS.task12 },
+      sentAt: T0.toISOString(),
+    });
+    expect(
+      FeishuMessageResponse.parse(
+        await (
+          await h.cockpit.request(
+            '/api/feishu/messages',
+            gw('POST', {
+              sourceMessageId: 'om_answer_outside',
+              text: '6 位',
+              chatType: 'group',
+              replyToMessageId: 'om_ask_card',
+            }),
+          )
+        ).json(),
+      ),
+    ).toMatchObject({ kind: 'answer', text: '已记下你的回答，记在另开的那张单上。' });
+  });
+
   it('回复别人已经答过的追问卡：不改答案，明说已经有人答了', async () => {
     const h = harness({ data: feishuData() });
     await h.store.putCard({
@@ -1384,6 +1457,34 @@ describe('GET /feishu/board：盘面快照', () => {
     ]);
     expect(snap.active.map((t) => t.taskId)).toEqual([FEISHU_IDS.task2of12]);
     expect(snap.teamBoardCard).toEqual({ messageId: 'om_board', sentAt: T0.toISOString() });
+  });
+
+  it('问他不挡路（#259）：按推荐先做了的、另开单的、碰人闸的追问都不算「等你们」（单子没停着等），老式的照算', async () => {
+    const h = harness({ data: feishuData() });
+    const open = h.store.data.asks.find((a) => a.id === FEISHU_IDS.askOpen);
+    if (!open) throw new Error('样例里应当有一条没答的追问');
+    const legacy = { ...open };
+    for (const scope of ['task', 'outside', 'hold'] as const) {
+      Object.assign(open, {
+        scope,
+        recommended: open.options[0] ?? '4 位',
+        ...(scope === 'hold' ? { hold: 'spend' } : { hold: undefined }),
+      });
+      const snap = FeishuBoardSnapshotSchema.parse(
+        await (await h.cockpit.request('/api/feishu/board', gw('GET', undefined, null))).json(),
+      );
+      expect(
+        snap.waiting.filter((w) => w.kind === 'ask'),
+        scope,
+      ).toEqual([]);
+    }
+    Object.assign(open, legacy, { scope: undefined, recommended: undefined, hold: undefined });
+    const snap = FeishuBoardSnapshotSchema.parse(
+      await (await h.cockpit.request('/api/feishu/board', gw('GET', undefined, null))).json(),
+    );
+    expect(snap.waiting.filter((w) => w.kind === 'ask').map((w) => w.kind === 'ask' && w.askId)).toEqual([
+      FEISHU_IDS.askOpen,
+    ]);
   });
 
   it('需求已经结束：它上面没答的追问、没处理的要人拍都不算「等你们」', async () => {

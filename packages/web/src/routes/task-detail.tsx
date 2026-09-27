@@ -30,6 +30,7 @@ import { ActionButtons, targetOf, useTaskActions } from '../components/task-acti
 import { Button } from '../components/ui/button';
 import { canSeeDetail } from '../demo/access';
 import { HiddenNote } from '../demo/views';
+import { askEffectText, askStanding, canAnswerAsk } from '../lib/ask';
 import { stageLabel } from '../lib/catalog';
 import { formatAgo, formatCount, formatDuration, formatUsd, span } from '../lib/format';
 import { useNow } from '../lib/hooks';
@@ -275,6 +276,9 @@ export default function TaskDetailPage() {
                     </div>
                     <div className="mt-1 ml-5.5 rounded-md bg-muted/60 px-2 py-1">
                       {a.answer}
+                      {askEffectText(a) ? (
+                        <span className="ml-1 text-xs text-muted-foreground">· {askEffectText(a)}</span>
+                      ) : null}
                       <span className="num ml-1 text-xs text-muted-foreground">
                         {a.answeredBy ? `· ${isMine(a.answeredBy, me) ? '我' : a.answeredBy} ` : ''}
                         {a.answeredAt ? `· ${formatAgo(a.answeredAt, now)}` : ''}
@@ -354,30 +358,45 @@ function Usage({ d, now }: { d: TaskDetail; now: number }) {
 
 function AskCard({ ask, t, now }: { ask: Ask; t: BoardTask; now: number }) {
   const { trigger } = useTaskActions();
+  // 带了范围的提问不挡路（#259）：AI 已经按推荐接着干了，卡片写明怎么做的、改选会怎样
+  const standing = askStanding(ask, t.state);
   return (
-    <div className="mb-4 flex flex-col gap-3 rounded-xl border border-st-human/50 bg-st-human/[0.07] p-4 md:flex-row md:items-center">
+    <div
+      className={cn(
+        'mb-4 flex flex-col gap-3 rounded-xl border p-4 md:flex-row md:items-center',
+        ask.scope ? 'border-border bg-muted/40' : 'border-st-human/50 bg-st-human/[0.07]',
+      )}
+    >
       <div className="grid size-9 shrink-0 place-items-center rounded-full bg-st-human/15 text-ink-human">
         <MessageCircleQuestion className="size-5" />
       </div>
       <div className="min-w-0 flex-1">
         <div className="text-sm font-semibold">
-          AI 在问你{' '}
+          {ask.scope ? 'AI 问了你（没停下等）' : 'AI 在问你'}{' '}
           <span className="num ml-1 text-xs font-normal text-muted-foreground">
             {formatAgo(ask.askedAt, now)}
           </span>
         </div>
         <div className="mt-0.5 text-sm">{ask.question}</div>
+        {standing ? <div className="mt-1 text-sm text-muted-foreground">{standing}</div> : null}
         {ask.options.length ? (
           <div className="mt-2 flex flex-wrap gap-1.5">
             {ask.options.map((o) => (
-              <span key={o} className="rounded-full border bg-card px-2 py-0.5 text-xs">
+              <span
+                key={o}
+                className={cn(
+                  'rounded-full border bg-card px-2 py-0.5 text-xs',
+                  o === ask.recommended && 'border-foreground/40 font-medium',
+                )}
+              >
                 {o}
+                {o === ask.recommended ? ' · 推荐' : ''}
               </span>
             ))}
           </div>
         ) : null}
       </div>
-      <Button onClick={() => trigger('answer', targetOf(t))} disabled={isTaskFinished(t)}>
+      <Button onClick={() => trigger('answer', targetOf(t))} disabled={!canAnswerAsk(ask, t.state)}>
         回答
       </Button>
     </div>

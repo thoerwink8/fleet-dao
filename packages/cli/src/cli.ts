@@ -2,6 +2,7 @@
 import { type ParseArgsOptionsConfig, parseArgs } from 'node:util';
 import {
   AgentRoutes,
+  ASK_MAX_OPTIONS,
   AskRequest,
   AskResponse,
   BlockedRequest,
@@ -234,6 +235,12 @@ const COMMANDS: Record<string, Handler> = {
       hold: { type: 'string' },
     });
     const options = values.option;
+    if (options && options.length > ASK_MAX_OPTIONS) {
+      throw new CliError(
+        EXIT.usage,
+        `选项最多 ${ASK_MAX_OPTIONS} 个（现在 ${options.length} 个）：挑出最像样的几个`,
+      );
+    }
     const body = check(AskRequest, {
       question: joined(positionals, '问题'),
       ...(options?.length ? { options } : {}),

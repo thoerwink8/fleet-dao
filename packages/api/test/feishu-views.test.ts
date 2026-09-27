@@ -148,6 +148,87 @@ describe('推送条目', () => {
     ).toEqual([2]);
   });
 
+  describe('问他不挡路（#259）的卡', () => {
+    const scoped = {
+      id: 'a2',
+      taskId: 't1',
+      question: '验证码用哪家短信？',
+      options: ['阿里云', '腾讯云'],
+      askedAt: '2026-09-25T07:55:00.000Z',
+      scope: 'task' as const,
+      recommended: '阿里云',
+    };
+    const answered = (answer: string, more: object = {}) => ({
+      ...scoped,
+      answer,
+      answeredBy: 'u1',
+      answeredAt: '2026-09-25T08:00:00.000Z',
+      ...more,
+    });
+    const card = (
+      ask: FeishuOutboxSources['asks'][number]['ask'],
+      state: typeof task.state | 'done' | 'stopped' | 'failed' = 'running',
+    ) => {
+      const [item] = composeOutbox(
+        sources({ asks: [{ task: { ...task, state }, ask, answeredByName: '创始人甲' }] }),
+      );
+      if (!item) throw new Error('应当有一张卡');
+      const parsed = FeishuOutboxItemSchema.safeParse({ ...item.content, revision: 1 });
+      expect(parsed.success, JSON.stringify(parsed.error?.issues)).toBe(true);
+      return item.content;
+    };
+
+    it('还没回：第一行写明已按推荐先做、改选会怎样，推荐的是第一个按钮；单子合进去了照样能改（改了开后续单）', () => {
+      expect(card(scoped)).toMatchObject({
+        status: 'open',
+        lines: ['已按推荐先做：阿里云。改选别的，下个存档点交给 AI 改。', '需求：登录页加验证码'],
+        options: ['阿里云', '腾讯云'],
+      });
+      expect(card(scoped, 'done')).toMatchObject({
+        status: 'open',
+        lines: ['已按推荐先做：阿里云。这张单已经合进去了，改选别的会另开后续单。', '需求：登录页加验证码'],
+      });
+      // 叫停、失败的收起（老式的追问单子一结束就收起，见上一条）
+      expect(card(scoped, 'stopped')).toMatchObject({ status: 'done', doneText: '需求已叫停，不用再答了' });
+    });
+
+    it('回了之后原地改成「你选了 X」和怎么生效：就是推荐的、下个存档点改、已照改、合并后开后续单、单子停了只记下', () => {
+      const by = ' · 创始人甲 · 09-25 16:00';
+      expect(card(answered('阿里云')).doneText).toBe(`你选了：阿里云（就是推荐的），已生效${by}`);
+      expect(card(answered('腾讯云'))).toMatchObject({
+        status: 'done',
+        doneText: `你选了：腾讯云，下个存档点生效${by}`,
+      });
+      expect(card(answered('腾讯云', { appliedAt: '2026-09-25T08:10:00.000Z' })).doneText).toBe(
+        `你选了：腾讯云，已生效${by}`,
+      );
+      expect(card(answered('腾讯云'), 'done').doneText).toBe(
+        `你选了：腾讯云；这张单已经合进去了，会另开后续单${by}`,
+      );
+      expect(card(answered('腾讯云', { followUpIssue: 31 }), 'done').doneText).toBe(
+        `你选了：腾讯云；这张单已经合进去了，另开了后续单 #31${by}`,
+      );
+      expect(card(answered('腾讯云'), 'failed').doneText).toBe(
+        `你选了：腾讯云；这张单没做成就停了，只记下${by}`,
+      );
+    });
+
+    it('碰了人闸：写明碰的哪类、合并前等批；超出范围的：写明另开单、这张单绕开接着做', () => {
+      expect(card({ ...scoped, scope: 'hold', hold: 'spend' }).lines[0]).toBe(
+        '碰了人闸（花钱）：先按推荐做（阿里云），合并前等你批。',
+      );
+      expect(card({ ...scoped, scope: 'outside' }).lines[0]).toBe(
+        '超出这张单的范围：这张单绕开它接着做，另开一张单等你拍。',
+      );
+      expect(card({ ...scoped, scope: 'outside', followUpIssue: 40 }).lines[0]).toBe(
+        '超出这张单的范围：这张单绕开它接着做，另开一张单等你拍（#40）。',
+      );
+      expect(card({ ...answered('腾讯云'), scope: 'outside', followUpIssue: 40 }).doneText).toBe(
+        '你选了：腾讯云，记在 #40 上 · 创始人甲 · 09-25 16:00',
+      );
+    });
+  });
+
   it('等待期：到了时刻再多等一小会儿（两台机器的钟差一点也不会被网关当成重复）；下一个到点的时刻报给长轮询', () => {
     const item = composeOutbox(sources());
     const until = '2026-09-25T09:00:00.000Z';
