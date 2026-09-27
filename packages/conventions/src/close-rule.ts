@@ -34,18 +34,28 @@ const CLOSING = new RegExp(
 );
 
 /**
- * 正文里写了、GitHub 合并时会关的单号（从小到大，不重复）：#12、owner/仓#12、GH-12、issue 的网址都认。
+ * 正文里写了、GitHub 合并时会关的单号（从小到大，不重复）：#12、owner/仓#12、GH-12、issue 的网址都认。代码块、行内代码、
+ * HTML 注释里的不算（GitHub 不从那里认关单词，拿来举例的写法不该挡人；第二意见 #334）。
  * 给了 repo（owner/仓）时，写明是别的仓的不算；不给就都算（宁多不漏：合并闸拿它挡没带结果的 PR）。
  */
 export function closingIssues(body: string, repo?: string): number[] {
   const out = new Set<number>();
-  for (const m of body.matchAll(CLOSING)) {
+  for (const m of proseOf(body).matchAll(CLOSING)) {
     const other = m[1] ?? m[4];
     if (other && repo && other.toLowerCase() !== repo.toLowerCase()) continue;
     const n = Number(m[2] ?? m[3] ?? m[5]);
     if (Number.isSafeInteger(n) && n > 0) out.add(n);
   }
   return [...out].sort((a, b) => a - b);
+}
+
+/** 正文去掉 HTML 注释、围栏代码块（``` 或 ~~~，没收尾的不算块、照认）、行内代码，剩下 GitHub 会拿来认关单词的字。 */
+function proseOf(body: string): string {
+  return body
+    .replace(/\r\n?/g, '\n')
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/^[ \t]*(`{3,}|~{3,})[^\n]*\n[\s\S]*?\n[ \t]*\1[ \t]*$/gm, ' ')
+    .replace(/(`+)[^`]*?\1/g, ' ');
 }
 
 // —— PR 模板里「这个 PR 做完就关单」那一栏 ——
