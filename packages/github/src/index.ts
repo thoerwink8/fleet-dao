@@ -157,6 +157,8 @@ export {
   type OpenPrInput,
   type OpenPrResult,
   openPr,
+  type PrFile,
+  pullFiles,
   type WaitCiInput,
   waitCi,
 } from './pulls.ts';

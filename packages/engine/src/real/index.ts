@@ -174,6 +174,8 @@ export function createRealPorts(deps: RealPortsDeps): RealPorts {
     pushBranch: github.pushBranch,
     openPr: github.openPr,
     waitCi: github.waitCi,
+    checkHighRisk: github.checkHighRisk,
+    postSecondOpinion: github.postSecondOpinion,
     syncMainline: github.syncMainline,
     runTests: github.runTests,
     mergePr: github.mergePr,

@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { SessionUser } from '@fleet-dao/adapters';
+import { parseRiskPaths, RISK_PATHS_FILE, riskyFiles, SECOND_OPINION_CONTEXT } from '@fleet-dao/conventions';
 import { criteriaOf } from '@fleet-dao/core';
 import type { GitHub, PrBodyInput } from '@fleet-dao/github';
 import type { CiResult } from '../decisions/verify.ts';
@@ -51,6 +52,9 @@ export type EngineGitHub = Pick<
   | 'writeSpecDoc'
   | 'readSpecDoc'
   | 'readIssuePlan'
+  | 'readRepoFile'
+  | 'pullFiles'
+  | 'claims'
 >;
 
 /** 开 PR 的仓（owner、name 够读需求文档、读单子挂的版本）。 */
@@ -93,6 +97,8 @@ type GitHubPorts = Pick<
   | 'pushBranch'
   | 'openPr'
   | 'waitCi'
+  | 'checkHighRisk'
+  | 'postSecondOpinion'
   | 'syncMainline'
   | 'runTests'
   | 'mergePr'
@@ -384,6 +390,74 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
       return ciResultOf(
         await mapped(() => gh.waitCi({ repo: input.repo, prNumber: input.prNumber, head: input.head }, ctx)),
       );
+    },
+
+    async checkHighRisk(input, ctx) {
+      // 清单读主线上那份（和合并闸同一份判法，PR 改不了自己的门槛，design 第五节）；文件读这个 PR 现在的，带 patch
+      // 才判得出新迁移是不是只加不改。两样有一样读不到、翻不完页都明确抛错，不当「没碰到」。
+      const read = await mapped(() =>
+        gh.readRepoFile({ repo: input.repo, path: RISK_PATHS_FILE, signal: ctx.signal }),
+      );
+      if (read.file.kind !== 'text') {
+        const why = read.file.kind === 'missing' ? '文件不在' : read.file.why;
+        throw new PortError(
+          'RISK_PATHS_MISSING',
+          `主线上读不到 ${RISK_PATHS_FILE}（${why}）：判不了这个 PR 碰没碰先审后合的路径`,
+          { retryable: false },
+        );
+      }
+      const list = parseRiskPaths(read.file.text);
+      if (typeof list === 'string') {
+        throw new PortError('RISK_PATHS_INVALID', `${RISK_PATHS_FILE} 认不出：${list}`, { retryable: false });
+      }
+      const files = await mapped(() =>
+        gh.pullFiles({ repo: input.repo, prNumber: input.prNumber, signal: ctx.signal }),
+      );
+      return { hits: riskyFiles(files, list) };
+    },
+
+    async postSecondOpinion(input) {
+      const blocking = input.findings.filter((f) => f.severity === 'blocking');
+      const minor = input.findings.filter((f) => f.severity === 'minor');
+      const description =
+        input.verdict === 'pass' ? '第二意见通过' : `第二意见：必须改 ${blocking.length} 条`;
+      // 状态是合并闸认的唯一信号：这一步没做成必须抛出去（没权限、GitHub 拒绝……），不能拿评论贴没贴顶，也不能悄悄不贴
+      await mapped(() =>
+        gh.claims.setStatus(input.repo, input.head, {
+          context: SECOND_OPINION_CONTEXT,
+          state: input.verdict === 'pass' ? 'success' : 'failure',
+          description: description.slice(0, 140),
+        }),
+      );
+      const where = `改到了先审后合的地方：${input.hits
+        .map((h) => `${h.file}（${h.kind}${h.note ? `：${h.note}` : ''}）`)
+        .join('、')}（清单和理由见 ${RISK_PATHS_FILE}）`;
+      const lines = [
+        `**第二意见 第 ${input.round} 轮**（${input.model}；审的头 ${input.head.slice(0, 7)}）：${
+          input.verdict === 'pass' ? '通过' : `必须改 ${blocking.length} 条`
+        }`,
+        '',
+        where,
+        '',
+        '## 必须改',
+        ...(blocking.length > 0
+          ? blocking.map((f) => `- ${f.file ? `\`${f.file}\` ` : ''}${f.text}`)
+          : ['无']),
+        '## 小毛病',
+        ...(minor.length > 0 ? minor.map((f) => `- ${f.file ? `\`${f.file}\` ` : ''}${f.text}`) : ['无']),
+      ];
+      // 评论被卫生检查拦下、GitHub 一时不通：只记下没贴上，不影响已经写好的状态——合并闸只看状态，评论只是给人看
+      try {
+        const posted = await gh.claims.commentPull(
+          input.repo,
+          input.prNumber,
+          `second-opinion:${input.head}:${input.round}`,
+          lines.join('\n'),
+        );
+        return { commentUrl: posted.url };
+      } catch {
+        return {};
+      }
     },
 
     async syncMainline(input, ctx) {
