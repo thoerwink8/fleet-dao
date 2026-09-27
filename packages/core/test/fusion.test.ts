@@ -71,8 +71,13 @@ describe('开工前看流程配置（setupFusion）', () => {
       source: 'project',
       profile: 'single',
       mode: 'single',
-      // 单模型模式同样不用 Kimi（创始人 2026-09-27 夜：Mirasim 只开 DeepSeek Flash）
-      models: { lead: ['opus-5.5'], sidekick: [], verify: ['gpt-5.6-luna', 'grok-4.7'] },
+      // 单模型模式和 default 同一套（创始人 2026-09-27 夜：拼车号和 Grok 混用当 Lead；Mirasim 只开 DeepSeek Flash，不用 Kimi）：
+      // Lead Opus 在前、Grok 兜底；验证 DeepSeek Flash、Opus 垫在后面（Lead 兜底成 Grok 时界面单还有人验）；没有副手
+      models: {
+        lead: ['opus-5.5', 'grok-4.7'],
+        sidekick: [],
+        verify: ['gpt-5.6-luna', 'grok-4.7', 'deepseek-flash', 'opus-5.5'],
+      },
       verifyRounds: 1,
       uiPaths: ['packages/web/'],
     });
