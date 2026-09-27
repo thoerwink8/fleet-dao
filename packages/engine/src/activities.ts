@@ -13,6 +13,11 @@ import {
   withdrawSignal,
 } from './contract.ts';
 import {
+  type AlertDispatchDeps,
+  AlertDispatchFailedError,
+  runAlertDispatchJob,
+} from './jobs/alert-dispatch.ts';
+import {
   type CanaryDeps,
   CanaryNotRecordedError,
   type CanaryState,
@@ -263,6 +268,8 @@ export interface EngineJobs {
   canary?: (client: Client) => CanaryDeps;
   /** 看门狗（#203）：按登记表看各定时任务新不新鲜、推撤提醒（只读写库）。 */
   watchdog?: () => WatchdogDeps;
+  /** 提醒派单（design 15.3「谁在处理」）：没人认领、停着没动的再推，没挂单的开跟进单（读写库、「引擎」机器人开单）。 */
+  alertDispatch?: () => AlertDispatchDeps;
 }
 
 /** 引擎自己的活动：对账补漏跑一轮。没跑成的已经记进 schedule_runs，这里再报成不重试的失败（下一轮 15 分钟后照来）。 */
@@ -361,6 +368,29 @@ async function watchSchedules(jobs: EngineJobs): Promise<unknown> {
   }
 }
 
+/** 引擎自己的活动：提醒派单跑一轮。没跑成的已经记进 schedule_runs，这里再报成不重试的失败（下一轮 5 分钟后照来）。 */
+async function dispatchAlerts(jobs: EngineJobs): Promise<unknown> {
+  const make = jobs.alertDispatch;
+  if (!make) {
+    throw new PortError(
+      'JOB_NOT_CONFIGURED',
+      '这个引擎工人没装提醒派单（假端口，或真端口没接上库和 GitHub）：不装作派过',
+      { retryable: false },
+    );
+  }
+  try {
+    return await runAlertDispatchJob(make());
+  } catch (error) {
+    if (error instanceof AlertDispatchFailedError) {
+      throw new PortError('ALERT_DISPATCH_FAILED', error.message, {
+        retryable: false,
+        details: { runId: error.runId },
+      });
+    }
+    throw error;
+  }
+}
+
 /** 巡检没装（假端口，或真端口没接上库和 GitHub）：明确报 JOB_NOT_CONFIGURED，不装作巡检过。 */
 function canaryDeps(jobs: EngineJobs): CanaryDeps {
   const make = jobs.canary;
@@ -449,5 +479,6 @@ export function createActivities(
   out.canaryOpen = timed('canaryOpen', () => canaryOpen(jobs), record);
   out.canaryCheck = timed('canaryCheck', (input) => canaryCheck(jobs, input), record);
   out.watchSchedules = timed('watchSchedules', () => watchSchedules(jobs), record);
+  out.dispatchAlerts = timed('dispatchAlerts', () => dispatchAlerts(jobs), record);
   return out as unknown as EngineActivities;
 }

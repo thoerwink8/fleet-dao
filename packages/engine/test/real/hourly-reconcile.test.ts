@@ -983,10 +983,10 @@ describe('没人处理的卡住报警：超过 24 小时再推一次，一天最
   it('人在再提醒上点了处理：原来那条跟着撤（处理人记那个人）；原来那条处理了：再提醒跟着撤', async () => {
     probeDir();
     const a = await alert('mq:acme/widgets:decide', { title: '合并队列判断出错，卡住了' });
-    const b = await alert('stuck:other');
+    const b = await alert('reconcile:pr:acme/widgets#9');
     const long = new Date(Date.now() - 30 * HOUR);
     await backdate('mq:acme/widgets:decide', long);
-    await backdate('stuck:other', long);
+    await backdate('reconcile:pr:acme/widgets#9', long);
     const running = fakeWorkflows({ 'mq:acme/widgets': { state: 'running' } });
     await runHourlyReconcileJob(deps({ workflows: running.reader }));
     const [ra] = await remindersOf(a.id);
