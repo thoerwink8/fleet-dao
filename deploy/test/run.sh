@@ -3,7 +3,9 @@
 # 香港网关入口（fleet-gateway-deploy）、飞书网关打包、静态文件发到香港哪几处（演示版、根地址、可见范围不删）、
 # 演示版的可见范围推到香港、公网上看得到的几样（占位页、健康页不带真名，release.json 只给隧道，整站不让搜索引擎收录）、
 # 健康页的判定、自动发布的判断和流程（auto-release：CI 红不发、读不到不发、没成不重试、等空闲、人手动切过不动）、
-# 法国只有一个会话用户且读回拦得下故意造的错（session-user）、docs/ops.md 端口表和脚本对得上、docs/ops.md 里放文件的命令收到空的或半截的不换（place-file）、--ops 真跑了这两块（ops-only）。
+# 法国只有一个会话用户且读回拦得下故意造的错（session-user）、AI 会话用的 pnpm 的装和查（session-pnpm）、
+# 会话用户的 cursor-agent 的装和查（cursor-agent）、node 的编译缓存目录归 root、别人放不进（node-cache）、
+# docs/ops.md 端口表和脚本对得上、docs/ops.md 里放文件的命令收到空的或半截的不换（place-file）、--ops 真跑了这两块（ops-only）。
 # 用法：sudo bash deploy/test/run.sh（违规样本那项要 root）。退出码：0 通过，1 有不通过，2 有没跑成的。
 #   bash deploy/test/run.sh --ops：只跑读 docs/ops.md 的两块（端口表、place-file），CI 只改了 ops.md 时用（ci-plan.ts 的 deploy=ops）。
 # 改这里之前必须知道：deploy/test 里新加读 docs/ops.md 的检查，要同时进 --ops 那条路（ops_checks），否则只改 ops.md 的 PR 测不到它；
@@ -142,7 +144,7 @@ else
   skipped=1
 fi
 
-for t in agents-sync agents-sync-account cli-tools; do
+for t in agents-sync agents-sync-account cli-tools session-pnpm cursor-agent node-cache; do
   bash "$HERE/$t.test.sh"
   case $? in
   0) ;;

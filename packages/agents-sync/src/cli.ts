@@ -1,11 +1,14 @@
 // 命令行：解析参数、（要的话）换成目标用户的身份、跑一种模式、打印结论、给退出码。
-// 和系统打交道的几样（身份、查用户、PATH）都从 deps 进来，测试换成假的。
+// 和系统打交道的几样（身份、查用户、PATH、git）都从 deps 进来，测试换成假的。
 import { statSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
 import { Backups } from './backup.ts';
 import { installedAgents } from './detect.ts';
+import { applyHooks, checkHooks } from './hooks.ts';
+import { takeLock } from './lock.ts';
 import { manifestPath, readManifest } from './manifest.ts';
-import { exitCode, type Line, render, summary } from './report.ts';
+import { applyPosition, checkPosition, type Git, type Position, readPosition, runGit } from './position.ts';
+import { exitCode, type Line, line, render, summary } from './report.ts';
 import { retireOld } from './retire.ts';
 import {
   applyRules,
@@ -19,25 +22,27 @@ import {
 } from './sync.ts';
 import type { Platform } from './targets.ts';
 
-export const USAGE = `agents-sync —— 把 fleet-dao 仓里 AGENTS.md 的通用段和 agents/skills/ 分发到这台机器上各家 AI 的全局入口
+export const USAGE = `agents-sync —— 把 fleet-dao 仓里 AGENTS.md 的通用段、agents/skills/、agents/hooks/ 分发到这台机器上各家 AI 的全局入口
 
 用法（三种模式挑一种）：
-  agents-sync --check        只读：逐家报 一致 / 漂移 / 缺失 / 没装（跳过）/ 没查成
+  agents-sync --check        只读：逐家报 一致 / 漂移 / 缺失 / 没装（跳过）/ 没查成；最后报这台同步到哪个提交、落后主线几个
   agents-sync --apply        写：通用段写进各家的全局文件（只动标记圈起来的那一块；第一次接管先整份备份），
-                             skill 拷进各家的 skill 目录（只动清单里记着是本脚本装的），写完照查一遍
+                             skill 拷进各家的 skill 目录（只动清单里记着是本脚本装的），
+                             钩子脚本拷进 ~/.fleet-dao/hooks/、在各家设置里登记（只动指向它们的那几条），
+                             写完照查一遍，记下这台同步到哪个提交
   agents-sync --retire-old --old-repo <旧仓的位置>
                              撤掉旧仓留下的东西：各家 skill 目录里指向旧仓的链接、~/.claude/agents 里两个旧子代理；
                              每项先备份再动
 
 选项：
   --home <目录>      家目录（默认：当前用户的家；带 --user 时是那个用户的家）
-  --user <用户名>    替这个用户做（Linux，要 root）：先换成他的身份再动手，写出来的东西都归他
+  --user <用户名>    替这个用户做（Linux，要 root）：先换成他的身份再动手，写出来的东西都归他；钩子不装、同步位置不记
   --repo <目录>      fleet-dao 仓的位置（默认：本脚本所在的仓）
   --old-repo <目录>  旧仓在这台机器上的位置（--retire-old 要）
 
 每项一行：✓ 一致、↻ 这次改了、✗ 漂移 / 缺失 / 没做成、… 没查成、· 没装（跳过）。
-退出码：0 都对（没装的不算）；1 有漂移、缺失或没做成；2 没有 ✗ 但有没查成的；64 用法不对。
-清单在 ~/.fleet-dao/agents-sync.json，备份在 ~/.fleet-dao/backups/<时间>/。
+退出码：0 都对（没装的不算）；1 有漂移、缺失或没做成；2 没有 ✗ 但有没查成的（含另一个同步正在写）；64 用法不对。
+清单在 ~/.fleet-dao/agents-sync.json，同步位置在 ~/.fleet-dao/synced.json，备份在 ~/.fleet-dao/backups/<时间>/。
 `;
 
 export interface PasswdEntry {
@@ -61,6 +66,8 @@ export interface Deps {
   lookupUser: (name: string) => PasswdEntry | undefined;
   /** 换成这个用户的身份（附加组、组、用户），换不过去就抛 */
   becomeUser: (name: string, entry: PasswdEntry) => void;
+  /** 跑 git（默认真的 git）；测试可换 */
+  git?: Git;
 }
 
 type Mode = '--check' | '--apply' | '--retire-old';
@@ -108,8 +115,15 @@ function parse(argv: readonly string[]): Args | 'help' {
   return { mode, ...opts };
 }
 
-/** 定下家目录；带 --user 的先换身份。原件要在换身份之前读好（换过去之后未必读得到仓） */
-function settleIdentity(args: Args, deps: Deps): { home: string; who: string } {
+interface Identity {
+  home: string;
+  who: string;
+  /** 要换身份时换（先读好仓、问好 git 再调）；不用换是 null */
+  become: (() => void) | null;
+}
+
+/** 定下家目录、要不要换身份；真换身份留给调用方（原件和 git 的事要在换身份之前做完） */
+function planIdentity(args: Args, deps: Deps): Identity {
   if (args.user === undefined) {
     const home = resolve(args.home ?? deps.homedir());
     // root 直接往别人的家里写，写出来的东西归 root，那个用户自己改不动（留下 root 属主的文件是装机的红线）
@@ -126,19 +140,30 @@ function settleIdentity(args: Args, deps: Deps): { home: string; who: string } {
         );
       }
     }
-    return { home, who: '' };
+    return { home, who: '', become: null };
   }
   if (deps.platform !== 'linux')
     throw new UsageError('--user 只在 Linux 上用；Windows 上在那个用户自己的会话里跑');
-  const entry = deps.lookupUser(args.user);
-  if (entry === undefined) throw new UsageError(`没有用户 ${args.user}`);
+  const user = args.user;
+  const entry = deps.lookupUser(user);
+  if (entry === undefined) throw new UsageError(`没有用户 ${user}`);
   const me = deps.getuid();
-  if (me !== entry.uid) {
-    if (me !== 0) throw new UsageError(`替 ${args.user} 做要 root（现在是 uid ${me ?? '读不到'}）`);
-    deps.becomeUser(args.user, entry);
-  }
-  return { home: resolve(args.home ?? entry.home), who: `用户 ${args.user}，` };
+  if (me !== entry.uid && me !== 0)
+    throw new UsageError(`替 ${user} 做要 root（现在是 uid ${me ?? '读不到'}）`);
+  return {
+    home: resolve(args.home ?? entry.home),
+    who: `用户 ${user}，`,
+    become: me === entry.uid ? null : () => deps.becomeUser(user, entry),
+  };
 }
+
+/** 替别的用户写（法国装机）时钩子整段不装的原因 */
+const HOOKS_OFF_FOR_USER =
+  '替别的用户写（--user）时不装钩子：开会话钩子要在这个用户自己能拉、能写的 fleet-dao 检出里快进、同步；法国的会话由引擎管';
+// 法国的检出由自动发布推进，停在发出去的那个提交上，本来就可能落后主线（等 CI、等引擎空闲）：
+// 拿主线比会把正常的等待判红、让自动发布误报「规矩同步没成」。同步到哪个提交记在自动发布的读数里（ops 第九节）。
+const POSITION_OFF_FOR_USER =
+  '替别的用户写（--user）时不记同步位置：法国的规矩跟着自动发布走，同步到哪个提交、落后主线多少看自动发布的读数（release.sh --check）';
 
 export function runCli(argv: readonly string[], deps: Deps): number {
   let args: Args | 'help';
@@ -158,8 +183,8 @@ export function runCli(argv: readonly string[], deps: Deps): number {
 
   // 仓里的原件先读好（换身份之前）；读不到就是没查成，不往下走
   let sources: Sources | undefined;
+  const repo = resolve(args.repo ?? deps.defaultRepo);
   if (args.mode !== '--retire-old') {
-    const repo = resolve(args.repo ?? deps.defaultRepo);
     const read = readSources(repo);
     if (!read.ok) {
       deps.stderr(`没查成：${read.why}（仓：${repo}）\n`);
@@ -176,18 +201,28 @@ export function runCli(argv: readonly string[], deps: Deps): number {
     oldRepo = resolve(args.oldRepo);
   }
 
-  let home: string;
-  let who: string;
+  let id: Identity;
   try {
-    ({ home, who } = settleIdentity(args, deps));
+    id = planIdentity(args, deps);
   } catch (err) {
     if (err instanceof UsageError) {
       deps.stderr(`${err.message}\n`);
       return 64;
     }
+    throw err;
+  }
+  // 同步位置：记录和 git 的事在换身份之前问好（换过去之后未必读得到仓，git 也会因为属主不同拒读）
+  const position: Position | undefined =
+    args.mode === '--retire-old' || args.user !== undefined
+      ? undefined
+      : readPosition(repo, id.home, deps.platform, deps.git ?? runGit);
+  try {
+    id.become?.();
+  } catch (err) {
     deps.stderr(`没查成：换不成 ${args.user} 的身份（${(err as Error).message}）\n`);
     return 2;
   }
+  const { home, who } = id;
   try {
     if (!statSync(home).isDirectory()) throw new Error('不是目录');
   } catch {
@@ -206,31 +241,57 @@ export function runCli(argv: readonly string[], deps: Deps): number {
     all.push(...lines);
   };
 
-  if (args.mode === '--retire-old') {
-    section(
-      '旧仓留下的东西',
-      retireOld({ home, platform: deps.platform, oldRepo: oldRepo as string }, backups),
-    );
-  } else {
-    const src = sources as Sources;
-    const ctx: Ctx = {
-      home,
-      platform: deps.platform,
-      installed: installedAgents({ env: deps.env, platform: deps.platform, home }),
-    };
-    const mf = manifestPath(home, deps.platform);
-    if (args.mode === '--check') {
-      section('通用段（AGENTS.md 上半段）', checkRules(ctx, src));
-      section('skill（agents/skills/）', checkSkills(ctx, src, readManifest(mf)));
-    } else {
-      const rules = applyRules(ctx, src, backups);
-      section('通用段（AGENTS.md 上半段）', rules);
-      const skills = applySkills(ctx, src, readManifest(mf));
-      section('skill（agents/skills/）', skills);
-      const after = [...checkRules(ctx, src), ...checkSkills(ctx, src, readManifest(mf))];
-      const bad = verify([...rules, ...skills], after);
-      if (bad.length) section('读回', bad);
+  // 写的两种模式先拿写锁：几个会话同时开，开会话钩子会同时跑同步
+  let release: (() => void) | undefined;
+  if (args.mode !== '--check') {
+    const lock = takeLock(home, deps.platform, deps.now());
+    if (!lock.ok) {
+      section('写锁', [line('unknown', lock.key, `没做成——${lock.why}`)]);
+      deps.stdout(summary(all));
+      return exitCode(all);
     }
+    release = lock.release;
+  }
+  try {
+    if (args.mode === '--retire-old') {
+      section(
+        '旧仓留下的东西',
+        retireOld({ home, platform: deps.platform, oldRepo: oldRepo as string }, backups),
+      );
+    } else {
+      const src = sources as Sources;
+      const positionOff = [line('skip', '同步位置', POSITION_OFF_FOR_USER)];
+      const ctx: Ctx = {
+        home,
+        platform: deps.platform,
+        installed: installedAgents({ env: deps.env, platform: deps.platform, home }),
+      };
+      const hooksOff = args.user === undefined ? undefined : HOOKS_OFF_FOR_USER;
+      const mf = manifestPath(home, deps.platform);
+      if (args.mode === '--check') {
+        section('通用段（AGENTS.md 上半段）', checkRules(ctx, src));
+        section('skill（agents/skills/）', checkSkills(ctx, src, readManifest(mf)));
+        section('钩子（agents/hooks/）', checkHooks(ctx, src, hooksOff));
+        section('同步位置', position ? checkPosition(position) : positionOff);
+      } else {
+        const rules = applyRules(ctx, src, backups);
+        section('通用段（AGENTS.md 上半段）', rules);
+        const skills = applySkills(ctx, src, readManifest(mf));
+        section('skill（agents/skills/）', skills);
+        const hooks = applyHooks(ctx, src, backups, hooksOff);
+        section('钩子（agents/hooks/）', hooks);
+        const after = [
+          ...checkRules(ctx, src),
+          ...checkSkills(ctx, src, readManifest(mf)),
+          ...checkHooks(ctx, src, hooksOff),
+        ];
+        const bad = verify([...rules, ...skills, ...hooks], after);
+        if (bad.length) section('读回', bad);
+        section('同步位置', position ? applyPosition(position, all, deps.now()) : positionOff);
+      }
+    }
+  } finally {
+    release?.();
   }
   deps.stdout(summary(all));
   return exitCode(all);

@@ -1,7 +1,7 @@
 // 会话目录里的 git（以会话用户的身份跑；这里用本机执行器、真 git、临时目录）：从 bundle 建树、交 bundle、快进，
 // 没跑成的明确报错，不拿空结果冒充「没有改动」。
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -17,6 +17,7 @@ import {
   fetchBundle,
   headOf,
   mainlineRef,
+  mergeInto,
   pinMainline,
   readFileAs,
   type UserTree,
@@ -213,5 +214,97 @@ describe('会话目录里的 git', { timeout: 60_000 }, () => {
       code: 'BAD_INPUT',
     });
     await expect(checkoutBranch(t, 'b', 'HEAD')).rejects.toMatchObject({ code: 'BAD_INPUT' });
+  });
+});
+
+// 并主线没并成、又不是冲突：报错以「并」这一步开头，撤销没成附在后面，树里留下什么照实写。
+// 「没并成却留下 MERGE_HEAD」这种状态不靠某一版 git 造：锁被占着时 git 2.45 及以前才留（法国的 2.43），2.46 起不留，
+// CI 和本机的 git 都比法国新。这里用 pre-merge-commit 钩子造——钩子失败时 git 各版都停在「并好了、没提交」，
+// 留下 MERGE_HEAD（钩子自 2.24 起有）；钩子顺手占住索引锁，就是法国那次「撤销被同一把锁挡住」。
+describe('并主线没并成（不是冲突）', { timeout: 60_000 }, () => {
+  /** 会话的树：分支上交了一个提交，主线另进了 c.ts，新主线的提交已经取进树里（和推分支之前一样）。
+   * 提交身份和引擎建树时一样写进树的配置：并主线要生成合并提交，CI 上没有全局的 git 身份，没写就先死在「身份为空」。 */
+  async function diverged(): Promise<{ t: UserTree; head: string; main: string }> {
+    const m = mirror();
+    const t = tree('work');
+    await fetchBundle(t, m.bundle(m.head), 'refs/fleet/export/0', {
+      identity: { name: 't', email: 'fleet-test@localhost' },
+    });
+    await checkoutBranch(t, 'fleet/12-a', m.head);
+    writeFileSync(join(t.dir, 'b.ts'), 'export const b = 1;\n');
+    execFileSync('git', ['add', '.'], { cwd: t.dir });
+    execFileSync('git', ['commit', '-q', '-m', 'add b'], { cwd: t.dir, env: ENV });
+    writeFileSync(join(m.dir, 'c.ts'), 'export const c = 1;\n');
+    sh(m.dir, 'add', '.');
+    sh(m.dir, 'commit', '-q', '-m', 'main moved');
+    const main = sh(m.dir, 'rev-parse', 'HEAD');
+    await fetchBundle(t, m.bundle(main, m.head), 'refs/fleet/export/0');
+    return { t, head: await headOf(t), main };
+  }
+  /** 树里装一个 pre-merge-commit 钩子（钩子目录设在树自己的配置里，盖过全局的 core.hooksPath）。 */
+  function hook(t: UserTree, body: string) {
+    const hooks = join(root, 'hooks');
+    mkdirSync(hooks, { recursive: true });
+    writeFileSync(join(hooks, 'pre-merge-commit'), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+    sh(t.dir, 'config', 'core.hooksPath', hooks);
+  }
+  const mergeHeadLeft = (t: UserTree) => existsSync(join(t.dir, '.git', 'MERGE_HEAD'));
+
+  it('留下了 MERGE_HEAD、撤销成了：报 GIT_FAILED（可重试），以「并」开头、写明已撤掉；树回到并之前', async () => {
+    const { t, head, main } = await diverged();
+    hook(t, 'exit 1');
+    const err = await mergeInto(t, main).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PortError);
+    expect(err).toMatchObject({ code: 'GIT_FAILED', retryable: true });
+    const message = (err as Error).message;
+    expect(message).toMatch(new RegExp(`^并 ${main.slice(0, 7)}：退出码 1（`));
+    expect(message).toContain('没并成的合并已撤掉');
+    expect(message).not.toContain('还留着没并完的合并');
+    expect(mergeHeadLeft(t)).toBe(false);
+    expect(await headOf(t)).toBe(head);
+    expect(existsSync(join(t.dir, 'c.ts'))).toBe(false);
+    expect(await uncommittedTracked(t)).toEqual([]);
+  });
+
+  it('留下了 MERGE_HEAD、撤销被锁挡住（法国 git 2.43 上锁被占着就是这样）：仍以「并」开头，撤销的原因和留下的状态附在后面', async () => {
+    const { t, head, main } = await diverged();
+    hook(t, ': > .git/index.lock\nexit 1');
+    const err = await mergeInto(t, main).catch((e: unknown) => e);
+    expect(err).toMatchObject({ code: 'GIT_FAILED', retryable: true });
+    const message = (err as Error).message;
+    const parts = message.split('；');
+    expect(parts[0]).toMatch(new RegExp(`^并 ${main.slice(0, 7)}：退出码 1（`));
+    // 撤销没成的原因引 git 自己的错误行（是哪把锁），不是后面那几行劝人的话
+    expect(parts[1]).toMatch(
+      /^撤掉没并成的合并：退出码 128（fatal: Unable to create '.*index\.lock': File exists\.）$/,
+    );
+    expect(parts[2]).toContain('还留着没并完的合并');
+    // 报的和树里真留下的对得上
+    expect(mergeHeadLeft(t)).toBe(true);
+    expect(await headOf(t)).toBe(head);
+  });
+
+  it('看 MERGE_HEAD 没查成：不当成「没留下」，写明没查成、没撤', async () => {
+    const { t, main } = await diverged();
+    hook(t, 'exit 1');
+    // 只让「看 MERGE_HEAD」那一步出错（git 的退出码 128），别的照常跑真 git
+    const real = localExec();
+    const exec: UserTree['exec'] = (c) =>
+      c.argv.includes('MERGE_HEAD')
+        ? Promise.resolve({
+            code: 128,
+            stdout: Buffer.alloc(0),
+            stderr: 'fatal: 故意造的读不了\n',
+            timedOut: false,
+            aborted: false,
+          })
+        : real(c);
+    const err = await mergeInto({ ...t, exec }, main).catch((e: unknown) => e);
+    expect(err).toMatchObject({ code: 'GIT_FAILED' });
+    const message = (err as Error).message;
+    expect(message).toMatch(new RegExp(`^并 ${main.slice(0, 7)}：`));
+    expect(message).toContain('有没有留下没并完的合并没查成');
+    expect(message).toContain('故意造的读不了');
+    expect(message).not.toContain('已撤掉');
   });
 });
