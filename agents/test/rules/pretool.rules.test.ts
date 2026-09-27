@@ -165,11 +165,8 @@ describe('命令行外壳：stdin 进、退出码出', { timeout: 0 }, () => {
       timeout: 60_000,
       killSignal: 'SIGKILL',
     });
-    // status 不是 null：子进程真退出过、拿到了退出码，写 stdin 时碰上的管道已关（Linux EPIPE、Windows EOF）
-    // 不算没跑完——和 packages/adapters/test/claude-args.test.ts 的 runHook 同一个坑，同一个改法。这份的 HOOK
-    // 是真 pretool.mjs，它一起手就整份读完 stdin 才可能退出（agents/hooks/pretool.mjs 的 isMain），实测碰不上
-    // 这个坑，这里按同一个模式顺手修，不另配复现测试。
-    if (r.status === null) throw new Error(`钩子没跑完：${r.error?.message ?? r.signal}`);
+    if (r.error !== undefined || r.status === null)
+      throw new Error(`钩子没跑完：${r.error?.message ?? r.signal}`);
     return r;
   };
 
