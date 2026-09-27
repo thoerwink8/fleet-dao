@@ -55,6 +55,7 @@ import {
   type Kit,
   limitsFor,
   NO_REWORK,
+  newId,
   newKit,
   park,
   type ReworkCarry,
@@ -514,12 +515,17 @@ export async function requirementWorkflow(input: RequirementInput): Promise<Requ
   };
 
   const run = async (): Promise<'done' | 'failed'> => {
-    // 分诊：看不懂就在任务里追问
+    // 分诊：看不懂的带选项和推荐问创始人，按推荐先做、不等回答（#259）；没带推荐的退回分诊补上
     await setPhase('triage', '分诊：判断需求清不清楚');
     const answers: SessionBrief['answers'] = [];
     let asked = 0;
+    let triageFeedback: Feedback[] = [];
     for (;;) {
-      const triage = await runStage(kit, { stage: 'triage', expect: 'triage', brief: brief(answers) });
+      const triage = await runStage(kit, {
+        stage: 'triage',
+        expect: 'triage',
+        brief: brief(answers, triageFeedback),
+      });
       const decision = await judge(kit, 'triage', {
         verdict: triage.output.verdict,
         asked,
@@ -528,9 +534,39 @@ export async function requirementWorkflow(input: RequirementInput): Promise<Requ
       if (decision.action === 'proceed') {
         if (decision.assumed) status.lastProblem = decision.note;
         requirementHolds = normalizeHolds([...requirementHolds, ...(decision.holds ?? [])]);
+        const ask = decision.ask;
+        if (ask) {
+          // 问他一句（发卡、记进库：这张单范围内的岔路，卡片写「已按推荐先做」），不等回答。编号先定好进历史，发卡重试只有一张卡。
+          // 他之后改了别的：旧的需求工作流不接存档点（#250 删它），合进去以后由对账开后续单照他选的改。
+          const askId = await newId(kit);
+          await attempt(kit, 'askHuman', () =>
+            acts.askHuman({
+              ...kit.scope,
+              askId,
+              question: ask.question,
+              options: ask.options,
+              recommended: ask.recommended,
+            }),
+          );
+          answers.push({
+            question: ask.question,
+            answer: `（他不在场，没等回答）按推荐先做：${ask.recommended}`,
+          });
+        }
         break;
       }
       asked += 1;
+      if (decision.action === 'retriage') {
+        triageFeedback = [
+          {
+            kind: 'ask',
+            summary: '说不清要问创始人，却没带选项和推荐：带上再交（他多半不在场，引擎按推荐先做、不等回答）',
+            items: [decision.why],
+          },
+        ];
+        continue;
+      }
+      // 老样子问了停下等（#259 之前开工的历史里才有这一种，重放照老样子走）
       await setPhase('asking', `追问：${decision.question}`);
       const answer = await askAndWait(kit, decision.question);
       answers.push({ question: decision.question, answer });

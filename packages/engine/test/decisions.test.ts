@@ -704,18 +704,38 @@ describe('合并队列的条目状态机', () => {
 });
 
 describe('分诊之后', () => {
-  it('清楚开工；没判出来按默认走，不当成「否」；看不懂就问，问够了按假设继续', () => {
+  it('清楚开工；没判出来按默认走，不当成「否」；看不懂的带选项和推荐问、按推荐先做不等回答（#259）', () => {
     expect(decideTriage({ verdict: { clear: true }, asked: 0, maxQuestions: 2 }).action).toBe('proceed');
     expect(decideTriage({ verdict: { clear: null }, asked: 0, maxQuestions: 2 })).toMatchObject({
       action: 'proceed',
       assumed: true,
     });
     expect(
-      decideTriage({ verdict: { clear: false, question: '哪个页面？' }, asked: 0, maxQuestions: 2 }),
+      decideTriage({
+        verdict: { clear: false, question: '哪个页面？', options: ['注册页', '登录页'], recommend: '登录页' },
+        asked: 0,
+        maxQuestions: 2,
+      }),
     ).toEqual({
-      action: 'ask',
-      question: '哪个页面？',
+      action: 'proceed',
+      assumed: true,
+      note: '分诊说不清：哪个页面？——问了创始人（不等回答），按推荐先做「登录页」',
+      holds: [],
+      ask: { question: '哪个页面？', options: ['登录页', '注册页'], recommended: '登录页' },
     });
+  });
+
+  it('【失败】看不懂却没带选项和推荐：退回分诊补上（写明缺什么），不再停下问；退回够了按假设继续', () => {
+    expect(
+      decideTriage({ verdict: { clear: false, question: '哪个页面？' }, asked: 0, maxQuestions: 2 }),
+    ).toMatchObject({ action: 'retriage', question: '哪个页面？', why: expect.stringContaining('推荐') });
+    expect(
+      decideTriage({
+        verdict: { clear: false, question: '哪个页面？', options: ['注册页', '登录页'], recommend: '首页' },
+        asked: 1,
+        maxQuestions: 2,
+      }),
+    ).toMatchObject({ action: 'retriage', why: expect.stringContaining('不在选项里') });
     expect(
       decideTriage({ verdict: { clear: false, question: '哪个页面？' }, asked: 2, maxQuestions: 2 }),
     ).toMatchObject({ action: 'proceed', assumed: true });

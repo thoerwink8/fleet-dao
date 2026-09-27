@@ -288,11 +288,16 @@ describe('子任务工作流', { timeout: 60_000 }, () => {
     expect(world.callsOf('pushBranch').map((c) => c.input.head)).not.toContain('off-1');
   });
 
-  it('会话说要人回答：在任务里问，回答到了续上同一个会话，带着回答接着干', async () => {
+  // 要人拍、缺信息（--needs human|info）的退回会话带推荐重问、不停下等（#259，fusion.test.ts 里有）；只有他本人才有的东西
+  // （--needs access）照旧在任务里问、停下等：下面两条考的是问人、等回答这一套本身
+  it('会话要只有他本人才有的东西：在任务里问，回答到了续上同一个会话，带着回答接着干', async () => {
     const world = createFakeWorld({
       session: (input, n) =>
         input.stage === 'execute' && n === 1
-          ? { outcome: 'blocked', blocked: { question: '验证码几位？', options: ['4 位', '6 位'] } }
+          ? {
+              outcome: 'blocked',
+              blocked: { question: '验证码几位？', options: ['4 位', '6 位'], needs: 'access' },
+            }
           : {},
     });
     const result = await withWorker(env, world, async (q) => {
@@ -319,7 +324,7 @@ describe('子任务工作流', { timeout: 60_000 }, () => {
       failAfter: { askHuman: 1 },
       session: (input, n) =>
         input.stage === 'execute' && n === 1
-          ? { outcome: 'blocked', blocked: { question: '验证码几位？' } }
+          ? { outcome: 'blocked', blocked: { question: '验证码几位？', needs: 'access' } }
           : {},
     });
     const result = await withWorker(env, world, async (q) => {

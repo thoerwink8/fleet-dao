@@ -119,6 +119,8 @@ export function createRealPorts(deps: RealPortsDeps): RealPorts {
   const ports: EnginePorts = {
     pickRoute: store.pickRoute,
     askHuman: store.askHuman,
+    taskAsks: store.taskAsks,
+    markAsksApplied: store.markAsksApplied,
     requestApproval: store.requestApproval,
     raiseAlert: store.raiseAlert,
     recordTiming: store.recordTiming,

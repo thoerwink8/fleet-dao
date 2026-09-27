@@ -6,10 +6,13 @@
 import {
   type AcceptanceDecision,
   type AcceptanceInput,
+  type AskTally,
+  assumedLines,
   type Brief,
   type BriefCheck,
   type CloseFacts,
   type ConfigDecision,
+  changeLine,
   checkBrief,
   checkLeadPlan,
   checkLeadReview,
@@ -28,6 +31,7 @@ import {
   fusionPrParts,
   type LeadPlanCheck,
   type LeadReviewCheck,
+  lateChanges,
   type Mode,
   nextFlow,
   type Rebuttable,
@@ -38,6 +42,8 @@ import {
   specDirOf,
   specDocs,
   startFlow,
+  type TaskAsk,
+  tallyAsks,
   type VerdictDecision,
   type VerdictInput,
   type VerifiedRound,
@@ -112,6 +118,16 @@ export interface DecisionMap {
   fusionPr: { input: FusionPrFacts; output: FusionPrParts };
   /** 关单评论的正文：定一次、进历史，重试和重放都发同一份。 */
   closeComment: { input: CloseFacts; output: string };
+  // ---- 问创始人不挡路（#259，core 的 ask.ts）
+  /** 存档点：他晚到、改选了别的、还没照改的（handed = 已经交给 Lead、还没照改完的），连同交给 Lead 的话。 */
+  lateChanges: {
+    input: { asks: TaskAsk[]; handed: string[] };
+    output: { askIds: string[]; items: string[] };
+  };
+  /** PR 正文「按推荐先做了」一栏。 */
+  assumedLines: { input: TaskAsk[]; output: string[] };
+  /** 关单评论的记数：按推荐先做了几条、事后被改了几条。 */
+  askTally: { input: TaskAsk[]; output: AskTally };
 }
 
 export type DecisionKind = keyof DecisionMap;
@@ -160,6 +176,12 @@ export function createDecide(deps: DecideDeps = {}): Decide {
     filesUnder: ({ paths, files }) => filesUnder(paths, files),
     fusionPr: fusionPrParts,
     closeComment,
+    lateChanges: ({ asks, handed }) => {
+      const late = lateChanges(asks, handed);
+      return { askIds: late.map((a) => a.id), items: late.map(changeLine) };
+    },
+    assumedLines,
+    askTally: tallyAsks,
   };
   return async (kind, input) => {
     const fn = table[kind] as ((input: unknown) => unknown) | undefined;

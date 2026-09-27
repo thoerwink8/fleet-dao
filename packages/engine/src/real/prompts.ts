@@ -132,6 +132,8 @@ const FEEDBACK_KIND: Record<SessionBrief['feedback'][number]['kind'], string> = 
   plan: '和方案对不上',
   hygiene: '卫生检查拦下',
   delivery: '交付没过核对',
+  ask: '要带推荐重问',
+  answer: '创始人改选了',
 };
 
 function feedbackBlock(brief: SessionBrief): string {
@@ -193,8 +195,9 @@ function deliverBlock(input: PromptInput): string {
       return `## 你要做的：分诊
 读原话，必要时翻一下仓里相关的代码（不改任何文件），判断这件事：清不清楚、多大、是不是 UI 活、会不会碰对外发布（release）、花钱（spend）、删数据（delete）。
 把结论写进 \`${OUT_DIR}/triage.json\`（只写这一个文件），形如：
-{"clear": true, "question": "", "summary": "三行以内：理解为……", "size": "S", "ui": false, "holds": []}
-- clear：清楚 true；有说不清、会做错方向的地方 false（这时 question 写要问创始人的那一句，一句话、能直接回答）；判不了 null。
+{"clear": true, "question": "", "options": [], "recommend": "", "summary": "三行以内：理解为……", "size": "S", "ui": false, "holds": []}
+- clear：清楚 true；有说不清、会做错方向的地方 false；判不了 null。
+- clear 是 false 时：question 写要问创始人的那一句（一句话、能直接回答），options 写 2–4 个做法，recommend 照抄你推荐的那一个。他多半不在场，引擎按推荐先做、不停下等；他之后改了，另开单照他选的改。
 - size：S / M / L。holds：会碰到的写 "release" / "spend" / "delete"，都不碰就空数组。
 写完就结束，不用 fleet done。`;
     case 'doc':
@@ -311,7 +314,7 @@ ${end}`;
     }
     case 'fix-brief':
       return `## 你要做的：写修复简报
-开了 PR 之后要改（原因在上面「这一轮要改的」）。看代码找到原因，给副手写一份修复简报：只许改的文件要把要改的地方都圈进去。${readOnly}
+要回去改一轮（原因在上面「这一轮要改的」：CI 没过、合并前退回、最终审查要改，或者创始人晚到的回答改选了别的——没等他回时按推荐先做的，照他选的改）。看代码找到要改的地方，给副手写一份修复简报：只许改的文件要把要改的地方都圈进去。${readOnly}
 写进 ${out('lead-brief')}，形如：
 {"brief": ${BRIEF_SHAPE}}
 ${end}`;
@@ -428,6 +431,16 @@ export function parseTriage(text: string): Parsed<TriageVerdict> {
   if (v.question !== undefined) {
     if (typeof v.question !== 'string') return { error: 'triage.json 的 question 要是字符串' };
     if (v.question.trim()) out.question = v.question.trim();
+  }
+  // 选项和推荐合不合格（够不够两个、推荐在不在选项里）由引擎经 decide 调 core 的 checkAsk 判，这里只挡类型
+  if (v.options !== undefined) {
+    if (!isStringArray(v.options)) return { error: 'triage.json 的 options 要是字符串数组' };
+    const options = v.options.map((o) => o.trim()).filter(Boolean);
+    if (options.length > 0) out.options = options;
+  }
+  if (v.recommend !== undefined) {
+    if (typeof v.recommend !== 'string') return { error: 'triage.json 的 recommend 要是字符串' };
+    if (v.recommend.trim()) out.recommend = v.recommend.trim();
   }
   if (v.summary !== undefined) {
     if (typeof v.summary !== 'string') return { error: 'triage.json 的 summary 要是字符串' };

@@ -44,7 +44,13 @@ import { type IssuePlan, type ReadIssuePlanInput, readIssuePlan } from './issue-
 import {
   type CloseIssueInput,
   type CloseIssueResult,
+  type CommentIssueInput,
+  type CommentIssueResult,
   closeIssue,
+  commentIssue,
+  type OpenIssueInput,
+  type OpenIssueResult,
+  openIssue,
   type UpdateIssueProgressInput,
   type UpdateIssueProgressResult,
   updateIssueProgress,
@@ -137,6 +143,10 @@ export interface GitHub {
     ctx?: ActivityContext,
   ): Promise<UpdateIssueProgressResult>;
   closeIssue(input: CloseIssueInput, ctx?: ActivityContext): Promise<CloseIssueResult>;
+  /** 开一张单（幂等，按 key 认）：引擎对账时给提问另开一张，见 #259。 */
+  openIssue(input: OpenIssueInput, ctx?: ActivityContext): Promise<OpenIssueResult>;
+  /** 在一张 issue 上留一条评论（幂等，按 key 认），不关单、不改进度段：把回答写到提问那张单上。 */
+  commentIssue(input: CommentIssueInput, ctx?: ActivityContext): Promise<CommentIssueResult>;
   renewInteractionLimit(input: InteractionLimitInput, ctx?: ActivityContext): Promise<InteractionLimitResult>;
   /** 需求文档直接写进默认分支（「引擎」机器人身份，Contents API）。 */
   writeSpecDoc(input: WriteSpecDocInput, ctx?: ActivityContext): Promise<WriteSpecDocResult>;
@@ -232,6 +242,8 @@ export function createGitHub(options: GitHubOptions): GitHub {
     mergePr: (input, ctx) => mergePr(deps, input, ctx),
     updateIssueProgress: (input, ctx) => updateIssueProgress(deps, input, ctx),
     closeIssue: (input, ctx) => closeIssue(deps, input, ctx),
+    openIssue: (input, ctx) => openIssue(deps, input, ctx),
+    commentIssue: (input, ctx) => commentIssue(deps, input, ctx),
     renewInteractionLimit: (input, ctx) => renewInteractionLimit(deps, input, ctx),
     commitIdentity: (repo) => deps.bots.identity('agent', repo),
     async selfCheck(repos) {

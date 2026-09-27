@@ -53,7 +53,7 @@ import {
 import type { FailureContext, FailureInfo, LadderCounters, NextAction } from '../decisions/failure.ts';
 import type { Decide, DecisionKind, DecisionMap } from '../decisions/index.ts';
 import type { Feedback } from '../decisions/verify.ts';
-import { historyAlertLine, type Limits } from '../limits.ts';
+import { historyAlertLine, type Limits, reaskLimit } from '../limits.ts';
 import type {
   RouteChoice,
   Scope,
@@ -730,8 +730,9 @@ export async function attemptOrRework<T>(
 }
 
 /**
- * 问创始人一句，等回答。提问编号由工作流先定好（进历史）再发卡：发卡的活动重试时端口按编号去重，只有一张卡；
- * 编号在发卡前就登记为「在等」，人回答得再快也不会落空。
+ * 问创始人一句，等回答（老样子：停下等）。提问编号由工作流先定好（进历史）再发卡：发卡的活动重试时端口按编号去重，只有一张卡；
+ * 编号在发卡前就登记为「在等」，人回答得再快也不会落空。#259 起只剩两处用它：会话要的是只有他本人才有的东西
+ * （fleet blocked --needs access、other），和说要人拍却退回几次都不肯带推荐问的（reaskLimit）。
  */
 export async function askAndWait(
   kit: Kit,
@@ -764,6 +765,23 @@ export async function askAndWait(
   } finally {
     kit.control.pendingAsks = kit.control.pendingAsks.filter((q) => q !== askId);
   }
+}
+
+/**
+ * 会话 fleet blocked --needs human|info 退回时交给它的话（#259）：要他挑一个的不算卡住，带选项和推荐问、按推荐接着干。
+ * 和提示词规矩段（real/prompts.ts 的 RULES）同一套问法：改一处要两处一起改。
+ */
+export function reaskFeedback(needs: 'human' | 'info', said: string): Feedback {
+  return {
+    kind: 'ask',
+    summary: `你用 fleet blocked --needs ${needs} 说要人才能往下做。要创始人在几个做法里挑一个的不算卡住：照下面问了，按推荐接着干`,
+    items: [
+      `你说的：${said.trim() || '（没写卡在哪）'}`,
+      '用 fleet ask "<问题>" -o <甲> -o <乙> -r <推荐的> 问，一定带选项和推荐：命令当场返回、不等回答，按推荐接着干，交活总结里写上按推荐先做了什么；他之后改了，下一个存档点会告诉你',
+      '超出这张单范围的加 --outside（另开一张单等他拍，这里绕开它接着做）；碰对外发布、花钱、删数据、改标准的加 --hold release|spend|delete|standard（也先按推荐做，合并前等他批）',
+      '只有他本人才有的东西（账号、权限、登录）才用 fleet blocked "<缺什么>" --needs access',
+    ],
+  };
 }
 
 // ---- 跑一个阶段的会话
@@ -1043,6 +1061,9 @@ async function stageLoop<K extends OutputKind>(
   let stick: string | undefined = request.stickRouteId;
   let previousMessage: string | undefined;
   const answers = [...request.brief.answers];
+  /** 退回让会话带推荐重问（#259）：接着起会话时加在返工意见后面，只留最近一次的。reasked = 这一阶段退回过几次。 */
+  let reask: Feedback | null = null;
+  let reasked = 0;
   let resumeSessionId = request.resumeSessionId;
   for (;;) {
     await gate(kit);
@@ -1083,7 +1104,11 @@ async function stageLoop<K extends OutputKind>(
         route: picked.route,
         whyRoute: picked.why,
         queuedAt,
-        brief: { ...request.brief, answers },
+        brief: {
+          ...request.brief,
+          answers,
+          ...(reask ? { feedback: [...request.brief.feedback, reask] } : {}),
+        },
         stallSeconds: kit.limits.stallSeconds,
         sessionMinutes: kit.limits.sessionMinutes,
         resources: {
@@ -1136,8 +1161,24 @@ async function stageLoop<K extends OutputKind>(
       continue;
     }
     if (end.outcome === 'blocked') {
-      const question = end.blocked?.question ?? end.blocked?.reason ?? '会话说需要人回答';
-      const answer = await askAndWait(kit, question, end.blocked?.options, runId);
+      const blocked = end.blocked;
+      // 问他不挡路（#259）：说要人拍、缺信息（human、info）的不停下等，退回会话让它带选项和推荐用 fleet ask 问（命令当场
+      // 返回）、按推荐接着干；退回到数还这样才停下等人。只有他本人才有的东西（access）、别的（other）照旧等人。
+      // 接这道改法之前起的执行，重放时照老样子问了等回答。
+      if (
+        (blocked?.needs === 'human' || blocked?.needs === 'info') &&
+        reasked < reaskLimit(kit.limits) &&
+        patched('blocked-reask')
+      ) {
+        reasked += 1;
+        reask = reaskFeedback(blocked.needs, blocked.question ?? blocked.reason);
+        kit.view.lastProblem = `会话说要人才能往下做：退回让它带推荐用 fleet ask 问、按推荐接着干（第 ${reasked} 次）`;
+        kit.onChange();
+        stick = picked.route.routeId;
+        continue;
+      }
+      const question = blocked?.question ?? blocked?.reason ?? '会话说需要人回答';
+      const answer = await askAndWait(kit, question, blocked?.options, runId);
       answers.push({ question, answer });
       stick = picked.route.routeId;
       continue;
