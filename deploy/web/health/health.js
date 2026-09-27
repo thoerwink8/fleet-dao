@@ -1,7 +1,8 @@
 // 健康页的取数与判定（浏览器里的页面和 deploy/test/health-page.test.mjs 用的是这同一份）。
 // 规矩：只有后端明说 ok 的项才算在线；连不上、超时、回的不是健康报告、缺项、结论和逐项对不上，一律报红，并说出是哪一种。
-// /healthz 的样子（packages/api 的 health.ts）：{ ok, checks: { <项>: { ok: true } | { ok: true, status: 'not_wired', message }
-// | { ok: false, code, message } } }。「未接」是功能还没做，不算不在线，照样显示出来（写明未接和原因），
+// /healthz 的样子（packages/api 的 health.ts）：{ ok, checks: { <项>: { ok: true } | { ok: true, message }
+// | { ok: true, status: 'not_wired', message } | { ok: false, code, message } } }。好的项可以带一句说明（飞书网关几秒前来过），
+// 写在「在线」后面；「未接」是功能还没做，不算不在线，照样显示出来（写明未接和原因），
 // 全好回 200，有一项不好回 503。香港 nginx 把 /healthz 经隧道转给法国的驾驶舱后端（deploy/hk/nginx-https.conf）。
 
 /** P0 验收要看到的三项：法国的数据库、Temporal、引擎工人。后端没报的项照样列出来、报红。 */
@@ -19,6 +20,7 @@ const EXTRA_LABELS = {
   draft_backlog: '待开单积压',
   judge: '判断题',
   deploy_lag: '跟上主线',
+  feishu_gateway: '飞书网关',
 };
 
 export const HEALTH_URL = '/healthz';
@@ -119,7 +121,10 @@ function row(key, label, check) {
     }
     return { key, label, ok: true, notWired: true, reason: `未接：${check.message}` };
   }
-  if (check.ok === true) return { key, label, ok: true, reason: '在线' };
+  if (check.ok === true) {
+    const note = typeof check.message === 'string' ? check.message.trim() : '';
+    return { key, label, ok: true, reason: note ? `在线：${note}` : '在线' };
+  }
   const message =
     typeof check.message === 'string' && check.message ? check.message : '不在线（后端没给原因）';
   const code = typeof check.code === 'string' && check.code ? `（${check.code}）` : '';

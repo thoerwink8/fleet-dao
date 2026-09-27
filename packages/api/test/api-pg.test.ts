@@ -16,6 +16,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { DEPLOY_LAG_NOT_HERE } from '../src/deploy-lag.ts';
 import { devFixtures } from '../src/dev-fixtures.ts';
 import { draftBacklogCheck, notWiredDraftOpener } from '../src/draft-opening.ts';
+import { createGatewaySeen } from '../src/gateway-seen.ts';
 import { githubAppMissing } from '../src/github.ts';
 import { serviceHealthChecks } from '../src/health.ts';
 import { JUDGE_NOT_WIRED, judgeHealthCheck } from '../src/judge-health.ts';
@@ -229,6 +230,8 @@ describe('接口跑在真库上', () => {
         }),
         // 和 main.ts 在法国以外的装配一样：没有发布目录、没有自动发布
         deployLag: { check: async () => {}, notWired: DEPLOY_LAG_NOT_HERE },
+        // 网关刚接上还没来过：没查成，照实报红（gateway-seen.test.ts 另测来过、太久没来）
+        feishuGateway: createGatewaySeen(() => new Date(T0)),
       }),
     });
     const res = await h.cockpit.request('/healthz');
@@ -253,6 +256,11 @@ describe('接口跑在真库上', () => {
         },
         judge: { ok: true, status: 'not_wired', message: JUDGE_NOT_WIRED },
         deploy_lag: { ok: true, status: 'not_wired', message: DEPLOY_LAG_NOT_HERE },
+        feishu_gateway: {
+          ok: false,
+          code: 'unchecked',
+          message: '没查成：后端起来才 0 秒，推送轮询还没来过（盘面快照也没来取过）',
+        },
       },
     });
     // 一张草稿确认了 20 分钟还没开成：积压报红（库里真查出来的）。

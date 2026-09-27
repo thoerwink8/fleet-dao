@@ -4,7 +4,6 @@
 // 不悄悄当成别的事（另起草稿、吞掉回答）。进来的话先规范化（wellFormed）。
 import {
   FEISHU_NOTE_MAX,
-  type FeishuActing,
   FeishuBoardSnapshotSchema,
   FeishuConfirmDraftRequest,
   FeishuConfirmDraftResponse,
@@ -74,20 +73,22 @@ export function feishuRoutes(deps: Deps, waiters: AskWaiters, opening: DraftOpen
   const outboxWake = createOutboxWake(deps.changes);
 
   const gate =
-    (acting: FeishuActing): MiddlewareHandler<FeishuEnv> =>
+    (route: FeishuRoute): MiddlewareHandler<FeishuEnv> =>
     async (c, next) => {
       const authorization = c.req.header('authorization');
       if (authorization === undefined) {
         throw new ApiError(401, 'gateway_pass_missing', '飞书接口只给飞书网关用：要带网关通行证');
       }
       checkGatewayPass(deps.config, authorization);
-      c.set('founder', acting === 'required' ? await actingFounder(c, store) : undefined);
+      // 通行证验过了才算网关来过（/healthz 的 feishu_gateway，gateway-seen.ts）
+      deps.gatewaySeen?.saw(route);
+      c.set('founder', route.acting === 'required' ? await actingFounder(c, store) : undefined);
       await next();
     };
 
   /** 按路由表挂：方法、路径、acting 都取自 FeishuRoutes，挂错了当场就对不上。 */
   const on = (route: FeishuRoute, handler: (c: Context<FeishuEnv>) => Promise<Response>) =>
-    app.on(route.method, route.path, gate(route.acting), handler);
+    app.on(route.method, route.path, gate(route), handler);
 
   const founderOf = (c: Context<FeishuEnv>): CockpitUser => {
     const founder = c.get('founder');

@@ -50,8 +50,8 @@ export interface AgentProcessSpec {
   /**
    * 经 fleet-agent-scope 以会话专用用户的身份放进它自己的 scope（资源记账、收尸以 cgroup 为准）。生产配置下必须给
    * （见 assertScopeInProduction），不给就不起。命令要写绝对路径；
-   * 环境里 FLEET_* 这几类经 sudo 的环境传，PATH 改名 FLEET_SESSION_PATH，白名单里的执行体开关写成 /usr/bin/env 的参数，
-   * 别的一律拒（见 scopeLaunch）。
+   * 环境里 FLEET_* 这几类经 sudo 的环境传，PATH 改名 FLEET_SESSION_PATH，会话自己的 TMPDIR 和白名单里的执行体开关
+   * 写成 /usr/bin/env 的参数，别的一律拒（见 scopeLaunch）。
    */
   scope?: CgroupScope;
   signal?: AbortSignal;

@@ -1,14 +1,22 @@
 // 会话的目录在哪、归谁（design 十四：/var/lib/fleet-work/<仓>/<需求号>-<子任务>/，归会话用户、700；还不归它的
 // 由 fleet-agent-scope 建或改属主）。引擎只看属主（stat 目录本身，不进去）、叫助手建 / 改属主 / 删，
 // 目录里的东西一律由会话用户自己碰（user-git.ts）。
+// 根下还有两样不是工作树的：探针的工作目录 _route-probe/<会话用户>（route-probe.ts），每个会话自己的临时目录
+// _tmp/<会话编号>（会话的 TMPDIR，会话结束就删，sessions.ts）。仓的目录是 <owner>_<name>，打头的是字母数字，撞不上这两个。
 
 import { readFileSync } from 'node:fs';
-import { stat } from 'node:fs/promises';
+import { readdir, stat } from 'node:fs/promises';
 import { adoptWorktree, removeWorktreeDir, SESSION_USERS, type SessionUser } from '@fleet-dao/adapters';
 import type { Repo, StageKind } from '@fleet-dao/shared';
 import { PortError } from '../ports.ts';
 
 export const DEFAULT_WORK_ROOT = '/var/lib/fleet-work';
+
+/**
+ * 会话临时目录的上一级（在工作树的根下）。路径要短：会话里的工具（tsx 之类）在 TMPDIR 下建 unix 套接字，
+ * 整条路径超过 107 个字节就建不了；<根>/_tmp/<会话编号> 在法国是 61 个字节。
+ */
+export const SESSION_TMP_DIR = '_tmp';
 
 export interface WorkTrees {
   root: string;
@@ -21,6 +29,13 @@ export interface WorkTrees {
     stage: StageKind,
     subtaskKey?: string,
   ): string;
+  /**
+   * 这次会话自己的临时目录（会话的 TMPDIR）：<root>/_tmp/<会话编号>。不在工作树里（git add -A 带不进去），和工作树一样由
+   * 帮手建成会话用户的、删也经帮手。
+   */
+  tmpFor(runId: string): string;
+  /** _tmp 下现有的会话临时目录（完整路径）；_tmp 还没建过回空。读不了明确报错，不当成一个都没有。 */
+  listTmp(): Promise<string[]>;
   /** 目录归哪个会话用户；不在回 null。归了别人（不是会话用户）明确报错。 */
   ownerOf(dir: string): Promise<SessionUser | null>;
   /** 交给这个会话用户（不在就建）。 */
@@ -42,9 +57,12 @@ function repoDir(root: string, repo: Pick<Repo, 'owner' | 'name'>): string {
   return `${root}/${segment(repo.owner, '仓的主人')}_${segment(repo.name, '仓名')}`;
 }
 
-export function layout(root: string): Pick<WorkTrees, 'root' | 'treeFor' | 'scratchFor'> {
+export function layout(root: string): Pick<WorkTrees, 'root' | 'treeFor' | 'scratchFor' | 'tmpFor'> {
   return {
     root,
+    tmpFor(runId) {
+      return `${root}/${SESSION_TMP_DIR}/${segment(runId, '会话编号')}`;
+    },
     treeFor(repo, branch) {
       const leaf = branch.startsWith('fleet/') ? branch.slice('fleet/'.length) : branch;
       if (leaf.includes('/'))
@@ -94,6 +112,18 @@ export function helperWorkTrees(options: HelperWorkTreesOptions = {}): WorkTrees
   };
   return {
     ...layout(root),
+    // _tmp 由帮手建成 root:root 755（adopt 建中间各级的规矩），引擎读得了；里面每一个归会话用户、700，引擎不进去。
+    async listTmp() {
+      const base = `${root}/${SESSION_TMP_DIR}`;
+      try {
+        return (await readdir(base)).map((name) => `${base}/${name}`);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+        throw new PortError('WORKTREE_UNREADABLE', `看不了 ${base} 里有哪些会话临时目录：${String(error)}`, {
+          retryable: true,
+        });
+      }
+    },
     async ownerOf(dir) {
       let uid: number;
       try {

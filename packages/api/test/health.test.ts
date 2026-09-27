@@ -60,6 +60,7 @@ describe('健康检查', () => {
       draftBacklog: draftBacklogCheck(backlogStore, () => new Date()),
       judge: { check: async () => {} },
       deployLag: { check: async () => {} },
+      feishuGateway: { check: async () => {} },
     });
 
   it('还没接上的功能报「未接」：整体照样 200，这一项看得到「未接」和单号，积压也不算坏', async () => {
@@ -145,6 +146,8 @@ describe('健康检查', () => {
     expect(listed).toContain('judge');
     // 主线一动就可能落后：自动发布正在追，和这一版好不好无关；少了它，每次发布都可能被它退回
     expect(listed).toContain('deploy_lag');
+    // 飞书网关不来：网关、隧道、香港出事都会，后端刚重启、网关还没回来时也是「没查成」；少了它，发版会被它退回
+    expect(listed).toContain('feishu_gateway');
     const names = serviceHealthChecks({
       probeDb: async () => {},
       feed: { probe: async () => {} },
@@ -154,6 +157,7 @@ describe('健康检查', () => {
       draftBacklog: async () => {},
       judge: { check: async () => {} },
       deployLag: { check: async () => {} },
+      feishuGateway: { check: async () => {} },
     }).map((c) => c.name);
     for (const name of listed) expect(names, name).toContain(name);
   });

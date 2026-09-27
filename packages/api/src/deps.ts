@@ -1,5 +1,6 @@
 import type { Config } from './config.ts';
 import type { DemoPublisher } from './demo.ts';
+import type { GatewaySeen } from './gateway-seen.ts';
 import type {
   ChangeFeed,
   DraftOpener,
@@ -27,6 +28,8 @@ export interface Deps {
   draftOpener: DraftOpener;
   /** /healthz 逐项探的依赖；空 = 没有外部依赖（内存版）。 */
   health: HealthCheck[];
+  /** 飞书网关来没来过：飞书接口的门口验过通行证就记一笔，/healthz 的 feishu_gateway 读它。没给就不记（开发、多数测试）。 */
+  gatewaySeen?: GatewaySeen | undefined;
   log: Logger;
   now: () => Date;
   /** 演示版可见范围的发布处；null = 没配（FLEET_DEMO_DIR）。 */

@@ -2,7 +2,9 @@
 // 长驻进程的环境会陈旧（旧系统里守护进程带着一周前的 env 起会话，排查了两小时），所以只从宿主抄一小撮基础变量。
 // 会话里拿不到任何 GitHub 凭据：只在本地提交，推分支、开 PR 由引擎在会话外做（设计第十四节）——
 // Claude 会话的网络流量经 reclaude 的代理（VPS 实测会话里 git 也带着它的 HTTPS_PROXY），凭据不能过它。
-import { delimiter } from 'node:path';
+// TMPDIR 不从宿主抄：宿主的是引擎自己的临时目录（会话用户不一定写得进）。会话的临时目录由起会话的一方给（tmpDir），
+// 每个会话一个、会话结束整个删掉；不给就用系统默认。
+import { delimiter, isAbsolute } from 'node:path';
 
 /** 只从宿主环境抄这些。XDG_RUNTIME_DIR 给 systemd-run --user 用；后半截是 Windows 开发机上起 node 必需的系统变量。 */
 export const SESSION_BASE_KEYS: ReadonlySet<string> = new Set([
@@ -14,7 +16,6 @@ export const SESSION_BASE_KEYS: ReadonlySet<string> = new Set([
   'LANG',
   'LANGUAGE',
   'TZ',
-  'TMPDIR',
   'TERM',
   'XDG_RUNTIME_DIR',
   'SYSTEMROOT',
@@ -49,8 +50,18 @@ export interface SessionEnvInput {
   fleetToken: string;
   /** 放到 PATH 最前面的目录，例如装着 fleet 命令的目录。 */
   pathPrepend?: string[];
+  /**
+   * 这次会话自己的临时目录（绝对路径，起会话的一方建好、会话结束删掉）：TMPDIR、TEMP、TMP 都指向它，会话里跑的测试、
+   * 工具往临时目录写的东西（vitest 每跑一次留下的转译缓存之类）都落在这里，不在共用的 /tmp 里越攒越多。
+   */
+  tmpDir?: string;
   /** 其余要带的变量，最后合并；带凭据类的键会被拒。 */
   extra?: Record<string, string>;
+}
+
+/** 环境里已有的同名键（Windows 上不分大小写，Path、Temp 这类）；没有就用给的写法。 */
+function keyOf(env: Record<string, string>, name: string): string {
+  return Object.keys(env).find((k) => k.toUpperCase() === name) ?? name;
 }
 
 export function buildSessionEnv(input: SessionEnvInput): Record<string, string> {
@@ -61,8 +72,12 @@ export function buildSessionEnv(input: SessionEnvInput): Record<string, string> 
     if (SESSION_BASE_KEYS.has(upper) || upper.startsWith('LC_')) env[key] = value;
   }
   if (input.pathPrepend?.length) {
-    const key = Object.keys(env).find((k) => k.toUpperCase() === 'PATH') ?? 'PATH';
+    const key = keyOf(env, 'PATH');
     env[key] = [...input.pathPrepend, env[key]].filter((part) => part).join(delimiter);
+  }
+  if (input.tmpDir !== undefined) {
+    if (!isAbsolute(input.tmpDir)) throw new Error(`会话的临时目录要写绝对路径：${input.tmpDir}`);
+    for (const name of ['TMPDIR', 'TEMP', 'TMP']) env[keyOf(env, name)] = input.tmpDir;
   }
   env.FLEET_API = input.fleetApi;
   env.FLEET_TOKEN = input.fleetToken;

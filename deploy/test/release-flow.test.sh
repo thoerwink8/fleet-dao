@@ -321,6 +321,13 @@ check "跟上主线（deploy_lag）恰好在发版时变红（主线又动了）
 check "跟上主线：记成待处理、写明不退回" \
   "$(printf '%s\n' "${PENDING[@]}" | grep -c 'deploy_lag 不好.*和换没换版无关，不退回')" 1
 reset
+compare_api_items "$(printf 'database\tok\t\nfeishu_gateway\tok\t\n')" \
+  "$(printf 'database\tok\t\nfeishu_gateway\tbad\t没查成：后端起来才 12 秒，推送轮询还没来过（盘面快照也没来取过）\n')" >/dev/null
+check "飞书网关（feishu_gateway）在后端刚重启时还没回来：不算这一版的错" "$?" 0
+check "飞书网关：没有红" "${#REDS[@]}" 0
+check "飞书网关：记成待处理、写明不退回" \
+  "$(printf '%s\n' "${PENDING[@]}" | grep -c 'feishu_gateway 不好.*和换没换版无关，不退回')" 1
+reset
 compare_api_items "$before_items" \
   "$(printf 'database\tbad\t连不上\ndraft_backlog\tok\t\ntemporal\tbad\t没接上\n')" >/dev/null
 check "库切之前好、切之后坏：算这一版的错" "$?" 1

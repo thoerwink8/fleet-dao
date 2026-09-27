@@ -15,11 +15,12 @@
 // 4. 会话一律经 fleet-agent-scope 起（scope 名用 runId，内存上限按 input.resources，swap 一起封），跑在按
 //    input.route.poolId 那个池定的会话专用用户下（法国只有一个，两个 Claude 池共用；它同一时刻只挂一个组织，design 第九节）；
 //    startSession 先按 input.runId 在库里建这一次会话（session_runs），再起进程，把进程号和 scope 交回（handle）。
+//    会话的 TMPDIR 是这次会话自己的临时目录（工作树根下的 _tmp/<runId>），会话收场就删。
 //    stopSession 按 runId 停（起会话还没返回时工作流只知道 runId）：停掉这个 runId 名下的进程，并记下「这个 runId 已叫停」——
 //    之后（或同时在跑的）startSession 再拿这个 runId 来，不起进程，抛 SESSION_STOPPED。
 // 5. awaitSession 只是「看守」：工人重启后它会被重试。接得上就接着看；接不上（引擎正常停时会话跟着退了，
 //    或者引擎被强杀、会话成了孤儿）就按 handle 把旧会话收掉，回 outcome=failed、code=SESSION_LOST——工作流会续会话重起。
-//    工人进程起来时 createEngineWorker 会先调 reapOrphanSessions（fleet-agent-scope list 再逐个 stop）：
+//    工人进程起来时 createEngineWorker 会先调 reapOrphanSessions（fleet-agent-scope list 再逐个 stop，再清上一轮会话的临时目录）：
 //    上一轮的会话输出管道已经断了，接不上。工作流被强行终止留下的会话，归每小时对账收。
 
 import type { Brief, FlowConfigRead, Rebuttable, Rebuttal, VerifyReport } from '@fleet-dao/core';

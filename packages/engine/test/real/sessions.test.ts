@@ -1,7 +1,7 @@
 // 会话端口：起会话（建树、定接着干的方式、登记开工）、看守（进度写库、按进展判停滞、交活核实、读结论文件）、
 // 叫停、收孤儿。用内存库、本地 git（顶替会话用户的执行器）、假插头（不起真执行体）；每条失败路径都故意造一次。
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { scopePrefix } from '@fleet-dao/adapters';
@@ -99,6 +99,8 @@ function setup(
     cursor?: (spec: Parameters<ReturnType<typeof fakeCursorRun>['run']>[0], n: number) => FakeCursorScript;
     /** 发给别家（开 PR 前验证）的材料怎么过卫生检查；不给就是没配检查。 */
     screen?: SessionPortsDeps['screen'];
+    /** 端口的日志（删不掉临时目录这类只记日志的）；不给就不记。 */
+    log?: SessionPortsDeps['log'];
   } = {},
 ) {
   const fake = fakeRun(script);
@@ -133,7 +135,7 @@ function setup(
     ...(options.jevTimeoutMs === undefined ? {} : { jevTimeoutMs: options.jevTimeoutMs }),
     ...(options.stallJevEveryMs === undefined ? {} : { stallJevEveryMs: options.stallJevEveryMs }),
     ...(options.screen ? { screen: options.screen } : {}),
-    log: () => {},
+    log: options.log ?? (() => {}),
   });
   return { ports, fake, cursor, trees, scope };
 }
@@ -236,8 +238,15 @@ describe('写码会话', () => {
     const input = launch();
     const started = await ports.startSession(input, ctx());
     expect(started).toMatchObject({ resumed: false, handle: { pid: 4242 } });
-    expect(trees.adopts).toEqual([{ dir: input.worktreePath, user: 'fleet-agent-carpool' }]);
+    // 树交给会话用户；会话自己的临时目录（它的 TMPDIR）在工作树根下的 _tmp/<runId>，不在工作树里，也归它
+    const tmp = layout(join(root, 'work')).tmpFor(input.runId);
+    expect(trees.adopts).toEqual([
+      { dir: input.worktreePath, user: 'fleet-agent-carpool' },
+      { dir: tmp, user: 'fleet-agent-carpool' },
+    ]);
     const spec = fake.specs[0];
+    expect(spec?.env.tmpDir).toBe(tmp);
+    expect(existsSync(tmp)).toBe(true);
     expect(spec?.session).toEqual({ mode: 'new', id: started.sessionId });
     expect(spec?.cwd).toBe(input.worktreePath);
     expect(spec?.cgroup).toMatchObject({
@@ -263,6 +272,8 @@ describe('写码会话', () => {
       beat,
     );
     expect(end.outcome).toBe('done');
+    // 看守交回之前，会话的临时目录已经删了
+    expect(existsSync(tmp)).toBe(false);
     expect(end.output).toMatchObject({ kind: 'delivery', summary: '做完了', testsPassed: true });
     expect(end.output?.kind === 'delivery' && end.output.head).toBe(
       git(input.worktreePath as string, 'rev-parse', 'HEAD'),
@@ -395,8 +406,8 @@ describe('会话断了接着干', () => {
     const first = await runOnce(ports, launch({ route: carpool }));
     const input = launch({ resumeSessionId: first.sessionId });
     const started = await ports.startSession(input, ctx());
-    // 树第一次起会话时交给了会话用户，之后还是它：不再改属主
-    expect(trees.adopts).toEqual([{ dir: input.worktreePath, user: 'fleet-agent-carpool' }]);
+    // 树第一次起会话时交给了会话用户，之后还是它：不再改属主（每个会话自己的临时目录另算）
+    expect(trees.treeAdopts()).toEqual([{ dir: input.worktreePath, user: 'fleet-agent-carpool' }]);
     expect(fake.specs[1]?.session).toEqual({ mode: 'fork', from: first.sessionId, id: started.sessionId });
     expect(fake.specs[1]?.cgroup?.user).toBe('fleet-agent-carpool');
     expect(started.resumed).toBe(true);
@@ -985,6 +996,137 @@ describe('收孤儿', () => {
     expect(scope.calls().filter((c) => c.action === 'stop')).toHaveLength(2);
     process.env.FAKE_SCOPE_LIST_EXIT = '1';
     await expect(ports.reapOrphanSessions()).rejects.toThrow('查不了上一轮留下的会话');
+  });
+});
+
+describe('会话自己的临时目录（TMPDIR）：插头一收场就删，删不掉明说', () => {
+  const tmpOf = (runId: string) => layout(join(root, 'work')).tmpFor(runId);
+  type Logged = { message: string; fields: Record<string, unknown> | undefined };
+  const logger = () => {
+    const logs: Logged[] = [];
+    return {
+      logs,
+      log: (message: string, fields?: Record<string, unknown>) => logs.push({ message, fields }),
+    };
+  };
+
+  it('失败、被叫停收场：看守交回之前临时目录已经删了（写码会话正常交活的见「写码会话」第一条）', async () => {
+    const failing = setup(() => ({ exitCode: 1, result: null }));
+    const failed = launch();
+    const { end } = await runOnce(failing.ports, failed);
+    expect(end.outcome).toBe('failed');
+    expect(failing.trees.adopts.map((a) => a.dir)).toContain(tmpOf(failed.runId));
+    expect(existsSync(tmpOf(failed.runId))).toBe(false);
+
+    const hanging = setup(() => ({ act: async ({ signal }) => untilAborted(signal) }));
+    const stopped = launch();
+    const started = await hanging.ports.startSession(stopped, ctx());
+    expect(existsSync(tmpOf(stopped.runId))).toBe(true);
+    await hanging.ports.stopSession({ taskId, runId: stopped.runId, mode: 'kill', reason: '叫停' }, ctx());
+    const stoppedEnd = await hanging.ports.awaitSession(
+      { taskId, runId: stopped.runId, sessionId: started.sessionId, stage: 'execute' },
+      ctx(),
+    );
+    expect(stoppedEnd.outcome).toBe('stopped');
+    expect(existsSync(tmpOf(stopped.runId))).toBe(false);
+  });
+
+  it('进程没起来、迟迟起不来：临时目录照样删，不留给下次起来再清', async () => {
+    const broken = setup(() => ({ spawnError: 'spawn /opt/fake/reclaude ENOENT' }));
+    const input = launch();
+    await expect(broken.ports.startSession(input, ctx())).rejects.toMatchObject({ code: 'SPAWN_FAILED' });
+    expect(broken.trees.adopts.map((a) => a.dir)).toContain(tmpOf(input.runId));
+    await vi.waitFor(() => expect(broken.trees.removes).toContain(tmpOf(input.runId)));
+    expect(existsSync(tmpOf(input.runId))).toBe(false);
+
+    const slow = setup(() => ({ hangBeforeSpawn: true }), { spawnTimeoutMs: 200 });
+    const late = launch();
+    await expect(slow.ports.startSession(late, ctx())).rejects.toMatchObject({ code: 'SPAWN_TIMEOUT' });
+    await vi.waitFor(() => expect(slow.trees.removes).toContain(tmpOf(late.runId)));
+    expect(existsSync(tmpOf(late.runId))).toBe(false);
+  });
+
+  it('工人重启过：看守接不上时收掉旧会话、删它的临时目录；叫停不在这个进程里的会话，收掉 scope 后删', async () => {
+    const { ports } = setup(() => ({ act: async ({ signal }) => untilAborted(signal) }));
+    const lost = launch();
+    const started = await ports.startSession(lost, ctx());
+    expect(existsSync(tmpOf(lost.runId))).toBe(true);
+    const restarted = setup(() => ({}));
+    const end = await restarted.ports.awaitSession(
+      {
+        taskId,
+        runId: lost.runId,
+        sessionId: started.sessionId,
+        stage: 'execute',
+        ...(started.handle ? { handle: started.handle } : {}),
+      },
+      ctx(),
+    );
+    expect(end.failure?.code).toBe('SESSION_LOST');
+    expect(restarted.trees.removes).toContain(tmpOf(lost.runId));
+    expect(existsSync(tmpOf(lost.runId))).toBe(false);
+
+    const orphan = launch();
+    await ports.startSession(orphan, ctx());
+    expect(existsSync(tmpOf(orphan.runId))).toBe(true);
+    const other = setup(() => ({}));
+    await other.ports.stopSession(
+      { taskId, runId: orphan.runId, mode: 'kill', reason: '换了工人叫停' },
+      ctx(),
+    );
+    expect(other.scope.calls().some((c) => c.action === 'stop' && c.args.includes(orphan.runId))).toBe(true);
+    expect(existsSync(tmpOf(orphan.runId))).toBe(false);
+
+    for (const input of [lost, orphan]) {
+      await ports.stopSession({ taskId, runId: input.runId, mode: 'kill', reason: '收尾' }, ctx());
+    }
+  });
+
+  it('【故意造出的失败】临时目录删不掉：会话的结局照常交回，日志里明说没删掉、是哪个目录，不当成删好了', async () => {
+    const { logs, log } = logger();
+    const { ports, trees } = setup(commitAndDone(), { log });
+    const input = launch();
+    trees.fail.remove.add(tmpOf(input.runId));
+    const { end } = await runOnce(ports, input);
+    expect(end.outcome).toBe('done');
+    expect(existsSync(tmpOf(input.runId))).toBe(true);
+    const said = logs.find((l) => l.message.includes('会话的临时目录没删掉'));
+    expect(said?.fields).toMatchObject({
+      runId: input.runId,
+      dir: tmpOf(input.runId),
+      error: expect.stringContaining('删不掉'),
+    });
+  });
+
+  it('工人起来时清掉上一轮留下的临时目录，这个进程里在跑的不碰；【故意造出的失败】删不掉、列不出来都明说没清成，不挡工人接活', async () => {
+    const { logs, log } = logger();
+    const { ports, trees } = setup(() => ({ act: async ({ signal }) => untilAborted(signal) }), { log });
+    const left = [randomUUID(), randomUUID()].map(tmpOf);
+    for (const dir of left) {
+      mkdirSync(join(dir, 'ssr'), { recursive: true });
+      writeFileSync(join(dir, 'ssr', 'cache'), 'x');
+    }
+    const running = launch();
+    await ports.startSession(running, ctx());
+    expect(await ports.reapOrphanSessions()).toBe(0);
+    for (const dir of left) expect(existsSync(dir)).toBe(false);
+    expect(existsSync(tmpOf(running.runId))).toBe(true);
+    expect(logs.map((l) => l.message)).toContain('删掉上一轮会话留下的临时目录 2 个');
+
+    const stuck = tmpOf(randomUUID());
+    mkdirSync(stuck, { recursive: true });
+    trees.fail.remove.add(stuck);
+    expect(await ports.reapOrphanSessions()).toBe(0);
+    expect(existsSync(stuck)).toBe(true);
+    const notRemoved = logs.find((l) => l.message.includes('有 1 个没删掉'));
+    expect(notRemoved?.fields?.failed).toEqual([expect.stringContaining(stuck)]);
+
+    trees.fail.list = true;
+    expect(await ports.reapOrphanSessions()).toBe(0);
+    const unlisted = logs.find((l) => l.message.includes('没清成：列不出来'));
+    expect(unlisted?.fields?.error).toContain('列不出会话临时目录');
+
+    await ports.stopSession({ taskId, runId: running.runId, mode: 'kill', reason: '收尾' }, ctx());
   });
 });
 
