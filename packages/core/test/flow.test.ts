@@ -1,6 +1,13 @@
 // 执行状态机的边界表：一行一条（当前状态 + 发生的事 → 下一步、要外壳做的事），含故意造出失败的行。
 import { describe, expect, it } from 'vitest';
-import { FLOW_LIMITS, type FlowEvent, type FlowState, nextFlow, startFlow } from '../src/flow.ts';
+import {
+  FLOW_LIMITS,
+  type FlowEvent,
+  type FlowState,
+  nextFlow,
+  startFlow,
+  upgradeFlowState,
+} from '../src/flow.ts';
 
 const base = startFlow('fusion', false);
 const at = (patch: Partial<FlowState>): FlowState => ({ ...base, ...patch });
@@ -446,5 +453,28 @@ describe('Fusion 执行状态机', () => {
       state = got.state;
     }
     expect(state.step).toBe('done');
+  });
+});
+
+describe('发布前就在跑的工作流：旧版本状态里没有后加的字段', () => {
+  // 09-28 #398 加了 mergeRounds，发布后 #307、#276 的工作流带着旧状态，被判成「状态认不出」一直失败
+  const old = (patch: Partial<FlowState>): FlowState => {
+    const { mergeRounds: _dropped, ...rest } = at(patch);
+    return rest as FlowState;
+  };
+
+  it('缺 mergeRounds 的旧状态照样能判，按 0 起算', () => {
+    const got = nextFlow(old({ step: 'pr', blocks: 1 }), { kind: 'ci', state: 'conflict' });
+    expect(got).toMatchObject({ ok: true, action: 'sync-mainline', state: { step: 'pr', mergeRounds: 1 } });
+  });
+
+  it('已有的值原样保留，不被起始值盖掉', () => {
+    expect(upgradeFlowState(at({ mergeRounds: 2 })).mergeRounds).toBe(2);
+  });
+
+  it('【故意造出的失败】补的是缺的字段，错的值照样判成状态认不出', () => {
+    const got = nextFlow(at({ step: 'pr', blocks: 1, mergeRounds: -1 }), { kind: 'ci', state: 'conflict' });
+    expect(got.ok).toBe(false);
+    if (!got.ok) expect(got.why).toMatch('状态认不出：mergeRounds = -1');
   });
 });

@@ -184,6 +184,22 @@ const park = (state: FlowState, resume: Step, why: string): FlowDecision =>
 /** 换到下一块：每块自己的计数清零。 */
 const freshBlock = { reworks: 0, takeover: false, verifyRounds: 0, ciRounds: 0, mergeRounds: 0 } as const;
 
+/**
+ * 后加进 FlowState 的计数和它的起始值。发布前就在跑的工作流带着旧版本的状态，里面没有这些字段；
+ * 不补就被 badState 判成「状态认不出」，工作流任务一直失败、单子卡死（09-28 #398 加 mergeRounds 后 #307、#276 撞上）。
+ * 往 FlowState 加字段时同时加进这里。
+ */
+const ADDED_FIELDS: Partial<FlowState> = { mergeRounds: 0 };
+
+/** 旧版本存下的状态补上后加的字段；已有的值原样保留（错的值照样交给 badState 判）。 */
+export function upgradeFlowState(state: FlowState): FlowState {
+  let out = state;
+  for (const [k, v] of Object.entries(ADDED_FIELDS)) {
+    if ((out as unknown as Record<string, unknown>)[k] === undefined) out = { ...out, [k]: v };
+  }
+  return out;
+}
+
 function badState(state: FlowState): string | undefined {
   const counts: [string, number][] = [
     ['blocks', state.blocks],
@@ -231,7 +247,8 @@ function fixRound(state: FlowState, why: string): FlowDecision {
   return park({ ...state, step: 'pr' }, 'pr', `${why}：开了 PR 之后已经修了 ${state.ciRounds} 轮`);
 }
 
-export function nextFlow(state: FlowState, event: FlowEvent): FlowDecision {
+export function nextFlow(saved: FlowState, event: FlowEvent): FlowDecision {
+  const state = upgradeFlowState(saved);
   const bad = badState(state);
   if (bad) return { ok: false, why: bad };
   const unexpected = (): FlowDecision => ({
