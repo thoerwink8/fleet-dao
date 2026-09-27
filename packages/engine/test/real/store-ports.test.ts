@@ -1090,15 +1090,26 @@ describe('给开 PR 前验证留一家（选副手、Lead 换路由）：#293 �
     expect(!none.ok && none.detail).toMatch(/^没有别家可验：写这张单的是 claude、grok 族/);
   });
 
-  it('界面单、Lead 是 claude：副手改派 Opus（和 Lead 同族，不多加一族），验证派到 Grok；不报警', async () => {
+  it('副手只有 Grok（创始人 09-28 凌晨拍）、界面单、Lead 是 claude：副手交派不出、Lead 续自己的会话写，验证派到 Grok；不报警', async () => {
     const { grok, taskId } = await franceWorld();
+    expect(STEPS.sidekick).toEqual(['grok-4.7']);
     await startedRun(taskId, 'carpool', 'plan');
     const side = await sidekick(taskId, true);
-    expect(side).toMatchObject({ ok: true, route: { family: 'claude', modelId: 'opus-5.5' } });
-    expect(side.ok && side.why).toContain(
+    expect(side).toMatchObject({ ok: false, waitFor: 'none' });
+    expect(!side.ok && side.detail).toContain(
       '选它开 PR 前验证就没有别家可派了（写这张单的会是 claude、grok 族）',
     );
-    await startedRun(taskId, side.ok ? side.route.routeId : '', 'ui');
+    // 副手派不出由 Lead 自己干（Fusion 的 leadWork：界面类在界面阶段、续 Lead 的会话、Lead 非派不可）
+    const lead = await pick({
+      taskId,
+      stage: 'ui',
+      models: STEPS.lead,
+      uiWork: true,
+      stickRouteId: 'carpool',
+      keepVerifier: keep(true, [], 'any'),
+    });
+    expect(lead).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+    await startedRun(taskId, 'carpool', 'ui');
     expect(await verify(taskId, true)).toMatchObject({ ok: true, route: { routeId: grok, family: 'grok' } });
     expect(await noVerifierAlerts()).toEqual([]);
   });
@@ -1111,7 +1122,7 @@ describe('给开 PR 前验证留一家（选副手、Lead 换路由）：#293 �
     expect(await verify(taskId, false)).toMatchObject({ ok: true, route: { routeId: luna } });
   });
 
-  it('Lead 兜底成 Grok（规划阶段的 Opus 派不了）：界面单副手派 Grok（和 Lead 同族），验证由 Opus 验', async () => {
+  it('Lead 兜底成 Grok（规划阶段的 Opus 派不了）：界面单副手只有 Grok、和 Lead 同族先避开，交回 Lead 自己写；验证由 Opus 验', async () => {
     const { grok, taskId } = await franceWorld();
     await t.client.query(
       "update stage_policy_routes set enabled = false where stage = 'plan' and route_id in ('solo', 'carpool')",
@@ -1121,12 +1132,24 @@ describe('给开 PR 前验证留一家（选副手、Lead 换路由）：#293 �
       route: { routeId: grok },
     });
     await startedRun(taskId, grok, 'plan');
-    expect(await sidekick(taskId, true, 'grok')).toMatchObject({ ok: true, route: { routeId: grok } });
+    const side = await sidekick(taskId, true, 'grok');
+    expect(side).toMatchObject({ ok: false, waitFor: 'none' });
+    expect(!side.ok && side.detail).toContain('先派别家：Grok 4.7 是 grok 族');
+    const lead = await pick({
+      taskId,
+      stage: 'ui',
+      models: STEPS.lead,
+      uiWork: true,
+      stickRouteId: grok,
+      keepVerifier: keep(true, [], 'any'),
+    });
+    expect(lead).toMatchObject({ ok: true, route: { routeId: grok } });
     await startedRun(taskId, grok, 'ui');
     expect(await verify(taskId, true)).toMatchObject({
       ok: true,
       route: { family: 'claude', modelId: 'opus-5.5' },
     });
+    expect(await noVerifierAlerts()).toEqual([]);
   });
 
   it('【故意造出的失败】这张单做完没人能验（验证阶段只剩 Luna、又是界面单）：选副手时当场报警，照常派；再选时验证留得下了自己撤', async () => {

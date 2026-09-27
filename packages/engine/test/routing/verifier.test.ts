@@ -119,6 +119,18 @@ describe('给开 PR 前验证留一家：选副手', () => {
     expect(verifyPick(['grok', 'claude'], false)).toMatchObject({ kind: 'dispatch', routeId: 'luna' });
   });
 
+  it('副手只有 Grok（全组织默认，创始人 09-28 凌晨拍）：界面单交派不出、让 Lead 自己干，不报警；验证派到 Grok', () => {
+    const r = chooseRoute(sidekick(true, {}, [grok]));
+    expect(r.kind).toBe('none');
+    expect(r.noVerifier).toBeUndefined();
+    expect(r.kind === 'none' && r.reason).toContain(
+      '选它开 PR 前验证就没有别家可派了（写这张单的会是 claude、grok 族）',
+    );
+    expect(verifyPick(['claude'], true)).toMatchObject({ kind: 'dispatch', routeId: 'grok' });
+    // 一般的单照旧派 Grok
+    expect(chooseRoute(sidekick(false, {}, [grok]))).toMatchObject({ kind: 'dispatch', routeId: 'grok' });
+  });
+
   it('能给验证留一家的都派不出（同族的 Opus 连不上）：交派不出让 Lead 自己干，写手族不变、验证照样有人，不报警', () => {
     const r = chooseRoute(sidekick(true, {}, [grok, offline(opus)]));
     expect(r.kind).toBe('none');

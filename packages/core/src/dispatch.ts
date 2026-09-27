@@ -190,7 +190,7 @@ export type LocalGate = { ok: true } | { ok: false; reason: 'reserved_local'; wh
  * 派走，帅位要留给本机做的也一样（#293、#299 都这样被接走过）。贴了「本机做」的，自动派一律不派；人明说交（fleet-api handover）
  * 照交，不拦。标签要开单那一刻就贴上（`pnpm issue:new --local`）：事后补贴时，开单那个事件已经把它派走了。
  * 认领进库（#299）已接进接活：过了这几道还要抢认领，本机拿着的不派（packages/api/src/issue-intake.ts）。这个标签留着挡开单那一刻
- * （开单事件可能比本机认领先到）；本机开单脚本当场替帅位认领那一步做好后，它就是库里认领的镜子。
+ * （开单事件可能比本机认领先到）；接过帅位的机器 `pnpm issue:new --local` 开完单当场替帅位认领，它就是库里认领的镜子。
  */
 export function localGate(issue: Pick<IssueFamily, 'labels'>): LocalGate {
   if (!issue.labels.includes(LOCAL_LABEL)) return { ok: true };

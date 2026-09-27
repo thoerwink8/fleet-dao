@@ -11,6 +11,7 @@ import {
   holderText,
   type IssueClaim,
   isActiveClaim,
+  isDrillScope,
   MAIN_SEAT,
   machineProblem,
   type SeatLease,
@@ -20,7 +21,7 @@ import {
   seatVerdict,
   sessionProblem,
 } from '@fleet-dao/core';
-import type { Repo, Task } from '@fleet-dao/shared';
+import { type Repo, requirementWorkflowId, type Task } from '@fleet-dao/shared';
 import type { AskRecord, SeatActor, Store } from './ports.ts';
 
 export const SEAT_USAGE = [
@@ -35,7 +36,8 @@ export const SEAT_USAGE = [
 export const CLAIM_USAGE = [
   '用法：fleet-api claim <take|step|done|release|show|sweep> …（每张单一个认领，#299；都能带 --json 给脚本读）',
   '  claim take <owner/仓名> <单号> --machine <机器名> --session <会话号> --term <任期> --label <工人名> [--owner worker|seat] [--grace-minutes <分>] [--note "<一句话>"] [--scope drill:<名字>]',
-  '                                         帅位认领一张单（派给工人或自己做）',
+  '                                         帅位认领一张单（派给工人或自己做；帅位自己占着的也换给工人）',
+  '  claim take <owner/仓名> <单号> --owner engine --scope drill:<名字>   演练：引擎那一边抢（只在演练座位下，不起工作流）',
   '  claim step <owner/仓名> <单号> --claim <认领号> [--note "<一句话>"] [--pr <PR 号>]   工人报一步（心跳）、登记 PR',
   '  claim done <owner/仓名> <单号> --claim <认领号> --note "<一句话>"                    做完了',
   '  claim release <owner/仓名> <单号> --claim <认领号> --note "<一句话>"                 放下（不做了、交出去）',
@@ -225,6 +227,14 @@ export async function runSeat(
     if (p.positional.length > 0) throw new SeatCliError(`seat take 不收位置参数。\n${usage}`);
     const me = identityOf(p, usage);
     const scope = scopeOf(p, usage);
+    // 租期认不出就不接班（什么都不改）：接了班本机也不知道多久没续约算过期，帅位记录就一直算数
+    const before = await store.readSeat(scope);
+    if (!before.settings.ok)
+      return {
+        code: 1,
+        text: `没接班（座位没动）：${before.settings.why}。先把设置改对`,
+        json: { ok: false, reason: 'settings', why: before.settings.why, now: before.now },
+      };
     const { lease, now } = await store.takeSeat({ scope, ...me });
     const snap = await store.readSeat(scope);
     const lm = snap.settings.ok ? snap.settings.settings.leaseMinutes : undefined;
@@ -389,6 +399,56 @@ async function showSeat(store: Store, scope: string): Promise<SeatCliResult> {
 
 // —— claim ——
 
+/**
+ * 演练（方案「演练」第 5 步）：引擎那一边在真库上和本机同时抢一张演练单——走引擎接活用的同一个库函数（claimForEngine），
+ * 只在演练座位下允许，记在演练座位名下，不起工作流，待起补起不碰它。真引擎的认领只由接活、交单拿。
+ */
+async function drillEngineTake(
+  p: Parsed,
+  store: Store,
+  repoName: { owner: string; name: string },
+  issueNumber: number,
+): Promise<SeatCliResult> {
+  const usage = CLAIM_USAGE;
+  const scope = scopeOf(p, usage);
+  if (!isDrillScope(scope))
+    throw new SeatCliError(
+      `--owner engine 只在演练座位（--scope drill:<名字>）下能用：真引擎的认领只由接活、交单拿。\n${usage}`,
+    );
+  for (const k of ['machine', 'session', 'term', 'label', 'grace-minutes'])
+    if (p.options.has(k))
+      throw new SeatCliError(`--owner engine 不带 --${k}（引擎那一边没有帅位、工人）。\n${usage}`);
+  const note = noteOf(p, false, usage);
+  const repo = await repoOf(store, repoName);
+  const names = new Map([[repo.id, `${repo.owner}/${repo.name}`]]);
+  const label = `${repo.owner}/${repo.name}#${issueNumber}`;
+  const r = await store.claimForEngine({
+    repoId: repo.id,
+    issueNumber,
+    workflowId: requirementWorkflowId(repo, issueNumber),
+    actor: { kind: 'engine', id: 'drill' },
+    drill: scope,
+    note: note ?? `演练（${scope}）：引擎这一边只抢认领、不起工作流`,
+  });
+  if (r.ok)
+    return {
+      code: 0,
+      text: `演练：引擎拿到了 ${label}（${r.fresh ? '新认领' : '本来就拿着'}，认领号 ${r.claim.claimId}，待起；不起工作流）`,
+      json: { ok: true, claim: claimJson(r.claim, names), fresh: r.fresh, now: r.now },
+    };
+  if (r.reason === 'held')
+    return {
+      code: 3,
+      text: `演练：引擎没抢到 ${label}：${describeClaim(r.claim, r.now)}`,
+      json: { ok: false, reason: 'held', claim: claimJson(r.claim, names), now: r.now },
+    };
+  return {
+    code: 1,
+    text: `演练：引擎没抢到 ${label}：${r.why}`,
+    json: { ok: false, reason: r.reason, why: r.why, now: r.now },
+  };
+}
+
 export async function runClaim(argv: readonly string[], deps: { store: Store }): Promise<SeatCliResult> {
   const [sub = '', ...rest] = argv;
   const usage = CLAIM_USAGE;
@@ -402,13 +462,16 @@ export async function runClaim(argv: readonly string[], deps: { store: Store }):
     if (p.positional.length !== 2) throw new SeatCliError(`要两个位置参数：仓和单号。\n${usage}`);
     const repoName = repoArg(p.positional[0], usage);
     const issueNumber = positiveInt(p.positional[1] ?? '', '单号', usage);
+    if (p.options.get('owner') === 'engine') return drillEngineTake(p, store, repoName, issueNumber);
     const seat = actorOf(p, usage);
     const label = need(p, 'label', usage);
     const labelWhy = sessionProblem(label, '工人名');
     if (labelWhy) throw new SeatCliError(`${labelWhy}。\n${usage}`);
     const kind = p.options.get('owner') ?? 'worker';
     if (kind !== 'worker' && kind !== 'seat')
-      throw new SeatCliError(`--owner 只收 worker、seat，没有「${kind}」。\n${usage}`);
+      throw new SeatCliError(
+        `--owner 只收 worker、seat（演练座位下还有 engine），没有「${kind}」。\n${usage}`,
+      );
     const graceRaw = p.options.get('grace-minutes');
     const graceMinutes = graceRaw === undefined ? undefined : positiveInt(graceRaw, '宽限期（分钟）', usage);
     const note = noteOf(p, false, usage);
