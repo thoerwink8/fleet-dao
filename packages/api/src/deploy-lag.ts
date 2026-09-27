@@ -307,7 +307,9 @@ function lagOf(
   const lagText = `落后主线 ${behind} 个提交`;
   const attempt = st.attempt;
   const last = st.last?.action;
-  if (attempt?.sha === main.head && attempt.result === 'failed') {
+  // 最近一次自动发布没成、那个提交比在用的新：主线头的 CI 没跑完时，自动发布发的是往回找到的全绿提交，不一定是主线头
+  const failedAt = attempt?.result === 'failed' ? main.commits.findIndex(([sha]) => sha === attempt.sha) : -1;
+  if (attempt && failedAt >= 0 && failedAt < idx) {
     add({
       code: 'failed',
       message: `${lagText}：最近一次自动发布没成`,

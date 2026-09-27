@@ -104,6 +104,26 @@ describe('判定：读的时候现算', () => {
     expect(v.problems[0]?.detail).toContain('迁移失败');
   });
 
+  it('没成的是往回找到的那个（主线头的 CI 没跑完，发的是更早的全绿提交）：照样马上红；比在用的旧的没成不算', () => {
+    const failedAt = (sha: string) =>
+      state({
+        attempt: {
+          sha,
+          startedAt: ago(20 * MIN),
+          endedAt: ago(15 * MIN),
+          result: 'failed',
+          detail: '迁移失败',
+        },
+        last: { action: 'ci-pending', detail: '', at: ago(MIN) },
+      });
+    // 在用 H0，发 H1（不是主线头 H2）没成
+    const v = judge(input(H0, failedAt(H1)));
+    expect(codes(v)).toEqual(['failed']);
+    expect(v.problems[0]?.detail).toContain('迁移失败');
+    // 在用 H1，没成的 H0 比它旧：不是现在的事，照落后多久判（才落后 10 分钟，绿）
+    expect(judge(input(H1, failedAt(H0))).ok).toBe(true);
+  });
+
   it('部署检出跟不上：马上红；CI 红、CI 结论读不到：落后满 30 分钟红', () => {
     expect(
       codes(judge(input(H1, state({ last: { action: 'checkout-blocked', detail: 'x', at: ago(MIN) } })))),

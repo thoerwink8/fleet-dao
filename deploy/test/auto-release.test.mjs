@@ -1,5 +1,6 @@
 // 自动发布（deploy/france/auto-release/lib.mjs）每条路：CI 红不发、CI 结论读不到不发并记没查成、发布没成记下报警不死循环、
-// 引擎忙等空闲（到上限照发）、人手动切过不跟人打架、主线头读不到、规矩同步没成报警不挡发布、库连不上报警留到下一轮。
+// 引擎忙等空闲（到上限照发）、人手动切过不跟人打架、主线头读不到、规矩同步没成报警不挡发布、库连不上报警留到下一轮；
+// 主线头的 CI 还在跑、红了，沿主线往回发最新的全绿提交（只往前走，不越过在用的、人按住的、发过没成的）。
 // git、GitHub、会话、发布脚本、库都换成假的；真机上那一半（真定时器、真发布）合并后在法国装上验，记在引入本文件的 PR 里。
 // 跑法：node --test deploy/test/auto-release.test.mjs（deploy/test/run.sh 会跑）。
 import assert from 'node:assert/strict';
@@ -107,6 +108,7 @@ function machine() {
     },
     configThrow: null,
     calls: [],
+    checkouts: [], // 部署检出每次快进到的提交
     alerts: [],
     resolved: [],
     resolvedKeys: [],
@@ -128,15 +130,17 @@ function machine() {
     async readHistory() {
       return m.history;
     },
-    async ciRuns(sha) {
-      m.calls.push(`ci ${sha[0]}`);
+    // 主线最近那些次 ci.yml 的运行（一次一整份，候选都从里面判）
+    async ciRuns() {
+      m.calls.push('ci');
       if (m.ciThrow) throw new Error(m.ciThrow);
       return m.ci;
     },
     async releaseBusy() {
       return m.releaseBusy;
     },
-    async prepareCheckout() {
+    async prepareCheckout(sha) {
+      m.checkouts.push(sha);
       return m.checkout;
     },
     async sessions() {
@@ -211,7 +215,7 @@ test('平常：主线头 CI 绿、引擎空闲 → 发，发完同步规矩；�
   );
 });
 
-test('CI 红：不发，记 ci-red；结论按提交号记住，下一轮不再问 GitHub', async () => {
+test('CI 红：不发，记 ci-red；下一轮再问一次（一轮最多一次），重跑绿了就发', async () => {
   const m = machine();
   m.ci = runsBody(run(H1, 'completed', 'failure'));
   let st = await m.round();
@@ -222,9 +226,27 @@ test('CI 红：不发，记 ci-red；结论按提交号记住，下一轮不再�
   st = await m.round();
   assert.deepEqual(
     m.calls.filter((c) => c.startsWith('ci')),
-    [],
+    ['ci'],
   );
   assert.equal(st.last.action, 'ci-red');
+  // 有人在 GitHub 上重跑了这次 CI、过了
+  m.ci = runsBody(run(H1, 'completed', 'success', { run_attempt: 2 }));
+  m.t += 5 * MIN;
+  await m.round();
+  assert.deepEqual(releases(m), ['release b']);
+});
+
+test('主线头全绿记下：等引擎空闲的那几轮不再问 GitHub', async () => {
+  const m = machine();
+  m.sessions = '17 active\n';
+  await m.round();
+  m.t += 5 * MIN;
+  const st = await m.round();
+  assert.equal(st.last.action, 'wait-idle');
+  assert.deepEqual(
+    m.calls.filter((c) => c.startsWith('ci')),
+    [],
+  );
 });
 
 test('CI 结论读不到（限流、回的不是 JSON、连不上、半小时还查不到这次 CI）：不发，记没查成，下一轮再问', async () => {
@@ -261,6 +283,213 @@ test('刚合进来、CI 还没开跑或还在跑：等，不发', async () => {
   m.ci = runsBody(run(H1, 'in_progress', null));
   assert.equal((await m.round()).last.action, 'ci-pending');
   assert.deepEqual(releases(m), []);
+});
+
+// ── 主线头的 CI 没跑完、红了：沿主线往回发最新的全绿提交（2026-09-27 夜合并一密，只看主线头就一直发不出去）──
+
+const H3 = 'e'.repeat(40); // 再后来合进来的
+const ciCalls = (m) => m.calls.filter((c) => c.startsWith('ci'));
+
+test('【故意造出的失败】主线头的 CI 还在跑、前一个提交全绿：发前一个（只看主线头时这一轮跳过，合并一密就一直发不出去）', async () => {
+  const m = machine();
+  // 主线：H2（刚合进来，CI 在跑）、H1（CI 全绿）、H0（在用）
+  m.main.unshift([H2, '2026-09-27T07:58:00Z']);
+  m.ci = runsBody(run(H2, 'in_progress', null, { run_number: 11 }), run(H1, 'completed', 'success'));
+  let st = await m.round();
+  assert.deepEqual(releases(m), ['release b'], '发前一个全绿的 H1');
+  assert.deepEqual(ciCalls(m), ['ci'], '一轮只问一次 GitHub，候选都从这一份判');
+  assert.deepEqual(m.checkouts, [H1], '部署检出快进到要发的那个，不是主线头');
+  assert.equal(st.attempt.sha, H1);
+  assert.equal(st.attempt.result, 'ok');
+  assert.equal(st.last.action, 'released');
+  assert.match(st.last.detail, /主线头 cccccccccccc 的 CI 在跑/);
+  assert.equal(st.ci.sha, H2, '读数照写主线头的 CI');
+  assert.equal(st.ci.verdict, 'pending');
+  assert.equal(st.rules.commit, H1, '规矩同步跟着发出去的那个提交走');
+  // 下一轮：主线头还在跑 → 等它，H1 不再发一遍
+  m.t += 5 * MIN;
+  st = await m.round();
+  assert.deepEqual(releases(m), []);
+  assert.equal(st.last.action, 'ci-pending');
+  // 主线头也绿了 → 发它，规矩跟着到它
+  m.ci = runsBody(run(H2, 'completed', 'success', { run_number: 11 }), run(H1, 'completed', 'success'));
+  m.t += 5 * MIN;
+  st = await m.round();
+  assert.deepEqual(releases(m), ['release c']);
+  assert.equal(st.rules.commit, H2);
+});
+
+test('往回找：前一个也没全绿（排着队、被后面的推送挤掉的）、再前一个绿：发再前一个', async () => {
+  for (const [what, h2] of [
+    ['排着队', run(H2, 'queued', null, { run_number: 12 })],
+    ['被挤掉', run(H2, 'completed', 'cancelled', { run_number: 12 })],
+    ['还没开跑', null],
+  ]) {
+    const m = machine();
+    // 主线：H3（CI 在跑）、H2、H1（全绿）、H0（在用）
+    m.main.unshift([H3, '2026-09-27T07:58:00Z'], [H2, '2026-09-27T07:50:00Z']);
+    m.ci = runsBody(
+      run(H3, 'in_progress', null, { run_number: 13 }),
+      ...(h2 ? [h2] : []),
+      run(H1, 'completed', 'success'),
+    );
+    const st = await m.round();
+    assert.deepEqual(releases(m), ['release b'], what);
+    assert.deepEqual(m.checkouts, [H1], what);
+    assert.equal(st.current, H1, what);
+  }
+});
+
+test('往回找到的要等引擎空闲：读数写明要发哪个，空了照发它', async () => {
+  const m = machine();
+  m.main.unshift([H2, '2026-09-27T07:58:00Z']);
+  m.ci = runsBody(run(H2, 'in_progress', null, { run_number: 11 }), run(H1, 'completed', 'success'));
+  m.sessions = '17 active\n';
+  let st = await m.round();
+  assert.equal(st.last.action, 'wait-idle');
+  assert.match(st.last.detail, /要发的是 bbbbbbbbbbbb：主线头 cccccccccccc 的 CI 在跑/);
+  m.sessions = '';
+  m.t += 5 * MIN;
+  st = await m.round();
+  assert.deepEqual(releases(m), ['release b']);
+});
+
+test('只往前走：比在用的旧的提交再绿也不发；在用的之后没有全绿的就等', async () => {
+  const m = machine();
+  // 主线：H2（CI 在跑）、H1（在用，自动发的）、H0（全绿，比在用的旧）
+  m.current = H1;
+  m.history += `2026-09-27T07:35:00Z ${H1} release auto\n`;
+  m.main.unshift([H2, '2026-09-27T07:58:00Z']);
+  m.ci = runsBody(
+    run(H2, 'in_progress', null, { run_number: 11 }),
+    run(H1, 'completed', 'failure'),
+    run(H0, 'completed', 'success', { run_number: 9 }),
+  );
+  const st = await m.round();
+  assert.deepEqual(releases(m), []);
+  assert.deepEqual(m.checkouts, []);
+  assert.equal(st.last.action, 'ci-pending');
+});
+
+test('往回找时 CI 状态读不到（限流、连不上、回的认不出、HTTP 出错）：整轮不发、写明没查成，不拿哪一个当绿', async () => {
+  for (const [why, setup] of [
+    ['限流', (m) => (m.ci = { status: 403, body: '{"message":"API rate limit exceeded"}', rate: '' })],
+    ['连不上', (m) => (m.ciThrow = 'getaddrinfo EAI_AGAIN api.github.com')],
+    ['回的不是运行列表', (m) => (m.ci = { status: 200, body: '{"message":"Not Found"}' })],
+    ['HTTP 502', (m) => (m.ci = { status: 502, body: '' })],
+  ]) {
+    const m = machine();
+    m.main.unshift([H2, '2026-09-27T07:58:00Z']);
+    setup(m);
+    const st = await m.round();
+    assert.deepEqual(releases(m), [], why);
+    assert.equal(st.last.action, 'ci-unknown', why);
+    assert.match(st.last.detail, /没查成/, why);
+    assert.equal(st.ci.sha, H2, why);
+    assert.equal(st.ci.verdict, 'unknown', why);
+  }
+});
+
+test('主线头红了、前一个全绿：前一个照发；之后主线头还红，照旧报 ci-red（主线红要修）', async () => {
+  const m = machine();
+  m.main.unshift([H2, '2026-09-27T07:50:00Z']);
+  m.ci = runsBody(run(H2, 'completed', 'failure', { run_number: 11 }), run(H1, 'completed', 'success'));
+  let st = await m.round();
+  assert.deepEqual(releases(m), ['release b']);
+  assert.match(st.last.detail, /主线头 cccccccccccc 的 CI 结论是 failure/);
+  m.t += 5 * MIN;
+  st = await m.round();
+  assert.deepEqual(releases(m), []);
+  assert.equal(st.last.action, 'ci-red');
+  assert.equal(st.waitingSince, null);
+});
+
+test('发过没成的提交：它和比它旧的都不再自动发（不往回挑它前面的再试一个），等主线出比它新的全绿提交', async () => {
+  for (const [what, setup, said] of [
+    [
+      '自动发过、没成（记在状态里）',
+      (m) =>
+        (m.state = {
+          schema: STATE_SCHEMA,
+          attempt: {
+            sha: H2,
+            startedAt: '2026-09-27T07:52:00Z',
+            endedAt: '2026-09-27T07:56:00Z',
+            result: 'failed',
+          },
+          alerts: [],
+          resolve: [],
+        }),
+      /cccccccccccc 自动发过、没成/,
+    ],
+    [
+      '发过、没过健康检查（记在发布历史里，状态文件丢了也认得）',
+      (m) =>
+        (m.history +=
+          `2026-09-27T07:52:00Z ${H2} release auto\n` +
+          `2026-09-27T07:55:00Z ${H2} unhealthy auto\n` +
+          `2026-09-27T07:55:30Z ${H0} auto-rollback auto\n`),
+      /cccccccccccc 发过、没过健康检查/,
+    ],
+  ]) {
+    const m = machine();
+    // 主线：H3（CI 在跑）、H2（发过没成）、H1（全绿，从没发过）、H0（在用）
+    m.main.unshift([H3, '2026-09-27T07:58:00Z'], [H2, '2026-09-27T07:50:00Z']);
+    m.ci = runsBody(
+      run(H3, 'in_progress', null, { run_number: 12 }),
+      run(H2, 'completed', 'success', { run_number: 11 }),
+      run(H1, 'completed', 'success'),
+    );
+    setup(m);
+    let st = await m.round();
+    assert.deepEqual(releases(m), [], what);
+    assert.equal(st.last.action, 'ci-pending', what);
+    assert.match(st.last.detail, said, what);
+    m.ci = runsBody(run(H3, 'completed', 'success', { run_number: 12 }));
+    m.t += 5 * MIN;
+    st = await m.round();
+    assert.deepEqual(releases(m), ['release e'], what);
+  }
+});
+
+test('往回找到的那个发布没成：报警记它；它不再试，主线头绿了发主线头，报警解除', async () => {
+  const m = machine();
+  m.main.unshift([H2, '2026-09-27T07:58:00Z']);
+  m.ci = runsBody(run(H2, 'in_progress', null, { run_number: 11 }), run(H1, 'completed', 'success'));
+  m.release = { code: 1, log: '/srv/fleet-dao-releases/.logs/z.log', detail: '迁移失败' };
+  let st = await m.round();
+  assert.deepEqual(releases(m), ['release b']);
+  assert.equal(st.attempt.result, 'failed');
+  assert.deepEqual(
+    m.alerts.map((a) => a.key),
+    [`${FAILED_PREFIX}${H1}`],
+  );
+  m.t += 5 * MIN;
+  st = await m.round();
+  assert.deepEqual(releases(m), [], '没成的不再试');
+  assert.equal(st.last.action, 'ci-pending');
+  m.ci = runsBody(run(H2, 'completed', 'success', { run_number: 11 }), run(H1, 'completed', 'success'));
+  m.release = { code: 0, log: '', detail: '' };
+  m.t += 5 * MIN;
+  await m.round();
+  assert.deepEqual(releases(m), ['release c']);
+  assert.deepEqual(m.resolved, [FAILED_PREFIX]);
+});
+
+test('人手动退回过：退回之前合进来的提交（含退回掉的那个）再绿也不自动发，只发那之后合进来的', async () => {
+  const m = machine();
+  // H1 自动发过，人 07:50 手动退回 H0；之后合进来 H2（CI 在跑）
+  m.history += `2026-09-27T07:40:00Z ${H1} release auto\n2026-09-27T07:50:00Z ${H0} rollback\n`;
+  m.main.unshift([H2, '2026-09-27T07:55:00Z']);
+  m.ci = runsBody(run(H2, 'in_progress', null, { run_number: 11 }), run(H1, 'completed', 'success'));
+  let st = await m.round();
+  assert.deepEqual(releases(m), []);
+  assert.equal(st.last.action, 'ci-pending');
+  assert.equal(st.hold, null, '主线上有了人退回之后合进来的提交，就不算按住');
+  m.ci = runsBody(run(H2, 'completed', 'success', { run_number: 11 }), run(H1, 'completed', 'success'));
+  m.t += 5 * MIN;
+  st = await m.round();
+  assert.deepEqual(releases(m), ['release c']);
 });
 
 test('发布没成：记下、报警一次；同一个提交不再试（不死循环），主线出了新提交再发；跟上后报警解除', async () => {
