@@ -16,6 +16,8 @@
 // 整个删掉（正常结束、失败、被叫停、没起来都一样）；工人重启接不上的在 awaitSession / stopSession 里删；工人起来时
 // reapOrphanSessions 把上一轮剩下的全清掉。删不掉不改会话的结局，只记日志、下次起来再清。
 //
+// 停机排空（drain.ts）：引擎在停时不起新会话（ENGINE_STOPPING）；过了闸的会话登记着，交回工作流才撤，停机等它们做完。
+// 会话被信号杀掉（没终帧、137/143）时按证据写是谁杀的（kill-evidence.ts：引擎在停、内存超限、没查到），不猜。
 // 看守：进程是这个工人进程起的（registry）。接不上（工人重启过、输出管道断了）就按记下的 scope 收掉旧会话，回
 // SESSION_LOST，工作流续会话重起。过程中：心跳；进度事件攒一小批写库（fleet done 的核实要读会话自己跑过的测试，
 // 所以写得要快）；额度读数顺手记账；每分钟按进展判一次停滞（failure/stall.ts），在绕圈、工具卡死就停掉，结局 stalled
@@ -69,6 +71,7 @@ import {
   upsertAlert,
 } from '@fleet-dao/db';
 import type { ProgressEvent, RunOutcome, StageKind } from '@fleet-dao/shared';
+import { type EngineDrain, stoppingNote } from '../drain.ts';
 import { judgeStallWithJev, NO_JEV, triageFailureAsked } from '../failure/ask.ts';
 import type { JevPort, JevReply } from '../failure/jev.ts';
 import { judgeStall, type StallPolicy, type StallToolCall } from '../failure/stall.ts';
@@ -98,6 +101,15 @@ import {
   type WiredHost,
   wiredHostNames,
 } from './hosts.ts';
+import {
+  explainKill,
+  type KillEvidenceDeps,
+  killSignal,
+  type OomCounters,
+  oomCounters,
+  realKillEvidence,
+  scopeOomKills,
+} from './kill-evidence.ts';
 import { bundleFromMirror, type MirrorGitHub, mapped } from './mirror.ts';
 import {
   isLeadKind,
@@ -142,6 +154,7 @@ import {
   removeFileAs,
   type UserTree,
   uncommittedTracked,
+  worktreeChanges,
 } from './user-git.ts';
 import type { WorkTrees } from './worktrees.ts';
 
@@ -155,6 +168,45 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** 切号停下的会话交回的失败码（#59）：失败分流 OS1 认它——马上续同一个会话，不算失败、不记重试的账。 */
 export const ORG_SWITCH_CODE = 'org_switch';
 const orgSwitchFailure = (why: string) => ({ code: ORG_SWITCH_CODE, message: why, retryable: true });
+/**
+ * 排空到截止停下的会话交回的失败码（drain.ts）：失败分流 KL3 认它——不算失败、不记重试的账，新引擎起来按编号续同一个会话。
+ * 引擎在停的那一刻会话被信号杀掉（kill-evidence.ts 对上了）也交这个码。
+ */
+export const ENGINE_STOP_CODE = 'engine_stop';
+/** 引擎在排空、这次没起会话（startSession 拒了）：失败分流 ES1 认它——不记账，回去选路（选路这时回「过一会儿再选」）。 */
+export const ENGINE_STOPPING_CODE = 'ENGINE_STOPPING';
+
+/** 插头默认等第一帧的时限（adapters 的 DEFAULT_PROCESS_LIMITS.startupMs）。 */
+export const STARTUP_BASE_MS = 180_000;
+/** 续会话等第一帧最多放宽到这么久：再久就不是在读过程记录了。 */
+export const RESUME_STARTUP_MAX_MS = 12 * 60_000;
+/** 上下文每这么多 token 多等一分钟；不知道上下文多大就按上一轮跑了多久，每 10 分钟多等一分钟。 */
+export const RESUME_STARTUP_TOKENS_PER_MINUTE = 40_000;
+export const RESUME_STARTUP_RUN_MS_PER_MINUTE = 10 * 60_000;
+
+/**
+ * 续会话（resume、fork）等第一帧的时限，按会话已有的长度放宽：执行体要先把整段过程记录读进来才吐第一帧，会话越长读得越久。
+ * 2026-09-28 02:01:47 #276 的 Grok 会话跑了 55 分钟，续的时候 3 分钟没第一帧（startup_timeout），退回去续了规划那一步的会话，
+ * 55 分钟的上下文丢了。新开、接力的会话不读过程记录，照插头默认（undefined）。
+ */
+export function resumeStartupMs(
+  mode: ContinueMode,
+  prior: Pick<SessionRunState, 'contextTokens' | 'startedAt' | 'endedAt'> | null,
+): number | undefined {
+  if ((mode !== 'resume' && mode !== 'fork') || !prior) return undefined;
+  let extraMinutes: number;
+  if (prior.contextTokens !== null && prior.contextTokens > 0) {
+    extraMinutes = Math.ceil(prior.contextTokens / RESUME_STARTUP_TOKENS_PER_MINUTE);
+  } else if (prior.startedAt && prior.endedAt) {
+    extraMinutes = Math.ceil(
+      (prior.endedAt.getTime() - prior.startedAt.getTime()) / RESUME_STARTUP_RUN_MS_PER_MINUTE,
+    );
+  } else {
+    // 多长都不知道：按放宽的一半给，不拿默认的 3 分钟赌
+    return Math.round((STARTUP_BASE_MS + RESUME_STARTUP_MAX_MS) / 2);
+  }
+  return Math.min(RESUME_STARTUP_MAX_MS, STARTUP_BASE_MS + Math.max(0, extraMinutes) * 60_000);
+}
 
 export interface ContinuationFacts {
   /** 工作流要接着的会话号（可能是 cursor 的临时号）。 */
@@ -262,6 +314,13 @@ export interface SessionPortsDeps {
   stallCheckMs?: number;
   flushMs?: number;
   spawnTimeoutMs?: number;
+  /**
+   * 停机排空（drain.ts）：引擎在停时不起新会话（抛 ENGINE_STOPPING，失败分流 ES1 不记账、回去选路）；过了闸的会话登记在它上面，
+   * 交回工作流（或没起来）就撤掉，停机时等它们。不给就不闸（测试、只起一次的工具）。
+   */
+  drain?: EngineDrain;
+  /** 会话被信号杀掉时去哪查证据（kill-evidence.ts）：测试换成假的；不给就读真的 cgroup、发布目录。 */
+  killEvidence?: KillEvidenceDeps;
   log?: (message: string, fields?: Record<string, unknown>) => void;
 }
 
@@ -270,6 +329,11 @@ export type SessionPorts = Pick<EnginePorts, 'startSession' | 'awaitSession' | '
   reapOrphanSessions(): Promise<number>;
   /** 切号（#59，real/org-switch.ts）用的两样：停下、还剩哪些。 */
   orgSwitch: OrgSwitchSessions;
+  /**
+   * 排空到截止（drain.ts）：把进程已经起来、还没收场的会话都停下（插头收进程），它们交回 engine_stop，新引擎起来按编号续上；
+   * 交回这一次叫停的会话编号（已经在停的不重复叫停）。
+   */
+  drainStop(why: string): string[];
 };
 
 /**
@@ -318,6 +382,8 @@ interface Live {
     | { kind: 'stall'; rule: string; basis: string }
     /** 切号（#59）：会话用户要换组织，先停下，切过去接着干（交回 org_switch，失败分流 OS1 马上续）。 */
     | { kind: 'org-switch'; why: string }
+    /** 排空到截止（drain.ts）：先停下，新引擎起来按编号续上（交回 engine_stop，失败分流 KL3）。 */
+    | { kind: 'engine-stop'; why: string }
     | undefined;
   pending: ProgressEvent[];
   flushTimer: ReturnType<typeof setTimeout> | undefined;
@@ -334,6 +400,16 @@ interface Live {
   says: string[];
   plan: Map<string, string>;
   quotaError: string | undefined;
+  /** 起来时读的会话资源池按内存杀进程的累计数：被信号杀掉时拿它比（kill-evidence.ts）。 */
+  oomBefore: Promise<OomCounters>;
+  /** 会话自己的 scope 名（插头交回的），看守醒来读它的内存记录。 */
+  scopeUnit: string | undefined;
+  /** 看守读到的它自己 scope 里按内存杀进程的最大数；没读到过是 undefined。 */
+  scopeOomSeen: number | undefined;
+  /** 这个会话在跑时，这个工人手上同时在跑的别的会话最多几个。 */
+  peersSeen: number;
+  /** 正挂着的看守有几个（看守被取消时会话可能还在跑，收场后由起会话那头撤掉排空的登记）。 */
+  awaiting: number;
 }
 
 const STEP_RANK: Record<string, number> = { pending: 0, in_progress: 1, done: 2 };
@@ -470,6 +546,7 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
   const flushMs = deps.flushMs ?? 300;
   const spawnTimeoutMs = deps.spawnTimeoutMs ?? 120_000;
   const log = deps.log ?? ((message, fields) => console.warn(message, fields ?? {}));
+  const evidence = deps.killEvidence ?? realKillEvidence();
   const helperOpts = {
     ...(deps.helper ? { helper: deps.helper } : {}),
     ...(deps.sudo ? { sudo: deps.sudo } : {}),
@@ -761,10 +838,55 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     return { ...decideContinuation({ resumeId, prior, before, route, driver, user, dir, forkMax }), prior };
   }
 
+  /**
+   * 起会话的闸（停机排空，drain.ts）：引擎在停就不起，抛 ENGINE_STOPPING（不可重试：交回工作流，失败分流 ES1 不记账、回去选路，
+   * 选路这时回「过一会儿再选」、新引擎起来再派）。过了闸先登记（和上面的判断之间没有 await：停机信号插不进来），
+   * 起来了改成按会话自己的时限等，没起来就撤掉。同一个 runId 的重试（这个进程里已经起了的）不拦。
+   */
   async function startSession(input: LaunchSessionInput, ctx: Parameters<EnginePorts['startSession']>[1]) {
     const known = registry.get(input.runId);
     if (known) return resultOf(known, await known.spawned);
+    const stopping = deps.drain?.stopping();
+    if (stopping) {
+      throw new PortError(ENGINE_STOPPING_CODE, `${stoppingNote(stopping)}；这次没起会话 ${input.runId}`, {
+        retryable: false,
+      });
+    }
+    const since = clock().getTime();
+    deps.drain?.track({
+      runId: input.runId,
+      stage: input.stage,
+      taskId: input.taskId,
+      phase: 'starting',
+      since: new Date(since).toISOString(),
+    });
+    try {
+      const started = await launch(input, ctx);
+      const live = registry.get(input.runId);
+      if (!live) {
+        // 交回的是上一个工人进程起的（看守接不上、会按 SESSION_LOST 收掉它）：这个进程不用等它
+        deps.drain?.settle(input.runId);
+        return started;
+      }
+      deps.drain?.track({
+        runId: input.runId,
+        stage: input.stage,
+        taskId: input.taskId,
+        phase: 'running',
+        since: new Date(live.startedAt).toISOString(),
+      });
+      // 进程收场时没有看守挂着（看守被取消、工作流收尾只叫了停）：没人会交回它了，不再等它
+      void live.cleaned.then(() => {
+        if (live.awaiting === 0) deps.drain?.settle(input.runId);
+      });
+      return started;
+    } catch (error) {
+      deps.drain?.settle(input.runId);
+      throw error;
+    }
+  }
 
+  async function launch(input: LaunchSessionInput, ctx: Parameters<EnginePorts['startSession']>[1]) {
     const route = await routeLaunchFacts(db, input.route.routeId);
     if (!route) {
       throw new PortError('ROUTE_NOT_FOUND', `库里没有路由 ${input.route.routeId}`, { retryable: false });
@@ -900,6 +1022,13 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
             prior?.failureMessage ? `${why}；${prior.failureMessage}` : why,
           )
         : undefined;
+    // 上一个会话没提交的改动（发布停机、续不上退回别的会话时留下的）：写进提示词，让它先读再接着做
+    let leftover: string[] | { error: string };
+    try {
+      leftover = await worktreeChanges(t);
+    } catch (error) {
+      leftover = { error: errorText(error) };
+    }
     const prompt = stagePrompt({
       stage: input.stage,
       brief: input.brief,
@@ -908,6 +1037,7 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
       mode,
       previousProblem: prior?.failureMessage ?? undefined,
       relay,
+      leftover,
     });
     // 发给别家的（开 PR 前验证，Fusion 按简报派给别家的副手……）：整份提示词（这次真要发的那一份，续会话、接力的也算）
     // 先过卫生检查，过不了不起会话。简报是 Lead 写的，没进过公开的地方
@@ -924,6 +1054,17 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     const again = await getSessionRun(db, input.runId);
     if (again?.stopRequested) {
       throw new PortError('SESSION_STOPPED', `会话 ${input.runId} 已经叫停，不再起`, { retryable: false });
+    }
+    // 建树的这几分钟里开始排空了（要发新版本）：进程还没起，不起了——起了也做不完这一步，树留着，新引擎起来接着用
+    const draining = deps.drain?.stopping();
+    if (draining) {
+      throw new PortError(
+        ENGINE_STOPPING_CODE,
+        `${stoppingNote(draining)}；树建好了，进程没起（会话 ${input.runId}）`,
+        {
+          retryable: false,
+        },
+      );
     }
     // 临时目录紧挨着起进程建：从这里起，不管起没起来、怎么收场，插头一收场就删（下面的 live.cleaned）。
     // 建不成照工作树建不成一样报 ADOPT_FAILED；同一个 runId 重试时它在就改属主（帮手的 adopt 可重入）。
@@ -975,8 +1116,15 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
       says: [],
       plan: new Map(),
       quotaError: undefined,
+      // 起进程前读一次资源池的累计数：被信号杀掉时比涨没涨（读不成的照实带着原因，不当成 0）
+      oomBefore: oomCounters(evidence),
+      scopeUnit: undefined,
+      scopeOomSeen: undefined,
+      peersSeen: registry.size,
+      awaiting: 0,
     };
     const cgroup: CgroupScope = { id: input.runId, user, limits, ...helperOpts };
+    const startupMs = resumeStartupMs(mode, prior);
     registry.set(input.runId, live);
     let spawnedYet = false;
     live.report = driver
@@ -997,6 +1145,8 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
             // 插头自己的 idle 超时管「光是没动静」；总时长比看守的限时（sessionMinutes）早一分钟到，插头先收场。
             idleMs: input.stallSeconds * 1000,
             wallClockMs: Math.max(60_000, input.sessionMinutes * 60_000 - 60_000),
+            // 续会话按已有长度多等第一帧（resumeStartupMs）
+            ...(startupMs === undefined ? {} : { startupMs }),
           },
           testCommands: task.repo.testCommand ? [task.repo.testCommand] : [],
           cgroup,
@@ -1012,6 +1162,7 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
           onRateLimit: (reading) => onRateLimit(live, reading),
           onSpawn: (info) => {
             spawnedYet = true;
+            live.scopeUnit = info.scope;
             spawnResolve(info);
           },
           // cursor 开新会话：真号到了才知道。先到的算（插头续会话时对不上的号不报，直接停）。
@@ -1136,6 +1287,17 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     } catch (error) {
       return `（收旧会话时出错：${errorText(error)}）`;
     }
+  }
+
+  /**
+   * 看守每醒一次：记下这个工人手上同时在跑的别的会话有几个、读会话自己 scope 的按内存杀进程记录——进程被信号杀掉时，
+   * 它的 scope 多半已经收掉了，只能靠平时读下的（kill-evidence.ts）。读不到不算错，那一项证据就是没有。
+   */
+  async function noteMemoryAndPeers(live: Live): Promise<void> {
+    live.peersSeen = Math.max(live.peersSeen, registry.size - 1);
+    if (!live.scopeUnit) return;
+    const n = await scopeOomKills(evidence, live.scopeUnit);
+    if (n !== undefined) live.scopeOomSeen = Math.max(live.scopeOomSeen ?? 0, n);
   }
 
   async function checkStall(live: Live): Promise<void> {
@@ -1508,6 +1670,28 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
         runAsUser: live.user,
       },
     });
+    /**
+     * 没交终帧就退了、而且是被信号杀掉的（信号 SIGKILL、SIGTERM，或 sh 包着交回的 137、143）：按证据定是谁杀的
+     * （kill-evidence.ts），码换成 engine_stop / oom_killed / signal_unexplained 交给失败分流，证据接在原文后面。不猜。
+     */
+    const failedOrKilled = async (code: string, message: string): Promise<SessionEnd> => {
+      const signal =
+        code === 'no_result' || code === 'exit_nonzero'
+          ? killSignal(report.facts.exitCode, report.facts.signal)
+          : null;
+      if (!signal) return failed(code, message);
+      const scopeNow = live.scopeUnit ? await scopeOomKills(evidence, live.scopeUnit) : undefined;
+      const seen = [live.scopeOomSeen, scopeNow].filter((n): n is number => n !== undefined);
+      const cause = await explainKill(evidence, {
+        signal,
+        endedAt: live.startedAt + report.wallMs,
+        stopping: deps.drain?.stopping() ?? null,
+        before: await live.oomBefore,
+        scopeSeen: seen.length > 0 ? Math.max(...seen) : undefined,
+        othersRunning: live.peersSeen,
+      });
+      return failed(cause.code, `${message}；${cause.why}`);
+    };
 
     if (live.stop?.kind === 'stop') return { ...common, outcome: 'stopped' };
     // 切号停下的：交回 org_switch（可重试），工作流续同一个会话，换了池就 fork 续上（失败分流 OS1）
@@ -1516,6 +1700,20 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
         ...common,
         outcome: 'failed',
         failure: { ...orgSwitchFailure(live.stop.why), machine: deps.machine, runAsUser: live.user },
+      };
+    }
+    // 排空到截止停下的：交回 engine_stop（可重试），新引擎起来工作流续同一个会话（失败分流 KL3，不记账）
+    if (live.stop?.kind === 'engine-stop') {
+      return {
+        ...common,
+        outcome: 'failed',
+        failure: {
+          code: ENGINE_STOP_CODE,
+          message: `要发新版本，到了宽限的截止先停下：${live.stop.why}；新引擎起来按编号续上`,
+          retryable: true,
+          machine: deps.machine,
+          runAsUser: live.user,
+        },
       };
     }
     if (live.stop?.kind === 'stall') {
@@ -1556,7 +1754,7 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
         };
       }
       if (verdict.outcome === 'stopped') return { ...common, outcome: 'stopped' };
-      if (verdict.outcome !== 'ok') return failed(verdict.reason, verdict.detail);
+      if (verdict.outcome !== 'ok') return failedOrKilled(verdict.reason, verdict.detail);
       if (!done) {
         return failed('not_delivered', '会话结束了，但没用 fleet done 交活（也没用 fleet blocked 说卡在哪）');
       }
@@ -1583,7 +1781,7 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
       };
     }
     if (verdict.outcome === 'stopped') return { ...common, outcome: 'stopped' };
-    if (verdict.outcome !== 'ok') return failed(verdict.reason, verdict.detail);
+    if (verdict.outcome !== 'ok') return failedOrKilled(verdict.reason, verdict.detail);
     const output = await readOutput(live);
     if ('error' in output) return failed('wrong_output', output.error);
     return { ...common, outcome: 'done', output: output.ok };
@@ -1623,14 +1821,35 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
       };
     }
 
+    live.awaiting += 1;
+    let settled = false;
+    try {
+      return await watchLive(live, ctx, () => {
+        settled = true;
+      });
+    } finally {
+      live.awaiting -= 1;
+      // 交回了：停机不用再等它。看守被取消（会话还在跑）的不撤：停机照它自己的时限等，收场时起会话那头撤
+      if (settled) deps.drain?.settle(live.runId);
+    }
+  }
+
+  /** 看守挂着的那一段：等进程收场、心跳、写进度、判停滞，收场后判结局、写库、交回。onSettled 在进程收场时叫。 */
+  async function watchLive(
+    live: Live,
+    ctx: Parameters<EnginePorts['awaitSession']>[1],
+    onSettled: () => void,
+  ): Promise<SessionEnd> {
     let nextStall = Date.now() + stallCheckMs;
     let settled = false;
     const ended = live.report.then(
       () => {
         settled = true;
+        onSettled();
       },
       () => {
         settled = true;
+        onSettled();
       },
     );
     while (!settled) {
@@ -1649,6 +1868,7 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
       }
       ctx.heartbeat({ runId: live.runId, sessionId: live.sessionId });
       await flush(live);
+      await noteMemoryAndPeers(live);
       if (Date.now() >= nextStall) {
         nextStall = Date.now() + stallCheckMs;
         try {
@@ -1769,7 +1989,18 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     live: (poolIds) => [...registry.values()].filter((l) => poolIds.has(l.poolId)).map((l) => l.runId),
   };
 
-  return { startSession, awaitSession, stopSession, reapOrphanSessions, orgSwitch };
+  function drainStop(why: string): string[] {
+    const stopped: string[] = [];
+    for (const live of registry.values()) {
+      if (live.stop) continue;
+      live.stop = { kind: 'engine-stop', why };
+      live.abort.abort();
+      stopped.push(live.runId);
+    }
+    return stopped;
+  }
+
+  return { startSession, awaitSession, stopSession, reapOrphanSessions, orgSwitch, drainStop };
 }
 
 /** 选路那边认的前缀，从这里也导出一份：session 端口写、store 端口读，同一个常量。 */

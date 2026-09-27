@@ -119,6 +119,26 @@ export interface PromptInput {
   /** 上一轮结束时的问题（续会话时告诉它上一轮哪里没过）。 */
   previousProblem?: string | undefined;
   relay?: RelayFacts | undefined;
+  /**
+   * 起会话时工作树里没提交的改动（git status --porcelain 的行）：多半是上一个会话没做完就断了留下的（发布停机、续会话起不来退回
+   * 别的会话，2026-09-28 #276 丢过 26 个文件的改动）。{ error } = 没查成，照实告诉它自己看。
+   */
+  leftover?: string[] | { error: string } | undefined;
+}
+
+/** 工作树里有上一个会话没提交的改动：先读再接着做，别从头重写、别丢。没查成照实说。 */
+export function leftoverBlock(leftover: PromptInput['leftover']): string {
+  if (!leftover) return '';
+  if (!Array.isArray(leftover)) {
+    return `没查成工作树里有没有上一个会话没提交的改动（${leftover.error}）：先自己 git status、git diff 看一眼再接着做。`;
+  }
+  if (leftover.length === 0) return '';
+  const shown = leftover.slice(0, 20).map((l) => `- ${l}`);
+  if (leftover.length > 20) shown.push(`- ……还有 ${leftover.length - 20} 个`);
+  return [
+    `工作树里有上一个会话没提交的改动（${leftover.length} 个文件，多半是它没做完就断了）：先读 git status、git diff 看清做到了哪，在它上面接着做；别当成没做过从头重写，也别丢掉。`,
+    ...shown,
+  ].join('\n');
 }
 
 const list = (items: readonly string[], empty = '（无）') =>
@@ -395,6 +415,7 @@ export function stagePrompt(input: PromptInput): string {
       input.brief.lead && !problem ? '这张单的下一步：' : `接着干${problem ? '' : '。'}${problem}`,
       feedbackBlock(input.brief),
       answersBlock(input.brief),
+      leftoverBlock(input.leftover),
       deliverBlock(input),
     ]
       .filter(Boolean)
@@ -406,6 +427,7 @@ export function stagePrompt(input: PromptInput): string {
     feedbackBlock(input.brief),
     answersBlock(input.brief),
     input.mode === 'relay' && input.relay ? relayBlock(input.relay) : '',
+    leftoverBlock(input.leftover),
     problem,
     deliverBlock(input),
     RULES,

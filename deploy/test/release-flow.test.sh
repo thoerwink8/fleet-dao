@@ -843,11 +843,168 @@ else
   skipped=1
 fi
 
-echo "== 自动发布的参数：--auto 只跟一个主线上的提交，--busy-ok 只跟着 --auto；不对就用法错（64），什么都不做"
+echo "== 排空引擎（发布不白杀在干的活）：构建之前写排空请求，迁移之前等排空、停引擎、撤请求；读不到、不会排空、等到上限都照实说"
+if [[ -z "$NODE" ]]; then
+  echo "  ✗ 没跑成：这台没有 node"
+  fail=1
+else
+  ENG=$TMP/engine
+  mkdir -p "$ENG"
+  ENGINE_STATE_DEFAULT=$ENG
+  ENGINE_ENV=$TMP/no-engine.env
+  ENG_STATE=active
+  : >"$ENG/calls"
+  systemctl() { # 引擎单元的桩：在不在跑、主进程号、停、起；调过什么记进 calls
+    case "$*" in
+    "is-active fleet-engine.service") echo "$ENG_STATE" ;;
+    "is-enabled fleet-engine.service") echo enabled ;;
+    "show -p MainPID --value fleet-engine.service") echo "$$" ;;
+    "stop fleet-engine.service")
+      echo stop >>"$ENG/calls"
+      ENG_STATE=inactive
+      ;;
+    "start fleet-engine.service" | "restart fleet-engine.service")
+      echo "${1}" >>"$ENG/calls"
+      ENG_STATE=active
+      ;;
+    *) command systemctl "$@" ;;
+    esac
+  }
+  status_json() { # 会话数 [pid]
+    local list="" i
+    for ((i = 0; i < $1; i++)); do list+="${list:+,}{\"runId\":\"run-$i-xxxxxxxx\",\"stage\":\"execute\",\"taskId\":\"t\",\"phase\":\"running\",\"since\":\"x\"}"; done
+    printf '{"schema":2,"pid":%s,"writtenAt":"x","cordon":{"source":"release","since":"x","until":"2026-09-28T01:40:00.000Z","why":"w"},"overdue":false,"sessions":[%s]}\n' \
+      "${2:-$$}" "$list" >"$ENG/drain.json"
+  }
+  # 排空时每睡一觉，「引擎」交回一个会话；第一次睡的时候把排空请求抄下来
+  sleep() {
+    if [[ ! -f "$ENG/request-seen" && -f "$DRAIN_REQUEST" ]]; then cp -- "$DRAIN_REQUEST" "$ENG/request-seen"; fi
+    local n
+    n=$(grep -o '"runId"' "$ENG/drain.json" | grep -c .)
+    if ((n > 0 && ${ENG_STUCK:-0} == 0)); then status_json $((n - 1)); fi
+  }
+  FLEET_SERVICES=fleet-engine
+  AUTO=0
+  DRAIN_POLL=0
+
+  status_json 2
+  rm -f -- "$ENG/request-seen"
+  reset
+  do_release "$A" >"$TMP/out"
+  check "会排空的引擎：切到 A" "$(current_sha)" "$A"
+  check "等两个会话交回（睡了两觉）才停引擎，停完起回来（切版本）" "$(tr '\n' ' ' <"$ENG/calls")" "stop start "
+  check "排空请求写的是要切到的提交、人手动发" \
+    "$("$NODE" -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(r.schema,r.sha===process.argv[2],r.by,(Date.parse(r.until)-Date.parse(r.requestedAt))/1000)' "$ENG/request-seen" "$A")" \
+    "1 true manual 600"
+  check "停完撤了排空请求（新引擎起来不能再认它）" "$([[ -e "$DRAIN_REQUEST" ]] && echo 还在 || echo 撤了)" 撤了
+  check "说了排空请求、排空了、停下引擎" \
+    "$(said '排空请求：引擎不起新会话'):$(said '引擎排空了：手上没有会话'):$(said '停下引擎（切版本之前）')" "1:1:1"
+  check "会排空的引擎：没有待处理" "${#PENDING[@]}" 0
+
+  : >"$ENG/calls"
+  rm -f -- "$ENG/drain.json"
+  reset
+  do_release "$B" >"$TMP/out"
+  check "引擎不会排空（没有 drain.json）：照旧停、切到 B" "$(current_sha):$(tr '\n' ' ' <"$ENG/calls")" "$B:stop start "
+  check "不会排空：照实记待处理（会话会断、按编号续上），不当成排空了" \
+    "$(printf '%s\n' "${PENDING[@]}" | grep -c '在跑的引擎不会排空：没有 .*drain.json')" 1
+
+  : >"$ENG/calls"
+  status_json 1 99999999
+  reset
+  do_release "$C" >"$TMP/out"
+  check "drain.json 是上一个进程留下的（pid 对不上）：不信，当不会排空" \
+    "$(printf '%s\n' "${PENDING[@]}" | grep -c '是上一个进程（99999999）留下的')" 1
+  printf 'garbage' >"$ENG/drain.json"
+  : >"$ENG/calls"
+  reset
+  do_release "$D" >"$TMP/out"
+  check "drain.json 认不出：不信，照实说认不出" "$(printf '%s\n' "${PENDING[@]}" | grep -c 'drain.json 认不出')" 1
+
+  # 会话一直不交回：等到上限照停，写明还剩谁
+  status_json 1
+  ENG_STUCK=1
+  DRAIN_GRACE=0
+  DRAIN_STOP_REPORT=0
+  DRAIN_SLACK=0
+  : >"$ENG/calls"
+  reset
+  do_release "$E" >"$TMP/out"
+  check "会话一直不交回：等到上限照停、切到 E" "$(current_sha):$(tr '\n' ' ' <"$ENG/calls")" "$E:stop start "
+  check "等到上限：记待处理、写明还剩谁" "$(printf '%s\n' "${PENDING[@]}" | grep -c '排空等到了上限.*execute(run-0-xx)')" 1
+  ENG_STUCK=0
+  DRAIN_GRACE=600
+  DRAIN_STOP_REPORT=120
+  DRAIN_SLACK=60
+
+  # 同一版再发：引擎跑的就是它（主进程的目录）→ 不写请求、不停引擎。桩的主进程是这个测试进程，拿它的目录冒充那一版
+  : >"$ENG/calls"
+  ln -sfn "$PWD" "$RELEASES/$E.cwd"
+  running_release_real=$(declare -f running_release)
+  running_release() { printf '%s' "$RELEASES/$E"; }
+  reset
+  do_release "$E" >"$TMP/out"
+  check "同一版再发：不写排空请求、不停引擎" "$(tr '\n' ' ' <"$ENG/calls"):$(said '排空请求')" ":0"
+  eval "$running_release_real"
+  rm -f -- "$RELEASES/$E.cwd"
+
+  # 自动发布、会排空的引擎：不看会话列表（排空替它）；有会话在跑也发
+  AUTO=1
+  scope busy
+  status_json 1
+  rm -f -- "$ENG/request-seen"
+  : >"$ENG/calls"
+  reset
+  do_release "$A" >"$TMP/out"
+  check "自动发布、会排空的引擎：会话在跑也切到 A，不问会话列表" "$(current_sha):$(scope_calls)" "$A:0"
+  check "自动发布：说了不等空闲、排空" "$(said '引擎会排空')" 1
+  check "自动发布：排空请求写 auto" "$(grep -c '"by":"auto"' "$ENG/request-seen")" 1
+  # 不会排空的引擎、会话在跑：照旧 76，排空请求撤掉
+  rm -f -- "$ENG/drain.json"
+  reset
+  (do_release "$B") >"$TMP/out" 2>&1
+  rc=$?
+  check "自动发布、不会排空的引擎、会话在跑：照旧 76（什么都没动）" "$rc:$(current_sha)" "76:$A"
+  check "76 退出时排空请求撤了" "$([[ -e "$DRAIN_REQUEST" ]] && echo 还在 || echo 撤了)" 撤了
+  AUTO=0
+
+  # --now：不给宽限
+  NOW_MODE=1
+  check "--now：宽限 0" "$(drain_grace)" 0
+  NOW_MODE=0
+  check "不带 --now：宽限 600 秒" "$(drain_grace)" 600
+
+  # 停下引擎以后失败了（没走到切版本）：收尾把引擎起回来、撤请求
+  ENG_STATE=inactive
+  ENGINE_STOPPED=1
+  DRAIN_WROTE=1
+  : >"$DRAIN_REQUEST"
+  : >"$ENG/calls"
+  reset
+  finish_hook >"$TMP/out"
+  check "没走到切版本：收尾把停下的引擎起回来" "$(tr '\n' ' ' <"$ENG/calls")" "start "
+  check "收尾撤了排空请求" "$([[ -e "$DRAIN_REQUEST" ]] && echo 还在 || echo 撤了)" 撤了
+  check "收尾说了起回来" "$(said '把停下的引擎起回来')" 1
+  # 引擎起不回来：红
+  systemctl_ok=$(declare -f systemctl)
+  systemctl() { if [[ "$1" == start ]]; then return 1; fi; echo inactive; }
+  ENGINE_STOPPED=1
+  reset
+  finish_hook >"$TMP/out"
+  check "引擎起不回来：记红，不当成没事" "$(reds_with '停下的引擎也起不回来')" 1
+  eval "$systemctl_ok"
+
+  unset -f systemctl sleep status_json
+  FLEET_SERVICES=""
+  ENGINE_STOPPED=0
+  scope idle
+fi
+
+echo "== 自动发布的参数：--auto 只跟一个主线上的提交，--busy-ok 只跟着 --auto，--now 不跟 --auto、--check；不对就用法错（64），什么都不做"
 AUTO=0
 BUSY_OK=0
 for args in "--auto" "$A --auto --unmerged" "$A --busy-ok" "--auto --busy-ok" "--check --auto" "--rollback --auto" \
-  "--rollback --busy-ok"; do
+  "--rollback --busy-ok" "$A --auto --now" "--check --now"; do
   # shellcheck disable=SC2086 # 故意按空格拆成几个参数
   (main $args) >/dev/null 2>&1
   rc=$?

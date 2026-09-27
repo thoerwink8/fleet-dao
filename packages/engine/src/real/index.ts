@@ -7,10 +7,13 @@ import { SESSION_USERS, type SessionUser, switchSessionOrg } from '@fleet-dao/ad
 import { createDb, type Db } from '@fleet-dao/db';
 import { assertPublishable, createGitHub, pgLedger, pgLocker } from '@fleet-dao/github';
 import type { EngineJobs } from '../activities.ts';
+import type { EngineDrain } from '../drain.ts';
+import { type DrainControlDeps, drainRequestFile, readDrainRequest } from '../drain-control.ts';
 import type { JevPort } from '../failure/jev.ts';
 import type { EnginePorts } from '../ports.ts';
 import { alertDispatchJob } from './alert-dispatch.ts';
 import { canaryJob } from './canary.ts';
+import { drainNotifier } from './drain-alerts.ts';
 import { scopeExec, type UserExec } from './exec.ts';
 import { createGitHubPorts, type EngineGitHub } from './github-ports.ts';
 import { githubReconcileJob } from './github-reconcile.ts';
@@ -24,6 +27,7 @@ import {
 import { hourlyReconcileJob } from './hourly-reconcile.ts';
 import { engineJevFromEnv } from './jev-port.ts';
 import { registerEngineJobs } from './jobs.ts';
+import { realKillEvidence } from './kill-evidence.ts';
 import { orgDriftReporter, orgSwitchRound } from './org-switch.ts';
 import { routeProbeJob } from './route-probe.ts';
 import { type SessionOrgReader, sessionOrgReader } from './session-org.ts';
@@ -57,6 +61,11 @@ export interface RealPortsDeps {
   /** 错误分流、停滞预判问 Jev 用（real/jev-port.ts）；不给就不问，照规则走。 */
   jev?: JevPort;
   /**
+   * 排空（drain.ts）：在排空时选路回「过一会儿再选」、起会话直接拒；在途会话登记在它上面，到截止按切号那一套停下。
+   * 不给就不闸（测试、只起一次的工具）。
+   */
+  drain?: EngineDrain;
+  /**
    * 发给别家（开 PR 前验证）的材料过卫生检查：生产用 github 包的 assertPublishable 和推分支同一份名单。
    * 不给就发不出去（验证会话起不来，报 HYGIENE_UNSCANNED），不当成查过了。
    */
@@ -86,12 +95,15 @@ export interface RealPorts {
   reapOrphanSessions(): Promise<number>;
   /** 切号那一刻在跑的会话（#59）：交给 real/org-switch.ts 停下、等收场。 */
   orgSwitchSessions: OrgSwitchSessions;
+  /** 排空到截止时停下还在跑的会话（交回 engine_stop，按编号续上）；返回这次叫停的。 */
+  drainStop(why: string): string[];
 }
 
 export function createRealPorts(deps: RealPortsDeps): RealPorts {
   const store = createStorePorts({
     db: deps.db,
     sessionOrg: deps.sessionOrg,
+    ...(deps.drain ? { drain: deps.drain } : {}),
     ...(deps.now ? { now: deps.now } : {}),
     ...(deps.log ? { log: deps.log } : {}),
   });
@@ -119,6 +131,7 @@ export function createRealPorts(deps: RealPortsDeps): RealPorts {
     ...(deps.log ? { log: deps.log } : {}),
     ...(deps.jev ? { jev: deps.jev } : {}),
     ...(deps.screen ? { screen: deps.screen } : {}),
+    ...(deps.drain ? { drain: deps.drain } : {}),
     ...deps.session,
   });
   const ports: EnginePorts = {
@@ -150,7 +163,12 @@ export function createRealPorts(deps: RealPortsDeps): RealPorts {
     awaitSession: sessions.awaitSession,
     stopSession: sessions.stopSession,
   };
-  return { ports, reapOrphanSessions: sessions.reapOrphanSessions, orgSwitchSessions: sessions.orgSwitch };
+  return {
+    ports,
+    reapOrphanSessions: sessions.reapOrphanSessions,
+    orgSwitchSessions: sessions.orgSwitch,
+    drainStop: sessions.drainStop,
+  };
 }
 
 /** reclaude 装在会话用户自己家里（docs/ops.md 第五节）；{user} 换成会话用户。 */
@@ -224,7 +242,15 @@ export function agentCommands(config: Pick<RealPortsConfig, 'claudeBin' | 'curso
  */
 export function realPortsFromEnv(
   env: Readonly<Record<string, string | undefined>> = process.env,
-): RealPorts & { jobs: EngineJobs; registerJobs(): Promise<void>; close(): Promise<void> } {
+  extra: { drain?: EngineDrain; ownSha?: string | null; releasesDir?: string } = {},
+): RealPorts & {
+  jobs: EngineJobs;
+  registerJobs(): Promise<void>;
+  close(): Promise<void>;
+  stateDir: string;
+  /** 排空要的几样（drain-control.ts）：读发布脚本的排空请求、查发布锁、到点停会话、报提醒。 */
+  drainControl: Omit<DrainControlDeps, 'drain' | 'log'>;
+} {
   const config = realPortsConfigFromEnv(env);
   const { db, close } = createDb({ env: env as Record<string, string | undefined> });
   const gh = createGitHub({
@@ -264,6 +290,7 @@ export function realPortsFromEnv(
     cursorCommand,
     grokCommand,
     forkMaxContextTokens: config.forkMaxContextTokens,
+    ...(extra.drain ? { drain: extra.drain } : {}),
   });
   // 拼车用满切独享、恢复了切回（#157）：路由探针每一轮探之前判，经 root 帮手的 org-use 切；手上跑在 Claude 池上的会话
   // 先停下、切完续上（#59，换了池 fork 续上），不等它们跑完
@@ -306,9 +333,19 @@ export function realPortsFromEnv(
     // 提醒派单（design 15.3「谁在处理」）：没人认领、停着没动的提醒再推，没挂单的卡住报警开跟进单（「引擎」机器人开，不开在巡检仓）
     alertDispatch: alertDispatchJob({ db, gh, canaryRepo: env.FLEET_CANARY_REPO }),
   };
+  const evidence = realKillEvidence(extra.releasesDir ? { releasesDir: extra.releasesDir } : {});
+  const drainControl: Omit<DrainControlDeps, 'drain' | 'log'> = {
+    readRequest: () => readDrainRequest(drainRequestFile(evidence.releasesDir)),
+    releaseLockBusy: () => evidence.releaseLockBusy(),
+    ownSha: extra.ownSha ?? null,
+    stopSessions: (why) => real.drainStop(why),
+    notify: drainNotifier({ db, machine: config.machine }),
+  };
   return {
     ...real,
     jobs,
+    drainControl,
+    stateDir: config.stateDir,
     registerJobs: async () => {
       await registerEngineJobs(db);
       // 判断题起不来、登记不上只报错（error 级日志 + /healthz 的 judge 项红），不挡引擎接活：照规则走一样能干。
