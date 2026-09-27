@@ -4,6 +4,7 @@ import {
   FeishuBoardSnapshotSchema,
   FeishuDraftSchema,
   FeishuOutboxItemSchema,
+  summarizeUsage,
   TaskDetailResponse,
 } from '@fleet-dao/shared';
 import type { z } from 'zod';
@@ -244,5 +245,6 @@ export function taskDetail(o: { state?: TaskDetail['task']['state'] } = {}): Tas
     ],
     runs: [],
     asks: [],
+    usage: summarizeUsage([]),
   });
 }

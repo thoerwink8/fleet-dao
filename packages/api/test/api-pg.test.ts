@@ -65,6 +65,13 @@ describe('接口跑在真库上', () => {
     expect(board.tasks.map((task) => task.id)).toContain(IDS.task12);
     const detail = TaskDetailResponse.parse(await get(`/api/tasks/${IDS.task12}`));
     expect(detail.runs.map((r) => r.id)).toContain(DEV_RUN_ID);
+    // 缓存读写从库里读回来、折进当量；花费没记的就是没读到
+    expect(detail.usage.total).toMatchObject({
+      cacheReadTokens: 1_450_000,
+      cacheWriteTokens: 64_000,
+      inputEquivalent: 385_000,
+      missingCost: 1,
+    });
     const timeline = TimelineResponse.parse(await get(`/api/tasks/${IDS.task12}/timeline`));
     expect(timeline.items.length).toBeGreaterThan(0);
     // 登录本身也落了库里的操作记录。

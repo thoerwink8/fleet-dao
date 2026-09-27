@@ -21,7 +21,8 @@
 // 5. awaitSession 只是「看守」：工人重启后它会被重试。接得上就接着看；接不上（引擎正常停时会话跟着退了，
 //    或者引擎被强杀、会话成了孤儿）就按 handle 把旧会话收掉，回 outcome=failed、code=SESSION_LOST——工作流会续会话重起。
 //    工人进程起来时 createEngineWorker 会先调 reapOrphanSessions（fleet-agent-scope list 再逐个 stop，再清上一轮会话的临时目录）：
-//    上一轮的会话输出管道已经断了，接不上。工作流被强行终止留下的会话，归每小时对账收。
+//    上一轮的会话输出管道已经断了，接不上。工作流被强行终止留下的会话，现在要等工人下一次起来时这一步才收
+//    （每小时对账还没接这一项：#247）。
 
 import type { Brief, FlowConfigRead, Rebuttable, Rebuttal, VerifyReport } from '@fleet-dao/core';
 import type { HostId, Repo, RunOutcome, StageKind, SubtaskState, TaskState } from '@fleet-dao/shared';

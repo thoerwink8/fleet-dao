@@ -108,6 +108,41 @@ describe('看板与任务', () => {
     );
     expect(detail.runs.map((r) => r.id).sort()).toEqual([IDS.run0, DEV_RUN_ID]);
     expect(detail.runs.find((r) => r.id === IDS.run0)?.modelName).toBe('Opus 5.5');
+    expect(detail.runs.find((r) => r.id === IDS.run0)).toMatchObject({
+      cacheReadTokens: 1_450_000,
+      cacheWriteTokens: 64_000,
+    });
+  });
+
+  it('任务详情带用量汇总：按模型、按阶段、整张合计；没读到的花费记次数，不当成 0；还在跑的只记在跑', async () => {
+    const h = harness();
+    const { cookie } = await h.login();
+    const { usage } = TaskDetailResponse.parse(
+      await (await h.cockpit.request(`/api/tasks/${IDS.task12}`, { headers: { cookie } })).json(),
+    );
+    // 结束的那次：120000 + 64000×1.25 + 1450000×0.1 + 8000×5 = 120000 + 80000 + 145000 + 40000
+    expect(usage.total).toMatchObject({
+      runs: 1,
+      running: 1,
+      inputTokens: 120_000,
+      outputTokens: 8_000,
+      missingTokens: 0,
+      cacheReadTokens: 1_450_000,
+      cacheWriteTokens: 64_000,
+      missingCache: 0,
+      inputEquivalent: 385_000,
+      missingEquivalent: 0,
+      costUsd: 0,
+      missingCost: 1,
+      missingTime: 0,
+    });
+    expect(usage.byModel.map((m) => [m.model, m.modelName, m.runs, m.running])).toEqual([
+      ['opus-5.5', 'Opus 5.5', 1, 1],
+    ]);
+    expect(usage.byStage.map((s) => [s.stage, s.runs, s.running, s.inputEquivalent])).toEqual([
+      ['plan', 1, 0, 385_000],
+      ['execute', 0, 1, 0],
+    ]);
   });
 
   it('时间线：会话报的、人做的都在，按时间倒序，翻页不重不漏', async () => {

@@ -185,6 +185,8 @@ export const toSessionRun = (r: typeof sessionRuns.$inferSelect): SessionRun =>
     actualModel: opt(r.actualModel),
     inputTokens: opt(r.inputTokens),
     outputTokens: opt(r.outputTokens),
+    cacheReadTokens: opt(r.cacheReadTokens),
+    cacheWriteTokens: opt(r.cacheWriteTokens),
     costUsd: opt(r.costUsd),
     testCommand: opt(r.testCommand),
   });

@@ -5,5 +5,6 @@ export type * from './domain.ts';
 export * from './feishu-api.ts';
 export * from './quota.ts';
 export * from './realtime.ts';
+export * from './usage.ts';
 export * from './web-api.ts';
 export * from './workflow-ids.ts';

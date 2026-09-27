@@ -1626,6 +1626,11 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
         ...(actualModel ? { actualModel } : {}),
         ...(end.usage?.inputTokens === undefined ? {} : { inputTokens: end.usage.inputTokens }),
         ...(end.usage?.outputTokens === undefined ? {} : { outputTokens: end.usage.outputTokens }),
+        // 缓存读写折额度当量要用（#216）：终帧没报的不给，库里留空（没读到），不记 0
+        ...(end.usage?.cacheReadTokens === undefined ? {} : { cacheReadTokens: end.usage.cacheReadTokens }),
+        ...(end.usage?.cacheWriteTokens === undefined
+          ? {}
+          : { cacheWriteTokens: end.usage.cacheWriteTokens }),
         ...(cost === undefined ? {} : { costUsd: cost }),
         ...(end.sessionCostUsd === undefined ? {} : { sessionCostUsd: end.sessionCostUsd }),
         ...(end.failure ? { failureCode: end.failure.code, failureMessage: end.failure.message } : {}),

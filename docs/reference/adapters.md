@@ -249,7 +249,7 @@ codex exec --json -C <工作树> -m gpt-5.6-sol \
 
 - ACP：`session/update` 里的 `agent_message_chunk`、`tool_call{kind: read|edit|execute|other, title, status}`、`tool_call_update`；阻塞请求 `session/request_permission`、`cursor/ask_question`、`cursor/create_plan`（带 `plan` 与 `todos`）（WD runner:17, 38-43, 584-596；WD `docs/evidence/1174-cursor-worktree-commit.json`）。
 - **执行工具没有 rawInput**：shell 命令写在 tool 的 `title` 里、用反引号包着，有时前缀 `cd <工作树> &&`；提交信息写成 `"$(cat <<'EOF' … EOF)"`（WD runner:87-94, 306-314）。
-- `-p` 的 stream-json：`system/init` 带 model / session，终态 `result` 带 request_id 和 usage（WD `scripts/lib/execution-usage.mjs:898-899`）；其余字段没查成：本机离线探针在出任何 JSON 之前就失败了（见 4.5）。
+- `-p` 的 stream-json：`system/init` 带 model（界面名，例如 `Auto`、`Grok 4.6 High Fast`、`Claude Sonnet 5 300K Low No Thinking`）/ session，终态 `result` 带 request_id 和 `usage{inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens}`（WD `scripts/lib/execution-usage.mjs:898-899`）。2026-09-27 本机实测（cursor-agent 2026.09.26）：usage 只算这一轮（续会话不累计），`inputTokens` 只算没命中缓存的；缓存写是真数——`claude-sonnet-5-low` 开新会话 `cacheWriteTokens` 20925、续一轮 `cacheReadTokens` 20925，Auto、Grok 报 0；终帧没有花费字段（花费见 CU-08）。夹具在 `packages/adapters/test/fixtures/cursor-agent/`。
 - **用量不在 ACP 流里**：旧系统用 Cursor Dashboard API `GetCurrentPeriodUsage / GetFilteredUsageEvents` 采样（WD `execution-usage.mjs:620-735`）；本地 SQLite 里存的是上下文窗口的 token，不是计费用量，不许当花费用（同文件 :861-865）。Cursor 有两个独立用量池：`grok-*-fast` 计入「Cursor Models 池」，kimi 等第三方走「Other 池」（AGS `docs/MIRASIM.md:58-67`）。
 
 ### 4.4 真开工 / 真完成
