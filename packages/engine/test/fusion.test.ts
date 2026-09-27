@@ -136,7 +136,12 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
     const accept = leads.find((c) => c.input.brief.lead?.step === 'accept');
     expect(sideWatch?.end).not.toBeNull();
     expect(sideWatch?.end ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(accept?.at ?? 0);
-    expect(accept?.input.brief.lead?.delivery).toMatchObject({ head: fakeHead(2), testsPassed: true });
+    // 从上一次推上去的头（方案那一次）看起：副手这一块的全部改动
+    expect(accept?.input.brief.lead?.delivery).toMatchObject({
+      head: fakeHead(2),
+      base: fakeHead(1),
+      testsPassed: true,
+    });
 
     // 别家验证：按流程配置的验证模型、整族避开写过这张单的（claude、kimi），派给 gpt
     const verifyPick = w.callsOf('pickRoute').find((c) => c.input.stage === 'verify');

@@ -2,9 +2,17 @@
 import { describe, expect, it } from 'vitest';
 import type { SessionBrief } from '../../src/ports.ts';
 import {
+  isLeadKind,
   OUT_DIR,
+  outputKindFor,
   outputKindOf,
   parseDoc,
+  parseLeadBrief,
+  parseLeadPlan,
+  parseLeadRebut,
+  parseLeadReview,
+  parseLeadText,
+  parseLeadVerdict,
   parsePlan,
   parseRequirementDoc,
   parseReview,
@@ -384,5 +392,227 @@ describe('开 PR 前验证', () => {
         HEAD,
       ),
     ).toMatchObject({ error: expect.stringContaining('答了清单外的一条') });
+  });
+});
+
+describe('Fusion 的 Lead：每一步交代什么、交回什么', () => {
+  const DOCS = {
+    requirement: 'specs/12-login/需求.md',
+    plan: 'specs/12-login/方案.md',
+    result: 'specs/12-login/结果.md',
+  };
+  const BASE = 'a'.repeat(40);
+  const leadBrief = (lead: Partial<NonNullable<SessionBrief['lead']>>, over: Partial<SessionBrief> = {}) =>
+    brief({
+      branch: 'fleet/12-fabc12345',
+      specDir: 'specs/12-login',
+      lead: { step: 'plan', mode: 'fusion', docs: DOCS, ...lead },
+      ...over,
+    });
+  const prompt = (b: SessionBrief, mode: 'new' | 'resume' = 'resume', stage: 'plan' | 'execute' = 'plan') =>
+    stagePrompt({ stage, brief: b, repo, issueNumber: 12, mode });
+
+  it('交什么按这一步定，不按阶段：写码那一步交活（和副手一样）；没带 lead 的照阶段', () => {
+    const steps = ['plan', 'accept', 'rebut', 'fix-brief', 'review', 'pr-text', 'takeover'] as const;
+    expect(steps.map((step) => outputKindFor('plan', leadBrief({ step })))).toEqual([
+      'lead-plan',
+      'lead-verdict',
+      'lead-rebut',
+      'lead-brief',
+      'lead-review',
+      'lead-text',
+      'delivery',
+    ]);
+    expect(isLeadKind('lead-plan')).toBe(true);
+    expect(isLeadKind('delivery')).toBe(false);
+    expect(outputKindFor('plan', brief())).toBe('plan');
+  });
+
+  it('第 2 步（新会话）：读哪份需求文档、方案写哪提交、简报和摘要写哪个结论文件、各字段怎么填', () => {
+    const text = prompt(leadBrief({ step: 'plan' }), 'new');
+    for (const part of [
+      '你是这张单的主导模型 Lead',
+      DOCS.requirement,
+      DOCS.plan,
+      'git commit',
+      `${OUT_DIR}/lead-plan.json`,
+      '"brief": {"goal"',
+      '"returnFormat"',
+      'fleet/12-fabc12345',
+      '不用 fleet done',
+      '不 push',
+    ]) {
+      expect(text).toContain(part);
+    }
+    expect(text).not.toContain('单模型模式');
+    expect(prompt(leadBrief({ step: 'plan', mode: 'single' }), 'new')).toContain('这次是单模型模式');
+  });
+
+  it('续会话的下一步：只交代这一步（不重复整份任务）；验收写明从哪个头看起、只看不改', () => {
+    const text = prompt(
+      leadBrief({
+        step: 'accept',
+        delivery: {
+          head: 'b'.repeat(40),
+          base: BASE,
+          summary: '加了验证码输入',
+          changedFiles: ['src/login/form.ts'],
+          testsPassed: true,
+        },
+      }),
+    );
+    expect(text.startsWith('这张单的下一步：')).toBe(true);
+    expect(text).not.toContain('原话 / 说明');
+    for (const part of [
+      `git diff ${BASE}..HEAD`,
+      'src/login/form.ts',
+      '加了验证码输入',
+      '它报测试过了',
+      '只看不改',
+      `${OUT_DIR}/lead-verdict.json`,
+      '"verdict": "accept"',
+    ]) {
+      expect(text).toContain(part);
+    }
+    // 上一轮出了问题的（同一步重试）：照旧写「接着干」和问题
+    const retry = stagePrompt({
+      stage: 'plan',
+      brief: leadBrief({ step: 'accept' }),
+      repo,
+      issueNumber: 12,
+      mode: 'resume',
+      previousProblem: '没写结论',
+    });
+    expect(retry).toContain('接着干');
+    expect(retry).toContain('没写结论');
+  });
+
+  it('驳回、写修复简报、最终审查、重写 PR 摘要、自己接手：各写明看什么、交哪个文件', () => {
+    const rebut = prompt(
+      leadBrief({
+        step: 'rebut',
+        blocking: [{ target: '有一条故意造出失败的测试', kind: 'not-done', evidence: 'test/ 下没有' }],
+        notes: ['验证码长度可以配置'],
+      }),
+    );
+    expect(rebut).toContain('[没做到] 有一条故意造出失败的测试（它的证据：test/ 下没有）');
+    expect(rebut).toContain('验证码长度可以配置');
+    expect(rebut).toContain(`${OUT_DIR}/lead-rebut.json`);
+    expect(rebut).toContain('{"rebuttals": []}');
+
+    const fix = prompt(
+      leadBrief(
+        { step: 'fix-brief' },
+        { feedback: [{ kind: 'ci', summary: 'CI 没过', items: ['test (engine)'] }] },
+      ),
+    );
+    expect(fix).toContain('test (engine)');
+    expect(fix).toContain(`${OUT_DIR}/lead-brief.json`);
+    expect(fix).toContain('只看不改');
+
+    const review = prompt(leadBrief({ step: 'review' }));
+    for (const part of [
+      'git diff origin/main...HEAD',
+      DOCS.result,
+      '"verdict": "fix"',
+      `${OUT_DIR}/lead-review.json`,
+    ]) {
+      expect(review).toContain(part);
+    }
+    expect(review).not.toContain('只看不改');
+
+    const text = prompt(leadBrief({ step: 'pr-text' }));
+    expect(text).toContain(`${OUT_DIR}/lead-text.json`);
+    expect(text).toContain('PR 正文是公开的');
+
+    const takeover = prompt(
+      leadBrief({ step: 'takeover', why: '副手打回两次还没做好' }),
+      'resume',
+      'execute',
+    );
+    expect(takeover).toContain('副手打回两次还没做好');
+    expect(takeover).toContain('fleet done');
+    expect(takeover).toContain('pnpm check');
+  });
+
+  it('结论文件：合法的认出来（字段原样，前后空白去掉）', () => {
+    const b = {
+      goal: '加验证码',
+      scope: '只改登录',
+      constraints: [],
+      files: ['src/login/'],
+      acceptance: ['五分钟过期'],
+      returnFormat: '改了什么',
+    };
+    expect(
+      parseLeadPlan(JSON.stringify({ summary: ' 摘要 ', brief: b, small: true, highRisk: false, holds: [] })),
+    ).toEqual({ ok: { summary: '摘要', brief: b, small: true, highRisk: false, holds: [] } });
+    expect(parseLeadVerdict('{"verdict": "reject", "why": "没做过期"}')).toEqual({
+      ok: { verdict: 'reject', why: '没做过期' },
+    });
+    expect(parseLeadRebut('{"rebuttals": [{"target": "日志里有验证码", "evidence": "打的是编号"}]}')).toEqual(
+      {
+        ok: { rebuttals: [{ target: '日志里有验证码', evidence: '打的是编号' }] },
+      },
+    );
+    expect(parseLeadRebut('{"rebuttals": []}')).toEqual({ ok: { rebuttals: [] } });
+    expect(parseLeadBrief(JSON.stringify({ brief: b }))).toEqual({ ok: { brief: b } });
+    expect(
+      parseLeadReview(JSON.stringify({ verdict: 'pass', why: '都做到了', did: ['加了验证码'], owed: [] })),
+    ).toEqual({ ok: { verdict: 'pass', why: '都做到了', did: ['加了验证码'], owed: [] } });
+    expect(
+      parseLeadReview(JSON.stringify({ verdict: 'fix', why: '漏了过期', did: [], owed: [], brief: b })),
+    ).toEqual({ ok: { verdict: 'fix', why: '漏了过期', did: [], owed: [], brief: b } });
+    expect(parseLeadText('{"summary": "加验证码", "did": ["加了输入框"]}')).toEqual({
+      ok: { summary: '加验证码', did: ['加了输入框'] },
+    });
+  });
+
+  it('【故意造出的失败】结论文件认不出：不是 JSON、不是对象、缺字段、类型不对、空的一条、要改却没给简报，都明确算交错了', () => {
+    const cases: [ReturnType<typeof parseLeadPlan | typeof parseLeadText>, string][] = [
+      [parseLeadPlan('不是 JSON'), '不是合法的 JSON'],
+      [parseLeadPlan('[]'), 'lead-plan.json 要是一个对象'],
+      [
+        parseLeadPlan('{"brief": {}, "small": true, "highRisk": false, "holds": []}'),
+        'summary 要是不空的字符串',
+      ],
+      [
+        parseLeadPlan(
+          '{"summary": "x", "brief": "写在正文里", "small": true, "highRisk": false, "holds": []}',
+        ),
+        'brief 要是一个对象',
+      ],
+      [
+        parseLeadPlan('{"summary": "x", "brief": {}, "small": "是", "highRisk": false, "holds": []}'),
+        'small 要是 true 或 false',
+      ],
+      [
+        parseLeadPlan('{"summary": "x", "brief": {}, "small": true, "highRisk": false}'),
+        'holds 要是字符串数组',
+      ],
+      [parseLeadText('{"summary": "x", "did": ["", "y"]}'), 'did 里有空的一条'],
+    ];
+    for (const [got, why] of cases) expect(got).toMatchObject({ error: expect.stringContaining(why) });
+    expect(parseLeadVerdict('{"verdict": "maybe", "why": "x"}')).toMatchObject({
+      error: expect.stringContaining('verdict 要是 accept 或 reject'),
+    });
+    expect(parseLeadVerdict('{"verdict": "accept", "why": " "}')).toMatchObject({
+      error: expect.stringContaining('why 要是不空的字符串'),
+    });
+    expect(parseLeadRebut('{"rebuttals": [{"evidence": "x"}]}')).toMatchObject({
+      error: expect.stringContaining('第 1 条驳回 缺 target'),
+    });
+    expect(parseLeadRebut('{"rebuttals": {}}')).toMatchObject({
+      error: expect.stringContaining('rebuttals 要是数组'),
+    });
+    expect(parseLeadBrief('{"brief": null}')).toMatchObject({
+      error: expect.stringContaining('brief 要是一个对象'),
+    });
+    expect(parseLeadReview('{"verdict": "fix", "why": "x", "did": [], "owed": []}')).toMatchObject({
+      error: expect.stringContaining('没写修复简报'),
+    });
+    expect(parseLeadReview('{"verdict": "ok", "why": "x", "did": [], "owed": []}')).toMatchObject({
+      error: expect.stringContaining('verdict 要是 pass 或 fix'),
+    });
   });
 });

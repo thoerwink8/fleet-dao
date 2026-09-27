@@ -561,6 +561,8 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
           summary: del.summary,
           changedFiles: del.changedFiles ?? [],
           testsPassed: del.testsPassed,
+          // 上一次推上去的头：从它到副手交回的头就是这一块副手的全部改动（打回过的几轮连在一起看）
+          base: head,
         },
       },
       task: brief,

@@ -20,7 +20,7 @@ import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fle
 import { assertPublishable } from '@fleet-dao/github';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { JevAskContext, JevPort, JevQuestion, JevReply } from '../../src/failure/jev.ts';
-import type { LaunchSessionInput, PortContext, SessionEnd } from '../../src/ports.ts';
+import type { LaunchSessionInput, LeadStep, PortContext, SessionEnd } from '../../src/ports.ts';
 import { localExec } from '../../src/real/exec.ts';
 import { CURSOR_KEY_BAD, CURSOR_KEY_EXIT, CURSOR_MISSING } from '../../src/real/hosts.ts';
 import { createSessionPorts, type SessionPortsDeps, screenForOtherVendor } from '../../src/real/sessions.ts';
@@ -143,7 +143,8 @@ function setup(
     ...(options.jev ? { jev: options.jev } : {}),
     ...(options.jevTimeoutMs === undefined ? {} : { jevTimeoutMs: options.jevTimeoutMs }),
     ...(options.stallJevEveryMs === undefined ? {} : { stallJevEveryMs: options.stallJevEveryMs }),
-    ...(options.screen ? { screen: options.screen } : {}),
+    // 派给别家（cursor）的整份提示词都要先过卫生检查：起 cursor 的用例没给检查就放一个都放行的（查出来拦下的另有用例）
+    ...(options.screen ? { screen: options.screen } : options.cursor || rig ? { screen: () => {} } : {}),
     log: (message, fields) => {
       if (rig) logs.push(JSON.stringify([message, fields]));
       options.log?.(message, fields);
@@ -1038,6 +1039,189 @@ describe('失败', () => {
     // 和真插头同一道校验：不抛就是帮手认得
     expect(() => scopePrefix(cgroup as NonNullable<typeof cgroup>, '/fleet-test-cwd')).not.toThrow();
     await ports.stopSession({ taskId, runId: input.runId, mode: 'kill', reason: '收尾' }, ctx());
+  });
+});
+
+describe('Fusion 的 Lead：在这张单的工作树里跑，按这一步读结论文件', () => {
+  const DOCS = {
+    requirement: 'specs/12-login/需求.md',
+    plan: 'specs/12-login/方案.md',
+    result: 'specs/12-login/结果.md',
+  };
+  const BRIEF = {
+    goal: '加验证码',
+    scope: '只改登录',
+    constraints: [],
+    files: ['src/login/'],
+    acceptance: ['五分钟过期'],
+    returnFormat: '改了什么',
+  };
+  const freshTree = () => layout(join(root, `w-${randomUUID().slice(0, 8)}`)).treeFor(repo, BRANCH);
+  const leadLaunch = (step: LeadStep, over: Partial<LaunchSessionInput> = {}): LaunchSessionInput => {
+    const base = launch({ stage: step === 'takeover' ? 'execute' : 'plan', ...over });
+    return {
+      ...base,
+      brief: { ...base.brief, specDir: 'specs/12-login', lead: { step, mode: 'fusion', docs: DOCS } },
+    };
+  };
+  const writeOut = (cwd: string, file: string, value: unknown) => {
+    mkdirSync(join(cwd, '.fleet-out'), { recursive: true });
+    writeFileSync(join(cwd, '.fleet-out', file), typeof value === 'string' ? value : JSON.stringify(value));
+  };
+  const commitDoc = (cwd: string, path: string) => {
+    mkdirSync(join(cwd, 'specs', '12-login'), { recursive: true });
+    writeFileSync(join(cwd, path), '# 写好了\n');
+    git(cwd, 'add', '--', 'specs');
+    git(cwd, 'commit', '-q', '-m', `docs: ${path}`);
+  };
+
+  it('写方案：在新工作树上起（检出这张单的分支）；方案提交进分支，头和改到的文件从提交里读；结论文件不会被提交', async () => {
+    const { ports, fake } = setup(() => ({
+      act: ({ spec }) => {
+        commitDoc(spec.cwd, DOCS.plan);
+        writeOut(spec.cwd, 'lead-plan.json', {
+          summary: '加验证码',
+          brief: BRIEF,
+          small: true,
+          highRisk: false,
+          holds: [],
+        });
+      },
+    }));
+    const input = leadLaunch('plan');
+    const { end } = await runOnce(ports, input);
+    const dir = input.worktreePath as string;
+    expect(end).toMatchObject({
+      outcome: 'done',
+      output: {
+        kind: 'lead-plan',
+        head: git(dir, 'rev-parse', 'HEAD'),
+        changedFiles: [DOCS.plan],
+        summary: '加验证码',
+        brief: BRIEF,
+        small: true,
+        highRisk: false,
+        holds: [],
+      },
+    });
+    expect(fake.specs[0]?.cwd).toBe(dir);
+    expect(git(dir, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe(BRANCH);
+    expect(fake.specs[0]?.prompt).toContain(DOCS.requirement);
+    // 结论文件在工作树里、进了这棵树自己的忽略清单：git add 带不走，看改动时也看不到
+    expect(git(dir, 'check-ignore', '.fleet-out/lead-plan.json')).toBe('.fleet-out/lead-plan.json');
+    expect(git(dir, 'status', '--porcelain', '--untracked-files=all', '--', '.fleet-out')).toBe('');
+  });
+
+  it('最终审查：结果.md 提交进分支，交回过了、做了什么，头和改到的文件从提交里读', async () => {
+    const { ports } = setup(() => ({
+      act: ({ spec }) => {
+        commitDoc(spec.cwd, DOCS.result);
+        writeOut(spec.cwd, 'lead-review.json', {
+          verdict: 'pass',
+          why: '都做到了',
+          did: ['加了验证码'],
+          owed: [],
+        });
+      },
+    }));
+    const input = leadLaunch('review', { worktreePath: freshTree() });
+    const { end } = await runOnce(ports, input);
+    expect(end).toMatchObject({
+      outcome: 'done',
+      output: {
+        kind: 'lead-review',
+        verdict: 'pass',
+        did: ['加了验证码'],
+        changedFiles: [DOCS.result],
+        head: git(input.worktreePath as string, 'rev-parse', 'HEAD'),
+      },
+    });
+  });
+
+  it('【故意造出的失败】只看不改的一步提交了、没写结论文件、写方案却留着没提交的改动：都判交错了（wrong_output），写明哪里不对', async () => {
+    const cases: [LeadStep, FakeRunScript, string][] = [
+      [
+        'accept',
+        {
+          act: ({ spec }) => {
+            commitDoc(spec.cwd, DOCS.plan);
+            writeOut(spec.cwd, 'lead-verdict.json', { verdict: 'accept', why: '看过了' });
+          },
+        },
+        '这一步只看不改',
+      ],
+      ['accept', {}, '没写结论 .fleet-out/lead-verdict.json'],
+      [
+        'plan',
+        {
+          act: ({ spec }) => {
+            writeFileSync(join(spec.cwd, 'README.md'), '# 改了没提交\n');
+            writeOut(spec.cwd, 'lead-plan.json', {
+              summary: '加验证码',
+              brief: BRIEF,
+              small: true,
+              highRisk: false,
+              holds: [],
+            });
+          },
+        },
+        '没提交的已跟踪改动',
+      ],
+      [
+        'accept',
+        { act: ({ spec }) => writeOut(spec.cwd, 'lead-verdict.json', { verdict: 'maybe', why: 'x' }) },
+        'verdict 要是 accept 或 reject',
+      ],
+    ];
+    for (const [step, script, why] of cases) {
+      const { ports } = setup(() => script);
+      const { end } = await runOnce(ports, leadLaunch(step, { worktreePath: freshTree() }));
+      expect(end.outcome).toBe('failed');
+      expect(end.failure).toMatchObject({ code: 'wrong_output', message: expect.stringContaining(why) });
+    }
+  });
+
+  it('【故意造出的失败】续同一个会话时，以前同一步留下的结论文件起之前先删掉：这一轮没写就是没写，不拿上一轮的顶', async () => {
+    const { ports } = setup((_spec, n) =>
+      n === 1
+        ? { act: ({ spec }) => writeOut(spec.cwd, 'lead-verdict.json', { verdict: 'accept', why: '看过了' }) }
+        : {},
+    );
+    const first = leadLaunch('accept', { worktreePath: freshTree() });
+    const one = await runOnce(ports, first);
+    expect(one.end).toMatchObject({ outcome: 'done', output: { kind: 'lead-verdict', verdict: 'accept' } });
+    const again = await runOnce(ports, { ...first, runId: randomUUID(), resumeSessionId: one.sessionId });
+    expect(again.end.outcome).toBe('failed');
+    expect(again.end.failure?.message).toContain('没写结论 .fleet-out/lead-verdict.json');
+  });
+
+  it('派给别家的（cursor 上的副手）：整份提示词先过卫生检查，查出名单上的值不发、不起会话', async () => {
+    const LISTED = 'zeta-crane-5521';
+    const { routeId, poolId } = await addCursorRoute(t.db);
+    const route = {
+      routeId,
+      poolId,
+      modelId: 'cursor-auto',
+      family: 'cursor',
+      hostId: 'cursor-agent' as const,
+    };
+    const screened: string[] = [];
+    const { ports, cursor } = setup(() => ({}), {
+      cursor: () => ({ replay: 'cursor-edit-commit' }),
+      screen: (what, texts) => {
+        screened.push(what);
+        assertPublishable(what, texts, () => ({ ok: true, source: '测试名单', values: [LISTED] }));
+      },
+    });
+    const input = launch({ route, worktreePath: freshTree() });
+    const error = await ports
+      .startSession({ ...input, brief: { ...input.brief, request: `别把 ${LISTED} 写进日志` } }, ctx())
+      .catch((e: unknown) => e);
+    expect(error).toMatchObject({ code: 'MATERIAL_BLOCKED', retryable: false });
+    expect(String((error as Error).message)).toContain('发给别家的交代没过卫生检查，没发给Cursor Agent');
+    expect(String((error as Error).message)).not.toContain(LISTED);
+    expect(screened).toEqual(['发给别家的交代']);
+    expect(cursor.specs).toEqual([]);
   });
 });
 

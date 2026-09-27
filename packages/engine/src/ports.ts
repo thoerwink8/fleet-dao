@@ -161,8 +161,11 @@ export interface LeadBrief {
   mode: 'fusion' | 'single';
   /** 需求文档、方案、结果在仓里的路径（specs/<号>-<短名>/…，随 PR 进仓）。 */
   docs: { requirement: string; plan: string; result: string };
-  /** accept：副手这一轮交回的（改了哪些文件由引擎从提交里读）。 */
-  delivery?: { head: string; summary: string; changedFiles: string[]; testsPassed: boolean };
+  /**
+   * accept：副手这一轮交回的（改了哪些文件由引擎从提交里读）。base = 上一次推上去的头：base..head 是这一块副手的全部改动
+   * （打回过的几轮连在一起）。
+   */
+  delivery?: { head: string; summary: string; changedFiles: string[]; testsPassed: boolean; base?: string };
   /** rebut：验证挡住的几条，原文照抄（驳回时 target 一字不差照抄）。 */
   blocking?: Rebuttable[];
   /** rebut、review：验证的备注（看不出的、建议）。 */
