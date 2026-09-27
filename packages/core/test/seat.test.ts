@@ -278,9 +278,9 @@ describe('「认领对得上」（#348）：挂了单的 PR 要是现在这份�
       state: 'success',
       description: '#40 归引擎，PR 是引擎开的',
     });
-    expect(judgeClaimMatch({ ...pr, claim: { ...engine, state: 'pending_start' }, byAgentBot: true }).state).toBe(
-      'success',
-    );
+    expect(
+      judgeClaimMatch({ ...pr, claim: { ...engine, state: 'pending_start' }, byAgentBot: true }).state,
+    ).toBe('success');
     expect(judgeClaimMatch({ ...pr, claim: engine, prClaimId: ID })).toEqual({
       state: 'failure',
       description: '#40 归引擎在做（认领 0f0e0d0c），这个 PR 不是引擎开的；要改派得创始人说',

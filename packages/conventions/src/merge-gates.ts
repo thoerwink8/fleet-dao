@@ -330,7 +330,9 @@ export function checkClaimMatch(
   const at = `当前头 ${head.slice(0, 7)}`;
   const wait = `引擎收到 PR 事件就贴（漏了的每 15 分钟对账补上），贴上合并闸自动重算`;
   if (got === null) {
-    return [`等「${CLAIM_MATCH_CONTEXT}」：PR 挂了 #${linked}，${at} 上还没有引擎机器人贴的这个状态；${wait}。`];
+    return [
+      `等「${CLAIM_MATCH_CONTEXT}」：PR 挂了 #${linked}，${at} 上还没有引擎机器人贴的这个状态；${wait}。`,
+    ];
   }
   if (!got.byEngine) {
     return [
@@ -339,7 +341,8 @@ export function checkClaimMatch(
   }
   const why = got.description ? `：${oneLine(got.description)}` : '';
   if (got.state === 'pending') return [`等「${CLAIM_MATCH_CONTEXT}」：${at} 上的还是 pending${why}。`];
-  if (got.state !== 'success') return [`认领对不上（${at} 上引擎贴的「${CLAIM_MATCH_CONTEXT}」是 ${got.state}）${why}。`];
+  if (got.state !== 'success')
+    return [`认领对不上（${at} 上引擎贴的「${CLAIM_MATCH_CONTEXT}」是 ${got.state}）${why}。`];
   if (!got.description.startsWith(`#${linked} `)) {
     return [
       `「${CLAIM_MATCH_CONTEXT}」是按旧正文判的（${oneLine(got.description) || '没写说明'}），PR 现在挂的是 #${linked}；${wait}。`,

@@ -81,6 +81,12 @@ export const PR_BODY_MAX_LINES = 15;
  */
 export const ENGINE_CLOSE_COLUMN = '否（引擎合并后第 7 步自己关单）';
 
+/**
+ * 「认领」一栏（#348）：引擎开的 PR 不写认领号——认领归引擎、PR 是「干活的」机器人开的，引擎贴的「认领对得上」就算对得上
+ * （core 的 judgeClaimMatch）。
+ */
+export const ENGINE_CLAIM_COLUMN = '引擎';
+
 export function renderPrBody(input: PrBodyInput): string {
   const lists: [string, readonly string[]][] = [
     ['做了什么', input.did.length ? input.did : ['（没写）']],
@@ -99,6 +105,7 @@ export function renderPrBody(input: PrBodyInput): string {
   const docs = PR_DOC_FILES.filter(([path]) => changed.has(path)).map(([, name]) => name);
   const tail = [
     `**需求**：${requirement}`,
+    `**认领**：${ENGINE_CLAIM_COLUMN}`,
     `**修提醒**：${(input.fixesAlerts ?? []).map(oneLine).filter(Boolean).join(' ') || '无'}`,
     `**这个 PR 做完就关单**：${ENGINE_CLOSE_COLUMN}`,
     `**对应计划**：${oneLine(input.plan) || '（没写）'}`,

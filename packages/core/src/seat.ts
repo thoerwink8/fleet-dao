@@ -316,7 +316,9 @@ export interface ClaimMatch {
 /** 截到状态说明的上限（多的写省略号，不让 GitHub 拒收）。 */
 export function clipStatus(text: string): string {
   const chars = [...text.replace(/\s+/g, ' ').trim()];
-  return chars.length > CLAIM_STATUS_MAX ? `${chars.slice(0, CLAIM_STATUS_MAX - 1).join('')}…` : chars.join('');
+  return chars.length > CLAIM_STATUS_MAX
+    ? `${chars.slice(0, CLAIM_STATUS_MAX - 1).join('')}…`
+    : chars.join('');
 }
 
 /**

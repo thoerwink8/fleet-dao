@@ -5,31 +5,16 @@
 
 import { CLOSE_COLUMN, type CloseColumn, closeColumnValue } from './close-rule.ts';
 import { isKindLabel, KIND_LABELS, milestonePhase, milestoneVersion } from './labels.ts';
-import { parseMd, stripComments } from './markdown.ts';
+import { parseMd } from './markdown.ts';
 import { parseTier, TIER_COLUMN } from './merge-gates.ts';
 import { findItem, itemExample, type PlanPhase, parsePlanRefs, phaseRange, planPhases } from './plan.ts';
+import { PLAN_COLUMN, PR_COLUMNS, prColumns, SPECS_COLUMN } from './pr-columns.ts';
 
-export { CLOSE_COLUMN, type CloseColumn, closeColumnValue };
+// 各栏怎么认在 pr-columns.ts（合并闸认挂了哪张单也用它，在先审后合的清单里）；这里照旧导出，老的引用不用改
+export { CLOSE_COLUMN, type CloseColumn, closeColumnValue, PLAN_COLUMN, PR_COLUMNS, prColumns, SPECS_COLUMN };
 
-export const PLAN_COLUMN = '对应计划';
-export const SPECS_COLUMN = 'specs';
 /** plan.md 在仓里的位置：pr-fields 判「对应计划」、引擎收需求文档时核那一行，都按它找。 */
 export const PLAN_DOC = 'docs/plan.md';
-/** PR 模板（.github/pull_request_template.md）的各栏，顺序同模板；测试里对着模板查，两边对不上就红。 */
-export const PR_COLUMNS = [
-  '做了什么',
-  '怎么验证的',
-  '还欠什么',
-  '按推荐先做了',
-  '需求',
-  '修提醒',
-  CLOSE_COLUMN,
-  PLAN_COLUMN,
-  SPECS_COLUMN,
-  TIER_COLUMN,
-  '文档',
-] as const;
-const KNOWN = new Set<string>(PR_COLUMNS.map((c) => c.toLowerCase()));
 
 export interface PrFacts {
   labels: readonly string[];
@@ -43,46 +28,6 @@ export interface RepoFacts {
   phases: Map<number, PlanPhase>;
   /** 仓内相对路径在不在（这个 PR 检出来的样子）。 */
   exists(rel: string): boolean;
-}
-
-/** 「**对应计划**：」「**对应计划：**」：加粗的，冒号在里在外都算一栏的开头。 */
-const BOLD_COLUMN = /^\s*(?:[-*+]\s+)?\*\*\s*([^*：:\n]+?)\s*(?:\*\*\s*[：:]|[：:]\s*\*\*)\s*(.*)$/;
-/** 「对应计划：」：不加粗的只认模板里有的栏名，免得把正文里带冒号的一句话当成新的一栏。 */
-const PLAIN_COLUMN = /^\s*(?:[-*+]\s+)?([^\s*：:][^*：:\n]*?)\s*[：:]\s*(.*)$/;
-/** 小标题是正文分节，上一栏到这里为止：栏写在正文开头时，不截的话后面各节里提到的 specs 路径会被当成这一栏来查。 */
-const HEADING = /^\s{0,3}#{1,6}(?:\s|$)/;
-
-/**
- * 正文里的各栏：从一栏的开头起，到下一栏为止；栏名不分大小写。
- * HTML 注释（模板里的提示）先去掉：只留着模板提示没填，这一栏就是空的。
- */
-export function prColumns(body: string): Map<string, string> {
-  const cols = new Map<string, string>();
-  let current: string | undefined;
-  let buf: string[] = [];
-  const flush = () => {
-    if (current !== undefined && !cols.has(current)) cols.set(current, buf.join('\n').trim());
-  };
-  for (const line of stripComments(body.replace(/\r\n?/g, '\n')).split('\n')) {
-    if (HEADING.test(line)) {
-      flush();
-      current = undefined;
-      buf = [];
-      continue;
-    }
-    const bold = BOLD_COLUMN.exec(line);
-    const plain = bold ? null : PLAIN_COLUMN.exec(line);
-    const m = bold ?? (plain?.[1] && KNOWN.has(plain[1].toLowerCase()) ? plain : null);
-    if (m?.[1] !== undefined) {
-      flush();
-      current = m[1].trim().toLowerCase();
-      buf = [m[2] ?? ''];
-    } else if (current !== undefined) {
-      buf.push(line);
-    }
-  }
-  flush();
-  return cols;
 }
 
 export function checkPrFields(pr: PrFacts, repo: RepoFacts): string[] {

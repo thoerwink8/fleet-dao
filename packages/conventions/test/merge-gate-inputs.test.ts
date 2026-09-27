@@ -15,7 +15,7 @@ const gates = src('merge-gates.ts');
 const ALLOWED_READS: Record<string, string> = {
   pr: 'PR 本身：草稿、冲突、当前头、改了几个文件、正文和标签（必填栏只提醒；正文里的关单词定这个 PR 要关哪几张，#325）',
   files: 'PR 改了哪些文件：判改没改到先审后合的路径；写了关单的带没带那张单的结果.md（#325）',
-  statuses: '当前头上的提交状态：第二意见（#299 起加「认领对得上」）',
+  statuses: '当前头上的提交状态（逐条的，带是谁贴的）：第二意见、引擎机器人贴的「认领对得上」（#348）',
   fileAt: '这个 PR 里的 plan.md：必填栏「对应计划」只提醒',
   exists: '这个 PR 里的 specs 目录在不在：必填栏「specs」只提醒',
   openPrs: '主线一动逐个重算开着的 PR：挑要算哪几个，不参与判',
@@ -24,8 +24,9 @@ const ALLOWED_READS: Record<string, string> = {
   writeStatus: '写 merge-gate 这一个状态',
 };
 
-/** 合并闸认得的提交状态名：自己写的 merge-gate、第二意见。#299 贴状态那一步会加上「认领对得上」。 */
+/** 合并闸认得的提交状态名：自己写的 merge-gate、第二意见、引擎机器人贴的「认领对得上」（#348）。 */
 const ALLOWED_CONTEXTS: Record<string, string> = {
+  CLAIM_MATCH_CONTEXT: '认领对得上',
   GATE_CONTEXT: 'merge-gate',
   SECOND_OPINION_CONTEXT: 'second-opinion',
 };
