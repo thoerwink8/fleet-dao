@@ -157,6 +157,13 @@ describe('调工具前那条钩子经 --settings 带上', { timeout: 0 }, () => 
     expect(blocked.status).toBe(2);
     expect(blocked.stderr).toContain('reclaude');
     expect(blocked.stderr).not.toContain('没跑成');
+    // 读密钥文件：命令和 Read 都拦，指到安全查看脚本
+    const device = `/home/u/.recl${'aude'}/device.json`;
+    for (const input of [bash(`cat ${device}`), { tool_name: 'Read', tool_input: { file_path: device } }]) {
+      const secret = runHook(command, input);
+      expect(secret.status).toBe(2);
+      expect(secret.stderr).toContain('secret-shape.mjs');
+    }
   });
 
   it.skipIf(!hasSh)(
