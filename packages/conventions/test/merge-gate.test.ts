@@ -26,6 +26,7 @@ const RISK_TEXT = JSON.stringify({ paths: RISK });
 function body(tier: string | null): string {
   return [
     '**做了什么**：试一下',
+    '**这个 PR 做完就关单**：否',
     '**对应计划**：P1「GitHub：两个新机器人」',
     '**specs**：specs/74-合并检查上GitHub/',
     ...(tier === null ? [] : [`**档位**：${tier}`]),
@@ -173,6 +174,7 @@ describe('合并闸：验收场景', () => {
       '提醒：正文里认不出「对应计划」一栏',
       '提醒：正文里认不出「specs」一栏',
       '提醒：正文里认不出「档位」一栏',
+      '提醒：正文里认不出「这个 PR 做完就关单」一栏',
     ]);
   });
 
