@@ -2,7 +2,6 @@
 // 香港只转发不验签：请求体和几个头原样透传，签名必须对收到的原始字节算，不许先解析再序列化。
 // 验签不过的不落库（没认证的请求不许往库里写），只回 401、记日志。
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import type { GitHub } from '@fleet-dao/github';
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { z } from 'zod';
@@ -16,7 +15,6 @@ import {
   type GitHubEventSink,
   type GitHubObjectVersion,
   type IngestedEvent,
-  type IssuePlanReader,
   REPO_NOT_MANAGED,
 } from './ports.ts';
 import { GhUser, type GithubWhitelist, githubWhitelist, isTrusted } from './whitelist.ts';
@@ -36,11 +34,7 @@ const MAX_REASON_CHARS = 2_000;
  * 两个机器人的凭据读不到时 PR 镜像、CI 汇总的去处：这两样要调 GitHub，如实失败（这条投递记成出错）；issue、评论、ping
  * 不用写镜像，照常放过去，issue 照样变成任务。健康检查报红。凭据只在后端启动时读一次：补上之后要重启后端。
  */
-export function githubAppMissing(why: string): {
-  sink: GitHubEventSink;
-  check: () => Promise<void>;
-  plans: IssuePlanReader;
-} {
+export function githubAppMissing(why: string): { sink: GitHubEventSink; check: () => Promise<void> } {
   const message = `GitHub 机器人的凭据没读到，PR 镜像和 CI 汇总写不了：${why}`;
   return {
     sink: {
@@ -55,20 +49,6 @@ export function githubAppMissing(why: string): {
         'GitHub 机器人的凭据没读到，PR 和 CI 事件写不进镜像',
       );
     },
-    // 读不到这张单挂在哪个版本：接活不派（这条投递记成出错、对账重放），不当成挂在当前版本上
-    plans: {
-      async read() {
-        throw new Error(`GitHub 机器人的凭据没读到，读不了 issue 挂在哪个版本：${why}`);
-      },
-    },
-  };
-}
-
-/** 接活判当前版本、fleet-api handover 读 issue 此刻的样子：经 @fleet-dao/github 的「引擎」机器人现读。 */
-export function githubIssuePlans(gh: Pick<GitHub, 'readIssuePlan'>): IssuePlanReader {
-  return {
-    read: (repo, issueNumber) =>
-      gh.readIssuePlan({ repo: { owner: repo.owner, name: repo.name }, issueNumber }),
   };
 }
 

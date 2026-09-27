@@ -946,7 +946,7 @@ export interface IssuePlan extends IssueMilestones, IssueNow {
   author: string | null;
 }
 
-/** 读 issue 此刻的样子（「引擎」机器人现读，计划以 GitHub 为准）：真实现是 @fleet-dao/github 的 readIssuePlan（github.ts 的 githubIssuePlans）。 */
+/** 读 issue 此刻的样子（「引擎」机器人现读，计划以 GitHub 为准）：真实现是 @fleet-dao/github 的 readIssuePlan（issue-intake.ts 的 githubIssuePlans）。 */
 export interface IssuePlanReader {
   /** 读不到、认不出一律抛错（调用方说「没查成」），不拿「没挂里程碑」「开着」顶。 */
   read(repo: { owner: string; name: string }, issueNumber: number): Promise<IssuePlan>;

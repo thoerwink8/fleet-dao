@@ -29,8 +29,9 @@ import { DEV_RUN_ID, DEV_USER_ID, devFixtures, IDS } from './dev-fixtures.ts';
 import { draftBacklogCheck, notWiredDraftOpener } from './draft-opening.ts';
 import { createFeishuAuth } from './feishu.ts';
 import { createGatewaySeen, GATEWAY_NO_PASS } from './gateway-seen.ts';
-import { githubAppMissing, githubEventsCheck, githubIssuePlans } from './github.ts';
+import { githubAppMissing, githubEventsCheck } from './github.ts';
 import { serviceHealthChecks } from './health.ts';
+import { githubIssuePlans, issuePlansUnavailable } from './issue-intake.ts';
 import { judgeHealthCheck } from './judge-health.ts';
 import { serveCockpit } from './keep-alive.ts';
 import { jsonLogger } from './log.ts';
@@ -60,7 +61,11 @@ function githubMirror(db: Db): {
       error: String(err),
     });
     const missing = githubAppMissing(String(err));
-    return { sink: missing.sink, plans: missing.plans, credentialsMissing: missing.check };
+    return {
+      sink: missing.sink,
+      plans: issuePlansUnavailable(String(err)),
+      credentialsMissing: missing.check,
+    };
   }
 }
 

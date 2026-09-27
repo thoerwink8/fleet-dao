@@ -23,7 +23,7 @@ export interface Deps {
   requirements: RequirementWorkflows;
   /**
    * 读一张 issue 此刻挂在哪个版本、开没开着（GitHub 上现读）：接活只派挂在当前版本上的单。机器人凭据没读到时是一个读就抛错的
-   * （githubAppMissing），不拿「挂在当前版本」顶。
+   * （issue-intake.ts 的 issuePlansUnavailable），不拿「挂在当前版本」顶。
    */
   plans: IssuePlanReader;
   changes: ChangeFeed;

@@ -17,7 +17,7 @@ import {
   type VersionGate,
   versionGate,
 } from '@fleet-dao/core';
-import { humanPart } from '@fleet-dao/github';
+import { type GitHub, humanPart } from '@fleet-dao/github';
 import { AnswerAskRequest, type Repo, requirementWorkflowId, type Task } from '@fleet-dao/shared';
 import { z } from 'zod';
 import type { Deps } from './deps.ts';
@@ -26,6 +26,7 @@ import {
   type IngestedEvent,
   type IntakeRepo,
   type IssuePlan,
+  type IssuePlanReader,
   type NewAuditEntry,
   type User,
   WorkflowGoneError,
@@ -75,6 +76,23 @@ export class RetryLaterError extends Error {
 const INTAKE: Actor = { kind: 'engine', id: 'github-intake' };
 
 const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
+
+/** 读 issue 此刻挂在哪个版本、开没开着：经 @fleet-dao/github 的「引擎」机器人现读（后端 main.ts、引擎对账都这样装）。 */
+export function githubIssuePlans(gh: Pick<GitHub, 'readIssuePlan'>): IssuePlanReader {
+  return {
+    read: (repo, issueNumber) =>
+      gh.readIssuePlan({ repo: { owner: repo.owner, name: repo.name }, issueNumber }),
+  };
+}
+
+/** 机器人凭据没读到（githubAppMissing 那种情况）：一读就抛，接活不派（投递记成出错、对账重放），不当成挂在当前版本上。 */
+export function issuePlansUnavailable(why: string): IssuePlanReader {
+  return {
+    async read() {
+      throw new Error(`GitHub 机器人的凭据没读到，读不了 issue 挂在哪个版本：${why}`);
+    },
+  };
+}
 
 export interface IssueIntake {
   /** 不是 issue、评论事件：undefined。是：一句做了什么（记进这条投递的 note）。 */
