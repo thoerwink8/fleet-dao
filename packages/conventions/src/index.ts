@@ -64,6 +64,7 @@ export {
   isKindLabel,
   KIND_LABELS,
   type KindLabel,
+  LOCAL_LABEL,
   MOTHER_LABEL,
   milestonePhase,
   milestoneVersion,

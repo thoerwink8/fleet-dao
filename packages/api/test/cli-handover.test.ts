@@ -283,6 +283,23 @@ describe('交给 fleet', () => {
     ]);
   });
 
+  it('【故意造出的失败】贴着「本机做」的（#299 止血，自动派不派）：人明着交照起，打印和操作记录写明它贴着「本机做」、帅位原本留给本机', async () => {
+    const t = setup();
+    await t.queued(45);
+    t.plans.set(45, issuePlan({ labels: ['需求', '本机做'] }));
+    expect(await t.run(['example/canary', '45', '--reason', REASON])).toBe(0);
+    expect(t.out.at(-1)).toContain(
+      '已交给 fleet：example/canary#45（挂在当前版本「v1 Fusion 接活」上，贴着「本机做」（帅位原本留给本机做的））起了 Fusion 工作流',
+    );
+    expect(t.temporal.started.map((s) => s.input.issueNumber)).toEqual([45]);
+    expect(t.handovers().map((a) => a.after)).toMatchObject([
+      {
+        outcome: 'started',
+        place: '挂在当前版本「v1 Fusion 接活」上，贴着「本机做」（帅位原本留给本机做的）',
+      },
+    ]);
+  });
+
   it('在跑的：不重复起（退出码 0），不连 Temporal；谁交的、为什么照样记一条、读回打印', async () => {
     const t = setup();
     // 样例里的 #12 正在跑

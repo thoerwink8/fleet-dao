@@ -1,6 +1,7 @@
 // 派不派一张单的边界表（0003 第 2、4、8 条；design 第九节「在哪能做与接活开关」）：开关这一道（关着、开关打开以前开的、
 // 排队中、结束的、重开）、版本这一道（只派当前版本：未排期、别的版本、关了的里程碑、认不出版本号都不派）、母单子单这一道
-// （#252 之前母单、子单都不自动派），人明说交给 fleet（在跑的不重复起、结束的只有重开过才再起、关着的和 PR 拒）。
+// （#252 之前母单、子单都不自动派）、本机做这一道（#299 止血：贴了「本机做」的不自动派），人明说交给 fleet（在跑的不重复起、
+// 结束的只有重开过才再起、关着的和 PR 拒）。
 import { describe, expect, it } from 'vitest';
 import {
   autoDispatchGate,
@@ -10,6 +11,7 @@ import {
   handoverDecision,
   type IssueFamily,
   type IssueNow,
+  localGate,
   type MilestoneRef,
   milestoneVersion,
   versionGate,
@@ -165,6 +167,37 @@ describe('母单、子单这一道（#252 之前：一张单只走一块，母�
     expect(autoDispatchGate({ ...plan, milestone: null, ...alone, labels: ['母单'] })).toMatchObject({
       ok: false,
       reason: 'unscheduled',
+    });
+  });
+});
+
+describe('本机做这一道（#299 止血：帅位留给本机做的，认领进库之前靠标签挡）', () => {
+  const plan = { milestone: V1, openMilestones: [V1, V2], parent: null, subIssues: 0 };
+
+  it('没贴「本机做」：过（别的标签不算）', () => {
+    expect(localGate({ labels: ['需求'] })).toEqual({ ok: true });
+    expect(localGate({ labels: [] })).toEqual({ ok: true });
+    expect(localGate({ labels: ['本机'] })).toEqual({ ok: true });
+  });
+
+  it('【故意造出的失败】贴了「本机做」、挂在当前版本上的独立单：自动派不派，原因 reserved_local，写明要交给引擎先去掉标签再 handover', () => {
+    const got = autoDispatchGate({ ...plan, labels: ['需求', '本机做'] });
+    expect(got).toMatchObject({ ok: false, reason: 'reserved_local' });
+    if (got.ok) throw new Error('贴了「本机做」的单不该自动派');
+    expect(got.why).toBe('帅位留给本机做（贴着「本机做」）；要交给引擎，先去掉标签再 handover');
+  });
+
+  it('不贴的照派；先看版本、母单子单，再看本机做', () => {
+    expect(autoDispatchGate({ ...plan, labels: ['需求'] })).toEqual({
+      ok: true,
+      version: 1,
+      milestone: V1.title,
+    });
+    expect(autoDispatchGate({ ...plan, milestone: null, labels: ['本机做'] })).toMatchObject({
+      reason: 'unscheduled',
+    });
+    expect(autoDispatchGate({ ...plan, parent: 192, labels: ['本机做'] })).toMatchObject({
+      reason: 'sub_issue',
     });
   });
 });
