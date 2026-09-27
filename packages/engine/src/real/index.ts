@@ -12,7 +12,7 @@ import type { EnginePorts } from '../ports.ts';
 import { scopeExec, type UserExec } from './exec.ts';
 import { createGitHubPorts, type EngineGitHub } from './github-ports.ts';
 import { githubReconcileJob } from './github-reconcile.ts';
-import { cursorLaunchCommand, DEFAULT_CURSOR_VERSIONS_DIR } from './hosts.ts';
+import { cursorLaunchCommand, DEFAULT_CURSOR_API_KEY_FILE, DEFAULT_CURSOR_VERSIONS_DIR } from './hosts.ts';
 import { hourlyReconcileJob } from './hourly-reconcile.ts';
 import { engineJevFromEnv } from './jev-port.ts';
 import { registerEngineJobs } from './jobs.ts';
@@ -168,7 +168,8 @@ export function realPortsConfigFromEnv(env: Readonly<Record<string, string | und
 
 /**
  * 起执行体的命令（绝对路径），会话和探针同一份：reclaude、cursor-agent 都装在会话用户自己家里，{user} 换成会话用户。
- * cursor-agent 不钉版本：以会话用户的身份在版本目录下现找 current → 最新版本（hosts.ts 的 cursorLaunchCommand）。
+ * cursor-agent 不钉版本：以会话用户的身份先读它家里的 API 密钥（DEFAULT_CURSOR_API_KEY_FILE，不做成配置），再在版本目录下
+ * 现找 current → 最新版本（hosts.ts 的 cursorLaunchCommand）。
  */
 export function agentCommands(config: Pick<RealPortsConfig, 'claudeBin' | 'cursorVersionsDir'>): {
   claudeCommand(user: SessionUser): string[];
@@ -176,7 +177,11 @@ export function agentCommands(config: Pick<RealPortsConfig, 'claudeBin' | 'curso
 } {
   return {
     claudeCommand: (user) => [config.claudeBin.replaceAll('{user}', user)],
-    cursorCommand: (user) => cursorLaunchCommand(config.cursorVersionsDir.replaceAll('{user}', user)),
+    cursorCommand: (user) =>
+      cursorLaunchCommand(
+        config.cursorVersionsDir.replaceAll('{user}', user),
+        DEFAULT_CURSOR_API_KEY_FILE.replaceAll('{user}', user),
+      ),
   };
 }
 

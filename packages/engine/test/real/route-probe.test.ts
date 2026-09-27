@@ -1,21 +1,27 @@
 // 路由探针的真装配（#129）：内存库上跑真迁移、假插头（不起真执行体）、假工作树管家。
 // 探通 → 在线；登录失效、设备被撤销 → 离线写明原因、整池暂停报警，恢复后下一轮转回在线、撤掉报警；额度用满被拒 → 算通、
 // 额度读数记账；回答认不出、超时、起不来、连不上、工作目录交不出去、账号池没定会话用户 → 离线写明原因。每条都故意造一次。
-import { mkdtempSync, rmSync } from 'node:fs';
+// cursor 的 API 密钥另走一遍真插头、真起法（经假帮手真起进程，只在 Linux 上）：探针带上了它，哪里都搜不到值。
+import { chmodSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { notifications, quotaWindows, routes, scheduleRuns, toRoute } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { ROUTE_PROBE_JOB, runRouteProbeJob } from '../../src/jobs/route-probe.ts';
-import { CURSOR_MISSING } from '../../src/real/hosts.ts';
+import { CURSOR_KEY_BAD, CURSOR_KEY_EXIT, CURSOR_MISSING } from '../../src/real/hosts.ts';
 import { registerEngineJobs } from '../../src/real/jobs.ts';
 import { PROBE_DIR, PROBE_PROMPT, routeProbeJob } from '../../src/real/route-probe.ts';
 import { poolHoldKey } from '../../src/real/store-ports.ts';
 import {
   addCursorRoute,
+  CURSOR_KEY_REJECTED,
   CURSOR_NO_LOGIN,
   CURSOR_SESSION,
+  CURSOR_TRUST_REQUIRED,
+  type CursorKeyRig,
+  cursorKeyRig,
+  dumpDb,
   type FakeCursorScript,
   type FakeRunScript,
   fakeCursorRun,
@@ -46,7 +52,13 @@ const quiet = () => {};
 
 function setup(
   script: (n: number) => FakeRunScript,
-  over: { adoptFails?: string; runThrows?: string; cursor?: (n: number) => FakeCursorScript } = {},
+  over: {
+    adoptFails?: string;
+    runThrows?: string;
+    cursor?: (n: number) => FakeCursorScript;
+    /** cursor 的路由用真插头、真起法（经假帮手真起进程，fixtures 的 cursorKeyRig），不用假插头。 */
+    realCursor?: CursorKeyRig;
+  } = {},
 ) {
   const fake = fakeRun((_, n) => script(n));
   const cursor = fakeCursorRun((_, n) => {
@@ -64,24 +76,30 @@ function setup(
   const thrower = async (): Promise<never> => {
     throw new Error(over.runThrows);
   };
+  const logs: string[] = [];
+  const rig = over.realCursor;
   const job = routeProbeJob({
     db: t.db,
     trees: trees.trees,
     claudeCommand: (user) => [`/opt/fake/${user}/reclaude`],
-    cursorCommand: (user) => [`/opt/fake/${user}/cursor-agent`],
+    cursorCommand: rig ? rig.command : (user) => [`/opt/fake/${user}/cursor-agent`],
     machine: '法国',
     now: () => new Date(clock),
-    log: quiet,
+    log: rig ? (level, text, fields) => void logs.push(JSON.stringify([level, text, fields])) : quiet,
     sleep: async () => {},
     retryDelayMs: 0,
     run: over.runThrows
       ? { 'claude-code': thrower, 'cursor-agent': thrower }
-      : { 'claude-code': fake.run, 'cursor-agent': cursor.run },
+      : rig
+        ? { 'claude-code': fake.run }
+        : { 'claude-code': fake.run, 'cursor-agent': cursor.run },
+    ...(rig ? { helper: rig.helper, sudo: rig.sudo } : {}),
   });
   return {
     fake,
     cursor,
     trees,
+    logs,
     round: async () => runRouteProbeJob(job()),
     advance: (minutes: number) => {
       clock += minutes * 60_000;
@@ -449,7 +467,7 @@ describe('cursor-agent 的路由（#212）：和干活的会话同一个驱动�
     expect(await cursorHold()).toBeUndefined();
   });
 
-  it('没登录（-p 模式的原话）：同一轮不再试；离线写清去哪台机器、以谁跑 cursor-agent login，整池暂停；登好后下一轮转回在线、撤掉', async () => {
+  it('没登录（-p 模式的原话）：同一轮不再试；离线写清去 Cursor 后台重新生成密钥、照 ops 放进哪台机器、谁家里，整池暂停；放好后下一轮转回在线、撤掉', async () => {
     const s = setup(answered, { cursor: (n) => (n === 1 ? failing(CURSOR_NO_LOGIN) : replied()) });
     await s.round();
     expect(s.cursor.count()).toBe(1);
@@ -458,7 +476,8 @@ describe('cursor-agent 的路由（#212）：和干活的会话同一个驱动�
     expect(down?.probeDetail).toContain('Cursor 登录失效');
     expect(down?.probeDetail).toContain('法国');
     expect(down?.probeDetail).toContain('fleet-agent-carpool');
-    expect(down?.probeDetail).toContain('cursor-agent login');
+    expect(down?.probeDetail).toContain('cursor.com/dashboard/api');
+    expect(down?.probeDetail).toContain('docs/ops.md 第五节「会话用户的 Cursor 密钥」');
     const alert = await cursorHold();
     expect(alert).toMatchObject({ level: 'decision', resolvedAt: null });
     expect(alert?.title).toContain('Cursor 登录失效');
@@ -470,6 +489,59 @@ describe('cursor-agent 的路由（#212）：和干活的会话同一个驱动�
     expect(await row(routeId)).toMatchObject({ alive: true, probeState: 'ok' });
     expect((await cursorHold())?.resolvedAt).not.toBeNull();
   });
+
+  it('Cursor 拒了会话用户的 API 密钥（无效、被撤、过期；原话带终端颜色）：同一轮不再试；离线、整池暂停，写清去后台重新生成、照 ops 放进法国', async () => {
+    const s = setup(answered, { cursor: () => failing(CURSOR_KEY_REJECTED) });
+    await s.round();
+    expect(s.cursor.count()).toBe(1);
+    const down = await row(routeId);
+    expect(down).toMatchObject({ alive: false, probeState: 'failed' });
+    expect(down?.probeDetail).toContain('Cursor 登录失效');
+    expect(down?.probeDetail).toContain('The provided API key is invalid');
+    expect(down?.probeDetail).toContain('cursor.com/dashboard/api');
+    expect(down?.probeDetail).toContain('法国');
+    // 终端颜色去掉了，不带进库
+    expect(down?.probeDetail).not.toContain('\u001b');
+    expect((await cursorHold())?.title).toContain('Cursor 登录失效');
+  });
+
+  it('会话用户家里的密钥文件没放好（起它的那段 sh 退出 78）：同一轮不再试；离线写清哪里不对、照 ops 放好，整池暂停；放好后下一轮转回在线', async () => {
+    const bad = `${CURSOR_KEY_BAD}：权限是 644，要 600。文件是 /home/fleet-agent-carpool/.cursor/fleet-api-key，照 docs/ops.md 第五节「会话用户的 Cursor 密钥」放好`;
+    const s = setup(answered, {
+      cursor: (n) => (n === 1 ? failing(bad, CURSOR_KEY_EXIT) : replied()),
+    });
+    await s.round();
+    expect(s.cursor.count()).toBe(1);
+    const down = await row(routeId);
+    expect(down).toMatchObject({ alive: false, probeState: 'failed' });
+    expect(down?.probeDetail).toContain('Cursor 密钥没放好');
+    expect(down?.probeDetail).toContain('权限是 644，要 600');
+    expect(down?.probeDetail).toContain('会话用户 fleet-agent-carpool');
+    const alert = await cursorHold();
+    expect(alert).toMatchObject({ level: 'decision', resolvedAt: null });
+    expect(alert?.title).toContain('Cursor 密钥没放好');
+    // 哪里不对摘进了提醒：人不用翻探针的结论就知道要改什么
+    expect(alert?.body).toContain('权限是 644，要 600');
+
+    s.advance(15);
+    await s.round();
+    expect(await row(routeId)).toMatchObject({ alive: true, probeState: 'ok' });
+    expect((await cursorHold())?.resolvedAt).not.toBeNull();
+  });
+
+  for (const exitCode of [0, 1]) {
+    it(`没信任过的目录（-p 打一段 Workspace Trust 提示就退出，退出码 ${exitCode}）：不算探通，认成执行方式或路由配置不对、写明那一句，不是认不出`, async () => {
+      const s = setup(answered, { cursor: () => failing(CURSOR_TRUST_REQUIRED, exitCode) });
+      await s.round();
+      const down = await row(routeId);
+      expect(down).toMatchObject({ alive: false, probeState: 'failed' });
+      expect(down?.probeDetail).toContain('执行方式或路由配置不对');
+      expect(down?.probeDetail).toContain('Workspace Trust Required');
+      expect(down?.probeDetail).toContain('Pass --trust');
+      // 是这条路由的起法坏了，不是这个池要人修：不整池暂停
+      expect(await cursorHold()).toBeUndefined();
+    });
+  }
 
   it('会话用户家里没装 cursor-agent（找版本目录的那段 sh 退出 127）：离线，原因写没装；不整池暂停', async () => {
     const s = setup(answered, {
@@ -511,3 +583,67 @@ describe('cursor-agent 的路由（#212）：和干活的会话同一个驱动�
     expect(down?.probeDetail).toContain('回答认不出（要的是只回 OK）');
   });
 });
+
+// 真插头（runCursorAgent）、真起法（cursorLaunchCommand：会话用户自己读密钥、现找版本目录）、经假帮手真起进程：探针真带上了
+// 那一把，库、日志、帮手收到的参数和环境、cursor-agent 收到的参数里都搜不到值。Windows 上起不了 /bin/sh，NTFS 也表示不了 600。
+describe.skipIf(process.platform === 'win32')(
+  'cursor 的 API 密钥真走一遍：探针带上了它，哪里都搜不到值',
+  () => {
+    let routeId: string;
+    let rig: CursorKeyRig;
+    beforeEach(async () => {
+      ({ routeId } = await addCursorRoute(t.db, { stages: ['execute'] }));
+      // 上一次探通是 3 小时前：cursor 探通了隔 2 小时再探，这一轮到点了
+      await t.client.query('update routes set probed_at = $2::timestamptz where id = $1', [
+        routeId,
+        new Date(NOW.getTime() - 3 * 60 * 60_000).toISOString(),
+      ]);
+      rig = cursorKeyRig(root);
+    });
+    const cursorHold = async () =>
+      (await t.db.select().from(notifications)).find((n) => n.dedupeKey === poolHoldKey('cursor'));
+    /** 库、引擎日志、帮手的记录、cursor-agent 收到的参数：值会漏去的地方拼在一起。 */
+    const everywhere = async (logs: string[]) => [await dumpDb(t.client), rig.traces(), ...logs].join('\n');
+
+    it('放好了：cursor-agent 拿到的就是文件里那一把（它只在对得上时回 OK），探通、在线；带 --trust 不带 --force；哪里都没有值', async () => {
+      const s = setup(answered, { realCursor: rig });
+      await s.round();
+      const up = await row(routeId);
+      expect(up?.probeDetail).toMatch(/^答上了：OK · /);
+      expect(up).toMatchObject({ alive: true, probeState: 'ok' });
+      const argv = rig.traces();
+      expect(argv).toContain('--trust');
+      expect(argv).not.toContain('--force');
+      const all = await everywhere(s.logs);
+      // 真攒上了东西：库里有这条路由，帮手记下了 run
+      expect(all).toContain(routeId);
+      expect(all).toContain('"action":"run"');
+      expect(all).not.toContain(rig.key);
+    });
+
+    it('Cursor 拒了这一把（无效、被撤、过期）：离线、整池暂停，提醒写清去后台重新生成、照 ops 放进法国；哪里都没有值', async () => {
+      rig.rejectKey();
+      const s = setup(answered, { realCursor: rig });
+      await s.round();
+      const down = await row(routeId);
+      expect(down).toMatchObject({ alive: false, probeState: 'failed' });
+      expect(down?.probeDetail).toContain('The provided API key is invalid');
+      expect(down?.probeDetail).toContain('cursor.com/dashboard/api');
+      expect((await cursorHold())?.title).toContain('Cursor 登录失效');
+      expect(await everywhere(s.logs)).not.toContain(rig.key);
+    });
+
+    it('密钥文件权限太松（644）：cursor-agent 不起，离线写清哪里不对，整池暂停；哪里都没有值', async () => {
+      chmodSync(rig.keyFile, 0o644);
+      const s = setup(answered, { realCursor: rig });
+      await s.round();
+      expect(rig.agentRan()).toBe(false);
+      const down = await row(routeId);
+      expect(down).toMatchObject({ alive: false, probeState: 'failed' });
+      expect(down?.probeDetail).toContain(`${CURSOR_KEY_BAD}：权限是 644，要 600。文件是 ${rig.keyFile}`);
+      expect(down?.probeDetail).toContain(`退出码 ${CURSOR_KEY_EXIT}`);
+      expect((await cursorHold())?.title).toContain('Cursor 密钥没放好');
+      expect(await everywhere(s.logs)).not.toContain(rig.key);
+    });
+  },
+);

@@ -1253,6 +1253,112 @@
         "message": "任务 3f2b1c4d-0000-4000-8000-000000000001 一个起过的会话都查不到：不知道写它的是哪一族，判不了验证模型是不是别家，不验"
       },
       "expect": { "action": "park", "rule": "VF1", "alert": true, "routeOutcome": "neutral" }
+    },
+    {
+      "id": "X83",
+      "provenance": "format",
+      "origin": "cursor-agent 2026.09.26-dd393fe 发行包 index.js 的 api-key-auth：环境里的 CURSOR_API_KEY 换令牌被拒（无效、被撤、过期）就打这三行、退出 1、没有 JSON（头一行的终端颜色插头去掉了）；前半句是会话端口按插头判定拼的（#212，法国改用 API 密钥）",
+      "evidence": {
+        "hostId": "cursor-agent",
+        "code": "no_result",
+        "exitCode": 1,
+        "message": "进程退出（退出码 1），没有终帧：⚠ Warning: The provided API key is invalid. ⏎ The API key was loaded from the CURSOR_API_KEY environment variable. ⏎ Please check you have the right key, create a new one, or authenticate without it."
+      },
+      "expect": {
+        "action": "swapRoute",
+        "rule": "AU5",
+        "avoid": "pool",
+        "alert": true,
+        "routeOutcome": "neutral"
+      }
+    },
+    {
+      "id": "X84",
+      "provenance": "format",
+      "origin": "cursor-agent 2026.09.26-dd393fe 发行包 5533.index.js：拉可用模型时认证被拒（凭据或 API 密钥无效、过期）的那一句",
+      "evidence": {
+        "hostId": "cursor-agent",
+        "message": "Authentication failed: your Cursor credentials or API key are invalid or expired. If you set CURSOR_API_KEY, check that it is correct, or run `cursor-agent login` to re-authenticate."
+      },
+      "expect": { "action": "swapRoute", "rule": "AU5", "avoid": "pool", "alert": true }
+    },
+    {
+      "id": "X85",
+      "provenance": "format",
+      "origin": "会话用户家里的 Cursor API 密钥文件不在：引擎起 cursor-agent 的前一段 sh（engine/src/real/hosts.ts 的 CURSOR_KEY_SCRIPT）这么说、退出 78，不起 cursor-agent（#212）",
+      "evidence": {
+        "hostId": "cursor-agent",
+        "code": "no_result",
+        "exitCode": 78,
+        "message": "进程退出（退出码 78），没有终帧：Cursor 密钥没放好：不在。文件是 /home/<会话用户>/.cursor/fleet-api-key，照 docs/ops.md 第五节「会话用户的 Cursor 密钥」放好"
+      },
+      "expect": {
+        "action": "swapRoute",
+        "rule": "AU6",
+        "avoid": "pool",
+        "alert": true,
+        "routeOutcome": "neutral"
+      }
+    },
+    {
+      "id": "X86",
+      "provenance": "format",
+      "origin": "同 X85：密钥文件放了，但权限不是 600",
+      "evidence": {
+        "hostId": "cursor-agent",
+        "code": "no_result",
+        "exitCode": 78,
+        "message": "进程退出（退出码 78），没有终帧：Cursor 密钥没放好：权限是 644，要 600。文件是 /home/<会话用户>/.cursor/fleet-api-key，照 docs/ops.md 第五节「会话用户的 Cursor 密钥」放好"
+      },
+      "expect": {
+        "action": "swapRoute",
+        "rule": "AU6",
+        "avoid": "pool",
+        "alert": true,
+        "routeOutcome": "neutral"
+      }
+    },
+    {
+      "id": "X87",
+      "provenance": "format",
+      "origin": "cursor-agent 2026.09.26-dd393fe 发行包 6853.index.js：-p 在没信任过的目录里、没带 --trust / --force 时打一段提示就退出；插头把开头那句从整段里捞出来接在最后几行前面（插头固定带 --trust，撞上就是起法坏了）",
+      "evidence": {
+        "hostId": "cursor-agent",
+        "code": "no_result",
+        "exitCode": 1,
+        "message": "进程退出（退出码 1），没有终帧：⚠ Workspace Trust Required ⏎ To proceed, you can either: ⏎ • Run 'cursor-agent' interactively to decide ⏎ • Pass --trust, --yolo, or -f if you trust this directory"
+      },
+      "expect": {
+        "action": "swapRoute",
+        "rule": "CF1",
+        "avoid": "route",
+        "alert": true,
+        "routeOutcome": "fail"
+      }
+    },
+    {
+      "id": "X88",
+      "provenance": "format",
+      "origin": "同 X87，只剩最后几行（开头那句被挤掉了，比如没经插头拼、直接拿 stderr 末几行）：最后一行也认得出",
+      "evidence": {
+        "hostId": "cursor-agent",
+        "code": "no_result",
+        "exitCode": 0,
+        "message": "进程退出（退出码 0），没有终帧：To proceed, you can either: ⏎ • Run 'cursor-agent' interactively to decide ⏎ • Pass --trust, --yolo, or -f if you trust this directory"
+      },
+      "expect": { "action": "swapRoute", "rule": "CF1", "avoid": "route", "alert": true }
+    },
+    {
+      "id": "X89",
+      "provenance": "format",
+      "origin": "cursor-agent 2026.09.26-dd393fe 发行包 6853.index.js：带了 --trust、却写不下这个目录的信任记录（会话用户家里的 ~/.cursor 写不进）",
+      "evidence": {
+        "hostId": "cursor-agent",
+        "code": "no_result",
+        "exitCode": 1,
+        "message": "进程退出（退出码 1），没有终帧：Error: Failed to trust workspace at /var/lib/fleet-work/_route-probe/fleet-agent-carpool. Please check permissions."
+      },
+      "expect": { "action": "swapRoute", "rule": "CF1", "avoid": "route", "alert": true }
     }
   ],
   "skipped": [

@@ -218,25 +218,44 @@ export const RULES: readonly FailureRule[] = [
     alert: true,
     routeOutcome: 'fail',
   },
-  // cursor-agent 没有登录态（会话用户家里没登、登录过期）：-p 模式下 stderr 一句、退出 1、没有任何 JSON。原话取自
-  // cursor-agent 2026.09.23 的发行包：「Error: Authentication required. Please run 'cursor-agent login' first, or set
+  // cursor-agent 的认证没过：-p 模式下 stderr 几行、退出 1、没有任何 JSON。法国用 API 密钥认证（创始人 2026-09-27 拍：
+  // 浏览器登录在没有桌面的服务器上存不下），原话取自发行包 2026.09.23、2026.09.26：密钥换令牌被拒（无效、被撤、过期）是
+  // 「⚠ Warning: The provided API key is invalid.」（插头去掉了它自带的终端颜色），拉模型清单时被拒是「Authentication
+  // failed: your Cursor credentials or API key are invalid or expired.」，常驻的 worker 是「Your authentication is
+  // invalid.」；一样凭据都没有是「Error: Authentication required. Please run 'cursor-agent login' first, or set
   // CURSOR_API_KEY environment variable.」「Authentication required to use Cursor Agent. Please run 'cursor-agent login'
   // to authenticate.」（命令名随起法变，agent / cursor-agent）；ACP 那条路上是「Backend rejected authentication」。
-  // 和 AU2 一样整池暂停，修法是确定的：到那台机器上以会话用户重跑 cursor-agent login（登录态在它家里，不往会话环境里塞
-  // CURSOR_API_KEY）。排在 AU2 前面：AU2 的「authentication required」也认得它，但 AU2 管各家的登录，没写修法。
+  // 和 AU2 一样整池暂停，修法是确定的：去 Cursor 后台重新生成一把密钥、放进那台机器。排在 AU2 前面：AU2 的
+  // 「authentication failed / required」也认得它，但 AU2 管各家的登录，没写修法。
   {
     id: 'AU5',
     title: 'Cursor 登录失效',
-    text: /run '(?:cursor-)?agent login'|Authentication required to use Cursor Agent|Backend rejected authentication/i,
+    text: /run '(?:cursor-)?agent login'|Authentication required to use Cursor Agent|Backend rejected authentication|provided API key is invalid|API key are invalid or expired|Your authentication is invalid/i,
     ladder: ['swapRoute', 'park'],
     avoid: { scope: 'pool', shared: true, until: 'none' },
     alert: true,
     routeOutcome: 'neutral',
     humanFix:
-      '在{machine}上以{user}跑 cursor-agent login，按提示在浏览器里批准（登录态在它家里，不往会话环境里塞 CURSOR_API_KEY）；然后在驾驶舱点「继续」',
+      '去 Cursor 后台（cursor.com/dashboard/api）重新生成一把 API 密钥，照 docs/ops.md 第五节「会话用户的 Cursor 密钥」那条命令放进{machine}（{user}家里的 ~/.cursor/fleet-api-key），旧的那把在后台撤掉；然后在驾驶舱点「继续」',
     resumeAfterPark: true,
   },
-  // 登录失效要人重新登录（设备被撤销单独归 DV1，Cursor 的归 AU5）。
+  // 引擎起 Cursor 会话、探针之前，会话用户家里的 API 密钥文件没放好（不在、空的、不是它的、权限不是 600、是符号链接、
+  // 里面不只一行密钥）：起 cursor-agent 的那段 sh 不往下起，报「Cursor 密钥没放好：<哪里不对>。文件是 <路径>，…」、
+  // 退出 78（real/hosts.ts 的 CURSOR_KEY_SCRIPT）。认的时候连「哪里不对」一起摘（到句号为止），进「要人拍」的提醒。
+  // 这台机器上 Cursor 的池全都起不来，重试、换这个池的路由都没用：整池暂停，照原因放好再继续；是机器没配好，不算路由的账。
+  {
+    id: 'AU6',
+    title: 'Cursor 密钥没放好',
+    text: /Cursor 密钥没放好：[^。⏎\n]*/,
+    ladder: ['swapRoute', 'park'],
+    avoid: { scope: 'pool', shared: true, until: 'none' },
+    alert: true,
+    routeOutcome: 'neutral',
+    humanFix:
+      '照原因把{machine}上{user}的 Cursor 密钥放好（docs/ops.md 第五节「会话用户的 Cursor 密钥」：~/.cursor/fleet-api-key 属它自己、600、只有一行密钥、不带换行，重放用那一节的命令）；然后在驾驶舱点「继续」',
+    resumeAfterPark: true,
+  },
+  // 登录失效要人重新登录（设备被撤销单独归 DV1，Cursor 的归 AU5、AU6）。
   {
     id: 'AU2',
     title: '登录失效',
@@ -306,11 +325,14 @@ export const RULES: readonly FailureRule[] = [
     routeOutcome: 'fail',
   },
   // 这条路由在这台机上起不来：版本太旧、工作区信任、参数错、模型名重名、二进制不在……重试不会变，所有任务都会撞。
+  // 工作区信任：cursor-agent -p 在没信任过的目录里、没带 --trust / --force 时，stderr 打一段「⚠ Workspace Trust Required」
+  // 就退出（插头固定带 --trust，撞上就是起法坏了；插头把那一句从整段里捞出来，最后一行是「Pass --trust, --yolo, or -f if you
+  // trust this directory」）；带了 --trust 却写不下信任记录是「Error: Failed to trust workspace at <目录>」。
   {
     id: 'CF1',
     title: '执行方式或路由配置不对',
     codes: ['cli_too_old', 'agent_unconfigured', 'unsupported_capability', 'protocol_mismatch'],
-    text: /Workspace Trust|ambiguous across providers|requires --verbose|unexpected argument|unknown option|spawn \S+ (?:ENOENT|EACCES)/i,
+    text: /Workspace Trust|if you trust this directory|Failed to trust workspace|ambiguous across providers|requires --verbose|unexpected argument|unknown option|spawn \S+ (?:ENOENT|EACCES)/i,
     ladder: ['swapRoute', 'park'],
     avoid: { scope: 'route', shared: true, until: 'none' },
     alert: true,

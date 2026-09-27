@@ -48,7 +48,7 @@ describe('cursor 参数', () => {
     ]);
   });
 
-  it('续会话带 --resume；不放开权限就不带 --force', () => {
+  it('续会话带 --resume；不放开权限就不带 --force，--trust 照带（探针也要：不带的话没信任过的目录里 -p 只打一段提示就退出）', () => {
     const args = buildCursorArgs({
       model: 'auto',
       session: { mode: 'resume', id: SESSION },
@@ -56,6 +56,7 @@ describe('cursor 参数', () => {
       force: false,
     });
     expect(args).not.toContain('--force');
+    expect(args).toContain('--trust');
     expect(args.slice(-2)).toEqual(['--resume', SESSION]);
   });
 
@@ -271,6 +272,50 @@ describe('cursor 起停', () => {
     const verdict = judgeRun(cursorRunSummary(report).facts);
     expect(verdict).toMatchObject({ outcome: 'failed', reason: 'no_result' });
     expect(verdict.detail).toContain('Failed to reach the Cursor API');
+  });
+
+  it('没信任过的目录（-p 打一段 Workspace Trust 提示就退出，退出码 1 或 0）：最后几行里没有那个词，把开头那句捞出来接上；不算跑成', async () => {
+    // 2026.09.26 发行包 6853.index.js 在没有终端时打的原样（不带颜色）
+    const trust = [
+      '',
+      '⚠ Workspace Trust Required',
+      '',
+      ' Cursor Agent can execute code and access files in this directory.',
+      ' Do you trust the contents of this directory?',
+      '',
+      ' /var/lib/fleet-work/_route-probe/fleet-agent-carpool',
+      '',
+      ' To proceed, you can either:',
+      " • Run 'cursor-agent' interactively to decide",
+      ' • Pass --trust, --yolo, or -f if you trust this directory',
+      '',
+    ].join('\n');
+    for (const exitCode of [1, 0]) {
+      const report = await runCursorAgent(spec(tempDir()), {
+        command: fakeAgent({ stderr: trust, exitCode }),
+      });
+      const facts = cursorRunSummary(report).facts;
+      expect(facts.lastWords).toBe(
+        "⚠ Workspace Trust Required ⏎ To proceed, you can either: ⏎ • Run 'cursor-agent' interactively to decide ⏎ • Pass --trust, --yolo, or -f if you trust this directory",
+      );
+      expect(judgeRun(facts)).toMatchObject({ outcome: 'failed', reason: 'no_result' });
+    }
+  });
+
+  it('Cursor 拒了环境里的 API 密钥（2026.09.26 发行包的原话，头一行自带终端颜色）：颜色去掉，三行原话都在；不当成额度用满', async () => {
+    const rejected =
+      '\u001b[33m⚠ Warning: The provided API key is invalid.\u001b[0m\n' +
+      'The API key was loaded from the CURSOR_API_KEY environment variable.\n' +
+      'Please check you have the right key, create a new one, or authenticate without it.';
+    const report = await runCursorAgent(spec(tempDir()), {
+      command: fakeAgent({ stderr: rejected, exitCode: 1 }),
+    });
+    const facts = cursorRunSummary(report).facts;
+    expect(facts.lastWords).toBe(
+      '⚠ Warning: The provided API key is invalid. ⏎ The API key was loaded from the CURSOR_API_KEY environment variable. ⏎ Please check you have the right key, create a new one, or authenticate without it.',
+    );
+    expect(facts.quotaExhausted).toBe(false);
+    expect(judgeRun(facts)).toMatchObject({ outcome: 'failed', reason: 'no_result' });
   });
 
   it('stderr 说额度用完：判额度用满，不当成执行体失败', async () => {

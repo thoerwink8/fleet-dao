@@ -10,10 +10,13 @@
 //   （cursor-pending:<runId>），真号一到经 onSessionId 报上来。没有 fork：换了账号池一律开新会话带接力任务书。终帧只报
 //   这一轮的 token（含缓存读写），没有花费、没有实际模型（init 里的 model 是界面名，docs/reference/adapters.md CU-08）。
 //   认证、额度、网络的报错只在 stderr（退出 1、没有 JSON）：原话放进 rawError，失败信息里带上，失败分流靠它认。
-//   Cursor 的池不绑会话用户（库里约束会话用户和 reclaude 组织类型同有同无），跑在法国唯一的会话用户下：Cursor 的登录态在它
-//   自己家里（它跑过一次 cursor-agent login），不往会话环境里塞 CURSOR_API_KEY（帮手脚本也不放，adapters 的 scopeLaunch）。
+//   Cursor 的池不绑会话用户（库里约束会话用户和 reclaude 组织类型同有同无），跑在法国唯一的会话用户下。认证用 API 密钥
+//   （创始人 2026-09-27 拍：浏览器登录在没有桌面的服务器上存不下，docs/ops.md 第五节）：密钥是会话用户家里的一个文件，
+//   引擎进不去它的家（750），帮手脚本也不放 FLEET_* 以外的变量（adapters 的 scopeLaunch）——所以由会话用户自己在起
+//   cursor-agent 的那一步读它、放进环境（cursorLaunchCommand 的前一段）。值只在 cursor-agent 的环境里：不上命令行、
+//   不进日志、进度、失败信息和库。
 //   cursor-agent 装在会话用户家里、不在 PATH 上，升级会删掉旧版本目录：每次起都由会话用户自己按 current → 最新版本目录现找
-//   （cursorLaunchCommand，CU-03）——引擎进不去会话用户的家（700），替它找不了。
+//   （cursorLaunchCommand 的后一段，CU-03）。
 import { randomUUID } from 'node:crypto';
 import {
   type CgroupScope,
@@ -274,13 +277,52 @@ export const CURSOR_PENDING_PREFIX = 'cursor-pending:';
 /** 会话用户家里 cursor-agent 的版本目录（{user} 换成会话用户）：官方安装脚本装在这下面，一个版本一个目录。 */
 export const DEFAULT_CURSOR_VERSIONS_DIR = '/home/{user}/.local/share/cursor-agent/versions';
 
+/**
+ * 会话用户家里放 Cursor API 密钥的文件（{user} 换成会话用户）：属它、600、只有一行密钥、不带换行（docs/ops.md 第五节
+ * 「会话用户的 Cursor 密钥」）。不做成配置：放密钥的命令、装机脚本的读回都认这一处（deploy/lib/cursor-key.sh 的
+ * CURSOR_API_KEY_FILE，hosts.test.ts 核对两边一样）。
+ */
+export const DEFAULT_CURSOR_API_KEY_FILE = '/home/{user}/.cursor/fleet-api-key';
+
 /** 没装时 stderr 那句的开头：和 Node 起不来时的原话一个样子，失败分流按「执行方式或路由配置不对」（CF1）认。 */
 export const CURSOR_MISSING = 'spawn cursor-agent ENOENT';
 
-// 一行写完：命令行要经 sudo（会记日志），不带换行这类控制字符。版本目录名只认「数字.数字」开头的（2026.09.23-86fc751
-// 这种；安装时下载的临时包是 UUID 起名的，不认），按版本号倒序（sort -V：月、日不补零也排得对），里面有能跑的 cursor-agent
-// 才算；找到就 exec 成 cursor-agent（进程号不变，还是插头拿着的那一个）。
-const CURSOR_LAUNCH_SCRIPT = [
+/** 密钥文件没放好时 stderr 那句的开头：失败分流按它认成 AU6（整池暂停，照原因放好再继续）。 */
+export const CURSOR_KEY_BAD = 'Cursor 密钥没放好';
+/** 密钥文件没放好时的退出码（sysexits 的 EX_CONFIG）：和没装（127）、cursor-agent 自己的退出码分得开。 */
+export const CURSOR_KEY_EXIT = 78;
+
+// 两段都一行写完：命令行要经 sudo（会记日志），不带换行这类控制字符。
+//
+// 前一段：以会话用户的身份读它家里的密钥文件，export 成 CURSOR_API_KEY，再 exec 后面的命令（后一段）。值只在这个进程的变量
+// 和 cursor-agent 的环境里：cat 的参数只有路径，报错只报路径、属主、权限，不打值。判据和装机脚本的读回一样
+// （deploy/lib/cursor-key.sh 的 check_cursor_key：不是符号链接、是普通文件、非空、属会话用户自己、600），另外核内容：只该是
+// 一行密钥，里面有空白、换行、控制字符（Windows 的回车）都不认——不然交给 Cursor 去报「密钥无效」，人会白换一把。
+// 没放好就报「Cursor 密钥没放好：<哪里不对>。文件是 <路径>，…」、退出 78，不起 cursor-agent，也不去试浏览器登录。哪里不对
+// 紧跟在开头那句后面、到句号为止：失败分流（AU6）把这一段摘进「要人拍」的提醒，人不用翻日志就知道要改什么。
+const CURSOR_KEY_SCRIPT = [
+  'key=$1',
+  'shift',
+  `bad() { echo "${CURSOR_KEY_BAD}：$1。文件是 $key，照 docs/ops.md 第五节「会话用户的 Cursor 密钥」放好" >&2; exit ${CURSOR_KEY_EXIT}; }`,
+  'if [ -L "$key" ]; then bad "是符号链接，只认真文件"; fi',
+  'if [ ! -e "$key" ]; then bad "不在"; fi',
+  'if [ ! -f "$key" ]; then bad "不是普通文件"; fi',
+  'if [ ! -s "$key" ]; then bad "是空的"; fi',
+  'uid=$(stat -c %u -- "$key" 2>/dev/null) && mode=$(stat -c %a -- "$key" 2>/dev/null) || bad "查不了属主和权限，stat 没跑成"',
+  'me=$(id -u)',
+  'if [ "$uid" != "$me" ]; then bad "属主不对：是 uid $uid，要是会话用户自己的 uid $me"; fi',
+  'if [ "$mode" != 600 ]; then bad "权限是 $mode，要 600"; fi',
+  'k=$(cat -- "$key" 2>/dev/null) || bad "读不了"',
+  'case $k in "") bad "只有换行，没有密钥" ;; *[[:space:]]* | *[[:cntrl:]]*) bad "里面有空白、换行或控制字符，只该是一行密钥、不带换行" ;; esac',
+  'CURSOR_API_KEY=$k',
+  'export CURSOR_API_KEY',
+  'exec "$@"',
+].join('; ');
+
+// 后一段：版本目录名只认「数字.数字」开头的（2026.09.23-86fc751 这种；安装时下载的临时包是 UUID 起名的，不认），按版本号
+// 倒序（sort -V：月、日不补零也排得对），里面有能跑的 cursor-agent 才算；找到就 exec 成 cursor-agent（进程号不变，还是插头
+// 拿着的那一个）。
+const CURSOR_FIND_SCRIPT = [
   'dir=$1',
   'shift',
   'bin=',
@@ -289,13 +331,37 @@ const CURSOR_LAUNCH_SCRIPT = [
   'exec "$bin" "$@"',
 ].join('; ');
 
+/** 前一段（读密钥）在命令里占几项：后一段（找 cursor-agent）从这里开始。 */
+export const CURSOR_KEY_STAGE_LENGTH = 5;
+
+// biome-ignore lint/suspicious/noControlCharactersInRegex: 就是要拦控制字符
+const CONTROL_CHAR = /[\u0000-\u001f\u007f]/;
+
 /**
- * 起 cursor-agent 的命令：以会话用户的身份现找 current → 最新版本目录（CU-03：升级会删掉旧版本目录，钉死一个版本会起不来）。
- * 版本目录经参数传给脚本，不拼进脚本（没有注入）；插头的参数接在后面，原样交给 cursor-agent。
+ * 起 cursor-agent 的命令，两段接力、都以会话用户的身份跑：先从它家里的密钥文件读出 API 密钥、放进环境，再现找 current →
+ * 最新版本目录（CU-03：升级会删掉旧版本目录，钉死一个版本会起不来）、exec 成 cursor-agent。路径经参数传给脚本，不拼进脚本
+ * （没有注入）；插头的参数接在后面，原样交给 cursor-agent。
  */
-export function cursorLaunchCommand(versionsDir: string): string[] {
-  if (!versionsDir.startsWith('/')) throw new Error(`cursor-agent 的版本目录要写绝对路径：${versionsDir}`);
-  return ['/bin/sh', '-c', CURSOR_LAUNCH_SCRIPT, 'cursor-agent', versionsDir];
+export function cursorLaunchCommand(versionsDir: string, apiKeyFile: string): string[] {
+  for (const [what, path] of [
+    ['版本目录', versionsDir],
+    ['密钥文件', apiKeyFile],
+  ] as const) {
+    if (!path.startsWith('/')) throw new Error(`cursor-agent 的${what}要写绝对路径：${path}`);
+    if (CONTROL_CHAR.test(path)) throw new Error(`cursor-agent 的${what}里有控制字符，不写上命令行`);
+  }
+  return [
+    '/bin/sh',
+    '-c',
+    CURSOR_KEY_SCRIPT,
+    'cursor-key',
+    apiKeyFile,
+    '/bin/sh',
+    '-c',
+    CURSOR_FIND_SCRIPT,
+    'cursor-agent',
+    versionsDir,
+  ];
 }
 
 function cursorDriver(
@@ -318,7 +384,8 @@ function cursorDriver(
           prompt: spec.prompt,
           model: spec.model,
           session: spec.session.mode === 'resume' ? { mode: 'resume', id: spec.session.id } : { mode: 'new' },
-          // 干活的会话照 Claude 的理由放开命令（--force）；探针不放，什么命令都不许跑
+          // 干活的会话照 Claude 的理由放开命令（--force）；探针不放，什么命令都不许跑。不管放不放，插头都带 --trust（只信任
+          // 工作目录、不放开命令）：不带的话，没信任过的目录里 -p 只打一段 Workspace Trust 提示就退出（CU-01）
           force: spec.purpose === 'work',
           env: spec.env,
           limits: spec.limits,
@@ -332,7 +399,9 @@ function cursorDriver(
       );
       return cursorReport(report);
     },
-    loginFix: (machine, user) => `在${machine}上以 ${user} 跑 cursor-agent login，在浏览器里批准`,
+    // 浏览器登录在没有桌面的服务器上存不下（docs/ops.md 第五节）：Cursor 的认证是会话用户家里的 API 密钥，修法是换一把
+    loginFix: (machine, user) =>
+      `去 Cursor 后台（cursor.com/dashboard/api）重新生成一把 API 密钥，照 docs/ops.md 第五节「会话用户的 Cursor 密钥」那条命令放进${machine}（${user} 家里的 ~/.cursor/fleet-api-key）`,
   };
 }
 
