@@ -13,6 +13,13 @@ export interface WorkflowRepoRef {
  */
 export const REQUIREMENT_WORKFLOW_TYPE = 'requirementWorkflow';
 
+/**
+ * Fusion 工作流的类型名（docs/decisions/0003-fusion-flow.md 第 5 条：一张单一个 Lead 会话带一个副手，引擎推分支、开 PR、
+ * 合并、关单，不直写主线）。必须等于引擎 workflows/fusion.ts 导出的函数名。工作流编号和需求工作流同一个
+ * （requirementWorkflowId）：驾驶舱、fleet 命令的信号照旧按它发。
+ */
+export const FUSION_WORKFLOW_TYPE = 'fusionWorkflow';
+
 /** 一张 issue 一条需求工作流，例如 `req:acme/demo#12`。 */
 export function requirementWorkflowId(repo: WorkflowRepoRef, issueNumber: number): string {
   return `req:${repo.owner}/${repo.name}#${issueNumber}`;

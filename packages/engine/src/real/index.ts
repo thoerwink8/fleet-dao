@@ -104,6 +104,8 @@ export function createRealPorts(deps: RealPortsDeps): RealPorts {
     saveTaskState: store.saveTaskState,
     authorFamilies: store.authorFamilies,
     recordVerification: store.recordVerification,
+    flowConfig: store.flowConfig,
+    taskRequest: store.taskRequest,
     readCriteria: github.readCriteria,
     createWorktree: github.createWorktree,
     removeWorktree: github.removeWorktree,

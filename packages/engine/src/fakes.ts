@@ -1,6 +1,6 @@
 // 假实现：不碰真仓、真会话、真 GitHub，用来把流程跑通（测试、联调）。行为可以按剧本改。
 
-import type { VerifyReport } from '@fleet-dao/core';
+import type { Brief, FlowConfigRead, VerifyReport } from '@fleet-dao/core';
 import type { StageKind } from '@fleet-dao/shared';
 import type { MergeOutcome, TestResult } from './decisions/merge.ts';
 import type { PlannedSubtask } from './decisions/plan.ts';
@@ -11,6 +11,7 @@ import {
   type Criteria,
   type EnginePorts,
   type LaunchSessionInput,
+  type LeadStep,
   type MergePrInput,
   type OpenPrInput,
   type PickRouteInput,
@@ -29,6 +30,7 @@ import {
   type SessionOutput,
   type StartSessionResult,
   type SyncMainlineInput,
+  type TaskRequest,
   type TaskStateSnapshot,
   type TimingEntry,
   type UpdateIssueProgressInput,
@@ -73,6 +75,15 @@ export interface FakeScript {
   criteria: (input: ReadCriteriaInput, n: number) => Criteria | PortError | undefined;
   /** 写这张单的会话用过的族：不给就照假会话算（验证、审查不算）；一个都没有抛 AUTHORS_UNKNOWN，和真端口一样。 */
   authors: (input: Scope, n: number) => string[] | PortError | undefined;
+  /**
+   * Fusion 的 Lead 这一步交回的（n = 这一步第几次）；不给就是一份合格的（方案提交了、简报齐全、验收收下、不驳回、最终审查
+   * 过了……）。要故意交错的给形状不对的：假会话原样交，工作流经 decide 调 core 判。
+   */
+  lead: (step: LeadStep, input: LaunchSessionInput, n: number) => SessionOutput | undefined;
+  /** 流程配置副本：给了 PortError 就抛它；不给就是刚同步过、读自仓里的 FAKE_FLOW_CONFIG。 */
+  flow: (input: Scope, n: number) => FlowConfigRead | PortError | undefined;
+  /** 单子现在的标题和正文（停下等人之后重认需求文档用）：给了 PortError 就抛它；不给就报任务不在（和真端口一样明确失败）。 */
+  request: (input: Scope, n: number) => TaskRequest | PortError | undefined;
   /** 起会话：给了就抛它（假的「发给别家的材料没过卫生检查」……）；n = 这个阶段第几次起。 */
   startSession: (input: LaunchSessionInput, n: number) => PortError | undefined;
   ci: (input: WaitCiInput, n: number) => Partial<CiResult> | undefined;
@@ -162,6 +173,53 @@ export const FAKE_ROUTES: readonly RouteChoice[] = [
 
 const DOC_FILE = { requirement: '需求.md', plan: '方案.md', result: '结果.md' } as const;
 
+/**
+ * 假端口的流程配置（合并过全组织默认的整份，core 的 FlowConfig 形状）：每一步的模型用 FAKE_ROUTES 里的模型——
+ * Lead 是 m1（claude 族），副手先 m2（kimi 族）再 m1，验证先 m3（gpt 族，FAKE_ROUTES 里没有，要验证的用例自己加一条）再 m2。
+ */
+export const FAKE_FLOW_CONFIG = {
+  formatVersion: 1,
+  profiles: {
+    default: {
+      mode: 'fusion',
+      steps: { lead: ['m1'], sidekick: ['m2', 'm1'], review: [], verify: ['m3', 'm2'], discuss: ['m3'] },
+      review: { vendors: 0, rounds: 1 },
+      verify: { rounds: 2 },
+      discuss: { vendors: 1, rounds: 1 },
+    },
+    single: {
+      mode: 'single',
+      steps: { lead: ['m1'], sidekick: [], review: [], verify: ['m3', 'm2'], discuss: ['m3'] },
+      review: { vendors: 0, rounds: 1 },
+      verify: { rounds: 1 },
+      discuss: { vendors: 1, rounds: 1 },
+    },
+  },
+  categoryProfiles: { 需求: 'default', 缺陷: 'default', 杂项: 'default' },
+  bans: [
+    { id: 'gpt-no-ui', reason: 'GPT 不做界面类的活' },
+    { id: 'no-fable', reason: '不用 Fable' },
+  ],
+  testCommand: 'pnpm test:changed',
+  highRiskPaths: [],
+  uiPaths: ['web/'],
+} as const;
+
+/** 假 Lead 默认写的任务简报：只许改 src/login/。 */
+export const FAKE_BRIEF: Brief = {
+  goal: '登录页加验证码',
+  scope: '只改登录表单和校验',
+  constraints: [],
+  files: ['src/login/'],
+  acceptance: ['验证码五分钟过期'],
+  returnFormat: '改了哪些文件、测试结果',
+};
+
+/** 假的提交号：40 位（验证、方案交回的都要完整提交号），末尾是序号。 */
+export function fakeHead(n: number): string {
+  return `${n}`.padStart(40, 'f');
+}
+
 function pause(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
     if (ms <= 0) return resolve();
@@ -210,9 +268,67 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
     for (const probe of [...waiters]) probe();
   };
 
+  /** 假会话「改了」哪些文件：照交代的地方各改一个（以 / 结尾的是目录）。 */
+  const filesOf = (brief: LaunchSessionInput['brief']) =>
+    brief.touches.map((t) =>
+      t === '*' ? 'README.md' : t.endsWith('/') ? `${t}changed.ts` : `${t}/changed.ts`,
+    );
+
+  /** 假 Lead 每一步默认交回一份合格的。 */
+  const leadOutput = (s: FakeSession, step: LeadStep): SessionOutput => {
+    const lead = s.input.brief.lead;
+    const docs = lead?.docs ?? { requirement: '', plan: '', result: '' };
+    switch (step) {
+      case 'plan':
+        seq += 1;
+        return {
+          kind: 'lead-plan',
+          head: fakeHead(seq),
+          changedFiles: [docs.plan],
+          summary: '登录表单加验证码输入，后端校验五分钟过期',
+          brief: FAKE_BRIEF,
+          small: true,
+          highRisk: false,
+          holds: [],
+        };
+      case 'accept':
+        return { kind: 'lead-verdict', verdict: 'accept', why: '看过改动，和简报一致，测试齐' };
+      case 'rebut':
+        return { kind: 'lead-rebut', rebuttals: [] };
+      case 'fix-brief':
+        return { kind: 'lead-brief', brief: { ...FAKE_BRIEF, goal: '照返工意见修好' } };
+      case 'review':
+        seq += 1;
+        return {
+          kind: 'lead-review',
+          verdict: 'pass',
+          why: '改动和方案一致，CI 绿',
+          did: ['登录页加了验证码'],
+          owed: [],
+          head: fakeHead(seq),
+          changedFiles: [docs.result],
+        };
+      case 'pr-text':
+        return { kind: 'lead-text', summary: '登录表单加验证码', did: ['加了验证码输入'] };
+      case 'takeover':
+        seq += 1;
+        return {
+          kind: 'delivery',
+          head: fakeHead(seq),
+          summary: `Lead 自己写完：${s.input.brief.title}`,
+          testsPassed: true,
+          changedFiles: filesOf(s.input.brief),
+        };
+    }
+  };
+
   const outputFor = (s: FakeSession): SessionOutput => {
     if (s.plan.output) return s.plan.output;
     const brief = s.input.brief;
+    if (brief.lead) {
+      const step = brief.lead.step;
+      return script.lead?.(step, s.input, next(`lead:${step}`)) ?? leadOutput(s, step);
+    }
     switch (s.stage) {
       case 'triage':
         return {
@@ -250,11 +366,12 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
         seq += 1;
         return {
           kind: 'delivery',
-          head: `${s.input.subtaskKey ?? 'x'}-${seq}`,
+          // Fusion 的副手（照任务简报干的）交完整提交号：后面的验证、方案都认 40 位的
+          head: brief.task ? fakeHead(seq) : `${s.input.subtaskKey ?? 'x'}-${seq}`,
           summary: `做完：${brief.title}`,
           testsPassed: true,
           // 老老实实改方案点名的地方。
-          changedFiles: brief.touches.map((t) => (t === '*' ? 'README.md' : `${t}/changed.ts`)),
+          changedFiles: filesOf(brief),
         };
     }
   };
@@ -305,13 +422,18 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
       if (scripted) return scripted;
       // 整族避开（开 PR 前验证只派别家）：点名的、续会话的也照样避开，和真选路一样
       const families = new Set((input.avoidFamilies ?? []).map((f) => f.trim().toLowerCase()));
-      const usable = routes.filter(
-        (r) =>
-          !input.avoidRouteIds.includes(r.routeId) &&
-          !input.avoidPoolIds.includes(r.poolId) &&
-          !input.avoidModelIds.includes(r.modelId) &&
-          !families.has(r.family.toLowerCase()),
-      );
+      // 流程配置的模型顺序：只派这几个模型的路由，按这个先后（和真选路一样）
+      const models = input.models;
+      const usable = routes
+        .filter(
+          (r) =>
+            !input.avoidRouteIds.includes(r.routeId) &&
+            !input.avoidPoolIds.includes(r.poolId) &&
+            !input.avoidModelIds.includes(r.modelId) &&
+            !families.has(r.family.toLowerCase()) &&
+            (!models || models.includes(r.modelId)),
+        )
+        .sort((a, b) => (models ? models.indexOf(a.modelId) - models.indexOf(b.modelId) : 0));
       const preferred = input.preferRouteId
         ? usable.find((r) => r.routeId === input.preferRouteId)
         : undefined;
@@ -325,7 +447,9 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
           detail:
             families.size > 0
               ? `没有别家可验：写这张单的是 ${[...families].join('、')} 族，这一步只派别家，不拿同族顶`
-              : '能用的路由都被避开了',
+              : models
+                ? `流程配置里这一步的模型（${models.join('、') || '一个都没配'}）没有能派的路由`
+                : '能用的路由都被避开了',
         };
       }
       return {
@@ -491,6 +615,30 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
       const at = verifications.findIndex((v) => v.id === input.id);
       if (at >= 0) verifications[at] = input;
       else verifications.push(input);
+    },
+    async flowConfig(input) {
+      const scripted = script.flow?.(input, next('flowConfig'));
+      if (scripted instanceof PortError) throw scripted;
+      return (
+        scripted ?? {
+          replica: {
+            syncedAt: new Date().toISOString(),
+            error: null,
+            unread: null,
+            testCommand: FAKE_FLOW_CONFIG.testCommand,
+          },
+          source: 'project',
+          config: FAKE_FLOW_CONFIG,
+        }
+      );
+    },
+    async taskRequest(input) {
+      const scripted = script.request?.(input, next('taskRequest'));
+      if (scripted instanceof PortError) throw scripted;
+      if (scripted) return scripted;
+      throw new PortError('TASK_NOT_FOUND', `库里没有任务 ${input.taskId}（假端口没给单子正文）`, {
+        retryable: false,
+      });
     },
     async askHuman(input) {
       if (!asks.some((a) => a.askId === input.askId)) asks.push(input);

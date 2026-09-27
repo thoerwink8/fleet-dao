@@ -789,4 +789,68 @@ describe('Fusion 的判断经 decide 调（core 包，0003 第 12 条）', () =>
     const got = await decide('flowConfig', { org: { kind: 'missing' }, project: { kind: 'missing' } });
     expect(got).toMatchObject({ ok: false, scope: 'org' });
   });
+
+  it('Fusion 工作流用的几样也接上了：起步、需求文档目录、配置副本、Lead 交回的、PR 正文、关单评论', async () => {
+    expect(await decide('fusionStart', { mode: 'fusion', mother: false, verifyRounds: 1 })).toMatchObject({
+      step: 'discuss',
+      verifyLimit: 1,
+    });
+    expect(await decide('specDir', { body: '文档：`specs/12-登录/需求.md`', issueNumber: 12 })).toEqual({
+      ok: 'specs/12-登录',
+      docs: {
+        requirement: 'specs/12-登录/需求.md',
+        plan: 'specs/12-登录/方案.md',
+        result: 'specs/12-登录/结果.md',
+      },
+    });
+    const setup = await decide('fusionSetup', {
+      read: {
+        replica: { syncedAt: null, error: null, unread: null, testCommand: null },
+        source: null,
+        config: null,
+      },
+      now: '2026-09-27T08:00:00.000Z',
+      category: '需求',
+    });
+    expect(setup.ok).toBe(false);
+    expect((await decide('leadPlan', { output: {}, specDir: 'specs/12-登录' })).ok).toBe(false);
+    expect((await decide('leadReview', { output: {}, specDir: 'specs/12-登录', committed: [] })).ok).toBe(
+      false,
+    );
+    expect(await decide('rebuttable', { head: 'h', results: [], findings: [] })).toEqual([]);
+    expect(await decide('filesUnder', { paths: ['web/'], files: ['web/a.tsx', 'src/b.ts'] })).toEqual([
+      'web/a.tsx',
+    ]);
+    const pr = await decide('fusionPr', {
+      mode: 'single',
+      planSummary: '加验证码',
+      summary: '',
+      testsPassed: true,
+      verify: null,
+      highRisk: false,
+      planReviewSkipped: false,
+      flowSource: 'project',
+    });
+    expect(pr.did[0]).toBe('方案：加验证码');
+    const comment = await decide('closeComment', {
+      prNumber: 7,
+      mergeCommit: 'c'.repeat(40),
+      did: ['加了验证码'],
+      elapsedMs: 60_000,
+      offClockMs: 0,
+      usage: [],
+      verified: pr.verified,
+      owed: [],
+      docs: { requirement: 'r', plan: 'p', result: 'x' },
+      flowSource: 'project',
+      mode: 'single',
+    });
+    expect(comment).toContain('做完了：PR #7 已合并');
+  });
+
+  it('【故意造出的失败】单子正文指的是别的单的需求文档：判认不出，不拿别人的顶', async () => {
+    expect(await decide('specDir', { body: '文档：`specs/13-别的/需求.md`', issueNumber: 12 })).toEqual({
+      error: expect.stringContaining('不是这张单 #12 的'),
+    });
+  });
 });
