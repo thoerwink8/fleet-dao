@@ -53,8 +53,6 @@ import {
   type OpenIssueResult,
   openIssue,
   readIssue,
-  type SetIssueMilestoneInput,
-  setIssueMilestone,
   type UpdateIssueProgressInput,
   type UpdateIssueProgressResult,
   updateIssueProgress,
@@ -174,8 +172,6 @@ export interface GitHub {
     issueNumber: number;
     signal?: AbortSignal | undefined;
   }): Promise<{ state: 'open' | 'closed'; stateReason: string | null }>;
-  /** 给一张单挂里程碑（「引擎」机器人），按回执核对挂上的就是这个编号。 */
-  setIssueMilestone(input: SetIssueMilestoneInput, ctx?: ActivityContext): Promise<{ changed: boolean }>;
   /** 会话提交用的身份（「干活的」机器人）：引擎建工作树时写进 user.name / user.email。 */
   commitIdentity(repo: RepoRef): Promise<BotIdentity>;
   /** 两个机器人在这些仓上的权限够不够。读不到算没查成（ok=false、why 写原因），不算「没有差异」。 */
@@ -270,7 +266,6 @@ export function createGitHub(options: GitHubOptions): GitHub {
         stateReason: issue.state === 'open' ? null : (issue.state_reason ?? null),
       };
     },
-    setIssueMilestone: (input, ctx) => setIssueMilestone(deps, input, ctx),
     openPr: (input, ctx) => openPr(deps, input, ctx),
     waitCi: (input, ctx) => waitCi(deps, input, ctx),
     mergePr: (input, ctx) => mergePr(deps, input, ctx),

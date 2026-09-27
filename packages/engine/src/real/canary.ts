@@ -1,8 +1,8 @@
 // 全流程巡检的真装配：巡检仓按引擎配置 FLEET_CANARY_REPO（owner/name，写在 /etc/fleet-dao/engine.env，公开仓里不写真值）；
-// 开单、挂里程碑、读单子、关单都是「引擎」机器人（@fleet-dao/github）；需求文档不直写主线，经 PR 合进去的那条路随 #295 接上
-// （接上之前 specDoc 是 unavailable，巡检每轮记没跑成、不开单）；这张单在库里的事实、每一轮的记录、报警
-// 是同一个库（@fleet-dao/db）；工作流在不在跑、走到哪一步问这次活动的 Temporal 客户端，叫停前几轮留下的单和驾驶舱叫停同一个
-// 信号（后端的 createTemporalWorkflowControl）；「驾驶舱显示」读的是驾驶舱后端的 Store（看板、任务详情读的同一份）。
+// 开单（同时挂上当前版本）、读单子、关单都是「引擎」机器人（@fleet-dao/github），巡检单的需求写全在正文里（#295）；
+// 这张单在库里的事实、每一轮的记录、报警是同一个库（@fleet-dao/db）；工作流在不在跑、走到哪一步问这次活动的 Temporal
+// 客户端，叫停前几轮留下的单和驾驶舱叫停同一个信号（后端的 createTemporalWorkflowControl）；「驾驶舱显示」读的是驾驶舱后端的
+// Store（看板、任务详情读的同一份）。
 import { createPgStore, createTemporalWorkflowControl, WorkflowGoneError } from '@fleet-dao/api';
 import {
   canaryDbFacts,
@@ -71,21 +71,12 @@ export function canaryViewOf(raw: unknown, workflowId: string): CanaryView {
 
 export interface CanaryWiring {
   db: Db;
-  gh: Pick<
-    GitHub,
-    'readOpenMilestones' | 'openIssue' | 'setIssueMilestone' | 'readIssueState' | 'closeIssue'
-  >;
+  gh: Pick<GitHub, 'readOpenMilestones' | 'openIssue' | 'readIssueState' | 'closeIssue'>;
   /** 引擎配置 FLEET_CANARY_REPO 的原文。 */
   repo: string | undefined;
-  /** 需求文档经 PR 进主线的那条路（#295）；不给就是还没接上（CANARY_SPEC_DOC_PENDING）。 */
-  specDoc?: CanaryDeps['specDoc'];
   now?: () => Date;
   log?: CanaryDeps['log'];
 }
-
-/** 需求文档经 PR 进主线的路还没接上时，巡检每轮记没跑成写的原因。 */
-export const CANARY_SPEC_DOC_PENDING =
-  '引擎不直写主线，巡检单的需求文档要经 PR 合进主线；这条路和引擎对账开的单共用，等 #295（引擎开单连需求文档一起开）接上';
 
 /** 给 EngineJobs.canary 用的工厂。 */
 export function canaryJob(w: CanaryWiring): (client: Client) => CanaryDeps {
@@ -123,26 +114,22 @@ export function canaryJob(w: CanaryWiring): (client: Client) => CanaryDeps {
       github: {
         openMilestones: () => w.gh.readOpenMilestones({ repo: need() }),
         async openIssue(input) {
-          // 不贴标签、不挂里程碑：写好需求文档再挂当前版本（jobs/canary.ts 开头）
+          // 不贴标签（巡检单不算哪一类活）；开单时就挂上当前版本，接活才派
           const r = await w.gh.openIssue({
             repo: need(),
             key: input.dedupe,
             title: input.title,
             body: input.body,
             labels: [],
-            milestone: null,
+            milestone: input.milestone,
           });
           return { number: r.number, url: r.url };
-        },
-        async setMilestone(issueNumber, milestone) {
-          await w.gh.setIssueMilestone({ repo: need(), issueNumber, milestone });
         },
         issueState: (issueNumber) => w.gh.readIssueState({ repo: need(), issueNumber }),
         async closeIssue(issueNumber, comment) {
           await w.gh.closeIssue({ repo: need(), issueNumber, reason: 'not_planned', comment });
         },
       },
-      specDoc: w.specDoc ?? { unavailable: CANARY_SPEC_DOC_PENDING },
       facts: (issueNumber) => canaryDbFacts(w.db, { ...need(), issueNumber }),
       workflows: {
         state: (workflowId) => workflows.state(workflowId),
