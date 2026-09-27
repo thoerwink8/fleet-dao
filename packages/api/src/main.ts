@@ -42,6 +42,7 @@ import { createPgStore, probeDb, withStatementTimeout } from './pg-store.ts';
 import type { GitHubEventSink, IssuePlanReader } from './ports.ts';
 import { sessionOrgHealthCheck } from './session-org-health.ts';
 import { connectTemporal } from './temporal.ts';
+import { startWatchdogWatch, WATCHDOG_NOT_HERE, watchdogHealthCheck } from './watchdog-health.ts';
 
 const log = jsonLogger();
 
@@ -160,6 +161,8 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
   const stopDeployLagWatch = onFrance
     ? startDeployLagWatch({ db, read: () => readDeployLagInput(), now, log })
     : () => {};
+  // 看门狗（#203）自己停了它自己报不了：后端每 5 分钟按登记表上它那一行看一次，停了推一条「看门狗停了」，好了自己撤
+  const stopWatchdogWatch = onFrance ? startWatchdogWatch({ db, now, log }) : () => {};
   // 飞书网关还来不来：飞书接口的门口记，/healthz 读的时候现算；没配通行证网关一律进不来，报「未接」
   const gatewaySeen = createGatewaySeen(now);
   const deps: Deps = {
@@ -201,12 +204,17 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
       canary: onFrance
         ? { check: canaryHealthCheck(db, now) }
         : { check: async () => {}, notWired: CANARY_NOT_HERE },
+      // 看门狗（#203）：引擎每 5 分钟跑一轮、记在登记表上；只有法国的正式机器上有
+      watchdog: onFrance
+        ? { check: watchdogHealthCheck(db, now) }
+        : { check: async () => {}, notWired: WATCHDOG_NOT_HERE },
     }),
   };
   return {
     deps,
     close: async () => {
       stopDeployLagWatch();
+      stopWatchdogWatch();
       await feed.stop();
       await temporal.close();
       await closeDb();

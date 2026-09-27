@@ -30,6 +30,7 @@ import {
   runHourlyReconcileJob,
 } from './jobs/hourly-reconcile.ts';
 import { RouteProbeFailedError, type RouteProbeJobDeps, runRouteProbeJob } from './jobs/route-probe.ts';
+import { runWatchdogJob, type WatchdogDeps, WatchdogFailedError } from './jobs/watchdog.ts';
 import type { Limits } from './limits.ts';
 import {
   type ActivityTiming,
@@ -257,6 +258,8 @@ export interface EngineJobs {
   hourlyReconcile?: (client: Client) => HourlyReconcileJobDeps;
   /** 全流程巡检（#223）：在巡检仓开单、看它一路走完（叫停前几轮留下的单、查工作流用这次活动的 Temporal 客户端）。 */
   canary?: (client: Client) => CanaryDeps;
+  /** 看门狗（#203）：按登记表看各定时任务新不新鲜、推撤提醒（只读写库）。 */
+  watchdog?: () => WatchdogDeps;
 }
 
 /** 引擎自己的活动：对账补漏跑一轮。没跑成的已经记进 schedule_runs，这里再报成不重试的失败（下一轮 15 分钟后照来）。 */
@@ -323,6 +326,29 @@ async function reconcileHourly(jobs: EngineJobs): Promise<unknown> {
   } catch (error) {
     if (error instanceof HourlyReconcileFailedError) {
       throw new PortError('HOURLY_RECONCILE_FAILED', error.message, {
+        retryable: false,
+        details: { runId: error.runId },
+      });
+    }
+    throw error;
+  }
+}
+
+/** 引擎自己的活动：看门狗跑一轮。没跑成的已经记进 schedule_runs，这里再报成不重试的失败（下一轮 5 分钟后照来）。 */
+async function watchSchedules(jobs: EngineJobs): Promise<unknown> {
+  const make = jobs.watchdog;
+  if (!make) {
+    throw new PortError(
+      'JOB_NOT_CONFIGURED',
+      '这个引擎工人没装看门狗（假端口，或真端口没接上库）：不装作看过',
+      { retryable: false },
+    );
+  }
+  try {
+    return await runWatchdogJob(make());
+  } catch (error) {
+    if (error instanceof WatchdogFailedError) {
+      throw new PortError('WATCHDOG_FAILED', error.message, {
         retryable: false,
         details: { runId: error.runId },
       });
@@ -418,5 +444,6 @@ export function createActivities(
   out.reconcileHourly = timed('reconcileHourly', () => reconcileHourly(jobs), record);
   out.canaryOpen = timed('canaryOpen', () => canaryOpen(jobs), record);
   out.canaryCheck = timed('canaryCheck', (input) => canaryCheck(jobs, input), record);
+  out.watchSchedules = timed('watchSchedules', () => watchSchedules(jobs), record);
   return out as unknown as EngineActivities;
 }

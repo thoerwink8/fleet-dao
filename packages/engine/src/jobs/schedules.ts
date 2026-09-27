@@ -14,6 +14,7 @@ import {
   type GitHubReconcileInput,
   type HourlyReconcileInput,
   type RouteProbeInput,
+  type WatchdogInput,
   WORKFLOW_TYPES,
 } from '../contract.ts';
 import {
@@ -29,11 +30,13 @@ import {
   HOURLY_RECONCILE_OFFSET_MINUTES,
 } from './hourly-reconcile.ts';
 import { ROUTE_PROBE_EVERY_MINUTES, ROUTE_PROBE_JOB, ROUTE_PROBE_OFFSET_MINUTES } from './route-probe.ts';
+import { WATCHDOG_EVERY_MINUTES, WATCHDOG_JOB, WATCHDOG_OFFSET_MINUTES } from './watchdog.ts';
 
 export const GITHUB_RECONCILE_SCHEDULE_ID = GITHUB_RECONCILE_JOB.id;
 export const ROUTE_PROBE_SCHEDULE_ID = ROUTE_PROBE_JOB.id;
 export const HOURLY_RECONCILE_SCHEDULE_ID = HOURLY_RECONCILE_JOB.id;
 export const CANARY_SCHEDULE_ID = CANARY_JOB.id;
+export const WATCHDOG_SCHEDULE_ID = WATCHDOG_JOB.id;
 
 interface EngineSchedule {
   scheduleId: string;
@@ -48,6 +51,7 @@ export function engineSchedules(taskQueue: string): EngineSchedule[] {
   const probeInput: RouteProbeInput = { schemaVersion: 1 };
   const hourlyInput: HourlyReconcileInput = { schemaVersion: 1 };
   const canaryInput: CanaryInput = { schemaVersion: 1 };
+  const watchdogInput: WatchdogInput = { schemaVersion: 1 };
   return [
     {
       scheduleId: GITHUB_RECONCILE_SCHEDULE_ID,
@@ -67,7 +71,8 @@ export function engineSchedules(taskQueue: string): EngineSchedule[] {
         overlap: ScheduleOverlapPolicy.SKIP,
         // Temporal 停了一阵再起来：只补最近一轮，不把错过的全补一遍（每轮本来就往回看 2 小时）
         catchupWindow: `${GITHUB_RECONCILE_EVERY_MINUTES} minutes`,
-        // 一轮失败不停掉定时：下一轮照样来，失败记在 schedule_runs 里由看门狗报
+        // 一轮失败不停掉定时：下一轮照样来。没跑成的一轮记在 schedule_runs 里，看门狗（下面的 watchdog，每 5 分钟）照登记表
+        // 看到最近一次没跑成、或者过了期望间隔没跑成过，就推一条卡住报警，跑成了自己撤（jobs/watchdog.ts）；别的定时任务一样
         pauseOnFailure: false,
       },
     },
@@ -144,6 +149,31 @@ export function engineSchedules(taskQueue: string): EngineSchedule[] {
         overlap: ScheduleOverlapPolicy.SKIP,
         // Temporal 停了一阵再起来：错过的那一轮一小时内补上，再久就等下一轮
         catchupWindow: '1 hour',
+        pauseOnFailure: false,
+      },
+    },
+    {
+      // 看门狗（#203）：每 5 分钟按登记表看各定时任务新不新鲜，没跑成、停了推提醒，恢复了自己撤；和对账补漏、路由探针错开
+      scheduleId: WATCHDOG_SCHEDULE_ID,
+      spec: {
+        intervals: [
+          { every: `${WATCHDOG_EVERY_MINUTES} minutes`, offset: `${WATCHDOG_OFFSET_MINUTES} minutes` },
+        ],
+      },
+      action: {
+        type: 'startWorkflow',
+        workflowType: WORKFLOW_TYPES.watchdog,
+        workflowId: WATCHDOG_SCHEDULE_ID,
+        taskQueue,
+        args: [watchdogInput],
+        // 一轮秒级；活动最多 10 分钟（job 档），卡死的不拖到下一轮之后太久
+        workflowRunTimeout: '15 minutes',
+      },
+      policies: {
+        // 上一轮还没完就跳过：两轮叠着跑会同时推、撤同一条提醒
+        overlap: ScheduleOverlapPolicy.SKIP,
+        // Temporal 停了一阵再起来：只补最近一轮（每轮都是看当时的库）
+        catchupWindow: `${WATCHDOG_EVERY_MINUTES} minutes`,
         pauseOnFailure: false,
       },
     },

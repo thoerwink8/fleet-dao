@@ -1,9 +1,10 @@
 // 合并闸（#74）：在 PR 当前头上写提交状态 merge-gate，「按我们的规矩能不能合」只看它一个（design 第五节「流程只为快」）。
 // 判红只有：草稿、和主线冲突、改到先审后合的路径（删改迁移；碰安全：密钥鉴权、CI 和卫生检查、对公网开口子和提权的生产配置）而当前头上没有通过的
-// second-opinion；读不到、认不出写 failure（没查成），GitHub 还没算完冲突写 pending。必填栏（标签、里程碑、对应计划、specs、
-// 档位）只提醒。merge-gate.yml 在 PR 事件、主线推送（逐个重算所有开着的 PR）、second-opinion 状态写上来时跑它；
+// second-opinion、写了关单却没带那张单的结果.md（#325，closingCheck）；读不到、认不出写 failure（没查成），GitHub 还没算完冲突写
+// pending。必填栏（标签、里程碑、对应计划、specs、档位、这个 PR 做完就关单）只提醒。merge-gate.yml 在 PR 事件、主线推送（逐个重算所有开着的 PR）、second-opinion 状态写上来时跑它；
 // 不检出、不跑 PR 里的代码：判法和清单都用跑这段代码的那一份（主线的）。
 import { readFileSync } from 'node:fs';
+import { closingTargets, missingResults } from './close-rule.ts';
 import type { GhApi } from './gh-api.ts';
 import { parseMd } from './markdown.ts';
 import {
@@ -222,7 +223,7 @@ export interface GateDeps {
 
 /**
  * 判一个 PR。只读，不写状态。判红只有：草稿、和主线冲突（这两样 GitHub 本来就合不了）、改到先审后合的路径
- * 而当前头上没有通过的 second-opinion；读不到、认不出也判红（没查成）。必填栏只提醒。
+ * 而当前头上没有通过的 second-opinion、写了关单却没带那张单的结果.md（#325）；读不到、认不出也判红（没查成）。必填栏只提醒。
  */
 export async function gatePr(number: number, deps: GateDeps): Promise<GateResult> {
   const { gh } = deps;
@@ -285,6 +286,9 @@ export async function gatePr(number: number, deps: GateDeps): Promise<GateResult
       notChecked.push(`读不到当前头 ${meta.head.slice(0, 7)} 的提交状态（${message(e)}）`);
     }
   }
+  const closing = await closingCheck(live, meta, gh);
+  notChecked.push(...closing.notChecked);
+  problems.push(...closing.problems);
   const notes = (await reminders(live, meta, gh)).map((r) => `提醒：${r}`);
 
   const base = { number, head: meta.head };
@@ -313,7 +317,52 @@ export async function gatePr(number: number, deps: GateDeps): Promise<GateResult
 }
 
 /**
- * 必填栏（标签、里程碑、对应计划、specs、档位）只提醒、不挡合并（创始人 2026-09-26「流程只为快」）。
+ * 关单要有结果（#325，创始人 2026-09-27 晚拍）：正文写了关单词（GitHub 合并时会关那张单），就要在这个 PR 自己的改动里带
+ * 那张单的 specs/<号>-<短名>/结果.md，没带不让合；「这个 PR 做完就关单」填了「是」却一个关单词都没写（GitHub 不关）也不让合。
+ * 判法在 close-rule.ts，只看 PR 的正文和改动文件，同一个 PR 什么时候判都一样；不关单的 PR 不为这一段多读一次改动文件。
+ * 正文认不出、改动文件读不到、读不全算没查成。
+ */
+async function closingCheck(
+  live: unknown,
+  meta: LiveMeta,
+  gh: GitHubReads,
+): Promise<{ problems: string[]; notChecked: string[] }> {
+  const pr = isObject(live) ? live : {};
+  const { body } = pr;
+  const base = isObject(pr.base) && isObject(pr.base.repo) ? pr.base.repo.full_name : undefined;
+  if (body !== null && body !== undefined && typeof body !== 'string') {
+    return { problems: [], notChecked: [`PR #${meta.number} 的正文认不出，没法判它要关哪几张单`] };
+  }
+  const targets = closingTargets(
+    { number: meta.number, body: typeof body === 'string' ? body : '' },
+    typeof base === 'string' ? base : undefined,
+  );
+  if (targets.issues.length === 0) return { problems: targets.problems, notChecked: [] };
+  const want = targets.issues.map((n) => `#${n}`).join('、');
+  let files: ChangedFile[];
+  try {
+    files = await gh.files(meta.number);
+  } catch (e) {
+    return {
+      problems: targets.problems,
+      notChecked: [
+        `读不到 PR #${meta.number} 改了哪些文件（${message(e)}），没法判要关的 ${want} 带没带结果`,
+      ],
+    };
+  }
+  if (files.length !== meta.changedFiles) {
+    return {
+      problems: targets.problems,
+      notChecked: [
+        `PR #${meta.number} 改了 ${meta.changedFiles} 个文件，只读到 ${files.length} 个，没法判要关的 ${want} 带没带结果`,
+      ],
+    };
+  }
+  return { problems: [...targets.problems, ...missingResults(targets.issues, files)], notChecked: [] };
+}
+
+/**
+ * 必填栏（标签、里程碑、对应计划、specs、档位、这个 PR 做完就关单）只提醒、不挡合并（创始人 2026-09-26「流程只为快」）。
  * 这里的任何读不到、认不出都只变成一条提醒，影响不了合并闸的结论——所以 pr-fields.ts 那套判法不在先审后合的清单里。
  */
 export async function reminders(live: unknown, meta: LiveMeta, gh: GitHubReads): Promise<string[]> {

@@ -522,23 +522,29 @@ export async function openIssue(
     now: deps.client.now,
     renewEveryMs: deps.leaseRenewMs,
     lookup: async () => {
-      // 我们的单刚开不久：占用 2 分钟没续就过期重写，最近 300 张（100 条一页、最多翻 3 页）里一定在
-      for await (const page of deps.client.pages(
-        {
-          method: 'GET',
-          path: base,
-          auth,
-          query: { state: 'all', sort: 'created', direction: 'desc', per_page: 100 },
-          signal: ctx.signal,
-        },
-        3,
-      )) {
+      // 我们的单刚开不久：占用 2 分钟没续就过期重写（CLAIM_STALE_AFTER_MS）。300 张够不够：开单要过卫生检查、
+      // 一个个发请求，这个仓 2 分钟内开不出 300 张单（哪怕所有工人一起开也到不了这个量级）——最近 300 张
+      // （100 条一页、翻 3 页）里一定能看到 2 分钟前开的那张；3 页翻完没找到就当没开过。
+      // 页数自己数、够了就返回 null（等效 break，让 pages() 的生成器正常收尾），不把 3 传给 pages() 的
+      // maxPages——那是它自己的翻页安全网（次数很大，兜底真正翻不到头的情况），跟这里「只看最近 300 张」
+      // 的业务决定是两回事：传 3 会让它把「第 4 页还有数据」也当成「没翻完」抛 TOO_MANY_PAGES，
+      // 单子一过 300 张开单就全部失败（法国生产 2026-09-27 踩过）。
+      let pageCount = 0;
+      for await (const page of deps.client.pages({
+        method: 'GET',
+        path: base,
+        auth,
+        query: { state: 'all', sort: 'created', direction: 'desc', per_page: 100 },
+        signal: ctx.signal,
+      })) {
         const parsed = z.array(IssueSchema).safeParse(page.data);
         if (!parsed.success) throw unexpected(`翻 ${slug} 的 issue 列表`, page.data);
         const hit = parsed.data.find(
           (i) => !isPullRequest(i) && (i.body ?? '').includes(marker) && deps.bots.is('engine', i.user),
         );
         if (hit) return { number: hit.number, url: hit.html_url, updatedAt: hit.updated_at };
+        pageCount += 1;
+        if (pageCount >= 3) return null;
       }
       return null;
     },
