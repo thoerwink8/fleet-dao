@@ -11,8 +11,10 @@ import {
   ensureMirror,
   fromGitFailure,
   type Git,
+  lsRemote,
   mirrorPath,
   NET_TIMEOUT_MS,
+  validBranchName,
   withMirrorLock,
 } from './push.ts';
 import type { RepoFactsCache } from './repos.ts';
@@ -77,6 +79,58 @@ export async function fetchMainline(
     const head = rev.stdout.trim();
     if (rev.code !== 0 || !FULL_SHA.test(head)) throw fromGitFailure('解析刚抓到的主线', slug, rev);
     return { head, defaultBranch };
+  });
+}
+
+export interface FetchBranchInput {
+  repo: RepoRef;
+  branch: string;
+  signal?: AbortSignal | undefined;
+}
+
+export interface FetchBranchResult {
+  /** null = 远端此刻没有这个分支（被删了，或从没推过）。 */
+  head: string | null;
+}
+
+const BRANCH_REF = 'refs/fleet/adopt';
+
+/**
+ * 抓一个分支此刻在远端的头进镜像：不认之前哪次操作留下的引用还在不在（推分支、并主线用完各自的临时引用就删，
+ * 对象什么时候被回收不归这层管）——重新问一次远端、重新 fetch，保证拿到的提交对象在镜像里真的有。
+ * 推被拒（DIVERGED / REMOTE_AHEAD）时，引擎要认领远端的新头、判断是良性前进还是被改写，靠这个先把新头的
+ * 提交安全地取到手（#307/#389 那次真事：推被拒退回来的 remoteHead 到认领那一刻镜像里那个临时引用已经删了，
+ * 不能假设对象还在）。
+ */
+export async function fetchBranchHead(
+  deps: MirrorReadDeps,
+  input: FetchBranchInput,
+): Promise<FetchBranchResult> {
+  const { repo, branch } = input;
+  if (!validBranchName(branch)) {
+    throw new GitHubError('BAD_BRANCH_NAME', `分支名「${branch}」不合规`);
+  }
+  const slug = repoSlug(repo);
+  const mirror = mirrorPath(deps.mirrorRoot, repo);
+  return withMirrorLock(mirror, async () => {
+    await ensureMirror(deps, mirror);
+    const url = deps.gitUrl(repo);
+    const token = (await deps.client.installationToken('agent', repo, input.signal)).token;
+    const net: GitCall = {
+      cwd: mirror,
+      env: gitEnv({ base: deps.baseEnv, config: authHeaderConfig(deps.gitHost, token) }),
+      timeoutMs: NET_TIMEOUT_MS,
+    };
+    const git: Git = (args, call) => deps.git(args, call);
+    const before = await lsRemote(git, net, url, [branch]);
+    const head = before.get(branch) ?? null;
+    if (!head) return { head: null };
+    const fetched = await git(
+      ['fetch', '--no-tags', '--no-write-fetch-head', '--quiet', url, `+refs/heads/${branch}:${BRANCH_REF}`],
+      net,
+    );
+    if (fetched.code !== 0) throw fromGitFailure('抓取分支的头', slug, fetched);
+    return { head };
   });
 }
 

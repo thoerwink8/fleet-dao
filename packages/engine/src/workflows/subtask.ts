@@ -520,7 +520,7 @@ export async function subtaskWorkflow(input: SubtaskInput): Promise<SubtaskResul
           sync.state === 'clean'
             ? await Promise.all([
                 attempt(kit, 'waitCi', () =>
-                  acts.waitCi({ ...kit.scope, repo: input.repo, prNumber, head: sync.head }),
+                  acts.waitCi({ ...kit.scope, repo: input.repo, prNumber, branch, head: sync.head }),
                 ),
                 sub.secondOpinion ? secondOpinion(prNumber, sync.head) : Promise.resolve(null),
               ])

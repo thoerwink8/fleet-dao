@@ -623,6 +623,19 @@ export const RULES: readonly FailureRule[] = [
     routeOutcome: 'neutral',
     hint: '先抓远端、并好再推',
   },
+  // 推被拒（DIVERGED）：github-ports.ts 的 pushBranch 已经先试过认领远端新头、并一次（远端含着起会话前的头就是
+  // 良性前进，不算改写），到这条规则时说明那条路也走不通——要么真被强推改写了历史，要么远端分支已经不在了。
+  // 原路重试没用（改写、删分支都不会因为再试一次而变回来），得人看（#307/#389 那次真事：帅位手工并了主线又推，
+  // 工作树没跟上，后来推被拒，当时落进了「认不出」的兜底梯，见文件顶部三轮认的说明；这条规则补上明确归类）。
+  {
+    id: 'MC3',
+    title: '推送和远端真分叉了，不是良性前进',
+    codes: ['diverged'],
+    ladder: ['park'],
+    alert: true,
+    routeOutcome: 'neutral',
+    hint: '看原因里远端此刻的头，人工核实要不要把它当成分支的新头接着走',
+  },
   {
     id: 'TS1',
     title: '测试没过',

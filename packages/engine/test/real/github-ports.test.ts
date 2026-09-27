@@ -69,6 +69,7 @@ function fakeGh(over: Partial<Record<keyof EngineGitHub, (input: never) => unkno
     }),
     openPr: record('openPr', () => ({ number: 101, url: 'https://github.com/acme/widgets/pull/101' })),
     waitCi: record('waitCi', (input: { head: string }) => ({ state: 'green', head: input.head })),
+    fetchBranchHead: record('fetchBranchHead', () => ({ head: m.head })),
     syncMainline: record('syncMainline', (input: { head: string }) => ({
       state: 'clean',
       head: input.head,
@@ -150,6 +151,14 @@ function commitIn(dir: string, file: string) {
   git(dir, 'add', '--', 'src');
   git(dir, 'commit', '-q', '-m', `feat: ${file}`);
   return git(dir, 'rev-parse', 'HEAD');
+}
+
+/** 直接在镜像里补一个提交（顶替「远端此刻的头」：帅位手推、或 CI 认下的新头，对象要在镜像里才能打包出来）。 */
+function commitInMirror(file: string, content: string) {
+  writeFileSync(join(m.dir, file), content);
+  git(m.dir, 'add', '.');
+  git(m.dir, 'commit', '-q', '-m', `on top: ${file}`);
+  return git(m.dir, 'rev-parse', 'HEAD');
 }
 
 describe('GitHubError → PortError', () => {
@@ -490,6 +499,134 @@ describe('推之前把最新主线并进会话的树', () => {
   });
 });
 
+describe('推被拒（DIVERGED / REMOTE_AHEAD）：先认领远端新头，判断是良性前进还是真被改写（#307/#389 那次真事）', () => {
+  const parentsOf = (dir: string, sha: string) =>
+    git(dir, 'rev-list', '--parents', '-n', '1', sha).split(' ').slice(1);
+
+  /** 在镜像里另开一条不碰 main 的分支，往 main 此刻的头上加一个提交（模拟帅位手推的、良性前进的远端头）；用完删分支，对象留着。 */
+  function commitOffMain(file: string, content: string) {
+    const branch = `scratch-${Math.random().toString(36).slice(2, 7)}`;
+    git(m.dir, 'checkout', '-q', '-b', branch);
+    writeFileSync(join(m.dir, file), content);
+    git(m.dir, 'add', '.');
+    git(m.dir, 'commit', '-q', '-m', `remote: ${file}`);
+    const sha = git(m.dir, 'rev-parse', 'HEAD');
+    git(m.dir, 'checkout', '-q', 'main');
+    git(m.dir, 'branch', '-q', '-D', branch);
+    return sha;
+  }
+
+  /** 把 headSha（只存在于会话树 dir 里）导进镜像、在它上面再加一层提交（模拟远端已经含着我们要推的这个头、还往前走了）。 */
+  function extendHeadInMirror(dir: string, headSha: string, file: string, content: string) {
+    const tmp = `tmp-${headSha.slice(0, 7)}`;
+    git(m.dir, 'fetch', '-q', dir, `${headSha}:refs/heads/${tmp}`);
+    git(m.dir, 'checkout', '-q', tmp);
+    writeFileSync(join(m.dir, file), content);
+    git(m.dir, 'add', '.');
+    git(m.dir, 'commit', '-q', '-m', `remote extends: ${file}`);
+    const sha = git(m.dir, 'rev-parse', 'HEAD');
+    git(m.dir, 'checkout', '-q', 'main');
+    git(m.dir, 'branch', '-q', '-D', tmp);
+    return sha;
+  }
+
+  /** 从主线的根提交另开一条分支（不含 main 此刻的头）：模拟历史被改写过的远端头。 */
+  function commitRewrittenHistory(file: string, content: string) {
+    const root = git(m.dir, 'rev-list', '--max-parents=0', 'HEAD').trim();
+    const branch = `scratch-rewrite-${Math.random().toString(36).slice(2, 7)}`;
+    git(m.dir, 'checkout', '-q', '-b', branch, root);
+    writeFileSync(join(m.dir, file), content);
+    git(m.dir, 'add', '.');
+    git(m.dir, 'commit', '-q', '-m', `rewritten: ${file}`);
+    const sha = git(m.dir, 'rev-parse', 'HEAD');
+    git(m.dir, 'checkout', '-q', 'main');
+    git(m.dir, 'branch', '-q', '-D', branch);
+    return sha;
+  }
+
+  it('DIVERGED、远端含着起会话前的头（良性前进）：认领、并一次、改用新头重推，不当成改写', async () => {
+    const remoteHead = commitOffMain('manual-merge.ts', 'export const m = 1;\n');
+    const pushed: string[] = [];
+    const { ports, trees } = setup({
+      pushBranch: (input: { head: string }) => {
+        pushed.push(input.head);
+        if (pushed.length === 1) {
+          throw new GitHubError('DIVERGED', '分叉了', { retryable: false, details: { remoteHead } });
+        }
+        return { head: input.head, pushed: true };
+      },
+      fetchBranchHead: () => ({ head: remoteHead }),
+    });
+    const dir = await seededTree(trees);
+    const head = commitIn(dir, 'login.ts');
+    const r = await ports.pushBranch({ taskId: 't1', repo, worktreePath: dir, branch: BRANCH, head }, ctx);
+    expect(pushed).toEqual([head, r.head]);
+    expect(r.head).not.toBe(head);
+    expect(parentsOf(dir, r.head)).toEqual([head, remoteHead]);
+    expect(git(dir, 'rev-parse', 'HEAD')).toBe(r.head);
+    expect([...(r.changedFiles ?? [])].sort()).toEqual(['manual-merge.ts', 'src/login.ts']);
+  });
+
+  it('REMOTE_AHEAD（远端已经含着我们要推的头、还往前走了）：认领远端的新头，不用再推一次', async () => {
+    let remoteHead = '';
+    const { ports, trees, calls } = setup({
+      pushBranch: () => {
+        throw new GitHubError('REMOTE_AHEAD', '远端已经在这个头之上被推进了', {
+          retryable: false,
+          details: { remoteHead },
+        });
+      },
+      fetchBranchHead: () => ({ head: remoteHead }),
+    });
+    const dir = await seededTree(trees);
+    const head = commitIn(dir, 'login.ts');
+    remoteHead = extendHeadInMirror(dir, head, 'someone-else.ts', 'export const s = 1;\n');
+    const r = await ports.pushBranch({ taskId: 't1', repo, worktreePath: dir, branch: BRANCH, head }, ctx);
+    expect(r.head).toBe(remoteHead);
+    expect(git(dir, 'rev-parse', 'HEAD')).toBe(remoteHead);
+    // 认领不用重推：pushBranch（低层的推）总共只被真调用了一次（那一次就是报 REMOTE_AHEAD 的那次）
+    expect(calls.pushBranch).toHaveLength(1);
+  });
+
+  it('【故意造出的失败】DIVERGED、远端不含起会话前的头（历史被改写过）：不试着并，原样报出去，明确写「不含」', async () => {
+    const remoteHead = commitRewrittenHistory('force-pushed.ts', 'export const f = 1;\n');
+    const { ports, trees } = setup({
+      pushBranch: () => {
+        throw new GitHubError('DIVERGED', '分叉了', { retryable: false, details: { remoteHead } });
+      },
+      fetchBranchHead: () => ({ head: remoteHead }),
+    });
+    const dir = await seededTree(trees);
+    const head = commitIn(dir, 'login.ts');
+    const err = await ports
+      .pushBranch({ taskId: 't1', repo, worktreePath: dir, branch: BRANCH, head }, ctx)
+      .catch((e: unknown) => e);
+    expect(err).toMatchObject({ code: 'DIVERGED', retryable: false });
+    expect((err as Error).message).toContain('不含起会话前的头');
+    // 没有乱动工作树：还在会话交的那个头上，没有半途而废的并
+    expect(git(dir, 'rev-parse', 'HEAD')).toBe(head);
+  });
+
+  it('【故意造出的失败】远端分支已经不在了（被人删了）：不当成改写，写清「不见了」', async () => {
+    const { ports, trees } = setup({
+      pushBranch: () => {
+        throw new GitHubError('DIVERGED', '分叉了', {
+          retryable: false,
+          details: { remoteHead: 'f'.repeat(40) },
+        });
+      },
+      fetchBranchHead: () => ({ head: null }),
+    });
+    const dir = await seededTree(trees);
+    const head = commitIn(dir, 'login.ts');
+    const err = await ports
+      .pushBranch({ taskId: 't1', repo, worktreePath: dir, branch: BRANCH, head }, ctx)
+      .catch((e: unknown) => e);
+    expect(err).toMatchObject({ code: 'DIVERGED', retryable: false });
+    expect((err as Error).message).toContain('不在了');
+  });
+});
+
 describe('开 PR、CI、合并', () => {
   const body = {
     requirement: 12,
@@ -734,6 +871,73 @@ describe('开 PR、CI、合并', () => {
       ),
     ).toEqual({ path: 'specs/12-登录/方案.md', commit: 'd'.repeat(40) });
     expect(calls.writeSpecDoc?.[0]).toMatchObject({ message: 'docs(spec): #12 方案.md' });
+  });
+});
+
+describe('CI 认了新头：工作树跟着并（#307/#389 那次真事补上的）', () => {
+  it('新头含着老头（帅位手推、或引擎自己另一轮先推成了）：工作树快进过去，不止是查 CI 的结论', async () => {
+    const newHead = commitInMirror('adopted.ts', 'export const x = 1;\n');
+    const { ports, trees, calls } = setup({
+      waitCi: (_input: { head: string }) => ({ state: 'green', head: newHead, checks: [] }),
+    });
+    const dir = await seededTree(trees);
+    const result = await ports.waitCi(
+      { taskId: 't1', repo, prNumber: 101, branch: BRANCH, head: m.head, worktreePath: dir },
+      ctx,
+    );
+    expect(result).toEqual({ state: 'green', head: newHead, failedChecks: [] });
+    expect(git(dir, 'rev-parse', 'HEAD')).toBe(newHead);
+    expect(calls.fetchBranchHead?.[0]).toMatchObject({ branch: BRANCH });
+  });
+
+  it('没给工作树（合并队列没有工作树）：只回查 CI 的结论，不碰工作树、不抓分支', async () => {
+    const newHead = commitInMirror('adopted2.ts', 'export const x = 2;\n');
+    const { ports, calls } = setup({
+      waitCi: (_input: { head: string }) => ({ state: 'green', head: newHead, checks: [] }),
+    });
+    const result = await ports.waitCi(
+      { taskId: 't1', repo, prNumber: 101, branch: BRANCH, head: m.head },
+      ctx,
+    );
+    expect(result).toEqual({ state: 'green', head: newHead, failedChecks: [] });
+    expect(calls.fetchBranchHead ?? []).toHaveLength(0);
+  });
+
+  it('【故意造出的失败】会话在跑（工作树有没提交的改动）：不并，跳过、不抛，等下一轮再试', async () => {
+    const newHead = commitInMirror('adopted3.ts', 'export const x = 3;\n');
+    const { ports, trees, calls } = setup({
+      waitCi: (_input: { head: string }) => ({ state: 'green', head: newHead, checks: [] }),
+    });
+    const dir = await seededTree(trees);
+    // 改一个已跟踪的文件、不提交（未跟踪的新文件 uncommittedTracked 不算数，见 user-git.ts）：模拟会话正编辑到一半。
+    writeFileSync(join(dir, 'README.md'), '会话还没提交这一份\n');
+    const result = await ports.waitCi(
+      { taskId: 't1', repo, prNumber: 101, branch: BRANCH, head: m.head, worktreePath: dir },
+      ctx,
+    );
+    // 查 CI 的结论照样查得成、照样回给调用方：工作树跟不跟得上不耽误这一步的判断。
+    expect(result).toEqual({ state: 'green', head: newHead, failedChecks: [] });
+    expect(git(dir, 'rev-parse', 'HEAD')).toBe(m.head);
+    expect(calls.fetchBranchHead ?? []).toHaveLength(0);
+  });
+
+  it('【故意造出的失败】diverged（新头不含老头）：不试着并工作树，交回去要人看，不碰工作树', async () => {
+    const { ports, trees, calls } = setup({
+      waitCi: (input: { head: string }) => ({
+        state: 'head_moved',
+        head: input.head,
+        actualHead: 'f'.repeat(40),
+        detail: '被强推改写了',
+      }),
+    });
+    const dir = await seededTree(trees);
+    const result = await ports.waitCi(
+      { taskId: 't1', repo, prNumber: 101, branch: BRANCH, head: m.head, worktreePath: dir },
+      ctx,
+    );
+    expect(result.state).toBe('diverged');
+    expect(git(dir, 'rev-parse', 'HEAD')).toBe(m.head);
+    expect(calls.fetchBranchHead ?? []).toHaveLength(0);
   });
 });
 
