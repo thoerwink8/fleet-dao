@@ -1014,11 +1014,15 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
     | { kind: 'needs-human'; why: string };
 
   /**
-   * 先审后合（#253）：这个头碰没碰高风险路径（迁移里有删改语句、碰安全，清单和判法和合并闸同一份）；碰了就派别家
-   * （和写这张单不同族，路由config 里 review 阶段本就配的是别的厂商）审一轮，结论写回 GitHub 的 second-opinion
-   * 提交状态和一条评论（合并闸认的就是这个）。同一个头只请一次：头没变、已经贴过的不再重请。
-   * 「必须改」的反馈和 CI 红走同一条账（fix，由 doFix 派会话去改）；连着 SECOND_OPINION_ROUND_LIMIT 轮还是必须改、
-   * 或者一家都派不出（runStage 自己的兜底梯挂起报警），才停下等人。
+   * 先审后合（#253）：这个头碰没碰高风险路径（迁移里有删改语句、碰安全，清单和判法和合并闸同一份）；碰了就派别家审
+   * 一轮，结论写回 GitHub 的 second-opinion 提交状态和一条评论（合并闸认的就是这个）。同一个头只请一次：头没变、
+   * 已经贴过的不再重请。
+   * 派别家和第 5 步「开 PR 前验证」同一套（帅位 2026-09-27 夜挑错：路由配置里 review 阶段的排法可能是 grok-4.7、
+   * deepseek-flash、opus-5.5，写这张单的要是 grok 就可能挑到自己审自己）：整族避开写这张单用过的族（authorFamilies），
+   * 界面单再避开 GPT（uiWork，禁令按 stage 'ui' 判，见 shared 的 bans.ts）；挑不出别家（runStage 自己的兜底梯）
+   * 停下等人，原因写清，不拿同族顶。
+   * 「必须改」的反馈和 CI 红走同一条账（fix，由 doFix 派会话去改）；连着 SECOND_OPINION_ROUND_LIMIT 轮还是必须改
+   * 才停下等人。
    */
   const secondOpinionRound = async (pr: number, atHead: string): Promise<SecondOpinionOutcome> => {
     if (atHead === soHead) return { kind: 'skip' };
@@ -1029,10 +1033,17 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
       soHead = atHead;
       return { kind: 'skip' };
     }
+    const authors = await attempt(kit, 'authorFamilies', () => acts.authorFamilies({ ...kit.scope }));
+    const uiPaths = need(setup, '流程配置').uiPaths;
+    const files = netChanged ?? [...changed];
+    const ui = await judge(kit, 'filesUnder', { paths: uiPaths, files });
     const got = await runStage(kit, {
       stage: 'review',
       expect: 'review',
       brief: secondOpinionBrief(pr, atHead),
+      avoidFamilies: authors.families,
+      uiWork: ui.length > 0 || undefined,
+      noRouteTitle: `没有别家可请第二意见：写这张单的是 ${authors.families.join('、')} 族，第二意见只派别家，不拿同族顶`,
     });
     const verdict: 'pass' | 'changes' = got.output.review.verdict === 'pass' ? 'pass' : 'changes';
     const blocking = got.output.review.findings.filter((f) => f.severity === 'blocking');

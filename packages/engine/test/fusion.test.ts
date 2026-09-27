@@ -493,6 +493,50 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
       const { parked } = await runUntilParked(w);
       expect(parked.lastProblem).toContain('没有 statuses 写权限');
     });
+
+    it('【故意造出的失败】写这张单的是 Grok、review 排法第一个也是 grok：整族避开，不许挑到自己审自己', async () => {
+      // 帅位 2026-09-27 夜挑错：光靠「路由配置里 review 阶段本就配的是别的厂商」不够——排法里可能同时有
+      // grok-4.7、deepseek-flash、opus-5.5，写这张单的要是 grok（今晚 #276、#307 都是）就可能挑到 grok 自己审自己。
+      // 用「Lead 是 grok」这个真实过的场景（和上面「副手派不出、Lead 是 Grok」同一族路由）：副手避开同族派不出、
+      // Lead 自己写完整张单，authorFamilies 照实起过的会话算出来就是 ['grok']；第二意见按这套避开，不能拿它顶。
+      const grokLead: RouteChoice = {
+        routeId: 'g1',
+        poolId: 'pg',
+        modelId: 'm1',
+        family: 'grok',
+        hostId: 'grok',
+      };
+      const deepseekReview: RouteChoice = {
+        routeId: 'g2',
+        poolId: 'pg2',
+        modelId: 'deepseek-flash',
+        family: 'deepseek',
+        hostId: 'cursor-agent',
+      };
+      const opusReview: RouteChoice = {
+        routeId: 'g3',
+        poolId: 'pg3',
+        modelId: 'opus-5.5',
+        family: 'claude',
+        hostId: 'claude-code',
+      };
+      // 排法第一个是 grok：不避开的话会挑到它自己
+      const w = createFakeWorld({
+        routes: [grokLead, deepseekReview, opusReview, GPT_ROUTE],
+        highRisk: () => HITS,
+        review: () => ({ verdict: 'pass', findings: [] }),
+      });
+      const result = await runToEnd(w);
+      expect(result.state).toBe('done');
+
+      const reviewPick = w.callsOf('pickRoute').find((c) => c.input.stage === 'review');
+      expect(reviewPick?.input.avoidFamilies).toEqual(['grok']);
+      const reviewSession = w.callsOf('startSession').find((c) => c.input.stage === 'review');
+      expect(reviewSession?.input.route.family).toBe('deepseek');
+      expect(reviewSession?.input.route.family).not.toBe('grok');
+      const post = w.callsOf('postSecondOpinion')[0];
+      expect(post?.input.model).toBe('deepseek-flash');
+    });
   });
 
   it('CI 报和主线冲突：自动并主线并上了，接着在新头上查 CI，不算「没查成」的次数、照常走完', async () => {
