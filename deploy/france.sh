@@ -162,7 +162,11 @@ DEMO_UNITS=(fleet-demo-scopes.service fleet-demo-scopes.path fleet-demo-scopes.t
 # 自动发布（docs/ops.md 第九节「自动发布」）：主线上 CI 全绿的新提交等引擎空闲后发到本机、发完同步规矩。装的是副本：
 # 主线上改了它，要重跑本脚本才换。它每一轮的读数、本脚本装到哪个提交（下面 APPLIED_FILE）都放在 AUTO_DIR，后端的 /healthz 读
 AUTO_RELEASE_LIB=/usr/local/lib/fleet-dao/auto-release
-AUTO_RELEASE_FILES=(lib.mjs fleet-auto-release.mjs)
+AUTO_RELEASE_FILES=(lib.mjs fleet-auto-release.mjs config.mjs)
+# 配置对账（#323，docs/ops.md 第九节「配置进仓对账」）：私有值只把 HMAC 指纹写进仓里的期望，钥匙只在本机（root 600）。
+# 本脚本第一次跑时生成，之后不动；自动发布每一轮、本脚本的读回都拿它算线上私有值的指纹
+CONFIG_KEY=/etc/fleet-dao/config-fingerprint.key
+CONFIG_CLI=$DEPLOY_DIR/france/auto-release/config.mjs
 AUTO_RELEASE_UNITS=(fleet-auto-release.service fleet-auto-release.timer)
 AUTO_DIR=$RELEASES_DIR/.auto
 APPLIED_FILE=$AUTO_DIR/france-applied
@@ -741,6 +745,14 @@ setup_app_config() {
 $key=$(openssl rand -hex 32)"
     fi
   done
+  # 配置对账的指纹钥匙：首次生成，之后不动（换了钥匙，仓里期望文件记的私有值指纹要全部重算）。只有 root 读，值不进日志
+  if app_config_path_ok "$CONFIG_KEY"; then
+    if [[ -s "$CONFIG_KEY" ]]; then
+      fix_meta "$CONFIG_KEY" root:root 600
+    else
+      put_file "$CONFIG_KEY" root:root 600 "$(openssl rand -hex 32)"
+    fi
+  fi
 }
 
 # 发布脚本登香港用的钥匙：没有就生成（只有 root 读得到），打印公钥给香港登记。公钥随时能从私钥导出，不另存一份
@@ -1046,6 +1058,36 @@ readback_app_config() {
   check_sensitive_values "$SENSITIVE_VALUES" || :
   check_engine_env /etc/fleet-dao/engine.env "$SENSITIVE_VALUES" "$WORK_DIR" "$ENGINE_STATE_DIR" || :
   check_retired "$CARPOOL_SHIM" 拼车用户家里的派活垫片
+  readback_config
+}
+
+# 配置和仓里的期望对账（#323）：和自动发布每一轮同一份判法（deploy/france/auto-release/config.mjs），拿在用那一版里的期望比；
+# 不一致判红，没查成记待配，一行一条、值不打印。指纹钥匙要 root:root 600（它在，私有值的指纹才算得出来）
+readback_config() {
+  local out line rc=0 meta
+  if [[ -L "$CONFIG_KEY" ]]; then
+    red "$CONFIG_KEY 是符号链接：要 root:root 600 的普通文件（配置对账的指纹钥匙）"
+  elif [[ -e "$CONFIG_KEY" ]]; then
+    meta=$(stat -c '%U:%G %a' -- "$CONFIG_KEY" 2>/dev/null) || meta="读不了"
+    if [[ ! -f "$CONFIG_KEY" || "$meta" != "root:root 600" ]]; then
+      red "$CONFIG_KEY 是「$meta」，要 root:root 600 的普通文件（配置对账的指纹钥匙，别人读到就能拿指纹猜私有值）"
+    fi
+  fi
+  out=$(/usr/bin/node "$CONFIG_CLI" check 2>&1) || rc=$?
+  while IFS= read -r line; do
+    case $line in
+    "ok "*) ok "${line#ok }" ;;
+    "red "*) red "${line#red }" ;;
+    "pending "*) pending "${line#pending }" ;;
+    "") ;;
+    *) pending "配置对账说了认不出的一行：${line:0:200}" ;;
+    esac
+  done <<<"$out"
+  # 0 一致、1 有不一致、2 没查成：各行已经记了账；别的退出码是命令行自己没跑成
+  case $rc in
+  0 | 1 | 2) ;;
+  *) red "配置对账没跑成（$CONFIG_CLI 退出码 $rc）" ;;
+  esac
 }
 
 # 往香港传静态文件的通路：用发布脚本同一套参数试跑一次 rsync（-n，什么都不传）
