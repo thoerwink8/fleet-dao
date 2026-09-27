@@ -873,6 +873,17 @@ export type TakeClaimResult =
   /** 租期、宽限期的设置认不出：什么都没做。 */
   | { ok: false; reason: 'settings'; why: string; now: string };
 
+/** 引擎拿一张单（接活、交单）的结果。 */
+export type EngineClaimResult =
+  /** 拿到了：fresh = 这次新认领的（待起）；false = 引擎本来就拿着（重投、重放）。voided = 强制改派作废掉的本机认领。 */
+  | { ok: true; claim: IssueClaim; fresh: boolean; voided: IssueClaim | null; now: string }
+  /** 本机（帅位、工人）拿着还没结束：这张单一点没动。 */
+  | { ok: false; reason: 'held'; claim: IssueClaim; now: string }
+  /** 带着帅位来（交单）却不是帅位（换了人、过了期、座位上没人）：什么都没做。 */
+  | { ok: false; reason: 'not_seat'; why: string; now: string }
+  /** 核帅位要的租期设置认不出：什么都没做。 */
+  | { ok: false; reason: 'settings'; why: string; now: string };
+
 export type ClaimUpdateResult =
   | { ok: true; claim: IssueClaim; now: string }
   /** 认领号对不上、已经结束了、这张单没有认领：claim 是此刻的样子（没有是 null），什么都没改。 */
@@ -919,6 +930,35 @@ export interface SeatStore {
    * 记在引擎名下）。回作废了的那几张。
    */
   voidExpiredClaims(input: { limit: number }): Promise<{ voided: IssueClaim[]; now: string }>;
+  /**
+   * 引擎拿这张单（接活、交单，方案第四节）：同一句抢——没有认领、结束了的换成引擎的新认领（待起，带工作流编号）；引擎本来就
+   * 拿着的照旧（fresh = false）；本机拿着的不动（held），除非带了创始人原话（founder）：作废掉本机的、再给引擎。带着帅位来的
+   * （seat，交单）在同一个事务里先锁座位、核任期。新认领、作废都记操作记录（claim.take / claim.reassign），记在 actor 名下。
+   */
+  claimForEngine(
+    input: ClaimTarget & {
+      workflowId: string;
+      actor: Actor;
+      seat?: SeatActor | undefined;
+      founder?: string | undefined;
+      /** 记进认领的那一句（接活自动派、交给 fleet 的原因）。 */
+      note?: string | undefined;
+    },
+  ): Promise<EngineClaimResult>;
+  /** 引擎的认领起成了工作流：待起 → 在做。不是引擎的、不在待起的不动（changed = false，claim 是此刻的样子）。 */
+  startEngineClaim(input: ClaimTarget): Promise<{ changed: boolean; claim: IssueClaim | null; now: string }>;
+  /** 待起超过 minutes 分钟还没改成在做的引擎认领（演练座位下的不算），老的在前，最多 limit 张。 */
+  listStalePendingEngineClaims(input: {
+    minutes: number;
+    limit: number;
+  }): Promise<{ claims: IssueClaim[]; now: string }>;
+  /**
+   * 待起的引擎认领不起了（开关关了、单子不在了）：放下、写原因、记操作记录（claim.release）。认领号对不上、已经不是待起的
+   * 不动（回 null）。
+   */
+  releasePendingEngineClaim(
+    input: ClaimTarget & { claimId: string; reason: string; actor: Actor },
+  ): Promise<IssueClaim | null>;
   /** 一张单的认领（没有是 null）。 */
   getClaim(repoId: string, issueNumber: number): Promise<{ claim: IssueClaim | null; now: string }>;
   /** 列认领：默认只要还活着的；可以只看一个仓。按仓、单号排。 */

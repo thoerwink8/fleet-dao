@@ -1,7 +1,13 @@
 // 内存里的 Store：测试和本地开发用，也是 ports.ts 语义的参照实现。数据按 Postgres 的表来摆（packages/db 的 schema），
 // 行为照库的约束来（比较后再改、和操作记录同一「事务」、同一会话同一句追问只一条、ok=false 的操作记录必须带原因……），
 // 和 pg-store.ts 过同一套契约测试（test/store-contract.ts）。onChange 模拟数据库的 NOTIFY fleet_changes。
-import { type FlowReplica, type IssueClaim, type SeatLease, UNSYNCED_REPLICA } from '@fleet-dao/core';
+import {
+  type FlowReplica,
+  type IssueClaim,
+  isActiveClaim,
+  type SeatLease,
+  UNSYNCED_REPLICA,
+} from '@fleet-dao/core';
 import type {
   Ban,
   Channel,
@@ -1262,6 +1268,26 @@ export function createMemoryStore(
         at: now().toISOString(),
       });
       audit(entry);
+      // 没派出去过就叫停了：引擎待起的认领跟着放下（#299），和 Postgres 版的 followTaskOnEngineClaim 一样
+      const claim = data.claims.find(
+        (c) => c.repoId === task.repoId && c.issueNumber === task.issueNumber && c.ownerKind === 'engine',
+      );
+      if (claim && isActiveClaim(claim.state)) {
+        const at = now().toISOString();
+        claim.state = 'released';
+        claim.endedAt = at;
+        claim.updatedAt = at;
+        claim.endReason = '任务没派出去过就叫停了';
+        audit({
+          actor: { kind: 'engine', id: 'fusion' },
+          action: 'claim.release',
+          target: `claim:${claim.repoId}#${claim.issueNumber}`,
+          after: { claimId: claim.claimId, owner: 'engine', state: claim.state },
+          reason: claim.endReason,
+          via: 'engine',
+          ok: true,
+        });
+      }
       changed('tasks', task.id);
       return 'ok';
     },
