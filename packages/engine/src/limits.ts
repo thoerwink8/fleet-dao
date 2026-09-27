@@ -28,6 +28,11 @@ export interface Limits {
   modelSwaps: number;
   /** 分诊追问创始人的次数上限，到了按写明的假设继续。 */
   maxQuestions: number;
+  /**
+   * 会话 fleet blocked --needs human|info 说要人才能往下做：退回让它带选项和推荐用 fleet ask 重问（#259：问他不挡路），
+   * 一个阶段最多退回几次；到数还这样才停下等人。access、other 不退回，照旧等人。
+   */
+  reaskRounds: number;
   /** 方案不合格时重写方案的次数。 */
   planRetries: number;
   /** 没空位、没额度时隔多久再选一次路由。 */
@@ -98,6 +103,7 @@ export const DEFAULT_LIMITS: Readonly<Limits> = Object.freeze({
   routeSwaps: 2,
   modelSwaps: 1,
   maxQuestions: 2,
+  reaskRounds: 2,
   planRetries: 1,
   routePollSeconds: 30,
   sessionMinutes: 90,
@@ -142,4 +148,12 @@ export function resolveLimits(partial: Partial<Limits> | null | undefined): Limi
 export function historyAlertLine(limits: Partial<Limits>): number {
   const value = limits.historyAlertEvents;
   return typeof value === 'number' && Number.isFinite(value) ? value : DEFAULT_LIMITS.historyAlertEvents;
+}
+
+/** 退回重问的次数上限：和 historyAlertLine 一样，这一项加进来之前开工的在途任务记下的那一套里没有它，缺了按现在的默认值。 */
+export function reaskLimit(limits: Partial<Limits>): number {
+  const value = limits.reaskRounds;
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? value
+    : DEFAULT_LIMITS.reaskRounds;
 }

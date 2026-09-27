@@ -62,6 +62,8 @@ export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
   saveTaskState: 'quick',
   raiseAlert: 'quick',
   askHuman: 'quick',
+  taskAsks: 'quick',
+  markAsksApplied: 'quick',
   requestApproval: 'quick',
   enqueueMerge: 'quick',
   withdrawMerge: 'quick',

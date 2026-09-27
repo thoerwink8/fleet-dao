@@ -45,6 +45,8 @@ export interface PrBodyInput {
   owed?: readonly string[] | undefined;
   /** 有什么风险。模板没有这一栏：并进「还欠什么」，每条前面标「风险：」。 */
   risks?: readonly string[] | undefined;
+  /** 「按推荐先做了」：问创始人的岔路里没等他回、按推荐先做了的（#259）；空 = 无。 */
+  assumed?: readonly string[] | undefined;
   /**
    * 「对应计划」：plan.md 的阶段加那一条的原话开头，例如「P1「工作流」」。必填；给空的写「（没写）」，
    * CI 的 pr-fields（packages/conventions）照样判红，不会当成填了。
@@ -76,6 +78,7 @@ export function renderPrBody(input: PrBodyInput): string {
     ['做了什么', input.did.length ? input.did : ['（没写）']],
     ['怎么验证的', input.verified.length ? input.verified : ['（没写）']],
     ['还欠什么', [...(input.owed ?? []), ...(input.risks ?? []).map((r) => `风险：${r}`)]],
+    ['按推荐先做了', input.assumed ?? []],
   ];
   const requirement =
     [
@@ -121,14 +124,23 @@ export function renderPrBody(input: PrBodyInput): string {
   return neutralizeCloseKeywords(lines.join('\n'));
 }
 
-function oneLine(s: string): string {
+/** 折叠空白（含换行）成单个空格、掐头去尾：标题、单行栏目用这个压。 */
+export function oneLine(s: string): string {
   return s.replace(/\s+/g, ' ').trim();
 }
 
-/** 进度段、评论里要放进人写的标题：挡 @ 提醒（会给人发通知）和能截断 HTML 注释的 `-->`。 */
-export function inert(s: string): string {
-  return oneLine(s)
+/**
+ * 挡 @ 提醒（会给人发通知）、中和能截断或伪造我们标记的 `<!--`/`-->`：换成看着一样但没有那个效果的字符。
+ * 不动换行——issue/评论正文要保留排版，压成一行的场合（标题、进度段的一行字）在 inert() 里再叠一层 oneLine。
+ */
+export function neutralizeMentions(s: string): string {
+  return s
     .replace(/@(?=[A-Za-z0-9-])/g, '@​')
     .replace(/<!--/g, '<!‑‑')
     .replace(/-->/g, '‑‑>');
+}
+
+/** 进度段、评论里要放进人写的标题：压成一行，再中和 @ 提醒和能截断 HTML 注释的 `-->`。 */
+export function inert(s: string): string {
+  return neutralizeMentions(oneLine(s));
 }

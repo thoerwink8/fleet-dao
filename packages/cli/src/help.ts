@@ -120,6 +120,7 @@ export const COMMAND_HELP: Record<string, string> = {
     human    要人动手的事；要他拍板的用 fleet ask，按推荐先做、不停下
     other    其他
   原因写清卡在哪、试过什么（4000 字以内）。
+  报 human、info 的，引擎先退回让你带推荐用 fleet ask 问、按推荐接着干（同一步最多退回 2 次），还说要人才停下等。
 
 例子：
   fleet blocked "测试要连短信网关，沙箱里没有测试账号" --needs access

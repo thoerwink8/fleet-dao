@@ -256,7 +256,13 @@ describe('PR 正文（fusionPrParts）', () => {
       ],
       owed: ['验证建议：长度可配'],
       tier: 'CI 绿就合——Lead 判了一般改动（合并闸按改动路径判，这一栏只作说明）',
+      assumed: [],
     });
+  });
+
+  it('问过创始人、按推荐先做了的进「按推荐先做了」一栏（#259），一条一行', () => {
+    const got = fusionPrParts(prFacts({ assumed: ['验证码几位？ → 先按推荐做了「6 位」，\n创始人还没回'] }));
+    expect(got.assumed).toEqual(['验证码几位？ → 先按推荐做了「6 位」， 创始人还没回']);
   });
 
   it('没验、Lead 单干、方案评审跳过、用的全组织默认：都明说，不空着', () => {
@@ -334,6 +340,19 @@ describe('关单评论（closeComment）', () => {
     expect(got).toContain('- kimi-k3：会话 2 次；token 没读到；花费没读到');
     expect(got).toContain('需求 specs/12-登录验证码/需求.md · 方案 specs/12-登录验证码/方案.md');
     expect(got).not.toContain('还欠什么');
+  });
+
+  it('问过创始人的记数（#259）：按推荐先做了几条、事后被改了几条；没读的不写这一段', () => {
+    expect(closeComment(closeFacts())).not.toContain('问创始人');
+    const got = closeComment(
+      closeFacts({ asks: { assumed: 3, confirmed: 1, changed: 1, outside: 1, legacy: 0 } }),
+    );
+    expect(got).toContain(
+      '**问创始人**：按推荐先做了 3 条，事后被改了 1 条（他确认了 1 条，还有 1 条他没回）；超出范围另开单 1 条',
+    );
+    expect(
+      closeComment(closeFacts({ asks: { assumed: 0, confirmed: 0, changed: 0, outside: 0, legacy: 0 } })),
+    ).toContain('**问创始人**：没问过');
   });
 
   it('同样的事实写出同一份正文（关单评论的幂等键带正文，重试不多发）', () => {

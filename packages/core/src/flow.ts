@@ -69,6 +69,11 @@ export type FlowEvent =
   | { kind: 'final-reviewed'; verdict: 'pass' | 'fix' }
   /** 合并前退回（合并队列退回要改、人闸没批）：回第 6 步修一轮。 */
   | { kind: 'merge-returned' }
+  /**
+   * 存档点读到创始人晚到的回答：按推荐先做了的，他改选了别的（#259，ask.ts 的 lateChanges）。交给 Lead 照改：还没开 PR 的
+   * 回第 4 步执行，已经开了 PR 的算开了 PR 之后修一轮（和 CI 红同一本账）。prOpen = 这张单的 PR 开出来了。
+   */
+  | { kind: 'changed'; prOpen: boolean }
   | { kind: 'merged' }
   | { kind: 'mother-verified'; verdict: 'pass' | 'block' }
   | { kind: 'needs-human'; why: string }
@@ -193,6 +198,22 @@ function badState(state: FlowState): string | undefined {
   return undefined;
 }
 
+/** 规划之后、开 PR 之前的几步：他改选了别的，回第 4 步执行照改（Lead 接手了的这一块还是 Lead 写）。 */
+const BEFORE_PR: readonly Step[] = ['review', 'execute', 'verify', 'pr'];
+/** 开了 PR 以后的几步：他改选了别的，算开了 PR 之后修一轮。 */
+const AFTER_PR: readonly Step[] = ['pr', 'final-review', 'merge'];
+
+/**
+ * 存档点读到他改选了别的（#259）：交给 Lead 照改。规划做完之前（方案还没有）、合进去以后（归对账开后续单）没有这一步，
+ * 走到这里的都是外壳叫错了（null）。第 6 步开 PR 之前（pr 这一步刚要开 PR）和之后都是 pr：看 PR 开没开出来。
+ */
+function changedAt(state: FlowState, prOpen: boolean): FlowDecision | null {
+  if (prOpen) return AFTER_PR.includes(state.step) ? fixRound(state, '创始人改选了别的，照改') : null;
+  if (!BEFORE_PR.includes(state.step)) return null;
+  const back: FlowState = { ...state, step: 'execute' };
+  return go(state, { step: 'execute' }, actionAt(back));
+}
+
 /** 开了 PR 之后回去改一轮（CI 红、最终审查要改、合并前退回）：没用完就修，用完了停下等人。 */
 function fixRound(state: FlowState, why: string): FlowDecision {
   if (state.ciRounds < FLOW_LIMITS.ciRounds) {
@@ -223,6 +244,8 @@ export function nextFlow(state: FlowState, event: FlowEvent): FlowDecision {
     return go(state, { step: back.step }, actionAt(back));
   }
   if (event.kind === 'resumed') return unexpected();
+
+  if (event.kind === 'changed') return changedAt(state, event.prOpen) ?? unexpected();
 
   switch (state.step) {
     case 'discuss':

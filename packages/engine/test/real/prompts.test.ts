@@ -224,6 +224,22 @@ describe('认交回来的东西', () => {
     expect(parseTriage('[]')).toMatchObject({ error: expect.stringContaining('对象') });
   });
 
+  it('分诊说不清时带的选项和推荐（#259）：去空白认出来；类型不对明确算交错了（合不合格由 core 的 checkAsk 判）', () => {
+    expect(
+      parseTriage(
+        '{"clear":false,"question":"验证码几位？","options":[" 6 位 ","4 位",""],"recommend":" 6 位 "}',
+      ),
+    ).toEqual({
+      ok: { clear: false, question: '验证码几位？', options: ['6 位', '4 位'], recommend: '6 位' },
+    });
+    expect(parseTriage('{"clear":false,"question":"几位？","options":"6 位"}')).toMatchObject({
+      error: expect.stringContaining('options'),
+    });
+    expect(parseTriage('{"clear":false,"question":"几位？","recommend":6}')).toMatchObject({
+      error: expect.stringContaining('recommend'),
+    });
+  });
+
   it('文档：空的、太长的都算交错了', () => {
     expect(parseDoc('# 需求\n要验证码')).toEqual({ ok: '# 需求\n要验证码' });
     expect(parseDoc('  \n')).toMatchObject({ error: expect.stringContaining('空的') });

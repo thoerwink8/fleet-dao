@@ -214,6 +214,43 @@ const rows: Row[] = [
     { kind: 'resumed' },
     { step: 'pr', action: 'fix-ci' },
   ],
+  // 存档点读到创始人晚到、改选了别的回答（#259）：没开 PR 回执行照改，开了 PR 算修一轮
+  [
+    '他改选了别的、验证之前（还没开 PR）→ 回第 4 步执行照改，验证轮数不动',
+    at({ step: 'verify', blocks: 1, verifyRounds: 1 }),
+    { kind: 'changed', prOpen: false },
+    { step: 'execute', action: 'dispatch', patch: { verifyRounds: 1, reworks: 0 } },
+  ],
+  [
+    '他改选了别的、正要开 PR → 回第 4 步执行照改',
+    at({ step: 'pr', blocks: 1 }),
+    { kind: 'changed', prOpen: false },
+    { step: 'execute', action: 'dispatch', patch: { ciRounds: 0 } },
+  ],
+  [
+    '他改选了别的、这一块 Lead 已经接手 → 回去还是 Lead 自己改',
+    at({ step: 'verify', blocks: 1, takeover: true }),
+    { kind: 'changed', prOpen: false },
+    { step: 'execute', action: 'lead-takeover' },
+  ],
+  [
+    '他改选了别的、PR 开了在等 CI → 修一轮',
+    at({ step: 'pr', blocks: 1, ciRounds: 1 }),
+    { kind: 'changed', prOpen: true },
+    { step: 'pr', action: 'fix-ci', patch: { ciRounds: 2 } },
+  ],
+  [
+    '他改选了别的、正要合并 → 修一轮',
+    at({ step: 'merge', blocks: 1 }),
+    { kind: 'changed', prOpen: true },
+    { step: 'pr', action: 'fix-ci', patch: { ciRounds: 1 } },
+  ],
+  [
+    `他改选了别的、开了 PR 之后已经修满 ${FLOW_LIMITS.ciRounds} 轮 → 停下等人，恢复后接着修`,
+    at({ step: 'final-review', blocks: 1, ciRounds: FLOW_LIMITS.ciRounds }),
+    { kind: 'changed', prOpen: true },
+    { step: 'parked', action: 'wait-human', patch: { resume: 'pr' } },
+  ],
   // 故意造出的失败：认不出的组合明说，不猜着往下走
   ['【失败】关了的单再来事件', at({ step: 'done', blocks: 1 }), { kind: 'merged' }, { error: /已经关了/ }],
   ['【失败】规划没拆出块', at({ step: 'plan' }), planned({ blocks: 0 }), { error: /没拆出能做的块/ }],
@@ -283,6 +320,30 @@ const rows: Row[] = [
     at({ step: 'execute', blocks: 1 }),
     { kind: 'merge-returned' },
     { error: /不该收到/ },
+  ],
+  [
+    '【失败】还没规划完就说他改选了别的（方案都没有，照改不了）',
+    at({ step: 'plan' }),
+    { kind: 'changed', prOpen: false },
+    { error: /不该收到/ },
+  ],
+  [
+    '【失败】最终审查时说 PR 没开（开了 PR 才有最终审查）',
+    at({ step: 'final-review', blocks: 1 }),
+    { kind: 'changed', prOpen: false },
+    { error: /不该收到/ },
+  ],
+  [
+    '【失败】还在验证却说 PR 开了',
+    at({ step: 'verify', blocks: 1 }),
+    { kind: 'changed', prOpen: true },
+    { error: /不该收到/ },
+  ],
+  [
+    '【失败】合进去了才说他改选了别的（归对账开后续单）',
+    at({ step: 'done', blocks: 1 }),
+    { kind: 'changed', prOpen: true },
+    { error: /已经关了/ },
   ],
 ];
 

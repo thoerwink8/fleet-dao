@@ -624,9 +624,28 @@ export class FakeGitHub {
       const since = req.query.get('since');
       const list = [...this.issues.values()]
         .filter((i) => state === 'all' || i.state === state)
-        .filter((i) => !since || i.updated_at >= since)
-        .map((i) => this.issueJson(i));
-      return this.page(req, list);
+        .filter((i) => !since || i.updated_at >= since);
+      if (req.query.get('sort') === 'created') {
+        list.sort(
+          (a, b) =>
+            (req.query.get('direction') === 'asc' ? 1 : -1) * a.created_at.localeCompare(b.created_at),
+        );
+      }
+      return this.page(
+        req,
+        list.map((i) => this.issueJson(i)),
+      );
+    }
+    if (rest === '/issues' && m === 'POST') {
+      const b = req.body as { title: string; body?: string; labels?: string[]; milestone?: number };
+      const issue = this.addIssue({
+        title: b.title,
+        body: b.body ?? null,
+        labels: b.labels ?? [],
+        milestone: b.milestone === undefined ? null : this.milestoneOf(b.milestone),
+        user: this.user(role),
+      });
+      return this.json(201, this.issueJson(issue));
     }
     if (rest === '/issues/comments' && m === 'GET') {
       const since = req.query.get('since');
