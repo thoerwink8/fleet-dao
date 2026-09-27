@@ -32,6 +32,7 @@ import {
 } from '../lib/status';
 import { cn } from '../lib/utils';
 import { hrefOf } from './board-ui';
+import { OrgDefaultMark } from './flow-source';
 import type { BoardNodeData } from './model';
 import { prState } from './nodes';
 
@@ -143,6 +144,7 @@ function TaskPanel({
       <Head onClose={onClose}>
         <span className="num text-sm font-semibold text-muted-foreground">#{t.issueNumber}</span>
         <StatusChip tone={tone} label={taskStateLabel[t.state]} />
+        <OrgDefaultMark flowSource={t.flowSource} />
       </Head>
       <h2 className="mt-2 text-lg leading-snug font-semibold">{t.title}</h2>
       <p className={cn('mt-1 text-sm', tone === 'run' ? 'text-muted-foreground' : toneText[tone])}>

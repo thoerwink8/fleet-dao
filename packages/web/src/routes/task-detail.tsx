@@ -21,6 +21,7 @@ import {
   useTimeline,
 } from '../api/client';
 import type { Ask, BoardSubtask, BoardTask, Routing, Run, TaskDetail, TimelineItem } from '../api/types';
+import { OrgDefaultMark } from '../board/flow-source';
 import { LogStream } from '../components/log-stream';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
 import { RepoLink, repoHref } from '../components/repo-link';
@@ -76,6 +77,7 @@ function boardTaskOf(d: TaskDetail, fromBoard: BoardTask | undefined): BoardTask
     priority: d.task.priority,
     requestedBy: d.task.requestedBy,
     createdAt: d.task.createdAt,
+    ...(d.task.flowSource ? { flowSource: d.task.flowSource } : {}),
     progress: { done: merged, total: d.subtasks.length },
     subtasks: d.subtasks,
   };
@@ -166,6 +168,7 @@ export default function TaskDetailPage() {
           <span className="num text-muted-foreground">#{d.task.issueNumber}</span>
           <span>{d.task.title}</span>
           <StatusChip tone={tone} label={taskStateLabel[t.state]} className="h-6 text-xs" />
+          <OrgDefaultMark flowSource={d.task.flowSource} />
         </span>
       }
       description={<span className={cn(tone !== 'run' && toneText[tone])}>{describeTask(t, now)}</span>}

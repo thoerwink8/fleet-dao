@@ -120,7 +120,9 @@ const CODE_RE = /`([^`\n]+)`/g;
 const OTHER_REPO_RE = /([^\s，。；、：:（(「」）)]+)\s*仓\s*(?:的\s*)?$/;
 const THIS_REPO = new Set(['本', '这个', '此', 'fleet-dao']);
 /** 仓根下不当成「仓里的东西」的名字。 */
-const IGNORED_TOP = new Set(['.git', 'node_modules']);
+// .fleet-out/ 是引擎会话在检出里落的交活文件（.git/info/exclude 排除、不进仓）：CI 上没有它，
+// 本地有它时指到里面的路径会被当成仓里的缺文件，同一份代码本地红、CI 绿。
+const IGNORED_TOP = new Set(['.git', 'node_modules', '.fleet-out']);
 
 /** 路径找没找到；unreadable 是读不到的那一级（仓内路径，'' 是仓根）：在不在没查成，不能当成没有。 */
 type Lookup = 'found' | 'missing' | { unreadable: string };

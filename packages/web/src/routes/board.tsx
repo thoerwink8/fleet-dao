@@ -4,6 +4,7 @@ import { useSearchParams } from 'react-router';
 import { brand } from '#brand';
 import { errorText, useBoard, useMe, useRouting } from '../api/client';
 import { BoardTree } from '../board/board-tree';
+import { FlowBanner } from '../board/flow-source';
 import { Empty, LoadError } from '../components/page';
 import { useRepo } from '../components/repo-context';
 import { Button } from '../components/ui/button';
@@ -69,6 +70,7 @@ export default function BoardPage() {
     return (
       <>
         {stale ? <div className="sticky top-0 z-20 p-2">{stale}</div> : null}
+        <FlowBanner flow={board.data.flow} />
         <BoardTree
           board={board.data}
           me={me}
@@ -86,15 +88,18 @@ export default function BoardPage() {
     );
   }
   return (
-    <div className="relative h-full">
-      <Suspense fallback={<BoardSkeleton />}>
-        <BoardCanvas board={board.data} me={me} />
-      </Suspense>
-      {stale ? (
-        <div className="pointer-events-none absolute inset-x-0 top-16 z-20 flex justify-center px-3">
-          <div className="pointer-events-auto">{stale}</div>
-        </div>
-      ) : null}
+    <div className="flex h-full flex-col">
+      <FlowBanner flow={board.data.flow} />
+      <div className="relative min-h-0 flex-1">
+        <Suspense fallback={<BoardSkeleton />}>
+          <BoardCanvas board={board.data} me={me} />
+        </Suspense>
+        {stale ? (
+          <div className="pointer-events-none absolute inset-x-0 top-16 z-20 flex justify-center px-3">
+            <div className="pointer-events-auto">{stale}</div>
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }

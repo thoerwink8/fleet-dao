@@ -1,6 +1,16 @@
-import { type Channel, hardBanFor, type Model, type Route, type SessionRun } from '@fleet-dao/shared';
-import { describe, expect, it } from 'vitest';
 import {
+  type Channel,
+  hardBanFor,
+  type Model,
+  type Route,
+  type SessionRun,
+  type Task,
+} from '@fleet-dao/shared';
+import { describe, expect, it } from 'vitest';
+import type { RepoFlowRow } from '../src/ports.ts';
+import {
+  boardFlow,
+  buildBoard,
   describeTimeline,
   findBan,
   jobView,
@@ -234,5 +244,93 @@ describe('任务详情的花费分清按量、套餐内', () => {
     const usage = usageView([ended('a', 'r-lost', 0.1), ended('b', 'r-none')], route);
     expect(usage.total.cost.unknown).toEqual({ runs: 2, usd: 0.1, missing: 1 });
     expect(usage.total.cost.subscription.runs).toBe(0);
+  });
+});
+
+describe('看板顶栏的流程配置副本', () => {
+  const now = new Date('2026-09-25T08:00:00.000Z');
+  const ago = (minutes: number) => new Date(now.getTime() - minutes * 60_000).toISOString();
+  const row = (over: Partial<RepoFlowRow> = {}): RepoFlowRow => ({
+    source: 'project',
+    commit: '0123456789abcdef0123456789abcdef01234567',
+    syncedAt: ago(6),
+    error: null,
+    unread: null,
+    ...over,
+  });
+
+  it('刚同步过的全组织默认：不停派，提交只给前 7 位', () => {
+    expect(boardFlow(row({ source: 'org_default' }), now)).toEqual({
+      paused: false,
+      source: 'org_default',
+      commit: '0123456',
+      syncedAt: ago(6),
+    });
+  });
+
+  it('提交不足 7 位原样，不加省略号', () => {
+    const got = boardFlow(row({ commit: 'abc' }), now);
+    if (got.paused) throw new Error('不该停派');
+    expect(got.commit).toBe('abc');
+  });
+
+  it('认不出：停派，原因里有这段错误和「改好仓里的」', () => {
+    const got = boardFlow(row({ error: '不是合法的 JSON' }), now);
+    if (!got.paused) throw new Error('应该停派');
+    expect(got.why).toContain('不是合法的 JSON');
+    expect(got.why).toContain('改好仓里的');
+  });
+
+  it('超过 45 分钟没同步成：停派，原因里写明分钟没同步成', () => {
+    const got = boardFlow(row({ syncedAt: ago(46) }), now);
+    if (!got.paused) throw new Error('应该停派');
+    expect(got.why).toContain('分钟没同步成');
+  });
+
+  it('从没同步过：停派，不带来源', () => {
+    const got = boardFlow(row({ source: null, commit: null, syncedAt: null }), now);
+    if (!got.paused) throw new Error('应该停派');
+    expect(got).not.toHaveProperty('source');
+  });
+
+  it('判得过但来源或提交是空的：拒绝，不返回 paused: false，也不填 project', () => {
+    expect(() => boardFlow(row({ source: null }), now)).toThrow(/不拿 project 顶/);
+    expect(() => boardFlow(row({ commit: null }), now)).toThrow(/不拿 project 顶/);
+  });
+
+  it('单上的来源照抄；库里空着的 JSON 没有这个键', () => {
+    const task = (id: string, flowSource?: Task['flowSource']): Task => ({
+      id,
+      repoId: 'r',
+      issueNumber: id === 'marked' ? 1 : 2,
+      title: '登录',
+      rawRequest: '原话',
+      requestedBy: 'founder',
+      state: 'running',
+      priority: 1,
+      createdAt: ago(10),
+      ...(flowSource ? { flowSource } : {}),
+    });
+    const board = buildBoard(
+      { id: 'r', owner: 'acme', name: 'shop', defaultBranch: 'main', testCommand: 'pnpm t' },
+      {
+        tasks: [task('marked', 'org_default'), task('blank')],
+        subtasks: [],
+        activeRuns: [],
+        plans: new Map(),
+        route: () => ({ modelName: '未知模型' }),
+      },
+      now,
+      row(),
+    );
+    const json = JSON.parse(JSON.stringify(board)) as {
+      tasks: { id: string; flowSource?: string }[];
+      flow: { paused: boolean; commit: string };
+    };
+    expect(json.tasks.find((t) => t.id === 'marked')?.flowSource).toBe('org_default');
+    const blank = json.tasks.find((t) => t.id === 'blank');
+    expect(blank).toBeTruthy();
+    expect(blank && 'flowSource' in blank).toBe(false);
+    expect(json.flow).toMatchObject({ paused: false, source: 'project', commit: '0123456' });
   });
 });
