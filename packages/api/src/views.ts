@@ -136,7 +136,12 @@ export function usageView(runs: readonly SessionRun[], route: (routeId: string) 
   return summarizeUsage(
     runs.map((r) => {
       const info = route(r.routeId);
-      return { ...r, model: info.route?.modelId ?? r.routeId, modelName: info.modelName, billing: info.billing };
+      return {
+        ...r,
+        model: info.route?.modelId ?? r.routeId,
+        modelName: info.modelName,
+        billing: info.billing,
+      };
     }),
   );
 }

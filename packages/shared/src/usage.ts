@@ -47,19 +47,22 @@ export function inputEquivalentOf(u: TokenCounts): number | undefined {
   return Math.round(scaled / SCALE);
 }
 
-/** 一次会话的用量事实（session_runs 一行，和 SessionRun 同形）：读不到的字段不给。 */
-export type RunUsageFacts = Pick<
-  SessionRun,
-  | 'stage'
-  | 'queuedAt'
+type OptionalFact =
   | 'startedAt'
   | 'endedAt'
   | 'inputTokens'
   | 'outputTokens'
   | 'cacheReadTokens'
   | 'cacheWriteTokens'
-  | 'costUsd'
-> & {
+  | 'costUsd';
+
+/**
+ * 一次会话的用量事实（session_runs 一行，和 SessionRun 同名同义）：读不到的字段不给，给 undefined 也一样——
+ * 网页拿接口返回的会话（zod 推出来的，可选字段带 undefined）直接算，不另抄一份。
+ */
+export type RunUsageFacts = Pick<SessionRun, 'stage' | 'queuedAt'> & {
+  [K in OptionalFact]?: SessionRun[K] | undefined;
+} & {
   /**
    * 记在哪个模型名下：路由上的模型（模型目录的 id），和 Fusion 关单评论「各模型额度」一个口径；
    * 上游实际回话的模型（actualModel）不在这里分。

@@ -46,7 +46,7 @@ import { sha256Hex } from '../../demo/scope';
 import { ApiError, type FleetApi } from '../client';
 import type { AuditEntry, DemoLink, LiveEvent } from '../types';
 import type { MLog, MockState, MSubtask, MTask } from './model';
-import { createSeed, fakeAction } from './seed';
+import { createSeed, fakeAction, fakeUsage } from './seed';
 
 export interface MockOptions {
   /** 是否开模拟器；测试里关掉，手动调 tick()。 */
@@ -183,7 +183,9 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     const route = st.routes.find((r) => r.id === routeId);
     const model = route ? st.models.find((m) => m.id === route.modelId) : undefined;
     const hostId: HostId | undefined = route?.hostId;
-    return { route, model, modelName: model?.displayName ?? '未知模型', hostId };
+    // 和真后端一样从渠道表读计费方式；渠道查不到就没有（不猜成套餐内）
+    const billing = route ? st.channels.find((c) => c.id === route.channelId)?.billing : undefined;
+    return { route, model, modelName: model?.displayName ?? '未知模型', hostId, billing };
   }
   function poolRunning(poolId: string): number {
     return allRuns().filter((r) => isRunning(r) && routeInfo(r.routeId).route?.poolId === poolId).length;
@@ -302,7 +304,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
 
   function runView(r: SessionRun) {
     const info = routeInfo(r.routeId);
-    return { ...r, modelName: info.modelName, hostId: info.hostId };
+    return { ...r, modelName: info.modelName, hostId: info.hostId, billing: info.billing };
   }
 
   // ---------- 模拟器的小动作 ----------
@@ -352,6 +354,8 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     const minutes = Math.max(1, (Date.parse(r.endedAt) - Date.parse(r.startedAt ?? r.queuedAt)) / 60_000);
     r.inputTokens = Math.round(minutes * (7000 + rand() * 4000));
     r.outputTokens = Math.round(minutes * (500 + rand() * 300));
+    const info = routeInfo(r.routeId);
+    fakeUsage(r, { hostId: info.hostId, modelId: info.route?.modelId, billing: info.billing });
   }
   function setSubState(tv: MTask, sv: MSubtask, to: MSubtask['subtask']['state']) {
     const from = sv.subtask.state;
@@ -770,13 +774,18 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
           answeredBy: a.answeredBy,
           answeredAt: a.answeredAt,
         })),
-        // 和真后端同一个算法（shared 的 usage.ts）：按路由上的模型记
+        // 和真后端同一个算法（shared 的 usage.ts）：按路由上的模型记，花费按渠道的计费方式分
         usage: summarizeUsage(
           [...runs]
             .sort((a, b) => a.queuedAt.localeCompare(b.queuedAt))
             .map((r) => {
               const info = routeInfo(r.routeId);
-              return { ...r, model: info.route?.modelId ?? r.routeId, modelName: info.modelName };
+              return {
+                ...r,
+                model: info.route?.modelId ?? r.routeId,
+                modelName: info.modelName,
+                billing: info.billing,
+              };
             }),
         ),
       });

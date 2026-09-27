@@ -180,4 +180,22 @@ describe('演示版：任务详情按细节级别收', () => {
     expect(screen.getByText('演示版没开放步骤清单')).toBeTruthy();
     expect(screen.getAllByText('演示版没开放过程日志').length).toBeGreaterThan(0);
   });
+
+  test('用量只到状态一级也看得到，「没读到」「不全」照样写明（演示用量读不到时长什么样）', async () => {
+    scope(['board', 'task'], 'status');
+    renderApp(
+      <Routes>
+        <Route path="tasks/:taskId" element={<TaskDetailPage />} />
+      </Routes>,
+      { api: demoApi(), route: '/tasks/t-12?sub=t-12-a' },
+    );
+    // 会话时间线：A 的第一个会话没交终帧就断了；第二意见走 Grok，不报花费
+    expect(await screen.findByText('token 和缓存都没读到')).toBeTruthy();
+    expect(screen.getAllByText(/花费没读到/).length).toBeGreaterThan(0);
+    // 时间与用量：合计里有没读到的标「不全」，花费分按量、套餐内
+    expect(screen.getAllByText('不全').length).toBeGreaterThan(0);
+    expect(screen.getByText('按量', { selector: 'dt' })).toBeTruthy();
+    expect(screen.getByText('套餐内', { selector: 'dt' })).toBeTruthy();
+    expect(screen.queryByText('没有按量花费')).toBeNull();
+  });
 });

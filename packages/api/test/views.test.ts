@@ -1,6 +1,14 @@
 import { type Channel, hardBanFor, type Model, type Route, type SessionRun } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
-import { describeTimeline, findBan, jobView, routeLookup, routeProblem, runView, usageView } from '../src/views.ts';
+import {
+  describeTimeline,
+  findBan,
+  jobView,
+  routeLookup,
+  routeProblem,
+  runView,
+  usageView,
+} from '../src/views.ts';
 
 const gpt: Model = { id: 'gpt-5.6', family: 'GPT', displayName: 'GPT 5.6' };
 const opus: Model = { id: 'opus-5.5', family: 'claude', displayName: 'Opus 5.5' };
@@ -201,7 +209,10 @@ describe('任务详情的花费分清按量、套餐内', () => {
   it('计费方式从路由所在的渠道来：会话带上它，汇总按它分', () => {
     const route = routeLookup([onChannel('r-sub', 'c'), onChannel('r-api', 'm')], [opus], channels);
     expect(runView(ended('a', 'r-api', 0.04), route('r-api')).billing).toBe('metered');
-    const usage = usageView([ended('a', 'r-api', 0.04), ended('b', 'r-sub', 0.25), ended('c', 'r-sub')], route);
+    const usage = usageView(
+      [ended('a', 'r-api', 0.04), ended('b', 'r-sub', 0.25), ended('c', 'r-sub')],
+      route,
+    );
     expect(usage.total.cost).toEqual({
       metered: { runs: 1, usd: 0.04, missing: 0 },
       subscription: { runs: 2, usd: 0.25, missing: 1 },
