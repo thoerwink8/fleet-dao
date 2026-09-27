@@ -24,6 +24,7 @@ const EXTRA_LABELS = {
   session_org: '会话账号切换',
   github_app: 'GitHub 机器人权限',
   canary: '全流程巡检',
+  watchdog: '看门狗',
 };
 
 export const HEALTH_URL = '/healthz';

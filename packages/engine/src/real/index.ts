@@ -33,6 +33,7 @@ import {
   type SessionPortsDeps,
 } from './sessions.ts';
 import { createStorePorts } from './store-ports.ts';
+import { watchdogJob } from './watchdog.ts';
 import { DEFAULT_WORK_ROOT, helperWorkTrees, type WorkTrees } from './worktrees.ts';
 
 export interface RealPortsDeps {
@@ -290,6 +291,8 @@ export function realPortsFromEnv(
     }),
     // 全流程巡检（#223）：巡检仓写在引擎配置 FLEET_CANARY_REPO（没配这一轮记没跑成，看门狗报）；开单、写需求文档、挂版本都是「引擎」机器人
     canary: canaryJob({ db, gh, repo: env.FLEET_CANARY_REPO }),
+    // 看门狗（#203）：按登记表看上面这些（和备份那几个）新不新鲜，没跑成、停了推提醒，恢复了自己撤
+    watchdog: watchdogJob({ db }),
   };
   return {
     ...real,

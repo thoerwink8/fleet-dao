@@ -38,6 +38,7 @@ import {
   GITHUB_RECONCILE_SCHEDULE_ID,
   HOURLY_RECONCILE_SCHEDULE_ID,
   ROUTE_PROBE_SCHEDULE_ID,
+  WATCHDOG_SCHEDULE_ID,
 } from '../src/jobs/schedules.ts';
 import { githubReconcileJob } from '../src/real/github-reconcile.ts';
 import { ENGINE_JOBS, registerEngineJobs } from '../src/real/jobs.ts';
@@ -890,6 +891,7 @@ describe('定时任务按固定编号建：重启、重复部署不多出第二�
       [ROUTE_PROBE_SCHEDULE_ID]: 'created',
       [HOURLY_RECONCILE_SCHEDULE_ID]: 'created',
       [CANARY_SCHEDULE_ID]: 'created',
+      [WATCHDOG_SCHEDULE_ID]: 'created',
     });
     const again = fakeScheduleClient(true);
     expect(await ensureEngineSchedules(again.client, 'fleet')).toEqual({
@@ -897,6 +899,7 @@ describe('定时任务按固定编号建：重启、重复部署不多出第二�
       [ROUTE_PROBE_SCHEDULE_ID]: 'updated',
       [HOURLY_RECONCILE_SCHEDULE_ID]: 'updated',
       [CANARY_SCHEDULE_ID]: 'updated',
+      [WATCHDOG_SCHEDULE_ID]: 'updated',
     });
     expect(again.calls).toEqual([
       `create:${GITHUB_RECONCILE_SCHEDULE_ID}`,
@@ -907,6 +910,8 @@ describe('定时任务按固定编号建：重启、重复部署不多出第二�
       `update:${HOURLY_RECONCILE_SCHEDULE_ID}`,
       `create:${CANARY_SCHEDULE_ID}`,
       `update:${CANARY_SCHEDULE_ID}`,
+      `create:${WATCHDOG_SCHEDULE_ID}`,
+      `update:${WATCHDOG_SCHEDULE_ID}`,
     ]);
     expect(again.updated(GITHUB_RECONCILE_SCHEDULE_ID)).toMatchObject({
       state: { paused: true, note: '人停的' },
@@ -935,6 +940,13 @@ describe('定时任务按固定编号建：重启、重复部署不多出第二�
       action: { workflowType: WORKFLOW_TYPES.canary, taskQueue: 'fleet', workflowRunTimeout: '330 minutes' },
       policies: { overlap: 'SKIP' },
     });
+    // 看门狗（#203）：每 5 分钟，4 分起（和对账补漏、路由探针错开），上一轮没完就跳过
+    expect(again.updated(WATCHDOG_SCHEDULE_ID)).toMatchObject({
+      state: { paused: true, note: '人停的' },
+      spec: { intervals: [{ every: '5 minutes', offset: '4 minutes' }] },
+      action: { workflowType: WORKFLOW_TYPES.watchdog, taskQueue: 'fleet' },
+      policies: { overlap: 'SKIP' },
+    });
   });
 
   it('建的时候出了别的错（连不上、没权限）：原样抛出，引擎起不来要看得见', async () => {
@@ -942,7 +954,7 @@ describe('定时任务按固定编号建：重启、重复部署不多出第二�
     await expect(ensureEngineSchedules(broken.client, 'fleet')).rejects.toThrow('UNAVAILABLE');
   });
 
-  it('真 Temporal 开发服务端：对两遍各只有一个定时任务，对账每 15 分钟、路由探针每 15 分钟错开 7 分钟、每小时对账 41 分起、巡检每 6 小时 26 分起', {
+  it('真 Temporal 开发服务端：对两遍各只有一个定时任务，对账每 15 分钟、路由探针每 15 分钟错开 7 分钟、每小时对账 41 分起、巡检每 6 小时 26 分起、看门狗每 5 分钟 4 分起', {
     timeout: 300_000,
   }, async () => {
     const real = await createRealEnv();
@@ -953,6 +965,7 @@ describe('定时任务按固定编号建：重启、重复部署不多出第二�
         [ROUTE_PROBE_SCHEDULE_ID]: 'created',
         [HOURLY_RECONCILE_SCHEDULE_ID]: 'created',
         [CANARY_SCHEDULE_ID]: 'created',
+        [WATCHDOG_SCHEDULE_ID]: 'created',
       });
       await client.schedule.getHandle(GITHUB_RECONCILE_SCHEDULE_ID).pause('人停的');
       expect(await ensureEngineSchedules(client, 'fleet-b')).toEqual({
@@ -960,6 +973,7 @@ describe('定时任务按固定编号建：重启、重复部署不多出第二�
         [ROUTE_PROBE_SCHEDULE_ID]: 'updated',
         [HOURLY_RECONCILE_SCHEDULE_ID]: 'updated',
         [CANARY_SCHEDULE_ID]: 'updated',
+        [WATCHDOG_SCHEDULE_ID]: 'updated',
       });
       const d = await client.schedule.getHandle(GITHUB_RECONCILE_SCHEDULE_ID).describe();
       expect(d.spec.intervals?.map((i) => i.every)).toEqual([15 * 60_000]);
@@ -981,6 +995,9 @@ describe('定时任务按固定编号建：重启、重复部署不多出第二�
         [6 * 60 * 60_000, 26 * 60_000],
       ]);
       expect(canary.action).toMatchObject({ workflowType: WORKFLOW_TYPES.canary, taskQueue: 'fleet-b' });
+      const watchdog = await client.schedule.getHandle(WATCHDOG_SCHEDULE_ID).describe();
+      expect(watchdog.spec.intervals?.map((i) => [i.every, i.offset])).toEqual([[5 * 60_000, 4 * 60_000]]);
+      expect(watchdog.action).toMatchObject({ workflowType: WORKFLOW_TYPES.watchdog, taskQueue: 'fleet-b' });
     } finally {
       await real.teardown();
     }
