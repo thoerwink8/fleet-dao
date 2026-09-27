@@ -2,7 +2,7 @@
 # shellcheck source-path=SCRIPTDIR
 # 法国机器装机（以 root 跑；幂等：跑第二遍什么都不变）。装的是：引擎用户 fleet、会话专用用户（一个）、创始人的登录用户 pilot、目录、
 # PostgreSQL 16（Ubuntu 自带的源，吃得到自动安全更新）、Temporal 服务端 1.32.0（Postgres 持久化，端口和旧系统错开）、
-# 本机上只许 root 和 fleet 连 Temporal 与库的 nft 表、AI 会话资源池 fleet-agents.slice 与起会话的脚本、
+# 本机上只许 root 和 fleet 连 Temporal 与库、会话用户在本机开的口只许它自己连的 nft 表、AI 会话资源池 fleet-agents.slice 与起会话的脚本、
 # fleet 用户的 pnpm（corepack）、AI 会话用的 pnpm（归 root，钉版本、核 sha512）、WireGuard 客户端（主动连香港，法国不开任何入站端口）、
 # 应用的本机配置与随机密钥、往香港传驾驶舱静态文件的钥匙、把演示版的可见范围推到香港的单元、
 # 会话用户和 pilot 家里各家 AI 的全局说明与方法类 skill、他们各自的 ddgs（用钉住版本的 uv 装）、
@@ -29,6 +29,8 @@ source "$DEPLOY_DIR/lib/root-exec-check.sh"
 source "$DEPLOY_DIR/lib/login-user.sh"
 # shellcheck source=lib/session-user.sh
 source "$DEPLOY_DIR/lib/session-user.sh"
+# shellcheck source=lib/session-ports.sh
+source "$DEPLOY_DIR/lib/session-ports.sh"
 # shellcheck source=lib/cli-tools.sh
 source "$DEPLOY_DIR/lib/cli-tools.sh"
 # shellcheck source=lib/cursor-agent.sh
@@ -594,10 +596,26 @@ setup_slice() {
   fi
 }
 
+# fleet-dao.nft 渲染好的样子放进 RENDERED：setup_firewall 装的就是它，读回拿它比文件。uid 都现查，查不到判红、不往下写
+render_firewall() {
+  local ports fleet_uid session_uid
+  # 模板里挡会话口的规则只写得下一个会话用户（fleet-dao.nft 第二道隔离末尾写了为什么）
+  if ((${#SESSION_USERS[@]} != 1)); then
+    red "会话用户有 ${#SESSION_USERS[@]} 个，deploy/france/fleet-dao.nft 挡会话口的规则只写得下一个：先改规则"
+    return 1
+  fi
+  if ! fleet_uid=$(id -u fleet 2>/dev/null) || ! session_uid=$(id -u "${SESSION_USERS[0]}" 2>/dev/null); then
+    red "查不到 fleet 或 ${SESSION_USERS[0]} 的 uid：nft 表写不出来"
+    return 1
+  fi
+  ports=$(printf '%s, ' "${PROTECTED_PORTS[@]}")
+  render "$DEPLOY_DIR/france/fleet-dao.nft" PORTS="${ports%, }" FLEET_UID="$fleet_uid" SESSION_UID="$session_uid"
+}
+
 setup_firewall() {
-  step "防火墙（隧道上放行香港访问驾驶舱后端；本机上 Temporal、库、后端只许 root 和 fleet 连）"
+  step "防火墙（隧道上放行香港访问驾驶舱后端；本机上 Temporal、库、后端只许 root 和 fleet 连；会话用户在本机开的口只许它自己连）"
   # 驾驶舱后端的端口只对隧道那头的香港开：规则挂在隧道网卡上，公网照旧一个入站端口都不开
-  local rule="allow in on $WG_IF from $WG_HK_ADDR to ${WG_ADDR%/*} port $API_PORT proto tcp" ports tmp err file_changed unit_changed
+  local rule="allow in on $WG_IF from $WG_HK_ADDR to ${WG_ADDR%/*} port $API_PORT proto tcp" tmp err file_changed unit_changed
   if command -v ufw >/dev/null && [[ "$(ufw status 2>/dev/null | head -1)" == "Status: active" ]]; then
     if [[ "$(ufw show added 2>/dev/null)" == *"ufw $rule"* ]]; then
       ok "ufw 已有：$rule"
@@ -609,9 +627,9 @@ setup_firewall() {
   else
     ok "这台没开 ufw，隧道上不用另外放行"
   fi
-  # 本机上谁能连 Temporal、库、驾驶舱后端：只许 root 和 fleet（按连接发起方的属主）。会话用户连上去就被复位
-  ports=$(printf '%s, ' "${PROTECTED_PORTS[@]}")
-  render "$DEPLOY_DIR/france/fleet-dao.nft" PORTS="${ports%, }" FLEET_UID="$(id -u fleet)"
+  # 本机上谁能连 Temporal、库、驾驶舱后端：只许 root 和 fleet（按连接发起方的属主），会话用户连上去就被复位；
+  # 会话用户在回环上开的口（它的 reclaude 代理）只许它自己和 root 连（按应答方的属主，#35）
+  render_firewall
   tmp=$(mktemp)
   printf '%s\n' "$RENDERED" >"$tmp"
   # 规则写错了载不进去：先验这一份，过了才放上去
@@ -632,6 +650,8 @@ setup_firewall() {
     changed "重载 fleet-firewall（nft 表换成新规则）"
   fi
   ensure_unit_running fleet-firewall.service 0
+  # 规则只管新连接：表载上之前就连着会话用户的口、由别人发起的连接在这里断掉（lib/session-ports.sh）
+  session_ports_cut "${SESSION_USERS[0]}"
 }
 
 pnpm_want() { /usr/bin/node -p 'require(process.argv[1]).packageManager' "$DEPLOY_DIR/../package.json"; }
@@ -897,6 +917,7 @@ readback() {
   readback_grok
   readback_wireguard
   readback_firewall
+  readback_session_ports
   readback_app_config
   readback_web_upload
   readback_demo_scopes
@@ -1183,9 +1204,23 @@ readback_firewall() {
     fi
   fi
   if [[ "$(systemctl is-active fleet-firewall.service 2>/dev/null)" != active ]] || ! nft list table inet fleet_dao >/dev/null 2>&1; then
-    red "nft 表 inet fleet_dao 不在：会话能直接连 Temporal 给工作流发信号"
+    red "nft 表 inet fleet_dao 不在：会话能直接连 Temporal 给工作流发信号，别的用户能借会话用户的 reclaude"
     return 0
   fi
+  # 装上去的就是仓里这份：文件和模板渲染出来的一样，内核里的表和文件一样（手改过、换了文件没重载，都在这里现形）。
+  # 真连一遍在下面和 readback_session_ports 里
+  local same=0
+  if render_firewall; then
+    if ! cmp -s -- "$NFT_FILE" <(printf '%s\n' "$RENDERED"); then
+      red "$NFT_FILE 和仓里 deploy/france/fleet-dao.nft 渲染出来的不一样：重跑 france.sh"
+    fi
+  fi
+  nft_table_same_as_file inet fleet_dao "$NFT_FILE" || same=$?
+  case $same in
+  0) ok "内核里的 nft 表 inet fleet_dao 就是 $NFT_FILE 那一份" ;;
+  1) red "内核里的 nft 表 inet fleet_dao 和 $NFT_FILE 不一样（手改过，或者换了文件没重载）：systemctl reload fleet-firewall" ;;
+  *) pending "内核里的 nft 表和 $NFT_FILE 一不一样没查成：$NFT_SAME_WHY" ;;
+  esac
   # 真连一次：会话用户和登录用户 pilot 都连不上 Temporal 前端和库，fleet 连得上
   for u in "${SESSION_USERS[@]}" "$PILOT_USER"; do
     id "$u" >/dev/null 2>&1 || continue
@@ -1205,6 +1240,12 @@ readback_firewall() {
   if [[ "$(systemctl is-enabled nftables.service 2>/dev/null)" == enabled ]]; then
     red "nftables.service 被启用了：它开机会 flush ruleset，把 ufw 的规则和这张表一起冲掉"
   fi
+}
+
+# 会话用户在本机开的口只许它自己和 root 连（#35）：fleet、pilot 真连一遍它此刻在听的口（reclaude 的代理口）和现起的探针，
+# 判据在 lib/session-ports.sh
+readback_session_ports() {
+  check_session_ports "${SESSION_USERS[0]}" fleet "$PILOT_USER"
 }
 
 readback_dirs() {

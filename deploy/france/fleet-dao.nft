@@ -1,14 +1,33 @@
 #!/usr/sbin/nft -f
-# fleet-dao：Temporal、库、驾驶舱后端这几个端口，在本机上只许 root 和引擎用户（fleet）去连。
-# Temporal 没开认证、只靠绑本机回环：谁连得上谁就能给任意工作流发信号，会话就能绕过人闸。按连接发起方的属主（skuid）拦。
-# deploy/france.sh 把 @@…@@ 换好后装到 /etc/fleet-dao/nftables.nft，由 fleet-firewall.service 载入（先 nft -c 验过）。
+# fleet-dao 在法国本机上的两道隔离，都按套接字的属主（skuid）拦。deploy/france.sh 把 @@…@@ 换好后装到
+# /etc/fleet-dao/nftables.nft，由 fleet-firewall.service 载入（先 nft -c 验过）；读回核对内核里的表就是这份文件。
 # 自己一张表、自己一个单元：不启用 nftables.service——它的默认配置开头是 flush ruleset，会把 ufw 的规则一起冲掉。
 # 前两行让整张表先删后建、在一个事务里换掉，重载时不会有空窗。
+#
+# 一、Temporal、库、驾驶舱后端这几个端口只许 root 和引擎用户（fleet）连。Temporal 没开认证、只靠绑本机回环：
+#     谁连得上谁就能给任意工作流发信号，会话就能绕过人闸。按连接发起方的属主拦。
+#
+# 二、会话用户在回环上开的口只许它自己和 root 连（#35）。它的 reclaude 在临时端口上开 HTTP 代理（会话的 HTTPS_PROXY
+#     指它），代理不认客户端，本机别的用户连上就能用它的订阅额度。端口每次重启都变，按目的端口写不死，所以看应答的一方：
+#     1. 别人（root、会话用户以外）发起的回环连接，第一个 SYN 在连接跟踪上记一位（0x10000000）；
+#     2. 会话用户的套接字应答这种连接，一律拒：SYN-ACK 挂在监听套接字上，skuid 就是监听的一方（内核 tcp_make_synack；
+#        nft 取 skuid 时把请求套接字换成它的监听套接字），别人等不到应答、连不上；
+#     3. 应答的不是会话用户的，记另一位（0x20000000）：对面证实过不归会话用户；
+#     4. SYN 洪水下内核改发 syncookie，那种 SYN-ACK 不挂套接字、认不出是谁发的，第 2 条拦不住：别人发起、又没证实过
+#        对面的连接，往临时端口段（32768 起，ip_local_port_range 的下界）发的后续包一律复位，握手完成不了、数据到不了
+#        对面。代价：正被 SYN 洪水压着的临时口，别人正常连也会被复位；32768 以下的固定端口不受影响。
+#     root 不拦（root 本来什么都拿得到）；fleet 本来就能经 sudo 以会话用户起命令（引擎起会话就这么起），挡它直连只是少
+#     一条路。只写得下一个会话用户：要是再加一个，它借另一个的口这里挡不住（标记只记「是不是 root 或会话用户发起的」）。
+#     连接跟踪标记只动这两位（按位或进去、按位与出来），别的程序用别的位互不干扰。
 table inet fleet_dao
 delete table inet fleet_dao
 table inet fleet_dao {
 	chain output {
 		type filter hook output priority filter; policy accept;
 		oifname "lo" tcp dport { @@PORTS@@ } meta skuid != { 0, @@FLEET_UID@@ } reject with tcp reset
+		oifname "lo" tcp flags & (fin | syn | rst | ack) == syn ct state new meta skuid != { 0, @@SESSION_UID@@ } ct mark set ct mark | 0x10000000
+		oifname "lo" ct direction reply ct mark & 0x10000000 == 0x10000000 meta skuid @@SESSION_UID@@ reject with tcp reset
+		oifname "lo" ct direction reply ct mark & 0x10000000 == 0x10000000 meta skuid != @@SESSION_UID@@ ct mark set ct mark | 0x20000000
+		oifname "lo" ct direction original tcp dport >= 32768 tcp flags & (syn | rst) == 0 ct mark & 0x30000000 == 0x10000000 reject with tcp reset
 	}
 }
