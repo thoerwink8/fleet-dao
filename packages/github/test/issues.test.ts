@@ -513,6 +513,40 @@ describe('开单', () => {
     ).toHaveLength(1);
   });
 
+  it('仓里单子超过 300 张：查重翻完最近 3 页（300 张）没找到就当没开过，去开新的，不抛 TOO_MANY_PAGES', async () => {
+    const { gh, fake } = setup();
+    // 305 张都没有标记：300 张之后还有第 4 页——这第 4 页不该被翻到，也不该被当成「没查全」
+    for (let i = 0; i < 305; i += 1) fake.addIssue();
+    const res = await gh.openIssue({
+      repo,
+      key: 'q-toomany',
+      title: '标题',
+      body: '正文',
+      labels: [],
+      milestone: null,
+    });
+    expect(res.created).toBe(true);
+    // 只翻了 3 页：一张张查重的 GET 到 /issues 正好 3 次，第 4 页从没被请求过
+    expect(fake.calls('GET', /\/issues$/)).toHaveLength(3);
+  });
+
+  it('标记刚好在第 2 页：翻到就返回，不再翻第 3 页、不重开', async () => {
+    const { gh, fake } = setup();
+    const input = { repo, key: 'q-page2', title: '标题', body: '正文', labels: [], milestone: null };
+    const first = await gh.openIssue(input);
+    // 插 150 张比它新的单，desc 排序时都排在它前面：翻到第 2 页（101–200）才翻到它，翻不到第 3 页
+    const base = Date.parse('2026-09-25T12:00:00Z');
+    for (let i = 0; i < 150; i += 1) {
+      fake.addIssue({ created_at: new Date(base + (i + 1) * 1000).toISOString() });
+    }
+    const fresh = setup();
+    for (const [number, issue] of fake.issues) fresh.fake.issues.set(number, issue);
+    const res = await fresh.gh.openIssue(input);
+    expect(res.created).toBe(false);
+    expect(res.number).toBe(first.number);
+    expect(fresh.fake.calls('GET', /\/issues$/)).toHaveLength(2);
+  });
+
   it('卫生检查拦下：一个请求都没发，报 HYGIENE_ 开头的码，没开单', async () => {
     const { gh, fake } = setup();
     const before = fake.requests.length;
