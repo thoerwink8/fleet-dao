@@ -480,6 +480,11 @@ describe('ci.yml 和这里对得上', () => {
     expect(check).toContain('node packages/conventions/src/bin/ci-verdict.ts');
   });
 
+  it('【故意造出的失败】并发组 PR 按号分、推主线按分支分：合过的 PR 改标题正文那一轮（github.ref 是 refs/heads/main）不许挤掉主线的全量', () => {
+    const group = /^concurrency:\n {2}group: (.+)$/m.exec(yml)?.[1];
+    expect(group).toBe(['ci-$', '{{ github.event.pull_request.number || github.ref }}'].join(''));
+  });
+
   it('按开关跑的几个 job 都看 changes 给的开关；hygiene、docs 不看、每次都跑', () => {
     for (const j of PLANNED_JOBS) {
       expect(job(j), j).toMatch(/^ {4}needs: changes$/m);
