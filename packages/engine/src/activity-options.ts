@@ -98,6 +98,8 @@ export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
   removeWorktree: 'git',
   pushBranch: 'git',
   openPr: 'git',
+  checkHighRisk: 'git',
+  postSecondOpinion: 'git',
   syncMainline: 'git',
   mergePr: 'git',
   updateIssueProgress: 'git',

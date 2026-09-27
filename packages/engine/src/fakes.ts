@@ -1,5 +1,6 @@
 // 假实现：不碰真仓、真会话、真 GitHub，用来把流程跑通（测试、联调）。行为可以按剧本改。
 
+import type { RiskyFile } from '@fleet-dao/conventions';
 import type { Brief, FlowConfigRead, TaskAsk, VerifyReport } from '@fleet-dao/core';
 import type { StageKind } from '@fleet-dao/shared';
 import type { MergeOutcome, TestResult } from './decisions/merge.ts';
@@ -8,6 +9,7 @@ import type { TriageVerdict } from './decisions/triage.ts';
 import type { CiResult, ReviewResult, SyncResult } from './decisions/verify.ts';
 import {
   type AskHumanInput,
+  type CheckHighRiskInput,
   type Criteria,
   type EnginePorts,
   type LaunchSessionInput,
@@ -19,6 +21,8 @@ import {
   type PortContext,
   PortError,
   type PortName,
+  type PostSecondOpinionInput,
+  type PostSecondOpinionResult,
   type PushBranchInput,
   type RaiseAlertInput,
   type ReadCriteriaInput,
@@ -98,6 +102,18 @@ export interface FakeScript {
   /** 起会话：给了就抛它（假的「发给别家的材料没过卫生检查」……）；n = 这个阶段第几次起。 */
   startSession: (input: LaunchSessionInput, n: number) => PortError | undefined;
   ci: (input: WaitCiInput, n: number) => Partial<CiResult> | undefined;
+  /**
+   * 这个 PR 碰没碰先审后合的路径（#253）：给了 PortError 就抛它（假的「清单读不到」……）；给了数组就当命中的（不给就是
+   * 空的，不高风险）。n = 第几次查（从 1 开始）。
+   */
+  highRisk: (input: CheckHighRiskInput, n: number) => RiskyFile[] | PortError | undefined;
+  /**
+   * 第二意见的结论写回 GitHub（#253）：给了 PortError 就抛它（假的「贴状态没权限」……）；n = 第几次贴（从 1 开始）。
+   */
+  postSecondOpinion: (
+    input: PostSecondOpinionInput,
+    n: number,
+  ) => PostSecondOpinionResult | PortError | undefined;
   sync: (input: SyncMainlineInput, n: number) => Partial<SyncResult> | undefined;
   tests: (input: RunTestsInput, n: number) => Partial<TestResult> | undefined;
   merge: (input: MergePrInput, n: number) => Partial<MergeOutcome> | undefined;
@@ -585,6 +601,16 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
     },
     async waitCi(input) {
       return { state: 'green', head: input.head, failedChecks: [], ...script.ci?.(input, next('waitCi')) };
+    },
+    async checkHighRisk(input) {
+      const scripted = script.highRisk?.(input, next('checkHighRisk'));
+      if (scripted instanceof PortError) throw scripted;
+      return { hits: scripted ?? [] };
+    },
+    async postSecondOpinion(input) {
+      const scripted = script.postSecondOpinion?.(input, next('postSecondOpinion'));
+      if (scripted instanceof PortError) throw scripted;
+      return scripted ?? {};
     },
     async syncMainline(input) {
       return {

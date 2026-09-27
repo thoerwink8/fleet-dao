@@ -31,7 +31,10 @@ export interface ChildResult {
 export function runChild(command: string, args: readonly string[], options: ChildOptions = {}): ChildResult {
   const { limitMs = CHILD_LIMIT_MS, ...rest } = options;
   const r = spawnSync(command, args, { ...rest, encoding: 'utf8', timeout: limitMs, killSignal: 'SIGKILL' });
-  if (r.error !== undefined || r.status === null) {
+  // status 不是 null：子进程真退出过、拿到了退出码。子进程不读标准输入就退出时，父进程写 input 写到一半会碰上管道
+  // 已经关了（Linux 上 EPIPE、Windows 上 EOF），r.error 照样会被设上——这只是写的时序问题，不算「没跑完」。
+  // 真没跑完（起不来、超时、被信号杀）才会 status 是 null。
+  if (r.status === null) {
     const code = (r.error as NodeJS.ErrnoException | undefined)?.code;
     const why =
       code === 'ETIMEDOUT'

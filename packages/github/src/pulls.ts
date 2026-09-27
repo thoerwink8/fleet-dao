@@ -368,6 +368,58 @@ export async function openPr(
   };
 }
 
+// —— 改到的文件（先审后合按路径判要它，#253）——
+
+/** 一个改到的文件：@fleet-dao/conventions 的 riskyFiles 按这个形状判（结构一致就够，这里不引那个包）。 */
+export interface PrFile {
+  filename: string;
+  status: string;
+  /** 改动内容；文件太大 GitHub 不给（这时判定不了迁移是不是只加不改，按「看不到改动内容」算改了）。 */
+  patch?: string;
+  /** 改名前的名字。 */
+  previous?: string;
+}
+
+const FILES_PER_PAGE = 100;
+const FILES_MAX_PAGES = 30;
+
+/** PR 改到的文件（翻完页，带 patch）：高风险路径按它判，判法在 @fleet-dao/conventions 的 riskyFiles（合并闸同一份）。 */
+export async function pullFiles(
+  deps: Deps,
+  repo: RepoRef,
+  prNumber: number,
+  signal?: AbortSignal,
+): Promise<PrFile[]> {
+  const items = await deps.client.all<unknown>(
+    {
+      method: 'GET',
+      path: `/repos/${enc(repo.owner)}/${enc(repo.name)}/pulls/${prNumber}/files`,
+      auth: { as: 'engine' as const, repo },
+      query: { per_page: FILES_PER_PAGE },
+      signal,
+    },
+    (d) => d,
+    FILES_MAX_PAGES,
+  );
+  return items.map((item) => {
+    if (
+      !item ||
+      typeof item !== 'object' ||
+      typeof (item as { filename?: unknown }).filename !== 'string' ||
+      typeof (item as { status?: unknown }).status !== 'string'
+    ) {
+      throw unexpected(`PR #${prNumber} 的改动文件列表有一条`, item);
+    }
+    const f = item as { filename: string; status: string; patch?: string; previous_filename?: string };
+    return {
+      filename: f.filename,
+      status: f.status,
+      ...(f.patch !== undefined ? { patch: f.patch } : {}),
+      ...(f.previous_filename !== undefined ? { previous: f.previous_filename } : {}),
+    };
+  });
+}
+
 // —— 读 CI ——
 
 export interface CiRead {

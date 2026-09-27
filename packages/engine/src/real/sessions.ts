@@ -44,8 +44,10 @@ import {
   type DeliveryCheck,
   IO_FILES,
   judgeRun,
+  type LedgerFs,
   type LineMeta,
   listAgentScopes,
+  type MirasimConnect,
   type PlanPayload,
   type RateLimitReading,
   reapSession,
@@ -293,6 +295,10 @@ export interface SessionPortsDeps {
   cursorCommand(user: SessionUser): string[];
   /** 起 grok 的命令（绝对路径）：装在会话用户自己家里，生产用 hosts.ts 的 grokLaunchCommand 先看在不在。 */
   grokCommand(user: SessionUser): string[];
+  /** 会话用户自己的 Mirasim 服务：连接工厂、账本目录、读账本用的文件访问（real/index.ts 的 mirasimDepsFor 生产装配）。 */
+  mirasimConnect(user: SessionUser): MirasimConnect;
+  mirasimLedgerDir(user: SessionUser): string;
+  mirasimLedgerFs(user: SessionUser): LedgerFs;
   forkMaxContextTokens?: number;
   /** 经 sudo 调的帮手（fleet-agent-scope）；测试里换成假的。 */
   helper?: string;
@@ -577,6 +583,9 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     claudeCommand: deps.claudeCommand,
     cursorCommand: deps.cursorCommand,
     grokCommand: deps.grokCommand,
+    mirasimConnect: deps.mirasimConnect,
+    mirasimLedgerDir: deps.mirasimLedgerDir,
+    mirasimLedgerFs: deps.mirasimLedgerFs,
     ...(deps.run ? { run: deps.run } : {}),
   });
   const forkMax = deps.forkMaxContextTokens ?? DEFAULT_FORK_MAX_CONTEXT_TOKENS;

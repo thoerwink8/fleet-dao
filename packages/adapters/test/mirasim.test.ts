@@ -6,7 +6,9 @@ import { describe, expect, it } from 'vitest';
 import { judgeRun } from '../src/judge.ts';
 import { ledgerRouting, readMirasimLedger } from '../src/mirasim/ledger.ts';
 import {
+  type MirasimRunReport,
   type MirasimRunSpec,
+  mirasimRunFacts,
   mirasimRunSummary,
   runMirasim,
   stopMirasimSession,
@@ -115,6 +117,39 @@ describe('Mirasim 会话状态（真跑夹具）', () => {
     const b = new MirasimSession({ runId: 'r1', cwd: '/w' });
     b.applySnapshot(1, { phase: 'done', incomplete: true });
     expect(b.terminal()?.isError).toBe(true);
+  });
+
+  it('中继返回额度用完：判成账号池额度用满，不当成上游抖动或普通失败【故意造出的失败】（#345，别踩 GK-08 那个坑）', () => {
+    const report = (runId: string, error: string): MirasimRunReport => {
+      const s = new MirasimSession({ runId, cwd: '/w' });
+      s.applySnapshot(1, { phase: 'done', error });
+      const terminal = s.terminal();
+      if (!terminal) throw new Error('测试没搭好：给了 error 应该已经是终态');
+      return {
+        runId,
+        agent: 'dsh',
+        route: 'cloud',
+        resumed: false,
+        session: s.summary(),
+        terminal,
+        foreignFrames: 0,
+        resubscribes: 0,
+        reconnects: 0,
+        startedAt: '2026-01-01T00:00:00.000Z',
+        endedAt: '2026-01-01T00:00:05.000Z',
+        wallMs: 5000,
+      };
+    };
+    // 中继账号级额度用满（关继账本共扣的那份，docs/reference/quota.md 「Mirasim 中转账号」一行的用满报法）
+    const quotaFacts = mirasimRunFacts(report('r-quota', '中继 7 天额度已用满，约 2 小时后重置'));
+    expect(quotaFacts.quotaExhausted).toBe(true);
+    expect(judgeRun(quotaFacts)).toMatchObject({ outcome: 'failed', reason: 'quota_exhausted' });
+    // 对照：模型繁忙是上游抖动（docs/reference/adapters.md 里「常见失败与报错原文」一段的原话），不该混进额度用满
+    const busyFacts = mirasimRunFacts(
+      report('r-busy', 'Selected model is at capacity. Please try a different model.'),
+    );
+    expect(busyFacts.quotaExhausted).toBe(false);
+    expect(judgeRun(busyFacts).reason).not.toBe('quota_exhausted');
   });
 });
 
@@ -587,6 +622,65 @@ describe('Mirasim 账本', () => {
     });
     expect((await readMirasimLedger(dir, 'pi:../../etc')).state).toBe('unknown');
   });
+
+  it('给了 fs 就经它读，不碰本机文件系统（账本在别的系统用户家里、调用方进不去时用，real/index.ts 的生产装配）；readdir 认 ENOENT 分「没有这个会话的目录」和别的读不了；readFile 抛的错按 code 报', async () => {
+    const uuid = '9adf4d07-32a6-4ee4-b5cf-61b324c985e3';
+    // 账本目录用 join 拼（和 ledger.ts 的 readMirasimLedger 同一个函数）：不能在这假 fs 里另写死用 / 分隔的字符串——
+    // 这条用例在 Windows 开发机上跑，node:path 的 join 在这台机器上给的是 \，写死 / 会让下面的 startsWith 比不上，
+    // 假装「目录不在」，把「读到了」的分支测成了别的分支。
+    const folder = join('fake-root', uuid);
+    const calls: string[] = [];
+    const files = new Map([
+      [
+        join(folder, 'index-a.ndjson'),
+        JSON.stringify({ ts: '2026-09-25T00:00:00.000Z', status: 200, model: 'deepseek-flash' }),
+      ],
+    ]);
+    const fs = {
+      async readdir(dir: string) {
+        calls.push(`readdir:${dir}`);
+        if (!dir.includes(uuid)) {
+          const err = new Error('假的：没有这个目录') as NodeJS.ErrnoException;
+          err.code = 'ENOENT';
+          throw err;
+        }
+        return [...files.keys()].filter((f) => f.startsWith(dir)).map((f) => f.slice(dir.length + 1));
+      },
+      async readFile(path: string) {
+        calls.push(`readFile:${path}`);
+        const text = files.get(path);
+        if (text === undefined) {
+          const err = new Error('假的：没有这个文件') as NodeJS.ErrnoException;
+          err.code = 'EACCES';
+          throw err;
+        }
+        return text;
+      },
+    };
+    const reading = await readMirasimLedger('fake-root', `dsh:${uuid}`, undefined, fs);
+    expect(reading).toMatchObject({ state: 'read', rows: [{ status: 200, model: 'deepseek-flash' }] });
+    expect(calls).toEqual([`readdir:${folder}`, `readFile:${join(folder, 'index-a.ndjson')}`]);
+
+    const missingDir = await readMirasimLedger(
+      'fake-root',
+      'dsh:00000000-0000-0000-0000-000000000000',
+      undefined,
+      fs,
+    );
+    expect(missingDir).toEqual({
+      state: 'unknown',
+      detail: '账本里没有这个会话的目录（可能一次上游调用都没有，也可能账本换了地方）',
+    });
+
+    const badFile: typeof fs = {
+      ...fs,
+      readFile: async () => {
+        throw Object.assign(new Error('x'), { code: 'EACCES' });
+      },
+    };
+    const unreadable = await readMirasimLedger('fake-root', `dsh:${uuid}`, undefined, badFile);
+    expect(unreadable).toEqual({ state: 'unknown', detail: '读不了账本文件 index-a.ndjson：EACCES' });
+  });
 });
 
 describe('Mirasim 连接', () => {
@@ -628,6 +722,44 @@ describe('Mirasim 连接', () => {
     }
   });
 
+  it('readToken 给了就用它现读，不碰 tokenFile（Mirasim 服务跑在别的系统用户家里，调用方进不去那个家目录时用，real/index.ts 的生产装配）；每次建连都现调，不缓存；它抛的错也按「读不了回环令牌」包一层', async () => {
+    const dir = tempDir();
+    const server = await startWsServer((conn) => {
+      conn.onMessage((frame) => {
+        if (frame.type === 'getState') conn.send({ type: 'state', state: {} });
+      });
+    });
+    try {
+      const calls: number[] = [];
+      let n = 0;
+      const connect = mirasimConnector({
+        port: server.port,
+        // tokenFile 指一个不存在的路径：真读到它就会抛错，读到就说明 readToken 没被用上
+        tokenFile: join(dir, 'not-here.token'),
+        connectTimeoutMs: 2_000,
+        readToken: async () => {
+          n += 1;
+          calls.push(n);
+          return `tok-${n}`;
+        },
+      });
+      (await connect()).close();
+      (await connect()).close();
+      expect(calls).toEqual([1, 2]);
+    } finally {
+      await server.close();
+    }
+    const failing = mirasimConnector({
+      port: 1,
+      tokenFile: join(dir, 'unused.token'),
+      readToken: async () => {
+        throw new Error('假的：以会话用户读令牌没成');
+      },
+    });
+    await expect(failing()).rejects.toThrow('读不了 Mirasim 的回环令牌（');
+    await expect(failing()).rejects.toThrow('假的：以会话用户读令牌没成');
+  });
+
   it('服务端不在：重试到期限再报连不上', async () => {
     const dir = tempDir();
     writeFileSync(join(dir, 't'), 'tok');
@@ -639,6 +771,17 @@ describe('Mirasim 连接', () => {
       mirasimConnector({ port, tokenFile: join(dir, 't'), connectTimeoutMs: 1_200 })(),
     ).rejects.toThrow('连不上 Mirasim');
     expect(Date.now() - t0).toBeGreaterThanOrEqual(400);
+  });
+
+  it('法国上 Mirasim 服务不在、连不上：插头不吞掉这个错，原样报出来判失败【故意造出的失败】', async () => {
+    const down = await runMirasim(
+      { runId: 'r1', cwd: tempDir(), prompt: 'x', agent: 'dsh', route: 'cloud', session: { mode: 'new' } },
+      { connect: new FakeMirasim({ refuse: true }).connect },
+    );
+    expect(down.launchError).toBe('ECONNREFUSED');
+    const facts = mirasimRunFacts(down);
+    expect(facts.spawnError).toBe('ECONNREFUSED');
+    expect(judgeRun(facts)).toMatchObject({ outcome: 'failed', reason: 'spawn_failed' });
   });
 
   it('令牌文件读不了、是空的：明说，不连', async () => {

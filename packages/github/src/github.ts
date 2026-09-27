@@ -68,6 +68,8 @@ import {
   type OpenPrInput,
   type OpenPrResult,
   openPr,
+  type PrFile,
+  pullFiles,
   type WaitCiInput,
   waitCi,
 } from './pulls.ts';
@@ -151,6 +153,8 @@ export interface GitHub {
   bundleCommits(input: BundleCommitsInput, ctx?: ActivityContext): Promise<BundleCommitsResult>;
   openPr(input: OpenPrInput, ctx?: ActivityContext): Promise<OpenPrResult>;
   waitCi(input: WaitCiInput, ctx?: ActivityContext): Promise<CiWaitResult>;
+  /** PR 改到的文件（翻完页、带 patch）：先审后合按路径判要不要等第二意见用它，判法和合并闸同一份（#253）。 */
+  pullFiles(input: { repo: RepoRef; prNumber: number; signal?: AbortSignal }): Promise<PrFile[]>;
   mergePr(input: MergePrInput, ctx?: ActivityContext): Promise<MergePrResult>;
   updateIssueProgress(
     input: UpdateIssueProgressInput,
@@ -293,6 +297,7 @@ export function createGitHub(options: GitHubOptions): GitHub {
     },
     openPr: (input, ctx) => openPr(deps, input, ctx),
     waitCi: (input, ctx) => waitCi(deps, input, ctx),
+    pullFiles: (input) => pullFiles(deps, input.repo, input.prNumber, input.signal),
     mergePr: (input, ctx) => mergePr(deps, input, ctx),
     updateIssueProgress: (input, ctx) => updateIssueProgress(deps, input, ctx),
     closeIssue: (input, ctx) => closeIssue(deps, input, ctx),

@@ -17,6 +17,7 @@ import { poolHoldKey } from '../../src/real/store-ports.ts';
 import {
   addCursorRoute,
   addGrokRoute,
+  addMirasimRoute,
   CURSOR_KEY_REJECTED,
   CURSOR_NO_LOGIN,
   CURSOR_SESSION,
@@ -26,9 +27,12 @@ import {
   dumpDb,
   type FakeCursorScript,
   type FakeGrokScript,
+  type FakeMirasimScript,
   type FakeRunScript,
   fakeCursorRun,
   fakeGrokRun,
+  fakeMirasimDeps,
+  fakeMirasimRun,
   fakeRun,
   fakeTrees,
   GROK_NO_STDIN,
@@ -69,6 +73,7 @@ function setup(
     /** cursor 的路由用真插头、真起法（经假帮手真起进程，fixtures 的 cursorKeyRig），不用假插头。 */
     realCursor?: CursorKeyRig;
     grok?: (n: number) => FakeGrokScript;
+    mirasim?: (n: number) => FakeMirasimScript;
   } = {},
 ) {
   const fake = fakeRun((_, n) => script(n));
@@ -79,6 +84,10 @@ function setup(
   const grok = fakeGrokRun((_, n) => {
     if (!over.grok) throw new Error('这条用例不该起 grok');
     return over.grok(n);
+  });
+  const mirasim = fakeMirasimRun((_, n) => {
+    if (!over.mirasim) throw new Error('这条用例不该起 Mirasim');
+    return over.mirasim(n);
   });
   const trees = fakeTrees(join(root, 'work'));
   if (over.adoptFails) {
@@ -99,6 +108,7 @@ function setup(
     claudeCommand: (user) => [`/opt/fake/${user}/reclaude`],
     cursorCommand: rig ? rig.command : (user) => [`/opt/fake/${user}/cursor-agent`],
     grokCommand: (user) => [`/opt/fake/${user}/grok`],
+    ...fakeMirasimDeps(),
     sessionOrg: async () => ({ ok: true, org: 'carpool' }),
     machine: '法国',
     now: () => new Date(clock),
@@ -106,16 +116,17 @@ function setup(
     sleep: async () => {},
     retryDelayMs: 0,
     run: over.runThrows
-      ? { 'claude-code': thrower, 'cursor-agent': thrower, grok: thrower }
+      ? { 'claude-code': thrower, 'cursor-agent': thrower, grok: thrower, mirasim: thrower }
       : rig
-        ? { 'claude-code': fake.run, grok: grok.run }
-        : { 'claude-code': fake.run, 'cursor-agent': cursor.run, grok: grok.run },
+        ? { 'claude-code': fake.run, grok: grok.run, mirasim: mirasim.run }
+        : { 'claude-code': fake.run, 'cursor-agent': cursor.run, grok: grok.run, mirasim: mirasim.run },
     ...(rig ? { helper: rig.helper, sudo: rig.sudo } : {}),
   });
   return {
     fake,
     cursor,
     grok,
+    mirasim,
     trees,
     logs,
     round: async () => runRouteProbeJob(job()),
@@ -760,6 +771,126 @@ describe('grok 的路由（#266）：和干活的会话同一个驱动探，判�
     const down = await row(routeId);
     expect(down).toMatchObject({ alive: false, probeState: 'failed' });
     expect(down?.probeDetail).toContain('回答认不出（要的是只回 OK）');
+  });
+});
+
+describe('Mirasim 的路由（#345）：和干活的会话同一个驱动探，判法同一套', () => {
+  let routeId: string;
+  beforeEach(async () => {
+    ({ routeId } = await addMirasimRoute(t.db, { stages: ['execute'] }));
+    // 上一次探通是 3 小时前：Mirasim 探通了隔 2 小时再探（额度紧，#345），这一轮到点了
+    await t.client.query('update routes set probed_at = $2::timestamptz where id = $1', [
+      routeId,
+      new Date(NOW.getTime() - 3 * 60 * 60_000).toISOString(),
+    ]);
+  });
+
+  it('探通：在线；以唯一的会话用户、route=cloud、模型串按路由上的、执行体按模型对应表（deepseek-flash → dsh）', async () => {
+    const s = setup(answered, { mirasim: () => ({ state: { text: 'OK' } }) });
+    const run = await s.round();
+    expect(run.online).toEqual(expect.arrayContaining(['carpool', routeId]));
+    const up = await row(routeId);
+    expect(up).toMatchObject({ alive: true, probeState: 'ok' });
+    expect(up?.probeDetail).toMatch(/^答上了：OK · 用时 \d+ 秒$/);
+    expect(s.mirasim.count()).toBe(1);
+    const [spec] = s.mirasim.specs;
+    expect(spec).toMatchObject({
+      prompt: PROBE_PROMPT,
+      agent: 'dsh',
+      route: 'cloud',
+      model: 'deepseek-flash',
+      session: { mode: 'new' },
+    });
+    // 连接、账本都是以唯一的会话用户读的（mirasimDepsFor 的生产装配；这里是假的，只核对传的是哪个会话用户）
+    expect(s.mirasim.options[0]?.ledgerDir).toBe('/fake/fleet-agent-carpool/.mirasim/traffic');
+  });
+
+  it('探通了：15 分钟后那一轮不再真探、不重写，结论照旧（还在线）；到 2 小时再真探（一次扣的是那份紧张的中转额度，#345）', async () => {
+    const s = setup(answered, { mirasim: () => ({ state: { text: 'OK' } }) });
+    await s.round();
+    expect(s.mirasim.count()).toBe(1);
+    s.advance(15);
+    const second = await s.round();
+    expect(s.mirasim.count()).toBe(1);
+    expect(second.online).toContain(routeId);
+    expect(await row(routeId)).toMatchObject({ alive: true, probeState: 'ok', probedAt: NOW });
+    s.advance(105);
+    await s.round();
+    expect(s.mirasim.count()).toBe(2);
+    expect((await row(routeId))?.probedAt).toEqual(new Date(NOW.getTime() + 120 * 60_000));
+  });
+
+  it('路由上的模型串这张对应表认不出（新路由没跟着改 MIRASIM_AGENT_BY_MODEL）：起会话之前就被拦下，离线写明认不出', async () => {
+    const bad = await addMirasimRoute(t.db, {
+      modelId: 'glm-6',
+      upstreamModel: 'glm-6',
+      stages: ['review'],
+    });
+    // 这条也是现插的种子（上一次「探通」是 5 分钟前）：不推到 3 小时前，2 小时的冷却会把这一轮当成「还没到点」整个跳过，
+    // 到不了「起会话之前就被拦下」这条判断——和 beforeEach 里那条同一个道理。
+    await t.client.query('update routes set probed_at = $2::timestamptz where id = $1', [
+      bad.routeId,
+      new Date(NOW.getTime() - 3 * 60 * 60_000).toISOString(),
+    ]);
+    const s = setup(answered, { mirasim: () => ({ state: { text: 'OK' } }) });
+    await s.round();
+    const down = await row(bad.routeId);
+    expect(down).toMatchObject({ alive: false, probeState: 'failed' });
+    expect(down?.probeDetail).toContain('起会话之前就被拦下了');
+    expect(down?.probeDetail).toContain('Mirasim 认不出这个模型该起哪个执行体：glm-6');
+    // 这条路由认不出，不连累另一条认得出的
+    expect(await row(routeId)).toMatchObject({ alive: true, probeState: 'ok' });
+  });
+
+  it('服务端没有这个执行体、拒了这一针：离线，写明服务端的原话（不当成没起来重派）', async () => {
+    const s = setup(answered, {
+      mirasim: () => ({
+        noAccept: true,
+        report: { launchError: '服务端没有 dsh 这个执行体（有：claude、pi）' },
+      }),
+    });
+    await s.round();
+    const down = await row(routeId);
+    expect(down).toMatchObject({ alive: false, probeState: 'failed' });
+    expect(down?.probeDetail).toContain('没起来');
+    expect(down?.probeDetail).toContain('服务端没有 dsh 这个执行体');
+  });
+
+  it('探针探不通——法国上这个会话用户的 Mirasim 服务连不上：离线、写明连不上，不当成还在线【故意造出的失败】', async () => {
+    const s = setup(answered, {
+      mirasim: () => ({ noAccept: true, report: { launchError: 'ECONNREFUSED' } }),
+    });
+    await s.round();
+    const down = await row(routeId);
+    expect(down).toMatchObject({ alive: false, probeState: 'failed' });
+    expect(down?.probeDetail).toContain('没起来');
+    expect(down?.probeDetail).toContain('ECONNREFUSED');
+  });
+
+  it('快照说 done，但账本没给目录：中转到底走没走上游没查成，不当成探通（DL3）', async () => {
+    const s = setup(answered, {
+      mirasim: () => ({ state: { text: 'OK' }, report: { ledger: undefined } }),
+    });
+    await s.round();
+    const down = await row(routeId);
+    expect(down).toMatchObject({ alive: false, probeState: 'failed' });
+    expect(down?.probeDetail).toContain('中转没查成');
+    expect(down?.probeDetail).toContain('没给账本目录');
+  });
+
+  it('快照说 done，账本读到了、但起针之后没有一次 2xx：中转没真干活，不算探通', async () => {
+    const s = setup(answered, {
+      mirasim: () => ({
+        state: { text: 'OK' },
+        report: {
+          ledger: { state: 'read', rows: [{ status: 500, upstreamHost: 'x' }], unparsed: 0 },
+        },
+      }),
+    });
+    await s.round();
+    const down = await row(routeId);
+    expect(down).toMatchObject({ alive: false, probeState: 'failed' });
+    expect(down?.probeDetail).toContain('账本里起针之后没有一次 2xx 的上游调用');
   });
 });
 
