@@ -17,6 +17,7 @@ import { bundleFromMirror, mapped } from './mirror.ts';
 import { PLAN_LINE_HINT, planLineOf, REQUIREMENT_DOC } from './spec-doc.ts';
 import {
   bundleSince,
+  changedFilesAgainst,
   fastForward,
   fetchBundle,
   hasCommit,
@@ -314,6 +315,9 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
         }
         head = merged.merged;
       }
+      // 推上去的头相对主线的净改动（头里已经含最新主线）：工作流开 PR 前验证判界面、给验证方的清单、PR 正文按它，
+      // 不按一轮轮会话交的累计（撤回了的、老版算进来的主线改动都还在那里面，#293）
+      const changedFiles = await changedFilesAgainst(t, main.head, head);
       // 包的起点：树最后一次从引擎取的头（建树的主线头、并主线后的新头、或刚取进来的最新主线）——引擎的镜像里一定有它。
       const base = await headOfIncoming(t);
       const bundle = await bundleSince(t, head, base);
@@ -327,7 +331,7 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
             ctx,
           ),
         );
-        return { head: r.head };
+        return { head: r.head, changedFiles };
       } finally {
         await rm(bundlePath, { force: true });
       }
