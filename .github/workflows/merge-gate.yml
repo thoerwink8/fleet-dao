@@ -2,11 +2,12 @@ name: merge-gate
 # 合并闸（#74）：在 PR 当前头上写提交状态 merge-gate，「按我们的规矩能不能合」只看它一个——不是草稿、和主线没冲突、
 # 改到先审后合的路径（packages/conventions/high-risk-paths.json）时当前头上有通过的 second-opinion；必填栏只提醒
 # （packages/conventions/src/merge-gate.ts，design 第五节「流程只为快」）。
+# 挂了单的 PR 还要当前头上有引擎机器人贴的、通过的「认领对得上」（#348，这张单归开这个 PR 的人）。
 # 三处触发：
 # - PR 事件用 pull_request_target：有冲突的 PR 上 pull_request 跑不起来，fork 来的 PR 在 pull_request 里也拿不到写状态的令牌。
 #   这里跑的是主线上的代码、检出的是主线，不检出也不跑 PR 里的代码；PR 的 plan.md、specs 目录都按 API 现读。
 # - 主线推送：冲突是主线一变才出现的，逐个重算所有开着的 PR。
-# - status 事件：第二意见写上 second-opinion 时重算那个头的 PR。status 事件只跑默认分支上的这份文件、事件里没有 PR 号，
+# - status 事件：第二意见写上 second-opinion、引擎贴上「认领对得上」时重算那个头的 PR（引擎用 App 令牌贴，会触发 status 事件）。status 事件只跑默认分支上的这份文件、事件里没有 PR 号，
 #   所以按 sha 去找 PR，再用状态接口写回 PR 的头（GitHub 文档「Events that trigger workflows」的 status 一节）。
 # 用 GITHUB_TOKEN 写的状态不会再触发 status 事件，不会自己转圈。也能在 Actions 页手动跑（填 PR 号，留空算所有开着的）。
 on:
@@ -43,7 +44,7 @@ permissions:
   statuses: write
 jobs:
   merge-gate:
-    if: github.event_name != 'status' || github.event.context == 'second-opinion'
+    if: github.event_name != 'status' || github.event.context == 'second-opinion' || github.event.context == '认领对得上'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

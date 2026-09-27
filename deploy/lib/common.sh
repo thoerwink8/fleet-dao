@@ -37,6 +37,8 @@ pending() {
 }
 
 finish() {
+  # 调用方要在出结论之前收尾的（release.sh：撤排空请求、把停下的引擎起回来）定义 finish_hook；出错退出也走这里
+  if declare -F finish_hook >/dev/null; then finish_hook; fi
   printf '\n== 结论\n'
   if ((${#CHANGES[@]})); then
     printf '本次改动 %d 处：\n' "${#CHANGES[@]}"

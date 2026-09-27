@@ -161,7 +161,7 @@ GATEWAY_DEPLOY_KEY=/etc/fleet-dao/gateway-deploy.key
 DEMO_DIR=/var/lib/fleet-dao/demo
 DEMO_SCOPES_BIN=/usr/local/sbin/fleet-demo-scopes
 DEMO_UNITS=(fleet-demo-scopes.service fleet-demo-scopes.path fleet-demo-scopes.timer)
-# 自动发布（docs/ops.md 第九节「自动发布」）：主线上 CI 全绿的新提交等引擎空闲后发到本机、发完同步规矩。装的是副本：
+# 自动发布（docs/ops.md 第九节「自动发布」）：主线上 CI 全绿的新提交马上发到本机（发布脚本先排空引擎）、发完同步规矩。装的是副本：
 # 主线上改了它，要重跑本脚本才换。它每一轮的读数、本脚本装到哪个提交（下面 APPLIED_FILE）都放在 AUTO_DIR，后端的 /healthz 读
 AUTO_RELEASE_LIB=/usr/local/lib/fleet-dao/auto-release
 AUTO_RELEASE_FILES=(lib.mjs fleet-auto-release.mjs config.mjs)
@@ -830,7 +830,7 @@ setup_demo_scopes() {
 # 自动发布：定时器每 5 分钟拉起一轮（deploy/france/auto-release），以 root 跑 release.sh --auto、替会话用户同步规矩。
 # 脚本放 /usr/local/lib 下的副本（全链归 root），不从检出直接跑：检出它自己会快进，主线上一个坏提交不该把自动发布本身弄坏
 setup_auto_release() {
-  step "自动发布（主线上 CI 全绿的新提交等引擎空闲后发到本机，发完同步规矩；读数在 $AUTO_DIR）"
+  step "自动发布（主线上 CI 全绿的新提交马上发到本机，发布脚本先排空引擎；发完同步规矩；读数在 $AUTO_DIR）"
   local f u unit_changed=0
   ensure_dir "$AUTO_DIR" root:root 755
   ensure_dir /usr/local/lib/fleet-dao root:root 755

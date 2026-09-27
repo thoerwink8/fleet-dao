@@ -64,6 +64,13 @@ export interface RouteCandidate {
    * 结论过没过期由选路按现在的时刻判（引擎 routing/choose.ts），这里原样给。
    */
   probedAt: Date | null;
+  /** 那次结论是什么（routes.probe_state）；探针还没看过为空。 */
+  probeState: (typeof routes.$inferSelect)['probeState'];
+  /**
+   * Claude 订阅池的路由：探针下那次结论时会话用户挂的是哪个组织（routes.probe_org）。skipped、又是另一个组织 = 那一轮
+   * 没探它，不是它坏了（引擎 routing/filter.ts 按它判等不等下一轮探针）。
+   */
+  probeOrg: (typeof routes.$inferSelect)['probeOrg'];
   /**
    * unknown = 额度没读成或判不了：这个池从没读成过、最近一次读成或上游数据本身超过 30 分钟、适用的窗口已过清零点，
    * 或有窗口判不了扣不扣这条路由。派工原因里要写明「额度未知」。读成了、但没有扣这个模型的窗口，是 ok。
@@ -204,6 +211,8 @@ export async function stageCandidates(
       family: model.family,
       hostId: route.hostId,
       probedAt: route.probedAt,
+      probeState: route.probeState,
+      probeOrg: route.probeOrg,
       quota,
       windows,
       inFlight: running,

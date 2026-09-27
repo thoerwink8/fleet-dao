@@ -243,7 +243,10 @@ export interface RouteProbeWiring {
   claudeCommand(user: SessionUser): string[];
   cursorCommand(user: SessionUser): string[];
   grokCommand(user: SessionUser): string[];
-  /** 会话用户此刻挂的组织（real/session-org.ts）：和选路共用一个，Claude 订阅池只探挂着的那个。 */
+  /**
+   * 会话用户此刻挂的组织（real/session-org.ts）：和选路、切号共用一个，Claude 订阅池只探挂着的那个；这会儿定不下来就这一轮
+   * 不探 Claude 池。
+   */
   sessionOrg: SessionOrgReader;
   /** 会话用户切号（real/org-switch.ts，#157）：每一轮探之前判、该切就切。不给就不切。 */
   orgSwitch?: OrgSwitchRound;
@@ -298,7 +301,8 @@ export function routeProbeJob(w: RouteProbeWiring): () => RouteProbeJobDeps {
   return () => ({
     targets: () => routeProbeTargets(w.db),
     probers,
-    sessionOrg: w.sessionOrg,
+    // 和选路、切号同一个读法、同一个起点：谁读到的写进前后两次读数里
+    sessionOrg: () => w.sessionOrg({ by: '路由探针' }),
     ...(w.orgSwitch ? { orgSwitch: w.orgSwitch } : {}),
     save: (x) => saveRouteProbe(w.db, x),
     afterProbe: (t, a) => poolHoldAfterProbe(w.db, t, a),

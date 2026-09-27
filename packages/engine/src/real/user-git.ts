@@ -221,6 +221,11 @@ export async function headOfIncoming(t: UserTree): Promise<string> {
   return headOfRef(t, 'refs/fleet/incoming');
 }
 
+/** 工作树里所有没提交的改动（含新文件，不含忽略的）：起会话时告诉它上一个会话留下了什么（prompts.ts 的 leftoverBlock）。 */
+export async function worktreeChanges(t: UserTree): Promise<string[]> {
+  return lines(await git(t, ['status', '--porcelain'], '看工作树里有没有没提交的改动'));
+}
+
 /** 没提交的已跟踪改动（交付判据：不许有）。 */
 export async function uncommittedTracked(t: UserTree): Promise<string[]> {
   return lines(await git(t, ['status', '--porcelain', '--untracked-files=no'], '看有没有没提交的改动'));

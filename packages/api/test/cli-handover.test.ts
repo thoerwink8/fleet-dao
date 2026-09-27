@@ -9,14 +9,17 @@ import { FUSION_WORKFLOW_TYPE, type RequirementStartInput, requirementWorkflowId
 import { WorkflowExecutionAlreadyStartedError } from '@temporalio/client';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { createClaimStatus } from '../src/claim-status.ts';
 import { type CliDeps, CliError, main, parseHandoverArgs, TASK_HANDOVER } from '../src/cli.ts';
 import { devFixtures, IDS } from '../src/dev-fixtures.ts';
+import { silentLogger } from '../src/log.ts';
 import type { MemoryData } from '../src/memory-store.ts';
 import { createMemoryStore } from '../src/memory-store.ts';
 import { createPgStore } from '../src/pg-store.ts';
 import type { IssuePlan, Store } from '../src/ports.ts';
 import { createTemporalRequirementWorkflows, type WorkflowStarterLike } from '../src/temporal.ts';
 import { runChild } from './child.ts';
+import { fakeClaimsGitHub } from './fake-claims-github.ts';
 import { issuePlan, V2 } from './harness.ts';
 import { seedPg } from './pg-fixtures.ts';
 
@@ -57,7 +60,7 @@ function fakeTemporal() {
 
 type Data = Partial<MemoryData>;
 
-function setup(options: { switchOn?: string | null; data?: (d: Data) => void } = {}) {
+function setup(options: { switchOn?: string | null; data?: (d: Data) => void; noGitHub?: boolean } = {}) {
   const data: Data = devFixtures(T0);
   const since = options.switchOn === undefined ? SWITCH_ON : options.switchOn;
   data.repos = (data.repos ?? []).map((r) => ({ ...r, ...(since ? { autoDispatchSince: since } : {}) }));
@@ -66,6 +69,7 @@ function setup(options: { switchOn?: string | null; data?: (d: Data) => void } =
   const out: string[] = [];
   const err: string[] = [];
   const temporal = fakeTemporal();
+  const gh = fakeClaimsGitHub();
   const plans = new Map<number, IssuePlan | Error>();
   const planReads: number[] = [];
   const opened = { store: 0, plans: 0 };
@@ -98,6 +102,14 @@ function setup(options: { switchOn?: string | null; data?: (d: Data) => void } =
         },
       };
     },
+    ...(options.noGitHub
+      ? {}
+      : {
+          openClaims: async () => ({
+            claims: createClaimStatus({ store: s, github: gh, log: silentLogger }),
+            close: async () => {},
+          }),
+        }),
     now: () => T0,
   });
   const run = (args: string[], s?: Store) => main(['handover', ...args], deps(s));
@@ -124,7 +136,7 @@ function setup(options: { switchOn?: string | null; data?: (d: Data) => void } =
     return id;
   };
   const handovers = () => store.data.audit.filter((a) => a.action === TASK_HANDOVER);
-  return { store, out, err, temporal, plans, planReads, opened, deps, run, queued, handovers };
+  return { store, out, err, temporal, gh, plans, planReads, opened, deps, run, queued, handovers };
 }
 
 describe('参数', () => {
@@ -537,10 +549,11 @@ describe('认领（#299）：交单和本机抢同一行；帅位上线后交单
     expect(t.store.data.claims).toMatchObject([{ claimId: held.claimId, state: 'claimed' }]);
   });
 
-  it('带创始人原话：本机那份认领当场作废（记 claim.reassign），归引擎、起工作流；打印写明作废了谁、开过的 PR 要手动撤', async () => {
+  it('带创始人原话：本机那份认领当场作废（记 claim.reassign），归引擎、起工作流；它开着的 PR 撤自动合并、留言、关掉（#348）', async () => {
     const t = setup();
     await t.queued();
     const held = await localHolds(t, 88);
+    t.gh.addPull('example/canary', { number: 88, body: '**需求**：#40', autoMerge: true });
     expect(
       await t.run(['example/canary', '40', '--reason', REASON, '--founder', '这张交给引擎做', ...SEAT_ARGS]),
     ).toBe(0);
@@ -554,12 +567,29 @@ describe('认领（#299）：交单和本机抢同一行；帅位上线后交单
       reason: '改派给引擎（创始人原话：这张交给引擎做）',
     });
     expect(t.out.at(-1)).toContain(
-      `认领：归引擎（认领 ${claim?.claimId.slice(0, 8)}）；作废了本机的认领（原来归 本机/w1，认领 ${held.claimId.slice(0, 8)}，开过的 PR #88 要手动撤自动合并、关掉）`,
+      `认领：归引擎（认领 ${claim?.claimId.slice(0, 8)}）；作废了本机的认领（原来归 本机/w1，认领 ${held.claimId.slice(0, 8)}），它开着的 PR #88 撤了自动合并、关了（分支留着）`,
     );
+    expect(t.gh.writes).toEqual([
+      'disable example/canary#88',
+      'comment example/canary#88',
+      'close example/canary#88',
+    ]);
+    expect(t.gh.comments[0]?.body).toContain('改派给 引擎（创始人原话：这张交给引擎做）');
     expect(t.handovers()[0]).toMatchObject({
       after: { claim: { voided: held.claimId, fresh: true } },
       reason: expect.stringContaining('（帅位 本机/s1，main 第 1 任）'),
     });
+  });
+
+  it('【故意造出的失败】强制改派时没接 GitHub：照交，照实写旧 PR 没处理、要人撤自动合并关掉', async () => {
+    const t = setup({ noGitHub: true });
+    await t.queued();
+    await localHolds(t, 88);
+    expect(
+      await t.run(['example/canary', '40', '--reason', REASON, '--founder', '这张交给引擎做', ...SEAT_ARGS]),
+    ).toBe(0);
+    expect(t.out.at(-1)).toContain('它开着的 PR 没处理（这里没接 GitHub（openClaims）');
+    expect(t.out.at(-1)).toContain('登记过的 #88 要人撤自动合并、关掉');
   });
 
   it('【故意造出的失败】帅位上线后：不带任期也不带原话拒（退出码 1）；带着换下来的任期拒（退出码 3）；都不派', async () => {

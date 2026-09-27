@@ -63,6 +63,64 @@ describe('事件之后的处理', () => {
     expect((await ledger.getPullRequest(REPO_ID, 5))?.state).toBe('merged');
   });
 
+  it('PR 镜像记下提醒谁在处理要的几样：开的时刻、正文挂的单和修的提醒；合了记合并提交', async () => {
+    const { gh, ledger } = setup();
+    const sink = gh.eventSink({ wake: async () => {} });
+    const body = [
+      '**需求**：#342',
+      '**修提醒**：`watchdog:job:backup:after-12`',
+      'Closes acme/widgets#343',
+    ].join('\n');
+    await sink.accept(
+      event({
+        event: 'pull_request',
+        payload: prPayload({
+          created_at: '2026-09-25T11:50:00Z',
+          title: 'fix: 备份',
+          body,
+          merge_commit_sha: B, // 没合的 PR 也带试合提交：不记
+        }),
+      }),
+    );
+    expect(await ledger.getPullRequest(REPO_ID, 5)).toMatchObject({
+      openedAt: new Date('2026-09-25T11:50:00Z'),
+      mergedAt: null,
+      mergeSha: null,
+      links: { issues: [342, 343], alerts: ['watchdog:job:backup:after-12'] },
+    });
+    await sink.accept(
+      event({
+        event: 'pull_request',
+        payload: prPayload({
+          state: 'closed',
+          merged: true,
+          merged_at: '2026-09-25T12:10:00Z',
+          merge_commit_sha: B,
+          updated_at: '2026-09-25T12:10:00Z',
+          title: 'fix: 备份',
+          body,
+        }),
+      }),
+    );
+    expect(await ledger.getPullRequest(REPO_ID, 5)).toMatchObject({
+      state: 'merged',
+      mergedAt: new Date('2026-09-25T12:10:00Z'),
+      mergeSha: B,
+    });
+  });
+
+  it('【故意造出的失败】事件里没带正文（只有号和头）：不把镜像里的链接清空', async () => {
+    const { gh, ledger } = setup();
+    const sink = gh.eventSink({ wake: async () => {} });
+    await sink.accept(
+      event({ event: 'pull_request', payload: prPayload({ body: '**修提醒**：pool-hold:x', title: 't' }) }),
+    );
+    await sink.accept(
+      event({ event: 'pull_request', payload: prPayload({ updated_at: '2026-09-25T12:01:00Z' }) }),
+    );
+    expect((await ledger.getPullRequest(REPO_ID, 5))?.links).toEqual({ issues: [], alerts: ['pool-hold:x'] });
+  });
+
   it('CI 跑完：回 GitHub 重读这个头的检查写进镜像（不信事件里带的结论），再叫醒', async () => {
     const { gh, fake, ledger } = setup();
     const sink = gh.eventSink({ wake: async () => {} });

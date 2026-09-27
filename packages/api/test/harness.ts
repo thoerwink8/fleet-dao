@@ -154,6 +154,8 @@ export interface HarnessOptions {
   notWired?: Deps['notWired'];
   /** 飞书网关来没来过的记录（/healthz 的 feishu_gateway）；不给就不记。 */
   gatewaySeen?: Deps['gatewaySeen'];
+  /** 提醒谁在处理（design 15.3）；不给就是没接上（内存版、开发环境一样）。 */
+  alertWork?: Deps['alertWork'];
 }
 
 function wire<S extends Store>(
@@ -189,6 +191,7 @@ function wire<S extends Store>(
     demo: options.demo ?? null,
     ...(options.notWired ? { notWired: options.notWired } : {}),
     ...(options.gatewaySeen ? { gatewaySeen: options.gatewaySeen } : {}),
+    ...(options.alertWork ? { alertWork: options.alertWork } : {}),
     feishu: options.feishu === null ? null : feishu.auth,
     workflows: options.workflows ?? {
       async signal(workflowId, signal) {

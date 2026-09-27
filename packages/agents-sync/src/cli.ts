@@ -4,6 +4,7 @@ import { statSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
 import { Backups } from './backup.ts';
 import { installedAgents } from './detect.ts';
+import { applyGitExcludes, checkGitExcludes } from './git-excludes.ts';
 import { applyHooks, checkHooks, type HookSkip } from './hooks.ts';
 import { takeLock } from './lock.ts';
 import { manifestPath, readManifest } from './manifest.ts';
@@ -29,6 +30,8 @@ export const USAGE = `agents-sync —— 把 fleet-dao 仓里 AGENTS.md 的通�
   agents-sync --apply        写：通用段写进各家的全局文件（只动标记圈起来的那一块；第一次接管先整份备份），
                              skill 拷进各家的 skill 目录（只动清单里记着是本脚本装的），
                              钩子脚本拷进 ~/.fleet-dao/hooks/、在各家设置里登记（只动指向它们的那几条），
+                             _tmp/ 加进这台的 git 全局忽略（core.excludesFile 没设过就新建一份；已经指到别的文件，
+                             就在那份文件里接管一小块，不碰其余内容），
                              写完照查一遍，记下这台同步到哪个提交
   agents-sync --retire-old --old-repo <旧仓的位置>
                              撤掉旧仓留下的东西：各家 skill 目录里指向旧仓的链接、~/.claude/agents 里两个旧子代理；
@@ -37,6 +40,8 @@ export const USAGE = `agents-sync —— 把 fleet-dao 仓里 AGENTS.md 的通�
 选项：
   --home <目录>      家目录（默认：当前用户的家；带 --user 时是那个用户的家）
   --user <用户名>    替这个用户做（Linux，要 root）：先换成他的身份再动手，写出来的东西都归他；开会话钩子不登记、同步位置不记
+                     （调工具前、Stop 那两条钩子，还有全局 git 忽略都照写：不需要会话、不用等自动发布，
+                     写出来的东西也归他）
   --repo <目录>      fleet-dao 仓的位置（默认：本脚本所在的仓）
   --old-repo <目录>  旧仓在这台机器上的位置（--retire-old 要）
 
@@ -161,7 +166,7 @@ function planIdentity(args: Args, deps: Deps): Identity {
  * 替别的用户写（法国装机）时开会话那条钩子不登记：它要在这个用户自己能拉、能写的 fleet-dao 检出里快进、同步，法国的检出跟着
  * 自动发布走。调工具前那条照装：会话用户家里就有 reclaude 的设备密钥，在那台上手开的会话、借道读 ~/.claude/settings.json
  * 的 Grok、Cursor 起的会话都要拦读密钥文件。引擎起的 Claude 会话带 --setting-sources project、不读用户级设置，这里装了
- * 也管不到它：引擎经 --settings 另外带上发布目录里那份（packages/adapters/src/claude-code/args.ts）。
+ * 也管不到它（packages/adapters/src/claude-code/args.ts），要管得由引擎另外带上。
  */
 const SESSION_START_OFF_FOR_USER: HookSkip = {
   event: 'SessionStart',
@@ -279,6 +284,7 @@ export function runCli(argv: readonly string[], deps: Deps): number {
         section('通用段（AGENTS.md 上半段）', checkRules(ctx, src));
         section('skill（agents/skills/）', checkSkills(ctx, src, readManifest(mf)));
         section('钩子（agents/hooks/）', checkHooks(ctx, src, hooksOff));
+        section('全局 git 忽略（_tmp/）', checkGitExcludes(ctx));
         section('同步位置', position ? checkPosition(position) : positionOff);
       } else {
         const rules = applyRules(ctx, src, backups);
@@ -294,6 +300,7 @@ export function runCli(argv: readonly string[], deps: Deps): number {
         ];
         const bad = verify([...rules, ...skills, ...hooks], after);
         if (bad.length) section('读回', bad);
+        section('全局 git 忽略（_tmp/）', applyGitExcludes(ctx, backups));
         section('同步位置', position ? applyPosition(position, all, deps.now()) : positionOff);
       }
     }

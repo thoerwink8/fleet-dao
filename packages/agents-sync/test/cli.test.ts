@@ -78,7 +78,8 @@ describe('用法', () => {
 });
 
 describe('退出码', () => {
-  it('缺失 1；写完 0；第二遍零改动；只装了 claude 的机器上其余各家列为没装', () => {
+  // 4 次 run() 各自真 spawn 一两次 git（git-excludes 那一步）：默认 5 秒在机器忙的时候不够
+  it('缺失 1；写完 0；第二遍零改动；只装了 claude 的机器上其余各家列为没装', { timeout: 15_000 }, () => {
     const home = tempDir('home');
     const repo = makeRepo({});
     const first = run(['--check', '--home', home, '--repo', repo]);
@@ -178,12 +179,15 @@ describe('--user：替别的用户写', () => {
     expect(r.out).toContain('用户 alice');
     expect(get(home, '.claude/CLAUDE.md')).toBe(`${BLOCK}\n`);
     // 替别的用户写（法国装机）：开会话那条不登记（它要在那个用户自己能写的检出里快进、同步），
-    // 调工具前那条照装（会话用户家里就有 reclaude 的设备密钥，借道读这份设置的几家起的会话也要拦）
+    // 调工具前、Stop 那两条照装（会话用户家里就有 reclaude 的设备密钥，借道读这份设置的几家起的会话也要拦；
+    // Stop 不需要会话、不用等自动发布，照样能装）
     expect(r.out).toContain('· SessionStart：替别的用户写（--user）时不登记开会话钩子');
     const settings = JSON.parse(get(home, '.claude/settings.json')) as { hooks: Record<string, unknown> };
-    expect(Object.keys(settings.hooks)).toEqual(['PreToolUse']);
+    expect(Object.keys(settings.hooks)).toEqual(['PreToolUse', 'Stop']);
     expect(JSON.stringify(settings.hooks.PreToolUse)).toContain('/.fleet-dao/hooks/pretool.mjs');
+    expect(JSON.stringify(settings.hooks.Stop)).toContain('/.fleet-dao/hooks/stop.mjs');
     expect(existsSync(join(home, '.fleet-dao', 'hooks', 'pretool.mjs'))).toBe(true);
+    expect(existsSync(join(home, '.fleet-dao', 'hooks', 'stop.mjs'))).toBe(true);
     expect(r.code).toBe(0);
   });
 

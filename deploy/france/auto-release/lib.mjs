@@ -1,5 +1,6 @@
 // 自动发布（法国，root；fleet-auto-release.timer 每 5 分钟拉起一轮）：主线上比在用的新、CI 全绿的最新一个提交（主线头的
-// CI 还在跑、红了，就沿主线往回找），等引擎空闲后用 deploy/release.sh 发到本机，发完把各家 AI 的规矩同步给会话用户；
+// CI 还在跑、红了，就沿主线往回找），马上用 deploy/release.sh 发到本机（发布脚本先排空引擎：不起新会话，在跑的最多再做
+// 10 分钟，到点停下、按编号续上），发完把各家 AI 的规矩同步给会话用户；
 // 每一轮的读数写进状态文件，后端的 /healthz 读它现算「跟不跟得上主线」。规矩和由来见 docs/ops.md 第九节「自动发布」。
 // 这里是判断和「跑一轮」的流程；和系统打交道的（git、GitHub 接口、会话、发布脚本、库）都从 io 进来：真的在
 // fleet-auto-release.mjs，测试换成假的（deploy/test/auto-release.test.mjs）。
@@ -22,7 +23,10 @@ export const CHECKOUT = '/srv/fleet-dao';
 export const REPO = 'thoerwink8/fleet-dao';
 /** 状态里留主线最近多少个提交（后端据此数落后几个）；在用的版本不在里面，后端报「落后太多」或「不在主线上」。 */
 export const MAIN_HISTORY = 300;
-/** 引擎有会话在跑时最多等这么久：到点照发（会话按编号续上，design 第四节「会话断了接着干」），不无限等。 */
+/**
+ * 只对不会排空的引擎（这一版之前的）：发布脚本看到会话在跑退出 76，最多等这么久空闲，到点带 --busy-ok 照发（会话按编号续上）。
+ * 会排空的引擎不等空闲：引擎一直起新会话，60 分钟也等不到（2026-09-27 夜里法国落后主线 9 个提交），排空由发布脚本做。
+ */
 export const IDLE_WAIT_MS = 60 * 60_000;
 /** 只认这个工作流在 main 上那次 push 的结论（其余几个工作流看的是 GitHub 上的现状，不是这份代码好不好）。 */
 export const CI_WORKFLOW = '.github/workflows/ci.yml';
@@ -58,7 +62,7 @@ export const FAILED_PREFIX = `${ALERT_PREFIX}failed:`;
 export const RULES_PREFIX = `${ALERT_PREFIX}rules:`;
 export const CONFIG_PREFIX = `${ALERT_PREFIX}config:`;
 export const CONFIG_UNCHECKED_KEY = `${ALERT_PREFIX}config-unchecked`;
-/** release.sh --auto 的两种「这次不发、什么都没动」：另一个发布在跑；切之前又看到会话在跑。 */
+/** release.sh --auto 的两种「这次不发、什么都没动」：另一个发布在跑；引擎不会排空、切之前看到会话在跑。 */
 export const EXIT_RELEASE_BUSY = 75;
 export const EXIT_SESSIONS_BUSY = 76;
 
@@ -204,19 +208,6 @@ export function ciVerdict(body, sha, at, now) {
   if (run.status !== 'completed') return { verdict: 'pending', detail: `CI 在跑（${run.status}）` };
   if (run.conclusion === 'success') return { verdict: 'green', detail: `CI 全绿（第 ${run.run_number} 次）` };
   return { verdict: 'red', detail: `CI 结论是 ${run.conclusion ?? '空'}（第 ${run.run_number} 次）` };
-}
-
-/** fleet-agent-scope list 的输出：一行「编号 状态」。返回还没停的会话编号；认不出一行就抛（调用方按忙算）。 */
-export function parseScopes(text) {
-  const busy = [];
-  for (const raw of String(text).split('\n')) {
-    const line = raw.trim();
-    if (line === '') continue;
-    const m = /^(\S+) (\S+)$/.exec(line);
-    if (!m) throw new Error(`会话列表里有认不出的一行：${line.slice(0, 80)}`);
-    if (m[2] !== 'inactive' && m[2] !== 'failed') busy.push(m[1]);
-  }
-  return busy;
 }
 
 /** 上一轮留下的状态里，这一轮接着用的几样；认不出（第一次跑、版本不对）就从空的起。 */
@@ -399,27 +390,9 @@ async function deployStep(io, st, now) {
     return current;
   }
 
+  // 不先看有没有会话在跑：发布脚本先排空引擎（不起新会话、宽限到点停下），不会排空的旧引擎由它退出 76、这里等空闲
   const waited = st.waitingSince ? now - Date.parse(st.waitingSince) : 0;
   const busyOk = st.waitingSince !== null && waited >= IDLE_WAIT_MS;
-  if (!busyOk) {
-    let busy;
-    try {
-      busy = parseScopes(await io.sessions());
-    } catch (e) {
-      busy = [`（会话在不在跑没查成：${why(e)}）`];
-    }
-    if (busy.length > 0) {
-      st.waitingSince ??= iso(now);
-      st.busy = busy.join(' ');
-      act(
-        st,
-        now,
-        'wait-idle',
-        `引擎有会话在跑（${st.busy}），等空闲，最多等到 ${iso(Date.parse(st.waitingSince) + IDLE_WAIT_MS)}；要发的是 ${short(target)}${via}`,
-      );
-      return current;
-    }
-  }
 
   const before = st.attempt;
   st.attempt = {
@@ -458,7 +431,12 @@ async function deployStep(io, st, now) {
     st.attempt = before;
     if (r.code === EXIT_SESSIONS_BUSY) {
       st.waitingSince ??= iso(now);
-      act(st, end, 'wait-idle', '切版本之前又看到会话在跑，这轮不切（构建留着，下轮直接用）');
+      act(
+        st,
+        end,
+        'wait-idle',
+        `在跑的引擎不会排空、有会话在跑，这轮不切（构建留着，下轮直接用），等空闲，最多等到 ${iso(Date.parse(st.waitingSince) + IDLE_WAIT_MS)}；要发的是 ${short(target)}${via}`,
+      );
     } else {
       act(st, end, 'release-busy', '另一个发布在跑');
     }

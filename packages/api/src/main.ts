@@ -10,13 +10,15 @@
 // （#43 已随 #56 合并、没接这一步，真开单记在 #91。）
 import type { Server } from 'node:http';
 import { createDb, type Db } from '@fleet-dao/db';
-import { createGitHub, pgLedger, pgLocker } from '@fleet-dao/github';
+import { type ClaimsGitHub, createGitHub, pgLedger, pgLocker } from '@fleet-dao/github';
 import { jevConfigLocation } from '@fleet-dao/jev';
 import { serve } from '@hono/node-server';
 import { signAgentToken } from './agent-token.ts';
+import { deployFacts, pgAlertWork } from './alert-work.ts';
 import { buildApps } from './app.ts';
 import { CANARY_NOT_HERE, canaryHealthCheck } from './canary-health.ts';
 import { createChangeHub, startPgChangeFeed } from './changes.ts';
+import { createClaimStatus } from './claim-status.ts';
 import { ConfigError, loadConfig } from './config.ts';
 import { createDirDemoPublisher, sweepExpiredDemoLinks } from './demo.ts';
 import {
@@ -54,12 +56,14 @@ const log = jsonLogger();
 function githubMirror(db: Db): {
   sink: GitHubEventSink;
   plans: IssuePlanReader;
+  /** 「认领对得上」要的读写（#348）；凭据没读到时没有（PR 事件在写镜像那一步就如实失败了）。 */
+  claims?: ClaimsGitHub;
   credentialsMissing?: () => Promise<void>;
 } {
   try {
     const gh = createGitHub({ ledger: pgLedger(db), locker: pgLocker(db, { log }), log });
     // 引擎等 CI 靠活动自己轮询（waitCi），不收按事件叫醒的信号：PR、CI 事件只写镜像
-    return { sink: gh.eventSink({ async wake() {} }), plans: githubIssuePlans(gh) };
+    return { sink: gh.eventSink({ async wake() {} }), plans: githubIssuePlans(gh), claims: gh.claims };
   } catch (err) {
     log.error('GitHub 机器人的凭据没读到：PR、CI 事件写不进镜像（issue 照收，但不派）', {
       error: String(err),
@@ -177,8 +181,12 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
     requirements: temporal.requirements,
     plans: github.plans,
     github: github.sink,
+    // PR 事件进来按库里的认领贴「认领对得上」（#348）
+    claims: github.claims ? createClaimStatus({ store, github: github.claims, log }) : undefined,
     draftOpener,
     gatewaySeen,
+    // 提醒谁在处理（design 15.3）：认领、PR 镜像、静默都在同一个库；发布记录只在法国的正式机器上有
+    alertWork: pgAlertWork(db, onFrance ? () => deployFacts(readDeployLagInput()) : () => null),
     // 还没做的读取器：驾驶舱那一块整块显示「待实现」，不说成「没查成」。接上了就删掉这一项
     notWired: {
       quota: { what: '额度读数', phase: 'P3', issue: 76 },

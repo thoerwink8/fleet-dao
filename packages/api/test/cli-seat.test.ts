@@ -4,18 +4,21 @@
 import { fileURLToPath } from 'node:url';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { createClaimStatus } from '../src/claim-status.ts';
 import { type CliDeps, main } from '../src/cli.ts';
 import { devFixtures } from '../src/dev-fixtures.ts';
+import { silentLogger } from '../src/log.ts';
 import { createMemoryStore } from '../src/memory-store.ts';
 import { createPgStore } from '../src/pg-store.ts';
-import type { Store } from '../src/ports.ts';
+import { type Store, type TaskSignal, WorkflowGoneError } from '../src/ports.ts';
 import { runChild } from './child.ts';
+import { AGENT_BOT, fakeClaimsGitHub } from './fake-claims-github.ts';
 import { seedPg } from './pg-fixtures.ts';
 
 const T0 = new Date('2026-09-27T08:00:00.000Z');
 const REPO = 'example/canary';
 
-function setup(base?: Store) {
+function setup(base?: Store, options: { noGitHub?: boolean } = {}) {
   const clock = { now: new Date(T0) };
   const memory = createMemoryStore(devFixtures(T0), { now: () => clock.now });
   const store = base ?? memory;
@@ -23,6 +26,10 @@ function setup(base?: Store) {
   const err: string[] = [];
   let opened = 0;
   let stdin = '';
+  const gh = fakeClaimsGitHub();
+  /** 发给引擎工作流的信号；gone 里的工作流算已经不在了。 */
+  const signals: { workflowId: string; signal: TaskSignal }[] = [];
+  const gone = new Set<string>();
   const deps: CliDeps = {
     env: { DATABASE_URL: 'postgres:///fleet' },
     out: (text) => out.push(text),
@@ -34,9 +41,28 @@ function setup(base?: Store) {
     openIssuePlans: async () => {
       throw new Error('seat、claim 不该读 GitHub');
     },
-    openTemporal: async () => {
-      throw new Error('seat、claim 不该连 Temporal');
-    },
+    openTemporal: async () => ({
+      requirements: {
+        start: async () => {
+          throw new Error('seat、claim 不该起工作流');
+        },
+      },
+      workflows: {
+        signal: async (workflowId, signal) => {
+          if (gone.has(workflowId)) throw new WorkflowGoneError(workflowId);
+          signals.push({ workflowId, signal });
+        },
+      },
+      close: async () => {},
+    }),
+    ...(options.noGitHub
+      ? {}
+      : {
+          openClaims: async () => ({
+            claims: createClaimStatus({ store, github: gh, log: silentLogger }),
+            close: async () => {},
+          }),
+        }),
     now: () => clock.now,
     readStdin: async () => stdin,
   };
@@ -52,6 +78,9 @@ function setup(base?: Store) {
   };
   return {
     memory,
+    gh,
+    signals,
+    gone,
     clock,
     run,
     json,
@@ -258,11 +287,43 @@ describe('认领', () => {
     t.tick(3);
     const swept = await t.run('claim', 'sweep');
     expect(swept.out).toContain('作废了 1 张');
-    expect(swept.out).toContain('example/canary#43 本机/工人甲 作废了（过了宽限期（2 分钟）没心跳）');
+    expect(swept.out).toContain(`example/canary#43 本机/工人甲（认领 ${claimId.slice(0, 8)}）`);
     const back = await t.run('claim', 'step', REPO, '43', '--claim', claimId, '--note', '我回来了');
     expect(back.code).toBe(3);
     expect(back.out).toContain('这张已经不归你');
-    expect((await t.run('claim', 'sweep')).out).toBe('没有过了宽限期没心跳的认领');
+    expect((await t.run('claim', 'sweep')).out).toContain('没有过了宽限期没心跳的认领');
+  });
+
+  it('【故意造出的失败】sweep 时没接 GitHub：库里照样作废，PR 那边没做照实说（退出码 1）', async () => {
+    const t = setup(undefined, { noGitHub: true });
+    await t.run('seat', 'take', ...A);
+    await take(t, '46', A, '1', '工人甲', '--grace-minutes', '2');
+    t.tick(3);
+    const swept = await t.run('claim', 'sweep');
+    expect(swept.code).toBe(1);
+    expect(swept.out).toContain('作废了 1 张过了宽限期没心跳的认领；PR 那边没做（GitHub 没接上');
+    expect((await t.json('claim', 'show', REPO, '46', '--all')).body).toMatchObject({
+      claims: [{ state: 'voided' }],
+    });
+  });
+
+  it('认领、登记 PR 之后当场重贴挂这张单的 PR（#348）；没接 GitHub 的照实说没重贴成，认领照样记上', async () => {
+    const t = setup();
+    await t.run('seat', 'take', ...A);
+    t.gh.addPull(REPO, { number: 306, body: '**需求**：#47' });
+    const got = await take(t, '47');
+    expect(got.body.prStatus).toMatchObject({ ok: true, checked: 1, posted: [306] });
+    expect(t.gh.latest(REPO, 306)).toMatchObject({ state: 'failure' });
+    const claimId = (got.body.claim as { claimId: string }).claimId;
+    const step = await t.run('claim', 'step', REPO, '47', '--claim', claimId, '--pr', '306');
+    expect(step.out).toContain('重贴了 #306');
+    expect(t.gh.latest(REPO, 306)).toMatchObject({ state: 'success' });
+
+    const bare = setup(undefined, { noGitHub: true });
+    await bare.run('seat', 'take', ...A);
+    const r = await bare.run('claim', 'take', REPO, '47', ...A, '--term', '1', '--label', 'w');
+    expect(r.code).toBe(0);
+    expect(r.out).toContain('「认领对得上」没重贴成（这里没接 GitHub');
   });
 
   it('【故意造出的失败】库里没有这个仓：说清认领只管导入过的项目（退出码 1）', async () => {
@@ -316,6 +377,120 @@ describe('认领', () => {
     expect(
       (await t.run('claim', 'take', REPO, '60', '--owner', 'engine', '--scope', 'drill:299', ...A)).code,
     ).toBe(2);
+    expect(t.opened()).toBe(0);
+  });
+});
+
+describe('改派（claim reassign，#348）', () => {
+  const engineHolds = async (t: ReturnType<typeof setup>, issueNumber: number) => {
+    const r = await t.memory.claimForEngine({
+      repoId: t.memory.data.repos[0]?.id ?? '',
+      issueNumber,
+      workflowId: `req:example/canary#${issueNumber}`,
+      actor: { kind: 'engine', id: 'github-intake' },
+    });
+    if (!r.ok) throw new Error('引擎没拿到');
+    return r.claim;
+  };
+  const reassign = (t: ReturnType<typeof setup>, issue: string, ...more: string[]) =>
+    t.run('claim', 'reassign', REPO, issue, '--to', 'worker', ...A, '--term', '1', '--label', 'w2', ...more);
+
+  it('【故意造出的失败】引擎拿着、不带创始人原话：不改派（退出码 3），这张没动、没叫停、没关 PR', async () => {
+    const t = setup();
+    await t.run('seat', 'take', ...A);
+    const eng = await engineHolds(t, 70);
+    t.gh.addPull(REPO, { number: 700, body: '**需求**：#70', author: AGENT_BOT, autoMerge: true });
+    const r = await reassign(t, '70');
+    expect(r.code).toBe(3);
+    expect(r.out).toContain('要强制改派带上创始人原话 --founder');
+    expect((await t.memory.getClaim(eng.repoId, 70)).claim).toMatchObject({ claimId: eng.claimId });
+    expect(t.signals).toEqual([]);
+    expect(t.gh.writes).toEqual([]);
+  });
+
+  it('带创始人原话：引擎那份作废、叫停它的工作流、它开的 PR 撤自动合并留言关掉（分支留着），归这次的工人', async () => {
+    const t = setup();
+    await t.run('seat', 'take', ...A);
+    const eng = await engineHolds(t, 71);
+    t.gh.addPull(REPO, { number: 710, body: '**需求**：#71', author: AGENT_BOT, autoMerge: true });
+    const r = await reassign(t, '71', '--founder', '71 本机做');
+    expect(r.code).toBe(0);
+    expect(r.out).toContain('改派了 example/canary#71：归 本机/w2');
+    expect(r.out).toContain(`原来那份作废了：引擎（认领 ${eng.claimId.slice(0, 8)}）`);
+    expect(r.out).toContain('引擎的工作流 req:example/canary#71 叫停了');
+    expect(r.out).toContain('原来那份开着的 PR 关了（分支留着）：#710');
+    expect(t.signals).toEqual([
+      {
+        workflowId: 'req:example/canary#71',
+        signal: { name: 'stop', by: '本机/a1', reason: '改派给 本机/w2（创始人原话：71 本机做）' },
+      },
+    ]);
+    expect(t.gh.writes).toEqual([`disable ${REPO}#710`, `comment ${REPO}#710`, `close ${REPO}#710`]);
+    expect(t.gh.comments[0]?.body).toContain('改派给 本机/w2（创始人原话：71 本机做）');
+  });
+
+  it('【故意造出的失败】工作流已经不在：照改派、说已经不在；叫停连不上：退出码 1、写要人去叫停', async () => {
+    const t = setup();
+    await t.run('seat', 'take', ...A);
+    await engineHolds(t, 72);
+    t.gone.add('req:example/canary#72');
+    const r = await reassign(t, '72', '--founder', '给本机');
+    expect(r.code).toBe(0);
+    expect(r.out).toContain('引擎的工作流 req:example/canary#72 已经不在了');
+
+    const bare = setup();
+    await bare.run('seat', 'take', ...A);
+    await engineHolds(bare, 73);
+    bare.gone.clear();
+    // 信号那一侧抛别的错（Temporal 连不上）
+    const broken = { ...bare };
+    broken.signals.push = () => {
+      throw new Error('Temporal 连不上');
+    };
+    const r2 = await reassign(broken, '73', '--founder', '给本机');
+    expect(r2.code).toBe(1);
+    expect(r2.out).toContain('没叫停成（Temporal 连不上）');
+    expect(r2.out).toContain('要人去叫停');
+  });
+
+  it('原来的认领过了宽限期作废了：不用原话，改派后它开着的 PR 关掉（留言写作废原因）', async () => {
+    const t = setup();
+    await t.run('seat', 'take', ...A);
+    const got = await t.json(
+      'claim',
+      'take',
+      REPO,
+      '74',
+      ...A,
+      '--term',
+      '1',
+      '--label',
+      'w1',
+      '--grace-minutes',
+      '2',
+    );
+    const claimId = (got.body.claim as { claimId: string }).claimId;
+    t.gh.addPull(REPO, { number: 740, body: `**需求**：#74\n**认领**：${claimId}` });
+    t.tick(3);
+    await t.run('claim', 'sweep');
+    t.gh.writes.length = 0;
+    const r = await reassign(t, '74');
+    expect(r.code).toBe(0);
+    expect(r.out).toContain('原来那份开着的 PR 关了（分支留着）：#740');
+    expect(t.gh.comments.at(-1)?.body).toContain('原来的认领作废了：过了宽限期');
+  });
+
+  it('【故意造出的失败】参数不对：--to 认不出、--to engine 不带 --reason、--to worker 带 --reason：退出码 2，不连库', async () => {
+    const t = setup();
+    for (const extra of [
+      ['--to', 'robot', ...A, '--term', '1', '--label', 'w'],
+      ['--to', 'engine', '--founder', 'x'],
+      ['--to', 'engine', '--reason', 'r'],
+      ['--to', 'worker', ...A, '--term', '1', '--label', 'w', '--reason', 'r'],
+    ]) {
+      const r = await t.run('claim', 'reassign', REPO, '75', ...extra);
+      expect(r.code, extra.join(' ')).toBe(2);
+    }
     expect(t.opened()).toBe(0);
   });
 });

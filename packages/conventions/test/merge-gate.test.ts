@@ -144,6 +144,8 @@ function world(
   return Object.assign(w, { gh });
 }
 
+const baseWorld = world;
+
 const deps = (w: { gh: GitHubReads }, riskList: GateDeps['riskList'] = RISK): GateDeps => ({
   gh: w.gh,
   riskList,
@@ -221,6 +223,105 @@ describe('合并闸：验收场景', () => {
   });
 });
 
+const ENGINE_BOT = { login: 'fleet-dao-engine[bot]', id: 7, type: 'Bot' };
+const claimStatus = (state: string, description: string, creator: unknown = ENGINE_BOT) => ({
+  context: '认领对得上',
+  state,
+  description,
+  creator,
+});
+const claimOk = (n: number) => claimStatus('success', `#${n} 归 本机/w1，认领号对得上（0f0e0d0c）`);
+const linkedBody = (n: number) =>
+  body('CI 绿就合——只改文档').replace(
+    '**这个 PR 做完就关单**：否',
+    `**需求**：#${n}\n**这个 PR 做完就关单**：否`,
+  );
+
+describe('合并闸：挂了单的 PR 要有引擎机器人贴的、通过的「认领对得上」（#348）', () => {
+  const linked = (over: Parameters<typeof world>[0] = {}) =>
+    world({ ...over, prOver: { body: linkedBody(12), ...over.prOver } });
+
+  it('没挂单：不看这个状态，也不为它读提交状态', async () => {
+    const r = await gatePr(80, deps(world({ broken: { statuses: '不该读' } })));
+    expect(r.state).toBe('success');
+  });
+
+  it('挂了单、当前头上最新的是引擎贴的通过：通过，结论里写上', async () => {
+    const r = await gatePr(80, deps(linked({ statuses: [claimOk(12)] })));
+    expect(r.state).toBe('success');
+    expect(r.lines[0]).toBe('能合：不是草稿、没冲突，没改到先审后合的地方，#12 的认领对得上。');
+  });
+
+  it('标题里的 (#12) 也算挂了单（和 pr-labels 同一个认法）', async () => {
+    const r = await gatePr(80, deps(world({ prOver: { title: '修一下 (#12)' } })));
+    expect(r.state).toBe('failure');
+    expect(r.lines[0]).toMatch(/^等「认领对得上」：PR 挂了 #12/);
+  });
+
+  it('【故意造出的失败】挂了单、当前头上还没有：不通过，等引擎贴', async () => {
+    const r = await gatePr(80, deps(linked()));
+    expect(r).toMatchObject({ state: 'failure', notChecked: false });
+    expect(r.lines[0]).toBe(
+      '等「认领对得上」：PR 挂了 #12，当前头 aaaaaaa 上还没有引擎机器人贴的这个状态；引擎收到 PR 事件就贴（漏了的每 15 分钟对账补上），贴上合并闸自动重算。',
+    );
+  });
+
+  it('【故意造出的失败】旧认领号（引擎判的 failure）：不通过，把引擎说的原因带出来', async () => {
+    const why = '#12 现在归 本机/w2（认领 1a2b3c4d），PR 上写的是 0f0e0d0c；不是这份认领的 PR 合不进去';
+    const r = await gatePr(80, deps(linked({ statuses: [claimStatus('failure', why)] })));
+    expect(r.state).toBe('failure');
+    expect(r.lines[0]).toBe(`认领对不上（当前头 aaaaaaa 上引擎贴的「认领对得上」是 failure）：${why}。`);
+  });
+
+  it('【故意造出的失败】不是引擎机器人贴的（有推送权限的人也贴得出同名的状态）：不认，不通过', async () => {
+    const noCreator = { context: '认领对得上', state: 'success', description: '#12 随便' };
+    for (const status of [
+      claimStatus('success', '#12 随便', { login: 'someone', id: 1, type: 'User' }),
+      claimStatus('success', '#12 随便', { login: 'fleet-dao-engine[bot]', id: 1, type: 'User' }),
+      claimStatus('success', '#12 随便', { login: 'fleet-dao-agent[bot]', id: 2, type: 'Bot' }),
+      claimStatus('success', '#12 随便', null),
+      noCreator,
+    ]) {
+      const r = await gatePr(80, deps(linked({ statuses: [status] })));
+      expect(r.state, JSON.stringify(status)).toBe('failure');
+      expect(r.lines[0]).toMatch(/最新的「认领对得上」不是引擎机器人贴的，不认/);
+    }
+  });
+
+  it('【故意造出的失败】最新的一条说了算：引擎贴过通过，后来别人贴的同名状态照样不认', async () => {
+    const fake = claimStatus('success', '#12 我说行', { login: 'someone', id: 1, type: 'User' });
+    const r = await gatePr(80, deps(linked({ statuses: [fake, claimOk(12)] })));
+    expect(r.state).toBe('failure');
+    // 反过来：引擎的在最新，前面别人贴过的不影响
+    expect((await gatePr(80, deps(linked({ statuses: [claimOk(12), fake] })))).state).toBe('success');
+  });
+
+  it('【故意造出的失败】按旧正文判的（说明开头不是现在挂的单）：不通过，等引擎按新正文重判', async () => {
+    const r = await gatePr(80, deps(world({ prOver: { body: linkedBody(20) }, statuses: [claimOk(12)] })));
+    expect(r.state).toBe('failure');
+    expect(r.lines[0]).toMatch(/^「认领对得上」是按旧正文判的（#12 归 本机\/w1.*），PR 现在挂的是 #20/);
+    const unlinkedBefore = claimStatus('success', '没挂单，不查认领');
+    expect((await gatePr(80, deps(linked({ statuses: [unlinkedBefore] })))).state).toBe('failure');
+  });
+
+  it('还是 pending：不通过', async () => {
+    const r = await gatePr(80, deps(linked({ statuses: [claimStatus('pending', '#12 在判')] })));
+    expect(r.state).toBe('failure');
+    expect(r.lines[0]).toMatch(/^等「认领对得上」：当前头 aaaaaaa 上的还是 pending/);
+  });
+
+  it('【故意造出的失败】状态认不出、读不到、标题认不出：没查成，不当成对得上', async () => {
+    const odd = await gatePr(80, deps(linked({ statuses: [claimStatus('通过', '#12')] })));
+    expect(odd).toMatchObject({ state: 'failure', notChecked: true });
+    expect(odd.lines[0]).toMatch(/提交状态认不出：认领对得上 的 state「通过」认不出/);
+    const blind = await gatePr(80, deps(linked({ broken: { statuses: '502' } })));
+    expect(blind).toMatchObject({ state: 'failure', notChecked: true });
+    const noTitle = await gatePr(80, deps(world({ prOver: { title: null } })));
+    expect(noTitle).toMatchObject({ state: 'failure', notChecked: true });
+    expect(noTitle.lines[0]).toMatch(/标题认不出，没法判挂没挂单/);
+  });
+});
+
 describe('合并闸：写了关单的 PR 要自己带那张单的结果（#325，创始人 2026-09-27 晚拍）', () => {
   const RESULT = 'specs/12-登录/结果.md';
   const closing = (column: string, tail: string) =>
@@ -228,6 +329,9 @@ describe('合并闸：写了关单的 PR 要自己带那张单的结果（#325�
       '**这个 PR 做完就关单**：否',
       `**需求**：#12\n**这个 PR 做完就关单**：${column}`,
     ) + (tail ? `\n\n${tail}` : '');
+  // 这几条都挂了 #12：引擎贴好了通过的「认领对得上」，只看关单那一段
+  const world = (over: Parameters<typeof baseWorld>[0] = {}) =>
+    baseWorld({ statuses: [claimOk(12)], ...over });
 
   it('【故意造出的失败】正文写了 Closes #12、改动里没有 specs/12-*/结果.md：不通过，说清怎么补（改动前的合并闸照样放行）', async () => {
     const r = await gatePr(80, deps(world({ prOver: { body: closing('是', 'Closes #12') } })));
@@ -310,10 +414,11 @@ describe('合并闸：写了关单的 PR 要自己带那张单的结果（#325�
     );
   });
 
-  it('PR 读回来正文认不出：认不出要关哪几张，没查成', async () => {
+  it('PR 读回来正文认不出：认不出要关哪几张、挂没挂单，没查成', async () => {
     const r = await gatePr(80, deps(world({ prOver: { body: 42 } })));
     expect(r).toMatchObject({ state: 'failure', notChecked: true });
-    expect(r.lines[0]).toBe('没查成：PR #80 的正文认不出，没法判它要关哪几张单。');
+    expect(r.lines).toContain('没查成：PR #80 的正文认不出，没法判它要关哪几张单。');
+    expect(r.lines).toContain('没查成：PR #80 的正文认不出，没法判挂没挂单、要不要看「认领对得上」。');
   });
 });
 
@@ -479,6 +584,9 @@ describe('入口：认出要算哪些 PR、写状态、退出码', () => {
     });
     await run(w, 'status', { context: 'second-opinion', sha: HEAD, state: 'success' });
     expect(w.written.map((s) => s.sha)).toEqual([HEAD]);
+    // 引擎贴了「认领对得上」（#348）也重算
+    await run(w, 'status', { context: '认领对得上', sha: HEAD, state: 'failure' });
+    expect(w.written.map((s) => s.sha)).toEqual([HEAD, HEAD]);
     const other = world();
     expect(await run(other, 'status', { context: 'ci', sha: HEAD })).toEqual({
       code: 0,
@@ -644,20 +752,19 @@ describe('读写 GitHub（假的 fetch）', () => {
     await expect(notList.files(80)).rejects.toThrow('不是列表');
   });
 
-  it('提交状态翻页读全；sha 对不上、少了、认不出都抛', async () => {
-    const one = (page: number) => ({
-      sha: HEAD,
-      total_count: 2,
-      statuses: [{ context: `c${page}`, state: 'success' }],
-    });
-    const f = fakeFetch((url) => ({ json: one(url.endsWith('&page=1') ? 1 : 2) }));
-    await expect(gateGitHub(ghApi(env, f.fn)).statuses(HEAD)).resolves.toHaveLength(2);
-    const other = fakeFetch(() => ({ json: { ...one(1), sha: MERGE } }));
-    await expect(gateGitHub(ghApi(env, other.fn)).statuses(HEAD)).rejects.toThrow('读回来的是 bbbbbbb');
-    const short = fakeFetch(() => ({ json: { sha: HEAD, total_count: 5, statuses: [] } }));
-    await expect(gateGitHub(ghApi(env, short.fn)).statuses(HEAD)).rejects.toThrow('只读到 0 条');
-    const junk = fakeFetch(() => ({ json: [] }));
-    await expect(gateGitHub(ghApi(env, junk.fn)).statuses(HEAD)).rejects.toThrow('认不出');
+  it('提交状态读逐条的列表（带 creator：「认领对得上」要看是谁贴的），翻页读全；认不出、翻不完都抛', async () => {
+    const page1 = Array.from({ length: 100 }, (_, i) => ({ context: `c${i}`, state: 'success' }));
+    const f = fakeFetch((url) =>
+      url.endsWith('&page=1') ? { json: page1 } : { json: [{ context: 'last', state: 'success' }] },
+    );
+    await expect(gateGitHub(ghApi(env, f.fn)).statuses(HEAD)).resolves.toHaveLength(101);
+    expect(f.calls[0]?.url).toBe(
+      `https://api.example/repos/o/r/commits/${HEAD}/statuses?per_page=100&page=1`,
+    );
+    const junk = fakeFetch(() => ({ json: { sha: HEAD, total_count: 0, statuses: [] } }));
+    await expect(gateGitHub(ghApi(env, junk.fn)).statuses(HEAD)).rejects.toThrow('第 1 页认不出（不是列表）');
+    const endless = fakeFetch(() => ({ json: page1 }));
+    await expect(gateGitHub(ghApi(env, endless.fn)).statuses(HEAD)).rejects.toThrow('没读完');
   });
 
   it('提交关联的 PR 翻页读完；某一页认不出、翻不完都抛（调用方判没查成）', async () => {

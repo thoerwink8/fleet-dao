@@ -21,7 +21,6 @@ import {
   summary,
 } from './lib.mjs';
 
-const AGENT_SCOPE = '/usr/local/sbin/fleet-agent-scope';
 const NODE = '/usr/bin/node';
 const SHA = /^[0-9a-f]{40}$/;
 const tail = (text, n = 3) =>
@@ -197,11 +196,6 @@ export const realIo = {
     } catch (e) {
       return { ok: false, why: e instanceof Error ? e.message : String(e) };
     }
-  },
-  async sessions() {
-    const r = run(AGENT_SCOPE, ['list'], { timeoutMs: 20_000 });
-    if (r.code !== 0) throw new Error(`fleet-agent-scope list 退出码 ${r.code}：${tail(r.stderr)}`);
-    return r.stdout;
   },
   runRelease,
   async checkoutHead() {

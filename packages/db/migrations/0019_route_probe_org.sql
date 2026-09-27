@@ -1,0 +1,2 @@
+ALTER TABLE "routes" ADD COLUMN "probe_org" text;--> statement-breakpoint
+ALTER TABLE "routes" ADD CONSTRAINT "routes_probe_org_known" CHECK ("routes"."probe_org" is null or "routes"."probe_org" in ('solo', 'carpool'));

@@ -880,7 +880,15 @@ export type WriteHandoffResult =
   | { ok: false; lease: SeatLease | null; now: string };
 
 export type TakeClaimResult =
-  | { ok: true; claim: IssueClaim; now: string }
+  | {
+      ok: true;
+      claim: IssueClaim;
+      now: string;
+      /** 这一行原来那份（结束了的、帅位自己占着被换掉的、这次强制作废的）；原来没有是 null。 */
+      previous: IssueClaim | null;
+      /** 这次带创始人原话强制作废掉的那份（claim reassign）；没有是 null。 */
+      voided: IssueClaim | null;
+    }
   /** 不是帅位（换了人、过了期、座位上没人）：这张单一点没动。 */
   | { ok: false; reason: 'not_seat'; why: string; now: string }
   /** 别人（引擎、别的工人）拿着还没结束：这张单一点没动。 */
@@ -927,6 +935,8 @@ export interface SeatStore {
       owner: { kind: 'seat' | 'worker'; label: string };
       graceMinutes?: number | undefined;
       note?: string | undefined;
+      /** 创始人原话（强制改派，claim reassign）：别人还活着拿着的（引擎、别的工人）当场作废、给这次的工人。 */
+      founder?: string | undefined;
     },
   ): Promise<TakeClaimResult>;
   /**

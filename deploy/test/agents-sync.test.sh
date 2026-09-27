@@ -52,13 +52,15 @@ done
 ORIGINAL=$'# 原来的规矩\n- 一条\n'
 printf '%s' "$ORIGINAL" >"$H/.codex/AGENTS.md"
 chown "$U:$U" "$H/.codex/AGENTS.md"
-# 假仓：真的 AGENTS.md 加一个 skill、两个假钩子脚本，只有 root 读得到——换身份之后才读原件的话，这里就读不到
+# 假仓：真的 AGENTS.md 加一个 skill、三个假钩子脚本（和 HOOK_TARGETS 登记的名字对上，缺一个就会被 missingScript
+# 拦下、settings.json 整份不写——只有 root 读得到，换身份之后才读原件的话，这里就读不到
 R=$T/repo
 mkdir -p "$R/agents/skills/demo" "$R/agents/hooks"
 cp "$REPO/AGENTS.md" "$R/AGENTS.md"
 printf -- '---\nname: demo\n---\n演示用的 skill\n' >"$R/agents/skills/demo/SKILL.md"
 printf '// 假的调工具前钩子\n' >"$R/agents/hooks/pretool.mjs"
 printf '// 假的开会话钩子\n' >"$R/agents/hooks/session-start.mjs"
+printf '// 假的收尾提醒钩子\n' >"$R/agents/hooks/stop.mjs"
 chmod -R go-rwx "$R"
 
 fail=0
@@ -85,20 +87,34 @@ check "输出写明原文件几行、备份在哪" "$(grep -c '接管——原�
 check "skill 拷进了 ~/.claude/skills 和 ~/.agents/skills" \
   "$(cat "$H/.claude/skills/demo/SKILL.md" "$H/.agents/skills/demo/SKILL.md" | grep -c '演示用的 skill')" 2
 check "清单记下了装过的 skill" "$(grep -c '"demo"' "$H/.fleet-dao/agents-sync.json")" 2
-# 替别的用户写：调工具前的钩子照装（他家里就有 reclaude 的设备密钥，借道读这份设置的几家起的会话也要拦），
-# 开会话那条不登记（它要在他自己能拉、能写的检出里快进、同步，法国的检出跟着自动发布走）
+# 替别的用户写：调工具前、Stop 那两条钩子照装（他家里就有 reclaude 的设备密钥，借道读这份设置的几家起的会话也要拦；
+# Stop 不需要会话、不用等自动发布），开会话那条不登记（它要在他自己能拉、能写的检出里快进、同步，法国的检出跟着自动发布走）
 check "钩子脚本拷进了他家" "$(cat "$H/.fleet-dao/hooks/pretool.mjs")" "// 假的调工具前钩子"
-check "Claude 的设置里只登记了调工具前那条" \
+check "Stop 钩子脚本也拷进了他家" "$(cat "$H/.fleet-dao/hooks/stop.mjs")" "// 假的收尾提醒钩子"
+check "Claude 的设置里登记了调工具前、Stop 那两条" \
   "$("$NODE" -e 'const s = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); console.log(Object.keys(s.hooks).join(","))' "$H/.claude/settings.json")" \
-  PreToolUse
+  PreToolUse,Stop
 check "写明开会话那条为什么不登记" "$(grep -c 'SessionStart：替别的用户写（--user）时不登记开会话钩子' <<<"$OUT")" 1
+# 全局 git 忽略：换完身份之后才起的 git 子进程，cwd 还是原来那个仓目录（$U 摸不到）——踩过一次
+# 「fatal: failed to stat '<仓目录>': Permission denied」，git-excludes.ts 加了 -C "$home" 才好
+check "core.excludesFile 设到了 gitignore_global（原来没设过）" \
+  "$(grep -c '设成了 ~/.fleet-dao/gitignore_global（原来没设过）' <<<"$OUT")" 1
+check "core.excludesFile 真写进了 ~/.gitconfig" \
+  "$(git config --file "$H/.gitconfig" --path --get core.excludesFile)" \
+  "$H/.fleet-dao/gitignore_global"
+check "gitignore_global 新建、写了 _tmp/ 那一块" "$(grep -c '新建，写入 _tmp/ 那一块' <<<"$OUT")" 1
+check "gitignore_global 文件内容里真有 _tmp/" \
+  "$(grep -c 'fleet-dao:全局忽略 开始' "$H/.fleet-dao/gitignore_global")" 1
+check "gitignore_global 归 $U、不归 root" "$(stat -c %U "$H/.fleet-dao/gitignore_global")" "$U"
 
 echo "== 第二遍零改动，--check 全绿"
 run_sync --apply --user "$U"
 check "第二遍退出 0" "$RC" 0
 check "第二遍一处没改" "$(grep -c '↻' <<<"$OUT")" 0
+check "第二遍全局 git 忽略读回一致" "$(grep -c 'gitignore_global：_tmp/ 在全局忽略里' <<<"$OUT")" 1
 run_sync --check --user "$U"
 check "--check 退出 0" "$RC" 0
+check "--check 也认全局 git 忽略一致" "$(grep -c 'gitignore_global：_tmp/ 在全局忽略里' <<<"$OUT")" 1
 
 echo "== 属主不对的文件：--check 判红"
 chown root:root "$H/.claude/CLAUDE.md"

@@ -473,6 +473,101 @@ describe('claim.mjs：认领、报一步、做完', () => {
     expect(await w.claim(['done', '40', '--claim', CLAIM_ID])).toBe(1);
     expect(await w.claim(['step', '40', '--claim', 'abc'])).toBe(1);
   });
+
+  it('认领变了法国当场重贴 PR 上的「认领对得上」（#348）：贴了说一句；【故意造出的失败】没贴成打到标准错误，认领照样算', async () => {
+    const w = await seated();
+    w.replies.push({
+      status: 0,
+      json: { ok: true, claim: claimJson(), prStatus: { ok: true, checked: 1, posted: [88], problems: [] } },
+    });
+    expect(await w.claim(['take', '40', '--label', 'w1'])).toBe(0);
+    expect(w.out.join('\n')).toContain('PR 上的「认领对得上」重贴了：#88');
+    w.replies.push({
+      status: 0,
+      json: { ok: true, claim: claimJson({ prs: [88] }), prStatus: { ok: false, error: '这里没接 GitHub' } },
+    });
+    expect(await w.claim(['step', '40', '--claim', CLAIM_ID, '--pr', '88'])).toBe(0);
+    expect(w.err.at(-1)).toContain('PR 上的「认领对得上」没重贴成（这里没接 GitHub）');
+  });
+});
+
+describe('claim.mjs reassign：帅位改派（#348）', () => {
+  async function seated() {
+    const w = world();
+    w.replies.push(taken(3));
+    expect(await w.seat(['take', '--session', 's1'])).toBe(0);
+    return w;
+  }
+
+  it('给本机的工人：带着任期、创始人原话调 claim reassign，打出法国的话，单上的「在做」镜子改成新工人', async () => {
+    const w = await seated();
+    w.replies.push({
+      status: 0,
+      stdout: `改派了 ${REPO}#40：归 本机/w2，认领号 ${CLAIM_ID}（开 PR 时正文「认领」栏写它）\n原来那份作废了：引擎（认领 0a0b0c0d）\n引擎的工作流 req:${REPO}#40 叫停了\n原来那份开着的 PR 关了（分支留着）：#88\n`,
+    });
+    expect(
+      await w.claim(['reassign', '40', '--to', 'worker', '--label', 'w2', '--founder', '40 本机做']),
+    ).toBe(0);
+    expect(w.calls.at(-1)?.args).toEqual([
+      'claim',
+      'reassign',
+      REPO,
+      '40',
+      '--to',
+      'worker',
+      '--machine',
+      '本机',
+      '--session',
+      's1',
+      '--term',
+      '3',
+      '--scope',
+      'main',
+      '--label',
+      'w2',
+      '--founder',
+      '40 本机做',
+    ]);
+    expect(w.out.join('\n')).toContain('原来那份开着的 PR 关了（分支留着）：#88');
+    expect(w.github.claims(40)).toMatchObject([{ state: 'doing', machine: '本机' }]);
+  });
+
+  it('给引擎：带 --reason 走交单；【故意造出的失败】不带 --reason、--to 认不出、给本机不带 --label：退出码 1，不碰 ssh', async () => {
+    const w = await seated();
+    const before = w.calls.length;
+    expect(await w.claim(['reassign', '40', '--to', 'engine'])).toBe(1);
+    expect(await w.claim(['reassign', '40', '--to', 'robot'])).toBe(1);
+    expect(await w.claim(['reassign', '40', '--to', 'worker'])).toBe(1);
+    expect(await w.claim(['reassign', '40', '--to', 'engine', '--reason', 'r', '--label', 'w'])).toBe(1);
+    expect(w.calls.length).toBe(before);
+    w.replies.push({ status: 0, stdout: `已交给 fleet：${REPO}#40\n` });
+    expect(
+      await w.claim(['reassign', '40', '--to', 'engine', '--reason', '交给引擎', '--founder', '给引擎']),
+    ).toBe(0);
+    expect(w.calls.at(-1)?.args).toEqual(
+      expect.arrayContaining(['--to', 'engine', '--reason', '交给引擎', '--founder', '给引擎']),
+    );
+    expect(w.github.comments).toEqual([]);
+  });
+
+  it('【故意造出的失败】原来的还活着没带原话：退出码 3，打出法国的话；改派成了但旧 PR 没关成：退出码 2，照实打出要人补的', async () => {
+    const w = await seated();
+    w.replies.push({
+      status: 3,
+      stdout: `没改派（${REPO}#40 没动）：引擎 在做，还活着。要强制改派带上创始人原话 --founder "…"：原来那份当场作废\n`,
+    });
+    expect(await w.claim(['reassign', '40', '--to', 'worker', '--label', 'w2'])).toBe(3);
+    expect(w.err.at(-1)).toContain('要强制改派带上创始人原话');
+    w.replies.push({
+      status: 1,
+      stdout: `改派了 ${REPO}#40：归 本机/w2，认领号 ${CLAIM_ID}\n原来那份的 PR 没处理（GitHub 没接上：限流了）：撤自动合并、关掉要人补\n`,
+    });
+    expect(await w.claim(['reassign', '40', '--to', 'worker', '--label', 'w2', '--founder', 'x'])).toBe(2);
+    expect(w.err.at(-1)).toContain('撤自动合并、关掉要人补');
+    w.replies.push({ status: 255, stderr: 'ssh: Could not resolve hostname contabo\n' });
+    expect(await w.claim(['reassign', '40', '--to', 'worker', '--label', 'w2', '--founder', 'x'])).toBe(2);
+    expect(w.err.at(-1)).toContain('不知道法国那边做没做');
+  });
 });
 
 describe('推前钩子（claim.mjs prepush）', () => {
