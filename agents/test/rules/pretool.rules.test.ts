@@ -1,21 +1,31 @@
 // 钉住调工具前钩子（agents/hooks/pretool.mjs）拦的规矩（改标准：改这个文件要创始人同意，packages/conventions/standard-paths.json）。
 // 几条规矩：fleet-dao 里不用 git stash（list、show 放行）；
 // 本机不切号、不登录、不退出（ssh 到别处的放行）；bash 里会被当命令执行的反引号全机都拦（单引号、带引号的 heredoc 里放行，
-// PowerShell 不管）；fleet-dao 开单走 pnpm issue:new；认不出的输入按拦处理。脚本改了这些判断，这里会红。
+// PowerShell 不管）；fleet-dao 开单走 pnpm issue:new；认不出的输入按拦处理；
+// 密钥文件的内容不进对话：碰到密钥路径只放行不读内容的（列目录、看权限、判断在不在），看结构走 secret-shape.mjs，
+// 它一个值都不打（2026-09-27 帅位按字段名猜着遮值，把 reclaude 的设备密钥和账号名打进了对话）。脚本改了这些判断，这里会红。
 // 命令字符串拆开拼：免得跑这条测试的命令、或者有人 grep 它时，本机的护栏把自己拦下。
 import { spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 interface PretoolLib {
   decide(raw: string, fallbackCwd?: string): { code: number; message?: string };
   SHELL_TOOLS: Record<string, string>;
+  GITIGNORE_NOT_BLOCKED: Record<string, string>;
+}
+interface ShapeLib {
+  main(argv: string[], io: { out(line: string): void; err(line: string): void }): number;
 }
 
 const HOOKS = fileURLToPath(new URL('../../hooks/', import.meta.url));
 const HOOK = join(HOOKS, 'pretool.mjs');
+const SHAPE_SCRIPT = join(HOOKS, 'secret-shape.mjs');
 const lib = (await import(pathToFileURL(HOOK).href)) as PretoolLib;
+const shape = (await import(pathToFileURL(SHAPE_SCRIPT).href)) as ShapeLib;
 
 const s = `st${'ash'}`;
 const rc = `recl${'aude'}`;
@@ -23,6 +33,10 @@ const bt = '`';
 const create = `cre${'ate'}`;
 const F = '/work/fleet-dao';
 const O = '/work/other';
+const RC = `.recl${'aude'}`;
+const ETC = `/etc/fleet${'-dao'}`;
+const CRED = `.creden${'tials'}.json`;
+const SHAPE = '"$HOME/.fleet-dao/hooks/secret-shape.mjs"';
 
 /** [命令, 该给的退出码, 会话目录, 工具名（不写是 Bash；写了 undefined 就是没给工具名）] */
 type Case = [string, 0 | 2, string, (string | undefined)?];
@@ -142,8 +156,19 @@ describe('借道读这条钩子的几家：格式认得、规矩照拦', () => {
   });
 });
 
-describe('命令行外壳：stdin 进、退出码出', () => {
-  const run = (stdin: string) => spawnSync(process.execPath, [HOOK], { input: stdin, encoding: 'utf8' });
+// 同步起子进程：卡死由子进程自己的上限管，不靠 vitest 的超时（它打断不了同步用例，机器一忙又把慢报成红，#264）
+describe('命令行外壳：stdin 进、退出码出', { timeout: 0 }, () => {
+  const run = (stdin: string) => {
+    const r = spawnSync(process.execPath, [HOOK], {
+      input: stdin,
+      encoding: 'utf8',
+      timeout: 60_000,
+      killSignal: 'SIGKILL',
+    });
+    if (r.error !== undefined || r.status === null)
+      throw new Error(`钩子没跑完：${r.error?.message ?? r.signal}`);
+    return r;
+  };
 
   it('拦下：退出码 2，理由在 stderr', () => {
     const r = run(JSON.stringify({ tool_name: 'Bash', tool_input: { command: `git ${s}` }, cwd: F }));
@@ -161,5 +186,348 @@ describe('命令行外壳：stdin 进、退出码出', () => {
     const r = run('不是 JSON');
     expect(r.status).toBe(2);
     expect(r.stderr).toContain('按拦处理');
+  });
+
+  it('读密钥文件：退出码 2，stderr 指到安全查看脚本', () => {
+    const r = run(
+      JSON.stringify({ tool_name: 'Bash', tool_input: { command: `cat ~/${RC}/device.json` }, cwd: O }),
+    );
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain('secret-shape.mjs');
+  });
+});
+
+// —— 密钥文件：值不进对话 ——
+
+/** 2026-09-27 那次的原样：for 循环把 ~/.reclaude/*.json 逐个 node -e 读出来，按字段名猜着遮值 */
+const INCIDENT = `for f in ~/${RC}/*.json; do node -e 'const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));for(const k of Object.keys(j))console.log(k,/token|secret|key/i.test(k)?"***":j[k])' "$f"; done`;
+
+/** [工具名, 命令, 该给的退出码] */
+type SecretCase = [string, string, 0 | 2];
+
+const secretCases: SecretCase[] = [
+  ['Bash', INCIDENT, 2],
+  // 家目录、分隔符的各种写法：~、$HOME、${HOME}、%USERPROFILE%、$env:USERPROFILE、反斜杠、Git Bash 的 /c/Users/…
+  ['Bash', `cat ~/${RC}/device.json`, 2],
+  ['Bash', `cat $HOME/${RC}/*.json`, 2],
+  ['Bash', `head -c 64 \${HOME}/${RC}/claude-ca-bundle.pem`, 2],
+  ['Bash', `cat /c/Users/alice/${RC}/device.key`, 2],
+  ['Bash', `cat 'C:\\Users\\alice\\${RC}\\ca.key'`, 2],
+  ['PowerShell', `Get-Content $env:USERPROFILE\\${RC}\\device.json`, 2],
+  ['PowerShell', `type %USERPROFILE%\\.claude\\${CRED}`, 2],
+  ['Bash', `type %USERPROFILE%\\.claude\\${CRED}`, 2],
+  ['PowerShell', `gc ~\\.claude\\${CRED}`, 2],
+  ['Bash', `jq . ~/.claude/${CRED}`, 2],
+  // 路径拆开写在代码里、整个目录、reclaude 留的 Claude 配置副本
+  [
+    'Bash',
+    `node -e "console.log(require('fs').readFileSync(require('path').join(require('os').homedir(), '${RC}', 'device.json'), 'utf8'))"`,
+    2,
+  ],
+  ['Bash', `grep -r org ~/${RC}/`, 2],
+  ['Bash', `cat ~/${RC}/backups/x/claude.json`, 2],
+  // 钩子看不清的写法：cd 进去、赋给变量、$( )、管道交给会读文件的、输出写进文件（下一条再读）
+  ['Bash', `cd ~/${RC} && cat device.json`, 2],
+  ['Bash', `P=~/${RC}/device.json; cat "$P"`, 2],
+  ['Bash', `cat $(ls ~/${RC}/*.json)`, 2],
+  ['Bash', `echo "$(cat ~/${RC}/device.json)"`, 2],
+  ['Bash', `ls ~/${RC}/*.json | xargs cat`, 2],
+  ['Bash', `ls ~/${RC} |\n  xargs cat`, 2],
+  ['Bash', `cat ~/${RC}/device.json > /tmp/x`, 2],
+  ['Bash', `cp ~/${RC}/device.json /tmp/d.json && jq . /tmp/d.json`, 2],
+  ['Bash', `find ~/${RC} -name '*.json' -delete`, 2],
+  ['Bash', 'git show HEAD:deploy/tls.key', 2],
+  ['Bash', 'git add -p deploy/tls.key', 2],
+  ['PowerShell', `Get-ChildItem $HOME\\${RC}\\*.json | Get-Content`, 2],
+  ['PowerShell', `Get-ChildItem $HOME\\${RC} | ForEach-Object { Get-Content $_.FullName }`, 2],
+  ['PowerShell', `[IO.File]::ReadAllText("$env:USERPROFILE\\${RC}\\device.json")`, 2],
+  ['PowerShell', `$p = "$HOME\\${RC}\\device.json"; Get-Content $p`, 2],
+  // 套一层：sudo、bash -c、pwsh -Command、cmd /c、ssh 到法国
+  ['Bash', `sudo -u fleet cat ${ETC}/api.env`, 2],
+  ['Bash', `bash -c 'cat ~/${RC}/device.json'`, 2],
+  ['Bash', `bash -c 'cat "$1"' _ ~/${RC}/device.json`, 2],
+  ['Bash', `pwsh -Command "Get-Content ~/${RC}/device.json"`, 2],
+  ['Bash', `cmd /c type %USERPROFILE%\\.claude\\${CRED}`, 2],
+  ['Bash', `ssh fr 'cat ${ETC}/api.env'`, 2],
+  ['Bash', `ssh fr "sudo cat ${ETC}/engine.env"`, 2],
+  ['Bash', `ssh fr 'grep TOKEN ${ETC}/*.env'`, 2],
+  ['Bash', `ssh fr 'cat ${ETC}/reclaude-api.key'`, 2],
+  ['Bash', `ssh fr 'cat ${ETC}/github/gh-app-x.json'`, 2],
+  // 别的密钥文件
+  ['Bash', 'cat ~/.secrets/github.pass', 2],
+  ['Bash', 'cat deploy/tls.key', 2],
+  ['Bash', 'cat ~/.fleet-dao/vault-key.txt', 2],
+  ['Bash', 'age -d -i ~/.fleet-dao/vault-key.txt x.json.age', 2],
+  ['Bash', 'cat ~/.ssh/id_ed25519', 2],
+  // 借道读这条钩子的几家
+  ['run_terminal_command', `cat ~/${RC}/device.json`, 2],
+  ['exec', `cat ~/${RC}/device.json`, 2],
+  ['Shell', `cat ~/${RC}/device.json`, 2],
+  // —— 放行：只列目录、看权限、判断在不在 ——
+  ['Bash', `ls -la ~/${RC}/`, 0],
+  ['Bash', `test -f ~/${RC}/device.json`, 0],
+  ['Bash', `stat -c %a ${ETC}/api.env`, 0],
+  ['Bash', `ssh fr 'stat -c %a ${ETC}/api.env'`, 0],
+  ['Bash', `ssh fr 'ls -la ${ETC}/'`, 0],
+  ['Bash', `[ -s ~/${RC}/device.json ] && echo 有 || echo 没有`, 0],
+  ['Bash', `[[ -f ~/${RC}/device.json && -s ~/${RC}/device.json ]]`, 0],
+  ['Bash', `ls ~/${RC}/*.json | wc -l`, 0],
+  ['Bash', `find ~/${RC} -name '*.json'`, 0],
+  ['Bash', `echo ~/${RC}/*.json`, 0],
+  ['Bash', `ls ~/${RC}/ && reclaude status`, 0],
+  ['Bash', 'mkdir -p ~/.secrets && chmod 700 ~/.secrets', 0],
+  ['Bash', 'git check-ignore -v .secrets/x.pass', 0],
+  ['Bash', 'git rm --cached deploy/tls.key', 0],
+  ['Bash', `ssh fr "echo 'X=1' | sudo tee -a ${ETC}/api.env"`, 0],
+  ['Bash', 'ssh-keygen -lf ~/.ssh/id_ed25519', 0],
+  ['Bash', 'cat ~/.ssh/id_ed25519.pub', 0],
+  ['Bash', 'openssl x509 -in /etc/letsencrypt/live/x/fullchain.pem -noout -enddate', 0],
+  ['Bash', "ssh -i ~/.ssh/fr.key fr 'systemctl status fleet-api'", 0],
+  ['Bash', `cat ~/${RC}-org-switch-last.json`, 0],
+  ['Bash', `ls # 注释里写到的不算：cat ~/${RC}/device.json`, 0],
+  ['PowerShell', `Test-Path $env:USERPROFILE\\${RC}\\device.json`, 0],
+  ['PowerShell', `Get-Item $HOME\\.claude\\${CRED} | Select-Object Length, LastWriteTime`, 0],
+  ['PowerShell', `Get-ChildItem -Force $env:USERPROFILE\\${RC} | Format-Table Name, Length`, 0],
+  ['PowerShell', `Get-FileHash $HOME\\${RC}\\device.json`, 0],
+  // 查看脚本本身；别的机器上的文件，把它经 ssh 喂给那头的 node
+  ['Bash', `node ${SHAPE} ~/${RC}/*.json`, 0],
+  ['PowerShell', `node ${SHAPE} $env:USERPROFILE\\${RC}\\device.json`, 0],
+  ['Bash', `cat ${SHAPE} | ssh fr 'node --input-type=module - ${ETC}/api.env'`, 0],
+  // 只出指纹：值不过屏幕
+  ['Bash', `cat ~/${RC}/device.json | sha256sum`, 0],
+];
+
+const secretInput = (tool: string, command: string) =>
+  JSON.stringify({ tool_name: tool, tool_input: { command }, cwd: O });
+
+describe('密钥文件：碰到只放行不读内容的，值不进对话', () => {
+  it.each(
+    secretCases.map(([tool, command, want]) => [JSON.stringify(command), tool, want, command] as const),
+  )('%s（%s）→ 退出码 %i', (_name, tool, want, command) => {
+    const got = lib.decide(secretInput(tool, command));
+    expect(got.code).toBe(want);
+    if (want === 2) expect(got.message).toContain('secret-shape.mjs');
+  });
+
+  it('拦下时说清楚怎么办：看结构用旁边的安全查看脚本，判断在不在用 stat、test', () => {
+    const got = lib.decide(secretInput('Bash', INCIDENT));
+    expect(got.code).toBe(2);
+    expect(got.message).toContain(`node ${SHAPE}`);
+    expect(got.message).toMatch(/stat/);
+    expect(got.message).toMatch(/Test-Path/);
+    expect(existsSync(SHAPE_SCRIPT)).toBe(true);
+  });
+
+  // 文档里照着跑的命令不能被这条拦掉（原样抄来，占位的机器名换成 fr、hk）：docs/reclaude-self-check.md 第 2 节的自检
+  // （只读 state.json 的一个字段、数日志条数），docs/ops.md 第九节「两台同一份」「目录配置」那几条管道（值不过屏幕）。
+  // 不在测试里现读文档：agents 的测试读包外文件，CI 按改动选测试时要把那份文件接到 agents 上（ci-plan 是碰安全的路径）。
+  it.each([
+    `python3 -c "import json;print(json.load(open('$HOME/${RC}/state.json'))['daemon'].get('leak_report'))"`,
+    `grep -c "event: non-cc-client" ~/${RC}/logs/daemon.log     # 看有没有**新增**（记下当前条数，之后只许不涨）`,
+    `ssh fr 'cat ${ETC}/gateway-token.env' | ssh hk 'f=${ETC}/gateway-token.env; t=$(mktemp ${ETC}/.new.XXXXXX); if cat > "$t" && grep -qE "^FLEET_FEISHU_GATEWAY_TOKEN=[0-9a-f]{64}$" "$t" && chown root:fleet "$t" && chmod 640 "$t"; then mv "$t" "$f"; else rm -f "$t"; echo "没换：收到的不是完整的通行证" >&2; exit 1; fi'`,
+    `ssh fr 'sha256sum < ${ETC}/gateway-token.env'; ssh hk 'sha256sum < ${ETC}/gateway-token.env'`,
+    `~/.fleet-dao/bin/age -d -i ~/.fleet-dao/vault-key.txt france${ETC}/catalog.json.age | ssh fr 'f=${ETC}/catalog.json; t=$(mktemp ${ETC}/.new.XXXXXX); if cat > "$t" && [ -s "$t" ] && node -e "JSON.parse(require(\\"fs\\").readFileSync(process.argv[1], \\"utf8\\"))" "$t" && chown root:fleet "$t" && chmod 640 "$t"; then mv "$t" "$f"; else rm -f "$t"; echo "没换：收到的是空的或不是完整的 JSON" >&2; exit 1; fi'`,
+    `~/.fleet-dao/bin/age -d -i ~/.fleet-dao/vault-key.txt france${ETC}/catalog.json.age | sha256sum; ssh fr 'sha256sum < ${ETC}/catalog.json'`,
+  ])('文档里照着跑的照样放行：%s', (command) => {
+    expect(lib.decide(secretInput('Bash', command)).code).toBe(0);
+  });
+});
+
+// 仓根 .gitignore「密钥文件名单」那一段（照抄）：每一行这里都拦（照那一行造个路径 cat 它），除了钩子里
+// GITIGNORE_NOT_BLOCKED 写明理由不拦的；只列目录、看权限的照样放行。
+const GITIGNORE_SECRET_NAMES = [
+  '.secrets/',
+  '*.pass',
+  '*.key',
+  '*.pem',
+  'vault-key.txt',
+  '*.age',
+  '*.p12',
+  '*.pfx',
+  '*.ppk',
+  '*.kdbx',
+  '*.jks',
+  '*.keystore',
+  'id_rsa',
+  'id_dsa',
+  'id_ecdsa',
+  'id_ed25519',
+  'id_ecdsa_sk',
+  'id_ed25519_sk',
+  '.env',
+  '.env.*',
+  '.pgpass',
+  '.netrc',
+  '.credentials.json',
+];
+
+describe('密钥文件名单照 .gitignore 那一段', () => {
+  const sampleFor = (line: string) => `~/${line.replace(/\*/g, 'x').replace(/\/$/, '/x')}`;
+
+  it.each(GITIGNORE_SECRET_NAMES)('%s', (line) => {
+    const sample = sampleFor(line);
+    const exempt = Object.hasOwn(lib.GITIGNORE_NOT_BLOCKED, line);
+    expect([sample, lib.decide(secretInput('Bash', `cat ${sample}`)).code]).toEqual([sample, exempt ? 0 : 2]);
+    expect([sample, lib.decide(secretInput('Bash', `ls -la ${sample}`)).code]).toEqual([sample, 0]);
+  });
+
+  it('写明不拦的每一条都在名单里、都有理由', () => {
+    for (const [line, why] of Object.entries(lib.GITIGNORE_NOT_BLOCKED)) {
+      expect(GITIGNORE_SECRET_NAMES).toContain(line);
+      expect(why.length).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe('安全查看脚本 secret-shape.mjs：只打字段名、类型、长度，一个值都不打', () => {
+  const FAKE = 'sk-rec-FAKE000000000000000000000000';
+  const ORG = 'fake-org-name-for-test';
+  let dir = '';
+  const at = (name: string) => join(dir, name);
+  const run = (...argv: string[]) => {
+    const out: string[] = [];
+    const err: string[] = [];
+    const code = shape.main(argv, { out: (l) => out.push(l), err: (l) => err.push(l) });
+    return { code, out: out.join('\n'), err: err.join('\n') };
+  };
+  const noValue = (text: string) => {
+    expect(text).not.toContain('sk-rec-');
+    expect(text).not.toContain('FAKE');
+    expect(text).not.toContain(ORG);
+  };
+
+  beforeAll(() => {
+    dir = mkdtempSync(join(tmpdir(), 'secret-shape-'));
+    const device = {
+      sk: FAKE,
+      device_id: 123456,
+      org_name: ORG,
+      org_id: 654321,
+      ok: true,
+      gone: null,
+      teams: { 'team-2026': { role: 'owner' } },
+      list: [FAKE, { nested: FAKE }],
+    };
+    writeFileSync(at('device.json'), JSON.stringify(device));
+    writeFileSync(at('state.json'), JSON.stringify({ daemon: { leak_report: false } }));
+    writeFileSync(at('api.env'), `# 注释\nexport FLEET_TOKEN="${FAKE}"\nEMPTY=\nPLAIN=${ORG} # 行尾注释\n`);
+    writeFileSync(at('broken.json'), `{"sk": "${FAKE}", `);
+    writeFileSync(at('bad.env'), `GOOD=1\n${FAKE}\nALSO_GOOD=2\n`);
+    writeFileSync(at('db.pass'), `${ORG}=${FAKE}\n`);
+    writeFileSync(
+      at('ca.pem'),
+      `-----BEGIN ${'CERTIFICATE'}-----\n${'FAKE'.repeat(16)}\n-----END CERTIFICATE-----\n`,
+    );
+    mkdirSync(at('sub'));
+  });
+  afterAll(() => {
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('JSON：每个字段一行「路径：类型，长度」，假的 sk-rec- 串、账号名一个都不出现', () => {
+    const r = run(at('device.json'));
+    expect(r.code).toBe(0);
+    expect(r.err).toBe('');
+    expect(r.out).toContain(`sk：字符串，长度 ${FAKE.length}`);
+    expect(r.out).toContain(`org_name：字符串，长度 ${ORG.length}`);
+    expect(r.out).toContain('device_id：数字');
+    expect(r.out).toContain('ok：布尔');
+    expect(r.out).toContain('list[1].nested：字符串');
+    noValue(r.out);
+    expect(r.out).not.toContain('123456');
+    expect(r.out).not.toContain('true');
+  });
+
+  it('键名像数据的（带数字、点、@）不打，只打第几个、多长', () => {
+    const r = run(at('device.json'));
+    expect(r.out).not.toContain('team-2026');
+    expect(r.out).toContain('teams[第 1 个键');
+  });
+
+  it('env：每个键一行，值不出现', () => {
+    const r = run(at('api.env'));
+    expect(r.code).toBe(0);
+    expect(r.out).toContain(`FLEET_TOKEN：字符串，长度 ${FAKE.length}`);
+    expect(r.out).toContain('EMPTY：字符串，长度 0');
+    expect(r.out).toContain(`PLAIN：字符串，长度 ${ORG.length}`);
+    noValue(r.out);
+  });
+
+  it('PEM：只数几块、各是什么，正文不打', () => {
+    const r = run(at('ca.pem'));
+    expect(r.code).toBe(0);
+    expect(r.out).toContain('CERTIFICATE：1 块');
+    noValue(r.out);
+  });
+
+  it('JSON 坏了：退出码 1，只报第几行第几列（JSON.parse 的报错里带原文，一个字不转述）', () => {
+    const r = run(at('broken.json'));
+    expect(r.code).toBe(1);
+    expect(r.err).toContain('不是合法的 JSON');
+    expect(r.out).toBe('');
+    noValue(r.err);
+  });
+
+  it('env 里有一行认不出：退出码 1，只报第几行，不打那一行，也不打别的键', () => {
+    const r = run(at('bad.env'));
+    expect(r.code).toBe(1);
+    expect(r.err).toContain('第 2 行认不出');
+    expect(r.out).toBe('');
+    noValue(r.err);
+  });
+
+  it('不是 JSON、env、PEM 的（口令文件）：不读——按 KEY=VALUE 读会把 = 前半截当键名打出来', () => {
+    const r = run(at('db.pass'));
+    expect(r.code).toBe(1);
+    expect(r.err).toContain('认不出格式');
+    expect(r.out).toBe('');
+    noValue(r.err);
+  });
+
+  it('读不了的文件、目录、没有匹配的通配：明说，退出码 1，不打空', () => {
+    for (const arg of [at('missing.json'), at('sub'), at('*.nothing')]) {
+      const r = run(arg);
+      expect([arg, r.code]).toEqual([arg, 1]);
+      expect(r.err).toMatch(/读不了|是目录|没有匹配/);
+      expect(r.out).toBe('');
+    }
+    const partly = run(at('state.json'), at('missing.json'));
+    expect(partly.code).toBe(1);
+    expect(partly.out).toContain('daemon.leak_report：布尔');
+    expect(partly.out).not.toContain('false');
+  });
+
+  it('最后一段带 * 的自己展开（PowerShell 不替原生命令展开通配）', () => {
+    const r = run(at('*.json'));
+    expect(r.code).toBe(1); // broken.json 认不出
+    expect(r.out).toContain('device.json（JSON）');
+    expect(r.out).toContain('state.json（JSON）');
+    noValue(`${r.out}\n${r.err}`);
+  });
+
+  it('没给文件：说用法、退出码 2', () => {
+    const r = run();
+    expect(r.code).toBe(2);
+    expect(r.err).toContain('用法');
+  });
+
+  // 同步起子进程：卡死由子进程自己的上限管，不靠 vitest 的超时（#264）
+  it('命令行外壳：真起一个进程，输出、退出码和上面一样', { timeout: 0 }, () => {
+    const cli = (file: string) =>
+      spawnSync(process.execPath, [SHAPE_SCRIPT, file], {
+        encoding: 'utf8',
+        timeout: 60_000,
+        killSignal: 'SIGKILL',
+      });
+    const ok = cli(at('device.json'));
+    expect(ok.error).toBeUndefined();
+    expect(ok.status).toBe(0);
+    expect(ok.stdout).toContain('sk：字符串');
+    noValue(ok.stdout);
+    const missing = cli(at('missing.json'));
+    expect(missing.error).toBeUndefined();
+    expect(missing.status).toBe(1);
+    expect(missing.stderr).toContain('读不了');
+    expect(missing.stdout).toBe('');
   });
 });

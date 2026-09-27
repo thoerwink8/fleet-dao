@@ -1,5 +1,6 @@
 // PreToolUse 钩子（agents-sync 装进 ~/.fleet-dao/hooks/，Claude Code 每次调 Bash、PowerShell 之前跑）：拦住绕过仓里脚本、
-// 会把本机会话全弄断的命令。只是止血：正式的强制点在仓里（packages/conventions、卫生检查），这里挡的是会话自己手滑。
+// 会把本机会话全弄断、会把密钥文件的内容打进对话的命令。只是止血：正式的强制点在仓里（packages/conventions、卫生检查），
+// 这里挡的是会话自己手滑。
 // 协议：stdin 一份 JSON（tool_name、tool_input.command、cwd）；退出码 2 = 拦下，stderr 给模型看；0 = 放行。
 // 输入认不出一律按拦处理（退出码 2），不当成没事放行。
 // 规矩本身由 agents/test/rules/pretool.rules.test.ts 钉住：改这里的判断改了规矩，那边会红。
@@ -119,6 +120,622 @@ export function bashBacktickSubst(cmd) {
 
 const block = (message) => ({ code: 2, message });
 
+// —— 密钥文件：值不进对话 ——
+// 2026-09-27 撞过：帅位想看 reclaude 的配置长什么样，for 循环把 ~/.reclaude/*.json 逐个 node -e 读出来、按字段名猜着遮值，
+// 漏了设备密钥和一个账号名，原样打进了对话。命令碰到下面这些密钥路径时，只放行不读内容的（列目录、看权限、判断在不在），
+// 看结构走同目录的 secret-shape.mjs（只打字段名、类型、长度）。挡的是会话手滑、不是存心绕：钩子看不清的写法
+// （cd 进去、赋给变量、循环、$( )、脚本块）一律按拦处理。没碰到这些路径的命令一概不管（快路：先整条扫一遍名字）。
+
+/**
+ * reclaude 目录里写死了具体文件名时，这几个算密钥（设备密钥、账号名在 device.json 里），外加 backups/（它留的 Claude
+ * 配置副本，带账号编号，docs/reclaude-self-check.md）；state.json、logs/ 不算，自检照读。目录本身、通配、变量、拆开写的一律算碰到
+ */
+const RECLAUDE_SECRETS = new Set(['device.json', 'device.key', 'ca.key', 'claude-ca-bundle.pem']);
+/** /etc/fleet-dao 里写死了文件名时：这两个环境文件、github/（机器人的私钥和 webhook 密钥）；*.key、*.pass 归通用名单 */
+const FLEET_ETC_SECRETS = new Set(['api.env', 'engine.env']);
+
+/**
+ * 仓根 .gitignore「密钥文件名单」那一段里，读出来不算漏值、所以这里不拦的；别的每一行这里都得拦。
+ * agents/test/rules/pretool.rules.test.ts 抄了那一段逐行核对：.gitignore 加一行，这里和那边一起跟上。
+ */
+export const GITIGNORE_NOT_BLOCKED = {
+  '*.age': '保险箱的密文：读出来不漏值，保险箱仓里天天要 git add、看 diff',
+  '.env': '开发里 source .env、cp .env.example .env、--env-file 太常见，没出过事，先不加关卡',
+  '.env.*': '同 .env',
+};
+
+/** 路径词前后的分界：空白、引号、反引号、分号、管道、括号、尖括号、逗号、等号、冒号、斜杠 */
+const EDGE = String.raw`\\/\s'"\x60;|&()<>,=:`;
+const DIR_REST = String.raw`(?<rest>/[^\s'"\x60;|&()<>,]*)?`;
+const RECLAUDE_RE = new RegExp(String.raw`(?<![\w.-])\.reclaude(?![\w.-])${DIR_REST}`, 'gi');
+const FLEET_ETC_RE = new RegExp(String.raw`(?<![\w.~-])/etc/fleet-dao(?![\w.-])${DIR_REST}`, 'gi');
+const SECRETS_DIR_RE = /(?<![\w.-])\.secrets(?![\w.-])/i;
+const NAMED_RE = new RegExp(
+  String.raw`(?:^|[${EDGE}])(?<name>vault-key\.txt|id_(?:rsa|dsa|ecdsa|ed25519)(?:_sk)?|\.pgpass|\.netrc|\.credentials\.json)(?=$|[${EDGE}\]}])`,
+  'i',
+);
+const GENERIC_RE = new RegExp(
+  String.raw`(?:^|[${EDGE}])[^${EDGE}\[\]{}$!+]*[^${EDGE}\[\]{}$!+.]\.(?:pass|key|pem|p12|pfx|ppk|kdbx|jks|keystore)(?=$|[${EDGE}\]}])`,
+  'i',
+);
+
+function namedLabel(name) {
+  const n = name.toLowerCase();
+  if (n === 'vault-key.txt') return '保险箱的钥匙 vault-key.txt';
+  if (n === '.credentials.json') return 'Claude 的登录凭据 .credentials.json';
+  if (n.startsWith('id_')) return 'SSH 私钥';
+  return `口令文件 ${n}`;
+}
+
+/** 目录下的路径算不算碰到密钥：目录本身、子目录、通配、变量、. 和 .. 都算；写死的文件名交给 isSecret 判 */
+function secretUnder(rest, isSecret) {
+  if (!rest || rest === '/' || rest.endsWith('/') || /[*?[\]{}$~\x60]/.test(rest)) return true;
+  const parts = rest.split('/').filter(Boolean);
+  return parts.some((p) => p === '.' || p === '..') || isSecret(parts.map((p) => p.toLowerCase()));
+}
+
+/** 这段文字碰到了哪类密钥路径（给提示用的说法）；没碰到返回 null。反斜杠当路径分隔、再去掉转义和引号各看一遍 */
+export function secretMention(text) {
+  const s = String(text);
+  for (const v of [s.replace(/\\/g, '/').replace(/\/{2,}/g, '/'), s.replace(/[\\'"\x60]/g, '')]) {
+    for (const m of v.matchAll(RECLAUDE_RE)) {
+      if (secretUnder(m.groups?.rest, (p) => p[0] === 'backups' || RECLAUDE_SECRETS.has(p.at(-1) ?? ''))) {
+        return '~/.reclaude/ 里 reclaude 的设备密钥和账号';
+      }
+    }
+    for (const m of v.matchAll(FLEET_ETC_RE)) {
+      if (secretUnder(m.groups?.rest, (p) => p[0] === 'github' || FLEET_ETC_SECRETS.has(p.at(-1) ?? ''))) {
+        return '/etc/fleet-dao/ 里的密钥';
+      }
+    }
+    if (SECRETS_DIR_RE.test(v)) return '.secrets/ 里的密钥';
+    const named = NAMED_RE.exec(v);
+    if (named?.groups?.name) return namedLabel(named.groups.name);
+    if (GENERIC_RE.test(v)) return '密钥文件（*.key、*.pem、*.pass 这类）';
+  }
+  return null;
+}
+
+/**
+ * 把命令切成管道和简单命令，只认词、引号、; && || | & 换行、往文件写的重定向。钩子看不清的写法（$( )、反引号、
+ * 括号花括号、< 读入和 heredoc、PowerShell 的脚本块和表达式）记进 complex，照样往下切，好认出碰没碰到密钥路径。
+ * 注释去掉：注释里写到的路径不算碰到。
+ */
+function scanCommand(text, kind) {
+  const ps = kind === 'powershell';
+  const s = String(text).replace(/\r\n?/g, '\n');
+  const n = s.length;
+  const complex = [];
+  const pipelines = [];
+  let pipe = [];
+  let cmd = { words: [], redirects: [] };
+  let word = null;
+  let redirect = false;
+  let afterPipe = false;
+  let inTest = false;
+  const add = (raw, value = raw) => {
+    word ??= { raw: '', value: '' };
+    word.raw += raw;
+    word.value += value;
+  };
+  const endWord = () => {
+    if (word === null) return;
+    if (redirect) {
+      cmd.redirects.push(word);
+      redirect = false;
+    } else {
+      cmd.words.push(word);
+      if (!ps && cmd.words.length === 1 && word.raw === '[[') inTest = true;
+      else if (inTest && word.raw === ']]') inTest = false;
+    }
+    word = null;
+  };
+  const endCmd = (piped) => {
+    endWord();
+    if (redirect) {
+      complex.push('重定向后面没写文件');
+      redirect = false;
+    }
+    if (cmd.words.length > 0 || cmd.redirects.length > 0) {
+      pipe.push(cmd);
+      cmd = { words: [], redirects: [] };
+    } else if (piped || afterPipe) complex.push('管道的一头是空的');
+    afterPipe = piped;
+    inTest = false;
+    if (!piped && pipe.length > 0) {
+      pipelines.push(pipe);
+      pipe = [];
+    }
+  };
+  let i = 0;
+  while (i < n) {
+    const c = s[i];
+    const d = s[i + 1];
+    if (c === ' ' || c === '\t') {
+      endWord();
+      i++;
+    } else if (c === '\n') {
+      if (!(afterPipe && word === null && cmd.words.length === 0)) endCmd(false);
+      i++;
+    } else if (c === '#' && word === null) {
+      while (i < n && s[i] !== '\n') i++;
+    } else if (c === (ps ? '`' : '\\')) {
+      if (d !== '\n') add(s.slice(i, i + 2), d ?? '');
+      i += 2;
+    } else if (c === "'") {
+      let j = i + 1;
+      let v = '';
+      for (;;) {
+        const k = s.indexOf("'", j);
+        if (k < 0) {
+          complex.push('引号没收尾');
+          v += s.slice(j);
+          j = n;
+          break;
+        }
+        v += s.slice(j, k);
+        j = k + 1;
+        if (!(ps && s[j] === "'")) break;
+        v += "'";
+        j++;
+      }
+      add(s.slice(i, j), v);
+      i = j;
+    } else if (c === '"') {
+      let j = i + 1;
+      let v = '';
+      let closed = false;
+      while (j < n) {
+        const e = s[j];
+        const f = s[j + 1] ?? '';
+        if (e === '"' && ps && f === '"') {
+          v += '"';
+          j += 2;
+        } else if (e === '"') {
+          closed = true;
+          j++;
+          break;
+        } else if (!ps && e === '\\') {
+          v += '$`"\\'.includes(f) ? f : f === '\n' ? '' : e + f;
+          j += 2;
+        } else if (ps && e === '`') {
+          v += f;
+          j += 2;
+        } else {
+          if ((!ps && e === '`') || (e === '$' && f === '(')) complex.push('双引号里有 $( ) 或反引号');
+          v += e;
+          j++;
+        }
+      }
+      if (!closed) complex.push('引号没收尾');
+      add(s.slice(i, j), v);
+      i = j;
+    } else if (!ps && c === '$' && d === "'") {
+      let j = i + 2;
+      let v = '';
+      while (j < n && s[j] !== "'") {
+        v += s[j] === '\\' ? (s[j + 1] ?? '') : s[j];
+        j += s[j] === '\\' ? 2 : 1;
+      }
+      if (j >= n) complex.push('引号没收尾');
+      add(s.slice(i, j + 1), v);
+      i = j + 1;
+    } else if (c === '$' && d === '{') {
+      const k = s.indexOf('}', i + 2);
+      const inner = k < 0 ? s.slice(i) : s.slice(i, k + 1);
+      if (k < 0 || /[`$(]/.test(inner.slice(2))) complex.push('变量展开里套了别的');
+      add(inner);
+      i += inner.length;
+    } else if (c === '$' && d === '(') {
+      complex.push('$( )');
+      add('$(');
+      i += 2;
+    } else if ((!ps && c === '`') || (ps && word === null && (c === '@' || c === '['))) {
+      complex.push(ps ? '@( )、[类型]:: 这类表达式' : '反引号');
+      add(c);
+      i++;
+    } else if ('(){}'.includes(c) && !(inTest && (c === '(' || c === ')'))) {
+      complex.push('括号、花括号');
+      add(c);
+      i++;
+    } else if (c === '<' && !inTest) {
+      complex.push('< 读入、heredoc');
+      add(c);
+      i++;
+    } else if (c === '>' && !inTest) {
+      if (word !== null && /^(?:\d+|\*)$/.test(word.raw)) word = null;
+      let j = i + 1;
+      if (s[j] === '>' || s[j] === '|') j++;
+      endWord();
+      if (s[j] === '&') {
+        j++;
+        while (j < n && /[\d-]/.test(s[j])) j++;
+      } else redirect = true;
+      i = j;
+    } else if (c === '&' && d === '&' && !inTest) {
+      endCmd(false);
+      i += 2;
+    } else if (c === '&' && !inTest && !ps && d === '>') {
+      endWord();
+      redirect = true;
+      i += s[i + 2] === '>' ? 3 : 2;
+    } else if (c === '&' && !inTest && ps && word === null && cmd.words.length === 0) {
+      i++; // PowerShell 的调用运算符：& 'C:\…\node.exe' …
+    } else if (c === '&' && !inTest && ps) {
+      complex.push('&');
+      add(c);
+      i++;
+    } else if (c === '&' && !inTest) {
+      endCmd(false);
+      i++;
+    } else if (c === '|' && d === '|' && !inTest) {
+      endCmd(false);
+      i += 2;
+    } else if (c === '|' && !inTest) {
+      endCmd(true);
+      i += !ps && d === '&' ? 2 : 1;
+    } else if (c === ';') {
+      endCmd(false);
+      i++;
+    } else {
+      add(c);
+      i++;
+    }
+  }
+  endCmd(false);
+  return { pipelines, complex };
+}
+
+const BASH_KEYWORDS = new Set(
+  'if then else elif fi for while until do done case esac select function coproc ! { }'.split(' '),
+);
+
+/** 简单命令的头一个词为什么看不清（循环、赋值、拿变量当命令），看得清返回 null */
+function headProblem(words, kind) {
+  const head = words[0];
+  if (head === undefined) return null;
+  if (kind !== 'powershell' && BASH_KEYWORDS.has(head.raw)) return `${head.raw} 这类循环、判断`;
+  if (kind !== 'powershell' && /^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=/.test(head.raw)) return '变量赋值';
+  if (head.value.startsWith('$')) return kind === 'powershell' ? '变量、表达式' : '拿变量当命令';
+  return null;
+}
+
+function cmdName(value) {
+  return (String(value).split(/[\\/]/).pop() ?? '').toLowerCase().replace(/\.(?:exe|cmd|bat|com)$/, '');
+}
+
+/** 跳过选项，返回头一个不是选项的词的下标；argOpts 里的选项吃掉下一个词（-u fleet；-ufleet 不吃） */
+function afterOptions(words, argOpts) {
+  let i = 0;
+  while (i < words.length) {
+    const v = words[i].value;
+    if (v === '--') return i + 1;
+    if (!v.startsWith('-') || v === '-') return i;
+    if (v.startsWith('--')) {
+      i += !v.includes('=') && argOpts.has(v) ? 2 : 1;
+      continue;
+    }
+    let takes = false;
+    for (let k = 1; k < v.length; k++) {
+      if (argOpts.has(`-${v[k]}`)) {
+        takes = k === v.length - 1;
+        break;
+      }
+    }
+    i += takes ? 2 : 1;
+  }
+  return i;
+}
+
+const opts = (list) => new Set(list.split(' '));
+const SUDO_ARGS = opts(
+  '-u -g -h -p -C -D -R -T -U -r -t --user --group --host --prompt --chdir --role --type',
+);
+const XARGS_ARGS = opts(
+  '-a -d -E -I -L -n -P -s --arg-file --delimiter --eof --replace --max-lines --max-args --max-procs --max-chars',
+);
+const SSH_ARGS = opts('-B -b -c -D -E -e -F -I -i -J -L -l -m -O -o -P -p -Q -R -S -W -w');
+const SCP_ARGS = opts('-c -D -F -i -J -l -o -P -S -X');
+const PREFIX_ARGS = {
+  nohup: opts(''),
+  time: opts(''),
+  command: opts(''),
+  builtin: opts(''),
+  exec: opts('-a'),
+  setsid: opts(''),
+  nice: opts('-n --adjustment'),
+  ionice: opts('-c -n -p -t --class --classdata'),
+  stdbuf: opts('-i -o -e --input --output --error'),
+  timeout: opts('-s -k --signal --kill-after'),
+  doas: opts('-u -C'),
+};
+const SH_NAMES = opts('bash sh zsh dash ksh ash');
+const PWSH_ARGS = opts(
+  '-executionpolicy -ex -ep -workingdirectory -wd -outputformat -of -o -inputformat -if -windowstyle -w -version -v -configurationname -config -custompipename -settingsfile',
+);
+
+/**
+ * 剥掉 sudo、env、xargs 这类前缀，拿到真正跑的命令：{ leaf }；ssh、bash -c、pwsh -Command、cmd /c 里的命令另算一条命令行：
+ * { nested }；看不清：{ complex }。exclude 是不算「碰到」的词：ssh、scp 自己的选项（-i 指的钥匙是拿来用的，不打出来）和主机名。
+ */
+function unwrap(words) {
+  const exclude = new Set();
+  let w = words;
+  let viaXargs = false;
+  for (let hop = 0; hop < 12; hop++) {
+    const head = w[0];
+    if (head === undefined) return { complex: '前缀后面没有命令', exclude };
+    const name = cmdName(head.value);
+    const rest = w.slice(1);
+    if (name === 'sudo') {
+      w = rest.slice(afterOptions(rest, SUDO_ARGS));
+    } else if (name === 'env') {
+      let i = 0;
+      while (i < rest.length) {
+        const v = rest[i].value;
+        if (v === '-S' || v.startsWith('--split-string')) return { complex: 'env -S', exclude };
+        if (v === '-u' || v === '-C' || v === '--unset' || v === '--chdir') i += 2;
+        else if (v.startsWith('-') || /^[A-Za-z_][A-Za-z0-9_]*=/.test(v)) i++;
+        else break;
+      }
+      w = rest.slice(i);
+    } else if (Object.hasOwn(PREFIX_ARGS, name)) {
+      let i = afterOptions(rest, PREFIX_ARGS[name]);
+      if (name === 'timeout') i++;
+      w = rest.slice(i);
+    } else if (name === 'xargs') {
+      viaXargs = true;
+      w = rest.slice(afterOptions(rest, XARGS_ARGS));
+      if (w.length === 0) return { leaf: { name: 'echo', args: [], viaXargs }, exclude };
+    } else if (name === 'ssh') {
+      const at = afterOptions(rest, SSH_ARGS);
+      for (const x of rest.slice(0, at + 1)) exclude.add(x);
+      const remote = rest.slice(at + 1);
+      if (remote.length === 0) return { leaf: { name, args: rest, viaXargs }, exclude };
+      return { nested: { text: remote.map((x) => x.value).join(' '), kind: 'bash' }, name, exclude };
+    } else if (SH_NAMES.has(name)) {
+      let i = 0;
+      let dashC = false;
+      while (i < rest.length) {
+        const v = rest[i].value;
+        if (v === '--' || v === '-') {
+          i++;
+          break;
+        }
+        if (/^[-+][oO]$|^--(?:rcfile|init-file)$/.test(v)) i += 2;
+        else if (v.startsWith('--')) i++;
+        else if (/^[-+][A-Za-z]+$/.test(v)) {
+          if (v[0] === '-' && v.includes('c')) dashC = true;
+          i++;
+        } else break;
+      }
+      if (!dashC) return { leaf: { name, args: rest, viaXargs }, exclude };
+      const script = rest[i];
+      if (script === undefined) return { complex: `${name} -c 后面没有脚本`, exclude };
+      return { nested: { text: script.value, kind: 'bash' }, name, extra: rest.slice(i + 1), exclude };
+    } else if (name === 'pwsh' || name === 'powershell') {
+      let i = 0;
+      while (i < rest.length) {
+        const v = rest[i].value.toLowerCase();
+        if (/^-(?:e|ec|en|enc|enco|encod|encode|encoded\w*)$/.test(v))
+          return { complex: '-EncodedCommand', exclude };
+        if (
+          /^-c(?:o(?:m(?:m(?:a(?:n(?:d)?)?)?)?)?)?$/.test(v) ||
+          (!v.startsWith('-') && name === 'powershell')
+        ) {
+          const from = v.startsWith('-') ? i + 1 : i;
+          const text = rest
+            .slice(from)
+            .map((x) => x.value)
+            .join(' ');
+          return { nested: { text, kind: 'powershell' }, name, exclude };
+        }
+        if (!v.startsWith('-') || /^-f(?:ile)?$/.test(v)) break;
+        i += PWSH_ARGS.has(v) ? 2 : 1;
+      }
+      return { leaf: { name, args: rest, viaXargs }, exclude };
+    } else if (name === 'cmd') {
+      const at = rest.findIndex((x) => /^\/[ck]$/i.test(x.value));
+      if (at < 0) return { leaf: { name, args: rest, viaXargs }, exclude };
+      const text = rest
+        .slice(at + 1)
+        .map((x) => x.value)
+        .join(' ');
+      return { nested: { text, kind: 'shell' }, name, exclude };
+    } else {
+      if (name === 'scp' || name === 'sftp') {
+        rest.forEach((x, i) => {
+          if (SCP_ARGS.has(x.value) && rest[i + 1]) exclude.add(rest[i + 1]);
+        });
+      }
+      return { leaf: { name, args: rest, viaXargs }, exclude };
+    }
+  }
+  return { complex: '前缀套了太多层', exclude };
+}
+
+/**
+ * 不读内容的：列目录、看属性、判断在不在、改权限、只往里写（tee）、只出摘要、用钥匙不打钥匙；拿它们碰密钥路径放行。
+ * cp、mv 不在里面：拷到别处再读一遍就绕过去了（cp 到 /tmp 再 jq . 是顺手就会写的）。
+ */
+const NONREADING = opts(
+  [
+    'ls dir vdir tree stat test [ [[ file du wc readlink realpath basename dirname pwd echo printf true false :',
+    'chmod chown chgrp getfacl lsattr mkdir touch tee',
+    'sha1sum sha224sum sha256sum sha384sum sha512sum md5sum shasum b2sum cksum ssh-keygen ssh-add',
+    'test-path get-item gi get-childitem gci get-itemproperty gp get-acl icacls attrib resolve-path rvpa split-path',
+    'join-path write-output write write-host get-filehash new-item ni md',
+  ].join(' '),
+);
+/** 只出摘要的：密钥往它这里送，屏幕上只有一串指纹（ops 第九节「核对：比指纹」） */
+const HASHES = opts('sha1sum sha224sum sha256sum sha384sum sha512sum md5sum shasum b2sum cksum');
+/** 只处理管道里传过来的文字（这里是文件名）的：和碰了密钥路径的命令接在一个管道里放行 */
+const FILTERS = opts(
+  [
+    'grep egrep fgrep rg sort uniq head tail wc cut tr column nl fold tac rev awk gawk sed tee less more findstr',
+    'select-object select sort-object format-table ft format-list fl format-wide fw measure-object measure',
+    'out-string out-host oh out-null where-object where ? group-object group convertto-json convertto-csv',
+  ].join(' '),
+);
+const VIEWER_RE = /(?:^|[\\/])secret-shape\.mjs$/i;
+
+/** node 跑的是不是 secret-shape.mjs：node <…/secret-shape.mjs> …，或者经管道喂进去的 node -（stdinViewer） */
+function isViewerRun(args, ctx) {
+  for (let i = 0; i < args.length; i++) {
+    const v = args[i].value;
+    if (v === '-') return ctx.stdinViewer === true;
+    if (!v.startsWith('-')) return VIEWER_RE.test(v);
+    if (/^(?:-e|--eval|-p|--print|-i|--interactive|-c|--check)$|^--(?:eval|print)=/.test(v)) return false;
+    if (
+      /^(?:-r|--require|--import|--loader|--experimental-loader|--env-file|--input-type|--conditions|-C)$/.test(
+        v,
+      )
+    ) {
+      i++;
+    }
+  }
+  return false;
+}
+
+/** git 不读文件内容的子命令：看跟没跟踪、忽没忽略，加进、撤出暂存（git rm --cached 正是撤掉误提交的密钥）；-p 这类会打出改动的不算 */
+function gitNonReading(args) {
+  let i = 0;
+  while (i < args.length && args[i].value.startsWith('-')) {
+    i += /^(?:-C|-c|--git-dir|--work-tree|--namespace)$/.test(args[i].value) ? 2 : 1;
+  }
+  const sub = args[i]?.value ?? '';
+  if (!['ls-files', 'check-ignore', 'status', 'add', 'rm', 'mv'].includes(sub)) return false;
+  return !args
+    .slice(i + 1)
+    .some((x) => /^(?:-[A-Za-z]*[pie][A-Za-z]*|--patch|--interactive|--edit)$/.test(x.value));
+}
+
+function nonReading(leaf, ctx) {
+  if (NONREADING.has(leaf.name)) return true;
+  if (leaf.name === 'node') return isViewerRun(leaf.args, ctx);
+  // find 只列路径；-exec 这类会跑别的命令、-delete 会删、-fprint 这类会写
+  if (leaf.name === 'find')
+    return !leaf.args.some((x) => /^-(?:exec|execdir|ok|okdir|delete|fprint0?|fprintf|fls)$/.test(x.value));
+  if (leaf.name === 'openssl') return leaf.args[0]?.value === 'x509';
+  if (leaf.name === 'git') return gitNonReading(leaf.args);
+  return false;
+}
+
+/** cat / Get-Content 只读 secret-shape.mjs 这一个文件：往 ssh 那头的 node - 喂查看脚本 */
+function isViewerFeeder(info) {
+  const leaf = info.u.leaf;
+  if (!leaf || !['cat', 'type', 'gc', 'get-content'].includes(leaf.name)) return false;
+  const files = leaf.args.filter((x) => !x.value.startsWith('-'));
+  return files.length === 1 && VIEWER_RE.test(files[0].value);
+}
+
+/** 值往这里送就不过屏幕：ssh 到别的机器（ops 第九节「值不过屏幕」那几条管道）、只出摘要的 */
+function isSink(info) {
+  return info.u.name === 'ssh' ? info.u.nested !== undefined : HASHES.has(info.u.leaf?.name ?? '');
+}
+
+function describeCmd(c, kind) {
+  const u = unwrap(c.words);
+  const label = c.words
+    .filter((x) => !u.exclude.has(x))
+    .reduce(
+      (found, x) => found ?? secretMention(x.raw) ?? secretMention(x.value),
+      /** @type {string | null} */ (null),
+    );
+  return { u, label, head: headProblem(c.words, kind) };
+}
+
+const SHAPE = '"$HOME/.fleet-dao/hooks/secret-shape.mjs"';
+
+function secretBlock(label, why) {
+  return block(
+    [
+      `fleet-guard：这条命令碰到了${label}${why ? `，又${why}` : ''}，按拦处理：密钥、令牌、口令的值不能进对话。`,
+      '碰到密钥文件只放行不读内容的：ls、stat、test、Test-Path、Get-Item 这类看在不在、看权限的，单独一条跑（别 cd 进去、别赋给变量、别套循环或 $( )）。',
+      `要看结构：node ${SHAPE} <文件>…（只打字段名、类型、长度，一个值都不打；认 JSON、env、PEM）；别的机器上的：cat ${SHAPE} | ssh <机器> 'node --input-type=module - <文件>'。`,
+      '提交信息、PR 正文里要写这些路径：先用 Write 写进文件，再 -F / --body-file；在代码里搜这些名字用 Grep 工具。',
+    ].join('\n'),
+  );
+}
+
+/** checkLine 的结论：碰到了、都不读内容，放行 */
+const CLEAN = { code: 0 };
+
+/**
+ * 一条命令行里碰到密钥路径的命令是不是都不读内容：每条碰到的叶子命令不读内容（或者它的输出直接送进 ssh、摘要）；
+ * 和它接在一个管道里的只能是不读内容的、只处理文字的（xargs 后面那条得不读内容）。ctx.stdoutSafe：这条命令行的输出
+ * 本身就送进了 ssh、摘要；ctx.stdinViewer：标准输入是 secret-shape.mjs。
+ * 返回 null：一处都没碰到；CLEAN：碰到了、放行；否则是 block。
+ */
+function checkLine(text, kind, ctx, depth) {
+  if (depth > 4) return secretBlock('密钥路径', '套了太多层 ssh / bash -c');
+  const { pipelines, complex } = scanCommand(text, kind);
+  const infos = pipelines.map((p) => p.map((c) => describeCmd(c, kind)));
+  const hit = infos.flat().find((x) => x.label !== null);
+  if (hit === undefined) return null;
+  const unclear =
+    complex[0] ??
+    infos.flat().find((x) => x.head !== null)?.head ??
+    infos.flat().find((x) => x.u.complex)?.u.complex;
+  if (unclear) return secretBlock(hit.label, `用了钩子看不清的写法（${unclear}）`);
+  for (const p of infos) {
+    const last = p.length - 1;
+    for (let i = 0; i <= last; i++) {
+      const x = p[i];
+      if (x.label === null) continue;
+      const toSink = (i < last && isSink(p[i + 1])) || (i === last && ctx.stdoutSafe === true);
+      if (x.u.nested) {
+        if ((x.u.extra ?? []).some((a) => secretMention(a.raw) ?? secretMention(a.value))) {
+          return secretBlock(x.label, `把它当参数传给 ${x.u.name} -c 里的脚本`);
+        }
+        const viewer = i > 0 && isViewerFeeder(p[i - 1]);
+        const r = checkLine(
+          x.u.nested.text,
+          x.u.nested.kind,
+          { stdoutSafe: toSink, stdinViewer: viewer },
+          depth + 1,
+        );
+        // 外层看得见、拆出来的那条命令行里却找不到了（多半是转义把反斜杠吃了）：看不清就按拦处理
+        if (r === null) return secretBlock(x.label, `用了 ${x.u.name} 转手、拆开后钩子对不上路径`);
+        if (r !== CLEAN) return r;
+      } else if (!nonReading(x.u.leaf, ctx) && !toSink) return secretBlock(x.label);
+    }
+    const first = p.find((x) => x.label !== null);
+    if (first === undefined || p.length === 1) continue;
+    for (let j = 0; j <= last; j++) {
+      const x = p[j];
+      if (x.label !== null || isViewerFeeder(x)) continue;
+      if (j > 0 && p[j - 1].label !== null && isSink(x)) continue;
+      if (x.u.nested) {
+        if (x.u.name === 'ssh') continue;
+        return secretBlock(first.label, `把它接进管道交给 ${x.u.name}`);
+      }
+      const leaf = x.u.leaf;
+      const ok =
+        nonReading(leaf, ctx) ||
+        (!leaf.viaXargs && (FILTERS.has(leaf.name) || (kind === 'bash' && leaf.name === 'cat')));
+      if (!ok)
+        return secretBlock(
+          first.label,
+          `把它接进管道交给 ${leaf.viaXargs ? `xargs ${leaf.name}` : leaf.name}`,
+        );
+    }
+  }
+  return CLEAN;
+}
+
+/** 碰到密钥文件的命令判一下：没碰到、或者只列目录看权限，返回 null；要把内容打出来的返回 block */
+function secretVerdict(command, kind) {
+  const label = secretMention(command);
+  if (label === null) return null;
+  try {
+    const r = checkLine(command, kind, {}, 0);
+    return r === null || r === CLEAN ? null : r;
+  } catch (err) {
+    return secretBlock(label, `钩子没看懂这条命令（${err?.message ?? err}）`);
+  }
+}
+
 /**
  * 跑命令的工具在各家叫什么。登记在 ~/.claude/settings.json 的这条钩子，Grok、Devin、Cursor 默认也借道读，
  * 送进来的是它们自己的工具名：Grok 是 run_terminal_command（输入是 camelCase 的 toolName、toolInput），Devin 是 exec，
@@ -155,6 +772,9 @@ export function decide(raw, fallbackCwd = '') {
     .join('/')
     .toLowerCase();
   const inFleet = cwd.includes('fleet-dao') || /fleet-dao/i.test(cmd);
+  // 密钥文件的内容不进对话（上面「密钥文件」那一段）。不分仓，全机都拦；别家的终端按 bash 的写法切。
+  const secret = secretVerdict(cmd, kind);
+  if (secret) return secret;
   // 2026-09-26 撞过两回：子代理拼命令时反引号误跑了切号登录；总指挥 node -e "…`specs/…/需求.md`…" 把整份需求文档当脚本执行了。
   // PowerShell 里反引号是转义符，不归这条管；别家的终端是不是 bash 说不准，也不管。不分仓，全机都拦。
   if (kind === 'bash' && bashBacktickSubst(cmd)) {
