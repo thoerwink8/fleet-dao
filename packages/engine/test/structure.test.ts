@@ -64,6 +64,7 @@ describe('工作流文件的规矩', () => {
       'requirement.ts',
       'route-probe.ts',
       'subtask.ts',
+      'sync-mainline.ts',
       'verify.ts',
       'watchdog.ts',
     ]);

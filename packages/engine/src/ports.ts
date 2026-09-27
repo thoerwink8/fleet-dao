@@ -510,7 +510,8 @@ export interface WaitCiInput extends Scope {
 
 export interface SyncMainlineInput extends Scope {
   repo: Repo;
-  prNumber: number;
+  /** 没给（还没开 PR）：并主线的提交说明少写一句，不影响并不并（跟着 github 包的 SyncMainlineInput）。 */
+  prNumber?: number | undefined;
   branch: string;
   /** 以为分支现在的头是它；对不上说明被别人推过，先认领新头。 */
   head: string;
