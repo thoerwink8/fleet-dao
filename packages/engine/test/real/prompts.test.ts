@@ -136,6 +136,9 @@ describe('提示词', () => {
     });
     expect(review).toContain('git diff origin/main...HEAD');
     expect(review).toContain('可以跑测试（pnpm check）');
+    // #307 连着几轮只因结果文档引的 CI 是旧头就判必须改，并主线一换头又旧了，停下等人
+    expect(review).toContain('结果文档里引的 CI 运行对不上这个头，不算 blocking');
+    expect(review).toContain('别同时开');
   });
 
   it('项目没写测试命令（只有不写码的阶段起得来）：提示词里不出现 null、不叫它跑测试', () => {

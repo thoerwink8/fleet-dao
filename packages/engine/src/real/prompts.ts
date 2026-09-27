@@ -241,6 +241,8 @@ function deliverBlock(input: PromptInput): string {
 结论写进 \`${OUT_DIR}/review.json\`，形如：
 {"verdict": "pass", "findings": [{"severity": "blocking", "text": "……", "file": "src/a.ts"}]}
 - verdict：能合 "pass"，要改 "changes"。blocking = 必须改才能合；minor = 小毛病，不挡合并。
+- 结果文档里引的 CI 运行对不上这个头，不算 blocking：文档只能引写它之前那次运行，写完提交、并主线都会换头；能不能合由合并闸看当前头的检查。只有文档说的和事实相反（红说成绿、没跑说成跑过）才算。
+- 测试和类型检查一个跑完再跑下一个，别同时开：会话的内存有上限，同时开会被压着回收、卡住不动。
 写完就结束，不用 fleet done。`;
     case 'verify':
       return verifyBlock(input);
