@@ -100,6 +100,45 @@ describe('看板与任务', () => {
     expect((await h.cockpit.request('/api/repos/nope/board', { headers: { cookie } })).status).toBe(404);
   });
 
+  it('这一轮用全组织默认的单，详情和看板都带 flowSource；库里空着的 JSON 没有这个键', async () => {
+    const h = harness();
+    const { cookie } = await h.login();
+    const marked = h.store.data.tasks.find((t) => t.id === IDS.task12);
+    const blank = h.store.data.tasks.find((t) => t.id === IDS.task13);
+    if (!marked || !blank) throw new Error('样例数据里没有这两张单');
+    marked.flowSource = 'org_default';
+    const headers = { cookie };
+    const board = (await (await h.cockpit.request(`/api/repos/${IDS.repo}/board`, { headers })).json()) as {
+      tasks: { id: string; flowSource?: string }[];
+    };
+    const onBoard = (id: string) => {
+      const task = board.tasks.find((t) => t.id === id);
+      if (!task) throw new Error(`看板上没有 ${id}`);
+      return task;
+    };
+    expect(onBoard(IDS.task12).flowSource).toBe('org_default');
+    expect('flowSource' in onBoard(IDS.task13)).toBe(false);
+    const detail = async (id: string) =>
+      (await (await h.cockpit.request(`/api/tasks/${id}`, { headers })).json()) as {
+        task: { flowSource?: string };
+      };
+    expect((await detail(IDS.task12)).task.flowSource).toBe('org_default');
+    expect('flowSource' in (await detail(IDS.task13)).task).toBe(false);
+  });
+
+  it('副本认不出：看板停派，原因里有这段错误', async () => {
+    const h = harness();
+    const { cookie } = await h.login();
+    const repo = h.store.data.repos.find((r) => r.id === IDS.repo);
+    if (!repo?.flow) throw new Error('样例仓没有流程配置副本');
+    repo.flow.error = '不是合法的 JSON';
+    const board = (await (
+      await h.cockpit.request(`/api/repos/${IDS.repo}/board`, { headers: { cookie } })
+    ).json()) as { flow: { paused: boolean; why?: string } };
+    expect(board.flow.paused).toBe(true);
+    expect(board.flow.why).toContain('不是合法的 JSON');
+  });
+
   it('任务详情带全部会话（含已结束的）与追问', async () => {
     const h = harness();
     const { cookie } = await h.login();

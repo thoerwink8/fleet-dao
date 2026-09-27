@@ -604,6 +604,19 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       const [row] = await db.select().from(repos).where(eq(repos.id, id));
       return row ? toRepo(row) : null;
     },
+    async getRepoFlow(id) {
+      if (!isUuid(id)) return null;
+      const [row] = await db.select().from(repos).where(eq(repos.id, id));
+      if (!row) return null;
+      const flow = flowReplicaOf(row);
+      return {
+        source: flow.source,
+        commit: flow.commit,
+        syncedAt: flow.syncedAt ? iso(flow.syncedAt) : null,
+        error: flow.error,
+        unread: flow.unread,
+      };
+    },
     async listBoardTasks(repoId) {
       if (!isUuid(repoId)) return [];
       const rows = await db

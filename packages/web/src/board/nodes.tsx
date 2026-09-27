@@ -39,6 +39,7 @@ import {
 } from '../lib/status';
 import { cn } from '../lib/utils';
 import { nodeTarget, useBoardUi, useHoverIntent, useNodeView, useZoomLevel } from './board-ui';
+import { OrgDefaultMark } from './flow-source';
 import type { BoardNodeData, Side } from './model';
 
 export type BoardNode = Node<BoardNodeData>;
@@ -327,9 +328,10 @@ export const TaskNode = memo(function TaskNode({ id, data }: Props) {
         <Far tone={tone} big={`#${t.issueNumber}`} small={`${prog.done}/${prog.total}`} />
       ) : (
         <div className="flex h-full flex-col overflow-hidden py-3 pr-3.5 pl-4">
-          <div className="flex shrink-0 items-center gap-2">
+          <div className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1">
             <span className="num text-[13px] font-semibold text-muted-foreground">#{t.issueNumber}</span>
             <StatusChip tone={tone} label={taskStateLabel[t.state]} />
+            <OrgDefaultMark flowSource={t.flowSource} />
             <span className="ml-auto flex items-center gap-1.5 text-[11px] text-muted-foreground">
               <span className="num" title="优先级：数字越小越先做">
                 P{t.priority}

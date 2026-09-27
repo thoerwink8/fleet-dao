@@ -308,9 +308,24 @@ export interface UserStore {
   recordPasswordSuccess(userId: string): Promise<void>;
 }
 
+/**
+ * 一个仓此刻的流程配置副本，给看板顶栏（repos 表这五列的原值）。
+ * 提交是全长，截到前 7 位在视图里做。没有这个仓是 null，不是「还没同步」。
+ */
+export interface RepoFlowRow {
+  source: 'project' | 'org_default' | null;
+  commit: string | null;
+  /** ISO。从没同步成过是 null。 */
+  syncedAt: string | null;
+  error: string | null;
+  unread: string | null;
+}
+
 export interface BoardStore {
   listRepos(): Promise<Repo[]>;
   getRepo(id: string): Promise<Repo | null>;
+  /** 这个仓的流程配置副本。没有这个仓（含编号不是 uuid）回 null。 */
+  getRepoFlow(repoId: string): Promise<RepoFlowRow | null>;
   /** 看板上的需求：没结束的，加上进入终态不到 7 天的。按优先级、再按建单先后排。 */
   listBoardTasks(repoId: string): Promise<Task[]>;
   getTask(id: string): Promise<Task | null>;

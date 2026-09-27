@@ -35,6 +35,7 @@ import {
   toneText,
 } from '../lib/status';
 import { cn } from '../lib/utils';
+import { OrgDefaultMark } from './flow-source';
 import { filterTasks, sortTasks } from './model';
 
 export interface TreeFilter {
@@ -168,27 +169,32 @@ function TaskRow({ t }: { t: BoardTask }) {
               <ChevronRight className={cn('size-4 transition-transform', open && 'rotate-90')} />
             </button>
           </CollapsibleTrigger>
-          <Link to={`/tasks/${t.id}`} className="min-w-0 flex-1">
-            <div className="flex items-center gap-2">
-              <span className="num text-xs font-semibold text-muted-foreground">#{t.issueNumber}</span>
-              <StatusChip tone={tone} label={taskStateLabel[t.state]} />
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <Link to={`/tasks/${t.id}`} className="flex items-center gap-2">
+                <span className="num text-xs font-semibold text-muted-foreground">#{t.issueNumber}</span>
+                <StatusChip tone={tone} label={taskStateLabel[t.state]} />
+              </Link>
+              <OrgDefaultMark flowSource={t.flowSource} />
             </div>
-            <div className="mt-1 text-[15px] leading-snug font-semibold">{t.title}</div>
-            <p
-              className={cn(
-                'mt-0.5 text-[13px] leading-snug',
-                tone === 'run' ? 'text-muted-foreground' : toneText[tone],
-              )}
-            >
-              {describeTask(t, now)}
-            </p>
-            <div className="mt-2 flex items-center gap-2">
-              <ToneBar value={prog.total ? prog.done / prog.total : 0} tone={tone} live={taskLive(t)} />
-              <span className="num shrink-0 text-[11px] text-muted-foreground">
-                {prog.done}/{prog.total}
-              </span>
-            </div>
-          </Link>
+            <Link to={`/tasks/${t.id}`} className="block">
+              <div className="mt-1 text-[15px] leading-snug font-semibold">{t.title}</div>
+              <p
+                className={cn(
+                  'mt-0.5 text-[13px] leading-snug',
+                  tone === 'run' ? 'text-muted-foreground' : toneText[tone],
+                )}
+              >
+                {describeTask(t, now)}
+              </p>
+              <div className="mt-2 flex items-center gap-2">
+                <ToneBar value={prog.total ? prog.done / prog.total : 0} tone={tone} live={taskLive(t)} />
+                <span className="num shrink-0 text-[11px] text-muted-foreground">
+                  {prog.done}/{prog.total}
+                </span>
+              </div>
+            </Link>
+          </div>
           <ActionsMenu target={targetOf(t)} label={`#${t.issueNumber}`} />
         </div>
         <CollapsibleContent>

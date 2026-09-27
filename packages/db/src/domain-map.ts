@@ -66,6 +66,7 @@ export const toTask = (r: typeof tasks.$inferSelect): Task =>
     priority: r.priority,
     specDir: opt(r.specDir),
     acceptance: r.acceptance,
+    flowSource: opt(r.flowSource),
     createdAt: r.createdAt.toISOString(),
   });
 

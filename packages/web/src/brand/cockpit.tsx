@@ -42,5 +42,11 @@ export const brand: Brand = {
     triage: '判断是哪类活、说没说清、多大、碰不碰人闸',
     ui: '界面类写码；GPT 族不碰',
   },
+  flow: {
+    fileName: '.fleet/flow.json',
+    orgName: 'fleet-dao',
+    orgDefaultDetail:
+      '这个项目没有 .fleet/flow.json，这一轮按 fleet-dao 的全组织默认流程配置派（每步模型顺序、验证几轮都用默认的）',
+  },
   repoLink: (repo, kind, n) => `https://github.com/${repo.owner}/${repo.name}/${kind}/${n}`,
 };

@@ -66,4 +66,19 @@ describe('手机上的看板：可折叠的树形列表', () => {
     renderApp(<Harness />);
     expect(screen.getByText(/Opus 5\.5 正在写验证码过期的测试，已 \d+ 分钟/)).toBeTruthy();
   });
+
+  test('读自仓里的单不挂「全组织默认配置」', () => {
+    renderApp(<Harness />);
+    expect(screen.queryByRole('button', { name: '全组织默认配置' })).toBeNull();
+  });
+
+  test('用全组织默认的仓，每张卡片都有小标', async () => {
+    const api = createMockApi({ live: false });
+    const canary = await api.board('r-canary');
+    renderApp(
+      <BoardTree board={canary} me={me} filter={{ stuck: false, mine: false }} onFilter={() => {}} />,
+    );
+    expect(screen.getAllByRole('button', { name: '全组织默认配置' })).toHaveLength(canary.tasks.length);
+    expect(canary.tasks.every((t) => t.flowSource === 'org_default')).toBe(true);
+  });
 });
