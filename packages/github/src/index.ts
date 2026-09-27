@@ -32,6 +32,13 @@ export {
   silentLogger,
 } from './client.ts';
 export {
+  CLOSE_FACTS_MAX_PAGES,
+  type CloseFacts,
+  type ReadCloseFactsInput,
+  readCloseFacts,
+  SUB_ISSUES_PAGE,
+} from './close-facts.ts';
+export {
   type ReadRepoFileInput,
   type ReadRepoFileResult,
   type ReadSpecDocInput,

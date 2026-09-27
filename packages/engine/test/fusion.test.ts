@@ -164,6 +164,7 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
     expect(body?.did[0]).toBe('方案：登录表单加验证码输入，后端校验五分钟过期');
     expect(body?.verified.join('\n')).toContain('开 PR 前');
     expect(body).toMatchObject({ requirement: 12, specs: SPEC_DIR });
+    // 假的推分支没交净改动（老版端口、在途任务重放的历史里就是这样）：照会话交的累计
     expect(body?.changedFiles).toEqual([DOCS.plan, 'src/login/changed.ts']);
     expect(w.callsOf('waitCi').map((c) => c.input.head)).toEqual([fakeHead(2)]);
 
@@ -276,6 +277,36 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
     expect(w.states.map((s) => s.lastProblem)).toContain(`${line.slice(0, -1)}：${why}）`);
     expect(w.callsOf('openPr')[0]?.input.body.verified).toContain(line);
     expect(w.callsOf('closeIssue')[0]?.input.comment).toContain(`- ${line}`);
+  });
+
+  it('【故意造出的失败】#293：副手并过主线、主线上别人改了页面代码——开 PR 前验证照推上去的头相对主线的净改动判，不按界面派；给验证方的清单、PR 正文也不带主线的页面代码', async () => {
+    // 法国 #293：会话交回的改动清单把并进来的主线也算成这张单改的（老版端口，在途任务的历史里就是这样），里面有主线上
+    // 别人改的页面代码（uiPaths 下的），验证就按界面类派：写它的两族之外只剩 GPT、GPT 不做界面，没人可派，干等 47 分钟
+    const mainlineUi = 'web/health/health.js';
+    const w = world({
+      session: (input) =>
+        !input.brief.lead && input.stage === 'execute'
+          ? {
+              output: {
+                kind: 'delivery',
+                head: fakeHead(70),
+                summary: '做完：登录页加验证码',
+                testsPassed: true,
+                changedFiles: ['src/login/changed.ts', mainlineUi],
+              },
+            }
+          : undefined,
+      // 推之前并了最新主线，推上去的头相对主线的净改动只有这张单改的
+      pushed: (input) => (input.head === fakeHead(1) ? [DOCS.plan] : [DOCS.plan, 'src/login/changed.ts']),
+    });
+    const result = await runToEnd(w);
+    expect(result.state).toBe('done');
+    expect(trail(w)).toEqual(['lead:plan', 'side', 'lead:accept', 'verify', 'lead:review']);
+    const verifyPick = w.callsOf('pickRoute').find((c) => c.input.stage === 'verify');
+    expect(verifyPick?.input.uiWork).toBeUndefined();
+    const verify = w.callsOf('startSession').find((c) => c.input.stage === 'verify');
+    expect(verify?.input.brief.verify?.changedFiles).toEqual([DOCS.plan, 'src/login/changed.ts']);
+    expect(w.callsOf('openPr')[0]?.input.body.changedFiles).toEqual([DOCS.plan, 'src/login/changed.ts']);
   });
 
   it('开了 PR 之后修的一轮碰了简报外的文件、Lead 收下 → 推上去接着走；PR 正文开出去不改，关单评论补记', async () => {

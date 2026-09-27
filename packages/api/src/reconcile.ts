@@ -5,7 +5,7 @@
 import type { Reconciler, ReconcilerOptions } from '@fleet-dao/github';
 import type { ScheduleOutcome } from '@fleet-dao/shared';
 import { DELIVERY_STALE_MS, type GitHubIntake, MAX_AUTO_REPLAYS, pollDeliveryId } from './github.ts';
-import { RetryLaterError } from './issue-intake.ts';
+import { type IssueIntake, RetryLaterError } from './issue-intake.ts';
 import type { GitHubDelivery, Logger, Store } from './ports.ts';
 
 export { MAX_AUTO_REPLAYS } from './github.ts';
@@ -29,7 +29,7 @@ export function reconcilerOptions(parts: {
 }
 
 export interface ReconcileStep {
-  step: 'redeliver' | 'poll' | 'audit' | 'replay';
+  step: 'redeliver' | 'poll' | 'audit' | 'replay' | 'claims';
   repo?: string | undefined;
   outcome: 'ok' | 'partial' | 'unscanned' | 'failed';
   /** 查了几样（投递、事件、开放 issue、要重放的投递）。 */
@@ -58,6 +58,8 @@ export interface GitHubReconcileResult {
 export interface ReconcileParts {
   store: Pick<Store, 'listRepos' | 'listUnfinishedDeliveries'>;
   intake: Pick<GitHubIntake, 'replay'>;
+  /** 接活里补起待起认领的那一步（#299，issue-intake.ts 的 restartPending；和 intake 同一套依赖）。 */
+  claims: Pick<IssueIntake, 'restartPending'>;
   /** @fleet-dao/github 的 createGitHub(...).reconciler(reconcilerOptions(...))。 */
   reconciler: Pick<Reconciler, 'redeliverFailed' | 'poll' | 'auditOpenIssues'>;
   log: Logger;
@@ -143,6 +145,36 @@ export async function reconcileGitHub(
     recovered: replayed,
     why: replayNotes.join('；') || undefined,
   });
+
+  // 待起的引擎认领（#299）：起工作流没成的投递重放到头就不再重放，交单时 Temporal 连不上也留着待起，照认领行里的工作流编号补起
+  try {
+    const pending = await parts.claims.restartPending();
+    const released =
+      pending.released > 0 ? `放下了 ${pending.released} 张（开关关了、上一轮已结束或单子关了）` : '';
+    steps.push({
+      step: 'claims',
+      outcome: pending.problems.length > 0 ? 'partial' : 'ok',
+      checked: pending.checked,
+      recovered: pending.started,
+      why:
+        [
+          pending.problems.length > 0
+            ? `待起的认领 ${pending.problems.length} 张没起成：${pending.problems.slice(0, 3).join('；')}`
+            : '',
+          released,
+        ]
+          .filter(Boolean)
+          .join('；') || undefined,
+    });
+  } catch (err) {
+    steps.push({
+      step: 'claims',
+      outcome: 'failed',
+      checked: 0,
+      recovered: 0,
+      why: `补起待起的认领没跑成：${why(err)}`,
+    });
+  }
 
   const found = steps.reduce((n, s) => n + s.recovered, 0) + stuck.length;
   const notOk = steps.filter((s) => s.outcome !== 'ok');

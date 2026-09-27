@@ -10,18 +10,22 @@ import { localExec } from '../../src/real/exec.ts';
 import { OUT_DIR } from '../../src/real/prompts.ts';
 import {
   bundleSince,
+  changedFilesAgainst,
   changedFilesSince,
   checkoutBranch,
   checkoutDetached,
   commitsSince,
   DISPOSABLE,
+  diffstatSince,
   disposableArgs,
   fastForward,
   fetchBundle,
+  hasMainline,
   headOf,
   LEFTOVER_LIST_MAX,
   mainlineRef,
   mergeInto,
+  ownSpan,
   pinMainline,
   readFileAs,
   treeLeftovers,
@@ -95,6 +99,7 @@ describe('会话目录里的 git', { timeout: 60_000 }, () => {
     });
     expect(fetched).toBe(m.head);
     await checkoutBranch(t, 'fleet/12-a', m.head);
+    await pinMainline(t, 'main', m.head);
     expect(await headOf(t)).toBe(m.head);
     expect(sh(t.dir, 'config', 'user.name')).toBe('fleet-dao-agent[bot]');
 
@@ -104,8 +109,10 @@ describe('会话目录里的 git', { timeout: 60_000 }, () => {
     execFileSync('git', ['add', '.'], { cwd: t.dir });
     execFileSync('git', ['commit', '-q', '-m', 'change a, add b'], { cwd: t.dir, env: ENV });
     const head = await headOf(t);
-    expect(await changedFilesSince(t, m.head)).toEqual(['a.ts', 'b.ts']);
-    expect((await commitsSince(t, m.head)).map((l) => l.replace(/^\w+ /, ''))).toEqual(['change a, add b']);
+    const span = await ownSpan(t, m.head, 'main');
+    expect(span).toEqual({ base: m.head, from: m.head, mainline: m.head });
+    expect(await changedFilesSince(t, span)).toEqual(['a.ts', 'b.ts']);
+    expect((await commitsSince(t, span)).map((l) => l.replace(/^\w+ /, ''))).toEqual(['change a, add b']);
     expect(await uncommittedTracked(t)).toEqual([]);
 
     const bundle = await bundleSince(t, head, m.head);
@@ -178,13 +185,15 @@ describe('会话目录里的 git', { timeout: 60_000 }, () => {
     const t = tree('work');
     await fetchBundle(t, m.bundle(m.head), 'refs/fleet/export/0');
     await checkoutBranch(t, 'fleet/12-a', m.head);
+    await pinMainline(t, 'main', m.head);
     mkdirSync(join(t.dir, 'specs', '12-登录'), { recursive: true });
     writeFileSync(join(t.dir, 'specs', '12-登录', '方案.md'), '# 方案\n');
     execFileSync('git', ['add', '--', 'specs'], { cwd: t.dir });
     execFileSync('git', ['commit', '-q', '-m', 'docs: 方案'], { cwd: t.dir, env: ENV });
     // 不关转义的话 git 列出来的是 "specs/12-\347\231\273\345\275\225/\346\226\271\346\241\210.md"
     expect(sh(t.dir, '-c', 'core.quotePath=true', 'diff', '--name-only', m.head, 'HEAD')).toContain('\\');
-    expect(await changedFilesSince(t, m.head)).toEqual(['specs/12-登录/方案.md']);
+    expect(await changedFilesSince(t, await ownSpan(t, m.head, 'main'))).toEqual(['specs/12-登录/方案.md']);
+    expect(await changedFilesAgainst(t, m.head, await headOf(t))).toEqual(['specs/12-登录/方案.md']);
     writeFileSync(join(t.dir, 'specs', '12-登录', '方案.md'), '# 改了没提交\n');
     expect(await uncommittedTracked(t)).toEqual([' M specs/12-登录/方案.md']);
   });
@@ -272,7 +281,15 @@ describe('会话目录里的 git', { timeout: 60_000 }, () => {
   it('git 没跑成（目录里没有仓）：明确报错，不当成「没有改动」', async () => {
     const t = tree('empty');
     await expect(uncommittedTracked(t)).rejects.toBeInstanceOf(PortError);
-    await expect(changedFilesSince(t, 'a'.repeat(40))).rejects.toMatchObject({ code: 'GIT_FAILED' });
+    await expect(ownSpan(t, 'a'.repeat(40), 'main')).rejects.toMatchObject({ code: 'GIT_FAILED' });
+    await expect(hasMainline(t, 'main')).rejects.toMatchObject({ code: 'GIT_FAILED' });
+    const span = { base: 'a'.repeat(40), from: 'a'.repeat(40), mainline: 'b'.repeat(40) };
+    await expect(changedFilesSince(t, span)).rejects.toMatchObject({ code: 'GIT_FAILED' });
+    await expect(commitsSince(t, span)).rejects.toMatchObject({ code: 'GIT_FAILED' });
+    await expect(diffstatSince(t, span)).rejects.toMatchObject({ code: 'GIT_FAILED' });
+    await expect(changedFilesAgainst(t, 'a'.repeat(40), 'b'.repeat(40))).rejects.toMatchObject({
+      code: 'GIT_FAILED',
+    });
     await expect(headOf(t)).rejects.toMatchObject({ code: 'GIT_FAILED' });
   });
 
@@ -282,6 +299,172 @@ describe('会话目录里的 git', { timeout: 60_000 }, () => {
       code: 'BAD_INPUT',
     });
     await expect(checkoutBranch(t, 'b', 'HEAD')).rejects.toMatchObject({ code: 'BAD_INPUT' });
+  });
+});
+
+// #293：会话在树里并过主线（推之前并主线有冲突、退回会话照着 git merge 解；并好了却没推成、树停在引擎的并提交上），
+// 「这一步自己改了什么」要扣掉并进来的主线。原来的 git diff base HEAD 把主线上别人改的页面代码（deploy/web/）也算成这张单
+// 改的：开 PR 前验证按界面类派，写它的两族之外只剩 GPT、GPT 不做界面，没人可派，干等 47 分钟。
+describe('这一步自己改了什么：扣掉会话并进来的主线（#293）', { timeout: 60_000 }, () => {
+  const UI = 'deploy/web/health/health.js';
+  /** 在目录里写一个文件并提交，交回新头。 */
+  const commitFile = (dir: string, file: string, body: string, msg: string) => {
+    mkdirSync(join(dir, file, '..'), { recursive: true });
+    writeFileSync(join(dir, file), body);
+    execFileSync('git', ['add', '--', file], { cwd: dir });
+    execFileSync('git', ['commit', '-q', '-m', msg], { cwd: dir, env: ENV });
+    return sh(dir, 'rev-parse', 'HEAD');
+  };
+  const subjects = (commits: string[]) => commits.map((l) => l.replace(/^\w+ /, ''));
+
+  /**
+   * 和引擎一样建树（从 bundle 建、检出分支、钉主线、设提交身份），分支上先交一个提交（branchFile；给 null 就不交，起会话前
+   * 的头就是主线头）当起会话前的头；之后主线又进了一个提交（mainFiles，默认改页面代码），引擎推之前把它取进树里、钉上
+   * （github-ports 的 pushBranch），会话照着 git merge 它。
+   */
+  async function mainlineMoved(
+    branchFile: [string, string] | null = ['packages/engine/src/reconcile.ts', 'export const r = 1;\n'],
+    mainFiles: [string, string][] = [[UI, 'export const h = 2;\n']],
+  ) {
+    const m = mirror();
+    const t = tree('work');
+    await fetchBundle(t, m.bundle(m.head), 'refs/fleet/export/0', {
+      identity: { name: 't', email: 'fleet-test@localhost' },
+    });
+    await checkoutBranch(t, 'fleet/293-a', m.head);
+    await pinMainline(t, 'main', m.head);
+    const base = branchFile ? commitFile(t.dir, ...branchFile, 'feat: 上一轮推上去的') : m.head;
+    for (const [file, body] of mainFiles) commitFile(m.dir, file, body, `main: ${file}`);
+    const main = sh(m.dir, 'rev-parse', 'HEAD');
+    await fetchBundle(t, m.bundle(main, m.head), 'refs/fleet/export/0');
+    await pinMainline(t, 'main', main);
+    return { t, base, main };
+  }
+  const mergeMainline = (t: UserTree) => sh(t.dir, 'merge', '--no-ff', '--no-edit', '-q', 'origin/main');
+
+  it('【故意造出的失败】会话并了改过页面代码的主线、再改一个非界面文件：只算自己改的那一个；原来的算法把页面代码也算进来', async () => {
+    const { t, base, main } = await mainlineMoved();
+    mergeMainline(t);
+    commitFile(t.dir, 'packages/engine/src/hourly.ts', 'export const h = 1;\n', 'feat: 每小时对账接上');
+    // 原来的算法（git diff base HEAD）：主线上别人改的页面代码也算成这一步改的——#293 就是这样被按界面类派的
+    expect(sh(t.dir, 'diff', '--name-only', base, 'HEAD').split('\n')).toContain(UI);
+
+    const span = await ownSpan(t, base, 'main');
+    expect(span).toMatchObject({ base, mainline: main });
+    expect(await changedFilesSince(t, span)).toEqual(['packages/engine/src/hourly.ts']);
+    const stat = (await diffstatSince(t, span)).join('\n');
+    expect(stat).toContain('hourly.ts');
+    expect(stat).not.toContain('health');
+    // 新提交：会话自己的并提交和提交，主线上别人的提交不算
+    const commits = subjects(await commitsSince(t, span));
+    expect(commits).toHaveLength(2);
+    expect(commits.at(-1)).toBe('feat: 每小时对账接上');
+    expect(commits.join('\n')).not.toContain(UI);
+    // 分支相对主线的净改动（推上去的头、开 PR 前验证按它）：两轮自己改的，没有主线的
+    expect(await changedFilesAgainst(t, main, await headOf(t))).toEqual([
+      'packages/engine/src/hourly.ts',
+      'packages/engine/src/reconcile.ts',
+    ]);
+  });
+
+  it('【故意造出的失败】只并了主线、自己没写东西：一个文件都不算改了（交活核对据此判没交）；原来的算法算出主线的文件', async () => {
+    const { t, base } = await mainlineMoved();
+    mergeMainline(t);
+    expect(sh(t.dir, 'diff', '--name-only', base, 'HEAD')).toBe(UI);
+    const span = await ownSpan(t, base, 'main');
+    expect(await changedFilesSince(t, span)).toEqual([]);
+    expect(await diffstatSince(t, span)).toEqual([]);
+    // 只剩会话自己那个并提交
+    expect(await commitsSince(t, span)).toHaveLength(1);
+  });
+
+  it('并主线有冲突、会话解了：解冲突改的文件算这一步的，主线另带进来的页面代码不算', async () => {
+    const { t, base } = await mainlineMoved(
+      ['a.ts', 'export const a = 100;\n'],
+      [
+        ['a.ts', 'export const a = 2;\n'],
+        [UI, 'export const h = 2;\n'],
+      ],
+    );
+    expect(() => mergeMainline(t)).toThrow();
+    writeFileSync(join(t.dir, 'a.ts'), 'export const a = 102;\n');
+    execFileSync('git', ['add', '--', 'a.ts'], { cwd: t.dir });
+    execFileSync('git', ['commit', '-q', '--no-edit'], { cwd: t.dir, env: ENV });
+    const span = await ownSpan(t, base, 'main');
+    // 起点是 merge-tree 算出来的树（不是提交）：a.ts 在里面是冲突标记，会话解成的样子和它不一样
+    expect(span.from).not.toBe(base);
+    expect(await changedFilesSince(t, span)).toEqual(['a.ts']);
+    // 并完一个字没改、原样照主线收的，也不一样（冲突标记没了）：照样算
+    expect(sh(t.dir, 'cat-file', '-p', `${span.from}:a.ts`)).toContain('<<<<<<<');
+  });
+
+  it('起会话前的头就在主线上（第一轮），会话把主线快进过来再改：从快进到的主线比', async () => {
+    const { t, base, main } = await mainlineMoved(null);
+    sh(t.dir, 'merge', '--ff-only', '-q', 'origin/main');
+    commitFile(t.dir, 'src/own.ts', 'export const o = 1;\n', 'feat: 自己的');
+    const span = await ownSpan(t, base, 'main');
+    expect(span).toEqual({ base, from: main, mainline: main });
+    expect(await changedFilesSince(t, span)).toEqual(['src/own.ts']);
+    expect(subjects(await commitsSince(t, span))).toEqual(['feat: 自己的']);
+  });
+
+  it('钉的主线比会话并的新（推之前又取了一次新主线）、会话没并：从起会话前的头比，和原来一样', async () => {
+    const { t, base } = await mainlineMoved();
+    commitFile(t.dir, 'src/own.ts', 'export const o = 1;\n', 'feat: 自己的');
+    const span = await ownSpan(t, base, 'main');
+    expect(span.from).toBe(base);
+    expect(await changedFilesSince(t, span)).toEqual(['src/own.ts']);
+  });
+
+  it('【故意造出的失败】树里没钉主线：明确报 MAINLINE_MISSING，不拿起会话前的头之后的全部冒充这一步改的', async () => {
+    const m = mirror();
+    const t = tree('work');
+    await fetchBundle(t, m.bundle(m.head), 'refs/fleet/export/0');
+    await checkoutBranch(t, 'fleet/293-a', m.head);
+    expect(await hasMainline(t, 'main')).toBe(false);
+    await expect(ownSpan(t, m.head, 'main')).rejects.toMatchObject({
+      code: 'MAINLINE_MISSING',
+      retryable: false,
+      message: expect.stringContaining('origin/main'),
+    });
+    await pinMainline(t, 'main', m.head);
+    expect(await hasMainline(t, 'main')).toBe(true);
+    await expect(ownSpan(t, m.head, 'bad..name')).rejects.toMatchObject({ code: 'BAD_INPUT' });
+  });
+
+  it('【故意造出的失败】找含到的主线、算并上主线的样子没跑成，或输出认不出：明确报 GIT_FAILED，不当成没并过主线', async () => {
+    const { t, base } = await mainlineMoved();
+    mergeMainline(t);
+    const real = localExec();
+    const failing =
+      (match: string, r: { code: number; stdout?: string; stderr?: string }): UserTree['exec'] =>
+      (c) =>
+        c.argv.includes(match)
+          ? Promise.resolve({
+              code: r.code,
+              stdout: Buffer.from(r.stdout ?? ''),
+              stderr: r.stderr ?? '',
+              timedOut: false,
+              aborted: false,
+            })
+          : real(c);
+    await expect(
+      ownSpan(
+        { ...t, exec: failing('merge-base', { code: 128, stderr: 'fatal: 故意造的\n' }) },
+        base,
+        'main',
+      ),
+    ).rejects.toMatchObject({ code: 'GIT_FAILED', message: expect.stringContaining('找 HEAD 里含到的主线') });
+    await expect(
+      ownSpan(
+        { ...t, exec: failing('merge-tree', { code: 129, stderr: 'usage: 故意造的\n' }) },
+        base,
+        'main',
+      ),
+    ).rejects.toMatchObject({ code: 'GIT_FAILED', message: expect.stringContaining('并上主线') });
+    await expect(
+      ownSpan({ ...t, exec: failing('merge-tree', { code: 0, stdout: '认不出的输出\n' }) }, base, 'main'),
+    ).rejects.toMatchObject({ code: 'GIT_FAILED', message: expect.stringContaining('输出认不出') });
   });
 });
 

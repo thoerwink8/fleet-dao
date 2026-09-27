@@ -327,6 +327,8 @@ async function wiring(
     gh,
     ...(options.requirements === 'real' ? {} : { requirements: options.requirements ?? fake.requirements }),
     ...(options.orgDefault ? { orgDefault: options.orgDefault } : {}),
+    // 关单对账（#241）按真钟每天北京 9:00 那一轮跑：这里的用例不看它，关掉，免得几点跑测试结果就不一样
+    closeSweepDue: () => false,
     log: quiet,
   });
   return { repoId: repo?.id ?? '', starts: fake.starts, job };
@@ -668,6 +670,7 @@ describe('对账补漏一轮的记账（不起 Temporal）', () => {
       opened: [],
       unchecked: [],
     }),
+    closeSweep: GitHubReconcileJobDeps['closeSweep'] = async () => ({ scanned: 0, found: 0, unchecked: [] }),
   ) {
     const finished: { id: number; result: unknown }[] = [];
     const logs: string[] = [];
@@ -675,6 +678,7 @@ describe('对账补漏一轮的记账（不起 Temporal）', () => {
       syncFlowConfigs,
       reconcile,
       askIssues,
+      closeSweep,
       runs: {
         async start() {
           return 7;
@@ -848,6 +852,61 @@ describe('对账补漏一轮的记账（不起 Temporal）', () => {
     expect(await runGitHubReconcileJob(d)).toMatchObject({
       outcome: 'partial',
       why: '给提问另开单没跑成：读 asks 表超时',
+    });
+  });
+
+  describe('关单对账（#241）：一天一次，北京时间 9:00 起的那一轮', () => {
+    const ok = async () => ({ outcome: 'ok' as const, scanned: 1, found: 0, steps: [] });
+    const at = (iso: string, d: GitHubReconcileJobDeps) => ({ ...d, now: () => new Date(iso) });
+
+    it('到点的那一轮在另开单之后跑，新留的言算处理了的；别的轮不跑', async () => {
+      const order: string[] = [];
+      const { d } = deps(
+        async () => {
+          order.push('reconcile');
+          return ok();
+        },
+        undefined,
+        async () => {
+          order.push('asks');
+          return { scanned: 0, found: 0, opened: [], unchecked: [] };
+        },
+        async () => {
+          order.push('close');
+          return { scanned: 1, found: 2, unchecked: [] };
+        },
+      );
+      expect(await runGitHubReconcileJob(at('2026-09-28T01:00:04Z', d))).toEqual({
+        runId: 7,
+        outcome: 'ok',
+        scanned: 1,
+        found: 2,
+      });
+      expect(order).toEqual(['reconcile', 'asks', 'close']);
+      order.length = 0;
+      await runGitHubReconcileJob(at('2026-09-28T01:15:04Z', d));
+      expect(order).toEqual(['reconcile', 'asks']);
+    });
+
+    it('【故意造出的失败】关单对账整步没跑成：不挡对账本身，这一轮记成 partial 写明原因（不当成查过、都齐了）', async () => {
+      const { d } = deps(ok, undefined, undefined, async () => {
+        throw new Error('读 repos 表超时');
+      });
+      expect(await runGitHubReconcileJob(at('2026-09-28T01:00:04Z', d))).toMatchObject({
+        outcome: 'partial',
+        why: '关单对账没跑成：读 repos 表超时',
+      });
+    });
+
+    it('【故意造出的失败】有仓没查成、留言没留成：这一轮记成 partial，前 3 条写进原因、其余写明还有几条', async () => {
+      const lines = [1, 2, 3, 4].map((i) => `关单对账 example/canary#${i} 留言没留成（GitHub 回 502）`);
+      const { d } = deps(ok, undefined, undefined, async () => ({ scanned: 1, found: 0, unchecked: lines }));
+      const run = await runGitHubReconcileJob(at('2026-09-28T01:00:04Z', d));
+      expect(run.outcome).toBe('partial');
+      expect(run.why?.split('；')).toEqual([
+        ...lines.slice(0, 3),
+        '关单对账另有 1 条没查成、没写成（看引擎日志）',
+      ]);
     });
   });
 });

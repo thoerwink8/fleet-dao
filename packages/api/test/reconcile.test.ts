@@ -6,6 +6,7 @@ import { requirementWorkflowId } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import { devFixtures, IDS } from '../src/dev-fixtures.ts';
 import { createGitHubIntake, githubEventsCheck, pollDeliveryId } from '../src/github.ts';
+import { createIssueIntake } from '../src/issue-intake.ts';
 import type { MemoryData } from '../src/memory-store.ts';
 import type { AskRecord, GitHubDelivery } from '../src/ports.ts';
 import { MAX_AUTO_REPLAYS, reconcileGitHub, reconcilerOptions } from '../src/reconcile.ts';
@@ -180,7 +181,17 @@ function setup(state: GitHubState, data: Partial<MemoryData> = devFixtures(T0)) 
     },
   });
   const run = () =>
-    reconcileGitHub({ store: h.store, intake, reconciler, log: h.deps.log, now: () => T0 }, { since: SINCE });
+    reconcileGitHub(
+      {
+        store: h.store,
+        intake,
+        claims: createIssueIntake(h.deps),
+        reconciler,
+        log: h.deps.log,
+        now: () => T0,
+      },
+      { since: SINCE },
+    );
   return { h, run, api };
 }
 
@@ -581,5 +592,43 @@ describe('对账补漏', () => {
     expect(result).toMatchObject({ outcome: 'partial', scanned: 1 });
     expect(result.why).toContain('重放 1 条还是没处理成');
     expect(await h.store.getDelivery('still-broken')).toMatchObject({ status: 'failed', attempts: 2 });
+  });
+
+  it('【故意造出的失败】待起的认领（#299）：开单时起工作流没成、投递重放到头还在待起的，对账这一步补起；起不成算 partial、写明哪张', async () => {
+    const { h, run } = setup({ repos: { [SLUG]: empty() } });
+    const start = h.deps.requirements.start;
+    h.deps.requirements.start = async () => {
+      throw new Error('Temporal 连不上');
+    };
+    expect((await deliver(h, 'issues', opened(issue(47, -10)), { delivery: 'open-47' })).status).toBe(500);
+    // 投递重放到头：不再自动重放，只剩认领待起
+    const d = h.store.data.githubEvents.get('open-47');
+    if (!d) throw new Error('投递没落库');
+    d.attempts = MAX_AUTO_REPLAYS;
+    expect(h.store.data.claims.find((c) => c.issueNumber === 47)).toMatchObject({
+      ownerKind: 'engine',
+      state: 'pending_start',
+    });
+    h.clock.now = new Date(T0.getTime() + 6 * 60_000);
+
+    const down = await run();
+    expect(down).toMatchObject({ outcome: 'partial', scanned: 1 });
+    expect(down.steps.find((s) => s.step === 'claims')).toMatchObject({
+      outcome: 'partial',
+      checked: 1,
+      recovered: 0,
+      why: expect.stringContaining('待起的认领 1 张没起成'),
+    });
+    expect(down.why).toContain('claims：待起的认领 1 张没起成');
+
+    h.deps.requirements.start = start;
+    const up = await run();
+    expect(up.steps.find((s) => s.step === 'claims')).toMatchObject({
+      outcome: 'ok',
+      checked: 1,
+      recovered: 1,
+    });
+    expect(h.starts.map((s) => s.issueNumber)).toEqual([47]);
+    expect(h.store.data.claims.find((c) => c.issueNumber === 47)?.state).toBe('doing');
   });
 });

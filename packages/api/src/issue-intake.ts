@@ -8,6 +8,8 @@
 // 「本机做」（#299 认领进库之前的止血：帅位留给本机做的）——挂在哪、当前版本是哪个、是不是母单子单、贴了哪些标签，拉起前在
 // GitHub 上现读（deps.plans），读不到就当这条没处理成（记成出错、对账重放时再判），不当成挂在当前版本上的独立单。开关打开以前开的、
 // 别的版本的、未排期的、母单和子单、贴了「本机做」的，由人明说交给 fleet（fleet-api handover，cli.ts）。
+// 过了这几道再抢这张单的认领（#299，specs/299-帅位只一个/方案.md 第四节）：和本机（帅位、工人）抢库里同一行，本机拿着就不派；
+// 抢到的先记待起，工作流起成了改在做；起没成留着待起，投递重放、GitHub 对账（restartPending）再起。
 // 拉起之前看这个仓的流程配置副本（docs/decisions/0003-fusion-flow.md 第 9 条）：认不出、太旧就停派，这条记成等着，
 // 副本好了由对账重放再拉起（判法在 @fleet-dao/core 的 replica.ts）。
 import { randomUUID } from 'node:crypto';
@@ -15,6 +17,9 @@ import {
   type AutoDispatchGate,
   autoDispatchGate,
   dispatchDecision,
+  ENGINE_PENDING_RESTART_MINUTES,
+  heldByOtherText,
+  type IssueClaim,
   isFinishedTask,
   replicaVerdict,
 } from '@fleet-dao/core';
@@ -95,9 +100,30 @@ export function issuePlansUnavailable(why: string): IssuePlanReader {
   };
 }
 
+/** GitHub 对账补起待起认领这一轮的结果。 */
+export interface PendingRestartReport {
+  /** 看了几张待起超过几分钟的引擎认领。 */
+  checked: number;
+  /** 起了几张（含本来就在跑、只是认领还没改成在做的）。 */
+  started: number;
+  /** 不起了、放下了几张（开关关了、上一轮已经结束、单子关了）。 */
+  released: number;
+  /** 没起成、没查成的，一张一句。 */
+  problems: string[];
+}
+
+/** 一轮最多补起几张待起的认领（多的下一轮再来）。 */
+const PENDING_BATCH = 20;
+
 export interface IssueIntake {
   /** 不是 issue、评论事件：undefined。是：一句做了什么（记进这条投递的 note）。 */
   handle(event: IngestedEvent): Promise<string | undefined>;
+  /**
+   * 待起超过几分钟还没起来的引擎认领再起一次（GitHub 对账每轮调，方案第四节）：起工作流没成的投递最多自动重放 5 次、之后不再
+   * 重放，靠这里照认领行里的工作流编号、经同一个拉起实现补起。只起从没派出去过的（任务还在排队）；工作流已经在跑的只把认领改成
+   * 在做；上一轮已经结束的（重开再起那种）、开关关了、单子关了的放下认领，交回投递重放或交单。
+   */
+  restartPending(): Promise<PendingRestartReport>;
 }
 
 export function createIssueIntake(
@@ -264,6 +290,27 @@ export function createIssueIntake(
       });
       throw new RetryLaterError(`这个项目停派：${flow.why}。副本好了由对账重放再拉起`);
     }
+    // 抢认领：本机拿着（帅位留给本机做的、工人在做的）就不派，写明谁拿着；引擎自己拿着的（重投、重放、上一次起工作流没成）
+    // 照旧往下起
+    const claim = await store.claimForEngine({
+      repoId: repo.id,
+      issueNumber: issue.number,
+      workflowId: requirementWorkflowId(repo, issue.number),
+      actor: INTAKE,
+      note: decision === 'restart' ? 'GitHub 上重开了，接活再派一轮' : '接活自动派',
+    });
+    if (!claim.ok) {
+      // 不带帅位、不带创始人原话来抢，只会是别人拿着；别的结果是认领这一步自己坏了，照实报错（投递记成出错、对账重放）
+      if (claim.reason !== 'held') throw new Error(`没查成：认领这一步回了 ${claim.reason}（${claim.why}）`);
+      log.info(`这张单不自动派：${heldByOtherText(claim.claim, claim.now)}`, {
+        deliveryId: event.deliveryId,
+        repo: event.repo,
+        issueNumber: issue.number,
+        claimId: claim.claim.claimId,
+      });
+      notes.push('workflow=claimed_local');
+      return notes.join(', ');
+    }
     // 开关、副本都不进工作流的历史
     const { autoDispatchSince: _switch, flow: _flow, ...repoOnly } = repo;
     const started = await deps.requirements.start({
@@ -279,6 +326,8 @@ export function createIssueIntake(
       // 任务记成结束（或还在排队），上一轮工作流却还在收尾：同上，等它真结束
       throw new RetryLaterError('GitHub 上重开了，上一轮工作流还没收完尾：等它结束后由对账重放再拉起');
     }
+    // 起成了（already_running：上一次其实起成了）：认领从待起改成在做。这一步没写上也不要紧，工作流写第一份快照时同样会改
+    await store.startEngineClaim({ repoId: repo.id, issueNumber: issue.number });
     if (started === 'started') {
       await store.appendAudit(
         entry(INTAKE, 'task.start', task.id, {
@@ -404,11 +453,94 @@ export function createIssueIntake(
     return 'ask=answered';
   }
 
+  /** 补起一张待起的认领：started / released / moved（这之间别处已经改了它）或一句没起成的原因。 */
+  async function restartOne(
+    claim: IssueClaim,
+  ): Promise<'started' | 'released' | 'moved' | { problem: string }> {
+    const base = await store.getRepo(claim.repoId);
+    const repo = base && (await store.findRepoByName(base.owner, base.name));
+    if (!repo) return { problem: `仓 ${claim.repoId} 的 #${claim.issueNumber} 待起：库里找不到这个仓` };
+    const label = `${repo.owner}/${repo.name}#${claim.issueNumber}`;
+    const target = { repoId: repo.id, issueNumber: claim.issueNumber };
+    const release = async (why: string) =>
+      (await store.releasePendingEngineClaim({
+        ...target,
+        claimId: claim.claimId,
+        reason: why,
+        actor: INTAKE,
+      }))
+        ? ('released' as const)
+        : ('moved' as const);
+    if (repo.autoDispatchSince === null)
+      return release('「让 AI 接活」关着：待起的不起了，打开后由投递重放或交单再起');
+    const task = await store.findTaskByIssue(repo.id, claim.issueNumber);
+    if (!task) return { problem: `${label} 待起：库里没有这张单的任务行` };
+    if (isFinishedTask(task.state)) {
+      // 重开再起的那种：还在等的投递每轮都重放，由它按重开的规矩再起；这里起了会和它各起一轮
+      return release(
+        `上一轮已经结束（${task.state}），这一轮待起超过 ${ENGINE_PENDING_RESTART_MINUTES} 分钟没起来：放下，由投递重放或交单再起`,
+      );
+    }
+    if (task.state !== 'queued') {
+      // 工作流已经在跑（任务不在排队了），只是认领还没改成在做
+      return (await store.startEngineClaim(target)).changed ? 'started' : 'moved';
+    }
+    const flow = replicaVerdict(repo.flow, deps.now());
+    if (!flow.ok) return { problem: `${label} 待起：这个项目停派（${flow.why}），副本好了再起` };
+    let plan: IssuePlan;
+    try {
+      plan = await deps.plans.read(repo, claim.issueNumber);
+    } catch (err) {
+      return { problem: `${label} 待起：没查成，读不到 GitHub 上这张单此刻的样子（${message(err)}）` };
+    }
+    if (plan.state === 'closed') return release('GitHub 上这张单关了：待起的不起了');
+    // 开关、副本都不进工作流的历史（和接活拉起的是同一种输入、同一个拉起实现，工作流编号就是认领行里那个）
+    const { autoDispatchSince: _switch, flow: _flow, ...repoOnly } = repo;
+    const started = await deps.requirements.start({
+      schemaVersion: 1,
+      taskId: task.id,
+      repo: repoOnly satisfies Repo,
+      issueNumber: claim.issueNumber,
+      title: task.title,
+      rawRequest: task.rawRequest,
+      requestedBy: plan.author ?? task.requestedBy,
+    });
+    if (started === 'started') {
+      await store.appendAudit(
+        entry(INTAKE, 'task.start', task.id, {
+          reason: `待起的认领补起（待起超过 ${ENGINE_PENDING_RESTART_MINUTES} 分钟，GitHub 对账）`,
+        }),
+      );
+    }
+    await store.startEngineClaim(target);
+    return 'started';
+  }
+
+  async function restartPending(): Promise<PendingRestartReport> {
+    const { claims } = await store.listStalePendingEngineClaims({
+      minutes: ENGINE_PENDING_RESTART_MINUTES,
+      limit: PENDING_BATCH,
+    });
+    const report: PendingRestartReport = { checked: claims.length, started: 0, released: 0, problems: [] };
+    for (const claim of claims) {
+      try {
+        const r = await restartOne(claim);
+        if (r === 'started') report.started += 1;
+        else if (r === 'released') report.released += 1;
+        else if (r !== 'moved') report.problems.push(r.problem);
+      } catch (err) {
+        report.problems.push(`仓 ${claim.repoId} 的 #${claim.issueNumber} 待起，补起没成：${message(err)}`);
+      }
+    }
+    return report;
+  }
+
   return {
     async handle(event) {
       if (event.event === 'issues') return onIssue(event);
       if (event.event === 'issue_comment') return onComment(event);
       return undefined;
     },
+    restartPending,
   };
 }

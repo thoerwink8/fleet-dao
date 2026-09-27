@@ -30,8 +30,10 @@ const makeSeat: MakeSeatStore = async (data, clock) => {
     },
     async backdateClaim(repoId, issueNumber, minutes) {
       for (const c of store.data.claims)
-        if (c.repoId === repoId && c.issueNumber === issueNumber)
+        if (c.repoId === repoId && c.issueNumber === issueNumber) {
           c.heartbeatAt = back(c.heartbeatAt, minutes);
+          c.updatedAt = back(c.updatedAt, minutes);
+        }
     },
   };
 };

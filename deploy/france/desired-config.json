@@ -1,0 +1,135 @@
+{
+  "说明": "法国 /etc/fleet-dao 下几份环境文件「应该是什么」（#323，照 OpenGitOps：期望进仓、有版本，线上每轮对账）。自动发布每一轮拿在用的那一版里的这份跟法国上的比，哪一项不一致、缺了、写重了、多出来，就报一条警（线上的值不打印），改回去了自己撤。公开的值写原值；私有的值（域名、账号、编号、密钥）不写值，只写指纹：HMAC-SHA256，钥匙是法国本机的 /etc/fleet-dao/config-fingerprint.key，fingerprint.keyId 是它的编号；private 为 null 是还没记指纹（对账记没查成）。selfHeal 是自动改回的开关，关着只报警、不改回（开不开等创始人定）。格式和对账的读法在 deploy/france/auto-release/config.mjs，怎么改、怎么算指纹见 docs/ops.md 第九节「配置进仓对账」。",
+  "formatVersion": 1,
+  "selfHeal": false,
+  "fingerprint": {
+    "algorithm": "hmac-sha256/v1",
+    "keyId": null
+  },
+  "files": {
+    "engine.env": {
+      "FLEET_ENGINE_PORTS": {
+        "value": "real",
+        "说明": "端口的实现：real = 真仓、真会话、真 GitHub；fake = 假实现（联调、演练，不碰真东西）。必须写，没写引擎不起"
+      },
+      "TEMPORAL_ADDRESS": {
+        "value": "127.0.0.1:7243",
+        "说明": "本机的 Temporal（fleet-dao 这套，前端 127.0.0.1:7243）、命名空间、任务队列"
+      },
+      "TEMPORAL_NAMESPACE": "fleet",
+      "FLEET_TASK_QUEUE": "fleet",
+      "FLEET_AGENT_API_URL": {
+        "value": "http://127.0.0.1:8788",
+        "说明": "AI 会话里的 fleet 命令连的后端地址（驾驶舱后端的 fleet 命令接口）"
+      },
+      "DATABASE_URL": {
+        "value": "postgres:///fleet",
+        "说明": "本机库（同 api.env：unix socket + peer 认证，主机由 PGHOST 给）"
+      },
+      "PGHOST": "/var/run/postgresql",
+      "PGUSER": "fleet",
+      "FLEET_MACHINE_NAME": {
+        "value": "法国",
+        "说明": "这台机器给人看的名字：设备被撤销这类只有人能修的事，提醒里写清去哪台机器修"
+      },
+      "FLEET_WORK_DIR": {
+        "value": "/var/lib/fleet-work",
+        "说明": "AI 会话的工作树的根（root:root 755，france.sh 建；fleet-agent-scope 只认这一个）"
+      },
+      "FLEET_ENGINE_STATE_DIR": {
+        "value": "/var/lib/fleet-dao/engine",
+        "说明": "引擎自己的临时目录（bundle）和存档（没合并就收的树里没提交的改动）放在这下面的 tmp/、archive/"
+      },
+      "FLEET_CLAUDE_BIN": {
+        "value": "/home/{user}/.local/bin/reclaude",
+        "说明": "reclaude 装在会话用户自己家里，{user} 换成会话用户"
+      },
+      "FLEET_FORK_MAX_CONTEXT_TOKENS": {
+        "value": "100000",
+        "说明": "换账号池接着干时，上一轮的上下文比这个小才 fork 续，大了开新会话带接力任务书"
+      },
+      "FLEET_SENSITIVE_VALUES_FILE": {
+        "value": "/etc/fleet-dao/sensitive-values.txt",
+        "说明": "卫生检查的已知敏感值名单（手放，root:fleet 640）：推分支、写需求文档、开 PR 之前都读；钉在这一份上"
+      },
+      "FLEET_CURSOR_VERSIONS_DIR": {
+        "value": "/home/{user}/.local/share/cursor-agent/versions",
+        "说明": "cursor-agent 装在会话用户自己家里，每次起会话在这下面现找 current → 最新版本；{user} 换成会话用户"
+      },
+      "FLEET_CANARY_REPO": {
+        "private": null,
+        "说明": "全流程巡检的巡检仓（owner/仓名）：私有值，公开仓里不写真值（docs/ops.md 第五节「全流程巡检」）"
+      }
+    },
+    "api.env": {
+      "FLEET_ENV": "production",
+      "FLEET_PUBLIC_URL": {
+        "private": null,
+        "说明": "浏览器看到的驾驶舱地址（香港的域名）：私有值"
+      },
+      "FLEET_COCKPIT_LISTEN": {
+        "value": "10.99.0.2:8787",
+        "说明": "驾驶舱接口只听隧道地址：香港经 WireGuard 转进来，公网上没有这个端口"
+      },
+      "FLEET_AGENT_LISTEN": {
+        "value": "127.0.0.1:8788",
+        "说明": "fleet 命令接口只听本机回环：AI 会话在同一台机器上调"
+      },
+      "DATABASE_URL": {
+        "value": "postgres:///fleet",
+        "说明": "本机库：unix socket + peer 认证，没有口令；主机由 PGHOST 给（postgres.js 不认连接串里的 ?host=）"
+      },
+      "PGHOST": "/var/run/postgresql",
+      "PGUSER": "fleet",
+      "FLEET_GITHUB_WEBHOOK_SECRET": {
+        "private": null,
+        "说明": "GitHub「引擎」App 设置里的 Webhook secret（france.sh 照 /etc/fleet-dao/github/ 里那份 json 填）：私有值"
+      },
+      "FEISHU_APP_ID": {
+        "private": null,
+        "说明": "飞书自建应用的凭据：私有值"
+      },
+      "FEISHU_APP_SECRET": {
+        "private": null,
+        "说明": "飞书自建应用的凭据：私有值"
+      },
+      "TEMPORAL_ADDRESS": {
+        "value": "127.0.0.1:7243",
+        "说明": "本机的 Temporal（同 engine.env）：发给工作流的信号、/healthz 的 temporal 项都连它"
+      },
+      "TEMPORAL_NAMESPACE": "fleet",
+      "FLEET_TASK_QUEUE": {
+        "value": "fleet",
+        "说明": "引擎工人取活的任务队列（同 engine.env）：/healthz 的 engine 项查这条队列上有没有 poller"
+      },
+      "FLEET_DEMO_DIR": {
+        "value": "/var/lib/fleet-dao/demo",
+        "说明": "演示版的可见范围写在这里（france.sh 建的目录），由 fleet-demo-scopes 推到香港"
+      }
+    },
+    "release.env": {
+      "FLEET_SERVICES": {
+        "value": "fleet-engine fleet-api",
+        "说明": "本机跑哪些应用服务（空格分隔，可选 fleet-engine、fleet-api）"
+      },
+      "FLEET_DOMAIN": {
+        "private": null,
+        "说明": "驾驶舱的域名（和香港 hk.env 的同一个）：私有值"
+      },
+      "FLEET_HK_PARTS": {
+        "value": "gateway web demo",
+        "说明": "往香港发哪几样：gateway 飞书网关、web 驾驶舱静态文件（根地址，对外发布）、demo 演示版（自动发布不发、只核对）"
+      }
+    },
+    "france.env": {
+      "FLEET_WG_HK_ENDPOINT": {
+        "private": null,
+        "说明": "香港 WireGuard 的公网地址和端口：私有值（france.sh 读，改了要重跑 france.sh）"
+      },
+      "FLEET_WG_HK_PUBLIC_KEY": {
+        "private": null,
+        "说明": "香港的 WireGuard 公钥（france.sh 读）：当私有值记指纹"
+      }
+    }
+  }
+}

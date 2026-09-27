@@ -6,7 +6,15 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import {
+  FINGERPRINT_ALGORITHM,
+  fingerprintOf,
+  keyIdOf,
+  parseFingerprintKey,
+} from '../france/auto-release/config.mjs';
+import {
   CI_WORKFLOW,
+  CONFIG_PREFIX,
+  CONFIG_UNCHECKED_KEY,
   ciVerdict,
   EXIT_RELEASE_BUSY,
   EXIT_SESSIONS_BUSY,
@@ -47,6 +55,24 @@ const runsBody = (...runs) => ({
   body: JSON.stringify({ total_count: runs.length, workflow_runs: runs }),
 });
 
+// 配置对账用的一台假机器上的配置：在用那一版里的期望、线上两份环境文件、指纹钥匙，默认和期望一致
+const KEY_TEXT = `${'3c'.repeat(32)}\n`;
+const KEY = parseFingerprintKey(KEY_TEXT);
+const SECRET = 'cli_fake飞书密钥_7788'; // 带 fake：卫生检查认得出是编的
+const DESIRED = JSON.stringify({
+  formatVersion: 1,
+  selfHeal: false,
+  fingerprint: { algorithm: FINGERPRINT_ALGORITHM, keyId: keyIdOf(KEY) },
+  files: {
+    'engine.env': { FLEET_WORK_DIR: '/var/lib/fleet-work', FLEET_ENGINE_PORTS: 'real' },
+    'api.env': { FEISHU_APP_SECRET: { private: fingerprintOf(KEY, 'api.env', 'FEISHU_APP_SECRET', SECRET) } },
+    'release.env': {},
+    'france.env': {},
+  },
+});
+const ENGINE_ENV = 'FLEET_WORK_DIR=/var/lib/fleet-work\nFLEET_ENGINE_PORTS=real\n';
+const API_ENV = `FEISHU_APP_SECRET=${SECRET}\n`;
+
 /** 一台假机器：主线两个提交（H1 在 07:30 合进来、CI 绿），在用 H0，引擎空闲，发布会成。 */
 function machine() {
   const m = {
@@ -68,9 +94,22 @@ function machine() {
     rules: { code: 0, out: '  ✓ 一致' },
     checkoutHead: null, // null = 和在用的同一个
     dbDown: false,
+    // 配置对账读到的：期望（在用那一版里的）、线上的环境文件、指纹钥匙；configThrow = 读的时候就抛
+    config: {
+      desired: { text: DESIRED },
+      files: {
+        'engine.env': { text: ENGINE_ENV },
+        'api.env': { text: API_ENV },
+        'release.env': { text: '' },
+        'france.env': { text: '' },
+      },
+      key: { text: KEY_TEXT },
+    },
+    configThrow: null,
     calls: [],
     alerts: [],
     resolved: [],
+    resolvedKeys: [],
     saved: [],
   };
   m.io = {
@@ -123,6 +162,14 @@ function machine() {
     async resolve(prefix) {
       if (m.dbDown) throw new Error('库连不上');
       m.resolved.push(prefix);
+    },
+    async resolveKey(key) {
+      if (m.dbDown) throw new Error('库连不上');
+      m.resolvedKeys.push(key);
+    },
+    async readConfig() {
+      if (m.configThrow) throw new Error(m.configThrow);
+      return { commit: m.current, ...structuredClone(m.config) };
     },
     async save(st) {
       m.saved.push(structuredClone(st));
@@ -495,6 +542,111 @@ test('读数：一行人看的，写明主线头、落后几个、这一轮干�
   assert.match(line, /这轮：ci-red/);
   assert.match(line, /规矩同步到/);
   assert.match(line, /装机脚本装到 aaaaaaaaaaaa，之后相关提交 0 个/);
+  assert.match(line, /配置和期望一致/);
+});
+
+// ── 配置对账（#323）：每一轮拿线上的环境文件跟在用那一版里的期望比 ──
+
+const configAlerts = (m) =>
+  m.alerts.filter((a) => a.key.startsWith(CONFIG_PREFIX) || a.key === CONFIG_UNCHECKED_KEY);
+
+test('配置一致：不报警；状态里记一致', async () => {
+  const m = machine();
+  const st = await m.round();
+  assert.equal(st.config.result, 'ok');
+  assert.deepEqual(configAlerts(m), []);
+});
+
+test('线上配置被手改：下一轮报出偏离、指明哪一项，不每轮重发；改回去下一轮报警自己撤', async () => {
+  const m = machine();
+  await m.round();
+  m.config.files['engine.env'].text = ENGINE_ENV.replace('/var/lib/fleet-work', '/tmp/手改');
+  m.t += 5 * MIN;
+  let st = await m.round();
+  assert.equal(st.config.result, 'drift');
+  assert.deepEqual(st.config.drift, [{ id: 'engine.env:FLEET_WORK_DIR', kind: 'value' }]);
+  assert.deepEqual(
+    configAlerts(m).map((a) => a.key),
+    [`${CONFIG_PREFIX}engine.env:FLEET_WORK_DIR`],
+  );
+  assert.match(configAlerts(m)[0].title, /engine\.env 的 FLEET_WORK_DIR/);
+  assert.match(summary(st), /配置有 1 项和期望不一致（engine\.env:FLEET_WORK_DIR）/);
+  for (let i = 0; i < 2; i++) {
+    m.t += 5 * MIN;
+    await m.round();
+  }
+  assert.equal(configAlerts(m).length, 1, '一直没改：报警只发一次');
+  m.config.files['engine.env'].text = ENGINE_ENV;
+  m.t += 5 * MIN;
+  st = await m.round();
+  assert.equal(st.config.result, 'ok');
+  assert.deepEqual(m.resolvedKeys, [`${CONFIG_PREFIX}engine.env:FLEET_WORK_DIR`], '按整个键解除，不按前缀');
+  assert.deepEqual(m.resolved, [], '别的报警一条没碰');
+});
+
+test('私有值不一致：只报「不一致」，状态文件、报警、读数里都搜不到线上的值和原来的值', async () => {
+  const m = machine();
+  m.config.files['api.env'].text = 'FEISHU_APP_SECRET=cli_被人换掉的\n';
+  const st = await m.round();
+  assert.deepEqual(st.config.drift, [{ id: 'api.env:FEISHU_APP_SECRET', kind: 'private' }]);
+  assert.match(configAlerts(m)[0].body, /私有值.*不打印/);
+  const everything = JSON.stringify({ st, alerts: m.alerts, saved: m.saved, line: summary(st) });
+  for (const v of ['cli_被人换掉的', SECRET]) assert.ok(!everything.includes(v), `出现了值「${v}」`);
+});
+
+test('期望读不到、认不出，钥匙不对，对账自己抛了：记没查成、报一条，不当成一致；查成了自己撤', async () => {
+  for (const [what, setup, why] of [
+    [
+      '在用的版本没有期望文件',
+      (m) => (m.config.desired = { error: '没有 …/desired-config.json' }),
+      /读不到期望/,
+    ],
+    ['期望不是 JSON', (m) => (m.config.desired = { text: '{' }), /不是 JSON/],
+    ['钥匙换了', (m) => (m.config.key = { text: `${'00'.repeat(32)}\n` }), /不是期望文件记的那一把/],
+    ['读的时候抛了', (m) => (m.configThrow = 'EACCES'), /对账没跑成.*EACCES/],
+  ]) {
+    const m = machine();
+    setup(m);
+    const st = await m.round();
+    assert.notEqual(st.config.result, 'ok', what);
+    assert.match(st.config.unchecked.join('；'), why, what);
+    assert.deepEqual(
+      configAlerts(m).map((a) => a.key),
+      [CONFIG_UNCHECKED_KEY],
+      what,
+    );
+    assert.match(summary(st), /配置没查成/, what);
+    const fresh = machine();
+    m.config = fresh.config;
+    m.configThrow = null;
+    m.t += 5 * MIN;
+    await m.round();
+    assert.deepEqual(m.resolvedKeys, [CONFIG_UNCHECKED_KEY], `${what}：查成了自己撤`);
+  }
+});
+
+test('配置报警库连不上：留到下一轮再发、再撤，不丢', async () => {
+  const m = machine();
+  m.config.files['engine.env'].text = ENGINE_ENV.replace('real', 'fake');
+  m.dbDown = true;
+  let st = await m.round();
+  assert.equal(configAlerts(m).length, 0);
+  assert.equal(st.alerts.find((a) => a.key.startsWith(CONFIG_PREFIX)).raised, false);
+  m.dbDown = false;
+  m.t += 5 * MIN;
+  st = await m.round();
+  assert.equal(configAlerts(m).length, 1);
+  m.config.files['engine.env'].text = ENGINE_ENV;
+  m.dbDown = true;
+  m.t += 5 * MIN;
+  st = await m.round();
+  assert.deepEqual(m.resolvedKeys, []);
+  assert.deepEqual(st.resolveKeys, [`${CONFIG_PREFIX}engine.env:FLEET_ENGINE_PORTS`], '解除留到下一轮');
+  m.dbDown = false;
+  m.t += 5 * MIN;
+  st = await m.round();
+  assert.deepEqual(m.resolvedKeys, [`${CONFIG_PREFIX}engine.env:FLEET_ENGINE_PORTS`]);
+  assert.deepEqual(st.resolveKeys, []);
 });
 
 test('CI 结论：只认这个提交在 main 上那次 push 的 ci.yml，取最新一次', () => {

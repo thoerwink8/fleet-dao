@@ -3,23 +3,26 @@
 import { randomUUID } from 'node:crypto';
 import { and, eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { saveTaskSnapshot } from '../src/queries/engine.ts';
 import {
   endClaimRow,
   listClaimRows,
+  listStalePendingEngineClaimRows,
   readClaim,
   readDbNow,
   readSeat,
   readSeatSetting,
   renewSeatRow,
+  startEngineClaimRow,
   stepClaimRow,
   takeClaimRow,
   takeSeatRow,
   voidExpiredClaimRows,
   writeHandoffRow,
 } from '../src/queries/seat.ts';
-import { issueClaims, seatLeases, settings } from '../src/schema/index.ts';
+import { auditLog, issueClaims, seatLeases, settings } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
-import { addRepo, expectViolation } from './helpers.ts';
+import { addRepo, addTask, expectViolation } from './helpers.ts';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -264,5 +267,88 @@ describe('认领：每张单一行，一条语句抢，只有一边拿到', () =
       }),
       'seat_leases_term_positive',
     );
+  });
+});
+
+describe('引擎的认领跟着任务走（写快照的同一个事务里）', () => {
+  const snapshot = (
+    taskId: string,
+    state: Parameters<typeof saveTaskSnapshot>[1]['state'],
+    claimEnd: Parameters<typeof saveTaskSnapshot>[1]['claimEnd'],
+  ) =>
+    saveTaskSnapshot(t.db, {
+      taskId,
+      state,
+      phase: 'fusion:execute',
+      doing: '写码',
+      lastProblem: null,
+      subtasks: [],
+      claimEnd,
+    });
+  const claimOf = async (repoId: string, issueNumber: number) =>
+    (await readClaim(t.db, repoId, issueNumber)).value;
+
+  it('工作流在跑：待起的改在做；做完了：认领记做完、记一条 claim.done（在引擎名下）', async () => {
+    const repo = await addRepo(t.db);
+    const task = await addTask(t.db, repo.id, { issueNumber: 70 });
+    await takeClaimRow(t.db, engine(repo.id, 70));
+    expect(await snapshot(task.id, 'running', null)).toBe('saved');
+    expect(await claimOf(repo.id, 70)).toMatchObject({ ownerKind: 'engine', state: 'doing' });
+    await snapshot(task.id, 'done', { state: 'done', reason: 'Fusion 做完了' });
+    expect(await claimOf(repo.id, 70)).toMatchObject({ state: 'done', endReason: 'Fusion 做完了' });
+    const audits = await t.db
+      .select()
+      .from(auditLog)
+      .where(eq(auditLog.target, `claim:${repo.id}#70`));
+    expect(audits.map((a) => [a.action, a.actorKind, a.actorId, a.reason])).toEqual([
+      ['claim.done', 'engine', 'fusion', 'Fusion 做完了'],
+    ]);
+  });
+
+  it('【故意造出的失败】引擎在做、库里却没有还活着的认领（认领上线前起的任务）：写快照时补一份引擎的（在做）；叫停了跟着放下', async () => {
+    const repo = await addRepo(t.db);
+    const task = await addTask(t.db, repo.id, { issueNumber: 71 });
+    await snapshot(task.id, 'running', null);
+    expect(await claimOf(repo.id, 71)).toMatchObject({
+      ownerKind: 'engine',
+      state: 'doing',
+      workflowId: `req:acme/${repo.name}#71`,
+    });
+    await snapshot(task.id, 'stopped', { state: 'released', reason: '任务叫停了' });
+    expect(await claimOf(repo.id, 71)).toMatchObject({ state: 'released', endReason: '任务叫停了' });
+  });
+
+  it('【故意造出的失败】本机拿着的：写快照不碰它（补不上、也不结束它）', async () => {
+    const repo = await addRepo(t.db);
+    const task = await addTask(t.db, repo.id, { issueNumber: 72 });
+    const local = await takeClaimRow(t.db, worker(repo.id, 72));
+    await snapshot(task.id, 'running', null);
+    await snapshot(task.id, 'failed', { state: 'released', reason: 'Fusion 没做成（任务 failed）' });
+    expect(await claimOf(repo.id, 72)).toMatchObject({
+      claimId: local?.value.claimId,
+      ownerKind: 'worker',
+      state: 'claimed',
+    });
+  });
+
+  it('待起的引擎认领：只列待起超过几分钟的（在做的、演练座位下的不列）；起成了改在做只动引擎待起的', async () => {
+    const repo = await addRepo(t.db);
+    await takeClaimRow(t.db, engine(repo.id, 73));
+    await takeClaimRow(t.db, engine(repo.id, 74));
+    await takeClaimRow(t.db, { ...engine(repo.id, 75), seatScope: 'drill:299', seatTerm: 1 });
+    await takeClaimRow(t.db, worker(repo.id, 76));
+    await t.db
+      .update(issueClaims)
+      .set({ updatedAt: sql`${issueClaims.updatedAt} - make_interval(mins => 10)` })
+      .where(eq(issueClaims.repoId, repo.id));
+    expect(await startEngineClaimRow(t.db, { repoId: repo.id, issueNumber: 74 })).toMatchObject({
+      value: { state: 'doing' },
+    });
+    expect(await startEngineClaimRow(t.db, { repoId: repo.id, issueNumber: 76 })).toBeNull();
+    const stale = await listStalePendingEngineClaimRows(t.db, { minutes: 5, limit: 10 });
+    expect(stale.value.map((c) => c.issueNumber)).toEqual([73]);
+    expect(await listStalePendingEngineClaimRows(t.db, { minutes: 15, limit: 10 })).toMatchObject({
+      value: [],
+    });
   });
 });

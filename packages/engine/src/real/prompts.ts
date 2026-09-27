@@ -298,7 +298,7 @@ ${end}`;
     case 'accept': {
       const d = lead.delivery;
       const diff = d?.base
-        ? `\`git diff ${d.base}..HEAD\` 就是副手交回的全部改动（打回过的几轮连在一起看）。`
+        ? `\`git diff ${d.base}..HEAD\` 就是副手交回的全部改动（打回过的几轮连在一起看；副手并过主线的话，主线带进来的改动也在这个 diff 里，那些不是副手改的、不算它改到简报外——上面列的文件已经扣掉了并进来的主线）。`
         : '';
       const outside = brief.task && d ? outsideBrief(brief.task, d.changedFiles) : [];
       return `## 你要做的：验收副手这一轮

@@ -443,6 +443,95 @@ describe('写码会话', () => {
     }
   });
 
+  // #293：会话在树里并过主线，交活的改动清单要扣掉并进来的主线（user-git.ts 的 ownSpan）。原来按 git diff base HEAD 算，
+  // 主线上别人改的页面代码也算成这张单改的，开 PR 前验证按界面类派、没人可派。
+  describe('会话并了主线（#293）', () => {
+    const UI = 'deploy/web/health/health.js';
+    /** 主线上别人又改了页面代码。 */
+    function mainlineChangesUi(): string {
+      mkdirSync(join(m.dir, 'deploy', 'web', 'health'), { recursive: true });
+      writeFileSync(join(m.dir, UI), 'export const h = 2;\n');
+      git(m.dir, 'add', '--', UI);
+      git(m.dir, 'commit', '-q', '-m', 'main: 健康页');
+      return git(m.dir, 'rev-parse', 'HEAD');
+    }
+    /**
+     * 会话在树里并主线：新主线由引擎推之前取进树里、钉成 origin/main（github-ports 的 pushBranch，这里照做一遍），会话照着
+     * git merge 它；own 为真再提交一个自己改的文件。都跑了测试、fleet done。
+     */
+    const mergesMainline =
+      (options: { own?: boolean } = {}) =>
+      (): FakeRunScript => ({
+        act: async ({ spec, emit }) => {
+          git(spec.cwd, 'fetch', '-q', m.dir, '+refs/heads/main:refs/remotes/origin/main');
+          git(spec.cwd, 'merge', '--no-ff', '--no-edit', '-q', 'origin/main');
+          if (options.own) {
+            mkdirSync(join(spec.cwd, 'src'), { recursive: true });
+            writeFileSync(join(spec.cwd, 'src', 'login-own.ts'), 'export const code = 1;\n');
+            git(spec.cwd, 'add', '--', 'src');
+            git(spec.cwd, 'commit', '-q', '-m', 'feat: 登录页加验证码');
+          }
+          emit('tool', {
+            phase: 'start',
+            toolUseId: 'u1',
+            name: 'Bash',
+            action: 'run',
+            summary: 'pnpm check',
+          });
+          emit('test', { command: 'pnpm check', passed: true });
+          emit('tool', {
+            phase: 'end',
+            toolUseId: 'u1',
+            name: 'Bash',
+            action: 'run',
+            summary: 'pnpm check',
+            ok: true,
+          });
+          await appendProgressEvents(t.db, spec.runId, [
+            { at: new Date(), kind: 'done', payload: { summary: '做完了', testsPassed: true } },
+          ]);
+        },
+      });
+
+    it('【故意造出的失败】并了改过页面代码的主线、又改了自己的：交回的改动只有自己改的，主线的页面代码不算', async () => {
+      mainlineChangesUi();
+      const { ports } = setup(mergesMainline({ own: true }));
+      const input = launch();
+      const { end } = await runOnce(ports, input);
+      expect(end.outcome).toBe('done');
+      // 原来的算法（git diff base HEAD）会是 [页面代码, 自己的]
+      expect(git(input.worktreePath as string, 'diff', '--name-only', m.head, 'HEAD').split('\n')).toContain(
+        UI,
+      );
+      expect(end.output?.kind === 'delivery' && end.output.changedFiles).toEqual(['src/login-own.ts']);
+    });
+
+    it('【故意造出的失败】只并了主线、自己没写东西：判没交付，不当成交了主线上别人的活', async () => {
+      mainlineChangesUi();
+      const { ports } = setup(mergesMainline());
+      const { end } = await runOnce(ports, launch());
+      expect(end.outcome).toBe('failed');
+      expect(end.failure?.code).toBe('not_delivered');
+      expect(end.failure?.message).toContain('除了并进来的主线');
+    });
+
+    it('钉主线之前建的老树接着用：起会话前把主线钉到起会话前的头，交活照常核（不因为树里没钉判不了）', async () => {
+      const { ports } = setup(commitAndDone());
+      const input = launch();
+      const dir = input.worktreePath as string;
+      await runOnce(ports, input);
+      const first = git(dir, 'rev-parse', 'HEAD');
+      // 老树：#218 之前建的，树里没有 origin/main
+      git(dir, 'update-ref', '-d', 'refs/remotes/origin/main');
+      const { end } = await runOnce(ports, launch({ baseHead: first }));
+      expect(git(dir, 'rev-parse', 'refs/remotes/origin/main')).toBe(first);
+      expect(end.outcome).toBe('done');
+      const files = end.output?.kind === 'delivery' ? (end.output.changedFiles ?? []) : [];
+      expect(files).toHaveLength(1);
+      expect(files[0]).toMatch(/^src\/login-/);
+    });
+  });
+
   it('会话说卡住了（fleet blocked）：结局 blocked，带原因', async () => {
     const { ports } = setup(() => ({
       act: async ({ spec }) => {
@@ -1269,6 +1358,37 @@ describe('Fusion 的 Lead：在这张单的工作树里跑，按这一步读结�
         changedFiles: [DOCS.result],
         head: git(input.worktreePath as string, 'rev-parse', 'HEAD'),
       },
+    });
+  });
+
+  it('【故意造出的失败】最终审查前 Lead 并了主线（主线上别人改了页面代码）再提交结果.md：改到的文件只有结果.md（#293）', async () => {
+    const UI = 'deploy/web/health/health.js';
+    mkdirSync(join(m.dir, 'deploy', 'web', 'health'), { recursive: true });
+    writeFileSync(join(m.dir, UI), 'export const h = 2;\n');
+    git(m.dir, 'add', '--', UI);
+    git(m.dir, 'commit', '-q', '-m', 'main: 健康页');
+    const { ports } = setup(() => ({
+      act: ({ spec }) => {
+        // 新主线由引擎取进树里、钉成 origin/main（推之前并主线那一步），Lead 照着 git merge
+        git(spec.cwd, 'fetch', '-q', m.dir, '+refs/heads/main:refs/remotes/origin/main');
+        git(spec.cwd, 'merge', '--no-ff', '--no-edit', '-q', 'origin/main');
+        commitDoc(spec.cwd, DOCS.result);
+        writeOut(spec.cwd, 'lead-review.json', {
+          verdict: 'pass',
+          why: '都做到了',
+          did: ['加了验证码'],
+          owed: [],
+        });
+      },
+    }));
+    const input = leadLaunch('review', { worktreePath: freshTree() });
+    const { end } = await runOnce(ports, input);
+    expect(git(input.worktreePath as string, 'diff', '--name-only', m.head, 'HEAD').split('\n')).toContain(
+      UI,
+    );
+    expect(end).toMatchObject({
+      outcome: 'done',
+      output: { kind: 'lead-review', changedFiles: [DOCS.result] },
     });
   });
 

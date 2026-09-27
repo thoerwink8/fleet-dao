@@ -34,6 +34,7 @@ import {
 } from '../schema/index.ts';
 import { type Blocker, stageCandidates } from './candidates.ts';
 import { type FlowReplicaState, flowReplicaOf } from './flow.ts';
+import { followTaskOnEngineClaim } from './seat.ts';
 
 /** 起出来的会话进程在哪；会话状态、markSessionRunStarted 的输入用同一个形状。 */
 type RunHandle = { pid?: number; scope?: string };
@@ -977,6 +978,11 @@ export interface TaskSnapshotInput {
   lastProblem: string | null;
   /** 这一轮用的流程配置读自哪（tasks.flow_source）；不给就不动（旧的需求工作流不读流程配置，不给）。 */
   flowSource?: 'project' | 'org_default';
+  /**
+   * 这张单上引擎的认领（#299）怎么跟着走：任务结束了给结束成什么（@fleet-dao/core 的 engineClaimEnd），没结束给 null
+   * （还在待起的改成在做：工作流在跑了）。本机的认领不碰。
+   */
+  claimEnd: { state: 'done' | 'released'; reason: string } | null;
   subtasks: {
     id: string;
     key: string;
@@ -1021,6 +1027,7 @@ export async function saveTaskSnapshot(
       .where(eq(tasks.id, input.taskId))
       .returning({ id: tasks.id });
     if (updated.length === 0) return 'task_not_found';
+    await followTaskOnEngineClaim(tx, { taskId: input.taskId, end: input.claimEnd });
 
     const keepIds = input.subtasks.map((s) => s.id);
     await tx

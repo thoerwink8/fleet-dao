@@ -4,6 +4,7 @@
 # 演示版照「上次发的是哪一版」的记录核对（自动发布不发也照样查，坏了要红）、
 # 演示版的可见范围推到香港、公网上看得到的几样（占位页、健康页不带真名，release.json 只给隧道，整站不让搜索引擎收录）、
 # 健康页的判定、自动发布的判断和流程（auto-release：CI 红不发、读不到不发、没成不重试、等空闲、人手动切过不动）、
+# 配置对账（config：线上手改报哪一项、私有值只报不一致不带值、期望和钥匙读不到记没查成）、
 # france.sh 读回自动发布跑得怎么样（auto-release-state：没跑过、读不了、读到了分得清）、
 # 法国只有一个会话用户且读回拦得下故意造的错（session-user）、AI 会话用的 pnpm 的装和查（session-pnpm）、
 # 会话用户的 cursor-agent 的装和查（cursor-agent）、会话用户的 Cursor 密钥的放、查、撤（cursor-key）、
@@ -146,6 +147,7 @@ esac
 if command -v node >/dev/null; then
   if node --test "$HERE/health-page.test.mjs"; then echo "健康页的判定：通过"; else fail=1; fi
   if node --test "$HERE/auto-release.test.mjs"; then echo "自动发布的判断和流程：通过"; else fail=1; fi
+  if node --test "$HERE/config.test.mjs"; then echo "配置对账（期望进仓、私有值只比指纹）：通过"; else fail=1; fi
 else
   echo "没跑成：这台没有 node，健康页的判定、自动发布没测"
   skipped=1
