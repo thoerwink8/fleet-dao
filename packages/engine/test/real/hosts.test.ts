@@ -25,6 +25,9 @@ import {
   type HostRunners,
   type HostRunSpec,
   hostDrivers,
+  MIRASIM_AGENT_BY_MODEL,
+  MIRASIM_PENDING_PREFIX,
+  mirasimAgentFor,
   sessionUserOf,
   WIRED_HOSTS,
   wiredHostNames,
@@ -36,8 +39,11 @@ import {
   CURSOR_SESSION,
   type FakeCursorScript,
   type FakeGrokScript,
+  type FakeMirasimScript,
   fakeCursorRun,
   fakeGrokRun,
+  fakeMirasimDeps,
+  fakeMirasimRun,
   fakeRun,
   GROK_NOT_SIGNED_IN,
   grokAnswered,
@@ -74,9 +80,9 @@ describe('会话用户怎么定', () => {
 });
 
 describe('接上的执行方式', () => {
-  it('Claude Code、cursor-agent 和 grok；报错里的说法跟着这张表', () => {
-    expect([...WIRED_HOSTS]).toEqual(['claude-code', 'cursor-agent', 'grok']);
-    expect(wiredHostNames()).toBe('Claude Code、Cursor Agent、Grok 命令行');
+  it('Claude Code、cursor-agent、grok 和 mirasim；报错里的说法跟着这张表', () => {
+    expect([...WIRED_HOSTS]).toEqual(['claude-code', 'cursor-agent', 'grok', 'mirasim']);
+    expect(wiredHostNames()).toBe('Claude Code、Cursor Agent、Grok 命令行、Mirasim');
   });
 });
 
@@ -666,6 +672,7 @@ function drivers(run: HostRunners) {
     claudeCommand: (user) => [`/opt/fake/${user}/reclaude`],
     cursorCommand: (user) => [`/opt/fake/${user}/cursor-agent`],
     grokCommand: (user) => [`/opt/fake/${user}/grok`],
+    ...fakeMirasimDeps(),
     run,
   });
 }
@@ -898,5 +905,199 @@ describe('Claude Code 的驱动', () => {
     expect(fake.specs[0]).not.toHaveProperty('persistSession');
     expect(fake.specs[1]).toMatchObject({ permissionMode: 'dontAsk', persistSession: false });
     expect(fake.options[0]?.command).toEqual(['/opt/fake/fleet-agent-carpool/reclaude']);
+  });
+});
+
+describe('模型串 → Mirasim 执行体（MIRASIM_AGENT_BY_MODEL）', () => {
+  it('四条现挂的路由都认得出：opus-5.5→claude、gpt-5.6-luna→codex、kimi-k3→pi、deepseek-flash→dsh', () => {
+    expect(mirasimAgentFor('claude-opus-5-5')).toBe('claude');
+    expect(mirasimAgentFor('gpt-5.6-luna')).toBe('codex');
+    expect(mirasimAgentFor('kimi-k3')).toBe('pi');
+    expect(mirasimAgentFor('deepseek-flash')).toBe('dsh');
+  });
+
+  it('认不出的模型串：明确报错，不落到某个默认执行体上（新路由忘了改这张表会当场炸，不会悄悄派错执行体）', () => {
+    expect(() => mirasimAgentFor('glm-6')).toThrow('Mirasim 认不出这个模型该起哪个执行体：glm-6');
+    expect(() => mirasimAgentFor('')).toThrow('Mirasim 认不出这个模型该起哪个执行体：');
+    // 报错里列出现在认得的几个，方便照着改表
+    for (const known of Object.keys(MIRASIM_AGENT_BY_MODEL)) {
+      expect(() => mirasimAgentFor('glm-6')).toThrow(new RegExp(known));
+    }
+  });
+});
+
+describe('Mirasim 的驱动（#345）', () => {
+  const mirasimWith = (script: FakeMirasimScript) => {
+    const fake = fakeMirasimRun(() => script);
+    return { fake, driver: drivers({ mirasim: fake.run }).mirasim };
+  };
+  const mirasimSpec = (over: Partial<HostRunSpec> = {}) =>
+    spec({ model: 'deepseek-flash', session: { mode: 'new', id: 'ignored' }, ...over });
+
+  it('会话号不是我们起的：先回一眼看得出不是真号的临时号（cursor 同一个道理），server 的 accepted 帧才给真号', async () => {
+    const { driver } = mirasimWith({ state: { text: 'OK' } });
+    const fresh = driver.newSessionId('run-9');
+    expect(fresh).toEqual({ id: `${MIRASIM_PENDING_PREFIX}run-9`, known: false });
+    const ids: string[] = [];
+    const report = await driver.run(mirasimSpec({ session: { mode: 'new', id: fresh.id } }), {
+      onSessionId: (id) => ids.push(id),
+    });
+    expect(ids).toHaveLength(1);
+    expect(ids[0]).toMatch(/^dsh:/);
+    expect(report.sessionId).toBe(ids[0]);
+  });
+
+  it('起会话不带我们造的会话号（服务端自己起）：新会话给 { mode: "new" }，续会话按原 sessionKey 给 { mode: "resume", key }', async () => {
+    const { fake, driver } = mirasimWith({ state: { text: 'OK' } });
+    await driver.run(mirasimSpec({ session: { mode: 'new', id: 'whatever' } }), {});
+    await driver.run(mirasimSpec({ session: { mode: 'resume', id: 'dsh:abc-123' } }), {});
+    expect(fake.specs[0]?.session).toEqual({ mode: 'new' });
+    expect(fake.specs[1]?.session).toEqual({ mode: 'resume', key: 'dsh:abc-123' });
+  });
+
+  it('只留「中继额度」这一种路由：route 永远是 cloud（design 第三节第 12 条、MS-28：不许反代）', async () => {
+    const { fake, driver } = mirasimWith({ state: { text: 'OK' } });
+    await driver.run(mirasimSpec(), {});
+    expect(fake.specs[0]?.route).toBe('cloud');
+  });
+
+  it('模型串按路由上的：agent 由 MIRASIM_AGENT_BY_MODEL 现算，一般执行体带 model；pi（kimi-k3）不带 model，只带 expectModel 核对回读的快照（PI-02）', async () => {
+    const { fake, driver } = mirasimWith({ state: { text: 'OK' } });
+    await driver.run(mirasimSpec({ model: 'deepseek-flash' }), {});
+    expect(fake.specs[0]).toMatchObject({ agent: 'dsh', model: 'deepseek-flash' });
+    expect(fake.specs[0]).not.toHaveProperty('expectModel');
+    await driver.run(mirasimSpec({ model: 'kimi-k3' }), {});
+    expect(fake.specs[1]).toMatchObject({ agent: 'pi', expectModel: 'kimi-k3' });
+    expect(fake.specs[1]).not.toHaveProperty('model');
+  });
+
+  it('模型串这张表认不出：起会话之前就拒（不起插头），和其它认不出的配置一样交回工作流换新 runId', async () => {
+    const { fake, driver } = mirasimWith({ state: { text: 'OK' } });
+    await expect(driver.run(mirasimSpec({ model: 'glm-6' }), {})).rejects.toThrow(
+      'Mirasim 认不出这个模型该起哪个执行体：glm-6',
+    );
+    expect(fake.count()).toBe(0);
+  });
+
+  it('要 fork：拒（Mirasim 没有 fork，换了账号池走接力），插头不起', async () => {
+    const { fake, driver } = mirasimWith({ state: { text: 'OK' } });
+    expect(driver.canFork).toBe(false);
+    expect(driver.userFrom).toBe('sole');
+    await expect(
+      driver.run(mirasimSpec({ session: { mode: 'fork', from: 'dsh:aaa', id: 'dsh:bbb' } }), {}),
+    ).rejects.toThrow('没有 fork');
+    expect(fake.count()).toBe(0);
+  });
+
+  it('连接、账本目录、读账本都以这次会话的用户去拿（mirasimConnect / mirasimLedgerDir / mirasimLedgerFs 三个依赖都被调用）', async () => {
+    const { fake, driver } = mirasimWith({ state: { text: 'OK' } });
+    await driver.run(mirasimSpec({ user: 'fleet-agent-carpool' }), {});
+    expect(fake.options[0]?.ledgerDir).toBe('/fake/fleet-agent-carpool/.mirasim/traffic');
+    expect(typeof fake.options[0]?.connect).toBe('function');
+    expect(typeof fake.options[0]?.ledgerFs?.readdir).toBe('function');
+    expect(typeof fake.options[0]?.ledgerFs?.readFile).toBe('function');
+  });
+
+  it('没接 accepted（服务端没接这一针）：onSessionId 不会被调用', async () => {
+    const { driver } = mirasimWith({ state: { text: 'OK' }, noAccept: true });
+    const ids: string[] = [];
+    await driver.run(mirasimSpec(), { onSessionId: (id) => ids.push(id) });
+    expect(ids).toEqual([]);
+  });
+
+  it('报告：token、实际模型、回答从快照状态整理出来；没有 stderrTail（协议是 ws 帧、不是子进程，给空串）、没有 sessionCostUsd / httpStatus / contextTokens（Mirasim 没有这几个概念）、没有 rawError（原因已经在 facts 里，和 Claude 一个道理）', async () => {
+    const { driver } = mirasimWith({
+      state: {
+        text: '好了',
+        model: 'deepseek-flash',
+        usage: { turnOutputTokens: 42 },
+      },
+    });
+    const report = await driver.run(mirasimSpec(), {});
+    expect(report.hostId).toBe('mirasim');
+    expect(report.actualModel).toBe('deepseek-flash');
+    expect(report.answer).toBe('好了');
+    expect(report.usage).toEqual({ outputTokens: 42 });
+    expect(report).not.toHaveProperty('sessionCostUsd');
+    expect(report).not.toHaveProperty('httpStatus');
+    expect(report).not.toHaveProperty('contextTokens');
+    expect(report).not.toHaveProperty('rawError');
+    expect(report.stderrTail).toBe('');
+    expect(judgeRun(report.facts)).toMatchObject({ outcome: 'ok', reason: 'answered' });
+  });
+
+  it('一句话都没说：没有回答；用量读不到的字段不给（不记成 0）', async () => {
+    const { driver } = mirasimWith({ state: { text: '' } });
+    const report = await driver.run(mirasimSpec(), {});
+    expect(report).not.toHaveProperty('answer');
+    expect(report.usage).toEqual({});
+  });
+
+  it('起没起来没查成（服务端没有这个执行体、明确拒了这一针）：facts.spawnError，判失败、不算路由的账留给失败分流认', async () => {
+    const { driver } = mirasimWith({
+      state: { text: '' },
+      report: { launchError: '服务端没有 dsh 这个执行体（有：claude、pi）' },
+      noAccept: true,
+    });
+    const report = await driver.run(mirasimSpec(), {});
+    expect(report).not.toHaveProperty('sessionId');
+    const verdict = judgeRun(report.facts);
+    expect(verdict).toMatchObject({ outcome: 'failed', reason: 'spawn_failed' });
+    expect(verdict.detail).toContain('服务端没有 dsh 这个执行体');
+  });
+
+  it('prompt 发出去了、没等到应答（可能已经在跑）：facts.launchUnknown，不当成「没起来」重派（会烧两次额度）', async () => {
+    const { driver } = mirasimWith({
+      state: { text: '' },
+      report: { launchError: '起会话没查成：没收到 prompt 的应答帧', launchUnknown: true },
+      noAccept: true,
+    });
+    const report = await driver.run(mirasimSpec(), {});
+    expect(judgeRun(report.facts)).toMatchObject({ outcome: 'failed', reason: 'launch_unknown' });
+  });
+
+  it('中途被停（型号回读不符、停滞……）：killed 原因照 KillReason 判', async () => {
+    const { driver } = mirasimWith({
+      state: { text: '' },
+      // terminal 不用清：judgeRun 里 killed 短路在最前面，不管 terminal 是不是默认的「done」都不影响这条判失败。
+      report: { killed: { reason: 'model_mismatch', at: new Date().toISOString() } },
+    });
+    const report = await driver.run(mirasimSpec(), {});
+    expect(judgeRun(report.facts)).toMatchObject({ outcome: 'failed', reason: 'model_mismatch' });
+  });
+
+  it('快照说 done、但没给账本目录：中转到底走没走上游没查成（DL3），不当成交了活也不当成执行体失败', async () => {
+    const { driver } = mirasimWith({ state: { text: 'OK' }, report: { ledger: undefined } });
+    const report = await driver.run(mirasimSpec(), {});
+    const verdict = judgeRun(report.facts);
+    expect(verdict).toMatchObject({ outcome: 'failed', reason: 'relay_unknown' });
+    expect(verdict.detail).toContain('没给账本目录');
+  });
+
+  it('快照说 done、账本读到了、起针之后却没有一次 2xx：不算真交了活', async () => {
+    const { driver } = mirasimWith({
+      state: { text: 'OK' },
+      report: { ledger: { state: 'read', rows: [{ status: 500 }], unparsed: 0 } },
+    });
+    const report = await driver.run(mirasimSpec(), {});
+    const verdict = judgeRun(report.facts);
+    expect(verdict.outcome).toBe('failed');
+    expect(verdict.detail).toContain('账本里起针之后没有一次 2xx 的上游调用');
+  });
+
+  it('账本读不了（不是没有调用，是没查成）：不当成零次调用', async () => {
+    const { driver } = mirasimWith({
+      state: { text: 'OK' },
+      report: { ledger: { state: 'unknown', detail: '账本没读成：EACCES' } },
+    });
+    const report = await driver.run(mirasimSpec(), {});
+    expect(judgeRun(report.facts)).toMatchObject({ outcome: 'failed', reason: 'relay_unknown' });
+  });
+
+  it('登录失效的修法：用 Mirasim 桌面端以 SSH 远程模式连那台机器那个会话用户，登一次账号；照 ops 哪一节', () => {
+    const { driver } = mirasimWith({ state: { text: 'OK' } });
+    expect(driver.loginFix('「法国」', 'fleet-agent-carpool')).toBe(
+      '用 Mirasim 桌面端以 SSH 远程模式连 fleet-agent-carpool@「法国」，把这个会话用户自己的 Mirasim 服务装起来、登一次账号（docs/ops.md 第五节「会话用户的 Mirasim」）',
+    );
   });
 });

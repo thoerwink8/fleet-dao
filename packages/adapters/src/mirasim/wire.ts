@@ -21,10 +21,16 @@ export interface MirasimEndpoint {
   host?: string;
   /** 旧系统那份是 4316；给会话用户单独起的那份按它自己的配置。 */
   port: number;
-  /** 回环令牌文件（~/.mirasim/run/local-<端口>.token，在这份 Mirasim 服务的用户家里）。 */
+  /** 回环令牌文件（~/.mirasim/run/local-<端口>.token，在这份 Mirasim 服务的用户家里）。只在没给 readToken 时用来报位置。 */
   tokenFile: string;
   /** 建连总共重试多久，默认 90 秒。 */
   connectTimeoutMs?: number;
+  /**
+   * 令牌怎么读：不给就直接读本机的 tokenFile（开发机、测试）。Mirasim 服务跑在别的系统用户家里、
+   * 调用方（引擎）进不去那个家目录时换成这个——例如经 fleet-agent-scope 以那个会话用户的身份读
+   * （real/index.ts 的生产装配）。每次建连都调它现读，不缓存（令牌每次起停会换）。
+   */
+  readToken?: () => Promise<string>;
 }
 
 /**
@@ -42,6 +48,7 @@ export function mirasimConnector(endpoint: MirasimEndpoint): MirasimConnect {
   assertNotRealMirasimInTests(endpoint);
   const host = endpoint.host ?? '127.0.0.1';
   const budget = endpoint.connectTimeoutMs ?? 90_000;
+  const read = endpoint.readToken ?? (() => readFile(endpoint.tokenFile, 'utf8'));
   return async () => {
     const deadline = Date.now() + budget;
     let wait = 500;
@@ -49,7 +56,7 @@ export function mirasimConnector(endpoint: MirasimEndpoint): MirasimConnect {
     for (;;) {
       let token: string;
       try {
-        token = (await readFile(endpoint.tokenFile, 'utf8')).trim();
+        token = (await read()).trim();
       } catch (err) {
         throw new Error(`读不了 Mirasim 的回环令牌（${endpoint.tokenFile}）：${(err as Error).message}`);
       }

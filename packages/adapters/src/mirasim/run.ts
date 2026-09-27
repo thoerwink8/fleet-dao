@@ -10,7 +10,13 @@ import { CallbackGate } from '../cli-run.ts';
 import type { RunFacts, RunSummary } from '../judge.ts';
 import { looksLikeQuotaExhausted, num, rec, str } from '../stream-kit.ts';
 import type { KillReason } from '../types.ts';
-import { type LedgerReading, type LedgerRouting, ledgerRouting, readMirasimLedger } from './ledger.ts';
+import {
+  type LedgerFs,
+  type LedgerReading,
+  type LedgerRouting,
+  ledgerRouting,
+  readMirasimLedger,
+} from './ledger.ts';
 import { MirasimSession } from './session.ts';
 import type { MirasimConnect, MirasimFrame, MirasimWire } from './wire.ts';
 
@@ -83,6 +89,11 @@ export interface MirasimRunOptions {
    * 走中转（route=cloud）时不给就判「中转没查成」：快照说 done 不等于上游真干了活。
    */
   ledgerDir?: string;
+  /**
+   * 账本怎么读：不给就直接读本机文件系统（开发机、测试）。账本在别的系统用户家里、调用方（引擎）进不去那个家目录时
+   * 换成这个——例如经 fleet-agent-scope 以那个会话用户的身份读（real/index.ts 的生产装配）。
+   */
+  ledgerFs?: LedgerFs;
 }
 
 export interface MirasimRunReport {
@@ -421,7 +432,7 @@ export async function runMirasim(
     // 中转路由要看到起针之后的 2xx：行是调用结束后才写的，刚结束就读会读空，等它追上来（最多 ledgerWaitMs）
     const deadline = Date.now() + limits.ledgerWaitMs;
     for (;;) {
-      report.ledger = await readMirasimLedger(options.ledgerDir, sessionKey, t0 - 5_000);
+      report.ledger = await readMirasimLedger(options.ledgerDir, sessionKey, t0 - 5_000, options.ledgerFs);
       const settled =
         spec.route !== 'cloud' ||
         !report.terminal ||

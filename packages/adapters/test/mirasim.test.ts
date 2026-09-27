@@ -587,6 +587,65 @@ describe('Mirasim 账本', () => {
     });
     expect((await readMirasimLedger(dir, 'pi:../../etc')).state).toBe('unknown');
   });
+
+  it('给了 fs 就经它读，不碰本机文件系统（账本在别的系统用户家里、调用方进不去时用，real/index.ts 的生产装配）；readdir 认 ENOENT 分「没有这个会话的目录」和别的读不了；readFile 抛的错按 code 报', async () => {
+    const uuid = '9adf4d07-32a6-4ee4-b5cf-61b324c985e3';
+    // 账本目录用 join 拼（和 ledger.ts 的 readMirasimLedger 同一个函数）：不能在这假 fs 里另写死用 / 分隔的字符串——
+    // 这条用例在 Windows 开发机上跑，node:path 的 join 在这台机器上给的是 \，写死 / 会让下面的 startsWith 比不上，
+    // 假装「目录不在」，把「读到了」的分支测成了别的分支。
+    const folder = join('fake-root', uuid);
+    const calls: string[] = [];
+    const files = new Map([
+      [
+        join(folder, 'index-a.ndjson'),
+        JSON.stringify({ ts: '2026-09-25T00:00:00.000Z', status: 200, model: 'deepseek-flash' }),
+      ],
+    ]);
+    const fs = {
+      async readdir(dir: string) {
+        calls.push(`readdir:${dir}`);
+        if (!dir.includes(uuid)) {
+          const err = new Error('假的：没有这个目录') as NodeJS.ErrnoException;
+          err.code = 'ENOENT';
+          throw err;
+        }
+        return [...files.keys()].filter((f) => f.startsWith(dir)).map((f) => f.slice(dir.length + 1));
+      },
+      async readFile(path: string) {
+        calls.push(`readFile:${path}`);
+        const text = files.get(path);
+        if (text === undefined) {
+          const err = new Error('假的：没有这个文件') as NodeJS.ErrnoException;
+          err.code = 'EACCES';
+          throw err;
+        }
+        return text;
+      },
+    };
+    const reading = await readMirasimLedger('fake-root', `dsh:${uuid}`, undefined, fs);
+    expect(reading).toMatchObject({ state: 'read', rows: [{ status: 200, model: 'deepseek-flash' }] });
+    expect(calls).toEqual([`readdir:${folder}`, `readFile:${join(folder, 'index-a.ndjson')}`]);
+
+    const missingDir = await readMirasimLedger(
+      'fake-root',
+      'dsh:00000000-0000-0000-0000-000000000000',
+      undefined,
+      fs,
+    );
+    expect(missingDir).toEqual({
+      state: 'unknown',
+      detail: '账本里没有这个会话的目录（可能一次上游调用都没有，也可能账本换了地方）',
+    });
+
+    const badFile: typeof fs = {
+      ...fs,
+      readFile: async () => {
+        throw Object.assign(new Error('x'), { code: 'EACCES' });
+      },
+    };
+    const unreadable = await readMirasimLedger('fake-root', `dsh:${uuid}`, undefined, badFile);
+    expect(unreadable).toEqual({ state: 'unknown', detail: '读不了账本文件 index-a.ndjson：EACCES' });
+  });
 });
 
 describe('Mirasim 连接', () => {
@@ -626,6 +685,44 @@ describe('Mirasim 连接', () => {
     } finally {
       await server.close();
     }
+  });
+
+  it('readToken 给了就用它现读，不碰 tokenFile（Mirasim 服务跑在别的系统用户家里，调用方进不去那个家目录时用，real/index.ts 的生产装配）；每次建连都现调，不缓存；它抛的错也按「读不了回环令牌」包一层', async () => {
+    const dir = tempDir();
+    const server = await startWsServer((conn) => {
+      conn.onMessage((frame) => {
+        if (frame.type === 'getState') conn.send({ type: 'state', state: {} });
+      });
+    });
+    try {
+      const calls: number[] = [];
+      let n = 0;
+      const connect = mirasimConnector({
+        port: server.port,
+        // tokenFile 指一个不存在的路径：真读到它就会抛错，读到就说明 readToken 没被用上
+        tokenFile: join(dir, 'not-here.token'),
+        connectTimeoutMs: 2_000,
+        readToken: async () => {
+          n += 1;
+          calls.push(n);
+          return `tok-${n}`;
+        },
+      });
+      (await connect()).close();
+      (await connect()).close();
+      expect(calls).toEqual([1, 2]);
+    } finally {
+      await server.close();
+    }
+    const failing = mirasimConnector({
+      port: 1,
+      tokenFile: join(dir, 'unused.token'),
+      readToken: async () => {
+        throw new Error('假的：以会话用户读令牌没成');
+      },
+    });
+    await expect(failing()).rejects.toThrow('读不了 Mirasim 的回环令牌（');
+    await expect(failing()).rejects.toThrow('假的：以会话用户读令牌没成');
   });
 
   it('服务端不在：重试到期限再报连不上', async () => {
