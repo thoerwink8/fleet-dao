@@ -95,6 +95,7 @@ export {
   type InteractionLimitResult,
   renewInteractionLimit,
 } from './interaction.ts';
+export { type IssuePlan, type ReadIssuePlanInput, readIssuePlan } from './issue-plan.ts';
 export {
   type CloseIssueInput,
   type CloseIssueResult,

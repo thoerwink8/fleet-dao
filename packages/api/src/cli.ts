@@ -6,11 +6,29 @@
 //   dispatch <owner/仓名> on|off|status
 // 「让 AI 接活」开关（repos.auto_dispatch_since）：驾驶舱的开关页面（#131）之前的唯一入口，之后留作运维的后备。
 // 写入口和页面同一个（Store.setAutoDispatch）；改了记一条操作记录，改完从库里读回开关和那条记录再打印。
-// 退出码（两条命令一样）：0 做成了；1 没做成（被拒、库里没有、连不上库、读回来不对，一句话说原因）；2 参数不对或没带上库连接。
+//   handover <owner/仓名> <issue 号> --reason "<谁说的、为什么>"
+// 交给 fleet：人明说把一张自动派管不到的单（开关打开以前就开着的、别的版本的、未排期的）交给引擎，起 Fusion 工作流。
+// 开关关着、这个项目停派一律拒；在跑的不重复起，结束了的只有 GitHub 上重开过才再起一轮（判法在 @fleet-dao/core 的 dispatch.ts）。
+// 要读 GitHub（「引擎」机器人看这张单此刻开没开着、挂在哪个版本）、连 Temporal（起工作流），都按同一份 api.env。
+// 起了（或没起成）记一条操作记录 task.handover，从库里读回再打印。驾驶舱的「交给 fleet」按钮随界面单 #282 做，调同一套判法。
+// 每条命令带 --help（或 -h）只打印用法。
+// 退出码（几条命令一样）：0 做成了（或本来就是）；1 没做成（被拒、库里没有、连不上库、读回来不对，一句话说原因）；2 参数不对或没带上库连接。
 import { userInfo } from 'node:os';
 import { createInterface } from 'node:readline';
+import { handoverDecision, replicaVerdict, versionGate } from '@fleet-dao/core';
+import { requirementWorkflowId } from '@fleet-dao/shared';
+import { temporalSettings } from './config.ts';
 import { checkNewPassword, checkUsername, hashPassword } from './password.ts';
-import type { AuditRecord, AutoDispatchChange, IntakeRepo, Store, User } from './ports.ts';
+import type {
+  AuditRecord,
+  AutoDispatchChange,
+  IntakeRepo,
+  IssuePlan,
+  IssuePlanReader,
+  RequirementWorkflows,
+  Store,
+  User,
+} from './ports.ts';
 import { isCockpitUser } from './session.ts';
 
 export class CliError extends Error {
@@ -298,7 +316,7 @@ const isSwitchEntry = (a: AuditRecord) =>
 function describeSwitch(label: string, since: string | null): string {
   return since === null
     ? `${label}：让 AI 接活 关着（auto_dispatch_since 为空：只收单、显示，不派）`
-    : `${label}：让 AI 接活 开着，自 ${since} 起（这之后新开的 issue 自动派；这之前就开着的不自动派，要人点「交给 fleet」）`;
+    : `${label}：让 AI 接活 开着，自 ${since} 起（这之后新开的、挂在当前版本上的 issue 自动派；这之前就开着的、别的版本的、未排期的不自动派，要交用 fleet-api handover）`;
 }
 
 /** 读回、status 看最近多少条和这个仓有关的操作记录。 */
@@ -395,17 +413,213 @@ export function operatorName(env: CliEnv): string {
   }
 }
 
+// —— handover：交给 fleet ——
+
+const HANDOVER_USAGE =
+  '用法：fleet-api handover <owner/仓名> <issue 号> --reason "<谁说的、为什么>"（把开关打开以前开的、别的版本的、未排期的单交给引擎，起 Fusion 工作流）';
+
+export interface HandoverArgs {
+  owner: string;
+  name: string;
+  issueNumber: number;
+  /** 谁说的、为什么交：原样写进操作记录。 */
+  reason: string;
+}
+
+/** 操作记录里「交给 fleet」这件事的名字；target 是 task:<任务编号>。 */
+export const TASK_HANDOVER = 'task.handover';
+
+/** 和 dispatch 一样记成引擎那一类，reason 写明谁跑的、谁说的为什么。 */
+const OPS_HANDOVER = { kind: 'engine', id: 'ops:handover' } as const;
+
+/** --reason 最长几个字：操作记录里的一句话，不是一篇文档。 */
+const MAX_HANDOVER_REASON = 500;
+
+/** 仓、issue 号两个位置参数，外加必带的 --reason（也认 --reason=…）。认不出的一律拒（退出码 2），不猜。 */
+export function parseHandoverArgs(argv: readonly string[]): HandoverArgs {
+  const positional: string[] = [];
+  let reason: string | undefined;
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i] ?? '';
+    if (arg === '--reason') {
+      const value = argv[++i];
+      if (value === undefined || value.startsWith('--'))
+        throw new CliError(`--reason 后面要跟一句话：谁说的、为什么交。${HANDOVER_USAGE}`, 2);
+      reason = value;
+    } else if (arg.startsWith('--reason=')) {
+      reason = arg.slice('--reason='.length);
+    } else if (arg.startsWith('-')) {
+      throw new CliError(`认不出参数 ${arg.split('=')[0]}。${HANDOVER_USAGE}`, 2);
+    } else {
+      positional.push(arg);
+    }
+  }
+  if (positional.length !== 2) throw new CliError(`要两个参数：仓和 issue 号。${HANDOVER_USAGE}`, 2);
+  const [repo = '', num = ''] = positional;
+  const m = REPO_ARG.exec(repo);
+  if (!m?.[1] || !m[2]) throw new CliError(`认不出仓「${repo}」：要写成 owner/仓名。${HANDOVER_USAGE}`, 2);
+  const digits = /^#?(\d{1,9})$/.exec(num)?.[1];
+  const issueNumber = digits === undefined ? 0 : Number(digits);
+  if (issueNumber <= 0)
+    throw new CliError(`认不出 issue 号「${num}」：要写成正整数（比如 214）。${HANDOVER_USAGE}`, 2);
+  const why = reason?.trim() ?? '';
+  if (!why) throw new CliError(`要带 --reason：谁说的、为什么交（写进操作记录）。${HANDOVER_USAGE}`, 2);
+  if ([...why].length > MAX_HANDOVER_REASON)
+    throw new CliError(`--reason 太长（最多 ${MAX_HANDOVER_REASON} 个字）：写一句谁说的、为什么就行`, 2);
+  return { owner: m[1], name: m[2], issueNumber, reason: why };
+}
+
+/** 连 Temporal 的一份：起工作流、用完关掉。 */
+export interface HandoverTemporal {
+  requirements: RequirementWorkflows;
+  close(): Promise<void>;
+}
+
+const errText = (err: unknown) => (err instanceof Error ? err.message : String(err));
+
+/** 这张单挂在哪（给人看、写进操作记录）：交给 fleet 不看版本，但要说清交的是哪个版本的单。 */
+function placeOf(issue: IssuePlan): string {
+  const gate = versionGate(issue);
+  if (gate.ok) return `挂在当前版本「${gate.milestone}」上`;
+  if (gate.reason === 'unscheduled') return '未排期';
+  const title = issue.milestone?.title ?? '';
+  return gate.reason === 'version_unreadable'
+    ? `挂在「${title}」上（认不出版本号）`
+    : `挂在「${title}」上（不是当前版本）`;
+}
+
+/**
+ * fleet-api handover 本身。依次查、不对就拒（什么都不改，退出码 1）：仓在库里；「让 AI 接活」开着；流程配置副本能用；
+ * 库里有这张单的任务行；GitHub 上这张单此刻的样子（读不到算没查成）。再按 core 的 handoverDecision：排队中的拉起、
+ * 结束了又重开过的再起一轮；在跑的不重复起（退出码 0）。起了（或没起成）记一条 task.handover，从库里读回再打印。
+ * GitHub、Temporal 到用得着时才连（plans、temporal 是开连接的办法）：前面就拒了的不连。
+ */
+export async function handover(input: {
+  store: Store;
+  plans: () => Promise<IssuePlanReader>;
+  temporal: () => Promise<HandoverTemporal>;
+  args: HandoverArgs;
+  operator: string;
+  now: () => Date;
+}): Promise<string> {
+  const { store, args } = input;
+  const no = '没交成（什么都没派）：';
+  const found = await dbStep(no, () => store.findRepoByName(args.owner, args.name));
+  if (!found)
+    throw new CliError(
+      `${no}库里没有仓 ${args.owner}/${args.name}（受管的仓就是 repos 表的行，见 docs/ops.md 第九节）`,
+    );
+  const repo: IntakeRepo = found;
+  const slug = `${repo.owner}/${repo.name}`;
+  const label = `${slug}#${args.issueNumber}`;
+  if (repo.autoDispatchSince === null)
+    throw new CliError(
+      `${no}${slug} 的「让 AI 接活」关着：关着时引擎只收单、显示，不派，交了也不起。要交先打开（fleet-api dispatch ${slug} on，开不开由创始人拍）`,
+    );
+  const flow = replicaVerdict(repo.flow, input.now());
+  if (!flow.ok) throw new CliError(`${no}这个项目停派：${flow.why}`);
+  const task = await dbStep(no, () => store.findTaskByIssue(repo.id, args.issueNumber));
+  if (!task)
+    throw new CliError(
+      `${no}库里没有 ${label} 的任务：接活还没收进来（不是 issue、作者不在白名单、已经关了，或对账还没补收）。GitHub 上开着、作者在白名单的单，等下一轮对账（每 15 分钟）补收了再交`,
+    );
+  let issue: IssuePlan;
+  try {
+    issue = await (await input.plans()).read(repo, args.issueNumber);
+  } catch (err) {
+    throw new CliError(`${no}没查成：读不到 GitHub 上 ${label} 此刻的样子（${errText(err)}）`);
+  }
+  const decision = handoverDecision(task, issue);
+  const place = placeOf(issue);
+  if (decision.act === 'refuse') throw new CliError(`${no}${label}（${place}）：${decision.why}`);
+  if (decision.act === 'noop') return `没起：${label}（${place}）${decision.why}`;
+
+  const restart = decision.act === 'restart';
+  const workflowId = requirementWorkflowId(repo, args.issueNumber);
+  // 开关、副本都不进工作流的历史（和接活拉起的是同一种输入）
+  const { autoDispatchSince: _switch, flow: _flow, ...repoOnly } = repo;
+  let started: 'started' | 'already_running' | undefined;
+  let failure: string | undefined;
+  try {
+    const temporal = await input.temporal();
+    try {
+      started = await temporal.requirements.start({
+        schemaVersion: 1,
+        taskId: task.id,
+        repo: repoOnly,
+        issueNumber: args.issueNumber,
+        title: task.title,
+        rawRequest: task.rawRequest,
+        requestedBy: issue.author ?? task.requestedBy,
+      });
+    } finally {
+      // 只是收尾：关连接出错不改「起没起成」（起成了的照样算起了），命令跑完进程就退
+      await temporal.close().catch(() => {});
+    }
+  } catch (err) {
+    failure = `起工作流没成：${errText(err)}`;
+  }
+  // 重开过的再起一轮，上一轮工作流却还在收尾：这次没起
+  if (restart && started === 'already_running')
+    failure = '上一轮工作流还没收完尾，这次没起：等它结束了再交一次';
+  const outcome = failure ? 'failed' : started === 'already_running' ? 'already_running' : 'started';
+
+  // 起了、没起成都记（谁跑的、谁说的为什么、挂在哪个版本、上一轮什么状态）；记完从库里读回
+  const target = `task:${task.id}`;
+  const note = `服务器上 ${input.operator} 跑的 fleet-api handover ${slug} ${args.issueNumber}：${args.reason}`;
+  const done =
+    outcome === 'failed'
+      ? `没交成：${label}（${place}）${failure}`
+      : outcome === 'started'
+        ? `已交给 fleet：${label}（${place}）${restart ? `上一轮是 ${task.state}、GitHub 上重开过，再` : ''}起了 Fusion 工作流 ${workflowId}`
+        : `已交给 fleet：${label}（${place}）工作流 ${workflowId} 已经在跑（刚被别处拉起），没重复起`;
+  const auditId = await dbStep(
+    outcome === 'failed' ? `${done}；操作记录也没写进去：` : `${done}，但操作记录没写进去：`,
+    () =>
+      store.appendAudit({
+        actor: OPS_HANDOVER,
+        action: TASK_HANDOVER,
+        target,
+        before: { state: task.state },
+        after: {
+          workflowId,
+          outcome,
+          restart,
+          milestone: issue.milestone?.title ?? null,
+          place,
+        },
+        reason: note,
+        via: 'engine',
+        ok: outcome !== 'failed',
+        ...(failure ? { error: failure } : {}),
+      }),
+  );
+  const page = await dbStep(`${done}（操作记录 ${auditId}），但读回时`, () =>
+    store.listAudit({ target, limit: RECENT_AUDITS }),
+  );
+  const entry = page.items.find((a) => a.id === auditId);
+  if (!entry) throw new CliError(`${done}（操作记录 ${auditId}），但读回时库里找不到这条操作记录`);
+  const record = `操作记录 ${entry.id}：${entry.at} ${entry.reason ?? note}`;
+  if (outcome === 'failed') throw new CliError(`${done}\n${record}`);
+  return `${done}\n${record}`;
+}
+
 // —— 入口 ——
 
 export type CliEnv = Readonly<Record<string, string | undefined>>;
 
-/** 命令行碰外面的几样：环境变量、输出、连库。测试换成内存库、收下输出。 */
+/** 命令行碰外面的几样：环境变量、输出、连库、读 GitHub、连 Temporal、钟。测试换成内存库和假的，收下输出。 */
 export interface CliDeps {
   env: CliEnv;
   out(text: string): void;
   err(text: string): void;
   /** 连库，给出 Store 和关连接的办法。 */
   openStore(url: string): Promise<{ store: Store; close(): Promise<void> }>;
+  /** 读 issue 此刻的样子（handover 用）：「引擎」机器人，凭据按环境里的位置读（和 fleet-api.service 同一份）。 */
+  openIssuePlans(env: CliEnv): Promise<IssuePlanReader>;
+  /** 连 Temporal 起工作流（handover 用）：地址、命名空间、任务队列按环境读（config.ts 的 temporalSettings）。 */
+  openTemporal(env: CliEnv): Promise<HandoverTemporal>;
+  now(): Date;
 }
 
 async function openPgStore(url: string): Promise<{ store: Store; close(): Promise<void> }> {
@@ -416,12 +630,37 @@ async function openPgStore(url: string): Promise<{ store: Store; close(): Promis
   return { store: createPgStore(db), close };
 }
 
+async function openGitHubPlans(env: CliEnv): Promise<IssuePlanReader> {
+  // 用得着才加载、才读凭据：前面就拒了的不碰；凭据读不到抛 GitHubError（只带文件路径，不带内容）
+  const { appFilesFromEnv, GitHubClient, loadApps, readIssuePlan } = await import('@fleet-dao/github');
+  const client = new GitHubClient({ apps: loadApps(appFilesFromEnv(env)) });
+  return {
+    read: (repo, issueNumber) =>
+      readIssuePlan(client, { repo: { owner: repo.owner, name: repo.name }, issueNumber }),
+  };
+}
+
+async function openTemporalClient(env: CliEnv): Promise<HandoverTemporal> {
+  // 懒连接：这一步不连网络，起工作流时才连，连不上、5 秒没回应抛 WorkflowUnavailableError
+  const { connectTemporal } = await import('./temporal.ts');
+  const s = temporalSettings(env);
+  const t = connectTemporal({
+    address: s.temporalAddress,
+    namespace: s.temporalNamespace,
+    taskQueue: s.fleetTaskQueue,
+  });
+  return { requirements: t.requirements, close: () => t.close() };
+}
+
 export function processDeps(): CliDeps {
   return {
     env: process.env,
     out: (text) => process.stdout.write(`${text}\n`),
     err: (text) => process.stderr.write(`${text}\n`),
     openStore: openPgStore,
+    openIssuePlans: openGitHubPlans,
+    openTemporal: openTemporalClient,
+    now: () => new Date(),
   };
 }
 
@@ -435,9 +674,27 @@ function databaseUrl(env: CliEnv): string {
   return url;
 }
 
+const USAGES: Record<string, string> = {
+  'set-password': USAGE,
+  dispatch: DISPATCH_USAGE,
+  handover: HANDOVER_USAGE,
+};
+
+const isHelp = (arg: string | undefined) => arg === '--help' || arg === '-h';
+
 /** 跑一条命令：返回退出码；参数不对、没做成抛 CliError（main 把它打印成一句白话）。 */
 export async function runCli(argv: readonly string[], deps: CliDeps = processDeps()): Promise<number> {
   const [command, ...rest] = argv;
+  // 只看用法：不连库、不碰别的（fleet-api --help 列全部，fleet-api <命令> --help 只列这一条）
+  if (isHelp(command) || command === 'help') {
+    deps.out(Object.values(USAGES).join('\n'));
+    return 0;
+  }
+  const usage = command !== undefined && Object.hasOwn(USAGES, command) ? USAGES[command] : undefined;
+  if (usage !== undefined && isHelp(rest[0])) {
+    deps.out(usage);
+    return 0;
+  }
   if (command === 'set-password') {
     const args = parseSetPasswordArgs(rest);
     const { store, close } = await deps.openStore(databaseUrl(deps.env));
@@ -460,7 +717,26 @@ export async function runCli(argv: readonly string[], deps: CliDeps = processDep
       await close();
     }
   }
-  deps.err(`${USAGE}\n${DISPATCH_USAGE}`);
+  if (command === 'handover') {
+    const args = parseHandoverArgs(rest);
+    const { store, close } = await deps.openStore(databaseUrl(deps.env));
+    try {
+      deps.out(
+        await handover({
+          store,
+          plans: () => deps.openIssuePlans(deps.env),
+          temporal: () => deps.openTemporal(deps.env),
+          args,
+          operator: operatorName(deps.env),
+          now: () => deps.now(),
+        }),
+      );
+      return 0;
+    } finally {
+      await close();
+    }
+  }
+  deps.err(Object.values(USAGES).join('\n'));
   return 2;
 }
 

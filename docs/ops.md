@@ -475,10 +475,18 @@ FLEET_DEMO_PATH=/demo/                  # 演示版的路径，和香港 hk.env 
 
   ```
   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api dispatch <owner>/<仓名> status   # 只看：开着还是关着、最近一次谁什么时候开关的
-  bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api dispatch <owner>/<仓名> on       # 打开：记下此刻，只有这之后新开的 issue 自动派
+  bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api dispatch <owner>/<仓名> on       # 打开：记下此刻，只有这之后新开的、挂在当前版本上的 issue 自动派
   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api dispatch <owner>/<仓名> off      # 关上：设为空，只收单、显示，不派
   ```
   和 set-password 一样换成 fleet、带上 `api.env` 连库；仓名不分大小写。已经是要的状态就不改、不记：开着时再 `on` 不重设时刻（重设会把已经能派的单变成「开关打开以前开的」）。改了就在同一个事务里记一条操作记录（`repo.auto_dispatch.enable` / `repo.auto_dispatch.disable`，target 是 `repo:<仓的 id>`，来源记成 engine，reason 写明谁跑的哪条命令，before / after 是开关原来和现在的值），改完从库里读回开关和这条记录再打印。退出码：0 查到了、改好了或本来就是；1 没做成（库里没这个仓、连不上库、写库出错、读回来对不上，一句话说原因和怎么核对）；2 参数不对或没带上库连接。
+  开着也只派当前版本的单（design 第九节「在哪能做与接活开关」，0003 第 2、8 条）：当前版本 = 还开着的 `v<N> …` 里程碑里 N 最小的那个，拉起前「引擎」机器人在 GitHub 上现读这张单挂在哪。没挂里程碑（未排期）、挂在别的版本或已经关了的里程碑上的，任务行照建、不派，投递的 note 写 `workflow=unscheduled` / `workflow=not_current_version`；里程碑认不出版本号写 `workflow=version_unreadable` 并告警；读不到里程碑（GitHub 出错、机器人凭据没读到）这条投递记成出错（原因以「没查成：读不到 … 挂在哪个版本」开头），对账重放时再判。挪进当前版本（`milestoned`）照开关规矩再判一次。看哪些单因为版本没派：`sudo -u fleet psql fleet -c "select delivery_id, received_at, note from github_events where note like '%workflow=unscheduled%' or note like '%workflow=not_current_version%' or note like '%workflow=version_unreadable%' order by received_at desc limit 20"`。
+- 交给 fleet（design 第九节「在哪能做与接活开关」）：开关打开以前就开着的、挂在别的版本上的、未排期的单，自动派不碰，由人明说交给引擎。驾驶舱的「交给 fleet」按钮（#282）做好之前，在法国以 root 跑：
+
+  ```
+  bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api handover <owner>/<仓名> <issue 号> --reason "<谁说的、为什么>"
+  bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api handover --help   # 只打印用法
+  ```
+  和 dispatch 一样换成 fleet、带上 `api.env`：连库；还要连 Temporal 起工作流（`TEMPORAL_ADDRESS` 这几项，和后端同一份），读 `/etc/fleet-dao/github` 下「引擎」机器人的凭据去 GitHub 上看这张单此刻开没开着、挂在哪个版本。`--reason` 必带（写进操作记录，最多 500 字），issue 号写 `214` 或 `#214` 都行。依次查、不对就拒（什么都不派）：库里有这个仓；「让 AI 接活」开着（关着一律拒，写明先 `dispatch … on`，开不开由创始人拍）；流程配置副本能用（停派的项目不派）；库里有这张单的任务行（接活收进来过；还没有就等下一轮对账补收）；读得到 GitHub 上这张单（读不到说「没查成」）。再按这张单此刻的样子（判法在 `packages/core/src/dispatch.ts` 的 `handoverDecision`）：还在排队的拉起 Fusion 工作流；在跑的不重复起（退出码 0，不记）；已经结束的只有 GitHub 上重开过才再起一轮，没重开的拒（要再做一轮先在 GitHub 上关了再开）；GitHub 上关着的拒。拉起了（或没起成）记一条操作记录 `task.handover`（target 是 `task:<任务 id>`，来源记成 engine，reason 写明谁跑的和 `--reason` 原话，before 是任务原来的状态，after 是工作流编号、起没起成、挂在哪个版本），从库里读回再打印；驾驶舱这张单的时间线显示「交给 fleet：…」。退出码：0 起了，或本来就在跑；1 没交成（被拒、没查成、Temporal 连不上、操作记录没写进去，一句话说原因）；2 参数不对或没带上库连接。
 - 后端收 GitHub 事件：原文一次投递一行落进库里的 `github_events`（状态、原因、做了什么都在）。PR、CI 事件要用 `github/` 里两个机器人的凭据写镜像，凭据只在后端启动时读一次：读不到时后端照样起、issue 照收，PR 和 CI 事件记成出错，健康检查的 `github_events` 报红；补上凭据后要重启 `fleet-api` 才读得到。记成出错、等着的投递原文还在，每轮对账（引擎的定时任务 `github-reconcile`，每 15 分钟）按原文重放：出错的最多自动重放 5 次；等着的（重开时上一轮还没结束、这个项目停派）每轮都重放、不占次数。重放到头的没有手动再推的入口，只在健康检查里报红。
 - GitHub 不会自己重投没送到的 webhook：漏收的靠对账调它的重投接口、再按仓轮询补回。
 - 接 GitHub 要齐两样，缺一样 GitHub 上的单就进不来（事件、对账补回来的都被门挡掉，投递账上记「不收」、不算出错），健康检查的 `github_events` 会报红（`no_repos`、`no_github_members`）；驾驶舱还没有加仓、改成员的页面，现在在库里加（新机器上两张表都是空的）：
@@ -487,7 +495,7 @@ FLEET_DEMO_PATH=/demo/                  # 演示版的路径，和香港 hk.env 
   - 派活只认副本（判法在 `packages/core/src/replica.ts`）：仓里没有这个文件就用全组织默认（副本标 `org_default`），但全组织默认里不放测试命令，这种仓的写码会话会停下说「项目没写测试命令」；文件认不出（坏 JSON、格式不对）这个项目停派，提醒中心报一条 `flow-config:<owner>/<仓名>`；读的时候 GitHub 出错只记「没查成」、副本不动，超过 45 分钟没同步成同样停派、报提醒。停派时新来的单照收（建任务行），投递记成等着，副本好了那一轮对账重放、自动拉起。核对（加完仓想马上同步，先手动跑一轮下面那条对账）：`sudo -u fleet psql fleet -c "select owner, name, test_command, flow_source, flow_commit, flow_synced_at, flow_error, flow_unread from repos"`。
   - 带 GitHub 账号的成员：白名单按 `users` 表认 GitHub 作者（有数字编号只按编号认），创始人那一行补上 GitHub 的数字编号和登录名，两个机器人各加一行 `role = 'bot'`（编号是 `<App 的 slug>[bot]` 这个用户的编号，不是 App 的编号）；数字编号用 `gh api users/<登录名>` 查：`sudo -u fleet psql fleet -c "update users set github_id = <编号>, github_login = '<登录名>' where id = '<创始人那一行的 id>' and github_id is null"`、`sudo -u fleet psql fleet -c "insert into users (display_name, role, github_login, github_id) values ('<slug>[bot]', 'bot', '<slug>[bot]', <编号>) on conflict (github_id) do nothing"`。
   - 加完手动跑一轮对账（`fleet-temporal schedule trigger --schedule-id github-reconcile`），已经开着的单这一轮就补进来。
-- 受管的仓就是库里 `repos` 表的行，别的仓的事件一律不收。「让 AI 接活」开关是 `repos.auto_dispatch_since`：空 = 关着，只收单（建任务行）、不拉起工作流（打开后给每张单起 Fusion 工作流，design 第五节）；打开以前就开着的 issue 也不自动派。开关用上面的 `fleet-api dispatch`，别直接改库：直接改的不进操作记录。
+- 受管的仓就是库里 `repos` 表的行，别的仓的事件一律不收。「让 AI 接活」开关是 `repos.auto_dispatch_since`：空 = 关着，只收单（建任务行）、不拉起工作流（打开后给挂在当前版本上的单起 Fusion 工作流，design 第五节、第九节）；打开以前就开着的、别的版本的、未排期的 issue 也不自动派，要交用上面的 `fleet-api handover`。开关用上面的 `fleet-api dispatch`，别直接改库：直接改的不进操作记录。
 
 两台同一份（飞书网关的通行证）：法国生成，原样拷到香港，值不过屏幕。香港那头先落临时名，收到的不是完整的一行通行证（法国那头没读成、传到一半断了、读到的是报错）就不换，原来那份原样留着：
 

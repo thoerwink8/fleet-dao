@@ -25,6 +25,7 @@ describe('core 只放纯判断', () => {
       'brief.ts',
       'config.ts',
       'criteria.ts',
+      'dispatch.ts',
       'flow.ts',
       'fusion.ts',
       'index.ts',

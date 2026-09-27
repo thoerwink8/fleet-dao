@@ -24,6 +24,8 @@ import type {
   FeishuIdentity,
   HealthCheck,
   IngestedEvent,
+  IssuePlan,
+  IssuePlanReader,
   Logger,
   RequirementStart,
   RequirementWorkflows,
@@ -35,6 +37,24 @@ import type { SseRelay } from '../src/sse.ts';
 import { seedPg } from './pg-fixtures.ts';
 
 export const T0 = new Date('2026-09-25T08:00:00.000Z');
+
+/** 样例仓里的版本（GitHub 上的里程碑）：v1 是当前版本。 */
+export const V1 = { number: 8, title: 'v1 Fusion 接活' };
+export const V2 = { number: 9, title: 'v2 引擎打磨' };
+
+/** issue 此刻在 GitHub 上的样子：默认开着、挂在当前版本 v1 上、仓里开着 v1 和 v2。 */
+export function issuePlan(over: Partial<IssuePlan> = {}): IssuePlan {
+  return {
+    state: 'open',
+    reopened: false,
+    pullRequest: false,
+    author: 'founder-a',
+    milestone: V1,
+    openMilestones: [V1, V2],
+    ...over,
+  };
+}
+
 export const PUBLIC_ORIGIN = 'https://cockpit.example.test';
 export const GATEWAY_PASS = 'gateway-pass-for-tests-0123456789abcdef';
 
@@ -96,6 +116,10 @@ export interface Harness<S extends Store = Store> {
   signals: { workflowId: string; signal: TaskSignal }[];
   /** 真拉起了的需求工作流（假的：同一张 issue 的还在跑、没被叫停，再拉回 already_running，不记在这里）。 */
   starts: RequirementStart[];
+  /** 读过哪几张 issue 挂在哪个版本（接活拉起前现读 GitHub）。 */
+  planReads: { repo: string; issueNumber: number }[];
+  /** 各张 issue 此刻在 GitHub 上的样子：按号设，没设的用 issuePlan() 的默认（挂在当前版本 v1 上）。 */
+  plans: Map<number, IssuePlan | Error>;
   accepted: IngestedEvent[];
   logs: { level: string; message: string; fields?: Record<string, unknown> | undefined }[];
   feishuCalls: Parameters<FeishuAuth['identify']>[0][];
@@ -112,6 +136,8 @@ export interface HarnessOptions {
   data?: Partial<MemoryData>;
   workflows?: WorkflowControl;
   requirements?: RequirementWorkflows;
+  /** 不给就是按 Harness.plans 回的假的（默认挂在当前版本 v1 上）。 */
+  plans?: IssuePlanReader;
   feishu?: 'fake' | null;
   github?: (event: IngestedEvent) => Promise<void>;
   health?: HealthCheck[];
@@ -137,6 +163,8 @@ function wire<S extends Store>(
   const config = testConfig(options.config);
   const signals: Harness['signals'] = [];
   const starts: RequirementStart[] = [];
+  const planReads: Harness['planReads'] = [];
+  const plans: Harness['plans'] = new Map();
   const accepted: IngestedEvent[] = [];
   const logs: Harness['logs'] = [];
   const log: Logger = {
@@ -181,6 +209,14 @@ function wire<S extends Store>(
         return 'started';
       },
     },
+    plans: options.plans ?? {
+      async read(repo, issueNumber) {
+        planReads.push({ repo: `${repo.owner}/${repo.name}`, issueNumber });
+        const plan = plans.get(issueNumber) ?? issuePlan();
+        if (plan instanceof Error) throw plan;
+        return plan;
+      },
+    },
     github: {
       accept:
         options.github ??
@@ -205,6 +241,8 @@ function wire<S extends Store>(
     changes,
     signals,
     starts,
+    planReads,
+    plans,
     accepted,
     logs,
     feishuCalls: feishu.calls,

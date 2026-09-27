@@ -7,7 +7,6 @@ import { WorkflowExecutionAlreadyStartedError } from '@temporalio/client';
 import { describe, expect, it } from 'vitest';
 import { devFixtures, IDS } from '../src/dev-fixtures.ts';
 import { createGitHubIntake } from '../src/github.ts';
-import { dispatchDecision } from '../src/issue-intake.ts';
 import type { MemoryData } from '../src/memory-store.ts';
 import {
   type AskRecord,
@@ -18,7 +17,7 @@ import {
   WorkflowUnavailableError,
 } from '../src/ports.ts';
 import { createTemporalRequirementWorkflows, type WorkflowStarterLike } from '../src/temporal.ts';
-import { deliverGithub as deliver, type HarnessOptions, harness, T0 } from './harness.ts';
+import { deliverGithub as deliver, type HarnessOptions, harness, issuePlan, T0, V1, V2 } from './harness.ts';
 
 /** 样例里的仓：需求工作流编号按它拼。 */
 const CANARY = { owner: 'example', name: 'canary' };
@@ -791,29 +790,130 @@ describe('流程配置副本不能用：这个项目停派（0003 第 9 条，�
   });
 });
 
-describe('开关的判法', () => {
-  const on = { autoDispatchSince: SWITCH_ON };
-  it('关着不派；开关以前开的不派；排队中的派；已结束的只在重开时派；在跑的不再派；建立时刻认不出不派', () => {
-    expect(dispatchDecision({ autoDispatchSince: null }, at(0), { state: 'queued' }, false)).toBe(
-      'dispatch_off',
-    );
-    expect(dispatchDecision(on, at(-61), { state: 'queued' }, false)).toBe('opened_before_switch');
-    expect(dispatchDecision(on, at(-60), { state: 'queued' }, false)).toBe('start');
-    expect(dispatchDecision(on, at(0), { state: 'done' }, false)).toBe('finished');
-    expect(dispatchDecision(on, at(0), { state: 'running' }, false)).toBe('in_progress');
-    expect(dispatchDecision(on, 'yesterday', { state: 'queued' }, false)).toBe('created_at_unreadable');
+// 开关、版本两道的边界表在 packages/core/test/dispatch.test.ts；这里走真的 webhook，看接活照它派、不派、记下原因。
+describe('只派当前版本的单（0003 第 2、8 条：未排期、别的版本的不碰）', () => {
+  it('【故意造出的失败】未排期的新单：建任务行（排队），不派；note 写 unscheduled', async () => {
+    const { h, task, auditsOf } = setup();
+    h.plans.set(40, issuePlan({ milestone: null }));
+    expect(await json(deliver(h, 'issues', issuesEvent('opened')))).toMatchObject({
+      verdict: 'accepted',
+      note: 'task=created, workflow=unscheduled',
+    });
+    expect(h.starts).toEqual([]);
+    const t = await task();
+    expect(t?.state).toBe('queued');
+    if (!t) throw new Error('没建任务');
+    expect((await auditsOf(t.id)).map((a) => a.action)).toEqual(['task.create']);
+    expect(
+      h.logs.some((l) => l.message.includes('这张单不自动派：没挂里程碑（未排期）') && l.level === 'info'),
+    ).toBe(true);
   });
 
-  it('重开：已结束的、还在排队的再拉起；正在做的等它结束；开关照样先看', () => {
-    expect(dispatchDecision(on, at(0), { state: 'failed' }, true)).toBe('restart');
-    expect(dispatchDecision(on, at(0), { state: 'stopped' }, true)).toBe('restart');
-    expect(dispatchDecision(on, at(0), { state: 'queued' }, true)).toBe('restart');
-    expect(dispatchDecision(on, at(0), { state: 'running' }, true)).toBe('wait_previous_run');
-    expect(dispatchDecision(on, at(0), { state: 'triaging' }, true)).toBe('wait_previous_run');
-    expect(dispatchDecision(on, at(-61), { state: 'failed' }, true)).toBe('opened_before_switch');
-    expect(dispatchDecision({ autoDispatchSince: null }, at(0), { state: 'running' }, true)).toBe(
-      'dispatch_off',
-    );
+  it('【故意造出的失败】v2 的新单（v1 还开着）：不派；note 写 not_current_version', async () => {
+    const { h } = setup();
+    h.plans.set(40, issuePlan({ milestone: V2 }));
+    expect(await json(deliver(h, 'issues', issuesEvent('opened')))).toMatchObject({
+      note: 'task=created, workflow=not_current_version',
+    });
+    expect(h.starts).toEqual([]);
+    expect(h.logs.some((l) => l.message.includes('不是当前版本；当前版本是「v1 Fusion 接活」'))).toBe(true);
+  });
+
+  it('v1 的新单：派；挂在哪、当前版本是哪个是拉起前在 GitHub 上现读的，操作记录写明按哪个版本派的', async () => {
+    const { h, task } = setup();
+    expect(await json(deliver(h, 'issues', issuesEvent('opened')))).toMatchObject({
+      note: 'task=created, workflow=started',
+    });
+    expect(h.planReads).toEqual([{ repo: 'example/canary', issueNumber: 40 }]);
+    expect(h.starts.map((s) => s.issueNumber)).toEqual([40]);
+    const t = await task();
+    if (!t) throw new Error('没建任务');
+    const [start] = (await h.store.listAudit({ target: `task:${t.id}`, limit: 5 })).items;
+    expect(start).toMatchObject({ action: 'task.start', after: { milestone: 'v1 Fusion 接活' } });
+  });
+
+  it('【故意造出的失败】读不到里程碑（GitHub 出错）：不派，投递记成出错、写明「没查成」；GitHub 好了对账重放再判、拉起', async () => {
+    const { h, task } = setup();
+    h.plans.set(40, new Error('GitHub 回 502'));
+    const res = await deliver(h, 'issues', issuesEvent('opened'), { delivery: 'plan-down' });
+    expect(res.status).toBe(500);
+    expect(await h.store.getDelivery('plan-down')).toMatchObject({
+      status: 'failed',
+      reason: '没查成：读不到 example/canary#40 挂在哪个版本（GitHub 回 502），这张单没派；对账重放时再判',
+    });
+    expect(h.starts).toEqual([]);
+    expect((await task())?.state).toBe('queued');
+
+    h.plans.delete(40);
+    expect(await createGitHubIntake(h.deps).replay('plan-down')).toMatchObject({
+      verdict: 'accepted',
+      note: 'task=exists, workflow=started',
+    });
+    expect(h.starts.map((s) => s.issueNumber)).toEqual([40]);
+  });
+
+  it('【故意造出的失败】挂的里程碑认不出版本号：不派，告警写明「没查成」，不当成当前版本', async () => {
+    const { h } = setup();
+    const odd = { number: 11, title: 'backlog 攒着的' };
+    h.plans.set(40, issuePlan({ milestone: odd, openMilestones: [odd, V1] }));
+    expect(await json(deliver(h, 'issues', issuesEvent('opened')))).toMatchObject({
+      note: 'task=created, workflow=version_unreadable',
+    });
+    expect(h.starts).toEqual([]);
+    expect(
+      h.logs.some(
+        (l) => l.level === 'warn' && l.message.includes('没查成：里程碑「backlog 攒着的」认不出版本号'),
+      ),
+    ).toBe(true);
+  });
+
+  it('后来挪进当前版本（GitHub 的 milestoned 事件）：照开关规矩再判一次，这回拉起；挪出去的（事件里还是 v1、现读已经未排期）不派', async () => {
+    const { h } = setup();
+    h.plans.set(40, issuePlan({ milestone: null }));
+    await json(deliver(h, 'issues', issuesEvent('opened')));
+    expect(h.starts).toEqual([]);
+    h.plans.set(40, issuePlan({ milestone: V1 }));
+    const moved = issuesEvent('milestoned', issue({ updated_at: at(-20), milestone: V1 }));
+    expect(await json(deliver(h, 'issues', moved))).toMatchObject({
+      note: 'task=exists, workflow=started',
+    });
+    expect(h.starts.map((s) => s.issueNumber)).toEqual([40]);
+
+    // 事件里带的是旧样子（挂着 v1），GitHub 上此刻已经挪回未排期：按现读的算，不派
+    h.plans.set(41, issuePlan({ milestone: null }));
+    const stale = issuesEvent('opened', issue({ number: 41, milestone: V1 }));
+    expect(await json(deliver(h, 'issues', stale))).toMatchObject({
+      note: 'task=created, workflow=unscheduled',
+    });
+    expect(h.starts.map((s) => s.issueNumber)).toEqual([40]);
+  });
+
+  it('开关打开以前开的单挪进当前版本：照开关规矩还是不自动派（要人交给 fleet）；开关关着、开关以前开的都不去读 GitHub', async () => {
+    const { h } = setup();
+    const old = issue({ created_at: at(-120) });
+    await json(deliver(h, 'issues', issuesEvent('opened', old)));
+    expect(
+      await json(deliver(h, 'issues', issuesEvent('milestoned', { ...old, updated_at: at(-10) }))),
+    ).toMatchObject({ note: 'task=exists, workflow=opened_before_switch' });
+    expect(h.starts).toEqual([]);
+    expect(h.planReads).toEqual([]);
+
+    const off = setup({ switchOn: null });
+    await json(deliver(off.h, 'issues', issuesEvent('opened')));
+    expect(off.h.planReads).toEqual([]);
+  });
+
+  it('重开：已经结束的任务、现在挂在 v2 上：不再拉起（note 写 not_current_version）', async () => {
+    const { h } = setup();
+    await json(deliver(h, 'issues', issuesEvent('opened')));
+    const t = h.store.data.tasks.find((x) => x.issueNumber === 40);
+    if (!t) throw new Error('没建任务');
+    t.state = 'done';
+    h.plans.set(40, issuePlan({ milestone: V2, openMilestones: [V1, V2] }));
+    expect(
+      await json(deliver(h, 'issues', issuesEvent('reopened', issue({ updated_at: at(-5) })))),
+    ).toMatchObject({ note: 'task=exists, workflow=not_current_version' });
+    expect(h.starts).toHaveLength(1);
   });
 });
 

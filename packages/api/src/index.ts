@@ -37,6 +37,7 @@ export {
   type GitHubIntake,
   githubAppMissing,
   githubEventsCheck,
+  githubIssuePlans,
   githubWhitelist,
   type IngestResult,
   MAX_AUTO_REPLAYS,
@@ -49,13 +50,7 @@ export {
 } from './github.ts';
 export { type HealthReport, PublicHealthError, runHealthChecks, serviceHealthChecks } from './health.ts';
 export { isSerial, isUuid, parseCursor } from './ids.ts';
-export {
-  createIssueIntake,
-  type DispatchDecision,
-  dispatchDecision,
-  type IssueIntake,
-  RetryLaterError,
-} from './issue-intake.ts';
+export { createIssueIntake, type IssueIntake, RetryLaterError } from './issue-intake.ts';
 export { jsonLogger, silentLogger } from './log.ts';
 export { createMemoryStore, emptyData, type MemoryData } from './memory-store.ts';
 export {

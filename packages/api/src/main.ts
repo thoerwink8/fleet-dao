@@ -29,14 +29,14 @@ import { DEV_RUN_ID, DEV_USER_ID, devFixtures, IDS } from './dev-fixtures.ts';
 import { draftBacklogCheck, notWiredDraftOpener } from './draft-opening.ts';
 import { createFeishuAuth } from './feishu.ts';
 import { createGatewaySeen, GATEWAY_NO_PASS } from './gateway-seen.ts';
-import { githubAppMissing, githubEventsCheck } from './github.ts';
+import { githubAppMissing, githubEventsCheck, githubIssuePlans } from './github.ts';
 import { serviceHealthChecks } from './health.ts';
 import { judgeHealthCheck } from './judge-health.ts';
 import { serveCockpit } from './keep-alive.ts';
 import { jsonLogger } from './log.ts';
 import { createMemoryStore } from './memory-store.ts';
 import { createPgStore, probeDb, withStatementTimeout } from './pg-store.ts';
-import type { GitHubEventSink } from './ports.ts';
+import type { GitHubEventSink, IssuePlanReader } from './ports.ts';
 import { connectTemporal } from './temporal.ts';
 
 const log = jsonLogger();
@@ -44,16 +44,23 @@ const log = jsonLogger();
 /**
  * PR、CI 事件写镜像：@fleet-dao/github 的事件去处，要两个机器人的凭据（只在这里、启动时读一次）。读不到时后端照样起
  * （issue 照收），PR、CI 事件如实失败，健康检查的 github_events 报红（credentialsMissing）；补上凭据要重启后端。
+ * 接活判「挂没挂在当前版本」也经这里的「引擎」机器人现读；凭据没读到时一读就抛，接活不派（投递记成出错）。
  */
-function githubMirror(db: Db): { sink: GitHubEventSink; credentialsMissing?: () => Promise<void> } {
+function githubMirror(db: Db): {
+  sink: GitHubEventSink;
+  plans: IssuePlanReader;
+  credentialsMissing?: () => Promise<void>;
+} {
   try {
     const gh = createGitHub({ ledger: pgLedger(db), locker: pgLocker(db, { log }), log });
     // 引擎等 CI 靠活动自己轮询（waitCi），不收按事件叫醒的信号：PR、CI 事件只写镜像
-    return { sink: gh.eventSink({ async wake() {} }) };
+    return { sink: gh.eventSink({ async wake() {} }), plans: githubIssuePlans(gh) };
   } catch (err) {
-    log.error('GitHub 机器人的凭据没读到：PR、CI 事件写不进镜像（issue 照收）', { error: String(err) });
+    log.error('GitHub 机器人的凭据没读到：PR、CI 事件写不进镜像（issue 照收，但不派）', {
+      error: String(err),
+    });
     const missing = githubAppMissing(String(err));
-    return { sink: missing.sink, credentialsMissing: missing.check };
+    return { sink: missing.sink, plans: missing.plans, credentialsMissing: missing.check };
   }
 }
 
@@ -99,6 +106,14 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
         async start(input) {
           log.info('（开发）拉起工作流', { taskId: input.taskId, issueNumber: input.issueNumber });
           return 'started';
+        },
+      },
+      // 开发环境不接 GitHub：读不到挂在哪个版本，接活不派（照实失败，不假装挂在当前版本上）
+      plans: {
+        async read(repo, issueNumber) {
+          throw new Error(
+            `开发环境没接 GitHub：读不到 ${repo.owner}/${repo.name}#${issueNumber} 挂在哪个版本`,
+          );
         },
       },
       github: {
@@ -149,6 +164,7 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
     demo,
     workflows: temporal.control,
     requirements: temporal.requirements,
+    plans: github.plans,
     github: github.sink,
     draftOpener,
     gatewaySeen,
