@@ -52,15 +52,7 @@ reset() {
 # 端口都问内核要一个当场空闲的（node 起个监听 0 口的 TCP server，读它分到的端口号再关掉），不再用
 # 「RANDOM % 20000 + 20000」随手挑：这段和 Linux 默认的临时端口段（32768 起）重叠，CI 机器上别的连接正占着
 # 就 bind 不上（曾经真红过一次：nginx: [emerg] bind() ... failed (98: Address already in use)）。
-# PORT_OVERRIDE 只给下面「端口撞车重来」的自造失败测试用：塞一个进去，逼下一次 free_port 交出那个号，
-# 制造一次真的撞车；用掉就从队列里去掉，后面照常问内核要。
-PORT_OVERRIDE=()
 free_port() {
-  if ((${#PORT_OVERRIDE[@]} > 0)); then
-    printf '%s' "${PORT_OVERRIDE[0]}"
-    PORT_OVERRIDE=("${PORT_OVERRIDE[@]:1}")
-    return 0
-  fi
   "$NODE" -e '
     const net = require("node:net");
     const s = net.createServer();
