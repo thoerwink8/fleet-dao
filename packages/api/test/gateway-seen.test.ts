@@ -29,7 +29,9 @@ function healthOf(feishuGateway: Parameters<typeof serviceHealthChecks>[0]['feis
     deployLag: { check: async () => {} },
     feishuGateway,
     sessionOrg: async () => {},
+    githubApp: async () => {},
     canary: { check: async () => {} },
+    watchdog: { check: async () => {} },
   });
 }
 

@@ -947,8 +947,12 @@ check_running_release() { # 提交号
 # session_org = 引擎切会话用户挂的组织没成、切完读回不在线、拼车恢复时刻读不到（#157）：跟着上游额度、登录自己变红，引擎每
 #   15 分钟判一次，和这一版无关。
 # canary = 全流程巡检最近一轮断了、没跑成、太久没跑完一轮（#223）：跟着每 6 小时一轮的结论自己变红，和这一版无关。
+# github_app = GitHub 两个机器人的权限不对、没查成（#299）：GitHub 那边有人改了 App 权限、新权限在安装处没点接受就红，引擎
+#   每小时自检一次、好了自己撤，和这一版无关。
+# watchdog = 看门狗（引擎每 5 分钟一轮，#203）最近一轮没跑成、过了 15 分钟没跑完一轮：跟着引擎自己变红；切版本那一刻它的下一轮
+#   还没来（第一次带上它的那版切上去时它一轮都还没跑），和这一版好不好无关。
 # 这里的名字都得是后端真报的项（packages/api 的 health.test.ts 核对，改了名那边报警）
-DRIFTING_HEALTH_ITEMS="draft_backlog judge deploy_lag feishu_gateway session_org canary"
+DRIFTING_HEALTH_ITEMS="draft_backlog judge deploy_lag feishu_gateway session_org canary github_app watchdog"
 
 # 切之后的健康报告逐项和切之前比：之前好的变坏了才算这一版的错（返回 1）；会自己变红的那几项只标待处理
 compare_api_items() { # 切之前的逐项结果 切之后的逐项结果

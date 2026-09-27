@@ -331,6 +331,11 @@ export const scheduledJobs = pgTable(
     schedule: text('schedule').notNull(),
     /** 上次成功距今超过这么多分钟就算过期。要大于「周期 + 抖动 + 一轮耗时」，否则每轮开头都误报。 */
     expectEveryMinutes: integer('expect_every_minutes').notNull(),
+    /**
+     * 第一次登记的时刻（重复登记不改）。从没跑成过的任务从这里算过没过期：刚登记、还没轮到第一次的不报，
+     * 登记了超过期望间隔还没跑成过的照报（看门狗 #203）。加这一列之前就在的行记的是加列那一刻。
+     */
+    registeredAt: timestamp('registered_at', tz).notNull().defaultNow(),
   },
   (t) => [check('scheduled_jobs_expect_every_positive', sql`${t.expectEveryMinutes} > 0`)],
 );

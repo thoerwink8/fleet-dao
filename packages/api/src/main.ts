@@ -31,6 +31,7 @@ import { draftBacklogCheck, notWiredDraftOpener } from './draft-opening.ts';
 import { createFeishuAuth } from './feishu.ts';
 import { createGatewaySeen, GATEWAY_NO_PASS } from './gateway-seen.ts';
 import { githubAppMissing, githubEventsCheck } from './github.ts';
+import { githubAppHealthCheck } from './github-app-health.ts';
 import { serviceHealthChecks } from './health.ts';
 import { githubIssuePlans, issuePlansUnavailable } from './issue-intake.ts';
 import { judgeHealthCheck } from './judge-health.ts';
@@ -41,6 +42,7 @@ import { createPgStore, probeDb, withStatementTimeout } from './pg-store.ts';
 import type { GitHubEventSink, IssuePlanReader } from './ports.ts';
 import { sessionOrgHealthCheck } from './session-org-health.ts';
 import { connectTemporal } from './temporal.ts';
+import { startWatchdogWatch, WATCHDOG_NOT_HERE, watchdogHealthCheck } from './watchdog-health.ts';
 
 const log = jsonLogger();
 
@@ -159,6 +161,8 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
   const stopDeployLagWatch = onFrance
     ? startDeployLagWatch({ db, read: () => readDeployLagInput(), now, log })
     : () => {};
+  // 看门狗（#203）自己停了它自己报不了：后端每 5 分钟按登记表上它那一行看一次，停了推一条「看门狗停了」，好了自己撤
+  const stopWatchdogWatch = onFrance ? startWatchdogWatch({ db, now, log }) : () => {};
   // 飞书网关还来不来：飞书接口的门口记，/healthz 读的时候现算；没配通行证网关一律进不来，报「未接」
   const gatewaySeen = createGatewaySeen(now);
   const deps: Deps = {
@@ -194,16 +198,23 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
         : { check: async () => {}, notWired: GATEWAY_NO_PASS },
       // 引擎切号（#157）写的提醒：只有法国的引擎会写，别处一直是好的
       sessionOrg: sessionOrgHealthCheck(db),
+      // 引擎每小时对账自检两个机器人的权限、缺了写的提醒：同样只有法国的引擎会写
+      githubApp: githubAppHealthCheck(db),
       // 全流程巡检（#223）：引擎每 6 小时在巡检仓跑一轮、结论写进库；只有法国的正式机器上有
       canary: onFrance
         ? { check: canaryHealthCheck(db, now) }
         : { check: async () => {}, notWired: CANARY_NOT_HERE },
+      // 看门狗（#203）：引擎每 5 分钟跑一轮、记在登记表上；只有法国的正式机器上有
+      watchdog: onFrance
+        ? { check: watchdogHealthCheck(db, now) }
+        : { check: async () => {}, notWired: WATCHDOG_NOT_HERE },
     }),
   };
   return {
     deps,
     close: async () => {
       stopDeployLagWatch();
+      stopWatchdogWatch();
       await feed.stop();
       await temporal.close();
       await closeDb();

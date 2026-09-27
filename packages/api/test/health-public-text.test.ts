@@ -5,7 +5,13 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { type Db, type PgListen, SESSION_ORG_ALERT_PREFIX, upsertAlert } from '@fleet-dao/db';
+import {
+  type Db,
+  GITHUB_APP_ALERT_PREFIX,
+  type PgListen,
+  SESSION_ORG_ALERT_PREFIX,
+  upsertAlert,
+} from '@fleet-dao/db';
 import { createTestDb, TEST_DB_TIMEOUT_MS } from '@fleet-dao/db/testing';
 import { FeishuRoutes, FLEET_CHANGES_CHANNEL } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
@@ -15,6 +21,7 @@ import { DEPLOY_LAG_NOT_HERE, deployLagCheck } from '../src/deploy-lag.ts';
 import { draftBacklogCheck, notWiredDraftOpener } from '../src/draft-opening.ts';
 import { createGatewaySeen, GATEWAY_NO_PASS } from '../src/gateway-seen.ts';
 import { githubAppMissing, githubEventsCheck } from '../src/github.ts';
+import { githubAppHealthCheck } from '../src/github-app-health.ts';
 import { type HealthReport, runHealthChecks, serviceHealthChecks } from '../src/health.ts';
 import { judgeHealthCheck } from '../src/judge-health.ts';
 import { silentLogger } from '../src/log.ts';
@@ -22,6 +29,7 @@ import { probeDb } from '../src/pg-store.ts';
 import type { Logger, Store } from '../src/ports.ts';
 import { sessionOrgHealthCheck } from '../src/session-org-health.ts';
 import { createEnginePollerCheck, createNamespaceCheck, notConnectedTemporal } from '../src/temporal.ts';
+import { WATCHDOG_NOT_HERE, watchdogHealthCheck } from '../src/watchdog-health.ts';
 import { fakePostgres } from './fake-postgres.ts';
 import { judgeCatalog, judgeMachine, makeFakeBackend, recordJudgeCall } from './judge-fixture.ts';
 
@@ -186,9 +194,22 @@ async function publicFailures(log: Logger) {
       body: 'fleet-agent-carpool 以会话用户跑 reclaude org list 没跑成',
     });
     await run('session-org', true, sessionOrgHealthCheck(judgeDb.db));
+    // 机器人权限的提醒开着：标题（带仓名、缺哪样权限）只进日志
+    await upsertAlert(judgeDb.db, {
+      dedupeKey: `${GITHUB_APP_ALERT_PREFIX}engine:acme/fleet-dao`,
+      level: 'alert',
+      taskId: null,
+      title: '「引擎」机器人在 acme/fleet-dao 上的权限不对：缺 statuses:write',
+      body: '去 GitHub 的 App 设置里改，再到装它的地方点接受新权限',
+    });
+    await run('github-app', true, githubAppHealthCheck(judgeDb.db));
     // 全流程巡检：只有一处 new PublicHealthError（说法有几种），这里造一种；每一种说法都在 canary-health.test.ts 用同一份名单扫
     await run('canary', true, async () => {
       await canaryHealthCheck(judgeDb.db)();
+    });
+    // 看门狗：只有一处 new PublicHealthError（说法有几种），这里造一种（还没登记）；每一种说法都在 watchdog-health.test.ts 用同一份名单扫
+    await run('watchdog', true, async () => {
+      await watchdogHealthCheck(judgeDb.db)();
     });
   } finally {
     judged.cleanup();
@@ -271,7 +292,9 @@ describe('公开的健康报告', () => {
           deployLag: { check: async () => {}, notWired: DEPLOY_LAG_NOT_HERE },
           feishuGateway,
           sessionOrg: async () => {},
+          githubApp: async () => {},
           canary: { check: async () => {}, notWired: CANARY_NOT_HERE },
+          watchdog: { check: async () => {}, notWired: WATCHDOG_NOT_HERE },
         }),
         silentLogger,
       );

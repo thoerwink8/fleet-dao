@@ -62,7 +62,9 @@ describe('健康检查', () => {
       deployLag: { check: async () => {} },
       feishuGateway: { check: async () => {} },
       sessionOrg: async () => {},
+      githubApp: async () => {},
       canary: { check: async () => {} },
+      watchdog: { check: async () => {} },
     });
 
   it('还没接上的功能报「未接」：整体照样 200，这一项看得到「未接」和单号，积压也不算坏', async () => {
@@ -154,6 +156,10 @@ describe('健康检查', () => {
     expect(listed).toContain('session_org');
     // 全流程巡检断了、没跑成跟着巡检的结论自己变红（6 小时一轮）；少了它，发版会被它退回
     expect(listed).toContain('canary');
+    // 机器人权限被人改了、新权限没点接受跟着 GitHub 那边自己变红（引擎每小时自检一次）；少了它，发版会被它退回
+    expect(listed).toContain('github_app');
+    // 看门狗停了、没跑成跟着引擎自己变红（每 5 分钟一轮；第一次带上它的那版发上去时它还没跑过）；少了它，发版会被它退回
+    expect(listed).toContain('watchdog');
     const names = serviceHealthChecks({
       probeDb: async () => {},
       feed: { probe: async () => {} },
@@ -165,7 +171,9 @@ describe('健康检查', () => {
       deployLag: { check: async () => {} },
       feishuGateway: { check: async () => {} },
       sessionOrg: async () => {},
+      githubApp: async () => {},
       canary: { check: async () => {} },
+      watchdog: { check: async () => {} },
     }).map((c) => c.name);
     for (const name of listed) expect(names, name).toContain(name);
   });

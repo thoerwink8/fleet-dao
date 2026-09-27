@@ -1,4 +1,15 @@
 export {
+  CLOSE_COLUMN,
+  type CloseColumn,
+  closeColumnValue,
+  closingIssues,
+  closingTargets,
+  missingResults,
+  RESULT_FILE,
+  resultDocIssue,
+  resultDocOf,
+} from './close-rule.ts';
+export {
   checkDebtDocs,
   checkSpecsDone,
   DEFERRAL_PATTERNS,
@@ -52,13 +63,9 @@ export {
   CLOSE_USAGE,
   CloseRefused,
   CloseUnchecked,
-  closingIssues,
   type IssueCloseDeps,
   type IssueCloseResult,
   issueClose,
-  RESULT_FILE,
-  resultDocIssue,
-  resultDocOf,
 } from './issue-close.ts';
 export {
   type Gh,
@@ -114,11 +121,8 @@ export {
 } from './plan-snapshot.ts';
 export {
   annotation,
-  CLOSE_COLUMN,
-  type CloseColumn,
   checkPlanValue,
   checkPrFields,
-  closeColumnValue,
   PLAN_COLUMN,
   PLAN_DOC,
   type PrEvent,

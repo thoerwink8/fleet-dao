@@ -118,6 +118,17 @@ test('会话账号切换（session_org）：显示成「会话账号切换」；
   assert.equal(byKey(w).session_org.reason, '会话账号切换有要人看的问题（session_org）');
 });
 
+test('GitHub 机器人权限（github_app）：显示成「GitHub 机器人权限」；有要人看的问题照实报红', () => {
+  const v = judge({ status: 200, body: report(true, { ...allOk, github_app: { ok: true } }) });
+  assert.equal(v.ok, true);
+  assert.equal(byKey(v).github_app.label, 'GitHub 机器人权限');
+  assert.equal(byKey(v).github_app.reason, '在线');
+  const bad = { ok: false, code: 'github_app', message: 'GitHub 机器人的权限有要人看的问题' };
+  const w = judge({ status: 503, body: report(false, { ...allOk, github_app: bad }) });
+  assert.equal(w.ok, false);
+  assert.equal(byKey(w).github_app.reason, 'GitHub 机器人的权限有要人看的问题（github_app）');
+});
+
 test('全流程巡检（canary）：显示成「全流程巡检」；通过写明几点、用了多久，断了照实报红、写明断在哪一步', () => {
   const pass = { ok: true, message: '最近一轮 09-27 20:26 通过（用时 43 分钟）' };
   const v = judge({ status: 200, body: report(true, { ...allOk, canary: pass }) });
@@ -128,6 +139,22 @@ test('全流程巡检（canary）：显示成「全流程巡检」；通过写�
   const w = judge({ status: 503, body: report(false, { ...allOk, canary: broken }) });
   assert.equal(w.ok, false);
   assert.equal(byKey(w).canary.reason, '最近一轮（09-27 20:31 有结论）断在「派活」（canary_broken）');
+});
+
+test('看门狗（watchdog）：显示成「看门狗」；跑完一轮写明几点、查了几个，停了照实报红、写明上次几点跑完', () => {
+  const fine = { ok: true, message: '最近一轮 09-27 20:26 跑完：查了 7 个定时任务，都按期跑成' };
+  const v = judge({ status: 200, body: report(true, { ...allOk, watchdog: fine }) });
+  assert.equal(v.ok, true);
+  assert.equal(byKey(v).watchdog.label, '看门狗');
+  assert.equal(byKey(v).watchdog.reason, '在线：最近一轮 09-27 20:26 跑完：查了 7 个定时任务，都按期跑成');
+  const stale = {
+    ok: false,
+    code: 'watchdog_stale',
+    message: '看门狗 09-27 20:10 之后超过 15 分钟没跑完一轮',
+  };
+  const w = judge({ status: 503, body: report(false, { ...allOk, watchdog: stale }) });
+  assert.equal(w.ok, false);
+  assert.equal(byKey(w).watchdog.reason, '看门狗 09-27 20:10 之后超过 15 分钟没跑完一轮（watchdog_stale）');
 });
 
 test('连不上后端：三项都红，说出原因', () => {

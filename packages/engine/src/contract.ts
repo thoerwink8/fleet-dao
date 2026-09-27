@@ -37,11 +37,27 @@ export const WORKFLOW_TYPES = {
   githubReconcile: 'githubReconcileWorkflow',
   /** 路由探针（#129）：Temporal Schedule 每 15 分钟起一条（和对账错开），见 jobs/schedules.ts。 */
   routeProbe: 'routeProbeWorkflow',
-  /** 每小时对账（工作树残留、提醒按条件撤和再推）：Temporal Schedule 每小时起一条，见 jobs/schedules.ts。 */
+  /** 每小时对账（工作树残留、提醒按条件撤和再推、GitHub 机器人权限自检）：Temporal Schedule 每小时起一条，见 jobs/schedules.ts。 */
   hourlyReconcile: 'hourlyReconcileWorkflow',
   /** 全流程巡检（#223）：Temporal Schedule 每 6 小时起一条，开一张巡检单一路看到有结论，见 jobs/canary.ts。 */
   canary: 'canaryWorkflow',
+  /** 看门狗（#203）：Temporal Schedule 每 5 分钟起一条，按登记表看各定时任务新不新鲜，见 jobs/watchdog.ts。 */
+  watchdog: 'watchdogWorkflow',
 } as const;
+
+/** 看门狗一轮的输入：看哪些任务、几点看，都由活动按当时的库和时刻定（工作流里不取时刻）。 */
+export interface WatchdogInput {
+  schemaVersion: 1;
+}
+
+/** 看门狗一轮的结局：和记进 schedule_runs 的同一份。scanned = 看了几个定时任务（不算它自己），found = 几个没跑成或不新鲜。 */
+export interface WatchdogRun {
+  runId: number;
+  outcome: ScheduleOutcome;
+  scanned: number;
+  found: number;
+  why?: string | undefined;
+}
 
 /** 全流程巡检一轮的输入：巡检哪个仓、几点开单，都由活动按引擎配置和当时的时刻定（工作流里不取时刻）。 */
 export interface CanaryInput {

@@ -19,11 +19,13 @@ import { devFixtures } from '../src/dev-fixtures.ts';
 import { draftBacklogCheck, notWiredDraftOpener } from '../src/draft-opening.ts';
 import { createGatewaySeen } from '../src/gateway-seen.ts';
 import { githubAppMissing } from '../src/github.ts';
+import { githubAppHealthCheck } from '../src/github-app-health.ts';
 import { serviceHealthChecks } from '../src/health.ts';
 import { JUDGE_NOT_WIRED, judgeHealthCheck } from '../src/judge-health.ts';
 import { probeDb } from '../src/pg-store.ts';
 import { sessionOrgHealthCheck } from '../src/session-org-health.ts';
 import { notConnectedTemporal } from '../src/temporal.ts';
+import { WATCHDOG_NOT_HERE } from '../src/watchdog-health.ts';
 import {
   agentRequest,
   DEV_RUN_ID,
@@ -257,8 +259,12 @@ describe('接口跑在真库上', () => {
         feishuGateway: createGatewaySeen(() => new Date(T0)),
         // 库里真查：没有切号的提醒就是好的（session-org-health.test.ts 另测开着报红）
         sessionOrg: sessionOrgHealthCheck(t.db),
+        // 库里真查：没有机器人权限的提醒就是好的（github-app-health.test.ts 另测开着报红）
+        githubApp: githubAppHealthCheck(t.db),
         // 和 main.ts 在法国以外的装配一样：全流程巡检只在法国跑
         canary: { check: async () => {}, notWired: CANARY_NOT_HERE },
+        // 和 main.ts 在法国以外的装配一样：看门狗只在法国跑
+        watchdog: { check: async () => {}, notWired: WATCHDOG_NOT_HERE },
       }),
     });
     const res = await h.cockpit.request('/healthz');
@@ -289,7 +295,9 @@ describe('接口跑在真库上', () => {
           message: '没查成：后端起来才 0 秒，推送轮询还没来过（盘面快照也没来取过）',
         },
         session_org: { ok: true },
+        github_app: { ok: true },
         canary: { ok: true, status: 'not_wired', message: CANARY_NOT_HERE },
+        watchdog: { ok: true, status: 'not_wired', message: WATCHDOG_NOT_HERE },
       },
     });
     // 一张草稿确认了 20 分钟还没开成：积压报红（库里真查出来的）。

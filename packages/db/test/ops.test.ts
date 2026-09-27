@@ -108,17 +108,89 @@ describe('定时任务：没跑成 ≠ 没问题', () => {
     });
   });
 
-  it('重复登记只更新计划，不丢运行记录', async () => {
-    await registerScheduledJobs(t.db, [every6h('probe')]);
+  it('重复登记只更新计划，不丢运行记录，第一次登记的时刻不动', async () => {
+    await registerScheduledJobs(t.db, [{ ...every6h('probe'), registeredAt: ago(3 * 24 * 60 * MIN) }]);
     await run('probe', 10, { outcome: 'ok', scanned: 3, found: 0 });
     await registerScheduledJobs(t.db, [
       { ...every6h('probe'), schedule: '每 3 小时', expectEveryMinutes: 200 },
     ]);
     expect(await t.db.select().from(scheduledJobs)).toEqual([
-      { id: 'probe', name: 'probe', schedule: '每 3 小时', expectEveryMinutes: 200 },
+      {
+        id: 'probe',
+        name: 'probe',
+        schedule: '每 3 小时',
+        expectEveryMinutes: 200,
+        registeredAt: ago(3 * 24 * 60 * MIN),
+      },
     ]);
     const [health] = await scheduleHealth(t.db, NOW);
     expect(health?.status).toBe('ok');
+  });
+
+  describe('新不新鲜（fresh，看门狗 #203 按它报「停了」）', () => {
+    it('上次跑成在期望间隔里：新鲜；过了：不新鲜', async () => {
+      await registerScheduledJobs(t.db, [every6h('a'), every6h('b')]);
+      await run('a', 60, { outcome: 'ok', scanned: 1, found: 0 });
+      await run('b', 8 * 60, { outcome: 'ok', scanned: 1, found: 0 });
+      const health = await scheduleHealth(t.db, NOW);
+      expect(health.map((h) => [h.job.id, h.status, h.fresh])).toEqual([
+        ['a', 'ok', true],
+        ['b', 'stale', false],
+      ]);
+    });
+
+    it('【故意造出的失败】从没跑过：刚登记、还没轮到第一次的算新鲜（不报）；登记了超过期望间隔还一次没跑过的不新鲜', async () => {
+      await registerScheduledJobs(t.db, [
+        { ...every6h('fresh-new'), registeredAt: ago(30 * MIN) },
+        { ...every6h('forgotten'), registeredAt: ago(8 * 60 * MIN) },
+      ]);
+      const health = await scheduleHealth(t.db, NOW);
+      expect(health.map((h) => [h.job.id, h.status, h.fresh])).toEqual([
+        ['forgotten', 'never', false],
+        ['fresh-new', 'never', true],
+      ]);
+    });
+
+    it('【故意造出的失败】最近一次没扫到东西、之后停着不跑了：标签还是 no-samples，但过了期望间隔就不新鲜（不被标签盖住）', async () => {
+      await registerScheduledJobs(t.db, [{ ...every6h('stopped'), registeredAt: ago(3 * 24 * 60 * MIN) }]);
+      await run('stopped', 20 * 60, { outcome: 'ok', scanned: 8, found: 0 });
+      await run('stopped', 10 * 60, { outcome: 'unscanned', why: '名册帧是空的' });
+      const [health] = await scheduleHealth(t.db, NOW);
+      expect(health).toMatchObject({
+        status: 'no-samples',
+        fresh: false,
+        lastFinished: { outcome: 'unscanned', why: '名册帧是空的' },
+        lastSuccess: { scanned: 8 },
+      });
+    });
+
+    it('一直在跑、只是这一轮没扫到东西，上次跑成还在间隔里：新鲜；从没跑成过、一直没扫到东西，过了登记后的期望间隔：不新鲜', async () => {
+      await registerScheduledJobs(t.db, [
+        { ...every6h('blip'), registeredAt: ago(3 * 24 * 60 * MIN) },
+        { ...every6h('empty'), registeredAt: ago(3 * 24 * 60 * MIN) },
+      ]);
+      await run('blip', 60, { outcome: 'ok', scanned: 2, found: 0 });
+      await run('blip', 10, { outcome: 'unscanned', why: '这一轮没东西' });
+      await run('empty', 10, { outcome: 'unscanned', why: '一个仓都没查成' });
+      const health = await scheduleHealth(t.db, NOW);
+      expect(health.map((h) => [h.job.id, h.status, h.fresh])).toEqual([
+        ['blip', 'no-samples', true],
+        ['empty', 'no-samples', false],
+      ]);
+    });
+
+    it('还在跑的那次不算「最近一次结束的」：没跑成的原因从最近结束的那次读', async () => {
+      await registerScheduledJobs(t.db, [every6h('probe')]);
+      await run('probe', 60, { outcome: 'failed', why: '连不上' });
+      await run('probe', 5, null);
+      const [health] = await scheduleHealth(t.db, NOW);
+      expect(health).toMatchObject({
+        status: 'failing',
+        running: true,
+        lastRun: { outcome: null },
+        lastFinished: { outcome: 'failed', why: '连不上' },
+      });
+    });
   });
 
   it('收尾一个不存在的记录要报错，不装成功', async () => {

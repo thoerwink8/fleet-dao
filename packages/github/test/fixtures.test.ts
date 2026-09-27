@@ -207,10 +207,10 @@ describe('真返回回放', () => {
     expect(calls.filter((c) => c.method === 'POST' && c.path.endsWith('/attempts'))).toHaveLength(1);
   });
 
-  it('自检：真的安装权限表', async () => {
+  it('自检：真的安装权限表（09-24 录的，那时 statuses 还是 read）：只报缺 statuses:write（#299 加的），别的都够', async () => {
     const { gh } = replay([['GET', /^\/app\/installations\/\d+$/, fx('installation')]]);
     const [, engine] = await gh.selfCheck([repo]);
-    expect(engine).toMatchObject({ role: 'engine', ok: true, missing: [] });
+    expect(engine).toMatchObject({ role: 'engine', ok: false, missing: ['statuses:write'], extra: [] });
   });
 
   it('机器人身份：提交邮箱用机器人的用户编号', async () => {
