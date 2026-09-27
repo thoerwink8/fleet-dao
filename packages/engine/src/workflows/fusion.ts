@@ -168,6 +168,7 @@ const DOING: Record<FlowAction, string> = {
   'open-pr': '开 PR、等 CI',
   'fix-ci': '开了 PR 之后修一轮',
   'recheck-ci': '再查一次 CI',
+  'sync-mainline': 'CI 报和主线冲突，自动并主线',
   'final-review': 'Lead 最终审查、写结果',
   merge: '合并队列合并',
   'verify-mother': '母单级验证',
@@ -956,12 +957,20 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
     return { kind: 'verified', verdict: round.final.verdict };
   };
 
-  /** 等 CI（绑在推上去的头上）：红了记下要修的，没查成的连着几次就停下等人。 */
+  /**
+   * 等 CI（绑在推上去的头上）：红了记下要修的；没查成的连着几次就停下等人；和主线冲突交给 core 走「并主线」
+   * （不算没查成的次数，见 doSyncMainline）；头被改写了（github 包已经排除了「新头含着老头」的良性情形）不是
+   * 重试或并主线能接的，直接停下等人，不占没查成的次数。
+   */
   const waitCiEvent = async (): Promise<FlowEvent> => {
     const pr = need(prNumber, 'PR');
     const ci = await attempt(kit, 'waitCi', () =>
       acts.waitCi({ ...kit.scope, repo: input.repo, prNumber: pr, head }),
     );
+    if (ci.state === 'diverged') {
+      // ci.detail（ciResultOf 拼的）已经写清是哪个头变成了哪个头、为什么不认：不再重复一遍。
+      return { kind: 'needs-human', why: ci.detail ?? 'PR 的头变了，且新头不含老头（像是被强推改写了）' };
+    }
     if (ci.state === 'unknown') {
       ciUnknown += 1;
       if (ciUnknown >= CI_UNKNOWN_LIMIT) {
@@ -974,6 +983,10 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
       return { kind: 'ci', state: 'unknown' };
     }
     ciUnknown = 0;
+    if (ci.state === 'conflict') {
+      status.lastProblem = `CI 报和主线冲突，GitHub 没给它起：${ci.detail ?? ''}`;
+      return { kind: 'ci', state: 'conflict' };
+    }
     if (ci.state === 'red') {
       status.lastProblem = `CI 没过：${ci.failedChecks.join('、') || '（没列出检查名）'}`;
       fix = {
@@ -987,6 +1000,44 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
       };
     }
     return { kind: 'ci', state: ci.state };
+  };
+
+  /**
+   * 并主线（core 判 CI 报冲突之后派的动作）：会话用户身份、走现有推分支的并主线路径（followBranchHead 同一个
+   * 端口）。并干净了记下新头，回去查它的 CI；并不上（真冲突）记下要修的，交给下一轮 fix-ci 派会话解——这条
+   * 路径不能不派会话就干等，所以这里一定把 `fix` 填好。
+   */
+  const doSyncMainline = async (): Promise<FlowEvent> => {
+    const pr = need(prNumber, 'PR');
+    const worktree = need(tree, '工作树');
+    const sync = await attempt(kit, 'syncMainline', () =>
+      acts.syncMainline({
+        ...kit.scope,
+        repo: input.repo,
+        prNumber: pr,
+        branch,
+        head,
+        worktreePath: worktree.path,
+      }),
+    );
+    if (sync.state === 'clean') {
+      head = sync.head;
+      treeHead = sync.head;
+      status.head = head;
+      status.lastProblem = 'CI 报和主线冲突：自动并主线并上了，接着查新头的 CI';
+    } else {
+      status.lastProblem = `CI 报和主线冲突：自动并主线也冲突，派会话解：${sync.conflictFiles.join('、') || '（没列出文件）'}`;
+      fix = {
+        feedback: [
+          {
+            kind: 'conflict',
+            summary: '自动并主线遇到冲突，请在分支上把最新主线并进来、解决冲突后提交',
+            items: sync.conflictFiles,
+          },
+        ],
+      };
+    }
+    return { kind: 'synced', state: sync.state, conflictFiles: sync.conflictFiles };
   };
 
   /** 6 开 PR：正文有方案摘要和验证结论（被卫生检查拦下让 Lead 重写摘要），再等 CI。 */
@@ -1462,6 +1513,9 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
         case 'recheck-ci':
           await waitFor(kit, 'retry', 'CI 没查成，隔一会儿再查', () => sleep('2 minutes'));
           event = await waitCiEvent();
+          break;
+        case 'sync-mainline':
+          event = await doSyncMainline();
           break;
         case 'fix-ci':
           event = await doFix();

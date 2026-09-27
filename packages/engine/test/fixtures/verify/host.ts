@@ -51,6 +51,7 @@ const AT_VERIFY: FlowState = {
   takeover: false,
   verifyRounds: 0,
   ciRounds: 0,
+  mergeRounds: 0,
   small: false,
   highRisk: false,
 };

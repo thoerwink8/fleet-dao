@@ -400,6 +400,61 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
     expect(result).toMatchObject({ state: 'stopped', prNumber: 100, mergeCommit: null });
   });
 
+  it('CI 报和主线冲突：自动并主线并上了，接着在新头上查 CI，不算「没查成」的次数、照常走完', async () => {
+    const w = world({
+      ci: (_input, n) => (n === 1 ? { state: 'conflict', detail: '和主线冲突，CI 没起' } : undefined),
+    });
+    const result = await runToEnd(w);
+    expect(result.state).toBe('done');
+    // 2 次：第 6 步 CI 冲突自己并了一次，合并队列合并前照旧再并一次（和我这次改的无关，是它本来就有的一步）
+    expect(w.count('syncMainline')).toBe(2);
+    expect(w.count('waitCi')).toBe(2);
+    // 没走「没查成停下」那条账：没发过要人看的卡
+    expect(w.alerts.some((a) => a.title.includes('没查成'))).toBe(false);
+  });
+
+  it('自动并主线遇到真冲突（并不上）：派会话照冲突的文件解开，改完推上去、CI 绿 → 照常走完', async () => {
+    const w = world({
+      ci: (_input, n) => (n === 1 ? { state: 'conflict', detail: '和主线冲突，CI 没起' } : undefined),
+      // 只第一次（第 6 步自己触发的那次）报冲突：合并队列合并前自己的那次并主线要能正常并上，不然队列卡住
+      sync: (_input, n) =>
+        n === 1 ? { state: 'conflict', conflictFiles: ['packages/api/test/harness.ts'] } : undefined,
+    });
+    const result = await runToEnd(w);
+    expect(result.state).toBe('done');
+    const fixBrief = w.callsOf('startSession').find((c) => c.input.brief.lead?.step === 'fix-brief');
+    expect(fixBrief?.input.brief.feedback[0]).toMatchObject({
+      kind: 'conflict',
+      items: ['packages/api/test/harness.ts'],
+    });
+  });
+
+  it('CI 一直报和主线冲突：自动并主线连着试满上限还是冲突，停下等人、原因写清（不算「没查成」）', async () => {
+    const w = world({ ci: () => ({ state: 'conflict', detail: '和主线冲突，CI 没起' }) });
+    const { parked, result } = await withWorker(env, w, async (q) => {
+      const handle = await start(q, fusionInput());
+      // 每次冲突都要经「再查一次」那一步的 2 分钟重试等待；连着 3 次并主线要跳够 6 分钟虚拟时间，直接跳 10 分钟。
+      // 查询（handle.query）不像 handle.result() 那样自己跳时间，要自己叫 env.sleep（09-27 撞过，看 merge-queue.test.ts）。
+      await env.sleep('10 minutes');
+      const parkedStatus = await queryUntil<FusionStatus>(handle, (s) => s.parked, '挂起');
+      await handle.signal(stopSignal, { by: 'founder' });
+      return { parked: parkedStatus, result: (await handle.result()) as FusionResult };
+    });
+    expect(parked.lastProblem).toContain('自动并主线已经试了 3 次还是冲突');
+    expect(w.count('syncMainline')).toBe(3);
+    expect(w.count('waitCi')).toBe(4);
+    expect(result.state).toBe('stopped');
+  });
+
+  it('【故意造出的失败】PR 的头被改写了（新头不含老头）：立刻停下等人，不当成没查成、不试着并主线', async () => {
+    const w = world({ ci: () => ({ state: 'diverged', detail: '像是被强推改写了' }) });
+    const { parked, result } = await runUntilParked(w);
+    expect(parked.lastProblem).toContain('像是被强推改写了');
+    expect(w.count('waitCi')).toBe(1);
+    expect(w.count('syncMainline')).toBe(0);
+    expect(result.state).toBe('stopped');
+  });
+
   it('Lead 写方案时 fleet blocked --needs human（要人拍）：不停下等，退回让它带推荐用 fleet ask 问，续同一个会话接着写', async () => {
     const w = world({
       session: (input) =>
