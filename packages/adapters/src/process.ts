@@ -1,8 +1,10 @@
 // 起一个无头执行体进程：提示词从 stdin 喂完立即关，stdout 按行交给解析方；超时、停滞、叫停时整个会话一起杀。
 // 「整个会话」= 执行体、它的子孙、它们各自的进程组、带会话标记的进程；放进 scope（fleet-agent-scope）时以 cgroup 为准。
 // 执行体退出后会话里还活着的（后台服务、脱离了进程组的测试）一律收掉：谁起的谁回收，不留孤儿占树。
+// 给了 io（收发目录）就不接管道、改走文件（detached.ts）：会话脱开引擎进程，引擎重启了照样接回（attach）。
 import { spawn, spawnSync } from 'node:child_process';
-import { basename } from 'node:path';
+import { basename, join } from 'node:path';
+import { type DetachedIo, IO_FILES, runDetached, WRAPPER } from './detached.ts';
 import { LineSplitter } from './lines.ts';
 import {
   assertScopeInProduction,
@@ -55,9 +57,13 @@ export interface AgentProcessSpec {
    */
   scope?: CgroupScope;
   signal?: AbortSignal;
+  /** 走文件、不接管道（会话脱开引擎进程，见 detached.ts）；attach = 引擎重启后接回，不起进程。 */
+  io?: DetachedIo;
 }
 
 export interface ProcessControl {
+  /** 正在处理的这一行的序号（从 0 起）：同一份输出怎么重读都是同一个号，引擎按它去重。 */
+  readonly seq: number;
   /** 解析方认定「在干活」时调用，停滞计时从这里重来。 */
   touch(): void;
   kill(reason: KillReason): void;
@@ -103,9 +109,31 @@ export interface AgentProcessResult {
   droppedLines: number;
   /** 解析方或回调抛的第一个异常（解析继续）。 */
   hookError?: string;
+  /**
+   * 走文件时：会话已经不在了、外壳却没写退出码（引擎不在时被强杀、机器重启过）。照实交回，不当成退出码 0；
+   * exitCode、signal 这时都是 null。
+   */
+  exitLost?: string;
 }
 
 const STDERR_TAIL = 16 * 1024;
+
+function emptyResult(now: () => Date, extra: Partial<AgentProcessResult>): AgentProcessResult {
+  const at = now().toISOString();
+  return {
+    exitCode: null,
+    signal: null,
+    stragglers: 0,
+    leftovers: 0,
+    stderrTail: '',
+    startedAt: at,
+    endedAt: at,
+    wallMs: 0,
+    lines: 0,
+    droppedLines: 0,
+    ...extra,
+  };
+}
 
 /** 各家执行体的命令名。单元测试里起它们一律拒绝：假会话泄漏出去的事故旧系统出过（14 个假会话）。 */
 const REAL_AGENT_BINARIES = new Set([
@@ -147,6 +175,26 @@ export function guardCallback(
 
 /** 真正要起的命令、环境、工作目录：放进 scope 时前面接上帮手脚本，环境按它的规矩拆。 */
 function launchSpec(spec: AgentProcessSpec): { command: string[]; env: Record<string, string>; cwd: string } {
+  if (spec.io) {
+    // 走文件：执行体套一层外壳（detached.ts 的 WRAPPER），输入输出接收发目录里的文件、退了写退出码
+    const f = (name: string) => join(spec.io?.dir ?? '', name);
+    const { io: _io, ...plain } = spec;
+    return launchSpec({
+      ...plain,
+      command: [
+        '/bin/sh',
+        '-c',
+        WRAPPER,
+        'fleet-session',
+        f(IO_FILES.prompt),
+        f(IO_FILES.out),
+        f(IO_FILES.err),
+        f(IO_FILES.exit),
+        f(IO_FILES.pid),
+        ...spec.command,
+      ],
+    });
+  }
   if (spec.command.length === 0 || !spec.command[0]) throw new Error('没有给命令');
   const env = { ...spec.env, [RUN_MARKER_KEY]: spec.runId };
   if (!spec.scope) {
@@ -172,6 +220,13 @@ export function runAgentProcess(
   hooks: AgentProcessHooks,
   now: () => Date = () => new Date(),
 ): Promise<AgentProcessResult> {
+  if (spec.io) {
+    const io = spec.io;
+    if (!io.attach && spec.command.length === 0) {
+      return Promise.resolve(emptyResult(now, { spawnError: '没有给命令' }));
+    }
+    return runDetached({ ...spec, io }, io.attach ? undefined : () => launchSpec(spec), hooks, now);
+  }
   return new Promise((resolve) => {
     const t0 = Date.now();
     const startedAt = now().toISOString();
@@ -225,6 +280,9 @@ export function runAgentProcess(
     };
 
     const control: ProcessControl = {
+      get seq() {
+        return lines - 1;
+      },
       touch: () => {
         lastActivity = Date.now();
       },

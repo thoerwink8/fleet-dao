@@ -142,6 +142,7 @@ export function claudeRunFacts(report: ClaudeCodeRunReport): RunFacts {
     ...(report.spawnError ? { spawnError: report.spawnError } : {}),
     ...(report.killed ? { killed: report.killed.reason } : {}),
     exitCode: report.exitCode,
+    ...(report.exitLost ? { exitLost: report.exitLost } : {}),
     signal: report.signal,
     ...(r
       ? {
