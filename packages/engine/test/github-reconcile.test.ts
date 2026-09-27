@@ -135,15 +135,44 @@ function githubApi(state: GitHubState): typeof fetch {
         state.issues.filter((i) => (open ? (i as { state?: unknown }).state === 'open' : fresh(i))),
       );
     }
-    // 拉起前现读这张单挂在哪个里程碑、仓里还开着哪些（接活只派当前版本的单）
-    const single = /^\/issues\/(\d+)$/.exec(url.pathname.slice(base.length));
-    if (url.pathname.startsWith(`${base}/`) && single) {
-      const found = state.issues.find((i) => (i as { number?: unknown }).number === Number(single[1]));
-      return found
-        ? reply(200, { milestone: null, ...(found as object) })
-        : reply(404, { message: 'Not Found' });
+    // 拉起前一次 GraphQL 现读这张单挂在哪个里程碑、是不是母单子单、仓里还开着哪些里程碑（接活只派当前版本的独立单）
+    if (url.pathname === '/graphql' && init?.method === 'POST') {
+      const { variables } = JSON.parse(String(init.body)) as { variables: { number: number } };
+      const found = state.issues.find((i) => (i as { number?: unknown }).number === variables.number) as
+        | (ReturnType<typeof issue> & { labels?: string[]; parent?: number; subIssues?: number })
+        | undefined;
+      const open = state.milestones ?? [V1];
+      const milestones = { totalCount: open.length, nodes: open };
+      if (!found) {
+        return reply(200, {
+          data: { repository: { issueOrPullRequest: null, milestones } },
+          errors: [
+            {
+              type: 'NOT_FOUND',
+              message: `Could not resolve to an issue with the number of ${variables.number}.`,
+            },
+          ],
+        });
+      }
+      const labels = found.labels ?? [];
+      return reply(200, {
+        data: {
+          repository: {
+            issueOrPullRequest: {
+              __typename: 'Issue',
+              state: found.state.toUpperCase(),
+              stateReason: null,
+              author: { login: found.user.login },
+              milestone: found.milestone,
+              labels: { totalCount: labels.length, nodes: labels.map((name) => ({ name })) },
+              parent: found.parent ? { number: found.parent } : null,
+              subIssuesSummary: { total: found.subIssues ?? 0 },
+            },
+            milestones,
+          },
+        },
+      });
     }
-    if (url.pathname === `${base}/milestones`) return reply(200, state.milestones ?? [V1]);
     if (url.pathname === `${base}/issues/comments`) return reply(200, []);
     if (url.pathname === `${base}/pulls`) return reply(200, []);
     if (url.pathname === '/app/hook/deliveries') return reply(200, []);
@@ -506,7 +535,7 @@ describe('流程配置副本：每轮对账从仓里同步（真库、照 GitHub
 });
 
 // 只派当前版本的单（0003 第 2、8 条）：对账补收、重放和 webhook 走同一道门、同一套判法，挂在哪由「引擎」机器人拉起前现读。
-describe('只派当前版本的单：对账补收进来的也一样（真库、照 GitHub 回话的假服务）', () => {
+describe('只派当前版本的独立单（母单、子单不派）：对账补收进来的也一样（真库、照 GitHub 回话的假服务）', () => {
   const round = (w: Awaited<ReturnType<typeof wiring>>) =>
     runGitHubReconcileJob(w.job({} as unknown as Client, 'fleet-test'));
   const notes = async () =>
@@ -516,23 +545,31 @@ describe('只派当前版本的单：对账补收进来的也一样（真库、�
         .map((e) => [(e.payload as { issue: { number: number } }).issue.number, e.note]),
     );
 
-  it('【故意造出的失败】未排期的、挂在 v2 上的补收进来：建了任务行、不拉起，投递写明原因；挂在 v1 上的拉起', async () => {
+  it('【故意造出的失败】未排期的、挂在 v2 上的、v1 的母单和它的子单补收进来：建了任务行、不拉起，投递写明原因；v1 的独立单拉起', async () => {
     const w = await wiring({
-      issues: [issue(41, -20), issue(42, -20, null), issue(43, -20, V2)],
+      issues: [
+        issue(41, -20),
+        issue(42, -20, null),
+        issue(43, -20, V2),
+        { ...issue(44, -20), labels: ['需求', '母单'], subIssues: 1 },
+        { ...issue(45, -20), parent: 44 },
+      ],
       milestones: [V1, V2],
     });
     await round(w);
     const rows = (await t.db.select().from(tasks)).filter((r) => r.repoId === w.repoId);
-    expect(rows.map((r) => r.issueNumber).sort()).toEqual([41, 42, 43]);
+    expect(rows.map((r) => r.issueNumber).sort()).toEqual([41, 42, 43, 44, 45]);
     expect(w.starts.map((s) => s.issueNumber)).toEqual([41]);
     expect(await notes()).toMatchObject({
       41: 'task=created, workflow=started',
       42: 'task=created, workflow=unscheduled',
       43: 'task=created, workflow=not_current_version',
+      44: 'task=created, workflow=mother_ticket',
+      45: 'task=created, workflow=sub_issue',
     });
   });
 
-  it('【故意造出的失败】读不到这张单挂在哪个版本（里程碑列表认不出）：不派，投递记成出错、写明没查成，这一轮不记 ok', async () => {
+  it('【故意造出的失败】读不到这张单挂在哪个版本、是不是母单子单（里程碑列表认不出）：不派，投递记成出错、写明没查成，这一轮不记 ok', async () => {
     const w = await wiring({
       issues: [issue(41, -20)],
       // 只有「列还开着的里程碑」这一条回的形状不对：轮询、建任务行照常
@@ -546,7 +583,7 @@ describe('只派当前版本的单：对账补收进来的也一样（真库、�
     expect(event).toMatchObject({
       status: 'failed',
       reason: expect.stringMatching(
-        /^没查成：读不到 example\/canary#41 挂在哪个版本（.+），这张单没派；对账重放时再判$/,
+        /^没查成：读不到 example\/canary#41 挂在哪个版本、是不是母单子单（.+），这张单没派；对账重放时再判$/,
       ),
     });
   });

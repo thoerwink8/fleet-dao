@@ -262,6 +262,27 @@ describe('交给 fleet', () => {
     ]);
   });
 
+  it('母单、子单自动派不派，人交了照起（#252 之前一张一张明着交）：打印写明是母单、是哪张下面的子单，操作记录记下父子关系', async () => {
+    const t = setup();
+    await t.queued(43);
+    await t.queued(44);
+    t.plans.set(43, issuePlan({ labels: ['需求', '母单'], subIssues: 3 }));
+    t.plans.set(44, issuePlan({ parent: 43 }));
+    expect(await t.run(['example/canary', '43', '--reason', REASON])).toBe(0);
+    expect(t.out.at(-1)).toContain(
+      'example/canary#43（挂在当前版本「v1 Fusion 接活」上，是母单、下面挂着 3 张子单）起了 Fusion 工作流',
+    );
+    expect(await t.run(['example/canary', '44', '--reason', REASON])).toBe(0);
+    expect(t.out.at(-1)).toContain(
+      'example/canary#44（挂在当前版本「v1 Fusion 接活」上，是 #43 下面的子单）起了 Fusion 工作流',
+    );
+    expect(t.temporal.started.map((s) => s.input.issueNumber)).toEqual([43, 44]);
+    expect(t.handovers().map((a) => a.after)).toMatchObject([
+      { parent: null, subIssues: 3 },
+      { parent: 43, subIssues: 0 },
+    ]);
+  });
+
   it('在跑的：不重复起（退出码 0），不连 Temporal；谁交的、为什么照样记一条、读回打印', async () => {
     const t = setup();
     // 样例里的 #12 正在跑

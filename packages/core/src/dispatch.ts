@@ -1,8 +1,9 @@
 // 派不派一张单（0003 第 2、4、8 条；design 第九节「在哪能做与接活开关」）：接活自动派（后端 packages/api/src/issue-intake.ts，
 // 引擎的对账重放用同一份）和人明说交给引擎（fleet-api handover，packages/api/src/cli.ts）都在这里判。
 // 读库、读 GitHub、起工作流是外壳的事，这里只判。
-// 自动派要过三道：开关开着、issue 是开关打开以后开的（dispatchDecision）、挂在当前版本上（versionGate）；
-// 交给 fleet 是人替后两道放行，只看这张单此刻的样子（handoverDecision），开关、流程配置副本那两道外壳照样先查。
+// 自动派要过四道：开关开着、issue 是开关打开以后开的（dispatchDecision）、挂在当前版本上（versionGate）、不是母单也不是子单
+// （familyGate；后两道合起来是 autoDispatchGate）；交给 fleet 是人替后三道放行，只看这张单此刻的样子（handoverDecision），
+// 开关、流程配置副本那两道外壳照样先查。
 import type { TaskState } from '@fleet-dao/shared';
 
 /** 结束了的任务：接活只在 GitHub 上重开时再拉起一轮。 */
@@ -129,6 +130,61 @@ export function versionGate(plan: IssueMilestones): VersionGate {
     return { ok: false, reason: 'not_current_version', why: `挂在「${open.title}」上，不是当前版本；${now}` };
   }
   return { ok: true, version, milestone: open.title };
+}
+
+// —— 母单、子单这一道 ——
+
+/** 母单标签：和开单脚本、计划快照认母单用的 @fleet-dao/conventions labels.ts 的 MOTHER_LABEL 是同一个（那个包不依赖 core）。 */
+const MOTHER_LABEL = '母单';
+
+/** 这张单在母单、子单里的位置（GitHub 上现读）。 */
+export interface IssueFamily {
+  /** 贴着的标签名。 */
+  labels: readonly string[];
+  /** 挂在哪张单下面（GitHub 子议题的父单号）；不是子单是 null。 */
+  parent: number | null;
+  /** 下面挂着几张子单（GitHub 子议题）。 */
+  subIssues: number;
+}
+
+export type FamilyGate = { ok: true } | { ok: false; reason: 'mother_ticket' | 'sub_issue'; why: string };
+
+/**
+ * 母单、子单这一道（帅位 2026-09-27 定；#252 做完就改）：引擎现在一张单只走一块，母单按块循环带子单还没做（#252）。开关一开，
+ * 母单和它的子单（GitHub 子议题）会各被当成独立的单、各起一条 Fusion，抢同一批文件。所以贴「母单」标签的、下面挂着子单的
+ * （结构上就是母单，标签漏贴也算）、挂在别的单下面的子单，自动派一律不派；要做用 fleet-api handover 一张一张明着交。
+ * #252 做完改成由母单的 Lead 按块带子单：母单派、子单跟着母单走，到时候改这里。
+ */
+export function familyGate(issue: IssueFamily): FamilyGate {
+  const later = '要做用 fleet-api handover 一张一张明着交（母单按块带子单等 #252）';
+  if (issue.labels.includes(MOTHER_LABEL) || issue.subIssues > 0) {
+    const kids = issue.subIssues > 0 ? `，下面挂着 ${issue.subIssues} 张子单` : '';
+    return {
+      ok: false,
+      reason: 'mother_ticket',
+      why: `是母单${kids}：和子单各起一条会抢同一批文件，自动派不派；${later}`,
+    };
+  }
+  if (issue.parent !== null) {
+    return {
+      ok: false,
+      reason: 'sub_issue',
+      why: `是 #${issue.parent} 下面的子单：和母单、别的子单各起一条会抢同一批文件，自动派不派；${later}`,
+    };
+  }
+  return { ok: true };
+}
+
+/** 过了是按哪个版本派的；没过是版本那道或母单子单那道的原因。 */
+export type AutoDispatchGate = VersionGate | Extract<FamilyGate, { ok: false }>;
+
+/** 自动派在开关那道之后的两道合起来：先看版本（versionGate），再看母单、子单（familyGate）。 */
+export function autoDispatchGate(plan: IssueMilestones & IssueFamily): AutoDispatchGate {
+  const version = versionGate(plan);
+  if (!version.ok) return version;
+  const family = familyGate(plan);
+  if (!family.ok) return family;
+  return version;
 }
 
 // —— 交给 fleet ——

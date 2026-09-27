@@ -1,11 +1,14 @@
 // 派不派一张单的边界表（0003 第 2、4、8 条；design 第九节「在哪能做与接活开关」）：开关这一道（关着、开关打开以前开的、
-// 排队中、结束的、重开）、版本这一道（只派当前版本：未排期、别的版本、关了的里程碑、认不出版本号都不派），
-// 人明说交给 fleet（在跑的不重复起、结束的只有重开过才再起、关着的和 PR 拒）。
+// 排队中、结束的、重开）、版本这一道（只派当前版本：未排期、别的版本、关了的里程碑、认不出版本号都不派）、母单子单这一道
+// （#252 之前母单、子单都不自动派），人明说交给 fleet（在跑的不重复起、结束的只有重开过才再起、关着的和 PR 拒）。
 import { describe, expect, it } from 'vitest';
 import {
+  autoDispatchGate,
   currentVersion,
   dispatchDecision,
+  familyGate,
   handoverDecision,
+  type IssueFamily,
   type IssueNow,
   type MilestoneRef,
   milestoneVersion,
@@ -120,6 +123,48 @@ describe('版本这一道：当前版本 = 还开着的 v<N> 里程碑里 N 最�
     expect(versionGate({ milestone: BACKLOG, openMilestones: [BACKLOG] })).toMatchObject({
       ok: false,
       reason: 'version_unreadable',
+    });
+  });
+});
+
+describe('母单、子单这一道（#252 之前：一张单只走一块，母单和子单各起一条会抢同一批文件）', () => {
+  const alone: IssueFamily = { labels: ['需求'], parent: null, subIssues: 0 };
+
+  it('独立的单（不是母单、不挂在别的单下面）：过', () => {
+    expect(familyGate(alone)).toEqual({ ok: true });
+  });
+
+  it('【故意造出的失败】贴了「母单」标签的、下面挂着子单的（标签漏贴也算）：不派，原因 mother_ticket', () => {
+    for (const mother of [
+      { ...alone, labels: ['需求', '母单'] },
+      { ...alone, subIssues: 3 },
+    ]) {
+      const got = familyGate(mother);
+      expect(got, JSON.stringify(mother)).toMatchObject({ ok: false, reason: 'mother_ticket' });
+      if (got.ok) throw new Error('母单不该派');
+      expect(got.why).toContain('fleet-api handover');
+      expect(got.why).toContain('#252');
+    }
+  });
+
+  it('【故意造出的失败】挂在别的单下面的子单：不派，原因 sub_issue，写明挂在哪张下面', () => {
+    const got = familyGate({ ...alone, parent: 192 });
+    expect(got).toMatchObject({ ok: false, reason: 'sub_issue' });
+    if (got.ok) throw new Error('子单不该派');
+    expect(got.why).toMatch(/^是 #192 下面的子单/);
+  });
+
+  it('两道合起来：先看版本，再看母单子单；都过了带上按哪个版本派的', () => {
+    const plan = { milestone: V1, openMilestones: [V1, V2] };
+    expect(autoDispatchGate({ ...plan, ...alone })).toEqual({ ok: true, version: 1, milestone: V1.title });
+    expect(autoDispatchGate({ ...plan, ...alone, parent: 192 })).toMatchObject({
+      ok: false,
+      reason: 'sub_issue',
+    });
+    // 未排期的母单：先报未排期
+    expect(autoDispatchGate({ ...plan, milestone: null, ...alone, labels: ['母单'] })).toMatchObject({
+      ok: false,
+      reason: 'unscheduled',
     });
   });
 });

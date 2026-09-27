@@ -1,7 +1,7 @@
 // 后端依赖的外部能力，一律按接口写：数据库（pg-store.ts 用 @fleet-dao/db 实现）、Temporal、飞书、GitHub 补收
 // 由各自的实现接进来；测试和本地开发用 memory-store.ts。两个 Store 实现过同一套契约测试（test/store-contract.ts），
 // 改这里的语义要两边一起改、契约测试跟着改。
-import type { AskHold, AskScope, FlowReplica, IssueMilestones, IssueNow } from '@fleet-dao/core';
+import type { AskHold, AskScope, FlowReplica, IssueFamily, IssueMilestones, IssueNow } from '@fleet-dao/core';
 import type {
   AuditEntrySchema,
   Ban,
@@ -938,10 +938,11 @@ export interface RequirementWorkflows {
 }
 
 /**
- * 一张 issue 此刻在 GitHub 上的样子：挂在哪个里程碑、仓里还开着哪些里程碑（接活判「挂没挂在当前版本」，core 的 versionGate），
- * 开没开着、重开过没有（交给 fleet 判能不能交，core 的 handoverDecision），作者（拉起时写提出人）。
+ * 一张 issue 此刻在 GitHub 上的样子：挂在哪个里程碑、仓里还开着哪些里程碑、是不是母单或子单（接活判「挂没挂在当前版本、
+ * 是不是母单子单」，core 的 autoDispatchGate），开没开着、重开过没有（交给 fleet 判能不能交，core 的 handoverDecision），
+ * 作者（拉起时写提出人）。
  */
-export interface IssuePlan extends IssueMilestones, IssueNow {
+export interface IssuePlan extends IssueMilestones, IssueNow, IssueFamily {
   /** 作者的 GitHub 登录名；账号删了是 null。 */
   author: string | null;
 }

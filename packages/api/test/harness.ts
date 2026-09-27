@@ -42,7 +42,7 @@ export const T0 = new Date('2026-09-25T08:00:00.000Z');
 export const V1 = { number: 8, title: 'v1 Fusion 接活' };
 export const V2 = { number: 9, title: 'v2 引擎打磨' };
 
-/** issue 此刻在 GitHub 上的样子：默认开着、挂在当前版本 v1 上、仓里开着 v1 和 v2。 */
+/** issue 此刻在 GitHub 上的样子：默认开着、挂在当前版本 v1 上、仓里开着 v1 和 v2，独立的单（不是母单也不是子单）。 */
 export function issuePlan(over: Partial<IssuePlan> = {}): IssuePlan {
   return {
     state: 'open',
@@ -51,6 +51,9 @@ export function issuePlan(over: Partial<IssuePlan> = {}): IssuePlan {
     author: 'founder-a',
     milestone: V1,
     openMilestones: [V1, V2],
+    labels: ['需求'],
+    parent: null,
+    subIssues: 0,
     ...over,
   };
 }
