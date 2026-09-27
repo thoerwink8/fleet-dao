@@ -780,7 +780,7 @@
     {
       "id": "X42",
       "provenance": "synthetic",
-      "origin": "没有真实 OOM 样本（旧系统三个服务 memory.events 全 0）。进程被 SIGKILL、没有终帧，按插头的判定格式",
+      "origin": "进程被 SIGKILL、没有终帧，按插头的判定格式；没经会话端口查证据（引擎在不在停、cgroup 有没有按内存杀进程），不猜是内存超限",
       "evidence": {
         "hostId": "claude-code",
         "code": "no_result",
@@ -788,7 +788,7 @@
         "signal": "SIGKILL",
         "message": "进程退出（信号 SIGKILL），没有终帧"
       },
-      "expect": { "action": "retry", "rule": "KL2", "routeOutcome": "neutral" }
+      "expect": { "action": "retry", "rule": "KL4", "routeOutcome": "neutral" }
     },
     {
       "id": "X43",
@@ -1510,6 +1510,119 @@
         "avoid": "route",
         "alert": true,
         "routeOutcome": "fail"
+      }
+    },
+    {
+      "id": "S53",
+      "provenance": "production",
+      "origin": "法国 2026-09-27 19:28:51 grok 写代码会话（session_runs 的失败原因）：正是自动发布重启引擎那一刻，systemd 把 SIGTERM 发给引擎 cgroup 里的 sudo、sudo 转给了会话。没经会话端口查证据的原样，不猜",
+      "evidence": {
+        "hostId": "grok",
+        "code": "no_result",
+        "signal": "SIGTERM",
+        "message": "进程退出（信号 SIGTERM）"
+      },
+      "expect": {
+        "action": "retry",
+        "rule": "KL4",
+        "routeOutcome": "neutral"
+      }
+    },
+    {
+      "id": "S54",
+      "provenance": "production",
+      "origin": "法国 2026-09-27 20:46:28 拼车池 Claude 会话（#293）：同样落在自动发布重启引擎那一刻，sh 包着的执行体被 SIGTERM 杀掉交回 143。没经会话端口查证据的原样",
+      "evidence": {
+        "hostId": "claude-code",
+        "code": "no_result",
+        "exitCode": 143,
+        "message": "进程退出（退出码 143），没有终帧"
+      },
+      "expect": {
+        "action": "retry",
+        "rule": "KL4",
+        "routeOutcome": "neutral"
+      }
+    },
+    {
+      "id": "X100",
+      "provenance": "format",
+      "origin": "会话端口查过证据（real/kill-evidence.ts）：信号杀掉的那一刻引擎收到过停机信号，码换成 engine_stop，证据接在原文后面（S53 那一次按新代码交回的样子）",
+      "evidence": {
+        "hostId": "grok",
+        "code": "engine_stop",
+        "signal": "SIGTERM",
+        "message": "进程退出（信号 SIGTERM）；引擎停机时被带走（2026-09-27T19:28:50.000Z 收到 SIGTERM（systemd 在停引擎：发布切版本、重启或关机）；发布锁占着（有发布在跑））"
+      },
+      "expect": {
+        "action": "retry",
+        "rule": "KL3",
+        "routeOutcome": "neutral"
+      }
+    },
+    {
+      "id": "X101",
+      "provenance": "format",
+      "origin": "发布排空到了宽限的截止，会话端口按切号那一套停下会话交回的码（engine_stop，real/sessions.ts 的 drainStop）",
+      "evidence": {
+        "hostId": "claude-code",
+        "code": "engine_stop",
+        "retryable": true,
+        "message": "要发新版本，到了宽限的截止先停下：到了发布宽限的截止（2026-09-28T01:40:00.000Z）；新引擎起来按编号续上"
+      },
+      "expect": {
+        "action": "retry",
+        "rule": "KL3",
+        "routeOutcome": "neutral"
+      }
+    },
+    {
+      "id": "X102",
+      "provenance": "format",
+      "origin": "引擎在为发布排空时起会话被拒的端口码（ENGINE_STOPPING，real/sessions.ts）",
+      "evidence": {
+        "hostId": "claude-code",
+        "code": "ENGINE_STOPPING",
+        "retryable": false,
+        "message": "要发新版本（发布 30b62d3e8f1a（auto））：2026-09-28T01:30:00.000Z 起不起新会话，在跑的最晚做到 2026-09-28T01:40:00.000Z，新引擎起来接着派；这次没起会话 run-1"
+      },
+      "expect": {
+        "action": "retry",
+        "rule": "ES1",
+        "routeOutcome": "neutral"
+      }
+    },
+    {
+      "id": "X103",
+      "provenance": "format",
+      "origin": "会话端口查过证据：会话在跑时它自己的 cgroup 记过按内存杀进程，码换成 oom_killed（real/kill-evidence.ts）。法国还没有真实 OOM 样本",
+      "evidence": {
+        "hostId": "claude-code",
+        "code": "oom_killed",
+        "exitCode": 137,
+        "signal": "SIGKILL",
+        "message": "进程退出（信号 SIGKILL），没有终帧；内存到了会话的上限，被内核杀掉（这个会话的 cgroup 记了 1 次按内存杀进程）"
+      },
+      "expect": {
+        "action": "retry",
+        "rule": "KL2",
+        "routeOutcome": "neutral"
+      }
+    },
+    {
+      "id": "X104",
+      "provenance": "format",
+      "origin": "会话端口查过证据、都对不上（引擎没在停、资源池没有按内存杀进程的记录），码换成 signal_unexplained；原文里没有英文的内存计数名（KL2 按原文认它）",
+      "evidence": {
+        "hostId": "claude-code",
+        "code": "signal_unexplained",
+        "exitCode": 143,
+        "message": "进程退出（退出码 143），没有终帧；没查到是谁杀的（SIGTERM）：那一刻引擎没在停；会话资源池这段时间没有按内存杀进程的记录"
+      },
+      "expect": {
+        "action": "retry",
+        "rule": "KL4",
+        "routeOutcome": "neutral"
       }
     }
   ],
