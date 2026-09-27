@@ -3,6 +3,7 @@ import { poolDataTimes, quotaReadOverdue } from '@fleet-dao/db';
 import {
   type ActivitySchema,
   type Ban,
+  type BillingKind,
   type BoardResponse,
   type BoardSubtaskSchema,
   type BoardTaskSchema,
@@ -54,15 +55,24 @@ export interface RouteInfo {
   hostId?: HostId | undefined;
   route?: Route | undefined;
   model?: Model | undefined;
+  /** 路由所在渠道的计费方式；没传渠道表、渠道查不到就没有——任务详情照「分不清」显示，不猜成套餐内。 */
+  billing?: BillingKind | undefined;
 }
 
-export function routeLookup(routes: Route[], models: Model[]): (routeId: string) => RouteInfo {
+/** channels 只有要分清按量、套餐内的地方（任务详情的花费）才传。 */
+export function routeLookup(
+  routes: Route[],
+  models: Model[],
+  channels: Channel[] = [],
+): (routeId: string) => RouteInfo {
   const routeById = new Map(routes.map((r) => [r.id, r]));
   const modelById = new Map(models.map((m) => [m.id, m]));
+  const channelById = new Map(channels.map((c) => [c.id, c]));
   return (routeId) => {
     const route = routeById.get(routeId);
     const model = route ? modelById.get(route.modelId) : undefined;
-    return { modelName: model?.displayName ?? '未知模型', hostId: route?.hostId, route, model };
+    const billing = route ? channelById.get(route.channelId)?.billing : undefined;
+    return { modelName: model?.displayName ?? '未知模型', hostId: route?.hostId, route, model, billing };
   };
 }
 
@@ -114,15 +124,19 @@ export function runView(run: SessionRun, info: RouteInfo): z.input<typeof RunSch
     cacheReadTokens: run.cacheReadTokens,
     cacheWriteTokens: run.cacheWriteTokens,
     costUsd: run.costUsd,
+    billing: info.billing,
   };
 }
 
-/** 任务详情的用量汇总：记在路由上的模型名下（和 Fusion 关单评论「各模型额度」一个口径），算法在 shared 的 usage.ts。 */
+/**
+ * 任务详情的用量汇总：记在路由上的模型名下（和 Fusion 关单评论「各模型额度」一个口径），算法在 shared 的 usage.ts。
+ * 花费按渠道的计费方式分按量、套餐内：route 要用带渠道表的 routeLookup，不然全记成分不清。
+ */
 export function usageView(runs: readonly SessionRun[], route: (routeId: string) => RouteInfo): TaskUsage {
   return summarizeUsage(
     runs.map((r) => {
       const info = route(r.routeId);
-      return { ...r, model: info.route?.modelId ?? r.routeId, modelName: info.modelName };
+      return { ...r, model: info.route?.modelId ?? r.routeId, modelName: info.modelName, billing: info.billing };
     }),
   );
 }

@@ -12,11 +12,12 @@ import { TaskUsageSchema } from '../src/web-api.ts';
 const T0 = Date.parse('2026-09-27T01:00:00.000Z');
 const at = (minutes: number) => new Date(T0 + minutes * 60_000).toISOString();
 
-/** 一次正常结束的会话：排队 1 分钟、干活 10 分钟，四样 token 都有、花费也有（Claude）。 */
+/** 一次正常结束的会话：排队 1 分钟、干活 10 分钟，四样 token 都有、花费也有（Claude 订阅，套餐内）。 */
 function run(over: Partial<RunUsageFacts> = {}): RunUsageFacts {
   return {
     model: 'opus-5.5',
     modelName: 'Opus 5.5',
+    billing: 'subscription',
     stage: 'execute',
     queuedAt: at(0),
     startedAt: at(1),
@@ -102,12 +103,61 @@ describe('一张单按模型、按阶段、整张合计', () => {
       missingEquivalent: 0,
       costUsd: 0.25,
       missingCost: 0,
+      cost: {
+        metered: { runs: 0, usd: 0, missing: 0 },
+        subscription: { runs: 1, usd: 0.25, missing: 0 },
+        unknown: { runs: 0, usd: 0, missing: 0 },
+      },
       queueMs: 60_000,
       runMs: 600_000,
       missingTime: 0,
     });
     // 后端按同一份定义校验返回：算出来的必须过得了
     expect(TaskUsageSchema.parse(u)).toEqual(u);
+  });
+
+  it('花费按计费方式分开加：按量是真花的钱，套餐内是折合价，没读到的各记各的', () => {
+    const cursor = without(run({ model: 'cursor-auto', modelName: 'Cursor Auto' }), 'costUsd');
+    const metered = run({ model: 'deepseek', modelName: 'DeepSeek', billing: 'metered', costUsd: 0.04 });
+    const u = summarizeUsage([run(), cursor, metered]);
+    expect(u.total.cost).toEqual({
+      metered: { runs: 1, usd: 0.04, missing: 0 },
+      subscription: { runs: 2, usd: 0.25, missing: 1 },
+      unknown: { runs: 0, usd: 0, missing: 0 },
+    });
+    // 旧的两栏是三种的和
+    expect(u.total).toMatchObject({ costUsd: 0.29, missingCost: 1 });
+    expect(u.byModel.map((m) => [m.model, m.cost.metered.runs, m.cost.subscription.missing])).toEqual([
+      ['opus-5.5', 0, 0],
+      ['cursor-auto', 0, 1],
+      ['deepseek', 1, 0],
+    ]);
+  });
+
+  it('按量的会话没报花费：按量那一栏记没读到，不当成花了 $0', () => {
+    const u = summarizeUsage([without(run({ billing: 'metered' }), 'costUsd')]);
+    expect(u.total.cost.metered).toEqual({ runs: 1, usd: 0, missing: 1 });
+    expect(u.total.missingCost).toBe(1);
+  });
+
+  it('渠道查不到（没给计费方式）、计费方式认不出：记进分不清，不猜成套餐内', () => {
+    const lost = without(run(), 'billing');
+    const odd = { ...run(), billing: 'prepaid' } as unknown as RunUsageFacts;
+    const u = summarizeUsage([lost, odd, without(run(), 'billing', 'costUsd')]);
+    expect(u.total.cost).toEqual({
+      metered: { runs: 0, usd: 0, missing: 0 },
+      subscription: { runs: 0, usd: 0, missing: 0 },
+      unknown: { runs: 3, usd: 0.5, missing: 1 },
+    });
+  });
+
+  it('各组的花费分开记账，互不串（每组一份新的空账）', () => {
+    const u = summarizeUsage([run({ stage: 'plan' }), run({ stage: 'execute', billing: 'metered' })]);
+    expect(u.byStage.map((s) => [s.stage, s.cost.subscription.runs, s.cost.metered.runs])).toEqual([
+      ['plan', 1, 0],
+      ['execute', 0, 1],
+    ]);
+    expect(u.total.cost.subscription.runs + u.total.cost.metered.runs).toBe(2);
   });
 
   it('只报 token 不报花费的渠道（cursor）：token 和当量照加，花费每次记没读到', () => {
