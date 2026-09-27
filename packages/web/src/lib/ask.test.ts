@@ -20,7 +20,7 @@ describe('问他不挡路（#259）的说法', () => {
       '已按推荐先做：阿里云。这张单已经合进去了，改选别的会另开后续单。',
     );
     expect(askStanding({ ...base, scope: 'hold', hold: 'spend' }, 'running')).toBe(
-      '碰了人闸（花钱）：先按推荐做（阿里云），合并前等你批。',
+      '碰了要你点头的事（花钱）：先按推荐做（阿里云），合并前等你批。',
     );
     expect(askStanding({ ...base, scope: 'outside', followUpIssue: 40 }, 'running')).toBe(
       '超出这张单的范围：这张单绕开它接着做，另开一张单等你拍（#40）。',

@@ -1,5 +1,6 @@
 // AI 问创始人的一句（#259「问他不挡路」）在驾驶舱里怎么说：和飞书卡片（后端 feishu-views.ts）同一套说法。
-// 带了范围的提问都不挡路：这张单范围内的按推荐先做、超出范围的另开单、碰人闸的先按推荐做到合并前等批。
+// 带了范围的提问都不挡路：这张单范围内的按推荐先做、超出范围的另开单、碰要他点头的四类的先按推荐做到合并前等批。
+// 演示版的产物不许出现内部叫法（build/scan.ts），这里的字一律用白话。
 import type { Ask, TaskState } from '../api/types';
 
 const HOLD_WORDS: Record<NonNullable<Ask['hold']>, string> = {
@@ -20,10 +21,10 @@ export function askStanding(ask: Ask, taskState: TaskState): string | null {
         ? `已按推荐先做：${rec}。这张单已经合进去了，改选别的会另开后续单。`
         : `已按推荐先做：${rec}。改选别的，下个存档点交给 AI 改。`;
     case 'hold': {
-      const gate = ask.hold ? HOLD_WORDS[ask.hold] : '人闸';
+      const gate = ask.hold ? HOLD_WORDS[ask.hold] : '没写哪类';
       return merged
-        ? `碰了人闸（${gate}）：已按推荐做（${rec}）并合进去了，改选别的会另开后续单。`
-        : `碰了人闸（${gate}）：先按推荐做（${rec}），合并前等你批。`;
+        ? `碰了要你点头的事（${gate}）：已按推荐做（${rec}）并合进去了，改选别的会另开后续单。`
+        : `碰了要你点头的事（${gate}）：先按推荐做（${rec}），合并前等你批。`;
     }
     case 'outside':
       return `超出这张单的范围：这张单绕开它接着做，另开一张单等你拍${ask.followUpIssue ? `（#${ask.followUpIssue}）` : ''}。`;
