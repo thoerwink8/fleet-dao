@@ -471,6 +471,8 @@ SDK 1.13.2 已经有 `workerDeploymentOptions`、`VersioningBehavior`（PINNED /
 
 ## 7. 新系统实现建议
 
+> **2026-09-27 起的实际形状**（`docs/decisions/0003-fusion-flow.md`，design 第五节）：后端给每张单起的是 Fusion 工作流（`packages/engine/src/workflows/fusion.ts`：一个 Lead 会话带一个副手，引擎推分支、开 PR、合并、关单，不直写主线），编号照旧 `req:<owner>/<repo>#<issue>`。下面 7.1–7.4 写的「需求工作流 + 子任务子工作流」是 2026-09-25 审计时的建议，照它写成的 `requirement.ts`、`subtask.ts` 后端已经不起了，只留给在途的跑完（删掉归 #250）；合并队列、定时任务、信号、部署这几节照旧适用。
+
 ### 7.1 总形状
 
 ```mermaid

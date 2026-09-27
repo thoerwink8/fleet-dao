@@ -15,6 +15,7 @@ import type { WorkflowHandle } from '@temporalio/client';
 import { historyToJSON } from '@temporalio/common/lib/proto-utils.js';
 import type { TestWorkflowEnvironment } from '@temporalio/testing';
 import {
+  type FusionStatus,
   pauseSignal,
   type RequirementStatus,
   requirementWorkflowId,
@@ -23,10 +24,20 @@ import {
   WORKFLOW_TYPES,
 } from '../../src/contract.ts';
 import type { SubtaskSpec } from '../../src/decisions/plan.ts';
-import { createFakeWorld, type FakeScript, type FakeWorld } from '../../src/fakes.ts';
+import {
+  createFakeWorld,
+  FAKE_BRIEF,
+  FAKE_FLOW_CONFIG,
+  FAKE_ROUTES,
+  type FakeScript,
+  type FakeWorld,
+  fakeHead,
+} from '../../src/fakes.ts';
+import type { RouteChoice } from '../../src/ports.ts';
 import {
   createEnv,
   engineBundle,
+  fusionInput,
   queryUntil,
   REPO,
   requirementInput,
@@ -70,6 +81,26 @@ const startRequirement = ({ env, queue }: Run) => {
 };
 
 const mergeQueue = ({ env }: Run) => env.client.workflow.getHandle(`mq:${repo.owner}/${repo.name}`);
+
+/** 后端从 #214 起给每张单起的 Fusion 工作流（编号和需求工作流同一个）。 */
+const startFusion = ({ env, queue }: Run) => {
+  const input = fusionInput({ repo, taskId: 'task-fixture' });
+  return env.client.workflow.start(WORKFLOW_TYPES.fusion, {
+    taskQueue: queue,
+    workflowId: requirementWorkflowId(repo, input.issueNumber),
+    args: [input],
+  });
+};
+
+/** 开 PR 前验证只派别家：写单的是 claude（Lead）和 kimi（副手），加一条 gpt 族的路由才验得了。 */
+const GPT_ROUTE: RouteChoice = {
+  routeId: 'r4',
+  poolId: 'p4',
+  modelId: 'm3',
+  family: 'gpt',
+  hostId: 'cursor-agent',
+};
+const FUSION_ROUTES = [...FAKE_ROUTES, GPT_ROUTE];
 
 const SCENARIOS: Record<string, Scenario> = {
   // 最顺的一条：写码、推分支开 PR、CI 和第二意见都过、合并队列合上、收树。
@@ -180,6 +211,147 @@ const SCENARIOS: Record<string, Scenario> = {
       const handle = await startRequirement(r);
       await queryUntil<RequirementStatus>(handle, (s) => s.waiting?.askId !== undefined, '在等回答');
       return { 'requirement-asking': handle };
+    },
+  },
+  // Fusion 走完：Lead 写方案 → 副手干、Lead 验收 → 别家验证 → 开 PR、CI 绿 → Lead 最终审查 → 合并 → 关单。
+  'fusion-done': {
+    script: { routes: FUSION_ROUTES },
+    async run(r) {
+      const handle = await startFusion(r);
+      await handle.result();
+      return { 'fusion-done': handle };
+    },
+  },
+  // Fusion 各处返工一轮：Lead 打回副手一次、别家验证挡一轮（Lead 没驳回）、开了 PR 之后 CI 红一轮，都改完合上。
+  'fusion-reworked': {
+    script: {
+      routes: FUSION_ROUTES,
+      lead: (step, _input, n) =>
+        step === 'accept' && n === 1
+          ? { kind: 'lead-verdict', verdict: 'reject', why: '验证码没做五分钟过期' }
+          : undefined,
+      verify: (input, n) =>
+        n === 1
+          ? {
+              head: input.brief.head ?? '',
+              results: [
+                { criterion: '照原话做完', answer: 'done', evidence: 'src/login/changed.ts 加了验证码' },
+                {
+                  criterion: '有一条故意造出失败的测试',
+                  answer: 'not-done',
+                  evidence: 'test/ 下没有过期验证码的用例',
+                },
+              ],
+              findings: [],
+            }
+          : undefined,
+      ci: (_input, n) => (n === 1 ? { state: 'red', failedChecks: ['test (engine)'] } : undefined),
+    },
+    async run(r) {
+      const handle = await startFusion(r);
+      await handle.result();
+      return { 'fusion-reworked': handle };
+    },
+  },
+  // 单模型模式：没有副手，Lead 自己写，不高风险就不验证，照样最终审查。
+  'fusion-single': {
+    async run(r) {
+      const input = fusionInput({ repo, taskId: 'task-fixture', mode: 'single' });
+      const handle = await r.env.client.workflow.start(WORKFLOW_TYPES.fusion, {
+        taskQueue: r.queue,
+        workflowId: requirementWorkflowId(repo, input.issueNumber),
+        args: [input],
+      });
+      await handle.result();
+      return { 'fusion-single': handle };
+    },
+  },
+  // Lead 写方案时要问创始人：发卡、等回答。
+  'fusion-asking': {
+    script: {
+      routes: FUSION_ROUTES,
+      session: (input) =>
+        input.brief.lead?.step === 'plan' && !input.resumeSessionId
+          ? { outcome: 'blocked', blocked: { question: '验证码几位？', options: ['4 位', '6 位'] } }
+          : undefined,
+    },
+    async run(r) {
+      const handle = await startFusion(r);
+      await queryUntil<FusionStatus>(handle, (s) => Boolean(s.waiting?.askId), '在等回答');
+      return { 'fusion-asking': handle };
+    },
+  },
+  // 副手在写（会话挂着）时点了暂停：停在等「继续」。
+  'fusion-paused': {
+    script: {
+      routes: FUSION_ROUTES,
+      session: (input) => (!input.brief.lead && input.stage === 'execute' ? { hold: true } : undefined),
+    },
+    async run(r) {
+      const handle = await startFusion(r);
+      await waitUntil(() => r.world.held().length === 1, '副手的会话挂着');
+      await handle.signal(pauseSignal, { by: 'recorder' });
+      await queryUntil<FusionStatus>(handle, (s) => s.waiting?.kind === 'human', '暂停后在等人');
+      return { 'fusion-paused': handle };
+    },
+  },
+  // 流程配置认不出：这张单停派报红，一个会话都不起，挂起等「继续」。
+  'fusion-parked': {
+    script: {
+      routes: FUSION_ROUTES,
+      flow: () => ({
+        replica: {
+          syncedAt: new Date().toISOString(),
+          error: '项目配置 .fleet/flow.json：不是 JSON（提交 0123456）',
+          unread: null,
+          testCommand: null,
+        },
+        source: 'project',
+        config: FAKE_FLOW_CONFIG,
+      }),
+    },
+    async run(r) {
+      const handle = await startFusion(r);
+      await queryUntil<FusionStatus>(handle, (s) => s.parked, '停派挂起');
+      return { 'fusion-parked': handle };
+    },
+  },
+  // 方案里写了人闸：验证过了、开了 PR、CI 绿、最终审查过了，停在等人批（卡片已发）。
+  'fusion-awaiting-approval': {
+    script: {
+      routes: FUSION_ROUTES,
+      lead: (step) =>
+        step === 'plan'
+          ? {
+              kind: 'lead-plan',
+              head: fakeHead(90),
+              changedFiles: ['specs/12-登录页加验证码/方案.md'],
+              summary: '接短信服务商发验证码',
+              brief: FAKE_BRIEF,
+              small: true,
+              highRisk: false,
+              holds: ['spend'],
+            }
+          : undefined,
+    },
+    async run(r) {
+      const handle = await startFusion(r);
+      await queryUntil<FusionStatus>(
+        handle,
+        (s) => s.approval?.state === 'pending' && r.world.approvals.length === 1,
+        '在等批准',
+      );
+      return { 'fusion-awaiting-approval': handle };
+    },
+  },
+  // 在合并队列里等结果；队列正在新头上跑测试。
+  'fusion-in-merge-queue': {
+    script: { routes: FUSION_ROUTES, delayMs: { runTests: 3_000 } },
+    async run(r) {
+      const handle = await startFusion(r);
+      await queryUntil<FusionStatus>(handle, (s) => s.state === 'merging', '排进合并队列');
+      await waitUntil(() => r.world.count('runTests') === 1, '队列在跑测试');
+      return { 'fusion-in-merge-queue': handle };
     },
   },
   // 子任务在写码（会话挂着），需求在调度循环里等。

@@ -121,10 +121,21 @@ export const tasks = pgTable(
     lastProblem: text('last_problem'),
     /** 由 saveTaskSnapshot 显式写；从没做过快照的任务是空，不是「没变化」。 */
     updatedAt: timestamp('updated_at', tz),
+    /**
+     * 这一轮用的流程配置读自哪（docs/decisions/0003-fusion-flow.md 第 9 条）：project = 仓里的 .fleet/flow.json；
+     * org_default = 仓里没有这个文件，用的全组织默认（驾驶舱要标出来）。Fusion 工作流开工前判完配置、随快照写
+     * （saveTaskSnapshot）；空 = 没记过：还没开工、开工前就停派了，或是旧的需求工作流跑的（它不读流程配置）。
+     * 记的是这一轮开工时用的，仓里后来加了、删了文件不回头改；看仓此刻的是 repos.flow_source。
+     */
+    flowSource: text('flow_source').$type<'project' | 'org_default'>(),
   },
   (t) => [
     unique('tasks_repo_issue_unique').on(t.repoId, t.issueNumber),
     check('tasks_issue_number_positive', sql`${t.issueNumber} > 0`),
+    check(
+      'tasks_flow_source_known',
+      sql`${t.flowSource} is null or ${t.flowSource} in ('project', 'org_default')`,
+    ),
   ],
 );
 

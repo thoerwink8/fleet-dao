@@ -309,7 +309,6 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
   /** 收尾时这一块的结局（叫停、没做完）；走在路上是 null，按步骤算。 */
   let blockEnd: SubtaskState | null = null;
   const publish = async () => {
-    if (!docs) return; // 认出需求文档目录之前没有要写的（写空目录会把库里的冲掉）
     const step = flow?.step ?? 'intake';
     const shown: Step = step === 'parked' ? (flow?.resume ?? 'intake') : step;
     const blockState = blockEnd ?? BLOCK_OF_STEP[shown];
@@ -320,9 +319,11 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
       state: status.state,
       phase: `fusion:${step}`,
       doing: status.doing,
-      specDir,
-      docs: publishedDocs(),
+      // 认出需求文档目录之前不写目录和文档（写空的会把库里上一轮、重开前记下的冲掉）；状态、在做什么照写，停在收单的也看得见
+      ...(docs ? { specDir, docs: publishedDocs() } : {}),
       lastProblem: status.lastProblem,
+      // 这一轮用的流程配置读自仓里还是全组织默认：驾驶舱要标出后者（0003 第 9 条）。开工前的判完才有
+      ...(setup ? { flowSource: setup.source } : {}),
       // 一张单一块：块不开单，只进库给驾驶舱看（0003 第 1 条）
       subtasks:
         blockId && plan
@@ -352,7 +353,8 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
         log.warn('任务状态没写进库', { error: String(error) });
       }
     }
-    // 公开的 issue 进度段只写已经公开的东西（单子标题、步骤、PR 号、文档路径），不写 Lead 写的简报
+    // 公开的 issue 进度段只写已经公开的东西（单子标题、步骤、PR 号、文档路径），不写 Lead 写的简报；认出需求文档之前不写
+    if (!docs) return;
     const progress = {
       state: status.state,
       current: status.doing,

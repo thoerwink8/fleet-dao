@@ -79,8 +79,9 @@ export interface Repo {
 }
 
 /**
- * 拉起需求工作流的输入：后端（api 的 RequirementWorkflows.start）照它给，引擎 contract.ts 的 RequirementInput
- * 在它上面只加可选字段——两边共用这一份，不各写一份。进了工作流历史：以后只许加可选字段，不许改老字段的意思。
+ * 拉起一张单的工作流的输入：后端（api 的 RequirementWorkflows.start，起的是 Fusion）照它给，引擎 contract.ts 的
+ * FusionInput（和旧的 RequirementInput）在它上面只加可选字段——两边共用这一份，不各写一份。进了工作流历史：以后只许加
+ * 可选字段，不许改老字段的意思。
  */
 export interface RequirementStartInput {
   schemaVersion: 1;

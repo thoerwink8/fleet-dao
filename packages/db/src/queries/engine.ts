@@ -956,9 +956,15 @@ export interface TaskSnapshotInput {
   state: TaskState;
   phase: string;
   doing: string;
-  specDir: string;
-  docs: { requirement?: string; plan?: string; result?: string };
+  /**
+   * 需求文档目录和三份文档。不给就不动库里这两列：Fusion 认出单子正文指的需求文档之前（收单还没做完、停在收单）也写快照，
+   * 这时写空的会把上一轮（重开前）记下的冲掉。
+   */
+  specDir?: string;
+  docs?: { requirement?: string; plan?: string; result?: string };
   lastProblem: string | null;
+  /** 这一轮用的流程配置读自哪（tasks.flow_source）；不给就不动（旧的需求工作流不读流程配置，不给）。 */
+  flowSource?: 'project' | 'org_default';
   subtasks: {
     id: string;
     key: string;
@@ -994,9 +1000,10 @@ export async function saveTaskSnapshot(
         state: input.state,
         phase: input.phase,
         doing: input.doing,
-        specDir: input.specDir,
-        docs: input.docs,
+        ...(input.specDir !== undefined ? { specDir: input.specDir } : {}),
+        ...(input.docs !== undefined ? { docs: input.docs } : {}),
         lastProblem: input.lastProblem,
+        ...(input.flowSource !== undefined ? { flowSource: input.flowSource } : {}),
         updatedAt: new Date(),
       })
       .where(eq(tasks.id, input.taskId))

@@ -2,10 +2,10 @@
 // 地址、端口、密钥都从本机配置（环境变量）读，见 config.ts。
 // - 有 DATABASE_URL：真库（Postgres Store + LISTEN fleet_changes）+ 真 Temporal（懒连接，Temporal 没起来时
 //   这一步不报错，健康检查会如实报红）。生产必须有。GitHub 事件原文落库、issue 变成任务；
-//   拉起需求工作流经同一份 Temporal 连接（连不上时这条投递如实记成出错，由对账重放）；
+//   拉起一张单的工作流（Fusion）经同一份 Temporal 连接（连不上时这条投递如实记成出错，由对账重放）；
 //   PR、CI 事件经 @fleet-dao/github 写镜像（机器人凭据在 /etc/fleet-dao/github，读不到时如实失败、健康检查报红）。
 // - 开发环境没有 DATABASE_URL：内存里的样例数据；飞书登录没配时可以用 POST /auth/dev-login 免登（只许本机回环监听）；
-//   发给工作流的信号、拉起需求工作流都只记日志，不接 Temporal。
+//   发给工作流的信号、拉起工作流都只记日志，不接 Temporal。
 // 飞书确认的草稿去开单（DraftOpener）等 #43 接：在那之前草稿留在「待开单」、健康检查报红，这里定时补开，接上后自动开出来。
 // （#43 已随 #56 合并、没接这一步，真开单记在 #91。）
 import type { Server } from 'node:http';
@@ -97,7 +97,7 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
       },
       requirements: {
         async start(input) {
-          log.info('（开发）拉起需求工作流', { taskId: input.taskId, issueNumber: input.issueNumber });
+          log.info('（开发）拉起工作流', { taskId: input.taskId, issueNumber: input.issueNumber });
           return 'started';
         },
       },

@@ -18,7 +18,7 @@ export interface Deps {
   config: Config;
   store: Store;
   workflows: WorkflowControl;
-  /** 拉起需求工作流（issue 进来之后）。 */
+  /** 拉起一张单的工作流（issue 进来之后；起的是 Fusion，见 temporal.ts）。 */
   requirements: RequirementWorkflows;
   changes: ChangeFeed;
   /** null = 飞书登录没配置（只允许在开发环境）。 */
