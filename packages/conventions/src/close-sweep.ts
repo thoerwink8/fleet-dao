@@ -5,9 +5,9 @@
 // - no-result：最近关成「完成」、主线上却没有它的 结果.md（直接 gh issue close 关的、Closes 合并时关的都算；关成
 //   「不做了」「重复」的不算）。
 // 纯判断，不碰网络、不读钟（now 由调用方给）：引擎的 jobs/close-sweep.ts 每天经「引擎」机器人读现状、调这里，按结果在单上
-// 留言一次、进驾驶舱提醒。「这张单有没有结果」和 pnpm issue:close 是同一份判断（issue-close.ts 的 resultDocOf）。
+// 留言一次、进驾驶舱提醒。「这张单有没有结果」和 pnpm issue:close、合并闸是同一份判断（close-rule.ts 的 resultDocOf）。
 // 判不了的（子单一页没读全、关单时刻认不出）照实交回 unchecked，由调用方记没查成，不当成没有。
-import { closingIssues, RESULT_FILE, resultDocOf } from './issue-close.ts';
+import { closingIssues, RESULT_FILE, resultDocOf } from './close-rule.ts';
 import { linkedIssue } from './pr-labels.ts';
 
 /** 关掉的单往回看几天。 */
