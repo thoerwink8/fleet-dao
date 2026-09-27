@@ -44,7 +44,7 @@ interface Plan {
   title: string;
   via: FailureVerdict['via'];
   hit: string;
-  budget: 'infra' | 'rework';
+  budget: 'infra' | 'rework' | 'free';
   maxRetries: number;
   retryBaseSeconds?: number | undefined;
   defaultWaitSeconds?: number | undefined;
@@ -75,6 +75,8 @@ interface Step {
   delaySeconds: number;
   counter: keyof AttemptCounters | null;
   wait: boolean;
+  /** waitRoute 那一级：不原地睡，回去选路等（原因里这么写）。 */
+  reroute?: true;
   avoid?: Avoid;
 }
 
@@ -105,7 +107,7 @@ export function classifyFailure(
   const hit = matchRule(scan);
   if (hit) {
     plan = {
-      ladder: (evidence.poolRole === 'backup' ? hit.rule.backupLadder : undefined) ?? hit.rule.ladder,
+      ladder: (evidence.orgKind ? hit.rule.orgLadder : undefined) ?? hit.rule.ladder,
       rule: hit.rule.id,
       title: hit.rule.title,
       via: hit.via,
@@ -224,6 +226,10 @@ function walk(plan: Plan, ctx: Ctx): Step {
   const { policy, used } = ctx;
   const retryCap = Math.min(plan.maxRetries, policy.retryAttempts);
   for (const rung of plan.ladder) {
+    if (rung === 'retry' && plan.budget === 'free') {
+      // 不记账、不设上限、不看上一次原文（切号这种：停几次续几次）
+      return { action: 'retry', delaySeconds: plan.retryBaseSeconds ?? 0, counter: null, wait: false };
+    }
     if (rung === 'retry') {
       const counter = plan.budget === 'rework' ? 'reworks' : 'retries';
       const cap = plan.budget === 'rework' ? policy.reworkRounds : retryCap;
@@ -244,7 +250,7 @@ function walk(plan: Plan, ctx: Ctx): Step {
         wait: false,
       };
     }
-    if (rung === 'waitShort' || rung === 'wait') {
+    if (rung === 'waitShort' || rung === 'wait' || rung === 'waitRoute') {
       const wait = ctx.upstreamWait;
       if (rung === 'waitShort' && (wait === undefined || wait > policy.inPlaceWaitMaxSeconds)) {
         if (wait !== undefined) plan.notes.push(`上游要等 ${duration(wait)}，不原地等`);
@@ -257,6 +263,10 @@ function walk(plan: Plan, ctx: Ctx): Step {
       if (wait !== undefined && wait > policy.waitMaxSeconds) {
         plan.notes.push(`上游要 ${duration(wait)}后才恢复，太久了`);
         continue;
+      }
+      // 不原地睡：马上回去选路，续同一个会话等这条路由（选路隔一会儿再看），派不了了就照常选
+      if (rung === 'waitRoute') {
+        return { action: 'retry', delaySeconds: 0, counter: 'retries', wait: true, reroute: true };
       }
       const delaySeconds =
         wait ??
@@ -326,7 +336,7 @@ function firstChoice(plan: Plan, ctx: Ctx): FailureAction {
         return 'retry';
       continue;
     }
-    return rung === 'wait' ? 'retry' : rung;
+    return rung === 'wait' || rung === 'waitRoute' ? 'retry' : rung;
   }
   return 'park';
 }
@@ -335,7 +345,15 @@ function actionText(step: Step, plan: Plan, ctx: Ctx): string {
   const first = plan.unknown && step.action !== 'park' ? '先按能撤回的动作走，' : '';
   switch (step.action) {
     case 'retry':
+      if (step.counter === null) {
+        return `${first}${step.delaySeconds === 0 ? '马上' : `${duration(step.delaySeconds)}后`}接着干（不算重试）`;
+      }
       if (step.counter === 'reworks') return `${first}退回会话返工（第 ${ctx.used.reworks + 1} 轮）`;
+      if (step.reroute) {
+        return `${first}不原地睡到清零，回去选路等：续同一个会话等这个池${
+          ctx.upstreamWait === undefined ? '' : `（约 ${duration(ctx.upstreamWait)}后清零）`
+        }，会话用户切了号就换到切过去的那个池接着干（fork 续上）`;
+      }
       if (step.wait) return `${first}等 ${duration(step.delaySeconds)}再试`;
       return `${first}第 ${ctx.used.retries + 1} 次重试，${
         step.delaySeconds === 0 ? '马上' : `${duration(step.delaySeconds)}后`

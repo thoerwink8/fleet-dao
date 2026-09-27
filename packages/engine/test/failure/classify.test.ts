@@ -265,7 +265,7 @@ describe('认得出的：按各自的梯子走', () => {
     });
   });
 
-  it('额度用满（主池）：挂起到清零、续同一个会话；等过两次还满才换池；这个池所有任务一起避到清零', () => {
+  it('额度用满（不是 Claude 订阅池）：挂起到清零、续同一个会话；等过两次还满才换池；这个池所有任务一起避到清零', () => {
     const quota = session({ message: '5 小时额度已用完，约 20 分钟后重置' });
     const { trail, verdicts } = drive(quota);
     expect(trail).toEqual(['retry', 'retry', 'swapRoute', 'swapRoute', 'park']);
@@ -299,13 +299,32 @@ describe('认得出的：按各自的梯子走', () => {
     });
   });
 
-  it('额度用满（备池 = 拼车号）：窗口小、等不起，先换到别的池接着干；池都换过了才等清零', () => {
-    const quota = session({ message: '拼车 5 小时额度已用完，约 20 分钟后重置', poolRole: 'backup' });
-    const { trail, verdicts } = drive(quota);
-    expect(trail).toEqual(['swapRoute', 'swapRoute', 'retry', 'retry', 'park']);
-    expect(verdicts[0]?.avoid).toEqual({ scope: 'pool', shared: true, until: '2026-09-25T00:20:00.000Z' });
-    expect(verdicts[0]?.resumeSame).toBe(false);
-    expect(verdicts[2]).toMatchObject({ delaySeconds: 1200, wait: 'quota', resumeSame: true });
+  it('额度用满（Claude 订阅池，#59）：不原地睡到清零，马上回去选路、续同一个会话等这条路由；切了号选路就换池接着干', () => {
+    for (const orgKind of ['carpool', 'solo'] as const) {
+      const quota = session({ message: '拼车 5 小时额度已用完，约 20 分钟后重置', orgKind });
+      const { trail, verdicts } = drive(quota);
+      // 回去选路也记重试的账：同一步反复被拒（切回去又被拒）有个头，之后照普通的换池、挂起
+      expect(trail).toEqual(['retry', 'retry', 'swapRoute', 'swapRoute', 'park']);
+      expect(verdicts[0]).toMatchObject({
+        action: 'retry',
+        delaySeconds: 0,
+        counter: 'retries',
+        wait: 'quota',
+        resumeSame: true,
+        alert: false,
+      });
+      expect(verdicts[0]?.reason).toContain('不原地睡到清零，回去选路等');
+      expect(verdicts[0]?.reason).toContain('约 20 分钟后清零');
+      // 别的任务照样避开这个池到清零（选路按它等、或者切了号派到切过去的那个池）
+      expect(verdicts[0]?.shared).toEqual({ scope: 'pool', shared: true, until: '2026-09-25T00:20:00.000Z' });
+      expect(verdicts[0]?.avoid).toBeUndefined();
+    }
+    // 要等太久（周限）和普通的一样跳过、换池
+    const weekly = classifyFailure(
+      session({ message: 'weekly limit reached', resetsAt: '2026-09-29T00:00:00.000Z', orgKind: 'carpool' }),
+    );
+    expect(weekly.action).toBe('swapRoute');
+    expect(weekly.reason).toContain('太久了');
   });
 
   it('设备被撤销（401 device_revoked）单独一类：不当额度用满、不当封号；挂起等人重新登录，整池暂停，写清去哪台机器以谁的身份登录', () => {
@@ -456,6 +475,42 @@ describe('认得出的：按各自的梯子走', () => {
     });
     expect(drive(conflict).trail).toEqual(['retry', 'retry', 'park']);
     expect(drive(session({ code: 'not_delivered' })).trail).toEqual(['retry', 'retry', 'swapModel', 'park']);
+  });
+});
+
+describe('切号停下的（org_switch，#59）', () => {
+  const SWITCH_MESSAGE = '切号：会话用户从拼车组织切到独享组织，先停下，切完接着干';
+  const SWITCH = session({ code: 'org_switch', retryable: true, message: SWITCH_MESSAGE });
+
+  it('马上续同一个会话：不算失败、不进路由失败率、不记重试的账', () => {
+    const v = classifyFailure(SWITCH);
+    expect(v).toMatchObject({
+      action: 'retry',
+      delaySeconds: 0,
+      rule: 'OS1',
+      counter: null,
+      resumeSame: true,
+      routeOutcome: 'neutral',
+      alert: false,
+    });
+    expect(v.reason).toContain('马上接着干（不算重试）');
+  });
+
+  it('切几次续几次：重试次数用光了、原文和上一次一字不差、路由病了，照样续，不挂起', () => {
+    const { trail } = drive(SWITCH, undefined, 10);
+    expect(trail).toEqual(Array.from({ length: 10 }, () => 'retry'));
+    const v = classifyFailure({
+      ...SWITCH,
+      attempts: { retries: 99 },
+      previousMessage: SWITCH_MESSAGE,
+      routeHealth: { samples: 20, failureRate: 1 },
+    });
+    expect(v).toMatchObject({ action: 'retry', counter: null });
+  });
+
+  it('【故意造出的失败】只认插头交来的结构化码：原文里提到 org_switch 不算', () => {
+    const v = classifyFailure(session({ code: 'agent_error', message: 'grep org_switch in the logs' }));
+    expect(v.rule).not.toBe('OS1');
   });
 });
 

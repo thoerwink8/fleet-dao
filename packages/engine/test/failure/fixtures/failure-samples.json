@@ -404,18 +404,20 @@
     {
       "id": "X03",
       "provenance": "observed",
-      "origin": "ai-gateway-stack deploy/reclaude-org-switch.test.mjs 的 REAL_EXHAUSTED_ERR（2026-09-23 拼车号当场用满实测，同时收到 rate_limit_event status:rejected）。前半句是 Claude Code 自带的临时限流说法，后半句是 reclaude 说的额度用满；认的是后半句，按上游给的 20 分钟避开这个池。出在拼车号（备池）：先换到别的池接着干",
+      "origin": "ai-gateway-stack deploy/reclaude-org-switch.test.mjs 的 REAL_EXHAUSTED_ERR（2026-09-23 拼车号当场用满实测，同时收到 rate_limit_event status:rejected）。前半句是 Claude Code 自带的临时限流说法，后半句是 reclaude 说的额度用满；认的是后半句，按上游给的 20 分钟避开这个池。出在 Claude 订阅的拼车池：不原地睡到清零，马上回去选路（切了号就换池 fork 续上，#59）",
       "evidence": {
         "hostId": "claude-code",
-        "poolRole": "backup",
+        "orgKind": "carpool",
         "message": "API Error: Server is temporarily limiting requests (not your usage limit) · 拼车 5 小时额度已用完，约 20 分钟后重置，请稍后再来（请求 ID: <请求ID>）"
       },
       "expect": {
-        "action": "swapRoute",
+        "action": "retry",
         "rule": "QT1",
         "avoid": "pool",
         "until": "2026-09-25T00:20:00.000Z",
-        "alert": false
+        "alert": false,
+        "counter": "retries",
+        "delaySeconds": 0
       }
     },
     {
@@ -875,6 +877,18 @@
       "origin": "引擎在会话被外面停掉时给的码（SESSION_STOPPED）",
       "evidence": { "code": "SESSION_STOPPED", "message": "会话被外面停掉了" },
       "expect": { "action": "retry", "rule": "OU2" }
+    },
+    {
+      "id": "X99",
+      "provenance": "format",
+      "origin": "引擎切号前把手上的 Claude 会话停下时给的码（org_switch，real/sessions.ts，#59）",
+      "evidence": {
+        "hostId": "claude-code",
+        "code": "org_switch",
+        "retryable": true,
+        "message": "切号：会话用户从拼车组织切到独享组织，先停下，切完接着干"
+      },
+      "expect": { "action": "retry", "rule": "OS1" }
     },
     {
       "id": "X54",

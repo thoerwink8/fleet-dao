@@ -320,7 +320,7 @@ describe('失败分流：接的是规则表（failure/classify.ts），认不出
     expect(nextAction({ failure: failure('WEIRD', false), limits, routeBound: false }).action).toBe('park');
   });
 
-  it('账号池的事：封号换池并报警、换不了就挂起；额度用满在备池（拼车号）先换池；别的换路由只避这条路由', () => {
+  it('账号池的事：封号换池并报警、换不了就挂起；额度用满在 Claude 订阅池马上回去选路（等切号）；别的换路由只避这条路由', () => {
     expect(nextAction({ failure: failure('account_banned'), limits, routeBound: true })).toMatchObject({
       action: 'swapRoute',
       avoid: 'pool',
@@ -335,7 +335,8 @@ describe('失败分流：接的是规则表（failure/classify.ts），认不出
         routeBound: true,
       }).action,
     ).toBe('park');
-    const backup = nextAction({
+    // Claude 订阅池（带组织类型）：不原地睡到清零，马上回去选路续同一个会话（切了号选路就换池 fork 续上，#59）
+    const org = nextAction({
       failure: failure('QUOTA_EXHAUSTED'),
       limits,
       routeBound: true,
@@ -347,30 +348,24 @@ describe('失败分流：接的是规则表（failure/classify.ts），认不出
           poolId: 'carpool',
           modelId: 'opus',
           hostId: 'claude-code',
-          poolRole: 'backup',
+          orgKind: 'carpool',
         },
       },
     });
-    expect(backup).toMatchObject({ action: 'swapRoute', avoid: 'pool', resumeSame: false });
-    expect(backup.shared).toEqual({ scope: 'pool', until: '2026-09-25T00:20:00.000Z' });
-    // 同样的额度用满在主池：等到清零（上游给的时刻），不换池。
-    const primary = nextAction({
+    expect(org).toMatchObject({ action: 'retry', delaySeconds: 0, wait: 'quota', resumeSame: true });
+    expect(org.shared).toEqual({ scope: 'pool', until: '2026-09-25T00:20:00.000Z' });
+    // 同样的额度用满在别的池：等到清零（上游给的时刻），不换池。
+    const plain = nextAction({
       failure: failure('QUOTA_EXHAUSTED'),
       limits,
       routeBound: true,
       context: {
         now: '2026-09-25T00:00:00.000Z',
         resetsAt: '2026-09-25T00:20:00.000Z',
-        route: {
-          routeId: 'r-solo',
-          poolId: 'solo',
-          modelId: 'opus',
-          hostId: 'claude-code',
-          poolRole: 'primary',
-        },
+        route: { routeId: 'r-kimi', poolId: 'kimi', modelId: 'k2', hostId: 'mirasim' },
       },
     });
-    expect(primary).toMatchObject({ action: 'retry', delaySeconds: 1200, wait: 'quota', resumeSame: true });
+    expect(plain).toMatchObject({ action: 'retry', delaySeconds: 1200, wait: 'quota', resumeSame: true });
     expect(nextAction({ failure: failure('ROUTE_BUSY'), limits, routeBound: true }).avoid).toBe('route');
     expect(
       nextAction({ failure: failure('WEIRD'), counters: { retries: 2 }, limits, routeBound: true }).avoid,
@@ -388,7 +383,7 @@ describe('失败分流：接的是规则表（failure/classify.ts），认不出
           poolId: 'carpool',
           modelId: 'opus',
           hostId: 'claude-code',
-          poolRole: 'backup',
+          orgKind: 'carpool',
         },
         machine: '法国',
         runAsUser: 'fleet-agent-carpool',
@@ -709,18 +704,38 @@ describe('合并队列的条目状态机', () => {
 });
 
 describe('分诊之后', () => {
-  it('清楚开工；没判出来按默认走，不当成「否」；看不懂就问，问够了按假设继续', () => {
+  it('清楚开工；没判出来按默认走，不当成「否」；看不懂的带选项和推荐问、按推荐先做不等回答（#259）', () => {
     expect(decideTriage({ verdict: { clear: true }, asked: 0, maxQuestions: 2 }).action).toBe('proceed');
     expect(decideTriage({ verdict: { clear: null }, asked: 0, maxQuestions: 2 })).toMatchObject({
       action: 'proceed',
       assumed: true,
     });
     expect(
-      decideTriage({ verdict: { clear: false, question: '哪个页面？' }, asked: 0, maxQuestions: 2 }),
+      decideTriage({
+        verdict: { clear: false, question: '哪个页面？', options: ['注册页', '登录页'], recommend: '登录页' },
+        asked: 0,
+        maxQuestions: 2,
+      }),
     ).toEqual({
-      action: 'ask',
-      question: '哪个页面？',
+      action: 'proceed',
+      assumed: true,
+      note: '分诊说不清：哪个页面？——问了创始人（不等回答），按推荐先做「登录页」',
+      holds: [],
+      ask: { question: '哪个页面？', options: ['登录页', '注册页'], recommended: '登录页' },
     });
+  });
+
+  it('【失败】看不懂却没带选项和推荐：退回分诊补上（写明缺什么），不再停下问；退回够了按假设继续', () => {
+    expect(
+      decideTriage({ verdict: { clear: false, question: '哪个页面？' }, asked: 0, maxQuestions: 2 }),
+    ).toMatchObject({ action: 'retriage', question: '哪个页面？', why: expect.stringContaining('推荐') });
+    expect(
+      decideTriage({
+        verdict: { clear: false, question: '哪个页面？', options: ['注册页', '登录页'], recommend: '首页' },
+        asked: 1,
+        maxQuestions: 2,
+      }),
+    ).toMatchObject({ action: 'retriage', why: expect.stringContaining('不在选项里') });
     expect(
       decideTriage({ verdict: { clear: false, question: '哪个页面？' }, asked: 2, maxQuestions: 2 }),
     ).toMatchObject({ action: 'proceed', assumed: true });
@@ -830,6 +845,7 @@ describe('Fusion 的判断经 decide 调（core 包，0003 第 12 条）', () =>
       highRisk: false,
       planReviewSkipped: false,
       flowSource: 'project',
+      outsideBrief: [],
     });
     expect(pr.did[0]).toBe('方案：加验证码');
     const comment = await decide('closeComment', {

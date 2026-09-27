@@ -18,9 +18,8 @@ const one = (extra: Partial<RouteFacts>) => input([route('a', extra)]);
 describe('输入认不出就明确失败', () => {
   it('现在的时刻认不出', () => fails(() => input([route('a')], { now: 'yesterday' }), /现在的时刻认不出/));
 
-  it('阶段类型、活的轻重认不出（轻重认不出不能让备池当成轻活放行）', () => {
+  it('阶段类型认不出', () => {
     fails(() => input([route('a')], { stage: 'test' as never }), /阶段类型认不出/);
-    fails(() => input([route('a')], { weight: 'medium' as never }), /轻重认不出/);
   });
 
   it('试探开着却没给随机数、或随机数越界', () => {
@@ -77,18 +76,17 @@ describe('输入认不出就明确失败', () => {
 
   it('探针时刻认不出：不当成没过期', () => fails(() => one({ probedAt: 'last round' }), /探针时刻认不出/));
 
-  it('额度状态和被挡原因对不上：不按其中一边往下派（未知的备池会被放去试探，用满的主池会被照派）', () => {
+  it('额度状态和被挡原因对不上：不按其中一边往下派（用满的池会被照派）', () => {
     fails(() => one({ quota: 'exhausted', blockers: [] }), /额度状态（exhausted）和被挡原因（无）对不上/);
     fails(
-      () => one({ poolRole: 'backup', quota: 'unknown', blockers: ['quota-exhausted'] }),
+      () => one({ quota: 'unknown', blockers: ['quota-exhausted'] }),
       /额度状态（unknown）和被挡原因（quota-exhausted）对不上/,
     );
     fails(() => one({ quota: 'ok', blockers: ['no-slot', 'quota-exhausted'] }), /对不上/);
   });
 
-  it('认不出的额度状态、池主备、熔断判定', () => {
+  it('认不出的额度状态、熔断判定', () => {
     fails(() => one({ quota: 'fine' as never }), /额度状态认不出/);
-    fails(() => one({ poolRole: 'spare' as never }), /池主备认不出/);
     fails(() => one({ breaker: { state: 'closed', admit: 'maybe' as never, reason: '' } }), /熔断判定认不出/);
     fails(
       () => one({ breaker: { state: 'open', admit: 'none', reason: '', probeAt: 'soon' } }),
@@ -134,24 +132,17 @@ describe('策略给了但不对就报错，不悄悄换成默认', () => {
     [{ minSamples: 0 }, /minSamples/],
     [{ poorSuccessRate: 1.5 }, /poorSuccessRate/],
     [{ trialRatio: 0 }, /trialRatio/],
-    [{ backupMaxConcurrency: 0 }, /backupMaxConcurrency/],
     [{ othersMinRemaining: -1 }, /othersMinRemaining/],
     [{ fastReset: { '7d': { withinHours: 0, minRemaining: 0.3 } } }, /withinHours/],
     [{ fastReset: { '7d': { withinHours: 24, minRemaining: 0 } } }, /minRemaining/],
     [{ needPerTask: { '5h': 2 } }, /needPerTask/],
-    [{ stageWeight: { triage: 'tiny' as never } } as never, /stageWeight/],
     [{ trialEnabled: 'yes' as never }, /trialEnabled/],
   ])('%j', (policy, message) => {
     expect(() => resolveRoutingPolicy(policy)).toThrow(message);
   });
 
   it('只改给了的项，其余照默认', () => {
-    const p = resolveRoutingPolicy({
-      stageWeight: { plan: 'light' } as never,
-      needPerTask: { '5h': 0.2 },
-    });
-    expect(p.stageWeight.plan).toBe('light');
-    expect(p.stageWeight.execute).toBe('heavy');
+    const p = resolveRoutingPolicy({ needPerTask: { '5h': 0.2 } });
     expect(p.needPerTask['5h']).toBe(0.2);
     expect(p.needPerTask['7d']).toBe(0.03);
     expect(p.trialEnabled).toBe(false);

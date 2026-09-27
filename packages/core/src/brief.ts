@@ -94,7 +94,7 @@ export function checkParallel(briefs: readonly Brief[]): { ok: true } | { ok: fa
   return problems.length ? { ok: false, problems } : { ok: true };
 }
 
-/** 改了简报外的哪些文件（要动别人的文件，副手得先回报 Lead 改派）。 */
+/** 改了简报外的哪些文件（碰到别的块的硬挡，别的由 Lead 验收时定收不收：acceptance.ts）。 */
 export function outsideBrief(brief: Brief, changed: readonly string[]): string[] {
   const allowedBy = (allowed: string, file: string) =>
     allowed === file || (allowed.endsWith('/') && file.startsWith(allowed));

@@ -38,7 +38,6 @@ export function route(routeId: string, overrides: Partial<RouteFacts> = {}): Rou
     channelId: 'claude-subscription',
     poolId: `pool-${routeId}`,
     poolName: `池${routeId}`,
-    poolRole: 'primary',
     modelId: 'opus-5.5',
     modelName: 'Opus 5.5',
     family: 'claude',
@@ -105,13 +104,13 @@ export function reserve(routes: RouteFacts[], poolId: string): RouteFacts[] {
   return routes.map((r) => (r.poolId === poolId ? { ...r, reserved: r.reserved + 1 } : r));
 }
 
-/** 独享号（主池）与拼车号（备池）两条 Claude 路由，别的字段照常。 */
+/** 独享号与拼车号两条 Claude 路由，别的字段照常（不分主池、备池：#59 删掉了那一套）。 */
 export function soloAndCarpool(
   solo: Partial<RouteFacts> = {},
   carpool: Partial<RouteFacts> = {},
 ): [RouteFacts, RouteFacts] {
   return [
     route('solo', { poolId: 'pool-solo', poolName: '独享号', ...solo }),
-    route('carpool', { poolId: 'pool-carpool', poolName: '拼车号', poolRole: 'backup', ...carpool }),
+    route('carpool', { poolId: 'pool-carpool', poolName: '拼车号', ...carpool }),
   ];
 }

@@ -47,7 +47,8 @@ export interface FailureContext {
         modelId: string;
         hostId: string;
         channelId?: string | undefined;
-        poolRole?: 'primary' | 'backup' | undefined;
+        /** Claude 订阅池的组织类型（拼车、独享）：额度用满不原地睡到清零（QT1 的 orgLadder）。 */
+        orgKind?: 'carpool' | 'solo' | undefined;
       }
     | undefined;
   /** 上游给的清零时刻（ISO）/ 等待秒数。 */
@@ -138,7 +139,7 @@ export function evidenceOf(input: FailureInput): FailureEvidence {
           modelId: r.modelId,
           hostId: r.hostId,
           ...set('channelId', r.channelId),
-          ...set('poolRole', r.poolRole),
+          ...set('orgKind', r.orgKind),
         }
       : {}),
     ...set('resetsAt', c.resetsAt),

@@ -12,12 +12,14 @@
 import type { Scan } from './scan.ts';
 
 /**
- * 梯子上的一级。等待类（waitShort、wait）落成 retry 动作，记在重试账上。
+ * 梯子上的一级。等待类（waitShort、wait、waitRoute）落成 retry 动作，记在重试账上。
  * - retry：原路再试，退避翻倍；
  * - waitShort：上游给了等待时间而且不长，原地等到点；没给或太长就跳过；
- * - wait：等到上游给的时刻；没给按规则的默认等待翻倍；要等太久就跳过（落到挂起）。
+ * - wait：等到上游给的时刻；没给按规则的默认等待翻倍；要等太久就跳过（落到挂起）；
+ * - waitRoute：不原地睡，马上回去选路、续同一个会话等这条路由（选路按清零时刻隔一会儿再看）；这条路由派不了了
+ *   （会话用户切了号）就照常选、换池接着干。要等太久和 wait 一样跳过。
  */
-export type Rung = 'retry' | 'waitShort' | 'wait' | 'swapRoute' | 'swapModel' | 'park';
+export type Rung = 'retry' | 'waitShort' | 'wait' | 'waitRoute' | 'swapRoute' | 'swapModel' | 'park';
 
 export interface FailureRule {
   id: string;
@@ -42,10 +44,16 @@ export interface FailureRule {
   weakCodes?: readonly string[];
   /** 依次尝试，某一级的次数用完就往下走；最后一级总是 park。 */
   ladder: readonly Rung[];
-  /** 出在备池（拼车号）时改用这个梯子；不给就和主池一样。 */
-  backupLadder?: readonly Rung[];
-  /** 重试记哪本账：返工（测试红、冲突、没交付）和基础设施处置分开。 */
-  budget?: 'infra' | 'rework';
+  /**
+   * 出在 Claude 订阅池（带组织类型的：拼车、独享共用法国唯一的会话用户，同一时刻只有挂着的那个能派，这个池用满了
+   * 引擎切号，#157）时改用这个梯子；不给就照 ladder。
+   */
+  orgLadder?: readonly Rung[];
+  /**
+   * 重试记哪本账：返工（测试红、冲突、没交付）和基础设施处置分开。free = 不记账、没有次数上限、不看上一次的原文：
+   * 只给我们自己为了别的事停下、停几次就该续几次的（切号，#59）。
+   */
+  budget?: 'infra' | 'rework' | 'free';
   /** 这条规则最多原路重试几次（和策略上限取小）。 */
   maxRetries?: number;
   /** 退避起点（秒）；不给用策略的。 */
@@ -121,6 +129,21 @@ export const RULES: readonly FailureRule[] = [
     retryBaseSeconds: 0,
     routeOutcome: 'neutral',
   },
+  // 切号（#59）：会话用户要换组织，引擎先把手上的 Claude 会话停下、切过去，再续同一个会话（换了池 fork 续上，
+  // 上下文大了带接力任务书）。是我们要停的：不算失败、不进路由失败率、不记重试的账（切几次续几次，不会因为切号挂起），
+  // 马上续——切号那十几秒选路回「过一会儿再选」，切完就选到切过去的那个池。码只认插头交来的结构化码。
+  {
+    id: 'OS1',
+    title: '切号：先停下，切过去接着干',
+    codes: ['org_switch'],
+    codeFieldOnly: true,
+    // free 的重试总有次数，挂起那一级走不到；留着是规则表的约定（梯子都以挂起收尾）
+    ladder: ['retry', 'park'],
+    budget: 'free',
+    retryBaseSeconds: 0,
+    routeOutcome: 'neutral',
+    hint: '切完续同一个会话（换了池就 fork 续上）',
+  },
   // 这台机器的 reclaude 登录被撤销（reclaude 文档「设备被自动撤销」：同号多机同时高频用会触发风控，自动撤销设备，
   // 请求拿到 401 device_revoked；修法只有人在那台机器上、以那个用户重跑 reclaude login）。不是额度用满、也不是封号：
   // 换池、等清零都没用，这个池在这台机器上整池暂停，手上的会话挂起；重新登录后人点「继续」，续同一个会话。
@@ -182,7 +205,9 @@ export const RULES: readonly FailureRule[] = [
   },
   // 时间窗额度用满（5 小时、周、月）。design 第一节「会话断了接着干」（2026-09-25 拍）：挂起到清零时刻，续上同一个会话，
   // 不开新的；要等太久（超过 waitMaxSeconds，例如周限）才换到别的池（换用户的接续由会话端口定：fork 续或接力任务书）。
-  // 备池（拼车号）窗口小、清零前手上的活等不起：先换到别的池接着干（第九节「拼车用完，手上的活原地接着干」），换不了再等清零。
+  // Claude 订阅池（拼车、独享共用一个会话用户）不原地睡到清零：这个池用满了引擎会切号（#157），睡着的活就一直等到
+  // 清零、白放着切过去的那个组织。所以马上回去选路：没切就续同一个会话等这条路由，切了号这条路由派不了，照常选到
+  // 切过去的那个池、fork 续上（第九节「拼车用完，切独享接着干」，#59）。原先的「备池先换池」随两个会话用户作废。
   // 两种都把这个池记成「所有任务一起避开到清零」（按上游给的时间）。
   {
     id: 'QT1',
@@ -191,7 +216,7 @@ export const RULES: readonly FailureRule[] = [
     // 「(not your usage limit)」是 Claude Code 在服务端临时限流时自带的一句，说的恰恰不是额度用满：否定句不认。
     text: /(?<!\bnot (?:your |a |the )?)usage limit|额度已用完|额度用完|额度用尽|quota (?:is )?exhausted|weekly limit|monthly limit|周限|\b5[- ]?hour limit/i,
     ladder: ['wait', 'swapRoute', 'park'],
-    backupLadder: ['swapRoute', 'wait', 'park'],
+    orgLadder: ['waitRoute', 'swapRoute', 'park'],
     defaultWaitSeconds: 900,
     avoid: { scope: 'pool', shared: true, until: 'upstream' },
     routeOutcome: 'neutral',

@@ -24,7 +24,7 @@ import {
   type FakeWorld,
   fakeHead,
 } from '../src/fakes.ts';
-import type { RouteChoice, SessionOutput } from '../src/ports.ts';
+import { PortError, type RouteChoice, type SessionOutput } from '../src/ports.ts';
 import { fusionInput, queryUntil, useEnv, withWorker } from './helpers.ts';
 
 const currentEnv = useEnv();
@@ -240,6 +240,76 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
     expect(w.states.every((s) => s.flowSource === 'org_default')).toBe(true);
   });
 
+  it('#246：副手第 1 轮碰了简报外的文件、Lead 看过收下 → 这一块直接收下推上去，不返工；状态、PR 正文、关单评论记下来', async () => {
+    // #246 第 1 轮：副手顺手改了 docs/ops.md 和一个测试，Lead 判收下，却被「简报外一律不收」打回；改动累计着看，
+    // 第 2 轮撤了也照样算简报外，这一块注定白转两轮、第 3 轮 Lead 接手
+    const outside = ['docs/ops.md', 'packages/engine/test/hourly-reconcile.test.ts'];
+    const why = 'ops.md 跟着改了说明，那条测试补的是同一条规则，该改';
+    const w = world({
+      session: (input) =>
+        !input.brief.lead && input.stage === 'execute'
+          ? {
+              output: {
+                kind: 'delivery',
+                head: fakeHead(50),
+                summary: '做完：登录页加验证码',
+                testsPassed: true,
+                changedFiles: ['src/login/changed.ts', ...outside],
+              },
+            }
+          : undefined,
+      lead: (step) => (step === 'accept' ? { kind: 'lead-verdict', verdict: 'accept', why } : undefined),
+    });
+    const { result, status } = await withWorker(env, w, async (q) => {
+      const handle = await start(q, fusionInput());
+      const done = (await handle.result()) as FusionResult;
+      return { result: done, status: (await handle.query('status')) as FusionStatus };
+    });
+    expect(result.state).toBe('done');
+    expect(trail(w)).toEqual(['lead:plan', 'side', 'lead:accept', 'verify', 'lead:review']);
+    expect(status.rounds.reworks).toBe(0);
+    expect(w.callsOf('pushBranch').map((c) => c.input.head)).toContain(fakeHead(50));
+
+    const line = '简报外改了：docs/ops.md、packages/engine/test/hourly-reconcile.test.ts（主导收下）';
+    // 状态里写一句（带 Lead 的理由），随快照进库
+    expect(w.states.map((s) => s.lastProblem)).toContain(`${line.slice(0, -1)}：${why}）`);
+    expect(w.callsOf('openPr')[0]?.input.body.verified).toContain(line);
+    expect(w.callsOf('closeIssue')[0]?.input.comment).toContain(`- ${line}`);
+  });
+
+  it('开了 PR 之后修的一轮碰了简报外的文件、Lead 收下 → 推上去接着走；PR 正文开出去不改，关单评论补记', async () => {
+    const w = world({
+      ci: (_input, n) => (n === 1 ? { state: 'red', failedChecks: ['test (engine)'] } : undefined),
+      session: (input) =>
+        !input.brief.lead && input.stage === 'execute' && input.brief.task?.goal === '照返工意见修好'
+          ? {
+              output: {
+                kind: 'delivery',
+                head: fakeHead(60),
+                summary: '修好了',
+                testsPassed: true,
+                changedFiles: ['src/login/changed.ts', 'docs/ops.md'],
+              },
+            }
+          : undefined,
+    });
+    const result = await runToEnd(w);
+    expect(result.state).toBe('done');
+    expect(trail(w)).toEqual([
+      'lead:plan',
+      'side',
+      'lead:accept',
+      'verify',
+      'lead:fix-brief',
+      'side',
+      'lead:accept',
+      'lead:review',
+    ]);
+    expect(w.callsOf('pushBranch').map((c) => c.input.head)).toContain(fakeHead(60));
+    expect(w.callsOf('openPr')[0]?.input.body.verified.join('\n')).not.toContain('简报外');
+    expect(w.callsOf('closeIssue')[0]?.input.comment).toContain('- 简报外改了：docs/ops.md（主导收下）');
+  });
+
   it('验证挡了两轮（Lead 没驳回）：回去改一轮还没过，停下等人，不开 PR', async () => {
     const w = world({ verify: (input) => BLOCKING(input.brief.head ?? '') });
     const { parked, result } = await runUntilParked(w);
@@ -293,11 +363,31 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
     expect(result).toMatchObject({ state: 'stopped', prNumber: 100, mergeCommit: null });
   });
 
-  it('Lead 写方案时要问创始人：发卡等回答，回答到了续同一个会话接着写', async () => {
+  it('Lead 写方案时 fleet blocked --needs human（要人拍）：不停下等，退回让它带推荐用 fleet ask 问，续同一个会话接着写', async () => {
     const w = world({
       session: (input) =>
         input.brief.lead?.step === 'plan' && !input.resumeSessionId
-          ? { outcome: 'blocked', blocked: { question: '验证码几位？', options: ['4 位', '6 位'] } }
+          ? { outcome: 'blocked', blocked: { reason: '验证码几位？要创始人定', needs: 'human' } }
+          : undefined,
+    });
+    const result = await runToEnd(w);
+    expect(result.state).toBe('done');
+    // 一张卡都没发、一次都没停下等人
+    expect(w.asks).toEqual([]);
+    const plans = w.callsOf('startSession').filter((c) => c.input.brief.lead?.step === 'plan');
+    expect(plans).toHaveLength(2);
+    expect(plans[1]?.input.resumeSessionId).toBe('s1');
+    const reask = plans[1]?.input.brief.feedback.find((f) => f.kind === 'ask');
+    expect(reask?.summary).toContain('fleet blocked --needs human');
+    expect(reask?.items.join('\n')).toContain('验证码几位？要创始人定');
+    expect(reask?.items.join('\n')).toContain('fleet ask "<问题>" -o <甲> -o <乙> -r <推荐的>');
+  });
+
+  it(`【失败】退回 ${2} 次还说要人：才停下等人（老样子发卡等回答），回答到了续同一个会话`, async () => {
+    const w = world({
+      session: (input) =>
+        input.brief.lead?.step === 'plan' && !input.brief.answers.length
+          ? { outcome: 'blocked', blocked: { reason: '验证码几位？', needs: 'info' } }
           : undefined,
     });
     const result = await withWorker(env, w, async (q) => {
@@ -312,12 +402,227 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
       return (await handle.result()) as FusionResult;
     });
     expect(result.state).toBe('done');
+    const plans = w.callsOf('startSession').filter((c) => c.input.brief.lead?.step === 'plan');
+    // 第一次说卡住 + 退回两次还说卡住 → 第四次是答了之后续的
+    expect(plans).toHaveLength(4);
+    expect(plans.slice(1, 3).map((p) => p.input.brief.feedback.some((f) => f.kind === 'ask'))).toEqual([
+      true,
+      true,
+    ]);
     expect(w.asks).toHaveLength(1);
-    expect(w.asks[0]).toMatchObject({ question: '验证码几位？', options: ['4 位', '6 位'] });
+    expect(plans[3]?.input.brief.answers).toEqual([{ question: '验证码几位？', answer: '6 位' }]);
+  });
+
+  it('要的是只有他本人才有的东西（--needs access）：不退回，照旧停下等人', async () => {
+    const w = world({
+      session: (input) =>
+        input.brief.lead?.step === 'plan' && !input.brief.answers.length
+          ? { outcome: 'blocked', blocked: { reason: '要短信服务的账号', needs: 'access' } }
+          : undefined,
+    });
+    const result = await withWorker(env, w, async (q) => {
+      const handle = await start(q, fusionInput());
+      const asking = await queryUntil<FusionStatus>(handle, (s) => Boolean(s.waiting?.askId), '在等人');
+      await handle.signal(answerSignal, {
+        by: 'founder',
+        askId: asking.waiting?.askId ?? '',
+        answer: '给了',
+      });
+      return (await handle.result()) as FusionResult;
+    });
+    expect(result.state).toBe('done');
     const plans = w.callsOf('startSession').filter((c) => c.input.brief.lead?.step === 'plan');
     expect(plans).toHaveLength(2);
-    expect(plans[1]?.input.resumeSessionId).toBe('s1');
-    expect(plans[1]?.input.brief.answers).toEqual([{ question: '验证码几位？', answer: '6 位' }]);
+    expect(plans[1]?.input.brief.feedback.some((f) => f.kind === 'ask')).toBe(false);
+    expect(w.asks.map((a) => a.question)).toEqual(['要短信服务的账号']);
+  });
+
+  it('他晚到、改选了别的回答（还没开 PR）：存档点交给 Lead，本来的活收下后回第 4 步照改，改完推上去记照改了，再验证、开 PR', async () => {
+    let w: FakeWorld | undefined;
+    w = world({
+      // 副手干本来的活时，他在卡片上改选了「4 位」（按推荐先做的是「6 位」）
+      session: (input) => {
+        if (!input.brief.lead && input.stage === 'execute' && w) {
+          const row = w.askRows[0];
+          if (row && row.answer === undefined) row.answer = '4 位';
+        }
+        return undefined;
+      },
+    });
+    const input = fusionInput();
+    w.askRows.push({
+      id: 'ask-1',
+      taskId: input.taskId,
+      question: '验证码几位？',
+      options: ['6 位', '4 位'],
+      scope: 'task',
+      recommended: '6 位',
+      applied: false,
+    });
+    const result = await runToEnd(w, input);
+    expect(result.state).toBe('done');
+    expect(trail(w)).toEqual([
+      'lead:plan',
+      'side',
+      'lead:accept',
+      'lead:fix-brief',
+      'side',
+      'lead:accept',
+      'verify',
+      'lead:review',
+    ]);
+    // Lead 写照改的简报时看到了他改选的原话
+    const brief = w.callsOf('startSession').find((c) => c.input.brief.lead?.step === 'fix-brief');
+    const told = brief?.input.brief.feedback.find((f) => f.kind === 'answer');
+    expect(told?.items).toEqual([
+      '问「验证码几位？」：按推荐先做的是「6 位」，创始人改选了「4 位」，照「4 位」改',
+    ]);
+    // 改完推上去才记照改了；推了四次：方案、本来的活、照改的、结果
+    expect(w.callsOf('markAsksApplied').map((c) => c.input.askIds)).toEqual([['ask-1']]);
+    expect(w.askRows[0]?.applied).toBe(true);
+    expect(w.count('pushBranch')).toBe(4);
+    // 验证是改完之后验的（验的是照改后推上去的头）
+    const pushes = w.callsOf('pushBranch').map((c) => c.input.head);
+    expect(w.verifications.map((v) => v.head)).toEqual([pushes[2]]);
+    // PR 正文「按推荐先做了」一栏写明他改选了、已照改；关单评论记数
+    expect(w.callsOf('openPr')[0]?.input.body.assumed).toEqual([
+      '验证码几位？ → 先按推荐做了「6 位」，创始人改选了「4 位」，已照改',
+    ]);
+    expect(w.callsOf('closeIssue')[0]?.input.comment).toContain(
+      '**问创始人**：按推荐先做了 1 条，事后被改了 1 条（他确认了 0 条）',
+    );
+  });
+
+  it('他在 Lead 写方案时就改选了：不跳过这之间的步骤（方案评审照走），本来的活照原方案做完收下，再回第 4 步照改', async () => {
+    // 不是小单：规划完要走方案评审（第 3 步）
+    const plan: SessionOutput = {
+      kind: 'lead-plan',
+      head: fakeHead(90),
+      changedFiles: [DOCS.plan],
+      summary: '登录表单加验证码输入，后端校验五分钟过期',
+      brief: FAKE_BRIEF,
+      small: false,
+      highRisk: false,
+      holds: [],
+    };
+    let w: FakeWorld | undefined;
+    w = world({
+      lead: (step) => (step === 'plan' ? plan : undefined),
+      session: (input) => {
+        if (input.brief.lead?.step === 'plan' && w) {
+          const row = w.askRows[0];
+          if (row && row.answer === undefined) row.answer = '4 位';
+        }
+        return undefined;
+      },
+    });
+    const input = fusionInput();
+    w.askRows.push({
+      id: 'ask-1',
+      taskId: input.taskId,
+      question: '验证码几位？',
+      options: ['6 位', '4 位'],
+      scope: 'task',
+      recommended: '6 位',
+      applied: false,
+    });
+    const result = await runToEnd(w, input);
+    expect(result.state).toBe('done');
+    expect(trail(w)).toEqual([
+      'lead:plan',
+      'side',
+      'lead:accept',
+      'lead:fix-brief',
+      'side',
+      'lead:accept',
+      'verify',
+      'lead:review',
+    ]);
+    // 方案评审那一步照走了（引擎还没接，照跳过、PR 里写明），没被改道绕过去
+    expect(w.callsOf('openPr')[0]?.input.body.owed).toContain(
+      '方案评审（0003 第 5 条第 3 步）引擎还没接，这次跳过（#249）',
+    );
+    expect(w.askRows[0]?.applied).toBe(true);
+  });
+
+  it('他晚到、改选了别的回答（PR 已经开了）：存档点交给 Lead 算开了 PR 之后修一轮，修完推上去记照改了、再过 CI', async () => {
+    let w: FakeWorld | undefined;
+    w = world({
+      // 开了 PR、等 CI 时他改选了
+      ci: (_input, n) => {
+        const row = w?.askRows[0];
+        if (n === 1 && row) row.answer = '4 位';
+        return undefined;
+      },
+    });
+    const input = fusionInput();
+    w.askRows.push({
+      id: 'ask-1',
+      taskId: input.taskId,
+      question: '验证码几位？',
+      options: ['6 位', '4 位'],
+      scope: 'task',
+      recommended: '6 位',
+      applied: false,
+    });
+    const { result, status } = await withWorker(env, w, async (q) => {
+      const handle = await start(q, input);
+      const done = (await handle.result()) as FusionResult;
+      return { result: done, status: (await handle.query('status')) as FusionStatus };
+    });
+    expect(result.state).toBe('done');
+    expect(trail(w)).toEqual([
+      'lead:plan',
+      'side',
+      'lead:accept',
+      'verify',
+      'lead:fix-brief',
+      'side',
+      'lead:accept',
+      'lead:review',
+    ]);
+    expect(status.rounds.fix).toBe(1);
+    expect(w.count('openPr')).toBe(1);
+    expect(w.count('waitCi')).toBe(2);
+    expect(w.askRows[0]?.applied).toBe(true);
+    // 开 PR 那一刻他还没回：「按推荐先做了」写的是那一刻的样子
+    expect(w.callsOf('openPr')[0]?.input.body.assumed).toEqual([
+      '验证码几位？ → 先按推荐做了「6 位」，创始人还没回',
+    ]);
+  });
+
+  it('超出这张单范围的：这张单绕开它接着做到合并（不停下等），PR 正文写明另开单等他拍', async () => {
+    const w = world();
+    const input = fusionInput();
+    w.askRows.push({
+      id: 'ask-out',
+      taskId: input.taskId,
+      question: '要不要顺手改注册页？',
+      options: ['不改', '改'],
+      scope: 'outside',
+      recommended: '不改',
+      applied: false,
+    });
+    const result = await runToEnd(w, input);
+    expect(result.state).toBe('done');
+    expect(trail(w)).toEqual(['lead:plan', 'side', 'lead:accept', 'verify', 'lead:review']);
+    expect(w.asks).toEqual([]);
+    expect(w.callsOf('openPr')[0]?.input.body.assumed).toEqual([
+      '要不要顺手改注册页？ → 超出这张单的范围，绕开了，另开一张单等创始人拍（对账时开）',
+    ]);
+    expect(w.callsOf('closeIssue')[0]?.input.comment).toContain('超出范围另开单 1 条');
+  });
+
+  it('【失败】这张单问过创始人的读不到（库没查成）：不当成一条都没问过往下走，挂起报警', async () => {
+    const w = world({
+      taskAsks: () => new PortError('TASK_NOT_FOUND', '库里没有这张单', { retryable: false }),
+    });
+    const { parked } = await runUntilParked(w);
+    expect(parked.lastProblem).toBeTruthy();
+    expect(w.count('openPr')).toBe(0);
+    expect(w.alerts.some((a) => a.level === 'stuck')).toBe(true);
+    // 规划做完、执行之前的第一个存档点就读，读不到就停在那里
+    expect(trail(w)).toEqual(['lead:plan']);
   });
 
   it('流程配置读不到、认不出：这张单停派报红，一个会话都不起；修好点「继续」接着走', async () => {

@@ -64,15 +64,15 @@ const pick = (over: Partial<PickRouteInput> = {}, p = ports()) =>
   );
 
 describe('选路', () => {
-  it('按调度台的顺序派；两个 Claude 池是同一个会话用户，不再分主池、备池', async () => {
+  it('按调度台的顺序派；两个 Claude 池是同一个会话用户，不再分主池、备池；派出去的带上组织类型（失败分流要）', async () => {
     await world(t.db);
     const r = await pick();
     expect(r).toMatchObject({
       ok: true,
-      route: { routeId: 'solo', poolId: 'claude-solo', poolRole: 'primary' },
+      route: { routeId: 'solo', poolId: 'claude-solo', orgKind: 'carpool' },
     });
     const carpool = await pick({ avoidRouteIds: ['solo'] });
-    expect(carpool).toMatchObject({ ok: true, route: { routeId: 'carpool', poolRole: 'primary' } });
+    expect(carpool).toMatchObject({ ok: true, route: { routeId: 'carpool', orgKind: 'carpool' } });
     // 写码这种重活照样派得出去：平时挂着的拼车池要接全部的活
     expect(await pick({ stage: 'execute', avoidRouteIds: ['solo'] })).toMatchObject({
       ok: true,
@@ -534,6 +534,79 @@ describe('报警、提问、人闸', () => {
     await expect(
       ports().askHuman({ taskId: randomUUID(), askId: randomUUID(), question: '？' }, ctx),
     ).rejects.toThrow();
+  });
+
+  it('引擎自己问、带推荐的（分诊说不清，#259）：记成这张单范围内按推荐先做的；读回来空的列不给，照改只记回答了的、时刻不往后挪', async () => {
+    await world(t.db);
+    const { task } = await addTask(t.db);
+    const { task: other } = await addTask(t.db);
+    const p = ports();
+    const withRec = randomUUID();
+    const legacy = randomUUID();
+    await p.askHuman(
+      {
+        taskId: task.id,
+        askId: withRec,
+        question: '验证码几位？',
+        options: ['6 位', '4 位'],
+        recommended: '6 位',
+      },
+      ctx,
+    );
+    await p.askHuman({ taskId: task.id, askId: legacy, question: '要不要兼容旧接口？' }, ctx);
+    await p.askHuman({ taskId: other.id, askId: randomUUID(), question: '别的单问的' }, ctx);
+
+    expect(await p.taskAsks({ taskId: task.id }, ctx)).toEqual([
+      {
+        id: withRec,
+        question: '验证码几位？',
+        options: ['6 位', '4 位'],
+        applied: false,
+        scope: 'task',
+        recommended: '6 位',
+      },
+      { id: legacy, question: '要不要兼容旧接口？', options: [], applied: false },
+    ]);
+
+    // 回答了的那条记上照改；没回答的不记；再记一次时刻不动
+    await t.client.query(
+      "update asks set answer = '4 位', answered_by = 'founder', answered_at = now() where id = $1",
+      [withRec],
+    );
+    await p.markAsksApplied({ taskId: task.id, askIds: [withRec, legacy] }, ctx);
+    const first = (await t.db.select().from(asks)).find((a) => a.id === withRec)?.appliedAt;
+    expect(first).toEqual(NOW);
+    await createStorePorts({
+      db: t.db,
+      now: () => new Date(NOW.getTime() + 60_000),
+      draw: () => 0.5,
+      log: () => {},
+      sessionOrg: onCarpool,
+    }).markAsksApplied({ taskId: task.id, askIds: [withRec] }, ctx);
+    const rows = await p.taskAsks({ taskId: task.id }, ctx);
+    expect(rows.map((r) => [r.id, r.answer, r.applied])).toEqual([
+      [withRec, '4 位', true],
+      [legacy, undefined, false],
+    ]);
+    expect((await t.db.select().from(asks)).find((a) => a.id === withRec)?.appliedAt).toEqual(first);
+  });
+
+  it('【故意造出的失败】读问过的、记照改：任务不在（或编号不是 UUID）报 TASK_NOT_FOUND、不可重试，不当成「一条都没问过」', async () => {
+    await world(t.db);
+    const p = ports();
+    for (const taskId of [randomUUID(), 'not-a-uuid']) {
+      await expect(p.taskAsks({ taskId }, ctx)).rejects.toMatchObject({
+        code: 'TASK_NOT_FOUND',
+        retryable: false,
+      });
+    }
+    await expect(p.markAsksApplied({ taskId: 'not-a-uuid', askIds: [] }, ctx)).rejects.toMatchObject({
+      code: 'TASK_NOT_FOUND',
+      retryable: false,
+    });
+    // 任务在、一条都没问过：是空的（这才是真的没问过）
+    const { task } = await addTask(t.db);
+    expect(await p.taskAsks({ taskId: task.id }, ctx)).toEqual([]);
   });
 });
 

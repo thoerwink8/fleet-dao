@@ -113,7 +113,7 @@ export async function world(db: Db, options: { order?: string[]; stages?: StageK
       .insert(stagePolicyRoutes)
       .values(order.map((routeId, position) => ({ stage, routeId, position, enabled: true })));
   }
-  // 额度都读成了、都还宽：选路按人排的顺序走（额度未知的备池只放一个试探，别让它搅进来）。
+  // 额度都读成了、都还宽：选路按人排的顺序走（额度未知的排在后面，别让它搅进来）。
   for (const poolId of ['claude-solo', 'claude-carpool', 'relay']) {
     await savePoolQuota(
       db,

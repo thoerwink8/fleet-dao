@@ -24,8 +24,16 @@
 //    上一轮的会话输出管道已经断了，接不上。工作流被强行终止留下的会话，现在要等工人下一次起来时这一步才收
 //    （每小时对账还没接这一项：#247）。
 
-import type { Brief, FlowConfigRead, Rebuttable, Rebuttal, VerifyReport } from '@fleet-dao/core';
-import type { HostId, Repo, RunOutcome, StageKind, SubtaskState, TaskState } from '@fleet-dao/shared';
+import type { Brief, FlowConfigRead, Rebuttable, Rebuttal, TaskAsk, VerifyReport } from '@fleet-dao/core';
+import type {
+  HostId,
+  OrgKind,
+  Repo,
+  RunOutcome,
+  StageKind,
+  SubtaskState,
+  TaskState,
+} from '@fleet-dao/shared';
 import type { MergeOutcome, TestResult } from './decisions/merge.ts';
 import type { PlannedSubtask } from './decisions/plan.ts';
 import type { TriageVerdict } from './decisions/triage.ts';
@@ -84,8 +92,11 @@ export interface RouteChoice {
   modelId: string;
   family: string;
   hostId: HostId;
-  /** 主池 / 备池（拼车号是备池）：额度用满时走法不同（失败分流 QT1）。老历史里没有 = 按主池。 */
-  poolRole?: 'primary' | 'backup';
+  /**
+   * Claude 订阅池的组织类型（pools.org_kind：拼车、独享，共用一个会话用户）：额度用满时不原地睡到清零（失败分流 QT1
+   * 的 orgLadder）。别的池、老历史里没有。
+   */
+  orgKind?: OrgKind;
 }
 
 export interface PickRouteInput extends Scope {
@@ -420,6 +431,8 @@ export interface PrBody {
   /** 还欠什么；空 = 无。 */
   owed?: string[];
   risks?: string[];
+  /** 「按推荐先做了」：问创始人的岔路里没等他回、按推荐先做了的（core 的 assumedLines，#259）；空 = 无。 */
+  assumed?: string[];
   /**
    * 需求文档的目录（specs/<号>-<短名>/）：「specs」一栏照写；「对应计划」一栏由端口开 PR 时现读这个目录下需求.md 的
    * 「对应计划：」那一行（读不到、没填就明确报错，不填空的）。
@@ -603,6 +616,16 @@ export interface AskHumanInput extends Scope {
   options?: string[];
   /** 会话里问的就带上是哪一次会话。 */
   runId?: string;
+  /**
+   * 引擎自己问、带了推荐的（分诊说不清，#259）：按推荐先做、不等回答，库里记成这张单范围内的岔路（scope = task），
+   * 卡片写「已按推荐先做」。推荐的要在 options 里（库约束兜底）。不给就是老样子：发卡等回答。
+   */
+  recommended?: string;
+}
+
+/** 照改完：这几条提问记上 applied_at（#259：他晚到、改选了别的回答，存档点交给 Lead 照改完了）。 */
+export interface MarkAsksAppliedInput extends Scope {
+  askIds: string[];
 }
 
 /** 人闸：请人批准这个子任务进合并队列（飞书卡片 + 驾驶舱待点头，一键批准 / 拒绝）。 */
@@ -719,6 +742,13 @@ export interface EnginePorts {
   /** 这张单现在的标题和正文（单子正文里改了需求文档那一行，人点「继续」后重认）。任务不在明确报错（TASK_NOT_FOUND）。 */
   taskRequest(input: Scope, ctx: PortContext): Promise<TaskRequest>;
   askHuman(input: AskHumanInput, ctx: PortContext): Promise<void>;
+  /**
+   * 这张单的全部提问（库里 asks，按提问先后）：存档点看他晚到的回答、开 PR 写「按推荐先做了」、关单记数（#259）。
+   * 任务不在明确报错（TASK_NOT_FOUND，不可重试），不拿「一条都没问过」顶。
+   */
+  taskAsks(input: Scope, ctx: PortContext): Promise<TaskAsk[]>;
+  /** 照改完记 applied_at：只记这张单的、回答了的、没记过的（重试幂等）。 */
+  markAsksApplied(input: MarkAsksAppliedInput, ctx: PortContext): Promise<void>;
   requestApproval(input: RequestApprovalInput, ctx: PortContext): Promise<void>;
   raiseAlert(input: RaiseAlertInput, ctx: PortContext): Promise<{ alertId: string }>;
   recordTiming(input: TimingEntry, ctx: PortContext): Promise<void>;
