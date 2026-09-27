@@ -12,7 +12,7 @@ import { cn } from '../lib/utils';
 import { Panel } from './page';
 
 /** 「不全」小标：这个合计只加了读到的那几次。 */
-export function Incomplete() {
+function Incomplete() {
   return (
     <span className="rounded border border-st-stall/50 px-1 text-[10px] leading-4 font-medium text-ink-stall">
       不全
@@ -21,7 +21,7 @@ export function Incomplete() {
 }
 
 /** 一段用量：「当量 38.5 万」「套餐内 · 花费没读到」「按量 $0.04（不全：1 次没读到）」。 */
-export function UsagePartView({ p }: { p: UsagePart }) {
+function UsagePartView({ p }: { p: UsagePart }) {
   return (
     <span title={p.title}>
       {p.label ? <span>{p.label}</span> : null}
@@ -323,7 +323,7 @@ export function UsagePanel({ d, now }: { d: TaskDetail; now: number }) {
             label="输入当量"
             r={reading(t.inputEquivalent, t.missingEquivalent, t.runs)}
             empty={noRuns}
-            note={t.runs ? `额度按它比：各家 token 按${EQUIVALENT_RULE}折算` : undefined}
+            note={t.runs ? `额度按它比：各家 token 按${EQUIVALENT_RULE} 折算` : undefined}
             big
             className="col-span-2"
           >
