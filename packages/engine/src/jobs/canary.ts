@@ -1,13 +1,13 @@
 // 全流程巡检（#223；design 第六节「断链怎么被发现」第 3 层）：每 6 小时在巡检仓开一张固定的小单，看它从收单一路走到派活、
 // 规划、执行、验证、开 PR 过 CI、合并、关单、记账、驾驶舱显示。每一步有期限，超时或出事（挂起等人、工作流没做完、单子被关成
 // 不做了）就推一条「卡住报警」，写清断在哪一步；下一轮通过了这条自己撤。
-// 一轮 = 开单（openCanaryRound：记开始 → 补记没收尾的几轮、收掉前几轮留下的单 → 找巡检仓的当前版本 → 开单 → 需求文档经 PR 进主线 → 挂当前版本）
+// 一轮 = 开单（openCanaryRound：记开始 → 补记没收尾的几轮、收掉前几轮留下的单 → 找巡检仓的当前版本 → 开单、挂上当前版本）
 // → 每 2 分钟看一回（checkCanaryRound：读库、问 Temporal、要时读 GitHub → canaryNext 判 → 记进库）→ 有结论就收尾。
 // 结论三种：通过、断在哪、没跑成（巡检自己挂了：没配、仓读不到、开不了单、连着查不成）。没跑成的这一轮在 schedule_runs 记
 // failed，由看门狗（#203）照登记表报；断了的这一轮巡检自己跑成了，schedule_runs 记 ok、发现 1 个问题，报警由这里推。
-// 改这里之前必须知道：开单不挂里程碑、写好需求文档再挂——接活只派挂在当前版本上的单（design 第九节「在哪能做与接活开关」），
-// 先挂上的话工作流可能在需求文档进主线之前起来。引擎不直写主线（0003）：需求文档走 PR 合进去，这条路和引擎对账开的单共用
-// 一份（#295），接上之前 specDoc 是 unavailable，这一轮开单之前就记没跑成、一张单都不开。
+// 改这里之前必须知道：接活只派挂在当前版本上的单（design 第九节「在哪能做与接活开关」），开单时就挂上巡检仓的当前版本。
+// 巡检单没有「文档：」那一行，也不先在巡检仓里建需求文档（引擎不直写主线）：正文照 #295 的写法写全需求，收单照正文写需求
+// 文档、Lead 随 PR 提交，开 PR 前验证照正文核（core 的 specOf、bodyCriteria）。「怎么算做完」下面只放验收条，别的话会被当成一条。
 // 判走到哪一步只在 canaryNext（纯函数），读东西只在 observe。
 import { currentVersion } from '@fleet-dao/core';
 import {
@@ -38,10 +38,10 @@ export const CANARY_JOB = {
 export const CANARY_EVERY_HOURS = 6;
 /** 和对账补漏（整点起每 15 分钟）、路由探针（7、22、37、52 分）、每小时对账（41 分）、备份巡查（17 分）错开。 */
 export const CANARY_OFFSET_MINUTES = 26;
-/** 两回之间隔多久、连着几回没查成算没跑成：工作流和活动共用，定义在 contract.ts。 */
 /**
- * 一轮最长多久：到了还没走完，断在当时那一步（下一轮 6 小时后照来，不叠着跑）；一轮的工作流再多给 30 分钟收尾。
- * 和健康页同一份（@fleet-dao/db）：过了工作流的时限还没有结论的一轮，健康页不说它在跑、下一轮开始时补记没跑成。
+ * 两回之间隔多久、连着几回没查成算没跑成：工作流和活动共用，定义在 contract.ts。
+ * 一轮最长多久（到了还没走完，断在当时那一步）、一轮的工作流最长活多久：和健康页同一份（@fleet-dao/db），过了工作流的时限
+ * 还没有结论的一轮，健康页不说它在跑、下一轮开始时补记没跑成。
  */
 export { CANARY_CHECK_FAILURE_LIMIT, CANARY_MAX_MINUTES, CANARY_POLL_SECONDS, CANARY_RUN_TIMEOUT_MINUTES };
 /** 断了的报警只有一条（同一个键）：下一轮再断原地更新、处理过的重新打开；通过了自己撤。 */
@@ -50,8 +50,6 @@ export const CANARY_ALERT_KEY = 'canary:broken';
 export const CANARY_ACTOR = 'engine:canary';
 /** 一轮最多收掉前几轮留下的几张单（多出来的下一轮接着收）。 */
 export const CANARY_CLEANUP_LIMIT = 5;
-/** 巡检单的需求文档目录的短名：specs/<号>-巡检/。 */
-export const CANARY_SPEC_SHORT = '巡检';
 /** 巡检单要改的文件（巡检仓根上）。 */
 export const CANARY_LOG_FILE = '巡检记录.md';
 
@@ -347,44 +345,34 @@ export function canaryNext(state: CanaryState, obs: CanaryObservation): CanaryDe
 
 // —— 巡检单本身 ——
 
-/** 巡检单的标题和正文：正文里「文档：」那一行用 <本单号> 占位（开单时还不知道号，core 的 specDirOf 认它）。 */
-export function canaryIssue(openedAt: Date): { title: string; body: string } {
+/**
+ * 巡检单的标题和正文（#295 的写法）：正文写全需求——起因、要什么，最后是写了字的「## 怎么算做完」；不写「文档：」那一行。
+ * 收单照正文写需求文档（目录 specs/<号>-<照标题取的短名>），Lead 随 PR 提交；开 PR 前验证照正文核。开单时还不知道单号，
+ * 要追加的那一行用这一轮的编号和开单时刻认（每轮都不一样）。
+ */
+export function canaryIssue(round: number, openedAt: Date): { title: string; body: string } {
+  const line = canaryLogLine(round, openedAt);
   return {
-    title: `巡检：往巡检记录追加一行（${stamp(openedAt)}）`,
+    title: `巡检第 ${round} 轮：往巡检记录追加一行`,
     body: [
       '原话：巡检单。fleet-dao 每 6 小时自动开一张，由引擎从收单一路做到合并、关单，证明整条链是通的；断在哪一步会报警。不用人管。',
       '',
-      `文档：\`specs/<本单号>-${CANARY_SPEC_SHORT}/需求.md\``,
+      '## 要什么',
+      '',
+      `在仓根的 \`${CANARY_LOG_FILE}\` 末尾追加一行 \`${line}\`（这一轮巡检的编号和开单时刻，UTC）。文件不在就新建：第一行写 \`# 巡检记录\`，空一行，再写这一行。别的内容一个字都不动。`,
+      '',
+      '## 怎么算做完',
+      '',
+      `- \`${CANARY_LOG_FILE}\` 的最后一行是 \`${line}\`，一字不差。`,
+      `- 这张单改到的文件只有 \`${CANARY_LOG_FILE}\`，和 \`specs/\` 下这张单自己的目录（目录名以这张单的号开头）里的文档。`,
+      '- `node --test` 通过。',
     ].join('\n'),
   };
 }
 
-/** 巡检单的需求文档路径。 */
-export function canarySpecPath(issueNumber: number): string {
-  return `specs/${issueNumber}-${CANARY_SPEC_SHORT}/需求.md`;
-}
-
-/** 巡检单的需求文档：一件确定、验得了的小事（往巡检记录追加一行），「怎么算做完」逐条可核。 */
-export function canarySpec(issueNumber: number, openedAt: Date): string {
-  const line = `- #${issueNumber} ${openedAt.toISOString().replace(/\.\d{3}Z$/, 'Z')}`;
-  return [
-    `# 巡检：往巡检记录追加一行（#${issueNumber}）`,
-    '',
-    '对应计划：无（巡检单：fleet-dao 每 6 小时自动开一张）',
-    '',
-    '原话：巡检单。fleet-dao 每 6 小时自动开一张，由引擎从收单一路做到合并、关单，证明整条链是通的。',
-    '',
-    '## 要什么',
-    '',
-    `在仓根的 \`${CANARY_LOG_FILE}\` 末尾追加一行 \`${line}\`（这张单的号和开单时刻，UTC）。文件不在就新建：第一行写 \`# 巡检记录\`，空一行，再写这一行。别的内容一个字都不动。`,
-    '',
-    '## 怎么算做完',
-    '',
-    `- \`${CANARY_LOG_FILE}\` 的最后一行是 \`${line}\`，一字不差。`,
-    `- 这张单改到的文件只有 \`${CANARY_LOG_FILE}\` 和 \`specs/${issueNumber}-${CANARY_SPEC_SHORT}/\` 下的文档。`,
-    '- `node --test` 通过。',
-    '',
-  ].join('\n');
+/** 巡检记录里这一轮要追加的那一行：这一轮的编号和开单时刻（UTC，到秒）。 */
+export function canaryLogLine(round: number, openedAt: Date): string {
+  return `- 第 ${round} 轮 ${openedAt.toISOString().replace(/\.\d{3}Z$/, 'Z')}`;
 }
 
 // —— 一轮怎么跑（外面的读写都经 deps，真装配在 real/canary.ts）——
@@ -428,8 +416,13 @@ export interface CanaryRecord {
 /** 「引擎」机器人在巡检仓上要做的几样（真实现是 @fleet-dao/github）。 */
 export interface CanaryGitHub {
   openMilestones(): Promise<{ number: number; title: string }[]>;
-  openIssue(input: { title: string; body: string; dedupe: string }): Promise<{ number: number; url: string }>;
-  setMilestone(issueNumber: number, milestone: number): Promise<void>;
+  /** 开单、同时挂上里程碑（按去重键幂等：重试不开第二张）。 */
+  openIssue(input: {
+    title: string;
+    body: string;
+    dedupe: string;
+    milestone: number;
+  }): Promise<{ number: number; url: string }>;
   issueState(issueNumber: number): Promise<{ state: 'open' | 'closed'; stateReason: string | null }>;
   closeIssue(issueNumber: number, comment: string): Promise<void>;
 }
@@ -440,13 +433,6 @@ export interface CanaryDeps {
   runs: ScheduleRunLog;
   record: CanaryRecord;
   github: CanaryGitHub;
-  /**
-   * 巡检单的需求文档怎么进主线：引擎不直写主线，要经 PR 合进去（CI 绿、合并了才算进了，重试按这张单认、不开第二个）。
-   * 这条路和引擎对账开的单共用一份（#295）；接上之前是 unavailable（写明等什么），这一轮记没跑成、一张单都不开。
-   */
-  specDoc:
-    | { land(input: { issueNumber: number; path: string; content: string; message: string }): Promise<void> }
-    | { unavailable: string };
   /** 这张单在库里的事实（@fleet-dao/db 的 canaryDbFacts）。 */
   facts(issueNumber: number): Promise<CanaryDbFacts>;
   workflows: {
@@ -601,10 +587,8 @@ async function cleanLeftovers(
 }
 
 /**
- * 开单：记开始 → 补记没收尾的几轮、收前几轮留下的单 → 找巡检仓的当前版本 → 开单（不挂里程碑）→ 需求文档经 PR 进主线 → 挂当前版本。
- * 需求文档进不了主线的路还没接上（specDoc 是 unavailable）：开单之前就记没跑成，不开一张注定停住的单。
- * 哪一步没成都算这一轮没跑成（写明停在哪），开出来的单关掉作废，不留一张没人管的半截单。
- * 记开始就失败：抛 CanaryNotRecordedError（这一轮在库里没有记录）。
+ * 开单：记开始 → 补记没收尾的几轮、收前几轮留下的单 → 找巡检仓的当前版本 → 开单、同时挂上当前版本（正文照 #295 写全需求）。
+ * 哪一步没成都算这一轮没跑成（写明停在哪）。记开始就失败：抛 CanaryNotRecordedError（这一轮在库里没有记录）。
  */
 export async function openCanaryRound(deps: CanaryDeps): Promise<CanaryStepResult> {
   const startedAt = deps.now();
@@ -634,19 +618,10 @@ export async function openCanaryRound(deps: CanaryDeps): Promise<CanaryStepResul
     return { done: true, run: await conclude(deps, base, 'not_run', 'open', [why, ...lost].join('；'), []) };
   }
   const notes = [...lost, ...(await cleanLeftovers(deps, repo, startedAt))];
-  const failed = async (why: string) => {
-    if (base.issueNumber !== null) {
-      try {
-        await deps.github.closeIssue(base.issueNumber, `巡检这一轮没开全（${why}），这张作废。`);
-      } catch (err) {
-        why = `${why}；开出来的 #${base.issueNumber} 也没关掉：${message(err)}`;
-      }
-    }
-    return {
-      done: true as const,
-      run: await conclude(deps, base, 'not_run', 'open', [...notes, why].join('；'), []),
-    };
-  };
+  const failed = async (why: string) => ({
+    done: true as const,
+    run: await conclude(deps, base, 'not_run', 'open', [...notes, why].join('；'), []),
+  });
   let milestone: { number: number; title: string };
   try {
     const current = currentVersion(await deps.github.openMilestones());
@@ -659,32 +634,15 @@ export async function openCanaryRound(deps: CanaryDeps): Promise<CanaryStepResul
   } catch (err) {
     return failed(`读不到巡检仓还开着的里程碑：${message(err)}`);
   }
-  const specDoc = deps.specDoc;
-  if ('unavailable' in specDoc) {
-    return failed(`巡检单的需求文档进不了主线：${specDoc.unavailable}`);
-  }
-  const text = canaryIssue(startedAt);
   let issue: { number: number; url: string };
   try {
-    issue = await deps.github.openIssue({ ...text, dedupe: `canary:${canaryRunId}` });
-  } catch (err) {
-    return failed(`在巡检仓开不了单：${message(err)}`);
-  }
-  base.issueNumber = issue.number;
-  try {
-    await specDoc.land({
-      issueNumber: issue.number,
-      path: canarySpecPath(issue.number),
-      content: canarySpec(issue.number, startedAt),
-      message: `巡检单 #${issue.number} 的需求文档（fleet-dao 全流程巡检开单时写）`,
+    issue = await deps.github.openIssue({
+      ...canaryIssue(canaryRunId, startedAt),
+      dedupe: `canary:${canaryRunId}`,
+      milestone: milestone.number,
     });
   } catch (err) {
-    return failed(`巡检单 #${issue.number} 的需求文档没进主线：${message(err)}`);
-  }
-  try {
-    await deps.github.setMilestone(issue.number, milestone.number);
-  } catch (err) {
-    return failed(`巡检单 #${issue.number} 挂不上当前版本「${milestone.title}」：${message(err)}`);
+    return failed(`在巡检仓开不了单（挂当前版本「${milestone.title}」）：${message(err)}`);
   }
   const at = deps.now().toISOString();
   const state: CanaryState = {

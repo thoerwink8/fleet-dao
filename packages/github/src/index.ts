@@ -107,8 +107,6 @@ export {
   type OpenIssueInput,
   type OpenIssueResult,
   openIssue,
-  type SetIssueMilestoneInput,
-  setIssueMilestone,
   type UpdateIssueProgressInput,
   type UpdateIssueProgressResult,
   updateIssueProgress,
