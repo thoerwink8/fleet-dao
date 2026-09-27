@@ -77,11 +77,14 @@ export interface ClaimStatus {
   refreshIssue(repo: ClaimRepo, issueNumber: number): Promise<ClaimRefresh>;
   /** 每轮对账：作废过了宽限期没心跳的本机认领，所有受管的仓开着的 PR 判一遍；作废的认领的 PR 先撤自动合并，再贴红、留言。 */
   sweep(): Promise<ClaimSweepReport>;
-  /** 强制改派：旧认领自己的 PR 撤自动合并、关掉（分支不动）、留言指向新主，再重贴这张单别的 PR。 */
+  /**
+   * 改派：旧认领（强制作废的、宽限期过了作废的）自己的 PR 撤自动合并、关掉（分支不动）、留言指向新主，再重贴这张单别的 PR。
+   * why 写进留言的括号里：「创始人原话：…」或「原来的认领作废了：…」。
+   */
   closeForReassign(
     repo: ClaimRepo,
     old: IssueClaim,
-    input: { to: string; founder: string },
+    input: { to: string; why: string },
   ): Promise<ReassignCloseReport>;
 }
 
@@ -113,8 +116,8 @@ export function voidComment(claim: IssueClaim): string {
   ].join('\n\n');
 }
 
-export function reassignComment(to: string, founder: string): string {
-  return `这张单改派给 ${to}（创始人原话：${founder}）；分支留着，新主接着用。这个 PR 关了、自动合并撤了。`;
+export function reassignComment(to: string, why: string): string {
+  return `这张单改派给 ${to}（${why}）；分支留着，新主接着用。这个 PR 关了、自动合并撤了。`;
 }
 
 export function createClaimStatus(deps: ClaimStatusDeps): ClaimStatus {
@@ -312,7 +315,7 @@ export function createClaimStatus(deps: ClaimStatusDeps): ClaimStatus {
             ref(repo),
             pull.number,
             `claim-reassigned:${old.claimId}`,
-            reassignComment(input.to, input.founder),
+            reassignComment(input.to, input.why),
           );
           await github.closePull(ref(repo), pull.number);
           out.closed.push(pull.number);

@@ -22,6 +22,7 @@ import {
   sessionProblem,
 } from '@fleet-dao/core';
 import { type Repo, requirementWorkflowId, type Task } from '@fleet-dao/shared';
+import { type ClaimStatus, refreshText } from './claim-status.ts';
 import type { AskRecord, SeatActor, Store } from './ports.ts';
 
 export const SEAT_USAGE = [
@@ -34,15 +35,20 @@ export const SEAT_USAGE = [
 ].join('\n');
 
 export const CLAIM_USAGE = [
-  '用法：fleet-api claim <take|step|done|release|show|sweep> …（每张单一个认领，#299；都能带 --json 给脚本读）',
+  '用法：fleet-api claim <take|step|done|release|reassign|show|sweep> …（每张单一个认领，#299；都能带 --json 给脚本读）',
   '  claim take <owner/仓名> <单号> --machine <机器名> --session <会话号> --term <任期> --label <工人名> [--owner worker|seat] [--grace-minutes <分>] [--note "<一句话>"] [--scope drill:<名字>]',
   '                                         帅位认领一张单（派给工人或自己做；帅位自己占着的也换给工人）',
   '  claim take <owner/仓名> <单号> --owner engine --scope drill:<名字>   演练：引擎那一边抢（只在演练座位下，不起工作流）',
   '  claim step <owner/仓名> <单号> --claim <认领号> [--note "<一句话>"] [--pr <PR 号>]   工人报一步（心跳）、登记 PR',
   '  claim done <owner/仓名> <单号> --claim <认领号> --note "<一句话>"                    做完了',
   '  claim release <owner/仓名> <单号> --claim <认领号> --note "<一句话>"                 放下（不做了、交出去）',
+  '  claim reassign <owner/仓名> <单号> --to worker|seat --label <工人名> --machine <机器名> --session <会话号> --term <任期> [--founder "<创始人原话>"] [--grace-minutes <分>] [--note "<一句话>"] [--scope drill:<名字>]',
+  '                                         帅位改派给本机：原来的作废了的直接改；还活着的（引擎、别的工人）要带创始人原话，引擎的工作流叫停；旧的 PR 撤自动合并、关掉（分支留着）',
+  '  claim reassign <owner/仓名> <单号> --to engine --reason "<为什么>" (--machine … --session … --term … | --founder "<创始人原话>")',
+  '                                         改派给引擎：走交单（fleet-api handover）同一条路',
   '  claim show <owner/仓名> [<单号>…] [--all]   看认领（默认只列还活着的）',
-  '  claim sweep                                 作废过了宽限期没心跳的本机认领（引擎定时跑；演练时手动跑）',
+  '  claim sweep                                 作废过了宽限期没心跳的本机认领，它们开着的 PR 撤自动合并、贴红、留言（引擎每轮 GitHub 对账都跑；演练时手动跑）',
+  '认领变了（认领、登记 PR、做完、放下、改派）当场重贴挂这张单的开着的 PR 上的「认领对得上」（引擎机器人）；没贴成照实说，GitHub 对账每 15 分钟会补。',
 ].join('\n');
 
 export class SeatCliError extends Error {
@@ -449,7 +455,167 @@ async function drillEngineTake(
   };
 }
 
-export async function runClaim(argv: readonly string[], deps: { store: Store }): Promise<SeatCliResult> {
+/**
+ * 帅位改派（方案「法国命令行」的表，#348）。给本机（--to worker|seat）：同一个事务里核任期、抢这一行——原来的作废了、放下了、
+ * 做完了的直接改；还活着的（引擎、别的工人）要带创始人原话，当场作废、给这次的工人；引擎的工作流叫停。原来那份是作废的（这次
+ * 强制作废的、宽限期过了作废的），它开着的 PR 撤自动合并、关掉、留言指向新主，分支留着。给引擎（--to engine）走交单同一条路。
+ */
+async function reassign(rest: readonly string[], deps: ClaimCliDeps): Promise<SeatCliResult> {
+  const usage = CLAIM_USAGE;
+  const p = parse(
+    rest,
+    ['to', 'machine', 'session', 'scope', 'term', 'label', 'founder', 'grace-minutes', 'note', 'reason'],
+    usage,
+  );
+  if (p.positional.length !== 2) throw new SeatCliError(`要两个位置参数：仓和单号。\n${usage}`);
+  const repoName = repoArg(p.positional[0], usage);
+  const issueNumber = positiveInt(p.positional[1] ?? '', '单号', usage);
+  const to = need(p, 'to', usage);
+  const founder = p.options.get('founder')?.trim() || undefined;
+  if (founder !== undefined && [...founder].length > MAX_NOTE)
+    throw new SeatCliError(`--founder 太长（最多 ${MAX_NOTE} 个字）。\n${usage}`);
+  if (to === 'engine') {
+    for (const k of ['label', 'grace-minutes', 'note'])
+      if (p.options.has(k)) throw new SeatCliError(`--to engine 不带 --${k}（交单写 --reason）。\n${usage}`);
+    const reason = need(p, 'reason', usage);
+    const hasSeat = p.options.has('machine') || p.options.has('session') || p.options.has('term');
+    if (!hasSeat && founder === undefined)
+      throw new SeatCliError(`--to engine 要带着帅位（--machine … --session … --term …）或创始人原话（--founder）。\n${usage}`);
+    const text = await deps.handoverToEngine({
+      owner: repoName.owner,
+      name: repoName.name,
+      issueNumber,
+      reason,
+      seat: hasSeat ? actorOf(p, usage) : undefined,
+      founder,
+    });
+    return { code: 0, text, json: { ok: true, to: 'engine', text } };
+  }
+  if (to !== 'worker' && to !== 'seat')
+    throw new SeatCliError(`--to 只收 worker、seat、engine，没有「${to}」。\n${usage}`);
+  if (p.options.has('reason')) throw new SeatCliError(`--to ${to} 不带 --reason（写 --note）。\n${usage}`);
+  const seat = actorOf(p, usage);
+  const label = need(p, 'label', usage);
+  const labelWhy = sessionProblem(label, '工人名');
+  if (labelWhy) throw new SeatCliError(`${labelWhy}。\n${usage}`);
+  const graceRaw = p.options.get('grace-minutes');
+  const graceMinutes = graceRaw === undefined ? undefined : positiveInt(graceRaw, '宽限期（分钟）', usage);
+  const note = noteOf(p, false, usage);
+  const repo = await repoOf(deps.store, repoName);
+  const names = new Map([[repo.id, `${repo.owner}/${repo.name}`]]);
+  const label2 = `${repo.owner}/${repo.name}#${issueNumber}`;
+  const r = await deps.store.takeClaim({
+    repoId: repo.id,
+    issueNumber,
+    seat,
+    owner: { kind: to, label },
+    graceMinutes,
+    note,
+    founder,
+  });
+  if (!r.ok) {
+    if (r.reason === 'held')
+      return {
+        code: 3,
+        text: `没改派（${label2} 没动）：${describeClaim(r.claim, r.now)}，还活着。要强制改派带上创始人原话 --founder "…"：原来那份当场作废`,
+        json: { ok: false, reason: 'held', claim: claimJson(r.claim, names), now: r.now },
+      };
+    return {
+      code: r.reason === 'not_seat' ? 3 : 1,
+      text: `没改派（${label2} 没动）：${r.why}`,
+      json: { ok: false, reason: r.reason, why: r.why, now: r.now },
+    };
+  }
+  const lines = [
+    `改派了 ${label2}：归 ${claimOwnerText(r.claim)}，认领号 ${r.claim.claimId}（开 PR 时正文「认领」栏写它）`,
+  ];
+  const json: Record<string, unknown> = { ok: true, claim: claimJson(r.claim, names), now: r.now };
+  let code = 0;
+  const old = r.voided ?? (r.previous?.state === 'voided' ? r.previous : null);
+  if (old) {
+    lines.push(`原来那份作废了：${claimOwnerText(old)}（认领 ${old.claimId.slice(0, 8)}）`);
+    json.voided = claimJson(old, names);
+  }
+  // 原来归引擎、这次强制作废的：叫停它的工作流（叫停不成它的 PR 也合不进——认领已经不归引擎——但要人去停）
+  if (r.voided?.ownerKind === 'engine' && r.voided.workflowId) {
+    try {
+      const stopped = await deps.stopEngine(r.voided.workflowId, {
+        by: `${seat.machine}/${seat.session}`,
+        reason: `改派给 ${claimOwnerText(r.claim)}（创始人原话：${founder ?? ''}）`,
+      });
+      lines.push(stopped === 'stopped' ? `引擎的工作流 ${r.voided.workflowId} 叫停了` : `引擎的工作流 ${r.voided.workflowId} 已经不在了`);
+      json.engine = stopped;
+    } catch (err) {
+      code = 1;
+      const why = err instanceof Error ? err.message : String(err);
+      lines.push(
+        `引擎的工作流 ${r.voided.workflowId} 没叫停成（${why}）：它开的 PR 合不进去（认领已经不归引擎），但它还在跑，要人去叫停`,
+      );
+      json.engine = { error: why };
+    }
+  }
+  if (old) {
+    const why = r.voided ? `创始人原话：${founder ?? ''}` : `原来的认领作废了：${old.endReason ?? '没写原因'}`;
+    try {
+      const closed = await (await deps.claims()).closeForReassign(repo, old, { to: claimOwnerText(r.claim), why });
+      lines.push(
+        closed.closed.length > 0
+          ? `原来那份开着的 PR 关了（分支留着）：${closed.closed.map((n) => `#${n}`).join('、')}`
+          : '原来那份没有开着的 PR',
+      );
+      if (closed.problems.length > 0) {
+        code = 1;
+        lines.push(...closed.problems.map((x) => `没处理成：${x}`));
+      }
+      json.closed = closed;
+    } catch (err) {
+      code = 1;
+      const e = err instanceof Error ? err.message : String(err);
+      lines.push(`原来那份的 PR 没处理（GitHub 没接上：${e}）：撤自动合并、关掉要人补；「认领对得上」GitHub 对账每 15 分钟会重贴`);
+      json.closed = { error: e };
+    }
+  } else {
+    const pr = await refreshAfter(deps, repo, issueNumber);
+    lines.push(pr.line);
+    json.prStatus = pr.json;
+  }
+  return { code, text: lines.join('\n'), json };
+}
+
+/** fleet-api claim 碰外面的几样：库；GitHub（引擎机器人）、Temporal、交单用到才连。 */
+export interface ClaimCliDeps {
+  store: Store;
+  /** 「认领对得上」那一侧（claim-status.ts）：认领变了重贴、sweep 撤自动合并、改派关旧 PR。用到才连；连不上抛错。 */
+  claims: () => Promise<ClaimStatus>;
+  /** 改派给本机时叫停引擎在跑的工作流：叫停了 stopped；工作流已经不在 gone；连不上抛错。 */
+  stopEngine: (workflowId: string, input: { by: string; reason: string }) => Promise<'stopped' | 'gone'>;
+  /** 改派给引擎：交单（cli.ts 的 handover）同一条路，回给人看的那段话；没交成抛 CliError（带退出码）。 */
+  handoverToEngine: (input: {
+    owner: string;
+    name: string;
+    issueNumber: number;
+    reason: string;
+    seat?: SeatActor | undefined;
+    founder?: string | undefined;
+  }) => Promise<string>;
+}
+
+/** 认领变了之后当场重贴挂这张单的开着的 PR（没贴成照实说，不改这条命令的退出码：认领已经记上了）。 */
+async function refreshAfter(
+  deps: ClaimCliDeps,
+  repo: Repo,
+  issueNumber: number,
+): Promise<{ line: string; json: Record<string, unknown> }> {
+  try {
+    const r = await (await deps.claims()).refreshIssue(repo, issueNumber);
+    return { line: refreshText(r), json: { ok: r.problems.length === 0, ...r } };
+  } catch (err) {
+    const error = err instanceof Error ? err.message : String(err);
+    return { line: refreshText({ error }), json: { ok: false, error } };
+  }
+}
+
+export async function runClaim(argv: readonly string[], deps: ClaimCliDeps): Promise<SeatCliResult> {
   const [sub = '', ...rest] = argv;
   const usage = CLAIM_USAGE;
   const { store } = deps;
@@ -486,12 +652,14 @@ export async function runClaim(argv: readonly string[], deps: { store: Store }):
       note,
     });
     const label2 = `${repo.owner}/${repo.name}#${issueNumber}`;
-    if (r.ok)
+    if (r.ok) {
+      const pr = await refreshAfter(deps, repo, issueNumber);
       return {
         code: 0,
-        text: `认领了 ${label2}：归 ${claimOwnerText(r.claim)}，认领号 ${r.claim.claimId}（开 PR 时正文「认领」栏写它），宽限期 ${r.claim.graceMinutes} 分钟没心跳就作废`,
-        json: { ok: true, claim: claimJson(r.claim, names), now: r.now },
+        text: `认领了 ${label2}：归 ${claimOwnerText(r.claim)}，认领号 ${r.claim.claimId}（开 PR 时正文「认领」栏写它），宽限期 ${r.claim.graceMinutes} 分钟没心跳就作废\n${pr.line}`,
+        json: { ok: true, claim: claimJson(r.claim, names), prStatus: pr.json, now: r.now },
       };
+    }
     if (r.reason === 'held')
       return {
         code: 3,
@@ -533,12 +701,17 @@ export async function runClaim(argv: readonly string[], deps: { store: Store }):
         text: `没记上：${label2} ${r.claim ? `现在是 ${describeClaim(r.claim, r.now)}` : '没有认领'}，你的认领号 ${claimId.slice(0, 8)} 对不上或已经结束；这张已经不归你，别再动（推不上、合不进）`,
         json: { ok: false, claim: r.claim && claimJson(r.claim, names), now: r.now },
       };
+    const text = `${label2}：${claimOwnerText(r.claim)} ${claimStateText(r.claim.state)}${sub === 'step' && pr !== undefined ? `，登记了 PR #${pr}` : ''}`;
+    if (sub === 'step' && pr === undefined)
+      return { code: 0, text, json: { ok: true, claim: claimJson(r.claim, names), now: r.now } };
+    const prStatus = await refreshAfter(deps, repo, issueNumber);
     return {
       code: 0,
-      text: `${label2}：${claimOwnerText(r.claim)} ${claimStateText(r.claim.state)}${sub === 'step' && pr !== undefined ? `，登记了 PR #${pr}` : ''}`,
-      json: { ok: true, claim: claimJson(r.claim, names), now: r.now },
+      text: `${text}\n${prStatus.line}`,
+      json: { ok: true, claim: claimJson(r.claim, names), prStatus: prStatus.json, now: r.now },
     };
   }
+  if (sub === 'reassign') return reassign(rest, deps);
   if (sub === 'show') {
     const p = parse(rest, [], usage);
     const [repoRaw, ...nums] = p.positional;
@@ -568,19 +741,42 @@ export async function runClaim(argv: readonly string[], deps: { store: Store }):
     const p = parse(rest, [], usage);
     if (p.positional.length > 0) throw new SeatCliError(`claim sweep 不收位置参数。\n${usage}`);
     const names = await repoNames(store);
-    const { voided, now } = await store.voidExpiredClaims({ limit: 200 });
+    let claims: ClaimStatus;
+    try {
+      claims = await deps.claims();
+    } catch (err) {
+      // GitHub 连不上也照样作废（库里的事先做）；PR 那边交给引擎每轮的对账
+      const { voided, now } = await store.voidExpiredClaims({ limit: 200 });
+      const why = err instanceof Error ? err.message : String(err);
+      return {
+        code: 1,
+        text: [
+          `作废了 ${voided.length} 张过了宽限期没心跳的认领；PR 那边没做（GitHub 没接上：${why}），撤自动合并、贴红交给引擎每 15 分钟的对账`,
+          ...voided.map((c) => `  ${names.get(c.repoId) ?? c.repoId}#${c.issueNumber} ${describeClaim(c, now)}`),
+        ].join('\n'),
+        json: { ok: false, voided: voided.map((c) => claimJson(c, names)), why, now },
+      };
+    }
+    const s = await claims.sweep();
+    const lines = [
+      s.voided.length === 0 ? '没有过了宽限期没心跳的认领' : `作废了 ${s.voided.length} 张过了宽限期没心跳的认领：`,
+      ...s.voided.map((c) => `  ${names.get(c.repoId) ?? c.repoId}#${c.issueNumber} ${claimOwnerText(c)}（认领 ${c.claimId.slice(0, 8)}）`),
+      `开着的 PR 判了 ${s.checked} 个，「认领对得上」贴了 ${s.posted} 条${s.disabled.length > 0 ? `，撤了自动合并：${s.disabled.join('、')}` : ''}${s.commented > 0 ? `，留言 ${s.commented} 条` : ''}`,
+      ...(s.reposScanned < s.reposTotal ? [`有 ${s.reposTotal - s.reposScanned} 个仓开着的 PR 没列出来`] : []),
+      ...s.problems.map((x) => `没处理成：${x}`),
+    ];
     return {
-      code: 0,
-      text:
-        voided.length === 0
-          ? '没有过了宽限期没心跳的认领'
-          : [
-              `作废了 ${voided.length} 张（它们开着的 PR 撤自动合并、贴红在 #299 下一步接上）：`,
-              ...voided.map(
-                (c) => `  ${names.get(c.repoId) ?? c.repoId}#${c.issueNumber} ${describeClaim(c, now)}`,
-              ),
-            ].join('\n'),
-      json: { voided: voided.map((c) => claimJson(c, names)), now },
+      code: s.problems.length > 0 ? 1 : 0,
+      text: lines.join('\n'),
+      json: {
+        ok: s.problems.length === 0,
+        voided: s.voided.map((c) => claimJson(c, names)),
+        checked: s.checked,
+        posted: s.posted,
+        disabled: s.disabled,
+        commented: s.commented,
+        problems: s.problems,
+      },
     };
   }
   throw new SeatCliError(sub ? `没有 claim ${sub} 这条命令。\n${usage}` : usage);
