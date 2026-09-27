@@ -281,6 +281,8 @@ export interface FusionPrFacts {
   flowSource: 'project' | 'org_default';
   /** 副手派不出、由 Lead 自己写的原因；副手写的不给。 */
   soloWhy?: string | undefined;
+  /** Lead 验收时收下的简报外文件（decideAcceptance 交回的 outside，几轮合在一起）；没有是空数组。 */
+  outsideBrief: readonly string[];
 }
 
 export interface FusionPrParts {
@@ -303,16 +305,19 @@ export function summaryItems(summary: string, max = 4): string[] {
 
 /**
  * PR 正文的几栏（0003 第 13 条：方案摘要、验证结论进 PR 正文）。「做了什么」第一条是方案摘要，其余是交活时的总结；
- * 「怎么验证的」是会话里的测试和开 PR 前别家验证的结论，没验就明说为什么没验；「还欠什么」是验证的看不出和建议，
- * 外加这次没做的（方案评审没接、用的全组织默认配置）。
+ * 「怎么验证的」是会话里的测试、Lead 验收收下的简报外文件、开 PR 前别家验证的结论，没验就明说为什么没验；
+ * 「还欠什么」是验证的看不出和建议，外加这次没做的（方案评审没接、用的全组织默认配置）。
  */
 export function fusionPrParts(f: FusionPrFacts): FusionPrParts {
   const did = [`方案：${oneLine(f.planSummary)}`, ...summaryItems(f.summary)];
   const tests = f.testsPassed
     ? '会话里跑过测试命令，最后一次通过（交活时后端核实过）'
     : '交活时报测试没过（fleet done --tests failed）';
+  // 简报外那一行紧跟测试：正文限 15 行，超了从每栏末尾往前砍（github 包的 renderPrBody）
+  const outside = f.outsideBrief.length ? [`简报外改了：${f.outsideBrief.join('、')}（主导收下）`] : [];
   const verified = [
     tests,
+    ...outside,
     ...(f.verify ? f.verify.verified : ['开 PR 前别家验证：单模型模式只对高风险的开，这次没验']),
   ];
   if (f.soloWhy) verified.push(`这一块由 Lead 自己写：${oneLine(f.soloWhy)}`);

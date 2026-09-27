@@ -5,7 +5,7 @@
 // Fusion 的 Lead（brief.lead）每一步都在这张单的工作树里跑、续同一个会话：交什么按这一步定（LEAD_KIND），结论也写进
 // .fleet-out/（工作树里记进 .git/info/exclude，不会被提交）；写方案、写结果那两步另外在分支上提交，头和改动引擎从提交里读。
 
-import { checkReport, type Rebuttal, type VerifyReport } from '@fleet-dao/core';
+import { checkReport, outsideBrief, type Rebuttal, type VerifyReport } from '@fleet-dao/core';
 import type { Repo, StageKind } from '@fleet-dao/shared';
 import type { PlannedSubtask, Risk, SubtaskStage } from '../decisions/plan.ts';
 import type { TriageVerdict } from '../decisions/triage.ts';
@@ -162,6 +162,10 @@ function taskBlock(input: PromptInput): string {
     brief.specDir ? `需求文档目录：${brief.specDir}` : '',
     brief.acceptance.length > 0 ? `做完标准：\n${list(brief.acceptance)}` : '',
     brief.touches.length > 0 ? `会改的地方：\n${list(brief.touches)}` : '',
+    // Fusion 的副手：简报外的由 Lead 验收时定收不收（core 的 decideAcceptance），它要知道为什么改了才判得了
+    brief.task && !brief.lead
+      ? '「会改的地方」以外的文件非改不可才改，交活总结里写清改了哪个、为什么（Lead 验收时看过再定收不收）。'
+      : '',
   ]
     .filter(Boolean)
     .join('\n');
@@ -272,7 +276,7 @@ function leadBlock(input: PromptInput, lead: LeadBrief): string {
 2. 把方案写进 \`${lead.docs.plan}\`：怎么做、改哪些文件、怎么验证，一两页以内。用 git commit 提交在当前分支上；这一步只提交方案，不改代码。
 3. 写一份任务简报（副手照它干），连同方案摘要写进 ${out('lead-plan')}（只写这一个结论文件，它不会被提交），形如：
 {"summary": "方案摘要，三五句（会写进公开的 PR 正文）", "small": true, "highRisk": false, "holds": [], "brief": ${BRIEF_SHAPE}}
-- brief.files：副手只许改这些；改到外面的，验收一律不收。
+- brief.files：副手要改的文件，把要改的地方都圈进去；副手改到外面的，验收时由你定收不收。
 - small：一个副手一次做得完、方案不用别家评的写 true。highRisk：碰安全、权限、数据（迁移里删改）、对外发布的写 true。
 - holds：会对外发布、花钱、删数据的写 "release" / "spend" / "delete"（合并前要人批），都不碰就空数组。
 ${end}`;
@@ -281,11 +285,12 @@ ${end}`;
       const diff = d?.base
         ? `\`git diff ${d.base}..HEAD\` 就是副手交回的全部改动（打回过的几轮连在一起看）。`
         : '';
+      const outside = brief.task && d ? outsideBrief(brief.task, d.changedFiles) : [];
       return `## 你要做的：验收副手这一轮
 副手照你的任务简报干完、交回了（它现在不在跑）：提交头 ${d?.head ?? '（没给）'}，${d?.testsPassed ? '它报测试过了' : '它报测试没过'}。它的总结：${d?.summary?.trim() || '（没写）'}
 改了这些文件：
 ${list(d?.changedFiles ?? [])}
-${diff}对照任务简报（上面的「做完标准」「会改的地方」）看代码：做对了没有、有没有漏、测试够不够。${tests}${readOnly}
+${outside.length ? `其中改到任务简报外的：${outside.join('、')}\n` : ''}${diff}对照任务简报（上面的「做完标准」「会改的地方」）看代码：做对了没有、有没有漏、测试够不够。改到简报外的文件，看过觉得该改就可以收，why 里写清为什么要改它们（收下的会记进 PR 正文或关单评论）；不该改的打回，写清要撤掉哪些。${tests}${readOnly}
 结论写进 ${out('lead-verdict')}，形如：
 {"verdict": "accept", "why": "……"}
 - verdict：收下 "accept"，打回 "reject"。why 都要写：打回时写清要副手改什么（原样交给副手）。打回满两次还不行，下一步由你自己接手。

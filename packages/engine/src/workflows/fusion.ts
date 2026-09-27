@@ -17,6 +17,7 @@ import type {
   FlowAction,
   FlowEvent,
   FlowState,
+  FusionPrFacts,
   FusionPrParts,
   FusionSetup,
   LeadPlan,
@@ -273,14 +274,21 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
   let feedback: Feedback[] = [];
   /** 这张单提交改到过的文件（相对主线）：PR 正文、验证材料、最终审查核结果.md 用。 */
   const changed = new Set<string>();
-  /** 副手这一块改到过的（验收看累计的：前一轮碰了简报外的文件，后一轮没改回来也照样算）。 */
+  /**
+   * 副手这一块改到过的，几轮累计（每轮交回的只有这一轮的改动：前一轮碰了、这一轮没再碰的也要算上）。撤回了的也还在里面：
+   * 拿它硬挡就是 #246 的死结（撤了也过不了），所以简报外的归 Lead 判；#252 接上别的块的硬挡时要换成净改动。
+   */
   const blockChanged = new Set<string>();
+  /** Lead 验收时收下的简报外文件（decideAcceptance 交回的 outside）：状态里写一句，进 PR 正文和关单评论。 */
+  const outsideAccepted = new Set<string>();
   let lastDelivery: { summary: string; testsPassed: boolean } | null = null;
   /** 这一块由 Lead 自己写的原因（副手写的是 undefined）。 */
   let soloWhy: string | undefined;
   let planReviewSkipped = false;
   const rounds: VerifyRound[] = [];
   let prNumber: number | null = null;
+  /** 开 PR 时拼正文用的事实：开了 PR 之后 Lead 又收下简报外的，照它重拼一份给关单评论（PR 正文开出去就不改了）。 */
+  let prFacts: FusionPrFacts | null = null;
   let prParts: FusionPrParts | null = null;
   let pushRework: ReworkCarry = NO_REWORK;
   let prRework: ReworkCarry = NO_REWORK;
@@ -300,6 +308,17 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
   };
   const addChanged = (files: readonly string[] | undefined) => {
     for (const f of files ?? []) changed.add(f);
+  };
+  /**
+   * 记下 Lead 收下的简报外文件（推上去之后才记）：状态里写一句带理由。交回有没有新记下的。
+   * 旧版代码判的结果（重放在途的任务）没有 outside：那时简报外的一律不收，收下的本来就一个都没有。
+   */
+  const noteOutside = (files: readonly string[] | undefined, why: string): boolean => {
+    if (!files?.length) return false;
+    status.lastProblem = `简报外改了：${files.join('、')}（主导收下：${why}）`;
+    const before = outsideAccepted.size;
+    for (const f of files) outsideAccepted.add(f);
+    return outsideAccepted.size > before;
   };
 
   // ---- 写库给驾驶舱、原地更新 issue 的进度段（尽力而为，失败不挡流程）
@@ -700,6 +719,8 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
     const verdict = await leadAccept(del, brief);
     const decision = await judge(kit, 'acceptance', {
       brief,
+      // 一张单一块，#252 母单多块时填别的块的简报
+      otherBlocks: [],
       delivery: { changedFiles: [...blockChanged], tests: del.testsPassed ? 'green' : 'red' },
       lead: verdict,
       reworks: current.reworks,
@@ -710,6 +731,7 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
         feedback = [reworkFeedback('push', pushed.rework)];
         return { kind: 'rejected' };
       }
+      noteOutside(decision.outside, verdict.why);
       lastDelivery = { summary: del.summary, testsPassed: del.testsPassed };
       soloWhy = undefined;
       feedback = [];
@@ -827,7 +849,7 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
       let planSummary = need(plan, '方案').summary;
       let summary = lastDelivery?.summary ?? '';
       for (;;) {
-        const parts = await judge(kit, 'fusionPr', {
+        const facts: FusionPrFacts = {
           mode: current.mode,
           planSummary,
           summary,
@@ -837,7 +859,9 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
           planReviewSkipped,
           flowSource: current.source,
           ...(soloWhy ? { soloWhy } : {}),
-        });
+          outsideBrief: [...outsideAccepted],
+        };
+        const parts = await judge(kit, 'fusionPr', facts);
         const opened = await attemptOrRework(
           kit,
           'openPr',
@@ -871,6 +895,7 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
           continue;
         }
         prRework = NO_REWORK;
+        prFacts = facts;
         prParts = parts;
         prNumber = opened.ok.prNumber;
         status.prNumber = prNumber;
@@ -923,6 +948,8 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
       const accepted = await leadAccept(del, brief);
       let decision = await judge(kit, 'acceptance', {
         brief,
+        // 一张单一块，#252 母单多块时填别的块的简报
+        otherBlocks: [],
         delivery: {
           changedFiles: del.changedFiles ? [...fixChanged] : [],
           tests: del.testsPassed ? 'green' : 'red',
@@ -934,11 +961,15 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
         const pushed = await pushOrRework(del.head);
         if (!('rework' in pushed)) {
           lastDelivery = { summary: del.summary, testsPassed: del.testsPassed };
+          if (noteOutside(decision.outside, accepted.why) && prFacts) {
+            prParts = await judge(kit, 'fusionPr', { ...prFacts, outsideBrief: [...outsideAccepted] });
+          }
           return { ok: true };
         }
         // 推之前被拦下（卫生检查、并主线冲突）也算这一轮没收下：同一本打回账
         decision = await judge(kit, 'acceptance', {
           brief,
+          otherBlocks: [],
           delivery: { changedFiles: [...fixChanged], tests: del.testsPassed ? 'green' : 'red' },
           lead: { verdict: 'reject', why: pushed.rework.message },
           reworks,

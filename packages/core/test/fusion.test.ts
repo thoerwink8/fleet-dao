@@ -229,10 +229,24 @@ const prFacts = (over: Partial<FusionPrFacts> = {}): FusionPrFacts => ({
   highRisk: false,
   planReviewSkipped: false,
   flowSource: 'project',
+  outsideBrief: [],
   ...over,
 });
 
 describe('PR 正文（fusionPrParts）', () => {
+  it('#246：Lead 收下的简报外文件在「怎么验证的」里紧跟测试写一行', () => {
+    const got = fusionPrParts(
+      prFacts({ outsideBrief: ['docs/ops.md', 'packages/engine/test/hourly-reconcile.test.ts'] }),
+    );
+    expect(got.verified).toEqual([
+      '会话里跑过测试命令，最后一次通过（交活时后端核实过）',
+      '简报外改了：docs/ops.md、packages/engine/test/hourly-reconcile.test.ts（主导收下）',
+      '开 PR 前别家验证第 1 轮（m3（gpt 族））：过',
+    ]);
+    // 没有简报外的就不写这一行
+    expect(fusionPrParts(prFacts()).verified.join('\n')).not.toContain('简报外');
+  });
+
   it('方案摘要打头、验证结论进「怎么验证的」、建议进「还欠什么」', () => {
     expect(fusionPrParts(prFacts())).toEqual({
       did: ['方案：登录表单加验证码 后端校验', '加了验证码输入', '加了过期校验'],

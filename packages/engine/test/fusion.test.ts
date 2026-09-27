@@ -240,6 +240,76 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
     expect(w.states.every((s) => s.flowSource === 'org_default')).toBe(true);
   });
 
+  it('#246：副手第 1 轮碰了简报外的文件、Lead 看过收下 → 这一块直接收下推上去，不返工；状态、PR 正文、关单评论记下来', async () => {
+    // #246 第 1 轮：副手顺手改了 docs/ops.md 和一个测试，Lead 判收下，却被「简报外一律不收」打回；改动累计着看，
+    // 第 2 轮撤了也照样算简报外，这一块注定白转两轮、第 3 轮 Lead 接手
+    const outside = ['docs/ops.md', 'packages/engine/test/hourly-reconcile.test.ts'];
+    const why = 'ops.md 跟着改了说明，那条测试补的是同一条规则，该改';
+    const w = world({
+      session: (input) =>
+        !input.brief.lead && input.stage === 'execute'
+          ? {
+              output: {
+                kind: 'delivery',
+                head: fakeHead(50),
+                summary: '做完：登录页加验证码',
+                testsPassed: true,
+                changedFiles: ['src/login/changed.ts', ...outside],
+              },
+            }
+          : undefined,
+      lead: (step) => (step === 'accept' ? { kind: 'lead-verdict', verdict: 'accept', why } : undefined),
+    });
+    const { result, status } = await withWorker(env, w, async (q) => {
+      const handle = await start(q, fusionInput());
+      const done = (await handle.result()) as FusionResult;
+      return { result: done, status: (await handle.query('status')) as FusionStatus };
+    });
+    expect(result.state).toBe('done');
+    expect(trail(w)).toEqual(['lead:plan', 'side', 'lead:accept', 'verify', 'lead:review']);
+    expect(status.rounds.reworks).toBe(0);
+    expect(w.callsOf('pushBranch').map((c) => c.input.head)).toContain(fakeHead(50));
+
+    const line = '简报外改了：docs/ops.md、packages/engine/test/hourly-reconcile.test.ts（主导收下）';
+    // 状态里写一句（带 Lead 的理由），随快照进库
+    expect(w.states.map((s) => s.lastProblem)).toContain(`${line.slice(0, -1)}：${why}）`);
+    expect(w.callsOf('openPr')[0]?.input.body.verified).toContain(line);
+    expect(w.callsOf('closeIssue')[0]?.input.comment).toContain(`- ${line}`);
+  });
+
+  it('开了 PR 之后修的一轮碰了简报外的文件、Lead 收下 → 推上去接着走；PR 正文开出去不改，关单评论补记', async () => {
+    const w = world({
+      ci: (_input, n) => (n === 1 ? { state: 'red', failedChecks: ['test (engine)'] } : undefined),
+      session: (input) =>
+        !input.brief.lead && input.stage === 'execute' && input.brief.task?.goal === '照返工意见修好'
+          ? {
+              output: {
+                kind: 'delivery',
+                head: fakeHead(60),
+                summary: '修好了',
+                testsPassed: true,
+                changedFiles: ['src/login/changed.ts', 'docs/ops.md'],
+              },
+            }
+          : undefined,
+    });
+    const result = await runToEnd(w);
+    expect(result.state).toBe('done');
+    expect(trail(w)).toEqual([
+      'lead:plan',
+      'side',
+      'lead:accept',
+      'verify',
+      'lead:fix-brief',
+      'side',
+      'lead:accept',
+      'lead:review',
+    ]);
+    expect(w.callsOf('pushBranch').map((c) => c.input.head)).toContain(fakeHead(60));
+    expect(w.callsOf('openPr')[0]?.input.body.verified.join('\n')).not.toContain('简报外');
+    expect(w.callsOf('closeIssue')[0]?.input.comment).toContain('- 简报外改了：docs/ops.md（主导收下）');
+  });
+
   it('验证挡了两轮（Lead 没驳回）：回去改一轮还没过，停下等人，不开 PR', async () => {
     const w = world({ verify: (input) => BLOCKING(input.brief.head ?? '') });
     const { parked, result } = await runUntilParked(w);
