@@ -319,6 +319,7 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
   let statusFile: string | undefined;
   let control: DrainControl | undefined;
   let stopSessions: (why: string) => string[] = () => [];
+  let releaseDetached: () => string[] = () => [];
   let signAgentToken = agentTokenSignerFromEnv(env);
   if (mode === 'real') {
     // 真会话里的 fleet 命令要连后端、要通行证：缺一样就不起（起了也只会一个个会话起不来）。
@@ -337,6 +338,7 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
     statusFile = join(real.stateDir, 'drain.json');
     control = createDrainControl({ ...real.drainControl, drain, log: (message) => console.info(message) });
     stopSessions = real.drainControl.stopSessions;
+    releaseDetached = real.releaseDetached;
   } else {
     ports = createFakeWorld().ports;
     signAgentToken ??= (claims) => `fake-token.${claims.runId}`;
@@ -392,6 +394,11 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
     );
     await worker.run();
   } finally {
+    // 工人停了、关库之前：脱开跑的会话放手（不停、不再写库），新引擎起来接回
+    const released = releaseDetached();
+    if (released.length > 0) {
+      console.info(`停机不停会话：${released.length} 个会话接着跑，新引擎起来接回：${released.join('、')}`);
+    }
     shutdown?.dispose();
     stopControl?.();
     await status?.flush();

@@ -15,6 +15,11 @@ export interface RunFacts {
   killed?: KillReason;
   /** 进程退出码。不是进程的插头（Mirasim、接口外壳）不带。 */
   exitCode?: number | null;
+  /**
+   * 会话脱开引擎跑（走文件）时：会话已经不在了、退出码却没记下来（引擎不在时被强杀、机器重启过）。没有终帧就判 exit_lost
+   * （续会话接着干），有终帧照终帧判——不拿「没有退出码」当 0，也不当成失败。
+   */
+  exitLost?: string;
   signal?: string | null;
   /** 跑完才看得到的不一致（终帧里的实际模型、会话号）：和中途发现被停掉的同样判失败。 */
   mismatch?: { kind: 'model' | 'session'; expected: string; observed: string };
@@ -50,6 +55,7 @@ export type VerdictReason =
   | 'agent_error'
   | 'exit_nonzero'
   | 'relay_unknown' // 中转有没有真打到上游没查成：要对账，不能重跑会话，不该算执行体失败
+  | 'exit_lost' // 会话脱开引擎跑、没了却没留下退出码和终帧：续会话接着干
   | 'not_delivered'
   | 'delivery_unknown'; // 交付没查成：该重查，不该算执行体失败
 
@@ -95,12 +101,19 @@ export function judgeRun(facts: RunFacts, delivery?: DeliveryCheck): RunVerdict 
   }
   const isProcess = facts.exitCode !== undefined || Boolean(facts.signal);
   const exit = facts.signal ? `信号 ${facts.signal}` : `退出码 ${facts.exitCode}`;
+  if (!facts.terminal && facts.exitLost) {
+    const words = facts.lastWords ? `；最后说的：${facts.lastWords}` : '';
+    return failed('exit_lost', `会话没了，没有终帧、退出码也没记下来：${facts.exitLost}${words}`);
+  }
   if (!facts.terminal) {
     const words = facts.lastWords ? `：${facts.lastWords}` : '';
     return failed('no_result', `${isProcess ? `进程退出（${exit}）` : '会话结束'}，没有终帧${words}`);
   }
   if (facts.terminal.isError) return failed('agent_error', facts.terminal.detail);
-  if (isProcess && facts.exitCode !== 0) return failed('exit_nonzero', `终帧说完成，但进程${exit}`);
+  // 退出码丢了（走文件、外壳被强杀）但终帧说完成：照终帧算，不拿 null 当失败
+  if (isProcess && facts.exitCode !== 0 && !facts.exitLost) {
+    return failed('exit_nonzero', `终帧说完成，但进程${exit}`);
+  }
   if (facts.relayUnknown) return failed('relay_unknown', `中转没查成：${facts.relayUnknown}`);
   if (!delivery) return { outcome: 'ok', reason: 'answered', detail: '正常结束' };
   if (delivery.state === 'delivered') return { outcome: 'ok', reason: 'delivered', detail: delivery.detail };
