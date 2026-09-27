@@ -272,17 +272,29 @@ function leadBlock(input: PromptInput, lead: LeadBrief): string {
     : '';
   const tests = repo.testCommand ? `可以跑测试（\`${repo.testCommand}\`）。` : '';
   switch (lead.step) {
-    case 'plan':
+    case 'plan': {
+      // 还没有需求文档、正文写全了需求的单（#295）：引擎照正文写好了，Lead 原样提交
+      const seed = lead.requirementText?.trim();
+      const read = seed
+        ? `1. 这张单还没有需求文档，单子正文就是需求（引擎开的单）。把下面这份原样写进 \`${lead.docs.requirement}\`（一字不改；要补充、要澄清的写进方案），里面的「怎么算做完」就是验收标准，开 PR 前别家照单子正文逐条核。再读相关代码。
+\`\`\`\`markdown
+${seed}
+\`\`\`\``
+        : `1. 读需求文档 \`${lead.docs.requirement}\`（里面的「怎么算做完」就是验收标准，开 PR 前别家会逐条核）和相关代码。`;
+      const commit = seed
+        ? `用 git commit 提交在当前分支上（需求文档和方案一起）；这一步只提交这两份，不改代码。`
+        : '用 git commit 提交在当前分支上；这一步只提交方案，不改代码。';
       return `## 你要做的：第 2 步 规划（你是这张单的主导模型 Lead）
 这张单由你领着做完：你写方案和任务简报，副手（别家的模型）照简报写码、你验收；之后每一步引擎都会续你这个会话交代下一步。${lead.mode === 'single' ? '这次是单模型模式：没有副手，写码也是你自己（引擎下一步交代）。' : ''}当前目录是这张单的工作树（分支 ${brief.branch ?? '（没给）'}），主线在 origin/${main}。
-1. 读需求文档 \`${lead.docs.requirement}\`（里面的「怎么算做完」就是验收标准，开 PR 前别家会逐条核）和相关代码。
-2. 把方案写进 \`${lead.docs.plan}\`：怎么做、改哪些文件、怎么验证，一两页以内。用 git commit 提交在当前分支上；这一步只提交方案，不改代码。
+${read}
+2. 把方案写进 \`${lead.docs.plan}\`：怎么做、改哪些文件、怎么验证，一两页以内。${commit}
 3. 写一份任务简报（副手照它干），连同方案摘要写进 ${out('lead-plan')}（只写这一个结论文件，它不会被提交），形如：
 {"summary": "方案摘要，三五句（会写进公开的 PR 正文）", "small": true, "highRisk": false, "holds": [], "brief": ${BRIEF_SHAPE}}
 - brief.files：副手要改的文件，把要改的地方都圈进去；副手改到外面的，验收时由你定收不收。
 - small：一个副手一次做得完、方案不用别家评的写 true。highRisk：碰安全、权限、数据（迁移里删改）、对外发布的写 true。
 - holds：会对外发布、花钱、删数据的写 "release" / "spend" / "delete"（合并前要人批），都不碰就空数组。
 ${end}`;
+    }
     case 'accept': {
       const d = lead.delivery;
       const diff = d?.base

@@ -276,7 +276,10 @@ export async function refStates(numbers: Iterable<number>, gh: GitHubReader): Pr
 /** 开单后多久还没有需求文档就算欠（第六节：分支活不过一天）。 */
 export const SPECS_GRACE_HOURS = 24;
 
-/** 开着的 issue 在 specs/ 下有没有 <号>-<短名>/需求.md；开单不满一天的只提一句，不算欠。欠的留言到那张单上。 */
+/**
+ * 开着的 issue 在 specs/ 下有没有 <号>-<短名>/需求.md；开单不满一天的只提一句，不算欠。正文写全了需求的（#295）不算欠。
+ * 欠的留言到那张单上。
+ */
 export function missingSpecsFindings(
   repo: RepoView,
   open: readonly IssueInfo[],
@@ -292,6 +295,8 @@ export function missingSpecsFindings(
     if (issue.isPr) continue;
     const has = dirs.some((d) => d.startsWith(`${issue.number}-`) && repo.exists(`specs/${d}/需求.md`));
     if (has) continue;
+    // 正文写全了需求（有写了字的「## 怎么算做完」，引擎对账开的单就是这样）：接手时引擎照正文写需求文档、随 PR 进主线（#295），不算欠
+    if (issue.body !== undefined && doneSection(parseMd(`#${issue.number}`, issue.body)) === 'ok') continue;
     const created = Date.parse(issue.createdAt);
     const hours = (now.getTime() - created) / 3_600_000;
     if (!Number.isNaN(created) && hours < SPECS_GRACE_HOURS) {

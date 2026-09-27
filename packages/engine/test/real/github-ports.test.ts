@@ -90,6 +90,17 @@ function fakeGh(over: Partial<Record<keyof EngineGitHub, (input: never) => unkno
       content: '# 需求\n\n对应计划：plan.md P1「工作流」\n',
       url: 'x',
     })),
+    readIssuePlan: record('readIssuePlan', () => ({
+      state: 'open',
+      reopened: false,
+      pullRequest: false,
+      author: 'fleet-engine[bot]',
+      milestone: { number: 8, title: 'v1 Fusion 接活' },
+      openMilestones: [{ number: 8, title: 'v1 Fusion 接活' }],
+      labels: ['缺陷'],
+      parent: null,
+      subIssues: 0,
+    })),
   } as unknown as EngineGitHub;
   return { gh, calls };
 }
@@ -518,6 +529,92 @@ describe('开 PR、CI、合并', () => {
       ctx,
     );
     expect(calls.openPr?.[0]).toMatchObject({ body: { assumed } });
+  });
+
+  it('需求文档随这个 PR 才进主线（#295）：「对应计划」照单子此刻挂的版本写，没挂写「未排期」，不去读主线', async () => {
+    const { ports, calls } = setup();
+    await ports.openPr(
+      {
+        taskId: 't1',
+        repo,
+        branch: BRANCH,
+        head: m.head,
+        title: '#11 的后续',
+        body: { ...body, planFromIssue: true },
+      },
+      ctx,
+    );
+    expect(calls.readSpecDoc).toBeUndefined();
+    expect(calls.readIssuePlan?.[0]).toMatchObject({
+      repo: { owner: repo.owner, name: repo.name },
+      issueNumber: 12,
+    });
+    expect(calls.openPr?.[0]).toMatchObject({ body: { plan: 'v1 Fusion 接活' } });
+
+    const unscheduled = setup({
+      readIssuePlan: () => ({
+        state: 'open',
+        reopened: false,
+        pullRequest: false,
+        author: null,
+        milestone: null,
+        openMilestones: [],
+        labels: [],
+        parent: null,
+        subIssues: 0,
+      }),
+    });
+    await unscheduled.ports.openPr(
+      {
+        taskId: 't1',
+        repo,
+        branch: BRANCH,
+        head: m.head,
+        title: '#11',
+        body: { ...body, planFromIssue: true },
+      },
+      ctx,
+    );
+    expect(unscheduled.calls.openPr?.[0]).toMatchObject({ body: { plan: '未排期' } });
+  });
+
+  it('【失败】照单子挂的版本写「对应计划」却读不到单子（502）、没给单号：不开 PR，明确报错，不当成未排期', async () => {
+    const down = setup({
+      readIssuePlan: () => {
+        throw new GitHubError('UPSTREAM', 'GitHub 502', { retryable: true });
+      },
+    });
+    await expect(
+      down.ports.openPr(
+        {
+          taskId: 't1',
+          repo,
+          branch: BRANCH,
+          head: m.head,
+          title: '#11',
+          body: { ...body, planFromIssue: true },
+        },
+        ctx,
+      ),
+    ).rejects.toMatchObject({ code: 'UPSTREAM' });
+    expect(down.calls.openPr).toBeUndefined();
+
+    const { requirement: _dropped, ...noIssue } = body;
+    const { ports, calls } = setup();
+    await expect(
+      ports.openPr(
+        {
+          taskId: 't1',
+          repo,
+          branch: BRANCH,
+          head: m.head,
+          title: '#11',
+          body: { ...noIssue, planFromIssue: true },
+        },
+        ctx,
+      ),
+    ).rejects.toMatchObject({ code: 'SPEC_PLAN_MISSING', retryable: false });
+    expect(calls.openPr).toBeUndefined();
   });
 
   it('需求文档没有「对应计划」那一行：不开 PR，明确报错（SPEC_PLAN_MISSING，不重试）', async () => {

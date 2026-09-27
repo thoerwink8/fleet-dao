@@ -1,6 +1,6 @@
 // 开 PR 前验证照哪几条问：单子正文指的需求文档目录、需求文档里「怎么算做完」逐条原文。认不出的一律明确报错，不拿空清单顶。
 import { describe, expect, it } from 'vitest';
-import { criteriaOf, specDirOf } from '../src/criteria.ts';
+import { bodyCriteria, criteriaOf, specDirOf, specOf, specShortName } from '../src/criteria.ts';
 
 const ok = <T>(r: { ok: T } | { error: string }): T => {
   if ('error' in r) throw new Error(r.error);
@@ -25,6 +25,77 @@ describe('单子正文指的需求文档目录', () => {
   ])('【失败】%s → 明确报错', (_name, body, why) => {
     const got = specDirOf(body, 12);
     expect('error' in got && got.error).toMatch(why);
+  });
+});
+
+describe('需求文档从哪来：有那一行照它，没有的正文写全了需求也照收（#295）', () => {
+  const body = [
+    '创始人在 #12（登录页加验证码）的提问里改选了「4 位」。',
+    '',
+    '## 怎么算做完',
+    '',
+    '- #12 里按推荐先做的「6 位」改成「4 位」，测试跟着改',
+    '- CI 绿，合进主线',
+    '',
+    '<!-- fleet:issue:abc123 -->',
+  ].join('\r\n');
+
+  it('没有那一行、正文有写了字的「怎么算做完」：目录按标题取短名，需求文档照正文写（去掉引擎的标记）', () => {
+    const got = specOf({ body, issueNumber: 13, title: '#12 的后续：验证码几位？改成「4 位」' });
+    expect(got).toEqual({
+      ok: 'specs/13-12的后续验证码几位改成4位',
+      requirement: [
+        '# #12 的后续：验证码几位？改成「4 位」（#13）',
+        '',
+        '创始人在 #12（登录页加验证码）的提问里改选了「4 位」。',
+        '',
+        '## 怎么算做完',
+        '',
+        '- #12 里按推荐先做的「6 位」改成「4 位」，测试跟着改',
+        '- CI 绿，合进主线',
+        '',
+      ].join('\n'),
+    });
+    // 照这份写的需求文档，「怎么算做完」和正文里的逐条一样
+    const doc = 'ok' in got ? (got.requirement ?? '') : '';
+    expect(ok(criteriaOf(doc))).toEqual(ok(bodyCriteria(body)));
+    expect(ok(bodyCriteria(body))).toEqual([
+      '#12 里按推荐先做的「6 位」改成「4 位」，测试跟着改',
+      'CI 绿，合进主线',
+    ]);
+  });
+
+  it('有那一行的照那一行（不改用正文），也不带需求文档', () => {
+    const withPointer = `文档：\`specs/<本单号>-登录验证码/需求.md\`\n\n${body}`;
+    expect(specOf({ body: withPointer, issueNumber: 13, title: '随便' })).toEqual({
+      ok: 'specs/13-登录验证码',
+    });
+  });
+
+  it.each([
+    [
+      '那一行写错了（指的是别的单）：照样报错，不改用正文',
+      `文档：\`specs/99-别的/需求.md\`\n\n${body}`,
+      /#99 的需求文档/,
+    ],
+    ['没有那一行、正文没有「怎么算做完」', '原话：给登录页加验证码', /没有指需求文档.*也没写全需求/],
+    ['没有那一行、「怎么算做完」是空的', '原话：……\n\n## 怎么算做完\n\n<!-- 还没写 -->\n', /一节是空的/],
+  ])('【失败】%s → 明确报错、停下等人', (_name, text, why) => {
+    const got = specOf({ body: text, issueNumber: 13, title: '登录页加验证码' });
+    expect('error' in got && got.error).toMatch(why);
+  });
+
+  it('【失败】开 PR 前照正文核时，正文里的「怎么算做完」被删了或空了：明确报错，不拿空清单去验', () => {
+    expect(bodyCriteria('原话：……')).toEqual({ error: '单子正文里没有「## 怎么算做完」一节' });
+    expect(bodyCriteria('## 怎么算做完\n\n')).toEqual({ error: '单子正文里「怎么算做完」一节是空的' });
+  });
+
+  it('短名：只留字母、数字、汉字，最多 20 个字；一个都不剩写「需求」', () => {
+    expect(specShortName('巡检：主线 CI 红了 3 次')).toBe('巡检主线CI红了3次');
+    expect(specShortName('一二三四五六七八九十一二三四五六七八九十多出来的')).toBe(
+      '一二三四五六七八九十一二三四五六七八九十',
+    );
+    expect(specShortName('？！…… / \\')).toBe('需求');
   });
 });
 

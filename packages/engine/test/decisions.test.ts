@@ -810,7 +810,9 @@ describe('Fusion 的判断经 decide 调（core 包，0003 第 12 条）', () =>
       step: 'discuss',
       verifyLimit: 1,
     });
-    expect(await decide('specDir', { body: '文档：`specs/12-登录/需求.md`', issueNumber: 12 })).toEqual({
+    expect(
+      await decide('specDir', { body: '文档：`specs/12-登录/需求.md`', issueNumber: 12, title: '登录' }),
+    ).toEqual({
       ok: 'specs/12-登录',
       docs: {
         requirement: 'specs/12-登录/需求.md',
@@ -865,8 +867,28 @@ describe('Fusion 的判断经 decide 调（core 包，0003 第 12 条）', () =>
   });
 
   it('【故意造出的失败】单子正文指的是别的单的需求文档：判认不出，不拿别人的顶', async () => {
-    expect(await decide('specDir', { body: '文档：`specs/13-别的/需求.md`', issueNumber: 12 })).toEqual({
+    expect(
+      await decide('specDir', { body: '文档：`specs/13-别的/需求.md`', issueNumber: 12, title: '别的' }),
+    ).toEqual({
       error: expect.stringContaining('不是这张单 #12 的'),
+    });
+  });
+
+  it('正文写全了需求、没有指需求文档的那一行（引擎开的单，#295）：照收，带上照正文写的需求文档；验证照正文逐条核', async () => {
+    const body = '创始人改选了「4 位」。\n\n## 怎么算做完\n\n- 改成 4 位\n';
+    expect(await decide('specDir', { body, issueNumber: 13, title: '#12 的后续' })).toEqual({
+      ok: 'specs/13-12的后续',
+      docs: {
+        requirement: 'specs/13-12的后续/需求.md',
+        plan: 'specs/13-12的后续/方案.md',
+        result: 'specs/13-12的后续/结果.md',
+      },
+      requirement: '# #12 的后续（#13）\n\n创始人改选了「4 位」。\n\n## 怎么算做完\n\n- 改成 4 位\n',
+    });
+    expect(await decide('bodyCriteria', { body })).toEqual({ ok: ['改成 4 位'] });
+    // 【故意造出的失败】正文也没写全：照样认不出、停下等人
+    expect(await decide('specDir', { body: '原话：加验证码', issueNumber: 13, title: '加验证码' })).toEqual({
+      error: expect.stringContaining('也没写全需求'),
     });
   });
 });
