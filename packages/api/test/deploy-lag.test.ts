@@ -315,8 +315,9 @@ describe('状态文件：和自动发布写的对得上', () => {
       const lib = (await import(/* @vite-ignore */ AUTO_RELEASE_LIB)) as {
         runOnce(io: unknown, prev: unknown): Promise<unknown>;
         STATE_SCHEMA: number;
+        EXIT_SESSIONS_BUSY: number;
       };
-      const t = { now: Date.parse('2026-09-27T08:00:00Z'), current: H0 as string, release: 0, sessions: '' };
+      const t = { now: Date.parse('2026-09-27T08:00:00Z'), current: H0 as string, release: 0 };
       const io = {
         now: () => new Date(t.now),
         readMain: async () => `${H1} 2026-09-27T07:30:00Z\n${H0} 2026-09-27T06:00:00Z`,
@@ -341,7 +342,6 @@ describe('状态文件：和自动发布写的对得上', () => {
         }),
         releaseBusy: async () => false,
         prepareCheckout: async () => ({ ok: true }),
-        sessions: async () => t.sessions,
         runRelease: async (sha: string) => {
           if (t.release === 0) t.current = sha;
           return { code: t.release, log: '/srv/x.log', detail: t.release ? '健康检查没过' : '' };
@@ -353,9 +353,9 @@ describe('状态文件：和自动发布写的对得上', () => {
         save: async () => {},
       };
       expect(lib.STATE_SCHEMA).toBe(1);
-      t.sessions = '17 active';
+      // 在跑的引擎不会排空、有会话在跑：发布脚本退出 76，这一轮等空闲
+      t.release = lib.EXIT_SESSIONS_BUSY;
       const waiting = await lib.runOnce(io, null);
-      t.sessions = '';
       t.release = 1;
       t.now += 5 * MIN;
       const failed = await lib.runOnce(io, waiting);

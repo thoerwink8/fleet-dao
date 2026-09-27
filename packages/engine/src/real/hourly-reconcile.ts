@@ -8,10 +8,14 @@
 import { readdir } from 'node:fs/promises';
 import {
   createPgStore,
+  deployFacts,
+  handlingOf,
   jsonLogger,
   type Logger,
+  pgAlertWork,
   type RequirementWorkflows,
   RetryLaterError,
+  readDeployLagInput,
 } from '@fleet-dao/api';
 import {
   activeTaskRefs,
@@ -170,6 +174,13 @@ export function hourlyReconcileJob(
   // 补拉用的接活那道门：和对账补漏同一份实现（后端的 Store 是同一个库）
   const intakeStore = createPgStore(w.db, { now });
   const intakeLog = w.intakeLog ?? jsonLogger();
+  // 谁在处理（24 小时再推不给有人在处理、静默了的推）：和驾驶舱、提醒派单同一个口子、同一份判法
+  const alertWork = pgAlertWork(w.db, () => deployFacts(readDeployLagInput()));
+  const handling: HourlyReconcileJobDeps['handling'] = async (ids) => {
+    const r = await handlingOf(alertWork, ids);
+    if (!r.ok) throw new Error(r.why);
+    return new Map([...r.byId].map(([id, h]) => [id, { stage: h.stage, line: h.line }]));
+  };
   return (client, taskQueue) => {
     const intake = reconcileIntake(w, { store: intakeStore, log: intakeLog, now }, client, taskQueue);
     return {
@@ -231,6 +242,7 @@ export function hourlyReconcileJob(
       workflows: w.workflows ?? temporalWorkflows(client),
       stageRoutable,
       stageAllOpen,
+      handling,
       alerts: {
         listOpen: (limit) => listOpenAlerts(w.db, { limit }),
         byKey: (key) => alertByKey(w.db, key),

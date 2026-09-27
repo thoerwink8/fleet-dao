@@ -45,7 +45,7 @@ describe('开 PR', () => {
     expect(new Set(fake.calls('POST', /\/pulls$/).map((r) => r.as))).toEqual(new Set(['agent']));
     expect(fake.pulls.size).toBe(1);
     expect(pr?.body).toBe(
-      '**做了什么**：\n- 加了验证码输入框\n**怎么验证的**：\n- pnpm check 全绿\n**还欠什么**：无\n**按推荐先做了**：无\n**需求**：#12 · 子任务 A 登录表单\n**修提醒**：无\n**这个 PR 做完就关单**：否（引擎合并后第 7 步自己关单）\n**对应计划**：P1「工作流」\n**specs**：specs/12-otp/\n**档位**：先合后看——一般改动\n**文档**：design',
+      '**做了什么**：\n- 加了验证码输入框\n**怎么验证的**：\n- pnpm check 全绿\n**还欠什么**：无\n**按推荐先做了**：无\n**需求**：#12 · 子任务 A 登录表单\n**认领**：引擎\n**修提醒**：无\n**这个 PR 做完就关单**：否（引擎合并后第 7 步自己关单）\n**对应计划**：P1「工作流」\n**specs**：specs/12-otp/\n**档位**：先合后看——一般改动\n**文档**：design',
     );
     expect(pr?.base.ref).toBe('main');
   });

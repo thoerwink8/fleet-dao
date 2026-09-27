@@ -55,6 +55,7 @@ describe('活动外壳', () => {
         'canaryOpen',
         'canaryCheck',
         'watchSchedules',
+        'dispatchAlerts',
       ].sort(),
     ).toEqual(Object.keys(ACTIVITY_PROFILE).sort());
   });

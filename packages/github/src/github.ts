@@ -12,6 +12,7 @@ import {
   type FetchMainlineResult,
   fetchMainline,
 } from './bundle.ts';
+import { type ClaimsGitHub, createClaimsGitHub } from './claims.ts';
 import { GitHubClient, type Logger, type RepoRef, repoSlug, type Sleep, unexpected } from './client.ts';
 import { type CloseFacts, type ReadCloseFactsInput, readCloseFacts } from './close-facts.ts';
 import {
@@ -190,6 +191,8 @@ export interface GitHub {
   }): Promise<{ state: 'open' | 'closed'; stateReason: string | null }>;
   /** 会话提交用的身份（「干活的」机器人）：引擎建工作树时写进 user.name / user.email。 */
   commitIdentity(repo: RepoRef): Promise<BotIdentity>;
+  /** 「认领对得上」这一侧（#348，「引擎」机器人）：现读 PR、读贴提交状态、撤自动合并、关 PR、在 PR 上留言。 */
+  claims: ClaimsGitHub;
   /** 两个机器人在这些仓上的权限够不够。读不到算没查成（ok=false、why 写原因），不算「没有差异」。 */
   selfCheck(repos: RepoRef[]): Promise<SelfCheckItem[]>;
   eventSink(waker: WorkflowWaker): EventSink;
@@ -297,6 +300,7 @@ export function createGitHub(options: GitHubOptions): GitHub {
     commentIssue: (input, ctx) => commentIssue(deps, input, ctx),
     renewInteractionLimit: (input, ctx) => renewInteractionLimit(deps, input, ctx),
     commitIdentity: (repo) => deps.bots.identity('agent', repo),
+    claims: createClaimsGitHub(deps),
     async selfCheck(repos) {
       const out: SelfCheckItem[] = [];
       for (const repo of repos) {

@@ -10,6 +10,7 @@ import {
 } from '@temporalio/client';
 import type { Workflow } from '@temporalio/common';
 import {
+  type AlertDispatchInput,
   type CanaryInput,
   type GitHubReconcileInput,
   type HourlyReconcileInput,
@@ -17,6 +18,11 @@ import {
   type WatchdogInput,
   WORKFLOW_TYPES,
 } from '../contract.ts';
+import {
+  ALERT_DISPATCH_EVERY_MINUTES,
+  ALERT_DISPATCH_JOB,
+  ALERT_DISPATCH_OFFSET_MINUTES,
+} from './alert-dispatch.ts';
 import {
   CANARY_EVERY_HOURS,
   CANARY_JOB,
@@ -37,6 +43,7 @@ export const ROUTE_PROBE_SCHEDULE_ID = ROUTE_PROBE_JOB.id;
 export const HOURLY_RECONCILE_SCHEDULE_ID = HOURLY_RECONCILE_JOB.id;
 export const CANARY_SCHEDULE_ID = CANARY_JOB.id;
 export const WATCHDOG_SCHEDULE_ID = WATCHDOG_JOB.id;
+export const ALERT_DISPATCH_SCHEDULE_ID = ALERT_DISPATCH_JOB.id;
 
 interface EngineSchedule {
   scheduleId: string;
@@ -52,6 +59,7 @@ export function engineSchedules(taskQueue: string): EngineSchedule[] {
   const hourlyInput: HourlyReconcileInput = { schemaVersion: 1 };
   const canaryInput: CanaryInput = { schemaVersion: 1 };
   const watchdogInput: WatchdogInput = { schemaVersion: 1 };
+  const alertDispatchInput: AlertDispatchInput = { schemaVersion: 1 };
   return [
     {
       scheduleId: GITHUB_RECONCILE_SCHEDULE_ID,
@@ -174,6 +182,34 @@ export function engineSchedules(taskQueue: string): EngineSchedule[] {
         overlap: ScheduleOverlapPolicy.SKIP,
         // Temporal 停了一阵再起来：只补最近一轮（每轮都是看当时的库）
         catchupWindow: `${WATCHDOG_EVERY_MINUTES} minutes`,
+        pauseOnFailure: false,
+      },
+    },
+    {
+      // 提醒派单（design 15.3「谁在处理」）：每 5 分钟，没人认领、停着没动的提醒再推，没挂单的开跟进单；和看门狗错开
+      scheduleId: ALERT_DISPATCH_SCHEDULE_ID,
+      spec: {
+        intervals: [
+          {
+            every: `${ALERT_DISPATCH_EVERY_MINUTES} minutes`,
+            offset: `${ALERT_DISPATCH_OFFSET_MINUTES} minutes`,
+          },
+        ],
+      },
+      action: {
+        type: 'startWorkflow',
+        workflowType: WORKFLOW_TYPES.alertDispatch,
+        workflowId: ALERT_DISPATCH_SCHEDULE_ID,
+        taskQueue,
+        args: [alertDispatchInput],
+        // 一轮秒级；活动最多 10 分钟（job 档），卡死的不拖到下一轮之后太久
+        workflowRunTimeout: '15 minutes',
+      },
+      policies: {
+        // 上一轮还没完就跳过：两轮叠着跑会同时推、撤同一条
+        overlap: ScheduleOverlapPolicy.SKIP,
+        // Temporal 停了一阵再起来：只补最近一轮（每轮都是看当时的库）
+        catchupWindow: `${ALERT_DISPATCH_EVERY_MINUTES} minutes`,
         pauseOnFailure: false,
       },
     },

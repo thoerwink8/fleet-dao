@@ -8,7 +8,7 @@
 // 留言一次、进驾驶舱提醒。「这张单有没有结果」和 pnpm issue:close、合并闸是同一份判断（close-rule.ts 的 resultDocOf）。
 // 判不了的（子单一页没读全、关单时刻认不出）照实交回 unchecked，由调用方记没查成，不当成没有。
 import { closingIssues, RESULT_FILE, resultDocOf } from './close-rule.ts';
-import { linkedIssue } from './pr-labels.ts';
+import { linkedIssue } from './pr-columns.ts';
 
 /** 关掉的单往回看几天。 */
 export const CLOSE_LOOKBACK_DAYS = 30;

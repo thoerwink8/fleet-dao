@@ -580,7 +580,7 @@ export function escalationFor(
         : h.stage === 'engine_stuck'
           ? `这条是引擎自己卡住了报的：跟进单 ${h.work ? issueRef(h.work) : ''} 的认领在引擎手里，${at}起超过 ${settings.claimAfterMinutes} 分钟没人接手。本机接手要创始人说改派（fleet-api claim reassign），或者另开一张单跟进（alert claim 加 --issue <号>）。`
           : `这条${at}起超过 ${settings.claimAfterMinutes} 分钟没人认领${h.work ? `，跟进单是 ${issueRef(h.work)}` : ''}。`,
-      ...(openIssue ? ['没挂单：提醒派单这一轮开一张跟进单（贴「本机做」），开好后单号写在这里。'] : []),
+      ...(openIssue ? ['没挂单：提醒派单给它开一张跟进单（贴「本机做」），开好就挂在这条提醒上。'] : []),
       ...original,
       claimHowTo(alert.dedupeKey),
     ];
@@ -597,7 +597,7 @@ export function escalationFor(
   const what: Record<string, string> = {
     claimed: `${h.who ?? '有人'} ${at}认领了，到现在超过 ${settings.stuckAfterMinutes} 分钟还没开 PR（认领 120 分钟没心跳会被作废、回到没人认领）。`,
     pr_open: `PR #${h.pr?.number ?? '?'} ${at}开着，到现在超过 ${settings.stuckAfterMinutes} 分钟没合（看 CI、合并闸）。`,
-    merged: `PR #${h.pr?.number ?? '?'} ${at}合进主线，到现在超过 ${settings.stuckAfterMinutes} 分钟还没看到法国发布${h.deploy?.state === 'unknown' ? `（发布没查成：${h.deploy.why}）` : ''}（看健康页的 deploy_lag）。`,
+    merged: `PR #${h.pr?.number ?? '?'} ${at}合进主线，到现在超过 ${settings.stuckAfterMinutes} 分钟还没看到法国发布${h.deploy?.state === 'unknown' ? '（发布没查成，原因在驾驶舱这条提醒下面）' : ''}（看健康页的 deploy_lag）。`,
     deployed: `PR #${h.pr?.number ?? '?'} ${at}起法国已经发布，到现在超过 ${settings.stuckAfterMinutes} 分钟提醒还没自己撤：条件判法没接上，或者没修好。`,
   };
   return {
@@ -640,4 +640,87 @@ export function beijing(iso: string): string {
   const d = new Date(t + 8 * 3_600_000);
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${d.getUTCMonth() + 1} 月 ${d.getUTCDate()} 日 ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
+}
+
+// —— 跟进单：没挂单的卡住报警，提醒派单开一张（开在哪、写什么在这里定，开单、挂单是外壳的事）——
+
+/** 跟进单贴的标签：类别「缺陷」；「本机做」——提醒是引擎自己搞不定才报的，由本机带外修，接活不自动派给引擎。 */
+export const FOLLOW_UP_LABELS: readonly string[] = ['缺陷', '本机做'];
+
+export interface ManagedRepoRef {
+  id: string;
+  owner: string;
+  name: string;
+}
+
+/**
+ * 跟进单开在哪个仓：设置 alerts.issueRepo 写了就用它（得是驾驶舱导入过的项目）；没写就在受管的项目里去掉巡检仓，
+ * 恰好剩一个用它。挑不出（一个没有、不止一个、设置写的不在库里）回原因，不猜。
+ */
+export function followUpRepo(
+  repos: readonly ManagedRepoRef[],
+  issueRepo: AlertSettings['issueRepo'],
+  canaryRepo: string | null,
+): { ok: true; repo: ManagedRepoRef } | { ok: false; why: string } {
+  const slug = (r: { owner: string; name: string }) => `${r.owner}/${r.name}`.toLowerCase();
+  if (issueRepo) {
+    const hit = repos.find((r) => slug(r) === slug(issueRepo));
+    return hit
+      ? { ok: true, repo: hit }
+      : {
+          ok: false,
+          why: `设置 ${ALERT_SETTING_KEYS.issueRepo} 写的 ${issueRepo.owner}/${issueRepo.name} 不是驾驶舱导入过的项目`,
+        };
+  }
+  const canary = canaryRepo?.trim().toLowerCase() || null;
+  const rest = repos.filter((r) => slug(r) !== canary);
+  if (rest.length === 1 && rest[0]) return { ok: true, repo: rest[0] };
+  return {
+    ok: false,
+    why:
+      rest.length === 0
+        ? '除了巡检仓没有受管的项目，不知道开在哪'
+        : `受管的项目有 ${rest.length} 个（${rest.map((r) => `${r.owner}/${r.name}`).join('、')}），不知道开在哪：在驾驶舱设置里填「提醒跟进单开在哪个仓」（${ALERT_SETTING_KEYS.issueRepo}）`,
+  };
+}
+
+const clipText = (s: string, max: number) =>
+  [...s].length > max ? `${[...s].slice(0, max - 1).join('')}…` : s;
+
+/**
+ * 跟进单的标题和正文（引擎开，写进公开的单：开之前 github 包过卫生检查）。需求写全在正文里、没有单独的需求文档
+ * （和引擎对账开的单一样，#295）；「怎么算做完」放最后。version：挂的当前版本标题，null = 仓里没有开着的 v<N>，未排期。
+ */
+export function followUpIssueText(
+  f: Pick<AlertWorkFacts, 'alert'>,
+  settings: Pick<AlertSettings, 'claimAfterMinutes'>,
+  version: string | null,
+): { title: string; body: string } {
+  const { alert } = f;
+  const key = alert.dedupeKey;
+  return {
+    title: clipText(`跟进提醒：${alert.title.replace(/\s+/g, ' ').trim()}`, 200),
+    body: [
+      `引擎北京时间 ${beijing(alert.createdAt)} 报的这条卡住报警没挂单，超过 ${settings.claimAfterMinutes} 分钟没人认领；提醒派单开这张单跟进（design 15.3「谁在处理」）。这张单是引擎开的，需求就写在这里。`,
+      '',
+      `- 提醒：${clipText(alert.title, 300)}`,
+      `- 键：\`${key}\`（编号 ${alert.id}）`,
+      `- 版本：${version ? `挂当前版本「${version}」（坏了的立刻修）` : '仓里没有还开着的 v<N> 里程碑，先未排期'}`,
+      '- 贴「本机做」：提醒是引擎自己搞不定才报的，由本机带外修（AGENTS.md 本仓段「本机和法国怎么分活」），接活不自动派给引擎。',
+      '',
+      '## 提醒原文',
+      '',
+      clipText(alert.body.trim(), 2000) || '（没写）',
+      '',
+      '## 怎么接',
+      '',
+      claimHowTo(key),
+      `修复的 PR 正文「修提醒」栏写 \`${key}\`：驾驶舱照它显示 PR 开着、合进主线、法国已发布。`,
+      '',
+      '## 怎么算做完',
+      '',
+      `- 提醒 \`${key}\` 撤掉了：条件判法自己撤（修好了），或确认不用修、由人点「处理」并写明为什么；`,
+      '- 修复的 PR 合进主线，法国发布了这一版。',
+    ].join('\n'),
+  };
 }

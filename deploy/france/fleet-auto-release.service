@@ -1,4 +1,5 @@
-# fleet-dao 自动发布：主线上 CI 全绿的新提交，等引擎空闲后用 deploy/release.sh --auto 发到本机，发完把规矩同步给会话用户；
+# fleet-dao 自动发布：主线上 CI 全绿的新提交，马上用 deploy/release.sh --auto 发到本机（发布脚本先排空引擎：不起新会话，在跑的
+# 最多再做 10 分钟，到点停下、按编号续上），发完把规矩同步给会话用户；
 # 每一轮的读数写进 /srv/fleet-dao-releases/.auto/state.json（后端的 /healthz 读它）。由 fleet-auto-release.timer 每 5 分钟拉起。
 # deploy/france.sh 装（脚本装到 /usr/local/lib/fleet-dao/auto-release/），别在机器上手改。规矩见 docs/ops.md 第九节「自动发布」。
 # 以 root 跑、不收紧：要起发布（写 /srv、/etc/systemd，起停服务）、替会话用户同步规矩，和手动跑 release.sh 一样。
@@ -11,6 +12,6 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/node /usr/local/lib/fleet-dao/auto-release/fleet-auto-release.mjs
-# 一轮里最长的是发布本身（构建、迁移、健康检查，不过还要退回再查一遍）。到点这里被停，发布照样跑完（它在自己的临时服务里）：
+# 一轮里最长的是发布本身（排空最多 10 分钟和构建一起走，再加迁移、健康检查，不过还要退回再查一遍）。到点这里被停，发布照样跑完（它在自己的临时服务里）：
 # 下一轮看到发布锁还占着就接着等，空了按在用的是谁定成败
 TimeoutStartSec=60min

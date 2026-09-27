@@ -51,7 +51,7 @@ describe('PR 正文模板', () => {
     expect(columns(body)).toEqual(fromTemplate);
   });
 
-  it('15 行以内：条目多了从最长的一栏砍，砍掉的写「另有 N 条」；风险并进「还欠什么」', () => {
+  it('16 行以内：条目多了从最长的一栏砍，砍掉的写「另有 N 条」；风险并进「还欠什么」', () => {
     const body = renderPrBody({
       requirement: 12,
       subtask: 'B 验证码',
@@ -67,8 +67,9 @@ describe('PR 正文模板', () => {
     expect(lines.length).toBeLessThanOrEqual(PR_BODY_MAX_LINES);
     expect(body).toContain('- ……另有');
     expect(body).toContain('**还欠什么**：\n- 过期提示放到子任务 C\n- 风险：旧的登录接口还在用');
-    expect(lines.slice(-7)).toEqual([
+    expect(lines.slice(-8)).toEqual([
       '**需求**：#12 · 子任务 B 验证码',
+      '**认领**：引擎',
       '**修提醒**：无',
       '**这个 PR 做完就关单**：否（引擎合并后第 7 步自己关单）',
       '**对应计划**：P1「工作流」',
@@ -95,7 +96,7 @@ describe('PR 正文模板', () => {
       specs: null,
       changedFiles: [],
     });
-    expect(body).toContain('**还欠什么**：无\n**按推荐先做了**：无\n**需求**：无\n');
+    expect(body).toContain('**还欠什么**：无\n**按推荐先做了**：无\n**需求**：无\n**认领**：引擎\n');
   });
 
   it('按推荐先做了（#259）：问创始人的岔路一条一行，排在「还欠什么」后面', () => {
@@ -147,7 +148,7 @@ describe('PR 正文模板', () => {
       changedFiles: ['specs/12-x/结果.md'],
     });
     expect(body).toContain(
-      '**需求**：#12\n**修提醒**：无\n**这个 PR 做完就关单**：否（引擎合并后第 7 步自己关单）\n',
+      '**需求**：#12\n**认领**：引擎\n**修提醒**：无\n**这个 PR 做完就关单**：否（引擎合并后第 7 步自己关单）\n',
     );
     expect(hasCloseKeywords(body)).toBe(false);
   });

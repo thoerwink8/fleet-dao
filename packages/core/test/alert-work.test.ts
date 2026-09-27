@@ -11,6 +11,8 @@ import {
   deployStateOf,
   escalationFor,
   type FixPr,
+  followUpIssueText,
+  followUpRepo,
   isEscalationKey,
   parseEscalationKey,
   readAlertSettings,
@@ -436,5 +438,45 @@ describe('升级：没人认领、停得太久', () => {
     expect(
       retireEscalationWhy(stuck, alertHandling(facts({ work, claim: claim(), prs: [pr()] }), null, at(80))),
     ).toMatch(/^往前走了：现在是「PR 开着」/);
+  });
+});
+
+describe('跟进单：开在哪、写什么', () => {
+  const repos = [
+    { id: 'r1', owner: 'owner', name: 'fleet-dao' },
+    { id: 'r2', owner: 'owner', name: 'canary' },
+  ];
+
+  it('没设：受管的项目去掉巡检仓，恰好剩一个就用它；设了用设的（大小写不论）', () => {
+    expect(followUpRepo(repos, null, 'owner/canary')).toEqual({ ok: true, repo: repos[0] });
+    expect(followUpRepo(repos, { owner: 'Owner', name: 'Canary' }, 'owner/canary')).toEqual({
+      ok: true,
+      repo: repos[1],
+    });
+  });
+
+  it('【故意造出的失败】挑不出：不止一个、一个没有、设的不在库里——回原因，不猜', () => {
+    const why = (r: ReturnType<typeof followUpRepo>) => (r.ok ? '' : r.why);
+    const many = followUpRepo(repos, null, null);
+    expect(many.ok).toBe(false);
+    expect(why(many)).toContain('受管的项目有 2 个');
+    expect(why(many)).toContain('alerts.issueRepo');
+    expect(why(followUpRepo(repos.slice(1), null, 'owner/canary'))).toContain('没有受管的项目');
+    expect(why(followUpRepo(repos, { owner: 'x', name: 'y' }, null))).toContain('x/y 不是驾驶舱导入过的项目');
+  });
+
+  it('标题、正文：键、版本、「本机做」的理由、怎么接，「怎么算做完」放最后', () => {
+    const t = followUpIssueText({ alert: alert() }, ALERT_DEFAULTS, 'v1 Fusion 接活');
+    expect(t.title).toBe('跟进提醒：定时任务「备份」没跑成');
+    expect(t.body).toContain('`watchdog:job:backup:after-12`');
+    expect(t.body).toContain('挂当前版本「v1 Fusion 接活」');
+    expect(t.body).toContain('本机做');
+    expect(t.body).toContain('fleet-api alert claim watchdog:job:backup:after-12');
+    expect(t.body).toContain('最近一次没跑成：磁盘满了');
+    expect(t.body.indexOf('## 怎么算做完')).toBeGreaterThan(t.body.indexOf('## 怎么接'));
+    expect(t.body.trimEnd().endsWith('- 修复的 PR 合进主线，法国发布了这一版。')).toBe(true);
+    const unscheduled = followUpIssueText({ alert: alert({ title: 'x'.repeat(400) }) }, ALERT_DEFAULTS, null);
+    expect(unscheduled.body).toContain('先未排期');
+    expect([...unscheduled.title].length).toBe(200);
   });
 });

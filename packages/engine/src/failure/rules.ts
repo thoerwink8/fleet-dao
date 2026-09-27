@@ -144,6 +144,32 @@ export const RULES: readonly FailureRule[] = [
     routeOutcome: 'neutral',
     hint: '切完续同一个会话（换了池就 fork 续上）',
   },
+  // 发布前排空（drain.ts）：引擎要发新版本、在停，这次没起会话。是我们自己要停的：不算失败、不记账，马上回去选路——
+  // 选路在排空时回「过一会儿再选」，新引擎起来、或者发布没成撤了请求，就接着派。码只认端口交来的结构化码。
+  {
+    id: 'ES1',
+    title: '引擎在为发布排空，这次没起会话',
+    codes: ['engine_stopping'],
+    codeFieldOnly: true,
+    ladder: ['retry', 'park'],
+    budget: 'free',
+    retryBaseSeconds: 0,
+    routeOutcome: 'neutral',
+    hint: '新引擎起来接着派',
+  },
+  // 发布前排空到了宽限的截止（drain.ts，10 分钟），还在跑的会话按切号那一套停下；或者引擎收到停机信号的那一刻会话被信号杀掉
+  // （kill-evidence.ts 对上了时刻）。是我们自己要停的：不算失败、不进路由失败率、不记账，新引擎起来按编号续同一个会话。
+  {
+    id: 'KL3',
+    title: '要发新版本，先停下、新引擎起来接着干',
+    codes: ['engine_stop'],
+    codeFieldOnly: true,
+    ladder: ['retry', 'park'],
+    budget: 'free',
+    retryBaseSeconds: 0,
+    routeOutcome: 'neutral',
+    hint: '新引擎起来按编号续同一个会话',
+  },
   // 这台机器的 reclaude 登录被撤销（reclaude 文档「设备被自动撤销」：同号多机同时高频用会触发风控，自动撤销设备，
   // 请求拿到 401 device_revoked；修法只有人在那台机器上、以那个用户重跑 reclaude login）。不是额度用满、也不是封号：
   // 换池、等清零都没用，这个池在这台机器上整池暂停，手上的会话挂起；重新登录后人点「继续」，续同一个会话。
@@ -615,18 +641,35 @@ export const RULES: readonly FailureRule[] = [
     routeOutcome: 'neutral',
     hint: '重查交付，不算执行体失败',
   },
-  // 被 SIGKILL（多半是内存超限）或被外面停掉：从检查点重起一次；再来就是资源或任务本身的问题，交帅位。
+  // 内存超限被内核杀掉：只认有证据的——会话端口查过 cgroup 的按内存杀进程记录交回的 oom_killed（real/kill-evidence.ts），
+  // 或者原文里写着内核的 OOM 字样。从检查点重起一次；再来就是资源或任务本身的问题，交帅位。
+  // 改这里之前必须知道：原来这条把所有 137、143、SIGKILL、SIGTERM 都算进来、提示写死「多半是内存超限」，把「我们自己的发布
+  // 把它叫停了」盖住了（2026-09-27 19:28:51、20:46:26 两次都是发布重启引擎）。没证据的信号杀掉归 KL4，不猜。
   {
     id: 'KL2',
-    title: '进程被信号杀掉',
-    codes: ['oom_kill', 'oom_killed'],
-    text: /\bSIGKILL\b|oom[-_ ]?kill|out of memory|\bKilled\b/i,
+    title: '内存超限被内核杀掉',
+    codes: ['oom_killed'],
+    codeFieldOnly: true,
+    text: /oom[-_ ]?kill|out of memory/i,
+    ladder: ['retry', 'park'],
+    maxRetries: 1,
+    routeOutcome: 'neutral',
+    hint: '从检查点重起；内存到了上限（证据见原因）',
+  },
+  // 被信号杀掉、查过也对不上是谁（引擎没在停、cgroup 里没有按内存杀进程的记录）：照实写没查到，从检查点重起一次，再来交帅位。
+  // 只剩退出码、信号（插头的判定没经过会话端口查证据）也归这里，不猜是内存。
+  {
+    id: 'KL4',
+    title: '进程被信号杀掉，没查到是谁杀的',
+    codes: ['signal_unexplained'],
+    codeFieldOnly: true,
+    text: /\bSIGKILL\b|\bKilled\b/,
     exitCodes: [137, 143],
     signals: ['SIGKILL', 'SIGTERM'],
     ladder: ['retry', 'park'],
     maxRetries: 1,
     routeOutcome: 'neutral',
-    hint: '从检查点重起；多半是内存超限',
+    hint: '从检查点重起一次（没查到是谁杀的，不猜）',
   },
   // 会话里的命令跑超时被杀（Claude 的 Bash 默认 2 分钟，插头放宽到 10 分钟）：接着干并提醒它换跑法，再来就交帅位。
   {

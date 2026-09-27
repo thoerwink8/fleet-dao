@@ -36,6 +36,9 @@ export const CLAIM_USAGE = `用法：node claim.mjs <命令> …（经 ssh 调�
   done <单号> --claim <认领号> --note "<一句话>"                      做完了
   release <单号> --claim <认领号> --note "<一句话>"                   放下（不做了、交出去）
   show [<单号>…] [--all]                                              看认领
+  reassign <单号> --to worker|seat --label <工人名> [--founder "<创始人原话>"] [--note …] [--grace-minutes <分>]
+  reassign <单号> --to engine --reason "<为什么>" [--founder "<创始人原话>"]
+                     帅位改派：原来的还活着（引擎、别的工人）要带创始人原话，当场作废、叫停引擎、关掉它开着的 PR（分支留着）
   prepush                                                             推前钩子调：分支带着认领的，查认领还归不归你
 退出码：0 好了；1 用法不对（prepush：拦下这次推送）；2 没查成、没做成；3 不是你的（不是帅位、别人拿着、认领号对不上）。`;
 
@@ -516,6 +519,21 @@ export async function runClaim(argv, io) {
       io.out(r.text);
       return 0;
     }
+    if (cmd === 'reassign')
+      return await claimReassign(
+        parseArgs(rest, [
+          'to',
+          'label',
+          'founder',
+          'note',
+          'reason',
+          'grace-minutes',
+          'scope',
+          'session',
+          'repo',
+        ]),
+        io,
+      );
     if (cmd === 'prepush') return await prePush(await io.readStdin(), io);
     throw new UsageError(`没有「${cmd}」这个命令\n${CLAIM_USAGE}`);
   } catch (e) {
@@ -609,6 +627,7 @@ async function claimTake(p, io) {
     io.out(
       `认领了 ${repo}#${n}：归 ${s.machine}/${label}${owner === 'seat' ? '（帅位自己）' : ''}，认领号 ${claim.claimId}（开 PR 时正文「认领」栏写它），宽限期 ${claim.graceMinutes} 分钟没心跳就作废`,
     );
+    prStatusNote(io, r.json.prStatus);
     if (!isDrill(scope))
       await mirror(io, repo, n, ['claim', note ?? `${label} 在做（认领 ${claim.claimId.slice(0, 8)}）`]);
     return 0;
@@ -649,6 +668,7 @@ async function claimUpdate(cmd, p, io) {
     io.out(
       `${repo}#${n}：${cmd === 'step' ? `报上了${pr ? `，登记了 PR #${pr.replace('#', '')}` : ''}` : cmd === 'done' ? '做完了' : '放下了'}`,
     );
+    prStatusNote(io, r.json.prStatus);
     if (!isDrill(claim?.seat?.scope)) {
       if (cmd === 'step' && note) await mirror(io, repo, n, ['say', note]);
       if (cmd === 'done') await mirror(io, repo, n, ['done', note]);
@@ -666,6 +686,119 @@ async function claimUpdate(cmd, p, io) {
     return 3;
   }
   return fail(io, `没记上：${whyOf(r.json, `法国回的退出码 ${r.code}`)}`);
+}
+
+/**
+ * 认领变了之后法国当场重贴 PR 上的「认领对得上」（#348）：没贴成的照实打到标准错误（认领已经记上，不改退出码）；
+ * 法国还没有这一段（旧版本）就不打。
+ */
+function prStatusNote(io, p) {
+  if (!p || typeof p !== 'object') return;
+  if (p.ok === false) {
+    const why =
+      typeof p.error === 'string' ? p.error : Array.isArray(p.problems) ? p.problems.join('；') : '没说原因';
+    io.err(
+      `PR 上的「认领对得上」没重贴成（${firstLine(why)}）：法国的 GitHub 对账每 15 分钟会补，补上之前合并闸按旧的算`,
+    );
+    return;
+  }
+  if (Array.isArray(p.posted) && p.posted.length > 0)
+    io.out(`PR 上的「认领对得上」重贴了：${p.posted.map((x) => `#${x}`).join('、')}`);
+}
+
+async function claimReassign(p, io) {
+  if (p.positional.length !== 1) throw new UsageError('claim reassign 要一个位置参数：单号');
+  const n = issueOf(p.positional[0]);
+  const to = p.options.get('to');
+  if (to !== 'worker' && to !== 'seat' && to !== 'engine')
+    throw new UsageError(`要带 --to worker|seat|engine${to === undefined ? '' : `，没有「${to}」`}`);
+  const founder = p.options.get('founder')?.trim() || undefined;
+  const repo = repoOf(p, io);
+  const scope = scopeOf(p);
+  const extra = [];
+  if (to === 'engine') {
+    const reason = p.options.get('reason')?.trim();
+    if (!reason) throw new UsageError('--to engine 要带 --reason "<为什么>"（写进交单的操作记录）');
+    for (const k of ['label', 'note', 'grace-minutes'])
+      if (p.options.has(k)) throw new UsageError(`--to engine 不带 --${k}`);
+    extra.push('--reason', reason);
+  } else {
+    const label = p.options.get('label')?.trim();
+    if (!label) throw new UsageError('要带 --label <工人名>');
+    if (!SESSION.test(label))
+      throw new UsageError(`工人名「${label}」不行：64 字以内的一段字母、汉字、数字、点、冒号、横线、下划线`);
+    if (p.options.has('reason')) throw new UsageError(`--to ${to} 不带 --reason（写 --note）`);
+    const grace = p.options.get('grace-minutes');
+    if (grace !== undefined && !/^[1-9]\d{0,5}$/.test(grace))
+      throw new UsageError(`--grace-minutes 写正整数（分钟），「${grace}」不行`);
+    const note = noteOf(p, false);
+    extra.push(
+      '--label',
+      label,
+      ...(grace === undefined ? [] : ['--grace-minutes', grace]),
+      ...(note === undefined ? [] : ['--note', note]),
+    );
+  }
+  const picked = pickState(io.home, scope, sessionOf(p, false));
+  if (!picked.ok) return fail(io, picked.why);
+  const s = picked.state;
+  if (s.retired) {
+    io.err(`没改派：你已经不是帅位（${scope} 第 ${s.term} 任已退役：${s.retired.why}）`);
+    return 3;
+  }
+  const lapse = localLapse(s, io.now());
+  if (lapse) {
+    io.err(`没改派：不是帅位——${lapse}`);
+    return 3;
+  }
+  const host = franceHost(io);
+  if (!host.ok) return fail(io, host.why);
+  const r = callFrance(
+    io,
+    host.host,
+    [
+      'claim',
+      'reassign',
+      repo,
+      String(n),
+      '--to',
+      to,
+      '--machine',
+      s.machine,
+      '--session',
+      s.session,
+      '--term',
+      String(s.term),
+      '--scope',
+      scope,
+      ...extra,
+      ...(founder === undefined ? [] : ['--founder', founder]),
+    ],
+    { json: false },
+  );
+  if (r.kind !== 'done')
+    return fail(io, `没改派（不知道法国那边做没做，先 claim.mjs show ${n} 看）：${r.why}`);
+  // 法国打的是给人看的话：改派了什么、叫停了没有、旧 PR 关了哪几个、哪几样没做成要人补
+  if (r.code === 0) {
+    io.out(r.text);
+    const id = /认领号 ([0-9a-f-]{36})/.exec(r.text)?.[1];
+    if (to !== 'engine' && id && !isDrill(scope))
+      await mirror(io, repo, n, [
+        'claim',
+        `改派给 ${s.machine}/${p.options.get('label')}（认领 ${id.slice(0, 8)}）`,
+      ]);
+    return 0;
+  }
+  if (r.code === 3) {
+    io.err(r.text || '没改派：不是你的（不是帅位，或原来的还活着、没带创始人原话）');
+    return 3;
+  }
+  if (r.code === 1 && r.text) {
+    // 改派本身成了、后面几样（叫停、关旧 PR）有没做成的：法国照实写在正文里，退出码 1
+    io.err(r.text);
+    return 2;
+  }
+  return fail(io, `没改派：法国回的退出码 ${r.code}${r.text ? `：${firstLine(r.text)}` : ''}`);
 }
 
 // —— 推前钩子 ——

@@ -18,8 +18,9 @@
 //    会话的 TMPDIR 是这次会话自己的临时目录（工作树根下的 _tmp/<runId>），会话收场就删。
 //    stopSession 按 runId 停（起会话还没返回时工作流只知道 runId）：停掉这个 runId 名下的进程，并记下「这个 runId 已叫停」——
 //    之后（或同时在跑的）startSession 再拿这个 runId 来，不起进程，抛 SESSION_STOPPED。
-// 5. awaitSession 只是「看守」：工人重启后它会被重试。接得上就接着看；接不上（引擎正常停时会话跟着退了，
+// 5. awaitSession 只是「看守」：工人重启后它会被重试。接得上就接着看；接不上（引擎停机排空到了上限、过了时限还没完的，
 //    或者引擎被强杀、会话成了孤儿）就按 handle 把旧会话收掉，回 outcome=failed、code=SESSION_LOST——工作流会续会话重起。
+//    引擎正常停机先排空（drain.ts）：不起新会话（startSession 抛 ENGINE_STOPPING），等在跑的做完再停，不带走它们。
 //    工人进程起来时 createEngineWorker 会先调 reapOrphanSessions（fleet-agent-scope list 再逐个 stop，再清上一轮会话的临时目录）：
 //    上一轮的会话输出管道已经断了，接不上。工作流被强行终止留下的会话，现在要等工人下一次起来时这一步才收
 //    （每小时对账还没接这一项：#247）。
