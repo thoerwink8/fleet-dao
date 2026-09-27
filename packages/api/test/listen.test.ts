@@ -153,6 +153,33 @@ function waitForStdout(child: ChildProcess, want: string, timeoutMs: number): Pr
   });
 }
 
+/**
+ * 连到一个端口，连不上就再试（`systemd-socket-activate` 是另起的进程，spawn() 一回来它自己还没跑到 bind/listen
+ * 那一步，这段时间里 connect 会 ECONNREFUSED——不是「端口没被排队」，是这个外部进程自己启动慢；CI 的机器比本机慢，
+ * 只试一次会偶发假红）。超时了才是真的「不该失败还失败了」。
+ */
+function connectRetrying(port: number, host: string, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  return new Promise((resolve, reject) => {
+    const attempt = () => {
+      const sock = connect(port, host);
+      sock.once('connect', () => {
+        sock.destroy();
+        resolve();
+      });
+      sock.once('error', () => {
+        sock.destroy();
+        if (Date.now() >= deadline) {
+          reject(new Error(`连 ${host}:${port} 试到超时（${timeoutMs}ms）还是被拒`));
+          return;
+        }
+        setTimeout(attempt, 50);
+      });
+    };
+    attempt();
+  });
+}
+
 function httpGetBody(port: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const req = request({ host: '127.0.0.1', port, path: '/', method: 'GET' }, (res) => {
@@ -191,9 +218,9 @@ describe.skipIf(!hasSystemdSocketActivate())(
         },
       );
       try {
-        const early = connect(aPort, '127.0.0.1');
-        await once(early, 'connect');
-        early.destroy();
+        // 连的是 systemd-socket-activate 自己绑的端口（子进程的 startListeners 还没跑到，见上面 delay 那行的注释）：
+        // 连得上就证明「排队等着接」这件事本身成立，不用等子进程真起来。
+        await connectRetrying(aPort, '127.0.0.1', 5_000);
 
         // fixture 真的调用了 startListeners、两个 fd 都听上了才会打这一行；等它，不瞎猜时间。
         await waitForStdout(child, 'ready', 10_000);
