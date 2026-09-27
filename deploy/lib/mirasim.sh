@@ -25,9 +25,11 @@ check_mirasim() { # 用户
   local fix="创始人从自己电脑上的 Mirasim 桌面端以 SSH 远程模式连 $u@这台机器，装起来、登一次账号（docs/ops.md 第五节「会话用户的 Mirasim」）；装好之前 Mirasim 路由派不出去"
   # 目录不在也算「还没装」（待配，不是坏了）：ls 找不到目录退出 2，和 runuser 本身跑不起来（用户没有、权限不对）分不清——
   # 两层 stderr（内层 ls、外层 runuser）都并进 out，退出非 0 时看文字认是不是「目录不在」，不靠退出码本身区分。
+  # 「|| rc=$?」不能拆成下一行的 rc=$?：france.sh 挂着 ERR 陷阱，赋值里的命令一失败陷阱就先响、整个装机停下（09-28 撞过：
+  # 目录不在本该是待配，结果把后面的读回全跳了）
+  rc=0
   # shellcheck disable=SC2016 # 单引号里的 $1 在这个用户的 sh 里展开，不是这里
-  out=$(runuser -u "$u" -- /bin/sh -c 'ls -1 -- "$1" 2>&1' sh "$dir" 2>&1)
-  rc=$?
+  out=$(runuser -u "$u" -- /bin/sh -c 'ls -1 -- "$1" 2>&1' sh "$dir" 2>&1) || rc=$?
   if ((rc != 0)); then
     if [[ "$out" == *'No such file or directory'* ]]; then
       pending "$u 还没有自己的 Mirasim 服务（没有 $dir）：$fix"
