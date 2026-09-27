@@ -30,7 +30,7 @@ export function neutralizeCloseKeywords(text: string): string {
 }
 
 // —— PR 正文：栏目以仓根 .github/pull_request_template.md 为准。人开的 PR 由 GitHub 套那份模板，引擎开的走这里；
-// 两边栏目对不上，test/text.test.ts 会红。整篇 15 行以内（设计 §7）。——
+// 两边栏目对不上，test/text.test.ts 会红。整篇 16 行以内（设计 §7；#348 加「认领」栏时从 15 放到 16：固定的栏占 8 行，再少列表就放不下）。——
 
 export interface PrBodyInput {
   /** 对应的需求（issue 号）。 */
@@ -73,7 +73,7 @@ const PR_DOC_FILES: readonly (readonly [path: string, name: string])[] = [
   ['docs/plan.md', 'plan'],
 ];
 
-export const PR_BODY_MAX_LINES = 15;
+export const PR_BODY_MAX_LINES = 16;
 
 /**
  * 「这个 PR 做完就关单」一栏：引擎开的 PR 一律写「否」（#241）。GitHub 合并时替它关了单，接活会当成叫停，第 7 步的

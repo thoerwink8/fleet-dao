@@ -51,7 +51,7 @@ describe('PR 正文模板', () => {
     expect(columns(body)).toEqual(fromTemplate);
   });
 
-  it('15 行以内：条目多了从最长的一栏砍，砍掉的写「另有 N 条」；风险并进「还欠什么」', () => {
+  it('16 行以内：条目多了从最长的一栏砍，砍掉的写「另有 N 条」；风险并进「还欠什么」', () => {
     const body = renderPrBody({
       requirement: 12,
       subtask: 'B 验证码',
