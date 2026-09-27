@@ -49,6 +49,18 @@ export {
   toPlanIssue,
 } from './github-api.ts';
 export {
+  CLOSE_USAGE,
+  CloseRefused,
+  CloseUnchecked,
+  closingIssues,
+  type IssueCloseDeps,
+  type IssueCloseResult,
+  issueClose,
+  RESULT_FILE,
+  resultDocIssue,
+  resultDocOf,
+} from './issue-close.ts';
+export {
   type Gh,
   type GhResult,
   ghRunner,
@@ -102,8 +114,11 @@ export {
 } from './plan-snapshot.ts';
 export {
   annotation,
+  CLOSE_COLUMN,
+  type CloseColumn,
   checkPlanValue,
   checkPrFields,
+  closeColumnValue,
   PLAN_COLUMN,
   PLAN_DOC,
   type PrEvent,

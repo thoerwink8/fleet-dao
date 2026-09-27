@@ -6,6 +6,7 @@ import {
   annotation,
   checkPlanValue,
   checkPrFields,
+  closeColumnValue,
   PR_COLUMNS,
   type PrFacts,
   prColumns,
@@ -41,6 +42,7 @@ function body(plan: string | null, specs: string | null): string {
     '**做了什么**：',
     '- 加了验证码',
     '**需求**：#12',
+    '**这个 PR 做完就关单**：否',
     ...(plan === null ? [] : [`**对应计划**：${plan}`]),
     ...(specs === null ? [] : [`**specs**：${specs}`]),
     '**档位**：直接合——只加了一个输入框',
@@ -101,11 +103,11 @@ describe('PR 必填栏：齐了就过', () => {
 
   it('栏的几种写法都认：**对应计划**：、**对应计划：**、不加粗的「对应计划：」（#39、#46 这么写）、列表里的、英文冒号、Specs 大写', () => {
     for (const text of [
-      '**对应计划**：P1「工作流」\n**specs**：不适用\n**档位**：直接合（纯文档）',
-      '**对应计划：** P1「工作流」\n**specs：** 不适用\n**档位：** 先合后看——一般改动',
-      '对应计划：plan.md P1「工作流」（本 PR 新加这一条）\nspecs：`specs/12-登录验证码/`\n档位：先审后合，碰了引擎核心',
-      '- 对应计划：P1「工作流」\n- specs：不适用\n- 档位：`直接合` 只改测试',
-      '**对应计划**: P1「工作流」\nSpecs: 不适用\n档位: 直接合 - 纯文档',
+      '**对应计划**：P1「工作流」\n**specs**：不适用\n**档位**：直接合（纯文档）\n**这个 PR 做完就关单**：否',
+      '**对应计划：** P1「工作流」\n**specs：** 不适用\n**档位：** 先合后看——一般改动\n**这个 PR 做完就关单：** 否',
+      '对应计划：plan.md P1「工作流」（本 PR 新加这一条）\nspecs：`specs/12-登录验证码/`\n档位：先审后合，碰了引擎核心\n这个 PR 做完就关单：否（还有后续）',
+      '- 对应计划：P1「工作流」\n- specs：不适用\n- 档位：`直接合` 只改测试\n- 这个 PR 做完就关单：`是`',
+      '**对应计划**: P1「工作流」\nSpecs: 不适用\n档位: 直接合 - 纯文档\n这个 PR 做完就关单: 否',
     ]) {
       expect(check({ body: text }), text).toEqual([]);
     }
@@ -123,6 +125,7 @@ describe('PR 必填栏：齐了就过', () => {
       '对应计划：P1「工作流」',
       'specs：specs/12-登录验证码/',
       '档位：直接合——只改文档',
+      '这个 PR 做完就关单：否',
       '',
       '## 改了什么',
       '- `specs/99-别的/需求.md`：顺带提一句',
@@ -138,7 +141,8 @@ describe('PR 必填栏：齐了就过', () => {
   });
 
   it('不加粗认的栏名就是 PR 模板里的那几栏，顺序也一样', () => {
-    expect([...prColumns(TEMPLATE).keys()]).toEqual([...PR_COLUMNS]);
+    // 栏名不分大小写（prColumns 按小写存）：「这个 PR 做完就关单」带大写字母
+    expect([...prColumns(TEMPLATE).keys()]).toEqual(PR_COLUMNS.map((c) => c.toLowerCase()));
   });
 
   it('specsPaths 取出的路径和 specs 一栏认的一样（合并闸先按它去 GitHub 上问在不在）', () => {
@@ -254,7 +258,7 @@ describe('PR 必填栏：缺一样报一句，说清缺什么、怎么补', () =
     );
   });
 
-  it('全缺：五样各一句，按标签、里程碑、对应计划、specs、档位的顺序', () => {
+  it('全缺：六样各一句，按标签、里程碑、对应计划、specs、档位、这个 PR 做完就关单的顺序', () => {
     const problems = checkPrFields({ labels: [], milestone: null, body: '' }, repo);
     expect(problems.map((p) => p.slice(0, p.indexOf('：')))).toEqual([
       '没贴类别标签',
@@ -262,6 +266,7 @@ describe('PR 必填栏：缺一样报一句，说清缺什么、怎么补', () =
       '正文里认不出「对应计划」一栏',
       '正文里认不出「specs」一栏',
       '正文里认不出「档位」一栏',
+      '正文里认不出「这个 PR 做完就关单」一栏',
     ]);
     for (const p of problems) expect(p).not.toContain('\n');
   });
@@ -273,12 +278,38 @@ describe('PR 必填栏：缺一样报一句，说清缺什么、怎么补', () =
     ]);
   });
 
-  it('照仓里的 PR 模板开、一个字没填：三栏都在，都判成空的（模板提示不算填了）', () => {
+  it('照仓里的 PR 模板开、一个字没填：四栏都在，都判成空的（模板提示不算填了）', () => {
     expect(check({ body: TEMPLATE })).toEqual([
       '「对应计划」一栏是空的：写 plan.md 的阶段加那一条的原话开头，比如 P1「工作流」。',
       '「specs」一栏是空的：写需求文档的目录（specs/<号>-<短名>/），杂活写「不适用」。',
       '「档位」一栏是空的：写「CI 绿就合」「先审后合」之一，后面跟理由（拿不准写「先审后合」）。',
+      expect.stringMatching(/^「这个 PR 做完就关单」一栏是空的：合进去这张单就做完了写「是」/),
     ]);
+  });
+});
+
+describe('「这个 PR 做完就关单」一栏（#241）：只提醒，挡不挡合并看合并闸', () => {
+  const withClose = (line: string | null) =>
+    good.body.replace('**这个 PR 做完就关单**：否\n', line === null ? '' : `${line}\n`);
+
+  it('是、否都认（带理由、反引号、不加粗都行）', () => {
+    for (const line of [
+      '**这个 PR 做完就关单**：是',
+      '**这个 PR 做完就关单**：`否`（还有 #13）',
+      '这个 PR 做完就关单：是，Closes 写在最后一行',
+    ]) {
+      expect(check({ body: withClose(line) }), line).toEqual([]);
+    }
+    expect(closeColumnValue('**这个 PR 做完就关单**：是').value).toBe('yes');
+    expect(closeColumnValue('这个 PR 做完就关单：否').value).toBe('no');
+  });
+
+  it.each([
+    ['没这一栏', null, /^正文里认不出「这个 PR 做完就关单」一栏：单独起一行写/],
+    ['只留着模板提示', '**这个 PR 做完就关单**：<!-- 是 / 否 -->', /^「这个 PR 做完就关单」一栏是空的/],
+    ['写了认不出的', '**这个 PR 做完就关单**：看情况', /^「这个 PR 做完就关单」写的「看情况」认不出/],
+  ])('%s：提醒一句，说清怎么填', (_name, line, message) => {
+    expect(check({ body: withClose(line) })).toEqual([expect.stringMatching(message)]);
   });
 });
 

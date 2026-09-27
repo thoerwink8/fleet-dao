@@ -15,6 +15,7 @@
     "test": "vitest run",
     "test:changed": "node packages/conventions/src/bin/test-changed.ts",
     "issue:new": "node packages/conventions/src/bin/issue-new.ts",
+    "issue:close": "node packages/conventions/src/bin/issue-close.ts",
     "debt:check": "node packages/conventions/src/bin/debt-check.ts",
     "milestone:close-check": "node packages/conventions/src/bin/milestone-close-check.ts",
     "plan:snapshot": "node packages/conventions/src/bin/plan-snapshot.ts"

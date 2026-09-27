@@ -73,6 +73,12 @@ const PR_DOC_FILES: readonly (readonly [path: string, name: string])[] = [
 
 export const PR_BODY_MAX_LINES = 15;
 
+/**
+ * 「这个 PR 做完就关单」一栏：引擎开的 PR 一律写「否」（#241）。GitHub 合并时替它关了单，接活会当成叫停，第 7 步的
+ * 关单评论和记账就做不完；所以正文里的关单词也一律改成「关联」（neutralizeCloseKeywords）。
+ */
+export const ENGINE_CLOSE_COLUMN = '否（引擎合并后第 7 步自己关单）';
+
 export function renderPrBody(input: PrBodyInput): string {
   const lists: [string, readonly string[]][] = [
     ['做了什么', input.did.length ? input.did : ['（没写）']],
@@ -91,6 +97,7 @@ export function renderPrBody(input: PrBodyInput): string {
   const docs = PR_DOC_FILES.filter(([path]) => changed.has(path)).map(([, name]) => name);
   const tail = [
     `**需求**：${requirement}`,
+    `**这个 PR 做完就关单**：${ENGINE_CLOSE_COLUMN}`,
     `**对应计划**：${oneLine(input.plan) || '（没写）'}`,
     `**specs**：${input.specs === null ? '不适用' : oneLine(input.specs) || '（没写）'}`,
     `**档位**：${oneLine(input.tier ?? '') || '（没写）'}`,
