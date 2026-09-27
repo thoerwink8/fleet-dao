@@ -49,6 +49,10 @@ interface World {
   forCommit: unknown[];
   /** 每次读主线头依次回这些，读完了一直回最后一个。 */
   mains: string[];
+  /** files 里这几个是删掉的（status removed）。 */
+  removed: string[];
+  /** 读了几次改动文件。 */
+  filesReads: number;
 }
 
 function world(
@@ -57,6 +61,7 @@ function world(
   const w: World = {
     pr: {
       number: 80,
+      title: '试一下',
       labels: [{ name: '杂项' }],
       milestone: { title: 'P1 核心闭环' },
       body: body('直接合——只改文档'),
@@ -81,6 +86,8 @@ function world(
     open: [],
     forCommit: [],
     mains: [MAIN],
+    removed: [],
+    filesReads: 0,
     ...over,
   };
   if (over.files && !over.prOver?.changed_files) w.pr.changed_files = over.files.length;
@@ -97,8 +104,12 @@ function world(
       return { ...w.pr, number: n };
     },
     async files() {
+      w.filesReads += 1;
       boom('files');
-      return w.files.map((filename) => ({ filename, status: 'modified' }));
+      return w.files.map((filename) => ({
+        filename,
+        status: w.removed.includes(filename) ? 'removed' : 'modified',
+      }));
     },
     async statuses() {
       boom('statuses');
@@ -207,6 +218,102 @@ describe('合并闸：验收场景', () => {
       );
     expect((await at('failure')).lines).toEqual([expect.stringMatching(/^第二意见没过/)]);
     expect((await at('pending')).lines).toEqual([expect.stringMatching(/^等第二意见：.*还在跑/)]);
+  });
+});
+
+describe('合并闸：写了关单的 PR 要自己带那张单的结果（#325，创始人 2026-09-27 晚拍）', () => {
+  const RESULT = 'specs/12-登录/结果.md';
+  const closing = (column: string, tail: string) =>
+    body('CI 绿就合——只改文档').replace(
+      '**这个 PR 做完就关单**：否',
+      `**需求**：#12\n**这个 PR 做完就关单**：${column}`,
+    ) + (tail ? `\n\n${tail}` : '');
+
+  it('【故意造出的失败】正文写了 Closes #12、改动里没有 specs/12-*/结果.md：不通过，说清怎么补（改动前的合并闸照样放行）', async () => {
+    const r = await gatePr(80, deps(world({ prOver: { body: closing('是', 'Closes #12') } })));
+    expect(r).toMatchObject({ state: 'failure', notChecked: false });
+    expect(r.lines).toEqual([
+      '要关 #12 却没带 specs/12-<短名>/结果.md：结果写进这个 PR；结果不在这里写的，去掉 Closes #12、「这个 PR 做完就关单」改「否」，合完用 pnpm issue:close 12 关。',
+    ]);
+  });
+
+  it('带了结果：通过（结果写在这个 PR 里、改名进来的都算）', async () => {
+    const r = await gatePr(
+      80,
+      deps(world({ files: ['docs/x.md', RESULT], prOver: { body: closing('是', 'Closes #12') } })),
+    );
+    expect(r.state).toBe('success');
+  });
+
+  it('「这个 PR 做完就关单」写「否」、却在正文写了 fixes #12：GitHub 照样会关，照样要带结果', async () => {
+    const r = await gatePr(80, deps(world({ prOver: { body: closing('否', '顺手 fixes #12') } })));
+    expect(r.state).toBe('failure');
+    expect(r.lines[0]).toMatch(/^要关 #12 却没带/);
+  });
+
+  it('结果是这个 PR 删掉的：不算带了', async () => {
+    const w = world({ files: [RESULT], removed: [RESULT], prOver: { body: closing('是', 'Closes #12') } });
+    expect((await gatePr(80, deps(w))).state).toBe('failure');
+  });
+
+  it('【故意造出的失败】填了「是」却一个关单词都没写：GitHub 不关，不通过（结果带了也一样）', async () => {
+    const r = await gatePr(80, deps(world({ files: [RESULT], prOver: { body: closing('是', '') } })));
+    expect(r.state).toBe('failure');
+    expect(r.lines[0]).toBe(
+      '「这个 PR 做完就关单」填了「是」，正文里却没写 Closes #<单号>：GitHub 只认关单词，不写合并了也不关；另起一行写上，还不关就改成「否」。',
+    );
+  });
+
+  it('关好几张：每张都要带自己的结果，缺哪张报哪张', async () => {
+    const r = await gatePr(
+      80,
+      deps(world({ files: [RESULT], prOver: { body: closing('是', 'Closes #12\nCloses #13') } })),
+    );
+    expect(r.state).toBe('failure');
+    expect(r.lines).toEqual([expect.stringMatching(/^要关 #13 却没带 specs\/13-<短名>\/结果\.md/)]);
+  });
+
+  it('关单词写的是别的仓：不关这个仓的单，不挡', async () => {
+    const r = await gatePr(
+      80,
+      deps(
+        world({
+          prOver: { body: closing('否', 'fixes other/repo#12'), base: { repo: { full_name: 'o/r' } } },
+        }),
+      ),
+    );
+    expect(r.state).toBe('success');
+  });
+
+  it('引擎开的 PR（「否」、关单词改成了「关联」）、不关单的 PR：这一段不多读改动文件，照常通过', async () => {
+    const w = world({ prOver: { body: closing('否（引擎合并后第 7 步自己关单）', '关联 #12') } });
+    expect((await gatePr(80, deps(w, '读不到'))).lines.filter((l) => l.includes('#12'))).toEqual([]);
+    expect(w.filesReads).toBe(0);
+  });
+
+  it('【故意造出的失败】要关单、改动文件读不到或读不全：没查成，不当成带了', async () => {
+    const broken = await gatePr(
+      80,
+      deps(world({ broken: { files: 'GitHub 回 502' }, prOver: { body: closing('是', 'Closes #12') } })),
+    );
+    expect(broken).toMatchObject({ state: 'failure', notChecked: true });
+    expect(broken.lines).toContain(
+      '没查成：读不到 PR #80 改了哪些文件（GitHub 回 502），没法判要关的 #12 带没带结果。',
+    );
+    const partial = await gatePr(
+      80,
+      deps(world({ files: [RESULT], prOver: { changed_files: 3, body: closing('是', 'Closes #12') } })),
+    );
+    expect(partial).toMatchObject({ state: 'failure', notChecked: true });
+    expect(partial.lines).toContain(
+      '没查成：PR #80 改了 3 个文件，只读到 1 个，没法判要关的 #12 带没带结果。',
+    );
+  });
+
+  it('PR 读回来正文认不出：认不出要关哪几张，没查成', async () => {
+    const r = await gatePr(80, deps(world({ prOver: { body: 42 } })));
+    expect(r).toMatchObject({ state: 'failure', notChecked: true });
+    expect(r.lines[0]).toBe('没查成：PR #80 的正文认不出，没法判它要关哪几张单。');
   });
 });
 

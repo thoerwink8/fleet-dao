@@ -3,19 +3,16 @@
 // 每缺一样给一句话：缺什么、怎么补——没挂里程碑但「对应计划」写着未排期就不提醒。design 第七节「标签和里程碑不靠人记得贴」。
 // 纯判断，不碰网络：合并闸（merge-gate.ts）现读 PR 和仓里的文件后调这里；这些只是提醒，不挡合并（创始人 2026-09-26）。
 
+import { CLOSE_COLUMN, type CloseColumn, closeColumnValue } from './close-rule.ts';
 import { isKindLabel, KIND_LABELS, milestonePhase, milestoneVersion } from './labels.ts';
 import { parseMd, stripComments } from './markdown.ts';
 import { parseTier, TIER_COLUMN } from './merge-gates.ts';
 import { findItem, itemExample, type PlanPhase, parsePlanRefs, phaseRange, planPhases } from './plan.ts';
 
+export { CLOSE_COLUMN, type CloseColumn, closeColumnValue };
+
 export const PLAN_COLUMN = '对应计划';
 export const SPECS_COLUMN = 'specs';
-/**
- * 「这个 PR 做完就关单」：是 = 合进去这张单就做完了，正文另写 Closes #号、由 GitHub 合并时关，这个 PR 要带 结果.md（合并闸
- * 要不要挡没带的，#325 等创始人拍）；否 = 还有后续，或结果不在这个 PR 里写（合完用 pnpm issue:close 关）。引擎开的 PR 一律写否（#241）。
- * 这一栏缺了、写的认不出只提醒（必填栏只提醒）。
- */
-export const CLOSE_COLUMN = '这个 PR 做完就关单';
 /** plan.md 在仓里的位置：pr-fields 判「对应计划」、引擎收需求文档时核那一行，都按它找。 */
 export const PLAN_DOC = 'docs/plan.md';
 /** PR 模板（.github/pull_request_template.md）的各栏，顺序同模板；测试里对着模板查，两边对不上就红。 */
@@ -120,26 +117,10 @@ export function checkPrFields(pr: PrFacts, repo: RepoFacts): string[] {
   problems.push(...checkSpecs(cols.get(SPECS_COLUMN), repo));
   const tier = parseTier(cols.get(TIER_COLUMN));
   if ('problem' in tier) problems.push(tier.problem);
-  const close = closeColumnOf(cols);
+  // 「这个 PR 做完就关单」和合并闸认的是同一份（close-rule.ts）：填了「是」却没写关单词，合并闸那边挡
+  const close = closeColumnValue(pr.body);
   if (close.value !== 'yes' && close.value !== 'no') problems.push(closeColumnProblem(close));
   return problems;
-}
-
-/** 「这个 PR 做完就关单」填的什么：是、否、空的、写了认不出的；没有这一栏是 missing。 */
-export type CloseColumn = { value: 'yes' | 'no' | 'empty' | 'missing' } | { value: 'other'; text: string };
-
-export function closeColumnValue(body: string): CloseColumn {
-  return closeColumnOf(prColumns(body));
-}
-
-function closeColumnOf(cols: Map<string, string>): CloseColumn {
-  const raw = cols.get(CLOSE_COLUMN.toLowerCase());
-  if (raw === undefined) return { value: 'missing' };
-  const v = raw.replace(/[`*]/g, '').trim();
-  if (!v) return { value: 'empty' };
-  if (v.startsWith('是')) return { value: 'yes' };
-  if (v.startsWith('否')) return { value: 'no' };
-  return { value: 'other', text: oneLine(v) };
 }
 
 function closeColumnProblem(c: CloseColumn): string {
