@@ -10,6 +10,13 @@ describe('测试里起子进程', { timeout: 0 }, () => {
     expect(r).toEqual({ status: 3, stdout: '', stderr: '坏了' });
   });
 
+  it('【故意造出的失败】子进程不读标准输入就退出：大输入撑爆管道缓冲，父进程写一半必踩「管道已经关了」，不算没跑完', () => {
+    // 2MB，远超管道缓冲（Linux 默认 64KB）：process.exit(3) 根本不读 stdin，父进程写这一步几乎每次都会踩上
+    // Linux 是 EPIPE、Windows 是 EOF（本机实测），r.error 会被设上，但子进程其实已经正常退出、拿到了退出码 3。
+    const r = runChild(process.execPath, ['-e', 'process.exit(3)'], { input: 'x'.repeat(2 * 1024 * 1024) });
+    expect(r).toEqual({ status: 3, stdout: '', stderr: '' });
+  });
+
   it('不给输入：标准输入是空的，读输入的子进程马上读到结尾、不会等', () => {
     const r = runChild(process.execPath, [
       '-e',
