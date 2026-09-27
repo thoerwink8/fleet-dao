@@ -8,8 +8,11 @@ import {
   type BundleCommitsInput,
   type BundleCommitsResult,
   bundleCommits,
+  type FetchBranchInput,
+  type FetchBranchResult,
   type FetchMainlineInput,
   type FetchMainlineResult,
+  fetchBranchHead,
   fetchMainline,
 } from './bundle.ts';
 import { type ClaimsGitHub, createClaimsGitHub } from './claims.ts';
@@ -151,6 +154,8 @@ export interface GitHub {
   fetchMainline(input: FetchMainlineInput, ctx?: ActivityContext): Promise<FetchMainlineResult>;
   /** 从镜像打包给会话用户（`git fetch <bundle> <ref>` 用得到；会话读不到镜像本身）。 */
   bundleCommits(input: BundleCommitsInput, ctx?: ActivityContext): Promise<BundleCommitsResult>;
+  /** 抓一个分支此刻在远端的头（不认镜像里旧引用还在不在，重新问一次）：推被拒时认领远端新头用。 */
+  fetchBranchHead(input: FetchBranchInput, ctx?: ActivityContext): Promise<FetchBranchResult>;
   openPr(input: OpenPrInput, ctx?: ActivityContext): Promise<OpenPrResult>;
   waitCi(input: WaitCiInput, ctx?: ActivityContext): Promise<CiWaitResult>;
   /** PR 改到的文件（翻完页、带 patch）：先审后合按路径判要不要等第二意见用它，判法和合并闸同一份（#253）。 */
@@ -265,6 +270,9 @@ export function createGitHub(options: GitHubOptions): GitHub {
     },
     async bundleCommits(input, ctx = {}) {
       return bundleCommits(pushDeps, { ...input, signal: input.signal ?? ctx.signal });
+    },
+    async fetchBranchHead(input, ctx = {}) {
+      return fetchBranchHead(pushDeps, { ...input, signal: input.signal ?? ctx.signal });
     },
     async writeSpecDoc(input, ctx = {}) {
       return writeSpecDoc(deps, { ...input, signal: input.signal ?? ctx.signal });

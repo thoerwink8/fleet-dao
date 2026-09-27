@@ -1624,6 +1624,19 @@
         "rule": "KL4",
         "routeOutcome": "neutral"
       }
+    },
+    {
+      "id": "X105",
+      "provenance": "observed",
+      "origin": "#307/#389 2026-09-28 凌晨真事：帅位手工把并主线的提交推上 PR 分支，引擎认了新头去查 CI 但工作树没跟上；后来再推被拒，引擎自己先试过认领远端新头（github-ports.ts 的 pushBranch），发现远端不含起会话前的头，判定是历史被改写过，原样报出来",
+      "evidence": {
+        "source": "pushBranch",
+        "routeBound": false,
+        "code": "DIVERGED",
+        "retryable": false,
+        "message": "推 fleet/307-x 被拒：远端头 4f5b1f4 不含起会话前的头 a81893a（像是被强推改写了历史），不能自动并，要人看"
+      },
+      "expect": { "action": "park", "rule": "MC3", "alert": true, "routeOutcome": "neutral" }
     }
   ],
   "skipped": [

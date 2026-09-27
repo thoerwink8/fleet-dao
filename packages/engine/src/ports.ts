@@ -507,7 +507,15 @@ export interface PullRequestRef {
 export interface WaitCiInput extends Scope {
   repo: Repo;
   prNumber: number;
+  branch: string;
   head: string;
+  /**
+   * 子任务的工作树：github 包认了新头（新头含着老头，见 packages/github/src/pulls.ts 的 waitCi）就顺手把它也
+   * 快进到那个头——不给就只更新证据里的 head，不碰工作树（合并队列没有工作树）。会话在跑（工作树里有没提交的
+   * 改动、或本地还有没推的提交）时不碰：等下一轮再试，不强上（#307/#389 那次真事：CI 认了新头，工作树没跟上，
+   * 后面再并主线、再推都是从旧头算起，最后推送被拒）。
+   */
+  worktreePath?: string;
 }
 
 // —— 先审后合：改到的地方碰没碰高风险路径、第二意见写回合并闸认的状态（#253）——
