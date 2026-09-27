@@ -6,7 +6,8 @@
 # fleet 用户的 pnpm（corepack）、AI 会话用的 pnpm（归 root，钉版本、核 sha512）、WireGuard 客户端（主动连香港，法国不开任何入站端口）、
 # 应用的本机配置与随机密钥、往香港传驾驶舱静态文件的钥匙、把演示版的可见范围推到香港的单元、
 # 会话用户和 pilot 家里各家 AI 的全局说明与方法类 skill、他们各自的 ddgs（用钉住版本的 uv 装）、
-# 会话用户的 cursor-agent（官方安装脚本，以会话用户自己的身份装在他家里，只在没有时装）。
+# 会话用户的 cursor-agent（官方安装脚本，以会话用户自己的身份装在他家里，只在没有时装）、
+# node 默认的编译缓存目录（先由 root 建好，别的用户替 fleet、pilot、root 放不进编译缓存）。
 # 应用本身（引擎、后端、前端）由 deploy/release.sh 发布。
 # 旧系统的服务、端口、文件一概不动。端口表、怎么跑、怎么看健康、怎么回滚：docs/ops.md。
 #   bash deploy/france.sh           装：缺的补上，已有的不动
@@ -35,6 +36,8 @@ source "$DEPLOY_DIR/lib/agents-sync.sh"
 source "$DEPLOY_DIR/lib/app-config.sh"
 # shellcheck source=lib/session-pnpm.sh
 source "$DEPLOY_DIR/lib/session-pnpm.sh"
+# shellcheck source=lib/node-cache.sh
+source "$DEPLOY_DIR/lib/node-cache.sh"
 trap 'on_error "$LINENO" "$BASH_COMMAND"' ERR
 
 # ── 钉死的版本与校验和：外部二进制装上机器就进了信任面，不用 latest ──
@@ -64,6 +67,9 @@ CURSOR_INSTALL_URL=https://cursor.com/install
 # 官方安装脚本固定装在这（{user} 换成会话用户），装和读回都照引擎的找法在这里找：和 packages/engine/src/real/hosts.ts 的
 # DEFAULT_CURSOR_VERSIONS_DIR 一样（engine 的 hosts.test.ts 核对）。engine.env 别改 FLEET_CURSOR_VERSIONS_DIR：改了引擎就找不到这里装的
 CURSOR_VERSIONS_DIR='/home/{user}/.local/share/cursor-agent/versions'
+# node 默认的编译缓存目录和开机时建它的配置（lib/node-cache.sh：为什么要归 root）
+NODE_CACHE_DIR=/tmp/node-compile-cache
+NODE_CACHE_CONF=/etc/tmpfiles.d/fleet-dao-node-compile-cache.conf
 
 # ── 端口：全部只绑本机，和旧系统的开发版 Temporal（7233/8233 与一批临时端口）错开。改了同步 docs/ops.md ──
 PG_PORT=5432
@@ -240,6 +246,15 @@ setup_pilot() {
   ensure_pkgs git openssh-client curl
   setup_login_user "$PILOT_USER" "$PILOT_HOME" "https://dl.reclaude.ai/$RECLAUDE_VERSION/reclaude-linux-amd64" "$RECLAUDE_SHA256"
 }
+
+# node 默认的编译缓存目录先由 root 建好（lib/node-cache.sh）：排在第一次以 fleet 跑 node（下面装 pnpm 就会）之前。
+# 没弄成照装机的规矩停下：这一步不对，会话就能替 fleet、pilot、root 放编译缓存、以他们的身份跑代码
+setup_node_cache() {
+  step "node 的编译缓存目录（$NODE_CACHE_DIR 归 root、755；开机时由 $NODE_CACHE_CONF 先建好）"
+  ensure_node_cache "$NODE_CACHE_DIR" "$NODE_CACHE_CONF"
+}
+
+readback_node_cache() { check_node_cache "$NODE_CACHE_DIR" "$NODE_CACHE_CONF"; }
 
 load_config() {
   load_env "$ENV_FILE" "${ENV_KEYS[@]}"
@@ -837,6 +852,7 @@ readback() {
   readback_pilot
   readback_agent_rules
   readback_sessions
+  readback_node_cache
   readback_pnpm
   readback_cursor_agent
   readback_wireguard
@@ -1308,6 +1324,7 @@ main() {
     before=$(snapshot_others)
     setup_identity
     setup_pilot
+    setup_node_cache
     load_config
     setup_packages
     setup_wireguard
