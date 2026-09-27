@@ -1,6 +1,6 @@
 // pre-push 钩子的判定：拿真 git 在临时仓里造提交，喂钩子会收到的那几行，看拦不拦、退出码对不对。不出网。
 // 每个用例从「远端主线」上另起一段（分离头），互不串：钩子只扫远端还没有的提交。
-import { execFileSync, spawnSync } from 'node:child_process';
+// 用例全是同步的、起一串 git：不设 vitest 的超时，卡死由每个子进程自己的上限管（为什么见 child.ts 开头）。
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,25 +8,16 @@ import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { type GitSync, type PrePushInput, parsePushedRefs, prePushCheck } from '../src/prepush.ts';
 import type { LoadedValues } from '../src/values.ts';
+import { GIT_ID, gitIn, gitSyncIn, runChild } from './child.ts';
 import { pseudoRandom } from './helpers.ts';
 
 const LIST: LoadedValues = { ok: true, source: '测试名单', values: ['fake-org-778899'] };
-const ID = ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', '-c', 'commit.gpgsign=false'];
 const HOOK = fileURLToPath(new URL('../src/bin/pre-push.ts', import.meta.url));
 let repo: string;
 let scratch: string;
 let base: string;
-const gitIn = (cwd: string, ...args: string[]) =>
-  execFileSync('git', [...ID, '-c', 'core.autocrlf=false', ...args], {
-    cwd,
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-  }).trim();
 const git = (...args: string[]) => gitIn(repo, ...args);
-const gitSync: GitSync = (args) => {
-  const r = spawnSync('git', args, { cwd: repo, encoding: 'utf8' });
-  return { code: r.status ?? 1, stdout: r.stdout, stderr: r.stderr };
-};
+const gitSync: GitSync = gitSyncIn(() => repo);
 /** 在 cwd 里写文件（null = 删掉）、提交，返回新提交号。 */
 const commitIn = (
   cwd: string,
@@ -56,10 +47,9 @@ const check = (head: string, over: Partial<PrePushInput> = {}) =>
 const short = (oid: string) => oid.slice(0, 7);
 /** 像 git 那样调钩子本身：参数是远端名和网址，标准输入是要推的引用；名单用测试的假名单。 */
 const runHook = (cwd: string, stdin: string, args: string[]) => {
-  const r = spawnSync(process.execPath, [HOOK, ...args], {
+  const r = runChild(process.execPath, [HOOK, ...args], {
     cwd,
     input: stdin,
-    encoding: 'utf8',
     env: { ...process.env, FLEET_SENSITIVE_VALUES_FILE: join(scratch, 'list.txt') },
   });
   return { code: r.status, out: `${r.stdout}${r.stderr}` };
@@ -73,13 +63,13 @@ beforeAll(() => {
   base = commit({ 'README.md': 'hello\n' });
   // 装作远端主线就在这里：钩子只扫 refs/remotes/* 上都没有的提交。
   git('update-ref', 'refs/remotes/origin/main', base);
-});
+}, 0);
 afterAll(() => {
   rmSync(repo, { recursive: true, force: true });
   rmSync(scratch, { recursive: true, force: true });
 });
 
-describe('prePushCheck', { timeout: 30_000 }, () => {
+describe('prePushCheck', { timeout: 0 }, () => {
   it('解析钩子的标准输入：四段一行', () => {
     expect(parsePushedRefs(`${refLine('a'.repeat(40))}\n`)).toEqual([
       {
@@ -230,7 +220,8 @@ describe('prePushCheck', { timeout: 30_000 }, () => {
     const side = commit({ 'docs/a.md': 'side\n' });
     fresh();
     commit({ 'docs/a.md': 'mine\n' });
-    spawnSync('git', [...ID, 'merge', '-q', '--no-edit', side], { cwd: repo });
+    // 这一步故意冲突（退出码不是 0），下面手写解好的内容再提交。
+    runChild('git', [...GIT_ID, 'merge', '-q', '--no-edit', side], { cwd: repo });
     writeFileSync(join(repo, 'docs/a.md'), 'mine\n用户 fake-org-778899\n');
     const merged = commit({}, '合并 side');
     git(...['merge', '-q', '--no-edit', old]);

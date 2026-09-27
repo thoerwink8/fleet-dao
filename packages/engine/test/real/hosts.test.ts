@@ -1,7 +1,6 @@
 // 执行方式的驱动（#212）：会话用户怎么定、cursor-agent 的起法（会话用户自己读 API 密钥、现找版本目录）、两家驱动拼的参数、
 // 报告整理成的同一个形状（读不到的不记成 0）。起法的两段 sh 都真跑（本机的 sh、假的 cursor-agent 脚本），每条失败路径都故意
 // 造一次；看属主、权限的那几条只在 Linux 上跑（Windows 的 Git Bash 在 NTFS 上表示不了 600）。
-import { spawnSync } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -26,6 +25,7 @@ import {
   wiredHostNames,
 } from '../../src/real/hosts.ts';
 import { agentCommands, realPortsConfigFromEnv } from '../../src/real/index.ts';
+import { runChild } from '../child.ts';
 import {
   CURSOR_NO_LOGIN,
   CURSOR_SESSION,
@@ -101,13 +101,14 @@ function launch(versionsDir: string, args: string[] = []) {
     CURSOR_KEY_STAGE_LENGTH,
   );
   expect([sh, flag, name, dir, rest]).toEqual(['/bin/sh', '-c', 'cursor-agent', HOME_VERSIONS, []]);
-  const r = spawnSync(SH, [flag as string, script as string, name as string, posix(versionsDir), ...args], {
-    encoding: 'utf8',
-  });
+  const r = runChild(SH, [flag as string, script as string, name as string, posix(versionsDir), ...args]);
   return { status: r.status, lines: r.stdout.trim().split('\n'), stderr: r.stderr.trim() };
 }
 
-describe('cursorLaunchCommand：会话用户按 current → 最新版本目录现找（CU-03：升级会删掉旧版本目录）', () => {
+// 下面两组同步起 sh：不设 vitest 的超时，卡死由子进程自己的上限管（为什么见 ../child.ts 开头）。
+describe('cursorLaunchCommand：会话用户按 current → 最新版本目录现找（CU-03：升级会删掉旧版本目录）', {
+  timeout: 0,
+}, () => {
   it('有 current 就用 current', () => {
     const v = join(root, 'versions');
     agent(join(v, 'current'), 'current');
@@ -237,13 +238,14 @@ function keyStage(keyFile: string) {
     'cursor-agent',
   ]);
   const next = [SH, '-c', REPORT_KEY, 'next', posix(keyFile), '-p', '--model', 'auto'];
-  const r = spawnSync(SH, [flag as string, script as string, name as string, posix(keyFile), ...next], {
-    encoding: 'utf8',
-  });
+  const r = runChild(SH, [flag as string, script as string, name as string, posix(keyFile), ...next]);
   return { status: r.status, stdout: r.stdout, lines: r.stdout.trim().split('\n'), stderr: r.stderr.trim() };
 }
 
-describe('cursorLaunchCommand 的前一段：会话用户自己读家里的 API 密钥，放进环境再起 cursor-agent', () => {
+// 同步起 sh：不设 vitest 的超时，卡死由子进程自己的上限管（为什么见 ../child.ts 开头）。
+describe('cursorLaunchCommand 的前一段：会话用户自己读家里的 API 密钥，放进环境再起 cursor-agent', {
+  timeout: 0,
+}, () => {
   /** 没放好：退出 78，stderr 头一句写哪里不对、再写文件和照哪一节放；后面的命令一次都没起。 */
   const refused = (r: ReturnType<typeof keyStage>, file: string, why: string) => {
     expect(r.status).toBe(CURSOR_KEY_EXIT);
@@ -360,21 +362,21 @@ describe('cursorLaunchCommand 的前一段：会话用户自己读家里的 API 
       );
       chmodSync(join(agentDir, 'cursor-agent'), 0o755);
       const [bin, ...args] = cursorLaunchCommand(v, file);
-      const ok = spawnSync(bin as string, [...args, '-p', '--trust'], { encoding: 'utf8' });
+      const ok = runChild(bin as string, [...args, '-p', '--trust']);
       expect(ok.status).toBe(0);
       expect(ok.stdout.trim().split('\n')).toEqual(['KEY_OK', '[-p]', '[--trust]']);
       expect(`${ok.stdout}${ok.stderr}`).not.toContain(key);
 
       // 密钥放好了、cursor-agent 没装：照旧报没装（127）
       const [bin2, ...args2] = cursorLaunchCommand(join(root, 'nowhere'), file);
-      const missing = spawnSync(bin2 as string, args2, { encoding: 'utf8' });
+      const missing = runChild(bin2 as string, args2);
       expect(missing.status).toBe(127);
       expect(missing.stderr).toContain(CURSOR_MISSING);
 
       // 密钥没放好：先报密钥（78），不去找 cursor-agent
       chmodSync(file, 0o644);
       const [bin3, ...args3] = cursorLaunchCommand(v, file);
-      const bad = spawnSync(bin3 as string, args3, { encoding: 'utf8' });
+      const bad = runChild(bin3 as string, args3);
       expect(bad.status).toBe(CURSOR_KEY_EXIT);
       expect(bad.stdout).toBe('');
       expect(bad.stderr).toContain(`${CURSOR_KEY_BAD}：权限是 644，要 600`);
@@ -397,11 +399,11 @@ const FRANCE_SH = fileURLToPath(new URL('../../../../deploy/france.sh', import.m
 
 /** 照装机脚本那样真跑一次：先打一行挑中的路径，再 exec 它 --version。 */
 function deployProbe(versionsDir: string) {
-  const r = spawnSync(SH, [posix(DEPLOY_PROBE), posix(versionsDir)], { encoding: 'utf8' });
+  const r = runChild(SH, [posix(DEPLOY_PROBE), posix(versionsDir)]);
   return { status: r.status, lines: r.stdout.trim().split('\n'), stdout: r.stdout, stderr: r.stderr };
 }
 
-describe('装机脚本找 cursor-agent 和引擎起它挑的是同一个（改了一边另一边跟着改）', () => {
+describe('装机脚本找 cursor-agent 和引擎起它挑的是同一个（改了一边另一边跟着改）', { timeout: 0 }, () => {
   const layouts: Record<string, (v: string) => void> = {
     '有 current': (v) => {
       agent(join(v, 'current'), 'current');

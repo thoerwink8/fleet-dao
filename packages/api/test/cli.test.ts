@@ -1,11 +1,11 @@
 // fleet-api set-password（#120）：只给白名单里的人设；密码读两遍要一致、不从参数传；每条拒绝的路都造一遍。
-import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { CliError, type Prompter, parseSetPasswordArgs, setPassword } from '../src/cli.ts';
 import { DEV_USER_ID, devFixtures, IDS } from '../src/dev-fixtures.ts';
 import { createMemoryStore } from '../src/memory-store.ts';
 import { verifyPassword } from '../src/password.ts';
+import { runChild } from './child.ts';
 
 const PASSWORD = 'initial-words-only';
 
@@ -119,12 +119,13 @@ describe('set-password', () => {
   });
 });
 
-describe('命令行入口（真起一个 node 进程）', () => {
+// 同步起 node：不设 vitest 的超时，卡死由子进程自己的上限管（为什么见 child.ts 开头）。
+describe('命令行入口（真起一个 node 进程）', { timeout: 0 }, () => {
   const bin = fileURLToPath(new URL('../src/bin/fleet-api.ts', import.meta.url));
   const exec = (args: string[]) => {
     const env = { ...process.env };
     delete env.DATABASE_URL;
-    return spawnSync(process.execPath, [bin, ...args], { env, encoding: 'utf8', input: '' });
+    return runChild(process.execPath, [bin, ...args], { env });
   };
 
   it('没带库连接、参数想传密码、不认的命令：退出码 2，说清原因，不连库', () => {
