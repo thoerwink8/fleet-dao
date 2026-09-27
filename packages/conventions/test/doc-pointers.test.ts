@@ -429,6 +429,14 @@ describe('文档指针：故意不查的', () => {
     // 「不是指针」那条里的 docs/plan.md 本身是个真路径，照查；别的一条都不该认
     expect(mine.filter((p) => p.text !== 'docs/plan.md')).toEqual([]);
   });
+
+  it('引擎会话在检出里落的 .fleet-out/（不进仓）不当仓里的顶层目录：指到里面的文件不报「没有」', () => {
+    const { report, first } = withLines('docs/design.md', ['结论写 `.fleet-out/verify.json`。'], {
+      '.fleet-out/lead-brief.json': '{}',
+    });
+    expect(report.problems.map(formatProblem)).toEqual([]);
+    expect(report.pointers.filter((p) => p.file === 'docs/design.md' && p.line >= first)).toEqual([]);
+  });
 });
 
 describe('文档指针：读不到的明确报「没查成」，不当成「没有」（需求.md、方案.md 里也照报）', () => {
