@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest';
 import {
   claimExpired,
   describeClaim,
+  engineClaimEnd,
+  heldByOtherText,
   type IssueClaim,
   isDrillScope,
   machineProblem,
@@ -154,5 +156,49 @@ describe('认领过了宽限期没心跳：作废', () => {
     expect(
       describeClaim({ ...claim, state: 'voided', endReason: '两小时没心跳', endedAt: T0 }, T0),
     ).toContain('作废了（两小时没心跳）');
+  });
+});
+
+describe('引擎的认领', () => {
+  it('任务结束了跟着结束：做完记做完，叫停、没做成记放下（本机能接着认领）；没结束的是 null（待起改在做）', () => {
+    expect(engineClaimEnd('done')).toEqual({ state: 'done', reason: 'Fusion 做完了' });
+    expect(engineClaimEnd('stopped')).toEqual({ state: 'released', reason: '任务叫停了' });
+    expect(engineClaimEnd('failed')).toEqual({ state: 'released', reason: 'Fusion 没做成（任务 failed）' });
+    for (const state of [
+      'queued',
+      'triaging',
+      'asking',
+      'planning',
+      'running',
+      'merging',
+      'stalled',
+    ] as const)
+      expect(engineClaimEnd(state), state).toBeNull();
+  });
+
+  it('别人拿着时给人看的一句：本机的写明是哪个座位第几任认领的', () => {
+    const c: IssueClaim = {
+      repoId: 'r',
+      issueNumber: 40,
+      claimId: '0f0e0d0c-0000-4000-8000-000000000000',
+      ownerKind: 'worker',
+      ownerMachine: '本机',
+      ownerLabel: 'w1',
+      seatScope: 'main',
+      seatTerm: 2,
+      state: 'doing',
+      workflowId: null,
+      prNumbers: [],
+      graceMinutes: 120,
+      claimedAt: at(-30),
+      heartbeatAt: at(-5),
+      updatedAt: at(-5),
+      endedAt: null,
+      endReason: null,
+      note: null,
+    };
+    expect(heldByOtherText(c, T0)).toBe(
+      '这张单本机认领着（main 第 2 任帅位认领的）：本机/w1 在做（认领 0f0e0d0c，上次心跳 5 分钟前）',
+    );
   });
 });

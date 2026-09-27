@@ -95,6 +95,7 @@ describe('saveTaskSnapshot', () => {
       docs: { requirement: '需求.md' },
       lastProblem: null,
       subtasks: [],
+      claimEnd: null,
       ...over,
     });
   }
@@ -230,6 +231,7 @@ describe('saveTaskSnapshot', () => {
         lastProblem: '这个项目没有 .fleet/flow.json，按全组织默认的流程配置派',
         flowSource: 'org_default',
         subtasks: [],
+        claimEnd: null,
       }),
     ).toBe('saved');
     const [row] = await t.db.select().from(tasks).where(eq(tasks.id, task.id));

@@ -7,6 +7,7 @@ import { WorkflowExecutionAlreadyStartedError } from '@temporalio/client';
 import { describe, expect, it } from 'vitest';
 import { devFixtures, IDS } from '../src/dev-fixtures.ts';
 import { createGitHubIntake } from '../src/github.ts';
+import { createIssueIntake } from '../src/issue-intake.ts';
 import type { MemoryData } from '../src/memory-store.ts';
 import {
   type AskRecord,
@@ -1039,5 +1040,225 @@ describe('读不到、认不出：明确失败或记下原因，并告警', () =
     expect(await json(deliver(h, 'issues', closed))).toMatchObject({ note: 'stop=workflow_gone' });
     expect(h.logs.some((l) => l.level === 'warn' && l.message.includes('工作流已经不在'))).toBe(true);
     expect(t.state).toBe('running');
+  });
+});
+
+describe('认领（#299）：接活和本机抢同一行，本机拿着就不派；待起的由对账补起', () => {
+  const INTAKE_ACTOR = { kind: 'engine', id: 'github-intake' } as const;
+  const MAIN = { scope: 'main', machine: '本机', session: 's1' };
+
+  /** 帅位接班、派工人认领这张单（本机拿着）。 */
+  async function localHolds(h: ReturnType<typeof setup>['h'], issueNumber = 40) {
+    await h.store.takeSeat(MAIN);
+    const r = await h.store.takeClaim({
+      repoId: IDS.repo,
+      issueNumber,
+      seat: { ...MAIN, term: 1 },
+      owner: { kind: 'worker', label: 'w1' },
+    });
+    if (!r.ok) throw new Error('用例没认领上');
+    return r.claim;
+  }
+
+  /** 引擎抢到了、还在待起（接活起工作流没成那种）。 */
+  async function enginePending(h: ReturnType<typeof setup>['h'], issueNumber: number) {
+    const r = await h.store.claimForEngine({
+      repoId: IDS.repo,
+      issueNumber,
+      workflowId: requirementWorkflowId(CANARY, issueNumber),
+      actor: INTAKE_ACTOR,
+    });
+    if (!r.ok) throw new Error('用例里引擎没抢到');
+    return r.claim;
+  }
+
+  const claimOf = (h: ReturnType<typeof setup>['h'], issueNumber = 40) =>
+    h.store.data.claims.find((c) => c.issueNumber === issueNumber);
+
+  it('派出去的单：认领归引擎，先记待起、起成了改在做（记 claim.take）', async () => {
+    const { h } = setup();
+    expect(await json(deliver(h, 'issues', issuesEvent('opened')))).toMatchObject({
+      note: 'task=created, workflow=started',
+    });
+    expect(claimOf(h)).toMatchObject({
+      ownerKind: 'engine',
+      state: 'doing',
+      workflowId: requirementWorkflowId(CANARY, 40),
+      note: '接活自动派',
+    });
+    expect(h.store.data.audit.find((a) => a.action === 'claim.take')).toMatchObject({
+      actor: INTAKE_ACTOR,
+      target: `claim:${IDS.repo}#40`,
+    });
+  });
+
+  it('【故意造出的失败】本机认领着（帅位派了工人）：不自动派，投递写 workflow=claimed_local，日志写明谁拿着', async () => {
+    const { h } = setup();
+    const held = await localHolds(h);
+    expect(await json(deliver(h, 'issues', issuesEvent('opened')))).toMatchObject({
+      verdict: 'accepted',
+      note: 'task=created, workflow=claimed_local',
+    });
+    expect(h.starts).toEqual([]);
+    expect(claimOf(h)).toMatchObject({ claimId: held.claimId, ownerKind: 'worker', state: 'claimed' });
+    const log = h.logs.find((l) => l.message.startsWith('这张单不自动派：'));
+    expect(log?.message).toContain('这张单本机认领着（main 第 1 任帅位认领的）：本机/w1 认领了');
+    expect(log?.fields).toMatchObject({ issueNumber: 40, claimId: held.claimId });
+  });
+
+  it('起工作流没成（Temporal 连不上）：认领留着待起、投递记成出错；重放时引擎自己拿着照起、改在做，不另认领', async () => {
+    let down = true;
+    const requirements: RequirementWorkflows = {
+      async start() {
+        if (down) throw new WorkflowUnavailableError('Temporal 连不上');
+        return 'started';
+      },
+    };
+    const { h } = setup({ requirements });
+    expect((await deliver(h, 'issues', issuesEvent('opened'), { delivery: 'first' })).status).toBe(500);
+    const pending = claimOf(h);
+    expect(pending).toMatchObject({ ownerKind: 'engine', state: 'pending_start' });
+    // 本机这时来认领：引擎拿着（待起），抢不到
+    await h.store.takeSeat(MAIN);
+    expect(
+      await h.store.takeClaim({
+        repoId: IDS.repo,
+        issueNumber: 40,
+        seat: { ...MAIN, term: 1 },
+        owner: { kind: 'worker', label: 'w1' },
+      }),
+    ).toMatchObject({ ok: false, reason: 'held' });
+
+    down = false;
+    expect(await createGitHubIntake(h.deps).replay('first')).toMatchObject({
+      note: 'task=exists, workflow=started',
+    });
+    expect(claimOf(h)).toMatchObject({ claimId: pending?.claimId, state: 'doing' });
+    expect(h.store.data.audit.filter((a) => a.action === 'claim.take')).toHaveLength(1);
+  });
+
+  it('没派出去就关单了：任务记成叫停，引擎待起的认领跟着放下（本机能接着认领）', async () => {
+    const requirements: RequirementWorkflows = {
+      async start() {
+        throw new WorkflowUnavailableError('Temporal 连不上');
+      },
+    };
+    const workflows: WorkflowControl = {
+      async signal(workflowId) {
+        throw new WorkflowGoneError(workflowId);
+      },
+    };
+    const { h } = setup({ requirements, workflows });
+    expect((await deliver(h, 'issues', issuesEvent('opened'))).status).toBe(500);
+    const closed = issuesEvent('closed', issue({ state: 'closed', updated_at: at(-5) }));
+    expect(await json(deliver(h, 'issues', closed))).toMatchObject({ note: 'task=stopped' });
+    expect(claimOf(h)).toMatchObject({ state: 'released', endReason: '任务没派出去过就叫停了' });
+  });
+
+  describe('对账补起待起的认领（restartPending）', () => {
+    it('待起超过 5 分钟、任务还在排队：经同一个拉起实现补起，认领改在做；不到 5 分钟的不碰', async () => {
+      const { h } = setup();
+      await json(deliver(h, 'issues', issuesEvent('opened'), { delivery: 'first' }));
+      // 造一张待起的：像是开单事件起成了工作流、改在做之前那一下
+      const c = claimOf(h);
+      if (!c) throw new Error('没有认领');
+      c.state = 'pending_start';
+      const intake = createIssueIntake(h.deps);
+      expect(await intake.restartPending()).toEqual({ checked: 0, started: 0, released: 0, problems: [] });
+
+      h.clock.now = new Date(T0.getTime() + 6 * 60_000);
+      // 假的拉起实现按编号去重：上一次那条还「在跑」，这里回 already_running，照样改在做、不重复起
+      expect(await intake.restartPending()).toEqual({ checked: 1, started: 1, released: 0, problems: [] });
+      expect(claimOf(h)).toMatchObject({ claimId: c.claimId, state: 'doing' });
+      expect(h.starts).toHaveLength(1);
+    });
+
+    it('【故意造出的失败】从没起成过（Temporal 一直连不上，投递重放到头）：补起这一张，起了才算', async () => {
+      let down = true;
+      const starts: number[] = [];
+      const requirements: RequirementWorkflows = {
+        async start(input) {
+          if (down) throw new WorkflowUnavailableError('Temporal 连不上');
+          starts.push(input.issueNumber);
+          return 'started';
+        },
+      };
+      const { h, task, auditsOf } = setup({ requirements });
+      expect((await deliver(h, 'issues', issuesEvent('opened'))).status).toBe(500);
+      h.clock.now = new Date(T0.getTime() + 6 * 60_000);
+      const intake = createIssueIntake(h.deps);
+      const failed = await intake.restartPending();
+      expect(failed).toMatchObject({ checked: 1, started: 0, released: 0 });
+      expect(failed.problems[0]).toContain('补起没成：Temporal 连不上');
+      expect(claimOf(h)?.state).toBe('pending_start');
+
+      down = false;
+      expect(await intake.restartPending()).toEqual({ checked: 1, started: 1, released: 0, problems: [] });
+      expect(starts).toEqual([40]);
+      expect(claimOf(h)?.state).toBe('doing');
+      const t = await task();
+      expect((await auditsOf(t?.id ?? '')).find((a) => a.action === 'task.start')?.reason).toBe(
+        '待起的认领补起（待起超过 5 分钟，GitHub 对账）',
+      );
+    });
+
+    it('上一轮已经结束的（重开再起那种）、开关关了的：放下认领写明为什么，不起；工作流已经在跑的只改在做', async () => {
+      const { h } = setup();
+      // 样例里 #13 做完了，#12 在跑
+      await enginePending(h, 13);
+      await enginePending(h, 12);
+      h.clock.now = new Date(T0.getTime() + 6 * 60_000);
+      const intake = createIssueIntake(h.deps);
+      expect(await intake.restartPending()).toEqual({ checked: 2, started: 1, released: 1, problems: [] });
+      expect(claimOf(h, 13)).toMatchObject({
+        state: 'released',
+        endReason: expect.stringContaining('上一轮已经结束（done）'),
+      });
+      expect(claimOf(h, 12)).toMatchObject({ state: 'doing' });
+      expect(h.starts).toEqual([]);
+
+      await enginePending(h, 13);
+      const repo = h.store.data.repos.find((r) => r.id === IDS.repo);
+      if (!repo) throw new Error('样例里没有仓');
+      delete repo.autoDispatchSince;
+      h.clock.now = new Date(T0.getTime() + 12 * 60_000);
+      expect(await intake.restartPending()).toMatchObject({ checked: 1, released: 1 });
+      expect(claimOf(h, 13)).toMatchObject({
+        state: 'released',
+        endReason: expect.stringContaining('「让 AI 接活」关着'),
+      });
+    });
+
+    it('【故意造出的失败】读不到 GitHub 上这张单：不起，照实报没起成，认领留着待起', async () => {
+      const { h } = setup();
+      const id = 'c0000000-0000-4000-8000-000000000041';
+      await h.store.createTaskFromIssue(
+        {
+          id,
+          repoId: IDS.repo,
+          issueNumber: 41,
+          title: '待起的一张',
+          rawRequest: '原话',
+          requestedBy: IDS.founderA,
+        },
+        {
+          actor: { kind: 'user', id: IDS.founderA },
+          action: 'task.create',
+          target: `task:${id}`,
+          via: 'github',
+          ok: true,
+        },
+      );
+      await enginePending(h, 41);
+      h.plans.set(41, new Error('GitHub 回 502'));
+      h.clock.now = new Date(T0.getTime() + 6 * 60_000);
+      const r = await createIssueIntake(h.deps).restartPending();
+      expect(r).toMatchObject({ checked: 1, started: 0, released: 0 });
+      expect(r.problems).toEqual([
+        'example/canary#41 待起：没查成，读不到 GitHub 上这张单此刻的样子（GitHub 回 502）',
+      ]);
+      expect(claimOf(h, 41)?.state).toBe('pending_start');
+      expect(h.starts).toEqual([]);
+    });
   });
 });

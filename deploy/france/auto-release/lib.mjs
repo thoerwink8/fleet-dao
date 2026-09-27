@@ -7,6 +7,9 @@
 // - 状态文件后端也读（packages/api/src/deploy-lag.ts 按 STATE_SCHEMA 认），改字段两边一起改，那边的测试拿这里造的状态核对。
 // - RULES_USERS 要和 deploy/france.sh 的 AGENT_RULES_USERS 一样；INSTALL_PATHS 要盖住 france.sh 读的仓里文件（测试都核对）。
 // - 读不到、认不出的一律记成「没查成」、不发，不拿空、0 当没事（AGENTS.md「底线」）。
+// - 每一轮还拿法国 /etc/fleet-dao 下的环境文件跟在用那一版里的期望（deploy/france/desired-config.json）对账（#323，config.mjs）：
+//   一项一条报警，线上的值不进报警和状态文件。
+import { DESIRED_FILE, judgeConfig } from './config.mjs';
 
 export const STATE_SCHEMA = 1;
 export const RELEASES = '/srv/fleet-dao-releases';
@@ -38,11 +41,18 @@ export const INSTALL_PATHS = [
   ':(exclude)deploy/france/fleet-engine.service',
   ':(exclude)deploy/france/fleet-api.service',
   ':(exclude)deploy/france/bundle-gateway.sh',
+  // 配置的期望跟着版本走（对账拿在用那一版里的），改了它不用重跑 france.sh
+  `:(exclude)${DESIRED_FILE}`,
 ];
-/** 这边发的报警都以它开头：发布没成 `auto-release:failed:<提交号>`，规矩同步没成 `auto-release:rules:<提交号>`。 */
+/**
+ * 这边发的报警都以它开头：发布没成 `auto-release:failed:<提交号>`，规矩同步没成 `auto-release:rules:<提交号>`，
+ * 配置和期望不一致 `auto-release:config:<文件>:<键>`（一项一条），配置没查成 `auto-release:config-unchecked`。
+ */
 export const ALERT_PREFIX = 'auto-release:';
 export const FAILED_PREFIX = `${ALERT_PREFIX}failed:`;
 export const RULES_PREFIX = `${ALERT_PREFIX}rules:`;
+export const CONFIG_PREFIX = `${ALERT_PREFIX}config:`;
+export const CONFIG_UNCHECKED_KEY = `${ALERT_PREFIX}config-unchecked`;
 /** release.sh --auto 的两种「这次不发、什么都没动」：另一个发布在跑；切之前又看到会话在跑。 */
 export const EXIT_RELEASE_BUSY = 75;
 export const EXIT_SESSIONS_BUSY = 76;
@@ -172,8 +182,10 @@ export function carryOver(prev) {
     attempt: p.attempt ?? null,
     rules: p.rules ?? null,
     system: p.system ?? null,
+    config: null,
     alerts: Array.isArray(p.alerts) ? p.alerts : [],
     resolve: Array.isArray(p.resolve) ? p.resolve : [],
+    resolveKeys: Array.isArray(p.resolveKeys) ? p.resolveKeys : [],
     last: null,
   };
 }
@@ -188,6 +200,7 @@ export async function runOnce(io, prev) {
   st.ranAt = iso(now);
   const current = await deployStep(io, st, now);
   if (current !== undefined) await rulesStep(io, st, now, current);
+  await configStep(io, st, io.now());
   await flushAlerts(io, st);
   return st;
 }
@@ -208,6 +221,21 @@ function resolveLater(st, prefix) {
   if (mine.length === 0) return;
   st.alerts = st.alerts.filter((a) => !a.key.startsWith(prefix));
   if (mine.some((a) => a.raised) && !st.resolve.includes(prefix)) st.resolve.push(prefix);
+}
+
+/** 一直在的报警（配置对账那种，每一轮都判一次）：和上一轮一模一样就不动（不每 5 分钟重发一次），变了才重发。 */
+function keepRaised(st, key, title, body) {
+  const had = st.alerts.find((a) => a.key === key);
+  if (had && had.title === title && had.body === body) return;
+  raise(st, key, title, body);
+}
+
+/** 按整个键解除一条（配置对账一项一条，键之间可能是前缀关系，不能按前缀解除）。 */
+function resolveKeyLater(st, key) {
+  const had = st.alerts.find((a) => a.key === key);
+  if (!had) return;
+  st.alerts = st.alerts.filter((a) => a.key !== key);
+  if (had.raised && !st.resolveKeys.includes(key)) st.resolveKeys.push(key);
 }
 
 /** 发布那一半：返回在用的提交号（读到了，含「还没发布过」的 null），读不到返回 undefined（规矩那一半也不做）。 */
@@ -531,12 +559,63 @@ async function rulesStep(io, st, now, current) {
   );
 }
 
+/**
+ * 配置那一半（#323）：拿法国 /etc/fleet-dao 下的环境文件跟在用那一版里的期望比（config.mjs 的 judgeConfig）。
+ * 不一致的一项一条报警（键 auto-release:config:<文件>:<键>），改回去了下一轮自己解除；读不到、认不出记「没查成」
+ * （一条 auto-release:config-unchecked），不当成一致。只报警、不改回。线上的值不进状态、报警。
+ */
+async function configStep(io, st, now) {
+  let r;
+  let commit = null;
+  try {
+    const live = await io.readConfig();
+    commit = live?.commit ?? null;
+    r = judgeConfig(live ?? {});
+  } catch (e) {
+    r = { result: 'unchecked', drift: [], unchecked: [`对账没跑成：${why(e)}`], selfHeal: false };
+  }
+  st.config = {
+    checkedAt: iso(now),
+    commit,
+    result: r.result,
+    drift: r.drift.map((d) => ({ id: d.id, kind: d.kind })),
+    unchecked: r.unchecked,
+    selfHeal: r.selfHeal,
+  };
+  const want = new Set();
+  for (const d of r.drift) {
+    const key = `${CONFIG_PREFIX}${d.id}`;
+    want.add(key);
+    keepRaised(st, key, d.title, d.body);
+  }
+  for (const a of [...st.alerts]) {
+    if (a.key.startsWith(CONFIG_PREFIX) && !want.has(a.key)) resolveKeyLater(st, a.key);
+  }
+  if (r.unchecked.length > 0) {
+    keepRaised(
+      st,
+      CONFIG_UNCHECKED_KEY,
+      '法国配置这一轮没对上账（没查成）',
+      `${r.unchecked.join('；')}。没查成不当成一致：照原因补上（期望在在用那一版的 ${DESIRED_FILE}，` +
+        '指纹钥匙是 /etc/fleet-dao/config-fingerprint.key），下一轮查成了自己撤。',
+    );
+  } else resolveKeyLater(st, CONFIG_UNCHECKED_KEY);
+}
+
 /** 要发的报警发出去、要解除的解除掉；库连不上就留到下一轮，不丢。 */
 async function flushAlerts(io, st) {
   for (const prefix of [...st.resolve]) {
     try {
       await io.resolve(prefix);
       st.resolve = st.resolve.filter((p) => p !== prefix);
+    } catch {
+      // 下一轮再解除
+    }
+  }
+  for (const key of [...st.resolveKeys]) {
+    try {
+      await io.resolveKey(key);
+      st.resolveKeys = st.resolveKeys.filter((k) => k !== key);
     } catch {
       // 下一轮再解除
     }
@@ -578,5 +657,20 @@ export function summary(st) {
         ? `装机脚本装到 ${short(st.system.appliedSha)}，之后相关提交 ${st.system.behind} 个`
         : '装机层没查过',
   );
+  parts.push(configSummary(st.config));
   return parts.join('；');
+}
+
+/** 配置对账的一句话：只有文件、键名和原因，没有值。 */
+function configSummary(c) {
+  if (!c) return '配置还没对过账';
+  const drift = c.drift.length
+    ? `配置有 ${c.drift.length} 项和期望不一致（${c.drift
+        .slice(0, 5)
+        .map((d) => d.id)
+        .join('、')}${c.drift.length > 5 ? ' 等' : ''}）`
+    : '';
+  const unchecked = c.unchecked.length ? `配置没查成：${c.unchecked.join('；')}` : '';
+  if (c.result === 'ok') return '配置和期望一致';
+  return [drift, unchecked].filter(Boolean).join('；');
 }

@@ -16,6 +16,7 @@ import {
   feishuFollows,
   feishuOutbox,
   flowReplicaOf,
+  followTaskOnEngineClaim,
   githubEvents,
   githubEventVersions,
   idempotencyKeys,
@@ -1886,6 +1887,11 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
           .returning({ id: tasks.id });
         if (stopped.length === 0) return 'not_queued';
         await insertAudit(tx, entry);
+        // 没派出去过就叫停了：引擎待起的认领跟着放下（#299），本机能接着认领
+        await followTaskOnEngineClaim(tx, {
+          taskId,
+          end: { state: 'released', reason: '任务没派出去过就叫停了' },
+        });
         return 'ok';
       });
     },
