@@ -104,7 +104,7 @@ export type RepullResult =
   | { kind: 'not_taken'; why: string };
 
 type IssueRef = { owner: string; name: string; issueNumber: number };
-type DeliveryFacts = Pick<IssueDeliveryRef, 'deliveryId' | 'status' | 'reason' | 'note'>;
+type DeliveryFacts = Pick<IssueDeliveryRef, 'deliveryId' | 'status' | 'reason' | 'note' | 'issueState'>;
 
 export interface ReconcileCheckDeps
   extends Pick<AlertSweepDeps, 'workflows' | 'taskState' | 'alerts' | 'now' | 'log'> {
@@ -149,9 +149,17 @@ function heldBy(result: string | null): string | null {
   return INTAKE_HOLDS[result as IntakeHold];
 }
 
-/** 投递上记着的「为什么不派」：算数的原因（见 INTAKE_HOLDS）、或记成等着的原因；都不是是 null。 */
-export function heldWhy(d: Pick<IssueDeliveryRef, 'status' | 'reason' | 'note'> | null): string | null {
+/**
+ * 投递上记着的「为什么不派」：那一版 issue 已经关了（不是开着的单，不要求有工作流；机器人关的接活不叫停，库里还排着队）、
+ * 算数的原因（见 INTAKE_HOLDS）、或记成等着的原因；都不是是 null。
+ */
+export function heldWhy(
+  d: Pick<IssueDeliveryRef, 'status' | 'reason' | 'note' | 'issueState'> | null,
+): string | null {
   if (!d) return null;
+  if (d.issueState === 'closed') {
+    return `GitHub 上这张单关着，不要求有工作流（接活记的是「${d.note ?? d.reason ?? '什么都没记'}」）`;
+  }
   if (d.status === 'waiting') return `投递记成等着：${d.reason ?? '没写原因'}`;
   if (d.status !== 'accepted') return null;
   const why = heldBy(intakeResult(d.note));

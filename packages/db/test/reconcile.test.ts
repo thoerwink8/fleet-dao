@@ -75,7 +75,13 @@ describe('这张 issue 最近一次接活处理过的 issues 投递（latestIssu
     await delivery('comment', 'acme/widgets:issue:5', ago(MIN), { event: 'issue_comment' });
     await delivery('other', 'acme/widgets:issue:6', ago(MIN));
     const got = await latestIssueDelivery(t.db, { owner: 'acme', name: 'Widgets', issueNumber: 5 });
-    expect(got).toMatchObject({ deliveryId: 'new', status: 'waiting', reason: '等上一轮', note: null });
+    expect(got).toMatchObject({
+      deliveryId: 'new',
+      status: 'waiting',
+      reason: '等上一轮',
+      note: null,
+      issueState: 'open',
+    });
     expect(await latestIssueDelivery(t.db, { owner: 'acme', name: 'widgets', issueNumber: 7 })).toBeNull();
   });
 

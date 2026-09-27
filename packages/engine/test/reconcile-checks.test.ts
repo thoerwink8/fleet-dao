@@ -57,7 +57,8 @@ interface World {
   ledgerCalls: { since: Date; prs: { owner: string; name: string; number: number }[] }[];
 }
 
-type Delivery = Pick<IssueDeliveryRef, 'status' | 'reason' | 'note'>;
+type Delivery = Pick<IssueDeliveryRef, 'status' | 'reason' | 'note'> &
+  Partial<Pick<IssueDeliveryRef, 'issueState'>>;
 
 /** 对账结果：findings 照种类给，problems 跟着 text 排，found、fixed 照 github 包的算法数。 */
 function audit(findings: MergedPrFinding[], over: Partial<MergedPrAuditReport> = {}): MergedPrAuditReport {
@@ -105,7 +106,7 @@ function world(
     async latestDelivery(ref) {
       const d = over.deliveries?.[ref.issueNumber];
       if (d === 'throw') throw new Error('投递表读不了');
-      return d ? { deliveryId: `d-${ref.issueNumber}`, ...d } : null;
+      return d ? { deliveryId: `d-${ref.issueNumber}`, issueState: 'open', ...d } : null;
     },
     async repull(deliveryId) {
       repulled.push(deliveryId);
@@ -119,7 +120,9 @@ function world(
     workflows: {
       async state(id) {
         asked.push(id);
-        const after = repulled.length > 0 ? over.afterRepull?.[id] : undefined;
+        // 补拉之后的样子只对补拉过的那张单算（投递编号是 d-<号>）
+        const issue = /#(\d+)$/.exec(id)?.[1];
+        const after = repulled.includes(`d-${issue}`) ? over.afterRepull?.[id] : undefined;
         const st = after ?? over.states?.[id] ?? { state: 'missing' };
         if (st === 'throw') throw new Error('Temporal 连不上');
         return st;
@@ -318,6 +321,22 @@ describe('开着的单都有着落', () => {
     expect(part).toEqual({ scanned: notes.length, found: 0, unchecked: [] });
     expect(w.repulled).toEqual([]);
     expect(w.raised).toEqual([]);
+  });
+
+  it('排队的单那一版 issue 已经关了（机器人关的，接活不叫停、库里还排着）：不是开着的单，不补拉、不报，旧提醒撤掉', async () => {
+    const old = openAlert(`${WORKFLOW_ALERT_PREFIX}${TASK}`, { taskId: TASK });
+    const w = world({
+      tasks: [task({ state: 'queued', updatedAt: null })],
+      deliveries: { 160: { status: 'accepted', reason: null, note: 'stop=skip_bot', issueState: 'closed' } },
+      open: [old],
+    });
+    const part = await checkWorkflows(w.deps);
+    expect(part).toEqual({ scanned: 1, found: 1, unchecked: [] });
+    expect(w.repulled).toEqual([]);
+    expect(w.raised).toEqual([]);
+    expect(w.resolved.map((r) => r.why)).toEqual([
+      'GitHub 上这张单关着，不要求有工作流（接活记的是「stop=skip_bot」）',
+    ]);
   });
 
   it('接活每一种「不派」都定了算不算有着落：算的是开关打开前开的、未排期、别的版本、母单、子单、本机做', () => {

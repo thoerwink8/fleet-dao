@@ -50,6 +50,8 @@ export interface IssueDeliveryRef {
   reason: string | null;
   /** 放进来之后做了什么：接活写的 `workflow=<结果>` 就在这里（拉起了、为什么不派）。 */
   note: string | null;
+  /** 这一版 issue 开着还是关着（github_event_versions.state）；认不出是 null。 */
+  issueState: 'open' | 'closed' | null;
   receivedAt: Date;
 }
 
@@ -70,6 +72,7 @@ export async function latestIssueDelivery(
       status: githubEvents.status,
       reason: githubEvents.reason,
       note: githubEvents.note,
+      issueState: githubEventVersions.state,
       receivedAt: githubEvents.receivedAt,
     })
     .from(githubEventVersions)

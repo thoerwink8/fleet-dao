@@ -1006,21 +1006,21 @@ describe('两处核对接到真库', { timeout: 60_000 }, () => {
   }
 
   /**
-   * 一张排队的单，带（或不带）一条 issues 投递：status、note、reason 是接活记的；author 是这张 issue 的作者编号（不给是
-   * 白名单外的人）；at 是这一版 issue 的时刻（默认一小时前）。
+   * 一条 issues 投递：status、note、reason 是接活记的；author 是这张 issue 的作者编号（不给是白名单外的人）；at 是这一版
+   * issue 的时刻（默认一小时前）；state 是这一版开着还是关着（默认开着）。
    */
-  async function queuedWithDelivery(
-    repoId: string,
-    issueNumber: number,
-    delivery: {
-      id?: string;
-      status: 'accepted' | 'failed' | 'ignored';
-      note?: string;
-      reason?: string;
-      author?: number;
-      at?: Date;
-    } | null,
-  ) {
+  interface DeliveryFixture {
+    id?: string;
+    status: 'accepted' | 'failed' | 'ignored';
+    note?: string;
+    reason?: string;
+    author?: number;
+    at?: Date;
+    state?: 'open' | 'closed';
+  }
+
+  /** 一张排队的单，带（或不带）一条 issues 投递。 */
+  async function queuedWithDelivery(repoId: string, issueNumber: number, delivery: DeliveryFixture | null) {
     const [row] = await t.db
       .insert(tasks)
       .values({
@@ -1038,33 +1038,25 @@ describe('两处核对接到真库', { timeout: 60_000 }, () => {
     return row;
   }
 
-  async function addDelivery(
-    issueNumber: number,
-    delivery: {
-      id?: string;
-      status: 'accepted' | 'failed' | 'ignored';
-      note?: string;
-      reason?: string;
-      author?: number;
-      at?: Date;
-    },
-  ) {
+  async function addDelivery(issueNumber: number, delivery: DeliveryFixture) {
     const id = delivery.id ?? `d-${issueNumber}`;
     const at = (delivery.at ?? new Date(Date.now() - HOUR)).toISOString();
+    const state = delivery.state ?? 'open';
+    const action = state === 'open' ? 'opened' : 'closed';
     const author = {
       login: delivery.author ? FOUNDER.login : 'someone',
       id: delivery.author ?? 999,
       type: 'User',
     };
     const payload = {
-      action: 'opened',
+      action,
       sender: author,
       repository: { full_name: 'acme/widgets' },
       issue: {
         number: issueNumber,
         title: '还没派',
         body: '排队',
-        state: 'open',
+        state,
         created_at: at,
         updated_at: at,
         user: author,
@@ -1072,12 +1064,12 @@ describe('两处核对接到真库', { timeout: 60_000 }, () => {
     };
     await sql(
       `insert into github_events (delivery_id, event, action, source, repo, payload, status, reason, note, finished_at)
-       values ($1, 'issues', 'opened', 'webhook', 'acme/widgets', $2::jsonb, $3, $4, $5, now())`,
-      [id, JSON.stringify(payload), delivery.status, delivery.reason ?? null, delivery.note ?? null],
+       values ($1, 'issues', $2, 'webhook', 'acme/widgets', $3::jsonb, $4, $5, $6, now())`,
+      [id, action, JSON.stringify(payload), delivery.status, delivery.reason ?? null, delivery.note ?? null],
     );
     await sql(
-      `insert into github_event_versions (delivery_id, object, version, state) values ($1, $2, $3::timestamptz, 'open')`,
-      [id, `acme/widgets:issue:${issueNumber}`, at],
+      `insert into github_event_versions (delivery_id, object, version, state) values ($1, $2, $3::timestamptz, $4)`,
+      [id, `acme/widgets:issue:${issueNumber}`, at, state],
     );
   }
 
@@ -1113,6 +1105,12 @@ describe('两处核对接到真库', { timeout: 60_000 }, () => {
     // 作者不在白名单：真接活重放时门口就不收
     const outsider = await queuedWithDelivery(repo.id, 163, { status: 'failed', reason: '上次没处理成' });
     const orphan = await queuedWithDelivery(repo.id, 164, null);
+    // 机器人关的单（接活不叫停自己，库里还排着）：不是开着的单，不补拉、不报
+    const botClosed = await queuedWithDelivery(repo.id, 166, {
+      status: 'accepted',
+      note: 'stop=skip_bot',
+      state: 'closed',
+    });
     const [fresh] = await t.db
       .insert(tasks)
       .values({
@@ -1141,6 +1139,7 @@ describe('两处核对接到真库', { timeout: 60_000 }, () => {
     expect(row?.body).toContain('已经不在了');
     expect(await alertByKey(t.db, `reconcile:workflow:${held.id}`)).toBeNull();
     expect(await alertByKey(t.db, `reconcile:workflow:${fresh.id}`)).toBeNull();
+    expect(await alertByKey(t.db, `reconcile:workflow:${botClosed.id}`)).toBeNull();
     const outsiderAlert = `reconcile:workflow:${outsider.id}`;
     expect((await alertByKey(t.db, outsiderAlert))?.body).toContain(
       '补拉时接活没收：门口没收（author_not_whitelisted）',
