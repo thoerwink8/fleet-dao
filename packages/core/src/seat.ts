@@ -279,6 +279,7 @@ export function engineClaimEnd(taskState: TaskState): { state: 'done' | 'release
 
 /** 引擎要拿这张单时别人拿着：给人看的一句（接活的投递说明、交单被拒的原因）。 */
 export function heldByOtherText(c: IssueClaim, dbNow: string): string {
-  const seat = c.seatScope ? `（${c.seatScope} 第 ${c.seatTerm} 任帅位认领的）` : '';
+  const seat =
+    c.ownerKind !== 'engine' && c.seatScope ? `（${c.seatScope} 第 ${c.seatTerm} 任帅位认领的）` : '';
   return `这张单${c.ownerKind === 'engine' ? '' : '本机'}认领着${seat}：${describeClaim(c, dbNow)}`;
 }

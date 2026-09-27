@@ -261,6 +261,52 @@ describe('认领', () => {
     expect(r.code).toBe(1);
     expect(r.err).toContain('库里没有仓 someone/else');
   });
+
+  it('演练：引擎那一边（--owner engine）只在演练座位下能抢，记在演练座位名下、待起、不起工作流；和本机抢只一边拿到', async () => {
+    const t = setup();
+    const engine = await t.json('claim', 'take', REPO, '60', '--owner', 'engine', '--scope', 'drill:299');
+    expect(engine.code).toBe(0);
+    expect(engine.body).toMatchObject({
+      ok: true,
+      fresh: true,
+      claim: { owner: { kind: 'engine' }, seat: { scope: 'drill:299', term: 0 }, state: 'pending_start' },
+    });
+    await t.run('seat', 'take', ...A, '--scope', 'drill:299');
+    const local = await t.run(
+      'claim',
+      'take',
+      REPO,
+      '60',
+      ...A,
+      '--term',
+      '1',
+      '--scope',
+      'drill:299',
+      '--label',
+      'w1',
+    );
+    expect(local.code).toBe(3);
+    expect(local.out).toContain('引擎 待起');
+    // 待起补起不碰演练的
+    t.tick(10);
+    expect((await t.memory.listStalePendingEngineClaims({ minutes: 5, limit: 10 })).claims).toEqual([]);
+    // 本机先拿到的，引擎那一边抢不到
+    await t.run('claim', 'take', REPO, '61', ...A, '--term', '1', '--scope', 'drill:299', '--label', 'w1');
+    expect((await t.run('claim', 'take', REPO, '61', '--owner', 'engine', '--scope', 'drill:299')).code).toBe(
+      3,
+    );
+  });
+
+  it('【故意造出的失败】--owner engine 不在演练座位下、带了帅位身份：参数不对（退出码 2），不连库', async () => {
+    const t = setup();
+    const main = await t.run('claim', 'take', REPO, '60', '--owner', 'engine');
+    expect(main.code).toBe(2);
+    expect(main.err).toContain('--owner engine 只在演练座位');
+    expect(
+      (await t.run('claim', 'take', REPO, '60', '--owner', 'engine', '--scope', 'drill:299', ...A)).code,
+    ).toBe(2);
+    expect(t.opened()).toBe(0);
+  });
 });
 
 describe('接在真库上（PGlite 跑真迁移）', () => {

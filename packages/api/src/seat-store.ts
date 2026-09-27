@@ -109,7 +109,7 @@ type InsertAudit = (tx: Db, entry: NewAuditEntry) => Promise<string>;
  * 填默认值，不去读设置：设置写坏了不该连接活一起拦住。
  */
 const engineClaimRow = (
-  input: ClaimTarget & { workflowId: string; note?: string | undefined },
+  input: ClaimTarget & { workflowId: string; note?: string | undefined; drill?: string | undefined },
   claimId: string,
 ): NewClaimRow => ({
   repoId: input.repoId,
@@ -118,8 +118,9 @@ const engineClaimRow = (
   ownerKind: 'engine',
   ownerMachine: null,
   ownerLabel: null,
-  seatScope: null,
-  seatTerm: null,
+  // 演练座位下引擎那一边：记在演练座位名下（第 0 任），待起补起、作废都不碰它
+  seatScope: input.drill ?? null,
+  seatTerm: input.drill === undefined ? null : 0,
   state: 'pending_start',
   workflowId: input.workflowId,
   graceMinutes: SEAT_DEFAULTS.claimGraceMinutes,
@@ -232,20 +233,26 @@ export function pgSeatStore(db: Db, insertAudit: InsertAudit): SeatStore {
           settings.settings.leaseMinutes,
         );
         if (!verdict.ok) return { ok: false as const, reason: 'not_seat' as const, why: verdict.why, now };
-        const got = await takeClaimRow(tx, {
-          repoId: input.repoId,
-          issueNumber: input.issueNumber,
-          claimId: randomUUID(),
-          ownerKind: input.owner.kind,
-          ownerMachine: input.seat.machine,
-          ownerLabel: input.owner.label,
-          seatScope: input.seat.scope,
-          seatTerm: input.seat.term,
-          state: 'claimed',
-          workflowId: null,
-          graceMinutes: input.graceMinutes ?? settings.settings.claimGraceMinutes,
-          note: input.note ?? null,
-        });
+        // 这个座位的帅位自己占着的（开单时替帅位认领的）由现任帅位换给工人：换之前记下原来那份
+        const prev = await readClaim(tx, input.repoId, input.issueNumber, true);
+        const got = await takeClaimRow(
+          tx,
+          {
+            repoId: input.repoId,
+            issueNumber: input.issueNumber,
+            claimId: randomUUID(),
+            ownerKind: input.owner.kind,
+            ownerMachine: input.seat.machine,
+            ownerLabel: input.owner.label,
+            seatScope: input.seat.scope,
+            seatTerm: input.seat.term,
+            state: 'claimed',
+            workflowId: null,
+            graceMinutes: input.graceMinutes ?? settings.settings.claimGraceMinutes,
+            note: input.note ?? null,
+          },
+          { seatReservationOf: input.seat.scope },
+        );
         if (!got) {
           const cur = await readClaim(tx, input.repoId, input.issueNumber);
           if (!cur.value) throw new Error(`抢 ${claimTarget(input)} 没抢到，读回来却没有认领`);
@@ -257,10 +264,12 @@ export function pgSeatStore(db: Db, insertAudit: InsertAudit): SeatStore {
           };
         }
         const claim = toIssueClaim(got.value);
+        const replaced = prev.value && isActiveClaim(prev.value.state) ? toIssueClaim(prev.value) : null;
         await insertAudit(tx, {
           actor: seatActor(input.seat),
           action: 'claim.take',
           target: claimTarget(input),
+          ...(replaced ? { before: claimSummary(replaced) } : {}),
           after: {
             ...claimSummary(claim),
             seat: `${input.seat.scope}#${input.seat.term}`,
@@ -548,8 +557,11 @@ export function memorySeatStore(
       const verdict = seatVerdict(seatOf(input.seat.scope), input.seat, at, settings.settings.leaseMinutes);
       if (!verdict.ok) return { ok: false, reason: 'not_seat', why: verdict.why, now: at };
       const cur = claimOf(input);
-      if (cur && isActiveClaim(cur.state))
+      // 这个座位的帅位自己占着的（开单时替帅位认领的）由现任帅位换给工人，和 Postgres 版的 seatReservationOf 一样
+      const reserved = cur?.ownerKind === 'seat' && cur.seatScope === input.seat.scope;
+      if (cur && isActiveClaim(cur.state) && !reserved)
         return { ok: false, reason: 'held', claim: copyClaim(cur), now: at };
+      const replaced = cur && isActiveClaim(cur.state) ? copyClaim(cur) : null;
       const claim: IssueClaim = {
         repoId: input.repoId,
         issueNumber: input.issueNumber,
@@ -575,6 +587,7 @@ export function memorySeatStore(
         actor: seatActor(input.seat),
         action: 'claim.take',
         target: claimTarget(input),
+        ...(replaced ? { before: claimSummary(replaced) } : {}),
         after: {
           ...claimSummary(claim),
           seat: `${input.seat.scope}#${input.seat.term}`,
