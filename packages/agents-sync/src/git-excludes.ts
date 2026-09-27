@@ -44,7 +44,10 @@ export type ConfigRead =
 export function readExcludesFile(home: string): ConfigRead {
   const r = spawnSync(
     'git',
-    ['config', '--file', gitconfigPath(home), '--path', '--get', 'core.excludesFile'],
+    // -C home：不依赖进程继承来的 cwd。--user 换完身份后 cwd 还是原来那个仓目录，新用户往往连 stat
+    // 都没权限（法国、CI 的 --user 测试都踩过：「fatal: failed to stat '<仓目录>': Permission denied」）；
+    // 换成这台用户自己的家目录，保证当前有效身份摸得到。和 position.ts 的 runGit 一个思路。
+    ['-C', home, 'config', '--file', gitconfigPath(home), '--path', '--get', 'core.excludesFile'],
     { encoding: 'utf8', windowsHide: true, env: gitEnv(home), stdio: ['ignore', 'pipe', 'pipe'] },
   );
   if (r.error) {
@@ -66,12 +69,11 @@ export function readExcludesFile(home: string): ConfigRead {
 }
 
 function setExcludesFile(home: string, path: string): { ok: true } | { ok: false; why: string } {
-  const r = spawnSync('git', ['config', '--file', gitconfigPath(home), 'core.excludesFile', path], {
-    encoding: 'utf8',
-    windowsHide: true,
-    env: gitEnv(home),
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
+  const r = spawnSync(
+    'git',
+    ['-C', home, 'config', '--file', gitconfigPath(home), 'core.excludesFile', path],
+    { encoding: 'utf8', windowsHide: true, env: gitEnv(home), stdio: ['ignore', 'pipe', 'pipe'] },
+  );
   if (r.error)
     return { ok: false, why: `git 起不来（${(r.error as NodeJS.ErrnoException).code ?? r.error.message}）` };
   if (r.status !== 0) {

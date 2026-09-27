@@ -79,9 +79,6 @@ run_sync() { # 参数…；输出进 OUT，退出码进 RC
 
 echo "== 以 root 带 --user 写：东西都归那个用户"
 run_sync --apply --user "$U"
-echo "--- 临时诊断：第一遍 --apply 的完整输出（排查全局 git 忽略那步） ---"
-echo "$OUT"
-echo "--- 诊断结束 ---"
 check "第一遍退出 0" "$RC" 0
 check "家里没有不归 $U 的文件" "$(find "$H" ! -user "$U" -printf '%p\n' | head -5)" ""
 check "Claude 的全局文件写上了通用段" "$(grep -c 'fleet-dao:通用段 开始' "$H/.claude/CLAUDE.md")" 1
@@ -98,13 +95,26 @@ check "Claude 的设置里登记了调工具前、Stop 那两条" \
   "$("$NODE" -e 'const s = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); console.log(Object.keys(s.hooks).join(","))' "$H/.claude/settings.json")" \
   PreToolUse,Stop
 check "写明开会话那条为什么不登记" "$(grep -c 'SessionStart：替别的用户写（--user）时不登记开会话钩子' <<<"$OUT")" 1
+# 全局 git 忽略：换完身份之后才起的 git 子进程，cwd 还是原来那个仓目录（$U 摸不到）——踩过一次
+# 「fatal: failed to stat '<仓目录>': Permission denied」，git-excludes.ts 加了 -C "$home" 才好
+check "core.excludesFile 设到了 gitignore_global（原来没设过）" \
+  "$(grep -c '设成了 ~/.fleet-dao/gitignore_global（原来没设过）' <<<"$OUT")" 1
+check "~/.gitconfig 里真写上了 core.excludesFile" \
+  "$(git config --file "$H/.gitconfig" --path --get core.excludesFile)" \
+  "$H/.fleet-dao/gitignore_global"
+check "gitignore_global 新建、写了 _tmp/ 那一块" "$(grep -c '新建，写入 _tmp/ 那一块' <<<"$OUT")" 1
+check "gitignore_global 文件内容里真有 _tmp/" \
+  "$(grep -c 'fleet-dao:全局忽略 开始' "$H/.fleet-dao/gitignore_global")" 1
+check "gitignore_global 归 $U、不归 root" "$(stat -c %U "$H/.fleet-dao/gitignore_global")" "$U"
 
 echo "== 第二遍零改动，--check 全绿"
 run_sync --apply --user "$U"
 check "第二遍退出 0" "$RC" 0
 check "第二遍一处没改" "$(grep -c '↻' <<<"$OUT")" 0
+check "第二遍全局 git 忽略读回一致" "$(grep -c 'gitignore_global：_tmp/ 在全局忽略里' <<<"$OUT")" 1
 run_sync --check --user "$U"
 check "--check 退出 0" "$RC" 0
+check "--check 也认全局 git 忽略一致" "$(grep -c 'gitignore_global：_tmp/ 在全局忽略里' <<<"$OUT")" 1
 
 echo "== 属主不对的文件：--check 判红"
 chown root:root "$H/.claude/CLAUDE.md"
