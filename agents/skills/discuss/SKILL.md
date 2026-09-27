@@ -34,12 +34,14 @@ description: 重大方案要人拍板之前，让别家模型挑错（默认只�
 
 ## 本机工具（引擎接活之前）
 
-`node ~/.local/share/second-opinion/ask.mjs --text 题面.md --round <0|1|2…> --models gpt [--limit 45]`
+脚本在本技能的 `scripts/` 目录，下面写成 `$S`（Claude Code 是 `~/.claude/skills/discuss/scripts`，别家是 `~/.agents/skills/discuss/scripts`）；要这台机器上登录好的 Cursor 命令行（`cursor-agent login`）。
 
-- `--round 0` 是各自独立答，1 起是挑错。默认只问 GPT（脚本自己的默认还是四家，所以 `--models gpt` 要写上）；要盲设计、或者 GPT 答不上时才加别家（`--models gpt,kimi,glm`，最多 3 家：本机同时有工人在跑，五家齐跑加工人顶满进程数，宿主崩过）。界面类的题不找 GPT，换 Kimi 或 GLM。
-- 每家一个 `cursor-agent --mode ask` 只读会话（空目录、不读仓），硬上限 30 秒（GPT 偶尔要 `--limit 45`）；超时、退出码非 0、没输出都照实记成「没答上」。退出码 2 = 一家都没答上，算没讨论成，别拿自己的方案冒充结论。
+`node $S/ask.mjs --text 题面.md --round <0|1|2…> [--models gpt] [--limit 45]`
+
+- `--round 0` 是各自独立答，1 起是挑错。默认只问 GPT；要盲设计、或者 GPT 答不上时才加别家（`--models gpt,kimi,glm`，最多 3 家：本机同时有工人在跑，五家齐跑加工人顶满进程数，宿主崩过）。界面类的题不找 GPT，换 Kimi 或 GLM。
+- 每家一个 `cursor-agent --mode ask` 只读会话（空目录、不读仓），硬上限 30 秒（GPT 偶尔要 `--limit 45`）；超时、退出码非 0、没输出都照实记成「没答上」。退出码 2 = 没讨论成（一家都没答上，或这台没装、没登录 Cursor 命令行），别拿自己的方案冒充结论。
 - 接着聊：把上一轮的原话、你的回应和新证据写进新题面再问一次（`ask.mjs` 每次都是新会话，所以上一轮要贴全）。
-- 结论落在脚本旁边的 runs 目录（本机，不进仓）。Mirasim 云端这条路还用 `second-opinion.mjs --text 材料.md --name 短名 --effort medium [--blind] [--agent code|kimi]`，要几十秒到几分钟，Cursor 那几家答不上时再用。
+- Mirasim 云端这条路用 `node $S/second-opinion.mjs --text 材料.md --name 短名 --effort medium [--blind] [--agent code|kimi]`，要几十秒到几分钟，Cursor 那几家答不上时再用。
 
 ## 判例
 

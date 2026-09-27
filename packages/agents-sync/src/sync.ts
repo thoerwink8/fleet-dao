@@ -37,6 +37,8 @@ export interface Sources {
   block: string;
   /** agents/skills/ 下的各个 skill（目录名 → 文件） */
   skills: Map<string, Tree>;
+  /** agents/hooks/ 下的脚本；读不到时是为什么（只影响钩子这一段，规矩和 skill 照写） */
+  hooks: { ok: true; tree: Tree } | { ok: false; why: string };
 }
 
 export interface Ctx {
@@ -45,7 +47,7 @@ export interface Ctx {
   installed: ReadonlySet<AgentId>;
 }
 
-const code = (err: unknown): string => (err as NodeJS.ErrnoException).code ?? String(err);
+export const code = (err: unknown): string => (err as NodeJS.ErrnoException).code ?? String(err);
 
 /** 读仓里的原件：AGENTS.md 的通用段、agents/skills/。读不到就说清为什么，不拿空的顶上 */
 export function readSources(repo: string): { ok: true; value: Sources } | { ok: false; why: string } {
@@ -76,10 +78,26 @@ export function readSources(repo: string): { ok: true; value: Sources } | { ok: 
   } catch (err) {
     return { ok: false, why: `读不了仓里的 agents/skills/ 下的文件（${code(err)}）` };
   }
-  return { ok: true, value: { block: shared.block, skills } };
+  return { ok: true, value: { block: shared.block, skills, hooks: readHooks(repo) } };
 }
 
-function relOf(ctx: Ctx, place: { win32: string; linux: string }): { rel: string; abs: string; key: string } {
+/** agents/hooks/：读不到不挡规矩和 skill（旧检出里还没有它），钩子那一段报没查成 */
+function readHooks(repo: string): Sources['hooks'] {
+  const dir = join(repo, 'agents', 'hooks');
+  try {
+    if (!statSync(dir).isDirectory()) return { ok: false, why: '仓里的 agents/hooks 不是目录' };
+    return { ok: true, tree: readTree(dir).files };
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT')
+      return { ok: false, why: '仓里没有 agents/hooks/（检出太旧或不全，或 --repo 指错了）' };
+    return { ok: false, why: `读不了仓里的 agents/hooks/（${code(err)}）` };
+  }
+}
+
+export function relOf(
+  ctx: Ctx,
+  place: { win32: string; linux: string },
+): { rel: string; abs: string; key: string } {
   const rel = placeOn(place, ctx.platform);
   return { rel, abs: join(ctx.home, rel), key: `~/${slashed(rel)}` };
 }
@@ -94,7 +112,7 @@ function expectedOwner(ctx: Ctx): number | undefined {
   }
 }
 
-function lstatOrNull(p: string): Stats | null {
+export function lstatOrNull(p: string): Stats | null {
   try {
     return lstatSync(p);
   } catch (err) {
@@ -172,7 +190,7 @@ export function checkRules(ctx: Ctx, src: Sources): Line[] {
 }
 
 /** 先写临时文件再换上：写到一半断了也不会留半个文件 */
-function writeAtomic(abs: string, content: string, mode: number | undefined): void {
+export function writeAtomic(abs: string, content: string, mode: number | undefined): void {
   const tmp = join(dirname(abs), `.${basename(abs)}.fleet-dao-${process.pid}.tmp`);
   try {
     writeFileSync(tmp, content, { mode: mode ?? 0o644 });
