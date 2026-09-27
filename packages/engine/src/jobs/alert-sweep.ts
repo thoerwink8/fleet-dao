@@ -5,6 +5,9 @@
 // 2. 卡住报警（alert 这一级）超过 24 小时没人处理：再推一次——新写一条「还没处理：<原标题>」（键 remind:<原提醒>:<北京日期>，
 //    同一条一天最多一次），驾驶舱弹一条、飞书发一张新卡（原来那张卡只会原地改，沉在群里）。原来那条处理掉，再提醒跟着撤；
 //    在再提醒上点「处理」，原来那条也跟着撤。日报还没有（AI 帅位写日报没做），在那之前只靠这一下。
+//    有人在处理（认领了、PR 开着、合了、发布了）、静默了的不再推（谁在处理现算，core 的 alertHandling）；提醒派单
+//    再推出来的那几条（unclaimed:、stuck:）归提醒派单自己撤（jobs/alert-dispatch.ts），这里不给它们再推。谁在处理读不到：
+//    照旧再推，记没查全（宁可多一张卡）。
 //
 // 各种提醒谁来撤（改这里之前先对一遍）：
 // - 「工作树没收掉」（子任务报的 sub:<子任务>:worktree、Fusion 报的 req:<仓>#<号>:worktree）、worktree:<树>「要你拍」：
@@ -24,11 +27,13 @@
 //   auto-release:（自动发布）、备份脚本的几种（fleet-backup）、canary:broken（全流程巡检下一轮通过）、
 //   watchdog:job:<任务>:…、watchdog:unchecked:<日子>（看门狗 jobs/watchdog.ts：任务按期跑成了、读到登记表了就撤）、
 //   watchdog-down:…（后端看着看门狗，packages/api 的 watchdog-health.ts：看门狗又按期跑完一轮就撤）、
+//   unclaimed:<提醒>:…、stuck:<提醒>:…（提醒派单 jobs/alert-dispatch.ts：原来那条撤了、静默了、有人接手了、往前走了就撤）、
 //   github-app:<机器人>:<仓>（机器人权限自检 jobs/github-app-check.ts：权限够了就撤）、reconcile:workflow:<任务>（开着的单
 //   没有着落）、reconcile:ledger:<仓>#<号>（合了的 PR 记账不全）——后两个由两处核对自己撤（jobs/reconcile-checks.ts）。
 // - 判不了、还没接的，只靠 24 小时再推：<工作流>:failure:<规则>（封号、换池接着干这类通报，条件就是「发生过」，要人知道）；
 //   reconcile:pr:<仓>#<号>（机器人开的 PR 不是「引擎」合的、或账上没有合并队列的合并记录：条件就是「发生过」，只报一次、
 //   不自动撤，要人看过点处理）。
+import { type AlertStage, HANDLED_STAGES, isEscalationKey } from '@fleet-dao/core';
 import type { AlertRow } from '@fleet-dao/db';
 import type { StageKind, TaskState } from '@fleet-dao/shared';
 import { duration, STAGE_NAMES } from '../routing/names.ts';
@@ -86,6 +91,11 @@ export interface AlertSweepDeps {
    */
   stageAllOpen?(stage: StageKind): Promise<AllOpenCheck>;
   alerts: AlertStore;
+  /**
+   * 这批提醒（编号）此刻谁在处理（core 的 alertHandling 现算：阶段、给人看的一行）。读不到照抛。
+   * 真装配（real/hourly-reconcile.ts）一定接上；没接上的照旧按 24 小时再推。
+   */
+  handling?(ids: readonly string[]): Promise<Map<string, { stage: AlertStage; line: string }>>;
   now: () => Date;
   log: ReconcileLog;
 }
@@ -308,6 +318,21 @@ async function remind(c: Ctx, alert: AlertRow): Promise<void> {
   }
 }
 
+/** 有人在处理、静默了的（编号）：这些不按 24 小时再推。谁在处理读不到：一条都不算（照旧再推），记没查全。 */
+async function quietAlerts(c: Ctx, alerts: readonly AlertRow[]): Promise<Set<string>> {
+  const quiet = new Set<string>();
+  if (!c.deps.handling || alerts.length === 0) return quiet;
+  try {
+    const byId = await c.deps.handling(alerts.map((a) => a.id));
+    for (const [id, h] of byId) {
+      if (h.stage === 'silenced' || HANDLED_STAGES.includes(h.stage)) quiet.add(id);
+    }
+  } catch (err) {
+    c.part.unchecked.push(`谁在处理没查成，照旧按 24 小时再推：${message(err)}`);
+  }
+  return quiet;
+}
+
 /**
  * 跑提醒这一部分。open 是这一轮列出的没处理的提醒（truncated = 没列全，照实记没查全）。
  * 某一条判不成（查不了 Temporal、库）进 unchecked，别的照判。
@@ -345,9 +370,13 @@ export async function sweepAlerts(
       break;
     }
   }
-  // 2. 还开着的卡住报警（工作树的也算），超过 24 小时没人处理就再推
-  for (const alert of [...c.stillOpen.values()]) {
-    if (alert.level !== 'alert') continue;
+  // 2. 还开着的卡住报警（工作树的也算），超过 24 小时没人处理就再推；有人在处理、静默了的，提醒派单再推的不推
+  const candidates = [...c.stillOpen.values()].filter(
+    (a) => a.level === 'alert' && !isEscalationKey(a.dedupeKey),
+  );
+  const quiet = await quietAlerts(c, candidates);
+  for (const alert of candidates) {
+    if (quiet.has(alert.id)) continue;
     try {
       await remind(c, alert);
     } catch (err) {

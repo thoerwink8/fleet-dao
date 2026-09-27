@@ -26,6 +26,7 @@ export {
   startPgChangeFeed,
 } from './changes.ts';
 export { type Config, ConfigError, loadConfig } from './config.ts';
+export { readDeployLagInput } from './deploy-lag.ts';
 export type { Deps } from './deps.ts';
 export {
   createDraftOpenRunner,
