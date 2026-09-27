@@ -5,6 +5,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync, readlinkSync, renameSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { readLive } from './config.mjs';
 import {
   APPLIED_FILE,
   AUTO_DIR,
@@ -221,6 +222,17 @@ on conflict (dedupe_key) do update
 where starts_with(dedupe_key, :'prefix') and resolved_at is null;`,
       { prefix },
     );
+  },
+  async resolveKey(key) {
+    sql(
+      `update notifications set resolved_at = now(), resolved_by = 'auto-release', updated_at = now()
+where dedupe_key = :'key' and resolved_at is null;`,
+      { key },
+    );
+  },
+  /** 配置对账要的原文：在用那一版里的期望、/etc/fleet-dao 下的环境文件、指纹钥匙（config.mjs 的 readLive）。 */
+  async readConfig() {
+    return readLive();
   },
   async save(st) {
     saveState(st);
