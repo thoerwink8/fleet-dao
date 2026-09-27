@@ -150,21 +150,21 @@ export type HandoverDecision =
 
 /**
  * 人明说把一张单交给引擎（fleet-api handover；驾驶舱的「交给 fleet」按钮以后也照这个判）：开关打开以前开的、别的版本的、
- * 未排期的都能交。这里只看任务和 issue 此刻的样子，照接活的老规矩：还在排队（从没派过）的拉起；在跑的不重复起；
- * 已经结束的只有 GitHub 上重开过才再起一轮（和接活「结束的只在重开时再拉起」是同一条），没重开的拒；issue 关着的、
- * 这个号其实是 PR 的，拒。
+ * 未排期的都能交。这里只看任务和 issue 此刻的样子，照接活的老规矩：这个号其实是 PR 的、issue 关着的，拒（关着的哪怕
+ * 任务还在跑也拒：关单会叫停它，说「已经在跑」是骗人）；还在排队（从没派过）的拉起；在跑的不重复起；已经结束的只有
+ * GitHub 上重开过才再起一轮（和接活「结束的只在重开时再拉起」是同一条），没重开的拒。
  */
 export function handoverDecision(task: { state: TaskState }, issue: IssueNow): HandoverDecision {
   if (issue.pullRequest) return { act: 'refuse', reason: 'pull_request', why: '这个号是 PR，不是 issue' };
-  if (task.state !== 'queued' && !isFinishedTask(task.state)) {
-    return { act: 'noop', why: `已经在跑（任务现在是 ${task.state}），不重复起` };
-  }
   if (issue.state === 'closed') {
     return {
       act: 'refuse',
       reason: 'issue_closed',
       why: 'GitHub 上这张单关着：关着的单不派，要做先在 GitHub 上重开',
     };
+  }
+  if (task.state !== 'queued' && !isFinishedTask(task.state)) {
+    return { act: 'noop', why: `已经在跑（任务现在是 ${task.state}），不重复起` };
   }
   if (task.state === 'queued') return { act: 'start' };
   if (issue.reopened) return { act: 'restart' };

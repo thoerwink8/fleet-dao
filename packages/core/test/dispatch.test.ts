@@ -133,10 +133,14 @@ describe('交给 fleet：人替开关打开以前、别的版本、未排期那�
     expect(handoverDecision({ state: 'queued' }, open)).toEqual({ act: 'start' });
   });
 
-  it('在跑的（哪一步都算）：不重复起，也不去管 issue 是不是刚关', () => {
+  it('在跑的（哪一步都算）：不重复起；【故意造出的失败】GitHub 上已经关了的，哪怕任务还在跑也拒（关单会叫停它）', () => {
     for (const state of ['triaging', 'asking', 'planning', 'running', 'merging', 'stalled'] as const) {
       expect(handoverDecision({ state }, open), state).toMatchObject({ act: 'noop' });
-      expect(handoverDecision({ state }, closed), state).toMatchObject({ act: 'noop' });
+      expect(handoverDecision({ state }, reopened), state).toMatchObject({ act: 'noop' });
+      expect(handoverDecision({ state }, closed), state).toMatchObject({
+        act: 'refuse',
+        reason: 'issue_closed',
+      });
     }
   });
 

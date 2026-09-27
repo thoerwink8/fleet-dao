@@ -8,9 +8,10 @@
 // 写入口和页面同一个（Store.setAutoDispatch）；改了记一条操作记录，改完从库里读回开关和那条记录再打印。
 //   handover <owner/仓名> <issue 号> --reason "<谁说的、为什么>"
 // 交给 fleet：人明说把一张自动派管不到的单（开关打开以前就开着的、别的版本的、未排期的）交给引擎，起 Fusion 工作流。
-// 开关关着、这个项目停派一律拒；在跑的不重复起，结束了的只有 GitHub 上重开过才再起一轮（判法在 @fleet-dao/core 的 dispatch.ts）。
-// 要读 GitHub（「引擎」机器人看这张单此刻开没开着、挂在哪个版本）、连 Temporal（起工作流），都按同一份 api.env。
-// 起了（或没起成）记一条操作记录 task.handover，从库里读回再打印。驾驶舱的「交给 fleet」按钮随界面单 #282 做，调同一套判法。
+// 开关关着、这个项目停派、GitHub 上关着一律拒；在跑的不重复起，结束了的只有 GitHub 上重开过才再起一轮（判法在
+// @fleet-dao/core 的 dispatch.ts）。要读 GitHub（「引擎」机器人看这张单此刻开没开着、挂在哪个版本）、连 Temporal（起工作流），
+// 都按同一份 api.env。没被拒的（起了、没起成、本来就在跑）都记一条操作记录 task.handover，从库里读回再打印。
+// 驾驶舱的「交给 fleet」按钮随界面单 #282 做，调同一套判法。
 // 每条命令带 --help（或 -h）只打印用法。
 // 退出码（几条命令一样）：0 做成了（或本来就是）；1 没做成（被拒、库里没有、连不上库、读回来不对，一句话说原因）；2 参数不对或没带上库连接。
 import { userInfo } from 'node:os';
@@ -490,9 +491,10 @@ function placeOf(issue: IssuePlan): string {
 
 /**
  * fleet-api handover 本身。依次查、不对就拒（什么都不改，退出码 1）：仓在库里；「让 AI 接活」开着；流程配置副本能用；
- * 库里有这张单的任务行；GitHub 上这张单此刻的样子（读不到算没查成）。再按 core 的 handoverDecision：排队中的拉起、
- * 结束了又重开过的再起一轮；在跑的不重复起（退出码 0）。起了（或没起成）记一条 task.handover，从库里读回再打印。
- * GitHub、Temporal 到用得着时才连（plans、temporal 是开连接的办法）：前面就拒了的不连。
+ * 库里有这张单的任务行；GitHub 上这张单此刻的样子（读不到算没查成；关着的拒）。再按 core 的 handoverDecision：排队中的拉起、
+ * 结束了又重开过的再起一轮；在跑的不重复起（退出码 0）。真交了的（起了、没起成、本来就在跑）都记一条 task.handover
+ * （谁跑的、谁说的为什么），从库里读回再打印。GitHub、Temporal 到用得着时才连（plans、temporal 是开连接的办法）：
+ * 前面就拒了的不连，在跑的不连 Temporal。
  */
 export async function handover(input: {
   store: Store;
@@ -532,47 +534,57 @@ export async function handover(input: {
   const decision = handoverDecision(task, issue);
   const place = placeOf(issue);
   if (decision.act === 'refuse') throw new CliError(`${no}${label}（${place}）：${decision.why}`);
-  if (decision.act === 'noop') return `没起：${label}（${place}）${decision.why}`;
 
   const restart = decision.act === 'restart';
   const workflowId = requirementWorkflowId(repo, args.issueNumber);
-  // 开关、副本都不进工作流的历史（和接活拉起的是同一种输入）
-  const { autoDispatchSince: _switch, flow: _flow, ...repoOnly } = repo;
   let started: 'started' | 'already_running' | undefined;
   let failure: string | undefined;
-  try {
-    const temporal = await input.temporal();
+  if (decision.act !== 'noop') {
+    // 开关、副本都不进工作流的历史（和接活拉起的是同一种输入）
+    const { autoDispatchSince: _switch, flow: _flow, ...repoOnly } = repo;
     try {
-      started = await temporal.requirements.start({
-        schemaVersion: 1,
-        taskId: task.id,
-        repo: repoOnly,
-        issueNumber: args.issueNumber,
-        title: task.title,
-        rawRequest: task.rawRequest,
-        requestedBy: issue.author ?? task.requestedBy,
-      });
-    } finally {
-      // 只是收尾：关连接出错不改「起没起成」（起成了的照样算起了），命令跑完进程就退
-      await temporal.close().catch(() => {});
+      const temporal = await input.temporal();
+      try {
+        started = await temporal.requirements.start({
+          schemaVersion: 1,
+          taskId: task.id,
+          repo: repoOnly,
+          issueNumber: args.issueNumber,
+          title: task.title,
+          rawRequest: task.rawRequest,
+          requestedBy: issue.author ?? task.requestedBy,
+        });
+      } finally {
+        // 只是收尾：关连接出错不改「起没起成」（起成了的照样算起了），命令跑完进程就退
+        await temporal.close().catch(() => {});
+      }
+    } catch (err) {
+      failure = `起工作流没成：${errText(err)}`;
     }
-  } catch (err) {
-    failure = `起工作流没成：${errText(err)}`;
+    // 重开过的再起一轮，上一轮工作流却还在收尾：这次没起
+    if (restart && started === 'already_running')
+      failure = '上一轮工作流还没收完尾，这次没起：等它结束了再交一次';
   }
-  // 重开过的再起一轮，上一轮工作流却还在收尾：这次没起
-  if (restart && started === 'already_running')
-    failure = '上一轮工作流还没收完尾，这次没起：等它结束了再交一次';
-  const outcome = failure ? 'failed' : started === 'already_running' ? 'already_running' : 'started';
+  const outcome =
+    decision.act === 'noop'
+      ? 'in_progress'
+      : failure
+        ? 'failed'
+        : started === 'already_running'
+          ? 'already_running'
+          : 'started';
 
-  // 起了、没起成都记（谁跑的、谁说的为什么、挂在哪个版本、上一轮什么状态）；记完从库里读回
+  // 真交了的都记（谁跑的、谁说的为什么、挂在哪个版本、上一轮什么状态、起没起成）；记完从库里读回
   const target = `task:${task.id}`;
   const note = `服务器上 ${input.operator} 跑的 fleet-api handover ${slug} ${args.issueNumber}：${args.reason}`;
   const done =
-    outcome === 'failed'
-      ? `没交成：${label}（${place}）${failure}`
-      : outcome === 'started'
-        ? `已交给 fleet：${label}（${place}）${restart ? `上一轮是 ${task.state}、GitHub 上重开过，再` : ''}起了 Fusion 工作流 ${workflowId}`
-        : `已交给 fleet：${label}（${place}）工作流 ${workflowId} 已经在跑（刚被别处拉起），没重复起`;
+    decision.act === 'noop'
+      ? `没起：${label}（${place}）${decision.why}`
+      : outcome === 'failed'
+        ? `没交成：${label}（${place}）${failure}`
+        : outcome === 'started'
+          ? `已交给 fleet：${label}（${place}）${restart ? `上一轮是 ${task.state}、GitHub 上重开过，再` : ''}起了 Fusion 工作流 ${workflowId}`
+          : `已交给 fleet：${label}（${place}）工作流 ${workflowId} 已经在跑（刚被别处拉起），没重复起`;
   const auditId = await dbStep(
     outcome === 'failed' ? `${done}；操作记录也没写进去：` : `${done}，但操作记录没写进去：`,
     () =>

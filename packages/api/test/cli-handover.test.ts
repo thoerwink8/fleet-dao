@@ -262,13 +262,34 @@ describe('交给 fleet', () => {
     ]);
   });
 
-  it('在跑的：不重复起（退出码 0），不连 Temporal、不记', async () => {
+  it('在跑的：不重复起（退出码 0），不连 Temporal；谁交的、为什么照样记一条、读回打印', async () => {
     const t = setup();
     // 样例里的 #12 正在跑
     expect(await t.run(['example/canary', '12', '--reason', REASON])).toBe(0);
+    const [entry] = t.handovers();
+    expect(entry).toMatchObject({
+      actor: { kind: 'engine', id: 'ops:handover' },
+      target: `task:${IDS.task12}`,
+      ok: true,
+      before: { state: 'running' },
+      after: { outcome: 'in_progress', restart: false, milestone: 'v1 Fusion 接活' },
+      reason: `服务器上 root 跑的 fleet-api handover example/canary 12：${REASON}`,
+    });
     expect(t.out.at(-1)).toBe(
-      '没起：example/canary#12（挂在当前版本「v1 Fusion 接活」上）已经在跑（任务现在是 running），不重复起',
+      '没起：example/canary#12（挂在当前版本「v1 Fusion 接活」上）已经在跑（任务现在是 running），不重复起\n' +
+        `操作记录 ${entry?.id}：${T0.toISOString()} 服务器上 root 跑的 fleet-api handover example/canary 12：${REASON}`,
     );
+    expect(t.temporal.state.opened).toBe(0);
+  });
+
+  it('【故意造出的失败】任务还在跑、GitHub 上已经关了：拒（退出码 1），不说「已经在跑」，不记', async () => {
+    const t = setup();
+    t.plans.set(12, issuePlan({ state: 'closed' }));
+    expect(await t.run(['example/canary', '12', '--reason', REASON])).toBe(1);
+    expect(t.err.at(-1)).toBe(
+      '没交成（什么都没派）：example/canary#12（挂在当前版本「v1 Fusion 接活」上）：GitHub 上这张单关着：关着的单不派，要做先在 GitHub 上重开',
+    );
+    expect(t.out).toEqual([]);
     expect(t.temporal.state.opened).toBe(0);
     expect(t.handovers()).toEqual([]);
   });
