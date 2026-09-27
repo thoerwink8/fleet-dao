@@ -653,7 +653,7 @@ export async function upsertAlert(
   db: Db,
   input: {
     dedupeKey: string;
-    level: 'alert' | 'decision';
+    level: 'alert' | 'decision' | 'daily';
     taskId: string | null;
     title: string;
     body: string;
