@@ -1,5 +1,6 @@
 // 飞书接口要的样子（shared/feishu-api.ts）：草稿卡、盘面快照、推送条目。纯函数，不碰数据库，测试直接喂数据。
 import { createHash } from 'node:crypto';
+import { ASK_HOLD_NAMES, type LateAnswer, lateAnswer } from '@fleet-dao/core';
 import {
   type Channel,
   FEISHU_NOTE_MAX,
@@ -16,6 +17,7 @@ import {
 import type { z } from 'zod';
 import { clip, UNDERSTANDING_MAX } from './feishu-records.ts';
 import type {
+  AskRecord,
   DraftRecord,
   FeishuCardRecord,
   FeishuOutboxSources,
@@ -25,7 +27,7 @@ import type {
   RunPlan,
   User,
 } from './ports.ts';
-import { activityOf, type RouteInfo } from './views.ts';
+import { activityOf, askLate, type RouteInfo } from './views.ts';
 
 type Draft = z.input<typeof FeishuDraftSchema>;
 type Board = z.input<typeof FeishuBoardSnapshotSchema>;
@@ -129,6 +131,26 @@ export function draftView(d: DraftRecord, ctx: DraftViewContext): Draft {
 
 export const ANSWER_TEXTS = {
   askRecorded: '已记下你的回答，AI 会接着干。',
+  /** 按推荐先做了的、另开单的（#259）：回答之后会怎样。 */
+  askRecordedScoped: (
+    ask: Pick<AskRecord, 'scope' | 'recommended'>,
+    answer: string,
+    taskState: TaskState,
+  ): string => {
+    if (ask.scope === 'outside') return '已记下你的回答，记在另开的那张单上。';
+    if (ask.scope === undefined || ask.recommended === undefined) return ANSWER_TEXTS.askRecorded;
+    switch (lateAnswer({ recommended: ask.recommended, answer, applied: false, taskState })) {
+      case 'confirmed':
+        return '已记下：你选的就是 AI 先做的那个，不用改。';
+      case 'follow-up':
+        return '已记下：这张单已经合进去了，会另开一张后续单照你选的改。';
+      case 'recorded':
+        return '已记下：这张单没做成就停了，只记下，重开时照你选的做。';
+      case 'change':
+      case 'applied':
+        return '已记下：和 AI 先做的不一样，下个存档点交给 AI 改。';
+    }
+  },
   askTaken: (answer: string, by: string | undefined) =>
     `这个问题已经回答过了（${by ?? '另一位'}：${clip(answer, 60)}），这句没有记成新的回答。`,
   askMissing:
@@ -169,6 +191,51 @@ function lines(text: string, max = LINES_MAX): string[] {
 }
 
 const TASK_END_WORDS: Partial<Record<TaskState, string>> = { done: '做完', stopped: '叫停', failed: '结束' };
+
+/** 还没回答时卡片第一行：AI 已经怎么做了、他现在改选会怎样。老式的（会话在等回答）没有这一行。 */
+function askStandingLine(ask: AskRecord, taskState: TaskState): string | undefined {
+  if (ask.answer !== undefined || ask.scope === undefined) return undefined;
+  const rec = clip(ask.recommended ?? '', 60);
+  const merged = taskState === 'done';
+  switch (ask.scope) {
+    case 'task':
+      return merged
+        ? `已按推荐先做：${rec}。这张单已经合进去了，改选别的会另开后续单。`
+        : `已按推荐先做：${rec}。改选别的，下个存档点交给 AI 改。`;
+    case 'hold': {
+      const gate = ask.hold ? ASK_HOLD_NAMES[ask.hold] : '人闸';
+      return merged
+        ? `碰了人闸（${gate}）：已按推荐做（${rec}）并合进去了，改选别的会另开后续单。`
+        : `碰了人闸（${gate}）：先按推荐做（${rec}），合并前等你批。`;
+    }
+    case 'outside':
+      return `超出这张单的范围：这张单绕开它接着做，另开一张单等你拍${ask.followUpIssue ? `（#${ask.followUpIssue}）` : ''}。`;
+  }
+}
+
+/** 回答了的卡片结论（不含谁答的、什么时候）。 */
+function answeredText(ask: AskRecord, late: LateAnswer | undefined): string {
+  const answer = clip(ask.answer ?? '', 60);
+  if (ask.scope === 'outside') {
+    return `你选了：${answer}${ask.followUpIssue ? `，记在 #${ask.followUpIssue} 上` : '，记下了'}`;
+  }
+  switch (late) {
+    case 'confirmed':
+      return `你选了：${answer}（就是推荐的），已生效`;
+    case 'applied':
+      return `你选了：${answer}，已生效`;
+    case 'change':
+      return `你选了：${answer}，下个存档点生效`;
+    case 'follow-up':
+      return ask.followUpIssue
+        ? `你选了：${answer}；这张单已经合进去了，另开了后续单 #${ask.followUpIssue}`
+        : `你选了：${answer}；这张单已经合进去了，会另开后续单`;
+    case 'recorded':
+      return `你选了：${answer}；这张单没做成就停了，只记下`;
+    case undefined:
+      return `已回答：${answer}`;
+  }
+}
 const LEVEL_WORDS = { decision: '有事要你们拍', alert: '有任务卡住了', daily: '日报' } as const;
 
 function taskFields(task: FeishuTaskInfo | undefined) {
@@ -187,32 +254,34 @@ export function composeOutbox(sources: FeishuOutboxSources): ComputedOutboxItem[
   const out: OutboxContent[] = [];
   for (const { ask, task, answeredByName } of sources.asks) {
     const ended = TASK_END_WORDS[task.state];
-    const done = ask.answer !== undefined || ended !== undefined;
+    // 按推荐先做了的、另开单的（#259）：单子合进去以后照样能改（改了开后续单），只有叫停、失败的才收起；
+    // 老式的（会话在等回答）单子一结束就不用答了。
+    const late = askLate(ask, task.state);
+    const closedByTask =
+      ask.scope === undefined ? ended !== undefined : task.state === 'stopped' || task.state === 'failed';
+    const done = ask.answer !== undefined || closedByTask;
     const question = ask.question.trim() || '（AI 没写问题原文）';
     const [first = question, ...rest] = question.split('\n');
     const title = clip(first, 100);
+    const standing = askStandingLine(ask, task.state);
+    const room = LINES_MAX - 1 - (standing ? 1 : 0);
     // 第一行放得进标题，正文只放后面几行；放不下（截断了）正文就放全文。
-    const body =
-      title === first.trim() ? lines(rest.join('\n'), LINES_MAX - 1) : lines(question, LINES_MAX - 1);
+    const body = title === first.trim() ? lines(rest.join('\n'), room) : lines(question, room);
     const options = ask.options
       .map((o) => clip(o, 40))
       .filter((o) => o.length > 0)
       .slice(0, OPTIONS_MAX);
+    const by = `${answeredByName ? ` · ${answeredByName}` : ''}${ask.answeredAt ? ` · ${beijingStamp(ask.answeredAt)}` : ''}`;
     out.push({
       id: `ask:${ask.id}`,
       kind: 'ask',
       to: { type: 'team' },
       title,
-      lines: [...body, clip(`需求：${task.title}`, 500)],
+      lines: [...(standing ? [standing] : []), ...body, clip(`需求：${task.title}`, 500)],
       status: done ? 'done' : 'open',
       ...(ask.answer !== undefined
-        ? {
-            doneText: clip(
-              `已回答：${clip(ask.answer, 60)}${answeredByName ? ` · ${answeredByName}` : ''}${ask.answeredAt ? ` · ${beijingStamp(ask.answeredAt)}` : ''}`,
-              200,
-            ),
-          }
-        : ended !== undefined
+        ? { doneText: clip(`${answeredText(ask, late)}${by}`, 200) }
+        : closedByTask && ended !== undefined
           ? { doneText: `需求已${ended}，不用再答了` }
           : {}),
       ...taskFields(task),
@@ -361,7 +430,8 @@ export function buildFeishuBoard(input: FeishuBoardInput, now: Date, staleAfterM
   const openTaskIds = new Set(open.map((t) => t.id));
   const waiting = [
     ...input.sources.asks
-      .filter((x) => x.ask.answer === undefined && openTaskIds.has(x.task.id))
+      // 只算真在等回答的（老式的）：按推荐先做了的、另开单的不挡路（#259），碰人闸的到合并那一步另有要人拍
+      .filter((x) => x.ask.answer === undefined && x.ask.scope === undefined && openTaskIds.has(x.task.id))
       .map((x) => ({
         kind: 'ask' as const,
         askId: x.ask.id,

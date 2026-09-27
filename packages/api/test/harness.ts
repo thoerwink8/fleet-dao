@@ -52,7 +52,6 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     feishuGatewayToken: GATEWAY_PASS,
     devLogin: false,
     cookieSecure: true,
-    askWaitMs: 300,
     quotaStaleAfterMs: 30 * 60_000,
     sseHeartbeatMs: 60_000,
     demoDir: null,

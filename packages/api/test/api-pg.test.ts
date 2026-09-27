@@ -1,4 +1,4 @@
-// 整条链路跑在真库上：接口 → Postgres Store → PGlite（真迁移）→ 库里的触发器发 NOTIFY → LISTEN → SSE / 叫醒等回答的命令。
+// 整条链路跑在真库上：接口 → Postgres Store → PGlite（真迁移）→ 库里的触发器发 NOTIFY → LISTEN → SSE。
 // 语义细节在契约测试（store-contract.ts）和各接口的测试里按内存版测过；这里只证明「换成真库，接起来照样通」。
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -31,7 +31,6 @@ import {
   openEvents,
   pgHarness,
   readUntil,
-  settle,
   T0,
   write,
 } from './harness.ts';
@@ -105,27 +104,35 @@ describe('接口跑在真库上', () => {
     expect(h.signals).toHaveLength(1);
   });
 
-  it('别处（飞书、issue）直接写进库的回答：库里的触发器发通知，当场叫醒等着的 fleet ask', async () => {
-    const h = await start({ config: { askWaitMs: 5_000 } });
-    const pending = h.agent.request(
-      '/agent/v1/ask',
-      agentRequest(h.agentToken(), 'POST', { question: '用哪家短信？' }),
-    );
-    let row: typeof asks.$inferSelect | undefined;
-    for (let i = 0; i < 200 && !row; i++) {
-      [row] = await t.db.select().from(asks).where(eq(asks.question, '用哪家短信？'));
-      if (!row) await settle(5);
-    }
-    if (!row) throw new Error('追问没落库');
-    const answeredAt = Date.now();
+  it('fleet ask 在真库上：不等回答、当场按推荐先做，范围和推荐落库；别处（飞书、issue）写进库的回答，再问同一句回「答过了」', async () => {
+    const h = await start();
+    const ask = async () =>
+      AskResponse.parse(
+        await (
+          await h.agent.request(
+            '/agent/v1/ask',
+            agentRequest(h.agentToken(), 'POST', {
+              question: '用哪家短信？',
+              options: ['腾讯云', '阿里云'],
+              recommend: '阿里云',
+            }),
+          )
+        ).json(),
+      );
+    const first = await ask();
+    expect(first).toMatchObject({ status: 'assumed', answer: '阿里云' });
+    const [row] = await t.db.select().from(asks).where(eq(asks.id, first.askId));
+    expect(row).toMatchObject({
+      scope: 'task',
+      recommended: '阿里云',
+      options: ['阿里云', '腾讯云'],
+      hold: null,
+    });
     await t.db
       .update(asks)
-      .set({ answer: '先用阿里云', answeredBy: IDS.founderB, answeredAt: new Date() })
-      .where(eq(asks.id, row.id));
-    const body = AskResponse.parse(await (await pending).json());
-    expect(body).toEqual({ askId: row.id, status: 'answered', answer: '先用阿里云' });
-    // 远早于兜底的回库轮询（5 秒）：是通知叫醒的。
-    expect(Date.now() - answeredAt).toBeLessThan(2_000);
+      .set({ answer: '腾讯云', answeredBy: IDS.founderB, answeredAt: new Date() })
+      .where(eq(asks.id, first.askId));
+    expect(await ask()).toEqual({ askId: first.askId, status: 'answered', answer: '腾讯云' });
   });
 
   it('SSE：驾驶舱里回答追问 → 库里的触发器发通知 → 打开的页面收到 asks 的变化', async () => {
@@ -135,7 +142,11 @@ describe('接口跑在真库上', () => {
       await (
         await h.agent.request(
           '/agent/v1/ask',
-          agentRequest(h.agentToken(), 'POST', { question: '验证码几位？', blocking: false }),
+          agentRequest(h.agentToken(), 'POST', {
+            question: '验证码几位？',
+            options: ['6 位', '4 位'],
+            recommend: '6 位',
+          }),
         )
       ).json(),
     );

@@ -21,6 +21,7 @@ describe('core 只放纯判断', () => {
   it('扫到了 src 下的文件（不是空扫一遍就算过）', () => {
     expect(files.sort()).toEqual([
       'acceptance.ts',
+      'ask.ts',
       'brief.ts',
       'config.ts',
       'criteria.ts',

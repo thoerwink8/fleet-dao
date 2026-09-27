@@ -36,8 +36,6 @@ export interface Config {
   devLogin: boolean;
   /** https 才给 Cookie 加 Secure 和 __Host- 前缀。 */
   cookieSecure: boolean;
-  /** fleet ask 阻塞等回答的上限。 */
-  askWaitMs: number;
   /** 额度读数超过这么久就判「过期」（设计文档第六节：每个账号池的额度读数不超过 30 分钟）。 */
   quotaStaleAfterMs: number;
   /** SSE 心跳间隔，防香港 nginx 和浏览器把空闲连接掐掉。 */
@@ -66,8 +64,6 @@ export class ConfigError extends Error {
 }
 
 const MIN_SECRET_LENGTH = 32;
-/** Node 自带 fetch 默认 300 秒收不到响应头就断开；阻塞等回答要比它短，命令端才收得到 pending。 */
-const MAX_ASK_WAIT_SECONDS = 290;
 const LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1']);
 /** 法国本机的 Temporal；和引擎 worker.ts 的 configFromEnv 用同一套默认值，两边不用都配。 */
 const DEFAULT_TEMPORAL_ADDRESS = '127.0.0.1:7243';
@@ -140,15 +136,6 @@ export function loadConfig(env: Env): Config {
   if (demoDir !== null && !isAbsolute(demoDir))
     problems.push(`FLEET_DEMO_DIR 要写绝对路径，现在是「${demoDir}」`);
 
-  const askWaitSeconds = parseIntIn(
-    'FLEET_ASK_WAIT_SECONDS',
-    env.FLEET_ASK_WAIT_SECONDS,
-    240,
-    0,
-    MAX_ASK_WAIT_SECONDS,
-    problems,
-  );
-
   // 都有默认值，两个环境都不强制配（和引擎 worker.ts 的 configFromEnv 同一套默认，Temporal 没起来也不挡后端启动）。
   const temporalAddress = env.TEMPORAL_ADDRESS?.trim() || DEFAULT_TEMPORAL_ADDRESS;
   const temporalNamespace = env.TEMPORAL_NAMESPACE?.trim() || DEFAULT_TEMPORAL_NAMESPACE;
@@ -177,7 +164,6 @@ export function loadConfig(env: Env): Config {
     feishuGatewayToken,
     devLogin: devLoginRequested && dev,
     cookieSecure: publicUrl.protocol === 'https:',
-    askWaitMs: askWaitSeconds * 1000,
     quotaStaleAfterMs: QUOTA_STALE_AFTER_MS,
     sseHeartbeatMs: 25 * 1000,
     demoDir,
@@ -239,21 +225,4 @@ function secret(name: string, env: Env, dev: boolean, problems: string[]): strin
     return null;
   }
   return value;
-}
-
-function parseIntIn(
-  name: string,
-  value: string | undefined,
-  fallback: number,
-  min: number,
-  max: number,
-  problems: string[],
-): number {
-  if (value === undefined || value === '') return fallback;
-  const n = Number(value);
-  if (!Number.isInteger(n) || n < min || n > max) {
-    problems.push(`${name} 要是 ${min}–${max} 之间的整数，现在是「${value}」`);
-    return fallback;
-  }
-  return n;
 }

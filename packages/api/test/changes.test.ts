@@ -1,12 +1,6 @@
 import { FLEET_CHANGES_CHANNEL, REALTIME_TABLES } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
-import {
-  createAskWaiters,
-  createChangeHub,
-  PROBE_CHANNEL,
-  parseChangePayload,
-  startPgChangeFeed,
-} from '../src/changes.ts';
+import { createChangeHub, PROBE_CHANNEL, parseChangePayload, startPgChangeFeed } from '../src/changes.ts';
 import { silentLogger } from '../src/log.ts';
 import type { FeedEvent, Logger } from '../src/ports.ts';
 import { fakePostgres } from './fake-postgres.ts';
@@ -290,37 +284,5 @@ describe('LISTEN fleet_changes（替身照 postgres.js：失败后监听仍挂�
     off();
     hub.publish({ type: 'resync' });
     expect(got).toHaveLength(1);
-  });
-});
-
-describe('等回答', () => {
-  it('asks 表对应那一行的变化叫醒；别的表同编号不叫醒；resync 叫醒所有；不然到时间醒', async () => {
-    const hub = createChangeHub();
-    const waiters = createAskWaiters(hub);
-    const started = Date.now();
-    const a = waiters.sleep('ask-1', 5_000);
-    hub.publish({ type: 'change', table: 'asks', id: 'ask-1' });
-    await a;
-    const b = waiters.sleep('ask-2', 5_000);
-    hub.publish({ type: 'resync' });
-    await b;
-    expect(Date.now() - started).toBeLessThan(1_000);
-
-    let woke = false;
-    const c = waiters.sleep('ask-3', 60).then(() => {
-      woke = true;
-    });
-    hub.publish({ type: 'change', table: 'tasks', id: 'ask-3' });
-    await new Promise((r) => setTimeout(r, 20));
-    expect(woke).toBe(false);
-    await c;
-  });
-
-  it('请求中止就不等了', async () => {
-    const waiters = createAskWaiters(createChangeHub());
-    const controller = new AbortController();
-    const p = waiters.sleep('ask-1', 5_000, controller.signal);
-    controller.abort();
-    await p;
   });
 });

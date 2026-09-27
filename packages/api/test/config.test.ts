@@ -32,7 +32,6 @@ describe('配置', () => {
       devLogin: false,
       cockpitListen: { host: 'wg-france', port: 8787 },
       agentListen: { host: '127.0.0.1', port: 8788 },
-      askWaitMs: 240_000,
       databaseUrl: 'postgres://fleet@localhost/fleet',
       feishuGatewayToken: null,
       temporalAddress: '127.0.0.1:7243',
@@ -104,7 +103,6 @@ describe('配置', () => {
     expect(problems({ ...PROD, FLEET_SESSION_SECRET: 'short' }).join()).toContain('太短');
     expect(problems({ ...PROD, FLEET_PUBLIC_URL: 'http://cockpit.example.test' }).join()).toContain('https');
     expect(problems({ ...PROD, FLEET_ENV: 'staging' }).join()).toContain('FLEET_ENV');
-    expect(problems({ ...PROD, FLEET_ASK_WAIT_SECONDS: '600' }).join()).toContain('FLEET_ASK_WAIT_SECONDS');
   });
 
   it('飞书网关通行证：太短、和别的密钥相同都拒绝启动', () => {

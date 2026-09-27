@@ -44,8 +44,8 @@ import {
 import type { z } from 'zod';
 import { sha256Hex } from '../../demo/scope';
 import { ApiError, type FleetApi } from '../client';
-import type { AuditEntry, DemoLink, LiveEvent } from '../types';
-import type { MLog, MockState, MSubtask, MTask } from './model';
+import type { Ask, AuditEntry, DemoLink, LiveEvent, TaskState } from '../types';
+import type { MAsk, MLog, MockState, MSubtask, MTask } from './model';
 import { createSeed, fakeAction, fakeUsage } from './seed';
 
 export interface MockOptions {
@@ -128,6 +128,17 @@ function page<T extends { id: string }>(
   return last && start + limit < sorted.length
     ? { items: slice, nextCursor: `${at(last)}|${last.id}` }
     : { items: slice };
+}
+
+/** 按推荐先做了的回答之后会怎样：和真后端（core 的 lateAnswer）同一个判法，假后端不引 core。 */
+function askEffect(a: MAsk, state: TaskState): Ask['effect'] {
+  if (a.answer === undefined || a.recommended === undefined) return undefined;
+  if (a.scope !== 'task' && a.scope !== 'hold') return undefined;
+  if (a.answer.trim() === a.recommended.trim()) return 'confirmed';
+  if (a.appliedAt) return 'applied';
+  if (state === 'done') return 'follow-up';
+  if (state === 'stopped' || state === 'failed') return 'recorded';
+  return 'change';
 }
 
 export function createMockApi(opts: MockOptions = {}): MockApi {
@@ -773,6 +784,11 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
           answer: a.answer,
           answeredBy: a.answeredBy,
           answeredAt: a.answeredAt,
+          scope: a.scope,
+          recommended: a.recommended,
+          hold: a.hold,
+          effect: askEffect(a, tv.task.state),
+          followUpIssue: a.followUpIssue,
         })),
         // 和真后端同一个算法（shared 的 usage.ts）：按路由上的模型记，花费按渠道的计费方式分
         usage: summarizeUsage(

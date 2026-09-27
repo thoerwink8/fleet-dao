@@ -436,7 +436,7 @@ export interface RunProgressFacts {
    */
   lastStepAdvanceAt: Date | null;
   lastPlan: { at: Date; steps: { title: string; state: string }[] } | null;
-  /** 这次会话里还没答的 fleet ask（最早的那个）。 */
+  /** 这次会话里还没答、会话真在等的提问（最早的那个）：带了范围的（#259，问完不等）不算。 */
   pendingAsk: { id: string; question: string; askedAt: Date } | null;
   /** 最后一条 done 事件的 payload（api 写的形状：{summary, prNumber?, testsPassed, verified?}）。 */
   done: { at: Date; summary: string; testsPassed: boolean | null; payload: unknown } | null;
@@ -473,7 +473,8 @@ export async function runProgressFacts(
     db
       .select({ id: asks.id, question: asks.question, askedAt: asks.askedAt })
       .from(asks)
-      .where(and(eq(asks.runId, runId), isNull(asks.answer)))
+      // 只有老式的（没带范围的）才算会话在等人：带了范围的问完当场按推荐接着干（#259），不能拿它把真停滞当成「在等人」
+      .where(and(eq(asks.runId, runId), isNull(asks.answer), isNull(asks.scope)))
       .orderBy(asc(asks.askedAt))
       .limit(1),
     db

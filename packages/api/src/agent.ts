@@ -1,5 +1,7 @@
 // fleet 命令的接口（/agent/v1，照 shared/agent-api.ts）：只认 fleet 令牌，只能动令牌对应的那一次会话。
 // 每条命令先写库、再叫醒工作流；库是准，信号只是叫醒。
+
+import { ASK_HOLD_NAMES, type AskHold, type AskScope, checkAsk } from '@fleet-dao/core';
 import {
   AGENT_EVENT_WAKE_KINDS,
   AgentRoutes,
@@ -17,18 +19,22 @@ import {
 } from '@fleet-dao/shared';
 import { Hono, type MiddlewareHandler } from 'hono';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
+import type { z } from 'zod';
 import { verifyAgentToken } from './agent-token.ts';
-import type { AskWaiters } from './changes.ts';
 import type { Deps } from './deps.ts';
 import { checkDone } from './done-check.ts';
 import { ApiError, readJson, reply } from './http.ts';
-import type { AgentSession, AskRecord, TaskSignal } from './ports.ts';
+import {
+  type AgentSession,
+  type AskRecord,
+  type TaskSignal,
+  WorkflowGoneError,
+  WorkflowUnavailableError,
+} from './ports.ts';
 import { requirementWorkflowIdForTask } from './temporal.ts';
 
 export type AgentEnv = { Variables: { agent: AgentSession } };
 
-/** 等回答时隔多久回库看一眼（数据库变化通知没接上时的兜底）。 */
-const ASK_POLL_MS = 5_000;
 /** 幂等键最长多少字（插头用的是 uuid）。 */
 const MAX_IDEMPOTENCY_KEY_LENGTH = 200;
 /** 占着键超过这么久还没做完，当它已经死了（连接断了、卡死了），接过来重做。正常一条命令毫秒级做完。 */
@@ -111,6 +117,23 @@ function isWakeKind(kind: AgentEventKind): kind is (typeof AGENT_EVENT_WAKE_KIND
   return (AGENT_EVENT_WAKE_KINDS as readonly string[]).includes(kind);
 }
 
+/**
+ * fleet ask 当场回什么：创始人回过这一句（同一个会话问过一模一样的）就回他的回答；不然按提问的范围——
+ * 这张单范围内的按推荐先做，超出范围的另开单，碰人闸的先按推荐做、合并前等批。
+ * 同一句在这之前按老问法问过（库里那一条没有范围）：照这次带的范围回。
+ */
+function askReply(ask: AskRecord, scope: AskScope, recommended: string): z.input<typeof AskResponse> {
+  if (ask.answer !== undefined) return { askId: ask.id, status: 'answered', answer: ask.answer };
+  switch (ask.scope ?? scope) {
+    case 'outside':
+      return { askId: ask.id, status: 'outside' };
+    case 'hold':
+      return { askId: ask.id, status: 'held', answer: ask.recommended ?? recommended };
+    case 'task':
+      return { askId: ask.id, status: 'assumed', answer: ask.recommended ?? recommended };
+  }
+}
+
 export function agentAuth(deps: Deps): MiddlewareHandler<AgentEnv> {
   return async (c, next) => {
     const header = c.req.header('authorization');
@@ -142,7 +165,7 @@ export function agentAuth(deps: Deps): MiddlewareHandler<AgentEnv> {
   };
 }
 
-export function agentRoutes(deps: Deps, waiters: AskWaiters): Hono<AgentEnv> {
+export function agentRoutes(deps: Deps): Hono<AgentEnv> {
   const { store, log } = deps;
   const bootedAt = deps.now().getTime();
   const app = new Hono<AgentEnv>();
@@ -167,14 +190,39 @@ export function agentRoutes(deps: Deps, waiters: AskWaiters): Hono<AgentEnv> {
     }
   }
 
-  async function waitForAnswer(askId: string, ms: number, signal: AbortSignal): Promise<AskRecord | null> {
-    const deadline = Date.now() + ms;
-    for (;;) {
-      const ask = await store.getAsk(askId);
-      if (ask?.answer !== undefined) return ask;
-      const left = deadline - Date.now();
-      if (left <= 0 || signal.aborted) return null;
-      await waiters.sleep(askId, Math.min(left, ASK_POLL_MS), signal);
+  /**
+   * 碰了人闸的提问（scope = hold）：给这张单的工作流加人闸，合并前等创始人批（和驾驶舱加人闸同一个信号）。
+   * 发给需求那一层（Fusion 就是它本身）：子任务会话点名自己的子任务。引擎连不上就明说没加上（503，fleet 会重试，
+   * 重试时问题去重、人闸再加一次），不回「已按推荐先做、合并前等批」装作拦住了；工作流已经结束的，这张单不会再合并，只记日志。
+   */
+  async function holdMerge(session: AgentSession, hold: AskHold, askId: string) {
+    let workflowId: string;
+    try {
+      workflowId = await requirementWorkflowIdForTask(store, session.taskId);
+      await deps.workflows.signal(workflowId, {
+        name: 'requireApproval',
+        by: `session:${session.runId}`,
+        holds: [hold],
+        ...(session.subtaskId ? { subtaskId: session.subtaskId } : {}),
+        reason: `会话问创始人时碰了人闸（追问 ${askId}）`,
+      });
+    } catch (err) {
+      if (err instanceof WorkflowGoneError) {
+        log.warn('碰了人闸的提问已记下，但工作流已经结束，人闸没处加', { runId: session.runId, askId, hold });
+        return;
+      }
+      log.error('碰了人闸的提问已记下，但人闸没加上', {
+        runId: session.runId,
+        askId,
+        hold,
+        error: String(err),
+      });
+      const why = err instanceof WorkflowUnavailableError ? '引擎这会儿连不上' : String(err);
+      throw new ApiError(
+        err instanceof WorkflowUnavailableError ? 503 : 500,
+        'hold_not_set',
+        `问题已经记下，但人闸（${ASK_HOLD_NAMES[hold]}）没加上：${why}。重跑同一条 fleet ask 会再加一次`,
+      );
     }
   }
 
@@ -220,30 +268,28 @@ export function agentRoutes(deps: Deps, waiters: AskWaiters): Hono<AgentEnv> {
     return c.json(ok);
   });
 
+  // 问他不挡路（#259）：不合格的（没带选项、没带推荐）当场退回让会话补齐；合格的记下、当场回，不等回答。
   app.post(AgentRoutes.ask.path, async (c) => {
     const session = c.get('agent');
     const body = await readJson(c, AskRequest);
+    const checked = checkAsk(body);
+    if (!checked.ok) throw new ApiError(400, 'ask_incomplete', checked.why);
+    const q = checked.ask;
     const { ask, created } = await store.openAsk({
       runId: session.runId,
       taskId: session.taskId,
-      question: body.question,
-      options: body.options ?? [],
+      question: q.question,
+      options: q.options,
+      scope: q.scope,
+      recommended: q.recommended,
+      ...(q.hold ? { hold: q.hold } : {}),
     });
     // 追问和它的 ask 进度在 openAsk 里同一事务写进去了，这里只叫醒工作流。
     if (created) await wake(session, 'ask', ask.id);
-    const answered =
-      ask.answer !== undefined
-        ? ask
-        : body.blocking && deps.config.askWaitMs > 0
-          ? await waitForAnswer(ask.id, deps.config.askWaitMs, c.req.raw.signal)
-          : null;
-    return reply(
-      c,
-      AskResponse,
-      answered?.answer !== undefined
-        ? { askId: ask.id, status: 'answered', answer: answered.answer }
-        : { askId: ask.id, status: 'pending' },
-    );
+    // 碰了人闸：每次问（含重试、同一句再问）都给工作流加一次人闸，加过的工作流自己认「已经有了」。
+    const hold = ask.hold ?? q.hold;
+    if (hold) await holdMerge(session, hold, ask.id);
+    return reply(c, AskResponse, askReply(ask, q.scope, q.recommended));
   });
 
   app.post(AgentRoutes.history.path, async (c) => {

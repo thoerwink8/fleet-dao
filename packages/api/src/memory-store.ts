@@ -978,7 +978,10 @@ export function createMemoryStore(
     async appendProgress(runId, kind, payload) {
       progress(runId, kind, payload);
     },
-    async openAsk({ runId, taskId, question, options: choices }) {
+    async openAsk({ runId, taskId, question, options: choices, scope, recommended, hold }) {
+      // 和库里的约束一样、也和库一样先查约束再去重：推荐的一定在选项里，人闸只跟着 hold 走（不拿空的冒充推荐）
+      if (!choices.includes(recommended)) throw new Error(`推荐的「${recommended}」不在选项里`);
+      if ((scope === 'hold') !== (hold !== undefined)) throw new Error('人闸和提问的范围对不上');
       const existing = data.asks.find((a) => a.runId === runId && a.question === question);
       if (existing) return { ask: existing, created: false };
       const ask: AskRecord = {
@@ -988,6 +991,9 @@ export function createMemoryStore(
         question,
         options: choices,
         askedAt: now().toISOString(),
+        scope,
+        recommended,
+        ...(hold ? { hold } : {}),
       };
       data.asks.push(ask);
       changed('asks', ask.id);
