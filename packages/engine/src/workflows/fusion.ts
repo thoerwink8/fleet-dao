@@ -1090,7 +1090,14 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
     const soOn = patched(SECOND_OPINION_PATCH);
     const [ci, so] = await Promise.all([
       attempt(kit, 'waitCi', () =>
-        acts.waitCi({ ...kit.scope, repo: input.repo, prNumber: pr, head: atHead }),
+        acts.waitCi({
+          ...kit.scope,
+          repo: input.repo,
+          prNumber: pr,
+          branch,
+          head: atHead,
+          ...(tree ? { worktreePath: tree.path } : {}),
+        }),
       ),
       soOn ? secondOpinionRound(pr, atHead) : Promise.resolve<SecondOpinionOutcome>({ kind: 'skip' }),
     ]);
@@ -1098,6 +1105,14 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
     if (ci.state === 'diverged') {
       // ci.detail（ciResultOf 拼的）已经写清是哪个头变成了哪个头、为什么不认：不再重复一遍。
       return { kind: 'needs-human', why: ci.detail ?? 'PR 的头变了，且新头不含老头（像是被强推改写了）' };
+    }
+    // CI 认了新头（新头含着老头，github 包的 waitCi 已经核过）：这里的 head 也跟着改，往后并主线、推分支
+    // 都从新头算起；工作树那份由 waitCi 端口顺手快进了（给了 worktreePath 的话；会话在跑快进不了就先跳过，
+    // 不耽误这里认头——工作树迟早在下一次任务边界或推分支时自己追上，见 #307/#389 那次真事）。
+    if (ci.head !== head) {
+      head = ci.head;
+      treeHead = ci.head;
+      status.head = head;
     }
     if (ci.state === 'unknown') {
       ciUnknown += 1;
