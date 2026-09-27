@@ -5,8 +5,11 @@ export {
   type BundleCommitsInput,
   type BundleCommitsResult,
   bundleCommits,
+  type FetchBranchInput,
+  type FetchBranchResult,
   type FetchMainlineInput,
   type FetchMainlineResult,
+  fetchBranchHead,
   fetchMainline,
   type MirrorReadDeps,
 } from './bundle.ts';
