@@ -67,8 +67,9 @@ describe('PR 正文模板', () => {
     expect(lines.length).toBeLessThanOrEqual(PR_BODY_MAX_LINES);
     expect(body).toContain('- ……另有');
     expect(body).toContain('**还欠什么**：\n- 过期提示放到子任务 C\n- 风险：旧的登录接口还在用');
-    expect(lines.slice(-5)).toEqual([
+    expect(lines.slice(-6)).toEqual([
       '**需求**：#12 · 子任务 B 验证码',
+      '**这个 PR 做完就关单**：否（引擎合并后第 7 步自己关单）',
       '**对应计划**：P1「工作流」',
       '**specs**：specs/12-登录验证码/',
       '**档位**：（没写）',
@@ -133,6 +134,19 @@ describe('PR 正文模板', () => {
       '**档位**：（没写）',
     ]);
     expect(tail('P0「仓骨架」', null)[2]).toBe('**档位**：（没写）');
+  });
+
+  it('「这个 PR 做完就关单」一律写「否」（#241）：GitHub 替引擎关了单，接活当成叫停，第 7 步的关单评论和记账就做不完', () => {
+    const body = renderPrBody({
+      requirement: 12,
+      did: ['做完了 closes #12'],
+      verified: ['ok'],
+      plan: 'v1 Fusion 接活',
+      specs: 'specs/12-x/',
+      changedFiles: ['specs/12-x/结果.md'],
+    });
+    expect(body).toContain('**需求**：#12\n**这个 PR 做完就关单**：否（引擎合并后第 7 步自己关单）\n');
+    expect(hasCloseKeywords(body)).toBe(false);
   });
 
   it('条目里的关单词也改掉', () => {

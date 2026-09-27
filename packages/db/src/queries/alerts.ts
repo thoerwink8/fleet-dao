@@ -20,6 +20,12 @@ export interface AlertRow {
   resolvedBy: string | null;
 }
 
+/**
+ * GitHub 两个机器人的权限自检（引擎每小时对账，engine 的 jobs/github-app-check.ts）报的提醒都用这个前缀
+ * （github-app:<机器人>:<仓>）；开着就让驾驶舱后端的健康检查 github_app 那一项红，权限好了引擎下一轮自己撤、跟着回绿。
+ */
+export const GITHUB_APP_ALERT_PREFIX = 'github-app:';
+
 const columns = {
   id: notifications.id,
   dedupeKey: notifications.dedupeKey,

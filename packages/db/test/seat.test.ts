@@ -1,0 +1,268 @@
+// 帅位租约和认领的语句（#299，specs/299-帅位只一个/方案.md 第二节）：接班一条语句、任期只增不减；抢认领一条语句、只有一边拿到；
+// 心跳和过期用库的 now()。PGlite 只有一条连接，真并发在法国真库上演练（方案第八节）；这里按先后造两边抢。
+import { randomUUID } from 'node:crypto';
+import { and, eq, sql } from 'drizzle-orm';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import {
+  endClaimRow,
+  listClaimRows,
+  readClaim,
+  readDbNow,
+  readSeat,
+  readSeatSetting,
+  renewSeatRow,
+  stepClaimRow,
+  takeClaimRow,
+  takeSeatRow,
+  voidExpiredClaimRows,
+  writeHandoffRow,
+} from '../src/queries/seat.ts';
+import { issueClaims, seatLeases, settings } from '../src/schema/index.ts';
+import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
+import { addRepo, expectViolation } from './helpers.ts';
+
+let t: TestDb;
+beforeAll(async () => {
+  t = await createTestDb();
+}, TEST_DB_TIMEOUT_MS);
+afterAll(() => t.close());
+beforeEach(() => resetTestDb(t));
+
+/** 把一张单认领的心跳往前挪 minutes 分钟（造「很久没心跳」）。 */
+async function backdateHeartbeat(repoId: string, issueNumber: number, minutes: number) {
+  await t.db
+    .update(issueClaims)
+    .set({ heartbeatAt: sql`${issueClaims.heartbeatAt} - make_interval(mins => ${minutes})` })
+    .where(and(eq(issueClaims.repoId, repoId), eq(issueClaims.issueNumber, issueNumber)));
+}
+
+const worker = (
+  repoId: string,
+  issueNumber: number,
+  over: Partial<Parameters<typeof takeClaimRow>[1]> = {},
+) => ({
+  repoId,
+  issueNumber,
+  claimId: randomUUID(),
+  ownerKind: 'worker' as const,
+  ownerMachine: '本机',
+  ownerLabel: '工人甲',
+  seatScope: 'main',
+  seatTerm: 1,
+  state: 'claimed' as const,
+  workflowId: null,
+  graceMinutes: 120,
+  note: '开工',
+  ...over,
+});
+const engine = (repoId: string, issueNumber: number) =>
+  worker(repoId, issueNumber, {
+    ownerKind: 'engine',
+    ownerMachine: null,
+    ownerLabel: null,
+    seatScope: null,
+    seatTerm: null,
+    state: 'pending_start',
+    workflowId: `req:acme/x#${issueNumber}`,
+    note: null,
+  });
+
+describe('帅位：接班一条语句，任期只增不减', () => {
+  it('座位上没人：第 1 任；再接班：任期加一、上一任抄进 previous；时间是库的 now()', async () => {
+    const before = await readDbNow(t.db);
+    const first = await takeSeatRow(t.db, { scope: 'main', machine: '本机', session: 's1' });
+    expect(first.value).toMatchObject({
+      term: 1,
+      holderMachine: '本机',
+      holderSession: 's1',
+      previousMachine: null,
+    });
+    expect(first.value.renewedAt.getTime()).toBeGreaterThanOrEqual(before.getTime() - 1000);
+    const second = await takeSeatRow(t.db, { scope: 'main', machine: '笔记本', session: 's9' });
+    expect(second.value).toMatchObject({
+      term: 2,
+      holderMachine: '笔记本',
+      holderSession: 's9',
+      previousMachine: '本机',
+      previousSession: 's1',
+    });
+    // 同一台同一个会话再被说一次「你当帅位」：照样加一（后说的算，任期号一直往上加）
+    expect((await takeSeatRow(t.db, { scope: 'main', machine: '笔记本', session: 's9' })).value.term).toBe(3);
+  });
+
+  it('演练座位和真帅位互不影响', async () => {
+    await takeSeatRow(t.db, { scope: 'main', machine: '本机', session: 's1' });
+    await takeSeatRow(t.db, { scope: 'drill:299', machine: '演练甲', session: 'a1' });
+    await takeSeatRow(t.db, { scope: 'drill:299', machine: '演练乙', session: 'b1' });
+    expect((await readSeat(t.db, 'main')).value).toMatchObject({ term: 1, holderMachine: '本机' });
+    expect((await readSeat(t.db, 'drill:299')).value).toMatchObject({ term: 2, holderMachine: '演练乙' });
+  });
+
+  it('【故意造出的失败】带旧任期号、别的会话来续约：不续（回 null），座位不动', async () => {
+    await takeSeatRow(t.db, { scope: 'main', machine: '本机', session: 's1' });
+    await takeSeatRow(t.db, { scope: 'main', machine: '笔记本', session: 's9' });
+    expect(await renewSeatRow(t.db, { scope: 'main', term: 1, machine: '本机', session: 's1' })).toBeNull();
+    expect(await renewSeatRow(t.db, { scope: 'main', term: 2, machine: '本机', session: 's1' })).toBeNull();
+    const ok = await renewSeatRow(t.db, { scope: 'main', term: 2, machine: '笔记本', session: 's9' });
+    expect(ok?.value).toMatchObject({ term: 2, holderMachine: '笔记本' });
+  });
+
+  it('座位上没人：读回 null 和库的 now；锁着读要在事务里', async () => {
+    const r = await readSeat(t.db, 'main');
+    expect(r.value).toBeNull();
+    expect(r.now).toBeInstanceOf(Date);
+    await takeSeatRow(t.db, { scope: 'main', machine: '本机', session: 's1' });
+    const locked = await t.db.transaction(async (tx) => readSeat(tx, 'main', true));
+    expect(locked.value?.term).toBe(1);
+  });
+
+  it('交接说明整份换掉、带上写的时刻；座位的约束：scope 只认 main 和 drill:', async () => {
+    await takeSeatRow(t.db, { scope: 'main', machine: '本机', session: 's1' });
+    const row = await writeHandoffRow(t.db, { scope: 'main', text: '在做 #299' });
+    expect(row.handoff).toBe('在做 #299');
+    expect(row.handoffAt).toBeInstanceOf(Date);
+    await expectViolation(
+      takeSeatRow(t.db, { scope: 'prod', machine: '本机', session: 's1' }),
+      'seat_leases_scope_known',
+    );
+  });
+
+  it('租期、宽限期的配置：settings 表的 seat.leaseMinutes、seat.claimGraceMinutes，没写的不出现', async () => {
+    expect(await readSeatSetting(t.db)).toEqual({});
+    await t.db.insert(settings).values({ key: 'seat.leaseMinutes', value: 30 });
+    expect(await readSeatSetting(t.db)).toEqual({ leaseMinutes: 30 });
+    await t.db.insert(settings).values({ key: 'seat.claimGraceMinutes', value: 'x' });
+    expect(await readSeatSetting(t.db)).toEqual({ leaseMinutes: 30, claimGraceMinutes: 'x' });
+  });
+});
+
+describe('认领：每张单一行，一条语句抢，只有一边拿到', () => {
+  it('【故意造出的失败】引擎先拿了（待起），本机再抢：拿不到（回 null），行不动', async () => {
+    const repo = await addRepo(t.db);
+    const got = await takeClaimRow(t.db, engine(repo.id, 40));
+    expect(got?.value).toMatchObject({ ownerKind: 'engine', state: 'pending_start', prNumbers: [] });
+    expect(await takeClaimRow(t.db, worker(repo.id, 40))).toBeNull();
+    expect((await readClaim(t.db, repo.id, 40)).value).toMatchObject({
+      ownerKind: 'engine',
+      claimId: got?.value.claimId,
+    });
+  });
+
+  it('【故意造出的失败】本机先拿了，引擎再抢：拿不到', async () => {
+    const repo = await addRepo(t.db);
+    const got = await takeClaimRow(t.db, worker(repo.id, 41));
+    expect(await takeClaimRow(t.db, engine(repo.id, 41))).toBeNull();
+    expect((await readClaim(t.db, repo.id, 41)).value?.claimId).toBe(got?.value.claimId);
+  });
+
+  it('结束了的（做完、放下、作废）：下一次认领整行换成新的认领号，心跳、PR 清掉', async () => {
+    const repo = await addRepo(t.db);
+    const first = await takeClaimRow(t.db, worker(repo.id, 42));
+    if (!first) throw new Error('没拿到');
+    await stepClaimRow(t.db, { repoId: repo.id, issueNumber: 42, claimId: first.value.claimId, pr: 7 });
+    await endClaimRow(t.db, {
+      repoId: repo.id,
+      issueNumber: 42,
+      claimId: first.value.claimId,
+      state: 'released',
+      reason: '不做了',
+    });
+    const second = await takeClaimRow(t.db, worker(repo.id, 42, { ownerLabel: '工人乙' }));
+    expect(second?.value).toMatchObject({
+      ownerLabel: '工人乙',
+      state: 'claimed',
+      prNumbers: [],
+      endedAt: null,
+      endReason: null,
+    });
+    expect(second?.value.claimId).not.toBe(first.value.claimId);
+  });
+
+  it('报一步：认领号对得上才写，刚认领的到「在做」；带 PR 的记进 pr_numbers（不重复）、到「开了 PR」', async () => {
+    const repo = await addRepo(t.db);
+    const got = await takeClaimRow(t.db, worker(repo.id, 43));
+    if (!got) throw new Error('没拿到');
+    const claimId = got.value.claimId;
+    expect(
+      await stepClaimRow(t.db, { repoId: repo.id, issueNumber: 43, claimId: randomUUID(), note: 'x' }),
+    ).toBeNull();
+    const step = await stepClaimRow(t.db, { repoId: repo.id, issueNumber: 43, claimId, note: '在写测试' });
+    expect(step?.value).toMatchObject({ state: 'doing', note: '在写测试' });
+    await stepClaimRow(t.db, { repoId: repo.id, issueNumber: 43, claimId, pr: 306 });
+    const again = await stepClaimRow(t.db, { repoId: repo.id, issueNumber: 43, claimId, pr: 306 });
+    await stepClaimRow(t.db, { repoId: repo.id, issueNumber: 43, claimId, pr: 311 });
+    expect(again?.value).toMatchObject({ state: 'pr_open', prNumbers: [306], note: '在写测试' });
+    expect((await readClaim(t.db, repo.id, 43)).value?.prNumbers).toEqual([306, 311]);
+  });
+
+  it('【故意造出的失败】结束了的认领再报一步、再结束：都回 null（旧工人拿着旧认领号来，写不进去）', async () => {
+    const repo = await addRepo(t.db);
+    const got = await takeClaimRow(t.db, worker(repo.id, 44));
+    if (!got) throw new Error('没拿到');
+    const key = { repoId: repo.id, issueNumber: 44, claimId: got.value.claimId };
+    expect(await endClaimRow(t.db, { ...key, state: 'done', reason: 'PR 合了' })).not.toBeNull();
+    expect(await stepClaimRow(t.db, { ...key, note: '我回来了' })).toBeNull();
+    expect(await endClaimRow(t.db, { ...key, state: 'released', reason: '再放一次' })).toBeNull();
+  });
+
+  it('【故意造出的失败】过了宽限期没心跳的本机认领作废，写明原因；引擎的、还在宽限期里的不动', async () => {
+    const repo = await addRepo(t.db);
+    await takeClaimRow(t.db, worker(repo.id, 45));
+    await takeClaimRow(t.db, worker(repo.id, 46, { graceMinutes: 2 }));
+    await takeClaimRow(t.db, engine(repo.id, 47));
+    await backdateHeartbeat(repo.id, 45, 119);
+    await backdateHeartbeat(repo.id, 46, 3);
+    await backdateHeartbeat(repo.id, 47, 600);
+    const swept = await voidExpiredClaimRows(t.db, { limit: 50 });
+    expect(swept.value.map((c) => [c.issueNumber, c.state, c.endReason])).toEqual([
+      [46, 'voided', '过了宽限期（2 分钟）没心跳'],
+    ]);
+    expect((await voidExpiredClaimRows(t.db, { limit: 50 })).value).toEqual([]);
+    const active = await listClaimRows(t.db, { repoId: repo.id, activeOnly: true });
+    expect(active.value.map((c) => c.issueNumber)).toEqual([45, 47]);
+    expect((await listClaimRows(t.db, { activeOnly: false })).value).toHaveLength(3);
+  });
+
+  it('库里的约束兜底：待起只有引擎有；引擎要有工作流编号、不带机器；本机要有机器和工人名；作废、放下要写原因', async () => {
+    const repo = await addRepo(t.db);
+    await expectViolation(
+      takeClaimRow(t.db, worker(repo.id, 50, { state: 'pending_start' })),
+      'issue_claims_pending_engine_only',
+    );
+    await expectViolation(
+      takeClaimRow(t.db, { ...engine(repo.id, 51), workflowId: null }),
+      'issue_claims_owner_shape',
+    );
+    await expectViolation(
+      takeClaimRow(t.db, worker(repo.id, 52, { ownerLabel: null })),
+      'issue_claims_owner_shape',
+    );
+    await expectViolation(
+      takeClaimRow(t.db, worker(repo.id, 53, { seatTerm: null })),
+      'issue_claims_seat_shape',
+    );
+    const got = await takeClaimRow(t.db, worker(repo.id, 54));
+    if (!got) throw new Error('没拿到');
+    await expectViolation(
+      endClaimRow(t.db, {
+        repoId: repo.id,
+        issueNumber: 54,
+        claimId: got.value.claimId,
+        state: 'voided',
+        reason: '',
+      }),
+      'issue_claims_end_reason',
+    );
+    await expectViolation(
+      t.db.insert(seatLeases).values({
+        scope: 'main',
+        term: 0,
+        holderMachine: '本机',
+        holderSession: 's1',
+        acquiredAt: sql`now()`,
+        renewedAt: sql`now()`,
+      }),
+      'seat_leases_term_positive',
+    );
+  });
+});

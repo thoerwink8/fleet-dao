@@ -7,6 +7,8 @@
 // Claude 订阅池只派会话用户此刻真挂着的那个组织的（real/session-org.ts 现读 reclaude org list，不假定）；读不到、认不出，
 // 带组织类型的池一律不派、写明原因，别的池照常派；还没读完（reclaude 首跑同步配置）就过一会儿再选。
 // 失败一律明确：库没查成照常抛，事实对不上（RoutingInputError）抛 ROUTING_INPUT，不当成「没有路由」。
+// 全熔断判不判得了另有 stageAllOpen：和选路同一份事实、同一套熔断判定，不写库、不报警（每小时对账用来撤
+// routing:all-open）。组织还没读完、库读失败照抛，不返回「解了」。
 
 import type { TaskAsk } from '@fleet-dao/core';
 import {
@@ -32,10 +34,12 @@ import type { HostId, OrgKind, StageKind } from '@fleet-dao/shared';
 import { routeBreaker } from '../failure/breaker.ts';
 import { type EnginePorts, type PickRouteResult, PortError, type RouteChoice } from '../ports.ts';
 import {
+  type AllOpenCheck,
   type BreakerFacts,
   type ChooseRouteInput,
   type ChooseRouteResult,
   chooseRoute,
+  stageAllOpen as judgeStageAllOpen,
   type RouteFacts,
   type RouteRecord,
   RoutingInputError,
@@ -99,7 +103,13 @@ type StorePorts = Pick<
   | 'recordVerification'
   | 'flowConfig'
   | 'taskRequest'
->;
+> & {
+  /**
+   * 这个阶段现在是不是全熔断。和 pickRoute 同一个 loadStage、同一套熔断判定；暂停的账号池同样避开。
+   * 不带某一步的模型过滤（提醒是整个阶段的），不调 allOpenAlarm、不写任何表。读不了就抛。
+   */
+  stageAllOpen(stage: StageKind): Promise<AllOpenCheck>;
+};
 
 /** 库里的一条提问 → core 的 TaskAsk（存档点、PR 正文、关单记数、对账开单都按它判）：空的列不给，不拿空串、0 顶。 */
 export function toTaskAsk(r: TaskAskRow): TaskAsk {
@@ -185,6 +195,17 @@ function choose(input: ChooseRouteInput): ChooseRouteResult {
   } catch (error) {
     if (error instanceof RoutingInputError) {
       throw new PortError('ROUTING_INPUT', `选路没查成：${error.message}`, { retryable: true });
+    }
+    throw error;
+  }
+}
+
+function judgeAllOpen(input: ChooseRouteInput): AllOpenCheck {
+  try {
+    return judgeStageAllOpen(input);
+  } catch (error) {
+    if (error instanceof RoutingInputError) {
+      throw new PortError('ROUTING_INPUT', `全熔断判不了：${error.message}`, { retryable: true });
     }
     throw error;
   }
@@ -415,6 +436,38 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
       if (r.kind === 'dispatch') return dispatched(r, [r.why, ...notes].join('；'));
       if (r.kind === 'wait') return waiting(r, context);
       return { ok: false, waitFor: 'none', detail: [...noOther, r.reason, ...context].join('；') };
+    },
+
+    async stageAllOpen(stage) {
+      const now = clock();
+      const facts = await loadStage(stage, now);
+      const held = await heldPools();
+      // 和选路一样：候选里有带组织类型的池才读。还没读完不是「解了」，抛出去让对账记没查成。
+      const live = facts.routes.some((r) => r.orgKind)
+        ? await deps.sessionOrg({ waitMs: deps.orgReadWaitMs ?? ORG_READ_WAIT_MS })
+        : null;
+      if (live && !live.ok && live.pending) {
+        throw new PortError(
+          'ORG_UNREAD',
+          `会话用户挂的组织还没读出来，判不了${STAGE_NAMES[stage]}阶段是不是全熔断：${live.why}`,
+          { retryable: true },
+        );
+      }
+      if (live && !live.ok) log('会话用户挂的组织认不出，Claude 订阅池按认不出挡', { why: live.why });
+      return judgeAllOpen({
+        stage,
+        configured: facts.configured,
+        stagePinned: facts.stagePinned,
+        order: facts.order,
+        routes: facts.routes,
+        now: now.toISOString(),
+        // 试探开着时校验要一个随机数；这个判断不用它（不抽签）。
+        draw: 0,
+        avoid: { poolIds: [...held] },
+        ...(live?.ok ? { liveOrg: live.org } : {}),
+        ...(live && !live.ok ? { liveOrgProblem: live.why } : {}),
+        ...(deps.routingPolicy ? { policy: deps.routingPolicy } : {}),
+      });
     },
 
     async authorFamilies(input) {

@@ -484,4 +484,20 @@ describe('对账与补漏', () => {
     const [, engine] = await gh.selfCheck([repo]);
     expect(engine).toMatchObject({ ok: false, why: expect.stringContaining('没装到') });
   });
+
+  it('【故意造出的失败】「引擎」只有 statuses:read（App 设置里改了、安装处没点接受）：自检报缺 statuses:write——贴不了「认领对得上」（#299）', async () => {
+    const { gh, fake } = setup();
+    fake.permissions.engine = { ...fake.permissions.engine, statuses: 'read' };
+    const [, engine] = await gh.selfCheck([repo]);
+    expect(engine).toEqual({
+      role: 'engine',
+      repo: 'acme/widgets',
+      ok: false,
+      missing: ['statuses:write'],
+      extra: [],
+    });
+    const { statuses: _gone, ...without } = fake.permissions.engine;
+    fake.permissions.engine = without;
+    expect((await gh.selfCheck([repo]))[1]).toMatchObject({ ok: false, missing: ['statuses:write'] });
+  });
 });

@@ -125,6 +125,7 @@ export class FakeGitHub {
       administration: 'write',
       checks: 'read',
       actions: 'read',
+      statuses: 'write',
       metadata: 'read',
     },
   };

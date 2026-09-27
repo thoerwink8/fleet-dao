@@ -62,6 +62,7 @@ describe('健康检查', () => {
       deployLag: { check: async () => {} },
       feishuGateway: { check: async () => {} },
       sessionOrg: async () => {},
+      githubApp: async () => {},
       canary: { check: async () => {} },
     });
 
@@ -154,6 +155,8 @@ describe('健康检查', () => {
     expect(listed).toContain('session_org');
     // 全流程巡检断了、没跑成跟着巡检的结论自己变红（6 小时一轮）；少了它，发版会被它退回
     expect(listed).toContain('canary');
+    // 机器人权限被人改了、新权限没点接受跟着 GitHub 那边自己变红（引擎每小时自检一次）；少了它，发版会被它退回
+    expect(listed).toContain('github_app');
     const names = serviceHealthChecks({
       probeDb: async () => {},
       feed: { probe: async () => {} },
@@ -165,6 +168,7 @@ describe('健康检查', () => {
       deployLag: { check: async () => {} },
       feishuGateway: { check: async () => {} },
       sessionOrg: async () => {},
+      githubApp: async () => {},
       canary: { check: async () => {} },
     }).map((c) => c.name);
     for (const name of listed) expect(names, name).toContain(name);

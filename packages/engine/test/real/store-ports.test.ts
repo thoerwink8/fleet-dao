@@ -255,6 +255,101 @@ describe('选路', () => {
   });
 });
 
+describe('全熔断只读判定（stageAllOpen）：不写库、不报警', () => {
+  /** 这条路由连着失败三次。最近一次距现在 lastEndedMinutesAgo 分钟：1 = 还在冷却里，40 = 冷却过了（半开）。 */
+  async function tripBreaker(routeId: string, taskId: string, lastEndedMinutesAgo: number) {
+    for (let i = 0; i < 3; i++) {
+      const id = randomUUID();
+      const ended = new Date(NOW.getTime() - (lastEndedMinutesAgo + (2 - i)) * MIN);
+      await openSessionRun(t.db, {
+        id,
+        taskId,
+        subtaskId: null,
+        stage: 'execute',
+        routeId,
+        whyRoute: 'x',
+        branch: null,
+        queuedAt: new Date(ended.getTime() - 2 * MIN),
+        workflowId: null,
+        runAsUser: 'fleet-agent-carpool',
+        worktreePath: null,
+      });
+      await markSessionRunStarted(t.db, {
+        id,
+        startedAt: new Date(ended.getTime() - MIN),
+        sessionId: randomUUID(),
+        handle: null,
+      });
+      await finishSessionRun(t.db, { id, outcome: 'failed', endedAt: ended, routeOutcome: 'fail' });
+    }
+  }
+
+  it('两条都熔断：判全熔断；提醒既不新建，已有那条的 updated_at、正文、resolved_at 也不变（判一次不刷新、不重开）', async () => {
+    await world(t.db);
+    const { task } = await addTask(t.db);
+    await tripBreaker('solo', task.id, 1);
+    await tripBreaker('carpool', task.id, 1);
+    const p = ports();
+    expect(await p.stageAllOpen('execute')).toEqual({ allOpen: true });
+    expect(await t.db.select().from(notifications)).toEqual([]);
+
+    await upsertAlert(t.db, {
+      dedupeKey: 'routing:all-open:execute',
+      level: 'alert',
+      taskId: null,
+      title: '「execute」阶段的路由全都熔断了',
+      body: '原来的正文',
+    });
+    const before = await t.db.select().from(notifications);
+    expect(before).toHaveLength(1);
+    expect(await p.stageAllOpen('execute')).toEqual({ allOpen: true });
+    expect(await t.db.select().from(notifications)).toEqual(before);
+
+    await t.client.query(
+      `update notifications set resolved_at = $1::timestamptz, resolved_by = 'founder-a' where dedupe_key = 'routing:all-open:execute'`,
+      [NOW.toISOString()],
+    );
+    const resolved = await t.db.select().from(notifications);
+    expect(resolved[0]?.resolvedAt).not.toBeNull();
+    expect(await p.stageAllOpen('execute')).toEqual({ allOpen: true });
+    expect(await t.db.select().from(notifications)).toEqual(resolved);
+  });
+
+  it('其中一条过了冷却（半开、能放试探）：不是全熔断', async () => {
+    await world(t.db);
+    const { task } = await addTask(t.db);
+    await tripBreaker('solo', task.id, 1);
+    await tripBreaker('carpool', task.id, 40);
+    const check = await ports().stageAllOpen('execute');
+    expect(check.allOpen).toBe(false);
+    if (!check.allOpen) {
+      expect(check.detail).toContain('第 2 条');
+      expect(check.detail).toContain('Claude 订阅 · 拼车');
+    }
+  });
+
+  it('【故意造出的失败】库读失败：抛错，不返回 false', async () => {
+    const broken = await createTestDb();
+    await broken.close();
+    const p = createStorePorts({
+      db: broken.db,
+      now: () => NOW,
+      log: () => {},
+      sessionOrg: onCarpool,
+    });
+    await expect(p.stageAllOpen('execute')).rejects.toThrow();
+  });
+
+  it('【故意造出的失败】组织还没读完：抛错，不返回 false', async () => {
+    await world(t.db);
+    const pending: SessionOrgReader = async () => ({ ok: false, why: '还在同步配置', pending: true });
+    await expect(ports(pending).stageAllOpen('execute')).rejects.toMatchObject({
+      name: 'PortError',
+      code: 'ORG_UNREAD',
+    });
+  });
+});
+
 describe('会话用户挂的组织：选路前现读（以会话用户跑 reclaude org list，不假定挂拼车）', () => {
   let rig: OrgListRig;
   beforeEach(async () => {

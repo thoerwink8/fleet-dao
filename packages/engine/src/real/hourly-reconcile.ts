@@ -1,7 +1,8 @@
 // 每小时对账的真装配：工作树按目录真列（根和仓这两级归 root、755，引擎自己读得了）、属主和删经 fleet-agent-scope
 // （real/worktrees.ts）、树里还剩什么以会话用户的身份看（real/user-git.ts 的 treeLeftovers：仓里跑 git，不是仓的用 find
 // 一层层列）；需求、子任务、PR 头、批准从库里读；工作流在不在跑、挂没挂着问这次活动的 Temporal 客户端；这个阶段派不派得
-// 出去问选路（store-ports 的 pickRoute：和任务挂起时用的同一套）；提醒的读写、操作记录、结局记账是同一个库。
+// 出去问选路（store-ports 的 pickRoute：和任务挂起时用的同一套）；GitHub 两个机器人的权限自检问 @fleet-dao/github 的
+// selfCheck（受管的仓从库里的 repos 表列）；提醒的读写、操作记录、结局记账是同一个库。
 import { readdir } from 'node:fs/promises';
 import {
   alertByKey,
@@ -11,6 +12,7 @@ import {
   insertAlertOnce,
   issueWorkFacts,
   latestAlertByPrefix,
+  listFlowReplicas,
   listOpenAlerts,
   openSessionTrees,
   prHeadsOfBranch,
@@ -24,6 +26,7 @@ import {
 } from '@fleet-dao/db';
 import { requirementWorkflowId, subtaskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { type Client, WorkflowNotFoundError } from '@temporalio/client';
+import type { GitHubAppCheckDeps } from '../jobs/github-app-check.ts';
 import type { HourlyReconcileJobDeps } from '../jobs/hourly-reconcile.ts';
 import type { WorkflowReader, WorkflowView } from '../jobs/reconcile-common.ts';
 import type { PortContext } from '../ports.ts';
@@ -104,6 +107,8 @@ export interface HourlyReconcileWiring {
   sessionOrg: SessionOrgReader;
   /** 这台机器给人看的名字（FLEET_MACHINE_NAME）。 */
   machine: string;
+  /** GitHub 两个机器人在这些仓上的权限够不够（生产是 createGitHub 的 selfCheck）。 */
+  selfCheck: GitHubAppCheckDeps['apps']['selfCheck'];
   now?: () => Date;
   log?: HourlyReconcileJobDeps['log'];
   /** 以下测试用。 */
@@ -111,6 +116,8 @@ export interface HourlyReconcileWiring {
   shBin?: string;
   listDir?: HourlyReconcileJobDeps['listDir'];
   stageRoutable?: HourlyReconcileJobDeps['stageRoutable'];
+  /** 测试用：不给就用选路同一份事实的只读判法（store.stageAllOpen）。 */
+  stageAllOpen?: HourlyReconcileJobDeps['stageAllOpen'];
   workflows?: WorkflowReader;
   inspectMax?: number;
 }
@@ -123,8 +130,8 @@ export function hourlyReconcileJob(
   const log: HourlyReconcileJobDeps['log'] =
     w.log ?? ((level, text, fields) => console[level === 'info' ? 'info' : level](text, fields ?? {}));
   const store = createStorePorts({ db: w.db, now, sessionOrg: w.sessionOrg });
-  // 和点「继续」以后选路会怎么选是同一套：全熔断时它放一条去试探，也算派得出去——它这时还会顺手把「全熔断」那条提醒
-  // 再报一次（条件确实还在）；要一个不写库的判法见 #246。
+  // 和点「继续」以后选路会怎么选是同一套：全熔断时它放一条去试探，也算派得出去。这时它还会顺手把「全熔断」那条提醒
+  // 再报一次（条件确实还在）。这条提醒撤不撤不在这里判，走下面的 stageAllOpen（只读，不写库、不报警）。
   const stageRoutable: HourlyReconcileJobDeps['stageRoutable'] =
     w.stageRoutable ??
     (async (stage, taskId) => {
@@ -135,6 +142,8 @@ export function hourlyReconcileJob(
       if (r.ok) return { kind: 'dispatch' };
       return r.waitFor === 'none' ? { kind: 'none', detail: r.detail } : { kind: 'wait', detail: r.detail };
     });
+  const stageAllOpen: HourlyReconcileJobDeps['stageAllOpen'] =
+    w.stageAllOpen ?? ((stage) => store.stageAllOpen(stage));
   return (client) => ({
     root: w.trees.root,
     probeDir: PROBE_DIR,
@@ -175,6 +184,7 @@ export function hourlyReconcileJob(
     },
     workflows: w.workflows ?? temporalWorkflows(client),
     stageRoutable,
+    stageAllOpen,
     alerts: {
       listOpen: (limit) => listOpenAlerts(w.db, { limit }),
       byKey: (key) => alertByKey(w.db, key),
@@ -199,6 +209,10 @@ export function hourlyReconcileJob(
       },
       insertOnce: (x) => insertAlertOnce(w.db, x),
       updateOpen: (x) => updateOpenAlert(w.db, { ...x, at: now() }),
+    },
+    apps: {
+      repos: async () => (await listFlowReplicas(w.db)).map((r) => ({ owner: r.owner, name: r.name })),
+      selfCheck: (repos) => w.selfCheck(repos),
     },
     runs: {
       start: (job, at) => startScheduleRun(w.db, job, at),

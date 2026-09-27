@@ -245,6 +245,13 @@ export type ChooseRouteResult =
       verdicts: RouteVerdict[];
     };
 
+/**
+ * 这个阶段现在是不是「候选全都熔断」（chooseRoute 走出 trial 'all-open' 的同一条件：没有能派的，
+ * 活着的候选至少两条，且全都只被熔断挡着）。false 时 detail 写现在为什么不是。
+ * 给每小时对账撤 routing:all-open 用：只算、不派。
+ */
+export type AllOpenCheck = { allOpen: true } | { allOpen: false; detail: string };
+
 /** 输入认不出（时刻、随机数、重复的路由、缺事实、认不出的被挡原因、策略越界）。调用方按「选路没查成」处理。 */
 export class RoutingInputError extends Error {
   constructor(message: string) {

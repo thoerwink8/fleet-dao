@@ -72,6 +72,7 @@ function harness(over: Partial<HourlyReconcileJobDeps> = {}): Harness {
       insertOnce: async () => ({ created: true }),
       updateOpen: async () => 'not_open',
     },
+    apps: { repos: async () => [], selfCheck: async () => [] },
     runs: {
       async start() {
         return 7;
@@ -138,7 +139,7 @@ describe('几部分的结局并成这一轮的（combineParts）', () => {
   it('什么都没看到、也没出错：unscanned（没扫到 ≠ 没问题），不记 ok', () => {
     expect(combineParts([part(), part()])).toEqual({
       outcome: 'unscanned',
-      why: '工作树的根下什么都没有，也没有没处理的提醒',
+      why: '工作树的根下什么都没有，没有没处理的提醒，也没有受管的仓',
     });
   });
 
@@ -247,6 +248,42 @@ describe('一轮（runHourlyReconcileJob，不起 Temporal）', () => {
     expect(h.logs.some((l) => l.startsWith('warn:每小时对账：列没处理的提醒没成'))).toBe(true);
   });
 
+  it('GitHub 机器人权限自检是这一轮的第三项：缺权限的报提醒、算发现一个；自检没跑成记 partial，不记 ok', async () => {
+    const raised: string[] = [];
+    const widgets = { owner: 'acme', name: 'widgets' };
+    const h = harness({
+      alerts: {
+        ...harness().deps.alerts,
+        raise: async (input) => {
+          raised.push(input.dedupeKey);
+        },
+      },
+      apps: {
+        repos: async () => [widgets],
+        selfCheck: async () => [
+          { role: 'agent', repo: 'acme/widgets', ok: true, missing: [], extra: [] },
+          { role: 'engine', repo: 'acme/widgets', ok: false, missing: ['statuses:write'], extra: [] },
+        ],
+      },
+    });
+    // 探针目录 1 个 + 两个机器人 2 个
+    expect(await runHourlyReconcileJob(h.deps)).toEqual({ runId: 7, outcome: 'ok', scanned: 3, found: 1 });
+    expect(raised).toEqual(['github-app:engine:acme/widgets']);
+
+    const broken = harness({
+      apps: {
+        repos: async () => [widgets],
+        selfCheck: async () => {
+          throw new Error('引擎的 App 私钥读不到');
+        },
+      },
+    });
+    expect(await runHourlyReconcileJob(broken.deps)).toMatchObject({
+      outcome: 'partial',
+      why: 'GitHub 机器人权限自检没跑成：引擎的 App 私钥读不到',
+    });
+  });
+
   it('一轮当中出了没料到的错（列出来的不是列表）：记 failed 写明原因再抛，不记成 ok', async () => {
     const h = harness({ listDir: async () => null as never });
     await expect(runHourlyReconcileJob(h.deps)).rejects.toThrow('每小时对账没跑成');
@@ -348,7 +385,7 @@ describe('每小时对账的工作流（真 Temporal 测试服务端）', { time
   it('登记的名字、频率：每小时对账、连着两轮没跑成才算过期', () => {
     expect(HOURLY_RECONCILE_JOB).toMatchObject({
       id: 'hourly-reconcile',
-      name: '每小时对账（工作树、提醒）',
+      name: '每小时对账（工作树、提醒、GitHub 机器人权限）',
       expectEveryMinutes: 150,
     });
   });
