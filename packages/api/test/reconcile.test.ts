@@ -4,6 +4,7 @@ import { generateKeyPairSync } from 'node:crypto';
 import { type AppCredentials, createGitHub, memoryLedger } from '@fleet-dao/github';
 import { requirementWorkflowId } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
+import type { ClaimSweepReport } from '../src/claim-status.ts';
 import { devFixtures, IDS } from '../src/dev-fixtures.ts';
 import { createGitHubIntake, githubEventsCheck, pollDeliveryId } from '../src/github.ts';
 import { createIssueIntake } from '../src/issue-intake.ts';
@@ -180,20 +181,34 @@ function setup(state: GitHubState, data: Partial<MemoryData> = devFixtures(T0)) 
       return r !== undefined && (await h.store.findTaskByIssue(r.id, n)) !== null;
     },
   });
+  // 「认领对得上」那一步（#348）换成假的：它自己的判法、GitHub 读写在 claim-status.test.ts 里测
+  const claimStatus = { sweep: async (): Promise<ClaimSweepReport> => emptySweep() };
   const run = () =>
     reconcileGitHub(
       {
         store: h.store,
         intake,
         claims: createIssueIntake(h.deps),
+        claimStatus,
         reconciler,
         log: h.deps.log,
         now: () => T0,
       },
       { since: SINCE },
     );
-  return { h, run, api };
+  return { h, run, api, claimStatus };
 }
+
+const emptySweep = (): ClaimSweepReport => ({
+  voided: [],
+  reposScanned: 1,
+  reposTotal: 1,
+  checked: 0,
+  posted: 0,
+  disabled: [],
+  commented: 0,
+  problems: [],
+});
 
 describe('对账补漏', () => {
   it('对账补回一条漏的：webhook 漏掉的 issue 由轮询送进门，建任务、拉起工作流；webhook 收过的同一版认得出，不重做', async () => {
@@ -630,5 +645,35 @@ describe('对账补漏', () => {
     });
     expect(h.starts.map((s) => s.issueNumber)).toEqual([47]);
     expect(h.store.data.claims.find((c) => c.issueNumber === 47)?.state).toBe('doing');
+  });
+
+  it('【故意造出的失败】「认领对得上」（#348）：有没处理成的算 partial、写明哪几处；整步抛错算 failed，不当成这一轮查全了', async () => {
+    const { run, claimStatus } = setup({ repos: { [SLUG]: empty() } });
+    claimStatus.sweep = async () => ({
+      ...emptySweep(),
+      checked: 2,
+      posted: 1,
+      disabled: [`${SLUG}#7`],
+      problems: [`${SLUG}#8：GitHub 回 502`],
+    });
+    const some = await run();
+    expect(some).toMatchObject({ outcome: 'partial', scanned: 1 });
+    expect(some.steps.find((s) => s.step === 'claim-status')).toMatchObject({
+      outcome: 'partial',
+      checked: 2,
+      recovered: 1,
+      why: expect.stringContaining(
+        `撤了自动合并：${SLUG}#7；「认领对得上」有 1 处没处理成：${SLUG}#8：GitHub 回 502`,
+      ),
+    });
+    claimStatus.sweep = async () => {
+      throw new Error('库连不上');
+    };
+    const broken = await run();
+    expect(broken.outcome).toBe('partial');
+    expect(broken.steps.find((s) => s.step === 'claim-status')).toMatchObject({
+      outcome: 'failed',
+      why: '「认领对得上」这一轮没跑成：库连不上',
+    });
   });
 });
