@@ -69,26 +69,67 @@ export const FRANCE_USABLE_MB = 11 * 1024;
 /** 平台常驻的四个服务合计（MiB，2026-09-26 实测）：引擎 0.27G、后端 0.09G、Temporal 0.12G、库 0.13G。 */
 export const FRANCE_RESIDENT_MB = 600;
 /**
- * 同一时刻最多几个会话在跑测试（内存的大头）：Fusion 的估算是法国同时约 3 张单，每张同一时间只一个模型写代码、跑测试
- * （docs/decisions/0002-fusion.md「容量」；design 第四节的「同时跑测试 2–3 份」）。在线的会话可以更多（不跑测试时一个约
- * 0.3G），但现在没有东西限着「同时跑测试的不超过 3 个」：真撞上了，每个会话照样被自己的硬上限封住，整机却可能不够——
- * 账号池的并发（目录配置里的 maxConcurrency）加起来比 3 大时要一起看（specs/164-会话内存与交活测试/方案.md「还没做的」）。
+ * 同一时刻大致有几个会话在跑测试（内存的大头）：Fusion 的估算是法国同时约 3 张单，每张同一时间只一个模型写代码、跑测试
+ * （docs/decisions/0002-fusion.md「容量」；design 第四节的「同时跑测试 2–3 份」）。只是容量规划的参考数，不再拿它去除
+ * 单会话的内存上限（见 SESSION_MEMORY_MAX_MB 的推导）：总量不超的安全垫现在挪到父节点 fleet-agents.slice 这一层
+ * （见 SLICE_MEMORY_MAX_MB），多个会话同时冲高由它兜住，不指望单会话早早卡死自己。
  */
 export const CONCURRENT_SESSIONS = 3;
+
 /**
- * 会话（连同它跑的测试）的内存硬上限 =（能分的 - 常驻）÷ 同时跑测试的会话数 = (11264 - 600) ÷ 3 ≈ 3554 MiB。
- * 原来的 2G（照旧仓估的）连 1 个测试进程加 Claude Code 都放不下：法国实测 fleet-dao 的测试开 1、2、3 个进程峰值约
- * 1.6、2.5、3.2G，会话里的 Claude Code 约 0.27G（specs/164-会话内存与交活测试/）。
+ * fleet-agents.slice（所有会话共用的父节点）的内存总上限 = 能分给会话的 - 平台常驻服务 = 11264 - 600 = 10664 MiB。
+ * cgroup v2 的常见做法是把「总量」管在父节点，子节点（各会话的 scope）只管自己那份、彼此间允许借用空闲内存
+ * （kernel 文档 memory.high / memory.max 一节：https://docs.kernel.org/admin-guide/cgroup-v2.html；k8s 的
+ * requests/limits 同理）：多个会话同时冲高时，内核按这道父节点总闸压着回收，不会有单个会话在整机明明有空闲内存时
+ * 先被自己那道窄墙卡死——法国 2026-09-28 06:35–06:45 实测：某次审查会话（cursor-agent）在自己的 scope 里同时跑
+ * `pnpm test:changed` 和 `pnpm exec tsc -b`：tsc 一个进程约 1.9G、vitest 几个 worker、cursor-agent 本身合计约
+ * 3.5G，超过旧的单会话软上限 3298M，内核压着这个 cgroup 回收，进程卡在 D 状态（wchan mem_cgroup_handle_over_high）、
+ * 1 分钟负载 12，但 vmstat 看 CPU 七到九成空闲、整机 MemAvailable 还有 6.8G——和 #160 同一个坑，第二次踩。
+ * 这份总上限装进 `deploy/france/fleet-agents.slice` 的单元文件；两处数值要对得上，`packages/engine/test/slice-unit.test.ts`
+ * 核对，免得改一边忘了改另一边。
  */
-export const SESSION_MEMORY_MAX_MB = Math.floor(
-  (FRANCE_USABLE_MB - FRANCE_RESIDENT_MB) / CONCURRENT_SESSIONS,
-);
+export const SLICE_MEMORY_MAX_MB = FRANCE_USABLE_MB - FRANCE_RESIDENT_MB;
+/** 父节点的软上限比总上限低 512 MiB（比单会话那道 256 的夹缝宽一倍：这里要扛的是好几个会话一起冲高，留多一点余量）。 */
+export const SLICE_MEMORY_HIGH_MB = SLICE_MEMORY_MAX_MB - 512;
+
+/**
+ * 单会话（连同它跑的测试）的内存硬上限：不再按「总量 ÷ 同时几个会话」严格三等分——旧算法把安全垫做在单会话这一层，
+ * 三等分出来的 3554M 连「tsc -b 全仓 + 跑测试 + 代理本身」这一种会话内部就可能撞见的组合都放不下
+ * （见 SLICE_MEMORY_MAX_MB 注释里的实测事故）。新算法把「总量不超」的安全垫交给父节点，单会话放宽成「一次放得下最坏
+ * 情形」：tsc -b 全仓约 1.9G + 测试 2–3 个进程约 2.5–3.2G + 代理本身约 0.3–1G，取整到 6144（6 GiB）——约等于能分给
+ * 会话的总量的一半，比旧值（三分之一）宽松得多，同时仍明显小于父节点的总上限（assertSessionFitsSlice 在模块加载时
+ * 就校验这一点），多个会话同时顶到硬上限时由父节点的 MemoryHigh/MemoryMax 兜住。
+ */
+export const SESSION_MEMORY_MAX_MB = 6144;
 /**
  * 软上限只比硬上限低 256 MiB：超了软上限、又没 swap 可换，内核就压着这个会话回收，半死不活（#160 在软 1.5G、硬 2G 之间
- * 一动不动十几分钟）；夹缝留窄，真超了就撞硬上限被明确杀掉。测试开几个进程按它算（packages/conventions/src/test-run.ts：
- * 3298 放得下 2 个）。
+ * 一动不动十几分钟）；夹缝留窄，真超了就撞硬上限被明确杀掉。测试开几个进程按它算（packages/conventions/src/test-run.ts
+ * 的 workersThatFit：新软上限放得下 5 个）。
  */
 export const SESSION_MEMORY_HIGH_MB = SESSION_MEMORY_MAX_MB - 256;
+
+export class LimitsConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'LimitsConfigError';
+  }
+}
+
+/**
+ * 单会话的硬上限不能比父节点 fleet-agents.slice 的总上限还大：那样父节点这道总闸根本兜不住单个会话，形同没设。
+ * 【故意造出的失败】常量改坏了（比如手改时把单会话上限抬到超过父节点）要在这里明确报错，不能悄悄放过去、等内核事后杀掉。
+ */
+export function assertSessionFitsSlice(sessionMaxMb: number, sliceMaxMb: number): void {
+  if (sessionMaxMb > sliceMaxMb) {
+    throw new LimitsConfigError(
+      `单会话内存硬上限 ${sessionMaxMb}M 比父节点 fleet-agents.slice 的总上限 ${sliceMaxMb}M 还大，父节点兜不住：` +
+        '改 SESSION_MEMORY_MAX_MB 或 SLICE_MEMORY_MAX_MB（packages/engine/src/limits.ts）',
+    );
+  }
+}
+
+// 模块加载时就校验一次：常量改坏了要立刻炸，不等到部署到法国才发现。
+assertSessionFitsSlice(SESSION_MEMORY_MAX_MB, SLICE_MEMORY_MAX_MB);
 
 export const DEFAULT_LIMITS: Readonly<Limits> = Object.freeze({
   maxParallelSubtasks: 3,

@@ -1,8 +1,13 @@
 # AI 会话的资源池：所有会话进这个 slice，每个会话再各开一个 scope。deploy/france.sh 装到 /etc/systemd/system/。
-# 第一轮只记账、不设任何上限（windsurf-dao 仓 docs/decisions/2026-09-24-agent-isolation-and-error-routing.md「先观测」）；
-# 按实测画像加 MemoryHigh / CPUWeight / TasksMax 时写 drop-in，回滚就是删 drop-in。
+# 第一轮只记账、不设上限（windsurf-dao 仓 docs/decisions/2026-09-24-agent-isolation-and-error-routing.md「先观测」）；
+# 法国 2026-09-28 06:35–06:45 实测：单会话被自己那道窄墙（旧的 3298M/3554M）卡死，整机却还有 6.8G 空闲——
+# cgroup v2 的常见做法是把「总量不超」的安全垫放在父节点，子节点（各会话的 scope）之间允许借用空闲内存，父节点这道
+# 总闸才是真正兜住多会话同时冲高的那一层（kernel 文档 memory.high / memory.max 一节，k8s requests/limits 同理）。
+# 下面两个数和 packages/engine/src/limits.ts 的 SLICE_MEMORY_HIGH_MB / SLICE_MEMORY_MAX_MB 是同一份推导算出来的
+# （能分给会话的 11264 MiB − 平台常驻服务 600 MiB = 10664 MiB 总量，软上限低 512）：改一边要一起改另一边，
+# packages/engine/test/slice-unit.test.ts 核对两处数值对得上。CPUWeight、TasksMax 还没实测画像，先不设。
 [Unit]
-Description=fleet-dao AI 会话资源池（第一轮只记账）
+Description=fleet-dao AI 会话资源池（总量上限，单会话各自的上限由引擎起会话时给）
 Documentation=https://github.com/thoerwink8/fleet-dao/blob/main/docs/ops.md
 
 [Slice]
@@ -10,6 +15,10 @@ CPUAccounting=yes
 MemoryAccounting=yes
 TasksAccounting=yes
 IOAccounting=yes
+# 10664 MiB = (11 * 1024 - 600) MiB：packages/engine/src/limits.ts 的 SLICE_MEMORY_MAX_MB
+MemoryMax=10664M
+# 10152 MiB = 10664 - 512：packages/engine/src/limits.ts 的 SLICE_MEMORY_HIGH_MB
+MemoryHigh=10152M
 
 [Install]
 WantedBy=multi-user.target
