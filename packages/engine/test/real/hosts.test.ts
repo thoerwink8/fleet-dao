@@ -1,6 +1,5 @@
 // 执行方式的驱动（#212）：会话用户怎么定、cursor-agent 的起法（会话用户现找版本目录）、两家驱动拼的参数、报告整理成的
 // 同一个形状（读不到的不记成 0）。找版本目录的那段 sh 真跑（本机的 sh、假的 cursor-agent 脚本），每条失败路径都故意造一次。
-import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -21,6 +20,7 @@ import {
   wiredHostNames,
 } from '../../src/real/hosts.ts';
 import { agentCommands, realPortsConfigFromEnv } from '../../src/real/index.ts';
+import { runChild } from '../child.ts';
 import {
   CURSOR_NO_LOGIN,
   CURSOR_SESSION,
@@ -96,13 +96,14 @@ function launch(versionsDir: string, args: string[] = []) {
     'cursor-agent',
     '/home/u/.local/share/cursor-agent/versions',
   ]);
-  const r = spawnSync(SH, [flag as string, script as string, name as string, posix(versionsDir), ...args], {
-    encoding: 'utf8',
-  });
+  const r = runChild(SH, [flag as string, script as string, name as string, posix(versionsDir), ...args]);
   return { status: r.status, lines: r.stdout.trim().split('\n'), stderr: r.stderr.trim() };
 }
 
-describe('cursorLaunchCommand：会话用户按 current → 最新版本目录现找（CU-03：升级会删掉旧版本目录）', () => {
+// 下面两组同步起 sh：不设 vitest 的超时，卡死由子进程自己的上限管（为什么见 ../child.ts 开头）。
+describe('cursorLaunchCommand：会话用户按 current → 最新版本目录现找（CU-03：升级会删掉旧版本目录）', {
+  timeout: 0,
+}, () => {
   it('有 current 就用 current', () => {
     const v = join(root, 'versions');
     agent(join(v, 'current'), 'current');
@@ -202,11 +203,11 @@ const FRANCE_SH = fileURLToPath(new URL('../../../../deploy/france.sh', import.m
 
 /** 照装机脚本那样真跑一次：先打一行挑中的路径，再 exec 它 --version。 */
 function deployProbe(versionsDir: string) {
-  const r = spawnSync(SH, [posix(DEPLOY_PROBE), posix(versionsDir)], { encoding: 'utf8' });
+  const r = runChild(SH, [posix(DEPLOY_PROBE), posix(versionsDir)]);
   return { status: r.status, lines: r.stdout.trim().split('\n'), stdout: r.stdout, stderr: r.stderr };
 }
 
-describe('装机脚本找 cursor-agent 和引擎起它挑的是同一个（改了一边另一边跟着改）', () => {
+describe('装机脚本找 cursor-agent 和引擎起它挑的是同一个（改了一边另一边跟着改）', { timeout: 0 }, () => {
   const layouts: Record<string, (v: string) => void> = {
     '有 current': (v) => {
       agent(join(v, 'current'), 'current');

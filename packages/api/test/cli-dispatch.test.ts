@@ -1,6 +1,5 @@
 // fleet-api dispatch：「让 AI 接活」开关的运维命令。开、关、只看，每次改记一条操作记录、改完读回再打印；
 // 没做成的每条路（参数不对、库里没这个仓、连不上库、写库出错、读回来对不上）都故意造一遍：退出码非 0，说清原因。
-import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { auditLog, repos } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
@@ -20,6 +19,7 @@ import { devFixtures, IDS } from '../src/dev-fixtures.ts';
 import { createMemoryStore } from '../src/memory-store.ts';
 import { createPgStore } from '../src/pg-store.ts';
 import type { Store } from '../src/ports.ts';
+import { runChild } from './child.ts';
 import { seedPg } from './pg-fixtures.ts';
 
 const T0 = new Date('2026-09-26T07:00:00.000Z');
@@ -413,17 +413,13 @@ describe('库的错误说成白话', () => {
   });
 });
 
-describe('命令行入口（真起一个 node 进程）', () => {
+// 同步起 node：不设 vitest 的超时，卡死由子进程自己的上限管（为什么见 child.ts 开头）。
+describe('命令行入口（真起一个 node 进程）', { timeout: 0 }, () => {
   const bin = fileURLToPath(new URL('../src/bin/fleet-api.ts', import.meta.url));
   const exec = (args: string[], env: Record<string, string> = {}) => {
     const base = { ...process.env };
     delete base.DATABASE_URL;
-    return spawnSync(process.execPath, [bin, ...args], {
-      env: { ...base, ...env },
-      encoding: 'utf8',
-      input: '',
-      timeout: 60_000,
-    });
+    return runChild(process.execPath, [bin, ...args], { env: { ...base, ...env } });
   };
   // 本机 1 号端口没人听：连接当场被拒，和法国上 Postgres 停了、socket 不在一样是「连不上库」
   const REFUSED_DB = 'postgres://fleet@127.0.0.1:1/fleet';

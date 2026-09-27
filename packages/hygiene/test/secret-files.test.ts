@@ -1,11 +1,11 @@
 // 密钥文件按名字拦：规则表（rules.ts 的 SECRET_FILES）和仓根 .gitignore 里标记圈出来的那一段是同一张名单，两边对不上就红。
 // .gitignore 管「平常 git add 加不进来」，卫生检查管「git add -f 强行加进来的」。只核对标记段：别的行（*.log 之类）随便加。
-import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { findSecretFile, SECRET_FILES } from '../src/rules.ts';
 import { formatFinding, scanFiles } from '../src/scan.ts';
+import { runChild } from './child.ts';
 
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 const GITIGNORE = readFileSync(new URL('../../../.gitignore', import.meta.url), 'utf8');
@@ -81,23 +81,18 @@ describe('规则表和 .gitignore 的标记段是同一张名单', () => {
     expect(section?.length ?? 0).toBeGreaterThan(10);
   });
 
-  it('标记段的每一行规则表都拦得住；规则表每一类的样例 .gitignore 都忽略（git 只起一次）', () => {
+  // 同步起 git：不设 vitest 的超时，卡死由子进程自己的上限管（为什么见 child.ts 开头）。
+  it('标记段的每一行规则表都拦得住；规则表每一类的样例 .gitignore 都忽略（git 只起一次）', {
+    timeout: 0,
+  }, () => {
     const lines = section ?? [];
     expect(lines.filter((l) => findSecretFile(sampleFor(l)) === undefined)).toEqual([]);
     const paths = [...new Set([...SECRET_FILES.map((r) => r.sample), ...lines.map(sampleFor)])];
-    let ignored: string[];
-    try {
-      ignored = execFileSync('git', ['check-ignore', '--no-index', '--', ...paths], {
-        cwd: ROOT,
-        encoding: 'utf8',
-      })
-        .split('\n')
-        .filter(Boolean);
-    } catch (e) {
-      // 退出码 1 = 一个都没被忽略；别的都是真出错。
-      if ((e as { status?: number }).status !== 1) throw e;
-      ignored = [];
-    }
+    const r = runChild('git', ['check-ignore', '--no-index', '--', ...paths], { cwd: ROOT });
+    // 退出码 1 = 一个都没被忽略；别的都是真出错。
+    if (r.status !== 0 && r.status !== 1)
+      throw new Error(`git check-ignore 退出码 ${r.status}：${r.stderr.trim()}`);
+    const ignored = r.stdout.split('\n').filter(Boolean);
     expect(paths.filter((p) => !ignored.includes(p))).toEqual([]);
   });
 
