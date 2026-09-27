@@ -58,7 +58,9 @@ function assertScryptParams(N: number, r: number, p: number): void {
     N < 2 ||
     N > MAX_N ||
     (N & (N - 1)) !== 0 ||
+    !Number.isInteger(r) ||
     !(r >= 1 && r <= MAX_R) ||
+    !Number.isInteger(p) ||
     !(p >= 1 && p <= MAX_P)
   ) {
     throw new PasswordHashFormatError('scrypt 参数认不出或超出上限');
