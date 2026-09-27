@@ -1,6 +1,15 @@
 // 假数据的初始盘面。时间都相对「现在」生成，打开页面时各种「已 12 分钟」「38 分钟后清零」才说得通。
 // 名字、账号都是编的：公开仓里不放真实账号。
-import type { RunOutcome, SessionRun, StageKind, Step, SubtaskState, TaskState } from '@fleet-dao/shared';
+import type {
+  BillingKind,
+  HostId,
+  RunOutcome,
+  SessionRun,
+  StageKind,
+  Step,
+  SubtaskState,
+  TaskState,
+} from '@fleet-dao/shared';
 import type { AuditEntry, Notification, Setting } from '../types';
 import type { MAsk, MJob, MLog, MockState, MSubtask, MTask, PlanTemplate } from './model';
 
@@ -25,8 +34,13 @@ export function createSeed(now: number): MockState {
     /** 干了几分钟；不填表示还在干。 */
     work?: number;
     outcome?: RunOutcome;
+    /** 没命中缓存的输入、输出；不填 = 这次会话的用量一样都没读到（进程断了、没交终帧）。 */
     tokens?: [number, number];
+    /** 读到了 token、但这几样没读到（演示「没读到」长什么样）：缓存读写没写进库、花费没报。 */
+    unread?: ('cache' | 'cost')[];
   }
+  /** 哪些会话的哪几样故意留着没读到；其余结束了的会话最后按执行方式补上缓存读写和花费（fakeUsage）。 */
+  const unread = new Map<string, ('cache' | 'cost')[]>();
   function run(s: RunSpec): SessionRun {
     const r: SessionRun = {
       id: id('run'),
@@ -47,6 +61,7 @@ export function createSeed(now: number): MockState {
       r.inputTokens = s.tokens[0];
       r.outputTokens = s.tokens[1];
     }
+    if (s.unread) unread.set(r.id, s.unread);
     return r;
   }
   function steps(titles: string[], done: number, active = true): Step[] {
@@ -169,7 +184,42 @@ export function createSeed(now: number): MockState {
       priority: 1,
       created: -190,
       spec: 'specs/12-登录验证码',
-      runs: frontRuns('t-12', -188),
+      // 这张单也用来演示用量「没读到」长什么样：需求文档那次缓存读写没写进库（工作流兜底补写的结局），
+      // A 的第一个会话没交终帧就断了（一样都没读到），第二意见走 Grok（只报 token 不报花费）。
+      // 分诊走按量的 DeepSeek 接口，花费分得出按量和套餐内。
+      runs: [
+        run({
+          task: 't-12',
+          stage: 'triage',
+          route: 'r-ds',
+          why: 'Claude A 号 5/5 满，分诊第二条：DeepSeek 接口（按量，月度上限内）',
+          queued: -188,
+          wait: 0.2,
+          work: 0.7,
+          tokens: [8200, 640],
+        }),
+        run({
+          task: 't-12',
+          stage: 'spec',
+          route: 'r-ca-opus',
+          why: '需求文档阶段排第一',
+          queued: -187,
+          wait: 0.3,
+          work: 3.4,
+          tokens: [21_400, 3100],
+          unread: ['cache'],
+        }),
+        run({
+          task: 't-12',
+          stage: 'plan',
+          route: 'r-ca-opus',
+          why: '方案阶段已钉住，排第一',
+          queued: -183,
+          wait: 0.2,
+          work: 6.1,
+          tokens: [44_300, 5200],
+        }),
+      ],
       asks: [
         {
           id: 'ask-12-1',
@@ -192,12 +242,24 @@ export function createSeed(now: number): MockState {
           state: 'merged',
           steps: steps(['读现有登录接口', '写发送与校验接口', '加一分钟限流', '写测试', '开 PR'], 5),
           runs: [
+            // 没交终帧就断了：用量一样都没读到
             run({
               task: 't-12',
               sub: 't-12-a',
               stage: 'execute',
               route: 'r-ca-opus',
               why: '写码阶段排第一，A 号有空位',
+              queued: -178,
+              wait: 0.4,
+              work: 1.1,
+              outcome: 'failed',
+            }),
+            run({
+              task: 't-12',
+              sub: 't-12-a',
+              stage: 'execute',
+              route: 'r-ca-opus',
+              why: '上一个会话没交终帧就断了，重派：写码阶段排第一',
               queued: -176,
               wait: 0.5,
               work: 34,
@@ -621,6 +683,7 @@ export function createSeed(now: number): MockState {
           queued: -9,
           wait: 0.1,
           work: 0.4,
+          tokens: [5200, 310],
         }),
         run({
           task: 't-c7',
@@ -630,6 +693,7 @@ export function createSeed(now: number): MockState {
           queued: -8.4,
           wait: 0.2,
           work: 1.5,
+          tokens: [12_600, 980],
         }),
       ],
       subtasks: [
@@ -675,6 +739,7 @@ export function createSeed(now: number): MockState {
           queued: -372,
           wait: 0.1,
           work: 0.4,
+          tokens: [5100, 300],
         }),
       ],
       subtasks: [
@@ -696,6 +761,7 @@ export function createSeed(now: number): MockState {
               queued: -370,
               wait: 0.2,
               work: 6,
+              tokens: [38_000, 2600],
             }),
           ],
           pr: 14,
@@ -778,6 +844,7 @@ export function createSeed(now: number): MockState {
               queued: -285,
               wait: 0.4,
               work: 18,
+              tokens: [141_000, 9800],
             }),
           ],
           pr: 9,
@@ -1525,9 +1592,62 @@ export function createSeed(now: number): MockState {
     nextPr: 40,
     seq,
   };
+  // 结束了、读到 token 的会话按执行方式补上缓存读写和花费；unread 里记着的那几样留着没读到。
+  for (const t of state.tasks) {
+    for (const r of [...t.runs, ...t.subtasks.flatMap((x) => x.runs)]) {
+      if (!r.endedAt) continue;
+      const route = state.routes.find((x) => x.id === r.routeId);
+      const billing = route ? state.channels.find((c) => c.id === route.channelId)?.billing : undefined;
+      fakeUsage(r, { hostId: route?.hostId, modelId: route?.modelId, billing }, unread.get(r.id));
+    }
+  }
   state.logs = seedLogs(state, now);
   state.seq = seq + state.logs.length;
   return state;
+}
+
+/** 各执行方式的缓存读、缓存写大约是没命中缓存的输入的几倍（假数据，只求量级像）。 */
+const CACHE_SHAPE: Partial<Record<HostId, { read: number; write: number }>> = {
+  'claude-code': { read: 9, write: 0.45 },
+  'cursor-agent': { read: 3, write: 0 },
+  grok: { read: 4, write: 0 },
+  mirasim: { read: 6, write: 0.3 },
+  codex: { read: 5, write: 0 },
+  'api-shell': { read: 1.5, write: 0 },
+};
+
+/** 每百万 token 的美元价（输入、输出、缓存读、缓存写），只用来编花费。 */
+const PRICE: Record<string, readonly [number, number, number, number]> = {
+  'opus-5.5': [5, 25, 0.5, 6.25],
+  'opus-5': [5, 25, 0.5, 6.25],
+  'sonnet-5': [3, 15, 0.3, 3.75],
+  'deepseek-v4.1-flash': [0.27, 1.1, 0.07, 0],
+};
+
+/**
+ * 按执行方式补上一次会话的缓存读写和花费（假数据，照各家终帧实际报什么编，docs/reference/adapters.md）：
+ * Claude Code 四样 token 都报，也报花费（套餐内也报，是按 API 价折合）；按量的接口报花费；
+ * cursor、Grok、中转站、codex 只报 token、不报花费。没读到 token 的会话什么都不补；skip 里的那几样留着没读到。
+ */
+export function fakeUsage(
+  r: SessionRun,
+  how: { hostId?: HostId | undefined; modelId?: string | undefined; billing?: BillingKind | undefined },
+  skip: readonly ('cache' | 'cost')[] = [],
+): void {
+  const input = r.inputTokens;
+  const output = r.outputTokens;
+  if (input === undefined || output === undefined) return;
+  const shape = (how.hostId ? CACHE_SHAPE[how.hostId] : undefined) ?? { read: 4, write: 0 };
+  const read = Math.round(input * shape.read);
+  const write = Math.round(input * shape.write);
+  if (!skip.includes('cache')) {
+    r.cacheReadTokens = read;
+    r.cacheWriteTokens = write;
+  }
+  if ((how.hostId === 'claude-code' || how.billing === 'metered') && !skip.includes('cost')) {
+    const [pi, po, pr, pw] = PRICE[how.modelId ?? ''] ?? [3, 15, 0.3, 3.75];
+    r.costUsd = Math.round(((input * pi + output * po + read * pr + write * pw) / 1e6) * 10_000) / 10_000;
+  }
 }
 
 /** 按会话的起止时间编一段过程记录（和真后端 describeTimeline 的说法一致）。 */
@@ -1601,7 +1721,16 @@ function seedLogs(state: MockState, now: number): MLog[] {
             text: r.stage === 'review' ? '交活：第二意见没有必须改的' : '交活：测试通过，PR 已开',
           });
         }
-        if (r.outcome === 'failed') {
+        if (r.outcome === 'failed' && r.inputTokens === undefined) {
+          // 没交终帧就断了的会话（用量一样都没读到）
+          push({
+            ...base,
+            source: 'engine',
+            at: r.endedAt ?? new Date(now).toISOString(),
+            kind: 'state',
+            text: '会话断了：进程退出，没交终帧，重派',
+          });
+        } else if (r.outcome === 'failed') {
           push({
             ...base,
             at: r.endedAt ?? new Date(now).toISOString(),

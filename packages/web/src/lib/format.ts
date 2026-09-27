@@ -86,7 +86,10 @@ export function formatCount(n: number): string {
   return `${(n / 100_000_000).toFixed(1)} 亿`;
 }
 
+/** $12.40 / $120 / $0.0038：不到一分的多写两位，再小的写「<$0.0001」，不四舍五入成 $0.00 冒充没花。 */
 export function formatUsd(n: number): string {
+  if (n > 0 && n < 0.0001) return '<$0.0001';
+  if (n > 0 && n < 0.01) return `$${n.toFixed(4)}`;
   return `$${n.toFixed(n >= 100 ? 0 : 2)}`;
 }
 

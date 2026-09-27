@@ -1,7 +1,8 @@
-import { REALTIME_TABLES } from '@fleet-dao/shared';
+import { REALTIME_TABLES, type SessionRun } from '@fleet-dao/shared';
 import { describe, expect, test } from 'vitest';
 import { ApiError } from '../client';
 import type { LiveEvent } from '../types';
+import { fakeUsage } from './seed';
 import { createMockApi } from './server';
 
 // 假后端是页面在没有真后端时的「对手」：返回都按 shared/web-api.ts 校验，报错的 code 照真后端。
@@ -28,6 +29,78 @@ describe('假后端：任务详情的用量汇总', () => {
     expect(byModel.reduce((n, m) => n + m.runs + m.running, 0)).toBe(d.runs.length);
     expect(byStage.reduce((n, s) => n + s.runs + s.running, 0)).toBe(d.runs.length);
     expect(byModel.every((m) => m.modelName !== '')).toBe(true);
+  });
+
+  test('演示数据看得到「没读到」长什么样：没交终帧的会话、缓存没存下来的会话、不报花费的 Grok；花费分得出按量和套餐内', async () => {
+    const d = await fresh().task('t-12');
+    const { total } = d.usage;
+    expect(total).toMatchObject({
+      runs: 6,
+      running: 1,
+      missingTokens: 1,
+      missingCache: 2,
+      missingEquivalent: 2,
+    });
+    expect(total.cost).toEqual({
+      metered: expect.objectContaining({ runs: 1, missing: 0 }),
+      subscription: expect.objectContaining({ runs: 5, missing: 2 }),
+      unknown: { runs: 0, usd: 0, missing: 0 },
+    });
+    // 会话也带着计费方式（和真后端一样从渠道表读）
+    expect(d.runs.find((r) => r.routeId === 'r-ds')?.billing).toBe('metered');
+    expect(d.runs.find((r) => r.routeId === 'r-grok')?.billing).toBe('subscription');
+  });
+
+  test('别的演示单结束了的会话用量都读得到：「没读到」只在专门演示的那张单上', async () => {
+    const api = fresh();
+    for (const t of api.state().tasks.filter((x) => x.task.id !== 't-12')) {
+      const { total } = (await api.task(t.task.id)).usage;
+      expect([t.task.id, total.missingTokens, total.missingCache], t.task.id).toEqual([t.task.id, 0, 0]);
+    }
+  });
+});
+
+describe('假数据的用量：照各家终帧实际报什么编', () => {
+  const ended = (): SessionRun => ({
+    id: 'r',
+    stage: 'execute',
+    routeId: 'x',
+    whyRoute: '',
+    queuedAt: '2026-09-27T01:00:00.000Z',
+    startedAt: '2026-09-27T01:01:00.000Z',
+    endedAt: '2026-09-27T01:11:00.000Z',
+    inputTokens: 10_000,
+    outputTokens: 1000,
+  });
+
+  test('Claude Code 补缓存读写和花费（套餐内也报，是折合价）；按量的接口报花费', () => {
+    const claude = ended();
+    fakeUsage(claude, { hostId: 'claude-code', modelId: 'opus-5.5', billing: 'subscription' });
+    expect(claude).toMatchObject({ cacheReadTokens: 90_000, cacheWriteTokens: 4500 });
+    expect(claude.costUsd).toBeGreaterThan(0);
+    const metered = ended();
+    fakeUsage(metered, { hostId: 'api-shell', modelId: 'deepseek-v4.1-flash', billing: 'metered' });
+    expect(metered.costUsd).toBeGreaterThan(0);
+  });
+
+  test('cursor、Grok、中转站只报 token 不报花费；没读到 token 的什么都不补；点名没读到的那几样留空', () => {
+    for (const hostId of ['cursor-agent', 'grok', 'mirasim'] as const) {
+      const r = ended();
+      fakeUsage(r, { hostId, billing: 'subscription' });
+      expect(r.cacheReadTokens, hostId).toBeGreaterThan(0);
+      expect(r.costUsd, hostId).toBeUndefined();
+    }
+    const { inputTokens: _in, outputTokens: _out, ...blank }: SessionRun = ended();
+    fakeUsage(blank, { hostId: 'claude-code', billing: 'subscription' });
+    expect([blank.cacheReadTokens, blank.cacheWriteTokens, blank.costUsd]).toEqual([
+      undefined,
+      undefined,
+      undefined,
+    ]);
+    const old = ended();
+    fakeUsage(old, { hostId: 'claude-code', billing: 'subscription' }, ['cache']);
+    expect([old.cacheReadTokens, old.cacheWriteTokens]).toEqual([undefined, undefined]);
+    expect(old.costUsd).toBeGreaterThan(0);
   });
 });
 
