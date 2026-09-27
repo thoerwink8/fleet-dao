@@ -189,6 +189,12 @@ describe('按改动算要跑什么', () => {
     });
     expect(pr('docs/ops.md')).toMatchObject({ deploy: 'ops', tests: [{ name: 'db' }] });
     expect(testArgs(pr('agents/skills/discuss/SKILL.md'))).toEqual(['agents/', 'packages/agents-sync/']);
+    // 调工具前的钩子：引擎起 Claude 会话也直接用仓里这份（adapters 的测试真跑它）
+    expect(testArgs(pr('agents/hooks/pretool.mjs'))).toEqual([
+      'packages/adapters/',
+      'agents/',
+      'packages/agents-sync/',
+    ]);
     // 只改说明文字不拖上 2 分钟的 deploy/test（#121 只改 AGENTS.md 和 skill 就跑了 2 分 13 秒）
     expect(pr('agents/skills/discuss/SKILL.md').deploy).toBe('none');
     expect(pr('AGENTS.md', 'agents/skills/discuss/SKILL.md', 'docs/design.md').deploy).toBe('none');

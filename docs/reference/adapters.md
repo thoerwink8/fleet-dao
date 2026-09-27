@@ -77,6 +77,7 @@ reclaude -p --output-format stream-json --verbose \
   --permission-mode bypassPermissions \
   --session-id <uuid> \
   --setting-sources project \
+  --settings '<调工具前那条钩子，JSON>' \
   < prompt.txt          # 长 prompt 走 stdin
 ```
 
@@ -85,6 +86,7 @@ reclaude -p --output-format stream-json --verbose \
 - `--verbose` 必带：本机实跑 `claude -p --output-format stream-json "hi"` 报 `Error: When using --print, --output-format=stream-json requires --verbose`，退出 1。
 - prompt 可以走 stdin：本机实跑，不给 prompt 且 stdin 为空时报 `Error: Input must be provided either through stdin or as a prompt argument when using --print`（退出 1）；stdin 给内容就正常起会话。
 - `--setting-sources project`：不加载用户级 settings，就不会跑用户的 SessionStart hooks；同一句话成本从 $0.028 降到 $0.0116，`unifiedWindows` 照样齐全（AGS `deploy/reclaude-org-switch.mjs:223-230`）。
+- `--settings`：用户级 settings.json 里登记的调工具前钩子（拦把密钥文件读进对话、切号、git stash 这类）也跟着不读了，引擎经 `--settings` 另外带上，只登这一条 PreToolUse（`Bash|PowerShell|Read|Grep`），跑发布目录里的 `agents/hooks/pretool.mjs`（归 root、会话改不了，和引擎同一版）。命令行给的设置是单独一层，不受 `--setting-sources` 管：法国 2026-09-27 以 2.1.282 实测，会话里 `cat`、Read 一个 `.reclaude/device.json` 都被拦下，改文件、Read、提交照常（`packages/adapters/test/e2e/claude-guard-e2e.ts`）。钩子崩了、node 起不来，Claude 本来当「钩子出错」照样放行，命令外面包一层改成退出码 2；脚本不在就不起会话（`packages/adapters/src/claude-code/args.ts`、`run.ts`）。每调一次工具多起一个 node：法国实测平均 45–65 毫秒。
 - **不能用 `--bare`**：它只认 `ANTHROPIC_API_KEY`，经 reclaude 起会认证失败，回一条 `<synthetic>` 占位消息（同文件 :230）。
 - 续跑：`--session-id <uuid>` 起的会话能用 `--resume <uuid>` 接着跑（本机 `claude --help`）。
 - 工作目录就是工作树（claude 把 cwd 当工作区）。环境变量里**不许**有 `ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY`：有值就会绕开 reclaude 的代理链（WD `NEW-MACHINE.md` §8：「`ANTHROPIC_BASE_URL` 有值＝走中继；没值而 `NODE_EXTRA_CA_CERTS` 指向 reclaude＝走 reclaude」）。
