@@ -830,6 +830,7 @@ describe('Fusion 的判断经 decide 调（core 包，0003 第 12 条）', () =>
       highRisk: false,
       planReviewSkipped: false,
       flowSource: 'project',
+      outsideBrief: [],
     });
     expect(pr.did[0]).toBe('方案：加验证码');
     const comment = await decide('closeComment', {
