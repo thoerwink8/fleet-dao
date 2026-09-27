@@ -34,6 +34,7 @@ import {
 import {
   addCursorRoute,
   addGrokRoute,
+  addMirasimRoute,
   addTask,
   CARPOOL_ORG_ID,
   MIN,
@@ -1223,9 +1224,9 @@ describe('给开 PR 前验证留一家（选副手、Lead 换路由）：#293 �
     expect(!none.ok && none.detail).toMatch(/^没有别家可验：写这张单的是 claude、grok 族/);
   });
 
-  it('副手只有 Grok（创始人 09-28 凌晨拍）、界面单、Lead 是 claude：副手交派不出、Lead 续自己的会话写，验证派到 Grok；不报警', async () => {
+  it('副手排 DeepSeek Flash、Grok（创始人 09-28 凌晨改拍，#345；这张单没有 Mirasim 路由，落到 Grok）、界面单、Lead 是 claude：副手交派不出、Lead 续自己的会话写，验证派到 Grok；不报警', async () => {
     const { grok, taskId } = await franceWorld();
-    expect(STEPS.sidekick).toEqual(['grok-4.7']);
+    expect(STEPS.sidekick).toEqual(['deepseek-flash', 'grok-4.7']);
     await startedRun(taskId, 'carpool', 'plan');
     const side = await sidekick(taskId, true);
     expect(side).toMatchObject({ ok: false, waitFor: 'none' });
@@ -1243,6 +1244,18 @@ describe('给开 PR 前验证留一家（选副手、Lead 换路由）：#293 �
     });
     expect(lead).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
     await startedRun(taskId, 'carpool', 'ui');
+    expect(await verify(taskId, true)).toMatchObject({ ok: true, route: { routeId: grok, family: 'grok' } });
+    expect(await noVerifierAlerts()).toEqual([]);
+  });
+
+  it('Mirasim 接上、这张单挂了 DeepSeek Flash 路由：界面单副手真派到它（不再交回 Lead 自己写），Grok 还留得住验证', async () => {
+    const { grok, taskId } = await franceWorld();
+    const ds = (await addMirasimRoute(t.db, { stages: ['ui'] })).routeId;
+    await startedRun(taskId, 'carpool', 'plan');
+    const side = await sidekick(taskId, true);
+    expect(side).toMatchObject({ ok: true, route: { routeId: ds, family: 'deepseek' } });
+    await startedRun(taskId, ds, 'ui');
+    // 副手这次用了 deepseek 族，验证整族避开 claude（Lead）、deepseek（副手），落到 Grok——没被「留一家」拦下
     expect(await verify(taskId, true)).toMatchObject({ ok: true, route: { routeId: grok, family: 'grok' } });
     expect(await noVerifierAlerts()).toEqual([]);
   });
