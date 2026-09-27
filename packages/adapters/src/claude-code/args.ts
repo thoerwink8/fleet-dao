@@ -1,5 +1,7 @@
 // reclaude（原样转给 claude）的无头参数。提示词不进参数，走 stdin：超长会 E2BIG，而且 --allowedTools 吃变长参数，
 // 放在它后面的提示词会被当成工具名（已实测）。
+import { fileURLToPath } from 'node:url';
+
 export const CLAUDE_PERMISSION_MODES = [
   'acceptEdits',
   'auto',
@@ -41,6 +43,33 @@ export interface ClaudeArgsSpec {
    * 路由探针用：每 15 分钟一次的一问一答不留记录。干活的会话要能续，不给（默认存）。
    */
   persistSession?: boolean;
+  /** 调工具前那条钩子的脚本，默认 PRETOOL_SCRIPT；只有测试、验收脚本改它。 */
+  pretoolScript?: string;
+}
+
+/**
+ * 调工具前那条钩子（拦把密钥文件读进对话的命令和 Read、Grep，拦切号、git stash 这类，规矩在脚本里）：仓里这一份，
+ * 和引擎同一版。法国上它在 /srv/fleet-dao-releases/<提交号>/ 下，归 root、谁都能读：会话改不了、删不掉它；会话用户家里
+ * agents-sync 装的那份归会话用户（会话自己就能改掉），引擎也读不到那个家目录，所以不用那份。
+ */
+export const PRETOOL_SCRIPT = fileURLToPath(new URL('../../../../agents/hooks/pretool.mjs', import.meta.url));
+
+/** 和 packages/agents-sync/src/targets.ts 里 Claude 那组一样：跑命令的、读文件的、搜内容的。 */
+export const PRETOOL_MATCHER = 'Bash|PowerShell|Read|Grep';
+
+const shellQuote = (s: string) => `'${s.replaceAll("'", `'\\''`)}'`;
+
+/**
+ * 经 --settings 带上的那份设置：引擎起 Claude 带 --setting-sources project，用户级 settings.json 里登记的钩子它不读，
+ * 命令行给的设置是单独一层（不受 --setting-sources 管：法国 2026-09-27 以 2.1.282 实测，test/e2e/claude-guard-e2e.ts）。
+ * 钩子退出码 2 = 拦下；别的非 0（脚本崩了、node 起不来）Claude 当「钩子出错」照样放行，没人看着的会话里等于没装：
+ * 这里一律改成 2、说清没跑成（按拦处理）。脚本不在由 runClaudeCode 起会话之前查，查不到不起。
+ */
+export function pretoolSettings(script: string = PRETOOL_SCRIPT, node: string = process.execPath): string {
+  const command = `${shellQuote(node)} ${shellQuote(script)} || { c=$?; [ "$c" = 2 ] || echo "fleet-guard：调工具前的钩子没跑成（退出码 $c），按拦处理" >&2; exit 2; }`;
+  return JSON.stringify({
+    hooks: { PreToolUse: [{ matcher: PRETOOL_MATCHER, hooks: [{ type: 'command', command, timeout: 10 }] }] },
+  });
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -70,9 +99,11 @@ export function buildClaudeArgs(spec: ClaudeArgsSpec): string[] {
     '--verbose',
     '--model',
     spec.model,
-    // 只读项目级设置：不跑用户级 hooks，行为和成本都可控
+    // 只读项目级设置：不跑用户级 hooks，行为和成本都可控；调工具前那条钩子另经 --settings 带上
     '--setting-sources',
     'project',
+    '--settings',
+    pretoolSettings(spec.pretoolScript),
     '--strict-mcp-config',
     '--permission-mode',
     spec.permissionMode,

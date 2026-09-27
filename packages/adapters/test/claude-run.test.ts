@@ -1,9 +1,10 @@
 // 起停测试：用假执行体回放真跑夹具，或故意卡住、留子进程，看插头怎么喂提示词、判超时、杀进程、交报告。
 import { randomUUID } from 'node:crypto';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ProgressEvent } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
+import { pretoolSettings } from '../src/claude-code/args.ts';
 import {
   type ClaudeCodeRunSpec,
   claudeRunSummary,
@@ -63,6 +64,8 @@ describe('runClaudeCode', { timeout: 30_000 }, () => {
     const argv = JSON.parse(readText(files.argvTo)) as string[];
     expect(argv.join('\n')).not.toContain('notes.md');
     expect(argv).toContain('--session-id');
+    // 调工具前那条钩子经 --settings 带上（--setting-sources project 不读用户级设置）
+    expect(argv[argv.indexOf('--settings') + 1]).toBe(pretoolSettings());
     const env = JSON.parse(readText(files.envTo)) as Record<string, string>;
     expect(env.FLEET_API).toBe('http://127.0.0.1:7070');
     expect(env.FLEET_TOKEN).toBe('tok-7');
@@ -461,6 +464,17 @@ describe('runClaudeCode', { timeout: 30_000 }, () => {
     await expect(
       runClaudeCode(spec('cc-haiku-read', { prompt: '  ' }), { command: fakeAgent({}) }),
     ).rejects.toThrow('提示词是空的');
+  });
+
+  it('【故意造出的失败】调工具前那条钩子的脚本不在、是个目录：不起会话（起了也没人拦，钩子出错 Claude 照样放行）', async () => {
+    const dir = tempDir();
+    const argvTo = join(dir, 'argv');
+    for (const pretoolScript of [join(dir, 'missing.mjs'), dir]) {
+      await expect(
+        runClaudeCode(spec('cc-haiku-read', { pretoolScript }), { command: fakeAgent({ argvTo }) }),
+      ).rejects.toThrow('调工具前的钩子不在');
+    }
+    expect(existsSync(argvTo)).toBe(false);
   });
 
   it('额度读数边跑边交出去', async () => {

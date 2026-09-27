@@ -1,4 +1,6 @@
 // Claude Code 插头：经 reclaude 无头起一个会话，边跑边把过程记录转成进度事件，结束时交出一份报告。
+import { constants } from 'node:fs';
+import { access, stat } from 'node:fs/promises';
 import { type AgentRunOptions, assertRunnable, runCliAgent } from '../cli-run.ts';
 import type { DeliveryCheck } from '../delivery.ts';
 import { assertNoForbiddenEnv, buildSessionEnv, type SessionEnvInput } from '../env.ts';
@@ -6,7 +8,7 @@ import { judgeRun, type RunFacts, type RunSummary, type RunVerdict } from '../ju
 import type { AgentProcessResult, ProcessLimits } from '../process.ts';
 import type { CgroupScope } from '../procs.ts';
 import { lastLines, optional } from '../stream-kit.ts';
-import { buildClaudeArgs, type ClaudeArgsSpec, type ClaudeSession } from './args.ts';
+import { buildClaudeArgs, type ClaudeArgsSpec, type ClaudeSession, PRETOOL_SCRIPT } from './args.ts';
 import {
   type ClaudeResult,
   ClaudeStreamReader,
@@ -60,11 +62,23 @@ export interface ClaudeCodeRunReport extends AgentProcessResult {
   stream: ClaudeStreamSummary;
 }
 
+/** 调工具前那条钩子的脚本得在、读得了：不在就不起会话（起了也没人拦，钩子出错 Claude 照样放行）。 */
+async function assertPretool(script: string): Promise<void> {
+  const file = await stat(script).catch(() => undefined);
+  if (!file?.isFile()) {
+    throw new Error(`调工具前的钩子不在：${script}（会话不起：没有它，读密钥文件、切号这类就没人拦）`);
+  }
+  await access(script, constants.R_OK).catch(() => {
+    throw new Error(`调工具前的钩子读不了：${script}（会话不起）`);
+  });
+}
+
 export async function runClaudeCode(
   spec: ClaudeCodeRunSpec,
   options: ClaudeCodeRunOptions,
 ): Promise<ClaudeCodeRunReport> {
   await assertRunnable(options.command, spec.prompt, spec.cwd);
+  await assertPretool(spec.pretoolScript ?? PRETOOL_SCRIPT);
   const args = buildClaudeArgs(spec);
   const bashTimeout = spec.bashTimeoutMs ?? DEFAULT_BASH_TIMEOUT_MS;
   const env = {

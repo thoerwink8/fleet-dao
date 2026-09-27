@@ -87,6 +87,12 @@ export const PATH_RULES: readonly Rule[] = [
   // AGENTS.md、agents/ 只是 agents-sync 的输入：标记成对、skill 格式由 agents-sync 和 agents 的单测读真文件核对；
   // deploy/test 的同步测试只验换身份写文件，内容换了结果不变，所以不跑 deploy（纯说明 PR 曾被拖 2 分多钟）。
   { match: exact('AGENTS.md'), units: ['agents-sync'], why: '通用段由 agents-sync 分发' },
+  // 引擎起 Claude 会话经 --settings 直接用仓里这份调工具前的钩子（adapters 的 PRETOOL_SCRIPT），adapters 的测试真跑它
+  {
+    match: under('agents/hooks/'),
+    units: [AGENTS_UNIT, 'agents-sync', 'adapters'],
+    why: '钩子由 agents-sync 分发，引擎起 Claude 会话也直接用仓里这份',
+  },
   {
     match: under('agents/'),
     units: [AGENTS_UNIT, 'agents-sync'],
