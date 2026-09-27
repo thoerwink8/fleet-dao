@@ -588,7 +588,7 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
   };
 
   /**
-   * 副手干一轮：照简报，在同一棵树上，按流程配置的副手模型顺序派别家（避开 Lead 那一族：Claude 额度留给 Lead，0002 第 5 条）。
+   * 副手干一轮：照简报，在同一棵树上，按流程配置的副手模型顺序派别家（避开 Lead 那一族：Lead 那家的额度留给 Lead，0002 第 5 条）。
    * 派不出（没接好、没额度、连着做不好）交回 unavailable，调用方让 Lead 自己干（0003 第 7 条）。
    */
   const sidekickRun = async (
@@ -807,7 +807,8 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
     const got = await sidekickRun(brief, feedback);
     if ('unavailable' in got) {
       const r = await leadWork(
-        `副手派不出（${got.unavailable}）：Claude 单干（0003 第 7 条）`,
+        // Lead 不一定是 Claude（创始人 09-27 夜：拼车号和 Grok 混用当 Lead），这句进 PR 正文，不写死哪一家
+        `副手派不出（${got.unavailable}）：Lead 单干（0003 第 7 条）`,
         feedback,
         brief,
       );
