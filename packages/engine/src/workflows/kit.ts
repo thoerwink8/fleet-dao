@@ -55,6 +55,7 @@ import type { Decide, DecisionKind, DecisionMap } from '../decisions/index.ts';
 import type { Feedback } from '../decisions/verify.ts';
 import { historyAlertLine, type Limits, reaskLimit } from '../limits.ts';
 import type {
+  KeepVerifierRequest,
   RouteChoice,
   Scope,
   SessionBrief,
@@ -807,6 +808,11 @@ export interface StageRequest<K extends OutputKind> {
   /** 流程配置里这一步的模型顺序（0003 第 9 条）：只派这几个模型的路由。不给 = 照调度台（在途任务的历史里没有这一项）。 */
   models?: string[] | undefined;
   /**
+   * 给开 PR 前验证留一家（PickRouteInput.keepVerifier）：Fusion 规划完、开 PR 之前，选副手、Lead 换路由时带上。
+   * 不给 = 不管。只多一个活动入参，调度顺序不变（重放时活动入参不比对）。
+   */
+  keepVerifier?: KeepVerifierRequest | undefined;
+  /**
    * 一开始就续这条路由：Fusion 的 Lead 一张单一个会话、按步续用（0003 第 6 条），换了账号池 --resume 就续不上。
    * 暂时派不了就等它，用不了了（下线、被禁）才照常选（和同一次调用里的重试一样）。
    */
@@ -839,6 +845,7 @@ interface PickExtras {
   avoidFamilies?: string[] | undefined;
   uiWork?: boolean | undefined;
   models?: string[] | undefined;
+  keepVerifier?: KeepVerifierRequest | undefined;
   giveUp?: boolean | undefined;
 }
 
@@ -872,6 +879,7 @@ async function chooseRoute(
           ...(extras.avoidFamilies?.length ? { avoidFamilies: extras.avoidFamilies } : {}),
           ...(extras.uiWork ? { uiWork: true } : {}),
           ...(extras.models ? { models: extras.models } : {}),
+          ...(extras.keepVerifier ? { keepVerifier: extras.keepVerifier } : {}),
         }),
       );
       if (result.ok) return { route: result.route, why: result.why };
@@ -1072,6 +1080,7 @@ async function stageLoop<K extends OutputKind>(
       avoidFamilies: request.avoidFamilies,
       uiWork: request.uiWork,
       models: request.models,
+      keepVerifier: request.keepVerifier,
       giveUp,
     });
     if ('none' in picked) {

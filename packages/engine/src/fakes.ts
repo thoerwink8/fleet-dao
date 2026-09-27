@@ -443,8 +443,14 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
     async pickRoute(input) {
       const scripted = script.route?.(input, next('pickRoute'));
       if (scripted) return scripted;
-      // 整族避开（开 PR 前验证只派别家）：点名的、续会话的也照样避开，和真选路一样
-      const families = new Set((input.avoidFamilies ?? []).map((f) => f.trim().toLowerCase()));
+      // 整族避开（开 PR 前验证只派别家）：点名的、续会话的也照样避开，和真选路一样。给验证留一家时副手先避开的族
+      // （keepVerifier.spare）这里也一律避开：假世界不排验证那一步的路由，判不了别家会不会让验证没人可派——和真选路
+      // 没有候选会让验证落空时一样（给验证留一家的真判法测在 test/routing/verifier.test.ts、test/real/store-ports.test.ts）
+      const families = new Set(
+        [...(input.avoidFamilies ?? []), ...(input.keepVerifier?.spare ?? [])].map((f) =>
+          f.trim().toLowerCase(),
+        ),
+      );
       // 流程配置的模型顺序：只派这几个模型的路由，按这个先后（和真选路一样）
       const models = input.models;
       const usable = routes

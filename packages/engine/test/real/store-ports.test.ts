@@ -1,6 +1,7 @@
 // 选路、报警、提问、人闸、计时、快照接真库（PGlite）：三种结果原样换成端口的；点名、续会话、被暂停的账号池、
 // 没接上的执行方式各有去处；库里对不上的明确报错，不当成「没有路由」「记上了」。
 import { randomUUID } from 'node:crypto';
+import { createRequire } from 'node:module';
 import {
   asks,
   finishSessionRun,
@@ -17,11 +18,19 @@ import {
   verifyRoundsOfTask,
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
+import type { StageKind } from '@fleet-dao/shared';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { PickRouteInput } from '../../src/ports.ts';
 import type { UserExec } from '../../src/real/exec.ts';
 import { type SessionOrgReader, sessionOrgReader } from '../../src/real/session-org.ts';
-import { createStorePorts, ORG_READ_RETRY_SECONDS, poolHoldKey } from '../../src/real/store-ports.ts';
+import {
+  createStorePorts,
+  NO_VERIFIER_PREFIX,
+  noVerifierKey,
+  ORG_READ_RETRY_SECONDS,
+  PICK_ROUTE_ACTOR,
+  poolHoldKey,
+} from '../../src/real/store-ports.ts';
 import {
   addCursorRoute,
   addGrokRoute,
@@ -810,27 +819,27 @@ describe('计时、快照', () => {
   });
 });
 
-describe('开 PR 前验证：只派别家、作者是哪几族、每一轮的记录', () => {
-  /** 这张单上起过（有开工时刻）的一次会话。 */
-  async function startedRun(taskId: string, routeId: string, stage: 'execute' | 'verify' | 'plan') {
-    const id = randomUUID();
-    await openSessionRun(t.db, {
-      id,
-      taskId,
-      subtaskId: null,
-      stage,
-      routeId,
-      whyRoute: 'x',
-      branch: null,
-      queuedAt: NOW,
-      workflowId: null,
-      runAsUser: routeId.startsWith('cursor') ? null : 'fleet-agent-carpool',
-      worktreePath: null,
-    });
-    await markSessionRunStarted(t.db, { id, startedAt: NOW, sessionId: `s-${id}`, handle: null });
-    return id;
-  }
+/** 这张单上起过（有开工时刻）的一次会话。 */
+async function startedRun(taskId: string, routeId: string, stage: StageKind) {
+  const id = randomUUID();
+  await openSessionRun(t.db, {
+    id,
+    taskId,
+    subtaskId: null,
+    stage,
+    routeId,
+    whyRoute: 'x',
+    branch: null,
+    queuedAt: NOW,
+    workflowId: null,
+    runAsUser: routeId.startsWith('cursor') ? null : 'fleet-agent-carpool',
+    worktreePath: null,
+  });
+  await markSessionRunStarted(t.db, { id, startedAt: NOW, sessionId: `s-${id}`, handle: null });
+  return id;
+}
 
+describe('开 PR 前验证：只派别家、作者是哪几族、每一轮的记录', () => {
   it('写这张单的是 claude 族：整族避开，派给别家（钉住 kimi 的 cursor 路由）；点名同族的路由也不给', async () => {
     await world(t.db, { stages: ['verify'] });
     const { routeId } = await addCursorRoute(t.db, {
@@ -980,6 +989,227 @@ describe('开 PR 前验证：只派别家、作者是哪几族、每一轮的记
       ),
     ).rejects.toThrow();
     expect(await verifyRoundsOfTask(t.db, task.id)).toEqual([]);
+  });
+});
+
+describe('给开 PR 前验证留一家（选副手、Lead 换路由）：#293 在法国干完才挂起「没有别家可验」、干等 47 分钟', () => {
+  /** 各步的模型顺序照全组织默认（packages/core/flow.default.json，创始人 2026-09-27 夜拍的）。 */
+  const STEPS = (
+    createRequire(import.meta.url)('@fleet-dao/core/flow.default.json') as {
+      profiles: { default: { steps: { lead: string[]; sidekick: string[]; verify: string[] } } };
+    }
+  ).profiles.default.steps;
+
+  /**
+   * 照法国排（deploy/examples/catalog.example.json）：规划两条 Opus 在前、Grok 垫底；写码、界面 Grok 第一、两条 Opus 在后；
+   * 开 PR 前验证 Cursor 上钉住的 GPT-5.6 Luna 第一、Grok 第二、两条 Opus 在后。DeepSeek Flash（Mirasim）没接上，没有路由。
+   * 各池额度都读成了、都还宽（额度未知的会排到后面，这里只看给验证留一家）。一张需求（#12），还没起过会话。
+   */
+  async function franceWorld() {
+    await world(t.db, { stages: [] });
+    const luna = (await addCursorRoute(t.db, { modelId: 'gpt-5.6-luna', upstreamModel: 'gpt-5.6-luna-high' }))
+      .routeId;
+    const grok = (await addGrokRoute(t.db)).routeId;
+    const stages: [StageKind, string[]][] = [
+      ['plan', ['solo', 'carpool', grok]],
+      ['execute', [grok, 'solo', 'carpool']],
+      ['ui', [grok, 'solo', 'carpool']],
+      ['verify', [luna, grok, 'solo', 'carpool']],
+    ];
+    for (const [stage, ids] of stages) {
+      await t.db
+        .insert(stagePolicyRoutes)
+        .values(ids.map((routeId, position) => ({ stage, routeId, position, enabled: true })));
+    }
+    for (const poolId of ['cursor', 'grok']) {
+      await savePoolQuota(
+        t.db,
+        {
+          poolId,
+          readAt: new Date(NOW.getTime() - MIN).toISOString(),
+          complete: true,
+          windows: (['5h', '7d'] as const).map((window) => ({
+            poolId,
+            window,
+            label: window === '5h' ? 'five_hour' : 'seven_day',
+            unit: 'percent' as const,
+            utilization: 0.1,
+            reading: 'measured' as const,
+            readAt: new Date(NOW.getTime() - MIN).toISOString(),
+            source: 'test',
+          })),
+        },
+        { now: NOW },
+      );
+    }
+    const { task } = await addTask(t.db);
+    return { luna, grok, taskId: task.id };
+  }
+
+  const keep = (uiWork: boolean, spare: string[], otherwise: 'none' | 'any') => ({
+    models: STEPS.verify,
+    uiWork,
+    otherwise,
+    ...(spare.length > 0 ? { spare } : {}),
+  });
+  /** 选副手：和 Fusion 工作流带的一样（界面类的在界面阶段派；Lead 那一族先避开）。 */
+  const sidekick = (taskId: string, ui: boolean, leadFamily = 'claude') =>
+    pick({
+      taskId,
+      stage: ui ? 'ui' : 'execute',
+      models: STEPS.sidekick,
+      ...(ui ? { uiWork: true } : {}),
+      keepVerifier: keep(ui, [leadFamily], 'none'),
+    });
+  /** 开 PR 前验证：和 workflows/verify.ts 一样，整族避开库里查到的写这张单的族。 */
+  const verify = async (taskId: string, ui: boolean) =>
+    pick({
+      taskId,
+      stage: 'verify',
+      models: STEPS.verify,
+      avoidFamilies: (await ports().authorFamilies({ taskId }, ctx)).families,
+      ...(ui ? { uiWork: true } : {}),
+    });
+  const noVerifierAlerts = async () =>
+    (await t.db.select().from(notifications)).filter((n) => n.dedupeKey.startsWith(NO_VERIFIER_PREFIX));
+
+  it('【故意造出的失败】修之前的选法（副手整族避开 Lead、不给验证留一家）：界面单副手派到 Grok，写手成了 claude + grok，验证无路可派', async () => {
+    const { grok, taskId } = await franceWorld();
+    await startedRun(taskId, 'carpool', 'plan');
+    const side = await pick({
+      taskId,
+      stage: 'ui',
+      models: STEPS.sidekick,
+      uiWork: true,
+      avoidFamilies: ['claude'],
+    });
+    expect(side).toMatchObject({ ok: true, route: { routeId: grok } });
+    await startedRun(taskId, grok, 'ui');
+    const none = await verify(taskId, true);
+    expect(none).toMatchObject({ ok: false, waitFor: 'none' });
+    expect(!none.ok && none.detail).toMatch(/^没有别家可验：写这张单的是 claude、grok 族/);
+  });
+
+  it('界面单、Lead 是 claude：副手改派 Opus（和 Lead 同族，不多加一族），验证派到 Grok；不报警', async () => {
+    const { grok, taskId } = await franceWorld();
+    await startedRun(taskId, 'carpool', 'plan');
+    const side = await sidekick(taskId, true);
+    expect(side).toMatchObject({ ok: true, route: { family: 'claude', modelId: 'opus-5.5' } });
+    expect(side.ok && side.why).toContain(
+      '选它开 PR 前验证就没有别家可派了（写这张单的会是 claude、grok 族）',
+    );
+    await startedRun(taskId, side.ok ? side.route.routeId : '', 'ui');
+    expect(await verify(taskId, true)).toMatchObject({ ok: true, route: { routeId: grok, family: 'grok' } });
+    expect(await noVerifierAlerts()).toEqual([]);
+  });
+
+  it('非界面单不受影响：副手照旧派 Grok，验证派 Luna', async () => {
+    const { grok, luna, taskId } = await franceWorld();
+    await startedRun(taskId, 'carpool', 'plan');
+    expect(await sidekick(taskId, false)).toMatchObject({ ok: true, route: { routeId: grok } });
+    await startedRun(taskId, grok, 'execute');
+    expect(await verify(taskId, false)).toMatchObject({ ok: true, route: { routeId: luna } });
+  });
+
+  it('Lead 兜底成 Grok（规划阶段的 Opus 派不了）：界面单副手派 Grok（和 Lead 同族），验证由 Opus 验', async () => {
+    const { grok, taskId } = await franceWorld();
+    await t.client.query(
+      "update stage_policy_routes set enabled = false where stage = 'plan' and route_id in ('solo', 'carpool')",
+    );
+    expect(await pick({ taskId, stage: 'plan', models: STEPS.lead })).toMatchObject({
+      ok: true,
+      route: { routeId: grok },
+    });
+    await startedRun(taskId, grok, 'plan');
+    expect(await sidekick(taskId, true, 'grok')).toMatchObject({ ok: true, route: { routeId: grok } });
+    await startedRun(taskId, grok, 'ui');
+    expect(await verify(taskId, true)).toMatchObject({
+      ok: true,
+      route: { family: 'claude', modelId: 'opus-5.5' },
+    });
+  });
+
+  it('【故意造出的失败】这张单做完没人能验（验证阶段只剩 Luna、又是界面单）：选副手时当场报警，照常派；再选时验证留得下了自己撤', async () => {
+    const { grok, luna, taskId } = await franceWorld();
+    await startedRun(taskId, 'carpool', 'plan');
+    await t.client.query(
+      "update stage_policy_routes set enabled = false where stage = 'verify' and route_id <> $1",
+      [luna],
+    );
+    expect(await sidekick(taskId, true)).toMatchObject({ ok: true, route: { routeId: grok } });
+    const [alarm, ...more] = await noVerifierAlerts();
+    expect(more).toEqual([]);
+    expect(alarm).toMatchObject({
+      dedupeKey: noVerifierKey(taskId),
+      level: 'alert',
+      taskId,
+      title: '需求 #12 做完没人能验：开 PR 前验证派不出别家',
+      resolvedAt: null,
+    });
+    expect(alarm?.body).toContain('写这张单的已经有 claude 族，开 PR 前验证阶段没有能派的路由');
+    expect(alarm?.body).toContain('这张单改到了页面代码，GPT 不验');
+    // 验证阶段的别家接回来了：Lead 验收时再选路，验证留得下，撤掉（写明为什么、谁撤的）
+    await t.client.query("update stage_policy_routes set enabled = true where stage = 'verify'");
+    const lead = await pick({
+      taskId,
+      stage: 'plan',
+      models: STEPS.lead,
+      stickRouteId: 'carpool',
+      keepVerifier: keep(true, [], 'any'),
+    });
+    expect(lead).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+    const [cleared] = await noVerifierAlerts();
+    expect(cleared?.resolvedBy).toBe(PICK_ROUTE_ACTOR);
+    expect(cleared?.body).toMatch(/^已撤：再选路时给开 PR 前验证留得下别家了/);
+  });
+
+  it('开 PR 前验证派出去了：规划时报的「做完没人能验」跟着撤', async () => {
+    const { grok, luna, taskId } = await franceWorld();
+    await startedRun(taskId, 'carpool', 'plan');
+    await t.client.query(
+      "update stage_policy_routes set enabled = false where stage = 'verify' and route_id <> $1",
+      [luna],
+    );
+    await pick({
+      taskId,
+      stage: 'plan',
+      models: STEPS.lead,
+      stickRouteId: 'carpool',
+      keepVerifier: keep(true, [], 'any'),
+    });
+    expect((await noVerifierAlerts()).map((a) => a.resolvedAt)).toEqual([null]);
+    await t.client.query("update stage_policy_routes set enabled = true where stage = 'verify'");
+    expect(await verify(taskId, true)).toMatchObject({ ok: true, route: { routeId: grok } });
+    const [cleared] = await noVerifierAlerts();
+    expect(cleared?.resolvedBy).toBe(PICK_ROUTE_ACTOR);
+    expect(cleared?.body).toMatch(/^已撤：开 PR 前验证派出去了：Grok 订阅 · Grok 4.7 · Grok 命令行/);
+  });
+
+  it('Lead 续不上原来那条、只剩会让验证没人可派的 Grok：照常派（Lead 非派不可），当场报警', async () => {
+    const { grok, taskId } = await franceWorld();
+    await startedRun(taskId, 'carpool', 'plan');
+    await saveRouteProbe(t.db, { routeId: 'carpool', state: 'failed', at: NOW, detail: '登录失效' });
+    await t.client.query(
+      "update stage_policy_routes set enabled = false where stage = 'plan' and route_id = 'solo'",
+    );
+    const lead = await pick({
+      taskId,
+      stage: 'plan',
+      models: STEPS.lead,
+      stickRouteId: 'carpool',
+      keepVerifier: keep(true, [], 'any'),
+    });
+    expect(lead).toMatchObject({ ok: true, route: { routeId: grok } });
+    const [alarm] = await noVerifierAlerts();
+    expect(alarm?.body).toMatch(
+      /^再派 grok 族的话，写这张单的就有 claude、grok 族，开 PR 前验证阶段没有能派的路由/,
+    );
+  });
+
+  it('【故意造出的失败】这张单一个起过的会话都查不到：判不了验证留不留得下，明确报错（AUTHORS_UNKNOWN、不可重试），不当成谁都能验', async () => {
+    const { taskId } = await franceWorld();
+    await expect(sidekick(taskId, true)).rejects.toMatchObject({ code: 'AUTHORS_UNKNOWN', retryable: false });
+    expect(await noVerifierAlerts()).toEqual([]);
   });
 });
 
