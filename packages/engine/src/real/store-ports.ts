@@ -8,7 +8,9 @@
 // 同一个查询，查不到明确报错），验证那一步的事实也现读（照流程配置里验证的模型、暂停的池同样避开），一起交给 chooseRoute 判；
 // 留不下当场报警 no-verifier:<任务>（报不进去照常抛），留得下、验证派出去了撤掉它。
 // Claude 订阅池只派会话用户此刻真挂着的那个组织的（real/session-org.ts 现读 reclaude org list，不假定）；读不到、认不出，
-// 带组织类型的池一律不派、写明原因，别的池照常派；还没读完（reclaude 首跑同步配置）就过一会儿再选。
+// 带组织类型的池一律不派、写明原因，别的池照常派；还没读完（reclaude 首跑同步配置）、这会儿定不下来（读数刚变、引擎没切过
+// 号，#335）就过一会儿再选。不是挂着的那个组织的池：引擎打算切过去的（real/org-plan.ts，和切号同一个判法）算等得来——
+// 等切号，任务不挂起；续会话的那条只差切号就不等它，照常选到挂着的那个池（换池 fork 续上，#59）。
 // 失败一律明确：库没查成照常抛，事实对不上（RoutingInputError）抛 ROUTING_INPUT，不当成「没有路由」。
 // 全熔断判不判得了另有 stageAllOpen：和选路同一份事实、同一套熔断判定，不写库、不报警（每小时对账用来撤
 // routing:all-open）。组织还没读完、库读失败照抛，不返回「解了」。
@@ -51,6 +53,8 @@ import {
   chooseRoute,
   stageAllOpen as judgeStageAllOpen,
   type KeepVerifier,
+  type LiveOrgReading,
+  type OrgPlanView,
   type RouteFacts,
   type RouteRecord,
   RoutingInputError,
@@ -59,6 +63,7 @@ import {
   STAGE_NAMES,
 } from '../routing/index.ts';
 import { WIRED_HOSTS as WIRED_HOST_IDS } from './hosts.ts';
+import { orgPlanView } from './org-plan.ts';
 import type { SessionOrgReader } from './session-org.ts';
 
 /** 账号池整池暂停（设备被撤销、封号、登录失效、欠费：要人修）的提醒：dedupe_key = pool-hold:<池>。 */
@@ -99,6 +104,11 @@ export interface StorePortsDeps {
    * 候选里有这种池才读；读不到、认不出，这些池一律不派（写明原因），不拿拼车顶；还没读完就过一会儿再选。
    */
   sessionOrg: SessionOrgReader;
+  /**
+   * 引擎切号的打算（默认 real/org-plan.ts 的 orgPlanView：和切号同一份事实、同一个判法）：候选里有不是挂着的那个组织的池
+   * 才问。读不了照抛（选路报没查成，不当成不打算切）。测试可换。
+   */
+  orgPlan?: (input: { live: OrgKind; held: ReadonlySet<string>; now: Date }) => Promise<OrgPlanView>;
   now?: () => Date;
   /** [0, 1) 的随机数，试探用（调度策略开了试探才用得上）。 */
   draw?: () => number;
@@ -267,6 +277,8 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
       upstreamModel: r.upstreamModel,
       upstreamAliases: r.upstreamAliases,
       probedAt: r.probedAt?.toISOString() ?? null,
+      probeState: r.probeState,
+      probeOrg: r.probeOrg,
       quota: r.quota,
       windows: r.windows.map((w) => ({
         label: w.label,
@@ -358,6 +370,21 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
     }
   }
 
+  const planOf = deps.orgPlan ?? ((input) => orgPlanView(db, input));
+
+  /**
+   * 引擎切号的打算：读成了挂的是哪个、候选里又有不是它的组织的池才问（和切号同一个判法）。别的时候不给，选路照老样子。
+   */
+  async function orgPlanFor(
+    routes: readonly RouteFacts[],
+    live: LiveOrgReading | null,
+    held: ReadonlySet<string>,
+    now: Date,
+  ): Promise<OrgPlanView | undefined> {
+    if (!live?.ok || !routes.some((r) => r.orgKind && r.orgKind !== live.org)) return undefined;
+    return planOf({ live: live.org, held, now });
+  }
+
   async function allOpenAlarm(stage: StageKind, taskId: string, alarm: string): Promise<void> {
     try {
       await upsertAlert(db, {
@@ -385,9 +412,10 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
       const verifyAll = keep ? await loadStage('verify', now) : null;
       const verifyFacts = verifyAll && keep?.models ? onlyModels(verifyAll, keep.models) : verifyAll;
       // 会话用户此刻挂的组织：候选里有带组织类型的池（Claude 订阅）才读。读不到、认不出的原话交给选路，那些池一律不派；
-      // 还没读完（reclaude 首跑同步配置）、正在切号（real/org-switch.ts 让选路停下的那十几秒）不算认不出：过一会儿再选
+      // 还没读完（reclaude 首跑同步配置）、正在切号（real/org-switch.ts 让选路停下的那十几秒）、读数刚变又没有引擎切号
+      // （real/session-org.ts 的起点，#335）不算认不出：过一会儿再选，不悄悄照新读数派，也不挂起等人
       const live = [...all.routes, ...(verifyAll?.routes ?? [])].some((r) => r.orgKind)
-        ? await deps.sessionOrg({ waitMs: deps.orgReadWaitMs ?? ORG_READ_WAIT_MS })
+        ? await deps.sessionOrg({ waitMs: deps.orgReadWaitMs ?? ORG_READ_WAIT_MS, by: '选路' })
         : null;
       if (live && !live.ok && live.pending) {
         return {
@@ -398,6 +426,8 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         };
       }
       if (live && !live.ok) log('会话用户挂的组织认不出，Claude 订阅池这次不派', { why: live.why });
+      // 引擎切号的打算：这一步和给验证留一家的那一步同一份（两边的 Claude 池都按它判等不等切号）
+      const orgPlan = await orgPlanFor([...all.routes, ...(verifyAll?.routes ?? [])], live, held, now);
       const known = (id: string) => facts.routes.find((r) => r.routeId === id);
       const knownAny = (id: string) => all.routes.find((r) => r.routeId === id);
       // 开 PR 前验证只派别家：写这张单的族整族避开，点名的、续会话的也一样（一条都没有就明说没有别家可验，不拿同族顶）
@@ -412,6 +442,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
       const orgFacts = {
         ...(live?.ok ? { liveOrg: live.org } : {}),
         ...(live && !live.ok ? { liveOrgProblem: live.why } : {}),
+        ...(orgPlan ? { orgPlan } : {}),
       };
       const policy = deps.routingPolicy ? { policy: deps.routingPolicy } : {};
       // 验证那一步此刻的选路输入：和 verify.ts 真验证时一样只派别家（族由选路按写手族加上候选的族现填）、暂停着的池不派
@@ -526,12 +557,20 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
                 : `续同一个会话：${r.why}`,
             );
           }
-          // 暂时派不了（空位、额度、熔断到点）就等它，不换：换了就续不上这个会话。
-          if (r.kind === 'wait') {
+          // 暂时派不了（空位、额度、熔断到点）就等它，不换：换了就续不上这个会话。只差切号（会话用户挂的不是它的组织、
+          // 或切过来还没探过）不等它：照常选到挂着的那个池，换池 fork 续上（#59），不为等切号把活停着
+          const orgWait = r.verdicts.some((v) =>
+            v.blocks.some((b) => b.wait === 'org' || b.wait === 'probe'),
+          );
+          if (r.kind === 'wait' && !orgWait) {
             await settled(r);
             return waiting(r, ['续同一个会话，等这条路由']);
           }
-          notes.push(`续会话的路由用不了了（${r.reason}），照常选`);
+          notes.push(
+            r.kind === 'wait'
+              ? `续会话的路由要等切号（${r.reason}），照常选`
+              : `续会话的路由用不了了（${r.reason}），照常选`,
+          );
         }
       }
 
@@ -563,9 +602,9 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
       const now = clock();
       const facts = await loadStage(stage, now);
       const held = await heldPools();
-      // 和选路一样：候选里有带组织类型的池才读。还没读完不是「解了」，抛出去让对账记没查成。
+      // 和选路一样：候选里有带组织类型的池才读。还没读完、这会儿定不下来不是「解了」，抛出去让对账记没查成。
       const live = facts.routes.some((r) => r.orgKind)
-        ? await deps.sessionOrg({ waitMs: deps.orgReadWaitMs ?? ORG_READ_WAIT_MS })
+        ? await deps.sessionOrg({ waitMs: deps.orgReadWaitMs ?? ORG_READ_WAIT_MS, by: '每小时对账' })
         : null;
       if (live && !live.ok && live.pending) {
         throw new PortError(
@@ -575,6 +614,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         );
       }
       if (live && !live.ok) log('会话用户挂的组织认不出，Claude 订阅池按认不出挡', { why: live.why });
+      const orgPlan = await orgPlanFor(facts.routes, live, held, now);
       return judgeAllOpen({
         stage,
         configured: facts.configured,
@@ -587,6 +627,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         avoid: { poolIds: [...held] },
         ...(live?.ok ? { liveOrg: live.org } : {}),
         ...(live && !live.ok ? { liveOrgProblem: live.why } : {}),
+        ...(orgPlan ? { orgPlan } : {}),
         ...(deps.routingPolicy ? { policy: deps.routingPolicy } : {}),
       });
     },

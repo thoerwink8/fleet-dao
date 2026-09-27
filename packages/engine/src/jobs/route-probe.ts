@@ -1,7 +1,9 @@
 // 路由探针（#129，design 第九节「路由探针」）：一轮 = 记下开始 → 读全部路由 → 会话用户该不该切号（#157，org-switch.ts；
 // 切了这一轮探完核对）→ 逐条定探不探 → 该探的真起一次最小会话 → 每条写一条结论（只有 ok 在线，其余一律不在线、
-// 写明原因）→ 结局记进 schedule_runs。按一次的成本放慢的执行方式（cursor-agent、grok），上一次探通了、还没到再探的
-// 时候，这一轮不探、不重写，结论照旧（它的过期线也跟着放宽，routeProbeStaleMinutes）。
+// 写明原因；Claude 订阅池的还记下那时会话用户挂的组织，选路靠它分得清「那一轮挂着别的组织、没探它」和「探了没通」，#335）
+// → 结局记进 schedule_runs。按一次的成本放慢的执行方式（cursor-agent、grok），上一次探通了、还没到再探的
+// 时候，这一轮不探、不重写，结论照旧（它的过期线也跟着放宽，routeProbeStaleMinutes）。会话用户挂的组织这会儿定不下来
+// （读数刚变、引擎没切过号，real/session-org.ts）：Claude 订阅池这一轮也不探、结论照旧，这一轮记 partial、写明为什么。
 // scanned = 这一轮看过的路由条数（写下结论的，加上结论照旧的），found = 其中不在线的条数（驾驶舱「定时任务」页和调度台的
 // 在线数对得上）。没跑成、一条都没写进去、只写进去一部分，照实记 failed / unscanned / partial，不记成 ok（没跑成 ≠ 没问题）。
 import type { RouteProbeTarget, ScheduleResult } from '@fleet-dao/db';
@@ -62,8 +64,9 @@ export interface RouteProbeJobDeps {
   /** 执行方式 → 探法；没有的执行方式 = 引擎还没接这种插头。 */
   probers: Partial<Record<HostId, Prober>>;
   /**
-   * 会话用户此刻挂的组织（真实现是 real/session-org.ts：以会话用户跑 reclaude org list，认带 * 的那行的类型）。
-   * 只在探带组织类型的池（Claude 订阅）之前读，一条读一次（读成了的留一会儿），等到读完；不许抛，读不到、认不出回 ok: false。
+   * 会话用户此刻挂的组织（真实现是 real/session-org.ts：以会话用户跑 reclaude org list，认带 * 的那行的类型，按和选路、切号
+   * 同一个起点判）。只在探带组织类型的池（Claude 订阅）之前读，一条读一次（读成了的留一会儿），等到读完；不许抛，读不到、
+   * 认不出回 ok: false，这会儿定不下来（读数刚变、引擎没切过号）回 pending。
    */
   sessionOrg(): Promise<LiveOrgReading>;
   /**
@@ -71,12 +74,16 @@ export interface RouteProbeJobDeps {
    * 切过了这一轮探完核对切过去的那个池探通了没有。不给就不切。
    */
   orgSwitch?: OrgSwitchRound;
-  /** 写一条结论（真实现是 saveRouteProbe）；路由这一轮当中被删了回 route_not_found。 */
+  /**
+   * 写一条结论（真实现是 saveRouteProbe）；路由这一轮当中被删了回 route_not_found。org：Claude 订阅池的路由下这个结论时
+   * 会话用户挂的组织（读不到、不是 Claude 订阅池为 null）。
+   */
   save(write: {
     routeId: string;
     state: RouteProbeState;
     at: Date;
     detail: string;
+    org: OrgKind | null;
   }): Promise<'saved' | 'route_not_found'>;
   /** 一条路由真探完（写库之前）：真实现里接整池暂停的报警和撤销。抛了只记日志，不改结论。 */
   afterProbe?(target: ProbeTarget, attempt: ProbeAttempt): Promise<void>;
@@ -107,14 +114,20 @@ export type ProbePlan =
   /** failed：该探却探不了（会话用户挂的组织认不出，不知道探这个池扣的是谁）——不是按规矩不探，是出了要人看的毛病。 */
   | { state: 'not_wired' | 'skipped' | 'failed'; detail: string }
   /** 按一次的成本放慢的执行方式，上一次探通了、还没到再探的时候：这一轮不探、不重写，结论照旧（原因只进日志）。 */
-  | { kept: string };
+  | { kept: string }
+  /**
+   * 会话用户挂的组织这会儿定不下来（读数刚变、引擎没切过号；切号那几秒）：Claude 订阅池这一轮不探、不重写，结论照旧——
+   * 不知道这时探的是哪个组织，也不把没探的写成不在线。这一轮记 partial、写明为什么。
+   */
+  | { unsettled: string };
 
 /**
  * 这条路由这一轮探不探。先后就是优先级：按量计费 → 插头没接 → 渠道下架 → 模型下架 → 没有阶段在用 → 会话用户挂着别的组织
  * → 放慢的执行方式还没到再探的时候（ROUTE_PROBE_HOST_EVERY_MINUTES：只看上一次探通了的；没通的每轮都探）。
  * 按量计费排第一：不管插头接没接都不探（判断阶段的 Jev 就是按量的，它不经会话插头，说「派不了」反而误导）。
  * 不探的一律不在线（写明原因）；要探的交给这种执行方式的探法。live 是会话用户此刻挂的组织（带组织类型的池才用得上，
- * 别的传 null）：读不到、认不出就记没探成（failed），不拿哪个组织顶。
+ * 别的传 null）：读不到、认不出就记没探成（failed），不拿哪个组织顶；这会儿定不下来（pending）就这一轮不探、结论照旧
+ * （unsettled），不把没探的写成不在线。
  */
 export function planProbe(
   t: ProbeTarget,
@@ -147,6 +160,11 @@ export function planProbe(
     };
   }
   if (t.orgKind !== null) {
+    if (live && !live.ok && live.pending) {
+      return {
+        unsettled: `会话用户挂的组织这会儿定不下来（${live.why}）：${ORG_NAMES[t.orgKind]}池这一轮不探，结论照旧`,
+      };
+    }
     if (!live?.ok) {
       return {
         state: 'failed',
@@ -188,8 +206,12 @@ interface Conclusion {
   state: RouteProbeState;
   detail: string;
   at: Date;
+  /** Claude 订阅池的路由下这个结论时会话用户挂的组织（读不到、不是 Claude 订阅池为 null），跟结论一起写进库。 */
+  org: OrgKind | null;
   /** 放慢的执行方式还没到再探的时候：不写库，上一次探通的结论照旧（算在线）。 */
   kept?: boolean;
+  /** 会话用户挂的组织这会儿定不下来：不写库，上一次的结论照旧（在不在线照库里那样算）。 */
+  unsettled?: boolean;
 }
 
 /** 会话用户此刻挂的组织：读法约好了不抛，万一抛了也按认不出记（写明原因），不让整轮垮掉。 */
@@ -204,12 +226,21 @@ async function liveOrgOf(deps: RouteProbeJobDeps): Promise<LiveOrgReading> {
 async function conclude(deps: RouteProbeJobDeps, t: ProbeTarget): Promise<Conclusion> {
   // 带组织类型的池（Claude 订阅）探之前现读一次（读成了的留一会儿）：一轮要好几分钟，中途切了号也认得出
   const live = t.orgKind === null ? null : await liveOrgOf(deps);
+  // 写进库的「那时挂的组织」：读成了才有；读不到、这会儿定不下来都不写（选路就不会把它当成「另一个组织挂着时没探」）
+  const org = live?.ok ? live.org : null;
   const plan = planProbe(t, deps.probers, live, deps.now());
   if ('kept' in plan) {
     deps.log('info', '路由探针：还没到再探的时候，结论照旧', { routeId: t.routeId, detail: plan.kept });
-    return { target: t, state: 'ok', detail: plan.kept, at: deps.now(), kept: true };
+    return { target: t, state: 'ok', detail: plan.kept, at: deps.now(), org, kept: true };
   }
-  if (!('probe' in plan)) return { target: t, state: plan.state, detail: plan.detail, at: deps.now() };
+  if ('unsettled' in plan) {
+    deps.log('warn', '路由探针：会话用户挂的组织这会儿定不下来，Claude 池这一轮不探、结论照旧', {
+      routeId: t.routeId,
+      detail: plan.unsettled,
+    });
+    return { target: t, state: 'skipped', detail: plan.unsettled, at: deps.now(), org, unsettled: true };
+  }
+  if (!('probe' in plan)) return { target: t, state: plan.state, detail: plan.detail, at: deps.now(), org };
   let attempt = await attemptOf(plan.probe, t);
   if (attempt.kind === 'failed' && !attempt.poolHold) {
     const first = attempt.detail;
@@ -236,6 +267,7 @@ async function conclude(deps: RouteProbeJobDeps, t: ProbeTarget): Promise<Conclu
     state: attempt.kind === 'failed' ? 'failed' : 'ok',
     detail: clip(attempt.detail),
     at: deps.now(),
+    org,
   };
 }
 
@@ -287,9 +319,9 @@ async function probeRound(deps: RouteProbeJobDeps): Promise<{ result: ScheduleRe
     conclude(deps, t),
   );
   if (deps.orgSwitch) {
-    // 真探了的才算读回（放慢没真探、结论照旧的不算）
+    // 真探了的才算读回（放慢没真探、组织定不下来没探的，结论照旧，都不算）
     const probed = conclusions
-      .filter((c) => !c.kept)
+      .filter((c) => !c.kept && !c.unsettled)
       .map((c) => ({
         routeId: c.target.routeId,
         orgKind: c.target.orgKind,
@@ -305,6 +337,8 @@ async function probeRound(deps: RouteProbeJobDeps): Promise<{ result: ScheduleRe
   const online: string[] = [];
   const unsaved: string[] = [];
   const gone: string[] = [];
+  const unsettled: Conclusion[] = [];
+  let written = 0;
   let offline = 0;
   let kept = 0;
   for (const c of conclusions) {
@@ -313,9 +347,22 @@ async function probeRound(deps: RouteProbeJobDeps): Promise<{ result: ScheduleRe
       online.push(c.target.routeId);
       continue;
     }
+    if (c.unsettled) {
+      // 没探、不写：在不在线照库里上一次的结论算
+      unsettled.push(c);
+      if (c.target.alive) online.push(c.target.routeId);
+      else offline += 1;
+      continue;
+    }
     let saved: 'saved' | 'route_not_found';
     try {
-      saved = await deps.save({ routeId: c.target.routeId, state: c.state, at: c.at, detail: c.detail });
+      saved = await deps.save({
+        routeId: c.target.routeId,
+        state: c.state,
+        at: c.at,
+        detail: c.detail,
+        org: c.org,
+      });
     } catch (err) {
       unsaved.push(`${c.target.routeId}：${message(err)}`);
       continue;
@@ -324,12 +371,12 @@ async function probeRound(deps: RouteProbeJobDeps): Promise<{ result: ScheduleRe
       gone.push(c.target.routeId);
       continue;
     }
+    written += 1;
     if (c.state === 'ok') online.push(c.target.routeId);
     else offline += 1;
   }
-  const written = online.length - kept + offline;
   const goneNote = gone.length > 0 ? `；探的时候被删掉的路由：${gone.join('、')}` : '';
-  if (written === 0 && (kept === 0 || unsaved.length > 0)) {
+  if (written === 0 && (kept + unsettled.length === 0 || unsaved.length > 0)) {
     return {
       result:
         unsaved.length > 0
@@ -338,16 +385,21 @@ async function probeRound(deps: RouteProbeJobDeps): Promise<{ result: ScheduleRe
       online,
     };
   }
-  // 结论照旧的也算看过了（上一次探通、在线），不算不在线的
-  const scanned = written + kept;
-  if (unsaved.length > 0) {
+  // 结论照旧的也算看过了（放慢的上一次探通、在线；组织定不下来的照上一次的算），不在线的算进 found
+  const scanned = written + kept + unsettled.length;
+  const problems = [
+    ...(unsaved.length > 0
+      ? [`${unsaved.length} 条路由的结论没写进库（它们还是上一轮的样子）：${unsaved.join('；')}`]
+      : []),
+    ...(unsettled.length > 0
+      ? [
+          `会话用户挂的组织这会儿定不下来，Claude 订阅池的 ${unsettled.length} 条路由这一轮没探、结论照旧（${unsettled.map((c) => c.target.routeId).join('、')}）：${unsettled[0]?.detail ?? ''}`,
+        ]
+      : []),
+  ];
+  if (problems.length > 0) {
     return {
-      result: {
-        outcome: 'partial',
-        why: `${unsaved.length} 条路由的结论没写进库（它们还是上一轮的样子）：${unsaved.join('；')}${goneNote}`,
-        scanned,
-        found: offline,
-      },
+      result: { outcome: 'partial', why: `${problems.join('；')}${goneNote}`, scanned, found: offline },
       online,
     };
   }

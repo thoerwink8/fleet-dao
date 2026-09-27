@@ -61,6 +61,139 @@ describe('会话用户挂着哪个组织（design 第九节：一个会话用户
   });
 });
 
+describe('不是挂着的那个组织的池：引擎打算切过去的等切号，不打算切的硬挡（#335，和切号同一个判法）', () => {
+  const solo = route('solo', { orgKind: 'solo', poolName: '独享号' });
+
+  it('引擎下一轮就切过去（to 是它的组织、没给时刻）：等得来（等切号），时刻不知道、按轮询再看', () => {
+    const blocks = blocksFor(
+      solo,
+      entry('solo', 0),
+      ctx({ orgPlan: { to: 'solo', at: null, why: '拼车额度用满了，切到独享接着干' } }),
+    );
+    expect(blocks).toEqual([
+      {
+        code: 'org-not-live',
+        text: '会话用户现在挂的是拼车组织，独享号要等切过去才能派；引擎下一轮路由探针切过去（拼车额度用满了，切到独享接着干），等切号',
+        wait: 'org',
+        until: null,
+      },
+    ]);
+    expect(groupOf(blocks)).toEqual({ kind: 'wait', waitFor: 'org', until: null });
+  });
+
+  it('引擎到点才切回（拼车几点恢复）：等到那个时刻', () => {
+    const car = route('car', { orgKind: 'carpool', poolName: '拼车号' });
+    const blocks = blocksFor(
+      car,
+      entry('car', 0),
+      ctx({ liveOrg: 'solo', orgPlan: { to: 'carpool', at: at(2), why: '拼车 2 小时后恢复' } }),
+    );
+    expect(blocks[0]).toMatchObject({ code: 'org-not-live', wait: 'org', until: at(2) });
+    expect(blocks[0]?.text).toContain('以后的那一轮路由探针切过去（拼车 2 小时后恢复）');
+    // 那个时刻已经过了（读数慢了一步）：不给过去的时刻，按下一轮算
+    const late = blocksFor(
+      car,
+      entry('car', 0),
+      ctx({ liveOrg: 'solo', orgPlan: { to: 'carpool', at: at(-1), why: '恢复了' } }),
+    );
+    expect(late[0]).toMatchObject({ wait: 'org', until: null });
+  });
+
+  it('引擎不打算切过去（to 是另一个或空）：硬挡，写明为什么不切', () => {
+    for (const to of ['carpool', null] as const) {
+      const blocks = blocksFor(
+        solo,
+        entry('solo', 0),
+        ctx({ orgPlan: { to, at: null, why: '挂着拼车，拼车额度没用满' } }),
+      );
+      expect(blocks.map((b) => b.code)).toEqual(['org-not-live']);
+      expect(blocks[0]?.text).toBe(
+        '会话用户现在挂的是拼车组织，独享号要等切过去才能派；引擎现在不打算切过去（挂着拼车，拼车额度没用满）',
+      );
+      expect(groupOf(blocks)).toEqual({ kind: 'hard' });
+    }
+  });
+
+  it('整池暂停着的（pool-hold）：就算引擎打算切过去也照样硬挡（避开整池是硬挡）', () => {
+    const blocks = blocksFor(
+      solo,
+      entry('solo', 0),
+      ctx({
+        avoid: {
+          routeIds: new Set(),
+          poolIds: new Set(['pool-solo']),
+          modelIds: new Set(),
+          families: new Set(),
+        },
+        orgPlan: { to: 'solo', at: null, why: '切' },
+      }),
+    );
+    expect(blocks.map((b) => b.code)).toEqual(['avoided', 'org-not-live']);
+    expect(groupOf(blocks)).toEqual({ kind: 'hard' });
+  });
+});
+
+describe('探针在另一个组织挂着时没探的（skipped、probeOrg 是另一个组织，#335）', () => {
+  const skipped = (over: Partial<RouteFacts> = {}) =>
+    route('car', {
+      orgKind: 'carpool',
+      poolName: '拼车号',
+      blockers: ['offline'],
+      probeState: 'skipped',
+      probeOrg: 'solo',
+      probedAt: at(-0.1),
+      ...over,
+    });
+
+  it('现在挂的正是它的组织：不当成坏了，等下一轮探针在这个组织下探过（最早上次结论之后一轮）', () => {
+    const blocks = blocksFor(skipped(), entry('car', 0), ctx());
+    expect(blocks).toEqual([
+      {
+        code: 'offline',
+        text: `探针上一次看它（2026-09-24 23:54 UTC）时会话用户挂的是独享组织，没探它；现在挂的是拼车组织，等下一轮路由探针在拼车组织下探过再派`,
+        wait: 'probe',
+        until: new Date(Date.parse(at(-0.1)) + 15 * 60_000).toISOString(),
+      },
+    ]);
+    expect(groupOf(blocks)).toMatchObject({ kind: 'wait', waitFor: 'probe' });
+    // 下一轮该探的时刻过了还没新结论：时刻不给，按轮询再看
+    expect(blocksFor(skipped({ probedAt: at(-0.5) }), entry('car', 0), ctx())[0]).toMatchObject({
+      wait: 'probe',
+      until: null,
+    });
+  });
+
+  it('【故意造出的失败】过了探针的过期线还没探到：按不在线硬挡，写明探针可能停了', () => {
+    const blocks = blocksFor(skipped({ probedAt: at(-1) }), entry('car', 0), ctx());
+    expect(blocks.map((b) => b.code)).toEqual(['offline']);
+    expect(blocks[0]?.text).toContain('之后 1 小时探针都没再探它（探针可能停了），按不在线算');
+    expect(groupOf(blocks)).toEqual({ kind: 'hard' });
+  });
+
+  it('【故意造出的失败】别的不在线照老样子硬挡：探了没通、探针那时组织认不出、探的时候就是它的组织、没给结论', () => {
+    for (const over of [
+      { probeState: 'failed' as const },
+      { probeOrg: null },
+      { probeOrg: 'carpool' as const },
+      { probeState: null },
+      { probedAt: null },
+    ]) {
+      const blocks = blocksFor(skipped(over), entry('car', 0), ctx());
+      expect(blocks).toEqual([
+        { code: 'offline', text: '不在线（探活或熔断判的）', wait: null, until: null },
+      ]);
+    }
+  });
+
+  it('现在挂的还是另一个组织：照样不在线，另加「要等切过去」', () => {
+    const blocks = blocksFor(skipped(), entry('car', 0), ctx({ liveOrg: 'solo' }));
+    expect(blocks.map((b) => [b.code, b.wait])).toEqual([
+      ['offline', null],
+      ['org-not-live', null],
+    ]);
+  });
+});
+
 describe('候选查询给的被挡原因', () => {
   it('没被挡的能派', () => {
     expect(codes(route('a'))).toEqual([]);

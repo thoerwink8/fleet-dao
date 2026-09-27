@@ -1,27 +1,39 @@
-// 会话用户此刻挂的 reclaude 组织（design 第九节「一个会话用户，同一时刻只挂一个组织」）：选路（store-ports 的 pickRoute）、
-// 路由探针、每小时对账每次用之前读，读成了的留很短一会儿（SESSION_ORG_TTL_MS）。这里只读；切号在 real/org-switch.ts（#157，
-// 路由探针每一轮探之前判），切的那一会儿经 hold 让选路停下、切完丢掉留着的读数。
+// 会话用户此刻挂的 reclaude 组织（design 第九节「一个会话用户，同一时刻只挂一个组织」）。选路（store-ports 的 pickRoute，
+// 每小时对账也借它判）、路由探针、切号（real/org-switch.ts）都经这里的同一个读法（real/index.ts 只装一个），按同一个起点判：
+// 谁读到的都一个口径（#335）。
 // 读法（specs/157-拼车自动切换/需求.md）：以会话用户的身份（经 fleet-agent-scope，exec.ts：引擎进不去它的家）跑它家里的
-// reclaude org list——带 * 的是现在挂的，类型那一列 team 是拼车、personal 是独享。解析和额度读取器是同一个（adapters 的
-// parseOrgList），只留类型和是否当前：组织编号、名字、邮箱一概不往外带，编号不进仓、也不用配文件。前面的「Syncing config…」
-// 之类不是组织那一行的，一律跳过。
-// 读不到（没跑成、登录失效、封号）、一个组织都认不出、没有带 * 的行、带 * 的不止一行、类型认不出：一律明确失败（ok: false，
-// 带白话原因，原因里不带编号、邮箱：它会进库、上驾驶舱），调用方按「会话用户挂的组织认不出」处理——带组织类型的池一律
-// 不派、不探，不拿拼车顶。
-// reclaude 更新后首跑会先「Syncing config…」上百秒：一次读最多等 SESSION_ORG_TIMEOUT_MS；选路只等 waitMs，没读完回 pending
-// （选路按「过一会儿再选」处理），读在后台接着跑完、留下结果。
+// reclaude org list——带 * 的是现在挂的，类型那一列 team 是拼车、personal 是独享。解析和判法跟额度读取器、切号帮手同一个
+// （adapters 的 parseOrgList、currentOrgOf），只留类型：组织编号、名字、邮箱一概不往外带，编号不进仓、也不用配文件。
+// 读不到（没跑成、登录失效、封号）、认不出（一个组织都没有、没有带 * 的行、带 * 的不止一行、类型认不出）：一律明确失败
+// （ok: false，带白话原因，原因里不带编号、邮箱：它会进库、上驾驶舱），调用方按「会话用户挂的组织认不出」处理——带组织类型的
+// 池一律不派、不探，不拿拼车顶。
+// 起点（#335）：认下来的那个组织。读成的和它不一样、中间又没有引擎切过号（engineSwitched），不悄悄照新的来：回 pending
+// （「这会儿定不下来」：选路过一会儿再选、探针这一轮不探 Claude 池、切号这一轮不判），报一次 drift（带前后两次读数，真装配推
+// session-org:drift 提醒、记操作记录）；读数回到起点就照常（settled back），连着 SESSION_ORG_SETTLE_MS 都是新的才认它当起点
+// （settled accepted）。引擎自己切的号不算：切完读成的第一次就是新起点。09-27 21:54 那次就是帅位在法国手动切过去又切回来，
+// 选路在中间读到独享、照它挡掉了拼车，任务挂起等人。
+// 读成了的留很短一会儿（SESSION_ORG_TTL_MS），同时来的几次共用一次读。reclaude 更新后首跑会先「Syncing config…」上百秒：一次
+// 读最多等 SESSION_ORG_TIMEOUT_MS；选路只等 waitMs，没读完回 pending（选路按「过一会儿再选」处理），读在后台接着跑完、留下结果。
 import { randomUUID } from 'node:crypto';
 import { redact, type SessionUser } from '@fleet-dao/adapters';
-import { parseOrgList } from '@fleet-dao/adapters/quota';
-import type { LiveOrgReading } from '../routing/index.ts';
+import { currentOrgOf, parseOrgList } from '@fleet-dao/adapters/quota';
+import type { OrgKind } from '@fleet-dao/shared';
+import { type LiveOrgReading, ORG_NAMES } from '../routing/index.ts';
 import type { UserCommandResult, UserExec } from './exec.ts';
 
 /** 读成了的留多久：选路的几次调用、探针一轮里的几条路由共用一次读。读失败的不留，下一次照读。 */
 export const SESSION_ORG_TTL_MS = 30_000;
 /** 一次读最多等多久：平时 0.3 秒；reclaude 更新后首跑先同步配置，上百秒（和路由探针起会话给的一样长，real/route-probe.ts）。 */
 export const SESSION_ORG_TIMEOUT_MS = 150_000;
+/**
+ * 读成的和起点不一样、又没有引擎切过号：连着这么久读到的都是新的才认它。人手动切了留着，引擎最多晚这么久照新的来；切过去又
+ * 切回来不到这么久（09-27 21:53–21:55 那种），就一直当没定下来，回到起点照常，活不派到临时挂上的那个组织。
+ */
+export const SESSION_ORG_SETTLE_MS = 120_000;
 
 const LIST = 'reclaude org list';
+/** 起在重读之前（切号、切号前的现读把它作废了）的那次读回来时，给等它的人的原因。 */
+export const STALE_READ_WHY = `这次 ${LIST} 起在引擎重读（切号前后）之前，读数不算、也不留，过一会儿再读`;
 
 const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
@@ -29,6 +41,37 @@ const message = (err: unknown) => (err instanceof Error ? err.message : String(e
 function scrub(text: string): string {
   return redact(text, 200).replace(/\d{3,}/g, '<数>');
 }
+
+const BEIJING_OFFSET_MS = 8 * 60 * 60_000;
+
+/** 北京时间「09-27 21:54:03」：前后两次读数常在同一分钟里，带上秒。 */
+export function readingStamp(at: Date): string {
+  const s = new Date(at.getTime() + BEIJING_OFFSET_MS).toISOString();
+  return `${s.slice(5, 10)} ${s.slice(11, 19)}`;
+}
+
+/** 一次读成的：哪个组织、几点读完、谁读的（选路、路由探针、切号、每小时对账）。 */
+export interface OrgSighting {
+  org: OrgKind;
+  at: Date;
+  by: string;
+}
+
+/**
+ * 起点的变动（真装配里推提醒、记操作记录：real/org-switch.ts 的 orgDriftReporter）。
+ * drift：读成的和起点不一样、引擎没切过号——from 是最近一次读到起点那个组织的，to 是第一次读到新组织的（前后两次读数）。
+ * settled：定下来了——back 读数回到了起点；accepted 连着 SESSION_ORG_SETTLE_MS 都是新的，认它当起点；engine 引擎切了号，
+ * 以切完读成的为准。last 是定下来的那一次读（引擎切号那种没有）。
+ */
+export type SessionOrgEvent =
+  | { kind: 'drift'; from: OrgSighting; to: OrgSighting }
+  | {
+      kind: 'settled';
+      how: 'back' | 'accepted' | 'engine';
+      from: OrgSighting;
+      to: OrgSighting;
+      last: OrgSighting | null;
+    };
 
 export interface SessionOrgDeps {
   exec: UserExec;
@@ -38,9 +81,13 @@ export interface SessionOrgDeps {
   now?: () => Date;
   ttlMs?: number;
   timeoutMs?: number;
+  settleMs?: number;
+  /** 起点的变动交给谁（真装配推 session-org:drift、记操作记录）。抛了只记错误日志，读数照样按判出来的给。 */
+  onEvent?: (event: SessionOrgEvent) => Promise<void> | void;
+  log?: (level: 'info' | 'warn' | 'error', message: string, fields?: Record<string, unknown>) => void;
 }
 
-/** 读一次（不留）。没读成一律 ok: false（带原因），不抛。 */
+/** 读一次（不留、不按起点判）。没读成一律 ok: false（带原因），不抛。 */
 export async function readSessionOrg(deps: SessionOrgDeps): Promise<LiveOrgReading> {
   const what = `以会话用户 ${deps.user} 跑 ${LIST}`;
   const timeoutMs = deps.timeoutMs ?? SESSION_ORG_TIMEOUT_MS;
@@ -74,58 +121,115 @@ export async function readSessionOrg(deps: SessionOrgDeps): Promise<LiveOrgReadi
     const tail = scrub(r.stderr);
     return { ok: false, why: `${what}：退出码 ${r.code ?? '空'}${tail ? `（${tail}）` : ''}` };
   }
-  const rows = parseOrgList(stdout);
-  if (rows.length === 0) {
-    return { ok: false, why: `${what}：输出里一个组织都认不出（没有「编号 名字 类型」那样的行）` };
-  }
-  const current = rows.filter((row) => row.current);
-  if (current.length === 0) return { ok: false, why: `${what}：没有带 * 的行，认不出现在挂的是哪个组织` };
-  if (current.length > 1) {
-    return { ok: false, why: `${what}：带 * 的有 ${current.length} 行，认不出现在挂的是哪个组织` };
-  }
-  const kind = current[0]?.kind;
-  if (!kind)
-    return { ok: false, why: `${what}：现在挂的那个组织类型认不出（只认 team 拼车、personal 独享）` };
-  return { ok: true, org: kind };
+  const current = currentOrgOf(parseOrgList(stdout));
+  if (!current.ok) return { ok: false, why: `${what}：${current.why}` };
+  return { ok: true, org: current.kind };
 }
 
 /**
- * 读会话用户此刻挂的组织。waitMs：最多等这么久，没读完回 pending（读在后台接着跑完、留下结果，下一次就用上）；
- * 不给就等到读完（最多 SESSION_ORG_TIMEOUT_MS）。
+ * 读会话用户此刻挂的组织，按起点判过。waitMs：最多等这么久，没读完回 pending（读在后台接着跑完、留下结果，下一次就用上）；
+ * 不给就等到读完（最多 SESSION_ORG_TIMEOUT_MS）。by：谁在读（写进前后两次读数里）。
  */
-export type SessionOrgReader = (options?: { waitMs?: number }) => Promise<LiveOrgReading>;
+export type SessionOrgReader = (options?: { waitMs?: number; by?: string }) => Promise<LiveOrgReading>;
 
 /**
- * 读法加两样只给切号（real/org-switch.ts）用的：hold 让之后的读都回 pending（选路过一会儿再选，切号那几秒不派新会话），
- * 交回解除的函数，解除时连留着的读数一起丢掉；forget 丢掉留着的读数，下一次现读。切号前起的读晚于切号才回来，也不留它。
+ * 读法加三样只给切号（real/org-switch.ts）用的：hold 让之后的读都回 pending（选路过一会儿再选，切号那几秒不派新会话），
+ * 交回解除的函数，解除时连留着的读数一起丢掉；forget 丢掉留着的读数，下一次现读（起点不动）；engineSwitched 引擎刚经帮手切过号
+ * （成没成都算），切完读成的第一次就是新起点，不算没记录的变动。切号前起的读晚于这些才回来，读数不算、也不留。
  */
 export type SessionOrgControl = SessionOrgReader & {
   hold(why: string): () => void;
   forget(): void;
+  engineSwitched(): Promise<void>;
 };
 
+function driftWhy(d: { from: OrgSighting; to: OrgSighting }, last: OrgSighting, settleMs: number): string {
+  const from = ORG_NAMES[d.from.org];
+  const to = ORG_NAMES[d.to.org];
+  const again =
+    last.at.getTime() > d.to.at.getTime() ? `，${readingStamp(last.at)} ${last.by}再读还是${to}` : '';
+  return (
+    `会话用户挂的组织和上一次读的不一样，引擎没切过号：${readingStamp(d.from.at)} ${d.from.by}读到${from}，` +
+    `${readingStamp(d.to.at)} ${d.to.by}读到${to}${again}（北京时间）。等读数定下来再照它：连着 ` +
+    `${Math.round(settleMs / 60_000)} 分钟都是${to}才认，回到${from}就照常`
+  );
+}
+
 /**
- * 选路、探针、每小时对账共用的读法：读成了的留 ttlMs（默认 30 秒），读失败的不留；同时来的几次共用一次读。不抛。
+ * 选路、探针、切号、每小时对账共用的读法：读成了的留 ttlMs（默认 30 秒），读失败的不留；同时来的几次共用一次读。
+ * 每次读成都按起点判一次（上面文件头）。不抛。
  */
 export function sessionOrgReader(deps: SessionOrgDeps): SessionOrgControl {
   const clock = deps.now ?? (() => new Date());
   const ttl = deps.ttlMs ?? SESSION_ORG_TTL_MS;
+  const settleMs = deps.settleMs ?? SESSION_ORG_SETTLE_MS;
+  const log = deps.log ?? ((level, text, fields) => console[level](text, fields ?? {}));
   let kept: { at: number; value: LiveOrgReading } | null = null;
   let reading: Promise<LiveOrgReading> | null = null;
   let held: string | null = null;
   let holder: object | null = null;
-  // forget 一次加一：起读时记下来，回来时对不上（这中间切过号）就不留、也不当成「还在读」的那一次
+  // forget 一次加一：起读时记下来，回来时对不上（这中间重读过、切过号）就不按它判、不留
   let generation = 0;
-  const start = (): Promise<LiveOrgReading> => {
+  // 起点：认下来的那个组织（最近一次读到它的那一次）；null = 还没读成过，或引擎刚切过号（下一次读成的就是起点）
+  let baseline: OrgSighting | null = null;
+  // 读成的和起点不一样、还没定下来：从哪次（最近一次读到起点的）变到哪次（第一次读到新组织的）
+  let drift: { from: OrgSighting; to: OrgSighting } | null = null;
+
+  const report = async (events: readonly SessionOrgEvent[]) => {
+    for (const event of events) {
+      try {
+        await deps.onEvent?.(event);
+      } catch (err) {
+        log('error', '会话用户挂的组织：起点变动没记下（提醒、操作记录没写进库），读数照样按判出来的给', {
+          event: event.kind,
+          error: message(err),
+        });
+      }
+    }
+  };
+
+  /** 这一代读成的一次读数按起点判：改起点、记变动。一次读只判一次。 */
+  const judge = (raw: LiveOrgReading, by: string, events: SessionOrgEvent[]): LiveOrgReading => {
+    if (!raw.ok) return raw;
+    const seen: OrgSighting = { org: raw.org, at: clock(), by };
+    if (baseline === null) {
+      baseline = seen;
+      return raw;
+    }
+    if (seen.org === baseline.org) {
+      if (drift) events.push({ kind: 'settled', how: 'back', from: drift.from, to: drift.to, last: seen });
+      baseline = seen;
+      drift = null;
+      return raw;
+    }
+    if (!drift) {
+      drift = { from: baseline, to: seen };
+      events.push({ kind: 'drift', from: baseline, to: seen });
+    }
+    if (seen.at.getTime() - drift.to.at.getTime() >= settleMs) {
+      events.push({ kind: 'settled', how: 'accepted', from: drift.from, to: drift.to, last: seen });
+      baseline = seen;
+      drift = null;
+      return raw;
+    }
+    return { ok: false, pending: true, why: driftWhy(drift, seen, settleMs) };
+  };
+
+  const start = (by: string): Promise<LiveOrgReading> => {
     if (!reading) {
       const gen = generation;
       const current: Promise<LiveOrgReading> = readSessionOrg(deps)
         .catch(
           (err: unknown): LiveOrgReading => ({ ok: false, why: `读会话用户挂的组织出错：${message(err)}` }),
         )
-        .then((value) => {
-          if (gen === generation) kept = value.ok ? { at: clock().getTime(), value } : null;
+        .then(async (raw): Promise<LiveOrgReading> => {
           if (reading === current) reading = null;
+          // 起在重读之前：读数不算（可能是切号前的组织），也不留、不当起点；读失败的原样给（本来就不算数）
+          if (gen !== generation) return raw.ok ? { ok: false, pending: true, why: STALE_READ_WHY } : raw;
+          const events: SessionOrgEvent[] = [];
+          const value = judge(raw, by, events);
+          kept = raw.ok ? { at: clock().getTime(), value } : null;
+          await report(events);
           return value;
         });
       reading = current;
@@ -141,7 +245,7 @@ export function sessionOrgReader(deps: SessionOrgDeps): SessionOrgControl {
     if (held !== null) return { ok: false, pending: true, why: held };
     const now = clock().getTime();
     if (kept && now >= kept.at && now - kept.at < ttl) return kept.value;
-    const pending = start();
+    const pending = start(options.by?.trim() || '引擎');
     const waitMs = options.waitMs;
     if (waitMs === undefined) return pending;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -177,5 +281,12 @@ export function sessionOrgReader(deps: SessionOrgDeps): SessionOrgControl {
       };
     },
     forget,
+    async engineSwitched() {
+      const was = drift;
+      baseline = null;
+      drift = null;
+      forget();
+      if (was) await report([{ kind: 'settled', how: 'engine', from: was.from, to: was.to, last: null }]);
+    },
   });
 }

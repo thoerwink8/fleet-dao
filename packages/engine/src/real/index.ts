@@ -23,7 +23,7 @@ import {
 import { hourlyReconcileJob } from './hourly-reconcile.ts';
 import { engineJevFromEnv } from './jev-port.ts';
 import { registerEngineJobs } from './jobs.ts';
-import { orgSwitchRound } from './org-switch.ts';
+import { orgDriftReporter, orgSwitchRound } from './org-switch.ts';
 import { routeProbeJob } from './route-probe.ts';
 import { type SessionOrgReader, sessionOrgReader } from './session-org.ts';
 import {
@@ -41,7 +41,9 @@ export interface RealPortsDeps {
   gh: EngineGitHub;
   trees: WorkTrees;
   exec: UserExec;
-  /** 会话用户此刻挂的组织（real/session-org.ts）：选路只派它挂着的那个 Claude 订阅池。 */
+  /**
+   * 会话用户此刻挂的组织（real/session-org.ts）：选路只派它挂着的那个 Claude 订阅池。和探针、切号是同一个（按同一个起点判）。
+   */
   sessionOrg: SessionOrgReader;
   /** 引擎自己的临时目录（bundle）、存档目录（没合并就收的树里没提交的改动）。 */
   tmpDir: string;
@@ -236,9 +238,15 @@ export function realPortsFromEnv(
   const jev = engineJevFromEnv(db, env);
   const exec = scopeExec();
   // 会话用户此刻挂的组织：法国只有一个会话用户（design 第九节），两个 Claude 池都跑在它下面、同一时刻只有它挂着的那个能派。
-  // 以它跑它家里的 reclaude org list（和会话同一份 reclaude）；选路、探针、每小时对账共用这一个（读成了的留 30 秒）
+  // 以它跑它家里的 reclaude org list（和会话同一份 reclaude）；选路、探针、切号、每小时对账共用这一个（读成了的留 30 秒），
+  // 按同一个起点判：读数变了、引擎没切过号，推 session-org:drift（带前后两次读数），定下来之前谁都不照它来（#335）
   const [sessionUser] = SESSION_USERS;
-  const sessionOrg = sessionOrgReader({ exec, user: sessionUser, reclaude: claudeCommand(sessionUser) });
+  const sessionOrg = sessionOrgReader({
+    exec,
+    user: sessionUser,
+    reclaude: claudeCommand(sessionUser),
+    onEvent: orgDriftReporter({ db, user: sessionUser, machine: config.machine }),
+  });
   const real = createRealPorts({
     db,
     jev: jev.port,

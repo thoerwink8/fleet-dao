@@ -21,6 +21,7 @@ export { formatQuotaTable } from './format.ts';
 export { productionQuotaIo } from './io.ts';
 export { DEFAULT_TIMEOUT_MS, READERS, readAllQuotas } from './read-all.ts';
 export {
+  currentOrgOf,
   findUsageReport,
   parseOrgList,
   readingsFromUsageReport,

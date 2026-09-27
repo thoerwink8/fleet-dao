@@ -1,6 +1,6 @@
 // 选路的输入与结果。输入由引擎的 pickRoute 端口从库里取齐（候选路由、熔断、战绩），结果只有三种：派、等、派不出。
 // 时刻一律 ISO 字符串（和熔断一样），认不出就抛 RoutingInputError，不当成「没有」。
-import type { HostId, OrgKind, QuotaWindowKind, StageKind } from '@fleet-dao/shared';
+import type { HostId, OrgKind, QuotaWindowKind, RouteProbeState, StageKind } from '@fleet-dao/shared';
 import type { RoutingPolicy } from './policy.ts';
 
 /**
@@ -91,6 +91,13 @@ export interface RouteFacts {
    * 没更新（探针可能停了）照派，派工理由里写明（choose.ts 的 probeNote）。
    */
   probedAt: string | null;
+  /** 那次结论是什么（routes.probe_state）：探针还没看过为空。不给 = 不知道（老的输入），按 offline 原样硬挡。 */
+  probeState?: RouteProbeState | null;
+  /**
+   * Claude 订阅池的路由：探针下那次结论时会话用户挂的是哪个组织（routes.probe_org）；读不到、不是 Claude 订阅池为空。
+   * 结论是 skipped、这里是另一个组织 = 那一轮另一个组织挂着、没探它，不是它坏了：它的组织挂上以后等下一轮探针（filter.ts）。
+   */
+  probeOrg?: OrgKind | null;
   /** 候选查询算好的：ok / exhausted / unknown（没读成、读数过期、判不了扣不扣）。 */
   quota: 'ok' | 'exhausted' | 'unknown';
   windows: RouteWindow[];
@@ -128,6 +135,17 @@ export interface StageRouteEntry {
  */
 export type LiveOrgReading = { ok: true; org: OrgKind } | { ok: false; why: string; pending?: true };
 
+/**
+ * 引擎切号的打算（engine 的 jobs/org-switch.ts 的 orgIntent，和切号同一个判法、同一份事实）：to 是引擎打算让会话用户挂到的
+ * 组织（下一轮路由探针切；at 给了是到那个时刻以后的那一轮，例如拼车几点恢复），为空 = 不打算切，why 写为什么。
+ * 选路按它判「不是挂着的那个组织的池」：引擎打算切过去的等得来（等切号，任务不挂起），不打算切的硬挡、写明为什么。
+ */
+export interface OrgPlanView {
+  to: OrgKind | null;
+  at: string | null;
+  why: string;
+}
+
 export interface ChooseRouteInput {
   stage: StageKind;
   /** 这个阶段在调度台上配过顺序没有（stage_policies 有没有这一行）。没配过就派不出，不按 id 乱挑。 */
@@ -157,6 +175,10 @@ export interface ChooseRouteInput {
    * 「会话用户挂的组织认不出（…）」。和 liveOrg 不能同时给。
    */
   liveOrgProblem?: string;
+  /**
+   * 引擎切号的打算（OrgPlanView）：只在给了 liveOrg、候选里又有不是它的组织的池时才要。不给 = 没判，那些池照老样子硬挡。
+   */
+  orgPlan?: OrgPlanView;
   /** [0, 1) 的随机数，试探用；由工作流经 decide 生成、记进历史。试探开着时必须给。 */
   draw?: number;
   now: string;
@@ -209,12 +231,18 @@ export type BlockCode =
   /** 选它开 PR 前验证就没有别家可派了（ChooseRouteInput.keepVerifier）。 */
   | 'no-verifier';
 
+/**
+ * 等什么：slot 空位 / quota 额度清零 / breaker 熔断到点 / org 引擎切号（会话用户挂的不是这个池的组织，引擎打算切过去）/
+ * probe 探针在这个组织下探一次（上一轮另一个组织挂着，没探它）。
+ */
+export type RouteWaitKind = 'slot' | 'quota' | 'breaker' | 'org' | 'probe';
+
 export interface Block {
   code: BlockCode;
   /** 白话，驾驶舱直接显示。 */
   text: string;
-  /** 等什么：slot 空位 / quota 额度清零 / breaker 熔断到点；硬挡为空。 */
-  wait: 'slot' | 'quota' | 'breaker' | null;
+  /** 等什么（RouteWaitKind）；硬挡为空。 */
+  wait: RouteWaitKind | null;
   /** 等得来的，最早几点能好：一定晚于现在；不知道（或那个时刻已经过了）为空。 */
   until: string | null;
 }
@@ -263,7 +291,7 @@ export type ChooseRouteResult = (
   | {
       kind: 'wait';
       /** 最早能派的那条在等什么；时刻不知道时，有只差空位的就是空位。 */
-      waitFor: 'slot' | 'quota' | 'breaker';
+      waitFor: RouteWaitKind;
       /**
        * 最早能派的时刻：各条路由里最早好的那条，一定晚于现在。有一条时刻不知道（只差空位、等试探结果、
        * 清零时刻不知道）就为空：它随时可能好，调用方按轮询间隔再选一次。

@@ -67,7 +67,7 @@ const mirasim = target({
 
 interface Harness {
   deps: RouteProbeJobDeps;
-  saved: { routeId: string; state: string; at: Date; detail: string }[];
+  saved: { routeId: string; state: string; at: Date; detail: string; org: string | null }[];
   finished: { id: number; result: ScheduleResult }[];
   sleeps: number[];
   after: { routeId: string; attempt: ProbeAttempt }[];
@@ -214,6 +214,59 @@ describe('一轮里读会话用户挂的组织', () => {
       });
     }
     expect(reads).toBe(2);
+  });
+
+  it('写结论时连那时挂的组织一起写：Claude 订阅池写读到的组织（没探的独享那条也写，选路靠它认出「那一轮没探它」），别的池写空（#335）', async () => {
+    const h = harness([carpool, solo, cursorTarget], answered, {
+      probers: { 'claude-code': answered, 'cursor-agent': answered },
+    });
+    await runRouteProbeJob(h.deps);
+    expect(h.saved.map((s) => [s.routeId, s.state, s.org])).toEqual([
+      [carpool.routeId, 'ok', 'carpool'],
+      [solo.routeId, 'skipped', 'carpool'],
+      [cursorTarget.routeId, 'ok', null],
+    ]);
+    // 认不出：写空，不拿哪个组织顶
+    const unknown = harness([carpool], answered, { sessionOrg: async () => UNKNOWN });
+    await runRouteProbeJob(unknown.deps);
+    expect(unknown.saved[0]?.org).toBeNull();
+  });
+
+  it('【故意造出的失败】这会儿定不下来（读数刚变、引擎没切过号，#335）：Claude 订阅池这一轮不探、不写（不写成不在线，也不写成探了），结论照旧；别的池照探；这一轮记 partial、写明为什么', async () => {
+    const onlineCarpool = target({ alive: true });
+    const h = harness([onlineCarpool, solo, cursorTarget], answered, {
+      probers: { 'claude-code': answered, 'cursor-agent': answered },
+      sessionOrg: async () => ({
+        ok: false,
+        pending: true,
+        why: '会话用户挂的组织和上一次读的不一样，引擎没切过号',
+      }),
+    });
+    const run = await runRouteProbeJob(h.deps);
+    expect(h.saved.map((s) => s.routeId)).toEqual([cursorTarget.routeId]);
+    expect(run).toMatchObject({
+      outcome: 'partial',
+      scanned: 3,
+      // 拼车上一轮在线：照旧在线；独享上一轮不在线：照旧不在线
+      found: 1,
+      online: [onlineCarpool.routeId, cursorTarget.routeId],
+    });
+    expect(run.why).toContain('会话用户挂的组织这会儿定不下来，Claude 订阅池的 2 条路由这一轮没探、结论照旧');
+    expect(run.why).toContain('会话用户挂的组织和上一次读的不一样，引擎没切过号');
+    expect(
+      planProbe(solo, { 'claude-code': answered }, { ok: false, pending: true, why: '切号中' }, NOW),
+    ).toEqual({
+      unsettled: '会话用户挂的组织这会儿定不下来（切号中）：独享池这一轮不探，结论照旧',
+    });
+  });
+
+  it('【故意造出的失败】只有 Claude 订阅池、组织又定不下来：一条都没写，也不记成没扫到或 ok——记 partial', async () => {
+    const h = harness([carpool, solo], answered, {
+      sessionOrg: async () => ({ ok: false, pending: true, why: '读数刚变' }),
+    });
+    const run = await runRouteProbeJob(h.deps);
+    expect(h.saved).toEqual([]);
+    expect(run).toMatchObject({ outcome: 'partial', scanned: 2, found: 2, online: [] });
   });
 
   it('读法自己抛了：按认不出记（写明原因），这一轮照样跑完', async () => {
