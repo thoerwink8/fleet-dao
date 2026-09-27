@@ -16,6 +16,8 @@
 // 驾驶舱的「交给 fleet」按钮随界面单 #282 做，调同一套判法。
 //   seat …、claim …（#299 帅位只一个）：帅位接班、续约、现查、看现状、交接，帅位认领单、工人报进度和结束、作废过了宽限期的认领。
 // 本机经 ssh 调，写法和退出码见 seat-cli.ts（多一个 3：不是你的——不是帅位、别人拿着、认领号对不上）。
+//   alert …（design 15.3「谁在处理」）：开着的提醒谁在处理、修到哪；认领一条提醒（认领它的跟进单，就是上面的认领）；静默。
+// 写法和退出码见 alert-cli.ts，和 seat、claim 一样。
 // 每条命令带 --help（或 -h）只打印用法。
 // 退出码（几条命令一样）：0 做成了（或本来就是）；1 没做成（被拒、库里没有、连不上库、读回来不对，一句话说原因）；2 参数不对或没带上库连接。
 import { userInfo } from 'node:os';
@@ -35,6 +37,8 @@ import {
   versionGate,
 } from '@fleet-dao/core';
 import { requirementWorkflowId } from '@fleet-dao/shared';
+import { ALERT_USAGE, runAlert } from './alert-cli.ts';
+import type { AlertWorkPort } from './alert-work.ts';
 import { temporalSettings } from './config.ts';
 import { checkNewPassword, checkUsername, hashPassword } from './password.ts';
 import type {
@@ -784,6 +788,8 @@ export interface CliDeps {
   now(): Date;
   /** 标准输入整段读完（seat handoff 的交接说明）。不给就是真的 process.stdin。 */
   readStdin?: () => Promise<string>;
+  /** 提醒的处理状态、跟进单、静默（alert 命令用）。不给就是真的：连库，法国上再读发布记录。 */
+  openAlertWork?: (url: string, env: CliEnv) => Promise<{ alerts: AlertWorkPort; close(): Promise<void> }>;
 }
 
 async function openPgStore(url: string): Promise<{ store: Store; close(): Promise<void> }> {
@@ -792,6 +798,23 @@ async function openPgStore(url: string): Promise<{ store: Store; close(): Promis
   const { createPgStore, withStatementTimeout } = await import('./pg-store.ts');
   const { db, close } = createDb({ url: withStatementTimeout(url) });
   return { store: createPgStore(db), close };
+}
+
+async function openPgAlertWork(
+  url: string,
+  env: CliEnv,
+): Promise<{ alerts: AlertWorkPort; close(): Promise<void> }> {
+  const { createDb } = await import('@fleet-dao/db');
+  const { withStatementTimeout } = await import('./pg-store.ts');
+  const { deployFacts, pgAlertWork } = await import('./alert-work.ts');
+  const { readDeployLagInput } = await import('./deploy-lag.ts');
+  const { db, close } = createDb({ url: withStatementTimeout(url) });
+  // 发布记录只在法国的正式机器上有（和后端 main.ts 的 deploy_lag 同一个判法：没写 FLEET_ENV 的就是正式的）
+  const production = (env.FLEET_ENV ?? 'production') === 'production';
+  return {
+    alerts: pgAlertWork(db, () => (production ? deployFacts(readDeployLagInput()) : null)),
+    close,
+  };
 }
 
 async function openGitHubPlans(env: CliEnv): Promise<IssuePlanReader> {
@@ -826,6 +849,7 @@ export function processDeps(): CliDeps {
     openTemporal: openTemporalClient,
     now: () => new Date(),
     readStdin: readAllStdin,
+    openAlertWork: openPgAlertWork,
   };
 }
 
@@ -852,6 +876,7 @@ const USAGES: Record<string, string> = {
   handover: HANDOVER_USAGE,
   seat: SEAT_USAGE,
   claim: CLAIM_USAGE,
+  alert: ALERT_USAGE,
 };
 
 const isHelp = (arg: string | undefined) => arg === '--help' || arg === '-h';
@@ -910,17 +935,33 @@ export async function runCli(argv: readonly string[], deps: CliDeps = processDep
       await close();
     }
   }
-  if (command === 'seat' || command === 'claim') return runSeatOrClaim(command, rest, deps);
+  if (command === 'seat' || command === 'claim' || command === 'alert')
+    return runSeatOrClaim(command, rest, deps);
   deps.err(Object.values(USAGES).join('\n'));
   return 2;
 }
 
+/** 用到才连：参数不对（退出码 2）的不连库。给出一个替身，第一次调方法时才打开真的（方法一律当成异步的）。 */
+function lazy<T extends object>(open: () => Promise<T>): T {
+  return new Proxy({} as T, {
+    get(_target, prop) {
+      if (prop === 'then') return undefined;
+      return async (...args: unknown[]) => {
+        const real = (await open()) as unknown as Record<PropertyKey, unknown>;
+        const fn = real[prop];
+        if (typeof fn !== 'function') throw new Error(`没有 ${String(prop)} 这个方法`);
+        return (fn as (...a: unknown[]) => unknown).apply(real, args);
+      };
+    },
+  });
+}
+
 /**
- * seat、claim（#299）：带 --json 只往标准输出打一行 JSON（本机脚本读），不带打给人看的话；出错也照这个样子打。
- * 退出码见 seat-cli.ts 开头：0 好了，3 不是你的，1 没做成（连不上库、库出错），2 参数不对。
+ * seat、claim（#299）、alert（design 15.3「谁在处理」）：带 --json 只往标准输出打一行 JSON（本机脚本读），不带打给人看的话；
+ * 出错也照这个样子打。退出码见 seat-cli.ts 开头：0 好了，3 不是你的，1 没做成（连不上库、库出错），2 参数不对。
  */
 async function runSeatOrClaim(
-  command: 'seat' | 'claim',
+  command: 'seat' | 'claim' | 'alert',
   rest: readonly string[],
   deps: CliDeps,
 ): Promise<number> {
@@ -947,11 +988,20 @@ async function runSeatOrClaim(
       };
     },
   });
+  // 提醒的那一份（alert 命令用）同样用到才连
+  const openAlertWork = deps.openAlertWork ?? openPgAlertWork;
+  let alertsOpened: Promise<{ alerts: AlertWorkPort; close(): Promise<void> }> | undefined;
+  const alerts = lazy(async () => {
+    alertsOpened ??= Promise.resolve().then(() => openAlertWork(databaseUrl(deps.env), deps.env));
+    return (await alertsOpened).alerts;
+  });
   try {
     const result =
       command === 'seat'
         ? await runSeat(rest, { store, readStdin: deps.readStdin ?? readAllStdin })
-        : await runClaim(rest, { store });
+        : command === 'claim'
+          ? await runClaim(rest, { store })
+          : await runAlert(rest, { store, alerts });
     deps.out(json ? JSON.stringify(result.json) : result.text);
     return result.code;
   } catch (err) {
@@ -959,6 +1009,7 @@ async function runSeatOrClaim(
     return fail(1, `没做成：${describeDbError(err)}`);
   } finally {
     if (opened) await (await opened.catch(() => undefined))?.close();
+    if (alertsOpened) await (await alertsOpened.catch(() => undefined))?.close();
   }
 }
 

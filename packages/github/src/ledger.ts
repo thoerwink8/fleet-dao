@@ -102,6 +102,15 @@ export interface PrMirror {
   checks: PrChecks;
   /** GitHub 上这条 PR 的最后更新时间。 */
   updatedAt: Date;
+  /**
+   * 下面几样给「提醒谁在处理」现算用（design 15.3）：事件里带了才给；不给（undefined）= 这次没读到，库里旧值留着，
+   * 不拿空顶（审计补合并那一路只有列表里的几样）。
+   */
+  openedAt?: Date | null | undefined;
+  mergedAt?: Date | null | undefined;
+  mergeSha?: string | null | undefined;
+  /** 正文挂的单（需求栏、关单词）和「修提醒」栏写的提醒（@fleet-dao/conventions 的 prLinks）。 */
+  links?: { issues: number[]; alerts: string[] } | undefined;
 }
 
 export interface Ledger {
@@ -130,6 +139,10 @@ export function pgLedger(db: Db): Ledger {
     headSha: r.headSha,
     checks: r.checks,
     updatedAt: r.updatedAt,
+    openedAt: r.openedAt,
+    mergedAt: r.mergedAt,
+    mergeSha: r.mergeSha,
+    links: { issues: r.issueRefs, alerts: r.alertRefs },
   });
   return {
     idempotency: pgIdempotencyStore(db),
@@ -157,6 +170,11 @@ export function pgLedger(db: Db): Ledger {
           checks: row.checks ?? 'pending',
           updatedAt: row.updatedAt,
           syncedAt: new Date(),
+          openedAt: row.openedAt ?? null,
+          mergedAt: row.mergedAt ?? null,
+          mergeSha: row.mergeSha ?? null,
+          issueRefs: row.links?.issues ?? [],
+          alertRefs: row.links?.alerts ?? [],
         })
         .onConflictDoUpdate({
           target: [pullRequests.repoId, pullRequests.number],
@@ -169,6 +187,13 @@ export function pgLedger(db: Db): Ledger {
               : sql`case when ${pullRequests.headSha} = excluded.head_sha then ${pullRequests.checks} else 'pending'::pr_checks end`,
             updatedAt: sql`excluded.updated_at`,
             syncedAt: sql`excluded.synced_at`,
+            // 这次没读到的（undefined）不改：旧值留着
+            ...(row.openedAt === undefined ? {} : { openedAt: sql`excluded.opened_at` }),
+            ...(row.mergedAt === undefined ? {} : { mergedAt: sql`excluded.merged_at` }),
+            ...(row.mergeSha === undefined ? {} : { mergeSha: sql`excluded.merge_sha` }),
+            ...(row.links === undefined
+              ? {}
+              : { issueRefs: sql`excluded.issue_refs`, alertRefs: sql`excluded.alert_refs` }),
           },
           setWhere: sql`${pullRequests.updatedAt} <= excluded.updated_at`,
         })
@@ -238,7 +263,15 @@ export function memoryLedger(init: { repos?: (RepoRef & { id: string })[] } = {}
       const old = prs.get(k(row.repoId, row.number));
       if (old && old.updatedAt.getTime() > row.updatedAt.getTime()) return 'stale';
       const checks = row.checks ?? (old && old.headSha === row.headSha ? old.checks : 'pending');
-      prs.set(k(row.repoId, row.number), { ...row, checks });
+      // 这次没读到的（undefined）不改：旧值留着（和 Postgres 版一样）
+      prs.set(k(row.repoId, row.number), {
+        ...row,
+        checks,
+        openedAt: row.openedAt === undefined ? (old?.openedAt ?? null) : row.openedAt,
+        mergedAt: row.mergedAt === undefined ? (old?.mergedAt ?? null) : row.mergedAt,
+        mergeSha: row.mergeSha === undefined ? (old?.mergeSha ?? null) : row.mergeSha,
+        links: row.links === undefined ? old?.links : row.links,
+      });
       return 'written';
     },
     async getPullRequest(repoId, number) {

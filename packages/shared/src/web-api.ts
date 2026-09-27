@@ -687,6 +687,51 @@ export const JobsResponse = z.object({ jobs: z.array(JobViewSchema), asOf: Time 
 /** 三级：要人拍 / 卡住报警 / 日报。 */
 export const NotificationLevelSchema = z.enum(['decision', 'alert', 'daily']);
 
+/**
+ * 提醒的处理状态（design 15.3「谁在处理」）：读时从认领、PR 镜像、发布记录现算（@fleet-dao/core 的 alertHandling），
+ * 不另存。判法和这几个名字在 core 里用的是同一份。
+ */
+export const ALERT_STAGES = [
+  'resolved',
+  'silenced',
+  'waiting_founder',
+  'unclaimed',
+  'engine_stuck',
+  'claimed',
+  'pr_open',
+  'merged',
+  'deployed',
+] as const;
+
+export const AlertHandlingSchema = z.object({
+  stage: z.enum(ALERT_STAGES),
+  /** 阶段说成人话：没人认领、认领了、PR 开着、合进主线、等发布…… */
+  stageText: z.string(),
+  /** 进这个阶段的时刻：「多久了」从它算。 */
+  since: Time,
+  /** 谁在处理：机器/工人、PR #号、建静默的人、创始人；没人是空。 */
+  who: z.string().optional(),
+  /** 跟进单：提醒挂的任务的单、提醒派单开的小单、帅位挂的单。 */
+  work: z.object({ repo: z.string(), issueNumber: z.number().int().positive(), url: z.string() }).optional(),
+  /** 带动这个阶段的 PR。 */
+  pr: z
+    .object({
+      number: z.number().int().positive(),
+      state: z.enum(['open', 'closed', 'merged']),
+      url: z.string(),
+    })
+    .optional(),
+  silence: z.object({ by: z.string(), comment: z.string(), endsAt: Time }).optional(),
+  /** 合了以后才有：发布了没有；判不了写为什么。 */
+  deploy: z
+    .object({ state: z.enum(['deployed', 'not_yet', 'unknown']), why: z.string().optional() })
+    .optional(),
+  /** 给人看的一行：「本机/工人A 在处理 · owner/仓#342 · PR #350 开着 · 35 分钟」。 */
+  line: z.string(),
+  /** 没查成的，一条一句。 */
+  problems: z.array(z.string()),
+});
+
 export const NotificationSchema = z.object({
   id: Id,
   level: NotificationLevelSchema,
@@ -708,6 +753,8 @@ export const NotificationSchema = z.object({
       lastAttemptAt: Time.optional(),
     }),
   ),
+  /** 谁在处理、修到哪（现算）；这一页没算成时整页的 handlingProblem 写为什么。 */
+  handling: AlertHandlingSchema.optional(),
 });
 
 export const NotificationsQuery = PageQuery.extend({
@@ -716,6 +763,8 @@ export const NotificationsQuery = PageQuery.extend({
 export const NotificationsResponse = z.object({
   items: z.array(NotificationSchema),
   nextCursor: Cursor.optional(),
+  /** 这一页「谁在处理」没算成：为什么（没接上、读不到库）。算成了没有这一项。 */
+  handlingProblem: z.string().optional(),
 });
 export const ResolveNotificationResponse = z.object({ ok: z.literal(true) });
 
@@ -759,6 +808,21 @@ export const SETTING_SCHEMAS = {
   'notify.quietHours': z.object({ start: HHMM, end: HHMM }).nullable(),
   /** Jev 每天最多调用多少次。 */
   'judge.dailyCallLimit': z.number().int().min(0).max(100_000),
+  /**
+   * 提醒没人认领多久再推一次、没挂单的开一张跟进单（分钟；design 15.3「谁在处理」）。没设用 20。
+   * 读的地方是 @fleet-dao/core 的 readAlertSettings：设了却认不出明确失败，不拿默认顶。
+   */
+  'alerts.claimAfterMinutes': z.number().int().min(1).max(1440),
+  /** 提醒停在一个阶段（认领了、PR 开着、合进主线、法国已发布）多久没往前走，再推一次（分钟）。没设用 60。 */
+  'alerts.stuckAfterMinutes': z.number().int().min(5).max(10_080),
+  /**
+   * 没挂单的提醒，跟进单开在哪个仓（owner/仓名，要是受管的仓）。null = 不设：除了巡检仓只有一个受管的仓时用它，
+   * 不止一个就不开、明说要设这一项。
+   */
+  'alerts.issueRepo': z
+    .string()
+    .regex(/^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9._-]+$/, '写成 owner/仓名')
+    .nullable(),
 } as const;
 export type SettingKey = keyof typeof SETTING_SCHEMAS;
 
