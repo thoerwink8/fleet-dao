@@ -131,7 +131,12 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
     expect(side?.input.route.routeId).toBe('r3');
     expect(side?.input.brief.task).toEqual(FAKE_BRIEF);
     const sidePick = w.callsOf('pickRoute').find((c) => c.input.stage === 'execute');
-    expect(sidePick?.input).toMatchObject({ models: ['m2', 'm1'], avoidFamilies: ['claude'] });
+    // 开 PR 前验证还在前头：避开 Lead 那一族挪进「给验证留一家」的 spare（先避开），留不下就交派不出（Lead 自己干）
+    expect(sidePick?.input).toMatchObject({
+      models: ['m2', 'm1'],
+      keepVerifier: { models: ['m3', 'm2'], uiWork: false, spare: ['claude'], otherwise: 'none' },
+    });
+    expect(sidePick?.input.avoidFamilies).toBeUndefined();
     // Lead 验收时副手已经不在跑
     const sideWatch = w.callsOf('awaitSession').find((c) => c.input.runId === side?.input.runId && c.ok);
     const accept = leads.find((c) => c.input.brief.lead?.step === 'accept');
@@ -879,12 +884,89 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
     expect(verified).not.toContain('Claude');
   });
 
+  it('给开 PR 前验证留一家（#293）：界面单规划完、开 PR 之前选副手、Lead 续用都带上验证的模型顺序和界面类；规划本身、验证本身、开了 PR 之后不带', async () => {
+    const plan: SessionOutput = {
+      kind: 'lead-plan',
+      head: fakeHead(90),
+      changedFiles: [DOCS.plan],
+      summary: '登录页加验证码输入框',
+      brief: { ...FAKE_BRIEF, files: ['web/login/'] },
+      small: true,
+      highRisk: false,
+      holds: [],
+    };
+    const w = world({
+      lead: (step) => (step === 'plan' ? plan : undefined),
+      ci: (_input, n) => (n === 1 ? { state: 'red', failedChecks: ['test (web)'] } : undefined),
+    });
+    const result = await runToEnd(w);
+    expect(result.state).toBe('done');
+    expect(trail(w)).toEqual([
+      'lead:plan',
+      'side',
+      'lead:accept',
+      'verify',
+      'lead:fix-brief',
+      'side',
+      'lead:accept',
+      'lead:review',
+    ]);
+    const picks = w.callsOf('pickRoute').map((c) => c.input);
+    const keep = { models: ['m3', 'm2'], uiWork: true };
+    // Lead（规划阶段续同一个会话）：规划时界面与否还不知道不带；验收时带、留不下照常选（非派不可）；开了 PR 之后不带
+    expect(picks.filter((p) => p.stage === 'plan').map((p) => p.keepVerifier)).toEqual([
+      undefined,
+      { ...keep, otherwise: 'any' },
+      undefined,
+      undefined,
+      undefined,
+    ]);
+    // 副手（界面类在 UI 阶段派）：开 PR 之前 Lead 那一族先避开、留不下交派不出；开了 PR 之后照旧整族避开
+    const sides = picks.filter((p) => p.stage === 'ui');
+    expect(sides.map((p) => [p.keepVerifier, p.avoidFamilies])).toEqual([
+      [{ ...keep, spare: ['claude'], otherwise: 'none' }, undefined],
+      [undefined, ['claude']],
+    ]);
+    // 验证本身：只派别家、按界面类判，不带
+    const verifyPick = picks.find((p) => p.stage === 'verify');
+    expect(verifyPick).toMatchObject({ avoidFamilies: ['claude', 'kimi'], uiWork: true });
+    expect(verifyPick?.keepVerifier).toBeUndefined();
+  });
+
+  it('单模型模式高风险的单（要验）：Lead 自己写那一步带上给验证留一家；不高风险的不验，不带', async () => {
+    const plan: SessionOutput = {
+      kind: 'lead-plan',
+      head: fakeHead(90),
+      changedFiles: [DOCS.plan],
+      summary: '改登录鉴权',
+      brief: FAKE_BRIEF,
+      small: true,
+      highRisk: true,
+      holds: [],
+    };
+    const w = createFakeWorld({
+      routes: ROUTES,
+      lead: (step) => (step === 'plan' ? plan : undefined),
+    });
+    const result = await runToEnd(w, fusionInput({ mode: 'single' }));
+    expect(result.state).toBe('done');
+    expect(trail(w)).toEqual(['lead:plan', 'lead:takeover', 'verify', 'lead:review']);
+    const takeover = w.callsOf('pickRoute').find((c) => c.input.stage === 'execute');
+    expect(takeover?.input.keepVerifier).toEqual({ models: ['m3', 'm2'], uiWork: false, otherwise: 'any' });
+  });
+
   it('单模型模式：Lead 自己写、不派副手，不高风险就不验证，照样最终审查写结果', async () => {
     const w = createFakeWorld({ routes: [...FAKE_ROUTES] });
     const result = await runToEnd(w, fusionInput({ mode: 'single' }));
     expect(result.state).toBe('done');
     expect(trail(w)).toEqual(['lead:plan', 'lead:takeover', 'lead:review']);
     expect(w.verifications).toEqual([]);
+    // 这张单不验：选路不用给验证留一家
+    expect(w.callsOf('pickRoute').map((c) => c.input.keepVerifier)).toEqual([
+      undefined,
+      undefined,
+      undefined,
+    ]);
     const body = w.callsOf('openPr')[0]?.input.body;
     expect(body?.verified.join('\n')).toContain('单模型模式只对高风险的开，这次没验');
     expect(result.docs).toEqual(DOCS);
