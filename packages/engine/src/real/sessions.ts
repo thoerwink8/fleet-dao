@@ -19,7 +19,8 @@
 // 看守：进程是这个工人进程起的（registry）。接不上（工人重启过、输出管道断了）就按记下的 scope 收掉旧会话，回
 // SESSION_LOST，工作流续会话重起。过程中：心跳；进度事件攒一小批写库（fleet done 的核实要读会话自己跑过的测试，
 // 所以写得要快）；额度读数顺手记账；每分钟按进展判一次停滞（failure/stall.ts），在绕圈、工具卡死就停掉，结局 stalled
-// （光是没动静由插头自己的 idle 超时管）。结束后：写码类看 fleet done 和工作树（有新提交、没有没提交的已跟踪改动）；
+// （光是没动静由插头自己的 idle 超时管）。结束后：写码类看 fleet done 和工作树（有新提交、没有没提交的已跟踪改动；
+// 新提交、改了哪些文件都扣掉会话并进来的主线，user-git.ts 的 ownSpan）；
 // 分诊、需求文档、方案、审查、开 PR 前验证读 .fleet-out/ 下的结论文件，形状不对算交错了（验证的用 core 的 checkReport 核）。
 // 发给别家的（开 PR 前验证、Fusion 派给别家的副手）：起会话前整份提示词先过卫生检查（screenForOtherVendor），过不了不起。
 // Fusion 的 Lead（brief.lead）每一步都在这张单的工作树里跑、续同一个会话，交什么按这一步定（prompts.ts 的 LEAD_KIND）：
@@ -131,9 +132,11 @@ import {
   fetchBundle,
   hasCheckout,
   hasCommit,
+  hasMainline,
   hasRepo,
   headOf,
   headOfIncoming,
+  ownSpan,
   pinMainline,
   readFileAs,
   removeFileAs,
@@ -297,6 +300,8 @@ interface Live {
   routeId: string;
   dir: string;
   baseHead: string | undefined;
+  /** 仓的主线分支：交活核对、Lead 交的改动扣掉并进来的主线（树里钉的 origin/<它>，user-git.ts 的 ownSpan）。 */
+  defaultBranch: string;
   reviewHead: string | undefined;
   /** 开 PR 前验证对照的「怎么算做完」：读结论文件时拿它核逐条答全了没有。 */
   verifyCriteria: string[] | undefined;
@@ -660,6 +665,11 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
         // 第一轮的 base 就是建树时记下的主线头（createWorktree 的 baseSha）。树丢了、从返工时的分支头重建的，钉的是分支头：
         // test:changed 只算这一轮的改动——前几轮的在那几轮的会话里测过，CI 还会全测。
         await pinMainline(t, task.repo.defaultBranch, base);
+      } else if (!(await hasMainline(t, task.repo.defaultBranch))) {
+        // 钉主线之前（#218）建的老树接着用：照「从分支头重建的树」的规矩钉到起会话前的头。交活核对要扣掉并进来的主线，
+        // 树里没钉就判不了（ownSpan 明确报 MAINLINE_MISSING）；这样钉，这一步的改动从起会话前的头比，和钉主线之前一样
+        const base = input.baseHead;
+        if (base && SHA.test(base)) await pinMainline(t, task.repo.defaultBranch, base);
       }
       // Lead 的结论文件写在工作树的 .fleet-out/ 里：记进这棵树自己的忽略清单，git add 不会把它提交进分支
       await excludeLocally(t, `${OUT_DIR}/`);
@@ -709,15 +719,18 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     t: UserTree,
     kind: OutputKind,
     base: string | undefined,
+    defaultBranch: string,
     why: string,
   ): Promise<RelayFacts> {
     const progress = prior ? await runProgressFacts(db, prior.id, { saysLimit: 8 }) : null;
     const delivery = (kind === 'delivery' || isLeadKind(kind)) && base !== undefined && SHA.test(base);
+    // 已提交了什么：并进来的主线不算（接力的会话照它接着干，主线上别人的提交不是这一步做的）
+    const span = delivery ? await ownSpan(t, base, defaultBranch) : null;
     return {
       steps: progress?.lastPlan?.steps ?? [],
       says: (progress?.says ?? []).map((s) => s.text).filter(Boolean),
-      commits: delivery ? await commitsSince(t, base, 30) : [],
-      diffstat: delivery ? await diffstatSince(t, base) : [],
+      commits: span ? await commitsSince(t, span, 30) : [],
+      diffstat: span ? await diffstatSince(t, span) : [],
       why,
     };
   }
@@ -883,6 +896,7 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
             t,
             kind,
             input.baseHead,
+            task.repo.defaultBranch,
             prior?.failureMessage ? `${why}；${prior.failureMessage}` : why,
           )
         : undefined;
@@ -938,6 +952,7 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
       routeId: route.routeId,
       dir,
       baseHead: input.baseHead,
+      defaultBranch: task.repo.defaultBranch,
       reviewHead: input.brief.head,
       verifyCriteria: input.brief.verify?.criteria,
       previousCost: mode === 'resume' ? (prior?.sessionCostUsd ?? null) : undefined,
@@ -1207,20 +1222,22 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
           changed: [],
         };
       }
-      const commits = head === base ? [] : await commitsSince(t, base, 50);
-      if (commits.length === 0) {
+      // 并进来的主线不算这一步交的（user-git.ts 的 ownSpan）：只并了主线、自己没写东西的不算交了
+      const span = head === base ? null : await ownSpan(t, base, live.defaultBranch);
+      const commits = span ? await commitsSince(t, span, 50) : [];
+      if (!span || commits.length === 0) {
         return {
           check: {
             state: 'not_delivered',
             target,
             newCommits: 0,
-            detail: `起会话前的头 ${base.slice(0, 7)} 之后没有新提交`,
+            detail: `起会话前的头 ${base.slice(0, 7)} 之后没有新提交（并进来的主线不算）`,
           },
           head,
           changed: [],
         };
       }
-      const changed = await changedFilesSince(t, base);
+      const changed = await changedFilesSince(t, span);
       if (changed.length === 0) {
         return {
           check: {
@@ -1228,7 +1245,7 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
             target,
             newCommits: commits.length,
             hasDiff: false,
-            detail: '有新提交，但和起会话前比没有内容差异',
+            detail: '有新提交，但除了并进来的主线，和起会话前比没有内容差异',
           },
           head,
           changed,
@@ -1342,7 +1359,9 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
         error: `这一步只看不改，头却从 ${base.slice(0, 7)} 变成了 ${head.slice(0, 7)}：用 git reset --hard ${base} 退回起这一步之前的头再交（要改的写进结论里）`,
       };
     }
-    const changedFiles = commits && head !== base ? await changedFilesSince(t, base) : [];
+    // 并进来的主线不算这一步改的（user-git.ts 的 ownSpan）
+    const changedFiles =
+      commits && head !== base ? await changedFilesSince(t, await ownSpan(t, base, live.defaultBranch)) : [];
     switch (kind) {
       case 'lead-plan': {
         const v = parseLeadPlan(text);

@@ -269,6 +269,8 @@ describe('推分支', () => {
       await ports.pushBranch({ taskId: 't1', repo, worktreePath: dir, branch: BRANCH, head }, ctx),
     ).toEqual({
       head,
+      // 推上去的头相对主线的净改动：工作流开 PR 前验证判界面、给验证方的清单按它
+      changedFiles: ['src/login.ts'],
     });
     expect(calls.pushBranch).toHaveLength(1);
     expect(readdirSync(join(root, 'tmp')).filter((f) => f.startsWith('push-'))).toEqual([]);
@@ -335,6 +337,10 @@ describe('推之前把最新主线并进会话的树', () => {
     // 主线跟着钉到新头：返工时 pnpm test:changed 只算分支自己的改动，不把并进来的主线也算上
     expect(git(dir, 'rev-parse', 'refs/remotes/origin/main')).toBe(main);
     expect(git(dir, 'diff', '--name-only', 'origin/main...HEAD')).toBe('src/login.ts');
+    // 【#293】交回的改动清单是推上去的头相对主线的净改动：并进来的主线（b.ts）不算。原来工作流按会话交的累计，
+    // 并进来的主线改了页面代码就被当成这张单改了页面、按界面类派验证
+    expect(git(dir, 'diff', '--name-only', head, r.head)).toBe('b.ts');
+    expect(r.changedFiles).toEqual(['src/login.ts']);
   });
 
   it('并完、推没成、活动重试：头是上一次并出来的（第一个父提交是会话交的头）就接着推它，不判头对不上', async () => {
@@ -352,7 +358,7 @@ describe('推之前把最新主线并进会话的树', () => {
     const input = { taskId: 't1', repo, worktreePath: dir, branch: BRANCH, head };
     await expect(ports.pushBranch(input, ctx)).rejects.toMatchObject({ code: 'GIT_FAILED', retryable: true });
     const merged = git(dir, 'rev-parse', 'HEAD');
-    expect(await ports.pushBranch(input, ctx)).toEqual({ head: merged });
+    expect(await ports.pushBranch(input, ctx)).toEqual({ head: merged, changedFiles: ['src/login.ts'] });
     expect(calls.pushBranch?.map((c) => (c as { head: string }).head)).toEqual([merged, merged]);
   });
 
@@ -447,7 +453,7 @@ describe('推之前把最新主线并进会话的树', () => {
     await expect(ports.pushBranch(input, ctx)).rejects.toMatchObject({ code: 'GIT_FAILED' });
     const second = git(dir, 'rev-parse', 'HEAD');
     expect(parentsOf(dir, second)).toEqual([first, main]);
-    expect(await ports.pushBranch(input, ctx)).toEqual({ head: second });
+    expect(await ports.pushBranch(input, ctx)).toEqual({ head: second, changedFiles: ['src/login.ts'] });
     expect(calls.pushBranch?.map((c) => (c as { head: string }).head)).toEqual([first, second, second]);
   });
 

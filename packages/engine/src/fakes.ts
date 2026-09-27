@@ -103,6 +103,11 @@ export interface FakeScript {
   merge: (input: MergePrInput, n: number) => Partial<MergeOutcome> | undefined;
   /** 推分支：给了就抛它（假的卫生检查拦下、名单没读到……）；n = 第几次推（从 1 开始）。 */
   push: (input: PushBranchInput, n: number) => PortError | undefined;
+  /**
+   * 推上去的头相对主线的净改动（推分支交回的 changedFiles）；n 同 push。不给就不交：老版端口的样子，Fusion 照会话交的
+   * 累计算。
+   */
+  pushed: (input: PushBranchInput, n: number) => string[] | undefined;
   /** 开 PR：给了就抛它（假的卫生检查拦下标题或正文……）；n = 第几次开（从 1 开始）。 */
   openPr: (input: OpenPrInput, n: number) => PortError | undefined;
   /** 写需求文档、方案、结果进主线：给了就抛它；n = 第几次写（三种文档一起数，从 1 开始）。 */
@@ -553,9 +558,11 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
       };
     },
     async pushBranch(input) {
-      const refused = script.push?.(input, next('pushBranch'));
+      const n = next('pushBranch');
+      const refused = script.push?.(input, n);
       if (refused) throw refused;
-      return { head: input.head };
+      const changedFiles = script.pushed?.(input, n);
+      return { head: input.head, ...(changedFiles ? { changedFiles } : {}) };
     },
     async runTests(input) {
       return { passed: true, head: input.head, summary: '全绿', ...script.tests?.(input, next('runTests')) };

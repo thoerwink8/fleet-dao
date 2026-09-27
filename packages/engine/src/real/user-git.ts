@@ -154,6 +154,27 @@ export function mainlineRef(defaultBranch: string): string {
   return `refs/remotes/origin/${defaultBranch}`;
 }
 
+/** 树里钉的主线头（origin/<主线> 解析出的提交）；没钉回 null。git 没跑成照抛，不当成没钉。 */
+async function pinnedMainline(t: UserTree, defaultBranch: string): Promise<string | null> {
+  const ref = mainlineRef(defaultBranch);
+  const r = await run(t, [t.git ?? GIT, 'rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
+  if (r.code === 1) return null;
+  if (r.code !== 0) {
+    throw new PortError('GIT_FAILED', describeFailure(`读 origin/${defaultBranch}`, r), {
+      retryable: !r.aborted,
+      details: { user: t.user, dir: t.dir },
+    });
+  }
+  const sha = text(r).trim();
+  assertSha(sha, `origin/${defaultBranch}`);
+  return sha;
+}
+
+/** 树里钉没钉主线。 */
+export async function hasMainline(t: UserTree, defaultBranch: string): Promise<boolean> {
+  return (await pinnedMainline(t, defaultBranch)) !== null;
+}
+
 /**
  * 把「主线」钉在树里的一个主线提交上。树是从 bundle 建的、没有远端，git diff origin/main...HEAD 和 pnpm test:changed
  * （和 origin/main 比改了什么，specs/164-会话内存与交活测试/）都靠这个引用；没有它 test:changed 明确报「认不出 origin/main」。
@@ -205,21 +226,92 @@ export async function uncommittedTracked(t: UserTree): Promise<string[]> {
   return lines(await git(t, ['status', '--porcelain', '--untracked-files=no'], '看有没有没提交的改动'));
 }
 
-/** base 之后改了哪些文件。 */
-export async function changedFilesSince(t: UserTree, base: string): Promise<string[]> {
-  assertSha(base, '起点');
-  return lines(await git(t, ['diff', '--name-only', base, 'HEAD'], '列改动的文件'));
+/**
+ * 这一步（一个会话）自己改了什么，从哪儿比起。会话在树里并过主线（推之前并主线有冲突、退回会话照着 git merge 解；并好了
+ * 却没推成、树停在引擎的并提交上），base..HEAD 就把并进来的主线也算成这一步改的：#293 的开 PR 前验证因此把主线上别人改的
+ * 页面代码算成这张单改的，按界面类派，没人可派。所以一律先扣掉主线。主线 = 树里钉的 origin/<主线>（pinMainline：建树、
+ * 推之前并主线、并主线后快进都跟着重钉）；HEAD 里含到的最新主线提交 = merge-base(主线, HEAD)：
+ * - base 里已经有它（这一步没并进新主线）：从 base 比。
+ * - base 是它的祖先（base 就在主线上，这一步把主线快进过来）：从它比。
+ * - 都不是：从「base 并上它」比，即 git merge-tree 算出来的树（只写对象，不动工作树和引用）。主线带进来的在这棵树里和 HEAD
+ *   一样，不算；解冲突改的（这棵树里是冲突标记）、并完又改的，都算这一步的。
+ * 提交也一样：主线走得到的不算这一步的新提交（会话自己的并提交算）。
+ */
+export interface OwnSpan {
+  /** 起会话前的头。 */
+  base: string;
+  /** 比改动的起点：base、HEAD 里含到的主线提交，或 merge-tree 算出来的树号。 */
+  from: string;
+  /** 树里钉的主线头：它走得到的提交不算这一步的。 */
+  mainline: string;
 }
 
-/** base 之后的提交（老的在前，最多 limit 条）。 */
-export async function commitsSince(t: UserTree, base: string, limit = 50): Promise<string[]> {
+/**
+ * 算这一步从哪儿比起（见 OwnSpan）。树里没钉主线明确报 MAINLINE_MISSING：分不出哪些是并进来的主线，不拿 base 之后的全部
+ * 冒充这一步改的（sessions.ts 起会话前给钉主线之前建的老树补钉）。
+ */
+export async function ownSpan(t: UserTree, base: string, defaultBranch: string): Promise<OwnSpan> {
   assertSha(base, '起点');
-  return lines(await git(t, ['log', '--oneline', '--reverse', `-n${limit}`, `${base}..HEAD`], '列已提交的'));
+  const details = { user: t.user, dir: t.dir };
+  const mainline = await pinnedMainline(t, defaultBranch);
+  if (mainline === null) {
+    throw new PortError(
+      'MAINLINE_MISSING',
+      `树里没有钉住的主线 origin/${defaultBranch}：分不出哪些改动是并进来的主线`,
+      { retryable: false, details },
+    );
+  }
+  // HEAD 里含到的最新主线提交；没有共同的祖先（git 退出 1）就是一个主线提交都没含
+  const found = await git(t, ['merge-base', mainline, 'HEAD'], '找 HEAD 里含到的主线', { allow: [1] });
+  const merged = found.code === 0 ? text(found).trim() : null;
+  if (merged === null || (await isAncestor(t, merged, base))) return { base, from: base, mainline };
+  if (await isAncestor(t, base, merged)) return { base, from: merged, mainline };
+  // 退出 1 = 并出冲突：树照样写出来（冲突的文件里是冲突标记），会话解冲突改的就比得出来
+  const what = `算 ${base.slice(0, 7)} 并上主线 ${merged.slice(0, 7)} 的样子`;
+  const simulated = await git(t, ['merge-tree', '--write-tree', base, merged], what, { allow: [1] });
+  const tree = text(simulated).split('\n', 1)[0]?.trim() ?? '';
+  if (!SHA.test(tree)) {
+    throw new PortError('GIT_FAILED', `${what}：输出认不出（${tree.slice(0, 80) || '空的'}）`, {
+      retryable: true,
+      details,
+    });
+  }
+  return { base, from: tree, mainline };
 }
 
-export async function diffstatSince(t: UserTree, base: string, maxLines = 12): Promise<string[]> {
-  assertSha(base, '起点');
-  return lines(await git(t, ['diff', '--stat', base, 'HEAD'], '统计改动')).slice(-maxLines);
+/** 这一步改了哪些文件（并进来的主线不算，见 OwnSpan）。 */
+export async function changedFilesSince(t: UserTree, span: OwnSpan): Promise<string[]> {
+  assertSha(span.from, '比改动的起点');
+  return lines(await git(t, ['diff', '--name-only', span.from, 'HEAD'], '列改动的文件'));
+}
+
+/** 这一步的新提交（老的在前，最多 limit 条；主线走得到的不算）。 */
+export async function commitsSince(t: UserTree, span: OwnSpan, limit = 50): Promise<string[]> {
+  assertSha(span.base, '起点');
+  assertSha(span.mainline, '主线');
+  return lines(
+    await git(
+      t,
+      ['log', '--oneline', '--reverse', `-n${limit}`, 'HEAD', `^${span.base}`, `^${span.mainline}`],
+      '列已提交的',
+    ),
+  );
+}
+
+/** 这一步的改动统计（并进来的主线不算）。 */
+export async function diffstatSince(t: UserTree, span: OwnSpan, maxLines = 12): Promise<string[]> {
+  assertSha(span.from, '比改动的起点');
+  return lines(await git(t, ['diff', '--stat', span.from, 'HEAD'], '统计改动')).slice(-maxLines);
+}
+
+/**
+ * 分支相对主线的净改动（和 PR 在 GitHub 上显示的一样：git diff 主线...头，只看分叉点之后分支这边改的）。推之前刚把最新主线
+ * 并进来，推上去的头就拿它算：开 PR 前验证判界面、给验证方的清单、PR 正文都按它，不按一轮轮累计的。
+ */
+export async function changedFilesAgainst(t: UserTree, mainline: string, head: string): Promise<string[]> {
+  assertSha(mainline, '主线');
+  assertSha(head, '头');
+  return lines(await git(t, ['diff', '--name-only', `${mainline}...${head}`], '列分支相对主线改了哪些文件'));
 }
 
 /** head 在不在 base 之后（base 是 head 的祖先）。 */

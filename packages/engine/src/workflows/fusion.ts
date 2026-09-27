@@ -300,8 +300,14 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
   const side: { sessionId?: string; routeId?: string; family?: string } = {};
   /** 下一次执行要带的返工意见（验收打回、验证挡住、推分支被拦……）。 */
   let feedback: Feedback[] = [];
-  /** 这张单提交改到过的文件（相对主线）：PR 正文、验证材料、最终审查核结果.md 用。 */
+  /** 这张单各步提交改到过的文件（一轮轮累计）：进度段的文档、最终审查核结果.md 用。 */
   const changed = new Set<string>();
+  /**
+   * 推上去的头相对主线的净改动（pushBranch 交回的，推之前刚并了最新主线）：开 PR 前验证判界面、给验证方的清单、PR 正文按它。
+   * changed 是累计的：撤回了的、老版端口把会话并进来的主线也算成这一步改的（#293：主线上别人改的页面代码让验证按界面类派，
+   * 没人可派）都还在里面。老版端口推的（重放在途任务的历史）没交它，是 null，照旧按 changed。
+   */
+  let netChanged: string[] | null = null;
   /**
    * 副手这一块改到过的，几轮累计（每轮交回的只有这一轮的改动：前一轮碰了、这一轮没再碰的也要算上）。撤回了的也还在里面：
    * 拿它硬挡就是 #246 的死结（撤了也过不了），所以简报外的归 Lead 判；#252 接上别的块的硬挡时要换成净改动。
@@ -582,7 +588,7 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
   };
 
   /**
-   * 副手干一轮：照简报，在同一棵树上，按流程配置的副手模型顺序派别家（避开 Lead 那一族：Claude 额度留给 Lead，0002 第 5 条）。
+   * 副手干一轮：照简报，在同一棵树上，按流程配置的副手模型顺序派别家（避开 Lead 那一族：Lead 那家的额度留给 Lead，0002 第 5 条）。
    * 派不出（没接好、没额度、连着做不好）交回 unavailable，调用方让 Lead 自己干（0003 第 7 条）。
    */
   const sidekickRun = async (
@@ -629,6 +635,7 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
     pushRework = NO_REWORK;
     head = pushed.ok.head;
     treeHead = pushed.ok.head;
+    netChanged = pushed.ok.changedFiles ?? null;
     status.head = head;
     return { head };
   };
@@ -800,7 +807,8 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
     const got = await sidekickRun(brief, feedback);
     if ('unavailable' in got) {
       const r = await leadWork(
-        `副手派不出（${got.unavailable}）：Claude 单干（0003 第 7 条）`,
+        // Lead 不一定是 Claude（创始人 09-27 夜：拼车号和 Grok 混用当 Lead），这句进 PR 正文，不写死哪一家
+        `副手派不出（${got.unavailable}）：Lead 单干（0003 第 7 条）`,
         feedback,
         brief,
       );
@@ -869,7 +877,8 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
     const current = need(setup, '流程配置');
     // 第几轮按验过几次数（不按没过的轮数）：验过了、他又改选了别的回去照改（#259），再验是新的一轮
     const n = rounds.length + 1;
-    const files = [...changed];
+    // 判界面、给验证方的清单：送检的头相对主线改了什么（不按累计的，见 netChanged）
+    const files = netChanged ?? [...changed];
     const ui = await judge(kit, 'filesUnder', { paths: current.uiPaths, files });
     let round = await verifyRound(kit, {
       round: n,
@@ -989,7 +998,8 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
                 // 需求文档跟着这个 PR 才进主线（#295）：「对应计划」照单子挂的版本写
                 ...(requirementSeed === null ? {} : { planFromIssue: true }),
                 tier: parts.tier,
-                changedFiles: [...changed],
+                // 「文档」一栏：这个 PR 相对主线改了哪些（不按累计的，见 netChanged）
+                changedFiles: netChanged ?? [...changed],
               },
             }),
           prRework,
