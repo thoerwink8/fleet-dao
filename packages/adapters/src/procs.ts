@@ -425,7 +425,11 @@ export interface SwitchSessionOrgInput {
   timeoutMs?: number;
 }
 
-/** 切号最多等多久：帮手里读、切、回读各一次 reclaude，reclaude 更新后首跑先同步配置要上百秒。 */
+/**
+ * 切号最多等多久。帮手自己有总时限（fleet-agent-scope.sh 的 ORG_BUDGET，270 秒：读、切、回读核对都在里面，每一步只给剩下的
+ * 时间，用完照实报「不知道挂的是哪个」），这里比它多等 30 秒给 sudo、bash 起来和最后一步的 KILL 余量；到这里还没完就是帮手
+ * 卡死了（adopt.test.ts 核对两边对得上）。
+ */
 export const SWITCH_ORG_TIMEOUT_MS = 300_000;
 
 export type SwitchSessionOrgResult =

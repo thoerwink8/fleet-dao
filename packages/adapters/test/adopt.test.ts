@@ -10,6 +10,7 @@ import {
   adoptWorktree,
   listAgentScopes,
   removeWorktreeDir,
+  SWITCH_ORG_TIMEOUT_MS,
   switchSessionOrg,
 } from '../src/procs.ts';
 import { tempDir } from './helpers.ts';
@@ -264,5 +265,19 @@ describe('switchSessionOrg · 调帮手切会话用户挂的组织（假帮手�
   it('只认 carpool、solo 和会话用户：起之前就拒', () => {
     expect(() => sw({ to: 'team' as never })).toThrow('只认 carpool、solo');
     expect(() => sw({ user: 'root' as never })).toThrow('会话用户');
+  });
+
+  it('等帮手的时限比帮手自己的总时限长：帮手时间用完会照实报「不知道挂的是哪个」，不会切到一半被这里掐掉', () => {
+    const script = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), '../../../deploy/france/fleet-agent-scope.sh'),
+      'utf8',
+    );
+    const budget = Number(/^ORG_BUDGET=\$\{AGENT_SCOPE_TEST_ORG_BUDGET:-(\d+)\}$/m.exec(script)?.[1]);
+    const killAfter = Number(/^RECLAUDE_KILL_AFTER=(\d+)$/m.exec(script)?.[1]);
+    // 读不到就不算核对过：两个数都得认出来
+    expect(budget).toBeGreaterThan(0);
+    expect(killAfter).toBeGreaterThan(0);
+    // 最后一步到点先 TERM、再等 killAfter 秒 KILL；另留 10 秒给 sudo、bash 起来
+    expect(SWITCH_ORG_TIMEOUT_MS / 1000).toBeGreaterThanOrEqual(budget + killAfter + 10);
   });
 });

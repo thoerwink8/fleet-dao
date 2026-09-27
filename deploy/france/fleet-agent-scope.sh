@@ -19,6 +19,7 @@
 #                                    跑它家里的 reclaude，那一类的组织要恰好一个；已经挂着就不动。切完再读一遍 org list 核对
 #                                    （org use 退出码不是 0 也可能已经切了，docs/reference/adapters.md CC-07），没切成就切回原来那个。
 #                                    切号会让这个家目录下在跑的 Claude 会话全断：等手上没有在跑的会话再调，由引擎管（#157）。
+#                                    整个流程总时限 ORG_BUDGET 秒，每一步只给剩下的时间，切之前给核对留够、不够就不切。
 #                                    组织编号、名字、邮箱一概不打出来。标准输出最后一行：switched <类型> / already <类型>；
 #                                    没成是 failed <现在挂的类型：carpool、solo、other 或 unknown>。退出码：0 成功；64 校验不过；
 #                                    其余失败 1。
@@ -54,6 +55,15 @@ AS_USER_TEST=${AGENT_SCOPE_TEST_AS_USER:-}
 HOME_TEST=${AGENT_SCOPE_TEST_HOME:-}
 # 一次 reclaude 最多等多久：平时不到 1 秒；reclaude 更新后首跑先「Syncing config…」，要上百秒（引擎的探针也给 150 秒）。
 RECLAUDE_TIMEOUT=150
+# org-use 整个流程的总时限（秒）：读、切、切完回读核对，没切成还要往回切、再读，加起来不超过它。每一步只给剩下的时间，
+# 切之前给切完的核对留 ORG_VERIFY_RESERVE 秒、不够就不切；时间用完照实报「不知道现在挂的是哪个」，不会被调用方半道掐掉
+# （adapters 的 switchSessionOrg 等 300 秒，packages/adapters/test/adopt.test.ts 核对它比这里的总时限长）。
+# 两个测试专用开关，理由同上、故意不叫 FLEET_*。
+ORG_BUDGET=${AGENT_SCOPE_TEST_ORG_BUDGET:-270}
+ORG_VERIFY_RESERVE=${AGENT_SCOPE_TEST_ORG_RESERVE:-60}
+# timeout 到点先发 TERM，这么多秒还不走再 KILL：算每一步给多少时间时一起扣掉。
+RECLAUDE_KILL_AFTER=5
+ORG_DEADLINE=0
 
 die() {
   printf 'fleet-agent-scope：%s\n' "$*" >&2
@@ -286,26 +296,44 @@ scrub() {
   printf '%s' "$1" | sed -E 's/[^[:space:]]+@[^[:space:]]+/<邮箱>/g; s/[0-9]{3,}/<数>/g' | tr '\n\r\t' '   ' | tail -c 300
 }
 
-reclaude_as() { # 用户 家目录 参数…：以会话用户跑它家里的 reclaude，环境清成它自己的，从 / 起，限时
-  local user=$1 home=$2 bin
-  shift 2
+org_left() { echo $((ORG_DEADLINE - SECONDS)); }
+
+rc_name() { # timeout 到点停掉的是 124（TERM 停下）或 137（等不及又 KILL）
+  case $1 in
+  124 | 137) echo "超时被停" ;;
+  *) echo "退出码 $1" ;;
+  esac
+}
+
+# 以会话用户跑它家里的 reclaude，环境清成它自己的，从 / 起。限时：一次最多 RECLAUDE_TIMEOUT，且不越过总时限
+# （扣掉 KILL 的余量和要留给后面几步的秒数）；一点都不剩就不跑，回 124
+reclaude_as() { # 留给后面的秒数 用户 家目录 参数…
+  local reserve=$1 user=$2 home=$3 bin limit
+  shift 3
+  limit=$((ORG_DEADLINE - SECONDS - RECLAUDE_KILL_AFTER - reserve))
+  ((limit <= RECLAUDE_TIMEOUT)) || limit=$RECLAUDE_TIMEOUT
+  if ((limit < 1)); then
+    echo "总时限 ${ORG_BUDGET} 秒只剩 $(org_left) 秒，这一步没跑"
+    return 124
+  fi
   bin=${RECLAUDE_TEST_BIN:-$home/.local/bin/reclaude}
   local -a envs=(HOME="$home" USER="$user" LOGNAME="$user" PATH="/usr/local/bin:/usr/bin:/bin:$home/.local/bin" LANG=C.UTF-8)
   if [[ "$AS_USER_TEST" == direct ]]; then
-    (cd / && timeout --kill-after=10 "$RECLAUDE_TIMEOUT" env -i "${envs[@]}" "$bin" "$@")
+    (cd / && timeout --kill-after="$RECLAUDE_KILL_AFTER" "$limit" env -i "${envs[@]}" "$bin" "$@")
   else
-    (cd / && timeout --kill-after=10 "$RECLAUDE_TIMEOUT" /usr/bin/setpriv --reuid="$user" --regid="$user" --init-groups \
-      --no-new-privs -- /usr/bin/env -i "${envs[@]}" "$bin" "$@")
+    (cd / && timeout --kill-after="$RECLAUDE_KILL_AFTER" "$limit" /usr/bin/setpriv --reuid="$user" --regid="$user" \
+      --init-groups --no-new-privs -- /usr/bin/env -i "${envs[@]}" "$bin" "$@")
   fi
 }
 
 # org list 的一行：「* 编号<Tab>名字<Tab>类型<Tab>邮箱」，带 * 的是现在挂的；前后的「Syncing config…」、提示之类都跳过。
 # 读成 ORG_ROWS（一行一个「是否当前 编号 类型」，类型 carpool / solo / other）；读不了、一行都认不出回 1，原因在 ORG_WHY
 org_rows() { # 用户 家目录
-  local out line mark id type re=$'^[[:space:]]*(\\*?)[[:space:]]*([0-9]+)\t[^\t]*\t([^\t]*)'
+  local out rc line mark id type re=$'^[[:space:]]*(\\*?)[[:space:]]*([0-9]+)\t[^\t]*\t([^\t]*)'
   ORG_ROWS="" ORG_WHY=""
-  if ! out=$(reclaude_as "$1" "$2" org list 2>&1); then
-    ORG_WHY="org list 没跑成（$(scrub "$out")）"
+  if out=$(reclaude_as 0 "$1" "$2" org list 2>&1); then rc=0; else rc=$?; fi
+  if ((rc != 0)); then
+    ORG_WHY="org list 没跑成（$(rc_name "$rc")：$(scrub "$out")）"
     return 1
   fi
   while IFS= read -r line; do
@@ -380,6 +408,8 @@ org_use() {
     home=$(getent passwd "$user" | cut -d: -f6) || home=""
   fi
   [[ "$home" == /* ]] || org_fail unknown "找不到 $user 的家目录"
+  # 总时限从这里起算：读、切、核对（和没切成时的往回切、再读）都在它里面
+  ORG_DEADLINE=$((SECONDS + ORG_BUDGET))
   org_rows "$user" "$home" || org_fail unknown "$ORG_WHY"
   org_pick "$kind" || org_fail "$CUR_KIND" "$ORG_WHY"
   if [[ "$CUR_ID" == "$WANT_ID" ]]; then
@@ -388,10 +418,14 @@ org_use() {
     return 0
   fi
   from_id=$CUR_ID from_kind=$CUR_KIND
-  if out=$(reclaude_as "$user" "$home" org use "$WANT_ID" 2>&1); then rc=0; else rc=$?; fi
+  # 切之前看时间：切完一定要回读核对，剩下的不够「切 + 给核对留的」就不切（读得慢多半是 reclaude 首跑在同步配置）
+  if (($(org_left) - RECLAUDE_KILL_AFTER - ORG_VERIFY_RESERVE < 1)); then
+    org_fail "$from_kind" "总时限 ${ORG_BUDGET} 秒只剩 $(org_left) 秒，不够切完再核对，没切；现在挂的还是$(kind_name "$from_kind")组织"
+  fi
+  if out=$(reclaude_as "$ORG_VERIFY_RESERVE" "$user" "$home" org use "$WANT_ID" 2>&1); then rc=0; else rc=$?; fi
   # 不看退出码下结论，回读核对：退出码 1 也可能已经切了（CC-07），退出码 0 也要看真挂上了没有
   if ! org_rows "$user" "$home" || ! org_pick "$kind"; then
-    org_fail unknown "org use 退出码 $rc，切完回读核对不了（$ORG_WHY），不知道现在挂的是哪个，没敢往回切"
+    org_fail unknown "org use $(rc_name "$rc")，切完回读核对不了（$ORG_WHY），不知道现在挂的是哪个，没敢往回切"
   fi
   if [[ "$CUR_ID" == "$WANT_ID" ]]; then
     echo "已从$(kind_name "$from_kind")组织切到$(kind_name "$kind")组织"
@@ -399,15 +433,17 @@ org_use() {
     return 0
   fi
   # 没切成：挂着的已经不是原来那个了，切回去；再回读一次，照实说现在挂的是哪个
-  if [[ "$CUR_ID" != "$from_id" ]]; then reclaude_as "$user" "$home" org use "$from_id" >/dev/null 2>&1 || true; fi
+  if [[ "$CUR_ID" != "$from_id" ]]; then
+    reclaude_as "$ORG_VERIFY_RESERVE" "$user" "$home" org use "$from_id" >/dev/null 2>&1 || true
+  fi
   now=unknown
   if org_rows "$user" "$home" && org_pick "$kind"; then
     if [[ "$CUR_ID" == "$from_id" ]]; then
-      org_fail "$from_kind" "没切成（org use 退出码 $rc：$(scrub "$out")），现在挂的还是原来的$(kind_name "$from_kind")组织"
+      org_fail "$from_kind" "没切成（org use $(rc_name "$rc")：$(scrub "$out")），现在挂的还是原来的$(kind_name "$from_kind")组织"
     fi
     now=$CUR_KIND
   fi
-  org_fail "$now" "没切成（org use 退出码 $rc：$(scrub "$out")），也没回到原来的$(kind_name "$from_kind")组织：现在挂的是$(kind_name "$now")组织"
+  org_fail "$now" "没切成（org use $(rc_name "$rc")：$(scrub "$out")），也没回到原来的$(kind_name "$from_kind")组织：现在挂的是$(kind_name "$now")组织"
 }
 
 case ${1:-} in
