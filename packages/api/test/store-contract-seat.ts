@@ -384,6 +384,60 @@ export function describeSeatStoreContract(name: string, make: MakeSeatStore): vo
         ]);
       });
 
+      it('帅位改派给本机（#348）：带创始人原话作废引擎的、别的工人的（记 claim.reassign，写明给谁、原话），交回作废的那份；【故意造出的失败】不带原话 held、这张没动', async () => {
+        await store.takeSeat({ scope: 'main', ...A });
+        const eng = await engine(65);
+        if (!eng.ok) throw new Error('引擎没拿到');
+        const reassign = (issueNumber: number, label: string, founder?: string) =>
+          store.takeClaim({
+            ...target(issueNumber),
+            seat: actor(A, 1),
+            owner: { kind: 'worker', label },
+            founder,
+          });
+        expect(await reassign(65, '工人乙')).toMatchObject({
+          ok: false,
+          reason: 'held',
+          claim: { ownerKind: 'engine' },
+        });
+        expect((await store.getClaim(IDS.repo, 65)).claim).toMatchObject({ claimId: eng.claim.claimId });
+        const got = await reassign(65, '工人乙', '65 本机做');
+        expect(got).toMatchObject({
+          ok: true,
+          claim: { ownerKind: 'worker', ownerLabel: '工人乙', state: 'claimed' },
+          voided: {
+            claimId: eng.claim.claimId,
+            state: 'voided',
+            endReason: '改派给本机/工人乙（创始人原话：65 本机做）',
+          },
+          previous: { claimId: eng.claim.claimId, state: 'voided' },
+        });
+        // 工人拿着的也能强制改派给另一个工人
+        const again = await reassign(65, '工人丙', '换丙做');
+        if (!got.ok || !again.ok) throw new Error('改派没成');
+        expect(again.voided).toMatchObject({ claimId: got.claim.claimId, ownerLabel: '工人乙' });
+        expect(await seatAudits(`claim:${IDS.repo}#65`)).toEqual([
+          ['claim.take', 'github-intake'],
+          ['claim.reassign', '本机/a1'],
+          ['claim.take', '本机/a1'],
+          ['claim.reassign', '本机/a1'],
+          ['claim.take', '本机/a1'],
+        ]);
+        // 原来的已经结束了的：不用原话，不作废谁，previous 交回原来那份
+        await store.endClaim({
+          ...target(65),
+          claimId: again.claim.claimId,
+          state: 'released',
+          reason: '放下',
+        });
+        const after = await reassign(65, '工人丁');
+        expect(after).toMatchObject({
+          ok: true,
+          voided: null,
+          previous: { claimId: again.claim.claimId, state: 'released' },
+        });
+      });
+
       it('【故意造出的失败】带着帅位来（交单）：不是帅位（换了人、过了租期、座位上没人）什么都不做；设置认不出也不做', async () => {
         expect(await engine(64, { seat: actor(A, 1) })).toMatchObject({ ok: false, reason: 'not_seat' });
         await store.takeSeat({ scope: 'main', ...A });

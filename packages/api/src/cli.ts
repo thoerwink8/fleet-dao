@@ -39,6 +39,7 @@ import {
 import { requirementWorkflowId } from '@fleet-dao/shared';
 import { ALERT_USAGE, runAlert } from './alert-cli.ts';
 import type { AlertWorkPort } from './alert-work.ts';
+import type { ClaimStatus } from './claim-status.ts';
 import { temporalSettings } from './config.ts';
 import { checkNewPassword, checkUsername, hashPassword } from './password.ts';
 import type {
@@ -52,8 +53,10 @@ import type {
   SeatActor,
   Store,
   User,
+  WorkflowControl,
 } from './ports.ts';
-import { CLAIM_USAGE, runClaim, runSeat, SEAT_USAGE, SeatCliError } from './seat-cli.ts';
+import { WorkflowGoneError } from './ports.ts';
+import { CLAIM_USAGE, type ClaimCliDeps, runClaim, runSeat, SEAT_USAGE, SeatCliError } from './seat-cli.ts';
 import { seatActor } from './seat-store.ts';
 import { isCockpitUser } from './session.ts';
 
@@ -536,9 +539,17 @@ export function parseHandoverArgs(argv: readonly string[]): HandoverArgs {
   return args;
 }
 
-/** 连 Temporal 的一份：起工作流、用完关掉。 */
+/** 连 Temporal 的一份：起工作流、给工作流发信号（改派给本机时叫停引擎，#348）、用完关掉。 */
 export interface HandoverTemporal {
   requirements: RequirementWorkflows;
+  /** 没给（测试里只起工作流的）就叫停不了：用到时明确报错。 */
+  workflows?: WorkflowControl | undefined;
+  close(): Promise<void>;
+}
+
+/** 「认领对得上」那一侧（#348）连上的一份：用完关掉（它自己连库记评论、关 PR 的账）。 */
+export interface ClaimsConnection {
+  claims: ClaimStatus;
   close(): Promise<void>;
 }
 
@@ -577,6 +588,8 @@ export async function handover(input: {
   store: Store;
   plans: () => Promise<IssuePlanReader>;
   temporal: () => Promise<HandoverTemporal>;
+  /** 强制改派作废了本机的认领时，它开着的 PR 撤自动合并、关掉、留言（#348）。没给的照实打出来要人补。 */
+  claims?: (() => Promise<ClaimStatus>) | undefined;
   args: HandoverArgs;
   operator: string;
   now: () => Date;
@@ -703,10 +716,24 @@ export async function handover(input: {
       claimNotes.push(`认领 ${id} 没改成（${errText(err)}）`);
     }
     const v = claimed.voided;
-    if (v)
-      claimNotes.push(
-        `作废了本机的认领（原来归 ${claimOwnerText(v)}，认领 ${v.claimId.slice(0, 8)}${v.prNumbers.length > 0 ? `，开过的 PR ${v.prNumbers.map((n) => `#${n}`).join('、')} 要手动撤自动合并、关掉` : ''}）`,
-      );
+    if (v) {
+      const head = `作废了本机的认领（原来归 ${claimOwnerText(v)}，认领 ${v.claimId.slice(0, 8)}）`;
+      // 它开着的 PR：撤自动合并、关掉（分支留着）、留言指向引擎；没做成的照实写，要人补
+      try {
+        if (!input.claims) throw new Error('这里没接 GitHub');
+        const closed = await (await input.claims()).closeForReassign(repo, v, {
+          to: '引擎',
+          why: `创始人原话：${args.founder ?? ''}`,
+        });
+        claimNotes.push(
+          `${head}${closed.closed.length > 0 ? `，它开着的 PR ${closed.closed.map((n) => `#${n}`).join('、')} 撤了自动合并、关了（分支留着）` : '，它没有开着的 PR'}${closed.problems.length > 0 ? `；没处理成：${closed.problems.join('；')}` : ''}`,
+        );
+      } catch (err) {
+        claimNotes.push(
+          `${head}；它开着的 PR 没处理（${errText(err)}）${v.prNumbers.length > 0 ? `，登记过的 ${v.prNumbers.map((n) => `#${n}`).join('、')} 要人撤自动合并、关掉` : ''}`,
+        );
+      }
+    }
   }
   const outcome =
     decision.act === 'noop'
@@ -790,6 +817,11 @@ export interface CliDeps {
   readStdin?: () => Promise<string>;
   /** 提醒的处理状态、跟进单、静默（alert 命令用）。不给就是真的：连库，法国上再读发布记录。 */
   openAlertWork?: (url: string, env: CliEnv) => Promise<{ alerts: AlertWorkPort; close(): Promise<void> }>;
+  /**
+   * 「认领对得上」那一侧（#348，claim、handover 用）：「引擎」机器人（凭据和 fleet-api.service 同一份）加一个连库（评论、关 PR
+   * 记账）。不给的用到时明确报错，不当成贴上了。
+   */
+  openClaims?: (url: string, env: CliEnv) => Promise<ClaimsConnection>;
 }
 
 async function openPgStore(url: string): Promise<{ store: Store; close(): Promise<void> }> {
@@ -817,6 +849,26 @@ async function openPgAlertWork(
   };
 }
 
+async function openPgClaims(url: string, env: CliEnv): Promise<ClaimsConnection> {
+  // 用得着才加载、才读凭据：凭据读不到抛 GitHubError（只带文件路径，不带内容）
+  const { createDb } = await import('@fleet-dao/db');
+  const { createGitHub, pgLedger, pgLocker } = await import('@fleet-dao/github');
+  const { createPgStore, withStatementTimeout } = await import('./pg-store.ts');
+  const { createClaimStatus } = await import('./claim-status.ts');
+  const { silentLogger } = await import('./log.ts');
+  const { db, close } = createDb({ url: withStatementTimeout(url) });
+  try {
+    const gh = createGitHub({ ledger: pgLedger(db), locker: pgLocker(db), env });
+    return {
+      claims: createClaimStatus({ store: createPgStore(db), github: gh.claims, log: silentLogger }),
+      close,
+    };
+  } catch (err) {
+    await close();
+    throw err;
+  }
+}
+
 async function openGitHubPlans(env: CliEnv): Promise<IssuePlanReader> {
   // 用得着才加载、才读凭据：前面就拒了的不碰；凭据读不到抛 GitHubError（只带文件路径，不带内容）
   const { appFilesFromEnv, GitHubClient, loadApps, readIssuePlan } = await import('@fleet-dao/github');
@@ -836,7 +888,7 @@ async function openTemporalClient(env: CliEnv): Promise<HandoverTemporal> {
     namespace: s.temporalNamespace,
     taskQueue: s.fleetTaskQueue,
   });
-  return { requirements: t.requirements, close: () => t.close() };
+  return { requirements: t.requirements, workflows: t.control, close: () => t.close() };
 }
 
 export function processDeps(): CliDeps {
@@ -850,6 +902,7 @@ export function processDeps(): CliDeps {
     now: () => new Date(),
     readStdin: readAllStdin,
     openAlertWork: openPgAlertWork,
+    openClaims: openPgClaims,
   };
 }
 
@@ -919,12 +972,14 @@ export async function runCli(argv: readonly string[], deps: CliDeps = processDep
   if (command === 'handover') {
     const args = parseHandoverArgs(rest);
     const { store, close } = await deps.openStore(databaseUrl(deps.env));
+    const claims = claimsOnDemand(deps);
     try {
       deps.out(
         await handover({
           store,
           plans: () => deps.openIssuePlans(deps.env),
           temporal: () => deps.openTemporal(deps.env),
+          claims: claims.get,
           args,
           operator: operatorName(deps.env),
           now: () => deps.now(),
@@ -932,6 +987,7 @@ export async function runCli(argv: readonly string[], deps: CliDeps = processDep
       );
       return 0;
     } finally {
+      await claims.close();
       await close();
     }
   }
@@ -939,6 +995,24 @@ export async function runCli(argv: readonly string[], deps: CliDeps = processDep
     return runSeatOrClaim(command, rest, deps);
   deps.err(Object.values(USAGES).join('\n'));
   return 2;
+}
+
+/** 「认领对得上」那一侧用到才连（#348）：没接（openClaims 没给）的用到时抛错，不当成贴上了；用完 close。 */
+function claimsOnDemand(deps: CliDeps): { get: () => Promise<ClaimStatus>; close(): Promise<void> } {
+  let opened: Promise<ClaimsConnection> | undefined;
+  return {
+    get: async () => {
+      const open = deps.openClaims;
+      if (!open) throw new CliError('这里没接 GitHub（openClaims），贴不了「认领对得上」', 1);
+      opened ??= Promise.resolve().then(() => open(databaseUrl(deps.env), deps.env));
+      return (await opened).claims;
+    },
+    close: async () => {
+      if (!opened) return;
+      const c = await opened.catch(() => undefined);
+      await c?.close();
+    },
+  };
 }
 
 /** 用到才连：参数不对（退出码 2）的不连库。给出一个替身，第一次调方法时才打开真的（方法一律当成异步的）。 */
@@ -995,12 +1069,48 @@ async function runSeatOrClaim(
     alertsOpened ??= Promise.resolve().then(() => openAlertWork(databaseUrl(deps.env), deps.env));
     return (await alertsOpened).alerts;
   });
+  // 认领那几样外面的（#348）：GitHub、Temporal 都用到才连（Temporal 用完各自关：handover 自己关它开的那份）
+  const claims = claimsOnDemand(deps);
+  const claimDeps: ClaimCliDeps = {
+    store,
+    claims: claims.get,
+    stopEngine: async (workflowId, { by, reason }) => {
+      const t = await deps.openTemporal(deps.env);
+      try {
+        if (!t.workflows) throw new CliError('这里没接 Temporal 的工作流信号，叫停不了引擎', 1);
+        await t.workflows.signal(workflowId, { name: 'stop', by, reason });
+        return 'stopped';
+      } catch (err) {
+        if (err instanceof WorkflowGoneError) return 'gone';
+        throw err;
+      } finally {
+        await t.close().catch(() => {});
+      }
+    },
+    handoverToEngine: ({ owner, name, issueNumber, reason, seat, founder }) =>
+      handover({
+        store,
+        plans: () => deps.openIssuePlans(deps.env),
+        temporal: () => deps.openTemporal(deps.env),
+        claims: claims.get,
+        args: {
+          owner,
+          name,
+          issueNumber,
+          reason,
+          ...(seat ? { seat } : {}),
+          ...(founder !== undefined ? { founder } : {}),
+        },
+        operator: operatorName(deps.env),
+        now: () => deps.now(),
+      }),
+  };
   try {
     const result =
       command === 'seat'
         ? await runSeat(rest, { store, readStdin: deps.readStdin ?? readAllStdin })
         : command === 'claim'
-          ? await runClaim(rest, { store })
+          ? await runClaim(rest, claimDeps)
           : await runAlert(rest, { store, alerts });
     deps.out(json ? JSON.stringify(result.json) : result.text);
     return result.code;
@@ -1010,6 +1120,7 @@ async function runSeatOrClaim(
   } finally {
     if (opened) await (await opened.catch(() => undefined))?.close();
     if (alertsOpened) await (await alertsOpened.catch(() => undefined))?.close();
+    await claims.close();
   }
 }
 
