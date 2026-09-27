@@ -39,7 +39,6 @@ import { type Context, Hono } from 'hono';
 import type { z } from 'zod';
 import { answerAsk } from './answer-ask.ts';
 import { meBody } from './auth.ts';
-import type { AskWaiters } from './changes.ts';
 import { registerCredentialRoutes } from './credentials.ts';
 import { registerDemoRoutes } from './demo.ts';
 import type { Deps, NotWiredMark } from './deps.ts';
@@ -71,7 +70,7 @@ import {
 
 const ACTION_WORDS = { pause: '暂停', resume: '继续', stop: '叫停', reroute: '换路由' } as const;
 
-export function cockpitRoutes(deps: Deps, waiters: AskWaiters, relay: SseRelay): Hono<CockpitEnv> {
+export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
   const { config, store } = deps;
   const app = new Hono<CockpitEnv>();
   app.use('*', requireSession(config, store, deps.now));
@@ -271,7 +270,7 @@ export function cockpitRoutes(deps: Deps, waiters: AskWaiters, relay: SseRelay):
     const { answer } = await readJson(c, AnswerAskRequest);
     const ask = await store.getAsk(askId);
     if (!ask) throw new ApiError(404, 'ask_not_found', '没有这条追问');
-    const result = await answerAsk(deps, waiters, {
+    const result = await answerAsk(deps, {
       askId,
       taskId: ask.taskId,
       answer,

@@ -29,15 +29,27 @@ export const PlanRequest = z
 /** 一句白话进度，例如「正在写验证码过期的测试」。 */
 export const SayRequest = z.object({ text: z.string().min(1).max(500) });
 
-/** 问创始人。blocking=true 时命令会等回答（有上限），等不到就返回 pending，AI 按写明的假设继续并在结果里注明。 */
+/**
+ * 问创始人（#259）：一律带选项和推荐，命令当场返回、不等回答——他多半不在场，问他不许卡住活。
+ * 默认是这张单范围内的岔路，按推荐先做；outside = 超出这张单的范围，另开一张单等他拍，这张单绕开它接着做；
+ * hold = 碰了人闸四类（release 对外发布、spend 花钱、delete 删数据、standard 改标准），也先按推荐做，合并前等他批。
+ * 合不合格由 core 的 checkAsk 判：不合格回 400（ask_incomplete），message 写明怎么补。
+ */
 export const AskRequest = z.object({
   question: z.string().min(1).max(2000),
   options: z.array(z.string().min(1).max(200)).max(4).optional(),
-  blocking: z.boolean().default(true),
+  /** 推荐哪个：照抄其中一个选项。 */
+  recommend: z.string().min(1).max(200).optional(),
+  outside: z.boolean().optional(),
+  hold: z.string().min(1).max(20).optional(),
 });
 export const AskResponse = z.object({
   askId: z.string(),
-  status: z.enum(['answered', 'pending']),
+  /**
+   * answered = 这一句创始人已经回过了（同一个会话问过一模一样的），answer 是他的回答；assumed = 按推荐先做，answer 是推荐的；
+   * outside = 另开一张单等他拍，这张单绕开它接着做；held = 先按推荐做（answer），合并前等他批。
+   */
+  status: z.enum(['answered', 'assumed', 'outside', 'held']),
   answer: z.string().optional(),
 });
 

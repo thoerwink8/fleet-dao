@@ -1,7 +1,6 @@
 // fleet 命令对着假后端测：请求形状（方法、路径、通行证、JSON 体）、本地校验、出错处理、退出码。
-import { DEFAULT_BASH_TIMEOUT_MS } from '@fleet-dao/adapters';
 import { afterEach, describe, expect, it } from 'vitest';
-import { ASK_WAIT_MS, type CliIo, parseStep, runFleet } from '../src/cli.ts';
+import { type CliIo, parseStep, runFleet } from '../src/cli.ts';
 import { EXIT } from '../src/client.ts';
 import { COMMAND_HELP } from '../src/help.ts';
 import { deadUrl, type FakeBackend, type Responder, startFakeBackend } from './fake-backend.ts';
@@ -228,36 +227,55 @@ describe('say', () => {
 });
 
 describe('ask', () => {
-  it('默认等回答：带选项，回来就打印回答', async () => {
+  it('带选项和推荐：后端当场回按推荐先做，打印「别停下等回答」', async () => {
     const b = await backend(() => ({
       status: 200,
-      body: { askId: 'A1', status: 'answered', answer: '5 分钟' },
+      body: { askId: 'A1', status: 'assumed', answer: '5 分钟' },
     }));
-    const r = await fleet(['ask', '有效期 5 分钟还是 10 分钟？', '-o', '5 分钟', '--option', '10 分钟'], {
-      url: b.url,
-    });
+    const r = await fleet(
+      ['ask', '有效期 5 分钟还是 10 分钟？', '-o', '5 分钟', '--option', '10 分钟', '-r', '5 分钟'],
+      { url: b.url },
+    );
     expect(r.code).toBe(EXIT.ok);
     expect(b.requests[0]?.body).toEqual({
       question: '有效期 5 分钟还是 10 分钟？',
       options: ['5 分钟', '10 分钟'],
-      blocking: true,
+      recommend: '5 分钟',
     });
-    expect(r.out).toBe('回答：5 分钟\n');
+    expect(r.out).toContain('已按推荐先做：5 分钟（问题编号 A1）');
+    expect(r.out).toContain('别停下等回答');
   });
 
-  it('等不到回答：退出码 0，提示按写明的假设继续', async () => {
-    const b = await backend(() => ({ status: 200, body: { askId: 'A2', status: 'pending' } }));
-    const r = await fleet(['ask', '要不要顺手改注册页？'], { url: b.url });
-    expect(r.code).toBe(EXIT.ok);
-    expect(r.out).toContain('还没人回答（问题编号 A2）');
-    expect(r.out).toContain('假设');
+  it('超出这张单的范围、碰人闸、创始人回过这一句：各有各的说法', async () => {
+    const replies = [
+      { askId: 'A2', status: 'outside' },
+      { askId: 'A3', status: 'held', answer: '阿里云' },
+      { askId: 'A4', status: 'answered', answer: '6 位' },
+    ];
+    let n = 0;
+    const b = await backend(() => ({ status: 200, body: replies[n++] }));
+    const outside = await fleet(['ask', '顺手改注册页？', '-o', '改', '-o', '不改', '-r', '不改', '--outside'], {
+      url: b.url,
+    });
+    expect(b.requests[0]?.body).toMatchObject({ outside: true, recommend: '不改' });
+    expect(outside.out).toContain('另开一张单等创始人拍（问题编号 A2）');
+    const held = await fleet(['ask', '短信用哪家？', '-o', '阿里云', '-o', '腾讯云', '-r', '阿里云', '--hold', 'spend'], {
+      url: b.url,
+    });
+    expect(b.requests[1]?.body).toMatchObject({ hold: 'spend' });
+    expect(held.out).toContain('先按推荐做（阿里云），合并前等创始人批');
+    const answered = await fleet(['ask', '验证码几位？', '-o', '4 位', '-o', '6 位', '-r', '4 位'], { url: b.url });
+    expect(answered.out).toBe('创始人回过这一句：6 位\n');
   });
 
-  it('--no-wait 发出去就走', async () => {
-    const b = await backend(() => ({ status: 200, body: { askId: 'A3', status: 'pending' } }));
-    const r = await fleet(['ask', '顺便问一句', '--no-wait'], { url: b.url });
-    expect(b.requests[0]?.body).toEqual({ question: '顺便问一句', blocking: false });
-    expect(r.out).toBe('已发出（问题编号 A3），不等回答。\n');
+  it('【故意造出的失败】后端退回（没带推荐）：退出码 4，原因原样打出来，AI 照着补', async () => {
+    const b = await backend(() => ({
+      status: 400,
+      body: { error: { code: 'ask_incomplete', message: '没写推荐哪个（--recommend，照抄其中一个选项）' } },
+    }));
+    const r = await fleet(['ask', '验证码几位？', '-o', '4 位', '-o', '6 位'], { url: b.url });
+    expect(r.code).toBe(EXIT.rejected);
+    expect(r.err).toContain('没写推荐哪个');
   });
 
   it('选项超过 4 个：本地挡下', async () => {
@@ -267,16 +285,10 @@ describe('ask', () => {
     expect(b.requests).toEqual([]);
   });
 
-  it('等回答的上限短于会话里单条命令的超时：不然命令先被执行体杀掉，AI 只看到超时', () => {
-    expect(ASK_WAIT_MS).toBeLessThan(DEFAULT_BASH_TIMEOUT_MS);
-  });
-
-  it('等回答超时：不重试（再问一遍只会重复提问），按后端出错退出', async () => {
-    const b = await backend(() => 'hang');
-    const r = await fleet(['ask', '在吗？'], { url: b.url, timing: { askMs: 200 } });
-    expect(r.code).toBe(EXIT.backend);
-    expect(r.err).toContain('超时');
-    expect(b.requests).toHaveLength(1);
+  it('不等回答了：--no-wait 这个老写法不认（本地挡下），不会发出一条去等', async () => {
+    const b = await backend(ok);
+    expect((await fleet(['ask', '在吗？', '--no-wait'], { url: b.url })).code).toBe(EXIT.usage);
+    expect(b.requests).toEqual([]);
   });
 });
 

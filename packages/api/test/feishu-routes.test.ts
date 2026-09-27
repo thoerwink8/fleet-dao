@@ -1548,7 +1548,14 @@ describe('GET /feishu/outbox 与 POST /feishu/outbox/acks：待推送与回执',
     const started = Date.now();
     const pending = outbox(h, '?waitSeconds=5');
     await new Promise((r) => setTimeout(r, 150));
-    await h.store.openAsk({ runId: IDS.run1, taskId: IDS.task12, question: '用哪个短信商？', options: [] });
+    await h.store.openAsk({
+      runId: IDS.run1,
+      taskId: IDS.task12,
+      question: '用哪个短信商？',
+      options: ['阿里云', '腾讯云'],
+      scope: 'task',
+      recommended: '阿里云',
+    });
     const batch = await pending;
     expect(batch.items.map((i) => i.title)).toEqual(['用哪个短信商？']);
     expect(Date.now() - started).toBeLessThan(2_000);

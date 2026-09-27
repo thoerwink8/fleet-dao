@@ -28,7 +28,6 @@ import {
 import { type Context, Hono, type MiddlewareHandler } from 'hono';
 import { z } from 'zod';
 import { answerAsk } from './answer-ask.ts';
-import type { AskWaiters } from './changes.ts';
 import type { Deps } from './deps.ts';
 import type { DraftOpenRunner } from './draft-opening.ts';
 import { textHash, wellFormed } from './feishu-records.ts';
@@ -67,7 +66,7 @@ const OUTBOX_BATCH = 100;
 const MessageIdParam = z.string().min(1).max(100);
 const TERMINAL = new Set(['done', 'stopped', 'failed']);
 
-export function feishuRoutes(deps: Deps, waiters: AskWaiters, opening: DraftOpenRunner): Hono<FeishuEnv> {
+export function feishuRoutes(deps: Deps, opening: DraftOpenRunner): Hono<FeishuEnv> {
   const { store, log } = deps;
   const app = new Hono<FeishuEnv>();
   const outboxWake = createOutboxWake(deps.changes);
@@ -258,7 +257,7 @@ export function feishuRoutes(deps: Deps, waiters: AskWaiters, opening: DraftOpen
   ): Promise<Response> {
     const ask = await store.getAsk(askId);
     const result = ask
-      ? await answerAsk(deps, waiters, {
+      ? await answerAsk(deps, {
           askId,
           taskId: ask.taskId,
           answer: text,

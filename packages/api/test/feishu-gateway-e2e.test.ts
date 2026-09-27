@@ -387,7 +387,11 @@ describe('网关的真客户端对着后端跑一遍（真库）', () => {
       await (
         await h.agent.request(
           '/agent/v1/ask',
-          agentRequest(h.agentToken(), 'POST', { question: '用哪家短信？', options: [], blocking: false }),
+          agentRequest(h.agentToken(), 'POST', {
+            question: '用哪家短信？',
+            options: ['阿里云', '腾讯云'],
+            recommend: '阿里云',
+          }),
         )
       ).json(),
     );

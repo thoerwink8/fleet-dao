@@ -356,20 +356,26 @@ export function describeStoreContract(name: string, make: MakeStore): void {
           taskId: IDS.task12,
           question: long,
           options: ['是', '否'],
+          scope: 'task',
+          recommended: '是',
         });
         expect(first.created).toBe(true);
         const again = await store.openAsk({
           runId: IDS.run1,
           taskId: IDS.task12,
           question: long,
-          options: [],
+          options: ['甲', '乙'],
+          scope: 'outside',
+          recommended: '乙',
         });
         expect(again).toMatchObject({ created: false, ask: { id: first.ask.id } });
         const other = await store.openAsk({
           runId: IDS.run0,
           taskId: IDS.task12,
           question: long,
-          options: [],
+          options: ['是', '否'],
+          scope: 'task',
+          recommended: '否',
         });
         expect(other.created).toBe(true);
         expect(other.ask.id).not.toBe(first.ask.id);
@@ -379,11 +385,79 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         expect(await store.getAsk(first.ask.id)).toMatchObject({ question: long, options: ['是', '否'] });
       });
 
+      it('问他不挡路（#259）：范围、推荐、人闸都记下，读回原样；还没回的不带后补的单号和改动时间', async () => {
+        const task = await store.openAsk({
+          runId: IDS.run1,
+          taskId: IDS.task12,
+          question: '验证码 5 分钟还是 10 分钟？',
+          options: ['5 分钟', '10 分钟'],
+          scope: 'task',
+          recommended: '5 分钟',
+        });
+        expect(await store.getAsk(task.ask.id)).toMatchObject({
+          scope: 'task',
+          recommended: '5 分钟',
+          options: ['5 分钟', '10 分钟'],
+        });
+        const held = await store.openAsk({
+          runId: IDS.run1,
+          taskId: IDS.task12,
+          question: '短信平台开按量付费？',
+          options: ['阿里云', '腾讯云'],
+          scope: 'hold',
+          recommended: '阿里云',
+          hold: 'spend',
+        });
+        const read = await store.getAsk(held.ask.id);
+        expect(read).toMatchObject({ scope: 'hold', recommended: '阿里云', hold: 'spend' });
+        expect(read?.followUpIssue).toBeUndefined();
+        expect(read?.appliedAt).toBeUndefined();
+        const outside = await store.openAsk({
+          runId: IDS.run1,
+          taskId: IDS.task12,
+          question: '注册页也要验证码吗？',
+          options: ['要', '不要'],
+          scope: 'outside',
+          recommended: '不要',
+        });
+        expect((await store.getAsk(outside.ask.id))?.hold).toBeUndefined();
+      });
+
+      it('【故意造出的失败】推荐的不在选项里、人闸和范围对不上：拒写（库里有约束，不拿空的冒充推荐）', async () => {
+        const base = { runId: IDS.run1, taskId: IDS.task12, options: ['甲', '乙'] };
+        await expect(
+          store.openAsk({ ...base, question: '推荐的不在选项里？', scope: 'task', recommended: '丙' }),
+        ).rejects.toThrow();
+        await expect(
+          store.openAsk({ ...base, question: '碰了人闸没说哪一类？', scope: 'hold', recommended: '甲' }),
+        ).rejects.toThrow();
+        await expect(
+          store.openAsk({
+            ...base,
+            question: '没碰人闸却带了人闸？',
+            scope: 'task',
+            recommended: '甲',
+            hold: 'spend',
+          }),
+        ).rejects.toThrow();
+        const questions = (await store.listAsks(IDS.task12)).map((a) => a.question);
+        expect(questions).not.toContain('推荐的不在选项里？');
+        expect(questions).not.toContain('碰了人闸没说哪一类？');
+        expect(questions).not.toContain('没碰人闸却带了人闸？');
+      });
+
       it('新开的追问同一事务记一条 ask 进度；复用那一条时不再记', async () => {
         const askEvents = async () =>
           (await store.listTimeline(IDS.task12, { limit: 100 })).items.filter((r) => r.kind === 'ask');
         const before = (await askEvents()).length;
-        const input = { runId: IDS.run1, taskId: IDS.task12, question: '验证码几位？', options: [] };
+        const input = {
+          runId: IDS.run1,
+          taskId: IDS.task12,
+          question: '验证码几位？',
+          options: ['6', '4'],
+          scope: 'task' as const,
+          recommended: '6',
+        };
         const { ask } = await store.openAsk(input);
         tick();
         await store.openAsk(input);
@@ -400,7 +474,9 @@ export function describeStoreContract(name: string, make: MakeStore): void {
           runId: IDS.run1,
           taskId: IDS.task12,
           question: '几位？',
-          options: [],
+          options: ['6', '4'],
+          scope: 'task',
+          recommended: '6',
         });
         const auditsBefore = (await store.listAudit({ limit: 200 })).items.length;
         tick();
@@ -425,7 +501,9 @@ export function describeStoreContract(name: string, make: MakeStore): void {
           runId: IDS.run1,
           taskId: IDS.task12,
           question: '几位？',
-          options: [],
+          options: ['6', '4'],
+          scope: 'task',
+          recommended: '6',
         });
         await expect(
           store.answerAsk({ askId: ask.id, answer: '6', by: { kind: 'user', id: DEV_USER_ID } }, badAudit()),

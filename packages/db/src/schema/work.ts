@@ -320,6 +320,8 @@ export const progressEvents = pgTable(
 /**
  * 会话在任务里问创始人的话（fleet ask，一句最长 2000 字），回答来自驾驶舱、飞书或 issue 评论。
  * 同一会话问一模一样的一句只有一条：命令重试不会刷屏，写入用 on conflict (run_id, md5(question))。答过就不再改。
+ * 问他不挡路（#259，判法在 core 的 ask.ts）：会话的提问带选项和推荐（scope 有值），当场按推荐先做、不等回答；
+ * scope 是空的是引擎自己等人的（只有他本人才有的东西）和这之前的老提问。
  */
 export const asks = pgTable(
   'asks',
@@ -336,6 +338,16 @@ export const asks = pgTable(
     /** 谁答的（actor id）。 */
     answeredBy: text('answered_by'),
     answeredAt: timestamp('answered_at', tz),
+    /** 推荐的那个选项：task、hold 两种当场照它先做。 */
+    recommended: text('recommended'),
+    /** task = 这张单范围内的岔路；outside = 超出这张单的范围（另开单）；hold = 碰了人闸四类（合并前等批）。 */
+    scope: text('scope').$type<'task' | 'outside' | 'hold'>(),
+    /** scope = hold 时碰的是哪一类：release 对外发布、spend 花钱、delete 删数据、standard 改标准。 */
+    hold: text('hold').$type<'release' | 'spend' | 'delete' | 'standard'>(),
+    /** 另开的单：超出范围的那张，或他改选了别的、原单已经合了开的后续单。 */
+    followUpIssue: integer('follow_up_issue'),
+    /** 他改选了别的，引擎在存档点交给主导照改的时刻。 */
+    appliedAt: timestamp('applied_at', tz),
   },
   (t) => [
     foreignKey({
@@ -349,6 +361,19 @@ export const asks = pgTable(
       'asks_answer_shape',
       sql`(${t.answer} is null) = (${t.answeredAt} is null) and (${t.answer} is null) = (${t.answeredBy} is null)`,
     ),
+    check('asks_scope_known', sql`${t.scope} is null or ${t.scope} in ('task', 'outside', 'hold')`),
+    // 带了范围的都是新问法：一定有推荐，推荐的一定在选项里（不拿空的冒充推荐）
+    check(
+      'asks_scoped_recommendation',
+      sql`${t.scope} is null or (${t.recommended} is not null and ${t.recommended} = any(${t.options}))`,
+    ),
+    check('asks_hold_shape', sql`(${t.scope} is not distinct from 'hold') = (${t.hold} is not null)`),
+    check(
+      'asks_hold_known',
+      sql`${t.hold} is null or ${t.hold} in ('release', 'spend', 'delete', 'standard')`,
+    ),
+    check('asks_applied_answered', sql`${t.appliedAt} is null or ${t.answer} is not null`),
+    check('asks_follow_up_positive', sql`${t.followUpIssue} is null or ${t.followUpIssue} > 0`),
     index('asks_task_idx').on(t.taskId, t.askedAt),
   ],
 );
