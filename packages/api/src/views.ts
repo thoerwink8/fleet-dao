@@ -422,6 +422,7 @@ const ACTION_WORDS: Record<string, string> = {
   resume: '继续',
   stop: '叫停',
   reroute: '换路由',
+  handover: '交给 fleet',
 };
 
 /** 一行白话。会话被动读出来的 file/test/tool 的载荷由插头决定，这里只认常见字段，认不出就只写种类。 */

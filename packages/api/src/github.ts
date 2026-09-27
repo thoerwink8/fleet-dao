@@ -324,7 +324,7 @@ export interface GitHubIntake {
 
 /** 收件（webhook）、补收（对账、轮询）、重放共用这一道门和这一本投递账（github_events）。 */
 export function createGitHubIntake(
-  deps: Pick<Deps, 'store' | 'github' | 'workflows' | 'requirements' | 'log' | 'now'>,
+  deps: Pick<Deps, 'store' | 'github' | 'workflows' | 'requirements' | 'plans' | 'log' | 'now'>,
 ): GitHubIntake {
   const { store, log } = deps;
   const issues = createIssueIntake(deps);

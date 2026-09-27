@@ -51,9 +51,9 @@ export { type HealthReport, PublicHealthError, runHealthChecks, serviceHealthChe
 export { isSerial, isUuid, parseCursor } from './ids.ts';
 export {
   createIssueIntake,
-  type DispatchDecision,
-  dispatchDecision,
+  githubIssuePlans,
   type IssueIntake,
+  issuePlansUnavailable,
   RetryLaterError,
 } from './issue-intake.ts';
 export { jsonLogger, silentLogger } from './log.ts';

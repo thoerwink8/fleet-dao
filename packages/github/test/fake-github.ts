@@ -130,6 +130,8 @@ export class FakeGitHub {
   issues = new Map<number, IssueState>();
   /** 里程碑编号 → 标题：PATCH 里程碑只带编号，靠这张表把标题配回去。 */
   milestones = new Map<number, string>();
+  /** 已经关了的里程碑编号（列还开着的里程碑时不回它们）。 */
+  closedMilestones = new Set<number>();
   /** 需求文档（Contents API），键是仓内路径。 */
   specs = new Map<string, { sha: string; content: string }>();
   checkRuns: CheckRunState[] = [];
@@ -611,6 +613,19 @@ export class FakeGitHub {
       const name = decodeURIComponent(x[1] ?? '');
       if (!this.refs.delete(name)) return this.json(422, { message: 'Reference does not exist' });
       return new Response(null, { status: 204 });
+    }
+
+    // —— 里程碑 ——
+    if (rest === '/milestones' && m === 'GET') {
+      const state = req.query.get('state') ?? 'open';
+      const list = [...this.milestones]
+        .map(([number, title]) => ({
+          number,
+          title,
+          state: this.closedMilestones.has(number) ? 'closed' : 'open',
+        }))
+        .filter((x) => state === 'all' || x.state === state);
+      return this.page(req, list);
     }
 
     // —— issue ——

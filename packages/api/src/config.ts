@@ -72,6 +72,20 @@ const DEFAULT_FLEET_TASK_QUEUE = 'fleet';
 
 type Env = Record<string, string | undefined>;
 
+/**
+ * 连 Temporal 的三样：都有默认值，两个环境都不强制配（和引擎 worker.ts 的 configFromEnv 同一套默认，Temporal 没起来也不挡
+ * 后端启动）。后端启动和 fleet-api handover（带着同一份 api.env）都照这里读。
+ */
+export function temporalSettings(
+  env: Env,
+): Pick<Config, 'temporalAddress' | 'temporalNamespace' | 'fleetTaskQueue'> {
+  return {
+    temporalAddress: env.TEMPORAL_ADDRESS?.trim() || DEFAULT_TEMPORAL_ADDRESS,
+    temporalNamespace: env.TEMPORAL_NAMESPACE?.trim() || DEFAULT_TEMPORAL_NAMESPACE,
+    fleetTaskQueue: env.FLEET_TASK_QUEUE?.trim() || DEFAULT_FLEET_TASK_QUEUE,
+  };
+}
+
 export function loadConfig(env: Env): Config {
   const problems: string[] = [];
   const fleetEnv = parseEnv(env.FLEET_ENV, problems);
@@ -136,10 +150,7 @@ export function loadConfig(env: Env): Config {
   if (demoDir !== null && !isAbsolute(demoDir))
     problems.push(`FLEET_DEMO_DIR 要写绝对路径，现在是「${demoDir}」`);
 
-  // 都有默认值，两个环境都不强制配（和引擎 worker.ts 的 configFromEnv 同一套默认，Temporal 没起来也不挡后端启动）。
-  const temporalAddress = env.TEMPORAL_ADDRESS?.trim() || DEFAULT_TEMPORAL_ADDRESS;
-  const temporalNamespace = env.TEMPORAL_NAMESPACE?.trim() || DEFAULT_TEMPORAL_NAMESPACE;
-  const fleetTaskQueue = env.FLEET_TASK_QUEUE?.trim() || DEFAULT_FLEET_TASK_QUEUE;
+  const { temporalAddress, temporalNamespace, fleetTaskQueue } = temporalSettings(env);
 
   if (
     problems.length > 0 ||

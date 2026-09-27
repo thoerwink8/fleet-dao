@@ -1,7 +1,7 @@
 // 后端依赖的外部能力，一律按接口写：数据库（pg-store.ts 用 @fleet-dao/db 实现）、Temporal、飞书、GitHub 补收
 // 由各自的实现接进来；测试和本地开发用 memory-store.ts。两个 Store 实现过同一套契约测试（test/store-contract.ts），
 // 改这里的语义要两边一起改、契约测试跟着改。
-import type { AskHold, AskScope, FlowReplica } from '@fleet-dao/core';
+import type { AskHold, AskScope, FlowReplica, IssueMilestones, IssueNow } from '@fleet-dao/core';
 import type {
   AuditEntrySchema,
   Ban,
@@ -569,7 +569,7 @@ export interface IntakeStore {
   /**
    * 「让 AI 接活」开关（repos.auto_dispatch_since，design 第九节「在哪能做与接活开关」）的写入口，
    * 服务器上的 fleet-api dispatch 和以后驾驶舱的开关（#131）都走这里。on 打开、记下此刻（只有这之后开的 issue
-   * 自动派，见 issue-intake.ts 的 dispatchDecision）；off 关上、设为空。已经是要的状态就不改、不记（changed=false）：
+   * 自动派，还要挂在当前版本上，见 @fleet-dao/core 的 dispatch.ts）；off 关上、设为空。已经是要的状态就不改、不记（changed=false）：
    * 开着时再开不重设时刻——重设会把已经能派的单变成「开关打开以前开的」。改了就和操作记录同一事务：先锁住这一行，
    * 操作记录的 before/after（开关原来、现在的值）由这里按库里的值填。没这个仓（含编号不是 uuid）：not_found。
    */
@@ -935,6 +935,21 @@ export interface RequirementWorkflows {
    * 调用方把这条投递记成出错，重放时再来。真实现见 temporal.ts 的 createTemporalRequirementWorkflows。
    */
   start(input: RequirementStart): Promise<'started' | 'already_running'>;
+}
+
+/**
+ * 一张 issue 此刻在 GitHub 上的样子：挂在哪个里程碑、仓里还开着哪些里程碑（接活判「挂没挂在当前版本」，core 的 versionGate），
+ * 开没开着、重开过没有（交给 fleet 判能不能交，core 的 handoverDecision），作者（拉起时写提出人）。
+ */
+export interface IssuePlan extends IssueMilestones, IssueNow {
+  /** 作者的 GitHub 登录名；账号删了是 null。 */
+  author: string | null;
+}
+
+/** 读 issue 此刻的样子（「引擎」机器人现读，计划以 GitHub 为准）：真实现是 @fleet-dao/github 的 readIssuePlan（issue-intake.ts 的 githubIssuePlans）。 */
+export interface IssuePlanReader {
+  /** 读不到、认不出一律抛错（调用方说「没查成」），不拿「没挂里程碑」「开着」顶。 */
+  read(repo: { owner: string; name: string }, issueNumber: number): Promise<IssuePlan>;
 }
 
 /** 发不了信号、起不了工作流：Temporal 客户端没接上、连不上或超时。 */

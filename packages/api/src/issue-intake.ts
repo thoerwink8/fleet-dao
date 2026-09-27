@@ -3,11 +3,21 @@
 // 只有「重开」「编辑」这两件边沿上的事只认 webhook 带来的动作：补收看不出是谁、什么时候改的。
 // 每一步都能重放：任务行按（仓, issue 号）唯一，起工作流按工作流编号去重，叫停重发引擎回「已经在叫停」。
 // 抛错 = 没处理成：这条投递记成出错，对账重放时整条再来一遍（GitHub 自己不重投）。
+// 派不派（判法都在 @fleet-dao/core 的 dispatch.ts）：开关开着、issue 是开关打开以后开的，还要挂在当前版本上（0003 第 2、8 条：
+// 引擎只做当前版本的单，未排期、别的版本的不碰）——挂在哪、当前版本是哪个，拉起前在 GitHub 上现读（deps.plans），读不到就
+// 当这条没处理成（记成出错、对账重放时再判），不当成挂在当前版本上。开关打开以前开的、别的版本的、未排期的，由人明说交给 fleet
+// （fleet-api handover，cli.ts）。
 // 拉起之前看这个仓的流程配置副本（docs/decisions/0003-fusion-flow.md 第 9 条）：认不出、太旧就停派，这条记成等着，
 // 副本好了由对账重放再拉起（判法在 @fleet-dao/core 的 replica.ts）。
 import { randomUUID } from 'node:crypto';
-import { replicaVerdict } from '@fleet-dao/core';
-import { humanPart } from '@fleet-dao/github';
+import {
+  dispatchDecision,
+  isFinishedTask,
+  replicaVerdict,
+  type VersionGate,
+  versionGate,
+} from '@fleet-dao/core';
+import { type GitHub, humanPart } from '@fleet-dao/github';
 import { AnswerAskRequest, type Repo, requirementWorkflowId, type Task } from '@fleet-dao/shared';
 import { z } from 'zod';
 import type { Deps } from './deps.ts';
@@ -15,6 +25,8 @@ import {
   type Actor,
   type IngestedEvent,
   type IntakeRepo,
+  type IssuePlan,
+  type IssuePlanReader,
   type NewAuditEntry,
   type User,
   WorkflowGoneError,
@@ -60,44 +72,26 @@ export class RetryLaterError extends Error {
   }
 }
 
-const TERMINAL: readonly string[] = ['done', 'stopped', 'failed'];
 /** 引擎这边自己的动作（拉起工作流）记在这个名下。 */
 const INTAKE: Actor = { kind: 'engine', id: 'github-intake' };
 
-/**
- * 拉不拉起工作流。start = 从没派过（还在排队），拉起；restart = 重开了、任务已经结束或还在排队，再拉起一次
- * （拉起时发现上一轮还在跑，就等它结束）；wait_previous_run = 重开了、上一轮正在做（刚叫停还在收尾，或者引擎
- * 做完正在收工），等它结束再拉起；其余都不拉起。
- */
-export type DispatchDecision =
-  | 'start'
-  | 'restart'
-  | 'wait_previous_run'
-  | 'dispatch_off'
-  | 'opened_before_switch'
-  | 'created_at_unreadable'
-  | 'in_progress'
-  | 'finished';
+const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
-/**
- * 自动派活开关（design 第九节「在哪能做与接活开关」）：关着不派；开关打开以前就开着的 issue 不自动派（要人点「交给 fleet」）。
- * 开关允许时：还在排队（从没派过）的拉起；已经结束的只在 GitHub 上重开时再拉起一次；重开时上一轮还没结束的，等它结束。
- */
-export function dispatchDecision(
-  repo: Pick<IntakeRepo, 'autoDispatchSince'>,
-  issueCreatedAt: string,
-  task: Pick<Task, 'state'>,
-  reopened: boolean,
-): DispatchDecision {
-  if (repo.autoDispatchSince === null) return 'dispatch_off';
-  const opened = Date.parse(issueCreatedAt);
-  if (!Number.isFinite(opened)) return 'created_at_unreadable';
-  if (opened < Date.parse(repo.autoDispatchSince)) return 'opened_before_switch';
-  if (reopened)
-    return TERMINAL.includes(task.state) || task.state === 'queued' ? 'restart' : 'wait_previous_run';
-  if (task.state === 'queued') return 'start';
-  if (TERMINAL.includes(task.state)) return 'finished';
-  return 'in_progress';
+/** 读 issue 此刻挂在哪个版本、开没开着：经 @fleet-dao/github 的「引擎」机器人现读（后端 main.ts、引擎对账都这样装）。 */
+export function githubIssuePlans(gh: Pick<GitHub, 'readIssuePlan'>): IssuePlanReader {
+  return {
+    read: (repo, issueNumber) =>
+      gh.readIssuePlan({ repo: { owner: repo.owner, name: repo.name }, issueNumber }),
+  };
+}
+
+/** 机器人凭据没读到（githubAppMissing 那种情况）：一读就抛，接活不派（投递记成出错、对账重放），不当成挂在当前版本上。 */
+export function issuePlansUnavailable(why: string): IssuePlanReader {
+  return {
+    async read() {
+      throw new Error(`GitHub 机器人的凭据没读到，读不了 issue 挂在哪个版本：${why}`);
+    },
+  };
 }
 
 export interface IssueIntake {
@@ -106,9 +100,26 @@ export interface IssueIntake {
 }
 
 export function createIssueIntake(
-  deps: Pick<Deps, 'store' | 'workflows' | 'requirements' | 'log' | 'now'>,
+  deps: Pick<Deps, 'store' | 'workflows' | 'requirements' | 'plans' | 'log' | 'now'>,
 ): IssueIntake {
   const { store, log } = deps;
+
+  /**
+   * 挂没挂在当前版本上：GitHub 上现读这张单挂的里程碑和仓里还开着的里程碑（重放时事件里带的那份可能早过时了），交给 core 判。
+   * 读不到、认不出就抛：这条投递记成出错、对账重放时再判，不当成挂在当前版本上。
+   */
+  async function versionOf(repo: IntakeRepo, issueNumber: number): Promise<VersionGate> {
+    let plan: IssuePlan;
+    try {
+      plan = await deps.plans.read(repo, issueNumber);
+    } catch (err) {
+      throw new Error(
+        `没查成：读不到 ${repo.owner}/${repo.name}#${issueNumber} 挂在哪个版本（${message(err)}），这张单没派；对账重放时再判`,
+        { cause: err },
+      );
+    }
+    return versionGate(plan);
+  }
 
   async function repoOf(event: IngestedEvent): Promise<IntakeRepo> {
     const [owner = '', name = ''] = event.repo.split('/');
@@ -130,7 +141,7 @@ export function createIssueIntake(
   ): Promise<string> {
     // 自家机器人关的：做完了引擎自己关单，不叫停自己
     if (!event.wake) return 'stop=skip_bot';
-    if (TERMINAL.includes(task.state)) return `task=${task.state}`;
+    if (isFinishedTask(task.state)) return `task=${task.state}`;
     const actor = actorFor(memberFor(users, p.sender));
     const reason =
       p.action === 'deleted'
@@ -221,6 +232,21 @@ export function createIssueIntake(
       notes.push(`workflow=${decision}`);
       return notes.join(', ');
     }
+    // 只派当前版本的单（0003 第 2、8 条）：未排期、别的版本、挂的里程碑关了的都不派，任务行留着（排队），之后挪进当前版本
+    // （GitHub 的 milestoned 事件）照开关规矩再判一次；认不出版本号的算没查成，告警。人要交就用 fleet-api handover。
+    // 急修（0003 第 4、8 条：只有带证据的急修能自动开单，排在本版之前）现在还没有自动开单的来源，这里不开特例；
+    // 以后引擎能开急修单时，在这一步之前按单上的急修标记（带证据）放行，不改当前版本的判法。
+    const version = await versionOf(repo, issue.number);
+    if (!version.ok) {
+      log[version.reason === 'version_unreadable' ? 'warn' : 'info'](`这张单不自动派：${version.why}`, {
+        deliveryId: event.deliveryId,
+        repo: event.repo,
+        issueNumber: issue.number,
+        reason: version.reason,
+      });
+      notes.push(`workflow=${version.reason}`);
+      return notes.join(', ');
+    }
     // 这个项目停派（流程配置认不出、从没同步过、太久没同步成）：不拉起，也不丢——记成等着（不占自动重放的次数），
     // 每轮对账先同步副本、再重放，副本好了那一轮就拉起
     const flow = replicaVerdict(repo.flow, deps.now());
@@ -251,6 +277,8 @@ export function createIssueIntake(
     if (started === 'started') {
       await store.appendAudit(
         entry(INTAKE, 'task.start', task.id, {
+          // 按哪个版本派的：挪版本、关版本之后回头查得清
+          after: { milestone: version.milestone },
           reason: decision === 'restart' ? 'GitHub 上重开了这张 issue' : undefined,
         }),
       );
@@ -304,7 +332,7 @@ export function createIssueIntake(
     const repo = await repoOf(event);
     const task = await store.findTaskByIssue(repo.id, p.issue.number);
     if (!task) return 'task=none';
-    if (TERMINAL.includes(task.state)) return `task=${task.state}`;
+    if (isFinishedTask(task.state)) return `task=${task.state}`;
 
     const answer = p.comment.body?.trim() ?? '';
     if (!AnswerAskRequest.safeParse({ answer }).success) {

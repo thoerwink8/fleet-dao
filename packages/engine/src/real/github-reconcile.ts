@@ -2,7 +2,7 @@
 // 记账用 @fleet-dao/db 的 schedule_runs。发信号、拉起一张单的工作流（后端的 createTemporalRequirementWorkflows，和 webhook
 // 那条同一份实现，起的都是 Fusion）用这次活动自己的 Temporal 客户端，起在这个工人取活的任务队列上。
 // 每轮先同步各仓的流程配置副本（jobs/flow-config.ts）：「引擎」机器人读默认分支头上的 .fleet/flow.json，全组织默认读这份
-// 代码里带的 packages/core/flow.default.json，写库、报提醒都是同一个库。
+// 代码里带的 packages/core/flow.default.json，写库、报提醒都是同一个库。重放、补收拉起前判「挂没挂在当前版本」，也经这个机器人现读。
 import { readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import {
@@ -10,6 +10,7 @@ import {
   createPgStore,
   createTemporalRequirementWorkflows,
   createTemporalWorkflowControl,
+  githubIssuePlans,
   jsonLogger,
   type Logger,
   type RequirementWorkflows,
@@ -33,7 +34,7 @@ import type { GitHubReconcileJobDeps } from '../jobs/github-reconcile.ts';
 
 export interface GitHubReconcileWiring {
   db: Db;
-  gh: Pick<GitHub, 'eventSink' | 'reconciler' | 'readRepoFile'>;
+  gh: Pick<GitHub, 'eventSink' | 'reconciler' | 'readRepoFile' | 'readIssuePlan'>;
   /** 测试用：换掉拉起工作流（不给就是真的，经这次活动的 Temporal 客户端起 Fusion）。 */
   requirements?: RequirementWorkflows;
   /** 测试用：换掉全组织默认（不给就读这份代码里带的 packages/core/flow.default.json）。 */
@@ -100,6 +101,8 @@ export function githubReconcileJob(
       github,
       workflows: createTemporalWorkflowControl(client),
       requirements: w.requirements ?? createTemporalRequirementWorkflows(client, taskQueue),
+      // 只派当前版本的单：挂在哪、当前版本是哪个，拉起前经「引擎」机器人现读（和后端 webhook 那条同一份判法）
+      plans: githubIssuePlans(w.gh),
       log,
       now,
     });

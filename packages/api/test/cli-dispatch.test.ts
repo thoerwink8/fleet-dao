@@ -33,6 +33,17 @@ function refusedQuery(): Error {
   });
 }
 
+/** dispatch 只连库：读 GitHub、连 Temporal 一碰就红。 */
+const notForDispatch: Pick<CliDeps, 'openIssuePlans' | 'openTemporal' | 'now'> = {
+  openIssuePlans: async () => {
+    throw new Error('dispatch 不该读 GitHub');
+  },
+  openTemporal: async () => {
+    throw new Error('dispatch 不该连 Temporal');
+  },
+  now: () => T0,
+};
+
 /** 每个方法都抛同一种错的 Store。 */
 function failingStore(base: Store, err: () => unknown): Store {
   return new Proxy(base, {
@@ -58,6 +69,7 @@ function setup() {
     env: { DATABASE_URL: 'postgres:///fleet', FLEET_OPS_OPERATOR: 'root', ...env },
     out: (text) => out.push(text),
     err: (text) => err.push(text),
+    ...notForDispatch,
     openStore: async (url) => {
       opened.push(url);
       return {
@@ -155,7 +167,7 @@ describe('开、关、只看', () => {
       reason: '服务器上 root 跑的 fleet-api dispatch example/canary on',
     });
     expect(t.out.at(-1)).toBe(
-      `已打开：example/canary：让 AI 接活 开着，自 ${since} 起（这之后新开的 issue 自动派；这之前就开着的不自动派，要人点「交给 fleet」）\n` +
+      `已打开：example/canary：让 AI 接活 开着，自 ${since} 起（这之后新开的、挂在当前版本上的 issue 自动派；这之前就开着的、别的版本的、未排期的不自动派，要交用 fleet-api handover）\n` +
         `最近一次开关：${since} 打开，服务器上 root 跑的 fleet-api dispatch example/canary on（操作记录 ${entry?.id}）`,
     );
 
@@ -244,6 +256,7 @@ describe('接在真库上（PGlite 跑真迁移）', () => {
       out: (text) => out.push(text),
       err: (text) => err.push(text),
       openStore: async () => ({ store, close: async () => {} }),
+      ...notForDispatch,
     };
     const since = async () => (await db.db.select({ since: repos.autoDispatchSince }).from(repos))[0]?.since;
     const audits = () =>

@@ -134,6 +134,12 @@ describe('时间线白话', () => {
     expect(describeTimeline(rec('run_ended', { outcome: 'stopped' }))).toBe('会话被叫停');
     expect(describeTimeline(rec('notification', { title: '卡住了' }))).toBe('通知：卡住了');
     expect(describeTimeline(rec('stop', { reason: '方向错了' }))).toBe('叫停：方向错了');
+    expect(
+      describeTimeline(rec('handover', { reason: '服务器上 root 跑的 fleet-api handover：创始人说交' })),
+    ).toBe('交给 fleet：服务器上 root 跑的 fleet-api handover：创始人说交');
+    expect(describeTimeline(rec('handover', { ok: false, error: 'Temporal 连不上' }))).toBe(
+      '交给 fleet没做成：Temporal 连不上',
+    );
     expect(describeTimeline(rec('file', 'not-an-object'))).toBe('改文件：（没带路径）');
     expect(describeTimeline(rec('something-new'))).toBe('something-new');
     expect(describeTimeline(rec('pause', { ok: false, error: 'workflow_gone' }))).toBe(

@@ -7,6 +7,7 @@ import type {
   FeishuAuth,
   GitHubEventSink,
   HealthCheck,
+  IssuePlanReader,
   Logger,
   RequirementWorkflows,
   Store,
@@ -20,6 +21,11 @@ export interface Deps {
   workflows: WorkflowControl;
   /** 拉起一张单的工作流（issue 进来之后；起的是 Fusion，见 temporal.ts）。 */
   requirements: RequirementWorkflows;
+  /**
+   * 读一张 issue 此刻挂在哪个版本、开没开着（GitHub 上现读）：接活只派挂在当前版本上的单。机器人凭据没读到时是一个读就抛错的
+   * （issue-intake.ts 的 issuePlansUnavailable），不拿「挂在当前版本」顶。
+   */
+  plans: IssuePlanReader;
   changes: ChangeFeed;
   /** null = 飞书登录没配置（只允许在开发环境）。 */
   feishu: FeishuAuth | null;

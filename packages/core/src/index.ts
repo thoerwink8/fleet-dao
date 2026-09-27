@@ -6,6 +6,7 @@ export * from './ask.ts';
 export * from './brief.ts';
 export * from './config.ts';
 export * from './criteria.ts';
+export * from './dispatch.ts';
 export * from './flow.ts';
 export * from './fusion.ts';
 export * from './replica.ts';
