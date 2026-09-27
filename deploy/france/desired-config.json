@@ -4,7 +4,7 @@
   "selfHeal": false,
   "fingerprint": {
     "algorithm": "hmac-sha256/v1",
-    "keyId": null
+    "keyId": "310517c602b7adb85476e5d131cc206b"
   },
   "files": {
     "engine.env": {
@@ -57,14 +57,14 @@
         "说明": "cursor-agent 装在会话用户自己家里，每次起会话在这下面现找 current → 最新版本；{user} 换成会话用户"
       },
       "FLEET_CANARY_REPO": {
-        "private": null,
+        "private": "67514fa0e273daaec37f215554967308c904134ea1a65ca8e735c32e2ee8b2e4",
         "说明": "全流程巡检的巡检仓（owner/仓名）：私有值，公开仓里不写真值（docs/ops.md 第五节「全流程巡检」）"
       }
     },
     "api.env": {
       "FLEET_ENV": "production",
       "FLEET_PUBLIC_URL": {
-        "private": null,
+        "private": "88b74fe7c864848610dc899073d2d233b013b058861bb79a2bc292f1281d37be",
         "说明": "浏览器看到的驾驶舱地址（香港的域名）：私有值"
       },
       "FLEET_COCKPIT_LISTEN": {
@@ -82,15 +82,15 @@
       "PGHOST": "/var/run/postgresql",
       "PGUSER": "fleet",
       "FLEET_GITHUB_WEBHOOK_SECRET": {
-        "private": null,
+        "private": "1672250130894d5f98a4586d77bc6f61d557b6c21bd478cf072cb6a11b9c8e2d",
         "说明": "GitHub「引擎」App 设置里的 Webhook secret（france.sh 照 /etc/fleet-dao/github/ 里那份 json 填）：私有值"
       },
       "FEISHU_APP_ID": {
-        "private": null,
+        "private": "bcf7a04b3b72d04e151069f0b80abbccd31cc945b2ae6eacacb2803f3ed6697f",
         "说明": "飞书自建应用的凭据：私有值"
       },
       "FEISHU_APP_SECRET": {
-        "private": null,
+        "private": "473fcbb2c51e0cb398d35d26bb36c4175b248ade5673ac6174bd5b9790c1ac7e",
         "说明": "飞书自建应用的凭据：私有值"
       },
       "TEMPORAL_ADDRESS": {
@@ -113,7 +113,7 @@
         "说明": "本机跑哪些应用服务（空格分隔，可选 fleet-engine、fleet-api）"
       },
       "FLEET_DOMAIN": {
-        "private": null,
+        "private": "5ecae725bd3e628c733cdb9ca7c58a670f96c0803406e6ce72c78891b1c27024",
         "说明": "驾驶舱的域名（和香港 hk.env 的同一个）：私有值"
       },
       "FLEET_HK_PARTS": {
@@ -123,11 +123,11 @@
     },
     "france.env": {
       "FLEET_WG_HK_ENDPOINT": {
-        "private": null,
+        "private": "f7bd649cf118225a2a185e8f7ea325773878c7b21d65518db94303afca887813",
         "说明": "香港 WireGuard 的公网地址和端口：私有值（france.sh 读，改了要重跑 france.sh）"
       },
       "FLEET_WG_HK_PUBLIC_KEY": {
-        "private": null,
+        "private": "c02711998b5d2352a13c6d451b95ed709167556e5f8d09beb442aac28bc42a92",
         "说明": "香港的 WireGuard 公钥（france.sh 读）：当私有值记指纹"
       }
     }
