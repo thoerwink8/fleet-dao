@@ -71,8 +71,11 @@ export interface AlertSweepDeps {
   taskState(taskId: string): Promise<TaskState | null>;
   approval(approvalId: string): Promise<ApprovalFacts | null>;
   stageRoutable(stage: StageKind, taskId: string | null): Promise<RouteCheck>;
-  /** 这个阶段现在是不是全熔断（store-ports 的 stageAllOpen：不写库、不报警）。读不了照抛。 */
-  stageAllOpen(stage: StageKind): Promise<AllOpenCheck>;
+  /**
+   * 这个阶段现在是不是全熔断（store-ports 的 stageAllOpen：不写库、不报警）。读不了照抛。
+   * 真装配一定会给。不给就当没查成（不撤）：不把它定成必填，是为了不逼每小时对账的外壳测试改装配。
+   */
+  stageAllOpen?(stage: StageKind): Promise<AllOpenCheck>;
   alerts: AlertStore;
   now: () => Date;
   log: ReconcileLog;
@@ -204,6 +207,7 @@ export const RULES: readonly Rule[] = [
     async judge(deps, _alert, m) {
       const stage = m[1] as string;
       if (!isStage(stage)) return { keep: true };
+      if (!deps.stageAllOpen) throw new Error('全熔断判不了：没接上只读判法');
       const check = await deps.stageAllOpen(stage);
       if (check.allOpen) return { keep: true };
       return { resolve: `${STAGE_NAMES[stage]}有路由不熔断了：${check.detail}` };

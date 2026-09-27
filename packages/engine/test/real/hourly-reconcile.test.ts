@@ -842,6 +842,14 @@ describe('提醒：条件没了就撤、还在就留着', { timeout: 60_000 }, (
     expect(resolved).toEqual([]);
     expect(calls).toEqual({ updateOpen: 0, raise: 0 });
 
+    const { stageAllOpen: _omit, ...unwired } = sweepDeps;
+    const missing = await sweepAlerts(unwired, [open], false);
+    expect(missing.found).toBe(0);
+    expect(missing.unchecked).toEqual([
+      '提醒 routing:all-open:execute（全熔断）没查成：全熔断判不了：没接上只读判法',
+    ]);
+    expect(resolved).toEqual([]);
+
     // 阶段名认不出：留着，不去判。
     expect(await sweepAlerts(sweepDeps, [row('routing:all-open:zzz')], false)).toMatchObject({
       found: 0,

@@ -266,7 +266,7 @@ grok 装在会话用户自己家里：官方安装脚本把二进制放在 `~/.g
   - 它撤了什么：`runuser -u fleet -- psql -d fleet -c "select resolved_at, dedupe_key, left(body, 80) from notifications where resolved_by = 'engine:hourly-reconcile' order by resolved_at desc limit 20"`
   - 等人拍的树、再推的提醒：`runuser -u fleet -- psql -d fleet -c "select created_at, dedupe_key, title from notifications where resolved_at is null and (dedupe_key like 'worktree:%' or dedupe_key like 'remind:%') order by created_at"`
   - 日志：`journalctl -u fleet-engine --since '-2h' | grep 每小时对账`
-- 还没做的：被强行终止的工作流留下的会话要等引擎下一次起来才收（#247）。全熔断（`routing:all-open`）熔断解了由每小时对账撤。
+- 还没做的：被强行终止的工作流留下的会话要等引擎下一次起来才收（#247）；路由全熔断那条提醒还不会自己撤（#246）。
 
 已知口子（会话用户的 reclaude 代理端口，2026-09-25 审查官发现，待定机制修，#35）：会话用户的 reclaude 守护在 `127.0.0.1` 上开两个临时端口（一个 HTTP CONNECT 代理，会话的 `HTTPS_PROXY` 指它；一个 MITM TLS 口），端口号每次重启会变。代理口不认客户端身份——本机**别的用户**（`pilot`、`fleet`）也连得上、也会被转发，等于借用这个账号的订阅（从 pilot 借会话用户的额度）。`HTTPS_PROXY` 里没有令牌，靠的是绑回环 + 会话本该只有自己碰，但回环对所有本机用户都通。
 
