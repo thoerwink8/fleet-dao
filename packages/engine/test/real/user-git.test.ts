@@ -1,21 +1,25 @@
 // 会话目录里的 git（以会话用户的身份跑；这里用本机执行器、真 git、临时目录）：从 bundle 建树、交 bundle、快进，
 // 没跑成的明确报错，不拿空结果冒充「没有改动」。
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { PortError } from '../../src/ports.ts';
 import { localExec } from '../../src/real/exec.ts';
+import { OUT_DIR } from '../../src/real/prompts.ts';
 import {
   bundleSince,
   changedFilesSince,
   checkoutBranch,
   checkoutDetached,
   commitsSince,
+  DISPOSABLE,
+  disposableArgs,
   fastForward,
   fetchBundle,
   headOf,
+  LEFTOVER_LIST_MAX,
   mainlineRef,
   mergeInto,
   pinMainline,
@@ -327,7 +331,8 @@ describe('并主线没并成（不是冲突）', { timeout: 60_000 }, () => {
 });
 
 // 每小时对账删一棵没人用的树之前，以会话用户的身份看里面还剩什么：剩着没推的提交、没提交的改动、stash 就不删、交人拍。
-// 只会多算不会少算；git 没跑成明确报错，不拿空结果冒充「什么都不剩」（那样会把人的活删掉）。
+// 只会多算不会少算；能重新生成的缓存（DISPOSABLE）是不是 git 仓都不算；git 没跑成、有目录读不了明确报错，不拿空结果
+// 冒充「什么都不剩」（那样会把人的活删掉）。
 describe('树里还剩什么（每小时对账删树之前看）', { timeout: 60_000 }, () => {
   /** 和引擎建的一样：从 bundle 建树、检出分支、钉主线。 */
   async function checkedOut(name = 'left', from?: ReturnType<typeof mirror>) {
@@ -345,11 +350,114 @@ describe('树里还剩什么（每小时对账删树之前看）', { timeout: 60
     return sh(dir, 'rev-parse', 'HEAD');
   };
 
-  it('空目录（建树建到一半）：什么都不剩；不是仓却有东西：列出名字，不当成空的', async () => {
+  it('空目录（建树建到一半）：什么都不剩；不是仓却有东西：列出文件，不当成空的', async () => {
     const t = tree('half');
     expect(await treeLeftovers(t, [])).toEqual({ kind: 'empty' });
     writeFileSync(join(t.dir, 'notes.md'), 'x\n');
-    expect(await treeLeftovers(t, [])).toEqual({ kind: 'not-repo', entries: ['notes.md'] });
+    expect(await treeLeftovers(t, [])).toEqual({ kind: 'not-repo', files: ['notes.md'], fileCount: 1 });
+  });
+
+  /** 在目录里写一个文件（中间各级不在就建）。 */
+  const put = (dir: string, rel: string, body = 'x\n') => {
+    mkdirSync(join(dir, rel, '..'), { recursive: true });
+    writeFileSync(join(dir, rel), body);
+  };
+
+  it('不是仓、只剩能重新生成的缓存（法国 160-handover-store 只剩两个 tsbuildinfo）：当成什么都不剩；名单里的每一样、哪一层都算，空目录也不算', async () => {
+    const t = tree('handover');
+    put(t.dir, 'packages/api/tsconfig.tsbuildinfo', '{}');
+    put(t.dir, 'packages/db/tsconfig.tsbuildinfo', '{}');
+    expect(await treeLeftovers(t, [])).toEqual({ kind: 'empty' });
+
+    put(t.dir, 'node_modules/.pnpm/foo@1.0.0/node_modules/foo/index.js');
+    put(t.dir, 'packages/api/dist/index.js');
+    put(t.dir, '.turbo/cache/abc.tar.zst');
+    put(t.dir, '.vite/deps/_metadata.json');
+    put(t.dir, 'packages/db/coverage/lcov.info');
+    put(t.dir, `${OUT_DIR}/plan.md`);
+    mkdirSync(join(t.dir, 'src', 'empty'), { recursive: true });
+    expect(await treeLeftovers(t, [])).toEqual({ kind: 'empty' });
+  });
+
+  it('不是仓、缓存以外还有一个源文件：不当成空的，只列那个文件；多了列排好序的前几个、写明一共几个', async () => {
+    const t = tree('mixed');
+    put(t.dir, 'packages/api/tsconfig.tsbuildinfo', '{}');
+    put(t.dir, 'packages/api/dist/index.js');
+    put(t.dir, 'packages/api/src/handover.ts');
+    expect(await treeLeftovers(t, [])).toEqual({
+      kind: 'not-repo',
+      files: ['packages/api/src/handover.ts'],
+      fileCount: 1,
+    });
+
+    const names = Array.from(
+      { length: LEFTOVER_LIST_MAX + 2 },
+      (_, i) => `f${String(i).padStart(2, '0')}.ts`,
+    );
+    for (const n of [...names].reverse()) put(t.dir, n);
+    const left = await treeLeftovers(t, []);
+    expect(left).toMatchObject({ kind: 'not-repo', fileCount: LEFTOVER_LIST_MAX + 3 });
+    expect(left.kind === 'not-repo' ? left.files : []).toEqual(names.slice(0, LEFTOVER_LIST_MAX));
+  });
+
+  it('git 仓里也一样：没跟踪的缓存（仓里没写 .gitignore）不算剩着；缓存旁边的新文件照算、一个一个列（中文路径原样）；仓里跟踪着的缓存文件改了照算', async () => {
+    const { m, t } = await checkedOut();
+    put(t.dir, 'packages/api/tsconfig.tsbuildinfo', '{}');
+    put(t.dir, 'packages/api/dist/index.js');
+    put(t.dir, 'node_modules/foo/index.js');
+    put(t.dir, 'coverage/lcov.info');
+    put(t.dir, `${OUT_DIR}/review.json`, '{}');
+    expect(await treeLeftovers(t, [])).toEqual({
+      kind: 'repo',
+      dirty: [],
+      dirtyCount: 0,
+      stashes: 0,
+      unpushed: [],
+      unpushedCount: 0,
+    });
+
+    put(t.dir, 'packages/api/src/handover.ts');
+    put(t.dir, 'specs/1-新单/需求.md');
+    expect(await treeLeftovers(t, [])).toMatchObject({
+      dirty: ['?? packages/api/src/handover.ts', '?? specs/1-新单/需求.md'],
+      dirtyCount: 2,
+    });
+
+    // 仓把 dist/ 当源码提交了（推上去过）：改了照算
+    const u = (await checkedOut('tracked', m)).t;
+    put(u.dir, 'dist/keep.js', 'v1\n');
+    execFileSync('git', ['add', '.'], { cwd: u.dir });
+    execFileSync('git', ['commit', '-q', '-m', 'commit dist'], { cwd: u.dir, env: ENV });
+    const pushed = sh(u.dir, 'rev-parse', 'HEAD');
+    expect(await treeLeftovers(u, [pushed])).toMatchObject({ dirtyCount: 0, unpushedCount: 0 });
+    put(u.dir, 'dist/keep.js', 'v2\n');
+    expect(await treeLeftovers(u, [pushed])).toMatchObject({ dirty: [' M dist/keep.js'], dirtyCount: 1 });
+  });
+
+  it('不算剩着的名单：每条写了为什么、都是单层名字、含会话的结论文件目录；认不出的写法明确拒，不当成名单是空的', () => {
+    expect(DISPOSABLE.map((d) => d.pattern)).toEqual(
+      expect.arrayContaining([
+        '*.tsbuildinfo',
+        'node_modules/',
+        'dist/',
+        '.turbo/',
+        '.vite/',
+        'coverage/',
+        `${OUT_DIR}/`,
+      ]),
+    );
+    for (const d of DISPOSABLE) expect(d.why, d.pattern).toMatch(/：/);
+    expect(disposableArgs(['dist/', 'coverage/', '*.tsbuildinfo'])).toEqual({
+      git: ['--exclude=dist/', '--exclude=coverage/', '--exclude=*.tsbuildinfo'],
+      find: [
+        ...['-type', 'd', '(', '-name', 'dist', '-o', '-name', 'coverage', ')', '-prune', '-o'],
+        ...['(', '-name', '*.tsbuildinfo', ')', '-o'],
+        ...['!', '-type', 'd', '-print0'],
+      ],
+    });
+    for (const bad of ['*', '*/', '.', '..', '../x', 'a/b', 'src/dist/', '', 'dist //', '-delete']) {
+      expect(() => disposableArgs([bad]), bad).toThrow(PortError);
+    }
   });
 
   it('检出好了、会话没动过（写码的树、分离头的检出副本）：什么都不剩——引擎交给它的头、钉的主线都算推过', async () => {
@@ -427,12 +535,72 @@ describe('树里还剩什么（每小时对账删树之前看）', { timeout: 60
     await expect(treeLeftovers({ ...t, exec: bornFails }, [])).rejects.toMatchObject({ code: 'GIT_FAILED' });
     const reflogFails: UserTree['exec'] = (c) =>
       c.argv.includes('reflog') ? failWith(128, 'fatal: 故意造的读不了检出记录\n') : real(c);
-    const scratch = { scratch: { ignore: ['.fleet-out'] } };
-    await expect(treeLeftovers({ ...t, exec: reflogFails }, [], scratch)).rejects.toMatchObject({
+    await expect(treeLeftovers({ ...t, exec: reflogFails }, [], { scratch: true })).rejects.toMatchObject({
       code: 'GIT_FAILED',
       message: expect.stringContaining('读检出记录'),
     });
   });
+
+  // git 碰上读不了的目录只打一行、照样退出 0；find 照样往下列、最后退出 1。三处都故意造一遍：一律没查成，不当成那里是空的。
+  it('有读不了的目录：不是仓的（find 退出 1）、git 只打一行警告的（没跟踪的目录、跟踪着的文件）都明确报 READ_FAILED', async () => {
+    const real = localExec();
+    const withStderr =
+      (match: (argv: string[]) => boolean, code: number, stderr: string): UserTree['exec'] =>
+      async (c) => {
+        if (!match(c.argv)) return real(c);
+        const r = await real(c);
+        return { ...r, code, stderr: `${r.stderr}${stderr}` };
+      };
+    const half = tree('locked-half');
+    put(half.dir, 'packages/api/tsconfig.tsbuildinfo', '{}');
+    const findDenied = withStderr(
+      (a) => a.join(' ').includes('find'),
+      1,
+      "find: './locked': Permission denied\n",
+    );
+    await expect(treeLeftovers({ ...half, exec: findDenied }, [])).rejects.toMatchObject({
+      code: 'READ_FAILED',
+      message: expect.stringMatching(/^列树里的东西：退出码 1（.*Permission denied/),
+    });
+
+    const { t } = await checkedOut();
+    const lsDenied = withStderr(
+      (a) => a.includes('ls-files'),
+      0,
+      "warning: could not open directory 'locked/': Permission denied\n",
+    );
+    await expect(treeLeftovers({ ...t, exec: lsDenied }, [])).rejects.toMatchObject({
+      code: 'READ_FAILED',
+      message:
+        "列没跟踪的新文件：有读不了的地方（warning: could not open directory 'locked/': Permission denied）",
+    });
+    const statusDenied = withStderr((a) => a.includes('status'), 0, 'sub/a.ts: Permission denied\n');
+    await expect(treeLeftovers({ ...t, exec: statusDenied }, [])).rejects.toMatchObject({
+      code: 'READ_FAILED',
+      message: '看有没有没提交的改动：有读不了的地方（sub/a.ts: Permission denied）',
+    });
+  });
+
+  // 真把目录权限去掉：Windows 上去不掉，root 照样读得了，这两处不跑（CI 是 Linux 普通用户）。
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    '真有读不了的目录（chmod 000）：不是仓的、git 仓里的都没查成，不当成什么都不剩',
+    async () => {
+      const half = tree('locked-half');
+      put(half.dir, 'packages/api/tsconfig.tsbuildinfo', '{}');
+      put(half.dir, 'locked/secret.ts');
+      const { t } = await checkedOut();
+      put(t.dir, 'locked/secret.ts');
+      chmodSync(join(half.dir, 'locked'), 0o000);
+      chmodSync(join(t.dir, 'locked'), 0o000);
+      try {
+        await expect(treeLeftovers(half, [])).rejects.toMatchObject({ code: 'READ_FAILED' });
+        await expect(treeLeftovers(t, [])).rejects.toBeInstanceOf(PortError);
+      } finally {
+        chmodSync(join(half.dir, 'locked'), 0o755);
+        chmodSync(join(t.dir, 'locked'), 0o755);
+      }
+    },
+  );
 
   it('检出副本（引擎从镜像检出、会话只写 .fleet-out/）：检出过的提交算推过、结论文件不算剩着；会话自己的提交和别的改动照算', async () => {
     const m = mirror();
@@ -455,10 +623,10 @@ describe('树里还剩什么（每小时对账删树之前看）', { timeout: 60
     await pinMainline(s, 'main', main2);
     mkdirSync(join(s.dir, '.fleet-out'));
     writeFileSync(join(s.dir, '.fleet-out', 'review.json'), '{}\n');
-    const scratch = { scratch: { ignore: ['.fleet-out'] } };
+    const scratch = { scratch: true };
 
-    // 当成写码的树看：PR 头那个提交和结论文件都算剩着（只会多算）
-    expect(await treeLeftovers(s, [])).toMatchObject({ unpushedCount: 1, dirtyCount: 1 });
+    // 当成写码的树看：PR 头那个提交算剩着（只会多算）；结论文件哪种树都不算
+    expect(await treeLeftovers(s, [])).toMatchObject({ unpushedCount: 1, dirtyCount: 0 });
     expect(await treeLeftovers(s, [], scratch)).toEqual({
       kind: 'repo',
       dirty: [],
@@ -491,9 +659,7 @@ describe('树里还剩什么（每小时对账删树之前看）', { timeout: 60
       unpushed: [],
       unpushedCount: 0,
     });
-    expect(await treeLeftovers(t, [], { scratch: { ignore: ['.fleet-out'] } })).toMatchObject({
-      unpushedCount: 0,
-    });
+    expect(await treeLeftovers(t, [], { scratch: true })).toMatchObject({ unpushedCount: 0 });
     writeFileSync(join(t.dir, 'x.ts'), 'x\n');
     expect(await treeLeftovers(t, [])).toMatchObject({ dirtyCount: 1, unpushedCount: 0 });
   });
