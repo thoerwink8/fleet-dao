@@ -14,11 +14,13 @@ import {
   WORKFLOW_TYPES,
 } from '../src/contract.ts';
 import { createDecide, type Decide } from '../src/decisions/index.ts';
-import { createFakeWorld } from '../src/fakes.ts';
+import { createFakeWorld, FAKE_ROUTES } from '../src/fakes.ts';
 import {
   type ActivityTiming,
   type AwaitSessionInput,
+  type PickRouteResult,
   PortError,
+  type RouteChoice,
   type StartSessionInput,
   type WaitTiming,
 } from '../src/ports.ts';
@@ -637,7 +639,65 @@ describe('子任务工作流', { timeout: 60_000 }, () => {
     expect(quotaWait?.waitMs).toBeLessThan(3 * 3600_000);
   });
 
-  it('额度用满（主池）：挂起到清零、续上同一个会话同一条路由，不换池；等的时间不算墙钟预算', async () => {
+  it('额度用满（Claude 订阅池，#59）：不睡到清零，马上回去选路续同一个会话；会话用户切了号、这条路由派不了了，照常选到切过去的池接着干', async () => {
+    const carpool: RouteChoice = {
+      routeId: 'r-carpool',
+      poolId: 'claude-carpool',
+      modelId: 'm1',
+      family: 'claude',
+      hostId: 'claude-code',
+      orgKind: 'carpool',
+    };
+    const solo: RouteChoice = { ...carpool, routeId: 'r-solo', poolId: 'claude-solo', orgKind: 'solo' };
+    let stickPicks = 0;
+    const world = createFakeWorld({
+      routes: [carpool, solo, ...FAKE_ROUTES.filter((r) => r.family !== 'claude')],
+      session: (input, n) =>
+        input.stage === 'execute' && n === 1
+          ? {
+              outcome: 'failed',
+              failure: { code: 'quota_exhausted', message: '5 小时额度已用完，约 3 小时后重置' },
+            }
+          : {},
+      // 真选路（real/store-ports.ts）续会话那一段：还没切号，续同一个会话等这条路由（按清零时刻最多隔 10 分钟再看）；
+      // 切了号，这条路由挡着（会话用户挂的不是它的组织），照常选到切过去的那个池
+      route: (input): PickRouteResult | undefined => {
+        if (input.stage !== 'execute' || input.stickRouteId !== 'r-carpool') return undefined;
+        stickPicks += 1;
+        return stickPicks === 1
+          ? {
+              ok: false,
+              waitFor: 'quota',
+              detail: '拼车池额度用满；续同一个会话，等这条路由',
+              retryAfterSeconds: 600,
+            }
+          : { ok: true, route: solo, why: '续会话的路由用不了了（会话用户现在挂的是独享组织），照常选' };
+      },
+    });
+    const result = (await withWorker(env, world, async (q) =>
+      (await startSubtask(q)).result(),
+    )) as SubtaskResult;
+    expect(result.state).toBe('merged');
+    const execs = world.callsOf('startSession').filter((c) => c.input.stage === 'execute');
+    expect(execs.map((c) => c.input.route.routeId)).toEqual(['r-carpool', 'r-solo']);
+    // 换了池也接着原来的会话（会话端口按池判：换了池 fork 续上）
+    expect(execs[1]?.input.resumeSessionId).toBe('s1');
+    const picks = world.callsOf('pickRoute').filter((c) => c.input.stage === 'execute');
+    expect(picks.map((c) => [c.input.avoidPoolIds, c.input.stickRouteId])).toEqual([
+      [[], undefined],
+      [[], 'r-carpool'],
+      [[], 'r-carpool'],
+    ]);
+    // 没睡到清零：等的只是选路那一轮（10 分钟），不是 3 小时
+    const waited = world.timings
+      .filter((t): t is WaitTiming => t.kind === 'wait' && t.waitFor === 'quota')
+      .reduce((sum, t) => sum + t.waitMs, 0);
+    expect(waited).toBeGreaterThanOrEqual(10 * 60_000);
+    expect(waited).toBeLessThan(60 * 60_000);
+    expect(world.count('raiseAlert')).toBe(0);
+  });
+
+  it('额度用满（不是 Claude 订阅池）：挂起到清零、续上同一个会话同一条路由，不换池；等的时间不算墙钟预算', async () => {
     const world = createFakeWorld({
       session: (input, n) =>
         input.stage === 'execute' && n === 1

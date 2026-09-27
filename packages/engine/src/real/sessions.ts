@@ -56,6 +56,7 @@ import {
   markSessionRunStarted,
   openAlertsByPrefix,
   openSessionRun,
+  recordEngineAudit,
   requestSessionStop,
   resolveAlertByKey,
   routeLaunchFacts,
@@ -147,6 +148,10 @@ export const DEFAULT_FORK_MAX_CONTEXT_TOKENS = 100_000;
 export type { ContinueMode };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** 切号停下的会话交回的失败码（#59）：失败分流 OS1 认它——马上续同一个会话，不算失败、不记重试的账。 */
+export const ORG_SWITCH_CODE = 'org_switch';
+const orgSwitchFailure = (why: string) => ({ code: ORG_SWITCH_CODE, message: why, retryable: true });
 
 export interface ContinuationFacts {
   /** 工作流要接着的会话号（可能是 cursor 的临时号）。 */
@@ -260,7 +265,20 @@ export interface SessionPortsDeps {
 export type SessionPorts = Pick<EnginePorts, 'startSession' | 'awaitSession' | 'stopSession'> & {
   /** 工人起来接活之前：收掉上一轮留下的会话 scope（fleet-agent-scope list 再逐个 stop）、清掉它们的临时目录，回收了几个会话。 */
   reapOrphanSessions(): Promise<number>;
+  /** 切号（#59，real/org-switch.ts）用的两样：停下、还剩哪些。 */
+  orgSwitch: OrgSwitchSessions;
 };
+
+/**
+ * 切号那一刻在跑的会话（#59）。只管这个工人进程里起的会话：会话都由它起，工人重启时上一轮留下的已经收掉了。
+ * stop：把跑在这些账号池上、进程已经起来的会话停下（插头收进程），它们交回 org_switch，工作流切完续同一个会话；
+ * 交回这一次叫停的会话编号（已经在停的不重复叫停）。还在建树、没起进程的不碰：它们一起进程就在 live 里，下一次再停。
+ * live：跑在这些账号池上、还没收场的会话编号（进程起来了、还没交回的），切号要等它们都收场。
+ */
+export interface OrgSwitchSessions {
+  stop(poolIds: ReadonlySet<string>, why: string): string[];
+  live(poolIds: ReadonlySet<string>): string[];
+}
 
 interface Live {
   runId: string;
@@ -290,7 +308,12 @@ interface Live {
   /** 插头收场（进程、scope 都收了）之后删这次会话的临时目录；不会失败（删不掉只记日志）。 */
   cleaned: Promise<void>;
   abort: AbortController;
-  stop: { kind: 'stop'; reason: string } | { kind: 'stall'; rule: string; basis: string } | undefined;
+  stop:
+    | { kind: 'stop'; reason: string }
+    | { kind: 'stall'; rule: string; basis: string }
+    /** 切号（#59）：会话用户要换组织，先停下，切过去接着干（交回 org_switch，失败分流 OS1 马上续）。 */
+    | { kind: 'org-switch'; why: string }
+    | undefined;
   pending: ProgressEvent[];
   flushTimer: ReturnType<typeof setTimeout> | undefined;
   flushing: Promise<void>;
@@ -814,6 +837,25 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     const { mode, prior, why } = input.resumeSessionId
       ? await continuation(input.resumeSessionId, route, driver, user, dir)
       : { mode: 'new' as const, prior: null, why: '' };
+    // 切号停下的会话接着干（#59）：怎么续的进操作记录（驾驶舱看得到切号那一刻手上的活去哪了）；记不上不挡起会话
+    if (prior?.failureCode === ORG_SWITCH_CODE) {
+      await recordEngineAudit(db, {
+        action: 'session-org.resume',
+        target: `session-run:${input.runId}`,
+        actorId: 'engine:sessions',
+        before: { runId: prior.id, routeId: prior.routeId },
+        after: { routeId: route.routeId, poolId: route.poolId, mode },
+        reason:
+          mode === 'fork'
+            ? `切号停下的会话在 ${route.poolId} 上 fork 续上`
+            : mode === 'resume'
+              ? `切号停下的会话在同一个池 ${route.poolId} 上续上（切号没成，或又切回来了）`
+              : `切号停下的会话续不上原会话，在 ${route.poolId} 上开新会话带接力任务书：${why}`,
+        ok: true,
+      }).catch((error: unknown) =>
+        log('切号后续会话的操作记录没写进库', { runId: input.runId, error: errorText(error) }),
+      );
+    }
     // 这次的会话号：续会话就是原来那个；开新会话、fork 由驱动给——Claude 的号我们定，cursor 的先给临时号、真号 init 帧里报，
     // grok 的号我们定、但它真开了会话才交回工作流（hosts.ts 的 grokReport）。
     const fresh = driver.newSessionId(input.runId);
@@ -1449,6 +1491,14 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     });
 
     if (live.stop?.kind === 'stop') return { ...common, outcome: 'stopped' };
+    // 切号停下的：交回 org_switch（可重试），工作流续同一个会话，换了池就 fork 续上（失败分流 OS1）
+    if (live.stop?.kind === 'org-switch') {
+      return {
+        ...common,
+        outcome: 'failed',
+        failure: { ...orgSwitchFailure(live.stop.why), machine: deps.machine, runAsUser: live.user },
+      };
+    }
     if (live.stop?.kind === 'stall') {
       return {
         ...common,
@@ -1686,7 +1736,21 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     return reaped;
   }
 
-  return { startSession, awaitSession, stopSession, reapOrphanSessions };
+  const orgSwitch: OrgSwitchSessions = {
+    stop(poolIds, why) {
+      const stopped: string[] = [];
+      for (const live of registry.values()) {
+        if (!poolIds.has(live.poolId) || live.stop) continue;
+        live.stop = { kind: 'org-switch', why };
+        live.abort.abort();
+        stopped.push(live.runId);
+      }
+      return stopped;
+    },
+    live: (poolIds) => [...registry.values()].filter((l) => poolIds.has(l.poolId)).map((l) => l.runId),
+  };
+
+  return { startSession, awaitSession, stopSession, reapOrphanSessions, orgSwitch };
 }
 
 /** 选路那边认的前缀，从这里也导出一份：session 端口写、store 端口读，同一个常量。 */

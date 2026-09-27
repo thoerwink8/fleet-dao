@@ -13,18 +13,10 @@ import {
   windowName,
 } from './names.ts';
 import { ABILITY_NAMES, HOST_ABILITIES, type RoutingPolicy, STAGE_NEEDS } from './policy.ts';
-import type {
-  Block,
-  CandidateBlocker,
-  RouteFacts,
-  RouteWindow,
-  StageRouteEntry,
-  TaskWeight,
-} from './types.ts';
+import type { Block, CandidateBlocker, RouteFacts, RouteWindow, StageRouteEntry } from './types.ts';
 
 export interface FilterContext {
   stage: StageKind;
-  weight: TaskWeight;
   policy: RoutingPolicy;
   now: number;
   avoid: {
@@ -64,7 +56,6 @@ export function blocksFor(
   if (avoided) out.push(hard('avoided', avoided));
   const notLive = orgNotLive(route, ctx.liveOrg, ctx.liveOrgProblem);
   if (notLive) out.push(hard('org-not-live', notLive));
-  if (route.poolRole === 'backup') out.push(...backupBlocks(route, ctx));
   out.push(...shortBlocks(route, ctx));
   return out;
 }
@@ -221,53 +212,13 @@ function avoidReason(route: RouteFacts, ctx: FilterContext): string | null {
   return null;
 }
 
-/**
- * 备池（拼车号）另有两条：只接短而轻的活；同时最多 backupMaxConcurrency 个（和池自己的上限取小的）。
- * 额度未知时判不了够不够：只放一个轻活去试探，并发临时压到 1。拼车号的真实上限只有真实请求被拒最准
- * （/usage 看不见成员上限，design §十），读取器一坏就整个停派，等于渠道静默闲置。那个会话被拒时，被拒原文记成
- * 一条用满读数（清零时刻取原文），候选查询随之给出 quota-exhausted，所有任务避开到清零；被拒的任务由失败分流 QT1 换池。
- * 主池额度未知照常派、排在读到了的后面（rank.ts）。「额度够收尾」所有路由都判（shortBlocks）。
- */
-function backupBlocks(route: RouteFacts, ctx: FilterContext): Block[] {
-  const out: Block[] = [];
-  if (ctx.weight !== 'light') {
-    out.push(hard('backup-heavy', `${route.poolName}是备池，只接短而轻的活，这一单是重活`));
-  }
-  const probe = backupProbeReason(route);
-  const cap = probe === null ? Math.min(route.maxConcurrency, ctx.policy.backupMaxConcurrency) : 1;
-  const poolFull = route.blockers.includes('no-slot') || occupied(route) >= route.maxConcurrency;
-  if (occupied(route) >= cap && !poolFull) {
-    out.push({
-      code: probe === null ? 'backup-no-slot' : 'backup-quota-unknown',
-      text:
-        probe === null
-          ? `${route.poolName}是备池，同时最多 ${cap} 个，${holders(route)}`
-          : `${route.poolName}额度未知（${probe}），只放一个试探，${holders(route)}：等它的结果`,
-      wait: 'slot',
-      until: null,
-    });
-  }
-  return out;
-}
-
-/**
- * 备池额度未知（没读成、读数过期，或适用的窗口算不出还剩多少）的白话原因：这时只放一个试探。
- * 主池、已经用满的、读到了的为空。
- */
-export function backupProbeReason(route: RouteFacts): string | null {
-  if (route.poolRole !== 'backup' || route.quota === 'exhausted') return null;
-  if (route.quota === 'unknown') return '没读成或读数过期';
-  const blind = route.windows.find((w) => w.applies === 'yes' && w.state === 'ok' && remaining(w) === null);
-  return blind ? `${windowName(blind)}算不出还剩多少` : null;
-}
-
 /** 比较剩余和所需时的容差：1 − 0.9 算出来是 0.0999…，正好剩一成要算够。 */
 const EPSILON = 1e-9;
 
 /**
  * 额度够收尾（design §九 选路第 1 条，所有路由都判）：这条路由适用的每个窗口，读到了还剩多少的，剩余要够跑一个活，
- * 不够就等那个窗口清零。读数过期、算不出剩多少、判不了扣不扣的窗口不在这里挡——那是「额度未知」：主池排后面，
- * 备池只放一个试探。额度未知的池照样看读到了的窗口（池级读数过期，但会话里顺手读到的窗口还新）：知道不够就等，不拿活去撞。
+ * 不够就等那个窗口清零。读数过期、算不出剩多少、判不了扣不扣的窗口不在这里挡——那是「额度未知」：照派、排在读到了的
+ * 后面（rank.ts）。额度未知的池照样看读到了的窗口（池级读数过期，但会话里顺手读到的窗口还新）：知道不够就等，不拿活去撞。
  */
 function shortBlocks(route: RouteFacts, ctx: FilterContext): Block[] {
   if (route.blockers.includes('quota-exhausted')) return [];

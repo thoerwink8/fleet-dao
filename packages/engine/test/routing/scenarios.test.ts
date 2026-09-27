@@ -8,7 +8,7 @@ import { at, halfOpenBreaker, input, NOW, reserve, route, win } from './helpers.
 const solo = (extra: Partial<RouteFacts> = {}) =>
   route('solo-opus', { poolId: 'claude-solo', poolName: '独享号', ...extra });
 const carpool = (extra: Partial<RouteFacts> = {}) =>
-  route('carpool-opus', { poolId: 'claude-carpool', poolName: '拼车号', poolRole: 'backup', ...extra });
+  route('carpool-opus', { poolId: 'claude-carpool', poolName: '拼车号', ...extra });
 
 describe('两个 Claude 池：一个快清零，一个刚清零', () => {
   // 独享号周窗刚清零（用了 2%，还有近 7 天）；拼车号周窗 20 小时后清零、还剩 60%。
@@ -25,32 +25,27 @@ describe('两个 Claude 池：一个快清零，一个刚清零', () => {
     ],
   });
 
-  it('轻活（分诊）：先用快清零的拼车号，理由写清几点清零、还剩多少', () => {
+  it('先用快清零的拼车号，理由写清几点清零、还剩多少', () => {
     const r = chooseRoute(input([soloFresh, carpoolSoon], { stage: 'triage' }));
     expect(r).toMatchObject({ kind: 'dispatch', routeId: 'carpool-opus' });
     if (r.kind === 'dispatch') expect(r.why).toContain('拼车号周额度 20 小时后清零、还剩 60%，提到最前');
   });
 
-  it('重活（写码）：拼车号只接轻活，派独享号', () => {
-    const r = chooseRoute(input([soloFresh, carpoolSoon], { stage: 'execute' }));
-    expect(r).toMatchObject({ kind: 'dispatch', routeId: 'solo-opus' });
+  it('不分轻活重活：写码、审查也先用快清零的拼车号（#59 删掉了「拼车号是备池、只接轻活」）', () => {
+    for (const stage of ['execute', 'review'] as const) {
+      expect(chooseRoute(input([soloFresh, carpoolSoon], { stage }))).toMatchObject({
+        kind: 'dispatch',
+        routeId: 'carpool-opus',
+      });
+    }
   });
 
-  it('审查默认算轻活：可以用快清零的拼车号（design §九：拼车号派审查、判断题、巡检）', () => {
-    const r = chooseRoute(input([soloFresh, carpoolSoon], { stage: 'review' }));
-    expect(r).toMatchObject({ kind: 'dispatch', routeId: 'carpool-opus' });
-  });
-
-  it('任务标了轻重就按任务的：写码阶段的小活可以用拼车号', () => {
-    const r = chooseRoute(input([soloFresh, carpoolSoon], { stage: 'execute', weight: 'light' }));
-    expect(r).toMatchObject({ kind: 'dispatch', routeId: 'carpool-opus' });
-  });
-
-  it('拼车号已经在跑 2 个：轻活也回到独享号', () => {
-    const busy = { ...carpoolSoon, inFlight: 2 };
-    expect(chooseRoute(input([soloFresh, busy], { stage: 'triage' }))).toMatchObject({
-      routeId: 'solo-opus',
+  it('拼车号按它自己池的并发上限算，满了回到独享号（不再另压到 2 个）', () => {
+    expect(chooseRoute(input([soloFresh, { ...carpoolSoon, inFlight: 2 }]))).toMatchObject({
+      routeId: 'carpool-opus',
     });
+    const full = { ...carpoolSoon, inFlight: 5 };
+    expect(chooseRoute(input([soloFresh, full]))).toMatchObject({ routeId: 'solo-opus' });
   });
 
   it('只剩拼车号、它 5 小时窗只剩 5%：不派，等它清零', () => {
@@ -161,7 +156,7 @@ describe('Cursor 两个桶', () => {
 });
 
 describe('额度读不到', () => {
-  it('主池额度未知：不挡，但排在读到了的后面，理由写「额度未知」', () => {
+  it('额度未知：不挡，但排在读到了的后面，理由写「额度未知」', () => {
     const unknownSolo = solo({ quota: 'unknown', windows: [] });
     const known = route('mira-opus', { poolName: 'Mirasim 中转', hostId: 'mirasim' });
     expect(chooseRoute(input([unknownSolo, known]))).toMatchObject({ routeId: 'mira-opus' });
@@ -178,99 +173,96 @@ describe('额度读不到', () => {
   });
 });
 
-describe('拼车号额度读不到：只放一个轻活去试探，被拒就一起避开', () => {
-  // 独享号并发满了（轻活溢到拼车号），拼车号的额度读取器坏了。
+describe('拼车号额度读不到：照派、排在读到了的后面；被拒就一起避开到清零，切了号换池接着干', () => {
+  // 独享号并发满了，拼车号的额度读取器坏了。
   const soloFull = () => solo({ blockers: ['no-slot'], inFlight: 5 });
   const blind = (inFlight = 0) => carpool({ quota: 'unknown', windows: [], inFlight });
 
-  it('第一个轻活放行：理由写「拼车号额度未知，只放一个试探」', () => {
+  it('照派，理由写「额度未知」；已经有一个在跑也不等（不再是「备池只放一个试探」，#59 删掉）', () => {
     const r = chooseRoute(input([soloFull(), blind()], { stage: 'triage' }));
-    expect(r).toMatchObject({ kind: 'dispatch', routeId: 'carpool-opus', trial: 'quota-probe' });
+    expect(r).toMatchObject({ kind: 'dispatch', routeId: 'carpool-opus', trial: null });
     if (r.kind === 'dispatch') {
       expect(r.why).toBe(
-        '分诊阶段第 2 条：拼车号 · Opus 5.5 · Claude Code；拼车号额度未知，只放一个试探；第 1 条 独享号 · Opus 5.5 · Claude Code：独享号并发满了（5/5）',
+        '分诊阶段第 2 条：拼车号 · Opus 5.5 · Claude Code；额度未知（没读成或读数过期）；第 1 条 独享号 · Opus 5.5 · Claude Code：独享号并发满了（5/5）',
       );
     }
+    expect(chooseRoute(input([soloFull(), blind(1)], { stage: 'execute' }))).toMatchObject({
+      kind: 'dispatch',
+      routeId: 'carpool-opus',
+    });
   });
 
-  it('第二个轻活等：试探还在跑', () => {
-    const r = chooseRoute(input([soloFull(), blind(1)], { stage: 'triage' }));
-    expect(r).toMatchObject({ kind: 'wait', waitFor: 'slot', until: null });
-    if (r.kind === 'wait') expect(r.reason).toContain('拼车号额度未知（没读成或读数过期），只放一个试探');
-  });
-
-  it('独享号有空位：轻活照常先去独享号（拼车号是备池、额度又未知，排在后面）', () => {
+  it('独享号有空位：先去独享号（额度未知的排在读到了的后面）', () => {
     const r = chooseRoute(input([solo(), blind()], { stage: 'triage' }));
     expect(r).toMatchObject({ kind: 'dispatch', routeId: 'solo-opus', trial: null });
   });
 
-  it('重活不拿来试探：等独享号的空位', () => {
-    const r = chooseRoute(input([soloFull(), blind()], { stage: 'execute' }));
-    expect(r).toMatchObject({ kind: 'wait', waitFor: 'slot' });
-    expect(r.verdicts[1]?.blocks.map((b) => b.code)).toEqual(['backup-heavy']);
-  });
-
-  it('试探被拒：被拒的任务换池，别的任务按原文的时间一起避开，过了清零时刻再放一个试探', () => {
-    // 2026-09-23 拼车号当场用满的真实原文（失败样本 X03）。
-    // 拼车号是备池：用满了先换池接着干（失败分流 QT1 的备池梯子）；主池用满是等清零、续同一个会话。
+  it('被拒：被拒的任务回去选路、等这个池（切了号就换池接着干），别的任务按原文的时间一起避开，过了清零时刻照派', () => {
+    // 2026-09-23 拼车号当场用满的真实原文（失败样本 X03）。Claude 订阅池不原地睡到清零：马上回去选路（QT1 的 orgLadder）。
     const verdict = classifyFailure({
       source: 'session:triage',
       hostId: 'claude-code',
       poolId: 'claude-carpool',
-      poolRole: 'backup',
+      orgKind: 'carpool',
       routeId: 'carpool-opus',
       message:
         'API Error: Server is temporarily limiting requests (not your usage limit) · 拼车 5 小时额度已用完，约 20 分钟后重置，请稍后再来（请求 ID: <请求ID>）',
       now: NOW,
     });
+    const until = at(20 / 60);
     expect(verdict).toMatchObject({
       rule: 'QT1',
-      action: 'swapRoute',
-      avoid: { scope: 'pool', shared: true, until: at(20 / 60) },
+      action: 'retry',
+      delaySeconds: 0,
+      resumeSame: true,
+      shared: { scope: 'pool', shared: true, until },
     });
-    const until = at(20 / 60);
 
-    // 被拒的那个任务：引擎把整个池放进它的避开名单（PR #7 kit.ts），不回拼车号，等独享号的空位。
-    const self = chooseRoute(
-      input([soloFull(), blind(0)], { stage: 'triage', avoid: { poolIds: ['claude-carpool'] } }),
-    );
-    expect(self).toMatchObject({ kind: 'wait', waitFor: 'slot' });
-    expect(self.verdicts[1]?.blocks.map((b) => b.code)).toEqual(['avoided']);
-
-    // 别的任务：被拒原文记成一条读数（5 小时窗用满、清零取原文，adapters 的 claude-stream 读数就这么记），
-    // 候选查询随之给出 quota-exhausted：不再放试探，只挂拼车号的阶段等到原文给的时刻。
-    const rejected = carpool({
-      quota: 'exhausted',
-      blockers: ['quota-exhausted'],
-      windows: [win({ label: '5h', window: '5h', state: 'exhausted', used: null, resetsAt: until })],
-    });
-    expect(chooseRoute(input([rejected], { stage: 'triage' }))).toMatchObject({
-      kind: 'wait',
-      waitFor: 'quota',
-      until,
-    });
-    expect(chooseRoute(input([solo(), rejected], { stage: 'triage' }))).toMatchObject({
+    // 被拒原文记成一条读数（5 小时窗用满、清零取原文，adapters 的 claude-stream 读数就这么记），候选查询随之给出
+    // quota-exhausted：续同一个会话的那个任务等这条路由到原文给的时刻，别的任务有独享号就去独享号。
+    const rejected = (extra: Partial<RouteFacts> = {}) =>
+      carpool({
+        quota: 'exhausted',
+        blockers: ['quota-exhausted'],
+        windows: [win({ label: '5h', window: '5h', state: 'exhausted', used: null, resetsAt: until })],
+        ...extra,
+      });
+    expect(
+      chooseRoute(input([solo(), rejected()], { stage: 'triage', taskRouteId: 'carpool-opus' })),
+    ).toMatchObject({ kind: 'wait', waitFor: 'quota', until });
+    expect(chooseRoute(input([solo(), rejected()], { stage: 'triage' }))).toMatchObject({
       routeId: 'solo-opus',
     });
 
-    // 过了清零时刻：旧读数作废（候选查询判 reset → 额度未知），又只放一个试探。
+    // 会话用户切到独享组织（#157）：续的那条路由挡着（等也等不来），端口照常再选，派到独享号（会话端口换池 fork 续上）
+    const orgSolo = solo({ orgKind: 'solo' });
+    const orgCarpool = rejected({ orgKind: 'carpool' });
+    const stuck = chooseRoute(
+      input([orgSolo, orgCarpool], { stage: 'triage', taskRouteId: 'carpool-opus', liveOrg: 'solo' }),
+    );
+    expect(stuck).toMatchObject({ kind: 'none' });
+    expect(chooseRoute(input([orgSolo, orgCarpool], { stage: 'triage', liveOrg: 'solo' }))).toMatchObject({
+      kind: 'dispatch',
+      routeId: 'solo-opus',
+    });
+
+    // 过了清零时刻：旧读数作废（候选查询判 reset → 额度未知），照派。
     const reset = carpool({
       quota: 'unknown',
       windows: [win({ label: '5h', window: '5h', state: 'reset', used: null, resetsAt: until })],
     });
     expect(chooseRoute(input([reset], { stage: 'triage', now: at(0.5) }))).toMatchObject({
       kind: 'dispatch',
-      trial: 'quota-probe',
+      trial: null,
     });
   });
 });
 
-describe('构建期重活只有独享号能接（审查实测的两处）', () => {
-  // 写码是重活，拼车号不接；独享号是唯一能派的一条。
+describe('只剩独享号一条时（审查实测的两处）', () => {
   const execute = (soloExtra: Partial<RouteFacts>) =>
-    chooseRoute(input([solo(soloExtra), carpool()], { stage: 'execute' }));
+    chooseRoute(input([solo(soloExtra)], { stage: 'execute' }));
 
-  it('独享号 5 小时窗只剩 1%：不派过去，等它清零（额度够收尾，主池也判）', () => {
+  it('独享号 5 小时窗只剩 1%：不派过去，等它清零（额度够收尾，所有路由都判）', () => {
     const r = execute({
       windows: [win({ label: '5h', window: '5h', used: 0.99, resetsAt: at(2) }), win({ used: 0.3 })],
     });
@@ -303,24 +295,14 @@ describe('一批任务同时来选路：已选定、还没开工的也占位子'
   }
   const soloFull = () => solo({ blockers: ['no-slot'], inFlight: 5 });
 
-  it('拼车号额度未知：三个轻活同时来，只放出一个试探（创始人不要短时间在拼车号上并发）', () => {
-    expect(batch([soloFull(), carpool({ quota: 'unknown', windows: [] })], 3, 'triage')).toEqual([
-      'carpool-opus(quota-probe)',
-      'wait:slot',
-      'wait:slot',
-    ]);
-  });
-
-  it('拼车号读到了：三个轻活同时来，放出两个（备池上限 2），第三个等', () => {
-    expect(batch([soloFull(), carpool()], 3, 'triage')).toEqual([
-      'carpool-opus',
-      'carpool-opus',
-      'wait:slot',
-    ]);
+  it('拼车号额度未知：按池自己的并发上限放（不再只放一个试探），满了等', () => {
+    expect(
+      batch([soloFull(), carpool({ quota: 'unknown', windows: [], maxConcurrency: 2 })], 3, 'triage'),
+    ).toEqual(['carpool-opus', 'carpool-opus', 'wait:slot']);
   });
 
   it('独享号上限 2：三个重活同时来，第三个等空位', () => {
-    expect(batch([solo({ maxConcurrency: 2 }), carpool()], 3, 'execute')).toEqual([
+    expect(batch([solo({ maxConcurrency: 2 })], 3, 'execute')).toEqual([
       'solo-opus',
       'solo-opus',
       'wait:slot',

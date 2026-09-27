@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { runCursorAgent, scopePrefix } from '@fleet-dao/adapters';
 import {
   appendProgressEvents,
+  auditLog,
   getSessionRun,
   latestRunOfSession,
   notifications,
@@ -525,6 +526,92 @@ describe('会话断了接着干', () => {
     expect(fake.specs[1]?.session.mode).toBe('new');
     expect(fake.specs[1]?.prompt).toContain('接力');
     expect(fake.specs[1]?.prompt).toContain('不是现在的会话用户');
+  });
+});
+
+describe('切号那一刻在跑的会话（#59）', () => {
+  const CARPOOL = {
+    routeId: 'carpool',
+    poolId: 'claude-carpool',
+    modelId: 'opus-5.5',
+    family: 'claude',
+    hostId: 'claude-code' as const,
+  };
+  const WHY = '切号：会话用户从拼车组织切到独享组织，先停下，切完接着干';
+
+  it('停下跑在这些池上、进程起来了的会话：交回 org_switch（可重试，不算路由的失败）；别的池上的不碰；已经在停的不重复叫停', async () => {
+    const { ports } = setup(() => ({
+      act: async ({ signal }) => untilAborted(signal),
+      lastContextTokens: 5_000,
+    }));
+    const onCarpool = launch({ route: CARPOOL });
+    const onSolo = launch({ subtaskKey: 'other', brief: { ...launch().brief, branch: 'fleet/12-other' } });
+    const a = await ports.startSession(onCarpool, ctx());
+    const b = await ports.startSession(onSolo, ctx());
+    const carpool = new Set(['claude-carpool']);
+    expect(ports.orgSwitch.live(carpool)).toEqual([onCarpool.runId]);
+    expect(ports.orgSwitch.stop(carpool, WHY)).toEqual([onCarpool.runId]);
+    expect(ports.orgSwitch.stop(carpool, WHY)).toEqual([]);
+    const end = await ports.awaitSession(
+      { taskId, runId: onCarpool.runId, sessionId: a.sessionId, stage: 'execute' },
+      ctx(),
+    );
+    expect(end).toMatchObject({
+      outcome: 'failed',
+      sessionId: a.sessionId,
+      failure: { code: 'org_switch', message: WHY, retryable: true, machine: '法国' },
+    });
+    // 收场了：不在手上了
+    expect(ports.orgSwitch.live(carpool)).toEqual([]);
+    expect(await runRow(onCarpool.runId)).toMatchObject({
+      outcome: 'failed',
+      failureCode: 'org_switch',
+      routeOutcome: 'neutral',
+      contextTokens: 5_000,
+    });
+    // 切号不记叫停（叫停记录会让同一个 runId 起不来）：续的是新的 runId
+    expect((await t.db.select().from(sessionStops)).map((s) => s.runId)).toEqual([]);
+    // 独享池上的那个照跑
+    expect(ports.orgSwitch.live(new Set(['claude-solo']))).toEqual([onSolo.runId]);
+    await ports.stopSession({ taskId, runId: onSolo.runId, mode: 'kill', reason: '收尾' }, ctx());
+    await ports.awaitSession(
+      { taskId, runId: onSolo.runId, sessionId: b.sessionId, stage: 'execute' },
+      ctx(),
+    );
+  });
+
+  it('切号停下的会话接着干：换了池 fork 续上，提示词里写着上一次为什么停；怎么续的进操作记录', async () => {
+    const { ports, fake } = setup((_, n) =>
+      n === 1
+        ? { act: async ({ signal }) => untilAborted(signal), lastContextTokens: 5_000 }
+        : commitAndDone()(),
+    );
+    const first = launch({ route: CARPOOL });
+    const a = await ports.startSession(first, ctx());
+    ports.orgSwitch.stop(new Set(['claude-carpool']), WHY);
+    await ports.awaitSession({ taskId, runId: first.runId, sessionId: a.sessionId, stage: 'execute' }, ctx());
+    const next = launch({ resumeSessionId: a.sessionId });
+    const again = await runOnce(ports, next);
+    expect(fake.specs[1]?.session).toEqual({ mode: 'fork', from: a.sessionId, id: again.sessionId });
+    expect(fake.specs[1]?.prompt).toContain(WHY);
+    expect(again.end.outcome).toBe('done');
+    const audits = (await t.db.select().from(auditLog)).filter((r) => r.action === 'session-org.resume');
+    expect(audits).toHaveLength(1);
+    expect(audits[0]).toMatchObject({
+      actorKind: 'engine',
+      target: `session-run:${next.runId}`,
+      before: { runId: first.runId, routeId: 'carpool' },
+      after: { routeId: 'solo', poolId: 'claude-solo', mode: 'fork' },
+      ok: true,
+    });
+    expect(audits[0]?.reason).toContain('fork 续上');
+  });
+
+  it('不是切号停下的会话接着干：不记这一条', async () => {
+    const { ports } = setup(() => commitAndDone()());
+    const first = await runOnce(ports, launch());
+    await runOnce(ports, launch({ resumeSessionId: first.sessionId }));
+    expect((await t.db.select().from(auditLog)).filter((r) => r.action === 'session-org.resume')).toEqual([]);
   });
 });
 

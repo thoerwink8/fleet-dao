@@ -1,7 +1,7 @@
 // 选路的参数与能力表。全是起步值：驾驶舱「战绩」「额度」攒够真实数据后再调，每个数的理由写在旁边。
 // 给了但不对的直接报错，不悄悄换成默认值。
 import type { HostId, QuotaWindowKind, StageKind } from '@fleet-dao/shared';
-import { RoutingInputError, type TaskWeight } from './types.ts';
+import { RoutingInputError } from './types.ts';
 
 /** 执行方式能做的事。answer = 只答题；read = 读仓库；edit = 改文件；shell = 跑命令和测试。 */
 export type Ability = 'answer' | 'read' | 'edit' | 'shell';
@@ -70,8 +70,6 @@ export interface RoutingPolicy {
   trialEnabled: boolean;
   /** 开着时约这么多比例的任务派给非首选的可用路由。 */
   trialRatio: number;
-  /** 备池（拼车号）同时最多几个会话，和池自己的并发上限取小的（创始人 2026-09-25 定：不超过 2）。 */
-  backupMaxConcurrency: number;
   /**
    * 额度够收尾（design §九 选路第 1 条，所有路由都判）：适用的窗口剩余少于这个比例就不派，等它清零。没列的种类按 other 算。
    * 起步值按拼车号的轻活估：一个活大约占 5 小时窗的一成、周窗的百分之三（估的，没有量过）。独享号的窗口大得多
@@ -80,11 +78,6 @@ export interface RoutingPolicy {
    * 攒够会话用量后换成「该阶段在该池上的 p80 用量」。
    */
   needPerTask: Partial<Record<QuotaWindowKind, number>>;
-  /**
-   * 各阶段默认的轻重（任务没给轻重时用）：分诊、判断题、写需求文档、审查算短而轻，其余算重。
-   * design §九「主池与备池」：拼车号派审查、判断题、巡检这类短而独立的活；巡检任务由引擎在任务上标 light。
-   */
-  stageWeight: Record<StageKind, TaskWeight>;
 }
 
 export const DEFAULT_ROUTING_POLICY: Readonly<RoutingPolicy> = Object.freeze<RoutingPolicy>({
@@ -99,7 +92,6 @@ export const DEFAULT_ROUTING_POLICY: Readonly<RoutingPolicy> = Object.freeze<Rou
   poorSuccessRate: 0.5,
   trialEnabled: false,
   trialRatio: 0.1,
-  backupMaxConcurrency: 2,
   needPerTask: {
     '5h': 0.1,
     '7d': 0.03,
@@ -109,27 +101,15 @@ export const DEFAULT_ROUTING_POLICY: Readonly<RoutingPolicy> = Object.freeze<Rou
     points: 0.05,
     other: 0.05,
   },
-  stageWeight: {
-    triage: 'light',
-    judge: 'light',
-    spec: 'light',
-    plan: 'heavy',
-    execute: 'heavy',
-    ui: 'heavy',
-    review: 'light',
-    verify: 'light',
-    research: 'heavy',
-  },
 });
 
 /** 缺的取默认值，给了但不对的报错。 */
 export function resolveRoutingPolicy(partial?: Partial<RoutingPolicy>): RoutingPolicy {
-  // fastReset 整张换（换了就能去掉某种窗口）；另两张表按项合并，只改给了的那几项。
+  // fastReset 整张换（换了就能去掉某种窗口）；needPerTask 按项合并，只改给了的那几项。
   const p: RoutingPolicy = {
     ...DEFAULT_ROUTING_POLICY,
     ...(partial ?? {}),
     needPerTask: { ...DEFAULT_ROUTING_POLICY.needPerTask, ...partial?.needPerTask },
-    stageWeight: { ...DEFAULT_ROUTING_POLICY.stageWeight, ...partial?.stageWeight },
   };
   const bad = (key: string, want: string, got: unknown) =>
     new RoutingInputError(`选路策略的 ${key} 不对：要${want}，给的是 ${JSON.stringify(got)}`);
@@ -151,14 +131,8 @@ export function resolveRoutingPolicy(partial?: Partial<RoutingPolicy>): RoutingP
   ratio('poorSuccessRate', p.poorSuccessRate);
   if (typeof p.trialEnabled !== 'boolean') throw bad('trialEnabled', ' true 或 false', p.trialEnabled);
   ratio('trialRatio', p.trialRatio, { zeroOk: false });
-  if (!Number.isInteger(p.backupMaxConcurrency) || p.backupMaxConcurrency < 1) {
-    throw bad('backupMaxConcurrency', '不小于 1 的整数', p.backupMaxConcurrency);
-  }
   for (const [kind, need] of Object.entries(p.needPerTask)) {
     if (need !== undefined) ratio(`needPerTask.${kind}`, need);
-  }
-  for (const [stage, w] of Object.entries(p.stageWeight)) {
-    if (w !== 'light' && w !== 'heavy') throw bad(`stageWeight.${stage}`, ' light 或 heavy', w);
   }
   return p;
 }

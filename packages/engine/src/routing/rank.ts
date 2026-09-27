@@ -1,7 +1,8 @@
-// 排序与微调：按人排的顺序取；钉住的行原地不动；没钉住的按四条微调重排，填回剩下的位置。
-// 微调（设计 §九 选路第 3 条 + 创始人 2026-09-25 补的主池 / 备池）：
+// 排序与微调：按人排的顺序取；钉住的行原地不动；没钉住的按三条微调重排，填回剩下的位置。
+// 微调（设计 §九 选路第 3 条）：
 //   ① 快清零还没用完的往前提（清零早的在前）；② 战绩明显差的往后放，样本少不动；
-//   ③ 额度未知的排在读到了的后面；④ 备池排在主池后面（快清零提前的备池除外——提前就是为了赶在清零前用掉它）。
+//   ③ 额度未知的排在读到了的后面。
+// （原先还有一条「备池排在主池后面」：两个会话用户同时跑时拼车号是备池，法国只留一个会话用户后作废，#59 删掉。）
 
 import { duration, percent, remaining, windowName } from './names.ts';
 import type { RoutingPolicy } from './policy.ts';
@@ -83,9 +84,6 @@ export function rank(
       if (route.quota === 'unknown') {
         nudges.push({ kind: 'quota-unknown', text: '额度未知（没读成或读数过期），排在读到了的后面' });
       }
-      if (route.poolRole === 'backup' && !fast) {
-        nudges.push({ kind: 'backup-pool', text: `${route.poolName}是备池，排在主池后面` });
-      }
     }
     return { route, entry, humanIndex, pinned, nudges, fast };
   });
@@ -96,7 +94,6 @@ export function rank(
     it.fast ? 0 : 1,
     it.fast ? it.fast.resetAt : 0,
     has(it, 'poor-record') ? 1 : 0,
-    has(it, 'backup-pool') ? 1 : 0,
     it.humanIndex,
   ];
   const cmp = (a: Ranked, b: Ranked) => {

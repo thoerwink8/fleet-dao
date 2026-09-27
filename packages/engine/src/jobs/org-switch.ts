@@ -1,8 +1,8 @@
-// 会话用户切号（#157，design 第九节「拼车用完，切独享接着干」）：路由探针每一轮探之前判一次要不要切，这里是纯判法和
+// 会话用户切号（#157、#59，design 第九节「拼车用完，切独享接着干」）：路由探针每一轮探之前判一次要不要切，这里是纯判法和
 // 探针那一轮用的接口（真装配在 real/org-switch.ts）。
 // 平时挂拼车：拼车额度用满（和选路同一个判法：会话、探针被拒记成的读数，或读数到顶）就切独享；拼车用满的那几个窗口
-// 清零时刻都过了，就切回拼车。只在手上没有在跑的 Claude 会话时切（切号会让这个家目录下在跑的 Claude 会话全断；在跑的活
-// 原地接着干是 #59）。
+// 清零时刻都过了，就切回拼车。切号会让这个家目录下在跑的 Claude 会话全断：能先把它们停下、切完续上（#59，canStopRunning）
+// 就照切；不能就等手上没有在跑的 Claude 会话（#157 的做法）。
 // 明确失败，不当成到点了、不当成切好了：挂的是哪个认不出就不切；拼车用满了却读不到几点恢复（stuck），要人看——读数旧了也
 // 不算恢复（读数旧了在选路里算「不知道」，可在这里当成恢复就会切回去、被拒、再切走，来回折腾）。
 import type { OrgKind, RouteProbeState } from '@fleet-dao/shared';
@@ -30,6 +30,11 @@ export interface OrgSwitchFacts {
   pools: Partial<Record<OrgKind, OrgPool>>;
   /** 带组织类型的池上还没结束的会话数。 */
   busy: number;
+  /**
+   * 在跑的 Claude 会话能先停下、切完续上（#59：会话端口接上了，real/org-switch.ts）：有会话在跑也照切。
+   * 不给 = 不能，等它们跑完再切。
+   */
+  canStopRunning?: boolean;
   now: Date;
 }
 
@@ -93,6 +98,13 @@ export function planOrgSwitch(facts: OrgSwitchFacts): OrgSwitchPlan {
     want = {
       to: 'carpool',
       why: '挂着独享；拼车没有用满的读数（清零时刻过了，或本来就没用满），切回拼车（平时挂拼车）',
+    };
+  }
+  if (facts.busy > 0 && facts.canStopRunning) {
+    return {
+      action: 'switch',
+      to: want.to,
+      why: `${want.why}；手上 ${facts.busy} 个 Claude 会话先停下，切完接着干（换了池 fork 续上）`,
     };
   }
   if (facts.busy > 0) {

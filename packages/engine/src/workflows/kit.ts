@@ -1227,7 +1227,7 @@ async function retryPause(kit: Kit, stage: StageKind, seconds: number): Promise<
   );
 }
 
-/** 失败分流要的这一步的事实：哪个阶段、哪条路由（主池还是备池）、上游给的等待、会话跑在哪。 */
+/** 失败分流要的这一步的事实：哪个阶段、哪条路由（是不是 Claude 订阅池）、上游给的等待、会话跑在哪。 */
 function failureContext(
   stage: StageKind,
   route: RouteChoice,
@@ -1242,7 +1242,7 @@ function failureContext(
       poolId: route.poolId,
       modelId: route.modelId,
       hostId: route.hostId,
-      ...(route.poolRole ? { poolRole: route.poolRole } : {}),
+      ...(route.orgKind ? { orgKind: route.orgKind } : {}),
     },
     ...(f?.resetsAt ? { resetsAt: f.resetsAt } : {}),
     ...(f?.retryAfterSeconds === undefined ? {} : { retryAfterSeconds: f.retryAfterSeconds }),

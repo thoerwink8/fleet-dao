@@ -197,8 +197,6 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
       channelId: r.channelId,
       poolId: r.poolId,
       poolName: poolNameOf(r.channelName, r.poolOrgKind),
-      // 两个 Claude 池合成一个会话用户后不再同时跑，没有备池了（routing/types.ts 的 PoolRole）。
-      poolRole: 'primary',
       orgKind: r.poolOrgKind,
       modelId: r.modelId,
       modelName: r.modelName,
@@ -324,7 +322,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
           modelId: r.modelId,
           family: r.family,
           hostId: r.hostId,
-          poolRole: fact.poolRole,
+          ...(fact.orgKind ? { orgKind: fact.orgKind } : {}),
         };
         return { ok: true as const, route, why };
       };

@@ -25,7 +25,12 @@ import { registerEngineJobs } from './jobs.ts';
 import { orgSwitchRound } from './org-switch.ts';
 import { routeProbeJob } from './route-probe.ts';
 import { type SessionOrgReader, sessionOrgReader } from './session-org.ts';
-import { createSessionPorts, DEFAULT_FORK_MAX_CONTEXT_TOKENS, type SessionPortsDeps } from './sessions.ts';
+import {
+  createSessionPorts,
+  DEFAULT_FORK_MAX_CONTEXT_TOKENS,
+  type OrgSwitchSessions,
+  type SessionPortsDeps,
+} from './sessions.ts';
 import { createStorePorts } from './store-ports.ts';
 import { DEFAULT_WORK_ROOT, helperWorkTrees, type WorkTrees } from './worktrees.ts';
 
@@ -74,6 +79,8 @@ export interface RealPortsDeps {
 export interface RealPorts {
   ports: EnginePorts;
   reapOrphanSessions(): Promise<number>;
+  /** 切号那一刻在跑的会话（#59）：交给 real/org-switch.ts 停下、等收场。 */
+  orgSwitchSessions: OrgSwitchSessions;
 }
 
 export function createRealPorts(deps: RealPortsDeps): RealPorts {
@@ -136,7 +143,7 @@ export function createRealPorts(deps: RealPortsDeps): RealPorts {
     awaitSession: sessions.awaitSession,
     stopSession: sessions.stopSession,
   };
-  return { ports, reapOrphanSessions: sessions.reapOrphanSessions };
+  return { ports, reapOrphanSessions: sessions.reapOrphanSessions, orgSwitchSessions: sessions.orgSwitch };
 }
 
 /** reclaude 装在会话用户自己家里（docs/ops.md 第五节）；{user} 换成会话用户。 */
@@ -228,14 +235,6 @@ export function realPortsFromEnv(
   // 以它跑它家里的 reclaude org list（和会话同一份 reclaude）；选路、探针、每小时对账共用这一个（读成了的留 30 秒）
   const [sessionUser] = SESSION_USERS;
   const sessionOrg = sessionOrgReader({ exec, user: sessionUser, reclaude: claudeCommand(sessionUser) });
-  // 拼车用满切独享、恢复了切回（#157）：路由探针每一轮探之前判，经 root 帮手的 org-use 切（手上没有在跑的 Claude 会话时）
-  const orgSwitch = orgSwitchRound({
-    db,
-    org: sessionOrg,
-    user: sessionUser,
-    switchOrg: (to) => switchSessionOrg({ to, user: sessionUser }),
-    machine: config.machine,
-  });
   const real = createRealPorts({
     db,
     jev: jev.port,
@@ -252,6 +251,16 @@ export function realPortsFromEnv(
     cursorCommand,
     grokCommand,
     forkMaxContextTokens: config.forkMaxContextTokens,
+  });
+  // 拼车用满切独享、恢复了切回（#157）：路由探针每一轮探之前判，经 root 帮手的 org-use 切；手上跑在 Claude 池上的会话
+  // 先停下、切完续上（#59，换了池 fork 续上），不等它们跑完
+  const orgSwitch = orgSwitchRound({
+    db,
+    org: sessionOrg,
+    user: sessionUser,
+    switchOrg: (to) => switchSessionOrg({ to, user: sessionUser }),
+    sessions: real.orgSwitchSessions,
+    machine: config.machine,
   });
   const jobs: EngineJobs = {
     githubReconcile: githubReconcileJob({ db, gh }),

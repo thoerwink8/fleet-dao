@@ -32,10 +32,11 @@ export interface FailureEvidence {
   /** 执行方式（@fleet-dao/shared 的 HostId）。 */
   hostId?: string;
   /**
-   * 主池 / 备池（选路的 PoolRole：拼车号是备池）。额度用满时两者走法不同（design 第一节、第九节）：
-   * 主池挂起到清零、续同一个会话；备池窗口小，先换到别的池接着干（fork 续），换不了再等清零。不给按主池。
+   * 这个池是 Claude 订阅的哪个组织（pools.org_kind：拼车、独享）。带了的额度用满不原地睡到清零（design 第九节
+   * 「拼车用完，切独享接着干」）：两个组织共用一个会话用户，这个池用满了引擎切号，回去选路、切了就换池 fork 续上
+   * （QT1 的 orgLadder）。不给 = 不是这种池，照普通的走。
    */
-  poolRole?: 'primary' | 'backup';
+  orgKind?: 'carpool' | 'solo';
   /** 出事的机器（给人看的名字，例如「法国」）和会话用户：只有人能修的（重新登录）要写清去哪台机器、以谁的身份修。 */
   machine?: string;
   runAsUser?: string;
