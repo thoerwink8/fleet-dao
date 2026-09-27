@@ -45,8 +45,8 @@ describe('开工前看流程配置（setupFusion）', () => {
       mode: 'fusion',
       models: {
         lead: ['opus-5.5'],
-        sidekick: ['cursor-auto', 'kimi-k3', 'deepseek-flash', 'opus-5.5'],
-        verify: ['gpt-5.6-luna', 'kimi-k3'],
+        sidekick: ['grok-4.7', 'kimi-k3', 'deepseek-flash', 'opus-5.5'],
+        verify: ['gpt-5.6-luna', 'grok-4.7', 'kimi-k3'],
       },
       verifyRounds: 2,
       uiPaths: [],
