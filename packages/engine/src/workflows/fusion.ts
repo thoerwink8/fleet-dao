@@ -92,6 +92,7 @@ import {
   type Verdict,
   waitFor,
 } from './kit.ts';
+import { type SyncMainlineOutcome, syncMainlineNow } from './sync-mainline.ts';
 import { rebutRound, type VerifyRound, verifyLines, verifyRound } from './verify.ts';
 
 type Setup = Extract<FusionSetup, { ok: true }>;
@@ -110,6 +111,12 @@ const BLOCK_KEY = 'fusion';
  * 接这道改法之前起的执行，重放时照老样子一处都不调。
  */
 const ASK_PATCH = 'ask-not-blocking';
+/**
+ * 任务边界并主线、已开 PR 的单定时检查主线（创始人 09-28 凌晨拍：「正在干活的工人都拉一下主线内容」）：多调了
+ * syncMainline 活动、把等批准/排合并队列的单个 condition 拆成了按 chunk 轮询——接这道改法之前起的执行，
+ * 重放时一处都不多调、等待还是原来那一个不设超时/整段超时的 condition（syncMainlineNow、applySync 见 sync-mainline.ts）。
+ */
+const MAINLINE_SYNC_PATCH = 'mainline-sync-boundary';
 /**
  * 存档点看晚到的回答的几步：规划做完、合进去之前（core 的 nextFlow 收「changed」的也是这几步）。规划之前方案还没有，
  * 读到的留到规划之后；合进去以后的归对账开后续单。
@@ -168,6 +175,7 @@ const DOING: Record<FlowAction, string> = {
   'open-pr': '开 PR、等 CI',
   'fix-ci': '开了 PR 之后修一轮',
   'recheck-ci': '再查一次 CI',
+  'sync-mainline': 'CI 报和主线冲突，自动并主线',
   'final-review': 'Lead 最终审查、写结果',
   merge: '合并队列合并',
   'verify-mother': '母单级验证',
@@ -828,6 +836,7 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
 
   /** 4 执行：副手干、Lead 验收；单模型模式、副手派不出由 Lead 自己干。收下的推上去。 */
   const doDispatch = async (): Promise<FlowEvent> => {
+    await syncWorktreeAtBoundary('execute');
     const current = need(flow, '状态');
     const brief = need(plan, '方案').brief;
     // 存档点交过来的、他改选了别的（#259）：本来的活已经收下推上去了才照改；还没收下的先把本来的活做完，下一个存档点再照改
@@ -896,6 +905,7 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
 
   /** 4 执行（Lead 接手）：副手打回满两次，或验证挡住时已经是 Lead 在写。 */
   const doTakeover = async (): Promise<FlowEvent> => {
+    await syncWorktreeAtBoundary('execute');
     if (change && lastDelivery) return applyChange(change, true);
     const r = await leadWork(
       '副手打回两次还没做好，Lead 接手（0003 第 5 条）',
@@ -909,6 +919,7 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
 
   /** 5 验证：别家对照「怎么算做完」核推上去的头；挡了 Lead 看过、有证据就驳回。 */
   const doVerify = async (): Promise<FlowEvent> => {
+    await syncWorktreeAtBoundary('verify');
     const current = need(setup, '流程配置');
     // 第几轮按验过几次数（不按没过的轮数）：验过了、他又改选了别的回去照改（#259），再验是新的一轮
     const n = rounds.length + 1;
@@ -956,12 +967,20 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
     return { kind: 'verified', verdict: round.final.verdict };
   };
 
-  /** 等 CI（绑在推上去的头上）：红了记下要修的，没查成的连着几次就停下等人。 */
+  /**
+   * 等 CI（绑在推上去的头上）：红了记下要修的；没查成的连着几次就停下等人；和主线冲突交给 core 走「并主线」
+   * （不算没查成的次数，见 doSyncMainline）；头被改写了（github 包已经排除了「新头含着老头」的良性情形）不是
+   * 重试或并主线能接的，直接停下等人，不占没查成的次数。
+   */
   const waitCiEvent = async (): Promise<FlowEvent> => {
     const pr = need(prNumber, 'PR');
     const ci = await attempt(kit, 'waitCi', () =>
       acts.waitCi({ ...kit.scope, repo: input.repo, prNumber: pr, head }),
     );
+    if (ci.state === 'diverged') {
+      // ci.detail（ciResultOf 拼的）已经写清是哪个头变成了哪个头、为什么不认：不再重复一遍。
+      return { kind: 'needs-human', why: ci.detail ?? 'PR 的头变了，且新头不含老头（像是被强推改写了）' };
+    }
     if (ci.state === 'unknown') {
       ciUnknown += 1;
       if (ciUnknown >= CI_UNKNOWN_LIMIT) {
@@ -974,6 +993,10 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
       return { kind: 'ci', state: 'unknown' };
     }
     ciUnknown = 0;
+    if (ci.state === 'conflict') {
+      status.lastProblem = `CI 报和主线冲突，GitHub 没给它起：${ci.detail ?? ''}`;
+      return { kind: 'ci', state: 'conflict' };
+    }
     if (ci.state === 'red') {
       status.lastProblem = `CI 没过：${ci.failedChecks.join('、') || '（没列出检查名）'}`;
       fix = {
@@ -989,9 +1012,81 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
     return { kind: 'ci', state: ci.state };
   };
 
+  /**
+   * 并一次主线（sync-mainline.ts 的 syncMainlineNow），把结果套用到这张单自己的状态上：干净且并出了新头就
+   * 记下（工作树已经被端口快进过去，见 github-ports.ts 的 syncMainline）；真冲突写一句状态，`setFixOnConflict`
+   * 才顺手给 `fix` 填好返工意见（只有 CI 报冲突走 fix-ci 那条路要——任务边界/定时检查这两处不占这条路，冲突了
+   * 也不挡这一步，交给后面真正等 CI 时再处理，不然会给一个没人会去读的 `fix` 埋着）。
+   * 「一个函数两处（这里数下面几处调用的话是四处）共用」：CI 报冲突时（doSyncMainline）、派新会话/开 PR 前的
+   * 任务边界（syncWorktreeAtBoundary）、等批准/排合并队列时的定时检查（awaitApproval、viaMergeQueue）都用它。
+   */
+  const applySync = async (
+    label: string,
+    opts: { setFixOnConflict?: boolean } = {},
+  ): Promise<SyncMainlineOutcome & { changed: boolean }> => {
+    const worktree = need(tree, '工作树');
+    const before = head;
+    const outcome = await syncMainlineNow(kit, acts, {
+      ...kit.scope,
+      repo: input.repo,
+      prNumber: prNumber ?? undefined,
+      branch,
+      head: before,
+      worktreePath: worktree.path,
+    });
+    if (outcome.state === 'conflict') {
+      status.lastProblem = `${label}：自动并主线遇到冲突：${outcome.conflictFiles.join('、') || '（没列出文件）'}`;
+      if (opts.setFixOnConflict) {
+        fix = {
+          feedback: [
+            {
+              kind: 'conflict',
+              summary: '自动并主线遇到冲突，请在分支上把最新主线并进来、解决冲突后提交',
+              items: outcome.conflictFiles,
+            },
+          ],
+        };
+      }
+      return { ...outcome, changed: false };
+    }
+    const changed = outcome.head !== before;
+    if (changed) {
+      head = outcome.head;
+      treeHead = outcome.head;
+      status.head = head;
+      status.lastProblem = `${label}：主线动过，自动并进工作树（新头 ${head.slice(0, 7)}）`;
+    }
+    return { ...outcome, changed };
+  };
+
+  /**
+   * 任务边界并主线（创始人 09-28 凌晨拍：「正在干活的工人都拉一下主线内容」）：没有会话在跑、工作树冻结的时候
+   * （每一步真正派新会话、或开 PR 之前，一步只点一次，不是每一步都点——`tag` 去重）主线比这张单的分支新就并
+   * 进来；最佳努力，并不上（真冲突）不挡这一步（不设 setFixOnConflict），等真开了 PR、CI 报冲突时走现成那条
+   * 路（doSyncMainline）处理，别在这里另起一套「开 PR 前的冲突要修几轮」的账。没有工作树（还没建树）就跳过。
+   */
+  const boundarySynced = new Set<string>();
+  const syncWorktreeAtBoundary = async (tag: string): Promise<void> => {
+    // 接这道改法之前起的执行：重放时不多调 syncMainline（MAINLINE_SYNC_PATCH，见常量定义处）。
+    if (!patched(MAINLINE_SYNC_PATCH) || boundarySynced.has(tag) || !tree || !head) return;
+    boundarySynced.add(tag);
+    await applySync(`任务边界（${tag}）`);
+  };
+
+  /**
+   * 并主线（core 判 CI 报冲突之后派的动作）：并干净了记下新头，回去查它的 CI；并不上（真冲突）记下要修的，
+   * 交给下一轮 fix-ci 派会话解——这条路径不能不派会话就干等，所以走 applySync 时要它顺手把 `fix` 填好。
+   */
+  const doSyncMainline = async (): Promise<FlowEvent> => {
+    const outcome = await applySync('CI 报和主线冲突', { setFixOnConflict: true });
+    return { kind: 'synced', state: outcome.state, conflictFiles: outcome.conflictFiles };
+  };
+
   /** 6 开 PR：正文有方案摘要和验证结论（被卫生检查拦下让 Lead 重写摘要），再等 CI。 */
   const doOpenPr = async (): Promise<FlowEvent> => {
     if (prNumber === null) {
+      // 开 PR 前再并一次（创始人 09-28 凌晨拍的第二点）：这一步只点一次（syncWorktreeAtBoundary 的 tag 去重）。
+      await syncWorktreeAtBoundary('open-pr');
       const current = need(setup, '流程配置');
       const lines = rounds.length > 0 ? await verifyLines(kit, rounds) : null;
       // 「按推荐先做了」一栏（#259）：照开 PR 这一刻库里这张单的提问写
@@ -1239,13 +1334,19 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
   };
   const needsApproval = (h: string) => status.holds.length > 0 && !approvedFor(h);
 
-  /** 人闸：发卡请人批（编号先定好进历史，发卡重试只有一张卡），等批准或拒绝。拒了回返工意见，批了回 null。 */
+  /**
+   * 人闸：发卡请人批（编号先定好进历史，发卡重试只有一张卡），等批准或拒绝。拒了回返工意见，批了回 null；
+   * 已开 PR 的单等批准这段可能很久（创始人 09-28 凌晨拍：定时检查，比如 10 分钟一次）：每 10 分钟顺手并一次
+   * 主线，并出新头了这张卡审的就是旧头，不算数——回 null 交回去，doMerge 的外层循环拿新头重新申批一张。
+   */
   const awaitApproval = async (pr: number, h: string): Promise<Feedback[] | null> => {
     const approvalId = await newId(kit);
     const holds = [...status.holds];
     const what = describeHolds(holds);
     status.approval = { approvalId, holds, head: h, state: 'pending' };
-    await waitFor(
+    // 接这道改法之前起的执行：重放时还是原来那一个不设超时的 condition，不拆成按 10 分钟一轮的定时检查。
+    const mainlineSync = patched(MAINLINE_SYNC_PATCH);
+    const headMoved = await waitFor(
       kit,
       'human',
       `等人批准：${what}（PR #${pr}）`,
@@ -1262,10 +1363,19 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
             summary: need(plan, '方案').summary,
           }),
         );
-        await condition(() => status.approval?.state !== 'pending');
+        if (!mainlineSync) {
+          await condition(() => status.approval?.state !== 'pending');
+          return false;
+        }
+        for (;;) {
+          const decided = await condition(() => status.approval?.state !== 'pending', '10 minutes');
+          if (decided) return false;
+          if ((await applySync('等批准时定时检查')).changed) return true;
+        }
       },
       { approvalId },
     );
+    if (headMoved) return null;
     const decided = status.approval;
     if (decided?.state !== 'rejected') return null;
     return [
@@ -1307,7 +1417,12 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
       }
     });
 
-  /** 排进合并队列等结果。暂停了、新加了人闸要等批准：还没合的撤出来，回 null（回头过暂停门、人闸再排）。 */
+  /**
+   * 排进合并队列等结果。暂停了、新加了人闸要等批准：还没合的撤出来，回 null（回头过暂停门、人闸再排）。
+   * 排队这段可能很久：每 10 分钟（或 mergeWaitMinutes 比它还短就按那个算）顺手并一次主线（创始人 09-28 凌晨
+   * 拍的定时检查），要并才并；并出新头了，队列里那条排的还是老头，撤了回 null——doMerge 的外层循环会拿新头
+   * 重新调这个函数，建一条新的排队记录（新 mergeAttempt、新 itemId），不是在这里边等边偷换排队条目的头。
+   */
   const viaMergeQueue = async (pr: number, h: string): Promise<MergeResult | null> => {
     await gate(kit);
     mergeAttempt += 1;
@@ -1325,11 +1440,36 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
     };
     pendingItemId = item.itemId;
     const interrupted = () => control.paused || needsApproval(h);
+    // 接这道改法之前起的执行：重放时还是原来那一个整段 mergeWaitMinutes 超时的 condition，不拆成按 10 分钟
+    // 一轮的定时检查。
+    const mainlineSync = patched(MAINLINE_SYNC_PATCH);
+    const chunkMinutes = Math.max(1, Math.min(10, limits.mergeWaitMinutes));
     for (;;) {
       await attempt(kit, 'enqueueMerge', () => acts.enqueueMerge({ item, limits: input.limits ?? {} }));
-      await waitFor(kit, 'merge-queue', `PR #${pr} 在合并队列里`, () =>
-        condition(() => item.itemId in mergeResults || interrupted(), `${limits.mergeWaitMinutes} minutes`),
-      );
+      const headMoved = await waitFor(kit, 'merge-queue', `PR #${pr} 在合并队列里`, async () => {
+        if (!mainlineSync) {
+          await condition(
+            () => item.itemId in mergeResults || interrupted(),
+            `${limits.mergeWaitMinutes} minutes`,
+          );
+          return false;
+        }
+        let waited = 0;
+        for (;;) {
+          const got = await condition(
+            () => item.itemId in mergeResults || interrupted(),
+            `${chunkMinutes} minutes`,
+          );
+          waited += chunkMinutes;
+          if (got || waited >= limits.mergeWaitMinutes) return false;
+          if ((await applySync('排队时定时检查')).changed) return true;
+        }
+      });
+      if (headMoved) {
+        await withdrawUntilConfirmed(item.itemId);
+        pendingItemId = null;
+        return null;
+      }
       const answered = mergeResults[item.itemId];
       if (answered) {
         pendingItemId = null;
@@ -1340,7 +1480,7 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
         pendingItemId = null;
         return confirmed && confirmed.outcome !== 'withdrawn' ? confirmed : null;
       }
-      // 太久没回话：再排一次（队列按条目编号去重，已经有结果的会补发）
+      // 太久没回话（不是并出了新头）：再排一次同一条（队列按条目编号去重，已经有结果的会补发）
     }
   };
 
@@ -1462,6 +1602,9 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
         case 'recheck-ci':
           await waitFor(kit, 'retry', 'CI 没查成，隔一会儿再查', () => sleep('2 minutes'));
           event = await waitCiEvent();
+          break;
+        case 'sync-mainline':
+          event = await doSyncMainline();
           break;
         case 'fix-ci':
           event = await doFix();

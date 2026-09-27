@@ -827,6 +827,10 @@ export interface FeishuStore {
   /** since 之后进入「已合并」的子任务个数。 */
   countMergedSubtasksSince(since: string): Promise<number>;
 
+  /**
+   * 联查 tasks、repos（pg-store.ts 的 taskInfos）：这两张表被迁移的 DDL 锁住时抛 TableLockedError（不是真故障，
+   * 是「现在读不了，等锁放开」，见 #364）；别的错误原样抛。
+   */
   listOutboxSources(since: string): Promise<FeishuOutboxSources>;
   /**
    * 按现算的内容指纹更新送达状态：没有的建成第 1 版（create=false 的不建）；指纹变了版本加 1。
@@ -1155,6 +1159,19 @@ export class InvalidCursorError extends Error {
   constructor(message = '翻页游标看不懂（被改过，或者不是这个列表的），从第一页重新翻') {
     super(message);
     this.name = 'InvalidCursorError';
+  }
+}
+
+/**
+ * 查询撞上了被 DDL 锁住的表，等锁本身也超时了（Postgres 57014 语句超时 / 55P03 等锁超时，见
+ * pg-store.ts 的 withStatementTimeout、sqlState）：不是数据或代码的错，是「发布跑迁移的这几秒表被锁着」——
+ * 调用方该当成「再等一下、自己重试」，不是当场 500（#364：飞书 outbox 长轮询联查 tasks/repos 撞上这个，
+ * 之前直接被 Hono 的全局错误处理接住回 500，回错了「真故障」）。
+ */
+export class TableLockedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'TableLockedError';
   }
 }
 

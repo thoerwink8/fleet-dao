@@ -557,6 +557,8 @@ export const RULES: readonly FailureRule[] = [
       'timeout_schedule_to_close',
       'timeout_schedule_to_start',
       'session_lost',
+      // 会话脱开引擎跑、引擎不在时没了，没留下终帧和退出码（adapters 的 detached.ts）：续会话接着干
+      'exit_lost',
     ],
     text: /StartToClose timeout|活动随旧进程丢失|worker 部署重启|heartbeat timeout/i,
     ladder: ['retry', 'park'],

@@ -84,6 +84,7 @@ describe('openSessionRun', () => {
       sessionCostUsd: null,
       testCommand: null,
       stopRequested: null,
+      outputSeq: null,
     });
   });
 

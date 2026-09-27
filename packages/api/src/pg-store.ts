@@ -96,6 +96,7 @@ import {
   type RunPlan,
   type SettingRecord,
   type Store,
+  TableLockedError,
   type TimelineRecord,
   type User,
 } from './ports.ts';
@@ -1537,48 +1538,66 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       return row?.n ?? 0;
     },
     async listOutboxSources(since): Promise<FeishuOutboxSources> {
-      const cutoff = new Date(since);
-      const [askRows, noteRows] = await Promise.all([
-        db
-          .select()
-          .from(asks)
-          .where(or(isNull(asks.answer), gte(asks.answeredAt, cutoff)))
-          .orderBy(asc(asks.askedAt), asc(asks.id)),
-        db
-          .select()
-          .from(notifications)
-          .where(or(isNull(notifications.resolvedAt), gte(notifications.resolvedAt, cutoff)))
-          .orderBy(asc(notifications.createdAt), asc(notifications.id)),
-      ]);
-      const [infos, names] = await Promise.all([
-        taskInfos(db, [
-          ...askRows.map((a) => a.taskId),
-          ...noteRows.flatMap((n) => (n.taskId ? [n.taskId] : [])),
-        ]),
-        displayNames(db, [...askRows.map((a) => a.answeredBy), ...noteRows.map((n) => n.resolvedBy)]),
-      ]);
-      return {
-        asks: askRows.map((a) => {
-          const task = infos.get(a.taskId);
-          if (!task) throw new Error(`追问 ${a.id} 的需求 ${a.taskId} 读不到`);
-          return { ask: toAsk(a), task, answeredByName: a.answeredBy ? names.get(a.answeredBy) : undefined };
-        }),
-        notifications: noteRows.map((n) => ({
-          notification: {
-            id: n.id,
-            level: n.level,
-            title: n.title,
-            body: n.body,
-            link: opt(n.link),
-            taskId: opt(n.taskId),
-            createdAt: iso(n.createdAt),
-            resolvedAt: isoOpt(n.resolvedAt),
-            resolvedBy: opt(n.resolvedBy),
-          },
-          task: n.taskId ? infos.get(n.taskId) : undefined,
-          resolvedByName: n.resolvedBy ? names.get(n.resolvedBy) : undefined,
-        })),
-      };
+      // 整个函数体包一层：57014 语句超时 / 55P03 等锁超时（发布跑迁移时 tasks、repos 被 DDL 锁住，联表查询
+      // 等锁本身也超时——不是数据或代码的错）转成调用方认得出「再等一下」的 TableLockedError；别的错误原样抛，
+      // 含下面「追问的需求读不到」那种真数据问题，不跟着被当成「再等一下」吞掉（#364）。
+      try {
+        const cutoff = new Date(since);
+        const [askRows, noteRows] = await Promise.all([
+          db
+            .select()
+            .from(asks)
+            .where(or(isNull(asks.answer), gte(asks.answeredAt, cutoff)))
+            .orderBy(asc(asks.askedAt), asc(asks.id)),
+          db
+            .select()
+            .from(notifications)
+            .where(or(isNull(notifications.resolvedAt), gte(notifications.resolvedAt, cutoff)))
+            .orderBy(asc(notifications.createdAt), asc(notifications.id)),
+        ]);
+        const [infos, names] = await Promise.all([
+          taskInfos(db, [
+            ...askRows.map((a) => a.taskId),
+            ...noteRows.flatMap((n) => (n.taskId ? [n.taskId] : [])),
+          ]),
+          displayNames(db, [...askRows.map((a) => a.answeredBy), ...noteRows.map((n) => n.resolvedBy)]),
+        ]);
+        return {
+          asks: askRows.map((a) => {
+            const task = infos.get(a.taskId);
+            if (!task) throw new Error(`追问 ${a.id} 的需求 ${a.taskId} 读不到`);
+            return {
+              ask: toAsk(a),
+              task,
+              answeredByName: a.answeredBy ? names.get(a.answeredBy) : undefined,
+            };
+          }),
+          notifications: noteRows.map((n) => ({
+            notification: {
+              id: n.id,
+              level: n.level,
+              title: n.title,
+              body: n.body,
+              link: opt(n.link),
+              taskId: opt(n.taskId),
+              createdAt: iso(n.createdAt),
+              resolvedAt: isoOpt(n.resolvedAt),
+              resolvedBy: opt(n.resolvedBy),
+            },
+            task: n.taskId ? infos.get(n.taskId) : undefined,
+            resolvedByName: n.resolvedBy ? names.get(n.resolvedBy) : undefined,
+          })),
+        };
+      } catch (err) {
+        if (err instanceof TableLockedError) throw err;
+        const code = sqlState(err);
+        if (code === '57014' || code === '55P03') {
+          throw new TableLockedError(
+            `outbox 联查 tasks/repos 时表被锁住、等锁超时（sqlstate ${code}）：${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+        throw err;
+      }
     },
     async syncOutbox(items) {
       if (items.length === 0) return new Map();

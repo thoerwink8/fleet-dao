@@ -10,7 +10,7 @@ import { serve } from '@hono/node-server';
 /** 驾驶舱接口的空闲连接留多久：比香港 nginx 的 keepalive_timeout（5 分钟）长。 */
 export const COCKPIT_KEEP_ALIVE_MS = 6 * 60_000;
 
-type Fetch = Parameters<typeof serve>[0]['fetch'];
+export type Fetch = Parameters<typeof serve>[0]['fetch'];
 
 export function serveCockpit(
   fetch: Fetch,

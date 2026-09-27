@@ -37,9 +37,11 @@ import {
   type CursorRunSpec,
   claudeRunFacts,
   cursorRunFacts,
+  type DetachedIo,
   type GrokRunReport,
   type GrokRunSpec,
   grokRunFacts,
+  type LineMeta,
   type ProcessLimits,
   type RateLimitReading,
   type RunFacts,
@@ -98,7 +100,12 @@ export interface HostRunSpec {
 export interface HostRunHooks {
   signal?: AbortSignal;
   now?: () => Date;
-  onEvent?: (event: ProgressEvent) => unknown;
+  /** meta：出自输出的哪一行、是不是接回时重放的（重放的只重建状态、别再写库）。 */
+  onEvent?: (event: ProgressEvent, meta: LineMeta) => unknown;
+  /** 走文件、脱开引擎进程跑（adapters 的 detached.ts）；attach = 引擎重启后接回，不起进程。 */
+  io?: DetachedIo;
+  /** 接回时：序号小于它的行已经处理过（库里确认过）。 */
+  replayUntil?: number;
   onRateLimit?: (reading: RateLimitReading) => unknown;
   onSpawn?: (info: SpawnInfo) => unknown;
   /** 执行体报出自己的会话号（cursor 的 init 帧）。同步调，别抛。 */
@@ -223,6 +230,8 @@ function agentHooks(command: string[], hooks: HostRunHooks): ClaudeCodeRunOption
     ...(hooks.signal ? { signal: hooks.signal } : {}),
     ...(hooks.now ? { now: hooks.now } : {}),
     ...(hooks.onEvent ? { onEvent: hooks.onEvent } : {}),
+    ...(hooks.io ? { io: hooks.io } : {}),
+    ...(hooks.replayUntil === undefined ? {} : { replayUntil: hooks.replayUntil }),
     ...(hooks.onRateLimit ? { onRateLimit: hooks.onRateLimit } : {}),
     ...(hooks.onSpawn ? { onSpawn: hooks.onSpawn } : {}),
   };
