@@ -47,6 +47,7 @@ function contextOf(
     },
     liveOrg: input.liveOrg,
     liveOrgProblem: input.liveOrgProblem,
+    orgPlan: input.orgPlan,
     uiWork: input.uiWork ?? false,
   };
 }
@@ -371,11 +372,27 @@ function earliestWait(waits: Wait[]): Wait {
 function waitText(w: Wait): string {
   if (w.waitFor === 'slot') return '在等并发空位';
   if (w.until === null) {
-    return w.waitFor === 'breaker' ? '在等熔断的试探结果' : '在等额度清零，清零时刻不知道，按轮询间隔再看';
+    switch (w.waitFor) {
+      case 'breaker':
+        return '在等熔断的试探结果';
+      case 'org':
+        return '在等引擎切号（下一轮路由探针切），按轮询间隔再看';
+      case 'probe':
+        return '在等路由探针在现在挂着的组织下探一次，按轮询间隔再看';
+      default:
+        return '在等额度清零，清零时刻不知道，按轮询间隔再看';
+    }
   }
-  return w.waitFor === 'breaker'
-    ? `最早 ${stamp(w.until)} 熔断到点、放试探`
-    : `最早 ${stamp(w.until)} 额度清零、够跑一个活`;
+  switch (w.waitFor) {
+    case 'breaker':
+      return `最早 ${stamp(w.until)} 熔断到点、放试探`;
+    case 'org':
+      return `最早 ${stamp(w.until)} 以后引擎切号`;
+    case 'probe':
+      return `最早 ${stamp(w.until)} 路由探针在现在挂着的组织下探一次`;
+    default:
+      return `最早 ${stamp(w.until)} 额度清零、够跑一个活`;
+  }
 }
 
 /** 任务指定了路由：只看它；硬挡报「指定的路由用不了」，等得来就等，绝不偷偷换。 */

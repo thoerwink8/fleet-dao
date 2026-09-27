@@ -246,6 +246,19 @@ describe('拼车号额度读不到：照派、排在读到了的后面；被拒�
       routeId: 'solo-opus',
     });
 
+    // 带上引擎切号的打算（#335）：挂着独享、拼车到点切回——续的那条拼车路由成了「等切号 + 等清零」，等得来；
+    // 选路端口（real/store-ports.ts）见续会话的路由只差切号，不等它，照常再选（上面那样派到独享，换池 fork 续上）
+    const planned = chooseRoute(
+      input([orgSolo, orgCarpool], {
+        stage: 'triage',
+        taskRouteId: 'carpool-opus',
+        liveOrg: 'solo',
+        orgPlan: { to: 'carpool', at: until, why: '挂着独享；拼车到点才恢复，到点再切回' },
+      }),
+    );
+    expect(planned).toMatchObject({ kind: 'wait', waitFor: 'quota', until });
+    expect(planned.verdicts[0]?.blocks.map((b) => b.wait)).toEqual(['quota', 'org']);
+
     // 过了清零时刻：旧读数作废（候选查询判 reset → 额度未知），照派。
     const reset = carpool({
       quota: 'unknown',
@@ -352,5 +365,66 @@ describe('全部并发满 / 全部额度满 / 全部被禁', () => {
       expect(r.reason).toContain('不用 Fable');
       expect(r.verdicts.map((v) => v.blocks.map((b) => b.code))).toEqual([['banned'], ['banned']]);
     }
+  });
+});
+
+describe('09-27 21:54 那一次（#335）：人手动切到独享又切回，巡检单在最终审查挂起等人', () => {
+  // 21:52 那一轮探针挂着拼车：拼车路由探通在线，独享路由写「现在挂拼车，不探」（skipped、探的时候挂的是拼车）
+  const carpoolOk = carpool({ orgKind: 'carpool' });
+  const soloSkipped = solo({
+    orgKind: 'solo',
+    blockers: ['offline'],
+    probeState: 'skipped',
+    probeOrg: 'carpool',
+    probedAt: at(-0.03),
+  });
+
+  it('当时的判法（没有切号的打算、不知道独享那条是没探还是坏了）：两条都是硬挡——派不出，任务挂起等人', () => {
+    const then = solo({ orgKind: 'solo', blockers: ['offline'], probedAt: at(-0.03) });
+    const r = chooseRoute(input([carpoolOk, then], { liveOrg: 'solo' }));
+    expect(r.kind).toBe('none');
+  });
+
+  it('现在：独享挂着、引擎打算切回拼车（和切号同一个判法），拼车等切号、独享等探针探一次——等得来，不挂起', () => {
+    const r = chooseRoute(
+      input([carpoolOk, soloSkipped], {
+        liveOrg: 'solo',
+        orgPlan: { to: 'carpool', at: null, why: '挂着独享；拼车没有用满的读数，切回拼车（平时挂拼车）' },
+      }),
+    );
+    expect(r).toMatchObject({ kind: 'wait', waitFor: 'org', until: null });
+    expect(r.kind === 'wait' && r.reason).toContain('在等引擎切号');
+    expect(r.verdicts.map((v) => v.blocks.map((b) => [b.code, b.wait]))).toEqual([
+      [['org-not-live', 'org']],
+      [['offline', 'probe']],
+    ]);
+  });
+
+  it('切回拼车以后（读数回到拼车）：拼车照派', () => {
+    expect(chooseRoute(input([carpoolOk, soloSkipped], { liveOrg: 'carpool' }))).toMatchObject({
+      kind: 'dispatch',
+      routeId: 'carpool-opus',
+    });
+  });
+
+  it('引擎不打算切回（比如拼车池整池暂停着）：拼车硬挡、写明为什么不切；独享挂着，等探针在独享下探一次', () => {
+    const noBack = { to: null, at: null, why: '挂着独享；拼车池整池暂停着（等人处理），先不切回' };
+    const r = chooseRoute(input([carpoolOk, soloSkipped], { liveOrg: 'solo', orgPlan: noBack }));
+    expect(r).toMatchObject({ kind: 'wait', waitFor: 'probe' });
+    expect(r.kind === 'wait' && r.reason).toContain(
+      '引擎现在不打算切过去（挂着独享；拼车池整池暂停着（等人处理），先不切回）',
+    );
+    // 探针在独享下探过、没探通：两条都等不来——派不出，明确写着为什么（不是悄悄挂着）
+    const soloDown = solo({
+      orgKind: 'solo',
+      blockers: ['offline'],
+      probeState: 'failed',
+      probeOrg: 'solo',
+      probedAt: at(-0.03),
+    });
+    const none = chooseRoute(input([carpoolOk, soloDown], { liveOrg: 'solo', orgPlan: noBack }));
+    expect(none.kind).toBe('none');
+    expect(none.kind === 'none' && none.reason).toContain('引擎现在不打算切过去');
+    expect(none.kind === 'none' && none.reason).toContain('不在线（探活或熔断判的）');
   });
 });

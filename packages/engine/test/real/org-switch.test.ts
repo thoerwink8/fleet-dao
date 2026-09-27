@@ -25,9 +25,11 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { runRouteProbeJob } from '../../src/jobs/route-probe.ts';
 import { registerEngineJobs } from '../../src/real/jobs.ts';
 import {
+  ORG_DRIFT_ALERT,
   ORG_STUCK_ALERT,
   ORG_SWITCH_ALERT,
   ORG_VERIFY_ALERT,
+  orgDriftReporter,
   orgSwitchRound,
 } from '../../src/real/org-switch.ts';
 import { routeProbeJob } from '../../src/real/route-probe.ts';
@@ -80,7 +82,12 @@ function setup(
   const rig = orgListRig();
   let clock = NOW.getTime();
   const now = () => new Date(clock);
-  const org = rig.reader({ ttlMs: 30_000, now });
+  // 和真装配一样：起点变动（读数变了、引擎没切过号）写 session-org:drift 和操作记录（#335）
+  const org = rig.reader({
+    ttlMs: 30_000,
+    now,
+    onEvent: orgDriftReporter({ db: t.db, user: 'fleet-agent-carpool', machine: '法国', now }),
+  });
   const helperCalls: OrgKind[] = [];
   const logs: string[] = [];
   const store = createStorePorts({ db: t.db, now, draw: () => 0.5, log: () => {}, sessionOrg: org });
@@ -542,5 +549,147 @@ describe('手上有会话在跑也照切：先停下、等收场、再切（#59�
     expect(s.helperCalls).toEqual(['carpool']);
     expect(fake.stops[0]?.stopped).toEqual([a.id]);
     expect(fake.stops[0]?.why).toContain('从独享组织切到拼车组织');
+  });
+});
+
+describe('组织临时被切走又切回（#335）：选路、探针、切号按同一个起点判，活不挂起、自己接着走', () => {
+  /** 法国现在的样子（创始人 09-27 夜拍）：独享池整池暂停着，选路不派、拼车用满也不切过去。 */
+  const holdSolo = () =>
+    upsertAlert(t.db, {
+      dedupeKey: poolHoldKey('claude-solo'),
+      level: 'decision',
+      taskId: null,
+      title: '账号池 claude-solo 整池暂停：法国暂时不用独享号',
+      body: '创始人 2026-09-27 夜拍',
+    });
+
+  it('09-27 21:54 那次：人经帮手切到独享、两分钟内又切回——选路等着（不挂起），推一条带前后两次读数的提醒，切回来照常派拼车、提醒自己撤；独享暂停照旧', async () => {
+    const s = setup();
+    await holdSolo();
+    // 21:52 那一轮：挂拼车，拼车探通；独享不探，记下探的时候挂的是拼车
+    await s.round();
+    expect(await row('carpool')).toMatchObject({ alive: true, probeState: 'ok', probeOrg: 'carpool' });
+    expect(await row('solo')).toMatchObject({ alive: false, probeState: 'skipped', probeOrg: 'carpool' });
+
+    // 21:53 人手动切到独享（引擎没切，库里没有切号记录）
+    s.advance(2 * MIN);
+    s.rig.answer('solo');
+    const during = await s.pick();
+    // 不照新读数派，也不挂起等人：过 30 秒再选
+    expect(during).toMatchObject({ ok: false, waitFor: 'slot' });
+    expect(!during.ok && during.detail).toContain('会话用户挂的组织这会儿定不下来，过一会儿再选');
+    const drift = await alertOf(ORG_DRIFT_ALERT);
+    expect(drift).toMatchObject({ level: 'alert', resolvedAt: null });
+    expect(drift?.title).toBe('会话用户挂的组织变了，引擎没切过号：拼车 → 独享');
+    // 提醒里是前后两次读数：几点、谁读的、读到哪个
+    expect(drift?.body).toContain('09-25 16:00:00 切号读到拼车');
+    expect(drift?.body).toContain('09-25 16:02:00 选路读到独享');
+    expect(drift?.body).toContain('fleet-agent-scope org-use');
+
+    // 21:55 人切回拼车：读数回到起点，马上照常派拼车，提醒自己撤、写明为什么
+    s.advance(MIN);
+    s.rig.answer('carpool');
+    expect(await s.pick()).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+    const settled = await alertOf(ORG_DRIFT_ALERT);
+    expect(settled?.resolvedAt).not.toBeNull();
+    expect(settled?.body).toMatch(/^已撤：读数回到了拼车（09-25 16:03:00 选路读到拼车）/);
+
+    // 下一轮探针：挂拼车，不切号；独享暂停照旧（没探它、没派它、没撤它的暂停）
+    s.advance(12 * MIN);
+    await s.round();
+    expect(s.helperCalls).toEqual([]);
+    expect((await alertOf(poolHoldKey('claude-solo')))?.resolvedAt).toBeNull();
+    expect(await audits()).toEqual([
+      {
+        action: 'session-org.drift',
+        ok: true,
+        before: { org: 'carpool', at: '2026-09-25T08:00:00.000Z', by: '切号' },
+        after: { org: 'solo', at: '2026-09-25T08:02:00.000Z', by: '选路' },
+        error: null,
+      },
+      {
+        action: 'session-org.settle',
+        ok: true,
+        before: { org: 'carpool' },
+        after: { org: 'carpool', how: 'back' },
+        error: null,
+      },
+    ]);
+    const text = JSON.stringify([
+      await t.db.select().from(auditLog),
+      await t.db.select().from(notifications),
+    ]);
+    for (const bad of [String(CARPOOL_ORG_ID), String(SOLO_ORG_ID)]) expect(text).not.toContain(bad);
+  });
+
+  it('切过去一直没切回：2 分钟后认它（提醒撤掉、写明认了），活等切号不挂起；下一轮探针引擎切回拼车，切完照常派', async () => {
+    const s = setup();
+    await s.round();
+    s.advance(MIN);
+    s.rig.answer('solo');
+    expect(await s.pick()).toMatchObject({ ok: false, waitFor: 'slot' });
+    // 连着 2 分钟都是独享：认了。拼车要等切号（引擎下一轮切回：拼车没用满），独享上一轮在拼车下没探、等探针——等得来
+    s.advance(2 * MIN);
+    const waiting = await s.pick();
+    expect(waiting).toMatchObject({ ok: false, waitFor: 'slot' });
+    expect(!waiting.ok && waiting.detail).toContain('在等引擎切号');
+    expect(!waiting.ok && waiting.detail).toContain('等切号');
+    expect(!waiting.ok && waiting.detail).toContain('等下一轮路由探针在独享组织下探过再派');
+    expect((await alertOf(ORG_DRIFT_ALERT))?.body).toMatch(
+      /^已撤：读数定下来了：从 ?09-25 16:01:00 ?起连着 2 分钟都是独享/,
+    );
+
+    // 下一轮：切号判的也是这个起点——挂独享、拼车没用满，切回拼车；帮手切的，不算没记录的变动
+    s.advance(12 * MIN);
+    await s.round();
+    expect(s.helperCalls).toEqual(['carpool']);
+    expect(await s.pick()).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+    expect((await audits()).map((a) => a.action)).toEqual([
+      'session-org.drift',
+      'session-org.settle',
+      'session-org.switch',
+      'session-org.verify',
+    ]);
+  });
+
+  it('引擎切到独享、拼车恢复了人先切回拼车：拼车那条上一轮在独享下没探——等下一轮探针，不当成坏了挂起；下一轮探通照常派', async () => {
+    const s = setup();
+    // 拼车被拒、20 分钟后清零：这一轮引擎切到独享，拼车不探（记下探的时候挂的是独享）
+    await rejected('claude-carpool', s.now(), new Date(NOW.getTime() + 20 * MIN));
+    await s.round();
+    expect(s.helperCalls).toEqual(['solo']);
+    s.advance(15 * MIN);
+    await s.round();
+    expect(await row('carpool')).toMatchObject({ alive: false, probeState: 'skipped', probeOrg: 'solo' });
+    // 到点了，人赶在下一轮之前手动切回拼车
+    s.advance(6 * MIN);
+    s.rig.answer('carpool');
+    expect(await s.pick()).toMatchObject({ ok: false, waitFor: 'slot' });
+    s.advance(2 * MIN);
+    // 认了拼车：拼车路由不是坏了、是上一轮没探——等下一轮探针（改之前：拼车不在线、独享要等切过去，两个硬挡，挂起等人）
+    const waiting = await s.pick();
+    expect(waiting).toMatchObject({ ok: false, waitFor: 'slot' });
+    expect(!waiting.ok && waiting.detail).toContain('等下一轮路由探针在拼车组织下探过再派');
+    // 下一轮：挂拼车、不切，探通拼车，照常派
+    s.advance(7 * MIN);
+    await s.round();
+    expect(s.helperCalls).toEqual(['solo']);
+    expect(await row('carpool')).toMatchObject({ alive: true, probeState: 'ok', probeOrg: 'carpool' });
+    expect(await s.pick()).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+  });
+
+  it('【故意造出的失败】读数刚变、还没定下来时轮到探针：切号不判（写明定不下来），Claude 池这一轮不探、结论照旧，这一轮记 partial', async () => {
+    const s = setup();
+    await s.round();
+    s.advance(MIN);
+    s.rig.answer('solo');
+    const run = await s.round();
+    expect(run.outcome).toBe('partial');
+    expect(run.why).toContain('会话用户挂的组织这会儿定不下来，Claude 订阅池的 2 条路由这一轮没探、结论照旧');
+    expect(s.helperCalls).toEqual([]);
+    expect(s.logs.join('\n')).toContain('会话用户挂的组织这会儿定不下来');
+    // 结论照旧：拼车还是上一轮探通的在线，独享还是「没探」
+    expect(await row('carpool')).toMatchObject({ alive: true, probeState: 'ok', probeOrg: 'carpool' });
+    expect(await row('solo')).toMatchObject({ probeState: 'skipped', probeOrg: 'carpool' });
   });
 });

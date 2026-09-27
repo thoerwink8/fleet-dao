@@ -7,6 +7,7 @@ const WINDOW_STATES = ['ok', 'exhausted', 'stale', 'reset'];
 const QUOTA_STATES = ['ok', 'exhausted', 'unknown'];
 const ADMITS = ['all', 'trial', 'none'];
 const ORGS = ['solo', 'carpool'];
+const PROBE_STATES = ['ok', 'failed', 'not_wired', 'skipped'];
 
 export function time(iso: unknown, what: string): number {
   const ms = typeof iso === 'string' ? Date.parse(iso) : Number.NaN;
@@ -36,6 +37,23 @@ export function validateInput(input: ChooseRouteInput, trialEnabled: boolean): n
       throw new RoutingInputError('选路判不了：会话用户挂的组织既给了，又说认不出');
     }
   }
+  // 切号的打算认不出就不往下判：拿坏的打算会把该硬挡的当成等得来（任务一直等），或反过来挂起等人
+  const plan = input.orgPlan;
+  if (plan !== undefined) {
+    if (input.liveOrg === undefined) {
+      throw new RoutingInputError('选路判不了：给了引擎切号的打算，却不知道会话用户现在挂的是哪个组织');
+    }
+    if (plan.to !== null && !ORGS.includes(plan.to)) {
+      throw new RoutingInputError(`选路判不了：引擎打算切到的组织认不出（${String(plan.to)}）`);
+    }
+    if (plan.at !== null) {
+      time(plan.at, '引擎打算切号的时刻');
+      if (plan.to === null) throw new RoutingInputError('选路判不了：引擎切号的打算给了时刻，却没说切到哪个');
+    }
+    if (typeof plan.why !== 'string' || !plan.why.trim()) {
+      throw new RoutingInputError('选路判不了：引擎切号的打算没写为什么');
+    }
+  }
   if (trialEnabled) {
     const d = input.draw;
     if (typeof d !== 'number' || !Number.isFinite(d) || d < 0 || d >= 1) {
@@ -61,6 +79,12 @@ export function validateInput(input: ChooseRouteInput, trialEnabled: boolean): n
       throw new RoutingInputError(`选路判不了：${who} 的额度状态认不出（${r.quota}）`);
     if (r.orgKind !== undefined && r.orgKind !== null && !ORGS.includes(r.orgKind))
       throw new RoutingInputError(`选路判不了：${who} 的组织类型认不出（${String(r.orgKind)}）`);
+    if (r.probeState !== undefined && r.probeState !== null && !PROBE_STATES.includes(r.probeState)) {
+      throw new RoutingInputError(`选路判不了：${who} 的探针结论认不出（${String(r.probeState)}）`);
+    }
+    if (r.probeOrg !== undefined && r.probeOrg !== null && !ORGS.includes(r.probeOrg)) {
+      throw new RoutingInputError(`选路判不了：${who} 探针那时挂的组织认不出（${String(r.probeOrg)}）`);
+    }
     count(r.inFlight, `${who} 的在途数`);
     // 读不到不能当 0：一批任务同时来时，每个都会看到「没人占着」，并发上限就挡不住。
     count(r.reserved, `${who} 的已选定还没开工数`);

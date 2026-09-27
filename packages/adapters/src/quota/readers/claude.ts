@@ -81,6 +81,26 @@ export function parseOrgList(text: string): OrgRow[] {
   return rows;
 }
 
+/**
+ * 现在挂的是哪一类（parseOrgList 读出的行）：带 * 的要恰好一行、它的类型要认得出（team 拼车、personal 独享），认不出回原因，
+ * 不挑一个、不猜。引擎读会话用户挂的组织（engine 的 real/session-org.ts）、这里的额度读取器、切号帮手（fleet-agent-scope 的
+ * org_pick，bash 那份）都按这一个口径；原因里不带编号、名字、邮箱（会进库、上驾驶舱）。
+ */
+export function currentOrgOf(
+  rows: readonly OrgRow[],
+): { ok: true; kind: ClaudeOrgKind } | { ok: false; why: string } {
+  if (rows.length === 0)
+    return { ok: false, why: '输出里一个组织都认不出（没有「编号 名字 类型」那样的行）' };
+  const current = rows.filter((row) => row.current);
+  if (current.length === 0) return { ok: false, why: '没有带 * 的行，认不出现在挂的是哪个组织' };
+  if (current.length > 1) {
+    return { ok: false, why: `带 * 的有 ${current.length} 行，认不出现在挂的是哪个组织` };
+  }
+  const kind = current[0]?.kind;
+  if (!kind) return { ok: false, why: '现在挂的那个组织类型认不出（只认 team 拼车、personal 独享）' };
+  return { ok: true, kind };
+}
+
 const ORG_NAME: Record<ClaudeOrgKind, string> = { solo: '独享', carpool: '拼车' };
 
 /** Claude 用量行的 kind → 窗口归类。按 kind 归，不按展示文字归（服务端原话：classify a row on this, never on a label）。 */
@@ -267,13 +287,13 @@ export const readClaudeUsage: Reader = async (ctx) => {
   if (pool.orgKind) {
     const orgRun = await ctx.shared(`claude-org:${key}`, () => run(ctx, pool, ['org', 'list']));
     if (orgRun.code !== 0) throw failureFromRun('reclaude org list', orgRun);
-    const current = parseOrgList(orgRun.stdout).find((r) => r.current);
-    if (!current) throw new QuotaReadError('bad_response', 'reclaude org list 里认不出当前组织');
+    // 和引擎读会话用户挂的组织同一个口径（currentOrgOf）：带 * 的不止一行、类型认不出，都不挑一个接着读
+    const current = currentOrgOf(parseOrgList(orgRun.stdout));
+    if (!current.ok) throw new QuotaReadError('bad_response', `reclaude org list：${current.why}`);
     if (current.kind !== pool.orgKind) {
-      const now = current.kind ? `${ORG_NAME[current.kind]}组织` : '认不出类型的组织';
       throw new QuotaReadError(
         'not_current',
-        `这台机器当前挂的是${now}，读不到${ORG_NAME[pool.orgKind]}组织：额度只能读当前组织，切号会影响这台机器上所有会话，读取器不切号`,
+        `这台机器当前挂的是${ORG_NAME[current.kind]}组织，读不到${ORG_NAME[pool.orgKind]}组织：额度只能读当前组织，切号会影响这台机器上所有会话，读取器不切号`,
       );
     }
     notes.push(`当前组织：${ORG_NAME[pool.orgKind]}`);
@@ -288,8 +308,8 @@ export const readClaudeUsage: Reader = async (ctx) => {
   if (pool.orgKind) {
     // 读的这十来秒里组织被切走了，读数就不知道算谁的——作废，不记到错的池上。
     const after = await ctx.shared(`claude-org-after:${key}`, () => run(ctx, pool, ['org', 'list']));
-    const still = after.code === 0 ? parseOrgList(after.stdout).find((r) => r.current) : undefined;
-    if (still?.kind !== pool.orgKind) {
+    const still = after.code === 0 ? currentOrgOf(parseOrgList(after.stdout)) : undefined;
+    if (!still?.ok || still.kind !== pool.orgKind) {
       throw new QuotaReadError('upstream', '读额度的过程中这台机器的组织变了（或核对不了），这次读数作废');
     }
   }

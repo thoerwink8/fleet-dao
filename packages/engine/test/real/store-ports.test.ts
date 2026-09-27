@@ -382,17 +382,31 @@ describe('会话用户挂的组织：选路前现读（以会话用户跑 reclau
     expect(r.ok && r.why).toContain('会话用户现在挂的是拼车组织，Claude 订阅 · 独享要等切过去才能派');
   });
 
-  it('挂独享：派独享池；拼车池挡掉，只剩它时派不出、写明挂的是独享', async () => {
+  it('挂独享：派独享池；拼车池挡掉，只剩它时等切号（引擎下一轮切回拼车）、不挂起；引擎不切回时派不出、写明为什么', async () => {
     rig.answer('solo');
     const p = onRig();
     expect(await pick({ stage: 'execute' }, p)).toMatchObject({
       ok: true,
       route: { routeId: 'solo', poolId: 'claude-solo' },
     });
+    // 拼车没用满：引擎下一轮路由探针就切回拼车（和切号同一个判法，#335）——等得来，不是派不出
+    const wait = await pick({ stage: 'execute', avoidRouteIds: ['solo'] }, p);
+    expect(wait).toMatchObject({ ok: false, waitFor: 'slot' });
+    expect(!wait.ok && wait.detail).toContain(
+      '会话用户现在挂的是独享组织，Claude 订阅 · 拼车要等切过去才能派；引擎下一轮路由探针切过去（挂着独享；拼车没有用满的读数',
+    );
+    // 拼车池整池暂停着：引擎不切回——派不出，写明挂的是独享、引擎为什么不切
+    await upsertAlert(t.db, {
+      dedupeKey: poolHoldKey('claude-carpool'),
+      level: 'decision',
+      taskId: null,
+      title: '账号池 claude-carpool 整池暂停：登录失效',
+      body: '要重新登录',
+    });
     const none = await pick({ stage: 'execute', avoidRouteIds: ['solo'] }, p);
     expect(none).toMatchObject({ ok: false, waitFor: 'none' });
     expect(!none.ok && none.detail).toContain(
-      '会话用户现在挂的是独享组织，Claude 订阅 · 拼车要等切过去才能派',
+      '会话用户现在挂的是独享组织，Claude 订阅 · 拼车要等切过去才能派；引擎现在不打算切过去（挂着独享；拼车池整池暂停着（等人处理），先不切回）',
     );
     // 点名要拼车池的也一样挡（换不过去，不偷偷派）
     const named = await pick({ stage: 'execute', preferRouteId: 'carpool' }, p);
@@ -487,8 +501,10 @@ describe('会话用户挂的组织：选路前现读（以会话用户跑 reclau
     // 停着的时候不读
     expect(rig.calls).toHaveLength(calls);
     rig.answer('solo');
+    // 切号那一步经帮手切过了（real/org-switch.ts 在解除之前告诉读法）
+    await org.engineSwitched();
     release();
-    // 解除时丢掉留着的「拼车」（留 60 秒也不用它），现读出独享
+    // 解除时丢掉留着的「拼车」（留 60 秒也不用它），现读出独享：引擎切的号，切完读成的就是新起点
     expect(await pick({ stage: 'execute' }, p)).toMatchObject({ ok: true, route: { routeId: 'solo' } });
     expect(rig.calls).toHaveLength(calls + 1);
   });
@@ -498,6 +514,123 @@ describe('会话用户挂的组织：选路前现读（以会话用户跑 reclau
     rig.answer({ code: 1, stderr: 'not logged in' });
     expect(await pick({ stage: 'execute' }, onRig())).toMatchObject({ ok: true, route: { routeId: 'solo' } });
     expect(rig.calls).toHaveLength(0);
+  });
+
+  it('【故意造出的失败】两次读之间组织变了、没有引擎切号（#335）：选路不照新读数派、不挂起（过 30 秒再选），原因里是前后两次读数；读数回到拼车照常派', async () => {
+    let clock = NOW.getTime();
+    const events: string[] = [];
+    const org = rig.reader({
+      ttlMs: 0,
+      now: () => new Date(clock),
+      onEvent: (e) => void events.push(e.kind === 'settled' ? `settled:${e.how}` : e.kind),
+    });
+    const p = createStorePorts({
+      db: t.db,
+      now: () => new Date(clock),
+      draw: () => 0.5,
+      log: () => {},
+      sessionOrg: org,
+    });
+    rig.answer('carpool');
+    expect(await pick({ stage: 'execute' }, p)).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+    clock += 2 * MIN;
+    rig.answer('solo');
+    const r = await pick({ stage: 'execute' }, p);
+    expect(r).toMatchObject({ ok: false, waitFor: 'slot', retryAfterSeconds: ORG_READ_RETRY_SECONDS });
+    expect(!r.ok && r.detail).toBe(
+      '会话用户挂的组织这会儿定不下来，过一会儿再选：会话用户挂的组织和上一次读的不一样，引擎没切过号：' +
+        '09-25 16:00:00 选路读到拼车，09-25 16:02:00 选路读到独享（北京时间）。等读数定下来再照它：连着 2 分钟都是独享才认，回到拼车就照常',
+    );
+    clean(!r.ok && r.detail);
+    expect(events).toEqual(['drift']);
+    clock += 30_000;
+    rig.answer('carpool');
+    expect(await pick({ stage: 'execute' }, p)).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+    expect(events).toEqual(['drift', 'settled:back']);
+  });
+
+  it('续会话的那条只差切号（挂着独享、拼车到点才切回）：不等它，照常选到挂着的独享（换池 fork 续上，#59）', async () => {
+    rig.answer('solo');
+    const resets = new Date(NOW.getTime() + 2 * 60 * MIN);
+    await savePoolQuota(
+      t.db,
+      {
+        poolId: 'claude-carpool',
+        readAt: NOW.toISOString(),
+        complete: false,
+        windows: [
+          {
+            poolId: 'claude-carpool',
+            window: '5h',
+            label: 'five_hour',
+            unit: 'percent',
+            utilization: 1,
+            resetsAt: resets.toISOString(),
+            reading: 'measured',
+            readAt: NOW.toISOString(),
+            source: 'test',
+          },
+        ],
+      },
+      { now: NOW },
+    );
+    const r = await pick({ stage: 'execute', stickRouteId: 'carpool' }, onRig());
+    expect(r).toMatchObject({ ok: true, route: { routeId: 'solo', poolId: 'claude-solo' } });
+    expect(r.ok && r.why).toContain('续会话的路由要等切号（');
+    expect(r.ok && r.why).toContain('到点再切回');
+  });
+
+  it('【故意造出的失败】引擎切号的打算读不了（库没查成）：选路照常报错，不当成「不打算切」挂起、也不当成等得来', async () => {
+    rig.answer('solo');
+    const p = createStorePorts({
+      db: t.db,
+      now: () => NOW,
+      draw: () => 0.5,
+      log: () => {},
+      sessionOrg: rig.reader(),
+      orgPlan: async () => {
+        throw new Error('sessionOrgFacts：连接断了');
+      },
+    });
+    await expect(pick({ stage: 'execute' }, p)).rejects.toThrow('sessionOrgFacts：连接断了');
+    // 候选里都是挂着的那个组织的池（没有要问打算的）：不问，照常派
+    await t.client.query(`update pools set org_kind = 'solo' where id = 'claude-carpool'`);
+    expect(await pick({ stage: 'execute' }, p)).toMatchObject({ ok: true, route: { routeId: 'solo' } });
+  });
+
+  it('探针在另一个组织挂着时没探的那条（库里 probe_org 是另一个组织）：它的组织挂上以后等下一轮探针，不挂起；探了没通的照样不在线', async () => {
+    // 上一轮（5 分钟前）挂着拼车：独享那条写的是「不探」、记下那时挂的是拼车
+    await saveRouteProbe(t.db, {
+      routeId: 'solo',
+      state: 'skipped',
+      at: new Date(NOW.getTime() - 5 * MIN),
+      detail: '会话用户现在挂的是拼车组织：这时探独享池，扣的是拼车的额度、探的也是拼车，不探',
+      org: 'carpool',
+    });
+    await upsertAlert(t.db, {
+      dedupeKey: poolHoldKey('claude-carpool'),
+      level: 'decision',
+      taskId: null,
+      title: '账号池 claude-carpool 整池暂停：登录失效',
+      body: '要重新登录',
+    });
+    rig.answer('solo');
+    const r = await pick({ stage: 'execute' }, onRig());
+    expect(r).toMatchObject({ ok: false, waitFor: 'slot' });
+    expect(!r.ok && r.detail).toContain(
+      '会话用户挂的是拼车组织，没探它；现在挂的是独享组织，等下一轮路由探针在独享组织下探过再派',
+    );
+    // 在独享下探了、没通：照样不在线，派不出（写明）
+    await saveRouteProbe(t.db, {
+      routeId: 'solo',
+      state: 'failed',
+      at: NOW,
+      detail: '登录失效：Not logged in',
+      org: 'solo',
+    });
+    const none = await pick({ stage: 'execute' }, onRig());
+    expect(none).toMatchObject({ ok: false, waitFor: 'none' });
+    expect(!none.ok && none.detail).toContain('不在线（探活或熔断判的）');
   });
 });
 

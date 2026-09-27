@@ -1,7 +1,13 @@
 // 过滤：一条路由这次派不派得出去，挡在哪（每个原因一条，白话 + 等不等得来）。被挡的不删，带原因留给驾驶舱。
 // 等得来的原因带「最早几点能好」，一定晚于现在：那个时刻已经过了（读数、熔断状态慢了一步）就按不知道算，
 // 调用方按轮询间隔再选一次——给一个过去的时刻，等待秒数成了负数，选路循环会空转。
-import { hardBanFor, type OrgKind, type StageKind } from '@fleet-dao/shared';
+import {
+  hardBanFor,
+  type OrgKind,
+  ROUTE_PROBE_EVERY_MINUTES,
+  routeProbeStaleMinutes,
+  type StageKind,
+} from '@fleet-dao/shared';
 import {
   duration,
   hostName,
@@ -13,7 +19,14 @@ import {
   windowName,
 } from './names.ts';
 import { ABILITY_NAMES, HOST_ABILITIES, type RoutingPolicy, STAGE_NEEDS } from './policy.ts';
-import type { Block, CandidateBlocker, RouteFacts, RouteWindow, StageRouteEntry } from './types.ts';
+import type {
+  Block,
+  CandidateBlocker,
+  OrgPlanView,
+  RouteFacts,
+  RouteWindow,
+  StageRouteEntry,
+} from './types.ts';
 
 export interface FilterContext {
   stage: StageKind;
@@ -42,6 +55,8 @@ export interface FilterContext {
   liveOrg: OrgKind | undefined;
   /** 不知道是因为读了没读成：原话（ChooseRouteInput.liveOrgProblem）。 */
   liveOrgProblem?: string | undefined;
+  /** 引擎切号的打算（ChooseRouteInput.orgPlan）：不是挂着的那个组织的池等不等得来按它判。 */
+  orgPlan?: OrgPlanView | undefined;
   /** 界面类的活：禁令按 UI 判（ChooseRouteInput.uiWork）。 */
   uiWork: boolean;
 }
@@ -68,8 +83,8 @@ export function blocksFor(
   if (avoided) out.push(hard('avoided', avoided));
   const spoiled = ctx.spoils?.get(familyKey(route.family));
   if (spoiled) out.push(hard('no-verifier', spoiled));
-  const notLive = orgNotLive(route, ctx.liveOrg, ctx.liveOrgProblem);
-  if (notLive) out.push(hard('org-not-live', notLive));
+  const notLive = orgBlock(route, ctx);
+  if (notLive) out.push(notLive);
   out.push(...shortBlocks(route, ctx));
   return out;
 }
@@ -96,7 +111,7 @@ function candidateBlocks(route: RouteFacts, ctx: FilterContext): Block[] {
   const out: Block[] = [];
   for (const b of route.blockers) {
     if (b === 'switched-off' || b === 'banned' || b === 'quota-exhausted' || b === 'no-slot') continue;
-    out.push(hard(b, CANDIDATE_TEXT[b]));
+    out.push(b === 'offline' ? offlineBlock(route, ctx) : hard(b, CANDIDATE_TEXT[b]));
   }
   // 硬禁令在这里再过一遍（shared 的同一份，连上游串和别名一起认）：候选查询漏了、或任务指定的路由没经过候选查询，也照样挡。
   // 界面类的活（例如验证一个改了页面的改动）按 UI 判：候选查询是按阶段算的，查不出这一条。
@@ -187,17 +202,66 @@ export function hostUnfit(hostId: string, stage: StageKind): string | null {
 /**
  * 会话用户同一时刻只挂一个 reclaude 组织（design 第九节）：不是它挂着的那个组织的 Claude 池，派过去会话照样扣挂着的
  * 那个组织，额度账就记错了池。不知道挂的是哪个（读了没读成的带上原话），带组织类型的池一律不派，不拿哪个组织顶。
+ * 不是挂着的那个组织的池：引擎打算切过去的（orgPlan，和切号同一个判法）等得来——等切号，任务不挂起（#335：09-27 21:54
+ * 人手动切走又切回，这里硬挡了拼车，任务挂起等人）；不打算切的（或没判）硬挡，写明引擎为什么不切。
  */
-function orgNotLive(route: RouteFacts, liveOrg: OrgKind | undefined, problem?: string): string | null {
+function orgBlock(route: RouteFacts, ctx: FilterContext): Block | null {
   const kind = route.orgKind;
   if (kind === undefined || kind === null) return null;
+  const { liveOrg, liveOrgProblem: problem, orgPlan: plan } = ctx;
   if (liveOrg === undefined) {
-    return problem
-      ? `会话用户挂的组织认不出（${problem}），${route.poolName}不派`
-      : `不知道会话用户现在挂的是哪个组织，${route.poolName}不派`;
+    return hard(
+      'org-not-live',
+      problem
+        ? `会话用户挂的组织认不出（${problem}），${route.poolName}不派`
+        : `不知道会话用户现在挂的是哪个组织，${route.poolName}不派`,
+    );
   }
   if (kind === liveOrg) return null;
-  return `会话用户现在挂的是${ORG_NAMES[liveOrg]}组织，${route.poolName}要等切过去才能派`;
+  const head = `会话用户现在挂的是${ORG_NAMES[liveOrg]}组织，${route.poolName}要等切过去才能派`;
+  if (!plan) return hard('org-not-live', head);
+  if (plan.to !== kind) return hard('org-not-live', `${head}；引擎现在不打算切过去（${plan.why}）`);
+  const at = plan.at === null ? null : ahead(Date.parse(plan.at), ctx.now);
+  return {
+    code: 'org-not-live',
+    text: `${head}；引擎${at === null ? '下一轮路由探针' : `${stamp(at)} 以后的那一轮路由探针`}切过去（${plan.why}），等切号`,
+    wait: 'org',
+    until: at === null ? null : new Date(at).toISOString(),
+  };
+}
+
+/**
+ * 候选查询说它不在线。Claude 订阅池的路由上一次的结论是探针在另一个组织挂着时写的「不探」（skipped、probeOrg 是另一个
+ * 组织）：那不是它坏了，是那一轮探不了它。现在会话用户挂的正是它的组织：等下一轮路由探针在这个组织下探过再派（最早是
+ * 上一次结论之后一轮），任务不挂起；过了探针的过期线（routeProbeStaleMinutes）还没探到，按不在线硬挡，写明探针可能停了。
+ * 别的（探了没通、认不出组织没探、老的输入没给结论）照老样子硬挡。
+ */
+function offlineBlock(route: RouteFacts, ctx: FilterContext): Block {
+  const kind = route.orgKind;
+  const seen = route.probeOrg;
+  if (
+    !kind ||
+    ctx.liveOrg !== kind ||
+    route.probeState !== 'skipped' ||
+    !seen ||
+    seen === kind ||
+    route.probedAt === null
+  ) {
+    return hard('offline', CANDIDATE_TEXT.offline);
+  }
+  const probedAt = Date.parse(route.probedAt);
+  const age = ctx.now - probedAt;
+  const was = `探针上一次看它（${stamp(probedAt)}）时会话用户挂的是${ORG_NAMES[seen]}组织，没探它`;
+  if (age > routeProbeStaleMinutes(route.hostId) * 60_000) {
+    return hard('offline', `${was}，之后 ${duration(age)}探针都没再探它（探针可能停了），按不在线算`);
+  }
+  const next = ahead(probedAt + ROUTE_PROBE_EVERY_MINUTES * 60_000, ctx.now);
+  return {
+    code: 'offline',
+    text: `${was}；现在挂的是${ORG_NAMES[kind]}组织，等下一轮路由探针在${ORG_NAMES[kind]}组织下探过再派`,
+    wait: 'probe',
+    until: next === null ? null : new Date(next).toISOString(),
+  };
 }
 
 /** 上游串是 auto 的（Cursor Auto 这类由渠道自己挑模型的）：这一次到底是哪一家在答，事先认不出。 */

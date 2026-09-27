@@ -39,8 +39,8 @@ export interface OrgSwitchFacts {
 }
 
 export type OrgSwitchPlan =
-  /** 不用切。 */
-  | { action: 'stay'; why: string }
+  /** 不用切。later：到那个时刻（拼车几点恢复）要切回去，这一轮先不切。 */
+  | { action: 'stay'; why: string; later?: { to: OrgKind; at: Date } }
   /** 该切，手上还有 Claude 会话在跑：等下一轮。 */
   | { action: 'wait'; to: OrgKind; why: string }
   | { action: 'switch'; to: OrgKind; why: string }
@@ -51,7 +51,12 @@ const stamp = (d: Date) => `${d.toISOString().replace('T', ' ').slice(0, 16)}（
 
 export function planOrgSwitch(facts: OrgSwitchFacts): OrgSwitchPlan {
   const { live, now } = facts;
-  if (!live.ok) return { action: 'stay', why: `会话用户挂的组织认不出（${live.why}），不切` };
+  if (!live.ok) {
+    // 读数刚变、引擎没切过号（real/session-org.ts 的起点）也回 pending：定下来之前不切，下一轮再判
+    return live.pending
+      ? { action: 'stay', why: `会话用户挂的组织这会儿定不下来（${live.why}），这一轮不切` }
+      : { action: 'stay', why: `会话用户挂的组织认不出（${live.why}），不切` };
+  }
   const carpool = facts.pools.carpool;
   const solo = facts.pools.solo;
   if (!carpool || !solo) return { action: 'stay', why: '库里拼车、独享两个池不全，没得切' };
@@ -90,7 +95,14 @@ export function planOrgSwitch(facts: OrgSwitchFacts): OrgSwitchPlan {
     }
     if (pending.length > 0) {
       const until = new Date(Math.max(...pending.map((w) => (w.resetsAt as Date).getTime())));
-      return { action: 'stay', why: `挂着独享；拼车 ${stamp(until)} 才恢复，到点再切回` };
+      // 到点了拼车整池还暂停着，也不切回（下面那条）：那就不算打算切回
+      return carpool.held
+        ? { action: 'stay', why: `挂着独享；拼车 ${stamp(until)} 才恢复，拼车池还整池暂停着（等人处理）` }
+        : {
+            action: 'stay',
+            why: `挂着独享；拼车 ${stamp(until)} 才恢复，到点再切回`,
+            later: { to: 'carpool', at: until },
+          };
     }
     if (carpool.held) {
       return { action: 'stay', why: '挂着独享；拼车池整池暂停着（等人处理），先不切回' };
@@ -115,6 +127,23 @@ export function planOrgSwitch(facts: OrgSwitchFacts): OrgSwitchPlan {
     };
   }
   return { action: 'switch', to: want.to, why: want.why };
+}
+
+/**
+ * 引擎打算让会话用户挂到哪个组织（选路判「不是挂着的那个组织的池」等不等得来，和切号同一个判法、同一份事实）：
+ * switch、wait 是下一轮路由探针就切过去（at 为空）；stay 带 later 是到那个时刻以后的那一轮切回；别的（不用切、认不出、
+ * 卡住要人看）to 为空，why 写为什么不切。
+ */
+export interface OrgIntent {
+  to: OrgKind | null;
+  at: Date | null;
+  why: string;
+}
+
+export function orgIntent(plan: OrgSwitchPlan): OrgIntent {
+  if (plan.action === 'switch' || plan.action === 'wait') return { to: plan.to, at: null, why: plan.why };
+  if (plan.action === 'stay' && plan.later) return { to: plan.later.to, at: plan.later.at, why: plan.why };
+  return { to: null, at: null, why: plan.why };
 }
 
 /** 这一轮探完的一条结论（jobs/route-probe.ts 交给 after；放慢没真探、结论照旧的不给）。 */

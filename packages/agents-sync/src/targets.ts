@@ -129,7 +129,9 @@ export interface HookTarget {
 
 /**
  * 钩子装到哪。Claude Code 的用户级钩子在 ~/.claude/settings.json 的 hooks 里（code.claude.com/docs/en/hooks）：
- * SessionStart 的输出进会话上下文；PreToolUse 退出码 2 拦下、stderr 给模型看。开会话那条要取远端、快进、跑一遍同步，给足 90 秒。
+ * SessionStart 的输出进会话上下文；PreToolUse 退出码 2 拦下、stderr 给模型看；Stop 只提醒（systemMessage），
+ * 不设 decision/additionalContext，退出码恒为 0——Stop 上 exit 2 是「不许停」，不是这里要的效果。
+ * 开会话那条要取远端、快进、跑一遍同步，给足 90 秒。
  * 借道读这份的：Grok 默认扫 ~/.claude/settings.json 的钩子（~/.grok/docs/user-guide/10-hooks.md「Hook Locations」，
  * 输入是 camelCase、终端工具叫 run_terminal_command，开会话钩子的输出不进上下文）；Devin CLI 默认 read_config_from.claude
  * （docs.devin.ai/cli/extensibility/hooks/overview，终端工具叫 exec）。Cursor 的命令行默认也读（cursor.com/docs/reference/third-party-hooks，
@@ -143,6 +145,7 @@ export interface HookTarget {
  * match」）：第一组它一个都匹配不上，所以另登记锚定的一组 ^(exec|read|grep)$（不锚定的 read 会连 notebook_read、
  * read_subagent、mcp_read_resource 一起匹配上，脚本认不得那些名字就会把它们全拦下；这组在 Claude Code、Cursor 里匹配不到
  * 任何工具，在 Grok 里只多匹配一次它的 grep）。脚本认得的名字：agents/hooks/pretool.mjs 的 SHELL_TOOLS、READ_TOOLS。
+ * Stop 事件借道的几家支不支持没一一核过：不支持就是从来不触发，装了也无害。
  */
 export const HOOK_TARGETS: readonly HookTarget[] = [
   {
@@ -153,6 +156,7 @@ export const HOOK_TARGETS: readonly HookTarget[] = [
       { event: 'SessionStart', script: 'session-start.mjs', timeout: 90 },
       { event: 'PreToolUse', matcher: 'Bash|PowerShell|Read|Grep', script: 'pretool.mjs', timeout: 10 },
       { event: 'PreToolUse', matcher: '^(exec|read|grep)$', script: 'pretool.mjs', timeout: 10 },
+      { event: 'Stop', script: 'stop.mjs', timeout: 10 },
     ],
   },
 ];
