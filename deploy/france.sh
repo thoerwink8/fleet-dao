@@ -1224,7 +1224,7 @@ readback_pnpm() {
 
 # 照引擎起会话的路子起一条命令：fleet 经 sudo 调 fleet-agent-scope，引擎给的 PATH 改名 FLEET_SESSION_PATH 交过去
 # （packages/adapters 的 scopeLaunch），帮手脚本在它最后接上会话用户的 ~/.local/bin，再降成会话用户跑
-# shellcheck disable=SC2329 # 当跑法交给 check_session_pnpm，由它间接调
+# shellcheck disable=SC2317,SC2329 # 当跑法交给 check_session_pnpm，由它间接调（CI 上的旧版 shellcheck 报的是 2317）
 session_scope_run() { # 会话 PATH 命令…
   local path=$1
   shift

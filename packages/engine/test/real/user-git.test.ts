@@ -222,11 +222,14 @@ describe('会话目录里的 git', { timeout: 60_000 }, () => {
 // CI 和本机的 git 都比法国新。这里用 pre-merge-commit 钩子造——钩子失败时 git 各版都停在「并好了、没提交」，
 // 留下 MERGE_HEAD（钩子自 2.24 起有）；钩子顺手占住索引锁，就是法国那次「撤销被同一把锁挡住」。
 describe('并主线没并成（不是冲突）', { timeout: 60_000 }, () => {
-  /** 会话的树：分支上交了一个提交，主线另进了 c.ts，新主线的提交已经取进树里（和推分支之前一样）。 */
+  /** 会话的树：分支上交了一个提交，主线另进了 c.ts，新主线的提交已经取进树里（和推分支之前一样）。
+   * 提交身份和引擎建树时一样写进树的配置：并主线要生成合并提交，CI 上没有全局的 git 身份，没写就先死在「身份为空」。 */
   async function diverged(): Promise<{ t: UserTree; head: string; main: string }> {
     const m = mirror();
     const t = tree('work');
-    await fetchBundle(t, m.bundle(m.head), 'refs/fleet/export/0');
+    await fetchBundle(t, m.bundle(m.head), 'refs/fleet/export/0', {
+      identity: { name: 't', email: 'fleet-test@localhost' },
+    });
     await checkoutBranch(t, 'fleet/12-a', m.head);
     writeFileSync(join(t.dir, 'b.ts'), 'export const b = 1;\n');
     execFileSync('git', ['add', '.'], { cwd: t.dir });
