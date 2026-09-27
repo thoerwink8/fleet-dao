@@ -731,22 +731,29 @@ scope() { # 会话列表这一轮怎么答；清掉问过几次的记录
 scope_calls() { if [[ -f "$SCOPE.calls" ]]; then grep -c . "$SCOPE.calls"; else echo 0; fi; }
 last_line() { tail -1 "$HISTORY" | cut -d' ' -f3-; } # 历史最后一行去掉时间、提交号：「事件 [标记…]」
 
+sends() { if sends_demo; then echo 发; else echo 不发; fi; } # 这次发不发演示版
 AUTO=1
 FLEET_HK_PARTS="web demo gateway"
+DEMO_PUBLISH=1
 reset
 auto_parts >"$TMP/out"
-check "自动发布：要发的里去掉演示版，驾驶舱静态文件、网关照发" "$FLEET_HK_PARTS" "web gateway"
-check "自动发布：说了演示版这次不动" "$(said '自动发布不发演示版')" 1
+check "自动发布：演示版不发，驾驶舱静态文件、网关照发" "$(sends):$FLEET_HK_PARTS" "不发:web demo gateway"
+check "自动发布：演示版还在要核对的里（原先连核对一起去掉，香港上的演示版就没人看了）" "$(has_part demo && echo 核对)" 核对
+check "自动发布：说了演示版这次不动、只核对" "$(said '自动发布不发演示版（对外，要人确认）：香港上的演示版这次不动，只核对')" 1
+check "自动发布：往香港发哪几样照实说（演示版只核对）" "$(parts_said)" "web demo（只核对、不发） gateway"
 FLEET_HK_PARTS="demo"
+DEMO_PUBLISH=1
 auto_parts >/dev/null
-check "只配了演示版：自动发布什么都不往香港发" "$FLEET_HK_PARTS" ""
+check "只配了演示版：自动发布一样都不往香港传" "$(sends):$(has_part web && echo 发根地址)" "不发:"
 FLEET_HK_PARTS="gateway"
+DEMO_PUBLISH=1
 auto_parts >"$TMP/out"
-check "没配演示版：不变、不多说" "$FLEET_HK_PARTS:$(said '演示版')" "gateway:0"
+check "没配演示版：不变、不多说" "$FLEET_HK_PARTS:$DEMO_PUBLISH:$(said '演示版')" "gateway:1:0"
 AUTO=0
 FLEET_HK_PARTS="web demo gateway"
+DEMO_PUBLISH=1
 auto_parts >/dev/null
-check "人手动发：演示版照发" "$FLEET_HK_PARTS" "web demo gateway"
+check "人手动发：演示版照发" "$(sends):$(parts_said)" "发:web demo gateway"
 FLEET_HK_PARTS=""
 
 AUTO=1
