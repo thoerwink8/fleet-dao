@@ -1,14 +1,14 @@
 {
-  "说明": "全组织默认的流程配置（docs/decisions/0003-fusion-flow.md 第 9 条；格式见 packages/core/src/config.ts）。各项目仓里的 .fleet/flow.json 只写和这里不同的；禁令只能写在这里，项目改不掉。改这份算改标准（人闸第四类），PR 等创始人同意再合。模型顺序是起步值，跑出战绩后再调。",
+  "说明": "全组织默认的流程配置（docs/decisions/0003-fusion-flow.md 第 9 条；格式见 packages/core/src/config.ts）。各项目仓里的 .fleet/flow.json 只写和这里不同的；禁令只能写在这里，项目改不掉。模型顺序、轮数这些改了 CI 绿就合（驾驶舱是它的编辑器，0003 第 9 条）；禁令写死在 core 里（config.ts），这里少写一条会被拒收，改禁令本身才算改标准。模型顺序是起步值，跑出战绩后再调。",
   "formatVersion": 1,
   "profiles": {
     "default": {
       "mode": "fusion",
       "steps": {
         "lead": ["opus-5.5"],
-        "sidekick": ["cursor-auto", "kimi-k3", "deepseek-flash", "opus-5.5"],
-        "review": ["gpt-5.6-luna", "kimi-k3"],
-        "verify": ["gpt-5.6-luna", "kimi-k3"],
+        "sidekick": ["grok-4.7", "kimi-k3", "deepseek-flash", "opus-5.5"],
+        "review": ["gpt-5.6-luna", "grok-4.7", "kimi-k3"],
+        "verify": ["gpt-5.6-luna", "grok-4.7", "kimi-k3"],
         "discuss": ["gpt-5.6-luna"]
       },
       "review": { "vendors": 2, "rounds": 1 },
@@ -21,7 +21,7 @@
         "lead": ["opus-5.5", "kimi-k3"],
         "sidekick": [],
         "review": [],
-        "verify": ["gpt-5.6-luna", "kimi-k3"],
+        "verify": ["gpt-5.6-luna", "grok-4.7", "kimi-k3"],
         "discuss": ["gpt-5.6-luna"]
       },
       "review": { "vendors": 0, "rounds": 1 },
