@@ -26,6 +26,7 @@ import {
   listFlowReplicas,
   markAsksApplied,
   resolveAlertByKey,
+  resolveAlertWithReason,
   setAskFollowUpIssue,
   startScheduleRun,
   upsertAlert,
@@ -34,6 +35,7 @@ import {
 import type { GitHub } from '@fleet-dao/github';
 import type { Client } from '@temporalio/client';
 import { type AskIssueJobDeps, openAskIssues } from '../jobs/ask-issues.ts';
+import { type CloseSweepJobDeps, sweepClosing } from '../jobs/close-sweep.ts';
 import { type FlowConfigJobDeps, syncFlowConfigs } from '../jobs/flow-config.ts';
 import type { GitHubReconcileJobDeps } from '../jobs/github-reconcile.ts';
 import { toTaskAsk } from './store-ports.ts';
@@ -42,10 +44,12 @@ export interface GitHubReconcileWiring {
   db: Db;
   gh: Pick<
     GitHub,
-    'eventSink' | 'reconciler' | 'readRepoFile' | 'readIssuePlan' | 'openIssue' | 'commentIssue'
+    'eventSink' | 'reconciler' | 'readRepoFile' | 'readIssuePlan' | 'openIssue' | 'commentIssue' | 'readCloseFacts'
   >;
   /** 测试用：换掉拉起工作流（不给就是真的，经这次活动的 Temporal 客户端起 Fusion）。 */
   requirements?: RequirementWorkflows;
+  /** 测试用：这一轮跑不跑关单对账（不给就是 jobs/close-sweep.ts 的 closeSweepDue，按真钟：北京时间 9:00 起的那一轮）。 */
+  closeSweepDue?: (at: Date) => boolean;
   /** 测试用：换掉全组织默认（不给就读这份代码里带的 packages/core/flow.default.json）。 */
   orgDefault?: () => Promise<Source>;
   log?: Logger;
@@ -127,6 +131,28 @@ export function askIssueJob(w: GitHubReconcileWiring, log: Logger, now: () => Da
   };
 }
 
+/** 关单对账那一步的真装配（#241）：受管的仓从库里列，现状、留言经「引擎」机器人，提醒进同一个库（要人拍的那一级）。 */
+export function closeSweepJob(
+  w: GitHubReconcileWiring,
+  repos: () => Promise<{ owner: string; name: string }[]>,
+  log: Logger,
+  now: () => Date,
+): CloseSweepJobDeps {
+  return {
+    repos,
+    facts: (repo, since) => w.gh.readCloseFacts({ repo, since }),
+    comment: (input) => w.gh.commentIssue(input),
+    async alert(key, title, body, link) {
+      await upsertAlert(w.db, { dedupeKey: key, level: 'decision', taskId: null, title, body, link });
+    },
+    async resolve(key, why) {
+      await resolveAlertWithReason(w.db, { dedupeKey: key, by: 'engine:github-reconcile', why, at: now() });
+    },
+    now,
+    log: (level, text, fields) => log[level](text, fields),
+  };
+}
+
 /** 给 EngineJobs.githubReconcile 用的工厂。 */
 export function githubReconcileJob(
   w: GitHubReconcileWiring,
@@ -138,6 +164,12 @@ export function githubReconcileJob(
   const github = w.gh.eventSink({ async wake() {} });
   const flow = flowConfigJob(w, log, now);
   const asks = askIssueJob(w, log, now);
+  const close = closeSweepJob(
+    w,
+    async () => (await store.listRepos()).map((r) => ({ owner: r.owner, name: r.name })),
+    log,
+    now,
+  );
   return (client, taskQueue) => {
     const intake = createGitHubIntake({
       store,
@@ -154,6 +186,8 @@ export function githubReconcileJob(
       syncFlowConfigs: () => syncFlowConfigs(flow),
       reconcile: (options) => reconcileGitHub({ store, intake, reconciler, log, now }, options),
       askIssues: () => openAskIssues(asks),
+      closeSweep: () => sweepClosing(close),
+      ...(w.closeSweepDue ? { closeSweepDue: w.closeSweepDue } : {}),
       runs: {
         start: (job, at) => startScheduleRun(w.db, job, at),
         finish: (id, result, at) => finishScheduleRun(w.db, id, result, at),

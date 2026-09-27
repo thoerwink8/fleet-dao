@@ -1,12 +1,13 @@
 // 定时对账补漏（#43，specs/43-接活入口/方案-对账调度.md）：一轮 = 记下开始 → 同步各仓的流程配置副本（flow-config.ts）→
-// 调后端的 reconcileGitHub → 给问创始人的提问另开单（ask-issues.ts，#259）→ 把结局记进 schedule_runs。副本先同步：同一轮里
-// 重放「等着」的投递时，接活看到的就是新副本。
+// 调后端的 reconcileGitHub → 给问创始人的提问另开单（ask-issues.ts，#259）→ 每天一次的关单对账（close-sweep.ts，#241，
+// 只在北京时间 9:00 起的那一轮）→ 把结局记进 schedule_runs。副本先同步：同一轮里重放「等着」的投递时，接活看到的就是新副本。
 // 没跑成、一个仓都没查成、只查了一部分，都照实记成 failed / unscanned / partial，不记成 ok（没跑成 ≠ 没问题）；
 // 驾驶舱「定时任务」页和看门狗按 scheduled_jobs 登记的 expect_every_minutes 看它新不新鲜。
 import type { GitHubReconcileResult } from '@fleet-dao/api';
 import type { ScheduleResult } from '@fleet-dao/db';
 import type { GitHubReconcileRun } from '../contract.ts';
 import type { AskIssuesResult } from './ask-issues.ts';
+import { type CloseSweepResult, closeSweepDue } from './close-sweep.ts';
 import type { FlowSyncResult } from './flow-config.ts';
 
 /** 登记进 scheduled_jobs 的那一行：一次都没跑过也列得出来（看门狗按登记表查，不按跑过的记录查）。 */
@@ -35,6 +36,10 @@ export interface GitHubReconcileJobDeps {
   reconcile(options: { since: Date }): Promise<GitHubReconcileResult>;
   /** 给问创始人的提问另开单、把回答写上去（ask-issues.ts 的 openAskIssues，#259）。 */
   askIssues(): Promise<AskIssuesResult>;
+  /** 关单对账（close-sweep.ts 的 sweepClosing，#241）：只在 closeSweepDue 说到点的那一轮调。 */
+  closeSweep(): Promise<CloseSweepResult>;
+  /** 这一轮跑不跑关单对账；不给就是 closeSweepDue（北京时间 9:00 起的那一轮）。测试换掉它，免得按真钟跑出不一样的结果。 */
+  closeSweepDue?: ((at: Date) => boolean) | undefined;
   runs: ScheduleRunLog;
   now: () => Date;
   log: (level: 'info' | 'warn' | 'error', message: string, fields?: Record<string, unknown>) => void;
@@ -123,6 +128,38 @@ export function withAskIssues(
 /** 一轮的原因里最多写几条没开成、没写成的提问。 */
 const ASK_WHY_LINES = 3;
 
+/**
+ * 关单对账这一步并进这一轮的结局（#241）：没到点（null）原样；新留的言算处理了的（found 加上）；整步没跑成、有仓没查成、
+ * 留言提醒没写成的，这一轮不算查全（ok 降成 partial），前几条写进 why——没查成不当成齐了。
+ */
+export function withCloseSweep(
+  r: GitHubReconcileResult,
+  close: CloseSweepResult | { failed: string } | null,
+): GitHubReconcileResult {
+  if (close === null) return r;
+  if ('failed' in close) {
+    return {
+      ...r,
+      outcome: r.outcome === 'ok' ? 'partial' : r.outcome,
+      why: [r.why, `关单对账没跑成：${close.failed}`].filter(Boolean).join('；'),
+    };
+  }
+  const found = r.found + close.found;
+  const n = close.unchecked.length;
+  if (n === 0) return { ...r, found };
+  const shown = close.unchecked.slice(0, CLOSE_WHY_LINES);
+  if (n > CLOSE_WHY_LINES) shown.push(`关单对账另有 ${n - CLOSE_WHY_LINES} 条没查成、没写成（看引擎日志）`);
+  return {
+    ...r,
+    outcome: r.outcome === 'ok' ? 'partial' : r.outcome,
+    found,
+    why: [r.why, ...shown].filter(Boolean).join('；'),
+  };
+}
+
+/** 一轮的原因里最多写几条关单对账没查成的。 */
+const CLOSE_WHY_LINES = 3;
+
 /** 对账的结局换成 schedule_runs 的写法：ok 必须真查了东西，其余都要写原因。 */
 export function toScheduleResult(r: GitHubReconcileResult): ScheduleResult {
   switch (r.outcome) {
@@ -165,7 +202,16 @@ export async function runGitHubReconcileJob(deps: GitHubReconcileJobDeps): Promi
     } catch (err) {
       asks = { failed: message(err) };
     }
-    result = toScheduleResult(withAskIssues(reconciled, asks));
+    // 关单对账一天一次（#241）；没跑成不挡对账本身：这一轮记成没查全，第二天再来（留言、提醒都按键认，重跑不重复）
+    let close: CloseSweepResult | { failed: string } | null = null;
+    if ((deps.closeSweepDue ?? closeSweepDue)(startedAt)) {
+      try {
+        close = await deps.closeSweep();
+      } catch (err) {
+        close = { failed: message(err) };
+      }
+    }
+    result = toScheduleResult(withCloseSweep(withAskIssues(reconciled, asks), close));
   } catch (err) {
     result = { outcome: 'failed', why: `对账没跑成：${message(err)}` };
   }
