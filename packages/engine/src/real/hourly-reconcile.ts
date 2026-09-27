@@ -1,7 +1,8 @@
 // 每小时对账的真装配：工作树按目录真列（根和仓这两级归 root、755，引擎自己读得了）、属主和删经 fleet-agent-scope
 // （real/worktrees.ts）、树里还剩什么以会话用户的身份看（real/user-git.ts 的 treeLeftovers：仓里跑 git，不是仓的用 find
 // 一层层列）；需求、子任务、PR 头、批准从库里读；工作流在不在跑、挂没挂着问这次活动的 Temporal 客户端；这个阶段派不派得
-// 出去问选路（store-ports 的 pickRoute：和任务挂起时用的同一套）；提醒的读写、操作记录、结局记账是同一个库。
+// 出去问选路（store-ports 的 pickRoute：和任务挂起时用的同一套）；GitHub 两个机器人的权限自检问 @fleet-dao/github 的
+// selfCheck（受管的仓从库里的 repos 表列）；提醒的读写、操作记录、结局记账是同一个库。
 import { readdir } from 'node:fs/promises';
 import {
   alertByKey,
@@ -11,6 +12,7 @@ import {
   insertAlertOnce,
   issueWorkFacts,
   latestAlertByPrefix,
+  listFlowReplicas,
   listOpenAlerts,
   openSessionTrees,
   prHeadsOfBranch,
@@ -24,6 +26,7 @@ import {
 } from '@fleet-dao/db';
 import { requirementWorkflowId, subtaskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { type Client, WorkflowNotFoundError } from '@temporalio/client';
+import type { GitHubAppCheckDeps } from '../jobs/github-app-check.ts';
 import type { HourlyReconcileJobDeps } from '../jobs/hourly-reconcile.ts';
 import type { WorkflowReader, WorkflowView } from '../jobs/reconcile-common.ts';
 import type { PortContext } from '../ports.ts';
@@ -104,6 +107,8 @@ export interface HourlyReconcileWiring {
   sessionOrg: SessionOrgReader;
   /** 这台机器给人看的名字（FLEET_MACHINE_NAME）。 */
   machine: string;
+  /** GitHub 两个机器人在这些仓上的权限够不够（生产是 createGitHub 的 selfCheck）。 */
+  selfCheck: GitHubAppCheckDeps['apps']['selfCheck'];
   now?: () => Date;
   log?: HourlyReconcileJobDeps['log'];
   /** 以下测试用。 */
@@ -204,6 +209,10 @@ export function hourlyReconcileJob(
       },
       insertOnce: (x) => insertAlertOnce(w.db, x),
       updateOpen: (x) => updateOpenAlert(w.db, { ...x, at: now() }),
+    },
+    apps: {
+      repos: async () => (await listFlowReplicas(w.db)).map((r) => ({ owner: r.owner, name: r.name })),
+      selfCheck: (repos) => w.selfCheck(repos),
     },
     runs: {
       start: (job, at) => startScheduleRun(w.db, job, at),

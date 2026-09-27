@@ -102,7 +102,10 @@ export interface GitHubOptions {
   sensitiveValues?: () => LoadedValues;
 }
 
-/** 各身份要有的权限（自检用）。「干活的」只推分支、开 PR；「引擎」合并、改 issue、续互动限制、读 CI。 */
+/**
+ * 各身份要有的权限（自检用，引擎每小时对账跑一次、缺了报提醒、健康页 github_app 跟着红）。「干活的」只推分支、开 PR；
+ * 「引擎」合并、改 issue、续互动限制、读 CI，还要在 PR 头上贴「认领对得上」（#299，commit status 要 statuses:write）。
+ */
 export const REQUIRED_PERMISSIONS: Record<AppRole, Record<string, 'read' | 'write'>> = {
   agent: { contents: 'write', pull_requests: 'write', metadata: 'read' },
   engine: {
@@ -112,6 +115,7 @@ export const REQUIRED_PERMISSIONS: Record<AppRole, Record<string, 'read' | 'writ
     administration: 'write',
     checks: 'read',
     actions: 'read',
+    statuses: 'write',
     metadata: 'read',
   },
 };

@@ -97,7 +97,7 @@ export function engineSchedules(taskQueue: string): EngineSchedule[] {
       },
     },
     {
-      // 每小时对账（工作树残留、提醒按条件撤和再推）：和对账补漏、路由探针错开
+      // 每小时对账（工作树残留、提醒按条件撤和再推、GitHub 机器人权限自检）：和对账补漏、路由探针错开
       scheduleId: HOURLY_RECONCILE_SCHEDULE_ID,
       spec: {
         intervals: [
