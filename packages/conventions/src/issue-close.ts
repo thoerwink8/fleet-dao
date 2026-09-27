@@ -1,7 +1,7 @@
 // 关单要有结果（#241）：一张单做完，主线上要有 specs/<号>-<短名>/结果.md（做成什么样、怎么验的、还欠什么）才关。
-// 「这张单有没有结果」只在这里判一份（resultDocOf）：pnpm issue:close 拿主线上的文件问它，合并闸拿写了关单词的 PR 自己带的
-// 文件问它，引擎每天的关单对账拿主线上的文件问它。放在 conventions 不放 core：合并闸不装依赖跑、只引本包的文件，core 只许
-// 依赖 shared 和 zod；引擎第 6 步收 结果.md 用的是 core 的 specDocs，engine 包里有测试钉住两边认的是同一个路径。
+// 「这张单有没有结果」只在这里判一份（resultDocOf）：pnpm issue:close、引擎每天的关单对账都拿主线上的文件问它（合并闸要不要
+// 拿写了关单词的 PR 自己带的文件问它、挡住没带的，#325 等创始人拍）。放在 conventions 不放 core：合并闸不装依赖跑、只引本包的
+// 文件，core 只许依赖 shared 和 zod；引擎第 6 步收 结果.md 用的是 core 的 specDocs，engine 包里有测试钉住两边认的是同一个路径。
 // pnpm issue:close 经 gh 读写：读不到 GitHub、读不到主线一律明确报错、不关（CloseUnchecked，退出码 2），
 // 条件不够的拒关（CloseRefused，退出码 1），不拿「没读到」当「没有」，也不拿「没报错」当「关上了」（关完回读）。
 import type { Gh, GhResult } from './issue-new.ts';
@@ -26,7 +26,7 @@ export function resultDocOf(issue: number, files: Iterable<string>): string | un
 }
 
 // —— GitHub 合并时认的关单写法：close/closes/closed、fix/fixes/fixed、resolve/resolves/resolved，后面跟单号（冒号可有可无）。
-// 引擎开的 PR 在 packages/github 的 text.ts 里把它们改成「关联」（C13），这里是认出来拿去判（合并闸、每天对账）。
+// 引擎开的 PR 在 packages/github 的 text.ts 里把它们改成「关联」（C13），这里是认出来拿去判（每天对账看开着的 PR 引用了哪些单）。
 
 const CLOSE_WORD = '(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)';
 const CLOSING = new RegExp(
@@ -36,7 +36,7 @@ const CLOSING = new RegExp(
 
 /**
  * 正文里写了、GitHub 合并时会关的单号（从小到大，不重复）：#12、owner/仓#12、GH-12、issue 的网址都认。
- * 给了 repo（owner/仓）时，写明是别的仓的不算；不给就都算（宁多不漏：合并闸拿它挡没带结果的 PR）。
+ * 给了 repo（owner/仓）时，写明是别的仓的不算；不给就都算（宁多不漏）。
  */
 export function closingIssues(body: string, repo?: string): number[] {
   const out = new Set<number>();

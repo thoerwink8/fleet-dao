@@ -11,8 +11,9 @@ import { findItem, itemExample, type PlanPhase, parsePlanRefs, phaseRange, planP
 export const PLAN_COLUMN = '对应计划';
 export const SPECS_COLUMN = 'specs';
 /**
- * 「这个 PR 做完就关单」：是 = 合进去这张单就做完了，正文另写 Closes #号、由 GitHub 合并时关（合并闸查这个 PR 带了
- * 结果.md，issue-close.ts）；否 = 还有后续，或结果不在这个 PR 里写（合完用 pnpm issue:close 关）。引擎开的 PR 一律写否（#241）。
+ * 「这个 PR 做完就关单」：是 = 合进去这张单就做完了，正文另写 Closes #号、由 GitHub 合并时关，这个 PR 要带 结果.md（合并闸
+ * 要不要挡没带的，#325 等创始人拍）；否 = 还有后续，或结果不在这个 PR 里写（合完用 pnpm issue:close 关）。引擎开的 PR 一律写否（#241）。
+ * 这一栏缺了、写的认不出只提醒（必填栏只提醒）。
  */
 export const CLOSE_COLUMN = '这个 PR 做完就关单';
 /** plan.md 在仓里的位置：pr-fields 判「对应计划」、引擎收需求文档时核那一行，都按它找。 */
