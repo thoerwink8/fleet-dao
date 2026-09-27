@@ -112,6 +112,11 @@ export interface Task {
   specDir?: string;
   /** 做完标准（从需求文档来），fleet task 给会话看。 */
   acceptance?: string[];
+  /**
+   * 这一轮开工时用的流程配置读自哪。project = 仓里自己的文件；org_default = 没有，用的全组织默认。
+   * 不填 = 没记过（还没开工、开工前就停派、或旧工作流）。仓里后来改了文件不回头改这一列。
+   */
+  flowSource?: 'project' | 'org_default';
   createdAt: string;
 }
 

@@ -492,12 +492,15 @@ describe('需求工作流', { timeout: 60_000 }, () => {
   });
 
   it('人闸：方案标的、分诊判出的都带上；批准发给需求，按子任务编号或批准编号转给对应的子任务', async () => {
+    // 关单挂着，回执在工作流结束前查。结束之后再 query 会整段重放，历史里的
+    // SignalExternalWorkflowExecutionInitiated 偶发被活动状态机接住（TMPRL1100）。
     const world = createFakeWorld({
       triage: () => ({ clear: true, holds: ['spend'] }),
       plan: [
         { key: 'api', title: '后端接口', touches: ['src/api'], holds: ['delete'] },
         { key: 'page', title: '页面', touches: ['src/page'] },
       ],
+      holdPorts: ['closeIssue'],
     });
     const result = await withWorker(env, world, async (q) => {
       const handle = await startRequirement(q);
@@ -516,8 +519,10 @@ describe('需求工作流', { timeout: 60_000 }, () => {
       await handle.signal(approveSignal, { by: 'founder', approvalId: page?.waiting?.approvalId });
       // 不点名的不受理：一次批一张。
       await handle.signal(approveSignal, { by: 'founder' });
+      const status = await queryUntil<RequirementStatus>(handle, (s) => s.commands.length === 3, '三条回执');
+      world.releasePort('closeIssue');
       const done = (await handle.result()) as RequirementResult;
-      return { done, status: (await handle.query('status')) as RequirementStatus };
+      return { done, status };
     });
     expect(result.done.state).toBe('done');
     expect(result.status.commands.map((c) => [c.command, c.accepted])).toEqual([

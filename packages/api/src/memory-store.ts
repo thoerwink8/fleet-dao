@@ -185,7 +185,13 @@ function changesOutboxRow(row: FeishuOutboxRow, next: Partial<FeishuOutboxRow>):
  * repos 表的一行：多一个自动派活开关（打开的时刻，不填 = 关着）和流程配置副本（不填 = 还没同步过，和库里刚加上这几列
  * 一样按停派算）。列仓的接口不带这两样。
  */
-export type RepoRecord = Repo & { autoDispatchSince?: string | undefined; flow?: FlowReplica | undefined };
+/** 内存里的副本：core 的 FlowReplica，再加上驾驶舱顶栏要的来源和全长提交。没写就当这两列空着。 */
+export type MemoryFlow = FlowReplica & {
+  source?: 'project' | 'org_default' | undefined;
+  commit?: string | undefined;
+};
+
+export type RepoRecord = Repo & { autoDispatchSince?: string | undefined; flow?: MemoryFlow | undefined };
 
 /** 和库里的表一一对应（去掉了库自己算的列）。 */
 export interface MemoryData {
@@ -290,6 +296,17 @@ const RECENT_TERMINAL_MS = 7 * 24 * 60 * 60_000;
 const seq15 = (n: string | number): string => String(n).padStart(15, '0');
 
 const repoOnly = ({ autoDispatchSince: _switch, flow: _flow, ...repo }: RepoRecord): Repo => repo;
+
+/** 接活要的是 core 的 FlowReplica。来源和提交只给看板，不从这里漏出去。 */
+function coreReplica(flow: MemoryFlow | undefined): FlowReplica {
+  if (!flow) return UNSYNCED_REPLICA;
+  return {
+    syncedAt: flow.syncedAt,
+    error: flow.error,
+    unread: flow.unread,
+    testCommand: flow.testCommand,
+  };
+}
 
 /** 给出去的是副本：调用方改了不影响库里的。对象版本按对象排（和库版一样）。 */
 const copyDelivery = (e: GitHubDelivery): GitHubDelivery => ({
@@ -658,6 +675,18 @@ export function createMemoryStore(
     async getRepo(id) {
       const repo = data.repos.find((r) => r.id === id);
       return repo ? repoOnly(repo) : null;
+    },
+    async getRepoFlow(repoId) {
+      const repo = data.repos.find((r) => r.id === repoId);
+      if (!repo) return null;
+      const flow = repo.flow;
+      return {
+        source: flow?.source ?? null,
+        commit: flow?.commit ?? null,
+        syncedAt: flow?.syncedAt ?? null,
+        error: flow?.error ?? null,
+        unread: flow?.unread ?? null,
+      };
     },
     async listBoardTasks(repoId) {
       const cutoff = now().getTime() - RECENT_TERMINAL_MS;
@@ -1199,7 +1228,7 @@ export function createMemoryStore(
         ? {
             ...repoOnly(repo),
             autoDispatchSince: repo.autoDispatchSince ?? null,
-            flow: repo.flow ?? UNSYNCED_REPLICA,
+            flow: coreReplica(repo.flow),
           }
         : null;
     },

@@ -1,11 +1,12 @@
 // 把库里的记录拼成驾驶舱要的样子。纯函数，不碰数据库，测试直接喂数据。
 
-import { type LateAnswer, lateAnswer } from '@fleet-dao/core';
+import { type FlowReplica, type LateAnswer, lateAnswer, replicaVerdict } from '@fleet-dao/core';
 import { poolDataTimes, quotaReadOverdue } from '@fleet-dao/db';
 import {
   type ActivitySchema,
   type Ban,
   type BillingKind,
+  type BoardFlowSchema,
   type BoardResponse,
   type BoardSubtaskSchema,
   type BoardTaskSchema,
@@ -35,6 +36,7 @@ import type {
   JobRecord,
   NotificationRecord,
   QuotaWindowRecord,
+  RepoFlowRow,
   RunPlan,
   TimelineRecord,
 } from './ports.ts';
@@ -203,7 +205,47 @@ export function taskActivity(taskId: string, input: BoardInput): Activity | unde
   return run ? activityOf(run, input.plans.get(run.id), input.route(run.routeId)) : undefined;
 }
 
-export function buildBoard(repo: Repo, input: BoardInput, now: Date): z.input<typeof BoardResponse> {
+/** 提交给人看的长度：前 7 位；不足 7 位原样，不加省略号。 */
+function shortCommit(commit: string): string {
+  return commit.length <= 7 ? commit : commit.slice(0, 7);
+}
+
+/**
+ * 看板顶栏。停派只问 replicaVerdict，why 原样带上，不改写。
+ * 判得过但来源、提交或同步时刻缺了：直接拒绝，不返回 paused: false，也不拿 project 顶。
+ */
+export function boardFlow(row: RepoFlowRow, now: Date): z.input<typeof BoardFlowSchema> {
+  const replica: FlowReplica = {
+    syncedAt: row.syncedAt,
+    error: row.error,
+    unread: row.unread,
+    testCommand: null,
+  };
+  const verdict = replicaVerdict(replica, now);
+  const source = row.source ?? undefined;
+  const commit = row.commit ? shortCommit(row.commit) : undefined;
+  const syncedAt = row.syncedAt ?? undefined;
+  if (verdict.ok) {
+    if (!source || !commit || !syncedAt) {
+      throw new Error('流程配置副本判得过，但缺来源、提交或同步时刻，不拿 project 顶');
+    }
+    return { source, commit, syncedAt, paused: false };
+  }
+  return {
+    ...(source ? { source } : {}),
+    ...(commit ? { commit } : {}),
+    ...(syncedAt ? { syncedAt } : {}),
+    paused: true,
+    why: verdict.why,
+  };
+}
+
+export function buildBoard(
+  repo: Repo,
+  input: BoardInput,
+  now: Date,
+  repoFlow: RepoFlowRow,
+): z.input<typeof BoardResponse> {
   const tasks = [...input.tasks].sort(
     (a, b) => a.priority - b.priority || a.createdAt.localeCompare(b.createdAt),
   );
@@ -218,6 +260,7 @@ export function buildBoard(repo: Repo, input: BoardInput, now: Date): z.input<ty
       priority: t.priority,
       requestedBy: t.requestedBy,
       createdAt: t.createdAt,
+      ...(t.flowSource ? { flowSource: t.flowSource } : {}),
       progress: { done: subtasks.filter((s) => s.state === 'merged').length, total: subtasks.length },
       activity: taskActivity(t.id, input),
       subtasks,
@@ -236,6 +279,7 @@ export function buildBoard(repo: Repo, input: BoardInput, now: Date): z.input<ty
     repo: { id: repo.id, owner: repo.owner, name: repo.name, defaultBranch: repo.defaultBranch },
     tasks: boardTasks,
     now: now_,
+    flow: boardFlow(repoFlow, now),
     asOf: now.toISOString(),
   };
 }

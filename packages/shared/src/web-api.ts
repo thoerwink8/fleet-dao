@@ -258,6 +258,9 @@ export const BoardSubtaskSchema = z.object({
   activity: ActivitySchema.optional(),
 });
 
+/** 这一轮开工时流程配置读自哪。库里空着就不出现这个字段，不给 null，也不拿 project 顶。 */
+export const FlowSourceSchema = z.enum(['project', 'org_default']);
+
 export const BoardTaskSchema = z.object({
   id: Id,
   issueNumber: z.number().int().positive(),
@@ -266,6 +269,8 @@ export const BoardTaskSchema = z.object({
   priority: z.number(),
   requestedBy: z.string(),
   createdAt: Time,
+  /** 这一轮开工时读自哪。库里空着就没有这个键。 */
+  flowSource: FlowSourceSchema.optional(),
   /** 子任务合并数 / 子任务总数。 */
   progress: ProgressSchema,
   /** 需求级的会话（分诊、写需求文档、规划）。 */
@@ -279,11 +284,33 @@ export const NowItemSchema = ActivitySchema.extend({
   subtaskId: Id.optional(),
 });
 
+/**
+ * 看板顶上这一栏：这个项目此刻的流程配置副本。paused 和 why 同有同无。
+ * 判得过时来源、提交、同步时刻必须都有；提交是前 7 位（不足 7 位原样）。
+ */
+export const BoardFlowSchema = z.discriminatedUnion('paused', [
+  z.object({
+    source: FlowSourceSchema,
+    commit: z.string().min(1),
+    syncedAt: Time,
+    paused: z.literal(false),
+  }),
+  z.object({
+    source: FlowSourceSchema.optional(),
+    commit: z.string().min(1).optional(),
+    syncedAt: Time.optional(),
+    paused: z.literal(true),
+    why: z.string().min(1),
+  }),
+]);
+
 export const BoardResponse = z.object({
   repo: RepoSchema,
   tasks: z.array(BoardTaskSchema),
   /** 「此刻」面板：这个仓里正在跑或排队的会话。 */
   now: z.array(NowItemSchema),
+  /** 这个项目此刻的流程配置副本，停派与否由后端算好。 */
+  flow: BoardFlowSchema,
   asOf: Time,
 });
 
@@ -299,6 +326,8 @@ export const TaskSchema = z.object({
   state: TaskStateSchema,
   priority: z.number(),
   specDir: z.string().optional(),
+  /** 这一轮开工时读自哪。库里空着就没有这个键。 */
+  flowSource: FlowSourceSchema.optional(),
   createdAt: Time,
 });
 

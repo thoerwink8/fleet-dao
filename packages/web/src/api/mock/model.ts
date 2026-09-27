@@ -94,9 +94,20 @@ export interface PlanTemplate {
   steps: string[];
 }
 
+/** 看板顶栏用的流程配置副本。不放进 repos：仓列表不带停派原因。 */
+export interface MockRepoFlow {
+  source: 'project' | 'org_default' | null;
+  commit: string | null;
+  syncedAt: string | null;
+  error: string | null;
+  unread: string | null;
+}
+
 export interface MockState {
   me: Me;
   repos: Repo[];
+  /** 按仓编号。三个仓写成顶栏的三种样子，假后端不重算 45 分钟。 */
+  repoFlows: Record<string, MockRepoFlow>;
   channels: Channel[];
   pools: Pool[];
   models: Model[];
