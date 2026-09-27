@@ -1,4 +1,4 @@
-// 网关的四件事：随手记任务、推送（outbox.ts）、看盘面（board.ts）、回复即追问。
+// 网关的四件事：随手记任务、推送（outbox.ts）、看盘面（board.ts）、回复即追问；外加自己看着自己（watch.ts：心跳、调不通后端报警）。
 // 收事件的回调一律立刻返回（SDK 按会话排队，回调慢了会挡住后面的人），活放到后台跑；
 // 每条消息先加表情回应（2 秒内），不等后端；确认卡 10 秒内必到——后端慢就先回「正在理解」卡，之后原地更新。
 // 回复某张卡：网关不自己判它是改草稿、回答还是追问，把回复的消息编号交给后端一次问完（后端按卡片登记处理，
@@ -45,12 +45,13 @@ import {
 } from './port.ts';
 import { createRegistry, type Registry } from './registry.ts';
 import { Inflight, Lru, nextNonce, sleep, uuidFor } from './util.ts';
+import { createWatch, type Watch, type WatchLimits } from './watch.ts';
 import { beijingDay, clip, when } from './words.ts';
 
 /** 开发者后台「机器人自定义菜单」里配的 event_key（菜单只在私聊里出现）。 */
 export const MENU_KEYS = { board: 'board', todo: 'todo', newTask: 'new_task', progress: 'progress' } as const;
 
-/** 设计目标：先回应 ≤2 秒、确认卡 ≤10 秒。超了记日志并计数（端到端巡检按这两个数判黄）。 */
+/** 设计目标：先回应 ≤2 秒、确认卡 ≤10 秒。超了记日志并计数，网关心跳里带上（watch.ts；端到端巡检按这两个数判黄）。 */
 export const TARGET_ACK_MS = 2_000;
 export const TARGET_CARD_MS = 10_000;
 
@@ -91,6 +92,8 @@ export interface GatewayOptions {
   askBudgetPerDay: number;
   boardRefreshMs: number;
   timing?: Partial<Timing>;
+  /** 网关自己看守的时限（watch.ts 的 WATCH_LIMITS）；测试调小。 */
+  watch?: Partial<WatchLimits>;
 }
 
 export interface Gateway {
@@ -99,7 +102,7 @@ export interface Gateway {
   onMenu(evt: InboundMenu): void;
   /** SDK 的策略层拦下的消息（群里没 @我、不在允许的群）：只计数，不回话。 */
   onReject(evt: { messageId: string; chatId: string; senderId: string; reason: string }): void;
-  /** 开始定时取盘面、长轮询待推送。 */
+  /** 开始定时取盘面、长轮询待推送，和网关自己的看守（心跳、调不通后端报警）。 */
   start(): void;
   /** 停止定时活，最多等 drainMs 让在途的活做完。 */
   stop(drainMs?: number): Promise<void>;
@@ -109,6 +112,7 @@ export interface Gateway {
   readonly board: Board;
   readonly outbox: Outbox;
   readonly registry: Registry;
+  readonly watch: Watch;
 }
 
 const HINT_EMPTY = '在呢。直接说要做的事，比如「给登录页加手机验证码」；发「进度 12」查进度。';
@@ -140,6 +144,18 @@ export function createGateway(o: GatewayOptions): Gateway {
   });
   const life = new AbortController();
   const registry = createRegistry({ backend: o.backend, log, inflight });
+  const watch = createWatch({
+    feishu: o.feishu,
+    log,
+    now,
+    teamChatId: o.teamChatId,
+    publicUrl: o.publicUrl,
+    // 免打扰时段只有推送那条从后端带回来：连不上后端时用最近一次拿到的
+    quietHours: () => outbox.quietHours(),
+    boardRefreshMs: o.boardRefreshMs,
+    ackTargetMs: TARGET_ACK_MS,
+    limits: o.watch,
+  });
   const board = createBoard({
     backend: o.backend,
     feishu: o.feishu,
@@ -148,6 +164,7 @@ export function createGateway(o: GatewayOptions): Gateway {
     now,
     teamChatId: o.teamChatId,
     publicUrl: o.publicUrl,
+    watch,
   });
   const outbox = createOutbox({
     backend: o.backend,
@@ -160,6 +177,7 @@ export function createGateway(o: GatewayOptions): Gateway {
     publicUrl: o.publicUrl,
     askBudgetPerDay: o.askBudgetPerDay,
     waitSeconds: timing.outboxWaitSeconds,
+    watch,
   });
   /** 最近见过的草稿（按钮一点就能先把卡改成「正在…」，不用等后端）。 */
   const drafts = new Lru<string, Draft>(500);
@@ -233,19 +251,26 @@ export function createGateway(o: GatewayOptions): Gateway {
 
   // —— 消息 ——
 
-  async function ack(msg: InboundMessage, receivedAt: number): Promise<void> {
+  /**
+   * 先回「收到」：加表情，加不上改回一句「收到」。返回从收到这条到回上花了多久（改回的那句也算）；都没回上是 null。
+   * 超过 2 秒计一次（ack_slow），每条都记给看守，心跳里带上。
+   */
+  async function ack(msg: InboundMessage, receivedAt: number): Promise<number | null> {
+    let ms: number | null;
     try {
       await o.feishu.react(msg.messageId, o.ackEmoji);
-      const ms = now() - receivedAt;
-      if (ms > TARGET_ACK_MS) {
-        count('ack_slow');
-        log.warn('「收到」超过 2 秒', { messageId: msg.messageId, ms });
-      }
+      ms = now() - receivedAt;
     } catch (err) {
       count('ack_failed');
       log.error('表情回应没加上，改回一句「收到」', { messageId: msg.messageId, error: String(err) });
-      await reply(msg.messageId, { text: '收到。' }, 'ack');
+      ms = (await reply(msg.messageId, { text: '收到。' }, 'ack')) ? now() - receivedAt : null;
     }
+    watch.acked(ms);
+    if (ms !== null && ms > TARGET_ACK_MS) {
+      count('ack_slow');
+      log.warn('「收到」超过 2 秒', { messageId: msg.messageId, ms });
+    }
+    return ms;
   }
 
   async function handleMessage(msg: InboundMessage, founder: Founder, receivedAt: number): Promise<void> {
@@ -267,13 +292,17 @@ export function createGateway(o: GatewayOptions): Gateway {
       if (msg.replyToMessageId) path = 'reply';
       await understand(msg, founder, text, receivedAt);
     } finally {
-      await acked;
+      const ackMs = await acked;
+      // 「消息处理完」这几个字香港的 fleet-gateway-deploy status 在数（deploy/hk/fleet-gateway-deploy.sh 的 MESSAGE_MARK），别改
       log.info('消息处理完', {
         messageId: msg.messageId,
         chatType: msg.chatType,
         path,
         textLength: text.length,
+        ackMs,
         totalMs: now() - receivedAt,
+        // 飞书从用户发出到推给网关花了多久（网关重启、长连接断过时会很长）
+        deliveryMs: msg.createTime > 0 ? receivedAt - msg.createTime : null,
       });
     }
   }
@@ -361,6 +390,7 @@ export function createGateway(o: GatewayOptions): Gateway {
     const ms = now() - receivedAt;
     if (ms > TARGET_CARD_MS) {
       count('card_slow');
+      watch.cardSlow();
       log.warn('确认卡超过 10 秒', { messageId, what, ms });
     }
   }
@@ -784,6 +814,8 @@ export function createGateway(o: GatewayOptions): Gateway {
   }
 
   let boardTimer: NodeJS.Timeout | undefined;
+  let watchTimer: NodeJS.Timeout | undefined;
+  let heartbeatTimer: NodeJS.Timeout | undefined;
   let ticking: Promise<void> | null = null;
   let outboxRun: Promise<void> | null = null;
 
@@ -867,15 +899,22 @@ export function createGateway(o: GatewayOptions): Gateway {
       tick();
       boardTimer = setInterval(tick, o.boardRefreshMs);
       outboxRun = outbox.run(life.signal).catch((err) => log.error('推送循环停了', { error: String(err) }));
+      watchTimer = setInterval(() => void watch.check(), watch.limits.checkEveryMs);
+      heartbeatTimer = setInterval(() => watch.heartbeat(), watch.limits.heartbeatMs);
     },
 
     async stop(drainMs = 20_000) {
       clearInterval(boardTimer);
+      clearInterval(watchTimer);
+      clearInterval(heartbeatTimer);
       life.abort();
       await outboxRun;
       await ticking;
+      await watch.idle();
       const left = await inflight.drain(drainMs);
       if (left > 0) log.warn('停机时还有活没做完', { left });
+      // 停机前把这一段的心跳也写上：重启时不丢最后几分钟的读数
+      if (watchTimer) watch.heartbeat();
     },
 
     idle: () => inflight.idle(),
@@ -883,6 +922,7 @@ export function createGateway(o: GatewayOptions): Gateway {
     board,
     outbox,
     registry,
+    watch,
   };
 }
 

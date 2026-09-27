@@ -124,6 +124,8 @@ export interface HarnessOptions {
   demo?: DemoPublisher | null;
   /** 还没做的读取器；不给就是都接上了。 */
   notWired?: Deps['notWired'];
+  /** 飞书网关来没来过的记录（/healthz 的 feishu_gateway）；不给就不记。 */
+  gatewaySeen?: Deps['gatewaySeen'];
 }
 
 function wire<S extends Store>(
@@ -156,6 +158,7 @@ function wire<S extends Store>(
     health: options.health ?? [],
     demo: options.demo ?? null,
     ...(options.notWired ? { notWired: options.notWired } : {}),
+    ...(options.gatewaySeen ? { gatewaySeen: options.gatewaySeen } : {}),
     feishu: options.feishu === null ? null : feishu.auth,
     workflows: options.workflows ?? {
       async signal(workflowId, signal) {

@@ -28,6 +28,8 @@ export type HealthReport = {
   checks: Record<
     string,
     | { ok: true }
+    /** 好，另带一句说明（比如飞书网关几秒前来过）：检查返回了一句话。和「未接」靠有没有 status 分开。 */
+    | { ok: true; message: string }
     | { ok: true; status: 'not_wired'; message: string }
     | { ok: false; code: string; message: string }
   >;
@@ -45,16 +47,19 @@ export async function runHealthChecks(
         return [name, { ok: true, status: 'not_wired', message: notWired }] as const;
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
-        await Promise.race([
+        const note = await Promise.race([
           check(),
-          new Promise((_, reject) => {
+          new Promise<never>((_, reject) => {
             timer = setTimeout(
               () => reject(new PublicHealthError('timeout', `${timeoutMs / 1000} 秒没回应`)),
               timeoutMs,
             );
           }),
         ]);
-        return [name, { ok: true }] as const;
+        // 好的时候检查可以带一句说明（公网看得到：同样只写中性的话）
+        const good: { ok: true; message?: string } =
+          typeof note === 'string' && note.trim() ? { ok: true, message: note } : { ok: true };
+        return [name, good] as const;
       } catch (err) {
         log.warn('健康检查没过', {
           check: name,
@@ -78,7 +83,7 @@ export async function runHealthChecks(
 
 /**
  * 生产要探的几项：库、实时推送（LISTEN）、Temporal、引擎工人、GitHub 事件的去处、飞书草稿开单（接没接上、有没有积压）、
- * 判断题（接没接、调不调得通）、线上版本跟不跟得上主线。main.ts 用它装配，测试也用它，是同一份代码。
+ * 判断题（接没接、调不调得通）、线上版本跟不跟得上主线、飞书网关还来不来。main.ts 用它装配，测试也用它，是同一份代码。
  */
 export function serviceHealthChecks(parts: {
   /** 真去读几张常用表、带自己的超时（pg-store.ts 的 probeDb）；只 select 1 查不出表被锁住。 */
@@ -96,6 +101,9 @@ export function serviceHealthChecks(parts: {
   judge: { check(): Promise<void>; readonly notWired?: string };
   /** 线上版本跟不跟得上主线（deploy-lag.ts）：只在法国的正式机器上查，别处报「未接」。 */
   deployLag: { check(): Promise<void>; readonly notWired?: string };
+  /** 飞书网关还来不来（gateway-seen.ts）：没配网关通行证报「未接」。 */
+  // biome-ignore lint/suspicious/noConfusingVoidType: 没说明的检查是 async () => {}（Promise<void>），换成 undefined 它们就对不上了
+  feishuGateway: { check(): Promise<void | string>; readonly notWired?: string };
 }): HealthCheck[] {
   return [
     { name: 'database', check: parts.probeDb },
@@ -115,6 +123,12 @@ export function serviceHealthChecks(parts: {
     { name: 'judge', check: () => parts.judge.check(), ...notWired(parts.judge.notWired) },
     // 主线一动就可能落后，也会自己变红：发版脚本同样只标待处理、不退回
     { name: 'deploy_lag', check: () => parts.deployLag.check(), ...notWired(parts.deployLag.notWired) },
+    // 网关、隧道、香港出事就自己变红（后端刚起、网关还没回来时是「没查成」）：发版脚本同样只标待处理、不退回
+    {
+      name: 'feishu_gateway',
+      check: () => parts.feishuGateway.check(),
+      ...notWired(parts.feishuGateway.notWired),
+    },
   ];
 }
 

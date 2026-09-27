@@ -13,6 +13,7 @@ import type { Logger } from './log.ts';
 import { CARD_EDITABLE_MS, type Card, type FeishuPort, feishuErrorKind } from './port.ts';
 import type { Registry } from './registry.ts';
 import { nextNonce, uuidFor } from './util.ts';
+import type { Watch } from './watch.ts';
 
 /** 满这么久就换新卡（飞书的硬限制是 14 天，见 CARD_EDITABLE_MS）。 */
 export const BOARD_RESEND_AFTER_MS = 13 * 24 * 60 * 60 * 1000;
@@ -31,6 +32,8 @@ export interface BoardDeps {
   minPatchIntervalMs?: number;
   /** 内容没变时，隔这么久也改一次，好让「更新于」的时间不显得停住了。 */
   touchIntervalMs?: number;
+  /** 每次取快照成没成、花了多久，记给网关自己的看守（心跳、调不通后端报警，watch.ts）。 */
+  watch?: Pick<Watch, 'ok' | 'fail'> | undefined;
 }
 
 export interface Board {
@@ -68,8 +71,10 @@ export function createBoard(deps: BoardDeps): Board {
   });
 
   async function refresh(timeoutMs = 5_000): Promise<BoardSnapshot | null> {
+    const started = deps.now();
     try {
       const snap = await deps.backend.board({ timeoutMs });
+      deps.watch?.ok('board', deps.now() - started);
       cache = { snap, fetchedAt: deps.now() };
       if (pinned === undefined) {
         const card = snap.teamBoardCard;
@@ -77,6 +82,7 @@ export function createBoard(deps: BoardDeps): Board {
       }
       return snap;
     } catch (err) {
+      deps.watch?.fail('board', err);
       deps.log.warn('盘面快照没取到，先用缓存', { error: String(err), cachedAt: cache?.fetchedAt });
       return null;
     }
