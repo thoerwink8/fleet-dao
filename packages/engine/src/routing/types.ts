@@ -131,6 +131,13 @@ export interface StageRouteEntry {
 /** 活的轻重：备池只接轻的。不给就按阶段的默认（policy.stageWeight）。 */
 export type TaskWeight = 'light' | 'heavy';
 
+/**
+ * 读会话用户此刻挂的组织的结果（real/session-org.ts 读，选路、路由探针用）。读不到、认不出是明确的失败，带白话原因
+ * （不带组织编号、邮箱：原因会进库、上驾驶舱）；调用方拿它当「认不出」，不拿哪个组织顶。pending：还没读完（reclaude
+ * 首跑同步配置要上百秒），不是读坏了——选路按「过一会儿再选」处理，不当成认不出挂起任务。
+ */
+export type LiveOrgReading = { ok: true; org: OrgKind } | { ok: false; why: string; pending?: true };
+
 export interface ChooseRouteInput {
   stage: StageKind;
   /** 这个阶段在调度台上配过顺序没有（stage_policies 有没有这一行）。没配过就派不出，不按 id 乱挑。 */
@@ -156,6 +163,11 @@ export interface ChooseRouteInput {
    * 只有和它一样的才派；不给 = 不知道挂的是哪个，带 orgKind 的池一律不派。
    */
   liveOrg?: OrgKind;
+  /**
+   * 没给 liveOrg 是因为读了没读成（读不到、认不出，LiveOrgReading 的原话）：写进带 orgKind 的池被挡的原因，
+   * 「会话用户挂的组织认不出（…）」。和 liveOrg 不能同时给。
+   */
+  liveOrgProblem?: string;
   /** [0, 1) 的随机数，试探用；由工作流经 decide 生成、记进历史。试探开着时必须给。 */
   draw?: number;
   now: string;

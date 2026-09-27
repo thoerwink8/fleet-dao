@@ -20,6 +20,13 @@ import {
 import { useEnv, withWorker } from './helpers.ts';
 
 const NOW = new Date('2026-09-26T04:07:00.000Z');
+/** 会话用户此刻挂的组织（真实现以会话用户跑 reclaude org list，认带 * 的那行的类型，real/session-org.ts）。 */
+const ON_CARPOOL = { ok: true, org: 'carpool' } as const;
+const ON_SOLO = { ok: true, org: 'solo' } as const;
+const UNKNOWN = {
+  ok: false,
+  why: '以会话用户 fleet-agent-carpool 跑 reclaude org list：reclaude 报登录失效',
+} as const;
 
 function target(over: Partial<RouteProbeTarget> = {}): RouteProbeTarget {
   return {
@@ -76,7 +83,7 @@ function harness(targets: RouteProbeTarget[], probe: Prober, over: Partial<Route
   const deps: RouteProbeJobDeps = {
     targets: async () => targets,
     probers: { 'claude-code': probe },
-    liveOrg: 'carpool',
+    sessionOrg: async () => ON_CARPOOL,
     save: async (w) => {
       saved.push(w);
       return 'saved';
@@ -106,7 +113,7 @@ const answered: Prober = async () => ({ kind: 'answered', detail: '答上了：O
 
 describe('探不探（planProbe）', () => {
   const probers = { 'claude-code': answered };
-  const plan = (t: RouteProbeTarget) => planProbe(t, probers, 'carpool', NOW);
+  const plan = (t: RouteProbeTarget) => planProbe(t, probers, t.orgKind === null ? null : ON_CARPOOL, NOW);
 
   it('插头接上了、渠道开着、有阶段开着、会话用户挂着这个组织：探', () => {
     expect('probe' in plan(carpool)).toBe(true);
@@ -144,8 +151,82 @@ describe('探不探（planProbe）', () => {
   it('会话用户挂着拼车时，独享池的路由不探（探了扣的是拼车的额度）', () => {
     expect(plan(solo)).toMatchObject({ state: 'skipped', detail: /会话用户现在挂的是拼车组织/ });
     // 切过去以后反过来
-    expect('probe' in planProbe(solo, probers, 'solo', NOW)).toBe(true);
-    expect(planProbe(carpool, probers, 'solo', NOW)).toMatchObject({ state: 'skipped' });
+    expect('probe' in planProbe(solo, probers, ON_SOLO, NOW)).toBe(true);
+    expect(planProbe(carpool, probers, ON_SOLO, NOW)).toMatchObject({
+      state: 'skipped',
+      detail: /会话用户现在挂的是独享组织：这时探拼车池，扣的是独享的额度/,
+    });
+  });
+
+  it('会话用户挂的组织认不出（读不到、没有带 * 的行、类型认不出）：带组织类型的池一律不探、记没探成，写明原因；不拿拼车顶', () => {
+    for (const t of [carpool, solo]) {
+      expect(planProbe(t, probers, UNKNOWN, NOW)).toEqual({
+        state: 'failed',
+        detail: expect.stringContaining(`会话用户挂的组织认不出（${UNKNOWN.why}）`),
+      });
+      // 没读（调用方漏了）也一样，不当成挂着
+      expect(planProbe(t, probers, null, NOW)).toMatchObject({ state: 'failed', detail: /认不出（没读）/ });
+    }
+    // 不是 Claude 订阅池（没有组织）的不受影响
+    expect('probe' in planProbe(target({ orgKind: null }), probers, null, NOW)).toBe(true);
+    // 先后照旧：插头没接、按量、下架、没阶段在用的照原来的原因说
+    expect(planProbe(target({ inUse: false }), probers, UNKNOWN, NOW)).toMatchObject({ state: 'skipped' });
+  });
+});
+
+describe('一轮里读会话用户挂的组织', () => {
+  const cursorTarget = target({
+    routeId: 'cursor:cursor-auto:cursor-agent',
+    hostId: 'cursor-agent',
+    channelId: 'cursor',
+    poolId: 'cursor',
+    runAsUser: null,
+    orgKind: null,
+  });
+
+  it('挂着独享：独享池探通在线，拼车池不探、写明挂的是独享', async () => {
+    const h = harness([carpool, solo], answered, { sessionOrg: async () => ON_SOLO });
+    const run = await runRouteProbeJob(h.deps);
+    expect(run).toMatchObject({ outcome: 'ok', scanned: 2, found: 1, online: [solo.routeId] });
+    expect(h.saved.find((s) => s.routeId === carpool.routeId)).toMatchObject({
+      state: 'skipped',
+      detail: expect.stringContaining('会话用户现在挂的是独享组织'),
+    });
+  });
+
+  it('认不出：Claude 订阅池都记没探成（不在线、写明原因），别的池照探；只在探带组织类型的池之前读', async () => {
+    let reads = 0;
+    const h = harness([carpool, solo, cursorTarget], answered, {
+      probers: { 'claude-code': answered, 'cursor-agent': answered },
+      sessionOrg: async () => {
+        reads += 1;
+        return UNKNOWN;
+      },
+    });
+    const run = await runRouteProbeJob(h.deps);
+    expect(run).toMatchObject({ outcome: 'ok', scanned: 3, found: 2, online: [cursorTarget.routeId] });
+    for (const id of [carpool.routeId, solo.routeId]) {
+      expect(h.saved.find((s) => s.routeId === id)).toMatchObject({
+        state: 'failed',
+        detail: expect.stringContaining(
+          '会话用户挂的组织认不出（以会话用户 fleet-agent-carpool 跑 reclaude org list：reclaude 报登录失效）',
+        ),
+      });
+    }
+    expect(reads).toBe(2);
+  });
+
+  it('读法自己抛了：按认不出记（写明原因），这一轮照样跑完', async () => {
+    const h = harness([carpool], answered, {
+      sessionOrg: async () => {
+        throw new Error('帮手脚本起不来');
+      },
+    });
+    expect(await runRouteProbeJob(h.deps)).toMatchObject({ outcome: 'ok', found: 1, online: [] });
+    expect(h.saved[0]).toMatchObject({
+      state: 'failed',
+      detail: expect.stringContaining('会话用户挂的组织认不出（读会话用户挂的组织出错：帮手脚本起不来）'),
+    });
   });
 });
 
@@ -169,7 +250,7 @@ describe('按一次的成本放慢（cursor-agent：探通了隔 2 小时再真�
       ...over,
     });
   const probers = { 'claude-code': answered, 'cursor-agent': answered };
-  const plan = (t: RouteProbeTarget) => planProbe(t, probers, 'carpool', NOW);
+  const plan = (t: RouteProbeTarget) => planProbe(t, probers, t.orgKind === null ? null : ON_CARPOOL, NOW);
 
   it('上一次探通、还没到 2 小时：这一轮不探，结论照旧（写明为什么）', () => {
     expect(plan(cursor())).toEqual({

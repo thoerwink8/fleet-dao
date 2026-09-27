@@ -31,7 +31,8 @@ import {
   sessionUserOf,
   WIRED_HOSTS,
 } from './hosts.ts';
-import { poolHoldKey, SESSION_USER_ORG } from './store-ports.ts';
+import type { SessionOrgReader } from './session-org.ts';
+import { poolHoldKey } from './store-ports.ts';
 import type { WorkTrees } from './worktrees.ts';
 
 /** 问的那一句：最短的输出，用不着任何工具。 */
@@ -241,6 +242,8 @@ export interface RouteProbeWiring {
   claudeCommand(user: SessionUser): string[];
   cursorCommand(user: SessionUser): string[];
   grokCommand(user: SessionUser): string[];
+  /** 会话用户此刻挂的组织（real/session-org.ts）：和选路共用一个，Claude 订阅池只探挂着的那个。 */
+  sessionOrg: SessionOrgReader;
   machine: string;
   now?: () => Date;
   log?: RouteProbeJobDeps['log'];
@@ -292,7 +295,7 @@ export function routeProbeJob(w: RouteProbeWiring): () => RouteProbeJobDeps {
   return () => ({
     targets: () => routeProbeTargets(w.db),
     probers,
-    liveOrg: SESSION_USER_ORG,
+    sessionOrg: w.sessionOrg,
     save: (x) => saveRouteProbe(w.db, x),
     afterProbe: (t, a) => poolHoldAfterProbe(w.db, t, a),
     runs: {

@@ -49,6 +49,17 @@ describe('会话用户挂着哪个组织（design 第九节：一个会话用户
     expect(blocks[0]?.text).toContain('不知道会话用户现在挂的是哪个组织');
     expect(codes(route('relay'), { ...ctx(), liveOrg: undefined })).toEqual([]);
   });
+
+  it('读了没读成（读不到、认不出）：带组织类型的池一律不派，原话写进原因；别的池照派', () => {
+    const unknown = ctx({ liveOrg: undefined, liveOrgProblem: 'reclaude 报登录失效' });
+    for (const kind of ['carpool', 'solo'] as const) {
+      const blocks = blocksFor(route(kind, { orgKind: kind, poolName: '某号' }), entry(kind, 0), unknown);
+      expect(blocks.map((b) => b.code)).toEqual(['org-not-live']);
+      expect(blocks[0]?.text).toBe('会话用户挂的组织认不出（reclaude 报登录失效），某号不派');
+      expect(groupOf(blocks)).toEqual({ kind: 'hard' });
+    }
+    expect(codes(route('relay'), unknown)).toEqual([]);
+  });
 });
 
 describe('候选查询给的被挡原因', () => {

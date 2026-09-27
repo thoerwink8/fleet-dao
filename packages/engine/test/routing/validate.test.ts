@@ -55,6 +55,15 @@ describe('输入认不出就明确失败', () => {
     fails(() => input([route('a')], { liveOrg: 'personal' as never }), /会话用户挂的组织认不出（personal）/);
   });
 
+  it('会话用户挂的组织既给了又说认不出、认不出的原因是空的：输入拼错了，不挑一边往下走', () => {
+    fails(
+      () => input([route('a')], { liveOrg: 'carpool', liveOrgProblem: '没有带 * 的行' }),
+      /既给了，又说认不出/,
+    );
+    fails(() => input([route('a')], { liveOrgProblem: ' ' }), /原因是空的/);
+    fails(() => input([route('a')], { liveOrgProblem: 42 as never }), /原因是空的/);
+  });
+
   it('认不出的被挡原因：不当成没被挡', () =>
     fails(() => one({ blockers: ['paused' as never] }), /被挡原因认不出/));
 

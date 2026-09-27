@@ -51,7 +51,7 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 | 用户 | 在哪 | 干什么 |
 |---|---|---|
 | `fleet` | 两台 | 引擎、驾驶舱后端、Temporal（法国），飞书网关（香港）。系统用户，家 `/home/fleet`（750） |
-| `fleet-agent-carpool` | 法国 | AI 会话专用，**只有这一个**（称「会话用户」；名字是历史沿用，不改名免得重新登录）：reclaude 一个账户最多挂 4 台设备、一个家目录算一台，本机和另一台机器已占掉两台，法国只能占 1 台（创始人 2026-09-26）。引擎的全部会话都跑在它下面；它平时挂拼车组织，拼车用满时整个用户切到独享组织、手上的会话 fork 续上，拼车窗口恢复再切回（design 第九节，切号 #59 还没做）。没有 sudo、不能提权、只在自己的组里、家里没有 GitHub 凭据、读不到 `/etc/fleet-dao`、连不上 Temporal 和库。原先的 `fleet-agent-dedicated`（挂独享号的第二个会话用户）已删，2026-09-26；france.sh 不再建它、读回不查它 |
+| `fleet-agent-carpool` | 法国 | AI 会话专用，**只有这一个**（称「会话用户」；名字是历史沿用，不改名免得重新登录）：reclaude 一个账户最多挂 4 台设备、一个家目录算一台，本机和另一台机器已占掉两台，法国只能占 1 台（创始人 2026-09-26）。引擎的全部会话都跑在它下面；挂哪个组织以它家里的 reclaude 为准（`reclaude org list` 里带 `*` 的那行；2026-09-26 下午起挂独享），引擎选路、探针之前现读、不假定（第五节「会话用户挂的组织」）。打算是平时挂拼车、用满整个用户切到独享、手上的会话 fork 续上，拼车窗口恢复再切回（design 第九节）；自动切号 #194 还没做，现在由人切。没有 sudo、不能提权、只在自己的组里、家里没有 GitHub 凭据、读不到 `/etc/fleet-dao`、连不上 Temporal 和库。原先的 `fleet-agent-dedicated`（挂独享号的第二个会话用户）已删，2026-09-26；france.sh 不再建它、读回不查它 |
 | `pilot` | 法国 | 创始人的登录用户：用 Mirasim 桌面端的 ssh 远程模式登进来干活（第五节）。系统用户，家 `/home/pilot`（750）；没有任何 sudo，只在自己的组和 `systemd-journal` 里（看日志）；读不到 `/etc/fleet-dao`、连不上 Temporal 和库 |
 | `root` | | 只装机 |
 
@@ -190,14 +190,21 @@ node 的编译缓存目录（查 #164 时发现：会话能借它以 fleet、pil
 - `france.sh` 在第一次以 fleet 跑 node 之前，把这个目录建成 root:root 755（`deploy/lib/node-cache.sh`）；已经在但归别人、权限松、里面有别人的东西、是链接或文件的，整个删了重建。开机时 /tmp 清空，由 `/etc/tmpfiles.d/fleet-dao-node-compile-cache.conf` 在任何会话之前先建好。建好后，非 root 的 node 建不了自己的子目录，就不用编译缓存（只慢一点、不报错）；root 自己的子目录别人换不掉。读回：目录归 root、755、里面只有 root 的东西，开机配置在、内容对，不然判红。
 - 撤掉：删 `/etc/tmpfiles.d/fleet-dao-node-compile-cache.conf`，`france.sh` 里去掉 `setup_node_cache` 和读回里的 `readback_node_cache`；目录留着不碍事，下次开机 /tmp 清空时就没了。
 
-会话用户登录 reclaude（要创始人做，一次；`fleet-agent-carpool` 已登录、挂拼车组织，2026-09-26）：
+会话用户登录 reclaude（要创始人做，一次；`fleet-agent-carpool` 已登录，2026-09-26；挂哪个组织见下面「会话用户挂的组织」）：
 
 reclaude 按用户记设备：组织写在家里的 `~/.reclaude/device.json`，对这个用户的所有会话一起生效，请求按设备签名。一个账户最多挂 4 台设备、一个家目录算一台，所以法国只登录这一个用户（pilot 不登录，见下面）；不拷别的用户的 `~/.reclaude`（同一设备号从两个家目录跑会互相打架）。
 
 1. 准备（装机这边做）：`france.sh` 给会话用户装 reclaude 二进制到 `/home/fleet-agent-carpool/.local/bin/reclaude`（只在没有时装，版本和 sha256 钉在脚本顶部，以这个用户自己的身份写，之后它自己 `reclaude update`）；读回里它缺了判红——引擎起 Claude 会话用的就是这一份。不拷别的用户的 `~/.reclaude`。
 2. 创始人以 root 登法国跑：`sudo -iu fleet-agent-carpool reclaude login`。终端里会打印一行「Open this URL in your browser to authorize this CLI session」和一个链接：在浏览器里打开，用 reclaude 账号登录，授权这个命令行会话；授权完终端自己往下走。
-3. 选拼车组织：`sudo -iu fleet-agent-carpool reclaude org list`，找到拼车（team）那个，`sudo -iu fleet-agent-carpool reclaude org use <组织编号>`。之后切独享、切回拼车由引擎做（#59），人不手动切：一切号这个家目录下在跑的会话全断。
+3. 选拼车组织：`sudo -iu fleet-agent-carpool reclaude org list`，找到拼车（team）那个，`sudo -iu fleet-agent-carpool reclaude org use <组织编号>`。自动切独享、切回拼车（#194）还没做，现在由人切：一切号这个家目录下在跑的会话全断，挑手上没有在跑的会话时切；切完不用告诉引擎，它下一次选路（最多 30 秒）就读到。
 4. 重跑 `deploy/france.sh`：读回里「reclaude 还没登录」消失。
+
+会话用户挂的组织（引擎只读、不切；2026-09-27 起，原先引擎写死挂拼车）：
+
+- 引擎怎么读：选路、路由探针每次用之前（读成了的留 30 秒，读失败的不留），以会话用户的身份经 `fleet-agent-scope run` 跑它家里那份 reclaude 的 `org list`（和会话同一份，`engine.env` 的 `FLEET_CLAUDE_BIN`）：带 `*` 的那行是现在挂的，类型那一列 team 是拼车、personal 是独享（`packages/engine/src/real/session-org.ts`，解析和额度读取器同一个）。编号、名字、邮箱不往外带，不用配文件。两个 Claude 池只派、只探挂着的那个，会话的额度就记在那个池上。
+- 慢的时候：平时一次 0.3 秒；reclaude 更新后首跑先打「Syncing config…」、要上百秒。一次读最多等 150 秒；选路只等 15 秒，没读完就过 30 秒再选（不算认不出，任务不挂起），读在后台接着跑完、下一次直接用上。
+- 认不出怎么办：读不到（没跑成、登录失效、封号）、一个组织都认不出、没有带 `*` 的行、带 `*` 的不止一行、类型认不出，一律当「会话用户挂的组织认不出」：两个 Claude 池都不派、不探（探针记没探成、写明原因，调度台看得到；派工理由、挂起原因里也写着），别的渠道照派，不拿拼车顶。原因里不带编号、邮箱。
+- 核对：人切了号不用告诉引擎，也不用重启。下一轮路由探针（15 分钟内，或照下面「路由探针」手动跑一轮）之后，调度台上挂着的那个池的 Claude 路由探通在线，另一个写「会话用户现在挂的是拼车（独享）组织」；两个都写「会话用户挂的组织认不出（…）」就照括号里的原因修。
 
 会话用户的 cursor-agent（#212 接上了 cursor-agent；装由 `france.sh` 做，API 密钥要创始人放，一次；Cursor 的路由接真流量之前）：
 
