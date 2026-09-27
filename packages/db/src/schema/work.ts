@@ -207,6 +207,12 @@ export const sessionRuns = pgTable(
     actualModel: text('actual_model'),
     inputTokens: bigint('input_tokens', { mode: 'number' }),
     outputTokens: bigint('output_tokens', { mode: 'number' }),
+    /**
+     * 这一轮的缓存读、缓存写（执行体终帧报的，Claude、cursor 都报）：折额度当量要用（shared 的 usage.ts）。
+     * 空 = 没读到，不是 0；加这两列之前的会话全是空。
+     */
+    cacheReadTokens: bigint('cache_read_tokens', { mode: 'number' }),
+    cacheWriteTokens: bigint('cache_write_tokens', { mode: 'number' }),
     costUsd: numeric('cost_usd', { precision: 14, scale: 6, mode: 'number' }),
     queueMs: bigint('queue_ms', { mode: 'number' }).generatedAlwaysAs(
       sql`(extract(epoch from (coalesce(started_at, ended_at) - queued_at)) * 1000)::bigint`,
@@ -260,6 +266,11 @@ export const sessionRuns = pgTable(
     check(
       'session_runs_usage_nonneg',
       sql`coalesce(${t.inputTokens}, 0) >= 0 and coalesce(${t.outputTokens}, 0) >= 0 and coalesce(${t.costUsd}, 0) >= 0 and coalesce(${t.sessionCostUsd}, 0) >= 0 and coalesce(${t.contextTokens}, 0) >= 0`,
+    ),
+    // 缓存读写单起一条：并进上面那条要删了重建，迁移就不是只加不改了。
+    check(
+      'session_runs_cache_nonneg',
+      sql`coalesce(${t.cacheReadTokens}, 0) >= 0 and coalesce(${t.cacheWriteTokens}, 0) >= 0`,
     ),
     check(
       'session_runs_run_as_user_known',

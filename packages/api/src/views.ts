@@ -21,7 +21,9 @@ import {
   type SessionRun,
   type StageKind,
   type Subtask,
+  summarizeUsage,
   type Task,
+  type TaskUsage,
 } from '@fleet-dao/shared';
 import type { z } from 'zod';
 import type { JobRecord, NotificationRecord, QuotaWindowRecord, RunPlan, TimelineRecord } from './ports.ts';
@@ -109,8 +111,20 @@ export function runView(run: SessionRun, info: RouteInfo): z.input<typeof RunSch
     outcome: run.outcome,
     inputTokens: run.inputTokens,
     outputTokens: run.outputTokens,
+    cacheReadTokens: run.cacheReadTokens,
+    cacheWriteTokens: run.cacheWriteTokens,
     costUsd: run.costUsd,
   };
+}
+
+/** 任务详情的用量汇总：记在路由上的模型名下（和 Fusion 关单评论「各模型额度」一个口径），算法在 shared 的 usage.ts。 */
+export function usageView(runs: readonly SessionRun[], route: (routeId: string) => RouteInfo): TaskUsage {
+  return summarizeUsage(
+    runs.map((r) => {
+      const info = route(r.routeId);
+      return { ...r, model: info.route?.modelId ?? r.routeId, modelName: info.modelName };
+    }),
+  );
 }
 
 export interface BoardInput {

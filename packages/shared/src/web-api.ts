@@ -20,6 +20,7 @@ import type {
   TaskState,
 } from './domain.ts';
 import { type ChangeEvent, REALTIME_TABLES } from './realtime.ts';
+import type { TaskUsage } from './usage.ts';
 
 export const WEB_API_PREFIX = '/api';
 export const AUTH_PREFIX = '/auth';
@@ -316,8 +317,38 @@ export const RunSchema = z.object({
   outcome: RunOutcomeSchema.optional(),
   inputTokens: z.number().int().min(0).optional(),
   outputTokens: z.number().int().min(0).optional(),
+  cacheReadTokens: z.number().int().min(0).optional(),
+  cacheWriteTokens: z.number().int().min(0).optional(),
   costUsd: z.number().min(0).optional(),
 });
+
+// 用量汇总：算法和各栏的意思在 usage.ts。每一样只加读到的，没读到的次数在 missing* 里，不当成 0。
+const Count = z.number().int().min(0);
+export const UsageTotalsSchema = z.object({
+  runs: Count,
+  running: Count,
+  notStarted: Count,
+  inputTokens: Count,
+  outputTokens: Count,
+  missingTokens: Count,
+  cacheReadTokens: Count,
+  cacheWriteTokens: Count,
+  missingCache: Count,
+  inputEquivalent: Count,
+  missingEquivalent: Count,
+  costUsd: z.number().min(0),
+  missingCost: Count,
+  queueMs: Count,
+  runMs: Count,
+  missingTime: Count,
+});
+export const TaskUsageSchema = z.object({
+  total: UsageTotalsSchema,
+  byModel: z.array(UsageTotalsSchema.extend({ model: z.string(), modelName: z.string() })),
+  byStage: z.array(UsageTotalsSchema.extend({ stage: StageKindSchema })),
+});
+/** 编译期闸：和 usage.ts 算出来的形状一字不差，改了一边没改另一边 `tsc` 当场报错。 */
+export const USAGE_MATCHES_SUMMARY: Same<z.infer<typeof TaskUsageSchema>, TaskUsage> = true;
 
 export const AskSchema = z.object({
   id: Id,
@@ -337,6 +368,8 @@ export const TaskDetailResponse = z.object({
   subtasks: z.array(BoardSubtaskSchema),
   runs: z.array(RunSchema),
   asks: z.array(AskSchema),
+  /** 这张单的会话按模型、按阶段、整张合计（耗时、token、输入当量、花费）；按 Fusion 步骤分等 #214 的步骤标记。 */
+  usage: TaskUsageSchema,
 });
 
 export const TimelineItemSchema = z.object({
