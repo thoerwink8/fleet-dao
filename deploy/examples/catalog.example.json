@@ -46,7 +46,7 @@
       "maxConcurrency": 5
     },
     {
-      "_说明": "Cursor：Auto、API 两个桶是只扣对应模型组的窗口，成员表由额度读取器读来。并发 6 是旧系统实测（docs/reference/quota.md）。会话用户登录一次 Cursor（docs/plan.md），不绑池。",
+      "_说明": "Cursor：Auto、API 两个桶是只扣对应模型组的窗口，成员表由额度读取器读来。并发 6 是旧系统实测（docs/reference/quota.md）。会话用户家里放一把 Cursor 的 API 密钥（没桌面的服务器上浏览器登录存不下，docs/ops.md 第五节「会话用户的 Cursor 密钥」），不绑池。",
       "id": "cursor",
       "channelId": "cursor",
       "maxConcurrency": 6
@@ -131,6 +131,14 @@
       "upstreamAliases": ["default"]
     },
     {
+      "_说明": "cursor-agent --model gpt-5.6-luna-high（cursor-agent models 里列作「GPT-5.6 Luna 1M High」，2026-09-27 法国读的），扣 Cursor 订阅的包含用量（点名的模型走 API 桶，不是 Auto 桶）。开 PR 前的验证排第一（创始人 2026-09-27 拍，specs/212 方案「真流量」）；碰界面的单不给 GPT，由代码的硬禁令挡，所以不挂 ui。",
+      "id": "cursor:gpt-5.6-luna:cursor-agent",
+      "poolId": "cursor",
+      "modelId": "gpt-5.6-luna",
+      "hostId": "cursor-agent",
+      "upstreamModel": "gpt-5.6-luna-high"
+    },
+    {
       "_说明": "grok -m grok-4.7，终帧回 grok-4.7-build（插头夹具 packages/adapters/test/fixtures/grok/grok-read）。",
       "id": "grok:grok-4.7:grok",
       "poolId": "grok",
@@ -149,8 +157,19 @@
     }
   ],
   "stages": {
-    "_说明": "构建期除了判断阶段，都用 Opus 5.5、经两个 Claude 池（设计文档「已定」表第 8 条）：两条都开着；会话用户同一时刻只挂一个组织，没挂着的那个池由引擎按 orgKind 挡掉，不靠这里的排序。其余路由挂在后面、默认关着，P3 接好插头、登录之后再打开。硬禁令（GPT 不做 UI、不用 Fable）由代码管，装载器也按它拒收：ui 单列一份、不挂 GPT（关着也不行）。judge：Claude 判断后端接上之前先用 TypeSafe 的 Jev（设计文档第十一节，2026-09-25 定）。引擎每次问判断题都按判断阶段排第一、开着的路由起后端（packages/jev 的 resolveJevBackend → backendForRoute，驾驶舱改了顺序下一道题就按新的走；/healthz 的 judge 项同一个判法）；它只接得了 TypeSafe，两条 Claude 挂着、关着。每个阶段只在第一次装的时候排，之后装载器不再动它；装进去之后怎么改见 docs/ops.md 第九节「目录配置」。要给某个阶段单排，就加一个以阶段名为键的列表。",
+    "_说明": "构建期除了判断阶段，都用 Opus 5.5、经两个 Claude 池（设计文档「已定」表第 8 条）：两条都开着；会话用户同一时刻只挂一个组织，没挂着的那个池由引擎按 orgKind 挡掉，不靠这里的排序。其余路由挂在后面、默认关着，P3 接好插头、登录之后再打开。硬禁令（GPT 不做 UI、不用 Fable）由代码管，装载器也按它拒收：ui 单列一份、不挂 GPT（关着也不行）。judge：Claude 判断后端接上之前先用 TypeSafe 的 Jev（设计文档第十一节，2026-09-25 定）。引擎每次问判断题都按判断阶段排第一、开着的路由起后端（packages/jev 的 resolveJevBackend → backendForRoute，驾驶舱改了顺序下一道题就按新的走；/healthz 的 judge 项同一个判法）；它只接得了 TypeSafe，两条 Claude 挂着、关着。verify（开 PR 前的验证）单列：Cursor 上钉住的 GPT-5.6 Luna 排第一、开着（创始人 2026-09-27 拍，specs/212 方案「真流量」），后面照 default；派哪个模型先看流程配置里验证这一步的模型顺序（packages/core/flow.default.json），同一个模型的几条路由再照这里的先后，写这张单的族（Claude）整族避开，碰界面的单 GPT 由代码挡掉。每个阶段只在第一次装的时候排，之后装载器不再动它；装进去之后怎么改见 docs/ops.md 第九节「目录配置」。要给某个阶段单排，就加一个以阶段名为键的列表。",
     "default": [
+      { "routeId": "claude-solo:opus-5.5:claude-code", "enabled": true },
+      { "routeId": "claude-carpool:opus-5.5:claude-code", "enabled": true },
+      { "routeId": "mirasim-relay:opus-5.5:mirasim", "enabled": false },
+      { "routeId": "mirasim-relay:gpt-5.6-luna:mirasim", "enabled": false },
+      { "routeId": "mirasim-relay:kimi-k3:mirasim", "enabled": false },
+      { "routeId": "mirasim-relay:deepseek-flash:mirasim", "enabled": false },
+      { "routeId": "cursor:cursor-auto:cursor-agent", "enabled": false },
+      { "routeId": "grok:grok-4.7:grok", "enabled": false }
+    ],
+    "verify": [
+      { "routeId": "cursor:gpt-5.6-luna:cursor-agent", "enabled": true },
       { "routeId": "claude-solo:opus-5.5:claude-code", "enabled": true },
       { "routeId": "claude-carpool:opus-5.5:claude-code", "enabled": true },
       { "routeId": "mirasim-relay:opus-5.5:mirasim", "enabled": false },
