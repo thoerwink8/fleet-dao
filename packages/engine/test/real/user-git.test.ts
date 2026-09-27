@@ -1,7 +1,7 @@
 // 会话目录里的 git（以会话用户的身份跑；这里用本机执行器、真 git、临时目录）：从 bundle 建树、交 bundle、快进，
 // 没跑成的明确报错，不拿空结果冒充「没有改动」。
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -109,6 +109,53 @@ describe('会话目录里的 git', { timeout: 60_000 }, () => {
     writeFileSync(file, bundle);
     sh(m.dir, 'fetch', '-q', file, `+${head}:refs/delivered`);
     expect(sh(m.dir, 'rev-parse', 'refs/delivered')).toBe(head);
+  });
+
+  it('建树时关掉 git 的自动维护：主线一次次取进树里，包还是一个一个的，没有后台的重打包和删树抢', async () => {
+    const m = mirror();
+    const t = tree('work');
+    await fetchBundle(t, m.bundle(m.head), 'refs/fleet/export/0', {
+      identity: { name: 'fleet-dao-agent[bot]', email: 'bofleet-test@localhost' },
+    });
+    expect(sh(t.dir, 'config', 'maintenance.auto')).toBe('false');
+    expect(sh(t.dir, 'config', 'gc.auto')).toBe('0');
+    // 没关的话：git 2.54 起（CI 上是 2.55）每次取完都跑自动维护，默认的几何重打包取到第三个包就把它们并掉；Linux 上它
+    // 脱离前台在后台跑，删树时还在写 .git/objects（github-ports 的用例因此在 CI 上报过 ENOTEMPTY）。这里让它在前台跑，
+    // 并没并包就是确定的：上面两行关掉的话这条必红。更老的 git 不自己并包，这条在那儿照样过。
+    sh(t.dir, 'config', 'maintenance.autoDetach', 'false');
+    let tip = m.head;
+    for (let i = 0; i < 3; i++) {
+      writeFileSync(join(m.dir, `f${i}.ts`), `export const f${i} = ${i};\n`);
+      sh(m.dir, 'add', '.');
+      sh(m.dir, 'commit', '-q', '-m', `main: f${i}`);
+      const next = sh(m.dir, 'rev-parse', 'HEAD');
+      expect(await fetchBundle(t, m.bundle(next, tip), 'refs/fleet/export/0')).toBe(next);
+      tip = next;
+    }
+    const packs = readdirSync(join(t.dir, '.git', 'objects', 'pack')).filter((f) => f.endsWith('.pack'));
+    expect(packs).toHaveLength(4);
+  });
+
+  it('【故意造出的失败】关自动维护那一步没写成：建树报 GIT_FAILED、说清是哪一步，不带着后台维护接着建', async () => {
+    const m = mirror();
+    const t = tree('work');
+    const real = localExec();
+    const exec: UserTree['exec'] = (c) =>
+      c.argv.includes('maintenance.auto')
+        ? Promise.resolve({
+            code: 255,
+            stdout: Buffer.alloc(0),
+            stderr: 'error: 故意造的写不了配置\n',
+            timedOut: false,
+            aborted: false,
+          })
+        : real(c);
+    const err = await fetchBundle({ ...t, exec }, m.bundle(m.head), 'refs/fleet/export/0').catch(
+      (e: unknown) => e,
+    );
+    expect(err).toMatchObject({ code: 'GIT_FAILED', retryable: true });
+    expect((err as Error).message).toContain('关掉自动维护');
+    expect((err as Error).message).toContain('故意造的写不了配置');
   });
 
   it('起会话前的头之后没有新提交：明确报 EMPTY_DELIVERY，不交空包', async () => {
