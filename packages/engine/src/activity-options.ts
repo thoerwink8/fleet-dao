@@ -62,6 +62,8 @@ export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
   withdrawMerge: 'quick',
   authorFamilies: 'quick',
   recordVerification: 'quick',
+  flowConfig: 'quick',
+  taskRequest: 'quick',
   readCriteria: 'git',
   startSession: 'git',
   stopSession: 'git',

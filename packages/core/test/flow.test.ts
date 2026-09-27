@@ -103,10 +103,52 @@ const rows: Row[] = [
     { step: 'parked', action: 'wait-human', patch: { resume: 'execute' } },
   ],
   [
-    'CI 绿 → 合并',
+    '验证只配了 1 轮：第一轮没过就停下等人',
+    at({ step: 'verify', blocks: 1, verifyLimit: 1 }),
+    { kind: 'verified', verdict: 'block' },
+    { step: 'parked', action: 'wait-human', patch: { resume: 'execute', verifyRounds: 1 } },
+  ],
+  [
+    'CI 绿 → Lead 最终审查',
     at({ step: 'pr', blocks: 1 }),
     { kind: 'ci', state: 'green' },
+    { step: 'final-review', action: 'final-review' },
+  ],
+  [
+    '单模型模式 CI 绿 → 也由 Lead 收尾、写结果（结果随 PR 进仓）',
+    at({ mode: 'single', step: 'pr', blocks: 1 }),
+    { kind: 'ci', state: 'green' },
+    { step: 'final-review', action: 'final-review' },
+  ],
+  [
+    '最终审查过了 → 合并',
+    at({ step: 'final-review', blocks: 1 }),
+    { kind: 'final-reviewed', verdict: 'pass' },
     { step: 'merge', action: 'merge' },
+  ],
+  [
+    '最终审查要改 → 回第 6 步修一轮',
+    at({ step: 'final-review', blocks: 1, ciRounds: 1 }),
+    { kind: 'final-reviewed', verdict: 'fix' },
+    { step: 'pr', action: 'fix-ci', patch: { ciRounds: 2 } },
+  ],
+  [
+    `最终审查要改、已经修满 ${FLOW_LIMITS.ciRounds} 轮 → 停下等人，恢复后接着修`,
+    at({ step: 'final-review', blocks: 1, ciRounds: FLOW_LIMITS.ciRounds }),
+    { kind: 'final-reviewed', verdict: 'fix' },
+    { step: 'parked', action: 'wait-human', patch: { resume: 'pr' } },
+  ],
+  [
+    '合并前退回 → 回第 6 步修一轮',
+    at({ step: 'merge', blocks: 1 }),
+    { kind: 'merge-returned' },
+    { step: 'pr', action: 'fix-ci', patch: { ciRounds: 1 } },
+  ],
+  [
+    `合并前退回、已经修满 ${FLOW_LIMITS.ciRounds} 轮 → 停下等人`,
+    at({ step: 'merge', blocks: 1, ciRounds: FLOW_LIMITS.ciRounds }),
+    { kind: 'merge-returned' },
+    { step: 'parked', action: 'wait-human', patch: { resume: 'pr' } },
   ],
   [
     'CI 没查成 → 再查，不算一轮',
@@ -224,6 +266,24 @@ const rows: Row[] = [
     { kind: 'ci', state: 'red' },
     { error: /ciRounds/ },
   ],
+  [
+    '【失败】验证轮数配成 3（上限 2）',
+    at({ step: 'verify', blocks: 1, verifyLimit: 3 }),
+    { kind: 'verified', verdict: 'block' },
+    { error: /验证最多 3 轮/ },
+  ],
+  [
+    '【失败】还没过 CI 就收到最终审查的结论',
+    at({ step: 'pr', blocks: 1 }),
+    { kind: 'final-reviewed', verdict: 'pass' },
+    { error: /不该收到/ },
+  ],
+  [
+    '【失败】执行时收到合并前退回',
+    at({ step: 'execute', blocks: 1 }),
+    { kind: 'merge-returned' },
+    { error: /不该收到/ },
+  ],
 ];
 
 describe('Fusion 执行状态机', () => {
@@ -263,10 +323,17 @@ describe('Fusion 执行状态机', () => {
       { kind: 'verified', verdict: 'pass' },
       { kind: 'ci', state: 'red' },
       { kind: 'ci', state: 'green' },
+      { kind: 'final-reviewed', verdict: 'fix' },
+      { kind: 'ci', state: 'green' },
+      { kind: 'final-reviewed', verdict: 'pass' },
+      { kind: 'merge-returned' },
+      { kind: 'ci', state: 'green' },
+      { kind: 'final-reviewed', verdict: 'pass' },
       { kind: 'merged' },
       { kind: 'accepted' },
       { kind: 'verified', verdict: 'pass' },
       { kind: 'ci', state: 'green' },
+      { kind: 'final-reviewed', verdict: 'pass' },
       { kind: 'merged' },
       { kind: 'mother-verified', verdict: 'pass' },
     ];

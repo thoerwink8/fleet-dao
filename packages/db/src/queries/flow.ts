@@ -18,6 +18,8 @@ export interface FlowReplicaState {
   unread: string | null;
   /** 副本里的测试命令（flow_config 的 testCommand）；项目没写、从没读成过都是 null。 */
   testCommand: string | null;
+  /** 副本整份（flow_config 原样）；从没读成过是 null。认不认得出由 core 判（Fusion 起步前 setupFusion），这里不补默认值。 */
+  config: Record<string, unknown> | null;
   source: 'project' | 'org_default' | null;
   commit: string | null;
   checkedAt: Date | null;
@@ -40,6 +42,7 @@ export function flowReplicaOf(row: RepoRow): FlowReplicaState {
     error: row.flowError,
     unread: row.flowUnread,
     testCommand: replicaTestCommand(row.flowConfig),
+    config: row.flowConfig ?? null,
     source: row.flowSource,
     commit: row.flowCommit,
     checkedAt: row.flowCheckedAt,

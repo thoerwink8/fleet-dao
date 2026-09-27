@@ -18,6 +18,7 @@ import {
   routeOutcomesSince,
   saveTaskSnapshot,
   saveVerifyRound,
+  taskContext,
   upsertAlert,
 } from '@fleet-dao/db';
 import type { HostId, OrgKind, StageKind } from '@fleet-dao/shared';
@@ -80,6 +81,8 @@ type StorePorts = Pick<
   | 'saveTaskState'
   | 'authorFamilies'
   | 'recordVerification'
+  | 'flowConfig'
+  | 'taskRequest'
 >;
 
 /** 给人看的池名：从渠道名拼，独享、拼车按池的组织类型分（两个 Claude 池是同一个会话用户）；不带账号、组织编号。 */
@@ -370,6 +373,36 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         },
         clock(),
       );
+    },
+
+    async flowConfig(input) {
+      // 任务所在仓的流程配置副本原样交出去：能不能派、用哪套由 core 判（Fusion 起步的 setupFusion），这里不补默认值
+      const task = UUID.test(input.taskId) ? await taskContext(db, input.taskId) : null;
+      if (!task) {
+        throw new PortError('TASK_NOT_FOUND', `库里没有任务 ${input.taskId}：读不了它那个仓的流程配置`, {
+          retryable: false,
+        });
+      }
+      const { flow } = task.repo;
+      return {
+        replica: {
+          syncedAt: flow.syncedAt ? flow.syncedAt.toISOString() : null,
+          error: flow.error,
+          unread: flow.unread,
+          testCommand: flow.testCommand,
+        },
+        source: flow.source,
+        config: flow.config,
+      };
+    },
+
+    async taskRequest(input) {
+      // 库里这张单的标题和正文：单子在 GitHub 上改了，接活那边（api 的 updateTaskRequest）会跟着改
+      const task = UUID.test(input.taskId) ? await taskContext(db, input.taskId) : null;
+      if (!task) {
+        throw new PortError('TASK_NOT_FOUND', `库里没有任务 ${input.taskId}`, { retryable: false });
+      }
+      return { title: task.title, rawRequest: task.rawRequest };
     },
 
     async askHuman(input) {

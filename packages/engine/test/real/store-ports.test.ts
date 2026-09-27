@@ -552,3 +552,47 @@ describe('开 PR 前验证：只派别家、作者是哪几族、每一轮的记
     expect(await verifyRoundsOfTask(t.db, task.id)).toEqual([]);
   });
 });
+
+describe('Fusion 开工前读的：流程配置副本、单子正文', () => {
+  it('流程配置副本原样交出去（时刻换成 ISO）：能不能用由 core 判，这里不补默认值', async () => {
+    const synced = await addTask(t.db, { testCommand: 'pnpm test:changed' });
+    expect(await ports().flowConfig({ taskId: synced.task.id }, ctx)).toEqual({
+      replica: {
+        syncedAt: synced.repo.flowSyncedAt?.toISOString(),
+        error: null,
+        unread: null,
+        testCommand: 'pnpm test:changed',
+      },
+      source: 'project',
+      config: { formatVersion: 1, testCommand: 'pnpm test:changed' },
+    });
+    // 从没同步成过、认不出：照实交出去（core 判停派），不拿空配置顶
+    const never = await addTask(t.db, { flowSyncedAt: null, flowError: '认不出：formatVersion 写成了 9' });
+    expect(await ports().flowConfig({ taskId: never.task.id }, ctx)).toEqual({
+      replica: { syncedAt: null, error: '认不出：formatVersion 写成了 9', unread: null, testCommand: null },
+      source: null,
+      config: null,
+    });
+  });
+
+  it('单子正文：库里这张单现在的标题和正文', async () => {
+    const { task } = await addTask(t.db);
+    expect(await ports().taskRequest({ taskId: task.id }, ctx)).toEqual({
+      title: '登录页加验证码',
+      rawRequest: '登录页加一个手机验证码',
+    });
+  });
+
+  it('【故意造出的失败】任务不在（或编号不是 UUID）：两个都报 TASK_NOT_FOUND、不可重试，不交空的', async () => {
+    for (const taskId of [randomUUID(), 'task-不是-uuid']) {
+      await expect(ports().flowConfig({ taskId }, ctx)).rejects.toMatchObject({
+        code: 'TASK_NOT_FOUND',
+        retryable: false,
+      });
+      await expect(ports().taskRequest({ taskId }, ctx)).rejects.toMatchObject({
+        code: 'TASK_NOT_FOUND',
+        retryable: false,
+      });
+    }
+  });
+});

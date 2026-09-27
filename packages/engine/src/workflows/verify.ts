@@ -31,6 +31,8 @@ export interface VerifyRequest {
   changedFiles: string[];
   /** 改到了页面代码：禁令按界面类判（GPT 不派，含审界面）。 */
   uiWork?: boolean | undefined;
+  /** 流程配置里验证这一步的模型顺序（0003 第 9 条）；不给照调度台。 */
+  models?: string[] | undefined;
 }
 
 export interface VerifyRound {
@@ -117,6 +119,7 @@ export async function verifyRound(kit: Kit, req: VerifyRequest): Promise<VerifyR
       },
       avoidFamilies: authors.families,
       uiWork: req.uiWork,
+      models: req.models,
       noRouteTitle: `没有别家可验：写这张单的是 ${authors.families.join('、')} 族，验证只派别家`,
     });
     const decision = await judge(kit, 'verdict', {

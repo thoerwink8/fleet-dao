@@ -213,9 +213,14 @@ export function resolveFlowConfig(org: Source, project: Source): ConfigDecision 
 const under = (prefix: string, file: string) =>
   file === prefix || (prefix.endsWith('/') && file.startsWith(prefix));
 
+/** files 里落在这几个路径下的（以 / 结尾的是目录）。 */
+export function filesUnder(prefixes: readonly string[], files: readonly string[]): string[] {
+  return files.filter((f) => prefixes.some((p) => under(p, f)));
+}
+
 /** 改到的文件里算页面代码的（派给 GPT 之前查：非空就不派）。 */
 export function uiFiles(config: FlowConfig, files: readonly string[]): string[] {
-  return files.filter((f) => config.uiPaths.some((p) => under(p, f)));
+  return filesUnder(config.uiPaths, files);
 }
 
 /** 改到的文件碰没碰高风险路径。 */

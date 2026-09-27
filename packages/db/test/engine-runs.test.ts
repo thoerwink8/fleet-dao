@@ -495,6 +495,7 @@ describe('taskContext', () => {
           error: null,
           unread: null,
           testCommand: null,
+          config: null,
           source: null,
           commit: null,
           checkedAt: null,
@@ -515,7 +516,13 @@ describe('taskContext', () => {
     );
     expect((await taskContext(t.db, task.id))?.repo).toMatchObject({
       testCommand: 'pnpm test:changed',
-      flow: { syncedAt: NOW, testCommand: 'pnpm test:changed', source: 'project' },
+      flow: {
+        syncedAt: NOW,
+        testCommand: 'pnpm test:changed',
+        source: 'project',
+        // 整份原样交出去（Fusion 起步前由 core 判认不认得出），不补默认值
+        config: { formatVersion: 1, testCommand: 'pnpm test:changed' },
+      },
     });
   });
 

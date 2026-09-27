@@ -49,6 +49,8 @@ const PORT_KEYS: Readonly<Record<PortName, true>> = {
   readCriteria: true,
   authorFamilies: true,
   recordVerification: true,
+  flowConfig: true,
+  taskRequest: true,
   askHuman: true,
   requestApproval: true,
   raiseAlert: true,
