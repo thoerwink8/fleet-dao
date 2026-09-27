@@ -280,6 +280,10 @@ export function parseDesired(text) {
     }
     files[file] = list;
   }
+  // 受管的几份文件一份都不能少：漏写一份，那份线上被怎么改都没人比，对账却照样报一致
+  const lacking = CONFIG_FILES.filter((f) => !Object.hasOwn(files, f));
+  if (lacking.length > 0)
+    bad(`少了 ${lacking.join('、')}：受管的 ${CONFIG_FILES.join('、')} 都要写上（一项都不管的写 {}）`);
   if (privateCount > 0 && fingerprint === null) bad('有私有值就要写 fingerprint（算法和钥匙编号）');
   return { formatVersion: raw.formatVersion, selfHeal: raw.selfHeal, fingerprint, files };
 }

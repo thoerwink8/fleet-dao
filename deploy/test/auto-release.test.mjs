@@ -66,6 +66,8 @@ const DESIRED = JSON.stringify({
   files: {
     'engine.env': { FLEET_WORK_DIR: '/var/lib/fleet-work', FLEET_ENGINE_PORTS: 'real' },
     'api.env': { FEISHU_APP_SECRET: { private: fingerprintOf(KEY, 'api.env', 'FEISHU_APP_SECRET', SECRET) } },
+    'release.env': {},
+    'france.env': {},
   },
 });
 const ENGINE_ENV = 'FLEET_WORK_DIR=/var/lib/fleet-work\nFLEET_ENGINE_PORTS=real\n';
@@ -95,7 +97,12 @@ function machine() {
     // 配置对账读到的：期望（在用那一版里的）、线上的环境文件、指纹钥匙；configThrow = 读的时候就抛
     config: {
       desired: { text: DESIRED },
-      files: { 'engine.env': { text: ENGINE_ENV }, 'api.env': { text: API_ENV } },
+      files: {
+        'engine.env': { text: ENGINE_ENV },
+        'api.env': { text: API_ENV },
+        'release.env': { text: '' },
+        'france.env': { text: '' },
+      },
       key: { text: KEY_TEXT },
     },
     configThrow: null,

@@ -27,7 +27,7 @@ const KEY = parseFingerprintKey(KEY_TEXT);
 const SECRET = 'cli_fake-飞书-9f8e7d'; // 带 fake：卫生检查认得出是编的
 const SECRET2 = 'thoerwink8/secret-canary';
 
-/** 一份期望：engine.env 两个公开值、一个私有值，api.env 一个私有值。 */
+/** 一份期望：engine.env 两个公开值、一个私有值，api.env 一个私有值，release.env 一个公开值，france.env 一项都不管。 */
 function desiredText(over = {}) {
   return JSON.stringify({
     说明: '测试用',
@@ -44,16 +44,26 @@ function desiredText(over = {}) {
         FEISHU_APP_SECRET: { private: fingerprintOf(KEY, 'api.env', 'FEISHU_APP_SECRET', SECRET) },
         FLEET_ENV: 'production',
       },
+      'release.env': { FLEET_SERVICES: 'fleet-engine fleet-api' },
+      'france.env': {},
     },
     ...over,
   });
 }
 const ENGINE = `# 注释\nFLEET_WORK_DIR=/var/lib/fleet-work\nFLEET_MACHINE_NAME=法国\nFLEET_CANARY_REPO=${SECRET2}\n`;
 const API = `FEISHU_APP_SECRET=${SECRET}\nFLEET_ENV=production\n`;
+/** 线上的四份文件，默认和期望一致；over 换掉其中几份。 */
+const files = (over = {}) => ({
+  'engine.env': { text: ENGINE },
+  'api.env': { text: API },
+  'release.env': { text: 'FLEET_SERVICES=fleet-engine fleet-api\n' },
+  'france.env': { text: '' },
+  ...over,
+});
 const live = (over = {}) => ({
   commit: 'a'.repeat(40),
   desired: { text: desiredText() },
-  files: { 'engine.env': { text: ENGINE }, 'api.env': { text: API } },
+  files: files(),
   key: { text: KEY_TEXT },
   ...over,
 });
@@ -127,6 +137,14 @@ test('期望文件：认得出的和各种认不出的', () => {
     ['多了不认识的一项', desiredText({ 别的: 1 }), /不认识的一项/],
     ['selfHeal 没写成布尔', desiredText({ selfHeal: 'no' }), /selfHeal/],
     ['不认识的文件', desiredText({ files: { 'x.env': {} } }), /不认识的文件/],
+    [
+      '少了一份受管的文件（漏写就没人比它）',
+      JSON.stringify({
+        ...JSON.parse(desiredText()),
+        files: { ...JSON.parse(desiredText()).files, 'france.env': undefined },
+      }),
+      /少了 france\.env/,
+    ],
     ['键名不合法', desiredText({ files: { 'engine.env': { 'bad-key': 'x' } } }), /键名/],
     ['公开的值带引号', desiredText({ files: { 'engine.env': { K: 'a"b' } } }), /引号/],
     ['公开的值带换行', desiredText({ files: { 'engine.env': { K: 'a\nb' } } }), /控制字符/],
@@ -139,7 +157,7 @@ test('期望文件：认得出的和各种认不出的', () => {
     ['指纹不是 64 位十六进制', desiredText({ files: { 'engine.env': { K: { private: 'abc' } } } }), /64 位/],
     [
       '有私有值却没写 fingerprint',
-      JSON.stringify({ formatVersion: 1, selfHeal: false, files: { 'api.env': { K: { private: null } } } }),
+      JSON.stringify({ ...JSON.parse(desiredText()), fingerprint: undefined }),
       /fingerprint/,
     ],
     ['指纹算法不认识', desiredText({ fingerprint: { algorithm: 'sha256', keyId: null } }), /指纹算法/],
@@ -182,7 +200,7 @@ test('线上和期望一致：ok，没有一条偏离', () => {
 
 test('线上配置被手改：报出偏离，指明是哪份文件的哪一项；线上的值不打印', () => {
   const edited = ENGINE.replace('FLEET_WORK_DIR=/var/lib/fleet-work', 'FLEET_WORK_DIR=/tmp/手改的');
-  const r = judgeConfig(live({ files: { 'engine.env': { text: edited }, 'api.env': { text: API } } }));
+  const r = judgeConfig(live({ files: files({ 'engine.env': { text: edited }, 'api.env': { text: API } }) }));
   assert.equal(r.result, 'drift');
   assert.deepEqual(
     r.drift.map((d) => [d.id, d.kind]),
@@ -195,7 +213,9 @@ test('线上配置被手改：报出偏离，指明是哪份文件的哪一项�
 
 test('私有值不一致：只报「不一致」，结果和报警里搜不到线上的值，也搜不到原来的值', () => {
   const changed = API.replace(SECRET, 'cli_手改成的新密钥');
-  const r = judgeConfig(live({ files: { 'engine.env': { text: ENGINE }, 'api.env': { text: changed } } }));
+  const r = judgeConfig(
+    live({ files: files({ 'engine.env': { text: ENGINE }, 'api.env': { text: changed } }) }),
+  );
   assert.equal(r.result, 'drift');
   assert.deepEqual(
     r.drift.map((d) => [d.id, d.kind]),
@@ -209,7 +229,7 @@ test('缺了、写重了、被注释掉、期望里没有的：各报一条，�
   const engine =
     '# FLEET_WORK_DIR=/var/lib/fleet-work\nFLEET_MACHINE_NAME=法国\nFLEET_MACHINE_NAME=法国\n' +
     `FLEET_CANARY_REPO=${SECRET2}\nFLEET_HAND_ADDED=机密的东西\n`;
-  const r = judgeConfig(live({ files: { 'engine.env': { text: engine }, 'api.env': { text: API } } }));
+  const r = judgeConfig(live({ files: files({ 'engine.env': { text: engine }, 'api.env': { text: API } }) }));
   assert.deepEqual(
     r.drift.map((d) => [d.id, d.kind]),
     [
@@ -254,7 +274,7 @@ test('指纹钥匙读不到、认不出、不是期望记的那把、期望还�
   ]) {
     const edited = ENGINE.replace('FLEET_MACHINE_NAME=法国', 'FLEET_MACHINE_NAME=别处');
     const r = judgeConfig(
-      live({ ...over, files: { 'engine.env': { text: edited }, 'api.env': { text: API } } }),
+      live({ ...over, files: files({ 'engine.env': { text: edited }, 'api.env': { text: API } }) }),
     );
     assert.equal(r.unchecked.length, 1, `${what}：只记一句，不展开成一堆不一致`);
     assert.match(r.unchecked[0], /私有值 2 项都没比/, what);
@@ -274,11 +294,15 @@ test('私有值还没记指纹、线上文件读不到或认不出：那几项�
   assert.equal(r.result, 'unchecked');
   assert.deepEqual(r.unchecked, ['api.env 的 FEISHU_APP_SECRET 是私有值，仓里还没记它的指纹']);
   r = judgeConfig(
-    live({ files: { 'engine.env': { error: '没有 /etc/fleet-dao/engine.env' }, 'api.env': { text: API } } }),
+    live({
+      files: files({ 'engine.env': { error: '没有 /etc/fleet-dao/engine.env' }, 'api.env': { text: API } }),
+    }),
   );
   assert.equal(r.result, 'unchecked');
   assert.match(r.unchecked.join(), /engine\.env 读不到.*3 项都没比/);
-  r = judgeConfig(live({ files: { 'engine.env': { text: 'A="没配上\n' }, 'api.env': { text: API } } }));
+  r = judgeConfig(
+    live({ files: files({ 'engine.env': { text: 'A="没配上\n' }, 'api.env': { text: API } }) }),
+  );
   assert.match(r.unchecked.join(), /engine\.env 认不出/);
 });
 
@@ -304,8 +328,7 @@ test('命令行：算指纹只打印指纹；对账不打印值、退出码分�
     writeFileSync(join(dir, 'desired.json'), desiredText());
     const { mkdirSync } = await import('node:fs');
     mkdirSync(etc);
-    writeFileSync(join(etc, 'engine.env'), ENGINE);
-    writeFileSync(join(etc, 'api.env'), API);
+    for (const [name, got] of Object.entries(files())) writeFileSync(join(etc, name), got.text);
     const run = async (...argv) => {
       const out = [];
       const err = [];
