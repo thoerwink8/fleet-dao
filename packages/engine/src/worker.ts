@@ -79,7 +79,7 @@ export interface CreateEngineWorkerOptions {
   /** 签 fleet 通行证：接驾驶舱后端的 signAgentToken（`@fleet-dao/api/agent-token`，密钥 FLEET_AGENT_TOKEN_SECRET）。 */
   signAgentToken: (claims: AgentTokenClaims) => string;
   /**
-   * 接活之前先收掉上一轮留下的会话（fleet-agent-scope list 再逐个 stop），返回收了几个。
+   * 接活之前先收掉上一轮留下的会话（fleet-agent-scope list 再逐个 stop，再清它们的临时目录），返回收了几个会话。
    * 引擎被强杀时会话留在自己的 scope 里；它们的输出管道断了、接不上，工作流会按 SESSION_LOST 续会话重起。
    */
   reapOrphanSessions?: () => Promise<number>;

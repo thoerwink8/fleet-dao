@@ -39,6 +39,21 @@ describe('buildSessionEnv', () => {
     expect(env.PATH).toBe(['/opt/fleet/bin', '/usr/bin'].join(delimiter));
   });
 
+  it('TMPDIR 不从宿主抄（那是引擎自己的）；给了会话自己的临时目录，TMPDIR、TEMP、TMP 都指向它，已有的写法（Temp）照原样改', () => {
+    const host = { ...base, TMPDIR: '/var/lib/fleet-dao/engine/tmp', Temp: 'C:\\engine-temp' };
+    expect(buildSessionEnv({ base: host, fleetApi: 'a', fleetToken: 'b' }).TMPDIR).toBeUndefined();
+    const own = '/var/lib/fleet-work/_tmp/run-1';
+    const env = buildSessionEnv({ base: host, fleetApi: 'a', fleetToken: 'b', tmpDir: own });
+    expect(env).toMatchObject({ TMPDIR: own, Temp: own, TMP: own });
+    expect(env.TEMP).toBeUndefined();
+  });
+
+  it('【故意造出的失败】会话的临时目录不是绝对路径：明确拒，不拿相对路径（会落进工作树）当临时目录', () => {
+    expect(() => buildSessionEnv({ base: {}, fleetApi: 'a', fleetToken: 'b', tmpDir: 'tmp/run-1' })).toThrow(
+      '绝对路径',
+    );
+  });
+
   it.each([
     'GH_TOKEN',
     'GH_ENTERPRISE_TOKEN',
