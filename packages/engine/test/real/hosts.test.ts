@@ -1,6 +1,7 @@
-// 执行方式的驱动（#212）：会话用户怎么定、cursor-agent 的起法（会话用户自己读 API 密钥、现找版本目录）、两家驱动拼的参数、
-// 报告整理成的同一个形状（读不到的不记成 0）。起法的两段 sh 都真跑（本机的 sh、假的 cursor-agent 脚本），每条失败路径都故意
-// 造一次；看属主、权限的那几条只在 Linux 上跑（Windows 的 Git Bash 在 NTFS 上表示不了 600）。
+// 执行方式的驱动（#212、#266）：会话用户怎么定、cursor-agent 的起法（会话用户自己读 API 密钥、现找版本目录）、grok 的起法
+// （会话用户先看它在不在）、三家驱动拼的参数、报告整理成的同一个形状（读不到的不记成 0）。起法的 sh 都真跑（本机的 sh、假的
+// cursor-agent / grok 脚本），每条失败路径都故意造一次；看属主、权限的那几条只在 Linux 上跑（Windows 的 Git Bash 在 NTFS 上
+// 表示不了 600）。
 import { randomBytes, randomUUID } from 'node:crypto';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -17,6 +18,9 @@ import {
   cursorLaunchCommand,
   DEFAULT_CURSOR_API_KEY_FILE,
   DEFAULT_CURSOR_VERSIONS_DIR,
+  DEFAULT_GROK_BIN,
+  GROK_MISSING,
+  grokLaunchCommand,
   type HostRunners,
   type HostRunSpec,
   hostDrivers,
@@ -30,8 +34,12 @@ import {
   CURSOR_NO_LOGIN,
   CURSOR_SESSION,
   type FakeCursorScript,
+  type FakeGrokScript,
   fakeCursorRun,
+  fakeGrokRun,
   fakeRun,
+  GROK_NOT_SIGNED_IN,
+  grokAnswered,
 } from './fixtures.ts';
 
 describe('会话用户怎么定', () => {
@@ -64,9 +72,9 @@ describe('会话用户怎么定', () => {
 });
 
 describe('接上的执行方式', () => {
-  it('Claude Code 和 cursor-agent；报错里的说法跟着这张表', () => {
-    expect([...WIRED_HOSTS]).toEqual(['claude-code', 'cursor-agent']);
-    expect(wiredHostNames()).toBe('Claude Code、Cursor Agent');
+  it('Claude Code、cursor-agent 和 grok；报错里的说法跟着这张表', () => {
+    expect([...WIRED_HOSTS]).toEqual(['claude-code', 'cursor-agent', 'grok']);
+    expect(wiredHostNames()).toBe('Claude Code、Cursor Agent、Grok 命令行');
   });
 });
 
@@ -489,6 +497,7 @@ function drivers(run: HostRunners) {
   return hostDrivers({
     claudeCommand: (user) => [`/opt/fake/${user}/reclaude`],
     cursorCommand: (user) => [`/opt/fake/${user}/cursor-agent`],
+    grokCommand: (user) => [`/opt/fake/${user}/grok`],
     run,
   });
 }

@@ -7,6 +7,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
+  type AgentRunOptions,
   type ClaudeCodeRunOptions,
   type ClaudeCodeRunReport,
   type ClaudeCodeRunSpec,
@@ -14,6 +15,9 @@ import {
   type CursorRunReport,
   type CursorRunSpec,
   CursorStreamReader,
+  type GrokRunReport,
+  type GrokRunSpec,
+  GrokStreamReader,
   type KillReason,
   type RateLimitReading,
   type SessionUser,
@@ -574,6 +578,166 @@ export function fakeCursorRun(script: (spec: CursorRunSpec, n: number) => FakeCu
     return finish({ exitCode: s.exitCode === undefined ? 0 : s.exitCode, signal: null });
   };
   return { run, specs, options, count: () => n };
+}
+
+// ---- grok
+
+const GROK_FIXTURES = new URL('../../../adapters/test/fixtures/grok/', import.meta.url);
+
+/** 法国上真跑的 grok 过程记录（一行一帧）和当时的工作目录（读取器按它把路径换成相对的）。 */
+export function grokFixture(name: string): { lines: string[]; cwd: string } {
+  const lines = readFileSync(new URL(`${name}.ndjson`, GROK_FIXTURES), 'utf8')
+    .split('\n')
+    .filter((l) => l.trim());
+  const meta = JSON.parse(readFileSync(new URL(`${name}.meta.json`, GROK_FIXTURES), 'utf8')) as {
+    cwd: string;
+  };
+  return { lines, cwd: meta.cwd };
+}
+
+/** grok 1.0.41 在会话用户家里没有登录态时无头模式的原话（法国实跑 2026-09-27：error 帧、stderr 各一遍，退出 1）。 */
+export const GROK_NOT_SIGNED_IN =
+  'Not signed in. To authenticate without a browser, run:\n  grok login --device-code\n\n' +
+  'Alternatively, set the XAI_API_KEY environment variable or run `grok login` on a machine with a browser.';
+
+/** grok 登录过期、续不上时的原话（xai-org/grok-build 源码 crates/codegen/xai-grok-login/src/error.rs）。 */
+export const GROK_TOKEN_EXPIRED = 'Token expired. Run `grok login` to re-authenticate.';
+
+/** 没有真管道、也没有终端时 grok 打开 /dev/stdin 的报错（法国 2026-09-27：直接跑 grok status 撞到的）。 */
+export const GROK_NO_STDIN = 'Error: No such device or address (os error 6)';
+
+/** 探针要的那种终帧：回答 OK（text 帧）、终帧带会话号和实际模型。 */
+export function grokAnswered(sessionId: string, text = 'OK', model = 'grok-4.7-build'): Record<string, unknown>[] {
+  return [
+    { type: 'text', data: text },
+    {
+      type: 'end',
+      stopReason: 'end_turn',
+      sessionId,
+      usage: { input_tokens: 15244, output_tokens: 2, cache_read_input_tokens: 12032 },
+      num_turns: 1,
+      modelUsage: { [model]: { inputTokens: 15244, outputTokens: 2 } },
+    },
+  ];
+}
+
+export interface FakeGrokScript {
+  /** 回放哪一份真跑夹具（不带后缀）；不给 = 一帧都没有。 */
+  replay?: string;
+  replayLines?: number;
+  /** 接在回放后面的帧。 */
+  frames?: Record<string, unknown>[];
+  /**
+   * 终帧回的会话号照不照夹具原样：默认换成这一轮交给插头的号（真 grok 带 -s / -r 起，终帧回的就是它）；
+   * 给 true 就照夹具原样，造「回的号对不上」。
+   */
+  keepSessionId?: boolean;
+  spawnError?: string;
+  act?: (ctx: { spec: GrokRunSpec; signal: AbortSignal }) => Promise<void> | void;
+  stderr?: string;
+  exitCode?: number | null;
+  killed?: Exclude<KillReason, 'aborted'>;
+}
+
+/**
+ * 假的 grok 插头：不起进程，把夹具逐行喂给真的读取器（GrokStreamReader），事件照读取器给的发，报告里的 stream 就是读取器的
+ * 摘要（会话号、实际模型只在终帧里：跑完由 grokRunFacts 核对）。被 abort 当成引擎叫停收场。
+ */
+export function fakeGrokRun(script: (spec: GrokRunSpec, n: number) => FakeGrokScript) {
+  const specs: GrokRunSpec[] = [];
+  const options: AgentRunOptions[] = [];
+  let n = 0;
+  const run = async (spec: GrokRunSpec, opts: AgentRunOptions): Promise<GrokRunReport> => {
+    n += 1;
+    specs.push(spec);
+    options.push(opts);
+    const s = script(spec, n);
+    const startedAt = new Date().toISOString();
+    const fixture = s.replay ? grokFixture(s.replay) : { lines: [], cwd: spec.cwd };
+    const reader = new GrokStreamReader({
+      runId: spec.runId,
+      cwd: fixture.cwd,
+      testCommands: spec.testCommands ?? [],
+    });
+    const finish = (extra: Partial<GrokRunReport> & Pick<GrokRunReport, 'exitCode' | 'signal'>) => ({
+      runId: spec.runId,
+      requestedModel: spec.model,
+      session: spec.session,
+      stragglers: 0,
+      leftovers: 0,
+      stderrTail: s.stderr ?? '',
+      startedAt,
+      endedAt: new Date().toISOString(),
+      wallMs: 1,
+      lines: 0,
+      droppedLines: 0,
+      stream: reader.summary(),
+      ...extra,
+    });
+    // 和真插头一样先过帮手的参数校验（见 fakeRun）。
+    let scopeError: string | undefined;
+    if (spec.cgroup) {
+      try {
+        scopePrefix(spec.cgroup, '/fleet-test-cwd');
+      } catch (err) {
+        scopeError = err instanceof Error ? err.message : String(err);
+      }
+    }
+    const spawnError = scopeError ?? s.spawnError;
+    if (spawnError) return finish({ exitCode: null, signal: null, spawnError });
+    await opts.onSpawn?.({ pid: 4545, runId: spec.runId, scope: `fleet-agent-${spec.runId}.scope`, startedAt });
+    const signal = opts.signal ?? new AbortController().signal;
+    await s.act?.({ spec, signal });
+    const lines = [
+      ...fixture.lines.slice(0, s.replayLines ?? fixture.lines.length),
+      ...(s.frames ?? []).map((f) => JSON.stringify(f)),
+    ].map((line) => {
+      if (s.keepSessionId) return line;
+      const frame = JSON.parse(line) as Record<string, unknown>;
+      return frame.type === 'end' ? JSON.stringify({ ...frame, sessionId: spec.session.id }) : line;
+    });
+    for (const line of lines) {
+      if (signal.aborted) break;
+      for (const event of reader.read(line).events) void opts.onEvent?.(event);
+    }
+    for (const event of reader.flush()) void opts.onEvent?.(event);
+    const at = new Date().toISOString();
+    if (signal.aborted)
+      return finish({ exitCode: null, signal: 'SIGTERM', killed: { reason: 'aborted', at } });
+    if (s.killed) return finish({ exitCode: null, signal: 'SIGKILL', killed: { reason: s.killed, at } });
+    return finish({ exitCode: s.exitCode === undefined ? 0 : s.exitCode, signal: null });
+  };
+  return { run, specs, options, count: () => n };
+}
+
+/**
+ * 一条 grok 路由（和目录样例同一个样子）：SuperGrok 的池不绑会话用户，模型 grok-4.7。stages 给了就挂进这些阶段的调度台
+ * （探针只探有阶段在用的路由）。
+ */
+export async function addGrokRoute(
+  db: Db,
+  over: { poolId?: string; stages?: StageKind[]; upstreamModel?: string } = {},
+): Promise<{ routeId: string; poolId: string }> {
+  const poolId = over.poolId ?? 'grok';
+  const routeId = `${poolId}:grok-4.7:grok`;
+  await db
+    .insert(pools)
+    .values({ id: poolId, channelId: 'grok-subscription', maxConcurrency: 6 })
+    .onConflictDoNothing();
+  await db.insert(routes).values({
+    id: routeId,
+    channelId: 'grok-subscription',
+    poolId,
+    modelId: 'grok-4.7',
+    hostId: 'grok',
+    alive: true,
+    ...PROBED_OK,
+    upstreamModel: over.upstreamModel ?? 'grok-4.7',
+  });
+  for (const stage of over.stages ?? []) {
+    await db.insert(stagePolicyRoutes).values({ stage, routeId, position: 9, enabled: true });
+  }
+  return { routeId, poolId };
 }
 
 /**

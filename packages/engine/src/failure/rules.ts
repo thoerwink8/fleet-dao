@@ -255,7 +255,26 @@ export const RULES: readonly FailureRule[] = [
       '照原因把{machine}上{user}的 Cursor 密钥放好（docs/ops.md 第五节「会话用户的 Cursor 密钥」：~/.cursor/fleet-api-key 属它自己、600、只有一行密钥、不带换行，重放用那一节的命令）；然后在驾驶舱点「继续」',
     resumeAfterPark: true,
   },
-  // 登录失效要人重新登录（设备被撤销单独归 DV1，Cursor 的归 AU5、AU6）。
+  // grok（SuperGrok 订阅的 Grok Build 命令行，#266）没登录或登录续不上：无头模式一样凭据都没有是「Not signed in. To authenticate
+  // without a browser, run: grok login --device-code …」（error 帧和 stderr 各一遍、退出 1，法国实跑 2026-09-27）；登录过期、
+  // 续不上是「Token expired. Run `grok login` to re-authenticate.」「Session expired. Run `grok login` …」「Your auth token is
+  // invalid or expired. Run `grok login` …」「Authentication rejected by server. Run `grok login` …」「Auth recovery exhausted;
+  // re-authentication required.」（xai-org/grok-build 源码原文）。修法是确定的：在那台机器上以会话用户跑 grok login
+  // --device-code、在任意设备的浏览器里确认。排在 AU2 前面：AU2 的「token expired」「not logged in」也认得几句，但它没写修法。
+  // 没管道、没终端时打开 stdin 报的「No such device or address (os error 6)」不是没登录（起法坏了，归 CF1）。
+  {
+    id: 'AU7',
+    title: 'Grok 登录失效',
+    text: /Not signed in\. |Run `grok login`|grok login --device-code|Auth recovery exhausted/i,
+    ladder: ['swapRoute', 'park'],
+    avoid: { scope: 'pool', shared: true, until: 'none' },
+    alert: true,
+    routeOutcome: 'neutral',
+    humanFix:
+      '在{machine}上以{user}跑 grok login --device-code（docs/ops.md 第五节「会话用户的 grok」），在任意设备的浏览器里打开它给的链接、确认那串码；然后在驾驶舱点「继续」',
+    resumeAfterPark: true,
+  },
+  // 登录失效要人重新登录（设备被撤销单独归 DV1，Cursor 的归 AU5、AU6，Grok 的归 AU7）。
   {
     id: 'AU2',
     title: '登录失效',
@@ -328,11 +347,13 @@ export const RULES: readonly FailureRule[] = [
   // 工作区信任：cursor-agent -p 在没信任过的目录里、没带 --trust / --force 时，stderr 打一段「⚠ Workspace Trust Required」
   // 就退出（插头固定带 --trust，撞上就是起法坏了；插头把那一句从整段里捞出来，最后一行是「Pass --trust, --yolo, or -f if you
   // trust this directory」）；带了 --trust 却写不下信任记录是「Error: Failed to trust workspace at <目录>」。
+  // grok 从 /dev/stdin 读提示词要真管道：插头前面垫了一个 cat，没垫上（或者 stdin 不是管道也不是终端）时打开 stdin 报
+  // 「No such device or address (os error 6)」（ENXIO，法国实跑 2026-09-27），是起法坏了，不是没登录。
   {
     id: 'CF1',
     title: '执行方式或路由配置不对',
     codes: ['cli_too_old', 'agent_unconfigured', 'unsupported_capability', 'protocol_mismatch'],
-    text: /Workspace Trust|if you trust this directory|Failed to trust workspace|ambiguous across providers|requires --verbose|unexpected argument|unknown option|spawn \S+ (?:ENOENT|EACCES)/i,
+    text: /Workspace Trust|if you trust this directory|Failed to trust workspace|ambiguous across providers|requires --verbose|unexpected argument|unknown option|spawn \S+ (?:ENOENT|EACCES)|No such device or address \(os error 6\)/i,
     ladder: ['swapRoute', 'park'],
     avoid: { scope: 'route', shared: true, until: 'none' },
     alert: true,

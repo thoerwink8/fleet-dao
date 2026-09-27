@@ -124,6 +124,20 @@ describe('grok 过程记录', () => {
     });
     expect(summary.unknownFrames).toEqual({});
     expect(summary.errors).toEqual([]);
+    // 终帧里没有回答正文：最后一段回答是最后一次 say（探针靠它看是不是只回了 OK）
+    expect(summary.answer).toBe('好了');
+  });
+
+  it('最后一段回答：只认最后一次说的整段；一句都没说就没有，不记成空串', () => {
+    const reader = new GrokStreamReader({ runId: 'r1', cwd: '/w', now: () => NOW });
+    expect(reader.summary().answer).toBeUndefined();
+    reader.read(JSON.stringify({ type: 'text', data: '先看看' }));
+    reader.read(JSON.stringify({ type: 'usage', usage: {} }));
+    reader.read(JSON.stringify({ type: 'text', data: 'O' }));
+    reader.read(JSON.stringify({ type: 'text', data: 'K' }));
+    // 还没遇到下一帧：flush 时才交出去（进程没发终帧就断了也一样）
+    reader.flush();
+    expect(reader.summary().answer).toBe('OK');
   });
 
   it('待办清单：plan 帧是整张单子，状态换成 fleet 的写法', () => {

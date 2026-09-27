@@ -222,6 +222,8 @@ export interface SessionPortsDeps {
   claudeCommand(user: SessionUser): string[];
   /** 起 cursor-agent 的命令（绝对路径）：装在会话用户自己家里，生产用 hosts.ts 的 cursorLaunchCommand 现找版本目录。 */
   cursorCommand(user: SessionUser): string[];
+  /** 起 grok 的命令（绝对路径）：装在会话用户自己家里，生产用 hosts.ts 的 grokLaunchCommand 先看在不在。 */
+  grokCommand(user: SessionUser): string[];
   forkMaxContextTokens?: number;
   /** 经 sudo 调的帮手（fleet-agent-scope）；测试里换成假的。 */
   helper?: string;
@@ -428,6 +430,7 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
   const drivers = hostDrivers({
     claudeCommand: deps.claudeCommand,
     cursorCommand: deps.cursorCommand,
+    grokCommand: deps.grokCommand,
     ...(deps.run ? { run: deps.run } : {}),
   });
   const forkMax = deps.forkMaxContextTokens ?? DEFAULT_FORK_MAX_CONTEXT_TOKENS;
