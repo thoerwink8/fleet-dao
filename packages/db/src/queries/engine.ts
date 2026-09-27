@@ -74,6 +74,8 @@ export interface SessionRunState {
   testCommand: string | null;
   /** session_stops 里有这一行就给出。 */
   stopRequested: { at: Date; reason: string } | null;
+  /** 输出确认到哪一行（见 schema 的 output_seq）；空 = 一行都还没确认。 */
+  outputSeq: number | null;
 }
 
 function mapSessionRun(
@@ -102,6 +104,7 @@ function mapSessionRun(
     sessionCostUsd: row.sessionCostUsd,
     testCommand: row.testCommand,
     stopRequested: stop ? { at: stop.requestedAt, reason: stop.reason } : null,
+    outputSeq: row.outputSeq,
   };
 }
 
@@ -650,7 +653,7 @@ export async function upsertAlert(
   db: Db,
   input: {
     dedupeKey: string;
-    level: 'alert' | 'decision';
+    level: 'alert' | 'decision' | 'daily';
     taskId: string | null;
     title: string;
     body: string;
@@ -750,11 +753,20 @@ export const PROGRESS_BATCH_MAX = 500;
  * 会话行不在回 run_not_found（一条都不写）；plan 的 payload 没有 steps 数组、条数超上限、时刻读不出都直接抛——
  * 这些是引擎自己的错，不能静默丢（看板的进度条会变成 0/0）。整批一个语句，要么全进要么全不进。
  */
+/**
+ * 写一批进度事件。给了 outputSeq（这批事件出自会话输出的哪一行为止）就在同一个事务里把 session_runs.output_seq 推到它
+ * （只往前推）：事件进库和「确认到哪一行」要么都成、要么都不成，引擎重启后接回会话按它去重。
+ */
 export async function appendProgressEvents(
   db: Db,
   runId: string,
   events: readonly { at: Date; kind: ProgressKind; payload: unknown }[],
+  options: { outputSeq?: number } = {},
 ): Promise<'written' | 'run_not_found'> {
+  const seq = options.outputSeq;
+  if (seq !== undefined && (!Number.isInteger(seq) || seq < 0)) {
+    throw new Error(`输出序号要是不小于 0 的整数，给的是 ${seq}`);
+  }
   if (events.length > PROGRESS_BATCH_MAX) {
     throw new Error(`一批进度事件 ${events.length} 条，超过上限 ${PROGRESS_BATCH_MAX}`);
   }
@@ -767,10 +779,20 @@ export async function appendProgressEvents(
   }
   const [run] = await db.select({ id: sessionRuns.id }).from(sessionRuns).where(eq(sessionRuns.id, runId));
   if (!run) return 'run_not_found';
-  if (events.length === 0) return 'written';
-  await db
-    .insert(progressEvents)
-    .values(events.map((e) => ({ runId, at: e.at, kind: e.kind, payload: e.payload })));
+  if (events.length === 0 && seq === undefined) return 'written';
+  await db.transaction(async (tx) => {
+    if (events.length > 0) {
+      await tx
+        .insert(progressEvents)
+        .values(events.map((e) => ({ runId, at: e.at, kind: e.kind, payload: e.payload })));
+    }
+    if (seq !== undefined) {
+      await tx
+        .update(sessionRuns)
+        .set({ outputSeq: sql`greatest(coalesce(${sessionRuns.outputSeq}, -1), ${seq})` })
+        .where(eq(sessionRuns.id, runId));
+    }
+  });
   return 'written';
 }
 

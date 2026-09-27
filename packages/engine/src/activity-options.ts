@@ -130,6 +130,9 @@ export const NON_RETRYABLE_CODES: readonly string[] = [
   'INVALID_INPUT',
 ];
 
+/** 看守（awaitSession）最多试几次：见 profileOptions 的 watch。 */
+export const WATCH_ATTEMPTS = 12;
+
 function retry(maximumAttempts: number, initialInterval: string, maximumInterval: string): RetryPolicy {
   return {
     maximumAttempts,
@@ -159,10 +162,12 @@ export function profileOptions(profile: Profile, limits: Limits): ActivityOption
       };
     case 'watch':
       // 会话本身在工人外面跑；看守丢了就重新接上（接不上会回 SESSION_LOST），所以可以重试。
+      // 次数给足：会话脱开引擎跑（real/session-io.ts），每发布、重启一次引擎，看守就随旧进程断一次、在新工人上接回，
+      // 一个长会话赶上几次发布不该把次数用完（用完了工作流会当成这一步丢了、另起会话，原来那个还在跑）
       return {
         startToCloseTimeout: `${limits.sessionMinutes} minutes`,
         heartbeatTimeout,
-        retry: retry(3, '2 seconds', '30 seconds'),
+        retry: retry(WATCH_ATTEMPTS, '2 seconds', '30 seconds'),
       };
     case 'ci':
       return {

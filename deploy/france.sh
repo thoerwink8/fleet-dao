@@ -39,6 +39,8 @@ source "$DEPLOY_DIR/lib/cursor-agent.sh"
 source "$DEPLOY_DIR/lib/cursor-key.sh"
 # shellcheck source=lib/grok.sh
 source "$DEPLOY_DIR/lib/grok.sh"
+# shellcheck source=lib/mirasim.sh
+source "$DEPLOY_DIR/lib/mirasim.sh"
 # shellcheck source=lib/agents-sync.sh
 source "$DEPLOY_DIR/lib/agents-sync.sh"
 # shellcheck source=lib/app-config.sh
@@ -151,6 +153,9 @@ CARPOOL_SHIM=/home/fleet-agent-carpool/bin/carpool-run.sh
 # AI 会话的工作树的根（引擎真端口的 FLEET_WORK_DIR，fleet-agent-scope 的 WORK_BASE）、引擎自己的状态目录（FLEET_ENGINE_STATE_DIR）
 WORK_DIR=/var/lib/fleet-work
 ENGINE_STATE_DIR=/var/lib/fleet-dao/engine
+# 会话脱开引擎跑的收发目录的根（引擎的 FLEET_SESSION_IO_DIR 默认就是它，packages/engine/src/real/session-io.ts）：归 fleet、711——
+# 会话用户按路径进得去自己那一格（写输出、读提示词），列不出别的会话；不在或权限不对，引擎照旧接管道、发布还会停会话（推提醒）
+SESSION_IO_DIR=/var/lib/fleet-sessions
 # 发布脚本往香港传驾驶舱静态文件用的钥匙（只有 root 读得到），和钉住的香港 sshd 主机钥匙
 WEB_UPLOAD_KEY=/etc/fleet-dao/web-upload.key
 HK_KNOWN_HOSTS=/etc/fleet-dao/hk-known-hosts
@@ -235,6 +240,7 @@ setup_identity() {
   ensure_dir "$DEMO_DIR" fleet:fleet 750
   # 引擎自己的临时目录（从镜像打的 bundle）和存档（没合并就收的树里没提交的改动）放在这下面，引擎自己建 tmp/、archive/
   ensure_dir "$ENGINE_STATE_DIR" fleet:fleet 750
+  ensure_dir "$SESSION_IO_DIR" fleet:fleet 711
   # AI 会话的工作树的根：归 root、别人写不进（会话用户没法在路径上塞符号链接）；每棵树由 fleet-agent-scope 建、归会话用户 700
   ensure_dir "$WORK_DIR" root:root 755
   ensure_dir /var/log/fleet-dao fleet:fleet 750
@@ -915,6 +921,7 @@ readback() {
   readback_pnpm
   readback_cursor_agent
   readback_grok
+  readback_mirasim
   readback_wireguard
   readback_firewall
   readback_session_ports
@@ -1251,7 +1258,7 @@ readback_session_ports() {
 readback_dirs() {
   local spec path want have bad=0
   for spec in "/srv/fleet-dao root:root 755" "$RELEASES_DIR root:root 755" "/var/lib/fleet-dao fleet:fleet 750" "$DEMO_DIR fleet:fleet 750" "/var/log/fleet-dao fleet:fleet 750" \
-    "$ENGINE_STATE_DIR fleet:fleet 750" "$WORK_DIR root:root 755" \
+    "$ENGINE_STATE_DIR fleet:fleet 750" "$SESSION_IO_DIR fleet:fleet 711" "$WORK_DIR root:root 755" \
     "/opt/fleet-dao root:root 755" "/home/fleet fleet:fleet 750" "$TEMPORAL_ENV root:fleet 640" "$TEMPORAL_CONFIG root:fleet 640"; do
     path=${spec%% *}
     want=${spec#* }
@@ -1399,6 +1406,19 @@ readback_grok() {
     fi
     check_grok "$u" "$(grok_bin "$u")"
     check_grok_login "$u" "$(grok_auth_file "$u")" "$(grok_bin "$u")"
+  done
+}
+
+# 会话用户自己的 Mirasim 服务（lib/mirasim.sh，#345）：这一步不装，只看有没有——创始人从自己电脑上的 Mirasim 桌面端
+# 以 SSH 远程模式装、登录（docs/ops.md 第五节「会话用户的 Mirasim」）。
+readback_mirasim() {
+  local u
+  for u in "${SESSION_USERS[@]}"; do
+    if ! id "$u" >/dev/null 2>&1; then
+      pending "$u 这个用户还没有，Mirasim 服务没查"
+      continue
+    fi
+    check_mirasim "$u"
   done
 }
 

@@ -5,6 +5,21 @@ import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { num, optional, rec, str } from '../stream-kit.ts';
 
+/**
+ * 读账本目录、读账本文件怎么做：默认直接读本机文件（开发机、测试）。账本在别的系统用户家里、调用方（引擎）进不去那个
+ * 家目录时换成这个——例如经 fleet-agent-scope 以那个会话用户的身份读（real/index.ts 的生产装配）。readdir 找不到目录
+ * 要抛一个 code 是 'ENOENT' 的错（和 node:fs 一样），不然「没有这个会话的目录」和「读不了账本」这两种没法分开报。
+ */
+export interface LedgerFs {
+  readdir(dir: string): Promise<string[]>;
+  readFile(path: string): Promise<string>;
+}
+
+const nodeLedgerFs: LedgerFs = {
+  readdir: (dir) => readdir(dir),
+  readFile: (path) => readFile(path, 'utf8'),
+};
+
 export interface LedgerRow {
   /** 毫秒时间戳。 */
   at?: number;
@@ -31,13 +46,14 @@ export async function readMirasimLedger(
   dir: string,
   sessionKey: string,
   since?: number,
+  fs: LedgerFs = nodeLedgerFs,
 ): Promise<LedgerReading> {
   const uuid = sessionKey.slice(sessionKey.indexOf(':') + 1);
   if (!/^[0-9a-f-]{36}$/i.test(uuid)) return { state: 'unknown', detail: `会话号认不出：${sessionKey}` };
   const folder = join(dir, uuid);
   let names: string[];
   try {
-    names = (await readdir(folder)).filter((n) => n.startsWith('index-') && n.endsWith('.ndjson'));
+    names = (await fs.readdir(folder)).filter((n) => n.startsWith('index-') && n.endsWith('.ndjson'));
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     return {
@@ -54,7 +70,7 @@ export async function readMirasimLedger(
   for (const name of names.sort()) {
     let text: string;
     try {
-      text = await readFile(join(folder, name), 'utf8');
+      text = await fs.readFile(join(folder, name));
     } catch (err) {
       return { state: 'unknown', detail: `读不了账本文件 ${name}：${(err as NodeJS.ErrnoException).code}` };
     }

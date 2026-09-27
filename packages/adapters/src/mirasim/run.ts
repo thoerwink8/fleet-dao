@@ -6,11 +6,17 @@
 import { stat } from 'node:fs/promises';
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { ProgressEvent } from '@fleet-dao/shared';
-import { CallbackGate } from '../cli-run.ts';
+import { CallbackGate, type LineMeta } from '../cli-run.ts';
 import type { RunFacts, RunSummary } from '../judge.ts';
 import { looksLikeQuotaExhausted, num, rec, str } from '../stream-kit.ts';
 import type { KillReason } from '../types.ts';
-import { type LedgerReading, type LedgerRouting, ledgerRouting, readMirasimLedger } from './ledger.ts';
+import {
+  type LedgerFs,
+  type LedgerReading,
+  type LedgerRouting,
+  ledgerRouting,
+  readMirasimLedger,
+} from './ledger.ts';
 import { MirasimSession } from './session.ts';
 import type { MirasimConnect, MirasimFrame, MirasimWire } from './wire.ts';
 
@@ -73,7 +79,14 @@ export interface MirasimAccepted {
 
 export interface MirasimRunOptions {
   connect: MirasimConnect;
-  onEvent?: (event: ProgressEvent) => unknown;
+  /**
+   * meta：和 cli-run.ts 的 spawn 类插头共用同一个形状（session-io.ts 的接回要用），但 Mirasim 没有「进程脱开引擎再
+   * 接回」这件事——工具是在已经在跑的 Mirasim 服务里执行的，引擎自己重启只是这条 ws 断了重连、重订阅（session.ts
+   * 的 seq 自己会丢旧快照、拒绝倒退的补丁），不是接一个留在磁盘上的收发目录。所以这里的 seq 只是单调递增、
+   * replay 恒为 false：Mirasim 的事件在进 onEvent 之前已经被 MirasimSession 去重过，没有「重放上一个引擎处理过的
+   * 行」这个概念。
+   */
+  onEvent?: (event: ProgressEvent, meta: LineMeta) => unknown;
   /** 服务端接下了：引擎记下 sessionKey，重启后用 stopMirasimSession 收掉它。 */
   onAccepted?: (info: MirasimAccepted) => unknown;
   signal?: AbortSignal;
@@ -83,6 +96,11 @@ export interface MirasimRunOptions {
    * 走中转（route=cloud）时不给就判「中转没查成」：快照说 done 不等于上游真干了活。
    */
   ledgerDir?: string;
+  /**
+   * 账本怎么读：不给就直接读本机文件系统（开发机、测试）。账本在别的系统用户家里、调用方（引擎）进不去那个家目录时
+   * 换成这个——例如经 fleet-agent-scope 以那个会话用户的身份读（real/index.ts 的生产装配）。
+   */
+  ledgerFs?: LedgerFs;
 }
 
 export interface MirasimRunReport {
@@ -196,8 +214,13 @@ export async function runMirasim(
   };
   let control: MirasimWire | undefined;
   let sub: MirasimWire | undefined;
+  let eventSeq = -1;
   const deliver = (events: ProgressEvent[]) => {
-    for (const event of events) gate.call(() => options.onEvent?.(event));
+    for (const event of events) {
+      eventSeq += 1;
+      const meta: LineMeta = { seq: eventSeq, replay: false };
+      gate.call(() => options.onEvent?.(event, meta));
+    }
   };
   const done = async (): Promise<MirasimRunReport> => {
     control?.close();
@@ -421,7 +444,7 @@ export async function runMirasim(
     // 中转路由要看到起针之后的 2xx：行是调用结束后才写的，刚结束就读会读空，等它追上来（最多 ledgerWaitMs）
     const deadline = Date.now() + limits.ledgerWaitMs;
     for (;;) {
-      report.ledger = await readMirasimLedger(options.ledgerDir, sessionKey, t0 - 5_000);
+      report.ledger = await readMirasimLedger(options.ledgerDir, sessionKey, t0 - 5_000, options.ledgerFs);
       const settled =
         spec.route !== 'cloud' ||
         !report.terminal ||

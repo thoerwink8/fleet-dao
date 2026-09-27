@@ -29,13 +29,25 @@ export function drainAlertText(
   };
 }
 
+/**
+ * 排空是告知、不是要人修的事：到点自己照发、发完自己撤，没有谁该去认领。记成 alert 的话，提醒派单（#394）
+ * 20 分钟后会推「没人认领」、没挂单还开跟进单（09-28 第一次真排空就这么推了）。排空卡住另有「发布没成」那条报。
+ */
+export const DRAIN_ALERT_LEVEL = 'daily' as const;
+
 /** 真的报法：写进 notifications（upsertAlert），撤掉时写明原因。写不进去照抛，由 drain-control 记日志、不挡排空。 */
 export function drainNotifier(deps: { db: Db; machine: string; now?: () => Date }) {
   const clock = deps.now ?? (() => new Date());
   return async (event: DrainEvent): Promise<void> => {
     if (event.kind === 'start') {
       const { title, body } = drainAlertText(event, deps.machine, clock().getTime());
-      await upsertAlert(deps.db, { dedupeKey: DRAIN_ALERT_KEY, level: 'alert', taskId: null, title, body });
+      await upsertAlert(deps.db, {
+        dedupeKey: DRAIN_ALERT_KEY,
+        level: DRAIN_ALERT_LEVEL,
+        taskId: null,
+        title,
+        body,
+      });
       return;
     }
     const why =
