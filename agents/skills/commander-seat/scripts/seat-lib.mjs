@@ -127,9 +127,13 @@ function stateProblem(s) {
   if (typeof s.session !== 'string' || !SESSION.test(s.session)) return 'session 认不出';
   if (!Number.isInteger(s.term) || s.term < 1) return 'term 认不出';
   if (!Number.isFinite(Date.parse(s.renewedOkAt))) return 'renewedOkAt 认不出';
-  if (s.leaseMinutes !== null && !(Number.isInteger(s.leaseMinutes) && s.leaseMinutes > 0))
-    return 'leaseMinutes 认不出';
+  if (!isLeaseMinutes(s.leaseMinutes)) return 'leaseMinutes 认不出';
   return null;
+}
+
+/** 租期（分钟）：正整数才认；没有、认不出的不记帅位（本机判不了过期）。 */
+function isLeaseMinutes(v) {
+  return Number.isInteger(v) && v > 0;
 }
 
 /** 这台机器上这个座位的帅位记录：scope 必给，session 不给时这个座位只能有一份。认不出的明说，不当成没有。 */
@@ -176,7 +180,6 @@ function saveState(home, state) {
 
 /** 离上次续约成功超过租期：不等法国回话，直接判不是帅位（先续约）。没超是 null。 */
 function localLapse(state, now) {
-  if (state.leaseMinutes === null) return null;
   const ms = now.getTime() - Date.parse(state.renewedOkAt);
   if (ms < state.leaseMinutes * 60_000) return null;
   return `离上次续约成功已经 ${Math.floor(ms / 60_000)} 分钟（租期 ${state.leaseMinutes} 分钟）：先续约（node seat.mjs renew）再动手`;
@@ -342,7 +345,13 @@ function seatTake(p, io) {
     seat.scope !== scope
   )
     return fail(io, `没查成：法国回的接班结果对不上（${JSON.stringify(seat).slice(0, 160)}），按不是帅位算`);
-  const leaseMinutes = Number.isInteger(r.json.leaseMinutes) ? r.json.leaseMinutes : null;
+  // 租期认不出不记：没有租期，本机就判不了多久没续约算过期，这份记录会一直算数
+  const leaseMinutes = r.json.leaseMinutes;
+  if (!isLeaseMinutes(leaseMinutes))
+    return fail(
+      io,
+      `没查成：法国回的租期认不出（leaseMinutes=${JSON.stringify(leaseMinutes)}），没记帅位，按不是帅位算；先查 settings 表的 seat.leaseMinutes`,
+    );
   const file = saveState(io.home, {
     scope,
     machine,
@@ -357,7 +366,7 @@ function seatTake(p, io) {
     ? `上一任是 ${seat.previous.machine}/${seat.previous.session}（第 ${seat.term - 1} 任），它下一次动手前现查就会退役`
     : '座位原来没人';
   io.out(
-    `接班了：${scope} 第 ${seat.term} 任是 ${machine}/${session}；${prev}。${leaseMinutes === null ? '租期设置没读到，每 15 分钟续一次约' : `租期 ${leaseMinutes} 分钟，每 15 分钟续一次约`}（记在 ${file}）`,
+    `接班了：${scope} 第 ${seat.term} 任是 ${machine}/${session}；${prev}。租期 ${leaseMinutes} 分钟，每 15 分钟续一次约（记在 ${file}）`,
   );
   return 0;
 }
@@ -398,7 +407,7 @@ function seatRenewOrCheck(cmd, p, io) {
     if (cmd === 'renew')
       saveState(io.home, {
         ...s,
-        leaseMinutes: Number.isInteger(r.json.leaseMinutes) ? r.json.leaseMinutes : s.leaseMinutes,
+        leaseMinutes: isLeaseMinutes(r.json.leaseMinutes) ? r.json.leaseMinutes : s.leaseMinutes,
         renewedOkAt: io.now().toISOString(),
         expiresAt: typeof r.json.expiresAt === 'string' ? r.json.expiresAt : s.expiresAt,
       });

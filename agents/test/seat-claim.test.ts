@@ -222,6 +222,31 @@ describe('seat.mjs：接班', () => {
     expect(() => w.states()).toThrow();
   });
 
+  it('【故意造出的失败】法国回的租期没有、认不出：不记帅位（本机判不了过期，记下就一直算数），退出码 2', async () => {
+    const w = world();
+    for (const leaseMinutes of [null, undefined, 0, 1.5, '45']) {
+      const r = taken(3);
+      w.replies.push({ ...r, json: { ...r.json, leaseMinutes } });
+      expect(await w.seat(['take', '--session', 's1']), String(leaseMinutes)).toBe(2);
+      expect(w.err.at(-1)).toContain('法国回的租期认不出');
+    }
+    expect(() => w.states()).toThrow();
+  });
+
+  it('【故意造出的失败】本机的帅位记录里租期是空的（旧版本记的）：认不出，按不是帅位算、叫重新接班，不当成永不过期', async () => {
+    const w = world();
+    w.replies.push(taken(3));
+    expect(await w.seat(['take', '--session', 's1'])).toBe(0);
+    const dir = join(w.home, '.fleet-dao', 'seat');
+    for (const name of readdirSync(dir)) {
+      const file = join(dir, name);
+      writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, 'utf8')), leaseMinutes: null }));
+    }
+    expect(await w.seat(['check'])).toBe(2);
+    expect(w.err.at(-1)).toContain('leaseMinutes 认不出');
+    expect(w.calls).toHaveLength(1);
+  });
+
   it('参数不对退出码 1，不碰 ssh', async () => {
     const w = world();
     expect(await w.seat(['take'])).toBe(1);

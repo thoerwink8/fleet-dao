@@ -133,6 +133,17 @@ describe('帅位', () => {
     });
   });
 
+  it('【故意造出的失败】租期设置认不出：不接班（座位没动），退出码 1——接了本机也判不了多久没续约算过期', async () => {
+    const bad = createMemoryStore(
+      { ...devFixtures(T0), settings: [{ key: 'seat.leaseMinutes', value: 0, version: 1 }] },
+      { now: () => T0 },
+    );
+    const t = setup(bad);
+    const took = await t.json('seat', 'take', ...A);
+    expect(took).toMatchObject({ code: 1, body: { ok: false, reason: 'settings' } });
+    expect((await bad.readSeat('main')).lease).toBeNull();
+  });
+
   it('【故意造出的失败】旧帅位：续约、现查都说「不是帅位」、写明现在是谁，退出码 3', async () => {
     const t = setup();
     await t.run('seat', 'take', ...A);

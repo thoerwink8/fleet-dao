@@ -227,6 +227,14 @@ export async function runSeat(
     if (p.positional.length > 0) throw new SeatCliError(`seat take 不收位置参数。\n${usage}`);
     const me = identityOf(p, usage);
     const scope = scopeOf(p, usage);
+    // 租期认不出就不接班（什么都不改）：接了班本机也不知道多久没续约算过期，帅位记录就一直算数
+    const before = await store.readSeat(scope);
+    if (!before.settings.ok)
+      return {
+        code: 1,
+        text: `没接班（座位没动）：${before.settings.why}。先把设置改对`,
+        json: { ok: false, reason: 'settings', why: before.settings.why, now: before.now },
+      };
     const { lease, now } = await store.takeSeat({ scope, ...me });
     const snap = await store.readSeat(scope);
     const lm = snap.settings.ok ? snap.settings.settings.leaseMinutes : undefined;
