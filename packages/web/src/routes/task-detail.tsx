@@ -28,11 +28,12 @@ import { RunTimeline } from '../components/run-timeline';
 import { StatusChip, StatusDot, ToneBar } from '../components/status';
 import { ActionButtons, targetOf, useTaskActions } from '../components/task-actions';
 import { Button } from '../components/ui/button';
+import { UsagePanel } from '../components/usage';
 import { canSeeDetail } from '../demo/access';
 import { HiddenNote } from '../demo/views';
 import { askEffectText, askStanding, canAnswerAsk } from '../lib/ask';
 import { stageLabel } from '../lib/catalog';
-import { formatAgo, formatCount, formatDuration, formatUsd, span } from '../lib/format';
+import { formatAgo, formatDuration } from '../lib/format';
 import { useNow } from '../lib/hooks';
 import { taskPhases } from '../lib/phases';
 import {
@@ -40,17 +41,14 @@ import {
   describeTask,
   isMine,
   isRunning,
-  isTaskFinished,
   latestRun,
   letterOf,
-  queueMs,
   subtaskStateLabel,
   subtaskTone,
   taskStateLabel,
   taskTone,
   toneBg,
   toneText,
-  workMs,
 } from '../lib/status';
 import { cn } from '../lib/utils';
 
@@ -289,7 +287,7 @@ export default function TaskDetailPage() {
               </ul>
             </Panel>
           ) : null}
-          <Usage d={d} now={now} />
+          <UsagePanel d={d} now={now} />
         </div>
       </div>
     </Page>
@@ -318,41 +316,6 @@ function TabButton({
     >
       {children}
     </button>
-  );
-}
-
-function Fact({ label, value }: { label: string; value: string }) {
-  return (
-    <div>
-      <dt className="text-xs text-muted-foreground">{label}</dt>
-      <dd className="num mt-0.5 font-medium">{value}</dd>
-    </div>
-  );
-}
-
-function Usage({ d, now }: { d: TaskDetail; now: number }) {
-  const runs = d.runs;
-  const queueTotal = runs.reduce((n, r) => n + queueMs(r, now), 0);
-  const workTotal = runs.reduce((n, r) => n + workMs(r, now), 0);
-  const tokens = runs.reduce((n, r) => n + (r.inputTokens ?? 0) + (r.outputTokens ?? 0), 0);
-  const cost = runs.reduce((n, r) => n + (r.costUsd ?? 0), 0);
-  // 做完的需求算到最后一个会话结束；契约里没有「做完的时刻」。
-  const lastEnd = runs.reduce<string | undefined>(
-    (m, r) => (r.endedAt && (!m || r.endedAt > m) ? r.endedAt : m),
-    undefined,
-  );
-  const total = span(d.task.createdAt, isTaskFinished(d.task) ? lastEnd : undefined, now);
-  return (
-    <Panel title="时间与用量" description="排队和干活分开算。">
-      <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
-        <Fact label={isTaskFinished(d.task) ? '总耗时' : '已用时'} value={formatDuration(total)} />
-        <Fact label="会话" value={`${runs.length} 个`} />
-        <Fact label="排队合计" value={formatDuration(queueTotal)} />
-        <Fact label="干活合计" value={formatDuration(workTotal)} />
-        <Fact label="token" value={tokens ? formatCount(tokens) : '—'} />
-        <Fact label="按量花费" value={cost ? formatUsd(cost) : '没有按量花费'} />
-      </dl>
-    </Panel>
   );
 }
 

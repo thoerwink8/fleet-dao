@@ -71,6 +71,9 @@ describe('接口跑在真库上', () => {
       inputEquivalent: 385_000,
       missingCost: 1,
     });
+    // 计费方式从库里的渠道表读：Claude 订阅是套餐内，没记的花费记在套餐内那一栏的没读到
+    expect(detail.runs.find((r) => r.id === IDS.run0)?.billing).toBe('subscription');
+    expect(detail.usage.total.cost.subscription).toEqual({ runs: 1, usd: 0, missing: 1 });
     const timeline = TimelineResponse.parse(await get(`/api/tasks/${IDS.task12}/timeline`));
     expect(timeline.items.length).toBeGreaterThan(0);
     // 登录本身也落了库里的操作记录。

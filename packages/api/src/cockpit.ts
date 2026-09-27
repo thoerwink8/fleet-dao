@@ -136,18 +136,20 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
   app.get(WebRoutes.task.path, async (c) => {
     const task = await store.getTask(c.req.param('taskId'));
     if (!task) throw new ApiError(404, 'task_not_found', '没有这个任务');
-    const [repo, subtasks, runs, asks, routes, models] = await Promise.all([
+    const [repo, subtasks, runs, asks, routes, models, channels] = await Promise.all([
       store.getRepo(task.repoId),
       store.listSubtasks([task.id]),
       store.listRuns({ taskIds: [task.id] }),
       store.listAsks(task.id),
       store.listRoutes(),
       store.listModels(),
+      store.listChannels(),
     ]);
     if (!repo) throw new ApiError(500, 'repo_missing', `任务 ${task.id} 所在的仓不在库里`);
     const activeRuns = runs.filter((r) => !r.endedAt);
     const plans = await store.getPlans(activeRuns.map((r) => r.id));
-    const route = routeLookup(routes, models);
+    // 带上渠道表：会话和用量汇总的花费要分清按量、套餐内
+    const route = routeLookup(routes, models, channels);
     return reply(c, TaskDetailResponse, {
       task,
       repo,

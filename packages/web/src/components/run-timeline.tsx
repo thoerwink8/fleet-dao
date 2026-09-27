@@ -1,9 +1,11 @@
 import type { Routing, Run } from '../api/types';
 import { stageLabel } from '../lib/catalog';
-import { formatClock, formatCount, formatDuration, formatUsd } from '../lib/format';
+import { formatClock, formatDuration } from '../lib/format';
 import { isRunning, queueMs, type Tone, toneBg, workMs } from '../lib/status';
+import { costParts, runUsage, tokenParts } from '../lib/usage';
 import { cn } from '../lib/utils';
 import { RouteLabel } from './route-label';
+import { UsageParts } from './usage';
 
 function runTone(run: Run): Tone {
   if (!run.endedAt) return run.startedAt ? 'run' : 'wait';
@@ -23,9 +25,18 @@ function runTone(run: Run): Tone {
 
 const outcomeText: Record<string, string> = { ok: '完成', failed: '失败', stopped: '停了', stalled: '停滞' };
 
+function stateText(run: Run): string {
+  if (isRunning(run)) return '在跑';
+  if (!run.endedAt) return '排队中';
+  // 结束了却没开工：进程没起来（不是还在排队）
+  if (!run.startedAt) return '没起来';
+  return outcomeText[run.outcome ?? ''] ?? '结束';
+}
+
 /**
  * 会话时间线：一行一个会话，同一条时间轴。斜纹是排队，实色是干活——两段分开计时，
- * 一眼看出时间花在等空位上还是花在干活上。
+ * 一眼看出时间花在等空位上还是花在干活上。结束了的会话的时长和用量照任务合计同一个算法算（lib/usage 的 runUsage）：
+ * 读不到的写明没读到，不当成 0；还在跑的只算时长到现在，用量等它结束才有。
  */
 export function RunTimeline({
   runs,
@@ -58,7 +69,7 @@ export function RunTimeline({
           const e0 = r.endedAt ? Date.parse(r.endedAt) : now;
           const tone = runTone(r);
           const running = isRunning(r);
-          const tokens = (r.inputTokens ?? 0) + (r.outputTokens ?? 0);
+          const usage = r.endedAt ? runUsage(r) : undefined;
           return (
             <li key={r.id} className="grid gap-x-3 gap-y-1 md:grid-cols-[160px_1fr]">
               <div className="min-w-0 text-xs">
@@ -70,7 +81,7 @@ export function RunTimeline({
                       running ? 'bg-st-run/15 text-ink-run' : 'bg-muted text-muted-foreground',
                     )}
                   >
-                    {running ? '在跑' : r.startedAt ? (outcomeText[r.outcome ?? ''] ?? '结束') : '排队中'}
+                    {stateText(r)}
                   </span>
                 </div>
                 <RouteLabel
@@ -96,25 +107,25 @@ export function RunTimeline({
                   ) : null}
                 </div>
                 <div className="mt-1 flex flex-wrap gap-x-3 text-[11px] text-muted-foreground">
-                  <span>
-                    排队 <span className="num text-foreground">{formatDuration(queueMs(r, now))}</span>
-                  </span>
-                  <span>
-                    干活{' '}
-                    <span className="num text-foreground">
-                      {r.startedAt ? formatDuration(workMs(r, now)) : '—'}
-                    </span>
-                  </span>
-                  {tokens ? (
-                    <span>
-                      <span className="num text-foreground">{formatCount(tokens)}</span> token
-                    </span>
-                  ) : null}
-                  {r.costUsd ? (
-                    <span>
-                      花了 <span className="num text-foreground">{formatUsd(r.costUsd)}</span>
-                    </span>
-                  ) : null}
+                  {usage?.missingTime ? (
+                    <span className="text-ink-stall">时刻认不出，时长没读到</span>
+                  ) : (
+                    <>
+                      <span>
+                        排队{' '}
+                        <span className="num text-foreground">
+                          {formatDuration(usage ? usage.queueMs : queueMs(r, now))}
+                        </span>
+                      </span>
+                      <span>
+                        干活{' '}
+                        <span className="num text-foreground">
+                          {r.startedAt ? formatDuration(usage ? usage.runMs : workMs(r, now)) : '—'}
+                        </span>
+                      </span>
+                    </>
+                  )}
+                  {usage ? <UsageParts parts={[...tokenParts(usage), ...costParts(usage)]} /> : null}
                   <span className="min-w-0 truncate">为什么派给它：{r.whyRoute}</span>
                 </div>
               </div>

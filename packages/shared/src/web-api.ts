@@ -320,10 +320,13 @@ export const RunSchema = z.object({
   cacheReadTokens: z.number().int().min(0).optional(),
   cacheWriteTokens: z.number().int().min(0).optional(),
   costUsd: z.number().min(0).optional(),
+  /** 路由所在渠道的计费方式：按量的花费是真花的钱，套餐内的只是按 API 价折合。渠道查不到就没有（不猜成套餐内）。 */
+  billing: BillingKindSchema.optional(),
 });
 
 // 用量汇总：算法和各栏的意思在 usage.ts。每一样只加读到的，没读到的次数在 missing* 里，不当成 0。
 const Count = z.number().int().min(0);
+const CostShareSchema = z.object({ runs: Count, usd: z.number().min(0), missing: Count });
 export const UsageTotalsSchema = z.object({
   runs: Count,
   running: Count,
@@ -338,6 +341,8 @@ export const UsageTotalsSchema = z.object({
   missingEquivalent: Count,
   costUsd: z.number().min(0),
   missingCost: Count,
+  /** 花费按计费方式分开：按量（真花的钱）、套餐内（按 API 价折合，不另花钱）、渠道查不到分不清的。 */
+  cost: z.object({ metered: CostShareSchema, subscription: CostShareSchema, unknown: CostShareSchema }),
   queueMs: Count,
   runMs: Count,
   missingTime: Count,

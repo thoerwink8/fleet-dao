@@ -111,6 +111,7 @@ describe('看板与任务', () => {
     expect(detail.runs.find((r) => r.id === IDS.run0)).toMatchObject({
       cacheReadTokens: 1_450_000,
       cacheWriteTokens: 64_000,
+      billing: 'subscription',
     });
   });
 
@@ -187,6 +188,12 @@ describe('看板与任务', () => {
       missingEquivalent: 0,
       costUsd: 0,
       missingCost: 1,
+      // 走的是 Claude 订阅（套餐内），花费没记：记在套餐内那一栏的没读到，不当成按量花了 $0
+      cost: {
+        metered: { runs: 0, usd: 0, missing: 0 },
+        subscription: { runs: 1, usd: 0, missing: 1 },
+        unknown: { runs: 0, usd: 0, missing: 0 },
+      },
       missingTime: 0,
     });
     expect(usage.byModel.map((m) => [m.model, m.modelName, m.runs, m.running])).toEqual([

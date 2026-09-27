@@ -101,7 +101,7 @@ export interface Identity {
 }
 
 /**
- * 从 bundle 取提交进目录里的仓：没有仓先 init（设好提交身份——会话的提交挂在「干活的」机器人名下）。
+ * 从 bundle 取提交进目录里的仓：没有仓先 init（设好提交身份——会话的提交挂在「干活的」机器人名下；关掉自动维护）。
  * bundle 经标准输入进来，会话用户在自己的 .git 里落成临时文件再 fetch，fetch 完删掉。取完回 refs/fleet/incoming 的头。
  */
 export async function fetchBundle(
@@ -120,7 +120,14 @@ export async function fetchBundle(
     await git(t, ['config', 'user.name', options.identity.name], '设提交身份');
     await git(t, ['config', 'user.email', options.identity.email], '设提交身份');
   }
-  if (fresh || options.identity) await git(t, ['config', 'commit.gpgsign', 'false'], '设提交身份');
+  if (fresh || options.identity) {
+    await git(t, ['config', 'commit.gpgsign', 'false'], '设提交身份');
+    // 会话的树用完就删，不许 git 在后台做自动维护：git 2.54 起 fetch、merge、commit 之后默认做几何重打包，而且脱离
+    // 前台在后台跑（maintenance.autoDetach 默认开）——收树、删树时它还在往 .git/objects 里写，删树报 ENOTEMPTY；
+    // 也白占会话 scope 的 CPU 和内存。gc.auto=0 管还没有 maintenance 的老 git（直接跑 gc --auto）。
+    await git(t, ['config', 'maintenance.auto', 'false'], '关掉自动维护');
+    await git(t, ['config', 'gc.auto', '0'], '关掉自动维护');
+  }
   const script =
     'f="$(git rev-parse --git-dir)/fleet-incoming.bundle" && cat > "$f" && ' +
     'git fetch --no-tags -q "$f" "+$1:refs/fleet/incoming"; rc=$?; rm -f "$f"; exit $rc';

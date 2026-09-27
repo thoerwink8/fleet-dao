@@ -35,6 +35,8 @@ const example = () => parseCatalog(exampleText, EXAMPLE_PATH);
 const CLAUDE_ROUTES = ['claude-solo:opus-5.5:claude-code', 'claude-carpool:opus-5.5:claude-code'];
 /** TypeSafe 的 Jev：只挂判断阶段，排第一（引擎每次提问按判断阶段排第一、开着的路由起后端，见 packages/jev 的 wiring.ts）。 */
 const JEV_ROUTE = 'jev:jev-1.13:api-shell';
+/** Cursor 上钉住的 GPT-5.6 Luna：只挂开 PR 前的验证，排第一、开着（创始人 2026-09-27 拍，specs/212 方案「真流量」）。 */
+const LUNA_ROUTE = 'cursor:gpt-5.6-luna:cursor-agent';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -73,23 +75,27 @@ async function stageOrder(stage: (typeof STAGE_KINDS)[number]) {
 }
 
 describe('示例配置 deploy/examples/catalog.example.json', () => {
-  it('装得进空库：每个阶段先是独享号、拼车号的 Opus（开着），其余挂在后面关着；判断阶段 TypeSafe 在前', async () => {
+  it('装得进空库：每个阶段先是独享号、拼车号的 Opus（开着），其余挂在后面关着；开 PR 前验证 Cursor 的 GPT-5.6 Luna 排第一、开着；判断阶段 TypeSafe 在前', async () => {
     const result = await load();
     expect(result.inserted.stages).toEqual([...STAGE_KINDS]);
     const config = example();
-    // Jev 只挂判断阶段；其余路由按样例里的先后挂在各阶段，开着的只有两条 Claude（独享在前、拼车在后）。
+    // Jev 只挂判断阶段、Cursor 的 GPT-5.6 Luna 只挂验证阶段；其余路由按样例里的先后挂在各阶段，开着的只有两条 Claude
+    // （独享在前、拼车在后）。
     const expected = config.routes
-      .filter((r) => r.id !== JEV_ROUTE)
+      .filter((r) => r.id !== JEV_ROUTE && r.id !== LUNA_ROUTE)
       .map((r) => [r.id, CLAUDE_ROUTES.includes(r.id)]);
     for (const stage of STAGE_KINDS) {
       // ui 单列一份，不挂 GPT（硬禁令，关着也不挂）。judge 照 packages/jev：TypeSafe 开着在前，两条 Claude 关着
       // （Claude 判断会话接上 fleet-agent-scope 之前 packages/jev 接不了，见 packages/jev/test/catalog-judge.test.ts）。
+      // verify 单列一份：GPT-5.6 Luna 开着在前，后面照 default。
       const want =
         stage === 'judge'
           ? [[JEV_ROUTE, true], ...CLAUDE_ROUTES.map((id) => [id, false])]
           : stage === 'ui'
             ? expected.filter(([id]) => !String(id).includes('gpt'))
-            : expected;
+            : stage === 'verify'
+              ? [[LUNA_ROUTE, true], ...expected]
+              : expected;
       expect(await stageOrder(stage)).toEqual(want);
     }
     expect((await stageOrder('ui')).length).toBe(expected.length - 1);
@@ -114,8 +120,9 @@ describe('示例配置 deploy/examples/catalog.example.json', () => {
       stagePolicies: orders.filter((o) => o.length > 0).length,
       stagePolicyRoutes: orders.reduce((n, o) => n + o.length, 0),
     });
-    // 两边都从样例算，再钉一遍样例本身：9 个阶段都排了；判断阶段 3 条、UI 7 条、其余 7 个阶段（含开 PR 前验证）各 8 条。
-    expect([rows.stagePolicies.length, rows.stagePolicyRoutes.length]).toEqual([9, 3 + 7 + 7 * 8]);
+    // 两边都从样例算，再钉一遍样例本身：9 个阶段都排了；判断阶段 3 条、UI 7 条、开 PR 前验证 9 条（多一条 Cursor 的
+    // GPT-5.6 Luna）、其余 6 个阶段各 8 条。
+    expect([rows.stagePolicies.length, rows.stagePolicyRoutes.length]).toEqual([9, 3 + 7 + 9 + 6 * 8]);
   });
 
   it('两个 Claude 池跑在同一个会话用户下、按组织类型分（法国只留一个会话用户，design 第十节）；同一时刻只有一个在跑，各 4', () => {

@@ -1,7 +1,7 @@
 // 会话用量怎么汇总（#216）：一张单按模型、按阶段、整张合计，四样 token 折成输入当量。
-// 后端的任务详情、网页的演示数据都调这一份（Fusion 关单评论的「各模型额度」以后也该用它），免得几处算法不一样。
-// 读不到的另记次数（missing*），不当成 0：没读到的那一项不往合计里加任何东西。
-import type { SessionRun, StageKind } from './domain.ts';
+// 后端的任务详情、网页的演示数据和会话时间线（一次会话也按它算）都调这一份（Fusion 关单评论的「各模型额度」以后也该用它），
+// 免得几处算法不一样。读不到的另记次数（missing*），不当成 0：没读到的那一项不往合计里加任何东西。
+import type { BillingKind, SessionRun, StageKind } from './domain.ts';
 
 /**
  * 输入当量的折法（docs/design.md 第十节「一个 5 小时窗能干多少活」）：输入 1、缓存写 1.25、缓存读 0.1、输出 5。
@@ -47,19 +47,22 @@ export function inputEquivalentOf(u: TokenCounts): number | undefined {
   return Math.round(scaled / SCALE);
 }
 
-/** 一次会话的用量事实（session_runs 一行，和 SessionRun 同形）：读不到的字段不给。 */
-export type RunUsageFacts = Pick<
-  SessionRun,
-  | 'stage'
-  | 'queuedAt'
+type OptionalFact =
   | 'startedAt'
   | 'endedAt'
   | 'inputTokens'
   | 'outputTokens'
   | 'cacheReadTokens'
   | 'cacheWriteTokens'
-  | 'costUsd'
-> & {
+  | 'costUsd';
+
+/**
+ * 一次会话的用量事实（session_runs 一行，和 SessionRun 同名同义）：读不到的字段不给，给 undefined 也一样——
+ * 网页拿接口返回的会话（zod 推出来的，可选字段带 undefined）直接算，不另抄一份。
+ */
+export type RunUsageFacts = Pick<SessionRun, 'stage' | 'queuedAt'> & {
+  [K in OptionalFact]?: SessionRun[K] | undefined;
+} & {
   /**
    * 记在哪个模型名下：路由上的模型（模型目录的 id），和 Fusion 关单评论「各模型额度」一个口径；
    * 上游实际回话的模型（actualModel）不在这里分。
@@ -67,7 +70,32 @@ export type RunUsageFacts = Pick<
   model: string;
   /** 给人看的模型名。 */
   modelName: string;
+  /**
+   * 路由所在渠道的计费方式（channels.billing）：按量的花费是真花的钱；套餐内的是执行体报的「按 API 价折合」，
+   * 账单不因它多一笔。渠道在库里查不到就不给——记进「分不清」，不猜成套餐内。
+   */
+  billing?: BillingKind | undefined;
 };
+
+/** 一种计费方式下的花费。 */
+export interface CostShare {
+  /** 走这种计费方式、结束了的会话数。 */
+  runs: number;
+  /** 读到的花费合计（美元）。 */
+  usd: number;
+  /** 没读到花费的次数。 */
+  missing: number;
+}
+
+/**
+ * 花费按渠道的计费方式分开：metered 按量，是真花的钱；subscription 套餐内，只是按 API 价折合、不另花钱；
+ * unknown 渠道查不到，分不清是哪种（不猜成套餐内）。
+ */
+export interface CostByBilling {
+  metered: CostShare;
+  subscription: CostShare;
+  unknown: CostShare;
+}
 
 /**
  * 一组会话的用量合计。每一样只加读到的；读不到的会话另记次数（missing*），不当成 0。
@@ -92,10 +120,12 @@ export interface UsageTotals {
   missingEquivalent: number;
   /**
    * 执行体报的花费（美元；订阅内的也报一个数，说明这一轮值多少，不说明账单多了这一笔）。只有 Claude 报：
-   * cursor 这类只报 token 的渠道每次都记 missingCost。
+   * cursor 这类只报 token 的渠道每次都记 missingCost。这两项是 cost 里三种计费方式的和（和 Fusion 关单评论的
+   * ModelUsage 同名）；给人看花了多少钱要看 cost，分清按量和套餐内。
    */
   costUsd: number;
   missingCost: number;
+  cost: CostByBilling;
   /** 排队、干活时长（毫秒），和库里 queue_ms / run_ms 同一个算法；时刻认不出或倒着的记 missingTime。 */
   queueMs: number;
   runMs: number;
@@ -118,6 +148,10 @@ export interface TaskUsage {
   byStage: StageUsageTotals[];
 }
 
+function emptyShare(): CostShare {
+  return { runs: 0, usd: 0, missing: 0 };
+}
+
 function emptyTotals(): UsageTotals {
   return {
     runs: 0,
@@ -133,10 +167,18 @@ function emptyTotals(): UsageTotals {
     missingEquivalent: 0,
     costUsd: 0,
     missingCost: 0,
+    cost: { metered: emptyShare(), subscription: emptyShare(), unknown: emptyShare() },
     queueMs: 0,
     runMs: 0,
     missingTime: 0,
   };
+}
+
+/** 认不出的计费方式（没给、库里出了新种类）一律算分不清，不猜成套餐内。 */
+function shareOf(cost: CostByBilling, billing: string | undefined): CostShare {
+  if (billing === 'metered') return cost.metered;
+  if (billing === 'subscription') return cost.subscription;
+  return cost.unknown;
 }
 
 /** 排队 = (开工 ?? 结束) − 排队，干活 = 结束 − 开工（没开工就是 0）：和 session_runs 的两个生成列一样。 */
@@ -177,9 +219,16 @@ function add(t: UsageTotals, run: RunUsageFacts): void {
   if (equivalent !== undefined) t.inputEquivalent += equivalent;
   else t.missingEquivalent += 1;
 
+  const share = shareOf(t.cost, run.billing);
+  share.runs += 1;
   const cost = run.costUsd;
-  if (cost !== undefined && Number.isFinite(cost) && cost >= 0) t.costUsd += cost;
-  else t.missingCost += 1;
+  if (cost !== undefined && Number.isFinite(cost) && cost >= 0) {
+    t.costUsd += cost;
+    share.usd += cost;
+  } else {
+    t.missingCost += 1;
+    share.missing += 1;
+  }
 
   const spent = durations(run, run.endedAt);
   if (spent) {
