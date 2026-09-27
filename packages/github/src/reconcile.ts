@@ -137,7 +137,7 @@ export function createReconciler(deps: Deps, options: ReconcilerOptions): Reconc
 
   return {
     async redeliverFailed(since) {
-      const failed = new Map<string, string>();
+      const failed = new Map<string, { id: string; deliveredAt: string }>();
       const ok = new Set<string>();
       let checked = 0;
       try {
@@ -160,7 +160,7 @@ export function createReconciler(deps: Deps, options: ReconcilerOptions): Reconc
             checked += 1;
             const code = d.status_code ?? 0;
             if (code >= 200 && code < 300) ok.add(d.guid);
-            else if (!failed.has(d.guid)) failed.set(d.guid, d.id);
+            else if (!failed.has(d.guid)) failed.set(d.guid, { id: d.id, deliveredAt: d.delivered_at });
           }
           if (older || parsed.data.length === 0) break;
         }
@@ -182,10 +182,16 @@ export function createReconciler(deps: Deps, options: ReconcilerOptions): Reconc
         };
       }
       const todo = neverOk.filter(([guid]) => !stored.has(guid));
+      // 老的先补：上面翻页是新的在前，todo 原样也是「最近失败的排前面」。since 是个固定往回看的窗口、跟着现在往前挪，
+      // 不按时间重排的话，一直有新失败的会一轮轮把老的挤到 50 个名额外面，老的永远轮不上、等它超出 since 就再也补不回来
+      // （法国 2026-09-27 夜实测：发布很勤，几乎每轮都有新的 502/504，10:26 UTC 就开始失败的一批 check_run/workflow_run
+      // 500 到 15 点多一次都没被重投过——GitHub 对账补漏一直 partial 就是这么来的）。按 delivered_at 升序重排：
+      // 离窗口边界最近、最快过期的先补。
+      todo.sort((a, b) => Date.parse(a[1].deliveredAt) - Date.parse(b[1].deliveredAt));
       const limit = options.maxRedeliveries ?? 50;
       let recovered = 0;
       const errors: string[] = [];
-      for (const [guid, id] of todo.slice(0, limit)) {
+      for (const [guid, { id }] of todo.slice(0, limit)) {
         try {
           await client.request({
             method: 'POST',
