@@ -98,6 +98,7 @@ import {
   type TimelineRecord,
   type User,
 } from './ports.ts';
+import { pgSeatStore } from './seat-store.ts';
 
 export interface PgStoreOptions {
   now?: () => Date;
@@ -502,6 +503,8 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
   }
 
   return {
+    ...pgSeatStore(db, insertAudit),
+
     // —— 人 ——
     async getUser(id) {
       if (!isUuid(id)) return null;
