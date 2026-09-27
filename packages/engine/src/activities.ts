@@ -247,7 +247,7 @@ export interface EngineJobs {
   /** 路由探针（#129）：读路由、真起最小会话、写结论。 */
   routeProbe?: () => RouteProbeJobDeps;
   /** 每小时对账：看工作树、撤过时的提醒、再推没人处理的（查工作流在不在跑、挂没挂着用这次活动的 Temporal 客户端）。 */
-  hourlyReconcile?: (client: Client) => HourlyReconcileJobDeps;
+  hourlyReconcile?: (client: Client, taskQueue: string) => HourlyReconcileJobDeps;
 }
 
 /** 引擎自己的活动：对账补漏跑一轮。没跑成的已经记进 schedule_runs，这里再报成不重试的失败（下一轮 15 分钟后照来）。 */
@@ -310,7 +310,8 @@ async function reconcileHourly(jobs: EngineJobs): Promise<unknown> {
     );
   }
   try {
-    return await runHourlyReconcileJob(make(Context.current().client));
+    const ctx = Context.current();
+    return await runHourlyReconcileJob(make(ctx.client, ctx.info.taskQueue));
   } catch (error) {
     if (error instanceof HourlyReconcileFailedError) {
       throw new PortError('HOURLY_RECONCILE_FAILED', error.message, {

@@ -65,7 +65,7 @@ export interface AlertStore {
   updateOpen(input: { dedupeKey: string; title?: string; body?: string }): Promise<'ok' | 'not_open'>;
 }
 
-/** 对账的一部分（工作树、三处核对、提醒）跑下来的样子。 */
+/** 对账的一部分（工作树、两处核对、提醒）跑下来的样子。 */
 export interface SweepPart {
   /** 这一部分整个没跑成（读不了工作树的根、列不了提醒）。 */
   failed?: string;

@@ -11,12 +11,14 @@ import {
   createPgStore,
   createTemporalRequirementWorkflows,
   createTemporalWorkflowControl,
+  type GitHubIntake,
   githubIssuePlans,
   jsonLogger,
   type Logger,
   type RequirementWorkflows,
   reconcileGitHub,
   reconcilerOptions,
+  type Store,
 } from '@fleet-dao/api';
 import { PROJECT_CONFIG_PATH, type Source } from '@fleet-dao/core';
 import {
@@ -127,6 +129,29 @@ export function askIssueJob(w: GitHubReconcileWiring, log: Logger, now: () => Da
   };
 }
 
+/**
+ * 接活那道门（createGitHubIntake，和 webhook 同一份实现）：对账补漏的重放、补收，每小时对账给排队的单补拉，都经它。
+ * 拉起工作流用这次活动的 Temporal 客户端，起在 taskQueue 上。
+ */
+export function reconcileIntake(
+  w: Pick<GitHubReconcileWiring, 'gh' | 'requirements'>,
+  parts: { store: Store; log: Logger; now: () => Date },
+  client: Client,
+  taskQueue: string,
+): GitHubIntake {
+  return createGitHubIntake({
+    store: parts.store,
+    // 引擎等 CI 靠活动自己轮询，PR、CI 事件只写镜像，不按事件叫醒（和后端 main.ts 一样）
+    github: w.gh.eventSink({ async wake() {} }),
+    workflows: createTemporalWorkflowControl(client),
+    requirements: w.requirements ?? createTemporalRequirementWorkflows(client, taskQueue),
+    // 只派当前版本的独立单：挂在哪、当前版本是哪个、是不是母单子单，拉起前经「引擎」机器人现读（和后端 webhook 那条同一份判法）
+    plans: githubIssuePlans(w.gh),
+    log: parts.log,
+    now: parts.now,
+  });
+}
+
 /** 给 EngineJobs.githubReconcile 用的工厂。 */
 export function githubReconcileJob(
   w: GitHubReconcileWiring,
@@ -134,21 +159,10 @@ export function githubReconcileJob(
   const now = w.now ?? (() => new Date());
   const log = w.log ?? jsonLogger();
   const store = createPgStore(w.db, { now });
-  // 引擎等 CI 靠活动自己轮询，PR、CI 事件只写镜像，不按事件叫醒（和后端 main.ts 一样）
-  const github = w.gh.eventSink({ async wake() {} });
   const flow = flowConfigJob(w, log, now);
   const asks = askIssueJob(w, log, now);
   return (client, taskQueue) => {
-    const intake = createGitHubIntake({
-      store,
-      github,
-      workflows: createTemporalWorkflowControl(client),
-      requirements: w.requirements ?? createTemporalRequirementWorkflows(client, taskQueue),
-      // 只派当前版本的独立单：挂在哪、当前版本是哪个、是不是母单子单，拉起前经「引擎」机器人现读（和后端 webhook 那条同一份判法）
-      plans: githubIssuePlans(w.gh),
-      log,
-      now,
-    });
+    const intake = reconcileIntake(w, { store, log, now }, client, taskQueue);
     const reconciler = w.gh.reconciler(reconcilerOptions({ store, intake }));
     return {
       syncFlowConfigs: () => syncFlowConfigs(flow),

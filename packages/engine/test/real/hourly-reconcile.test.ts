@@ -6,13 +6,12 @@ import { randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { silentLogger } from '@fleet-dao/api';
 import {
   alertByKey,
   approvals,
   auditLog,
-  channels,
   notifications,
-  pools,
   pullRequests,
   repos,
   scheduleRuns,
@@ -25,7 +24,7 @@ import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fle
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { RouteCheck } from '../../src/jobs/alert-sweep.ts';
 import { HOURLY_RECONCILE_JOB, runHourlyReconcileJob } from '../../src/jobs/hourly-reconcile.ts';
-import { MERGED_PR_LOOKBACK_MS, QUOTA_ALERT_KEY } from '../../src/jobs/reconcile-checks.ts';
+import { MERGED_PR_LOOKBACK_MS } from '../../src/jobs/reconcile-checks.ts';
 import {
   beijingDate,
   RECONCILE_ACTOR,
@@ -148,12 +147,33 @@ function deps(over: Partial<HourlyReconcileWiring> & { now?: () => Date } = {}) 
     shBin: 'sh',
     log: quiet,
     stageRoutable: async (): Promise<RouteCheck> => ({ kind: 'none', detail: '没有在线的路由' }),
-    gh: {
-      auditMergedPrs: async () => ({ outcome: 'ok', scanned: 0, found: 0, fixed: 0, problems: [] }),
-    },
+    gh: ghWith(),
+    requirements: {
+      async start() {
+        throw new Error('用例里不该真拉起工作流');
+      },
+    } as never,
+    intakeLog: silentLogger,
     ...over,
     workflows: wf,
-  })({ workflow: {} as never });
+  })({ workflow: {} as never } as never, 'fleet-test');
+}
+
+/** 假 GitHub：审合并的 PR 由用例定；补拉时接活那道门要的几样（现读挂在哪个版本、镜像）用例里走不到，走到了照抛。 */
+function ghWith(over: Partial<HourlyReconcileWiring['gh']> = {}): HourlyReconcileWiring['gh'] {
+  const never = () => {
+    throw new Error('用例里不该走到这个 GitHub 接口');
+  };
+  return {
+    auditMergedPrs: async () => ({ outcome: 'ok', scanned: 0, found: 0, fixed: 0, problems: [] }),
+    eventSink: () => ({}) as never,
+    reconciler: never,
+    readRepoFile: never,
+    readIssuePlan: never,
+    openIssue: never,
+    commentIssue: never,
+    ...over,
+  } as HourlyReconcileWiring['gh'];
 }
 
 const alert = (
@@ -848,19 +868,18 @@ describe('没人处理的卡住报警：超过 24 小时再推一次，一天最
   });
 });
 
-describe('三处核对接到真库', { timeout: 60_000 }, () => {
-  it('在干的单工作流不在、超过 10 分钟没更新：报 reconcile:workflow；又在跑了就撤。排队的、刚更新的不报', async () => {
-    probeDir();
-    const { repo, task } = await work('running');
-    await sql('update tasks set updated_at = $1::timestamptz where id = $2', [
-      new Date(Date.now() - 20 * 60_000).toISOString(),
-      task.id,
-    ]);
-    const [queued] = await t.db
+describe('两处核对接到真库', { timeout: 60_000 }, () => {
+  /** 一张排队的单，带（或不带）一条 issues 投递：note 是接活记的，author 是这张 issue 的作者编号。 */
+  async function queuedWithDelivery(
+    repoId: string,
+    issueNumber: number,
+    delivery: { status: 'accepted' | 'failed'; note?: string; reason?: string; author?: number } | null,
+  ) {
+    const [row] = await t.db
       .insert(tasks)
       .values({
-        repoId: repo.id,
-        issueNumber: 161,
+        repoId,
+        issueNumber,
         title: '还没派',
         rawRequest: '排队',
         requestedBy: 'founder-a',
@@ -868,6 +887,54 @@ describe('三处核对接到真库', { timeout: 60_000 }, () => {
         state: 'queued',
       })
       .returning();
+    if (!row) throw new Error('单没写进去');
+    if (delivery) {
+      const id = `d-${issueNumber}`;
+      const at = new Date(Date.now() - HOUR).toISOString();
+      const payload = {
+        action: 'opened',
+        sender: { login: 'someone', id: delivery.author ?? 999, type: 'User' },
+        repository: { full_name: 'acme/widgets' },
+        issue: {
+          number: issueNumber,
+          title: '还没派',
+          body: '排队',
+          state: 'open',
+          created_at: at,
+          user: { login: 'someone', id: delivery.author ?? 999, type: 'User' },
+        },
+      };
+      await sql(
+        `insert into github_events (delivery_id, event, action, source, repo, payload, status, reason, note, finished_at)
+         values ($1, 'issues', 'opened', 'webhook', 'acme/widgets', $2::jsonb, $3, $4, $5, now())`,
+        [id, JSON.stringify(payload), delivery.status, delivery.reason ?? null, delivery.note ?? null],
+      );
+      await sql(
+        `insert into github_event_versions (delivery_id, object, version, state) values ($1, $2, $3::timestamptz, 'open')`,
+        [id, `acme/widgets:issue:${issueNumber}`, at],
+      );
+    }
+    return row;
+  }
+
+  it('接活开着：在干的单工作流不在报卡住、又在跑撤掉；排队的记着不派理由不报；没理由的经真接活补拉，门没收、没投递报卡住；刚更新的不查', async () => {
+    probeDir();
+    const { repo, task } = await work('running');
+    await sql('update repos set auto_dispatch_since = $1::timestamptz where id = $2', [
+      new Date(Date.now() - 24 * HOUR).toISOString(),
+      repo.id,
+    ]);
+    await sql('update tasks set updated_at = $1::timestamptz where id = $2', [
+      new Date(Date.now() - 20 * 60_000).toISOString(),
+      task.id,
+    ]);
+    const held = await queuedWithDelivery(repo.id, 161, {
+      status: 'accepted',
+      note: 'task=created, workflow=unscheduled',
+    });
+    // 作者不在白名单：真接活重放时门口就不收
+    const outsider = await queuedWithDelivery(repo.id, 163, { status: 'failed', reason: '上次没处理成' });
+    const orphan = await queuedWithDelivery(repo.id, 164, null);
     const [fresh] = await t.db
       .insert(tasks)
       .values({
@@ -881,12 +948,10 @@ describe('三处核对接到真库', { timeout: 60_000 }, () => {
         updatedAt: new Date(Date.now() - 60_000),
       })
       .returning();
-    if (!queued || !fresh) throw new Error('单没写进去');
+    if (!fresh) throw new Error('单没写进去');
     const wf = fakeWorkflows();
     const run = await runHourlyReconcileJob(deps({ workflows: wf.reader }));
-    expect(run).toMatchObject({ outcome: 'ok', found: 1 });
-    expect(wf.asked).toContain('req:acme/widgets#160');
-    expect(wf.asked).not.toContain('req:acme/widgets#161');
+    expect(run).toMatchObject({ outcome: 'ok', found: 3 });
     const row = await alertByKey(t.db, `reconcile:workflow:${task.id}`);
     expect(row).toMatchObject({
       level: 'alert',
@@ -896,13 +961,24 @@ describe('三处核对接到真库', { timeout: 60_000 }, () => {
     });
     expect(row?.body).toContain('在干');
     expect(row?.body).toContain('已经不在了');
-    expect(await alertByKey(t.db, `reconcile:workflow:${queued.id}`)).toBeNull();
+    expect(await alertByKey(t.db, `reconcile:workflow:${held.id}`)).toBeNull();
     expect(await alertByKey(t.db, `reconcile:workflow:${fresh.id}`)).toBeNull();
+    expect((await alertByKey(t.db, `reconcile:workflow:${outsider.id}`))?.body).toContain(
+      '补拉时接活没收：author_not_whitelisted',
+    );
+    expect((await alertByKey(t.db, `reconcile:workflow:${orphan.id}`))?.body).toContain(
+      '库里没有这张 issue 的投递',
+    );
 
     const running = fakeWorkflows({ 'req:acme/widgets#160': { state: 'running' } });
     await runHourlyReconcileJob(deps({ workflows: running.reader }));
-    expect((await alertByKey(t.db, `reconcile:workflow:${task.id}`))?.body).toMatch(
-      /^已撤：需求工作流又在跑了/,
+    expect((await alertByKey(t.db, `reconcile:workflow:${task.id}`))?.body).toMatch(/^已撤：需求工作流在跑/);
+
+    // 项目接活关了：不再查，旧提醒撤掉
+    await sql('update repos set auto_dispatch_since = null where id = $1', [repo.id]);
+    await runHourlyReconcileJob(deps({ workflows: running.reader }));
+    expect((await alertByKey(t.db, `reconcile:workflow:${orphan.id}`))?.body).toMatch(
+      /^已撤：这个项目「让 AI 接活」关着/,
     );
   });
 
@@ -914,7 +990,7 @@ describe('三处核对接到真库', { timeout: 60_000 }, () => {
     const first = await runHourlyReconcileJob(
       deps({
         now: () => now,
-        gh: {
+        gh: ghWith({
           async auditMergedPrs(repo, since) {
             seen.push({ repo, since });
             return {
@@ -925,7 +1001,7 @@ describe('三处核对接到真库', { timeout: 60_000 }, () => {
               problems: ['#7 合并了但镜像里没有（已补）', '#7 不是「引擎」机器人合的（合并人 founder）'],
             };
           },
-        },
+        }),
       }),
     );
     expect(seen.map((s) => s.repo)).toEqual(['acme/widgets']);
@@ -940,7 +1016,7 @@ describe('三处核对接到真库', { timeout: 60_000 }, () => {
     const again = await runHourlyReconcileJob(
       deps({
         now: () => now,
-        gh: {
+        gh: ghWith({
           async auditMergedPrs() {
             return {
               outcome: 'unscanned',
@@ -951,7 +1027,7 @@ describe('三处核对接到真库', { timeout: 60_000 }, () => {
               why: '列合并的 PR 失败：403',
             };
           },
-        },
+        }),
       }),
     );
     expect(again.outcome).not.toBe('ok');
@@ -959,32 +1035,49 @@ describe('三处核对接到真库', { timeout: 60_000 }, () => {
     expect((await alertByKey(t.db, 'reconcile:pr:acme/widgets#7'))?.resolvedAt).toBeNull();
   });
 
-  it('启用渠道的额度读数过期：汇成一条，写出池和从没读成；都新了撤掉。停用的渠道不算', async () => {
+  it('合了的 PR 对上的单：会话没结局、单没记成做完，报 reconcile:ledger 写明缺什么；补齐了撤掉', async () => {
+    await world(t.db);
     probeDir();
-    await t.db.insert(channels).values([
-      { id: 'relay', name: '中转', billing: 'subscription', enabled: true },
-      { id: 'old', name: '停用的', billing: 'subscription', enabled: false },
-    ]);
-    await t.db.insert(pools).values([
-      { id: 'relay-a', channelId: 'relay', maxConcurrency: 1 },
-      { id: 'relay-fresh', channelId: 'relay', maxConcurrency: 1, lastReadOkAt: new Date() },
-      { id: 'old-a', channelId: 'old', maxConcurrency: 1 },
-    ]);
-    const run = await runHourlyReconcileJob(deps());
-    expect(run.outcome).toBe('ok');
-    expect(run.found).toBe(1);
-    const row = await alertByKey(t.db, QUOTA_ALERT_KEY);
-    expect(row).toMatchObject({ level: 'alert', taskId: null, resolvedAt: null });
-    expect(row?.body).toContain('中转 / relay-a：从没读成过');
-    expect(row?.body).not.toContain('old-a');
-    expect(row?.body).not.toContain('relay-fresh');
+    const { repo, task } = await work('merging');
+    const merged = new Date(Date.now() - 2 * HOUR);
+    await t.db.insert(pullRequests).values({
+      repoId: repo.id,
+      number: 9,
+      state: 'merged',
+      headRef: 'fleet/160-abc',
+      headSha: 'a'.repeat(40),
+      updatedAt: merged,
+    });
+    const [run] = await t.db
+      .insert(sessionRuns)
+      .values({
+        taskId: task.id,
+        stage: 'execute',
+        routeId: 'solo',
+        whyRoute: '写码阶段首选',
+        branch: 'fleet/160-abc',
+        queuedAt: new Date(Date.now() - 5 * HOUR),
+        startedAt: new Date(Date.now() - 5 * HOUR),
+      })
+      .returning();
+    if (!run) throw new Error('run 没写进去');
+    const first = await runHourlyReconcileJob(deps());
+    expect(first).toMatchObject({ outcome: 'ok', found: 1 });
+    const row = await alertByKey(t.db, 'reconcile:ledger:acme/widgets#9');
+    expect(row).toMatchObject({ level: 'alert', taskId: task.id, resolvedAt: null });
+    expect(row?.body).toContain('单 #160：1 次会话没有结局（execute）');
+    expect(row?.body).toContain('单 #160：合并关单那一步没写完：库里这张单是「在合并」');
+    expect(row?.link).toBe('https://github.com/acme/widgets/pull/9');
 
-    await sql('update pools set last_read_ok_at = $1::timestamptz where id = $2', [
-      new Date().toISOString(),
-      'relay-a',
-    ]);
+    await sql(
+      `update session_runs set ended_at = now(), outcome = 'ok', input_tokens = 10, output_tokens = 5 where id = $1`,
+      [run.id],
+    );
+    await sql(`update tasks set state = 'done' where id = $1`, [task.id]);
     await runHourlyReconcileJob(deps());
-    expect((await alertByKey(t.db, QUOTA_ALERT_KEY))?.body).toMatch(/^已撤：/);
+    expect((await alertByKey(t.db, 'reconcile:ledger:acme/widgets#9'))?.body).toMatch(
+      /^已撤：会话结局、用量、关单都记齐了/,
+    );
   });
 });
 

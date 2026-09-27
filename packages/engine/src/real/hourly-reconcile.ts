@@ -1,9 +1,17 @@
 // 每小时对账的真装配：工作树按目录真列（根和仓这两级归 root、755，引擎自己读得了）、属主和删经 fleet-agent-scope
 // （real/worktrees.ts）、树里还剩什么以会话用户的身份看（real/user-git.ts 的 treeLeftovers：仓里跑 git，不是仓的用 find
-// 一层层列）；需求、子任务、PR 头、批准、没结束的单、受管的仓、额度表从库里读；合了的 PR 问这次传进来的 GitHub
-// （auditMergedPrs，和 githubReconcile 同一个）；工作流在不在跑、挂没挂着问这次活动的 Temporal 客户端；这个阶段派不派得
+// 一层层列）；需求、子任务、PR 头、批准、没结束的单、投递、受管的仓、合了的 PR 和会话记账从库里读；合了的 PR 问这次传进来的
+// GitHub（auditMergedPrs，和 githubReconcile 同一个）；排队的单补拉走对账补漏同一道接活的门（real/github-reconcile.ts 的
+// reconcileIntake：重放这张 issue 最近一次的投递）；工作流在不在跑、挂没挂着问这次活动的 Temporal 客户端；这个阶段派不派得
 // 出去问选路（store-ports 的 pickRoute：和任务挂起时用的同一套）；提醒的读写、操作记录、结局记账是同一个库。
 import { readdir } from 'node:fs/promises';
+import {
+  createPgStore,
+  jsonLogger,
+  type Logger,
+  type RequirementWorkflows,
+  RetryLaterError,
+} from '@fleet-dao/api';
 import {
   activeTaskRefs,
   alertByKey,
@@ -13,10 +21,11 @@ import {
   insertAlertOnce,
   issueWorkFacts,
   latestAlertByPrefix,
+  latestIssueDelivery,
   listOpenAlerts,
+  mergedPrLedgers,
   openSessionTrees,
   prHeadsOfBranch,
-  quotaTable,
   reconcileRepos,
   resolveAlertWithReason,
   startScheduleRun,
@@ -33,6 +42,7 @@ import type { HourlyReconcileJobDeps } from '../jobs/hourly-reconcile.ts';
 import type { WorkflowReader, WorkflowView } from '../jobs/reconcile-common.ts';
 import type { PortContext } from '../ports.ts';
 import type { UserExec } from './exec.ts';
+import { type GitHubReconcileWiring, reconcileIntake } from './github-reconcile.ts';
 import { PROBE_DIR } from './route-probe.ts';
 import type { SessionOrgReader } from './session-org.ts';
 import { createStorePorts } from './store-ports.ts';
@@ -103,8 +113,8 @@ const NO_CTX: PortContext = {
 
 export interface HourlyReconcileWiring {
   db: Db;
-  /** 和 githubReconcile 同一个：审最近合了的 PR（镜像、合并人、合并记录）。 */
-  gh: Pick<GitHub, 'auditMergedPrs'>;
+  /** 和 githubReconcile 同一个：审最近合了的 PR（镜像、合并人、合并记录）；补拉经接活那道门时现读挂在哪个版本。 */
+  gh: Pick<GitHub, 'auditMergedPrs'> & GitHubReconcileWiring['gh'];
   trees: WorkTrees;
   exec: UserExec;
   /** 会话用户此刻挂的组织（real/session-org.ts）：判阶段派不派得出去和选路同一套，也要它。 */
@@ -120,12 +130,16 @@ export interface HourlyReconcileWiring {
   stageRoutable?: HourlyReconcileJobDeps['stageRoutable'];
   workflows?: WorkflowReader;
   inspectMax?: number;
+  /** 测试用：换掉补拉时拉起工作流（不给就是真的，经这次活动的 Temporal 客户端起 Fusion）。 */
+  requirements?: RequirementWorkflows;
+  /** 测试用：接活那道门的日志。 */
+  intakeLog?: Logger;
 }
 
 /** 给 EngineJobs.hourlyReconcile 用的工厂。 */
 export function hourlyReconcileJob(
   w: HourlyReconcileWiring,
-): (client: Pick<Client, 'workflow'>) => HourlyReconcileJobDeps {
+): (client: Client, taskQueue: string) => HourlyReconcileJobDeps {
   const now = w.now ?? (() => new Date());
   const log: HourlyReconcileJobDeps['log'] =
     w.log ?? ((level, text, fields) => console[level === 'info' ? 'info' : level](text, fields ?? {}));
@@ -142,81 +156,102 @@ export function hourlyReconcileJob(
       if (r.ok) return { kind: 'dispatch' };
       return r.waitFor === 'none' ? { kind: 'none', detail: r.detail } : { kind: 'wait', detail: r.detail };
     });
-  return (client) => ({
-    root: w.trees.root,
-    probeDir: PROBE_DIR,
-    sessionTmpDir: SESSION_TMP_DIR,
-    machine: w.machine,
-    listDir: w.listDir ?? listDirEntries,
-    treeFor: (repo, branch) => w.trees.treeFor(repo, branch),
-    ownerOf: (dir) => w.trees.ownerOf(dir),
-    remove: (dir) => w.trees.remove(dir),
-    leftovers: (dir, user, known, scratch) =>
-      treeLeftovers(
-        {
-          exec: w.exec,
-          user,
-          dir,
-          scopePrefix: 'reconcile',
-          ...(w.gitBin ? { git: w.gitBin } : {}),
-          ...(w.shBin ? { sh: w.shBin } : {}),
-        },
-        known,
-        { scratch },
-      ),
-    issue: (ref) => issueWorkFacts(w.db, ref),
-    prHeads: (ref) => prHeadsOfBranch(w.db, ref),
-    subtaskTrees: (ids) => subtaskTreeRefs(w.db, ids),
-    openSessions: () => openSessionTrees(w.db),
-    taskState: (taskId) => taskStateOf(w.db, taskId),
-    activeTasks: () => activeTaskRefs(w.db),
-    repos: () => reconcileRepos(w.db),
-    auditMergedPrs: (repo, since) => w.gh.auditMergedPrs(repo, since),
-    quotaPools: () => quotaTable(w.db, { now: now() }),
-    async approval(id) {
-      const a = await getApproval(w.db, id);
-      if (!a) return null;
-      // 子任务发的等子任务工作流；Fusion 发的（没有子任务）等需求工作流（编号和需求工作流同一个）
-      let waitingWorkflowId: string | null = a.subtaskId ? subtaskWorkflowId(a.subtaskId) : null;
-      if (!a.subtaskId) {
-        const task = await taskContext(w.db, a.taskId);
-        waitingWorkflowId = task ? requirementWorkflowId(task.repo, task.issueNumber) : null;
-      }
-      return { decision: a.decision, decidedBy: a.decidedBy, waitingWorkflowId };
-    },
-    workflows: w.workflows ?? temporalWorkflows(client),
-    stageRoutable,
-    alerts: {
-      listOpen: (limit) => listOpenAlerts(w.db, { limit }),
-      byKey: (key) => alertByKey(w.db, key),
-      latestByPrefix: (prefix) => latestAlertByPrefix(w.db, prefix),
-      resolve: (x) =>
-        resolveAlertWithReason(w.db, {
-          dedupeKey: x.dedupeKey,
-          by: x.by,
-          why: x.why,
-          at: now(),
-          ...(x.auditActor ? { auditActor: x.auditActor } : {}),
-        }),
-      async raise(x) {
-        await upsertAlert(w.db, {
-          dedupeKey: x.dedupeKey,
-          level: x.level,
-          taskId: x.taskId,
-          title: x.title,
-          body: x.body,
-          ...(x.link ? { link: x.link } : {}),
-        });
+  const pgStore = createPgStore(w.db, { now });
+  const intakeLog = w.intakeLog ?? jsonLogger();
+  return (client, taskQueue) => {
+    const intake = reconcileIntake(w, { store: pgStore, log: intakeLog, now }, client, taskQueue);
+    return {
+      root: w.trees.root,
+      probeDir: PROBE_DIR,
+      sessionTmpDir: SESSION_TMP_DIR,
+      machine: w.machine,
+      listDir: w.listDir ?? listDirEntries,
+      treeFor: (repo, branch) => w.trees.treeFor(repo, branch),
+      ownerOf: (dir) => w.trees.ownerOf(dir),
+      remove: (dir) => w.trees.remove(dir),
+      leftovers: (dir, user, known, scratch) =>
+        treeLeftovers(
+          {
+            exec: w.exec,
+            user,
+            dir,
+            scopePrefix: 'reconcile',
+            ...(w.gitBin ? { git: w.gitBin } : {}),
+            ...(w.shBin ? { sh: w.shBin } : {}),
+          },
+          known,
+          { scratch },
+        ),
+      issue: (ref) => issueWorkFacts(w.db, ref),
+      prHeads: (ref) => prHeadsOfBranch(w.db, ref),
+      subtaskTrees: (ids) => subtaskTreeRefs(w.db, ids),
+      openSessions: () => openSessionTrees(w.db),
+      taskState: (taskId) => taskStateOf(w.db, taskId),
+      activeTasks: () => activeTaskRefs(w.db),
+      repos: () => reconcileRepos(w.db),
+      auditMergedPrs: (repo, since) => w.gh.auditMergedPrs(repo, since),
+      latestDelivery: (ref) => latestIssueDelivery(w.db, ref),
+      async repull(ref) {
+        const d = await latestIssueDelivery(w.db, ref);
+        if (!d) return { kind: 'no_delivery' };
+        try {
+          const r = await intake.replay(d.deliveryId, { force: true });
+          if (r.verdict === 'accepted') return { kind: 'processed', note: r.note ?? '' };
+          if (r.verdict === 'in_flight') return { kind: 'busy' };
+          if (r.verdict === 'ignored') return { kind: 'not_taken', why: r.reason };
+          return { kind: 'not_taken', why: `重放投递 ${d.deliveryId} 回的是 ${r.verdict}` };
+        } catch (err) {
+          // 现在做不了、要等（上一轮还没结束、项目停派）：接活已经把这条记成等着，对账补漏每轮重放
+          if (err instanceof RetryLaterError) return { kind: 'waiting', why: err.message };
+          throw err;
+        }
       },
-      insertOnce: (x) => insertAlertOnce(w.db, x),
-      updateOpen: (x) => updateOpenAlert(w.db, { ...x, at: now() }),
-    },
-    runs: {
-      start: (job, at) => startScheduleRun(w.db, job, at),
-      finish: (id, result, at) => finishScheduleRun(w.db, id, result, at),
-    },
-    now,
-    log,
-    ...(w.inspectMax === undefined ? {} : { inspectMax: w.inspectMax }),
-  });
+      ledgers: (input) => mergedPrLedgers(w.db, input),
+      async approval(id) {
+        const a = await getApproval(w.db, id);
+        if (!a) return null;
+        // 子任务发的等子任务工作流；Fusion 发的（没有子任务）等需求工作流（编号和需求工作流同一个）
+        let waitingWorkflowId: string | null = a.subtaskId ? subtaskWorkflowId(a.subtaskId) : null;
+        if (!a.subtaskId) {
+          const task = await taskContext(w.db, a.taskId);
+          waitingWorkflowId = task ? requirementWorkflowId(task.repo, task.issueNumber) : null;
+        }
+        return { decision: a.decision, decidedBy: a.decidedBy, waitingWorkflowId };
+      },
+      workflows: w.workflows ?? temporalWorkflows(client),
+      stageRoutable,
+      alerts: {
+        listOpen: (limit) => listOpenAlerts(w.db, { limit }),
+        byKey: (key) => alertByKey(w.db, key),
+        latestByPrefix: (prefix) => latestAlertByPrefix(w.db, prefix),
+        resolve: (x) =>
+          resolveAlertWithReason(w.db, {
+            dedupeKey: x.dedupeKey,
+            by: x.by,
+            why: x.why,
+            at: now(),
+            ...(x.auditActor ? { auditActor: x.auditActor } : {}),
+          }),
+        async raise(x) {
+          await upsertAlert(w.db, {
+            dedupeKey: x.dedupeKey,
+            level: x.level,
+            taskId: x.taskId,
+            title: x.title,
+            body: x.body,
+            ...(x.link ? { link: x.link } : {}),
+          });
+        },
+        insertOnce: (x) => insertAlertOnce(w.db, x),
+        updateOpen: (x) => updateOpenAlert(w.db, { ...x, at: now() }),
+      },
+      runs: {
+        start: (job, at) => startScheduleRun(w.db, job, at),
+        finish: (id, result, at) => finishScheduleRun(w.db, id, result, at),
+      },
+      now,
+      log,
+      ...(w.inspectMax === undefined ? {} : { inspectMax: w.inspectMax }),
+    };
+  };
 }

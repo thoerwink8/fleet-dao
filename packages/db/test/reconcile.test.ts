@@ -1,7 +1,14 @@
+import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { activeTaskRefs, reconcileRepos } from '../src/queries/reconcile.ts';
+import {
+  activeTaskRefs,
+  latestIssueDelivery,
+  mergedPrLedgers,
+  reconcileRepos,
+} from '../src/queries/reconcile.ts';
+import { githubEvents, githubEventVersions, pullRequests, repos } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
-import { addRepo, addTask, ago, HOUR, MIN } from './helpers.ts';
+import { addRepo, addRoute, addRun, addTask, ago, catalog, DAY, HOUR, MIN } from './helpers.ts';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -11,9 +18,13 @@ afterAll(() => t.close());
 beforeEach(() => resetTestDb(t));
 
 describe('每小时对账要的两份清单', () => {
-  it('没结束的单都列出来（含排队），终态的不列；仓和最近更新带着', async () => {
+  it('没结束的单都列出来（含排队），终态的不列；仓、最近更新、项目接活开没开带着', async () => {
     const aaa = await addRepo(t.db, 'aaa');
     const bbb = await addRepo(t.db, 'bbb');
+    await t.db
+      .update(repos)
+      .set({ autoDispatchSince: ago(DAY) })
+      .where(eq(repos.id, aaa.id));
     await addTask(t.db, aaa.id, { issueNumber: 1, state: 'done', updatedAt: ago(HOUR) });
     const running = await addTask(t.db, aaa.id, {
       issueNumber: 2,
@@ -39,10 +50,82 @@ describe('每小时对账要的两份清单', () => {
     expect(rows[0]?.updatedAt).toEqual(ago(2 * HOUR));
     expect(rows[1]?.updatedAt).toBeNull();
     expect(rows[2]?.updatedAt).toEqual(ago(MIN));
+    expect(rows.map((r) => r.autoDispatch)).toEqual([true, true, false]);
 
     expect(await reconcileRepos(t.db)).toEqual([
       { owner: 'acme', name: 'aaa' },
       { owner: 'acme', name: 'bbb' },
     ]);
+  });
+});
+
+async function delivery(
+  id: string,
+  object: string,
+  version: Date,
+  over: Partial<typeof githubEvents.$inferInsert> = {},
+) {
+  await t.db.insert(githubEvents).values({
+    deliveryId: id,
+    event: 'issues',
+    source: 'webhook',
+    repo: 'acme/Widgets',
+    payload: {},
+    status: 'accepted',
+    finishedAt: version,
+    ...over,
+  });
+  await t.db.insert(githubEventVersions).values({ deliveryId: id, object, version, state: 'open' });
+}
+
+describe('这张 issue 最近一次的 issues 投递（latestIssueDelivery）', () => {
+  it('按那一版 issue 的时刻取最新的；评论事件、别的 issue 不算；仓名按小写对', async () => {
+    await delivery('old', 'acme/widgets:issue:5', ago(2 * HOUR), { note: 'workflow=unscheduled' });
+    await delivery('new', 'acme/widgets:issue:5', ago(HOUR), { status: 'waiting', reason: '等上一轮' });
+    await delivery('comment', 'acme/widgets:issue:5', ago(MIN), { event: 'issue_comment' });
+    await delivery('other', 'acme/widgets:issue:6', ago(MIN));
+    const got = await latestIssueDelivery(t.db, { owner: 'acme', name: 'Widgets', issueNumber: 5 });
+    expect(got).toMatchObject({ deliveryId: 'new', status: 'waiting', reason: '等上一轮', note: null });
+    expect(await latestIssueDelivery(t.db, { owner: 'acme', name: 'widgets', issueNumber: 7 })).toBeNull();
+  });
+});
+
+describe('合了的 PR 和它对上的单的记账（mergedPrLedgers）', () => {
+  it('只列合了的、头分支上有这张单会话的；回看窗口外的点名了才列；带上这张单所有会话', async () => {
+    await catalog(t.db);
+    await addRoute(t.db, { id: 'r1', poolId: 'relay-a', modelId: 'opus-4.9' });
+    const route = { id: 'r1' };
+    const repo = await addRepo(t.db, 'widgets');
+    const task = await addTask(t.db, repo.id, { issueNumber: 160, state: 'merging' });
+    const run = await addRun(t.db, { taskId: task.id, routeId: route.id, branch: 'fleet/160-a' });
+    const other = await addRun(t.db, { taskId: task.id, routeId: route.id, branch: null, stage: 'verify' });
+    const pr = (number: number, headRef: string, state: 'merged' | 'open', updatedAt: Date) =>
+      t.db
+        .insert(pullRequests)
+        .values({ repoId: repo.id, number, state, headRef, headSha: 'a'.repeat(40), updatedAt });
+    await pr(1, 'fleet/160-a', 'merged', ago(HOUR));
+    await pr(2, 'fleet/160-a', 'open', ago(HOUR));
+    await pr(3, 'human/branch', 'merged', ago(HOUR));
+    await pr(4, 'fleet/160-a', 'merged', ago(3 * DAY));
+
+    const recent = await mergedPrLedgers(t.db, { since: ago(DAY) });
+    expect(recent.map((l) => l.prNumber)).toEqual([1]);
+    expect(recent[0]).toMatchObject({
+      owner: 'acme',
+      name: 'widgets',
+      taskId: task.id,
+      issueNumber: 160,
+      taskState: 'merging',
+      prUpdatedAt: ago(HOUR),
+    });
+    expect(recent[0]?.sessions.map((s) => s.runId).sort()).toEqual([run.id, other.id].sort());
+    expect(recent[0]?.sessions.every((s) => s.endedAt === null && s.inputTokens === null)).toBe(true);
+
+    const named = await mergedPrLedgers(t.db, {
+      since: ago(DAY),
+      prs: [{ owner: 'acme', name: 'widgets', number: 4 }],
+    });
+    expect(named.map((l) => l.prNumber)).toEqual([1, 4]);
+    expect(await mergedPrLedgers(t.db, { since: new Date() })).toEqual([]);
   });
 });

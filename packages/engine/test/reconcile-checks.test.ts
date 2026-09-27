@@ -1,18 +1,20 @@
-// 三处核对（jobs/reconcile-checks.ts）：没问题不报、有问题报并计 found、条件没了撤、读不到不记 ok 且旧提醒不撤。
-// 排队的单、10 分钟内更新过的不报。人开的 PR 不报合并人这一条在 github 包的测试里（这里只认对账结果里有没有那两句）。
+// 两处核对（jobs/reconcile-checks.ts）：对上了不报、对不上报并写明哪张单缺什么、条件没了撤、读不到不记 ok 且旧提醒不撤。
+// 接活关着的项目不查；排队的单投递上记着为什么不派的不报，没记的先补拉；10 分钟内更新过的不查。
+// 人开的 PR 不报合并人这一条在 github 包的测试里（这里只认对账结果里有没有那两句）。
 import { randomUUID } from 'node:crypto';
-import type { ActiveTaskRef, AlertRow } from '@fleet-dao/db';
+import type { ActiveTaskRef, AlertRow, IssueDeliveryRef, MergedPrLedger } from '@fleet-dao/db';
 import type { TaskState } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import {
+  checkLedgers,
   checkMergedPrs,
-  checkQuotas,
   checkWorkflows,
+  LEDGER_GRACE_MS,
+  ledgerAlertKey,
   MERGED_PR_LOOKBACK_MS,
   prAlertKey,
-  QUOTA_ALERT_KEY,
-  type QuotaPoolRead,
   type ReconcileCheckDeps,
+  type RepullResult,
   WORKFLOW_ALERT_PREFIX,
   WORKFLOW_QUIET_MS,
 } from '../src/jobs/reconcile-checks.ts';
@@ -30,6 +32,7 @@ function task(over: Partial<ActiveTaskRef> = {}): ActiveTaskRef {
     issueNumber: 160,
     state: 'running',
     updatedAt: new Date(NOW.getTime() - 20 * 60_000),
+    autoDispatch: true,
     ...over,
   };
 }
@@ -48,7 +51,11 @@ interface World {
   resolved: { dedupeKey: string; why: string }[];
   inserted: { dedupeKey: string; body: string; link: string | null; created: boolean }[];
   asked: string[];
+  repulled: number[];
+  ledgerCalls: { since: Date; prs: { owner: string; name: string; number: number }[] }[];
 }
+
+type Delivery = Pick<IssueDeliveryRef, 'status' | 'reason' | 'note'>;
 
 function world(
   over: {
@@ -57,29 +64,49 @@ function world(
     taskStates?: Record<string, TaskState | null>;
     repos?: { owner: string; name: string }[];
     audit?: ReconcileCheckDeps['auditMergedPrs'];
-    pools?: QuotaPoolRead[];
     open?: AlertRow[];
     listOpen?: ReconcileCheckDeps['alerts']['listOpen'];
     activeTasks?: ReconcileCheckDeps['activeTasks'];
     reposFn?: ReconcileCheckDeps['repos'];
-    quotaPools?: ReconcileCheckDeps['quotaPools'];
+    /** issue 号 → 最近一次投递；'throw' 读不成。 */
+    deliveries?: Record<number, Delivery | 'throw'>;
+    /** issue 号 → 补拉的结果；补拉之后工作流怎样由 afterRepull 定。 */
+    repull?: (issueNumber: number) => Promise<RepullResult>;
+    afterRepull?: Record<string, WorkflowState>;
+    ledgers?: ReconcileCheckDeps['ledgers'];
   } = {},
 ): World {
   const raised: Raised[] = [];
   const resolved: World['resolved'] = [];
   const inserted: World['inserted'] = [];
   const asked: string[] = [];
+  const repulled: number[] = [];
+  const ledgerCalls: World['ledgerCalls'] = [];
   const rows = [...(over.open ?? [])];
   const deps: ReconcileCheckDeps = {
     activeTasks: over.activeTasks ?? (async () => over.tasks ?? []),
     repos: over.reposFn ?? (async () => over.repos ?? []),
     auditMergedPrs:
       over.audit ?? (async () => ({ outcome: 'ok', scanned: 0, found: 0, fixed: 0, problems: [] })),
-    quotaPools: over.quotaPools ?? (async () => over.pools ?? []),
+    async latestDelivery(ref) {
+      const d = over.deliveries?.[ref.issueNumber] ?? null;
+      if (d === 'throw') throw new Error('投递表读不了');
+      return d;
+    },
+    async repull(ref) {
+      repulled.push(ref.issueNumber);
+      if (!over.repull) return { kind: 'no_delivery' };
+      return over.repull(ref.issueNumber);
+    },
+    async ledgers(input) {
+      ledgerCalls.push(input);
+      return over.ledgers ? over.ledgers(input) : [];
+    },
     workflows: {
       async state(id) {
         asked.push(id);
-        const st = over.states?.[id] ?? { state: 'missing' };
+        const after = repulled.length > 0 ? over.afterRepull?.[id] : undefined;
+        const st = after ?? over.states?.[id] ?? { state: 'missing' };
         if (st === 'throw') throw new Error('Temporal 连不上');
         return st;
       },
@@ -167,7 +194,7 @@ function world(
     now: () => NOW,
     log() {},
   };
-  return { deps, raised, resolved, inserted, asked };
+  return { deps, raised, resolved, inserted, asked, repulled, ledgerCalls };
 }
 
 function openAlert(dedupeKey: string, over: Partial<AlertRow> = {}): AlertRow {
@@ -187,7 +214,7 @@ function openAlert(dedupeKey: string, over: Partial<AlertRow> = {}): AlertRow {
   };
 }
 
-describe('开着的单都有工作流', () => {
+describe('开着的单都有着落', () => {
   it('工作流在跑：不报，found 是 0', async () => {
     const w = world({
       tasks: [task()],
@@ -198,7 +225,7 @@ describe('开着的单都有工作流', () => {
     expect(w.raised).toEqual([]);
   });
 
-  it('running / planning，工作流结束了或不在，而且 10 分钟前就没再更新：报 reconcile:workflow 并计 found', async () => {
+  it('在做的单（在干、写方案中），工作流结束了或不在、10 分钟前就没再更新：报卡住，写明哪张单、卡在哪；不补拉', async () => {
     const w = world({
       tasks: [
         task({ state: 'running' }),
@@ -216,6 +243,7 @@ describe('开着的单都有工作流', () => {
     });
     const part = await checkWorkflows(w.deps);
     expect(part).toMatchObject({ scanned: 2, found: 2, unchecked: [] });
+    expect(w.repulled).toEqual([]);
     expect(w.raised.map((r) => r.dedupeKey)).toEqual([
       `${WORKFLOW_ALERT_PREFIX}${TASK}`,
       `${WORKFLOW_ALERT_PREFIX}${OTHER}`,
@@ -223,10 +251,12 @@ describe('开着的单都有工作流', () => {
     expect(w.raised[0]).toMatchObject({
       level: 'alert',
       taskId: TASK,
+      title: '开着的单没有着落：acme/widgets#160',
       link: 'https://github.com/acme/widgets/issues/160',
     });
     expect(w.raised[0]?.body).toContain('在干');
     expect(w.raised[0]?.body).toContain('已经不在了');
+    expect(w.raised[0]?.body).toContain('不自动重起');
     expect(w.raised[1]?.body).toContain('写方案中');
     expect(w.raised[1]?.body).toContain('被强行终止了');
   });
@@ -238,15 +268,120 @@ describe('开着的单都有工作流', () => {
     expect(w.raised).toHaveLength(1);
   });
 
-  it('排队的单不报，也不去问 Temporal', async () => {
-    const w = world({ tasks: [task({ state: 'queued', updatedAt: null })] });
+  it('项目「让 AI 接活」关着：不查、不计数，也不去问 Temporal', async () => {
+    const w = world({
+      tasks: [task({ autoDispatch: false }), task({ state: 'queued', autoDispatch: false })],
+    });
     const part = await checkWorkflows(w.deps);
-    expect(part).toEqual({ scanned: 1, found: 0, unchecked: [] });
+    expect(part).toEqual({ scanned: 0, found: 0, unchecked: [] });
     expect(w.asked).toEqual([]);
     expect(w.raised).toEqual([]);
   });
 
-  it('10 分钟内更新过：不报', async () => {
+  it('排队的单，投递上记着为什么不派（未排期、不是当前版本、母单、子单、开关打开前开的、等着）：不报、不补拉', async () => {
+    const notes: Delivery[] = [
+      { status: 'accepted', reason: null, note: 'task=exists, workflow=unscheduled' },
+      { status: 'accepted', reason: null, note: 'task=exists, workflow=not_current_version' },
+      { status: 'accepted', reason: null, note: 'task=exists, workflow=mother_ticket' },
+      { status: 'accepted', reason: null, note: 'task=created, workflow=sub_issue' },
+      { status: 'accepted', reason: null, note: 'task=created, workflow=opened_before_switch' },
+      { status: 'waiting', reason: '这个项目停派：流程配置认不出', note: null },
+    ];
+    const w = world({
+      tasks: notes.map((_, i) =>
+        task({ taskId: randomUUID(), issueNumber: 200 + i, state: 'queued', updatedAt: null }),
+      ),
+      deliveries: Object.fromEntries(notes.map((d, i) => [200 + i, d])),
+    });
+    const part = await checkWorkflows(w.deps);
+    expect(part).toEqual({ scanned: 6, found: 0, unchecked: [] });
+    expect(w.repulled).toEqual([]);
+    expect(w.raised).toEqual([]);
+  });
+
+  it('排队的单两样都没有（没记不派理由）：补拉一次，工作流起来了就算补上，不报', async () => {
+    const w = world({
+      tasks: [task({ state: 'queued', updatedAt: null })],
+      deliveries: {
+        160: { status: 'accepted', reason: null, note: 'task=created, workflow=version_unreadable' },
+      },
+      repull: async () => ({ kind: 'processed', note: 'task=exists, workflow=started' }),
+      afterRepull: { 'req:acme/widgets#160': { state: 'running' } },
+    });
+    const part = await checkWorkflows(w.deps);
+    expect(w.repulled).toEqual([160]);
+    expect(part).toEqual({ scanned: 1, found: 1, unchecked: [] });
+    expect(w.raised).toEqual([]);
+  });
+
+  it('补拉后接活判了不派、或记成等着：有着落了，不报', async () => {
+    const w = world({
+      tasks: [
+        task({ state: 'queued', updatedAt: null }),
+        task({ taskId: OTHER, issueNumber: 161, state: 'queued', updatedAt: null }),
+      ],
+      repull: async (n) =>
+        n === 160
+          ? { kind: 'processed', note: 'task=exists, workflow=unscheduled' }
+          : { kind: 'waiting', why: '上一轮还没结束' },
+    });
+    const part = await checkWorkflows(w.deps);
+    expect(w.repulled).toEqual([160, 161]);
+    expect(part).toEqual({ scanned: 2, found: 2, unchecked: [] });
+    expect(w.raised).toEqual([]);
+  });
+
+  it('补拉也没成（还是没起来、没有投递、门没收、重放抛错）：报卡住，写明卡在哪', async () => {
+    const ids = [TASK, OTHER, randomUUID(), randomUUID()];
+    const w = world({
+      tasks: ids.map((taskId, i) => task({ taskId, issueNumber: 160 + i, state: 'queued', updatedAt: null })),
+      deliveries: { 160: { status: 'accepted', reason: null, note: 'task=exists, workflow=started' } },
+      async repull(n) {
+        if (n === 160) return { kind: 'processed', note: 'task=exists, workflow=already_running' };
+        if (n === 161) return { kind: 'no_delivery' };
+        if (n === 162) return { kind: 'not_taken', why: '仓不受管' };
+        throw new Error('GitHub 读不了里程碑');
+      },
+    });
+    const part = await checkWorkflows(w.deps);
+    expect(part).toMatchObject({ scanned: 4, found: 4, unchecked: [] });
+    expect(w.raised.map((r) => r.body)).toEqual([
+      expect.stringContaining('补拉了一次还是没起来：接活记的是「task=exists, workflow=already_running」'),
+      expect.stringContaining('库里没有这张 issue 的投递，补拉不了'),
+      expect.stringContaining('补拉时接活没收：仓不受管'),
+      expect.stringContaining('补拉了一次没成：GitHub 读不了里程碑'),
+    ]);
+    expect(w.raised[0]?.body).toContain('排队中');
+  });
+
+  it('补拉时那条投递正在处理：这一轮不报、旧提醒不撤', async () => {
+    const old = openAlert(`${WORKFLOW_ALERT_PREFIX}${TASK}`, { taskId: TASK });
+    const w = world({
+      tasks: [task({ state: 'queued', updatedAt: null })],
+      repull: async () => ({ kind: 'busy' }),
+      open: [old],
+    });
+    const part = await checkWorkflows(w.deps);
+    expect(part).toEqual({ scanned: 1, found: 0, unchecked: [] });
+    expect(w.raised).toEqual([]);
+    expect(old.resolvedAt).toBeNull();
+  });
+
+  it('读投递抛错：记没查成，不补拉、不报，旧提醒不撤', async () => {
+    const old = openAlert(`${WORKFLOW_ALERT_PREFIX}${TASK}`, { taskId: TASK });
+    const w = world({
+      tasks: [task({ state: 'queued', updatedAt: null })],
+      deliveries: { 160: 'throw' },
+      open: [old],
+    });
+    const part = await checkWorkflows(w.deps);
+    expect(part.unchecked).toEqual(['acme/widgets#160 的投递没读成：投递表读不了']);
+    expect(w.repulled).toEqual([]);
+    expect(w.raised).toEqual([]);
+    expect(old.resolvedAt).toBeNull();
+  });
+
+  it('10 分钟内更新过：不查', async () => {
     const w = world({
       tasks: [task({ updatedAt: new Date(NOW.getTime() - WORKFLOW_QUIET_MS + 1) })],
     });
@@ -255,25 +390,31 @@ describe('开着的单都有工作流', () => {
     expect(w.raised).toEqual([]);
   });
 
-  it('工作流又在跑、单结束了、回到排队：撤掉', async () => {
+  it('工作流又在跑、单结束了、有了不派理由、项目接活关了：撤掉', async () => {
+    const third = '33333333-3333-4333-8333-333333333333';
+    const fourth = '44444444-4444-4444-8444-444444444444';
     const running = openAlert(`${WORKFLOW_ALERT_PREFIX}${TASK}`, { taskId: TASK });
     const done = openAlert(`${WORKFLOW_ALERT_PREFIX}${OTHER}`);
-    const back = openAlert(`${WORKFLOW_ALERT_PREFIX}33333333-3333-4333-8333-333333333333`);
+    const held = openAlert(`${WORKFLOW_ALERT_PREFIX}${third}`);
+    const off = openAlert(`${WORKFLOW_ALERT_PREFIX}${fourth}`);
     const w = world({
       tasks: [
         task(),
-        task({ taskId: '33333333-3333-4333-8333-333333333333', issueNumber: 162, state: 'queued' }),
+        task({ taskId: third, issueNumber: 162, state: 'queued' }),
+        task({ taskId: fourth, issueNumber: 163, autoDispatch: false }),
       ],
       states: { 'req:acme/widgets#160': { state: 'running' } },
+      deliveries: { 162: { status: 'accepted', reason: null, note: 'workflow=not_current_version' } },
       taskStates: { [OTHER]: 'done' },
-      open: [running, done, back],
+      open: [running, done, held, off],
     });
     const part = await checkWorkflows(w.deps);
-    expect(part.found).toBe(3);
+    expect(part.found).toBe(4);
     expect(w.resolved.map((r) => r.why)).toEqual([
-      '需求工作流又在跑了',
+      '需求工作流在跑',
       '这张单已经结束了（做完了）',
-      '这张单在排队，没派是有意的，不要求已经有工作流',
+      '投递上记着不派：不是当前版本',
+      '这个项目「让 AI 接活」关着，不要求有工作流',
     ]);
     expect(running.body.startsWith('已撤：')).toBe(true);
     expect(done.resolvedAt).toEqual(NOW);
@@ -439,80 +580,128 @@ describe('合了的 PR 都记了账', () => {
   });
 });
 
-describe('额度读数不超过 30 分钟', () => {
-  const pool = (over: Partial<QuotaPoolRead> = {}): QuotaPoolRead => ({
-    poolId: 'relay-a',
-    channelName: '中转',
-    channelEnabled: true,
-    lastReadOkAt: new Date(NOW.getTime() - 5 * 60_000),
-    dataAt: new Date(NOW.getTime() - 5 * 60_000),
-    neverRead: false,
-    readOverdue: false,
-    ...over,
-  });
+describe('合了的 PR 对上的单记了账', () => {
+  function ledger(over: Partial<MergedPrLedger> = {}): MergedPrLedger {
+    return {
+      owner: 'acme',
+      name: 'widgets',
+      prNumber: 88,
+      prUpdatedAt: new Date(NOW.getTime() - 2 * 60 * 60_000),
+      taskId: TASK,
+      issueNumber: 160,
+      taskState: 'done',
+      sessions: [
+        {
+          runId: randomUUID(),
+          stage: 'execute',
+          startedAt: new Date(NOW.getTime() - 5 * 60 * 60_000),
+          endedAt: new Date(NOW.getTime() - 4 * 60 * 60_000),
+          outcome: 'ok',
+          inputTokens: 1200,
+          outputTokens: 300,
+        },
+        {
+          runId: randomUUID(),
+          stage: 'verify',
+          startedAt: new Date(NOW.getTime() - 3 * 60 * 60_000),
+          endedAt: new Date(NOW.getTime() - 3 * 60 * 60_000),
+          outcome: 'ok',
+          // 没读到：留空，关单评论写「没读到」，不算缺
+          inputTokens: null,
+          outputTokens: null,
+        },
+      ],
+      ...over,
+    };
+  }
 
-  it('都新的：不报；原来那条撤掉', async () => {
-    const old = openAlert(QUOTA_ALERT_KEY);
-    const w = world({ pools: [pool()], open: [old] });
-    const part = await checkQuotas(w.deps);
-    expect(part).toMatchObject({ scanned: 1, found: 1, unchecked: [] });
+  it('会话都有结局、用量记了或留空、单做完了：不报，按 26 小时回看', async () => {
+    const w = world({ ledgers: async () => [ledger()] });
+    const part = await checkLedgers(w.deps);
+    expect(part).toEqual({ scanned: 1, found: 0, unchecked: [] });
     expect(w.raised).toEqual([]);
-    expect(w.resolved).toEqual([
-      { dedupeKey: QUOTA_ALERT_KEY, why: '启用的渠道下，账号池的额度读数都在 30 分钟以内' },
-    ]);
-    expect(old.body.startsWith('已撤：')).toBe(true);
+    expect(w.ledgerCalls[0]?.since).toEqual(new Date(NOW.getTime() - MERGED_PR_LOOKBACK_MS));
   });
 
-  it('启用渠道下过期的汇成一条，写出上次读成的时刻；停用的渠道不算', async () => {
-    const staleAt = new Date(NOW.getTime() - 45 * 60_000);
-    const frozenAt = new Date(NOW.getTime() - 2 * 60 * 60_000);
+  it('缺什么报什么：会话没结局、用量记成 0、单没记成做完，一条 PR 一条提醒，写明哪张单', async () => {
+    const base = ledger();
     const w = world({
-      pools: [
-        pool({ poolId: 'relay-a', lastReadOkAt: staleAt, dataAt: null, readOverdue: true }),
-        pool({ poolId: 'relay-b', neverRead: true, lastReadOkAt: null, dataAt: null, readOverdue: true }),
-        pool({
-          poolId: 'relay-c',
-          lastReadOkAt: NOW,
-          dataAt: frozenAt,
-          readOverdue: true,
+      ledgers: async () => [
+        ledger({
+          taskState: 'merging',
+          sessions: [
+            { ...(base.sessions[0] as MergedPrLedger['sessions'][number]), endedAt: null, outcome: null },
+            { ...(base.sessions[1] as MergedPrLedger['sessions'][number]), inputTokens: 0, outputTokens: 0 },
+          ],
         }),
-        pool({
-          poolId: 'old-a',
-          channelName: '停用的',
-          channelEnabled: false,
-          readOverdue: true,
-          neverRead: true,
-          lastReadOkAt: null,
-        }),
-        pool({ poolId: 'relay-fresh' }),
       ],
     });
-    const part = await checkQuotas(w.deps);
-    expect(part).toMatchObject({ scanned: 4, found: 3, unchecked: [] });
+    const part = await checkLedgers(w.deps);
+    expect(part).toEqual({ scanned: 1, found: 1, unchecked: [] });
     expect(w.raised).toHaveLength(1);
-    expect(w.raised[0]).toMatchObject({ dedupeKey: QUOTA_ALERT_KEY, level: 'alert', taskId: null });
+    expect(w.raised[0]).toMatchObject({
+      dedupeKey: ledgerAlertKey('acme', 'widgets', 88),
+      taskId: TASK,
+      title: '合了的 PR 记账不全：acme/widgets#88',
+      link: 'https://github.com/acme/widgets/pull/88',
+    });
     const body = w.raised[0]?.body ?? '';
-    expect(body).toContain('中转 / relay-a：上次读成在北京时间 09-26 16:56（45 分钟前）');
-    expect(body).toContain('中转 / relay-b：从没读成过');
-    expect(body).toContain('中转 / relay-c：上次读成在北京时间 09-26 17:41（0 分钟前）');
-    expect(body).toContain('上游数据冻住了（数据时刻北京时间 09-26 15:41）');
-    expect(body).not.toContain('old-a');
-    expect(body).not.toContain('relay-fresh');
+    expect(body).toContain('单 #160：1 次会话没有结局（execute）');
+    expect(body).toContain('单 #160：1 次跑过的会话用量记成了 0');
+    expect(body).toContain('单 #160：合并关单那一步没写完：库里这张单是「在合并」');
   });
 
-  it('读额度表抛错：这一部分 failed，旧提醒不撤', async () => {
-    const old = openAlert(QUOTA_ALERT_KEY);
+  it('合并不满 30 分钟（关单那一步可能还在走）：不报', async () => {
+    const w = world({
+      ledgers: async () => [
+        ledger({ taskState: 'merging', prUpdatedAt: new Date(NOW.getTime() - LEDGER_GRACE_MS + 1) }),
+      ],
+    });
+    const part = await checkLedgers(w.deps);
+    expect(part).toEqual({ scanned: 1, found: 0, unchecked: [] });
+    expect(w.raised).toEqual([]);
+  });
+
+  it('补齐了撤；出了回看窗口的旧提醒点名复查；镜像里不再对得上的也撤', async () => {
+    const fixed = openAlert(ledgerAlertKey('acme', 'widgets', 88));
+    const gone = openAlert(ledgerAlertKey('acme', 'gadgets', 7));
+    const w = world({ open: [fixed, gone], ledgers: async () => [ledger()] });
+    const part = await checkLedgers(w.deps);
+    expect(w.ledgerCalls[0]?.prs).toEqual([
+      { owner: 'acme', name: 'widgets', number: 88 },
+      { owner: 'acme', name: 'gadgets', number: 7 },
+    ]);
+    expect(part.found).toBe(2);
+    expect(w.resolved.map((r) => r.why)).toEqual([
+      '会话结局、用量、关单都记齐了',
+      '镜像里这条 PR 不再是已合并、或对不上单了',
+    ]);
+  });
+
+  it('读库抛错：这一部分 failed，旧提醒不撤', async () => {
+    const old = openAlert(ledgerAlertKey('acme', 'widgets', 88));
     const w = world({
       open: [old],
-      quotaPools: async () => {
-        throw new Error('关系 quota_windows 不存在');
+      ledgers: async () => {
+        throw new Error('库连不上');
       },
     });
-    const part = await checkQuotas(w.deps);
-    expect(part.failed).toBe('读额度表没成：关系 quota_windows 不存在');
-    expect(part.scanned).toBe(0);
+    const part = await checkLedgers(w.deps);
+    expect(part.failed).toBe('读合了的 PR 和会话记账没成：库连不上');
     expect(w.resolved).toEqual([]);
-    expect(w.raised).toEqual([]);
     expect(old.resolvedAt).toBeNull();
+  });
+
+  it('列提醒抛错：照样查、照样报，记没查成，旧提醒不撤', async () => {
+    const w = world({
+      ledgers: async () => [ledger({ taskState: 'running' })],
+      listOpen: async () => {
+        throw new Error('提醒表读不了');
+      },
+    });
+    const part = await checkLedgers(w.deps);
+    expect(part.unchecked).toEqual(['列没处理的提醒没成，记账核对的旧提醒这一轮不复查、不撤：提醒表读不了']);
+    expect(part.found).toBe(1);
+    expect(w.resolved).toEqual([]);
   });
 });

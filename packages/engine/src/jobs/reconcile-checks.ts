@@ -1,15 +1,17 @@
-// 每小时对账的三处核对（design 第六节第 4 层）：开着的单都有工作流、合了的 PR 都记了账、额度读数不超过 30 分钟。
+// 每小时对账的两处核对（design 第六节第 4 层，specs/293-对账三处核对）：开着的单都有着落、合了的 PR 都记了账。
+// 第三处（额度读数不超过 30 分钟）等 #76 定时读额度上线后随它做：额度现在没有定时读进库，查它新不新鲜只会天天报过期。
 // 各返回一个 SweepPart，由 hourly-reconcile 的 combineParts 并进这一轮。提醒自己报、自己撤，不进 alert-sweep 的判法表。
-// 不自动重起工作流：重起会和残留的会话、分支撞，要人判。镜像没记成已合并可以补，补了写日志、不报警。
+// 补拉只对排队中的单：照对账补漏重放同一份实现（接活那道门）再判一次派不派；在做的单工作流断了不自动重起（会和残留的
+// 会话、分支撞，接活也不会再拉起在做的单），直接报要人看。记账对不上只报、不补：补账要从会话记录重算，不在这里猜。
 import {
   type ActiveTaskRef,
-  QUOTA_STALE_AFTER_MS,
+  type IssueDeliveryRef,
+  type MergedPrLedger,
   type ReconcileRepoRef,
   TERMINAL_TASK_STATES,
 } from '@fleet-dao/db';
 import type { TaskState } from '@fleet-dao/shared';
 import { requirementWorkflowId } from '@fleet-dao/shared/workflow-ids';
-import { duration } from '../routing/names.ts';
 import type { AlertSweepDeps } from './alert-sweep.ts';
 import {
   clip,
@@ -17,7 +19,6 @@ import {
   notRunningWords,
   RECONCILE_ACTOR,
   type SweepPart,
-  stamp,
   type WorkflowState,
 } from './reconcile-common.ts';
 
@@ -35,22 +36,41 @@ const TASK_STATE_WORDS: Readonly<Record<TaskState, string>> = {
   stalled: '停滞',
 };
 
-/** 开着的单没有在跑的工作流。后面是任务编号。 */
+/** 开着的单没有着落（工作流不在跑、也没记为什么不派，补拉也没成）。后面是任务编号。 */
 export const WORKFLOW_ALERT_PREFIX = 'reconcile:workflow:';
+/** 合了的 PR 对上的单记账不全。后面是 <owner>/<name>#<PR 号>。 */
+export const LEDGER_ALERT_PREFIX = 'reconcile:ledger:';
 /**
- * 工作流刚收尾、库里的状态还没写上的那一下：单在这之内更新过，不报、也不撤旧的。
+ * 工作流刚收尾、库里的状态还没写上的那一下：单在这之内更新过，不查、也不撤旧的。
  * 再短会把正常收尾报出来，再长会把真断了的单多瞒一阵。
  */
 export const WORKFLOW_QUIET_MS = 10 * 60_000;
-/** 额度读数过期，所有池汇成这一条。 */
-export const QUOTA_ALERT_KEY = 'reconcile:quota-stale';
+/** PR 合了以后关单那一步（写关单评论、收会话、记做完）要走一会儿：合并这么久之内的不查记账。 */
+export const LEDGER_GRACE_MS = 30 * 60_000;
 /** 每小时一轮，往回看 26 小时：漏一轮也补得回最近一天里合的。 */
 export const MERGED_PR_LOOKBACK_MS = 26 * 60 * 60_000;
 /** 和 hourly-reconcile 的 OPEN_ALERT_LIMIT 同一个上限：多出来的照实记没看全，不当成没有。 */
 const ALERT_LIST_LIMIT = 500;
 
+/**
+ * 接活在投递上记的「为什么不派」（`workflow=<原因>`，packages/api/src/issue-intake.ts；判法在 @fleet-dao/core 的
+ * dispatch.ts）里算数的几种：排队中的单记着其中一种，没派是有意的。开关关着（dispatch_off）不在这里：项目开关开着
+ * 还记着它是旧的，要重判；读不出版本、读不出建单时刻的是没判成，也要重判。
+ */
+export const HELD_REASONS: Readonly<Record<string, string>> = {
+  opened_before_switch: '开关打开以前开的单，要人明说交给 fleet',
+  unscheduled: '未排期',
+  not_current_version: '不是当前版本',
+  mother_ticket: '母单',
+  sub_issue: '子单',
+};
+
 export function prAlertKey(owner: string, name: string, number: number): string {
   return `reconcile:pr:${owner}/${name}#${number}`;
+}
+
+export function ledgerAlertKey(owner: string, name: string, number: number): string {
+  return `${LEDGER_ALERT_PREFIX}${owner}/${name}#${number}`;
 }
 
 /** 合并 PR 对账的结果，和 @fleet-dao/github 的 AuditReport 同形（这里不引那个包）。 */
@@ -63,23 +83,34 @@ export interface MergedPrAudit {
   why?: string | undefined;
 }
 
-/** 额度表里这一处要的几列（quotaTable 的行多出来的字段不用）。 */
-export interface QuotaPoolRead {
-  poolId: string;
-  channelName: string;
-  channelEnabled: boolean;
-  lastReadOkAt: Date | null;
-  dataAt: Date | null;
-  neverRead: boolean;
-  readOverdue: boolean;
-}
+/** 补拉（重放这张 issue 最近一次的 issues 投递）的结果。 */
+export type RepullResult =
+  /** 库里没有这张 issue 的 issues 投递，没东西可重放。 */
+  | { kind: 'no_delivery' }
+  /** 那条投递正在处理：这一轮不动。 */
+  | { kind: 'busy' }
+  /** 接活处理完了，note 是它记的（`workflow=started` 之类）。 */
+  | { kind: 'processed'; note: string }
+  /** 接活说现在做不了、记成等着（上一轮还没结束、项目停派）：对账补漏每轮重放它。 */
+  | { kind: 'waiting'; why: string }
+  /** 门没收、或已经处理完不肯再来。 */
+  | { kind: 'not_taken'; why: string };
+
+type IssueRef = { owner: string; name: string; issueNumber: number };
 
 export interface ReconcileCheckDeps
   extends Pick<AlertSweepDeps, 'workflows' | 'taskState' | 'alerts' | 'now' | 'log'> {
   activeTasks(): Promise<ActiveTaskRef[]>;
+  /** 这张 issue 最近一次的 issues 投递（@fleet-dao/db 的 latestIssueDelivery）。 */
+  latestDelivery(ref: IssueRef): Promise<Pick<IssueDeliveryRef, 'status' | 'reason' | 'note'> | null>;
+  /** 照对账补漏重放同一份实现，把这张 issue 最近一次的投递重放一次（带 force）。 */
+  repull(ref: IssueRef): Promise<RepullResult>;
   repos(): Promise<ReconcileRepoRef[]>;
   auditMergedPrs(repoFullName: string, since: Date): Promise<MergedPrAudit>;
-  quotaPools(): Promise<readonly QuotaPoolRead[]>;
+  ledgers(input: {
+    since: Date;
+    prs: { owner: string; name: string; number: number }[];
+  }): Promise<MergedPrLedger[]>;
 }
 
 const empty = (): SweepPart => ({ scanned: 0, found: 0, unchecked: [] });
@@ -94,7 +125,68 @@ function workflowKey(taskId: string): string {
   return `${WORKFLOW_ALERT_PREFIX}${taskId}`;
 }
 
-/** 库里没结束、也不在排队的单，需求工作流不在跑就报；又在跑、结束、回到排队、库里没了就撤。 */
+/** 接活记的 `workflow=<结果>`；没有是 null。 */
+export function intakeResult(note: string | null): string | null {
+  return note ? (/(?:^|,\s*)workflow=([a-z_]+)/.exec(note)?.[1] ?? null) : null;
+}
+
+/** 投递上记着的「为什么不派」：算数的原因（见 HELD_REASONS）、或记成等着的原因；都不是是 null。 */
+export function heldWhy(d: Pick<IssueDeliveryRef, 'status' | 'reason' | 'note'> | null): string | null {
+  if (!d) return null;
+  if (d.status === 'waiting') return `投递记成等着：${d.reason ?? '没写原因'}`;
+  if (d.status !== 'accepted') return null;
+  const r = intakeResult(d.note);
+  return r && Object.hasOwn(HELD_REASONS, r) ? `投递上记着不派：${HELD_REASONS[r]}` : null;
+}
+
+type Verdict =
+  | { kind: 'ok'; why: string; fixed: boolean }
+  | { kind: 'hold' }
+  | { kind: 'stuck'; why: string };
+
+/** 排队中的单工作流不在跑、投递上也没记为什么不派：补拉一次，看结果。 */
+async function repullQueued(deps: ReconcileCheckDeps, task: ActiveTaskRef, where: string): Promise<Verdict> {
+  let r: RepullResult;
+  try {
+    r = await deps.repull(task);
+  } catch (err) {
+    return { kind: 'stuck', why: `补拉了一次没成：${message(err)}` };
+  }
+  switch (r.kind) {
+    case 'busy':
+      return { kind: 'hold' };
+    case 'no_delivery':
+      return { kind: 'stuck', why: '库里没有这张 issue 的投递，补拉不了（接活从没收到过它？）' };
+    case 'not_taken':
+      return { kind: 'stuck', why: `补拉时接活没收：${r.why}` };
+    case 'waiting':
+      return { kind: 'ok', why: `补拉了一次，接活记成等着（${r.why}），对账补漏每轮再来`, fixed: true };
+    case 'processed': {
+      const got = intakeResult(r.note);
+      if (got && Object.hasOwn(HELD_REASONS, got)) {
+        return { kind: 'ok', why: `补拉了一次，接活判不派：${HELD_REASONS[got]}`, fixed: true };
+      }
+      const wf = requirementWorkflowId({ owner: task.owner, name: task.name }, task.issueNumber);
+      let st: WorkflowState;
+      try {
+        st = await deps.workflows.state(wf);
+      } catch (err) {
+        deps.log('warn', '每小时对账：补拉之后问工作流没问成', { issue: where, error: message(err) });
+        return { kind: 'hold' };
+      }
+      if (st.state === 'running') return { kind: 'ok', why: '补拉了一次，工作流起来了', fixed: true };
+      return {
+        kind: 'stuck',
+        why: `补拉了一次还是没起来：接活记的是「${r.note || '什么都没记'}」，${notRunningWords(st)}`,
+      };
+    }
+  }
+}
+
+/**
+ * 「让 AI 接活」开着的项目里没结束的单：工作流在跑，或（排队中的）投递上记着为什么不派，就有着落；都没有的排队单补拉一次，
+ * 补拉也没成、或在做的单工作流断了，报卡住。条件没了（有着落了、单结束了、项目接活关了、库里没了）撤。
+ */
 export async function checkWorkflows(deps: ReconcileCheckDeps): Promise<SweepPart> {
   const part = empty();
   let tasks: ActiveTaskRef[];
@@ -104,18 +196,18 @@ export async function checkWorkflows(deps: ReconcileCheckDeps): Promise<SweepPar
     return { ...part, failed: `列没结束的单没成：${message(err)}` };
   }
   const now = deps.now();
-  /** 这一轮查成了且没事：值是撤的时候写的原因。 */
+  /** 这一轮查成了且有着落：值是撤的时候写的原因。 */
   const clear = new Map<string, string>();
-  /** 报了、问失败、或还在 10 分钟的窗口里：旧提醒留着。 */
+  /** 报了、没查成、或还在 10 分钟的窗口里：旧提醒留着。 */
   const hold = new Set<string>();
 
   for (const task of tasks) {
-    part.scanned += 1;
-    const where = `${task.owner}/${task.name}#${task.issueNumber}`;
-    if (task.state === 'queued') {
-      clear.set(task.taskId, '这张单在排队，没派是有意的，不要求已经有工作流');
+    if (!task.autoDispatch) {
+      clear.set(task.taskId, '这个项目「让 AI 接活」关着，不要求有工作流');
       continue;
     }
+    part.scanned += 1;
+    const where = `${task.owner}/${task.name}#${task.issueNumber}`;
     const wf = requirementWorkflowId({ owner: task.owner, name: task.name }, task.issueNumber);
     let st: WorkflowState;
     try {
@@ -126,34 +218,67 @@ export async function checkWorkflows(deps: ReconcileCheckDeps): Promise<SweepPar
       continue;
     }
     if (st.state === 'running') {
-      clear.set(task.taskId, '需求工作流又在跑了');
+      clear.set(task.taskId, '需求工作流在跑');
       continue;
     }
     if (recentlyTouched(task.updatedAt, now)) {
       hold.add(task.taskId);
       continue;
     }
+    let verdict: Verdict;
+    if (task.state === 'queued') {
+      let delivery: Awaited<ReturnType<ReconcileCheckDeps['latestDelivery']>>;
+      try {
+        delivery = await deps.latestDelivery(task);
+      } catch (err) {
+        hold.add(task.taskId);
+        part.unchecked.push(`${where} 的投递没读成：${message(err)}`);
+        continue;
+      }
+      const held = heldWhy(delivery);
+      verdict = held ? { kind: 'ok', why: held, fixed: false } : await repullQueued(deps, task, where);
+    } else {
+      verdict = {
+        kind: 'stuck',
+        why: `${notRunningWords(st)}。接活不会再拉起在做的单，也不自动重起（会和残留的会话、分支撞），要人看`,
+      };
+    }
+    if (verdict.kind === 'hold') {
+      hold.add(task.taskId);
+      continue;
+    }
+    if (verdict.kind === 'ok') {
+      clear.set(task.taskId, verdict.why);
+      if (verdict.fixed) {
+        part.found += 1;
+        deps.log('info', '每小时对账：排队的单补拉了一次', {
+          taskId: task.taskId,
+          issue: where,
+          why: verdict.why,
+        });
+      }
+      continue;
+    }
+    hold.add(task.taskId);
     const dedupeKey = workflowKey(task.taskId);
-    const title = clip(`开着的单没有在跑的工作流：${where}`, 300);
-    const body = [
-      `库里这张单是「${TASK_STATE_WORDS[task.state]}」。${notRunningWords(st)}。`,
-      '不自动重起：重起会和残留的会话、分支撞，要人看。',
-    ].join('\n');
     try {
       await deps.alerts.raise({
         dedupeKey,
         level: 'alert',
         taskId: task.taskId,
-        title,
-        body,
+        title: clip(`开着的单没有着落：${where}`, 300),
+        body: `库里这张单是「${TASK_STATE_WORDS[task.state]}」，需求工作流不在跑。${verdict.why}。`,
         link: `https://github.com/${task.owner}/${task.name}/issues/${task.issueNumber}`,
       });
       part.found += 1;
-      deps.log('info', '每小时对账：开着的单没有在跑的工作流', { taskId: task.taskId, issue: where });
+      deps.log('info', '每小时对账：开着的单没有着落', {
+        taskId: task.taskId,
+        issue: where,
+        why: verdict.why,
+      });
     } catch (err) {
-      part.unchecked.push(`${where} 没有在跑的工作流，报提醒没报成：${message(err)}`);
+      part.unchecked.push(`${where} 没有着落，报提醒没报成：${message(err)}`);
     }
-    hold.add(task.taskId);
   }
 
   let open: { dedupeKey: string }[];
@@ -178,32 +303,31 @@ export async function checkWorkflows(deps: ReconcileCheckDeps): Promise<SweepPar
       if (active.has(taskId)) continue;
       try {
         const state = await deps.taskState(taskId);
-        if (state !== null && state !== 'queued' && !terminal.has(state)) {
+        if (state !== null && !terminal.has(state)) {
           part.unchecked.push(`提醒 ${alert.dedupeKey} 对上的单还没结束，这一轮的清单里却没有，不撤`);
           continue;
         }
-        why =
-          state === null
-            ? '库里没有这张单了'
-            : state === 'queued'
-              ? '这张单回到排队了，没派是有意的'
-              : `这张单已经结束了（${TASK_STATE_WORDS[state]}）`;
+        why = state === null ? '库里没有这张单了' : `这张单已经结束了（${TASK_STATE_WORDS[state]}）`;
       } catch (err) {
         part.unchecked.push(`提醒 ${alert.dedupeKey} 对上的单读不了，不撤：${message(err)}`);
         continue;
       }
     }
-    try {
-      const r = await deps.alerts.resolve({ dedupeKey: alert.dedupeKey, by: RECONCILE_ACTOR, why });
-      if (r === 'ok') {
-        part.found += 1;
-        deps.log('info', '每小时对账：撤了一条提醒', { dedupeKey: alert.dedupeKey, why });
-      }
-    } catch (err) {
-      part.unchecked.push(`提醒 ${alert.dedupeKey} 没撤成：${message(err)}`);
-    }
+    await resolveOne(deps, part, alert.dedupeKey, why);
   }
   return part;
+}
+
+async function resolveOne(deps: ReconcileCheckDeps, part: SweepPart, dedupeKey: string, why: string) {
+  try {
+    const r = await deps.alerts.resolve({ dedupeKey, by: RECONCILE_ACTOR, why });
+    if (r === 'ok') {
+      part.found += 1;
+      deps.log('info', '每小时对账：撤了一条提醒', { dedupeKey, why });
+    }
+  } catch (err) {
+    part.unchecked.push(`提醒 ${dedupeKey} 没撤成：${message(err)}`);
+  }
 }
 
 interface Classified {
@@ -241,7 +365,7 @@ function classifyProblems(problems: readonly string[]): Classified {
   return { fixed, failed, odd, alerts };
 }
 
-/** 每个受管的仓，最近 26 小时合了的 PR：镜像补上算发现；没补上的按 PR 报一条，不自动撤。 */
+/** 每个受管的仓，最近 26 小时合了的 PR：镜像补上算发现；机器人开的合并人、合并记录不对按 PR 报一条，不自动撤。 */
 export async function checkMergedPrs(deps: ReconcileCheckDeps): Promise<SweepPart> {
   const part = empty();
   let repos: ReconcileRepoRef[];
@@ -284,11 +408,11 @@ export async function checkMergedPrs(deps: ReconcileCheckDeps): Promise<SweepPar
           dedupeKey,
           level: 'alert',
           taskId: null,
-          title: clip(`合并的 PR 记账对不上：${slug}#${number}`, 300),
+          title: clip(`合并的 PR 合并人或合并记录对不上：${slug}#${number}`, 300),
           body: lines.join('\n'),
           link: `https://github.com/${slug}/pull/${number}`,
         });
-        deps.log('info', '每小时对账：合并的 PR 记账对不上', { dedupeKey });
+        deps.log('info', '每小时对账：合并的 PR 合并人或合并记录对不上', { dedupeKey });
       } catch (err) {
         part.unchecked.push(`${dedupeKey} 没报成：${message(err)}`);
       }
@@ -297,63 +421,114 @@ export async function checkMergedPrs(deps: ReconcileCheckDeps): Promise<SweepPar
   return part;
 }
 
-function poolLine(pool: QuotaPoolRead, now: Date): string {
-  const name = `${pool.channelName} / ${pool.poolId}`;
-  const frozen =
-    pool.dataAt !== null && now.getTime() - pool.dataAt.getTime() > QUOTA_STALE_AFTER_MS
-      ? `；上游数据冻住了（数据时刻北京时间 ${stamp(pool.dataAt)}）`
-      : '';
-  if (pool.neverRead || pool.lastReadOkAt === null) return `${name}：从没读成过${frozen}`;
-  const age = duration(now.getTime() - pool.lastReadOkAt.getTime());
-  return `${name}：上次读成在北京时间 ${stamp(pool.lastReadOkAt)}（${age}前）${frozen}`;
+/** 一条合了的 PR 对上的单缺什么；都齐是空的。 */
+export function ledgerGaps(l: MergedPrLedger): string[] {
+  const gaps: string[] = [];
+  const open = l.sessions.filter((s) => s.endedAt === null || s.outcome === null);
+  if (open.length > 0) {
+    gaps.push(`${open.length} 次会话没有结局（${[...new Set(open.map((s) => s.stage))].join('、')}）`);
+  }
+  // 读不到的用量留空（不记 0），关单评论照写「没读到」；真跑过的会话 token 记成 0 就是拿 0 冒充读到了
+  const zero = l.sessions.filter(
+    (s) => s.endedAt !== null && s.startedAt !== null && s.inputTokens === 0 && s.outputTokens === 0,
+  );
+  if (zero.length > 0) {
+    gaps.push(`${zero.length} 次跑过的会话用量记成了 0（读不到要留空、写明没读到，不记 0）`);
+  }
+  if (l.taskState !== 'done') {
+    gaps.push(`合并关单那一步没写完：库里这张单是「${TASK_STATE_WORDS[l.taskState]}」，不是「做完了」`);
+  }
+  return gaps;
 }
 
-/** 启用渠道下 readOverdue 的池汇成一条；一个都不过期就撤。读不了额度表，这一部分算没跑成。 */
-export async function checkQuotas(deps: ReconcileCheckDeps): Promise<SweepPart> {
+function parseLedgerKey(key: string): { owner: string; name: string; number: number } | null {
+  const m = /^([^/]+)\/(.+)#(\d+)$/.exec(key.slice(LEDGER_ALERT_PREFIX.length));
+  return m?.[1] && m[2] && m[3] ? { owner: m[1], name: m[2], number: Number(m[3]) } : null;
+}
+
+/**
+ * 合了的 PR 对上的单（引擎开的：PR 头分支上有这张单的会话）：会话都有结局、用量不拿 0 冒充、关单那一步写完（单记成做完）。
+ * 缺的按 PR 报一条，写明哪张单缺什么；不自动补。都齐了（还开着的提醒复查，出了回看窗口也查）就撤。
+ */
+export async function checkLedgers(deps: ReconcileCheckDeps): Promise<SweepPart> {
   const part = empty();
-  let pools: readonly QuotaPoolRead[];
-  try {
-    pools = await deps.quotaPools();
-  } catch (err) {
-    return { ...part, failed: `读额度表没成：${message(err)}` };
-  }
   const now = deps.now();
-  const enabled = pools.filter((p) => p.channelEnabled);
-  part.scanned = enabled.length;
-  const overdue = enabled.filter((p) => p.readOverdue);
-  if (overdue.length === 0) {
-    try {
-      const r = await deps.alerts.resolve({
-        dedupeKey: QUOTA_ALERT_KEY,
-        by: RECONCILE_ACTOR,
-        why: '启用的渠道下，账号池的额度读数都在 30 分钟以内',
-      });
-      if (r === 'ok') {
-        part.found += 1;
-        deps.log('info', '每小时对账：撤了一条提醒', { dedupeKey: QUOTA_ALERT_KEY });
-      }
-    } catch (err) {
-      part.unchecked.push(`额度读数都新了，撤提醒没撤成：${message(err)}`);
-    }
-    return part;
-  }
-  const body = [
-    '启用的渠道下，这些账号池的额度读数过期了（从没读成、上次读成超过 30 分钟，或上游数据 30 分钟没前进）：',
-    ...overdue.map((p) => `- ${poolLine(p, now)}`),
-    '和驾驶舱、选路用的是同一个判法。都新了这条自己撤。',
-  ].join('\n');
+  let open: { dedupeKey: string }[] | null = null;
   try {
-    await deps.alerts.raise({
-      dedupeKey: QUOTA_ALERT_KEY,
-      level: 'alert',
-      taskId: null,
-      title: '有账号池的额度读数超过 30 分钟没更新',
-      body,
-    });
-    part.found += overdue.length;
-    deps.log('info', '每小时对账：有账号池的额度读数过期了', { pools: overdue.map((p) => p.poolId) });
+    const listed = await deps.alerts.listOpen(ALERT_LIST_LIMIT);
+    open = listed.alerts.filter((a) => a.dedupeKey.startsWith(LEDGER_ALERT_PREFIX));
+    if (listed.truncated) {
+      part.unchecked.push(
+        `没处理的提醒太多，记账核对这一轮只看了前 ${listed.alerts.length} 条，没看到的不撤`,
+      );
+    }
   } catch (err) {
-    part.unchecked.push(`额度读数过期，报提醒没报成：${message(err)}`);
+    part.unchecked.push(`列没处理的提醒没成，记账核对的旧提醒这一轮不复查、不撤：${message(err)}`);
+  }
+  const named = (open ?? []).flatMap((a) => {
+    const pr = parseLedgerKey(a.dedupeKey);
+    return pr ? [pr] : [];
+  });
+  let ledgers: MergedPrLedger[];
+  try {
+    ledgers = await deps.ledgers({ since: new Date(now.getTime() - MERGED_PR_LOOKBACK_MS), prs: named });
+  } catch (err) {
+    return { ...part, failed: `读合了的 PR 和会话记账没成：${message(err)}` };
+  }
+
+  const byPr = new Map<string, MergedPrLedger[]>();
+  for (const l of ledgers) {
+    const key = ledgerAlertKey(l.owner, l.name, l.prNumber);
+    byPr.set(key, [...(byPr.get(key) ?? []), l]);
+  }
+  const hold = new Set<string>();
+  const clear = new Set<string>();
+  for (const [dedupeKey, list] of byPr) {
+    const first = list[0];
+    if (!first) continue;
+    part.scanned += 1;
+    if (now.getTime() - first.prUpdatedAt.getTime() < LEDGER_GRACE_MS) {
+      hold.add(dedupeKey);
+      continue;
+    }
+    const slug = `${first.owner}/${first.name}`;
+    const lines = list.flatMap((l) => ledgerGaps(l).map((g) => `- 单 #${l.issueNumber}：${g}`));
+    if (lines.length === 0) {
+      clear.add(dedupeKey);
+      continue;
+    }
+    hold.add(dedupeKey);
+    try {
+      await deps.alerts.raise({
+        dedupeKey,
+        level: 'alert',
+        taskId: list.length === 1 ? first.taskId : null,
+        title: clip(`合了的 PR 记账不全：${slug}#${first.prNumber}`, 300),
+        body: [
+          `PR 合进去了，对上的单记账不全（不自动补：补账要从会话记录重算）：`,
+          ...lines,
+          '都补齐了这条自己撤。',
+        ].join('\n'),
+        link: `https://github.com/${slug}/pull/${first.prNumber}`,
+      });
+      part.found += 1;
+      deps.log('info', '每小时对账：合了的 PR 记账不全', { dedupeKey, gaps: lines });
+    } catch (err) {
+      part.unchecked.push(`${dedupeKey} 记账不全，报提醒没报成：${message(err)}`);
+    }
+  }
+
+  for (const alert of open ?? []) {
+    if (hold.has(alert.dedupeKey)) continue;
+    if (clear.has(alert.dedupeKey)) {
+      await resolveOne(deps, part, alert.dedupeKey, '会话结局、用量、关单都记齐了');
+    } else if (!byPr.has(alert.dedupeKey)) {
+      if (!parseLedgerKey(alert.dedupeKey)) {
+        part.unchecked.push(`提醒 ${alert.dedupeKey} 认不出是哪条 PR，不撤`);
+        continue;
+      }
+      await resolveOne(deps, part, alert.dedupeKey, '镜像里这条 PR 不再是已合并、或对不上单了');
+    }
   }
   return part;
 }
