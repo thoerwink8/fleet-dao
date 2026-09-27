@@ -1,6 +1,5 @@
 // ciTextCheck：PR 标题、正文按内容规则和已知敏感值名单扫，复用 rules.ts / values.ts 同一套判法，这里只测标题、
 // 正文两段分得开、退出码和别的卫生检查一致。文件末尾还真跑一遍命令行入口（bin/ci-pr-text.ts），标题正文经环境变量传。
-import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { ciTextCheck } from '../src/ci-text.ts';
 import type { LoadedValues } from '../src/values.ts';
+import { runChild } from './child.ts';
 import { pseudoRandom } from './helpers.ts';
 
 const LIST: LoadedValues = { ok: true, source: '测试名单', values: ['fake-org-778899'] };
@@ -53,12 +53,12 @@ describe('ciTextCheck', () => {
 
 // 真跑一遍命令行入口：标题、正文从环境变量 PR_TITLE / PR_BODY 读（工作流那边就是这么传的），不是命令行参数。
 // 名单指到临时文件，不读这台机器上真的名单（结果不能随机器而变）。
-describe('入口（bin/ci-pr-text.ts）', () => {
+// 同步起子进程：不设 vitest 的超时，卡死由子进程自己的上限管（为什么见 child.ts 开头）。
+describe('入口（bin/ci-pr-text.ts）', { timeout: 0 }, () => {
   const bin = fileURLToPath(new URL('../src/bin/ci-pr-text.ts', import.meta.url));
   let scratch: string;
   const run = (title: string, body: string) =>
-    spawnSync(process.execPath, [bin], {
-      encoding: 'utf8',
+    runChild(process.execPath, [bin], {
       env: {
         ...process.env,
         FLEET_SENSITIVE_VALUES_FILE: join(scratch, 'list.txt'),
@@ -78,7 +78,7 @@ describe('入口（bin/ci-pr-text.ts）', () => {
     env.FLEET_SENSITIVE_VALUES_FILE = join(scratch, 'list.txt');
     delete env.PR_TITLE;
     delete env.PR_BODY;
-    const r = spawnSync(process.execPath, [bin], { encoding: 'utf8', env });
+    const r = runChild(process.execPath, [bin], { env });
     expect(r.status).toBe(0);
     expect(r.stdout).toContain('查出 0 条');
   });
