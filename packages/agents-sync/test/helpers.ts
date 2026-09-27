@@ -1,8 +1,17 @@
 // 测试用的临时「机器」：假家目录、假仓、假的可执行文件。一律放系统临时目录，不碰真家目录、不出网。
 import { execFileSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import { expect } from 'vitest';
 import { BEGIN, END } from '../src/block.ts';
 import { type Ctx, readSources, type Sources } from '../src/sync.ts';
@@ -127,6 +136,19 @@ export function fakeBin(dir: string, name: string): void {
   writeFileSync(file, '#!/bin/sh\n');
   chmodSync(file, 0o755);
   if (PLATFORM === 'win32') writeFileSync(join(dir, `${name}.cmd`), '@echo off\r\n');
+}
+
+/**
+ * git 所在的目录：测试起真的 agents-sync 时常把子进程 PATH 收窄到只有 fakeBin() 那一个目录（好让
+ * installedAgents 只认出装了的那几家假二进制，不把这台机器上真装的别家 AI 也一起测出来）；
+ * git-excludes.ts 那一步不管仓是不是真的 git 检出都会跑 git config，所以窄 PATH 里得单独把 git 加回去。
+ */
+export function gitDir(): string {
+  const exe = PLATFORM === 'win32' ? 'git.exe' : 'git';
+  for (const dir of (process.env.PATH ?? '').split(delimiter)) {
+    if (dir && existsSync(join(dir, exe))) return dir;
+  }
+  throw new Error('PATH 上找不到 git');
 }
 
 export function kinds(lines: readonly { kind: string; key: string }[], key: string): string[] {

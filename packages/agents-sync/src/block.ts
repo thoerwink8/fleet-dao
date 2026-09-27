@@ -31,10 +31,11 @@ function linesOf(text: string): LineAt[] {
   return out;
 }
 
-export function findMarkers(text: string): Markers {
+/** begin/end 不传就是通用段那对；别的受管块（比如全局 git 忽略）传自己的一对，算法是同一个 */
+export function findMarkers(text: string, begin: string = BEGIN, end: string = END): Markers {
   const lines = linesOf(text);
-  const begins = lines.filter((l) => l.text.trim() === BEGIN);
-  const ends = lines.filter((l) => l.text.trim() === END);
+  const begins = lines.filter((l) => l.text.trim() === begin);
+  const ends = lines.filter((l) => l.text.trim() === end);
   if (begins.length === 0 && ends.length === 0) return { kind: 'none' };
   if (begins.length !== 1 || ends.length !== 1) {
     return { kind: 'broken', why: `开始标记 ${begins.length} 个、结束标记 ${ends.length} 个，应各 1 个` };
