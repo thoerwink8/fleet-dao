@@ -2,8 +2,16 @@
 // cursor-agent，real/hosts.ts）、工作树（fleet-agent-scope）各一份，拼成 EnginePorts。生产按环境变量装（realPortsFromEnv，
 // 见 deploy/france/engine.env.example）；缺了哪一项就不起，讲清楚缺什么，不带着半套配置接活。
 
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import { SESSION_USERS, type SessionUser, switchSessionOrg } from '@fleet-dao/adapters';
+import {
+  type LedgerFs,
+  type MirasimConnect,
+  mirasimConnector,
+  SESSION_USERS,
+  type SessionUser,
+  switchSessionOrg,
+} from '@fleet-dao/adapters';
 import { createDb, type Db } from '@fleet-dao/db';
 import { assertPublishable, createGitHub, pgLedger, pgLocker } from '@fleet-dao/github';
 import type { EngineJobs } from '../activities.ts';
@@ -14,7 +22,7 @@ import type { EnginePorts } from '../ports.ts';
 import { alertDispatchJob } from './alert-dispatch.ts';
 import { canaryJob } from './canary.ts';
 import { drainNotifier } from './drain-alerts.ts';
-import { scopeExec, type UserExec } from './exec.ts';
+import { describeFailure, scopeExec, type UserExec } from './exec.ts';
 import { createGitHubPorts, type EngineGitHub } from './github-ports.ts';
 import { githubReconcileJob } from './github-reconcile.ts';
 import {
@@ -58,6 +66,10 @@ export interface RealPortsDeps {
   claudeCommand(user: SessionUser): string[];
   cursorCommand(user: SessionUser): string[];
   grokCommand(user: SessionUser): string[];
+  /** 会话用户自己的 Mirasim 服务：连接工厂、账本目录、读账本用的文件访问（mirasimDepsFor 生产装配）。 */
+  mirasimConnect(user: SessionUser): MirasimConnect;
+  mirasimLedgerDir(user: SessionUser): string;
+  mirasimLedgerFs(user: SessionUser): LedgerFs;
   forkMaxContextTokens?: number;
   /** 错误分流、停滞预判问 Jev 用（real/jev-port.ts）；不给就不问，照规则走。 */
   jev?: JevPort;
@@ -132,6 +144,9 @@ export function createRealPorts(deps: RealPortsDeps): RealPorts {
     claudeCommand: deps.claudeCommand,
     cursorCommand: deps.cursorCommand,
     grokCommand: deps.grokCommand,
+    mirasimConnect: deps.mirasimConnect,
+    mirasimLedgerDir: deps.mirasimLedgerDir,
+    mirasimLedgerFs: deps.mirasimLedgerFs,
     ...(deps.forkMaxContextTokens === undefined ? {} : { forkMaxContextTokens: deps.forkMaxContextTokens }),
     ...(deps.log ? { log: deps.log } : {}),
     ...(deps.jev ? { jev: deps.jev } : {}),
@@ -181,6 +196,12 @@ export function createRealPorts(deps: RealPortsDeps): RealPorts {
 /** reclaude 装在会话用户自己家里（docs/ops.md 第五节）；{user} 换成会话用户。 */
 export const DEFAULT_CLAUDE_BIN = '/home/{user}/.local/bin/reclaude';
 export const DEFAULT_ENGINE_STATE_DIR = '/var/lib/fleet-dao/engine';
+/**
+ * 会话用户自己的 Mirasim 服务在他家里（{user} 换成会话用户；design 第十四节：单独起一份，不借旧系统那份）：
+ * 令牌在 <这个目录>/.mirasim/run/local-<端口>.token，账本在 <这个目录>/.mirasim/traffic。端口不钉：装的时候由 Mirasim
+ * 自己定，引擎每次连都现找（discoverMirasimEndpoint）。
+ */
+export const DEFAULT_MIRASIM_HOME = '/home/{user}';
 
 export interface RealPortsConfig {
   machine: string;
@@ -191,6 +212,8 @@ export interface RealPortsConfig {
   cursorVersionsDir: string;
   /** 会话用户家里的 grok（{user} 换成会话用户）：每次起都由会话用户先看它在不在。 */
   grokBin: string;
+  /** 会话用户家里的 Mirasim 服务（{user} 换成会话用户）：每次连都现找端口、现读令牌。 */
+  mirasimHome: string;
   forkMaxContextTokens: number;
   /** 会话脱开引擎跑的收发目录的根（FLEET_SESSION_IO_DIR，默认 DEFAULT_SESSION_IO_DIR）。 */
   sessionIoDir: string;
@@ -215,6 +238,8 @@ export function realPortsConfigFromEnv(env: Readonly<Record<string, string | und
   }
   const grokBin = env.FLEET_GROK_BIN?.trim() || DEFAULT_GROK_BIN;
   if (!grokBin.startsWith('/')) problems.push(`FLEET_GROK_BIN 要写绝对路径（现在是 ${grokBin}）`);
+  const mirasimHome = env.FLEET_MIRASIM_HOME?.trim() || DEFAULT_MIRASIM_HOME;
+  if (!mirasimHome.startsWith('/')) problems.push(`FLEET_MIRASIM_HOME 要写绝对路径（现在是 ${mirasimHome}）`);
   const rawFork = env.FLEET_FORK_MAX_CONTEXT_TOKENS?.trim();
   const forkMaxContextTokens = rawFork ? Number(rawFork) : DEFAULT_FORK_MAX_CONTEXT_TOKENS;
   if (!Number.isInteger(forkMaxContextTokens) || forkMaxContextTokens <= 0) {
@@ -231,6 +256,7 @@ export function realPortsConfigFromEnv(env: Readonly<Record<string, string | und
     claudeBin,
     cursorVersionsDir,
     grokBin,
+    mirasimHome,
     forkMaxContextTokens,
     sessionIoDir,
   };
@@ -254,6 +280,113 @@ export function agentCommands(config: Pick<RealPortsConfig, 'claudeBin' | 'curso
         DEFAULT_CURSOR_API_KEY_FILE.replaceAll('{user}', user),
       ),
     grokCommand: (user) => grokLaunchCommand(config.grokBin.replaceAll('{user}', user)),
+  };
+}
+
+const MIRASIM_TOKEN_NAME = /^local-([1-9][0-9]{0,4})\.token$/;
+
+/** 一条以那个会话用户的身份跑的短命令：起个短命 scope（scopeId 每次都不同，同一时刻不撞）。 */
+function execAs(exec: UserExec, user: SessionUser, argv: string[], tag: string) {
+  return exec({ user, cwd: '/', argv, timeoutMs: 10_000, scopeId: `${tag}-${randomUUID()}` });
+}
+
+/** ls 报「没有这个路径」的样子（GNU coreutils：退出 2，stderr 里这句）；和别的读不了（权限、没查成）分开报。 */
+function isMissingPath(r: { code: number | null; stderr: string }): boolean {
+  return r.code === 2 && /No such file or directory/.test(r.stderr);
+}
+
+/** 经 exec 以那个会话用户 cat 一个文件：值不上命令行、不进日志（只有路径在 argv 里）。 */
+async function catAsUser(exec: UserExec, user: SessionUser, path: string): Promise<string> {
+  const r = await execAs(exec, user, ['/bin/cat', '--', path], 'mirasim-cat');
+  if (r.code !== 0) throw new Error(describeFailure(`读 ${path}`, r));
+  return r.stdout.toString('utf8');
+}
+
+/** 经 exec 以那个会话用户列一个目录：LedgerFs 的 readdir 要的形状（没有这个目录时抛 code 为 ENOENT 的错，和 node:fs 一样）。 */
+async function lsAsUser(exec: UserExec, user: SessionUser, dir: string): Promise<string[]> {
+  const r = await execAs(exec, user, ['/bin/ls', '-1', '--', dir], 'mirasim-ls');
+  if (isMissingPath(r)) {
+    const err = new Error(`没有这个目录：${dir}`) as NodeJS.ErrnoException;
+    err.code = 'ENOENT';
+    throw err;
+  }
+  if (r.code !== 0) throw new Error(describeFailure(`列 ${dir}`, r));
+  return r.stdout
+    .toString('utf8')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+}
+
+/**
+ * 这个会话用户自己的 Mirasim 服务在哪（design 第十四节：给他单独起一份，不借旧系统那份）：列他家里的
+ * <home>/.mirasim/run，只认「恰好一份 local-<端口>.token」——一份都没有就是这个会话用户还没配好，不止一份就是认不出
+ * 该用哪份（只该有一份 Mirasim 服务）。令牌本身不在这里读（每次建连都现读，不缓存：wire.ts 的 mirasimConnector），
+ * 这里只定端口和令牌文件的位置。
+ */
+export async function discoverMirasimEndpoint(
+  exec: UserExec,
+  user: SessionUser,
+  home: string,
+): Promise<{ port: number; tokenFile: string }> {
+  const dir = `${home}/.mirasim/run`;
+  let names: string[];
+  try {
+    names = (await lsAsUser(exec, user, dir)).filter((n) => MIRASIM_TOKEN_NAME.test(n));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error(
+        `${user} 家里没有 ${dir}：这个会话用户还没单独起一份 Mirasim 服务（docs/ops.md 第五节「会话用户的 Mirasim」；配好之前 Mirasim 路由保持关闭，design 第十四节）`,
+      );
+    }
+    throw err;
+  }
+  if (names.length === 0) {
+    throw new Error(
+      `${dir} 下没有 local-<端口>.token：这个会话用户还没单独起一份 Mirasim 服务（docs/ops.md 第五节「会话用户的 Mirasim」）`,
+    );
+  }
+  if (names.length > 1) {
+    throw new Error(
+      `${dir} 下有 ${names.length} 份令牌（${names.join('、')}）：认不出该用哪一份，只该有一份 Mirasim 服务`,
+    );
+  }
+  const name = names[0] as string;
+  const port = Number(MIRASIM_TOKEN_NAME.exec(name)?.[1]);
+  if (!Number.isInteger(port)) throw new Error(`令牌文件名认不出：${name}（该是 local-<端口>.token）`);
+  return { port, tokenFile: `${dir}/${name}` };
+}
+
+/**
+ * 会话用户自己的 Mirasim 服务：连接工厂、账本目录、读账本用的（as-user）文件访问，三样都经 exec 以那个会话用户读——
+ * 引擎自己的进程（fleet 用户）进不去他的家（750，design 第十四节）。connect 每次调用都现发现端口、现读令牌（服务重装、
+ * 重启都可能换令牌和端口）。
+ */
+export function mirasimDepsFor(
+  exec: UserExec,
+  home: string,
+): {
+  connect(user: SessionUser): MirasimConnect;
+  ledgerDir(user: SessionUser): string;
+  ledgerFs(user: SessionUser): LedgerFs;
+} {
+  const homeOf = (user: SessionUser) => home.replaceAll('{user}', user);
+  return {
+    connect: (user) => async () => {
+      const at = homeOf(user);
+      const { port, tokenFile } = await discoverMirasimEndpoint(exec, user, at);
+      return mirasimConnector({
+        host: '127.0.0.1',
+        port,
+        tokenFile,
+        readToken: () => catAsUser(exec, user, tokenFile),
+      })();
+    },
+    ledgerDir: (user) => `${homeOf(user)}/.mirasim/traffic`,
+    ledgerFs: (user) => ({
+      readdir: (dir) => lsAsUser(exec, user, dir),
+      readFile: (path) => catAsUser(exec, user, path),
+    }),
   };
 }
 
@@ -285,6 +418,9 @@ export function realPortsFromEnv(
   // 判断路由不用重启，和 /healthz 的 judge 项同一个判法）。默认位置上没有 jev.json 才算没接、不问；别的读不成都报错。
   const jev = engineJevFromEnv(db, env);
   const exec = scopeExec();
+  // Mirasim：会话（sessions.ts）和路由探针（route-probe.ts）共用同一份「怎么连、怎么读账本」（都经这个 exec 以会话用户读，
+  // 引擎自己的进程进不去他的家）
+  const mirasim = mirasimDepsFor(exec, config.mirasimHome);
   // 会话用户此刻挂的组织：法国只有一个会话用户（design 第九节），两个 Claude 池都跑在它下面、同一时刻只有它挂着的那个能派。
   // 以它跑它家里的 reclaude org list（和会话同一份 reclaude）；选路、探针、切号、每小时对账共用这一个（读成了的留 30 秒），
   // 按同一个起点判：读数变了、引擎没切过号，推 session-org:drift（带前后两次读数），定下来之前谁都不照它来（#335）
@@ -316,6 +452,9 @@ export function realPortsFromEnv(
     claudeCommand,
     cursorCommand,
     grokCommand,
+    mirasimConnect: mirasim.connect,
+    mirasimLedgerDir: mirasim.ledgerDir,
+    mirasimLedgerFs: mirasim.ledgerFs,
     forkMaxContextTokens: config.forkMaxContextTokens,
     ...(extra.drain ? { drain: extra.drain } : {}),
     ...(ioProblem ? {} : { ioRoot: config.sessionIoDir }),
@@ -332,13 +471,16 @@ export function realPortsFromEnv(
   });
   const jobs: EngineJobs = {
     githubReconcile: githubReconcileJob({ db, gh }),
-    // 路由探针和干活的会话用同一份执行体（reclaude、cursor-agent、grok）、同一个工作树的根（探针目录在它下面）
+    // 路由探针和干活的会话用同一份执行体（reclaude、cursor-agent、grok、Mirasim）、同一个工作树的根（探针目录在它下面）
     routeProbe: routeProbeJob({
       db,
       trees,
       claudeCommand,
       cursorCommand,
       grokCommand,
+      mirasimConnect: mirasim.connect,
+      mirasimLedgerDir: mirasim.ledgerDir,
+      mirasimLedgerFs: mirasim.ledgerFs,
       sessionOrg,
       orgSwitch,
       machine: config.machine,

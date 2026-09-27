@@ -22,6 +22,7 @@ import { layout } from '../../src/real/worktrees.ts';
 import {
   addTask,
   type FakeRunScript,
+  fakeMirasimDeps,
   fakeRun,
   fakeScopeHelper,
   fakeTrees,
@@ -115,6 +116,7 @@ function harness() {
     claudeCommand: (user) => [`/opt/fake/${user}/reclaude`],
     cursorCommand: (user) => [`/opt/fake/${user}/cursor-agent`],
     grokCommand: (user) => [`/opt/fake/${user}/grok`],
+    ...fakeMirasimDeps(),
     helper: scope.helper,
     sudo: scope.sudo,
     gitBin: 'git',

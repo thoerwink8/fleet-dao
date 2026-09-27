@@ -20,7 +20,17 @@ import { META_FILE } from '../../src/real/session-io.ts';
 import { confirmedSeq, createSessionPorts } from '../../src/real/sessions.ts';
 import { createStorePorts } from '../../src/real/store-ports.ts';
 import { layout } from '../../src/real/worktrees.ts';
-import { addTask, fakeScopeHelper, fakeTrees, git, mirror, NOW, orgListRig, world } from './fixtures.ts';
+import {
+  addTask,
+  fakeMirasimDeps,
+  fakeScopeHelper,
+  fakeTrees,
+  git,
+  mirror,
+  NOW,
+  orgListRig,
+  world,
+} from './fixtures.ts';
 
 vi.setConfig({ testTimeout: 120_000, hookTimeout: 60_000 });
 
@@ -110,6 +120,7 @@ function engine(logs: string[] = []) {
     ],
     cursorCommand: (user) => [`/opt/fake/${user}/cursor-agent`],
     grokCommand: (user) => [`/opt/fake/${user}/grok`],
+    ...fakeMirasimDeps(),
     helper: scope.helper,
     sudo: scope.sudo,
     gitBin: 'git',

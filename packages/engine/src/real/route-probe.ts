@@ -8,7 +8,13 @@
 // 探通了就撤掉它。探的时候顺带读到的额度也记账（和会话一样 complete=false）。
 import { randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { judgeRun, type RateLimitReading, type SessionUser } from '@fleet-dao/adapters';
+import {
+  judgeRun,
+  type LedgerFs,
+  type MirasimConnect,
+  type RateLimitReading,
+  type SessionUser,
+} from '@fleet-dao/adapters';
 import { readingsFromRateLimit } from '@fleet-dao/adapters/quota';
 import {
   type Db,
@@ -243,6 +249,10 @@ export interface RouteProbeWiring {
   claudeCommand(user: SessionUser): string[];
   cursorCommand(user: SessionUser): string[];
   grokCommand(user: SessionUser): string[];
+  /** 会话用户自己的 Mirasim 服务：连接工厂、账本目录、读账本用的文件访问（real/index.ts 的 mirasimDepsFor 生产装配）。 */
+  mirasimConnect(user: SessionUser): MirasimConnect;
+  mirasimLedgerDir(user: SessionUser): string;
+  mirasimLedgerFs(user: SessionUser): LedgerFs;
   /**
    * 会话用户此刻挂的组织（real/session-org.ts）：和选路、切号共用一个，Claude 订阅池只探挂着的那个；这会儿定不下来就这一轮
    * 不探 Claude 池。
@@ -271,6 +281,9 @@ export function routeProbeJob(w: RouteProbeWiring): () => RouteProbeJobDeps {
     claudeCommand: w.claudeCommand,
     cursorCommand: w.cursorCommand,
     grokCommand: w.grokCommand,
+    mirasimConnect: w.mirasimConnect,
+    mirasimLedgerDir: w.mirasimLedgerDir,
+    mirasimLedgerFs: w.mirasimLedgerFs,
     ...(w.run ? { run: w.run } : {}),
   });
   const deps: ProberDeps = {

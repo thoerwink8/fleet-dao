@@ -19,11 +19,27 @@ import {
   type GrokRunSpec,
   GrokStreamReader,
   type KillReason,
+  type LedgerFs,
+  type MirasimAccepted,
+  type MirasimConnect,
+  type MirasimRunOptions,
+  type MirasimRunReport,
+  type MirasimRunSpec,
   type RateLimitReading,
   type SessionUser,
   scopePrefix,
 } from '@fleet-dao/adapters';
-import { type Db, pools, repos, routes, savePoolQuota, seed, stagePolicyRoutes, tasks } from '@fleet-dao/db';
+import {
+  type Db,
+  models,
+  pools,
+  repos,
+  routes,
+  savePoolQuota,
+  seed,
+  stagePolicyRoutes,
+  tasks,
+} from '@fleet-dao/db';
 import type { TestDb } from '@fleet-dao/db/testing';
 import type { ProgressEvent, StageKind } from '@fleet-dao/shared';
 import type { UserCommand, UserCommandResult, UserExec } from '../../src/real/exec.ts';
@@ -739,6 +755,172 @@ export function fakeGrokRun(script: (spec: GrokRunSpec, n: number) => FakeGrokSc
     return finish({ exitCode: s.exitCode === undefined ? 0 : s.exitCode, signal: null });
   };
   return { run, specs, options, count: () => n };
+}
+
+// ---- mirasim
+
+/**
+ * 假的 Mirasim 连接 / 账本依赖：只是把 hostDrivers 要的形状填满，不真连服务、不真读账本。真的连接重试、令牌怎么读、
+ * 账本怎么解析各有各的单元测试（packages/adapters/test/mirasim.test.ts、real/index.ts 的 mirasimDepsFor）；
+ * 这里的用例要么不起 mirasim 路由，要么用 run.mirasim 顶掉插头本身（不会真调 connect / ledgerFs）。
+ */
+export function fakeMirasimDeps(): {
+  mirasimConnect(user: SessionUser): MirasimConnect;
+  mirasimLedgerDir(user: SessionUser): string;
+  mirasimLedgerFs(user: SessionUser): LedgerFs;
+} {
+  return {
+    mirasimConnect: (user) => async () => {
+      throw new Error(`假的：这条用例不该真连 Mirasim（${user}）`);
+    },
+    mirasimLedgerDir: (user) => `/fake/${user}/.mirasim/traffic`,
+    mirasimLedgerFs: (user) => ({
+      readdir: async () => {
+        throw new Error(`假的：这条用例不该真列 Mirasim 账本目录（${user}）`);
+      },
+      readFile: async () => {
+        throw new Error(`假的：这条用例不该真读 Mirasim 账本文件（${user}）`);
+      },
+    }),
+  };
+}
+
+/** 一份最小的 Mirasim 会话状态（MirasimSession.summary() 的形状）：done、没工具、没用量，text 给了才有回答。 */
+export function mirasimState(
+  over: Partial<MirasimRunReport['session']['state']> = {},
+): MirasimRunReport['session'] {
+  return {
+    state: { text: '', reasoning: '', toolCalls: [], interactions: 0, phase: 'done', ...over },
+    seq: 1,
+    snapshots: 1,
+    patches: 0,
+    toolCalls: 0,
+    toolErrors: 0,
+    filesChanged: [],
+    testRuns: [],
+  };
+}
+
+export interface FakeMirasimScript {
+  /** 快照状态（答上了的默认之上再改）：text、model、phase、error、usage…… */
+  state?: Partial<MirasimRunReport['session']['state']>;
+  /**
+   * 报告顶层的字段（不给的用一份「答上了」的默认值补）：launchError、launchUnknown、killed、watchError、ledger……
+   * 要把 base 给的默认值（比如 route=cloud 时自动补的账本）清掉、改回「没有」，显式给 undefined
+   * （下面 run() 里会把值是 undefined 的键整个删掉，不会真的拼出一个 ledger: undefined 的报告）。
+   */
+  report?: {
+    [K in keyof Omit<MirasimRunReport, 'session'>]?: Omit<MirasimRunReport, 'session'>[K] | undefined;
+  };
+  /** 服务端 accepted 报的会话号：不给就续会话给回原号、开新会话现造一个。 */
+  sessionKey?: string;
+  /** 不回 accepted（造「服务端没接这一针」）：hooks.onSessionId 不会被调用。 */
+  noAccept?: boolean;
+}
+
+/**
+ * 假的 Mirasim 插头：不连真服务，直接交出一份 MirasimRunReport（协议细节——快照合并、订阅重连——已经在
+ * packages/adapters/test/mirasim.test.ts 测过；这里只测 hosts.ts 的驱动把 HostRunSpec 拼成 MirasimRunSpec、
+ * 把报告整理成 HostReport 这一层胶水）。
+ */
+export function fakeMirasimRun(script: (spec: MirasimRunSpec, n: number) => FakeMirasimScript) {
+  const specs: MirasimRunSpec[] = [];
+  const options: MirasimRunOptions[] = [];
+  let n = 0;
+  const run = async (spec: MirasimRunSpec, opts: MirasimRunOptions): Promise<MirasimRunReport> => {
+    n += 1;
+    specs.push(spec);
+    options.push(opts);
+    const s = script(spec, n);
+    const sessionKey =
+      s.sessionKey ?? (spec.session.mode === 'resume' ? spec.session.key : `${spec.agent}:${randomUUID()}`);
+    if (!s.noAccept) {
+      const accepted: MirasimAccepted = { sessionKey, acceptedAt: new Date().toISOString() };
+      opts.onAccepted?.(accepted);
+    }
+    const now = new Date().toISOString();
+    const base: MirasimRunReport = {
+      runId: spec.runId,
+      agent: spec.agent,
+      route: spec.route,
+      resumed: spec.session.mode === 'resume',
+      ...(spec.model ? { requestedModel: spec.model } : {}),
+      ...(spec.expectModel ? { expectModel: spec.expectModel } : {}),
+      // 没接 accepted（造「服务端没接这一针」）就不该有会话号：真插头在 accepted 之前就不知道 sessionKey
+      ...(s.noAccept ? {} : { sessionKey }),
+      terminal: { isError: false, detail: 'done' },
+      session: mirasimState({ model: spec.model ?? spec.expectModel, ...s.state }),
+      // route=cloud（design 第三节第 12 条：只留这一种）时 mirasimRunFacts 要看账本才算数（MS-27）：默认给一行像真的
+      // 2xx，不然每条不特意测账本的用例都会白白判成 relayUnknown。要测账本没查成、没有 2xx，用 s.report.ledger 覆盖。
+      ...(spec.route === 'cloud'
+        ? {
+            ledger: {
+              state: 'read' as const,
+              rows: [
+                {
+                  status: 200,
+                  upstreamHost: 'relay.mirasim.example',
+                  viaRelay: true,
+                  ...(spec.model ? { model: spec.model } : {}),
+                },
+              ],
+              unparsed: 0,
+            },
+          }
+        : {}),
+      foreignFrames: 0,
+      resubscribes: 0,
+      reconnects: 0,
+      startedAt: now,
+      endedAt: now,
+      wallMs: 1,
+    };
+    // s.report 里显式给 undefined 的键（清掉 base 的默认值）整个删掉，不拼进报告里：exactOptionalPropertyTypes
+    // 不许「有这个键、值是 undefined」，真的没有就该是键都不在。
+    const merged: Record<string, unknown> = { ...base, ...s.report };
+    for (const key of Object.keys(merged)) {
+      if (merged[key] === undefined) delete merged[key];
+    }
+    return merged as unknown as MirasimRunReport;
+  };
+  return { run, specs, options, count: () => n };
+}
+
+/**
+ * 一条 mirasim 路由（和目录样例同一个样子）：中转池不绑会话用户，agent 由调用方给（对应 hosts.ts 的
+ * MIRASIM_AGENT_BY_MODEL）。stages 给了就挂进这些阶段的调度台。
+ */
+export async function addMirasimRoute(
+  db: Db,
+  over: { poolId?: string; modelId?: string; upstreamModel?: string; stages?: StageKind[] } = {},
+): Promise<{ routeId: string; poolId: string }> {
+  const poolId = over.poolId ?? 'mirasim-relay';
+  const modelId = over.modelId ?? 'deepseek-flash';
+  const routeId = `${poolId}:${modelId}:mirasim`;
+  await db
+    .insert(pools)
+    .values({ id: poolId, channelId: 'mirasim-cloud', maxConcurrency: 5 })
+    .onConflictDoNothing();
+  // 种子里没有的模型串（测「目录配了、MIRASIM_AGENT_BY_MODEL 没跟上」时故意给一个没见过的）：现插一行，
+  // 不然连 routes 外键都插不进去——生产上这一步由目录装载器做（catalog.ts 的 config.models），不是这份种子的事。
+  await db
+    .insert(models)
+    .values({ id: modelId, family: 'deepseek', displayName: modelId })
+    .onConflictDoNothing();
+  await db.insert(routes).values({
+    id: routeId,
+    channelId: 'mirasim-cloud',
+    poolId,
+    modelId,
+    hostId: 'mirasim',
+    alive: true,
+    ...PROBED_OK,
+    upstreamModel: over.upstreamModel ?? modelId,
+  });
+  for (const stage of over.stages ?? []) {
+    await db.insert(stagePolicyRoutes).values({ stage, routeId, position: 11, enabled: true });
+  }
+  return { routeId, poolId };
 }
 
 /**

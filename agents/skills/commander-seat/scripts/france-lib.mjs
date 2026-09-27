@@ -52,7 +52,7 @@ export const LIMITS = {
 /** 路由探针：平时每 15 分钟一轮，结论 45 分钟没更新算过期；贵的执行方式探通后隔 120 分钟再探（shared 的 web-api.ts）。 */
 export const PROBE_EVERY = 15;
 export const PROBE_STALE = 45;
-export const SLOW_PROBE_EVERY = { 'cursor-agent': 120, grok: 120 };
+export const SLOW_PROBE_EVERY = { 'cursor-agent': 120, grok: 120, mirasim: 120 };
 export const probeStaleMinutes = (host) =>
   (SLOW_PROBE_EVERY[host] ?? PROBE_EVERY) + PROBE_STALE - PROBE_EVERY;
 
