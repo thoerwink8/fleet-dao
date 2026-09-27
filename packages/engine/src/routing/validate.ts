@@ -74,6 +74,11 @@ export function validateInput(input: ChooseRouteInput, trialEnabled: boolean): n
       if (!CANDIDATE_BLOCKERS.includes(b))
         throw new RoutingInputError(`选路判不了：${who} 的被挡原因认不出（${b}）`);
     }
+    // 在线的一定带着探针下结论的时刻（库里约束 alive 要有探针的 ok 结论）：没有就是输入拼错了，不当成刚探过。
+    if (r.probedAt !== null) time(r.probedAt, `${who} 的探针时刻`);
+    else if (!r.blockers.includes('offline')) {
+      throw new RoutingInputError(`选路判不了：${who} 在线，却没有探针下结论的时刻`);
+    }
     // 候选查询里两者是一回事（额度用满才挂 quota-exhausted）。对不上说明输入拼错了：额度未知的备池会被放去试探，
     // 用满的主池会被照派，不能按其中一边往下走。
     if ((r.quota === 'exhausted') !== r.blockers.includes('quota-exhausted')) {

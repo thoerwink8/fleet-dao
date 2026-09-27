@@ -92,6 +92,12 @@ export interface RouteFacts {
    */
   upstreamModel: string | null;
   upstreamAliases: string[];
+  /**
+   * 路由探针最近一次下结论的时刻（routes.probed_at），探针还没看过为空。在线（被挡原因里没有 offline）的一定有：
+   * 库里约束 alive 为真时结论必须是 ok，没有就是输入拼错了（validate.ts 抛）。超过 routeProbeStaleMinutes(hostId)
+   * 没更新（探针可能停了）照派，派工理由里写明（choose.ts 的 probeNote）。
+   */
+  probedAt: string | null;
   /** 候选查询算好的：ok / exhausted / unknown（没读成、读数过期、判不了扣不扣）。 */
   quota: 'ok' | 'exhausted' | 'unknown';
   windows: RouteWindow[];
@@ -137,8 +143,14 @@ export interface ChooseRouteInput {
   /** 任务（或人、帅位）指定的路由：只用它，用不了就报，不偷偷换。 */
   taskRouteId?: string;
   weight?: TaskWeight;
-  /** 这个任务要避开的（换路由、换模型时引擎给）。 */
-  avoid?: { routeIds?: string[]; poolIds?: string[]; modelIds?: string[] };
+  /**
+   * 这个任务要避开的（换路由、换模型时引擎给）。families：这一步要避开的模型族，按族名认、不分大小写——开 PR 前验证只派
+   * 别家，写这张单的族都在这里（docs/decisions/0003-fusion-flow.md 第 5 条）；给了它，渠道自己挑模型的路由（上游串 auto）
+   * 也不派：认不出这次是哪一家在答。
+   */
+  avoid?: { routeIds?: string[]; poolIds?: string[]; modelIds?: string[]; families?: string[] };
+  /** 这一步算界面类的活（改到了页面代码，例如验证一个改了页面的改动）：禁令按 UI 判（GPT 不做界面，含审界面）。 */
+  uiWork?: boolean;
   /**
    * 会话用户此刻挂的 reclaude 组织（design 第九节：法国只有一个会话用户，同一时刻只挂一个组织）。带 orgKind 的池
    * 只有和它一样的才派；不给 = 不知道挂的是哪个，带 orgKind 的池一律不派。

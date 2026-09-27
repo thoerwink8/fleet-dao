@@ -4,7 +4,7 @@ import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { stageCandidates } from '../src/queries/candidates.ts';
 import { type PoolQuotaSnapshot, type StoredQuotaWindow, savePoolQuota } from '../src/queries/quota.ts';
-import { bans, channels, models, pools, stagePolicies } from '../src/schema/index.ts';
+import { bans, channels, models, pools, routes, stagePolicies } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import {
   addRepo,
@@ -78,6 +78,22 @@ describe('某阶段的候选路由', () => {
       ['offline', ['offline']],
       ['retired', ['model-retired']],
     ]);
+  });
+
+  it('探针下结论的时刻原样给（在线的有，探针还没看过的为空）；过没过期由选路判，候选查询不因此挡', async () => {
+    await addRoute(t.db, { id: 'probed', poolId: 'relay-a', modelId: 'opus-5.5' });
+    await addRoute(t.db, { id: 'never', poolId: 'relay-b', modelId: 'opus-5.5', alive: false });
+    await setStageOrder(t.db, 'execute', ['probed', 'never']);
+    await addWindow(t.db, { poolId: 'relay-a', window: '7d', utilization: 0.1, ...fresh });
+    await addWindow(t.db, { poolId: 'relay-b', window: '7d', utilization: 0.1, ...fresh });
+    // 三小时前的结论（探针可能停了）：照样在线，挡不挡只看 alive
+    await t.db
+      .update(routes)
+      .set({ probedAt: ago(3 * HOUR) })
+      .where(eq(routes.id, 'probed'));
+    const [probed, never] = (await stageCandidates(t.db, 'execute', { now: NOW })).candidates;
+    expect(probed).toMatchObject({ routeId: 'probed', probedAt: ago(3 * HOUR), blockers: [] });
+    expect(never).toMatchObject({ routeId: 'never', probedAt: null, blockers: ['offline'] });
   });
 
   it('渠道关了、订阅过期都挡', async () => {

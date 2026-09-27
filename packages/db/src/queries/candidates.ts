@@ -60,6 +60,11 @@ export interface RouteCandidate {
   family: string;
   hostId: (typeof routes.$inferSelect)['hostId'];
   /**
+   * 路由探针最近一次下结论的时刻（routes.probed_at），探针还没看过为空。在线的一定有（库里约束 alive 要有探针的 ok 结论）；
+   * 结论过没过期由选路按现在的时刻判（引擎 routing/choose.ts），这里原样给。
+   */
+  probedAt: Date | null;
+  /**
    * unknown = 额度没读成或判不了：这个池从没读成过、最近一次读成或上游数据本身超过 30 分钟、适用的窗口已过清零点，
    * 或有窗口判不了扣不扣这条路由。派工原因里要写明「额度未知」。读成了、但没有扣这个模型的窗口，是 ok。
    */
@@ -198,6 +203,7 @@ export async function stageCandidates(
       modelId: model.id,
       family: model.family,
       hostId: route.hostId,
+      probedAt: route.probedAt,
       quota,
       windows,
       inFlight: running,

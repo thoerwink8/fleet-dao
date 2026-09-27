@@ -754,6 +754,12 @@ export interface StageRequest<K extends OutputKind> {
   worktreePath?: string | undefined;
   /** 写码类会话：起会话前分支的头（交付判据用）。 */
   baseHead?: string | undefined;
+  /** 整族避开（开 PR 前验证只派别家：写这张单的族）；换路由、人点名都照样避开。 */
+  avoidFamilies?: string[] | undefined;
+  /** 这一步算界面类的活（禁令按 UI 判）。 */
+  uiWork?: boolean | undefined;
+  /** 一条能派的都没有时挂起的标题（不给就是「「阶段」没有能用的路由」）。 */
+  noRouteTitle?: string | undefined;
 }
 
 export interface StageResult<K extends OutputKind> {
@@ -774,12 +780,19 @@ interface Avoid {
 
 const AVOID_NOTHING: Avoid = { routeIds: [], poolIds: [], modelIds: [] };
 
+/** 选路要带的这一步的讲究：整族避开、界面类的活。只在给了的时候放进选路的输入（在途任务的历史里没有这两项）。 */
+interface PickExtras {
+  avoidFamilies?: string[] | undefined;
+  uiWork?: boolean | undefined;
+}
+
 /** 选路由；没空位、没额度就等（记下在等哪个、停表），一条能用的都没有就交回去挂起。 */
 async function chooseRoute(
   kit: Kit,
   stage: StageKind,
   avoid: Avoid,
   stickRouteId: string | undefined,
+  extras: PickExtras = {},
 ): Promise<Picked> {
   const outer = kit.view.waiting;
   let since: number | null = null;
@@ -800,6 +813,8 @@ async function chooseRoute(
           avoidModelIds: avoid.modelIds,
           ...(preferRouteId ? { preferRouteId } : {}),
           ...(stick ? { stickRouteId: stick } : {}),
+          ...(extras.avoidFamilies?.length ? { avoidFamilies: extras.avoidFamilies } : {}),
+          ...(extras.uiWork ? { uiWork: true } : {}),
         }),
       );
       if (result.ok) return { route: result.route, why: result.why };
@@ -941,9 +956,12 @@ export async function runStage<K extends OutputKind>(
   for (;;) {
     await gate(kit);
     const queuedAt = iso(Date.now());
-    const picked = await chooseRoute(kit, request.stage, avoid, stick);
+    const picked = await chooseRoute(kit, request.stage, avoid, stick, {
+      avoidFamilies: request.avoidFamilies,
+      uiWork: request.uiWork,
+    });
     if ('none' in picked) {
-      await park(kit, `「${request.stage}」没有能用的路由`, picked.none);
+      await park(kit, request.noRouteTitle ?? `「${request.stage}」没有能用的路由`, picked.none);
       counters = NO_LADDER;
       avoid = AVOID_NOTHING;
       stick = undefined;

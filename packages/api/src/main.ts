@@ -18,6 +18,12 @@ import { buildApps } from './app.ts';
 import { createChangeHub, startPgChangeFeed } from './changes.ts';
 import { ConfigError, loadConfig } from './config.ts';
 import { createDirDemoPublisher, sweepExpiredDemoLinks } from './demo.ts';
+import {
+  DEPLOY_LAG_NOT_HERE,
+  deployLagCheck,
+  readDeployLagInput,
+  startDeployLagWatch,
+} from './deploy-lag.ts';
 import type { Deps } from './deps.ts';
 import { DEV_RUN_ID, DEV_USER_ID, devFixtures, IDS } from './dev-fixtures.ts';
 import { draftBacklogCheck, notWiredDraftOpener } from './draft-opening.ts';
@@ -122,6 +128,14 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
   const github = githubMirror(db);
   const store = createPgStore(db, { now });
   const draftOpener = notWiredDraftOpener();
+  // 线上版本跟不跟得上主线：只有法国的正式机器上有发布目录和自动发布；读的时候现算，报警每 5 分钟判一次
+  const onFrance = config.env === 'production';
+  const deployLag = onFrance
+    ? { check: deployLagCheck(() => readDeployLagInput(), now) }
+    : { check: async () => {}, notWired: DEPLOY_LAG_NOT_HERE };
+  const stopDeployLagWatch = onFrance
+    ? startDeployLagWatch({ db, read: () => readDeployLagInput(), now, log })
+    : () => {};
   const deps: Deps = {
     config,
     store,
@@ -147,11 +161,13 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
       draftBacklog: draftBacklogCheck(store, now),
       // 和引擎读同一份位置（FLEET_JEV_CONFIG，默认 /etc/fleet-dao/jev.json）：引擎问得了、这里才报绿
       judge: judgeHealthCheck({ db, location: jevConfigLocation(process.env) }),
+      deployLag,
     }),
   };
   return {
     deps,
     close: async () => {
+      stopDeployLagWatch();
       await feed.stop();
       await temporal.close();
       await closeDb();

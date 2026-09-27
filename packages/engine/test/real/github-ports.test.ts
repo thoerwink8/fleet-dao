@@ -321,6 +321,9 @@ describe('推之前把最新主线并进会话的树', () => {
     expect(parentsOf(dir, r.head)).toEqual([head, main]);
     expect(git(dir, 'rev-parse', 'refs/fleet/incoming')).toBe(main);
     expect(calls.pushBranch?.[0]).toMatchObject({ head: r.head });
+    // 主线跟着钉到新头：返工时 pnpm test:changed 只算分支自己的改动，不把并进来的主线也算上
+    expect(git(dir, 'rev-parse', 'refs/remotes/origin/main')).toBe(main);
+    expect(git(dir, 'diff', '--name-only', 'origin/main...HEAD')).toBe('src/login.ts');
   });
 
   it('并完、推没成、活动重试：头是上一次并出来的（第一个父提交是会话交的头）就接着推它，不判头对不上', async () => {
@@ -365,8 +368,9 @@ describe('推之前把最新主线并进会话的树', () => {
     expect(git(dir, 'ls-files', '-u')).toBe('');
     expect(git(dir, '-c', 'core.autocrlf=true', 'status', '--porcelain', '--untracked-files=no')).toBe('');
     expect(existsSync(join(dir, '.git', 'MERGE_HEAD'))).toBe(false);
-    // 新主线的提交已经在树里：会话照着 git merge 就能解
+    // 新主线的提交已经在树里：会话照着 git merge 就能解；origin/main 也钉到了它（test:changed 和它比）
     expect(git(dir, 'cat-file', '-t', main)).toBe('commit');
+    expect(git(dir, 'rev-parse', 'refs/remotes/origin/main')).toBe(main);
     expect(calls.pushBranch ?? []).toHaveLength(0);
   });
 
@@ -392,20 +396,22 @@ describe('推之前把最新主线并进会话的树', () => {
     expect(calls.pushBranch ?? []).toHaveLength(0);
   });
 
-  it('并的时候 git 自己出错（.git/index.lock 被占着）：报 GIT_FAILED（可重试，不当成冲突），树不动、不推', async () => {
+  it('并的时候 git 自己出错（.git/index.lock 被占着）：报 GIT_FAILED（可重试，不当成冲突），以「并」开头，树里留下的照实写，不推', async () => {
     const { ports, calls, trees } = setup();
     const dir = await seededTree(trees);
     const head = commitIn(dir, 'login.ts');
-    advanceMain('b.ts', 'export const b = 2;\n');
+    const main = advanceMain('b.ts', 'export const b = 2;\n');
     writeFileSync(join(dir, '.git', 'index.lock'), '');
     const err = await ports
       .pushBranch({ taskId: 't1', repo, worktreePath: dir, branch: BRANCH, head }, ctx)
       .catch((e: unknown) => e);
     expect(err).toMatchObject({ code: 'GIT_FAILED', retryable: true });
-    // 原文随 git 的版本、配置不同（锁文件在、或 autostash 写不了索引）：只认是「并」这一步没做成
-    expect((err as Error).message).toMatch(/^并 [0-9a-f]{7}：/);
+    // git 2.45 及以前（法国的 2.43）写不了索引时留下 MERGE_HEAD、撤销又被同一把锁挡住；2.46 起直接退出、什么都不留。
+    // 原文也随版本、配置不同（锁文件在、或 autostash 写不了索引）。哪种都以「并」这一步开头，留没留下 MERGE_HEAD 和报的对得上
+    const message = (err as Error).message;
+    expect(message).toMatch(new RegExp(`^并 ${main.slice(0, 7)}：`));
+    expect(message.includes('还留着没并完的合并')).toBe(existsSync(join(dir, '.git', 'MERGE_HEAD')));
     expect(git(dir, 'rev-parse', 'HEAD')).toBe(head);
-    expect(existsSync(join(dir, '.git', 'MERGE_HEAD'))).toBe(false);
     expect(existsSync(join(dir, 'b.ts'))).toBe(false);
     expect(calls.pushBranch ?? []).toHaveLength(0);
   });
@@ -646,6 +652,8 @@ describe('并主线', () => {
       ),
     ).toEqual({ state: 'clean', head: merged, conflictFiles: [] });
     expect(git(clean.dir, 'rev-parse', 'HEAD')).toBe(merged);
+    // 并进来的主线钉成 origin/main
+    expect(git(clean.dir, 'rev-parse', 'refs/remotes/origin/main')).toBe(merged);
 
     const conflict = await setupTree({
       syncMainline: () => ({ state: 'conflict', head: m.head, conflictFiles: ['a.ts'], mainline: merged }),
@@ -687,5 +695,77 @@ describe('并主线', () => {
         ctx,
       ),
     ).rejects.toMatchObject({ code: 'WORKTREE_DIVERGED' });
+  });
+});
+
+describe('开 PR 前验证读「怎么算做完」：默认分支上单子指的需求文档', () => {
+  const doc = [
+    '# 登录页加验证码',
+    '',
+    '## 要什么',
+    '手机验证码登录。',
+    '',
+    '## 怎么算做完',
+    '- 过期的验证码登录不了',
+    '- 有一条故意造出失败的测试',
+    '',
+    '## 现状',
+    '- 这一条不算',
+  ].join('\n');
+
+  it('读默认分支上的 specs/<号>-<短名>/需求.md，交回逐条原文和出处', async () => {
+    const { ports, calls } = setup({
+      readSpecDoc: (input: { path: string }) => ({ path: input.path, content: doc, url: 'x' }),
+    });
+    const got = await ports.readCriteria({ taskId: 't1', repo, specDir: 'specs/12-login/' }, ctx);
+    expect(got).toEqual({
+      path: 'specs/12-login/需求.md',
+      criteria: ['过期的验证码登录不了', '有一条故意造出失败的测试'],
+    });
+    expect(calls.readSpecDoc?.[0]).toMatchObject({ path: 'specs/12-login/需求.md' });
+  });
+
+  it('【故意造出的失败】需求文档不在主线上（读回 null）：SPEC_DOC_MISSING、不可重试，不拿空清单去验', async () => {
+    const { ports } = setup({ readSpecDoc: () => null });
+    await expect(
+      ports.readCriteria({ taskId: 't1', repo, specDir: 'specs/12-login' }, ctx),
+    ).rejects.toMatchObject({
+      code: 'SPEC_DOC_MISSING',
+      retryable: false,
+      message: expect.stringContaining('主线上没有 specs/12-login/需求.md'),
+    });
+  });
+
+  it('【故意造出的失败】目录认不出（不是 specs/<号>-<短名>、带 ..）：SPEC_DOC_MISSING，连读都不去读', async () => {
+    const { ports, calls } = setup();
+    for (const specDir of ['', 'docs/12-login', 'specs/login', 'specs/12-login/../13-x', 'specs/../12-x']) {
+      await expect(ports.readCriteria({ taskId: 't1', repo, specDir }, ctx)).rejects.toMatchObject({
+        code: 'SPEC_DOC_MISSING',
+        retryable: false,
+      });
+    }
+    expect(calls.readSpecDoc).toBeUndefined();
+  });
+
+  it('【故意造出的失败】文档里没有「怎么算做完」、那一节是空的：CRITERIA_MISSING、不可重试', async () => {
+    for (const content of ['# 需求\n\n## 要什么\n验证码\n', '# 需求\n\n## 怎么算做完\n\n## 现状\n- x\n']) {
+      const { ports } = setup({
+        readSpecDoc: (input: { path: string }) => ({ path: input.path, content, url: 'x' }),
+      });
+      await expect(
+        ports.readCriteria({ taskId: 't1', repo, specDir: 'specs/12-login' }, ctx),
+      ).rejects.toMatchObject({ code: 'CRITERIA_MISSING', retryable: false });
+    }
+  });
+
+  it('【故意造出的失败】读需求文档读不了（403）：原样带过，不当成文档不在', async () => {
+    const { ports } = setup({
+      readSpecDoc: () => {
+        throw new GitHubError('FORBIDDEN', 'Resource not accessible by integration');
+      },
+    });
+    await expect(
+      ports.readCriteria({ taskId: 't1', repo, specDir: 'specs/12-login' }, ctx),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
   });
 });

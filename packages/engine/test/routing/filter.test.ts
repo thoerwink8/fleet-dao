@@ -17,8 +17,9 @@ function ctx(overrides: Partial<FilterContext> = {}): FilterContext {
     weight: 'heavy',
     policy: { ...DEFAULT_ROUTING_POLICY },
     now: Date.parse(NOW),
-    avoid: { routeIds: new Set(), poolIds: new Set(), modelIds: new Set() },
+    avoid: { routeIds: new Set(), poolIds: new Set(), modelIds: new Set(), families: new Set() },
     liveOrg: 'carpool',
+    uiWork: false,
     ...overrides,
   };
 }
@@ -124,6 +125,13 @@ describe('禁令用 shared 的硬禁令，候选查询漏了也挡', () => {
     expect(codes(gpt, ctx({ stage: 'execute' }))).toEqual([]);
   });
 
+  it('界面类的活（验证一个改了页面的改动）：不管哪个阶段，GPT 都挡（GPT 不审界面）；别的族不挡', () => {
+    const gpt = route('g', { modelId: 'gpt-5.6-luna', modelName: 'GPT 5.6 luna', family: 'gpt' });
+    expect(codes(gpt, ctx({ stage: 'verify', uiWork: true }))).toEqual(['banned']);
+    expect(codes(gpt, ctx({ stage: 'verify', uiWork: false }))).toEqual([]);
+    expect(codes(route('k', { family: 'kimi' }), ctx({ stage: 'verify', uiWork: true }))).toEqual([]);
+  });
+
   it('库里的禁令原因照写，不重复', () => {
     const r = route('k', { blockers: ['banned'], banReasons: ['创始人另加：Kimi 不做审查'] });
     const blocks = blocksFor(r, entry('k', 0), ctx({ stage: 'review' }));
@@ -156,7 +164,7 @@ describe('单条开关', () => {
 describe('执行方式 × 阶段是数据', () => {
   it('每个阶段都写了要什么，每个执行方式都写了会什么', () => {
     expect(Object.keys(STAGE_NEEDS).sort()).toEqual(
-      ['execute', 'judge', 'plan', 'research', 'review', 'spec', 'triage', 'ui'].sort(),
+      ['execute', 'judge', 'plan', 'research', 'review', 'spec', 'triage', 'ui', 'verify'].sort(),
     );
     expect(Object.keys(HOST_ABILITIES).sort()).toEqual(
       ['api-shell', 'claude-code', 'codex', 'cursor-agent', 'grok', 'mirasim'].sort(),
@@ -356,11 +364,48 @@ describe('已选定、还没开工的也占位子（一批任务同时选路）'
 describe('避开', () => {
   it('按路由、池、模型避开；不相干的不挡', () => {
     const avoid = (a: Partial<FilterContext['avoid']>) =>
-      ctx({ avoid: { routeIds: new Set(), poolIds: new Set(), modelIds: new Set(), ...a } });
+      ctx({
+        avoid: { routeIds: new Set(), poolIds: new Set(), modelIds: new Set(), families: new Set(), ...a },
+      });
     expect(codes(route('a'), avoid({ routeIds: new Set(['a']) }))).toEqual(['avoided']);
     expect(codes(route('a'), avoid({ poolIds: new Set(['pool-a']) }))).toEqual(['avoided']);
     expect(codes(route('a'), avoid({ modelIds: new Set(['opus-5.5']) }))).toEqual(['avoided']);
     expect(codes(route('a'), avoid({ routeIds: new Set(['b']) }))).toEqual([]);
+  });
+
+  it('开 PR 前验证只派别家：写这张单的族整族避开（族名不分大小写），别的族照派', () => {
+    const avoid = ctx({
+      stage: 'verify',
+      avoid: { routeIds: new Set(), poolIds: new Set(), modelIds: new Set(), families: new Set(['claude']) },
+    });
+    const blocks = blocksFor(route('a', { family: ' Claude ' }), entry('a', 0), avoid);
+    expect(blocks.map((b) => b.code)).toEqual(['avoided']);
+    expect(blocks[0]?.text).toContain('只派别家');
+    expect(codes(route('k', { family: 'kimi', modelName: 'Kimi k3' }), avoid)).toEqual([]);
+  });
+
+  it('【故意造出的失败】只派别家时，渠道自己挑模型的（上游串或别名是 auto）认不出是哪一家：不派；不验证时照派', () => {
+    const verifying = ctx({
+      stage: 'verify',
+      avoid: { routeIds: new Set(), poolIds: new Set(), modelIds: new Set(), families: new Set(['claude']) },
+    });
+    const auto = route('c', { family: 'cursor', modelName: 'Cursor Auto', upstreamModel: 'auto' });
+    const blocks = blocksFor(auto, entry('c', 0), verifying);
+    expect(blocks.map((b) => b.code)).toEqual(['avoided']);
+    expect(blocks[0]?.text).toBe(
+      '这一步只派别家：Cursor Auto 由渠道自己挑模型（上游串 auto），认不出这次是哪一家在答',
+    );
+    expect(codes(route('o', { family: 'gpt', upstreamModel: 'openrouter/auto' }), verifying)).toEqual([
+      'avoided',
+    ]);
+    expect(
+      codes(route('d', { family: 'cursor', upstreamModel: 'x', upstreamAliases: ['Auto'] }), verifying),
+    ).toEqual(['avoided']);
+    // 钉住型号的照派；不验证（没有要避开的族）时 auto 照派
+    expect(codes(route('p', { family: 'cursor', upstreamModel: 'gpt-5.6-autopilot' }), verifying)).toEqual(
+      [],
+    );
+    expect(codes(auto, ctx({ stage: 'verify' }))).toEqual([]);
   });
 });
 

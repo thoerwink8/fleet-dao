@@ -134,6 +134,31 @@ async function headOfRef(t: UserTree, ref: string): Promise<string> {
   return sha;
 }
 
+const BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
+
+/** 会话树里主线的引用名：refs/remotes/origin/<主线分支>，git 里写 origin/<主线分支> 就认得。 */
+export function mainlineRef(defaultBranch: string): string {
+  if (!BRANCH.test(defaultBranch) || defaultBranch.includes('..') || defaultBranch.endsWith('.lock')) {
+    throw new PortError('BAD_INPUT', `主线分支名不对：${defaultBranch}`, { retryable: false });
+  }
+  return `refs/remotes/origin/${defaultBranch}`;
+}
+
+/**
+ * 把「主线」钉在树里的一个主线提交上。树是从 bundle 建的、没有远端，git diff origin/main...HEAD 和 pnpm test:changed
+ * （和 origin/main 比改了什么，specs/164-会话内存与交活测试/）都靠这个引用；没有它 test:changed 明确报「认不出 origin/main」。
+ * 三个点的比法只看分叉点：钉得比分支并进来的主线旧，会把并进来的主线改动也算成这次改的（多跑测试，不会少跑），
+ * 所以引擎每次把新的主线取进树里都跟着重钉。sha 必须已经在树里（git 拒绝把引用指到没有的提交上，抛 GIT_FAILED）。
+ */
+export async function pinMainline(t: UserTree, defaultBranch: string, sha: string): Promise<void> {
+  assertSha(sha, '主线的提交');
+  await git(
+    t,
+    ['update-ref', mainlineRef(defaultBranch), sha],
+    `把 origin/${defaultBranch} 钉到 ${sha.slice(0, 7)}`,
+  );
+}
+
 /** 仓里有没有这个提交（换检出之前先看：已经有了就不用再从镜像取，取了反而是空包）。 */
 export async function hasCommit(t: UserTree, sha: string): Promise<boolean> {
   assertSha(sha, '提交');
@@ -295,21 +320,86 @@ export async function isMergeChainOnto(
 }
 
 /**
+ * git 没跑成的白话，引它自己的错误行：以 error: / fatal: 开头的那几行（GIT_ENV 把语言钉成 C），没有再照 describeFailure
+ * 引末尾几行。锁被占着时 git 先打一行「fatal: Unable to create '…/index.lock': File exists.」、后面跟五行劝人的话，
+ * 只引末尾就把是哪把锁挡住的截掉了。
+ */
+function describeGitFailure(what: string, r: UserCommandResult): string {
+  if (r.code === null) return describeFailure(what, r);
+  const errors = r.stderr
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => /^(?:error|fatal):/.test(l));
+  if (errors.length === 0) return describeFailure(what, r);
+  return `${what}：退出码 ${r.code}（${errors.slice(0, 3).join(' / ')}）`;
+}
+
+/** 树里有没有没并完的合并（.git/MERGE_HEAD）。rev-parse -q --verify：有 0、没有 1，别的退出码是没查成。 */
+async function mergeLeft(t: UserTree): Promise<'yes' | 'no' | { unknown: string }> {
+  const r = await run(t, [t.git ?? GIT, 'rev-parse', '-q', '--verify', 'MERGE_HEAD']);
+  if (r.code === 0) return 'yes';
+  if (r.code === 1) return 'no';
+  return { unknown: describeGitFailure('看 MERGE_HEAD', r) };
+}
+
+/** 撤销没成之后，树里留下了什么（报错里照实写）。 */
+const MERGE_LEFT_TEXT =
+  '树里还留着没并完的合并（.git/MERGE_HEAD 还在，工作树和暂存区可能停在并了一半的样子）';
+
+/**
  * 把 sha（引擎取进来的最新主线头）并进当前分支（--no-ff，提交身份用树里设好的「干活的」机器人）。
  * 有冲突（或没跟踪的文件挡着）就撤掉这次合并、树回到并之前的样子，回冲突的文件交给调用方退回会话；
  * 别的失败照抛，不当成冲突、也不当成并好了。
+ * 没并成之后的收拾（列冲突、撤销）自己也可能没成：锁文件被占着时撤销会被同一把锁挡住。报错一律以「并」这一步开头，
+ * 收拾哪步没成附在后面，树里留下了什么照实写。git 2.45 及以前写不了索引也会留下 MERGE_HEAD（退出码 1），2.46 起
+ * 直接退出、不留（退出码 128）——哪种都照这个写法报，不靠 git 的版本。
  */
 export async function mergeInto(
   t: UserTree,
   sha: string,
 ): Promise<{ merged: string } | { conflict: string[] }> {
   assertSha(sha, '要并的提交');
-  const r = await run(t, [t.git ?? GIT, 'merge', '--no-ff', '--no-edit', '-q', sha], { timeoutMs: 300_000 });
+  const bin = t.git ?? GIT;
+  const what = `并 ${sha.slice(0, 7)}`;
+  const details = { user: t.user, dir: t.dir };
+  const r = await run(t, [bin, 'merge', '--no-ff', '--no-edit', '-q', sha], { timeoutMs: 300_000 });
   if (r.code === 0) return { merged: await headOf(t) };
-  const unmerged = lines(await git(t, ['diff', '--name-only', '--diff-filter=U'], '列冲突的文件'));
-  const mergeHead = await run(t, [t.git ?? GIT, 'rev-parse', '-q', '--verify', 'MERGE_HEAD']);
-  if (mergeHead.code === 0) await git(t, ['merge', '--abort'], '撤掉没并成的合并');
-  if (unmerged.length > 0) return { conflict: unmerged };
+  // 被叫停：后面的收拾也会立刻被叫停，不再跑
+  if (r.aborted) throw new PortError('GIT_FAILED', describeFailure(what, r), { retryable: false, details });
+  const after: string[] = [];
+  let aborted = false;
+  const listed = await run(t, [bin, 'diff', '--name-only', '--diff-filter=U']);
+  const unmerged = listed.code === 0 ? lines(listed) : null;
+  if (unmerged === null) {
+    after.push(describeGitFailure('列冲突的文件', listed));
+    aborted ||= listed.aborted;
+  }
+  const left = await mergeLeft(t);
+  let undone = false;
+  if (left === 'yes') {
+    const abort = await run(t, [bin, 'merge', '--abort']);
+    if (abort.code === 0) {
+      undone = true;
+    } else {
+      after.push(describeGitFailure('撤掉没并成的合并', abort));
+      aborted ||= abort.aborted;
+      const still = await mergeLeft(t);
+      if (still === 'yes') after.push(MERGE_LEFT_TEXT);
+      else if (still === 'no')
+        after.push('树里的 MERGE_HEAD 已经没了（撤销没报成功，工作树和暂存区什么样没再查）');
+      else after.push(`树里还有没有没并完的合并没查成（${still.unknown}）`);
+    }
+  } else if (left !== 'no') {
+    after.push(`有没有留下没并完的合并没查成（${left.unknown}），没撤`);
+  }
+  if (after.length > 0) {
+    const head =
+      unmerged !== null && unmerged.length > 0
+        ? `${what}：有冲突（${unmerged.slice(0, 10).join('、')}）`
+        : describeGitFailure(what, r);
+    throw new PortError('GIT_FAILED', [head, ...after].join('；'), { retryable: !aborted, details });
+  }
+  if (unmerged !== null && unmerged.length > 0) return { conflict: unmerged };
   const stderr = r.stderr;
   if (/would be overwritten by merge/.test(stderr)) {
     const blocking = stderr
@@ -319,10 +409,8 @@ export async function mergeInto(
       .filter(Boolean);
     return { conflict: blocking.length > 0 ? blocking : ['（工作树里有文件挡着，没列出是哪几个）'] };
   }
-  throw new PortError('GIT_FAILED', describeFailure(`并 ${sha.slice(0, 7)}`, r), {
-    retryable: !r.aborted,
-    details: { user: t.user, dir: t.dir },
-  });
+  const message = `${describeGitFailure(what, r)}${undone ? '；没并成的合并已撤掉，树回到并之前' : ''}`;
+  throw new PortError('GIT_FAILED', message, { retryable: true, details });
 }
 
 /** 以会话用户的身份读目录里的一个文件；不在回 null（别的错照抛）。 */

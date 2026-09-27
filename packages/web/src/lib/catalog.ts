@@ -3,7 +3,7 @@
 import {
   hardBanFor,
   ROUTE_PROBE_EVERY_MINUTES,
-  ROUTE_PROBE_STALE_MINUTES,
+  routeProbeStaleMinutes,
   windowAppliesTo,
 } from '@fleet-dao/shared';
 import { brand } from '#brand';
@@ -28,6 +28,7 @@ export const STAGES: { id: StageKind; label: string; hint: string }[] = [
   { id: 'execute', label: '写码', hint: '改文件、跑测试、开 PR；执行方式要能改文件' },
   { id: 'ui', label: 'UI', hint: brand.stageHints.ui },
   { id: 'review', label: '第二意见', hint: '全新会话看改动，最多 2 轮' },
+  { id: 'verify', label: '开 PR 前验证', hint: '别家对照「怎么算做完」逐条核，只派和作者不同族的路由' },
   { id: 'research', label: '调研', hint: '查资料、比方案' },
   { id: 'judge', label: '判断', hint: `${brand.terms.judgeQuiz}：选择题 + 把握度` },
 ];
@@ -39,6 +40,7 @@ export const stageLabel: Record<StageKind, string> = {
   execute: '写码',
   ui: 'UI',
   review: '第二意见',
+  verify: '开 PR 前验证',
   research: '调研',
   judge: '判断',
 };
@@ -167,14 +169,20 @@ export interface RouteStatus {
   detail: string;
   /** 探针下结论的时刻；还没探过就没有。 */
   at: string | undefined;
-  /** 结论超过 ROUTE_PROBE_STALE_MINUTES 没更新：探针可能停了，这个在线 / 离线不一定还对。 */
+  /**
+   * 结论超过 routeProbeStaleMinutes 没更新：探针可能停了，这个在线 / 离线不一定还对。放慢的执行方式（cursor-agent 探通了
+   * 2 小时再探）按它自己的间隔算；不知道执行方式的按每轮都探算。
+   */
   stale: boolean;
 }
 
-export function routeStatus(route: Pick<Route, 'alive' | 'probe'>, now: number): RouteStatus {
+export function routeStatus(
+  route: Pick<Route, 'alive' | 'probe'> & { hostId?: Route['hostId'] },
+  now: number,
+): RouteStatus {
   const p = route.probe;
   const at = p?.at;
-  const stale = at !== undefined && now - Date.parse(at) > ROUTE_PROBE_STALE_MINUTES * TIME.MIN;
+  const stale = at !== undefined && now - Date.parse(at) > routeProbeStaleMinutes(route.hostId) * TIME.MIN;
   if (route.alive) {
     return { kind: 'online', label: '在线', tone: 'done', detail: p?.detail ?? '在线', at, stale };
   }

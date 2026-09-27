@@ -32,9 +32,13 @@ export {
   silentLogger,
 } from './client.ts';
 export {
+  type ReadRepoFileInput,
+  type ReadRepoFileResult,
   type ReadSpecDocInput,
   type ReadSpecDocResult,
+  readRepoFile,
   readSpecDoc,
+  validRepoFilePath,
   validSpecPath,
   type WriteSpecDocInput,
   type WriteSpecDocResult,
@@ -116,6 +120,7 @@ export {
   renderProgress,
   spliceProgress,
 } from './progress.ts';
+export { assertPublishable, type PublishName, type PublishText } from './publish-check.ts';
 export {
   CATEGORY_LABELS,
   type CiWaitResult,

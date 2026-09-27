@@ -224,7 +224,30 @@ describe('cursor 起停', () => {
     expect(judgeRun(summary.facts)).toMatchObject({ outcome: 'ok', reason: 'answered' });
   });
 
-  it('续会话回来的不是原来那个会话：当场停', async () => {
+  it('开新会话：init 帧一到就把 cursor 自己起的会话号报给调用方，只报一次', async () => {
+    const ids: string[] = [];
+    const report = await runCursorAgent(spec(tempDir()), {
+      command: fakeAgent({ replay: fixturePath('cursor-agent', 'cursor-edit-commit') }),
+      onSessionId: (id) => void ids.push(id),
+    });
+    expect(ids).toEqual([SESSION]);
+    expect(report.stream.sessionId).toBe(SESSION);
+    expect(report.hookError).toBeUndefined();
+  });
+
+  it('报会话号的回调抛了：记进 hookError，解析照常走完', async () => {
+    const report = await runCursorAgent(spec(tempDir()), {
+      command: fakeAgent({ replay: fixturePath('cursor-agent', 'cursor-edit-commit') }),
+      onSessionId: () => {
+        throw new Error('库连不上');
+      },
+    });
+    expect(report.hookError).toBe('库连不上');
+    expect(report.stream.result?.isError).toBe(false);
+  });
+
+  it('续会话回来的不是原来那个会话：当场停，不把对不上的号报出去', async () => {
+    const ids: string[] = [];
     const report = await runCursorAgent(
       spec(tempDir(), { session: { mode: 'resume', id: '11111111-2222-4333-8444-555555555555' } }),
       {
@@ -233,10 +256,12 @@ describe('cursor 起停', () => {
           lineDelayMs: 50,
           after: 'hang',
         }),
+        onSessionId: (id) => void ids.push(id),
       },
     );
     expect(report.killed?.reason).toBe('session_mismatch');
     expect(judgeRun(cursorRunSummary(report).facts).reason).toBe('session_mismatch');
+    expect(ids).toEqual([]);
   });
 
   it('只在 stderr 报错就退出：没有终帧，原因带上原文', async () => {
@@ -256,6 +281,23 @@ describe('cursor 起停', () => {
       }),
     });
     expect(judgeRun(cursorRunSummary(report).facts).reason).toBe('quota_exhausted');
+  });
+
+  it('包的入口导出 cursor 插头，和 Claude 插头并排（重名的会被 export * 悄悄丢掉，这里点名核对）', async () => {
+    const pkg = await import('../src/index.ts');
+    for (const name of [
+      'runCursorAgent',
+      'cursorRunFacts',
+      'cursorRunSummary',
+      'CursorStreamReader',
+      'buildCursorArgs',
+      'runClaudeCode',
+      'claudeRunFacts',
+      'ClaudeStreamReader',
+      'buildClaudeArgs',
+    ]) {
+      expect(typeof (pkg as Record<string, unknown>)[name], name).toBe('function');
+    }
   });
 
   it('测试里起真的 cursor-agent 一律拒绝', async () => {

@@ -34,6 +34,9 @@ importers:
 
   packages/api:
     dependencies:
+      '@fleet-dao/core':
+        specifier: workspace:*
+        version: link:../core
       '@fleet-dao/db':
         specifier: workspace:*
         version: link:../db
@@ -81,6 +84,15 @@ importers:
 
   packages/conventions: {}
 
+  packages/core:
+    dependencies:
+      '@fleet-dao/shared':
+        specifier: workspace:*
+        version: link:../shared
+      zod:
+        specifier: ^4.6.5
+        version: 4.6.5
+
   packages/db:
     dependencies:
       '@fleet-dao/shared':
@@ -114,6 +126,9 @@ importers:
       '@fleet-dao/conventions':
         specifier: workspace:*
         version: link:../conventions
+      '@fleet-dao/core':
+        specifier: workspace:*
+        version: link:../core
       '@fleet-dao/db':
         specifier: workspace:*
         version: link:../db

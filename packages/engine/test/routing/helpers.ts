@@ -45,6 +45,8 @@ export function route(routeId: string, overrides: Partial<RouteFacts> = {}): Rou
     hostId: 'claude-code',
     upstreamModel: null,
     upstreamAliases: [],
+    // 在线的路由带着探针的结论时刻：默认是上一轮（6 分钟前）探的，没过期
+    probedAt: at(-0.1),
     quota: 'ok',
     windows: [win({ label: '5h', window: '5h', used: 0.2, resetsAt: at(3) }), win()],
     inFlight: 0,

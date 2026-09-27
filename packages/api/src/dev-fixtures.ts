@@ -46,7 +46,16 @@ export function devFixtures(now: Date): Partial<MemoryData> {
       { id: IDS.botEngine, displayName: '引擎机器人', role: 'bot', active: true, githubId: 9002 },
     ],
     repos: [
-      { id: IDS.repo, owner: 'example', name: 'canary', defaultBranch: 'main', testCommand: 'pnpm check' },
+      {
+        id: IDS.repo,
+        owner: 'example',
+        name: 'canary',
+        defaultBranch: 'main',
+        // 给人看的旧值：派活、交活都不认它，认下面副本里的（生产上对账读成后会把它改成一样的）
+        testCommand: 'pnpm check',
+        // 流程配置副本五分钟前刚从仓里 .fleet/flow.json 同步过（生产上由引擎的对账写；超过 45 分钟没同步就停派）
+        flow: { syncedAt: ago(5), error: null, unread: null, testCommand: 'pnpm test:changed' },
+      },
     ],
     channels: [
       { id: 'ch-claude', name: 'Claude 订阅', billing: 'subscription', enabled: true },
@@ -218,6 +227,8 @@ export function devFixtures(now: Date): Partial<MemoryData> {
         branch: 'fleet/12-a',
         queuedAt: ago(14),
         startedAt: ago(12),
+        // 起会话时交代的测试命令（当时副本里的），交活核对认它
+        testCommand: 'pnpm test:changed',
       },
     ],
     progress: [

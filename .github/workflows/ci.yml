@@ -8,6 +8,9 @@ name: ci
 # - 加 job 要同时加进 ci-plan.ts 的 PLANNED_JOBS（或 ALWAYS_JOBS）和 check 的 needs。
 on:
   pull_request:
+    # 默认只有 opened、synchronize、reopened：改 PR 标题、正文不重跑，hygiene job 扫的还是事件里带的旧标题正文（手动
+    # 重跑也是）——改掉命中的内容清不掉红，已经绿了的 PR 再往标题里写东西也拦不住（标题会进 squash 提交）。
+    types: [opened, synchronize, reopened, edited]
   push:
     branches: [main]
 # 令牌只给读代码：这里的检查都只看检出来的文件，不读 GitHub 上的现状（#87：必过检查必须确定）。
@@ -46,6 +49,8 @@ jobs:
   # 卫生检查：每个 PR 都跑、不裁剪。这个 job 拿着真的已知敏感值名单，所以一行 PR 里的代码都不执行（#115 第二意见）：
   # PR 检出到 pr/ 只当数据扫；执行的是目标分支（主线）上那份 packages/hygiene，检出到 trusted/；不装依赖、不跑安装脚本。
   # 代价：PR 改卫生检查的规则、白名单，要合进主线之后才用上——要加白名单的，先单独合一个只改白名单的 PR。不等 changes。
+  # 除了扫 PR 最终的文件树，还按提交扫这个 PR 的历史（先加后删的、提交说明、作者）、扫 PR 标题和正文，两步都只在
+  # pull_request 事件上跑（push 到 main 没有 base/head 这两个概念）；推别的分支没开 PR 时由 hygiene-push.yml 兜底。
   hygiene:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -53,6 +58,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: pr
+          # 按提交扫这个 PR 的历史（下面）要完整提交图：默认浅克隆只有 GitHub 造的这一个合并提交，base、head 两头
+          # 都不在里面。
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/checkout@v4
         with:
@@ -85,6 +93,27 @@ jobs:
           for (const line of lines) (code === 0 ? console.log : console.error)(line);
           process.exitCode = code;
           '
+      # 上面那步只看 PR 最终的文件树：先加后删的值、提交说明、作者邮箱推上去就公开了，那步看不见。这里按提交扫
+      # base..head，和推送前的闸（packages/hygiene/src/prepush.ts）、引擎推分支同一份判定（historyArgs / scanHistory）。
+      - name: 卫生检查（主线上的代码，按提交扫这个 PR 的历史）
+        if: github.event_name == 'pull_request'
+        working-directory: pr
+        env:
+          TRUSTED: ${{ github.workspace }}/trusted
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          node "$TRUSTED/packages/hygiene/src/bin/ci-history.ts" --base "$BASE" --head "$HEAD"
+      # 标题、正文只能经 env 传：直接把 ${{ }} 拼进这段脚本文本，PR 标题里随手写个 $(...) 或反引号就能在这台
+      # runner 上跑起来（脚本注入）；env: 是 GitHub 在起这段 shell 之前就替换好的，不会有这个问题。
+      - name: 卫生检查（PR 标题和正文）
+        if: github.event_name == 'pull_request'
+        env:
+          TRUSTED: ${{ github.workspace }}/trusted
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          node "$TRUSTED/packages/hygiene/src/bin/ci-pr-text.ts"
 
   # 文档指针、skill 指针：每个 PR 都跑、不裁剪（改名挪文件也会让文档里的指针指空）。不等 changes。
   docs:

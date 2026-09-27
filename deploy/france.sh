@@ -3,9 +3,11 @@
 # 法国机器装机（以 root 跑；幂等：跑第二遍什么都不变）。装的是：引擎用户 fleet、会话专用用户（一个）、创始人的登录用户 pilot、目录、
 # PostgreSQL 16（Ubuntu 自带的源，吃得到自动安全更新）、Temporal 服务端 1.32.0（Postgres 持久化，端口和旧系统错开）、
 # 本机上只许 root 和 fleet 连 Temporal 与库的 nft 表、AI 会话资源池 fleet-agents.slice 与起会话的脚本、
-# fleet 用户的 pnpm（corepack）、WireGuard 客户端（主动连香港，法国不开任何入站端口）、
+# fleet 用户的 pnpm（corepack）、AI 会话用的 pnpm（归 root，钉版本、核 sha512）、WireGuard 客户端（主动连香港，法国不开任何入站端口）、
 # 应用的本机配置与随机密钥、往香港传驾驶舱静态文件的钥匙、把演示版的可见范围推到香港的单元、
-# 会话用户和 pilot 家里各家 AI 的全局说明与方法类 skill、他们各自的 ddgs（用钉住版本的 uv 装）。
+# 会话用户和 pilot 家里各家 AI 的全局说明与方法类 skill、他们各自的 ddgs（用钉住版本的 uv 装）、
+# 会话用户的 cursor-agent（官方安装脚本，以会话用户自己的身份装在他家里，只在没有时装）、
+# node 默认的编译缓存目录（先由 root 建好，别的用户替 fleet、pilot、root 放不进编译缓存）。
 # 应用本身（引擎、后端、前端）由 deploy/release.sh 发布。
 # 旧系统的服务、端口、文件一概不动。端口表、怎么跑、怎么看健康、怎么回滚：docs/ops.md。
 #   bash deploy/france.sh           装：缺的补上，已有的不动
@@ -26,10 +28,16 @@ source "$DEPLOY_DIR/lib/login-user.sh"
 source "$DEPLOY_DIR/lib/session-user.sh"
 # shellcheck source=lib/cli-tools.sh
 source "$DEPLOY_DIR/lib/cli-tools.sh"
+# shellcheck source=lib/cursor-agent.sh
+source "$DEPLOY_DIR/lib/cursor-agent.sh"
 # shellcheck source=lib/agents-sync.sh
 source "$DEPLOY_DIR/lib/agents-sync.sh"
 # shellcheck source=lib/app-config.sh
 source "$DEPLOY_DIR/lib/app-config.sh"
+# shellcheck source=lib/session-pnpm.sh
+source "$DEPLOY_DIR/lib/session-pnpm.sh"
+# shellcheck source=lib/node-cache.sh
+source "$DEPLOY_DIR/lib/node-cache.sh"
 trap 'on_error "$LINENO" "$BASH_COMMAND"' ERR
 
 # ── 钉死的版本与校验和：外部二进制装上机器就进了信任面，不用 latest ──
@@ -49,6 +57,19 @@ UV_SHA256=fa82fd8dde8e8eefdecada6aa0889666556cfceb690d06e0c3bca49eb3070a63
 # 这些是 PyPI 上的包，只钉版本、不核校验和（核 sha256 的只有上面的 uv）。升 ddgs 时依赖跟着对一遍
 DDGS_VERSION=9.16.0
 DDGS_DEPS=(click==8.5.0 lxml==6.1.3 primp==2.0.1)
+# AI 会话用的 pnpm（lib/session-pnpm.sh）：版本必须和仓根 package.json 的 packageManager 一样（deploy/test/session-pnpm.test.sh
+# 核对，漏改一处 CI 就红）；校验和是 npm 的 dist.integrity，升版本时照 `npm view pnpm@<版本> dist.integrity` 一起改
+PNPM_VERSION=11.1.2
+PNPM_INTEGRITY=sha512-QVocwll0cx51RVwUaDcb50xapft2IbUNQFbSIkUWCfEUEvI/1gLmFp8eBgRmZB95hZfhvpYaEGiINqZ7FlaUmQ==
+# 会话用户的 cursor-agent（lib/cursor-agent.sh）：官方安装脚本，以会话用户自己的身份跑，只在没有时装，之后它自己升级；
+# 不钉版本、不核校验和（升级会删旧版本目录；为什么可以不核见 lib/cursor-agent.sh 开头）
+CURSOR_INSTALL_URL=https://cursor.com/install
+# 官方安装脚本固定装在这（{user} 换成会话用户），装和读回都照引擎的找法在这里找：和 packages/engine/src/real/hosts.ts 的
+# DEFAULT_CURSOR_VERSIONS_DIR 一样（engine 的 hosts.test.ts 核对）。engine.env 别改 FLEET_CURSOR_VERSIONS_DIR：改了引擎就找不到这里装的
+CURSOR_VERSIONS_DIR='/home/{user}/.local/share/cursor-agent/versions'
+# node 默认的编译缓存目录和开机时建它的配置（lib/node-cache.sh：为什么要归 root）
+NODE_CACHE_DIR=/tmp/node-compile-cache
+NODE_CACHE_CONF=/etc/tmpfiles.d/fleet-dao-node-compile-cache.conf
 
 # ── 端口：全部只绑本机，和旧系统的开发版 Temporal（7233/8233 与一批临时端口）错开。改了同步 docs/ops.md ──
 PG_PORT=5432
@@ -95,6 +116,9 @@ ENV_FILE=/etc/fleet-dao/france.env
 ENV_KEYS=(FLEET_WG_HK_ENDPOINT FLEET_WG_HK_PUBLIC_KEY)
 TEMPORAL_HOME=/opt/fleet-dao/temporal
 UV_HOME=/opt/fleet-dao/uv
+# AI 会话用的 pnpm：包解在 <这里>/<版本>，入口放在引擎给会话的 PATH 上（systemd 给服务的默认 PATH 里有 /usr/local/bin）
+PNPM_ROOT=/opt/fleet-dao/pnpm
+PNPM_BIN=/usr/local/bin/pnpm
 TEMPORAL_ENV=/etc/fleet-dao/temporal.env
 TEMPORAL_CONFIG=/etc/fleet-dao/temporal.yaml
 PG_UNIT=postgresql@$PG_MAJOR-main.service
@@ -123,6 +147,13 @@ GATEWAY_DEPLOY_KEY=/etc/fleet-dao/gateway-deploy.key
 DEMO_DIR=/var/lib/fleet-dao/demo
 DEMO_SCOPES_BIN=/usr/local/sbin/fleet-demo-scopes
 DEMO_UNITS=(fleet-demo-scopes.service fleet-demo-scopes.path fleet-demo-scopes.timer)
+# 自动发布（docs/ops.md 第九节「自动发布」）：主线上 CI 全绿的新提交等引擎空闲后发到本机、发完同步规矩。装的是副本：
+# 主线上改了它，要重跑本脚本才换。它每一轮的读数、本脚本装到哪个提交（下面 APPLIED_FILE）都放在 AUTO_DIR，后端的 /healthz 读
+AUTO_RELEASE_LIB=/usr/local/lib/fleet-dao/auto-release
+AUTO_RELEASE_FILES=(lib.mjs fleet-auto-release.mjs)
+AUTO_RELEASE_UNITS=(fleet-auto-release.service fleet-auto-release.timer)
+AUTO_DIR=$RELEASES_DIR/.auto
+APPLIED_FILE=$AUTO_DIR/france-applied
 
 FLEET_WG_HK_ENDPOINT=""
 FLEET_WG_HK_PUBLIC_KEY=""
@@ -215,6 +246,15 @@ setup_pilot() {
   ensure_pkgs git openssh-client curl
   setup_login_user "$PILOT_USER" "$PILOT_HOME" "https://dl.reclaude.ai/$RECLAUDE_VERSION/reclaude-linux-amd64" "$RECLAUDE_SHA256"
 }
+
+# node 默认的编译缓存目录先由 root 建好（lib/node-cache.sh）：排在第一次以 fleet 跑 node（下面装 pnpm 就会）之前。
+# 没弄成照装机的规矩停下：这一步不对，会话就能替 fleet、pilot、root 放编译缓存、以他们的身份跑代码
+setup_node_cache() {
+  step "node 的编译缓存目录（$NODE_CACHE_DIR 归 root、755；开机时由 $NODE_CACHE_CONF 先建好）"
+  ensure_node_cache "$NODE_CACHE_DIR" "$NODE_CACHE_CONF"
+}
+
+readback_node_cache() { check_node_cache "$NODE_CACHE_DIR" "$NODE_CACHE_CONF"; }
 
 load_config() {
   load_env "$ENV_FILE" "${ENV_KEYS[@]}"
@@ -594,7 +634,8 @@ setup_pnpm() {
     ok "fleet 用户的 pnpm 是 $ver"
     return 0
   fi
-  # 垫片装在 fleet 自己的 ~/.local/bin，不动 /usr/bin：旧系统的用户看不到这个 pnpm。写家目录的事都以 fleet 身份做（审计 P01）
+  # 发布（release.sh 以 fleet 装依赖、打包）用的这一份：垫片装在 fleet 自己的 ~/.local/bin，它的 PATH 里排在 /usr/local/bin
+  # 前面。AI 会话读不到 fleet 的家，用的是 setup_session_pnpm 装的那一份。写家目录的事都以 fleet 身份做（审计 P01）
   as_user fleet mkdir -p /home/fleet/.local/bin
   as_user fleet corepack enable --install-directory /home/fleet/.local/bin pnpm
   as_user fleet env COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack install -g "$want" >/dev/null
@@ -603,6 +644,36 @@ setup_pnpm() {
     return 1
   fi
   changed "fleet 用户装 pnpm $ver（corepack，垫片在 /home/fleet/.local/bin）"
+}
+
+# AI 会话用的 pnpm（lib/session-pnpm.sh）：会话交活要原样跑 `pnpm test:changed`，引擎给会话的 PATH 上得找得到它。
+# 装完以会话用户、按 fleet-agent-scope 的默认 PATH 跑一次入口核版本；引擎给会话的那条 PATH 上找不找得到，在读回里查
+setup_session_pnpm() {
+  local want
+  want=$(pnpm_want)
+  step "AI 会话用的 pnpm $PNPM_VERSION（归 root：$PNPM_ROOT/<版本>，入口 $PNPM_BIN；钉版本、核 sha512）"
+  if [[ "${want#pnpm@}" != "$PNPM_VERSION" ]]; then
+    red "仓根 package.json 钉的是 $want，france.sh 顶部钉的是 pnpm@$PNPM_VERSION 的校验和：升 pnpm 时两处一起改（校验和照 npm view pnpm@<版本> dist.integrity）"
+    return 1
+  fi
+  ensure_session_pnpm "$PNPM_VERSION" "$PNPM_INTEGRITY" "https://registry.npmjs.org/pnpm/-/pnpm-$PNPM_VERSION.tgz" \
+    "$PNPM_ROOT" "$PNPM_BIN" as_tool_user "${SESSION_USERS[0]}"
+}
+
+cursor_versions_dir() { printf '%s' "${CURSOR_VERSIONS_DIR//\{user\}/$1}"; } # 会话用户
+
+# 会话用户的 cursor-agent（lib/cursor-agent.sh）：引擎起 Cursor 会话用的就是他家里这份。照引擎的找法一个能跑的都没有时，
+# 以他自己的身份跑官方安装脚本；有了不动。装不上只记红、不中断（读回还会再判一次）。登录由创始人做（docs/ops.md 第五节）
+setup_cursor_agent() {
+  step "会话用户的 cursor-agent（${SESSION_USERS[*]}；官方安装脚本，以会话用户自己的身份装，只在没有时装）"
+  local u
+  for u in "${SESSION_USERS[@]}"; do
+    if ! id "$u" >/dev/null 2>&1; then
+      pending "$u 这个用户还没有，cursor-agent 没装（建了再跑一遍）"
+      continue
+    fi
+    ensure_cursor_agent "$u" "$(cursor_versions_dir "$u")" "$CURSOR_INSTALL_URL"
+  done
 }
 
 setup_app_config() {
@@ -697,6 +768,37 @@ setup_demo_scopes() {
   ensure_unit_running fleet-demo-scopes.timer "$unit_changed"
 }
 
+# 自动发布：定时器每 5 分钟拉起一轮（deploy/france/auto-release），以 root 跑 release.sh --auto、替会话用户同步规矩。
+# 脚本放 /usr/local/lib 下的副本（全链归 root），不从检出直接跑：检出它自己会快进，主线上一个坏提交不该把自动发布本身弄坏
+setup_auto_release() {
+  step "自动发布（主线上 CI 全绿的新提交等引擎空闲后发到本机，发完同步规矩；读数在 $AUTO_DIR）"
+  local f u unit_changed=0
+  ensure_dir "$AUTO_DIR" root:root 755
+  ensure_dir /usr/local/lib/fleet-dao root:root 755
+  ensure_dir "$AUTO_RELEASE_LIB" root:root 755
+  for f in "${AUTO_RELEASE_FILES[@]}"; do
+    put_file "$AUTO_RELEASE_LIB/$f" root:root 644 "$(<"$DEPLOY_DIR/france/auto-release/$f")"
+  done
+  for u in "${AUTO_RELEASE_UNITS[@]}"; do
+    put_file "/etc/systemd/system/$u" root:root 644 "$(<"$DEPLOY_DIR/france/$u")"
+    if ((WROTE)); then unit_changed=1; fi
+  done
+  if ((unit_changed)); then systemctl daemon-reload; fi
+  ensure_unit_running fleet-auto-release.timer "$unit_changed"
+}
+
+# 本脚本跑完没红：记下装到了哪个提交（检出的 HEAD）。自动发布拿它和主线比，数装机相关的文件后来改过几次，
+# 后端的 /healthz 据此标「装机脚本落后」（这层碰防火墙、sudoers，不自动跑）。同一个提交再跑不改
+record_applied() {
+  local head
+  if ! head=$(git -C "$DEPLOY_DIR/.." rev-parse HEAD 2>/dev/null) || [[ ! "$head" =~ ^[0-9a-f]{40}$ ]]; then
+    pending "读不到检出在哪个提交，没记装到哪了（$APPLIED_FILE）：后端会报装机层没查成"
+    return 0
+  fi
+  if [[ ! -d "$AUTO_DIR" ]]; then return 0; fi
+  put_file "$APPLIED_FILE" root:root 644 "commit=$head"
+}
+
 # agents_sync（跑同步脚本、把逐行结论记进账）在 lib/agents-sync.sh
 setup_agent_rules() {
   step "各家 AI 的全局说明与方法类 skill（${AGENT_RULES_USERS[*]}；仓根 AGENTS.md 的通用段、agents/skills/）"
@@ -750,14 +852,42 @@ readback() {
   readback_pilot
   readback_agent_rules
   readback_sessions
+  readback_node_cache
   readback_pnpm
+  readback_cursor_agent
   readback_wireguard
   readback_firewall
   readback_app_config
   readback_web_upload
   readback_demo_scopes
+  readback_auto_release
   readback_proxy_headers
   readback_service_home
+}
+
+# 自动发布：定时器在等、装上去的副本和仓里一样、上一轮跑完了没有（跟不跟得上主线由后端 /healthz 的 deploy_lag 判）
+readback_auto_release() {
+  local f result status at
+  if [[ "$(systemctl is-active fleet-auto-release.timer 2>/dev/null)" != active ]]; then
+    red "fleet-auto-release.timer 没在跑：主线上的新提交不会自动发到本机"
+  fi
+  for f in "${AUTO_RELEASE_FILES[@]}"; do
+    if ! cmp -s -- "$AUTO_RELEASE_LIB/$f" "$DEPLOY_DIR/france/auto-release/$f"; then
+      red "$AUTO_RELEASE_LIB/$f 和仓里的不一样（或没装）：重跑本脚本"
+    fi
+  done
+  at=$(unit_prop fleet-auto-release.service ExecMainExitTimestamp)
+  if [[ -z "$at" ]]; then
+    pending "自动发布还一轮都没跑过（定时器装上 2 分钟后跑第一轮；现在跑：systemctl start fleet-auto-release）"
+    return 0
+  fi
+  result=$(unit_prop fleet-auto-release.service Result)
+  status=$(unit_prop fleet-auto-release.service ExecMainStatus)
+  if [[ "$result" == success ]]; then
+    ok "自动发布上一轮跑完是 $at（读数：bash /srv/fleet-dao/deploy/release.sh --check）"
+  else
+    red "自动发布上一轮没跑完（$at，退出码 ${status:-读不到}）：journalctl -u fleet-auto-release -n 30"
+  fi
 }
 
 # 演示版的可见范围：两个触发单元在等、上一次推成了没有（一次都没推过是「待配」，推不成、有文件认不出是红）
@@ -1105,6 +1235,50 @@ readback_pnpm() {
   want=$(pnpm_want)
   have=$(pnpm_have)
   if [[ "$have" == "${want#pnpm@}" ]]; then ok "fleet 用户的 pnpm 是 $have"; else red "fleet 用户的 pnpm 是「$have」，应为 ${want#pnpm@}"; fi
+  readback_session_pnpm "${want#pnpm@}"
+}
+
+# 照引擎起会话的路子起一条命令：fleet 经 sudo 调 fleet-agent-scope，引擎给的 PATH 改名 FLEET_SESSION_PATH 交过去
+# （packages/adapters 的 scopeLaunch），帮手脚本在它最后接上会话用户的 ~/.local/bin，再降成会话用户跑
+# shellcheck disable=SC2317,SC2329 # 当跑法交给 check_session_pnpm，由它间接调（CI 上的旧版 shellcheck 报的是 2317）
+session_scope_run() { # 会话 PATH 命令…
+  local path=$1
+  shift
+  as_user fleet env FLEET_SESSION_PATH="$path" /usr/bin/sudo -n "$AGENT_SCOPE_BIN" run "readback-pnpm-$$" \
+    --user "${SESSION_USERS[0]}" --memory-max 1G --tasks-max 64 -- "$@"
+}
+
+# AI 会话用的 pnpm：装着的和装的时候一样（归 root），引擎给会话的那条 PATH 上先找到的就是它、版本是钉的那一版。
+# 那条 PATH 从在跑的引擎进程里读（lib/session-pnpm.sh 的 engine_session_path）；引擎没在跑读不到，记待配
+readback_session_pnpm() { # 仓根 package.json 钉的版本
+  local want=$1
+  if [[ "$want" != "$PNPM_VERSION" ]]; then
+    red "仓根 package.json 钉的 pnpm 是 $want，france.sh 顶部钉的是 $PNPM_VERSION：两处一起改，再跑一遍 france.sh"
+    return 0
+  fi
+  if session_pnpm_intact "$PNPM_ROOT/$PNPM_VERSION" "$PNPM_INTEGRITY"; then
+    ok "会话用的 pnpm $PNPM_VERSION 装在 $PNPM_ROOT/$PNPM_VERSION，文件和装的时候一样"
+  else
+    red "$PNPM_ROOT/$PNPM_VERSION 没装、没装全，或文件和装的时候对不上：跑一遍 france.sh 重装"
+  fi
+  if ! engine_session_path "$(unit_prop fleet-engine.service MainPID)"; then
+    pending "引擎给会话的 PATH 上找不找得到 pnpm 没查：$SESSION_PATH_WHY"
+    return 0
+  fi
+  check_session_pnpm "$PNPM_VERSION" "$PNPM_BIN" "引擎给会话的 PATH（$SESSION_PATH，最后再接会话用户的 ~/.local/bin）" \
+    session_scope_run "$SESSION_PATH"
+}
+
+# 会话用户的 cursor-agent：以他的身份照引擎的找法跑 --version，没装、跑不成都判红（lib/cursor-agent.sh）；登没登录不查
+readback_cursor_agent() {
+  local u
+  for u in "${SESSION_USERS[@]}"; do
+    if ! id "$u" >/dev/null 2>&1; then
+      pending "$u 这个用户还没有，cursor-agent 没查"
+      continue
+    fi
+    check_cursor_agent "$u" "$(cursor_versions_dir "$u")"
+  done
 }
 
 readback_wireguard() {
@@ -1150,6 +1324,7 @@ main() {
     before=$(snapshot_others)
     setup_identity
     setup_pilot
+    setup_node_cache
     load_config
     setup_packages
     setup_wireguard
@@ -1158,9 +1333,12 @@ main() {
     setup_slice
     setup_firewall
     setup_pnpm
+    setup_session_pnpm
+    setup_cursor_agent
     setup_app_config
     setup_web_upload
     setup_demo_scopes
+    setup_auto_release
     setup_agent_rules
     setup_cli_tools
   else
@@ -1169,6 +1347,7 @@ main() {
   readback
   self_check_root_exec
   if ((CHECK_ONLY == 0)); then compare_others "$before"; fi
+  if ((CHECK_ONLY == 0 && ${#REDS[@]} == 0)); then record_applied; fi
   finish
 }
 

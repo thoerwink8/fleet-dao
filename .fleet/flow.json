@@ -1,0 +1,5 @@
+{
+  "说明": "fleet-dao 自己的流程配置，只写和全组织默认（packages/core/flow.default.json）不同的；格式见 packages/core/src/config.ts。引擎的对账每 15 分钟读一次默认分支上的这份，合并校验后写进库里的副本（repos 表的 flow_* 列），派活只认副本；认不出这个项目就停派。testCommand 是写码会话交活要原样跑的那条：只跑改动影响到的测试（全量检查、卫生检查归 CI）。",
+  "formatVersion": 1,
+  "testCommand": "pnpm test:changed"
+}

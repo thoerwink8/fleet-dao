@@ -15,6 +15,7 @@ import {
   feishuDrafts,
   feishuFollows,
   feishuOutbox,
+  flowReplicaOf,
   githubEvents,
   githubEventVersions,
   idempotencyKeys,
@@ -55,6 +56,7 @@ import {
 } from '@fleet-dao/db';
 import type { ProgressKind, Step } from '@fleet-dao/shared';
 import { and, asc, countDistinct, desc, eq, gt, gte, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
+import { testRunOf } from './done-check.ts';
 import {
   feishuMessageKey,
   feishuReviseKey,
@@ -93,7 +95,6 @@ import {
   type RunPlan,
   type SettingRecord,
   type Store,
-  type TestRunRecord,
   type TimelineRecord,
   type User,
 } from './ports.ts';
@@ -1020,10 +1021,12 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
     // —— fleet 命令 ——
     async getAgentSession(runId) {
       if (!isUuid(runId)) return null;
+      // 测试命令认起会话时记下的那条（session_runs.test_command），不读仓此刻的：开工后仓里改了命令也照旧
       const [row] = await db
         .select({ run: sessionRuns, task: tasks })
         .from(sessionRuns)
         .innerJoin(tasks, eq(tasks.id, sessionRuns.taskId))
+        .innerJoin(repos, eq(repos.id, tasks.repoId))
         .where(eq(sessionRuns.id, runId));
       if (!row) return null;
       return {
@@ -1032,6 +1035,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         subtaskId: opt(row.run.subtaskId),
         stage: row.run.stage,
         repoId: row.task.repoId,
+        testCommand: opt(row.run.testCommand),
         branch: opt(row.run.branch),
         acceptance: row.task.acceptance,
         endedAt: isoOpt(row.run.endedAt),
@@ -1094,17 +1098,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         .from(progressEvents)
         .where(and(eq(progressEvents.runId, runId), eq(progressEvents.kind, 'test')))
         .orderBy(asc(progressEvents.at), asc(progressEvents.id));
-      return rows.flatMap((r): TestRunRecord[] => {
-        const payload = r.payload as { passed?: unknown; command?: unknown } | null;
-        if (typeof payload?.passed !== 'boolean') return [];
-        return [
-          {
-            at: iso(r.at),
-            passed: payload.passed,
-            command: typeof payload.command === 'string' ? payload.command : undefined,
-          },
-        ];
-      });
+      return rows.map((r) => testRunOf(iso(r.at), r.payload));
     },
     async claimCommand({ runId, key, action, takeOverBefore }): Promise<CommandClaim> {
       const k = commandKey(runId, key);
@@ -1791,9 +1785,18 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         .from(repos)
         .where(and(sql`lower(${repos.owner}) = lower(${owner})`, sql`lower(${repos.name}) = lower(${name})`))
         .limit(1);
-      return row
-        ? { ...toRepo(row), autoDispatchSince: row.autoDispatchSince ? iso(row.autoDispatchSince) : null }
-        : null;
+      if (!row) return null;
+      const flow = flowReplicaOf(row);
+      return {
+        ...toRepo(row),
+        autoDispatchSince: row.autoDispatchSince ? iso(row.autoDispatchSince) : null,
+        flow: {
+          syncedAt: flow.syncedAt ? iso(flow.syncedAt) : null,
+          error: flow.error,
+          unread: flow.unread,
+          testCommand: flow.testCommand,
+        },
+      };
     },
     async findTaskByIssue(repoId, issueNumber) {
       if (!isUuid(repoId)) return null;

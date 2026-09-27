@@ -9,6 +9,7 @@ export type StageKind =
   | 'execute' // 写码
   | 'ui' // UI 类写码（GPT 族禁入）
   | 'review' // 第二意见
+  | 'verify' // 开 PR 前别家验证（Fusion 第 5 步）：只派别家、只读
   | 'research' // 调研
   | 'judge'; // Jev 判断题
 
@@ -70,7 +71,10 @@ export interface Repo {
   owner: string;
   name: string;
   defaultBranch: string;
-  /** 在工作树里跑测试的命令，例如 `pnpm check`。 */
+  /**
+   * 给人看的测试命令（repos.test_command）：对账从仓里 .fleet/flow.json 读成后跟着改成一样的。起会话、交活核对不认它，
+   * 认流程配置副本里的（项目没写就是没有，不拿这一列的旧值顶；packages/core/src/replica.ts）。
+   */
   testCommand: string;
 }
 
@@ -292,6 +296,8 @@ export interface SessionRun {
   inputTokens?: number;
   outputTokens?: number;
   costUsd?: number;
+  /** 起会话时交代给它的测试命令（当时的流程配置副本里的），交活核对认它；没有 = 开工时项目没写，或这一项加上之前开的会话。 */
+  testCommand?: string;
 }
 
 export type ProgressKind = 'plan' | 'say' | 'tool' | 'file' | 'test' | 'ask' | 'done' | 'blocked';

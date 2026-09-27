@@ -550,7 +550,7 @@ describe('fleet done 要核实', () => {
     const h = harness();
     const noTests = await done(h, { summary: 's', testsPassed: true });
     expect(noTests.status).toBe(422);
-    expect(await reasonsOf(noTests)).toContain('没查到本次会话跑过测试');
+    expect(await reasonsOf(noTests)).toContain('没查到本次会话跑过 `pnpm test:changed` 的记录');
 
     testRun(h, true);
     testRun(h, false, 5);
@@ -565,6 +565,25 @@ describe('fleet done 要核实', () => {
     expect(await reasonsOf(wrongBranch)).toContain('不是本会话的分支');
 
     expect(h.store.data.progress.some((p) => p.kind === 'done')).toBe(false);
+    expect(h.signals).toHaveLength(0);
+  });
+
+  it('先跑过一次绿的、最后一次接了管道（结果认不出）：退回，前面那次绿的顶不上', async () => {
+    const h = harness();
+    testRun(h, true);
+    h.store.data.progress.push({
+      id: String(++seq),
+      runId: DEV_RUN_ID,
+      at: new Date(h.clock.now.getTime() + 5 * 60_000).toISOString(),
+      kind: 'test',
+      payload: {
+        command: 'pnpm check | tail',
+        unknownBecause: '带管道又没开 pipefail，退出码是管道最后一段的',
+      },
+    });
+    const res = await done(h, { summary: 's', testsPassed: true });
+    expect(res.status).toBe(422);
+    expect(await reasonsOf(res)).toContain('结果认不出：带管道又没开 pipefail');
     expect(h.signals).toHaveLength(0);
   });
 
@@ -587,7 +606,7 @@ describe('fleet done 要核实', () => {
       ).json(),
     );
     expect(timeline.items[0]).toMatchObject({ source: 'session', kind: 'done_rejected' });
-    expect(timeline.items[0]?.text).toContain('交活被退回：没查到本次会话跑过测试');
+    expect(timeline.items[0]?.text).toContain('交活被退回：没查到本次会话跑过 `pnpm test:changed`');
   });
 
   it('带的 PR 还没同步进库：409，过一会儿再交（也落库）', async () => {

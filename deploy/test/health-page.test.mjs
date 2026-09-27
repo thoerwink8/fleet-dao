@@ -65,6 +65,14 @@ test('判断题（judge）：显示成「判断题」；没配是「未接」不
   assert.equal(byKey(w).judge.reason, '判断题最近一次调用没成（judge_failing）');
 });
 
+test('跟上主线（deploy_lag）：显示成「跟上主线」；落后照实报红、写明原因', () => {
+  const lag = { ok: false, code: 'behind', message: '落后主线 2 个提交、1 小时 40 分钟（在等引擎空闲）' };
+  const v = judge({ status: 503, body: report(false, { ...allOk, deploy_lag: lag }) });
+  assert.equal(v.ok, false);
+  assert.equal(byKey(v).deploy_lag.label, '跟上主线');
+  assert.equal(byKey(v).deploy_lag.reason, '落后主线 2 个提交、1 小时 40 分钟（在等引擎空闲）（behind）');
+});
+
 test('连不上后端：三项都红，说出原因', () => {
   const v = judge({ error: 'Failed to fetch' });
   assert.equal(v.ok, false);

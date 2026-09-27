@@ -1,6 +1,9 @@
-// 开单脚本：pnpm issue:new --kind 需求 --milestone P1 --title "…" --body-file 正文.md [--specs 短名]
+// 开单脚本：pnpm issue:new --kind 需求 --milestone v1 --title "…" --body-file 正文.md [--specs 短名] [--mother]
 // 缺类别、里程碑，或正文里没有写了字的「## 怎么算做完」就不开（design 第三节第 35 条：以后要做的事得是一张
 // 带怎么算做完和里程碑的 issue）。经 gh 开单时一次带上标签和里程碑（gh 先把名字换成编号再建单，对不上就一张也不建）。
+// 里程碑＝版本（创始人 2026-09-26 拍，替代 P 阶段）：--milestone 认全名、v<N> 简写、旧的 P<N> 简写，或「未排期」——
+// 未排期时不挂里程碑（建单不带 --milestone），结果里 milestone 记「未排期」。--mother 给这张单多贴「母单」标签
+// （一组能一起验收的子单，用 GitHub 自带子议题挂在它下面）。
 // 带 --specs 时，完整正文写进 specs/<号>-<短名>/需求.md，issue 上只留第一个小标题之前那段（原话、AI 理解）
 // 和需求文档的路径（第七节：完整需求只在仓里存一份）。gh 出错原样报出来，退出码非 0。
 import { execFile } from 'node:child_process';
@@ -8,7 +11,7 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'no
 import { isAbsolute, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { doneSection } from './debt.ts';
-import { isKindLabel, KIND_LABELS, milestonePhase } from './labels.ts';
+import { isKindLabel, KIND_LABELS, MOTHER_LABEL, milestonePhase, milestoneVersion } from './labels.ts';
 import { parseMd } from './markdown.ts';
 
 export interface GhResult {
@@ -29,15 +32,19 @@ export interface IssueNewDeps {
 export interface IssueNewResult {
   number: number;
   url: string;
-  /** 实际挂上的里程碑全名。 */
+  /** 实际挂上的里程碑全名；未排期时是「未排期」（建单没带 --milestone）。 */
   milestone: string;
   /** 建了需求文档时，它的仓内路径。 */
   specsFile: string | undefined;
 }
 
 export const USAGE =
-  '用法：pnpm issue:new --kind 需求|缺陷|杂项 --milestone P1 --title "一句话" --body-file 正文.md [--specs 短名]' +
-  '（正文要有写了字的「## 怎么算做完」；带 --specs 时，第一个小标题之前写原话和 AI 理解）';
+  '用法：pnpm issue:new --kind 需求|缺陷|杂项 --milestone v1 --title "一句话" --body-file 正文.md [--specs 短名] [--mother]' +
+  '（--milestone 认全名、v<N>、旧的 P<N>，或「未排期」；正文要有写了字的「## 怎么算做完」；' +
+  '带 --specs 时，第一个小标题之前写原话和 AI 理解；--mother 多贴「母单」标签）';
+
+/** --milestone 写这个值：这张单没有版本（未排期）。不去查 GitHub 的里程碑列表，建单也不带 --milestone。 */
+const UNSCHEDULED = '未排期';
 
 export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Promise<IssueNewResult> {
   const o = parse(argv);
@@ -64,7 +71,7 @@ export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Pro
     throw new Error(`仓根 ${deps.root} 下没有 specs/ 目录，--specs 建不了需求文档，单没开。`);
   }
 
-  const milestone = await resolveMilestone(deps.gh, o.milestone);
+  const milestone = o.milestone === UNSCHEDULED ? UNSCHEDULED : await resolveMilestone(deps.gh, o.milestone);
   const created = await deps.gh([
     'issue',
     'create',
@@ -75,8 +82,8 @@ export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Pro
       : ['--body', `${summary}\n\n文档：\`specs/<本单号>-${o.specs}/需求.md\`（完整需求和怎么算做完）\n`]),
     '--label',
     o.kind,
-    '--milestone',
-    milestone,
+    ...(o.mother ? ['--label', MOTHER_LABEL] : []),
+    ...(milestone === UNSCHEDULED ? [] : ['--milestone', milestone]),
   ]);
   // 开单这一步报错，单不一定没建：超时、断连时 GitHub 那边可能已经建好了，照着重跑会开出重复的单
   if (created.code !== 0) {
@@ -111,11 +118,13 @@ interface Options {
   title: string;
   bodyFile: string;
   specs: string | undefined;
+  /** 多贴「母单」标签：这张单下面会挂子单（GitHub 自带子议题）。 */
+  mother: boolean;
 }
 
 function parse(argv: readonly string[]): Options {
   const args = argv[0] === '--' ? argv.slice(1) : [...argv];
-  let values: Record<string, string | undefined>;
+  let values: Record<string, string | boolean | undefined>;
   try {
     values = parseArgs({
       args,
@@ -125,6 +134,7 @@ function parse(argv: readonly string[]): Options {
         title: { type: 'string' },
         'body-file': { type: 'string' },
         specs: { type: 'string' },
+        mother: { type: 'boolean' },
       },
       strict: true,
       allowPositionals: false,
@@ -132,25 +142,31 @@ function parse(argv: readonly string[]): Options {
   } catch (e) {
     throw new Error(`参数不对（${message(e)}）。${USAGE}`);
   }
-  const kind = values.kind?.trim();
+  const str = (v: string | boolean | undefined): string | undefined =>
+    typeof v === 'string' ? v.trim() : undefined;
+  const kind = str(values.kind);
   if (!kind) throw new Error(`缺 --kind：从 ${KIND_LABELS.join('、')} 里挑一个。${USAGE}`);
   if (!isKindLabel(kind)) throw new Error(`--kind 只能是 ${KIND_LABELS.join('、')}，没有「${kind}」。`);
-  const milestone = values.milestone?.trim();
+  const milestone = str(values.milestone);
   if (!milestone) throw new Error(`缺 --milestone：写这块活属于的阶段，比如 --milestone P1。${USAGE}`);
-  const title = values.title?.trim();
+  const title = str(values.title);
   if (!title) throw new Error(`缺 --title：一句话写要什么。${USAGE}`);
-  const bodyFile = values['body-file']?.trim();
+  const bodyFile = str(values['body-file']);
   if (!bodyFile) throw new Error(`缺 --body-file：正文写进一个文件再指过来。${USAGE}`);
-  const specs = values.specs?.trim();
+  const specs = str(values.specs);
   if (values.specs !== undefined && !/^(?![.-])[^/\\\s<>:"|?*]+$/.test(specs ?? '')) {
     throw new Error(
       `--specs 的短名「${values.specs}」不行：不能空，不能带 / \\ 空格和 < > : " | ? *，也不能以 . 或 - 开头。`,
     );
   }
-  return { kind, milestone, title, bodyFile, specs };
+  const mother = values.mother === true;
+  return { kind, milestone, title, bodyFile, specs, mother };
 }
 
-/** 「P1」→ 开放里程碑里 P1 开头的那一个的全名；给的就是全名也行。 */
+/**
+ * 「v1」「P1」（旧）→ 开放里程碑里那个简写开头的那一个的全名；给的就是全名也行。
+ * 「未排期」不经过这里：issueNew 里直接处理，不查里程碑列表。
+ */
 async function resolveMilestone(gh: Gh, want: string): Promise<string> {
   const r = await gh(['api', 'repos/{owner}/{repo}/milestones?state=open&per_page=100']);
   if (r.code !== 0) throw new Error(`gh 读里程碑失败（退出码 ${r.code}），单没开：${detail(r)}`);
@@ -168,8 +184,14 @@ async function resolveMilestone(gh: Gh, want: string): Promise<string> {
   }
   const exact = titles.filter((t) => t === want);
   const phase = /^P\d+$/.test(want) ? Number(want.slice(1)) : undefined;
-  const matches =
-    exact.length || phase === undefined ? exact : titles.filter((t) => milestonePhase(t) === phase);
+  const version = /^v\d+$/.test(want) ? Number(want.slice(1)) : undefined;
+  const shorthand =
+    phase !== undefined
+      ? titles.filter((t) => milestonePhase(t) === phase)
+      : version !== undefined
+        ? titles.filter((t) => milestoneVersion(t) === version)
+        : undefined;
+  const matches = exact.length || shorthand === undefined ? exact : shorthand;
   const [only, ...more] = matches;
   if (only !== undefined && more.length === 0) return only;
   if (only === undefined) {
@@ -193,22 +215,31 @@ export function issueSummary(body: string): string {
 
 /**
  * 需求文档，照 specs/ 下已有的几份的样子：标题、「对应计划」「设计依据」两行，接着是整份正文；
- * 正文里没有「## 现状」就补一节「未开工。」。「对应计划」的引号故意空着：不填就提交，文档指针检查会红。
+ * 正文里没有「## 现状」就补一节「未开工。」。里程碑是 P 阶段（旧写法）时「对应计划」的引号故意空着：不填就提交，
+ * 文档指针检查会红；里程碑是版本或未排期时直接写版本全名或「未排期」，不用 plan.md 那一套核。
  */
 export function specsDoc(title: string, number: number, milestone: string, body: string): string {
   const phase = milestonePhase(milestone);
+  const plan = phase === undefined ? milestone : `plan.md P${phase}「」`;
   const text = body.replace(/\r\n?/g, '\n').trim();
   const hasStatus = parseMd('body.md', text).headings.some((h) => h.title.trim() === '现状');
   return [
     `# ${title}（#${number}）`,
     '',
-    `对应计划：${phase === undefined ? '' : `plan.md P${phase}「」`}`,
+    `对应计划：${plan}`,
     '设计依据：',
     '',
     text,
     ...(hasStatus ? [] : ['', '## 现状', '', '未开工。']),
     '',
   ].join('\n');
+}
+
+/** 建了需求文档后 bin 打的提示：P 阶段（旧写法）还要去 plan.md 那一条的引号里填字，版本、未排期不用。 */
+export function specsHint(milestone: string): string {
+  return milestonePhase(milestone) === undefined
+    ? '「设计依据」写上 design 哪一节再提交'
+    : '「对应计划」的引号里填上 plan.md 那一条、「设计依据」写上 design 哪一节再提交';
 }
 
 function writeSpecs(root: string, number: number, short: string, text: string): string {

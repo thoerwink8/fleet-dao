@@ -30,7 +30,7 @@
 | `packages/jev` | Jev 判断题服务：题库、提问接口、从只记不拦转到真拦 |
 | `packages/feishu` | 飞书网关（跑在香港） |
 | `packages/conventions` | design 第七节的约定写成检查：合并闸 merge-gate（必填栏提醒、先审后合路径等第二意见）、开单脚本、文档指针检查、欠账检查、阶段收口 |
-| `packages/agents-sync` | 同步脚本：把 `AGENTS.md` 上半段和 `agents/skills/` 写进这台机器上各家 AI 的全局入口，另能查漂移、撤旧仓留下的东西 |
+| `packages/agents-sync` | 同步脚本：把 `AGENTS.md` 上半段、`agents/skills/`、`agents/hooks/` 装进这台机器上各家 AI 的全局入口，记下这台同步到哪个提交，另能查漂移、撤旧仓留下的东西 |
 | `deploy/` | 装机、发版、健康页，和它们的检查 |
 | `docs/` | 设计、计划、运维；`docs/reference/` 是旧系统的坑 |
 | `specs/` | 需求文档，每个需求一个文件夹（需求、方案、结果） |
@@ -42,6 +42,7 @@
 - **服务器上**：`/etc/fleet-dao/`，不进 git；每个文件放什么见 ops 第三节（用户、目录、库）。
 - **加密副本**：私有仓 [fleet-dao-vault](https://github.com/thoerwink8/fleet-dao-vault)，age 加密，一个文件一个 `.age`，仓里只有密文和公钥。在创始人电脑上跑那个仓里的 `bash refresh.sh` 刷新；怎么解开、机器没了怎么恢复，见那个仓 README 的「解开一个文件」和「法国整机没了怎么恢复」两节。
 - **创始人电脑上**：`~/.fleet-dao/`，放解密钥匙 `vault-key.txt` 和 age；只有拿着这把钥匙的人解得开。钥匙还要抄一份进创始人的密码管理器（plan 第五节）。
+- **已知敏感值名单**（`sensitive-values.txt`，一行一个真实的账号、组织编号、域名、IP，给卫生检查认「光看形状认不出」的值）：法国 `/etc/fleet-dao/sensitive-values.txt`（引擎推分支、写单子前必读，缺了不推不写）；CI 的 Actions 密钥 `FLEET_SENSITIVE_VALUES`（每个 PR 都查，不光扫文件树，还按提交、连 PR 标题正文一起查；推任何非 main 分支哪怕没开 PR 也按提交查一遍，见 `.github/workflows/hygiene-push.yml`）；保险箱里有加密副本 `france/etc/fleet-dao/sensitive-values.txt.age`；创始人电脑 `~/.fleet-dao/sensitive-values.txt`。新机器可以不放：推之前的钩子会写明「这台没放名单、交给 CI 查」照样放行，令牌、密钥文件照拦；想本机也查，只把这一个文件拷过去放到同样位置，别为它把保险箱的解密钥匙拷过去（那把钥匙能解开全部）。
 - 数据库备份不在保险箱里，见 plan 第二节「备份」。
 
 ## 常用
@@ -49,10 +50,11 @@
 - 装机：ops 第四节（怎么跑装机脚本）。
 - 发版：`deploy/release.sh`，见 ops 第九节（发布应用）。
 - 开发：`pnpm install`，Node 和 pnpm 的版本钉在 `package.json`；给 AI 的约定在 [AGENTS.md](AGENTS.md)。
-- 跑检查：本机推前只跑改动涉及的包（`pnpm exec vitest run packages/<包>`）和格式、类型；`pnpm check` 是全量（格式、类型、全部测试、卫生检查；文档里的路径、章节指针也在里面查），本机一般不跑。CI 按改动跑受影响的部分、并行跑，main 上全量（`.github/workflows/ci.yml`，见 design 第五节「CI 按改动跑」）；想先看一个分支 CI 会跑什么：`node packages/conventions/src/bin/ci-plan.ts`。
-- 开单：`pnpm issue:new --kind 需求 --milestone P1 --title "一句话" --body-file 正文.md`，缺类别、里程碑，或正文里没写「## 怎么算做完」都不开；加 `--specs 短名` 时完整正文进 `specs/<号>-<短名>/需求.md`，issue 上只留原话、AI 理解和路径。
+- 跑检查：本机推前只跑改动影响到的测试（`pnpm test:changed`，和 origin/main 比、按 CI 那套判法选包，引擎的会话交活只认它；它要全跑时本机改成单跑 `pnpm exec vitest run packages/<包>`）和格式、类型；`pnpm check` 是全量（格式、类型、全部测试、卫生检查；文档里的路径、章节指针也在里面查），本机一般不跑。CI 按改动跑受影响的部分、并行跑，main 上全量（`.github/workflows/ci.yml`，见 design 第五节「CI 按改动跑」）；想先看一个分支 CI 会跑什么：`node packages/conventions/src/bin/ci-plan.ts`。
+- 开单：`pnpm issue:new --kind 需求 --milestone v1 --title "一句话" --body-file 正文.md`（未排期写 `--milestone 未排期`，母单加 `--mother`），缺类别、里程碑，或正文里没写「## 怎么算做完」都不开；加 `--specs 短名` 时完整正文进 `specs/<号>-<短名>/需求.md`，issue 上只留原话、AI 理解和路径。
 - 欠账：`pnpm debt:check` 只看文件，查文档里推后的话带着单号、需求.md 写了怎么算做完（PR 和主线上 debt.yml 也跑，只报告、不挡合并，不读 GitHub）；加 `--live` 另读 GitHub，查挂的单号开没开着、开着的单都有需求文档（定时任务 debt.yml 用，它再加 `--comment` 留言到单上）；关里程碑之前跑 `pnpm milestone:close-check P1`，还有开着的单就不关。见 design 第七节「欠账不漏」「阶段收口」。
-- 各家 AI 的全局说明：`node packages/agents-sync/bin/agents-sync --check`（只读），`--apply` 写；`--help` 看全部用法，法国怎么跑见 ops 第五节。
+- 计划快照：每个版本开始和结束时由总指挥跑 `pnpm plan:snapshot`（加 `--at 2026-09-27T09:00+08:00` 定快照时间，不加取现在），从 GitHub 读版本、先后、母单和子单，重写 `docs/plan.md` 两行快照标记之间的几节，标记外面不动，改动照常开 PR；没登录、GitHub 读不到、先后标记认不出都不写、退出码 2。
+- 各家 AI 的全局说明、技能和钩子：`node packages/agents-sync/bin/agents-sync --check`（只读，最后报这台同步到哪个提交、落后主线几个），`--apply` 写；开发机装过一次以后，每次开会话由开会话钩子自动同步；`--help` 看全部用法，法国怎么跑见 ops 第五节。
 
 ## 文档各管什么
 
@@ -61,11 +63,13 @@
 | `README.md` | 门口：是什么、入口、东西在哪 | 入口或目录变了 |
 | [docs/design.md](docs/design.md) | 为什么这样定；「已定」表是拍板记录 | 改行为的 PR 同时改它 |
 | [docs/ops.md](docs/ops.md) | 两台机器怎么装、怎么发版、怎么看、怎么退 | 跟着 `deploy/` 一起改 |
-| [docs/plan.md](docs/plan.md) | 各阶段的验收标准（进度看里程碑） | 验收标准变了 |
+| [docs/plan.md](docs/plan.md) | 版本快照：每个版本的目标、先后、母单和子单，未排期的单（`pnpm plan:snapshot` 从 GitHub 生成，别手改）；下面留着迁到版本之前 P0–P6 的原计划 | 每个版本开始和结束时，总指挥重新生成 |
 | `docs/decisions/` | 拍板记录：一个决定一个文件，只增不改，被推翻标「已被 xx 替代」（design 第三节的决定表拆过来，#139） | 创始人拍板的那一轮 |
 | [docs/reference/](docs/reference/README.md) | 旧系统的坑和接线细节 | 做某一块之前先读对应那份 |
+| [docs/reclaude-in-mirasim.md](docs/reclaude-in-mirasim.md) | reclaude 这条线怎么接上：Mirasim 里让「自有」claude 会话真吃 reclaude 订阅（装法、换机、服务器上装） | 装法或启动器变了 |
+| [docs/reclaude-self-check.md](docs/reclaude-self-check.md) | 装了 reclaude 的机器上机前 / 换机后怎么自检：清旧账号 id、四步查有没有在产生上报 | 清法与判据变了 |
 | [AGENTS.md](AGENTS.md) | 给 AI 的一页约定：上半段各仓通用（同步脚本写进各家 AI 的全局说明），下半段只管本仓 | 规则变了；改上半段要各台机器重跑同步脚本 |
 
 ## 协作
 
-GitHub 上只用标签和里程碑：每个标签的意思写在[标签页](https://github.com/thoerwink8/fleet-dao/labels)，里程碑就是 plan 的 P0–P6；怎么用、为什么这样定，见 design 第七节。开 issue 用上面的 `pnpm issue:new`；开 PR 照模板填，写明「对应计划」和「specs」；类别标签、里程碑缺了由 pr-labels 按对应 issue 自动补，这几栏缺了只在合并闸里提醒、不挡合并（能不能合只看 merge-gate，见 design 第五节）；最后一栏「文档」写改了哪份文档，或「不适用」。
+GitHub 上只用标签和里程碑：每个标签的意思写在[标签页](https://github.com/thoerwink8/fleet-dao/labels)，里程碑就是版本（没挂就是未排期），母单贴「母单」标签、子单用子议题挂在它下面，P0–P6 已关留作历史；怎么用、为什么这样定，见 design 第七节。开 issue 用上面的 `pnpm issue:new`；开 PR 照模板填，写明「对应计划」和「specs」；类别标签、里程碑缺了由 pr-labels 按对应 issue 自动补，这几栏缺了只在合并闸里提醒、不挡合并（能不能合只看 merge-gate，见 design 第五节）；最后一栏「文档」写改了哪份文档，或「不适用」。

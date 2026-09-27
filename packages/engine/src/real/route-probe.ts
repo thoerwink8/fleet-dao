@@ -1,23 +1,14 @@
 // 路由探针的真装配（#129，design 第九节「路由探针」）：路由从库里读（routeProbeTargets）、结论写回库（saveRouteProbe）、
 // 结局记进 schedule_runs。
-// Claude Code 的探法：以这条路由所在账号池的会话用户，经 fleet-agent-scope 在自己的 scope 里起一次 reclaude -p，问一句
-// 「只回 OK」——和干活的会话同一个插头（runClaudeCode）、同一份 reclaude、同一个模型串，所以探通了就说明会话起得来、
-// 答得上。不存会话记录（每 15 分钟一次，不往会话用户家里攒），权限一律拒（dontAsk：它什么工具都用不了）。
+// 探法按执行方式分派给和干活的会话同一个驱动（real/hosts.ts）：以会话用户的身份，经 fleet-agent-scope 在自己的 scope 里
+// 起一次极小的无头会话，问一句「只回 OK」——同一个插头、同一份执行体、同一个模型串（路由上写的），所以探通了就说明会话
+// 起得来、答得上；判法也是同一套（judgeRun + 失败分流的规则表）。什么命令都不许跑（Claude 用 dontAsk，cursor 不带 --force），
+// Claude 还不存会话记录（每 15 分钟一次，不往会话用户家里攒；cursor 没有这个开关）。
 // 要人修的整池问题（登录失效、设备被撤销、封号、欠费）和会话同一个做法：写 pool-hold:<池> 那条「要人拍」，选路整池避开；
 // 探通了就撤掉它。探的时候顺带读到的额度也记账（和会话一样 complete=false）。
 import { randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
-import {
-  type ClaudeCodeRunOptions,
-  type ClaudeCodeRunReport,
-  type ClaudeCodeRunSpec,
-  claudeRunFacts,
-  judgeClaudeRun,
-  type RateLimitReading,
-  runClaudeCode,
-  SESSION_USERS,
-  type SessionUser,
-} from '@fleet-dao/adapters';
+import { judgeRun, type RateLimitReading, type SessionUser } from '@fleet-dao/adapters';
 import { readingsFromRateLimit } from '@fleet-dao/adapters/quota';
 import {
   type Db,
@@ -29,8 +20,17 @@ import {
   startScheduleRun,
   upsertAlert,
 } from '@fleet-dao/db';
+import type { HostId } from '@fleet-dao/shared';
 import { classifyFailure } from '../failure/classify.ts';
 import type { ProbeAttempt, Prober, ProbeTarget, RouteProbeJobDeps } from '../jobs/route-probe.ts';
+import {
+  type HostDriver,
+  type HostReport,
+  type HostRunners,
+  hostDrivers,
+  sessionUserOf,
+  WIRED_HOSTS,
+} from './hosts.ts';
 import { poolHoldKey, SESSION_USER_ORG } from './store-ports.ts';
 import type { WorkTrees } from './worktrees.ts';
 
@@ -43,7 +43,7 @@ export const PROBE_DIR = '_route-probe';
  * 没通隔 20 秒再探一次，两次加起来也在定时任务一轮的 10 分钟里。
  */
 export const PROBE_LIMITS = { startupMs: 150_000, wallClockMs: 200_000, idleMs: 90_000 } as const;
-/** 探针会话只起一个 claude，用不了干活会话那么多内存。 */
+/** 探针会话只起一个执行体，用不了干活会话那么多内存。 */
 export const PROBE_SCOPE_LIMITS = { memoryHigh: '1024M', memoryMax: '1536M', memorySwapMax: '0' } as const;
 
 const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
@@ -56,10 +56,6 @@ const RECLAUDE_NO_LOGIN = /^.*no valid login detected.*$/im;
  */
 const withoutQueries = (text: string) => text.replace(/(https?:\/\/[^\s?#]+)[?#]\S*/g, '$1?…');
 
-function asSessionUser(user: string | null): SessionUser | undefined {
-  return (SESSION_USERS as readonly string[]).includes(user ?? '') ? (user as SessionUser) : undefined;
-}
-
 /** 探针会话的工作目录。 */
 export function probeDir(root: string, user: SessionUser): string {
   return `${root}/${PROBE_DIR}/${user}`;
@@ -69,6 +65,8 @@ export interface ProbeContext {
   machine: string;
   user: SessionUser;
   now: Date;
+  /** 这种执行方式登录失效时人该怎么修（规则表里通用的登录失效 AU2 没写修法）。 */
+  loginFix: string;
 }
 
 /**
@@ -77,13 +75,12 @@ export interface ProbeContext {
 const PROBE_ANSWER = /^ok$/i;
 
 /**
- * 一次探针会话的报告 → 结论。答上了、整句只回 OK 才算通；额度用满被拒算通（quota）；其余按失败分流的同一张规则表
- * 认出是什么事（登录失效、设备被撤销……），要人修的整池问题带上 poolHold。
+ * 一次探针会话的报告（各家整理成的同一个形状）→ 结论。答上了、整句只回 OK 才算通；额度用满被拒算通（quota）；其余按
+ * 失败分流的同一张规则表认出是什么事（登录失效、设备被撤销……），要人修的整池问题带上 poolHold。
  */
-export function probeVerdict(report: ClaudeCodeRunReport, t: ProbeTarget, ctx: ProbeContext): ProbeAttempt {
-  const verdict = judgeClaudeRun(report);
-  const result = report.stream.result;
-  const text = (result?.text ?? '').trim();
+export function probeVerdict(report: HostReport, t: ProbeTarget, ctx: ProbeContext): ProbeAttempt {
+  const verdict = judgeRun(report.facts);
+  const text = (report.answer ?? '').trim();
   if (verdict.outcome === 'ok') {
     if (!PROBE_ANSWER.test(text)) {
       return {
@@ -92,21 +89,18 @@ export function probeVerdict(report: ClaudeCodeRunReport, t: ProbeTarget, ctx: P
       };
     }
     const secs = Math.max(1, Math.round(report.wallMs / 1000));
-    const cost = result?.sessionCostUsd;
+    const cost = report.sessionCostUsd;
     return {
       kind: 'answered',
       detail: `答上了：${clip(text, 40)} · 用时 ${secs} 秒${cost === undefined ? '' : ` · 按 API 价折合 $${cost.toFixed(3)}`}`,
     };
   }
-  const facts = claudeRunFacts(report);
   // 执行体最后说的话；reclaude 没登录的那一句在整段 stderr 里找（它后面还会打几行，可能挤出最后三行）。
+  const lastWords = report.facts.lastWords;
   const loginLine = report.stderrTail.match(RECLAUDE_NO_LOGIN)?.[0]?.trim();
-  const said = [facts.lastWords, loginLine && !facts.lastWords?.includes(loginLine) ? loginLine : undefined]
+  const said = [lastWords, loginLine && !lastWords?.includes(loginLine) ? loginLine : undefined]
     .filter(Boolean)
     .join(' ⏎ ');
-  const exhausted = [...report.stream.rateLimits].reverse().find((x) => x.exhausted);
-  const resetsAt =
-    exhausted?.resetsAt ?? exhausted?.windows.find((w) => w.name === exhausted.rateLimitType)?.resetsAt;
   let cls: ReturnType<typeof classifyFailure> | undefined;
   try {
     cls = classifyFailure({
@@ -117,10 +111,10 @@ export function probeVerdict(report: ClaudeCodeRunReport, t: ProbeTarget, ctx: P
       hostId: t.hostId,
       code: verdict.reason,
       message: [verdict.detail, said].filter(Boolean).join(' · '),
-      ...(result?.apiErrorStatus === undefined ? {} : { httpStatus: result.apiErrorStatus }),
-      exitCode: report.exitCode,
-      signal: report.signal,
-      ...(resetsAt ? { resetsAt } : {}),
+      ...(report.httpStatus === undefined ? {} : { httpStatus: report.httpStatus }),
+      exitCode: report.facts.exitCode ?? null,
+      signal: report.facts.signal ?? null,
+      ...(report.resetsAt ? { resetsAt: report.resetsAt } : {}),
       machine: ctx.machine,
       runAsUser: ctx.user,
       now: ctx.now.toISOString(),
@@ -132,18 +126,15 @@ export function probeVerdict(report: ClaudeCodeRunReport, t: ProbeTarget, ctx: P
     return {
       kind: 'quota',
       detail: withoutQueries(
-        `额度用满被拒（登录、组织、上游都通，派不派按额度等清零）：${verdict.detail}${resetsAt ? ` · ${resetsAt} 清零` : ''}`,
+        `额度用满被拒（登录、组织、上游都通，派不派按额度等清零）：${verdict.detail}${report.resetsAt ? ` · ${report.resetsAt} 清零` : ''}${said && !verdict.detail.includes(said) ? `（原文：${clip(said, 200)}）` : ''}`,
       ),
     };
   }
   const what = !cls || cls.via === 'fallback' ? verdict.detail : `${cls.title}：${verdict.detail}`;
   const words = said && !what.includes(said) ? `（原文：${clip(said, 200)}）` : '';
-  // 规则表里登录失效（AU2）没写修法（它也管别家的登录）；这里探的是经 reclaude 起的 Claude Code，修法是确定的
+  // 规则表里登录失效（AU2）没写修法（它管各家的登录）；探的是哪一家、修法就是确定的，由驱动给
   const fix =
-    cls?.humanFix ??
-    (cls?.rule === 'AU2'
-      ? `在${ctx.machine}上以 ${ctx.user} 重跑 reclaude login（docs/ops.md 第五节），在浏览器里批准；下一轮探针探通就转回在线`
-      : undefined);
+    cls?.humanFix ?? (cls?.rule === 'AU2' ? `${ctx.loginFix}；下一轮探针探通就转回在线` : undefined);
   const detail = withoutQueries([`${what}${words}`, fix].filter(Boolean).join('。'));
   const hold = cls?.shared?.scope === 'pool' && cls.shared.until === undefined;
   return {
@@ -155,33 +146,30 @@ export function probeVerdict(report: ClaudeCodeRunReport, t: ProbeTarget, ctx: P
   };
 }
 
-export interface ClaudeProberDeps {
+export interface ProberDeps {
   trees: Pick<WorkTrees, 'root' | 'ownerOf' | 'adopt'>;
-  /** 起 Claude Code 的命令（绝对路径）：reclaude 装在会话用户自己家里，和干活的会话同一份。 */
-  claudeCommand(user: SessionUser): string[];
   machine: string;
   now: () => Date;
   /** 探的时候读到的额度读数（真实现记进 quota_windows）。 */
   onRateLimit?: (target: ProbeTarget, reading: RateLimitReading) => void;
   /** 以下测试用。 */
-  run?: (spec: ClaudeCodeRunSpec, options: ClaudeCodeRunOptions) => Promise<ClaudeCodeRunReport>;
+  baseEnv?: Readonly<Record<string, string | undefined>>;
   helper?: string;
   sudo?: readonly string[];
-  baseEnv?: Readonly<Record<string, string | undefined>>;
   limits?: Partial<typeof PROBE_LIMITS>;
 }
 
-/** Claude Code（经 reclaude）的探法。不抛：起不来、超时、认不出都写成没探通的原因。 */
-export function claudeCodeProber(deps: ClaudeProberDeps): Prober {
-  const run = deps.run ?? runClaudeCode;
+/**
+ * 一种执行方式的探法：以会话用户起一次极小的无头会话，模型照路由上写的，问一句 OK。不抛：会话用户没定、工作目录交不出去、
+ * 起不来、超时、认不出，都写成没探通的原因。
+ */
+export function sessionProber(driver: HostDriver, deps: ProberDeps): Prober {
   return async (t) => {
-    const user = asSessionUser(t.runAsUser);
-    if (!user) {
-      return {
-        kind: 'failed',
-        detail: `账号池 ${t.poolId} 没定会话用户（pools.run_as_user 是 ${t.runAsUser ?? '空的'}），起不了会话`,
-      };
+    const who = sessionUserOf(driver, t.runAsUser);
+    if ('missing' in who) {
+      return { kind: 'failed', detail: `账号池 ${t.poolId} ${who.missing}，起不了会话` };
     }
+    const { user } = who;
     const dir = probeDir(deps.trees.root, user);
     try {
       if ((await deps.trees.ownerOf(dir)) !== user) await deps.trees.adopt(dir, user);
@@ -189,16 +177,18 @@ export function claudeCodeProber(deps: ClaudeProberDeps): Prober {
       return { kind: 'failed', detail: `探针的工作目录 ${dir} 没交给 ${user}：${message(err)}` };
     }
     const runId = `probe-${randomUUID()}`;
-    let report: ClaudeCodeRunReport;
+    let report: HostReport;
     try {
-      report = await run(
+      report = await driver.run(
         {
           runId,
+          user,
           cwd: dir,
           prompt: PROBE_PROMPT,
           // 探针不用 fleet 命令：不给后端地址、不签通行证
           env: { base: deps.baseEnv ?? process.env, fleetApi: '', fleetToken: '' },
           limits: { ...PROBE_LIMITS, ...deps.limits },
+          testCommands: [],
           cgroup: {
             id: runId,
             user,
@@ -207,19 +197,20 @@ export function claudeCodeProber(deps: ClaudeProberDeps): Prober {
             ...(deps.sudo ? { sudo: deps.sudo } : {}),
           },
           model: t.upstreamModel ?? t.modelId,
-          session: { mode: 'new', id: randomUUID() },
-          permissionMode: 'dontAsk',
-          persistSession: false,
+          session: { mode: 'new', id: driver.newSessionId(runId).id },
+          purpose: 'probe',
         },
-        {
-          command: deps.claudeCommand(user),
-          ...(deps.onRateLimit ? { onRateLimit: (reading) => deps.onRateLimit?.(t, reading) } : {}),
-        },
+        deps.onRateLimit ? { onRateLimit: (reading) => deps.onRateLimit?.(t, reading) } : {},
       );
     } catch (err) {
       return { kind: 'failed', detail: `起会话之前就被拦下了：${message(err)}` };
     }
-    return probeVerdict(report, t, { machine: deps.machine, user, now: deps.now() });
+    return probeVerdict(report, t, {
+      machine: deps.machine,
+      user,
+      now: deps.now(),
+      loginFix: driver.loginFix(deps.machine, user),
+    });
   };
 }
 
@@ -246,14 +237,16 @@ export async function poolHoldAfterProbe(db: Db, t: ProbeTarget, a: ProbeAttempt
 export interface RouteProbeWiring {
   db: Db;
   trees: WorkTrees;
+  /** 起执行体的命令（绝对路径），和干活的会话同一份：reclaude、cursor-agent 都装在会话用户自己家里。 */
   claudeCommand(user: SessionUser): string[];
+  cursorCommand(user: SessionUser): string[];
   machine: string;
   now?: () => Date;
   log?: RouteProbeJobDeps['log'];
   /** 以下测试用。 */
   sleep?: (ms: number) => Promise<void>;
   retryDelayMs?: number;
-  run?: ClaudeProberDeps['run'];
+  run?: HostRunners;
   helper?: string;
   sudo?: readonly string[];
   baseEnv?: Readonly<Record<string, string | undefined>>;
@@ -264,9 +257,13 @@ export function routeProbeJob(w: RouteProbeWiring): () => RouteProbeJobDeps {
   const now = w.now ?? (() => new Date());
   const log: RouteProbeJobDeps['log'] =
     w.log ?? ((level, text, fields) => console[level === 'info' ? 'info' : level](text, fields ?? {}));
-  const claude = claudeCodeProber({
-    trees: w.trees,
+  const drivers = hostDrivers({
     claudeCommand: w.claudeCommand,
+    cursorCommand: w.cursorCommand,
+    ...(w.run ? { run: w.run } : {}),
+  });
+  const deps: ProberDeps = {
+    trees: w.trees,
     machine: w.machine,
     now,
     onRateLimit: (t, reading) => {
@@ -282,14 +279,17 @@ export function routeProbeJob(w: RouteProbeWiring): () => RouteProbeJobDeps {
         log('warn', '路由探针读到的额度没记上', { poolId: t.poolId, error: message(err) }),
       );
     },
-    ...(w.run ? { run: w.run } : {}),
     ...(w.helper ? { helper: w.helper } : {}),
     ...(w.sudo ? { sudo: w.sudo } : {}),
     ...(w.baseEnv ? { baseEnv: w.baseEnv } : {}),
-  });
+  };
+  // 接上的执行方式各一个探法（和干活的会话同一个驱动）；没接上的由 planProbe 记 not_wired。
+  const probers: Partial<Record<HostId, Prober>> = Object.fromEntries(
+    WIRED_HOSTS.map((host) => [host, sessionProber(drivers[host], deps)]),
+  );
   return () => ({
     targets: () => routeProbeTargets(w.db),
-    probers: { 'claude-code': claude },
+    probers,
     liveOrg: SESSION_USER_ORG,
     save: (x) => saveRouteProbe(w.db, x),
     afterProbe: (t, a) => poolHoldAfterProbe(w.db, t, a),

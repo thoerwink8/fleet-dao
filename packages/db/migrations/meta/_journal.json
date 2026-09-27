@@ -78,6 +78,20 @@
       "when": 1790397744402,
       "tag": "0010_route_probe",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1790460519807,
+      "tag": "0011_flow_replica",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1790469035292,
+      "tag": "0012_verify_rounds",
+      "breakpoints": true
     }
   ]
 }

@@ -101,7 +101,7 @@
 - 返回：`billingCycleStart` / `billingCycleEnd`（毫秒字符串）、`planUsage.{totalSpend, limit, remaining}`（美分）；401/403 记 `cursor_account_auth_required`（:657、673-681）。返回里还有账号展示信息，入账时丢掉（wd:tests/execution-usage.test.js:574）。
 - 逐会话：`GetFilteredUsageEvents` body `{teamId:0, startDate, endDate, page, pageSize:100}`，最多 10 页、回看 7 天；`usageEventsDisplay[]{conversationId, timestamp, model, tokenUsage{inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, totalCents}, chargedCents}`；`conversationId` 就是 ACP 会话号（:684-736）。长得一样的两条事件也是两次调用，不去重；`chargedCents`（实扣）与 `totalCents`（估算）分开记，缺实扣不拿估算填（:702-705、725-727）。
 - Cursor 本地 SQLite 里的 token 数是「当前上下文占用」，不是计费计数，不许当花费（:860-864）。
-- 两个计费池（2026-08-29 用本账号实证）：Cursor 自家模型池（含 grok-fast，Ultra 套餐内零扣费）与 Other 池（kimi-k3 等第三方，烧美元）；Dashboard 只给一份上限，拆不开（ags:docs/MIRASIM.md:58-62；wd:docs/execution-profiles.json:228、246）。
+- 两个计费池（2026-08-29 用本账号实证）：Cursor 自家模型池（含 grok-fast，Ultra 套餐内零扣费）与 Other 池（kimi-k3 等第三方，烧美元）；Dashboard 只给一份上限，拆不开（ags:docs/MIRASIM.md:58-62；wd:docs/execution-profiles.json:228、246）。「烧美元」烧的是订阅里包含的美元额度：创始人 2026-09-27 确认走订阅、没开按量计费、没额外充钱，两个池用完请求被拒、不多扣钱（`specs/212-接第一个别家渠道/方案.md`「花费」）。
 - 现场（`<VPS>`，2026-09-24T17:18Z）：月账期（`billingCycleStart/End` 相差一个月），上限以美分返回（当时约 $400）、已用过半；逐会话匹配上 153 个、15 个没对上；`gaps: ["cursor_session_window_incomplete"]`。这份上限属于哪个计费池——没查成。
 
 ### 1.4 xAI、Kimi 与其它

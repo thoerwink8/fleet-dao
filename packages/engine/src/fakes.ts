@@ -1,5 +1,6 @@
 // 假实现：不碰真仓、真会话、真 GitHub，用来把流程跑通（测试、联调）。行为可以按剧本改。
 
+import type { VerifyReport } from '@fleet-dao/core';
 import type { StageKind } from '@fleet-dao/shared';
 import type { MergeOutcome, TestResult } from './decisions/merge.ts';
 import type { PlannedSubtask } from './decisions/plan.ts';
@@ -7,6 +8,7 @@ import type { TriageVerdict } from './decisions/triage.ts';
 import type { CiResult, ReviewResult, SyncResult } from './decisions/verify.ts';
 import {
   type AskHumanInput,
+  type Criteria,
   type EnginePorts,
   type LaunchSessionInput,
   type MergePrInput,
@@ -18,9 +20,11 @@ import {
   type PortName,
   type PushBranchInput,
   type RaiseAlertInput,
+  type ReadCriteriaInput,
   type RequestApprovalInput,
   type RouteChoice,
   type RunTestsInput,
+  type Scope,
   type SessionEnd,
   type SessionOutput,
   type StartSessionResult,
@@ -28,6 +32,7 @@ import {
   type TaskStateSnapshot,
   type TimingEntry,
   type UpdateIssueProgressInput,
+  type VerificationRecord,
   type WaitCiInput,
   type WriteSpecDocInput,
 } from './ports.ts';
@@ -52,9 +57,24 @@ export interface FakeSessionPlan {
 export interface FakeScript {
   plan: PlannedSubtask[];
   triage: (n: number) => TriageVerdict;
-  /** n = 这个阶段第几次起会话（从 1 开始）。 */
-  session: (input: LaunchSessionInput, n: number) => FakeSessionPlan | undefined;
+  /**
+   * n = 这个阶段第几次起会话，所有子任务一起数；own = 这个子任务自己这个阶段第几次起（分诊、写需求、写方案这些不属于
+   * 子任务的算一份）。都从 1 开始。几个子任务并行时谁的会话先起是赛跑：要挑「某个子任务的第几次」看 own，拿 n 配
+   * subtaskKey 会随先后错位（#88：readme 先起就拿走了 1，form 的那次成了 2）。
+   */
+  session: (input: LaunchSessionInput, n: number, own: number) => FakeSessionPlan | undefined;
   review: (input: LaunchSessionInput, n: number) => Omit<ReviewResult, 'head'> | undefined;
+  /**
+   * 开 PR 前验证会话交回的结论（n = 第几次起验证会话）；不给就是每条「怎么算做完」都答做到、审的是送检的头。
+   * 可以故意给形状不对的（unknown）：假会话原样交，工作流经 decide 判（真会话端口会先拦一道，见 real/sessions.ts）。
+   */
+  verify: (input: LaunchSessionInput, n: number) => VerifyReport | unknown | undefined;
+  /** 读需求文档的「怎么算做完」：给了 PortError 就抛它；不给就是 specDir 下的需求.md、两条。 */
+  criteria: (input: ReadCriteriaInput, n: number) => Criteria | PortError | undefined;
+  /** 写这张单的会话用过的族：不给就照假会话算（验证、审查不算）；一个都没有抛 AUTHORS_UNKNOWN，和真端口一样。 */
+  authors: (input: Scope, n: number) => string[] | PortError | undefined;
+  /** 起会话：给了就抛它（假的「发给别家的材料没过卫生检查」……）；n = 这个阶段第几次起。 */
+  startSession: (input: LaunchSessionInput, n: number) => PortError | undefined;
   ci: (input: WaitCiInput, n: number) => Partial<CiResult> | undefined;
   sync: (input: SyncMainlineInput, n: number) => Partial<SyncResult> | undefined;
   tests: (input: RunTestsInput, n: number) => Partial<TestResult> | undefined;
@@ -116,6 +136,8 @@ export interface FakeWorld {
   approvals: RequestApprovalInput[];
   /** 报过的警（按调用顺序，含重复的 dedupeKey）。 */
   alerts: RaiseAlertInput[];
+  /** 写进「库」的验证记录（同一个 id 整行覆盖，和真库一样），按第一次写入的先后。 */
+  verifications: VerificationRecord[];
   callsOf<P extends PortName>(port: P): (FakeCall & { input: Parameters<EnginePorts[P]>[0] })[];
   count(port: PortName): number;
   /** 放行一个挂着的会话。 */
@@ -124,6 +146,12 @@ export interface FakeWorld {
   releasePort(port: PortName): void;
   /** 正挂着、有人在看守的会话。 */
   held(): FakeSession[];
+  /**
+   * 等到 check 成立：假世界每变一下（端口调用开始、结束，会话开始看守，放行）当场重查，不按钟点轮询。check 只能看假世界里的
+   * 东西（调用、会话、写进库的状态……），要看 Temporal 查询结果的用 test/support.ts 的 queryUntil。
+   * timeoutMs 内没等到就报错、写明在等什么，不无限挂着；check 抛错原样报出来。
+   */
+  until(check: () => boolean, what: string, timeoutMs?: number): Promise<void>;
 }
 
 export const FAKE_ROUTES: readonly RouteChoice[] = [
@@ -161,6 +189,7 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
   const asks: AskHumanInput[] = [];
   const approvals: RequestApprovalInput[] = [];
   const alerts: RaiseAlertInput[] = [];
+  const verifications: VerificationRecord[] = [];
   /** 和真实现一样按 runId 幂等：起过的原样返回，叫停过的不再起。 */
   const byRun = new Map<string, StartSessionResult>();
   const stoppedRuns = new Set<string>();
@@ -174,6 +203,11 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
     const n = (counters.get(key) ?? 0) + 1;
     counters.set(key, n);
     return n;
+  };
+  /** until 挂着的等待：假世界每变一下都叫一遍，各自重查自己的条件。 */
+  const waiters = new Set<() => void>();
+  const changed = () => {
+    for (const probe of [...waiters]) probe();
   };
 
   const outputFor = (s: FakeSession): SessionOutput => {
@@ -196,6 +230,21 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
       case 'review': {
         const review = script.review?.(s.input, s.n) ?? { verdict: 'pass', findings: [] };
         return { kind: 'review', review: { ...review, head: brief.head ?? '' } };
+      }
+      case 'verify': {
+        const scripted = script.verify?.(s.input, s.n);
+        const report =
+          scripted ??
+          ({
+            head: brief.head ?? '',
+            results: (brief.verify?.criteria ?? []).map((criterion) => ({
+              criterion,
+              answer: 'done' as const,
+              evidence: '假验证：看过改动',
+            })),
+            findings: [],
+          } satisfies VerifyReport);
+        return { kind: 'verify', report: report as VerifyReport };
       }
       default:
         seq += 1;
@@ -254,11 +303,14 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
     async pickRoute(input) {
       const scripted = script.route?.(input, next('pickRoute'));
       if (scripted) return scripted;
+      // 整族避开（开 PR 前验证只派别家）：点名的、续会话的也照样避开，和真选路一样
+      const families = new Set((input.avoidFamilies ?? []).map((f) => f.trim().toLowerCase()));
       const usable = routes.filter(
         (r) =>
           !input.avoidRouteIds.includes(r.routeId) &&
           !input.avoidPoolIds.includes(r.poolId) &&
-          !input.avoidModelIds.includes(r.modelId),
+          !input.avoidModelIds.includes(r.modelId) &&
+          !families.has(r.family.toLowerCase()),
       );
       const preferred = input.preferRouteId
         ? usable.find((r) => r.routeId === input.preferRouteId)
@@ -266,7 +318,16 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
       // 续同一个会话：还是那一条（和真选路一样，避开的照样不派）。
       const stuck = input.stickRouteId ? usable.find((r) => r.routeId === input.stickRouteId) : undefined;
       const route = preferred ?? stuck ?? usable[0];
-      if (!route) return { ok: false, waitFor: 'none', detail: '能用的路由都被避开了' };
+      if (!route) {
+        return {
+          ok: false,
+          waitFor: 'none',
+          detail:
+            families.size > 0
+              ? `没有别家可验：写这张单的是 ${[...families].join('、')} 族，这一步只派别家，不拿同族顶`
+              : '能用的路由都被避开了',
+        };
+      }
       return {
         ok: true,
         route,
@@ -280,13 +341,16 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
         throw new PortError('SESSION_STOPPED', `会话 ${input.runId} 已经叫停，不再起`, { retryable: false });
       }
       const n = next(`session:${input.stage}`);
+      const own = next(`session:${input.stage}:${input.subtaskKey ?? '-'}`);
+      const refused = script.startSession?.(input, n);
+      if (refused) throw refused;
       const id = input.resumeSessionId ?? `s${next('sessionId')}`;
       sessions.set(id, {
         id,
         runId: input.runId,
         stage: input.stage,
         input,
-        plan: script.session?.(input, n) ?? {},
+        plan: script.session?.(input, n, own) ?? {},
         n,
         released: false,
         stopped: false,
@@ -312,6 +376,7 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
         throw new Error('看守随工人一起没了');
       }
       s.watching = true;
+      changed();
       try {
         while (s.plan.hold && !s.released && !s.stopped && !ctx.signal.aborted) {
           ctx.heartbeat({ sessionId: s.id });
@@ -391,6 +456,42 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
       if (refused) throw refused;
       return { path: `${input.specDir}/${DOC_FILE[input.doc]}` };
     },
+    async readCriteria(input) {
+      const scripted = script.criteria?.(input, next('readCriteria'));
+      if (scripted instanceof PortError) throw scripted;
+      return (
+        scripted ?? {
+          path: `${input.specDir}/${DOC_FILE.requirement}`,
+          criteria: ['照原话做完', '有一条故意造出失败的测试'],
+        }
+      );
+    },
+    async authorFamilies(input) {
+      const scripted = script.authors?.(input, next('authorFamilies'));
+      if (scripted instanceof PortError) throw scripted;
+      const families =
+        scripted ??
+        [
+          ...new Set(
+            [...sessions.values()]
+              .filter((s) => s.input.taskId === input.taskId && s.stage !== 'verify' && s.stage !== 'review')
+              .map((s) => s.input.route.family),
+          ),
+        ].sort();
+      if (families.length === 0) {
+        throw new PortError(
+          'AUTHORS_UNKNOWN',
+          `任务 ${input.taskId} 一个起过的会话都查不到：不知道写它的是哪一族，判不了验证模型是不是别家，不验`,
+          { retryable: false },
+        );
+      }
+      return { families };
+    },
+    async recordVerification(input) {
+      const at = verifications.findIndex((v) => v.id === input.id);
+      if (at >= 0) verifications[at] = input;
+      else verifications.push(input);
+    },
     async askHuman(input) {
       if (!asks.some((a) => a.askId === input.askId)) asks.push(input);
     },
@@ -412,6 +513,7 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
     ports[name] = async (input, ctx) => {
       const call: FakeCall = { port: name, input, attempt: ctx.attempt, at: Date.now(), end: null, ok: null };
       calls.push(call);
+      changed();
       try {
         while (heldPorts.has(name) && !ctx.signal.aborted) await pause(heartbeatMs, ctx.signal);
         const delay = script.delayMs?.[name] ?? 0;
@@ -433,6 +535,7 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
         throw error;
       } finally {
         call.end = Date.now();
+        changed();
       }
     };
   }
@@ -447,15 +550,41 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
     asks,
     approvals,
     alerts,
+    verifications,
     callsOf: (<P extends PortName>(port: P) => calls.filter((c) => c.port === port)) as FakeWorld['callsOf'],
     count: (port) => calls.filter((c) => c.port === port).length,
     release(sessionId) {
       const s = sessions.get(sessionId);
       if (s) s.released = true;
+      changed();
     },
     releasePort(port) {
       heldPorts.delete(port);
+      changed();
     },
     held: () => [...sessions.values()].filter((s) => s.plan.hold && !s.released && !s.stopped && s.watching),
+    until(check, what, timeoutMs = 20_000) {
+      return new Promise<void>((resolve, reject) => {
+        const settle = (error?: unknown) => {
+          waiters.delete(probe);
+          clearTimeout(timer);
+          if (error === undefined) resolve();
+          else reject(error);
+        };
+        const probe = () => {
+          try {
+            if (check()) settle();
+          } catch (error) {
+            settle(error ?? new Error(`查「${what}」时出错`));
+          }
+        };
+        const timer = setTimeout(
+          () => settle(new Error(`等了 ${timeoutMs} 毫秒还没等到：${what}`)),
+          timeoutMs,
+        );
+        waiters.add(probe);
+        probe();
+      });
+    },
   };
 }

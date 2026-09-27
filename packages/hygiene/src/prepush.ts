@@ -3,7 +3,9 @@
 // 推上去的是整段历史，先加后删的东西照样在里面。「远端还没有」按本地记着的所有远端分支（refs/remotes/*）算：
 // 只认这次的远端名的话，推到网址、推到没 fetch 过的远端名会把早就公开的历史整段重扫、必被拒，还叫人去改写主线。
 // 钩子参数里的远端（可能是带令牌的网址）不用、也不打印。
-// 退出码和全仓检查一样：0 = 没问题；1 = 查出了，拒推；2 = 没扫全（名单没读到、git 出错、输出认不出），也拒推。
+// 退出码和全仓检查一样：0 = 没问题；1 = 查出了，拒推；2 = 没扫全（名单放了却读不了或是空的、环境变量指错、git 出错、输出认不出），也拒推。
+// 这台机器压根没放名单（values.absent）不拒推：令牌、密钥文件这些不靠名单的规则照查，名单上的值写明「没查、交给 CI」
+// ——CI 在每个 PR 上用 Actions 密钥里的名单再查（创始人 2026-09-26 拍：新机器因为没名单推不上，名单又只是账号、编号、IP 这类标识）。
 import type { Allow } from './allowlist.ts';
 import type { CheckResult } from './check.ts';
 import { FIX_HINT } from './check.ts';
@@ -98,9 +100,14 @@ export function prePushCheck(input: PrePushInput): CheckResult {
   ];
   if (scan.findings.length > 0)
     lines.push(FIX_HINT, `没推。${REWRITE_HINT}别用 --no-verify 硬推：公开仓推上去就公开了。`);
-  if (!values.ok) {
+  if (!values.ok && values.absent) {
     lines.push(
-      `没扫全：${values.reason}。名单放好之前不推（本机放 ~/.fleet-dao/sensitive-values.txt，或用 FLEET_SENSITIVE_VALUES_FILE 指过去）。`,
+      `这台机器没放已知敏感值名单，这次没查名单上的值（账号、编号、IP 这类）；推上去后 CI 会在 PR 上用名单再查。` +
+        `要本机也查，见 README「密钥和本机配置在哪」。`,
+    );
+  } else if (!values.ok) {
+    lines.push(
+      `没扫全：${values.reason}。修好它之前不推（本机名单是可选的：不想放就删掉这个文件、去掉 FLEET_SENSITIVE_VALUES_FILE，改成交给 CI 查）。`,
     );
     return { code: 2, lines };
   }

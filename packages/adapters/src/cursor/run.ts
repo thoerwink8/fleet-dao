@@ -1,5 +1,6 @@
 // cursor-agent 插头：无头起一个会话（提示词走 stdin），过程记录转成进度事件，结束时交出一份报告。
-// 用 --model auto 吃订阅里的 Auto 额度；花费不在流里（只认 Dashboard，CU-08），这里只报 token。
+// 模型照路由上写的（auto = Cursor 自己挑，按它实际选中的模型扣订阅里包含的用量）；花费不在流里（只认 Dashboard，CU-08），
+// 这里只报 token。开新会话的会话号是它自己在 init 帧里起的：报出来时调 onSessionId。
 import { type AgentRunOptions, assertRunnable, runCliAgent } from '../cli-run.ts';
 import { buildSessionEnv, type SessionEnvInput } from '../env.ts';
 import type { RunFacts, RunSummary } from '../judge.ts';
@@ -36,9 +37,17 @@ export interface CursorRunReport extends AgentProcessResult {
   stream: CursorStreamSummary;
 }
 
+export interface CursorRunOptions extends AgentRunOptions {
+  /**
+   * init 帧报出会话号时调一次（续会话报的号对不上就不调，直接停掉）。开新会话的号 cursor 自己起、事先定不了，
+   * 调用方在这里才知道真号。同步调：抛了记进报告的 hookError，解析照常往下走。
+   */
+  onSessionId?: (id: string) => void;
+}
+
 export async function runCursorAgent(
   spec: CursorRunSpec,
-  options: AgentRunOptions,
+  options: CursorRunOptions,
 ): Promise<CursorRunReport> {
   await assertRunnable(options.command, spec.prompt, spec.cwd);
   const args = buildCursorArgs({
@@ -66,9 +75,13 @@ export async function runCursorAgent(
       read: (line) => reader.read(line),
       busy: () => reader.toolsInFlight > 0,
       inspect(effect, control) {
-        if (resumeId && effect.init?.sessionId && effect.init.sessionId !== resumeId) {
+        const id = effect.init?.sessionId;
+        if (!id) return;
+        if (resumeId && id !== resumeId) {
           control.kill('session_mismatch');
+          return;
         }
+        options.onSessionId?.(id);
       },
     },
     options,

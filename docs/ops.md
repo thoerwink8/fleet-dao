@@ -59,14 +59,20 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 
 | 路径 | 属主 权限 | 放什么 |
 |---|---|---|
-| `/srv/fleet-dao` | root:root 755 | 装机脚本所在的检出（git clone）。fleet 和会话用户都只读 |
+| `/srv/fleet-dao` | root:root 755 | 装机脚本所在的检出（git clone）。fleet 和会话用户都只读。自动发布每发一版之前把它快进到要发的提交（第九节「自动发布」），不用再手动 pull |
 | `/srv/fleet-dao-releases` | root:root 755 | 应用的各版（第九节）：`<提交号>/`、`current` 链接、`.history`；每一版归 root，fleet 只读 |
+| `/srv/fleet-dao-releases/.auto` | root:root 755 | 自动发布的读数 `state.json`（每一轮写，后端 `/healthz` 的 `deploy_lag` 读）、`france-applied`（france.sh 跑完没红时记装到哪个提交） |
+| `/usr/local/lib/fleet-dao/auto-release`；`/etc/systemd/system/fleet-auto-release.{service,timer}` | root:root 755（文件 644）；root 644 | 自动发布（第九节「自动发布」）：france.sh 从仓里拷的副本，不从检出直接跑 |
 | `/var/lib/fleet-dao`、`/var/log/fleet-dao` | fleet:fleet 750 | 运行数据、日志（服务日志主要在 journald）。引擎自己的临时文件（从镜像打的 bundle）和存档（没合并就收的树里没提交的改动）在 `/var/lib/fleet-dao/engine/` 的 `tmp/`、`archive/` 下，GitHub 的镜像仓在 `/var/lib/fleet-dao/github/` |
 | `/var/lib/fleet-dao/demo` | fleet:fleet 750 | 演示版的可见范围（第九节「演示版」）：驾驶舱后端写，`scopes/` 由 `fleet-demo-scopes` 推到香港，`links/` 是只留本机的备注 |
 | `/var/lib/fleet-work` | root:root 755 | AI 会话的工作树：`<owner>_<name>/<分支>` 是子任务的树，`<owner>_<name>/<需求号>.<阶段>[.<子任务>]` 是分诊、写文档、审查的检出副本，`_route-probe/<会话用户>` 是路由探针起会话的目录（第五节「路由探针」）。中间各级归 root、别人写不进；每棵树归会话用户、700，建、交、删都经 `fleet-agent-scope`（第五节） |
 | `/etc/fleet-dao` | root:fleet 750 | 本机配置与密钥：`france.env`、`temporal.env`（库口令）、`temporal.yaml`、`nftables.nft`、`github/`（两个 GitHub 机器人的 json，手放）、`catalog.json`（目录配置，从保险箱放上来，第九节「目录配置」）；`reclaude-api.key`（reclaude 网页「设置 → API Key」生成的账号级 Key，只一行，读拼车额度用，手放；网页上重新生成后旧的立刻作废，要换这份再刷新保险箱）；`jev.json`（判断题的机器配置：TypeSafe 的地址、钥匙文件在哪，样例 `packages/jev/config.example.json`，手放；引擎和驾驶舱后端都读，`FLEET_JEV_CONFIG` 可改位置）、`typesafe.key`（TypeSafe 的钥匙，只一行，手放）；应用的 `engine.env`、`api.env`、`release.env`（照仓里样例建一次，之后归人改），随机密钥 `agent-token.env`、`session-secret.env`、`gateway-token.env`（首次生成，之后不动）。卫生检查的已知敏感值名单 `sensitive-values.txt`（真实的组织编号、账号，一行一个，手放；引擎推分支、写需求文档、开 PR 之前都读，缺了一律不推不写，france.sh 读回报待配；见 packages/hygiene）。文件一律 root:fleet 640；只有 `web-upload.key`（往香港传静态文件、演示版的可见范围的钥匙）、`gateway-deploy.key`（往香港发飞书网关的钥匙）和 `hk-known-hosts`（钉住的香港主机钥匙）是 root:root 600 |
 | `/opt/fleet-dao/temporal` | root:root 755 | `server-1.32.0/`（temporal-server、temporal-sql-tool）、`cli-1.9.1/`（temporal），`bin/` 链接到在用的版本 |
 | `/opt/fleet-dao/uv` | root:root 755 | `<版本>/uv`：只用来给会话用户和 pilot 各装一份 ddgs（第五节），不进谁的 PATH |
+| `/opt/fleet-dao/pnpm` | root:root 755 | `<版本>/`：AI 会话用的 pnpm（npm 上的 `pnpm-<版本>.tgz`，版本跟仓根 `package.json` 的 `packageManager`，核过 `france.sh` 顶部钉的 sha512），`.sha256` 记着装完时每个文件的指纹（第五节「会话的 PATH 与 pnpm」） |
+| `/usr/local/bin/pnpm` | root 755 | 会话用的 pnpm 的入口：关掉 node 的编译缓存，再用 `/usr/bin/node` 跑上面那一版。在引擎给会话的 PATH 上；pilot、root 的 PATH 里也有它 |
+| `/tmp/node-compile-cache` | root:root 755 | node 默认的编译缓存目录：先由 root 建好，别的用户的 node 在里面建不了自己的子目录，就不用编译缓存（只慢一点）。不许归别人、里面不许有别人的东西：读回判红，`france.sh` 删了重建（第五节「node 的编译缓存目录」） |
+| `/etc/tmpfiles.d/fleet-dao-node-compile-cache.conf` | root 644 | 开机清空 /tmp 后，systemd-tmpfiles 照它在任何会话之前先把上面那个目录建好 |
 | `/usr/local/bin/fleet-temporal` | root 755 | 运维命令行：连 127.0.0.1:7243，默认命名空间 fleet（只有 root 和 fleet 用得了） |
 | `/usr/local/sbin/fleet-agent-scope`、`/etc/sudoers.d/fleet-dao` | root 755、root 440 | 起、收 AI 会话（第五节） |
 | `/usr/local/sbin/fleet-demo-scopes`；`/etc/systemd/system/fleet-demo-scopes.{service,path,timer}` | root 755；root 644 | 把演示版的可见范围推到香港（第九节「演示版」） |
@@ -74,8 +80,9 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 | `/etc/postgresql/16/main/conf.d/fleet.conf` | root 644 | 库只听本机 |
 | `/etc/systemd/system/`：`fleet-temporal.service`、`fleet-agents.slice`、`fleet-firewall.service`、`postgresql@16-main.service.d/fleet.conf` | root 644 | 单元；最后那个让库的进程没了（干净退出也算）就拉起来——装包自带的是 `Restart=no` |
 | `/etc/systemd/system/`：`fleet-engine.service`、`fleet-api.service` | root 644 | 应用单元，发布脚本从要发的那版里取来装上，只装 `release.env` 启用了的（第九节） |
-| `/home/fleet/.local/bin/pnpm` | fleet | corepack 的垫片，版本跟仓根 `package.json` 的 `packageManager` |
+| `/home/fleet/.local/bin/pnpm` | fleet | corepack 的垫片，版本跟仓根 `package.json` 的 `packageManager`；发布（第九节）以 fleet 装依赖、打包用它。会话读不到 fleet 的家，用的是 `/usr/local/bin/pnpm` |
 | `/home/fleet-agent-carpool/.local/bin/reclaude` | 会话用户 | reclaude 二进制：france.sh 只在没有时装（和 pilot 同一个版本、sha256），缺了读回判红；登录见第五节 |
+| `/home/fleet-agent-carpool/.local/share/cursor-agent/versions` | 会话用户 | cursor-agent，一个版本一个目录（命令还链到 `~/.local/bin/cursor-agent`）：france.sh 照引擎的找法一个能跑的都没有时，以会话用户自己的身份跑官方安装脚本装，之后它自己升级；缺了、跑不成读回判红；登录见第五节 |
 | `/home/pilot/.local/bin/reclaude` | pilot 755 | reclaude 二进制：france.sh 只在没有时装（版本和 sha256 钉在脚本顶部），之后 pilot 自己 `reclaude update`。pilot 不登录 reclaude（第五节），读回也不查登没登录 |
 | `/home/pilot/.mirasim-remote/`、`/home/pilot/.mirasim/` | pilot | Mirasim 桌面端连进来时自己装的服务端和它的数据（第五节），不归装机脚本管 |
 
@@ -117,7 +124,7 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 
 平时：
 
-- 改了 `deploy/` → 机器上 `git -C /srv/fleet-dao pull` → 重跑。脚本只把它管的东西改回仓里的样子；早先版本放过、后来撤掉的几样，脚本里逐个写死了去删，别的多出来的东西不删（要删见第七节）。
+- 改了 `deploy/` → 机器上 `git -C /srv/fleet-dao pull` → 重跑。脚本只把它管的东西改回仓里的样子；早先版本放过、后来撤掉的几样，脚本里逐个写死了去删，别的多出来的东西不删（要删见第七节）。法国的检出由自动发布跟着主线快进，pull 可以省；france.sh 本身不自动跑（它碰防火墙、sudoers），主线上它管的文件改了、一天以上没重跑，`/healthz` 的 `deploy_lag` 会报（第九节「自动发布」）。应用那一层（引擎、驾驶舱后端）不用重跑这里，自动发布会发。
 - 只看不改：`bash deploy/france.sh --check`、`bash deploy/hk.sh --check`。
 - 法国经跳板登录，长连接会被重置：长命令甩到后台跑再看日志，`nohup setsid bash /srv/fleet-dao/deploy/france.sh > /root/fleet-dao-install.log 2>&1 < /dev/null &`。
 
@@ -127,7 +134,7 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 
 - `bash deploy/lib/snapshot.sh ours`：fleet-dao 管的东西的指纹。连跑两遍装机，两遍之间各拍一次，diff 为空才算第二遍零改动——和脚本自己数的「改动几处」是两套判据。
 - `bash deploy/lib/snapshot.sh others`：不归 fleet-dao 管的单元状态、监听端口、防火墙（系统自带的服务、MiraQuota 等）。装机脚本每次开头结尾自己比一遍：装机不许碰它们。
-- `sudo bash deploy/test/run.sh`：语法、shellcheck、自检的违规样本、发布脚本的来回（`release-flow.test.sh`）、香港网关的入口（`gateway-deploy.test.sh`）、网关打包（`gateway-bundle.test.sh`，要先 `pnpm install`）、公网上看得到的几样（`public-site.test.sh`：占位页、健康页不带仓名，`release.json` 只给隧道、整站 noindex；真起 nginx 那段要这台装了 nginx）、健康页的判定（`health-page.test.mjs`）、同步脚本以 root 替别的用户写（`agents-sync.test.sh`）、ddgs 的装和查（`cli-tools.test.sh`）、本页端口表和脚本对得上、只有一个会话用户且它的读回拦得下故意造的错（`session-user.test.sh`：不要 root，假的 getent、sudo、id）、`adopt` 的用法校验和改属主（`agent-scope-adopt.test.sh`）。后者改属主那段要建、删真的系统账号（会话用户），只在命令行上给了 `FLEET_TEST_SYSTEM_USERS=1` 时跑（`sudo FLEET_TEST_SYSTEM_USERS=1 bash deploy/test/run.sh`，只在 CI 的一次性机器上这么跑）；没给、或这个用户、组、家目录有一样已经在，这一段报「没跑成」（退出码 2，不算通过），不碰已有的账号。`bash deploy/test/run.sh --ops` 只跑读本页的两块（端口表、`place-file.test.sh`），CI 只改了本页时这么跑；全套里的 `ops-only.test.sh` 核对这两块真跑了、本页改坏了会红。
+- `sudo bash deploy/test/run.sh`：语法、shellcheck、自检的违规样本、发布脚本的来回（`release-flow.test.sh`）、香港网关的入口（`gateway-deploy.test.sh`）、网关打包（`gateway-bundle.test.sh`，要先 `pnpm install`）、公网上看得到的几样（`public-site.test.sh`：占位页、健康页不带仓名，`release.json` 只给隧道、整站 noindex；真起 nginx 那段要这台装了 nginx）、健康页的判定（`health-page.test.mjs`）、自动发布的判断和流程（`auto-release.test.mjs`：CI 红不发、读不到不发、没成不重试、等空闲、人手动切过不动；`release.sh --auto` 那几条在 `release-flow.test.sh`）、同步脚本以 root 替别的用户写（`agents-sync.test.sh`）、ddgs 的装和查（`cli-tools.test.sh`）、会话用的 pnpm 的装和查（`session-pnpm.test.sh`：钉的版本和 `package.json` 对得上、核不上不装、引擎给会话的 PATH 怎么读、会话里找不到或找错 pnpm 判红；不出网，要 root）、node 的编译缓存目录（`node-cache.test.sh`：拿真 node 对照为什么要归 root，不对的样子判红、装的时候删了重建，删不掉、建不成判红；要 root）、会话用户的 cursor-agent 的装和查（`cursor-agent.test.sh`：没装才以他自己的身份跑安装脚本、装着的不重装、跑不成和卡住判红、没查成不当成没装；假的安装脚本，不出网，要 root；找法和引擎的一样由 `packages/engine/test/real/hosts.test.ts` 核对）、本页端口表和脚本对得上、只有一个会话用户且它的读回拦得下故意造的错（`session-user.test.sh`：不要 root，假的 getent、sudo、id）、`adopt` 的用法校验和改属主（`agent-scope-adopt.test.sh`）。后者改属主那段要建、删真的系统账号（会话用户），只在命令行上给了 `FLEET_TEST_SYSTEM_USERS=1` 时跑（`sudo FLEET_TEST_SYSTEM_USERS=1 bash deploy/test/run.sh`，只在 CI 的一次性机器上这么跑）；没给、或这个用户、组、家目录有一样已经在，这一段报「没跑成」（退出码 2，不算通过），不碰已有的账号。`bash deploy/test/run.sh --ops` 只跑读本页的两块（端口表、`place-file.test.sh`），CI 只改了本页时这么跑；全套里的 `ops-only.test.sh` 核对这两块真跑了、本页改坏了会红。
 - `sudo bash deploy/test/agent-scope.e2e.sh`（法国）：会话通路真跑一遍，见第五节；含引擎给的 PATH 里没有会话用户的 `~/.local/bin` 时，会话里照样先找那儿、找得到 ddgs。只测 `run`、`stop`、`list`；`adopt` 在真机上还没有这样的用例，只有上一条在 CI 里跑的。
 
 ## 五、AI 会话
@@ -140,7 +147,7 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 
 ```
 sudo -n /usr/local/sbin/fleet-agent-scope run <编号> --user fleet-agent-carpool
-        [--memory-high 1536M] [--memory-max 2G --memory-swap-max 0] [--tasks-max 512] [--cpu-weight 100]
+        [--memory-high 3298M] [--memory-max 3554M --memory-swap-max 0] [--tasks-max 512] [--cpu-weight 100]
         [--cwd /某目录] -- /绝对路径/命令 参数…
 sudo -n /usr/local/sbin/fleet-agent-scope stop <编号>     # 已经没了也返回 0
 sudo -n /usr/local/sbin/fleet-agent-scope list            # 编号 状态，一行一个
@@ -162,6 +169,24 @@ sudo -n /usr/local/sbin/fleet-agent-scope remove /var/lib/fleet-work/<owner>_<na
 - 看用量（不用 root）：`systemctl status fleet-agents.slice`、`systemd-cgtop /fleet.slice/fleet-agents.slice`、`systemctl show fleet-agent-<编号>.scope -p MemoryCurrent,CPUUsageNSec,TasksCurrent`。
 - 给池子加上限：写 `/etc/systemd/system/fleet-agents.slice.d/limits.conf`（MemoryHigh、MemoryMax、MemorySwapMax…）再 `systemctl daemon-reload`；回滚就删掉它。
 
+会话的内存上限和测试进程数（#164，按 2026-09-26 的实测定，依据和复测办法见 `specs/164-会话内存与交活测试/方案.md`）：
+
+- 每个会话 scope 的上限是引擎的默认值（`packages/engine/src/limits.ts` 的 `sessionMemoryHighMb`、`sessionMemoryMaxMb`，驾驶舱设置里能改）：硬上限 =（能分给会话的 11G − 平台常驻服务约 0.6G）÷ 同时跑测试的 3 个会话 ≈ 3554M；软上限只比它低 256M（3298M），超了软上限、又没有 swap 可换，内核就压着回收、会话半死不活，夹缝留窄。原来的软 1.5G、硬 2G 连 1 个测试进程加 Claude Code 都放不下（#160 卡在那里十几分钟）。现在没有东西限着「同时跑测试的不超过 3 个」，账号池的并发加起来比 3 大时要一起看。
+- 会话里跑测试开几个进程，由仓根的 `vitest.config.ts` 按本进程所在 cgroup 的上限算（`packages/conventions/src/test-run.ts`：每个进程按 900M、给主进程和 Claude Code 留 1300M）：3298M 放得下 2 个；没有上限（本机、CI）照 vitest 默认；读不到、认不出上限直接报错，要硬跑就给 `VITEST_MAX_WORKERS=<进程数>`。
+
+会话的 PATH 与 pnpm（#164 在法国复测时查出：引擎给会话的 PATH 和会话用户的登录 shell 里都没有 pnpm，会话跑不了 `pnpm test:changed`，交活核对又只认命令开头就是它，绕成 `corepack pnpm …` 不算）：
+
+- 会话的 PATH 是这么拼出来的：fleet 命令的目录（`engine.env` 的 `FLEET_CLI_BIN`；没写就是引擎这一版代码里的 `packages/cli/bin`，`packages/engine/src/worker.ts` 的 `DEFAULT_CLI_BIN_DIR`）+ 引擎进程自己的 PATH（`fleet-engine.service` 没设，就是 systemd 给服务的默认 PATH，里面有 `/usr/local/bin`）——引擎起会话时经 `pathPrepend` 拼（`packages/engine/src/activities.ts` → `packages/adapters/src/env.ts` 的 `buildSessionEnv`），调 sudo 时改名 `FLEET_SESSION_PATH`（`packages/adapters/src/procs.ts` 的 `scopeLaunch`），`fleet-agent-scope` 再在最后接上会话用户的 `~/.local/bin`。
+- `france.sh` 给会话装一份 pnpm（`deploy/lib/session-pnpm.sh`）：版本跟仓根 `package.json` 的 `packageManager`，从 npm 下 `pnpm-<版本>.tgz`、核 `france.sh` 顶部钉的 sha512（`PNPM_INTEGRITY`，npm 的 `dist.integrity`），解到 `/opt/fleet-dao/pnpm/<版本>`，入口 `/usr/local/bin/pnpm`，都归 root：会话改不动，也不在第一次用时现下。不用 corepack 给会话装：它按调用者的家目录缓存、第一次用时才下，缓存在会话自己家里、会话写得动。入口关掉 node 的编译缓存（`NODE_DISABLE_COMPILE_CACHE=1`）：pnpm 启动时会打开它，默认放在共用的 `/tmp/node-compile-cache` 下，会话能先把别的身份那一格造好、往里放东西。
+- 升 pnpm：`package.json` 的 `packageManager` 和 `france.sh` 顶部的 `PNPM_VERSION`、`PNPM_INTEGRITY`（`npm view pnpm@<版本> dist.integrity`）一起改；漏改一处 `deploy/test/session-pnpm.test.sh` 就红，法国上 `france.sh` 也拒装。
+- 读回：装着的文件和装的时候一样；再从在跑的引擎进程里读出它给会话的那条 PATH（`/proc/<引擎主进程>/environ` 里只取 `PATH`、`FLEET_CLI_BIN`），照引擎起会话的路子（fleet 经 sudo 调 `fleet-agent-scope`，PATH 走 `FLEET_SESSION_PATH`）以会话用户跑一次 `pnpm --version`：找不到、先找到的不是 `/usr/local/bin/pnpm`、版本不对都判红；引擎没在跑读不到那条 PATH，记待配。
+
+node 的编译缓存目录（查 #164 时发现：会话能借它以 fleet、pilot、root 的身份跑代码）：
+
+- 为什么：pnpm、tsc 这些命令行一起来就开 node 的编译缓存，默认放在 `/tmp/node-compile-cache/<node 版本>-<架构>-<V8 标记>-<uid>/`；node 建这个子目录用的是 mkdir -p，已经在就照用，不查归谁。/tmp 谁都能写，会话用户只要赶在别人前面建出这个目录，就能替 fleet（发布时装依赖）、pilot、root 的 uid 预先建好子目录、放进编译缓存，对方的 node 照读。
+- `france.sh` 在第一次以 fleet 跑 node 之前，把这个目录建成 root:root 755（`deploy/lib/node-cache.sh`）；已经在但归别人、权限松、里面有别人的东西、是链接或文件的，整个删了重建。开机时 /tmp 清空，由 `/etc/tmpfiles.d/fleet-dao-node-compile-cache.conf` 在任何会话之前先建好。建好后，非 root 的 node 建不了自己的子目录，就不用编译缓存（只慢一点、不报错）；root 自己的子目录别人换不掉。读回：目录归 root、755、里面只有 root 的东西，开机配置在、内容对，不然判红。
+- 撤掉：删 `/etc/tmpfiles.d/fleet-dao-node-compile-cache.conf`，`france.sh` 里去掉 `setup_node_cache` 和读回里的 `readback_node_cache`；目录留着不碍事，下次开机 /tmp 清空时就没了。
+
 会话用户登录 reclaude（要创始人做，一次；`fleet-agent-carpool` 已登录、挂拼车组织，2026-09-26）：
 
 reclaude 按用户记设备：组织写在家里的 `~/.reclaude/device.json`，对这个用户的所有会话一起生效，请求按设备签名。一个账户最多挂 4 台设备、一个家目录算一台，所以法国只登录这一个用户（pilot 不登录，见下面）；不拷别的用户的 `~/.reclaude`（同一设备号从两个家目录跑会互相打架）。
@@ -171,12 +196,21 @@ reclaude 按用户记设备：组织写在家里的 `~/.reclaude/device.json`，
 3. 选拼车组织：`sudo -iu fleet-agent-carpool reclaude org list`，找到拼车（team）那个，`sudo -iu fleet-agent-carpool reclaude org use <组织编号>`。之后切独享、切回拼车由引擎做（#59），人不手动切：一切号这个家目录下在跑的会话全断。
 4. 重跑 `deploy/france.sh`：读回里「reclaude 还没登录」消失。
 
+会话用户的 cursor-agent（#212 接上了 cursor-agent；装由 `france.sh` 做，登录要创始人做，一次；Cursor 的路由接真流量之前）：
+
+cursor-agent 装在会话用户自己家里（官方安装脚本：一个版本一个目录，在 `~/.local/share/cursor-agent/versions/<版本>/`），登录态也在它家里；不往会话环境里塞 `CURSOR_API_KEY`。引擎每次起 cursor 会话，由会话用户自己在 `FLEET_CURSOR_VERSIONS_DIR`（engine.env，默认 `/home/{user}/.local/share/cursor-agent/versions`）下按 `current` → 最新版本目录现找（升级会删掉旧版本目录，所以不钉版本）；一个能跑的都没有就退出 127、报「没装 cursor-agent」，失败分流按执行方式配置不对（CF1）认，这条路由记一次失败。
+
+1. 装（`france.sh` 做，`deploy/lib/cursor-agent.sh`）：以会话用户的身份照引擎的找法（`current` → 最新能跑的版本目录）一个都找不到时，以他自己的身份把官方安装脚本 `https://cursor.com/install` 整个下下来再跑（不以 root 装，不 `curl | bash`），装完再核一遍；找得到就不动（不重装、不升级，之后它自己升级）。安装脚本和包都不核校验和：官方没给，它只以会话用户的身份跑（理由写在 `deploy/lib/cursor-agent.sh` 开头）。读回以会话用户的身份照同一个找法跑 `cursor-agent --version`：没装、跑不成、卡住、输出认不出都判红；登没登录不查。手动装（等不及重跑 `france.sh` 时）：`sudo -iu fleet-agent-carpool bash -c 't=$(mktemp) && curl -fsSL https://cursor.com/install -o "$t" && bash "$t"; rm -f "$t"'`。
+2. 登录：`sudo -iu fleet-agent-carpool cursor-agent login`。终端里会打印一个链接：在自己电脑的浏览器里打开，用 Cursor 账号登录、批准；批准完终端自己往下走。
+3. 查：`sudo -iu fleet-agent-carpool cursor-agent status` 说已登录。之后调度台哪个阶段挂上 Cursor 的路由、开着，下一轮探针就探它。
+
 路由探针（#129，design 第九节「路由探针」）：
 
-- 引擎每 15 分钟（每小时 7、22、37、52 分）以会话用户在 `/var/lib/fleet-work/_route-probe/<会话用户>` 起一次最小的 reclaude 会话、问一句「只回 OK」，结论写进 `routes` 的 `alive`、`probe_state`、`probed_at`、`probe_detail`。派工只派在线的路由：一上线（换机器、库清空也一样）第一轮探完之前，引擎一条活都派不出去。发布完不想等，手动跑一轮：`fleet-temporal schedule trigger --schedule-id route-probe`。
+- 引擎每 15 分钟（每小时 7、22、37、52 分）以会话用户在 `/var/lib/fleet-work/_route-probe/<会话用户>` 起一次最小的会话（Claude 的路由起 reclaude，Cursor 的起 cursor-agent，模型照路由上写的）、问一句「只回 OK」，结论写进 `routes` 的 `alive`、`probe_state`、`probed_at`、`probe_detail`。Cursor 的路由探通了隔 2 小时才再真探（一次扣的是按月的包含用量），中间那几轮结论照旧；没通的每轮都探。派工只派在线的路由：一上线（换机器、库清空也一样）第一轮探完之前，引擎一条活都派不出去。发布完不想等，手动跑一轮：`fleet-temporal schedule trigger --schedule-id route-probe`。
 - 看结论：驾驶舱调度台顶上「路由在线状态」；库里 `runuser -u fleet -- psql -d fleet -c "select id, alive, probe_state, probed_at, probe_detail from routes order by id"`；每一轮的结局在驾驶舱「定时任务」页（库里 `schedule_runs`、`job = 'route-probe'`）。
-- 离线了看 `probe_detail`：登录失效、设备被撤销的，照原因里写的重跑上面第 2 步的 reclaude 登录，下一轮探通就回在线，那条「整池暂停」自动撤掉。按量计费、插头没接、会话用户挂着别的组织的是按规矩不探，不是坏了。
-- 探针不存会话记录（`--no-session-persistence`），会话用户家里不攒它的记录；目录由引擎经 `fleet-agent-scope adopt` 建，归会话用户、700。
+- 离线了看 `probe_detail`：登录失效、设备被撤销的，照原因里写的重新登录（Claude 的是上面 reclaude 那节第 2 步，Cursor 的是 cursor-agent 那节第 2 步），下一轮探通就回在线，那条「整池暂停」自动撤掉。按量计费、插头没接、会话用户挂着别的组织的是按规矩不探，不是坏了。
+- 派工理由末尾出现「在线是探针 N 前的结论，之后它没再给新结论（探针可能停了）」：探针连着三轮（45 分钟；Cursor 的路由是 2 小时 30 分，它探通了隔 2 小时才再探）没给这条路由写新结论，引擎照上一次的结论接着派（不停工）。看驾驶舱「定时任务」页路由探针那一行（没跑、没跑成还是只写进去一部分，`why` 写了原因），再手动跑一轮（上面那条命令）看它报什么。
+- Claude 的探针不存会话记录（`--no-session-persistence`），会话用户家里不攒它的记录；cursor-agent 没有这个开关，探针的会话留在会话用户家里的 `~/.cursor/chats` 下（一条路由一天约 12 个）。目录由引擎经 `fleet-agent-scope adopt` 建，归会话用户、700。
 
 已知口子（会话用户的 reclaude 代理端口，2026-09-25 审查官发现，待定机制修，#35）：会话用户的 reclaude 守护在 `127.0.0.1` 上开两个临时端口（一个 HTTP CONNECT 代理，会话的 `HTTPS_PROXY` 指它；一个 MITM TLS 口），端口号每次重启会变。代理口不认客户端身份——本机**别的用户**（`pilot`、`fleet`）也连得上、也会被转发，等于借用这个账号的订阅（从 pilot 借会话用户的额度）。`HTTPS_PROXY` 里没有令牌，靠的是绑回环 + 会话本该只有自己碰，但回环对所有本机用户都通。
 
@@ -191,24 +225,27 @@ reclaude 按用户记设备：组织写在家里的 `~/.reclaude/device.json`，
 - **pilot 不登录 reclaude**（创始人 2026-09-26）：创始人在 VPS 上不开会话，而 reclaude 一个账户最多挂 4 台设备、法国只占 1 台，给了会话用户。reclaude 二进制照装，将来真要在 pilot 下开会话，得先腾出一台设备再登录。
 - 家里不预装任何凭据。第一次要 root 帮一件事（以 pilot 自己的身份写，家里不留 root 属主的文件）：放创始人的 ssh 公钥：`sudo -iu pilot sh -c 'umask 077; mkdir -p ~/.ssh; cat >> ~/.ssh/authorized_keys' < <创始人的公钥>.pub`
 - Mirasim 的 ssh 远程模式在 pilot 家里自己装服务端：`~/.mirasim-remote/servers/<版本>/`（自带 node 和 node-pty，不用系统的 node），`current` 指在用的那版，`run/` 下是进程号、日志和 unix socket，数据在 `~/.mirasim/`；桌面端经 ssh 把本机一个端口转到那个 socket。服务器这头要的：公钥登得进来、sshd 允许转发到 unix socket（`AllowStreamLocalForwarding`，Ubuntu 默认开）、`curl`（直接下服务端包，下不了由桌面端经 scp 传）、`tar`、`gzip`、`sha256sum`。不需要系统的 node，也不需要另起一个 systemd 管的 mirasim-server。它按登录 shell（`$SHELL -ilc`）取 PATH，Ubuntu 默认的 `~/.profile` 把 `~/.local/bin` 加了进去，所以找得到 reclaude。
-- 经 Mirasim 起 Claude 会话、启动命令写 `reclaude` 的，先在 pilot 的 `~/.local/bin` 装 ai-gateway-stack 仓的 reclaude-mirasim 启动器（该仓 `docs/RECLAUDE-IN-MIRASIM.md` 第四节）：不装的话 Mirasim 把自己网关的地址塞给 claude，reclaude 回 non_cc_client 并上报，攒多了设备会被解绑。本仓不装它。
+- 经 Mirasim 起 Claude 会话、启动命令写 `reclaude` 的，先在 pilot 的 `~/.local/bin` 装 ai-gateway-stack 仓的 reclaude-mirasim 启动器（装法与原理见 `docs/reclaude-in-mirasim.md`）：不装的话 Mirasim 把自己网关的地址塞给 claude，reclaude 回 non_cc_client 并上报，攒多了设备会被解绑。本仓不装它。
 - 已知的口子：桌面端起远端服务端时把 `MIRASIM_SECRET_KEY` 写在 ssh 执行的命令行里，那几秒里本机别的用户（包括会话用户）用 `ps` 看得到；要堵得给 `/proc` 加 `hidepid`，还没做。
 - 撤掉：`userdel -r pilot`。家里是创始人的活和登录态，删之前先问人。
 
-各家 AI 的全局说明与方法类 skill（`packages/agents-sync`，会话用户和 pilot 各一份）：
+各家 AI 的全局说明、方法类 skill 和钩子（`packages/agents-sync`；法国的会话用户和 pilot 各一份，开发机见下面「开发机」一条）：
 
-- 写什么：仓根 `AGENTS.md` 上半段（两行 `fleet-dao:通用段` 标记圈起来的那一块）写进各家的全局文件，`agents/skills/` 下的每个 skill 拷进各家的 skill 目录。哪家读哪份、为什么这样放，见 `packages/agents-sync/src/targets.ts`（Windows、Linux 各一列）。
-- 法国：`france.sh` 最后一步以 root 跑 `node packages/agents-sync/bin/agents-sync --apply --user <用户>`，给 `fleet-agent-carpool`、`pilot` 各写一份：同步脚本先换成那个用户再动手，写出来的都归他。读回里的 `--check` 逐人逐项列出。只写这台装了的那几家（按 PATH 和家里的 `.local/bin` 找命令），没装的列为「没装，跳过」。
+- 写什么：仓根 `AGENTS.md` 上半段（两行 `fleet-dao:通用段` 标记圈起来的那一块）写进各家的全局文件，`agents/skills/` 下的每个 skill 拷进各家的 skill 目录，`agents/hooks/` 下的钩子脚本拷进 `~/.fleet-dao/hooks/`、在 Claude Code 的 `~/.claude/settings.json` 里登记两条（开会话时跑 `session-start.mjs`，调 Bash、PowerShell 之前跑 `pretool.mjs`）。哪家读哪份、为什么这样放，见 `packages/agents-sync/src/targets.ts`（Windows、Linux 各一列）。
+- 法国：`france.sh` 最后一步以 root 跑 `node packages/agents-sync/bin/agents-sync --apply --user <用户>`，给 `fleet-agent-carpool`、`pilot` 各写一份：同步脚本先换成那个用户再动手，写出来的都归他。读回里的 `--check` 逐人逐项列出。只写这台装了的那几家（按 PATH 和家里的 `.local/bin` 找命令），没装的列为「没装，跳过」。自动发布每发成一版，也以 root 对这两个用户跑同一条（第九节「自动发布」）：同步到哪个提交记在它的读数里，没成报警、不挡发布。钩子不装、同步位置不记（带 `--user` 时这两段跳过：开会话钩子要在那个用户自己能拉、能写的 fleet-dao 检出里快进、同步，法国的会话由引擎管；法国的检出停在自动发布发出去的那个提交上，等 CI、等空闲时本来就落后主线，拿主线比会误报）。
 - 只动两样：文件里标记圈起来的那一块（标记外的内容原样留着；第一次接管、文件里还没有标记时，先把原文件整份备份，再整份换成受管块），和清单 `~/.fleet-dao/agents-sync.json` 里记着是它装的 skill（仓里删了的会撤掉；插件链进来的、claude.ai 同步来的一律不碰；同名、但清单里没记的，内容和仓里一样也不接管，判红等人处置）。备份在各用户家里的 `~/.fleet-dao/backups/<时间>/`，照原来的相对路径摆。
-- 改了 `AGENTS.md` 上半段或 `agents/skills/`：合进主线、机器上 pull 之后重跑 `france.sh`（或只跑上面那条命令）才生效。
+- 钩子只动 `~/.claude/settings.json` 里命令指向 `~/.fleet-dao/hooks/` 的那几条（以前手装在 `~/.local/share/fleet-guard/` 的两条接管时换掉），别的钩子、别的设置一条不碰；改之前整份备份。设置文件不是 JSON、`hooks` 不是对象就不动、判红；`disableAllHooks` 开着也判红（登记照写，但一条都不跑）。Grok、Devin CLI、Cursor 命令行默认也读这份设置里的钩子，脚本认得它们的输入格式；别家没装钩子，装了的逐家列一行为什么：Codex 的每条钩子要人在 Codex 里 `/hooks` 审过才跑，Kimi Code 的钩子在 TOML 里，Antigravity、Gemini CLI 是另一套事件和输入输出，pi 要写成 TypeScript 扩展，dsh 没有自带的全局钩子（依据和出处在 `packages/agents-sync/src/targets.ts` 的 `HOOK_GAPS` 上面；能接的几家接上是 #232）。
+- 开发机（跑 Claude Code 的电脑）：第一次在 fleet-dao 检出里跑一遍 `node packages/agents-sync/bin/agents-sync --apply`；之后每次开会话，开会话钩子取远端、把检出的 main 快进到 origin/main，再跑一遍 `--apply`，结论一句话进会话（三分钟内刚同步成功过就跳过）。检出不在 main 上、和 origin/main 分叉、main 或 `AGENTS.md`、`agents/` 有没提交的改动时不同步，会话里写明为什么、这台落后主线几个。同一个家目录同一时刻只许一个 `--apply` 在写（锁 `~/.fleet-dao/agents-sync.lock`，拿不到退出码 2）。
+- 同步到哪：`--apply` 记下同步用的检出（linked worktree 记主工作树）和提交（整次没有 ✗、没有没查成才记提交），放在 `~/.fleet-dao/synced.json`；`--check` 按本机上次取到的 origin/main 报这台同步到哪个提交、落后几个，落后、同步的提交不在主线上都判 ✗。仓不是 git 检出时只写明、不判；带 `--user`（法国）不记不判，见上面「法国」一条。
+- 改了 `AGENTS.md` 上半段、`agents/skills/` 或 `agents/hooks/`：合进主线后，开发机开会话时自己跟上；法国由自动发布发完那一版跟着同步，不用人跑（在等 CI、等空闲、发布没成时还没同步，`release.sh --check` 列出的「自动发布」那一段写着规矩同步到哪个提交）；要马上生效或自动发布停着，就手动跑上面那条命令（或重跑 `france.sh`）。
 - ddgs（skill docs-lookup 首选的搜索命令行）：装机最后一步以各用户自己的身份 `uv tool install ddgs==<版本>`，依赖用 `--with` 写死版本一起装（`france.sh` 顶部的 `DDGS_DEPS`），装在他家里（`~/.local/share/uv/tools/ddgs`，命令在 `~/.local/bin/ddgs`），只用系统的 Python；命令能跑、版本对、虚拟环境里的包和钉住的一样，就不动。用的 uv 装在 `/opt/fleet-dao/uv/<版本>/uv`（钉版本、核 sha256），带 `--no-config` 跑（不读他家里的 `uv.toml`：那里能改装包来源、绕过钉版本）；ddgs 和它的依赖是 PyPI 上的包，只钉版本、不核校验和。读回以各用户的身份跑 `ddgs version`，再按虚拟环境里的 dist-info 逐个核对依赖：没装、跑不起来、卡住、输出认不出、版本不对、依赖不一样、虚拟环境没了都判红（`deploy/lib/cli-tools.sh`）。装和读回用的 PATH 和会话的一样，他写得动的 `~/.local/bin` 排最后；ddgs 他改得动，读回照登录 shell 那一问的做法防卡：输出落进 root 建的临时文件、不带控制终端、10 秒叫停再过 5 秒强杀。下载 uv 失败按装机的规矩判红停下；这一步排在最后，规矩已经写完。
-- 自测：`sudo bash deploy/test/run.sh` 里的 `agents-sync.test.sh` 以 root 建临时用户，验换身份再写、写出来的都归他、第二遍零改动、属主不对判红、root 不带 `--user` 往别人家里写被拦下；`agents-sync-account.test.sh` 用假的同步脚本验装机怎么记账（崩了判红、写时的 ✗ 只打不记）；`cli-tools.test.sh` 用假的 uv、ddgs 验 ddgs 的装和查（装错了、卡住了都判红，不出网）。会话的 PATH、会话里找不找得到 ddgs 在 `agent-scope.e2e.sh` 和 `packages/adapters/test/e2e/scope-e2e.ts`（法国）里查。
-- 撤掉：删各用户家里受管的那几份文件（要原件就从备份拷回）、清单里列的 skill 目录和清单本身；ddgs 以各用户的身份 `/opt/fleet-dao/uv/<版本>/uv --no-config tool uninstall ddgs`（和装的时候一样不读他家里的配置），再删 `/opt/fleet-dao/uv`；`france.sh` 里去掉 `setup_agent_rules`、`setup_cli_tools` 两步，和读回里的 `readback_agent_rules`（`agents_sync --check` 加 `check_ddgs`）。
+- 自测：`sudo bash deploy/test/run.sh` 里的 `agents-sync.test.sh` 以 root 建临时用户，验换身份再写、写出来的都归他、第二遍零改动、属主不对判红、root 不带 `--user` 往别人家里写被拦下；`agents-sync-account.test.sh` 用假的同步脚本验装机怎么记账（崩了判红、写时的 ✗ 只打不记）；`cli-tools.test.sh` 用假的 uv、ddgs 验 ddgs 的装和查（装错了、卡住了都判红，不出网）。会话的 PATH、会话里找不找得到 ddgs 在 `agent-scope.e2e.sh` 和 `packages/adapters/test/e2e/scope-e2e.ts`（法国）里查。钩子、同步位置、写锁在 `packages/agents-sync/test/hooks.test.ts`、`packages/agents-sync/test/position.test.ts`、`packages/agents-sync/test/lock.test.ts`；`packages/agents-sync/test/session-hook.test.ts` 拷一份仓、装上钩子，真跑一遍「主线走了 → 开会话钩子快进、同步」和「原件坏了 → 会话里明说没查成」；两个钩子脚本本身在 `agents/test/session-start.test.ts`、`agents/test/rules/pretool.rules.test.ts`。
+- 撤掉：删各用户家里受管的那几份文件（要原件就从备份拷回）、清单里列的 skill 目录和清单本身，`~/.fleet-dao/hooks/`、`~/.fleet-dao/synced.json` 和 `~/.claude/settings.json` 里命令指向 `~/.fleet-dao/hooks/` 的两条；ddgs 以各用户的身份 `/opt/fleet-dao/uv/<版本>/uv --no-config tool uninstall ddgs`（和装的时候一样不读他家里的配置），再删 `/opt/fleet-dao/uv`；`france.sh` 里去掉 `setup_agent_rules`、`setup_cli_tools` 两步，和读回里的 `readback_agent_rules`（`agents_sync --check` 加 `check_ddgs`）。
 
 ## 六、怎么看健康
 
 一条命令：`bash /srv/fleet-dao/deploy/france.sh --check`（香港用 `hk.sh --check`），只读回和自检，不改东西。
-应用这一层：`bash /srv/fleet-dao/deploy/release.sh --check`（在用哪版、服务、健康检查），和浏览器里的健康页 `https://<驾驶舱域名>/health/`（第九节）。
+应用这一层：`bash /srv/fleet-dao/deploy/release.sh --check`（在用哪版、自动发布的读数、服务、健康检查），和浏览器里的健康页 `https://<驾驶舱域名>/health/`（第九节）；跟不跟得上主线看健康检查里的 `deploy_lag`（第九节「自动发布」）。
 
 法国分项：
 
@@ -242,7 +279,9 @@ reclaude 按用户记设备：组织写在家里的 `~/.reclaude/device.json`，
 法国：
 
 ```
-# 0. 应用：停掉、撤掉单元（各版代码还在 /srv/fleet-dao-releases）
+# 0. 先停自动发布（不然它会接着发、把应用装回来），再停应用、撤掉单元（各版代码还在 /srv/fleet-dao-releases）
+systemctl disable --now fleet-auto-release.timer
+rm /etc/systemd/system/fleet-auto-release.service /etc/systemd/system/fleet-auto-release.timer && rm -r /usr/local/lib/fleet-dao
 systemctl disable --now fleet-engine.service fleet-api.service
 rm -f /etc/systemd/system/fleet-engine.service /etc/systemd/system/fleet-api.service
 # 演示版的可见范围不再往香港推（香港上已有的范围文件留着，演示版照旧按它们给人看）
@@ -303,8 +342,10 @@ rm /root/.ssh/authorized_keys2
 bash /srv/fleet-dao/deploy/release.sh              # 发主线最新
 bash /srv/fleet-dao/deploy/release.sh <提交号>     # 发主线上的某个提交
 bash /srv/fleet-dao/deploy/release.sh --rollback   # 退回上一版
-bash /srv/fleet-dao/deploy/release.sh --check      # 只读：在用哪版、服务、健康检查
+bash /srv/fleet-dao/deploy/release.sh --check      # 只读：在用哪版、自动发布的读数、服务、健康检查
 ```
+
+平时不用人发：自动发布每 5 分钟看一轮主线，CI 全绿的新提交等引擎空闲后自己发（本节末尾「自动发布」）。上面几条留给人手动发、退回、重试。
 
 发布和退回自己交给 systemd 跑（临时服务 `fleet-dao-release-<时间>`），终端只跟着看日志：跳板断线、终端关了，发布照样跑完。日志在 `/srv/fleet-dao-releases/.logs/`（开头会打印路径，留最近 30 份），断了之后 `tail -f` 它接着看。`--check` 就在终端里跑。
 输出与退出码同装机脚本；没过健康检查、已自动退回，也是 1。
@@ -320,16 +361,16 @@ bash /srv/fleet-dao/deploy/release.sh --check      # 只读：在用哪版、服
    - `FLEET_HK_PARTS` 里有 `demo`：演示版发到 `FLEET_DEMO_PATH`（默认 `/demo/`），只动这一个目录，根地址不碰；它下面的 `scopes/` 是可见范围，归 `fleet-demo-scopes` 推，发布不删。这一版没带演示版（老提交），或演示版是按别的路径构建的（改过 `FLEET_DEMO_PATH`），这次不发、记一项待配。
    - 明写了 `web`（默认不发）：驾驶舱静态文件连健康页、`release.json` 整套发到根地址，根上不是这一版的文件会被删掉，但演示版的目录一概不碰。放在演示版后面：`release.json` 换了就说明这次要发的都发完了。
    在演示版的目录里、根地址上（发 `web` 时）手放的东西，下次发布就没了。接着发飞书网关（第十二节）。
-7. 健康检查：启用的服务 10 秒里没退出、没重启，主进程跑的是这一版的目录；`fleet-api` 的驾驶舱接口在答健康报告、切之前好的项没变坏（会随时间自己变红的项除外：待开单积压 `draft_backlog`、判断题 `judge`（最近一次调用没成跟着上游变红）只记待处理，不退回），fleet 命令接口在听；`fleet-engine` 90 秒内到任务队列 fleet 上取活（工作流任务、活动任务都要有它）；发了静态文件的话，香港在发这一版（经隧道读 `release.json`、健康页 200）；发了演示版的话，演示版的首页和这一版的一字不差，深链接（`/demo/tasks/…`）回落到演示版自己的首页——回落到根上的，是香港的站点还是旧的，记一项待配：香港 `git pull` 后重跑 `hk.sh`；这次切了飞书网关的话，它以这一版连上了飞书、起稳了（第十二节）。不过就自动退回上一版（同样的切法、同样的检查），报红；但库里跑过的迁移比上一版带的多时不退，停在新版报红等人（旧代码对着新表结构会出错，健康检查还查不出来）。
+7. 健康检查：启用的服务 10 秒里没退出、没重启，主进程跑的是这一版的目录；`fleet-api` 的驾驶舱接口在答健康报告、切之前好的项没变坏（会随时间自己变红的项除外：待开单积压 `draft_backlog`、判断题 `judge`（最近一次调用没成跟着上游变红）、跟上主线 `deploy_lag`（主线一动就可能落后）只记待处理，不退回），fleet 命令接口在听；`fleet-engine` 90 秒内到任务队列 fleet 上取活（工作流任务、活动任务都要有它）；发了静态文件的话，香港在发这一版（经隧道读 `release.json`、健康页 200）；发了演示版的话，演示版的首页和这一版的一字不差，深链接（`/demo/tasks/…`）回落到演示版自己的首页——回落到根上的，是香港的站点还是旧的，记一项待配：香港 `git pull` 后重跑 `hk.sh`；这次切了飞书网关的话，它以这一版连上了飞书、起稳了（第十二节）。不过就自动退回上一版（同样的切法、同样的检查），报红；但库里跑过的迁移比上一版带的多时不退，停在新版报红等人（旧代码对着新表结构会出错，健康检查还查不出来）。
 8. 清旧版：留 5 版——在用的、上一版，再按最近用过的补满。
 
-同一个提交跑第二遍，结论是「本次改动 0 处」；两遍之间各拍一次 `bash deploy/lib/snapshot.sh ours`，diff 为空（快照里每一版整棵树的名字、大小、修改时间、属主、权限压成一个指纹，重新构建一定会变）。
+同一个提交跑第二遍，结论是「本次改动 0 处」；两遍之间各拍一次 `bash deploy/lib/snapshot.sh ours`，diff 为空（快照里每一版整棵树的名字、大小、修改时间、属主、权限压成一个指纹，重新构建一定会变）。这样比之前先停自动发布（`systemctl stop fleet-auto-release.timer`，比完 `start`）：两遍之间它可能发了新版。
 
 退回：
 
 - `--rollback` 退到「上一版」：历史里最近在用过、不是现在这版、没被判过不健康、目录还在的那一版。退之前先比库：库里跑过的迁移比那一版带的多（或读不清），不退、报红；也先试通香港。
 - 健康检查没过的版本在历史里记成不健康，`--rollback` 不会退到它；它以后再发一次、过了，就记回健康。
-- 历史在 `/srv/fleet-dao-releases/.history`，一行一件事：时间、提交号、事件（`release`、`rollback`、`auto-rollback`、`unhealthy`、`recovered`），合并前发的带 `unmerged`。
+- 历史在 `/srv/fleet-dao-releases/.history`，一行一件事：时间、提交号、事件（`release`、`rollback`、`auto-rollback`、`unhealthy`、`recovered`），合并前发的带 `unmerged`，自动发布那一次里记的（发布、不健康、自动退回）带 `auto`。
 
 本机起哪些服务（`/etc/fleet-dao/release.env`，照 `deploy/france/release.env.example` 建一次，之后归人改）：
 
@@ -389,10 +430,12 @@ FLEET_DEMO_PATH=/demo/                  # 演示版的路径，和香港 hk.env 
   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api dispatch <owner>/<仓名> off      # 关上：设为空，只收单、显示，不派
   ```
   和 set-password 一样换成 fleet、带上 `api.env` 连库；仓名不分大小写。已经是要的状态就不改、不记：开着时再 `on` 不重设时刻（重设会把已经能派的单变成「开关打开以前开的」）。改了就在同一个事务里记一条操作记录（`repo.auto_dispatch.enable` / `repo.auto_dispatch.disable`，target 是 `repo:<仓的 id>`，来源记成 engine，reason 写明谁跑的哪条命令，before / after 是开关原来和现在的值），改完从库里读回开关和这条记录再打印。退出码：0 查到了、改好了或本来就是；1 没做成（库里没这个仓、连不上库、写库出错、读回来对不上，一句话说原因和怎么核对）；2 参数不对或没带上库连接。
-- 后端收 GitHub 事件：原文一次投递一行落进库里的 `github_events`（状态、原因、做了什么都在）。PR、CI 事件要用 `github/` 里两个机器人的凭据写镜像，凭据只在后端启动时读一次：读不到时后端照样起、issue 照收，PR 和 CI 事件记成出错，健康检查的 `github_events` 报红；补上凭据后要重启 `fleet-api` 才读得到。记成出错、等着（重开时上一轮还没结束）的投递原文还在，但对账还没接上定时（`specs/43-接活入口/方案.md`「谁来定时调对账」），现在没有东西自动重放它们；自动重放到头（5 次）的也没有手动再推的入口，只在健康检查里报红。
-- GitHub 不会自己重投没送到的 webhook：漏收的靠对账调它的重投接口、再按仓轮询补回，对账没接上之前收不回来。
+- 后端收 GitHub 事件：原文一次投递一行落进库里的 `github_events`（状态、原因、做了什么都在）。PR、CI 事件要用 `github/` 里两个机器人的凭据写镜像，凭据只在后端启动时读一次：读不到时后端照样起、issue 照收，PR 和 CI 事件记成出错，健康检查的 `github_events` 报红；补上凭据后要重启 `fleet-api` 才读得到。记成出错、等着的投递原文还在，每轮对账（引擎的定时任务 `github-reconcile`，每 15 分钟）按原文重放：出错的最多自动重放 5 次；等着的（重开时上一轮还没结束、这个项目停派）每轮都重放、不占次数。重放到头的没有手动再推的入口，只在健康检查里报红。
+- GitHub 不会自己重投没送到的 webhook：漏收的靠对账调它的重投接口、再按仓轮询补回。
 - 接 GitHub 要齐两样，缺一样 GitHub 上的单就进不来（事件、对账补回来的都被门挡掉，投递账上记「不收」、不算出错），健康检查的 `github_events` 会报红（`no_repos`、`no_github_members`）；驾驶舱还没有加仓、改成员的页面，现在在库里加（新机器上两张表都是空的）：
-  - 受管的仓：GitHub App 装在哪几个仓上，就给哪几个仓各加一行（`test_command` 是这个仓跑测试的命令）：`sudo -u fleet psql fleet -c "insert into repos (owner, name, default_branch, test_command) values ('<owner>', '<仓名>', 'main', '<测试命令>') on conflict (owner, name) do nothing"`。App 装在哪些仓上，在 GitHub 上 App 的安装页看。
+  - 受管的仓：GitHub App 装在哪几个仓上，就给哪几个仓各加一行（`test_command` 先填个占位 `-`，对账读成仓里的配置后会改成里面的测试命令）：`sudo -u fleet psql fleet -c "insert into repos (owner, name, default_branch, test_command) values ('<owner>', '<仓名>', 'main', '-') on conflict (owner, name) do nothing"`。App 装在哪些仓上，在 GitHub 上 App 的安装页看。
+  - 测试命令、流程配置写在各仓仓根的 `.fleet/flow.json`（只写和全组织默认 `packages/core/flow.default.json` 不同的，格式见 `packages/core/src/config.ts`；fleet-dao 自己的在仓根）：要改就改那个文件、合进主线，对账每 15 分钟读一次默认分支头上的这份，合并校验后同步进库里的副本（`repos` 表的 `flow_*` 列，`test_command` 跟着改成一样的给人看），最多一刻钟生效；不在库里手改。测试命令是写码会话交活要原样跑的那一条（起会话时记进 `session_runs.test_command`，交活核对只认它，`packages/api/src/done-check.ts`），所以只放会话跑得过的——只跑改动影响到的测试，不放全量检查、卫生检查（会话用户按设计读不到敏感值名单，那两样归 CI 和引擎推分支时自己的扫描）；fleet-dao 是 `pnpm test:changed`。
+  - 派活只认副本（判法在 `packages/core/src/replica.ts`）：仓里没有这个文件就用全组织默认（副本标 `org_default`），但全组织默认里不放测试命令，这种仓的写码会话会停下说「项目没写测试命令」；文件认不出（坏 JSON、格式不对）这个项目停派，提醒中心报一条 `flow-config:<owner>/<仓名>`；读的时候 GitHub 出错只记「没查成」、副本不动，超过 45 分钟没同步成同样停派、报提醒。停派时新来的单照收（建任务行），投递记成等着，副本好了那一轮对账重放、自动拉起。核对（加完仓想马上同步，先手动跑一轮下面那条对账）：`sudo -u fleet psql fleet -c "select owner, name, test_command, flow_source, flow_commit, flow_synced_at, flow_error, flow_unread from repos"`。
   - 带 GitHub 账号的成员：白名单按 `users` 表认 GitHub 作者（有数字编号只按编号认），创始人那一行补上 GitHub 的数字编号和登录名，两个机器人各加一行 `role = 'bot'`（编号是 `<App 的 slug>[bot]` 这个用户的编号，不是 App 的编号）；数字编号用 `gh api users/<登录名>` 查：`sudo -u fleet psql fleet -c "update users set github_id = <编号>, github_login = '<登录名>' where id = '<创始人那一行的 id>' and github_id is null"`、`sudo -u fleet psql fleet -c "insert into users (display_name, role, github_login, github_id) values ('<slug>[bot]', 'bot', '<slug>[bot]', <编号>) on conflict (github_id) do nothing"`。
   - 加完手动跑一轮对账（`fleet-temporal schedule trigger --schedule-id github-reconcile`），已经开着的单这一轮就补进来。
 - 受管的仓就是库里 `repos` 表的行，别的仓的事件一律不收。「让 AI 接活」开关是 `repos.auto_dispatch_since`：空 = 关着，只收单（建任务行）、不拉起需求工作流；打开以前就开着的 issue 也不自动派。开关用上面的 `fleet-api dispatch`，别直接改库：直接改的不进操作记录。
@@ -431,11 +474,38 @@ ssh <法国> 'sha256sum < /etc/fleet-dao/gateway-token.env'; ssh <香港> 'sha25
 - 读 `/healthz`：香港经隧道转给法国驾驶舱后端，后端逐项探库、Temporal……，全好回 200、有一项不好回 503。每 15 秒刷新。公网 `/healthz` 在香港限流：每个来源每分钟 30 次、突发 10 次，超了回 429（健康页照样报红，写明是限流）。
 - 功能还没做的项报「未接」（`{ ok: true, status: "not_wired", message }`，message 带单号，比如飞书草稿开成 issue 的 #91）：不算失败、不让 `/healthz` 变 503，健康页写成「未接：…」、灰点；只认装配时的标记（`HealthCheck.notWired`，由「没接上的那个实现」自带，比如 `notWiredDraftOpener`），检查跑出来抛什么都判不成未接，接上以后读不到、出错照样红；健康页对样子不完整的「未接」（缺原因、status 认不出）也判红。驾驶舱同一个做法：还没做的读取器（`packages/api/src/main.ts` 的 `notWired`：现在只剩额度读取 #76；路由探针 #129 已接上，调度台顶上是真的在线状态）让对应那一块整块显示「待实现」占位（阶段 + 单号，链到单），不把「没读到」说成「没查成」「离线」；接上哪个就删掉 `notWired` 里哪一项，之后读失败照实显示「没查成」。
 - 判断题（`judge` 项，健康页写「判断题」）：`/etc/fleet-dao/jev.json` 在不在定「未接」——后端起来时看一次，没写 `FLEET_JEV_CONFIG`、默认位置上又没有才算未接，补上文件要重启 `fleet-api` 才显示出来。有了就每次探，判法和引擎每次提问是同一份（`packages/jev` 的 `wiring.ts`）：配置读不出来、认不出，调度台判断阶段没有开着的路由，钥匙读不到，报红（`judge_config`）；最近一次真发给上游的调用没成报红（`judge_failing`），下一次调成了自动变绿。原因只进 `journalctl -u fleet-api`（哪道题、为什么、上游原文）；引擎那边起来时登记两道题的结果、每次起不来的原因在 `journalctl -u fleet-engine`。
+- 跟上主线（`deploy_lag` 项）：线上版本落后主线多少、自动发布在不在跑，判法见本节末尾「自动发布」的落后读数。
 - 必看三项：数据库、Temporal、引擎工人。只有后端明说在线的才绿；连不上（香港回 502、504）、回的不是健康报告、后端没报这一项、后端的结论和逐项对不上，一律红，并写明是哪一种。判定在 `deploy/web/health/health.js`，`deploy/test/health-page.test.mjs` 把每一种「没查成」都造了一遍。
 - 从公网打开的，健康页和占位页上都不写仓名、GitHub 账号名和地址（设计文档第十四节「演示版」），也不显示版本号（`release.json` 公网上读不到）。`deploy/test/public-site.test.sh` 拿演示版打包扫描的同一份名单（`packages/web/src/build/scan.ts`）扫发布脚本生成的这几页；改了文字，下次发 `web` 才到香港。
 - 香港转发时清掉 `Authorization`、`X-Fleet-Acting-Feishu`。france.sh 的读回从公网带着这两个头请求 `/api`，核对法国收到的请求里没有：后端没在跑时在隧道地址上临时起回显直接看，后端在跑时看它答的是「没登录」。
 
 还欠（发布这块）：构建以 fleet 身份跑，构建期间的第三方代码（前端构建工具等）读得到 `/etc/fleet-dao` 里 fleet 能读的全部密钥。换成读不到 `/etc/fleet-dao` 的专用构建用户要动装机（新用户、它的 pnpm、属主交接），留到下一轮（#79）。现在挡着的：pnpm 11 默认不跑依赖的安装脚本，只跑 `pnpm-workspace.yaml` 的 `allowBuilds` 放行的（现在一个都没放行），所以装依赖这一步第三方代码不执行；前端构建那一步照样会执行构建工具的代码。
+
+### 自动发布
+
+`fleet-auto-release`（design 第三节第 42 条：fleet-dao 自己的法国引擎、驾驶舱随主线自动发布；对外的照 0003 第 18 条按版本由创始人确认）：
+
+- 做什么：`fleet-auto-release.timer` 每 5 分钟（上一轮跑完再等 5 分钟，不叠着跑）以 root 拉起一轮 `/usr/local/lib/fleet-dao/auto-release/fleet-auto-release.mjs`：从 GitHub 取主线到检出 `/srv/fleet-dao`，主线最新的提交和在用的一样就收工；不一样就按下面的顺序一样样查，都过了才 `bash /srv/fleet-dao/deploy/release.sh <提交号> --auto` 发它（发布的每一步照上面，健康检查不过照样自动退回）。只发主线最新的那一个，中间的提交不一个个发。
+- 发之前查的（哪一样没过，这一轮就停在那，读数里写明卡在哪）：
+  1. 人手动切过版本：历史里最近一次不带 `auto` 的 `release`、`rollback`、`auto-rollback` 之后，主线上还没有更新的提交，就不动——人退回了坏版本、合并前用 `--unmerged` 在真机上验，自动发布不跟人抢；主线出了新提交（修复、那个 PR 合进来）再接着发。
+  2. 这个提交自动发过、没成，或发过、没过健康检查：不再自动试，等主线出新提交。
+  3. CI：只认这个提交在 main 上 push 触发的 `ci.yml` 那次运行的结论，不带凭据读 GitHub 的接口（一个钟头 60 次，一轮最多问一次；有了绿、红的结论就记下不再问）。全绿才发；还在跑、还没开跑，等下一轮；红了不发；读不到（限流、连不上、回的认不出、提交落到主线 30 分钟了还查不到它的 CI）记「没查成」、不发。
+  4. 另一个发布在跑（发布锁 `/srv/fleet-dao-releases/.lock` 占着）：等下一轮。
+  5. 部署脚本的检出：`git merge --ff-only` 快进到要发的提交；有没提交的改动、和主线分叉了，就停（`/healthz` 当场报）。检出已经在更新的提交上（人 pull 过）不往回退。
+  6. 引擎有会话在跑（`fleet-agent-scope list`；读不到、认不出按在跑算）：等，最多等 60 分钟，到点照发——会话按编号续上（design 第四节「会话断了接着干」）；Temporal 里在途的工作流，重放测试（`packages/engine/test/replay.test.ts`）在 CI 里先把过关。release.sh 构建完、切版本之前再看一眼，这时又有会话在跑就不切（构建留着，下一轮直接用）。
+- 不发演示版：演示版是对外的，换它就是对外发布，要人确认；`release.env` 的 `FLEET_HK_PARTS` 里有 `demo` 也跳过，香港上的演示版原样留着，要换就人手动发一次。驾驶舱静态文件（`web`：明写进 `release.env` 那一步就是对外发布，要先告诉创始人）、飞书网关跟后端同一版。
+- 发完同步规矩：在用的版本和检出对上、这个提交还没同步过，就以 root 对 `fleet-agent-carpool`、`pilot` 各跑一遍 `node /srv/fleet-dao/packages/agents-sync/bin/agents-sync --apply --user <用户>`（和 france.sh 最后那步同一条、同一份名单，第五节）。没成就记下、报警，不挡发布；同一个提交不重跑，下一个提交再来；要马上补就手动跑那条命令。
+- 没成怎么办：release.sh 退出码不是 0、2（1 = 有红，含「没过健康检查、已自动退回」），或上一轮跑到一半没了（被杀、机器重启，发布锁空了、在用的不是它），都记成没成、报警，这个提交不再自动试。照报警里的日志路径查，修好后合一个修复进主线（自动发布发它），或在法国以 root 手动发：`bash /srv/fleet-dao/deploy/release.sh <提交号>`（手动发的按上面第 1 条算人按住，主线出了新提交再自动接着发）。
+- 报警（驾驶舱提醒，飞书跟着推）：自动发布当场报两种——发布没成（`auto-release:failed:<提交号>`）、规矩同步没成（`auto-release:rules:<提交号>`），之后发成了、同步成了自动解除；库连不上时这一轮不发，定时器下次醒来再看。其余的不对由后端每 5 分钟判一次（和下面 `deploy_lag` 同一个判法），开一条「线上版本跟不上主线：…」，好了解除——自动发布自己停了、没装、跑崩了，只有后端看得出来。
+- 落后读数：后端 `/healthz` 的 `deploy_lag`（健康页写「跟上主线」），读的时候现算：`current` 链接（在用哪版）加自动发布每一轮写的读数 `/srv/fleet-dao-releases/.auto/state.json`。
+  - 当场红：读数读不到、认不出；自动发布 20 分钟没报到；主线头 20 分钟没读到；最近一次自动发布没成；部署脚本的检出跟不上主线；规矩同步没成、同步到哪没读到；在用的版本不在主线最近 300 个提交里（落后太多；是没合进主线的提交的，人按住 90 分钟后才红）。
+  - 落后超过时限才红：CI 红了、CI 的结论读不到，30 分钟；在等 CI、等空闲、人按住的，90 分钟（从最老的没上线的提交合进主线、或人按住那一刻算）；一轮里在发，60 分钟还没完。
+  - 装机层：france.sh 跑完没红时把装到的提交记进 `.auto/france-applied`；之后主线上它管的文件（`france.sh`、`deploy/lib/`、`deploy/france/` 里除两个应用单元和网关打包脚本以外的）改过、一天以上没重跑，红，写明要人重跑（它碰防火墙、sudoers，不自动跑）。自动发布本身也是 france.sh 装的副本，改了 `deploy/france/auto-release/` 同样要重跑 france.sh 才换上。
+  - 公网看得到 `/healthz`：对外的话不带提交号和路径，细节在 `release.sh --check` 列出的「自动发布」那一段和报警正文里。不在法国的正式机器上（开发、测试）报「未接」。
+- 看：`bash /srv/fleet-dao/deploy/release.sh --check` 列出的「自动发布」那一段（定时器在不在跑、上一轮什么时候、主线头和它的 CI、在用的落后几个、这一轮卡在哪、规矩同步到哪、装机脚本装到哪）；`journalctl -u fleet-auto-release -n 30`（每轮一行读数）；`systemctl list-timers fleet-auto-release.timer`；发布日志在 `/srv/fleet-dao-releases/.logs/`。
+- 停、开：`systemctl disable --now fleet-auto-release.timer` 停（在跑的那一轮照样跑完；20 分钟后 `/healthz` 报自动发布没报到——停着就跟不上主线，该报）；`systemctl enable --now fleet-auto-release.timer` 开；马上跑一轮：`systemctl start fleet-auto-release`（别直接跑那个 `.mjs`：两轮叠着跑会互相盖读数）。
+- `release.sh --auto` 只给自动发布用：历史行带 `auto`、不发演示版、切之前看会话；另一个发布在跑退出 75，切之前看到会话在跑退出 76，这两种什么都没动，自动发布不记成没成。`--busy-ok`（等空闲到了上限）只能跟着 `--auto`。
+- 由来（2026-09-27）：这之前合并后没有东西发布，全靠人以 root 跑 release.sh；法国跑的版本落后主线 40 个提交、14 个小时，健康检查只看在用的那版自己好不好、不和主线比，没人发现。做法照拉取式持续部署（机器自己定时拉、持续对齐；一个提交只试一次、没成不重试；人手动退回时自动的不跟人抢）、单机 systemd 定时器加自动退回、等空闲再换版，来源和对比写在引入它的 PR 里。
 
 ## 十、「你好」工作流（P0 验收）
 

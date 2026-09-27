@@ -1,5 +1,7 @@
 // 把内存版的数据（MemoryData 的形状）原样写进 Postgres，让两个 Store 在同一份数据上过同一套测试。
 // 按外键先后写；库自己记的东西（状态变化、自增编号）由库生成，不从这里写。
+
+import type { FlowReplica } from '@fleet-dao/core';
 import {
   asks,
   auditLog,
@@ -38,6 +40,25 @@ import type { MemoryData } from '../src/memory-store.ts';
 
 const date = (iso: string) => new Date(iso);
 const dateOpt = (iso: string | undefined) => (iso === undefined ? null : new Date(iso));
+
+/**
+ * 内存版的流程配置副本（core 的 FlowReplica）→ repos 表的 flow_* 列。同步过的补上库里要的「读自哪个提交、是不是仓里
+ * 自己的」（约束要求四样一起有），整份配置只放测试命令：Store 只读得到这一样。
+ */
+function flowColumns(flow: FlowReplica) {
+  const synced = flow.syncedAt === null ? null : date(flow.syncedAt);
+  return {
+    flowConfig: synced
+      ? { formatVersion: 1, ...(flow.testCommand ? { testCommand: flow.testCommand } : {}) }
+      : null,
+    flowSource: synced ? ('project' as const) : null,
+    flowCommit: synced ? 'f'.repeat(40) : null,
+    flowSyncedAt: synced,
+    flowError: flow.error,
+    flowUnread: flow.unread,
+    flowCheckedAt: synced,
+  };
+}
 
 export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
   const familyIds = [...new Set((data.models ?? []).map((m) => m.family))];
@@ -132,9 +153,13 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
     );
   }
   if (data.repos?.length) {
-    await db
-      .insert(repos)
-      .values(data.repos.map((r) => ({ ...r, autoDispatchSince: dateOpt(r.autoDispatchSince) })));
+    await db.insert(repos).values(
+      data.repos.map(({ flow, ...r }) => ({
+        ...r,
+        autoDispatchSince: dateOpt(r.autoDispatchSince),
+        ...(flow ? flowColumns(flow) : {}),
+      })),
+    );
   }
   if (data.tasks?.length) {
     await db.insert(tasks).values(
@@ -178,6 +203,7 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
         inputTokens: r.inputTokens ?? null,
         outputTokens: r.outputTokens ?? null,
         costUsd: r.costUsd ?? null,
+        testCommand: r.testCommand ?? null,
       })),
     );
   }

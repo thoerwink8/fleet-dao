@@ -44,6 +44,7 @@ export const StageKindSchema = z.enum([
   'execute',
   'ui',
   'review',
+  'verify',
   'research',
   'judge',
 ]);
@@ -410,6 +411,26 @@ export const ModelSchema = z.object({
 export const ROUTE_PROBE_EVERY_MINUTES = 15;
 /** 结论超过这么久没更新（连着三轮没跑）：驾驶舱标「探测过期」，探针可能停了。 */
 export const ROUTE_PROBE_STALE_MINUTES = 45;
+/**
+ * 按一次的成本放慢的执行方式（design 第九节「路由探针」：贵的放慢）：上一次探通了，隔这么久才再真探；没通的照样每轮探
+ * （没登录、连不上的报错走不到模型，不扣用量）。没列的每轮都探。cursor-agent：一次最小会话约 1.3 万输入 token
+ * （2026-09-27 本机实测），扣的是按月的包含用量、和创始人在编辑器里用的是同一份——每轮都探一个月约 2900 次，2 小时一次约 360 次。
+ */
+export const ROUTE_PROBE_HOST_EVERY_MINUTES: Readonly<Partial<Record<HostId, number>>> = {
+  'cursor-agent': 120,
+};
+
+/** 这种执行方式探通之后隔多久再真探（分钟）。 */
+export function routeProbeEveryMinutes(hostId: string | undefined): number {
+  const slow =
+    hostId === undefined ? undefined : (ROUTE_PROBE_HOST_EVERY_MINUTES as Record<string, number>)[hostId];
+  return slow ?? ROUTE_PROBE_EVERY_MINUTES;
+}
+
+/** 这条路由的结论多久没更新算过期（探针可能停了）：再探的间隔加两轮。每轮都探的就是 ROUTE_PROBE_STALE_MINUTES。 */
+export function routeProbeStaleMinutes(hostId: string | undefined): number {
+  return routeProbeEveryMinutes(hostId) + ROUTE_PROBE_STALE_MINUTES - ROUTE_PROBE_EVERY_MINUTES;
+}
 
 /** 路由探针最近一次的结论（domain.ts 的 RouteProbe）。 */
 export const RouteProbeSchema = z.object({

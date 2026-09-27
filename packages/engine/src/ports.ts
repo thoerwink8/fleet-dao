@@ -22,6 +22,7 @@
 //    工人进程起来时 createEngineWorker 会先调 reapOrphanSessions（fleet-agent-scope list 再逐个 stop）：
 //    上一轮的会话输出管道已经断了，接不上。工作流被强行终止留下的会话，归每小时对账收。
 
+import type { Rebuttal, VerifyReport } from '@fleet-dao/core';
 import type { HostId, Repo, RunOutcome, StageKind, SubtaskState, TaskState } from '@fleet-dao/shared';
 import type { MergeOutcome, TestResult } from './decisions/merge.ts';
 import type { PlannedSubtask } from './decisions/plan.ts';
@@ -98,6 +99,13 @@ export interface PickRouteInput extends Scope {
    * 用不了（下线、被禁）才照常选。账号池被暂停（设备被撤销）时它也放行：这一单就是看人修好了没有的试探。
    */
   stickRouteId?: string;
+  /**
+   * 这一步要避开的模型族（开 PR 前验证只派别家：写这张单的族都在这里）。点名的、续会话的路由也照样避开，渠道自己挑模型的
+   * （上游串 auto）也不派；避开之后一条都派不出，detail 写明「没有别家可验」，不拿同族顶。
+   */
+  avoidFamilies?: string[];
+  /** 这一步算界面类的活（改到了页面代码）：禁令按 UI 判，GPT 不派（含审界面）。 */
+  uiWork?: boolean;
 }
 
 export type PickRouteResult =
@@ -121,9 +129,23 @@ export interface SessionBrief {
   /** 追问过的问题和回答。 */
   answers: { question: string; answer: string }[];
   branch?: string;
-  /** 第二意见：审哪个 PR 的哪个头。 */
+  /** 第二意见：审哪个 PR 的哪个头；开 PR 前验证：验哪个头（完整提交号，推上去的那个）。 */
   prNumber?: number;
   head?: string;
+  /** 开 PR 前验证要交代的（只有 verify 阶段给）。 */
+  verify?: VerifyBrief;
+}
+
+/** 开 PR 前验证交代给别家的材料（起会话前整份提示词过一遍卫生检查，过不了不发）。 */
+export interface VerifyBrief {
+  /** 这张单的「怎么算做完」逐条原文，从需求文档读的。 */
+  criteria: string[];
+  /** 那份需求文档（specs/<号>-<短名>/需求.md），提示词里写明出处。 */
+  specPath: string;
+  /** 方案摘要（Lead 写的）。 */
+  planSummary: string;
+  /** 这次改了哪些文件（相对主线）。 */
+  changedFiles: string[];
 }
 
 /** 给会话 scope 的资源上限（fleet-agent-scope 的 --memory-high / --memory-max / --memory-swap-max）。 */
@@ -178,7 +200,10 @@ export interface SessionHandle {
 }
 
 export interface StartSessionResult {
-  /** 执行体自己的会话编号（续会话用）。 */
+  /**
+   * 执行体自己的会话编号（续会话用）。cursor 开新会话的号是它在 init 帧里自己起的，事先定不了：这里先给一个一眼看得出
+   * 不是 UUID 的临时号（cursor-pending:<runId>），看守拿它对会话；真号由结束时的 SessionEnd.sessionId 给。
+   */
   sessionId: string;
   resumed: boolean;
   handle?: SessionHandle;
@@ -197,9 +222,18 @@ export type SessionOutput =
   | { kind: 'plan'; markdown: string; subtasks: PlannedSubtask[] }
   /** 会话只在本地提交；head 是工作树里最新的提交，changedFiles 是相对 baseHead 改了哪些文件（交付对账用）。 */
   | { kind: 'delivery'; head: string; summary: string; testsPassed: boolean; changedFiles?: string[] }
-  | { kind: 'review'; review: ReviewResult };
+  | { kind: 'review'; review: ReviewResult }
+  /**
+   * 开 PR 前验证交回的结论文件（.fleet-out/verify.json）。真端口读的时候已经拿 core 的 checkReport 挡过一道（认不出、
+   * 审错了头、漏答多答的退回会话重写）；定论照样由工作流经 decide 调 core 的 decideVerdict 判，不信这一道。
+   */
+  | { kind: 'verify'; report: VerifyReport };
 
 export interface SessionEnd {
+  /**
+   * 执行体自己的会话号，下次续会话就拿它。cursor 开新会话、还没报出号就结束了的是空串：工作流保留上一个（没有就开新会话）。
+   * 工人重启、接不上（SESSION_LOST）时回的是开工时那个号，可能是临时号：拿它续时会话端口认得出不是 UUID，开新会话带接力任务书。
+   */
   sessionId: string;
   /** stopped = 被 stopSession 停下（暂停、换路由、叫停）。 */
   outcome: 'done' | 'blocked' | 'failed' | 'stalled' | 'stopped';
@@ -232,8 +266,16 @@ export interface SessionEnd {
      */
     jev?: JevReply<TriageChoice>;
   };
-  /** 这一次会话的 token（执行体终帧报的就是这一次的）。 */
-  usage?: { inputTokens?: number; outputTokens?: number };
+  /**
+   * 这一次会话的 token（执行体终帧报的就是这一次的；Claude、cursor 都报缓存读写）。读不到的字段不给，不记成 0。
+   * 缓存读写进库、折成额度当量归 #216。
+   */
+  usage?: {
+    inputTokens?: number;
+    outputTokens?: number;
+    cacheReadTokens?: number;
+    cacheWriteTokens?: number;
+  };
   /** 整个会话（sessionId）到目前为止的累计花费（续会话时含前几轮）；这一次的由引擎按上一轮求差。 */
   sessionCostUsd?: number;
 }
@@ -429,6 +471,47 @@ export interface SpecDocRef {
   commit?: string;
 }
 
+// ---- 开 PR 前验证（docs/decisions/0003-fusion-flow.md 第 5 条第 5 步）
+
+export interface ReadCriteriaInput extends Scope {
+  repo: Repo;
+  /** 需求文档目录（specs/<号>-<短名>）：单子正文里指的那个（core 的 specDirOf 认出来的），不按标题拼。 */
+  specDir: string;
+}
+
+export interface Criteria {
+  /** 读的是哪份：默认分支上的 specs/<号>-<短名>/需求.md。 */
+  path: string;
+  /** 「怎么算做完」逐条原文（core 的 criteriaOf），至少一条。 */
+  criteria: string[];
+}
+
+/** 一轮验证的记录（库里 verify_rounds 一行，同一个 id 整行覆盖）。 */
+export interface VerificationRecord extends Scope {
+  id: string;
+  round: number;
+  /** 送检的头。 */
+  head: string;
+  /** 验证会话（session_runs.id）和它的路由、族。 */
+  runId: string;
+  routeId: string;
+  family: string;
+  authorFamilies: string[];
+  criteria: string[];
+  /** 验证模型交回的原样。 */
+  report: unknown;
+  /** decideVerdict 判的，驳回之前。 */
+  verdict: 'pass' | 'block' | 'invalid';
+  invalidWhy?: string;
+  /** Lead 拿证据驳回的。 */
+  rebuttals: Rebuttal[];
+  /** 驳回之后的结论（没驳回就是 verdict）；作废的不给。 */
+  finalVerdict?: 'pass' | 'block';
+  /** 驳回之后还挡着的，和写进 PR「还欠什么」的备注（看不出的、建议）。 */
+  reasons: string[];
+  notes: string[];
+}
+
 // ---- 人、报警、计时
 
 export interface AskHumanInput extends Scope {
@@ -540,6 +623,12 @@ export interface EnginePorts {
   saveTaskState(input: TaskStateSnapshot, ctx: PortContext): Promise<void>;
   closeIssue(input: CloseIssueInput, ctx: PortContext): Promise<void>;
   writeSpecDoc(input: WriteSpecDocInput, ctx: PortContext): Promise<SpecDocRef>;
+  /** 开 PR 前验证：读这张单的「怎么算做完」。文档不在、没有这一节，明确报错（SPEC_DOC_MISSING / CRITERIA_MISSING，不可重试）。 */
+  readCriteria(input: ReadCriteriaInput, ctx: PortContext): Promise<Criteria>;
+  /** 写这张单的会话用过的路由的族（验证只派别家）。一个都查不到明确报错（AUTHORS_UNKNOWN，不可重试），不回空的。 */
+  authorFamilies(input: Scope, ctx: PortContext): Promise<{ families: string[] }>;
+  /** 一轮验证写进库（同一个 id 整行覆盖，重试幂等）。 */
+  recordVerification(input: VerificationRecord, ctx: PortContext): Promise<void>;
   askHuman(input: AskHumanInput, ctx: PortContext): Promise<void>;
   requestApproval(input: RequestApprovalInput, ctx: PortContext): Promise<void>;
   raiseAlert(input: RaiseAlertInput, ctx: PortContext): Promise<{ alertId: string }>;

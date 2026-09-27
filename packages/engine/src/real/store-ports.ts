@@ -6,6 +6,7 @@
 // 失败一律明确：库没查成照常抛，事实对不上（RoutingInputError）抛 ROUTING_INPUT，不当成「没有路由」。
 
 import {
+  authorFamiliesOfTask,
   type Db,
   finishSessionRun,
   openAlertsByPrefix,
@@ -16,6 +17,7 @@ import {
   routeFactsForStage,
   routeOutcomesSince,
   saveTaskSnapshot,
+  saveVerifyRound,
   upsertAlert,
 } from '@fleet-dao/db';
 import type { HostId, OrgKind, StageKind } from '@fleet-dao/shared';
@@ -32,13 +34,17 @@ import {
   type RoutingPolicy,
   routeLabel,
 } from '../routing/index.ts';
+import { WIRED_HOSTS as WIRED_HOST_IDS } from './hosts.ts';
 
 /** 账号池整池暂停（设备被撤销、封号、登录失效、欠费：要人修）的提醒：dedupe_key = pool-hold:<池>。 */
 export const POOL_HOLD_PREFIX = 'pool-hold:';
 export const poolHoldKey = (poolId: string) => `${POOL_HOLD_PREFIX}${poolId}`;
 
-/** 目前接上的执行方式：只有 Claude Code（经 reclaude）。别的执行方式的路由不派，派不出时理由里写明。 */
-export const WIRED_HOSTS: readonly HostId[] = ['claude-code'];
+/**
+ * 接上的执行方式（会话端口的驱动清单，real/hosts.ts）：Claude Code（经 reclaude）、cursor-agent。别的执行方式的路由不派，
+ * 派不出时理由里写明。
+ */
+export const WIRED_HOSTS: readonly HostId[] = WIRED_HOST_IDS;
 
 /**
  * 会话用户此刻挂的 reclaude 组织（design 第九节）。切号（拼车用满切独享、到点切回）归 #59，还没做：在那之前会话用户
@@ -66,7 +72,14 @@ export interface StorePortsDeps {
 
 type StorePorts = Pick<
   EnginePorts,
-  'pickRoute' | 'askHuman' | 'requestApproval' | 'raiseAlert' | 'recordTiming' | 'saveTaskState'
+  | 'pickRoute'
+  | 'askHuman'
+  | 'requestApproval'
+  | 'raiseAlert'
+  | 'recordTiming'
+  | 'saveTaskState'
+  | 'authorFamilies'
+  | 'recordVerification'
 >;
 
 /** 给人看的池名：从渠道名拼，独享、拼车按池的组织类型分（两个 Claude 池是同一个会话用户）；不带账号、组织编号。 */
@@ -161,6 +174,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
       hostId: r.hostId,
       upstreamModel: r.upstreamModel,
       upstreamAliases: r.upstreamAliases,
+      probedAt: r.probedAt?.toISOString() ?? null,
       quota: r.quota,
       windows: r.windows.map((w) => ({
         label: w.label,
@@ -222,10 +236,13 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
       const facts = await loadStage(input.stage, now);
       const held = await heldPools();
       const known = (id: string) => facts.routes.find((r) => r.routeId === id);
+      // 开 PR 前验证只派别家：写这张单的族整族避开，点名的、续会话的也一样（一条都没有就明说没有别家可验，不拿同族顶）
+      const families = (input.avoidFamilies ?? []).filter((f) => f.trim());
       const avoid = (exceptPool?: string) => ({
         routeIds: input.avoidRouteIds,
         poolIds: [...new Set([...input.avoidPoolIds, ...[...held].filter((p) => p !== exceptPool)])],
         modelIds: input.avoidModelIds,
+        ...(families.length > 0 ? { families } : {}),
       });
       const base = {
         stage: input.stage,
@@ -236,6 +253,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         now: now.toISOString(),
         draw: draw(),
         liveOrg: SESSION_USER_ORG,
+        ...(input.uiWork ? { uiWork: true } : {}),
         ...(deps.routingPolicy ? { policy: deps.routingPolicy } : {}),
       } satisfies Omit<ChooseRouteInput, 'avoid' | 'taskRouteId'>;
       const notes: string[] = [];
@@ -309,7 +327,49 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
           : []),
       ];
       if (r.kind === 'wait') return waiting(r, context);
-      return { ok: false, waitFor: 'none', detail: [r.reason, ...context].join('；') };
+      const noOther =
+        families.length > 0
+          ? [`没有别家可验：写这张单的是 ${families.join('、')} 族，这一步只派别家，不拿同族顶`]
+          : [];
+      return { ok: false, waitFor: 'none', detail: [...noOther, r.reason, ...context].join('；') };
+    },
+
+    async authorFamilies(input) {
+      // 写这张单的会话用过的族：判验证是不是别家就靠它。一个都查不到不回空的（空的等于谁都能验）
+      const families = UUID.test(input.taskId) ? await authorFamiliesOfTask(db, input.taskId) : [];
+      if (families.length === 0) {
+        throw new PortError(
+          'AUTHORS_UNKNOWN',
+          `任务 ${input.taskId} 一个起过的会话都查不到：不知道写它的是哪一族，判不了验证模型是不是别家，不验`,
+          { retryable: false },
+        );
+      }
+      return { families };
+    },
+
+    async recordVerification(input) {
+      await saveVerifyRound(
+        db,
+        {
+          id: input.id,
+          taskId: input.taskId,
+          round: input.round,
+          head: input.head,
+          runId: input.runId,
+          routeId: input.routeId,
+          family: input.family,
+          authorFamilies: input.authorFamilies,
+          criteria: input.criteria,
+          report: input.report ?? null,
+          verdict: input.verdict,
+          invalidWhy: input.invalidWhy ?? null,
+          rebuttals: input.rebuttals,
+          finalVerdict: input.finalVerdict ?? null,
+          reasons: input.reasons,
+          notes: input.notes,
+        },
+        clock(),
+      );
     },
 
     async askHuman(input) {

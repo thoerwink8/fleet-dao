@@ -9,6 +9,7 @@ export const STAGE_NAMES: Readonly<Record<StageKind, string>> = {
   execute: '写码',
   ui: 'UI',
   review: '审查',
+  verify: '开 PR 前验证',
   research: '调研',
   judge: '判断题',
 };

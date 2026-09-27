@@ -3,6 +3,27 @@
 // 工作流文件只许 `import type` 这里的东西；直接调用会把判断搬回工作流、失去这层保护（test/structure.test.ts 盯着）。
 // 库主键也从这里出（newIds）：理由一样，要进历史。
 
+import {
+  type AcceptanceDecision,
+  type AcceptanceInput,
+  type Brief,
+  type BriefCheck,
+  type ConfigDecision,
+  checkBrief,
+  checkParallel,
+  decideAcceptance,
+  decideVerdict,
+  type FlowDecision,
+  type FlowEvent,
+  type FlowState,
+  nextFlow,
+  resolveFlowConfig,
+  type Source,
+  type VerdictDecision,
+  type VerdictInput,
+  type VerifiedRound,
+  verificationLines,
+} from '@fleet-dao/core';
 import { type Limits, resolveLimits } from '../limits.ts';
 import { checkDelivery, type DeliveryDecision, type DeliveryInput } from './delivery.ts';
 import { type FailureInput, type FailureTriage, type NextAction, nextAction } from './failure.ts';
@@ -37,6 +58,15 @@ export interface DecisionMap {
   verify: { input: VerifyInput; output: VerifyDecision };
   mergeStep: { input: MergeStepInput; output: MergeStep };
   mergeReturn: { input: MergeReturnInput; output: MergeReturnDecision };
+  // Fusion 的判断在 core 包（docs/decisions/0003-fusion-flow.md 第 12 条），这里只接上，工作流照样经 decide 调、结果进历史。
+  fusionFlow: { input: { state: FlowState; event: FlowEvent }; output: FlowDecision };
+  brief: { input: unknown; output: BriefCheck };
+  parallelBriefs: { input: Brief[]; output: { ok: true } | { ok: false; problems: string[] } };
+  acceptance: { input: AcceptanceInput; output: AcceptanceDecision };
+  verdict: { input: VerdictInput; output: VerdictDecision };
+  /** 开 PR 前验证写进 PR 正文的几行（「怎么验证的」「还欠什么」）。 */
+  verifyLines: { input: VerifiedRound[]; output: { verified: string[]; owed: string[] } };
+  flowConfig: { input: { org: Source; project: Source }; output: ConfigDecision };
 }
 
 export type DecisionKind = keyof DecisionMap;
@@ -66,6 +96,13 @@ export function createDecide(deps: DecideDeps = {}): Decide {
     verify: decideAfterVerify,
     mergeStep,
     mergeReturn: afterMergeReturn,
+    fusionFlow: ({ state, event }) => nextFlow(state, event),
+    brief: checkBrief,
+    parallelBriefs: checkParallel,
+    acceptance: decideAcceptance,
+    verdict: decideVerdict,
+    verifyLines: verificationLines,
+    flowConfig: ({ org, project }) => resolveFlowConfig(org, project),
   };
   return async (kind, input) => {
     const fn = table[kind] as ((input: unknown) => unknown) | undefined;

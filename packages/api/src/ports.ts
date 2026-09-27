@@ -1,6 +1,7 @@
 // 后端依赖的外部能力，一律按接口写：数据库（pg-store.ts 用 @fleet-dao/db 实现）、Temporal、飞书、GitHub 补收
 // 由各自的实现接进来；测试和本地开发用 memory-store.ts。两个 Store 实现过同一套契约测试（test/store-contract.ts），
 // 改这里的语义要两边一起改、契约测试跟着改。
+import type { FlowReplica } from '@fleet-dao/core';
 import type {
   AuditEntrySchema,
   Ban,
@@ -194,6 +195,11 @@ export interface AgentSession {
   subtaskId?: string | undefined;
   stage: StageKind;
   repoId: string;
+  /**
+   * 起会话时交代给它的测试命令（session_runs.test_command，当时的流程配置副本里的）：交活核对只认会话里跑过它，
+   * 退回时写明要跑哪一条。没有 = 开工时项目没写（只有不写码的阶段起得来），或加这一列之前开的会话。
+   */
+  testCommand?: string | undefined;
   /** 引擎给这次会话建了分支才有。 */
   branch?: string | undefined;
   /** 做完标准（需求上的 acceptance）。 */
@@ -211,11 +217,16 @@ export interface PullRequestRecord {
   checks: 'success' | 'failure' | 'pending' | 'none';
 }
 
-/** 会话里跑过的一次测试：从 kind=test 的进度里读出来的，载荷带布尔 passed 的才算（读不出结果的不算证据）。 */
+/**
+ * 会话里跑过的一次测试：从 kind=test 的进度里读出来的。passed 为 null 是结果认不出（接了管道、放了后台……，
+ * 插头写明了原因），照样列出来：交活核对以最后一次为准，认不出的那一次不能被它前面一次「通过」顶掉。
+ */
 export interface TestRunRecord {
   at: string;
-  passed: boolean;
+  passed: boolean | null;
   command?: string | undefined;
+  /** passed 为 null 时：为什么认不出。 */
+  unknownBecause?: string | undefined;
 }
 
 export type HistoryItem = z.infer<typeof HistoryResponse>['items'][number];
@@ -495,9 +506,13 @@ export interface GitHubStore {
   }): Promise<{ exhausted: number; stale: number }>;
 }
 
-/** 受管的仓，带自动派活开关：autoDispatchSince = 打开的时刻，null = 关着（只收单、显示，不拉起工作流）。 */
+/**
+ * 受管的仓，带自动派活开关：autoDispatchSince = 打开的时刻，null = 关着（只收单、显示，不拉起工作流）。
+ * flow = 流程配置的副本（repos 表的 flow_* 列，对账从仓里 .fleet/flow.json 同步）：认不出、太旧就停派（core 的 replicaVerdict）。
+ */
 export interface IntakeRepo extends Repo {
   autoDispatchSince: string | null;
+  flow: FlowReplica;
 }
 
 /** 改「让 AI 接活」开关的结果（setAutoDispatch）。 */

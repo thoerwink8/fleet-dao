@@ -1,4 +1,5 @@
 // 流程判断全是纯函数：不起 Temporal 直接测。
+import { startFlow } from '@fleet-dao/core';
 import { describe, expect, it } from 'vitest';
 import { activityOptions, QUICK_TIMEOUT_SECONDS } from '../src/activity-options.ts';
 import {
@@ -21,7 +22,16 @@ import {
 } from '../src/decisions/index.ts';
 import type { FailureVerdict } from '../src/failure/index.ts';
 import { describeHolds, normalizeHolds } from '../src/holds.ts';
-import { DEFAULT_LIMITS, historyAlertLine, resolveLimits } from '../src/limits.ts';
+import {
+  CONCURRENT_SESSIONS,
+  DEFAULT_LIMITS,
+  FRANCE_RESIDENT_MB,
+  FRANCE_USABLE_MB,
+  historyAlertLine,
+  resolveLimits,
+  SESSION_MEMORY_HIGH_MB,
+  SESSION_MEMORY_MAX_MB,
+} from '../src/limits.ts';
 import { costOfRun } from '../src/usage.ts';
 
 const limits = DEFAULT_LIMITS;
@@ -41,6 +51,18 @@ describe('上限：读时现算默认值', () => {
     expect(old).toEqual({ reviewRounds: 5 });
     expect(resolveLimits({ ciFixRounds: -1, heartbeatSeconds: Number.NaN }).ciFixRounds).toBe(3);
     expect(resolveLimits(undefined)).toEqual(DEFAULT_LIMITS);
+  });
+
+  it('会话内存上限按法国实测容量算：(11G - 常驻 0.6G) ÷ 同时 3 个会话；软上限只比硬上限低 256', () => {
+    expect(SESSION_MEMORY_MAX_MB).toBe(Math.floor((11 * 1024 - 600) / 3));
+    expect(DEFAULT_LIMITS).toMatchObject({ sessionMemoryMaxMb: 3554, sessionMemoryHighMb: 3298 });
+    // 同时跑满的会话都顶到硬上限，加上常驻服务也不超过能分的
+    expect(CONCURRENT_SESSIONS * DEFAULT_LIMITS.sessionMemoryMaxMb + FRANCE_RESIDENT_MB).toBeLessThanOrEqual(
+      FRANCE_USABLE_MB,
+    );
+    // 放得下法国实测开 2 个测试进程的峰值（约 2493 MiB，含页缓存）加 Claude Code（约 270）：原来的 1.5G / 2G 连 1 个都放不下
+    expect(DEFAULT_LIMITS.sessionMemoryHighMb).toBeGreaterThan(2493 + 270);
+    expect(DEFAULT_LIMITS.sessionMemoryHighMb).toBe(SESSION_MEMORY_HIGH_MB);
   });
 
   it('事件数报警线：在途任务记下的那一套里没有这一项（它加进来之前开工的），按现在的默认值，不报「报警线 undefined」', () => {
@@ -724,5 +746,47 @@ describe('编号（库主键）', () => {
     }
     expect(new Set(ids).size).toBe(3);
     expect(await decide('newIds', { count: 0 })).toEqual([]);
+  });
+});
+
+describe('Fusion 的判断经 decide 调（core 包，0003 第 12 条）', () => {
+  const decide = createDecide();
+
+  it('状态机、简报、验收、验证、流程配置都接上了', async () => {
+    const state = startFlow('fusion', false);
+    const step = await decide('fusionFlow', { state, event: { kind: 'discussed' } });
+    expect(step).toMatchObject({ ok: true, action: 'intake' });
+    expect((await decide('brief', { goal: 'x' })).ok).toBe(false);
+    expect(await decide('parallelBriefs', [])).toEqual({ ok: true });
+    const verdict = await decide('verdict', {
+      criteria: ['a'],
+      sentHead: 'abc1234',
+      report: { head: 'abc1234', results: [{ criterion: 'a', answer: 'done', evidence: 'e' }], findings: [] },
+      verifierFamily: 'gpt',
+      authorFamilies: ['claude'],
+      rebuttals: [],
+    });
+    expect(verdict.verdict).toBe('pass');
+    const lines = await decide('verifyLines', [
+      {
+        round: 1,
+        verifier: 'Kimi k3（kimi 族）',
+        criteria: 1,
+        rebuttals: [],
+        final: { verdict: 'pass', notes: [], rebutted: [] },
+      },
+    ]);
+    expect(lines.verified).toEqual([
+      '开 PR 前别家验证第 1 轮（Kimi k3（kimi 族））：过，逐条核了 1 条「怎么算做完」',
+    ]);
+  });
+
+  it('【故意造出的失败】验证一轮都没有：PR 正文明说没有记录，不空着', async () => {
+    expect(await decide('verifyLines', [])).toEqual({ verified: ['开 PR 前别家验证：没有记录'], owed: [] });
+  });
+
+  it('【故意造出的失败】全组织默认读不到：判停派，不拿空配置顶', async () => {
+    const got = await decide('flowConfig', { org: { kind: 'missing' }, project: { kind: 'missing' } });
+    expect(got).toMatchObject({ ok: false, scope: 'org' });
   });
 });
