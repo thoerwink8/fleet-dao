@@ -149,6 +149,34 @@ describe('任务详情「时间与用量」：读到的照数写，没读到的�
     expect(sub).toContain('不另花钱');
   });
 
+  test('缓存有一次没读到：照数写读到的那几次，标「不全」、写明另有 1 次', () => {
+    render(<UsagePanel d={detail([run(), without(run(), 'cacheWriteTokens')])} now={NOW} />);
+    const cache = figure('缓存');
+    expect(cache).toContain('不全');
+    expect(cache).toContain('读 3.0 万');
+    expect(cache).toContain('写 2,000');
+    expect(cache).toContain('另有 1 次没读到，没算进来');
+    expect(figure('token')).not.toContain('不全');
+  });
+
+  test('花费：按量有一次没报——照数写读到的、标「不全」；渠道查不到又没报的——「分不清」那栏写没读到', () => {
+    render(
+      <UsagePanel
+        d={detail([
+          run({ billing: 'metered', costUsd: 0.04 }),
+          without(run({ billing: 'metered' }), 'costUsd'),
+          without(run(), 'billing', 'costUsd'),
+        ])}
+        now={NOW}
+      />,
+    );
+    expect(shownValue('按量')).toContain('$0.04');
+    expect(figure('按量')).toContain('不全');
+    expect(figure('按量')).toContain('另有 1 次没读到');
+    expect(shownValue('分不清')).toBe('没读到');
+    expect(figure('分不清')).toContain('1 次会话都没读到');
+  });
+
   test('花费：按量的会话没报花费——按量那栏写没读到，不写 $0.00', () => {
     render(<UsagePanel d={detail([without(run({ billing: 'metered' }), 'costUsd')])} now={NOW} />);
     expect(figure('按量')).toContain('没读到');
@@ -167,6 +195,14 @@ describe('任务详情「时间与用量」：读到的照数写，没读到的�
     render(<UsagePanel d={detail([run(), run({ startedAt: at(-10), endedAt: at(-20) })])} now={NOW} />);
     expect(figure('干活合计')).toContain('不全');
     expect(figure('干活合计')).toContain('另有 1 次时刻认不出');
+  });
+
+  test('时长：唯一一次会话时刻认不出——排队、干活合计写「没读到」，不写 1 秒', () => {
+    render(<UsagePanel d={detail([run({ startedAt: at(-10), endedAt: at(-20) })])} now={NOW} />);
+    for (const label of ['排队合计', '干活合计']) {
+      expect(shownValue(label), label).toBe('没读到');
+      expect(figure(label), label).toContain('1 次会话都时刻认不出');
+    }
   });
 
   test('只有在跑的会话：写「会话结束后才有数」，不写没读到', () => {
