@@ -5,9 +5,12 @@
 // 选它不选 N=2^17、p=1：每次算要的内存是 128·N·r 字节，N=2^15、r=8 是 32 MiB（2^17 是 128 MiB）；
 // libuv 线程池默认 4 个线程，同时最多 4 个在算，最坏也就 128 MiB，法国那台机器扛得住。
 // 改这里之前必须知道：库里已有的哈希按它自己带的参数验，改默认参数只影响以后设的密码。
+// 调用方不传参数就用 SCRYPT_PARAMS。没有环境变量，也没有可以改掉的模块级「当前参数」：
+// 测试要快，只能把小参数当参数传进来（#307）。
 import { randomBytes, type ScryptOptions, scrypt, timingSafeEqual } from 'node:crypto';
 
 export const SCRYPT_PARAMS = { N: 2 ** 15, r: 8, p: 3 } as const;
+export type ScryptParams = { readonly N: number; readonly r: number; readonly p: number };
 const SALT_BYTES = 16;
 const KEY_BYTES = 32;
 /** 库里读出来的参数不许超过这些：哈希被人改大了，也不能拿它把后端内存吃光。 */
@@ -48,21 +51,9 @@ function normalize(password: string): string {
   return password.normalize('NFC');
 }
 
-export async function hashPassword(password: string): Promise<string> {
-  const { N, r, p } = SCRYPT_PARAMS;
-  const salt = randomBytes(SALT_BYTES);
-  const key = await scryptAsync(normalize(password), salt, KEY_BYTES, { N, r, p, maxmem: maxmem(N, r) });
-  return ['scrypt', N, r, p, salt.toString('base64url'), key.toString('base64url')].join('$');
-}
-
-function parseHash(stored: string) {
-  const parts = stored.split('$');
-  if (parts.length !== 6 || parts[0] !== 'scrypt') throw new PasswordHashFormatError('不是 scrypt 哈希');
-  const [N, r, p] = parts.slice(1, 4).map((x) => (/^\d{1,8}$/.test(x ?? '') ? Number(x) : Number.NaN));
+/** 跟 parseHash 同一套上下限：认不出就抛，不许退回生产参数再算一版。 */
+function assertScryptParams(N: number, r: number, p: number): void {
   if (
-    N === undefined ||
-    r === undefined ||
-    p === undefined ||
     !Number.isInteger(N) ||
     N < 2 ||
     N > MAX_N ||
@@ -72,6 +63,24 @@ function parseHash(stored: string) {
   ) {
     throw new PasswordHashFormatError('scrypt 参数认不出或超出上限');
   }
+}
+
+export async function hashPassword(password: string, params: ScryptParams = SCRYPT_PARAMS): Promise<string> {
+  const { N, r, p } = params;
+  assertScryptParams(N, r, p);
+  const salt = randomBytes(SALT_BYTES);
+  const key = await scryptAsync(normalize(password), salt, KEY_BYTES, { N, r, p, maxmem: maxmem(N, r) });
+  return ['scrypt', N, r, p, salt.toString('base64url'), key.toString('base64url')].join('$');
+}
+
+function parseHash(stored: string) {
+  const parts = stored.split('$');
+  if (parts.length !== 6 || parts[0] !== 'scrypt') throw new PasswordHashFormatError('不是 scrypt 哈希');
+  const [N, r, p] = parts.slice(1, 4).map((x) => (/^\d{1,8}$/.test(x ?? '') ? Number(x) : Number.NaN));
+  if (N === undefined || r === undefined || p === undefined) {
+    throw new PasswordHashFormatError('scrypt 参数认不出或超出上限');
+  }
+  assertScryptParams(N, r, p);
   const salt = strictBase64url(parts[4] ?? '');
   const key = strictBase64url(parts[5] ?? '');
   if (salt.length < SALT_BYTES || key.length < KEY_BYTES) throw new PasswordHashFormatError('盐或哈希太短');
@@ -97,14 +106,28 @@ export async function verifyPassword(password: string, stored: string): Promise<
   return timingSafeEqual(got, key);
 }
 
-let dummy: Promise<string> | undefined;
+/** 按参数分开留占位哈希：测试先算过的小参数不能占住「不传参数」那一份。 */
+const dummies = new Map<string, Promise<string>>();
 /**
  * 没这个用户、或这人还没设过密码时也照样算一次哈希再说「不对」：两种情况花的时间和「密码错」一样，
  * 别人没法凭响应快慢试出哪些用户名存在。
  */
-export async function burnPasswordCheck(password: string): Promise<void> {
-  dummy ??= hashPassword(randomBytes(16).toString('base64url'));
-  await verifyPassword(password, await dummy);
+export async function burnPasswordCheck(
+  password: string,
+  params: ScryptParams = SCRYPT_PARAMS,
+): Promise<void> {
+  const key = `${params.N}/${params.r}/${params.p}`;
+  let pending = dummies.get(key);
+  if (!pending) {
+    pending = hashPassword(randomBytes(16).toString('base64url'), params);
+    dummies.set(key, pending);
+  }
+  try {
+    await verifyPassword(password, await pending);
+  } catch (err) {
+    if (dummies.get(key) === pending) dummies.delete(key);
+    throw err;
+  }
 }
 
 export type CredentialProblem =

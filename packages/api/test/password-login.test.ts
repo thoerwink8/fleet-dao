@@ -20,6 +20,7 @@ import {
   IDS,
   PUBLIC_ORIGIN,
   setCookies,
+  TEST_SCRYPT_PARAMS,
   viaGateway,
   write,
 } from './harness.ts';
@@ -56,11 +57,9 @@ async function body(res: Response) {
 
 describe('密码哈希（crypto.scrypt）', () => {
   it('带参数和盐；同一个密码两次哈希不一样；对的验得过、错的验不过', async () => {
-    const a = await hashPassword(PASSWORD);
-    const b = await hashPassword(PASSWORD);
-    expect(a).toMatch(
-      new RegExp(`^scrypt\\$${SCRYPT_PARAMS.N}\\$${SCRYPT_PARAMS.r}\\$${SCRYPT_PARAMS.p}\\$`),
-    );
+    const a = await hashPassword(PASSWORD, TEST_SCRYPT_PARAMS);
+    const b = await hashPassword(PASSWORD, TEST_SCRYPT_PARAMS);
+    expect(a).toMatch(/^scrypt\$256\$8\$1\$/);
     expect(a).not.toBe(b);
     expect(a).not.toContain(PASSWORD);
     expect(await verifyPassword(PASSWORD, a)).toBe(true);
@@ -71,8 +70,31 @@ describe('密码哈希（crypto.scrypt）', () => {
     expect(SCRYPT_PARAMS).toEqual({ N: 32768, r: 8, p: 3 });
   });
 
+  it('传入认不出的参数：抛 PasswordHashFormatError，不退回生产参数', async () => {
+    for (const params of [
+      { N: 3, r: 8, p: 1 },
+      { N: 2 ** 22, r: 8, p: 1 },
+    ]) {
+      await expect(hashPassword(PASSWORD, params)).rejects.toBeInstanceOf(PasswordHashFormatError);
+    }
+  });
+
+  it('生产建出来的哈希仍是 N=2^15、r=8、p=3；测试的小参数带不过去', async () => {
+    const fast = harness();
+    await setFirst(fast);
+    const testHash = fast.store.data.credentials.get(DEV_USER_ID)?.passwordHash;
+    expect(testHash).toMatch(/^scrypt\$256\$8\$1\$/);
+    expect(testHash).not.toMatch(/^scrypt\$32768\$/);
+
+    const prod = harness({ scryptParams: null });
+    await setFirst(prod);
+    const produced = prod.store.data.credentials.get(DEV_USER_ID)?.passwordHash;
+    expect(produced).toMatch(/^scrypt\$32768\$8\$3\$/);
+    expect(produced).not.toMatch(/^scrypt\$256\$/);
+  });
+
   it('库里的哈希格式认不出：抛 PasswordHashFormatError，不当成「密码错」', async () => {
-    const good = await hashPassword(PASSWORD);
+    const good = await hashPassword(PASSWORD, TEST_SCRYPT_PARAMS);
     const parts = good.split('$');
     const bad = [
       '',
@@ -141,7 +163,7 @@ describe('账密登录', () => {
       {
         userId: IDS.botWorker,
         username: 'robot',
-        passwordHash: await hashPassword(PASSWORD),
+        passwordHash: await hashPassword(PASSWORD, TEST_SCRYPT_PARAMS),
         at: new Date(),
       },
       { actor: { kind: 'engine', id: 't' }, action: 't', target: 't', via: 'engine', ok: true },
@@ -519,7 +541,7 @@ describe('会话作废（会话版本）', () => {
       {
         userId: DEV_USER_ID,
         username: 'founder-a',
-        passwordHash: await hashPassword(PASSWORD),
+        passwordHash: await hashPassword(PASSWORD, TEST_SCRYPT_PARAMS),
         at: new Date(),
       },
       {

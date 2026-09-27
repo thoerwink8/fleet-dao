@@ -215,7 +215,7 @@ export function authRoutes(deps: Deps): Hono<CockpitEnv> {
     let ok = false;
     try {
       if (user && creds?.passwordHash !== undefined) ok = await verifyPassword(password, creds.passwordHash);
-      else await burnPasswordCheck(password);
+      else await burnPasswordCheck(password, deps.scryptParams);
     } catch (err) {
       if (err instanceof PasswordHashFormatError) {
         // 库里的哈希坏了：不当「密码错」糊过去（那样人永远登不上还查不出原因），照实 500 并记下是谁的
