@@ -465,6 +465,30 @@ describe('等 CI', () => {
     expect(await wait(gh, pr.number, A)).toMatchObject({ state: 'head_moved', actualHead: B });
   });
 
+  it('刚推完 GitHub 读回更早的头（新头是老头的祖先）：隔一会儿再读，读回推上去的那个头就接着查，不当成强推', async () => {
+    const { gh, fake } = setup();
+    const pr = fake.addPull({ head: { ref: 'task/1', sha: B } });
+    fake.aheadBy.set(B, 0);
+    fake.behindBy.set(B, 2);
+    fake.addCheck(A, 'check', 'success');
+    let reads = 0;
+    fake.before.push((req) => {
+      if (req.method === 'GET' && /\/pulls\/\d+$/.test(req.path) && ++reads > 2) pr.head.sha = A;
+      return undefined;
+    });
+    expect(await wait(gh, pr.number, A)).toMatchObject({ state: 'green', head: A });
+  });
+
+  it('【故意造出的失败】一直读到更早的头：再读几次还是它，才报头被改回去了（不当成认了新头）', async () => {
+    const { gh, fake } = setup();
+    const pr = fake.addPull({ head: { ref: 'task/1', sha: B } });
+    fake.aheadBy.set(B, 0);
+    fake.behindBy.set(B, 2);
+    const res = await wait(gh, pr.number, A);
+    expect(res).toMatchObject({ state: 'head_moved', actualHead: B });
+    if (res.state === 'head_moved') expect(res.detail).toContain('退回到了更早的');
+  });
+
   it('PR 的头变了、新头含着老头（人或引擎自己并了主线又推了）：认新头，接着在它上面等 CI，不算头变了', async () => {
     const { gh, fake } = setup();
     const pr = fake.addPull({ head: { ref: 'task/1', sha: B } });
