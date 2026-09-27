@@ -56,7 +56,7 @@ describe('上限：读时现算默认值', () => {
     expect(resolveLimits(undefined)).toEqual(DEFAULT_LIMITS);
   });
 
-  it('会话内存上限（法国 2026-09-28 #307 断链之后的新推导）：父节点 fleet-agents.slice 兜总量，单会话放宽到约一半', () => {
+  it('会话内存上限（法国 2026-09-28 断链之后的新推导）：父节点 fleet-agents.slice 兜总量，单会话放宽到约一半', () => {
     // 父节点总上限 = 能分给会话的 - 平台常驻服务，软上限只比它低 512
     expect(SLICE_MEMORY_MAX_MB).toBe(FRANCE_USABLE_MB - FRANCE_RESIDENT_MB);
     expect(SLICE_MEMORY_HIGH_MB).toBe(SLICE_MEMORY_MAX_MB - 512);

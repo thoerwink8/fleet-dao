@@ -1,5 +1,5 @@
 // fleet-agents.slice（父节点，装到法国机器上的静态单元文件）的 MemoryHigh/MemoryMax 和这里算出来的
-// SLICE_MEMORY_HIGH_MB / SLICE_MEMORY_MAX_MB 必须是同一个数：两处各记一遍容易改一边忘了改另一边（#307 断链的教训），
+// SLICE_MEMORY_HIGH_MB / SLICE_MEMORY_MAX_MB 必须是同一个数：两处各记一遍容易改一边忘了改另一边（法国 2026-09-28 断链的教训），
 // 这里直接读那份文件的文本核对，不是从 limits.ts 生成它——生成需要给 systemd 单元文件加一道构建步骤，这里先用测试守住。
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
