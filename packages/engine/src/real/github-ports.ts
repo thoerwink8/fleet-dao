@@ -49,7 +49,11 @@ export type EngineGitHub = Pick<
   | 'bundleCommits'
   | 'writeSpecDoc'
   | 'readSpecDoc'
+  | 'readIssuePlan'
 >;
+
+/** 开 PR 的仓（owner、name 够读需求文档、读单子挂的版本）。 */
+type PrRepo = { owner: string; name: string };
 
 export interface GitHubPortsDeps {
   gh: EngineGitHub;
@@ -170,6 +174,45 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
     ...(deps.gitBin ? { git: deps.gitBin } : {}),
     ...(deps.shBin ? { sh: deps.shBin } : {}),
   });
+
+  /** 「对应计划」照主线上那份需求文档里的那一行：读不到、没填都明确报错，不开 PR。 */
+  const planFromDoc = async (repo: PrRepo, path: string, ctx: PortContext): Promise<string> => {
+    const doc = await mapped(() => gh.readSpecDoc({ repo, path, signal: ctx.signal }, ctx));
+    if (!doc) {
+      throw new PortError(
+        'SPEC_PLAN_MISSING',
+        `主线上没有 ${path}：开 PR 要照它写「对应计划」一栏（需求文档还没进主线？）`,
+        { retryable: false },
+      );
+    }
+    const plan = planLineOf(doc.content);
+    if ('error' in plan) {
+      throw new PortError(
+        'SPEC_PLAN_MISSING',
+        `${path} 里${plan.error}：开 PR 的「对应计划」一栏照它写，缺了不开。${PLAN_LINE_HINT}`,
+        { retryable: false },
+      );
+    }
+    return plan.ok;
+  };
+
+  /**
+   * 需求文档跟着这个 PR 才进主线的单（#295）：「对应计划」照单子此刻挂的版本写，没挂写「未排期」（和 pnpm issue:new 写进
+   * 需求文档的那一行同一个写法）。读不到单子由 github 包明确报错，不当成未排期。
+   */
+  const planFromIssue = async (
+    repo: PrRepo,
+    issueNumber: number | undefined,
+    ctx: PortContext,
+  ): Promise<string> => {
+    if (issueNumber === undefined) {
+      throw new PortError('SPEC_PLAN_MISSING', '开 PR 没给单号：「对应计划」要照单子挂的版本写，没法读', {
+        retryable: false,
+      });
+    }
+    const plan = await mapped(() => gh.readIssuePlan({ repo, issueNumber, signal: ctx.signal }, ctx));
+    return plan.milestone?.title ?? '未排期';
+  };
 
   /** 这棵树现在归谁：不在（从没起过会话、或已经收了）明确报错，不当成「没有改动」。 */
   const ownerOrFail = async (dir: string): Promise<SessionUser> => {
@@ -304,23 +347,9 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
           },
         );
       }
-      const path = `${specs}${REQUIREMENT_DOC}`;
-      const doc = await mapped(() => gh.readSpecDoc({ repo: input.repo, path, signal: ctx.signal }, ctx));
-      if (!doc) {
-        throw new PortError(
-          'SPEC_PLAN_MISSING',
-          `主线上没有 ${path}：开 PR 要照它写「对应计划」一栏（需求文档还没进主线？）`,
-          { retryable: false },
-        );
-      }
-      const plan = planLineOf(doc.content);
-      if ('error' in plan) {
-        throw new PortError(
-          'SPEC_PLAN_MISSING',
-          `${path} 里${plan.error}：开 PR 的「对应计划」一栏照它写，缺了不开。${PLAN_LINE_HINT}`,
-          { retryable: false },
-        );
-      }
+      const planLine = input.body.planFromIssue
+        ? await planFromIssue(input.repo, issueNumber, ctx)
+        : await planFromDoc(input.repo, `${specs}${REQUIREMENT_DOC}`, ctx);
       const r = await mapped(() =>
         gh.openPr(
           {
@@ -328,7 +357,7 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
             branch: input.branch,
             head: input.head,
             title: input.title,
-            body: prBody(input.body, plan.ok, specs),
+            body: prBody(input.body, planLine, specs),
             ...(issueNumber === undefined ? {} : { inheritFrom: { issueNumber } }),
           },
           ctx,

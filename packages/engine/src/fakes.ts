@@ -301,7 +301,8 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
         return {
           kind: 'lead-plan',
           head: fakeHead(seq),
-          changedFiles: [docs.plan],
+          // 还没有需求文档的单（#295）：照交代把引擎照正文写好的那份和方案一起提交
+          changedFiles: lead?.requirementText ? [docs.requirement, docs.plan] : [docs.plan],
           summary: '登录表单加验证码输入，后端校验五分钟过期',
           brief: FAKE_BRIEF,
           small: true,

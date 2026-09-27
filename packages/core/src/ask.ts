@@ -310,7 +310,8 @@ export interface AskIssueFacts {
 
 /**
  * 另开的单的标题和正文（引擎开，写进公开的单：开之前 github 包过卫生检查）。正文照 pnpm issue:new 的样子：开头写起因
- * （原话）和怎么理解，后面「## 怎么算做完」。引擎不往主线直接写，开单时没法连需求文档一起建：正文里写明接手前先补一份。
+ * （原话）和怎么理解，后面「## 怎么算做完」。需求写全在正文里、没有单独的需求文档：引擎接手时照正文写一份，随 PR 进主线
+ * （criteria.ts 的 specOf，#295）。那一句说明放在「怎么算做完」前面，不然开 PR 前验证会把它当成一条验收条。
  */
 export function askIssueText(f: AskIssueFacts): { title: string; body: string } {
   const { ask, original } = f;
@@ -321,8 +322,8 @@ export function askIssueText(f: AskIssueFacts): { title: string; body: string } 
     return t === rec ? `「${t}」（AI 推荐）` : `「${t}」`;
   });
   const question = ask.question.trim();
-  const needDoc =
-    '这张单是引擎对账时开的，还没有需求文档（引擎不往主线直接写）：接手前照这张单写一份 `specs/<本单号>-<短名>/需求.md` 合进主线，正文补上「文档：」那一行，引擎才接得了。';
+  const docNote =
+    '这张单是引擎对账时开的，需求就写在这里：接手时引擎照这张单的正文写需求文档，随 PR 进主线（#295）。';
   if (f.kind === 'follow-up') {
     const answer = oneLine(ask.answer ?? '');
     const where = f.placement.milestone
@@ -341,12 +342,12 @@ export function askIssueText(f: AskIssueFacts): { title: string; body: string } 
         `**选项**：${options.join('、')}`,
         `**创始人选了**：「${answer}」`,
         '',
+        docNote,
+        '',
         '## 怎么算做完',
         '',
         `- #${n} 里按推荐先做的「${rec}」改成创始人选的「${answer}」，受影响的地方和测试跟着改`,
         '- CI 绿，合进主线',
-        '',
-        needDoc,
       ].join('\n'),
     };
   }
@@ -360,12 +361,12 @@ export function askIssueText(f: AskIssueFacts): { title: string; body: string } 
       `**问**：${question}`,
       `**选项**：${options.join('、')}`,
       '',
+      docNote,
+      '',
       '## 怎么算做完',
       '',
       `- 创始人拍了选哪个（#${n} 的提问卡片上点，或者在这张单上说），照他拍的把这一块做完`,
       '- CI 绿，合进主线',
-      '',
-      needDoc,
     ].join('\n'),
   };
 }

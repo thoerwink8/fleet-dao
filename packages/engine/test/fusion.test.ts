@@ -1,6 +1,7 @@
 // Fusion 工作流（src/workflows/fusion.ts，#214）：在真 Temporal（测试服务端）里跑，端口是假的（src/fakes.ts）。
 // 走通一条全程，再每条要紧的岔路各一条：副手打回两次 Lead 接手、验证挡两轮停下、CI 红三轮停下、要问创始人、
 // 流程配置读不到或认不出（停派报红，修好点「继续」接着走）、没有别家可验、单子正文没指需求文档、单模型模式、人闸。
+import { askIssueText } from '@fleet-dao/core';
 import type { WorkflowHandle } from '@temporalio/client';
 import type { TestWorkflowEnvironment } from '@temporalio/testing';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -700,6 +701,109 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
     // 认不出需求文档的时候 issue 上的进度段不动（进度段里要写文档路径）
     const firstProgress = w.callsOf('updateIssueProgress')[0];
     expect(firstProgress?.input.progress.docs.requirement).toBe(DOCS.requirement);
+  });
+
+  describe('正文写全了需求、没有需求文档的单（#295：引擎对账开的后续单、巡检单）', () => {
+    const title = '#11 的后续：验证码几位？改成「4 位」';
+    const body = [
+      '创始人在 #11（登录页加验证码）的提问里改选了「4 位」。',
+      '',
+      '## 怎么算做完',
+      '',
+      '- #11 里按推荐先做的「6 位」改成「4 位」，测试跟着改',
+      '- CI 绿，合进主线',
+      '',
+      '<!-- fleet:issue:abc123 -->',
+    ].join('\n');
+    const dir = 'specs/12-11的后续验证码几位改成4位';
+    const bodyInput = () => fusionInput({ title, rawRequest: body });
+
+    it('照收、不停下：Lead 把照正文写的需求文档和方案一起提交，开 PR 前验证照正文核，「对应计划」照单子挂的版本', async () => {
+      const input = bodyInput();
+      const w = world({ request: () => ({ title, rawRequest: body }) });
+      const result = await runToEnd(w, input);
+      expect(result.state).toBe('done');
+      expect(result.docs).toEqual({
+        requirement: `${dir}/需求.md`,
+        plan: `${dir}/方案.md`,
+        result: `${dir}/结果.md`,
+      });
+      expect(trail(w)).toEqual(['lead:plan', 'side', 'lead:accept', 'verify', 'lead:review']);
+      // Lead 写方案时拿到照正文写好的需求文档（去掉了引擎开单的标记），交代它原样提交
+      const plan = w.callsOf('startSession').find((c) => c.input.brief.lead?.step === 'plan');
+      expect(plan?.input.brief.lead?.requirementText).toBe(
+        `# ${title}（#12）\n\n${body.replace('\n\n<!-- fleet:issue:abc123 -->', '')}\n`,
+      );
+      // 验证照单子正文逐条核，不读主线上的需求文档（还没进主线）
+      expect(w.count('readCriteria')).toBe(0);
+      expect(w.verifications[0]?.criteria).toEqual([
+        '#11 里按推荐先做的「6 位」改成「4 位」，测试跟着改',
+        'CI 绿，合进主线',
+      ]);
+      // 开 PR：需求文档随这个 PR 进主线，「对应计划」照单子挂的版本写
+      expect(w.callsOf('openPr')[0]?.input.body).toMatchObject({ specs: dir, planFromIssue: true });
+      expect(w.callsOf('openPr')[0]?.input.body.changedFiles).toContain(`${dir}/需求.md`);
+    });
+
+    it('对账真开出来的后续单、超出范围的单（core 的 askIssueText 写的正文）照收，做到合并', async () => {
+      for (const kind of ['follow-up', 'outside'] as const) {
+        const text = askIssueText({
+          kind,
+          ask: {
+            id: 'ask-1',
+            question: '验证码几位？',
+            options: ['6 位', '4 位'],
+            scope: kind === 'outside' ? 'outside' : 'task',
+            recommended: '6 位',
+            answer: '4 位',
+            applied: false,
+          },
+          original: { issueNumber: 11, title: '登录页加验证码' },
+          placement: { labels: ['需求'], milestone: null },
+        });
+        const w = world({ request: () => ({ title: text.title, rawRequest: text.body }) });
+        const result = await runToEnd(w, fusionInput({ title: text.title, rawRequest: text.body }));
+        expect(result.state).toBe('done');
+        expect(w.verifications[0]?.criteria).toHaveLength(2);
+      }
+    });
+
+    it('【失败】Lead 只提交了方案、没提交需求文档：方案不收，退回写明要提交哪份；几次都不交就停下等人，不推', async () => {
+      const w = world({
+        request: () => ({ title, rawRequest: body }),
+        lead: (step) =>
+          step === 'plan'
+            ? {
+                kind: 'lead-plan',
+                head: fakeHead(91),
+                changedFiles: [`${dir}/方案.md`],
+                summary: '改成 4 位',
+                brief: FAKE_BRIEF,
+                small: true,
+                highRisk: false,
+                holds: [],
+              }
+            : undefined,
+      });
+      const { parked, result } = await runUntilParked(w, bodyInput());
+      expect(parked.lastProblem).toBe('方案几次都不合格');
+      const alert = w.callsOf('raiseAlert').find((c) => c.input.title === '方案几次都不合格');
+      expect(alert?.input.detail).toContain('需求文档没提交');
+      expect(result.state).toBe('stopped');
+      expect(w.count('pushBranch')).toBe(0);
+      const retry = w.callsOf('startSession').filter((c) => c.input.brief.lead?.step === 'plan')[1];
+      expect(retry?.input.brief.feedback[0]?.items.join('\n')).toContain(`${dir}/需求.md`);
+    });
+
+    it('【失败】开 PR 前单子正文里的「怎么算做完」被删了：不验、也不当成验过了，停下等人补', async () => {
+      const w = world({ request: () => ({ title, rawRequest: '改成 4 位就行' }) });
+      const { parked } = await runUntilParked(w, bodyInput());
+      expect(parked.lastProblem).toContain('开 PR 前验证没法逐条核');
+      expect(parked.lastProblem).toContain('没有「## 怎么算做完」一节');
+      expect(trail(w)).toEqual(['lead:plan', 'side', 'lead:accept']);
+      expect(w.count('readCriteria')).toBe(0);
+      expect(w.count('openPr')).toBe(0);
+    });
   });
 
   it('【失败】流程配置不能用、停派时叫停：库里的任务记成叫停（不留在排队），没有配置就不记读自哪', async () => {
