@@ -317,7 +317,7 @@ export function fusionPrParts(f: FusionPrFacts): FusionPrParts {
   ];
   if (f.soloWhy) verified.push(`这一块由 Lead 自己写：${oneLine(f.soloWhy)}`);
   const owed = [...(f.verify?.owed ?? [])];
-  if (f.planReviewSkipped) owed.push('方案评审（0003 第 5 条第 3 步）引擎还没接，这次跳过（#193）');
+  if (f.planReviewSkipped) owed.push('方案评审（0003 第 5 条第 3 步）引擎还没接，这次跳过（#249）');
   if (f.flowSource === 'org_default') owed.push('这个项目没有 .fleet/flow.json，按全组织默认的流程配置派的');
   const tier = f.highRisk
     ? '先审后合——Lead 判了高风险（合并闸按改动路径判要不要第二意见，这一栏只作说明）'

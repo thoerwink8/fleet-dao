@@ -2,7 +2,7 @@
 // 会话领着走 0–7 步，派一个副手（Sidekick）干界定清楚的活；引擎推分支、开 PR、合并、关单，不往主线直接写。
 //   1 收单（引擎，不用模型）：看流程配置副本（读不到、认不出就停派报红），认单子正文里指的需求文档目录，建工作树。
 //   2 规划：Lead 读需求文档和代码，把方案写进 specs/<号>-<短名>/方案.md 提交，交方案摘要和任务简报（core 判），先推上去。
-//   3 方案评审：小单跳过；不算小单的引擎还没接评审（#193），照跳过、PR 里写明。
+//   3 方案评审：小单跳过；不算小单的引擎还没接评审（#249），照跳过、PR 里写明。
 //   4 执行：副手照简报在同一棵树上干（按流程配置派别家的便宜路由；派不出、没额度就 Lead 自己干）；副手干完 Lead 续同一个
 //     会话验收：收下 / 打回（最多 2 次）/ Lead 接手（core 的 decideAcceptance）。Lead 验收时副手不在跑（一步一步来）。
 //   5 验证：推上去之后别家验证（workflows/verify.ts）；挡了 Lead 可以拿证据驳回，回第 4 步改，最多 2 轮。
@@ -94,7 +94,7 @@ type Delivery = OutputOf<'delivery'>;
 const STOP_WITHDRAW_MINUTES = 10;
 /** CI 连着几次没查成就停下等人（没查成不是没过，也不能一直空转）。 */
 const CI_UNKNOWN_LIMIT = 3;
-/** 在合并队列里的这一块叫什么（合并条目、快照里的块）。一张单一块（母单按块循环归后面的单）。 */
+/** 在合并队列里的这一块叫什么（合并条目、快照里的块）。一张单一块（母单按块循环归 #252）。 */
 const BLOCK_KEY = 'fusion';
 
 const STATE_OF_STEP: Record<Step, TaskState> = {
@@ -1239,9 +1239,9 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
           event = await doPlan();
           break;
         case 'review-plan':
-          // 方案评审（第 3 步）引擎还没接（#193）：照跳过，PR 正文「还欠什么」写明
+          // 方案评审（第 3 步）引擎还没接（#249）：照跳过，PR 正文「还欠什么」写明
           planReviewSkipped = true;
-          status.lastProblem = '方案评审（第 3 步）引擎还没接，这次跳过（#193），PR 里写明';
+          status.lastProblem = '方案评审（第 3 步）引擎还没接，这次跳过（#249），PR 里写明';
           event = { kind: 'reviewed' };
           break;
         case 'dispatch':

@@ -263,7 +263,7 @@ describe('PR 正文（fusionPrParts）', () => {
       '这一块由 Lead 自己写：副手渠道没接好',
     ]);
     expect(got.owed).toEqual([
-      '方案评审（0003 第 5 条第 3 步）引擎还没接，这次跳过（#193）',
+      '方案评审（0003 第 5 条第 3 步）引擎还没接，这次跳过（#249）',
       '这个项目没有 .fleet/flow.json，按全组织默认的流程配置派的',
     ]);
     expect(got.tier).toMatch(/^先审后合/);
