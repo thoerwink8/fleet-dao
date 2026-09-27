@@ -36,6 +36,8 @@ export interface FilterContext {
   };
   /** 会话用户此刻挂的组织；不知道为 undefined（ChooseRouteInput.liveOrg）。 */
   liveOrg: OrgKind | undefined;
+  /** 不知道是因为读了没读成：原话（ChooseRouteInput.liveOrgProblem）。 */
+  liveOrgProblem?: string | undefined;
   /** 界面类的活：禁令按 UI 判（ChooseRouteInput.uiWork）。 */
   uiWork: boolean;
 }
@@ -60,7 +62,7 @@ export function blocksFor(
   if (route.breaker.admit === 'none') out.push(breakerBlock(route, ctx.now));
   const avoided = avoidReason(route, ctx);
   if (avoided) out.push(hard('avoided', avoided));
-  const notLive = orgNotLive(route, ctx.liveOrg);
+  const notLive = orgNotLive(route, ctx.liveOrg, ctx.liveOrgProblem);
   if (notLive) out.push(hard('org-not-live', notLive));
   if (route.poolRole === 'backup') out.push(...backupBlocks(route, ctx));
   out.push(...shortBlocks(route, ctx));
@@ -179,12 +181,16 @@ export function hostUnfit(hostId: string, stage: StageKind): string | null {
 
 /**
  * 会话用户同一时刻只挂一个 reclaude 组织（design 第九节）：不是它挂着的那个组织的 Claude 池，派过去会话照样扣挂着的
- * 那个组织，额度账就记错了池。不知道挂的是哪个，带组织类型的池一律不派。
+ * 那个组织，额度账就记错了池。不知道挂的是哪个（读了没读成的带上原话），带组织类型的池一律不派，不拿哪个组织顶。
  */
-function orgNotLive(route: RouteFacts, liveOrg: OrgKind | undefined): string | null {
+function orgNotLive(route: RouteFacts, liveOrg: OrgKind | undefined, problem?: string): string | null {
   const kind = route.orgKind;
   if (kind === undefined || kind === null) return null;
-  if (liveOrg === undefined) return `不知道会话用户现在挂的是哪个组织，${route.poolName}不派`;
+  if (liveOrg === undefined) {
+    return problem
+      ? `会话用户挂的组织认不出（${problem}），${route.poolName}不派`
+      : `不知道会话用户现在挂的是哪个组织，${route.poolName}不派`;
+  }
   if (kind === liveOrg) return null;
   return `会话用户现在挂的是${ORG_NAMES[liveOrg]}组织，${route.poolName}要等切过去才能派`;
 }

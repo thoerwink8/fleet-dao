@@ -4,6 +4,8 @@
 // 端口的三种。点名的路由先试，用不了照常选并写明；续同一个会话的路由暂时派不了就等它，用不了（下线、被禁）才照常选；
 // 账号池暂停着时，续会话的那一单照样放过去——它就是看人修好了没有的试探。Fusion 带了流程配置里这一步的模型顺序（models）
 // 就只派这几个模型的路由、先按配置的先后排（onlyModels），一条都没有明说；人点名的路由不受它限制。
+// Claude 订阅池只派会话用户此刻真挂着的那个组织的（real/session-org.ts 现读 reclaude org list，不假定）；读不到、认不出，
+// 带组织类型的池一律不派、写明原因，别的池照常派；还没读完（reclaude 首跑同步配置）就过一会儿再选。
 // 失败一律明确：库没查成照常抛，事实对不上（RoutingInputError）抛 ROUTING_INPUT，不当成「没有路由」。
 
 import {
@@ -38,6 +40,7 @@ import {
   STAGE_NAMES,
 } from '../routing/index.ts';
 import { WIRED_HOSTS as WIRED_HOST_IDS } from './hosts.ts';
+import type { SessionOrgReader } from './session-org.ts';
 
 /** 账号池整池暂停（设备被撤销、封号、登录失效、欠费：要人修）的提醒：dedupe_key = pool-hold:<池>。 */
 export const POOL_HOLD_PREFIX = 'pool-hold:';
@@ -49,28 +52,33 @@ export const poolHoldKey = (poolId: string) => `${POOL_HOLD_PREFIX}${poolId}`;
  */
 export const WIRED_HOSTS: readonly HostId[] = WIRED_HOST_IDS;
 
-/**
- * 会话用户此刻挂的 reclaude 组织（design 第九节）。切号（拼车用满切独享、到点切回）归 #59，还没做：在那之前会话用户
- * 一直挂拼车，独享池的路由按 org-not-live 挡着不派。#59 接上之后改成读真实状态，不再是常量。
- */
-export const SESSION_USER_ORG: OrgKind = 'carpool';
-
 /** 战绩和熔断看最近几天的会话结局。 */
 export const RECORD_DAYS = 7;
 /** 选路要等时，最多隔这么久再选一次（等额度清零可能要几天：中途人点名换路由、额度提前清零要看得见）。 */
 export const MAX_ROUTE_WAIT_SECONDS = 600;
+/** 选路读会话用户挂的组织最多等多久：选路这一步（quick 一档）一次尝试只有 30 秒，还要查库。 */
+export const ORG_READ_WAIT_MS = 15_000;
+/** 组织还没读出来时隔多久再选：平时一读 0.3 秒，慢的是 reclaude 首跑同步配置（上百秒），读在后台接着跑。 */
+export const ORG_READ_RETRY_SECONDS = 30;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export interface StorePortsDeps {
   db: Db;
+  /**
+   * 会话用户此刻挂的 reclaude 组织（real/session-org.ts，design 第九节）：带组织类型的池（Claude 订阅）只派和它一样的。
+   * 候选里有这种池才读；读不到、认不出，这些池一律不派（写明原因），不拿拼车顶；还没读完就过一会儿再选。
+   */
+  sessionOrg: SessionOrgReader;
   now?: () => Date;
   /** [0, 1) 的随机数，试探用（调度策略开了试探才用得上）。 */
   draw?: () => number;
   wiredHosts?: readonly HostId[];
   routingPolicy?: Partial<RoutingPolicy>;
   log?: (message: string, fields?: Record<string, unknown>) => void;
+  /** 选路读组织最多等多久（默认 ORG_READ_WAIT_MS），测试用。 */
+  orgReadWaitMs?: number;
 }
 
 type StorePorts = Pick<
@@ -261,6 +269,20 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
       // 流程配置里这一步的模型顺序（Fusion，0003 第 9 条）：只派这几个模型的路由。人点名的路由不受它限制（换路由是人的指令）
       const facts = input.models ? onlyModels(all, input.models) : all;
       const held = await heldPools();
+      // 会话用户此刻挂的组织：候选里有带组织类型的池（Claude 订阅）才读。读不到、认不出的原话交给选路，那些池一律不派；
+      // 还没读完（reclaude 首跑同步配置）不算认不出：过一会儿再选，读在后台接着跑
+      const live = all.routes.some((r) => r.orgKind)
+        ? await deps.sessionOrg({ waitMs: deps.orgReadWaitMs ?? ORG_READ_WAIT_MS })
+        : null;
+      if (live && !live.ok && live.pending) {
+        return {
+          ok: false,
+          waitFor: 'slot',
+          detail: `会话用户挂的组织还没读出来，过一会儿再选：${live.why}`,
+          retryAfterSeconds: ORG_READ_RETRY_SECONDS,
+        };
+      }
+      if (live && !live.ok) log('会话用户挂的组织认不出，Claude 订阅池这次不派', { why: live.why });
       const known = (id: string) => facts.routes.find((r) => r.routeId === id);
       const knownAny = (id: string) => all.routes.find((r) => r.routeId === id);
       // 开 PR 前验证只派别家：写这张单的族整族避开，点名的、续会话的也一样（一条都没有就明说没有别家可验，不拿同族顶）
@@ -279,7 +301,8 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         routes: facts.routes,
         now: now.toISOString(),
         draw: draw(),
-        liveOrg: SESSION_USER_ORG,
+        ...(live?.ok ? { liveOrg: live.org } : {}),
+        ...(live && !live.ok ? { liveOrgProblem: live.why } : {}),
         ...(input.uiWork ? { uiWork: true } : {}),
         ...(deps.routingPolicy ? { policy: deps.routingPolicy } : {}),
       } satisfies Omit<ChooseRouteInput, 'avoid' | 'taskRouteId'>;

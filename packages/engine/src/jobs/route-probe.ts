@@ -6,13 +6,13 @@
 import type { RouteProbeTarget, ScheduleResult } from '@fleet-dao/db';
 import {
   type HostId,
-  type OrgKind,
   ROUTE_PROBE_EVERY_MINUTES,
   type RouteProbeState,
   routeProbeEveryMinutes,
 } from '@fleet-dao/shared';
 import type { RouteProbeRun } from '../contract.ts';
 import { hostName, ORG_NAMES } from '../routing/names.ts';
+import type { LiveOrgReading } from '../routing/types.ts';
 import type { ScheduleRunLog } from './github-reconcile.ts';
 
 /** 登记进 scheduled_jobs 的那一行：一次都没跑过也列得出来。 */
@@ -58,8 +58,11 @@ export interface RouteProbeJobDeps {
   targets(): Promise<ProbeTarget[]>;
   /** 执行方式 → 探法；没有的执行方式 = 引擎还没接这种插头。 */
   probers: Partial<Record<HostId, Prober>>;
-  /** 会话用户此刻挂的组织（store-ports.ts 的 SESSION_USER_ORG；切号 #59 接上后读真实状态）。 */
-  liveOrg: OrgKind;
+  /**
+   * 会话用户此刻挂的组织（真实现是 real/session-org.ts：以会话用户跑 reclaude org list，认带 * 的那行的类型）。
+   * 只在探带组织类型的池（Claude 订阅）之前读，一条读一次（读成了的留一会儿），等到读完；不许抛，读不到、认不出回 ok: false。
+   */
+  sessionOrg(): Promise<LiveOrgReading>;
   /** 写一条结论（真实现是 saveRouteProbe）；路由这一轮当中被删了回 route_not_found。 */
   save(write: {
     routeId: string;
@@ -93,7 +96,8 @@ const clip = (text: string, max = ROUTE_PROBE_DETAIL_MAX) =>
 
 export type ProbePlan =
   | { probe: Prober }
-  | { state: 'not_wired' | 'skipped'; detail: string }
+  /** failed：该探却探不了（会话用户挂的组织认不出，不知道探这个池扣的是谁）——不是按规矩不探，是出了要人看的毛病。 */
+  | { state: 'not_wired' | 'skipped' | 'failed'; detail: string }
   /** 按一次的成本放慢的执行方式，上一次探通了、还没到再探的时候：这一轮不探、不重写，结论照旧（原因只进日志）。 */
   | { kept: string };
 
@@ -101,12 +105,13 @@ export type ProbePlan =
  * 这条路由这一轮探不探。先后就是优先级：按量计费 → 插头没接 → 渠道下架 → 模型下架 → 没有阶段在用 → 会话用户挂着别的组织
  * → 放慢的执行方式还没到再探的时候（ROUTE_PROBE_HOST_EVERY_MINUTES：只看上一次探通了的；没通的每轮都探）。
  * 按量计费排第一：不管插头接没接都不探（判断阶段的 Jev 就是按量的，它不经会话插头，说「派不了」反而误导）。
- * 不探的一律不在线（写明原因）；要探的交给这种执行方式的探法。
+ * 不探的一律不在线（写明原因）；要探的交给这种执行方式的探法。live 是会话用户此刻挂的组织（带组织类型的池才用得上，
+ * 别的传 null）：读不到、认不出就记没探成（failed），不拿哪个组织顶。
  */
 export function planProbe(
   t: ProbeTarget,
   probers: Partial<Record<HostId, Prober>>,
-  liveOrg: OrgKind,
+  live: LiveOrgReading | null,
   now: Date,
 ): ProbePlan {
   if (t.billing === 'metered') {
@@ -133,12 +138,20 @@ export function planProbe(
       detail: '没有哪个阶段在用这条路由（挂着但关着的不算），不花额度去探；哪个阶段用上它，下一轮就探',
     };
   }
-  if (t.orgKind !== null && t.orgKind !== liveOrg) {
-    const live = ORG_NAMES[liveOrg];
-    return {
-      state: 'skipped',
-      detail: `会话用户现在挂的是${live}组织：这时探${ORG_NAMES[t.orgKind]}池，扣的是${live}的额度、探的也是${live}，不探（切号见 #59）`,
-    };
+  if (t.orgKind !== null) {
+    if (!live?.ok) {
+      return {
+        state: 'failed',
+        detail: `会话用户挂的组织认不出（${live ? live.why : '没读'}）：不知道这时探${ORG_NAMES[t.orgKind]}池扣的是哪个组织的额度、探的是哪个，不探`,
+      };
+    }
+    if (t.orgKind !== live.org) {
+      const name = ORG_NAMES[live.org];
+      return {
+        state: 'skipped',
+        detail: `会话用户现在挂的是${name}组织：这时探${ORG_NAMES[t.orgKind]}池，扣的是${name}的额度、探的也是${name}，不探（切号见 #59）`,
+      };
+    }
   }
   const every = routeProbeEveryMinutes(t.hostId);
   const last = t.previous;
@@ -171,8 +184,19 @@ interface Conclusion {
   kept?: boolean;
 }
 
+/** 会话用户此刻挂的组织：读法约好了不抛，万一抛了也按认不出记（写明原因），不让整轮垮掉。 */
+async function liveOrgOf(deps: RouteProbeJobDeps): Promise<LiveOrgReading> {
+  try {
+    return await deps.sessionOrg();
+  } catch (err) {
+    return { ok: false, why: `读会话用户挂的组织出错：${message(err)}` };
+  }
+}
+
 async function conclude(deps: RouteProbeJobDeps, t: ProbeTarget): Promise<Conclusion> {
-  const plan = planProbe(t, deps.probers, deps.liveOrg, deps.now());
+  // 带组织类型的池（Claude 订阅）探之前现读一次（读成了的留一会儿）：一轮要好几分钟，中途切了号也认得出
+  const live = t.orgKind === null ? null : await liveOrgOf(deps);
+  const plan = planProbe(t, deps.probers, live, deps.now());
   if ('kept' in plan) {
     deps.log('info', '路由探针：还没到再探的时候，结论照旧', { routeId: t.routeId, detail: plan.kept });
     return { target: t, state: 'ok', detail: plan.kept, at: deps.now(), kept: true };

@@ -3,7 +3,7 @@
 // 见 deploy/france/engine.env.example）；缺了哪一项就不起，讲清楚缺什么，不带着半套配置接活。
 
 import { join } from 'node:path';
-import type { SessionUser } from '@fleet-dao/adapters';
+import { SESSION_USERS, type SessionUser } from '@fleet-dao/adapters';
 import { createDb, type Db } from '@fleet-dao/db';
 import { assertPublishable, createGitHub, pgLedger, pgLocker } from '@fleet-dao/github';
 import type { EngineJobs } from '../activities.ts';
@@ -23,6 +23,7 @@ import { hourlyReconcileJob } from './hourly-reconcile.ts';
 import { engineJevFromEnv } from './jev-port.ts';
 import { registerEngineJobs } from './jobs.ts';
 import { routeProbeJob } from './route-probe.ts';
+import { type SessionOrgReader, sessionOrgReader } from './session-org.ts';
 import { createSessionPorts, DEFAULT_FORK_MAX_CONTEXT_TOKENS, type SessionPortsDeps } from './sessions.ts';
 import { createStorePorts } from './store-ports.ts';
 import { DEFAULT_WORK_ROOT, helperWorkTrees, type WorkTrees } from './worktrees.ts';
@@ -32,6 +33,8 @@ export interface RealPortsDeps {
   gh: EngineGitHub;
   trees: WorkTrees;
   exec: UserExec;
+  /** 会话用户此刻挂的组织（real/session-org.ts）：选路只派它挂着的那个 Claude 订阅池。 */
+  sessionOrg: SessionOrgReader;
   /** 引擎自己的临时目录（bundle）、存档目录（没合并就收的树里没提交的改动）。 */
   tmpDir: string;
   archiveDir: string;
@@ -75,6 +78,7 @@ export interface RealPorts {
 export function createRealPorts(deps: RealPortsDeps): RealPorts {
   const store = createStorePorts({
     db: deps.db,
+    sessionOrg: deps.sessionOrg,
     ...(deps.now ? { now: deps.now } : {}),
     ...(deps.log ? { log: deps.log } : {}),
   });
@@ -219,6 +223,10 @@ export function realPortsFromEnv(
   // 判断路由不用重启，和 /healthz 的 judge 项同一个判法）。默认位置上没有 jev.json 才算没接、不问；别的读不成都报错。
   const jev = engineJevFromEnv(db, env);
   const exec = scopeExec();
+  // 会话用户此刻挂的组织：法国只有一个会话用户（design 第九节），两个 Claude 池都跑在它下面、同一时刻只有它挂着的那个能派。
+  // 以它跑它家里的 reclaude org list（和会话同一份 reclaude）；选路、探针、每小时对账共用这一个（读成了的留 30 秒）
+  const [sessionUser] = SESSION_USERS;
+  const sessionOrg = sessionOrgReader({ exec, user: sessionUser, reclaude: claudeCommand(sessionUser) });
   const real = createRealPorts({
     db,
     jev: jev.port,
@@ -227,6 +235,7 @@ export function realPortsFromEnv(
     screen: (what, texts) => assertPublishable(what, texts, gh.deps.sensitiveValues),
     trees,
     exec,
+    sessionOrg,
     tmpDir: join(config.stateDir, 'tmp'),
     archiveDir: join(config.stateDir, 'archive'),
     machine: config.machine,
@@ -244,10 +253,11 @@ export function realPortsFromEnv(
       claudeCommand,
       cursorCommand,
       grokCommand,
+      sessionOrg,
       machine: config.machine,
     }),
     // 每小时对账：同一个工作树管家（删树经 fleet-agent-scope）、同一个会话用户执行器（看树里还剩什么）
-    hourlyReconcile: hourlyReconcileJob({ db, trees, exec, machine: config.machine }),
+    hourlyReconcile: hourlyReconcileJob({ db, trees, exec, sessionOrg, machine: config.machine }),
   };
   return {
     ...real,

@@ -32,6 +32,14 @@ export function validateInput(input: ChooseRouteInput, trialEnabled: boolean): n
   if (input.liveOrg !== undefined && !ORGS.includes(input.liveOrg)) {
     throw new RoutingInputError(`选路判不了：会话用户挂的组织认不出（${String(input.liveOrg)}）`);
   }
+  if (input.liveOrgProblem !== undefined) {
+    if (typeof input.liveOrgProblem !== 'string' || !input.liveOrgProblem.trim()) {
+      throw new RoutingInputError('选路判不了：会话用户挂的组织为什么认不出，原因是空的');
+    }
+    if (input.liveOrg !== undefined) {
+      throw new RoutingInputError('选路判不了：会话用户挂的组织既给了，又说认不出');
+    }
+  }
   if (trialEnabled) {
     const d = input.draw;
     if (typeof d !== 'number' || !Number.isFinite(d) || d < 0 || d >= 1) {

@@ -29,6 +29,7 @@ import type { WorkflowReader, WorkflowView } from '../jobs/reconcile-common.ts';
 import type { PortContext } from '../ports.ts';
 import type { UserExec } from './exec.ts';
 import { PROBE_DIR } from './route-probe.ts';
+import type { SessionOrgReader } from './session-org.ts';
 import { createStorePorts } from './store-ports.ts';
 import { treeLeftovers } from './user-git.ts';
 import { SESSION_TMP_DIR, type WorkTrees } from './worktrees.ts';
@@ -99,6 +100,8 @@ export interface HourlyReconcileWiring {
   db: Db;
   trees: WorkTrees;
   exec: UserExec;
+  /** 会话用户此刻挂的组织（real/session-org.ts）：判阶段派不派得出去和选路同一套，也要它。 */
+  sessionOrg: SessionOrgReader;
   /** 这台机器给人看的名字（FLEET_MACHINE_NAME）。 */
   machine: string;
   now?: () => Date;
@@ -119,7 +122,7 @@ export function hourlyReconcileJob(
   const now = w.now ?? (() => new Date());
   const log: HourlyReconcileJobDeps['log'] =
     w.log ?? ((level, text, fields) => console[level === 'info' ? 'info' : level](text, fields ?? {}));
-  const store = createStorePorts({ db: w.db, now });
+  const store = createStorePorts({ db: w.db, now, sessionOrg: w.sessionOrg });
   // 和点「继续」以后选路会怎么选是同一套：全熔断时它放一条去试探，也算派得出去——它这时还会顺手把「全熔断」那条提醒
   // 再报一次（条件确实还在）；要一个不写库的判法见 #246。
   const stageRoutable: HourlyReconcileJobDeps['stageRoutable'] =

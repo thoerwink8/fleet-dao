@@ -51,7 +51,7 @@ let root: string;
 beforeEach(async () => {
   await resetTestDb(t);
   await world(t.db);
-  // 真实的样子：独享池挂在独享组织上（会话用户平时挂拼车，这个池不探）
+  // 真实的样子：独享池挂在独享组织上（这里的会话用户挂着拼车，setup 的 sessionOrg，这个池不探）
   await t.client.query("update pools set org_kind = 'solo' where id = 'claude-solo'");
   await registerEngineJobs(t.db);
   root = mkdtempSync(join(tmpdir(), 'fleet-probe-'));
@@ -99,6 +99,7 @@ function setup(
     claudeCommand: (user) => [`/opt/fake/${user}/reclaude`],
     cursorCommand: rig ? rig.command : (user) => [`/opt/fake/${user}/cursor-agent`],
     grokCommand: (user) => [`/opt/fake/${user}/grok`],
+    sessionOrg: async () => ({ ok: true, org: 'carpool' }),
     machine: '法国',
     now: () => new Date(clock),
     log: rig ? (level, text, fields) => void logs.push(JSON.stringify([level, text, fields])) : quiet,

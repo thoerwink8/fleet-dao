@@ -19,8 +19,22 @@ import {
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { PickRouteInput } from '../../src/ports.ts';
-import { createStorePorts, poolHoldKey } from '../../src/real/store-ports.ts';
-import { addCursorRoute, addGrokRoute, addTask, MIN, NOW, world } from './fixtures.ts';
+import type { UserExec } from '../../src/real/exec.ts';
+import { type SessionOrgReader, sessionOrgReader } from '../../src/real/session-org.ts';
+import { createStorePorts, ORG_READ_RETRY_SECONDS, poolHoldKey } from '../../src/real/store-ports.ts';
+import {
+  addCursorRoute,
+  addGrokRoute,
+  addTask,
+  CARPOOL_ORG_ID,
+  MIN,
+  NOW,
+  type OrgListRig,
+  orgListRig,
+  orgListText,
+  SOLO_ORG_ID,
+  world,
+} from './fixtures.ts';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -32,9 +46,12 @@ beforeEach(async () => {
 });
 
 const ctx = { signal: new AbortController().signal, heartbeat() {}, attempt: 1, lastHeartbeat: undefined };
-const ports = () => createStorePorts({ db: t.db, now: () => NOW, draw: () => 0.5, log: () => {} });
-const pick = (over: Partial<PickRouteInput> = {}) =>
-  ports().pickRoute(
+/** 一般的选路用例：会话用户挂着拼车（夹具里两个 Claude 池都标成拼车）；读真实状态的在下面「会话用户挂的组织」里单测。 */
+const onCarpool: SessionOrgReader = async () => ({ ok: true, org: 'carpool' });
+const ports = (sessionOrg: SessionOrgReader = onCarpool) =>
+  createStorePorts({ db: t.db, now: () => NOW, draw: () => 0.5, log: () => {}, sessionOrg });
+const pick = (over: Partial<PickRouteInput> = {}, p = ports()) =>
+  p.pickRoute(
     {
       taskId: randomUUID(),
       stage: 'triage',
@@ -219,6 +236,7 @@ describe('选路', () => {
       now: () => NOW,
       routingPolicy: { trialRatio: 5 },
       log: () => {},
+      sessionOrg: onCarpool,
     });
     await expect(
       bad.pickRoute(
@@ -234,6 +252,127 @@ describe('选路', () => {
       "update stage_policy_routes set enabled = false where stage = 'triage' and route_id = 'solo'",
     );
     expect(await pick()).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+  });
+});
+
+describe('会话用户挂的组织：选路前现读（以会话用户跑 reclaude org list，不假定挂拼车）', () => {
+  let rig: OrgListRig;
+  beforeEach(async () => {
+    rig = orgListRig();
+    await world(t.db);
+    // 真实的样子：独享池挂在独享组织上、拼车池挂在拼车组织上
+    await t.client.query(`update pools set org_kind = 'solo' where id = 'claude-solo'`);
+  });
+  const onRig = () => ports(rig.reader());
+  /** 派不出的原因里不许带组织编号、邮箱（它会进库、上驾驶舱、上单子）。 */
+  const clean = (text: string | false) => {
+    for (const bad of [String(CARPOOL_ORG_ID), String(SOLO_ORG_ID), 'fleet-test@localhost']) {
+      expect(text).not.toContain(bad);
+    }
+  };
+
+  it('挂拼车：派拼车池；独享池挡着，写明挂的是拼车', async () => {
+    rig.answer('carpool');
+    const r = await pick({ stage: 'execute' }, onRig());
+    expect(r).toMatchObject({ ok: true, route: { routeId: 'carpool', poolId: 'claude-carpool' } });
+    expect(r.ok && r.why).toContain('会话用户现在挂的是拼车组织，Claude 订阅 · 独享要等切过去才能派');
+  });
+
+  it('挂独享：派独享池；拼车池挡掉，只剩它时派不出、写明挂的是独享', async () => {
+    rig.answer('solo');
+    const p = onRig();
+    expect(await pick({ stage: 'execute' }, p)).toMatchObject({
+      ok: true,
+      route: { routeId: 'solo', poolId: 'claude-solo' },
+    });
+    const none = await pick({ stage: 'execute', avoidRouteIds: ['solo'] }, p);
+    expect(none).toMatchObject({ ok: false, waitFor: 'none' });
+    expect(!none.ok && none.detail).toContain(
+      '会话用户现在挂的是独享组织，Claude 订阅 · 拼车要等切过去才能派',
+    );
+    // 点名要拼车池的也一样挡（换不过去，不偷偷派）
+    const named = await pick({ stage: 'execute', preferRouteId: 'carpool' }, p);
+    expect(named).toMatchObject({ ok: true, route: { routeId: 'solo' } });
+    expect(named.ok && named.why).toContain('点名的路由这次用不了');
+  });
+
+  it('【故意造出的失败】org list 读不到（没登录、退出码不对、起不来、超时）：两个 Claude 池都不派，写明「会话用户挂的组织认不出」，不拿拼车顶', async () => {
+    const p = onRig();
+    for (const [answer, cause] of [
+      [{ code: 1, stderr: 'Error: not logged in' }, 'reclaude 报登录失效'],
+      [{ code: 3, stderr: `org ${SOLO_ORG_ID}: boom` }, '退出码 3'],
+      [{ code: null, spawnError: 'spawn sudo ENOENT' }, '没起来'],
+      [{ code: null, timedOut: true }, '超时被停'],
+    ] as const) {
+      rig.answer(answer);
+      const r = await pick({ stage: 'execute' }, p);
+      expect(r).toMatchObject({ ok: false, waitFor: 'none' });
+      expect(!r.ok && r.detail).toContain(
+        '会话用户挂的组织认不出（以会话用户 fleet-agent-carpool 跑 reclaude org list',
+      );
+      expect(!r.ok && r.detail).toContain(cause);
+      expect(!r.ok && r.detail).toContain('Claude 订阅 · 拼车不派');
+      expect(!r.ok && r.detail).toContain('Claude 订阅 · 独享不派');
+      clean(!r.ok && r.detail);
+    }
+  });
+
+  it('【故意造出的失败】org list 认不出（没有带 * 的行、类型认不出、一行组织都没有）：同样认不出，不派 Claude 池，原因里不带编号', async () => {
+    const p = onRig();
+    for (const [stdout, cause] of [
+      [orgListText(null), '没有带 * 的行'],
+      [orgListText('solo').replace('\tpersonal\t', '\tenterprise\t'), '类型认不出'],
+      ['Syncing config…\n', '一个组织都认不出'],
+    ] as const) {
+      rig.answer({ stdout });
+      const r = await pick({ stage: 'execute' }, p);
+      expect(r).toMatchObject({ ok: false, waitFor: 'none' });
+      expect(!r.ok && r.detail).toContain('会话用户挂的组织认不出（');
+      expect(!r.ok && r.detail).toContain(cause);
+      clean(!r.ok && r.detail);
+    }
+  });
+
+  it('认不出时别的渠道照派：派到 Cursor，理由里写明 Claude 池为什么没派', async () => {
+    const { routeId } = await addCursorRoute(t.db, { stages: ['execute'] });
+    rig.answer({ code: 1, stderr: 'not logged in' });
+    const r = await pick({ stage: 'execute' }, onRig());
+    expect(r).toMatchObject({ ok: true, route: { routeId } });
+    expect(r.ok && r.why).toContain(
+      '会话用户挂的组织认不出（以会话用户 fleet-agent-carpool 跑 reclaude org list',
+    );
+  });
+
+  it('还没读完（reclaude 首跑同步配置）：不算认不出、不挂起，过一会儿再选；读完了下一次就用上', async () => {
+    let release: (() => void) | undefined;
+    const slow: UserExec = async (command) => {
+      await new Promise<void>((r) => {
+        release = r;
+      });
+      return rig.exec(command);
+    };
+    rig.answer('solo');
+    const p = createStorePorts({
+      db: t.db,
+      now: () => NOW,
+      draw: () => 0.5,
+      log: () => {},
+      sessionOrg: sessionOrgReader({ exec: slow, user: 'fleet-agent-carpool', reclaude: ['/x/reclaude'] }),
+      orgReadWaitMs: 5,
+    });
+    const r = await pick({ stage: 'execute' }, p);
+    expect(r).toMatchObject({ ok: false, waitFor: 'slot', retryAfterSeconds: ORG_READ_RETRY_SECONDS });
+    expect(!r.ok && r.detail).toContain('会话用户挂的组织还没读出来，过一会儿再选');
+    release?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(await pick({ stage: 'execute' }, p)).toMatchObject({ ok: true, route: { routeId: 'solo' } });
+  });
+
+  it('候选里没有带组织类型的池：不读（省一次以会话用户起 scope）', async () => {
+    await t.client.query(`update pools set org_kind = null, run_as_user = null where id like 'claude-%'`);
+    rig.answer({ code: 1, stderr: 'not logged in' });
+    expect(await pick({ stage: 'execute' }, onRig())).toMatchObject({ ok: true, route: { routeId: 'solo' } });
+    expect(rig.calls).toHaveLength(0);
   });
 });
 

@@ -40,6 +40,7 @@ export function chooseRoute(input: ChooseRouteInput): ChooseRouteResult {
       families: new Set((input.avoid?.families ?? []).map(familyKey)),
     },
     liveOrg: input.liveOrg,
+    liveOrgProblem: input.liveOrgProblem,
     uiWork: input.uiWork ?? false,
   };
   const factsOf = new Map(input.routes.map((r) => [r.routeId, r]));

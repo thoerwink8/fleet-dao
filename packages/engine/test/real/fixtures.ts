@@ -26,7 +26,9 @@ import {
 import { type Db, pools, repos, routes, savePoolQuota, seed, stagePolicyRoutes, tasks } from '@fleet-dao/db';
 import type { TestDb } from '@fleet-dao/db/testing';
 import type { ProgressEvent, StageKind } from '@fleet-dao/shared';
+import type { UserCommand, UserCommandResult, UserExec } from '../../src/real/exec.ts';
 import { cursorLaunchCommand } from '../../src/real/hosts.ts';
+import { type SessionOrgDeps, type SessionOrgReader, sessionOrgReader } from '../../src/real/session-org.ts';
 import { layout, SESSION_TMP_DIR, type WorkTrees } from '../../src/real/worktrees.ts';
 
 export const NOW = new Date('2026-09-25T08:00:00.000Z');
@@ -930,6 +932,72 @@ export function cursorKeyRig(root: string): CursorKeyRig {
     agentRan: () => existsSync(argvLog),
     rejectKey: () => writeFileSync(rejectFlag, ''),
     traces: () => `${read(scopeLog)}\n${read(argvLog)}`,
+  };
+}
+
+/** 占位的组织编号：真机上是三四位的数（reclaude org list 的第一列）。读法只许交出类型，编号、邮箱一个字都不许往外带。 */
+export const CARPOOL_ORG_ID = 1111;
+export const SOLO_ORG_ID = 2222;
+
+/**
+ * reclaude org list 真机的样子（法国 2026-09-27 读回的格式，编号、名字、邮箱换成占位的）：制表符分列，带 * 的是现在挂的，
+ * 类型 team 是拼车、personal 是独享。current 给 null = 哪一行都不带 *；syncing = 前面先打一行 Syncing config…（真跑有时这样）。
+ */
+export function orgListText(current: 'carpool' | 'solo' | null, options: { syncing?: boolean } = {}): string {
+  const mark = (kind: 'carpool' | 'solo') => (current === kind ? '*' : ' ');
+  return [
+    ...(options.syncing ? ['Syncing config…'] : []),
+    'Available organizations:',
+    `${mark('solo')} ${SOLO_ORG_ID}\t<独享组织名>\tpersonal\tfleet-test@localhost`,
+    `${mark('carpool')} ${CARPOOL_ORG_ID}\t<拼车组织名>\tteam\tfleet-test@localhost`,
+    'Switch organization: reclaude org <子命令> <org_id>',
+    '',
+  ].join('\n');
+}
+
+/** org list 替身回的东西：stdout 写成文字，别的照 UserCommandResult。 */
+export type OrgListAnswer = Partial<Omit<UserCommandResult, 'stdout'>> & { stdout?: string };
+
+export interface OrgListRig {
+  /** 之后每次 org list 回什么：给组织类型就回一份像真的（它带 *），给对象就原样回（退出码、输出、超时……）。 */
+  answer(out: 'carpool' | 'solo' | OrgListAnswer): void;
+  /** 以会话用户跑命令的替身：记下每次调用，不真起进程。 */
+  exec: UserExec;
+  calls: UserCommand[];
+  /** 真的读法（不留：每次都现读），接在这个替身上。 */
+  reader(over?: Partial<SessionOrgDeps>): SessionOrgReader;
+}
+
+/** 会话用户挂的组织：以会话用户跑 reclaude org list 的替身（生产上经 fleet-agent-scope 起），默认挂着拼车。 */
+export function orgListRig(): OrgListRig {
+  const calls: UserCommand[] = [];
+  let next: OrgListAnswer = { stdout: orgListText('carpool') };
+  const exec: UserExec = async (command) => {
+    calls.push(command);
+    const { stdout, ...rest } = next;
+    return {
+      code: 0,
+      stderr: '',
+      timedOut: false,
+      aborted: false,
+      ...rest,
+      stdout: Buffer.from(stdout ?? ''),
+    };
+  };
+  return {
+    answer: (out) => {
+      next = typeof out === 'string' ? { stdout: orgListText(out) } : out;
+    },
+    exec,
+    calls,
+    reader: (over = {}) =>
+      sessionOrgReader({
+        exec,
+        user: 'fleet-agent-carpool',
+        reclaude: ['/home/fleet-agent-carpool/.local/bin/reclaude'],
+        ttlMs: 0,
+        ...over,
+      }),
   };
 }
 
