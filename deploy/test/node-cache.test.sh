@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # shellcheck source-path=SCRIPTDIR
-# shellcheck disable=SC2317,SC2329 # rm、mkdir 这些替身由被测的函数间接调用，shellcheck 看不出来
 # deploy/lib/node-cache.sh（node 默认的编译缓存目录先由 root 建好）的判据，每条失败路径都故意造出来：
 #   1. 拿真 node 看为什么要这样：目录归别的用户时，他能把 root 的 node 建的子目录换成自己的，root 的 node 照用；
 #      目录归 root、755 时，别的用户的 node 用不了编译缓存（建不了子目录），root 的照用、子目录归 root、别人换不掉
@@ -183,39 +182,40 @@ has "开机配置没了：读回判红" "$(last_red)" "$C 不在或内容不对"
 ensure_node_cache "$D" "$C" >/dev/null
 
 echo "== 3. 删不掉、建不成、systemd-tmpfiles 跑不成、查不成：判红"
+# 故意失败的同名命令放在 $T/fake-<名>/ 下，只在那一次调用时接到 PATH 最前面（被测的函数照 PATH 找命令）
+fake() { # 命令名 它报的错
+  mkdir -p "$T/fake-$1"
+  printf '#!/bin/sh\necho "%s: %s" >&2\nexit 1\n' "$1" "$2" >"$T/fake-$1/$1"
+  chmod 755 "$T/fake-$1/$1"
+}
+fake rm 故意删不掉
+fake mkdir 故意建不成
+fake systemd-tmpfiles 故意跑不成
+fake stat 故意读不到
+fake find 故意查不了
 chmod 777 "$D"
-rm() { echo "rm: 故意删不掉" >&2; return 1; }
 REDS=()
-ensure_node_cache "$D" "$C" >/dev/null
+PATH="$T/fake-rm:$PATH" ensure_node_cache "$D" "$C" >/dev/null
 check "删不掉：返回 1" "$?" 1
 has "删不掉：红里写清" "$(last_red)" '想删掉重建，删不掉：rm: 故意删不掉'
-unset -f rm
 rm -rf -- "$D"
-mkdir() { echo "mkdir: 故意建不成" >&2; return 1; }
 REDS=()
-ensure_node_cache "$D" "$C" >/dev/null
+PATH="$T/fake-mkdir:$PATH" ensure_node_cache "$D" "$C" >/dev/null
 check "建不成：返回 1" "$?" 1
 has "建不成：红里写清" "$(last_red)" '建不成（刚删就被人抢先建了？）：mkdir: 故意建不成'
-unset -f mkdir
 ensure_node_cache "$D" "$C" >/dev/null
-systemd-tmpfiles() { echo "故意跑不成" >&2; return 1; }
 REDS=()
-ensure_node_cache "$D" "$C" >/dev/null
+PATH="$T/fake-systemd-tmpfiles:$PATH" ensure_node_cache "$D" "$C" >/dev/null
 check "systemd-tmpfiles 跑不成：返回 1" "$?" 1
-has "systemd-tmpfiles 跑不成：红里写清" "$(last_red)" "systemd-tmpfiles 照 $C 建目录没成.*故意跑不成"
-unset -f systemd-tmpfiles
-stat() { echo "stat: 故意读不到" >&2; return 1; }
-node_cache_ok "$D"
+has "systemd-tmpfiles 跑不成：红里写清" "$(last_red)" "systemd-tmpfiles 照 $C 建目录没成.*systemd-tmpfiles: 故意跑不成"
+PATH="$T/fake-stat:$PATH" node_cache_ok "$D"
 check "读不到属主：不当成没事" "$?" 1
 has "读不到属主：原因" "$NODE_CACHE_BAD" "读不到 $D 的属主和权限：stat: 故意读不到"
-unset -f stat
-find() { echo "find: 故意查不了" >&2; return 1; }
-node_cache_ok "$D"
+PATH="$T/fake-find:$PATH" node_cache_ok "$D"
 check "查不了里面归谁：不当成没事" "$?" 1
 has "查不了里面归谁：原因" "$NODE_CACHE_BAD" "查 $D 里面归谁没查成：find: 故意查不了"
-unset -f find
 node_cache_ok "$D"
-check "替身都撤了：目录照样是对的" "$?" 0
+check "不接那些假命令：目录照样是对的" "$?" 0
 
 if ((fail)); then
   echo "node-cache：不通过"
