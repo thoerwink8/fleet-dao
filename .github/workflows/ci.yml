@@ -18,9 +18,12 @@ permissions:
   contents: read
 # 并发组 PR 按号分、推主线按分支分：已经合了的 PR 改标题正文（edited）也会触发一轮，GitHub 给它的 github.ref 是
 # refs/heads/main，按 github.ref 分组就和主线那一轮撞上、把主线的全量挤掉（主线头上 check 红、自动发布不发，2026-09-27 #283）。
+# 只有 PR 上新的一轮挤掉旧的；主线推送不挤掉在跑的那一轮：它跑完，新推送排着（同组只排一个，更新的顶掉更旧的）。
+# 要是也挤，合并比主线全量（3–4 分钟）还密时每一轮都被下一次推送挤成 cancelled，一个全绿的提交都没有，
+# 自动发布往回也找不到能发的（2026-09-27 夜最近 100 次主线 CI 被挤掉 26 次，#362）。
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   # 这次改了什么 → 各 job 的开关。PR 按 git diff origin/<目标分支>...HEAD 算（HEAD 是 GitHub 造的合并提交，比的就是合进去会带进来的改动）；
   # base 拿不到、diff 失败都判红（退出码 2），认不出的路径、读不出的依赖图升成全跑。
