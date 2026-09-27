@@ -25,7 +25,15 @@
 //    （每小时对账还没接这一项：#247）。
 
 import type { Brief, FlowConfigRead, Rebuttable, Rebuttal, VerifyReport } from '@fleet-dao/core';
-import type { HostId, Repo, RunOutcome, StageKind, SubtaskState, TaskState } from '@fleet-dao/shared';
+import type {
+  HostId,
+  OrgKind,
+  Repo,
+  RunOutcome,
+  StageKind,
+  SubtaskState,
+  TaskState,
+} from '@fleet-dao/shared';
 import type { MergeOutcome, TestResult } from './decisions/merge.ts';
 import type { PlannedSubtask } from './decisions/plan.ts';
 import type { TriageVerdict } from './decisions/triage.ts';
@@ -84,8 +92,11 @@ export interface RouteChoice {
   modelId: string;
   family: string;
   hostId: HostId;
-  /** 主池 / 备池（拼车号是备池）：额度用满时走法不同（失败分流 QT1）。老历史里没有 = 按主池。 */
-  poolRole?: 'primary' | 'backup';
+  /**
+   * Claude 订阅池的组织类型（pools.org_kind：拼车、独享，共用一个会话用户）：额度用满时不原地睡到清零（失败分流 QT1
+   * 的 orgLadder）。别的池、老历史里没有。
+   */
+  orgKind?: OrgKind;
 }
 
 export interface PickRouteInput extends Scope {

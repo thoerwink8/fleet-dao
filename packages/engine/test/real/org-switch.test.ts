@@ -12,6 +12,7 @@ import { readingsFromRateLimit } from '@fleet-dao/adapters/quota';
 import {
   auditLog,
   finishSessionRun,
+  markSessionRunStarted,
   notifications,
   openSessionRun,
   routes,
@@ -30,6 +31,7 @@ import {
   orgSwitchRound,
 } from '../../src/real/org-switch.ts';
 import { routeProbeJob } from '../../src/real/route-probe.ts';
+import type { OrgSwitchSessions } from '../../src/real/sessions.ts';
 import { createStorePorts, poolHoldKey } from '../../src/real/store-ports.ts';
 import {
   addTask,
@@ -71,6 +73,8 @@ function setup(
     probe?: (n: number) => FakeRunScript;
     /** 让选路停下以后等的那一会儿里发生的事（比如又有会话登记了）。 */
     duringGrace?: () => Promise<void>;
+    /** 会话端口的切号那两样（#59）：给了就是有会话在跑也照切，先停下。 */
+    sessions?: OrgSwitchSessions;
   } = {},
 ) {
   const rig = orgListRig();
@@ -99,11 +103,14 @@ function setup(
       return { ok: true, changed: true };
     },
     machine: '法国',
+    ...(over.sessions ? { sessions: over.sessions } : {}),
     now,
     sleep: async () => {
       await over.duringGrace?.();
     },
     graceMs: 0,
+    drainTimeoutMs: 10_000,
+    pollMs: 2_000,
     log: (level, text, fields) => void logs.push(JSON.stringify([level, text, fields])),
   });
   const fake = fakeRun((_, n) => (over.probe ? over.probe(n) : answered()));
@@ -155,7 +162,7 @@ async function rejected(poolId: string, at: Date, resetsAt: Date | null) {
 }
 
 /** 一个还没结束的会话（登记了、在跑），交回让它结束的函数。 */
-async function running(routeId: string, at: Date) {
+async function running(routeId: string, at: Date, options: { started?: boolean } = {}) {
   const { task } = await addTask(t.db);
   const id = randomUUID();
   await openSessionRun(t.db, {
@@ -171,9 +178,44 @@ async function running(routeId: string, at: Date) {
     runAsUser: 'fleet-agent-carpool',
     worktreePath: null,
   });
-  return async (endedAt: Date) => {
-    await finishSessionRun(t.db, { id, outcome: 'ok', endedAt });
+  if (options.started) {
+    await markSessionRunStarted(t.db, { id, startedAt: at, sessionId: randomUUID(), handle: null });
+  }
+  return Object.assign(
+    async (endedAt: Date) => {
+      await finishSessionRun(t.db, { id, outcome: 'ok', endedAt });
+    },
+    { id },
+  );
+}
+
+/**
+ * 会话端口切号那两样的替身（#59）：手上几个会话，叫停以后再看 settle 次才收场（Infinity = 一直不收场）。
+ */
+function fakeSessions(runs: { id: string; poolId: string }[], settle = 1) {
+  const state = new Map(runs.map((r) => [r.id, { poolId: r.poolId, stoppedAtPoll: -1 }]));
+  let polls = 0;
+  const stops: { poolIds: string[]; why: string; stopped: string[] }[] = [];
+  const sessions: OrgSwitchSessions = {
+    stop(poolIds, why) {
+      const stopped: string[] = [];
+      for (const [id, s] of state) {
+        if (!poolIds.has(s.poolId) || s.stoppedAtPoll >= 0) continue;
+        s.stoppedAtPoll = polls;
+        stopped.push(id);
+      }
+      stops.push({ poolIds: [...poolIds].sort(), why, stopped });
+      return stopped;
+    },
+    live(poolIds) {
+      polls += 1;
+      for (const [id, s] of state) {
+        if (s.stoppedAtPoll >= 0 && polls - s.stoppedAtPoll > settle) state.delete(id);
+      }
+      return [...state].filter(([, s]) => poolIds.has(s.poolId)).map(([id]) => id);
+    },
   };
+  return { sessions, stops };
 }
 
 const audits = async () =>
@@ -417,5 +459,88 @@ describe('【故意造出的失败】', () => {
     await s.round();
     expect(s.helperCalls).toEqual([]);
     expect(s.logs.join('\n')).toContain('独享池整池暂停着');
+  });
+});
+
+describe('手上有会话在跑也照切：先停下、等收场、再切（#59）', () => {
+  it('拼车被拒、手上两个拼车会话在跑：停下两个（只停带组织类型的池上的），收场了才切；操作记录写明停了哪几个', async () => {
+    const a = await running('carpool', NOW, { started: true });
+    const b = await running('carpool', NOW, { started: true });
+    const fake = fakeSessions([
+      { id: a.id, poolId: 'claude-carpool' },
+      { id: b.id, poolId: 'claude-carpool' },
+    ]);
+    const s = setup({ sessions: fake.sessions });
+    await rejected('claude-carpool', s.now(), new Date(NOW.getTime() + 2 * H));
+    await s.round();
+    expect(s.helperCalls).toEqual(['solo']);
+    // 停的时候带着切号的原因（会话收场交回 org_switch，续会话时写进提示词）；两个池都在停的范围里
+    expect(fake.stops[0]).toEqual({
+      poolIds: ['claude-carpool', 'claude-solo'],
+      why: '切号：会话用户从拼车组织切到独享组织，先停下，切完接着干',
+      stopped: [a.id, b.id],
+    });
+    const [switched] = await audits();
+    expect(switched).toMatchObject({
+      action: 'session-org.switch',
+      ok: true,
+      before: { org: 'carpool' },
+      after: { org: 'solo', stopped: [a.id, b.id] },
+    });
+    const row = (await t.db.select().from(auditLog)).find((r) => r.action === 'session-org.switch');
+    expect(row?.reason).toContain('手上 2 个 Claude 会话先停下');
+    expect(row?.reason).toContain('切之前停下了 2 个在跑的 Claude 会话，切完各自续上');
+    // 切的那一会儿选路停着
+    expect(s.picksWhileSwitching[0]).toMatchObject({ ok: false, waitFor: 'slot' });
+  });
+
+  it('【故意造出的失败】停下的会话一直不收场：这一轮不切（不在会话还在跑的时候切），记没成、报「要人看」', async () => {
+    const a = await running('carpool', NOW, { started: true });
+    const fake = fakeSessions([{ id: a.id, poolId: 'claude-carpool' }], Number.POSITIVE_INFINITY);
+    const s = setup({ sessions: fake.sessions });
+    await rejected('claude-carpool', s.now(), new Date(NOW.getTime() + 2 * H));
+    await s.round();
+    expect(s.helperCalls).toEqual([]);
+    const [attempt] = await audits();
+    expect(attempt).toMatchObject({
+      action: 'session-org.switch',
+      ok: false,
+      after: { org: 'solo', stopped: [a.id] },
+    });
+    expect(attempt?.error).toContain('还有 1 个没收场、0 个还在起，这一轮不切（停下的照样续上）');
+    expect(await alertOf(ORG_SWITCH_ALERT)).toMatchObject({ level: 'alert', resolvedAt: null });
+    // 选路那一道解开了：停下的会话照样续上（还在拼车上，等额度）
+    expect(await s.pick()).toMatchObject({ ok: false, waitFor: 'quota' });
+  });
+
+  it('登记了、进程还没起来的（还在建树）：等它；排队很久还没起来的、库里开着可手上没有的（上一轮工人留下的），不等', async () => {
+    // 刚登记、还没起来：等不到它起来，这一轮不切
+    await running('carpool', NOW);
+    const s = setup({ sessions: fakeSessions([]).sessions });
+    await rejected('claude-carpool', s.now(), new Date(NOW.getTime() + 2 * H));
+    await s.round();
+    expect(s.helperCalls).toEqual([]);
+    expect((await audits())[0]?.error).toContain('0 个没收场、1 个还在起');
+
+    // 排队 20 分钟还没起来的、起来了可手上没有的：不是在跑的进程，照切
+    await t.client.query('delete from audit_log');
+    await t.client.query('delete from session_runs');
+    await running('carpool', new Date(NOW.getTime() - 20 * MIN));
+    await running('carpool', NOW, { started: true });
+    const t2 = setup({ sessions: fakeSessions([]).sessions });
+    await t2.round();
+    expect(t2.helperCalls).toEqual(['solo']);
+  });
+
+  it('到恢复时刻、手上的独享会话在跑：照样停下、切回拼车', async () => {
+    const a = await running('solo', NOW, { started: true });
+    const fake = fakeSessions([{ id: a.id, poolId: 'claude-solo' }]);
+    const s = setup({ sessions: fake.sessions });
+    s.rig.answer('solo');
+    await rejected('claude-carpool', new Date(NOW.getTime() - 3 * H), new Date(NOW.getTime() - MIN));
+    await s.round();
+    expect(s.helperCalls).toEqual(['carpool']);
+    expect(fake.stops[0]?.stopped).toEqual([a.id]);
+    expect(fake.stops[0]?.why).toContain('从独享组织切到拼车组织');
   });
 });

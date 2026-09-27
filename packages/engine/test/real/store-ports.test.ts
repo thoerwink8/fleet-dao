@@ -64,15 +64,15 @@ const pick = (over: Partial<PickRouteInput> = {}, p = ports()) =>
   );
 
 describe('选路', () => {
-  it('按调度台的顺序派；两个 Claude 池是同一个会话用户，不再分主池、备池', async () => {
+  it('按调度台的顺序派；两个 Claude 池是同一个会话用户，不再分主池、备池；派出去的带上组织类型（失败分流要）', async () => {
     await world(t.db);
     const r = await pick();
     expect(r).toMatchObject({
       ok: true,
-      route: { routeId: 'solo', poolId: 'claude-solo', poolRole: 'primary' },
+      route: { routeId: 'solo', poolId: 'claude-solo', orgKind: 'carpool' },
     });
     const carpool = await pick({ avoidRouteIds: ['solo'] });
-    expect(carpool).toMatchObject({ ok: true, route: { routeId: 'carpool', poolRole: 'primary' } });
+    expect(carpool).toMatchObject({ ok: true, route: { routeId: 'carpool', orgKind: 'carpool' } });
     // 写码这种重活照样派得出去：平时挂着的拼车池要接全部的活
     expect(await pick({ stage: 'execute', avoidRouteIds: ['solo'] })).toMatchObject({
       ok: true,

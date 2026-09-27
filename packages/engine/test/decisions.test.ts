@@ -320,7 +320,7 @@ describe('失败分流：接的是规则表（failure/classify.ts），认不出
     expect(nextAction({ failure: failure('WEIRD', false), limits, routeBound: false }).action).toBe('park');
   });
 
-  it('账号池的事：封号换池并报警、换不了就挂起；额度用满在备池（拼车号）先换池；别的换路由只避这条路由', () => {
+  it('账号池的事：封号换池并报警、换不了就挂起；额度用满在 Claude 订阅池马上回去选路（等切号）；别的换路由只避这条路由', () => {
     expect(nextAction({ failure: failure('account_banned'), limits, routeBound: true })).toMatchObject({
       action: 'swapRoute',
       avoid: 'pool',
@@ -335,7 +335,8 @@ describe('失败分流：接的是规则表（failure/classify.ts），认不出
         routeBound: true,
       }).action,
     ).toBe('park');
-    const backup = nextAction({
+    // Claude 订阅池（带组织类型）：不原地睡到清零，马上回去选路续同一个会话（切了号选路就换池 fork 续上，#59）
+    const org = nextAction({
       failure: failure('QUOTA_EXHAUSTED'),
       limits,
       routeBound: true,
@@ -347,30 +348,24 @@ describe('失败分流：接的是规则表（failure/classify.ts），认不出
           poolId: 'carpool',
           modelId: 'opus',
           hostId: 'claude-code',
-          poolRole: 'backup',
+          orgKind: 'carpool',
         },
       },
     });
-    expect(backup).toMatchObject({ action: 'swapRoute', avoid: 'pool', resumeSame: false });
-    expect(backup.shared).toEqual({ scope: 'pool', until: '2026-09-25T00:20:00.000Z' });
-    // 同样的额度用满在主池：等到清零（上游给的时刻），不换池。
-    const primary = nextAction({
+    expect(org).toMatchObject({ action: 'retry', delaySeconds: 0, wait: 'quota', resumeSame: true });
+    expect(org.shared).toEqual({ scope: 'pool', until: '2026-09-25T00:20:00.000Z' });
+    // 同样的额度用满在别的池：等到清零（上游给的时刻），不换池。
+    const plain = nextAction({
       failure: failure('QUOTA_EXHAUSTED'),
       limits,
       routeBound: true,
       context: {
         now: '2026-09-25T00:00:00.000Z',
         resetsAt: '2026-09-25T00:20:00.000Z',
-        route: {
-          routeId: 'r-solo',
-          poolId: 'solo',
-          modelId: 'opus',
-          hostId: 'claude-code',
-          poolRole: 'primary',
-        },
+        route: { routeId: 'r-kimi', poolId: 'kimi', modelId: 'k2', hostId: 'mirasim' },
       },
     });
-    expect(primary).toMatchObject({ action: 'retry', delaySeconds: 1200, wait: 'quota', resumeSame: true });
+    expect(plain).toMatchObject({ action: 'retry', delaySeconds: 1200, wait: 'quota', resumeSame: true });
     expect(nextAction({ failure: failure('ROUTE_BUSY'), limits, routeBound: true }).avoid).toBe('route');
     expect(
       nextAction({ failure: failure('WEIRD'), counters: { retries: 2 }, limits, routeBound: true }).avoid,
@@ -388,7 +383,7 @@ describe('失败分流：接的是规则表（failure/classify.ts），认不出
           poolId: 'carpool',
           modelId: 'opus',
           hostId: 'claude-code',
-          poolRole: 'backup',
+          orgKind: 'carpool',
         },
         machine: '法国',
         runAsUser: 'fleet-agent-carpool',

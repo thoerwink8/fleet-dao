@@ -6,7 +6,6 @@ import { CANDIDATE_BLOCKERS, type ChooseRouteInput, RoutingInputError } from './
 const WINDOW_STATES = ['ok', 'exhausted', 'stale', 'reset'];
 const QUOTA_STATES = ['ok', 'exhausted', 'unknown'];
 const ADMITS = ['all', 'trial', 'none'];
-const ROLES = ['primary', 'backup'];
 const ORGS = ['solo', 'carpool'];
 
 export function time(iso: unknown, what: string): number {
@@ -25,9 +24,6 @@ export function validateInput(input: ChooseRouteInput, trialEnabled: boolean): n
   const now = time(input.now, '现在的时刻');
   if (!Object.hasOwn(STAGE_NEEDS, input.stage)) {
     throw new RoutingInputError(`选路判不了：阶段类型认不出（${String(input.stage)}）`);
-  }
-  if (input.weight !== undefined && input.weight !== 'light' && input.weight !== 'heavy') {
-    throw new RoutingInputError(`选路判不了：活的轻重认不出（${String(input.weight)}）`);
   }
   if (input.liveOrg !== undefined && !ORGS.includes(input.liveOrg)) {
     throw new RoutingInputError(`选路判不了：会话用户挂的组织认不出（${String(input.liveOrg)}）`);
@@ -63,12 +59,10 @@ export function validateInput(input: ChooseRouteInput, trialEnabled: boolean): n
     facts.add(r.routeId);
     if (!QUOTA_STATES.includes(r.quota))
       throw new RoutingInputError(`选路判不了：${who} 的额度状态认不出（${r.quota}）`);
-    if (!ROLES.includes(r.poolRole))
-      throw new RoutingInputError(`选路判不了：${who} 的池主备认不出（${r.poolRole}）`);
     if (r.orgKind !== undefined && r.orgKind !== null && !ORGS.includes(r.orgKind))
       throw new RoutingInputError(`选路判不了：${who} 的组织类型认不出（${String(r.orgKind)}）`);
     count(r.inFlight, `${who} 的在途数`);
-    // 读不到不能当 0：一批任务同时来时，每个都会看到「没人占着」，拼车号就放出不止一个试探。
+    // 读不到不能当 0：一批任务同时来时，每个都会看到「没人占着」，并发上限就挡不住。
     count(r.reserved, `${who} 的已选定还没开工数`);
     count(r.maxConcurrency, `${who} 的并发上限`);
     // 硬禁令也按上游串和别名认：没带上就只认得模型 id 和显示名，上游串是 Fable 的会漏过去。
@@ -87,8 +81,8 @@ export function validateInput(input: ChooseRouteInput, trialEnabled: boolean): n
     else if (!r.blockers.includes('offline')) {
       throw new RoutingInputError(`选路判不了：${who} 在线，却没有探针下结论的时刻`);
     }
-    // 候选查询里两者是一回事（额度用满才挂 quota-exhausted）。对不上说明输入拼错了：额度未知的备池会被放去试探，
-    // 用满的主池会被照派，不能按其中一边往下走。
+    // 候选查询里两者是一回事（额度用满才挂 quota-exhausted）。对不上说明输入拼错了：用满的池会被照派，
+    // 不能按其中一边往下走。
     if ((r.quota === 'exhausted') !== r.blockers.includes('quota-exhausted')) {
       throw new RoutingInputError(
         `选路判不了：${who} 的额度状态（${r.quota}）和被挡原因（${r.blockers.join('、') || '无'}）对不上`,

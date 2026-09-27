@@ -53,6 +53,14 @@ describe('挂着拼车', () => {
     expect(plan.why).toContain('手上还有 2 个 Claude 会话没结束，等跑完再切到独享');
   });
 
+  it('能先把手上的会话停下、切完续上（#59）：有会话在跑也照切，写明停几个', () => {
+    const plan = planOrgSwitch(
+      facts({ pools: { carpool: pool([full(at(H))]), solo: pool() }, busy: 2, canStopRunning: true }),
+    );
+    expect(plan).toMatchObject({ action: 'switch', to: 'solo' });
+    expect(plan.why).toContain('手上 2 个 Claude 会话先停下，切完接着干（换了池 fork 续上）');
+  });
+
   it('读数旧了、清零时刻不知道（选路算「不知道」照派）：不切，等真被拒了再说', () => {
     const stale: OrgWindow = { label: 'five_hour', state: 'stale', full: true, resetsAt: null };
     expect(planOrgSwitch(facts({ pools: { carpool: pool([stale]), solo: pool() } }))).toMatchObject({
@@ -101,8 +109,12 @@ describe('挂着独享', () => {
     expect(plan.why).toContain('平时挂拼车');
   });
 
-  it('恢复了、手上还有会话：等', () => {
+  it('恢复了、手上还有会话：等；能先停下的照切回（#59）', () => {
     expect(onSolo(pool([full(at(-60_000))]), { busy: 1 })).toMatchObject({ action: 'wait', to: 'carpool' });
+    expect(onSolo(pool([full(at(-60_000))]), { busy: 1, canStopRunning: true })).toMatchObject({
+      action: 'switch',
+      to: 'carpool',
+    });
   });
 
   it('【故意造出的失败】拼车用满了却读不到几点恢复：stuck，要人看，不当成到点了', () => {

@@ -38,24 +38,21 @@ describe('Q8 模型组窗口只卡对应模型', () => {
 });
 
 describe('Q11 读数过期不当现值', () => {
-  it('过期的主池不当「还够」：排到读到了的后面，理由写额度未知', () => {
+  it('过期的池不当「还够」：排到读到了的后面，理由写额度未知', () => {
     const stale = route('stale', { quota: 'unknown', windows: [win({ state: 'stale' })] });
     const r = chooseRoute(input([stale, route('fresh')]));
     expect(r).toMatchObject({ routeId: 'fresh' });
     expect(r.verdicts[1]?.nudges.map((n) => n.kind)).toEqual(['quota-unknown']);
   });
 
-  it('过期的备池也不当「还够」：只放一个试探，已经有一个在跑就等', () => {
-    const stale = (inFlight: number) =>
-      route('stale', { poolRole: 'backup', quota: 'unknown', windows: [win({ state: 'stale' })], inFlight });
-    expect(chooseRoute(input([stale(0)], { stage: 'triage' }))).toMatchObject({
-      kind: 'dispatch',
-      trial: 'quota-probe',
+  it('拼车号过期也一样：照派、排后面，已经有一个在跑也不等（不再是「备池只放一个试探」，#59 删掉）', () => {
+    const stale = route('stale', {
+      poolName: '拼车号',
+      quota: 'unknown',
+      windows: [win({ state: 'stale' })],
+      inFlight: 1,
     });
-    expect(chooseRoute(input([stale(1)], { stage: 'triage' }))).toMatchObject({
-      kind: 'wait',
-      waitFor: 'slot',
-    });
+    expect(chooseRoute(input([stale], { stage: 'triage' }))).toMatchObject({ kind: 'dispatch', trial: null });
   });
 });
 
@@ -116,7 +113,6 @@ describe('R2 改选路逻辑要对每个阶段读回首选', () => {
     route('solo', { poolName: '独享号' }),
     route('carpool', {
       poolName: '拼车号',
-      poolRole: 'backup',
       windows: [win({ label: '5h', window: '5h', used: 0.1 }), win({ used: 0.4, resetsAt: at(20) })],
     }),
     route('gpt', { modelId: 'gpt-5.6-luna', modelName: 'GPT 5.6 luna', family: 'gpt', hostId: 'codex' }),
@@ -139,13 +135,14 @@ describe('R2 改选路逻辑要对每个阶段读回首选', () => {
       research: firstChoice('research', ['shell', 'solo']),
     };
     expect(table).toEqual({
-      triage: 'carpool', // 轻活，拼车号周额度快清零：提到接口外壳前面
+      triage: 'carpool', // 拼车号周额度快清零：提到接口外壳前面
       judge: 'shell',
-      spec: 'carpool', // 轻活，同上
-      plan: 'solo', // 重活，拼车号不接
-      execute: 'solo',
+      spec: 'carpool', // 同上
+      // 2026-09-27（#59）起重活也派拼车号：法国只留一个会话用户，平时挂的拼车池接全部的活，不再「备池只接轻活」
+      plan: 'carpool',
+      execute: 'carpool',
       ui: 'solo', // GPT 不做 UI
-      review: 'carpool', // 审查算轻活（design §九：拼车号派审查），周额度快清零：提到最前
+      review: 'carpool', // 周额度快清零：提到最前
       research: 'solo', // 接口外壳不会读仓库
     });
   });
@@ -176,8 +173,8 @@ describe('C1 并发按账号池计', () => {
     expect(r).toMatchObject({ routeId: 'relay' });
   });
 
-  it('备池的上限按它自己池的在途数算', () => {
-    const c = route('c', { poolRole: 'backup', inFlight: 1 });
+  it('拼车号的上限按它自己池的在途数算', () => {
+    const c = route('c', { poolName: '拼车号', inFlight: 1 });
     expect(chooseRoute(input([c], { stage: 'triage' }))).toMatchObject({ kind: 'dispatch', routeId: 'c' });
   });
 });
