@@ -6,14 +6,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import {
-  CloseRefused,
-  CloseUnchecked,
-  closingIssues,
-  issueClose,
-  resultDocIssue,
-  resultDocOf,
-} from '../src/issue-close.ts';
+import { closingIssues, resultDocIssue, resultDocOf } from '../src/close-rule.ts';
+import { CloseRefused, CloseUnchecked, issueClose } from '../src/issue-close.ts';
 import type { GhResult } from '../src/issue-new.ts';
 import { runChild } from './child.ts';
 
