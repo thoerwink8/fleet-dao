@@ -1,21 +1,28 @@
-// pnpm test:changed：改了哪些文件（git 每一步没成都报错，不当成没改动）、跑哪些测试（和 CI 按改动跑同一套判法）。
-import { spawnSync } from 'node:child_process';
+// pnpm test:changed：改了哪些文件（git 每一步没成都报错，不当成没改动）、跑哪些测试（和 CI 按改动跑同一套判法）、
+// 要全跑时本机跑不跑。
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { readGraph } from '../src/ci-plan.ts';
-import { fsRepo } from '../src/repo.ts';
+import { fsRepo, type RepoView } from '../src/repo.ts';
 import {
   ALWAYS_TESTS,
   BASE,
   changedFiles,
+  changedUnits,
+  ENGINE_SESSION_MARKER,
   type GitRun,
+  REFUSED_FULL_RUN,
   selectTests,
   TestChangedError,
+  testChanged,
+  unitHasTests,
   vitestArgs,
 } from '../src/test-changed.ts';
+import { runChild } from './child.ts';
+import { memRepo } from './helpers.ts';
 
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 const GRAPH = readGraph(fsRepo(ROOT));
@@ -94,7 +101,8 @@ describe('改了哪些文件', () => {
     });
   });
 
-  describe('真 git（临时仓）', () => {
+  // 同步起三十几个 git：不设 vitest 的超时，卡死由子进程自己的上限管（为什么见 child.ts 开头）。
+  describe('真 git（临时仓）', { timeout: 0 }, () => {
     let dir: string | undefined;
     afterEach(() => {
       if (dir) rmSync(dir, { recursive: true, force: true });
@@ -104,11 +112,11 @@ describe('改了哪些文件', () => {
     const realGit =
       (cwd: string): GitRun =>
       (args) => {
-        const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
-        return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '', error: r.error };
+        const r = runChild('git', args, { cwd });
+        return { status: r.status, stdout: r.stdout, stderr: r.stderr };
       };
     const sh = (cwd: string, ...args: string[]) => {
-      const r = spawnSync('git', [...ID, ...args], { cwd, encoding: 'utf8' });
+      const r = runChild('git', [...ID, ...args], { cwd });
       if (r.status !== 0) throw new Error(`git ${args.join(' ')}：${r.stderr}`);
       return r.stdout.trim();
     };
@@ -225,12 +233,165 @@ describe('跑哪些测试：和 CI 按改动跑同一套判法', () => {
   });
 });
 
+// 整段流程（testChanged）换上假的 git、假的仓、假的 vitest 跑：看跑不跑、打了什么、退出码。
+describe('要全跑时本机不跑：写明原因和单跑的命令，退出码 3（全量交给 CI）', () => {
+  const REPO = memRepo({
+    'packages/api/test/cli.test.ts': '',
+    'packages/api/src/cli.ts': '',
+    'packages/shared/src/domain.ts': '',
+    'packages/web/src/app.test.tsx': '',
+    'agents/test/discuss.test.ts': '',
+  });
+  type VitestResult = ReturnType<Parameters<typeof testChanged>[0]['vitest']>;
+  const run = (
+    changed: string[],
+    opts: {
+      argv?: string[];
+      env?: Record<string, string>;
+      repo?: RepoView;
+      vitest?: () => VitestResult;
+    } = {},
+  ) => {
+    const { git } = fakeGit({ committed: { stdout: changed.map((f) => `${f}\0`).join('') } });
+    const out: string[] = [];
+    const err: string[] = [];
+    const vitestCalls: string[][] = [];
+    const code = testChanged({
+      argv: opts.argv ?? [],
+      env: opts.env ?? {},
+      git,
+      repo: opts.repo ?? REPO,
+      graph: () => GRAPH,
+      vitest: (args) => {
+        vitestCalls.push(args);
+        return opts.vitest?.() ?? { status: 0 };
+      },
+      out: (l) => out.push(l),
+      err: (l) => err.push(l),
+    });
+    return { code, out, err, vitestCalls };
+  };
+
+  it('【故意造出的情形】要全跑、本机、没带 --all：一个测试都不跑，退出码 3，写明原因、改到的包各自单跑的命令、怎么真全跑', () => {
+    const r = run([
+      'pnpm-lock.yaml',
+      'packages/api/src/cli.ts',
+      'packages/shared/src/domain.ts',
+      'agents/skills/discuss/scripts/ask.mjs',
+    ]);
+    expect(r.code).toBe(REFUSED_FULL_RUN);
+    expect(REFUSED_FULL_RUN).toBe(3);
+    expect(r.vitestCalls).toEqual([]);
+    // 为什么要全跑照 CI 那套判法打出来（哪个文件、落到哪一条）
+    expect(r.out.some((l) => l.startsWith('- pnpm-lock.yaml：'))).toBe(true);
+    expect(r.err[0]).toContain('要全跑');
+    expect(r.err[0]).toContain('全量交给 CI');
+    expect(r.err).toEqual(
+      expect.arrayContaining([
+        '改到的包各自单跑：',
+        '  pnpm exec vitest run agents/test/',
+        '  pnpm exec vitest run packages/api/',
+        '  pnpm exec vitest run packages/shared/（这个包自己没有测试，不用跑）',
+        '真要在本机全跑：pnpm test:changed --all',
+      ]),
+    );
+    expect(r.err.at(-1)).toContain('退出码 3（不是测试没过）');
+  });
+
+  it('只改了根配置：没有要单跑的包，照样不跑、退出码 3', () => {
+    const r = run(['vitest.config.ts']);
+    expect(r.code).toBe(REFUSED_FULL_RUN);
+    expect(r.vitestCalls).toEqual([]);
+    expect(r.err).toContain('这次没改到哪个包的代码，没有要单跑的。');
+  });
+
+  it('带 --all：本机全跑（vitest run 不带过滤），退出码照 vitest 的', () => {
+    const r = run(['pnpm-lock.yaml'], { argv: ['--all'], vitest: () => ({ status: 1 }) });
+    expect(r.vitestCalls).toEqual([['run']]);
+    expect(r.out).toContain('带了 --all：本机全跑');
+    expect(r.code).toBe(1);
+  });
+
+  it('在 CI 里（CI=true）照旧全跑；CI 写成 false、0、空的不算在 CI 里', () => {
+    expect(run(['pnpm-lock.yaml'], { env: { CI: 'true' } }).vitestCalls).toEqual([['run']]);
+    for (const CI of ['false', '0', '']) {
+      expect(run(['pnpm-lock.yaml'], { env: { CI } }).code, CI).toBe(REFUSED_FULL_RUN);
+    }
+  });
+
+  it('引擎起的会话（环境里有会话标记）照旧全跑：拒跑的话交活永远过不了；会话在有内存上限的 scope 里', () => {
+    expect(ENGINE_SESSION_MARKER).toBe('FLEET_RUN_ID');
+    const r = run(['packages/shared/src/domain.ts'], { env: { [ENGINE_SESSION_MARKER]: 'run-1' } });
+    expect(r.vitestCalls).toEqual([['run']]);
+    expect(r.code).toBe(0);
+    expect(r.out.join('\n')).toContain('引擎起的会话：照旧全跑');
+    // 标记是空的不算
+    expect(run(['packages/shared/src/domain.ts'], { env: { [ENGINE_SESSION_MARKER]: ' ' } }).code).toBe(
+      REFUSED_FULL_RUN,
+    );
+  });
+
+  it('不用全跑的照常只跑选中的；--all 能把它升成全跑', () => {
+    const some = run(['packages/api/src/cli.ts']);
+    expect(some.code).toBe(0);
+    expect(some.vitestCalls[0]?.[0]).toBe('run');
+    expect(some.vitestCalls[0]).toContain('packages/api/');
+    expect(run(['packages/api/src/cli.ts'], { argv: ['--all'] }).vitestCalls).toEqual([['run']]);
+  });
+
+  it('给了 --all 以外的参数：退出码 2，一个测试都不跑，写明只收 --all', () => {
+    const r = run(['packages/api/src/cli.ts'], { argv: ['packages/api'] });
+    expect(r.code).toBe(2);
+    expect(r.vitestCalls).toEqual([]);
+    expect(r.err.join('\n')).toContain('只收 --all');
+  });
+
+  it('vitest 起不来：退出码 2；被信号杀掉：退出码 1，都不当成通过', () => {
+    const missing = run(['packages/api/src/cli.ts'], {
+      vitest: () => ({ status: null, error: new Error('找不到 vitest.mjs：先 pnpm install') }),
+    });
+    expect(missing.code).toBe(2);
+    expect(missing.err.join('\n')).toContain('vitest 起不来（找不到 vitest.mjs');
+    const killed = run(['packages/api/src/cli.ts'], { vitest: () => ({ status: null, signal: 'SIGKILL' }) });
+    expect(killed.code).toBe(1);
+    expect(killed.err.join('\n')).toContain('被信号 SIGKILL 杀掉了');
+  });
+
+  it('改到的文件落到哪几个单元：包、agents；根配置、文档、deploy 不算', () => {
+    expect(
+      changedUnits([
+        'packages/api/src/a.ts',
+        'packages/api/test/b.test.ts',
+        'agents/skills/x/SKILL.md',
+        'deploy/france.sh',
+        'docs/ops.md',
+        'pnpm-lock.yaml',
+      ]),
+    ).toEqual(['agents/test/', 'packages/api/']);
+  });
+
+  it('包有没有测试：src、test 下认 .test.ts(x)；目录列不出来的不说「没有」', () => {
+    expect(unitHasTests(REPO, 'packages/api/')).toBe(true);
+    expect(unitHasTests(REPO, 'packages/web/')).toBe(true);
+    expect(unitHasTests(REPO, 'packages/shared/')).toBe(false);
+    expect(unitHasTests(REPO, 'agents/test/')).toBe(true);
+    const unreadable: RepoView = {
+      ...REPO,
+      list: (rel) => (rel === 'packages/shared/src' ? undefined : REPO.list(rel)),
+    };
+    expect(unitHasTests(unreadable, 'packages/shared/')).toBeUndefined();
+    const r = run(['packages/shared/src/domain.ts'], { repo: unreadable });
+    expect(r.err).toContain('  pnpm exec vitest run packages/shared/');
+  });
+});
+
 describe('入口', () => {
-  it('不收参数：给了就退出 2，一个测试都不跑', () => {
+  // 同步起 node：不设 vitest 的超时，卡死由子进程自己的上限管（为什么见 child.ts 开头）。
+  it('只收 --all：给了别的参数就退出 2，一个测试都不跑', { timeout: 0 }, () => {
     const bin = fileURLToPath(new URL('../src/bin/test-changed.ts', import.meta.url));
-    const r = spawnSync(process.execPath, [bin, 'packages/api'], { encoding: 'utf8' });
+    const r = runChild(process.execPath, [bin, 'packages/api']);
     expect(r.status).toBe(2);
-    expect(r.stderr).toContain('不收参数');
+    expect(r.stderr).toContain('只收 --all');
   });
 
   it('根目录的 pnpm test:changed 就是这个入口', () => {
