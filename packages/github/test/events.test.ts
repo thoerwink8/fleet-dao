@@ -156,6 +156,24 @@ describe('对账与补漏', () => {
     expect(fake.calls('POST', /attempts$/).map((r) => r.as)).toEqual(['app:engine']);
   });
 
+  it('重投名额不够时老的优先：新失败的不该把老的挤出去，不然老的等 since 窗口一过就永久补不回来', async () => {
+    const { gh, fake } = setup();
+    // 翻页新的在前（GitHub 真接口就是这个顺序）：先给最新失败的，最后给最老的
+    fake.deliveries = [
+      { id: 3, guid: 'g-new', delivered_at: '2026-09-25T11:30:00Z', status_code: 502, event: 'issues' },
+      { id: 2, guid: 'g-mid', delivered_at: '2026-09-25T11:20:00Z', status_code: 502, event: 'issues' },
+      { id: 1, guid: 'g-old', delivered_at: '2026-09-25T11:10:00Z', status_code: 502, event: 'issues' },
+    ];
+    const { intake } = fakeIntake(() => true);
+    const report = await gh
+      .reconciler({ intake, pollDeliveryId, maxRedeliveries: 2 })
+      .redeliverFailed(new Date('2026-09-25T10:00:00Z'));
+    // 一轮只够重投 2 个：该保离窗口边界最近的两个（g-old、g-mid），把离过期还早的 g-new 留到下一轮
+    expect(fake.redelivered).toEqual([1, 2]);
+    expect(report).toMatchObject({ outcome: 'partial', checked: 3, recovered: 2 });
+    expect(report.why).toContain('还有 1 个没重投（一次最多 2 个）');
+  });
+
   it('重投：19 位的投递编号按原文拼路径，不丢精度（法国实测 …928 被改成 …000，重投全 404）', async () => {
     const { gh, fake } = setup();
     // 原文里的数字超出 JS 安全整数：只能手写 JSON 文本，JSON.stringify 一个 number 已经丢了精度
