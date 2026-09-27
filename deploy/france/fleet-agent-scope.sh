@@ -14,9 +14,18 @@
 #                                    在就改属主。退出码：0 成功；64 校验不过；其余失败 1。
 #   sudo -n fleet-agent-scope remove <工作树>  删掉一棵工作树（不跟随符号链接、不跨文件系统）。本来就不在也返回 0；
 #                                    标准输出最后一行是 removed <路径> 或 gone <路径>。退出码同 adopt。
+#   sudo -n fleet-agent-scope org-use <carpool|solo> --user <会话用户>
+#                                    把会话用户挂的 reclaude 组织切到拼车（org list 里类型 team）或独享（personal）：以它的身份
+#                                    跑它家里的 reclaude，那一类的组织要恰好一个；已经挂着就不动。切完再读一遍 org list 核对
+#                                    （org use 退出码不是 0 也可能已经切了，docs/reference/adapters.md CC-07），没切成就切回原来那个。
+#                                    切号会让这个家目录下在跑的 Claude 会话全断：等手上没有在跑的会话再调，由引擎管（#157）。
+#                                    组织编号、名字、邮箱一概不打出来。标准输出最后一行：switched <类型> / already <类型>；
+#                                    没成是 failed <现在挂的类型：carpool、solo、other 或 unknown>。退出码：0 成功；64 校验不过；
+#                                    其余失败 1。
 #
 # 法国只有一个会话用户 fleet-agent-carpool（reclaude 一个账户最多挂 4 台设备、一个家目录算一台，创始人 2026-09-26；
-# 名字是历史沿用）。它的组织写在家里的 ~/.reclaude/device.json，对它的所有会话一起生效：平时挂拼车，用满切独享（#59）。
+# 名字是历史沿用）。它的组织写在家里的 ~/.reclaude/device.json，对它的所有会话一起生效：平时挂拼车，用满切独享、恢复了
+# 切回，由引擎在手上没有 Claude 会话时经 org-use 切（#157；切的那一刻在跑的会话 fork 续上是 #59）。
 # 原先的 fleet-agent-dedicated 已停用、已删，这里不再认。
 # 内存要真封顶，--memory-max 和 --memory-swap-max 得一起给：只给前者，超出的部分会被换进 swap，会话不会被杀（法国实测）。
 # run 会 exec 成会话本身：进程号、标准输入输出都还是调用方拿着的那一份。会话看得到的环境：HOME/USER/LOGNAME/SHELL 是会话用户的；
@@ -38,6 +47,13 @@ ENV_RE='^(FLEET_[A-Z0-9_]+|LANG|LANGUAGE|LC_[A-Z_]+|TZ|TERM|GIT_TERMINAL_PROMPT)
 WORK_BASE=${AGENT_SCOPE_TEST_WORK_BASE:-/var/lib/fleet-work}
 # fs.protected_hardlinks 的读取路径，理由同上：测试专用开关，故意不叫 FLEET_*。
 PROTECTED_HARDLINKS_PATH=${AGENT_SCOPE_TEST_PROTECTED_HARDLINKS_PATH:-/proc/sys/fs/protected_hardlinks}
+# org-use 用的，理由同上、故意不叫 FLEET_*：换 reclaude 的路径（默认会话用户家里的 ~/.local/bin/reclaude）；
+# direct = 不降权直接跑、家目录用 AGENT_SCOPE_TEST_HOME（不经 sudo 直接跑这个脚本的测试用，测试机上没有会话用户）。
+RECLAUDE_TEST_BIN=${AGENT_SCOPE_TEST_RECLAUDE:-}
+AS_USER_TEST=${AGENT_SCOPE_TEST_AS_USER:-}
+HOME_TEST=${AGENT_SCOPE_TEST_HOME:-}
+# 一次 reclaude 最多等多久：平时不到 1 秒；reclaude 更新后首跑先「Syncing config…」，要上百秒（引擎的探针也给 150 秒）。
+RECLAUDE_TIMEOUT=150
 
 die() {
   printf 'fleet-agent-scope：%s\n' "$*" >&2
@@ -254,6 +270,146 @@ adopt() {
   echo "已把 $dir 交给 $user"
 }
 
+# ---- org-use：切会话用户挂的 reclaude 组织（#157）。全程只认类型，组织编号只在这几个函数里过手，不打出来。
+
+kind_name() { # 后面接「组织」两个字用
+  case $1 in
+  carpool) echo 拼车 ;;
+  solo) echo 独享 ;;
+  other) echo 类型认不出的 ;;
+  *) echo 认不出的 ;;
+  esac
+}
+
+# reclaude 的原话进引擎的日志和库之前：三位以上的数（组织编号就是这样的数）、邮箱抹掉，只留末尾一截、压成一行
+scrub() {
+  printf '%s' "$1" | sed -E 's/[^[:space:]]+@[^[:space:]]+/<邮箱>/g; s/[0-9]{3,}/<数>/g' | tr '\n\r\t' '   ' | tail -c 300
+}
+
+reclaude_as() { # 用户 家目录 参数…：以会话用户跑它家里的 reclaude，环境清成它自己的，从 / 起，限时
+  local user=$1 home=$2 bin
+  shift 2
+  bin=${RECLAUDE_TEST_BIN:-$home/.local/bin/reclaude}
+  local -a envs=(HOME="$home" USER="$user" LOGNAME="$user" PATH="/usr/local/bin:/usr/bin:/bin:$home/.local/bin" LANG=C.UTF-8)
+  if [[ "$AS_USER_TEST" == direct ]]; then
+    (cd / && timeout --kill-after=10 "$RECLAUDE_TIMEOUT" env -i "${envs[@]}" "$bin" "$@")
+  else
+    (cd / && timeout --kill-after=10 "$RECLAUDE_TIMEOUT" /usr/bin/setpriv --reuid="$user" --regid="$user" --init-groups \
+      --no-new-privs -- /usr/bin/env -i "${envs[@]}" "$bin" "$@")
+  fi
+}
+
+# org list 的一行：「* 编号<Tab>名字<Tab>类型<Tab>邮箱」，带 * 的是现在挂的；前后的「Syncing config…」、提示之类都跳过。
+# 读成 ORG_ROWS（一行一个「是否当前 编号 类型」，类型 carpool / solo / other）；读不了、一行都认不出回 1，原因在 ORG_WHY
+org_rows() { # 用户 家目录
+  local out line mark id type re=$'^[[:space:]]*(\\*?)[[:space:]]*([0-9]+)\t[^\t]*\t([^\t]*)'
+  ORG_ROWS="" ORG_WHY=""
+  if ! out=$(reclaude_as "$1" "$2" org list 2>&1); then
+    ORG_WHY="org list 没跑成（$(scrub "$out")）"
+    return 1
+  fi
+  while IFS= read -r line; do
+    line=${line%$'\r'}
+    [[ "$line" =~ $re ]] || continue
+    mark=${BASH_REMATCH[1]:--} id=${BASH_REMATCH[2]} type=${BASH_REMATCH[3],,}
+    type=${type//[[:space:]]/}
+    case $type in
+    team) type=carpool ;;
+    personal) type=solo ;;
+    *) type=other ;;
+    esac
+    ORG_ROWS+="$mark $id $type"$'\n'
+  done <<<"$out"
+  [[ -n "$ORG_ROWS" ]] || {
+    ORG_WHY="org list 里一个组织都认不出"
+    return 1
+  }
+}
+
+# 从 ORG_ROWS 认出现在挂的（CUR_ID、CUR_KIND）和要切到的那一类（WANT_ID）：带 * 的、那一类的都要恰好一个。认不出回 1
+org_pick() { # 要切到的类型
+  local want=$1 mark id type ncur=0 nwant=0
+  CUR_ID="" CUR_KIND="" WANT_ID=""
+  while read -r mark id type; do
+    [[ -n "$id" ]] || continue
+    if [[ "$mark" == '*' ]]; then
+      ncur=$((ncur + 1))
+      CUR_ID=$id CUR_KIND=$type
+    fi
+    if [[ "$type" == "$want" ]]; then
+      nwant=$((nwant + 1))
+      WANT_ID=$id
+    fi
+  done <<<"$ORG_ROWS"
+  if ((ncur != 1)); then
+    ORG_WHY="org list 里带 * 的有 $ncur 行，认不出现在挂的是哪个"
+    CUR_KIND=unknown
+    return 1
+  fi
+  if ((nwant != 1)); then
+    ORG_WHY="org list 里$(kind_name "$want")类型的组织有 $nwant 个，不知道切到哪个"
+    return 1
+  fi
+}
+
+org_fail() { # 现在挂的类型 原因：没切成（退出码 1），最后一行 failed <类型>
+  printf 'fleet-agent-scope：%s\n' "$2" >&2
+  echo "failed $1"
+  exit 1
+}
+
+org_use() {
+  local kind=${1:-} user="" u ok=0 home from_id from_kind out rc now
+  [[ "$kind" == carpool || "$kind" == solo ]] || die "要切到哪一类只认 carpool（拼车）或 solo（独享），给的是「$kind」"
+  shift
+  while (($#)); do
+    case $1 in
+    --user)
+      (($# >= 2)) || die "$1 后面要给一个值"
+      user=$2
+      shift 2
+      ;;
+    *) die "不认识的参数：「$1」" ;;
+    esac
+  done
+  for u in "${SESSION_USERS[@]}"; do if [[ "$user" == "$u" ]]; then ok=1; fi; done
+  ((ok)) || die "--user 只能是会话用户 ${SESSION_USERS[*]}，给的是「$user」"
+  if [[ "$AS_USER_TEST" == direct ]]; then
+    home=$HOME_TEST
+  else
+    home=$(getent passwd "$user" | cut -d: -f6) || home=""
+  fi
+  [[ "$home" == /* ]] || org_fail unknown "找不到 $user 的家目录"
+  org_rows "$user" "$home" || org_fail unknown "$ORG_WHY"
+  org_pick "$kind" || org_fail "$CUR_KIND" "$ORG_WHY"
+  if [[ "$CUR_ID" == "$WANT_ID" ]]; then
+    echo "已经挂着$(kind_name "$kind")组织，不用切"
+    echo "already $kind"
+    return 0
+  fi
+  from_id=$CUR_ID from_kind=$CUR_KIND
+  if out=$(reclaude_as "$user" "$home" org use "$WANT_ID" 2>&1); then rc=0; else rc=$?; fi
+  # 不看退出码下结论，回读核对：退出码 1 也可能已经切了（CC-07），退出码 0 也要看真挂上了没有
+  if ! org_rows "$user" "$home" || ! org_pick "$kind"; then
+    org_fail unknown "org use 退出码 $rc，切完回读核对不了（$ORG_WHY），不知道现在挂的是哪个，没敢往回切"
+  fi
+  if [[ "$CUR_ID" == "$WANT_ID" ]]; then
+    echo "已从$(kind_name "$from_kind")组织切到$(kind_name "$kind")组织"
+    echo "switched $kind"
+    return 0
+  fi
+  # 没切成：挂着的已经不是原来那个了，切回去；再回读一次，照实说现在挂的是哪个
+  if [[ "$CUR_ID" != "$from_id" ]]; then reclaude_as "$user" "$home" org use "$from_id" >/dev/null 2>&1 || true; fi
+  now=unknown
+  if org_rows "$user" "$home" && org_pick "$kind"; then
+    if [[ "$CUR_ID" == "$from_id" ]]; then
+      org_fail "$from_kind" "没切成（org use 退出码 $rc：$(scrub "$out")），现在挂的还是原来的$(kind_name "$from_kind")组织"
+    fi
+    now=$CUR_KIND
+  fi
+  org_fail "$now" "没切成（org use 退出码 $rc：$(scrub "$out")），也没回到原来的$(kind_name "$from_kind")组织：现在挂的是$(kind_name "$now")组织"
+}
+
 case ${1:-} in
 run)
   shift
@@ -272,5 +428,9 @@ remove)
   shift
   remove "$@"
   ;;
-*) die "用法：fleet-agent-scope run <编号> --user <会话用户> [选项] -- /绝对路径/命令 参数… | stop <编号> | list | adopt <工作树> --user <会话用户> | remove <工作树>" ;;
+org-use)
+  shift
+  org_use "$@"
+  ;;
+*) die "用法：fleet-agent-scope run <编号> --user <会话用户> [选项] -- /绝对路径/命令 参数… | stop <编号> | list | adopt <工作树> --user <会话用户> | remove <工作树> | org-use <carpool|solo> --user <会话用户>" ;;
 esac

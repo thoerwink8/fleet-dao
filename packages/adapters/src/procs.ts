@@ -5,6 +5,7 @@
 import { execFile, spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { setTimeout as sleep } from 'node:timers/promises';
+import type { OrgKind } from '@fleet-dao/shared';
 import { SESSION_BASE_KEYS } from './env.ts';
 
 /** 会话标记的环境变量名：每个会话一个值，子孙进程都继承它，重启后的引擎也能按它认出旧会话的进程。 */
@@ -411,6 +412,93 @@ export function removeWorktreeDir(input: RemoveWorktreeDirInput): Promise<Remove
           detail: `帮手退出码 0，但没报 removed / gone（最后一行：「${last.slice(0, 200)}」）`,
         });
     });
+  });
+}
+
+export interface SwitchSessionOrgInput {
+  /** 切到哪一类：拼车（org list 里 team）、独享（personal）。组织编号由帮手以会话用户读 org list 现认，引擎不经手。 */
+  to: OrgKind;
+  user: SessionUser;
+  helper?: string;
+  sudo?: readonly string[];
+  /** 最多等多久（默认 SWITCH_ORG_TIMEOUT_MS）。 */
+  timeoutMs?: number;
+}
+
+/** 切号最多等多久：帮手里读、切、回读各一次 reclaude，reclaude 更新后首跑先同步配置要上百秒。 */
+export const SWITCH_ORG_TIMEOUT_MS = 300_000;
+
+export type SwitchSessionOrgResult =
+  /** changed = 真切了（already 是本来就挂着）。 */
+  | { ok: true; changed: boolean }
+  | {
+      ok: false;
+      code: 'usage' | 'failed';
+      exitCode: number | null;
+      /** 帮手说现在挂的是哪一类：other = 类型认不出的组织，unknown = 帮手也不知道（读不了、核对不了、没跑完）。 */
+      now: OrgKind | 'other' | 'unknown';
+      detail: string;
+    };
+
+const ORG_DONE = /^(switched|already) (carpool|solo)$/;
+const ORG_FAILED = /^failed (carpool|solo|other|unknown)$/;
+
+/**
+ * 切会话用户挂的 reclaude 组织（#157）：经 `sudo -n fleet-agent-scope org-use <类型> --user <会话用户>` 以 root 调帮手，
+ * 帮手以会话用户读 org list 认出那一类的组织、切过去、回读核对，没切成切回原来的（deploy/france/fleet-agent-scope.sh）。
+ * 标准输出最后一行 switched / already <类型> 是成，failed <现在挂的类型> 是没成；退出码 0 却认不出这一行、超时、起不来，
+ * 一律算没成、现在挂的是哪个不知道（unknown），不当成切好了。切号会让这个家目录下在跑的 Claude 会话全断：调用方先等空闲。
+ */
+export function switchSessionOrg(input: SwitchSessionOrgInput): Promise<SwitchSessionOrgResult> {
+  if (input.to !== 'carpool' && input.to !== 'solo')
+    throw new Error(`切到哪一类只认 carpool、solo：${input.to}`);
+  if (!SESSION_USERS.includes(input.user))
+    throw new Error(`会话用户只能是 ${SESSION_USERS.join('、')} 之一：${input.user}`);
+  const [bin, ...rest] = [
+    ...(input.sudo ?? ['/usr/bin/sudo', '-n']),
+    input.helper ?? SCOPE_HELPER,
+    'org-use',
+    input.to,
+    '--user',
+    input.user,
+  ];
+  return new Promise((resolve) => {
+    execFile(
+      bin as string,
+      rest,
+      { encoding: 'utf8', timeout: input.timeoutMs ?? SWITCH_ORG_TIMEOUT_MS, killSignal: 'SIGTERM' },
+      (err, stdout, stderr) => {
+        const last = stdout.trimEnd().split('\n').at(-1)?.trim() ?? '';
+        const said = stderr.trim().split('\n').slice(-3).join(' / ').slice(-400);
+        if (!err) {
+          const done = ORG_DONE.exec(last);
+          if (done) {
+            resolve({ ok: true, changed: done[1] === 'switched' });
+            return;
+          }
+          resolve({
+            ok: false,
+            code: 'failed',
+            exitCode: 0,
+            now: 'unknown',
+            detail: `帮手退出码 0，但没报 switched / already（最后一行：「${last.slice(0, 200)}」）`,
+          });
+          return;
+        }
+        const exitCode = typeof err.code === 'number' ? err.code : null;
+        const failed = ORG_FAILED.exec(last);
+        const why = err.killed
+          ? `${Math.round((input.timeoutMs ?? SWITCH_ORG_TIMEOUT_MS) / 1000)} 秒没切完，被停`
+          : '';
+        resolve({
+          ok: false,
+          code: exitCode === 64 ? 'usage' : 'failed',
+          exitCode,
+          now: (failed?.[1] as OrgKind | 'other' | 'unknown' | undefined) ?? 'unknown',
+          detail: [why, said || err.message].filter(Boolean).join('：'),
+        });
+      },
+    );
   });
 }
 

@@ -28,7 +28,7 @@ import type { TestDb } from '@fleet-dao/db/testing';
 import type { ProgressEvent, StageKind } from '@fleet-dao/shared';
 import type { UserCommand, UserCommandResult, UserExec } from '../../src/real/exec.ts';
 import { cursorLaunchCommand } from '../../src/real/hosts.ts';
-import { type SessionOrgDeps, type SessionOrgReader, sessionOrgReader } from '../../src/real/session-org.ts';
+import { type SessionOrgControl, type SessionOrgDeps, sessionOrgReader } from '../../src/real/session-org.ts';
 import { layout, SESSION_TMP_DIR, type WorkTrees } from '../../src/real/worktrees.ts';
 
 export const NOW = new Date('2026-09-25T08:00:00.000Z');
@@ -965,7 +965,7 @@ export interface OrgListRig {
   exec: UserExec;
   calls: UserCommand[];
   /** 真的读法（不留：每次都现读），接在这个替身上。 */
-  reader(over?: Partial<SessionOrgDeps>): SessionOrgReader;
+  reader(over?: Partial<SessionOrgDeps>): SessionOrgControl;
 }
 
 /** 会话用户挂的组织：以会话用户跑 reclaude org list 的替身（生产上经 fleet-agent-scope 起），默认挂着拼车。 */

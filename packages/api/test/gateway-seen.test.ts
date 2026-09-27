@@ -28,6 +28,7 @@ function healthOf(feishuGateway: Parameters<typeof serviceHealthChecks>[0]['feis
     judge: { check: async () => {} },
     deployLag: { check: async () => {} },
     feishuGateway,
+    sessionOrg: async () => {},
   });
 }
 

@@ -21,6 +21,7 @@ import { githubAppMissing } from '../src/github.ts';
 import { serviceHealthChecks } from '../src/health.ts';
 import { JUDGE_NOT_WIRED, judgeHealthCheck } from '../src/judge-health.ts';
 import { probeDb } from '../src/pg-store.ts';
+import { sessionOrgHealthCheck } from '../src/session-org-health.ts';
 import { notConnectedTemporal } from '../src/temporal.ts';
 import {
   agentRequest,
@@ -253,6 +254,8 @@ describe('接口跑在真库上', () => {
         deployLag: { check: async () => {}, notWired: DEPLOY_LAG_NOT_HERE },
         // 网关刚接上还没来过：没查成，照实报红（gateway-seen.test.ts 另测来过、太久没来）
         feishuGateway: createGatewaySeen(() => new Date(T0)),
+        // 库里真查：没有切号的提醒就是好的（session-org-health.test.ts 另测开着报红）
+        sessionOrg: sessionOrgHealthCheck(t.db),
       }),
     });
     const res = await h.cockpit.request('/healthz');
@@ -282,6 +285,7 @@ describe('接口跑在真库上', () => {
           code: 'unchecked',
           message: '没查成：后端起来才 0 秒，推送轮询还没来过（盘面快照也没来取过）',
         },
+        session_org: { ok: true },
       },
     });
     // 一张草稿确认了 20 分钟还没开成：积压报红（库里真查出来的）。
