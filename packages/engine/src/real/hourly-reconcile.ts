@@ -1,7 +1,7 @@
 // 每小时对账的真装配：工作树按目录真列（根和仓这两级归 root、755，引擎自己读得了）、属主和删经 fleet-agent-scope
-// （real/worktrees.ts）、树里还剩什么以会话用户的身份跑 git（real/user-git.ts 的 treeLeftovers）；需求、子任务、PR 头、
-// 批准从库里读；工作流在不在跑、挂没挂着问这次活动的 Temporal 客户端；这个阶段派不派得出去问选路（store-ports 的
-// pickRoute：和任务挂起时用的同一套）；提醒的读写、操作记录、结局记账是同一个库。
+// （real/worktrees.ts）、树里还剩什么以会话用户的身份看（real/user-git.ts 的 treeLeftovers：仓里跑 git，不是仓的用 find
+// 一层层列）；需求、子任务、PR 头、批准从库里读；工作流在不在跑、挂没挂着问这次活动的 Temporal 客户端；这个阶段派不派得
+// 出去问选路（store-ports 的 pickRoute：和任务挂起时用的同一套）；提醒的读写、操作记录、结局记账是同一个库。
 import { readdir } from 'node:fs/promises';
 import {
   alertByKey,
@@ -28,7 +28,6 @@ import type { HourlyReconcileJobDeps } from '../jobs/hourly-reconcile.ts';
 import type { WorkflowReader, WorkflowView } from '../jobs/reconcile-common.ts';
 import type { PortContext } from '../ports.ts';
 import type { UserExec } from './exec.ts';
-import { OUT_DIR } from './prompts.ts';
 import { PROBE_DIR } from './route-probe.ts';
 import { createStorePorts } from './store-ports.ts';
 import { treeLeftovers } from './user-git.ts';
@@ -153,8 +152,7 @@ export function hourlyReconcileJob(
           ...(w.shBin ? { sh: w.shBin } : {}),
         },
         known,
-        // 检出副本里会话交给引擎的结论文件（prompts.ts 的 OUT_DIR）引擎读过了，不算剩着
-        scratch ? { scratch: { ignore: [OUT_DIR] } } : {},
+        { scratch },
       ),
     issue: (ref) => issueWorkFacts(w.db, ref),
     prHeads: (ref) => prHeadsOfBranch(w.db, ref),

@@ -3,7 +3,7 @@
 // 残留的干净树删掉、提醒跟着撤；有没推的东西不删、改报要人拍；读不到目录、查不了 Temporal、删不掉、git 没跑成都记没查成；
 // 条件还在的提醒不撤；卡住报警超过 24 小时再推一次、同一天不重复。每条失败路径都故意造一次。
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -267,9 +267,119 @@ describe('工作树：残留的删掉、有东西的交人拍', { timeout: 120_0
     expect(existsSync(tree.dir)).toBe(false);
     expect(await alertByKey(t.db, 'worktree:acme_widgets/160-login')).toMatchObject({
       resolvedBy: RECONCILE_ACTOR,
-      body: expect.stringMatching(/^已撤：里面的东西推走或清掉了/),
+      body: expect.stringMatching(/^已撤：树里已经没有没推、没提交的东西了/),
     });
   });
+
+  /** 一棵不是 git 仓的树（上一版删到一半、会话的编译进程又写回来的那种）：rel 下按路径写文件，属主记会话用户。 */
+  function plainTree(rel: string, files: Record<string, string>): string {
+    const dir = `${root}/${rel}`;
+    for (const [path, body] of Object.entries(files)) {
+      mkdirSync(join(dir, path, '..'), { recursive: true });
+      writeFileSync(join(dir, path), body);
+    }
+    ft.owners.set(dir, USER);
+    return dir;
+  }
+
+  it('只剩能重新生成的缓存（法国 160-handover-store：不是 git 仓，只剩两个 tsbuildinfo；git 仓里只剩没跟踪的缓存也一样）：照空树删，上一版报的要人拍跟着撤', async () => {
+    await work();
+    probeDir();
+    const dir = plainTree('acme_widgets/160-handover-store', {
+      'packages/api/tsconfig.tsbuildinfo': '{}',
+      'packages/db/tsconfig.tsbuildinfo': '{}',
+    });
+    // 上一版把它判成「这一层不是 git 仓，里面却有东西」，报了要人拍
+    await alert('worktree:acme_widgets/160-handover-store', {
+      level: 'decision',
+      title: '工作树里有没推的东西，删不删要你拍：acme_widgets/160-handover-store',
+    });
+    const repoTree = makeTree('acme_widgets/160-login');
+    mkdirSync(join(repoTree.dir, 'node_modules', 'foo'), { recursive: true });
+    writeFileSync(join(repoTree.dir, 'node_modules', 'foo', 'index.js'), 'x\n');
+    writeFileSync(join(repoTree.dir, 'tsconfig.tsbuildinfo'), '{}');
+
+    const run = await runHourlyReconcileJob(deps());
+    expect(existsSync(dir)).toBe(false);
+    expect(existsSync(repoTree.dir)).toBe(false);
+    expect(await alertByKey(t.db, 'worktree:acme_widgets/160-handover-store')).toMatchObject({
+      resolvedBy: RECONCILE_ACTOR,
+      body: expect.stringMatching(
+        /^已撤：树里已经没有没推、没提交的东西了（能重新生成的编译和工具缓存不算），每小时对账把树删了（acme_widgets\/160-handover-store）/,
+      ),
+    });
+    // 两棵树 + 探针目录；删了两棵、撤了一条
+    expect(run).toMatchObject({ outcome: 'ok', scanned: 3, found: 3 });
+  });
+
+  it('缓存以外还剩一个源文件：不删，报要人拍，提醒里列出那个文件、写明一共几个（缓存不列），看里面给 find 不给 git', async () => {
+    const { task } = await work();
+    probeDir();
+    const dir = plainTree('acme_widgets/160-handover-store', {
+      'packages/api/tsconfig.tsbuildinfo': '{}',
+      'packages/api/src/handover.ts': 'export const h = 1;\n',
+    });
+
+    const run = await runHourlyReconcileJob(deps());
+    expect(run).toMatchObject({ outcome: 'ok', found: 1 });
+    expect(existsSync(dir)).toBe(true);
+    const keep = await alertByKey(t.db, 'worktree:acme_widgets/160-handover-store');
+    expect(keep).toMatchObject({
+      level: 'decision',
+      resolvedAt: null,
+      link: `/tasks/${task.id}`,
+      title: '工作树里有没推的东西，删不删要你拍：acme_widgets/160-handover-store',
+    });
+    expect(keep?.body).toContain(
+      '- 这一层不是 git 仓，里面有 1 个文件（能重新生成的编译和工具缓存不算）：packages/api/src/handover.ts\n',
+    );
+    expect(keep?.body).not.toContain('tsbuildinfo');
+    expect(keep?.body).toContain(`看里面：sudo -u ${USER} find ${dir} ! -type d`);
+    expect(keep?.body).not.toContain('git -C');
+  });
+
+  it('树里有目录读不了：记没查成（partial，写明哪棵、为什么），不删，也不报要人拍', async () => {
+    await work();
+    probeDir();
+    const dir = plainTree('acme_widgets/160-handover-store', { 'packages/api/tsconfig.tsbuildinfo': '{}' });
+    const real = localExec();
+    const run = await runHourlyReconcileJob(
+      deps({
+        exec: async (c) =>
+          c.argv.join(' ').includes('find')
+            ? { ...(await real(c)), code: 1, stderr: "find: './locked': Permission denied\n" }
+            : real(c),
+      }),
+    );
+    expect(run.outcome).toBe('partial');
+    expect(run.why).toContain(
+      "acme_widgets/160-handover-store 里还剩什么没查成（没删）：列树里的东西：退出码 1（find: './locked': Permission denied）",
+    );
+    expect(existsSync(dir)).toBe(true);
+    expect(await alertByKey(t.db, 'worktree:acme_widgets/160-handover-store')).toBeNull();
+  });
+
+  // 真把目录权限去掉：Windows 上去不掉、root 照样读得了，这两种不跑（CI 是 Linux 普通用户）。
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    '真有读不了的目录（chmod 000）：记没查成，不删',
+    async () => {
+      await work();
+      probeDir();
+      const dir = plainTree('acme_widgets/160-handover-store', {
+        'packages/api/tsconfig.tsbuildinfo': '{}',
+        'locked/secret.ts': 'export const s = 1;\n',
+      });
+      chmodSync(join(dir, 'locked'), 0o000);
+      try {
+        const run = await runHourlyReconcileJob(deps());
+        expect(run.outcome).toBe('partial');
+        expect(run.why).toContain('acme_widgets/160-handover-store 里还剩什么没查成（没删）');
+        expect(existsSync(dir)).toBe(true);
+      } finally {
+        chmodSync(join(dir, 'locked'), 0o755);
+      }
+    },
+  );
 
   it('需求工作流还在跑、或者它的子任务工作流还在收尾：这张需求的树都不碰，「工作树没收掉」也留着', async () => {
     const { sub } = await work();

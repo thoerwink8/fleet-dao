@@ -1,8 +1,10 @@
 // 工作树对账（每小时对账的一项，design 第十四节「AI 会话」的目录那条）：子任务收尾时删树没成的、工作流被强行终止没收尾的、
 // 分诊 / 需求文档 / 方案 / 审查 / 开 PR 前验证的检出副本（没有谁删它们），都会在工作树的根下攒着（旧系统攒到 162 棵，拖慢整机）。
 // 一轮：列根下每个仓的每棵树 → 认出是哪张需求的 → 需求工作流和它的子任务工作流都不在跑了、树里也没有没结束的会话，才算
-// 残留 → 以会话用户的身份看树里还剩什么 → 什么都不剩就删（fleet-agent-scope remove）；还剩没推的提交、没提交的改动、stash
-// 就不删，报「要人拍」（删数据要人拍）。`_route-probe/<会话用户>` 是路由探针常驻的目录，不算残留。
+// 残留 → 以会话用户的身份看树里还剩什么 → 什么都不剩就删（fleet-agent-scope remove）；能重新生成的编译和工具缓存
+// （*.tsbuildinfo、node_modules/ 这些，名单是 real/user-git.ts 的 DISPOSABLE）不算剩着，只剩这些的树照空树删，是不是 git 仓
+// 都一样；还剩没推的提交、没提交的改动、stash、名单以外的文件就不删，报「要人拍」（删数据要人拍），列出前几个、写明
+// 一共几个。`_route-probe/<会话用户>` 是路由探针常驻的目录，不算残留。
 // 改之前必须知道：「在用」只认需求工作流（req:）和它的子任务工作流（sub:）；新加一种会在树里起会话的工作流，要在 issueUse
 // 里一起认。认漏了还有一道：树里有没结束的会话（session_runs）就不碰。
 // 顺带撤提醒：子任务报的「工作树没收掉」（sub:<子任务>:worktree）、Fusion 报的（req:<仓>#<号>:worktree，按这张需求的
@@ -59,8 +61,8 @@ export interface WorktreeSweepDeps {
   /** 归哪个会话用户；不在回 null；归了别人、看不了照抛。 */
   ownerOf(dir: string): Promise<SessionUser | null>;
   /**
-   * 以会话用户的身份看树里还剩什么（real/user-git.ts 的 treeLeftovers）。scratch = 引擎的检出副本：它检出过的提交算推过，
-   * 会话交给引擎的结论文件（.fleet-out/）不算剩着——引擎每起一个新会话都把副本清干净重来。
+   * 以会话用户的身份看树里还剩什么（real/user-git.ts 的 treeLeftovers；能重新生成的缓存和结论文件 .fleet-out/ 不算）。
+   * scratch = 引擎的检出副本：它检出过的提交算推过——引擎每起一个新会话都把副本清干净重来。
    */
   leftovers(
     dir: string,
@@ -121,18 +123,27 @@ function treeWords(t: TreeKind): string {
   return `需求 #${t.issue}「${STAGE_NAMES[t.stage]}」的检出副本${t.key ? `（子任务「${t.key}」）` : ''}`;
 }
 
+/** 「一共几个」后面接列出来的：列全了直接列，没列全写明是前几个。 */
+function listed(items: readonly string[], total: number, unit: string): string {
+  return total > items.length
+    ? `，前 ${items.length} ${unit}：${items.join('；')}；…`
+    : `：${items.join('；')}`;
+}
+
 /** 树里还剩的东西，一样一句；什么都不剩回空。 */
 export function describeLeftovers(left: TreeLeftovers): string[] {
   if (left.kind === 'empty') return [];
-  if (left.kind === 'not-repo') return [`这一层不是 git 仓，里面却有东西：${left.entries.join('、')}…`];
+  if (left.kind === 'not-repo') {
+    return [
+      `这一层不是 git 仓，里面有 ${left.fileCount} 个文件（能重新生成的编译和工具缓存不算）${listed(left.files, left.fileCount, '个')}`,
+    ];
+  }
   const out: string[] = [];
   if (left.unpushedCount > 0) {
-    const more = left.unpushedCount > left.unpushed.length ? '；…' : '';
-    out.push(`没推的提交 ${left.unpushedCount} 个：${left.unpushed.join('；')}${more}`);
+    out.push(`没推的提交 ${left.unpushedCount} 个${listed(left.unpushed, left.unpushedCount, '个')}`);
   }
   if (left.dirtyCount > 0) {
-    const more = left.dirtyCount > left.dirty.length ? '；…' : '';
-    out.push(`没提交的改动 ${left.dirtyCount} 处：${left.dirty.join('；')}${more}`);
+    out.push(`没提交的改动 ${left.dirtyCount} 处${listed(left.dirty, left.dirtyCount, '处')}`);
   }
   if (left.stashes > 0) out.push(`存着 ${left.stashes} 个 stash（git stash list）`);
   return out;
@@ -196,6 +207,8 @@ async function escalate(
     tree: TreeKind;
     user: SessionUser;
     what: string[];
+    /** 这一层是不是 git 仓：「看里面」给哪种命令。 */
+    repo: boolean;
     taskId: string | null;
   },
 ): Promise<TreeOutcome> {
@@ -211,7 +224,9 @@ async function escalate(
     '删了就没了，所以每小时对账没删它（删数据要人拍）。',
     `要删：在${deps.machine}以 root 跑 /usr/local/sbin/fleet-agent-scope remove ${ctx.path}，下一轮对账看它不在了就撤掉这条。`,
     '要留：点「处理」，之后这棵树不再提醒；里面的东西推走或清掉以后，下一轮对账会自己删。',
-    `看里面：sudo -u ${ctx.user} git -C ${ctx.path} status；sudo -u ${ctx.user} git -C ${ctx.path} log --oneline -5`,
+    ctx.repo
+      ? `看里面：sudo -u ${ctx.user} git -C ${ctx.path} status；sudo -u ${ctx.user} git -C ${ctx.path} log --oneline -5`
+      : `看里面：sudo -u ${ctx.user} find ${ctx.path} ! -type d`,
   ].join('\n');
   if (existing && !existing.resolvedAt) {
     if (existing.title !== title || existing.body !== body) {
@@ -290,7 +305,15 @@ async function sweepTree(s: Sweep, repo: Repo, repoDir: string, name: string): P
     return { kind: 'removed' };
   }
   try {
-    return await escalate(s, { rel, path, tree, user, what, taskId: use.facts?.taskId ?? null });
+    return await escalate(s, {
+      rel,
+      path,
+      tree,
+      user,
+      what,
+      repo: left.kind === 'repo',
+      taskId: use.facts?.taskId ?? null,
+    });
   } catch (err) {
     return { kind: 'unchecked', why: `${rel} 里还有没推的东西，报要人拍没报成：${message(err)}` };
   }
@@ -300,7 +323,7 @@ async function sweepTree(s: Sweep, repo: Repo, repoDir: string, name: string): P
 function outcomeWhy(outcome: TreeOutcome, rel: string): string | null {
   switch (outcome.kind) {
     case 'removed':
-      return `每小时对账把这棵树删了（${rel}）：里面没有没推的提交、也没有没提交的改动`;
+      return `每小时对账把这棵树删了（${rel}）：里面没有没推的提交、也没有没提交的改动（能重新生成的编译和工具缓存不算）`;
     case 'gone':
       return `树已经不在了（${rel}）`;
     case 'escalated':
@@ -400,7 +423,7 @@ async function settleTreeAlerts(s: Sweep, open: readonly AlertRow[]): Promise<vo
           : outcome?.kind === 'escalated'
             ? null
             : outcome?.kind === 'removed'
-              ? `里面的东西推走或清掉了，每小时对账把树删了（${rel}）`
+              ? `树里已经没有没推、没提交的东西了（能重新生成的编译和工具缓存不算），每小时对账把树删了（${rel}）`
               : await treeGoneWhy(s, path, rel);
       if (why) await resolveOne(s, alert.dedupeKey, why);
     } catch (err) {
