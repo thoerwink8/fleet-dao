@@ -293,8 +293,12 @@ export interface SessionRun {
   outcome?: RunOutcome;
   /** 上游实际用的模型。请求的模型看路由；两者不同就是被静默换了，战绩按实际的算。 */
   actualModel?: string;
+  /** 这一轮没命中缓存的输入。token、花费读不到就不给，不当成 0。 */
   inputTokens?: number;
   outputTokens?: number;
+  /** 这一轮的缓存读、缓存写（Claude、cursor 的终帧都报）：折额度当量要用（usage.ts）。 */
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
   costUsd?: number;
   /** 起会话时交代给它的测试命令（当时的流程配置副本里的），交活核对认它；没有 = 开工时项目没写，或这一项加上之前开的会话。 */
   testCommand?: string;

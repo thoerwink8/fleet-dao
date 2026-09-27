@@ -566,6 +566,54 @@ describe('0011：流程配置副本、会话记下的测试命令（只加列）
   );
 });
 
+describe('0013：会话记缓存读写 token（只加列，#216）', () => {
+  const entries = [...journal.entries].sort((a, b) => a.idx - b.idx);
+  const target = entries.findIndex((e) => e.tag === '0013_cache_tokens');
+  const runMigration = async (pg: PGlite, tag: string) => {
+    const text = readFileSync(join(MIGRATIONS_FOLDER, `${tag}.sql`), 'utf8');
+    for (const statement of text.split('--> statement-breakpoint')) await pg.exec(statement);
+  };
+
+  it(
+    '升级前的会话行缓存读写是空（没读到），不是 0，输入输出照留；之后写负数被拒',
+    async () => {
+      expect(target).toBeGreaterThan(0);
+      const pg = new PGlite();
+      try {
+        for (const e of entries.slice(0, target)) await runMigration(pg, e.tag);
+        await pg.exec(`
+        insert into families (id, display_name, vendor) values ('claude', 'Claude', 'Anthropic');
+        insert into channels (id, name, billing) values ('sub', '订阅', 'subscription');
+        insert into pools (id, channel_id, max_concurrency) values ('relay', 'sub', 5);
+        insert into models (id, family, display_name) values ('opus', 'claude', 'Opus');
+        insert into routes (id, channel_id, pool_id, model_id, host_id) values ('r1', 'sub', 'relay', 'opus', 'claude-code');
+        insert into session_runs (stage, route_id, why_route, input_tokens, output_tokens) values ('execute', 'r1', '测试', 1200, 300);
+      `);
+        await runMigration(pg, '0013_cache_tokens');
+
+        expect(
+          (
+            await pg.query(
+              `select input_tokens, output_tokens, cache_read_tokens, cache_write_tokens from session_runs`,
+            )
+          ).rows,
+        ).toEqual([
+          { input_tokens: 1200, output_tokens: 300, cache_read_tokens: null, cache_write_tokens: null },
+        ]);
+        await expect(pg.exec(`update session_runs set cache_read_tokens = -1`)).rejects.toThrow(
+          /session_runs_cache_nonneg/,
+        );
+        await expect(pg.exec(`update session_runs set cache_write_tokens = -1`)).rejects.toThrow(
+          /session_runs_cache_nonneg/,
+        );
+      } finally {
+        await pg.close();
+      }
+    },
+    TEST_DB_TIMEOUT_MS,
+  );
+});
+
 describe('测试库', () => {
   it(
     '在内存里，两份测试库互相看不见对方的数据',

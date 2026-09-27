@@ -15,7 +15,7 @@ import {
   taskContext,
 } from '../src/queries/engine.ts';
 import { writeFlowReplica } from '../src/queries/flow.ts';
-import { pools } from '../src/schema/index.ts';
+import { pools, sessionRuns } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import {
   addRepo,
@@ -271,6 +271,8 @@ describe('finishSessionRun', () => {
       actualModel: 'claude-opus-5-5',
       inputTokens: 1000,
       outputTokens: 200,
+      cacheReadTokens: 48_000,
+      cacheWriteTokens: 0,
       costUsd: 0.5,
       sessionCostUsd: 1.2,
       contextTokens: 50000,
@@ -282,6 +284,14 @@ describe('finishSessionRun', () => {
     expect(run?.endedAt).toEqual(later(10 * MIN));
     expect(run?.contextTokens).toBe(50000);
     expect(run?.sessionCostUsd).toBe(1.2);
+    // 缓存写报的就是 0（cursor 的 Auto 这样报）：照记 0，和没读到的空分开
+    const [row] = await t.db.select().from(sessionRuns).where(eq(sessionRuns.id, id));
+    expect(row).toMatchObject({
+      inputTokens: 1000,
+      outputTokens: 200,
+      cacheReadTokens: 48_000,
+      cacheWriteTokens: 0,
+    });
   });
 
   it('已结束的不改：第二次调用回 already_finished，字段不变', async () => {
@@ -337,6 +347,14 @@ describe('finishSessionRun', () => {
     const run = await getSessionRun(t.db, id);
     expect(run?.contextTokens).toBeNull();
     expect(run?.sessionCostUsd).toBeNull();
+    const [row] = await t.db.select().from(sessionRuns).where(eq(sessionRuns.id, id));
+    expect(row).toMatchObject({
+      inputTokens: null,
+      outputTokens: null,
+      cacheReadTokens: null,
+      cacheWriteTokens: null,
+      costUsd: null,
+    });
   });
 });
 

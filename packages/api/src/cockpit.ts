@@ -66,6 +66,7 @@ import {
   routeProblem,
   runView,
   subtaskViews,
+  usageView,
 } from './views.ts';
 
 const ACTION_WORDS = { pause: '暂停', resume: '继续', stop: '叫停', reroute: '换路由' } as const;
@@ -163,6 +164,7 @@ export function cockpitRoutes(deps: Deps, waiters: AskWaiters, relay: SseRelay):
         answeredBy: a.answeredBy,
         answeredAt: a.answeredAt,
       })),
+      usage: usageView(runs, route),
     });
   });
 

@@ -281,6 +281,47 @@ describe('写码会话', () => {
     expect(kinds).toEqual(expect.arrayContaining(['tool', 'test', 'done']));
   });
 
+  it('token 照终帧记进库，缓存读写单列（折额度当量要用，#216）', async () => {
+    const { ports } = setup(() => ({
+      ...commitAndDone()(),
+      result: {
+        usage: {
+          inputTokens: 12,
+          outputTokens: 340,
+          cacheReadInputTokens: 51_200,
+          cacheCreationInputTokens: 2_048,
+        },
+      },
+    }));
+    const input = launch();
+    const { end } = await runOnce(ports, input);
+    expect(end.usage).toEqual({
+      inputTokens: 12,
+      outputTokens: 340,
+      cacheReadTokens: 51_200,
+      cacheWriteTokens: 2_048,
+    });
+    expect(await runRow(input.runId)).toMatchObject({
+      inputTokens: 12,
+      outputTokens: 340,
+      cacheReadTokens: 51_200,
+      cacheWriteTokens: 2_048,
+    });
+  });
+
+  it('终帧没报缓存读写（假插头默认只报输入输出）：库里留空，就是没读到，不记成 0', async () => {
+    const { ports } = setup(commitAndDone());
+    const input = launch();
+    const { end } = await runOnce(ports, input);
+    expect(end.usage).toEqual({ inputTokens: 100, outputTokens: 20 });
+    expect(await runRow(input.runId)).toMatchObject({
+      inputTokens: 100,
+      outputTokens: 20,
+      cacheReadTokens: null,
+      cacheWriteTokens: null,
+    });
+  });
+
   it('同一个 runId 起第二次：回同一个，不起第二个进程；叫停过的 runId 不再起', async () => {
     const { ports, fake } = setup(() => ({ act: async ({ signal }) => untilAborted(signal) }));
     const input = launch();
@@ -1210,6 +1251,8 @@ describe('cursor-agent：会话端口按执行方式分派（法国真跑夹具�
         routeOutcome: 'ok',
         inputTokens: 12715,
         outputTokens: 178,
+        cacheReadTokens: 19968,
+        cacheWriteTokens: 0,
         costUsd: null,
         sessionCostUsd: null,
         actualModel: null,
@@ -1289,6 +1332,8 @@ describe('cursor-agent：会话端口按执行方式分派（法国真跑夹具�
       expect(await runRow(input.runId)).toMatchObject({
         inputTokens: null,
         outputTokens: null,
+        cacheReadTokens: null,
+        cacheWriteTokens: null,
         costUsd: null,
       });
     });

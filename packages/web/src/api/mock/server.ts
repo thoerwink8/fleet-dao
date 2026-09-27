@@ -30,6 +30,7 @@ import {
   type StageKind,
   StageKindSchema,
   type Step,
+  summarizeUsage,
   TaskActionRequest,
   TaskDetailResponse,
   TimelineResponse,
@@ -752,11 +753,12 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     async task(taskId) {
       await wait();
       const tv = findTask(taskId);
+      const runs = [...tv.runs, ...tv.subtasks.flatMap((s) => s.runs)];
       return TaskDetailResponse.parse({
         task: tv.task,
         repo: repoView(tv.task.repoId),
         subtasks: tv.subtasks.map(subtaskView),
-        runs: [...tv.runs, ...tv.subtasks.flatMap((s) => s.runs)].map(runView),
+        runs: runs.map(runView),
         asks: tv.asks.map((a) => ({
           id: a.id,
           runId: a.runId,
@@ -768,6 +770,15 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
           answeredBy: a.answeredBy,
           answeredAt: a.answeredAt,
         })),
+        // 和真后端同一个算法（shared 的 usage.ts）：按路由上的模型记
+        usage: summarizeUsage(
+          [...runs]
+            .sort((a, b) => a.queuedAt.localeCompare(b.queuedAt))
+            .map((r) => {
+              const info = routeInfo(r.routeId);
+              return { ...r, model: info.route?.modelId ?? r.routeId, modelName: info.modelName };
+            }),
+        ),
       });
     },
     async timeline(taskId, p) {

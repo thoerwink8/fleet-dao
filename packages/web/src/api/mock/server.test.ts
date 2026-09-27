@@ -19,6 +19,18 @@ async function rejects(p: Promise<unknown>): Promise<ApiError> {
   throw new Error('本该报错，却成功了');
 }
 
+describe('假后端：任务详情的用量汇总', () => {
+  test('和真后端同一个算法：结束的会话进 runs、在跑的进 running，按模型、按阶段各数一遍都对得上', async () => {
+    const d = await fresh().task('t-12');
+    const { total, byModel, byStage } = d.usage;
+    expect(total.runs + total.running).toBe(d.runs.length);
+    expect(total.running).toBe(d.runs.filter((r) => !r.endedAt).length);
+    expect(byModel.reduce((n, m) => n + m.runs + m.running, 0)).toBe(d.runs.length);
+    expect(byStage.reduce((n, s) => n + s.runs + s.running, 0)).toBe(d.runs.length);
+    expect(byModel.every((m) => m.modelName !== '')).toBe(true);
+  });
+});
+
 describe('假后端：发给工作流的信号', () => {
   test('换子任务的路由：旧会话停下，新会话写明是谁手动换的', async () => {
     const api = fresh();
