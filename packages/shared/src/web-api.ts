@@ -44,6 +44,7 @@ export const StageKindSchema = z.enum([
   'execute',
   'ui',
   'review',
+  'verify',
   'research',
   'judge',
 ]);

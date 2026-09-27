@@ -16,5 +16,6 @@ export * from './queries/quota.ts';
 export * from './queries/schedule.ts';
 export * from './queries/subtasks.ts';
 export * from './queries/timeline.ts';
+export * from './queries/verify.ts';
 export * from './schema/index.ts';
 export * from './seed.ts';

@@ -6,6 +6,7 @@
 // 失败一律明确：库没查成照常抛，事实对不上（RoutingInputError）抛 ROUTING_INPUT，不当成「没有路由」。
 
 import {
+  authorFamiliesOfTask,
   type Db,
   finishSessionRun,
   openAlertsByPrefix,
@@ -16,6 +17,7 @@ import {
   routeFactsForStage,
   routeOutcomesSince,
   saveTaskSnapshot,
+  saveVerifyRound,
   upsertAlert,
 } from '@fleet-dao/db';
 import type { HostId, OrgKind, StageKind } from '@fleet-dao/shared';
@@ -70,7 +72,14 @@ export interface StorePortsDeps {
 
 type StorePorts = Pick<
   EnginePorts,
-  'pickRoute' | 'askHuman' | 'requestApproval' | 'raiseAlert' | 'recordTiming' | 'saveTaskState'
+  | 'pickRoute'
+  | 'askHuman'
+  | 'requestApproval'
+  | 'raiseAlert'
+  | 'recordTiming'
+  | 'saveTaskState'
+  | 'authorFamilies'
+  | 'recordVerification'
 >;
 
 /** 给人看的池名：从渠道名拼，独享、拼车按池的组织类型分（两个 Claude 池是同一个会话用户）；不带账号、组织编号。 */
@@ -227,10 +236,13 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
       const facts = await loadStage(input.stage, now);
       const held = await heldPools();
       const known = (id: string) => facts.routes.find((r) => r.routeId === id);
+      // 开 PR 前验证只派别家：写这张单的族整族避开，点名的、续会话的也一样（一条都没有就明说没有别家可验，不拿同族顶）
+      const families = (input.avoidFamilies ?? []).filter((f) => f.trim());
       const avoid = (exceptPool?: string) => ({
         routeIds: input.avoidRouteIds,
         poolIds: [...new Set([...input.avoidPoolIds, ...[...held].filter((p) => p !== exceptPool)])],
         modelIds: input.avoidModelIds,
+        ...(families.length > 0 ? { families } : {}),
       });
       const base = {
         stage: input.stage,
@@ -241,6 +253,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         now: now.toISOString(),
         draw: draw(),
         liveOrg: SESSION_USER_ORG,
+        ...(input.uiWork ? { uiWork: true } : {}),
         ...(deps.routingPolicy ? { policy: deps.routingPolicy } : {}),
       } satisfies Omit<ChooseRouteInput, 'avoid' | 'taskRouteId'>;
       const notes: string[] = [];
@@ -314,7 +327,49 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
           : []),
       ];
       if (r.kind === 'wait') return waiting(r, context);
-      return { ok: false, waitFor: 'none', detail: [r.reason, ...context].join('；') };
+      const noOther =
+        families.length > 0
+          ? [`没有别家可验：写这张单的是 ${families.join('、')} 族，这一步只派别家，不拿同族顶`]
+          : [];
+      return { ok: false, waitFor: 'none', detail: [...noOther, r.reason, ...context].join('；') };
+    },
+
+    async authorFamilies(input) {
+      // 写这张单的会话用过的族：判验证是不是别家就靠它。一个都查不到不回空的（空的等于谁都能验）
+      const families = UUID.test(input.taskId) ? await authorFamiliesOfTask(db, input.taskId) : [];
+      if (families.length === 0) {
+        throw new PortError(
+          'AUTHORS_UNKNOWN',
+          `任务 ${input.taskId} 一个起过的会话都查不到：不知道写它的是哪一族，判不了验证模型是不是别家，不验`,
+          { retryable: false },
+        );
+      }
+      return { families };
+    },
+
+    async recordVerification(input) {
+      await saveVerifyRound(
+        db,
+        {
+          id: input.id,
+          taskId: input.taskId,
+          round: input.round,
+          head: input.head,
+          runId: input.runId,
+          routeId: input.routeId,
+          family: input.family,
+          authorFamilies: input.authorFamilies,
+          criteria: input.criteria,
+          report: input.report ?? null,
+          verdict: input.verdict,
+          invalidWhy: input.invalidWhy ?? null,
+          rebuttals: input.rebuttals,
+          finalVerdict: input.finalVerdict ?? null,
+          reasons: input.reasons,
+          notes: input.notes,
+        },
+        clock(),
+      );
     },
 
     async askHuman(input) {

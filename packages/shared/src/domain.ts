@@ -9,6 +9,7 @@ export type StageKind =
   | 'execute' // 写码
   | 'ui' // UI 类写码（GPT 族禁入）
   | 'review' // 第二意见
+  | 'verify' // 开 PR 前别家验证（Fusion 第 5 步）：只派别家、只读
   | 'research' // 调研
   | 'judge'; // Jev 判断题
 

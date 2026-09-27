@@ -28,6 +28,7 @@ export const STAGES: { id: StageKind; label: string; hint: string }[] = [
   { id: 'execute', label: '写码', hint: '改文件、跑测试、开 PR；执行方式要能改文件' },
   { id: 'ui', label: 'UI', hint: brand.stageHints.ui },
   { id: 'review', label: '第二意见', hint: '全新会话看改动，最多 2 轮' },
+  { id: 'verify', label: '开 PR 前验证', hint: '别家对照「怎么算做完」逐条核，只派和作者不同族的路由' },
   { id: 'research', label: '调研', hint: '查资料、比方案' },
   { id: 'judge', label: '判断', hint: `${brand.terms.judgeQuiz}：选择题 + 把握度` },
 ];
@@ -39,6 +40,7 @@ export const stageLabel: Record<StageKind, string> = {
   execute: '写码',
   ui: 'UI',
   review: '第二意见',
+  verify: '开 PR 前验证',
   research: '调研',
   judge: '判断',
 };

@@ -16,7 +16,8 @@
 // SESSION_LOST，工作流续会话重起。过程中：心跳；进度事件攒一小批写库（fleet done 的核实要读会话自己跑过的测试，
 // 所以写得要快）；额度读数顺手记账；每分钟按进展判一次停滞（failure/stall.ts），在绕圈、工具卡死就停掉，结局 stalled
 // （光是没动静由插头自己的 idle 超时管）。结束后：写码类看 fleet done 和工作树（有新提交、没有没提交的已跟踪改动）；
-// 分诊、需求文档、方案、审查读 .fleet-out/ 下的结论文件，形状不对算交错了。
+// 分诊、需求文档、方案、审查、开 PR 前验证读 .fleet-out/ 下的结论文件，形状不对算交错了（验证的用 core 的 checkReport 核）。
+// 开 PR 前验证是发给别家的：起会话前整份提示词先过卫生检查（screenForOtherVendor），过不了不起。
 // 失败原样交给工作流的失败分流（只在 stderr 里的报错原话接在失败信息后面：cursor 的认证、额度、网络报错就只有它）；
 // 这里只按同一张规则表认出「要人修的整池问题」（设备被撤销、封号、登录失效、欠费）：写一条 pool-hold:<池> 的「要人拍」
 // 提醒（写清去哪台机器、以哪个会话用户重新登录），选路就避开整个池；续会话的那一单是试探，跑通了就撤掉这条提醒。
@@ -98,6 +99,7 @@ import {
   parseRequirementDoc,
   parseReview,
   parseTriage,
+  parseVerify,
   type RelayFacts,
   stagePrompt,
 } from './prompts.ts';
@@ -213,6 +215,12 @@ export interface SessionPortsDeps {
   baseEnv?: Readonly<Record<string, string | undefined>>;
   /** 起会话的插头，按执行方式给；测试里换成假的（不起真执行体）。没给的用真插头。 */
   run?: HostRunners;
+  /**
+   * 发给别家之前的卫生检查（和推分支、开 PR 同一套规则和名单：github 包的 assertPublishable）。查出来、名单没读到、
+   * 没扫成都抛带码的错（HYGIENE_BLOCKED / HYGIENE_NAME_BLOCKED / HYGIENE_LIST_MISSING / HYGIENE_UNSCANNED）。
+   * 开 PR 前验证的会话起之前整份提示词过一遍；没配就不起验证会话（明确报错），不当成查过没事。
+   */
+  screen?: (what: string, texts: { path: string; text: string }[]) => void;
   stallPolicy?: Partial<StallPolicy>;
   /** 规则认不出的失败、拿不准的停滞去问 Jev（real/jev-port.ts）；不给就不问，照默认走。 */
   jev?: JevPort;
@@ -252,6 +260,8 @@ interface Live {
   dir: string;
   baseHead: string | undefined;
   reviewHead: string | undefined;
+  /** 开 PR 前验证对照的「怎么算做完」：读结论文件时拿它核逐条答全了没有。 */
+  verifyCriteria: string[] | undefined;
   /** 续会话时上一轮结束时的会话累计花费：这一轮的花费按它求差。 */
   previousCost: number | null | undefined;
   startedAt: number;
@@ -315,6 +325,59 @@ export function scopeSize(name: string, mb: number): string {
     });
   }
   return mb === 0 ? '0' : `${mb}M`;
+}
+
+/** 发给别家的材料在卫生检查里叫什么（报错里的位置只有它和行号、规则名，没有值）。 */
+const MATERIAL_WHAT = '发给别家的验证材料';
+const MATERIAL_PATH = '验证提示词';
+
+/**
+ * 发给别家之前的卫生检查：查出来的报 MATERIAL_BLOCKED（不可重试；失败分流 HY4 当场挂起报警——材料是工作流交代的，
+ * 换路由、退回会话都还是它）；名单没读到、没扫成原样报 HYGIENE_LIST_MISSING / HYGIENE_UNSCANNED（HY2 挂起）；没配检查、
+ * 检查自己出错都算没扫成，不发。报错里只有位置、行号和规则名（assertPublishable 不打值）。
+ */
+export function screenForOtherVendor(screen: SessionPortsDeps['screen'], prompt: string, to: string): void {
+  if (!screen) {
+    throw new PortError(
+      'HYGIENE_UNSCANNED',
+      `${MATERIAL_WHAT}没法过卫生检查（会话端口没配检查），不发给${to}`,
+      {
+        retryable: false,
+      },
+    );
+  }
+  try {
+    screen(MATERIAL_WHAT, [{ path: MATERIAL_PATH, text: prompt }]);
+  } catch (error) {
+    const code = (error as { code?: unknown } | null)?.code;
+    const details = (error as { details?: unknown } | null)?.details;
+    if (code === 'HYGIENE_BLOCKED' || code === 'HYGIENE_NAME_BLOCKED') {
+      const raw = (details as { findings?: unknown } | undefined)?.findings;
+      const findings = Array.isArray(raw)
+        ? (raw as { path?: unknown; line?: unknown; rule?: unknown }[])
+        : [];
+      const where = findings
+        .slice(0, 10)
+        .map(
+          (f) =>
+            `${String(f.path)}${typeof f.line === 'number' && f.line > 0 ? ` 第 ${f.line} 行` : ''} ${String(f.rule)}`,
+        )
+        .join('；');
+      throw new PortError(
+        'MATERIAL_BLOCKED',
+        where
+          ? `${MATERIAL_WHAT}没过卫生检查，没发给${to}：查出 ${findings.length} 处（${where}）`
+          : `${MATERIAL_WHAT}没过卫生检查，没发给${to}：${errorText(error)}`,
+        { retryable: false, details },
+      );
+    }
+    if (code === 'HYGIENE_LIST_MISSING' || code === 'HYGIENE_UNSCANNED') {
+      throw new PortError(code, errorText(error), { retryable: false, details });
+    }
+    throw new PortError('HYGIENE_UNSCANNED', `${MATERIAL_WHAT}没扫成，不发给${to}：${errorText(error)}`, {
+      retryable: false,
+    });
+  }
 }
 
 function scopeLimitsOf(r: LaunchSessionInput['resources']): NonNullable<CgroupScope['limits']> {
@@ -491,13 +554,15 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
       await pinMainline(t, task.repo.defaultBranch, base);
       return;
     }
-    // 分诊、需求文档、方案、审查：检出副本。续同一个会话（resume / fork）不动它；开新会话从干净的检出起。
+    // 分诊、需求文档、方案、审查、开 PR 前验证：检出副本。续同一个会话（resume / fork）不动它；开新会话从干净的检出起。
     if (!fresh && (mode === 'resume' || mode === 'fork')) return;
     let sha: string;
-    if (kind === 'review') {
+    const checksHead = kind === 'review' || kind === 'verify';
+    if (checksHead) {
       sha = input.brief.head ?? '';
       if (!SHA.test(sha)) {
-        throw new PortError('BAD_INPUT', `审查会话要给 PR 的头（完整提交号）：${sha || '没给'}`, {
+        const who = kind === 'review' ? '审查会话要给 PR 的头' : '验证会话要给送检的头';
+        throw new PortError('BAD_INPUT', `${who}（完整提交号）：${sha || '没给'}`, {
           retryable: false,
         });
       }
@@ -516,9 +581,9 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
       await fetchBundle(t, bytes, ref, { identity });
     }
     await checkoutDetached(t, sha);
-    // 分诊、文档、方案检出的就是主线头；审查检出的是 PR 的头，主线另取进来再钉（审查的提示词让它 git diff origin/<主线>...HEAD）。
+    // 分诊、文档、方案检出的就是主线头；审查、验证检出的是送检的头，主线另取进来再钉（提示词让它 git diff origin/<主线>...HEAD）。
     let mainline = sha;
-    if (kind === 'review') {
+    if (checksHead) {
       mainline = (await mapped(() => gh.fetchMainline({ repo: repoRef, signal }))).head;
       if (!(await hasCommit(t, mainline))) {
         const { bytes, ref } = await bundleFromMirror(gh, deps.tmpDir, repoRef, mainline, [sha], signal);
@@ -692,6 +757,8 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
       previousProblem: prior?.failureMessage ?? undefined,
       relay,
     });
+    // 开 PR 前验证是发给别家的：整份提示词（这次真要发的那一份，续会话、接力的也算）先过卫生检查，过不了不起会话
+    if (kind === 'verify') screenForOtherVendor(deps.screen, prompt, hostName(route.hostId));
 
     // 登记之后再核一次叫停：叫停可能落在上面建树的那几秒里。
     const again = await getSessionRun(db, input.runId);
@@ -723,6 +790,7 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
       dir,
       baseHead: input.baseHead,
       reviewHead: input.brief.head,
+      verifyCriteria: input.brief.verify?.criteria,
       previousCost: mode === 'resume' ? (prior?.sessionCostUsd ?? null) : undefined,
       startedAt: clock().getTime(),
       spawned,
@@ -1069,6 +1137,12 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
           if (text === null) return { error: `会话结束了，但没写 ${OUTPUT_FILES.review[0]}` };
           const v = parseReview(text, live.reviewHead ?? '');
           return 'error' in v ? v : { ok: { kind: 'review', review: v.ok } };
+        }
+        case 'verify': {
+          const text = await read(OUTPUT_FILES.verify[0]);
+          if (text === null) return { error: `会话结束了，但没写结论 ${OUTPUT_FILES.verify[0]}` };
+          const v = parseVerify(text, live.verifyCriteria ?? [], live.reviewHead ?? '');
+          return 'error' in v ? v : { ok: { kind: 'verify', report: v.ok } };
         }
         case 'delivery':
           return { error: '写码会话不读结论文件' };

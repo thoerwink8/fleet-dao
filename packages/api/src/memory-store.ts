@@ -265,6 +265,7 @@ const STAGE_ORDER: readonly StageKind[] = [
   'execute',
   'ui',
   'review',
+  'verify',
   'research',
   'judge',
 ];

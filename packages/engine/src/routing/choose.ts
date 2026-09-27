@@ -2,7 +2,7 @@
 // 纯函数、确定性：同样输入同样输出；不取时钟、不随机——现在几点、试探用的随机数都由调用方给，引擎记进历史。
 
 import { routeProbeStaleMinutes } from '@fleet-dao/shared';
-import { backupProbeReason, blocksFor, type FilterContext } from './filter.ts';
+import { backupProbeReason, blocksFor, type FilterContext, familyKey } from './filter.ts';
 import { type BlockGroup, groupOf } from './group.ts';
 import { duration, routeLabel, STAGE_NAMES, stamp } from './names.ts';
 import { resolveRoutingPolicy } from './policy.ts';
@@ -37,8 +37,10 @@ export function chooseRoute(input: ChooseRouteInput): ChooseRouteResult {
       routeIds: new Set(input.avoid?.routeIds ?? []),
       poolIds: new Set(input.avoid?.poolIds ?? []),
       modelIds: new Set(input.avoid?.modelIds ?? []),
+      families: new Set((input.avoid?.families ?? []).map(familyKey)),
     },
     liveOrg: input.liveOrg,
+    uiWork: input.uiWork ?? false,
   };
   const factsOf = new Map(input.routes.map((r) => [r.routeId, r]));
   const fact = (id: string) => factsOf.get(id) as RouteFacts;

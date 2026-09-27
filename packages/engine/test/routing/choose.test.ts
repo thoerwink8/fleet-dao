@@ -173,6 +173,24 @@ describe('派不出（要报警，附每条被挡的原因）', () => {
     const r = chooseRoute(input([route('a', { blockers: ['offline', 'no-slot'], inFlight: 5 })]));
     expect(r.kind).toBe('none');
   });
+
+  it('开 PR 前验证：能用的只有和作者同族的，派不出，不拿同族顶；有别家就派别家（哪怕人排在后面）', () => {
+    const claude = [route('a'), route('b')];
+    const onlySame = chooseRoute(input(claude, { stage: 'verify', avoid: { families: ['Claude'] } }));
+    expect(onlySame.kind).toBe('none');
+    if (onlySame.kind === 'none') expect(onlySame.reason).toContain('只派别家');
+    const kimi = route('k', { family: 'kimi', modelId: 'kimi-k3', modelName: 'Kimi k3' });
+    const withOther = chooseRoute(
+      input([...claude, kimi], { stage: 'verify', avoid: { families: ['claude'] } }),
+    );
+    expect(picked(withOther)).toBe('k');
+  });
+
+  it('别家在等空位：等它，不回派不出', () => {
+    const kimi = route('k', { family: 'kimi', blockers: ['no-slot'], inFlight: 5 });
+    const r = chooseRoute(input([route('a'), kimi], { stage: 'verify', avoid: { families: ['claude'] } }));
+    expect(r.kind).toBe('wait');
+  });
 });
 
 describe('任务指定了路由', () => {

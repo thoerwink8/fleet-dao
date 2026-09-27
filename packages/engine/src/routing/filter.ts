@@ -27,10 +27,21 @@ export interface FilterContext {
   weight: TaskWeight;
   policy: RoutingPolicy;
   now: number;
-  avoid: { routeIds: ReadonlySet<string>; poolIds: ReadonlySet<string>; modelIds: ReadonlySet<string> };
+  avoid: {
+    routeIds: ReadonlySet<string>;
+    poolIds: ReadonlySet<string>;
+    modelIds: ReadonlySet<string>;
+    /** 要避开的模型族（小写）。 */
+    families: ReadonlySet<string>;
+  };
   /** 会话用户此刻挂的组织；不知道为 undefined（ChooseRouteInput.liveOrg）。 */
   liveOrg: OrgKind | undefined;
+  /** 界面类的活：禁令按 UI 判（ChooseRouteInput.uiWork）。 */
+  uiWork: boolean;
 }
+
+/** 族名比较用的写法：去掉首尾空白、小写（和 core 的 decideVerdict 判同族一个认法）。 */
+export const familyKey = (family: string): string => family.trim().toLowerCase();
 
 /** 这条路由此刻的全部被挡原因；空数组 = 能派。entry 是调度台上的那一行（任务指定、不在顺序里的没有）。 */
 export function blocksFor(
@@ -81,6 +92,7 @@ function candidateBlocks(route: RouteFacts, ctx: FilterContext): Block[] {
     out.push(hard(b, CANDIDATE_TEXT[b]));
   }
   // 硬禁令在这里再过一遍（shared 的同一份，连上游串和别名一起认）：候选查询漏了、或任务指定的路由没经过候选查询，也照样挡。
+  // 界面类的活（例如验证一个改了页面的改动）按 UI 判：候选查询是按阶段算的，查不出这一条。
   const hardBan = hardBanFor(
     {
       id: route.modelId,
@@ -89,7 +101,7 @@ function candidateBlocks(route: RouteFacts, ctx: FilterContext): Block[] {
       upstreamModel: route.upstreamModel,
       upstreamAliases: route.upstreamAliases,
     },
-    ctx.stage,
+    ctx.uiWork ? 'ui' : ctx.stage,
   );
   const reasons = [...route.banReasons];
   if (hardBan && !reasons.includes(hardBan.reason)) reasons.unshift(hardBan.reason);
@@ -177,7 +189,26 @@ function orgNotLive(route: RouteFacts, liveOrg: OrgKind | undefined): string | n
   return `会话用户现在挂的是${ORG_NAMES[liveOrg]}组织，${route.poolName}要等切过去才能派`;
 }
 
+/** 上游串是 auto 的（Cursor Auto 这类由渠道自己挑模型的）：这一次到底是哪一家在答，事先认不出。 */
+const ROUTER_MODEL = /(?:^|[/:])auto$/i;
+
+/** 这条路由的模型是不是由渠道自己挑的（上游串或别名是 auto）。 */
+export function routerPicksModel(route: Pick<RouteFacts, 'upstreamModel' | 'upstreamAliases'>): boolean {
+  return [route.upstreamModel ?? '', ...(route.upstreamAliases ?? [])].some((n) =>
+    ROUTER_MODEL.test(n.trim()),
+  );
+}
+
 function avoidReason(route: RouteFacts, ctx: FilterContext): string | null {
+  if (ctx.avoid.families.size > 0) {
+    if (ctx.avoid.families.has(familyKey(route.family))) {
+      return `这一步只派别家：${route.modelName} 是 ${route.family} 族，写这张单的就有这一族`;
+    }
+    // 只派别家要认得出是哪一家：渠道自己挑模型的，挑中的可能正是写这张单的那家
+    if (routerPicksModel(route)) {
+      return `这一步只派别家：${route.modelName} 由渠道自己挑模型（上游串 ${route.upstreamModel}），认不出这次是哪一家在答`;
+    }
+  }
   if (ctx.avoid.routeIds.has(route.routeId)) return '这个任务要避开这条路由（刚在它上面出过错）';
   if (ctx.avoid.poolIds.has(route.poolId)) return `这个任务要避开${route.poolName}整个池`;
   if (ctx.avoid.modelIds.has(route.modelId)) return `这个任务要换模型，避开 ${route.modelName}`;

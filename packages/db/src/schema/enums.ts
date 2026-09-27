@@ -34,6 +34,7 @@ export const STAGE_KINDS = valuesOf<StageKind>()([
   'execute',
   'ui',
   'review',
+  'verify',
   'research',
   'judge',
 ]);

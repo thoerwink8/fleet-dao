@@ -36,6 +36,7 @@ export const STAGE_WORDS: Record<StageKind, string> = {
   execute: '写码',
   ui: '写界面',
   review: '审查',
+  verify: '开 PR 前验证',
   research: '调研',
   judge: '判断',
 };

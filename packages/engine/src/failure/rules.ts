@@ -377,6 +377,19 @@ export const RULES: readonly FailureRule[] = [
     humanFix:
       '名字是开工时按 issue 标题、子任务的 key 定下的，点「继续」还是它：误报就把这一条加进卫生检查的白名单再继续；真带了值就叫停这张需求，改掉 issue 标题再重开',
   },
+  // 开 PR 前验证要发给别家的材料（「怎么算做完」、方案摘要、改动清单拼成的提示词）没过卫生检查：材料是工作流从需求文档、
+  // 方案、改动里取的，换路由、退回会话都还是它——不发，挂起报警，要人看是误报还是材料里真带了值。
+  {
+    id: 'HY4',
+    title: '发给别家验证的材料没过卫生检查',
+    codes: ['material_blocked'],
+    codeFieldOnly: true,
+    ladder: ['park'],
+    alert: true,
+    routeOutcome: 'neutral',
+    humanFix:
+      '材料来自需求文档的「怎么算做完」、方案摘要和改动清单：误报就把这一条加进卫生检查的白名单再继续；真带了值就先把它从需求文档或分支里拿掉再继续',
+  },
   // 开 PR 时照需求 issue 对齐类别标签，issue 自己贴了不止一个类别：没法判以哪个为准，照抄过去 pr-fields 会一直红。
   // 只有人能改 issue：挂起报警，改成一个再点「继续」，PR 跟着对齐。
   {
@@ -410,6 +423,20 @@ export const RULES: readonly FailureRule[] = [
     routeOutcome: 'neutral',
     humanFix:
       '在需求文档的「对应计划：」那一行写上 plan.md 的阶段加那一条的原话，比如 P1「工作流」；没有 plan.md 就写「无」',
+  },
+  // 开 PR 前验证（0003 第 5 条第 5 步）要照需求文档的「怎么算做完」逐条问、要知道写这张单的是哪一族：文档不在主线上、
+  // 没有那一节、那一节空着、单子正文没指需求文档，或者这张单一个起过的会话都查不到——都不是会话能改的，重试、换路由
+  // 都还是它。不验，也不当成验过了：挂起报警，等人补上再点「继续」。
+  {
+    id: 'VF1',
+    title: '开 PR 前验证缺材料（需求文档、「怎么算做完」、作者是哪一族）',
+    codes: ['spec_doc_missing', 'criteria_missing', 'authors_unknown'],
+    codeFieldOnly: true,
+    ladder: ['park'],
+    alert: true,
+    routeOutcome: 'neutral',
+    humanFix:
+      '在需求 issue 正文里写上「文档：`specs/<号>-<短名>/需求.md`」，文档进主线、里面有「## 怎么算做完」一节并逐条写上；作者查不到就看这张单的会话记录，补好再点「继续」',
   },
   // 无头会话没人批权限：同一会话里会一直被拒（原文自己说了别重试），是这条路由的起法不对。
   {

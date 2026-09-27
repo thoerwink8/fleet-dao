@@ -12,12 +12,13 @@ import {
   sessionRuns,
   stepTimings,
   upsertAlert,
+  verifyRoundsOfTask,
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { PickRouteInput } from '../../src/ports.ts';
 import { createStorePorts, poolHoldKey } from '../../src/real/store-ports.ts';
-import { addTask, MIN, NOW, world } from './fixtures.ts';
+import { addCursorRoute, addTask, MIN, NOW, world } from './fixtures.ts';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -402,5 +403,152 @@ describe('计时、快照', () => {
         ctx,
       ),
     ).rejects.toMatchObject({ code: 'TASK_NOT_FOUND' });
+  });
+});
+
+describe('开 PR 前验证：只派别家、作者是哪几族、每一轮的记录', () => {
+  /** 这张单上起过（有开工时刻）的一次会话。 */
+  async function startedRun(taskId: string, routeId: string, stage: 'execute' | 'verify' | 'plan') {
+    const id = randomUUID();
+    await openSessionRun(t.db, {
+      id,
+      taskId,
+      subtaskId: null,
+      stage,
+      routeId,
+      whyRoute: 'x',
+      branch: null,
+      queuedAt: NOW,
+      workflowId: null,
+      runAsUser: routeId.startsWith('cursor') ? null : 'fleet-agent-carpool',
+      worktreePath: null,
+    });
+    await markSessionRunStarted(t.db, { id, startedAt: NOW, sessionId: `s-${id}`, handle: null });
+    return id;
+  }
+
+  it('写这张单的是 claude 族：整族避开，派给别家（钉住 kimi 的 cursor 路由）；点名同族的路由也不给', async () => {
+    await world(t.db, { stages: ['verify'] });
+    const { routeId } = await addCursorRoute(t.db, {
+      stages: ['verify'],
+      modelId: 'kimi-k3',
+      upstreamModel: 'kimi-k3',
+    });
+    const r = await pick({ stage: 'verify', avoidFamilies: ['claude'] });
+    expect(r).toMatchObject({ ok: true, route: { routeId, family: 'kimi' } });
+    const named = await pick({ stage: 'verify', avoidFamilies: ['Claude'], preferRouteId: 'solo' });
+    expect(named).toMatchObject({ ok: true, route: { routeId } });
+    expect(named.ok && named.why).toContain('点名的路由这次用不了');
+  });
+
+  it('【故意造出的失败】没有别家可验：一条都派不出，写明没有别家、不拿同族顶', async () => {
+    await world(t.db, { stages: ['verify'] });
+    const none = await pick({ stage: 'verify', avoidFamilies: ['claude'] });
+    expect(none).toMatchObject({ ok: false, waitFor: 'none' });
+    expect(!none.ok && none.detail).toMatch(
+      /^没有别家可验：写这张单的是 claude 族，这一步只派别家，不拿同族顶；/,
+    );
+    // 没说要避开哪一族的，照常派 claude
+    expect(await pick({ stage: 'verify' })).toMatchObject({ ok: true, route: { routeId: 'solo' } });
+  });
+
+  it('【故意造出的失败】别家只剩 Cursor Auto（渠道自己挑模型）：认不出是哪一家，不派，写明为什么', async () => {
+    await world(t.db, { stages: ['verify'] });
+    await addCursorRoute(t.db, { stages: ['verify'] });
+    const none = await pick({ stage: 'verify', avoidFamilies: ['claude'] });
+    expect(none).toMatchObject({ ok: false, waitFor: 'none' });
+    expect(!none.ok && none.detail).toContain('没有别家可验');
+    expect(!none.ok && none.detail).toContain(
+      'Cursor Auto 由渠道自己挑模型（上游串 auto），认不出这次是哪一家在答',
+    );
+  });
+
+  it('作者是哪几族：这张单上起过的会话按路由查模型目录，验证会话不算', async () => {
+    await world(t.db);
+    const { routeId } = await addCursorRoute(t.db);
+    const { task } = await addTask(t.db);
+    await startedRun(task.id, 'solo', 'plan');
+    await startedRun(task.id, routeId, 'verify');
+    expect(await ports().authorFamilies({ taskId: task.id }, ctx)).toEqual({ families: ['claude'] });
+    await startedRun(task.id, routeId, 'execute');
+    expect(await ports().authorFamilies({ taskId: task.id }, ctx)).toEqual({
+      families: ['claude', 'cursor'],
+    });
+  });
+
+  it('【故意造出的失败】一个起过的会话都查不到（或任务编号不是 UUID）：AUTHORS_UNKNOWN、不可重试，不回空的', async () => {
+    await world(t.db);
+    const { task } = await addTask(t.db);
+    for (const taskId of [task.id, 'task-不是-uuid']) {
+      await expect(ports().authorFamilies({ taskId }, ctx)).rejects.toMatchObject({
+        code: 'AUTHORS_UNKNOWN',
+        retryable: false,
+      });
+    }
+  });
+
+  it('每一轮的记录：先记验证模型判的，Lead 驳回后改写同一行', async () => {
+    await world(t.db);
+    const { routeId } = await addCursorRoute(t.db);
+    const { task } = await addTask(t.db);
+    const runId = await startedRun(task.id, routeId, 'verify');
+    const record = {
+      taskId: task.id,
+      id: randomUUID(),
+      round: 1,
+      head: 'a'.repeat(40),
+      runId,
+      routeId,
+      family: 'cursor',
+      authorFamilies: ['claude'],
+      criteria: ['过期的验证码登录不了'],
+      report: { head: 'a'.repeat(40), results: [], findings: [] },
+      verdict: 'block' as const,
+      rebuttals: [],
+      finalVerdict: 'block' as const,
+      reasons: ['安全：验证码写进了日志（证据：code.ts 第 12 行）'],
+      notes: [],
+    };
+    await ports().recordVerification(record, ctx);
+    const rebuttal = { target: '验证码写进了日志', evidence: 'code.ts 第 12 行打的是编号' };
+    await ports().recordVerification(
+      { ...record, rebuttals: [rebuttal], finalVerdict: 'pass', reasons: [] },
+      ctx,
+    );
+    const rows = await verifyRoundsOfTask(t.db, task.id);
+    expect(rows).toMatchObject([
+      { id: record.id, verdict: 'block', finalVerdict: 'pass', rebuttals: [rebuttal], invalidWhy: null },
+    ]);
+  });
+
+  it('【故意造出的失败】记录对不上库里的规矩（作废却有结论）：照常抛，不假装记上了', async () => {
+    await world(t.db);
+    const { routeId } = await addCursorRoute(t.db);
+    const { task } = await addTask(t.db);
+    const runId = await startedRun(task.id, routeId, 'verify');
+    await expect(
+      ports().recordVerification(
+        {
+          taskId: task.id,
+          id: randomUUID(),
+          round: 1,
+          head: 'a'.repeat(40),
+          runId,
+          routeId,
+          family: 'cursor',
+          authorFamilies: ['claude'],
+          criteria: ['x'],
+          report: null,
+          verdict: 'invalid',
+          invalidWhy: '审的不是送检的头',
+          rebuttals: [],
+          finalVerdict: 'pass',
+          reasons: [],
+          notes: [],
+        },
+        ctx,
+      ),
+    ).rejects.toThrow();
+    expect(await verifyRoundsOfTask(t.db, task.id)).toEqual([]);
   });
 });

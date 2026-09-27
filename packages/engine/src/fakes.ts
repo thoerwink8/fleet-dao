@@ -1,5 +1,6 @@
 // 假实现：不碰真仓、真会话、真 GitHub，用来把流程跑通（测试、联调）。行为可以按剧本改。
 
+import type { VerifyReport } from '@fleet-dao/core';
 import type { StageKind } from '@fleet-dao/shared';
 import type { MergeOutcome, TestResult } from './decisions/merge.ts';
 import type { PlannedSubtask } from './decisions/plan.ts';
@@ -7,6 +8,7 @@ import type { TriageVerdict } from './decisions/triage.ts';
 import type { CiResult, ReviewResult, SyncResult } from './decisions/verify.ts';
 import {
   type AskHumanInput,
+  type Criteria,
   type EnginePorts,
   type LaunchSessionInput,
   type MergePrInput,
@@ -18,9 +20,11 @@ import {
   type PortName,
   type PushBranchInput,
   type RaiseAlertInput,
+  type ReadCriteriaInput,
   type RequestApprovalInput,
   type RouteChoice,
   type RunTestsInput,
+  type Scope,
   type SessionEnd,
   type SessionOutput,
   type StartSessionResult,
@@ -28,6 +32,7 @@ import {
   type TaskStateSnapshot,
   type TimingEntry,
   type UpdateIssueProgressInput,
+  type VerificationRecord,
   type WaitCiInput,
   type WriteSpecDocInput,
 } from './ports.ts';
@@ -59,6 +64,17 @@ export interface FakeScript {
    */
   session: (input: LaunchSessionInput, n: number, own: number) => FakeSessionPlan | undefined;
   review: (input: LaunchSessionInput, n: number) => Omit<ReviewResult, 'head'> | undefined;
+  /**
+   * 开 PR 前验证会话交回的结论（n = 第几次起验证会话）；不给就是每条「怎么算做完」都答做到、审的是送检的头。
+   * 可以故意给形状不对的（unknown）：假会话原样交，工作流经 decide 判（真会话端口会先拦一道，见 real/sessions.ts）。
+   */
+  verify: (input: LaunchSessionInput, n: number) => VerifyReport | unknown | undefined;
+  /** 读需求文档的「怎么算做完」：给了 PortError 就抛它；不给就是 specDir 下的需求.md、两条。 */
+  criteria: (input: ReadCriteriaInput, n: number) => Criteria | PortError | undefined;
+  /** 写这张单的会话用过的族：不给就照假会话算（验证、审查不算）；一个都没有抛 AUTHORS_UNKNOWN，和真端口一样。 */
+  authors: (input: Scope, n: number) => string[] | PortError | undefined;
+  /** 起会话：给了就抛它（假的「发给别家的材料没过卫生检查」……）；n = 这个阶段第几次起。 */
+  startSession: (input: LaunchSessionInput, n: number) => PortError | undefined;
   ci: (input: WaitCiInput, n: number) => Partial<CiResult> | undefined;
   sync: (input: SyncMainlineInput, n: number) => Partial<SyncResult> | undefined;
   tests: (input: RunTestsInput, n: number) => Partial<TestResult> | undefined;
@@ -120,6 +136,8 @@ export interface FakeWorld {
   approvals: RequestApprovalInput[];
   /** 报过的警（按调用顺序，含重复的 dedupeKey）。 */
   alerts: RaiseAlertInput[];
+  /** 写进「库」的验证记录（同一个 id 整行覆盖，和真库一样），按第一次写入的先后。 */
+  verifications: VerificationRecord[];
   callsOf<P extends PortName>(port: P): (FakeCall & { input: Parameters<EnginePorts[P]>[0] })[];
   count(port: PortName): number;
   /** 放行一个挂着的会话。 */
@@ -171,6 +189,7 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
   const asks: AskHumanInput[] = [];
   const approvals: RequestApprovalInput[] = [];
   const alerts: RaiseAlertInput[] = [];
+  const verifications: VerificationRecord[] = [];
   /** 和真实现一样按 runId 幂等：起过的原样返回，叫停过的不再起。 */
   const byRun = new Map<string, StartSessionResult>();
   const stoppedRuns = new Set<string>();
@@ -211,6 +230,21 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
       case 'review': {
         const review = script.review?.(s.input, s.n) ?? { verdict: 'pass', findings: [] };
         return { kind: 'review', review: { ...review, head: brief.head ?? '' } };
+      }
+      case 'verify': {
+        const scripted = script.verify?.(s.input, s.n);
+        const report =
+          scripted ??
+          ({
+            head: brief.head ?? '',
+            results: (brief.verify?.criteria ?? []).map((criterion) => ({
+              criterion,
+              answer: 'done' as const,
+              evidence: '假验证：看过改动',
+            })),
+            findings: [],
+          } satisfies VerifyReport);
+        return { kind: 'verify', report: report as VerifyReport };
       }
       default:
         seq += 1;
@@ -269,11 +303,14 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
     async pickRoute(input) {
       const scripted = script.route?.(input, next('pickRoute'));
       if (scripted) return scripted;
+      // 整族避开（开 PR 前验证只派别家）：点名的、续会话的也照样避开，和真选路一样
+      const families = new Set((input.avoidFamilies ?? []).map((f) => f.trim().toLowerCase()));
       const usable = routes.filter(
         (r) =>
           !input.avoidRouteIds.includes(r.routeId) &&
           !input.avoidPoolIds.includes(r.poolId) &&
-          !input.avoidModelIds.includes(r.modelId),
+          !input.avoidModelIds.includes(r.modelId) &&
+          !families.has(r.family.toLowerCase()),
       );
       const preferred = input.preferRouteId
         ? usable.find((r) => r.routeId === input.preferRouteId)
@@ -281,7 +318,16 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
       // 续同一个会话：还是那一条（和真选路一样，避开的照样不派）。
       const stuck = input.stickRouteId ? usable.find((r) => r.routeId === input.stickRouteId) : undefined;
       const route = preferred ?? stuck ?? usable[0];
-      if (!route) return { ok: false, waitFor: 'none', detail: '能用的路由都被避开了' };
+      if (!route) {
+        return {
+          ok: false,
+          waitFor: 'none',
+          detail:
+            families.size > 0
+              ? `没有别家可验：写这张单的是 ${[...families].join('、')} 族，这一步只派别家，不拿同族顶`
+              : '能用的路由都被避开了',
+        };
+      }
       return {
         ok: true,
         route,
@@ -296,6 +342,8 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
       }
       const n = next(`session:${input.stage}`);
       const own = next(`session:${input.stage}:${input.subtaskKey ?? '-'}`);
+      const refused = script.startSession?.(input, n);
+      if (refused) throw refused;
       const id = input.resumeSessionId ?? `s${next('sessionId')}`;
       sessions.set(id, {
         id,
@@ -408,6 +456,42 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
       if (refused) throw refused;
       return { path: `${input.specDir}/${DOC_FILE[input.doc]}` };
     },
+    async readCriteria(input) {
+      const scripted = script.criteria?.(input, next('readCriteria'));
+      if (scripted instanceof PortError) throw scripted;
+      return (
+        scripted ?? {
+          path: `${input.specDir}/${DOC_FILE.requirement}`,
+          criteria: ['照原话做完', '有一条故意造出失败的测试'],
+        }
+      );
+    },
+    async authorFamilies(input) {
+      const scripted = script.authors?.(input, next('authorFamilies'));
+      if (scripted instanceof PortError) throw scripted;
+      const families =
+        scripted ??
+        [
+          ...new Set(
+            [...sessions.values()]
+              .filter((s) => s.input.taskId === input.taskId && s.stage !== 'verify' && s.stage !== 'review')
+              .map((s) => s.input.route.family),
+          ),
+        ].sort();
+      if (families.length === 0) {
+        throw new PortError(
+          'AUTHORS_UNKNOWN',
+          `任务 ${input.taskId} 一个起过的会话都查不到：不知道写它的是哪一族，判不了验证模型是不是别家，不验`,
+          { retryable: false },
+        );
+      }
+      return { families };
+    },
+    async recordVerification(input) {
+      const at = verifications.findIndex((v) => v.id === input.id);
+      if (at >= 0) verifications[at] = input;
+      else verifications.push(input);
+    },
     async askHuman(input) {
       if (!asks.some((a) => a.askId === input.askId)) asks.push(input);
     },
@@ -466,6 +550,7 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
     asks,
     approvals,
     alerts,
+    verifications,
     callsOf: (<P extends PortName>(port: P) => calls.filter((c) => c.port === port)) as FakeWorld['callsOf'],
     count: (port) => calls.filter((c) => c.port === port).length,
     release(sessionId) {

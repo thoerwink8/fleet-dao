@@ -1200,6 +1200,59 @@
         "message": "进程退出（退出码 127），没有终帧：spawn cursor-agent ENOENT：/home/<会话用户>/.local/share/cursor-agent/versions 下既没有 current，也没有能跑的版本目录（会话用户家里没装 cursor-agent）"
       },
       "expect": { "action": "swapRoute", "rule": "CF1", "avoid": "route", "alert": true }
+    },
+    {
+      "id": "X79",
+      "provenance": "format",
+      "origin": "开 PR 前验证（#213）：真会话端口起验证会话前，整份提示词过卫生检查（real/sessions.ts 的 screenForOtherVendor），查出来就不发、报 MATERIAL_BLOCKED；报错里只有位置、行号、规则名",
+      "evidence": {
+        "source": "session:verify",
+        "routeBound": true,
+        "hostId": "cursor-agent",
+        "code": "MATERIAL_BLOCKED",
+        "retryable": false,
+        "message": "发给别家的验证材料没过卫生检查，没发给Cursor Agent：查出 1 处（验证提示词 第 12 行 token）"
+      },
+      "expect": { "action": "park", "rule": "HY4", "alert": true, "routeOutcome": "neutral" }
+    },
+    {
+      "id": "X80",
+      "provenance": "format",
+      "origin": "开 PR 前验证（#213）读默认分支上的需求文档（real/github-ports.ts 的 readCriteria）：文件不在就报 SPEC_DOC_MISSING，不验",
+      "evidence": {
+        "source": "readCriteria",
+        "routeBound": false,
+        "code": "SPEC_DOC_MISSING",
+        "retryable": false,
+        "message": "主线上没有 specs/28-接真端口/需求.md：开 PR 前验证要照它的「怎么算做完」逐条核，读不到就不验（需求文档还没进主线？）"
+      },
+      "expect": { "action": "park", "rule": "VF1", "alert": true, "routeOutcome": "neutral" }
+    },
+    {
+      "id": "X81",
+      "provenance": "format",
+      "origin": "开 PR 前验证（#213）：需求文档在，但没有「怎么算做完」一节或那一节空着（core 的 criteriaOf），报 CRITERIA_MISSING",
+      "evidence": {
+        "source": "readCriteria",
+        "routeBound": false,
+        "code": "CRITERIA_MISSING",
+        "retryable": false,
+        "message": "specs/28-接真端口/需求.md：需求文档里没有「## 怎么算做完」一节，开 PR 前验证没法逐条核"
+      },
+      "expect": { "action": "park", "rule": "VF1", "alert": true, "routeOutcome": "neutral" }
+    },
+    {
+      "id": "X82",
+      "provenance": "format",
+      "origin": "开 PR 前验证（#213）查写这张单的会话用过哪几族（real/store-ports.ts 的 authorFamilies）：一个起过的会话都查不到就报 AUTHORS_UNKNOWN，不拿空的当谁都能验",
+      "evidence": {
+        "source": "authorFamilies",
+        "routeBound": false,
+        "code": "AUTHORS_UNKNOWN",
+        "retryable": false,
+        "message": "任务 3f2b1c4d-0000-4000-8000-000000000001 一个起过的会话都查不到：不知道写它的是哪一族，判不了验证模型是不是别家，不验"
+      },
+      "expect": { "action": "park", "rule": "VF1", "alert": true, "routeOutcome": "neutral" }
     }
   ],
   "skipped": [

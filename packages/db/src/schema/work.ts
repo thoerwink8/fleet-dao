@@ -434,6 +434,83 @@ export const pullRequests = pgTable(
   ],
 );
 
+/**
+ * 开 PR 前别家验证（docs/decisions/0003-fusion-flow.md 第 5 条第 5 步），一轮一行：送检的头、谁验的（路由、族）、写这张单的
+ * 是哪几族、对照的「怎么算做完」、验证模型交回的原样、core 的 decideVerdict 判的（驳回之前），以及 Lead 拿证据驳回的和驳回之后的
+ * 结论。引擎经 recordVerification 写，同一个 id 整行覆盖（重试幂等）：验证模型交回后写一次，Lead 拿证据驳回后再写一次。
+ */
+export const verifyRounds = pgTable(
+  'verify_rounds',
+  {
+    id: uuid('id').primaryKey(),
+    taskId: uuid('task_id')
+      .notNull()
+      .references(() => tasks.id),
+    /** 第几轮（从 1 起；默认 1 轮、最多 2 轮）。 */
+    round: integer('round').notNull(),
+    /** 送检的提交（完整提交号）。 */
+    head: text('head').notNull(),
+    /** 验证会话。 */
+    runId: uuid('run_id')
+      .notNull()
+      .references(() => sessionRuns.id),
+    routeId: text('route_id')
+      .notNull()
+      .references(() => routes.id),
+    /** 验证模型的族。 */
+    family: text('family').notNull(),
+    /** 写这张单的会话用过的族（验证只派别家）。 */
+    authorFamilies: text('author_families').array().notNull(),
+    /** 对照的「怎么算做完」逐条原文。 */
+    criteria: jsonb('criteria').$type<string[]>().notNull(),
+    /** 验证模型交回的结论文件，原样；交回的连 JSON 都不是时为空（只会出现在作废的行上）。 */
+    report: jsonb('report'),
+    /** decideVerdict 判的，驳回之前：pass / block / invalid。 */
+    verdict: text('verdict').$type<'pass' | 'block' | 'invalid'>().notNull(),
+    /** 作废的原因（verdict = invalid 才有）。 */
+    invalidWhy: text('invalid_why'),
+    /** Lead 拿证据驳回的（{target, evidence}），没驳回是空数组。 */
+    rebuttals: jsonb('rebuttals')
+      .$type<{ target: string; evidence: string }[]>()
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+    /** 驳回之后的结论（没驳回就是验证模型判的）；作废的是空。 */
+    finalVerdict: text('final_verdict').$type<'pass' | 'block'>(),
+    /** 驳回之后还挡着的（挡在哪），和写进 PR「还欠什么」的备注（看不出、建议）。 */
+    reasons: jsonb('reasons').$type<string[]>().notNull().default(sql`'[]'::jsonb`),
+    notes: jsonb('notes').$type<string[]>().notNull().default(sql`'[]'::jsonb`),
+    createdAt: timestamp('created_at', tz).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', tz).notNull().defaultNow(),
+  },
+  (t) => [
+    check('verify_rounds_round_positive', sql`${t.round} >= 1`),
+    check('verify_rounds_verdict_known', sql`${t.verdict} in ('pass', 'block', 'invalid')`),
+    check(
+      'verify_rounds_final_known',
+      sql`${t.finalVerdict} is null or ${t.finalVerdict} in ('pass', 'block')`,
+    ),
+    // 作废的必须写原因、没有结论；没作废的不写原因、一定有结论、交回的不能是空
+    check(
+      'verify_rounds_invalid_shape',
+      sql`(${t.verdict} = 'invalid') = (${t.invalidWhy} is not null) and (${t.verdict} = 'invalid') = (${t.finalVerdict} is null) and (${t.verdict} = 'invalid' or ${t.report} is not null)`,
+    ),
+    // 驳回只会放松：验证模型判过的，驳回之后照样是过
+    check('verify_rounds_pass_stays_pass', sql`${t.verdict} <> 'pass' or ${t.finalVerdict} = 'pass'`),
+    // 挡住的必须写挡在哪，过了的不许还留着挡的理由（不是数组的由 lists_are_arrays 拦）
+    check(
+      'verify_rounds_reasons_match',
+      sql`${t.finalVerdict} is null or jsonb_typeof(${t.reasons}) <> 'array' or (${t.finalVerdict} = 'block') = (jsonb_array_length(${t.reasons}) > 0)`,
+    ),
+    check(
+      'verify_rounds_lists_are_arrays',
+      sql`jsonb_typeof(${t.criteria}) = 'array' and jsonb_typeof(${t.rebuttals}) = 'array' and jsonb_typeof(${t.reasons}) = 'array' and jsonb_typeof(${t.notes}) = 'array'`,
+    ),
+    // 不知道作者是哪一族就判不了是不是别家：一族都没有的不许写进来
+    check('verify_rounds_authors_known', sql`cardinality(${t.authorFamilies}) > 0`),
+    index('verify_rounds_task_idx').on(t.taskId, t.createdAt),
+  ],
+);
+
 /** specs/<编号>-<短名>/ 的索引，给 fleet history 翻历史需求。目录名在 tasks.spec_dir，这里只放文件里的摘要。 */
 export const specs = pgTable('specs', {
   taskId: uuid('task_id')

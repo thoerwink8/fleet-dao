@@ -533,20 +533,21 @@ export function fakeCursorRun(script: (spec: CursorRunSpec, n: number) => FakeCu
 
 /**
  * 一条 cursor-agent 路由（和目录样例同一个样子）：池不绑会话用户（库里约束会话用户和 reclaude 组织类型同有同无），
- * 模型 auto。stages 给了就挂进这些阶段的调度台（探针只探有阶段在用的路由）。
+ * 模型默认 auto（给 modelId 就是钉住某个型号的）。stages 给了就挂进这些阶段的调度台（探针只探有阶段在用的路由）。
  */
 export async function addCursorRoute(
   db: Db,
-  over: { poolId?: string; stages?: StageKind[]; upstreamModel?: string } = {},
+  over: { poolId?: string; stages?: StageKind[]; upstreamModel?: string; modelId?: string } = {},
 ): Promise<{ routeId: string; poolId: string }> {
   const poolId = over.poolId ?? 'cursor';
-  const routeId = `${poolId}:cursor-auto:cursor-agent`;
+  const modelId = over.modelId ?? 'cursor-auto';
+  const routeId = `${poolId}:${modelId}:cursor-agent`;
   await db.insert(pools).values({ id: poolId, channelId: 'cursor', maxConcurrency: 6 }).onConflictDoNothing();
   await db.insert(routes).values({
     id: routeId,
     channelId: 'cursor',
     poolId,
-    modelId: 'cursor-auto',
+    modelId,
     hostId: 'cursor-agent',
     alive: true,
     ...PROBED_OK,

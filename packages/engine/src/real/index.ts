@@ -5,7 +5,7 @@
 import { join } from 'node:path';
 import type { SessionUser } from '@fleet-dao/adapters';
 import { createDb, type Db } from '@fleet-dao/db';
-import { createGitHub, pgLedger, pgLocker } from '@fleet-dao/github';
+import { assertPublishable, createGitHub, pgLedger, pgLocker } from '@fleet-dao/github';
 import type { EngineJobs } from '../activities.ts';
 import type { JevPort } from '../failure/jev.ts';
 import type { EnginePorts } from '../ports.ts';
@@ -34,6 +34,11 @@ export interface RealPortsDeps {
   forkMaxContextTokens?: number;
   /** 错误分流、停滞预判问 Jev 用（real/jev-port.ts）；不给就不问，照规则走。 */
   jev?: JevPort;
+  /**
+   * 发给别家（开 PR 前验证）的材料过卫生检查：生产用 github 包的 assertPublishable 和推分支同一份名单。
+   * 不给就发不出去（验证会话起不来，报 HYGIENE_UNSCANNED），不当成查过了。
+   */
+  screen?: SessionPortsDeps['screen'];
   /** 以下测试用。 */
   session?: Partial<
     Pick<
@@ -87,6 +92,7 @@ export function createRealPorts(deps: RealPortsDeps): RealPorts {
     ...(deps.forkMaxContextTokens === undefined ? {} : { forkMaxContextTokens: deps.forkMaxContextTokens }),
     ...(deps.log ? { log: deps.log } : {}),
     ...(deps.jev ? { jev: deps.jev } : {}),
+    ...(deps.screen ? { screen: deps.screen } : {}),
     ...deps.session,
   });
   const ports: EnginePorts = {
@@ -96,6 +102,9 @@ export function createRealPorts(deps: RealPortsDeps): RealPorts {
     raiseAlert: store.raiseAlert,
     recordTiming: store.recordTiming,
     saveTaskState: store.saveTaskState,
+    authorFamilies: store.authorFamilies,
+    recordVerification: store.recordVerification,
+    readCriteria: github.readCriteria,
     createWorktree: github.createWorktree,
     removeWorktree: github.removeWorktree,
     pushBranch: github.pushBranch,
@@ -191,6 +200,8 @@ export function realPortsFromEnv(
     db,
     jev: jev.port,
     gh,
+    // 发给别家的验证材料和推分支、开 PR 用同一份已知敏感值名单（createGitHub 按环境变量找的那份）
+    screen: (what, texts) => assertPublishable(what, texts, gh.deps.sensitiveValues),
     trees,
     exec: scopeExec(),
     tmpDir: join(config.stateDir, 'tmp'),
