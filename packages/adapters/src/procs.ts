@@ -230,7 +230,7 @@ export const SCOPE_ENV_ARGS: ReadonlySet<string> = new Set([
 export interface ScopeLaunch {
   /** 调 sudo 时的环境：FLEET_* 这几类，加 FLEET_SESSION_PATH。 */
   sudoEnv: Record<string, string>;
-  /** 白名单里的执行体开关（例如 GROK_DISABLE_AUTOUPDATER）：写成 /usr/bin/env 的参数。 */
+  /** 会话自己的 TMPDIR 和白名单里的执行体开关（例如 GROK_DISABLE_AUTOUPDATER）：写成 /usr/bin/env 的参数。 */
   envArgs: string[];
 }
 
@@ -238,6 +238,8 @@ export interface ScopeLaunch {
  * 把会话环境拆成「经 sudo 的环境传」和「写在命令行上」两份。宿主抄来的基础变量（HOME、USER……）是引擎的，
  * 帮手脚本会给会话用户设它自己的，不往里传；PATH 改走 FLEET_SESSION_PATH；别的变量不在白名单里一律拒——
  * 会话用户的登录态要在它自己家里登好，不从引擎这边传。
+ * TMPDIR 只会是起会话的一方给这次会话建的临时目录（buildSessionEnv 不从宿主抄它）：帮手脚本不放 TMPDIR，
+ * 写成 /usr/bin/env 的参数。它是工作树根下的路径（和 --cwd 一样本来就在命令行上），不是凭据；要绝对路径。
  */
 export function scopeLaunch(env: Record<string, string>): ScopeLaunch {
   const sudoEnv: Record<string, string> = { PATH: '/usr/sbin:/usr/bin:/sbin:/bin' };
@@ -245,7 +247,11 @@ export function scopeLaunch(env: Record<string, string>): ScopeLaunch {
   for (const [key, value] of Object.entries(env)) {
     if (SCOPE_ENV_KEEP.test(key)) sudoEnv[key] = value;
     else if (key === 'PATH') sudoEnv.FLEET_SESSION_PATH = value;
-    else if (SESSION_BASE_KEYS.has(key.toUpperCase())) continue;
+    else if (key === 'TMPDIR') {
+      if (!value.startsWith('/')) throw new Error(`会话的 TMPDIR 要写绝对路径：${value}`);
+      if (CONTROL_CHAR.test(value)) throw new Error('会话的 TMPDIR 里有控制字符，不写上命令行');
+      envArgs.push(`TMPDIR=${value}`);
+    } else if (SESSION_BASE_KEYS.has(key.toUpperCase())) continue;
     else if (!SCOPE_ENV_ARGS.has(key)) {
       throw new Error(
         `${key} 进不了会话用户的会话：帮手脚本只放 FLEET_* 这几类环境变量，命令行上只放白名单里的执行体开关——登录态在会话用户家里登好`,

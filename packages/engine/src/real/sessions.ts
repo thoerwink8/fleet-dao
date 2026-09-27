@@ -11,6 +11,10 @@
 // 会话用户下、换了执行方式、换了目录（会话记录按目录存）、续的号不是 UUID（cursor 的临时号），开新会话、带接力任务书
 // （做到哪了、已提交了什么）。工作树由会话用户自己从引擎镜像打的 bundle 建，
 // 引擎不以自己的身份在会话目录里跑 git。进程起来（onSpawn）才算开工：记进程号和 scope，交回工作流。
+// 每个会话一个自己的临时目录（会话的 TMPDIR）：工作树根下的 _tmp/<runId>（worktrees.ts），不在工作树里、归会话用户。
+// 会话里跑的测试往临时目录留的东西（vitest 每跑一次留一个转译缓存目录、测试没收的临时目录）都落在这里：插头收场后
+// 整个删掉（正常结束、失败、被叫停、没起来都一样）；工人重启接不上的在 awaitSession / stopSession 里删；工人起来时
+// reapOrphanSessions 把上一轮剩下的全清掉。删不掉不改会话的结局，只记日志、下次起来再清。
 //
 // 看守：进程是这个工人进程起的（registry）。接不上（工人重启过、输出管道断了）就按记下的 scope 收掉旧会话，回
 // SESSION_LOST，工作流续会话重起。过程中：心跳；进度事件攒一小批写库（fleet done 的核实要读会话自己跑过的测试，
@@ -238,7 +242,7 @@ export interface SessionPortsDeps {
 }
 
 export type SessionPorts = Pick<EnginePorts, 'startSession' | 'awaitSession' | 'stopSession'> & {
-  /** 工人起来接活之前：收掉上一轮留下的会话 scope（fleet-agent-scope list 再逐个 stop），回收了几个。 */
+  /** 工人起来接活之前：收掉上一轮留下的会话 scope（fleet-agent-scope list 再逐个 stop）、清掉它们的临时目录，回收了几个会话。 */
   reapOrphanSessions(): Promise<number>;
 };
 
@@ -267,6 +271,8 @@ interface Live {
   startedAt: number;
   spawned: Promise<SpawnInfo>;
   report: Promise<HostReport>;
+  /** 插头收场（进程、scope 都收了）之后删这次会话的临时目录；不会失败（删不掉只记日志）。 */
+  cleaned: Promise<void>;
   abort: AbortController;
   stop: { kind: 'stop'; reason: string } | { kind: 'stall'; rule: string; basis: string } | undefined;
   pending: ProgressEvent[];
@@ -432,6 +438,52 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     }
     return p;
   };
+
+  /** 删这次会话的临时目录。不抛（会话的结局不受它影响）：删不掉明说没删掉，工人下次起来时 sweepTmp 再清。 */
+  async function removeTmp(runId: string): Promise<void> {
+    let dir: string | undefined;
+    try {
+      dir = trees.tmpFor(runId);
+      await trees.remove(dir);
+    } catch (error) {
+      log('会话的临时目录没删掉（工人下次起来时再清）', {
+        runId,
+        ...(dir ? { dir } : {}),
+        error: errorText(error),
+      });
+    }
+  }
+
+  /**
+   * 上一轮会话留下的临时目录：工人起来时（上一轮的会话 scope 都收了）把 _tmp 下的全清掉，这个进程里在跑的不碰。
+   * 列不出来、删不掉都明说没清成（记日志），不挡工人接活：留着的只占盘，下次起来再清。回删掉了几个。
+   */
+  async function sweepTmp(): Promise<number> {
+    let dirs: string[];
+    try {
+      dirs = await trees.listTmp();
+    } catch (error) {
+      log('上一轮会话留下的临时目录没清成：列不出来', { error: errorText(error) });
+      return 0;
+    }
+    const mine = new Set([...registry.keys()].map((runId) => trees.tmpFor(runId)));
+    let removed = 0;
+    const failed: string[] = [];
+    for (const dir of dirs) {
+      if (mine.has(dir)) continue;
+      try {
+        if (!(await trees.remove(dir)).gone) removed += 1;
+      } catch (error) {
+        failed.push(`${dir}：${errorText(error)}`);
+      }
+    }
+    if (failed.length > 0) {
+      log(`上一轮会话留下的临时目录有 ${failed.length} 个没删掉（下次起来再清）`, {
+        failed: failed.slice(0, 10),
+      });
+    }
+    return removed;
+  }
 
   // ---- 进度：攒一小批写库
 
@@ -681,6 +733,8 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     } else {
       dir = trees.scratchFor(task.repo, task.issueNumber, input.stage, input.subtaskKey);
     }
+    // 会话的 TMPDIR：编号放不进目录名的在登记之前就拒（和工作树同一道校验）
+    const tmpDir = trees.tmpFor(input.runId);
 
     const opened = await openSessionRun(db, {
       id: input.runId,
@@ -765,6 +819,9 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     if (again?.stopRequested) {
       throw new PortError('SESSION_STOPPED', `会话 ${input.runId} 已经叫停，不再起`, { retryable: false });
     }
+    // 临时目录紧挨着起进程建：从这里起，不管起没起来、怎么收场，插头一收场就删（下面的 live.cleaned）。
+    // 建不成照工作树建不成一样报 ADOPT_FAILED；同一个 runId 重试时它在就改属主（帮手的 adopt 可重入）。
+    await trees.adopt(tmpDir, user);
 
     const abort = new AbortController();
     let spawnResolve!: (info: SpawnInfo) => void;
@@ -795,6 +852,7 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
       startedAt: clock().getTime(),
       spawned,
       report: Promise.resolve(undefined as unknown as HostReport),
+      cleaned: Promise.resolve(),
       abort,
       stop: undefined,
       pending: [],
@@ -826,6 +884,7 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
             fleetApi: input.launch.fleetApi,
             fleetToken: input.launch.fleetToken,
             pathPrepend: input.launch.pathPrepend,
+            tmpDir,
           },
           limits: {
             // 插头自己的 idle 超时管「光是没动静」；总时长比看守的限时（sessionMinutes）早一分钟到，插头先收场。
@@ -875,6 +934,8 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
         },
       );
     live.report.catch(() => undefined);
+    const settled = () => undefined;
+    live.cleaned = live.report.then(settled, settled).then(() => removeTmp(input.runId));
 
     let info: SpawnInfo;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -1353,6 +1414,8 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
       const user = asSessionUser(stored?.runAsUser);
       const handle = input.handle ?? stored?.handle ?? undefined;
       const reaped = await reapLost(input.runId, user, handle);
+      // 旧会话的临时目录跟着删：续会话是新的 runId、新的临时目录，这一个没人再用
+      await removeTmp(input.runId);
       const message = `接不上会话 ${input.sessionId}：引擎工人重启过，输出管道断了${reaped}`;
       if (stored && !stored.endedAt) {
         await finishSessionRun(db, {
@@ -1434,6 +1497,8 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
       };
     }
     registry.delete(live.runId);
+    // 插头已经收场：临时目录删完再交回（不会失败，删不掉只记日志）
+    await live.cleaned;
     const { routeOutcome, jev: asked } = await holdOrRelease(live, end);
     // 问过 Jev 的（规则认不出的失败）：回答随结局交给工作流，工作流的失败分流带着它判，不在工作流里再问。
     if (asked && end.failure) end = { ...end, failure: { ...end.failure, jev: asked } };
@@ -1478,13 +1543,14 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
       live.abort.abort();
       return;
     }
-    // 不在这个工人进程里（工人重启过）：按记下的 scope 收。
+    // 不在这个工人进程里（工人重启过）：按记下的 scope 收，收掉了再删它的临时目录。
     const stored = await getSessionRun(db, input.runId);
     const user = asSessionUser(stored?.runAsUser);
     if (!stored?.startedAt || !user) return;
     const error = await stopScope({ id: input.runId, user, ...helperOpts });
     if (error)
       throw new PortError('STOP_FAILED', `停会话 ${input.runId} 没成：${error}`, { retryable: true });
+    await removeTmp(input.runId);
   }
 
   async function reapOrphanSessions(): Promise<number> {
@@ -1500,6 +1566,9 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
       if (error) throw new Error(`收不掉上一轮留下的会话 ${scope.id}：${error}`);
       reaped += 1;
     }
+    // 会话都收了：它们的临时目录（上一轮没来得及删的、工人被强杀时在跑的）一起清掉
+    const swept = await sweepTmp();
+    if (swept > 0) log(`删掉上一轮会话留下的临时目录 ${swept} 个`);
     return reaped;
   }
 

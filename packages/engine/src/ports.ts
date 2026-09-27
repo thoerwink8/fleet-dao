@@ -15,14 +15,15 @@
 // 4. 会话一律经 fleet-agent-scope 起（scope 名用 runId，内存上限按 input.resources，swap 一起封），跑在按
 //    input.route.poolId 那个池定的会话专用用户下（法国只有一个，两个 Claude 池共用；它同一时刻只挂一个组织，design 第九节）；
 //    startSession 先按 input.runId 在库里建这一次会话（session_runs），再起进程，把进程号和 scope 交回（handle）。
+//    会话的 TMPDIR 是这次会话自己的临时目录（工作树根下的 _tmp/<runId>），会话收场就删。
 //    stopSession 按 runId 停（起会话还没返回时工作流只知道 runId）：停掉这个 runId 名下的进程，并记下「这个 runId 已叫停」——
 //    之后（或同时在跑的）startSession 再拿这个 runId 来，不起进程，抛 SESSION_STOPPED。
 // 5. awaitSession 只是「看守」：工人重启后它会被重试。接得上就接着看；接不上（引擎正常停时会话跟着退了，
 //    或者引擎被强杀、会话成了孤儿）就按 handle 把旧会话收掉，回 outcome=failed、code=SESSION_LOST——工作流会续会话重起。
-//    工人进程起来时 createEngineWorker 会先调 reapOrphanSessions（fleet-agent-scope list 再逐个 stop）：
+//    工人进程起来时 createEngineWorker 会先调 reapOrphanSessions（fleet-agent-scope list 再逐个 stop，再清上一轮会话的临时目录）：
 //    上一轮的会话输出管道已经断了，接不上。工作流被强行终止留下的会话，归每小时对账收。
 
-import type { Rebuttal, VerifyReport } from '@fleet-dao/core';
+import type { Brief, FlowConfigRead, Rebuttable, Rebuttal, VerifyReport } from '@fleet-dao/core';
 import type { HostId, Repo, RunOutcome, StageKind, SubtaskState, TaskState } from '@fleet-dao/shared';
 import type { MergeOutcome, TestResult } from './decisions/merge.ts';
 import type { PlannedSubtask } from './decisions/plan.ts';
@@ -106,6 +107,11 @@ export interface PickRouteInput extends Scope {
   avoidFamilies?: string[];
   /** 这一步算界面类的活（改到了页面代码）：禁令按 UI 判，GPT 不派（含审界面）。 */
   uiWork?: boolean;
+  /**
+   * 流程配置里这一步的模型顺序（0003 第 9 条，目录里的模型 id）：只派这几个模型的路由，按这个先后；同一个模型的几条路由
+   * 照调度台的先后。给了空数组 = 这一步没配模型，派不出。不给 = 照调度台（需求工作流、子任务不给）。
+   */
+  models?: string[];
 }
 
 export type PickRouteResult =
@@ -134,6 +140,34 @@ export interface SessionBrief {
   head?: string;
   /** 开 PR 前验证要交代的（只有 verify 阶段给）。 */
   verify?: VerifyBrief;
+  /** Fusion 的主导模型（Lead）这一步做什么、看什么（只有 Lead 的会话给；会话端口按它交代、按它读交回的东西）。 */
+  lead?: LeadBrief;
+  /** Fusion 的任务简报（core 的 Brief）：副手照它干，Lead 验收、自己接手时对照它。 */
+  task?: Brief;
+}
+
+/**
+ * Lead 的几步（一张单一个 Lead 会话，按步续用，0003 第 6 条）。plan = 读需求文档和代码、写方案和任务简报；accept = 验收副手
+ * 这一轮交回的；rebut = 看验证挡住的几条、有证据就驳回；fix-brief = 开了 PR 之后要改（CI 红、合并前退回）写修复简报；
+ * review = CI 绿了做最终审查、写结果；pr-text = 开 PR 时正文被卫生检查拦下，重写方案摘要和做了什么；takeover = 自己写码
+ * （副手打回两次还没做好、副手派不出、单模型模式）。
+ */
+export type LeadStep = 'plan' | 'accept' | 'rebut' | 'fix-brief' | 'review' | 'pr-text' | 'takeover';
+
+export interface LeadBrief {
+  step: LeadStep;
+  /** fusion = 带副手；single = 单模型模式（没有副手，Lead 自己写）。 */
+  mode: 'fusion' | 'single';
+  /** 需求文档、方案、结果在仓里的路径（specs/<号>-<短名>/…，随 PR 进仓）。 */
+  docs: { requirement: string; plan: string; result: string };
+  /** accept：副手这一轮交回的（改了哪些文件由引擎从提交里读）。 */
+  delivery?: { head: string; summary: string; changedFiles: string[]; testsPassed: boolean };
+  /** rebut：验证挡住的几条，原文照抄（驳回时 target 一字不差照抄）。 */
+  blocking?: Rebuttable[];
+  /** rebut、review：验证的备注（看不出的、建议）。 */
+  notes?: string[];
+  /** takeover：为什么 Lead 自己写。 */
+  why?: string;
 }
 
 /** 开 PR 前验证交代给别家的材料（起会话前整份提示词过一遍卫生检查，过不了不发）。 */
@@ -227,7 +261,39 @@ export type SessionOutput =
    * 开 PR 前验证交回的结论文件（.fleet-out/verify.json）。真端口读的时候已经拿 core 的 checkReport 挡过一道（认不出、
    * 审错了头、漏答多答的退回会话重写）；定论照样由工作流经 decide 调 core 的 decideVerdict 判，不信这一道。
    */
-  | { kind: 'verify'; report: VerifyReport };
+  | { kind: 'verify'; report: VerifyReport }
+  // ---- Fusion 的 Lead（brief.lead 给了哪一步就交哪一种）。形状由工作流经 decide 调 core 判（checkLeadPlan、checkBrief、
+  // checkLeadReview），会话端口读的时候先按同一个形状挡一道，交错了退回会话照原因重写。
+  /** plan：方案.md 写好提交了（head、这一步改到的文件），方案摘要、任务简报、大小、风险、会碰的人闸。 */
+  | {
+      kind: 'lead-plan';
+      head: string;
+      changedFiles: string[];
+      summary: string;
+      brief: unknown;
+      small: boolean;
+      highRisk: boolean;
+      holds: string[];
+    }
+  /** accept：收不收副手这一轮交回的，带理由。 */
+  | { kind: 'lead-verdict'; verdict: 'accept' | 'reject'; why: string }
+  /** rebut：拿证据驳回的（没有就空数组，照挡的理由改）。 */
+  | { kind: 'lead-rebut'; rebuttals: Rebuttal[] }
+  /** fix-brief：给副手的修复简报。 */
+  | { kind: 'lead-brief'; brief: unknown }
+  /** review：最终审查。过了写结果.md 提交（head、改到的文件），做了什么、还欠什么；要改给修复简报。 */
+  | {
+      kind: 'lead-review';
+      verdict: 'pass' | 'fix';
+      why: string;
+      did: string[];
+      owed: string[];
+      head: string;
+      changedFiles: string[];
+      brief?: unknown;
+    }
+  /** pr-text：重写的方案摘要和做了什么（PR 正文被卫生检查拦下时）。 */
+  | { kind: 'lead-text'; summary: string; did: string[] };
 
 export interface SessionEnd {
   /**
@@ -512,6 +578,15 @@ export interface VerificationRecord extends Scope {
   notes: string[];
 }
 
+// ---- Fusion 开工前要读的（docs/decisions/0003-fusion-flow.md 第 9 条；specs/214-Fusion工作流/）
+
+/** 这张单现在的标题和正文（库里 tasks 那一行，GitHub 上改了单子正文由接活跟着改）：认需求文档目录用。 */
+export interface TaskRequest {
+  title: string;
+  /** 单子正文去掉进度段（正文空就是标题）。 */
+  rawRequest: string;
+}
+
 // ---- 人、报警、计时
 
 export interface AskHumanInput extends Scope {
@@ -629,6 +704,13 @@ export interface EnginePorts {
   authorFamilies(input: Scope, ctx: PortContext): Promise<{ families: string[] }>;
   /** 一轮验证写进库（同一个 id 整行覆盖，重试幂等）。 */
   recordVerification(input: VerificationRecord, ctx: PortContext): Promise<void>;
+  /**
+   * 这张单所在仓的流程配置副本（库里 repos 的 flow_* 列）：原样交回，能不能用由工作流经 decide 调 core 判。
+   * 任务不在明确报错（TASK_NOT_FOUND，不可重试），不交空的。
+   */
+  flowConfig(input: Scope, ctx: PortContext): Promise<FlowConfigRead>;
+  /** 这张单现在的标题和正文（单子正文里改了需求文档那一行，人点「继续」后重认）。任务不在明确报错（TASK_NOT_FOUND）。 */
+  taskRequest(input: Scope, ctx: PortContext): Promise<TaskRequest>;
   askHuman(input: AskHumanInput, ctx: PortContext): Promise<void>;
   requestApproval(input: RequestApprovalInput, ctx: PortContext): Promise<void>;
   raiseAlert(input: RaiseAlertInput, ctx: PortContext): Promise<{ alertId: string }>;

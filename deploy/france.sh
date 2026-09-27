@@ -38,6 +38,8 @@ source "$DEPLOY_DIR/lib/app-config.sh"
 source "$DEPLOY_DIR/lib/session-pnpm.sh"
 # shellcheck source=lib/node-cache.sh
 source "$DEPLOY_DIR/lib/node-cache.sh"
+# shellcheck source=lib/auto-release-state.sh
+source "$DEPLOY_DIR/lib/auto-release-state.sh"
 trap 'on_error "$LINENO" "$BASH_COMMAND"' ERR
 
 # ── 钉死的版本与校验和：外部二进制装上机器就进了信任面，不用 latest ──
@@ -865,9 +867,10 @@ readback() {
   readback_service_home
 }
 
-# 自动发布：定时器在等、装上去的副本和仓里一样、上一轮跑完了没有（跟不跟得上主线由后端 /healthz 的 deploy_lag 判）
+# 自动发布：定时器在等、装上去的副本和仓里一样、上一轮什么时候跑的、干了什么、最近一轮崩没崩（lib/auto-release-state.sh：
+# 读它每一轮写的状态文件，不看服务正在跑时是空的 ExecMainExitTimestamp）。跟不跟得上主线由后端 /healthz 的 deploy_lag 判
 readback_auto_release() {
-  local f result status at
+  local f
   if [[ "$(systemctl is-active fleet-auto-release.timer 2>/dev/null)" != active ]]; then
     red "fleet-auto-release.timer 没在跑：主线上的新提交不会自动发到本机"
   fi
@@ -876,18 +879,10 @@ readback_auto_release() {
       red "$AUTO_RELEASE_LIB/$f 和仓里的不一样（或没装）：重跑本脚本"
     fi
   done
-  at=$(unit_prop fleet-auto-release.service ExecMainExitTimestamp)
-  if [[ -z "$at" ]]; then
-    pending "自动发布还一轮都没跑过（定时器装上 2 分钟后跑第一轮；现在跑：systemctl start fleet-auto-release）"
-    return 0
-  fi
-  result=$(unit_prop fleet-auto-release.service Result)
-  status=$(unit_prop fleet-auto-release.service ExecMainStatus)
-  if [[ "$result" == success ]]; then
-    ok "自动发布上一轮跑完是 $at（读数：bash /srv/fleet-dao/deploy/release.sh --check）"
-  else
-    red "自动发布上一轮没跑完（$at，退出码 ${status:-读不到}）：journalctl -u fleet-auto-release -n 30"
-  fi
+  # 判红时两个都已经记进 REDS，这里照样往下查
+  check_auto_release_state "$AUTO_DIR/state.json" "$DEPLOY_DIR/france/auto-release/lib.mjs" || true
+  check_auto_release_unit "$(unit_prop fleet-auto-release.service ActiveState)" \
+    "$(unit_prop fleet-auto-release.service ExecMainStatus)" || true
 }
 
 # 演示版的可见范围：两个触发单元在等、上一次推成了没有（一次都没推过是「待配」，推不成、有文件认不出是红）

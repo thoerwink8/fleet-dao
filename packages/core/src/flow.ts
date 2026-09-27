@@ -1,7 +1,10 @@
 // Fusion 一张单怎么走（docs/decisions/0003-fusion-flow.md 第 5、7 条）：给当前状态和刚发生的事，判下一步做什么。
 // 纯判断：不碰网络和库。工作流经引擎的 decide 调它，结果进历史；认不出的组合明说「不该出现」，不猜着往下走。
 
-/** 0 创单并讨论 → 1 收单 → 2 规划·拆块 → 3 方案评审 → 4 执行（含 Lead 验收）→ 5 验证 → 6 开 PR·过 CI → 7 合并；母单按块循环 4–7，最后做母单级验证。 */
+/**
+ * 0 创单并讨论 → 1 收单 → 2 规划·拆块 → 3 方案评审 → 4 执行（含 Lead 验收）→ 5 验证 → 6 开 PR·过 CI（绿了 Lead 最终审查）
+ * → 7 合并；母单按块循环 4–7，最后做母单级验证。
+ */
 export type Step =
   | 'discuss'
   | 'intake'
@@ -10,6 +13,7 @@ export type Step =
   | 'execute'
   | 'verify'
   | 'pr'
+  | 'final-review'
   | 'merge'
   | 'mother-verify'
   | 'done'
@@ -18,7 +22,10 @@ export type Step =
 /** fusion = Lead 带副手（默认）；single = 单模型模式，额度不够时用。 */
 export type Mode = 'fusion' | 'single';
 
-/** 副手打回最多 2 次（第 3 次 Lead 自己接手）；验证默认 1 轮、最多 2 轮；CI 红了最多修 3 轮。 */
+/**
+ * 副手打回最多 2 次（第 3 次 Lead 自己接手）；验证默认 1 轮、最多 2 轮（流程配置可以收到 1 轮）；开了 PR 之后回去改最多 3 轮
+ * （CI 红、Lead 最终审查要改、合并前退回都算一轮）。
+ */
 export const FLOW_LIMITS = { reworks: 2, verifyRounds: 2, ciRounds: 3 } as const;
 
 export interface FlowState {
@@ -35,8 +42,10 @@ export interface FlowState {
   takeover: boolean;
   /** 这一块验证跑过几轮没过。 */
   verifyRounds: number;
-  /** 这一块 CI 修过几轮。 */
+  /** 这一块 CI 修过几轮（最终审查要改、合并前退回也算一轮：都是开了 PR 之后回去改）。 */
   ciRounds: number;
+  /** 验证最多几轮（流程配置里的 verify.rounds，1–2）；不给按 FLOW_LIMITS.verifyRounds。 */
+  verifyLimit?: number;
   /** 小单：跳过方案评审。 */
   small: boolean;
   /** 高风险：单模型模式下第 5 步只对它开。 */
@@ -56,6 +65,10 @@ export type FlowEvent =
   | { kind: 'rejected' }
   | { kind: 'verified'; verdict: 'pass' | 'block' }
   | { kind: 'ci'; state: 'green' | 'red' | 'unknown' }
+  /** CI 绿了之后 Lead 的最终审查：过了进合并；要改就回第 6 步修一轮。 */
+  | { kind: 'final-reviewed'; verdict: 'pass' | 'fix' }
+  /** 合并前退回（合并队列退回要改、人闸没批）：回第 6 步修一轮。 */
+  | { kind: 'merge-returned' }
   | { kind: 'merged' }
   | { kind: 'mother-verified'; verdict: 'pass' | 'block' }
   | { kind: 'needs-human'; why: string }
@@ -73,6 +86,7 @@ export type FlowAction =
   | 'open-pr'
   | 'fix-ci'
   | 'recheck-ci'
+  | 'final-review'
   | 'merge'
   | 'verify-mother'
   | 'close'
@@ -80,7 +94,7 @@ export type FlowAction =
 
 export type FlowDecision = { ok: true; state: FlowState; action: FlowAction } | { ok: false; why: string };
 
-export function startFlow(mode: Mode, mother: boolean): FlowState {
+export function startFlow(mode: Mode, mother: boolean, options: { verifyRounds?: number } = {}): FlowState {
   return {
     mode,
     step: 'discuss',
@@ -93,6 +107,7 @@ export function startFlow(mode: Mode, mother: boolean): FlowState {
     ciRounds: 0,
     small: false,
     highRisk: false,
+    ...(options.verifyRounds === undefined ? {} : { verifyLimit: options.verifyRounds }),
   };
 }
 
@@ -104,6 +119,7 @@ const STEP_NAMES: Record<Step, string> = {
   execute: '4 执行',
   verify: '5 验证',
   pr: '6 开 PR',
+  'final-review': '6 最终审查',
   merge: '7 合并',
   'mother-verify': '母单级验证',
   done: '已关单',
@@ -127,6 +143,8 @@ function actionAt(state: FlowState): FlowAction {
       return 'verify';
     case 'pr':
       return state.ciRounds > 0 ? 'fix-ci' : 'open-pr';
+    case 'final-review':
+      return 'final-review';
     case 'merge':
       return 'merge';
     case 'mother-verify':
@@ -169,7 +187,18 @@ function badState(state: FlowState): string | undefined {
   if (state.blocks === 0 && state.block !== 0) return `状态认不出：还没拆块，却在第 ${state.block} 块`;
   if (state.step === 'parked' && state.resume === undefined)
     return '状态认不出：在等人，却没记恢复后回哪一步';
+  const limit = state.verifyLimit;
+  if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > FLOW_LIMITS.verifyRounds))
+    return `状态认不出：验证最多 ${String(limit)} 轮（要 1–${FLOW_LIMITS.verifyRounds}）`;
   return undefined;
+}
+
+/** 开了 PR 之后回去改一轮（CI 红、最终审查要改、合并前退回）：没用完就修，用完了停下等人。 */
+function fixRound(state: FlowState, why: string): FlowDecision {
+  if (state.ciRounds < FLOW_LIMITS.ciRounds) {
+    return go(state, { step: 'pr', ciRounds: state.ciRounds + 1 }, 'fix-ci');
+  }
+  return park({ ...state, step: 'pr' }, 'pr', `${why}：开了 PR 之后已经修了 ${state.ciRounds} 轮`);
 }
 
 export function nextFlow(state: FlowState, event: FlowEvent): FlowDecision {
@@ -243,7 +272,7 @@ export function nextFlow(state: FlowState, event: FlowEvent): FlowDecision {
       if (event.kind !== 'verified') return unexpected();
       if (event.verdict === 'pass') return go(state, { step: 'pr' }, 'open-pr');
       const rounds = state.verifyRounds + 1;
-      if (rounds < FLOW_LIMITS.verifyRounds) {
+      if (rounds < (state.verifyLimit ?? FLOW_LIMITS.verifyRounds)) {
         const back = { ...state, step: 'execute' as const };
         return go(state, { step: 'execute', verifyRounds: rounds }, actionAt(back));
       }
@@ -252,13 +281,21 @@ export function nextFlow(state: FlowState, event: FlowEvent): FlowDecision {
 
     case 'pr': {
       if (event.kind !== 'ci') return unexpected();
-      if (event.state === 'green') return go(state, { step: 'merge' }, 'merge');
+      // 绿了 Lead 最终审查、把结果.md 提交进这个 PR（两种模式都要：需求、方案、结果随 PR 进仓，引擎不直写主线）
+      if (event.state === 'green') return go(state, { step: 'final-review' }, 'final-review');
       if (event.state === 'unknown') return go(state, {}, 'recheck-ci');
       if (state.ciRounds < FLOW_LIMITS.ciRounds) return go(state, { ciRounds: state.ciRounds + 1 }, 'fix-ci');
       return park(state, 'pr', `CI 修了 ${state.ciRounds} 轮还是红的`);
     }
 
+    case 'final-review': {
+      if (event.kind !== 'final-reviewed') return unexpected();
+      if (event.verdict === 'pass') return go(state, { step: 'merge' }, 'merge');
+      return fixRound(state, 'Lead 最终审查要改');
+    }
+
     case 'merge': {
+      if (event.kind === 'merge-returned') return fixRound(state, '合并前退回要改');
       if (event.kind !== 'merged') return unexpected();
       if (state.block + 1 < state.blocks) {
         return go(state, { step: 'execute', block: state.block + 1, ...freshBlock }, 'dispatch');

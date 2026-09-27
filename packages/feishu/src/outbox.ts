@@ -6,11 +6,12 @@
 import { FeishuOutboxAckSchema } from '@fleet-dao/shared';
 import { type Backend, BackendError, type OutboxAck, type OutboxBatch, type OutboxItem } from './backend.ts';
 import { budgetAlertCard, outboxCard, type RenderContext } from './cards.ts';
-import { DailyBudget, quietUntil } from './gate.ts';
+import { DailyBudget, type QuietHours, quietUntil } from './gate.ts';
 import type { Logger } from './log.ts';
 import { CARD_EDITABLE_MS, type FeishuPort, feishuErrorKind, type Target } from './port.ts';
 import type { Registry } from './registry.ts';
 import { Lru, nextNonce, sleep, uuidFor } from './util.ts';
+import type { Watch } from './watch.ts';
 import { beijingDay, clip } from './words.ts';
 
 const KINDS = new Set<OutboxItem['kind']>(['decision', 'alert', 'daily', 'follow', 'ask']);
@@ -44,6 +45,8 @@ export interface OutboxDeps {
   /** 长轮询一次最多等几秒。 */
   waitSeconds?: number;
   maxPendingAcks?: number;
+  /** 每一轮走没走通、每一件推得怎样，记给网关自己的看守（心跳、调不通后端报警，watch.ts）。 */
+  watch?: Pick<Watch, 'ok' | 'fail' | 'pushed'> | undefined;
 }
 
 export interface Outbox {
@@ -53,6 +56,8 @@ export interface Outbox {
   run(signal: AbortSignal): Promise<void>;
   /** 按钮一点先在本地把卡改掉（已回答、已叫停……）。不是推送卡或重启后缓存没了返回 false，等后端下一版推过来。 */
   overlay(messageId: string, o: { doneText?: string; note?: string }): Promise<boolean>;
+  /** 最近一批里后端给的免打扰时段（null = 没设）；网关起来后还没取到过一批是 undefined。 */
+  quietHours(): QuietHours | null | undefined;
 }
 
 export function createOutbox(deps: OutboxDeps): Outbox {
@@ -73,6 +78,7 @@ export function createOutbox(deps: OutboxDeps): Outbox {
    */
   const settled = new Lru<string, { holdUntil: number; result: AckResult }>(5000);
   const ackKey = (a: { itemId: string; revision: number }) => `${a.revision}\u0000${a.itemId}`;
+  let lastQuiet: QuietHours | null | undefined;
 
   const ctx = (): RenderContext => ({
     publicUrl: deps.publicUrl,
@@ -270,6 +276,7 @@ export function createOutbox(deps: OutboxDeps): Outbox {
   async function runOnce(signal?: AbortSignal): Promise<number> {
     await flushAcks();
     const batch = await deps.backend.outbox(waitSeconds, signal);
+    lastQuiet = batch.quietHours;
     const repeated: Array<{ itemId: string; revision: number; status: AckResult['status'] }> = [];
     for (const item of batch.items) {
       const prior = settled.get(ackKey({ itemId: item.id, revision: item.revision }));
@@ -279,7 +286,9 @@ export function createOutbox(deps: OutboxDeps): Outbox {
         queueAck({ itemId: item.id, revision: item.revision, result: prior.result });
         continue;
       }
+      const started = deps.now();
       const result = await handle(item, batch.quietHours);
+      deps.watch?.pushed(result.status, deps.now() - started);
       queueAck({ itemId: item.id, revision: item.revision, result });
       const fields = { itemId: item.id, revision: item.revision, kind: item.kind, status: result.status };
       if (result.status === 'failed') deps.log.error('推送没发出去', { ...fields, error: result.error });
@@ -306,17 +315,21 @@ export function createOutbox(deps: OutboxDeps): Outbox {
         try {
           const n = await runOnce(signal);
           failures = 0;
+          deps.watch?.ok('outbox', deps.now() - started);
           // 后端要是没按长轮询等就回了空的，别原地打转。
           if (n === 0 && deps.now() - started < 1_000) await sleep(1_000, signal);
         } catch (err) {
           if (signal.aborted) break;
           failures += 1;
+          deps.watch?.fail('outbox', err);
           const wait = BACKOFF_MS[Math.min(failures, BACKOFF_MS.length) - 1] ?? 30_000;
           deps.log.warn('推送这一轮没走通，退避后重试', { failures, waitMs: wait, error: String(err) });
           await sleep(wait, signal);
         }
       }
     },
+
+    quietHours: () => lastQuiet,
 
     async overlay(messageId, o) {
       const item = byMessage.get(messageId);

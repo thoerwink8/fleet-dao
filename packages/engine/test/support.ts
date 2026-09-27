@@ -7,7 +7,7 @@ import { TestWorkflowEnvironment } from '@temporalio/testing';
 import { bundleWorkflowCode, DefaultLogger, Runtime, type WorkflowBundle } from '@temporalio/worker';
 import type { EngineJobs } from '../src/activities.ts';
 import type { EngineActivities } from '../src/activity-options.ts';
-import type { RequirementInput, SubtaskInput } from '../src/contract.ts';
+import type { FusionInput, RequirementInput, SubtaskInput } from '../src/contract.ts';
 import type { FailureTriage } from '../src/decisions/failure.ts';
 import type { Decide } from '../src/decisions/index.ts';
 import type { SubtaskSpec } from '../src/decisions/plan.ts';
@@ -135,6 +135,15 @@ export function requirementInput(over: Partial<RequirementInput> = {}): Requirem
     title: '登录页加验证码',
     rawRequest: '给登录页加手机验证码',
     requestedBy: 'founder',
+    ...over,
+  };
+}
+
+/** Fusion 工作流的输入：单子正文里有指需求文档的那一行（pnpm issue:new 开的单都有），不按标题拼。 */
+export function fusionInput(over: Partial<FusionInput> = {}): FusionInput {
+  return {
+    ...requirementInput(),
+    rawRequest: '给登录页加手机验证码\n\n文档：`specs/12-登录页加验证码/需求.md`',
     ...over,
   };
 }

@@ -959,10 +959,14 @@ export interface ChangeFeed {
 
 // —— 健康检查 ——
 
-/** 一项依赖的探活：正常返回 = 好；抛错 = 坏（错误原文只进日志，对外只报「坏了」）。 */
+/**
+ * 一项依赖的探活：正常返回 = 好（返回一句话的，健康报告里这一项带上它当说明，公网看得到）；抛错 = 坏（错误原文只进日志，
+ * 对外只报「坏了」）。
+ */
 export interface HealthCheck {
   name: string;
-  check(): Promise<void>;
+  // biome-ignore lint/suspicious/noConfusingVoidType: 多数检查是 async () => {}（Promise<void>），换成 undefined 它们就对不上了
+  check(): Promise<void | string>;
   /**
    * 这一项对应的功能压根还没接上（装配时就知道，不是跑出来的）：给了就不跑 check，报「未接」、不算失败。
    * 只由 serviceHealthChecks 按「没接上的那个实现」自带的标记填（比如 notWiredDraftOpener 的 notWired）；

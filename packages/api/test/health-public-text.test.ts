@@ -7,11 +7,12 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Db, PgListen } from '@fleet-dao/db';
 import { createTestDb, TEST_DB_TIMEOUT_MS } from '@fleet-dao/db/testing';
-import { FLEET_CHANGES_CHANNEL } from '@fleet-dao/shared';
+import { FeishuRoutes, FLEET_CHANGES_CHANNEL } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import { startPgChangeFeed } from '../src/changes.ts';
 import { DEPLOY_LAG_NOT_HERE, deployLagCheck } from '../src/deploy-lag.ts';
 import { draftBacklogCheck, notWiredDraftOpener } from '../src/draft-opening.ts';
+import { createGatewaySeen, GATEWAY_NO_PASS } from '../src/gateway-seen.ts';
 import { githubAppMissing, githubEventsCheck } from '../src/github.ts';
 import { type HealthReport, runHealthChecks, serviceHealthChecks } from '../src/health.ts';
 import { judgeHealthCheck } from '../src/judge-health.ts';
@@ -191,6 +192,14 @@ async function publicFailures(log: Logger) {
       () => new Date(),
     ),
   );
+  // 飞书网关：推送轮询太久没来。只有一处 new PublicHealthError，这里造一种；每一种说法都在 gateway-seen.test.ts 用同一份名单扫
+  let clock = Date.now();
+  const seen = createGatewaySeen(() => new Date(clock));
+  seen.saw(FeishuRoutes.outbox);
+  clock += 10 * 60_000;
+  await run('feishu-gateway', true, async () => {
+    await seen.check();
+  });
   return { reports, sites };
 }
 
@@ -229,10 +238,10 @@ describe('公开的健康报告', () => {
     TEST_DB_TIMEOUT_MS,
   );
 
-  it('「未接」的话也公网看得到：同一份名单扫，带单号可以', async () => {
+  it('「未接」的话、好的时候带的说明也公网看得到：同一份名单扫，带单号可以', async () => {
     const scan = await loadScan();
-    const pending = {
-      services: await runHealthChecks(
+    const services = (feishuGateway: Parameters<typeof serviceHealthChecks>[0]['feishuGateway']) =>
+      runHealthChecks(
         serviceHealthChecks({
           probeDb: async () => {},
           feed: { probe: async () => {} },
@@ -242,14 +251,31 @@ describe('公开的健康报告', () => {
           draftBacklog: async () => {},
           judge: judgeHealthCheck({ db: {} as Db, location: NO_JUDGE }),
           deployLag: { check: async () => {}, notWired: DEPLOY_LAG_NOT_HERE },
+          feishuGateway,
         }),
         silentLogger,
-      ),
+      );
+    const at = new Date();
+    const seen = createGatewaySeen(() => at);
+    seen.saw(FeishuRoutes.outbox);
+    seen.saw(FeishuRoutes.board);
+    const pending = {
+      services: await services({ check: async () => {}, notWired: GATEWAY_NO_PASS }),
+      noted: await services(seen),
     };
     expect(pending.services.checks.draft_opener).toMatchObject({ ok: true, status: 'not_wired' });
     expect(pending.services.checks.draft_backlog).toMatchObject({ ok: true, status: 'not_wired' });
     // 项名叫 judge 不叫 jev：jev 在公开页的禁用词名单上
     expect(pending.services.checks.judge).toMatchObject({ ok: true, status: 'not_wired' });
+    expect(pending.services.checks.feishu_gateway).toEqual({
+      ok: true,
+      status: 'not_wired',
+      message: GATEWAY_NO_PASS,
+    });
+    expect(pending.noted.checks.feishu_gateway).toEqual({
+      ok: true,
+      message: '推送轮询 0 秒前来过，盘面快照 0 秒前来过',
+    });
     const hits = scanReports(scan, pending);
     expect(hits, scan.formatHits(hits)).toEqual([]);
   });

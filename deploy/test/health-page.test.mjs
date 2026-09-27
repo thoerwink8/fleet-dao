@@ -73,6 +73,40 @@ test('跟上主线（deploy_lag）：显示成「跟上主线」；落后照实�
   assert.equal(byKey(v).deploy_lag.reason, '落后主线 2 个提交、1 小时 40 分钟（在等引擎空闲）（behind）');
 });
 
+test('飞书网关（feishu_gateway）：来得勤是绿、写明几秒前来过；太久没来、后端刚起还没来过都照实报红', () => {
+  const fresh = { ok: true, message: '推送轮询 12 秒前来过，盘面快照 22 秒前来过' };
+  const v = judge({ status: 200, body: report(true, { ...allOk, feishu_gateway: fresh }) });
+  assert.equal(v.ok, true);
+  assert.equal(v.summary, '全部在线');
+  assert.equal(byKey(v).feishu_gateway.label, '飞书网关');
+  assert.equal(byKey(v).feishu_gateway.reason, '在线：推送轮询 12 秒前来过，盘面快照 22 秒前来过');
+  // 说明是空的：照样在线，不写半截
+  const blank = judge({
+    status: 200,
+    body: report(true, { ...allOk, feishu_gateway: { ok: true, message: ' ' } }),
+  });
+  assert.equal(byKey(blank).feishu_gateway.reason, '在线');
+  for (const [bad, reason] of [
+    [
+      { ok: false, code: 'silent', message: '推送轮询 7 分钟没来过（盘面快照 3 秒前来过）' },
+      '推送轮询 7 分钟没来过（盘面快照 3 秒前来过）（silent）',
+    ],
+    [
+      {
+        ok: false,
+        code: 'unchecked',
+        message: '没查成：后端起来才 12 秒，推送轮询还没来过（盘面快照也没来取过）',
+      },
+      '没查成：后端起来才 12 秒，推送轮询还没来过（盘面快照也没来取过）（unchecked）',
+    ],
+  ]) {
+    const w = judge({ status: 503, body: report(false, { ...allOk, feishu_gateway: bad }) });
+    assert.equal(w.ok, false);
+    assert.equal(byKey(w).feishu_gateway.ok, false);
+    assert.equal(byKey(w).feishu_gateway.reason, reason);
+  }
+});
+
 test('连不上后端：三项都红，说出原因', () => {
   const v = judge({ error: 'Failed to fetch' });
   assert.equal(v.ok, false);

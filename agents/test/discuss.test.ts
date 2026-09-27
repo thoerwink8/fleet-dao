@@ -6,7 +6,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, wri
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 interface Verdict {
   pass: boolean;
@@ -40,12 +40,16 @@ interface ToolsLib {
 interface WalkLib {
   missingWalkthrough(text: string): string | null;
 }
+interface AskLib {
+  removeDir(dir: string, rm?: (dir: string, opts: unknown) => void): void;
+}
 
 const SCRIPTS = fileURLToPath(new URL('../skills/discuss/scripts/', import.meta.url));
 const load = async (name: string) => import(pathToFileURL(join(SCRIPTS, name)).href);
 const so = (await load('second-opinion.mjs')) as SecondOpinionLib;
 const tools = (await load('tools.mjs')) as ToolsLib;
 const walk = (await load('walkthrough.mjs')) as WalkLib;
+const ask = (await load('ask.mjs')) as AskLib;
 const WIN = process.platform === 'win32';
 
 const made: string[] = [];
@@ -114,6 +118,12 @@ function topic(text: string): string {
   return file;
 }
 
+/** 给子进程一个自己的临时目录（TMPDIR，Windows 上是 TEMP、TMP）：跑完看它留没留东西。 */
+function ownTmp(): { dir: string; env: Record<string, string> } {
+  const dir = temp('tmp');
+  return { dir, env: { TMPDIR: dir, TEMP: dir, TMP: dir } };
+}
+
 const SLOW = { timeout: 60_000 };
 
 describe('挑错题面要带【推演】', () => {
@@ -160,12 +170,13 @@ describe('ask.mjs：这台机器缺 cursor-agent', SLOW, () => {
     expect(r.all).not.toContain('不该问到我');
   });
 
-  it('装了登了：答案照登，记录落在家目录，不落进技能目录（同步会把技能目录整个换掉）', () => {
+  it('装了登了：答案照登，记录落在家目录，不落进技能目录（同步会把技能目录整个换掉）；放题面的临时目录问完就删', () => {
     const home = temp('home');
+    const tmp = ownTmp();
     const r = run('ask.mjs', ['--text', topic(LONG), '--round', '1'], {
       home,
       path: fakeCursor(),
-      env: { FAKE_LOGGED: '1', FAKE_ANSWER: '假答案：同意' },
+      env: { FAKE_LOGGED: '1', FAKE_ANSWER: '假答案：同意', ...tmp.env },
     });
     expect(r.code).toBe(0);
     expect(r.out).toContain('## gpt');
@@ -173,6 +184,41 @@ describe('ask.mjs：这台机器缺 cursor-agent', SLOW, () => {
     const runs = join(tools.dataDir(home), 'runs');
     expect(readdirSync(runs).some((f) => f.startsWith('ask-'))).toBe(true);
     expect(existsSync(join(SCRIPTS, 'runs'))).toBe(false);
+    expect(readdirSync(tmp.dir)).toEqual([]);
+  });
+
+  it('【故意造出的失败】问完了、记录却写不下（--out 落在一个文件下面）：退出码 2 说没问成，临时目录照样删掉', () => {
+    const tmp = ownTmp();
+    const blocker = join(temp('out'), 'not-a-dir');
+    writeFileSync(blocker, 'x');
+    const r = run('ask.mjs', ['--text', topic(LONG), '--round', '1', '--out', join(blocker, 'runs')], {
+      home: temp('home'),
+      path: fakeCursor(),
+      env: { FAKE_LOGGED: '1', FAKE_ANSWER: '假答案：同意', ...tmp.env },
+    });
+    expect(r.code).toBe(2);
+    expect(r.err).toContain('没问成');
+    expect(readdirSync(tmp.dir)).toEqual([]);
+  });
+
+  it('【故意造出的失败】临时目录删不掉：照实说没删掉、是哪个目录，不当成删好了；删得掉就不出声', () => {
+    const errors: string[] = [];
+    const spy = vi.spyOn(console, 'error').mockImplementation((...a: unknown[]) => {
+      errors.push(a.map(String).join(' '));
+    });
+    try {
+      const dir = temp('ask-left');
+      ask.removeDir(dir, () => {
+        throw new Error('EBUSY: resource busy or locked');
+      });
+      expect(existsSync(dir)).toBe(true);
+      expect(errors).toEqual([`临时目录没删掉：${dir}：EBUSY: resource busy or locked`]);
+      ask.removeDir(dir);
+      expect(existsSync(dir)).toBe(false);
+      expect(errors).toHaveLength(1);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('答了个空：记成没答上，一家都没答上退出码 2', () => {

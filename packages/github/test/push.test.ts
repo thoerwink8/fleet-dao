@@ -1,14 +1,13 @@
 // 推分支用真 git、本地裸仓当远端（不出网）。GitHub 接口（默认分支、换令牌）走假服务。
 // 会话交出来的是包（git bundle）：这里在测试自己的树里打包，模拟会话用户那一步。
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { classifyPushFailure, execGit, type GitRunner } from '../src/git.ts';
 import type { GitHubOptions } from '../src/github.ts';
 import { validBranchName } from '../src/push.ts';
-import { setup } from './helpers.ts';
+import { setup, tempDir } from './helpers.ts';
 
 const ID = ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', '-c', 'commit.gpgsign=false'];
 
@@ -63,7 +62,7 @@ function remoteHead(branch: string): string | null {
 }
 
 beforeAll(() => {
-  root = mkdtempSync(join(tmpdir(), 'fleet-gh-push-'));
+  root = tempDir('fleet-gh-push-');
   remote = join(root, 'remote.git');
   git(root, 'init', '-q', '--bare', '-b', 'main', remote);
   main = join(root, 'main');
@@ -107,7 +106,7 @@ function writeBundle(name: string, bytes: Buffer): string {
 
 /** 这台机器能不能建符号链接（Windows 没开开发者模式时不行）。 */
 const canSymlink = (() => {
-  const dir = mkdtempSync(join(tmpdir(), 'fleet-gh-ln-'));
+  const dir = tempDir('fleet-gh-ln-');
   try {
     symlinkSync(join(dir, 'target'), join(dir, 'link'));
     return true;

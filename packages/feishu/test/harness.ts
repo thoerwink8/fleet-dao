@@ -11,6 +11,7 @@ import type { z } from 'zod';
 import { createBackend } from '../src/backend.ts';
 import { createGateway, type Gateway, type Timing } from '../src/gateway.ts';
 import type { Logger } from '../src/log.ts';
+import type { WatchLimits } from '../src/watch.ts';
 import { A, B, TEAM, TEST_GROUP } from './events.ts';
 import { type FakeBackend, startFakeBackend } from './fake-backend.ts';
 import { FakeFeishu } from './fake-feishu.ts';
@@ -40,7 +41,14 @@ export function memoryLogger(lines: LogLine[]): Logger {
 }
 
 export async function harness(
-  opts: { timing?: Partial<Timing>; now?: () => number; askBudgetPerDay?: number } = {},
+  opts: {
+    timing?: Partial<Timing>;
+    now?: () => number;
+    askBudgetPerDay?: number;
+    /** 网关自己看守的时限调小（测报警、心跳时不真等 5 分钟）。 */
+    watch?: Partial<WatchLimits>;
+    boardRefreshMs?: number;
+  } = {},
 ): Promise<Harness> {
   const backend = await startFakeBackend();
   const feishu = new FakeFeishu();
@@ -59,8 +67,9 @@ export async function harness(
     publicUrl: PUBLIC_URL,
     ackEmoji: 'Get',
     askBudgetPerDay: opts.askBudgetPerDay ?? 10,
-    boardRefreshMs: 60_000,
+    boardRefreshMs: opts.boardRefreshMs ?? 60_000,
     timing: { outboxWaitSeconds: 0, ...opts.timing },
+    ...(opts.watch ? { watch: opts.watch } : {}),
   });
   return {
     gateway,

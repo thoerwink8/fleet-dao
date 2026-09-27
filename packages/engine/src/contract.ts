@@ -2,6 +2,7 @@
 // 输入带 schemaVersion；以后加字段只许可选、读时给默认值，不许改老字段的含义（在途任务的输入是老样子）。
 // 编号的拼法（requirementWorkflowId、subtaskWorkflowId）进了在途任务的历史：改格式要用 patched()。
 
+import type { Category, Mode } from '@fleet-dao/core';
 import type {
   Repo,
   RequirementStartInput,
@@ -11,6 +12,7 @@ import type {
   TaskState,
 } from '@fleet-dao/shared';
 import {
+  FUSION_WORKFLOW_TYPE,
   REQUIREMENT_WORKFLOW_TYPE,
   AGENT_EVENT_WAKE_KINDS as SHARED_WAKE_KINDS,
 } from '@fleet-dao/shared/workflow-ids';
@@ -22,6 +24,8 @@ import type { WaitKind } from './ports.ts';
 export const WORKFLOW_TYPES = {
   /** 后端起需求工作流也用这个名字（@fleet-dao/shared/workflow-ids）。 */
   requirement: REQUIREMENT_WORKFLOW_TYPE,
+  /** Fusion：一张单一个 Lead 会话带一个副手（0003 第 5 条）。编号和需求工作流同一个（requirementWorkflowId）。 */
+  fusion: FUSION_WORKFLOW_TYPE,
   subtask: 'subtaskWorkflow',
   mergeQueue: 'mergeQueueWorkflow',
   /** P0 验收（deploy/hello.sh）：跑一次就知道引擎工人在接活。 */
@@ -73,6 +77,14 @@ export function subtaskBranch(issueNumber: number, key: string): string {
   return `fleet/${issueNumber}-${key}`;
 }
 
+/**
+ * Fusion 一张单一个分支：fleet/<单号>-f<这一轮的编号前 8 位>。带上这一轮的编号：单子重开再跑一轮时，上一轮的分支
+ * （合并后没删、或没做完留下的）在 GitHub 上还在，同名会推不上去（历史对不上）。编号经 decide 生成、记在历史里。
+ */
+export function fusionBranch(issueNumber: number, runKey: string): string {
+  return `fleet/${issueNumber}-f${runKey.replace(/-/g, '').slice(0, 8)}`;
+}
+
 /** 需求文档目录的默认值，例如 `specs/12-登录验证码`。 */
 export function defaultSpecDir(issueNumber: number, title: string): string {
   const slug = title
@@ -91,6 +103,21 @@ export interface RequirementInput extends RequirementStartInput {
   specDir?: string;
   limits?: Partial<Limits>;
   routeOverrides?: RouteOverrides;
+}
+
+/**
+ * Fusion 工作流的输入：后端给的那几样（RequirementStartInput，和需求工作流同一份）再加引擎自己的可选项。
+ * 进了工作流历史：以后只许加可选字段。
+ */
+export interface FusionInput extends RequirementStartInput {
+  limits?: Partial<Limits>;
+  routeOverrides?: RouteOverrides;
+  /** 这张单的类别（按类别挑流程配置那一套）；不给按「需求」。 */
+  category?: Category;
+  /** 单上临时指定的流程配置名；不给按类别。 */
+  profile?: string;
+  /** 单模型模式的口子（0003 第 7 条）：给了压过配置里的模式；后端现在不给，以后创始人手动切、引擎按剩余额度切时给。 */
+  mode?: Mode;
 }
 
 export interface SubtaskInput {
@@ -173,6 +200,15 @@ export interface RequirementResult {
 
 export interface MergeQueueResult {
   processed: number;
+}
+
+export interface FusionResult {
+  taskId: string;
+  state: 'done' | 'failed' | 'stopped';
+  prNumber: number | null;
+  mergeCommit: string | null;
+  docs: { requirement?: string; plan?: string; result?: string };
+  problem: string | null;
 }
 
 // ---- 查询
@@ -283,6 +319,44 @@ export interface RequirementStatus {
   commands: CommandReceipt[];
 }
 
+/** Fusion 工作流此刻的样子（查询只给人调试和驾驶舱兜底用；驾驶舱平时读库）。 */
+export interface FusionStatus {
+  kind: 'fusion';
+  taskId: string;
+  issueNumber: number;
+  state: TaskState;
+  /** 走到 0–7 步的哪一步（core 的 FlowState.step）、这一步要做的事（FlowAction）。 */
+  step: string;
+  action: string;
+  doing: string;
+  mode: Mode | null;
+  /** 流程配置读自仓里（project）还是全组织默认（org_default）；还没读成是 null。 */
+  flowSource: 'project' | 'org_default' | null;
+  specDir: string | null;
+  branch: string | null;
+  paused: boolean;
+  parked: boolean;
+  waiting: Waiting | null;
+  /** 正在跑的会话（Lead 或副手）。 */
+  route: { routeId: string; modelId: string; why: string } | null;
+  runId: string | null;
+  sessionId: string | null;
+  /** Lead、副手各自续用的会话和路由。 */
+  lead: { sessionId: string; routeId: string; family: string } | null;
+  sidekick: { sessionId: string; routeId: string; family: string } | null;
+  prNumber: number | null;
+  head: string | null;
+  /** 副手打回几次、验证几轮、开了 PR 之后修几轮、合并队列退回几次。 */
+  rounds: { reworks: number; verify: number; fix: number; mergeReturn: number };
+  holds: string[];
+  approval: ApprovalView | null;
+  /** 每一步的起止（#216 按步骤记耗时进库之前，先在这里看得到；#215 在步骤交界写存档点）。 */
+  steps: { step: string; since: string; until: string | null }[];
+  lastProblem: string | null;
+  lastAgentEvent: AgentEventSeen | null;
+  commands: CommandReceipt[];
+}
+
 export interface MergeQueueStatus {
   kind: 'merge-queue';
   repo: string;
@@ -295,6 +369,7 @@ export interface MergeQueueStatus {
 export const requirementStatusQuery = defineQuery<RequirementStatus>('status');
 export const subtaskStatusQuery = defineQuery<SubtaskStatus>('status');
 export const mergeQueueStatusQuery = defineQuery<MergeQueueStatus>('status');
+export const fusionStatusQuery = defineQuery<FusionStatus>('status');
 
 // ---- 信号：名字和参数跟驾驶舱后端的 TaskSignal 一一对应（信号名 = TaskSignal.name，参数 = 去掉 name 的其余字段）。
 // 人发的命令（暂停、继续、叫停、换路由、回答、批准……）按任务发给需求工作流，需求转给在跑的子任务；

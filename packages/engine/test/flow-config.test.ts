@@ -24,6 +24,7 @@ function state(over: Partial<FlowReplicaState> = {}): FlowReplicaState {
     error: null,
     unread: null,
     testCommand: 'pnpm test:changed',
+    config: { formatVersion: 1, testCommand: 'pnpm test:changed' },
     source: 'project',
     commit: COMMIT,
     checkedAt: new Date(NOW.getTime() - 5 * 60_000),
@@ -147,7 +148,9 @@ describe('流程配置副本那一步', () => {
 
     const never = deps({
       ...unread,
-      list: async () => [state({ syncedAt: null, source: null, commit: null, testCommand: null })],
+      list: async () => [
+        state({ syncedAt: null, source: null, commit: null, testCommand: null, config: null }),
+      ],
     });
     expect((await syncFlowConfigs(never.d)).repos[0]).toMatchObject({ outcome: 'unread', blocked: true });
     expect(never.alerts).toEqual([

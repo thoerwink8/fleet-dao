@@ -31,6 +31,14 @@ describe('静态检查', () => {
     expect(drawing).toEqual(['cards.ts', 'outbox.ts']);
   });
 
+  it('网关自己的报警（调不通后端）只在看守（watch.ts）里画、发：不混进推送出口，推送出口也不发它', () => {
+    const drawing = sources
+      .filter((s) => /\blinkAlertCard\(/.test(s.text))
+      .map((s) => s.file)
+      .sort();
+    expect(drawing).toEqual(['cards.ts', 'watch.ts']);
+  });
+
   it('只有 backend.ts 直接发 HTTP 请求（调后端都带通行证、都按约定校验返回）', () => {
     const fetching = sources.filter((s) => /\bfetch\(/.test(s.text)).map((s) => s.file);
     expect(fetching).toEqual(['backend.ts']);

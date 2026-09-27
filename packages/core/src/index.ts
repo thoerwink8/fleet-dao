@@ -6,5 +6,6 @@ export * from './brief.ts';
 export * from './config.ts';
 export * from './criteria.ts';
 export * from './flow.ts';
+export * from './fusion.ts';
 export * from './replica.ts';
 export * from './verdict.ts';

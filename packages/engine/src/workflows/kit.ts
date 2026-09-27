@@ -1,8 +1,9 @@
-// 三条工作流共用的零件：活动代理、判断入口（判断出错也不判死）、命令受理、暂停门、等待记账（含墙钟预算的停表）、
+// 工作流共用的零件：活动代理、判断入口（判断出错也不判死）、命令受理、暂停门、等待记账（含墙钟预算的停表）、
 // 挂起报警、跑一个阶段的会话（含兜底梯）。
 // 这里是工作流代码，会被重放：改调度顺序（多调、少调、换顺序调活动或 decide）要用 patched()，见 test/replay.test.ts。
 // 编号（runId、askId、批准编号、subtasks.id）一律经 decide('newIds') 生成、记进历史；工作流里不许用 uuid4（structure.test.ts 盯着）。
 
+import type { ModelUsage } from '@fleet-dao/core';
 import type { RunOutcome, StageKind } from '@fleet-dao/shared';
 import {
   ActivityFailure,
@@ -323,10 +324,15 @@ export interface Kit {
   clock: { depth: number; since: number; offMs: number };
   /** 事件数报警报过了（一条执行只报一次）。 */
   historyAlarmed: boolean;
+  /**
+   * 这条工作流起过的会话按模型（目录里的模型 id）记的用量：会话每结束一次加一笔，读不到的次数另记（不当成 0）。
+   * Fusion 关单评论写「各模型额度」用；折成额度当量、按步骤进库归 #216。只在内存里（从历史重放出来）。
+   */
+  usage: Record<string, ModelUsage>;
 }
 
 export function newKit(
-  fields: Omit<Kit, 'parkCount' | 'active' | 'costSeen' | 'clock' | 'historyAlarmed'>,
+  fields: Omit<Kit, 'parkCount' | 'active' | 'costSeen' | 'clock' | 'historyAlarmed' | 'usage'>,
 ): Kit {
   return {
     ...fields,
@@ -335,6 +341,7 @@ export function newKit(
     costSeen: {},
     clock: { depth: 0, since: 0, offMs: 0 },
     historyAlarmed: false,
+    usage: {},
   };
 }
 
@@ -562,6 +569,25 @@ async function alertIfNeeded(kit: Kit, next: NextAction, detail: string): Promis
   }
 }
 
+/**
+ * tryStage 放弃时本该挂起的那一种（例如渠道要人重新登录）：不在这里等人，但照样报一张卡让人去修。一条执行一条规则一张卡；
+ * 报不出去不挡流程。
+ */
+async function alertGiveUp(kit: Kit, next: NextAction, detail: string): Promise<void> {
+  try {
+    await kit.acts.raiseAlert({
+      ...kit.scope,
+      level: 'info',
+      title: `${parkTitle(next)}（这一步换人接着干，不在这里等）`,
+      detail,
+      dedupeKey: `${workflowInfo().workflowId}:give-up:${next.rule ?? next.classifiedAs}`,
+    });
+  } catch (error) {
+    if (isCancellation(error)) throw error;
+    log.warn('报警没发出去，照样换人接着干', { error: String(error) });
+  }
+}
+
 /** 挂起的标题：只有人能修、修法确定的（重新登录），把修法写进标题，卡片上一眼看到。 */
 function parkTitle(next: NextAction): string {
   return next.humanFix && !next.reason.includes(next.humanFix)
@@ -760,6 +786,13 @@ export interface StageRequest<K extends OutputKind> {
   uiWork?: boolean | undefined;
   /** 一条能派的都没有时挂起的标题（不给就是「「阶段」没有能用的路由」）。 */
   noRouteTitle?: string | undefined;
+  /** 流程配置里这一步的模型顺序（0003 第 9 条）：只派这几个模型的路由。不给 = 照调度台（在途任务的历史里没有这一项）。 */
+  models?: string[] | undefined;
+  /**
+   * 一开始就续这条路由：Fusion 的 Lead 一张单一个会话、按步续用（0003 第 6 条），换了账号池 --resume 就续不上。
+   * 暂时派不了就等它，用不了了（下线、被禁）才照常选（和同一次调用里的重试一样）。
+   */
+  stickRouteId?: string | undefined;
 }
 
 export interface StageResult<K extends OutputKind> {
@@ -780,10 +813,15 @@ interface Avoid {
 
 const AVOID_NOTHING: Avoid = { routeIds: [], poolIds: [], modelIds: [] };
 
-/** 选路要带的这一步的讲究：整族避开、界面类的活。只在给了的时候放进选路的输入（在途任务的历史里没有这两项）。 */
+/**
+ * 选路要带的这一步的讲究：整族避开、界面类的活、流程配置的模型顺序。只在给了的时候放进选路的输入（在途任务的历史里没有
+ * 这几项）。giveUp：只能等额度清零时不等、当成派不出交回调用方（Fusion 的副手没额度由 Lead 自己干，0003 第 7 条）。
+ */
 interface PickExtras {
   avoidFamilies?: string[] | undefined;
   uiWork?: boolean | undefined;
+  models?: string[] | undefined;
+  giveUp?: boolean | undefined;
 }
 
 /** 选路由；没空位、没额度就等（记下在等哪个、停表），一条能用的都没有就交回去挂起。 */
@@ -815,10 +853,12 @@ async function chooseRoute(
           ...(stick ? { stickRouteId: stick } : {}),
           ...(extras.avoidFamilies?.length ? { avoidFamilies: extras.avoidFamilies } : {}),
           ...(extras.uiWork ? { uiWork: true } : {}),
+          ...(extras.models ? { models: extras.models } : {}),
         }),
       );
       if (result.ok) return { route: result.route, why: result.why };
       if (result.waitFor === 'none') return { none: result.detail };
+      if (extras.giveUp && result.waitFor === 'quota') return { none: `只能等额度清零：${result.detail}` };
       if (since === null) {
         since = Date.now();
         restartClock = stopClock(kit, result.waitFor);
@@ -902,17 +942,45 @@ const OUTCOME: Record<SessionEnd['outcome'], RunOutcome> = {
   stopped: 'stopped',
 };
 
-/** 一次会话结束：记结局和这一次的用量。尽力而为，记不上不挡流程。 */
+/** 按模型记一笔（kit.usage）：token、花费读不到的这一次另记一次「没读到」，不加 0 冒充读到了。 */
+function tally(kit: Kit, modelId: string, usage: Usage): void {
+  const was: ModelUsage = kit.usage[modelId] ?? {
+    model: modelId,
+    runs: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    costUsd: 0,
+    missingTokens: 0,
+    missingCost: 0,
+  };
+  const tokens = usage.inputTokens !== undefined || usage.outputTokens !== undefined;
+  kit.usage = {
+    ...kit.usage,
+    [modelId]: {
+      ...was,
+      runs: was.runs + 1,
+      inputTokens: was.inputTokens + (usage.inputTokens ?? 0),
+      outputTokens: was.outputTokens + (usage.outputTokens ?? 0),
+      costUsd: was.costUsd + (usage.costUsd ?? 0),
+      missingTokens: was.missingTokens + (tokens ? 0 : 1),
+      missingCost: was.missingCost + (usage.costUsd === undefined ? 1 : 0),
+    },
+  };
+}
+
+/** 一次会话结束：记结局和这一次的用量（按模型记一笔进 kit.usage）。尽力而为，记不上不挡流程。 */
 async function recordSessionEnd(
   kit: Kit,
   stage: StageKind,
-  routeId: string,
+  route: RouteChoice,
   runId: string,
   end: SessionEnd,
 ): Promise<void> {
+  const routeId = route.routeId;
   const cost = costOfRun(end.sessionId ? kit.costSeen[end.sessionId] : undefined, end.sessionCostUsd);
   if (end.sessionId) kit.costSeen = { ...kit.costSeen, [end.sessionId]: end.sessionCostUsd ?? null };
   const usage: Usage = { ...end.usage, ...(cost === undefined ? {} : { costUsd: cost }) };
+  tally(kit, route.modelId, usage);
   try {
     await CancellationScope.nonCancellable(() =>
       kit.acts.recordTiming({
@@ -946,10 +1014,33 @@ export async function runStage<K extends OutputKind>(
   kit: Kit,
   request: StageRequest<K>,
 ): Promise<StageResult<K>> {
+  const got = await stageLoop(kit, request, false);
+  // 不放弃的那一种只会交回做成的结果（派不出就挂起等人，人放行后接着选）
+  if ('unavailable' in got) throw new Error(`runStage 不该交回「派不出」：${got.unavailable}`);
+  return got;
+}
+
+/**
+ * 和 runStage 一样跑一个阶段，多一种结局：派不出（一条能派的都没有、只能等额度清零、兜底梯走到了换无可换或挂起）不挂起、
+ * 不干等，交回 { unavailable: 原因 } 给调用方另想办法。Fusion 的副手用它：副手渠道没额度、没接好、连着做不好，
+ * 由 Lead 自己干（0003 第 7 条），不为副手卡住整张单。要人修的（例如重新登录）照样报警，只是不在这里等。
+ */
+export function tryStage<K extends OutputKind>(
+  kit: Kit,
+  request: StageRequest<K>,
+): Promise<StageResult<K> | { unavailable: string }> {
+  return stageLoop(kit, request, true);
+}
+
+async function stageLoop<K extends OutputKind>(
+  kit: Kit,
+  request: StageRequest<K>,
+  giveUp: boolean,
+): Promise<StageResult<K> | { unavailable: string }> {
   const source = `session:${request.stage}`;
   let counters = NO_LADDER;
   let avoid = AVOID_NOTHING;
-  let stick: string | undefined;
+  let stick: string | undefined = request.stickRouteId;
   let previousMessage: string | undefined;
   const answers = [...request.brief.answers];
   let resumeSessionId = request.resumeSessionId;
@@ -959,8 +1050,11 @@ export async function runStage<K extends OutputKind>(
     const picked = await chooseRoute(kit, request.stage, avoid, stick, {
       avoidFamilies: request.avoidFamilies,
       uiWork: request.uiWork,
+      models: request.models,
+      giveUp,
     });
     if ('none' in picked) {
+      if (giveUp) return { unavailable: picked.none };
       await park(kit, request.noRouteTitle ?? `「${request.stage}」没有能用的路由`, picked.none);
       counters = NO_LADDER;
       avoid = AVOID_NOTHING;
@@ -1030,7 +1124,7 @@ export async function runStage<K extends OutputKind>(
     kit.active = stillActive;
     kit.view.sessionId = null;
     kit.view.runId = null;
-    await recordSessionEnd(kit, request.stage, picked.route.routeId, runId, end);
+    await recordSessionEnd(kit, request.stage, picked.route, runId, end);
     if (end.sessionId) resumeSessionId = end.sessionId;
 
     if (end.outcome === 'done' && end.output?.kind === request.expect) {
@@ -1084,6 +1178,11 @@ export async function runStage<K extends OutputKind>(
     kit.onChange();
     await alertIfNeeded(kit, next, failure.message);
     counters = bump(counters, next);
+    if (giveUp && (next.action === 'park' || (next.action === 'retry' && next.wait === 'quota'))) {
+      // 放弃的那一种不挂起、不等额度：要人修的照样报一张卡（不在这里等人），交回调用方另想办法
+      if (next.action === 'park') await alertGiveUp(kit, next, failure.message);
+      return { unavailable: next.reason };
+    }
     if (next.action === 'retry') {
       await waitFor(kit, waitKindOf(next), next.reason, () =>
         retryPause(kit, request.stage, next.delaySeconds),
