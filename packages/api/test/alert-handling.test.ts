@@ -124,7 +124,7 @@ describe('驾驶舱提醒列表：谁在处理', () => {
     expect(by.get(claimed.id)).toMatchObject({
       stage: 'claimed',
       who: '本机/工人A',
-      work: { repo: 'example/canary', issueNumber: 360, url: 'https://github.com/example/canary/issues/360' },
+      work: { repo: { owner: 'example', name: 'canary' }, issueNumber: 360 },
     });
     expect(by.get(claimed.id)?.line).toMatch(
       /^本机\/工人A 在处理 · example\/canary#360 · 查备份盘 · \d+ 分钟$/,
@@ -132,7 +132,7 @@ describe('驾驶舱提醒列表：谁在处理', () => {
     expect(by.get(fixed.id)).toMatchObject({
       stage: 'deployed',
       who: 'PR #370',
-      pr: { number: 370, state: 'merged', url: 'https://github.com/example/canary/pull/370' },
+      pr: { repo: { owner: 'example', name: 'canary' }, number: 370, state: 'merged' },
       deploy: { state: 'deployed' },
     });
   });

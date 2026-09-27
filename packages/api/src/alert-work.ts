@@ -189,8 +189,14 @@ export const seatAuditWho = (machine: string, session: string): AuditWho => ({
   via: 'engine',
 });
 
-const githubUrl = (repo: string, kind: 'issues' | 'pull', n: number) =>
-  `https://github.com/${repo}/${kind}/${n}`;
+/**
+ * core 里的仓是 owner/name（上面 toAlertWorkFacts 拿库里两列拼的，两段都不含 /）：拆回两段给驾驶舱。
+ * 不发网址：链接由驾驶舱按品牌拼（正式版给 GitHub 外链，演示版不给，演示产物里出现 github.com 打包就拒）。
+ */
+const repoRef = (repo: string) => {
+  const cut = repo.indexOf('/');
+  return { owner: repo.slice(0, cut), name: repo.slice(cut + 1) };
+};
 
 /** 给驾驶舱的样子（@fleet-dao/shared 的 AlertHandlingSchema）。 */
 export function handlingView(h: AlertHandling): z.input<typeof AlertHandlingSchema> {
@@ -199,18 +205,8 @@ export function handlingView(h: AlertHandling): z.input<typeof AlertHandlingSche
     stageText: alertStageText(h.stage),
     since: h.since,
     ...(h.who ? { who: h.who } : {}),
-    ...(h.work
-      ? {
-          work: {
-            repo: h.work.repo,
-            issueNumber: h.work.issueNumber,
-            url: githubUrl(h.work.repo, 'issues', h.work.issueNumber),
-          },
-        }
-      : {}),
-    ...(h.pr
-      ? { pr: { number: h.pr.number, state: h.pr.state, url: githubUrl(h.pr.repo, 'pull', h.pr.number) } }
-      : {}),
+    ...(h.work ? { work: { repo: repoRef(h.work.repo), issueNumber: h.work.issueNumber } } : {}),
+    ...(h.pr ? { pr: { repo: repoRef(h.pr.repo), number: h.pr.number, state: h.pr.state } } : {}),
     ...(h.silence
       ? { silence: { by: h.silence.createdBy, comment: h.silence.comment, endsAt: h.silence.endsAt } }
       : {}),

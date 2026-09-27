@@ -18,8 +18,8 @@ describe('通知中心：谁在处理', () => {
     const handling = within(row).getByTestId('alert-handling');
     expect(within(handling).getByText('认领了')).toBeTruthy();
     expect(within(handling).getByText('本机/工人A')).toBeTruthy();
-    const link = within(handling).getByRole('link', { name: /acme\/web#17/ });
-    expect(link.getAttribute('href')).toBe('https://github.com/acme/web/issues/17');
+    const link = within(handling).getByRole('link', { name: /acme\/orbit#17/ });
+    expect(link.getAttribute('href')).toBe('https://github.com/acme/orbit/issues/17');
     expect(within(handling).getByText(/分钟/)).toBeTruthy();
 
     const other = (await screen.findByText('每小时对账没查成')).closest('li');

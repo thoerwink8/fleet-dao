@@ -703,6 +703,9 @@ export const ALERT_STAGES = [
   'deployed',
 ] as const;
 
+/** 提醒挂的单、修它的 PR 在哪个仓：链接由驾驶舱按品牌拼（正式版给 GitHub 外链，演示版不给），后端不发网址。 */
+const AlertRepoSchema = z.object({ owner: z.string(), name: z.string() });
+
 export const AlertHandlingSchema = z.object({
   stage: z.enum(ALERT_STAGES),
   /** 阶段说成人话：没人认领、认领了、PR 开着、合进主线、等发布…… */
@@ -712,13 +715,13 @@ export const AlertHandlingSchema = z.object({
   /** 谁在处理：机器/工人、PR #号、建静默的人、创始人；没人是空。 */
   who: z.string().optional(),
   /** 跟进单：提醒挂的任务的单、提醒派单开的小单、帅位挂的单。 */
-  work: z.object({ repo: z.string(), issueNumber: z.number().int().positive(), url: z.string() }).optional(),
+  work: z.object({ repo: AlertRepoSchema, issueNumber: z.number().int().positive() }).optional(),
   /** 带动这个阶段的 PR。 */
   pr: z
     .object({
+      repo: AlertRepoSchema,
       number: z.number().int().positive(),
       state: z.enum(['open', 'closed', 'merged']),
-      url: z.string(),
     })
     .optional(),
   silence: z.object({ by: z.string(), comment: z.string(), endsAt: Time }).optional(),

@@ -5,6 +5,7 @@ import { brand } from '#brand';
 import { errorText, useAllBoards, useMe, useNotifications, useResolveNotification } from '../api/client';
 import type { Notification, NotificationLevel } from '../api/types';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
+import { RepoLink } from '../components/repo-link';
 import { StatusChip, StatusDot } from '../components/status';
 import { targetOf, useTaskActions } from '../components/task-actions';
 import { Button } from '../components/ui/button';
@@ -86,17 +87,28 @@ const STAGE_TONE: Record<Handling['stage'], Tone> = {
   deployed: 'done',
 };
 
-function GitHubLink({ href, label }: { href: string; label: string }) {
+/** 跟进单、PR：正式驾驶舱是外链，演示版只是文字（RepoLink 按品牌定）。 */
+function WorkLink({
+  repo,
+  kind,
+  n,
+  label,
+}: {
+  repo: { owner: string; name: string };
+  kind: 'issues' | 'pull';
+  n: number;
+  label: string;
+}) {
   return (
-    <a
-      href={href}
-      target="_blank"
-      rel="noreferrer"
-      className="inline-flex items-center gap-0.5 text-[11px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+    <RepoLink
+      repo={repo}
+      kind={kind}
+      n={n}
+      className="inline-flex items-center gap-0.5 text-[11px] text-muted-foreground underline-offset-2 [&[href]]:hover:text-foreground [&[href]]:hover:underline"
+      icon={<ExternalLink className="size-2.5" aria-hidden />}
     >
       {label}
-      <ExternalLink className="size-2.5" aria-hidden />
-    </a>
+    </RepoLink>
   );
 }
 
@@ -110,8 +122,15 @@ function HandlingRow({ h, now }: { h: Handling; now: number }) {
     <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1" data-testid="alert-handling">
       <StatusChip tone={STAGE_TONE[h.stage]} label={h.stageText} />
       {h.who ? <span className="text-[12px] text-foreground">{h.who}</span> : null}
-      {h.work ? <GitHubLink href={h.work.url} label={`${h.work.repo}#${h.work.issueNumber}`} /> : null}
-      {h.pr ? <GitHubLink href={h.pr.url} label={`PR #${h.pr.number}`} /> : null}
+      {h.work ? (
+        <WorkLink
+          repo={h.work.repo}
+          kind="issues"
+          n={h.work.issueNumber}
+          label={`${h.work.repo.owner}/${h.work.repo.name}#${h.work.issueNumber}`}
+        />
+      ) : null}
+      {h.pr ? <WorkLink repo={h.pr.repo} kind="pull" n={h.pr.number} label={`PR #${h.pr.number}`} /> : null}
       {h.silence ? (
         <span className="text-[11px] text-muted-foreground">
           {h.silence.comment} · 到 {formatDateTime(h.silence.endsAt)}
