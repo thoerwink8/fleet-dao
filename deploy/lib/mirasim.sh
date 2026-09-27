@@ -43,7 +43,15 @@ check_mirasim() { # 用户
   if ((n == 0)); then
     pending "$u 还没有自己的 Mirasim 服务（没有 $dir 下的 local-<端口>.token）：$fix"
   elif ((n > 1)); then
-    red "$u 的 $dir 下有 $n 份令牌（$(printf '%s' "$names" | tr '\n' '、')）：认不出该用哪一份，只该有一份 Mirasim 服务——清掉多余的（可能是重装留下的旧令牌）"
+    # 不用 tr '\n' '、'、也不用 paste -d '、'：这两个都把分隔符当「按字节/按位置轮着用的列表」，'、' 是三字节的
+    # UTF-8，会被拆开、每处只塞进一个字节，拼出读不出来的乱码（#345 review 撞过：CI 在 Linux 上真的读出了 U+FFFD；
+    # 本机另外试过 paste -sd，同样的坏法，不是 tr 一家的问题）。改用逐行读、用 bash 自己的字符串拼接（+=），
+    # 分隔符整段原样嵌进源码字面量，不会被当成要拆开的东西。
+    local joined='' name first=1
+    while IFS= read -r name; do
+      if ((first)); then joined=$name; first=0; else joined+="、$name"; fi
+    done <<<"$names"
+    red "$u 的 $dir 下有 $n 份令牌（$joined）：认不出该用哪一份，只该有一份 Mirasim 服务——清掉多余的（可能是重装留下的旧令牌）"
   else
     local port=${names#local-}
     port=${port%.token}
