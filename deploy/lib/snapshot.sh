@@ -104,7 +104,8 @@ snapshot_ours() {
   # 只记在不在、归谁（在下面 ## pilot-reclaude）
   snapshot_file_list /etc/fleet-dao /opt/fleet-dao /srv/fleet-dao-web /srv/fleet-dao-gateway /var/www/fleet-dao-acme \
     /etc/wireguard /etc/postgresql/16/main /etc/apt/sources.list.d /etc/apt/keyrings \
-    /usr/local/bin/fleet-temporal /usr/local/sbin/fleet-agent-scope /usr/local/sbin/fleet-gateway-deploy /usr/local/lib/fleet-dao \
+    /usr/local/bin/fleet-temporal /usr/local/bin/pnpm /usr/local/sbin/fleet-agent-scope /usr/local/sbin/fleet-gateway-deploy \
+    /usr/local/lib/fleet-dao \
     /etc/sudoers.d/fleet-dao /home/fleet/.local/bin \
     /home/fleet-agent-carpool/.local/bin \
     /etc/nginx/sites-available/fleet-dao /etc/nginx/sites-enabled/fleet-dao /root/.ssh/authorized_keys2
