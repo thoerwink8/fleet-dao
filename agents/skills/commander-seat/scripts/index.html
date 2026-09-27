@@ -80,7 +80,8 @@
   h1 { font-size: clamp(24px, 5vw, 32px); line-height: 1.25; margin: 0; font-weight: 700; }
   small { font-weight: 400; color: var(--muted); font-size: 13px; }
 
-  .wrap { max-width: 1100px; margin: 0 auto; display: grid; gap: 20px; min-width: 0; }
+  /* 电脑浏览器优先（创始人 2026-09-27：平时在电脑上看）：用满宽，宽屏上步骤、版本和母单、最近动态三块并排 */
+  .wrap { max-width: 1880px; margin: 0 auto; display: grid; gap: 20px; min-width: 0; }
   .board { display: grid; gap: 20px; min-width: 0; }
   .top { display: grid; gap: 6px; min-width: 0; }
   .eyebrow { font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.06em; color: var(--muted); }
@@ -90,6 +91,9 @@
   .conn { font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
   .conn.error { color: var(--block); }
 
+  .tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 4px; }
+  .tabs a { font-size: 13px; padding: 3px 12px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); background: var(--surface); }
+  .tabs a[aria-current="page"] { border-color: var(--accent); color: var(--accent); }
   .projects { display: flex; flex-wrap: wrap; gap: 6px; }
   .project-link { font-size: 13px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); background: var(--surface); }
   .project-link[aria-current="page"] { border-color: var(--accent); color: var(--accent); }
@@ -101,6 +105,11 @@
   .ask-list { margin: 0; padding-left: 20px; display: grid; gap: 4px; overflow-wrap: anywhere; }
 
   .grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: 20px; align-items: start; }
+  @media (min-width: 1400px) {
+    body { padding: 24px 28px 56px; }
+    .grid { grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 0.9fr); }
+    .grid > .side { display: contents; }
+  }
   @media (max-width: 780px) { .grid { grid-template-columns: minmax(0, 1fr); } }
   .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 16px 16px 6px; min-width: 0; }
   .panel-title { margin: 0 0 12px; font-size: 16px; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; align-items: baseline; }
@@ -160,6 +169,7 @@
 <div class="wrap">
   <header class="top">
     <div class="eyebrow" id="eyebrow">帅位 · 本机</div>
+    <nav class="tabs" aria-label="页面"><a href="/" aria-current="page">帅位进度</a><a href="/france">法国引擎</a></nav>
     <h1>帅位进度</h1>
     <nav class="projects" id="projects" aria-label="项目" hidden></nav>
     <p class="headline" id="headline">正在读进度……</p>
