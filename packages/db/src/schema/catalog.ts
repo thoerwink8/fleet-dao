@@ -117,6 +117,11 @@ export const routes = pgTable(
     probedAt: timestamp('probed_at', tz),
     /** 不是 ok 必须写原因；ok 也带一句（回答、用时）。 */
     probeDetail: text('probe_detail'),
+    /**
+     * Claude 订阅池的路由：探针下这个结论时会话用户挂的是哪个组织；读不到、不是 Claude 订阅池为空。结论是 skipped、这里是
+     * 另一个组织，说明那一轮另一个组织挂着、没探它（不是它坏了）：它的组织挂上以后选路等下一轮探针，不当成不在线挂起（#335）。
+     */
+    probeOrg: text('probe_org').$type<OrgKind>(),
     /** 插头实际发给上游的模型串（目录原文）。额度成员表只和它、和别名比；都没填，扣哪个桶判不了。 */
     upstreamModel: text('upstream_model'),
     /** 上游在别处（额度接口的成员表）对这条路由的叫法，和上面的模型串不同名时填。 */
@@ -137,6 +142,10 @@ export const routes = pgTable(
     check(
       'routes_probe_not_ok_has_detail',
       sql`${t.probeState} is null or ${t.probeState} = 'ok' or coalesce(${t.probeDetail}, '') <> ''`,
+    ),
+    check(
+      'routes_probe_org_known',
+      sql`${t.probeOrg} is null or ${t.probeOrg} in (${sql.raw(ORG_KINDS.map((k) => `'${k}'`).join(', '))})`,
     ),
   ],
 );

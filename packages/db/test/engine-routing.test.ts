@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { and, eq, isNull } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { recordStepTiming, routeFactsForStage, saveTaskSnapshot } from '../src/queries/engine.ts';
+import { saveRouteProbe } from '../src/queries/probe.ts';
 import { stagePolicies, stagePolicyRoutes, subtaskDeps, subtasks, tasks } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import {
@@ -353,5 +354,25 @@ describe('routeFactsForStage', () => {
     const off = facts.routes.find((r) => r.routeId === 'off');
     expect(off?.blockers).toContain('switched-off');
     expect(off?.reserved).toBe(0);
+  });
+
+  it('探针那次结论是什么、那时会话用户挂的是哪个组织原样透出去（#335：选路分得清「那一轮没探它」和「探了没通」）', async () => {
+    await addRoute(t.db, { id: 'on', poolId: 'relay-a', modelId: 'opus-5.5' });
+    await addRoute(t.db, { id: 'skip', poolId: 'relay-b', modelId: 'opus-4.9' });
+    await setStageOrder(t.db, 'execute', ['on', 'skip']);
+    await saveRouteProbe(t.db, {
+      routeId: 'skip',
+      state: 'skipped',
+      at: ago(MIN),
+      detail: '会话用户现在挂的是独享组织：不探',
+      org: 'solo',
+    });
+    const facts = await routeFactsForStage(t.db, 'execute', { now: NOW });
+    expect(facts.routes.find((r) => r.routeId === 'skip')).toMatchObject({
+      probeState: 'skipped',
+      probeOrg: 'solo',
+      blockers: expect.arrayContaining(['offline']),
+    });
+    expect(facts.routes.find((r) => r.routeId === 'on')).toMatchObject({ probeState: 'ok', probeOrg: null });
   });
 });

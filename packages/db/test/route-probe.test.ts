@@ -129,6 +129,41 @@ describe('写：一条路由的结论', () => {
     }
   });
 
+  it('Claude 订阅池的结论连那时挂的组织一起写（#335）；下一次没给就写空，不留上一次的', async () => {
+    await saveRouteProbe(t.db, {
+      routeId: 'car',
+      state: 'skipped',
+      at: NOW,
+      detail: '会话用户现在挂的是独享组织：不探',
+      org: 'solo',
+    });
+    expect(await routeRow('car')).toMatchObject({ alive: false, probeState: 'skipped', probeOrg: 'solo' });
+    const later = new Date(NOW.getTime() + 15 * MIN);
+    await saveRouteProbe(t.db, {
+      routeId: 'car',
+      state: 'ok',
+      at: later,
+      detail: '答上了：OK',
+      org: 'carpool',
+    });
+    expect(await routeRow('car')).toMatchObject({ alive: true, probeState: 'ok', probeOrg: 'carpool' });
+    await saveRouteProbe(t.db, { routeId: 'car', state: 'failed', at: later, detail: '组织认不出：不探' });
+    expect(await routeRow('car')).toMatchObject({ alive: false, probeState: 'failed', probeOrg: null });
+  });
+
+  it('【故意造出的失败】那时挂的组织认不出（不是拼车、独享）：库里约束拒掉、原样抛出，结论不写一半', async () => {
+    await expect(
+      saveRouteProbe(t.db, {
+        routeId: 'car',
+        state: 'skipped',
+        at: NOW,
+        detail: '不探',
+        org: 'enterprise' as never,
+      }),
+    ).rejects.toThrow();
+    expect(await routeRow('car')).toMatchObject({ alive: false, probeState: null, probeOrg: null });
+  });
+
   it('路由这一轮当中被删了：回 route_not_found，不当成写好了', async () => {
     expect(await saveRouteProbe(t.db, { routeId: 'gone', state: 'ok', at: NOW, detail: '答上了：OK' })).toBe(
       'route_not_found',

@@ -1,7 +1,13 @@
 // 会话用户切号的判法（jobs/org-switch.ts，#157）：平时挂拼车，拼车用满切独享、拼车恢复了切回；手上有 Claude 会话在跑就等。
 // 明确失败的每一条都故意造一次：挂的是哪个认不出不切；拼车用满却读不到几点恢复（读数旧了也算）是 stuck，要人看，不当成到点了。
 import { describe, expect, it } from 'vitest';
-import { type OrgPool, type OrgSwitchFacts, type OrgWindow, planOrgSwitch } from '../src/jobs/org-switch.ts';
+import {
+  type OrgPool,
+  type OrgSwitchFacts,
+  type OrgWindow,
+  orgIntent,
+  planOrgSwitch,
+} from '../src/jobs/org-switch.ts';
 
 const NOW = new Date('2026-09-27T10:00:00.000Z');
 const H = 60 * 60_000;
@@ -87,10 +93,19 @@ describe('挂着独享', () => {
   const onSolo = (carpool: OrgPool, over: Partial<OrgSwitchFacts> = {}) =>
     planOrgSwitch(facts({ live: { ok: true, org: 'solo' }, pools: { carpool, solo: pool() }, ...over }));
 
-  it('拼车还没到恢复时刻：不切，写明几点恢复', () => {
+  it('拼车还没到恢复时刻：不切，写明几点恢复；记下到点要切回（选路按它等切号）', () => {
     expect(onSolo(pool([full(at(90 * 60_000))]))).toEqual({
       action: 'stay',
       why: '挂着独享；拼车 2026-09-27 11:30（UTC） 才恢复，到点再切回',
+      later: { to: 'carpool', at: at(90 * 60_000) },
+    });
+  });
+
+  it('拼车还没到恢复时刻、拼车池还整池暂停着：到点也不切回，不记「到点切回」', () => {
+    const plan = onSolo(pool([full(at(H))], true));
+    expect(plan).toEqual({
+      action: 'stay',
+      why: '挂着独享；拼车 2026-09-27 11:00（UTC） 才恢复，拼车池还整池暂停着（等人处理）',
     });
   });
 
@@ -148,10 +163,52 @@ describe('【故意造出的失败】判不了的不切', () => {
     expect(plan).toEqual({ action: 'stay', why: '会话用户挂的组织认不出（没有带 * 的行），不切' });
   });
 
+  it('挂的是哪个这会儿定不下来（读数刚变、引擎没切过号，#335）：这一轮不切，写明是定不下来、不是认不出', () => {
+    const plan = planOrgSwitch(
+      facts({
+        live: { ok: false, pending: true, why: '会话用户挂的组织和上一次读的不一样' },
+        pools: { carpool: pool([full(at(H))]), solo: pool() },
+      }),
+    );
+    expect(plan).toEqual({
+      action: 'stay',
+      why: '会话用户挂的组织这会儿定不下来（会话用户挂的组织和上一次读的不一样），这一轮不切',
+    });
+  });
+
   it('库里两个池不全：没得切', () => {
     expect(planOrgSwitch(facts({ pools: { carpool: pool([full(at(H))]) } }))).toEqual({
       action: 'stay',
       why: '库里拼车、独享两个池不全，没得切',
     });
+  });
+});
+
+describe('引擎打算挂到哪个组织（orgIntent：选路判「等切号」用，和切号同一个判法）', () => {
+  it('切、等手上的会话跑完再切：下一轮探针就切过去（at 为空）', () => {
+    const cut = planOrgSwitch(facts({ pools: { carpool: pool([full(at(H))]), solo: pool() } }));
+    expect(orgIntent(cut)).toEqual({ to: 'solo', at: null, why: cut.why });
+    const waiting = planOrgSwitch(facts({ pools: { carpool: pool([full(at(H))]), solo: pool() }, busy: 1 }));
+    expect(orgIntent(waiting)).toMatchObject({ to: 'solo', at: null });
+  });
+
+  it('挂着独享、拼车几点恢复：到点切回拼车', () => {
+    const plan = planOrgSwitch(
+      facts({ live: { ok: true, org: 'solo' }, pools: { carpool: pool([full(at(H))]), solo: pool() } }),
+    );
+    expect(orgIntent(plan)).toEqual({ to: 'carpool', at: at(H), why: plan.why });
+  });
+
+  it('不用切、整池暂停着、认不出、卡住：不打算切（to 为空），写明为什么', () => {
+    for (const plan of [
+      planOrgSwitch(facts()),
+      planOrgSwitch(facts({ pools: { carpool: pool([full(at(H))]), solo: pool([roomy], true) } })),
+      planOrgSwitch(facts({ live: { ok: false, why: '没有带 * 的行' } })),
+      planOrgSwitch(
+        facts({ live: { ok: true, org: 'solo' }, pools: { carpool: pool([full(null)]), solo: pool() } }),
+      ),
+    ]) {
+      expect(orgIntent(plan)).toEqual({ to: null, at: null, why: plan.why });
+    }
   });
 });

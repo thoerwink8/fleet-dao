@@ -75,16 +75,27 @@ export interface RouteProbeWrite {
   at: Date;
   /** 不是 ok 必须写原因（库里约束）；ok 也带一句。 */
   detail: string;
+  /**
+   * Claude 订阅池的路由：下这个结论时会话用户挂的是哪个组织（routes.probe_org）；读不到、不是 Claude 订阅池给 null。
+   * 不给按 null 写（老的调用方）：不留上一次的，免得这个结论配上别的时候读到的组织。
+   */
+  org?: OrgKind | null;
 }
 
 /**
- * 写一条路由的结论：只有 ok 让它在线，其余一律不在线（alive 和结论在同一条语句里写，不会一半）。
+ * 写一条路由的结论：只有 ok 让它在线，其余一律不在线（alive、结论、那时挂的组织在同一条语句里写，不会一半）。
  * 路由已经不在了（这一轮当中被删）回 route_not_found；别的出错（约束不让写、库连不上）原样抛出。
  */
 export async function saveRouteProbe(db: Db, w: RouteProbeWrite): Promise<'saved' | 'route_not_found'> {
   const updated = await db
     .update(routes)
-    .set({ alive: w.state === 'ok', probeState: w.state, probedAt: w.at, probeDetail: w.detail })
+    .set({
+      alive: w.state === 'ok',
+      probeState: w.state,
+      probedAt: w.at,
+      probeDetail: w.detail,
+      probeOrg: w.org ?? null,
+    })
     .where(eq(routes.id, w.routeId))
     .returning({ id: routes.id });
   return updated.length > 0 ? 'saved' : 'route_not_found';

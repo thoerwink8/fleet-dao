@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  currentOrgOf,
   findUsageReport,
   parseOrgList,
   type QuotaConfig,
@@ -208,6 +209,27 @@ describe('reclaude org list：只留类型和是否当前', () => {
   });
 });
 
+describe('现在挂的是哪一类（currentOrgOf）：引擎、额度读取器、切号帮手同一个口径', () => {
+  it('带 * 的恰好一行、类型认得出：就是它', () => {
+    expect(currentOrgOf(parseOrgList(orgList()))).toEqual({ ok: true, kind: 'solo' });
+  });
+
+  it('【故意造出的失败】一行都认不出、没有带 *、带 * 的不止一行、类型认不出：一律认不出，不挑一个、不猜', () => {
+    const two = orgList().replace('  1000002', '* 1000002');
+    for (const [text, why] of [
+      ['Available organizations:\n', '一个组织都认不出'],
+      [orgList().replace('* 1000001', '  1000001'), '没有带 * 的行'],
+      [two, '带 * 的有 2 行'],
+      [orgList().replace('\tpersonal\t', '\tenterprise\t'), '类型认不出'],
+    ] as const) {
+      const r = currentOrgOf(parseOrgList(text));
+      expect(r.ok).toBe(false);
+      expect(!r.ok && r.why).toContain(why);
+      expect(!r.ok && r.why).not.toMatch(/1000001|1000002|邮箱/);
+    }
+  });
+});
+
 describe('Claude 读取器：只读当前组织，绝不切号', () => {
   const pools: QuotaConfig['pools'] = [
     {
@@ -251,6 +273,21 @@ describe('Claude 读取器：只读当前组织，绝不切号', () => {
       'org list',
     ]);
     expect(calls.some((c) => c.argv.includes('use'))).toBe(false);
+  });
+
+  it('【故意造出的失败】org list 里带 * 的不止一行：认不出当前组织（bad_response），不挑第一行接着读', async () => {
+    const two = orgList().replace('  1000002', '* 1000002');
+    const { run, calls } = fakeCommands((argv) =>
+      argv.includes('org') ? { stdout: two } : { stdout: usageStream() },
+    );
+    const rep = await readAllQuotas(
+      { pools: [pools[0] as QuotaConfig['pools'][number]] },
+      fakeDeps({ runCommand: run }),
+    );
+    const r = rep.results[0];
+    expect(!r?.ok && r?.error.code).toBe('bad_response');
+    expect(!r?.ok && r?.error.message).toContain('带 * 的有 2 行');
+    expect(calls.some((c) => c.argv.includes('/usage'))).toBe(false);
   });
 
   it('读的过程中组织被切走：这次读数作废，不记到错的池上', async () => {

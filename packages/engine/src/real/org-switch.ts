@@ -6,6 +6,8 @@
 // 没切成、核对不了都切回原来的），切完记操作记录。这一轮探完，切过去的那个池的路由探通了才算切成（after）。
 // 没切成、切完探针读回不在线、拼车用满却读不到几点恢复：写一条 session-org:* 的「要人看」提醒（驾驶舱和飞书看得到，驾驶舱
 // 后端的健康检查 session_org 跟着红），条件没了自己撤。这一步出什么错都不抛：探针照探，下一轮再判。
+// 事实和判法跟选路判「等不等切号」同一份（real/org-plan.ts）；经帮手动过组织就告诉读法（engineSwitched），切完读成的是新起点。
+// 读数变了、引擎没切过号（real/session-org.ts 的起点变动）由 orgDriftReporter 写 session-org:drift 提醒和操作记录（#335）。
 import type { SessionUser, SwitchSessionOrgResult } from '@fleet-dao/adapters';
 import {
   type Db,
@@ -14,13 +16,19 @@ import {
   recordEngineAudit,
   resolveAlertWithReason,
   SESSION_ORG_ALERT_PREFIX,
-  sessionOrgFacts,
   upsertAlert,
 } from '@fleet-dao/db';
 import type { OrgKind } from '@fleet-dao/shared';
-import { type OrgPool, type OrgSwitchRound, planOrgSwitch } from '../jobs/org-switch.ts';
+import { type OrgSwitchRound, planOrgSwitch } from '../jobs/org-switch.ts';
 import { ORG_NAMES } from '../routing/names.ts';
-import type { SessionOrgControl } from './session-org.ts';
+import { loadOrgSwitchFacts } from './org-plan.ts';
+import {
+  type OrgSighting,
+  readingStamp,
+  SESSION_ORG_SETTLE_MS,
+  type SessionOrgControl,
+  type SessionOrgEvent,
+} from './session-org.ts';
 import type { OrgSwitchSessions } from './sessions.ts';
 import { POOL_HOLD_PREFIX } from './store-ports.ts';
 
@@ -30,6 +38,11 @@ export const ORG_SWITCH_ALERT = `${SESSION_ORG_ALERT_PREFIX}switch`;
 export const ORG_VERIFY_ALERT = `${SESSION_ORG_ALERT_PREFIX}verify`;
 /** 拼车用满了却读不到几点恢复：不知道什么时候切回。 */
 export const ORG_STUCK_ALERT = `${SESSION_ORG_ALERT_PREFIX}stuck`;
+/**
+ * 会话用户挂的组织读数变了、引擎没切过号（#335，real/session-org.ts 的起点）：带前后两次读数。读数回到原来的、或者连着
+ * SESSION_ORG_SETTLE_MS 都是新的（认它了）、或者引擎切了号，撤。
+ */
+export const ORG_DRIFT_ALERT = `${SESSION_ORG_ALERT_PREFIX}drift`;
 /**
  * 让选路停下以后等多久、再数一遍没结束的会话才切：选路派出去到起会话那一步登记（session_runs）之间隔着一次活动调度和几次查库，
  * 平时一两秒。切号一次（一个 5 小时窗口最多两次）Claude 停派这么久，换不让刚派的会话被切号掐断。
@@ -90,21 +103,11 @@ export function orgSwitchRound(w: OrgSwitchWiring): OrgSwitchRound {
   const settle = (dedupeKey: string, why: string) =>
     resolveAlertWithReason(w.db, { dedupeKey, by: ACTOR, why, at: clock() });
 
+  // 和选路判「等不等切号」同一份事实（real/org-plan.ts）
   async function facts() {
-    const [f, holds] = await Promise.all([
-      sessionOrgFacts(w.db, { now: clock() }),
-      openAlertsByPrefix(w.db, POOL_HOLD_PREFIX),
-    ]);
+    const holds = await openAlertsByPrefix(w.db, POOL_HOLD_PREFIX);
     const held = new Set(holds.map((a) => a.dedupeKey.slice(POOL_HOLD_PREFIX.length)));
-    const pools: Partial<Record<OrgKind, OrgPool>> = {};
-    for (const p of f.pools) {
-      const seen = pools[p.orgKind];
-      pools[p.orgKind] = {
-        windows: [...(seen?.windows ?? []), ...p.windows],
-        held: (seen?.held ?? false) || held.has(p.poolId),
-      };
-    }
-    return { pools, busy: f.busy, poolIds: new Set(f.pools.map((p) => p.poolId)) };
+    return loadOrgSwitchFacts(w.db, { now: clock(), held });
   }
 
   /**
@@ -149,6 +152,8 @@ export function orgSwitchRound(w: OrgSwitchWiring): OrgSwitchRound {
     const release = w.org.hold(`正在把会话用户从${ORG_NAMES[from]}组织切到${ORG_NAMES[to]}组织`);
     let result: SwitchSessionOrgResult;
     let stopped: string[] = [];
+    // 经帮手动过组织（成没成都算）：切完读成的第一次就是新起点，不算没记录的变动（real/session-org.ts）
+    let touched = false;
     try {
       await sleep(w.graceMs ?? ORG_SWITCH_GRACE_MS);
       if (w.sessions) {
@@ -185,8 +190,10 @@ export function orgSwitchRound(w: OrgSwitchWiring): OrgSwitchRound {
           return null;
         }
       }
+      touched = true;
       result = await w.switchOrg(to);
     } finally {
+      if (touched) await w.org.engineSwitched();
       release();
     }
     const halted =
@@ -230,9 +237,9 @@ export function orgSwitchRound(w: OrgSwitchWiring): OrgSwitchRound {
   return {
     async before() {
       try {
-        // 切不切看现在的真实状态：留着的读数可能是半分钟前的
+        // 切不切看现在的真实状态：留着的读数可能是半分钟前的（起点不动：读数刚变、没定下来就这一轮不切）
         w.org.forget();
-        const live = await w.org();
+        const live = await w.org({ by: '切号' });
         const { pools, busy, poolIds } = await facts();
         const plan = planOrgSwitch({
           live,
@@ -307,5 +314,79 @@ export function orgSwitchRound(w: OrgSwitchWiring): OrgSwitchRound {
         log('error', '会话用户切号：探完核对这一步出错', { to, error: message(err) });
       }
     },
+  };
+}
+
+export interface OrgDriftWiring {
+  db: Db;
+  user: SessionUser;
+  machine: string;
+  settleMs?: number;
+  now?: () => Date;
+}
+
+const DRIFT_ACTOR = 'engine:session-org';
+
+/** 「09-27 21:54:00 选路读到独享」。 */
+const sighting = (s: OrgSighting) => `${readingStamp(s.at)} ${s.by}读到${ORG_NAMES[s.org]}`;
+
+/**
+ * 起点变动（real/session-org.ts 的 onEvent）写进库：读数变了、引擎没切过号，推一条 session-org:drift「要人看」提醒（带前后
+ * 两次读数，驾驶舱和飞书都推，健康检查 session_org 跟着红），记一条操作记录 session-org.drift；定下来了（回到原来的、认了新的、
+ * 引擎切了号）撤掉，再记一条 session-org.settle。写不进库照抛，由读法记错误日志（读数照样按没定下来给，不当成 ok）。
+ */
+export function orgDriftReporter(w: OrgDriftWiring): (event: SessionOrgEvent) => Promise<void> {
+  const clock = w.now ?? (() => new Date());
+  const target = `session-user:${w.user}`;
+  const settleMinutes = Math.round((w.settleMs ?? SESSION_ORG_SETTLE_MS) / 60_000);
+  return async (event) => {
+    const from = ORG_NAMES[event.from.org];
+    const to = ORG_NAMES[event.to.org];
+    const readings = `前后两次读数（北京时间）：${sighting(event.from)}，${sighting(event.to)}`;
+    if (event.kind === 'drift') {
+      await upsertAlert(w.db, {
+        dedupeKey: ORG_DRIFT_ALERT,
+        level: 'alert',
+        taskId: null,
+        title: `会话用户挂的组织变了，引擎没切过号：${from} → ${to}`,
+        body: [
+          `${readings}。库里没有引擎这一下的切号记录（引擎自己切的都记 session-org.switch）：多半是有人在${w.machine}上手动切了（fleet-agent-scope org-use，或以会话用户跑 reclaude org use），也可能是 reclaude 自己换了挂的组织。`,
+          `引擎先不照它来：选路过一会儿再选、路由探针不探 Claude 池、切号不判；读数回到${from}就照常，连着 ${settleMinutes} 分钟都是${to}才认它（要不要切回由下一轮路由探针的切号照常判）。`,
+          `要查是谁切的：在${w.machine}上跑 journalctl _COMM=sudo | grep org-use 看有没有人经帮手手动切；照 docs/ops.md 第五节「会话用户挂的组织」。`,
+        ].join('\n'),
+      });
+      await recordEngineAudit(w.db, {
+        action: 'session-org.drift',
+        target,
+        actorId: DRIFT_ACTOR,
+        before: { org: event.from.org, at: event.from.at.toISOString(), by: event.from.by },
+        after: { org: event.to.org, at: event.to.at.toISOString(), by: event.to.by },
+        reason: `读数变了、引擎没切过号：${readings}`,
+        ok: true,
+        at: clock(),
+      });
+      return;
+    }
+    const why =
+      event.how === 'back'
+        ? `读数回到了${from}（${event.last ? sighting(event.last) : '之后又读'}）：${to}那一下没定下来，照${from}接着派。${readings}`
+        : event.how === 'accepted'
+          ? `读数定下来了：从${readingStamp(event.to.at)}起连着 ${settleMinutes} 分钟都是${to}（${event.last ? sighting(event.last) : ''}），照${to}来；要不要切回由下一轮路由探针的切号判。${readings}`
+          : `引擎切了号，以切完读到的为准。${readings}`;
+    await resolveAlertWithReason(w.db, { dedupeKey: ORG_DRIFT_ALERT, by: DRIFT_ACTOR, why, at: clock() });
+    await recordEngineAudit(w.db, {
+      action: 'session-org.settle',
+      target,
+      actorId: DRIFT_ACTOR,
+      before: { org: event.from.org },
+      // 引擎切了号的那种：切到哪个看同一时刻那条 session-org.switch
+      after:
+        event.how === 'engine'
+          ? { how: event.how }
+          : { org: event.how === 'back' ? event.from.org : event.to.org, how: event.how },
+      reason: why,
+      ok: true,
+      at: clock(),
+    });
   };
 }

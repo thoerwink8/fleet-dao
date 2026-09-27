@@ -127,6 +127,33 @@ describe('输入认不出就明确失败', () => {
   });
 });
 
+describe('【故意造出的失败】组织那几样认不出（#335）：不把该硬挡的当成等得来，也不反过来', () => {
+  const plan = { to: 'solo' as const, at: null, why: '拼车额度用满了' };
+
+  it('给了打算却不知道挂的是哪个；打算切到的组织认不出、时刻认不出、给了时刻却没说切到哪个、没写为什么', () => {
+    const live = { liveOrg: 'carpool' as const };
+    fails(() => input([route('a')], { orgPlan: plan }), /却不知道会话用户现在挂的是哪个组织/);
+    fails(
+      () => input([route('a')], { ...live, orgPlan: { ...plan, to: 'enterprise' as never } }),
+      /引擎打算切到的组织认不出（enterprise）/,
+    );
+    fails(
+      () => input([route('a')], { ...live, orgPlan: { ...plan, at: 'next round' } }),
+      /引擎打算切号的时刻认不出/,
+    );
+    fails(
+      () => input([route('a')], { ...live, orgPlan: { to: null, at: '2026-09-25T01:00:00.000Z', why: 'x' } }),
+      /给了时刻，却没说切到哪个/,
+    );
+    fails(() => input([route('a')], { ...live, orgPlan: { ...plan, why: '  ' } }), /没写为什么/);
+  });
+
+  it('探针结论、探针那时挂的组织认不出', () => {
+    fails(() => one({ probeState: 'maybe' as never }), /探针结论认不出（maybe）/);
+    fails(() => one({ probeOrg: 'enterprise' as never }), /探针那时挂的组织认不出（enterprise）/);
+  });
+});
+
 describe('策略给了但不对就报错，不悄悄换成默认', () => {
   it.each([
     [{ minSamples: 0 }, /minSamples/],
