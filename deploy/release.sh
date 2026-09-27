@@ -946,8 +946,9 @@ check_running_release() { # 提交号
 # feishu_gateway = 飞书网关（香港）不来了：网关、隧道、香港出事都会；后端刚重启、网关还在退避重连时是「没查成」，和这一版无关。
 # session_org = 引擎切会话用户挂的组织没成、切完读回不在线、拼车恢复时刻读不到（#157）：跟着上游额度、登录自己变红，引擎每
 #   15 分钟判一次，和这一版无关。
+# canary = 全流程巡检最近一轮断了、没跑成、太久没跑完一轮（#223）：跟着每 6 小时一轮的结论自己变红，和这一版无关。
 # 这里的名字都得是后端真报的项（packages/api 的 health.test.ts 核对，改了名那边报警）
-DRIFTING_HEALTH_ITEMS="draft_backlog judge deploy_lag feishu_gateway session_org"
+DRIFTING_HEALTH_ITEMS="draft_backlog judge deploy_lag feishu_gateway session_org canary"
 
 # 切之后的健康报告逐项和切之前比：之前好的变坏了才算这一版的错（返回 1）；会自己变红的那几项只标待处理
 compare_api_items() { # 切之前的逐项结果 切之后的逐项结果

@@ -22,6 +22,7 @@ const EXTRA_LABELS = {
   deploy_lag: '跟上主线',
   feishu_gateway: '飞书网关',
   session_org: '会话账号切换',
+  canary: '全流程巡检',
 };
 
 export const HEALTH_URL = '/healthz';
