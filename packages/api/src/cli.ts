@@ -7,7 +7,7 @@
 // 「让 AI 接活」开关（repos.auto_dispatch_since）：驾驶舱的开关页面（#131）之前的唯一入口，之后留作运维的后备。
 // 写入口和页面同一个（Store.setAutoDispatch）；改了记一条操作记录，改完从库里读回开关和那条记录再打印。
 //   handover <owner/仓名> <issue 号> --reason "<谁说的、为什么>"
-// 交给 fleet：人明说把一张自动派管不到的单（开关打开以前就开着的、别的版本的、未排期的、母单和子单）交给引擎，起 Fusion 工作流。
+// 交给 fleet：人明说把一张自动派管不到的单（开关打开以前就开着的、别的版本的、未排期的、母单和子单、贴了「本机做」的）交给引擎，起 Fusion 工作流。
 // 开关关着、这个项目停派、GitHub 上关着一律拒；在跑的不重复起，结束了的只有 GitHub 上重开过才再起一轮（判法在
 // @fleet-dao/core 的 dispatch.ts）。要读 GitHub（「引擎」机器人看这张单此刻开没开着、挂在哪个版本）、连 Temporal（起工作流），
 // 都按同一份 api.env。没被拒的（起了、没起成、本来就在跑）都记一条操作记录 task.handover，从库里读回再打印。
@@ -16,7 +16,7 @@
 // 退出码（几条命令一样）：0 做成了（或本来就是）；1 没做成（被拒、库里没有、连不上库、读回来不对，一句话说原因）；2 参数不对或没带上库连接。
 import { userInfo } from 'node:os';
 import { createInterface } from 'node:readline';
-import { familyGate, handoverDecision, replicaVerdict, versionGate } from '@fleet-dao/core';
+import { familyGate, handoverDecision, localGate, replicaVerdict, versionGate } from '@fleet-dao/core';
 import { requirementWorkflowId } from '@fleet-dao/shared';
 import { temporalSettings } from './config.ts';
 import { checkNewPassword, checkUsername, hashPassword } from './password.ts';
@@ -317,7 +317,7 @@ const isSwitchEntry = (a: AuditRecord) =>
 function describeSwitch(label: string, since: string | null): string {
   return since === null
     ? `${label}：让 AI 接活 关着（auto_dispatch_since 为空：只收单、显示，不派）`
-    : `${label}：让 AI 接活 开着，自 ${since} 起（这之后新开的、挂在当前版本上的独立 issue 自动派；这之前就开着的、别的版本的、未排期的、母单和子单不自动派，要交用 fleet-api handover）`;
+    : `${label}：让 AI 接活 开着，自 ${since} 起（这之后新开的、挂在当前版本上、没贴「本机做」的独立 issue 自动派；这之前就开着的、别的版本的、未排期的、母单和子单、贴了「本机做」的不自动派，要交用 fleet-api handover）`;
 }
 
 /** 读回、status 看最近多少条和这个仓有关的操作记录。 */
@@ -417,7 +417,7 @@ export function operatorName(env: CliEnv): string {
 // —— handover：交给 fleet ——
 
 const HANDOVER_USAGE =
-  '用法：fleet-api handover <owner/仓名> <issue 号> --reason "<谁说的、为什么>"（把开关打开以前开的、别的版本的、未排期的、母单和子单交给引擎，起 Fusion 工作流）';
+  '用法：fleet-api handover <owner/仓名> <issue 号> --reason "<谁说的、为什么>"（把开关打开以前开的、别的版本的、未排期的、母单和子单、贴了「本机做」的交给引擎，起 Fusion 工作流）';
 
 export interface HandoverArgs {
   owner: string;
@@ -491,10 +491,13 @@ function placeOf(issue: IssuePlan): string {
         : `挂在「${title}」上（不是当前版本）`;
   // 母单、子单自动派不派（#252 之前），交了照起：说清交的是哪一种，母单和子单别同时交（会抢同一批文件）
   const family = familyGate(issue);
-  if (family.ok) return where;
-  return family.reason === 'mother_ticket'
-    ? `${where}，是母单${issue.subIssues > 0 ? `、下面挂着 ${issue.subIssues} 张子单` : ''}`
-    : `${where}，是 #${issue.parent} 下面的子单`;
+  const kind = family.ok
+    ? where
+    : family.reason === 'mother_ticket'
+      ? `${where}，是母单${issue.subIssues > 0 ? `、下面挂着 ${issue.subIssues} 张子单` : ''}`
+      : `${where}，是 #${issue.parent} 下面的子单`;
+  // 贴着「本机做」的（#299 止血）自动派不派，明着交了照起：说清交出去的这张帅位原本留给本机、标签还贴着
+  return localGate(issue).ok ? kind : `${kind}，贴着「本机做」（帅位原本留给本机做的）`;
 }
 
 /**
