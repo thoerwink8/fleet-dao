@@ -3,8 +3,8 @@
 // 两个不起真执行体的假插头：Claude 的按剧本发事件、改工作树、交报告；cursor 的拿法国真跑的过程记录
 // （packages/adapters/test/fixtures/cursor-agent）逐行喂给真的读取器，事件、会话号、终帧用量都是真解析出来的。
 import { execFileSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { randomBytes, randomUUID } from 'node:crypto';
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   type ClaudeCodeRunOptions,
@@ -20,7 +20,9 @@ import {
   scopePrefix,
 } from '@fleet-dao/adapters';
 import { type Db, pools, repos, routes, savePoolQuota, seed, stagePolicyRoutes, tasks } from '@fleet-dao/db';
+import type { TestDb } from '@fleet-dao/db/testing';
 import type { ProgressEvent, StageKind } from '@fleet-dao/shared';
+import { cursorLaunchCommand } from '../../src/real/hosts.ts';
 import { layout, SESSION_TMP_DIR, type WorkTrees } from '../../src/real/worktrees.ts';
 
 export const NOW = new Date('2026-09-25T08:00:00.000Z');
@@ -451,6 +453,34 @@ export const CURSOR_SESSION = 'e06fc62e-72a6-4020-9144-01155dbba6db';
 export const CURSOR_NO_LOGIN =
   "Error: Authentication required. Please run 'cursor-agent login' first, or set CURSOR_API_KEY environment variable.";
 
+/**
+ * Cursor 拒了环境里的 API 密钥（无效、被撤、过期）时 -p 模式的原话（2026.09.26 发行包 index.js 的 api-key-auth：
+ * 换令牌被拒就打这三行、退出 1、没有 JSON）。头一行不管有没有终端都带颜色。
+ */
+export const CURSOR_KEY_REJECTED =
+  '\u001b[33m⚠ Warning: The provided API key is invalid.\u001b[0m\n' +
+  'The API key was loaded from the CURSOR_API_KEY environment variable.\n' +
+  'Please check you have the right key, create a new one, or authenticate without it.\n';
+
+/**
+ * 没信任过的工作目录、没带 --trust / --force 时 -p 模式在 stderr 打的那段（2026.09.26 发行包 6853.index.js；没有终端时
+ * 不带颜色），打完就退出。最后三行里没有「Workspace Trust」这个词。
+ */
+export const CURSOR_TRUST_REQUIRED = [
+  '',
+  '⚠ Workspace Trust Required',
+  '',
+  ' Cursor Agent can execute code and access files in this directory.',
+  ' Do you trust the contents of this directory?',
+  '',
+  ' /var/lib/fleet-work/_route-probe/fleet-agent-carpool',
+  '',
+  ' To proceed, you can either:',
+  " • Run 'cursor-agent' interactively to decide",
+  ' • Pass --trust, --yolo, or -f if you trust this directory',
+  '',
+].join('\n');
+
 export interface FakeCursorScript {
   /** 回放哪一份真跑夹具（不带后缀）；不给 = 一帧都没有（只在 stderr 报错就退出的那种）。 */
   replay?: string;
@@ -621,4 +651,114 @@ export function untilAborted(signal: AbortSignal): Promise<void> {
     if (signal.aborted) return resolve();
     signal.addEventListener('abort', () => resolve(), { once: true });
   });
+}
+
+// ---- 真走一遍起 cursor-agent 的那条命令（只在 Linux 上用：NTFS 表示不了 600，Windows 上也起不了 /bin/sh）
+
+export interface CursorKeyRig {
+  /** 假密钥：运行时现拼（整段写在源码里，卫生检查会当成真的）。 */
+  key: string;
+  keyFile: string;
+  versionsDir: string;
+  /** 真的起法（real/hosts.ts 的 cursorLaunchCommand），指着这里的版本目录和密钥文件。 */
+  command(user: SessionUser): string[];
+  /** 假的 fleet-agent-scope：照真帮手的规矩起 -- 后面的命令，每次调用连参数、环境记进 scopeLog。经 node 跑。 */
+  helper: string;
+  sudo: string[];
+  /** 假 cursor-agent 起过没有（收到的参数记在这，一次一段）。 */
+  agentRan(): boolean;
+  /** 之后起的假 cursor-agent 照 Cursor 拒掉密钥的样子报错退出（CURSOR_KEY_REJECTED）。 */
+  rejectKey(): void;
+  /** 这套东西在磁盘上留下的全部记录（帮手收到的参数和环境、假 cursor-agent 收到的参数）：搜值用。 */
+  traces(): string;
+}
+
+/**
+ * 一套假东西，让起 cursor-agent 的真命令从头走到尾：版本目录里一个假 cursor-agent（sh）——读完 stdin，参数记下来，环境里的
+ * CURSOR_API_KEY 和密钥文件对不对得上只报一个词（OK / KEY_MISMATCH / NO_KEY），照 stream-json 打 init、说的话、终帧；
+ * 值本身哪里都不打。密钥文件属跑测试的用户、600。
+ */
+export function cursorKeyRig(root: string): CursorKeyRig {
+  const dir = join(root, 'cursor-rig');
+  const versionsDir = join(dir, 'versions');
+  const agentDir = join(versionsDir, '2026.09.26-aaa1111');
+  const home = join(dir, 'home');
+  const keyFile = join(home, '.cursor', 'fleet-api-key');
+  const key = `fake-cursor-key-${randomBytes(24).toString('hex')}`;
+  const argvLog = join(dir, 'agent-argv');
+  const scopeLog = join(dir, 'scope.log');
+  const rejectFlag = join(dir, 'reject');
+  const helper = join(dir, 'fake-scope.mjs');
+  mkdirSync(agentDir, { recursive: true });
+  mkdirSync(join(home, '.cursor'), { recursive: true });
+  writeFileSync(keyFile, key);
+  chmodSync(keyFile, 0o600);
+  const sid = '0e0c0a0b-1111-4222-8333-444455556666';
+  const agent = join(agentDir, 'cursor-agent');
+  writeFileSync(
+    agent,
+    [
+      '#!/bin/sh',
+      'cat >/dev/null',
+      `{ echo '--- run'; for a in "$@"; do printf '%s\\n' "$a"; done; } >>'${argvLog}'`,
+      `if [ -e '${rejectFlag}' ]; then printf '\\033[33m⚠ Warning: The provided API key is invalid.\\033[0m\\nThe API key was loaded from the CURSOR_API_KEY environment variable.\\nPlease check you have the right key, create a new one, or authenticate without it.\\n' >&2; exit 1; fi`,
+      `if ! printenv CURSOR_API_KEY >/dev/null; then a=NO_KEY; elif [ "$CURSOR_API_KEY" = "$(cat '${keyFile}')" ]; then a=OK; else a=KEY_MISMATCH; fi`,
+      `printf '%s\\n' '{"type":"system","subtype":"init","apiKeySource":"env","cwd":"/w","session_id":"${sid}","model":"Auto","permissionMode":"default"}'`,
+      `printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"%s"}]},"session_id":"${sid}"}\\n' "$a"`,
+      `printf '{"type":"result","subtype":"success","duration_ms":1,"duration_api_ms":1,"is_error":false,"result":"%s","session_id":"${sid}","request_id":"r","usage":{"inputTokens":1,"outputTokens":1,"cacheReadTokens":0,"cacheWriteTokens":0}}\\n' "$a"`,
+      '',
+    ].join('\n'),
+  );
+  chmodSync(agent, 0o755);
+  writeFileSync(
+    helper,
+    [
+      "import { spawn } from 'node:child_process';",
+      "import { appendFileSync } from 'node:fs';",
+      'const [action, ...rest] = process.argv.slice(2);',
+      `appendFileSync(${JSON.stringify(scopeLog)}, JSON.stringify({ action, args: rest, env: process.env }) + '\\n');`,
+      "if (action !== 'run') process.exit(0);",
+      "const at = rest.indexOf('--');",
+      "const cwdAt = rest.indexOf('--cwd');",
+      'const command = rest.slice(at + 1);',
+      '// 和真帮手一样：环境只剩 FLEET_* 这几类；PATH 取 FLEET_SESSION_PATH，家目录换成会话用户的',
+      'const env = {};',
+      'for (const [k, v] of Object.entries(process.env)) {',
+      '  if (v !== undefined && /^(FLEET_[A-Z0-9_]+|LANG|LANGUAGE|LC_[A-Z_]+|TZ|TERM|GIT_TERMINAL_PROMPT)$/.test(k)) env[k] = v;',
+      '}',
+      `env.HOME = ${JSON.stringify(home)};`,
+      "env.PATH = (process.env.FLEET_SESSION_PATH ?? '/usr/local/bin:/usr/bin:/bin') + ':' + env.HOME + '/.local/bin';",
+      "const child = spawn(command[0], command.slice(1), { cwd: cwdAt >= 0 ? rest[cwdAt + 1] : '/', env, stdio: 'inherit' });",
+      "child.on('exit', (code, signal) => process.exit(code ?? (signal ? 1 : 0)));",
+      "process.on('SIGTERM', () => child.kill('SIGTERM'));",
+      '',
+    ].join('\n'),
+  );
+  const read = (file: string) => (existsSync(file) ? readFileSync(file, 'utf8') : '');
+  return {
+    key,
+    keyFile,
+    versionsDir,
+    command: () => cursorLaunchCommand(versionsDir, keyFile),
+    helper,
+    sudo: [process.execPath],
+    agentRan: () => existsSync(argvLog),
+    rejectKey: () => writeFileSync(rejectFlag, ''),
+    traces: () => `${read(scopeLog)}\n${read(argvLog)}`,
+  };
+}
+
+/** 整个库拍成一段文字（public 下每张表的每一行）：搜值用。 */
+export async function dumpDb(client: TestDb['client']): Promise<string> {
+  const tables = await client.query<{ tablename: string }>(
+    "select tablename from pg_tables where schemaname = 'public' order by tablename",
+  );
+  const parts: string[] = [];
+  for (const { tablename } of tables.rows) {
+    const { rows } = await client.query(`select * from "${tablename}"`);
+    parts.push(
+      `${tablename}: ${JSON.stringify(rows, (_k, v: unknown) => (typeof v === 'bigint' ? v.toString() : v))}`,
+    );
+  }
+  return parts.join('\n');
 }

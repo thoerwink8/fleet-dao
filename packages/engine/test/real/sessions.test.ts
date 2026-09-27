@@ -1,10 +1,10 @@
 // 会话端口：起会话（建树、定接着干的方式、登记开工）、看守（进度写库、按进展判停滞、交活核实、读结论文件）、
 // 叫停、收孤儿。用内存库、本地 git（顶替会话用户的执行器）、假插头（不起真执行体）；每条失败路径都故意造一次。
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { scopePrefix } from '@fleet-dao/adapters';
+import { runCursorAgent, scopePrefix } from '@fleet-dao/adapters';
 import {
   appendProgressEvents,
   getSessionRun,
@@ -22,15 +22,20 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import type { JevAskContext, JevPort, JevQuestion, JevReply } from '../../src/failure/jev.ts';
 import type { LaunchSessionInput, LeadStep, PortContext, SessionEnd } from '../../src/ports.ts';
 import { localExec } from '../../src/real/exec.ts';
-import { CURSOR_MISSING } from '../../src/real/hosts.ts';
+import { CURSOR_KEY_BAD, CURSOR_KEY_EXIT, CURSOR_MISSING } from '../../src/real/hosts.ts';
 import { createSessionPorts, type SessionPortsDeps, screenForOtherVendor } from '../../src/real/sessions.ts';
 import { poolHoldKey } from '../../src/real/store-ports.ts';
 import { layout } from '../../src/real/worktrees.ts';
 import {
   addCursorRoute,
   addTask,
+  CURSOR_KEY_REJECTED,
   CURSOR_NO_LOGIN,
   CURSOR_SESSION,
+  CURSOR_TRUST_REQUIRED,
+  type CursorKeyRig,
+  cursorKeyRig,
+  dumpDb,
   type FakeCursorScript,
   type FakeRunScript,
   fakeCursorRun,
@@ -101,6 +106,8 @@ function setup(
     screen?: SessionPortsDeps['screen'];
     /** 端口的日志（删不掉临时目录这类只记日志的）；不给就不记。 */
     log?: SessionPortsDeps['log'];
+    /** cursor 的会话用真插头、真起法（经假帮手真起进程，fixtures 的 cursorKeyRig），不用假插头。 */
+    realCursor?: CursorKeyRig;
   } = {},
 ) {
   const fake = fakeRun(script);
@@ -112,6 +119,8 @@ function setup(
   );
   const trees = fakeTrees(join(root, 'work'));
   const scope = fakeScopeHelper(root);
+  const rig = options.realCursor;
+  const logs: string[] = [];
   const ports = createSessionPorts({
     db: t.db,
     trees: trees.trees,
@@ -120,12 +129,12 @@ function setup(
     tmpDir: join(root, 'tmp'),
     machine: '法国',
     claudeCommand: (user) => [`/opt/fake/${user}/reclaude`],
-    cursorCommand: (user) => [`/opt/fake/${user}/cursor-agent`],
-    helper: scope.helper,
-    sudo: scope.sudo,
+    cursorCommand: rig ? rig.command : (user) => [`/opt/fake/${user}/cursor-agent`],
+    helper: rig ? rig.helper : scope.helper,
+    sudo: rig ? rig.sudo : scope.sudo,
     gitBin: 'git',
     shBin: 'sh',
-    run: { 'claude-code': fake.run, 'cursor-agent': cursor.run },
+    run: { 'claude-code': fake.run, 'cursor-agent': rig ? runCursorAgent : cursor.run },
     tickMs: 10,
     stallCheckMs: 30,
     flushMs: 5,
@@ -135,10 +144,13 @@ function setup(
     ...(options.jevTimeoutMs === undefined ? {} : { jevTimeoutMs: options.jevTimeoutMs }),
     ...(options.stallJevEveryMs === undefined ? {} : { stallJevEveryMs: options.stallJevEveryMs }),
     // 派给别家（cursor）的整份提示词都要先过卫生检查：起 cursor 的用例没给检查就放一个都放行的（查出来拦下的另有用例）
-    ...(options.screen ? { screen: options.screen } : options.cursor ? { screen: () => {} } : {}),
-    log: options.log ?? (() => {}),
+    ...(options.screen ? { screen: options.screen } : options.cursor || rig ? { screen: () => {} } : {}),
+    log: (message, fields) => {
+      if (rig) logs.push(JSON.stringify([message, fields]));
+      options.log?.(message, fields);
+    },
   });
-  return { ports, fake, cursor, trees, scope };
+  return { ports, fake, cursor, trees, scope, logs };
 }
 
 function launch(over: Partial<LaunchSessionInput> = {}): LaunchSessionInput {
@@ -1807,7 +1819,7 @@ describe('cursor-agent：会话端口按执行方式分派（法国真跑夹具�
   });
 
   describe('失败分流：cursor 的认证、额度、网络报错只在 stderr（退出 1、没有 JSON）', () => {
-    it('登录失效：失败信息带原话；整池暂停，写清去哪台机器、以谁跑 cursor-agent login；不算路由的账；下一次跑通撤掉', async () => {
+    it('登录失效：失败信息带原话；整池暂停，写清去 Cursor 后台重新生成密钥、照 ops 放进哪台机器谁家里；不算路由的账；下一次跑通撤掉', async () => {
       const { ports } = setup(() => ({}), {
         cursor: (_, n) => (n === 1 ? { stderr: CURSOR_NO_LOGIN, exitCode: 1 } : cursorDelivers()()),
       });
@@ -1827,10 +1839,56 @@ describe('cursor-agent：会话端口按执行方式分派（法国真跑夹具�
       expect(hold?.title).toContain('Cursor 登录失效');
       expect(hold?.body).toContain('法国');
       expect(hold?.body).toContain('fleet-agent-carpool');
-      expect(hold?.body).toContain('cursor-agent login');
+      expect(hold?.body).toContain('cursor.com/dashboard/api');
+      expect(hold?.body).toContain('docs/ops.md 第五节「会话用户的 Cursor 密钥」');
 
       await runOnce(ports, cursorLaunch());
       expect((await holdOf('cursor'))?.resolvedAt).not.toBeNull();
+    });
+
+    it('Cursor 拒了会话用户的 API 密钥（无效、被撤、过期）：照登录失效整池暂停，提醒写清去后台重新生成、照 ops 放进法国；不算路由的账；原话去掉终端颜色', async () => {
+      const { ports } = setup(() => ({}), {
+        cursor: () => ({ stderr: CURSOR_KEY_REJECTED, exitCode: 1 }),
+      });
+      const input = cursorLaunch();
+      const { end } = await runOnce(ports, input);
+      expect(end).toMatchObject({ outcome: 'failed', failure: { code: 'no_result' } });
+      expect(end.failure?.message).toContain('The provided API key is invalid');
+      expect(end.failure?.message).not.toContain('\u001b');
+      expect(await runRow(input.runId)).toMatchObject({ routeOutcome: 'neutral' });
+      const hold = await holdOf('cursor');
+      expect(hold?.title).toContain('Cursor 登录失效');
+      expect(hold?.body).toContain('cursor.com/dashboard/api');
+      expect(hold?.body).toContain('「法国」');
+    });
+
+    it('会话用户家里的密钥文件没放好（起它的那段 sh 退出 78）：整池暂停，提醒写清哪里不对、照 ops 放好；不算路由的账', async () => {
+      const bad = `${CURSOR_KEY_BAD}：不在。文件是 /home/fleet-agent-carpool/.cursor/fleet-api-key，照 docs/ops.md 第五节「会话用户的 Cursor 密钥」放好`;
+      const { ports } = setup(() => ({}), {
+        cursor: () => ({ stderr: bad, exitCode: CURSOR_KEY_EXIT }),
+      });
+      const input = cursorLaunch();
+      const { end } = await runOnce(ports, input);
+      expect(end).toMatchObject({ outcome: 'failed', failure: { code: 'no_result' } });
+      expect(end.failure?.message).toContain(`${CURSOR_KEY_BAD}：不在。文件是 /home/fleet-agent-carpool/`);
+      expect(await runRow(input.runId)).toMatchObject({ routeOutcome: 'neutral' });
+      const hold = await holdOf('cursor');
+      expect(hold?.title).toContain('Cursor 密钥没放好');
+      expect(hold?.body).toContain('会话用户 fleet-agent-carpool 的 Cursor 密钥放好');
+      // 哪里不对摘进了提醒
+      expect(hold?.body).toContain(`${CURSOR_KEY_BAD}：不在`);
+    });
+
+    it('没信任过的目录（-p 打一段 Workspace Trust 提示就退出）：认成执行方式或路由配置不对，失败信息带那一句；算路由的账', async () => {
+      const { ports } = setup(() => ({}), {
+        cursor: () => ({ stderr: CURSOR_TRUST_REQUIRED, exitCode: 1 }),
+      });
+      const input = cursorLaunch();
+      const { end } = await runOnce(ports, input);
+      expect(end).toMatchObject({ outcome: 'failed', failure: { code: 'no_result' } });
+      expect(end.failure?.message).toContain('Workspace Trust Required');
+      expect(await runRow(input.runId)).toMatchObject({ routeOutcome: 'fail' });
+      expect(await holdOf('cursor')).toBeUndefined();
     });
 
     it('额度用满（请求被拒、不扣钱）：按额度用满判，不当成执行体出错；失败信息带原话；不整池暂停等人', async () => {
@@ -1881,6 +1939,56 @@ describe('cursor-agent：会话端口按执行方式分派（法国真跑夹具�
       expect(end.failure?.message).toContain('没装 cursor-agent');
       expect(await runRow(input.runId)).toMatchObject({ routeOutcome: 'fail' });
       expect(await holdOf('cursor')).toBeUndefined();
+    });
+  });
+
+  // 真插头（runCursorAgent）、真起法（cursorLaunchCommand：会话用户自己读密钥、现找版本目录）、经假帮手真起进程：会话真带上了
+  // 那一把，库（进度事件、会话记录、提醒……）、引擎日志、帮手收到的参数和环境、cursor-agent 收到的参数、交回工作流的结局里
+  // 都搜不到值。Windows 上起不了 /bin/sh，NTFS 也表示不了 600。
+  describe.skipIf(process.platform === 'win32')('API 密钥真走一遍：会话带上了它，哪里都搜不到值', () => {
+    let rig: CursorKeyRig;
+    beforeEach(() => {
+      rig = cursorKeyRig(root);
+    });
+    const everywhere = async (logs: string[], end: SessionEnd) =>
+      [await dumpDb(t.client), rig.traces(), ...logs, JSON.stringify(end)].join('\n');
+
+    it('放好了：cursor-agent 拿到的就是文件里那一把（对得上才说 OK），说的话进了进度；干活的会话带 --force、--trust；哪里都没有值', async () => {
+      const { ports, logs } = setup(() => ({}), { realCursor: rig });
+      const input = cursorLaunch();
+      const { end } = await runOnce(ports, input);
+      const says = (await t.db.select().from(progressEvents))
+        .filter((e) => e.runId === input.runId && e.kind === 'say')
+        .map((e) => (e.payload as { text?: string } | null)?.text);
+      expect(says).toContain('OK');
+      expect(says).not.toContain('KEY_MISMATCH');
+      expect(says).not.toContain('NO_KEY');
+      expect(rig.traces()).toContain('--force');
+      expect(rig.traces()).toContain('--trust');
+      const all = await everywhere(logs, end);
+      expect(all).toContain(input.runId);
+      expect(all).toContain('"action":"run"');
+      expect(all).not.toContain(rig.key);
+    });
+
+    it('Cursor 拒了这一把：失败信息带原话、整池暂停写清去后台重新生成；哪里都没有值', async () => {
+      rig.rejectKey();
+      const { ports, logs } = setup(() => ({}), { realCursor: rig });
+      const { end } = await runOnce(ports, cursorLaunch());
+      expect(end.failure?.message).toContain('The provided API key is invalid');
+      expect((await holdOf('cursor'))?.body).toContain('cursor.com/dashboard/api');
+      expect(await everywhere(logs, end)).not.toContain(rig.key);
+    });
+
+    it('密钥文件里多了一行（两把粘在一起）：cursor-agent 不起，失败信息写清哪里不对、整池暂停；哪里都没有值', async () => {
+      writeFileSync(rig.keyFile, `${rig.key}\n${rig.key}`);
+      chmodSync(rig.keyFile, 0o600);
+      const { ports, logs } = setup(() => ({}), { realCursor: rig });
+      const { end } = await runOnce(ports, cursorLaunch());
+      expect(rig.agentRan()).toBe(false);
+      expect(end.failure?.message).toContain(`${CURSOR_KEY_BAD}：里面有空白、换行或控制字符`);
+      expect((await holdOf('cursor'))?.title).toContain('Cursor 密钥没放好');
+      expect(await everywhere(logs, end)).not.toContain(rig.key);
     });
   });
 });
