@@ -17,8 +17,17 @@
 //   不进日志、进度、失败信息和库。
 //   cursor-agent 装在会话用户家里、不在 PATH 上，升级会删掉旧版本目录：每次起都由会话用户自己按 current → 最新版本目录现找
 //   （cursorLaunchCommand 的后一段，CU-03）。
+// - grok（SuperGrok 订阅的 Grok Build 命令行，#266）：会话号由我们定（-s <UUID>，续会话 -r），终帧回同一个号和实际模型
+//   （grok-4.7-build 这种带渠道后缀的名字，插头认得）。但号是我们定的不等于会话建成了：没登录、起不来、点的型号不认时它在
+//   开会话之前就退出，拿这个号 -r 只会报「not found」——所以开新会话时这个号先不算数，见到它真开了会话（终帧，或报错以外的
+//   任何一帧）才交回工作流（grokReport），没开成就交空串、下次开新会话。没有我们用得上的 fork：换了账号池一律接力。终帧里
+//   没有回答正文，回答是插头攒的最后一段话。认证是会话用户家里的登录态（~/.grok/auth.json，官方安装脚本、device code 登录，
+//   普通文件、没有桌面也存得下，grok 自己续期）；没登录、过期了在 error 帧和 stderr 里说「Not signed in」「Run `grok login`」，
+//   失败分流按 AU7 认。和 Cursor 一样不绑会话用户、跑在法国唯一的会话用户下；装在他家里的 ~/.grok/bin/grok，由会话用户自己
+//   看它是不是能跑的文件（grokLaunchCommand），不是就报没装。
 import { randomUUID } from 'node:crypto';
 import {
+  type AgentRunOptions,
   type CgroupScope,
   type ClaudeCodeRunOptions,
   type ClaudeCodeRunReport,
@@ -28,11 +37,15 @@ import {
   type CursorRunSpec,
   claudeRunFacts,
   cursorRunFacts,
+  type GrokRunReport,
+  type GrokRunSpec,
+  grokRunFacts,
   type ProcessLimits,
   type RateLimitReading,
   type RunFacts,
   runClaudeCode,
   runCursorAgent,
+  runGrok,
   SESSION_USERS,
   type SessionEnvInput,
   type SessionUser,
@@ -42,7 +55,7 @@ import type { HostId, ProgressEvent } from '@fleet-dao/shared';
 import { hostName } from '../routing/names.ts';
 
 /** 引擎接上的执行方式。加一家：写它的驱动，探针跟着就能探、选路跟着就派。 */
-export const WIRED_HOSTS = ['claude-code', 'cursor-agent'] as const satisfies readonly HostId[];
+export const WIRED_HOSTS = ['claude-code', 'cursor-agent', 'grok'] as const satisfies readonly HostId[];
 export type WiredHost = (typeof WIRED_HOSTS)[number];
 
 export function isWiredHost(hostId: string): hostId is WiredHost {
@@ -105,22 +118,26 @@ export interface HostReport {
   hostId: WiredHost;
   /** 判定事实（各家插头的 xxxRunFacts）：判法只有 judgeRun 一份。 */
   facts: RunFacts;
-  /** 执行体报的会话号：Claude 就是我们给的那个；cursor 是它 init 帧（或终帧）里的。没读到不给。 */
+  /**
+   * 执行体报的会话号：Claude 就是我们给的那个；cursor 是它 init 帧（或终帧）里的；grok 是我们给的那个、它真开了会话才给
+   * （终帧回的，或者见到了报错以外的帧）。没读到、没开成不给。
+   */
   sessionId?: string;
   usage: HostUsage;
-  /** 只有 Claude 报：会话累计花费（续会话含前几轮）、实际回话的模型、会话结束时的上下文大小。 */
+  /** 只有 Claude 报：会话累计花费（续会话含前几轮）、会话结束时的上下文大小。 */
   sessionCostUsd?: number;
+  /** 实际回话的模型：Claude 流里的、grok 终帧 modelUsage 的键（grok-4.7-build）；cursor 没有。 */
   actualModel?: string;
   contextTokens?: number;
   /** 额度用满时上游给的清零时刻（Claude 流里的额度读数）。 */
   resetsAt?: string;
   /** 上游的 HTTP 状态码（Claude 终帧的 api_error_status）。 */
   httpStatus?: number;
-  /** 终帧里的回答（探针看它是不是只回了 OK）。 */
+  /** 终帧里的回答（探针看它是不是只回了 OK；grok 的终帧没有正文，是插头攒的最后一段话）。 */
   answer?: string;
   /**
-   * 只在 stderr 里的报错原话（cursor 的认证、额度、网络报错：退出 1、没有 JSON）：失败信息里没有就接上，失败分流靠它认出
-   * 是哪一种。Claude 的报错在流里、已经在判定原因里，不给。
+   * 判定原因里没有的报错原话（cursor 的认证、额度、网络报错只在 stderr：退出 1、没有 JSON；grok 的在 error 帧和 stderr）：
+   * 失败信息里没有就接上，失败分流靠它认出是哪一种。Claude 的报错在流里、已经在判定原因里，不给。
    */
   rawError?: string;
   wallMs: number;
@@ -134,10 +151,11 @@ export interface HostDriver {
    * sole：不绑池，用法国唯一的会话用户（它家里登好了这一家）。
    */
   userFrom: 'pool' | 'sole';
-  /** 换了账号池能不能 fork 续（Claude 能；cursor 没有 fork，换池一律接力）。 */
+  /** 换了账号池能不能 fork 续（Claude 能；cursor、grok 不能，换池一律接力）。 */
   canFork: boolean;
   /**
-   * 开新会话、fork 时回给工作流的会话号。known = 这就是执行体要用的号（Claude）；不是的是临时号（cursor），真号 init 帧里给。
+   * 开新会话、fork 时用的会话号。known = 起来就算数，结局照它交回工作流（Claude）；不是的要等执行体报上来才算：cursor 给的
+   * 是临时号、真号 init 帧里给；grok 的号是我们给的（-s），但登录不上、起不来时它根本没建这个会话，看它开没开成（grokReport）。
    */
   newSessionId(runId: string): { id: string; known: boolean };
   run(spec: HostRunSpec, hooks: HostRunHooks): Promise<HostReport>;
@@ -145,10 +163,11 @@ export interface HostDriver {
   loginFix(machine: string, user: string): string;
 }
 
-/** 起插头的函数：生产是 runClaudeCode / runCursorAgent；测试按执行方式给假插头（不起真执行体）。 */
+/** 起插头的函数：生产是 runClaudeCode / runCursorAgent / runGrok；测试按执行方式给假插头（不起真执行体）。 */
 export interface HostRunners {
   'claude-code'?: (spec: ClaudeCodeRunSpec, options: ClaudeCodeRunOptions) => Promise<ClaudeCodeRunReport>;
   'cursor-agent'?: (spec: CursorRunSpec, options: CursorRunOptions) => Promise<CursorRunReport>;
+  grok?: (spec: GrokRunSpec, options: AgentRunOptions) => Promise<GrokRunReport>;
 }
 
 export interface HostDriverDeps {
@@ -156,6 +175,8 @@ export interface HostDriverDeps {
   claudeCommand(user: SessionUser): string[];
   /** 起 cursor-agent 的命令（绝对路径）：装在会话用户自己家里，生产用 cursorLaunchCommand 现找版本目录。 */
   cursorCommand(user: SessionUser): string[];
+  /** 起 grok 的命令（绝对路径）：装在会话用户自己家里，生产用 grokLaunchCommand 先看在不在。 */
+  grokCommand(user: SessionUser): string[];
   run?: HostRunners;
 }
 
@@ -163,6 +184,7 @@ export function hostDrivers(deps: HostDriverDeps): Record<WiredHost, HostDriver>
   return {
     'claude-code': claudeDriver(deps.claudeCommand, deps.run?.['claude-code'] ?? runClaudeCode),
     'cursor-agent': cursorDriver(deps.cursorCommand, deps.run?.['cursor-agent'] ?? runCursorAgent),
+    grok: grokDriver(deps.grokCommand, deps.run?.grok ?? runGrok),
   };
 }
 
@@ -423,6 +445,100 @@ export function cursorReport(report: CursorRunReport): HostReport {
       ...defined('cacheWriteTokens', r?.usage?.cacheWriteTokens),
     },
     ...defined('answer', r?.text),
+    ...defined('rawError', facts.lastWords),
+    wallMs: report.wallMs,
+    stderrTail: report.stderrTail,
+  };
+}
+
+// ---- grok
+
+/** 会话用户家里的 grok（{user} 换成会话用户）：官方安装脚本装在 ~/.grok/bin/grok（链到 ~/.grok/downloads 下的二进制）。 */
+export const DEFAULT_GROK_BIN = '/home/{user}/.grok/bin/grok';
+
+/** 没装时 stderr 那句的开头：和 Node 起不来时的原话一个样子，失败分流按「执行方式或路由配置不对」（CF1）认。 */
+export const GROK_MISSING = 'spawn grok ENOENT';
+
+// 一行写完（命令行要经 sudo 记日志）：以会话用户的身份看 grok 在不在、能不能跑（引擎进不去他的家，看不了），能跑就 exec 成它
+// （进程号不变，还是插头拿着的那一个）；不在、不是文件（-x 对目录也成立）、不能跑就照没装报、退出 127。装机脚本的读回
+// （deploy/lib/grok.sh 的 grok_version）照同一个判法。插头还会在它前面垫一个 cat：grok 从 /dev/stdin 读提示词要真管道，
+// Node 给的是 socketpair（adapters 的 runGrok）。
+const GROK_FIND_SCRIPT = [
+  'bin=$1',
+  'shift',
+  `if [ ! -f "$bin" ] || [ ! -x "$bin" ]; then echo "${GROK_MISSING}：$bin 不在或不能跑（会话用户家里没装 grok 命令行，docs/ops.md 第五节「会话用户的 grok」）" >&2; exit 127; fi`,
+  'exec "$bin" "$@"',
+].join('; ');
+
+/** 起 grok 的命令：以会话用户的身份先看它在不在，在就 exec 成它；位置经参数传给脚本，不拼进脚本。 */
+export function grokLaunchCommand(bin: string): string[] {
+  if (!bin.startsWith('/')) throw new Error(`grok 的位置要写绝对路径：${bin}`);
+  if (CONTROL_CHAR.test(bin)) throw new Error('grok 的位置里有控制字符，不写上命令行');
+  return ['/bin/sh', '-c', GROK_FIND_SCRIPT, 'grok', bin];
+}
+
+function grokDriver(
+  command: (user: SessionUser) => string[],
+  run: NonNullable<HostRunners['grok']>,
+): HostDriver {
+  return {
+    hostId: 'grok',
+    userFrom: 'sole',
+    canFork: false,
+    // 号是我们定的（-s），但它真开了会话才算数（grokReport）：没登录、起不来时拿它 -r 只会报 not found
+    newSessionId: () => ({ id: randomUUID(), known: false }),
+    async run(spec, hooks) {
+      if (spec.session.mode === 'fork') {
+        throw new Error('grok 不 fork：换了账号池要开新会话带接力任务书');
+      }
+      const report = await run(
+        {
+          runId: spec.runId,
+          cwd: spec.cwd,
+          prompt: spec.prompt,
+          model: spec.model,
+          session:
+            spec.session.mode === 'resume'
+              ? { mode: 'resume', id: spec.session.id }
+              : { mode: 'new', id: spec.session.id },
+          // 干活的会话照 Claude 的理由放开命令（--always-approve，GK-04）；探针不放：一个命令都不许跑
+          alwaysApprove: spec.purpose === 'work',
+          env: spec.env,
+          limits: spec.limits,
+          testCommands: spec.testCommands,
+          cgroup: spec.cgroup,
+        },
+        agentHooks(command(spec.user), hooks),
+      );
+      return grokReport(report);
+    },
+    loginFix: (machine, user) =>
+      `在${machine}上以 ${user} 跑 grok login --device-code（docs/ops.md 第五节「会话用户的 grok」），在任意设备的浏览器里打开它给的链接、确认那串码`,
+  };
+}
+
+/**
+ * grok 的报告整理成同一个形状。会话号：终帧回的那个；没有终帧（半路被停、断了）但见到了报错以外的帧，就是我们给它的那个
+ * （它开会话之后才出帧：头一帧是 available_commands，法国真跑记录）；一帧都没有、只有 error 帧（没登录、起不来、型号不认，
+ * 法国实跑 2026-09-27）就是没开成会话，不给——交回工作流的是空串，下次开新会话，不拿一个没建成的号去 -r（它报 not found）。
+ */
+export function grokReport(report: GrokRunReport): HostReport {
+  const s = report.stream;
+  const end = s.end;
+  const facts = grokRunFacts(report);
+  const opened = s.frames > s.errors.length;
+  return {
+    hostId: 'grok',
+    facts,
+    ...defined('sessionId', end?.sessionId ?? (opened ? report.session.id : undefined)),
+    usage: {
+      ...defined('inputTokens', end?.usage?.inputTokens),
+      ...defined('outputTokens', end?.usage?.outputTokens),
+      ...defined('cacheReadTokens', end?.usage?.cacheReadTokens),
+      ...defined('cacheWriteTokens', end?.usage?.cacheWriteTokens),
+    },
+    ...defined('actualModel', end?.models[0]),
+    ...defined('answer', report.stream.answer),
     ...defined('rawError', facts.lastWords),
     wallMs: report.wallMs,
     stderrTail: report.stderrTail,

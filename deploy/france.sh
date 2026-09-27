@@ -8,6 +8,8 @@
 # 会话用户和 pilot 家里各家 AI 的全局说明与方法类 skill、他们各自的 ddgs（用钉住版本的 uv 装）、
 # 会话用户的 cursor-agent（官方安装脚本，以会话用户自己的身份装在他家里，只在没有时装；它的 API 密钥由创始人放，这里只读回
 # 在不在、属主、权限，不读值，见 lib/cursor-key.sh）、
+# 会话用户的 grok 命令行（官方安装脚本，以会话用户自己的身份装在他家里，只在没有时装；登录由创始人以他的身份做一次，这里只读回
+# 登录态文件在不在、属主、权限，不读内容，见 lib/grok.sh）、
 # node 默认的编译缓存目录（先由 root 建好，别的用户替 fleet、pilot、root 放不进编译缓存）。
 # 应用本身（引擎、后端、前端）由 deploy/release.sh 发布。
 # 旧系统的服务、端口、文件一概不动。端口表、怎么跑、怎么看健康、怎么回滚：docs/ops.md。
@@ -33,6 +35,8 @@ source "$DEPLOY_DIR/lib/cli-tools.sh"
 source "$DEPLOY_DIR/lib/cursor-agent.sh"
 # shellcheck source=lib/cursor-key.sh
 source "$DEPLOY_DIR/lib/cursor-key.sh"
+# shellcheck source=lib/grok.sh
+source "$DEPLOY_DIR/lib/grok.sh"
 # shellcheck source=lib/agents-sync.sh
 source "$DEPLOY_DIR/lib/agents-sync.sh"
 # shellcheck source=lib/app-config.sh
@@ -72,6 +76,9 @@ CURSOR_INSTALL_URL=https://cursor.com/install
 # 官方安装脚本固定装在这（{user} 换成会话用户），装和读回都照引擎的找法在这里找：和 packages/engine/src/real/hosts.ts 的
 # DEFAULT_CURSOR_VERSIONS_DIR 一样（engine 的 hosts.test.ts 核对）。engine.env 别改 FLEET_CURSOR_VERSIONS_DIR：改了引擎就找不到这里装的
 CURSOR_VERSIONS_DIR='/home/{user}/.local/share/cursor-agent/versions'
+# 会话用户的 grok 命令行（lib/grok.sh）：官方安装脚本，以会话用户自己的身份跑，只在没有时装；不钉版本、不核校验和（为什么见
+# lib/grok.sh 开头）。装在哪、登录态在哪是 lib/grok.sh 的 GROK_BIN、GROK_AUTH_FILE
+GROK_INSTALL_URL=https://x.ai/cli/install.sh
 # node 默认的编译缓存目录和开机时建它的配置（lib/node-cache.sh：为什么要归 root）
 NODE_CACHE_DIR=/tmp/node-compile-cache
 NODE_CACHE_CONF=/etc/tmpfiles.d/fleet-dao-node-compile-cache.conf
@@ -682,6 +689,20 @@ setup_cursor_agent() {
   done
 }
 
+# 会话用户的 grok 命令行（lib/grok.sh）：引擎起 Grok 会话用的就是他家里这份。不在、不能跑时以他自己的身份跑官方安装脚本；
+# 有了不动。装不上只记红、不中断（读回还会再判一次）。登录由创始人以他的身份做一次（docs/ops.md 第五节「会话用户的 grok」）
+setup_grok() {
+  step "会话用户的 grok 命令行（${SESSION_USERS[*]}；官方安装脚本，以会话用户自己的身份装，只在没有时装）"
+  local u
+  for u in "${SESSION_USERS[@]}"; do
+    if ! id "$u" >/dev/null 2>&1; then
+      pending "$u 这个用户还没有，grok 没装（建了再跑一遍）"
+      continue
+    fi
+    ensure_grok "$u" "$(grok_bin "$u")" "$GROK_INSTALL_URL"
+  done
+}
+
 setup_app_config() {
   step "应用的本机配置（/etc/fleet-dao 下的环境文件；应用本身由 deploy/release.sh 发布）"
   local name spec file key what content api_ok=1
@@ -861,6 +882,7 @@ readback() {
   readback_node_cache
   readback_pnpm
   readback_cursor_agent
+  readback_grok
   readback_wireguard
   readback_firewall
   readback_app_config
@@ -1283,6 +1305,20 @@ readback_cursor_agent() {
   done
 }
 
+# 会话用户的 grok：以他的身份照引擎的判法跑 --version，没装、跑不成都判红（lib/grok.sh）；他家里的登录态只看在不在、属主、
+# 权限 600、非空，不读内容：还没登录记待配，在却不对判红。grok 认不认不在这里查：路由探针真起一次会话判（docs/ops.md 第五节）
+readback_grok() {
+  local u
+  for u in "${SESSION_USERS[@]}"; do
+    if ! id "$u" >/dev/null 2>&1; then
+      pending "$u 这个用户还没有，grok 和它的登录态没查"
+      continue
+    fi
+    check_grok "$u" "$(grok_bin "$u")"
+    check_grok_login "$u" "$(grok_auth_file "$u")" "$(grok_bin "$u")"
+  done
+}
+
 readback_wireguard() {
   local latest
   if [[ -z "$FLEET_WG_HK_PUBLIC_KEY" || -z "$FLEET_WG_HK_ENDPOINT" ]]; then
@@ -1337,6 +1373,7 @@ main() {
     setup_pnpm
     setup_session_pnpm
     setup_cursor_agent
+    setup_grok
     setup_app_config
     setup_web_upload
     setup_demo_scopes

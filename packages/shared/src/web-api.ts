@@ -469,9 +469,12 @@ export const ROUTE_PROBE_STALE_MINUTES = 45;
  * 按一次的成本放慢的执行方式（design 第九节「路由探针」：贵的放慢）：上一次探通了，隔这么久才再真探；没通的照样每轮探
  * （没登录、连不上的报错走不到模型，不扣用量）。没列的每轮都探。cursor-agent：一次最小会话约 1.3 万输入 token
  * （2026-09-27 本机实测），扣的是按月的包含用量、和创始人在编辑器里用的是同一份——每轮都探一个月约 2900 次，2 小时一次约 360 次。
+ * grok：同一个道理——SuperGrok 订阅按周的额度、和创始人在 grok.com 上用的是同一份，一次最小会话光系统提示就一万多输入 token
+ * （法国真跑的过程记录：一次模型调用约 1.5 万输入、其中 1.2 万走缓存）。
  */
 export const ROUTE_PROBE_HOST_EVERY_MINUTES: Readonly<Partial<Record<HostId, number>>> = {
   'cursor-agent': 120,
+  grok: 120,
 };
 
 /** 这种执行方式探通之后隔多久再真探（分钟）。 */

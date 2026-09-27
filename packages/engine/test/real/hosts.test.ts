@@ -1,12 +1,13 @@
-// 执行方式的驱动（#212）：会话用户怎么定、cursor-agent 的起法（会话用户自己读 API 密钥、现找版本目录）、两家驱动拼的参数、
-// 报告整理成的同一个形状（读不到的不记成 0）。起法的两段 sh 都真跑（本机的 sh、假的 cursor-agent 脚本），每条失败路径都故意
-// 造一次；看属主、权限的那几条只在 Linux 上跑（Windows 的 Git Bash 在 NTFS 上表示不了 600）。
+// 执行方式的驱动（#212、#266）：会话用户怎么定、cursor-agent 的起法（会话用户自己读 API 密钥、现找版本目录）、grok 的起法
+// （会话用户先看它在不在）、三家驱动拼的参数、报告整理成的同一个形状（读不到的不记成 0）。起法的 sh 都真跑（本机的 sh、假的
+// cursor-agent / grok 脚本），每条失败路径都故意造一次；看属主、权限的那几条只在 Linux 上跑（Windows 的 Git Bash 在 NTFS 上
+// 表示不了 600）。
 import { randomBytes, randomUUID } from 'node:crypto';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { SessionUser } from '@fleet-dao/adapters';
+import { type GrokRunSpec, judgeRun, runGrok, type SessionUser } from '@fleet-dao/adapters';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   CURSOR_KEY_BAD,
@@ -17,6 +18,10 @@ import {
   cursorLaunchCommand,
   DEFAULT_CURSOR_API_KEY_FILE,
   DEFAULT_CURSOR_VERSIONS_DIR,
+  DEFAULT_GROK_BIN,
+  GROK_MISSING,
+  grokLaunchCommand,
+  grokReport,
   type HostRunners,
   type HostRunSpec,
   hostDrivers,
@@ -30,8 +35,13 @@ import {
   CURSOR_NO_LOGIN,
   CURSOR_SESSION,
   type FakeCursorScript,
+  type FakeGrokScript,
   fakeCursorRun,
+  fakeGrokRun,
   fakeRun,
+  GROK_NOT_SIGNED_IN,
+  grokAnswered,
+  grokRefused,
 } from './fixtures.ts';
 
 describe('会话用户怎么定', () => {
@@ -64,9 +74,9 @@ describe('会话用户怎么定', () => {
 });
 
 describe('接上的执行方式', () => {
-  it('Claude Code 和 cursor-agent；报错里的说法跟着这张表', () => {
-    expect([...WIRED_HOSTS]).toEqual(['claude-code', 'cursor-agent']);
-    expect(wiredHostNames()).toBe('Claude Code、Cursor Agent');
+  it('Claude Code、cursor-agent 和 grok；报错里的说法跟着这张表', () => {
+    expect([...WIRED_HOSTS]).toEqual(['claude-code', 'cursor-agent', 'grok']);
+    expect(wiredHostNames()).toBe('Claude Code、Cursor Agent、Grok 命令行');
   });
 });
 
@@ -461,6 +471,172 @@ describe('装机脚本找 cursor-agent 和引擎起它挑的是同一个（改�
   });
 });
 
+// ---- grok 的起法：会话用户先看自己家里的 grok 在不在、能不能跑，在就 exec 成它
+
+const HOME_GROK = '/home/u/.grok/bin/grok';
+
+/** 假的 grok：能跑的先报自己是哪一个，再一行一个报参数；不能跑的（没有执行权限）不该被起。 */
+function grokBin(file: string, label: string, runnable = true) {
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(
+    file,
+    runnable ? `#!/bin/sh\necho "${label}"\nfor a in "$@"; do echo "[$a]"; done\n` : `echo "${label}"\n`,
+  );
+  chmodSync(file, runnable ? 0o755 : 0o644);
+}
+
+/** 照 grokLaunchCommand 真跑一次（位置换成这次造的；Windows 上用 Git 的 sh）。 */
+function grokLaunch(bin: string, args: string[] = []) {
+  const [sh, flag, script, name, path, ...rest] = grokLaunchCommand(HOME_GROK);
+  expect([sh, flag, name, path, rest]).toEqual(['/bin/sh', '-c', 'grok', HOME_GROK, []]);
+  const r = runChild(SH, [flag as string, script as string, name as string, posix(bin), ...args]);
+  return { status: r.status, lines: r.stdout.trim().split('\n'), stdout: r.stdout, stderr: r.stderr.trim() };
+}
+
+// 同步起 sh：不设 vitest 的超时，卡死由子进程自己的上限管（为什么见 ../child.ts 开头）。
+describe('grokLaunchCommand：会话用户先看自己家里的 grok 在不在、能不能跑，在就 exec 成它', {
+  timeout: 0,
+}, () => {
+  it('在、能跑：exec 成它，插头的参数原样交过去（带空格的也不拆）', () => {
+    const bin = join(root, 'home', '.grok', 'bin', 'grok');
+    grokBin(bin, 'grok');
+    const r = grokLaunch(bin, ['--prompt-file', '/dev/stdin', '-m', 'grok-4.7', '--cwd', '/w/a b']);
+    expect(r).toMatchObject({ status: 0, stderr: '' });
+    expect(r.lines).toEqual([
+      'grok',
+      '[--prompt-file]',
+      '[/dev/stdin]',
+      '[-m]',
+      '[grok-4.7]',
+      '[--cwd]',
+      '[/w/a b]',
+    ]);
+  });
+
+  it('不在、不能跑、是个目录：退出 127，stderr 写清没装、在哪（失败分流认成执行方式配置不对），一样都没起', () => {
+    const missing = join(root, 'nowhere', 'grok');
+    const broken = join(root, 'broken', 'grok');
+    grokBin(broken, 'broken', false);
+    const dir = join(root, 'dir', 'grok');
+    mkdirSync(dir, { recursive: true });
+    for (const bin of [missing, broken, dir]) {
+      const r = grokLaunch(bin, ['--version']);
+      expect(r.status).toBe(127);
+      expect(r.stdout).toBe('');
+      expect(r.stderr).toBe(
+        `${GROK_MISSING}：${posix(bin)} 不在或不能跑（会话用户家里没装 grok 命令行，docs/ops.md 第五节「会话用户的 grok」）`,
+      );
+    }
+  });
+
+  it('位置要写绝对路径、不带控制字符；命令行里没有换行这类控制字符（要经 sudo 记日志）', () => {
+    expect(() => grokLaunchCommand('.grok/bin/grok')).toThrow('grok 的位置要写绝对路径');
+    expect(() => grokLaunchCommand('/home/u/grok\n')).toThrow('控制字符');
+    for (const arg of grokLaunchCommand(HOME_GROK)) {
+      expect([...arg].every((c) => (c.codePointAt(0) ?? 0) >= 0x20 && c !== '\u007f')).toBe(true);
+    }
+  });
+
+  it('本机配置：默认在会话用户家里（官方安装脚本装的位置，{user} 换成会话用户）；能改；写了相对路径就起不来', () => {
+    const env = { FLEET_MACHINE_NAME: '法国', DATABASE_URL: 'postgres:///fleet' };
+    const config = realPortsConfigFromEnv(env);
+    expect(config.grokBin).toBe(DEFAULT_GROK_BIN);
+    expect(agentCommands(config).grokCommand('fleet-agent-carpool')).toEqual(
+      grokLaunchCommand('/home/fleet-agent-carpool/.grok/bin/grok'),
+    );
+    const custom = realPortsConfigFromEnv({ ...env, FLEET_GROK_BIN: '/opt/{user}/grok' });
+    expect(agentCommands(custom).grokCommand('fleet-agent-carpool').at(-1)).toBe(
+      '/opt/fleet-agent-carpool/grok',
+    );
+    expect(() => realPortsConfigFromEnv({ ...env, FLEET_GROK_BIN: 'grok' })).toThrow(
+      'FLEET_GROK_BIN 要写绝对路径',
+    );
+  });
+
+  it('位置和装机脚本装、查的一样（deploy/lib/grok.sh 的 GROK_BIN）', () => {
+    const lib = fileURLToPath(new URL('../../../../deploy/lib/grok.sh', import.meta.url));
+    const line = readFileSync(lib, 'utf8').match(/^GROK_BIN='([^']*)'$/m);
+    expect(line?.[1]).toBe(DEFAULT_GROK_BIN);
+  });
+});
+
+// 真插头（runGrok）接真起法（grokLaunchCommand）：提示词经插头垫的 cat 进真管道，再经起法 exec 到 grok；没装就退出 127、
+// 判没有终帧。不经帮手（不进 scope），只验这两层接得上。Windows 上起不了 /bin/sh。
+describe.skipIf(!onPosix)('grok 的真插头接真起法', () => {
+  /** 假 grok：记下 stdin 是不是真管道、读到的提示词、参数；照 streaming-json 回 OK，终帧回 -s / -r 给的号和 <模型>-build。 */
+  function grokRig() {
+    const bin = join(root, 'home', '.grok', 'bin', 'grok');
+    const log = join(root, 'grok.log');
+    mkdirSync(dirname(bin), { recursive: true });
+    writeFileSync(
+      bin,
+      [
+        '#!/bin/sh',
+        'if [ -p /dev/stdin ]; then kind=fifo; else kind=not-a-pipe; fi',
+        'prompt=$(cat)',
+        `{ echo "$kind"; printf '%s\\n' "$prompt"; for a in "$@"; do printf '[%s]\\n' "$a"; done; } >'${log}'`,
+        'sid=; model=',
+        'while [ $# -gt 0 ]; do case $1 in -s|-r) sid=$2; shift ;; -m) model=$2; shift ;; esac; shift; done',
+        `printf '%s\\n' '{"type":"text","data":"O"}' '{"type":"text","data":"K"}'`,
+        `printf '{"type":"end","stopReason":"end_turn","sessionId":"%s","usage":{"input_tokens":3,"output_tokens":1},"num_turns":1,"modelUsage":{"%s-build":{"inputTokens":3,"outputTokens":1}}}\\n' "$sid" "$model"`,
+        '',
+      ].join('\n'),
+    );
+    chmodSync(bin, 0o755);
+    return { bin, log: () => readFileSync(log, 'utf8').trim().split('\n') };
+  }
+  const grokSpec = (session: GrokRunSpec['session']): GrokRunSpec => ({
+    runId: randomUUID(),
+    cwd: root,
+    prompt: '只回 OK',
+    model: 'grok-4.7',
+    session,
+    alwaysApprove: false,
+    env: { base: { PATH: '/usr/bin:/bin' }, fleetApi: '', fleetToken: '' },
+  });
+
+  it('开新会话、续会话：提示词经真管道到了 grok，参数原样到了；终帧回的号和实际模型核得上，判正常结束、回答 OK', async () => {
+    const rig = grokRig();
+    const id = randomUUID();
+    for (const session of [
+      { mode: 'new', id },
+      { mode: 'resume', id },
+    ] as const) {
+      const report = grokReport(await runGrok(grokSpec(session), { command: grokLaunchCommand(rig.bin) }));
+      expect(report).toMatchObject({ sessionId: id, actualModel: 'grok-4.7-build', answer: 'OK' });
+      expect(judgeRun(report.facts)).toMatchObject({ outcome: 'ok', reason: 'answered' });
+      const [kind, prompt, ...args] = rig.log();
+      expect([kind, prompt]).toEqual(['fifo', '只回 OK']);
+      expect(args).toEqual(
+        [
+          '--prompt-file',
+          '/dev/stdin',
+          '--output-format',
+          'streaming-json',
+          '-m',
+          'grok-4.7',
+          '--cwd',
+          root,
+          session.mode === 'new' ? '-s' : '-r',
+          id,
+        ].map((a) => `[${a}]`),
+      );
+    }
+  });
+
+  it('会话用户家里没装：起法退出 127，没有终帧，原因写没装、在哪（失败分流认成执行方式配置不对）', async () => {
+    const bin = join(root, 'nowhere', '.grok', 'bin', 'grok');
+    const report = grokReport(
+      await runGrok(grokSpec({ mode: 'new', id: randomUUID() }), { command: grokLaunchCommand(bin) }),
+    );
+    expect(report.facts.exitCode).toBe(127);
+    const verdict = judgeRun(report.facts);
+    expect(verdict).toMatchObject({ outcome: 'failed', reason: 'no_result' });
+    expect(verdict.detail).toContain(`${GROK_MISSING}：${bin} 不在或不能跑`);
+    expect(report.rawError).toContain('会话用户家里没装 grok 命令行');
+  });
+});
+
 // ---- 两家驱动：拼的参数、整理成的同一个形状
 
 function spec(over: Partial<HostRunSpec> = {}): HostRunSpec {
@@ -489,6 +665,7 @@ function drivers(run: HostRunners) {
   return hostDrivers({
     claudeCommand: (user) => [`/opt/fake/${user}/reclaude`],
     cursorCommand: (user) => [`/opt/fake/${user}/cursor-agent`],
+    grokCommand: (user) => [`/opt/fake/${user}/grok`],
     run,
   });
 }
@@ -581,6 +758,127 @@ describe('cursor-agent 的驱动', () => {
       '去 Cursor 后台（cursor.com/dashboard/api）重新生成一把 API 密钥，照 docs/ops.md 第五节「会话用户的 Cursor 密钥」那条命令放进「法国」（fleet-agent-carpool 家里的 ~/.cursor/fleet-api-key）',
     );
     expect(fix).not.toContain('cursor-agent login');
+  });
+});
+
+describe('grok 的驱动', () => {
+  const grokWith = (script: FakeGrokScript) => {
+    const fake = fakeGrokRun(() => script);
+    return { fake, driver: drivers({ grok: fake.run }).grok };
+  };
+  const grokSpec = (over: Partial<HostRunSpec> = {}) =>
+    spec({ model: 'grok-4.7', session: { mode: 'new', id: randomUUID() }, ...over });
+
+  it('会话号由我们定（UUID，开新会话带它 -s），但它真开了会话才算数：终帧回的就是它；插头用的是会话用户家里那一份', async () => {
+    const { fake, driver } = grokWith({ frames: grokAnswered() });
+    const fresh = driver.newSessionId('run-1');
+    expect(fresh.known).toBe(false);
+    expect(fresh.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    const report = await driver.run(grokSpec({ session: { mode: 'new', id: fresh.id } }), {});
+    expect(fake.specs[0]?.session).toEqual({ mode: 'new', id: fresh.id });
+    expect(report.sessionId).toBe(fresh.id);
+    expect(fake.options[0]?.command).toEqual(['/opt/fake/fleet-agent-carpool/grok']);
+  });
+
+  it('开了会话、没到终帧就断了（半路被停、连不上）：会话号还是我们给它的那个（下次 -r 续得上）；一帧都没有就不给', async () => {
+    const id = randomUUID();
+    const cut = await grokWith({ replay: 'grok-edit-commit', replayLines: 30, exitCode: null }).driver.run(
+      grokSpec({ session: { mode: 'new', id } }),
+      {},
+    );
+    expect(cut.facts).not.toHaveProperty('terminal');
+    expect(cut.sessionId).toBe(id);
+    const nothing = await grokWith({ stderr: 'Error: connection reset\n', exitCode: 1 }).driver.run(
+      grokSpec({ session: { mode: 'new', id } }),
+      {},
+    );
+    expect(nothing).not.toHaveProperty('sessionId');
+  });
+
+  it('干活的会话放开命令（--always-approve），探针不放（要权限的工具一律被拒）；续会话照原号 -r；模型串照路由', async () => {
+    const { fake, driver } = grokWith({ replay: 'grok-resume' });
+    const id = randomUUID();
+    await driver.run(grokSpec({ purpose: 'work', session: { mode: 'resume', id } }), {});
+    await driver.run(grokSpec({ purpose: 'probe' }), {});
+    expect(fake.specs[0]).toMatchObject({
+      alwaysApprove: true,
+      model: 'grok-4.7',
+      session: { mode: 'resume', id },
+    });
+    expect(fake.specs[1]).toMatchObject({ alwaysApprove: false, session: { mode: 'new' } });
+  });
+
+  it('要 fork：拒（grok 没有我们用得上的 fork，换了账号池走接力），插头不起', async () => {
+    const { fake, driver } = grokWith({ frames: grokAnswered() });
+    expect(driver.canFork).toBe(false);
+    await expect(
+      driver.run(grokSpec({ session: { mode: 'fork', from: randomUUID(), id: randomUUID() } }), {}),
+    ).rejects.toThrow('grok 不 fork');
+    expect(fake.count()).toBe(0);
+  });
+
+  it('报告：token 照终帧（含缓存读写），实际模型取终帧 modelUsage 的键；没有会话累计花费、上下文大小；回答是最后一段话', async () => {
+    const { driver } = grokWith({ replay: 'grok-edit-commit' });
+    const report = await driver.run(grokSpec(), {});
+    expect(report.usage).toEqual({
+      inputTokens: 42438,
+      outputTokens: 955,
+      cacheReadTokens: 68992,
+      cacheWriteTokens: 0,
+    });
+    expect(report.actualModel).toBe('grok-4.7-build');
+    expect(report).not.toHaveProperty('sessionCostUsd');
+    expect(report).not.toHaveProperty('contextTokens');
+    expect(report).not.toHaveProperty('rawError');
+    expect(report.answer).toBe('好了');
+    expect(report.facts).toMatchObject({ exitCode: 0, terminal: { isError: false } });
+    expect(judgeRun(report.facts)).toMatchObject({ outcome: 'ok' });
+  });
+
+  it('终帧里的用量读不到、不是数：那几项不给（不记成 0）；一句话都没说：没有回答', async () => {
+    const { driver } = grokWith({
+      frames: [
+        {
+          type: 'end',
+          stopReason: 'end_turn',
+          usage: { input_tokens: 5, output_tokens: 'x', cache_read_input_tokens: null },
+          modelUsage: { 'grok-4.7-build': {} },
+        },
+      ],
+    });
+    const report = await driver.run(grokSpec(), {});
+    expect(report.usage).toEqual({ inputTokens: 5 });
+    expect(report).not.toHaveProperty('answer');
+    const bare = grokWith({ frames: [{ type: 'end', stopReason: 'end_turn', modelUsage: {} }] });
+    const r2 = await bare.driver.run(grokSpec(), {});
+    expect(r2.usage).toEqual({});
+    expect(r2).not.toHaveProperty('actualModel');
+  });
+
+  it('没登录（error 帧和 stderr 各一遍、退出 1、没有终帧）：原话进 rawError、只一份；没有会话号、没有用量', async () => {
+    const { driver } = grokWith(grokRefused(GROK_NOT_SIGNED_IN));
+    const report = await driver.run(grokSpec(), {});
+    expect(report.rawError).toBe(
+      'Error: Not signed in. To authenticate without a browser, run: ⏎ grok login --device-code ⏎ ' +
+        'Alternatively, set the XAI_API_KEY environment variable or run `grok login` on a machine with a browser.',
+    );
+    expect(report).not.toHaveProperty('sessionId');
+    expect(report.usage).toEqual({});
+    expect(judgeRun(report.facts)).toMatchObject({ outcome: 'failed', reason: 'no_result' });
+  });
+
+  it('实际回话的是别的一代（点名 grok-4.7、回 grok-4.6-build）：判模型不符；带渠道后缀的同一代不算', async () => {
+    const other = await grokWith({ frames: grokAnswered('OK', 'grok-4.6-build') }).driver.run(grokSpec(), {});
+    expect(judgeRun(other.facts)).toMatchObject({ outcome: 'failed', reason: 'model_mismatch' });
+    const same = await grokWith({ frames: grokAnswered('OK', 'grok-4.7-build') }).driver.run(grokSpec(), {});
+    expect(judgeRun(same.facts)).toMatchObject({ outcome: 'ok' });
+  });
+
+  it('登录失效的修法：在哪台机器上以会话用户跑 grok login --device-code，在浏览器里确认；照 ops 哪一节', () => {
+    const { driver } = grokWith({});
+    expect(driver.loginFix('「法国」', 'fleet-agent-carpool')).toBe(
+      '在「法国」上以 fleet-agent-carpool 跑 grok login --device-code（docs/ops.md 第五节「会话用户的 grok」），在任意设备的浏览器里打开它给的链接、确认那串码',
+    );
   });
 });
 

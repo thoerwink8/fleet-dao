@@ -60,6 +60,11 @@ export interface GrokStreamSummary {
   plan?: PlanStep[];
   /** error 帧的原文。 */
   errors: string[];
+  /**
+   * 最后一段回答（最后一次 say 的全文，截到 2000 字）：终帧里没有回答正文，探针靠它看是不是只回了 OK。
+   * 一句话都没说就没有。
+   */
+  answer?: string;
   maxTurnsReached: boolean;
   modelCalls: number;
   end?: GrokEnd;
@@ -197,7 +202,8 @@ export class GrokStreamReader {
     this.#text = '';
     if (!text) return;
     this.#s.startedWork = true;
-    this.#emit(effect, 'say', { text: cut(text, 2000), source: 'stream' } satisfies SayPayload);
+    this.#s.answer = cut(text, 2000);
+    this.#emit(effect, 'say', { text: this.#s.answer, source: 'stream' } satisfies SayPayload);
   }
 
   #toolCall(frame: Record<string, unknown>, effect: LineEffect): void {

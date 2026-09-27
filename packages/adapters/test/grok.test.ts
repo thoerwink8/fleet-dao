@@ -1,5 +1,5 @@
 // Grok 命令行插头：参数、过程记录解析（真跑夹具）、起停与判定（假执行体回放夹具）。
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ProgressEvent } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
@@ -124,6 +124,20 @@ describe('grok 过程记录', () => {
     });
     expect(summary.unknownFrames).toEqual({});
     expect(summary.errors).toEqual([]);
+    // 终帧里没有回答正文：最后一段回答是最后一次 say（探针靠它看是不是只回了 OK）
+    expect(summary.answer).toBe('好了');
+  });
+
+  it('最后一段回答：只认最后一次说的整段；一句都没说就没有，不记成空串', () => {
+    const reader = new GrokStreamReader({ runId: 'r1', cwd: '/w', now: () => NOW });
+    expect(reader.summary().answer).toBeUndefined();
+    reader.read(JSON.stringify({ type: 'text', data: '先看看' }));
+    reader.read(JSON.stringify({ type: 'usage', usage: {} }));
+    reader.read(JSON.stringify({ type: 'text', data: 'O' }));
+    reader.read(JSON.stringify({ type: 'text', data: 'K' }));
+    // 还没遇到下一帧：flush 时才交出去（进程没发终帧就断了也一样）
+    reader.flush();
+    expect(reader.summary().answer).toBe('OK');
   });
 
   it('待办清单：plan 帧是整张单子，状态换成 fleet 的写法', () => {
@@ -299,6 +313,46 @@ describe('grok 起停', () => {
     });
     expect(kinds.map((e) => e.kind)).toEqual(['say']);
     expect(judgeRun(grokRunSummary(report).facts).reason).toBe('no_result');
+  });
+
+  it('没登录（法国实跑 2026-09-27：error 帧和 stderr 各打一遍、退出 1、没有终帧）：同一句只留 stderr 那一份', async () => {
+    const said =
+      'Not signed in. To authenticate without a browser, run:\n  grok login --device-code\n\n' +
+      'Alternatively, set the XAI_API_KEY environment variable or run `grok login` on a machine with a browser.';
+    const out = tempDir();
+    const frames = join(out, 'frames.ndjson');
+    writeFileSync(frames, `${JSON.stringify({ type: 'error', message: said })}\n`);
+    const report = await runGrok(spec(tempDir()), {
+      command: fakeAgent({ replay: frames, stderr: `Error: ${said}\n`, exitCode: 1 }),
+    });
+    const facts = grokRunSummary(report).facts;
+    expect(facts.lastWords).toBe(
+      'Error: Not signed in. To authenticate without a browser, run: ⏎ grok login --device-code ⏎ ' +
+        'Alternatively, set the XAI_API_KEY environment variable or run `grok login` on a machine with a browser.',
+    );
+    expect(judgeRun(facts)).toMatchObject({ outcome: 'failed', reason: 'no_result' });
+  });
+
+  it('error 帧里的话 stderr 里没有：照旧拼上，不丢', () => {
+    const reader = new GrokStreamReader({ runId: 'r1', cwd: '/w', now: () => NOW });
+    reader.read(JSON.stringify({ type: 'error', message: "Couldn't start session: 403" }));
+    const facts = grokRunSummary({
+      runId: 'r1',
+      requestedModel: 'grok-4.7',
+      session: { mode: 'new', id: SESSION },
+      stream: reader.summary(),
+      exitCode: 1,
+      signal: null,
+      stragglers: 0,
+      leftovers: 0,
+      stderrTail: 'warning: something else\n',
+      startedAt: NOW.toISOString(),
+      endedAt: NOW.toISOString(),
+      wallMs: 1,
+      lines: 1,
+      droppedLines: 0,
+    }).facts;
+    expect(facts.lastWords).toBe("Couldn't start session: 403 ⏎ warning: something else");
   });
 
   it('额度用完（402 / 要订阅）：判额度用满', async () => {

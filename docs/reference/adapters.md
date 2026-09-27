@@ -358,6 +358,7 @@ grok -p "<prompt>" --output-format streaming-json \
 - **GK-08** 给定 grok.com 回 402 或撞周限，当分类，应当判「账号额度」（停这个账号池），不是「上游抖动」。（WD `execution-profiles.json` reason；WD `scripts/lib/failure-class.mjs:12-15`：xAI 额度用完被记成 23/145 的成功率，而同模型走 Cursor 好好的）
 - **GK-09** 给定装机，当从 npm 镜像装 `@xai-official/grok@latest`，应当被拦：npmmirror 的 `latest` 标签指向只有 macOS 的 0.1.4；要钉版本并走官方源，或者直接用自更新二进制。（WD `NEW-MACHINE.md` §7 第 1 条）
 - **GK-10** 给定无头模式，当适配器要给 grok 发任务，应当只用 `-p` / `--prompt-file` 或 ACP，**不许**往 TUI 里注入文本：TUI 首启的 opt-in 横幅会吃掉注入，`\n` 会被拆成 N 条消息，todo 确认态会停着等回车。（判例 `grok-tui-optin-banner-trap`、`tui-newline-per-agent`、`tui-hint-line-is-the-mode-oracle`）
+- **GK-11** 给定没登录、stdin 不是真管道、`-m` 点的型号它不认，当 grok 在开会话之前就退出（只有一个 error 帧或一帧都没有、退出 1），应当不把我们给的 `-s` 会话号当成建成了：拿它 `-r`，本地没有就去服务端找，报「Failed to restore session from remote: … 404 Not Found」。见到终帧或报错以外的帧才算会话开成了（引擎 `real/hosts.ts` 的 `grokReport`，#266）。（2026-09-27 法国实跑 1.0.41：没登录「Not signed in. …」、型号不认「Couldn't set model '…': Invalid params: "unknown model id"」都是 error 帧和 stderr 各一遍；stdin 是 socketpair 时只在 stderr 报「Failed to read '/dev/stdin': No such device or address (os error 6)」）
 
 **风险（没查成）**：旧用量采集器从 `~/.grok/sessions/<cwd>/<会话>/updates.jsonl` 读 `turn_completed`（WD `execution-usage.mjs:841-857`），而 1.0.41 的随装文档说 `sessions/` 是 SQLite（`14-headless-mode.md:613`）。版本漂移后旧读法可能已经读不到数据，新系统不要沿用。
 

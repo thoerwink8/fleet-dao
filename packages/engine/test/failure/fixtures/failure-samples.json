@@ -1377,6 +1377,126 @@
         "message": "进程退出（退出码 1），没有终帧：Error: Failed to trust workspace at /var/lib/fleet-work/_route-probe/fleet-agent-carpool. Please check permissions."
       },
       "expect": { "action": "swapRoute", "rule": "CF1", "avoid": "route", "alert": true }
+    },
+    {
+      "id": "X91",
+      "provenance": "production",
+      "origin": "法国 2026-09-27 实跑 grok 1.0.41（照插头的起法、GROK_HOME 指一个空目录）：一样凭据都没有时 error 帧和 stderr 各打一遍、退出 1、没有终帧；插头只留 stderr 那一份（grokRunFacts），前半句是会话端口按插头判定拼的（#266）",
+      "evidence": {
+        "hostId": "grok",
+        "code": "no_result",
+        "exitCode": 1,
+        "message": "进程退出（退出码 1），没有终帧：Error: Not signed in. To authenticate without a browser, run: ⏎ grok login --device-code ⏎ Alternatively, set the XAI_API_KEY environment variable or run `grok login` on a machine with a browser."
+      },
+      "expect": {
+        "action": "swapRoute",
+        "rule": "AU7",
+        "avoid": "pool",
+        "alert": true,
+        "routeOutcome": "neutral"
+      }
+    },
+    {
+      "id": "X92",
+      "provenance": "format",
+      "origin": "xai-org/grok-build f0e3be1 的 crates/codegen/xai-grok-login/src/error.rs：令牌过期、又没有能续期的凭据（TokenExpiredNoRefresh）",
+      "evidence": {
+        "hostId": "grok",
+        "message": "Token expired. Run `grok login` to re-authenticate."
+      },
+      "expect": { "action": "swapRoute", "rule": "AU7", "avoid": "pool", "alert": true }
+    },
+    {
+      "id": "X93",
+      "provenance": "format",
+      "origin": "同 X92：续期令牌被认证服务拒了（invalid_grant：过期、被撤、重用过，RefreshTokenRejected 的 user_message）",
+      "evidence": {
+        "hostId": "grok",
+        "message": "Your session has expired. Run `grok login` to sign in again."
+      },
+      "expect": { "action": "swapRoute", "rule": "AU7", "avoid": "pool", "alert": true }
+    },
+    {
+      "id": "X94",
+      "provenance": "format",
+      "origin": "同 X92：几种续期办法都试完了（RecoveryExhausted）；这一句不带 grok login，规则单认它",
+      "evidence": {
+        "hostId": "grok",
+        "message": "Auth recovery exhausted; re-authentication required."
+      },
+      "expect": { "action": "swapRoute", "rule": "AU7", "avoid": "pool", "alert": true }
+    },
+    {
+      "id": "X95",
+      "provenance": "production",
+      "origin": "法国 2026-09-27 实跑 grok 1.0.41：--prompt-file /dev/stdin 而 stdin 是 socketpair（Node 起子进程给的，插头没垫 cat 就是这样）时的原话，只在 stderr、退出 1；是起法坏了，不是没登录",
+      "evidence": {
+        "hostId": "grok",
+        "code": "no_result",
+        "exitCode": 1,
+        "message": "进程退出（退出码 1），没有终帧：Error: Failed to read '/dev/stdin': No such device or address (os error 6)"
+      },
+      "expect": {
+        "action": "swapRoute",
+        "rule": "CF1",
+        "avoid": "route",
+        "alert": true,
+        "routeOutcome": "fail"
+      }
+    },
+    {
+      "id": "X96",
+      "provenance": "format",
+      "origin": "会话用户家里没装 grok：引擎起 grok 的那段 sh（engine/src/real/hosts.ts 的 grokLaunchCommand）看 ~/.grok/bin/grok 不能跑就这么说、退出 127；和 Node 起不来时一个样子，按执行方式或路由配置不对认（#266）",
+      "evidence": {
+        "hostId": "grok",
+        "code": "no_result",
+        "exitCode": 127,
+        "message": "进程退出（退出码 127），没有终帧：spawn grok ENOENT：/home/<会话用户>/.grok/bin/grok 不在或不能跑（会话用户家里没装 grok 命令行，docs/ops.md 第五节「会话用户的 grok」）"
+      },
+      "expect": {
+        "action": "swapRoute",
+        "rule": "CF1",
+        "avoid": "route",
+        "alert": true,
+        "routeOutcome": "fail"
+      }
+    },
+    {
+      "id": "X97",
+      "provenance": "production",
+      "origin": "法国 2026-09-27 实跑 grok 1.0.41：-m 点了一个它不认的型号，error 帧和 stderr 各一遍、退出 1、没有终帧（插头只留 stderr 那一份）",
+      "evidence": {
+        "hostId": "grok",
+        "code": "no_result",
+        "exitCode": 1,
+        "message": "进程退出（退出码 1），没有终帧：Error: Couldn't set model 'grok-9.9-nope': Invalid params: \"unknown model id\". Run 'grok models' to see available models."
+      },
+      "expect": {
+        "action": "swapModel",
+        "rule": "MD1",
+        "avoid": "model",
+        "alert": true,
+        "routeOutcome": "fail"
+      }
+    },
+    {
+      "id": "X98",
+      "provenance": "format",
+      "origin": "grok 终帧 modelUsage 的键就是实际回话的模型：点名 grok-4.7、回的是别的一代，插头判模型不符（grokRunFacts；带渠道后缀的 grok-4.7-build 算同一个）",
+      "evidence": {
+        "hostId": "grok",
+        "code": "model_mismatch",
+        "exitCode": 0,
+        "message": "实际回话的模型不是点名的那个：点名 grok-4.7，实际 grok-4.6-build"
+      },
+      "expect": {
+        "action": "swapRoute",
+        "rule": "MD3",
+        "avoid": "route",
+        "alert": true,
+        "routeOutcome": "fail"
+      }
     }
   ],
   "skipped": [

@@ -237,9 +237,10 @@ export async function poolHoldAfterProbe(db: Db, t: ProbeTarget, a: ProbeAttempt
 export interface RouteProbeWiring {
   db: Db;
   trees: WorkTrees;
-  /** 起执行体的命令（绝对路径），和干活的会话同一份：reclaude、cursor-agent 都装在会话用户自己家里。 */
+  /** 起执行体的命令（绝对路径），和干活的会话同一份：reclaude、cursor-agent、grok 都装在会话用户自己家里。 */
   claudeCommand(user: SessionUser): string[];
   cursorCommand(user: SessionUser): string[];
+  grokCommand(user: SessionUser): string[];
   machine: string;
   now?: () => Date;
   log?: RouteProbeJobDeps['log'];
@@ -260,6 +261,7 @@ export function routeProbeJob(w: RouteProbeWiring): () => RouteProbeJobDeps {
   const drivers = hostDrivers({
     claudeCommand: w.claudeCommand,
     cursorCommand: w.cursorCommand,
+    grokCommand: w.grokCommand,
     ...(w.run ? { run: w.run } : {}),
   });
   const deps: ProberDeps = {

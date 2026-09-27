@@ -88,7 +88,10 @@ function viaStdinPipe(command: readonly string[], promptFile: string | undefined
 export function grokRunFacts(report: GrokRunReport): RunFacts {
   const s = report.stream;
   const end = s.end;
-  const words = lastLines([...s.errors, report.stderrTail].join('\n'));
+  // 起不来、没登录这类报错 grok 在 error 帧和 stderr（「Error: 」开头）各打一遍：stderr 里已经有的 error 帧不再拼一遍，
+  // 不然失败信息、「要人拍」的提醒里同一句出现两次（法国实跑 2026-09-27：没登录、型号不对都是这样）
+  const stderr = report.stderrTail;
+  const words = lastLines([...s.errors.filter((e) => !stderr.includes(e)), stderr].join('\n'));
   const observedModel = end?.models[0];
   const mismatch =
     end?.sessionId && end.sessionId !== report.session.id

@@ -2,6 +2,7 @@
 // 探通 → 在线；登录失效、设备被撤销 → 离线写明原因、整池暂停报警，恢复后下一轮转回在线、撤掉报警；额度用满被拒 → 算通、
 // 额度读数记账；回答认不出、超时、起不来、连不上、工作目录交不出去、账号池没定会话用户 → 离线写明原因。每条都故意造一次。
 // cursor 的 API 密钥另走一遍真插头、真起法（经假帮手真起进程，只在 Linux 上）：探针带上了它，哪里都搜不到值。
+// grok（#266）：探通、放慢、没登录、登录过期、没装、型号不认、回话的不是点名那一代、stdin 不是真管道、额度用满，各造一次。
 import { chmodSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,12 +10,13 @@ import { notifications, quotaWindows, routes, scheduleRuns, toRoute } from '@fle
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { ROUTE_PROBE_JOB, runRouteProbeJob } from '../../src/jobs/route-probe.ts';
-import { CURSOR_KEY_BAD, CURSOR_KEY_EXIT, CURSOR_MISSING } from '../../src/real/hosts.ts';
+import { CURSOR_KEY_BAD, CURSOR_KEY_EXIT, CURSOR_MISSING, GROK_MISSING } from '../../src/real/hosts.ts';
 import { registerEngineJobs } from '../../src/real/jobs.ts';
 import { PROBE_DIR, PROBE_PROMPT, routeProbeJob } from '../../src/real/route-probe.ts';
 import { poolHoldKey } from '../../src/real/store-ports.ts';
 import {
   addCursorRoute,
+  addGrokRoute,
   CURSOR_KEY_REJECTED,
   CURSOR_NO_LOGIN,
   CURSOR_SESSION,
@@ -23,10 +25,18 @@ import {
   cursorKeyRig,
   dumpDb,
   type FakeCursorScript,
+  type FakeGrokScript,
   type FakeRunScript,
   fakeCursorRun,
+  fakeGrokRun,
   fakeRun,
   fakeTrees,
+  GROK_NO_STDIN,
+  GROK_NOT_SIGNED_IN,
+  GROK_TOKEN_EXPIRED,
+  GROK_UNKNOWN_MODEL,
+  grokAnswered,
+  grokRefused,
   NOW,
   world,
 } from './fixtures.ts';
@@ -58,12 +68,17 @@ function setup(
     cursor?: (n: number) => FakeCursorScript;
     /** cursor 的路由用真插头、真起法（经假帮手真起进程，fixtures 的 cursorKeyRig），不用假插头。 */
     realCursor?: CursorKeyRig;
+    grok?: (n: number) => FakeGrokScript;
   } = {},
 ) {
   const fake = fakeRun((_, n) => script(n));
   const cursor = fakeCursorRun((_, n) => {
     if (!over.cursor) throw new Error('这条用例不该起 cursor-agent');
     return over.cursor(n);
+  });
+  const grok = fakeGrokRun((_, n) => {
+    if (!over.grok) throw new Error('这条用例不该起 grok');
+    return over.grok(n);
   });
   const trees = fakeTrees(join(root, 'work'));
   if (over.adoptFails) {
@@ -83,21 +98,23 @@ function setup(
     trees: trees.trees,
     claudeCommand: (user) => [`/opt/fake/${user}/reclaude`],
     cursorCommand: rig ? rig.command : (user) => [`/opt/fake/${user}/cursor-agent`],
+    grokCommand: (user) => [`/opt/fake/${user}/grok`],
     machine: '法国',
     now: () => new Date(clock),
     log: rig ? (level, text, fields) => void logs.push(JSON.stringify([level, text, fields])) : quiet,
     sleep: async () => {},
     retryDelayMs: 0,
     run: over.runThrows
-      ? { 'claude-code': thrower, 'cursor-agent': thrower }
+      ? { 'claude-code': thrower, 'cursor-agent': thrower, grok: thrower }
       : rig
-        ? { 'claude-code': fake.run }
-        : { 'claude-code': fake.run, 'cursor-agent': cursor.run },
+        ? { 'claude-code': fake.run, grok: grok.run }
+        : { 'claude-code': fake.run, 'cursor-agent': cursor.run, grok: grok.run },
     ...(rig ? { helper: rig.helper, sudo: rig.sudo } : {}),
   });
   return {
     fake,
     cursor,
+    grok,
     trees,
     logs,
     round: async () => runRouteProbeJob(job()),
@@ -577,6 +594,167 @@ describe('cursor-agent 的路由（#212）：和干活的会话同一个驱动�
 
   it('答了、但答的不是 OK：和 Claude 一样不算探通', async () => {
     const s = setup(answered, { cursor: () => replied('OK, but I cannot run tools here') });
+    await s.round();
+    const down = await row(routeId);
+    expect(down).toMatchObject({ alive: false, probeState: 'failed' });
+    expect(down?.probeDetail).toContain('回答认不出（要的是只回 OK）');
+  });
+});
+
+describe('grok 的路由（#266）：和干活的会话同一个驱动探，判法同一套', () => {
+  let routeId: string;
+  beforeEach(async () => {
+    ({ routeId } = await addGrokRoute(t.db, { stages: ['verify'] }));
+    // 上一次探通是 3 小时前：grok 探通了隔 2 小时再探，这一轮到点了
+    await t.client.query('update routes set probed_at = $2::timestamptz where id = $1', [
+      routeId,
+      new Date(NOW.getTime() - 3 * 60 * 60_000).toISOString(),
+    ]);
+  });
+  const grokHold = async () =>
+    (await t.db.select().from(notifications)).find((n) => n.dedupeKey === poolHoldKey('grok'));
+  const replied = (text = 'OK', model = 'grok-4.7-build'): FakeGrokScript => ({
+    frames: grokAnswered(text, model),
+  });
+
+  it('探通：在线；以唯一的会话用户、不放开命令（不带 --always-approve）、照路由上的模型、我们起的会话号问一句 OK，不给 fleet 命令的地址', async () => {
+    const s = setup(answered, { grok: () => replied() });
+    const run = await s.round();
+    expect(run.online).toEqual(expect.arrayContaining(['carpool', routeId]));
+    const up = await row(routeId);
+    expect(up).toMatchObject({ alive: true, probeState: 'ok' });
+    expect(up?.probeDetail).toMatch(/^答上了：OK · 用时 \d+ 秒$/);
+    expect(s.grok.count()).toBe(1);
+    const [spec] = s.grok.specs;
+    expect(spec).toMatchObject({
+      prompt: PROBE_PROMPT,
+      model: 'grok-4.7',
+      alwaysApprove: false,
+      session: { mode: 'new' },
+      cgroup: { user: 'fleet-agent-carpool' },
+      env: { fleetApi: '', fleetToken: '' },
+    });
+    expect(spec?.session.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    expect(spec?.cwd.replaceAll('\\', '/')).toBe(
+      `${join(root, 'work').replaceAll('\\', '/')}/${PROBE_DIR}/fleet-agent-carpool`,
+    );
+    expect(s.grok.options[0]?.command).toEqual(['/opt/fake/fleet-agent-carpool/grok']);
+  });
+
+  it('探通了：15 分钟后那一轮不再真探、不重写，结论照旧（还在线）；到 2 小时再真探（一次扣的是按周的订阅额度）', async () => {
+    const s = setup(answered, { grok: () => replied() });
+    await s.round();
+    expect(s.grok.count()).toBe(1);
+    s.advance(15);
+    const second = await s.round();
+    expect(s.grok.count()).toBe(1);
+    expect(second.online).toContain(routeId);
+    expect(await row(routeId)).toMatchObject({ alive: true, probeState: 'ok', probedAt: NOW });
+    s.advance(105);
+    await s.round();
+    expect(s.grok.count()).toBe(2);
+    expect((await row(routeId))?.probedAt).toEqual(new Date(NOW.getTime() + 120 * 60_000));
+  });
+
+  it('没登录（error 帧和 stderr 各一遍、退出 1）：同一轮不再试；离线写清在哪台机器以哪个会话用户跑 grok login --device-code，整池暂停；登录后下一轮转回在线、撤掉', async () => {
+    const s = setup(answered, { grok: (n) => (n === 1 ? grokRefused(GROK_NOT_SIGNED_IN) : replied()) });
+    await s.round();
+    expect(s.grok.count()).toBe(1);
+    const down = await row(routeId);
+    expect(down).toMatchObject({ alive: false, probeState: 'failed' });
+    expect(down?.probeDetail).toContain('Grok 登录失效');
+    expect(down?.probeDetail).toContain('Not signed in');
+    expect(down?.probeDetail).toContain(
+      '在「法国」上以会话用户 fleet-agent-carpool 跑 grok login --device-code',
+    );
+    expect(down?.probeDetail).toContain('docs/ops.md 第五节「会话用户的 grok」');
+    const alert = await grokHold();
+    expect(alert).toMatchObject({ level: 'decision', resolvedAt: null });
+    expect(alert?.title).toContain('Grok 登录失效');
+    expect(alert?.body).toContain('grok login --device-code');
+    // 拼车池的 Claude 路由不受牵连
+    expect(await row('carpool')).toMatchObject({ alive: true, probeState: 'ok' });
+
+    s.advance(15);
+    await s.round();
+    expect(await row(routeId)).toMatchObject({ alive: true, probeState: 'ok' });
+    expect((await grokHold())?.resolvedAt).not.toBeNull();
+  });
+
+  it('登录过期、续不上（Token expired）：照登录失效离线、整池暂停，写清重新登录', async () => {
+    const s = setup(answered, { grok: () => grokRefused(GROK_TOKEN_EXPIRED) });
+    await s.round();
+    expect(s.grok.count()).toBe(1);
+    const down = await row(routeId);
+    expect(down).toMatchObject({ alive: false, probeState: 'failed' });
+    expect(down?.probeDetail).toContain('Token expired');
+    expect(down?.probeDetail).toContain('grok login --device-code');
+    expect((await grokHold())?.title).toContain('Grok 登录失效');
+  });
+
+  it('会话用户家里没装 grok（起法那段 sh 退出 127）：离线，原因写没装；不整池暂停', async () => {
+    const s = setup(answered, {
+      grok: () => ({
+        stderr: `${GROK_MISSING}：/home/fleet-agent-carpool/.grok/bin/grok 不在或不能跑（会话用户家里没装 grok 命令行，docs/ops.md 第五节「会话用户的 grok」）`,
+        exitCode: 127,
+      }),
+    });
+    await s.round();
+    const down = await row(routeId);
+    expect(down).toMatchObject({ alive: false, probeState: 'failed' });
+    expect(down?.probeDetail).toContain('执行方式或路由配置不对');
+    expect(down?.probeDetail).toContain('没装 grok 命令行');
+    expect(await grokHold()).toBeUndefined();
+  });
+
+  it("路由上写的型号 grok 不认（Couldn't set model）：离线，认成模型不存在或已下架、带原话；不整池暂停", async () => {
+    const s = setup(answered, { grok: () => grokRefused(GROK_UNKNOWN_MODEL) });
+    await s.round();
+    const down = await row(routeId);
+    expect(down).toMatchObject({ alive: false, probeState: 'failed' });
+    expect(down?.probeDetail).toContain('模型不存在或已下架');
+    expect(down?.probeDetail).toContain('unknown model id');
+    expect(await grokHold()).toBeUndefined();
+  });
+
+  it('答了 OK、回话的却是别的一代（点名 grok-4.7、回 grok-4.6-build）：不算探通，写明点名和实际', async () => {
+    const s = setup(answered, { grok: () => replied('OK', 'grok-4.6-build') });
+    await s.round();
+    const down = await row(routeId);
+    expect(down).toMatchObject({ alive: false, probeState: 'failed' });
+    expect(down?.probeDetail).toContain('点名 grok-4.7，实际 grok-4.6-build');
+    expect(await grokHold()).toBeUndefined();
+  });
+
+  it('stdin 不是真管道（插头没垫上 cat，读 /dev/stdin 报 ENXIO）：认成执行方式或路由配置不对，不当成没登录、不整池暂停', async () => {
+    const s = setup(answered, { grok: () => ({ stderr: `${GROK_NO_STDIN}\n`, exitCode: 1 }) });
+    await s.round();
+    const down = await row(routeId);
+    expect(down).toMatchObject({ alive: false, probeState: 'failed' });
+    expect(down?.probeDetail).toContain('执行方式或路由配置不对');
+    expect(down?.probeDetail).toContain('No such device or address (os error 6)');
+    expect(down?.probeDetail).not.toContain('登录');
+    expect(await grokHold()).toBeUndefined();
+  });
+
+  it('额度用完（订阅的周额度撞顶、要订阅）：算通（在线），原因写额度用满、带原话，同一轮不再试', async () => {
+    const s = setup(answered, {
+      grok: () => ({
+        stderr: 'Error: 403 You have run out of credits or need a Grok subscription\n',
+        exitCode: 1,
+      }),
+    });
+    const run = await s.round();
+    expect(run.online).toContain(routeId);
+    const up = await row(routeId);
+    expect(up).toMatchObject({ alive: true, probeState: 'ok' });
+    expect(up?.probeDetail).toContain('额度用满');
+    expect(s.grok.count()).toBe(1);
+    expect(await grokHold()).toBeUndefined();
+  });
+
+  it('答了、但答的不是 OK：和 Claude 一样不算探通', async () => {
+    const s = setup(answered, { grok: () => replied('OK, but I cannot run tools here') });
     await s.round();
     const down = await row(routeId);
     expect(down).toMatchObject({ alive: false, probeState: 'failed' });
