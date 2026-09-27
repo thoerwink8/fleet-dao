@@ -104,11 +104,19 @@ export {
 } from './labels.ts';
 export { type GateResult, type GitHubReads, gateGitHub, gatePr, runMergeGate } from './merge-gate.ts';
 export {
+  type ChangedFile,
   CLAIM_MATCH_CONTEXT,
+  destructiveIn,
   ENGINE_BOT_LOGIN,
   GATE_CONTEXT,
+  parseRiskPaths,
   REVIEW_TIER,
+  RISK_KINDS,
   RISK_PATHS_FILE,
+  type RiskKind,
+  type RiskPath,
+  type RiskyFile,
+  riskyFiles,
   SECOND_OPINION_CONTEXT,
   TIER_COLUMN,
   TIERS,

@@ -25,6 +25,7 @@
 //    上一轮的会话输出管道已经断了，接不上。工作流被强行终止留下的会话，现在要等工人下一次起来时这一步才收
 //    （每小时对账还没接这一项：#247）。
 
+import type { RiskyFile } from '@fleet-dao/conventions';
 import type { Brief, FlowConfigRead, Rebuttable, Rebuttal, TaskAsk, VerifyReport } from '@fleet-dao/core';
 import type {
   HostId,
@@ -38,13 +39,14 @@ import type {
 import type { MergeOutcome, TestResult } from './decisions/merge.ts';
 import type { PlannedSubtask } from './decisions/plan.ts';
 import type { TriageVerdict } from './decisions/triage.ts';
-import type { CiResult, Feedback, ReviewResult, SyncResult } from './decisions/verify.ts';
+import type { CiResult, Feedback, Finding, ReviewResult, SyncResult } from './decisions/verify.ts';
 import type { JevReply } from './failure/jev.ts';
 import type { TriageChoice } from './failure/types.ts';
 
 export type {
   CiResult,
   Feedback,
+  Finding,
   MergeOutcome,
   PlannedSubtask,
   ReviewResult,
@@ -507,6 +509,37 @@ export interface WaitCiInput extends Scope {
   head: string;
 }
 
+// —— 先审后合：改到的地方碰没碰高风险路径、第二意见写回合并闸认的状态（#253）——
+
+export interface CheckHighRiskInput extends Scope {
+  repo: Repo;
+  prNumber: number;
+}
+
+/** 这个 PR 此刻改到的文件里，落在先审后合路径清单（@fleet-dao/conventions 的 high-risk-paths.json，主线上那份）里的。 */
+export interface CheckHighRiskResult {
+  hits: RiskyFile[];
+}
+
+export interface PostSecondOpinionInput extends Scope {
+  repo: Repo;
+  prNumber: number;
+  /** 贴在哪个头上：头变了旧状态不算，见 merge-gates.ts 的 checkSecondOpinion。 */
+  head: string;
+  /** 第几轮（1 起）：贴进评论标题，和本机第二意见垫片同一个叫法。 */
+  round: number;
+  hits: RiskyFile[];
+  verdict: 'pass' | 'changes';
+  findings: Finding[];
+  /** 审的会话用了哪个模型：贴进评论说明是谁审的。 */
+  model: string;
+}
+
+export interface PostSecondOpinionResult {
+  /** 评论没贴上（卫生检查拦下……）时没有这个字段，调用方只当没贴、不当没查成——状态照样要写上。 */
+  commentUrl?: string;
+}
+
 export interface SyncMainlineInput extends Scope {
   repo: Repo;
   prNumber: number;
@@ -767,6 +800,17 @@ export interface EnginePorts {
   runTests(input: RunTestsInput, ctx: PortContext): Promise<TestResult>;
   openPr(input: OpenPrInput, ctx: PortContext): Promise<PullRequestRef>;
   waitCi(input: WaitCiInput, ctx: PortContext): Promise<CiResult>;
+  /**
+   * 这个 PR 此刻的头碰没碰先审后合的路径（迁移里有删改语句、碰安全）：清单读主线上那份（和合并闸同一份判法），
+   * 文件读这个 PR 现在的（GitHub 现读，带 patch）。清单读不到、文件翻不完页一律抛错，不当「没碰到」。
+   */
+  checkHighRisk(input: CheckHighRiskInput, ctx: PortContext): Promise<CheckHighRiskResult>;
+  /**
+   * 第二意见的结论写回 GitHub：在这个头上贴提交状态 second-opinion（合并闸认的那个 context，通过 = success，必须改 = failure），
+   * 再留一条评论（幂等，按头和轮次去重）。贴状态没权限、GitHub 拒绝一律抛错（这一步没做成，合并闸会一直等）；评论被卫生检查
+   * 拦下、GitHub 一时不通只记进结果里，不影响状态照贴——状态是合并闸认的唯一信号，评论只是给人看。
+   */
+  postSecondOpinion(input: PostSecondOpinionInput, ctx: PortContext): Promise<PostSecondOpinionResult>;
   syncMainline(input: SyncMainlineInput, ctx: PortContext): Promise<SyncResult>;
   mergePr(input: MergePrInput, ctx: PortContext): Promise<MergeOutcome>;
   updateIssueProgress(input: UpdateIssueProgressInput, ctx: PortContext): Promise<void>;
