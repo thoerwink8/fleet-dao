@@ -1319,6 +1319,24 @@
       }
     },
     {
+      "id": "X90",
+      "provenance": "format",
+      "origin": "同 X85：密钥后面多了一个空行（两个换行），$(cat) 会把它去掉，所以前一段 sh 先数换行、多了就不起",
+      "evidence": {
+        "hostId": "cursor-agent",
+        "code": "no_result",
+        "exitCode": 78,
+        "message": "进程退出（退出码 78），没有终帧：Cursor 密钥没放好：有 2 个换行，只该是一行密钥、末尾最多一个换行。文件是 /home/<会话用户>/.cursor/fleet-api-key，照 docs/ops.md 第五节「会话用户的 Cursor 密钥」放好"
+      },
+      "expect": {
+        "action": "swapRoute",
+        "rule": "AU6",
+        "avoid": "pool",
+        "alert": true,
+        "routeOutcome": "neutral"
+      }
+    },
+    {
       "id": "X87",
       "provenance": "format",
       "origin": "cursor-agent 2026.09.26-dd393fe 发行包 6853.index.js：-p 在没信任过的目录里、没带 --trust / --force 时打一段提示就退出；插头把开头那句从整段里捞出来接在最后几行前面（插头固定带 --trust，撞上就是起法坏了）",

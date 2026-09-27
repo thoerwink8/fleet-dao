@@ -2,8 +2,9 @@
 # shellcheck source-path=SCRIPTDIR
 # 会话用户的 Cursor API 密钥：放、查、撤（docs/ops.md 第五节「会话用户的 Cursor 密钥」；判据和做法在 lib/cursor-key.sh）。
 # 在法国以 root 跑；值一律不打，结论里只有路径、属主、权限、字节数。
-#   <密钥> | bash deploy/cursor-key.sh put   从标准输入收一把：以会话用户的身份先核（非空、只有一行、没有空白和控制字符）、
-#                                            再落临时名、再换上；收到空的、不像一把密钥的不换，原来那份原样留着
+#   <密钥> | bash deploy/cursor-key.sh put   从标准输入收一把：以会话用户的身份先核（非空、只有一行、末尾最多一个换行、
+#                                            没有空白和控制字符）、再落临时名、再换上；收到空的、不像一把密钥的不换，
+#                                            原来那份原样留着
 #   bash deploy/cursor-key.sh check          只看在不在、属主、权限、大小，不读值（france.sh 的读回是同一段）
 #   bash deploy/cursor-key.sh remove         删掉（先在 Cursor 后台撤掉那一把）
 # 退出码：0 成了；1 没成或有红；2 待配（还没放）；64 用法不对。

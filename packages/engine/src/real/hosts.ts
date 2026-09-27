@@ -297,7 +297,8 @@ export const CURSOR_KEY_EXIT = 78;
 // 前一段：以会话用户的身份读它家里的密钥文件，export 成 CURSOR_API_KEY，再 exec 后面的命令（后一段）。值只在这个进程的变量
 // 和 cursor-agent 的环境里：cat 的参数只有路径，报错只报路径、属主、权限，不打值。判据和装机脚本的读回一样
 // （deploy/lib/cursor-key.sh 的 check_cursor_key：不是符号链接、是普通文件、非空、属会话用户自己、600），另外核内容：只该是
-// 一行密钥，里面有空白、换行、控制字符（Windows 的回车）都不认——不然交给 Cursor 去报「密钥无效」，人会白换一把。
+// 一行密钥（末尾最多一个换行），里面有空白、换行、控制字符（Windows 的回车）都不认——不然交给 Cursor 去报「密钥无效」，
+// 人会白换一把。
 // 没放好就报「Cursor 密钥没放好：<哪里不对>。文件是 <路径>，…」、退出 78，不起 cursor-agent，也不去试浏览器登录。哪里不对
 // 紧跟在开头那句后面、到句号为止：失败分流（AU6）把这一段摘进「要人拍」的提醒，人不用翻日志就知道要改什么。
 const CURSOR_KEY_SCRIPT = [
@@ -312,6 +313,9 @@ const CURSOR_KEY_SCRIPT = [
   'me=$(id -u)',
   'if [ "$uid" != "$me" ]; then bad "属主不对：是 uid $uid，要是会话用户自己的 uid $me"; fi',
   'if [ "$mode" != 600 ]; then bad "权限是 $mode，要 600"; fi',
+  // $(cat) 会把末尾的换行全去掉：只放过末尾那一个（echo 写进去的），先数一遍，多了就是两行或末尾多了空行
+  'n=$(wc -l < "$key" 2>/dev/null) || bad "读不了"',
+  'if [ "$n" -gt 1 ]; then bad "有 $n 个换行，只该是一行密钥、末尾最多一个换行"; fi',
   'k=$(cat -- "$key" 2>/dev/null) || bad "读不了"',
   'case $k in "") bad "只有换行，没有密钥" ;; *[[:space:]]* | *[[:cntrl:]]*) bad "里面有空白、换行或控制字符，只该是一行密钥、不带换行" ;; esac',
   'CURSOR_API_KEY=$k',

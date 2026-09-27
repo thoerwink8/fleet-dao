@@ -209,7 +209,7 @@ cursor-agent 装在会话用户自己家里（官方安装脚本：一个版本�
 
 - 为什么不用浏览器登录：没有桌面的 Linux 服务器上，cursor-agent 把登录凭据交给系统钥匙串（libsecret），服务器上没有 Secret Service，批准了也落不了盘，`cursor-agent status` 照样说没登录（2026-09-27 法国实测；原因见 https://dev.to/milkyway008/why-your-cli-says-youre-not-logged-in-on-a-headless-linux-server-j1o ）。Cursor 给自动化场景的办法是 `CURSOR_API_KEY`（https://cursor.com/docs/cli/reference/authentication 、https://cursor.com/docs/cli/headless ）。
 - 放在哪：`/home/fleet-agent-carpool/.cursor/fleet-api-key`，属会话用户、600、只有一行密钥、不带换行。位置不做成配置：引擎（`hosts.ts` 的 `DEFAULT_CURSOR_API_KEY_FILE`）、装机脚本的读回和放密钥的命令（`deploy/lib/cursor-key.sh` 的 `CURSOR_API_KEY_FILE`）认同一处，`packages/engine/test/real/hosts.test.ts` 核对两边一样。
-- 引擎怎么用：起 cursor 会话、探针时，由会话用户自己读这个文件（引擎进不去它的家，帮手脚本也只放 `FLEET_*` 这几样变量），核过（不是符号链接、是普通文件、非空、属它自己、600、只有一行、没有空白和控制字符）才 `export CURSOR_API_KEY`、往下起 cursor-agent。值只在 cursor-agent 的环境里：不上命令行（sudo 会记日志、`/proc` 里谁都看得到）、不进引擎日志、进度、失败信息和库。
+- 引擎怎么用：起 cursor 会话、探针时，由会话用户自己读这个文件（引擎进不去它的家，帮手脚本也只放 `FLEET_*` 这几样变量），核过（不是符号链接、是普通文件、非空、属它自己、600、只有一行、末尾最多一个换行、没有空白和控制字符）才 `export CURSOR_API_KEY`、往下起 cursor-agent。值只在 cursor-agent 的环境里：不上命令行（sudo 会记日志、`/proc` 里谁都看得到）、不进引擎日志、进度、失败信息和库。
 - 失败分流：文件没放好，起它的那段 sh 不往下起，报「Cursor 密钥没放好：<哪里不对>。文件是 …」、退出 78，按 AU6 整池暂停，「要人拍」的提醒里写着哪里不对；Cursor 不认这一把（无效、被撤、过期，原话「⚠ Warning: The provided API key is invalid.」），按 AU5「Cursor 登录失效」整池暂停，提醒写着去后台重新生成、照这里放进法国。两种都不算路由的账；放好后在驾驶舱点「继续」，下一轮探针探通也会自动撤掉整池暂停。
 - 生成：Cursor 后台 → API Keys（https://cursor.com/dashboard/api ）新建一把 User API Key，名字写上用在哪（比如「法国引擎」），好认、好撤。复制它，别贴进任何对话、单子、提交。
 - 放（在创始人电脑上，Git Bash；值只经过剪贴板和 ssh，不上屏幕）：
@@ -219,7 +219,7 @@ cursor-agent 装在会话用户自己家里（官方安装脚本：一个版本�
   cat /dev/clipboard | ssh <法国> 'bash /srv/fleet-dao/deploy/cursor-key.sh put'
   ```
 
-  那头（`deploy/cursor-key.sh`，判据和做法在 `deploy/lib/cursor-key.sh`）以会话用户自己的身份先核（非空、只有一行、没有空白和控制字符；剪贴板补的换行、Windows 的回车去掉），再在同一个目录里落临时名、改 600、换上；收到空的、不像一把密钥的说「没换」，原来那份原样留着。放完读回一行「放好了：…属 fleet-agent-carpool、600、N 字节（值没读…）」。在终端里直接敲不收（会显示在屏幕上）。
+  那头（`deploy/cursor-key.sh`，判据和做法在 `deploy/lib/cursor-key.sh`）以会话用户自己的身份先核（非空、只有一行、没有空白和控制字符；末尾那一个换行或 Windows 的回车换行去掉，多出来的空行不收），再在同一个目录里落临时名、改 600、换上；收到空的、不像一把密钥的说「没换」，原来那份原样留着。放完读回一行「放好了：…属 fleet-agent-carpool、600、N 字节（值没读…）」。在终端里直接敲不收（会显示在屏幕上）。
 - 查（只看在不在、是不是真文件、属主、权限、大小，不读值）：`ssh <法国> 'bash /srv/fleet-dao/deploy/cursor-key.sh check'`；`france.sh --check` 的读回是同一段（还没放记待配，放了不对判红）。Cursor 认不认看路由探针。
 - 换（定期换，或者怀疑漏了）：后台新建一把 → 照上面放进来（直接盖掉旧的）→ 等下一轮探针探通（或手动跑一轮）→ 后台撤掉旧的那把。别先撤后放：中间那段 Cursor 的活全停。
 - 撤（不用 Cursor 了，或者漏了）：先在后台撤掉那一把（立刻失效；这之后起的 Cursor 会话、探针按 AU5 整池暂停），再 `ssh <法国> 'bash /srv/fleet-dao/deploy/cursor-key.sh remove'` 删掉文件（以会话用户的身份删），读回变成待配。

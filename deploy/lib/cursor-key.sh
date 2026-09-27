@@ -17,16 +17,21 @@ CURSOR_API_KEY_FILE='/home/{user}/.cursor/fleet-api-key'
 
 cursor_key_file() { printf '%s' "${CURSOR_API_KEY_FILE//\{user\}/$1}"; } # 会话用户
 
-# 以会话用户的身份跑的那段（sh -c，参数是放到哪）：标准输入是密钥，末尾带不带换行都行（剪贴板、PowerShell 的管道会补一个）。
-# 先收全、核过（非空、只有一行、没有空白和控制字符），才在同一个目录里落临时名、改 600、换上；不然什么都不动，原来那份
-# 原样留着。值只在 sh 的变量里：printf 是 sh 自带的，不上任何命令行。
+# 以会话用户的身份跑的那段（sh -c，参数是放到哪）：标准输入是密钥，末尾带不带一个换行都行（剪贴板、PowerShell 的管道会补
+# 一个，Windows 的是 \r\n）；多出来的空行和别的空白一样不收。先收全、核过（非空、只有一行、没有空白和控制字符），才在同一个
+# 目录里落临时名、改 600、换上；不然什么都不动，原来那份原样留着。值只在 sh 的变量里：printf 是 sh 自带的，不上任何命令行。
 cursor_key_put_script() {
   cat <<'EOF'
 f=$1
 d=${f%/*}
 umask 077
-k=$(cat) || { echo "没换：读标准输入出错，原来那份原样留着" >&2; exit 1; }
+# $(cat) 会把末尾的换行全去掉：垫一个 x 收全，再只去掉末尾一个换行、一个回车（Windows 的 \r\n），多出来的照样拦
+k=$(cat && echo x) || { echo "没换：读标准输入出错，原来那份原样留着" >&2; exit 1; }
+k=${k%x}
+nl=$(printf '\nx')
+nl=${nl%x}
 cr=$(printf '\r')
+k=${k%"$nl"}
 k=${k%"$cr"}
 case $k in
 '' | *[[:space:]]* | *[[:cntrl:]]*)

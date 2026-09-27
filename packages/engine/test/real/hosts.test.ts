@@ -311,10 +311,25 @@ describe('cursorLaunchCommand 的前一段：会话用户自己读家里的 API 
     refused(keyStage(link), link, '是符号链接，只认真文件');
   });
 
-  it.skipIf(!onPosix)('只有换行：不起，报没有密钥', () => {
-    const file = putKey('\n\n');
+  it.skipIf(!onPosix)('只有一个换行：不起，报没有密钥', () => {
+    const file = putKey('\n');
     refused(keyStage(file), file, '只有换行，没有密钥');
   });
+
+  it.skipIf(!onPosix)(
+    '末尾多了空行、两行各带换行、只有几个换行：不起，报有几个换行（$(cat) 会把末尾的换行全去掉，不数就放过去了）',
+    () => {
+      for (const [content, n] of [
+        ['fake-cursor-key-abc\n\n', 2],
+        ['fake-cursor-key-a\nfake-cursor-key-b\n', 2],
+        ['fake-cursor-key-abc\n\n\n', 3],
+        ['\n\n', 2],
+      ] as const) {
+        const file = putKey(content);
+        refused(keyStage(file), file, `有 ${n} 个换行，只该是一行密钥、末尾最多一个换行`);
+      }
+    },
+  );
 
   it.skipIf(!onPosix)(
     '里面有空格、两行、Windows 的回车、控制字符：不起（交给 Cursor 只会报「密钥无效」，人会白换一把）',
