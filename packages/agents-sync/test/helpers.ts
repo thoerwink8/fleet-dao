@@ -43,6 +43,7 @@ export function get(base: string, rel: string): string {
 export const HOOK_FILES: Record<string, string> = {
   'session-start.mjs': '// 假的开会话钩子\n',
   'pretool.mjs': '// 假的调工具前钩子\n',
+  'stop.mjs': '// 假的收尾提醒钩子\n',
 };
 
 /** 假仓：AGENTS.md 带通用段；skills 为 null 时没有 agents/skills/ 这个目录，hooks 为 null 时没有 agents/hooks/ */
