@@ -38,6 +38,7 @@ import { jsonLogger } from './log.ts';
 import { createMemoryStore } from './memory-store.ts';
 import { createPgStore, probeDb, withStatementTimeout } from './pg-store.ts';
 import type { GitHubEventSink, IssuePlanReader } from './ports.ts';
+import { sessionOrgHealthCheck } from './session-org-health.ts';
 import { connectTemporal } from './temporal.ts';
 
 const log = jsonLogger();
@@ -190,6 +191,8 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
       feishuGateway: config.feishuGatewayToken
         ? gatewaySeen
         : { check: async () => {}, notWired: GATEWAY_NO_PASS },
+      // 引擎切号（#157）写的提醒：只有法国的引擎会写，别处一直是好的
+      sessionOrg: sessionOrgHealthCheck(db),
     }),
   };
   return {

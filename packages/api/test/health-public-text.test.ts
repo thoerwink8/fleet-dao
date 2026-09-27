@@ -5,7 +5,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { Db, PgListen } from '@fleet-dao/db';
+import { type Db, type PgListen, SESSION_ORG_ALERT_PREFIX, upsertAlert } from '@fleet-dao/db';
 import { createTestDb, TEST_DB_TIMEOUT_MS } from '@fleet-dao/db/testing';
 import { FeishuRoutes, FLEET_CHANGES_CHANNEL } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
@@ -19,6 +19,7 @@ import { judgeHealthCheck } from '../src/judge-health.ts';
 import { silentLogger } from '../src/log.ts';
 import { probeDb } from '../src/pg-store.ts';
 import type { Logger, Store } from '../src/ports.ts';
+import { sessionOrgHealthCheck } from '../src/session-org-health.ts';
 import { createEnginePollerCheck, createNamespaceCheck, notConnectedTemporal } from '../src/temporal.ts';
 import { fakePostgres } from './fake-postgres.ts';
 import { judgeCatalog, judgeMachine, makeFakeBackend, recordJudgeCall } from './judge-fixture.ts';
@@ -175,6 +176,15 @@ async function publicFailures(log: Logger) {
       true,
       judgeHealthCheck({ db: judgeDb.db, location: judged.location, makeBackend: makeFakeBackend }).check,
     );
+    // 切号的提醒开着：标题（带拼车、独享、会话用户名）只进日志
+    await upsertAlert(judgeDb.db, {
+      dedupeKey: `${SESSION_ORG_ALERT_PREFIX}switch`,
+      level: 'alert',
+      taskId: null,
+      title: '会话用户切号没成：拼车 → 独享',
+      body: 'fleet-agent-carpool 以会话用户跑 reclaude org list 没跑成',
+    });
+    await run('session-org', true, sessionOrgHealthCheck(judgeDb.db));
   } finally {
     judged.cleanup();
     await judgeDb.close();
@@ -234,6 +244,9 @@ describe('公开的健康报告', () => {
       // 判断题上游的原文（带上游和仓的名字）只进日志
       expect(logs.some((l) => l.includes('TypeSafe key rejected'))).toBe(true);
       expect(JSON.stringify(reports)).not.toContain('key rejected');
+      // 切号提醒的标题只进日志
+      expect(logs.some((l) => l.includes('会话用户切号没成'))).toBe(true);
+      expect(JSON.stringify(reports)).not.toContain('切号没成');
     },
     TEST_DB_TIMEOUT_MS,
   );
@@ -252,6 +265,7 @@ describe('公开的健康报告', () => {
           judge: judgeHealthCheck({ db: {} as Db, location: NO_JUDGE }),
           deployLag: { check: async () => {}, notWired: DEPLOY_LAG_NOT_HERE },
           feishuGateway,
+          sessionOrg: async () => {},
         }),
         silentLogger,
       );

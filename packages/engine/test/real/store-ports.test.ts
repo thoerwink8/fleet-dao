@@ -457,10 +457,31 @@ describe('会话用户挂的组织：选路前现读（以会话用户跑 reclau
     });
     const r = await pick({ stage: 'execute' }, p);
     expect(r).toMatchObject({ ok: false, waitFor: 'slot', retryAfterSeconds: ORG_READ_RETRY_SECONDS });
-    expect(!r.ok && r.detail).toContain('会话用户挂的组织还没读出来，过一会儿再选');
+    expect(!r.ok && r.detail).toContain('会话用户挂的组织这会儿定不下来，过一会儿再选');
     release?.();
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(await pick({ stage: 'execute' }, p)).toMatchObject({ ok: true, route: { routeId: 'solo' } });
+  });
+
+  it('正在切号（切号那一步让选路停下）：不派、不挂起，过一会儿再选、写明正在切；切完解除，下一次现读切过去的组织', async () => {
+    rig.answer('carpool');
+    const org = rig.reader({ ttlMs: 60_000 });
+    const p = ports(org);
+    expect(await pick({ stage: 'execute' }, p)).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+    const release = org.hold('正在把会话用户从拼车组织切到独享组织');
+    const calls = rig.calls.length;
+    const r = await pick({ stage: 'execute' }, p);
+    expect(r).toMatchObject({ ok: false, waitFor: 'slot', retryAfterSeconds: ORG_READ_RETRY_SECONDS });
+    expect(!r.ok && r.detail).toBe(
+      '会话用户挂的组织这会儿定不下来，过一会儿再选：正在把会话用户从拼车组织切到独享组织',
+    );
+    // 停着的时候不读
+    expect(rig.calls).toHaveLength(calls);
+    rig.answer('solo');
+    release();
+    // 解除时丢掉留着的「拼车」（留 60 秒也不用它），现读出独享
+    expect(await pick({ stage: 'execute' }, p)).toMatchObject({ ok: true, route: { routeId: 'solo' } });
+    expect(rig.calls).toHaveLength(calls + 1);
   });
 
   it('候选里没有带组织类型的池：不读（省一次以会话用户起 scope）', async () => {

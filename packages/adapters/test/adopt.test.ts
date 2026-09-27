@@ -5,7 +5,14 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { type AdoptWorktreeInput, adoptWorktree, listAgentScopes, removeWorktreeDir } from '../src/procs.ts';
+import {
+  type AdoptWorktreeInput,
+  adoptWorktree,
+  listAgentScopes,
+  removeWorktreeDir,
+  SWITCH_ORG_TIMEOUT_MS,
+  switchSessionOrg,
+} from '../src/procs.ts';
 import { tempDir } from './helpers.ts';
 
 const HELPER = join(dirname(fileURLToPath(import.meta.url)), 'fake-scope-helper.ts');
@@ -177,5 +184,100 @@ describe('removeWorktreeDir · 调帮手删工作树（假帮手）', () => {
   it('相对路径、控制字符：起之前就拒', () => {
     expect(() => remove({ dir: 'repo1/task1' })).toThrow('绝对路径');
     expect(() => remove({ dir: `${DIR}\n` })).toThrow('控制字符');
+  });
+});
+
+describe('switchSessionOrg · 调帮手切会话用户挂的组织（假帮手，#157）', () => {
+  let log: string;
+  beforeEach(() => {
+    log = join(tempDir(), 'org.log');
+    process.env.FLEET_FAKE_SCOPE_LOG = log;
+  });
+  afterEach(() => {
+    delete process.env.FLEET_FAKE_SCOPE_LOG;
+    delete process.env.FLEET_FAKE_SCOPE_ORG_STDOUT;
+    delete process.env.FLEET_FAKE_SCOPE_ORG_STDERR;
+    delete process.env.FLEET_FAKE_SCOPE_ORG_EXIT;
+    delete process.env.FLEET_FAKE_SCOPE_ORG_HANG_MS;
+  });
+  const sw = (over: Partial<Parameters<typeof switchSessionOrg>[0]> = {}) =>
+    switchSessionOrg({
+      to: 'solo',
+      user: 'fleet-agent-carpool',
+      helper: HELPER,
+      sudo: [process.execPath],
+      ...over,
+    });
+
+  it('参数：org-use <类型> --user <会话用户>，别的什么都不带（组织编号由帮手现认）；switched 是切了、already 是本来就挂着', async () => {
+    expect(await sw()).toEqual({ ok: true, changed: true });
+    const [run] = readFileSync(log, 'utf8')
+      .split('\n')
+      .filter((l) => l)
+      .map((l) => JSON.parse(l) as { action: string; args: string[] });
+    expect(run?.action).toBe('org-use');
+    expect(run?.args).toEqual(['solo', '--user', 'fleet-agent-carpool']);
+    process.env.FLEET_FAKE_SCOPE_ORG_STDOUT = '已经挂着独享组织，不用切\nalready solo\n';
+    expect(await sw()).toEqual({ ok: true, changed: false });
+  });
+
+  it('【故意造出的失败】帮手说没切成：带上它说的现在挂的是哪一类和原话', async () => {
+    process.env.FLEET_FAKE_SCOPE_ORG_STDOUT = 'failed carpool\n';
+    process.env.FLEET_FAKE_SCOPE_ORG_STDERR =
+      'fleet-agent-scope：没切成（org use 退出码 1：account_banned），现在挂的还是原来的拼车组织\n';
+    process.env.FLEET_FAKE_SCOPE_ORG_EXIT = '1';
+    const r = await sw();
+    expect(r).toMatchObject({ ok: false, code: 'failed', exitCode: 1, now: 'carpool' });
+    expect(!r.ok && r.detail).toContain('现在挂的还是原来的拼车组织');
+    process.env.FLEET_FAKE_SCOPE_ORG_STDOUT = 'failed unknown\n';
+    expect(await sw()).toMatchObject({ ok: false, now: 'unknown' });
+    process.env.FLEET_FAKE_SCOPE_ORG_STDOUT = 'failed other\n';
+    expect(await sw()).toMatchObject({ ok: false, now: 'other' });
+  });
+
+  it('【故意造出的失败】退出码 0 却没报 switched / already、最后一行认不出：不当成切好了，现在挂的是哪个不知道', async () => {
+    for (const stdout of ['', 'ok\n', 'switched team\n', 'switched carpool extra\n']) {
+      process.env.FLEET_FAKE_SCOPE_ORG_STDOUT = stdout;
+      expect(await sw()).toMatchObject({ ok: false, code: 'failed', exitCode: 0, now: 'unknown' });
+    }
+  });
+
+  it('【故意造出的失败】退出码 64：usage；超时：被停、不知道挂的是哪个；帮手起不来：failed', async () => {
+    process.env.FLEET_FAKE_SCOPE_ORG_STDOUT = '';
+    process.env.FLEET_FAKE_SCOPE_ORG_EXIT = '64';
+    process.env.FLEET_FAKE_SCOPE_ORG_STDERR = 'fleet-agent-scope：--user 只能是会话用户\n';
+    expect(await sw()).toMatchObject({ ok: false, code: 'usage', exitCode: 64, now: 'unknown' });
+    delete process.env.FLEET_FAKE_SCOPE_ORG_EXIT;
+    delete process.env.FLEET_FAKE_SCOPE_ORG_STDERR;
+    process.env.FLEET_FAKE_SCOPE_ORG_HANG_MS = '5000';
+    const slow = await sw({ timeoutMs: 300 });
+    expect(slow).toMatchObject({ ok: false, code: 'failed', now: 'unknown' });
+    expect(!slow.ok && slow.detail).toContain('没切完，被停');
+    delete process.env.FLEET_FAKE_SCOPE_ORG_HANG_MS;
+    expect(await sw({ sudo: [], helper: join(tempDir(), 'no-such-helper') })).toMatchObject({
+      ok: false,
+      code: 'failed',
+      exitCode: null,
+      now: 'unknown',
+    });
+  });
+
+  it('只认 carpool、solo 和会话用户：起之前就拒', () => {
+    expect(() => sw({ to: 'team' as never })).toThrow('只认 carpool、solo');
+    expect(() => sw({ user: 'root' as never })).toThrow('会话用户');
+  });
+
+  it('等帮手的时限比帮手自己的总时限长：帮手时间用完会照实报「不知道挂的是哪个」，不会切到一半被这里掐掉', () => {
+    const script = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), '../../../deploy/france/fleet-agent-scope.sh'),
+      'utf8',
+    );
+    const budget = Number(/^ORG_BUDGET=\$\{AGENT_SCOPE_TEST_ORG_BUDGET:-(\d+)\}$/m.exec(script)?.[1]);
+    const killAfter = Number(/^RECLAUDE_KILL_AFTER=(\d+)$/m.exec(script)?.[1]);
+    // 读不到就不算核对过：两个数都得认出来
+    expect(budget).toBeGreaterThan(0);
+    expect(killAfter).toBeGreaterThan(0);
+    // 最后一步到点先 TERM、再等 killAfter 秒 KILL；另留 10 秒给 sudo、bash 起来
+    expect(SWITCH_ORG_TIMEOUT_MS / 1000).toBeGreaterThanOrEqual(budget + killAfter + 10);
   });
 });

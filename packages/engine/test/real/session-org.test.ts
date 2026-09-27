@@ -227,3 +227,70 @@ describe('读成了的留一会儿（sessionOrgReader）', () => {
     expect(await sessionOrgReader(broken)()).toEqual({ ok: false, why: '读会话用户挂的组织出错：配置坏了' });
   });
 });
+
+describe('切号用的两样（hold、forget，real/org-switch.ts 用）', () => {
+  it('hold：之后的读都回 pending、写明原因，不去读；解除时丢掉留着的读数，下一次现读', async () => {
+    const reader = rig.reader({ now: () => new Date(0), ttlMs: 60_000 });
+    expect(await reader()).toEqual({ ok: true, org: 'carpool' });
+    const release = reader.hold('正在把会话用户从拼车组织切到独享组织');
+    expect(await reader({ waitMs: 5 })).toEqual({
+      ok: false,
+      pending: true,
+      why: '正在把会话用户从拼车组织切到独享组织',
+    });
+    expect(await reader()).toMatchObject({ ok: false, pending: true });
+    expect(rig.calls).toHaveLength(1);
+    rig.answer('solo');
+    release();
+    expect(await reader()).toEqual({ ok: true, org: 'solo' });
+    expect(rig.calls).toHaveLength(2);
+    // 解过了再解：不动别的（也不丢刚读的）
+    release();
+    expect(await reader()).toEqual({ ok: true, org: 'solo' });
+    expect(rig.calls).toHaveLength(2);
+  });
+
+  it('解除只解自己上的那一道：后上的那一道还停着', async () => {
+    const reader = rig.reader({ now: () => new Date(0), ttlMs: 60_000 });
+    const first = reader.hold('第一道');
+    reader.hold('第二道');
+    first();
+    expect(await reader()).toEqual({ ok: false, pending: true, why: '第二道' });
+  });
+
+  it('forget：丢掉留着的读数，下一次现读（人刚切过号也认得出）', async () => {
+    const reader = rig.reader({ now: () => new Date(0), ttlMs: 60_000 });
+    expect(await reader()).toEqual({ ok: true, org: 'carpool' });
+    rig.answer('solo');
+    expect(await reader()).toEqual({ ok: true, org: 'carpool' });
+    reader.forget();
+    expect(await reader()).toEqual({ ok: true, org: 'solo' });
+    expect(rig.calls).toHaveLength(2);
+  });
+
+  it('forget 之前起的读晚回来：交给等它的人，但不留（切号前的读数不当成切号后的）', async () => {
+    const releases: (() => void)[] = [];
+    const slow: UserExec = async (command) => {
+      const answer = await rig.exec(command);
+      await new Promise<void>((r) => {
+        releases.push(r);
+      });
+      return answer;
+    };
+    rig.answer('carpool');
+    const reader = sessionOrgReader({ ...deps(), exec: slow, now: () => new Date(0), ttlMs: 60_000 });
+    const before = reader();
+    await new Promise((r) => setTimeout(r, 0));
+    reader.forget();
+    rig.answer('solo');
+    const after = reader();
+    await new Promise((r) => setTimeout(r, 0));
+    // 切号前起的那次先回来：等它的人拿到的是它，可不留
+    releases[0]?.();
+    expect(await before).toEqual({ ok: true, org: 'carpool' });
+    releases[1]?.();
+    expect(await after).toEqual({ ok: true, org: 'solo' });
+    expect(await reader()).toEqual({ ok: true, org: 'solo' });
+    expect(rig.calls).toHaveLength(2);
+  });
+});

@@ -45,6 +45,16 @@ if (action === 'run') {
   if (process.env.FLEET_FAKE_SCOPE_REMOVE_STDERR)
     process.stderr.write(process.env.FLEET_FAKE_SCOPE_REMOVE_STDERR);
   process.exit(Number(process.env.FLEET_FAKE_SCOPE_REMOVE_EXIT ?? '0'));
+} else if (action === 'org-use') {
+  // 标准输出、标准错误、退出码由测试摆布：验 switchSessionOrg 怎么认 switched / already / failed / 认不出；
+  // FLEET_FAKE_SCOPE_ORG_HANG_MS 给了就先睡这么久（验超时）
+  const hang = Number(process.env.FLEET_FAKE_SCOPE_ORG_HANG_MS ?? '0');
+  setTimeout(() => {
+    process.stdout.write(process.env.FLEET_FAKE_SCOPE_ORG_STDOUT ?? `switched ${rest[0]}\n`);
+    if (process.env.FLEET_FAKE_SCOPE_ORG_STDERR)
+      process.stderr.write(process.env.FLEET_FAKE_SCOPE_ORG_STDERR);
+    process.exit(Number(process.env.FLEET_FAKE_SCOPE_ORG_EXIT ?? '0'));
+  }, hang);
 } else {
   process.exit(0);
 }
