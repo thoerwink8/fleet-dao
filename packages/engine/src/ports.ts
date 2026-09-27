@@ -274,7 +274,10 @@ export type SessionOutput =
   | { kind: 'triage'; verdict: TriageVerdict }
   | { kind: 'doc'; markdown: string }
   | { kind: 'plan'; markdown: string; subtasks: PlannedSubtask[] }
-  /** 会话只在本地提交；head 是工作树里最新的提交，changedFiles 是相对 baseHead 改了哪些文件（交付对账用）。 */
+  /**
+   * 会话只在本地提交；head 是工作树里最新的提交，changedFiles 是 baseHead 之后这一步自己改了哪些文件（交付对账用；
+   * 会话并进来的主线不算，real/user-git.ts 的 ownSpan）。
+   */
   | { kind: 'delivery'; head: string; summary: string; testsPassed: boolean; changedFiles?: string[] }
   | { kind: 'review'; review: ReviewResult }
   /**
@@ -729,7 +732,11 @@ export interface EnginePorts {
   stopSession(input: StopSessionInput, ctx: PortContext): Promise<void>;
   createWorktree(input: CreateWorktreeInput, ctx: PortContext): Promise<Worktree>;
   removeWorktree(input: RemoveWorktreeInput, ctx: PortContext): Promise<RemoveWorktreeResult>;
-  pushBranch(input: PushBranchInput, ctx: PortContext): Promise<{ head: string }>;
+  /**
+   * changedFiles：推上去的头相对主线的净改动（推之前刚并了最新主线，git diff 主线...头）。老版端口推的没有（重放在途任务
+   * 的历史里就是这样），工作流照旧按会话交的累计算。
+   */
+  pushBranch(input: PushBranchInput, ctx: PortContext): Promise<{ head: string; changedFiles?: string[] }>;
   runTests(input: RunTestsInput, ctx: PortContext): Promise<TestResult>;
   openPr(input: OpenPrInput, ctx: PortContext): Promise<PullRequestRef>;
   waitCi(input: WaitCiInput, ctx: PortContext): Promise<CiResult>;
