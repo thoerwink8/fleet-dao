@@ -64,6 +64,7 @@ describe('工作流文件的规矩', () => {
       'route-probe.ts',
       'subtask.ts',
       'verify.ts',
+      'watchdog.ts',
     ]);
     expect(all.length).toBeGreaterThan(10);
   });
