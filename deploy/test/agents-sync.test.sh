@@ -99,7 +99,7 @@ check "写明开会话那条为什么不登记" "$(grep -c 'SessionStart：替�
 # 「fatal: failed to stat '<仓目录>': Permission denied」，git-excludes.ts 加了 -C "$home" 才好
 check "core.excludesFile 设到了 gitignore_global（原来没设过）" \
   "$(grep -c '设成了 ~/.fleet-dao/gitignore_global（原来没设过）' <<<"$OUT")" 1
-check "~/.gitconfig 里真写上了 core.excludesFile" \
+check "core.excludesFile 真写进了 ~/.gitconfig" \
   "$(git config --file "$H/.gitconfig" --path --get core.excludesFile)" \
   "$H/.fleet-dao/gitignore_global"
 check "gitignore_global 新建、写了 _tmp/ 那一块" "$(grep -c '新建，写入 _tmp/ 那一块' <<<"$OUT")" 1
