@@ -15,6 +15,8 @@ export interface IssueInfo {
   createdAt: string;
   labels: string[];
   milestone: string | null;
+  /** 正文（接口带着就有；没带的是 undefined，不拿空串顶）。 */
+  body?: string;
 }
 
 export interface MilestoneInfo {
@@ -294,7 +296,7 @@ async function json(res: Response, what: string): Promise<unknown> {
 export function toIssue(raw: unknown, what = 'issue'): IssueInfo {
   const bad = (field: string) => new Error(`读${what}，有一条认不出（${field}）`);
   if (!isObject(raw)) throw bad('不是对象');
-  const { number, title, state, created_at, labels, milestone, pull_request } = raw;
+  const { number, title, state, created_at, labels, milestone, pull_request, body } = raw;
   if (typeof number !== 'number') throw bad('number');
   if (typeof title !== 'string') throw bad('title');
   if (state !== 'open' && state !== 'closed') throw bad('state');
@@ -305,6 +307,7 @@ export function toIssue(raw: unknown, what = 'issue'): IssueInfo {
   if (milestone !== null && !(isObject(milestone) && typeof milestone.title === 'string')) {
     throw bad('milestone');
   }
+  if (body !== undefined && body !== null && typeof body !== 'string') throw bad('body');
   return {
     number,
     title,
@@ -313,6 +316,7 @@ export function toIssue(raw: unknown, what = 'issue'): IssueInfo {
     createdAt: created_at,
     labels: labels.map((l) => String((l as { name: string }).name)),
     milestone: milestone === null ? null : String((milestone as { title: string }).title),
+    ...(typeof body === 'string' ? { body } : body === null ? { body: '' } : {}),
   };
 }
 

@@ -10,6 +10,7 @@ import {
   assumedLines,
   type Brief,
   type BriefCheck,
+  bodyCriteria,
   type CloseFacts,
   type ConfigDecision,
   changeLine,
@@ -39,8 +40,8 @@ import {
   resolveFlowConfig,
   type Source,
   setupFusion,
-  specDirOf,
   specDocs,
+  specOf,
   startFlow,
   type TaskAsk,
   tallyAsks,
@@ -96,15 +97,23 @@ export interface DecisionMap {
   // ---- Fusion 工作流（workflows/fusion.ts）
   /** 起步的状态（0 创单并讨论）：模式、是不是母单、验证最多几轮。 */
   fusionStart: { input: { mode: Mode; mother: boolean; verifyRounds: number }; output: FlowState };
-  /** 单子正文里指的需求文档目录（不按标题拼），连同目录下需求、方案、结果三份的路径。 */
+  /**
+   * 这张单的需求文档目录，连同目录下需求、方案、结果三份的路径：正文里指的那个（不按标题拼）；没指、正文写全了需求的
+   * （#295）按标题取短名，requirement 是照正文写的需求文档（Lead 原样提交、随 PR 进主线）。
+   */
   specDir: {
-    input: { body: string; issueNumber: number };
-    output: { ok: string; docs: { requirement: string; plan: string; result: string } } | { error: string };
+    input: { body: string; issueNumber: number; title: string };
+    output:
+      | { ok: string; docs: { requirement: string; plan: string; result: string }; requirement?: string }
+      | { error: string };
   };
+  /** 单子正文里「怎么算做完」逐条原文（正文写全了需求、主线上还没有需求文档的单，开 PR 前验证照它核，#295）。 */
+  bodyCriteria: { input: { body: string }; output: { ok: string[] } | { error: string } };
   /** 开工前看流程配置副本：能不能派、用哪套、每一步的模型。 */
   fusionSetup: { input: FusionSetupInput; output: FusionSetup };
   /** Lead 交回的方案和任务简报收不收。 */
-  leadPlan: { input: { output: unknown; specDir: string }; output: LeadPlanCheck };
+  /** Lead 交回的方案和任务简报收不收；withRequirement = 这一步还要提交照正文写的需求文档（#295）。 */
+  leadPlan: { input: { output: unknown; specDir: string; withRequirement?: boolean }; output: LeadPlanCheck };
   /** Lead 的最终审查收不收。 */
   leadReview: {
     input: { output: unknown; specDir: string; committed: string[] };
@@ -165,10 +174,16 @@ export function createDecide(deps: DecideDeps = {}): Decide {
     verifyLines: verificationLines,
     flowConfig: ({ org, project }) => resolveFlowConfig(org, project),
     fusionStart: ({ mode, mother, verifyRounds }) => startFlow(mode, mother, { verifyRounds }),
-    specDir: ({ body, issueNumber }) => {
-      const got = specDirOf(body, issueNumber);
-      return 'ok' in got ? { ok: got.ok, docs: specDocs(got.ok) } : got;
+    specDir: ({ body, issueNumber, title }) => {
+      const got = specOf({ body, issueNumber, title });
+      if ('error' in got) return got;
+      return {
+        ok: got.ok,
+        docs: specDocs(got.ok),
+        ...(got.requirement === undefined ? {} : { requirement: got.requirement }),
+      };
     },
+    bodyCriteria: ({ body }) => bodyCriteria(body),
     fusionSetup: setupFusion,
     leadPlan: checkLeadPlan,
     leadReview: checkLeadReview,

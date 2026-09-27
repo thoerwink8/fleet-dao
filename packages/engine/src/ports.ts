@@ -183,6 +183,11 @@ export interface LeadBrief {
   notes?: string[];
   /** takeover：为什么 Lead 自己写。 */
   why?: string;
+  /**
+   * plan：这张单还没有需求文档、正文写全了需求（#295，引擎开的后续单、巡检单）：引擎照正文写好的需求文档全文，Lead 原样
+   * 写进 docs.requirement、和方案一起提交（随 PR 进主线）。
+   */
+  requirementText?: string;
 }
 
 /** 开 PR 前验证交代给别家的材料（起会话前整份提示词过一遍卫生检查，过不了不发）。 */
@@ -439,6 +444,11 @@ export interface PrBody {
    * 「对应计划：」那一行（读不到、没填就明确报错，不填空的）。
    */
   specs: string;
+  /**
+   * 需求文档跟着这个 PR 才进主线（正文写全了需求、收单时照正文写的，#295）：主线上还没有它，「对应计划」一栏照单子此刻挂的
+   * 版本写（没挂写「未排期」），不读主线。
+   */
+  planFromIssue?: boolean;
   /**
    * 「档位」一栏（design 第五节的档位加理由）：只作说明、合并闸只提醒；合并闸按改动路径判要不要等第二意见
    * （当前头上通过的 second-opinion 提交状态），不看这一栏。

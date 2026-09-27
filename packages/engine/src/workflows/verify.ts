@@ -19,6 +19,11 @@ export interface VerifyRequest {
   repo: Repo;
   /** 需求文档目录：单子正文里指的那个（core 的 specDirOf 认出来的，specs/<号>-<短名>），不按标题拼。 */
   specDir: string;
+  /**
+   * 这张单的需求文档还没进主线（正文写全了需求、收单时照正文写的，#295）：「怎么算做完」照库里这张单此刻的正文核
+   * （GitHub 上改了正文由接活跟着改；分支上那份写这张单的会话能改，不读）。
+   */
+  criteriaFromBody?: boolean | undefined;
   /** 送检的头：已经推上去（过了推前卫生检查）的完整提交号。 */
   head: string;
   /** 单子标题和原话（提示词的「任务」一段）。 */
@@ -62,6 +67,23 @@ export function verifierLabel(route: Pick<RouteChoice, 'modelId' | 'family'>): s
   return `${route.modelId}（${route.family} 族）`;
 }
 
+/**
+ * 需求文档还没进主线的单（#295）：「怎么算做完」照库里这张单此刻的正文逐条读。读不到、正文里没有或空了：挂起等人补，
+ * 不验、也不当成验过了；人补好点「继续」再读。
+ */
+async function bodyCriteria(kit: Kit): Promise<{ path: string; criteria: string[] }> {
+  for (;;) {
+    const { rawRequest } = await attempt(kit, 'taskRequest', () => kit.acts.taskRequest({ ...kit.scope }));
+    const got = await judge(kit, 'bodyCriteria', { body: rawRequest });
+    if ('ok' in got) return { path: '这张单的正文（需求文档随 PR 进主线）', criteria: got.ok };
+    await park(
+      kit,
+      `开 PR 前验证没法逐条核：${got.error}`,
+      `这张单还没有需求文档，「怎么算做完」照单子正文核：${got.error}。在单子正文里补上写了字的「## 怎么算做完」，再点「继续」`,
+    );
+  }
+}
+
 async function record(kit: Kit, row: Omit<VerificationRecord, keyof Kit['scope']>): Promise<void> {
   await attempt(kit, 'recordVerification', () => kit.acts.recordVerification({ ...kit.scope, ...row }));
 }
@@ -92,9 +114,11 @@ function recordOf(r: VerifyRound): Omit<VerificationRecord, keyof Kit['scope']> 
  */
 export async function verifyRound(kit: Kit, req: VerifyRequest): Promise<VerifyRound> {
   for (;;) {
-    const read = await attempt(kit, 'readCriteria', () =>
-      kit.acts.readCriteria({ ...kit.scope, repo: req.repo, specDir: req.specDir }),
-    );
+    const read = req.criteriaFromBody
+      ? await bodyCriteria(kit)
+      : await attempt(kit, 'readCriteria', () =>
+          kit.acts.readCriteria({ ...kit.scope, repo: req.repo, specDir: req.specDir }),
+        );
     const authors = await attempt(kit, 'authorFamilies', () => kit.acts.authorFamilies({ ...kit.scope }));
     // 每一轮都是全新会话：不续上一轮的验证，免得带着上一轮的结论看这一轮
     const stage = await runStage(kit, {

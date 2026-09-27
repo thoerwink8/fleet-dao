@@ -148,7 +148,12 @@ const issuesOf = (error: z.ZodError, what: string) =>
   error.issues.map((i) => `${what}认不出：${i.path.join('.') || '整份'} ${i.message}`);
 
 /** Lead 第 2 步交回的：方案摘要、任务简报、大小和风险，外加方案.md 真提交了。缺一样都退回 Lead 照原因重写。 */
-export function checkLeadPlan(input: { output: unknown; specDir: string }): LeadPlanCheck {
+export function checkLeadPlan(input: {
+  output: unknown;
+  specDir: string;
+  /** 正文写全了需求、还没有需求文档的单（#295）：这一步要把照正文写的需求文档一起提交。 */
+  withRequirement?: boolean | undefined;
+}): LeadPlanCheck {
   const parsed = LeadPlanSchema.safeParse(input.output);
   if (!parsed.success) return { ok: false, problems: issuesOf(parsed.error, '方案交回的') };
   const out = parsed.data;
@@ -158,6 +163,12 @@ export function checkLeadPlan(input: { output: unknown; specDir: string }): Lead
   const planPath = specDocs(input.specDir).plan;
   if (!out.changedFiles.includes(planPath)) {
     problems.push(`方案没提交：写进 ${planPath} 并提交（需求、方案、结果随 PR 进仓，引擎不往主线直接写）`);
+  }
+  const requirementPath = specDocs(input.specDir).requirement;
+  if (input.withRequirement && !out.changedFiles.includes(requirementPath)) {
+    problems.push(
+      `需求文档没提交：这张单还没有需求文档，把交代里照单子正文写好的那份原样写进 ${requirementPath} 并提交（随 PR 进主线）`,
+    );
   }
   if (!brief.ok || problems.length > 0) return { ok: false, problems };
   return {

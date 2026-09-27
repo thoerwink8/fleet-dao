@@ -537,6 +537,21 @@ describe('Fusion 的 Lead：每一步交代什么、交回什么', () => {
     expect(text).not.toContain('一律不收');
   });
 
+  it('第 2 步、还没有需求文档的单（#295）：照正文写好的那份原样写进需求文档路径，和方案一起提交', () => {
+    const seed = '# #11 的后续（#12）\n\n## 怎么算做完\n\n- 改成 4 位\n';
+    const text = prompt(leadBrief({ step: 'plan', requirementText: seed }), 'new');
+    expect(text).toContain('这张单还没有需求文档');
+    expect(text).toContain(`原样写进 \`${DOCS.requirement}\``);
+    expect(text).toContain(`\`\`\`\`markdown\n${seed.trim()}\n\`\`\`\``);
+    expect(text).toContain('需求文档和方案一起');
+    expect(text).not.toContain(`读需求文档 \`${DOCS.requirement}\``);
+    // 有需求文档的单照旧：读它，只提交方案
+    const normal = prompt(leadBrief({ step: 'plan' }), 'new');
+    expect(normal).toContain(`读需求文档 \`${DOCS.requirement}\``);
+    expect(normal).toContain('这一步只提交方案');
+    expect(normal).not.toContain('这张单还没有需求文档');
+  });
+
   it('#246 验收：简报外的改动看过该改就可以收，why 里写清为什么；点出这一轮改到简报外的是哪几个', () => {
     const task: NonNullable<SessionBrief['task']> = {
       goal: '全熔断提醒自动撤',

@@ -278,6 +278,22 @@ describe('欠账（定时任务）：开着的 issue 在主线上要有需求文
     expect(r.notes).toEqual(['#75 还没有需求文档，开单 9 小时，一天内补上就行']);
   });
 
+  it('正文写全了需求的（有写了字的「## 怎么算做完」，引擎对账开的单，#295）：接手时照正文写需求文档，不算欠', () => {
+    const full = '创始人改选了「4 位」。\n\n## 怎么算做完\n\n- 改成 4 位\n';
+    const r = missingSpecsFindings(
+      repo,
+      [
+        issue(50, { body: full }),
+        // 【失败】「怎么算做完」空着、没有这一节、正文没读到：照样算欠，不当成写全了
+        issue(51, { body: '## 怎么算做完\n\n<!-- 还没写 -->\n' }),
+        issue(52, { body: '给登录页加验证码' }),
+        issue(53),
+      ],
+      now,
+    );
+    expect(r.findings.map((f) => f.issue)).toEqual([51, 52, 53]);
+  });
+
   it('开单时间认不出：当作欠着，不当成新开的', () => {
     const r = missingSpecsFindings(repo, [issue(41, { createdAt: '昨天' })], now);
     expect(r.findings[0]?.text).toContain('开单时间认不出（昨天），当作欠着');

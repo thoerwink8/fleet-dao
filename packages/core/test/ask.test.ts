@@ -16,6 +16,7 @@ import {
   type TaskAsk,
   tallyAsks,
 } from '../src/ask.ts';
+import { bodyCriteria, specOf } from '../src/criteria.ts';
 
 describe('提问合不合格', () => {
   it('这张单范围内的岔路：推荐的排第一个（卡片上的主按钮），前后空白、重复的选项去掉', () => {
@@ -309,7 +310,31 @@ describe('对账另开单（askIssueKind、askIssuePlacement、askIssueText）',
     }
   });
 
-  it('后续单的标题和正文：链接原单、写明问的什么、按推荐做了哪个、他选了哪个，带「怎么算做完」和补需求文档的提醒', () => {
+  it('另开的单正文写全了需求（#295）：收单照收；「怎么算做完」只有那几条，说明的话不混进验收条', () => {
+    for (const f of [
+      {
+        kind: 'follow-up' as const,
+        ask: ask({ answer: '4 位' }),
+        placement: { labels: ['需求'], milestone: { number: 3, title: 'v1 Fusion 接活' } },
+      },
+      {
+        kind: 'outside' as const,
+        ask: ask({ scope: 'outside', options: ['不改', '改'], recommended: '不改' }),
+        placement: { labels: ['需求'], milestone: null },
+      },
+    ]) {
+      const got = askIssueText({ ...f, original: { issueNumber: 12, title: '登录页加验证码' } });
+      expect(got.body).toContain('接手时引擎照这张单的正文写需求文档，随 PR 进主线');
+      const criteria = bodyCriteria(got.body);
+      expect('ok' in criteria && criteria.ok).toHaveLength(2);
+      expect(specOf({ body: got.body, issueNumber: 13, title: got.title })).toMatchObject({
+        ok: expect.stringMatching(/^specs\/13-12/),
+        requirement: expect.stringContaining('## 怎么算做完'),
+      });
+    }
+  });
+
+  it('后续单的标题和正文：链接原单、写明问的什么、按推荐做了哪个、他选了哪个，带「怎么算做完」', () => {
     const got = askIssueText({
       kind: 'follow-up',
       ask: ask({ answer: '4 位' }),
@@ -322,7 +347,6 @@ describe('对账另开单（askIssueKind、askIssuePlacement、askIssueText）',
     expect(got.body).toContain('挂原单的同一个版本（v1 Fusion 接活）');
     expect(got.body).toContain('**选项**：「6 位」（AI 推荐）、「4 位」');
     expect(got.body).toContain('\n## 怎么算做完\n\n- #12 里按推荐先做的「6 位」改成创始人选的「4 位」');
-    expect(got.body).toContain('specs/<本单号>-<短名>/需求.md');
   });
 
   it('超出范围的单：写明那张单绕开了、等他拍、他的回答记在评论里；不写他的回答', () => {

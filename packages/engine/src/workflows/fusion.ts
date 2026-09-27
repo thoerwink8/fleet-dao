@@ -1,7 +1,9 @@
 // Fusion 工作流（docs/decisions/0003-fusion-flow.md 第 5–7、9、13 条；specs/214-Fusion工作流/）：一张单一个主导模型（Lead）
 // 会话领着走 0–7 步，派一个副手（Sidekick）干界定清楚的活；引擎推分支、开 PR、合并、关单，不往主线直接写。
 //   1 收单（引擎，不用模型）：看流程配置副本（读不到、认不出就停派报红），认单子正文里指的需求文档目录，建工作树。
+//     没指、正文写全了需求的（引擎对账开的单，#295）照收：目录按标题取短名，需求文档照正文写好交给 Lead。
 //   2 规划：Lead 读需求文档和代码，把方案写进 specs/<号>-<短名>/方案.md 提交，交方案摘要和任务简报（core 判），先推上去。
+//     照正文写的需求文档由 Lead 原样和方案一起提交；这种单开 PR 前验证照单子正文核，「对应计划」照单子挂的版本写。
 //   3 方案评审：小单跳过；不算小单的引擎还没接评审（#249），照跳过、PR 里写明。
 //   4 执行：副手照简报在同一棵树上干（按流程配置派别家的便宜路由；派不出、没额度就 Lead 自己干）；副手干完 Lead 续同一个
 //     会话验收：收下 / 打回（最多 2 次）/ Lead 接手（core 的 decideAcceptance）。Lead 验收时副手不在跑（一步一步来）。
@@ -281,6 +283,11 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
   let flow: FlowState | null = null;
   let specDir = '';
   let docs: Docs | null = null;
+  /**
+   * 正文写全了需求、没有需求文档的单（#295，引擎开的后续单、巡检单）：照正文写的需求文档。Lead 在第 2 步原样提交进
+   * docs.requirement、随 PR 进主线；开 PR 前验证照正文核，「对应计划」照单子挂的版本写。有需求文档的单是 null。
+   */
+  let requirementSeed: string | null = null;
   let tree: Worktree | null = null;
   let branch = '';
   /** 推上去的头（远端分支头）；工作树的头可能更新（交回了、还没推）。 */
@@ -421,11 +428,11 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
       log.warn('issue 进度段没更新上', { error: String(error) });
     }
   };
-  /** 进度段、快照里的文档：需求文档一直在；方案、结果提交了才写。 */
+  /** 进度段、快照里的文档：需求文档一直在（照正文写的那份提交了才写，#295）；方案、结果提交了才写。 */
   const publishedDocs = (): { requirement?: string; plan?: string; result?: string } => {
     if (!docs) return {};
     return {
-      requirement: docs.requirement,
+      ...(requirementSeed === null || changed.has(docs.requirement) ? { requirement: docs.requirement } : {}),
       ...(changed.has(docs.plan) ? { plan: docs.plan } : {}),
       ...(changed.has(docs.result) ? { result: docs.result } : {}),
     };
@@ -704,15 +711,16 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
         ? input.rawRequest
         : (await attempt(kit, 'taskRequest', () => acts.taskRequest({ ...kit.scope }))).rawRequest;
     intakeTries += 1;
-    const dir = await judge(kit, 'specDir', { body, issueNumber: input.issueNumber });
+    const dir = await judge(kit, 'specDir', { body, issueNumber: input.issueNumber, title: input.title });
     if ('error' in dir) {
       return {
         kind: 'needs-human',
-        why: `认不出需求文档：${dir.error}。用 pnpm issue:new 开单（会写需求文档和这一行），或在单子正文里补上「文档：\`specs/<号>-<短名>/需求.md\`」、把需求文档合进主线，再点「继续」`,
+        why: `认不出需求文档：${dir.error}。用 pnpm issue:new 开单（会写需求文档和这一行），或在单子正文里补上「文档：\`specs/<号>-<短名>/需求.md\`」、把需求文档合进主线，或者把需求写全在正文里（要有写了字的「## 怎么算做完」），再点「继续」`,
       };
     }
     specDir = dir.ok;
     docs = dir.docs;
+    requirementSeed = dir.requirement ?? null;
     status.specDir = specDir;
     if (!tree) {
       blockId = await newId(kit);
@@ -734,9 +742,17 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
     let fb: Feedback[] = [];
     let tries = 0;
     for (;;) {
-      const out = await leadRun('plan', 'lead-plan', { feedback: fb });
+      // 还没有需求文档的（#295）：照正文写好的那份交给 Lead，和方案一起原样提交
+      const out = await leadRun('plan', 'lead-plan', {
+        feedback: fb,
+        ...(requirementSeed === null ? {} : { material: { requirementText: requirementSeed } }),
+      });
       treeHead = out.head;
-      const checked = await judge(kit, 'leadPlan', { output: out, specDir });
+      const checked = await judge(kit, 'leadPlan', {
+        output: out,
+        specDir,
+        ...(requirementSeed === null ? {} : { withRequirement: true }),
+      });
       if (!checked.ok) {
         status.lastProblem = checked.problems[0] ?? '方案不合格';
         fb = [{ kind: 'plan', summary: '方案或任务简报不合格，按下面几条改好再交', items: checked.problems }];
@@ -859,6 +875,8 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
       round: n,
       repo: input.repo,
       specDir,
+      // 还没有需求文档的（#295）：主线上没有，「怎么算做完」照单子正文核（分支上的写这张单的能改，不读）
+      ...(requirementSeed === null ? {} : { criteriaFromBody: true }),
       head,
       title: input.title,
       request: input.rawRequest,
@@ -968,6 +986,8 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
                 owed: parts.owed,
                 assumed: parts.assumed ?? [],
                 specs: specDir,
+                // 需求文档跟着这个 PR 才进主线（#295）：「对应计划」照单子挂的版本写
+                ...(requirementSeed === null ? {} : { planFromIssue: true }),
                 tier: parts.tier,
                 changedFiles: [...changed],
               },
