@@ -65,7 +65,7 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 | `/usr/local/lib/fleet-dao/auto-release`；`/etc/systemd/system/fleet-auto-release.{service,timer}` | root:root 755（文件 644）；root 644 | 自动发布（第九节「自动发布」）：france.sh 从仓里拷的副本，不从检出直接跑 |
 | `/var/lib/fleet-dao`、`/var/log/fleet-dao` | fleet:fleet 750 | 运行数据、日志（服务日志主要在 journald）。引擎自己的临时文件（从镜像打的 bundle）和存档（没合并就收的树里没提交的改动）在 `/var/lib/fleet-dao/engine/` 的 `tmp/`、`archive/` 下，GitHub 的镜像仓在 `/var/lib/fleet-dao/github/` |
 | `/var/lib/fleet-dao/demo` | fleet:fleet 750 | 演示版的可见范围（第九节「演示版」）：驾驶舱后端写，`scopes/` 由 `fleet-demo-scopes` 推到香港，`links/` 是只留本机的备注 |
-| `/var/lib/fleet-work` | root:root 755 | AI 会话的工作树：`<owner>_<name>/<分支>` 是子任务的树，`<owner>_<name>/<需求号>.<阶段>[.<子任务>]` 是分诊、写文档、审查的检出副本，`_route-probe/<会话用户>` 是路由探针起会话的目录（第五节「路由探针」），`_tmp/<会话编号>` 是每个会话自己的临时目录（会话的 TMPDIR，会话收场就删，工人起来时清上一轮剩下的）。中间各级归 root、别人写不进；每棵树归会话用户、700，建、交、删都经 `fleet-agent-scope`（第五节） |
+| `/var/lib/fleet-work` | root:root 755 | AI 会话的工作树：`<owner>_<name>/<分支>` 是子任务的树，`<owner>_<name>/<需求号>.<阶段>[.<子任务>]` 是分诊、写文档、审查的检出副本，`_route-probe/<会话用户>` 是路由探针起会话的目录（第五节「路由探针」），`_tmp/<会话编号>` 是每个会话自己的临时目录（会话的 TMPDIR，会话收场就删，工人起来时清上一轮剩下的）。中间各级归 root、别人写不进；每棵树归会话用户、700，建、交、删都经 `fleet-agent-scope`（第五节）。没有在跑的任务在用的树由引擎的每小时对账收（第五节「每小时对账」）：什么都不剩的删掉，剩着没推的东西的报「要人拍」 |
 | `/etc/fleet-dao` | root:fleet 750 | 本机配置与密钥：`france.env`、`temporal.env`（库口令）、`temporal.yaml`、`nftables.nft`、`github/`（两个 GitHub 机器人的 json，手放）、`catalog.json`（目录配置，从保险箱放上来，第九节「目录配置」）；`reclaude-api.key`（reclaude 网页「设置 → API Key」生成的账号级 Key，只一行，读拼车额度用，手放；网页上重新生成后旧的立刻作废，要换这份再刷新保险箱）；`jev.json`（判断题的机器配置：TypeSafe 的地址、钥匙文件在哪，样例 `packages/jev/config.example.json`，手放；引擎和驾驶舱后端都读，`FLEET_JEV_CONFIG` 可改位置）、`typesafe.key`（TypeSafe 的钥匙，只一行，手放）；应用的 `engine.env`、`api.env`、`release.env`（照仓里样例建一次，之后归人改），随机密钥 `agent-token.env`、`session-secret.env`、`gateway-token.env`（首次生成，之后不动）。卫生检查的已知敏感值名单 `sensitive-values.txt`（真实的组织编号、账号，一行一个，手放；引擎推分支、写需求文档、开 PR 之前都读，缺了一律不推不写，france.sh 读回报待配；见 packages/hygiene）。文件一律 root:fleet 640；只有 `web-upload.key`（往香港传静态文件、演示版的可见范围的钥匙）、`gateway-deploy.key`（往香港发飞书网关的钥匙）和 `hk-known-hosts`（钉住的香港主机钥匙）是 root:root 600 |
 | `/opt/fleet-dao/temporal` | root:root 755 | `server-1.32.0/`（temporal-server、temporal-sql-tool）、`cli-1.9.1/`（temporal），`bin/` 链接到在用的版本 |
 | `/opt/fleet-dao/uv` | root:root 755 | `<版本>/uv`：只用来给会话用户和 pilot 各装一份 ddgs（第五节），不进谁的 PATH |
@@ -211,6 +211,19 @@ cursor-agent 装在会话用户自己家里（官方安装脚本：一个版本�
 - 离线了看 `probe_detail`：登录失效、设备被撤销的，照原因里写的重新登录（Claude 的是上面 reclaude 那节第 2 步，Cursor 的是 cursor-agent 那节第 2 步），下一轮探通就回在线，那条「整池暂停」自动撤掉。按量计费、插头没接、会话用户挂着别的组织的是按规矩不探，不是坏了。
 - 派工理由末尾出现「在线是探针 N 前的结论，之后它没再给新结论（探针可能停了）」：探针连着三轮（45 分钟；Cursor 的路由是 2 小时 30 分，它探通了隔 2 小时才再探）没给这条路由写新结论，引擎照上一次的结论接着派（不停工）。看驾驶舱「定时任务」页路由探针那一行（没跑、没跑成还是只写进去一部分，`why` 写了原因），再手动跑一轮（上面那条命令）看它报什么。
 - Claude 的探针不存会话记录（`--no-session-persistence`），会话用户家里不攒它的记录；cursor-agent 没有这个开关，探针的会话留在会话用户家里的 `~/.cursor/chats` 下（一条路由一天约 12 个）。目录由引擎经 `fleet-agent-scope adopt` 建，归会话用户、700。
+
+每小时对账（工作树残留、提醒按条件撤和再推；design 第十四节「AI 会话」的目录那条、15.3）：
+
+- 引擎每小时 41 分跑一轮（定时任务 `hourly-reconcile`）。发布完不想等，手动跑一轮：`fleet-temporal schedule trigger --schedule-id hourly-reconcile`。
+- 工作树：`/var/lib/fleet-work/<owner>_<name>/` 下每一棵（子任务的树 `<需求号>-<子任务>`、检出副本 `<需求号>.<阶段>[.<子任务>]`），这张需求的工作流和它的子任务工作流都不在跑了、树里也没有没结束的会话（`session_runs` 里 `ended_at` 为空的），才算残留；有没结束的会话却没有在跑的工作流，记「没查成」写明是哪个会话（多半是被强行终止的工作流留下的，#247）。残留的以会话用户的身份看里面还剩什么：什么都不剩就经 `fleet-agent-scope remove` 删掉，子任务报的「工作树没收掉」跟着撤；还剩没推的提交、没提交的改动、stash 的不删，报一条「要人拍」（`worktree:<owner>_<name>/<树>`），正文写着哪棵树、剩什么、怎么删、怎么留。检出副本里的 `.fleet-out/`（会话交给引擎的结论文件）和引擎在里面检出过的提交不算剩着。`_route-probe/`、`_tmp/` 不碰。一轮最多看 80 棵，多的下一轮再看。
+- 收到「要人拍」的树：先看里面，`sudo -u fleet-agent-carpool git -C <路径> status`、`sudo -u fleet-agent-carpool git -C <路径> log --oneline -5`。要删：以 root 跑 `/usr/local/sbin/fleet-agent-scope remove <路径>`，下一轮看它不在了就撤掉那条；要留：驾驶舱点「处理」，之后这棵树不再提醒，里面的东西推走或清掉以后下一轮会自己删。
+- 提醒：条件没了的撤掉（正文开头「已撤：为什么」，处理人 `engine:hourly-reconcile`，操作记录 `notification.resolve`）；卡住报警超过 24 小时没人处理，每天最多再推一条「还没处理：<原标题>」（`remind:<原提醒编号>:<北京日期>`）。哪种提醒谁撤，清单在 `packages/engine/src/jobs/alert-sweep.ts` 开头。
+- 出了事去哪看：驾驶舱「定时任务」页每小时对账那一行（没跑、没跑成、没查全，`why` 写了哪里没查成：读不了的目录、查不了的工作流、删不掉的树都在这里，不算跑成）。库里：
+  - 最近几轮：`runuser -u fleet -- psql -d fleet -c "select started_at, outcome, scanned, found, why from schedule_runs where job = 'hourly-reconcile' order by id desc limit 5"`
+  - 它撤了什么：`runuser -u fleet -- psql -d fleet -c "select resolved_at, dedupe_key, left(body, 80) from notifications where resolved_by = 'engine:hourly-reconcile' order by resolved_at desc limit 20"`
+  - 等人拍的树、再推的提醒：`runuser -u fleet -- psql -d fleet -c "select created_at, dedupe_key, title from notifications where resolved_at is null and (dedupe_key like 'worktree:%' or dedupe_key like 'remind:%') order by created_at"`
+  - 日志：`journalctl -u fleet-engine --since '-2h' | grep 每小时对账`
+- 还没做的：被强行终止的工作流留下的会话要等引擎下一次起来才收（#247）；路由全熔断那条提醒还不会自己撤（#246）。
 
 已知口子（会话用户的 reclaude 代理端口，2026-09-25 审查官发现，待定机制修，#35）：会话用户的 reclaude 守护在 `127.0.0.1` 上开两个临时端口（一个 HTTP CONNECT 代理，会话的 `HTTPS_PROXY` 指它；一个 MITM TLS 口），端口号每次重启会变。代理口不认客户端身份——本机**别的用户**（`pilot`、`fleet`）也连得上、也会被转发，等于借用这个账号的订阅（从 pilot 借会话用户的额度）。`HTTPS_PROXY` 里没有令牌，靠的是绑回环 + 会话本该只有自己碰，但回环对所有本机用户都通。
 
