@@ -14,6 +14,7 @@ import { createGitHub, pgLedger, pgLocker } from '@fleet-dao/github';
 import { jevConfigLocation } from '@fleet-dao/jev';
 import { serve } from '@hono/node-server';
 import { signAgentToken } from './agent-token.ts';
+import { deployFacts, pgAlertWork } from './alert-work.ts';
 import { buildApps } from './app.ts';
 import { CANARY_NOT_HERE, canaryHealthCheck } from './canary-health.ts';
 import { createChangeHub, startPgChangeFeed } from './changes.ts';
@@ -179,6 +180,8 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
     github: github.sink,
     draftOpener,
     gatewaySeen,
+    // 提醒谁在处理（design 15.3）：认领、PR 镜像、静默都在同一个库；发布记录只在法国的正式机器上有
+    alertWork: pgAlertWork(db, onFrance ? () => deployFacts(readDeployLagInput()) : () => null),
     // 还没做的读取器：驾驶舱那一块整块显示「待实现」，不说成「没查成」。接上了就删掉这一项
     notWired: {
       quota: { what: '额度读数', phase: 'P3', issue: 76 },

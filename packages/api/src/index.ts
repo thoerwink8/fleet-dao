@@ -6,6 +6,15 @@ export {
   signAgentToken,
   verifyAgentToken,
 } from './agent-token.ts';
+export {
+  type AlertWorkPort,
+  deployFacts,
+  handlingOf,
+  handlingView,
+  pgAlertWork,
+  toAlertSilence,
+  toAlertWorkFacts,
+} from './alert-work.ts';
 export { type Apps, type BuildOptions, buildApps } from './app.ts';
 export {
   type ChangeHub,

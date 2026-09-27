@@ -83,6 +83,20 @@ export function redactTaskDetail(d: TaskDetail, level: DemoDetail): TaskDetail {
 }
 
 /** 提醒的标题带着任务的内容（追问的原话、卡在哪一步），低于 process 一律换成按种类的说法。 */
+type Handling = NonNullable<Notifications['items'][number]['handling']>;
+
+/** 谁在处理：阶段、谁、单号、多久照常；认领备注（在 line 里）、静默理由、没查成的原话收起。 */
+function handling(h: Handling): Handling {
+  const { deploy, silence, ...rest } = h;
+  return {
+    ...rest,
+    line: HIDDEN_TEXT,
+    problems: h.problems.map(() => HIDDEN_TEXT),
+    ...(silence ? { silence: { ...silence, comment: HIDDEN_TEXT } } : {}),
+    ...(deploy ? { deploy: { state: deploy.state } } : {}),
+  };
+}
+
 export function redactNotifications(
   n: Notifications,
   level: DemoDetail,
@@ -100,7 +114,7 @@ export function redactNotifications(
           : x.level === 'alert'
             ? `${who || '有东西'}卡住了`
             : '日报';
-      return { ...x, title, body: HIDDEN_TEXT };
+      return { ...x, title, body: HIDDEN_TEXT, ...(x.handling ? { handling: handling(x.handling) } : {}) };
     }),
   };
 }

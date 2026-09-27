@@ -1,11 +1,13 @@
 // GitHub 事件过了后端的门（签名、去重、白名单，packages/api 的 github.ts）之后的处理：写 PR 镜像、叫醒工作流。
 // 事件只当「叫醒」：里面的文字不当指令，CI 结论回 GitHub 重读，不信事件里带的（事件会乱序、会晚到、会被补收重放）。
 // 抛错 = 没处理成：后端把这条投递记成出错、原文留着，对账时按原文重放，所以这里的每一步都要能重放。
+import { prLinks } from '@fleet-dao/conventions';
 import { z } from 'zod';
 import { mirrorChecks } from './checks.ts';
 import { parseRepoSlug, type RepoRef, repoSlug } from './client.ts';
 import type { Deps } from './deps.ts';
 import { isGitHubError } from './errors.ts';
+import type { PrMirror } from './ledger.ts';
 import { readCi, requiredChecksFor } from './pulls.ts';
 
 /** 和 @fleet-dao/api 的 IngestedEvent 同形（通过签名与白名单之后交过来的事件）。 */
@@ -51,8 +53,61 @@ const PullPayload = z.object({
     merged_at: z.string().nullable().optional(),
     updated_at: z.string(),
     head: z.object({ ref: z.string(), sha: z.string() }),
+    // 下面几样给「提醒谁在处理」现算用（design 15.3）；事件里没带（undefined）的不改镜像里的旧值
+    created_at: z.string().optional(),
+    merge_commit_sha: z.string().nullable().optional(),
+    title: z.string().optional(),
+    body: z.string().nullable().optional(),
   }),
 });
+
+type PullFields = z.infer<typeof PullPayload>['pull_request'];
+
+/** 时刻认不出的当没读到（undefined，不改镜像），不拿空顶。 */
+function dateOf(text: string | null | undefined): Date | null | undefined {
+  if (text === undefined) return undefined;
+  if (text === null) return null;
+  const at = Date.parse(text);
+  return Number.isFinite(at) ? new Date(at) : undefined;
+}
+
+/**
+ * PR 镜像里给「提醒谁在处理」用的几样：开的时刻、合并的时刻和提交、正文挂的单和修的提醒（@fleet-dao/conventions 的
+ * prLinks，和 PR 补贴、合并闸同一个认法）。事件里没带正文（undefined）就不给链接：镜像里的旧值留着。
+ */
+export function mirrorExtras(
+  pr: Pick<PullFields, 'created_at' | 'merged_at' | 'merge_commit_sha' | 'title' | 'body'>,
+  merged: boolean,
+  repo: string,
+): Pick<PrMirror, 'openedAt' | 'mergedAt' | 'mergeSha' | 'links'> {
+  const sha = pr.merge_commit_sha;
+  return {
+    openedAt: dateOf(pr.created_at),
+    // 没合的 PR 也带着 merge_commit_sha（GitHub 算的试合提交）：只有合了的才记，没合的清空（合了的不会再变回没合，
+    // 晚到的旧事件由 updated_at 挡住）
+    mergedAt: merged ? dateOf(pr.merged_at) : null,
+    mergeSha: merged ? (sha && /^[0-9a-f]{40}$/.test(sha) ? sha : undefined) : null,
+    links: pr.body === undefined ? undefined : prLinks({ body: pr.body, title: pr.title ?? '' }, repo),
+  };
+}
+
+const PullExtras = PullPayload.shape.pull_request.pick({
+  created_at: true,
+  merged_at: true,
+  merge_commit_sha: true,
+  title: true,
+  body: true,
+});
+
+/** 列表接口里的一个 PR（对账审计补合并那一路）：认得出的几样照 mirrorExtras 给，认不出的一样都不给（镜像旧值留着）。 */
+export function mirrorExtrasOf(
+  item: unknown,
+  merged: boolean,
+  repo: string,
+): Pick<PrMirror, 'openedAt' | 'mergedAt' | 'mergeSha' | 'links'> {
+  const p = PullExtras.safeParse(item);
+  return p.success ? mirrorExtras(p.data, merged, repo) : {};
+}
 const IssuePayload = z.object({
   issue: z.object({ number: z.number(), pull_request: z.unknown().optional() }),
 });
@@ -161,6 +216,7 @@ export function createEventSink(deps: Deps, waker: WorkflowWaker): EventSink {
               headRef: pr.head.ref,
               headSha: pr.head.sha,
               updatedAt: new Date(pr.updated_at),
+              ...mirrorExtras(pr, merged, repoSlug(repo)),
             });
           }
           Object.assign(wake, { prNumbers: [pr.number], headSha: pr.head.sha, headRef: pr.head.ref });

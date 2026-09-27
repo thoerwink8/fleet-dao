@@ -47,6 +47,8 @@ export interface PrBodyInput {
   risks?: readonly string[] | undefined;
   /** 「按推荐先做了」：问创始人的岔路里没等他回、按推荐先做了的（#259）；空 = 无。 */
   assumed?: readonly string[] | undefined;
+  /** 「修提醒」：这个 PR 修的是哪几条提醒（键），驾驶舱据此显示修到哪（design 15.3「谁在处理」）；空 = 无。 */
+  fixesAlerts?: readonly string[] | undefined;
   /**
    * 「对应计划」：plan.md 的阶段加那一条的原话开头，例如「P1「工作流」」。必填；给空的写「（没写）」，
    * CI 的 pr-fields（packages/conventions）照样判红，不会当成填了。
@@ -97,6 +99,7 @@ export function renderPrBody(input: PrBodyInput): string {
   const docs = PR_DOC_FILES.filter(([path]) => changed.has(path)).map(([, name]) => name);
   const tail = [
     `**需求**：${requirement}`,
+    `**修提醒**：${(input.fixesAlerts ?? []).map(oneLine).filter(Boolean).join(' ') || '无'}`,
     `**这个 PR 做完就关单**：${ENGINE_CLOSE_COLUMN}`,
     `**对应计划**：${oneLine(input.plan) || '（没写）'}`,
     `**specs**：${input.specs === null ? '不适用' : oneLine(input.specs) || '（没写）'}`,
