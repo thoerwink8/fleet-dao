@@ -10,6 +10,7 @@
 //   文档、迁移、夹具也不在 import 里——改了引擎的工作流代码，它一个工作流测试都不跑。按包选（有 ci-plan.test.ts 扫测试源码兜着
 //   「测试读包外文件」的清单）没有这个洞，代价是比按文件多跑一些。
 import { type PackageGraph, planCi } from './ci-plan.ts';
+import type { RepoView } from './repo.ts';
 
 /** 和谁比：引擎给会话的树钉好了这个引用（packages/engine/src/real/user-git.ts 的 pinMainline），本机是 git fetch 来的。 */
 export const BASE = 'origin/main';
@@ -109,4 +110,171 @@ export function selectTests(changed: readonly string[], graph: PackageGraph | st
 /** 交给 vitest 的参数（不含 vitest 本身）。 */
 export function vitestArgs(selection: TestSelection): string[] {
   return selection.kind === 'all' ? ['run'] : ['run', ...selection.paths];
+}
+
+// ---- 要全跑时本机跑不跑（创始人的规矩：几个会话同时全跑会把机器拖满，全量交给 CI；只写在 AGENTS.md 里拦不住，
+// 三个工人照样在本机跑了全量，所以拦在这个必经的入口上）
+
+/** 退出码：0 过；1 没过（含 vitest 被信号杀掉）；2 没算成要跑什么、参数不对、vitest 起不来；3 本机要全跑、没带 --all，没跑。 */
+export const REFUSED_FULL_RUN = 3;
+
+/**
+ * 引擎起的会话环境里都带这个标记（@fleet-dao/adapters 的 RUN_MARKER_KEY，engine 的测试核对两边一致）。会话要全跑时照旧全跑：
+ * 交活只认 test:changed 最后一次通过，拒跑就永远交不了活；会话在有内存上限的 scope 里，测试进程数按上限算（test-run.ts），
+ * 全跑慢一些，拖不垮机器。
+ */
+export const ENGINE_SESSION_MARKER = 'FLEET_RUN_ID';
+
+export const USAGE_LINE =
+  '用法：pnpm test:changed [--all]（不带参数：按改动选测试；要全跑时本机不跑、退出码 3，带 --all 才在本机全跑）';
+
+export type RunDecision =
+  | { kind: 'run'; args: string[]; note?: string }
+  | { kind: 'refuse'; code: number; lines: string[] };
+
+/** CI 的环境（GitHub Actions 设 CI=true）。 */
+function inCi(env: Readonly<Record<string, string | undefined>>): boolean {
+  const v = env.CI?.trim().toLowerCase();
+  return v !== undefined && v !== '' && v !== 'false' && v !== '0';
+}
+
+/** 改到的文件落在哪几个测试单元：packages/<包>/ 和仓根的 agents/（测试在 agents/test/）；根配置、文档、deploy/ 这类不算。 */
+export function changedUnits(changed: readonly string[]): string[] {
+  const units = new Set<string>();
+  for (const f of changed) {
+    const m = /^packages\/([^/]+)\//.exec(f);
+    if (m) units.add(`packages/${m[1]}/`);
+    else if (f.startsWith('agents/')) units.add('agents/test/');
+  }
+  return [...units].sort();
+}
+
+const TEST_FILE = /\.test\.tsx?$/;
+
+/** 目录下（递归，跳过 node_modules）有没有测试文件：true 有、false 没有、undefined 有目录列不出来（不当成没有）。 */
+function hasTestFiles(repo: RepoView, dir: string): boolean | undefined {
+  const names = repo.list(dir);
+  if (names === undefined) return repo.exists(dir) ? undefined : false;
+  let unknown = false;
+  for (const name of names) {
+    if (name === 'node_modules') continue;
+    const path = `${dir}/${name}`;
+    if (repo.isDir(path)) {
+      const sub = hasTestFiles(repo, path);
+      if (sub === true) return true;
+      if (sub === undefined) unknown = true;
+    } else if (TEST_FILE.test(name)) return true;
+  }
+  return unknown ? undefined : false;
+}
+
+/** 这个单元自己有没有测试（vitest.config.ts 的 include：包的 src/、test/ 下，agents/test/ 下）。 */
+export function unitHasTests(repo: RepoView, unit: string): boolean | undefined {
+  const base = unit.replace(/\/$/, '');
+  const dirs = base === 'agents/test' ? [base] : [`${base}/src`, `${base}/test`];
+  let unknown = false;
+  for (const dir of dirs) {
+    const r = hasTestFiles(repo, dir);
+    if (r === true) return true;
+    if (r === undefined) unknown = true;
+  }
+  return unknown ? undefined : false;
+}
+
+/**
+ * 跑不跑、跑什么。只在「判出要全跑、没带 --all、不在 CI、不是引擎会话」时拒跑：写明原因、改到的单元各自单跑的命令、
+ * 真要全跑怎么说，退出码 REFUSED_FULL_RUN。带 --all 就全跑（明说了要）。
+ */
+export function decideRun(input: {
+  selection: TestSelection;
+  changed: readonly string[];
+  all: boolean;
+  env: Readonly<Record<string, string | undefined>>;
+  repo: RepoView;
+}): RunDecision {
+  const { selection, env } = input;
+  if (input.all) return { kind: 'run', args: ['run'], note: '带了 --all：本机全跑' };
+  if (selection.kind === 'some') return { kind: 'run', args: vitestArgs(selection) };
+  if (inCi(env)) return { kind: 'run', args: ['run'], note: '在 CI 里：全跑' };
+  if (env[ENGINE_SESSION_MARKER]?.trim()) {
+    return {
+      kind: 'run',
+      args: ['run'],
+      note: '引擎起的会话：照旧全跑（交活只认它；会话有内存上限，测试进程数按上限算）',
+    };
+  }
+  const units = changedUnits(input.changed);
+  const lines = [
+    '要全跑（原因见上面几行：改到了根配置、锁文件、shared 这类），本机不跑全量——几个会话同时全跑会把机器拖满，全量交给 CI。',
+  ];
+  if (units.length === 0) {
+    lines.push('这次没改到哪个包的代码，没有要单跑的。');
+  } else {
+    lines.push('改到的包各自单跑：');
+    for (const unit of units) {
+      const has = unitHasTests(input.repo, unit);
+      lines.push(`  pnpm exec vitest run ${unit}${has === false ? '（这个包自己没有测试，不用跑）' : ''}`);
+    }
+  }
+  lines.push('真要在本机全跑：pnpm test:changed --all');
+  lines.push(`没跑测试，退出码 ${REFUSED_FULL_RUN}（不是测试没过）。`);
+  return { kind: 'refuse', code: REFUSED_FULL_RUN, lines };
+}
+
+export interface TestChangedDeps {
+  argv: readonly string[];
+  env: Readonly<Record<string, string | undefined>>;
+  git: GitRun;
+  repo: RepoView;
+  graph: () => PackageGraph | string;
+  /** 跑 vitest（参数不含 vitest 本身）：回退出码；被信号杀掉 status 是 null；起不来 error 有值。 */
+  vitest: (args: string[]) => { status: number | null; signal?: string | null; error?: Error | undefined };
+  out: (line: string) => void;
+  err: (line: string) => void;
+}
+
+/** 入口的全部逻辑（bin/test-changed.ts 只接上真的 git、仓、vitest）：回进程的退出码，见 REFUSED_FULL_RUN 上面那行。 */
+export function testChanged(deps: TestChangedDeps): number {
+  const extra = deps.argv.filter((a) => a !== '--all');
+  if (extra.length > 0) {
+    deps.err(
+      `test:changed 没跑成：只收 --all，不收别的参数（给了：${extra.join(' ')}）。跑哪些由改动决定；要单跑几个文件用 pnpm exec vitest run <路径>。${USAGE_LINE}`,
+    );
+    return 2;
+  }
+  let changed: string[];
+  try {
+    changed = changedFiles(deps.git);
+  } catch (e) {
+    if (!(e instanceof TestChangedError)) throw e;
+    deps.err(`test:changed 没跑成：${e.message}`);
+    return 2;
+  }
+  const selection = selectTests(changed, deps.graph());
+  deps.out(`和 ${BASE} 比改了 ${changed.length} 个文件（含没提交的）`);
+  for (const reason of selection.reasons) deps.out(`- ${reason}`);
+  if (selection.ciOnly.length > 0) deps.out(`CI 另外还跑（这里不跑）：${selection.ciOnly.join('、')}`);
+  const decision = decideRun({
+    selection,
+    changed,
+    all: deps.argv.includes('--all'),
+    env: deps.env,
+    repo: deps.repo,
+  });
+  if (decision.kind === 'refuse') {
+    for (const line of decision.lines) deps.err(line);
+    return decision.code;
+  }
+  if (decision.note) deps.out(decision.note);
+  deps.out(decision.args.length === 1 ? '跑：全部测试' : `跑：${decision.args.slice(1).join(' ')}`);
+  const r = deps.vitest(decision.args);
+  if (r.error) {
+    deps.err(`test:changed 没跑成：vitest 起不来（${r.error.message}）`);
+    return 2;
+  }
+  if (r.status === null) {
+    deps.err(`vitest 被信号 ${r.signal ?? '（不知道哪个）'} 杀掉了：测试没跑完，不算通过`);
+    return 1;
+  }
+  return r.status;
 }
