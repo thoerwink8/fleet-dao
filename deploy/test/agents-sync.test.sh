@@ -79,6 +79,9 @@ run_sync() { # 参数…；输出进 OUT，退出码进 RC
 
 echo "== 以 root 带 --user 写：东西都归那个用户"
 run_sync --apply --user "$U"
+echo "--- 临时诊断：第一遍 --apply 的完整输出（排查全局 git 忽略那步） ---"
+echo "$OUT"
+echo "--- 诊断结束 ---"
 check "第一遍退出 0" "$RC" 0
 check "家里没有不归 $U 的文件" "$(find "$H" ! -user "$U" -printf '%p\n' | head -5)" ""
 check "Claude 的全局文件写上了通用段" "$(grep -c 'fleet-dao:通用段 开始' "$H/.claude/CLAUDE.md")" 1
