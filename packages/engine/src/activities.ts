@@ -58,6 +58,8 @@ const PORT_KEYS: Readonly<Record<PortName, true>> = {
   runTests: true,
   openPr: true,
   waitCi: true,
+  checkHighRisk: true,
+  postSecondOpinion: true,
   syncMainline: true,
   mergePr: true,
   updateIssueProgress: true,

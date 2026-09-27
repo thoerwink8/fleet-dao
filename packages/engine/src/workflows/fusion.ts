@@ -104,6 +104,27 @@ type Delivery = OutputOf<'delivery'>;
 const STOP_WITHDRAW_MINUTES = 10;
 /** CI 连着几次没查成就停下等人（没查成不是没过，也不能一直空转）。 */
 const CI_UNKNOWN_LIMIT = 3;
+/**
+ * 第二意见「必须改」连着几轮还是改不好就停下等人（#253，design 第五节「审一轮、最多 2 轮」）：和 CI 红共用「开了 PR
+ * 之后修一轮」的账（ciRounds，最多 3 轮），这里另加一道更紧的闸，专盯第二意见自己。
+ */
+const SECOND_OPINION_ROUND_LIMIT = 2;
+/**
+ * 合并闸报「等第二意见」（或第二意见状态还没被合并闸重算追上）却查不到别的失败检查，连着几次都这样就停下等人：
+ * 多半是别的原因（认领对得上、关单要带结果……），不是第二意见能解的，也不能一直空转（#253）。
+ */
+const GATE_ONLY_RED_LIMIT = 3;
+/**
+ * 合并闸自己的提交状态名（@fleet-dao/conventions 的 merge-gates.ts GATE_CONTEXT）：写死在这里、不从那个包
+ * 运行时导入——工作流文件会被 Temporal 的 webpack 打进沙盒执行的包，那个包的入口 index.ts 还带出 node:path
+ * 这类 Node 内置模块，webpack 打不出沙盒包（worker.test.ts 实测过，见 test/rules 里钉住这个字符串的测试）。
+ */
+export const MERGE_GATE_CONTEXT = 'merge-gate';
+/**
+ * 第二意见接进 waitCiEvent（#253）：在途任务的历史里没调过 checkHighRisk / postSecondOpinion 这两个新活动，
+ * 换上新代码直接调会报「历史对不上」（replay.test.ts 钉住）；没打这个标记（老历史）就照老步序走，一个字都不多问。
+ */
+const SECOND_OPINION_PATCH = 'second-opinion-253';
 /** 在合并队列里的这一块叫什么（合并条目、快照里的块）。一张单一块（母单按块循环归 #252）。 */
 const BLOCK_KEY = 'fusion';
 /**
@@ -348,6 +369,11 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
   let pendingItemId: string | null = null;
   let mergeReturns = 0;
   let ciUnknown = 0;
+  /** 第二意见（#253）：已经贴过状态的头（同一个头只请一次，头变了要重新请）；「必须改」的轮数，封顶见上面的常量。 */
+  let soHead: string | null = null;
+  let soRounds = 0;
+  /** 合并闸只报「等第二意见」（或还没追上我们刚贴的状态）却没有别的失败检查，连着几次——不占 CI 没查成、也不占修的轮数。 */
+  let gateOnlyRetries = 0;
   let intakeTries = 0;
   /** 存档点交给 Lead、还没照改完的（#259）：照改的那一轮推上去才记 applied_at、清掉。 */
   let change: Change | null = null;
@@ -967,16 +993,108 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
     return { kind: 'verified', verdict: round.final.verdict };
   };
 
+  /** 请第二意见的会话简报：审哪个 PR 的哪个头，对照的「怎么算合格」「只许改的文件」照方案的任务简报。 */
+  const secondOpinionBrief = (prNum: number, atHead: string): SessionBrief => ({
+    title: input.title,
+    request: input.rawRequest,
+    specDir,
+    acceptance: need(plan, '方案').brief.acceptance,
+    touches: need(plan, '方案').brief.files,
+    feedback: [],
+    answers: [],
+    branch,
+    prNumber: prNum,
+    head: atHead,
+  });
+
+  type SecondOpinionOutcome =
+    | { kind: 'skip' }
+    | { kind: 'pass' }
+    | { kind: 'changes'; items: string[] }
+    | { kind: 'needs-human'; why: string };
+
+  /**
+   * 先审后合（#253）：这个头碰没碰高风险路径（迁移里有删改语句、碰安全，清单和判法和合并闸同一份）；碰了就派别家审
+   * 一轮，结论写回 GitHub 的 second-opinion 提交状态和一条评论（合并闸认的就是这个）。同一个头只请一次：头没变、
+   * 已经贴过的不再重请。
+   * 派别家和第 5 步「开 PR 前验证」同一套（帅位 2026-09-27 夜挑错：路由配置里 review 阶段的排法可能是 grok-4.7、
+   * deepseek-flash、opus-5.5，写这张单的要是 grok 就可能挑到自己审自己）：整族避开写这张单用过的族（authorFamilies），
+   * 界面单再避开 GPT（uiWork，禁令按 stage 'ui' 判，见 shared 的 bans.ts）；挑不出别家（runStage 自己的兜底梯）
+   * 停下等人，原因写清，不拿同族顶。
+   * 「必须改」的反馈和 CI 红走同一条账（fix，由 doFix 派会话去改）；连着 SECOND_OPINION_ROUND_LIMIT 轮还是必须改
+   * 才停下等人。
+   */
+  const secondOpinionRound = async (pr: number, atHead: string): Promise<SecondOpinionOutcome> => {
+    if (atHead === soHead) return { kind: 'skip' };
+    const risk = await attempt(kit, 'checkHighRisk', () =>
+      acts.checkHighRisk({ ...kit.scope, repo: input.repo, prNumber: pr }),
+    );
+    if (risk.hits.length === 0) {
+      soHead = atHead;
+      return { kind: 'skip' };
+    }
+    const authors = await attempt(kit, 'authorFamilies', () => acts.authorFamilies({ ...kit.scope }));
+    const uiPaths = need(setup, '流程配置').uiPaths;
+    const files = netChanged ?? [...changed];
+    const ui = await judge(kit, 'filesUnder', { paths: uiPaths, files });
+    const got = await runStage(kit, {
+      stage: 'review',
+      expect: 'review',
+      brief: secondOpinionBrief(pr, atHead),
+      avoidFamilies: authors.families,
+      uiWork: ui.length > 0 || undefined,
+      noRouteTitle: `没有别家可请第二意见：写这张单的是 ${authors.families.join('、')} 族，第二意见只派别家，不拿同族顶`,
+    });
+    const verdict: 'pass' | 'changes' = got.output.review.verdict === 'pass' ? 'pass' : 'changes';
+    const blocking = got.output.review.findings.filter((f) => f.severity === 'blocking');
+    await attempt(kit, 'postSecondOpinion', () =>
+      acts.postSecondOpinion({
+        ...kit.scope,
+        repo: input.repo,
+        prNumber: pr,
+        head: atHead,
+        round: soRounds + 1,
+        hits: risk.hits,
+        verdict,
+        findings: got.output.review.findings,
+        model: got.route.modelId,
+      }),
+    );
+    soHead = atHead;
+    if (verdict === 'pass') return { kind: 'pass' };
+    soRounds += 1;
+    if (soRounds >= SECOND_OPINION_ROUND_LIMIT) {
+      return {
+        kind: 'needs-human',
+        why: `第二意见连着 ${soRounds} 轮都要改，停下等人：${
+          blocking.map((f) => f.text).join('；') || '没写具体条目'
+        }`,
+      };
+    }
+    return { kind: 'changes', items: blocking.map((f) => (f.file ? `${f.file}：${f.text}` : f.text)) };
+  };
+
   /**
    * 等 CI（绑在推上去的头上）：红了记下要修的；没查成的连着几次就停下等人；和主线冲突交给 core 走「并主线」
    * （不算没查成的次数，见 doSyncMainline）；头被改写了（github 包已经排除了「新头含着老头」的良性情形）不是
    * 重试或并主线能接的，直接停下等人，不占没查成的次数。
+   * 第二意见（#253）和等 CI 同时跑（design 第五节「第二意见一轮、和测试同时跑」）：碰了高风险路径就顺带请一轮，
+   * 「必须改」并进这一轮的修一轮反馈（和 CI 红同一本账）；合并闸报「等第二意见」（MERGE_GATE_CONTEXT）而没有别的失败检查，
+   * 不当 CI 红去修一轮（Lead 改不了合并闸自己的状态，见需求：#253 第 3 条），多半是状态还没被合并闸重算追上，
+   * 稍等再查一次，连着几次都这样才停下等人。
    */
   const waitCiEvent = async (): Promise<FlowEvent> => {
     const pr = need(prNumber, 'PR');
-    const ci = await attempt(kit, 'waitCi', () =>
-      acts.waitCi({ ...kit.scope, repo: input.repo, prNumber: pr, head }),
-    );
+    const atHead = head;
+    // patched() 本身也要记进历史、调用次数和顺序不能跟着分支变，所以先问一次存起来，不要在 Promise.all 里现问。
+    const soOn = patched(SECOND_OPINION_PATCH);
+    const [ci, so] = await Promise.all([
+      attempt(kit, 'waitCi', () =>
+        acts.waitCi({ ...kit.scope, repo: input.repo, prNumber: pr, head: atHead }),
+      ),
+      soOn ? secondOpinionRound(pr, atHead) : Promise.resolve<SecondOpinionOutcome>({ kind: 'skip' }),
+    ]);
+    if (so.kind === 'needs-human') return { kind: 'needs-human', why: so.why };
     if (ci.state === 'diverged') {
       // ci.detail（ciResultOf 拼的）已经写清是哪个头变成了哪个头、为什么不认：不再重复一遍。
       return { kind: 'needs-human', why: ci.detail ?? 'PR 的头变了，且新头不含老头（像是被强推改写了）' };
@@ -997,18 +1115,45 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
       status.lastProblem = `CI 报和主线冲突，GitHub 没给它起：${ci.detail ?? ''}`;
       return { kind: 'ci', state: 'conflict' };
     }
+    const feedback: Feedback[] = [];
     if (ci.state === 'red') {
-      status.lastProblem = `CI 没过：${ci.failedChecks.join('、') || '（没列出检查名）'}`;
-      fix = {
-        feedback: [
-          {
-            kind: 'ci',
-            summary: 'CI 没过',
-            items: [...ci.failedChecks, ...(ci.digest ? [ci.digest] : []), ...(ci.detail ? [ci.detail] : [])],
-          },
-        ],
-      };
+      // 合并闸自己不算「Lead 能改代码解决」的失败：碰了高风险路径本来就该等 second-opinion 的空窗，不报给 Lead
+      // （老历史没打过这个标记：照老步序一个字都不改，failedChecks 原样报给 Lead）
+      const realFails = soOn ? ci.failedChecks.filter((c) => c !== MERGE_GATE_CONTEXT) : ci.failedChecks;
+      if (realFails.length > 0) {
+        feedback.push({
+          kind: 'ci',
+          summary: 'CI 没过',
+          items: [...realFails, ...(ci.digest ? [ci.digest] : []), ...(ci.detail ? [ci.detail] : [])],
+        });
+      }
     }
+    if (so.kind === 'changes') {
+      feedback.push({
+        kind: 'review',
+        summary: `第二意见第 ${soRounds} 轮：必须改`,
+        items: so.items,
+      });
+    }
+    if (feedback.length > 0) {
+      status.lastProblem = feedback[0]?.summary ?? '';
+      fix = { feedback };
+      return { kind: 'ci', state: 'red' };
+    }
+    if (ci.state === 'red') {
+      // 走到这里：合并闸红了，但既不是第二意见要改（above 已经处理过），也没有别的失败检查——多半是合并闸还没
+      // 追上刚贴的状态（second-opinion 的状态写上去、merge-gate.yml 重算要几秒到几十秒），稍等再查一次。
+      gateOnlyRetries += 1;
+      if (gateOnlyRetries >= GATE_ONLY_RED_LIMIT) {
+        gateOnlyRetries = 0;
+        return {
+          kind: 'needs-human',
+          why: `合并闸连着 ${GATE_ONLY_RED_LIMIT} 次只报「${MERGE_GATE_CONTEXT}」红、没有别的失败检查，这个头也已经贴过第二意见：多半是别的原因（认领对得上、关单要带结果……），要人看`,
+        };
+      }
+      return waitCiEvent();
+    }
+    gateOnlyRetries = 0;
     return { kind: 'ci', state: ci.state };
   };
 

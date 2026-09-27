@@ -39,6 +39,8 @@ source "$DEPLOY_DIR/lib/cursor-agent.sh"
 source "$DEPLOY_DIR/lib/cursor-key.sh"
 # shellcheck source=lib/grok.sh
 source "$DEPLOY_DIR/lib/grok.sh"
+# shellcheck source=lib/mirasim.sh
+source "$DEPLOY_DIR/lib/mirasim.sh"
 # shellcheck source=lib/agents-sync.sh
 source "$DEPLOY_DIR/lib/agents-sync.sh"
 # shellcheck source=lib/app-config.sh
@@ -919,6 +921,7 @@ readback() {
   readback_pnpm
   readback_cursor_agent
   readback_grok
+  readback_mirasim
   readback_wireguard
   readback_firewall
   readback_session_ports
@@ -1403,6 +1406,19 @@ readback_grok() {
     fi
     check_grok "$u" "$(grok_bin "$u")"
     check_grok_login "$u" "$(grok_auth_file "$u")" "$(grok_bin "$u")"
+  done
+}
+
+# 会话用户自己的 Mirasim 服务（lib/mirasim.sh，#345）：这一步不装，只看有没有——创始人从自己电脑上的 Mirasim 桌面端
+# 以 SSH 远程模式装、登录（docs/ops.md 第五节「会话用户的 Mirasim」）。
+readback_mirasim() {
+  local u
+  for u in "${SESSION_USERS[@]}"; do
+    if ! id "$u" >/dev/null 2>&1; then
+      pending "$u 这个用户还没有，Mirasim 服务没查"
+      continue
+    fi
+    check_mirasim "$u"
   done
 }
 
