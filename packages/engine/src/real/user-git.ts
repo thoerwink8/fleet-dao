@@ -424,6 +424,136 @@ export async function readFileAs(t: UserTree, path: string): Promise<string | nu
   throw new PortError('READ_FAILED', describeFailure(`读 ${path}`, r), { retryable: true });
 }
 
+/** 一棵没有在跑的任务在用的树里还剩什么（每小时对账删树之前看，jobs/worktree-sweep.ts）。 */
+export type TreeLeftovers =
+  /** 这一层不是 git 仓，里面什么都没有（建树建到一半）：删了不丢东西。 */
+  | { kind: 'empty' }
+  /** 这一层不是 git 仓，里面却有东西（前几个名字）：认不出是什么，不删。 */
+  | { kind: 'not-repo'; entries: string[] }
+  | {
+      kind: 'repo';
+      /** 没提交的改动（git status --porcelain：改了的、暂存了的、没跟踪也没被忽略的新文件），前几行。 */
+      dirty: string[];
+      dirtyCount: number;
+      /** 存着几个 stash。 */
+      stashes: number;
+      /** 没推的提交（前几个，一行一个），总数在 unpushedCount。 */
+      unpushed: string[];
+      unpushedCount: number;
+    };
+
+/** 报「树里还剩什么」时每样最多列几个。 */
+export const LEFTOVER_LIST_MAX = 5;
+
+/** 检出副本往回看多少条检出记录（HEAD 的 reflog）：一个副本一轮一次检出，够用；更早的只会多算。 */
+const CHECKOUT_LOG_MAX = 200;
+
+export interface LeftoverOptions {
+  /**
+   * 引擎的检出副本（分诊、需求文档、方案、审查、开 PR 前验证：sessions.ts 每起一个新会话都 checkout --force + clean -fdx
+   * 从头来）：它在这里检出过的提交（HEAD 的检出记录）都是从引擎的镜像取的，算推过；ignore 里的路径（会话交给引擎的
+   * 结论文件 .fleet-out/，引擎读过了）不算没提交的改动。写码的树不给：那里的检出记录可能是会话自己切的。
+   */
+  scratch?: { ignore: readonly string[] };
+}
+
+/**
+ * 以会话用户的身份看这棵树里还有什么没推、没提交的。known = 推上去过的头（PR 镜像里这条分支的头）；树自己的
+ * refs/fleet/incoming（引擎交给它的主线头或 PR 头）和 refs/remotes/*（钉的主线）也算推过的。没推的提交 = HEAD、本地分支、
+ * 标签走得到，上面这些都走不到的提交；给的头树里没有就跳过（--ignore-missing）：只会多算、不会少算，多算的交人拍。
+ * 还没有提交的仓（建树时 init 之后取包没成）只看分支和标签。git 没跑成一律抛 PortError，不拿空结果冒充「什么都没剩」。
+ */
+export async function treeLeftovers(
+  t: UserTree,
+  known: readonly string[],
+  options: LeftoverOptions = {},
+): Promise<TreeLeftovers> {
+  for (const sha of known) assertSha(sha, '推上去过的头');
+  const bin = t.git ?? GIT;
+  // 这一层是不是仓的顶：--show-prefix 在顶上打空行，在子目录里打相对路径；不是仓（往上也找不到）退出 128
+  const top = await run(t, [bin, 'rev-parse', '--show-prefix']);
+  if (top.code !== 0 && top.code !== 128) {
+    throw new PortError('GIT_FAILED', describeFailure('看这一层是不是 git 仓', top), { retryable: true });
+  }
+  if (top.code === 128 || text(top).trim() !== '') {
+    const listed = await run(t, [t.sh ?? SH, '-c', 'ls -A1']);
+    if (listed.code !== 0) {
+      throw new PortError('READ_FAILED', describeFailure('列树里的东西', listed), { retryable: true });
+    }
+    const entries = lines(listed);
+    return entries.length === 0
+      ? { kind: 'empty' }
+      : { kind: 'not-repo', entries: entries.slice(0, LEFTOVER_LIST_MAX) };
+  }
+  // 有没有检出过提交：退出 1 = 还没有（HEAD 指着一个还没生出来的分支），别的非 0 是 git 没跑成
+  const born = await run(t, [bin, 'rev-parse', '-q', '--verify', 'HEAD^{commit}']);
+  if (born.code !== 0 && born.code !== 1) {
+    throw new PortError('GIT_FAILED', describeFailure('看树里检出过提交没有', born), { retryable: true });
+  }
+  const hasHead = born.code === 0;
+  const excluded = (options.scratch?.ignore ?? []).map((p) => `:(exclude)${p}`);
+  const dirty = lines(
+    await git(
+      t,
+      [
+        'status',
+        '--porcelain=v1',
+        '--untracked-files=normal',
+        ...(excluded.length ? ['--', '.', ...excluded] : []),
+      ],
+      '看有没有没提交的改动',
+    ),
+  );
+  const stashes = lines(await git(t, ['stash', 'list'], '看有没有存着的 stash')).length;
+  const checkouts =
+    options.scratch && hasHead
+      ? lines(
+          await git(
+            t,
+            ['reflog', 'show', '--format=%H %gs', `-n${CHECKOUT_LOG_MAX}`, 'HEAD', '--'],
+            '读检出记录',
+          ),
+        ).flatMap((l) => {
+          const [sha, ...subject] = l.split(' ');
+          return sha && SHA.test(sha) && subject.join(' ').startsWith('checkout: moving from ') ? [sha] : [];
+        })
+      : [];
+  const range = [
+    ...(hasHead ? ['HEAD'] : []),
+    '--branches',
+    '--tags',
+    '--not',
+    '--remotes',
+    'refs/fleet/incoming',
+    ...known,
+    ...new Set(checkouts),
+  ];
+  const count = Number(
+    text(await git(t, ['rev-list', '--count', '--ignore-missing', ...range], '数没推的提交')).trim(),
+  );
+  if (!Number.isInteger(count) || count < 0) {
+    throw new PortError('GIT_FAILED', '数没推的提交：输出认不出', { retryable: true });
+  }
+  const unpushed =
+    count === 0
+      ? []
+      : lines(
+          await git(
+            t,
+            ['log', '--oneline', '--ignore-missing', `-n${LEFTOVER_LIST_MAX}`, ...range],
+            '列没推的提交',
+          ),
+        );
+  return {
+    kind: 'repo',
+    dirty: dirty.slice(0, LEFTOVER_LIST_MAX),
+    dirtyCount: dirty.length,
+    stashes,
+    unpushed,
+    unpushedCount: count,
+  };
+}
+
 /** 没合并就收树时存档：没提交的改动（含二进制）和状态，交给引擎写进自己的存档目录。 */
 export async function uncommittedPatch(t: UserTree): Promise<{ status: string[]; patch: Buffer }> {
   const status = lines(await git(t, ['status', '--porcelain'], '看工作树状态'));

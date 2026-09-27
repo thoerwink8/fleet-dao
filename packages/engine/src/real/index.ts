@@ -13,6 +13,7 @@ import { scopeExec, type UserExec } from './exec.ts';
 import { createGitHubPorts, type EngineGitHub } from './github-ports.ts';
 import { githubReconcileJob } from './github-reconcile.ts';
 import { cursorLaunchCommand, DEFAULT_CURSOR_VERSIONS_DIR } from './hosts.ts';
+import { hourlyReconcileJob } from './hourly-reconcile.ts';
 import { engineJevFromEnv } from './jev-port.ts';
 import { registerEngineJobs } from './jobs.ts';
 import { routeProbeJob } from './route-probe.ts';
@@ -198,6 +199,7 @@ export function realPortsFromEnv(
   // 判断题：起来时读一遍 jev.json、建一遍后端、登记两道题（registerJobs）；之后每次问都现找一遍（改了配置、调度台换了
   // 判断路由不用重启，和 /healthz 的 judge 项同一个判法）。默认位置上没有 jev.json 才算没接、不问；别的读不成都报错。
   const jev = engineJevFromEnv(db, env);
+  const exec = scopeExec();
   const real = createRealPorts({
     db,
     jev: jev.port,
@@ -205,7 +207,7 @@ export function realPortsFromEnv(
     // 发给别家的验证材料和推分支、开 PR 用同一份已知敏感值名单（createGitHub 按环境变量找的那份）
     screen: (what, texts) => assertPublishable(what, texts, gh.deps.sensitiveValues),
     trees,
-    exec: scopeExec(),
+    exec,
     tmpDir: join(config.stateDir, 'tmp'),
     archiveDir: join(config.stateDir, 'archive'),
     machine: config.machine,
@@ -217,6 +219,8 @@ export function realPortsFromEnv(
     githubReconcile: githubReconcileJob({ db, gh }),
     // 路由探针和干活的会话用同一份执行体（reclaude、cursor-agent）、同一个工作树的根（探针目录在它下面）
     routeProbe: routeProbeJob({ db, trees, claudeCommand, cursorCommand, machine: config.machine }),
+    // 每小时对账：同一个工作树管家（删树经 fleet-agent-scope）、同一个会话用户执行器（看树里还剩什么）
+    hourlyReconcile: hourlyReconcileJob({ db, trees, exec, machine: config.machine }),
   };
   return {
     ...real,
