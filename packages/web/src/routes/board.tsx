@@ -5,6 +5,7 @@ import { brand } from '#brand';
 import { errorText, useBoard, useMe, useRouting } from '../api/client';
 import { BoardTree } from '../board/board-tree';
 import { FlowBanner } from '../board/flow-source';
+import { SeatBar } from '../board/seat-bar';
 import { Empty, LoadError } from '../components/page';
 import { useRepo } from '../components/repo-context';
 import { Button } from '../components/ui/button';
@@ -45,6 +46,7 @@ export default function BoardPage() {
   if (!board.data && (error || board.error)) {
     return (
       <div className="p-6">
+        <SeatBar />
         <LoadError what={error ? '仓列表' : '看板'} error={error ?? board.error} />
       </div>
     );
@@ -52,6 +54,7 @@ export default function BoardPage() {
   if (!loading && !repoId) {
     return (
       <div className="p-6">
+        <SeatBar />
         <Empty
           icon={FolderGit2}
           title="还没有仓"
@@ -60,7 +63,14 @@ export default function BoardPage() {
       </div>
     );
   }
-  if (!board.data) return <BoardSkeleton />;
+  if (!board.data) {
+    return (
+      <>
+        <SeatBar />
+        <BoardSkeleton />
+      </>
+    );
+  }
 
   const stale = board.error ? (
     <StaleBanner error={board.error} asOf={board.data.asOf} onRetry={() => void board.refetch()} />
@@ -70,6 +80,7 @@ export default function BoardPage() {
     return (
       <>
         {stale ? <div className="sticky top-0 z-20 p-2">{stale}</div> : null}
+        <SeatBar />
         <FlowBanner flow={board.data.flow} />
         <BoardTree
           board={board.data}
@@ -89,6 +100,7 @@ export default function BoardPage() {
   }
   return (
     <div className="flex h-full flex-col">
+      <SeatBar />
       <FlowBanner flow={board.data.flow} />
       <div className="relative min-h-0 flex-1">
         <Suspense fallback={<BoardSkeleton />}>

@@ -372,3 +372,444 @@ export function pullOfClaim(
   if (pull.prClaimId === claim.claimId || claim.prNumbers.includes(pull.number)) return true;
   return claim.ownerKind === 'engine' && pull.byAgentBot;
 }
+
+// —— 帅位栏（#199）：一份板是一个项目的进度。判法在这里，外壳只负责锁行和时钟。
+
+export const BOARD_STEP_STATUSES = ['done', 'doing', 'waiting', 'needs', 'blocked'] as const;
+export type BoardStepStatus = (typeof BOARD_STEP_STATUSES)[number];
+/** 最近动态只留这么多条，新的在前。 */
+export const BOARD_LOG_KEEP = 60;
+
+const BOARD_PROJECT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
+const BOARD_REPO = /^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9._-]+$/;
+const BOARD_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const BOARD_URL = /^https?:\/\/[^\s]+$/i;
+const BOARD_TEXT = 500;
+
+export function boardProjectProblem(name: string): string | null {
+  return BOARD_PROJECT.test(name)
+    ? null
+    : `项目名「${name}」不行：写成仓名（字母、数字、点、横线、下划线，一段）`;
+}
+
+export interface BoardLink {
+  label: string;
+  url: string;
+}
+export interface BoardStep {
+  id: string;
+  order: number;
+  title: string;
+  status: BoardStepStatus;
+  detail: string;
+  updatedAt: string;
+  links: BoardLink[];
+}
+export interface BoardLogEntry {
+  at: string;
+  text: string;
+}
+export interface BoardNeed {
+  id: string;
+  question: string;
+  options: string[];
+  recommended: string;
+  repo: string;
+  issue: number;
+}
+export interface BoardAnswer extends BoardNeed {
+  option: string;
+  answeredAt: string;
+  answeredBy: string;
+  ackedAt: string | null;
+}
+export interface SeatBoardDoc {
+  headline: string;
+  steps: BoardStep[];
+  log: BoardLogEntry[];
+  needs: BoardNeed[];
+  answers: BoardAnswer[];
+}
+
+export function emptySeatBoard(): SeatBoardDoc {
+  return { headline: '', steps: [], log: [], needs: [], answers: [] };
+}
+
+export type BoardWrite =
+  | { kind: 'head'; text: string }
+  | { kind: 'add'; id: string; order: number; title: string; detail: string }
+  | { kind: 'step'; id: string; status: string; detail?: string | undefined }
+  | { kind: 'link'; id: string; label: string; url: string }
+  | { kind: 'log'; text: string }
+  | {
+      kind: 'need';
+      id: string;
+      question: string;
+      options: string[];
+      recommended: string;
+      repo: string;
+      issue: number;
+    }
+  | { kind: 'clear-needs' }
+  | { kind: 'answer'; id: string; option: string; by: string }
+  | { kind: 'ack'; id: string };
+
+export type BoardWriteResult =
+  | { ok: true; doc: SeatBoardDoc }
+  | { ok: false; reason: 'bad' | 'missing' | 'already'; why: string };
+
+const isStr = (v: unknown): v is string => typeof v === 'string';
+const isIso = (v: unknown): v is string => isStr(v) && Number.isFinite(Date.parse(v));
+const isStatus = (v: unknown): v is BoardStepStatus =>
+  isStr(v) && (BOARD_STEP_STATUSES as readonly string[]).includes(v);
+
+function textProblem(value: string, what: string): string | null {
+  const t = value.trim();
+  if (t === '') return `${what}是空的`;
+  if ([...t].length > BOARD_TEXT) return `${what}太长（最多 ${BOARD_TEXT} 个字）`;
+  return null;
+}
+
+function idProblem(id: string, what: string): string | null {
+  return BOARD_ID.test(id) ? null : `${what}「${id}」不行：64 字以内的字母、数字、点、横线、下划线`;
+}
+
+/** 从库里读回来的四段。认不出就失败，不拿空的顶。 */
+export function readSeatBoard(raw: {
+  headline: unknown;
+  steps: unknown;
+  log: unknown;
+  needs: unknown;
+  answers: unknown;
+}): { ok: true; doc: SeatBoardDoc } | { ok: false; why: string } {
+  const problems: string[] = [];
+  if (!isStr(raw.headline)) problems.push('headline 不是字符串');
+  const steps = readSteps(raw.steps, problems);
+  const log = readLog(raw.log, problems);
+  const needs = readNeeds(raw.needs, problems);
+  const answers = readAnswers(raw.answers, problems);
+  if (!isStr(raw.headline) || !steps || !log || !needs || !answers) {
+    return { ok: false, why: `这份板认不出：${problems.slice(0, 5).join('；')}` };
+  }
+  return { ok: true, doc: { headline: raw.headline, steps, log, needs, answers } };
+}
+
+function readSteps(raw: unknown, problems: string[]): BoardStep[] | null {
+  if (!Array.isArray(raw)) {
+    problems.push('steps 不是列表');
+    return null;
+  }
+  const steps: BoardStep[] = [];
+  const seen = new Set<string>();
+  for (const [i, item] of raw.entries()) {
+    if (!item || typeof item !== 'object') {
+      problems.push(`steps[${i}] 不是对象`);
+      return null;
+    }
+    const s = item as Record<string, unknown>;
+    if (!isStr(s.id) || !BOARD_ID.test(s.id) || seen.has(s.id)) {
+      problems.push(`steps[${i}].id 不行`);
+      return null;
+    }
+    seen.add(s.id);
+    if (typeof s.order !== 'number' || !Number.isFinite(s.order)) {
+      problems.push(`steps[${i}].order 不是数`);
+      return null;
+    }
+    if (!isStr(s.title) || !isStatus(s.status) || !isStr(s.detail) || !isIso(s.updatedAt)) {
+      problems.push(`steps[${i}] 缺标题、状态、说明或更新时间`);
+      return null;
+    }
+    if (!Array.isArray(s.links)) {
+      problems.push(`steps[${i}].links 不是列表`);
+      return null;
+    }
+    const links: BoardLink[] = [];
+    for (const link of s.links) {
+      if (!link || typeof link !== 'object') {
+        problems.push(`steps[${i}].links 里有不是对象的`);
+        return null;
+      }
+      const l = link as Record<string, unknown>;
+      if (!isStr(l.url) || !BOARD_URL.test(l.url) || !isStr(l.label)) {
+        problems.push(`steps[${i}].links 每项要有名字和 http(s) 网址`);
+        return null;
+      }
+      links.push({ label: l.label, url: l.url });
+    }
+    steps.push({
+      id: s.id,
+      order: s.order,
+      title: s.title,
+      status: s.status,
+      detail: s.detail,
+      updatedAt: s.updatedAt,
+      links,
+    });
+  }
+  return steps;
+}
+
+function readLog(raw: unknown, problems: string[]): BoardLogEntry[] | null {
+  if (!Array.isArray(raw)) {
+    problems.push('log 不是列表');
+    return null;
+  }
+  const log: BoardLogEntry[] = [];
+  for (const [i, item] of raw.entries()) {
+    if (!item || typeof item !== 'object') {
+      problems.push(`log[${i}] 不是对象`);
+      return null;
+    }
+    const e = item as Record<string, unknown>;
+    if (!isIso(e.at) || !isStr(e.text)) {
+      problems.push(`log[${i}] 要有时间和文字`);
+      return null;
+    }
+    log.push({ at: e.at, text: e.text });
+  }
+  return log;
+}
+
+function readNeed(item: unknown, at: string, problems: string[]): BoardNeed | null {
+  if (!item || typeof item !== 'object') {
+    problems.push(`${at} 不是对象`);
+    return null;
+  }
+  const n = item as Record<string, unknown>;
+  if (!isStr(n.id) || !BOARD_ID.test(n.id)) {
+    problems.push(`${at}.id 不行`);
+    return null;
+  }
+  if (!isStr(n.question) || !isStr(n.repo) || !BOARD_REPO.test(n.repo)) {
+    problems.push(`${at} 缺问题或仓名不对`);
+    return null;
+  }
+  if (typeof n.issue !== 'number' || !Number.isInteger(n.issue) || n.issue <= 0) {
+    problems.push(`${at}.issue 不是正整数`);
+    return null;
+  }
+  if (!Array.isArray(n.options) || n.options.length < 2 || !n.options.every(isStr)) {
+    problems.push(`${at}.options 至少要两个选项`);
+    return null;
+  }
+  const options = n.options as string[];
+  if (new Set(options).size !== options.length || options.some((o) => o.trim() === '')) {
+    problems.push(`${at}.options 有空的或重复的`);
+    return null;
+  }
+  if (!isStr(n.recommended) || !options.includes(n.recommended)) {
+    problems.push(`${at}.recommended 不在选项里`);
+    return null;
+  }
+  return {
+    id: n.id,
+    question: n.question,
+    options,
+    recommended: n.recommended,
+    repo: n.repo,
+    issue: n.issue,
+  };
+}
+
+function readNeeds(raw: unknown, problems: string[]): BoardNeed[] | null {
+  if (!Array.isArray(raw)) {
+    problems.push('needs 不是列表');
+    return null;
+  }
+  const needs: BoardNeed[] = [];
+  for (const [i, item] of raw.entries()) {
+    const n = readNeed(item, `needs[${i}]`, problems);
+    if (!n) return null;
+    needs.push(n);
+  }
+  return needs;
+}
+
+function readAnswers(raw: unknown, problems: string[]): BoardAnswer[] | null {
+  if (!Array.isArray(raw)) {
+    problems.push('answers 不是列表');
+    return null;
+  }
+  const answers: BoardAnswer[] = [];
+  for (const [i, item] of raw.entries()) {
+    const n = readNeed(item, `answers[${i}]`, problems);
+    if (!n || !item || typeof item !== 'object') return null;
+    const a = item as Record<string, unknown>;
+    if (!isStr(a.option) || !n.options.includes(a.option) || !isIso(a.answeredAt) || !isStr(a.answeredBy)) {
+      problems.push(`answers[${i}] 缺选中的选项、回答时间或是谁答的`);
+      return null;
+    }
+    if (a.ackedAt !== null && !isIso(a.ackedAt)) {
+      problems.push(`answers[${i}].ackedAt 认不出`);
+      return null;
+    }
+    answers.push({
+      ...n,
+      option: a.option,
+      answeredAt: a.answeredAt,
+      answeredBy: a.answeredBy,
+      ackedAt: a.ackedAt === null ? null : a.ackedAt,
+    });
+  }
+  return answers;
+}
+
+function cloneBoard(doc: SeatBoardDoc): SeatBoardDoc {
+  return {
+    headline: doc.headline,
+    steps: doc.steps.map((s) => ({ ...s, links: s.links.map((l) => ({ ...l })) })),
+    log: doc.log.map((e) => ({ ...e })),
+    needs: doc.needs.map((n) => ({ ...n, options: [...n.options] })),
+    answers: doc.answers.map((a) => ({ ...a, options: [...a.options] })),
+  };
+}
+
+function needShape(input: {
+  id: string;
+  question: string;
+  options: string[];
+  recommended: string;
+  repo: string;
+  issue: number;
+}): string | null {
+  return (
+    idProblem(input.id, '编号') ??
+    textProblem(input.question, '问题') ??
+    (BOARD_REPO.test(input.repo) ? null : `仓「${input.repo}」要写成 owner/仓名`) ??
+    (Number.isInteger(input.issue) && input.issue > 0 ? null : '单号要是正整数') ??
+    (input.options.length >= 2 ? null : '至少要两个选项') ??
+    (new Set(input.options).size === input.options.length && input.options.every((o) => o.trim() !== '')
+      ? null
+      : '选项有空的或重复的') ??
+    (input.options.includes(input.recommended) ? null : `推荐的「${input.recommended}」不在选项里`)
+  );
+}
+
+/**
+ * 改一份板。now 是库的 now()（ISO）。不改入参。
+ * 状态写错、选项不在列表里：reason = bad，原样不动。
+ * 没有这一步、没有这一问：reason = missing。
+ * 这一问已经拍过：reason = already。
+ */
+export function applyBoardWrite(doc: SeatBoardDoc, op: BoardWrite, now: string): BoardWriteResult {
+  if (!isIso(now)) return { ok: false, reason: 'bad', why: `库的时钟（${now}）认不出` };
+  const next = cloneBoard(doc);
+  switch (op.kind) {
+    case 'head': {
+      const why = textProblem(op.text, '现状');
+      if (why) return { ok: false, reason: 'bad', why };
+      next.headline = op.text.trim();
+      return { ok: true, doc: next };
+    }
+    case 'add': {
+      const why = idProblem(op.id, '步骤编号') ?? textProblem(op.title, '标题');
+      if (why) return { ok: false, reason: 'bad', why };
+      if (!Number.isFinite(op.order)) return { ok: false, reason: 'bad', why: '序号不是数' };
+      if (op.detail.trim() !== '' && textProblem(op.detail, '说明')) {
+        return { ok: false, reason: 'bad', why: textProblem(op.detail, '说明') ?? '' };
+      }
+      if (next.steps.some((s) => s.id === op.id)) {
+        return { ok: false, reason: 'bad', why: `已经有 ${op.id} 这一步` };
+      }
+      next.steps.push({
+        id: op.id,
+        order: op.order,
+        title: op.title.trim(),
+        status: 'waiting',
+        detail: op.detail.trim(),
+        updatedAt: now,
+        links: [],
+      });
+      return { ok: true, doc: next };
+    }
+    case 'step': {
+      if (!isStatus(op.status)) {
+        return {
+          ok: false,
+          reason: 'bad',
+          why: `状态「${op.status}」不行，只能是 ${BOARD_STEP_STATUSES.join('、')}`,
+        };
+      }
+      const step = next.steps.find((s) => s.id === op.id);
+      if (!step) return { ok: false, reason: 'missing', why: `没有 ${op.id} 这一步` };
+      if (op.detail !== undefined && op.detail.trim() !== '' && textProblem(op.detail, '说明')) {
+        return { ok: false, reason: 'bad', why: textProblem(op.detail, '说明') ?? '' };
+      }
+      step.status = op.status;
+      if (op.detail !== undefined) step.detail = op.detail.trim();
+      step.updatedAt = now;
+      return { ok: true, doc: next };
+    }
+    case 'link': {
+      if (!isStr(op.url) || !BOARD_URL.test(op.url)) {
+        return { ok: false, reason: 'bad', why: '链接要是 http(s) 网址' };
+      }
+      const why = textProblem(op.label, '链接名字');
+      if (why) return { ok: false, reason: 'bad', why };
+      const step = next.steps.find((s) => s.id === op.id);
+      if (!step) return { ok: false, reason: 'missing', why: `没有 ${op.id} 这一步` };
+      step.links = [...step.links.filter((l) => l.url !== op.url), { label: op.label.trim(), url: op.url }];
+      step.updatedAt = now;
+      return { ok: true, doc: next };
+    }
+    case 'log': {
+      const why = textProblem(op.text, '动态');
+      if (why) return { ok: false, reason: 'bad', why };
+      next.log = [{ at: now, text: op.text.trim() }, ...next.log].slice(0, BOARD_LOG_KEEP);
+      return { ok: true, doc: next };
+    }
+    case 'need': {
+      const options = op.options.map((o) => o.trim());
+      const why = needShape({ ...op, question: op.question.trim(), options });
+      if (why) return { ok: false, reason: 'bad', why };
+      if (next.needs.some((n) => n.id === op.id) || next.answers.some((a) => a.id === op.id)) {
+        return { ok: false, reason: 'bad', why: `已经有 ${op.id} 这一问` };
+      }
+      next.needs.push({
+        id: op.id,
+        question: op.question.trim(),
+        options,
+        recommended: op.recommended,
+        repo: op.repo,
+        issue: op.issue,
+      });
+      return { ok: true, doc: next };
+    }
+    case 'clear-needs':
+      next.needs = [];
+      return { ok: true, doc: next };
+    case 'answer': {
+      if (next.answers.some((a) => a.id === op.id)) {
+        return { ok: false, reason: 'already', why: '这一问已经有人拍过了' };
+      }
+      const need = next.needs.find((n) => n.id === op.id);
+      if (!need) return { ok: false, reason: 'missing', why: `没有 ${op.id} 这一问` };
+      if (!need.options.includes(op.option)) {
+        return { ok: false, reason: 'bad', why: `「${op.option}」不在选项里` };
+      }
+      if (op.by.trim() === '') return { ok: false, reason: 'bad', why: '没有记下是谁拍的' };
+      next.needs = next.needs.filter((n) => n.id !== op.id);
+      next.answers.push({
+        ...need,
+        options: [...need.options],
+        option: op.option,
+        answeredAt: now,
+        answeredBy: op.by,
+        ackedAt: null,
+      });
+      return { ok: true, doc: next };
+    }
+    case 'ack': {
+      const answer = next.answers.find((a) => a.id === op.id);
+      if (!answer) return { ok: false, reason: 'missing', why: `没有 ${op.id} 这条已拍的` };
+      if (answer.ackedAt === null) answer.ackedAt = now;
+      return { ok: true, doc: next };
+    }
+  }
+}
+
+/** 已拍、会话还没写进单子的。 */
+export function pendingBoardAnswers(doc: SeatBoardDoc): BoardAnswer[] {
+  return doc.answers.filter((a) => a.ackedAt === null);
+}

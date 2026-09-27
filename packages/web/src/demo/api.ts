@@ -43,6 +43,8 @@ export function createDemoApi(inner: MockApi): FleetApi {
     },
     taskAction: (taskId, body) => inner.taskAction(taskId, body),
     answerAsk: (askId, answer) => inner.answerAsk(askId, answer),
+    seatBoard: () => inner.seatBoard(),
+    answerSeatNeed: (needId, option) => inner.answerSeatNeed(needId, option),
     routing: () => inner.routing(),
     updateStagePolicy: (stage, body) => inner.updateStagePolicy(stage, body),
     updateChannel: (channelId, body) => inner.updateChannel(channelId, body),

@@ -1,9 +1,11 @@
 // 帅位租约和认领的判法（#299，specs/299-帅位只一个/方案.md 第二节）：时间都是库的 now()，读不到、认不出按不是帅位算。
 import { describe, expect, it } from 'vitest';
 import {
+  applyBoardWrite,
   CLAIM_STATUS_MAX,
   claimExpired,
   describeClaim,
+  emptySeatBoard,
   engineClaimEnd,
   heldByOtherText,
   type IssueClaim,
@@ -11,6 +13,7 @@ import {
   judgeClaimMatch,
   machineProblem,
   pullOfClaim,
+  readSeatBoard,
   readSeatSettings,
   SEAT_DEFAULTS,
   type SeatLease,
@@ -35,6 +38,51 @@ const lease: SeatLease = {
   handoffAt: null,
 };
 const me = { machine: '本机', session: 's1', term: 3 };
+
+describe('帅位栏（#199）', () => {
+  const need = {
+    kind: 'need' as const,
+    id: 'n1',
+    question: '先做哪件',
+    options: ['接口', '页面'],
+    recommended: '接口',
+    repo: 'o/r',
+    issue: 12,
+  };
+
+  it('状态写错：拒绝，板不动', () => {
+    const added = applyBoardWrite(
+      emptySeatBoard(),
+      { kind: 'add', id: 's1', order: 1, title: '写', detail: '' },
+      T0,
+    );
+    expect(added.ok).toBe(true);
+    if (!added.ok) return;
+    const bad = applyBoardWrite(added.doc, { kind: 'step', id: 's1', status: 'nope' }, T0);
+    expect(bad).toMatchObject({ ok: false, reason: 'bad' });
+    expect(added.doc.steps[0]?.status).toBe('waiting');
+  });
+
+  it('选项不在列表里：拒绝，这一问还在', () => {
+    const withNeed = applyBoardWrite(emptySeatBoard(), need, T0);
+    expect(withNeed.ok).toBe(true);
+    if (!withNeed.ok) return;
+    const bad = applyBoardWrite(withNeed.doc, { kind: 'answer', id: 'n1', option: '别的', by: 'u' }, T0);
+    expect(bad).toMatchObject({ ok: false, reason: 'bad' });
+    expect(withNeed.doc.needs).toHaveLength(1);
+    const ok = applyBoardWrite(withNeed.doc, { kind: 'answer', id: 'n1', option: '页面', by: 'u' }, T0);
+    expect(ok.ok).toBe(true);
+    if (!ok.ok) return;
+    expect(ok.doc.needs).toHaveLength(0);
+    expect(ok.doc.answers[0]).toMatchObject({ option: '页面', ackedAt: null });
+    const again = applyBoardWrite(ok.doc, { kind: 'answer', id: 'n1', option: '接口', by: 'u' }, T0);
+    expect(again).toMatchObject({ ok: false, reason: 'already' });
+  });
+
+  it('认不出的板不能当成空的', () => {
+    expect(readSeatBoard({ headline: '', steps: 'x', log: [], needs: [], answers: [] }).ok).toBe(false);
+  });
+});
 
 describe('租期、宽限期的配置（settings 表的 seat.leaseMinutes、seat.claimGraceMinutes）', () => {
   it('没写：用默认，写明用的是默认', () => {

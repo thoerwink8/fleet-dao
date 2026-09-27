@@ -131,7 +131,7 @@ describe('参数', () => {
     const t = setup();
     expect((await t.run('seat', '--help')).out).toContain('seat take --machine');
     expect((await t.run('claim', '--help')).out).toContain('claim take <owner/仓名> <单号>');
-    expect((await t.run('--help')).out).toContain('fleet-api seat <take|renew|check|show|handoff>');
+    expect((await t.run('--help')).out).toContain('fleet-api seat <take|renew|check|show|handoff|board>');
     expect(t.opened()).toBe(0);
   });
 });
@@ -495,6 +495,88 @@ describe('改派（claim reassign，#348）', () => {
   });
 });
 
+describe('帅位栏 seat board（#199）', () => {
+  const term = ['--term', '1'];
+
+  it('不是现任写不进；点了不在选项里的这一问还在；点了合法的就从要你定的里消失、pending 里有', async () => {
+    const t = setup();
+    const denied = await t.run('seat', 'board', 'head', 'demo', ...A, ...term, '--text', '在写');
+    expect(denied.code).toBe(3);
+    expect((await t.run('seat', 'take', ...A)).code).toBe(0);
+    expect((await t.run('seat', 'board', 'head', 'demo', ...A, ...term, '--text', '在写')).code).toBe(0);
+    expect(
+      (
+        await t.run(
+          'seat',
+          'board',
+          'add',
+          'demo',
+          ...A,
+          ...term,
+          '--id',
+          's1',
+          '--order',
+          '1',
+          '--title',
+          '改首页',
+        )
+      ).code,
+    ).toBe(0);
+    const badStatus = await t.run(
+      'seat',
+      'board',
+      'step',
+      'demo',
+      ...A,
+      ...term,
+      '--id',
+      's1',
+      '--status',
+      'nope',
+    );
+    expect(badStatus.code).toBe(1);
+    expect(
+      (
+        await t.run(
+          'seat',
+          'board',
+          'need',
+          'demo',
+          ...A,
+          ...term,
+          '--id',
+          'n1',
+          '--issue',
+          '12',
+          '--repo',
+          'o/r',
+          '--recommend',
+          '接口',
+          '先做哪件',
+          '接口',
+          '页面',
+        )
+      ).code,
+    ).toBe(0);
+    const shown = await t.json('seat', 'board', 'show', 'demo');
+    expect(shown.code).toBe(0);
+    const boards = shown.body.boards as { needs: { id: string }[]; steps: { status: string }[] }[];
+    expect(boards[0]?.needs.map((n) => n.id)).toEqual(['n1']);
+    expect(boards[0]?.steps[0]?.status).toBe('waiting');
+    const bad = await t.memory.answerSeatNeed({ id: 'n1', option: '别的', by: 'u' });
+    expect(bad.ok).toBe(false);
+    const still = await t.memory.listSeatBoards('main');
+    expect(still.ok && still.boards[0]?.doc.needs).toHaveLength(1);
+    const ok = await t.memory.answerSeatNeed({ id: 'n1', option: '页面', by: 'u' });
+    expect(ok.ok).toBe(true);
+    const after = await t.memory.listSeatBoards('main');
+    expect(after.ok && after.boards[0]?.doc.needs).toHaveLength(0);
+    const pending = await t.json('seat', 'board', 'pending', 'demo', ...A, ...term);
+    expect(pending.code).toBe(0);
+    expect(pending.body.pending).toMatchObject([{ id: 'n1', option: '页面', issue: 12 }]);
+  });
+});
+
 describe('接在真库上（PGlite 跑真迁移）', () => {
   let db: TestDb;
   beforeAll(async () => {
@@ -507,6 +589,12 @@ describe('接在真库上（PGlite 跑真迁移）', () => {
     await seedPg(db.db, devFixtures(T0));
     const t = setup(createPgStore(db.db));
     expect((await t.run('seat', 'take', ...A)).code).toBe(0);
+    expect((await t.run('seat', 'board', 'head', 'demo', ...A, '--term', '1', '--text', '在写')).code).toBe(
+      0,
+    );
+    const shown = await t.json('seat', 'board', 'show', 'demo');
+    expect(shown.code).toBe(0);
+    expect(shown.body.boards).toMatchObject([{ project: 'demo', headline: '在写' }]);
     const got = await take2(t);
     const claimId = (got.body.claim as { claimId: string }).claimId;
     expect((await t.run('seat', 'take', ...B)).code).toBe(0);

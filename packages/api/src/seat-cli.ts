@@ -5,6 +5,7 @@
 // 退出码：0 做成了、是帅位；3 不是你的（不是帅位、过了租期、别人拿着、认领号对不上）；1 没做成（库出错、设置认不出）；
 // 2 参数不对。
 import {
+  type BoardWrite,
   claimOwnerText,
   claimStateText,
   describeClaim,
@@ -14,6 +15,7 @@ import {
   isDrillScope,
   MAIN_SEAT,
   machineProblem,
+  pendingBoardAnswers,
   type SeatLease,
   type SeatSettingsRead,
   seatExpiresAt,
@@ -26,7 +28,17 @@ import { type ClaimStatus, refreshText } from './claim-status.ts';
 import type { AskRecord, SeatActor, Store } from './ports.ts';
 
 export const SEAT_USAGE = [
-  '用法：fleet-api seat <take|renew|check|show|handoff> …（帅位只一个，#299；都能带 --scope drill:<名字> 用演练座位、带 --json 给脚本读）',
+  '用法：fleet-api seat <take|renew|check|show|handoff|board> …（帅位只一个，#299；都能带 --scope drill:<名字> 用演练座位、带 --json 给脚本读）',
+  '  seat board head <项目> --machine … --session … --term <任期> --text "<一句话>"',
+  '  seat board add <项目> --machine … --session … --term <任期> --id <步骤> --order <序号> --title "<标题>" [--detail "<说明>"]',
+  '  seat board step <项目> --machine … --session … --term <任期> --id <步骤> --status <done|doing|waiting|needs|blocked> [--detail "<说明>"]',
+  '  seat board log <项目> --machine … --session … --term <任期> --text "<动态>"',
+  '  seat board link <项目> --machine … --session … --term <任期> --id <步骤> --label "<名字>" --url <http(s) 网址>',
+  '  seat board need <项目> --machine … --session … --term <任期> --id <编号> --issue <单号> --repo <owner/仓> --recommend <选项> <问题> <选项…>',
+  '  seat board clear-needs <项目> --machine … --session … --term <任期>',
+  '  seat board pending [<项目>] --machine … --session … --term <任期>   已拍、还没写进单子的',
+  '  seat board ack <项目> --machine … --session … --term <任期> --id <编号>',
+  '  seat board show [<项目>] [--scope …]   看板上的样子（不核是不是现任）',
   '  seat take --machine <机器名> --session <会话号>                  接班（后说的算，任期号加一）',
   '  seat renew --machine <机器名> --session <会话号> --term <任期>   续约（每 15 分钟一次）',
   '  seat check --machine <机器名> --session <会话号> --term <任期>   现查：受保护动作前查一次还是不是帅位',
@@ -219,6 +231,167 @@ async function repoNames(store: Store): Promise<Map<string, string>> {
   return new Map((await store.listRepos()).map((r) => [r.id, `${r.owner}/${r.name}`]));
 }
 
+const BOARD_OPTS = [
+  'machine',
+  'session',
+  'term',
+  'scope',
+  'text',
+  'id',
+  'order',
+  'title',
+  'detail',
+  'status',
+  'label',
+  'url',
+  'issue',
+  'repo',
+  'recommend',
+] as const;
+
+function boardFail(reason: string, why: string, now: string, code: number): SeatCliResult {
+  return { code, text: why, json: { ok: false, reason, why, now } };
+}
+
+/** 帅位栏：写要现任，看不用。 */
+async function runBoard(rest: readonly string[], store: Store): Promise<SeatCliResult> {
+  const usage = SEAT_USAGE;
+  const [action = '', ...args] = rest;
+  const writes = new Set(['head', 'add', 'step', 'log', 'link', 'need', 'clear-needs', 'ack', 'pending']);
+  if (!writes.has(action) && action !== 'show')
+    throw new SeatCliError(`没有 seat board ${action || '(缺命令)'}。\n${usage}`);
+  const p = parse(args, BOARD_OPTS, usage);
+  const project = p.positional[0];
+  if (action !== 'show' && action !== 'pending' && !project) {
+    throw new SeatCliError(`要写项目名（仓名）。\n${usage}`);
+  }
+  if (action === 'show') {
+    const scope = scopeOf(p, usage);
+    const listed = await store.listSeatBoards(scope);
+    if (!listed.ok) return boardFail('bad', listed.why, listed.now, 1);
+    const boards = project ? listed.boards.filter((b) => b.project === project) : listed.boards;
+    const text =
+      boards.length === 0
+        ? `${scope} 没有${project ? ` ${project} 的` : ''}帅位栏`
+        : boards
+            .map((b) => {
+              const steps = [...b.doc.steps].sort((a, c) => a.order - c.order);
+              return [
+                `${b.project}（${b.updatedAt}）`,
+                `现状：${b.doc.headline || '（没写）'}`,
+                b.doc.needs.length
+                  ? `要你定的：\n${b.doc.needs.map((n) => `  ${n.id} ${n.question}（${n.options.join(' / ')}）`).join('\n')}`
+                  : '要你定的：没有',
+                steps.length
+                  ? `步骤：\n${steps.map((s) => `  ${s.id} [${s.status}] ${s.title}（${s.updatedAt}）`).join('\n')}`
+                  : '步骤：还没有',
+                b.doc.log.length
+                  ? `最近动态：\n${b.doc.log.map((e) => `  ${e.at} ${e.text}`).join('\n')}`
+                  : '最近动态：没有',
+              ].join('\n');
+            })
+            .join('\n\n');
+    return {
+      code: 0,
+      text,
+      json: {
+        ok: true,
+        now: listed.now,
+        boards: boards.map((b) => ({
+          project: b.project,
+          headline: b.doc.headline,
+          updatedAt: b.updatedAt,
+          steps: b.doc.steps,
+          log: b.doc.log,
+          needs: b.doc.needs,
+        })),
+      },
+    };
+  }
+  const seat = actorOf(p, usage);
+  if (action === 'pending') {
+    const listed = await store.listSeatBoards(seat.scope);
+    if (!listed.ok) return boardFail('bad', listed.why, listed.now, 1);
+    const picked = project ? listed.boards.filter((b) => b.project === project) : listed.boards;
+    const pending = picked.flatMap((b) =>
+      pendingBoardAnswers(b.doc).map((a) => ({
+        project: b.project,
+        id: a.id,
+        question: a.question,
+        option: a.option,
+        repo: a.repo,
+        issue: a.issue,
+      })),
+    );
+    return {
+      code: 0,
+      text:
+        pending.length === 0
+          ? '没有已拍还没记账的'
+          : pending.map((a) => `${a.project} ${a.id} ${a.question} → ${a.option}`).join('\n'),
+      json: { ok: true, pending, now: listed.now },
+    };
+  }
+  const op = boardOp(action, p, usage);
+  const r = await store.applySeatBoard({ seat, project: project ?? '', op });
+  if (!r.ok) return boardFail(r.reason, r.why, r.now, r.reason === 'not_seat' ? 3 : 1);
+  return {
+    code: 0,
+    text: `改好了（${r.board.project} ${action}）`,
+    json: { ok: true, project: r.board.project, now: r.now },
+  };
+}
+
+function boardOp(action: string, p: Parsed, usage: string): BoardWrite {
+  const text = () => need(p, 'text', usage);
+  const id = () => need(p, 'id', usage);
+  switch (action) {
+    case 'head':
+      return { kind: 'head', text: text() };
+    case 'add':
+      return {
+        kind: 'add',
+        id: id(),
+        order: positiveInt(need(p, 'order', usage), '序号', usage),
+        title: need(p, 'title', usage),
+        detail: p.options.get('detail') ?? '',
+      };
+    case 'step':
+      return {
+        kind: 'step',
+        id: id(),
+        status: need(p, 'status', usage),
+        ...(p.options.has('detail') ? { detail: p.options.get('detail') ?? '' } : {}),
+      };
+    case 'log':
+      return { kind: 'log', text: text() };
+    case 'link':
+      return { kind: 'link', id: id(), label: need(p, 'label', usage), url: need(p, 'url', usage) };
+    case 'clear-needs':
+      return { kind: 'clear-needs' };
+    case 'ack':
+      return { kind: 'ack', id: id() };
+    case 'need': {
+      const question = p.positional[1];
+      const options = p.positional.slice(2);
+      if (!question || options.length < 2) {
+        throw new SeatCliError(`need 要在项目名后面写问题和至少两个选项。\n${usage}`);
+      }
+      return {
+        kind: 'need',
+        id: id(),
+        question,
+        options,
+        recommended: need(p, 'recommend', usage),
+        repo: need(p, 'repo', usage),
+        issue: positiveInt(need(p, 'issue', usage), '单号', usage),
+      };
+    }
+    default:
+      throw new SeatCliError(`没有 seat board ${action}。\n${usage}`);
+  }
+}
+
 // —— seat ——
 
 export async function runSeat(
@@ -228,6 +401,7 @@ export async function runSeat(
   const [sub = '', ...rest] = argv;
   const usage = SEAT_USAGE;
   const { store } = deps;
+  if (sub === 'board') return runBoard(rest, store);
   if (sub === 'take') {
     const p = parse(rest, ['machine', 'session', 'scope'], usage);
     if (p.positional.length > 0) throw new SeatCliError(`seat take 不收位置参数。\n${usage}`);

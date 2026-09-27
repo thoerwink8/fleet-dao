@@ -12,6 +12,7 @@ import {
   pools,
   progressEvents,
   quotaWindows,
+  seatBoards,
   sessionRuns,
   settings,
   stagePolicies,
@@ -226,6 +227,7 @@ describe('写入即通知 fleet_changes', () => {
     await t.db
       .insert(auditLog)
       .values({ actorKind: 'engine', actorId: 'w1', action: 'x', target: 'task:x', via: 'engine' });
+    await t.db.insert(seatBoards).values({ scope: 'main', project: 'fleet-dao', updatedAt: NOW });
     await settle();
     expect([...new Set(tables())].sort()).toEqual([...REALTIME_TABLES].sort());
   });

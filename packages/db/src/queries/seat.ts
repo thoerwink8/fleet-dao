@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { requirementWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { and, eq, getTableColumns, inArray, lt, or, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
-import { auditLog, issueClaims, repos, seatLeases, settings, tasks } from '../schema/index.ts';
+import { auditLog, issueClaims, repos, seatBoards, seatLeases, settings, tasks } from '../schema/index.ts';
 
 export type SeatLeaseRow = typeof seatLeases.$inferSelect;
 export type IssueClaimRow = typeof issueClaims.$inferSelect;
@@ -494,4 +494,99 @@ export async function followTaskOnEngineClaim(
   if (!adopted) return null;
   await audit(adopted.value, 'claim.take', '引擎在做这张单，库里却没有还活着的认领：写快照时补上');
   return adopted.value;
+}
+
+// —— 帅位栏（#199）——
+
+export type SeatBoardRow = typeof seatBoards.$inferSelect;
+
+/** 一个座位下的板，按项目名排。 */
+export async function listSeatBoardRows(db: Db, scope: string): Promise<WithNow<SeatBoardRow[]>> {
+  const now = await readDbNow(db);
+  const rows = await db
+    .select()
+    .from(seatBoards)
+    .where(eq(seatBoards.scope, scope))
+    .orderBy(seatBoards.project);
+  return { value: rows, now };
+}
+
+/** 锁住这一行（要在事务里）。没有是 null。 */
+export async function lockSeatBoardRow(
+  db: Db,
+  scope: string,
+  project: string,
+): Promise<WithNow<SeatBoardRow | null>> {
+  const [row] = await db
+    .select({ ...getTableColumns(seatBoards), now: nowMs })
+    .from(seatBoards)
+    .where(and(eq(seatBoards.scope, scope), eq(seatBoards.project, project)))
+    .for('update');
+  if (!row) return { value: null, now: await readDbNow(db) };
+  const { now, ...board } = row;
+  return { value: board, now: toDate(now) };
+}
+
+/** 锁住首页要的全部板（scope = main），点选项时用，免得两下同时改同一行。 */
+export async function lockMainSeatBoards(db: Db): Promise<WithNow<SeatBoardRow[]>> {
+  const rows = await db
+    .select({ ...getTableColumns(seatBoards), now: nowMs })
+    .from(seatBoards)
+    .where(eq(seatBoards.scope, 'main'))
+    .orderBy(seatBoards.project)
+    .for('update');
+  if (rows.length === 0) return { value: [], now: await readDbNow(db) };
+  const now = rows[0]?.now;
+  if (now === undefined) return { value: [], now: await readDbNow(db) };
+  return {
+    value: rows.map(({ now: _now, ...board }) => board),
+    now: toDate(now),
+  };
+}
+
+export async function insertSeatBoardRow(
+  db: Db,
+  row: {
+    id: string;
+    scope: string;
+    project: string;
+    headline: string;
+    steps: unknown;
+    log: unknown;
+    needs: unknown;
+    answers: unknown;
+    updatedAt: Date;
+  },
+): Promise<SeatBoardRow> {
+  const [saved] = await db.insert(seatBoards).values(row).returning();
+  if (!saved) throw new Error('写入帅位栏没有返回行');
+  return saved;
+}
+
+export async function updateSeatBoardRow(
+  db: Db,
+  row: {
+    id: string;
+    headline: string;
+    steps: unknown;
+    log: unknown;
+    needs: unknown;
+    answers: unknown;
+    updatedAt: Date;
+  },
+): Promise<SeatBoardRow> {
+  const [saved] = await db
+    .update(seatBoards)
+    .set({
+      headline: row.headline,
+      steps: row.steps,
+      log: row.log,
+      needs: row.needs,
+      answers: row.answers,
+      updatedAt: row.updatedAt,
+    })
+    .where(eq(seatBoards.id, row.id))
+    .returning();
+  if (!saved) throw new Error(`帅位栏 ${row.id} 锁住了却更新不到`);
+  return saved;
 }
