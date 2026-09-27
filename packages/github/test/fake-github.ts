@@ -155,6 +155,8 @@ export class FakeGitHub {
   refs = new Map<string, string>();
   /** compare main...<sha> 的 behind_by。 */
   behindBy = new Map<string, number>();
+  /** compare 老头...新头的 ahead_by（默认 1）；设成 0 模拟「读到的新头其实是老头的祖先」（刚推完读到旧头）。 */
+  aheadBy = new Map<string, number>();
   interaction: { limit: string; origin: string; expires_at: string } | null = null;
   deliveries: { id: number; guid: string; delivered_at: string; status_code: number; event: string }[] = [];
   redelivered: number[] = [];
@@ -654,7 +656,11 @@ export class FakeGitHub {
     }
     x = /^\/compare\/(.+)\.\.\.([0-9a-f]+)$/.exec(rest);
     if (x && m === 'GET') {
-      return this.json(200, { status: 'ahead', ahead_by: 1, behind_by: this.behindBy.get(x[2] ?? '') ?? 0 });
+      return this.json(200, {
+        status: 'ahead',
+        ahead_by: this.aheadBy.get(x[2] ?? '') ?? 1,
+        behind_by: this.behindBy.get(x[2] ?? '') ?? 0,
+      });
     }
 
     // —— 分支 ——

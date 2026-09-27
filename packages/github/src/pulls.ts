@@ -568,9 +568,13 @@ export async function waitCi(
   let redSeenAt: number | null = null;
   const base = `/repos/${enc(repo.owner)}/${enc(repo.name)}`;
   const auth = { as: 'engine' as const, repo };
-  /** newHead 含不含 oldHead（GitHub 的 compare：老头...新头，behind_by = 0 就是新头一个不少地含着老头）。 */
-  const contains = async (oldHead: string, newHead: string): Promise<boolean> => {
-    const cmp = await deps.client.request<{ behind_by?: number }>({
+  /**
+   * 新头和老头的关系（GitHub 的 compare：老头...新头）：behind_by = 0 是新头一个不少地含着老头；ahead_by = 0、behind_by > 0
+   * 是读到的「新头」其实是老头的祖先——多半是刚推完 GitHub 还给旧数据（09-28 #389 撞上：读回了早两个提交的头，被当成强推
+   * 停下等人），隔一会儿再读；两边都有对方没有的提交才是真被改写了。
+   */
+  const relation = async (oldHead: string, newHead: string): Promise<'contains' | 'older' | 'rewritten'> => {
+    const cmp = await deps.client.request<{ behind_by?: number; ahead_by?: number }>({
       method: 'GET',
       path: `${base}/compare/${encRef(oldHead)}...${encRef(newHead)}`,
       auth,
@@ -578,11 +582,16 @@ export async function waitCi(
       signal: ctx.signal,
     });
     const behindBy = cmp.data?.behind_by;
-    if (typeof behindBy !== 'number') {
+    const aheadBy = cmp.data?.ahead_by;
+    if (typeof behindBy !== 'number' || typeof aheadBy !== 'number') {
       throw unexpected(`比较 ${oldHead.slice(0, 7)}...${newHead.slice(0, 7)}`, cmp.data);
     }
-    return behindBy === 0;
+    if (behindBy === 0) return 'contains';
+    return aheadBy === 0 ? 'older' : 'rewritten';
   };
+  /** 读到比老头还旧的头时再读几次（每次隔 pollMs）；一直是旧的才当成头真被改回去了。 */
+  const STALE_REREADS = 4;
+  let staleReads = 0;
 
   for (;;) {
     ctx.signal?.throwIfAborted();
@@ -594,7 +603,13 @@ export async function waitCi(
       if (pr.state !== 'closed' && pr.head.sha !== head) {
         // 头变了：人或引擎自己把主线并进来又推了（合并队列退回、自动并主线），新头含着老头——认新头，接着在它
         // 上面查 CI，不当成头变了（不算没查成，也不用停下等人）。新头不含老头（被强推改写了）才真的报出去。
-        if (await contains(head, pr.head.sha)) {
+        const rel = await relation(head, pr.head.sha);
+        if (rel === 'older' && staleReads < STALE_REREADS) {
+          staleReads += 1;
+          await sleep(pollMs);
+          continue;
+        }
+        if (rel === 'contains') {
           head = pr.head.sha;
           memo.head = head;
           memo.startedAt = now();
@@ -607,11 +622,15 @@ export async function waitCi(
           state: 'head_moved',
           head,
           actualHead: pr.head.sha,
-          detail: `PR #${prNumber} 的头从 ${head.slice(0, 7)} 变成了 ${pr.head.sha.slice(0, 7)}，而且新头不含老头（像是被强推改写了）`,
+          detail:
+            rel === 'older'
+              ? `PR #${prNumber} 的头从 ${head.slice(0, 7)} 退回到了更早的 ${pr.head.sha.slice(0, 7)}（隔着读了 ${STALE_REREADS} 次都是它，像是被人改回去了）`
+              : `PR #${prNumber} 的头从 ${head.slice(0, 7)} 变成了 ${pr.head.sha.slice(0, 7)}，而且新头不含老头（像是被强推改写了）`,
         };
       }
       ci = await readCi(deps, repo, head, required, ctx.signal);
       failures = 0;
+      staleReads = 0;
     } catch (err) {
       if (ctx.signal?.aborted) throw err;
       if (!(isGitHubError(err) && err.retryable)) {
