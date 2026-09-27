@@ -16,8 +16,10 @@ on:
 # 令牌只给读代码：这里的检查都只看检出来的文件，不读 GitHub 上的现状（#87：必过检查必须确定）。
 permissions:
   contents: read
+# 并发组 PR 按号分、推主线按分支分：已经合了的 PR 改标题正文（edited）也会触发一轮，GitHub 给它的 github.ref 是
+# refs/heads/main，按 github.ref 分组就和主线那一轮撞上、把主线的全量挤掉（主线头上 check 红、自动发布不发，2026-09-27 #283）。
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 jobs:
   # 这次改了什么 → 各 job 的开关。PR 按 git diff origin/<目标分支>...HEAD 算（HEAD 是 GitHub 造的合并提交，比的就是合进去会带进来的改动）；
