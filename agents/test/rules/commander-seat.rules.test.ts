@@ -93,7 +93,7 @@ const SEAT_RULES: Record<string, RegExp> = {
   全局只一个帅位: /全局只一个帅位/,
   创始人指定了才接班: /只在创始人指定了才接/,
   续约: /seat\.mjs renew/,
-  受保护动作前现查: /受保护动作[\s\S]{0,80}seat\.mjs check/,
+  受保护动作前现查: /\*\*受保护动作\*\*：[^\n]*每做一个之前先 `node \$S\/seat\.mjs check`/,
   换了人就退役: /不是帅位了，这个动作不做[\s\S]{0,40}退役/,
   派工先在库里认领: /claim\.mjs take <单号>/,
   工人每步报进度: /claim\.mjs step <单号> --claim <认领号>/,
@@ -101,6 +101,8 @@ const SEAT_RULES: Record<string, RegExp> = {
   Sonnet工人开草稿: /Sonnet 5[\s\S]{0,120}一律开成草稿、不挂自动合并/,
   帅位验收四样: /断点找得对[\s\S]{0,40}必经的那一步[\s\S]{0,40}故意造出失败的测试[\s\S]{0,20}没夹带别的改动/,
   两次没过改派Opus: /两次没过验收，改派 Opus/,
+  看到提醒先认领: /看到要修的提醒先认领[\s\S]{0,120}alert claim/,
+  修完随PR撤: /修完随 PR 撤[\s\S]{0,40}「修提醒」栏写提醒的键/,
 };
 
 function missingSeatRules(text: string): string[] {

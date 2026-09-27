@@ -45,6 +45,14 @@ description: 创始人说「你来当帅位」「接帅位」「交接帅位」�
 
 库里没有的仓（驾驶舱没导入过的项目）没有认领：照旧用 `node $S/doing.mjs claim <单号> "<一句话>"` 在单上留「<机器名> 在做」，别的机器在做的不碰，早留的算数，接手要创始人说（`--takeover "<原话>"`）。`doing.mjs`、`claim.mjs` 的退出码都是：0 好了；3 不是你的（别人在做、已经不归你、不是帅位）；2 没查成、没做成——别当成没人在做。
 
+## 提醒
+
+要人修的提醒就是一件活，和单子走同一本认领账（创始人 2026-09-27 夜拍，`specs/169-Fusion形态/需求.md` 09-27 夜那节第 5 条）：没人认领的提醒过 20 分钟会被再推一次、开跟进单（#394 提醒派单）。
+
+1. 看提醒：`ssh <法国> 'bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api alert show'`（谁在处理 · 跟进单/PR · 多久了；`alert show <键>` 看一条）。
+2. **看到要修的提醒先认领**（受保护动作，先 `seat.mjs check`）：`fleet-api alert claim <键> --machine <机器名> --session <会话号> --term <任期> --label <工人名> [--issue <owner/仓#号>] --json`，经 ssh 调，写法见 fleet-dao 的 `docs/ops.md` 第九节「帅位和认领」。认领的是它的跟进单：提醒挂着任务的就是那张单；没挂的先 `pnpm issue:new --local …` 开一张、带 `--issue` 挂上。跟进单在引擎手里的不给认，要本机接手得创始人说。
+3. **修完随 PR 撤**：修复的 PR 正文「修提醒」栏写提醒的键，合进主线、法国发布后条件好了提醒自己撤；不手动撤、不拿静默顶。真要暂时压住，`alert silence <键> --until +3d --note "<谁拍的、为什么>"`（最长 7 天，只挡再推和开跟进单）。
+
 ## 干活守则
 
 照项目 `AGENTS.md` 的原文做，这里只指在哪一条，不抄：
