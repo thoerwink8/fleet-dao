@@ -1,14 +1,14 @@
 {
-  "说明": "全组织默认的流程配置（docs/decisions/0003-fusion-flow.md 第 9 条；格式见 packages/core/src/config.ts）。各项目仓里的 .fleet/flow.json 只写和这里不同的；禁令只能写在这里，项目改不掉。模型顺序、轮数这些改了 CI 绿就合（驾驶舱是它的编辑器，0003 第 9 条）；禁令写死在 core 里（config.ts），这里少写一条会被拒收，改禁令本身才算改标准。模型顺序是起步值，跑出战绩后再调。",
+  "说明": "全组织默认的流程配置（docs/decisions/0003-fusion-flow.md 第 9 条；格式见 packages/core/src/config.ts）。各项目仓里的 .fleet/flow.json 只写和这里不同的；禁令只能写在这里，项目改不掉。模型顺序、轮数这些改了 CI 绿就合（驾驶舱是它的编辑器，0003 第 9 条）；禁令写死在 core 里（config.ts），这里少写一条会被拒收，改禁令本身才算改标准。模型顺序是起步值，跑出战绩后再调。现在的顺序照创始人 2026-09-27 夜拍的（specs/169-Fusion形态/需求.md「本机多做断链急单、法国 Lead 拼车和 Grok 混用」一节）：Lead 拼车的 Opus 在前、Grok 4.7 兜底；副手先用 Mirasim 的 DeepSeek Flash（Mirasim 只开这一个模型，接上之前照旧 Grok），Opus 垫底；不用 Kimi。评审、验证 DeepSeek Flash、Opus 垫在后面：碰界面的单 GPT 不验，Lead 兜底成 Grok 时还有人验。选副手、Lead 换路由都给开 PR 前验证留一家（design 第九节「选路」）。",
   "formatVersion": 1,
   "profiles": {
     "default": {
       "mode": "fusion",
       "steps": {
-        "lead": ["opus-5.5"],
-        "sidekick": ["grok-4.7", "kimi-k3", "deepseek-flash", "opus-5.5"],
-        "review": ["gpt-5.6-luna", "grok-4.7", "kimi-k3"],
-        "verify": ["gpt-5.6-luna", "grok-4.7", "kimi-k3"],
+        "lead": ["opus-5.5", "grok-4.7"],
+        "sidekick": ["deepseek-flash", "grok-4.7", "opus-5.5"],
+        "review": ["gpt-5.6-luna", "grok-4.7", "deepseek-flash", "opus-5.5"],
+        "verify": ["gpt-5.6-luna", "grok-4.7", "deepseek-flash", "opus-5.5"],
         "discuss": ["gpt-5.6-luna"]
       },
       "review": { "vendors": 2, "rounds": 1 },
@@ -18,10 +18,10 @@
     "single": {
       "mode": "single",
       "steps": {
-        "lead": ["opus-5.5", "kimi-k3"],
+        "lead": ["opus-5.5"],
         "sidekick": [],
         "review": [],
-        "verify": ["gpt-5.6-luna", "grok-4.7", "kimi-k3"],
+        "verify": ["gpt-5.6-luna", "grok-4.7"],
         "discuss": ["gpt-5.6-luna"]
       },
       "review": { "vendors": 0, "rounds": 1 },

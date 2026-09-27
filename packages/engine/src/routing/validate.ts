@@ -115,5 +115,33 @@ export function validateInput(input: ChooseRouteInput, trialEnabled: boolean): n
     if (!facts.has(id))
       throw new RoutingInputError(`选路判不了：路由 ${id} 的事实没给（候选、熔断、战绩没读到）`);
   }
+  if (input.keepVerifier !== undefined) keepVerifierProblem(input);
   return now;
+}
+
+const familyList = (v: unknown): v is string[] =>
+  Array.isArray(v) && v.every((f) => typeof f === 'string' && f.trim() !== '');
+
+/** 给验证留一家的输入：写手族空着就判不了验证是不是别家（不当成谁都能验）；验证那一步的输入自己由选路现选时再认一遍。 */
+function keepVerifierProblem(input: ChooseRouteInput): void {
+  const keep = input.keepVerifier;
+  if (!keep) return;
+  if (input.stage === 'verify') {
+    throw new RoutingInputError('选路判不了：开 PR 前验证这一步自己不该带「给验证留一家」');
+  }
+  if (!familyList(keep.writers) || keep.writers.length === 0) {
+    throw new RoutingInputError('选路判不了：给验证留一家却没给写这张单的族，判不了验证是不是别家');
+  }
+  if (keep.spare !== undefined && !familyList(keep.spare)) {
+    throw new RoutingInputError(`选路判不了：先避开的族认不出（${String(keep.spare)}）`);
+  }
+  if (keep.otherwise !== 'none' && keep.otherwise !== 'any') {
+    throw new RoutingInputError(`选路判不了：留不下验证时怎么办认不出（${String(keep.otherwise)}）`);
+  }
+  const verify: unknown = keep.verify;
+  if (typeof verify !== 'object' || verify === null || 'keepVerifier' in verify || 'taskRouteId' in verify) {
+    throw new RoutingInputError(
+      '选路判不了：验证那一步的选路输入认不出（不该再带给验证留一家、任务指定的路由）',
+    );
+  }
 }

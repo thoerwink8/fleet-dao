@@ -17,6 +17,8 @@
 // - approval:<批准> 要人批：批了、拒了，或者在等它的工作流（子任务的；Fusion 的是需求工作流）不在跑了、不在等这一次了就撤。
 // - routing:all-open:<阶段> 某阶段的路由全都熔断了：这个阶段有不在熔断的候选路由了就撤（只读判法，和选路同一套；
 //   读不了记没查成，不撤）。
+// - no-verifier:<任务> 这张单做完没人能验（选路给开 PR 前验证留一家留不下时报的）：这张单做完、叫停、没做完了就撤；
+//   验证留得下了、验证派出去了由选路自己撤（real/store-ports.ts）。
 // - 自己会撤的，这里不管：pool-hold:<池>（探针、会话跑通就撤）、flow-config:<仓>（GitHub 对账）、deploy-lag:（后端健康检查）、
 //   auto-release:（自动发布）、备份脚本的几种（fleet-backup）、canary:broken（全流程巡检下一轮通过）、
 //   watchdog:job:<任务>:…、watchdog:unchecked:<日子>（看门狗 jobs/watchdog.ts：任务按期跑成了、读到登记表了就撤）、
@@ -205,6 +207,17 @@ export const RULES: readonly Rule[] = [
       return {
         resolve: `任务已经不在等这次批准了（${view.approval ? '它在等的是另一次' : '现在没在等批准'}）`,
       };
+    },
+  },
+  {
+    // 选路报的「这张单做完没人能验」（real/store-ports.ts 的 no-verifier:<任务>）：验证留得下了、验证派出去了由选路自己撤；
+    // 这张单不在跑了（做完、叫停、没做完）走不到验证那一步，选路再也不会为它选，在这里撤
+    name: '做完没人能验',
+    pattern: /^no-verifier:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/,
+    async judge(deps, _alert, m) {
+      const state = await deps.taskState(m[1] as string);
+      if (state !== 'done' && state !== 'stopped' && state !== 'failed') return { keep: true };
+      return { resolve: `需求现在是「${TASK_STATE_WORDS[state]}」，走不到开 PR 前验证那一步了` };
     },
   },
   {

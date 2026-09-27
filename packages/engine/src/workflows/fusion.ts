@@ -58,6 +58,7 @@ import {
 import type { Feedback } from '../decisions/verify.ts';
 import { describeHolds, normalizeHolds } from '../holds.ts';
 import type {
+  KeepVerifierRequest,
   LeadBrief,
   LeadStep,
   SessionBrief,
@@ -114,6 +115,11 @@ const ASK_PATCH = 'ask-not-blocking';
  * 读到的留到规划之后；合进去以后的归对账开后续单。
  */
 const CHECKPOINT_STEPS: readonly Step[] = ['review', 'execute', 'verify', 'pr', 'final-review', 'merge'];
+/**
+ * 开 PR 前验证还在前头的几步（规划做完、开 PR 之前；验证挡了回第 4 步也还在）：这时候选副手、Lead 换路由都要给验证留一家。
+ * 开了 PR 之后验证就过去了，不再管。
+ */
+const VERIFY_AHEAD: readonly Step[] = ['review', 'execute', 'verify'];
 
 /** 交给 Lead、还没照改完的：他晚到、改选了别的回答（库里 asks 的编号）和交给 Lead 的话（core 的 changeLine）。 */
 interface Change {
@@ -542,6 +548,27 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
 
   // ---- 会话：Lead 一张单一个会话、按步续用；副手也续同一个
 
+  /**
+   * 选路要给开 PR 前验证留一家（store-ports 的 keepVerifier，0003 第 5 条「验证只派别家」）：选副手、Lead 换路由会给这张单
+   * 加一个写手族，加上以后验证可能一家都派不出（界面类的活 GPT 不验，#293 在法国干完才挂起「没有别家可验」、干等）。
+   * 规划完才知道算不算界面类；开了 PR 验证就过去了；这张单不验的（单模型模式、不算高风险，和 core 的 nextFlow 同一条）不管。
+   * 留不下时：副手交派不出（Lead 自己干），Lead 照常选；都当场报警「这张单做完没人能验」。
+   */
+  const keepVerifierFor = (
+    otherwise: KeepVerifierRequest['otherwise'],
+    spare: string[] = [],
+  ): KeepVerifierRequest | undefined => {
+    const f = flow;
+    if (!plan || !f || !VERIFY_AHEAD.includes(f.step)) return undefined;
+    if (!(f.mode === 'fusion' || f.highRisk)) return undefined;
+    return {
+      models: need(setup, '流程配置').models.verify,
+      uiWork,
+      otherwise,
+      ...(spare.length > 0 ? { spare } : {}),
+    };
+  };
+
   const sessionBrief = (extra: Partial<SessionBrief>): SessionBrief => ({
     title: input.title,
     request: input.rawRequest,
@@ -579,6 +606,8 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
       baseHead: treeHead,
       models: current.models.lead,
       uiWork: opts.stage === 'ui' ? true : undefined,
+      // 续不上原来那条、换了别族的 Lead 也是多一个写手族：照样给验证留一家，留不下照常选、报警（Lead 非派不可）
+      keepVerifier: keepVerifierFor('any'),
     });
     lead.sessionId = got.sessionId;
     lead.routeId = got.route.routeId;
@@ -589,13 +618,17 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
 
   /**
    * 副手干一轮：照简报，在同一棵树上，按流程配置的副手模型顺序派别家（避开 Lead 那一族：Lead 那家的额度留给 Lead，0002 第 5 条）。
-   * 派不出（没接好、没额度、连着做不好）交回 unavailable，调用方让 Lead 自己干（0003 第 7 条）。
+   * 开 PR 前验证还在前头时，避开 Lead 那一族只是「先避开」：别家的副手都会让验证没人可派，才派和 Lead 同族的新会话（同族
+   * 不多加写手族）；能给验证留一家的都派不出就交派不出。派不出（没接好、没额度、连着做不好、留不下验证）交回 unavailable，
+   * 调用方让 Lead 自己干（0003 第 7 条）。
    */
   const sidekickRun = async (
     brief: Brief,
     fb: Feedback[],
   ): Promise<{ delivery: Delivery } | { unavailable: string }> => {
     const current = need(setup, '流程配置');
+    const leadFamilies = lead.family ? [lead.family] : [];
+    const keep = keepVerifierFor('none', leadFamilies);
     const got = await tryStage(kit, {
       stage: uiWork ? 'ui' : 'execute',
       expect: 'delivery',
@@ -604,9 +637,11 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
       stickRouteId: side.routeId,
       worktreePath: need(tree, '工作树').path,
       baseHead: treeHead,
-      avoidFamilies: lead.family ? [lead.family] : undefined,
+      // 给验证留一家时 Lead 那一族挪进 keepVerifier.spare（先避开）；不用管验证的（开了 PR 之后）照旧整族避开
+      avoidFamilies: keep || leadFamilies.length === 0 ? undefined : leadFamilies,
       uiWork: uiWork || undefined,
       models: current.models.sidekick,
+      keepVerifier: keep,
     });
     if ('unavailable' in got) return got;
     side.sessionId = got.sessionId;

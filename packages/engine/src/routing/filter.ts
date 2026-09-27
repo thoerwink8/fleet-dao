@@ -25,7 +25,19 @@ export interface FilterContext {
     modelIds: ReadonlySet<string>;
     /** 要避开的模型族（小写）。 */
     families: ReadonlySet<string>;
+    /** 先避开的族（小写，KeepVerifier.spare）：别家的都会让开 PR 前验证没人可派时，选路去掉它再选一次。 */
+    spare?: ReadonlySet<string>;
+    /**
+     * 渠道自己挑模型的路由（上游串 auto）也不派：给开 PR 前验证留一家要认得出是哪一家（KeepVerifier）。
+     * 避开了族（families、spare）的一律不派，不用另给。
+     */
+    routers?: boolean;
   };
+  /**
+   * 给开 PR 前验证留一家（ChooseRouteInput.keepVerifier）：选了会让验证没人可派的族（小写）→ 挡掉的白话（no-verifier）。
+   * 由 choose.ts 按候选的族现算，不给 = 不管。
+   */
+  spoils?: ReadonlyMap<string, string>;
   /** 会话用户此刻挂的组织；不知道为 undefined（ChooseRouteInput.liveOrg）。 */
   liveOrg: OrgKind | undefined;
   /** 不知道是因为读了没读成：原话（ChooseRouteInput.liveOrgProblem）。 */
@@ -54,6 +66,8 @@ export function blocksFor(
   if (route.breaker.admit === 'none') out.push(breakerBlock(route, ctx.now));
   const avoided = avoidReason(route, ctx);
   if (avoided) out.push(hard('avoided', avoided));
+  const spoiled = ctx.spoils?.get(familyKey(route.family));
+  if (spoiled) out.push(hard('no-verifier', spoiled));
   const notLive = orgNotLive(route, ctx.liveOrg, ctx.liveOrgProblem);
   if (notLive) out.push(hard('org-not-live', notLive));
   out.push(...shortBlocks(route, ctx));
@@ -197,14 +211,19 @@ export function routerPicksModel(route: Pick<RouteFacts, 'upstreamModel' | 'upst
 }
 
 function avoidReason(route: RouteFacts, ctx: FilterContext): string | null {
-  if (ctx.avoid.families.size > 0) {
-    if (ctx.avoid.families.has(familyKey(route.family))) {
-      return `这一步只派别家：${route.modelName} 是 ${route.family} 族，写这张单的就有这一族`;
-    }
-    // 只派别家要认得出是哪一家：渠道自己挑模型的，挑中的可能正是写这张单的那家
-    if (routerPicksModel(route)) {
-      return `这一步只派别家：${route.modelName} 由渠道自己挑模型（上游串 ${route.upstreamModel}），认不出这次是哪一家在答`;
-    }
+  const family = familyKey(route.family);
+  const spare = ctx.avoid.spare ?? new Set<string>();
+  const byFamily = ctx.avoid.families.size > 0 || spare.size > 0;
+  if (ctx.avoid.families.has(family)) {
+    return `这一步只派别家：${route.modelName} 是 ${route.family} 族，写这张单的就有这一族`;
+  }
+  if (spare.has(family)) {
+    return `先派别家：${route.modelName} 是 ${route.family} 族，写这张单的就有这一族（别家都会让开 PR 前验证没人可派时才派它）`;
+  }
+  // 只派别家、给验证留一家都要认得出是哪一家：渠道自己挑模型的，挑中的可能正是写这张单的那家
+  if ((byFamily || ctx.avoid.routers) && routerPicksModel(route)) {
+    const why = byFamily ? '这一步只派别家' : '给开 PR 前验证留一家要认得出是哪一家';
+    return `${why}：${route.modelName} 由渠道自己挑模型（上游串 ${route.upstreamModel}），认不出这次是哪一家在答`;
   }
   if (ctx.avoid.routeIds.has(route.routeId)) return '这个任务要避开这条路由（刚在它上面出过错）';
   if (ctx.avoid.poolIds.has(route.poolId)) return `这个任务要避开${route.poolName}整个池`;
