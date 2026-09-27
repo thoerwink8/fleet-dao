@@ -60,7 +60,7 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 | 路径 | 属主 权限 | 放什么 |
 |---|---|---|
 | `/srv/fleet-dao` | root:root 755 | 装机脚本所在的检出（git clone）。fleet 和会话用户都只读。自动发布每发一版之前把它快进到要发的提交（第九节「自动发布」），不用再手动 pull |
-| `/srv/fleet-dao-releases` | root:root 755 | 应用的各版（第九节）：`<提交号>/`、`current` 链接、`.history`；每一版归 root，fleet 只读 |
+| `/srv/fleet-dao-releases` | root:root 755 | 应用的各版（第九节）：`<提交号>/`、`current` 链接、`.history`、`.demo-published`（香港上的演示版是哪一版，发演示版时记）；每一版归 root，fleet 只读 |
 | `/srv/fleet-dao-releases/.auto` | root:root 755 | 自动发布的读数 `state.json`（每一轮写，后端 `/healthz` 的 `deploy_lag` 读）、`france-applied`（france.sh 跑完没红时记装到哪个提交） |
 | `/usr/local/lib/fleet-dao/auto-release`；`/etc/systemd/system/fleet-auto-release.{service,timer}` | root:root 755（文件 644）；root 644 | 自动发布（第九节「自动发布」）：france.sh 从仓里拷的副本，不从检出直接跑 |
 | `/var/lib/fleet-dao`、`/var/log/fleet-dao` | fleet:fleet 750 | 运行数据、日志（服务日志主要在 journald）。引擎自己的临时文件（从镜像打的 bundle）和存档（没合并就收的树里没提交的改动）在 `/var/lib/fleet-dao/engine/` 的 `tmp/`、`archive/` 下，GitHub 的镜像仓在 `/var/lib/fleet-dao/github/` |
@@ -371,10 +371,10 @@ bash /srv/fleet-dao/deploy/release.sh --check      # 只读：在用哪版、自
 4. 迁移：以 fleet 跑 `packages/db` 的迁移（库 fleet，本机 socket）。在切版本之前跑，只进不退（第八节）。每一版带几个迁移记在它的 `.fleet-release`（`migrations=`）。跑之前先比库：库里跑过的比这一版带的多（直接发了个老提交），就停、不切——drizzle 碰到比代码新的迁移记录什么也不做、也不报错，光靠迁移这一步拦不住。迁移完装目录：以 fleet 跑这一版的目录装载器，把 `/etc/fleet-dao/catalog.json` 装进库（下面「目录配置」）；装不成、装完读不回就停、不切。
 5. 切版本：`current` 原子地指到这一版；`/etc/fleet-dao/release.env` 的 `FLEET_SERVICES` 里启用的服务装上这一版的单元、起来，没启用的停掉、撤掉单元。要不要重启看服务的主进程在哪个目录（`/proc/<主进程>/cwd`）：不在这一版的目录里就重启——所以上次切完 `current`、还没重启完就被打断，重跑同一版照样会重启；单元或环境文件变了也重启。
 6. 发静态文件：经隧道用 rrsync 传到香港 `/srv/fleet-dao-web`，每处都是新文件先落临时名、最后一起换上，旧文件最后删（在香港属 root）；按内容比、不带修改时间：内容没变的文件不传、不算变化。香港的 rrsync 同一时刻只让一个进来、后到的直接被拒，所以法国这头往香港推（这一步、第 3 步的试通、france.sh 读回的试跑、`fleet-demo-scopes`）都先拿同一把锁 `/run/lock/fleet-dao-hk-rsync.lock` 排队，等 2 分钟还轮不到就照实报红（2026-09-26 发布撞上过 `fleet-demo-scopes`，没切版本）。
-   - `FLEET_HK_PARTS` 里有 `demo`：演示版发到 `FLEET_DEMO_PATH`（默认 `/demo/`），只动这一个目录，根地址不碰；它下面的 `scopes/` 是可见范围，归 `fleet-demo-scopes` 推，发布不删。这一版没带演示版（老提交），或演示版是按别的路径构建的（改过 `FLEET_DEMO_PATH`），这次不发、记一项待配。
+   - `FLEET_HK_PARTS` 里有 `demo`（只有人手动发布、退回才发；自动发布不发，本节末尾「自动发布」）：演示版发到 `FLEET_DEMO_PATH`（默认 `/demo/`），只动这一个目录，根地址不碰；它下面的 `scopes/` 是可见范围，归 `fleet-demo-scopes` 推，发布不删。发成了当场记下香港上的演示版是哪一版：`/srv/fleet-dao-releases/.demo-published`（提交号、发的时间、路径、首页的 sha256），之后的健康检查、`--check` 都照它比；同一版再发一遍不重写。这一版没带演示版（老提交），或演示版是按别的路径构建的（改过 `FLEET_DEMO_PATH`），这次不发、记一项待配。
    - 明写了 `web`（默认不发）：驾驶舱静态文件连健康页、`release.json` 整套发到根地址，根上不是这一版的文件会被删掉，但演示版的目录一概不碰。放在演示版后面：`release.json` 换了就说明这次要发的都发完了。
    在演示版的目录里、根地址上（发 `web` 时）手放的东西，下次发布就没了。接着发飞书网关（第十二节）。
-7. 健康检查：启用的服务 10 秒里没退出、没重启，主进程跑的是这一版的目录；`fleet-api` 的驾驶舱接口在答健康报告、切之前好的项没变坏（会随时间自己变红的项除外：待开单积压 `draft_backlog`、判断题 `judge`（最近一次调用没成跟着上游变红）、跟上主线 `deploy_lag`（主线一动就可能落后）、飞书网关 `feishu_gateway`（网关、隧道、香港出事就红，后端刚重启、网关还在退避重连时是「没查成」）只记待处理，不退回），fleet 命令接口在听；`fleet-engine` 90 秒内到任务队列 fleet 上取活（工作流任务、活动任务都要有它）；发了静态文件的话，香港在发这一版（经隧道读 `release.json`、健康页 200）；发了演示版的话，演示版的首页和这一版的一字不差，深链接（`/demo/tasks/…`）回落到演示版自己的首页——回落到根上的，是香港的站点还是旧的，记一项待配：香港 `git pull` 后重跑 `hk.sh`；这次切了飞书网关的话，它以这一版连上了飞书、起稳了（第十二节）。不过就自动退回上一版（同样的切法、同样的检查），报红；但库里跑过的迁移比上一版带的多时不退，停在新版报红等人（旧代码对着新表结构会出错，健康检查还查不出来）。
+7. 健康检查：启用的服务 10 秒里没退出、没重启，主进程跑的是这一版的目录；`fleet-api` 的驾驶舱接口在答健康报告、切之前好的项没变坏（会随时间自己变红的项除外：待开单积压 `draft_backlog`、判断题 `judge`（最近一次调用没成跟着上游变红）、跟上主线 `deploy_lag`（主线一动就可能落后）、飞书网关 `feishu_gateway`（网关、隧道、香港出事就红，后端刚重启、网关还在退避重连时是「没查成」）只记待处理，不退回），fleet 命令接口在听；`fleet-engine` 90 秒内到任务队列 fleet 上取活（工作流任务、活动任务都要有它）；发了静态文件的话，香港在发这一版（经隧道读 `release.json`、健康页 200）；配了演示版的话（自动发布不发也照样查），香港上的演示版首页和发演示版的记录（`.demo-published`）一字不差——人手动发布刚发的，这时就是这一版的；自动发布不发，就该还是上次人发的那份，和在用的这一版不一样不算错，只列一行「还没发」（对外，按版本由人确认后手动发）。对不上（被改过、没发全）、取不到、记录认不出，报红；还没有记录（没人发过）、记录里的路径不是现在配的，记待处理（没查成，不当成好了）。深链接（`/demo/tasks/…`）要回落到演示版自己的首页——回落到根上的，是香港的站点还是旧的，记一项待配：香港 `git pull` 后重跑 `hk.sh`；这次切了飞书网关的话，它以这一版连上了飞书、起稳了（第十二节）。不过就自动退回上一版（同样的切法、同样的检查），报红；但库里跑过的迁移比上一版带的多时不退，停在新版报红等人（旧代码对着新表结构会出错，健康检查还查不出来）。
 8. 清旧版：留 5 版——在用的、上一版，再按最近用过的补满。
 
 同一个提交跑第二遍，结论是「本次改动 0 处」；两遍之间各拍一次 `bash deploy/lib/snapshot.sh ours`，diff 为空（快照里每一版整棵树的名字、大小、修改时间、属主、权限压成一个指纹，重新构建一定会变）。这样比之前先停自动发布（`systemctl stop fleet-auto-release.timer`，比完 `start`）：两遍之间它可能发了新版。
@@ -507,7 +507,7 @@ ssh <法国> 'sha256sum < /etc/fleet-dao/gateway-token.env'; ssh <香港> 'sha25
   4. 另一个发布在跑（发布锁 `/srv/fleet-dao-releases/.lock` 占着）：等下一轮。
   5. 部署脚本的检出：`git merge --ff-only` 快进到要发的提交；有没提交的改动、和主线分叉了，就停（`/healthz` 当场报）。检出已经在更新的提交上（人 pull 过）不往回退。
   6. 引擎有会话在跑（`fleet-agent-scope list`；读不到、认不出按在跑算）：等，最多等 60 分钟，到点照发——会话按编号续上（design 第四节「会话断了接着干」）；Temporal 里在途的工作流，重放测试（`packages/engine/test/replay.test.ts`）在 CI 里先把过关。release.sh 构建完、切版本之前再看一眼，这时又有会话在跑就不切（构建留着，下一轮直接用）。
-- 不发演示版：演示版是对外的，换它就是对外发布，要人确认；`release.env` 的 `FLEET_HK_PARTS` 里有 `demo` 也跳过，香港上的演示版原样留着，要换就人手动发一次。驾驶舱静态文件（`web`：明写进 `release.env` 那一步就是对外发布，要先告诉创始人）、飞书网关跟后端同一版。
+- 不发演示版：演示版是对外的，换它就是对外发布，要人确认；`release.env` 的 `FLEET_HK_PARTS` 里有 `demo` 也跳过，香港上的演示版原样留着，要换就人手动发一次（`bash /srv/fleet-dao/deploy/release.sh`，连演示版一起发、记下）。不发但照样核对：健康检查照发演示版的记录比，香港上的得还是上次人发的那份（往根地址发驾驶舱静态文件和它在同一个目录底下，碰坏了这一轮不过、照常退回、报警）；在用的这一版的演示版和它不一样只列一行「还没发」，不算错（2026-09-27 之前拿在用的这一版去比，自动发布发了带前端改动的版本后 `--check` 一直误报红）。驾驶舱静态文件（`web`：明写进 `release.env` 那一步就是对外发布，要先告诉创始人）、飞书网关跟后端同一版。
 - 发完同步规矩：在用的版本和检出对上、这个提交还没同步过，就以 root 对 `fleet-agent-carpool`、`pilot` 各跑一遍 `node /srv/fleet-dao/packages/agents-sync/bin/agents-sync --apply --user <用户>`（和 france.sh 最后那步同一条、同一份名单，第五节）。没成就记下、报警，不挡发布；同一个提交不重跑，下一个提交再来；要马上补就手动跑那条命令。
 - 没成怎么办：release.sh 退出码不是 0、2（1 = 有红，含「没过健康检查、已自动退回」），或上一轮跑到一半没了（被杀、机器重启，发布锁空了、在用的不是它），都记成没成、报警，这个提交不再自动试。照报警里的日志路径查，修好后合一个修复进主线（自动发布发它），或在法国以 root 手动发：`bash /srv/fleet-dao/deploy/release.sh <提交号>`（手动发的按上面第 1 条算人按住，主线出了新提交再自动接着发）。
 - 报警（驾驶舱提醒，飞书跟着推）：自动发布当场报两种——发布没成（`auto-release:failed:<提交号>`）、规矩同步没成（`auto-release:rules:<提交号>`），之后发成了、同步成了自动解除；库连不上时这一轮不发，定时器下次醒来再看。其余的不对由后端每 5 分钟判一次（和下面 `deploy_lag` 同一个判法），开一条「线上版本跟不上主线：…」，好了解除——自动发布自己停了、没装、跑崩了，只有后端看得出来。
@@ -518,7 +518,7 @@ ssh <法国> 'sha256sum < /etc/fleet-dao/gateway-token.env'; ssh <香港> 'sha25
   - 公网看得到 `/healthz`：对外的话不带提交号和路径，细节在 `release.sh --check` 列出的「自动发布」那一段和报警正文里。不在法国的正式机器上（开发、测试）报「未接」。
 - 看：`bash /srv/fleet-dao/deploy/release.sh --check` 列出的「自动发布」那一段（定时器在不在跑、上一轮什么时候、主线头和它的 CI、在用的落后几个、这一轮卡在哪、规矩同步到哪、装机脚本装到哪）；`journalctl -u fleet-auto-release -n 30`（每轮一行读数）；`systemctl list-timers fleet-auto-release.timer`；发布日志在 `/srv/fleet-dao-releases/.logs/`。
 - 停、开：`systemctl disable --now fleet-auto-release.timer` 停（在跑的那一轮照样跑完；20 分钟后 `/healthz` 报自动发布没报到——停着就跟不上主线，该报）；`systemctl enable --now fleet-auto-release.timer` 开；马上跑一轮：`systemctl start fleet-auto-release`（别直接跑那个 `.mjs`：两轮叠着跑会互相盖读数）。
-- `release.sh --auto` 只给自动发布用：历史行带 `auto`、不发演示版、切之前看会话；另一个发布在跑退出 75，切之前看到会话在跑退出 76，这两种什么都没动，自动发布不记成没成。`--busy-ok`（等空闲到了上限）只能跟着 `--auto`。
+- `release.sh --auto` 只给自动发布用：历史行带 `auto`、不发演示版（只核对）、切之前看会话；另一个发布在跑退出 75，切之前看到会话在跑退出 76，这两种什么都没动，自动发布不记成没成。`--busy-ok`（等空闲到了上限）只能跟着 `--auto`。
 - 由来（2026-09-27）：这之前合并后没有东西发布，全靠人以 root 跑 release.sh；法国跑的版本落后主线 40 个提交、14 个小时，健康检查只看在用的那版自己好不好、不和主线比，没人发现。做法照拉取式持续部署（机器自己定时拉、持续对齐；一个提交只试一次、没成不重试；人手动退回时自动的不跟人抢）、单机 systemd 定时器加自动退回、等空闲再换版，来源和对比写在引入它的 PR 里。
 
 ## 十、「你好」工作流（P0 验收）
