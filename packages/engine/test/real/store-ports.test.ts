@@ -8,8 +8,10 @@ import {
   markSessionRunStarted,
   notifications,
   openSessionRun,
+  savePoolQuota,
   saveRouteProbe,
   sessionRuns,
+  stagePolicyRoutes,
   stepTimings,
   upsertAlert,
   verifyRoundsOfTask,
@@ -232,6 +234,80 @@ describe('选路', () => {
       "update stage_policy_routes set enabled = false where stage = 'triage' and route_id = 'solo'",
     );
     expect(await pick()).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+  });
+});
+
+describe('流程配置里这一步的模型顺序（Fusion 的 models）', () => {
+  /** 写码阶段：调度台上 Opus 两条排最前（solo、carpool），Cursor Auto 第 9 条，钉住 Kimi k3 的 cursor 路由第 10 条。 */
+  async function fusionWorld() {
+    await world(t.db, { stages: ['execute'] });
+    const auto = (await addCursorRoute(t.db, { stages: ['execute'] })).routeId;
+    const kimi = (await addCursorRoute(t.db, { modelId: 'kimi-k3', upstreamModel: 'kimi-k3' })).routeId;
+    await t.db
+      .insert(stagePolicyRoutes)
+      .values({ stage: 'execute', routeId: kimi, position: 10, enabled: true });
+    // cursor 池的额度也读成了、还宽（额度未知的会排到读到了的后面，这里只看模型顺序）
+    await savePoolQuota(
+      t.db,
+      {
+        poolId: 'cursor',
+        readAt: new Date(NOW.getTime() - MIN).toISOString(),
+        complete: true,
+        windows: (['5h', '7d'] as const).map((window) => ({
+          poolId: 'cursor',
+          window,
+          label: window === '5h' ? 'five_hour' : 'seven_day',
+          unit: 'percent' as const,
+          utilization: 0.1,
+          reading: 'measured' as const,
+          readAt: new Date(NOW.getTime() - MIN).toISOString(),
+          source: 'test',
+        })),
+      },
+      { now: NOW },
+    );
+    return { auto, kimi };
+  }
+
+  it('只派配置里这几个模型的路由：先按配置的先后（压过调度台上排在前面的），同一个模型的照调度台的先后', async () => {
+    const { auto, kimi } = await fusionWorld();
+    expect(await pick({ stage: 'execute', models: ['cursor-auto', 'kimi-k3', 'opus-5.5'] })).toMatchObject({
+      ok: true,
+      route: { routeId: auto },
+    });
+    expect(await pick({ stage: 'execute', models: ['kimi-k3', 'cursor-auto'] })).toMatchObject({
+      ok: true,
+      route: { routeId: kimi },
+    });
+    expect(await pick({ stage: 'execute', models: ['opus-5.5'] })).toMatchObject({
+      ok: true,
+      route: { routeId: 'solo' },
+    });
+    // 没带模型顺序的（旧的需求工作流）照调度台走
+    expect(await pick({ stage: 'execute' })).toMatchObject({ ok: true, route: { routeId: 'solo' } });
+  });
+
+  it('【故意造出的失败】配置里的模型只剩被避开的、或在这个阶段一条路由都没有：派不出、写明是流程配置的模型，不拿别的模型顶', async () => {
+    const { kimi } = await fusionWorld();
+    const avoided = await pick({ stage: 'execute', models: ['kimi-k3'], avoidRouteIds: [kimi] });
+    expect(avoided).toMatchObject({ ok: false, waitFor: 'none' });
+    const none = await pick({ stage: 'execute', models: ['deepseek-flash'] });
+    expect(none).toMatchObject({ ok: false, waitFor: 'none' });
+    expect(!none.ok && none.detail).toContain(
+      '流程配置里这一步的模型（deepseek-flash）在写码阶段的调度台上没有接上的路由',
+    );
+    const empty = await pick({ stage: 'execute', models: [] });
+    expect(!empty.ok && empty.detail).toContain('流程配置里这一步的模型（一个都没配）');
+  });
+
+  it('人点名的路由不受配置限制；续会话的路由模型不在配置里：照配置选，写明为什么没续', async () => {
+    const { kimi } = await fusionWorld();
+    const named = await pick({ stage: 'execute', models: ['kimi-k3'], preferRouteId: 'solo' });
+    expect(named).toMatchObject({ ok: true, route: { routeId: 'solo' } });
+    expect(named.ok && named.why).toContain('点名的路由');
+    const stuck = await pick({ stage: 'execute', models: ['kimi-k3'], stickRouteId: 'solo' });
+    expect(stuck).toMatchObject({ ok: true, route: { routeId: kimi } });
+    expect(stuck.ok && stuck.why).toContain('续会话的路由 solo 的模型不在流程配置这一步的模型里');
   });
 });
 

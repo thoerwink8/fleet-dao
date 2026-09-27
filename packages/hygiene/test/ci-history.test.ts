@@ -1,32 +1,27 @@
 // ciHistoryCheck：CI 上按提交扫一段历史（PR 的 base..head、分支上 main 还没有的部分）。scanHistory 本身（先加后删、
 // 合并提交、二进制……）已经在 history.test.ts、prepush.test.ts 覆盖过，这里只测这个函数自己多出来的部分：
 // base/head 自己解析（分支名、SHA 都行）、解析不出就是没扫成、不把像参数的版本号递给 git。
-import { execFileSync, spawnSync } from 'node:child_process';
+// 用例全是同步的、起一串 git：不设 vitest 的超时，卡死由每个子进程自己的上限管（为什么见 child.ts 开头）。
+// 每个用例从同一个起点另起一段（分离头），不接着上一个用例留下的提交写：不然同一个用例再跑一遍（--repeats、重试），
+// 写的还是同样的内容，提交是空的，要查的东西根本不在范围里。
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { ciHistoryCheck } from '../src/ci-history.ts';
 import type { GitSync } from '../src/prepush.ts';
 import type { LoadedValues } from '../src/values.ts';
+import { gitIn, gitSyncIn, runChild } from './child.ts';
 import { pseudoRandom } from './helpers.ts';
 
 const LIST: LoadedValues = { ok: true, source: '测试名单', values: ['fake-org-778899'] };
 const NO_LIST: LoadedValues = { ok: false, reason: '已知敏感值名单没读到（找过：/nope）', tried: ['/nope'] };
-const ID = ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', '-c', 'commit.gpgsign=false'];
 
 let repo: string;
-const git = (...args: string[]) =>
-  execFileSync('git', [...ID, '-c', 'core.autocrlf=false', ...args], {
-    cwd: repo,
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-  }).trim();
-const gitSync: GitSync = (args) => {
-  const r = spawnSync('git', args, { cwd: repo, encoding: 'utf8' });
-  return { code: r.status ?? 1, stdout: r.stdout, stderr: r.stderr };
-};
+let start: string;
+const git = (...args: string[]) => gitIn(repo, ...args);
+const gitSync: GitSync = gitSyncIn(() => repo);
 const commit = (files: Record<string, string | null>, message = 'x') => {
   for (const [name, content] of Object.entries(files)) {
     if (content === null) rmSync(join(repo, name));
@@ -46,11 +41,14 @@ const short = (oid: string) => oid.slice(0, 7);
 beforeAll(() => {
   repo = mkdtempSync(join(tmpdir(), 'fleet-hygiene-ci-history-'));
   git('init', '-q', '-b', 'main');
-  commit({ 'README.md': 'hello\n' }, '起点');
-});
+  start = commit({ 'README.md': 'hello\n' }, '起点');
+}, 0);
+beforeEach(() => {
+  git('checkout', '-q', '--detach', start);
+}, 0);
 afterAll(() => rmSync(repo, { recursive: true, force: true }));
 
-describe('ciHistoryCheck', () => {
+describe('ciHistoryCheck', { timeout: 0 }, () => {
   it('干净：退出码 0，base/head 收分支名也行', () => {
     const head = commit({ 'docs/a.md': '没问题\n' });
     const result = check('HEAD~1', head);
@@ -159,13 +157,12 @@ describe('ciHistoryCheck', () => {
 
 // 真跑一遍命令行入口（不止测判定函数）：参数怎么解析、名单从哪读、退出码怎么落到进程上，和 ci-plan.test.ts 的
 // 「入口」一节同一个套路。名单指到临时文件，不读这台机器上真的名单（不然结果随机器而变，必过检查必须确定）。
-describe('入口（bin/ci-history.ts）', () => {
+describe('入口（bin/ci-history.ts）', { timeout: 0 }, () => {
   const bin = fileURLToPath(new URL('../src/bin/ci-history.ts', import.meta.url));
   let scratch: string;
   const run = (args: string[]) =>
-    spawnSync(process.execPath, [bin, ...args], {
+    runChild(process.execPath, [bin, ...args], {
       cwd: repo,
-      encoding: 'utf8',
       env: { ...process.env, FLEET_SENSITIVE_VALUES_FILE: join(scratch, 'list.txt') },
     });
 

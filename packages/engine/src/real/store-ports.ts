@@ -2,7 +2,8 @@
 // 选路：调度台的顺序和候选事实（routeFactsForStage）+ 熔断（近 7 天的会话结局现算，failure/breaker.ts）+ 这个阶段的战绩
 // + 被暂停的账号池（pool-hold:<池> 那条没处理的「要人拍」提醒，见 sessions.ts）交给纯函数 chooseRoute，三种结果原样换成
 // 端口的三种。点名的路由先试，用不了照常选并写明；续同一个会话的路由暂时派不了就等它，用不了（下线、被禁）才照常选；
-// 账号池暂停着时，续会话的那一单照样放过去——它就是看人修好了没有的试探。
+// 账号池暂停着时，续会话的那一单照样放过去——它就是看人修好了没有的试探。Fusion 带了流程配置里这一步的模型顺序（models）
+// 就只派这几个模型的路由、先按配置的先后排（onlyModels），一条都没有明说；人点名的路由不受它限制。
 // 失败一律明确：库没查成照常抛，事实对不上（RoutingInputError）抛 ROUTING_INPUT，不当成「没有路由」。
 
 import {
@@ -34,6 +35,7 @@ import {
   RoutingInputError,
   type RoutingPolicy,
   routeLabel,
+  STAGE_NAMES,
 } from '../routing/index.ts';
 import { WIRED_HOSTS as WIRED_HOST_IDS } from './hosts.ts';
 
@@ -127,6 +129,25 @@ interface StageFacts {
   /** 执行方式还没接上、这次不算的路由（给人看的名字）。 */
   unwired: string[];
   unwiredIds: Set<string>;
+}
+
+/**
+ * 流程配置里这一步的模型顺序（0003 第 9 条）：只留这几个模型的路由，先按配置里的先后、同一个模型的照调度台的先后排，
+ * 位置从 0 重新数（选路按位置排、也按它写「第几条」）。额度、战绩这些微调照常在它上面做（「再打分：配置顺序、战绩」）。
+ */
+function onlyModels(facts: StageFacts, models: readonly string[]): StageFacts {
+  const rankOf = new Map<string, number>();
+  for (const [i, m] of models.entries()) if (!rankOf.has(m)) rankOf.set(m, i);
+  const routes = facts.routes.filter((r) => rankOf.has(r.modelId));
+  const rankOfRoute = new Map(routes.map((r) => [r.routeId, rankOf.get(r.modelId) ?? 0] as const));
+  const order = facts.order
+    .filter((e) => rankOfRoute.has(e.routeId))
+    .sort(
+      (a, b) =>
+        (rankOfRoute.get(a.routeId) ?? 0) - (rankOfRoute.get(b.routeId) ?? 0) || a.position - b.position,
+    )
+    .map((e, position) => ({ ...e, position }));
+  return { ...facts, routes, order };
 }
 
 function choose(input: ChooseRouteInput): ChooseRouteResult {
@@ -236,9 +257,12 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
   return {
     async pickRoute(input): Promise<PickRouteResult> {
       const now = clock();
-      const facts = await loadStage(input.stage, now);
+      const all = await loadStage(input.stage, now);
+      // 流程配置里这一步的模型顺序（Fusion，0003 第 9 条）：只派这几个模型的路由。人点名的路由不受它限制（换路由是人的指令）
+      const facts = input.models ? onlyModels(all, input.models) : all;
       const held = await heldPools();
       const known = (id: string) => facts.routes.find((r) => r.routeId === id);
+      const knownAny = (id: string) => all.routes.find((r) => r.routeId === id);
       // 开 PR 前验证只派别家：写这张单的族整族避开，点名的、续会话的也一样（一条都没有就明说没有别家可验，不拿同族顶）
       const families = (input.avoidFamilies ?? []).filter((f) => f.trim());
       const avoid = (exceptPool?: string) => ({
@@ -261,12 +285,14 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
       } satisfies Omit<ChooseRouteInput, 'avoid' | 'taskRouteId'>;
       const notes: string[] = [];
       const missing = (id: string, what: string) =>
-        facts.unwiredIds.has(id)
+        all.unwiredIds.has(id)
           ? `${what} ${id} 的执行方式引擎还没接上，照常选`
-          : `${what} ${id} 不在这个阶段的调度台顺序里，照常选`;
+          : knownAny(id)
+            ? `${what} ${id} 的模型不在流程配置这一步的模型里，照常选`
+            : `${what} ${id} 不在这个阶段的调度台顺序里，照常选`;
 
       const dispatched = async (r: Extract<ChooseRouteResult, { kind: 'dispatch' }>, why: string) => {
-        const fact = known(r.routeId);
+        const fact = knownAny(r.routeId);
         if (!fact) throw new PortError('ROUTING_INPUT', `选路派给了事实里没有的路由 ${r.routeId}`);
         if (r.alarm) await allOpenAlarm(input.stage, input.taskId, r.alarm);
         const route: RouteChoice = {
@@ -294,9 +320,15 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
       };
 
       if (input.preferRouteId) {
-        if (!known(input.preferRouteId)) notes.push(missing(input.preferRouteId, '点名的路由'));
+        if (!knownAny(input.preferRouteId)) notes.push(missing(input.preferRouteId, '点名的路由'));
         else {
-          const r = choose({ ...base, taskRouteId: input.preferRouteId, avoid: avoid() });
+          const r = choose({
+            ...base,
+            order: all.order,
+            routes: all.routes,
+            taskRouteId: input.preferRouteId,
+            avoid: avoid(),
+          });
           if (r.kind === 'dispatch') return dispatched(r, `点名的路由：${r.why}`);
           notes.push(`点名的路由这次用不了（${r.reason}），照常选`);
         }
@@ -320,8 +352,6 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         }
       }
 
-      const r = choose({ ...base, avoid: avoid() });
-      if (r.kind === 'dispatch') return dispatched(r, [r.why, ...notes].join('；'));
       const context = [
         ...notes,
         ...(held.size > 0 ? [`暂停着、等人处理的账号池：${[...held].join('、')}`] : []),
@@ -329,11 +359,19 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
           ? [`执行方式引擎还没接上、这次没算的：${facts.unwired.join('、')}`]
           : []),
       ];
-      if (r.kind === 'wait') return waiting(r, context);
       const noOther =
         families.length > 0
           ? [`没有别家可验：写这张单的是 ${families.join('、')} 族，这一步只派别家，不拿同族顶`]
           : [];
+      // 调度台排了这个阶段、可流程配置里这一步的模型一条路由都没有：明说，不当成「这个阶段一条都没配」
+      if (input.models && facts.configured && facts.order.length === 0) {
+        const models = input.models.length > 0 ? input.models.join('、') : '一个都没配';
+        const reason = `流程配置里这一步的模型（${models}）在${STAGE_NAMES[input.stage]}阶段的调度台上没有接上的路由`;
+        return { ok: false, waitFor: 'none', detail: [...noOther, reason, ...context].join('；') };
+      }
+      const r = choose({ ...base, avoid: avoid() });
+      if (r.kind === 'dispatch') return dispatched(r, [r.why, ...notes].join('；'));
+      if (r.kind === 'wait') return waiting(r, context);
       return { ok: false, waitFor: 'none', detail: [...noOther, r.reason, ...context].join('；') };
     },
 

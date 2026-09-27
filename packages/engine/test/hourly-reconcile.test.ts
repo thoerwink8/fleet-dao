@@ -17,6 +17,7 @@ import {
   WHY_MAX,
 } from '../src/jobs/hourly-reconcile.ts';
 import type { SweepPart } from '../src/jobs/reconcile-common.ts';
+import { describeLeftovers } from '../src/jobs/worktree-sweep.ts';
 import { useEnv, withWorker } from './helpers.ts';
 
 const NOW = new Date('2026-09-26T09:41:00.000Z');
@@ -147,6 +148,46 @@ describe('几部分的结局并成这一轮的（combineParts）', () => {
     expect(r.outcome).toBe('partial');
     expect('why' in r && r.why.length).toBeLessThanOrEqual(WHY_MAX);
     expect('why' in r && r.why.startsWith('200 处没查成：')).toBe(true);
+  });
+});
+
+describe('树里还剩什么，写进要人拍的说法（describeLeftovers）', () => {
+  const repo = {
+    kind: 'repo' as const,
+    dirty: [],
+    dirtyCount: 0,
+    stashes: 0,
+    unpushed: [],
+    unpushedCount: 0,
+  };
+
+  it('什么都不剩（只剩能重新生成的缓存也算）：一句都没有，照空树删', () => {
+    expect(describeLeftovers({ kind: 'empty' })).toEqual([]);
+    expect(describeLeftovers(repo)).toEqual([]);
+  });
+
+  it('列全了直接列；没列全写明一共几个、列的是前几个', () => {
+    expect(describeLeftovers({ kind: 'not-repo', files: ['src/a.ts'], fileCount: 1 })).toEqual([
+      '这一层不是 git 仓，里面有 1 个文件（能重新生成的编译和工具缓存不算）：src/a.ts',
+    ]);
+    const ten = Array.from({ length: 10 }, (_, i) => `f${i}.ts`);
+    expect(describeLeftovers({ kind: 'not-repo', files: ten, fileCount: 13 })).toEqual([
+      `这一层不是 git 仓，里面有 13 个文件（能重新生成的编译和工具缓存不算），前 10 个：${ten.join('；')}；…`,
+    ]);
+    expect(
+      describeLeftovers({
+        ...repo,
+        dirty: [' M a.ts', '?? b.ts'],
+        dirtyCount: 12,
+        unpushed: ['abc1234 work'],
+        unpushedCount: 1,
+        stashes: 2,
+      }),
+    ).toEqual([
+      '没推的提交 1 个：abc1234 work',
+      '没提交的改动 12 处，前 2 处： M a.ts；?? b.ts；…',
+      '存着 2 个 stash（git stash list）',
+    ]);
   });
 });
 

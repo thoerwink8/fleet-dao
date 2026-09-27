@@ -21,7 +21,10 @@
 // 所以写得要快）；额度读数顺手记账；每分钟按进展判一次停滞（failure/stall.ts），在绕圈、工具卡死就停掉，结局 stalled
 // （光是没动静由插头自己的 idle 超时管）。结束后：写码类看 fleet done 和工作树（有新提交、没有没提交的已跟踪改动）；
 // 分诊、需求文档、方案、审查、开 PR 前验证读 .fleet-out/ 下的结论文件，形状不对算交错了（验证的用 core 的 checkReport 核）。
-// 开 PR 前验证是发给别家的：起会话前整份提示词先过卫生检查（screenForOtherVendor），过不了不起。
+// 发给别家的（开 PR 前验证、Fusion 派给别家的副手）：起会话前整份提示词先过卫生检查（screenForOtherVendor），过不了不起。
+// Fusion 的 Lead（brief.lead）每一步都在这张单的工作树里跑、续同一个会话，交什么按这一步定（prompts.ts 的 LEAD_KIND）：
+// 结论文件写在 .fleet-out/（记进工作树的 .git/info/exclude，不会被提交；起会话前清掉上一轮留下的同名文件），写方案、
+// 写结果那两步的头和改动从提交里读，其余几步只看不改（头动了、有没提交的改动都算交错了）。
 // 失败原样交给工作流的失败分流（只在 stderr 里的报错原话接在失败信息后面：cursor 的认证、额度、网络报错就只有它）；
 // 这里只按同一张规则表认出「要人修的整池问题」（设备被撤销、封号、登录失效、欠费）：写一条 pool-hold:<池> 的「要人拍」
 // 提醒（写清去哪台机器、以哪个会话用户重新登录），选路就避开整个池；续会话的那一单是试探，跑通了就撤掉这条提醒。
@@ -95,10 +98,19 @@ import {
 } from './hosts.ts';
 import { bundleFromMirror, type MirrorGitHub, mapped } from './mirror.ts';
 import {
+  isLeadKind,
+  type LeadOutputKind,
+  OUT_DIR,
   OUTPUT_FILES,
   type OutputKind,
-  outputKindOf,
+  outputKindFor,
   type Parsed,
+  parseLeadBrief,
+  parseLeadPlan,
+  parseLeadRebut,
+  parseLeadReview,
+  parseLeadText,
+  parseLeadVerdict,
   parsePlan,
   parseRequirementDoc,
   parseReview,
@@ -114,6 +126,7 @@ import {
   checkoutDetached,
   commitsSince,
   diffstatSince,
+  excludeLocally,
   fetchBundle,
   hasCheckout,
   hasCommit,
@@ -122,6 +135,7 @@ import {
   headOfIncoming,
   pinMainline,
   readFileAs,
+  removeFileAs,
   type UserTree,
   uncommittedTracked,
 } from './user-git.ts';
@@ -334,26 +348,40 @@ export function scopeSize(name: string, mb: number): string {
 }
 
 /** 发给别家的材料在卫生检查里叫什么（报错里的位置只有它和行号、规则名，没有值）。 */
-const MATERIAL_WHAT = '发给别家的验证材料';
-const MATERIAL_PATH = '验证提示词';
+export interface Material {
+  what: string;
+  path: string;
+}
+export const VERIFY_MATERIAL: Material = { what: '发给别家的验证材料', path: '验证提示词' };
+export const WORK_MATERIAL: Material = { what: '发给别家的交代', path: '提示词' };
+
+/** 自家（Claude）之外的族都算别家：派给它的整份提示词先过卫生检查。 */
+export function otherVendor(family: string): boolean {
+  return family.trim().toLowerCase() !== 'claude';
+}
 
 /**
  * 发给别家之前的卫生检查：查出来的报 MATERIAL_BLOCKED（不可重试；失败分流 HY4 当场挂起报警——材料是工作流交代的，
  * 换路由、退回会话都还是它）；名单没读到、没扫成原样报 HYGIENE_LIST_MISSING / HYGIENE_UNSCANNED（HY2 挂起）；没配检查、
  * 检查自己出错都算没扫成，不发。报错里只有位置、行号和规则名（assertPublishable 不打值）。
  */
-export function screenForOtherVendor(screen: SessionPortsDeps['screen'], prompt: string, to: string): void {
+export function screenForOtherVendor(
+  screen: SessionPortsDeps['screen'],
+  prompt: string,
+  to: string,
+  material: Material = VERIFY_MATERIAL,
+): void {
   if (!screen) {
     throw new PortError(
       'HYGIENE_UNSCANNED',
-      `${MATERIAL_WHAT}没法过卫生检查（会话端口没配检查），不发给${to}`,
+      `${material.what}没法过卫生检查（会话端口没配检查），不发给${to}`,
       {
         retryable: false,
       },
     );
   }
   try {
-    screen(MATERIAL_WHAT, [{ path: MATERIAL_PATH, text: prompt }]);
+    screen(material.what, [{ path: material.path, text: prompt }]);
   } catch (error) {
     const code = (error as { code?: unknown } | null)?.code;
     const details = (error as { details?: unknown } | null)?.details;
@@ -372,15 +400,15 @@ export function screenForOtherVendor(screen: SessionPortsDeps['screen'], prompt:
       throw new PortError(
         'MATERIAL_BLOCKED',
         where
-          ? `${MATERIAL_WHAT}没过卫生检查，没发给${to}：查出 ${findings.length} 处（${where}）`
-          : `${MATERIAL_WHAT}没过卫生检查，没发给${to}：${errorText(error)}`,
+          ? `${material.what}没过卫生检查，没发给${to}：查出 ${findings.length} 处（${where}）`
+          : `${material.what}没过卫生检查，没发给${to}：${errorText(error)}`,
         { retryable: false, details },
       );
     }
     if (code === 'HYGIENE_LIST_MISSING' || code === 'HYGIENE_UNSCANNED') {
       throw new PortError(code, errorText(error), { retryable: false, details });
     }
-    throw new PortError('HYGIENE_UNSCANNED', `${MATERIAL_WHAT}没扫成，不发给${to}：${errorText(error)}`, {
+    throw new PortError('HYGIENE_UNSCANNED', `${material.what}没扫成，不发给${to}：${errorText(error)}`, {
       retryable: false,
     });
   }
@@ -587,23 +615,28 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     const t = treeAs(dir, user, `prep-${input.runId}`, signal);
     const identity = await identityOf(task.repo);
     const repoRef = { owner: task.repo.owner, name: task.repo.name };
-    if (kind === 'delivery') {
+    if (kind === 'delivery' || isLeadKind(kind)) {
       // 续上一轮的树：检出过的原样接着用。只看 .git 在不在不够——建树时 init 之后取包失败、同一个 runId 重试，
-      // 留下的是个空仓；那样的照常取包、检出，不在空树里起会话。
-      if (!fresh && (await hasCheckout(t))) return;
-      const base = input.baseHead;
-      const branch = input.brief.branch;
-      if (!base || !SHA.test(base) || !branch) {
-        throw new PortError('BAD_INPUT', '写码会话要给起会话前的头（baseHead）和分支（brief.branch）', {
-          retryable: false,
-        });
+      // 留下的是个空仓；那样的照常取包、检出，不在空树里起会话。Fusion 的 Lead 第一步（写方案）就在新树上起。
+      if (fresh || !(await hasCheckout(t))) {
+        const base = input.baseHead;
+        const branch = input.brief.branch;
+        if (!base || !SHA.test(base) || !branch) {
+          throw new PortError(
+            'BAD_INPUT',
+            `${isLeadKind(kind) ? 'Lead 的会话' : '写码会话'}要给起会话前的头（baseHead）和分支（brief.branch）`,
+            { retryable: false },
+          );
+        }
+        const { bytes, ref } = await bundleFromMirror(gh, deps.tmpDir, repoRef, base, [], signal);
+        await fetchBundle(t, bytes, ref, { identity });
+        await checkoutBranch(t, branch, base);
+        // 第一轮的 base 就是建树时记下的主线头（createWorktree 的 baseSha）。树丢了、从返工时的分支头重建的，钉的是分支头：
+        // test:changed 只算这一轮的改动——前几轮的在那几轮的会话里测过，CI 还会全测。
+        await pinMainline(t, task.repo.defaultBranch, base);
       }
-      const { bytes, ref } = await bundleFromMirror(gh, deps.tmpDir, repoRef, base, [], signal);
-      await fetchBundle(t, bytes, ref, { identity });
-      await checkoutBranch(t, branch, base);
-      // 第一轮的 base 就是建树时记下的主线头（createWorktree 的 baseSha）。树丢了、从返工时的分支头重建的，钉的是分支头：
-      // test:changed 只算这一轮的改动——前几轮的在那几轮的会话里测过，CI 还会全测。
-      await pinMainline(t, task.repo.defaultBranch, base);
+      // Lead 的结论文件写在工作树的 .fleet-out/ 里：记进这棵树自己的忽略清单，git add 不会把它提交进分支
+      await excludeLocally(t, `${OUT_DIR}/`);
       return;
     }
     // 分诊、需求文档、方案、审查、开 PR 前验证：检出副本。续同一个会话（resume / fork）不动它；开新会话从干净的检出起。
@@ -653,7 +686,7 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     why: string,
   ): Promise<RelayFacts> {
     const progress = prior ? await runProgressFacts(db, prior.id, { saysLimit: 8 }) : null;
-    const delivery = kind === 'delivery' && base !== undefined && SHA.test(base);
+    const delivery = (kind === 'delivery' || isLeadKind(kind)) && base !== undefined && SHA.test(base);
     return {
       steps: progress?.lastPlan?.steps ?? [],
       says: (progress?.says ?? []).map((s) => s.text).filter(Boolean),
@@ -716,7 +749,7 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     if (!task) throw new PortError('TASK_NOT_FOUND', `库里没有任务 ${input.taskId}`, { retryable: false });
     let kind: OutputKind;
     try {
-      kind = outputKindOf(input.stage);
+      kind = outputKindFor(input.stage, input.brief);
     } catch (error) {
       throw new PortError('BAD_INPUT', errorText(error), { retryable: false });
     }
@@ -725,9 +758,12 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     // 流程配置副本也先核（flow-gate.ts）：坏了、太旧不起；写码阶段项目没写测试命令明确失败。交代的命令记进这一行，交活认它
     const testCommand = sessionTestCommandOrStop(task, input.stage, clock());
     let dir: string;
-    if (kind === 'delivery') {
+    if (kind === 'delivery' || isLeadKind(kind)) {
+      // Fusion 的 Lead 每一步都在这张单的工作树里（续同一个会话要同一个目录；写方案、写结果就提交在分支上）
       if (!input.worktreePath) {
-        throw new PortError('BAD_INPUT', '写码会话没给工作树', { retryable: false });
+        throw new PortError('BAD_INPUT', `${isLeadKind(kind) ? 'Lead 的会话' : '写码会话'}没给工作树`, {
+          retryable: false,
+        });
       }
       dir = input.worktreePath;
     } else {
@@ -792,6 +828,8 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     const agentSessionId = session.mode === 'resume' || fresh.known ? sessionId : undefined;
     await prepareTree(input, task, kind, dir, user, mode, ctx.signal);
     const t = treeAs(dir, user, `prep-${input.runId}`, ctx.signal);
+    // Lead 的结论文件按这一步定名：续同一个会话时，以前同一步留下的不能当成这一轮交的，起之前先删
+    if (isLeadKind(kind)) await removeFileAs(t, OUTPUT_FILES[kind][0]);
     const relay =
       mode === 'relay'
         ? await relayFacts(
@@ -811,8 +849,16 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
       previousProblem: prior?.failureMessage ?? undefined,
       relay,
     });
-    // 开 PR 前验证是发给别家的：整份提示词（这次真要发的那一份，续会话、接力的也算）先过卫生检查，过不了不起会话
-    if (kind === 'verify') screenForOtherVendor(deps.screen, prompt, hostName(route.hostId));
+    // 发给别家的（开 PR 前验证，Fusion 按简报派给别家的副手……）：整份提示词（这次真要发的那一份，续会话、接力的也算）
+    // 先过卫生检查，过不了不起会话。简报是 Lead 写的，没进过公开的地方
+    if (kind === 'verify' || otherVendor(input.route.family)) {
+      screenForOtherVendor(
+        deps.screen,
+        prompt,
+        hostName(route.hostId),
+        kind === 'verify' ? VERIFY_MATERIAL : WORK_MATERIAL,
+      );
+    }
 
     // 登记之后再核一次叫停：叫停可能落在上面建树的那几秒里。
     const again = await getSessionRun(db, input.runId);
@@ -1207,11 +1253,75 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
         }
         case 'delivery':
           return { error: '写码会话不读结论文件' };
+        case 'lead-plan':
+        case 'lead-verdict':
+        case 'lead-rebut':
+        case 'lead-brief':
+        case 'lead-review':
+        case 'lead-text':
+          return await readLeadOutput(live, live.kind, read);
       }
     } catch (error) {
       throw new PortError('READ_FAILED', `读会话交回来的结论文件没成：${errorText(error)}`, {
         retryable: true,
       });
+    }
+  }
+
+  /**
+   * Lead 这一步交回的：结论文件（按这一步定名）加上工作树的样子。写方案、写结果那两步可以在分支上提交，头和这一步改到的
+   * 文件从提交里读（不信文件里写的）；其余几步只看不改，头动了就算交错了。有没提交的已跟踪改动都算交错了（引擎只推提交）。
+   */
+  async function readLeadOutput(
+    live: Live,
+    kind: LeadOutputKind,
+    read: (path: string) => Promise<string | null>,
+  ): Promise<Parsed<SessionOutput>> {
+    const file = OUTPUT_FILES[kind][0];
+    const text = await read(file);
+    if (text === null) return { error: `会话结束了，但没写结论 ${file}` };
+    const t = treeAs(live.dir, live.user, `lead-${live.runId}`);
+    const head = await headOf(t);
+    const dirty = await uncommittedTracked(t);
+    if (dirty.length > 0) {
+      return {
+        error: `工作树里有没提交的已跟踪改动（引擎只推提交，这部分会丢）：${dirty.slice(0, 5).join('；')}`,
+      };
+    }
+    const base = live.baseHead;
+    if (!base || !SHA.test(base)) return { error: '没给起会话前的头，判不了这一步提交了什么' };
+    const commits = kind === 'lead-plan' || kind === 'lead-review';
+    if (!commits && head !== base) {
+      return {
+        error: `这一步只看不改，头却从 ${base.slice(0, 7)} 变成了 ${head.slice(0, 7)}：用 git reset --hard ${base} 退回起这一步之前的头再交（要改的写进结论里）`,
+      };
+    }
+    const changedFiles = commits && head !== base ? await changedFilesSince(t, base) : [];
+    switch (kind) {
+      case 'lead-plan': {
+        const v = parseLeadPlan(text);
+        return 'error' in v ? v : { ok: { kind, head, changedFiles, ...v.ok } };
+      }
+      case 'lead-review': {
+        const v = parseLeadReview(text);
+        return 'error' in v ? v : { ok: { kind, head, changedFiles, ...v.ok } };
+      }
+      case 'lead-verdict': {
+        const v = parseLeadVerdict(text);
+        return 'error' in v ? v : { ok: { kind, ...v.ok } };
+      }
+      case 'lead-rebut': {
+        const v = parseLeadRebut(text);
+        return 'error' in v ? v : { ok: { kind, ...v.ok } };
+      }
+      case 'lead-brief': {
+        const v = parseLeadBrief(text);
+        return 'error' in v ? v : { ok: { kind, ...v.ok } };
+      }
+      case 'lead-text': {
+        const v = parseLeadText(text);
+        return 'error' in v ? v : { ok: { kind, ...v.ok } };
+      }
     }
   }
 
