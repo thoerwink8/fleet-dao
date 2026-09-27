@@ -449,7 +449,7 @@ const ORG_FAILED = /^failed (carpool|solo|other|unknown)$/;
 
 /**
  * 切会话用户挂的 reclaude 组织（#157）：经 `sudo -n fleet-agent-scope org-use <类型> --user <会话用户>` 以 root 调帮手，
- * 帮手以会话用户读 org list 认出那一类的组织、切过去、回读核对，没切成切回原来的（deploy/france/fleet-agent-scope.sh）。
+ * 帮手以会话用户读 org list 认出那一类的组织、切过去、回读核对，没切成、核对不了都切回原来的（deploy/france/fleet-agent-scope.sh）。
  * 标准输出最后一行 switched / already <类型> 是成，failed <现在挂的类型> 是没成；退出码 0 却认不出这一行、超时、起不来，
  * 一律算没成、现在挂的是哪个不知道（unknown），不当成切好了。切号会让这个家目录下在跑的 Claude 会话全断：调用方先等空闲。
  */

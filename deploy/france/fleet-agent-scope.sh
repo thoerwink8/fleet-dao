@@ -17,7 +17,8 @@
 #   sudo -n fleet-agent-scope org-use <carpool|solo> --user <会话用户>
 #                                    把会话用户挂的 reclaude 组织切到拼车（org list 里类型 team）或独享（personal）：以它的身份
 #                                    跑它家里的 reclaude，那一类的组织要恰好一个；已经挂着就不动。切完再读一遍 org list 核对
-#                                    （org use 退出码不是 0 也可能已经切了，docs/reference/adapters.md CC-07），没切成就切回原来那个。
+#                                    （org use 退出码不是 0 也可能已经切了，docs/reference/adapters.md CC-07），没切成、核对不了
+#                                    都切回原来那个（只认正面证据），再读一遍照实报现在挂的是哪个。
 #                                    切号会让这个家目录下在跑的 Claude 会话全断：等手上没有在跑的会话再调，由引擎管（#157）。
 #                                    整个流程总时限 ORG_BUDGET 秒，每一步只给剩下的时间，切之前给核对留够、不够就不切。
 #                                    组织编号、名字、邮箱一概不打出来。标准输出最后一行：switched <类型> / already <类型>；
@@ -425,7 +426,16 @@ org_use() {
   if out=$(reclaude_as "$ORG_VERIFY_RESERVE" "$user" "$home" org use "$WANT_ID" 2>&1); then rc=0; else rc=$?; fi
   # 不看退出码下结论，回读核对：退出码 1 也可能已经切了（CC-07），退出码 0 也要看真挂上了没有
   if ! org_rows "$user" "$home" || ! org_pick "$kind"; then
-    org_fail unknown "org use $(rc_name "$rc")，切完回读核对不了（$ORG_WHY），不知道现在挂的是哪个，没敢往回切"
+    # 核对不了就当没切成（只认正面证据，docs/reference/quota.md Q2）：切回原来那个，再读一遍照实说现在挂的是哪个
+    local why=$ORG_WHY
+    reclaude_as "$ORG_VERIFY_RESERVE" "$user" "$home" org use "$from_id" >/dev/null 2>&1 || true
+    if org_rows "$user" "$home" && org_pick "$kind"; then
+      if [[ "$CUR_ID" == "$from_id" ]]; then
+        org_fail "$from_kind" "org use $(rc_name "$rc")，切完回读核对不了（$why），已切回原来的$(kind_name "$from_kind")组织"
+      fi
+      org_fail "$CUR_KIND" "org use $(rc_name "$rc")，切完回读核对不了（$why），切回原来的$(kind_name "$from_kind")组织也没成：现在挂的是$(kind_name "$CUR_KIND")组织"
+    fi
+    org_fail unknown "org use $(rc_name "$rc")，切完回读核对不了（$why），试着切回原来的$(kind_name "$from_kind")组织以后再读也读不了（$ORG_WHY）：不知道现在挂的是哪个"
   fi
   if [[ "$CUR_ID" == "$WANT_ID" ]]; then
     echo "已从$(kind_name "$from_kind")组织切到$(kind_name "$kind")组织"

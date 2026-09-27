@@ -23,6 +23,7 @@ flunk() {
 #   list-exit：有就让 org list 以这个退出码失败；list-fail-after-use：org use 跑过以后 org list 失败；syncing：先打一行 Syncing
 #   use-mode：第一次 org use 怎么表现（ok、exit1-switched、exit1-noswitch、exit0-noswitch、wrong）；rollback-fails：往回切不生效
 #   list-hang-after-use：org use 跑过以后 org list 卡住不回；slow-list：org use 之前的 org list 先睡这么多秒
+#   list-fail-once-after-use：org use 跑过以后头一次 org list 失败、之后好了
 FAKE=$TMP/fake-reclaude
 cat >"$FAKE" <<'SH'
 #!/usr/bin/env bash
@@ -35,6 +36,12 @@ if [[ "${1:-} ${2:-}" == "org list" ]]; then
   fi
   if [[ -f "$S/list-fail-after-use" && -f "$S/used" ]]; then
     echo "dial tcp: connection refused" >&2
+    exit 7
+  fi
+  # 切完头一次读失败、之后好了（一次网络抖动）
+  if [[ -f "$S/list-fail-once-after-use" && -f "$S/used" && ! -f "$S/failed-once" ]]; then
+    touch "$S/failed-once"
+    echo "dial tcp: i/o timeout" >&2
     exit 7
   fi
   # 切完再读就卡住（exec：timeout 的 TERM 直接落到 sleep 上，不留孤儿进程占着输出管道）
@@ -181,10 +188,16 @@ run carpool --user fleet-agent-carpool
 expect "切错了、往回切也没成：说清现在挂的是认不出类型的组织" 1 "failed other" "也没回到原来的独享组织"
 
 setup "$SOLO"
+touch "$S/list-fail-once-after-use"
+run carpool --user fleet-agent-carpool
+expect "切完回读核对不了（其实切成了）：只认正面证据，切回原来的独享、再读照实说" 1 "failed solo" "已切回原来的独享组织"
+[[ "$(uses)" == 2 && "$(current)" == "$SOLO" ]] || flunk "核对不了应往回切一次、回到独享：org use $(uses) 次，现在 $(current)"
+
+setup "$SOLO"
 touch "$S/list-fail-after-use"
 run carpool --user fleet-agent-carpool
-expect "切完回读核对不了：不知道挂的是哪个，不往回切" 1 "failed unknown" "没敢往回切"
-[[ "$(uses)" == 1 ]] || flunk "核对不了就不该往回切：org use $(uses) 次"
+expect "切完回读核对不了、切回去以后也读不了：不知道挂的是哪个" 1 "failed unknown" "不知道现在挂的是哪个"
+[[ "$(uses)" == 2 ]] || flunk "核对不了应试着往回切一次：org use $(uses) 次"
 
 echo "== org list 读不了、认不出：不切，退出码 1"
 setup "$SOLO"
@@ -228,9 +241,10 @@ export AGENT_SCOPE_TEST_ORG_BUDGET=8 AGENT_SCOPE_TEST_ORG_RESERVE=1
 started=$SECONDS
 run carpool --user fleet-agent-carpool
 took=$((SECONDS - started))
-expect "切完回读卡住：到总时限就停，不知道挂的是哪个，不往回切" 1 "failed unknown" "超时被停"
+expect "切完回读卡住：到总时限就停，不知道挂的是哪个" 1 "failed unknown" "超时被停"
 ((took <= 8)) || flunk "应在总时限 8 秒里收场：用了 $took 秒"
-[[ "$(uses)" == 1 ]] || flunk "核对不了就不该往回切：org use $(uses) 次"
+# 核对不了本该往回切，可时间已经不够了：不跑（不越过总时限）
+[[ "$(uses)" == 1 ]] || flunk "时间用完就不该再 org use：用了 $(uses) 次"
 unset AGENT_SCOPE_TEST_ORG_BUDGET AGENT_SCOPE_TEST_ORG_RESERVE
 
 if ((fail)); then
