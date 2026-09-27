@@ -167,7 +167,7 @@ export function decide(raw, fallbackCwd = '') {
   const otherRepo = repoFlag !== undefined && !/(?:^|\/)fleet-dao$/i.test(repoFlag);
   if (inFleet && /\bgh\s+issue\s+create\b/.test(cmd) && !otherRepo) {
     return block(
-      'fleet-dao 开单一律用 `pnpm issue:new --kind <需求|缺陷|杂项> --milestone <版本全名|v<N>|未排期> --specs`（母单加 --mother），不直接 gh issue create（会漏类别标签、里程碑、需求文档）。',
+      'fleet-dao 开单一律用 `pnpm issue:new --kind <需求|缺陷|杂项> --milestone <版本全名|v<N>|未排期> --specs`（母单加 --mother，子单加 --parent <母单号>），不直接 gh issue create（会漏类别标签、里程碑、需求文档）。',
     );
   }
   // 本机有 Claude 会话在跑时，在本机切号、登录、退出会让所有会话当场断掉（全局规矩「我的机器与模型」）。

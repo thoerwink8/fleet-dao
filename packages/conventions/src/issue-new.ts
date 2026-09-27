@@ -1,9 +1,11 @@
-// 开单脚本：pnpm issue:new --kind 需求 --milestone v1 --title "…" --body-file 正文.md [--specs 短名] [--mother]
+// 开单脚本：pnpm issue:new --kind 需求 --milestone v1 --title "…" --body-file 正文.md [--specs 短名] [--mother] [--parent 母单号]
 // 缺类别、里程碑，或正文里没有写了字的「## 怎么算做完」就不开（design 第三节第 35 条：以后要做的事得是一张
 // 带怎么算做完和里程碑的 issue）。经 gh 开单时一次带上标签和里程碑（gh 先把名字换成编号再建单，对不上就一张也不建）。
 // 里程碑＝版本（创始人 2026-09-26 拍，替代 P 阶段）：--milestone 认全名、v<N> 简写、旧的 P<N> 简写，或「未排期」——
 // 未排期时不挂里程碑（建单不带 --milestone），结果里 milestone 记「未排期」。--mother 给这张单多贴「母单」标签
-// （一组能一起验收的子单，用 GitHub 自带子议题挂在它下面）。
+// （一组能一起验收的子单，用 GitHub 自带子议题挂在它下面）。--parent 开的是子单：先不带里程碑建单、挂到母单下面，
+// 再挂里程碑——接活只派挂在当前版本上的独立单（design 第九节「在哪能做与接活开关」，母单、子单不派），带着当前版本先建、
+// 事后再挂到母单下面的，中间那一下是一张挂在当前版本上的独立单，开关开着就被派走了。
 // 带 --specs 时，完整正文写进 specs/<号>-<短名>/需求.md，issue 上只留第一个小标题之前那段（原话、AI 理解）
 // 和需求文档的路径（第七节：完整需求只在仓里存一份）。gh 出错原样报出来，退出码非 0。
 import { execFile } from 'node:child_process';
@@ -36,12 +38,15 @@ export interface IssueNewResult {
   milestone: string;
   /** 建了需求文档时，它的仓内路径。 */
   specsFile: string | undefined;
+  /** 开的是子单时，挂在哪张母单下面（--parent）。 */
+  parent?: number | undefined;
 }
 
 export const USAGE =
-  '用法：pnpm issue:new --kind 需求|缺陷|杂项 --milestone v1 --title "一句话" --body-file 正文.md [--specs 短名] [--mother]' +
+  '用法：pnpm issue:new --kind 需求|缺陷|杂项 --milestone v1 --title "一句话" --body-file 正文.md [--specs 短名] [--mother] [--parent 母单号]' +
   '（--milestone 认全名、v<N>、旧的 P<N>，或「未排期」；正文要有写了字的「## 怎么算做完」；' +
-  '带 --specs 时，第一个小标题之前写原话和 AI 理解；--mother 多贴「母单」标签）';
+  '带 --specs 时，第一个小标题之前写原话和 AI 理解；--mother 多贴「母单」标签；' +
+  '--parent 开子单：先挂到那张母单下面再挂里程碑）';
 
 /** --milestone 写这个值：这张单没有版本（未排期）。不去查 GitHub 的里程碑列表，建单也不带 --milestone。 */
 const UNSCHEDULED = '未排期';
@@ -72,6 +77,7 @@ export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Pro
   }
 
   const milestone = o.milestone === UNSCHEDULED ? UNSCHEDULED : await resolveMilestone(deps.gh, o.milestone);
+  if (o.parent !== undefined) await checkParent(deps.gh, o.parent);
   const created = await deps.gh([
     'issue',
     'create',
@@ -83,7 +89,8 @@ export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Pro
     '--label',
     o.kind,
     ...(o.mother ? ['--label', MOTHER_LABEL] : []),
-    ...(milestone === UNSCHEDULED ? [] : ['--milestone', milestone]),
+    // 子单先不带里程碑：挂到母单下面以后再挂（attachToParent）
+    ...(milestone === UNSCHEDULED || o.parent !== undefined ? [] : ['--milestone', milestone]),
   ]);
   // 开单这一步报错，单不一定没建：超时、断连时 GitHub 那边可能已经建好了，照着重跑会开出重复的单
   if (created.code !== 0) {
@@ -99,13 +106,16 @@ export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Pro
     );
   }
   const number = Number(n);
-  if (o.specs === undefined) return { number, url, milestone, specsFile: undefined };
+  const { parent } = o;
+  if (parent !== undefined) await attachToParent(deps.gh, { number, url, parent, milestone, specs: o.specs });
+  if (o.specs === undefined) return { number, url, milestone, specsFile: undefined, parent };
   try {
     return {
       number,
       url,
       milestone,
       specsFile: writeSpecs(deps.root, number, o.specs, specsDoc(o.title, number, milestone, body)),
+      parent,
     };
   } catch (e) {
     throw new Error(`单开了（#${number} ${url}），可需求文档没建成：${message(e)}。`);
@@ -120,6 +130,8 @@ interface Options {
   specs: string | undefined;
   /** 多贴「母单」标签：这张单下面会挂子单（GitHub 自带子议题）。 */
   mother: boolean;
+  /** 开的是子单：挂到这张母单下面。 */
+  parent: number | undefined;
 }
 
 function parse(argv: readonly string[]): Options {
@@ -135,6 +147,7 @@ function parse(argv: readonly string[]): Options {
         'body-file': { type: 'string' },
         specs: { type: 'string' },
         mother: { type: 'boolean' },
+        parent: { type: 'string' },
       },
       strict: true,
       allowPositionals: false,
@@ -160,7 +173,91 @@ function parse(argv: readonly string[]): Options {
     );
   }
   const mother = values.mother === true;
-  return { kind, milestone, title, bodyFile, specs, mother };
+  let parent: number | undefined;
+  if (values.parent !== undefined) {
+    const m = /^#?([1-9]\d*)$/.exec(str(values.parent) ?? '');
+    if (!m?.[1])
+      throw new Error(`--parent 写母单的号（比如 --parent 192），「${values.parent}」认不出。${USAGE}`);
+    parent = Number(m[1]);
+  }
+  return { kind, milestone, title, bodyFile, specs, mother, parent };
+}
+
+/** 挂子单之前先看母单：开着的 issue、贴了「母单」标签（design 第七节：有子单的必须带）。不对就不开单。 */
+async function checkParent(gh: Gh, parent: number): Promise<void> {
+  const r = await gh(['api', `repos/{owner}/{repo}/issues/${parent}`]);
+  if (r.code !== 0) throw new Error(`gh 读母单 #${parent} 失败（退出码 ${r.code}），单没开：${detail(r)}`);
+  let issue: { state?: unknown; pull_request?: unknown; labels?: unknown };
+  try {
+    const data: unknown = JSON.parse(r.stdout);
+    if (typeof data !== 'object' || data === null || Array.isArray(data)) throw new Error('不是一张 issue');
+    issue = data;
+  } catch (e) {
+    throw new Error(`gh 读回来的 #${parent} 认不出（${message(e)}），单没开。`);
+  }
+  if (issue.pull_request !== undefined) throw new Error(`#${parent} 是 PR，不是母单，单没开。`);
+  if (issue.state !== 'open') throw new Error(`母单 #${parent} 已经关了，单没开：子单挂到还开着的母单下面。`);
+  const labels = Array.isArray(issue.labels)
+    ? issue.labels.map((l: unknown) =>
+        typeof l === 'object' && l !== null ? (l as { name?: unknown }).name : l,
+      )
+    : undefined;
+  if (!labels?.every((name) => typeof name === 'string')) {
+    throw new Error(`gh 读回来的 #${parent} 的标签认不出，单没开。`);
+  }
+  if (!labels.includes(MOTHER_LABEL)) {
+    throw new Error(
+      `#${parent} 没贴「${MOTHER_LABEL}」标签，单没开：有子单的必须是母单（design 第七节「标签与里程碑」），` +
+        `先 gh issue edit ${parent} --add-label ${MOTHER_LABEL}，再写清它怎么算做完。`,
+    );
+  }
+}
+
+/**
+ * 子单建好以后：挂到母单下面（GitHub 子议题），再挂里程碑。顺序不能反（见文件头）：没挂到母单下面之前它没有里程碑，
+ * 自动派把它当未排期、不派。哪一步没成都照实报、说清停在哪一步和怎么手动补完，不重开单（会开出重复的）。
+ */
+async function attachToParent(
+  gh: Gh,
+  a: { number: number; url: string; parent: number; milestone: string; specs: string | undefined },
+): Promise<void> {
+  const thenMilestone =
+    a.milestone === UNSCHEDULED ? '' : `，再 gh issue edit ${a.number} --milestone "${a.milestone}"`;
+  const noDoc =
+    a.specs === undefined ? '' : `；需求文档还没建，挂好以后补上 specs/${a.number}-${a.specs}/需求.md`;
+  const unlinked = (why: string) =>
+    new Error(
+      `单开了（#${a.number} ${a.url}），可没挂到 #${a.parent} 下面：${why}。它现在没挂里程碑（未排期，不会被自动派）：` +
+        `在 #${a.parent} 页面上把它加成子议题${thenMilestone}${noDoc}。`,
+    );
+  const read = await gh(['api', `repos/{owner}/{repo}/issues/${a.number}`]);
+  if (read.code !== 0) throw unlinked(`gh 读它的 id 失败（退出码 ${read.code}）：${detail(read)}`);
+  let id: unknown;
+  try {
+    id = (JSON.parse(read.stdout) as { id?: unknown } | null)?.id;
+  } catch {
+    id = undefined;
+  }
+  if (typeof id !== 'number' || !Number.isSafeInteger(id) || id <= 0) {
+    throw unlinked('gh 读回来的这张单认不出 id');
+  }
+  const link = await gh([
+    'api',
+    '-X',
+    'POST',
+    `repos/{owner}/{repo}/issues/${a.parent}/sub_issues`,
+    '-F',
+    `sub_issue_id=${id}`,
+  ]);
+  if (link.code !== 0) throw unlinked(`gh 挂子议题报错（退出码 ${link.code}）：${detail(link)}`);
+  if (a.milestone === UNSCHEDULED) return;
+  const edit = await gh(['issue', 'edit', String(a.number), '--milestone', a.milestone]);
+  if (edit.code !== 0) {
+    throw new Error(
+      `单开了、挂到 #${a.parent} 下面了（#${a.number} ${a.url}），可里程碑「${a.milestone}」没挂上（退出码 ${edit.code}）：` +
+        `${detail(edit)}。手动补：gh issue edit ${a.number} --milestone "${a.milestone}"${noDoc}。`,
+    );
+  }
 }
 
 /**
