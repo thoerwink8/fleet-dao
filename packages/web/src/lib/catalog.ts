@@ -170,8 +170,8 @@ export interface RouteStatus {
   /** 探针下结论的时刻；还没探过就没有。 */
   at: string | undefined;
   /**
-   * 结论超过 routeProbeStaleMinutes 没更新：探针可能停了，这个在线 / 离线不一定还对。放慢的执行方式（cursor-agent 探通了
-   * 2 小时再探）按它自己的间隔算；不知道执行方式的按每轮都探算。
+   * 结论超过 routeProbeStaleMinutes 没更新：探针可能停了，这个在线 / 离线不一定还对。放慢的执行方式（cursor-agent、grok
+   * 探通了 2 小时再探）按它自己的间隔算；不知道执行方式的按每轮都探算。
    */
   stale: boolean;
 }

@@ -18,11 +18,13 @@
 //   cursor-agent 装在会话用户家里、不在 PATH 上，升级会删掉旧版本目录：每次起都由会话用户自己按 current → 最新版本目录现找
 //   （cursorLaunchCommand 的后一段，CU-03）。
 // - grok（SuperGrok 订阅的 Grok Build 命令行，#266）：会话号由我们定（-s <UUID>，续会话 -r），终帧回同一个号和实际模型
-//   （grok-4.7-build 这种带渠道后缀的名字，插头认得）。没有我们用得上的 fork：换了账号池一律接力。终帧里没有回答正文，
-//   回答是插头攒的最后一段话。认证是会话用户家里的登录态（~/.grok/auth.json，官方安装脚本、device code 登录，文件存得下，
-//   自己续期）；没登录、过期了在 error 帧和 stderr 里说「Not signed in」「Run `grok login`」，失败分流按 AU7 认。
-//   和 Cursor 一样不绑会话用户、跑在法国唯一的会话用户下；装在他家里的 ~/.grok/bin/grok，由会话用户自己看在不在
-//   （grokLaunchCommand），不在就报没装。
+//   （grok-4.7-build 这种带渠道后缀的名字，插头认得）。但号是我们定的不等于会话建成了：没登录、起不来、点的型号不认时它在
+//   开会话之前就退出，拿这个号 -r 只会报「not found」——所以开新会话时这个号先不算数，见到它真开了会话（终帧，或报错以外的
+//   任何一帧）才交回工作流（grokReport），没开成就交空串、下次开新会话。没有我们用得上的 fork：换了账号池一律接力。终帧里
+//   没有回答正文，回答是插头攒的最后一段话。认证是会话用户家里的登录态（~/.grok/auth.json，官方安装脚本、device code 登录，
+//   普通文件、没有桌面也存得下，grok 自己续期）；没登录、过期了在 error 帧和 stderr 里说「Not signed in」「Run `grok login`」，
+//   失败分流按 AU7 认。和 Cursor 一样不绑会话用户、跑在法国唯一的会话用户下；装在他家里的 ~/.grok/bin/grok，由会话用户自己
+//   看它是不是能跑的文件（grokLaunchCommand），不是就报没装。
 import { randomUUID } from 'node:crypto';
 import {
   type AgentRunOptions,
@@ -116,7 +118,10 @@ export interface HostReport {
   hostId: WiredHost;
   /** 判定事实（各家插头的 xxxRunFacts）：判法只有 judgeRun 一份。 */
   facts: RunFacts;
-  /** 执行体报的会话号：Claude、grok 就是我们给的那个（grok 在终帧里回）；cursor 是它 init 帧（或终帧）里的。没读到不给。 */
+  /**
+   * 执行体报的会话号：Claude 就是我们给的那个；cursor 是它 init 帧（或终帧）里的；grok 是我们给的那个、它真开了会话才给
+   * （终帧回的，或者见到了报错以外的帧）。没读到、没开成不给。
+   */
   sessionId?: string;
   usage: HostUsage;
   /** 只有 Claude 报：会话累计花费（续会话含前几轮）、会话结束时的上下文大小。 */
@@ -149,8 +154,8 @@ export interface HostDriver {
   /** 换了账号池能不能 fork 续（Claude 能；cursor、grok 不能，换池一律接力）。 */
   canFork: boolean;
   /**
-   * 开新会话、fork 时回给工作流的会话号。known = 这就是执行体要用的号（Claude、grok）；不是的是临时号（cursor），真号 init
-   * 帧里给。
+   * 开新会话、fork 时用的会话号。known = 起来就算数，结局照它交回工作流（Claude）；不是的要等执行体报上来才算：cursor 给的
+   * 是临时号、真号 init 帧里给；grok 的号是我们给的（-s），但登录不上、起不来时它根本没建这个会话，看它开没开成（grokReport）。
    */
   newSessionId(runId: string): { id: string; known: boolean };
   run(spec: HostRunSpec, hooks: HostRunHooks): Promise<HostReport>;
@@ -455,12 +460,13 @@ export const DEFAULT_GROK_BIN = '/home/{user}/.grok/bin/grok';
 export const GROK_MISSING = 'spawn grok ENOENT';
 
 // 一行写完（命令行要经 sudo 记日志）：以会话用户的身份看 grok 在不在、能不能跑（引擎进不去他的家，看不了），能跑就 exec 成它
-// （进程号不变，还是插头拿着的那一个）；不在就照没装报、退出 127。插头还会在它前面垫一个 cat：grok 从 /dev/stdin 读提示词
-// 要真管道，Node 给的是 socketpair（adapters 的 runGrok）。
+// （进程号不变，还是插头拿着的那一个）；不在、不是文件（-x 对目录也成立）、不能跑就照没装报、退出 127。装机脚本的读回
+// （deploy/lib/grok.sh 的 grok_version）照同一个判法。插头还会在它前面垫一个 cat：grok 从 /dev/stdin 读提示词要真管道，
+// Node 给的是 socketpair（adapters 的 runGrok）。
 const GROK_FIND_SCRIPT = [
   'bin=$1',
   'shift',
-  `if [ ! -x "$bin" ]; then echo "${GROK_MISSING}：$bin 不在或不能跑（会话用户家里没装 grok 命令行，docs/ops.md 第五节「会话用户的 grok」）" >&2; exit 127; fi`,
+  `if [ ! -f "$bin" ] || [ ! -x "$bin" ]; then echo "${GROK_MISSING}：$bin 不在或不能跑（会话用户家里没装 grok 命令行，docs/ops.md 第五节「会话用户的 grok」）" >&2; exit 127; fi`,
   'exec "$bin" "$@"',
 ].join('; ');
 
@@ -479,7 +485,8 @@ function grokDriver(
     hostId: 'grok',
     userFrom: 'sole',
     canFork: false,
-    newSessionId: () => ({ id: randomUUID(), known: true }),
+    // 号是我们定的（-s），但它真开了会话才算数（grokReport）：没登录、起不来时拿它 -r 只会报 not found
+    newSessionId: () => ({ id: randomUUID(), known: false }),
     async run(spec, hooks) {
       if (spec.session.mode === 'fork') {
         throw new Error('grok 不 fork：换了账号池要开新会话带接力任务书');
@@ -510,13 +517,20 @@ function grokDriver(
   };
 }
 
+/**
+ * grok 的报告整理成同一个形状。会话号：终帧回的那个；没有终帧（半路被停、断了）但见到了报错以外的帧，就是我们给它的那个
+ * （它开会话之后才出帧：头一帧是 available_commands，法国真跑记录）；一帧都没有、只有 error 帧（没登录、起不来、型号不认，
+ * 法国实跑 2026-09-27）就是没开成会话，不给——交回工作流的是空串，下次开新会话，不拿一个没建成的号去 -r（它报 not found）。
+ */
 export function grokReport(report: GrokRunReport): HostReport {
-  const end = report.stream.end;
+  const s = report.stream;
+  const end = s.end;
   const facts = grokRunFacts(report);
+  const opened = s.frames > s.errors.length;
   return {
     hostId: 'grok',
     facts,
-    ...defined('sessionId', end?.sessionId),
+    ...defined('sessionId', end?.sessionId ?? (opened ? report.session.id : undefined)),
     usage: {
       ...defined('inputTokens', end?.usage?.inputTokens),
       ...defined('outputTokens', end?.usage?.outputTokens),

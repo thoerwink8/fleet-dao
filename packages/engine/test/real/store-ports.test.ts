@@ -20,7 +20,7 @@ import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fle
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { PickRouteInput } from '../../src/ports.ts';
 import { createStorePorts, poolHoldKey } from '../../src/real/store-ports.ts';
-import { addCursorRoute, addTask, MIN, NOW, world } from './fixtures.ts';
+import { addCursorRoute, addGrokRoute, addTask, MIN, NOW, world } from './fixtures.ts';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -526,6 +526,32 @@ describe('开 PR 前验证：只派别家、作者是哪几族、每一轮的记
     );
     // 没说要避开哪一族的，照常派 claude
     expect(await pick({ stage: 'verify' })).toMatchObject({ ok: true, route: { routeId: 'solo' } });
+  });
+
+  it('碰界面的单（#266，创始人 2026-09-27 拍）：Cursor 上的 GPT-5.6 Luna 被硬禁令挡掉，派给排在它后面的 Grok 4.7；一般的单照排序派给 Luna', async () => {
+    await world(t.db, { stages: ['verify'] });
+    const luna = await addCursorRoute(t.db, {
+      stages: ['verify'],
+      modelId: 'gpt-5.6-luna',
+      upstreamModel: 'gpt-5.6-luna-high',
+    });
+    const grok = await addGrokRoute(t.db, { stages: ['verify'] });
+    // 验证阶段的顺序照法国：Luna 第一、Grok 第二，两个 Claude 池在后面（写这张单的族避开）。位置在阶段里不许重，先挪开再排
+    const order = [luna.routeId, grok.routeId, 'solo', 'carpool'];
+    for (const base of [100, 0]) {
+      for (const [i, routeId] of order.entries()) {
+        await t.client.query(
+          "update stage_policy_routes set position = $2 where stage = 'verify' and route_id = $1",
+          [routeId, base + i],
+        );
+      }
+    }
+    expect(await pick({ stage: 'verify', avoidFamilies: ['claude'] })).toMatchObject({
+      ok: true,
+      route: { routeId: luna.routeId, family: 'gpt' },
+    });
+    const ui = await pick({ stage: 'verify', avoidFamilies: ['claude'], uiWork: true });
+    expect(ui).toMatchObject({ ok: true, route: { routeId: grok.routeId, family: 'grok', hostId: 'grok' } });
   });
 
   it('【故意造出的失败】别家只剩 Cursor Auto（渠道自己挑模型）：认不出是哪一家，不派，写明为什么', async () => {

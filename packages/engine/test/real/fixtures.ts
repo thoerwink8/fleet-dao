@@ -1,7 +1,7 @@
 // 真端口测试共用的底子：内存库里的一份目录（两个 Claude 池：独享、拼车；一个没接上的执行方式）、一个需求，
 // 一个本地 git「镜像」（顶替 github 包的 fetchMainline / bundleCommits），一个记属主的假工作树管家，
-// 两个不起真执行体的假插头：Claude 的按剧本发事件、改工作树、交报告；cursor 的拿法国真跑的过程记录
-// （packages/adapters/test/fixtures/cursor-agent）逐行喂给真的读取器，事件、会话号、终帧用量都是真解析出来的。
+// 三个不起真执行体的假插头：Claude 的按剧本发事件、改工作树、交报告；cursor、grok 的拿法国真跑的过程记录
+// （packages/adapters/test/fixtures/cursor-agent、grok）逐行喂给真的读取器，事件、会话号、终帧用量都是真解析出来的。
 import { execFileSync } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -600,23 +600,39 @@ export const GROK_NOT_SIGNED_IN =
   'Not signed in. To authenticate without a browser, run:\n  grok login --device-code\n\n' +
   'Alternatively, set the XAI_API_KEY environment variable or run `grok login` on a machine with a browser.';
 
-/** grok 登录过期、续不上时的原话（xai-org/grok-build 源码 crates/codegen/xai-grok-login/src/error.rs）。 */
+/** grok 登录过期、续不上时的原话（xai-org/grok-build f0e3be1 的 crates/codegen/xai-grok-login/src/error.rs）。 */
 export const GROK_TOKEN_EXPIRED = 'Token expired. Run `grok login` to re-authenticate.';
 
-/** 没有真管道、也没有终端时 grok 打开 /dev/stdin 的报错（法国 2026-09-27：直接跑 grok status 撞到的）。 */
-export const GROK_NO_STDIN = 'Error: No such device or address (os error 6)';
+/** 点名的型号 grok 不认（法国实跑 2026-09-27：error 帧、stderr 各一遍，退出 1）。 */
+export const GROK_UNKNOWN_MODEL =
+  "Couldn't set model 'grok-9.9': Invalid params: \"unknown model id\". Run 'grok models' to see available models.";
 
-/** 探针要的那种终帧：回答 OK（text 帧）、终帧带会话号和实际模型。 */
-export function grokAnswered(sessionId: string, text = 'OK', model = 'grok-4.7-build'): Record<string, unknown>[] {
+/**
+ * stdin 不是真管道时 grok 读 /dev/stdin 的报错（法国实跑 2026-09-27：stdin 给 socketpair，只在 stderr、退出 1）。
+ * 插头前面垫了 cat 就撞不上；撞上了是起法坏了，不是没登录。
+ */
+export const GROK_NO_STDIN = "Error: Failed to read '/dev/stdin': No such device or address (os error 6)";
+
+/** grok 报错退出的样子：error 帧和 stderr（「Error: 」开头）各一遍、退出 1、没有终帧（没登录、型号不对都是这样）。 */
+export function grokRefused(message: string, exitCode = 1): FakeGrokScript {
+  return { frames: [{ type: 'error', message }], stderr: `Error: ${message}\n`, exitCode };
+}
+
+/**
+ * 探针要的那种回合：回答 OK（text 帧，一字一帧的增量拼成整句）、终帧带实际模型（会话号由假插头换成这一轮交给它的号）。
+ * 用量照法国真跑的一次最小会话。
+ */
+export function grokAnswered(text = 'OK', model = 'grok-4.7-build'): Record<string, unknown>[] {
   return [
-    { type: 'text', data: text },
+    ...[...text].map((data) => ({ type: 'text', data })),
     {
       type: 'end',
       stopReason: 'end_turn',
-      sessionId,
-      usage: { input_tokens: 15244, output_tokens: 2, cache_read_input_tokens: 12032 },
+      sessionId: 'replaced-by-fake',
+      usage: { input_tokens: 3212, output_tokens: 2, cache_read_input_tokens: 12032 },
       num_turns: 1,
-      modelUsage: { [model]: { inputTokens: 15244, outputTokens: 2 } },
+      total_cost_usd: 0.0021,
+      modelUsage: { [model]: { inputTokens: 3212, outputTokens: 2 } },
     },
   ];
 }
@@ -685,7 +701,12 @@ export function fakeGrokRun(script: (spec: GrokRunSpec, n: number) => FakeGrokSc
     }
     const spawnError = scopeError ?? s.spawnError;
     if (spawnError) return finish({ exitCode: null, signal: null, spawnError });
-    await opts.onSpawn?.({ pid: 4545, runId: spec.runId, scope: `fleet-agent-${spec.runId}.scope`, startedAt });
+    await opts.onSpawn?.({
+      pid: 4545,
+      runId: spec.runId,
+      scope: `fleet-agent-${spec.runId}.scope`,
+      startedAt,
+    });
     const signal = opts.signal ?? new AbortController().signal;
     await s.act?.({ spec, signal });
     const lines = [
@@ -712,7 +733,7 @@ export function fakeGrokRun(script: (spec: GrokRunSpec, n: number) => FakeGrokSc
 
 /**
  * 一条 grok 路由（和目录样例同一个样子）：SuperGrok 的池不绑会话用户，模型 grok-4.7。stages 给了就挂进这些阶段的调度台
- * （探针只探有阶段在用的路由）。
+ * （探针只探有阶段在用的路由），排在 cursor 那条（9）后面。
  */
 export async function addGrokRoute(
   db: Db,
@@ -735,7 +756,7 @@ export async function addGrokRoute(
     upstreamModel: over.upstreamModel ?? 'grok-4.7',
   });
   for (const stage of over.stages ?? []) {
-    await db.insert(stagePolicyRoutes).values({ stage, routeId, position: 9, enabled: true });
+    await db.insert(stagePolicyRoutes).values({ stage, routeId, position: 10, enabled: true });
   }
   return { routeId, poolId };
 }

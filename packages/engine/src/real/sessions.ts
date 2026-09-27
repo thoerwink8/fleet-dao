@@ -814,7 +814,8 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     const { mode, prior, why } = input.resumeSessionId
       ? await continuation(input.resumeSessionId, route, driver, user, dir)
       : { mode: 'new' as const, prior: null, why: '' };
-    // 这次的会话号：续会话就是原来那个；开新会话、fork 由驱动给——Claude 的号我们定，cursor 的先给临时号、真号 init 帧里报。
+    // 这次的会话号：续会话就是原来那个；开新会话、fork 由驱动给——Claude 的号我们定，cursor 的先给临时号、真号 init 帧里报，
+    // grok 的号我们定、但它真开了会话才交回工作流（hosts.ts 的 grokReport）。
     const fresh = driver.newSessionId(input.runId);
     let sessionId: string;
     let session: HostSession;
@@ -1414,8 +1415,8 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
   }
 
   /**
-   * 交给工作流的会话号：执行体真用的那个（Claude、续会话一开始就知道；cursor 开新会话要 init 帧或终帧报上来）。
-   * 没报出来就是空串：工作流保留上一个，不拿临时号去续。
+   * 交给工作流的会话号：执行体真用的那个（Claude、续会话一开始就知道；cursor 开新会话要 init 帧或终帧报上来；grok 开新会话
+   * 要它真开了会话）。没报出来就是空串：工作流保留上一个，不拿临时号、没建成的号去续。
    */
   const agentIdOf = (live: Live, report?: HostReport): string =>
     live.agentSessionId ?? report?.sessionId ?? '';

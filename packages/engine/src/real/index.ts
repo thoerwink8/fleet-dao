@@ -238,7 +238,14 @@ export function realPortsFromEnv(
   const jobs: EngineJobs = {
     githubReconcile: githubReconcileJob({ db, gh }),
     // 路由探针和干活的会话用同一份执行体（reclaude、cursor-agent、grok）、同一个工作树的根（探针目录在它下面）
-    routeProbe: routeProbeJob({ db, trees, claudeCommand, cursorCommand, grokCommand, machine: config.machine }),
+    routeProbe: routeProbeJob({
+      db,
+      trees,
+      claudeCommand,
+      cursorCommand,
+      grokCommand,
+      machine: config.machine,
+    }),
     // 每小时对账：同一个工作树管家（删树经 fleet-agent-scope）、同一个会话用户执行器（看树里还剩什么）
     hourlyReconcile: hourlyReconcileJob({ db, trees, exec, machine: config.machine }),
   };

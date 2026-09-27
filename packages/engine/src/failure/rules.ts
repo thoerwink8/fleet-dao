@@ -256,12 +256,14 @@ export const RULES: readonly FailureRule[] = [
     resumeAfterPark: true,
   },
   // grok（SuperGrok 订阅的 Grok Build 命令行，#266）没登录或登录续不上：无头模式一样凭据都没有是「Not signed in. To authenticate
-  // without a browser, run: grok login --device-code …」（error 帧和 stderr 各一遍、退出 1，法国实跑 2026-09-27）；登录过期、
-  // 续不上是「Token expired. Run `grok login` to re-authenticate.」「Session expired. Run `grok login` …」「Your auth token is
-  // invalid or expired. Run `grok login` …」「Authentication rejected by server. Run `grok login` …」「Auth recovery exhausted;
-  // re-authentication required.」（xai-org/grok-build 源码原文）。修法是确定的：在那台机器上以会话用户跑 grok login
-  // --device-code、在任意设备的浏览器里确认。排在 AU2 前面：AU2 的「token expired」「not logged in」也认得几句，但它没写修法。
-  // 没管道、没终端时打开 stdin 报的「No such device or address (os error 6)」不是没登录（起法坏了，归 CF1）。
+  // without a browser, run: grok login --device-code …」（error 帧和 stderr 各一遍、退出 1，法国实跑 2026-09-27；源码
+  // crates/codegen/xai-grok-pager/src/headless.rs 的 auth_required_message）；登录过期、续不上是「Token expired. Run `grok login`
+  // to re-authenticate.」「Authentication rejected by server. Run `grok login` …」「Your session has expired. Run `grok login` to
+  // sign in again.」「Authentication could not be refreshed. Run `grok login` …」「Auth recovery exhausted; re-authentication
+  // required.」「Not logged in. Run `grok login`.」（xai-org/grok-build f0e3be1 的 crates/codegen/xai-grok-login/src/error.rs）。
+  // 修法是确定的：在那台机器上以会话用户跑 grok login --device-code、在任意设备的浏览器里确认。排在 AU2 前面：AU2 的
+  // 「token expired」「not logged in」也认得几句，但它没写修法。续期时一时连不上是「auth refresh failed: …」，不带 grok login，
+  // 不在这里认（不是要人重登）。没真管道时读 /dev/stdin 报的「No such device or address (os error 6)」不是没登录（起法坏了，归 CF1）。
   {
     id: 'AU7',
     title: 'Grok 登录失效',
@@ -323,11 +325,13 @@ export const RULES: readonly FailureRule[] = [
   // 模型不存在或已下架：这个任务换模型，并报警好把对应路由下线（旧系统巡检判了下架的路线还在派，windsurf-dao#1840）。
   // 常常只是这一条路由的目录里没有它，别的路由上的同一个模型照样能用，所以不让所有任务一起避开这个模型；
   // 这条路由的失败记进熔断，由熔断去下线它。
+  // grok 点名的型号它不认：「Couldn't set model '<名字>': Invalid params: "unknown model id". Run 'grok models' to see available
+  // models.」（error 帧和 stderr 各一遍、退出 1，法国实跑 2026-09-27，grok 1.0.41）。
   {
     id: 'MD1',
     title: '模型不存在或已下架',
     codes: ['model_not_found', 'model_unavailable', 'model_retired', 'unrecognized_model'],
-    text: /issue with the selected model|may not exist or you may not have access|absent from the ACP model catalog|model catalog has no match|cannot use this model|model[_ ]not[_ ]found/i,
+    text: /issue with the selected model|may not exist or you may not have access|absent from the ACP model catalog|model catalog has no match|cannot use this model|model[_ ]not[_ ]found|unknown model id|Couldn't set model '/i,
     ladder: ['swapModel', 'park'],
     avoid: { scope: 'model', shared: false, until: 'none' },
     alert: true,

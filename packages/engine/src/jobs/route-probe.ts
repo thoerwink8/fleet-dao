@@ -1,6 +1,6 @@
 // 路由探针（#129，design 第九节「路由探针」）：一轮 = 记下开始 → 读全部路由 → 逐条定探不探 → 该探的真起一次最小会话
 // → 每条写一条结论（只有 ok 在线，其余一律不在线、写明原因）→ 结局记进 schedule_runs。按一次的成本放慢的执行方式
-// （cursor-agent），上一次探通了、还没到再探的时候，这一轮不探、不重写，结论照旧（它的过期线也跟着放宽，routeProbeStaleMinutes）。
+// （cursor-agent、grok），上一次探通了、还没到再探的时候，这一轮不探、不重写，结论照旧（它的过期线也跟着放宽，routeProbeStaleMinutes）。
 // scanned = 这一轮看过的路由条数（写下结论的，加上结论照旧的），found = 其中不在线的条数（驾驶舱「定时任务」页和调度台的
 // 在线数对得上）。没跑成、一条都没写进去、只写进去一部分，照实记 failed / unscanned / partial，不记成 ok（没跑成 ≠ 没问题）。
 import type { RouteProbeTarget, ScheduleResult } from '@fleet-dao/db';
