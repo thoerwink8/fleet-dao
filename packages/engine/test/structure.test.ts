@@ -55,6 +55,7 @@ describe('工作流文件的规矩', () => {
       'fusion.ts',
       'github-reconcile.ts',
       'hello.ts',
+      'hourly-reconcile.ts',
       'index.ts',
       'kit.ts',
       'merge-queue.ts',

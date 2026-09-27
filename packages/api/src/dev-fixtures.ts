@@ -216,6 +216,9 @@ export function devFixtures(now: Date): Partial<MemoryData> {
         outcome: 'ok',
         inputTokens: 120_000,
         outputTokens: 8_000,
+        // 缓存读写照终帧记；花费没给（演示「没读到」不显示成 0）
+        cacheReadTokens: 1_450_000,
+        cacheWriteTokens: 64_000,
       },
       {
         id: IDS.run1,

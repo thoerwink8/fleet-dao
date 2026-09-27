@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 # shellcheck source-path=SCRIPTDIR
 # 发布（在法国以 root 跑）：把主线上的一个提交装成一版 → 跑数据库迁移、装目录 → 切过去、按本机配置起应用服务 → 经隧道把飞书网关发到香港
-# （release.env 的 FLEET_HK_PARTS 写了 demo，连演示版一起发到 FLEET_DEMO_PATH；明写了 web，才连驾驶舱静态文件一起发到根地址）
-# → 健康检查；不过就自动退回上一版并报错（库的迁移比上一版新时不退）。幂等：同一个提交跑第二遍什么都不变。
+# （release.env 的 FLEET_HK_PARTS 写了 demo，人手动发布连演示版一起发到 FLEET_DEMO_PATH、记下发的是哪一版；明写了 web，才连
+# 驾驶舱静态文件一起发到根地址）→ 健康检查；不过就自动退回上一版并报错（库的迁移比上一版新时不退）。幂等：同一个提交跑第二遍什么都不变。
 # 发布和退回自己交给 systemd 跑（临时服务），终端断了照样跑完；日志在 /srv/fleet-dao-releases/.logs/。
 #   bash deploy/release.sh [<提交号>]            发布这个提交（不给就发主线最新）；只认主线上的提交
 #   bash deploy/release.sh --rollback            退回上一版（上一个在用过、没被判过不健康、目录还在的版本）
 #   bash deploy/release.sh --check               只读：在用哪版、有哪几版、服务与健康检查，不改任何东西
 #   bash deploy/release.sh <提交号> --unmerged   发还没合进主线的提交（只用来合并前在真机上验；历史里会标出来）
 #   bash deploy/release.sh <提交号> --auto [--busy-ok]
-#                                                自动发布（fleet-auto-release）用：不发演示版（对外，人闸）、历史行带 auto、
-#                                                切之前引擎有会话在跑就不切（--busy-ok 照切）；这两种「没动」单给退出码
+#                                                自动发布（fleet-auto-release）用：不发演示版（对外，人闸；只核对香港上的
+#                                                还是上次人发的那份）、历史行带 auto、切之前引擎有会话在跑就不切（--busy-ok
+#                                                照切）；这两种「没动」单给退出码
 # 每一版在 /srv/fleet-dao-releases/<提交号>，current 指着在用的那版；留最近 5 版。目录、单元、本机配置、怎么看、
 # 怎么退：docs/ops.md 第九节。退出码同装机脚本：0 全绿，1 有红（含「没过健康检查、已退回」），2 没红但有待配；
 # 只有 --auto 才有的：75 另一个发布在跑、76 切之前看到会话在跑——这两种什么都没动（构建留着，下次直接用）。
@@ -49,6 +50,9 @@ SETTLE_SECONDS=10     # 服务起来后再看这么久：这段时间里退出�
 ENGINE_POLL_WAIT=90   # 引擎工人起来后要先打包工作流，才去任务队列取活
 AGENT_SCOPE=/usr/local/sbin/fleet-agent-scope # 列 AI 会话（--auto 切之前看有没有会话在跑）；只有测试会换
 AUTO_STATE=$RELEASES/.auto/state.json         # 自动发布每一轮的读数（deploy/france/auto-release 写，--check 列出来）
+# 香港上的演示版是哪一版：演示版发成了（sync_web）当场记下提交号、时间、路径、首页的 sha256，核对（check_demo）都照它比。
+# 自动发布不发演示版，香港上的就该一直是这里记的那份——拿「在用的这一版」去比，会把「还没发」当成「坏了」（2026-09-27 误报过）
+DEMO_RECORD=$RELEASES/.demo-published
 # 自动发布（--auto）的两种「这次不发、什么都没动」：退出码单列，自动发布据此分得清「没动」和「没成」（没成的不再试）
 EXIT_RELEASE_BUSY=75
 EXIT_SESSIONS_BUSY=76
@@ -63,6 +67,7 @@ FLEET_HK_PARTS="gateway"
 GATEWAY_ACTIVATED=0 # 这一版的网关这次切过去了没有（没有网关、配置没备齐就是 0，健康检查不查它）
 # 演示版在香港站点上的路径（release.env，默认 /demo/）；和香港 hk.env 的 FLEET_DEMO_PATH 是同一个
 FLEET_DEMO_PATH=""
+DEMO_PUBLISH=1 # 这次发不发演示版：人手动发布发；自动发布（--auto）不发，只核对（auto_parts）
 SHA=""
 ON_MAIN=1
 WEB_KIND=""
@@ -93,7 +98,8 @@ short() { # 提交号 没有时显示的字
   if [[ -n "$1" ]]; then printf '%s' "${1:0:12}"; else printf '%s' "$2"; fi
 }
 has_service() { [[ " $FLEET_SERVICES " == *" $1 "* ]]; }
-has_part() { [[ " $FLEET_HK_PARTS " == *" $1 "* ]]; }
+has_part() { [[ " $FLEET_HK_PARTS " == *" $1 "* ]]; } # 香港上的这一样归发布管：发（自动发布不发演示版）、核对
+sends_demo() { has_part demo && ((DEMO_PUBLISH)); }   # 这次发演示版
 current_sha() {
   local s
   s=$(readlink -- "$RELEASES/current" 2>/dev/null) || return 0
@@ -126,12 +132,14 @@ record() { # 提交号 事件
   printf '%s %s %s%s\n' "$(date -u +%FT%TZ)" "$1" "$2" "$tag" >>"$HISTORY"
 }
 
-marker_get() { # 提交号 键
+marker_get() { kv_get "$RELEASES/$1/.fleet-release" "$2"; } # 提交号 键：这一版构建完成标记里的一项
+
+kv_get() { # 文件 键：「键=值」一行一项的文件里这一项的值（文件不在、没有这一项都打印空）
   local line
-  if [[ ! -f "$RELEASES/$1/.fleet-release" ]]; then return 0; fi
+  if [[ ! -f "$1" ]]; then return 0; fi
   while IFS= read -r line; do
     if [[ "$line" == "$2="* ]]; then printf '%s' "${line#*=}"; fi
-  done <"$RELEASES/$1/.fleet-release"
+  done <"$1"
 }
 
 # 以 fleet 身份、在给定目录里跑命令（环境清空，同 as_user）
@@ -183,20 +191,28 @@ preflight() {
     fi
   done
   auto_parts
-  ok "本机启用的服务：${FLEET_SERVICES:-（无：只发代码、跑迁移）}；往香港发：${FLEET_HK_PARTS:-（都不发）}；域名 $FLEET_DOMAIN"
-  if has_part demo; then ok "演示版发在香港站点的 $FLEET_DEMO_PATH"; fi
+  ok "本机启用的服务：${FLEET_SERVICES:-（无：只发代码、跑迁移）}；往香港发：$(parts_said)；域名 $FLEET_DOMAIN"
+  if has_part demo; then ok "演示版在香港站点的 $FLEET_DEMO_PATH"; fi
+}
+
+# 往香港发哪几样，说给人看：自动发布不发的演示版写明只核对
+parts_said() {
+  local p said=""
+  for p in $FLEET_HK_PARTS; do
+    if [[ "$p" == demo ]] && ! sends_demo; then p="demo（只核对、不发）"; fi
+    said+="${said:+ }$p"
+  done
+  printf '%s' "${said:-（都不发）}"
 }
 
 # 自动发布（--auto）不发演示版：演示版是对外的（链接发给了很多人），换它是对外发布，按版本由人确认（人闸，
-# docs/decisions/0003 第 18 条）；香港上的演示版这时不动、也不查。驾驶舱前端（web）和飞书网关是自家用的，和后端同一版一起跟
+# docs/decisions/0003 第 18 条）。香港上的演示版这时不动，但照样核对（check_demo）：它得还是上次人发的那份——往根地址发的
+# 驾驶舱静态文件和它在同一个目录底下，碰坏了要当场知道（原先连核对一起去掉，香港上的演示版就没人看了）。
+# 驾驶舱前端（web）和飞书网关是自家用的，和后端同一版一起跟
 auto_parts() {
-  local p kept=""
   if ((AUTO == 0)) || ! has_part demo; then return 0; fi
-  for p in $FLEET_HK_PARTS; do
-    if [[ "$p" != demo ]]; then kept+="${kept:+ }$p"; fi
-  done
-  FLEET_HK_PARTS=$kept
-  ok "自动发布不发演示版（对外，要人确认）：香港上的演示版这次不动"
+  DEMO_PUBLISH=0
+  ok "自动发布不发演示版（对外，要人确认）：香港上的演示版这次不动，只核对它还是上次人发的那份"
 }
 
 # 演示版在哪个路径：没写取默认 /demo/；不是一级路径、和根上已有的东西撞，报红
@@ -670,7 +686,7 @@ activate() { # 提交号 事件（release / rollback / auto-rollback）
     fi
     if ! ensure_unit_running "$u.service" "$restart"; then return 1; fi
   done
-  if has_part web || has_part demo; then sync_web "$sha" || return 1; fi
+  if has_part web || sends_demo; then sync_web "$sha" || return 1; fi
   if has_part gateway; then deploy_gateway "$sha" || return 1; fi
 }
 
@@ -703,7 +719,7 @@ report_gateway_lines() { # 输出
 # 切版本之前先试通要往香港发的那几样：不通就别切——切了健康检查必不过，新旧两版会一起被记成不健康
 hk_reachable() {
   local bad=0
-  if has_part web || has_part demo; then web_reachable || bad=1; fi
+  if has_part web || sends_demo; then web_reachable || bad=1; fi
   if has_part gateway; then gateway_reachable || bad=1; fi
   return "$bad"
 }
@@ -777,13 +793,13 @@ web_reachable() {
 }
 
 # 这一版的静态文件往香港哪几处发，一行一处：「本机源 香港路径 rsync 参数…」（sync_web 照着发，测试直接核对它）。
-# - demo：演示版发到 FLEET_DEMO_PATH，只动那一个目录；它下面的 scopes/ 是可见范围，归 fleet-demo-scopes 推，发布不删。
-#   这一版的演示版是按哪个路径构建的（标记里的 demo_path）就只往那发；和现在配的不一样就不发，等发一个新构建的版本。
+# - demo（自动发布不发）：演示版发到 FLEET_DEMO_PATH，只动那一个目录；它下面的 scopes/ 是可见范围，归 fleet-demo-scopes 推，
+#   发布不删。这一版的演示版是按哪个路径构建的（标记里的 demo_path）就只往那发；和现在配的不一样就不发，等发一个新构建的版本。
 # - web：驾驶舱静态文件（连健康页、版本标记 release.json）整套发到根地址，根上不是这一版的删掉——但演示版的目录一概
 #   不碰（不管这次发不发演示版）。放在演示版后面：release.json 换了，就说明这次要发的都发完了（check_web 认它）。
 web_plan() { # 提交号
   local dir=$RELEASES/$1 built
-  if has_part demo; then
+  if sends_demo; then
     built=$(marker_get "$1" demo_path)
     if [[ -d "$dir/web-demo" && -n "$built" && "$built" == "$FLEET_DEMO_PATH" ]]; then
       printf '%s %s %s\n' "$dir/web-demo/" "$FLEET_DEMO_PATH" "--delete-after --delay-updates --exclude=/scopes/"
@@ -796,12 +812,13 @@ web_plan() { # 提交号
 
 # 静态文件经隧道发到香港（那头 rrsync 把路径限死在 /srv/fleet-dao-web、只许写）。每一处都先落临时名、最后一起换上，
 # 旧的最后删：换的那一下之前浏览器拿到的都是整套旧页面。属主是香港的 root。
-# 按内容比（-c）、不带修改时间（不加 -t）：每一版都是新构建的，时间必然不同，按时间比会把内容没变的文件也算成变化
+# 按内容比（-c）、不带修改时间（不加 -t）：每一版都是新构建的，时间必然不同，按时间比会把内容没变的文件也算成变化。
+# 演示版那一处发成了，当场记下香港上的演示版是哪一版（record_demo）：后面的核对都照这份记录比
 sync_web() { # 提交号
   local src dest args out line all="" demo
   local -a extra
   demo=$(marker_get "$1" demo_path)
-  if ! has_part demo; then
+  if ! sends_demo; then
     :
   elif [[ ! -d "$RELEASES/$1/web-demo" ]]; then
     pending "${1:0:12} 没带演示版（那时的 packages/web 还没有 build:demo），香港上的演示版这次不动"
@@ -818,6 +835,8 @@ sync_web() { # 提交号
     if [[ -n "$out" ]]; then
       while IFS= read -r line; do all+="$dest $line"$'\n'; done <<<"$out"
     fi
+    # 演示版这一处发成了就记（后面根地址那一处发不成，香港上的演示版也已经换了）
+    if [[ "$dest" == "$FLEET_DEMO_PATH" ]]; then record_demo "$1" || return 1; fi
   done < <(web_plan "$1")
   if [[ -n "$all" ]]; then
     # 逐条列出来（最多 20 条）：数字不对时看得到是哪些
@@ -826,6 +845,26 @@ sync_web() { # 提交号
   else
     ok "香港的静态文件已是 ${1:0:12} 那版"
   fi
+}
+
+# 记下香港上的演示版现在是哪一版：提交号、什么时候发的、发在哪个路径、首页的 sha256（DEMO_RECORD，核对照它比）。
+# 和上次记的是同一版、同一个首页就不动（同一个提交再发一遍什么都不变）；先落临时名再换上，写一半不算数
+record_demo() { # 提交号
+  local sum
+  if ! sum=$(file_sum "$RELEASES/$1/web-demo/index.html"); then
+    red "演示版发到了香港，却算不出 ${1:0:12} 的演示版首页的指纹：记不下香港上的是哪一版"
+    return 1
+  fi
+  if [[ "$(kv_get "$DEMO_RECORD" commit) $(kv_get "$DEMO_RECORD" path) $(kv_get "$DEMO_RECORD" index_sha256)" == \
+    "$1 $FLEET_DEMO_PATH $sum" ]]; then
+    return 0
+  fi
+  if ! printf 'commit=%s\npublished=%s\npath=%s\nindex_sha256=%s\n' "$1" "$(date -u +%FT%TZ)" "$FLEET_DEMO_PATH" "$sum" \
+    >"$DEMO_RECORD.new" || ! mv -Tf -- "$DEMO_RECORD.new" "$DEMO_RECORD"; then
+    red "演示版发到了香港，却记不下是哪一版（$DEMO_RECORD 写不进去）：之后的核对拿它比会报红"
+    return 1
+  fi
+  changed "记下香港上的演示版是 ${1:0:12} 那版（$DEMO_RECORD）"
 }
 
 # ── 健康检查 ──
@@ -979,11 +1018,11 @@ check_engine() {
   return 1
 }
 
-# 香港在发的是不是这一版：经隧道连香港的 nginx（证书照常按域名校验）。发了 web 的，读 release.json 与健康页——
-# release.json 香港只给经隧道来的，别处来的是 404；发了 demo 的，看演示版的首页是不是这一版、深链接回落对不对。
-# 没发的那样不查（根地址上是什么由人定）
+# 香港在发的对不对：经隧道连香港的 nginx（证书照常按域名校验）。发了 web 的，读 release.json 与健康页——
+# release.json 香港只给经隧道来的，别处来的是 404；配了 demo 的，看演示版是不是上次发的那份（check_demo）。
+# 没配的那样不查（根地址上是什么由人定）
 check_web() { # 提交号
-  local body commit code dir=$RELEASES/$1 bad=0
+  local body commit code bad=0
   if has_part web; then
     if ! body=$(curl -sS -f --max-time 10 --resolve "$FLEET_DOMAIN:443:$HK_TUNNEL" "https://$FLEET_DOMAIN/release.json" 2>&1); then
       red "从香港取不到 https://$FLEET_DOMAIN/release.json：$(tail -1 <<<"$body")"
@@ -1001,18 +1040,55 @@ check_web() { # 提交号
     fi
     ok "香港在发 ${1:0:12} 这版：首页与健康页 https://$FLEET_DOMAIN/health/ 都在"
   fi
-  # 演示版：首页要是这一版的；在演示版里点到别的页再刷新（深链接），要回落到演示版自己的首页、不能回落到根上那一份——
-  # 回落错了是香港的 nginx 站点还没有演示版那一段（hk.sh 没重跑，或两台的 FLEET_DEMO_PATH 不一样）
-  if has_part demo && [[ -d "$dir/web-demo" && "$(marker_get "$1" demo_path)" == "$FLEET_DEMO_PATH" ]]; then
-    if ! check_page "$FLEET_DEMO_PATH" "$dir/web-demo/index.html" 演示版的首页; then
-      bad=1
-    elif same_page "${FLEET_DEMO_PATH}tasks/release-check" "$dir/web-demo/index.html"; then
-      ok "演示版的深链接回落到它自己的首页（${FLEET_DEMO_PATH}tasks/…）"
-    else
-      pending "演示版的深链接（${FLEET_DEMO_PATH}tasks/…）没回落到演示版自己的首页：香港 git pull 后重跑 deploy/hk.sh，hk.env 的 FLEET_DEMO_PATH 写 $FLEET_DEMO_PATH"
-    fi
-  fi
+  if has_part demo; then check_demo "$1" || bad=1; fi
   return "$bad"
+}
+
+# 演示版：香港上的要是上次发的那份（DEMO_RECORD，发成了当场记）。人手动发布当场发、当场记，这时就是这一版的；自动发布
+# 不发演示版（对外，要人确认），香港上的就该还是上次人发的——和这一版的不一样不算错，列出来等人定什么时候发。
+# 比的是首页：里面写着资源文件的名字（带内容哈希），一个字节都不差才算同一份。在演示版里点到别的页再刷新（深链接），要
+# 回落到演示版自己的首页、不能回落到根上那一份——回落错了是香港的 nginx 站点还没有演示版那一段（hk.sh 没重跑，或两台的
+# FLEET_DEMO_PATH 不一样）
+check_demo() { # 提交号
+  local commit at path want got mine url="https://$FLEET_DOMAIN$FLEET_DEMO_PATH"
+  if [[ ! -e "$DEMO_RECORD" ]]; then
+    pending "没有发演示版的记录（$DEMO_RECORD；人手动发一次演示版就有）：香港 $url 是不是上次发的那份，没查成"
+    return 0
+  fi
+  if [[ ! -r "$DEMO_RECORD" ]]; then
+    red "发演示版的记录 $DEMO_RECORD 读不了：香港上的演示版对不上号"
+    return 1
+  fi
+  commit=$(kv_get "$DEMO_RECORD" commit)
+  at=$(kv_get "$DEMO_RECORD" published)
+  path=$(kv_get "$DEMO_RECORD" path)
+  want=$(kv_get "$DEMO_RECORD" index_sha256)
+  if ! is_sha "$commit" || ! demo_path_ok "$path" || [[ ! "$want" =~ ^[0-9a-f]{64}$ ]]; then
+    red "发演示版的记录认不出（$DEMO_RECORD 要有 commit、path、index_sha256）：香港上的演示版对不上号"
+    return 1
+  fi
+  if [[ "$path" != "$FLEET_DEMO_PATH" ]]; then
+    pending "演示版上次发在 $path，release.env 现在是 $FLEET_DEMO_PATH：新路径上还没发过，人手动发一次（bash $DEPLOY_DIR/release.sh）"
+    return 0
+  fi
+  if ! got=$(page_sum "$FLEET_DEMO_PATH"); then
+    red "从香港取不到演示版的首页 $url"
+    return 1
+  fi
+  if [[ "$got" != "$want" ]]; then
+    red "香港 $url 给的不是上次发的演示版（${commit:0:12}，${at:-时间没记} 发的）：被改过或没发全，要人看"
+    return 1
+  fi
+  ok "演示版是上次发的那份（${commit:0:12}，${at:-时间没记} 发的；$url）"
+  if [[ -f "$RELEASES/$1/web-demo/index.html" ]] && mine=$(file_sum "$RELEASES/$1/web-demo/index.html") &&
+    [[ "$mine" != "$want" ]]; then
+    echo "  · ${1:0:12} 的演示版和香港上的不一样，还没发：演示版对外，按版本由人确认后手动发（bash $DEPLOY_DIR/release.sh）"
+  fi
+  if [[ "$(page_sum "${FLEET_DEMO_PATH}tasks/release-check")" == "$want" ]]; then
+    ok "演示版的深链接回落到它自己的首页（${FLEET_DEMO_PATH}tasks/…）"
+  else
+    pending "演示版的深链接（${FLEET_DEMO_PATH}tasks/…）没回落到演示版自己的首页：香港 git pull 后重跑 deploy/hk.sh，hk.env 的 FLEET_DEMO_PATH 写 $FLEET_DEMO_PATH"
+  fi
 }
 
 # 经隧道从香港取一页（证书照常按域名校验），不是 200 就算没取到
@@ -1020,20 +1096,16 @@ fetch_page() { # 站内路径
   curl -sS -f --max-time 10 --resolve "$FLEET_DOMAIN:443:$HK_TUNNEL" "https://$FLEET_DOMAIN$1"
 }
 
-# 香港给的和本机这份一字不差：首页里写着这一版资源文件的名字（带内容哈希），一样就是这一版
-same_page() { # 站内路径 本机文件
-  local got
-  got=$(fetch_page "$1" 2>/dev/null) || return 1
-  [[ "$got" == "$(<"$2")" ]]
+# 经隧道从香港取的一页、本机一个文件的 sha256（64 位十六进制）。取不到（不是 200）、读不了返回 1，不拿空的去比
+page_sum() { # 站内路径
+  local out
+  out=$(fetch_page "$1" 2>/dev/null | sha256sum) || return 1
+  printf '%s' "${out:0:64}"
 }
-
-check_page() { # 站内路径 本机文件 说的是哪一页
-  if same_page "$1" "$2"; then
-    ok "$3是这一版（https://$FLEET_DOMAIN$1）"
-    return 0
-  fi
-  red "香港 https://$FLEET_DOMAIN$1 给的不是这一版的$3（没取到，或内容不一样）"
-  return 1
+file_sum() { # 文件
+  local out
+  out=$(sha256sum <"$1") || return 1
+  printf '%s' "${out:0:64}"
 }
 
 json_field() { # JSON 键

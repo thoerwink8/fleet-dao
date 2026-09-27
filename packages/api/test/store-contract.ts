@@ -218,6 +218,23 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         expect(await store.getRun(IDS.run1)).toMatchObject({ branch: 'fleet/12-a', subtaskId: IDS.sub12a });
         expect(await store.getRun('run-1')).toBeNull();
       });
+
+      it('会话的 token 读得回来，缓存读写单列；没读到的（花费、还在跑的那次的用量）不给，不是 0', async () => {
+        const done = await store.getRun(IDS.run0);
+        expect(done).toMatchObject({
+          inputTokens: 120_000,
+          outputTokens: 8_000,
+          cacheReadTokens: 1_450_000,
+          cacheWriteTokens: 64_000,
+        });
+        expect(done?.costUsd).toBeUndefined();
+        const running = await store.getRun(IDS.run1);
+        expect([running?.inputTokens, running?.cacheReadTokens, running?.cacheWriteTokens]).toEqual([
+          undefined,
+          undefined,
+          undefined,
+        ]);
+      });
     });
 
     describe('进度', () => {

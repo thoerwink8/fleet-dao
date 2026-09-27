@@ -34,6 +34,8 @@ export const WORKFLOW_TYPES = {
   githubReconcile: 'githubReconcileWorkflow',
   /** 路由探针（#129）：Temporal Schedule 每 15 分钟起一条（和对账错开），见 jobs/schedules.ts。 */
   routeProbe: 'routeProbeWorkflow',
+  /** 每小时对账（工作树残留、提醒按条件撤和再推）：Temporal Schedule 每小时起一条，见 jobs/schedules.ts。 */
+  hourlyReconcile: 'hourlyReconcileWorkflow',
 } as const;
 
 /** 对账补漏一轮的输入：往回看到哪一刻由活动按当时的时刻算（工作流里不取时刻）。 */
@@ -63,6 +65,20 @@ export interface RouteProbeRun {
   found: number;
   /** 这一轮之后在线的路由。 */
   online: string[];
+  why?: string | undefined;
+}
+
+/** 每小时对账一轮的输入：看哪些树、哪些提醒由活动按当时的目录和库定（工作流里不取时刻）。 */
+export interface HourlyReconcileInput {
+  schemaVersion: 1;
+}
+
+/** 每小时对账一轮的结局：和记进 schedule_runs 的同一份。scanned = 看了几个对象，found = 处理了几个问题。 */
+export interface HourlyReconcileRun {
+  runId: number;
+  outcome: ScheduleOutcome;
+  scanned: number;
+  found: number;
   why?: string | undefined;
 }
 

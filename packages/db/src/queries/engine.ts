@@ -190,6 +190,9 @@ export interface FinishSessionRunInput {
   actualModel?: string;
   inputTokens?: number;
   outputTokens?: number;
+  /** 这一轮的缓存读、缓存写：没读到就不给，库里留空（不记 0）。 */
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
   costUsd?: number;
   sessionCostUsd?: number;
   failureCode?: string;
@@ -210,6 +213,8 @@ export async function finishSessionRun(
     ...(input.actualModel !== undefined && { actualModel: input.actualModel }),
     ...(input.inputTokens !== undefined && { inputTokens: input.inputTokens }),
     ...(input.outputTokens !== undefined && { outputTokens: input.outputTokens }),
+    ...(input.cacheReadTokens !== undefined && { cacheReadTokens: input.cacheReadTokens }),
+    ...(input.cacheWriteTokens !== undefined && { cacheWriteTokens: input.cacheWriteTokens }),
     ...(input.costUsd !== undefined && { costUsd: input.costUsd }),
     ...(input.sessionCostUsd !== undefined && { sessionCostUsd: input.sessionCostUsd }),
     ...(input.failureCode !== undefined && { failureCode: input.failureCode }),

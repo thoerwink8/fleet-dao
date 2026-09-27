@@ -345,6 +345,20 @@ describe('会话记录', () => {
   it('token 和花费不知道就是空，不记成 0', async () => {
     const run = await addRun(t.db, { taskId, routeId: 'r1' });
     expect([run.inputTokens, run.outputTokens, run.costUsd]).toEqual([null, null, null]);
+    expect([run.cacheReadTokens, run.cacheWriteTokens]).toEqual([null, null]);
+  });
+
+  it('缓存读写不能是负数', async () => {
+    await expectViolation(
+      addRun(t.db, { taskId, routeId: 'r1', cacheReadTokens: -1 }),
+      'session_runs_cache_nonneg',
+    );
+    await expectViolation(
+      addRun(t.db, { taskId, routeId: 'r1', cacheWriteTokens: -5 }),
+      'session_runs_cache_nonneg',
+    );
+    const zero = await addRun(t.db, { taskId, routeId: 'r1', cacheReadTokens: 0, cacheWriteTokens: 0 });
+    expect([zero.cacheReadTokens, zero.cacheWriteTokens]).toEqual([0, 0]);
   });
 
   it('请求的模型（看路由）和上游实际用的模型分开记', async () => {

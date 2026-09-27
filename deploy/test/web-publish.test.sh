@@ -3,8 +3,10 @@
 # shellcheck disable=SC2034 # FLEET_HK_PARTS、FLEET_DOMAIN 这些是给 source 进来的 release.sh 里的函数读的
 # shellcheck disable=SC2016 # 单引号里的 $uri、$args 是 nginx 配置里的字面量，本来就不该展开
 # deploy/release.sh 往香港发静态文件的那一段（release.env 的 FLEET_HK_PARTS 选）：demo 只发演示版到 FLEET_DEMO_PATH、
-# 不碰根地址，演示版下面的可见范围（scopes/）发布不删；web 才把驾驶舱整套发到根地址，而且不碰演示版的目录；
-# 两样都发时演示版在前、带版本标记的根地址在后。健康检查认得出演示版是不是这一版、深链接回落对不对。
+# 不碰根地址，演示版下面的可见范围（scopes/）发布不删，发成了当场记下香港上的演示版是哪一版；web 才把驾驶舱整套发到
+# 根地址，而且不碰演示版的目录；两样都发时演示版在前、带版本标记的根地址在后。自动发布不发演示版、只核对。
+# 健康检查照发演示版的记录比：香港上的是不是上次发的那份、深链接回落对不对——在用的是自动发布发的新版时，
+# 它的演示版和香港上的不一样不算错（2026-09-27 拿在用的这一版去比，误报过）。
 # rsync、curl 换成桩（curl 按一个假香港的目录答），其余是 release.sh 里的真代码。
 # 香港站点配置（deploy/hk/nginx-*.conf）的演示版那一段也在这里核对。
 # 用法：bash deploy/test/web-publish.test.sh。退出码：0 通过，1 不通过，2 有没跑成的。
@@ -36,28 +38,48 @@ reset() {
   CHANGES=()
   PENDING=()
 }
-config() { # FLEET_HK_PARTS FLEET_DEMO_PATH
+config() { # FLEET_HK_PARTS FLEET_DEMO_PATH：人手动发布（和 --check）的样子
   FLEET_HK_PARTS=$1
   FLEET_DEMO_PATH=$2
+  AUTO=0
+  DEMO_PUBLISH=1
   demo_config_ok >/dev/null
 }
+auto_config() { # FLEET_HK_PARTS FLEET_DEMO_PATH：自动发布（--auto）的样子，走 release.sh 的真 auto_parts
+  config "$1" "$2"
+  AUTO=1
+  auto_parts >/dev/null
+}
+said_line() { grep -cF -- "$1" "$TMP/out"; } # 上一次存进 $TMP/out 的输出里有几行带这段话
+record_is() { # 发演示版的记录里的提交号、路径、首页指纹（没有记录打印「没有」）
+  if [[ -f "$DEMO_RECORD" ]]; then
+    printf '%s %s %s' "$(kv_get "$DEMO_RECORD" commit)" "$(kv_get "$DEMO_RECORD" path)" "$(kv_get "$DEMO_RECORD" index_sha256)"
+  else
+    printf '没有'
+  fi
+}
+record_of() { printf '%s %s %s' "$1" "$2" "$(file_sum "$RELEASES/$1/web-demo/index.html")"; } # 提交号 路径：发了它该记成的样子
 # 每一处发到哪（香港路径），按顺序
 dests() { web_plan "$1" | awk '{ print $2 }' | tr '\n' ' '; }
 
 A=$(printf 'a%.0s' {1..40}) # 带演示版的新一版
 B=$(printf 'b%.0s' {1..40}) # 老的一版：只有 web/，标记里没有 demo_path
-for s in "$A" "$B"; do
+C=$(printf 'c%.0s' {1..40}) # A 之后自动发布发的一版：前端改过，演示版的资源文件名（带内容哈希）和 A 的不一样
+for s in "$A" "$B" "$C"; do
   mkdir -p "$RELEASES/$s/web/assets" "$RELEASES/$s/web/health"
   printf '<html>驾驶舱 %s</html>\n' "${s:0:1}" >"$RELEASES/$s/web/index.html"
   printf 'x' >"$RELEASES/$s/web/assets/app.js"
   printf 'health' >"$RELEASES/$s/web/health/index.html"
   printf '{"commit":"%s"}\n' "$s" >"$RELEASES/$s/web/release.json"
 done
-mkdir -p "$RELEASES/$A/web-demo/assets"
+mkdir -p "$RELEASES/$A/web-demo/assets" "$RELEASES/$C/web-demo/assets"
 printf '<html>演示版 a <script src="/demo/assets/d.js"></script></html>\n' >"$RELEASES/$A/web-demo/index.html"
 printf 'd' >"$RELEASES/$A/web-demo/assets/d.js"
+printf '<html>演示版 c <script src="/demo/assets/d-c.js"></script></html>\n' >"$RELEASES/$C/web-demo/index.html"
+printf 'dc' >"$RELEASES/$C/web-demo/assets/d-c.js"
 printf 'commit=%s\nweb=桩\ndemo_path=/demo/\n' "$A" >"$RELEASES/$A/.fleet-release"
 printf 'commit=%s\nweb=桩\n' "$B" >"$RELEASES/$B/.fleet-release"
+printf 'commit=%s\nweb=桩\ndemo_path=/demo/\n' "$C" >"$RELEASES/$C/.fleet-release"
 
 echo "== 演示版的路径：没写取默认 /demo/；不是一级路径、和根上已有的东西撞，报红"
 reset
@@ -94,8 +116,14 @@ config demo /show/
 check "演示版是按 /demo/ 构建的、现在配的是 /show/：这次不发演示版" "$(dests "$A")" ""
 config web /show/
 check "根地址那一处护着的是现在配的演示版目录" "$(web_plan "$A" | grep -c -- '--exclude=/show/')" 1
+auto_config "web demo" /demo/
+check "自动发布：演示版那一处不发（对外，要人确认），根地址照发" "$(dests "$A")" "/ "
+check "自动发布：根地址那一处照样护着演示版的目录" "$(web_plan "$A" | grep -c -- '--exclude=/demo/')" 1
+check "自动发布：演示版还归发布管——不发，但照样核对" "$(has_part demo && echo 核对)" 核对
+auto_config demo /demo/
+check "自动发布、只配了演示版：一处都不发" "$(dests "$A")" ""
 
-echo "== sync_web 照着发：顺序、源、参数一样；发不出去报红、后面的不发"
+echo "== sync_web 照着发：顺序、源、参数一样；发不出去报红、后面的不发；演示版发成了才记下香港上的是哪一版"
 ONE_AT_A_TIME=0
 rsync() {
   printf '%s\n' "$*" >>"$TMP/rsync.log"
@@ -118,19 +146,44 @@ rsync() {
 config demo /demo/
 reset
 : >"$TMP/rsync.log"
+rm -f -- "$DEMO_RECORD"
 sync_web "$A" >/dev/null
 check "demo：发了一处" "$(grep -c . "$TMP/rsync.log")" 1
 check "demo：一处都没往根上发" "$(grep -c 'root@10.99.0.1:/$' "$TMP/rsync.log")" 0
 check "demo：只删演示版目录里的旧文件" "$(grep -c -- '--delete-after --delay-updates --exclude=/scopes/ .*root@10.99.0.1:/demo/$' "$TMP/rsync.log")" 1
-check "记了一笔改动" "${#CHANGES[@]}" 1
+check "demo：发成了当场记下香港上的演示版是 A（提交号、路径、首页指纹）" "$(record_is)" "$(record_of "$A" /demo/)"
+check "记了两笔改动：换了文件、记下了是哪一版" "${#CHANGES[@]}" 2
+# 同一个提交再发一遍：记录不重写（发的时间还是头一次的），只剩 rsync 自己报的（真 rsync 这时报 0 行、改动 0 处）
+sed -i 's/^published=.*/published=2026-09-26T23:05:01Z/' "$DEMO_RECORD"
+reset
+sync_web "$A" >/dev/null
+check "同一个提交再发一遍：记录不重写" "$(kv_get "$DEMO_RECORD" published)" 2026-09-26T23:05:01Z
+check "同一个提交再发一遍：改动里没有「记下」那一笔" "$(printf '%s\n' "${CHANGES[@]}" | grep -c '记下香港上的演示版')" 0
 config "web demo" /demo/
 reset
 : >"$TMP/rsync.log"
+rm -f -- "$DEMO_RECORD"
 RSYNC_FAIL_AT=/demo/
 sync_web "$A" >/dev/null
 unset RSYNC_FAIL_AT
 check "演示版没发出去：报红" "${#REDS[@]}" 1
 check "根地址（带版本标记）没发：健康检查就知道这一版没发全" "$(grep -c 'root@10.99.0.1:/$' "$TMP/rsync.log")" 0
+check "演示版没发出去：不记（记了，核对就会把没发上去的当成在发的）" "$(record_is)" 没有
+# 记录写不进去（这里让记录的位置是个目录）：演示版已经换了、却对不上号，要报红，不能悄悄过去
+mkdir -p -- "$DEMO_RECORD"
+reset
+: >"$TMP/rsync.log"
+sync_web "$A" >/dev/null 2>&1
+check "记录写不进去：报红、停下（根地址不接着发）" \
+  "${#REDS[@]}:$(printf '%s\n' "${REDS[@]}" | grep -c '记不下是哪一版'):$(grep -c 'root@10.99.0.1:/$' "$TMP/rsync.log")" "1:1:0"
+rm -rf -- "$DEMO_RECORD" "$DEMO_RECORD.new"
+auto_config "web demo" /demo/
+reset
+: >"$TMP/rsync.log"
+sync_web "$C" >/dev/null
+check "自动发布：只往根上发了一处，演示版的目录没发" "$(grep -c . "$TMP/rsync.log"):$(grep -c 'root@10.99.0.1:/demo/$' "$TMP/rsync.log")" "1:0"
+check "自动发布：不记（香港上的演示版没换）" "$(record_is)" 没有
+check "自动发布：不为演示版记待配（不发是定好的，不是缺配置）" "${#PENDING[@]}" 0
 config demo /show/
 reset
 sync_web "$A" >/dev/null
@@ -139,6 +192,7 @@ config demo /demo/
 reset
 sync_web "$B" >/dev/null
 check "这一版没带演示版：记一项待配，香港上的演示版不动" "${#PENDING[@]}" 1
+check "没发演示版：不记" "$(record_is)" 没有
 
 echo "== 往香港推要排队：香港的 rrsync 同一时刻只让一个进来，法国这头先拿同一把锁（2026-09-26 发布撞上过 fleet-demo-scopes）"
 ONE_AT_A_TIME=1
@@ -179,7 +233,7 @@ web_reachable >/dev/null
 check "锁放开了：试通香港照常过" "${#REDS[@]} $(grep -c . "$TMP/rsync.log")" "0 1"
 ONE_AT_A_TIME=0
 
-echo "== 健康检查：演示版的首页是不是这一版、深链接回落到哪"
+echo "== 健康检查：演示版照发演示版的记录比（是不是上次发的那份）、深链接回落到哪"
 if [[ -z "$NODE" ]]; then
   echo "  … 没跑成：这台没有 node（版本标记要用它读）"
   skipped=1
@@ -238,13 +292,23 @@ else
     if [[ -n "$out" ]]; then cp -- "$file" "$out"; else cat -- "$file"; fi
     if [[ -n "$fmt" ]]; then printf '200'; fi
   }
-  hk_as() { # 提交号 根上的首页：把假香港摆成「发完这一版」的样子（根上的首页另给）
-    rm -rf -- "$HKD"
+  hk_as() { # 提交号 根上的首页：把假香港摆成「人手动发完这一版」的样子（根上的首页另给），带演示版的连演示版一起发、记下
+    rm -rf -- "$HKD" "$DEMO_RECORD"
     mkdir -p "$HKD/health" "$HKD/demo/scopes"
     cp -- "$RELEASES/$1/web/release.json" "$HKD/release.json"
     cp -- "$RELEASES/$1/web/health/index.html" "$HKD/health/index.html"
-    if [[ -d "$RELEASES/$1/web-demo" ]]; then cp -R -- "$RELEASES/$1/web-demo/." "$HKD/demo/"; fi
     printf '%s\n' "$2" >"$HKD/index.html"
+    if [[ -d "$RELEASES/$1/web-demo" ]]; then demo_published "$1"; fi
+  }
+  demo_published() { # 提交号：假香港的演示版换成这一版的，记录由 release.sh 的真 record_demo 写（和 sync_web 发成了一样）
+    rm -rf -- "$HKD/demo"
+    mkdir -p "$HKD/demo/scopes"
+    cp -R -- "$RELEASES/$1/web-demo/." "$HKD/demo/"
+    record_demo "$1" >/dev/null
+  }
+  root_as() { # 提交号：假香港的根地址换成这一版的（自动发布发 web 的样子），演示版不动
+    cp -- "$RELEASES/$1/web/release.json" "$HKD/release.json"
+    printf '<html>驾驶舱 %s</html>\n' "${1:0:1}" >"$HKD/index.html"
   }
   config demo /demo/
   hk_as "$A" '<html>根上原来的演示版</html>'
@@ -263,8 +327,8 @@ else
   printf '<html>演示版 上一版</html>\n' >"$HKD/demo/index.html"
   reset
   check_web "$A" >/dev/null
-  check "演示版的首页不是这一版：不过" "$?" 1
-  check "报红" "${#REDS[@]}" 1
+  check "演示版的首页被换过（不是上次发的那份）：不过" "$?" 1
+  check "报红，说不是上次发的那份" "$(printf '%s\n' "${REDS[@]}" | grep -c '不是上次发的演示版')" 1
   config "web demo" /demo/
   hk_as "$A" '<html>驾驶舱 a</html>'
   reset
@@ -280,6 +344,66 @@ else
   check_web "$A" >/dev/null
   check "web：香港对版本标记回 404（比如站点放行的不是法国的隧道地址）：不过" "$?" 1
   check "红里说的是取不到，不当成「在发一个空版本」" "$(printf '%s\n' "${REDS[@]}" | grep -c '从香港取不到')" 1
+
+  echo "== 自动发布之后（2026-09-27 那次误报）：香港上的演示版还是上次人发的 A，在用的是自动发布发的 C"
+  config "web demo" /demo/
+  hk_as "$A" '<html>驾驶舱 a</html>'
+  root_as "$C"
+  check "场景和那次一样：香港上的演示版首页和在用的 C 的不一样（拿 C 的去比就是那次的红）" \
+    "$([[ "$(page_sum /demo/)" != "$(file_sum "$RELEASES/$C/web-demo/index.html")" ]] && echo 不一样)" 不一样
+  for mode in 自动发布 --check; do
+    if [[ "$mode" == 自动发布 ]]; then auto_config "web demo" /demo/; else config "web demo" /demo/; fi
+    reset
+    check_web "$C" >"$TMP/out"
+    check "$mode：通过——香港上的就是上次人发的那份，C 的没发是定好的（对外，要人确认）" "$?:${#REDS[@]}" "0:0"
+    check "$mode：说清香港上的是哪一版" "$(said_line '演示版是上次发的那份（aaaaaaaaaaaa，')" 1
+    check "$mode：列出 C 的演示版还没发、怎么发" "$(said_line 'cccccccccccc 的演示版和香港上的不一样，还没发')" 1
+    check "$mode：不记待配（没发是定好的，不是缺配置）" "${#PENDING[@]}" 0
+  done
+
+  echo "== 自动发布照样核对演示版（原先连核对一起去掉，坏了没人知道）：故意把香港上的演示版弄坏"
+  auto_config "web demo" /demo/
+  printf '<html>被人手改过</html>\n' >"$HKD/demo/index.html"
+  reset
+  check_web "$C" >/dev/null
+  check "首页被改过：自动发布这一轮也不过（报红，照常退回、报警）" "$?:${#REDS[@]}" "1:1"
+  check "红里说清：不是上次发的那份、是哪一版" "$(printf '%s\n' "${REDS[@]}" | grep -c '不是上次发的演示版（aaaaaaaaaaaa，')" 1
+  rm -f -- "$HKD/demo/index.html"
+  reset
+  check_web "$C" >/dev/null
+  check "首页没了：也不过" "$?:${#REDS[@]}" "1:1"
+
+  echo "== 发演示版的记录：没有、认不出、路径对不上，都照实说，不当成对得上"
+  demo_published "$A"
+  rm -f -- "$DEMO_RECORD"
+  reset
+  check_web "$C" >"$TMP/out"
+  check "没有记录：不报红（还没人发过，或刚上这套记录）" "$?:${#REDS[@]}" "0:0"
+  check "没有记录：记待处理、说没查成（不当成查了没事）" "$(printf '%s\n' "${PENDING[@]}" | grep -c '没有发演示版的记录.*没查成')" 1
+  check "没有记录：不说「演示版是上次发的那份」" "$(said_line '演示版是上次发的那份')" 0
+  printf 'commit=%s\npath=/demo/\n' "$A" >"$DEMO_RECORD"
+  reset
+  check_web "$C" >/dev/null
+  check "记录缺首页指纹：报红（认不出不能当成对得上）" "$?:$(printf '%s\n' "${REDS[@]}" | grep -c '记录认不出')" "1:1"
+  printf '香港上是 A 那版\n' >"$DEMO_RECORD"
+  reset
+  check_web "$C" >/dev/null
+  check "记录不是「键=值」：报红" "$?:$(printf '%s\n' "${REDS[@]}" | grep -c '记录认不出')" "1:1"
+  demo_published "$A"
+  sed -i 's#^path=.*#path=/show/#' "$DEMO_RECORD"
+  reset
+  check_web "$C" >/dev/null
+  check "记录里的路径不是现在配的：不报红，记待处理（新路径上还没发过）" \
+    "$?:${#REDS[@]}:$(printf '%s\n' "${PENDING[@]}" | grep -c '新路径上还没发过')" "0:0:1"
+
+  echo "== 人手动发 C（创始人确认了）：香港上的演示版换成 C、记录跟着换，核对认 C"
+  config "web demo" /demo/
+  hk_as "$C" '<html>驾驶舱 c</html>'
+  reset
+  check_web "$C" >"$TMP/out"
+  check "通过，没有红、没有待配" "$?:${#REDS[@]}:${#PENDING[@]}" "0:0:0"
+  check "记录是 C 的" "$(record_is)" "$(record_of "$C" /demo/)"
+  check "不再列「还没发」" "$(said_line '还没发')" 0
 fi
 
 echo "== 香港的站点配置：演示版那一段（两份模板都有，占位都换得掉）"
