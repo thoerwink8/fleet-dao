@@ -141,6 +141,7 @@ function deps(over: Partial<HourlyReconcileWiring> & { now?: () => Date } = {}) 
     exec: localExec(),
     sessionOrg: async () => ({ ok: true, org: 'carpool' }),
     machine: '法国',
+    selfCheck: async () => [],
     gitBin: 'git',
     shBin: 'sh',
     log: quiet,
@@ -839,6 +840,40 @@ describe('没人处理的卡住报警：超过 24 小时再推一次，一天最
     expect((await alertByKey(t.db, rb.dedupeKey))?.body).toMatch(/^已撤：原来那条已经处理了/);
     const audits = await t.db.select().from(auditLog);
     expect(audits.every((x) => x.actorId === RECONCILE_ACTOR)).toBe(true);
+  });
+});
+
+describe('GitHub 机器人权限自检：受管的仓从库里列，缺的报进提醒，好了下一轮撤', { timeout: 60_000 }, () => {
+  it('【故意造出的失败】「引擎」缺 statuses:write：库里开一条要人看；权限补上后下一轮撤掉（处理人是每小时对账）', async () => {
+    await work();
+    probeDir();
+    const asked: string[][] = [];
+    let engineHas = false;
+    const selfCheck: HourlyReconcileWiring['selfCheck'] = async (list) => {
+      asked.push(list.map((r) => `${r.owner}/${r.name}`));
+      return list.flatMap((r) => [
+        { role: 'agent' as const, repo: `${r.owner}/${r.name}`, ok: true, missing: [], extra: [] },
+        {
+          role: 'engine' as const,
+          repo: `${r.owner}/${r.name}`,
+          ok: engineHas,
+          missing: engineHas ? [] : ['statuses:write'],
+          extra: [],
+        },
+      ]);
+    };
+
+    expect(await runHourlyReconcileJob(deps({ selfCheck }))).toMatchObject({ outcome: 'ok', found: 1 });
+    expect(asked).toEqual([['acme/widgets']]);
+    const open = await alertByKey(t.db, 'github-app:engine:acme/widgets');
+    expect(open).toMatchObject({ level: 'alert', resolvedAt: null });
+    expect(open?.title).toBe('「引擎」机器人在 acme/widgets 上的权限不对：缺 statuses:write');
+
+    engineHas = true;
+    expect(await runHourlyReconcileJob(deps({ selfCheck }))).toMatchObject({ outcome: 'ok', found: 1 });
+    const closed = await alertByKey(t.db, 'github-app:engine:acme/widgets');
+    expect(closed?.resolvedBy).toBe(RECONCILE_ACTOR);
+    expect(closed?.body).toMatch(/^已撤：「引擎」机器人在 acme\/widgets 上的权限够了/);
   });
 });
 
