@@ -5,7 +5,8 @@
 # 本机上只许 root 和 fleet 连 Temporal 与库的 nft 表、AI 会话资源池 fleet-agents.slice 与起会话的脚本、
 # fleet 用户的 pnpm（corepack）、AI 会话用的 pnpm（归 root，钉版本、核 sha512）、WireGuard 客户端（主动连香港，法国不开任何入站端口）、
 # 应用的本机配置与随机密钥、往香港传驾驶舱静态文件的钥匙、把演示版的可见范围推到香港的单元、
-# 会话用户和 pilot 家里各家 AI 的全局说明与方法类 skill、他们各自的 ddgs（用钉住版本的 uv 装）。
+# 会话用户和 pilot 家里各家 AI 的全局说明与方法类 skill、他们各自的 ddgs（用钉住版本的 uv 装）、
+# 会话用户的 cursor-agent（官方安装脚本，以会话用户自己的身份装在他家里，只在没有时装）。
 # 应用本身（引擎、后端、前端）由 deploy/release.sh 发布。
 # 旧系统的服务、端口、文件一概不动。端口表、怎么跑、怎么看健康、怎么回滚：docs/ops.md。
 #   bash deploy/france.sh           装：缺的补上，已有的不动
@@ -26,6 +27,8 @@ source "$DEPLOY_DIR/lib/login-user.sh"
 source "$DEPLOY_DIR/lib/session-user.sh"
 # shellcheck source=lib/cli-tools.sh
 source "$DEPLOY_DIR/lib/cli-tools.sh"
+# shellcheck source=lib/cursor-agent.sh
+source "$DEPLOY_DIR/lib/cursor-agent.sh"
 # shellcheck source=lib/agents-sync.sh
 source "$DEPLOY_DIR/lib/agents-sync.sh"
 # shellcheck source=lib/app-config.sh
@@ -55,6 +58,12 @@ DDGS_DEPS=(click==8.5.0 lxml==6.1.3 primp==2.0.1)
 # 核对，漏改一处 CI 就红）；校验和是 npm 的 dist.integrity，升版本时照 `npm view pnpm@<版本> dist.integrity` 一起改
 PNPM_VERSION=11.1.2
 PNPM_INTEGRITY=sha512-QVocwll0cx51RVwUaDcb50xapft2IbUNQFbSIkUWCfEUEvI/1gLmFp8eBgRmZB95hZfhvpYaEGiINqZ7FlaUmQ==
+# 会话用户的 cursor-agent（lib/cursor-agent.sh）：官方安装脚本，以会话用户自己的身份跑，只在没有时装，之后它自己升级；
+# 不钉版本、不核校验和（升级会删旧版本目录；为什么可以不核见 lib/cursor-agent.sh 开头）
+CURSOR_INSTALL_URL=https://cursor.com/install
+# 官方安装脚本固定装在这（{user} 换成会话用户），装和读回都照引擎的找法在这里找：和 packages/engine/src/real/hosts.ts 的
+# DEFAULT_CURSOR_VERSIONS_DIR 一样（engine 的 hosts.test.ts 核对）。engine.env 别改 FLEET_CURSOR_VERSIONS_DIR：改了引擎就找不到这里装的
+CURSOR_VERSIONS_DIR='/home/{user}/.local/share/cursor-agent/versions'
 
 # ── 端口：全部只绑本机，和旧系统的开发版 Temporal（7233/8233 与一批临时端口）错开。改了同步 docs/ops.md ──
 PG_PORT=5432
@@ -636,6 +645,22 @@ setup_session_pnpm() {
     "$PNPM_ROOT" "$PNPM_BIN" as_tool_user "${SESSION_USERS[0]}"
 }
 
+cursor_versions_dir() { printf '%s' "${CURSOR_VERSIONS_DIR//\{user\}/$1}"; } # 会话用户
+
+# 会话用户的 cursor-agent（lib/cursor-agent.sh）：引擎起 Cursor 会话用的就是他家里这份。照引擎的找法一个能跑的都没有时，
+# 以他自己的身份跑官方安装脚本；有了不动。装不上只记红、不中断（读回还会再判一次）。登录由创始人做（docs/ops.md 第五节）
+setup_cursor_agent() {
+  step "会话用户的 cursor-agent（${SESSION_USERS[*]}；官方安装脚本，以会话用户自己的身份装，只在没有时装）"
+  local u
+  for u in "${SESSION_USERS[@]}"; do
+    if ! id "$u" >/dev/null 2>&1; then
+      pending "$u 这个用户还没有，cursor-agent 没装（建了再跑一遍）"
+      continue
+    fi
+    ensure_cursor_agent "$u" "$(cursor_versions_dir "$u")" "$CURSOR_INSTALL_URL"
+  done
+}
+
 setup_app_config() {
   step "应用的本机配置（/etc/fleet-dao 下的环境文件；应用本身由 deploy/release.sh 发布）"
   local name spec file key what content api_ok=1
@@ -813,6 +838,7 @@ readback() {
   readback_agent_rules
   readback_sessions
   readback_pnpm
+  readback_cursor_agent
   readback_wireguard
   readback_firewall
   readback_app_config
@@ -1227,6 +1253,18 @@ readback_session_pnpm() { # 仓根 package.json 钉的版本
     session_scope_run "$SESSION_PATH"
 }
 
+# 会话用户的 cursor-agent：以他的身份照引擎的找法跑 --version，没装、跑不成都判红（lib/cursor-agent.sh）；登没登录不查
+readback_cursor_agent() {
+  local u
+  for u in "${SESSION_USERS[@]}"; do
+    if ! id "$u" >/dev/null 2>&1; then
+      pending "$u 这个用户还没有，cursor-agent 没查"
+      continue
+    fi
+    check_cursor_agent "$u" "$(cursor_versions_dir "$u")"
+  done
+}
+
 readback_wireguard() {
   local latest
   if [[ -z "$FLEET_WG_HK_PUBLIC_KEY" || -z "$FLEET_WG_HK_ENDPOINT" ]]; then
@@ -1279,6 +1317,7 @@ main() {
     setup_firewall
     setup_pnpm
     setup_session_pnpm
+    setup_cursor_agent
     setup_app_config
     setup_web_upload
     setup_demo_scopes

@@ -2,9 +2,10 @@
 // 同一个形状（读不到的不记成 0）。找版本目录的那段 sh 真跑（本机的 sh、假的 cursor-agent 脚本），每条失败路径都故意造一次。
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { SessionUser } from '@fleet-dao/adapters';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
@@ -189,6 +190,77 @@ describe('cursorLaunchCommand：会话用户按 current → 最新版本目录�
     expect(() => realPortsConfigFromEnv({ ...env, FLEET_CURSOR_VERSIONS_DIR: 'versions' })).toThrow(
       'FLEET_CURSOR_VERSIONS_DIR 要写绝对路径',
     );
+  });
+});
+
+// ---- 装机脚本装、查 cursor-agent 时照的是同一个找法（france.sh 以会话用户跑 deploy/lib/cursor-agent-version.sh）
+
+const DEPLOY_PROBE = fileURLToPath(
+  new URL('../../../../deploy/lib/cursor-agent-version.sh', import.meta.url),
+);
+const FRANCE_SH = fileURLToPath(new URL('../../../../deploy/france.sh', import.meta.url));
+
+/** 照装机脚本那样真跑一次：先打一行挑中的路径，再 exec 它 --version。 */
+function deployProbe(versionsDir: string) {
+  const r = spawnSync(SH, [posix(DEPLOY_PROBE), posix(versionsDir)], { encoding: 'utf8' });
+  return { status: r.status, lines: r.stdout.trim().split('\n'), stdout: r.stdout, stderr: r.stderr };
+}
+
+describe('装机脚本找 cursor-agent 和引擎起它挑的是同一个（改了一边另一边跟着改）', () => {
+  const layouts: Record<string, (v: string) => void> = {
+    '有 current': (v) => {
+      agent(join(v, 'current'), 'current');
+      agent(join(v, '2026.10.1-ccc3333'), 'ccc');
+    },
+    '没有 current：按版本号挑最新的': (v) => {
+      agent(join(v, '2026.9.5-aaa1111'), 'aaa');
+      agent(join(v, '2026.09.23-bbb2222'), 'bbb');
+      agent(join(v, '2026.10.1-ccc3333'), 'ccc');
+    },
+    最新的不能跑: (v) => {
+      agent(join(v, '2026.09.23-bbb2222'), 'bbb');
+      agent(join(v, '2026.10.1-ccc3333'), 'ccc', false);
+    },
+    'current 不能跑': (v) => {
+      agent(join(v, 'current'), 'current', false);
+      agent(join(v, '2026.09.23-bbb2222'), 'bbb');
+    },
+    '不是版本号的名字、安装时的临时目录': (v) => {
+      agent(join(v, '2026.09.23-bbb2222'), 'bbb');
+      agent(join(v, '80975bde-8b97-4c7b-bdcb-00741e363c13'), 'uuid');
+      agent(join(v, 'latest'), 'latest');
+      agent(join(v, '.tmp-2026.10.2-ddd4444-1790000000'), 'tmp');
+    },
+  };
+
+  for (const [name, make] of Object.entries(layouts)) {
+    it(`${name}：两边挑中同一个，交给它的都是 --version`, () => {
+      const v = join(root, 'versions');
+      make(v);
+      const engine = launch(v, ['--version']);
+      const deploy = deployProbe(v);
+      expect(engine.status).toBe(0);
+      expect(deploy.status).toBe(0);
+      expect(deploy.lines.slice(1)).toEqual(engine.lines);
+      expect(deploy.lines[0]?.startsWith(`${posix(v)}/`)).toBe(true);
+      expect(deploy.lines[0]?.endsWith('/cursor-agent')).toBe(true);
+    });
+  }
+
+  it('一个能跑的都没有：两边都退出 127；装机那边什么都不打（它凭这个认「没装」，才去装）', () => {
+    const empty = join(root, 'empty');
+    mkdirSync(empty);
+    const broken = join(root, 'broken');
+    agent(join(broken, '2026.09.23-bbb2222'), 'bbb', false);
+    for (const dir of [empty, join(root, 'nowhere'), broken]) {
+      expect(launch(dir).status).toBe(127);
+      expect(deployProbe(dir)).toMatchObject({ status: 127, stdout: '', stderr: '' });
+    }
+  });
+
+  it('找的版本目录和引擎默认的一样（france.sh 的 CURSOR_VERSIONS_DIR）', () => {
+    const line = readFileSync(FRANCE_SH, 'utf8').match(/^CURSOR_VERSIONS_DIR='([^']*)'$/m);
+    expect(line?.[1]).toBe(DEFAULT_CURSOR_VERSIONS_DIR);
   });
 });
 

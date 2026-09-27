@@ -80,6 +80,7 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 | `/etc/systemd/system/`：`fleet-engine.service`、`fleet-api.service` | root 644 | 应用单元，发布脚本从要发的那版里取来装上，只装 `release.env` 启用了的（第九节） |
 | `/home/fleet/.local/bin/pnpm` | fleet | corepack 的垫片，版本跟仓根 `package.json` 的 `packageManager`；发布（第九节）以 fleet 装依赖、打包用它。会话读不到 fleet 的家，用的是 `/usr/local/bin/pnpm` |
 | `/home/fleet-agent-carpool/.local/bin/reclaude` | 会话用户 | reclaude 二进制：france.sh 只在没有时装（和 pilot 同一个版本、sha256），缺了读回判红；登录见第五节 |
+| `/home/fleet-agent-carpool/.local/share/cursor-agent/versions` | 会话用户 | cursor-agent，一个版本一个目录（命令还链到 `~/.local/bin/cursor-agent`）：france.sh 照引擎的找法一个能跑的都没有时，以会话用户自己的身份跑官方安装脚本装，之后它自己升级；缺了、跑不成读回判红；登录见第五节 |
 | `/home/pilot/.local/bin/reclaude` | pilot 755 | reclaude 二进制：france.sh 只在没有时装（版本和 sha256 钉在脚本顶部），之后 pilot 自己 `reclaude update`。pilot 不登录 reclaude（第五节），读回也不查登没登录 |
 | `/home/pilot/.mirasim-remote/`、`/home/pilot/.mirasim/` | pilot | Mirasim 桌面端连进来时自己装的服务端和它的数据（第五节），不归装机脚本管 |
 
@@ -131,7 +132,7 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 
 - `bash deploy/lib/snapshot.sh ours`：fleet-dao 管的东西的指纹。连跑两遍装机，两遍之间各拍一次，diff 为空才算第二遍零改动——和脚本自己数的「改动几处」是两套判据。
 - `bash deploy/lib/snapshot.sh others`：不归 fleet-dao 管的单元状态、监听端口、防火墙（系统自带的服务、MiraQuota 等）。装机脚本每次开头结尾自己比一遍：装机不许碰它们。
-- `sudo bash deploy/test/run.sh`：语法、shellcheck、自检的违规样本、发布脚本的来回（`release-flow.test.sh`）、香港网关的入口（`gateway-deploy.test.sh`）、网关打包（`gateway-bundle.test.sh`，要先 `pnpm install`）、公网上看得到的几样（`public-site.test.sh`：占位页、健康页不带仓名，`release.json` 只给隧道、整站 noindex；真起 nginx 那段要这台装了 nginx）、健康页的判定（`health-page.test.mjs`）、自动发布的判断和流程（`auto-release.test.mjs`：CI 红不发、读不到不发、没成不重试、等空闲、人手动切过不动；`release.sh --auto` 那几条在 `release-flow.test.sh`）、同步脚本以 root 替别的用户写（`agents-sync.test.sh`）、ddgs 的装和查（`cli-tools.test.sh`）、会话用的 pnpm 的装和查（`session-pnpm.test.sh`：钉的版本和 `package.json` 对得上、核不上不装、引擎给会话的 PATH 怎么读、会话里找不到或找错 pnpm 判红；不出网，要 root）、本页端口表和脚本对得上、只有一个会话用户且它的读回拦得下故意造的错（`session-user.test.sh`：不要 root，假的 getent、sudo、id）、`adopt` 的用法校验和改属主（`agent-scope-adopt.test.sh`）。后者改属主那段要建、删真的系统账号（会话用户），只在命令行上给了 `FLEET_TEST_SYSTEM_USERS=1` 时跑（`sudo FLEET_TEST_SYSTEM_USERS=1 bash deploy/test/run.sh`，只在 CI 的一次性机器上这么跑）；没给、或这个用户、组、家目录有一样已经在，这一段报「没跑成」（退出码 2，不算通过），不碰已有的账号。`bash deploy/test/run.sh --ops` 只跑读本页的两块（端口表、`place-file.test.sh`），CI 只改了本页时这么跑；全套里的 `ops-only.test.sh` 核对这两块真跑了、本页改坏了会红。
+- `sudo bash deploy/test/run.sh`：语法、shellcheck、自检的违规样本、发布脚本的来回（`release-flow.test.sh`）、香港网关的入口（`gateway-deploy.test.sh`）、网关打包（`gateway-bundle.test.sh`，要先 `pnpm install`）、公网上看得到的几样（`public-site.test.sh`：占位页、健康页不带仓名，`release.json` 只给隧道、整站 noindex；真起 nginx 那段要这台装了 nginx）、健康页的判定（`health-page.test.mjs`）、自动发布的判断和流程（`auto-release.test.mjs`：CI 红不发、读不到不发、没成不重试、等空闲、人手动切过不动；`release.sh --auto` 那几条在 `release-flow.test.sh`）、同步脚本以 root 替别的用户写（`agents-sync.test.sh`）、ddgs 的装和查（`cli-tools.test.sh`）、会话用的 pnpm 的装和查（`session-pnpm.test.sh`：钉的版本和 `package.json` 对得上、核不上不装、引擎给会话的 PATH 怎么读、会话里找不到或找错 pnpm 判红；不出网，要 root）、会话用户的 cursor-agent 的装和查（`cursor-agent.test.sh`：没装才以他自己的身份跑安装脚本、装着的不重装、跑不成和卡住判红、没查成不当成没装；假的安装脚本，不出网，要 root；找法和引擎的一样由 `packages/engine/test/real/hosts.test.ts` 核对）、本页端口表和脚本对得上、只有一个会话用户且它的读回拦得下故意造的错（`session-user.test.sh`：不要 root，假的 getent、sudo、id）、`adopt` 的用法校验和改属主（`agent-scope-adopt.test.sh`）。后者改属主那段要建、删真的系统账号（会话用户），只在命令行上给了 `FLEET_TEST_SYSTEM_USERS=1` 时跑（`sudo FLEET_TEST_SYSTEM_USERS=1 bash deploy/test/run.sh`，只在 CI 的一次性机器上这么跑）；没给、或这个用户、组、家目录有一样已经在，这一段报「没跑成」（退出码 2，不算通过），不碰已有的账号。`bash deploy/test/run.sh --ops` 只跑读本页的两块（端口表、`place-file.test.sh`），CI 只改了本页时这么跑；全套里的 `ops-only.test.sh` 核对这两块真跑了、本页改坏了会红。
 - `sudo bash deploy/test/agent-scope.e2e.sh`（法国）：会话通路真跑一遍，见第五节；含引擎给的 PATH 里没有会话用户的 `~/.local/bin` 时，会话里照样先找那儿、找得到 ddgs。只测 `run`、`stop`、`list`；`adopt` 在真机上还没有这样的用例，只有上一条在 CI 里跑的。
 
 ## 五、AI 会话
@@ -187,11 +188,11 @@ reclaude 按用户记设备：组织写在家里的 `~/.reclaude/device.json`，
 3. 选拼车组织：`sudo -iu fleet-agent-carpool reclaude org list`，找到拼车（team）那个，`sudo -iu fleet-agent-carpool reclaude org use <组织编号>`。之后切独享、切回拼车由引擎做（#59），人不手动切：一切号这个家目录下在跑的会话全断。
 4. 重跑 `deploy/france.sh`：读回里「reclaude 还没登录」消失。
 
-会话用户装、登录 cursor-agent（#212 接上了 cursor-agent；要创始人做，一次；Cursor 的路由接真流量之前）：
+会话用户的 cursor-agent（#212 接上了 cursor-agent；装由 `france.sh` 做，登录要创始人做，一次；Cursor 的路由接真流量之前）：
 
 cursor-agent 装在会话用户自己家里（官方安装脚本：一个版本一个目录，在 `~/.local/share/cursor-agent/versions/<版本>/`），登录态也在它家里；不往会话环境里塞 `CURSOR_API_KEY`。引擎每次起 cursor 会话，由会话用户自己在 `FLEET_CURSOR_VERSIONS_DIR`（engine.env，默认 `/home/{user}/.local/share/cursor-agent/versions`）下按 `current` → 最新版本目录现找（升级会删掉旧版本目录，所以不钉版本）；一个能跑的都没有就退出 127、报「没装 cursor-agent」，失败分流按执行方式配置不对（CF1）认，这条路由记一次失败。
 
-1. 装（`france.sh` 现在不装它）：`sudo -iu fleet-agent-carpool bash -c 'curl https://cursor.com/install -fsS | bash'`。
+1. 装（`france.sh` 做，`deploy/lib/cursor-agent.sh`）：以会话用户的身份照引擎的找法（`current` → 最新能跑的版本目录）一个都找不到时，以他自己的身份把官方安装脚本 `https://cursor.com/install` 整个下下来再跑（不以 root 装，不 `curl | bash`），装完再核一遍；找得到就不动（不重装、不升级，之后它自己升级）。安装脚本和包都不核校验和：官方没给，它只以会话用户的身份跑（理由写在 `deploy/lib/cursor-agent.sh` 开头）。读回以会话用户的身份照同一个找法跑 `cursor-agent --version`：没装、跑不成、卡住、输出认不出都判红；登没登录不查。手动装（等不及重跑 `france.sh` 时）：`sudo -iu fleet-agent-carpool bash -c 't=$(mktemp) && curl -fsSL https://cursor.com/install -o "$t" && bash "$t"; rm -f "$t"'`。
 2. 登录：`sudo -iu fleet-agent-carpool cursor-agent login`。终端里会打印一个链接：在自己电脑的浏览器里打开，用 Cursor 账号登录、批准；批准完终端自己往下走。
 3. 查：`sudo -iu fleet-agent-carpool cursor-agent status` 说已登录。之后调度台哪个阶段挂上 Cursor 的路由、开着，下一轮探针就探它。
 
