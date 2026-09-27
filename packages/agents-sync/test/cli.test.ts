@@ -78,7 +78,8 @@ describe('用法', () => {
 });
 
 describe('退出码', () => {
-  it('缺失 1；写完 0；第二遍零改动；只装了 claude 的机器上其余各家列为没装', () => {
+  // 4 次 run() 各自真 spawn 一两次 git（git-excludes 那一步）：默认 5 秒在机器忙的时候不够
+  it('缺失 1；写完 0；第二遍零改动；只装了 claude 的机器上其余各家列为没装', { timeout: 15_000 }, () => {
     const home = tempDir('home');
     const repo = makeRepo({});
     const first = run(['--check', '--home', home, '--repo', repo]);

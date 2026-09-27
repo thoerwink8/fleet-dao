@@ -37,6 +37,7 @@ import {
 } from '@fleet-dao/shared';
 import { type Context, Hono } from 'hono';
 import type { z } from 'zod';
+import { handlingOf, handlingView } from './alert-work.ts';
 import { answerAsk } from './answer-ask.ts';
 import { meBody } from './auth.ts';
 import { registerCredentialRoutes } from './credentials.ts';
@@ -391,9 +392,20 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
   app.get(WebRoutes.notifications.path, async (c) => {
     const query = readQuery(c, NotificationsQuery);
     const page = await store.listNotifications(query);
+    // 谁在处理、修到哪（design 15.3）：读的时候现算；没接上、读不到照实写在 handlingProblem，不拿「没人认领」顶
+    const handling = deps.alertWork
+      ? await handlingOf(
+          deps.alertWork,
+          page.items.map((n) => n.id),
+        )
+      : { ok: false as const, why: '谁在处理没接上：这里没有提醒的认领和 PR 记录（开发环境）' };
     return reply(c, NotificationsResponse, {
-      items: page.items.map(notificationView),
+      items: page.items.map((n) => {
+        const h = handling.ok ? handling.byId.get(n.id) : undefined;
+        return { ...notificationView(n), ...(h ? { handling: handlingView(h) } : {}) };
+      }),
       nextCursor: page.nextCursor,
+      ...(handling.ok ? {} : { handlingProblem: handling.why }),
     });
   });
 

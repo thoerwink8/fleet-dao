@@ -10,6 +10,7 @@ import { ApiError } from '../api/client';
 import { createMockApi } from '../api/mock/server';
 import { demoBlocked, visibleNav } from '../components/shell/nav';
 import { SidebarNav } from '../components/shell/sidebar';
+import NotificationsPage from '../routes/notifications';
 import Shell from '../routes/shell';
 import TaskDetailPage from '../routes/task-detail';
 import { renderApp } from '../test/harness';
@@ -80,6 +81,17 @@ describe('演示版：模块开关', () => {
       { api: demoApi(), route: '/dispatch' },
     );
     expect(await screen.findByText('调度台的页面')).toBeTruthy();
+  });
+});
+
+describe('演示版：通知里谁在处理', () => {
+  test('跟进单只写文字、不给外链（演示产物里出现 github.com 打包就拒）', async () => {
+    scope(['notifications'], 'process');
+    renderApp(<NotificationsPage />, { api: demoApi() });
+    const handling = await screen.findAllByTestId('alert-handling');
+    expect(handling.length).toBeGreaterThan(0);
+    expect(screen.getByText('acme/orbit#17')).toBeTruthy();
+    for (const row of handling) expect(row.querySelector('a')).toBeNull();
   });
 });
 

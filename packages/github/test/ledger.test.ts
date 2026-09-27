@@ -339,6 +339,76 @@ describe('PR 镜像（pull_requests）', () => {
     expect(await ledger.taskFor(repoId, 12)).toMatchObject({ state: 'queued' });
     expect(await ledger.taskFor(repoId, 13)).toBeNull();
   });
+
+  it('提醒谁在处理要的几样（开的时刻、合并提交、正文挂的单和提醒）：读到了写上', async () => {
+    await ledger.upsertPullRequest({
+      repoId,
+      number: 7,
+      state: 'open',
+      headRef: 'fix/7',
+      headSha: 'a'.repeat(40),
+      updatedAt: at('12:00:00'),
+      openedAt: at('11:50:00'),
+      mergedAt: null,
+      mergeSha: null,
+      links: { issues: [342], alerts: ['watchdog:job:backup:after-12'] },
+    });
+    expect(await ledger.getPullRequest(repoId, 7)).toMatchObject({
+      openedAt: at('11:50:00'),
+      mergedAt: null,
+      links: { issues: [342], alerts: ['watchdog:job:backup:after-12'] },
+    });
+    await ledger.upsertPullRequest({
+      repoId,
+      number: 7,
+      state: 'merged',
+      headRef: 'fix/7',
+      headSha: 'a'.repeat(40),
+      updatedAt: at('12:10:00'),
+      mergedAt: at('12:10:00'),
+      mergeSha: 'c'.repeat(40),
+    });
+    expect(await ledger.getPullRequest(repoId, 7)).toMatchObject({
+      state: 'merged',
+      openedAt: at('11:50:00'),
+      mergedAt: at('12:10:00'),
+      mergeSha: 'c'.repeat(40),
+      links: { issues: [342], alerts: ['watchdog:job:backup:after-12'] },
+    });
+  });
+
+  it('【故意造出的失败】这次没读到（审计补合并那一路没带正文）：旧的链接留着，不拿空顶；带了空正文才清', async () => {
+    const base = { repoId, number: 8, headRef: 'fix/8', headSha: 'a'.repeat(40) };
+    await ledger.upsertPullRequest({
+      ...base,
+      state: 'open',
+      updatedAt: at('12:00:00'),
+      links: { issues: [9], alerts: ['pool-hold:x'] },
+    });
+    await ledger.upsertPullRequest({ ...base, state: 'merged', updatedAt: at('12:05:00') });
+    expect((await ledger.getPullRequest(repoId, 8))?.links).toEqual({ issues: [9], alerts: ['pool-hold:x'] });
+    await ledger.upsertPullRequest({
+      ...base,
+      state: 'merged',
+      updatedAt: at('12:06:00'),
+      links: { issues: [], alerts: [] },
+    });
+    expect((await ledger.getPullRequest(repoId, 8))?.links).toEqual({ issues: [], alerts: [] });
+  });
+
+  it('【故意造出的失败】合并提交号认不出（不是 40 位十六进制）：库的约束拒掉，不存半截', async () => {
+    await expect(
+      ledger.upsertPullRequest({
+        repoId,
+        number: 9,
+        state: 'merged',
+        headRef: 'x',
+        headSha: 'a'.repeat(40),
+        updatedAt: at('12:00:00'),
+        mergeSha: 'abc',
+      }),
+    ).rejects.toThrow();
+  });
 });
 
 describe('跨工人的锁', () => {

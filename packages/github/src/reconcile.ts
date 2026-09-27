@@ -9,6 +9,7 @@ import { z } from 'zod';
 import { enc, type Logger, parseRepoSlug, repoSlug } from './client.ts';
 import type { Deps } from './deps.ts';
 import { type EchoKind, echoOf } from './echo.ts';
+import { mirrorExtrasOf } from './events.ts';
 import { mergeKey, readPull } from './pulls.ts';
 
 /**
@@ -442,6 +443,7 @@ export async function auditMergedPrs(
               headRef: item.head.ref,
               headSha: item.head.sha,
               updatedAt: new Date(item.updated_at),
+              ...mirrorExtrasOf(item, true, slug),
             });
             note(
               item.number,

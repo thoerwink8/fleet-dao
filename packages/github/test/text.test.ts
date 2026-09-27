@@ -67,8 +67,9 @@ describe('PR 正文模板', () => {
     expect(lines.length).toBeLessThanOrEqual(PR_BODY_MAX_LINES);
     expect(body).toContain('- ……另有');
     expect(body).toContain('**还欠什么**：\n- 过期提示放到子任务 C\n- 风险：旧的登录接口还在用');
-    expect(lines.slice(-6)).toEqual([
+    expect(lines.slice(-7)).toEqual([
       '**需求**：#12 · 子任务 B 验证码',
+      '**修提醒**：无',
       '**这个 PR 做完就关单**：否（引擎合并后第 7 步自己关单）',
       '**对应计划**：P1「工作流」',
       '**specs**：specs/12-登录验证码/',
@@ -145,8 +146,23 @@ describe('PR 正文模板', () => {
       specs: 'specs/12-x/',
       changedFiles: ['specs/12-x/结果.md'],
     });
-    expect(body).toContain('**需求**：#12\n**这个 PR 做完就关单**：否（引擎合并后第 7 步自己关单）\n');
+    expect(body).toContain(
+      '**需求**：#12\n**修提醒**：无\n**这个 PR 做完就关单**：否（引擎合并后第 7 步自己关单）\n',
+    );
     expect(hasCloseKeywords(body)).toBe(false);
+  });
+
+  it('「修提醒」：写了修哪几条提醒就照写（驾驶舱据此显示修到哪），没写是「无」', () => {
+    const body = renderPrBody({
+      requirement: 12,
+      did: ['修了'],
+      verified: ['ok'],
+      plan: 'v1 Fusion 接活',
+      specs: null,
+      changedFiles: [],
+      fixesAlerts: ['watchdog:job:backup:after-12', 'pool-hold:x'],
+    });
+    expect(body).toContain('**修提醒**：watchdog:job:backup:after-12 pool-hold:x\n');
   });
 
   it('条目里的关单词也改掉', () => {

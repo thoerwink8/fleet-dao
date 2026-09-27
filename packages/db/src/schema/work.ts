@@ -474,10 +474,24 @@ export const pullRequests = pgTable(
     /** GitHub 上这条 PR 的最后更新时间。 */
     updatedAt: timestamp('updated_at', tz).notNull(),
     syncedAt: timestamp('synced_at', tz).notNull().defaultNow(),
+    // —— 下面几列给「提醒谁在处理」现算用（design 15.3）：PR 事件、对账补收都经同一处写（@fleet-dao/github 的 events.ts）。
+    // 事件里没带正文、没带合并信息的（审计补合并那一路）不改它们：旧值留着，不拿空顶。
+    /** GitHub 上开这个 PR 的时刻；没读到过是空。 */
+    openedAt: timestamp('opened_at', tz),
+    /** 合并的时刻、合进默认分支的那个提交（squash 的那一个）；没合、没读到是空。 */
+    mergedAt: timestamp('merged_at', tz),
+    mergeSha: text('merge_sha'),
+    /** 正文挂的单：「需求」栏（没有再看标题）的 #号、关单词（Closes #号），同仓的；和 PR 补贴、合并闸同一个认法。 */
+    issueRefs: integer('issue_refs').array().notNull().default(sql`'{}'::integer[]`),
+    /** 正文「修提醒」栏写的提醒（键或编号）。 */
+    alertRefs: text('alert_refs').array().notNull().default(sql`'{}'::text[]`),
   },
   (t) => [
     primaryKey({ columns: [t.repoId, t.number] }),
     check('pull_requests_number_positive', sql`${t.number} > 0`),
+    check('pull_requests_merge_shape', sql`${t.mergeSha} is null or ${t.mergeSha} ~ '^[0-9a-f]{40}$'`),
+    index('pull_requests_issue_refs_idx').using('gin', t.issueRefs),
+    index('pull_requests_alert_refs_idx').using('gin', t.alertRefs),
   ],
 );
 

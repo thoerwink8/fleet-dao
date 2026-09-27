@@ -22,6 +22,7 @@ export const PR_COLUMNS = [
   '还欠什么',
   '按推荐先做了',
   '需求',
+  '修提醒',
   CLOSE_COLUMN,
   PLAN_COLUMN,
   SPECS_COLUMN,
