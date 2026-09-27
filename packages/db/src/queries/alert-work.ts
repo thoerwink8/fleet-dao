@@ -15,6 +15,7 @@ import {
   notifications,
   pullRequests,
   repos,
+  settings,
   tasks,
 } from '../schema/index.ts';
 import type { AlertRow } from './alerts.ts';
@@ -55,6 +56,29 @@ const alertColumns = {
 };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
+ * settings 表里提醒那三项的原值（没写的是 undefined）；认不认得出由 core 的 readAlertSettings 判。读不到照抛。
+ */
+export async function readAlertSettingRaw(
+  db: Db,
+): Promise<{ claimAfterMinutes?: unknown; stuckAfterMinutes?: unknown; issueRepo?: unknown }> {
+  const keys = {
+    'alerts.claimAfterMinutes': 'claimAfterMinutes',
+    'alerts.stuckAfterMinutes': 'stuckAfterMinutes',
+    'alerts.issueRepo': 'issueRepo',
+  } as const;
+  const rows = await db
+    .select({ key: settings.key, value: settings.value })
+    .from(settings)
+    .where(inArray(settings.key, Object.keys(keys)));
+  const out: { claimAfterMinutes?: unknown; stuckAfterMinutes?: unknown; issueRepo?: unknown } = {};
+  for (const r of rows) {
+    const field = keys[r.key as keyof typeof keys];
+    if (field) out[field] = r.value;
+  }
+  return out;
+}
 
 /** 按编号或键找一条提醒（处理没处理都给）；没有是 null。 */
 export async function findAlert(db: Db, ref: string): Promise<AlertRow | null> {

@@ -116,7 +116,7 @@ export interface PendingRestartReport {
 const PENDING_BATCH = 20;
 
 export interface IssueIntake {
-  /** 不是 issue、评论事件：undefined。是：一句做了什么（记进这条投递的 note）。 */
+  /** issue、评论、PR 事件（PR 的贴「认领对得上」，#348）：一句做了什么（记进这条投递的 note）；别的事件 undefined。 */
   handle(event: IngestedEvent): Promise<string | undefined>;
   /**
    * 待起超过几分钟还没起来的引擎认领再起一次（GitHub 对账每轮调，方案第四节）：起工作流没成的投递最多自动重放 5 次、之后不再
@@ -127,7 +127,7 @@ export interface IssueIntake {
 }
 
 export function createIssueIntake(
-  deps: Pick<Deps, 'store' | 'workflows' | 'requirements' | 'plans' | 'log' | 'now'>,
+  deps: Pick<Deps, 'store' | 'workflows' | 'requirements' | 'plans' | 'log' | 'now' | 'claims'>,
 ): IssueIntake {
   const { store, log } = deps;
 
@@ -539,6 +539,9 @@ export function createIssueIntake(
     async handle(event) {
       if (event.event === 'issues') return onIssue(event);
       if (event.event === 'issue_comment') return onComment(event);
+      // PR 事件：按库里的认领贴「认领对得上」（#348）；机器人自己开的 PR 事件（不叫醒工作流的那种）也贴
+      if (event.event === 'pull_request')
+        return deps.claims ? deps.claims.onPullEvent(event) : 'claim_status=not_wired';
       return undefined;
     },
     restartPending,

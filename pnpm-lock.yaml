@@ -34,6 +34,9 @@ importers:
 
   packages/api:
     dependencies:
+      '@fleet-dao/conventions':
+        specifier: workspace:*
+        version: link:../conventions
       '@fleet-dao/core':
         specifier: workspace:*
         version: link:../core

@@ -21,9 +21,13 @@ export interface SyncResult {
   conflictFiles: string[];
 }
 
-/** CI 结果，证据绑定 head。unknown = 没查成（没有检查、超时读不到……）。 */
+/**
+ * CI 结果，证据绑定 head。unknown = 没查成（没有检查、超时读不到……），不是没过也不是过了；conflict = GitHub 不给
+ * 冲突的 PR 起 CI（和 unknown 分开：这个有确定的解法，并主线，不是读不到）；diverged = PR 的头变了、新头不含老头
+ * （像是被强推改写了），不是自动并主线能接的，要人看。
+ */
 export interface CiResult {
-  state: 'green' | 'red' | 'unknown';
+  state: 'green' | 'red' | 'unknown' | 'conflict' | 'diverged';
   head: string;
   failedChecks: string[];
   /** 失败摘要（首个失败的测试名、报错首行）；有它才判「同一假设」。 */
@@ -140,8 +144,17 @@ function decideOnEvidence(input: VerifyInput): VerifyDecision {
   }
 
   const ci = input.ci;
-  if (!ci || ci.state === 'unknown') {
-    return { action: 'escalate', reason: 'CI 结果没查成（不是没过，也不是过了）', detail: ci?.detail ?? '' };
+  if (!ci || ci.state === 'unknown' || ci.state === 'conflict' || ci.state === 'diverged') {
+    // 这条路径（子任务的经典流程）在等 CI 之前已经先 syncMainline 过一轮（见 subtask.ts），这里还读到 conflict
+    // 或 diverged 是没接自动重试的少数情形：老实报没查成，交给人，不在这里生出一套并主线的机制（那一套在
+    // Fusion 流程里，见 packages/core/src/flow.ts 的 sync-mainline）。
+    const why =
+      ci?.state === 'conflict'
+        ? '和主线冲突'
+        : ci?.state === 'diverged'
+          ? 'PR 的头变了'
+          : '不是没过，也不是过了';
+    return { action: 'escalate', reason: `CI 没查成（${why}）`, detail: ci?.detail ?? '' };
   }
   if (ci.head !== input.sync.head) {
     return {

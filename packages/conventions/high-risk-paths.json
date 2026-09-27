@@ -120,12 +120,17 @@
     {
       "path": "packages/conventions/src/merge-gates.ts",
       "kind": "碰安全",
-      "why": "CI 检查本身（合并闸）：档位、高风险路径、第二意见的判法"
+      "why": "CI 检查本身（合并闸）：档位、高风险路径、第二意见和「认领对得上」（只认引擎机器人贴的，#348）的判法"
     },
     {
       "path": "packages/conventions/src/close-rule.ts",
       "kind": "碰安全",
       "why": "CI 检查本身（合并闸，#325）：写了关单的 PR 要带那张单的结果.md，认关单词、认结果文档的判法在这里；放松它，合并时关掉却没结果的单就放过去了"
+    },
+    {
+      "path": "packages/conventions/src/pr-columns.ts",
+      "kind": "碰安全",
+      "why": "CI 检查本身（合并闸，#348）：PR 正文的栏怎么认——挂了哪张单（「需求」栏，其次标题）定要不要看引擎贴的「认领对得上」；放松它（认不出挂了单），被作废、被改派的旧工人的 PR 就不查认领合进去了"
     },
     {
       "path": "packages/conventions/src/gh-api.ts",

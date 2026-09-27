@@ -2,6 +2,7 @@
 // （标 never；登记了超过期望间隔还没跑过，看门狗推提醒）。这里的每一项在 jobs/schedules.ts 里都有一个 Temporal 定时任务，
 // 编号一样（测试核对两边对得上）。看门狗自己也登记：它停没停由后端按这一行现算（packages/api 的 watchdog-health.ts）。
 import { type Db, registerScheduledJobs } from '@fleet-dao/db';
+import { ALERT_DISPATCH_JOB } from '../jobs/alert-dispatch.ts';
 import { CANARY_JOB } from '../jobs/canary.ts';
 import { GITHUB_RECONCILE_JOB } from '../jobs/github-reconcile.ts';
 import { HOURLY_RECONCILE_JOB } from '../jobs/hourly-reconcile.ts';
@@ -14,6 +15,7 @@ export const ENGINE_JOBS = [
   HOURLY_RECONCILE_JOB,
   CANARY_JOB,
   WATCHDOG_JOB,
+  ALERT_DISPATCH_JOB,
 ] as const;
 
 export async function registerEngineJobs(db: Db): Promise<void> {

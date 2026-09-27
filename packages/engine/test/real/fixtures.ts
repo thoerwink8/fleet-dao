@@ -409,10 +409,14 @@ export function fakeRun(script: (spec: ClaudeCodeRunSpec, n: number) => FakeRunS
     });
     const readings: RateLimitReading[] = [];
     const signal = opts.signal ?? new AbortController().signal;
+    let seq = 0;
     await s.act?.({
       spec,
       emit: (kind, payload, at) =>
-        void opts.onEvent?.({ runId: spec.runId, at: (at ?? new Date()).toISOString(), kind, payload }),
+        void opts.onEvent?.(
+          { runId: spec.runId, at: (at ?? new Date()).toISOString(), kind, payload },
+          { seq: seq++, replay: false },
+        ),
       rateLimit: (reading) => {
         readings.push(reading);
         void opts.onRateLimit?.(reading);
@@ -578,6 +582,7 @@ export function fakeCursorRun(script: (spec: CursorRunSpec, n: number) => FakeCu
       ...fixture.lines.slice(0, s.replayLines ?? fixture.lines.length),
       ...(s.frames ?? []).map((f) => JSON.stringify(f)),
     ];
+    let seq = 0;
     for (const line of lines) {
       if (signal.aborted) break;
       const effect = reader.read(line);
@@ -587,7 +592,8 @@ export function fakeCursorRun(script: (spec: CursorRunSpec, n: number) => FakeCu
         return finish({ exitCode: null, signal: 'SIGTERM', killed: { reason: 'session_mismatch', at } });
       }
       if (id) opts.onSessionId?.(id);
-      for (const event of effect.events) void opts.onEvent?.(event);
+      for (const event of effect.events) void opts.onEvent?.(event, { seq, replay: false });
+      seq++;
     }
     const at = new Date().toISOString();
     if (signal.aborted)
@@ -735,11 +741,13 @@ export function fakeGrokRun(script: (spec: GrokRunSpec, n: number) => FakeGrokSc
       const frame = JSON.parse(line) as Record<string, unknown>;
       return frame.type === 'end' ? JSON.stringify({ ...frame, sessionId: spec.session.id }) : line;
     });
+    let seq = 0;
     for (const line of lines) {
       if (signal.aborted) break;
-      for (const event of reader.read(line).events) void opts.onEvent?.(event);
+      for (const event of reader.read(line).events) void opts.onEvent?.(event, { seq, replay: false });
+      seq++;
     }
-    for (const event of reader.flush()) void opts.onEvent?.(event);
+    for (const event of reader.flush()) void opts.onEvent?.(event, { seq, replay: false });
     const at = new Date().toISOString();
     if (signal.aborted)
       return finish({ exitCode: null, signal: 'SIGTERM', killed: { reason: 'aborted', at } });

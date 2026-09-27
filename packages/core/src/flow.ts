@@ -24,9 +24,10 @@ export type Mode = 'fusion' | 'single';
 
 /**
  * 副手打回最多 2 次（第 3 次 Lead 自己接手）；验证默认 1 轮、最多 2 轮（流程配置可以收到 1 轮）；开了 PR 之后回去改最多 3 轮
- * （CI 红、Lead 最终审查要改、合并前退回都算一轮）。
+ * （CI 红、Lead 最终审查要改、合并前退回、并主线遇到真冲突解不开都算一轮）；CI 报「和主线冲突」自动并主线最多 3 次
+ * （不算进上面那 3 轮：并得上就是并得上，不需要人改代码），连着 3 次还是冲突才停下等人，别和主线来回拉锯。
  */
-export const FLOW_LIMITS = { reworks: 2, verifyRounds: 2, ciRounds: 3 } as const;
+export const FLOW_LIMITS = { reworks: 2, verifyRounds: 2, ciRounds: 3, mergeRounds: 3 } as const;
 
 export interface FlowState {
   mode: Mode;
@@ -42,8 +43,10 @@ export interface FlowState {
   takeover: boolean;
   /** 这一块验证跑过几轮没过。 */
   verifyRounds: number;
-  /** 这一块 CI 修过几轮（最终审查要改、合并前退回也算一轮：都是开了 PR 之后回去改）。 */
+  /** 这一块 CI 修过几轮（最终审查要改、合并前退回、并主线真冲突解不开也算一轮：都是开了 PR 之后回去改）。 */
   ciRounds: number;
+  /** 这一块 CI 报「和主线冲突」自动并主线试过几次（不占 ciRounds：并得上不用人改代码）。 */
+  mergeRounds: number;
   /** 验证最多几轮（流程配置里的 verify.rounds，1–2）；不给按 FLOW_LIMITS.verifyRounds。 */
   verifyLimit?: number;
   /** 小单：跳过方案评审。 */
@@ -64,7 +67,10 @@ export type FlowEvent =
   | { kind: 'accepted' }
   | { kind: 'rejected' }
   | { kind: 'verified'; verdict: 'pass' | 'block' }
-  | { kind: 'ci'; state: 'green' | 'red' | 'unknown' }
+  /** conflict = GitHub 不给这个头起 CI（和主线冲突），走「并主线」，不算「没查成」的次数（unknown 才是没查成）。 */
+  | { kind: 'ci'; state: 'green' | 'red' | 'unknown' | 'conflict' }
+  /** 并主线的结果（sync-mainline 这个动作做完交回）：干净并上了接着查新头的 CI；冲突解不开要派会话改一轮。 */
+  | { kind: 'synced'; state: 'clean' | 'conflict'; conflictFiles: string[] }
   /** CI 绿了之后 Lead 的最终审查：过了进合并；要改就回第 6 步修一轮。 */
   | { kind: 'final-reviewed'; verdict: 'pass' | 'fix' }
   /** 合并前退回（合并队列退回要改、人闸没批）：回第 6 步修一轮。 */
@@ -91,6 +97,7 @@ export type FlowAction =
   | 'open-pr'
   | 'fix-ci'
   | 'recheck-ci'
+  | 'sync-mainline'
   | 'final-review'
   | 'merge'
   | 'verify-mother'
@@ -110,6 +117,7 @@ export function startFlow(mode: Mode, mother: boolean, options: { verifyRounds?:
     takeover: false,
     verifyRounds: 0,
     ciRounds: 0,
+    mergeRounds: 0,
     small: false,
     highRisk: false,
     ...(options.verifyRounds === undefined ? {} : { verifyLimit: options.verifyRounds }),
@@ -174,7 +182,23 @@ const park = (state: FlowState, resume: Step, why: string): FlowDecision =>
   go(state, { step: 'parked', resume, why }, 'wait-human');
 
 /** 换到下一块：每块自己的计数清零。 */
-const freshBlock = { reworks: 0, takeover: false, verifyRounds: 0, ciRounds: 0 } as const;
+const freshBlock = { reworks: 0, takeover: false, verifyRounds: 0, ciRounds: 0, mergeRounds: 0 } as const;
+
+/**
+ * 后加进 FlowState 的计数和它的起始值。发布前就在跑的工作流带着旧版本的状态，里面没有这些字段；
+ * 不补就被 badState 判成「状态认不出」，工作流任务一直失败、单子卡死（09-28 #398 加 mergeRounds 后 #307、#276 撞上）。
+ * 往 FlowState 加字段时同时加进这里。
+ */
+const ADDED_FIELDS: Partial<FlowState> = { mergeRounds: 0 };
+
+/** 旧版本存下的状态补上后加的字段；已有的值原样保留（错的值照样交给 badState 判）。 */
+export function upgradeFlowState(state: FlowState): FlowState {
+  let out = state;
+  for (const [k, v] of Object.entries(ADDED_FIELDS)) {
+    if ((out as unknown as Record<string, unknown>)[k] === undefined) out = { ...out, [k]: v };
+  }
+  return out;
+}
 
 function badState(state: FlowState): string | undefined {
   const counts: [string, number][] = [
@@ -183,6 +207,7 @@ function badState(state: FlowState): string | undefined {
     ['reworks', state.reworks],
     ['verifyRounds', state.verifyRounds],
     ['ciRounds', state.ciRounds],
+    ['mergeRounds', state.mergeRounds],
   ];
   for (const [name, n] of counts) {
     if (!Number.isInteger(n) || n < 0) return `状态认不出：${name} = ${String(n)}`;
@@ -222,7 +247,8 @@ function fixRound(state: FlowState, why: string): FlowDecision {
   return park({ ...state, step: 'pr' }, 'pr', `${why}：开了 PR 之后已经修了 ${state.ciRounds} 轮`);
 }
 
-export function nextFlow(state: FlowState, event: FlowEvent): FlowDecision {
+export function nextFlow(saved: FlowState, event: FlowEvent): FlowDecision {
+  const state = upgradeFlowState(saved);
   const bad = badState(state);
   if (bad) return { ok: false, why: bad };
   const unexpected = (): FlowDecision => ({
@@ -303,10 +329,37 @@ export function nextFlow(state: FlowState, event: FlowEvent): FlowDecision {
     }
 
     case 'pr': {
+      // 并主线交回的结果：干净并上了回去查新头的 CI（不占 ciRounds）；冲突解不开是「开了 PR 之后要改一轮」，
+      // 和 CI 红、最终审查要改、合并前退回同一本账（fixRound）。
+      if (event.kind === 'synced') {
+        if (event.state === 'clean') return go(state, {}, 'recheck-ci');
+        return fixRound(
+          state,
+          `并主线遇到真冲突，解不开：${event.conflictFiles.join('、') || '（没列出文件）'}`,
+        );
+      }
       if (event.kind !== 'ci') return unexpected();
       // 绿了 Lead 最终审查、把结果.md 提交进这个 PR（两种模式都要：需求、方案、结果随 PR 进仓，引擎不直写主线）
       if (event.state === 'green') return go(state, { step: 'final-review' }, 'final-review');
       if (event.state === 'unknown') return go(state, {}, 'recheck-ci');
+      if (event.state === 'conflict') {
+        // 冲突有确定的解法——并主线，不算「没查成」：连着并了 FLOW_LIMITS.mergeRounds 次还是冲突才停下等人，
+        // 别跟一小时十几个 PR 的主线来回拉锯（09-28 凌晨法国撞上 #307 那次真事）。
+        if (state.mergeRounds < FLOW_LIMITS.mergeRounds) {
+          return go(state, { mergeRounds: state.mergeRounds + 1 }, 'sync-mainline');
+        }
+        // 停下等人给这条一个干净的起点：人看过、恢复以后重新给够 mergeRounds 次自动并主线的机会。
+        return go(
+          state,
+          {
+            mergeRounds: 0,
+            step: 'parked',
+            resume: 'pr',
+            why: `CI 一直报和主线冲突，自动并主线已经试了 ${FLOW_LIMITS.mergeRounds} 次还是冲突：别再拉锯，等人看`,
+          },
+          'wait-human',
+        );
+      }
       if (state.ciRounds < FLOW_LIMITS.ciRounds) return go(state, { ciRounds: state.ciRounds + 1 }, 'fix-ci');
       return park(state, 'pr', `CI 修了 ${state.ciRounds} 轮还是红的`);
     }

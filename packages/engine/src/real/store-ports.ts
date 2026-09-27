@@ -11,6 +11,7 @@
 // 带组织类型的池一律不派、写明原因，别的池照常派；还没读完（reclaude 首跑同步配置）、这会儿定不下来（读数刚变、引擎没切过
 // 号，#335）就过一会儿再选。不是挂着的那个组织的池：引擎打算切过去的（real/org-plan.ts，和切号同一个判法）算等得来——
 // 等切号，任务不挂起；续会话的那条只差切号就不等它，照常选到挂着的那个池（换池 fork 续上，#59）。
+// 引擎在停（收到停机信号在排空，drain.ts）时一条都不派，回「过一会儿再选」：派出去的会话会被停机截断。
 // 失败一律明确：库没查成照常抛，事实对不上（RoutingInputError）抛 ROUTING_INPUT，不当成「没有路由」。
 // 全熔断判不判得了另有 stageAllOpen：和选路同一份事实、同一套熔断判定，不写库、不报警（每小时对账用来撤
 // routing:all-open）。组织还没读完、库读失败照抛，不返回「解了」。
@@ -37,6 +38,7 @@ import {
   upsertAlert,
 } from '@fleet-dao/db';
 import type { HostId, OrgKind, StageKind } from '@fleet-dao/shared';
+import { DRAIN_ROUTE_RETRY_SECONDS, type EngineDrain, stoppingNote } from '../drain.ts';
 import { routeBreaker } from '../failure/breaker.ts';
 import {
   type EnginePorts,
@@ -117,6 +119,11 @@ export interface StorePortsDeps {
   log?: (message: string, fields?: Record<string, unknown>) => void;
   /** 选路读组织最多等多久（默认 ORG_READ_WAIT_MS），测试用。 */
   orgReadWaitMs?: number;
+  /**
+   * 停机排空（drain.ts）：引擎在停时一条都不派，回「过一会儿再选」（工作流用 Temporal 的定时器睡，引擎重启了照样醒），
+   * 新引擎起来再派。不给就不闸。
+   */
+  drain?: EngineDrain;
 }
 
 type StorePorts = Pick<
@@ -401,6 +408,16 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
 
   return {
     async pickRoute(input): Promise<PickRouteResult> {
+      // 引擎在停（发布、重启）：派出去的会话会被停机截断，先不派；排在最前面，不为一次派不出去的选路查库、读组织
+      const stopping = deps.drain?.stopping();
+      if (stopping) {
+        return {
+          ok: false,
+          waitFor: 'slot',
+          detail: stoppingNote(stopping),
+          retryAfterSeconds: DRAIN_ROUTE_RETRY_SECONDS,
+        };
+      }
       const now = clock();
       const all = await loadStage(input.stage, now);
       // 流程配置里这一步的模型顺序（Fusion，0003 第 9 条）：只派这几个模型的路由。人点名的路由不受它限制（换路由是人的指令）

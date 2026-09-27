@@ -562,6 +562,24 @@ describe('会话断了接着干', () => {
     expect((await runRow(input.runId))?.costUsd).toBeCloseTo(0.3);
   });
 
+  it('续会话按上一轮的上下文多等第一帧；上一个会话没提交就断了：续上的提示词写明先读 git diff 接着做', async () => {
+    // 第一轮：上下文 20 万 token，改了 README 没提交、没交活就断了（发布停机、被杀这一类）
+    const { ports, fake } = setup((_, n) =>
+      n === 1
+        ? commitAndDone({ noCommit: true, noDone: true, dirty: true, contextTokens: 200_000 })()
+        : commitAndDone()(),
+    );
+    const first = await runOnce(ports, launch());
+    expect(first.end.outcome).toBe('failed');
+    expect(fake.specs[0]?.limits?.startupMs).toBeUndefined();
+    expect(fake.specs[0]?.prompt).not.toContain('没提交的改动');
+    await runOnce(ports, launch({ resumeSessionId: first.sessionId }));
+    // 20 万 token ÷ 每分钟 4 万 = 多等 5 分钟
+    expect(fake.specs[1]?.limits?.startupMs).toBe(180_000 + 5 * 60_000);
+    expect(fake.specs[1]?.prompt).toContain('工作树里有上一个会话没提交的改动（1 个文件');
+    expect(fake.specs[1]?.prompt).toContain('README.md');
+  });
+
   it('换了账号池（切号后原会话绑在旧组织上）、上一轮上下文还小：同一个会话用户 --fork-session 续，不改属主、不拷记录', async () => {
     const { ports, fake, trees } = setup((_, n) => commitAndDone(n === 1 ? { contextTokens: 5_000 } : {})());
     const carpool = {

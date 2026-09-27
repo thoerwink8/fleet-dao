@@ -25,7 +25,6 @@ import {
   manualHold,
   parseHistory,
   parseMainLog,
-  parseScopes,
   RULES_PREFIX,
   RULES_USERS,
   runOnce,
@@ -87,8 +86,6 @@ function machine() {
     history: '2026-09-27T06:05:00Z aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa release\n',
     ci: runsBody(run(H1, 'completed', 'success')),
     ciThrow: null,
-    sessions: '',
-    sessionsThrow: null,
     releaseBusy: false,
     checkout: { ok: true },
     release: { code: 0, log: '/srv/fleet-dao-releases/.logs/x.log', detail: '' },
@@ -142,10 +139,6 @@ function machine() {
     async prepareCheckout(sha) {
       m.checkouts.push(sha);
       return m.checkout;
-    },
-    async sessions() {
-      if (m.sessionsThrow) throw new Error(m.sessionsThrow);
-      return m.sessions;
     },
     async runRelease(sha, busyOk) {
       m.calls.push(`release ${sha[0]}${busyOk ? ' busy-ok' : ''}`);
@@ -238,7 +231,7 @@ test('CI 红：不发，记 ci-red；下一轮再问一次（一轮最多一次�
 
 test('主线头全绿记下：等引擎空闲的那几轮不再问 GitHub', async () => {
   const m = machine();
-  m.sessions = '17 active\n';
+  m.release = { code: EXIT_SESSIONS_BUSY, log: '', detail: '' };
   await m.round();
   m.t += 5 * MIN;
   const st = await m.round();
@@ -344,11 +337,11 @@ test('往回找到的要等引擎空闲：读数写明要发哪个，空了照�
   const m = machine();
   m.main.unshift([H2, '2026-09-27T07:58:00Z']);
   m.ci = runsBody(run(H2, 'in_progress', null, { run_number: 11 }), run(H1, 'completed', 'success'));
-  m.sessions = '17 active\n';
+  m.release = { code: EXIT_SESSIONS_BUSY, log: '', detail: '' };
   let st = await m.round();
   assert.equal(st.last.action, 'wait-idle');
   assert.match(st.last.detail, /要发的是 bbbbbbbbbbbb：主线头 cccccccccccc 的 CI 在跑/);
-  m.sessions = '';
+  m.release = { code: 0, log: '', detail: '' };
   m.t += 5 * MIN;
   st = await m.round();
   assert.deepEqual(releases(m), ['release b']);
@@ -534,14 +527,22 @@ test('发布脚本起不来（抛错）：当成没成，照样记下、报警',
   assert.equal(m.alerts.length, 1);
 });
 
-test('引擎有会话在跑：等空闲、记下从何时等；空了就发；等满 60 分钟照发（带 --busy-ok）', async () => {
+test('有要发的就马上交给发布脚本（它先排空引擎），不先看有没有会话在跑、不干等空闲', async () => {
   const m = machine();
-  m.sessions = '17 active\n18 inactive\n';
+  const st = await m.round();
+  assert.deepEqual(releases(m), ['release b']);
+  assert.equal(st.attempt.busyOk, false);
+  assert.equal(st.waitingSince, null);
+});
+
+test('引擎不会排空（发布脚本退出 76）：等空闲、记下从何时等；空了就发；等满 60 分钟照发（带 --busy-ok）', async () => {
+  const m = machine();
+  m.release = { code: EXIT_SESSIONS_BUSY, log: '', detail: '' };
   let st = await m.round();
-  assert.deepEqual(releases(m), []);
+  assert.deepEqual(releases(m), ['release b']);
   assert.equal(st.last.action, 'wait-idle');
   assert.equal(st.waitingSince, new Date(T0).toISOString());
-  assert.equal(st.busy, '17');
+  assert.equal(st.attempt, null);
   // 新提交来了也接着算，不从头等
   m.main.unshift([H2, '2026-09-27T08:10:00Z']);
   m.ci = runsBody(run(H2, 'completed', 'success'));
@@ -549,6 +550,7 @@ test('引擎有会话在跑：等空闲、记下从何时等；空了就发；�
   st = await m.round();
   assert.equal(st.last.action, 'wait-idle');
   assert.equal(st.waitingSince, new Date(T0).toISOString());
+  m.release = { code: 0, log: '', detail: '' };
   m.t = T0 + IDLE_WAIT_MS;
   st = await m.round();
   assert.deepEqual(releases(m), ['release c busy-ok']);
@@ -556,26 +558,12 @@ test('引擎有会话在跑：等空闲、记下从何时等；空了就发；�
   assert.equal(st.waitingSince, null);
 
   const idle = machine();
-  idle.sessions = '17 active\n';
+  idle.release = { code: EXIT_SESSIONS_BUSY, log: '', detail: '' };
   await idle.round();
-  idle.sessions = '17 inactive\n';
+  idle.release = { code: 0, log: '', detail: '' };
   idle.t += 5 * MIN;
   await idle.round();
   assert.deepEqual(releases(idle), ['release b'], '空了就发，不带 --busy-ok');
-});
-
-test('会话列表读不到、认不出：按在跑算，不发', async () => {
-  for (const setup of [
-    (m) => (m.sessionsThrow = 'fleet-agent-scope list 退出码 1'),
-    (m) => (m.sessions = '没有空格的一行\n'),
-  ]) {
-    const m = machine();
-    setup(m);
-    const st = await m.round();
-    assert.deepEqual(releases(m), []);
-    assert.equal(st.last.action, 'wait-idle');
-    assert.match(st.busy, /没查成/);
-  }
 });
 
 test('切之前又看到会话在跑（发布脚本退出 76）、另一个发布在跑（75）：什么都没动，不算没成、不报警', async () => {
@@ -738,7 +726,7 @@ test('发之前状态文件写不进去：不发（发到一半这一轮没了�
 
 test('人手动退回、CI 红：之前等空闲的钟不接着走，下一个头从头等', async () => {
   const m = machine();
-  m.sessions = '17 active\n';
+  m.release = { code: EXIT_SESSIONS_BUSY, log: '', detail: '' };
   await m.round();
   assert.ok(m.state.waitingSince);
   m.ci = runsBody(run(H1, 'completed', 'failure'));
@@ -912,7 +900,7 @@ test('CI 结论：只认这个提交在 main 上那次 push 的 ci.yml，取最�
   assert.equal(ciVerdict(null, H1, at, now).verdict, 'unknown');
 });
 
-test('解析：主线列表、发布历史、会话列表认不出就抛，不拿半截当全部', () => {
+test('解析：主线列表、发布历史认不出就抛，不拿半截当全部', () => {
   assert.throws(() => parseMainLog(''), /空/);
   assert.throws(() => parseMainLog(`${H1} 不是时间`), /认不出/);
   assert.equal(parseMainLog(`${H1} 2026-09-27T07:30:00+02:00\n`)[0].at, '2026-09-27T05:30:00.000Z');
@@ -921,8 +909,6 @@ test('解析：主线列表、发布历史、会话列表认不出就抛，不�
     'unmerged',
     'auto',
   ]);
-  assert.deepEqual(parseScopes('1 active\n2 deactivating\n3 inactive\n4 failed\n'), ['1', '2']);
-  assert.throws(() => parseScopes('坏行'), /认不出/);
 });
 
 test('人手动切的才算按住：带 auto 的不算；主线头比那次新就不按住', () => {

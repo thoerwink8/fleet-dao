@@ -124,7 +124,12 @@ function prBody(body: PrBody, plan: string, specs: string): PrBodyInput {
   };
 }
 
-/** CI 的结论换成引擎的三态：绿、红、没查成（冲突、头变了、PR 关了、没跑、超时都是没查成，写明哪一种）。 */
+/**
+ * CI 的结论换成引擎的几态：绿、红、和主线冲突、头被改写了、没查成（PR 关了、没跑、超时都是没查成，写明哪一种）。
+ * 冲突、头被改写了单独分出来（不折进没查成）：冲突有确定的解法——并主线（core 的 nextFlow 见到 conflict 走
+ * sync-mainline，不算「没查成」的次数）；头被改写了（github 包已经先排除了「新头含着老头」的良性情形，见
+ * packages/github/src/pulls.ts 的 waitCi）不是重试能解决的，要人看，也不该被当成「没查成」再等三次才停下。
+ */
 export function ciResultOf(r: Awaited<ReturnType<EngineGitHub['waitCi']>>): CiResult {
   switch (r.state) {
     case 'green':
@@ -137,13 +142,18 @@ export function ciResultOf(r: Awaited<ReturnType<EngineGitHub['waitCi']>>): CiRe
         ...(r.digest ? { digest: r.digest } : {}),
       };
     case 'conflict':
-      return { state: 'unknown', head: r.head, failedChecks: [], detail: `和主线冲突，CI 没起：${r.detail}` };
-    case 'head_moved':
       return {
-        state: 'unknown',
+        state: 'conflict',
         head: r.head,
         failedChecks: [],
-        detail: `PR 的头变成了 ${r.actualHead}：${r.detail}`,
+        detail: `和主线冲突，CI 没起：${r.detail}`,
+      };
+    case 'head_moved':
+      return {
+        state: 'diverged',
+        head: r.actualHead,
+        failedChecks: [],
+        detail: `PR 的头从 ${r.head} 变成了 ${r.actualHead}，且新头不含老头：${r.detail}`,
       };
     case 'closed':
       return { state: 'unknown', head: r.head, failedChecks: [], detail: `PR 被关了：${r.detail}` };
@@ -428,8 +438,10 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
       const ci = ciResultOf(
         await mapped(() => gh.waitCi({ repo: input.repo, prNumber: input.prNumber, head: input.head }, ctx)),
       );
-      if (ci.state === 'unknown') {
-        // 没查成不是没过：不退回会话，交给失败分流（重试，再不行挂起）。
+      if (ci.state === 'unknown' || ci.state === 'conflict' || ci.state === 'diverged') {
+        // 没查成、和主线冲突、头被改写了：都不是没过，合并队列这一步（合并前在并好的头上再核一遍）还没接
+        // 并主线自己重试的机制（那一套在 Fusion 流程，见 packages/core/src/flow.ts）；不退回会话，交给失败分流
+        // （重试，再不行挂起）。
         throw new PortError('CI_UNKNOWN', ci.detail ?? 'CI 没查成', { retryable: true });
       }
       const failed = ci.failedChecks.join('、');

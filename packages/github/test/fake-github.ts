@@ -70,6 +70,10 @@ export interface PullState {
   /** PR 在 GitHub 眼里也是一张 issue：标签/里程碑走 /issues/ 那一套接口，这里跟着记。 */
   labels: string[];
   milestone: { number: number; title: string } | null;
+  /** 开着 GitHub 的自动合并（#348 作废、改派时要撤）。 */
+  auto_merge: boolean;
+  /** PR 上的评论（走 /issues/{n}/comments）。 */
+  comments: IssueState['comments'];
 }
 
 export interface CheckRunState {
@@ -138,7 +142,15 @@ export class FakeGitHub {
   /** 需求文档（Contents API），键是仓内路径。 */
   specs = new Map<string, { sha: string; content: string }>();
   checkRuns: CheckRunState[] = [];
-  statuses: { sha: string; context: string; state: string; updated_at: string }[] = [];
+  /** 提交状态，按贴的先后；creator 是谁贴的（POST /statuses 记成那个身份的机器人）。 */
+  statuses: {
+    sha: string;
+    context: string;
+    state: string;
+    updated_at: string;
+    description?: string;
+    creator?: GhUser | null;
+  }[] = [];
   workflowRuns = new Map<string, number>();
   refs = new Map<string, string>();
   /** compare main...<sha> 的 behind_by。 */
@@ -206,6 +218,8 @@ export class FakeGitHub {
       merged_at: init.merged_at ?? null,
       labels: init.labels ?? [],
       milestone: init.milestone ?? null,
+      auto_merge: init.auto_merge ?? false,
+      comments: init.comments ?? [],
     };
     if (pr.milestone) this.milestones.set(pr.milestone.number, pr.milestone.title);
     this.pulls.set(n, pr);
@@ -345,6 +359,7 @@ export class FakeGitHub {
       head: { ref: p.head.ref, sha: p.head.sha, repo: { full_name: full } },
       base: { ref: p.base.ref, sha: 'b'.repeat(40), repo: { full_name: full } },
       updated_at: p.updated_at,
+      auto_merge: p.auto_merge ? { merge_method: 'squash', enabled_by: this.human } : null,
     };
   }
 
@@ -378,6 +393,7 @@ export class FakeGitHub {
       updated_at: p.updated_at,
       labels: p.labels.map((name) => ({ name })),
       milestone: p.milestone,
+      pull_request: { url: `${API}/repos/${OWNER}/${REPO}/pulls/${p.number}` },
     };
   }
 
@@ -549,9 +565,14 @@ export class FakeGitHub {
         return this.json(200, out);
       }
       if (m === 'PATCH') {
-        const b = req.body as { title?: string; body?: string };
+        const b = req.body as { title?: string; body?: string; state?: 'open' | 'closed' };
         if (b.title !== undefined) pr.title = b.title;
         if (b.body !== undefined) pr.body = b.body;
+        if (b.state !== undefined && !pr.merged) {
+          pr.state = b.state;
+          // 和真 GitHub 一样：关掉的 PR 自动合并跟着没了
+          if (b.state === 'closed') pr.auto_merge = false;
+        }
         pr.updated_at = this.iso();
         return this.json(200, this.pullJson(pr));
       }
@@ -594,6 +615,36 @@ export class FakeGitHub {
     if (x && m === 'GET') {
       const statuses = this.statuses.filter((s) => s.sha === x?.[1]);
       return this.json(200, { state: 'pending', statuses });
+    }
+    // 逐条的列表：新到旧，带 creator（真 GitHub 一样；合并状态接口 /status 不带）
+    x = /^\/commits\/([0-9a-f]+)\/statuses$/.exec(rest);
+    if (x && m === 'GET') {
+      const list = this.statuses.filter((s) => s.sha === x?.[1]).reverse();
+      return this.page(
+        req,
+        list.map(({ sha: _sha, ...s }) => ({ ...s, creator: s.creator ?? null })),
+      );
+    }
+    x = /^\/statuses\/([0-9a-f]+)$/.exec(rest);
+    if (x && m === 'POST') {
+      if (this.permissions[role]?.statuses !== 'write')
+        return this.json(403, { message: 'Resource not accessible by integration' });
+      const b = req.body as { state: string; context: string; description?: string };
+      const st = {
+        sha: x[1] ?? '',
+        context: b.context,
+        state: b.state,
+        description: b.description ?? '',
+        creator: this.user(role),
+        updated_at: this.iso(),
+      };
+      this.statuses.push(st);
+      return this.json(201, {
+        context: st.context,
+        state: st.state,
+        description: st.description,
+        creator: st.creator,
+      });
     }
     if (rest === '/actions/runs' && m === 'GET') {
       return this.json(200, {
@@ -728,7 +779,8 @@ export class FakeGitHub {
     }
     x = /^\/issues\/(\d+)\/comments$/.exec(rest);
     if (x) {
-      const issue = this.issues.get(Number(x[1]));
+      // PR 的评论也走这个接口（PR 在 GitHub 眼里也是一张 issue）
+      const issue = this.issues.get(Number(x[1])) ?? this.pulls.get(Number(x[1]));
       if (!issue) return this.notFound();
       const view = (c: IssueState['comments'][number]) => ({
         id: c.id,
@@ -861,6 +913,18 @@ export class FakeGitHub {
       return this.json(200, {
         data: { repository: { milestones: { totalCount: open.length, nodes: open } } },
       });
+    }
+    if (query.includes('disablePullRequestAutoMerge')) {
+      const n = Number(String(variables.id).replace('PR_', ''));
+      const pr = this.pulls.get(n);
+      if (!pr) return this.json(200, { data: null, errors: [{ type: 'NOT_FOUND', message: 'not found' }] });
+      if (!pr.auto_merge)
+        return this.json(200, {
+          data: { disablePullRequestAutoMerge: null },
+          errors: [{ type: 'UNPROCESSABLE', message: 'Pull request auto merge is not enabled' }],
+        });
+      pr.auto_merge = false;
+      return this.json(200, { data: { disablePullRequestAutoMerge: { pullRequest: { number: n } } } });
     }
     if (query.includes('markPullRequestReadyForReview')) {
       const n = Number(String(variables.id).replace('PR_', ''));

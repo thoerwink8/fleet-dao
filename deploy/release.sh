@@ -10,8 +10,11 @@
 #   bash deploy/release.sh <提交号> --unmerged   发还没合进主线的提交（只用来合并前在真机上验；历史里会标出来）
 #   bash deploy/release.sh <提交号> --auto [--busy-ok]
 #                                                自动发布（fleet-auto-release）用：不发演示版（对外，人闸；只核对香港上的
-#                                                还是上次人发的那份）、历史行带 auto、切之前引擎有会话在跑就不切（--busy-ok
-#                                                照切）；这两种「没动」单给退出码
+#                                                还是上次人发的那份）、历史行带 auto；引擎不会排空（这一版之前的）时切之前
+#                                                有会话在跑就不切（--busy-ok 照切）；这两种「没动」单给退出码
+#   发布、退回加 --now：不给在跑的会话宽限，马上停下（按编号续上）；急修、急退用
+# 要换引擎的版本时先排空（packages/engine/src/drain.ts）：一开始就写排空请求（$DRAIN_REQUEST），引擎马上不起新会话，在跑的最多再做
+# DRAIN_GRACE 秒（和构建一起走），到点没做完的由引擎按切号那一套停下、新引擎起来按编号续上；排空完停引擎，再迁移、切版本。
 # 每一版在 /srv/fleet-dao-releases/<提交号>，current 指着在用的那版；留最近 5 版。目录、单元、本机配置、怎么看、
 # 怎么退：docs/ops.md 第九节。退出码同装机脚本：0 全绿，1 有红（含「没过健康检查、已退回」），2 没红但有待配；
 # 只有 --auto 才有的：75 另一个发布在跑、76 切之前看到会话在跑——这两种什么都没动（构建留着，下次直接用）。
@@ -57,7 +60,21 @@ DEMO_RECORD=$RELEASES/.demo-published
 EXIT_RELEASE_BUSY=75
 EXIT_SESSIONS_BUSY=76
 AUTO=0    # --auto：自动发布起的
-BUSY_OK=0 # --busy-ok：等空闲到了上限，引擎有会话在跑也切
+BUSY_OK=0 # --busy-ok：引擎不会排空时（这一版之前的引擎），等空闲到了上限，有会话在跑也切
+NOW_MODE=0 # --now：不给在跑的会话宽限
+# 发布前排空引擎（packages/engine/src/drain.ts、drain-control.ts）。改宽限要和引擎的 RELEASE_GRACE_MS、fleet-engine.service 的
+# TimeoutStopSec 一起改（packages/engine/test/drain.test.ts 核对）。请求只在发布锁占着时算数：这个脚本中途没了，引擎不会一直停着不派
+DRAIN_GRACE=600                  # 宽限（秒）：在跑的会话最多再做这么久
+DRAIN_REQUEST=$RELEASES/.drain-request
+DRAIN_STOP_REPORT=120            # 到截止引擎叫停会话以后，等它们交回最多这么久（秒，和引擎的 STOP_REPORT_MS 同一个数）
+DRAIN_SLACK=60                   # 再多等这么久才不等了、直接停（秒）
+DRAIN_POLL=10                    # 多久看一次排空进度（秒）
+ENGINE_ENV=/etc/fleet-dao/engine.env
+ENGINE_STATE_DEFAULT=/var/lib/fleet-dao/engine # 引擎写 drain.json 的地方（engine.env 的 FLEET_ENGINE_STATE_DIR，没写取它）
+DRAIN_WROTE=0    # 这次写了排空请求、还没撤
+DRAIN_UNTIL=0    # 请求里的截止（秒）
+ENGINE_DRAINS=0  # 在跑的引擎会排空（认了 drain.json）
+ENGINE_STOPPED=0 # 这次把引擎停下了、还没起回来：没走到切版本就失败，收尾时照原样起回来
 
 FLEET_SERVICES=""
 FLEET_DOMAIN=""
@@ -79,13 +96,15 @@ usage() {
   bash deploy/release.sh <提交号> --unmerged   发还没合进主线的提交（合并前在真机上验）
   bash deploy/release.sh <提交号> --auto [--busy-ok]
                                                自动发布用（fleet-auto-release 起，人不用）
-  bash deploy/release.sh --rollback            退回上一版
+  bash deploy/release.sh [<提交号>] --now      发布，不给在跑的会话宽限（马上停下、按编号续上）
+  bash deploy/release.sh --rollback [--now]    退回上一版
   bash deploy/release.sh --check               只读：看在用哪版、服务与健康
 EOF
 }
 
 # --auto 这次不发、什么都没动（另一个发布在跑、会话在跑）：照样给出结论，退出码单列
 not_now() { # 退出码 原因
+  drain_withdraw
   pending "$2"
   printf '\n== 结论\n这次没发：%s。什么都没动\n' "$2"
   exit "$1"
@@ -239,6 +258,10 @@ take_lock() {
 # 等空闲到了上限（fleet-auto-release 定的），它带 --busy-ok 来，照切：会话按编号续上（design 第四节「会话断了接着干」）
 auto_gate() {
   local out busy bad
+  if ((ENGINE_DRAINS)); then
+    ok "自动发布：引擎会排空（不起新会话、在跑的最多再做 $((DRAIN_GRACE / 60)) 分钟），不等空闲"
+    return 0
+  fi
   if ((BUSY_OK)); then
     ok "自动发布：等空闲到了上限，引擎有会话在跑也切（会话按编号续上）"
     return 0
@@ -256,6 +279,124 @@ auto_gate() {
     not_now "$EXIT_SESSIONS_BUSY" "引擎有会话在跑（${busy% }），这次不切；构建留着，下一轮直接用"
   fi
   ok "自动发布：引擎没有会话在跑，切"
+}
+
+# ── 排空引擎 ──
+
+# 引擎写的 drain.json 读成一行：「ok <在排空 0/1> <截止秒> <会话数> <会话列表>」或「no <为什么不信>」。
+# pid 对不上 systemd 的 MainPID 就是上一个进程留下的，不信；读不成、认不出照实说
+engine_drain_status() { # 引擎主进程号
+  local dir
+  dir=$(kv_get "$ENGINE_ENV" FLEET_ENGINE_STATE_DIR)
+  "$NODE" -e '
+    const fs = require("fs");
+    const [file, pid] = process.argv.slice(1);
+    let text;
+    try { text = fs.readFileSync(file, "utf8"); } catch (e) {
+      console.log(e.code === "ENOENT" ? "no 没有 " + file + "（这一版之前的引擎不写它，不会排空）" : "no " + file + " 读不成：" + e.message);
+      process.exit(0);
+    }
+    let st;
+    try { st = JSON.parse(text); } catch (e) { console.log("no " + file + " 认不出：" + e.message); process.exit(0); }
+    if (!st || st.schema !== 2) { console.log("no " + file + " 的 schema 不是 2（" + JSON.stringify(st && st.schema) + "）"); process.exit(0); }
+    if (String(st.pid) !== pid) { console.log("no " + file + " 是上一个进程（" + st.pid + "）留下的，在跑的是 " + pid); process.exit(0); }
+    const list = Array.isArray(st.sessions) ? st.sessions : [];
+    const until = st.cordon ? Math.floor(Date.parse(st.cordon.until) / 1000) || 0 : 0;
+    const names = list.map((x) => x.stage + "(" + String(x.runId).slice(0, 8) + ")").join("、");
+    console.log(["ok", st.cordon ? 1 : 0, until, list.length, names || "-"].join(" "));
+  ' "${dir:-$ENGINE_STATE_DEFAULT}/drain.json" "$1"
+}
+
+# 要换引擎的版本（引擎在跑、跑的不是这一版）就写排空请求：引擎认了马上不起新会话。宽限和构建一起走，所以要早写。
+# 引擎认不认 drain.json（会不会排空）也在这里定：不会排空的（这一版之前的引擎），自动发布照旧看会话（auto_gate）
+drain_request() { # 要切到的提交号 宽限（秒）
+  local sha=$1 grace=$2 pid st by=manual now tmp
+  ENGINE_DRAINS=0
+  if ! has_service fleet-engine || [[ "$(systemctl is-active fleet-engine.service 2>/dev/null)" != active ]]; then return 0; fi
+  if [[ "$(running_release fleet-engine.service)" == "$RELEASES/$sha" ]]; then return 0; fi
+  pid=$(unit_prop fleet-engine.service MainPID)
+  st=$(engine_drain_status "$pid") || st="no drain.json 没读成（node 没跑成）"
+  if [[ "$st" == ok\ * ]]; then
+    ENGINE_DRAINS=1
+  else
+    pending "在跑的引擎不会排空：${st#no }。这次切版本照旧重启引擎，在跑的会话会断、新引擎起来按编号续上"
+  fi
+  if ((AUTO)); then by=auto; fi
+  if [[ "${FUNCNAME[1]:-}" == do_rollback ]]; then by=rollback; fi
+  now=$(date -u +%s)
+  DRAIN_UNTIL=$((now + grace))
+  tmp=$DRAIN_REQUEST.tmp
+  printf '{"schema":1,"sha":"%s","requestedAt":"%s","until":"%s","by":"%s"}\n' "$sha" \
+    "$(date -u -d "@$now" +%Y-%m-%dT%H:%M:%SZ)" "$(date -u -d "@$DRAIN_UNTIL" +%Y-%m-%dT%H:%M:%SZ)" "$by" >"$tmp"
+  chmod 644 -- "$tmp"
+  mv -f -- "$tmp" "$DRAIN_REQUEST"
+  DRAIN_WROTE=1
+  if ((ENGINE_DRAINS)); then
+    changed "排空请求：引擎不起新会话，在跑的最晚做到 $(date -u -d "@$DRAIN_UNTIL" +%H:%M:%SZ)（$((grace / 60)) 分钟），到点没做完的停下、新引擎起来按编号续上"
+  fi
+}
+
+# 撤掉排空请求（没走到切版本就不发了、或者引擎已经停下）：引擎下一眼就接着派
+drain_withdraw() {
+  if ((DRAIN_WROTE)); then
+    rm -f -- "$DRAIN_REQUEST"
+    DRAIN_WROTE=0
+  fi
+}
+
+# 等排空、停引擎：手上的会话都交回了（或者到了截止、引擎叫停后也等过了交回）就停。停下以后撤请求（新引擎起来不能再认它）。
+# 引擎不会排空的：直接停（会话会断，按编号续上），和原来一样
+drain_engine() {
+  local st pid now last=0 cap
+  if ((DRAIN_WROTE == 0)); then return 0; fi
+  if ((ENGINE_DRAINS)); then
+    cap=$((DRAIN_UNTIL + DRAIN_STOP_REPORT + DRAIN_SLACK))
+    while :; do
+      pid=$(unit_prop fleet-engine.service MainPID)
+      st=$(engine_drain_status "$pid") || st="no drain.json 没读成"
+      now=$(date -u +%s)
+      if [[ "$st" != ok\ * ]]; then
+        pending "排空进度读不到（${st#no }）：不等了，直接停引擎（在跑的会话会断，按编号续上）"
+        break
+      fi
+      read -r _ _ _ n names <<<"$st"
+      if ((n == 0)); then
+        ok "引擎排空了：手上没有会话"
+        break
+      fi
+      if ((now >= cap)); then
+        pending "排空等到了上限（截止后又等了 $((DRAIN_STOP_REPORT + DRAIN_SLACK)) 秒），还有 $n 个会话没交回（$names）：照停，新引擎起来按编号续上"
+        break
+      fi
+      if ((now - last >= 60)); then
+        echo "  · 排空中：还在等 $n 个会话（$names），截止 $(date -u -d "@$DRAIN_UNTIL" +%H:%M:%SZ)；不想等：systemctl kill --kill-whom=main -s TERM fleet-engine（再发一次停机信号，马上停）"
+        last=$now
+      fi
+      sleep "$DRAIN_POLL"
+    done
+  fi
+  if ! systemctl stop fleet-engine.service; then
+    red "停不下 fleet-engine（排空之后）：journalctl -u fleet-engine -n 50 看现场"
+    return 1
+  fi
+  ENGINE_STOPPED=1
+  drain_withdraw
+  changed "停下引擎（切版本之前）"
+}
+
+# 收尾（common.sh 的 finish 先调它）：撤掉没撤的排空请求；这次停下了引擎、没走到切版本（没起回来），照原样起回来——
+# 引擎不能因为发布没成就一直停着
+finish_hook() {
+  drain_withdraw
+  if ((ENGINE_STOPPED)) && has_service fleet-engine &&
+    [[ "$(systemctl is-active fleet-engine.service 2>/dev/null)" != active ]]; then
+    if systemctl start fleet-engine.service; then
+      changed "发布没走到切版本：把停下的引擎起回来（$(short "$(current_sha)" 在用的)），接着派"
+    else
+      red "发布没走到切版本，停下的引擎也起不回来：systemctl start fleet-engine；journalctl -u fleet-engine -n 50"
+    fi
+  fi
+  ENGINE_STOPPED=0
 }
 
 # ── 取代码、构建 ──
@@ -1235,11 +1376,16 @@ prune() {
   done
 }
 
+# 这次给在跑的会话多少宽限（秒）：--now 不给
+drain_grace() { if ((NOW_MODE)); then echo 0; else echo "$DRAIN_GRACE"; fi; }
+
 # ── 三种用法 ──
 
 do_release() { # 要发的提交（空 = 主线最新）
   local cur before=""
   fetch_code "$1"
+  # 排空请求在构建之前写：宽限和构建一起走
+  drain_request "$SHA" "$(drain_grace)"
   build_release "$SHA"
   if ((AUTO)); then auto_gate; fi
   cur=$(current_sha)
@@ -1247,6 +1393,8 @@ do_release() { # 要发的提交（空 = 主线最新）
   # 直接发一个老提交也一样把关：库里的迁移比它带的多就不切（drizzle 碰到比代码新的迁移记录什么也不做、也不报错，
   # 光靠迁移那一步拦不住）。放在迁移之前：老版本的迁移程序连库都不碰
   schema_allows "$SHA" 切到 || return 1
+  # 迁移之前停引擎：排空的这几分钟里旧引擎还在跑，不能让它对着新的库结构
+  drain_engine || return 1
   migrate "$SHA"
   load_catalog "$SHA" || return 1
   before=$(api_report_before)
@@ -1268,7 +1416,11 @@ do_release() { # 要发的提交（空 = 主线最新）
     step "自动退回上一版 ${cur:0:12}"
     if ! schema_allows "$cur"; then
       red "${SHA:0:12} 没过健康检查，也没自动退回（库的迁移比上一版新，见上）：停在 ${SHA:0:12}，要人来看"
-    elif activate "$cur" auto-rollback && health_gate "$cur" ""; then
+    elif
+      # 新版不健康：它刚起来那几分钟起的会话不给宽限，马上停下（按编号续上），尽快退回
+      drain_request "$cur" 0
+      drain_engine && activate "$cur" auto-rollback && health_gate "$cur" ""
+    then
       ok "已退回 ${cur:0:12}，健康检查过了"
       red "${SHA:0:12} 没过健康检查，已自动退回 ${cur:0:12}（原因见上面的红）"
     else
@@ -1291,6 +1443,8 @@ do_rollback() {
   step "退回 ${prev:0:12}（在用：$(short "$cur" 没有)）"
   schema_allows "$prev" || return 1
   hk_reachable || return 1
+  drain_request "$prev" "$(drain_grace)"
+  drain_engine || return 1
   if activate "$prev" rollback && health_gate "$prev" ""; then
     ok "已退回 ${prev:0:12}"
   else
@@ -1412,6 +1566,7 @@ main() {
     --unmerged) UNMERGED=1 ;;
     --auto) AUTO=1 ;;
     --busy-ok) BUSY_OK=1 ;;
+    --now) NOW_MODE=1 ;;
     -h | --help)
       usage
       exit 0
@@ -1433,8 +1588,9 @@ main() {
     usage >&2
     exit 64
   fi
-  # 自动发布只发给定的、主线上的提交；--busy-ok 只跟着 --auto
-  if { ((AUTO)) && [[ -z "$target" || "$UNMERGED" == 1 ]]; } || { ((BUSY_OK)) && ((AUTO == 0)); }; then
+  # 自动发布只发给定的、主线上的提交；--busy-ok 只跟着 --auto；--now 是人急修、急退用的，不跟 --auto、--check
+  if { ((AUTO)) && [[ -z "$target" || "$UNMERGED" == 1 ]]; } || { ((BUSY_OK)) && ((AUTO == 0)); } ||
+    { ((NOW_MODE)) && { ((AUTO)) || [[ "$mode" == check ]]; }; }; then
     usage >&2
     exit 64
   fi
@@ -1454,6 +1610,8 @@ main() {
   fi
   ensure_dir "$RELEASES" root:root 755
   take_lock
+  # 最后一道：脚本怎么退都撤掉排空请求（引擎那头只在发布锁占着时认它，这里撤是为了马上接着派）
+  trap 'drain_withdraw' EXIT
   if [[ "$mode" == rollback ]]; then do_rollback; else do_release "$target"; fi
   finish
 }

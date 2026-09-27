@@ -76,9 +76,7 @@ describe('规则表和夹具对得上', () => {
     for (const s of FIXTURE.samples) byRule.set(s.expect.rule, [...(byRule.get(s.expect.rule) ?? []), s]);
     const ruleIds = RULES.map((r) => r.id);
     expect(ruleIds.filter((id) => !byRule.has(id))).toEqual([]);
-    expect(ruleIds.filter((id) => byRule.get(id)?.every((s) => s.provenance === 'synthetic'))).toEqual([
-      'KL2',
-    ]);
+    expect(ruleIds.filter((id) => byRule.get(id)?.every((s) => s.provenance === 'synthetic'))).toEqual([]);
     // 夹具里期望的规则都真实存在（FB = 认不出走兜底梯）。
     const known = new Set([...ruleIds, 'FB']);
     expect([...byRule.keys()].filter((id) => !known.has(id))).toEqual([]);

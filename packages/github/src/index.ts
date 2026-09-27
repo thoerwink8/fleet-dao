@@ -19,6 +19,13 @@ export {
   mirrorChecks,
 } from './checks.ts';
 export {
+  type ClaimsGitHub,
+  type CommitStatusInput,
+  createClaimsGitHub,
+  type LatestStatus,
+  type PullFacts,
+} from './claims.ts';
+export {
   type Auth,
   type GhRequest,
   type GhResponse,
@@ -110,6 +117,7 @@ export {
   type CommentIssueResult,
   closeIssue,
   commentIssue,
+  commentPull,
   ISSUE_TITLE_LIMIT,
   type OpenIssueInput,
   type OpenIssueResult,

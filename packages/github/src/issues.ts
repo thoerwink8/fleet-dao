@@ -605,6 +605,27 @@ export async function commentIssue(
   input: CommentIssueInput,
   ctx: ActivityContext = {},
 ): Promise<CommentIssueResult> {
+  return commentOn(deps, input, ctx, 'issue');
+}
+
+/**
+ * 在一个 PR 上留一条评论（幂等，按 key 认）：认领作废、强制改派时给旧 PR 留话（#348）。号不是 PR 的抛错，不往 issue 上写。
+ * issueNumber 填 PR 号（GitHub 眼里 PR 也是一张 issue，评论走同一个接口）。
+ */
+export async function commentPull(
+  deps: Deps,
+  input: CommentIssueInput,
+  ctx: ActivityContext = {},
+): Promise<CommentIssueResult> {
+  return commentOn(deps, input, ctx, 'pull');
+}
+
+async function commentOn(
+  deps: Deps,
+  input: CommentIssueInput,
+  ctx: ActivityContext,
+  kind: 'issue' | 'pull',
+): Promise<CommentIssueResult> {
   const { repo, issueNumber, key } = input;
   const slug = repoSlug(repo);
   const idemKey = idempotencyKey('issue_comment', `${slug.toLowerCase()}#${issueNumber}`, { key });
@@ -615,7 +636,8 @@ export async function commentIssue(
     return { commentId: recorded.data.id, url: recorded.data.url, created: false };
   }
   const issue = await readIssue(deps, repo, issueNumber, ctx.signal);
-  assertIssue(issue, repo);
+  if (kind === 'issue') assertIssue(issue, repo);
+  else if (!isPullRequest(issue)) throw new GitHubError('NOT_A_PULL', `${slug} #${issueNumber} 不是 PR`);
 
   // 正文是 AI 写的（提问或回答）：中和之后照开单一样过卫生检查
   const safeBody = neutralizeMentions(input.body);
@@ -635,6 +657,14 @@ export async function commentIssue(
     { body, marker, key: idemKey, action: 'github.issue_comment' },
     ctx,
   );
-  if (value.updatedAt) await issueEcho(deps, repo, issueNumber, value.updatedAt);
+  if (value.updatedAt) {
+    if (kind === 'issue') await issueEcho(deps, repo, issueNumber, value.updatedAt);
+    else
+      await recordEcho(
+        deps.ledger.idempotency,
+        { repo, kind: 'pull', number: issueNumber, updatedAt: value.updatedAt, role: 'engine' },
+        deps.client.now(),
+      );
+  }
   return { commentId: value.id, url: value.url, created: !replay };
 }

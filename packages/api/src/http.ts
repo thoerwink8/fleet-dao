@@ -22,6 +22,20 @@ export function errorBody(code: string, message: string, details?: unknown) {
   return { error: { code, message, ...(details === undefined ? {} : { details }) } };
 }
 
+/**
+ * err.stack 不含 cause 链（Node 的 Error.prototype.stack 只是这个错误自己的栈，`.cause` 要自己往下找；
+ * 只有 console.error/util.inspect 才会自动展开）：drizzle 把驱动的错包成「Failed query: …」时，真正的
+ * SQLSTATE、驱动原话都挂在 cause 上（pg-store.ts 的 sqlState() 就是这么读的）——日志只打 `err.stack` 会把
+ * cause 整段吞掉，只剩一句「Failed query」，看不出为什么（#364 这条链反复报错、一直没查出根因，就是这么被
+ * 日志本身挡住的：journalctl 里那条 Failed query 后面没有跟着 sqlstate 和驱动的原话）。
+ */
+export function fullStack(err: unknown, depth = 0): string {
+  if (depth > 5) return '…（cause 链太深，截断）';
+  if (!(err instanceof Error)) return String(err);
+  const head = err.stack ?? err.message;
+  return err.cause === undefined ? head : `${head}\ncaused by: ${fullStack(err.cause, depth + 1)}`;
+}
+
 export function errorHandler(log: Logger): ErrorHandler {
   return (err, c) => {
     if (err instanceof ApiError) {
@@ -35,7 +49,7 @@ export function errorHandler(log: Logger): ErrorHandler {
     }
     // 游标看不懂回 400，不回空页：空页会被前端当成「后面没有了」。
     if (err instanceof InvalidCursorError) return c.json(errorBody('invalid_cursor', err.message), 400);
-    log.error('未处理的错误', { method: c.req.method, path: c.req.path, error: String(err.stack ?? err) });
+    log.error('未处理的错误', { method: c.req.method, path: c.req.path, error: fullStack(err) });
     return c.json(errorBody('internal', '后端出错了，已记日志'), 500);
   };
 }
