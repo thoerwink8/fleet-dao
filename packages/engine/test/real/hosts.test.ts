@@ -916,7 +916,7 @@ describe('模型串 → Mirasim 执行体（MIRASIM_AGENT_BY_MODEL）', () => {
     expect(mirasimAgentFor('deepseek-flash')).toBe('dsh');
   });
 
-  it('认不出的模型串：明确报错，不落到某个默认执行体上（新路由忘了改这张表会当场炸，不会悄悄派错执行体）', () => {
+  it('插头读到认不出的输出——模型串不在这张表里：明确报错，不落到某个默认执行体上（新路由忘了改这张表会当场炸，不会悄悄派错执行体）【故意造出的失败】', () => {
     expect(() => mirasimAgentFor('glm-6')).toThrow('Mirasim 认不出这个模型该起哪个执行体：glm-6');
     expect(() => mirasimAgentFor('')).toThrow('Mirasim 认不出这个模型该起哪个执行体：');
     // 报错里列出现在认得的几个，方便照着改表

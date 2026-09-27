@@ -6,7 +6,9 @@ import { describe, expect, it } from 'vitest';
 import { judgeRun } from '../src/judge.ts';
 import { ledgerRouting, readMirasimLedger } from '../src/mirasim/ledger.ts';
 import {
+  type MirasimRunReport,
   type MirasimRunSpec,
+  mirasimRunFacts,
   mirasimRunSummary,
   runMirasim,
   stopMirasimSession,
@@ -115,6 +117,39 @@ describe('Mirasim 会话状态（真跑夹具）', () => {
     const b = new MirasimSession({ runId: 'r1', cwd: '/w' });
     b.applySnapshot(1, { phase: 'done', incomplete: true });
     expect(b.terminal()?.isError).toBe(true);
+  });
+
+  it('中继返回额度用完：判成账号池额度用满，不当成上游抖动或普通失败【故意造出的失败】（#345，别踩 GK-08 那个坑）', () => {
+    const report = (runId: string, error: string): MirasimRunReport => {
+      const s = new MirasimSession({ runId, cwd: '/w' });
+      s.applySnapshot(1, { phase: 'done', error });
+      const terminal = s.terminal();
+      if (!terminal) throw new Error('测试没搭好：给了 error 应该已经是终态');
+      return {
+        runId,
+        agent: 'dsh',
+        route: 'cloud',
+        resumed: false,
+        session: s.summary(),
+        terminal,
+        foreignFrames: 0,
+        resubscribes: 0,
+        reconnects: 0,
+        startedAt: '2026-01-01T00:00:00.000Z',
+        endedAt: '2026-01-01T00:00:05.000Z',
+        wallMs: 5000,
+      };
+    };
+    // 中继账号级额度用满（关继账本共扣的那份，docs/reference/quota.md 「Mirasim 中转账号」一行的用满报法）
+    const quotaFacts = mirasimRunFacts(report('r-quota', '中继 7 天额度已用满，约 2 小时后重置'));
+    expect(quotaFacts.quotaExhausted).toBe(true);
+    expect(judgeRun(quotaFacts)).toMatchObject({ outcome: 'failed', reason: 'quota_exhausted' });
+    // 对照：模型繁忙是上游抖动（docs/reference/adapters.md 里「常见失败与报错原文」一段的原话），不该混进额度用满
+    const busyFacts = mirasimRunFacts(
+      report('r-busy', 'Selected model is at capacity. Please try a different model.'),
+    );
+    expect(busyFacts.quotaExhausted).toBe(false);
+    expect(judgeRun(busyFacts).reason).not.toBe('quota_exhausted');
   });
 });
 
@@ -736,6 +771,17 @@ describe('Mirasim 连接', () => {
       mirasimConnector({ port, tokenFile: join(dir, 't'), connectTimeoutMs: 1_200 })(),
     ).rejects.toThrow('连不上 Mirasim');
     expect(Date.now() - t0).toBeGreaterThanOrEqual(400);
+  });
+
+  it('法国上 Mirasim 服务不在、连不上：插头不吞掉这个错，原样报出来判失败【故意造出的失败】', async () => {
+    const down = await runMirasim(
+      { runId: 'r1', cwd: tempDir(), prompt: 'x', agent: 'dsh', route: 'cloud', session: { mode: 'new' } },
+      { connect: new FakeMirasim({ refuse: true }).connect },
+    );
+    expect(down.launchError).toBe('ECONNREFUSED');
+    const facts = mirasimRunFacts(down);
+    expect(facts.spawnError).toBe('ECONNREFUSED');
+    expect(judgeRun(facts)).toMatchObject({ outcome: 'failed', reason: 'spawn_failed' });
   });
 
   it('令牌文件读不了、是空的：明说，不连', async () => {

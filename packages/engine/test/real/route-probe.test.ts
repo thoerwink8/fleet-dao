@@ -856,6 +856,17 @@ describe('Mirasim 的路由（#345）：和干活的会话同一个驱动探，�
     expect(down?.probeDetail).toContain('服务端没有 dsh 这个执行体');
   });
 
+  it('探针探不通——法国上这个会话用户的 Mirasim 服务连不上：离线、写明连不上，不当成还在线【故意造出的失败】', async () => {
+    const s = setup(answered, {
+      mirasim: () => ({ noAccept: true, report: { launchError: 'ECONNREFUSED' } }),
+    });
+    await s.round();
+    const down = await row(routeId);
+    expect(down).toMatchObject({ alive: false, probeState: 'failed' });
+    expect(down?.probeDetail).toContain('没起来');
+    expect(down?.probeDetail).toContain('ECONNREFUSED');
+  });
+
   it('快照说 done，但账本没给目录：中转到底走没走上游没查成，不当成探通（DL3）', async () => {
     const s = setup(answered, {
       mirasim: () => ({ state: { text: 'OK' }, report: { ledger: undefined } }),
