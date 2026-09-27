@@ -51,12 +51,20 @@ type WindowReading = Pick<
   'utilization' | 'used' | 'limit' | 'upstreamStatus' | 'resetsAt' | 'readAt'
 >;
 
-export function windowState(w: WindowReading, now: Date, staleAfterMs = QUOTA_STALE_AFTER_MS): WindowState {
-  if (w.resetsAt !== null && w.resetsAt.getTime() <= now.getTime()) return 'reset';
-  const full =
+/** 读数本身说用满了（被拒、用量到顶）：不看读数新旧、清零时刻过没过（那两样归 windowState）。 */
+export function windowFull(
+  w: Pick<WindowReading, 'utilization' | 'used' | 'limit' | 'upstreamStatus'>,
+): boolean {
+  return (
     w.upstreamStatus === 'limit_reached' ||
     (w.utilization !== null && w.utilization >= 1) ||
-    (w.used !== null && w.limit !== null && w.used >= w.limit);
+    (w.used !== null && w.limit !== null && w.used >= w.limit)
+  );
+}
+
+export function windowState(w: WindowReading, now: Date, staleAfterMs = QUOTA_STALE_AFTER_MS): WindowState {
+  if (w.resetsAt !== null && w.resetsAt.getTime() <= now.getTime()) return 'reset';
+  const full = windowFull(w);
   const stale = now.getTime() - w.readAt.getTime() > staleAfterMs;
   if (full && (!stale || w.resetsAt !== null)) return 'exhausted';
   if (stale) return 'stale';

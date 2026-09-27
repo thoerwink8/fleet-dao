@@ -1,11 +1,13 @@
-// 路由探针（#129，design 第九节「路由探针」）：一轮 = 记下开始 → 读全部路由 → 逐条定探不探 → 该探的真起一次最小会话
-// → 每条写一条结论（只有 ok 在线，其余一律不在线、写明原因）→ 结局记进 schedule_runs。按一次的成本放慢的执行方式
-// （cursor-agent、grok），上一次探通了、还没到再探的时候，这一轮不探、不重写，结论照旧（它的过期线也跟着放宽，routeProbeStaleMinutes）。
+// 路由探针（#129，design 第九节「路由探针」）：一轮 = 记下开始 → 读全部路由 → 会话用户该不该切号（#157，org-switch.ts；
+// 切了这一轮探完核对）→ 逐条定探不探 → 该探的真起一次最小会话 → 每条写一条结论（只有 ok 在线，其余一律不在线、
+// 写明原因）→ 结局记进 schedule_runs。按一次的成本放慢的执行方式（cursor-agent、grok），上一次探通了、还没到再探的
+// 时候，这一轮不探、不重写，结论照旧（它的过期线也跟着放宽，routeProbeStaleMinutes）。
 // scanned = 这一轮看过的路由条数（写下结论的，加上结论照旧的），found = 其中不在线的条数（驾驶舱「定时任务」页和调度台的
 // 在线数对得上）。没跑成、一条都没写进去、只写进去一部分，照实记 failed / unscanned / partial，不记成 ok（没跑成 ≠ 没问题）。
 import type { RouteProbeTarget, ScheduleResult } from '@fleet-dao/db';
 import {
   type HostId,
+  type OrgKind,
   ROUTE_PROBE_EVERY_MINUTES,
   type RouteProbeState,
   routeProbeEveryMinutes,
@@ -14,6 +16,7 @@ import type { RouteProbeRun } from '../contract.ts';
 import { hostName, ORG_NAMES } from '../routing/names.ts';
 import type { LiveOrgReading } from '../routing/types.ts';
 import type { ScheduleRunLog } from './github-reconcile.ts';
+import type { OrgSwitchRound } from './org-switch.ts';
 
 /** 登记进 scheduled_jobs 的那一行：一次都没跑过也列得出来。 */
 export const ROUTE_PROBE_JOB = {
@@ -63,6 +66,11 @@ export interface RouteProbeJobDeps {
    * 只在探带组织类型的池（Claude 订阅）之前读，一条读一次（读成了的留一会儿），等到读完；不许抛，读不到、认不出回 ok: false。
    */
   sessionOrg(): Promise<LiveOrgReading>;
+  /**
+   * 会话用户切号（#157，真实现 real/org-switch.ts）：每一轮探之前判一次、该切就切（切完这一轮探的就是切过去的组织），
+   * 切过了这一轮探完核对切过去的那个池探通了没有。不给就不切。
+   */
+  orgSwitch?: OrgSwitchRound;
   /** 写一条结论（真实现是 saveRouteProbe）；路由这一轮当中被删了回 route_not_found。 */
   save(write: {
     routeId: string;
@@ -149,7 +157,7 @@ export function planProbe(
       const name = ORG_NAMES[live.org];
       return {
         state: 'skipped',
-        detail: `会话用户现在挂的是${name}组织：这时探${ORG_NAMES[t.orgKind]}池，扣的是${name}的额度、探的也是${name}，不探（切号见 #59）`,
+        detail: `会话用户现在挂的是${name}组织：这时探${ORG_NAMES[t.orgKind]}池，扣的是${name}的额度、探的也是${name}，不探（拼车用满切独享、恢复了切回，引擎在探针每一轮探之前判）`,
       };
     }
   }
@@ -231,6 +239,17 @@ async function conclude(deps: RouteProbeJobDeps, t: ProbeTarget): Promise<Conclu
   };
 }
 
+/** 这一轮探之前的切号：约好了不抛，万一抛了只记日志、这一轮不切（探针照探）。 */
+async function switchBefore(deps: RouteProbeJobDeps): Promise<OrgKind | null> {
+  if (!deps.orgSwitch) return null;
+  try {
+    return await deps.orgSwitch.before();
+  } catch (err) {
+    deps.log('error', '路由探针：切号这一步出错，这一轮不切', { error: message(err) });
+    return null;
+  }
+}
+
 /** 最多同时 n 个，结果按输入的顺序。 */
 async function mapLimit<T, R>(items: readonly T[], n: number, fn: (item: T) => Promise<R>): Promise<R[]> {
   const out = new Array<R>(items.length);
@@ -262,9 +281,27 @@ async function probeRound(deps: RouteProbeJobDeps): Promise<{ result: ScheduleRe
       online: [],
     };
   }
+  // 切号在探之前：切过去了，这一轮探的就是切过去的组织，探完核对
+  const switched = await switchBefore(deps);
   const conclusions = await mapLimit(targets, deps.concurrency ?? ROUTE_PROBE_CONCURRENCY, (t) =>
     conclude(deps, t),
   );
+  if (deps.orgSwitch) {
+    // 真探了的才算读回（放慢没真探、结论照旧的不算）
+    const probed = conclusions
+      .filter((c) => !c.kept)
+      .map((c) => ({
+        routeId: c.target.routeId,
+        orgKind: c.target.orgKind,
+        state: c.state,
+        detail: c.detail,
+      }));
+    try {
+      await deps.orgSwitch.after(switched, probed);
+    } catch (err) {
+      deps.log('error', '路由探针：切号的核对出错', { error: message(err) });
+    }
+  }
   const online: string[] = [];
   const unsaved: string[] = [];
   const gone: string[] = [];

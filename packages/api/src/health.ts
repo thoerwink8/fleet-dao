@@ -83,7 +83,7 @@ export async function runHealthChecks(
 
 /**
  * 生产要探的几项：库、实时推送（LISTEN）、Temporal、引擎工人、GitHub 事件的去处、飞书草稿开单（接没接上、有没有积压）、
- * 判断题（接没接、调不调得通）、线上版本跟不跟得上主线、飞书网关还来不来。main.ts 用它装配，测试也用它，是同一份代码。
+ * 判断题（接没接、调不调得通）、线上版本跟不跟得上主线、飞书网关还来不来、会话用户切号有没有要人看的。main.ts 用它装配，测试也用它，是同一份代码。
  */
 export function serviceHealthChecks(parts: {
   /** 真去读几张常用表、带自己的超时（pg-store.ts 的 probeDb）；只 select 1 查不出表被锁住。 */
@@ -104,6 +104,8 @@ export function serviceHealthChecks(parts: {
   /** 飞书网关还来不来（gateway-seen.ts）：没配网关通行证报「未接」。 */
   // biome-ignore lint/suspicious/noConfusingVoidType: 没说明的检查是 async () => {}（Promise<void>），换成 undefined 它们就对不上了
   feishuGateway: { check(): Promise<void | string>; readonly notWired?: string };
+  /** 会话用户切号（session-org-health.ts）：引擎切号没成、切完读回不在线、恢复时刻读不到的提醒还开着就报红。 */
+  sessionOrg: () => Promise<void>;
 }): HealthCheck[] {
   return [
     { name: 'database', check: parts.probeDb },
@@ -129,6 +131,8 @@ export function serviceHealthChecks(parts: {
       check: () => parts.feishuGateway.check(),
       ...notWired(parts.feishuGateway.notWired),
     },
+    // 切号出了要人看的问题（上游额度、登录这些）会自己变红，人处理好或下一轮切成了自己撤：发版脚本同样只标待处理、不退回
+    { name: 'session_org', check: parts.sessionOrg },
   ];
 }
 

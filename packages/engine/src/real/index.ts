@@ -3,7 +3,7 @@
 // 见 deploy/france/engine.env.example）；缺了哪一项就不起，讲清楚缺什么，不带着半套配置接活。
 
 import { join } from 'node:path';
-import { SESSION_USERS, type SessionUser } from '@fleet-dao/adapters';
+import { SESSION_USERS, type SessionUser, switchSessionOrg } from '@fleet-dao/adapters';
 import { createDb, type Db } from '@fleet-dao/db';
 import { assertPublishable, createGitHub, pgLedger, pgLocker } from '@fleet-dao/github';
 import type { EngineJobs } from '../activities.ts';
@@ -22,6 +22,7 @@ import {
 import { hourlyReconcileJob } from './hourly-reconcile.ts';
 import { engineJevFromEnv } from './jev-port.ts';
 import { registerEngineJobs } from './jobs.ts';
+import { orgSwitchRound } from './org-switch.ts';
 import { routeProbeJob } from './route-probe.ts';
 import { type SessionOrgReader, sessionOrgReader } from './session-org.ts';
 import { createSessionPorts, DEFAULT_FORK_MAX_CONTEXT_TOKENS, type SessionPortsDeps } from './sessions.ts';
@@ -227,6 +228,14 @@ export function realPortsFromEnv(
   // 以它跑它家里的 reclaude org list（和会话同一份 reclaude）；选路、探针、每小时对账共用这一个（读成了的留 30 秒）
   const [sessionUser] = SESSION_USERS;
   const sessionOrg = sessionOrgReader({ exec, user: sessionUser, reclaude: claudeCommand(sessionUser) });
+  // 拼车用满切独享、恢复了切回（#157）：路由探针每一轮探之前判，经 root 帮手的 org-use 切（手上没有在跑的 Claude 会话时）
+  const orgSwitch = orgSwitchRound({
+    db,
+    org: sessionOrg,
+    user: sessionUser,
+    switchOrg: (to) => switchSessionOrg({ to, user: sessionUser }),
+    machine: config.machine,
+  });
   const real = createRealPorts({
     db,
     jev: jev.port,
@@ -254,6 +263,7 @@ export function realPortsFromEnv(
       cursorCommand,
       grokCommand,
       sessionOrg,
+      orgSwitch,
       machine: config.machine,
     }),
     // 每小时对账：同一个工作树管家（删树经 fleet-agent-scope）、同一个会话用户执行器（看树里还剩什么）

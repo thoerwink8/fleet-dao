@@ -230,6 +230,71 @@ describe('一轮里读会话用户挂的组织', () => {
   });
 });
 
+describe('一轮里带着切号（#157：探之前判、该切就切，探完核对）', () => {
+  it('探之前切：这一轮探的就是切过去的组织；探完把真探了的结论交给核对', async () => {
+    let live: typeof ON_CARPOOL | typeof ON_SOLO = ON_CARPOOL;
+    const checked: { to: string | null; probed: unknown[] }[] = [];
+    const h = harness([carpool, solo], answered, {
+      sessionOrg: async () => live,
+      orgSwitch: {
+        async before() {
+          live = ON_SOLO;
+          return 'solo';
+        },
+        async after(to, probed) {
+          checked.push({ to, probed: [...probed] });
+        },
+      },
+    });
+    const run = await runRouteProbeJob(h.deps);
+    expect(run).toMatchObject({ outcome: 'ok', online: [solo.routeId] });
+    expect(checked).toEqual([
+      {
+        to: 'solo',
+        probed: [
+          {
+            routeId: carpool.routeId,
+            orgKind: 'carpool',
+            state: 'skipped',
+            detail: expect.stringContaining('会话用户现在挂的是独享组织'),
+          },
+          { routeId: solo.routeId, orgKind: 'solo', state: 'ok', detail: '答上了：OK · 用时 9 秒' },
+        ],
+      },
+    ]);
+  });
+
+  it('没切：照样交给核对（to 是 null，看之前切完读回不在线的这一轮探通了没有）', async () => {
+    const checked: (string | null)[] = [];
+    const h = harness([carpool], answered, {
+      orgSwitch: {
+        before: async () => null,
+        async after(to) {
+          checked.push(to);
+        },
+      },
+    });
+    await runRouteProbeJob(h.deps);
+    expect(checked).toEqual([null]);
+  });
+
+  it('【故意造出的失败】切号那两步自己抛了：记日志，这一轮照探、照写', async () => {
+    const h = harness([carpool], answered, {
+      orgSwitch: {
+        before: async () => {
+          throw new Error('库连不上');
+        },
+        after: async () => {
+          throw new Error('又连不上');
+        },
+      },
+    });
+    expect(await runRouteProbeJob(h.deps)).toMatchObject({ outcome: 'ok', online: [carpool.routeId] });
+    expect(h.logs).toContain('error:路由探针：切号这一步出错，这一轮不切');
+    expect(h.logs).toContain('error:路由探针：切号的核对出错');
+  });
+});
+
 describe('按一次的成本放慢（cursor-agent：探通了隔 2 小时再真探）', () => {
   const minutesAgo = (m: number) => new Date(NOW.getTime() - m * 60_000);
   const ok = (m: number) => ({ state: 'ok' as const, at: minutesAgo(m), detail: '答上了：OK · 用时 4 秒' });

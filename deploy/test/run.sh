@@ -7,7 +7,7 @@
 # france.sh 读回自动发布跑得怎么样（auto-release-state：没跑过、读不了、读到了分得清）、
 # 法国只有一个会话用户且读回拦得下故意造的错（session-user）、AI 会话用的 pnpm 的装和查（session-pnpm）、
 # 会话用户的 cursor-agent 的装和查（cursor-agent）、会话用户的 Cursor 密钥的放、查、撤（cursor-key）、
-# 会话用户的 grok 命令行的装和查、登录态的读回（grok）、
+# 会话用户的 grok 命令行的装和查、登录态的读回（grok）、切会话用户挂的 reclaude 组织（agent-scope-org-use）、
 # node 的编译缓存目录归 root、别人放不进（node-cache）、
 # docs/ops.md 端口表和脚本对得上、docs/ops.md 里放文件的命令收到空的或半截的不换（place-file）、--ops 真跑了这两块（ops-only）。
 # 用法：sudo bash deploy/test/run.sh（违规样本那项要 root）。退出码：0 通过，1 有不通过，2 有没跑成的。
@@ -132,6 +132,9 @@ case $? in
 2) skipped=1 ;;
 *) fail=1 ;;
 esac
+
+# 切会话用户挂的 reclaude 组织（#157）：不要 root，拿假 reclaude 把每种没切成的路径都造一遍
+run_test agent-scope-org-use.test.sh
 
 bash "$HERE/app-config.test.sh"
 case $? in

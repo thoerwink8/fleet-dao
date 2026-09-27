@@ -21,6 +21,7 @@ const EXTRA_LABELS = {
   judge: '判断题',
   deploy_lag: '跟上主线',
   feishu_gateway: '飞书网关',
+  session_org: '会话账号切换',
 };
 
 export const HEALTH_URL = '/healthz';

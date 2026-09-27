@@ -1,6 +1,6 @@
 // 会话用户此刻挂的 reclaude 组织（design 第九节「一个会话用户，同一时刻只挂一个组织」）：选路（store-ports 的 pickRoute）、
-// 路由探针、每小时对账每次用之前读，读成了的留很短一会儿（SESSION_ORG_TTL_MS）。引擎只读、不切号：切号是整个会话用户的
-// 设置，一切这个家目录下在跑的会话全断（自动切号是 #194）。
+// 路由探针、每小时对账每次用之前读，读成了的留很短一会儿（SESSION_ORG_TTL_MS）。这里只读；切号在 real/org-switch.ts（#157，
+// 路由探针每一轮探之前判），切的那一会儿经 hold 让选路停下、切完丢掉留着的读数。
 // 读法（specs/157-拼车自动切换/需求.md）：以会话用户的身份（经 fleet-agent-scope，exec.ts：引擎进不去它的家）跑它家里的
 // reclaude org list——带 * 的是现在挂的，类型那一列 team 是拼车、personal 是独享。解析和额度读取器是同一个（adapters 的
 // parseOrgList），只留类型和是否当前：组织编号、名字、邮箱一概不往外带，编号不进仓、也不用配文件。前面的「Syncing config…」
@@ -96,33 +96,54 @@ export async function readSessionOrg(deps: SessionOrgDeps): Promise<LiveOrgReadi
 export type SessionOrgReader = (options?: { waitMs?: number }) => Promise<LiveOrgReading>;
 
 /**
+ * 读法加两样只给切号（real/org-switch.ts）用的：hold 让之后的读都回 pending（选路过一会儿再选，切号那几秒不派新会话），
+ * 交回解除的函数，解除时连留着的读数一起丢掉；forget 丢掉留着的读数，下一次现读。切号前起的读晚于切号才回来，也不留它。
+ */
+export type SessionOrgControl = SessionOrgReader & {
+  hold(why: string): () => void;
+  forget(): void;
+};
+
+/**
  * 选路、探针、每小时对账共用的读法：读成了的留 ttlMs（默认 30 秒），读失败的不留；同时来的几次共用一次读。不抛。
  */
-export function sessionOrgReader(deps: SessionOrgDeps): SessionOrgReader {
+export function sessionOrgReader(deps: SessionOrgDeps): SessionOrgControl {
   const clock = deps.now ?? (() => new Date());
   const ttl = deps.ttlMs ?? SESSION_ORG_TTL_MS;
   let kept: { at: number; value: LiveOrgReading } | null = null;
   let reading: Promise<LiveOrgReading> | null = null;
+  let held: string | null = null;
+  let holder: object | null = null;
+  // forget 一次加一：起读时记下来，回来时对不上（这中间切过号）就不留、也不当成「还在读」的那一次
+  let generation = 0;
   const start = (): Promise<LiveOrgReading> => {
     if (!reading) {
-      reading = readSessionOrg(deps)
+      const gen = generation;
+      const current: Promise<LiveOrgReading> = readSessionOrg(deps)
         .catch(
           (err: unknown): LiveOrgReading => ({ ok: false, why: `读会话用户挂的组织出错：${message(err)}` }),
         )
         .then((value) => {
-          kept = value.ok ? { at: clock().getTime(), value } : null;
-          reading = null;
+          if (gen === generation) kept = value.ok ? { at: clock().getTime(), value } : null;
+          if (reading === current) reading = null;
           return value;
         });
+      reading = current;
     }
     return reading;
   };
-  return async (options = {}) => {
+  const forget = () => {
+    generation += 1;
+    kept = null;
+    reading = null;
+  };
+  const read: SessionOrgReader = async (options = {}) => {
+    if (held !== null) return { ok: false, pending: true, why: held };
     const now = clock().getTime();
     if (kept && now >= kept.at && now - kept.at < ttl) return kept.value;
-    const read = start();
+    const pending = start();
     const waitMs = options.waitMs;
-    if (waitMs === undefined) return read;
+    if (waitMs === undefined) return pending;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const late = new Promise<LiveOrgReading>((resolve) => {
       timer = setTimeout(
@@ -137,9 +158,24 @@ export function sessionOrgReader(deps: SessionOrgDeps): SessionOrgReader {
       timer.unref?.();
     });
     try {
-      return await Promise.race([read, late]);
+      return await Promise.race([pending, late]);
     } finally {
       clearTimeout(timer);
     }
   };
+  return Object.assign(read, {
+    hold(why: string) {
+      const token = {};
+      holder = token;
+      held = why;
+      return () => {
+        // 只解自己上的那一道（解过了、后来又有人上了，都不动）
+        if (holder !== token) return;
+        holder = null;
+        held = null;
+        forget();
+      };
+    },
+    forget,
+  });
 }

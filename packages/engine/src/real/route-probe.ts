@@ -22,6 +22,7 @@ import {
 } from '@fleet-dao/db';
 import type { HostId } from '@fleet-dao/shared';
 import { classifyFailure } from '../failure/classify.ts';
+import type { OrgSwitchRound } from '../jobs/org-switch.ts';
 import type { ProbeAttempt, Prober, ProbeTarget, RouteProbeJobDeps } from '../jobs/route-probe.ts';
 import {
   type HostDriver,
@@ -244,6 +245,8 @@ export interface RouteProbeWiring {
   grokCommand(user: SessionUser): string[];
   /** 会话用户此刻挂的组织（real/session-org.ts）：和选路共用一个，Claude 订阅池只探挂着的那个。 */
   sessionOrg: SessionOrgReader;
+  /** 会话用户切号（real/org-switch.ts，#157）：每一轮探之前判、该切就切。不给就不切。 */
+  orgSwitch?: OrgSwitchRound;
   machine: string;
   now?: () => Date;
   log?: RouteProbeJobDeps['log'];
@@ -296,6 +299,7 @@ export function routeProbeJob(w: RouteProbeWiring): () => RouteProbeJobDeps {
     targets: () => routeProbeTargets(w.db),
     probers,
     sessionOrg: w.sessionOrg,
+    ...(w.orgSwitch ? { orgSwitch: w.orgSwitch } : {}),
     save: (x) => saveRouteProbe(w.db, x),
     afterProbe: (t, a) => poolHoldAfterProbe(w.db, t, a),
     runs: {

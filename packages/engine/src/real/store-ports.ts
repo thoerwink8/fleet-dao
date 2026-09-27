@@ -270,7 +270,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
       const facts = input.models ? onlyModels(all, input.models) : all;
       const held = await heldPools();
       // 会话用户此刻挂的组织：候选里有带组织类型的池（Claude 订阅）才读。读不到、认不出的原话交给选路，那些池一律不派；
-      // 还没读完（reclaude 首跑同步配置）不算认不出：过一会儿再选，读在后台接着跑
+      // 还没读完（reclaude 首跑同步配置）、正在切号（real/org-switch.ts 让选路停下的那十几秒）不算认不出：过一会儿再选
       const live = all.routes.some((r) => r.orgKind)
         ? await deps.sessionOrg({ waitMs: deps.orgReadWaitMs ?? ORG_READ_WAIT_MS })
         : null;
@@ -278,7 +278,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         return {
           ok: false,
           waitFor: 'slot',
-          detail: `会话用户挂的组织还没读出来，过一会儿再选：${live.why}`,
+          detail: `会话用户挂的组织这会儿定不下来，过一会儿再选：${live.why}`,
           retryAfterSeconds: ORG_READ_RETRY_SECONDS,
         };
       }

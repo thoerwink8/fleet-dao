@@ -107,6 +107,17 @@ test('飞书网关（feishu_gateway）：来得勤是绿、写明几秒前来过
   }
 });
 
+test('会话账号切换（session_org）：显示成「会话账号切换」；有要人看的问题照实报红', () => {
+  const v = judge({ status: 200, body: report(true, { ...allOk, session_org: { ok: true } }) });
+  assert.equal(v.ok, true);
+  assert.equal(byKey(v).session_org.label, '会话账号切换');
+  assert.equal(byKey(v).session_org.reason, '在线');
+  const bad = { ok: false, code: 'session_org', message: '会话账号切换有要人看的问题' };
+  const w = judge({ status: 503, body: report(false, { ...allOk, session_org: bad }) });
+  assert.equal(w.ok, false);
+  assert.equal(byKey(w).session_org.reason, '会话账号切换有要人看的问题（session_org）');
+});
+
 test('连不上后端：三项都红，说出原因', () => {
   const v = judge({ error: 'Failed to fetch' });
   assert.equal(v.ok, false);
