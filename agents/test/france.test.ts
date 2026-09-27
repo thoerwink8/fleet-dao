@@ -676,6 +676,27 @@ describe('查询脚本：每一块查成就给数，查不成就写原因，一�
     expect(notObject).toEqual({ ok: false, why: '自动发布的读数认不出（不是一个对象）' });
   });
 
+  it('配置对账（#323）：只带结论和不一致的是哪几项（名字），不带别的', () => {
+    const withConfig = {
+      ...state(healthy().sections),
+      config: {
+        checkedAt: ago(3),
+        commit: SHA,
+        result: 'drift',
+        drift: [{ id: 'engine.env:FLEET_X', kind: 'value' }],
+        unchecked: [],
+        selfHeal: false,
+      },
+    };
+    const s = query.collect(fakeIo({ state: () => JSON.stringify(withConfig) })).sections;
+    expect(state(s).config).toEqual({
+      checkedAt: ago(3),
+      result: 'drift',
+      drift: ['engine.env:FLEET_X'],
+      unchecked: [],
+    });
+  });
+
   it('在用的版本：链接读不了、指的不是提交号，都明说', () => {
     const gone = query.collect(
       fakeIo({
@@ -1091,6 +1112,22 @@ describe('断链排查：每一种异常都标得出来，写清去哪看', () =
       });
     has(off(false), 'bad', '不在主线最近 1 个提交里');
     has(off(true), 'note', '人手动切过版本');
+  });
+
+  it('配置对账带到版本那一块；旧的状态文件没有这一项也认得；形状不对就是没读到', () => {
+    const v = viewOf((s) => {
+      state(s).config = { checkedAt: ago(3), result: 'drift', drift: ['engine.env:FLEET_X'], unchecked: [] };
+    });
+    expect(v.health.release).toMatchObject({
+      ok: true,
+      config: { result: 'drift', drift: ['engine.env:FLEET_X'] },
+    });
+    expect(viewOf().health.release).toMatchObject({ ok: true, config: null });
+    const bad = viewOf((s) => {
+      state(s).config = { checkedAt: ago(3), result: 'drift', drift: [{ id: 1 }], unchecked: [] };
+    });
+    expect(bad.health.release).toMatchObject({ ok: false });
+    expect(whats(bad, 'unread').join('')).toContain('config.drift');
   });
 
   it('上一次发布没成、规矩同步没成、装机脚本落后一天', () => {

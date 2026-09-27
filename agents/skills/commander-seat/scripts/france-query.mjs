@@ -321,6 +321,17 @@ export function autoReleaseSection(io) {
       rules: pickSha(s.rules, 'commit'),
       system: pickSha(s.system, 'appliedSha'),
       last: s.last ?? null,
+      // 配置对账（#323）：只带结论、不一致的是哪几项、没查成的原因；线上的值本来就不进状态文件
+      config: isObj(s.config)
+        ? {
+            checkedAt: s.config.checkedAt,
+            result: s.config.result,
+            drift: Array.isArray(s.config.drift)
+              ? s.config.drift.map((d) => (isObj(d) ? d.id : d))
+              : s.config.drift,
+            unchecked: s.config.unchecked,
+          }
+        : null,
     },
   };
 }

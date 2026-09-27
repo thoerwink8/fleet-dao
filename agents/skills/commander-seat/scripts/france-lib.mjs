@@ -477,6 +477,15 @@ export function autoReleaseProblem(s) {
     const p = shapeProblem(s.last, { action: 'str', detail: 'str', at: 'iso' }, 'last');
     if (p) return p;
   }
+  // 配置对账（#323）是后加的：旧的状态文件没有这一项，不算认不出
+  if (s.config !== null && s.config !== undefined) {
+    const p = shapeProblem(s.config, { checkedAt: 'iso', result: 'str' }, 'config');
+    if (p) return p;
+    if (!Array.isArray(s.config.drift) || !s.config.drift.every(TYPES.str))
+      return 'config.drift 不是一串名字';
+    if (!Array.isArray(s.config.unchecked) || !s.config.unchecked.every(TYPES.str))
+      return 'config.unchecked 不是一串原因';
+  }
   return null;
 }
 
@@ -838,6 +847,7 @@ function releaseFacts(current, auto, at) {
     rules: st.rules,
     system: st.system,
     last: st.last ? { ...st.last, actionName: ACTION_WORDS[st.last.action] ?? st.last.action } : null,
+    config: st.config ?? null,
     behind: null,
     oldestUnreleasedAt: null,
     inRecent: null,

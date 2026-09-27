@@ -375,6 +375,17 @@
     }
     return dl;
   }
+  /** 法国配置和仓里期望对账（#323）的结论；不一致、没查成的另有提醒在「没处理的提醒」里。 */
+  function configLine(c, base) {
+    if (!c) return "还没对过账";
+    const when = `（${agoFrom(c.checkedAt, base)}）`;
+    if (c.result === "ok") return `和期望一致${when}`;
+    const parts = [];
+    if (c.drift.length) parts.push(`${c.drift.length} 项和期望不一致：${c.drift.slice(0, 5).join("、")}${c.drift.length > 5 ? " 等" : ""}`);
+    if (c.unchecked.length) parts.push(`没查成：${c.unchecked.join("；")}`);
+    const s = el("span", "why", `${parts.join("；") || c.result}${when}`);
+    return s;
+  }
   function releasePanel(h, base) {
     const p = panel("版本和自动发布");
     const r = h.release;
@@ -402,6 +413,7 @@
       ["规矩同步", r.rules ? `${{ ok: "同步到", failed: "没成：", unchecked: "没查成：" }[r.rules.result] ?? r.rules.result} ${r.rules.commit ?? ""} ${r.rules.detail ?? ""}`.trim() : "没有记录"],
       ["装机脚本", r.system ? ("error" in r.system ? `没读到：${r.system.error}` : `装到 ${r.system.appliedSha}，之后相关提交 ${r.system.behind} 个`) : "没有记录"],
       ["自动发布", `上一轮跑于 ${agoFrom(r.ranAt, base)}（应每 5 分钟一轮）`],
+      ["配置对账", configLine(r.config, base)],
     ];
     if (r.hold) pairs.push(["手动切过", `${r.hold.sha}（${r.hold.event}，${agoFrom(r.hold.since, base)}）`]);
     p.appendChild(kv(pairs));
