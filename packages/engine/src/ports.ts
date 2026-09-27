@@ -177,7 +177,7 @@ export interface LeadBrief {
    * （打回过的几轮连在一起）。
    */
   delivery?: { head: string; summary: string; changedFiles: string[]; testsPassed: boolean; base?: string };
-  /** rebut：验证挡住的几条，原文照抄（驳回时 target 一字不差照抄）。 */
+  /** rebut：验证挡住的几条，原文照抄（驳回时 target 照抄；只差格式的由 core 的 decideVerdict 按 criterionKey 认）。 */
   blocking?: Rebuttable[];
   /** rebut、review：验证的备注（看不出的、建议）。 */
   notes?: string[];
@@ -274,7 +274,8 @@ export type SessionOutput =
   | { kind: 'review'; review: ReviewResult }
   /**
    * 开 PR 前验证交回的结论文件（.fleet-out/verify.json）。真端口读的时候已经拿 core 的 checkReport 挡过一道（认不出、
-   * 审错了头、漏答多答的退回会话重写）；定论照样由工作流经 decide 调 core 的 decideVerdict 判，不信这一道。
+   * 审错了头、漏答多答的退回会话重写；只差格式的 criterion 换成了清单原文）；定论照样由工作流经 decide 调 core 的
+   * decideVerdict 判，不信这一道。
    */
   | { kind: 'verify'; report: VerifyReport }
   // ---- Fusion 的 Lead（brief.lead 给了哪一步就交哪一种）。形状由工作流经 decide 调 core 判（checkLeadPlan、checkBrief、

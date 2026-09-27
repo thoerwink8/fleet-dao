@@ -826,7 +826,22 @@ describe('开 PR 前验证：检出送检的头，发出去的材料先过卫生
     expect(String((broken as Error).message)).toContain('没扫成，不发给Cursor Agent');
   });
 
-  it('【故意造出的失败】没写结论、写的不是 JSON、审的不是送检的头、漏答一条：都判交错了（wrong_output），写明哪里不对', async () => {
+  it('#246：结论文件里 criterion 只差反引号 → 会话端口认得（挡这一道的是 core 的 checkReport），交回的是清单原文', async () => {
+    const ticked = [
+      '`packages/engine/src/jobs/alert-sweep.ts` 加一条规则：读不了记这一轮没查全，不撤。',
+      ...CRITERIA,
+    ];
+    const answer = (criterion: string) => ({ criterion, answer: 'done', evidence: '看过 a.ts' });
+    const written = { head: m.head, results: ticked.map((c) => answer(c.replaceAll('`', ''))), findings: [] };
+    const { ports } = setup(() => writes(JSON.stringify(written)), { screen: listed });
+    const { end } = await runOnce(ports, verifyLaunch(m.head, ticked));
+    expect(end).toMatchObject({
+      outcome: 'done',
+      output: { kind: 'verify', report: { head: m.head, results: ticked.map(answer), findings: [] } },
+    });
+  });
+
+  it('【故意造出的失败】没写结论、写的不是 JSON、审的不是送检的头、漏答一条、答了清单外的（字不一样，不只差格式）：都判交错了（wrong_output），写明哪里不对', async () => {
     const other = 'f'.repeat(40);
     const good = report(m.head);
     for (const [text, why] of [
@@ -834,6 +849,16 @@ describe('开 PR 前验证：检出送检的头，发出去的材料先过卫生
       ['不是 JSON', '不是合法的 JSON'],
       [JSON.stringify(report(other)), `审的不是送检的头：送的是 ${m.head}，审的是 ${other}`],
       [JSON.stringify({ ...good, results: good.results.slice(0, 1) }), '没答：「有一条故意造出失败的测试」'],
+      [
+        JSON.stringify({
+          ...good,
+          results: [
+            ...good.results.slice(0, 1),
+            { criterion: '有两条故意造出失败的测试', answer: 'done', evidence: '看过 a.ts' },
+          ],
+        }),
+        '答了清单外的一条：「有两条故意造出失败的测试」',
+      ],
     ] as const) {
       const { ports } = setup(() => writes(text), { screen: listed });
       const { end } = await runOnce(ports, verifyLaunch(m.head));

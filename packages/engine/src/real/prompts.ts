@@ -308,7 +308,7 @@ ${end}`;
 ${list(blocking)}
 ${notes}逐条对照代码核实。你有证据证明它看错了的写进驳回；它说得对的别驳，引擎会把它交回去改。${tests}${readOnly}
 结论写进 ${out('lead-rebut')}，形如：
-{"rebuttals": [{"target": "<照抄上面那一条的原文，不带方括号里的类别>", "evidence": "哪个文件哪一行、跑了什么命令看到什么"}]}
+{"rebuttals": [{"target": "<照抄上面那一条的原文，连反引号；不带方括号里的类别和后面括号里它的证据>", "evidence": "哪个文件哪一行、跑了什么命令看到什么"}]}
 - 一条都不驳就写 {"rebuttals": []}。没有证据的驳回不算数。
 ${end}`;
     }
@@ -363,11 +363,11 @@ ${v?.planSummary.trim() || '（没写）'}
 ${list(shown)}${more}
 
 怎么答：
-- 「怎么算做完」每一条答一次：做到（done）、没做到（not-done）、看不出（unclear），都要带证据（哪个文件哪一行、跑了什么命令看到什么）。criterion 一字不差照抄上面那一条，不多答、不漏答、不重复答。没有把握就答看不出，别猜成做到。
+- 「怎么算做完」每一条答一次：做到（done）、没做到（not-done）、看不出（unclear），都要带证据（哪个文件哪一行、跑了什么命令看到什么）。criterion 照清单原文逐字抄，连反引号、加粗这些记号也照抄，只是不带前面的序号；不多答、不漏答、不重复答。没有把握就答看不出，别猜成做到。
 - 另外只报三种能挡的发现，都要有证据：弄坏原有功能（breaks-existing）、安全（security）、丢数据（data-loss）。别的意见一律写成建议（suggestion），不挡。
 
 结论写进 \`${OUT_DIR}/verify.json\`（只写这一个文件），形如：
-{"head": "${head}", "results": [{"criterion": "<照抄上面那一条>", "answer": "done", "evidence": "……"}], "findings": [{"kind": "security", "text": "……", "evidence": "……"}]}
+{"head": "${head}", "results": [{"criterion": "<照抄上面那一条的原文，连反引号>", "answer": "done", "evidence": "……"}], "findings": [{"kind": "security", "text": "……", "evidence": "……"}]}
 - head 照抄送检的提交号（上面那一整串）。没有发现就写 "findings": []。
 写完就结束，不用 fleet done。`;
 }
@@ -531,8 +531,9 @@ export function parsePlan(
 }
 
 /**
- * 开 PR 前验证的结论文件：先得是 JSON，再过 core 的 checkReport（形状、审的是不是送检的头、「怎么算做完」一条不漏不多不重）。
- * 对不上回 error，会话端口按「交错了」退回会话照原因重写；过了的定论照样由工作流经 decide 判（decideVerdict 用的是同一个 checkReport）。
+ * 开 PR 前验证的结论文件：先得是 JSON，再过 core 的 checkReport（形状、审的是不是送检的头、「怎么算做完」一条不漏不多不重，
+ * 按 criterionKey 对、交回的 criterion 换成清单原文）。对不上回 error，会话端口按「交错了」退回会话照原因重写；过了的定论
+ * 照样由工作流经 decide 判（decideVerdict 用的是同一个 checkReport）。
  */
 export function parseVerify(text: string, criteria: readonly string[], head: string): Parsed<VerifyReport> {
   const json = parseJson(text, `${OUT_DIR}/verify.json`);
