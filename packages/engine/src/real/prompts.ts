@@ -5,7 +5,7 @@
 // Fusion 的 Lead（brief.lead）每一步都在这张单的工作树里跑、续同一个会话：交什么按这一步定（LEAD_KIND），结论也写进
 // .fleet-out/（工作树里记进 .git/info/exclude，不会被提交）；写方案、写结果那两步另外在分支上提交，头和改动引擎从提交里读。
 
-import { checkReport, type Rebuttal, type VerifyReport } from '@fleet-dao/core';
+import { checkReport, outsideBrief, type Rebuttal, type VerifyReport } from '@fleet-dao/core';
 import type { Repo, StageKind } from '@fleet-dao/shared';
 import type { PlannedSubtask, Risk, SubtaskStage } from '../decisions/plan.ts';
 import type { TriageVerdict } from '../decisions/triage.ts';
@@ -132,6 +132,8 @@ const FEEDBACK_KIND: Record<SessionBrief['feedback'][number]['kind'], string> = 
   plan: '和方案对不上',
   hygiene: '卫生检查拦下',
   delivery: '交付没过核对',
+  ask: '要带推荐重问',
+  answer: '创始人改选了',
 };
 
 function feedbackBlock(brief: SessionBrief): string {
@@ -162,6 +164,10 @@ function taskBlock(input: PromptInput): string {
     brief.specDir ? `需求文档目录：${brief.specDir}` : '',
     brief.acceptance.length > 0 ? `做完标准：\n${list(brief.acceptance)}` : '',
     brief.touches.length > 0 ? `会改的地方：\n${list(brief.touches)}` : '',
+    // Fusion 的副手：简报外的由 Lead 验收时定收不收（core 的 decideAcceptance），它要知道为什么改了才判得了
+    brief.task && !brief.lead
+      ? '「会改的地方」以外的文件非改不可才改，交活总结里写清改了哪个、为什么（Lead 验收时看过再定收不收）。'
+      : '',
   ]
     .filter(Boolean)
     .join('\n');
@@ -189,8 +195,9 @@ function deliverBlock(input: PromptInput): string {
       return `## 你要做的：分诊
 读原话，必要时翻一下仓里相关的代码（不改任何文件），判断这件事：清不清楚、多大、是不是 UI 活、会不会碰对外发布（release）、花钱（spend）、删数据（delete）。
 把结论写进 \`${OUT_DIR}/triage.json\`（只写这一个文件），形如：
-{"clear": true, "question": "", "summary": "三行以内：理解为……", "size": "S", "ui": false, "holds": []}
-- clear：清楚 true；有说不清、会做错方向的地方 false（这时 question 写要问创始人的那一句，一句话、能直接回答）；判不了 null。
+{"clear": true, "question": "", "options": [], "recommend": "", "summary": "三行以内：理解为……", "size": "S", "ui": false, "holds": []}
+- clear：清楚 true；有说不清、会做错方向的地方 false；判不了 null。
+- clear 是 false 时：question 写要问创始人的那一句（一句话、能直接回答），options 写 2–4 个做法，recommend 照抄你推荐的那一个。他多半不在场，引擎按推荐先做、不停下等；他之后改了，另开单照他选的改。
 - size：S / M / L。holds：会碰到的写 "release" / "spend" / "delete"，都不碰就空数组。
 写完就结束，不用 fleet done。`;
     case 'doc':
@@ -265,27 +272,40 @@ function leadBlock(input: PromptInput, lead: LeadBrief): string {
     : '';
   const tests = repo.testCommand ? `可以跑测试（\`${repo.testCommand}\`）。` : '';
   switch (lead.step) {
-    case 'plan':
+    case 'plan': {
+      // 还没有需求文档、正文写全了需求的单（#295）：引擎照正文写好了，Lead 原样提交
+      const seed = lead.requirementText?.trim();
+      const read = seed
+        ? `1. 这张单还没有需求文档，单子正文就是需求（引擎开的单）。把下面这份原样写进 \`${lead.docs.requirement}\`（一字不改；要补充、要澄清的写进方案），里面的「怎么算做完」就是验收标准，开 PR 前别家照单子正文逐条核。再读相关代码。
+\`\`\`\`markdown
+${seed}
+\`\`\`\``
+        : `1. 读需求文档 \`${lead.docs.requirement}\`（里面的「怎么算做完」就是验收标准，开 PR 前别家会逐条核）和相关代码。`;
+      const commit = seed
+        ? `用 git commit 提交在当前分支上（需求文档和方案一起）；这一步只提交这两份，不改代码。`
+        : '用 git commit 提交在当前分支上；这一步只提交方案，不改代码。';
       return `## 你要做的：第 2 步 规划（你是这张单的主导模型 Lead）
 这张单由你领着做完：你写方案和任务简报，副手（别家的模型）照简报写码、你验收；之后每一步引擎都会续你这个会话交代下一步。${lead.mode === 'single' ? '这次是单模型模式：没有副手，写码也是你自己（引擎下一步交代）。' : ''}当前目录是这张单的工作树（分支 ${brief.branch ?? '（没给）'}），主线在 origin/${main}。
-1. 读需求文档 \`${lead.docs.requirement}\`（里面的「怎么算做完」就是验收标准，开 PR 前别家会逐条核）和相关代码。
-2. 把方案写进 \`${lead.docs.plan}\`：怎么做、改哪些文件、怎么验证，一两页以内。用 git commit 提交在当前分支上；这一步只提交方案，不改代码。
+${read}
+2. 把方案写进 \`${lead.docs.plan}\`：怎么做、改哪些文件、怎么验证，一两页以内。${commit}
 3. 写一份任务简报（副手照它干），连同方案摘要写进 ${out('lead-plan')}（只写这一个结论文件，它不会被提交），形如：
 {"summary": "方案摘要，三五句（会写进公开的 PR 正文）", "small": true, "highRisk": false, "holds": [], "brief": ${BRIEF_SHAPE}}
-- brief.files：副手只许改这些；改到外面的，验收一律不收。
+- brief.files：副手要改的文件，把要改的地方都圈进去；副手改到外面的，验收时由你定收不收。
 - small：一个副手一次做得完、方案不用别家评的写 true。highRisk：碰安全、权限、数据（迁移里删改）、对外发布的写 true。
 - holds：会对外发布、花钱、删数据的写 "release" / "spend" / "delete"（合并前要人批），都不碰就空数组。
 ${end}`;
+    }
     case 'accept': {
       const d = lead.delivery;
       const diff = d?.base
         ? `\`git diff ${d.base}..HEAD\` 就是副手交回的全部改动（打回过的几轮连在一起看）。`
         : '';
+      const outside = brief.task && d ? outsideBrief(brief.task, d.changedFiles) : [];
       return `## 你要做的：验收副手这一轮
 副手照你的任务简报干完、交回了（它现在不在跑）：提交头 ${d?.head ?? '（没给）'}，${d?.testsPassed ? '它报测试过了' : '它报测试没过'}。它的总结：${d?.summary?.trim() || '（没写）'}
 改了这些文件：
 ${list(d?.changedFiles ?? [])}
-${diff}对照任务简报（上面的「做完标准」「会改的地方」）看代码：做对了没有、有没有漏、测试够不够。${tests}${readOnly}
+${outside.length ? `其中改到任务简报外的：${outside.join('、')}\n` : ''}${diff}对照任务简报（上面的「做完标准」「会改的地方」）看代码：做对了没有、有没有漏、测试够不够。改到简报外的文件，看过觉得该改就可以收，why 里写清为什么要改它们（收下的会记进 PR 正文或关单评论）；不该改的打回，写清要撤掉哪些。${tests}${readOnly}
 结论写进 ${out('lead-verdict')}，形如：
 {"verdict": "accept", "why": "……"}
 - verdict：收下 "accept"，打回 "reject"。why 都要写：打回时写清要副手改什么（原样交给副手）。打回满两次还不行，下一步由你自己接手。
@@ -300,13 +320,13 @@ ${end}`;
 ${list(blocking)}
 ${notes}逐条对照代码核实。你有证据证明它看错了的写进驳回；它说得对的别驳，引擎会把它交回去改。${tests}${readOnly}
 结论写进 ${out('lead-rebut')}，形如：
-{"rebuttals": [{"target": "<照抄上面那一条的原文，不带方括号里的类别>", "evidence": "哪个文件哪一行、跑了什么命令看到什么"}]}
+{"rebuttals": [{"target": "<照抄上面那一条的原文，连反引号；不带方括号里的类别和后面括号里它的证据>", "evidence": "哪个文件哪一行、跑了什么命令看到什么"}]}
 - 一条都不驳就写 {"rebuttals": []}。没有证据的驳回不算数。
 ${end}`;
     }
     case 'fix-brief':
       return `## 你要做的：写修复简报
-开了 PR 之后要改（原因在上面「这一轮要改的」）。看代码找到原因，给副手写一份修复简报：只许改的文件要把要改的地方都圈进去。${readOnly}
+要回去改一轮（原因在上面「这一轮要改的」：CI 没过、合并前退回、最终审查要改，或者创始人晚到的回答改选了别的——没等他回时按推荐先做的，照他选的改）。看代码找到要改的地方，给副手写一份修复简报：只许改的文件要把要改的地方都圈进去。${readOnly}
 写进 ${out('lead-brief')}，形如：
 {"brief": ${BRIEF_SHAPE}}
 ${end}`;
@@ -355,11 +375,11 @@ ${v?.planSummary.trim() || '（没写）'}
 ${list(shown)}${more}
 
 怎么答：
-- 「怎么算做完」每一条答一次：做到（done）、没做到（not-done）、看不出（unclear），都要带证据（哪个文件哪一行、跑了什么命令看到什么）。criterion 一字不差照抄上面那一条，不多答、不漏答、不重复答。没有把握就答看不出，别猜成做到。
+- 「怎么算做完」每一条答一次：做到（done）、没做到（not-done）、看不出（unclear），都要带证据（哪个文件哪一行、跑了什么命令看到什么）。criterion 照清单原文逐字抄，连反引号、加粗这些记号也照抄，只是不带前面的序号；不多答、不漏答、不重复答。没有把握就答看不出，别猜成做到。
 - 另外只报三种能挡的发现，都要有证据：弄坏原有功能（breaks-existing）、安全（security）、丢数据（data-loss）。别的意见一律写成建议（suggestion），不挡。
 
 结论写进 \`${OUT_DIR}/verify.json\`（只写这一个文件），形如：
-{"head": "${head}", "results": [{"criterion": "<照抄上面那一条>", "answer": "done", "evidence": "……"}], "findings": [{"kind": "security", "text": "……", "evidence": "……"}]}
+{"head": "${head}", "results": [{"criterion": "<照抄上面那一条的原文，连反引号>", "answer": "done", "evidence": "……"}], "findings": [{"kind": "security", "text": "……", "evidence": "……"}]}
 - head 照抄送检的提交号（上面那一整串）。没有发现就写 "findings": []。
 写完就结束，不用 fleet done。`;
 }
@@ -423,6 +443,16 @@ export function parseTriage(text: string): Parsed<TriageVerdict> {
   if (v.question !== undefined) {
     if (typeof v.question !== 'string') return { error: 'triage.json 的 question 要是字符串' };
     if (v.question.trim()) out.question = v.question.trim();
+  }
+  // 选项和推荐合不合格（够不够两个、推荐在不在选项里）由引擎经 decide 调 core 的 checkAsk 判，这里只挡类型
+  if (v.options !== undefined) {
+    if (!isStringArray(v.options)) return { error: 'triage.json 的 options 要是字符串数组' };
+    const options = v.options.map((o) => o.trim()).filter(Boolean);
+    if (options.length > 0) out.options = options;
+  }
+  if (v.recommend !== undefined) {
+    if (typeof v.recommend !== 'string') return { error: 'triage.json 的 recommend 要是字符串' };
+    if (v.recommend.trim()) out.recommend = v.recommend.trim();
   }
   if (v.summary !== undefined) {
     if (typeof v.summary !== 'string') return { error: 'triage.json 的 summary 要是字符串' };
@@ -513,8 +543,9 @@ export function parsePlan(
 }
 
 /**
- * 开 PR 前验证的结论文件：先得是 JSON，再过 core 的 checkReport（形状、审的是不是送检的头、「怎么算做完」一条不漏不多不重）。
- * 对不上回 error，会话端口按「交错了」退回会话照原因重写；过了的定论照样由工作流经 decide 判（decideVerdict 用的是同一个 checkReport）。
+ * 开 PR 前验证的结论文件：先得是 JSON，再过 core 的 checkReport（形状、审的是不是送检的头、「怎么算做完」一条不漏不多不重，
+ * 按 criterionKey 对、交回的 criterion 换成清单原文）。对不上回 error，会话端口按「交错了」退回会话照原因重写；过了的定论
+ * 照样由工作流经 decide 判（decideVerdict 用的是同一个 checkReport）。
  */
 export function parseVerify(text: string, criteria: readonly string[], head: string): Parsed<VerifyReport> {
   const json = parseJson(text, `${OUT_DIR}/verify.json`);

@@ -10,10 +10,13 @@
 // 全熔断判不判得了另有 stageAllOpen：和选路同一份事实、同一套熔断判定，不写库、不报警（每小时对账用来撤
 // routing:all-open）。组织还没读完、库读失败照抛，不返回「解了」。
 
+import type { TaskAsk } from '@fleet-dao/core';
 import {
   authorFamiliesOfTask,
   type Db,
   finishSessionRun,
+  listTaskAsks,
+  markAsksApplied as markAsksAppliedInDb,
   openAlertsByPrefix,
   openApproval,
   openEngineAsk,
@@ -23,6 +26,7 @@ import {
   routeOutcomesSince,
   saveTaskSnapshot,
   saveVerifyRound,
+  type TaskAskRow,
   taskContext,
   upsertAlert,
 } from '@fleet-dao/db';
@@ -89,6 +93,8 @@ type StorePorts = Pick<
   EnginePorts,
   | 'pickRoute'
   | 'askHuman'
+  | 'taskAsks'
+  | 'markAsksApplied'
   | 'requestApproval'
   | 'raiseAlert'
   | 'recordTiming'
@@ -104,6 +110,21 @@ type StorePorts = Pick<
    */
   stageAllOpen(stage: StageKind): Promise<AllOpenCheck>;
 };
+
+/** 库里的一条提问 → core 的 TaskAsk（存档点、PR 正文、关单记数、对账开单都按它判）：空的列不给，不拿空串、0 顶。 */
+export function toTaskAsk(r: TaskAskRow): TaskAsk {
+  return {
+    id: r.id,
+    question: r.question,
+    options: r.options,
+    applied: r.appliedAt !== null,
+    ...(r.scope === null ? {} : { scope: r.scope }),
+    ...(r.recommended === null ? {} : { recommended: r.recommended }),
+    ...(r.hold === null ? {} : { hold: r.hold }),
+    ...(r.answer === null ? {} : { answer: r.answer }),
+    ...(r.followUpIssue === null ? {} : { followUpIssue: r.followUpIssue }),
+  };
+}
 
 /** 给人看的池名：从渠道名拼，独享、拼车按池的组织类型分（两个 Claude 池是同一个会话用户）；不带账号、组织编号。 */
 export function poolNameOf(channelName: string, orgKind: OrgKind | null): string {
@@ -218,8 +239,6 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
       channelId: r.channelId,
       poolId: r.poolId,
       poolName: poolNameOf(r.channelName, r.poolOrgKind),
-      // 两个 Claude 池合成一个会话用户后不再同时跑，没有备池了（routing/types.ts 的 PoolRole）。
-      poolRole: 'primary',
       orgKind: r.poolOrgKind,
       modelId: r.modelId,
       modelName: r.modelName,
@@ -345,7 +364,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
           modelId: r.modelId,
           family: r.family,
           hostId: r.hostId,
-          poolRole: fact.poolRole,
+          ...(fact.orgKind ? { orgKind: fact.orgKind } : {}),
         };
         return { ok: true as const, route, why };
       };
@@ -526,7 +545,33 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         runId: input.runId ?? null,
         question: input.question,
         options: input.options ?? [],
+        // 引擎自己问、带了推荐的（分诊说不清，#259）：按推荐先做了，记成这张单范围内的岔路，卡片写「已按推荐先做」
+        ...(input.recommended === undefined
+          ? {}
+          : { recommended: input.recommended, scope: 'task' as const }),
       });
+    },
+
+    async taskAsks(input) {
+      const missing = () =>
+        new PortError('TASK_NOT_FOUND', `库里没有任务 ${input.taskId}：读不了它问过创始人的`, {
+          retryable: false,
+        });
+      if (!UUID.test(input.taskId)) throw missing();
+      const rows = await listTaskAsks(db, input.taskId);
+      // 一条都没有时核一下任务在不在：不在是明确的错，不当成「一条都没问过」
+      if (rows.length === 0 && !(await taskContext(db, input.taskId))) throw missing();
+      return rows.map(toTaskAsk);
+    },
+
+    async markAsksApplied(input) {
+      if (!UUID.test(input.taskId)) {
+        throw new PortError('TASK_NOT_FOUND', `库里没有任务 ${input.taskId}：记不了照改`, {
+          retryable: false,
+        });
+      }
+      // 只记这张单的、回答了的、没记过的：重试时已经记过的不动（照改的时刻不往后挪）
+      await markAsksAppliedInDb(db, { taskId: input.taskId, askIds: input.askIds, at: clock() });
     },
 
     async requestApproval(input) {

@@ -1,7 +1,9 @@
 // Fusion 工作流（docs/decisions/0003-fusion-flow.md 第 5–7、9、13 条；specs/214-Fusion工作流/）：一张单一个主导模型（Lead）
 // 会话领着走 0–7 步，派一个副手（Sidekick）干界定清楚的活；引擎推分支、开 PR、合并、关单，不往主线直接写。
 //   1 收单（引擎，不用模型）：看流程配置副本（读不到、认不出就停派报红），认单子正文里指的需求文档目录，建工作树。
+//     没指、正文写全了需求的（引擎对账开的单，#295）照收：目录按标题取短名，需求文档照正文写好交给 Lead。
 //   2 规划：Lead 读需求文档和代码，把方案写进 specs/<号>-<短名>/方案.md 提交，交方案摘要和任务简报（core 判），先推上去。
+//     照正文写的需求文档由 Lead 原样和方案一起提交；这种单开 PR 前验证照单子正文核，「对应计划」照单子挂的版本写。
 //   3 方案评审：小单跳过；不算小单的引擎还没接评审（#249），照跳过、PR 里写明。
 //   4 执行：副手照简报在同一棵树上干（按流程配置派别家的便宜路由；派不出、没额度就 Lead 自己干）；副手干完 Lead 续同一个
 //     会话验收：收下 / 打回（最多 2 次）/ Lead 接手（core 的 decideAcceptance）。Lead 验收时副手不在跑（一步一步来）。
@@ -10,6 +12,9 @@
 //   7 合并队列合并（碰人闸的等人批）→ 关单（评论：改了什么、用时、各模型额度；正文经 decide 定一次再发，重试不重写）。
 // 走哪一步只听 core 的 nextFlow（经 decide，进历史）。编号和需求工作流同一个（req:<仓>#<号>）：驾驶舱、fleet 命令的信号照旧。
 // 步骤交界（stepBoundary）是 #215（存档点、换 Lead）、#216（每步耗时和额度进库）要接的地方。
+// 问创始人不挡路（#259）：会话 fleet ask 当场按推荐接着干，他晚到、改选了别的回答在存档点（每一步开工前，checkpoint）读库
+// 交给 Lead 照改——没开 PR 的回第 4 步，开了 PR 的算修一轮，改完推上去记 applied_at；开 PR 写「按推荐先做了」一栏、关单记数。
+// 合进去以后才到的由对账开后续单（jobs/ask-issues.ts）。
 // 这里是工作流代码：判断只经 judge、编号只经 newId、core 只许 import type；改调度顺序要 patched()（kit.ts 头注释）。
 
 import type {
@@ -17,10 +22,12 @@ import type {
   FlowAction,
   FlowEvent,
   FlowState,
+  FusionPrFacts,
   FusionPrParts,
   FusionSetup,
   LeadPlan,
   Step,
+  TaskAsk,
 } from '@fleet-dao/core';
 import type { StageKind, SubtaskState, TaskState } from '@fleet-dao/shared';
 import {
@@ -29,6 +36,7 @@ import {
   getExternalWorkflowHandle,
   isCancellation,
   log,
+  patched,
   setHandler,
   sleep,
   TemporalFailure,
@@ -96,6 +104,22 @@ const STOP_WITHDRAW_MINUTES = 10;
 const CI_UNKNOWN_LIMIT = 3;
 /** 在合并队列里的这一块叫什么（合并条目、快照里的块）。一张单一块（母单按块循环归 #252）。 */
 const BLOCK_KEY = 'fusion';
+/**
+ * 问创始人不挡路（#259）接进来的几处（存档点读晚到的回答、开 PR 写「按推荐先做了」、关单记数）都多调了活动和判断：
+ * 接这道改法之前起的执行，重放时照老样子一处都不调。
+ */
+const ASK_PATCH = 'ask-not-blocking';
+/**
+ * 存档点看晚到的回答的几步：规划做完、合进去之前（core 的 nextFlow 收「changed」的也是这几步）。规划之前方案还没有，
+ * 读到的留到规划之后；合进去以后的归对账开后续单。
+ */
+const CHECKPOINT_STEPS: readonly Step[] = ['review', 'execute', 'verify', 'pr', 'final-review', 'merge'];
+
+/** 交给 Lead、还没照改完的：他晚到、改选了别的回答（库里 asks 的编号）和交给 Lead 的话（core 的 changeLine）。 */
+interface Change {
+  askIds: string[];
+  items: string[];
+}
 
 const STATE_OF_STEP: Record<Step, TaskState> = {
   discuss: 'triaging',
@@ -259,6 +283,11 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
   let flow: FlowState | null = null;
   let specDir = '';
   let docs: Docs | null = null;
+  /**
+   * 正文写全了需求、没有需求文档的单（#295，引擎开的后续单、巡检单）：照正文写的需求文档。Lead 在第 2 步原样提交进
+   * docs.requirement、随 PR 进主线；开 PR 前验证照正文核，「对应计划」照单子挂的版本写。有需求文档的单是 null。
+   */
+  let requirementSeed: string | null = null;
   let tree: Worktree | null = null;
   let branch = '';
   /** 推上去的头（远端分支头）；工作树的头可能更新（交回了、还没推）。 */
@@ -273,14 +302,21 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
   let feedback: Feedback[] = [];
   /** 这张单提交改到过的文件（相对主线）：PR 正文、验证材料、最终审查核结果.md 用。 */
   const changed = new Set<string>();
-  /** 副手这一块改到过的（验收看累计的：前一轮碰了简报外的文件，后一轮没改回来也照样算）。 */
+  /**
+   * 副手这一块改到过的，几轮累计（每轮交回的只有这一轮的改动：前一轮碰了、这一轮没再碰的也要算上）。撤回了的也还在里面：
+   * 拿它硬挡就是 #246 的死结（撤了也过不了），所以简报外的归 Lead 判；#252 接上别的块的硬挡时要换成净改动。
+   */
   const blockChanged = new Set<string>();
+  /** Lead 验收时收下的简报外文件（decideAcceptance 交回的 outside）：状态里写一句，进 PR 正文和关单评论。 */
+  const outsideAccepted = new Set<string>();
   let lastDelivery: { summary: string; testsPassed: boolean } | null = null;
   /** 这一块由 Lead 自己写的原因（副手写的是 undefined）。 */
   let soloWhy: string | undefined;
   let planReviewSkipped = false;
   const rounds: VerifyRound[] = [];
   let prNumber: number | null = null;
+  /** 开 PR 时拼正文用的事实：开了 PR 之后 Lead 又收下简报外的，照它重拼一份给关单评论（PR 正文开出去就不改了）。 */
+  let prFacts: FusionPrFacts | null = null;
   let prParts: FusionPrParts | null = null;
   let pushRework: ReworkCarry = NO_REWORK;
   let prRework: ReworkCarry = NO_REWORK;
@@ -293,6 +329,8 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
   let mergeReturns = 0;
   let ciUnknown = 0;
   let intakeTries = 0;
+  /** 存档点交给 Lead、还没照改完的（#259）：照改的那一轮推上去才记 applied_at、清掉。 */
+  let change: Change | null = null;
 
   const need = <T>(value: T | null | undefined, what: string): T => {
     if (value === null || value === undefined) throw new Error(`Fusion 工作流走到这里却没有${what}`);
@@ -300,6 +338,17 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
   };
   const addChanged = (files: readonly string[] | undefined) => {
     for (const f of files ?? []) changed.add(f);
+  };
+  /**
+   * 记下 Lead 收下的简报外文件（推上去之后才记）：状态里写一句带理由。交回有没有新记下的。
+   * 旧版代码判的结果（重放在途的任务）没有 outside：那时简报外的一律不收，收下的本来就一个都没有。
+   */
+  const noteOutside = (files: readonly string[] | undefined, why: string): boolean => {
+    if (!files?.length) return false;
+    status.lastProblem = `简报外改了：${files.join('、')}（主导收下：${why}）`;
+    const before = outsideAccepted.size;
+    for (const f of files) outsideAccepted.add(f);
+    return outsideAccepted.size > before;
   };
 
   // ---- 写库给驾驶舱、原地更新 issue 的进度段（尽力而为，失败不挡流程）
@@ -379,11 +428,11 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
       log.warn('issue 进度段没更新上', { error: String(error) });
     }
   };
-  /** 进度段、快照里的文档：需求文档一直在；方案、结果提交了才写。 */
+  /** 进度段、快照里的文档：需求文档一直在（照正文写的那份提交了才写，#295）；方案、结果提交了才写。 */
   const publishedDocs = (): { requirement?: string; plan?: string; result?: string } => {
     if (!docs) return {};
     return {
-      requirement: docs.requirement,
+      ...(requirementSeed === null || changed.has(docs.requirement) ? { requirement: docs.requirement } : {}),
       ...(changed.has(docs.plan) ? { plan: docs.plan } : {}),
       ...(changed.has(docs.result) ? { result: docs.result } : {}),
     };
@@ -424,6 +473,65 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
     };
     await stepBoundary(current.step, decided.state.step);
     return decided.action;
+  };
+
+  // ---- 问创始人不挡路（#259）：他晚到的回答
+
+  /** 这张单问过创始人的（库里 asks）。读不到按失败分流走（重试、挂起报警），不当成一条都没问过。 */
+  const readAsks = (): Promise<TaskAsk[]> => attempt(kit, 'taskAsks', () => acts.taskAsks({ ...kit.scope }));
+
+  const changeFeedback = (c: Change): Feedback => ({
+    kind: 'answer',
+    summary:
+      '创始人晚到的回答：没等他回时按推荐先做的，他改选了别的，照他选的改（改完的推上去，引擎记下已照改）',
+    items: c.items,
+  });
+
+  /**
+   * 存档点（每一步开工前）：读这张单「选了别的、还没照改」的回答，交给 Lead（core 的 lateChanges）。执行、开了 PR 之后修一轮
+   * 这两种自己会接（doDispatch、doTakeover 先把本来的活做完再照改，doFix 并进这一轮）；别的几步经 core 的 nextFlow 改道：
+   * 没开 PR 的回第 4 步执行，开了 PR 的算修一轮（和 CI 红同一本账，修满了停下等人）。
+   */
+  const checkpoint = async (action: FlowAction): Promise<FlowAction> => {
+    if (!CHECKPOINT_STEPS.includes(need(flow, '状态').step) || !patched(ASK_PATCH)) return action;
+    const late = await judge(kit, 'lateChanges', { asks: await readAsks(), handed: change?.askIds ?? [] });
+    if (late.askIds.length > 0) {
+      change = {
+        askIds: [...(change?.askIds ?? []), ...late.askIds],
+        items: [...(change?.items ?? []), ...late.items],
+      };
+      status.lastProblem = `创始人晚到的回答改选了别的（${late.askIds.length} 条），交给 Lead 照改`;
+    }
+    // 本来的活还没交过（规划完、头一次派活之前）：先照原方案做，收下推上去以后的存档点再照改，不跳过这之间的步骤
+    if (!change || !lastDelivery) return action;
+    if (action === 'dispatch' || action === 'lead-takeover' || action === 'fix-ci') return action;
+    const prOpen = prNumber !== null;
+    if (prOpen) fix = fix ?? { feedback: [] };
+    return advance({ kind: 'changed', prOpen });
+  };
+
+  /** 照改的那一轮推上去了：记 applied_at（卡片原地改成「已生效」），清掉。 */
+  const changeApplied = async (done: Change) => {
+    await attempt(kit, 'markAsksApplied', () => acts.markAsksApplied({ ...kit.scope, askIds: done.askIds }));
+    change = null;
+    status.lastProblem = `创始人改选的 ${done.askIds.length} 条已照改`;
+  };
+
+  /**
+   * 还没开 PR、本来的活已经收下推上去了：照他改选的改一轮（Lead 写照改的简报、副手改、Lead 验收，和开了 PR 之后修一轮同一套）；
+   * 单模型模式、这一块 Lead 已经接手的由 Lead 自己改。改完推上去才记照改了，接着回去验证。
+   */
+  const applyChange = async (c: Change, solo: boolean): Promise<FlowEvent> => {
+    const fb = [changeFeedback(c)];
+    // PR 正文「这一块由 Lead 自己写」照旧写本来的原因（单模型模式、副手打回两次……），不换成照改这一轮的
+    const keep = soloWhy;
+    const r = solo
+      ? await leadWork('创始人改选了别的：Lead 照他选的改（#259）', fb, need(plan, '方案').brief)
+      : await deliverFix(await leadFixBrief(fb), fb);
+    if (solo && keep !== undefined) soloWhy = keep;
+    if ('needsHuman' in r) return { kind: 'needs-human', why: r.needsHuman };
+    await changeApplied(c);
+    return { kind: 'accepted' };
   };
 
   // ---- 会话：Lead 一张单一个会话、按步续用；副手也续同一个
@@ -603,15 +711,16 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
         ? input.rawRequest
         : (await attempt(kit, 'taskRequest', () => acts.taskRequest({ ...kit.scope }))).rawRequest;
     intakeTries += 1;
-    const dir = await judge(kit, 'specDir', { body, issueNumber: input.issueNumber });
+    const dir = await judge(kit, 'specDir', { body, issueNumber: input.issueNumber, title: input.title });
     if ('error' in dir) {
       return {
         kind: 'needs-human',
-        why: `认不出需求文档：${dir.error}。用 pnpm issue:new 开单（会写需求文档和这一行），或在单子正文里补上「文档：\`specs/<号>-<短名>/需求.md\`」、把需求文档合进主线，再点「继续」`,
+        why: `认不出需求文档：${dir.error}。用 pnpm issue:new 开单（会写需求文档和这一行），或在单子正文里补上「文档：\`specs/<号>-<短名>/需求.md\`」、把需求文档合进主线，或者把需求写全在正文里（要有写了字的「## 怎么算做完」），再点「继续」`,
       };
     }
     specDir = dir.ok;
     docs = dir.docs;
+    requirementSeed = dir.requirement ?? null;
     status.specDir = specDir;
     if (!tree) {
       blockId = await newId(kit);
@@ -633,9 +742,17 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
     let fb: Feedback[] = [];
     let tries = 0;
     for (;;) {
-      const out = await leadRun('plan', 'lead-plan', { feedback: fb });
+      // 还没有需求文档的（#295）：照正文写好的那份交给 Lead，和方案一起原样提交
+      const out = await leadRun('plan', 'lead-plan', {
+        feedback: fb,
+        ...(requirementSeed === null ? {} : { material: { requirementText: requirementSeed } }),
+      });
       treeHead = out.head;
-      const checked = await judge(kit, 'leadPlan', { output: out, specDir });
+      const checked = await judge(kit, 'leadPlan', {
+        output: out,
+        specDir,
+        ...(requirementSeed === null ? {} : { withRequirement: true }),
+      });
       if (!checked.ok) {
         status.lastProblem = checked.problems[0] ?? '方案不合格';
         fb = [{ kind: 'plan', summary: '方案或任务简报不合格，按下面几条改好再交', items: checked.problems }];
@@ -671,6 +788,8 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
   const doDispatch = async (): Promise<FlowEvent> => {
     const current = need(flow, '状态');
     const brief = need(plan, '方案').brief;
+    // 存档点交过来的、他改选了别的（#259）：本来的活已经收下推上去了才照改；还没收下的先把本来的活做完，下一个存档点再照改
+    if (change && lastDelivery) return applyChange(change, current.mode === 'single');
     const soloDone = (r: { ok: true } | { needsHuman: string }): FlowEvent =>
       'needsHuman' in r ? { kind: 'needs-human', why: r.needsHuman } : { kind: 'accepted' };
     if (current.mode === 'single') {
@@ -700,6 +819,8 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
     const verdict = await leadAccept(del, brief);
     const decision = await judge(kit, 'acceptance', {
       brief,
+      // 一张单一块，#252 母单多块时填别的块的简报
+      otherBlocks: [],
       delivery: { changedFiles: [...blockChanged], tests: del.testsPassed ? 'green' : 'red' },
       lead: verdict,
       reworks: current.reworks,
@@ -710,6 +831,7 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
         feedback = [reworkFeedback('push', pushed.rework)];
         return { kind: 'rejected' };
       }
+      noteOutside(decision.outside, verdict.why);
       lastDelivery = { summary: del.summary, testsPassed: del.testsPassed };
       soloWhy = undefined;
       feedback = [];
@@ -731,6 +853,7 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
 
   /** 4 执行（Lead 接手）：副手打回满两次，或验证挡住时已经是 Lead 在写。 */
   const doTakeover = async (): Promise<FlowEvent> => {
+    if (change && lastDelivery) return applyChange(change, true);
     const r = await leadWork(
       '副手打回两次还没做好，Lead 接手（0003 第 5 条）',
       feedback,
@@ -744,13 +867,16 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
   /** 5 验证：别家对照「怎么算做完」核推上去的头；挡了 Lead 看过、有证据就驳回。 */
   const doVerify = async (): Promise<FlowEvent> => {
     const current = need(setup, '流程配置');
-    const n = need(flow, '状态').verifyRounds + 1;
+    // 第几轮按验过几次数（不按没过的轮数）：验过了、他又改选了别的回去照改（#259），再验是新的一轮
+    const n = rounds.length + 1;
     const files = [...changed];
     const ui = await judge(kit, 'filesUnder', { paths: current.uiPaths, files });
     let round = await verifyRound(kit, {
       round: n,
       repo: input.repo,
       specDir,
+      // 还没有需求文档的（#295）：主线上没有，「怎么算做完」照单子正文核（分支上的写这张单的能改，不读）
+      ...(requirementSeed === null ? {} : { criteriaFromBody: true }),
       head,
       title: input.title,
       request: input.rawRequest,
@@ -824,10 +950,12 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
     if (prNumber === null) {
       const current = need(setup, '流程配置');
       const lines = rounds.length > 0 ? await verifyLines(kit, rounds) : null;
+      // 「按推荐先做了」一栏（#259）：照开 PR 这一刻库里这张单的提问写
+      const assumed = patched(ASK_PATCH) ? await judge(kit, 'assumedLines', await readAsks()) : [];
       let planSummary = need(plan, '方案').summary;
       let summary = lastDelivery?.summary ?? '';
       for (;;) {
-        const parts = await judge(kit, 'fusionPr', {
+        const facts: FusionPrFacts = {
           mode: current.mode,
           planSummary,
           summary,
@@ -837,7 +965,10 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
           planReviewSkipped,
           flowSource: current.source,
           ...(soloWhy ? { soloWhy } : {}),
-        });
+          ...(assumed.length > 0 ? { assumed } : {}),
+          outsideBrief: [...outsideAccepted],
+        };
+        const parts = await judge(kit, 'fusionPr', facts);
         const opened = await attemptOrRework(
           kit,
           'openPr',
@@ -853,7 +984,10 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
                 did: parts.did,
                 verified: parts.verified,
                 owed: parts.owed,
+                assumed: parts.assumed ?? [],
                 specs: specDir,
+                // 需求文档跟着这个 PR 才进主线（#295）：「对应计划」照单子挂的版本写
+                ...(requirementSeed === null ? {} : { planFromIssue: true }),
                 tier: parts.tier,
                 changedFiles: [...changed],
               },
@@ -871,6 +1005,7 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
           continue;
         }
         prRework = NO_REWORK;
+        prFacts = facts;
         prParts = parts;
         prNumber = opened.ok.prNumber;
         status.prNumber = prNumber;
@@ -923,6 +1058,8 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
       const accepted = await leadAccept(del, brief);
       let decision = await judge(kit, 'acceptance', {
         brief,
+        // 一张单一块，#252 母单多块时填别的块的简报
+        otherBlocks: [],
         delivery: {
           changedFiles: del.changedFiles ? [...fixChanged] : [],
           tests: del.testsPassed ? 'green' : 'red',
@@ -934,11 +1071,15 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
         const pushed = await pushOrRework(del.head);
         if (!('rework' in pushed)) {
           lastDelivery = { summary: del.summary, testsPassed: del.testsPassed };
+          if (noteOutside(decision.outside, accepted.why) && prFacts) {
+            prParts = await judge(kit, 'fusionPr', { ...prFacts, outsideBrief: [...outsideAccepted] });
+          }
           return { ok: true };
         }
         // 推之前被拦下（卫生检查、并主线冲突）也算这一轮没收下：同一本打回账
         decision = await judge(kit, 'acceptance', {
           brief,
+          otherBlocks: [],
           delivery: { changedFiles: [...fixChanged], tests: del.testsPassed ? 'green' : 'red' },
           lead: { verdict: 'reject', why: pushed.rework.message },
           reworks,
@@ -982,14 +1123,23 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
 
   /** 6 开了 PR 之后修一轮（CI 红、最终审查要改、合并前退回），修完推上去再等 CI。 */
   const doFix = async (): Promise<FlowEvent> => {
-    const cause = fix;
+    // 存档点交过来的、他改选了别的（#259）并进这一轮修；只有它要修时也修一轮
+    const applying = change;
+    const cause = fix ?? (applying ? { feedback: [] } : null);
     if (cause) {
       if (cause.follow) await followBranchHead();
       const single = need(flow, '状态').mode === 'single';
-      const brief = cause.brief ?? (single ? undefined : await leadFixBrief(cause.feedback));
-      const r = await deliverFix(brief, cause.feedback);
+      const fb = applying ? [...cause.feedback, changeFeedback(applying)] : cause.feedback;
+      // 他改选了别的：修复简报由 Lead 连同改选的重写（最终审查给的那份没算上它）
+      const brief = applying
+        ? single
+          ? undefined
+          : await leadFixBrief(fb)
+        : (cause.brief ?? (single ? undefined : await leadFixBrief(cause.feedback)));
+      const r = await deliverFix(brief, fb);
       if ('needsHuman' in r) return { kind: 'needs-human', why: r.needsHuman };
       fix = null;
+      if (applying) await changeApplied(applying);
     }
     return waitCiEvent();
   };
@@ -1198,6 +1348,8 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
     const usage = Object.values(kit.usage).sort((a, b) =>
       a.model < b.model ? -1 : a.model > b.model ? 1 : 0,
     );
+    // 问创始人的记数（#259）：按推荐先做了几条、事后被改了几条，给检验制度用（#257）
+    const asks = patched(ASK_PATCH) ? await judge(kit, 'askTally', await readAsks()) : undefined;
     const comment = await judge(kit, 'closeComment', {
       prNumber: need(prNumber, 'PR'),
       mergeCommit: need(mergeCommit, '合并提交'),
@@ -1210,6 +1362,7 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
       docs: need(docs, '需求文档'),
       flowSource: current.source,
       mode: current.mode,
+      ...(asks ? { asks } : {}),
     });
     await attempt(kit, 'closeIssue', () =>
       acts.closeIssue({
@@ -1234,6 +1387,7 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
     let action = await advance({ kind: 'discussed' });
     while (action !== 'close') {
       await gate(kit);
+      action = await checkpoint(action);
       let event: FlowEvent;
       switch (action) {
         case 'intake':

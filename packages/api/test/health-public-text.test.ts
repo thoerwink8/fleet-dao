@@ -9,6 +9,7 @@ import { type Db, type PgListen, SESSION_ORG_ALERT_PREFIX, upsertAlert } from '@
 import { createTestDb, TEST_DB_TIMEOUT_MS } from '@fleet-dao/db/testing';
 import { FeishuRoutes, FLEET_CHANGES_CHANNEL } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
+import { CANARY_NOT_HERE, canaryHealthCheck } from '../src/canary-health.ts';
 import { startPgChangeFeed } from '../src/changes.ts';
 import { DEPLOY_LAG_NOT_HERE, deployLagCheck } from '../src/deploy-lag.ts';
 import { draftBacklogCheck, notWiredDraftOpener } from '../src/draft-opening.ts';
@@ -185,6 +186,10 @@ async function publicFailures(log: Logger) {
       body: 'fleet-agent-carpool 以会话用户跑 reclaude org list 没跑成',
     });
     await run('session-org', true, sessionOrgHealthCheck(judgeDb.db));
+    // 全流程巡检：只有一处 new PublicHealthError（说法有几种），这里造一种；每一种说法都在 canary-health.test.ts 用同一份名单扫
+    await run('canary', true, async () => {
+      await canaryHealthCheck(judgeDb.db)();
+    });
   } finally {
     judged.cleanup();
     await judgeDb.close();
@@ -266,6 +271,7 @@ describe('公开的健康报告', () => {
           deployLag: { check: async () => {}, notWired: DEPLOY_LAG_NOT_HERE },
           feishuGateway,
           sessionOrg: async () => {},
+          canary: { check: async () => {}, notWired: CANARY_NOT_HERE },
         }),
         silentLogger,
       );

@@ -156,6 +156,13 @@ describe('读 GitHub：单张、里程碑', () => {
   it('toIssue：milestone 为 null 也行', () => {
     expect(toIssue(row(9, { milestone: null })).milestone).toBeNull();
   });
+
+  it('toIssue：正文带着就读（null 是空正文）；没带的不拿空串顶；【失败】不是字符串的认不出', () => {
+    expect(toIssue(row(9, { body: '## 怎么算做完\n\n- a\n' })).body).toBe('## 怎么算做完\n\n- a\n');
+    expect(toIssue(row(9, { body: null })).body).toBe('');
+    expect(toIssue(row(9))).not.toHaveProperty('body');
+    expect(() => toIssue(row(9, { body: 42 }))).toThrow('认不出（body）');
+  });
 });
 
 describe('读 GitHub：认是哪个仓', () => {

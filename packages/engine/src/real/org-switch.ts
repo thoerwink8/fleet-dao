@@ -1,14 +1,16 @@
-// 会话用户切号的真装配（#157）：路由探针每一轮探之前，现读会话用户挂的组织（session-org.ts）、库里两个 Claude 池的额度、
-// 整池暂停和还没结束的 Claude 会话（db 的 sessionOrgFacts），照 jobs/org-switch.ts 判。该切又空着：先让选路停下（读组织回
-// pending，选路过 30 秒再选），等一会儿、再数一遍会话（选路刚派出去、还没登记的会话要有时间登记），还空着就经 root 帮手的
-// org-use 切过去（adapters 的 switchSessionOrg：帮手以会话用户读 org list 认出那一类、切、回读核对，没切成、核对不了都切回原来的），
-// 切完记操作记录。这一轮探完，切过去的那个池的路由探通了才算切成（after）。
+// 会话用户切号的真装配（#157、#59）：路由探针每一轮探之前，现读会话用户挂的组织（session-org.ts）、库里两个 Claude 池的额度、
+// 整池暂停和还没结束的 Claude 会话（db 的 sessionOrgFacts），照 jobs/org-switch.ts 判。该切：先让选路停下（读组织回 pending，
+// 选路过 30 秒再选），等一会儿（选路刚派出去、还没登记的会话要有时间登记）；接了会话端口（#59）就把手上跑在 Claude 池上的
+// 会话停下（它们交回 org_switch，切完续同一个会话，换了池 fork 续上），等它们都收场；没接就再数一遍，还有会话就这一轮不切。
+// 然后经 root 帮手的 org-use 切过去（adapters 的 switchSessionOrg：帮手以会话用户读 org list 认出那一类、切、回读核对，
+// 没切成、核对不了都切回原来的），切完记操作记录。这一轮探完，切过去的那个池的路由探通了才算切成（after）。
 // 没切成、切完探针读回不在线、拼车用满却读不到几点恢复：写一条 session-org:* 的「要人看」提醒（驾驶舱和飞书看得到，驾驶舱
 // 后端的健康检查 session_org 跟着红），条件没了自己撤。这一步出什么错都不抛：探针照探，下一轮再判。
 import type { SessionUser, SwitchSessionOrgResult } from '@fleet-dao/adapters';
 import {
   type Db,
   openAlertsByPrefix,
+  openOrgRuns,
   recordEngineAudit,
   resolveAlertWithReason,
   SESSION_ORG_ALERT_PREFIX,
@@ -19,6 +21,7 @@ import type { OrgKind } from '@fleet-dao/shared';
 import { type OrgPool, type OrgSwitchRound, planOrgSwitch } from '../jobs/org-switch.ts';
 import { ORG_NAMES } from '../routing/names.ts';
 import type { SessionOrgControl } from './session-org.ts';
+import type { OrgSwitchSessions } from './sessions.ts';
 import { POOL_HOLD_PREFIX } from './store-ports.ts';
 
 /** 切号没成（帮手没切过去）。下一次切成了、或者不用切了（人切好了、额度变了）撤。 */
@@ -32,6 +35,16 @@ export const ORG_STUCK_ALERT = `${SESSION_ORG_ALERT_PREFIX}stuck`;
  * 平时一两秒。切号一次（一个 5 小时窗口最多两次）Claude 停派这么久，换不让刚派的会话被切号掐断。
  */
 export const ORG_SWITCH_GRACE_MS = 15_000;
+/**
+ * 停下手上的会话以后最多等多久它们都收场（#59）：插头收进程几秒，看守每 5 秒看一次、收场后写库。等不齐这一轮就不切：
+ * 停下的会话照样续上（还在原来的组织上）。
+ */
+export const ORG_DRAIN_TIMEOUT_MS = 120_000;
+export const ORG_DRAIN_POLL_MS = 2_000;
+/**
+ * 登记了、进程还没起来的会话（还在建树、准备）要等它起来再停；排队这么久还没起来的，是没了下文的（工作流没了），不等它。
+ */
+export const ORG_STARTING_MAX_MS = 10 * 60_000;
 const ACTOR = 'engine:org-switch';
 
 export interface OrgSwitchWiring {
@@ -43,9 +56,16 @@ export interface OrgSwitchWiring {
   switchOrg(to: OrgKind): Promise<SwitchSessionOrgResult>;
   /** 这台机器给人看的名字：提醒里写清去哪台机器看。 */
   machine: string;
+  /**
+   * 会话端口的切号那两样（real/sessions.ts，#59）：有会话在跑也照切——先停下、等收场、再切，切完它们续上。
+   * 不给就只在手上没有会话时切（#157 的做法）。
+   */
+  sessions?: OrgSwitchSessions;
   now?: () => Date;
   sleep?: (ms: number) => Promise<void>;
   graceMs?: number;
+  drainTimeoutMs?: number;
+  pollMs?: number;
   log?: (level: 'info' | 'warn' | 'error', message: string, fields?: Record<string, unknown>) => void;
 }
 
@@ -84,31 +104,101 @@ export function orgSwitchRound(w: OrgSwitchWiring): OrgSwitchRound {
         held: (seen?.held ?? false) || held.has(p.poolId),
       };
     }
-    return { pools, busy: f.busy };
+    return { pools, busy: f.busy, poolIds: new Set(f.pools.map((p) => p.poolId)) };
   }
 
-  async function switchOver(from: OrgKind, to: OrgKind, why: string): Promise<OrgKind | null> {
+  /**
+   * 切之前把手上跑在 Claude 池上的会话停下，等它们都收场（#59）。登记了、进程还没起来的（还在建树）等它起来再停；
+   * 排队很久还没起来的、库里还开着可这个工人手上没有的（上一轮工人留下的，起来时已经收掉了），都不是在跑的进程，不等。
+   * 交回这一次叫停的会话；等不齐交回原因。
+   */
+  async function drain(
+    sessions: OrgSwitchSessions,
+    poolIds: ReadonlySet<string>,
+    why: string,
+  ): Promise<{ stopped: string[]; problem?: string }> {
+    const timeoutMs = w.drainTimeoutMs ?? ORG_DRAIN_TIMEOUT_MS;
+    const pollMs = w.pollMs ?? ORG_DRAIN_POLL_MS;
+    const deadline = clock().getTime() + timeoutMs;
+    const stopped = new Set<string>();
+    // 按次数也有个头：时钟不走（测试里）也会停
+    for (let round = 0; ; round += 1) {
+      for (const id of sessions.stop(poolIds, why)) stopped.add(id);
+      const live = new Set(sessions.live(poolIds));
+      const now = clock().getTime();
+      const starting = (await openOrgRuns(w.db)).filter(
+        (r) => r.startedAt === null && !live.has(r.runId) && now - r.queuedAt.getTime() < ORG_STARTING_MAX_MS,
+      );
+      if (live.size === 0 && starting.length === 0) return { stopped: [...stopped] };
+      if (now >= deadline || round >= Math.ceil(timeoutMs / pollMs)) {
+        return {
+          stopped: [...stopped],
+          problem: `让手上的 Claude 会话停下等了 ${Math.round(timeoutMs / 1000)} 秒，还有 ${live.size} 个没收场、${starting.length} 个还在起，这一轮不切（停下的照样续上）`,
+        };
+      }
+      await sleep(pollMs);
+    }
+  }
+
+  async function switchOver(
+    from: OrgKind,
+    to: OrgKind,
+    why: string,
+    poolIds: ReadonlySet<string>,
+  ): Promise<OrgKind | null> {
     const release = w.org.hold(`正在把会话用户从${ORG_NAMES[from]}组织切到${ORG_NAMES[to]}组织`);
     let result: SwitchSessionOrgResult;
+    let stopped: string[] = [];
     try {
       await sleep(w.graceMs ?? ORG_SWITCH_GRACE_MS);
-      const again = await facts();
-      if (again.busy > 0) {
-        log('info', '会话用户切号：让选路停下以后又有会话登记了，这一轮不切', { busy: again.busy });
-        return null;
+      if (w.sessions) {
+        const drained = await drain(
+          w.sessions,
+          poolIds,
+          `切号：会话用户从${ORG_NAMES[from]}组织切到${ORG_NAMES[to]}组织，先停下，切完接着干`,
+        );
+        stopped = drained.stopped;
+        if (drained.problem) {
+          await recordEngineAudit(w.db, {
+            action: 'session-org.switch',
+            target,
+            actorId: ACTOR,
+            before: { org: from },
+            after: { org: to, stopped },
+            reason: why,
+            ok: false,
+            error: drained.problem,
+            at: clock(),
+          });
+          await alert(
+            ORG_SWITCH_ALERT,
+            `会话用户切号没成：${ORG_NAMES[from]} → ${ORG_NAMES[to]}`,
+            `为什么切：${why}。没成：${drained.problem}。下一轮路由探针还会再判、再试；${fix}`,
+          );
+          log('error', '会话用户切号：手上的会话没停齐，这一轮不切', { from, to, problem: drained.problem });
+          return null;
+        }
+      } else {
+        const again = await facts();
+        if (again.busy > 0) {
+          log('info', '会话用户切号：让选路停下以后又有会话登记了，这一轮不切', { busy: again.busy });
+          return null;
+        }
       }
       result = await w.switchOrg(to);
     } finally {
       release();
     }
+    const halted =
+      stopped.length > 0 ? `（切之前停下了 ${stopped.length} 个在跑的 Claude 会话，切完各自续上）` : '';
     if (result.ok) {
       await recordEngineAudit(w.db, {
         action: 'session-org.switch',
         target,
         actorId: ACTOR,
         before: { org: from },
-        after: { org: to },
-        reason: result.changed ? why : `${why}（帮手读到本来就挂着${ORG_NAMES[to]}）`,
+        after: { org: to, ...(stopped.length > 0 ? { stopped } : {}) },
+        reason: `${result.changed ? why : `${why}（帮手读到本来就挂着${ORG_NAMES[to]}）`}${halted}`,
         ok: true,
         at: clock(),
       });
@@ -122,8 +212,8 @@ export function orgSwitchRound(w: OrgSwitchWiring): OrgSwitchRound {
       target,
       actorId: ACTOR,
       before: { org: from },
-      after: { org: to },
-      reason: why,
+      after: { org: to, ...(stopped.length > 0 ? { stopped } : {}) },
+      reason: `${why}${stopped.length > 0 ? `（切之前停下了 ${stopped.length} 个在跑的 Claude 会话，切号没成，它们照样续上）` : ''}`,
       ok: false,
       error,
       at: clock(),
@@ -143,8 +233,14 @@ export function orgSwitchRound(w: OrgSwitchWiring): OrgSwitchRound {
         // 切不切看现在的真实状态：留着的读数可能是半分钟前的
         w.org.forget();
         const live = await w.org();
-        const { pools, busy } = await facts();
-        const plan = planOrgSwitch({ live, pools, busy, now: clock() });
+        const { pools, busy, poolIds } = await facts();
+        const plan = planOrgSwitch({
+          live,
+          pools,
+          busy,
+          ...(w.sessions ? { canStopRunning: true } : {}),
+          now: clock(),
+        });
         log('info', '会话用户切号：这一轮的判断', { action: plan.action, why: plan.why });
         if (plan.action === 'stuck') {
           await alert(ORG_STUCK_ALERT, '拼车恢复时刻读不到，不知道什么时候切回拼车', `${plan.why}。${fix}`);
@@ -154,7 +250,7 @@ export function orgSwitchRound(w: OrgSwitchWiring): OrgSwitchRound {
         // 挂的是哪个认得出、又不用切：之前没切成的那条过去了（人切好了，或者额度变了不用切了）
         if (plan.action === 'stay' && live.ok) await settle(ORG_SWITCH_ALERT, `现在不用切了：${plan.why}`);
         if (plan.action !== 'switch' || !live.ok) return null;
-        return await switchOver(live.org, plan.to, plan.why);
+        return await switchOver(live.org, plan.to, plan.why, poolIds);
       } catch (err) {
         log('error', '会话用户切号这一步出错（这一轮不切，探针照探）', { error: message(err) });
         return null;

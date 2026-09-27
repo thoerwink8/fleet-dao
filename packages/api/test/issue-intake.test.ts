@@ -964,6 +964,53 @@ describe('母单、子单不自动派（#252 之前：一张单只走一块，�
   });
 });
 
+// 本机做这一道的边界表在 packages/core/test/dispatch.test.ts；#299 认领进库之前靠「本机做」标签挡（#293、#299 都被接走过）。
+describe('贴了「本机做」的不自动派（#299 止血：帅位留给本机做的）', () => {
+  it('【故意造出的失败】开单时就贴着「本机做」的 v1 新单：建了任务行、不派，note 写 reserved_local；不贴的 v1 新单照派', async () => {
+    const { h, task } = setup();
+    h.plans.set(40, issuePlan({ labels: ['需求', '本机做'] }));
+    expect(await json(deliver(h, 'issues', issuesEvent('opened')))).toMatchObject({
+      verdict: 'accepted',
+      note: 'task=created, workflow=reserved_local',
+    });
+    expect((await task(40))?.state).toBe('queued');
+    expect(
+      h.logs.some(
+        (l) =>
+          l.level === 'info' &&
+          l.message === '这张单不自动派：帅位留给本机做（贴着「本机做」）；要交给引擎，先去掉标签再 handover',
+      ),
+    ).toBe(true);
+
+    expect(await json(deliver(h, 'issues', issuesEvent('opened', issue({ number: 42 }))))).toMatchObject({
+      note: 'task=created, workflow=started',
+    });
+    expect(h.starts.map((s) => s.issueNumber)).toEqual([42]);
+  });
+
+  it('【故意造出的失败】贴着「本机做」的未排期单挪进当前版本（milestoned 事件）：照样不派；去掉标签（unlabeled 事件）就照接活规矩派', async () => {
+    const { h } = setup();
+    h.plans.set(40, issuePlan({ milestone: null, labels: ['需求', '本机做'] }));
+    expect(await json(deliver(h, 'issues', issuesEvent('opened')))).toMatchObject({
+      note: 'task=created, workflow=unscheduled',
+    });
+    h.plans.set(40, issuePlan({ milestone: V1, labels: ['需求', '本机做'] }));
+    const moved = issuesEvent('milestoned', issue({ updated_at: at(-20), milestone: V1 }));
+    expect(await json(deliver(h, 'issues', moved))).toMatchObject({
+      note: 'task=exists, workflow=reserved_local',
+    });
+    expect(h.starts).toEqual([]);
+
+    // 帅位决定交还给引擎：去掉标签那一下照开关规矩再判一次，挂在当前版本上的独立单当场就派了
+    h.plans.set(40, issuePlan({ milestone: V1, labels: ['需求'] }));
+    const unlabeled = issuesEvent('unlabeled', issue({ updated_at: at(-10), milestone: V1 }));
+    expect(await json(deliver(h, 'issues', unlabeled))).toMatchObject({
+      note: 'task=exists, workflow=started',
+    });
+    expect(h.starts.map((s) => s.issueNumber)).toEqual([40]);
+  });
+});
+
 describe('读不到、认不出：明确失败或记下原因，并告警', () => {
   it('仓在门口放进来之后、接活之前被删了：投递记成出错，原因写明', async () => {
     const { h } = setup();

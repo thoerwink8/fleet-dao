@@ -53,8 +53,7 @@ describe('派给某条路由', () => {
   });
 
   it('同样的输入同样的结果（确定性）', () => {
-    const make = () =>
-      input(soloAndCarpool({}, { windows: [win({ used: 0.3, resetsAt: at(20) })] }), { weight: 'light' });
+    const make = () => input(soloAndCarpool({}, { windows: [win({ used: 0.3, resetsAt: at(20) })] }));
     expect(chooseRoute(make())).toEqual(chooseRoute(make()));
   });
 });
@@ -245,17 +244,12 @@ describe('任务指定了路由', () => {
       expect(r.why).toBe('任务指定的路由：池b · Opus 5.5 · Claude Code；额度未知（没读成或读数过期）');
   });
 
-  it('指定的备池额度未知：放这一个当试探；已经有一个在跑就等它，不换路由', () => {
-    const [solo, carpool] = soloAndCarpool({}, { quota: 'unknown', windows: [] });
+  it('拼车号额度未知、已经有一个在跑也照派，写明额度未知（不再是「备池只放一个试探」，#59 删掉）', () => {
+    const [solo, carpool] = soloAndCarpool({}, { quota: 'unknown', windows: [], inFlight: 1 });
     const r = chooseRoute(input([solo, carpool], { stage: 'judge', taskRouteId: 'carpool' }));
-    expect(r).toMatchObject({ kind: 'dispatch', routeId: 'carpool', trial: 'quota-probe' });
+    expect(r).toMatchObject({ kind: 'dispatch', routeId: 'carpool', trial: null });
     if (r.kind === 'dispatch')
-      expect(r.why).toBe('任务指定的路由：拼车号 · Opus 5.5 · Claude Code；拼车号额度未知，只放一个试探');
-    const busy = { ...carpool, inFlight: 1 };
-    expect(chooseRoute(input([solo, busy], { stage: 'judge', taskRouteId: 'carpool' }))).toMatchObject({
-      kind: 'wait',
-      waitFor: 'slot',
-    });
+      expect(r.why).toBe('任务指定的路由：拼车号 · Opus 5.5 · Claude Code；额度未知（没读成或读数过期）');
   });
 });
 
@@ -309,17 +303,7 @@ describe('试探', () => {
     });
   });
 
-  it('试探落到额度未知的备池：记成 explore，理由两样都写', () => {
-    const rs = soloAndCarpool({}, { quota: 'unknown', windows: [] });
-    const r = chooseRoute(input(rs, { stage: 'judge', draw: 0.05, policy: on }));
-    expect(r).toMatchObject({ routeId: 'carpool', trial: 'explore' });
-    if (r.kind === 'dispatch') {
-      expect(r.why).toMatch(/^试探：/);
-      expect(r.why).toContain('拼车号额度未知，只放一个试探');
-    }
-  });
-
-  it('试探落到额度未知的主池：理由写「额度未知」（design §九 选路第 3 条）', () => {
+  it('试探落到额度未知的池：理由写「额度未知」（design §九 选路第 3 条）', () => {
     const rs = [route('a'), route('b', { quota: 'unknown', windows: [] })];
     const r = chooseRoute(input(rs, { draw: 0.05, policy: on }));
     expect(r).toMatchObject({ routeId: 'b', trial: 'explore' });
@@ -372,10 +356,9 @@ describe('熔断：trial 只放一个', () => {
     expect(r).toMatchObject({ kind: 'wait', waitFor: 'slot' });
   });
 
-  it('半开的又是额度未知的备池：标熔断试探，理由两样都写', () => {
+  it('半开的又是额度未知的：标熔断试探，理由两样都写', () => {
     const c = route('c', {
       poolName: '拼车号',
-      poolRole: 'backup',
       quota: 'unknown',
       windows: [],
       breaker: { state: 'half_open', admit: 'trial', reason: '冷却到点' },
@@ -383,7 +366,7 @@ describe('熔断：trial 只放一个', () => {
     const r = chooseRoute(input([c], { stage: 'triage' }));
     expect(r).toMatchObject({ kind: 'dispatch', routeId: 'c', trial: 'breaker' });
     if (r.kind === 'dispatch') {
-      expect(r.why).toContain('拼车号额度未知，只放一个试探');
+      expect(r.why).toContain('额度未知（没读成或读数过期）');
       expect(r.why).toContain('熔断半开，这一单当试探');
     }
   });
@@ -438,7 +421,7 @@ describe('为什么派给它：人看得懂', () => {
         windows: [win({ label: '5h', window: '5h', used: 0.1 }), win({ used: 0.3, resetsAt: at(20) })],
       },
     );
-    const r = chooseRoute(input([solo, carpool], { weight: 'light' }));
+    const r = chooseRoute(input([solo, carpool]));
     expect(r.kind === 'dispatch' && r.why).toBe(
       '写码阶段第 2 条：拼车号 · Opus 5.5 · Claude Code；拼车号周额度 20 小时后清零、还剩 70%，提到最前；第 1 条 独享号 · Opus 5.5 · Claude Code：排到了后面',
     );

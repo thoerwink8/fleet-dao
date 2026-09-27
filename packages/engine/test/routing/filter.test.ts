@@ -1,6 +1,6 @@
-// 过滤：每条规则一正一反。被挡的留原因，no-slot 不算坏（等空位），额度没读成的主池不挡。
+// 过滤：每条规则一正一反。被挡的留原因，no-slot 不算坏（等空位），额度没读成的池不挡。
 import { describe, expect, it } from 'vitest';
-import { backupProbeReason, blocksFor, type FilterContext, hostUnfit } from '../../src/routing/filter.ts';
+import { blocksFor, type FilterContext, hostUnfit } from '../../src/routing/filter.ts';
 import { groupOf } from '../../src/routing/group.ts';
 import {
   DEFAULT_ROUTING_POLICY,
@@ -14,7 +14,6 @@ import { at, entry, halfOpenBreaker, NOW, route, win } from './helpers.ts';
 function ctx(overrides: Partial<FilterContext> = {}): FilterContext {
   return {
     stage: 'execute',
-    weight: 'heavy',
     policy: { ...DEFAULT_ROUTING_POLICY },
     now: Date.parse(NOW),
     avoid: { routeIds: new Set(), poolIds: new Set(), modelIds: new Set(), families: new Set() },
@@ -112,7 +111,7 @@ describe('候选查询给的被挡原因', () => {
     });
   });
 
-  it('额度没读成的主池不挡', () => {
+  it('额度没读成的池不挡', () => {
     expect(codes(route('a', { quota: 'unknown', windows: [] }))).toEqual([]);
   });
 });
@@ -346,29 +345,11 @@ describe('额度够收尾：所有路由都判（design §九 选路第 1 条）
 });
 
 describe('已选定、还没开工的也占位子（一批任务同时选路）', () => {
-  it('主池：在跑 3 个 + 已选定 2 个 = 上限 5，候选查询没标 no-slot 也等空位；已选定 1 个放', () => {
+  it('在跑 3 个 + 已选定 2 个 = 上限 5，候选查询没标 no-slot 也等空位；已选定 1 个放', () => {
     const blocks = blocksFor(route('a', { inFlight: 3, reserved: 2 }), entry('a', 0), ctx());
     expect(blocks.map((b) => b.code)).toEqual(['no-slot']);
     expect(blocks[0]?.text).toBe('池a并发满了（已经有 5 个（在跑 3 个、已选定还没开工 2 个），上限 5 个）');
     expect(codes(route('a', { inFlight: 3, reserved: 1 }))).toEqual([]);
-  });
-
-  it('备池：在跑 1 个 + 已选定 1 个 = 备池上限 2，等空位', () => {
-    const c = route('c', { poolRole: 'backup', poolName: '拼车号', inFlight: 1, reserved: 1 });
-    const blocks = blocksFor(c, entry('c', 0), ctx({ weight: 'light' }));
-    expect(blocks.map((b) => b.code)).toEqual(['backup-no-slot']);
-    expect(blocks[0]?.text).toContain('已选定还没开工 1 个');
-  });
-
-  it('备池额度未知：试探已选定、还没开工，第二个也等', () => {
-    const c = route('c', {
-      poolRole: 'backup',
-      poolName: '拼车号',
-      quota: 'unknown',
-      windows: [],
-      reserved: 1,
-    });
-    expect(codes(c, ctx({ weight: 'light' }))).toEqual(['backup-quota-unknown']);
   });
 });
 
@@ -420,110 +401,34 @@ describe('避开', () => {
   });
 });
 
-describe('备池（拼车号）', () => {
+describe('拼车号不再是备池（#59：两个会话用户同时跑时的主池、备池规则删掉）', () => {
   const carpool = (o: Partial<RouteFacts> = {}) =>
-    route('c', { poolRole: 'backup', poolName: '拼车号', ...o });
+    route('c', { poolName: '拼车号', orgKind: 'carpool', ...o });
 
-  it('只接短而轻的活：重活挡，轻活放', () => {
-    expect(codes(carpool(), ctx({ weight: 'heavy' }))).toEqual(['backup-heavy']);
-    expect(codes(carpool(), ctx({ weight: 'light' }))).toEqual([]);
+  it('写码这种重活照派；在跑几个按池自己的并发上限，不再压到 2', () => {
+    expect(codes(carpool())).toEqual([]);
+    expect(codes(carpool({ inFlight: 4 }))).toEqual([]);
+    expect(codes(carpool({ inFlight: 5 }))).toEqual(['no-slot']);
   });
 
-  it('主池不管轻重', () => {
-    expect(codes(route('a'), ctx({ weight: 'heavy' }))).toEqual([]);
-  });
-
-  it('并发不超过 2：在跑 2 个就等空位，1 个放', () => {
-    const light = ctx({ weight: 'light' });
-    const full = blocksFor(carpool({ inFlight: 2 }), entry('c', 0), light);
-    expect(full.map((b) => b.code)).toEqual(['backup-no-slot']);
-    expect(groupOf(full)).toEqual({ kind: 'wait', waitFor: 'slot', until: null });
-    expect(codes(carpool({ inFlight: 1 }), light)).toEqual([]);
-  });
-
-  it('池自己的上限更小时按池的（记成池的并发满了）', () => {
-    expect(codes(carpool({ inFlight: 1, maxConcurrency: 1 }), ctx({ weight: 'light' }))).toEqual(['no-slot']);
-  });
-
-  it('剩余不够跑一个活不派，等那个窗口清零；够就派', () => {
-    const light = ctx({ weight: 'light' });
-    const short = carpool({
-      windows: [win({ label: '5h', window: '5h', used: 0.95, resetsAt: at(1) }), win()],
-    });
-    const blocks = blocksFor(short, entry('c', 0), light);
-    expect(blocks.map((b) => b.code)).toEqual(['quota-short']);
-    expect(blocks[0]?.text).toContain('只剩 5%');
-    expect(groupOf(blocks)).toEqual({ kind: 'wait', waitFor: 'quota', until: Date.parse(at(1)) });
-    const enough = carpool({
-      windows: [win({ label: '5h', window: '5h', used: 0.85, resetsAt: at(1) }), win()],
-    });
-    expect(codes(enough, light)).toEqual([]);
+  it('额度未知照派，已经有一个在跑也不等它（额度未知的排后面，rank.ts）', () => {
+    expect(codes(carpool({ quota: 'unknown', windows: [], inFlight: 1 }))).toEqual([]);
   });
 
   it('周窗只剩 2% 也不派（一个活要 3%）', () => {
-    const r = carpool({ windows: [win({ used: 0.98 })] });
-    expect(codes(r, ctx({ weight: 'light' }))).toEqual(['quota-short']);
+    expect(codes(carpool({ windows: [win({ used: 0.98 })] }))).toEqual(['quota-short']);
   });
 
-  describe('额度未知：只放一个轻活去试探', () => {
-    const light = ctx({ weight: 'light' });
-    const blind = (inFlight: number) => carpool({ quota: 'unknown', windows: [], inFlight });
-
-    it('没有在跑的：放这一个', () => {
-      expect(codes(blind(0), light)).toEqual([]);
-    });
-
-    it('已经有一个在跑：等它的结果（等空位，不是等额度）', () => {
-      const blocks = blocksFor(blind(1), entry('c', 0), light);
-      expect(blocks.map((b) => b.code)).toEqual(['backup-quota-unknown']);
-      expect(blocks[0]?.text).toBe(
-        '拼车号额度未知（没读成或读数过期），只放一个试探，已经在跑 1 个：等它的结果',
-      );
-      expect(groupOf(blocks)).toEqual({ kind: 'wait', waitFor: 'slot', until: null });
-    });
-
-    it('并发临时压到 1：读到了的在跑 1 个照样放（平时上限是 2）', () => {
-      expect(codes(carpool({ inFlight: 1 }), light)).toEqual([]);
-      expect(codes(blind(1), light)).toEqual(['backup-quota-unknown']);
-    });
-
-    it('重活不拿来试探', () => {
-      expect(codes(blind(0), ctx({ weight: 'heavy' }))).toEqual(['backup-heavy']);
-    });
-
-    it('池级读数过期、但会话里顺手读到的窗口还新：读到了不够就等它清零，不拿试探去撞', () => {
-      // 候选查询：池的最近读成超过 30 分钟 → quota unknown；窗口本身是 10 分钟前从会话流里读到的。
-      const passive = (used: number, inFlight = 0) =>
-        carpool({
-          quota: 'unknown',
-          inFlight,
-          windows: [win({ label: '5h', window: '5h', used, resetsAt: at(1) }), win({ used: 0.4 })],
-        });
-      const short = blocksFor(passive(0.95), entry('c', 0), light);
-      expect(short.map((b) => b.code)).toEqual(['quota-short']);
-      expect(groupOf(short)).toEqual({ kind: 'wait', waitFor: 'quota', until: Date.parse(at(1)) });
-      // 读到的够：照样只放一个。
-      expect(codes(passive(0.5), light)).toEqual([]);
-      expect(codes(passive(0.5, 1), light)).toEqual(['backup-quota-unknown']);
-    });
-
-    it('已用比例算不出来：同样按额度未知，只放一个', () => {
-      const r = (inFlight: number) => carpool({ windows: [win({ used: null })], inFlight });
-      expect(codes(r(0), light)).toEqual([]);
-      expect(codes(r(1), light)).toEqual(['backup-quota-unknown']);
-      expect(backupProbeReason(r(0))).toBe('周额度算不出还剩多少');
-    });
-
-    it('读到了的、主池、已经用满的都不算试探', () => {
-      expect(backupProbeReason(carpool())).toBeNull();
-      expect(backupProbeReason(route('a', { quota: 'unknown', windows: [] }))).toBeNull();
-      const full = carpool({
-        quota: 'exhausted',
-        blockers: ['quota-exhausted'],
-        windows: [win({ state: 'exhausted', used: 1 })],
+  it('池级读数过期、但会话里顺手读到的窗口还新：读到了不够就等它清零，不拿活去撞', () => {
+    // 候选查询：池的最近读成超过 30 分钟 → quota unknown；窗口本身是 10 分钟前从会话流里读到的。
+    const passive = (used: number) =>
+      carpool({
+        quota: 'unknown',
+        windows: [win({ label: '5h', window: '5h', used, resetsAt: at(1) }), win({ used: 0.4 })],
       });
-      expect(backupProbeReason(full)).toBeNull();
-      expect(codes(full, light)).toEqual(['quota-exhausted']);
-    });
+    const short = blocksFor(passive(0.95), entry('c', 0), ctx());
+    expect(short.map((b) => b.code)).toEqual(['quota-short']);
+    expect(groupOf(short)).toEqual({ kind: 'wait', waitFor: 'quota', until: Date.parse(at(1)) });
+    expect(codes(passive(0.5))).toEqual([]);
   });
 });

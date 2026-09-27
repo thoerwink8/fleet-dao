@@ -17,6 +17,7 @@ export const PR_COLUMNS = [
   '做了什么',
   '怎么验证的',
   '还欠什么',
+  '按推荐先做了',
   '需求',
   PLAN_COLUMN,
   SPECS_COLUMN,

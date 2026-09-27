@@ -95,11 +95,20 @@ export {
   type InteractionLimitResult,
   renewInteractionLimit,
 } from './interaction.ts';
-export { type IssuePlan, type ReadIssuePlanInput, readIssuePlan } from './issue-plan.ts';
+export { type IssuePlan, type ReadIssuePlanInput, readIssuePlan, readOpenMilestones } from './issue-plan.ts';
 export {
   type CloseIssueInput,
   type CloseIssueResult,
+  type CommentIssueInput,
+  type CommentIssueResult,
   closeIssue,
+  commentIssue,
+  ISSUE_TITLE_LIMIT,
+  type OpenIssueInput,
+  type OpenIssueResult,
+  openIssue,
+  type SetIssueMilestoneInput,
+  setIssueMilestone,
   type UpdateIssueProgressInput,
   type UpdateIssueProgressResult,
   updateIssueProgress,

@@ -74,6 +74,29 @@ describe('提示词', () => {
     expect(text).toContain('--hold release|spend|delete|standard');
   });
 
+  it('Fusion 的副手（带任务简报）：简报外的非改不可才改，交活总结里写清改了哪个、为什么；旧的子任务不写这句', () => {
+    const task: NonNullable<SessionBrief['task']> = {
+      goal: '加验证码',
+      scope: '只改登录',
+      constraints: [],
+      files: ['src/login/'],
+      acceptance: ['验证码 5 分钟过期'],
+      returnFormat: '改了什么',
+    };
+    const side = stagePrompt({
+      stage: 'execute',
+      brief: brief({ task }),
+      repo,
+      issueNumber: 12,
+      mode: 'new',
+    });
+    expect(side).toContain('「会改的地方」以外的文件非改不可才改');
+    expect(side).toContain('交活总结里写清改了哪个、为什么');
+    expect(side).not.toContain('改派');
+    const old = stagePrompt({ stage: 'execute', brief: brief(), repo, issueNumber: 12, mode: 'new' });
+    expect(old).not.toContain('非改不可');
+  });
+
   it('非写码阶段：结论写进 .fleet-out 下的文件，不用 fleet done', () => {
     for (const [stage, file] of [
       ['triage', 'triage.json'],
@@ -199,6 +222,22 @@ describe('认交回来的东西', () => {
       error: expect.stringContaining('size'),
     });
     expect(parseTriage('[]')).toMatchObject({ error: expect.stringContaining('对象') });
+  });
+
+  it('分诊说不清时带的选项和推荐（#259）：去空白认出来；类型不对明确算交错了（合不合格由 core 的 checkAsk 判）', () => {
+    expect(
+      parseTriage(
+        '{"clear":false,"question":"验证码几位？","options":[" 6 位 ","4 位",""],"recommend":" 6 位 "}',
+      ),
+    ).toEqual({
+      ok: { clear: false, question: '验证码几位？', options: ['6 位', '4 位'], recommend: '6 位' },
+    });
+    expect(parseTriage('{"clear":false,"question":"几位？","options":"6 位"}')).toMatchObject({
+      error: expect.stringContaining('options'),
+    });
+    expect(parseTriage('{"clear":false,"question":"几位？","recommend":6}')).toMatchObject({
+      error: expect.stringContaining('recommend'),
+    });
   });
 
   it('文档：空的、太长的都算交错了', () => {
@@ -374,6 +413,48 @@ describe('开 PR 前验证', () => {
     expect(parseVerify(JSON.stringify(good), CRITERIA, HEAD)).toEqual({ ok: good });
   });
 
+  it('#246：结论文件里 criterion 只差反引号 → 认得，交回的是清单原文，不是模型去掉反引号的那份', () => {
+    const ticked = [
+      '`packages/engine/src/jobs/alert-sweep.ts` 加一条规则：读不了记这一轮没查全，不撤。',
+      ...CRITERIA.slice(1),
+    ];
+    const answer = (criterion: string) => ({
+      criterion,
+      answer: 'done',
+      evidence: 'alert-sweep.ts 第 30 行',
+    });
+    const written = { head: HEAD, results: ticked.map((c) => answer(c.replaceAll('`', ''))), findings: [] };
+    expect(parseVerify(JSON.stringify(written), ticked, HEAD)).toEqual({
+      ok: { head: HEAD, results: ticked.map(answer), findings: [] },
+    });
+  });
+
+  it('#246：交代里写明 criterion、驳回的 target 照原文逐字抄、连反引号', () => {
+    const verify = stagePrompt({ stage: 'verify', brief: verifyBrief(), repo, issueNumber: 12, mode: 'new' });
+    expect(verify).toContain('criterion 照清单原文逐字抄，连反引号');
+    const rebut = stagePrompt({
+      stage: 'plan',
+      brief: brief({
+        branch: 'fleet/12-fabc12345',
+        specDir: 'specs/12-login',
+        lead: {
+          step: 'rebut',
+          mode: 'fusion',
+          docs: {
+            requirement: 'specs/12-login/需求.md',
+            plan: 'specs/12-login/方案.md',
+            result: 'specs/12-login/结果.md',
+          },
+          blocking: [{ target: '`a.ts` 加一条规则', kind: 'not-done', evidence: 'test/ 下没有' }],
+        },
+      }),
+      repo,
+      issueNumber: 12,
+      mode: 'resume',
+    });
+    expect(rebut).toContain('照抄上面那一条的原文，连反引号');
+  });
+
   it('【故意造出的失败】结论文件解析不出、审的不是送检的头、漏答、答了清单外的：都明确算交错了', () => {
     expect(parseVerify('不是 JSON', CRITERIA, HEAD)).toMatchObject({
       error: expect.stringContaining('不是合法的 JSON'),
@@ -451,6 +532,70 @@ describe('Fusion 的 Lead：每一步交代什么、交回什么', () => {
     }
     expect(text).not.toContain('单模型模式');
     expect(prompt(leadBrief({ step: 'plan', mode: 'single' }), 'new')).toContain('这次是单模型模式');
+    // #246：简报外的改动由 Lead 验收时定，不再是「改到外面的一律不收」
+    expect(text).toContain('副手改到外面的，验收时由你定收不收');
+    expect(text).not.toContain('一律不收');
+  });
+
+  it('第 2 步、还没有需求文档的单（#295）：照正文写好的那份原样写进需求文档路径，和方案一起提交', () => {
+    const seed = '# #11 的后续（#12）\n\n## 怎么算做完\n\n- 改成 4 位\n';
+    const text = prompt(leadBrief({ step: 'plan', requirementText: seed }), 'new');
+    expect(text).toContain('这张单还没有需求文档');
+    expect(text).toContain(`原样写进 \`${DOCS.requirement}\``);
+    expect(text).toContain(`\`\`\`\`markdown\n${seed.trim()}\n\`\`\`\``);
+    expect(text).toContain('需求文档和方案一起');
+    expect(text).not.toContain(`读需求文档 \`${DOCS.requirement}\``);
+    // 有需求文档的单照旧：读它，只提交方案
+    const normal = prompt(leadBrief({ step: 'plan' }), 'new');
+    expect(normal).toContain(`读需求文档 \`${DOCS.requirement}\``);
+    expect(normal).toContain('这一步只提交方案');
+    expect(normal).not.toContain('这张单还没有需求文档');
+  });
+
+  it('#246 验收：简报外的改动看过该改就可以收，why 里写清为什么；点出这一轮改到简报外的是哪几个', () => {
+    const task: NonNullable<SessionBrief['task']> = {
+      goal: '全熔断提醒自动撤',
+      scope: '只改对账',
+      constraints: [],
+      files: ['packages/engine/src/jobs/alert-sweep.ts'],
+      acceptance: ['熔断解了就撤'],
+      returnFormat: '改了什么',
+    };
+    const text = prompt(
+      leadBrief(
+        {
+          step: 'accept',
+          delivery: {
+            head: 'b'.repeat(40),
+            base: BASE,
+            summary: '加了撤提醒的规则',
+            changedFiles: ['packages/engine/src/jobs/alert-sweep.ts', 'docs/ops.md'],
+            testsPassed: true,
+          },
+        },
+        { task },
+      ),
+    );
+    expect(text).toContain('改到任务简报外的：docs/ops.md');
+    expect(text).toContain('看过觉得该改就可以收，why 里写清为什么要改它们');
+    expect(text).not.toContain('一律不收');
+    // 都在简报里的不点名
+    const inside = prompt(
+      leadBrief(
+        {
+          step: 'accept',
+          delivery: {
+            head: 'b'.repeat(40),
+            base: BASE,
+            summary: '加了撤提醒的规则',
+            changedFiles: ['packages/engine/src/jobs/alert-sweep.ts'],
+            testsPassed: true,
+          },
+        },
+        { task },
+      ),
+    );
+    expect(inside).not.toContain('改到任务简报外的');
   });
 
   it('续会话的下一步：只交代这一步（不重复整份任务）；验收写明从哪个头看起、只看不改', () => {

@@ -1,4 +1,4 @@
-// 开单脚本入口：pnpm issue:new --kind 需求 --milestone v1 --title "…" --body-file 正文.md [--specs 短名] [--mother] [--parent 母单号]（见 ../issue-new.ts）
+// 开单脚本入口：pnpm issue:new --kind 需求 --milestone v1 --title "…" --body-file 正文.md [--specs 短名] [--mother] [--parent 母单号] [--local]（见 ../issue-new.ts）
 import { fileURLToPath } from 'node:url';
 import { ghRunner, issueNew, specsHint } from '../issue-new.ts';
 
@@ -10,7 +10,7 @@ try {
     cwd: process.env.INIT_CWD || process.cwd(),
   });
   console.log(
-    `开了 #${r.number}（${r.milestone}${r.parent === undefined ? '' : `，挂在母单 #${r.parent} 下面`}）：${r.url}`,
+    `开了 #${r.number}（${r.milestone}${r.parent === undefined ? '' : `，挂在母单 #${r.parent} 下面`}${r.local ? '，贴了「本机做」：接活不自动派' : ''}）：${r.url}`,
   );
   if (r.specsFile) console.log(`需求文档：${r.specsFile}（${specsHint(r.milestone)}）`);
 } catch (e) {

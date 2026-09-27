@@ -61,13 +61,6 @@ export interface RouteRecord {
   successes: number;
 }
 
-/**
- * 主池 / 备池：备池只接短而轻的活、并发另有上限、剩余不够跑一个活就不派，额度未知时只放一个试探。
- * 原先两个会话用户同时跑时拼车号是备池；法国合成一个会话用户后（创始人 2026-09-26）两个 Claude 池不再同时跑，
- * 平时挂着的拼车池要接全部的活，所以端口一律填 primary。这套备池规则改成什么、删不删归 #59（specs/59-拼车切独享）。
- */
-export type PoolRole = 'primary' | 'backup';
-
 /** 一条路由的全部事实：候选查询的一行 + 给人看的名字 + 熔断 + 战绩。 */
 export interface RouteFacts {
   routeId: string;
@@ -75,10 +68,10 @@ export interface RouteFacts {
   poolId: string;
   /** 给人看的池名，例如「独享号」「拼车号」「Mirasim 中转」。不许带账号、组织编号、邮箱。 */
   poolName: string;
-  poolRole: PoolRole;
   /**
    * Claude 订阅池对应的 reclaude 组织类型（pools.org_kind）。会话用户同一时刻只挂一个组织，只有和它挂着的一样的池
-   * 能派（ChooseRouteInput.liveOrg）。不是 Claude 订阅池的不填。
+   * 能派（ChooseRouteInput.liveOrg）；拼车用满引擎切号（#157），不再有「拼车号是备池、只接轻活」那一套（两个会话用户
+   * 同时跑时的主池、备池规则 2026-09-27 随 #59 删掉）。不是 Claude 订阅池的不填。
    */
   orgKind?: OrgKind | null;
   modelId: string;
@@ -104,8 +97,8 @@ export interface RouteFacts {
   /** 这个池此刻在跑的会话数（按池算：已开工、没结束）。 */
   inFlight: number;
   /**
-   * 这个池已选定、还没开工的会话数（按池算：session_runs 里没开工、没结束的行）。并发上限、备池上限、
-   * 「只放一个试探」都把它算进去：一批任务同时来选路时，只数已开工的，每个任务都会看到 0 个在跑。
+   * 这个池已选定、还没开工的会话数（按池算：session_runs 里没开工、没结束的行）。并发上限把它算进去：
+   * 一批任务同时来选路时，只数已开工的，每个任务都会看到 0 个在跑。
    */
   reserved: number;
   maxConcurrency: number;
@@ -128,9 +121,6 @@ export interface StageRouteEntry {
   pinned: boolean;
 }
 
-/** 活的轻重：备池只接轻的。不给就按阶段的默认（policy.stageWeight）。 */
-export type TaskWeight = 'light' | 'heavy';
-
 /**
  * 读会话用户此刻挂的组织的结果（real/session-org.ts 读，选路、路由探针用）。读不到、认不出是明确的失败，带白话原因
  * （不带组织编号、邮箱：原因会进库、上驾驶舱）；调用方拿它当「认不出」，不拿哪个组织顶。pending：还没读完（reclaude
@@ -149,7 +139,6 @@ export interface ChooseRouteInput {
   routes: RouteFacts[];
   /** 任务（或人、帅位）指定的路由：只用它，用不了就报，不偷偷换。 */
   taskRouteId?: string;
-  weight?: TaskWeight;
   /**
    * 这个任务要避开的（换路由、换模型时引擎给）。families：这一步要避开的模型族，按族名认、不分大小写——开 PR 前验证只派
    * 别家，写这张单的族都在这里（docs/decisions/0003-fusion-flow.md 第 5 条）；给了它，渠道自己挑模型的路由（上游串 auto）
@@ -184,10 +173,7 @@ export type BlockCode =
   | 'breaker-open'
   | 'avoided'
   | 'quota-short'
-  | 'org-not-live'
-  | 'backup-heavy'
-  | 'backup-no-slot'
-  | 'backup-quota-unknown';
+  | 'org-not-live';
 
 export interface Block {
   code: BlockCode;
@@ -199,7 +185,7 @@ export interface Block {
   until: string | null;
 }
 
-export type Nudge = 'fast-reset' | 'poor-record' | 'quota-unknown' | 'backup-pool';
+export type Nudge = 'fast-reset' | 'poor-record' | 'quota-unknown';
 
 /** 每条路由的判定，驾驶舱调度台按它显示「这次为什么派 / 不派它」。 */
 export interface RouteVerdict {
@@ -222,9 +208,7 @@ export type TrialKind =
   /** 熔断半开，这一单就是那一个试探。 */
   | 'breaker'
   /** 候选全都熔断：多半是共用的一层坏了，放最早到点的一条去试探，并报警。 */
-  | 'all-open'
-  /** 备池额度未知：只放这一个去试探，被拒就按原文的清零时刻避开这个池。 */
-  | 'quota-probe';
+  | 'all-open';
 
 export type ChooseRouteResult =
   | {
@@ -236,7 +220,7 @@ export type ChooseRouteResult =
       hostId: HostId;
       /** 一句「为什么派给它」，驾驶舱和飞书直接显示。 */
       why: string;
-      /** 几种试探同时成立时取排在前面的（explore → breaker → quota-probe），why 里都写。 */
+      /** 几种试探同时成立时取排在前面的（explore → breaker），why 里都写。 */
       trial: TrialKind | null;
       /** 派了但要报警（候选全熔断时放的试探）。 */
       alarm: string | null;

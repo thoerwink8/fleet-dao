@@ -3,6 +3,7 @@
 // 读库、读仓、写 GitHub 是外壳的事（引擎的 workflows/fusion.ts 经 decide 调这里，结果进历史）。读不到、认不出一律明说，
 // 不拿空的、0、默认值顶。
 import { z } from 'zod';
+import type { AskTally } from './ask.ts';
 import { type Brief, checkBrief } from './brief.ts';
 import { CATEGORIES, type Category, type FlowConfig, ProfileSchema, profileFor } from './config.ts';
 import type { Mode } from './flow.ts';
@@ -147,7 +148,12 @@ const issuesOf = (error: z.ZodError, what: string) =>
   error.issues.map((i) => `${what}认不出：${i.path.join('.') || '整份'} ${i.message}`);
 
 /** Lead 第 2 步交回的：方案摘要、任务简报、大小和风险，外加方案.md 真提交了。缺一样都退回 Lead 照原因重写。 */
-export function checkLeadPlan(input: { output: unknown; specDir: string }): LeadPlanCheck {
+export function checkLeadPlan(input: {
+  output: unknown;
+  specDir: string;
+  /** 正文写全了需求、还没有需求文档的单（#295）：这一步要把照正文写的需求文档一起提交。 */
+  withRequirement?: boolean | undefined;
+}): LeadPlanCheck {
   const parsed = LeadPlanSchema.safeParse(input.output);
   if (!parsed.success) return { ok: false, problems: issuesOf(parsed.error, '方案交回的') };
   const out = parsed.data;
@@ -157,6 +163,12 @@ export function checkLeadPlan(input: { output: unknown; specDir: string }): Lead
   const planPath = specDocs(input.specDir).plan;
   if (!out.changedFiles.includes(planPath)) {
     problems.push(`方案没提交：写进 ${planPath} 并提交（需求、方案、结果随 PR 进仓，引擎不往主线直接写）`);
+  }
+  const requirementPath = specDocs(input.specDir).requirement;
+  if (input.withRequirement && !out.changedFiles.includes(requirementPath)) {
+    problems.push(
+      `需求文档没提交：这张单还没有需求文档，把交代里照单子正文写好的那份原样写进 ${requirementPath} 并提交（随 PR 进主线）`,
+    );
   }
   if (!brief.ok || problems.length > 0) return { ok: false, problems };
   return {
@@ -281,6 +293,10 @@ export interface FusionPrFacts {
   flowSource: 'project' | 'org_default';
   /** 副手派不出、由 Lead 自己写的原因；副手写的不给。 */
   soloWhy?: string | undefined;
+  /** 问过创始人、按推荐先做了的（ask.ts 的 assumedLines，#259）；没问过是空的。 */
+  assumed?: readonly string[] | undefined;
+  /** Lead 验收时收下的简报外文件（decideAcceptance 交回的 outside，几轮合在一起）；没有是空数组。 */
+  outsideBrief: readonly string[];
 }
 
 export interface FusionPrParts {
@@ -288,6 +304,10 @@ export interface FusionPrParts {
   verified: string[];
   owed: string[];
   tier: string;
+  /**
+   * 「按推荐先做了」一栏（#259）。这一栏加进来之前开工的单，历史里记下的那一份没有它（读出来是 undefined，照「无」写）。
+   */
+  assumed?: string[] | undefined;
 }
 
 const oneLine = (s: string) => s.replace(/\s+/g, ' ').trim();
@@ -303,16 +323,19 @@ export function summaryItems(summary: string, max = 4): string[] {
 
 /**
  * PR 正文的几栏（0003 第 13 条：方案摘要、验证结论进 PR 正文）。「做了什么」第一条是方案摘要，其余是交活时的总结；
- * 「怎么验证的」是会话里的测试和开 PR 前别家验证的结论，没验就明说为什么没验；「还欠什么」是验证的看不出和建议，
- * 外加这次没做的（方案评审没接、用的全组织默认配置）。
+ * 「怎么验证的」是会话里的测试、Lead 验收收下的简报外文件、开 PR 前别家验证的结论，没验就明说为什么没验；
+ * 「还欠什么」是验证的看不出和建议，外加这次没做的（方案评审没接、用的全组织默认配置）。
  */
 export function fusionPrParts(f: FusionPrFacts): FusionPrParts {
   const did = [`方案：${oneLine(f.planSummary)}`, ...summaryItems(f.summary)];
   const tests = f.testsPassed
     ? '会话里跑过测试命令，最后一次通过（交活时后端核实过）'
     : '交活时报测试没过（fleet done --tests failed）';
+  // 简报外那一行紧跟测试：正文限 15 行，超了从每栏末尾往前砍（github 包的 renderPrBody）
+  const outside = f.outsideBrief.length ? [`简报外改了：${f.outsideBrief.join('、')}（主导收下）`] : [];
   const verified = [
     tests,
+    ...outside,
     ...(f.verify ? f.verify.verified : ['开 PR 前别家验证：单模型模式只对高风险的开，这次没验']),
   ];
   if (f.soloWhy) verified.push(`这一块由 Lead 自己写：${oneLine(f.soloWhy)}`);
@@ -322,7 +345,7 @@ export function fusionPrParts(f: FusionPrFacts): FusionPrParts {
   const tier = f.highRisk
     ? '先审后合——Lead 判了高风险（合并闸按改动路径判要不要第二意见，这一栏只作说明）'
     : 'CI 绿就合——Lead 判了一般改动（合并闸按改动路径判，这一栏只作说明）';
-  return { did, verified, owed, tier };
+  return { did, verified, owed, tier, assumed: (f.assumed ?? []).map(oneLine).filter(Boolean) };
 }
 
 // ---- 关单评论（第 7 步）：改了什么、用时、各模型额度
@@ -354,6 +377,11 @@ export interface CloseFacts {
   docs: { requirement: string; plan: string; result: string };
   flowSource: 'project' | 'org_default';
   mode: Mode;
+  /**
+   * 这张单问过创始人的记数（ask.ts 的 tallyAsks，#259：按推荐先走、事后被改的次数给检验制度用，#257）。没读（这一项加进来
+   * 之前开工的单）不给，评论里不写这一段；读了、一条都没问过写「没问过」。
+   */
+  asks?: AskTally | undefined;
 }
 
 function minutes(ms: number): string {
@@ -374,6 +402,23 @@ function usageLine(u: ModelUsage): string {
       ? `花费 $${u.costUsd.toFixed(2)}${u.missingCost > 0 ? `（另有 ${u.missingCost} 次没读到花费）` : ''}`
       : '花费没读到';
   return `- ${u.model}：会话 ${u.runs} 次；${tokens}；${cost}`;
+}
+
+/** 关单评论里问创始人的那一句：按推荐先做了几条、事后被改了几条（#259）。 */
+export function askTallyLine(t: AskTally): string {
+  if (t.assumed + t.outside + t.legacy === 0) return '没问过';
+  const parts: string[] = [];
+  if (t.assumed > 0) {
+    const waiting = t.assumed - t.confirmed - t.changed;
+    parts.push(
+      `按推荐先做了 ${t.assumed} 条，事后被改了 ${t.changed} 条（他确认了 ${t.confirmed} 条${waiting > 0 ? `，还有 ${waiting} 条他没回` : ''}）`,
+    );
+  } else {
+    parts.push('按推荐先做了 0 条，事后被改了 0 条');
+  }
+  if (t.outside > 0) parts.push(`超出范围另开单 ${t.outside} 条`);
+  if (t.legacy > 0) parts.push(`没带推荐、停下等过人的 ${t.legacy} 条`);
+  return parts.join('；');
 }
 
 /**
@@ -397,6 +442,7 @@ export function closeComment(f: CloseFacts): string {
     ...(f.verified.length ? f.verified.map((v) => `- ${oneLine(v)}`) : ['- （没写）']),
   ];
   if (f.owed.length) lines.push('', '**还欠什么**：', ...f.owed.map((o) => `- ${oneLine(o)}`));
+  if (f.asks) lines.push('', `**问创始人**：${askTallyLine(f.asks)}`);
   lines.push(
     '',
     `需求 ${f.docs.requirement} · 方案 ${f.docs.plan} · 结果 ${f.docs.result}（随 PR 进仓）`,

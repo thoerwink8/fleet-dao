@@ -85,7 +85,7 @@ describe('PR 正文模板', () => {
     expect(docs(['deploy/README.md', 'docs/reference/deploy.md', 'packages/x.ts'])).toBe('**文档**：不适用');
   });
 
-  it('没有需求号写「无」，还欠的没有写「无」', () => {
+  it('没有需求号写「无」，还欠的、按推荐先做了的没有写「无」', () => {
     const body = renderPrBody({
       did: ['a'],
       verified: ['b'],
@@ -93,7 +93,21 @@ describe('PR 正文模板', () => {
       specs: null,
       changedFiles: [],
     });
-    expect(body).toContain('**还欠什么**：无\n**需求**：无\n');
+    expect(body).toContain('**还欠什么**：无\n**按推荐先做了**：无\n**需求**：无\n');
+  });
+
+  it('按推荐先做了（#259）：问创始人的岔路一条一行，排在「还欠什么」后面', () => {
+    const body = renderPrBody({
+      did: ['a'],
+      verified: ['b'],
+      assumed: ['验证码几位？ → 先按推荐做了「6 位」，创始人还没回'],
+      plan: 'P1「工作流」',
+      specs: null,
+      changedFiles: [],
+    });
+    expect(body).toContain(
+      '**还欠什么**：无\n**按推荐先做了**：\n- 验证码几位？ → 先按推荐做了「6 位」，创始人还没回\n',
+    );
   });
 
   it('specs 给 null 写「不适用」；对应计划、specs、档位给空的或没给写「（没写）」（合并闸照样判红），不冒充填了', () => {

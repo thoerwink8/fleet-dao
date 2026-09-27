@@ -1,8 +1,11 @@
-// issue：进度段原地更新、关单（都用「引擎」机器人）。
+// issue：进度段原地更新、关单、开单、发评论、挂里程碑（都用「引擎」机器人）。
 // 进度段：只动标记之间的那一段，人写的部分原样保留；同一张单的写入加锁串行；旧快照不盖新快照（as-of）；
 // 内容没变就不写（省 GitHub 的内容创建配额）。GitHub 的写没有「版本不对就拒」，所以写完用编辑历史核对：
 // 我们读和写之间要是插进了人手编辑（被我们这次盖掉了），把人写的那一版找回来、重新放进进度段，并报警。
 // 关单：先发一条写明去向的评论（带标记，幂等），再关（带 state_reason），回读 state 与 state_reason 才算成（A8）。
+// 开单、发评论（#259：引擎对账时给提问另开单、把回答写到另开的单上）：正文都是标记 + 幂等键防重复写，账丢了
+// 按正文里的隐藏标记翻页回查；正文来自 AI（提问、回答），写之前先中和 @ 提醒和能伪造/截断标记的 <!-- -->、
+// 再过卫生检查——这两步进度段、关单评论都不用（进度段的字段、关单去向不是 AI 自由写的正文）。
 // 每次写完都把回执里的 updated_at 记成「自家的回声」（echo.ts），轮询补收时据此不叫醒自己。
 import { z } from 'zod';
 import { enc, type RepoRef, repoSlug, unexpected } from './client.ts';
@@ -19,7 +22,7 @@ import {
   spliceProgress,
 } from './progress.ts';
 import { assertPublishable, type PublishName, type PublishText } from './publish-check.ts';
-import { assertBodySize } from './text.ts';
+import { assertBodySize, neutralizeMentions, oneLine } from './text.ts';
 
 const User = z.object({ login: z.string(), id: z.number(), type: z.string() });
 
@@ -71,8 +74,13 @@ export async function readIssue(
   return parsed.data;
 }
 
+/** 号是 PR 的号：GitHub 眼里 PR 也是一张 issue，`pull_request` 字段有没有是唯一的分辨法。 */
+function isPullRequest(issue: Pick<Issue, 'pull_request'>): boolean {
+  return issue.pull_request !== undefined && issue.pull_request !== null;
+}
+
 function assertIssue(issue: Issue, repo: RepoRef): void {
-  if (issue.pull_request !== undefined && issue.pull_request !== null) {
+  if (isPullRequest(issue)) {
     throw new GitHubError('NOT_AN_ISSUE', `${repoSlug(repo)} #${issue.number} 是 PR，不是 issue`);
   }
 }
@@ -313,34 +321,29 @@ interface CommentReceipt {
   updatedAt?: string | undefined;
 }
 
-export async function closeIssue(
+/** 账上记的评论回执（幂等账里的 result 是 JSON，认不出就当没记，照常回查）。 */
+const CommentReceiptSchema = z.object({ id: z.number(), url: z.string() });
+
+/**
+ * 发一条带隐藏标记的评论，幂等：按标记翻页回查（评论可能过百，旧网关只翻第一页会重发），没有才写；
+ * 写成后核对作者是引擎机器人。关单去向、开单/评论的回答都走这条路，标记和幂等键由调用方定（各自的键、行为不同）。
+ */
+async function postMarkedComment(
   deps: Deps,
-  input: CloseIssueInput,
-  ctx: ActivityContext = {},
-): Promise<CloseIssueResult> {
-  const { repo, issueNumber, reason } = input;
-  const slug = repoSlug(repo);
+  repo: RepoRef,
+  issueNumber: number,
+  spec: { body: string; marker: string; key: string; action: string },
+  ctx: ActivityContext,
+): Promise<{ value: CommentReceipt; replay: boolean }> {
   const base = `/repos/${enc(repo.owner)}/${enc(repo.name)}/issues/${issueNumber}`;
   const auth = { as: 'engine' as const, repo };
-  const issue = await readIssue(deps, repo, issueNumber, ctx.signal);
-  assertIssue(issue, repo);
-
-  const text = (
-    input.comment ?? (reason === 'completed' ? '已完成，引擎关单。' : '不做了，引擎关单。')
-  ).trim();
-  const tag = digest({ reason, text });
-  const marker = `<!-- fleet:close:${tag} -->`;
-  const body = `${text}\n\n${marker}`;
-  assertBodySize('关单评论', body);
-
-  const { value, replay } = await once<CommentReceipt>(deps.ledger.idempotency, {
-    key: idempotencyKey('close_comment', `${slug.toLowerCase()}#${issueNumber}`, { reason, text }),
-    action: 'github.close_comment',
-    target: `${slug}#${issueNumber}`,
+  return once<CommentReceipt>(deps.ledger.idempotency, {
+    key: spec.key,
+    action: spec.action,
+    target: `${repoSlug(repo)}#${issueNumber}`,
     now: deps.client.now,
     renewEveryMs: deps.leaseRenewMs,
     lookup: async () => {
-      // 评论可能过百：一页页翻完（旧网关只翻第一页，评论多了就会再发一条）
       for await (const page of deps.client.pages({
         method: 'GET',
         path: `${base}/comments`,
@@ -351,7 +354,7 @@ export async function closeIssue(
         const parsed = z.array(CommentSchema).safeParse(page.data);
         if (!parsed.success) throw unexpected(`翻 #${issueNumber} 的评论`, page.data);
         const hit = parsed.data.find(
-          (c) => (c.body ?? '').includes(marker) && deps.bots.is('engine', c.user),
+          (c) => (c.body ?? '').includes(spec.marker) && deps.bots.is('engine', c.user),
         );
         if (hit) return { id: hit.id, url: hit.html_url, updatedAt: hit.updated_at };
       }
@@ -362,7 +365,7 @@ export async function closeIssue(
         method: 'POST',
         path: `${base}/comments`,
         auth,
-        body: { body },
+        body: { body: spec.body },
         signal: ctx.signal,
       });
       const parsed = CommentSchema.safeParse(res.data);
@@ -384,6 +387,40 @@ export async function closeIssue(
       return { id: parsed.data.id, url: parsed.data.html_url, updatedAt: parsed.data.updated_at };
     },
   });
+}
+
+export async function closeIssue(
+  deps: Deps,
+  input: CloseIssueInput,
+  ctx: ActivityContext = {},
+): Promise<CloseIssueResult> {
+  const { repo, issueNumber, reason } = input;
+  const slug = repoSlug(repo);
+  const base = `/repos/${enc(repo.owner)}/${enc(repo.name)}/issues/${issueNumber}`;
+  const auth = { as: 'engine' as const, repo };
+  const issue = await readIssue(deps, repo, issueNumber, ctx.signal);
+  assertIssue(issue, repo);
+
+  const text = (
+    input.comment ?? (reason === 'completed' ? '已完成，引擎关单。' : '不做了，引擎关单。')
+  ).trim();
+  const tag = digest({ reason, text });
+  const marker = `<!-- fleet:close:${tag} -->`;
+  const body = `${text}\n\n${marker}`;
+  assertBodySize('关单评论', body);
+
+  const { value, replay } = await postMarkedComment(
+    deps,
+    repo,
+    issueNumber,
+    {
+      body,
+      marker,
+      key: idempotencyKey('close_comment', `${slug.toLowerCase()}#${issueNumber}`, { reason, text }),
+      action: 'github.close_comment',
+    },
+    ctx,
+  );
   // 新评论会把 issue 的 updated_at 推到评论的时刻：这一版也是自家的回声（重记一遍无妨）
   if (value.updatedAt) await issueEcho(deps, repo, issueNumber, value.updatedAt);
 
@@ -409,4 +446,242 @@ export async function closeIssue(
     );
   }
   return { alreadyClosed, commentId: value.id, commentUrl: value.url, commentCreated: !replay };
+}
+
+// —— 开单 ——
+
+/** GitHub 单子标题的上限（字符）。 */
+export const ISSUE_TITLE_LIMIT = 256;
+
+export interface OpenIssueInput {
+  repo: RepoRef;
+  /** 幂等键：同一个仓、同一个 key 只开一张（引擎拿提问编号当 key）。正文末尾带隐藏标记，账丢了按标记回查。 */
+  key: string;
+  title: string;
+  body: string;
+  /** 开单时一起贴的标签（类别）。 */
+  labels: readonly string[];
+  /** 开单时一起挂的里程碑编号；null = 不挂（未排期）。 */
+  milestone: number | null;
+}
+
+export interface OpenIssueResult {
+  number: number;
+  url: string;
+  /** false = 以前开过（账上有，或按标记找到了），这次没开新的。 */
+  created: boolean;
+}
+
+interface IssueReceipt {
+  number: number;
+  url: string;
+  updatedAt: string;
+}
+
+export async function openIssue(
+  deps: Deps,
+  input: OpenIssueInput,
+  ctx: ActivityContext = {},
+): Promise<OpenIssueResult> {
+  const { repo, key } = input;
+  const slug = repoSlug(repo);
+  const auth = { as: 'engine' as const, repo };
+  const base = `/repos/${enc(repo.owner)}/${enc(repo.name)}/issues`;
+
+  // 一个请求都不发之前：标题压成一行，空的或超过 GitHub 的上限直接拒——这一步不中和，避免中和加的字符
+  // （零宽空格、变体连字符）把一个刚好卡在上限的标题误判成超限
+  const title = oneLine(input.title);
+  if (!title) throw new GitHubError('INVALID_INPUT', '单子标题是空的');
+  const titleLen = [...title].length;
+  if (titleLen > ISSUE_TITLE_LIMIT) {
+    throw new GitHubError(
+      'INVALID_INPUT',
+      `单子标题有 ${titleLen} 个字符，超过 GitHub 的上限 ${ISSUE_TITLE_LIMIT}`,
+      { details: { length: titleLen, limit: ISSUE_TITLE_LIMIT } },
+    );
+  }
+  // 标题、正文都可能是 AI 写的：中和 @ 提醒（别打扰人）和 <!-- -->（别让它伪造或截断我们下面拼的标记）
+  const safeTitle = neutralizeMentions(title);
+  const safeBody = neutralizeMentions(input.body);
+  assertPublishable(
+    `开 ${slug} 的单子`,
+    [
+      { path: '单子标题', text: safeTitle },
+      { path: '单子正文', text: safeBody },
+    ],
+    deps.sensitiveValues,
+  );
+  const marker = `<!-- fleet:issue:${digest({ key })} -->`;
+  const body = `${safeBody}\n\n${marker}`;
+  assertBodySize('单子正文', body);
+
+  const { value, replay } = await once<IssueReceipt>(deps.ledger.idempotency, {
+    key: idempotencyKey('open_issue', `${slug.toLowerCase()}:${key}`),
+    action: 'github.open_issue',
+    target: `${slug}:${key}`,
+    now: deps.client.now,
+    renewEveryMs: deps.leaseRenewMs,
+    lookup: async () => {
+      // 我们的单刚开不久：占用 2 分钟没续就过期重写，最近 300 张（100 条一页、最多翻 3 页）里一定在
+      for await (const page of deps.client.pages(
+        {
+          method: 'GET',
+          path: base,
+          auth,
+          query: { state: 'all', sort: 'created', direction: 'desc', per_page: 100 },
+          signal: ctx.signal,
+        },
+        3,
+      )) {
+        const parsed = z.array(IssueSchema).safeParse(page.data);
+        if (!parsed.success) throw unexpected(`翻 ${slug} 的 issue 列表`, page.data);
+        const hit = parsed.data.find(
+          (i) => !isPullRequest(i) && (i.body ?? '').includes(marker) && deps.bots.is('engine', i.user),
+        );
+        if (hit) return { number: hit.number, url: hit.html_url, updatedAt: hit.updated_at };
+      }
+      return null;
+    },
+    write: async () => {
+      const res = await deps.client.request({
+        method: 'POST',
+        path: base,
+        auth,
+        body: {
+          title: safeTitle,
+          body,
+          labels: input.labels,
+          ...(input.milestone === null ? {} : { milestone: input.milestone }),
+        },
+        signal: ctx.signal,
+      });
+      const parsed = IssueSchema.safeParse(res.data);
+      if (!parsed.success) {
+        throw new GitHubError('AMBIGUOUS_WRITE', `开单的回执读不懂（${slug}）`, {
+          retryable: true,
+          maybeLanded: true,
+        });
+      }
+      if (!deps.bots.is('engine', parsed.data.user)) {
+        throw new GitHubError(
+          'AUTHOR_MISMATCH',
+          `单开出去了，作者却是 ${parsed.data.user?.login ?? '（读不到）'}`,
+          { details: { number: parsed.data.number } },
+        );
+      }
+      return { number: parsed.data.number, url: parsed.data.html_url, updatedAt: parsed.data.updated_at };
+    },
+  });
+  // 写成、回查找到的都是这个号此刻的样子：记成自家的回声（重记一遍无妨）
+  await issueEcho(deps, repo, value.number, value.updatedAt);
+  return { number: value.number, url: value.url, created: !replay };
+}
+
+// —— 在 issue 上留一条评论（不关单、不改进度段：#259 引擎对账时给提问另开单，回答写到那张单上）——
+
+export interface CommentIssueInput {
+  repo: RepoRef;
+  issueNumber: number;
+  /** 幂等键：同一张单、同一个 key 只发一条评论（换 key 是另一条）。 */
+  key: string;
+  body: string;
+}
+
+export interface CommentIssueResult {
+  commentId: number;
+  url: string;
+  /** false = 这个 key 以前发过（账上有，或按标记找到了），这次没再发。 */
+  created: boolean;
+}
+
+export async function commentIssue(
+  deps: Deps,
+  input: CommentIssueInput,
+  ctx: ActivityContext = {},
+): Promise<CommentIssueResult> {
+  const { repo, issueNumber, key } = input;
+  const slug = repoSlug(repo);
+  const idemKey = idempotencyKey('issue_comment', `${slug.toLowerCase()}#${issueNumber}`, { key });
+  // 账上记着发过了就不再碰 GitHub：对账每轮都会拿同一个 key 来认一遍（回答写没写上），不能每轮读一次单子
+  const done = await deps.ledger.idempotency.peek(idemKey);
+  const recorded = CommentReceiptSchema.safeParse(done?.result);
+  if (done?.completedAt && recorded.success) {
+    return { commentId: recorded.data.id, url: recorded.data.url, created: false };
+  }
+  const issue = await readIssue(deps, repo, issueNumber, ctx.signal);
+  assertIssue(issue, repo);
+
+  // 正文是 AI 写的（提问或回答）：中和之后照开单一样过卫生检查
+  const safeBody = neutralizeMentions(input.body);
+  assertPublishable(
+    `写 ${slug} #${issueNumber} 的评论`,
+    [{ path: '评论正文', text: safeBody }],
+    deps.sensitiveValues,
+  );
+  const marker = `<!-- fleet:comment:${digest({ key })} -->`;
+  const body = `${safeBody}\n\n${marker}`;
+  assertBodySize(`#${issueNumber} 的评论`, body);
+
+  const { value, replay } = await postMarkedComment(
+    deps,
+    repo,
+    issueNumber,
+    { body, marker, key: idemKey, action: 'github.issue_comment' },
+    ctx,
+  );
+  if (value.updatedAt) await issueEcho(deps, repo, issueNumber, value.updatedAt);
+  return { commentId: value.id, url: value.url, created: !replay };
+}
+
+// —— 挂里程碑（巡检 #223：开单不挂、写好需求文档再挂，接活只派挂在当前版本上的单，先挂上的话工作流可能在需求文档进主线之前起来）——
+
+export interface SetIssueMilestoneInput {
+  repo: RepoRef;
+  issueNumber: number;
+  /** 里程碑的编号（GitHub 上的 number，不是标题）。 */
+  milestone: number;
+}
+
+const MilestonedIssue = z.object({
+  number: z.number(),
+  milestone: z.object({ number: z.number() }).nullable(),
+  updated_at: z.string(),
+  pull_request: z.unknown().optional(),
+});
+
+/** 给一张单挂里程碑（「引擎」机器人）。挂完按回执核对挂上的就是这个编号，对不上报错，不当成挂上了。 */
+export async function setIssueMilestone(
+  deps: Deps,
+  input: SetIssueMilestoneInput,
+  ctx: ActivityContext = {},
+): Promise<{ changed: boolean }> {
+  const { repo, issueNumber, milestone } = input;
+  const slug = repoSlug(repo);
+  const path = `/repos/${enc(repo.owner)}/${enc(repo.name)}/issues/${issueNumber}`;
+  const auth = { as: 'engine' as const, repo };
+  const before = await deps.client.request({ method: 'GET', path, auth, signal: ctx.signal });
+  const read = MilestonedIssue.safeParse(before.data);
+  if (!read.success) throw unexpected(`读 ${slug} #${issueNumber} 挂的里程碑`, before.data);
+  if (read.data.pull_request !== undefined && read.data.pull_request !== null) {
+    throw new GitHubError('NOT_AN_ISSUE', `${slug} #${issueNumber} 是 PR，不是 issue`);
+  }
+  if (read.data.milestone?.number === milestone) return { changed: false };
+  const res = await deps.client.request({
+    method: 'PATCH',
+    path,
+    auth,
+    body: { milestone },
+    signal: ctx.signal,
+  });
+  const after = MilestonedIssue.safeParse(res.data);
+  if (!after.success) throw unexpected(`给 ${slug} #${issueNumber} 挂里程碑的回执`, res.data);
+  if (after.data.milestone?.number !== milestone) {
+    throw new GitHubError(
+      'READBACK_MISMATCH',
+      `给 ${slug} #${issueNumber} 挂里程碑 ${milestone}，回执里挂的是 ${after.data.milestone?.number ?? '（没挂）'}`,
+      { retryable: true },
+    );
+  }
+  await issueEcho(deps, repo, issueNumber, after.data.updated_at);
+  return { changed: true };
 }

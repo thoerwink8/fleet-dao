@@ -3,7 +3,6 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import type { EngineActivities } from '../src/activity-options.ts';
 import {
   agentEventSignal,
-  answerSignal,
   approveSignal,
   pauseSignal,
   type RequirementResult,
@@ -234,30 +233,58 @@ describe('需求工作流', { timeout: 60_000 }, () => {
     expect(world.callsOf('startSession').filter((c) => c.input.stage === 'plan')).toHaveLength(1);
   });
 
-  it('看不懂就在任务里追问：回答（后端的 answer 信号）之后重新分诊，再往下走', async () => {
+  it('看不懂的带选项和推荐问创始人（发卡、记进库），不停下等，按推荐先做：后面的会话带着这个假设（#259）', async () => {
     const world = createFakeWorld({
-      triage: (n) => (n === 1 ? { clear: false, question: '验证码发短信还是邮件？' } : { clear: true }),
+      triage: () => ({
+        clear: false,
+        question: '验证码发短信还是邮件？',
+        options: ['邮件', '短信'],
+        recommend: '短信',
+      }),
     });
-    const result = await withWorker(env, world, async (q) => {
-      const handle = await startRequirement(q);
-      const asking = await queryUntil<RequirementStatus>(
-        handle,
-        (s) => s.waiting?.askId !== undefined,
-        '在等回答',
-      );
-      expect(asking.phase).toBe('asking');
-      expect(asking.waiting?.kind).toBe('human');
-      await handle.signal(answerSignal, {
-        by: 'founder',
-        askId: asking.waiting?.askId ?? '',
-        answer: '短信',
-      });
-      return (await handle.result()) as RequirementResult;
-    });
+    const result = (await withWorker(env, world, async (q) =>
+      (await startRequirement(q)).result(),
+    )) as RequirementResult;
     expect(result.state).toBe('done');
-    expect(world.callsOf('askHuman').map((c) => c.input.question)).toEqual(['验证码发短信还是邮件？']);
+    // 问了一句、带着推荐（库里记成按推荐先做了的），没等回答
+    expect(world.callsOf('askHuman').map((c) => c.input)).toEqual([
+      expect.objectContaining({
+        question: '验证码发短信还是邮件？',
+        options: ['短信', '邮件'],
+        recommended: '短信',
+      }),
+    ]);
+    expect(world.askRows).toEqual([expect.objectContaining({ scope: 'task', recommended: '短信' })]);
+    expect(world.callsOf('startSession').filter((c) => c.input.stage === 'triage')).toHaveLength(1);
+    const spec = world.callsOf('startSession').find((c) => c.input.stage === 'spec');
+    expect(spec?.input.brief.answers).toEqual([
+      { question: '验证码发短信还是邮件？', answer: '（他不在场，没等回答）按推荐先做：短信' },
+    ]);
+  });
+
+  it('【失败】看不懂却没带选项和推荐：退回分诊写明缺什么，第二次带上了才问（不停下等）', async () => {
+    const world = createFakeWorld({
+      triage: (n) =>
+        n === 1
+          ? { clear: false, question: '验证码发短信还是邮件？' }
+          : {
+              clear: false,
+              question: '验证码发短信还是邮件？',
+              options: ['邮件', '短信'],
+              recommend: '短信',
+            },
+    });
+    const result = (await withWorker(env, world, async (q) =>
+      (await startRequirement(q)).result(),
+    )) as RequirementResult;
+    expect(result.state).toBe('done');
     const triages = world.callsOf('startSession').filter((c) => c.input.stage === 'triage');
-    expect(triages[1]?.input.brief.answers).toEqual([{ question: '验证码发短信还是邮件？', answer: '短信' }]);
+    expect(triages).toHaveLength(2);
+    expect(triages[1]?.input.brief.feedback[0]).toMatchObject({
+      kind: 'ask',
+      items: [expect.stringContaining('至少两个选项和推荐')],
+    });
+    expect(world.callsOf('askHuman')).toHaveLength(1);
   });
 
   it('子任务按依赖先后跑：后面的等前面的合并了才开工', async () => {

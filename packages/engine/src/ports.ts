@@ -24,8 +24,16 @@
 //    上一轮的会话输出管道已经断了，接不上。工作流被强行终止留下的会话，现在要等工人下一次起来时这一步才收
 //    （每小时对账还没接这一项：#247）。
 
-import type { Brief, FlowConfigRead, Rebuttable, Rebuttal, VerifyReport } from '@fleet-dao/core';
-import type { HostId, Repo, RunOutcome, StageKind, SubtaskState, TaskState } from '@fleet-dao/shared';
+import type { Brief, FlowConfigRead, Rebuttable, Rebuttal, TaskAsk, VerifyReport } from '@fleet-dao/core';
+import type {
+  HostId,
+  OrgKind,
+  Repo,
+  RunOutcome,
+  StageKind,
+  SubtaskState,
+  TaskState,
+} from '@fleet-dao/shared';
 import type { MergeOutcome, TestResult } from './decisions/merge.ts';
 import type { PlannedSubtask } from './decisions/plan.ts';
 import type { TriageVerdict } from './decisions/triage.ts';
@@ -84,8 +92,11 @@ export interface RouteChoice {
   modelId: string;
   family: string;
   hostId: HostId;
-  /** 主池 / 备池（拼车号是备池）：额度用满时走法不同（失败分流 QT1）。老历史里没有 = 按主池。 */
-  poolRole?: 'primary' | 'backup';
+  /**
+   * Claude 订阅池的组织类型（pools.org_kind：拼车、独享，共用一个会话用户）：额度用满时不原地睡到清零（失败分流 QT1
+   * 的 orgLadder）。别的池、老历史里没有。
+   */
+  orgKind?: OrgKind;
 }
 
 export interface PickRouteInput extends Scope {
@@ -166,12 +177,17 @@ export interface LeadBrief {
    * （打回过的几轮连在一起）。
    */
   delivery?: { head: string; summary: string; changedFiles: string[]; testsPassed: boolean; base?: string };
-  /** rebut：验证挡住的几条，原文照抄（驳回时 target 一字不差照抄）。 */
+  /** rebut：验证挡住的几条，原文照抄（驳回时 target 照抄；只差格式的由 core 的 decideVerdict 按 criterionKey 认）。 */
   blocking?: Rebuttable[];
   /** rebut、review：验证的备注（看不出的、建议）。 */
   notes?: string[];
   /** takeover：为什么 Lead 自己写。 */
   why?: string;
+  /**
+   * plan：这张单还没有需求文档、正文写全了需求（#295，引擎开的后续单、巡检单）：引擎照正文写好的需求文档全文，Lead 原样
+   * 写进 docs.requirement、和方案一起提交（随 PR 进主线）。
+   */
+  requirementText?: string;
 }
 
 /** 开 PR 前验证交代给别家的材料（起会话前整份提示词过一遍卫生检查，过不了不发）。 */
@@ -263,7 +279,8 @@ export type SessionOutput =
   | { kind: 'review'; review: ReviewResult }
   /**
    * 开 PR 前验证交回的结论文件（.fleet-out/verify.json）。真端口读的时候已经拿 core 的 checkReport 挡过一道（认不出、
-   * 审错了头、漏答多答的退回会话重写）；定论照样由工作流经 decide 调 core 的 decideVerdict 判，不信这一道。
+   * 审错了头、漏答多答的退回会话重写；只差格式的 criterion 换成了清单原文）；定论照样由工作流经 decide 调 core 的
+   * decideVerdict 判，不信这一道。
    */
   | { kind: 'verify'; report: VerifyReport }
   // ---- Fusion 的 Lead（brief.lead 给了哪一步就交哪一种）。形状由工作流经 decide 调 core 判（checkLeadPlan、checkBrief、
@@ -420,11 +437,18 @@ export interface PrBody {
   /** 还欠什么；空 = 无。 */
   owed?: string[];
   risks?: string[];
+  /** 「按推荐先做了」：问创始人的岔路里没等他回、按推荐先做了的（core 的 assumedLines，#259）；空 = 无。 */
+  assumed?: string[];
   /**
    * 需求文档的目录（specs/<号>-<短名>/）：「specs」一栏照写；「对应计划」一栏由端口开 PR 时现读这个目录下需求.md 的
    * 「对应计划：」那一行（读不到、没填就明确报错，不填空的）。
    */
   specs: string;
+  /**
+   * 需求文档跟着这个 PR 才进主线（正文写全了需求、收单时照正文写的，#295）：主线上还没有它，「对应计划」一栏照单子此刻挂的
+   * 版本写（没挂写「未排期」），不读主线。
+   */
+  planFromIssue?: boolean;
   /**
    * 「档位」一栏（design 第五节的档位加理由）：只作说明、合并闸只提醒；合并闸按改动路径判要不要等第二意见
    * （当前头上通过的 second-opinion 提交状态），不看这一栏。
@@ -603,6 +627,16 @@ export interface AskHumanInput extends Scope {
   options?: string[];
   /** 会话里问的就带上是哪一次会话。 */
   runId?: string;
+  /**
+   * 引擎自己问、带了推荐的（分诊说不清，#259）：按推荐先做、不等回答，库里记成这张单范围内的岔路（scope = task），
+   * 卡片写「已按推荐先做」。推荐的要在 options 里（库约束兜底）。不给就是老样子：发卡等回答。
+   */
+  recommended?: string;
+}
+
+/** 照改完：这几条提问记上 applied_at（#259：他晚到、改选了别的回答，存档点交给 Lead 照改完了）。 */
+export interface MarkAsksAppliedInput extends Scope {
+  askIds: string[];
 }
 
 /** 人闸：请人批准这个子任务进合并队列（飞书卡片 + 驾驶舱待点头，一键批准 / 拒绝）。 */
@@ -719,6 +753,13 @@ export interface EnginePorts {
   /** 这张单现在的标题和正文（单子正文里改了需求文档那一行，人点「继续」后重认）。任务不在明确报错（TASK_NOT_FOUND）。 */
   taskRequest(input: Scope, ctx: PortContext): Promise<TaskRequest>;
   askHuman(input: AskHumanInput, ctx: PortContext): Promise<void>;
+  /**
+   * 这张单的全部提问（库里 asks，按提问先后）：存档点看他晚到的回答、开 PR 写「按推荐先做了」、关单记数（#259）。
+   * 任务不在明确报错（TASK_NOT_FOUND，不可重试），不拿「一条都没问过」顶。
+   */
+  taskAsks(input: Scope, ctx: PortContext): Promise<TaskAsk[]>;
+  /** 照改完记 applied_at：只记这张单的、回答了的、没记过的（重试幂等）。 */
+  markAsksApplied(input: MarkAsksAppliedInput, ctx: PortContext): Promise<void>;
   requestApproval(input: RequestApprovalInput, ctx: PortContext): Promise<void>;
   raiseAlert(input: RaiseAlertInput, ctx: PortContext): Promise<{ alertId: string }>;
   recordTiming(input: TimingEntry, ctx: PortContext): Promise<void>;

@@ -1,4 +1,4 @@
-// 排序与微调：按人排的顺序；钉住的不动；快清零提前、战绩差后置、额度未知排后、备池排在主池后。
+// 排序与微调：按人排的顺序；钉住的不动；快清零提前、战绩差后置、额度未知排后。
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_ROUTING_POLICY,
@@ -136,15 +136,13 @@ describe('③ 额度未知的排在读到了的后面', () => {
   });
 });
 
-describe('④ 独享号是主池，拼车号是备池', () => {
-  const backup = (id: string, extra: Partial<RouteFacts> = {}) => route(id, { poolRole: 'backup', ...extra });
-
-  it('人把拼车排在前面：主池还是先用', () => {
-    expect(order([backup('carpool'), route('solo')])).toEqual(['solo', 'carpool']);
+describe('拼车号、独享号不分主备（#59 删掉了「备池排在主池后面」）', () => {
+  it('人把拼车排在前面：就先用拼车', () => {
+    expect(order([route('carpool', { poolName: '拼车号' }), route('solo')])).toEqual(['carpool', 'solo']);
   });
 
-  it('拼车周额度快清零、还剩很多：提到主池前面（赶在清零前用掉）', () => {
-    const c = backup('carpool', {
+  it('拼车周额度快清零、还剩很多：照快清零那条提到前面', () => {
+    const c = route('carpool', {
       windows: [win({ label: '5h', window: '5h', used: 0.1 }), win({ used: 0.3, resetsAt: at(20) })],
     });
     expect(order([route('solo'), c])).toEqual(['carpool', 'solo']);

@@ -1,6 +1,6 @@
 // 假实现：不碰真仓、真会话、真 GitHub，用来把流程跑通（测试、联调）。行为可以按剧本改。
 
-import type { Brief, FlowConfigRead, VerifyReport } from '@fleet-dao/core';
+import type { Brief, FlowConfigRead, TaskAsk, VerifyReport } from '@fleet-dao/core';
 import type { StageKind } from '@fleet-dao/shared';
 import type { MergeOutcome, TestResult } from './decisions/merge.ts';
 import type { PlannedSubtask } from './decisions/plan.ts';
@@ -48,7 +48,13 @@ export interface FakeSessionPlan {
     retryable?: boolean;
     jev?: NonNullable<SessionEnd['failure']>['jev'];
   };
-  blocked?: { reason?: string; question?: string; options?: string[] };
+  /** needs 不给就是 human（fleet blocked 一定要写 --needs，假会话省事给个默认）。 */
+  blocked?: {
+    reason?: string;
+    question?: string;
+    options?: string[];
+    needs?: 'human' | 'info' | 'access' | 'other';
+  };
   /** 会话挂着不结束，直到 release()、stopSession 或取消。 */
   hold?: boolean;
   /** 第一次看守不心跳也不返回（模拟工人进程没了），重试的那次接上。 */
@@ -84,6 +90,11 @@ export interface FakeScript {
   flow: (input: Scope, n: number) => FlowConfigRead | PortError | undefined;
   /** 单子现在的标题和正文（停下等人之后重认需求文档用）：给了 PortError 就抛它；不给就报任务不在（和真端口一样明确失败）。 */
   request: (input: Scope, n: number) => TaskRequest | PortError | undefined;
+  /**
+   * 读这张单的提问（taskAsks）之前：给了 PortError 就抛它（假的「库没查成」）；n = 第几次读。给了数组就读它，不给就读
+   * FakeWorld.askRows 里这张单的。
+   */
+  taskAsks: (input: Scope, n: number) => TaskAsk[] | PortError | undefined;
   /** 起会话：给了就抛它（假的「发给别家的材料没过卫生检查」……）；n = 这个阶段第几次起。 */
   startSession: (input: LaunchSessionInput, n: number) => PortError | undefined;
   ci: (input: WaitCiInput, n: number) => Partial<CiResult> | undefined;
@@ -149,6 +160,11 @@ export interface FakeWorld {
   alerts: RaiseAlertInput[];
   /** 写进「库」的验证记录（同一个 id 整行覆盖，和真库一样），按第一次写入的先后。 */
   verifications: VerificationRecord[];
+  /**
+   * 「库」里的提问（asks 表，#259）：测试往里放会话 fleet ask 问的、改回答（模拟他晚到的回答）；taskAsks 按任务读它，
+   * markAsksApplied 照改 applied。引擎自己问的（askHuman）也记一份进来。
+   */
+  askRows: (TaskAsk & { taskId: string })[];
   callsOf<P extends PortName>(port: P): (FakeCall & { input: Parameters<EnginePorts[P]>[0] })[];
   count(port: PortName): number;
   /** 放行一个挂着的会话。 */
@@ -248,6 +264,7 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
   const approvals: RequestApprovalInput[] = [];
   const alerts: RaiseAlertInput[] = [];
   const verifications: VerificationRecord[] = [];
+  const askRows: (TaskAsk & { taskId: string })[] = [];
   /** 和真实现一样按 runId 幂等：起过的原样返回，叫停过的不再起。 */
   const byRun = new Map<string, StartSessionResult>();
   const stoppedRuns = new Set<string>();
@@ -284,7 +301,8 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
         return {
           kind: 'lead-plan',
           head: fakeHead(seq),
-          changedFiles: [docs.plan],
+          // 还没有需求文档的单（#295）：照交代把引擎照正文写好的那份和方案一起提交
+          changedFiles: lead?.requirementText ? [docs.requirement, docs.plan] : [docs.plan],
           summary: '登录表单加验证码输入，后端校验五分钟过期',
           brief: FAKE_BRIEF,
           small: true,
@@ -396,7 +414,7 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
         ...spent,
         blocked: {
           reason: s.plan.blocked?.reason ?? '需要人回答',
-          needs: 'human',
+          needs: s.plan.blocked?.needs ?? 'human',
           ...(s.plan.blocked?.question ? { question: s.plan.blocked.question } : {}),
           ...(s.plan.blocked?.options ? { options: s.plan.blocked.options } : {}),
         },
@@ -642,6 +660,28 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
     },
     async askHuman(input) {
       if (!asks.some((a) => a.askId === input.askId)) asks.push(input);
+      if (!askRows.some((a) => a.id === input.askId)) {
+        askRows.push({
+          id: input.askId,
+          taskId: input.taskId,
+          question: input.question,
+          options: input.options ?? [],
+          applied: false,
+          ...(input.recommended ? { scope: 'task' as const, recommended: input.recommended } : {}),
+        });
+      }
+    },
+    async taskAsks(input) {
+      const scripted = script.taskAsks?.(input, next('taskAsks'));
+      if (scripted instanceof PortError) throw scripted;
+      if (scripted) return scripted;
+      return askRows.filter((a) => a.taskId === input.taskId).map(({ taskId: _task, ...a }) => ({ ...a }));
+    },
+    async markAsksApplied(input) {
+      for (const a of askRows) {
+        if (a.taskId === input.taskId && input.askIds.includes(a.id) && a.answer !== undefined)
+          a.applied = true;
+      }
     },
     async requestApproval(input) {
       if (!approvals.some((a) => a.approvalId === input.approvalId)) approvals.push(input);
@@ -699,6 +739,7 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
     approvals,
     alerts,
     verifications,
+    askRows,
     callsOf: (<P extends PortName>(port: P) => calls.filter((c) => c.port === port)) as FakeWorld['callsOf'],
     count: (port) => calls.filter((c) => c.port === port).length,
     release(sessionId) {

@@ -9,6 +9,7 @@ import { assertPublishable, createGitHub, pgLedger, pgLocker } from '@fleet-dao/
 import type { EngineJobs } from '../activities.ts';
 import type { JevPort } from '../failure/jev.ts';
 import type { EnginePorts } from '../ports.ts';
+import { canaryJob } from './canary.ts';
 import { scopeExec, type UserExec } from './exec.ts';
 import { createGitHubPorts, type EngineGitHub } from './github-ports.ts';
 import { githubReconcileJob } from './github-reconcile.ts';
@@ -25,7 +26,12 @@ import { registerEngineJobs } from './jobs.ts';
 import { orgSwitchRound } from './org-switch.ts';
 import { routeProbeJob } from './route-probe.ts';
 import { type SessionOrgReader, sessionOrgReader } from './session-org.ts';
-import { createSessionPorts, DEFAULT_FORK_MAX_CONTEXT_TOKENS, type SessionPortsDeps } from './sessions.ts';
+import {
+  createSessionPorts,
+  DEFAULT_FORK_MAX_CONTEXT_TOKENS,
+  type OrgSwitchSessions,
+  type SessionPortsDeps,
+} from './sessions.ts';
 import { createStorePorts } from './store-ports.ts';
 import { DEFAULT_WORK_ROOT, helperWorkTrees, type WorkTrees } from './worktrees.ts';
 
@@ -74,6 +80,8 @@ export interface RealPortsDeps {
 export interface RealPorts {
   ports: EnginePorts;
   reapOrphanSessions(): Promise<number>;
+  /** 切号那一刻在跑的会话（#59）：交给 real/org-switch.ts 停下、等收场。 */
+  orgSwitchSessions: OrgSwitchSessions;
 }
 
 export function createRealPorts(deps: RealPortsDeps): RealPorts {
@@ -112,6 +120,8 @@ export function createRealPorts(deps: RealPortsDeps): RealPorts {
   const ports: EnginePorts = {
     pickRoute: store.pickRoute,
     askHuman: store.askHuman,
+    taskAsks: store.taskAsks,
+    markAsksApplied: store.markAsksApplied,
     requestApproval: store.requestApproval,
     raiseAlert: store.raiseAlert,
     recordTiming: store.recordTiming,
@@ -136,7 +146,7 @@ export function createRealPorts(deps: RealPortsDeps): RealPorts {
     awaitSession: sessions.awaitSession,
     stopSession: sessions.stopSession,
   };
-  return { ports, reapOrphanSessions: sessions.reapOrphanSessions };
+  return { ports, reapOrphanSessions: sessions.reapOrphanSessions, orgSwitchSessions: sessions.orgSwitch };
 }
 
 /** reclaude 装在会话用户自己家里（docs/ops.md 第五节）；{user} 换成会话用户。 */
@@ -228,14 +238,6 @@ export function realPortsFromEnv(
   // 以它跑它家里的 reclaude org list（和会话同一份 reclaude）；选路、探针、每小时对账共用这一个（读成了的留 30 秒）
   const [sessionUser] = SESSION_USERS;
   const sessionOrg = sessionOrgReader({ exec, user: sessionUser, reclaude: claudeCommand(sessionUser) });
-  // 拼车用满切独享、恢复了切回（#157）：路由探针每一轮探之前判，经 root 帮手的 org-use 切（手上没有在跑的 Claude 会话时）
-  const orgSwitch = orgSwitchRound({
-    db,
-    org: sessionOrg,
-    user: sessionUser,
-    switchOrg: (to) => switchSessionOrg({ to, user: sessionUser }),
-    machine: config.machine,
-  });
   const real = createRealPorts({
     db,
     jev: jev.port,
@@ -253,6 +255,16 @@ export function realPortsFromEnv(
     grokCommand,
     forkMaxContextTokens: config.forkMaxContextTokens,
   });
+  // 拼车用满切独享、恢复了切回（#157）：路由探针每一轮探之前判，经 root 帮手的 org-use 切；手上跑在 Claude 池上的会话
+  // 先停下、切完续上（#59，换了池 fork 续上），不等它们跑完
+  const orgSwitch = orgSwitchRound({
+    db,
+    org: sessionOrg,
+    user: sessionUser,
+    switchOrg: (to) => switchSessionOrg({ to, user: sessionUser }),
+    sessions: real.orgSwitchSessions,
+    machine: config.machine,
+  });
   const jobs: EngineJobs = {
     githubReconcile: githubReconcileJob({ db, gh }),
     // 路由探针和干活的会话用同一份执行体（reclaude、cursor-agent、grok）、同一个工作树的根（探针目录在它下面）
@@ -268,6 +280,8 @@ export function realPortsFromEnv(
     }),
     // 每小时对账：同一个工作树管家（删树经 fleet-agent-scope）、同一个会话用户执行器（看树里还剩什么）
     hourlyReconcile: hourlyReconcileJob({ db, trees, exec, sessionOrg, machine: config.machine }),
+    // 全流程巡检（#223）：巡检仓写在引擎配置 FLEET_CANARY_REPO（没配这一轮记没跑成，看门狗报）；开单、写需求文档、挂版本都是「引擎」机器人
+    canary: canaryJob({ db, gh, repo: env.FLEET_CANARY_REPO }),
   };
   return {
     ...real,

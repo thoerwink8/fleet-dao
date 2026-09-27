@@ -6,6 +6,7 @@
 // 这里只判，不碰库和网络：后端收提问、引擎走存档点、对账开后续单、卡片写什么都照这里。
 
 import { ASK_MAX_OPTIONS, type TaskState } from '@fleet-dao/shared';
+import { CATEGORIES } from './config.ts';
 
 /** 人闸四类：碰到的只挡那一步（合并前等人批）。 */
 export const ASK_HOLDS = ['release', 'spend', 'delete', 'standard'] as const;
@@ -157,4 +158,222 @@ export function tallyAsks(asks: readonly AskFacts[]): AskTally {
     } else t.legacy += 1;
   }
   return t;
+}
+
+// ---- 引擎和对账（#259 第 2 个 PR）：存档点交给 Lead 照改、PR 正文「按推荐先做了」、关单记数、另开单
+
+/** 引擎、对账要看的一条提问（库里 asks 一行）。和 AskFacts 同形，tallyAsks 直接能数。 */
+export interface TaskAsk {
+  id: string;
+  question: string;
+  /** 带了推荐的，推荐的排第一个。 */
+  options: readonly string[];
+  scope?: AskScope | undefined;
+  recommended?: string | undefined;
+  hold?: AskHold | undefined;
+  answer?: string | undefined;
+  /** 交给主导照改过了（库里 applied_at 有值）。 */
+  applied: boolean;
+  /** 另开的单：超出范围的那张，或他改选了别的、原单已经合了开的后续单。 */
+  followUpIssue?: number | undefined;
+}
+
+const oneLine = (s: string) => s.replace(/\s+/g, ' ').trim();
+const clip = (s: string, max: number) => {
+  const t = oneLine(s);
+  return t.length > max ? `${t.slice(0, max - 1)}…` : t;
+};
+
+/** 按推荐先做了的（task、hold）、带着推荐的：只有这种才谈得上「他改选了别的」。 */
+function assumed(a: TaskAsk): a is TaskAsk & { recommended: string } {
+  return (a.scope === 'task' || a.scope === 'hold') && a.recommended !== undefined;
+}
+
+/**
+ * 存档点（Fusion 每一步交界）要交给 Lead 照改的：按推荐先做了的、他回了别的、还没照改、也没另开后续单的（单子还在做，
+ * lateAnswer 判 change）。handed = 已经交给 Lead、还没照改完的，不再算新的。单子合了之后才到的归对账开后续单，不经这里。
+ */
+export function lateChanges(asks: readonly TaskAsk[], handed: readonly string[] = []): TaskAsk[] {
+  return asks.filter(
+    (a) =>
+      assumed(a) &&
+      a.answer !== undefined &&
+      a.followUpIssue === undefined &&
+      !handed.includes(a.id) &&
+      lateAnswer({
+        recommended: a.recommended,
+        answer: a.answer,
+        applied: a.applied,
+        taskState: 'running',
+      }) === 'change',
+  );
+}
+
+/** 交给 Lead 的一条（返工意见里原样给它）：问的什么、按推荐先做的是哪个、他改选了哪个。 */
+export function changeLine(a: TaskAsk): string {
+  const gate = a.scope === 'hold' && a.hold ? `（碰人闸：${ASK_HOLD_NAMES[a.hold]}）` : '';
+  const answer = oneLine(a.answer ?? '');
+  return `问「${clip(a.question, 200)}」${gate}：按推荐先做的是「${oneLine(a.recommended ?? '')}」，创始人改选了「${answer}」，照「${answer}」改`;
+}
+
+/**
+ * PR 正文「按推荐先做了」一栏（#259）：这张单问过创始人、没等回答就按推荐先做了的（task、hold），他回了的写明回了什么；
+ * 超出范围、绕开了另开单的也列上。老式的（没带推荐的）不列。
+ */
+export function assumedLines(asks: readonly TaskAsk[]): string[] {
+  const out: string[] = [];
+  for (const a of asks) {
+    const q = clip(a.question, 60);
+    if (a.scope === 'outside') {
+      out.push(
+        `${q} → 超出这张单的范围，绕开了，另开一张单等创始人拍${a.followUpIssue ? `（#${a.followUpIssue}）` : '（对账时开）'}`,
+      );
+      continue;
+    }
+    if (!assumed(a)) continue;
+    const rec = clip(a.recommended, 40);
+    const gate = a.scope === 'hold' && a.hold ? `（碰人闸：${ASK_HOLD_NAMES[a.hold]}，合并前等他批）` : '';
+    if (a.answer === undefined) {
+      out.push(`${q} → 先按推荐做了「${rec}」${gate}，创始人还没回`);
+      continue;
+    }
+    const late = lateAnswer({
+      recommended: a.recommended,
+      answer: a.answer,
+      applied: a.applied,
+      taskState: 'running',
+    });
+    const answer = clip(a.answer, 40);
+    out.push(
+      late === 'confirmed'
+        ? `${q} → 按推荐做了「${rec}」${gate}，创始人确认了`
+        : `${q} → 先按推荐做了「${rec}」${gate}，创始人改选了「${answer}」，${late === 'applied' ? '已照改' : '下个存档点照改'}`,
+    );
+  }
+  return out;
+}
+
+/** 另开的单：outside = 超出范围的那一块等他拍；follow-up = 他改选了别的、原单已经合了，照他选的改。 */
+export type AskIssueKind = 'outside' | 'follow-up';
+
+/**
+ * 这一条提问要不要另开一张单（对账每轮判）：超出范围的开一张等他拍；按推荐先做了的，他改选了别的、原单已经合了
+ * （没来得及照改，lateAnswer 判 follow-up）开后续单。开过的（follow_up_issue 有值）不再开。
+ */
+export function askIssueKind(a: TaskAsk, taskState: TaskState): AskIssueKind | null {
+  if (a.followUpIssue !== undefined) return null;
+  if (a.scope === 'outside') return 'outside';
+  if (!assumed(a) || a.answer === undefined) return null;
+  const late = lateAnswer({ recommended: a.recommended, answer: a.answer, applied: a.applied, taskState });
+  return late === 'follow-up' ? 'follow-up' : null;
+}
+
+/** 另开的单贴哪个类别、挂哪个版本：原单此刻的样子（GitHub 上现读）。 */
+export interface AskIssueOriginal {
+  labels: readonly string[];
+  milestone: { number: number; title: string } | null;
+  /** 仓里此刻还开着的里程碑。 */
+  openMilestones: readonly { number: number; title: string }[];
+}
+
+export interface AskIssuePlacement {
+  /** 恰好一个类别：照抄原单的，原单没贴或贴了不止一个就按「需求」。母单这些别的标签不抄：另开的是独立单，不挂成子单。 */
+  labels: string[];
+  /** 挂的版本；null = 未排期。 */
+  milestone: { number: number; title: string } | null;
+  /** 后续单本该挂原单的版本，可那个版本已经关了：先放未排期，正文写明。 */
+  closedMilestone?: string | undefined;
+}
+
+/**
+ * 另开的单放哪（design 第五节「没人拍板」）：后续单挂原单的同一个版本（开着才挂——挂在当前版本上的独立单会被自动派，
+ * 照他选的改掉），原单没挂版本就一样未排期；超出范围的一律未排期，等他拍（AI 不往进行中的版本里加他没拍过的活，0003 第 2 条）。
+ */
+export function askIssuePlacement(kind: AskIssueKind, original: AskIssueOriginal): AskIssuePlacement {
+  const categories = CATEGORIES.filter((c) => original.labels.includes(c));
+  const labels = categories.length === 1 ? categories : ['需求'];
+  if (kind === 'outside' || original.milestone === null) return { labels, milestone: null };
+  const want = original.milestone;
+  if (original.openMilestones.some((m) => m.number === want.number)) {
+    return { labels, milestone: { number: want.number, title: want.title } };
+  }
+  return { labels, milestone: null, closedMilestone: want.title };
+}
+
+export interface AskIssueFacts {
+  kind: AskIssueKind;
+  ask: TaskAsk;
+  /** 原单。 */
+  original: { issueNumber: number; title: string };
+  placement: AskIssuePlacement;
+}
+
+/**
+ * 另开的单的标题和正文（引擎开，写进公开的单：开之前 github 包过卫生检查）。正文照 pnpm issue:new 的样子：开头写起因
+ * （原话）和怎么理解，后面「## 怎么算做完」。需求写全在正文里、没有单独的需求文档：引擎接手时照正文写一份，随 PR 进主线
+ * （criteria.ts 的 specOf，#295）。那一句说明放在「怎么算做完」前面，不然开 PR 前验证会把它当成一条验收条。
+ */
+export function askIssueText(f: AskIssueFacts): { title: string; body: string } {
+  const { ask, original } = f;
+  const n = original.issueNumber;
+  const rec = oneLine(ask.recommended ?? '');
+  const options = ask.options.map((o) => {
+    const t = oneLine(o);
+    return t === rec ? `「${t}」（AI 推荐）` : `「${t}」`;
+  });
+  const question = ask.question.trim();
+  const docNote =
+    '这张单是引擎对账时开的，需求就写在这里：接手时引擎照这张单的正文写需求文档，随 PR 进主线（#295）。';
+  if (f.kind === 'follow-up') {
+    const answer = oneLine(ask.answer ?? '');
+    const where = f.placement.milestone
+      ? `挂原单的同一个版本（${f.placement.milestone.title}）`
+      : f.placement.closedMilestone
+        ? `原单的版本「${f.placement.closedMilestone}」已经关了，先放未排期，等排版本`
+        : '原单没挂版本，一样未排期';
+    return {
+      title: `#${n} 的后续：${clip(question.split('\n')[0] ?? question, 60)}改成「${clip(answer, 24)}」`,
+      body: [
+        `创始人在 #${n}（${clip(original.title, 80)}）的提问里改选了「${answer}」。`,
+        '',
+        `AI 理解：#${n} 做的时候问了他，他不在场，就按推荐先做了「${rec}」，已经合进主线；他之后选了「${answer}」，没来得及在那张单里照改，另开这张照他选的改（#259「问创始人不挡路」）。${where}。`,
+        '',
+        `**问**：${question}`,
+        `**选项**：${options.join('、')}`,
+        `**创始人选了**：「${answer}」`,
+        '',
+        docNote,
+        '',
+        '## 怎么算做完',
+        '',
+        `- #${n} 里按推荐先做的「${rec}」改成创始人选的「${answer}」，受影响的地方和测试跟着改`,
+        '- CI 绿，合进主线',
+      ].join('\n'),
+    };
+  }
+  return {
+    title: `#${n} 问到的、超出范围的：${clip(question.split('\n')[0] ?? question, 80)}`,
+    body: [
+      `#${n}（${clip(original.title, 80)}）做的时候问到的，超出那张单的范围。`,
+      '',
+      `AI 理解：那张单绕开这一块接着做，这一块另开这张单等创始人拍（#259「问创始人不挡路」）；先放未排期，他拍了再排版本。他的回答（在 #${n} 的提问卡片上点的）会记在这张单的评论里。`,
+      '',
+      `**问**：${question}`,
+      `**选项**：${options.join('、')}`,
+      '',
+      docNote,
+      '',
+      '## 怎么算做完',
+      '',
+      `- 创始人拍了选哪个（#${n} 的提问卡片上点，或者在这张单上说），照他拍的把这一块做完`,
+      '- CI 绿，合进主线',
+    ].join('\n'),
+  };
+}
+
+/** 超出范围的那张单上记他的回答（对账写，一条提问一条评论）。 */
+export function outsideAnswerComment(a: TaskAsk, originalIssue: number): string {
+  const answer = oneLine(a.answer ?? '');
+  const same = a.recommended !== undefined && answer === oneLine(a.recommended);
+  return `创始人在 #${originalIssue} 的提问卡片上选了「${answer}」${same ? '（就是 AI 推荐的）' : ''}：这一块照它做。`;
 }

@@ -246,6 +246,43 @@ describe('开单脚本：--mother 多贴「母单」标签', () => {
   });
 });
 
+describe('开单脚本：--local 多贴「本机做」（#299 止血：帅位留给本机做，接活不自动派）', () => {
+  it('【故意造出的失败】「本机做」和类别标签、里程碑在同一次 gh issue create 里贴上，不事后补；结果里记 local', async () => {
+    const { root, calls, run } = setup({ milestones: ok(JSON.stringify([{ title: 'v1 Fusion 接活' }])) });
+    await expect(run(...base.slice(0, 3), 'v1', ...base.slice(4), '--local')).resolves.toEqual({
+      number: 36,
+      url: URL36,
+      milestone: 'v1 Fusion 接活',
+      specsFile: undefined,
+      local: true,
+    });
+    expect(calls).toEqual([
+      ['api', 'repos/{owner}/{repo}/milestones?state=open&per_page=100'],
+      [
+        'issue',
+        'create',
+        '--title',
+        '登录页加验证码',
+        '--body-file',
+        join(root, 'body.md'),
+        '--label',
+        '需求',
+        '--label',
+        '本机做',
+        '--milestone',
+        'v1 Fusion 接活',
+      ],
+    ]);
+  });
+
+  it('不带 --local 不贴，结果里也不记', async () => {
+    const { calls, run } = setup();
+    const r = await run(...base);
+    expect(r.local).toBeUndefined();
+    expect(calls[1]).not.toContain('本机做');
+  });
+});
+
 describe('开单脚本：--parent 开子单，先挂到母单下面再挂里程碑（接活不派母单、子单，design 第九节）', () => {
   const V1 = ok(JSON.stringify([{ title: 'P1 核心闭环' }, { title: 'v1 Fusion 接活' }]));
   const sub = [...base.slice(0, 3), 'v1', ...base.slice(4), '--parent', '192'];
@@ -300,6 +337,14 @@ describe('开单脚本：--parent 开子单，先挂到母单下面再挂里程�
       ['api', 'repos/{owner}/{repo}/issues/36'],
       ['api', '-X', 'POST'],
     ]);
+  });
+
+  it('子单带 --local：「本机做」在建单那一次就贴上，挂到母单下面、挂里程碑照旧', async () => {
+    const { calls, run } = setup({ milestones: V1, route: routes() });
+    await expect(run(...sub, '--local')).resolves.toMatchObject({ number: 36, parent: 192, local: true });
+    const create = calls.find((c) => c[0] === 'issue' && c[1] === 'create');
+    expect(create?.slice(-4)).toEqual(['--label', '需求', '--label', '本机做']);
+    expect(calls.at(-1)).toEqual(['issue', 'edit', '36', '--milestone', 'v1 Fusion 接活']);
   });
 
   it.each([

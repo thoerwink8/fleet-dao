@@ -2,7 +2,7 @@
 // 纯函数、确定性：同样输入同样输出；不取时钟、不随机——现在几点、试探用的随机数都由调用方给，引擎记进历史。
 
 import { routeProbeStaleMinutes } from '@fleet-dao/shared';
-import { backupProbeReason, blocksFor, type FilterContext, familyKey } from './filter.ts';
+import { blocksFor, type FilterContext, familyKey } from './filter.ts';
 import { type BlockGroup, groupOf } from './group.ts';
 import { duration, routeLabel, STAGE_NAMES, stamp } from './names.ts';
 import { resolveRoutingPolicy } from './policy.ts';
@@ -32,7 +32,6 @@ function contextOf(
 ): FilterContext {
   return {
     stage: input.stage,
-    weight: input.weight ?? policy.stageWeight[input.stage],
     policy,
     now,
     avoid: {
@@ -91,13 +90,7 @@ export function chooseRoute(input: ChooseRouteInput): ChooseRouteResult {
     const chosen = explore ?? first;
     const route = chosen.item.route;
     const breakerTrial = route.breaker.admit === 'trial';
-    const trial: TrialKind | null = explore
-      ? 'explore'
-      : breakerTrial
-        ? 'breaker'
-        : backupProbeReason(route) !== null
-          ? 'quota-probe'
-          : null;
+    const trial: TrialKind | null = explore ? 'explore' : breakerTrial ? 'breaker' : null;
     const why = explore
       ? withNotes(
           `试探：${stageName}阶段第 ${explore.item.humanIndex + 1} 条 ${routeLabel(route)}（首选是 ${routeLabel(first.item.route)}；约 ${Math.round(policy.trialRatio * 100)}% 的任务派给非首选，攒战绩）`,
@@ -349,11 +342,7 @@ function chooseTaskRoute(input: ChooseRouteInput, route: RouteFacts, ctx: Filter
     };
   }
   const breakerTrial = route.breaker.admit === 'trial';
-  const trial: TrialKind | null = breakerTrial
-    ? 'breaker'
-    : backupProbeReason(route) !== null
-      ? 'quota-probe'
-      : null;
+  const trial: TrialKind | null = breakerTrial ? 'breaker' : null;
   const why = withNotes(`任务指定的路由：${label}`, quotaNote(route), breakerTrial ? BREAKER_TRIAL : null);
   return dispatch(route, why, trial, null, [verdict], ctx.now);
 }
@@ -361,11 +350,9 @@ function chooseTaskRoute(input: ChooseRouteInput, route: RouteFacts, ctx: Filter
 const BREAKER_TRIAL = '熔断半开，这一单当试探';
 
 /**
- * 派出去的这条额度未知时，理由里写明（design §九 选路第 3 条）：备池写「只放一个试探」（filter.ts 的
- * backupBlocks 只放一个），主池写「额度未知」。每条派出去的路径都经这里，试探、全熔断的也不例外。
+ * 派出去的这条额度未知时，理由里写明（design §九 选路第 3 条）。每条派出去的路径都经这里，试探、全熔断的也不例外。
  */
 function quotaNote(route: RouteFacts): string | null {
-  if (backupProbeReason(route) !== null) return `${route.poolName}额度未知，只放一个试探`;
   return route.quota === 'unknown' ? '额度未知（没读成或读数过期）' : null;
 }
 

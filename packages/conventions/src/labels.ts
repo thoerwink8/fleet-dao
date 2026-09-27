@@ -12,6 +12,13 @@ export function isKindLabel(name: string): name is KindLabel {
  */
 export const MOTHER_LABEL = '母单';
 
+/**
+ * 「本机做」标签（#299 止血，帅位 2026-09-27 定）：帅位留给本机做的单，接活不自动派（判法在 @fleet-dao/core 的 dispatch.ts
+ * localGate，那边有同名的一份，两份是同一条规矩）；人明说交给引擎（fleet-api handover）照交。要开单那一刻就贴上
+ * （`pnpm issue:new --local`）：事后补贴时，开单那个事件已经把它派走了。认领进库（#299）之后改成库里认领的镜子，或者删掉。
+ */
+export const LOCAL_LABEL = '本机做';
+
 /** 里程碑名字开头的阶段：「P1 核心闭环」→ 1；不是 P 加数字开头的返回 undefined。旧写法，迁到版本前用。 */
 export function milestonePhase(title: string): number | undefined {
   const m = /^P(\d+)(?:\s|$)/.exec(title.trim());

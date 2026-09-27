@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createGitHub } from '../src/github.ts';
+import { digest } from '../src/idempotency.ts';
 import { humanPart, type IssueProgress, parseBody, renderProgress, spliceProgress } from '../src/progress.ts';
 import { API } from './fake-github.ts';
 import { json, repo, setup, tempDir } from './helpers.ts';
@@ -442,6 +443,220 @@ describe('关单', () => {
     ).rejects.toMatchObject({
       code: 'READBACK_MISMATCH',
     });
+  });
+});
+
+describe('开单', () => {
+  it('开出来的单标签、里程碑、作者对，正文末尾有标记；milestone 为 null 时请求里不带 milestone', async () => {
+    const { gh, fake } = setup();
+    const withMilestone = await gh.openIssue({
+      repo,
+      key: 'q-1',
+      title: '追问：要不要切到独享池',
+      body: '现在切换会不会中断正在跑的会话？',
+      labels: ['问题'],
+      milestone: 7,
+    });
+    expect(withMilestone.created).toBe(true);
+    const issue = fake.issues.get(withMilestone.number);
+    expect(issue?.labels).toEqual(['问题']);
+    expect(issue?.milestone?.number).toBe(7);
+    expect(issue?.user.login).toBe('fleet-test-engine[bot]');
+    expect(issue?.body?.endsWith(`<!-- fleet:issue:${digest({ key: 'q-1' })} -->`)).toBe(true);
+
+    const withoutMilestone = await gh.openIssue({
+      repo,
+      key: 'q-2',
+      title: '标题',
+      body: '正文',
+      labels: [],
+      milestone: null,
+    });
+    const posted = fake.calls('POST', /\/issues$/)[1];
+    expect(posted?.body).not.toHaveProperty('milestone');
+    expect(fake.issues.get(withoutMilestone.number)?.milestone).toBeNull();
+  });
+
+  it('回执丢了：第一次报 AMBIGUOUS_WRITE，重试不开第二张、回 created=false', async () => {
+    const { gh, fake } = setup();
+    let dropped = false;
+    fake.dropAfter.push((req) => {
+      if (req.method === 'POST' && req.path.endsWith('/issues') && !dropped) {
+        dropped = true;
+        return true;
+      }
+      return false;
+    });
+    const input = { repo, key: 'q-drop', title: '标题', body: '正文', labels: [], milestone: null };
+    await expect(gh.openIssue(input)).rejects.toMatchObject({ code: 'AMBIGUOUS_WRITE' });
+    const res = await gh.openIssue(input);
+    expect(res.created).toBe(false);
+    expect([...fake.issues.values()].filter((i) => (i.body ?? '').includes('fleet:issue:'))).toHaveLength(1);
+  });
+
+  it('账丢了（换一份账本，同一个假 GitHub）按标记找回，created=false，没开第二张；标记在第 150 张之后也找得到', async () => {
+    const { gh, fake } = setup();
+    const input = { repo, key: 'q-lost', title: '标题', body: '正文', labels: [], milestone: null };
+    const first = await gh.openIssue(input);
+    // 插 150 张比它新的单：desc 排序时都排在它前面，得翻到第 2 页才翻到它
+    const base = Date.parse('2026-09-25T12:00:00Z');
+    for (let i = 0; i < 150; i += 1) {
+      fake.addIssue({ created_at: new Date(base + (i + 1) * 1000).toISOString() });
+    }
+    const fresh = setup();
+    for (const [number, issue] of fake.issues) fresh.fake.issues.set(number, issue);
+    const res = await fresh.gh.openIssue(input);
+    expect(res.created).toBe(false);
+    expect(res.number).toBe(first.number);
+    expect(
+      [...fresh.fake.issues.values()].filter((i) => (i.body ?? '').includes('fleet:issue:')),
+    ).toHaveLength(1);
+  });
+
+  it('卫生检查拦下：一个请求都没发，报 HYGIENE_ 开头的码，没开单', async () => {
+    const { gh, fake } = setup();
+    const before = fake.requests.length;
+    const err = await gh
+      .openIssue({
+        repo,
+        key: 'q-hygiene',
+        title: '标题',
+        body: '接到组织 fake-org-778899 的账号上',
+        labels: [],
+        milestone: null,
+      })
+      .catch((e: unknown) => e);
+    expect((err as { code?: string }).code).toMatch(/^HYGIENE_/);
+    expect(fake.requests.length).toBe(before);
+    expect(fake.issues.size).toBe(0);
+  });
+
+  it('正文里的 @某人 被中和；正文里自带 <!-- fleet:issue:... 这种字样不会被当成标记', async () => {
+    const { gh, fake } = setup();
+    const res = await gh.openIssue({
+      repo,
+      key: 'q-mention',
+      title: '标题',
+      body: '@founder 看一下\n<!-- fleet:issue:deadbeefdeadbeef -->\n下面这行才是正文',
+      labels: [],
+      milestone: null,
+    });
+    const issue = fake.issues.get(res.number);
+    expect(issue?.body).toContain('@​founder 看一下');
+    expect(issue?.body).not.toContain('<!-- fleet:issue:deadbeefdeadbeef -->');
+    expect(issue?.body?.endsWith(`<!-- fleet:issue:${digest({ key: 'q-mention' })} -->`)).toBe(true);
+  });
+
+  it('标题空、超过 256 字：INVALID_INPUT，一个请求都没发', async () => {
+    const { gh, fake } = setup();
+    const before = fake.requests.length;
+    await expect(
+      gh.openIssue({ repo, key: 'q-empty', title: '   ', body: '正文', labels: [], milestone: null }),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    await expect(
+      gh.openIssue({
+        repo,
+        key: 'q-long',
+        title: '字'.repeat(257),
+        body: '正文',
+        labels: [],
+        milestone: null,
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    expect(fake.requests.length).toBe(before);
+  });
+});
+
+describe('在 issue 上留一条评论（不关单、不改进度段）', () => {
+  it('同一个 key 调两次只一条评论（第二次 created=false）；换 key 是第二条', async () => {
+    const { gh, fake } = setup();
+    const issue = fake.addIssue();
+    const first = await gh.commentIssue({ repo, issueNumber: issue.number, key: 'a', body: '答案一' });
+    expect(first.created).toBe(true);
+    const again = await gh.commentIssue({ repo, issueNumber: issue.number, key: 'a', body: '答案一' });
+    expect(again.created).toBe(false);
+    expect(again.commentId).toBe(first.commentId);
+    expect(issue.comments).toHaveLength(1);
+    const second = await gh.commentIssue({ repo, issueNumber: issue.number, key: 'b', body: '答案二' });
+    expect(second.created).toBe(true);
+    expect(issue.comments).toHaveLength(2);
+  });
+
+  it('账上记着发过了：一个请求都不发就认下（对账每轮拿同一个 key 来认，不能每轮读一次单子）', async () => {
+    const { gh, fake } = setup();
+    const issue = fake.addIssue();
+    const input = { repo, issueNumber: issue.number, key: 'a', body: '答案一' };
+    const first = await gh.commentIssue(input);
+    const before = fake.requests.length;
+    expect(await gh.commentIssue(input)).toEqual({
+      commentId: first.commentId,
+      url: first.url,
+      created: false,
+    });
+    expect(fake.requests.length).toBe(before);
+  });
+
+  it('评论过百也回查得到', async () => {
+    const { gh, fake } = setup();
+    const issue = fake.addIssue();
+    const input = { repo, issueNumber: issue.number, key: 'c', body: '答案' };
+    await gh.commentIssue(input);
+    const mine = issue.comments.pop();
+    for (let i = 0; i < 150; i += 1)
+      issue.comments.push({
+        id: 6000 + i,
+        body: `评论 ${i}`,
+        user: fake.human,
+        updated_at: '2026-09-25T00:00:00Z',
+      });
+    if (mine) issue.comments.push(mine);
+    const fresh = setup();
+    fresh.fake.issues.set(issue.number, issue);
+    const res = await fresh.gh.commentIssue(input);
+    expect(res.created).toBe(false);
+    expect(issue.comments).toHaveLength(151);
+  });
+
+  it('对 PR 号报 NOT_AN_ISSUE', async () => {
+    const { gh, fake } = setup();
+    // 假 GitHub 的 addPull 没法在 /issues/:n 的回执里带 pull_request 字段（本文件「拿 PR 号来更新 issue
+    // 进度：拒绝」那个测试也是这样插一段假回执），这里照抄那个办法
+    fake.before.push((req) =>
+      req.method === 'GET' && /\/issues\/77$/.test(req.path)
+        ? json(200, {
+            number: 77,
+            node_id: 'x',
+            html_url: 'u',
+            state: 'open',
+            title: 't',
+            body: '',
+            user: fake.human,
+            pull_request: { url: 'u' },
+            updated_at: '2026-09-25T00:00:00Z',
+          })
+        : undefined,
+    );
+    await expect(gh.commentIssue({ repo, issueNumber: 77, key: 'a', body: '答案' })).rejects.toMatchObject({
+      code: 'NOT_AN_ISSUE',
+    });
+  });
+
+  it('卫生检查拦下：没发出评论（读那张 issue 判是不是 PR 的那次 GET 不算）', async () => {
+    const { gh, fake } = setup();
+    const issue = fake.addIssue();
+    const before = fake.requests.length;
+    await expect(
+      gh.commentIssue({
+        repo,
+        issueNumber: issue.number,
+        key: 'a',
+        body: '接到组织 fake-org-778899 的账号上',
+      }),
+    ).rejects.toMatchObject({ code: 'HYGIENE_BLOCKED' });
+    expect(issue.comments).toHaveLength(0);
+    // 卫生检查在 readIssue 之后：这一步会有一次 GET，但不会有 POST /comments
+    expect(fake.requests.length).toBeGreaterThan(before);
+    expect(fake.calls('POST', /\/comments$/)).toHaveLength(0);
   });
 });
 
