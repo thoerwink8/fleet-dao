@@ -2,7 +2,7 @@
 // 判红只有：草稿、和主线冲突、改到先审后合的路径（删改迁移；碰安全：密钥鉴权、CI 和卫生检查、对公网开口子和提权的生产配置）而当前头上没有通过的
 // second-opinion、挂了单却没有引擎机器人贴的通过的「认领对得上」（#348）、写了关单却没带那张单的结果.md（#325，closingCheck）；
 // 读不到、认不出写 failure（没查成），GitHub 还没算完冲突写 pending。必填栏（标签、里程碑、对应计划、specs、档位、这个 PR 做完就关单）只提醒。
-// merge-gate.yml 在 PR 事件、主线推送（逐个重算所有开着的 PR）、second-opinion 和「认领对得上」状态写上来时跑它；
+// merge-gate.yml 在 PR 事件、主线推送、second-opinion 和「认领对得上」状态写上来时跑它（后两种逐个重算所有开着的 PR）；
 // 不检出、不跑 PR 里的代码：判法和清单都用跑这段代码的那一份（主线的）。
 import { readFileSync } from 'node:fs';
 import { closingTargets, missingResults } from './close-rule.ts';
@@ -47,8 +47,6 @@ export interface GitHubReads {
   exists(path: string, ref: string): Promise<boolean>;
   /** 开着的 PR（翻完页）。 */
   openPrs(): Promise<unknown[]>;
-  /** 和某个提交有关的 PR。 */
-  prsForCommit(sha: string): Promise<unknown[]>;
   /** 主线（默认分支）现在的头提交。 */
   mainHead(): Promise<string>;
   writeStatus(
@@ -130,18 +128,6 @@ export function gateGitHub(api: GhApi): GitHubReads {
         if (got.length < 100) return all;
       }
       throw new Error(`开着的 PR 超过 ${PRS_MAX_PAGES * 100} 个，没读完`);
-    },
-    async prsForCommit(sha) {
-      // 翻页读完：只读第一页，排在后面的那个 PR 就漏算了
-      const all: unknown[] = [];
-      for (let page = 1; page <= PRS_MAX_PAGES; page++) {
-        const got = await api.get(`/commits/${sha}/pulls?per_page=100&page=${page}`);
-        if (!Array.isArray(got))
-          throw new Error(`提交 ${sha.slice(0, 7)} 的 PR 列表第 ${page} 页认不出（不是列表）`);
-        all.push(...got);
-        if (got.length < 100) return all;
-      }
-      throw new Error(`提交 ${sha.slice(0, 7)} 的 PR 超过 ${PRS_MAX_PAGES * 100} 个，没读完`);
     },
     async mainHead() {
       const repo = await api.get('');
@@ -444,26 +430,12 @@ export async function targetPrs(
     }
     case 'push':
       return numbersOf(await gh.openPrs(), () => true);
-    case 'status': {
+    case 'status':
+      // 不按事件里的 sha 只算那一个 PR：status 事件共用一个排队组（merge-gate.yml），排着的只留最新一个，中间的被取消——
+      // 引擎一轮对账给好几个 PR 贴「认领对得上」时，只算最后那个的话前面几个就一直停在旧结论上（#351 演练撞到）。
+      // 所以留下来的那一次把开着的 PR 全重算一遍，每个都现读自己此刻的状态。
       if (ev.context !== SECOND_OPINION_CONTEXT && ev.context !== CLAIM_MATCH_CONTEXT) return [];
-      const sha = ev.sha;
-      if (typeof sha !== 'string' || !/^[0-9a-f]{40}$/.test(sha)) return '事件里的 sha 认不出';
-      const list = await gh.prsForCommit(sha);
-      // 先把每一条认全了再筛：认不出的一条就判没查成，不许被筛掉后当成「没有要算的 PR」
-      for (const p of list) {
-        if (
-          !isObject(p) ||
-          typeof p.number !== 'number' ||
-          typeof p.state !== 'string' ||
-          !isObject(p.head) ||
-          typeof p.head.sha !== 'string' ||
-          !/^[0-9a-f]{40}$/.test(p.head.sha)
-        ) {
-          throw new Error(`提交 ${sha.slice(0, 7)} 的 PR 列表里有一条认不出（要有 number、state、head.sha）`);
-        }
-      }
-      return numbersOf(list, (p) => p.state === 'open' && isObject(p.head) && p.head.sha === sha);
-    }
+      return numbersOf(await gh.openPrs(), () => true);
     case 'workflow_dispatch': {
       const input = isObject(ev.inputs) ? String(ev.inputs.pr ?? '').trim() : '';
       if (!input || input === 'all') return numbersOf(await gh.openPrs(), () => true);

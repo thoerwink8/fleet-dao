@@ -18,8 +18,7 @@ const ALLOWED_READS: Record<string, string> = {
   statuses: '当前头上的提交状态（逐条的，带是谁贴的）：第二意见、引擎机器人贴的「认领对得上」（#348）',
   fileAt: '这个 PR 里的 plan.md：必填栏「对应计划」只提醒',
   exists: '这个 PR 里的 specs 目录在不在：必填栏「specs」只提醒',
-  openPrs: '主线一动逐个重算开着的 PR：挑要算哪几个，不参与判',
-  prsForCommit: '提交状态写上来时找是哪个 PR：挑要算哪几个，不参与判',
+  openPrs: '主线一动、第二意见或「认领对得上」写上来时逐个重算开着的 PR：挑要算哪几个，不参与判',
   mainHead: '写结论前核主线在这一轮里没动：动了不写，不参与判',
   writeStatus: '写 merge-gate 这一个状态',
 };
