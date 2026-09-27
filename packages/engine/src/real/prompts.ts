@@ -2,22 +2,54 @@
 // 交代：每个阶段一份提示词（中文，只写会话要知道的：干什么、在哪干、怎么汇报、怎么交）。续会话只补这一轮新的东西。
 // 交回：写码类用 fleet done（后端核实、写进库），会话结束后引擎自己看工作树拿头和改动；分诊、需求文档、方案、审查
 // 把结论写进检出副本里的 .fleet-out/ 下几个文件，引擎读出来按形状核对——对不上明确算「交错了」，不猜、不补默认值。
+// Fusion 的 Lead（brief.lead）每一步都在这张单的工作树里跑、续同一个会话：交什么按这一步定（LEAD_KIND），结论也写进
+// .fleet-out/（工作树里记进 .git/info/exclude，不会被提交）；写方案、写结果那两步另外在分支上提交，头和改动引擎从提交里读。
 
-import { checkReport, type VerifyReport } from '@fleet-dao/core';
+import { checkReport, type Rebuttal, type VerifyReport } from '@fleet-dao/core';
 import type { Repo, StageKind } from '@fleet-dao/shared';
 import type { PlannedSubtask, Risk, SubtaskStage } from '../decisions/plan.ts';
 import type { TriageVerdict } from '../decisions/triage.ts';
 import type { Finding, ReviewResult } from '../decisions/verify.ts';
-import type { SessionBrief } from '../ports.ts';
+import type { LeadBrief, LeadStep, SessionBrief } from '../ports.ts';
 import { checkPlanLine, PLAN_LINE_HINT, planLineOf } from './spec-doc.ts';
 
 /** 非写码阶段的结论写在检出副本的这个目录下（相对路径）。 */
 export const OUT_DIR = '.fleet-out';
 
-export type OutputKind = 'triage' | 'doc' | 'plan' | 'review' | 'verify' | 'delivery';
+/** 按阶段交的几种（旧的需求工作流、子任务、开 PR 前验证、Fusion 的副手）。 */
+export type StageOutputKind = 'triage' | 'doc' | 'plan' | 'review' | 'verify' | 'delivery';
+/** Fusion 的 Lead 按这一步交的几种（Lead 自己写码那一步交 delivery，和副手一样）。 */
+export type LeadOutputKind =
+  | 'lead-plan'
+  | 'lead-verdict'
+  | 'lead-rebut'
+  | 'lead-brief'
+  | 'lead-review'
+  | 'lead-text';
+export type OutputKind = StageOutputKind | LeadOutputKind;
+
+/** Lead 的每一步交什么（ports.ts 的 SessionOutput 里 lead-* 那几种）。 */
+export const LEAD_KIND: Readonly<Record<LeadStep, LeadOutputKind | 'delivery'>> = {
+  plan: 'lead-plan',
+  accept: 'lead-verdict',
+  rebut: 'lead-rebut',
+  'fix-brief': 'lead-brief',
+  review: 'lead-review',
+  'pr-text': 'lead-text',
+  takeover: 'delivery',
+};
+
+export function isLeadKind(kind: OutputKind): kind is LeadOutputKind {
+  return kind.startsWith('lead-');
+}
+
+/** 这一次会话该交回什么：Lead 按简报里的这一步（brief.lead），别的按阶段。 */
+export function outputKindFor(stage: StageKind, brief: Pick<SessionBrief, 'lead'>): OutputKind {
+  return brief.lead ? LEAD_KIND[brief.lead.step] : outputKindOf(stage);
+}
 
 /** 这个阶段该交回什么。judge 不起会话（判断题走 Jev），问到就是用错了。 */
-export function outputKindOf(stage: StageKind): OutputKind {
+export function outputKindOf(stage: StageKind): StageOutputKind {
   switch (stage) {
     case 'triage':
       return 'triage';
@@ -46,6 +78,12 @@ export const OUTPUT_FILES = {
   review: [`${OUT_DIR}/review.json`],
   verify: [`${OUT_DIR}/verify.json`],
   delivery: [],
+  'lead-plan': [`${OUT_DIR}/lead-plan.json`],
+  'lead-verdict': [`${OUT_DIR}/lead-verdict.json`],
+  'lead-rebut': [`${OUT_DIR}/lead-rebut.json`],
+  'lead-brief': [`${OUT_DIR}/lead-brief.json`],
+  'lead-review': [`${OUT_DIR}/lead-review.json`],
+  'lead-text': [`${OUT_DIR}/lead-text.json`],
 } as const satisfies Record<OutputKind, readonly string[]>;
 
 /** 开 PR 前验证的提示词里最多列几个改到的文件（再多的让它看 git diff）。 */
@@ -142,6 +180,7 @@ ${relay.diffstat.length > 0 ? `改动统计：\n${relay.diffstat.join('\n')}\n` 
 }
 
 function deliverBlock(input: PromptInput): string {
+  if (input.brief.lead) return leadBlock(input, input.brief.lead);
   const kind = outputKindOf(input.stage);
   const { brief, repo } = input;
   switch (kind) {
@@ -177,19 +216,116 @@ function deliverBlock(input: PromptInput): string {
 写完就结束，不用 fleet done。`;
     case 'verify':
       return verifyBlock(input);
-    case 'delivery': {
-      const test = repo.testCommand;
-      // 写码阶段（execute、ui）一定有测试命令（没有起不来）；只有调研这类不核对测试的活会走到「没写」
-      const tests = test
-        ? `跑 \`${test}\` 看过。
+    case 'delivery':
+      return codeBlock(input);
+  }
+}
+
+/** 写码（副手、旧的子任务、Lead 自己接手）：改代码、补测试、提交，fleet done 交活。 */
+function codeBlock(input: PromptInput): string {
+  const { brief, repo } = input;
+  const test = repo.testCommand;
+  // 写码阶段（execute、ui）一定有测试命令（没有起不来）；只有调研这类不核对测试的活会走到「没写」
+  const tests = test
+    ? `跑 \`${test}\` 看过。
 - 交活只认会话里原样跑的 \`${test}\`、以最后一次为准：别接管道、别放后台（结果会记成「认不出」），别的测试命令不算。`
-        : `这个项目没写测试命令（仓里 .fleet/flow.json 的 testCommand），交活不核对测试。`;
-      return `## 你要做的：写码
+    : `这个项目没写测试命令（仓里 .fleet/flow.json 的 testCommand），交活不核对测试。`;
+  return `## 你要做的：写码
 在当前目录（分支 ${brief.branch ?? '（没给）'}）上把活干完：改代码、补测试，${tests}主线在 origin/${repo.defaultBranch}。
 - 改动用 git commit 提交在本地（可以多次提交）；交活前工作区里不能有没提交的已跟踪改动。
 - 做完标准都满足了再交：\`fleet done "<一两句总结：做了什么>" --tests passed\`（测试没过就写 --tests failed，并在总结里说清）。后端会核实，没核实过会退回。
 - 做不下去就 \`fleet blocked "<卡在哪>" --needs human|info|access|other\`，别硬交。`;
+}
+
+/** 任务简报的形状（core 的 BriefSchema）：Lead 写给副手的，提示词里照这个给例子。 */
+const BRIEF_SHAPE =
+  '{"goal": "这块要做成什么", "scope": "做到哪为止、不碰什么", "constraints": ["约束，没有就空数组"], "files": ["只许改的文件，以 / 结尾的是目录"], "acceptance": ["怎么算合格，逐条"], "returnFormat": "交回什么：改了哪些文件、测试结果、没做完的"}';
+
+const BLOCK_KIND: Record<NonNullable<LeadBrief['blocking']>[number]['kind'], string> = {
+  'not-done': '没做到',
+  'breaks-existing': '弄坏原有功能',
+  security: '安全',
+  'data-loss': '丢数据',
+};
+
+/**
+ * Fusion 的 Lead 这一步要做的（docs/decisions/0003-fusion-flow.md 第 5 条）。Lead 一张单一个会话、每一步续上：第一步交代
+ * 身份和规矩，之后每一步只补这一步的事。只看不改的几步（验收、驳回、写修复简报、重写 PR 摘要）不许提交、不许改文件，
+ * 引擎交回之前核过（头没动、没有没提交的改动）。
+ */
+function leadBlock(input: PromptInput, lead: LeadBrief): string {
+  const { brief, repo } = input;
+  const main = repo.defaultBranch;
+  const out = (kind: LeadOutputKind) => `\`${OUTPUT_FILES[kind][0]}\``;
+  const readOnly = '这一步只看不改：不改仓里的文件、不提交，只写下面那一个结论文件。';
+  const end = '写完就结束，不用 fleet done。';
+  const notes = lead.notes?.length
+    ? `\n验证模型另外的备注（看不出的、建议，不挡）：\n${list(lead.notes)}\n`
+    : '';
+  const tests = repo.testCommand ? `可以跑测试（\`${repo.testCommand}\`）。` : '';
+  switch (lead.step) {
+    case 'plan':
+      return `## 你要做的：第 2 步 规划（你是这张单的主导模型 Lead）
+这张单由你领着做完：你写方案和任务简报，副手（别家的模型）照简报写码、你验收；之后每一步引擎都会续你这个会话交代下一步。${lead.mode === 'single' ? '这次是单模型模式：没有副手，写码也是你自己（引擎下一步交代）。' : ''}当前目录是这张单的工作树（分支 ${brief.branch ?? '（没给）'}），主线在 origin/${main}。
+1. 读需求文档 \`${lead.docs.requirement}\`（里面的「怎么算做完」就是验收标准，开 PR 前别家会逐条核）和相关代码。
+2. 把方案写进 \`${lead.docs.plan}\`：怎么做、改哪些文件、怎么验证，一两页以内。用 git commit 提交在当前分支上；这一步只提交方案，不改代码。
+3. 写一份任务简报（副手照它干），连同方案摘要写进 ${out('lead-plan')}（只写这一个结论文件，它不会被提交），形如：
+{"summary": "方案摘要，三五句（会写进公开的 PR 正文）", "small": true, "highRisk": false, "holds": [], "brief": ${BRIEF_SHAPE}}
+- brief.files：副手只许改这些；改到外面的，验收一律不收。
+- small：一个副手一次做得完、方案不用别家评的写 true。highRisk：碰安全、权限、数据（迁移里删改）、对外发布的写 true。
+- holds：会对外发布、花钱、删数据的写 "release" / "spend" / "delete"（合并前要人批），都不碰就空数组。
+${end}`;
+    case 'accept': {
+      const d = lead.delivery;
+      const diff = d?.base
+        ? `\`git diff ${d.base}..HEAD\` 就是副手交回的全部改动（打回过的几轮连在一起看）。`
+        : '';
+      return `## 你要做的：验收副手这一轮
+副手照你的任务简报干完、交回了（它现在不在跑）：提交头 ${d?.head ?? '（没给）'}，${d?.testsPassed ? '它报测试过了' : '它报测试没过'}。它的总结：${d?.summary?.trim() || '（没写）'}
+改了这些文件：
+${list(d?.changedFiles ?? [])}
+${diff}对照任务简报（上面的「做完标准」「会改的地方」）看代码：做对了没有、有没有漏、测试够不够。${tests}${readOnly}
+结论写进 ${out('lead-verdict')}，形如：
+{"verdict": "accept", "why": "……"}
+- verdict：收下 "accept"，打回 "reject"。why 都要写：打回时写清要副手改什么（原样交给副手）。打回满两次还不行，下一步由你自己接手。
+${end}`;
     }
+    case 'rebut': {
+      const blocking = (lead.blocking ?? []).map(
+        (b) => `[${BLOCK_KIND[b.kind]}] ${b.target}（它的证据：${b.evidence}）`,
+      );
+      return `## 你要做的：看开 PR 前验证挡住的几条
+别家的验证模型挡住了下面几条（原文照抄）：
+${list(blocking)}
+${notes}逐条对照代码核实。你有证据证明它看错了的写进驳回；它说得对的别驳，引擎会把它交回去改。${tests}${readOnly}
+结论写进 ${out('lead-rebut')}，形如：
+{"rebuttals": [{"target": "<照抄上面那一条的原文，不带方括号里的类别>", "evidence": "哪个文件哪一行、跑了什么命令看到什么"}]}
+- 一条都不驳就写 {"rebuttals": []}。没有证据的驳回不算数。
+${end}`;
+    }
+    case 'fix-brief':
+      return `## 你要做的：写修复简报
+开了 PR 之后要改（原因在上面「这一轮要改的」）。看代码找到原因，给副手写一份修复简报：只许改的文件要把要改的地方都圈进去。${readOnly}
+写进 ${out('lead-brief')}，形如：
+{"brief": ${BRIEF_SHAPE}}
+${end}`;
+    case 'review':
+      return `## 你要做的：最终审查、写结果
+PR 的 CI 绿了。\`git diff origin/${main}...HEAD\` 是这张单的全部改动：对照需求文档 \`${lead.docs.requirement}\` 的「怎么算做完」和你的方案 \`${lead.docs.plan}\` 最后看一遍。${tests}
+${notes}- 过了：把结果写进 \`${lead.docs.result}\`（做了什么、怎么验证的、还欠什么），用 git commit 提交；结论写 {"verdict": "pass", "why": "……", "did": ["做了什么，一条一句，最多 5 条"], "owed": ["还欠什么，没有就空数组"]}。
+- 要改：不提交，结论写 {"verdict": "fix", "why": "……", "did": [], "owed": [], "brief": ${BRIEF_SHAPE}}（修复简报，副手照它改）。
+结论写进 ${out('lead-review')}（只写这一个结论文件）。${end}`;
+    case 'pr-text':
+      return `## 你要做的：重写 PR 正文里的方案摘要
+开 PR 时正文被卫生检查拦下了（原因在上面「这一轮要改的」）：PR 正文是公开的，不许有密钥、账号、组织编号、邮箱、IP。${readOnly}
+重写方案摘要和「做了什么」，写进 ${out('lead-text')}，形如：
+{"summary": "方案摘要，三五句", "did": ["做了什么，一条一句"]}
+${end}`;
+    case 'takeover':
+      return `## 这一块你自己写
+${lead.why?.trim() || '这一块由你自己写'}。照任务简报（上面的「做完标准」「会改的地方」）把活干完。
+
+${codeBlock(input)}`;
   }
 }
 
@@ -234,7 +370,8 @@ export function stagePrompt(input: PromptInput): string {
     : '';
   if (input.mode === 'resume' || input.mode === 'fork') {
     return [
-      `接着干${problem ? '' : '。'}${problem}`,
+      // Lead 一张单一个会话、每一步续上：续上来不一定是接着上一轮没干完的，多半是新的一步
+      input.brief.lead && !problem ? '这张单的下一步：' : `接着干${problem ? '' : '。'}${problem}`,
       feedbackBlock(input.brief),
       answersBlock(input.brief),
       deliverBlock(input),
@@ -414,4 +551,147 @@ export function parseReview(text: string, head: string): Parsed<ReviewResult> {
     return { error: 'review.json 说要改（changes），却一条必须改的（blocking）意见都没写' };
   }
   return { ok: { verdict: v.verdict, head, findings } };
+}
+
+// ---- Fusion 的 Lead 交回的结论文件。这里只挡形状（类型对不对、该有的有没有）：内容合不合格（简报齐不齐、方案提交了没有、
+// 驳回成不成立）由工作流经 decide 调 core 判（checkLeadPlan、checkBrief、checkLeadReview、decideVerdict），这里不重复判，
+// 也不补默认值。写方案、写结果那两步的头和改动不在文件里，由会话端口从提交里读。
+
+type Fields = Record<string, unknown>;
+
+function leadFile(text: string, kind: LeadOutputKind): Parsed<Fields> {
+  const file = OUTPUT_FILES[kind][0];
+  const json = parseJson(text, file);
+  if ('error' in json) return json;
+  return isRecord(json.ok) ? { ok: json.ok } : { error: `${file} 要是一个对象` };
+}
+
+/** 读一个字段：不空的字符串、true/false、每一项都不空的字符串数组、对象。认不出回 error，写明是哪个文件的哪个字段。 */
+function reader(v: Fields, kind: LeadOutputKind) {
+  const file = OUTPUT_FILES[kind][0];
+  return {
+    text(name: string): Parsed<string> {
+      const x = v[name];
+      return typeof x === 'string' && x.trim()
+        ? { ok: x.trim() }
+        : { error: `${file} 的 ${name} 要是不空的字符串` };
+    },
+    bool(name: string): Parsed<boolean> {
+      const x = v[name];
+      return typeof x === 'boolean' ? { ok: x } : { error: `${file} 的 ${name} 要是 true 或 false` };
+    },
+    texts(name: string): Parsed<string[]> {
+      const x = v[name];
+      if (!isStringArray(x)) return { error: `${file} 的 ${name} 要是字符串数组（没有就写 []）` };
+      const items = x.map((s) => s.trim());
+      return items.some((s) => !s) ? { error: `${file} 的 ${name} 里有空的一条` } : { ok: items };
+    },
+    object(name: string): Parsed<Fields> {
+      const x = v[name];
+      return isRecord(x) ? { ok: x } : { error: `${file} 的 ${name} 要是一个对象` };
+    },
+  };
+}
+
+type PlanFile = { summary: string; brief: unknown; small: boolean; highRisk: boolean; holds: string[] };
+
+/** 第 2 步：方案摘要、任务简报、大小、风险、会碰的人闸（简报齐不齐由 core 的 checkBrief 判）。 */
+export function parseLeadPlan(text: string): Parsed<PlanFile> {
+  const v = leadFile(text, 'lead-plan');
+  if ('error' in v) return v;
+  const r = reader(v.ok, 'lead-plan');
+  const summary = r.text('summary');
+  if ('error' in summary) return summary;
+  const brief = r.object('brief');
+  if ('error' in brief) return brief;
+  const small = r.bool('small');
+  if ('error' in small) return small;
+  const highRisk = r.bool('highRisk');
+  if ('error' in highRisk) return highRisk;
+  const holds = r.texts('holds');
+  if ('error' in holds) return holds;
+  return {
+    ok: { summary: summary.ok, brief: brief.ok, small: small.ok, highRisk: highRisk.ok, holds: holds.ok },
+  };
+}
+
+/** 验收：收下还是打回，都要写理由（打回的理由原样交给副手）。 */
+export function parseLeadVerdict(text: string): Parsed<{ verdict: 'accept' | 'reject'; why: string }> {
+  const v = leadFile(text, 'lead-verdict');
+  if ('error' in v) return v;
+  const verdict = v.ok.verdict;
+  if (verdict !== 'accept' && verdict !== 'reject') {
+    return { error: `${OUTPUT_FILES['lead-verdict'][0]} 的 verdict 要是 accept 或 reject` };
+  }
+  const why = reader(v.ok, 'lead-verdict').text('why');
+  if ('error' in why) return why;
+  return { ok: { verdict, why: why.ok } };
+}
+
+/** 驳回验证挡住的：target 照抄原文、evidence 写证据（成不成立由 core 的 decideVerdict 判）；一条不驳是空数组。 */
+export function parseLeadRebut(text: string): Parsed<{ rebuttals: Rebuttal[] }> {
+  const file = OUTPUT_FILES['lead-rebut'][0];
+  const v = leadFile(text, 'lead-rebut');
+  if ('error' in v) return v;
+  const raw = v.ok.rebuttals;
+  if (!Array.isArray(raw)) return { error: `${file} 的 rebuttals 要是数组（一条不驳就写 []）` };
+  const rebuttals: Rebuttal[] = [];
+  for (const [i, item] of raw.entries()) {
+    const at = `${file} 第 ${i + 1} 条驳回`;
+    if (!isRecord(item)) return { error: `${at} 要是一个对象` };
+    if (typeof item.target !== 'string' || !item.target.trim()) {
+      return { error: `${at} 缺 target（照抄挡住的那一条）` };
+    }
+    if (typeof item.evidence !== 'string') return { error: `${at} 的 evidence 要是字符串` };
+    rebuttals.push({ target: item.target.trim(), evidence: item.evidence.trim() });
+  }
+  return { ok: { rebuttals } };
+}
+
+/** 修复简报（齐不齐由 core 的 checkBrief 判）。 */
+export function parseLeadBrief(text: string): Parsed<{ brief: unknown }> {
+  const v = leadFile(text, 'lead-brief');
+  if ('error' in v) return v;
+  const brief = reader(v.ok, 'lead-brief').object('brief');
+  return 'error' in brief ? brief : { ok: { brief: brief.ok } };
+}
+
+type ReviewFile = { verdict: 'pass' | 'fix'; why: string; did: string[]; owed: string[]; brief?: unknown };
+
+/** 最终审查：过了写做了什么、还欠什么；要改给修复简报（结果.md 提交了没有、简报齐不齐由 core 的 checkLeadReview 判）。 */
+export function parseLeadReview(text: string): Parsed<ReviewFile> {
+  const file = OUTPUT_FILES['lead-review'][0];
+  const v = leadFile(text, 'lead-review');
+  if ('error' in v) return v;
+  const verdict = v.ok.verdict;
+  if (verdict !== 'pass' && verdict !== 'fix') return { error: `${file} 的 verdict 要是 pass 或 fix` };
+  const r = reader(v.ok, 'lead-review');
+  const why = r.text('why');
+  if ('error' in why) return why;
+  const did = r.texts('did');
+  if ('error' in did) return did;
+  const owed = r.texts('owed');
+  if ('error' in owed) return owed;
+  const out: ReviewFile = { verdict, why: why.ok, did: did.ok, owed: owed.ok };
+  if (v.ok.brief !== undefined) {
+    const brief = r.object('brief');
+    if ('error' in brief) return brief;
+    out.brief = brief.ok;
+  }
+  if (verdict === 'fix' && out.brief === undefined) {
+    return { error: `${file} 说要改（fix），却没写修复简报（brief）` };
+  }
+  return { ok: out };
+}
+
+/** 重写的 PR 摘要和做了什么（开 PR 时正文被卫生检查拦下）。 */
+export function parseLeadText(text: string): Parsed<{ summary: string; did: string[] }> {
+  const v = leadFile(text, 'lead-text');
+  if ('error' in v) return v;
+  const r = reader(v.ok, 'lead-text');
+  const summary = r.text('summary');
+  if ('error' in summary) return summary;
+  const did = r.texts('did');
+  if ('error' in did) return did;
+  return { ok: { summary: summary.ok, did: did.ok } };
 }

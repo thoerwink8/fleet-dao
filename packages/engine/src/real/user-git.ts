@@ -50,7 +50,9 @@ async function git(
   what: string,
   options: { stdin?: Buffer; timeoutMs?: number; allow?: number[] } = {},
 ): Promise<UserCommandResult> {
-  const r = await run(t, [t.git ?? GIT, ...args], options);
+  // 中文文件名（specs/<号>-<短名>/方案.md……）原样列出：git 默认把非 ASCII 的字节转成 "\346\226…" 再加引号，
+  // 改动清单就和仓里的路径对不上（方案、结果算成没提交）
+  const r = await run(t, [t.git ?? GIT, '-c', 'core.quotePath=false', ...args], options);
   if (r.code === 0 || (r.code !== null && options.allow?.includes(r.code))) return r;
   throw new PortError('GIT_FAILED', describeFailure(what, r), {
     retryable: !r.aborted,
@@ -368,7 +370,7 @@ export async function mergeInto(
   if (r.aborted) throw new PortError('GIT_FAILED', describeFailure(what, r), { retryable: false, details });
   const after: string[] = [];
   let aborted = false;
-  const listed = await run(t, [bin, 'diff', '--name-only', '--diff-filter=U']);
+  const listed = await run(t, [bin, '-c', 'core.quotePath=false', 'diff', '--name-only', '--diff-filter=U']);
   const unmerged = listed.code === 0 ? lines(listed) : null;
   if (unmerged === null) {
     after.push(describeGitFailure('列冲突的文件', listed));
@@ -411,6 +413,35 @@ export async function mergeInto(
   }
   const message = `${describeGitFailure(what, r)}${undone ? '；没并成的合并已撤掉，树回到并之前' : ''}`;
   throw new PortError('GIT_FAILED', message, { retryable: true, details });
+}
+
+const relativeOnly = (path: string, what: string) => {
+  if (!path || path.startsWith('/') || path.split('/').includes('..')) {
+    throw new PortError('BAD_INPUT', `${what}只认目录里的相对路径：${path}`, { retryable: false });
+  }
+};
+
+/**
+ * 把一条规则记进这个仓自己的 .git/info/exclude（不改仓里的 .gitignore）：会话写在工作树里的结论文件（.fleet-out/）
+ * 这样就不会被 git add 提交进分支，查「有没有没提交的改动」也看不到它。已经记过的不重复记。
+ */
+export async function excludeLocally(t: UserTree, pattern: string): Promise<void> {
+  relativeOnly(pattern, '本地忽略');
+  const script =
+    'f="$(git rev-parse --git-path info/exclude)" && mkdir -p "$(dirname "$f")" && ' +
+    '{ grep -qxF -- "$1" "$f" 2>/dev/null || printf "%s\\n" "$1" >> "$f"; }';
+  const r = await run(t, [t.sh ?? SH, '-c', script, 'sh', pattern]);
+  if (r.code !== 0) {
+    throw new PortError('GIT_FAILED', describeFailure(`把 ${pattern} 记进本地忽略`, r), { retryable: true });
+  }
+}
+
+/** 以会话用户的身份删掉目录里的一个文件（起会话前清掉上一轮留下的结论文件）；本来就没有不算错。 */
+export async function removeFileAs(t: UserTree, path: string): Promise<void> {
+  relativeOnly(path, '删文件');
+  const r = await run(t, [t.sh ?? SH, '-c', 'rm -f -- "$1"', 'sh', path]);
+  if (r.code !== 0)
+    throw new PortError('WRITE_FAILED', describeFailure(`删 ${path}`, r), { retryable: true });
 }
 
 /** 以会话用户的身份读目录里的一个文件；不在回 null（别的错照抛）。 */

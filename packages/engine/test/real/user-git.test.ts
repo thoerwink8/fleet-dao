@@ -121,6 +121,22 @@ describe('会话目录里的 git', { timeout: 60_000 }, () => {
     });
   });
 
+  it('【故意造出的失败】中文文件名原样列出：改动清单、没提交的改动都不带 git 默认的转义和引号（方案.md 要对得上）', async () => {
+    const m = mirror();
+    const t = tree('work');
+    await fetchBundle(t, m.bundle(m.head), 'refs/fleet/export/0');
+    await checkoutBranch(t, 'fleet/12-a', m.head);
+    mkdirSync(join(t.dir, 'specs', '12-登录'), { recursive: true });
+    writeFileSync(join(t.dir, 'specs', '12-登录', '方案.md'), '# 方案\n');
+    execFileSync('git', ['add', '--', 'specs'], { cwd: t.dir });
+    execFileSync('git', ['commit', '-q', '-m', 'docs: 方案'], { cwd: t.dir, env: ENV });
+    // 不关转义的话 git 列出来的是 "specs/12-\347\231\273\345\275\225/\346\226\271\346\241\210.md"
+    expect(sh(t.dir, '-c', 'core.quotePath=true', 'diff', '--name-only', m.head, 'HEAD')).toContain('\\');
+    expect(await changedFilesSince(t, m.head)).toEqual(['specs/12-登录/方案.md']);
+    writeFileSync(join(t.dir, 'specs', '12-登录', '方案.md'), '# 改了没提交\n');
+    expect(await uncommittedTracked(t)).toEqual([' M specs/12-登录/方案.md']);
+  });
+
   it('没提交的已跟踪改动数得出来（交付判据）', async () => {
     const m = mirror();
     const t = tree('work');
