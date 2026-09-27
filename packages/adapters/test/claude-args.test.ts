@@ -111,15 +111,25 @@ describe('fork（换会话用户接着干：带着旧会话的记录开一个新
 // 钩子命令在 sh -c 里跑（Claude 在 Linux 上就这么跑命令式钩子），这里照样跑出来看退出码。
 const hasSh = spawnSync('sh', ['-c', 'exit 0'], { timeout: 60_000, killSignal: 'SIGKILL' }).status === 0;
 
-/** 照 Claude 的做法跑一次钩子命令：stdin 一份钩子输入 */
-function runHook(command: string, input: unknown): { status: number | null; stderr: string } {
+/**
+ * 照 Claude 的做法跑一次钩子命令：stdin 一份钩子输入。timeoutMs 只有测超时本身的用例才改（默认 60s 太慢）。
+ *
+ * 子进程不读标准输入就退出（crash.mjs 直接 exit、找不到 node 直接 127）时，父进程写 stdin 写到一半会碰上管道已经
+ * 关了（Linux 上 EPIPE、Windows 上 EOF，本机 sh 实测），r.error 照样会被设上——这只是写的时序问题，子进程其实已经
+ * 正常退出、r.status 已经拿到了退出码，不算「没跑完」。真没跑完（sh 起不来、超时、被信号杀）才会 r.status 是 null。
+ */
+function runHook(
+  command: string,
+  input: unknown,
+  timeoutMs = 60_000,
+): { status: number | null; stderr: string } {
   const r = spawnSync('sh', ['-c', command], {
     input: JSON.stringify(input),
     encoding: 'utf8',
-    timeout: 60_000,
+    timeout: timeoutMs,
     killSignal: 'SIGKILL',
   });
-  if (r.error || r.signal) throw new Error(`钩子命令没跑完：${r.error?.message ?? r.signal}`);
+  if (r.status === null) throw new Error(`钩子命令没跑完：${r.error?.message ?? r.signal}`);
   return { status: r.status, stderr: r.stderr };
 }
 
@@ -189,6 +199,21 @@ describe('调工具前那条钩子经 --settings 带上', { timeout: 0 }, () => 
       });
     },
   );
+
+  it.skipIf(!hasSh)(
+    '【故意造出的失败】命令不读标准输入就退出：大输入撑爆管道缓冲，父进程写一半必踩「管道已经关了」，这不是没跑完，退出码照样要拿到',
+    () => {
+      // 2MB，远超管道缓冲（Linux 默认 64KB）：exit 3 根本不读 stdin，父进程写这一步几乎每次都会踩上
+      // Linux 是 EPIPE、Windows 是 EOF（本机 sh 实测），r.error 会被设上，但子进程其实已经正常退出、拿到了退出码 3。
+      const big = { pad: 'x'.repeat(2 * 1024 * 1024) };
+      expect(runHook('exit 3', big)).toEqual({ status: 3, stderr: '' });
+    },
+  );
+
+  it.skipIf(!hasSh)('真没跑完（超时被杀）照旧抛：没把真失败当成「写 stdin 时序问题」吞掉', () => {
+    // 200ms 超时、命令是 sleep 5：runHook 第三个参数覆盖默认 60s，不然这条测试自己要跑 1 分钟
+    expect(() => runHook('sleep 5', bash('git status'), 200)).toThrow('钩子命令没跑完');
+  });
 
   it('路径里带单引号也不会拆坏命令', () => {
     expect(hookCommand(pretoolSettings("/tmp/it's/pretool.mjs", '/usr/bin/node'))).toBe(
