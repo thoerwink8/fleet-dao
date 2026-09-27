@@ -308,6 +308,41 @@ const secretCases: SecretCase[] = [
   ['Bash', `cat ${SHAPE} | ssh fr 'node --input-type=module - ${ETC}/api.env'`, 0],
   // 只出指纹：值不过屏幕
   ['Bash', `cat ~/${RC}/device.json | sha256sum`, 0],
+
+  // —— /etc/fleet-dao 下的一律算（飞书、网关通行证、备份、目录配置、敏感值名单……不按文件名挑） ——
+  ['Bash', `ssh fr 'cat ${ETC}/feishu.env'`, 2],
+  ['Bash', `ssh fr 'cat ${ETC}/gateway-token.env'`, 2],
+  ['Bash', `ssh fr 'cat ${ETC}/backup.env'`, 2],
+  ['Bash', `ssh fr 'jq . ${ETC}/catalog.json'`, 2],
+  ['Bash', `ssh fr 'cat ${ETC}/sensitive-values.txt'`, 2],
+  ['Bash', `ssh fr 'cat < ${ETC}/api.env'`, 2],
+  ['Bash', `cp ${ETC}/feishu.env /tmp/f`, 2],
+  ['Bash', `scp fr:${ETC}/feishu.env .`, 2],
+  // 管道那头的远端脚本：写死的密钥路径照样不许读（if 里的也剥出来看）
+  ['Bash', `echo x | ssh hk 'cat ${ETC}/feishu.env'`, 2],
+  ['Bash', `echo x | ssh hk 'if true; then cat ${ETC}/feishu.env; fi'`, 2],
+  // 放行：只数个数、只出指纹、只往里写、列目录
+  ['Bash', `ssh fr "grep -c '^FLEET_CANARY_REPO=' ${ETC}/engine.env"`, 0],
+  ['Bash', `ssh fr 'grep -q ^FEISHU_APP_ID= ${ETC}/feishu.env && echo 有'`, 0],
+  ['Bash', `ssh fr 'sha256sum < ${ETC}/gateway-token.env'`, 0],
+  ['Bash', `ssh fr 'ls -la ${ETC}/backup'`, 0],
+  ['Bash', `sudo install -m 640 -o root -g fleet /tmp/new.env ${ETC}/engine.env`, 0],
+  ['Bash', `scp -i ~/.ssh/fr.key ./feishu.env fr:${ETC}/feishu.env`, 0],
+
+  // —— 各家 AI 命令行、git、gh 存在家里的登录凭据 ——
+  ['Bash', 'cat ~/.cursor/fleet-api-key', 2],
+  ['Bash', 'cat ~/.grok/auth.json', 2],
+  ['Bash', 'cat ~/.grok/*', 2],
+  ['Bash', 'jq . ~/.codex/auth.json', 2],
+  ['Bash', 'cat ~/.gemini/oauth_creds.json', 2],
+  ['Bash', 'cat ~/.git-credentials', 2],
+  ['Bash', 'cat ~/.config/gh/hosts.yml', 2],
+  ['Bash', 'cat ~/.fleet-dao/sensitive-values.txt', 2],
+  ['PowerShell', 'Get-Content $env:USERPROFILE\\.codex\\auth.json', 2],
+  ['Bash', 'ls -la ~/.grok/ ~/.codex/ ~/.cursor/', 0],
+  ['Bash', 'cat ~/.codex/config.toml', 0],
+  ['Bash', 'cat ~/.grok/*.toml', 0],
+  ['Bash', 'stat -c %a ~/.cursor/fleet-api-key', 0],
 ];
 
 const secretInput = (tool: string, command: string) =>
@@ -456,6 +491,19 @@ const readCases: ReadCase[] = [
     0,
   ],
   ['Devin 的 grep', { tool_name: 'grep', tool_input: { pattern: 'x', path: '/work/repo' } }, 0],
+  // 各家命令行的登录凭据、/etc/fleet-dao 下的任何文件
+  ['Read 读 grok 的登录态', { tool_name: 'Read', tool_input: { file_path: `${HOME_A}/.grok/auth.json` } }, 2],
+  [
+    'Read 读 cursor 的 API 密钥',
+    { tool_name: 'Read', tool_input: { file_path: `${HOME_A}/.cursor/fleet-api-key` } },
+    2,
+  ],
+  ['Read 读法国的飞书凭据', { tool_name: 'Read', tool_input: { file_path: `${ETC}/feishu.env` } }, 2],
+  [
+    'Read 读 codex 的配置（不是凭据）',
+    { tool_name: 'Read', tool_input: { file_path: `${HOME_A}/.codex/config.toml` } },
+    0,
+  ],
 ];
 
 describe('读文件、搜内容的工具：路径碰到密钥名单就拦', () => {
@@ -525,6 +573,13 @@ const broadCases: BroadCase[] = [
   ['bash -c 里 grep -r ~', sh('bash -c "grep -r x ~"'), 2],
   ['PowerShell 里 grep -r 家目录', sh('grep -r x $env:USERPROFILE', '/w', 'PowerShell'), 2],
   ['Grok 的终端 grep -r ~', sh('grep -r x ~', '/w', 'run_terminal_command'), 2],
+  ['grep -r 从 ~/.codex 搜（登录凭据在里面）', sh('grep -r token ~/.codex'), 2],
+  [
+    'Grep 从 ~/.config 搜（gh 的令牌在 gh/hosts.yml）',
+    grepTool({ path: '~/.config', output_mode: 'content' }),
+    2,
+  ],
+  ['grep -r 的 --include 能匹配上 gh 的 hosts.yml', sh("grep -r --include='*.yml' oauth ~"), 2],
   // —— 放行 ——
   ['Grep 从家目录搜、只列文件名', grepTool({ path: '~', output_mode: 'files_with_matches' }), 0],
   ['Grep 从家目录搜、只数个数', grepTool({ path: '~', output_mode: 'count' }), 0],

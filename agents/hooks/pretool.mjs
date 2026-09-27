@@ -131,8 +131,25 @@ const block = (message) => ({ code: 2, message });
  * 配置副本，带账号编号，docs/reclaude-self-check.md）；state.json、logs/ 不算，自检照读。目录本身、通配、变量、拆开写的一律算碰到
  */
 const RECLAUDE_SECRETS = new Set(['device.json', 'device.key', 'ca.key', 'claude-ca-bundle.pem']);
-/** /etc/fleet-dao 里写死了文件名时：这两个环境文件、github/（机器人的私钥和 webhook 密钥）；*.key、*.pass 归通用名单 */
-const FLEET_ETC_SECRETS = new Set(['api.env', 'engine.env']);
+/**
+ * /etc/fleet-dao 是服务器上放密钥的地方（README「密钥和本机配置在哪」，root:fleet 750）：里面的一律算，不按文件名挑
+ * （api.env、engine.env 之外还有飞书的 feishu.env、网关通行证 gateway-token.env、备份的 backup.env、目录配置 catalog.json、
+ * 敏感值名单 sensitive-values.txt……）。这几个名字只拿来判 glob 限定得够不够（下面 SECRET_NAMES）。
+ */
+const FLEET_ETC_NAMES = [
+  'api.env',
+  'engine.env',
+  'feishu.env',
+  'gateway-token.env',
+  'backup.env',
+  'hk.env',
+  'france.env',
+  'temporal.env',
+  'release.env',
+  'catalog.json',
+  'jev.json',
+  'sensitive-values.txt',
+];
 
 /**
  * 仓根 .gitignore「密钥文件名单」那一段里，读出来不算漏值、所以这里不拦的；别的每一行这里都得拦。
@@ -148,12 +165,14 @@ export const GITIGNORE_NOT_BLOCKED = {
 const EDGE = String.raw`\\/\s'"\x60;|&()<>,=:`;
 const DIR_REST = String.raw`(?<rest>/[^\s'"\x60;|&()<>,]*)?`;
 const RECLAUDE_RE = new RegExp(String.raw`(?<![\w.-])\.reclaude(?![\w.-])${DIR_REST}`, 'gi');
-const FLEET_ETC_RE = new RegExp(String.raw`(?<![\w.~-])/etc/fleet-dao(?![\w.-])${DIR_REST}`, 'gi');
+const FLEET_ETC_RE = /(?<![\w.~-])\/etc\/fleet-dao(?![\w.-])/i;
 const SECRETS_DIR_RE = /(?<![\w.-])\.secrets(?![\w.-])/i;
 const NAMED_RE = new RegExp(
-  String.raw`(?:^|[${EDGE}])(?<name>vault-key\.txt|id_(?:rsa|dsa|ecdsa|ed25519)(?:_sk)?|\.pgpass|\.netrc|\.credentials\.json)(?=$|[${EDGE}\]}])`,
+  String.raw`(?:^|[${EDGE}])(?<name>vault-key\.txt|id_(?:rsa|dsa|ecdsa|ed25519)(?:_sk)?|\.pgpass|\.netrc|\.credentials\.json|\.git-credentials|sensitive-values\.txt)(?=$|[${EDGE}\]}])`,
   'i',
 );
+/** gh 没接系统钥匙串时把令牌明文存在这里（Linux 上常见） */
+const GH_HOSTS_RE = /(?<![\w.-])\.config\/gh\/hosts\.yml(?![\w.-])/i;
 const GENERIC_RE = new RegExp(
   String.raw`(?:^|[${EDGE}])[^${EDGE}\[\]{}$!+]*[^${EDGE}\[\]{}$!+.]\.(?:pass|key|pem|p12|pfx|ppk|kdbx|jks|keystore)(?=$|[${EDGE}\]}])`,
   'i',
@@ -164,14 +183,34 @@ function namedLabel(name) {
   if (n === 'vault-key.txt') return '保险箱的钥匙 vault-key.txt';
   if (n === '.credentials.json') return 'Claude 的登录凭据 .credentials.json';
   if (n.startsWith('id_')) return 'SSH 私钥';
+  if (n === '.git-credentials') return 'git 存的口令 .git-credentials';
+  if (n === 'sensitive-values.txt') return '已知敏感值名单 sensitive-values.txt（真实的账号、组织编号、IP）';
   return `口令文件 ${n}`;
 }
 
-/** 放着密钥文件的点目录：里面写死的名字归上面 NAMED_RE 认，这里认直接写在目录下、能匹配上密钥文件名的通配（cat ~/.ssh/*） */
-const DOTDIR_RE = new RegExp(String.raw`(?<![\w.-])\.(?<dir>claude|ssh)(?![\w.-])${DIR_REST}`, 'gi');
+/**
+ * 放着登录凭据的点目录（各家 AI 命令行、SSH）：直接写在目录下的这几个文件名，和能匹配上它们的通配（cat ~/.ssh/*、
+ * cat ~/.grok/*）都算。会话用户家里就有 cursor 的密钥、grok 的登录态（design 第十四节），开发机上还有 codex、gemini 的。
+ */
+const DOTDIR_RE = new RegExp(
+  String.raw`(?<![\w.-])\.(?<dir>claude|ssh|codex|grok|gemini|cursor)(?![\w.-])${DIR_REST}`,
+  'gi',
+);
 const DOTDIR_SECRETS = {
   claude: ['.credentials.json'],
   ssh: ['id_rsa', 'id_dsa', 'id_ecdsa', 'id_ed25519', 'id_ecdsa_sk', 'id_ed25519_sk'],
+  codex: ['auth.json'],
+  grok: ['auth.json'],
+  gemini: ['oauth_creds.json'],
+  cursor: ['fleet-api-key'],
+};
+const DOTDIR_LABELS = {
+  claude: 'Claude 的登录凭据 .credentials.json',
+  ssh: 'SSH 私钥',
+  codex: 'Codex 的登录凭据 ~/.codex/auth.json',
+  grok: 'grok 的登录态 ~/.grok/auth.json',
+  gemini: 'Gemini 的登录凭据 ~/.gemini/oauth_creds.json',
+  cursor: 'cursor-agent 的 API 密钥 ~/.cursor/fleet-api-key',
 };
 
 /**
@@ -240,20 +279,23 @@ export function secretMention(text) {
         return '~/.reclaude/ 里 reclaude 的设备密钥和账号';
       }
     }
-    for (const m of v.matchAll(FLEET_ETC_RE)) {
-      if (secretUnder(m.groups?.rest, (p) => p[0] === 'github' || FLEET_ETC_SECRETS.has(p.at(-1) ?? ''))) {
-        return '/etc/fleet-dao/ 里的密钥';
-      }
-    }
+    if (FLEET_ETC_RE.test(v)) return '/etc/fleet-dao/ 里的密钥和配置';
     if (SECRETS_DIR_RE.test(v)) return '.secrets/ 里的密钥';
     const named = NAMED_RE.exec(v);
     if (named?.groups?.name) return namedLabel(named.groups.name);
+    if (GH_HOSTS_RE.test(v)) return 'gh 的登录令牌 ~/.config/gh/hosts.yml';
     if (GENERIC_RE.test(v)) return '密钥文件（*.key、*.pem、*.pass 这类）';
     for (const m of v.matchAll(DOTDIR_RE)) {
       const parts = (m.groups?.rest ?? '').split('/').filter(Boolean);
-      const dir = /** @type {'claude' | 'ssh'} */ (m.groups?.dir.toLowerCase());
-      if (parts.length === 1 && /[*?[{]/.test(parts[0]) && globHits(parts[0], DOTDIR_SECRETS[dir])) {
-        return namedLabel(DOTDIR_SECRETS[dir][0]);
+      const dir = /** @type {keyof typeof DOTDIR_SECRETS} */ (m.groups?.dir.toLowerCase());
+      const names = DOTDIR_SECRETS[dir];
+      const [part] = parts;
+      if (
+        parts.length === 1 &&
+        part !== undefined &&
+        (/[*?[{]/.test(part) ? globHits(part, names) : names.includes(part.toLowerCase()))
+      ) {
+        return DOTDIR_LABELS[dir];
       }
     }
   }
@@ -403,7 +445,8 @@ function scanCommand(text, kind) {
       add(c);
       i++;
     } else if (c === '<' && !inTest) {
-      complex.push('< 读入、heredoc');
+      // 从文件读入（sha256sum < 文件）照常认：读的那个文件和别的参数一样判；heredoc、<<<、<( )、<& 看不清
+      if (ps || d === '<' || d === '(' || d === '&') complex.push('< 读入、heredoc');
       add(c);
       i++;
     } else if (c === '>' && !inTest) {
@@ -674,6 +717,64 @@ function gitNonReading(args) {
     .some((x) => /^(?:-[A-Za-z]*[pie][A-Za-z]*|--patch|--interactive|--edit)$/.test(x.value));
 }
 
+/** grep、rg 只列文件名、只数个数、不出声（-l、-L、-c、-q 和长写法）：内容不上屏幕（ops 第五节 grep -c '^KEY=' 那样读回） */
+function quietSearch(leaf) {
+  const isGrep = ['grep', 'egrep', 'fgrep'].includes(leaf.name);
+  if (!isGrep && leaf.name !== 'rg') return false;
+  const argShort = isGrep ? GREP_ARG_SHORT : RG_ARG_SHORT;
+  const argLong = isGrep ? GREP_ARG_LONG : RG_ARG_LONG;
+  for (let i = 0; i < leaf.args.length; i++) {
+    const v = leaf.args[i].value;
+    if (v === '--') return false;
+    if (v.startsWith('--')) {
+      if (QUIET_LONG.has(v.split('=')[0] ?? v)) return true;
+      if (!v.includes('=') && argLong.has(v)) i++;
+      continue;
+    }
+    if (!v.startsWith('-') || v === '-') continue;
+    for (let k = 1; k < v.length; k++) {
+      if (argShort.has(v[k] ?? '')) {
+        if (k === v.length - 1) i++;
+        break;
+      }
+      if ((isGrep ? 'lLcq' : 'lcq').includes(v[k] ?? '')) return true;
+    }
+  }
+  return false;
+}
+
+const COPY_ARGS = {
+  cp: opts('-t -S --target-directory --suffix'),
+  mv: opts('-t -S --target-directory --suffix'),
+  install: opts('-m -o -g -t -S --mode --owner --group --target-directory --suffix'),
+  scp: SCP_ARGS,
+  rsync: opts('-e --rsh --exclude --include --filter -f'),
+};
+
+/** cp、mv、install、scp、rsync 只往密钥路径里写（碰到密钥路径的只有最后那个目标）：值不上屏幕，放密钥就是这么放的 */
+function copiesInto(leaf) {
+  const argOpts = COPY_ARGS[/** @type {keyof typeof COPY_ARGS} */ (leaf.name)];
+  if (!argOpts) return false;
+  const words = leaf.args;
+  if (words.some((x) => /^(?:-t|--target-directory)(?:=|$)/.test(x.value))) return false;
+  const positional = [];
+  for (let i = 0; i < words.length; i++) {
+    const v = words[i].value;
+    if (v === '--') {
+      positional.push(...words.slice(i + 1));
+      break;
+    }
+    if (v.startsWith('-') && v !== '-') {
+      if (argOpts.has(v)) i++;
+      continue;
+    }
+    positional.push(words[i]);
+  }
+  // 选项的值（scp -i 指的钥匙、rsync -e 里的 ssh -i）是拿来用的，不算读；源里碰到密钥路径就是往外拷，不算
+  if (positional.length < 2) return false;
+  return positional.slice(0, -1).every((x) => (secretMention(x.raw) ?? secretMention(x.value)) === null);
+}
+
 function nonReading(leaf, ctx) {
   if (NONREADING.has(leaf.name)) return true;
   if (leaf.name === 'node') return isViewerRun(leaf.args, ctx);
@@ -682,7 +783,7 @@ function nonReading(leaf, ctx) {
     return !leaf.args.some((x) => /^-(?:exec|execdir|ok|okdir|delete|fprint0?|fprintf|fls)$/.test(x.value));
   if (leaf.name === 'openssl') return leaf.args[0]?.value === 'x509';
   if (leaf.name === 'git') return gitNonReading(leaf.args);
-  return false;
+  return quietSearch(leaf) || copiesInto(leaf);
 }
 
 /** cat / Get-Content 只读 secret-shape.mjs 这一个文件：往 ssh 那头的 node - 喂查看脚本 */
@@ -728,6 +829,9 @@ function secretBlock(label, why) {
 /** checkLine 的结论：碰到了、都不读内容，放行 */
 const CLEAN = { code: 0 };
 
+/** 管道那头的远端脚本里，命令前面这些词剥掉再看后面那条命令 */
+const RECEIVER_SKIP = new Set(['if', 'then', 'else', 'elif', 'do', 'while', 'until', '!']);
+
 /**
  * 一条命令行里碰到密钥路径的命令是不是都不读内容：每条碰到的叶子命令不读内容（或者它的输出直接送进 ssh、摘要）；
  * 和它接在一个管道里的只能是不读内容的、只处理文字的（xargs 后面那条得不读内容）。ctx.stdoutSafe：这条命令行的输出
@@ -737,19 +841,31 @@ const CLEAN = { code: 0 };
 function checkLine(text, kind, ctx, depth) {
   if (depth > 4) return secretBlock('密钥路径', '套了太多层 ssh / bash -c');
   const { pipelines, complex } = scanCommand(text, kind);
-  const infos = pipelines.map((p) => p.map((c) => describeCmd(c, kind)));
+  // 管道那头接着值的远端脚本（… | ssh 机器 '…'，ops 第九节「值不过屏幕」把值落进 /etc/fleet-dao 的那几条）：它往密钥路径里写，
+  // 用变量、$( )、if 是常事。这里不管看不清的写法，只看写死了密钥路径的命令读不读内容（if/then 这类剥掉再看，赋值、看不清的跳过）
+  const receiver = ctx.receiver === true;
+  const infos = pipelines.map((p) =>
+    p.map((c) => {
+      if (!receiver) return describeCmd(c, kind);
+      let n = 0;
+      while (n < c.words.length && RECEIVER_SKIP.has(c.words[n].raw)) n++;
+      return describeCmd({ ...c, words: c.words.slice(n) }, kind);
+    }),
+  );
   const hit = infos.flat().find((x) => x.label !== null);
   if (hit === undefined) return null;
-  const unclear =
-    complex[0] ??
-    infos.flat().find((x) => x.head !== null)?.head ??
-    infos.flat().find((x) => x.u.complex)?.u.complex;
+  const unclear = receiver
+    ? undefined
+    : (complex[0] ??
+      infos.flat().find((x) => x.head !== null)?.head ??
+      infos.flat().find((x) => x.u.complex)?.u.complex);
   if (unclear) return secretBlock(hit.label, `用了钩子看不清的写法（${unclear}）`);
   for (const p of infos) {
     const last = p.length - 1;
     for (let i = 0; i <= last; i++) {
       const x = p[i];
       if (x.label === null) continue;
+      if (receiver && (x.head !== null || x.u.complex)) continue;
       const toSink = (i < last && isSink(p[i + 1])) || (i === last && ctx.stdoutSafe === true);
       if (x.u.nested) {
         if ((x.u.extra ?? []).some((a) => secretMention(a.raw) ?? secretMention(a.value))) {
@@ -759,7 +875,7 @@ function checkLine(text, kind, ctx, depth) {
         const r = checkLine(
           x.u.nested.text,
           x.u.nested.kind,
-          { stdoutSafe: toSink, stdinViewer: viewer },
+          { stdoutSafe: toSink, stdinViewer: viewer, receiver: i > 0 && x.u.name === 'ssh' },
           depth + 1,
         );
         // 外层看得见、拆出来的那条命令行里却找不到了（多半是转义把反斜杠吃了）：看不清就按拦处理
@@ -814,22 +930,23 @@ const HOME_WORD = String.raw`(?:~|\$HOME|\$\{HOME\}|%USERPROFILE%|\$env:USERPROF
 const DRIVE = '(?:[a-z]:|/[a-z]|/mnt/[a-z])';
 const HOME_PATH = `(?:/root|/home/[^/]+|/Users/[^/]+|${DRIVE}/Users/[^/]+)`;
 const BROAD_ROOT_RE = new RegExp(
-  String.raw`^(?:(?:${HOME_WORD}|${HOME_PATH})(?:/\.(?:claude|ssh))?|/(?:home|Users|etc|mnt)?|${DRIVE}(?:/Users)?)$`,
+  String.raw`^(?:(?:${HOME_WORD}|${HOME_PATH})(?:/\.(?:claude|ssh|codex|grok|gemini|cursor|config(?:/gh)?))?|/(?:home|Users|etc|mnt)?|${DRIVE}(?:/Users)?)$`,
   'i',
 );
 /** 拿来判 glob、文件类型限定得够不够：密钥文件的名字（通用名单的扩展名配个 x） */
 const SECRET_NAMES = [
   ...RECLAUDE_SECRETS,
-  ...FLEET_ETC_SECRETS,
-  ...DOTDIR_SECRETS.claude,
-  ...DOTDIR_SECRETS.ssh,
+  ...FLEET_ETC_NAMES,
+  ...Object.values(DOTDIR_SECRETS).flat(),
   'vault-key.txt',
   '.pgpass',
   '.netrc',
+  '.git-credentials',
+  'hosts.yml',
   ...'pass key pem p12 pfx ppk kdbx jks keystore'.split(' ').map((e) => `x.${e}`),
 ];
-/** rg 的文件类型里会带上密钥文件的：json（device.json、.credentials.json）、txt（vault-key.txt） */
-const RISKY_TYPES = new Set(['json', 'jsonl', 'txt']);
+/** rg 的文件类型里会带上密钥文件的：json（device.json、auth.json……）、txt（vault-key.txt）、yaml（gh 的 hosts.yml） */
+const RISKY_TYPES = new Set(['json', 'jsonl', 'txt', 'yaml']);
 
 /** 搜的起点规整成 / 分隔、去掉 . 和 ..、末尾不带 /；相对路径接在 cwd 后面，cwd 也没有返回 null（看不出来） */
 function normRoot(p, cwd) {
