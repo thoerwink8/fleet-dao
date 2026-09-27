@@ -9,7 +9,9 @@ import {
   parseRequirementDoc,
   parseReview,
   parseTriage,
+  parseVerify,
   stagePrompt,
+  VERIFY_FILES_SHOWN,
 } from '../../src/real/prompts.ts';
 import { planLineOf } from '../../src/real/spec-doc.ts';
 
@@ -291,5 +293,96 @@ describe('认交回来的东西', () => {
     ).toMatchObject({
       error: expect.stringContaining('severity'),
     });
+  });
+});
+
+describe('开 PR 前验证', () => {
+  const HEAD = 'a'.repeat(40);
+  const CRITERIA = ['验证码 5 分钟过期', '有一条故意造出失败的测试'];
+  const verifyBrief = (changedFiles: string[] = ['src/login/code.ts']) =>
+    brief({
+      head: HEAD,
+      verify: {
+        criteria: CRITERIA,
+        specPath: 'specs/12-登录页加验证码/需求.md',
+        planSummary: '登录表单加验证码输入，后端校验五分钟过期',
+        changedFiles,
+      },
+    });
+  const good = {
+    head: HEAD,
+    results: CRITERIA.map((criterion) => ({
+      criterion,
+      answer: 'done',
+      evidence: 'src/login/code.ts 第 8 行',
+    })),
+    findings: [],
+  };
+
+  it('交代：送检的头、和主线怎么比、只读；「怎么算做完」逐条带出处；方案摘要、改了哪些文件；只三种能挡、其余写建议', () => {
+    expect(outputKindOf('verify')).toBe('verify');
+    const text = stagePrompt({ stage: 'verify', brief: verifyBrief(), repo, issueNumber: 12, mode: 'new' });
+    for (const part of [
+      `送检的提交 ${HEAD}`,
+      'git diff origin/main...HEAD',
+      '只读',
+      '出自 specs/12-登录页加验证码/需求.md',
+      '1. 验证码 5 分钟过期',
+      '2. 有一条故意造出失败的测试',
+      '登录表单加验证码输入，后端校验五分钟过期',
+      '改了 1 个文件',
+      '- src/login/code.ts',
+      'breaks-existing',
+      'security',
+      'data-loss',
+      'suggestion',
+      `${OUT_DIR}/verify.json`,
+      '不用 fleet done',
+    ]) {
+      expect(text).toContain(part);
+    }
+  });
+
+  it('改的文件太多：只列前一段，写明另有几个、让它看 git diff', () => {
+    const files = Array.from({ length: VERIFY_FILES_SHOWN + 3 }, (_, i) => `src/f${i}.ts`);
+    const text = stagePrompt({
+      stage: 'verify',
+      brief: verifyBrief(files),
+      repo,
+      issueNumber: 12,
+      mode: 'new',
+    });
+    expect(text).toContain(`改了 ${VERIFY_FILES_SHOWN + 3} 个文件`);
+    expect(text).toContain('另有 3 个，看 git diff');
+    expect(text).not.toContain(`src/f${VERIFY_FILES_SHOWN}.ts`);
+  });
+
+  it('结论文件：合法的认出来（和 core 的 checkReport 同一个判法）', () => {
+    expect(parseVerify(JSON.stringify(good), CRITERIA, HEAD)).toEqual({ ok: good });
+  });
+
+  it('【故意造出的失败】结论文件解析不出、审的不是送检的头、漏答、答了清单外的：都明确算交错了', () => {
+    expect(parseVerify('不是 JSON', CRITERIA, HEAD)).toMatchObject({
+      error: expect.stringContaining('不是合法的 JSON'),
+    });
+    expect(parseVerify('{"verdict":"pass"}', CRITERIA, HEAD)).toMatchObject({
+      error: expect.stringContaining('.fleet-out/verify.json 交回的认不出'),
+    });
+    expect(parseVerify(JSON.stringify({ ...good, head: 'b'.repeat(40) }), CRITERIA, HEAD)).toMatchObject({
+      error: expect.stringContaining('审的不是送检的头'),
+    });
+    expect(
+      parseVerify(JSON.stringify({ ...good, results: good.results.slice(1) }), CRITERIA, HEAD),
+    ).toMatchObject({ error: expect.stringContaining('没答：「验证码 5 分钟过期」') });
+    expect(
+      parseVerify(
+        JSON.stringify({
+          ...good,
+          results: [...good.results, { criterion: '顺手改了别的', answer: 'done', evidence: 'x' }],
+        }),
+        CRITERIA,
+        HEAD,
+      ),
+    ).toMatchObject({ error: expect.stringContaining('答了清单外的一条') });
   });
 });

@@ -1,12 +1,14 @@
 // 引擎端口 → packages/github：推分支（会话用户打的 bundle）、开 PR（正文给结构，renderPrBody 生成；照抄需求 issue 的
 // 类别标签和里程碑）、等 CI、并主线（并完把会话的树快进到新头）、在新头上跑测试（= 等这个头的 CI）、合并、issue 进度、
-// 关单、写需求文档，以及建树（记下主线的头；树等起会话时由会话用户自己建，见 sessions.ts）、收树（先存档没提交的改动）。
+// 关单、写需求文档、读需求文档的「怎么算做完」（开 PR 前验证照它逐条问），以及建树（记下主线的头；树等起会话时由会话用户
+// 自己建，见 sessions.ts）、收树（先存档没提交的改动）。
 // GitHubError 一律换成 PortError：码和「能不能重试」原样带过 Temporal 边界，失败分流按码判。
 
 import { randomUUID } from 'node:crypto';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { SessionUser } from '@fleet-dao/adapters';
+import { criteriaOf } from '@fleet-dao/core';
 import type { GitHub, PrBodyInput } from '@fleet-dao/github';
 import type { CiResult } from '../decisions/verify.ts';
 import { type EnginePorts, type PortContext, PortError, type PrBody, type Worktree } from '../ports.ts';
@@ -92,7 +94,11 @@ type GitHubPorts = Pick<
   | 'updateIssueProgress'
   | 'closeIssue'
   | 'writeSpecDoc'
+  | 'readCriteria'
 >;
+
+/** 需求文档目录：specs/<号>-<短名>（core 的 specDirOf 认出来的样子），别的一律不读。 */
+const SPEC_DIR = /^specs\/\d+-[^/\\\s]+$/;
 
 const DOC_FILE = { requirement: REQUIREMENT_DOC, plan: '方案.md', result: '结果.md' } as const;
 
@@ -432,6 +438,35 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
           ctx,
         ),
       );
+    },
+
+    async readCriteria(input, ctx) {
+      // 开 PR 前验证照默认分支上的需求文档逐条问（开单时写进主线的那份，不读分支上的：写这张单的改不了验收条）。
+      // 目录认不出、文档不在、没有「怎么算做完」或是空的，都明确报错、不可重试（失败分流 VF1 挂起等人补），不拿空清单去验。
+      const dir = input.specDir.trim().replace(/\/+$/, '');
+      if (!SPEC_DIR.test(dir) || dir.split('/').some((seg) => /^\.+$/.test(seg))) {
+        throw new PortError(
+          'SPEC_DOC_MISSING',
+          `需求文档目录认不出：「${input.specDir}」（要是单子正文指的 specs/<号>-<短名>）`,
+          { retryable: false },
+        );
+      }
+      const path = `${dir}/${REQUIREMENT_DOC}`;
+      const doc = await mapped(() => gh.readSpecDoc({ repo: input.repo, path, signal: ctx.signal }, ctx));
+      if (!doc) {
+        throw new PortError(
+          'SPEC_DOC_MISSING',
+          `主线上没有 ${path}：开 PR 前验证要照它的「怎么算做完」逐条核，读不到就不验（需求文档还没进主线？）`,
+          { retryable: false },
+        );
+      }
+      const got = criteriaOf(doc.content);
+      if ('error' in got) {
+        throw new PortError('CRITERIA_MISSING', `${path}：${got.error}，开 PR 前验证没法逐条核`, {
+          retryable: false,
+        });
+      }
+      return { path, criteria: got.ok };
     },
 
     async writeSpecDoc(input, ctx) {

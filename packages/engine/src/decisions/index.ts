@@ -21,6 +21,8 @@ import {
   type Source,
   type VerdictDecision,
   type VerdictInput,
+  type VerifiedRound,
+  verificationLines,
 } from '@fleet-dao/core';
 import { type Limits, resolveLimits } from '../limits.ts';
 import { checkDelivery, type DeliveryDecision, type DeliveryInput } from './delivery.ts';
@@ -62,6 +64,8 @@ export interface DecisionMap {
   parallelBriefs: { input: Brief[]; output: { ok: true } | { ok: false; problems: string[] } };
   acceptance: { input: AcceptanceInput; output: AcceptanceDecision };
   verdict: { input: VerdictInput; output: VerdictDecision };
+  /** 开 PR 前验证写进 PR 正文的几行（「怎么验证的」「还欠什么」）。 */
+  verifyLines: { input: VerifiedRound[]; output: { verified: string[]; owed: string[] } };
   flowConfig: { input: { org: Source; project: Source }; output: ConfigDecision };
 }
 
@@ -97,6 +101,7 @@ export function createDecide(deps: DecideDeps = {}): Decide {
     parallelBriefs: checkParallel,
     acceptance: decideAcceptance,
     verdict: decideVerdict,
+    verifyLines: verificationLines,
     flowConfig: ({ org, project }) => resolveFlowConfig(org, project),
   };
   return async (kind, input) => {

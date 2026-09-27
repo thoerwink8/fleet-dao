@@ -695,3 +695,75 @@ describe('并主线', () => {
     ).rejects.toMatchObject({ code: 'WORKTREE_DIVERGED' });
   });
 });
+
+describe('开 PR 前验证读「怎么算做完」：默认分支上单子指的需求文档', () => {
+  const doc = [
+    '# 登录页加验证码',
+    '',
+    '## 要什么',
+    '手机验证码登录。',
+    '',
+    '## 怎么算做完',
+    '- 过期的验证码登录不了',
+    '- 有一条故意造出失败的测试',
+    '',
+    '## 现状',
+    '- 这一条不算',
+  ].join('\n');
+
+  it('读默认分支上的 specs/<号>-<短名>/需求.md，交回逐条原文和出处', async () => {
+    const { ports, calls } = setup({
+      readSpecDoc: (input: { path: string }) => ({ path: input.path, content: doc, url: 'x' }),
+    });
+    const got = await ports.readCriteria({ taskId: 't1', repo, specDir: 'specs/12-login/' }, ctx);
+    expect(got).toEqual({
+      path: 'specs/12-login/需求.md',
+      criteria: ['过期的验证码登录不了', '有一条故意造出失败的测试'],
+    });
+    expect(calls.readSpecDoc?.[0]).toMatchObject({ path: 'specs/12-login/需求.md' });
+  });
+
+  it('【故意造出的失败】需求文档不在主线上（读回 null）：SPEC_DOC_MISSING、不可重试，不拿空清单去验', async () => {
+    const { ports } = setup({ readSpecDoc: () => null });
+    await expect(
+      ports.readCriteria({ taskId: 't1', repo, specDir: 'specs/12-login' }, ctx),
+    ).rejects.toMatchObject({
+      code: 'SPEC_DOC_MISSING',
+      retryable: false,
+      message: expect.stringContaining('主线上没有 specs/12-login/需求.md'),
+    });
+  });
+
+  it('【故意造出的失败】目录认不出（不是 specs/<号>-<短名>、带 ..）：SPEC_DOC_MISSING，连读都不去读', async () => {
+    const { ports, calls } = setup();
+    for (const specDir of ['', 'docs/12-login', 'specs/login', 'specs/12-login/../13-x', 'specs/../12-x']) {
+      await expect(ports.readCriteria({ taskId: 't1', repo, specDir }, ctx)).rejects.toMatchObject({
+        code: 'SPEC_DOC_MISSING',
+        retryable: false,
+      });
+    }
+    expect(calls.readSpecDoc).toBeUndefined();
+  });
+
+  it('【故意造出的失败】文档里没有「怎么算做完」、那一节是空的：CRITERIA_MISSING、不可重试', async () => {
+    for (const content of ['# 需求\n\n## 要什么\n验证码\n', '# 需求\n\n## 怎么算做完\n\n## 现状\n- x\n']) {
+      const { ports } = setup({
+        readSpecDoc: (input: { path: string }) => ({ path: input.path, content, url: 'x' }),
+      });
+      await expect(
+        ports.readCriteria({ taskId: 't1', repo, specDir: 'specs/12-login' }, ctx),
+      ).rejects.toMatchObject({ code: 'CRITERIA_MISSING', retryable: false });
+    }
+  });
+
+  it('【故意造出的失败】读需求文档读不了（403）：原样带过，不当成文档不在', async () => {
+    const { ports } = setup({
+      readSpecDoc: () => {
+        throw new GitHubError('FORBIDDEN', 'Resource not accessible by integration');
+      },
+    });
+    await expect(
+      ports.readCriteria({ taskId: 't1', repo, specDir: 'specs/12-login' }, ctx),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+  });
+});

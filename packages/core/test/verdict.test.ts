@@ -1,6 +1,12 @@
 // 开 PR 前验证结论的边界表：只三种能挡，其余当建议；认不出的一律作废，不当成过了。
 import { describe, expect, it } from 'vitest';
-import { decideVerdict, type VerdictInput } from '../src/verdict.ts';
+import {
+  checkReport,
+  decideVerdict,
+  type VerdictInput,
+  type VerifiedRound,
+  verificationLines,
+} from '../src/verdict.ts';
 
 const HEAD = 'abc1234def';
 const criteria = ['过期的验证码登录不了', '有一条故意造出失败的测试'];
@@ -105,5 +111,93 @@ describe('开 PR 前验证结论', () => {
     const report = { ...allDone, findings: [{ kind: 'security', text: '密钥写进日志', evidence: 'log.ts' }] };
     const got = decideVerdict(input({ report, rebuttals: [{ target: '密钥写进日志', evidence: ' ' }] }));
     expect(got.verdict).toBe('invalid');
+  });
+});
+
+describe('作废了该谁改', () => {
+  it.each([
+    ['同族', input({ verifierFamily: 'claude' }), 'setup'],
+    ['没写验证模型族', input({ verifierFamily: '' }), 'setup'],
+    ['单子没有怎么算做完', input({ criteria: [] }), 'setup'],
+    ['交回的认不出', input({ report: '全部做到' }), 'verifier'],
+    ['审的不是送检的头', input({ report: { ...allDone, head: 'fffffff0000' } }), 'verifier'],
+    ['漏答一条', input({ report: { ...allDone, results: [allDone.results[0]] } }), 'verifier'],
+    ['驳回不存在的意见', input({ rebuttals: [{ target: '没有这条', evidence: 'x' }] }), 'lead'],
+  ])('%s → %s', (_name, given, fault) => {
+    const got = decideVerdict(given);
+    expect(got.verdict).toBe('invalid');
+    if (got.verdict === 'invalid') expect(got.fault).toBe(fault);
+  });
+});
+
+describe('交回的这一份本身对不对（会话端口读结论文件时先挡一道，和 decideVerdict 同一个判法）', () => {
+  it('对的：原样交回解析好的', () => {
+    const got = checkReport(allDone, criteria, HEAD);
+    expect(got.ok).toBe(true);
+    if (got.ok) expect(got.report.results).toHaveLength(2);
+  });
+
+  it.each([
+    ['认不出', { head: HEAD }, /认不出/],
+    ['审的不是送检的头', { ...allDone, head: 'abc1234' }, /不是送检的头/],
+    [
+      '一条没带证据',
+      { ...allDone, results: [{ ...allDone.results[0], evidence: ' ' }, allDone.results[1]] },
+      /认不出/,
+    ],
+    [
+      '答了清单外的',
+      {
+        ...allDone,
+        results: [...allDone.results, { criterion: '别的', answer: 'done', evidence: 'x' }],
+      },
+      /清单外/,
+    ],
+  ])('【失败】%s', (_name, report, why) => {
+    const got = checkReport(report, criteria, HEAD);
+    expect(got.ok).toBe(false);
+    if (!got.ok) expect(got.why).toMatch(why);
+  });
+
+  it('【失败】没有「怎么算做完」也不算对（不拿空清单放过去）', () => {
+    const got = checkReport({ head: HEAD, results: [], findings: [] }, [], HEAD);
+    expect(got.ok).toBe(false);
+  });
+});
+
+describe('验证结论写成 PR 正文', () => {
+  const round1: VerifiedRound = {
+    round: 1,
+    verifier: 'Kimi k3（kimi 族）',
+    criteria: 2,
+    rebuttals: [{ target: '密钥写进日志', evidence: 'log.ts 第 8 行打的是密钥编号不是值' }],
+    final: {
+      verdict: 'block',
+      reasons: ['没做到：过期的验证码登录不了（证据：没有测试）'],
+      notes: [],
+      rebutted: ['密钥写进日志'],
+    },
+  };
+  const round2: VerifiedRound = {
+    round: 2,
+    verifier: 'Kimi k3（kimi 族）',
+    criteria: 2,
+    rebuttals: [],
+    final: { verdict: 'pass', notes: ['建议：变量名可以更清楚（证据：auth.ts 第 12 行）'], rebutted: [] },
+  };
+
+  it('每轮一行、驳回各一行带证据，最后一轮的建议进「还欠什么」', () => {
+    expect(verificationLines([round1, round2])).toEqual({
+      verified: [
+        '开 PR 前别家验证第 1 轮（Kimi k3（kimi 族））：挡，逐条核了 2 条「怎么算做完」，Lead 拿证据驳回 1 条，挡在 1 条：没做到：过期的验证码登录不了（证据：没有测试）',
+        '第 1 轮 Lead 驳回「密钥写进日志」：log.ts 第 8 行打的是密钥编号不是值',
+        '开 PR 前别家验证第 2 轮（Kimi k3（kimi 族））：过，逐条核了 2 条「怎么算做完」',
+      ],
+      owed: ['验证建议：变量名可以更清楚（证据：auth.ts 第 12 行）'],
+    });
+  });
+
+  it('【失败】一轮都没有：明说没有记录，不空着', () => {
+    expect(verificationLines([])).toEqual({ verified: ['开 PR 前别家验证：没有记录'], owed: [] });
   });
 });

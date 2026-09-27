@@ -3,6 +3,7 @@
 // 交回：写码类用 fleet done（后端核实、写进库），会话结束后引擎自己看工作树拿头和改动；分诊、需求文档、方案、审查
 // 把结论写进检出副本里的 .fleet-out/ 下几个文件，引擎读出来按形状核对——对不上明确算「交错了」，不猜、不补默认值。
 
+import { checkReport, type VerifyReport } from '@fleet-dao/core';
 import type { Repo, StageKind } from '@fleet-dao/shared';
 import type { PlannedSubtask, Risk, SubtaskStage } from '../decisions/plan.ts';
 import type { TriageVerdict } from '../decisions/triage.ts';
@@ -13,7 +14,7 @@ import { checkPlanLine, PLAN_LINE_HINT, planLineOf } from './spec-doc.ts';
 /** 非写码阶段的结论写在检出副本的这个目录下（相对路径）。 */
 export const OUT_DIR = '.fleet-out';
 
-export type OutputKind = 'triage' | 'doc' | 'plan' | 'review' | 'delivery';
+export type OutputKind = 'triage' | 'doc' | 'plan' | 'review' | 'verify' | 'delivery';
 
 /** 这个阶段该交回什么。judge 不起会话（判断题走 Jev），问到就是用错了。 */
 export function outputKindOf(stage: StageKind): OutputKind {
@@ -26,6 +27,8 @@ export function outputKindOf(stage: StageKind): OutputKind {
       return 'plan';
     case 'review':
       return 'review';
+    case 'verify':
+      return 'verify';
     case 'execute':
     case 'ui':
     case 'research':
@@ -41,8 +44,12 @@ export const OUTPUT_FILES = {
   doc: [`${OUT_DIR}/doc.md`],
   plan: [`${OUT_DIR}/plan.md`, `${OUT_DIR}/plan.json`],
   review: [`${OUT_DIR}/review.json`],
+  verify: [`${OUT_DIR}/verify.json`],
   delivery: [],
 } as const satisfies Record<OutputKind, readonly string[]>;
+
+/** 开 PR 前验证的提示词里最多列几个改到的文件（再多的让它看 git diff）。 */
+export const VERIFY_FILES_SHOWN = 200;
 
 /** 接力任务书：换了会话用户、又不能 fork 续时，从库和工作树拼出来的「做到哪了」。 */
 export interface RelayFacts {
@@ -168,6 +175,8 @@ function deliverBlock(input: PromptInput): string {
 {"verdict": "pass", "findings": [{"severity": "blocking", "text": "……", "file": "src/a.ts"}]}
 - verdict：能合 "pass"，要改 "changes"。blocking = 必须改才能合；minor = 小毛病，不挡合并。
 写完就结束，不用 fleet done。`;
+    case 'verify':
+      return verifyBlock(input);
     case 'delivery': {
       const test = repo.testCommand;
       // 写码阶段（execute、ui）一定有测试命令（没有起不来）；只有调研这类不核对测试的活会走到「没写」
@@ -182,6 +191,40 @@ function deliverBlock(input: PromptInput): string {
 - 做不下去就 \`fleet blocked "<卡在哪>" --needs human|info|access|other\`，别硬交。`;
     }
   }
+}
+
+/**
+ * 开 PR 前验证（docs/decisions/0003-fusion-flow.md 第 5 条第 5 步）：别家对照「怎么算做完」逐条答做到 / 没做到 / 看不出、带证据，
+ * 只报三种能挡的发现，其余写成建议。交回的形状照 core 的 ReportSchema。只读：检出的就是送检的头，只写结论文件。
+ */
+function verifyBlock(input: PromptInput): string {
+  const { brief, repo } = input;
+  const v = brief.verify;
+  const head = brief.head ?? '（没给）';
+  const files = v?.changedFiles ?? [];
+  const shown = files.slice(0, VERIFY_FILES_SHOWN);
+  const more = files.length > shown.length ? `\n- ……另有 ${files.length - shown.length} 个，看 git diff` : '';
+  const main = repo.defaultBranch;
+  return `## 你要做的：开 PR 前验证（别家核一遍）
+这张单的改动是别的模型写的，还没开 PR。请你对照这张单的「怎么算做完」逐条核一遍。当前目录已经检出送检的提交 ${head}，主线在 origin/${main}：\`git diff origin/${main}...HEAD\` 就是这次的改动。只读：不改仓里的文件、不提交，只写下面那一个结论文件。${repo.testCommand ? `可以跑测试（\`${repo.testCommand}\`）。` : ''}
+
+「怎么算做完」（逐条原文，出自 ${v?.specPath ?? '需求文档'}）：
+${(v?.criteria ?? []).map((c, i) => `${i + 1}. ${c}`).join('\n') || '（没给）'}
+
+方案摘要（写这张单的主导模型写的，只作参考，以代码为准）：
+${v?.planSummary.trim() || '（没写）'}
+
+改了 ${files.length} 个文件：
+${list(shown)}${more}
+
+怎么答：
+- 「怎么算做完」每一条答一次：做到（done）、没做到（not-done）、看不出（unclear），都要带证据（哪个文件哪一行、跑了什么命令看到什么）。criterion 一字不差照抄上面那一条，不多答、不漏答、不重复答。没有把握就答看不出，别猜成做到。
+- 另外只报三种能挡的发现，都要有证据：弄坏原有功能（breaks-existing）、安全（security）、丢数据（data-loss）。别的意见一律写成建议（suggestion），不挡。
+
+结论写进 \`${OUT_DIR}/verify.json\`（只写这一个文件），形如：
+{"head": "${head}", "results": [{"criterion": "<照抄上面那一条>", "answer": "done", "evidence": "……"}], "findings": [{"kind": "security", "text": "……", "evidence": "……"}]}
+- head 照抄送检的提交号（上面那一整串）。没有发现就写 "findings": []。
+写完就结束，不用 fleet done。`;
 }
 
 /** 起会话的提示词。 */
@@ -329,6 +372,17 @@ export function parsePlan(
     subtasks.push(item);
   }
   return { ok: { markdown: markdown.ok, subtasks } };
+}
+
+/**
+ * 开 PR 前验证的结论文件：先得是 JSON，再过 core 的 checkReport（形状、审的是不是送检的头、「怎么算做完」一条不漏不多不重）。
+ * 对不上回 error，会话端口按「交错了」退回会话照原因重写；过了的定论照样由工作流经 decide 判（decideVerdict 用的是同一个 checkReport）。
+ */
+export function parseVerify(text: string, criteria: readonly string[], head: string): Parsed<VerifyReport> {
+  const json = parseJson(text, `${OUT_DIR}/verify.json`);
+  if ('error' in json) return json;
+  const checked = checkReport(json.ok, criteria, head);
+  return checked.ok ? { ok: checked.report } : { error: `${OUT_DIR}/verify.json ${checked.why}` };
 }
 
 export function parseReview(text: string, head: string): Parsed<ReviewResult> {

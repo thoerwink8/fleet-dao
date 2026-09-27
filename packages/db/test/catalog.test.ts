@@ -114,8 +114,8 @@ describe('示例配置 deploy/examples/catalog.example.json', () => {
       stagePolicies: orders.filter((o) => o.length > 0).length,
       stagePolicyRoutes: orders.reduce((n, o) => n + o.length, 0),
     });
-    // 两边都从样例算，再钉一遍样例本身：8 个阶段都排了；判断阶段 3 条、UI 7 条、其余 6 个阶段各 8 条。
-    expect([rows.stagePolicies.length, rows.stagePolicyRoutes.length]).toEqual([8, 3 + 7 + 6 * 8]);
+    // 两边都从样例算，再钉一遍样例本身：9 个阶段都排了；判断阶段 3 条、UI 7 条、其余 7 个阶段（含开 PR 前验证）各 8 条。
+    expect([rows.stagePolicies.length, rows.stagePolicyRoutes.length]).toEqual([9, 3 + 7 + 7 * 8]);
   });
 
   it('两个 Claude 池跑在同一个会话用户下、按组织类型分（法国只留一个会话用户，design 第十节）；同一时刻只有一个在跑，各 4', () => {

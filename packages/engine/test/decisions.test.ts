@@ -767,6 +767,22 @@ describe('Fusion 的判断经 decide 调（core 包，0003 第 12 条）', () =>
       rebuttals: [],
     });
     expect(verdict.verdict).toBe('pass');
+    const lines = await decide('verifyLines', [
+      {
+        round: 1,
+        verifier: 'Kimi k3（kimi 族）',
+        criteria: 1,
+        rebuttals: [],
+        final: { verdict: 'pass', notes: [], rebutted: [] },
+      },
+    ]);
+    expect(lines.verified).toEqual([
+      '开 PR 前别家验证第 1 轮（Kimi k3（kimi 族））：过，逐条核了 1 条「怎么算做完」',
+    ]);
+  });
+
+  it('【故意造出的失败】验证一轮都没有：PR 正文明说没有记录，不空着', async () => {
+    expect(await decide('verifyLines', [])).toEqual({ verified: ['开 PR 前别家验证：没有记录'], owed: [] });
   });
 
   it('【故意造出的失败】全组织默认读不到：判停派，不拿空配置顶', async () => {

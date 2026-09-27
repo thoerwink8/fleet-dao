@@ -1,9 +1,10 @@
 // 测试共用（不依赖 vitest，录重放夹具的脚本也用）：可跳时间的 Temporal 测试服务端 + 真的工作流包 + 假端口。
 import { randomUUID } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import type { Repo } from '@fleet-dao/shared';
 import type { WorkflowHandle } from '@temporalio/client';
 import { TestWorkflowEnvironment } from '@temporalio/testing';
-import { DefaultLogger, Runtime, type WorkflowBundle } from '@temporalio/worker';
+import { bundleWorkflowCode, DefaultLogger, Runtime, type WorkflowBundle } from '@temporalio/worker';
 import type { EngineJobs } from '../src/activities.ts';
 import type { EngineActivities } from '../src/activity-options.ts';
 import type { RequirementInput, SubtaskInput } from '../src/contract.ts';
@@ -21,6 +22,19 @@ let bundle: Promise<WorkflowBundle> | undefined;
 export function engineBundle(): Promise<WorkflowBundle> {
   bundle ??= bundleEngineWorkflows(silent as never);
   return bundle;
+}
+
+let verifyBundle: Promise<WorkflowBundle> | undefined;
+/**
+ * 开 PR 前验证那一块（src/workflows/verify.ts）的测试宿主工作流（test/fixtures/verify/host.ts）打的包：#214 的工作流
+ * 接上之前，靠它在真 Temporal 里跑这一块。
+ */
+export function verifyHostBundle(): Promise<WorkflowBundle> {
+  verifyBundle ??= bundleWorkflowCode({
+    workflowsPath: fileURLToPath(new URL('./fixtures/verify/host.ts', import.meta.url)),
+    logger: silent as never,
+  });
+  return verifyBundle;
 }
 
 export function createEnv(): Promise<TestWorkflowEnvironment> {
@@ -60,6 +74,8 @@ export interface WorkerOptions {
   maxCachedWorkflows?: number;
   /** 定时任务要的东西（对账补漏）；不给就是假端口那样，定时任务的活动报 JOB_NOT_CONFIGURED。 */
   jobs?: EngineJobs;
+  /** 换一份工作流包（测试宿主工作流）；不给就是引擎自己的。 */
+  workflowBundle?: WorkflowBundle;
 }
 
 /** 起一个真的引擎 worker（假端口），跑完 fn 就关。 */
@@ -84,7 +100,7 @@ export async function withWorker<T>(
     signAgentToken: (claims) =>
       `token:${claims.taskId}:${claims.subtaskId ?? '-'}:${claims.runId}:${claims.ttlSeconds}`,
     connection: env.nativeConnection,
-    workflowBundle: await engineBundle(),
+    workflowBundle: options.workflowBundle ?? (await engineBundle()),
     ...(options.triage ? { triage: options.triage } : {}),
     ...(options.decide ? { decide: options.decide } : {}),
     ...(options.wrapActivities ? { wrapActivities: options.wrapActivities } : {}),

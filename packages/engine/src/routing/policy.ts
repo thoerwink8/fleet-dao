@@ -21,7 +21,7 @@ export const HOST_ABILITIES: Readonly<Record<HostId, readonly Ability[]>> = {
 
 /**
  * 阶段 × 要的能力。写码、UI 要改文件并跑测试；写需求文档、方案要读仓库并写进 specs/；
- * 审查要读代码、能跑测试；调研要读；分诊和判断题只答题（接口外壳或命令行都行）。
+ * 审查、开 PR 前验证要读代码、能跑测试（只写结论文件）；调研要读；分诊和判断题只答题（接口外壳或命令行都行）。
  */
 export const STAGE_NEEDS: Readonly<Record<StageKind, readonly Ability[]>> = {
   triage: ['answer'],
@@ -31,6 +31,7 @@ export const STAGE_NEEDS: Readonly<Record<StageKind, readonly Ability[]>> = {
   execute: ['read', 'edit', 'shell'],
   ui: ['read', 'edit', 'shell'],
   review: ['read', 'shell'],
+  verify: ['read', 'shell'],
   research: ['read'],
 };
 
@@ -116,6 +117,7 @@ export const DEFAULT_ROUTING_POLICY: Readonly<RoutingPolicy> = Object.freeze<Rou
     execute: 'heavy',
     ui: 'heavy',
     review: 'light',
+    verify: 'light',
     research: 'heavy',
   },
 });

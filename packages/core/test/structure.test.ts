@@ -23,6 +23,7 @@ describe('core 只放纯判断', () => {
       'acceptance.ts',
       'brief.ts',
       'config.ts',
+      'criteria.ts',
       'flow.ts',
       'index.ts',
       'replica.ts',

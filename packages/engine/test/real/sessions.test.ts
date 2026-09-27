@@ -17,12 +17,13 @@ import {
   upsertAlert,
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
+import { assertPublishable } from '@fleet-dao/github';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { JevAskContext, JevPort, JevQuestion, JevReply } from '../../src/failure/jev.ts';
 import type { LaunchSessionInput, PortContext, SessionEnd } from '../../src/ports.ts';
 import { localExec } from '../../src/real/exec.ts';
 import { CURSOR_MISSING } from '../../src/real/hosts.ts';
-import { createSessionPorts } from '../../src/real/sessions.ts';
+import { createSessionPorts, type SessionPortsDeps, screenForOtherVendor } from '../../src/real/sessions.ts';
 import { poolHoldKey } from '../../src/real/store-ports.ts';
 import { layout } from '../../src/real/worktrees.ts';
 import {
@@ -96,6 +97,8 @@ function setup(
     stallJevEveryMs?: number;
     /** cursor-agent 路由起的会话走这个剧本（假插头照真跑夹具回放）；不给就是不该起 cursor。 */
     cursor?: (spec: Parameters<ReturnType<typeof fakeCursorRun>['run']>[0], n: number) => FakeCursorScript;
+    /** 发给别家（开 PR 前验证）的材料怎么过卫生检查；不给就是没配检查。 */
+    screen?: SessionPortsDeps['screen'];
   } = {},
 ) {
   const fake = fakeRun(script);
@@ -129,6 +132,7 @@ function setup(
     ...(options.jev ? { jev: options.jev } : {}),
     ...(options.jevTimeoutMs === undefined ? {} : { jevTimeoutMs: options.jevTimeoutMs }),
     ...(options.stallJevEveryMs === undefined ? {} : { stallJevEveryMs: options.stallJevEveryMs }),
+    ...(options.screen ? { screen: options.screen } : {}),
     log: () => {},
   });
   return { ports, fake, cursor, trees, scope };
@@ -536,6 +540,129 @@ describe('分诊、需求文档、方案、审查：读结论文件', () => {
     ] as const) {
       const bad = setup(() => doc(text, withPlan));
       const { end } = await runOnce(bad.ports, specLaunch());
+      expect(end.outcome).toBe('failed');
+      expect(end.failure).toMatchObject({ code: 'wrong_output', message: expect.stringContaining(why) });
+    }
+  });
+});
+
+describe('开 PR 前验证：检出送检的头，发出去的材料先过卫生检查，读结论文件', () => {
+  const CRITERIA = ['过期的验证码登录不了', '有一条故意造出失败的测试'];
+  /** 名单上的一个假值（测试自己给的名单，不是真名单上的）。 */
+  const LISTED = 'zeta-crane-5521';
+  const verifyLaunch = (head: string, criteria: string[] = CRITERIA): LaunchSessionInput => {
+    const base = launch({ stage: 'verify' });
+    const { worktreePath: _w, baseHead: _b, ...rest } = base;
+    return {
+      ...rest,
+      brief: {
+        ...base.brief,
+        head,
+        verify: {
+          criteria,
+          specPath: 'specs/12-login/需求.md',
+          planSummary: '登录表单加验证码输入，后端校验五分钟过期',
+          changedFiles: ['a.ts'],
+        },
+      },
+    };
+  };
+  const writes = (text: string | null): FakeRunScript => ({
+    act: ({ spec }) => {
+      if (text === null) return;
+      mkdirSync(join(spec.cwd, '.fleet-out'), { recursive: true });
+      writeFileSync(join(spec.cwd, '.fleet-out', 'verify.json'), text);
+    },
+  });
+  const report = (head: string) => ({
+    head,
+    results: CRITERIA.map((criterion) => ({ criterion, answer: 'done', evidence: '看过 a.ts' })),
+    findings: [],
+  });
+  const listed = (what: string, texts: { path: string; text: string }[]) =>
+    assertPublishable(what, texts, () => ({ ok: true, source: '测试名单', values: [LISTED] }));
+  const caught = (fn: () => void): unknown => {
+    try {
+      fn();
+    } catch (error) {
+      return error;
+    }
+    return undefined;
+  };
+
+  it('检出送检的头；这次真要发的整份提示词先过卫生检查；写对了交回结论', async () => {
+    const screened: { what: string; texts: { path: string; text: string }[] }[] = [];
+    const { ports, fake } = setup(() => writes(JSON.stringify(report(m.head))), {
+      screen: (what, texts) => {
+        screened.push({ what, texts });
+        listed(what, texts);
+      },
+    });
+    const { end } = await runOnce(ports, verifyLaunch(m.head));
+    expect(end).toMatchObject({ outcome: 'done', output: { kind: 'verify', report: report(m.head) } });
+    const sent = fake.specs[0];
+    expect(screened).toEqual([
+      { what: '发给别家的验证材料', texts: [{ path: '验证提示词', text: sent?.prompt }] },
+    ]);
+    expect(sent?.prompt).toContain('1. 过期的验证码登录不了');
+    expect(sent?.prompt).toContain('specs/12-login/需求.md');
+    expect(git(sent?.cwd as string, 'rev-parse', 'HEAD')).toBe(m.head);
+  });
+
+  it('【故意造出的失败】材料里有名单上的值：不发、不起会话，报 MATERIAL_BLOCKED，报错里只有位置和规则、没有那个值', async () => {
+    const { ports, fake } = setup(() => writes(JSON.stringify(report(m.head))), { screen: listed });
+    const input = verifyLaunch(m.head, [`别把 ${LISTED} 写进日志`]);
+    const error = await ports.startSession(input, ctx()).catch((e: unknown) => e);
+    expect(error).toMatchObject({ code: 'MATERIAL_BLOCKED', retryable: false });
+    const message = String((error as Error).message);
+    expect(message).toContain('没过卫生检查，没发给Claude Code：查出 1 处（验证提示词 第');
+    expect(message).toContain('known-value');
+    expect(message).not.toContain(LISTED);
+    expect(fake.specs).toEqual([]);
+    expect((await runRow(input.runId))?.startedAt).toBeNull();
+  });
+
+  it('【故意造出的失败】会话端口没配卫生检查：发不出去（HYGIENE_UNSCANNED），不当成查过了', async () => {
+    const { ports, fake } = setup(() => writes(JSON.stringify(report(m.head))));
+    const error = await ports.startSession(verifyLaunch(m.head), ctx()).catch((e: unknown) => e);
+    expect(error).toMatchObject({ code: 'HYGIENE_UNSCANNED', retryable: false });
+    expect(fake.specs).toEqual([]);
+  });
+
+  it('【故意造出的失败】名单没读到、检查自己出错：原样报 HYGIENE_LIST_MISSING、算没扫成，都不发', () => {
+    const missing = caught(() =>
+      screenForOtherVendor(
+        (what, texts) =>
+          assertPublishable(what, texts, () => ({ ok: false, reason: '没找到名单', tried: [] })),
+        '提示词',
+        'Cursor Agent',
+      ),
+    );
+    expect(missing).toMatchObject({ code: 'HYGIENE_LIST_MISSING', retryable: false });
+    const broken = caught(() =>
+      screenForOtherVendor(
+        () => {
+          throw new Error('扫描器坏了');
+        },
+        '提示词',
+        'Cursor Agent',
+      ),
+    );
+    expect(broken).toMatchObject({ code: 'HYGIENE_UNSCANNED', retryable: false });
+    expect(String((broken as Error).message)).toContain('没扫成，不发给Cursor Agent');
+  });
+
+  it('【故意造出的失败】没写结论、写的不是 JSON、审的不是送检的头、漏答一条：都判交错了（wrong_output），写明哪里不对', async () => {
+    const other = 'f'.repeat(40);
+    const good = report(m.head);
+    for (const [text, why] of [
+      [null, '没写结论 .fleet-out/verify.json'],
+      ['不是 JSON', '不是合法的 JSON'],
+      [JSON.stringify(report(other)), `审的不是送检的头：送的是 ${m.head}，审的是 ${other}`],
+      [JSON.stringify({ ...good, results: good.results.slice(0, 1) }), '没答：「有一条故意造出失败的测试」'],
+    ] as const) {
+      const { ports } = setup(() => writes(text), { screen: listed });
+      const { end } = await runOnce(ports, verifyLaunch(m.head));
       expect(end.outcome).toBe('failed');
       expect(end.failure).toMatchObject({ code: 'wrong_output', message: expect.stringContaining(why) });
     }
