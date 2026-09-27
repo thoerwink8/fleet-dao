@@ -432,6 +432,22 @@ describe('接上真网关', () => {
     await h?.close();
   });
 
+  it('起来后按时写心跳（不等停机、没人说话也写）：推送一轮轮走通、盘面取到了，都记在里面', async () => {
+    h = await harness({ watch: { heartbeatMs: 150 }, boardRefreshMs: 40 });
+    h.backend.on('GET', '/feishu/outbox', {
+      body: { items: [], quietHours: null, asOf: new Date().toISOString() },
+    });
+    h.backend.on('GET', '/feishu/board', { body: snapshot() });
+    h.backend.on('PUT', '/feishu/cards/:messageId', { body: { ok: true } });
+    h.gateway.start();
+    const beats = () => h.logs.filter((l) => l.message === '网关心跳');
+    await until(() => beats().length >= 2, 5_000);
+    expect(beats()[0]).toMatchObject({ level: 'info', fields: { link: 'ok' } });
+    const counted = beats().map((b) => b.fields as { push: { rounds: number }; board: { ok: number } });
+    expect(counted.some((c) => c.push.rounds > 0)).toBe(true);
+    expect(counted.some((c) => c.board.ok > 0)).toBe(true);
+  });
+
   it('网关起来后推送、盘面都调不通：到时限往团队群报一次；后端好了，稳住后在报警下面回「通了」；停机时写一行心跳', async () => {
     h = await harness({
       watch: { alertAfterMs: 300, recoverAfterMs: 100, checkEveryMs: 20, heartbeatMs: 60_000 },
