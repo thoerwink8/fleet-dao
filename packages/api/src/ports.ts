@@ -903,7 +903,7 @@ export interface SeatStore {
   writeHandoff(input: SeatActor & { text: string }): Promise<WriteHandoffResult>;
   /**
    * 帅位认领一张单（受保护动作）：同一个事务里锁住座位、按库的 now 核任期没换、没过期，再抢这一行——结束了的整行换成
-   * 新的认领号，还活着的不动。owner 是 seat（帅位自己动手）或 worker（派的工人，在帅位同一台机器上）。
+   * 新的认领号，这个座位的帅位自己占着的（开单时替帅位认领的）也换（派工人接手），别的还活着的不动。owner 是 seat（帅位自己动手）或 worker（派的工人，在帅位同一台机器上）。
    * graceMinutes 不给用设置里的。和操作记录（claim.take）同一事务。
    */
   takeClaim(
@@ -943,6 +943,8 @@ export interface SeatStore {
       founder?: string | undefined;
       /** 记进认领的那一句（接活自动派、交给 fleet 的原因）。 */
       note?: string | undefined;
+      /** 演练座位（drill:<名字>）下引擎那一边：记在演练座位名下，只抢认领、不起工作流，待起补起不碰它。 */
+      drill?: string | undefined;
     },
   ): Promise<EngineClaimResult>;
   /** 引擎的认领起成了工作流：待起 → 在做。不是引擎的、不在待起的不动（changed = false，claim 是此刻的样子）。 */

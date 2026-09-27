@@ -104,7 +104,11 @@ export const PATH_RULES: readonly Rule[] = [
     why: 'PR 必填栏、引擎写 PR 正文都照这份模板',
   },
   { match: exact('.gitignore'), units: ['hygiene'], why: '标记段是卫生检查的密钥文件名单' },
-  { match: under('.githooks/'), units: ['hygiene'], why: '推前钩子调卫生检查' },
+  {
+    match: under('.githooks/'),
+    units: ['hygiene', AGENTS_UNIT],
+    why: '推前钩子调卫生检查、查认领（agents 的测试直接跑这个钩子）',
+  },
   { match: under('docs/'), units: [], why: '文档' },
   { match: under('specs/'), units: [], why: '需求文档' },
   { match: exact('README.md'), units: [], why: '文档' },
