@@ -572,6 +572,88 @@ export function budgetAlertCard(sent: number, budget: number, ctx: RenderContext
   });
 }
 
+// —— 网关自己的报警（watch.ts 发，不经过后端）——
+
+/** 健康页（香港上的静态页，deploy/web/health）：后端连不上时它照样打得开，会写明连不上。 */
+export const HEALTH_PAGE_PATH = '/health/';
+
+export interface LinkAlert {
+  /** 从什么时候起没走通（这几条都没走通过时，就是网关这次起来的时刻）。 */
+  since: number;
+  /** 画卡的时刻（卡上写「已经多久」）。 */
+  at: number;
+  /** 没走通的那几条定时活。 */
+  loops: Array<{
+    name: 'outbox' | 'board';
+    lastOkAt: number | null;
+    lastFail: { at: number; reason: string } | null;
+  }>;
+  /** 通了：全部又走通的时刻（卡改灰）。 */
+  backAt?: number | undefined;
+}
+
+/** 两条定时活给人看的名字（报警卡、「通了」那句）。 */
+export const LINK_WORDS = { outbox: '推送', board: '盘面快照' } as const;
+
+export function linkAlertCard(a: LinkAlert, ctx: RenderContext): Card {
+  const names = new Set(a.loops.map((l) => l.name));
+  const both = names.has('outbox') && names.has('board');
+  const title = both
+    ? '机器人连不上后端了'
+    : names.has('outbox')
+      ? '推送卡住了：机器人调不通后端'
+      : '盘面卡住了：机器人取不到快照';
+  const since = when(a.since, ctx.now);
+  const never = a.loops.every((l) => l.lastOkAt === null);
+  const elements: El[] = [
+    text(
+      never
+        ? `网关 ${since} 起来后一直没走通，到现在 ${duration(a.at - a.since)}：`
+        : `从 ${since} 起一直没走通，到现在 ${duration(a.at - a.since)}：`,
+    ),
+  ];
+  for (const l of a.loops) {
+    const last = l.lastOkAt === null ? '网关起来后没走通过' : `最后一次走通 ${when(l.lastOkAt, ctx.now)}`;
+    // 最后一次走通之前的失败不算：那之后一次都没失败过，就是一轮都没跑完
+    const failed = l.lastFail && (l.lastOkAt === null || l.lastFail.at >= l.lastOkAt) ? l.lastFail : null;
+    const fail = failed
+      ? `最近一次没走通 ${when(failed.at, ctx.now)}：${failed.reason}`
+      : '这段时间一轮都没跑完（网关的定时活停了，或卡在飞书那头？）';
+    elements.push(text(`· ${LINK_WORDS[l.name]}：${last}；${fail}`));
+  }
+  if (names.has('outbox')) {
+    elements.push(text('这期间要你们拍的事、卡住报警推不过来（后端都记着，通了会接着推）。'));
+  }
+  const board = a.loops.find((l) => l.name === 'board');
+  if (board) {
+    elements.push(
+      text(
+        board.lastOkAt === null
+          ? '团队群的置顶盘面卡这次还没刷新过。'
+          : `团队群的置顶盘面卡停在 ${when(board.lastOkAt, ctx.now)} 的样子。`,
+      ),
+    );
+  }
+  if (both) elements.push(text('发给我的话多半记不下来（会回「没记成」），通了请重发。'));
+  elements.push(
+    text(
+      a.backAt === undefined
+        ? '通了我会在这条下面说一声；这次只报这一次。'
+        : `已经通了 · ${when(a.backAt, ctx.now)}（断了 ${duration(a.backAt - a.since)}）`,
+    ),
+  );
+  elements.push(text('这条是飞书网关自己发的，不经过后端。细节看健康页和香港的网关日志。', 'note'));
+  elements.push(
+    buttons([{ label: '打开健康页', primary: true, url: `${ctx.publicUrl}${HEALTH_PAGE_PATH}` }]),
+  );
+  return card({
+    title,
+    subtitle: '卡住报警 · 飞书网关',
+    template: a.backAt === undefined ? 'red' : 'grey',
+    elements,
+  });
+}
+
 // —— 卡片自检（测试用；真发到测试群的验证等飞书应用建好后补）——
 
 const ALLOWED_TAGS = new Set([

@@ -28,6 +28,7 @@ import type { Deps } from './deps.ts';
 import { DEV_RUN_ID, DEV_USER_ID, devFixtures, IDS } from './dev-fixtures.ts';
 import { draftBacklogCheck, notWiredDraftOpener } from './draft-opening.ts';
 import { createFeishuAuth } from './feishu.ts';
+import { createGatewaySeen, GATEWAY_NO_PASS } from './gateway-seen.ts';
 import { githubAppMissing, githubEventsCheck } from './github.ts';
 import { serviceHealthChecks } from './health.ts';
 import { judgeHealthCheck } from './judge-health.ts';
@@ -136,6 +137,8 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
   const stopDeployLagWatch = onFrance
     ? startDeployLagWatch({ db, read: () => readDeployLagInput(), now, log })
     : () => {};
+  // 飞书网关还来不来：飞书接口的门口记，/healthz 读的时候现算；没配通行证网关一律进不来，报「未接」
+  const gatewaySeen = createGatewaySeen(now);
   const deps: Deps = {
     config,
     store,
@@ -148,6 +151,7 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
     requirements: temporal.requirements,
     github: github.sink,
     draftOpener,
+    gatewaySeen,
     // 还没做的读取器：驾驶舱那一块整块显示「待实现」，不说成「没查成」。接上了就删掉这一项
     notWired: {
       quota: { what: '额度读数', phase: 'P3', issue: 76 },
@@ -162,6 +166,9 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
       // 和引擎读同一份位置（FLEET_JEV_CONFIG，默认 /etc/fleet-dao/jev.json）：引擎问得了、这里才报绿
       judge: judgeHealthCheck({ db, location: jevConfigLocation(process.env) }),
       deployLag,
+      feishuGateway: config.feishuGatewayToken
+        ? gatewaySeen
+        : { check: async () => {}, notWired: GATEWAY_NO_PASS },
     }),
   };
   return {
