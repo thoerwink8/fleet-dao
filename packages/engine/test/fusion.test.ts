@@ -860,6 +860,25 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
     expect(last && 'specDir' in last).toBe(false);
   });
 
+  it('【故意造出的失败】副手派不出、Lead 是 Grok：Lead 自己写，PR 正文写「Lead 单干」，不说成 Claude 单干', async () => {
+    // Lead 的模型（m1）这里是 grok 族：副手按 m2、m1 找，m2 没有路由、m1 和 Lead 同族要避开，一条都派不出
+    const grokLead: RouteChoice = {
+      routeId: 'g1',
+      poolId: 'pg',
+      modelId: 'm1',
+      family: 'grok',
+      hostId: 'grok',
+    };
+    const w = createFakeWorld({ routes: [grokLead, GPT_ROUTE] });
+    const result = await runToEnd(w);
+    expect(result.state).toBe('done');
+    expect(trail(w)).toEqual(['lead:plan', 'lead:takeover', 'verify', 'lead:review']);
+    const verified = w.callsOf('openPr')[0]?.input.body.verified.join('\n') ?? '';
+    expect(verified).toContain('这一块由 Lead 自己写：副手派不出（');
+    expect(verified).toContain('Lead 单干（0003 第 7 条）');
+    expect(verified).not.toContain('Claude');
+  });
+
   it('单模型模式：Lead 自己写、不派副手，不高风险就不验证，照样最终审查写结果', async () => {
     const w = createFakeWorld({ routes: [...FAKE_ROUTES] });
     const result = await runToEnd(w, fusionInput({ mode: 'single' }));
