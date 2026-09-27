@@ -1,11 +1,8 @@
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createGitHub } from '../src/github.ts';
 import { humanPart, type IssueProgress, parseBody, renderProgress, spliceProgress } from '../src/progress.ts';
 import { API } from './fake-github.ts';
-import { json, repo, setup } from './helpers.ts';
+import { json, repo, setup, tempDir } from './helpers.ts';
 
 /** 等条件成立（真时间，最多 ms 毫秒）；到点不成立就返回 false，由调用方决定算不算失败。 */
 async function settle(cond: () => boolean, ms = 2000): Promise<boolean> {
@@ -364,7 +361,7 @@ describe('关单', () => {
         now: clock.now,
         sleep: async (ms) => clock.advance(ms),
         env: {},
-        stateDir: mkdtempSync(join(tmpdir(), 'fleet-gh-state-')),
+        stateDir: tempDir('fleet-gh-state-'),
         leaseRenewMs: 5,
       });
     const a = worker(slowLookup);

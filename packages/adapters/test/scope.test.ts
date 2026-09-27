@@ -61,12 +61,14 @@ describe('scope 的参数与环境', () => {
     expect(() => scopePrefix(scope, 'relative/dir')).toThrow('绝对路径');
   });
 
-  it('环境拆两份：FLEET_* 这几类经 sudo 的环境，PATH 改名，执行体开关上命令行，HOME 这类不传', () => {
+  it('环境拆两份：FLEET_* 这几类经 sudo 的环境，PATH 改名，会话自己的 TMPDIR 和执行体开关上命令行，HOME、TEMP 这类不传', () => {
     const { sudoEnv, envArgs } = scopeLaunch({
       PATH: '/opt/fleet/bin:/usr/bin',
       HOME: '/home/fleet',
       USER: 'fleet',
-      TMPDIR: '/tmp/fleet',
+      TMPDIR: '/var/lib/fleet-work/_tmp/run-1',
+      TEMP: '/var/lib/fleet-work/_tmp/run-1',
+      TMP: '/var/lib/fleet-work/_tmp/run-1',
       LANG: 'C.UTF-8',
       LC_ALL: 'C.UTF-8',
       FLEET_API: 'http://127.0.0.1:8788',
@@ -82,7 +84,16 @@ describe('scope 的参数与环境', () => {
       FLEET_API: 'http://127.0.0.1:8788',
       FLEET_TOKEN: 'secret-token',
     });
-    expect(envArgs).toEqual(['GROK_DISABLE_AUTOUPDATER=1', 'BASH_DEFAULT_TIMEOUT_MS=600000']);
+    expect(envArgs).toEqual([
+      'TMPDIR=/var/lib/fleet-work/_tmp/run-1',
+      'GROK_DISABLE_AUTOUPDATER=1',
+      'BASH_DEFAULT_TIMEOUT_MS=600000',
+    ]);
+  });
+
+  it('【故意造出的失败】会话的 TMPDIR 不是绝对路径、带控制字符：明确拒，不写上命令行', () => {
+    expect(() => scopeLaunch({ TMPDIR: 'tmp/run-1' })).toThrow('绝对路径');
+    expect(() => scopeLaunch({ TMPDIR: '/var/lib/fleet-work/_tmp/run-1\n' })).toThrow('控制字符');
   });
 
   it('命令行上只放白名单里的执行体开关（sudo 记日志、/proc 别的用户读得到）：名字不像凭据的也拒', () => {
@@ -176,9 +187,10 @@ describe.skipIf(!onPosix)('经帮手起停（假帮手）', () => {
     sudo: [process.execPath],
   });
 
-  it('命令接在帮手后面、环境按规矩拆；会话看到的是帮手给的环境', async () => {
+  it('命令接在帮手后面、环境按规矩拆；会话看到的是帮手给的环境，TMPDIR 是会话自己的', async () => {
     const cwd = tempDir();
     const envOut = join(tempDir(), 'env.json');
+    const ownTmp = tempDir();
     const command = fakeAgent({ replay: fixturePath('claude-code', 'cc-haiku-read'), envTo: envOut });
     const spawned: SpawnInfo[] = [];
     const report = await runAgentProcess(
@@ -188,6 +200,7 @@ describe.skipIf(!onPosix)('经帮手起停（假帮手）', () => {
         env: {
           PATH: '/usr/bin:/bin',
           HOME: '/home/fleet',
+          TMPDIR: ownTmp,
           FLEET_FAKE_SCOPE_LOG: log,
           GROK_DISABLE_AUTOUPDATER: '1',
         },
@@ -210,6 +223,7 @@ describe.skipIf(!onPosix)('经帮手起停（假帮手）', () => {
       cwd,
       '--',
       '/usr/bin/env',
+      `TMPDIR=${ownTmp}`,
       'GROK_DISABLE_AUTOUPDATER=1',
       ...command,
     ]);
@@ -217,8 +231,11 @@ describe.skipIf(!onPosix)('经帮手起停（假帮手）', () => {
     expect(run?.env.FLEET_SESSION_PATH).toBe('/usr/bin:/bin');
     expect(run?.env.HOME).toBeUndefined();
     expect(run?.env.GROK_DISABLE_AUTOUPDATER).toBeUndefined();
+    // TMPDIR 不经 sudo 的环境传（sudo 的 env_keep、帮手都只放 FLEET_* 这几类，会擦掉它），会话看到的是命令行上给的那一个
+    expect(run?.env.TMPDIR).toBeUndefined();
     const seen = JSON.parse(readFileSync(envOut, 'utf8')) as Record<string, string>;
     expect(seen.GROK_DISABLE_AUTOUPDATER).toBe('1');
+    expect(seen.TMPDIR).toBe(ownTmp);
     expect(seen.HOME).toBe('/home/fake-session-user');
   });
 

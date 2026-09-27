@@ -1,11 +1,10 @@
 // 从镜像打包：真 git、本地裸仓当远端（不出网），和 push.test.ts / sync.test.ts 一样。
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, statSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { execGit, type GitRunner } from '../src/git.ts';
-import { repo, setup } from './helpers.ts';
+import { repo, setup, tempDir } from './helpers.ts';
 
 const ID = ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', '-c', 'commit.gpgsign=false'];
 
@@ -23,7 +22,7 @@ let remote: string;
 let mainHead: string;
 
 beforeAll(() => {
-  root = mkdtempSync(join(tmpdir(), 'fleet-gh-bundle-'));
+  root = tempDir('fleet-gh-bundle-');
   remote = join(root, 'remote.git');
   git(root, 'init', '-q', '--bare', '-b', 'main', remote);
   const seed = join(root, 'seed');
@@ -63,7 +62,7 @@ describe('从镜像打包', { timeout: 60_000 }, () => {
   });
 
   it('打包后镜像里不留导出引用（用完即删）', async () => {
-    const stateDir = mkdtempSync(join(tmpdir(), 'fleet-gh-state-'));
+    const stateDir = tempDir('fleet-gh-state-');
     const { gh } = setup({
       git: execGit,
       gitUrl: () => remote,
@@ -179,7 +178,7 @@ describe('从镜像打包', { timeout: 60_000 }, () => {
   });
 
   it('git bundle create 失败：报 GIT_FAILED，可重试，且失败后也不留导出引用', async () => {
-    const stateDir = mkdtempSync(join(tmpdir(), 'fleet-gh-state-'));
+    const stateDir = tempDir('fleet-gh-state-');
     const runner: GitRunner = async (args, call) =>
       args[0] === 'bundle' && args[1] === 'create'
         ? { code: 128, stdout: '', stderr: 'fatal: unable to write bundle: No space left on device' }

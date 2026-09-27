@@ -10,7 +10,7 @@
 // 并发上限：同一时刻最多 MAX_PAR 个 cursor-agent（design 第九节起步值 3；2026-09-26 五家齐跑 + 工人把进程数顶满、宿主崩过）。
 
 import { spawn } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -105,31 +105,48 @@ async function main() {
   // 每家都走本机的 cursor-agent：没装、没登录就一家都不问（不然每家都报同一个错，还得等超时）
   const problem = cursorAgentProblem();
   if (problem) throw new Error(problem);
-  const dir = join(tmpdir(), `ask-${process.pid}`);
-  mkdirSync(dir, { recursive: true });
-  const results = [];
-  const queue = [...keys];
-  await Promise.all(
-    Array.from({ length: Math.min(MAX_PAR, queue.length) }, async () => {
-      while (queue.length) {
-        const k = queue.shift();
-        results.push(await askOne(k, MODELS[k], prompt, o.limit, dir));
-      }
-    }),
-  );
-  results.sort((a, b) => keys.indexOf(a.key) - keys.indexOf(b.key));
-  const md = results
-    .map(
-      (r) => `## ${r.key}（${r.model}，${r.secs.toFixed(1)} 秒）\n\n${r.ok ? r.text : `没答上：${r.why}`}\n`,
-    )
-    .join('\n');
-  const outDir = o.out ?? join(dataDir(), 'runs');
-  mkdirSync(outDir, { recursive: true });
-  const outFile = join(outDir, `ask-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}.md`);
-  writeFileSync(outFile, md);
-  console.log(md);
-  console.error(outFile);
-  process.exitCode = results.some((r) => r.ok) ? 0 : 2;
+  // 题面放进自己建的临时目录（也是 cursor-agent 的工作区）：问完、中途出错都删掉，不在 /tmp 里越攒越多
+  const dir = mkdtempSync(join(tmpdir(), 'ask-'));
+  try {
+    const results = [];
+    const queue = [...keys];
+    await Promise.all(
+      Array.from({ length: Math.min(MAX_PAR, queue.length) }, async () => {
+        while (queue.length) {
+          const k = queue.shift();
+          results.push(await askOne(k, MODELS[k], prompt, o.limit, dir));
+        }
+      }),
+    );
+    results.sort((a, b) => keys.indexOf(a.key) - keys.indexOf(b.key));
+    const md = results
+      .map(
+        (r) =>
+          `## ${r.key}（${r.model}，${r.secs.toFixed(1)} 秒）\n\n${r.ok ? r.text : `没答上：${r.why}`}\n`,
+      )
+      .join('\n');
+    const outDir = o.out ?? join(dataDir(), 'runs');
+    mkdirSync(outDir, { recursive: true });
+    const outFile = join(outDir, `ask-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}.md`);
+    writeFileSync(outFile, md);
+    console.log(md);
+    console.error(outFile);
+    process.exitCode = results.some((r) => r.ok) ? 0 : 2;
+  } finally {
+    removeDir(dir);
+  }
+}
+
+/**
+ * 删自己建的临时目录。删不掉（Windows 上被还没退干净的 cursor-agent 占着之类）不改退出码——答案已经落了盘——
+ * 但照实说没删掉、是哪个目录，不当成删好了。rm 换成别的只为造「删不掉」测试。
+ */
+export function removeDir(dir, rm = rmSync) {
+  try {
+    rm(dir, { recursive: true, force: true, maxRetries: 3 });
+  } catch (e) {
+    console.error(`临时目录没删掉：${dir}：${e instanceof Error ? e.message : String(e)}`);
+  }
 }
 
 function isMain() {

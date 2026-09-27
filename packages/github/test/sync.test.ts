@@ -1,12 +1,11 @@
 // 并主线：用真 git、本地裸仓当远端（不出网）。GitHub 接口（默认分支、换令牌）走假服务，和 push.test.ts 一样。
 // 这里不需要会话打包：分支本来就已经在远端（对应一张开着的 PR），syncMainline 直接在镜像里 fetch/merge/push。
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { execGit, type GitRunner } from '../src/git.ts';
-import { repo, setup } from './helpers.ts';
+import { repo, setup, tempDir } from './helpers.ts';
 
 const ID = ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', '-c', 'commit.gpgsign=false'];
 
@@ -23,7 +22,7 @@ let root: string;
 let remote: string;
 
 beforeAll(() => {
-  root = mkdtempSync(join(tmpdir(), 'fleet-gh-sync-'));
+  root = tempDir('fleet-gh-sync-');
   remote = join(root, 'remote.git');
   git(root, 'init', '-q', '--bare', '-b', 'main', remote);
   const seed = join(root, 'seed');

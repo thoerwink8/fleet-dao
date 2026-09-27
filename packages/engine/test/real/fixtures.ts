@@ -4,7 +4,7 @@
 // （packages/adapters/test/fixtures/cursor-agent）逐行喂给真的读取器，事件、会话号、终帧用量都是真解析出来的。
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   type ClaudeCodeRunOptions,
@@ -21,7 +21,7 @@ import {
 } from '@fleet-dao/adapters';
 import { type Db, pools, repos, routes, savePoolQuota, seed, stagePolicyRoutes, tasks } from '@fleet-dao/db';
 import type { ProgressEvent, StageKind } from '@fleet-dao/shared';
-import { layout, type WorkTrees } from '../../src/real/worktrees.ts';
+import { layout, SESSION_TMP_DIR, type WorkTrees } from '../../src/real/worktrees.ts';
 
 export const NOW = new Date('2026-09-25T08:00:00.000Z');
 export const MIN = 60_000;
@@ -228,12 +228,23 @@ export function mirror(root: string) {
   };
 }
 
-/** 假的工作树管家：目录真建在临时目录里，属主记在表里；adopt 记下每一次。 */
+/**
+ * 假的工作树管家：目录真建在临时目录里，属主记在表里；adopt、remove 记下每一次。
+ * fail.remove 里的目录删不掉（抛错）、fail.list 为真时列不出会话临时目录：造「删不掉」「列不出来」用。
+ */
 export function fakeTrees(root: string) {
   const owners = new Map<string, SessionUser>();
   const adopts: { dir: string; user: SessionUser }[] = [];
+  const removes: string[] = [];
+  const fail = { remove: new Set<string>(), list: false };
+  const tmpBase = `${root}/${SESSION_TMP_DIR}`;
   const trees: WorkTrees = {
     ...layout(root),
+    async listTmp() {
+      if (fail.list) throw new Error('假的：列不出会话临时目录');
+      if (!existsSync(tmpBase)) return [];
+      return readdirSync(tmpBase).map((name) => `${tmpBase}/${name}`);
+    },
     async ownerOf(dir) {
       return owners.get(dir) ?? null;
     },
@@ -243,13 +254,17 @@ export function fakeTrees(root: string) {
       owners.set(dir, user);
     },
     async remove(dir) {
-      const gone = !owners.has(dir);
+      removes.push(dir);
+      if (fail.remove.has(dir)) throw new Error(`假的：删不掉 ${dir}`);
+      const gone = !owners.has(dir) && !existsSync(dir);
       owners.delete(dir);
       rmSync(dir, { recursive: true, force: true });
       return { gone };
     },
   };
-  return { trees, owners, adopts };
+  /** 工作树、检出副本的交接（会话临时目录的不算）。 */
+  const treeAdopts = () => adopts.filter((a) => !a.dir.startsWith(`${tmpBase}/`));
+  return { trees, owners, adopts, removes, fail, tmpBase, treeAdopts };
 }
 
 export interface FakeRunScript {
