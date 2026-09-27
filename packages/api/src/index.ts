@@ -54,6 +54,7 @@ export {
   githubIssuePlans,
   type IssueIntake,
   issuePlansUnavailable,
+  type PendingRestartReport,
   RetryLaterError,
 } from './issue-intake.ts';
 export { jsonLogger, silentLogger } from './log.ts';

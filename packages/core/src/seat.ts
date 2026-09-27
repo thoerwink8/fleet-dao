@@ -5,6 +5,8 @@
 //   同一个持有人续约照样续得上；现查、受保护动作按过期算「不是帅位」（fail closed），续约成了再动手。
 // - 读不到、认不出一律算「不是帅位」，不算「没事」。
 
+import type { TaskState } from '@fleet-dao/shared';
+
 /** 真帅位的座位；演练用 `drill:<名字>`，和它互不影响。 */
 export const MAIN_SEAT = 'main';
 
@@ -254,4 +256,29 @@ export function describeClaim(c: IssueClaim, dbNow: string): string {
   const ended = isActiveClaim(c.state) ? '' : `（${c.endReason ?? '没写原因'}）`;
   const late = claimExpired(c, dbNow) ? '，过了宽限期没心跳，下一轮作废' : '';
   return `${claimOwnerText(c)} ${claimStateText(c.state)}${ended}${note}（认领 ${c.claimId.slice(0, 8)}，上次心跳 ${ago}${prs}${late}）`;
+}
+
+// —— 引擎的认领 ——
+
+/**
+ * 待起的引擎认领过了几分钟还没改成在做，GitHub 对账（每 15 分钟）就照行里的工作流编号补起一次：起工作流没成的投递最多自动
+ * 重放 5 次，之后不再重放；交单时 Temporal 连不上也留着待起。
+ */
+export const ENGINE_PENDING_RESTART_MINUTES = 5;
+
+/**
+ * 任务到了结束状态，这张单上引擎的认领跟着结束（写快照的同一个事务里）：做完的记做完；叫停、没做成的记放下，本机能接着认领。
+ * 没结束的回 null：写快照时引擎的认领还在待起就改成在做（工作流在跑了）。
+ */
+export function engineClaimEnd(taskState: TaskState): { state: 'done' | 'released'; reason: string } | null {
+  if (taskState === 'done') return { state: 'done', reason: 'Fusion 做完了' };
+  if (taskState === 'stopped') return { state: 'released', reason: '任务叫停了' };
+  if (taskState === 'failed') return { state: 'released', reason: 'Fusion 没做成（任务 failed）' };
+  return null;
+}
+
+/** 引擎要拿这张单时别人拿着：给人看的一句（接活的投递说明、交单被拒的原因）。 */
+export function heldByOtherText(c: IssueClaim, dbNow: string): string {
+  const seat = c.seatScope ? `（${c.seatScope} 第 ${c.seatTerm} 任帅位认领的）` : '';
+  return `这张单${c.ownerKind === 'engine' ? '' : '本机'}认领着${seat}：${describeClaim(c, dbNow)}`;
 }

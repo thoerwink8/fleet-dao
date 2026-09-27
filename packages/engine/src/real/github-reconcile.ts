@@ -8,6 +8,7 @@ import { readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import {
   createGitHubIntake,
+  createIssueIntake,
   createPgStore,
   createTemporalRequirementWorkflows,
   createTemporalWorkflowControl,
@@ -139,20 +140,22 @@ export function githubReconcileJob(
   const flow = flowConfigJob(w, log, now);
   const asks = askIssueJob(w, log, now);
   return (client, taskQueue) => {
-    const intake = createGitHubIntake({
+    const intakeDeps = {
       store,
-      github,
       workflows: createTemporalWorkflowControl(client),
       requirements: w.requirements ?? createTemporalRequirementWorkflows(client, taskQueue),
       // 只派当前版本的独立单：挂在哪、当前版本是哪个、是不是母单子单，拉起前经「引擎」机器人现读（和后端 webhook 那条同一份判法）
       plans: githubIssuePlans(w.gh),
       log,
       now,
-    });
+    };
+    const intake = createGitHubIntake({ ...intakeDeps, github });
+    // 补起待起的认领（#299）：和接活同一套依赖、同一个拉起实现
+    const claims = createIssueIntake(intakeDeps);
     const reconciler = w.gh.reconciler(reconcilerOptions({ store, intake }));
     return {
       syncFlowConfigs: () => syncFlowConfigs(flow),
-      reconcile: (options) => reconcileGitHub({ store, intake, reconciler, log, now }, options),
+      reconcile: (options) => reconcileGitHub({ store, intake, claims, reconciler, log, now }, options),
       askIssues: () => openAskIssues(asks),
       runs: {
         start: (job, at) => startScheduleRun(w.db, job, at),

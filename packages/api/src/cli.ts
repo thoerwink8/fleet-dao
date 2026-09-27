@@ -6,11 +6,13 @@
 //   dispatch <owner/仓名> on|off|status
 // 「让 AI 接活」开关（repos.auto_dispatch_since）：驾驶舱的开关页面（#131）之前的唯一入口，之后留作运维的后备。
 // 写入口和页面同一个（Store.setAutoDispatch）；改了记一条操作记录，改完从库里读回开关和那条记录再打印。
-//   handover <owner/仓名> <issue 号> --reason "<谁说的、为什么>"
+//   handover <owner/仓名> <issue 号> --reason "<谁说的、为什么>" [--machine … --session … --term … | --founder "<创始人原话>"]
 // 交给 fleet：人明说把一张自动派管不到的单（开关打开以前就开着的、别的版本的、未排期的、母单和子单、贴了「本机做」的）交给引擎，起 Fusion 工作流。
 // 开关关着、这个项目停派、GitHub 上关着一律拒；在跑的不重复起，结束了的只有 GitHub 上重开过才再起一轮（判法在
 // @fleet-dao/core 的 dispatch.ts）。要读 GitHub（「引擎」机器人看这张单此刻开没开着、挂在哪个版本）、连 Temporal（起工作流），
 // 都按同一份 api.env。没被拒的（起了、没起成、本来就在跑）都记一条操作记录 task.handover，从库里读回再打印。
+// 交单要和本机抢这张单的认领（#299）：本机认领着的拒（退出码 3），带创始人原话（--founder）才改派给引擎；帅位上线后（库里有
+// main 座位）交单是受保护动作，帅位带着任期来（--machine、--session、--term，同一个事务里核），运维手敲的带 --founder。
 // 驾驶舱的「交给 fleet」按钮随界面单 #282 做，调同一套判法。
 //   seat …、claim …（#299 帅位只一个）：帅位接班、续约、现查、看现状、交接，帅位认领单、工人报进度和结束、作废过了宽限期的认领。
 // 本机经 ssh 调，写法和退出码见 seat-cli.ts（多一个 3：不是你的——不是帅位、别人拿着、认领号对不上）。
@@ -18,21 +20,37 @@
 // 退出码（几条命令一样）：0 做成了（或本来就是）；1 没做成（被拒、库里没有、连不上库、读回来不对，一句话说原因）；2 参数不对或没带上库连接。
 import { userInfo } from 'node:os';
 import { createInterface } from 'node:readline';
-import { familyGate, handoverDecision, localGate, replicaVerdict, versionGate } from '@fleet-dao/core';
+import {
+  claimOwnerText,
+  familyGate,
+  handoverDecision,
+  heldByOtherText,
+  holderText,
+  localGate,
+  MAIN_SEAT,
+  machineProblem,
+  replicaVerdict,
+  seatScopeProblem,
+  sessionProblem,
+  versionGate,
+} from '@fleet-dao/core';
 import { requirementWorkflowId } from '@fleet-dao/shared';
 import { temporalSettings } from './config.ts';
 import { checkNewPassword, checkUsername, hashPassword } from './password.ts';
 import type {
   AuditRecord,
   AutoDispatchChange,
+  EngineClaimResult,
   IntakeRepo,
   IssuePlan,
   IssuePlanReader,
   RequirementWorkflows,
+  SeatActor,
   Store,
   User,
 } from './ports.ts';
 import { CLAIM_USAGE, runClaim, runSeat, SEAT_USAGE, SeatCliError } from './seat-cli.ts';
+import { seatActor } from './seat-store.ts';
 import { isCockpitUser } from './session.ts';
 
 export class CliError extends Error {
@@ -420,7 +438,7 @@ export function operatorName(env: CliEnv): string {
 // —— handover：交给 fleet ——
 
 const HANDOVER_USAGE =
-  '用法：fleet-api handover <owner/仓名> <issue 号> --reason "<谁说的、为什么>"（把开关打开以前开的、别的版本的、未排期的、母单和子单、贴了「本机做」的交给引擎，起 Fusion 工作流）';
+  '用法：fleet-api handover <owner/仓名> <issue 号> --reason "<谁说的、为什么>" [--machine <机器名> --session <会话号> --term <任期> [--scope main] | --founder "<创始人原话>"]（把开关打开以前开的、别的版本的、未排期的、母单和子单、贴了「本机做」的交给引擎，起 Fusion 工作流。帅位上线后交单是受保护动作：帅位带着任期来，运维手敲的带创始人原话；本机认领着的单要带创始人原话才改派给引擎）';
 
 export interface HandoverArgs {
   owner: string;
@@ -428,6 +446,10 @@ export interface HandoverArgs {
   issueNumber: number;
   /** 谁说的、为什么交：原样写进操作记录。 */
   reason: string;
+  /** 帅位交单（#299）：带着座位和任期来，和认领同一个事务里核。 */
+  seat?: SeatActor;
+  /** 创始人原话（#299）：运维手敲、不带任期时要它；本机认领着的单要它才能改派给引擎。 */
+  founder?: string;
 }
 
 /** 操作记录里「交给 fleet」这件事的名字；target 是 task:<任务编号>。 */
@@ -436,27 +458,39 @@ export const TASK_HANDOVER = 'task.handover';
 /** 和 dispatch 一样记成引擎那一类，reason 写明谁跑的、谁说的为什么。 */
 const OPS_HANDOVER = { kind: 'engine', id: 'ops:handover' } as const;
 
-/** --reason 最长几个字：操作记录里的一句话，不是一篇文档。 */
+/** --reason、--founder 最长几个字：操作记录里的一句话，不是一篇文档。 */
 const MAX_HANDOVER_REASON = 500;
 
-/** 仓、issue 号两个位置参数，外加必带的 --reason（也认 --reason=…）。认不出的一律拒（退出码 2），不猜。 */
+const HANDOVER_OPTIONS = ['reason', 'machine', 'session', 'term', 'scope', 'founder'] as const;
+type HandoverOption = (typeof HANDOVER_OPTIONS)[number];
+
+/**
+ * 仓、issue 号两个位置参数，外加必带的 --reason（也认 --reason=…）；帅位交单带 --machine、--session、--term（三样一起给，
+ * --scope 不给是 main），运维手敲的带 --founder。认不出的一律拒（退出码 2），不猜。
+ */
 export function parseHandoverArgs(argv: readonly string[]): HandoverArgs {
   const positional: string[] = [];
-  let reason: string | undefined;
+  const options = new Map<HandoverOption, string>();
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i] ?? '';
-    if (arg === '--reason') {
-      const value = argv[++i];
-      if (value === undefined || value.startsWith('--'))
-        throw new CliError(`--reason 后面要跟一句话：谁说的、为什么交。${HANDOVER_USAGE}`, 2);
-      reason = value;
-    } else if (arg.startsWith('--reason=')) {
-      reason = arg.slice('--reason='.length);
-    } else if (arg.startsWith('-')) {
-      throw new CliError(`认不出参数 ${arg.split('=')[0]}。${HANDOVER_USAGE}`, 2);
-    } else {
+    if (!arg.startsWith('-')) {
       positional.push(arg);
+      continue;
     }
+    const eq = arg.indexOf('=');
+    const name = arg.startsWith('--') ? arg.slice(2, eq < 0 ? undefined : eq) : '';
+    const known = HANDOVER_OPTIONS.find((o) => o === name);
+    if (!known) throw new CliError(`认不出参数 ${arg.split('=')[0]}。${HANDOVER_USAGE}`, 2);
+    const value = eq >= 0 ? arg.slice(eq + 1) : argv[++i];
+    if (value === undefined || (eq < 0 && value.startsWith('--')))
+      throw new CliError(
+        known === 'reason'
+          ? `--reason 后面要跟一句话：谁说的、为什么交。${HANDOVER_USAGE}`
+          : `--${known} 后面要跟值。${HANDOVER_USAGE}`,
+        2,
+      );
+    if (options.has(known)) throw new CliError(`--${known} 给了两次。${HANDOVER_USAGE}`, 2);
+    options.set(known, value);
   }
   if (positional.length !== 2) throw new CliError(`要两个参数：仓和 issue 号。${HANDOVER_USAGE}`, 2);
   const [repo = '', num = ''] = positional;
@@ -466,11 +500,36 @@ export function parseHandoverArgs(argv: readonly string[]): HandoverArgs {
   const issueNumber = digits === undefined ? 0 : Number(digits);
   if (issueNumber <= 0)
     throw new CliError(`认不出 issue 号「${num}」：要写成正整数（比如 214）。${HANDOVER_USAGE}`, 2);
-  const why = reason?.trim() ?? '';
+  const text = (key: 'reason' | 'founder', what: string) => {
+    const v = options.get(key)?.trim() ?? '';
+    if ([...v].length > MAX_HANDOVER_REASON)
+      throw new CliError(`--${key} 太长（最多 ${MAX_HANDOVER_REASON} 个字）：写一句${what}就行`, 2);
+    return v;
+  };
+  const why = text('reason', '谁说的、为什么');
   if (!why) throw new CliError(`要带 --reason：谁说的、为什么交（写进操作记录）。${HANDOVER_USAGE}`, 2);
-  if ([...why].length > MAX_HANDOVER_REASON)
-    throw new CliError(`--reason 太长（最多 ${MAX_HANDOVER_REASON} 个字）：写一句谁说的、为什么就行`, 2);
-  return { owner: m[1], name: m[2], issueNumber, reason: why };
+  const args: HandoverArgs = { owner: m[1], name: m[2], issueNumber, reason: why };
+  if (options.has('founder')) {
+    const founder = text('founder', '创始人的原话');
+    if (!founder) throw new CliError(`--founder 要写创始人的原话，不能是空的。${HANDOVER_USAGE}`, 2);
+    args.founder = founder;
+  }
+  const seatKeys = (['machine', 'session', 'term'] as const).filter((k) => options.has(k));
+  if (seatKeys.length > 0 || options.has('scope')) {
+    if (seatKeys.length !== 3)
+      throw new CliError(`帅位交单要 --machine、--session、--term 三样一起给。${HANDOVER_USAGE}`, 2);
+    const machine = options.get('machine')?.trim() ?? '';
+    const session = options.get('session')?.trim() ?? '';
+    const scope = options.get('scope')?.trim() || MAIN_SEAT;
+    const bad = machineProblem(machine) ?? sessionProblem(session) ?? seatScopeProblem(scope);
+    if (bad) throw new CliError(`${bad}。${HANDOVER_USAGE}`, 2);
+    const termDigits = /^(\d{1,9})$/.exec(options.get('term')?.trim() ?? '')?.[1];
+    const term = termDigits === undefined ? 0 : Number(termDigits);
+    if (term <= 0)
+      throw new CliError(`认不出任期「${options.get('term')}」：要写成正整数。${HANDOVER_USAGE}`, 2);
+    args.seat = { machine, session, scope, term };
+  }
+  return args;
 }
 
 /** 连 Temporal 的一份：起工作流、用完关掉。 */
@@ -551,6 +610,44 @@ export async function handover(input: {
 
   const restart = decision.act === 'restart';
   const workflowId = requirementWorkflowId(repo, args.issueNumber);
+  const who = args.seat
+    ? `（帅位 ${args.seat.machine}/${args.seat.session}，${args.seat.scope} 第 ${args.seat.term} 任）`
+    : args.founder
+      ? `（创始人原话：${args.founder}）`
+      : '';
+  // 认领（#299，方案第四节）：交单也和本机（帅位、工人）抢库里同一行。帅位上线后（库里有 main 这个座位）交单是受保护动作：
+  // 帅位带着任期来、和认领同一个事务里核；运维手敲的带创始人原话。帅位还没人接过时照旧不核（上线过渡）
+  let claimed: Extract<EngineClaimResult, { ok: true }> | undefined;
+  if (decision.act !== 'noop') {
+    if (!args.seat && !args.founder) {
+      const seat = await dbStep(no, () => store.readSeat(MAIN_SEAT));
+      if (seat.lease)
+        throw new CliError(
+          `${no}帅位已经上线（现在是 ${holderText(seat.lease)}，第 ${seat.lease.term} 任）：交单要带着任期（--machine … --session … --term …），运维手敲的带创始人原话（--founder "…"）`,
+        );
+    }
+    const r = await dbStep(no, () =>
+      store.claimForEngine({
+        repoId: repo.id,
+        issueNumber: args.issueNumber,
+        workflowId,
+        actor: args.seat ? seatActor(args.seat) : OPS_HANDOVER,
+        seat: args.seat,
+        founder: args.founder,
+        note: `交给 fleet${who}：${args.reason}`,
+      }),
+    );
+    if (!r.ok) {
+      if (r.reason === 'held')
+        throw new CliError(
+          `${no}${label}（${place}）${heldByOtherText(r.claim, r.now)}。要改派给引擎，带上创始人原话 --founder "…"：本机那份认领当场作废`,
+          3,
+        );
+      if (r.reason === 'not_seat') throw new CliError(`${no}不是帅位：${r.why}`, 3);
+      throw new CliError(`${no}${r.why}`);
+    }
+    claimed = r;
+  }
   let started: 'started' | 'already_running' | undefined;
   let failure: string | undefined;
   if (decision.act !== 'noop') {
@@ -579,6 +676,34 @@ export async function handover(input: {
     if (restart && started === 'already_running')
       failure = '上一轮工作流还没收完尾，这次没起：等它结束了再交一次';
   }
+  // 认领跟着起没起成走：起了（或本来就在跑）改在做；这次新认领的没起成就放下（这次什么都没派，本机能接着认领）。
+  // 这两步只是收尾：没写上照样往下记操作记录，写明没写上（起了的工作流写第一份快照时也会把认领改成在做）
+  const claimNotes: string[] = [];
+  if (claimed) {
+    const target = { repoId: repo.id, issueNumber: args.issueNumber };
+    const id = claimed.claim.claimId.slice(0, 8);
+    try {
+      if (!failure) {
+        await store.startEngineClaim(target);
+        claimNotes.push(`归引擎（认领 ${id}）`);
+      } else if (claimed.fresh) {
+        await store.releasePendingEngineClaim({
+          ...target,
+          claimId: claimed.claim.claimId,
+          reason: `交单时${failure}`,
+          actor: args.seat ? seatActor(args.seat) : OPS_HANDOVER,
+        });
+        claimNotes.push(`这次新认领的（认领 ${id}）已放下`);
+      }
+    } catch (err) {
+      claimNotes.push(`认领 ${id} 没改成（${errText(err)}）`);
+    }
+    const v = claimed.voided;
+    if (v)
+      claimNotes.push(
+        `作废了本机的认领（原来归 ${claimOwnerText(v)}，认领 ${v.claimId.slice(0, 8)}${v.prNumbers.length > 0 ? `，开过的 PR ${v.prNumbers.map((n) => `#${n}`).join('、')} 要手动撤自动合并、关掉` : ''}）`,
+      );
+  }
   const outcome =
     decision.act === 'noop'
       ? 'in_progress'
@@ -590,7 +715,9 @@ export async function handover(input: {
 
   // 真交了的都记（谁跑的、谁说的为什么、挂在哪个版本、上一轮什么状态、起没起成）；记完从库里读回
   const target = `task:${task.id}`;
-  const note = `服务器上 ${input.operator} 跑的 fleet-api handover ${slug} ${args.issueNumber}：${args.reason}`;
+  const note = `服务器上 ${input.operator} 跑的 fleet-api handover ${slug} ${args.issueNumber}${who}：${args.reason}`;
+  // 认领另起一行（在操作记录那行前面）
+  const claimLine = claimNotes.length > 0 ? `\n认领：${claimNotes.join('；')}` : '';
   const done =
     decision.act === 'noop'
       ? `没起：${label}（${place}）${decision.why}`
@@ -615,6 +742,13 @@ export async function handover(input: {
           parent: issue.parent,
           subIssues: issue.subIssues,
           place,
+          claim: claimed
+            ? {
+                claimId: claimed.claim.claimId,
+                fresh: claimed.fresh,
+                voided: claimed.voided?.claimId ?? null,
+              }
+            : null,
         },
         reason: note,
         via: 'engine',
@@ -628,8 +762,8 @@ export async function handover(input: {
   const entry = page.items.find((a) => a.id === auditId);
   if (!entry) throw new CliError(`${done}（操作记录 ${auditId}），但读回时库里找不到这条操作记录`);
   const record = `操作记录 ${entry.id}：${entry.at} ${entry.reason ?? note}`;
-  if (outcome === 'failed') throw new CliError(`${done}\n${record}`);
-  return `${done}\n${record}`;
+  if (outcome === 'failed') throw new CliError(`${done}${claimLine}\n${record}`);
+  return `${done}${claimLine}\n${record}`;
 }
 
 // —— 入口 ——

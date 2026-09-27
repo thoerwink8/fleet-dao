@@ -45,7 +45,10 @@ const makeSeat: MakeSeatStore = async (data, clock) => {
     async backdateClaim(repoId, issueNumber, minutes) {
       await t.db
         .update(issueClaims)
-        .set({ heartbeatAt: sql`${issueClaims.heartbeatAt} - make_interval(mins => ${minutes})` })
+        .set({
+          heartbeatAt: sql`${issueClaims.heartbeatAt} - make_interval(mins => ${minutes})`,
+          updatedAt: sql`${issueClaims.updatedAt} - make_interval(mins => ${minutes})`,
+        })
         .where(and(eq(issueClaims.repoId, repoId), eq(issueClaims.issueNumber, issueNumber)));
     },
   };

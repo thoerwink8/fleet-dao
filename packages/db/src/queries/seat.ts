@@ -4,9 +4,11 @@
 // - 时间一律用库的 now()（事务开始的时刻）：心跳、续约写它，读回时把它一起交出去（毫秒数），判过期用它，不用调用方的钟。
 // - 接班、抢认领都是一条语句（insert … on conflict … returning）：两边同时来只有一边拿到，不靠先读后写。
 // - 受保护动作在同一个事务里先 lockSeat（for share）再写：接班那条要等这个事务提交才能改座位，动作就排在接班之前。
+import { randomUUID } from 'node:crypto';
+import { requirementWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { and, eq, getTableColumns, inArray, lt, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
-import { issueClaims, seatLeases, settings } from '../schema/index.ts';
+import { auditLog, issueClaims, repos, seatLeases, settings, tasks } from '../schema/index.ts';
 
 export type SeatLeaseRow = typeof seatLeases.$inferSelect;
 export type IssueClaimRow = typeof issueClaims.$inferSelect;
@@ -159,7 +161,8 @@ export interface NewClaimRow {
   ownerLabel: string | null;
   seatScope: string | null;
   seatTerm: number | null;
-  state: 'pending_start' | 'claimed';
+  /** 引擎新认领是待起（交单、接活），写快照时补的是在做；本机的是认领了。 */
+  state: 'pending_start' | 'claimed' | 'doing';
   workflowId: string | null;
   graceMinutes: number;
   note: string | null;
@@ -359,4 +362,125 @@ export async function listClaimRows(
     .where(where)
     .orderBy(issueClaims.repoId, issueClaims.issueNumber);
   return { value: rows, now: await readDbNow(db) };
+}
+
+// —— 引擎的认领 ——
+
+/** 引擎的认领在操作记录里记在这个名下：和 @fleet-dao/api 的 seat-store.ts 里引擎那一份是同一个。 */
+const ENGINE_CLAIM_ACTOR = 'fusion';
+
+/** 引擎的认领起成了工作流：待起 → 在做。只改引擎自己的、还在待起的；不是就回 null（调用方再读现在是什么样）。 */
+export async function startEngineClaimRow(
+  db: Db,
+  input: { repoId: string; issueNumber: number },
+): Promise<WithNow<IssueClaimRow> | null> {
+  const [row] = await db
+    .update(issueClaims)
+    .set({ state: 'doing', heartbeatAt: sql`now()`, updatedAt: sql`now()` })
+    .where(
+      and(
+        eq(issueClaims.repoId, input.repoId),
+        eq(issueClaims.issueNumber, input.issueNumber),
+        eq(issueClaims.ownerKind, 'engine'),
+        eq(issueClaims.state, 'pending_start'),
+      ),
+    )
+    .returning({ ...getTableColumns(issueClaims), now: nowMs });
+  if (!row) return null;
+  const { now, ...claim } = row;
+  return { value: claim, now: toDate(now) };
+}
+
+/**
+ * 待起超过 minutes 分钟还没改成在做的引擎认领（按库的 now），老的在前，最多 limit 张：GitHub 对账照行里的工作流编号补起。
+ * 演练座位下的不算（演练里引擎那一边只抢认领、不起工作流）。
+ */
+export async function listStalePendingEngineClaimRows(
+  db: Db,
+  input: { minutes: number; limit: number },
+): Promise<WithNow<IssueClaimRow[]>> {
+  const rows = await db
+    .select({ ...getTableColumns(issueClaims) })
+    .from(issueClaims)
+    .where(
+      and(
+        eq(issueClaims.ownerKind, 'engine'),
+        eq(issueClaims.state, 'pending_start'),
+        lt(issueClaims.updatedAt, sql`now() - make_interval(mins => ${input.minutes})`),
+        sql`(${issueClaims.seatScope} is null or ${issueClaims.seatScope} not like 'drill:%')`,
+      ),
+    )
+    .orderBy(issueClaims.updatedAt)
+    .limit(input.limit);
+  return { value: rows, now: await readDbNow(db) };
+}
+
+/**
+ * 写任务快照的同一个事务里，这张单上引擎的认领跟着任务走。end 给了（任务结束了）：还活着的引擎认领结束掉、记一条操作记录
+ * （claim.done / claim.release）。没给（工作流在跑）：还在待起的改成在做；这张单一份还活着的认领都没有（认领上线前起的任务、
+ * 交单时起工作流超时其实起成了），补一份引擎的（在做）、记 claim.take——引擎在做的单库里就归引擎，本机抢不走。
+ * 本机的认领一概不碰（本机拿着时补不上，照旧归本机）。回改了、补了的那一行（没动是 null）。
+ */
+export async function followTaskOnEngineClaim(
+  tx: Db,
+  input: { taskId: string; end: { state: 'done' | 'released'; reason: string } | null },
+): Promise<IssueClaimRow | null> {
+  const ofTask = sql`(${issueClaims.repoId}, ${issueClaims.issueNumber}) = (select ${tasks.repoId}, ${tasks.issueNumber} from ${tasks} where ${tasks.id} = ${input.taskId})`;
+  const audit = (row: IssueClaimRow, action: string, reason: string) =>
+    tx.insert(auditLog).values({
+      actorKind: 'engine',
+      actorId: ENGINE_CLAIM_ACTOR,
+      action,
+      target: `claim:${row.repoId}#${row.issueNumber}`,
+      after: { claimId: row.claimId, owner: 'engine', state: row.state },
+      reason,
+      via: 'engine',
+    });
+  const end = input.end;
+  if (end) {
+    const [row] = await tx
+      .update(issueClaims)
+      .set({ state: end.state, endedAt: sql`now()`, updatedAt: sql`now()`, endReason: end.reason })
+      .where(
+        and(
+          ofTask,
+          eq(issueClaims.ownerKind, 'engine'),
+          inArray(issueClaims.state, [...ACTIVE_CLAIM_STATE_ROWS]),
+        ),
+      )
+      .returning();
+    if (!row) return null;
+    await audit(row, end.state === 'done' ? 'claim.done' : 'claim.release', end.reason);
+    return row;
+  }
+  const [started] = await tx
+    .update(issueClaims)
+    .set({ state: 'doing', heartbeatAt: sql`now()`, updatedAt: sql`now()` })
+    .where(and(ofTask, eq(issueClaims.ownerKind, 'engine'), eq(issueClaims.state, 'pending_start')))
+    .returning();
+  if (started) return started;
+  const [task] = await tx
+    .select({ repoId: tasks.repoId, issueNumber: tasks.issueNumber, owner: repos.owner, name: repos.name })
+    .from(tasks)
+    .innerJoin(repos, eq(repos.id, tasks.repoId))
+    .where(eq(tasks.id, input.taskId));
+  if (!task) return null;
+  const adopted = await takeClaimRow(tx, {
+    repoId: task.repoId,
+    issueNumber: task.issueNumber,
+    claimId: randomUUID(),
+    ownerKind: 'engine',
+    ownerMachine: null,
+    ownerLabel: null,
+    seatScope: null,
+    seatTerm: null,
+    state: 'doing',
+    workflowId: requirementWorkflowId({ owner: task.owner, name: task.name }, task.issueNumber),
+    // 引擎的认领不按心跳作废，这一格用不上：填默认（和 core 的 SEAT_DEFAULTS.claimGraceMinutes 同一个数）
+    graceMinutes: 120,
+    note: '引擎在做这张单，库里却没有还活着的认领：写快照时补上',
+  });
+  if (!adopted) return null;
+  await audit(adopted.value, 'claim.take', '引擎在做这张单，库里却没有还活着的认领：写快照时补上');
+  return adopted.value;
 }

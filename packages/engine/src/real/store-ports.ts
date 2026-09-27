@@ -10,7 +10,7 @@
 // 全熔断判不判得了另有 stageAllOpen：和选路同一份事实、同一套熔断判定，不写库、不报警（每小时对账用来撤
 // routing:all-open）。组织还没读完、库读失败照抛，不返回「解了」。
 
-import type { TaskAsk } from '@fleet-dao/core';
+import { engineClaimEnd, type TaskAsk } from '@fleet-dao/core';
 import {
   authorFamiliesOfTask,
   type Db,
@@ -666,6 +666,8 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         lastProblem: input.lastProblem,
         ...(input.flowSource !== undefined ? { flowSource: input.flowSource } : {}),
         subtasks: input.subtasks,
+        // 这张单上引擎的认领跟着任务走（#299）：结束了跟着结束，在跑的待起改成在做
+        claimEnd: engineClaimEnd(input.state),
       });
       if (r === 'task_not_found') {
         throw new PortError('TASK_NOT_FOUND', `任务 ${input.taskId} 在库里没有，写不了快照`, {
