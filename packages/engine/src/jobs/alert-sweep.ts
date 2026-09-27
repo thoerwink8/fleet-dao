@@ -73,7 +73,7 @@ export interface AlertSweepDeps {
   stageRoutable(stage: StageKind, taskId: string | null): Promise<RouteCheck>;
   /**
    * 这个阶段现在是不是全熔断（store-ports 的 stageAllOpen：不写库、不报警）。读不了照抛。
-   * 真装配一定会给。不给就当没查成（不撤）：不把它定成必填，是为了不逼每小时对账的外壳测试改装配。
+   * 真装配（real/hourly-reconcile.ts）一定接上；可选只是让只测别的部分的装配不用带它。没接上的当没查成记下、不撤。
    */
   stageAllOpen?(stage: StageKind): Promise<AllOpenCheck>;
   alerts: AlertStore;
