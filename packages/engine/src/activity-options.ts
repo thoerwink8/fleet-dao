@@ -4,6 +4,7 @@
 import type { Repo } from '@fleet-dao/shared';
 import type { ActivityOptions, RetryPolicy } from '@temporalio/common';
 import type {
+  CanaryInput,
   GitHubReconcileInput,
   GitHubReconcileRun,
   HourlyReconcileInput,
@@ -12,6 +13,7 @@ import type {
   RouteProbeInput,
   RouteProbeRun,
 } from './contract.ts';
+import type { CanaryState, CanaryStepResult } from './jobs/canary.ts';
 import type { Limits } from './limits.ts';
 import type { EnginePorts, StartSessionInput, StartSessionResult } from './ports.ts';
 
@@ -42,6 +44,13 @@ export type EngineActivities = PortActivities & {
   probeRoutes(input: RouteProbeInput): Promise<RouteProbeRun>;
   /** 引擎自己的活动：每小时对账跑一轮（工作树残留、提醒按条件撤和再推），结局记进 schedule_runs（jobs/hourly-reconcile.ts）。 */
   reconcileHourly(input: HourlyReconcileInput): Promise<HourlyReconcileRun>;
+  /** 引擎自己的活动：全流程巡检开一张单（jobs/canary.ts 的 openCanaryRound）；没跑成的已经记进库，回的是结论。 */
+  canaryOpen(input: CanaryInput): Promise<CanaryStepResult>;
+  /**
+   * 引擎自己的活动：全流程巡检看一回、判、记（jobs/canary.ts 的 checkCanaryRound）。状态包在 state 里：活动的计时按输入最外层的
+   * taskId 记到任务上，巡检自己看的这几下不能记成巡检单的每步耗时（那是记账那一步要核的）。
+   */
+  canaryCheck(input: { schemaVersion: 1; state: CanaryState }): Promise<CanaryStepResult>;
 };
 
 export type ActivityName = keyof EngineActivities;
@@ -89,6 +98,8 @@ export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
   reconcileGitHub: 'job',
   probeRoutes: 'job',
   reconcileHourly: 'job',
+  canaryOpen: 'job',
+  canaryCheck: 'job',
 };
 
 /** quick 一档（含排进合并队列、撤出）一次尝试的限时。合并队列的空闲收工时长不能比它短（limits.ts 的下限）。 */

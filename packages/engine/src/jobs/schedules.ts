@@ -10,11 +10,18 @@ import {
 } from '@temporalio/client';
 import type { Workflow } from '@temporalio/common';
 import {
+  type CanaryInput,
   type GitHubReconcileInput,
   type HourlyReconcileInput,
   type RouteProbeInput,
   WORKFLOW_TYPES,
 } from '../contract.ts';
+import {
+  CANARY_EVERY_HOURS,
+  CANARY_JOB,
+  CANARY_OFFSET_MINUTES,
+  CANARY_RUN_TIMEOUT_MINUTES,
+} from './canary.ts';
 import { GITHUB_RECONCILE_EVERY_MINUTES, GITHUB_RECONCILE_JOB } from './github-reconcile.ts';
 import {
   HOURLY_RECONCILE_EVERY_MINUTES,
@@ -26,6 +33,7 @@ import { ROUTE_PROBE_EVERY_MINUTES, ROUTE_PROBE_JOB, ROUTE_PROBE_OFFSET_MINUTES 
 export const GITHUB_RECONCILE_SCHEDULE_ID = GITHUB_RECONCILE_JOB.id;
 export const ROUTE_PROBE_SCHEDULE_ID = ROUTE_PROBE_JOB.id;
 export const HOURLY_RECONCILE_SCHEDULE_ID = HOURLY_RECONCILE_JOB.id;
+export const CANARY_SCHEDULE_ID = CANARY_JOB.id;
 
 interface EngineSchedule {
   scheduleId: string;
@@ -39,6 +47,7 @@ export function engineSchedules(taskQueue: string): EngineSchedule[] {
   const input: GitHubReconcileInput = { schemaVersion: 1 };
   const probeInput: RouteProbeInput = { schemaVersion: 1 };
   const hourlyInput: HourlyReconcileInput = { schemaVersion: 1 };
+  const canaryInput: CanaryInput = { schemaVersion: 1 };
   return [
     {
       scheduleId: GITHUB_RECONCILE_SCHEDULE_ID,
@@ -112,6 +121,29 @@ export function engineSchedules(taskQueue: string): EngineSchedule[] {
         overlap: ScheduleOverlapPolicy.SKIP,
         // Temporal 停了一阵再起来：只补最近一轮（每轮都是看当时的目录和库，补旧的没意义）
         catchupWindow: `${HOURLY_RECONCILE_EVERY_MINUTES} minutes`,
+        pauseOnFailure: false,
+      },
+    },
+    {
+      // 全流程巡检（#223）：每 6 小时开一张巡检单，一路看到有结论（一轮最长 5 小时）；和别的定时任务错开
+      scheduleId: CANARY_SCHEDULE_ID,
+      spec: {
+        intervals: [{ every: `${CANARY_EVERY_HOURS} hours`, offset: `${CANARY_OFFSET_MINUTES} minutes` }],
+      },
+      action: {
+        type: 'startWorkflow',
+        workflowType: WORKFLOW_TYPES.canary,
+        workflowId: CANARY_SCHEDULE_ID,
+        taskQueue,
+        args: [canaryInput],
+        // 一轮自己到 5 小时就判断在当时那一步；再多给半小时（开单、没查成的几回），卡死的不拖到下一轮
+        workflowRunTimeout: `${CANARY_RUN_TIMEOUT_MINUTES} minutes`,
+      },
+      policies: {
+        // 上一轮还没完就跳过：两轮叠着跑，巡检仓里会同时有两张巡检单抢同一个文件
+        overlap: ScheduleOverlapPolicy.SKIP,
+        // Temporal 停了一阵再起来：错过的那一轮一小时内补上，再久就等下一轮
+        catchupWindow: '1 hour',
         pauseOnFailure: false,
       },
     },

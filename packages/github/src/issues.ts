@@ -1,4 +1,4 @@
-// issue：进度段原地更新、关单、开单、发评论（都用「引擎」机器人）。
+// issue：进度段原地更新、关单、开单、发评论、挂里程碑（都用「引擎」机器人）。
 // 进度段：只动标记之间的那一段，人写的部分原样保留；同一张单的写入加锁串行；旧快照不盖新快照（as-of）；
 // 内容没变就不写（省 GitHub 的内容创建配额）。GitHub 的写没有「版本不对就拒」，所以写完用编辑历史核对：
 // 我们读和写之间要是插进了人手编辑（被我们这次盖掉了），把人写的那一版找回来、重新放进进度段，并报警。
@@ -631,4 +631,57 @@ export async function commentIssue(
   );
   if (value.updatedAt) await issueEcho(deps, repo, issueNumber, value.updatedAt);
   return { commentId: value.id, url: value.url, created: !replay };
+}
+
+// —— 挂里程碑（巡检 #223：开单不挂、写好需求文档再挂，接活只派挂在当前版本上的单，先挂上的话工作流可能在需求文档进主线之前起来）——
+
+export interface SetIssueMilestoneInput {
+  repo: RepoRef;
+  issueNumber: number;
+  /** 里程碑的编号（GitHub 上的 number，不是标题）。 */
+  milestone: number;
+}
+
+const MilestonedIssue = z.object({
+  number: z.number(),
+  milestone: z.object({ number: z.number() }).nullable(),
+  updated_at: z.string(),
+  pull_request: z.unknown().optional(),
+});
+
+/** 给一张单挂里程碑（「引擎」机器人）。挂完按回执核对挂上的就是这个编号，对不上报错，不当成挂上了。 */
+export async function setIssueMilestone(
+  deps: Deps,
+  input: SetIssueMilestoneInput,
+  ctx: ActivityContext = {},
+): Promise<{ changed: boolean }> {
+  const { repo, issueNumber, milestone } = input;
+  const slug = repoSlug(repo);
+  const path = `/repos/${enc(repo.owner)}/${enc(repo.name)}/issues/${issueNumber}`;
+  const auth = { as: 'engine' as const, repo };
+  const before = await deps.client.request({ method: 'GET', path, auth, signal: ctx.signal });
+  const read = MilestonedIssue.safeParse(before.data);
+  if (!read.success) throw unexpected(`读 ${slug} #${issueNumber} 挂的里程碑`, before.data);
+  if (read.data.pull_request !== undefined && read.data.pull_request !== null) {
+    throw new GitHubError('NOT_AN_ISSUE', `${slug} #${issueNumber} 是 PR，不是 issue`);
+  }
+  if (read.data.milestone?.number === milestone) return { changed: false };
+  const res = await deps.client.request({
+    method: 'PATCH',
+    path,
+    auth,
+    body: { milestone },
+    signal: ctx.signal,
+  });
+  const after = MilestonedIssue.safeParse(res.data);
+  if (!after.success) throw unexpected(`给 ${slug} #${issueNumber} 挂里程碑的回执`, res.data);
+  if (after.data.milestone?.number !== milestone) {
+    throw new GitHubError(
+      'READBACK_MISMATCH',
+      `给 ${slug} #${issueNumber} 挂里程碑 ${milestone}，回执里挂的是 ${after.data.milestone?.number ?? '（没挂）'}`,
+      { retryable: true },
+    );
+  }
+  await issueEcho(deps, repo, issueNumber, after.data.updated_at);
+  return { changed: true };
 }

@@ -13,6 +13,13 @@ import {
   withdrawSignal,
 } from './contract.ts';
 import {
+  type CanaryDeps,
+  CanaryNotRecordedError,
+  type CanaryState,
+  checkCanaryRound,
+  openCanaryRound,
+} from './jobs/canary.ts';
+import {
   GitHubReconcileFailedError,
   type GitHubReconcileJobDeps,
   runGitHubReconcileJob,
@@ -248,6 +255,8 @@ export interface EngineJobs {
   routeProbe?: () => RouteProbeJobDeps;
   /** 每小时对账：看工作树、撤过时的提醒、再推没人处理的（查工作流在不在跑、挂没挂着用这次活动的 Temporal 客户端）。 */
   hourlyReconcile?: (client: Client) => HourlyReconcileJobDeps;
+  /** 全流程巡检（#223）：在巡检仓开单、看它一路走完（叫停前几轮留下的单、查工作流用这次活动的 Temporal 客户端）。 */
+  canary?: (client: Client) => CanaryDeps;
 }
 
 /** 引擎自己的活动：对账补漏跑一轮。没跑成的已经记进 schedule_runs，这里再报成不重试的失败（下一轮 15 分钟后照来）。 */
@@ -322,6 +331,40 @@ async function reconcileHourly(jobs: EngineJobs): Promise<unknown> {
   }
 }
 
+/** 巡检没装（假端口，或真端口没接上库和 GitHub）：明确报 JOB_NOT_CONFIGURED，不装作巡检过。 */
+function canaryDeps(jobs: EngineJobs): CanaryDeps {
+  const make = jobs.canary;
+  if (!make) {
+    throw new PortError(
+      'JOB_NOT_CONFIGURED',
+      '这个引擎工人没装全流程巡检（假端口，或真端口没接上库和 GitHub）：不装作巡检过',
+      { retryable: false },
+    );
+  }
+  return make(Context.current().client);
+}
+
+/** 引擎自己的活动：全流程巡检开单。没跑成的已经记进库、回结论；记开始就没成报 CANARY_NOT_RECORDED（不重试）。 */
+async function canaryOpen(jobs: EngineJobs): Promise<unknown> {
+  try {
+    return await openCanaryRound(canaryDeps(jobs));
+  } catch (error) {
+    if (error instanceof CanaryNotRecordedError) {
+      throw new PortError('CANARY_NOT_RECORDED', error.message, { retryable: false });
+    }
+    throw error;
+  }
+}
+
+/** 引擎自己的活动：全流程巡检看一回、判、记。 */
+async function canaryCheck(jobs: EngineJobs, input: unknown): Promise<unknown> {
+  const state = (input as { state?: CanaryState } | null)?.state;
+  if (state?.schemaVersion !== 1) {
+    throw new PortError('INVALID_INPUT', '全流程巡检看一回：输入里没有认得出的状态', { retryable: false });
+  }
+  return checkCanaryRound(canaryDeps(jobs), state);
+}
+
 export function createActivities(
   ports: EnginePorts,
   launch: SessionLaunchConfig,
@@ -373,5 +416,7 @@ export function createActivities(
   out.reconcileGitHub = timed('reconcileGitHub', () => reconcileGitHub(jobs), record);
   out.probeRoutes = timed('probeRoutes', () => probeRoutes(jobs), record);
   out.reconcileHourly = timed('reconcileHourly', () => reconcileHourly(jobs), record);
+  out.canaryOpen = timed('canaryOpen', () => canaryOpen(jobs), record);
+  out.canaryCheck = timed('canaryCheck', (input) => canaryCheck(jobs, input), record);
   return out as unknown as EngineActivities;
 }

@@ -52,6 +52,8 @@ describe('活动外壳', () => {
         'reconcileGitHub',
         'probeRoutes',
         'reconcileHourly',
+        'canaryOpen',
+        'canaryCheck',
       ].sort(),
     ).toEqual(Object.keys(ACTIVITY_PROFILE).sort());
   });

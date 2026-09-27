@@ -33,6 +33,7 @@ import {
   type Locker,
   memoryLocker,
 } from './deps.ts';
+import { GitHubError } from './errors.ts';
 import { createEventSink, type EventSink, type WorkflowWaker } from './events.ts';
 import { execGit, type GitRunner } from './git.ts';
 import {
@@ -40,7 +41,7 @@ import {
   type InteractionLimitResult,
   renewInteractionLimit,
 } from './interaction.ts';
-import { type IssuePlan, type ReadIssuePlanInput, readIssuePlan } from './issue-plan.ts';
+import { type IssuePlan, type ReadIssuePlanInput, readIssuePlan, readOpenMilestones } from './issue-plan.ts';
 import {
   type CloseIssueInput,
   type CloseIssueResult,
@@ -51,6 +52,9 @@ import {
   type OpenIssueInput,
   type OpenIssueResult,
   openIssue,
+  readIssue,
+  type SetIssueMilestoneInput,
+  setIssueMilestone,
   type UpdateIssueProgressInput,
   type UpdateIssueProgressResult,
   updateIssueProgress,
@@ -143,7 +147,7 @@ export interface GitHub {
     ctx?: ActivityContext,
   ): Promise<UpdateIssueProgressResult>;
   closeIssue(input: CloseIssueInput, ctx?: ActivityContext): Promise<CloseIssueResult>;
-  /** 开一张单（幂等，按 key 认）：引擎对账时给提问另开一张，见 #259。 */
+  /** 开一张单（幂等，按 key 认）：引擎对账时给提问另开一张（#259）；巡检（#223）每 6 小时在巡检仓开一张。 */
   openIssue(input: OpenIssueInput, ctx?: ActivityContext): Promise<OpenIssueResult>;
   /** 在一张 issue 上留一条评论（幂等，按 key 认），不关单、不改进度段：把回答写到提问那张单上。 */
   commentIssue(input: CommentIssueInput, ctx?: ActivityContext): Promise<CommentIssueResult>;
@@ -159,6 +163,19 @@ export interface GitHub {
    * 现读）：接活判当前版本和母单子单、fleet-api handover 判能不能交都用它。读不到、认不出抛错，不拿「没挂」「开着」「独立单」顶。
    */
   readIssuePlan(input: ReadIssuePlanInput, ctx?: ActivityContext): Promise<IssuePlan>;
+  /** 仓里此刻还开着的里程碑（「引擎」机器人现读）：巡检开单前找巡检仓的当前版本。读不到、没翻完抛错。 */
+  readOpenMilestones(input: {
+    repo: RepoRef;
+    signal?: AbortSignal | undefined;
+  }): Promise<{ number: number; title: string }[]>;
+  /** 一张单此刻开没开着、关的原因（completed、not_planned……；开着是 null）。读不到、是 PR 都抛错。 */
+  readIssueState(input: {
+    repo: RepoRef;
+    issueNumber: number;
+    signal?: AbortSignal | undefined;
+  }): Promise<{ state: 'open' | 'closed'; stateReason: string | null }>;
+  /** 给一张单挂里程碑（「引擎」机器人），按回执核对挂上的就是这个编号。 */
+  setIssueMilestone(input: SetIssueMilestoneInput, ctx?: ActivityContext): Promise<{ changed: boolean }>;
   /** 会话提交用的身份（「干活的」机器人）：引擎建工作树时写进 user.name / user.email。 */
   commitIdentity(repo: RepoRef): Promise<BotIdentity>;
   /** 两个机器人在这些仓上的权限够不够。读不到算没查成（ok=false、why 写原因），不算「没有差异」。 */
@@ -237,6 +254,23 @@ export function createGitHub(options: GitHubOptions): GitHub {
     async readIssuePlan(input, ctx = {}) {
       return readIssuePlan(client, { ...input, signal: input.signal ?? ctx.signal });
     },
+    async readOpenMilestones(input) {
+      return readOpenMilestones(client, input);
+    },
+    async readIssueState(input) {
+      const issue = await readIssue(deps, input.repo, input.issueNumber, input.signal);
+      if (issue.pull_request !== undefined && issue.pull_request !== null) {
+        throw new GitHubError(
+          'NOT_AN_ISSUE',
+          `${repoSlug(input.repo)} #${input.issueNumber} 是 PR，不是 issue`,
+        );
+      }
+      return {
+        state: issue.state,
+        stateReason: issue.state === 'open' ? null : (issue.state_reason ?? null),
+      };
+    },
+    setIssueMilestone: (input, ctx) => setIssueMilestone(deps, input, ctx),
     openPr: (input, ctx) => openPr(deps, input, ctx),
     waitCi: (input, ctx) => waitCi(deps, input, ctx),
     mergePr: (input, ctx) => mergePr(deps, input, ctx),

@@ -13,6 +13,7 @@ import {
 } from '@fleet-dao/shared';
 import { and, eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { CANARY_NOT_HERE } from '../src/canary-health.ts';
 import { DEPLOY_LAG_NOT_HERE } from '../src/deploy-lag.ts';
 import { devFixtures } from '../src/dev-fixtures.ts';
 import { draftBacklogCheck, notWiredDraftOpener } from '../src/draft-opening.ts';
@@ -256,6 +257,8 @@ describe('接口跑在真库上', () => {
         feishuGateway: createGatewaySeen(() => new Date(T0)),
         // 库里真查：没有切号的提醒就是好的（session-org-health.test.ts 另测开着报红）
         sessionOrg: sessionOrgHealthCheck(t.db),
+        // 和 main.ts 在法国以外的装配一样：全流程巡检只在法国跑
+        canary: { check: async () => {}, notWired: CANARY_NOT_HERE },
       }),
     });
     const res = await h.cockpit.request('/healthz');
@@ -286,6 +289,7 @@ describe('接口跑在真库上', () => {
           message: '没查成：后端起来才 0 秒，推送轮询还没来过（盘面快照也没来取过）',
         },
         session_org: { ok: true },
+        canary: { ok: true, status: 'not_wired', message: CANARY_NOT_HERE },
       },
     });
     // 一张草稿确认了 20 分钟还没开成：积压报红（库里真查出来的）。
