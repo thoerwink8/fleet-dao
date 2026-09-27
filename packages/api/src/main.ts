@@ -8,15 +8,15 @@
 //   发给工作流的信号、拉起工作流都只记日志，不接 Temporal。
 // 飞书确认的草稿去开单（DraftOpener）等 #43 接：在那之前草稿留在「待开单」、健康检查报红，这里定时补开，接上后自动开出来。
 // （#43 已随 #56 合并、没接这一步，真开单记在 #91。）
-import type { Server } from 'node:http';
 import { createDb, type Db } from '@fleet-dao/db';
-import { createGitHub, pgLedger, pgLocker } from '@fleet-dao/github';
+import { type ClaimsGitHub, createGitHub, pgLedger, pgLocker } from '@fleet-dao/github';
 import { jevConfigLocation } from '@fleet-dao/jev';
-import { serve } from '@hono/node-server';
 import { signAgentToken } from './agent-token.ts';
+import { deployFacts, pgAlertWork } from './alert-work.ts';
 import { buildApps } from './app.ts';
 import { CANARY_NOT_HERE, canaryHealthCheck } from './canary-health.ts';
 import { createChangeHub, startPgChangeFeed } from './changes.ts';
+import { createClaimStatus } from './claim-status.ts';
 import { ConfigError, loadConfig } from './config.ts';
 import { createDirDemoPublisher, sweepExpiredDemoLinks } from './demo.ts';
 import {
@@ -35,12 +35,14 @@ import { githubAppHealthCheck } from './github-app-health.ts';
 import { serviceHealthChecks } from './health.ts';
 import { githubIssuePlans, issuePlansUnavailable } from './issue-intake.ts';
 import { judgeHealthCheck } from './judge-health.ts';
-import { serveCockpit } from './keep-alive.ts';
+import { COCKPIT_KEEP_ALIVE_MS } from './keep-alive.ts';
+import { ListenFdError, startListeners } from './listen.ts';
 import { jsonLogger } from './log.ts';
 import { createMemoryStore } from './memory-store.ts';
 import { createPgStore, probeDb, withStatementTimeout } from './pg-store.ts';
 import type { GitHubEventSink, IssuePlanReader } from './ports.ts';
 import { sessionOrgHealthCheck } from './session-org-health.ts';
+import { closeConnectionWhenStopping, gracefulShutdown } from './shutdown.ts';
 import { connectTemporal } from './temporal.ts';
 import { startWatchdogWatch, WATCHDOG_NOT_HERE, watchdogHealthCheck } from './watchdog-health.ts';
 
@@ -54,12 +56,14 @@ const log = jsonLogger();
 function githubMirror(db: Db): {
   sink: GitHubEventSink;
   plans: IssuePlanReader;
+  /** 「认领对得上」要的读写（#348）；凭据没读到时没有（PR 事件在写镜像那一步就如实失败了）。 */
+  claims?: ClaimsGitHub;
   credentialsMissing?: () => Promise<void>;
 } {
   try {
     const gh = createGitHub({ ledger: pgLedger(db), locker: pgLocker(db, { log }), log });
     // 引擎等 CI 靠活动自己轮询（waitCi），不收按事件叫醒的信号：PR、CI 事件只写镜像
-    return { sink: gh.eventSink({ async wake() {} }), plans: githubIssuePlans(gh) };
+    return { sink: gh.eventSink({ async wake() {} }), plans: githubIssuePlans(gh), claims: gh.claims };
   } catch (err) {
     log.error('GitHub 机器人的凭据没读到：PR、CI 事件写不进镜像（issue 照收，但不派）', {
       error: String(err),
@@ -177,8 +181,12 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
     requirements: temporal.requirements,
     plans: github.plans,
     github: github.sink,
+    // PR 事件进来按库里的认领贴「认领对得上」（#348）
+    claims: github.claims ? createClaimStatus({ store, github: github.claims, log }) : undefined,
     draftOpener,
     gatewaySeen,
+    // 提醒谁在处理（design 15.3）：认领、PR 镜像、静默都在同一个库；发布记录只在法国的正式机器上有
+    alertWork: pgAlertWork(db, onFrance ? () => deployFacts(readDeployLagInput()) : () => null),
     // 还没做的读取器：驾驶舱那一块整块显示「待实现」，不说成「没查成」。接上了就删掉这一项
     notWired: {
       quota: { what: '额度读数', phase: 'P3', issue: 76 },
@@ -223,12 +231,44 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
 }
 
 const { deps, close } = await assemble();
+// 给停机时的飞书 outbox 长轮询用（feishu-routes.ts）：main.ts 收到 SIGTERM 才会 abort，读不是装配的时候。
+const shutdownController = new AbortController();
+deps.shutdownSignal = shutdownController.signal;
 const { cockpit, agent, draftOpening } = buildApps(deps);
 const stopDraftOpening = draftOpening.start();
-const servers = [
-  serveCockpit(cockpit.fetch, config.cockpitListen),
-  serve({ fetch: agent.fetch, hostname: config.agentListen.host, port: config.agentListen.port }),
-];
+
+let stopping = false;
+const isStopping = () => stopping;
+
+/**
+ * systemd 传了监听套接字（要 deploy 侧装 fleet-api.socket 单元，见 listen.ts 开头的注释——这个 PR 里还没接，留了
+ * 后续单）就用它们；没传就照旧自己 bind（本机开发、测试，或还没装 socket 单元的生产，目前一直是这一支）。地址、
+ * fd 对不上号是明确的配置错误，不当成别的故障悄悄兜底，退出让 systemd 按 Restart=always 重试、也让人看得到原因。
+ */
+async function listen() {
+  try {
+    return await startListeners([
+      {
+        name: '驾驶舱接口',
+        at: config.cockpitListen,
+        fetch: closeConnectionWhenStopping(cockpit.fetch, isStopping),
+        keepAliveMs: COCKPIT_KEEP_ALIVE_MS,
+      },
+      {
+        name: 'fleet 命令接口',
+        at: config.agentListen,
+        fetch: closeConnectionWhenStopping(agent.fetch, isStopping),
+      },
+    ]);
+  } catch (err) {
+    if (err instanceof ListenFdError) {
+      log.error(err.message);
+      process.exit(1);
+    }
+    throw err;
+  }
+}
+const servers = await listen();
 
 log.info('驾驶舱后端已起', {
   env: config.env,
@@ -259,27 +299,23 @@ if (demo) {
   setInterval(() => void sweep(), 60 * 60_000).unref();
 }
 
-/** 退出时给在途的短请求多久做完（做完了幂等回执才记得上，插头重试不会重做）。 */
-const DRAIN_MS = 3_000;
+/** 退出时给在途的普通请求多久做完（做完了幂等回执才记得上，插头重试不会重做）；到点了收掉剩下的（SSE 这类）。 */
+const DRAIN_MS = 10_000;
 
-let stopping = false;
 async function shutdown(signal: string) {
   if (stopping) return;
   stopping = true;
   log.info('收到退出信号，停止接新请求', { signal });
   stopDraftOpening();
-  const drained = Promise.all(
-    servers.map((server) => new Promise<void>((resolve) => (server as Server).close(() => resolve()))),
-  );
-  for (const server of servers) (server as Server).closeIdleConnections?.();
-  // SSE 和等回答的长连接不会自己结束：等到点了全部收掉，不然进程退不出去。
-  await Promise.race([drained, new Promise((resolve) => setTimeout(resolve, DRAIN_MS))]);
-  for (const server of servers) (server as Server).closeAllConnections?.();
-  try {
-    await close();
-  } catch (err) {
-    log.error('退出时关连接出错', { error: String(err) });
-  }
+  await gracefulShutdown({
+    servers,
+    // 飞书 outbox 的长轮询（feishu-routes.ts）拿这个信号跟请求自己的 signal 合并着等：马上醒，直接回手上已有的
+    // 结果，不再查库——库要过一会儿（drainMs 之后）才真的关，这一步早一点发，长轮询就不会撞上正在关的库（#364）。
+    notifyLongPollers: () => shutdownController.abort(),
+    drainMs: DRAIN_MS,
+    close,
+    onCloseError: (err) => log.error('退出时关连接出错', { error: String(err) }),
+  });
   process.exit(0);
 }
 process.once('SIGTERM', () => void shutdown('SIGTERM'));

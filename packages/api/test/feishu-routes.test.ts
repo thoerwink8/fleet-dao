@@ -22,6 +22,7 @@ import {
   DraftOpenerUnavailableError,
   type DraftOpenRequest,
   type DraftOpenResult,
+  TableLockedError,
 } from '../src/ports.ts';
 import { errorCode, GATEWAY_PASS, harness, IDS, T0 } from './harness.ts';
 import { FEISHU_IDS, feishuData } from './store-contract-feishu.ts';
@@ -1665,6 +1666,85 @@ describe('GET /feishu/outbox 与 POST /feishu/outbox/acks：待推送与回执',
     const t2 = Date.now();
     expect((await outbox(h2, '?waitSeconds=1')).items).toEqual([]);
     expect(Date.now() - t2).toBeGreaterThanOrEqual(900);
+  });
+
+  // #364：法国 journalctl 里反复看到 /api/feishu/outbox 的「Failed query」500，每次都落在发布重启那几秒——
+  // 停机时库先关，等在这条长轮询里的请求醒过来又查了一次库，撞上正在关的连接。不是数据问题，是停机顺序问题：
+  // 下面两条钉住醒来之后不该再查库的两种情形（客户端自己断线；main.ts 的 shutdown 通知）。
+  it('客户端断线（请求的 signal 断了）：马上回手上已有的这批，不再多查一次库', async () => {
+    const quiet = () => ({ ...devFixtures(T0), notifications: [] });
+    const h = harness({ data: quiet() });
+    const calls = vi.spyOn(h.store, 'listOutboxSources');
+    const controller = new AbortController();
+    const started = Date.now();
+    const pending = h.cockpit.request('/api/feishu/outbox?waitSeconds=5', {
+      ...gw('GET', undefined, null),
+      signal: controller.signal,
+    });
+    await sleep(150);
+    const callsBeforeAbort = calls.mock.calls.length;
+    controller.abort();
+    const res = await pending;
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(FeishuOutboxResponse.parse(await res.json()).items).toEqual([]);
+    expect(calls.mock.calls.length).toBe(callsBeforeAbort); // 断线之后没有再查库
+  });
+
+  it('停机（main.ts 的 shutdown 给 deps.shutdownSignal 发的信号）：长轮询马上醒、回手上已有的，不再查库', async () => {
+    const quiet = () => ({ ...devFixtures(T0), notifications: [] });
+    const h = harness({ data: quiet() });
+    const shutdownController = new AbortController();
+    h.deps.shutdownSignal = shutdownController.signal;
+    const calls = vi.spyOn(h.store, 'listOutboxSources');
+    const started = Date.now();
+    const pending = outbox(h, '?waitSeconds=5');
+    await sleep(150);
+    const callsBeforeStop = calls.mock.calls.length;
+    shutdownController.abort();
+    const batch = await pending;
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(batch.items).toEqual([]);
+    expect(calls.mock.calls.length).toBe(callsBeforeStop); // 停机通知之后没有再查库
+  });
+
+  // #364 的另一半根因：不是重启，是发布跑迁移时 tasks/repos 被 DDL 锁住，联表查询等锁本身也超时（Postgres
+  // 57014/55P03，pg-store.ts 的 listOutboxSources 转成 TableLockedError）。这两条钉住：锁住只是「再等一下」，
+  // 轮询里重试就好；但一直没解锁、deadline 到了，不能拿空批次冒充「没有待推送的」，得回一个说清楚的错。
+  it('联表查询被表锁住（TableLockedError，多半是发布在跑迁移）：当成"再等一下"，轮询里重试，读成一次就正常回', async () => {
+    const quiet = () => ({ ...devFixtures(T0), notifications: [] });
+    const h = harness({ data: quiet() });
+    const calls = vi.spyOn(h.store, 'listOutboxSources');
+    calls.mockRejectedValueOnce(new TableLockedError('迁移锁着 tasks（模拟）'));
+    const started = Date.now();
+    const pending = outbox(h, '?waitSeconds=5');
+    await sleep(150);
+    await h.store.openAsk({
+      runId: IDS.run1,
+      taskId: IDS.task12,
+      question: '用哪个短信商？',
+      options: ['阿里云', '腾讯云'],
+      scope: 'task',
+      recommended: '阿里云',
+    });
+    const batch = await pending;
+    expect(batch.items.map((i) => i.title)).toEqual(['用哪个短信商？']);
+    expect(Date.now() - started).toBeLessThan(2_000); // 被锁那一次没有让整条长轮询干等到 deadline
+    expect(calls.mock.calls.length).toBeGreaterThanOrEqual(2); // 第一次被锁，重试才读成
+  });
+
+  it('【故意造出的失败】联表查询一直被表锁挡住、从没读成过一次：deadline 到了回 503，不拿空批次冒充「没有待推送的」', async () => {
+    const quiet = () => ({ ...devFixtures(T0), notifications: [] });
+    const h = harness({ data: quiet() });
+    vi.spyOn(h.store, 'listOutboxSources').mockRejectedValue(
+      new TableLockedError('迁移锁着 tasks（模拟，一直没放开）'),
+    );
+    const started = Date.now();
+    const res = await h.cockpit.request('/api/feishu/outbox?waitSeconds=1', gw('GET', undefined, null));
+    expect(Date.now() - started).toBeGreaterThanOrEqual(900); // 真等到了 deadline，不是提前认输
+    expect({ status: res.status, code: await errorCode(res) }).toEqual({
+      status: 503,
+      code: 'outbox_locked',
+    });
   });
 
   it('免打扰时段照设置给；设置读不懂 500（不当成「不设」，免得半夜推卡）；参数认不出 400', async () => {

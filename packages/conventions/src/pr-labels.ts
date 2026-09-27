@@ -4,22 +4,10 @@
 import { readFileSync } from 'node:fs';
 import type { GitHubPrLabeler, GitHubReader, IssueInfo, PullInfo } from './github-api.ts';
 import { isKindLabel, type KindLabel } from './labels.ts';
-import { prColumns } from './pr-fields.ts';
+import { ISSUE_COLUMN, linkedIssue } from './pr-columns.ts';
 
-/** 正文里写对应 issue 的那一栏（.github/pull_request_template.md）。 */
-export const ISSUE_COLUMN = '需求';
-
-/**
- * PR 对应的 issue 号：先看正文「需求」栏里第一个 #号，没有再看标题里第一个 (#号)（全角括号也算）。
- * 「owner/仓#号」这种别的仓的不算。都没有返回 undefined。
- */
-export function linkedIssue(body: string, title: string): number | undefined {
-  const col = prColumns(body).get(ISSUE_COLUMN.toLowerCase());
-  const fromBody = col && /(?<![\w/#])#(\d+)\b/.exec(col)?.[1];
-  if (fromBody) return Number(fromBody);
-  const fromTitle = /[(（]\s*#(\d+)\s*[)）]/.exec(title)?.[1];
-  return fromTitle ? Number(fromTitle) : undefined;
-}
+// 认 PR 挂了哪张单在 pr-columns.ts（合并闸认「认领对得上」也用它）；这里照旧导出，老的引用不用改
+export { ISSUE_COLUMN, linkedIssue };
 
 /** PR 现在的样子（号、标题、正文、标签、里程碑）。 */
 export type PrState = PullInfo;

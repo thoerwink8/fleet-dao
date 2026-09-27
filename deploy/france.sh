@@ -151,6 +151,9 @@ CARPOOL_SHIM=/home/fleet-agent-carpool/bin/carpool-run.sh
 # AI 会话的工作树的根（引擎真端口的 FLEET_WORK_DIR，fleet-agent-scope 的 WORK_BASE）、引擎自己的状态目录（FLEET_ENGINE_STATE_DIR）
 WORK_DIR=/var/lib/fleet-work
 ENGINE_STATE_DIR=/var/lib/fleet-dao/engine
+# 会话脱开引擎跑的收发目录的根（引擎的 FLEET_SESSION_IO_DIR 默认就是它，packages/engine/src/real/session-io.ts）：归 fleet、711——
+# 会话用户按路径进得去自己那一格（写输出、读提示词），列不出别的会话；不在或权限不对，引擎照旧接管道、发布还会停会话（推提醒）
+SESSION_IO_DIR=/var/lib/fleet-sessions
 # 发布脚本往香港传驾驶舱静态文件用的钥匙（只有 root 读得到），和钉住的香港 sshd 主机钥匙
 WEB_UPLOAD_KEY=/etc/fleet-dao/web-upload.key
 HK_KNOWN_HOSTS=/etc/fleet-dao/hk-known-hosts
@@ -161,7 +164,7 @@ GATEWAY_DEPLOY_KEY=/etc/fleet-dao/gateway-deploy.key
 DEMO_DIR=/var/lib/fleet-dao/demo
 DEMO_SCOPES_BIN=/usr/local/sbin/fleet-demo-scopes
 DEMO_UNITS=(fleet-demo-scopes.service fleet-demo-scopes.path fleet-demo-scopes.timer)
-# 自动发布（docs/ops.md 第九节「自动发布」）：主线上 CI 全绿的新提交等引擎空闲后发到本机、发完同步规矩。装的是副本：
+# 自动发布（docs/ops.md 第九节「自动发布」）：主线上 CI 全绿的新提交马上发到本机（发布脚本先排空引擎）、发完同步规矩。装的是副本：
 # 主线上改了它，要重跑本脚本才换。它每一轮的读数、本脚本装到哪个提交（下面 APPLIED_FILE）都放在 AUTO_DIR，后端的 /healthz 读
 AUTO_RELEASE_LIB=/usr/local/lib/fleet-dao/auto-release
 AUTO_RELEASE_FILES=(lib.mjs fleet-auto-release.mjs config.mjs)
@@ -235,6 +238,7 @@ setup_identity() {
   ensure_dir "$DEMO_DIR" fleet:fleet 750
   # 引擎自己的临时目录（从镜像打的 bundle）和存档（没合并就收的树里没提交的改动）放在这下面，引擎自己建 tmp/、archive/
   ensure_dir "$ENGINE_STATE_DIR" fleet:fleet 750
+  ensure_dir "$SESSION_IO_DIR" fleet:fleet 711
   # AI 会话的工作树的根：归 root、别人写不进（会话用户没法在路径上塞符号链接）；每棵树由 fleet-agent-scope 建、归会话用户 700
   ensure_dir "$WORK_DIR" root:root 755
   ensure_dir /var/log/fleet-dao fleet:fleet 750
@@ -830,7 +834,7 @@ setup_demo_scopes() {
 # 自动发布：定时器每 5 分钟拉起一轮（deploy/france/auto-release），以 root 跑 release.sh --auto、替会话用户同步规矩。
 # 脚本放 /usr/local/lib 下的副本（全链归 root），不从检出直接跑：检出它自己会快进，主线上一个坏提交不该把自动发布本身弄坏
 setup_auto_release() {
-  step "自动发布（主线上 CI 全绿的新提交等引擎空闲后发到本机，发完同步规矩；读数在 $AUTO_DIR）"
+  step "自动发布（主线上 CI 全绿的新提交马上发到本机，发布脚本先排空引擎；发完同步规矩；读数在 $AUTO_DIR）"
   local f u unit_changed=0
   ensure_dir "$AUTO_DIR" root:root 755
   ensure_dir /usr/local/lib/fleet-dao root:root 755
@@ -1251,7 +1255,7 @@ readback_session_ports() {
 readback_dirs() {
   local spec path want have bad=0
   for spec in "/srv/fleet-dao root:root 755" "$RELEASES_DIR root:root 755" "/var/lib/fleet-dao fleet:fleet 750" "$DEMO_DIR fleet:fleet 750" "/var/log/fleet-dao fleet:fleet 750" \
-    "$ENGINE_STATE_DIR fleet:fleet 750" "$WORK_DIR root:root 755" \
+    "$ENGINE_STATE_DIR fleet:fleet 750" "$SESSION_IO_DIR fleet:fleet 711" "$WORK_DIR root:root 755" \
     "/opt/fleet-dao root:root 755" "/home/fleet fleet:fleet 750" "$TEMPORAL_ENV root:fleet 640" "$TEMPORAL_CONFIG root:fleet 640"; do
     path=${spec%% *}
     want=${spec#* }

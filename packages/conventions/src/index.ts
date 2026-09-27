@@ -104,6 +104,8 @@ export {
 } from './labels.ts';
 export { type GateResult, type GitHubReads, gateGitHub, gatePr, runMergeGate } from './merge-gate.ts';
 export {
+  CLAIM_MATCH_CONTEXT,
+  ENGINE_BOT_LOGIN,
   GATE_CONTEXT,
   REVIEW_TIER,
   RISK_PATHS_FILE,
@@ -134,27 +136,27 @@ export {
   spliceSnapshot,
 } from './plan-snapshot.ts';
 export {
+  CLAIM_COLUMN,
+  ISSUE_COLUMN,
+  linkedIssue,
+  PLAN_COLUMN,
+  PR_COLUMNS,
+  prClaimId,
+  prColumns,
+  SPECS_COLUMN,
+} from './pr-columns.ts';
+export {
   annotation,
   checkPlanValue,
   checkPrFields,
-  PLAN_COLUMN,
   PLAN_DOC,
   type PrEvent,
   type PrFacts,
-  prColumns,
   prFromEvent,
   type RepoFacts,
-  SPECS_COLUMN,
   specsPaths,
 } from './pr-fields.ts';
-export {
-  ISSUE_COLUMN,
-  type LabelPlan,
-  type LabelRun,
-  linkedIssue,
-  type PrState,
-  planLabels,
-  runPrLabels,
-} from './pr-labels.ts';
+export { type LabelPlan, type LabelRun, type PrState, planLabels, runPrLabels } from './pr-labels.ts';
+export { FIX_ALERT_COLUMN, fixAlertRefs, prLinks } from './pr-links.ts';
 export { fsRepo, type RepoView } from './repo.ts';
 export { ENGINE_SESSION_MARKER, REFUSED_FULL_RUN } from './test-changed.ts';

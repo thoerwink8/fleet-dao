@@ -283,3 +283,92 @@ export function heldByOtherText(c: IssueClaim, dbNow: string): string {
     c.ownerKind !== 'engine' && c.seatScope ? `（${c.seatScope} 第 ${c.seatTerm} 任帅位认领的）` : '';
   return `这张单${c.ownerKind === 'engine' ? '' : '本机'}认领着${seat}：${describeClaim(c, dbNow)}`;
 }
+
+// —— 「认领对得上」（#348，方案「认领对得上」）——
+// 引擎机器人在每个开着的 PR 当前头上贴 commit status「认领对得上」，合并闸（@fleet-dao/conventions 的 merge-gate）认它。
+// 这里只判：PR 挂的是哪张单、正文「认领」栏写的认领号由外壳用 @fleet-dao/conventions 的 linkedIssue、prClaimId 认（和
+// pr-labels、合并闸同一个认法），这张单此刻的认领由外壳从库里读。状态说明要短（GitHub 限 140 个字符）；「过」只有下面
+// 写明的几种，其余一律红——红了合不进去，所以原因写清现在归谁、怎么办。
+
+/** 引擎贴的 commit status 名字；和 @fleet-dao/conventions merge-gates.ts 的 CLAIM_MATCH_CONTEXT 是同一个（那个包不依赖 core，后端的测试对着两边）。 */
+export const CLAIM_STATUS_CONTEXT = '认领对得上';
+
+/** GitHub 提交状态说明的上限（字符）。 */
+export const CLAIM_STATUS_MAX = 140;
+
+export interface ClaimMatchInput {
+  /** PR 挂的单号（正文「需求」栏或标题里的 #号）；没挂是 undefined。 */
+  issueNumber: number | undefined;
+  /** 这张单此刻的认领；库里没有这张单的认领是 null。 */
+  claim: IssueClaim | null;
+  /** PR 是不是「干活的」机器人开的（引擎的 PR 都是它开的）。 */
+  byAgentBot: boolean;
+  prNumber: number;
+  /** PR 正文「认领」栏写的认领号（整串，小写）；没写、认不出是 undefined。 */
+  prClaimId: string | undefined;
+}
+
+export interface ClaimMatch {
+  state: 'success' | 'failure';
+  description: string;
+}
+
+/** 截到状态说明的上限（多的写省略号，不让 GitHub 拒收）。 */
+export function clipStatus(text: string): string {
+  const chars = [...text.replace(/\s+/g, ' ').trim()];
+  return chars.length > CLAIM_STATUS_MAX
+    ? `${chars.slice(0, CLAIM_STATUS_MAX - 1).join('')}…`
+    : chars.join('');
+}
+
+/**
+ * 判一个 PR：没挂单、这张单没有认领记录都过（认领上线前开的、创始人自己开的 PR 不被挡）；认领还活着时，引擎的认领要 PR
+ * 是「干活的」机器人开的，本机的认领要 PR 正文「认领」栏写的认领号和现在的一样，或者这个 PR 用现在的认领号登记过
+ * （claim step --pr）；认领结束了（做完、放下、作废）一律红。结束的原因不写进状态：改派的原因带着创始人原话，状态说明
+ * 不过卫生检查（评论过）。
+ */
+export function judgeClaimMatch(input: ClaimMatchInput): ClaimMatch {
+  const { issueNumber: n, claim } = input;
+  if (n === undefined) return { state: 'success', description: '没挂单，不查认领' };
+  if (!claim) return { state: 'success', description: `#${n} 没有认领记录，不查认领` };
+  const owner = claimOwnerText(claim);
+  const id = claim.claimId.slice(0, 8);
+  if (!isActiveClaim(claim.state)) {
+    return {
+      state: 'failure',
+      description: clipStatus(
+        `#${n} 的认领（${owner}，${id}）${claimStateText(claim.state)}，没人拿着；要接着做先找帅位重新认领，正文「认领」栏写新认领号`,
+      ),
+    };
+  }
+  if (claim.ownerKind === 'engine') {
+    return input.byAgentBot
+      ? { state: 'success', description: `#${n} 归引擎，PR 是引擎开的` }
+      : {
+          state: 'failure',
+          description: clipStatus(`#${n} 归引擎在做（认领 ${id}），这个 PR 不是引擎开的；要改派得创始人说`),
+        };
+  }
+  if (input.prClaimId === claim.claimId || claim.prNumbers.includes(input.prNumber)) {
+    return { state: 'success', description: clipStatus(`#${n} 归 ${owner}，认领号对得上（${id}）`) };
+  }
+  const written = input.prClaimId
+    ? `PR 上写的是 ${input.prClaimId.slice(0, 8)}`
+    : 'PR 正文「认领」栏没写认领号';
+  return {
+    state: 'failure',
+    description: clipStatus(`#${n} 现在归 ${owner}（认领 ${id}），${written}；不是这份认领的 PR 合不进去`),
+  };
+}
+
+/**
+ * 这个 PR 是不是这份（已经结束的）认领开的：正文「认领」栏写的是它的认领号、用它登记过，或者它是引擎的认领、PR 是「干活的」
+ * 机器人开的。作废、强制改派时撤自动合并、关旧 PR 只动这些，别人的 PR 不碰。
+ */
+export function pullOfClaim(
+  claim: Pick<IssueClaim, 'claimId' | 'ownerKind' | 'prNumbers'>,
+  pull: { number: number; prClaimId: string | undefined; byAgentBot: boolean },
+): boolean {
+  if (pull.prClaimId === claim.claimId || claim.prNumbers.includes(pull.number)) return true;
+  return claim.ownerKind === 'engine' && pull.byAgentBot;
+}

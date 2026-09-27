@@ -4,6 +4,8 @@
 import type { Repo } from '@fleet-dao/shared';
 import type { ActivityOptions, RetryPolicy } from '@temporalio/common';
 import type {
+  AlertDispatchInput,
+  AlertDispatchRun,
   CanaryInput,
   GitHubReconcileInput,
   GitHubReconcileRun,
@@ -58,6 +60,8 @@ export type EngineActivities = PortActivities & {
   canaryCheck(input: { schemaVersion: 1; state: CanaryState }): Promise<CanaryStepResult>;
   /** 引擎自己的活动：看门狗跑一轮（按登记表看各定时任务新不新鲜、推撤提醒），结局记进 schedule_runs（jobs/watchdog.ts）。 */
   watchSchedules(input: WatchdogInput): Promise<WatchdogRun>;
+  /** 引擎自己的活动：提醒派单跑一轮（没人认领、停着没动的再推，没挂单的开跟进单），结局记进 schedule_runs（jobs/alert-dispatch.ts）。 */
+  dispatchAlerts(input: AlertDispatchInput): Promise<AlertDispatchRun>;
 };
 
 export type ActivityName = keyof EngineActivities;
@@ -69,7 +73,7 @@ export type ActivityName = keyof EngineActivities;
  * job：定时任务的一轮——10 分钟，不重试：每次尝试都记一行 schedule_runs，没跑成的等下一轮（间隔 15 分钟），不在这一轮里补。
  * 路由探针一轮里每条路由最长几分钟（起会话、等回答、没通隔 20 秒再探一次），同时探两条，也在 10 分钟里。
  * 每小时对账一轮最多看 80 棵残留的树（每棵以会话用户跑几条 git），也在 10 分钟里。
- * 看门狗一轮是几条查库、写提醒，秒级；卡住了也在 10 分钟里收场（上一轮没完下一轮跳过，一直卡着后端的看守看得见）。
+ * 看门狗、提醒派单一轮是几条查库、写提醒（派单偶尔开一张单），秒级；卡住了也在 10 分钟里收场（上一轮没完下一轮跳过，一直卡着后端的看守看得见）。
  */
 export type Profile = 'quick' | 'git' | 'setup' | 'watch' | 'ci' | 'tests' | 'job';
 
@@ -109,6 +113,7 @@ export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
   canaryOpen: 'job',
   canaryCheck: 'job',
   watchSchedules: 'job',
+  dispatchAlerts: 'job',
 };
 
 /** quick 一档（含排进合并队列、撤出）一次尝试的限时。合并队列的空闲收工时长不能比它短（limits.ts 的下限）。 */
@@ -122,6 +127,9 @@ export const NON_RETRYABLE_CODES: readonly string[] = [
   'WORKFLOWS_PERMISSION',
   'INVALID_INPUT',
 ];
+
+/** 看守（awaitSession）最多试几次：见 profileOptions 的 watch。 */
+export const WATCH_ATTEMPTS = 12;
 
 function retry(maximumAttempts: number, initialInterval: string, maximumInterval: string): RetryPolicy {
   return {
@@ -152,10 +160,12 @@ export function profileOptions(profile: Profile, limits: Limits): ActivityOption
       };
     case 'watch':
       // 会话本身在工人外面跑；看守丢了就重新接上（接不上会回 SESSION_LOST），所以可以重试。
+      // 次数给足：会话脱开引擎跑（real/session-io.ts），每发布、重启一次引擎，看守就随旧进程断一次、在新工人上接回，
+      // 一个长会话赶上几次发布不该把次数用完（用完了工作流会当成这一步丢了、另起会话，原来那个还在跑）
       return {
         startToCloseTimeout: `${limits.sessionMinutes} minutes`,
         heartbeatTimeout,
-        retry: retry(3, '2 seconds', '30 seconds'),
+        retry: retry(WATCH_ATTEMPTS, '2 seconds', '30 seconds'),
       };
     case 'ci':
       return {

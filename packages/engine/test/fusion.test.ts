@@ -400,6 +400,111 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
     expect(result).toMatchObject({ state: 'stopped', prNumber: 100, mergeCommit: null });
   });
 
+  it('CI 报和主线冲突：自动并主线并上了，接着在新头上查 CI，不算「没查成」的次数、照常走完', async () => {
+    const w = world({
+      ci: (_input, n) => (n === 1 ? { state: 'conflict', detail: '和主线冲突，CI 没起' } : undefined),
+    });
+    const result = await runToEnd(w);
+    expect(result.state).toBe('done');
+    // 5 次：任务边界（执行、验证、开 PR 前）各并一次 + 第 6 步 CI 冲突自己并一次 + 合并队列合并前照旧再并一次
+    expect(w.count('syncMainline')).toBe(5);
+    expect(w.count('waitCi')).toBe(2);
+    // 没走「没查成停下」那条账：没发过要人看的卡
+    expect(w.alerts.some((a) => a.title.includes('没查成'))).toBe(false);
+  });
+
+  it('自动并主线遇到真冲突（并不上）：派会话照冲突的文件解开，改完推上去、CI 绿 → 照常走完', async () => {
+    // 任务边界（执行、验证、开 PR 前）那几次并主线都还没开 PR（input.prNumber undefined），让它们照常并上，
+    // 不干扰；开 PR 之后头一次并主线是第 6 步 CI 冲突触发的那次，让它报真冲突；合并队列合并前那次要能正常并上。
+    let afterOpen = 0;
+    const w = world({
+      ci: (_input, n) => (n === 1 ? { state: 'conflict', detail: '和主线冲突，CI 没起' } : undefined),
+      sync: (input) => {
+        if (input.prNumber === undefined) return undefined;
+        afterOpen += 1;
+        return afterOpen === 1
+          ? { state: 'conflict', conflictFiles: ['packages/api/test/harness.ts'] }
+          : undefined;
+      },
+    });
+    const result = await runToEnd(w);
+    expect(result.state).toBe('done');
+    const fixBrief = w.callsOf('startSession').find((c) => c.input.brief.lead?.step === 'fix-brief');
+    expect(fixBrief?.input.brief.feedback[0]).toMatchObject({
+      kind: 'conflict',
+      items: ['packages/api/test/harness.ts'],
+    });
+  });
+
+  it('CI 一直报和主线冲突：自动并主线连着试满上限还是冲突，停下等人、原因写清（不算「没查成」）', async () => {
+    const w = world({ ci: () => ({ state: 'conflict', detail: '和主线冲突，CI 没起' }) });
+    const { parked, result } = await withWorker(env, w, async (q) => {
+      const handle = await start(q, fusionInput());
+      // 每次冲突都要经「再查一次」那一步的 2 分钟重试等待；连着 3 次并主线要跳够 6 分钟虚拟时间，直接跳 10 分钟。
+      // 查询（handle.query）不像 handle.result() 那样自己跳时间，要自己叫 env.sleep（09-27 撞过，看 merge-queue.test.ts）。
+      await env.sleep('10 minutes');
+      const parkedStatus = await queryUntil<FusionStatus>(handle, (s) => s.parked, '挂起');
+      await handle.signal(stopSignal, { by: 'founder' });
+      return { parked: parkedStatus, result: (await handle.result()) as FusionResult };
+    });
+    expect(parked.lastProblem).toContain('自动并主线已经试了 3 次还是冲突');
+    // 6 次：任务边界（执行、验证、开 PR 前）各并一次干净的 + CI 冲突触发的并主线循环 3 次（触到上限才停）
+    expect(w.count('syncMainline')).toBe(6);
+    expect(w.count('waitCi')).toBe(4);
+    expect(result.state).toBe('stopped');
+  });
+
+  it('【故意造出的失败】PR 的头被改写了（新头不含老头）：立刻停下等人，不当成没查成、不试着并主线', async () => {
+    const w = world({ ci: () => ({ state: 'diverged', detail: '像是被强推改写了' }) });
+    const { parked, result } = await runUntilParked(w);
+    expect(parked.lastProblem).toContain('像是被强推改写了');
+    expect(w.count('waitCi')).toBe(1);
+    // 3 次：任务边界（执行、验证、开 PR 前）各并了一次，都是干净的；头被改写了这条不试着走并主线那条路
+    expect(w.count('syncMainline')).toBe(3);
+    expect(result.state).toBe('stopped');
+  });
+
+  it('任务边界并主线：没有会话在跑的时候点一次，在派新会话之前——不是会话跑着的时候插进去并', async () => {
+    const w = world();
+    await runToEnd(w);
+    // 第 2 步规划（Lead 写方案）前头没有工作树可并，没有边界；第 4 步真正派副手之前才第一次点 syncMainline
+    // （execute 这个边界），点在副手那次 startSession 之前，不是夹在两次会话调用中间。
+    const firstSync = w.calls.findIndex((c) => c.port === 'syncMainline');
+    const execSession = w
+      .callsOf('startSession')
+      .find((c) => c.input.stage === 'execute' && !c.input.brief.lead);
+    const execSessionIdx = execSession ? w.calls.indexOf(execSession) : -1;
+    expect(firstSync).toBeGreaterThanOrEqual(0);
+    expect(execSessionIdx).toBeGreaterThanOrEqual(0);
+    expect(firstSync).toBeLessThan(execSessionIdx);
+  });
+
+  it('【故意造出的失败】任务边界并主线遇到冲突（并不上）：最佳努力，不挡这一步，照常派会话、照常走完', async () => {
+    const w = world({
+      // 还没开 PR（prNumber undefined）的任务边界都报冲突：执行、验证、开 PR 前三次都并不上
+      sync: (input) =>
+        input.prNumber === undefined ? { state: 'conflict', conflictFiles: ['a.ts'] } : undefined,
+    });
+    const result = await runToEnd(w);
+    expect(result.state).toBe('done');
+    // 三次任务边界都报了冲突，都不是拦下这一步的理由：没有因为「冲突」多退回一轮给副手
+    expect(
+      w.callsOf('startSession').filter((c) => c.input.brief.feedback.some((f) => f.kind === 'conflict')),
+    ).toHaveLength(0);
+  });
+
+  it('【故意造出的失败】任务边界并主线读不到 GitHub（活动一直失败、不是内容冲突）：不吞、挂起报警等人，不是静默卡住', async () => {
+    const w = world({ failFirst: { syncMainline: 999 } });
+    const { parked, result } = await runUntilParked(w, fusionInput({ limits: { retryAttempts: 0 } }));
+    expect(w.count('raiseAlert')).toBeGreaterThan(0);
+    expect(parked.lastProblem).toBeTruthy();
+    // 卡在了执行这一步真正派副手之前：只有第 2 步 Lead 写方案那一个会话起过，副手一次都没起
+    expect(
+      w.callsOf('startSession').filter((c) => c.input.stage === 'execute' && !c.input.brief.lead),
+    ).toEqual([]);
+    expect(result.state).toBe('stopped');
+  });
+
   it('Lead 写方案时 fleet blocked --needs human（要人拍）：不停下等，退回让它带推荐用 fleet ask 问，续同一个会话接着写', async () => {
     const w = world({
       session: (input) =>

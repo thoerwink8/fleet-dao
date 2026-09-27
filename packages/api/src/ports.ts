@@ -812,6 +812,10 @@ export interface FeishuStore {
   /** since 之后进入「已合并」的子任务个数。 */
   countMergedSubtasksSince(since: string): Promise<number>;
 
+  /**
+   * 联查 tasks、repos（pg-store.ts 的 taskInfos）：这两张表被迁移的 DDL 锁住时抛 TableLockedError（不是真故障，
+   * 是「现在读不了，等锁放开」，见 #364）；别的错误原样抛。
+   */
   listOutboxSources(since: string): Promise<FeishuOutboxSources>;
   /**
    * 按现算的内容指纹更新送达状态：没有的建成第 1 版（create=false 的不建）；指纹变了版本加 1。
@@ -865,7 +869,15 @@ export type WriteHandoffResult =
   | { ok: false; lease: SeatLease | null; now: string };
 
 export type TakeClaimResult =
-  | { ok: true; claim: IssueClaim; now: string }
+  | {
+      ok: true;
+      claim: IssueClaim;
+      now: string;
+      /** 这一行原来那份（结束了的、帅位自己占着被换掉的、这次强制作废的）；原来没有是 null。 */
+      previous: IssueClaim | null;
+      /** 这次带创始人原话强制作废掉的那份（claim reassign）；没有是 null。 */
+      voided: IssueClaim | null;
+    }
   /** 不是帅位（换了人、过了期、座位上没人）：这张单一点没动。 */
   | { ok: false; reason: 'not_seat'; why: string; now: string }
   /** 别人（引擎、别的工人）拿着还没结束：这张单一点没动。 */
@@ -912,6 +924,8 @@ export interface SeatStore {
       owner: { kind: 'seat' | 'worker'; label: string };
       graceMinutes?: number | undefined;
       note?: string | undefined;
+      /** 创始人原话（强制改派，claim reassign）：别人还活着拿着的（引擎、别的工人）当场作废、给这次的工人。 */
+      founder?: string | undefined;
     },
   ): Promise<TakeClaimResult>;
   /**
@@ -1130,6 +1144,19 @@ export class InvalidCursorError extends Error {
   constructor(message = '翻页游标看不懂（被改过，或者不是这个列表的），从第一页重新翻') {
     super(message);
     this.name = 'InvalidCursorError';
+  }
+}
+
+/**
+ * 查询撞上了被 DDL 锁住的表，等锁本身也超时了（Postgres 57014 语句超时 / 55P03 等锁超时，见
+ * pg-store.ts 的 withStatementTimeout、sqlState）：不是数据或代码的错，是「发布跑迁移的这几秒表被锁着」——
+ * 调用方该当成「再等一下、自己重试」，不是当场 500（#364：飞书 outbox 长轮询联查 tasks/repos 撞上这个，
+ * 之前直接被 Hono 的全局错误处理接住回 500，回错了「真故障」）。
+ */
+export class TableLockedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'TableLockedError';
   }
 }
 

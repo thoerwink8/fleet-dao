@@ -16,8 +16,13 @@
 // 整个删掉（正常结束、失败、被叫停、没起来都一样）；工人重启接不上的在 awaitSession / stopSession 里删；工人起来时
 // reapOrphanSessions 把上一轮剩下的全清掉。删不掉不改会话的结局，只记日志、下次起来再清。
 //
-// 看守：进程是这个工人进程起的（registry）。接不上（工人重启过、输出管道断了）就按记下的 scope 收掉旧会话，回
-// SESSION_LOST，工作流续会话重起。过程中：心跳；进度事件攒一小批写库（fleet done 的核实要读会话自己跑过的测试，
+// 停机排空（drain.ts）：引擎在停时不起新会话（ENGINE_STOPPING）；接管道跑的会话登记着，交回工作流才撤，停机等它们做完。
+// 发布不碰会话（deps.ioRoot，session-io.ts）：会话脱开引擎进程跑，输入输出、退出码走收发目录里的文件，每行输出一个序号，
+// 进度事件和「确认到哪一行」同一个事务进库；停机不停、排空不等，工人停下后放手（releaseDetached），新工人收孤儿时留着
+// 能接回的（keepForReattach），看守重试到新工人上时接回（reattach）：确认过的行只重放、不再写库。
+// 会话被信号杀掉（没终帧、137/143）时按证据写是谁杀的（kill-evidence.ts：引擎在停、内存超限、没查到），不猜。
+// 看守：进程是这个工人进程起的（registry），或者接回的。接不上（接管道跑的旧会话、接回记录没了、库里已经结束）就按记下的
+// scope 收掉旧会话，回 SESSION_LOST，工作流续会话重起。过程中：心跳；进度事件攒一小批写库（fleet done 的核实要读会话自己跑过的测试，
 // 所以写得要快）；额度读数顺手记账；每分钟按进展判一次停滞（failure/stall.ts），在绕圈、工具卡死就停掉，结局 stalled
 // （光是没动静由插头自己的 idle 超时管）。结束后：写码类看 fleet done 和工作树（有新提交、没有没提交的已跟踪改动；
 // 新提交、改了哪些文件都扣掉会话并进来的主线，user-git.ts 的 ownSpan）；
@@ -32,10 +37,14 @@
 // Jev（判断题）只在这个活动里问（design 第十一节「错误分流」「停滞预判」）：规则认不出的失败问一次，回答随结局交给工作流的
 // 失败分流；停滞拿不准时问，同一个会话隔 stallJevEveryMs 才再问。只记不拦的题、没判出来的一律照规则走。
 
+import { readdir, readFile, rm } from 'node:fs/promises';
+import { join } from 'node:path';
 import {
   type CgroupScope,
   type DeliveryCheck,
+  IO_FILES,
   judgeRun,
+  type LineMeta,
   listAgentScopes,
   type PlanPayload,
   type RateLimitReading,
@@ -69,6 +78,7 @@ import {
   upsertAlert,
 } from '@fleet-dao/db';
 import type { ProgressEvent, RunOutcome, StageKind } from '@fleet-dao/shared';
+import { type EngineDrain, stoppingNote } from '../drain.ts';
 import { judgeStallWithJev, NO_JEV, triageFailureAsked } from '../failure/ask.ts';
 import type { JevPort, JevReply } from '../failure/jev.ts';
 import { judgeStall, type StallPolicy, type StallToolCall } from '../failure/stall.ts';
@@ -91,6 +101,7 @@ import {
   type HostDriver,
   type HostReport,
   type HostRunners,
+  type HostRunSpec,
   type HostSession,
   hostDrivers,
   isWiredHost,
@@ -98,6 +109,15 @@ import {
   type WiredHost,
   wiredHostNames,
 } from './hosts.ts';
+import {
+  explainKill,
+  type KillEvidenceDeps,
+  killSignal,
+  type OomCounters,
+  oomCounters,
+  realKillEvidence,
+  scopeOomKills,
+} from './kill-evidence.ts';
 import { bundleFromMirror, type MirrorGitHub, mapped } from './mirror.ts';
 import {
   isLeadKind,
@@ -121,6 +141,7 @@ import {
   type RelayFacts,
   stagePrompt,
 } from './prompts.ts';
+import { readSessionMeta, type SessionMeta, writeSessionMeta } from './session-io.ts';
 import { POOL_HOLD_PREFIX, poolHoldKey } from './store-ports.ts';
 import {
   changedFilesSince,
@@ -142,6 +163,7 @@ import {
   removeFileAs,
   type UserTree,
   uncommittedTracked,
+  worktreeChanges,
 } from './user-git.ts';
 import type { WorkTrees } from './worktrees.ts';
 
@@ -155,6 +177,45 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** 切号停下的会话交回的失败码（#59）：失败分流 OS1 认它——马上续同一个会话，不算失败、不记重试的账。 */
 export const ORG_SWITCH_CODE = 'org_switch';
 const orgSwitchFailure = (why: string) => ({ code: ORG_SWITCH_CODE, message: why, retryable: true });
+/**
+ * 排空到截止停下的会话交回的失败码（drain.ts）：失败分流 KL3 认它——不算失败、不记重试的账，新引擎起来按编号续同一个会话。
+ * 引擎在停的那一刻会话被信号杀掉（kill-evidence.ts 对上了）也交这个码。
+ */
+export const ENGINE_STOP_CODE = 'engine_stop';
+/** 引擎在排空、这次没起会话（startSession 拒了）：失败分流 ES1 认它——不记账，回去选路（选路这时回「过一会儿再选」）。 */
+export const ENGINE_STOPPING_CODE = 'ENGINE_STOPPING';
+
+/** 插头默认等第一帧的时限（adapters 的 DEFAULT_PROCESS_LIMITS.startupMs）。 */
+export const STARTUP_BASE_MS = 180_000;
+/** 续会话等第一帧最多放宽到这么久：再久就不是在读过程记录了。 */
+export const RESUME_STARTUP_MAX_MS = 12 * 60_000;
+/** 上下文每这么多 token 多等一分钟；不知道上下文多大就按上一轮跑了多久，每 10 分钟多等一分钟。 */
+export const RESUME_STARTUP_TOKENS_PER_MINUTE = 40_000;
+export const RESUME_STARTUP_RUN_MS_PER_MINUTE = 10 * 60_000;
+
+/**
+ * 续会话（resume、fork）等第一帧的时限，按会话已有的长度放宽：执行体要先把整段过程记录读进来才吐第一帧，会话越长读得越久。
+ * 2026-09-28 02:01:47 #276 的 Grok 会话跑了 55 分钟，续的时候 3 分钟没第一帧（startup_timeout），退回去续了规划那一步的会话，
+ * 55 分钟的上下文丢了。新开、接力的会话不读过程记录，照插头默认（undefined）。
+ */
+export function resumeStartupMs(
+  mode: ContinueMode,
+  prior: Pick<SessionRunState, 'contextTokens' | 'startedAt' | 'endedAt'> | null,
+): number | undefined {
+  if ((mode !== 'resume' && mode !== 'fork') || !prior) return undefined;
+  let extraMinutes: number;
+  if (prior.contextTokens !== null && prior.contextTokens > 0) {
+    extraMinutes = Math.ceil(prior.contextTokens / RESUME_STARTUP_TOKENS_PER_MINUTE);
+  } else if (prior.startedAt && prior.endedAt) {
+    extraMinutes = Math.ceil(
+      (prior.endedAt.getTime() - prior.startedAt.getTime()) / RESUME_STARTUP_RUN_MS_PER_MINUTE,
+    );
+  } else {
+    // 多长都不知道：按放宽的一半给，不拿默认的 3 分钟赌
+    return Math.round((STARTUP_BASE_MS + RESUME_STARTUP_MAX_MS) / 2);
+  }
+  return Math.min(RESUME_STARTUP_MAX_MS, STARTUP_BASE_MS + Math.max(0, extraMinutes) * 60_000);
+}
 
 export interface ContinuationFacts {
   /** 工作流要接着的会话号（可能是 cursor 的临时号）。 */
@@ -262,6 +323,18 @@ export interface SessionPortsDeps {
   stallCheckMs?: number;
   flushMs?: number;
   spawnTimeoutMs?: number;
+  /**
+   * 停机排空（drain.ts）：引擎在停时不起新会话（抛 ENGINE_STOPPING，失败分流 ES1 不记账、回去选路）；过了闸的会话登记在它上面，
+   * 交回工作流（或没起来）就撤掉，停机时等它们。不给就不闸（测试、只起一次的工具）。
+   */
+  drain?: EngineDrain;
+  /** 会话被信号杀掉时去哪查证据（kill-evidence.ts）：测试换成假的；不给就读真的 cgroup、发布目录。 */
+  killEvidence?: KillEvidenceDeps;
+  /**
+   * 会话脱开引擎进程（发布不碰在跑的会话）：每个会话一个收发目录 <ioRoot>/<runId>（输入输出走文件、退出码由会话那一侧写），
+   * 引擎重启后照目录接回。不给就照旧接管道（测试、只起一次的工具）：引擎一退会话就断。
+   */
+  ioRoot?: string;
   log?: (message: string, fields?: Record<string, unknown>) => void;
 }
 
@@ -270,6 +343,13 @@ export type SessionPorts = Pick<EnginePorts, 'startSession' | 'awaitSession' | '
   reapOrphanSessions(): Promise<number>;
   /** 切号（#59，real/org-switch.ts）用的两样：停下、还剩哪些。 */
   orgSwitch: OrgSwitchSessions;
+  /** 引擎停机（工人停下之后、关库之前）：放手脱开跑的会话，不停它们、不再写库，新引擎起来接回。回放手的编号。 */
+  releaseDetached(): string[];
+  /**
+   * 排空到截止（drain.ts）：把进程已经起来、还没收场的会话都停下（插头收进程），它们交回 engine_stop，新引擎起来按编号续上；
+   * 交回这一次叫停的会话编号（已经在停的不重复叫停）。
+   */
+  drainStop(why: string): string[];
 };
 
 /**
@@ -318,8 +398,15 @@ interface Live {
     | { kind: 'stall'; rule: string; basis: string }
     /** 切号（#59）：会话用户要换组织，先停下，切过去接着干（交回 org_switch，失败分流 OS1 马上续）。 */
     | { kind: 'org-switch'; why: string }
+    /** 排空到截止（drain.ts）：先停下，新引擎起来按编号续上（交回 engine_stop，失败分流 KL3）。 */
+    | { kind: 'engine-stop'; why: string }
     | undefined;
-  pending: ProgressEvent[];
+  /** 还没进库的进度事件；seq = 出自输出的哪一行（走文件时有），进库时一起把「确认到哪一行」推上去。 */
+  pending: { event: ProgressEvent; seq: number | undefined }[];
+  /** 走文件、脱开引擎进程跑（deps.ioRoot）：引擎重启了由新引擎接回，停机不停它、排空不等它。 */
+  detached: boolean;
+  /** 引擎停机时放手（releaseDetached）：不再读它的输出、不写库、不停它，留给下一个引擎接回。 */
+  release: AbortController;
   flushTimer: ReturnType<typeof setTimeout> | undefined;
   flushing: Promise<void>;
   writeError: string | undefined;
@@ -334,9 +421,25 @@ interface Live {
   says: string[];
   plan: Map<string, string>;
   quotaError: string | undefined;
+  /** 起来时读的会话资源池按内存杀进程的累计数：被信号杀掉时拿它比（kill-evidence.ts）。 */
+  oomBefore: Promise<OomCounters>;
+  /** 会话自己的 scope 名（插头交回的），看守醒来读它的内存记录。 */
+  scopeUnit: string | undefined;
+  /** 看守读到的它自己 scope 里按内存杀进程的最大数；没读到过是 undefined。 */
+  scopeOomSeen: number | undefined;
+  /** 这个会话在跑时，这个工人手上同时在跑的别的会话最多几个。 */
+  peersSeen: number;
+  /** 正挂着的看守有几个（看守被取消时会话可能还在跑，收场后由起会话那头撤掉排空的登记）。 */
+  awaiting: number;
 }
 
 const STEP_RANK: Record<string, number> = { pending: 0, in_progress: 1, done: 2 };
+/**
+ * 脱开跑的会话过了总时限多久还没人接回就收掉：盖住看守在新工人上重试的等待（心跳超时 + 重试间隔），再留余量。
+ * 会话自己的总时限由接回它的看守按原来的起点管；没人接回（工作流没了）时靠这个兜底。
+ */
+export const REATTACH_MARGIN_MS = 30 * 60_000;
+const SCOPE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/;
 const PENDING_MAX = 5_000;
 const RECENT_TOOLS = 30;
 const SAYS_KEPT = 12;
@@ -349,6 +452,21 @@ const OUTCOME: Record<SessionEnd['outcome'], RunOutcome> = {
   stopped: 'stopped',
 };
 const NEEDS = new Set(['human', 'info', 'access', 'other']);
+
+/**
+ * 这一批进库后能确认到输出的哪一行：批里最大的序号；下一批的头一条还是同一行（一行的事件被 500 条一批切开了）就只确认到
+ * 上一行——接回时从没确认的那一行起整行重放，不丢那一行剩下的事件。没有序号（走管道）、确认不到任何一行回 undefined。
+ */
+export function confirmedSeq(
+  batch: readonly { seq: number | undefined }[],
+  nextSeq: number | undefined,
+): number | undefined {
+  const seqs = batch.map((b) => b.seq).filter((n): n is number => n !== undefined);
+  if (seqs.length === 0) return undefined;
+  const top = Math.max(...seqs);
+  const seq = nextSeq === top ? top - 1 : top;
+  return seq >= 0 ? seq : undefined;
+}
 
 function asSessionUser(user: string | null | undefined): SessionUser | undefined {
   return (SESSION_USERS as readonly string[]).includes(user ?? '') ? (user as SessionUser) : undefined;
@@ -470,6 +588,7 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
   const flushMs = deps.flushMs ?? 300;
   const spawnTimeoutMs = deps.spawnTimeoutMs ?? 120_000;
   const log = deps.log ?? ((message, fields) => console.warn(message, fields ?? {}));
+  const evidence = deps.killEvidence ?? realKillEvidence();
   const helperOpts = {
     ...(deps.helper ? { helper: deps.helper } : {}),
     ...(deps.sudo ? { sudo: deps.sudo } : {}),
@@ -517,7 +636,7 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
    * 上一轮会话留下的临时目录：工人起来时（上一轮的会话 scope 都收了）把 _tmp 下的全清掉，这个进程里在跑的不碰。
    * 列不出来、删不掉都明说没清成（记日志），不挡工人接活：留着的只占盘，下次起来再清。回删掉了几个。
    */
-  async function sweepTmp(): Promise<number> {
+  async function sweepTmp(keep: ReadonlySet<string> = new Set()): Promise<number> {
     let dirs: string[];
     try {
       dirs = await trees.listTmp();
@@ -525,7 +644,7 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
       log('上一轮会话留下的临时目录没清成：列不出来', { error: errorText(error) });
       return 0;
     }
-    const mine = new Set([...registry.keys()].map((runId) => trees.tmpFor(runId)));
+    const mine = new Set([...registry.keys(), ...keep].map((runId) => trees.tmpFor(runId)));
     let removed = 0;
     const failed: string[] = [];
     for (const dir of dirs) {
@@ -544,17 +663,268 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     return removed;
   }
 
+  // ---- 脱开跑的会话：收发目录、接回（session-io.ts、adapters 的 detached.ts）
+
+  /** 这个会话的收发目录；没配根（走管道）、编号不像 scope 编号都是 undefined。 */
+  const ioDirOf = (runId: string): string | undefined =>
+    deps.ioRoot && SCOPE_ID.test(runId) ? join(deps.ioRoot, runId) : undefined;
+
+  function metaOf(live: Live, spec: HostRunSpec, oomBefore: OomCounters): SessionMeta {
+    return {
+      v: 1,
+      runId: live.runId,
+      sessionId: live.sessionId,
+      agentSessionId: live.agentSessionId ?? null,
+      hostId: live.hostId,
+      taskId: live.taskId,
+      stage: live.stage,
+      kind: live.kind,
+      mode: live.mode,
+      user: live.user,
+      poolId: live.poolId,
+      routeId: live.routeId,
+      dir: live.dir,
+      baseHead: live.baseHead ?? null,
+      defaultBranch: live.defaultBranch,
+      reviewHead: live.reviewHead ?? null,
+      verifyCriteria: live.verifyCriteria ?? null,
+      ...(live.previousCost === undefined ? {} : { previousCost: live.previousCost }),
+      startedAt: live.startedAt,
+      oomBefore,
+      limits: spec.limits,
+      testCommands: [...spec.testCommands],
+      cgroupLimits: spec.cgroup.limits ?? null,
+      model: spec.model,
+      session: spec.session,
+      purpose: spec.purpose,
+    };
+  }
+
+  /** 删收发目录。不抛：删不掉记日志，工人下次起来时 sweepIo 再清。 */
+  async function removeIo(runId: string): Promise<void> {
+    const dir = ioDirOf(runId);
+    if (!dir) return;
+    try {
+      await rm(dir, { recursive: true, force: true });
+    } catch (error) {
+      log('会话的收发目录没删掉（工人下次起来时再清）', { runId, dir, error: errorText(error) });
+    }
+  }
+
+  /** 工人起来时：收发目录里既不在这个进程手上、也不留着接回的，删掉。列不出、删不掉只记日志。 */
+  async function sweepIo(keep: ReadonlySet<string>): Promise<void> {
+    if (!deps.ioRoot) return;
+    let names: string[];
+    try {
+      names = await readdir(deps.ioRoot);
+    } catch (error) {
+      log('上一轮会话留下的收发目录没清成：列不出来', { dir: deps.ioRoot, error: errorText(error) });
+      return;
+    }
+    for (const name of names) {
+      if (registry.has(name) || keep.has(name)) continue;
+      try {
+        await rm(join(deps.ioRoot, name), { recursive: true, force: true });
+      } catch (error) {
+        log('上一轮会话留下的收发目录没删掉（下次起来再清）', { name, error: errorText(error) });
+      }
+    }
+  }
+
+  /**
+   * 上一个工人起的这个会话接不接得回：有接回记录、库里这一轮没结束也没叫停、没过总时限加 REATTACH_MARGIN_MS。
+   * 接得回回 true，接不回回原因。库读不成照抛（不能因为一次读库失败就收掉在跑的会话）。
+   */
+  async function keepForReattach(runId: string): Promise<true | string> {
+    const dir = ioDirOf(runId);
+    if (!dir) return deps.ioRoot ? `编号 ${runId} 不像会话编号` : '这个引擎没配收发目录，会话不脱开跑';
+    const got = await readSessionMeta(dir);
+    if ('error' in got) return got.error;
+    const stored = await getSessionRun(db, runId);
+    if (!stored) return '库里没这一轮';
+    if (stored.endedAt) return '库里这一轮已经记了结局';
+    if (stored.stopRequested) return `已经叫停（${stored.stopRequested.reason}）`;
+    const deadline = got.meta.startedAt + (got.meta.limits.wallClockMs ?? 0) + REATTACH_MARGIN_MS;
+    if (clock().getTime() > deadline) {
+      return `过了总时限还没人接回（起于 ${new Date(got.meta.startedAt).toISOString()}）`;
+    }
+    return true;
+  }
+
+  /**
+   * 看守在新工人上重试、手上没有这个会话：照收发目录和库里那一行接回（不起进程，从头重读输出：库里确认过的行只重建状态、
+   * 不再写库；之后的照常处理）。会话已经跑完了也一样接回：读到外壳写的退出码就收场、判结局。接不回回原因。
+   */
+  async function reattach(input: AwaitSessionInput): Promise<{ live: Live } | { lost: string }> {
+    const dir = ioDirOf(input.runId);
+    if (!dir) return { lost: '引擎工人重启过，输出管道断了' };
+    const got = await readSessionMeta(dir);
+    if ('error' in got) return { lost: `引擎工人重启过，接不回：${got.error}` };
+    const m = got.meta;
+    if (m.runId !== input.runId || m.sessionId !== input.sessionId) {
+      return { lost: `接回记录对不上（记的是会话 ${m.sessionId}）` };
+    }
+    const stored = await getSessionRun(db, input.runId);
+    if (!stored) return { lost: '接不回：库里没这一轮' };
+    if (stored.endedAt) return { lost: '接不回：库里这一轮已经记了结局' };
+    let prompt: string;
+    try {
+      prompt = await readFile(join(dir, IO_FILES.prompt), 'utf8');
+    } catch (error) {
+      return { lost: `接不回：提示词文件读不成（${errorText(error)}）` };
+    }
+    // 等库、读文件的这一会儿，同一个会话可能已经被别的看守接回了：用那一个
+    const known = registry.get(input.runId);
+    if (known) return { live: known };
+    const driver = drivers[m.hostId];
+    const cgroup: CgroupScope = {
+      id: m.runId,
+      user: m.user,
+      ...(m.cgroupLimits ? { limits: m.cgroupLimits } : {}),
+      ...helperOpts,
+    };
+    const info: SpawnInfo = {
+      pid: stored.handle?.pid ?? 0,
+      runId: m.runId,
+      ...(stored.handle?.scope ? { scope: stored.handle.scope } : {}),
+      startedAt: new Date(m.startedAt).toISOString(),
+    };
+    const live = newLive({
+      runId: m.runId,
+      sessionId: m.sessionId,
+      agentSessionId: m.agentSessionId ?? undefined,
+      hostId: m.hostId,
+      driver,
+      taskId: m.taskId,
+      stage: m.stage,
+      kind: m.kind,
+      mode: m.mode,
+      user: m.user,
+      poolId: m.poolId,
+      routeId: m.routeId,
+      dir: m.dir,
+      baseHead: m.baseHead ?? undefined,
+      defaultBranch: m.defaultBranch,
+      reviewHead: m.reviewHead ?? undefined,
+      verifyCriteria: m.verifyCriteria ?? undefined,
+      previousCost: m.previousCost,
+      startedAt: m.startedAt,
+      spawned: Promise.resolve(info),
+      abort: new AbortController(),
+      detached: true,
+      oomBefore: Promise.resolve(m.oomBefore),
+    });
+    live.scopeUnit = info.scope;
+    // 引擎不在的时候叫停了：接回就停（插头经帮手收 scope）
+    if (stored.stopRequested) {
+      live.stop = { kind: 'stop', reason: stored.stopRequested.reason };
+      live.abort.abort();
+    }
+    const spec: HostRunSpec = {
+      runId: m.runId,
+      user: m.user,
+      cwd: m.dir,
+      prompt,
+      // 接回不起进程：环境、通行证用不着（也没落盘）
+      env: { base: {}, fleetApi: '', fleetToken: '', pathPrepend: [], tmpDir: trees.tmpFor(m.runId) },
+      limits: m.limits,
+      testCommands: m.testCommands,
+      cgroup,
+      model: m.model,
+      session: m.session,
+      purpose: m.purpose,
+    };
+    registry.set(live.runId, live);
+    live.report = driver.run(spec, {
+      signal: live.abort.signal,
+      ...(deps.now ? { now: deps.now } : {}),
+      io: { dir, attach: true, release: live.release.signal },
+      replayUntil: (stored.outputSeq ?? -1) + 1,
+      onEvent: (e, meta) => onEvent(live, e, meta),
+      onRateLimit: (reading) => onRateLimit(live, reading),
+      onSessionId: (id) => {
+        live.agentSessionId ??= id;
+      },
+    });
+    live.report.catch(() => undefined);
+    const settled = () => undefined;
+    live.cleaned = live.report.then(settled, settled).then(() => removeTmp(live.runId));
+    log('接回了上一个引擎工人起的会话', {
+      runId: live.runId,
+      confirmedSeq: stored.outputSeq,
+      stopRequested: Boolean(stored.stopRequested),
+    });
+    return { live };
+  }
+
+  /** 新看守的状态：起会话、接回共用，只给认得出这个会话的那些，其余从空开始。 */
+  function newLive(
+    base: Pick<
+      Live,
+      | 'runId'
+      | 'sessionId'
+      | 'agentSessionId'
+      | 'hostId'
+      | 'driver'
+      | 'taskId'
+      | 'stage'
+      | 'kind'
+      | 'mode'
+      | 'user'
+      | 'poolId'
+      | 'routeId'
+      | 'dir'
+      | 'baseHead'
+      | 'defaultBranch'
+      | 'reviewHead'
+      | 'verifyCriteria'
+      | 'previousCost'
+      | 'startedAt'
+      | 'spawned'
+      | 'abort'
+      | 'detached'
+      | 'oomBefore'
+    >,
+  ): Live {
+    return {
+      ...base,
+      release: new AbortController(),
+      report: Promise.resolve(undefined as unknown as HostReport),
+      cleaned: Promise.resolve(),
+      stop: undefined,
+      pending: [],
+      flushTimer: undefined,
+      flushing: Promise.resolve(),
+      writeError: undefined,
+      dropped: 0,
+      lastEventAt: null,
+      lastStepAt: undefined,
+      lastFileAt: undefined,
+      tools: new Map(),
+      recent: [],
+      says: [],
+      plan: new Map(),
+      quotaError: undefined,
+      scopeUnit: undefined,
+      scopeOomSeen: undefined,
+      peersSeen: registry.size,
+      awaiting: 0,
+    };
+  }
+
   // ---- 进度：攒一小批写库
 
   const flush = (live: Live): Promise<void> => {
     live.flushing = live.flushing.then(async () => {
       while (live.pending.length > 0) {
         const batch = live.pending.splice(0, 500);
+        const confirmed = confirmedSeq(batch, live.pending[0]?.seq);
         try {
           const r = await appendProgressEvents(
             db,
             live.runId,
-            batch.map((e) => ({ at: new Date(e.at), kind: e.kind, payload: e.payload })),
+            batch.map(({ event: e }) => ({ at: new Date(e.at), kind: e.kind, payload: e.payload })),
+            confirmed === undefined ? {} : { outputSeq: confirmed },
           );
           if (r === 'run_not_found') {
             live.writeError ??= `库里没有会话 ${live.runId}，进度写不进去`;
@@ -584,7 +954,8 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     }, flushMs);
   };
 
-  const onEvent = (live: Live, event: ProgressEvent) => {
+  /** meta.replay = 接回时重读的、上一个引擎已经处理过的行：只重建状态（停滞判断要用），不再进库。 */
+  const onEvent = (live: Live, event: ProgressEvent, meta?: LineMeta) => {
     const at = Date.parse(event.at);
     const when = Number.isNaN(at) ? clock().getTime() : at;
     live.lastEventAt = when;
@@ -611,7 +982,8 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
       live.says.push(payload.text);
       if (live.says.length > SAYS_KEPT) live.says.shift();
     }
-    live.pending.push(event);
+    if (meta?.replay) return;
+    live.pending.push({ event, seq: meta?.seq });
     scheduleFlush(live);
   };
 
@@ -761,10 +1133,55 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     return { ...decideContinuation({ resumeId, prior, before, route, driver, user, dir, forkMax }), prior };
   }
 
+  /**
+   * 起会话的闸（停机排空，drain.ts）：引擎在停就不起，抛 ENGINE_STOPPING（不可重试：交回工作流，失败分流 ES1 不记账、回去选路，
+   * 选路这时回「过一会儿再选」、新引擎起来再派）。过了闸先登记（和上面的判断之间没有 await：停机信号插不进来），
+   * 起来了改成按会话自己的时限等，没起来就撤掉。同一个 runId 的重试（这个进程里已经起了的）不拦。
+   */
   async function startSession(input: LaunchSessionInput, ctx: Parameters<EnginePorts['startSession']>[1]) {
     const known = registry.get(input.runId);
     if (known) return resultOf(known, await known.spawned);
+    const stopping = deps.drain?.stopping();
+    if (stopping) {
+      throw new PortError(ENGINE_STOPPING_CODE, `${stoppingNote(stopping)}；这次没起会话 ${input.runId}`, {
+        retryable: false,
+      });
+    }
+    const since = clock().getTime();
+    deps.drain?.track({
+      runId: input.runId,
+      stage: input.stage,
+      taskId: input.taskId,
+      phase: 'starting',
+      since: new Date(since).toISOString(),
+    });
+    try {
+      const started = await launch(input, ctx);
+      const live = registry.get(input.runId);
+      if (!live || live.detached) {
+        // 交回的是上一个工人进程起的（看守接回或收掉它）；脱开引擎跑的会话停机不碰它、新引擎接回：排空都不用等
+        deps.drain?.settle(input.runId);
+        return started;
+      }
+      deps.drain?.track({
+        runId: input.runId,
+        stage: input.stage,
+        taskId: input.taskId,
+        phase: 'running',
+        since: new Date(live.startedAt).toISOString(),
+      });
+      // 进程收场时没有看守挂着（看守被取消、工作流收尾只叫了停）：没人会交回它了，不再等它
+      void live.cleaned.then(() => {
+        if (live.awaiting === 0) deps.drain?.settle(input.runId);
+      });
+      return started;
+    } catch (error) {
+      deps.drain?.settle(input.runId);
+      throw error;
+    }
+  }
 
+  async function launch(input: LaunchSessionInput, ctx: Parameters<EnginePorts['startSession']>[1]) {
     const route = await routeLaunchFacts(db, input.route.routeId);
     if (!route) {
       throw new PortError('ROUTE_NOT_FOUND', `库里没有路由 ${input.route.routeId}`, { retryable: false });
@@ -900,6 +1317,13 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
             prior?.failureMessage ? `${why}；${prior.failureMessage}` : why,
           )
         : undefined;
+    // 上一个会话没提交的改动（发布停机、续不上退回别的会话时留下的）：写进提示词，让它先读再接着做
+    let leftover: string[] | { error: string };
+    try {
+      leftover = await worktreeChanges(t);
+    } catch (error) {
+      leftover = { error: errorText(error) };
+    }
     const prompt = stagePrompt({
       stage: input.stage,
       brief: input.brief,
@@ -908,6 +1332,7 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
       mode,
       previousProblem: prior?.failureMessage ?? undefined,
       relay,
+      leftover,
     });
     // 发给别家的（开 PR 前验证，Fusion 按简报派给别家的副手……）：整份提示词（这次真要发的那一份，续会话、接力的也算）
     // 先过卫生检查，过不了不起会话。简报是 Lead 写的，没进过公开的地方
@@ -925,10 +1350,23 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     if (again?.stopRequested) {
       throw new PortError('SESSION_STOPPED', `会话 ${input.runId} 已经叫停，不再起`, { retryable: false });
     }
+    // 建树的这几分钟里开始排空了（要发新版本）：进程还没起，不起了——起了也做不完这一步，树留着，新引擎起来接着用
+    const draining = deps.drain?.stopping();
+    if (draining) {
+      throw new PortError(
+        ENGINE_STOPPING_CODE,
+        `${stoppingNote(draining)}；树建好了，进程没起（会话 ${input.runId}）`,
+        {
+          retryable: false,
+        },
+      );
+    }
     // 临时目录紧挨着起进程建：从这里起，不管起没起来、怎么收场，插头一收场就删（下面的 live.cleaned）。
     // 建不成照工作树建不成一样报 ADOPT_FAILED；同一个 runId 重试时它在就改属主（帮手的 adopt 可重入）。
     await trees.adopt(tmpDir, user);
 
+    // 会话脱开引擎进程（deps.ioRoot）：进程一起来引擎就可能被重启，接回要的记录（meta.json）先写好
+    const ioDir = ioDirOf(input.runId);
     const abort = new AbortController();
     let spawnResolve!: (info: SpawnInfo) => void;
     let spawnReject!: (error: unknown) => void;
@@ -937,7 +1375,7 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
       spawnReject = reject;
     });
     spawned.catch(() => undefined);
-    const live: Live = {
+    const live = newLive({
       runId: input.runId,
       sessionId,
       agentSessionId,
@@ -958,68 +1396,83 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
       previousCost: mode === 'resume' ? (prior?.sessionCostUsd ?? null) : undefined,
       startedAt: clock().getTime(),
       spawned,
-      report: Promise.resolve(undefined as unknown as HostReport),
-      cleaned: Promise.resolve(),
       abort,
-      stop: undefined,
-      pending: [],
-      flushTimer: undefined,
-      flushing: Promise.resolve(),
-      writeError: undefined,
-      dropped: 0,
-      lastEventAt: null,
-      lastStepAt: undefined,
-      lastFileAt: undefined,
-      tools: new Map(),
-      recent: [],
-      says: [],
-      plan: new Map(),
-      quotaError: undefined,
-    };
+      detached: ioDir !== undefined,
+      // 起进程前读一次资源池的累计数：被信号杀掉时比涨没涨（读不成的照实带着原因，不当成 0）
+      oomBefore: oomCounters(evidence),
+    });
     const cgroup: CgroupScope = { id: input.runId, user, limits, ...helperOpts };
+    const startupMs = resumeStartupMs(mode, prior);
+    const runSpec: HostRunSpec = {
+      runId: input.runId,
+      user,
+      cwd: dir,
+      prompt,
+      env: {
+        base: deps.baseEnv ?? process.env,
+        fleetApi: input.launch.fleetApi,
+        fleetToken: input.launch.fleetToken,
+        pathPrepend: input.launch.pathPrepend,
+        tmpDir,
+      },
+      limits: {
+        // 插头自己的 idle 超时管「光是没动静」；总时长比看守的限时（sessionMinutes）早一分钟到，插头先收场。
+        idleMs: input.stallSeconds * 1000,
+        wallClockMs: Math.max(60_000, input.sessionMinutes * 60_000 - 60_000),
+        // 续会话按已有长度多等第一帧（resumeStartupMs）
+        ...(startupMs === undefined ? {} : { startupMs }),
+      },
+      testCommands: task.repo.testCommand ? [task.repo.testCommand] : [],
+      cgroup,
+      model: route.upstreamModel ?? route.modelId,
+      session,
+      // 会话用户读不到引擎的配置和机器人凭据（design 第十四节），无头会话没人批权限：放开（驱动按执行方式给参数）。
+      purpose: 'work',
+    };
+    if (ioDir) {
+      try {
+        await writeSessionMeta(ioDir, metaOf(live, runSpec, await live.oomBefore));
+      } catch (error) {
+        // 进程还没起：和「没起来」一样收尾（记结局、删临时目录），明确报错
+        const failure = new PortError(
+          'IO_PREP_FAILED',
+          `会话的收发目录备不好（${ioDir}）：${errorText(error)}`,
+          {
+            retryable: false,
+          },
+        );
+        await removeTmp(input.runId);
+        await removeIo(input.runId);
+        await finishSessionRun(db, {
+          id: input.runId,
+          outcome: 'failed',
+          endedAt: clock(),
+          failureCode: failure.code,
+          failureMessage: failure.message,
+          routeOutcome: 'neutral',
+        }).catch((e: unknown) => log('没起来的会话没记上结局', { runId: input.runId, error: errorText(e) }));
+        throw failure;
+      }
+    }
     registry.set(input.runId, live);
     let spawnedYet = false;
     live.report = driver
-      .run(
-        {
-          runId: input.runId,
-          user,
-          cwd: dir,
-          prompt,
-          env: {
-            base: deps.baseEnv ?? process.env,
-            fleetApi: input.launch.fleetApi,
-            fleetToken: input.launch.fleetToken,
-            pathPrepend: input.launch.pathPrepend,
-            tmpDir,
-          },
-          limits: {
-            // 插头自己的 idle 超时管「光是没动静」；总时长比看守的限时（sessionMinutes）早一分钟到，插头先收场。
-            idleMs: input.stallSeconds * 1000,
-            wallClockMs: Math.max(60_000, input.sessionMinutes * 60_000 - 60_000),
-          },
-          testCommands: task.repo.testCommand ? [task.repo.testCommand] : [],
-          cgroup,
-          model: route.upstreamModel ?? route.modelId,
-          session,
-          // 会话用户读不到引擎的配置和机器人凭据（design 第十四节），无头会话没人批权限：放开（驱动按执行方式给参数）。
-          purpose: 'work',
+      .run(runSpec, {
+        signal: abort.signal,
+        ...(deps.now ? { now: deps.now } : {}),
+        ...(ioDir ? { io: { dir: ioDir, release: live.release.signal } } : {}),
+        onEvent: (e, m) => onEvent(live, e, m),
+        onRateLimit: (reading) => onRateLimit(live, reading),
+        onSpawn: (info) => {
+          spawnedYet = true;
+          live.scopeUnit = info.scope;
+          spawnResolve(info);
         },
-        {
-          signal: abort.signal,
-          ...(deps.now ? { now: deps.now } : {}),
-          onEvent: (e) => onEvent(live, e),
-          onRateLimit: (reading) => onRateLimit(live, reading),
-          onSpawn: (info) => {
-            spawnedYet = true;
-            spawnResolve(info);
-          },
-          // cursor 开新会话：真号到了才知道。先到的算（插头续会话时对不上的号不报，直接停）。
-          onSessionId: (id) => {
-            live.agentSessionId ??= id;
-          },
+        // cursor 开新会话：真号到了才知道。先到的算（插头续会话时对不上的号不报，直接停）。
+        onSessionId: (id) => {
+          live.agentSessionId ??= id;
         },
-      )
+      })
       .then(
         (report) => {
           if (!spawnedYet) {
@@ -1136,6 +1589,17 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     } catch (error) {
       return `（收旧会话时出错：${errorText(error)}）`;
     }
+  }
+
+  /**
+   * 看守每醒一次：记下这个工人手上同时在跑的别的会话有几个、读会话自己 scope 的按内存杀进程记录——进程被信号杀掉时，
+   * 它的 scope 多半已经收掉了，只能靠平时读下的（kill-evidence.ts）。读不到不算错，那一项证据就是没有。
+   */
+  async function noteMemoryAndPeers(live: Live): Promise<void> {
+    live.peersSeen = Math.max(live.peersSeen, registry.size - 1);
+    if (!live.scopeUnit) return;
+    const n = await scopeOomKills(evidence, live.scopeUnit);
+    if (n !== undefined) live.scopeOomSeen = Math.max(live.scopeOomSeen ?? 0, n);
   }
 
   async function checkStall(live: Live): Promise<void> {
@@ -1508,6 +1972,28 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
         runAsUser: live.user,
       },
     });
+    /**
+     * 没交终帧就退了、而且是被信号杀掉的（信号 SIGKILL、SIGTERM，或 sh 包着交回的 137、143）：按证据定是谁杀的
+     * （kill-evidence.ts），码换成 engine_stop / oom_killed / signal_unexplained 交给失败分流，证据接在原文后面。不猜。
+     */
+    const failedOrKilled = async (code: string, message: string): Promise<SessionEnd> => {
+      const signal =
+        code === 'no_result' || code === 'exit_nonzero'
+          ? killSignal(report.facts.exitCode, report.facts.signal)
+          : null;
+      if (!signal) return failed(code, message);
+      const scopeNow = live.scopeUnit ? await scopeOomKills(evidence, live.scopeUnit) : undefined;
+      const seen = [live.scopeOomSeen, scopeNow].filter((n): n is number => n !== undefined);
+      const cause = await explainKill(evidence, {
+        signal,
+        endedAt: live.startedAt + report.wallMs,
+        stopping: deps.drain?.stopping() ?? null,
+        before: await live.oomBefore,
+        scopeSeen: seen.length > 0 ? Math.max(...seen) : undefined,
+        othersRunning: live.peersSeen,
+      });
+      return failed(cause.code, `${message}；${cause.why}`);
+    };
 
     if (live.stop?.kind === 'stop') return { ...common, outcome: 'stopped' };
     // 切号停下的：交回 org_switch（可重试），工作流续同一个会话，换了池就 fork 续上（失败分流 OS1）
@@ -1516,6 +2002,20 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
         ...common,
         outcome: 'failed',
         failure: { ...orgSwitchFailure(live.stop.why), machine: deps.machine, runAsUser: live.user },
+      };
+    }
+    // 排空到截止停下的：交回 engine_stop（可重试），新引擎起来工作流续同一个会话（失败分流 KL3，不记账）
+    if (live.stop?.kind === 'engine-stop') {
+      return {
+        ...common,
+        outcome: 'failed',
+        failure: {
+          code: ENGINE_STOP_CODE,
+          message: `要发新版本，到了宽限的截止先停下：${live.stop.why}；新引擎起来按编号续上`,
+          retryable: true,
+          machine: deps.machine,
+          runAsUser: live.user,
+        },
       };
     }
     if (live.stop?.kind === 'stall') {
@@ -1556,7 +2056,7 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
         };
       }
       if (verdict.outcome === 'stopped') return { ...common, outcome: 'stopped' };
-      if (verdict.outcome !== 'ok') return failed(verdict.reason, verdict.detail);
+      if (verdict.outcome !== 'ok') return failedOrKilled(verdict.reason, verdict.detail);
       if (!done) {
         return failed('not_delivered', '会话结束了，但没用 fleet done 交活（也没用 fleet blocked 说卡在哪）');
       }
@@ -1583,23 +2083,31 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
       };
     }
     if (verdict.outcome === 'stopped') return { ...common, outcome: 'stopped' };
-    if (verdict.outcome !== 'ok') return failed(verdict.reason, verdict.detail);
+    if (verdict.outcome !== 'ok') return failedOrKilled(verdict.reason, verdict.detail);
     const output = await readOutput(live);
     if ('error' in output) return failed('wrong_output', output.error);
     return { ...common, outcome: 'done', output: output.ok };
   }
 
   async function awaitSession(input: AwaitSessionInput, ctx: Parameters<EnginePorts['awaitSession']>[1]) {
-    const live = registry.get(input.runId);
+    let live = registry.get(input.runId);
+    let whyLost = '引擎工人重启过，输出管道断了';
+    if (!live) {
+      // 工人重启过：会话脱开引擎跑的（走文件），照收发目录接回；接不回再按下面收掉它
+      const back = await reattach(input);
+      if ('lost' in back) whyLost = back.lost;
+      else live = back.live;
+    }
     if (!live || live.sessionId !== input.sessionId) {
-      // 接不上：工人重启过（会话的输出管道已经断了）。按记下的 scope 收掉旧会话，交回 SESSION_LOST，工作流续会话重起。
+      // 接不上：按记下的 scope 收掉旧会话，交回 SESSION_LOST，工作流续会话重起。
       const stored = await getSessionRun(db, input.runId);
       const user = asSessionUser(stored?.runAsUser);
       const handle = input.handle ?? stored?.handle ?? undefined;
       const reaped = await reapLost(input.runId, user, handle);
       // 旧会话的临时目录跟着删：续会话是新的 runId、新的临时目录，这一个没人再用
       await removeTmp(input.runId);
-      const message = `接不上会话 ${input.sessionId}：引擎工人重启过，输出管道断了${reaped}`;
+      const message = `接不上会话 ${input.sessionId}：${whyLost}${reaped}`;
+      await removeIo(input.runId);
       if (stored && !stored.endedAt) {
         await finishSessionRun(db, {
           id: input.runId,
@@ -1623,14 +2131,35 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
       };
     }
 
+    live.awaiting += 1;
+    let settled = false;
+    try {
+      return await watchLive(live, ctx, () => {
+        settled = true;
+      });
+    } finally {
+      live.awaiting -= 1;
+      // 交回了：停机不用再等它。看守被取消（会话还在跑）的不撤：停机照它自己的时限等，收场时起会话那头撤
+      if (settled) deps.drain?.settle(live.runId);
+    }
+  }
+
+  /** 看守挂着的那一段：等进程收场、心跳、写进度、判停滞，收场后判结局、写库、交回。onSettled 在进程收场时叫。 */
+  async function watchLive(
+    live: Live,
+    ctx: Parameters<EnginePorts['awaitSession']>[1],
+    onSettled: () => void,
+  ): Promise<SessionEnd> {
     let nextStall = Date.now() + stallCheckMs;
     let settled = false;
     const ended = live.report.then(
       () => {
         settled = true;
+        onSettled();
       },
       () => {
         settled = true;
+        onSettled();
       },
     );
     while (!settled) {
@@ -1649,6 +2178,7 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
       }
       ctx.heartbeat({ runId: live.runId, sessionId: live.sessionId });
       await flush(live);
+      await noteMemoryAndPeers(live);
       if (Date.now() >= nextStall) {
         nextStall = Date.now() + stallCheckMs;
         try {
@@ -1682,6 +2212,7 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     registry.delete(live.runId);
     // 插头已经收场：临时目录删完再交回（不会失败，删不掉只记日志）
     await live.cleaned;
+    await removeIo(live.runId);
     const { routeOutcome, jev: asked } = await holdOrRelease(live, end);
     // 问过 Jev 的（规则认不出的失败）：回答随结局交给工作流，工作流的失败分流带着它判，不在工作流里再问。
     if (asked && end.failure) end = { ...end, failure: { ...end.failure, jev: asked } };
@@ -1717,6 +2248,25 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     return end;
   }
 
+  /** 收发目录里有、scope 已经没了、还能接回的（keepForReattach）：引擎不在时跑完的会话。列不出记日志、当没有。 */
+  async function finishedWhileAway(seen: ReadonlySet<string>): Promise<string[]> {
+    if (!deps.ioRoot) return [];
+    let names: string[];
+    try {
+      names = await readdir(deps.ioRoot);
+    } catch (error) {
+      log('收发目录列不出来，引擎不在时跑完的会话接不回', { dir: deps.ioRoot, error: errorText(error) });
+      return [];
+    }
+    const out: string[] = [];
+    for (const name of names) {
+      if (seen.has(name) || registry.has(name)) continue;
+      const why = await keepForReattach(name);
+      if (why === true) out.push(name);
+    }
+    return out;
+  }
+
   async function stopSession(input: Parameters<EnginePorts['stopSession']>[0]) {
     await requestSessionStop(db, { runId: input.runId, reason: input.reason });
     const live = registry.get(input.runId);
@@ -1734,6 +2284,7 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     if (error)
       throw new PortError('STOP_FAILED', `停会话 ${input.runId} 没成：${error}`, { retryable: true });
     await removeTmp(input.runId);
+    await removeIo(input.runId);
   }
 
   async function reapOrphanSessions(): Promise<number> {
@@ -1742,16 +2293,31 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
       throw new Error(`查不了上一轮留下的会话（fleet-agent-scope list）：${listed.detail}`);
     }
     let reaped = 0;
+    const kept: string[] = [];
     for (const scope of listed.scopes) {
       if (scope.state === 'inactive') continue;
+      // 脱开引擎跑的、还能接回的留着：看守（awaitSession）重试到这个新工人上时接回，停机不碰在跑的会话
+      const why = await keepForReattach(scope.id);
+      if (why === true) {
+        kept.push(scope.id);
+        continue;
+      }
+      log(`上一轮留下的会话 ${scope.id} 接不回，收掉：${why}`);
       // stop 只按编号收；用户只过帮手参数的校验。
       const error = await stopScope({ id: scope.id, user: SESSION_USERS[0], ...helperOpts });
       if (error) throw new Error(`收不掉上一轮留下的会话 ${scope.id}：${error}`);
       reaped += 1;
     }
-    // 会话都收了：它们的临时目录（上一轮没来得及删的、工人被强杀时在跑的）一起清掉
-    const swept = await sweepTmp();
+    if (kept.length > 0) log(`上一轮起的会话还在跑、留给看守接回 ${kept.length} 个：${kept.join('、')}`);
+    // 引擎不在的时候跑完了的（scope 已经没了，退出码在收发目录里）：也留着，看守接回时收场、判结局
+    const done = await finishedWhileAway(new Set(kept));
+    if (done.length > 0)
+      log(`上一轮起的会话在引擎不在时跑完了、留给看守收场 ${done.length} 个：${done.join('、')}`);
+    kept.push(...done);
+    // 收掉的会话的临时目录、收发目录（上一轮没来得及删的、工人被强杀时在跑的）一起清掉；留着接回的不动
+    const swept = await sweepTmp(new Set(kept));
     if (swept > 0) log(`删掉上一轮会话留下的临时目录 ${swept} 个`);
+    await sweepIo(new Set(kept));
     return reaped;
   }
 
@@ -1769,7 +2335,42 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     live: (poolIds) => [...registry.values()].filter((l) => poolIds.has(l.poolId)).map((l) => l.runId),
   };
 
-  return { startSession, awaitSession, stopSession, reapOrphanSessions, orgSwitch };
+  /** 脱开引擎跑的会话（detached）不停：引擎重启后接回。只停还接着管道的（这一版之前起的）。 */
+  function drainStop(why: string): string[] {
+    const stopped: string[] = [];
+    for (const live of registry.values()) {
+      if (live.stop || live.detached) continue;
+      live.stop = { kind: 'engine-stop', why };
+      live.abort.abort();
+      stopped.push(live.runId);
+    }
+    return stopped;
+  }
+
+  function releaseDetached(): string[] {
+    const released: string[] = [];
+    for (const live of [...registry.values()]) {
+      if (!live.detached) continue;
+      live.release.abort();
+      clearTimeout(live.flushTimer);
+      live.flushTimer = undefined;
+      // 没进库的进度不写了：这些行没确认，新引擎接回时从这里起照常再处理一遍
+      live.pending.length = 0;
+      registry.delete(live.runId);
+      released.push(live.runId);
+    }
+    return released;
+  }
+
+  return {
+    startSession,
+    awaitSession,
+    stopSession,
+    reapOrphanSessions,
+    orgSwitch,
+    drainStop,
+    releaseDetached,
+  };
 }
 
 /** 选路那边认的前缀，从这里也导出一份：session 端口写、store 端口读，同一个常量。 */

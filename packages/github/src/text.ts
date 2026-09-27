@@ -30,7 +30,7 @@ export function neutralizeCloseKeywords(text: string): string {
 }
 
 // —— PR 正文：栏目以仓根 .github/pull_request_template.md 为准。人开的 PR 由 GitHub 套那份模板，引擎开的走这里；
-// 两边栏目对不上，test/text.test.ts 会红。整篇 15 行以内（设计 §7）。——
+// 两边栏目对不上，test/text.test.ts 会红。整篇 16 行以内（设计 §7；#348 加「认领」栏时从 15 放到 16：固定的栏占 8 行，再少列表就放不下）。——
 
 export interface PrBodyInput {
   /** 对应的需求（issue 号）。 */
@@ -47,6 +47,8 @@ export interface PrBodyInput {
   risks?: readonly string[] | undefined;
   /** 「按推荐先做了」：问创始人的岔路里没等他回、按推荐先做了的（#259）；空 = 无。 */
   assumed?: readonly string[] | undefined;
+  /** 「修提醒」：这个 PR 修的是哪几条提醒（键），驾驶舱据此显示修到哪（design 15.3「谁在处理」）；空 = 无。 */
+  fixesAlerts?: readonly string[] | undefined;
   /**
    * 「对应计划」：plan.md 的阶段加那一条的原话开头，例如「P1「工作流」」。必填；给空的写「（没写）」，
    * CI 的 pr-fields（packages/conventions）照样判红，不会当成填了。
@@ -71,13 +73,19 @@ const PR_DOC_FILES: readonly (readonly [path: string, name: string])[] = [
   ['docs/plan.md', 'plan'],
 ];
 
-export const PR_BODY_MAX_LINES = 15;
+export const PR_BODY_MAX_LINES = 16;
 
 /**
  * 「这个 PR 做完就关单」一栏：引擎开的 PR 一律写「否」（#241）。GitHub 合并时替它关了单，接活会当成叫停，第 7 步的
  * 关单评论和记账就做不完；所以正文里的关单词也一律改成「关联」（neutralizeCloseKeywords）。
  */
 export const ENGINE_CLOSE_COLUMN = '否（引擎合并后第 7 步自己关单）';
+
+/**
+ * 「认领」一栏（#348）：引擎开的 PR 不写认领号——认领归引擎、PR 是「干活的」机器人开的，引擎贴的「认领对得上」就算对得上
+ * （core 的 judgeClaimMatch）。
+ */
+export const ENGINE_CLAIM_COLUMN = '引擎';
 
 export function renderPrBody(input: PrBodyInput): string {
   const lists: [string, readonly string[]][] = [
@@ -97,6 +105,8 @@ export function renderPrBody(input: PrBodyInput): string {
   const docs = PR_DOC_FILES.filter(([path]) => changed.has(path)).map(([, name]) => name);
   const tail = [
     `**需求**：${requirement}`,
+    `**认领**：${ENGINE_CLAIM_COLUMN}`,
+    `**修提醒**：${(input.fixesAlerts ?? []).map(oneLine).filter(Boolean).join(' ') || '无'}`,
     `**这个 PR 做完就关单**：${ENGINE_CLOSE_COLUMN}`,
     `**对应计划**：${oneLine(input.plan) || '（没写）'}`,
     `**specs**：${input.specs === null ? '不适用' : oneLine(input.specs) || '（没写）'}`,

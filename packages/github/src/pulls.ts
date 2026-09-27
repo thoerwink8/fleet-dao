@@ -474,7 +474,11 @@ export type CiWaitResult =
     }
   /** 和主线冲突：GitHub 不给冲突的 PR 起 CI，要先同步主线（C1）。 */
   | { state: 'conflict'; head: string; detail: string }
-  /** PR 的头变了：结论必须绑在要合的头上，重新送检。 */
+  /**
+   * PR 的头变了，且新头不含老头（compare 老头...新头 behind_by > 0，像是被强推改写了）：结论必须绑在要合的头上，
+   * 这种没法自己接着查，交回去要人看。新头含着老头的（人或引擎自己并了主线、加了提交）不会走到这里：见下面循环里的
+   * `advance`，认新头接着在它上面查，不当成头变了。
+   */
   | { state: 'head_moved'; head: string; actualHead: string; detail: string }
   | { state: 'closed'; head: string; detail: string }
   /** 一个检查、一个工作流都没起。 */
@@ -495,7 +499,10 @@ export async function waitCi(
   input: WaitCiInput,
   ctx: ActivityContext = {},
 ): Promise<CiWaitResult> {
-  const { repo, prNumber, head } = input;
+  const { repo, prNumber } = input;
+  // 送检的头（心跳恢复时按它对：memo 的头对不上就当没恢复，从头查，见 asMemo）；查到头变了、新头含着老头
+  // 就认它、往下接着用（不当成头变了）——`readCi` 等下面都读这个变量，不是 input.head。
+  let head = input.head;
   const now = () => deps.client.now().getTime();
   const sleep = (ms: number) => deps.client.sleep(ms, ctx.signal);
   const timeoutMs = input.timeoutMs ?? 30 * 60_000;
@@ -507,6 +514,23 @@ export async function waitCi(
   const required = await requiredChecksFor(deps, repo, input.checks, ctx.signal);
   let failures = 0;
   let redSeenAt: number | null = null;
+  const base = `/repos/${enc(repo.owner)}/${enc(repo.name)}`;
+  const auth = { as: 'engine' as const, repo };
+  /** newHead 含不含 oldHead（GitHub 的 compare：老头...新头，behind_by = 0 就是新头一个不少地含着老头）。 */
+  const contains = async (oldHead: string, newHead: string): Promise<boolean> => {
+    const cmp = await deps.client.request<{ behind_by?: number }>({
+      method: 'GET',
+      path: `${base}/compare/${encRef(oldHead)}...${encRef(newHead)}`,
+      auth,
+      query: { per_page: 1 },
+      signal: ctx.signal,
+    });
+    const behindBy = cmp.data?.behind_by;
+    if (typeof behindBy !== 'number') {
+      throw unexpected(`比较 ${oldHead.slice(0, 7)}...${newHead.slice(0, 7)}`, cmp.data);
+    }
+    return behindBy === 0;
+  };
 
   for (;;) {
     ctx.signal?.throwIfAborted();
@@ -515,6 +539,25 @@ export async function waitCi(
     let ci: CiRead;
     try {
       pr = await readPull(deps, repo, prNumber, 'engine', ctx.signal);
+      if (pr.state !== 'closed' && pr.head.sha !== head) {
+        // 头变了：人或引擎自己把主线并进来又推了（合并队列退回、自动并主线），新头含着老头——认新头，接着在它
+        // 上面查 CI，不当成头变了（不算没查成，也不用停下等人）。新头不含老头（被强推改写了）才真的报出去。
+        if (await contains(head, pr.head.sha)) {
+          head = pr.head.sha;
+          memo.head = head;
+          memo.startedAt = now();
+          memo.sawActivityAt = null;
+          redSeenAt = null;
+          failures = 0;
+          continue;
+        }
+        return {
+          state: 'head_moved',
+          head,
+          actualHead: pr.head.sha,
+          detail: `PR #${prNumber} 的头从 ${head.slice(0, 7)} 变成了 ${pr.head.sha.slice(0, 7)}，而且新头不含老头（像是被强推改写了）`,
+        };
+      }
       ci = await readCi(deps, repo, head, required, ctx.signal);
       failures = 0;
     } catch (err) {
@@ -536,14 +579,6 @@ export async function waitCi(
 
     if (pr.state === 'closed') {
       return { state: 'closed', head, detail: `PR #${prNumber} 已经${pr.merged ? '合并' : '关掉'}了` };
-    }
-    if (pr.head.sha !== head) {
-      return {
-        state: 'head_moved',
-        head,
-        actualHead: pr.head.sha,
-        detail: `PR #${prNumber} 的头从 ${head.slice(0, 7)} 变成了 ${pr.head.sha.slice(0, 7)}`,
-      };
     }
     if (pr.mergeable === false || pr.mergeable_state === 'dirty') {
       return {

@@ -6,6 +6,15 @@ export {
   signAgentToken,
   verifyAgentToken,
 } from './agent-token.ts';
+export {
+  type AlertWorkPort,
+  deployFacts,
+  handlingOf,
+  handlingView,
+  pgAlertWork,
+  toAlertSilence,
+  toAlertWorkFacts,
+} from './alert-work.ts';
 export { type Apps, type BuildOptions, buildApps } from './app.ts';
 export {
   type ChangeHub,
@@ -16,7 +25,19 @@ export {
   parseChangePayload,
   startPgChangeFeed,
 } from './changes.ts';
+export {
+  CLAIM_STATUS_ALERT_KEY,
+  type ClaimAlerts,
+  type ClaimRefresh,
+  type ClaimRepo,
+  type ClaimStatus,
+  type ClaimStatusDeps,
+  type ClaimSweepReport,
+  createClaimStatus,
+  type ReassignCloseReport,
+} from './claim-status.ts';
 export { type Config, ConfigError, loadConfig } from './config.ts';
+export { readDeployLagInput } from './deploy-lag.ts';
 export type { Deps } from './deps.ts';
 export {
   createDraftOpenRunner,

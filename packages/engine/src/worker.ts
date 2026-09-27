@@ -1,12 +1,33 @@
 // worker：连 Temporal、打包工作流、挂上活动。地址、命名空间、任务队列等从本机配置（环境变量）读，不写死进代码。
+// 排空（drain.ts）：要发新版本、收到停机信号，都先不起新会话，在跑的最多再做一小段宽限，到点停下（按编号续上），再让工人停下。
 
+import { realpathSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { signAgentToken } from '@fleet-dao/api/agent-token';
 import { Client, Connection } from '@temporalio/client';
-import { bundleWorkflowCode, NativeConnection, Worker, type WorkflowBundle } from '@temporalio/worker';
+import {
+  bundleWorkflowCode,
+  NativeConnection,
+  Runtime,
+  Worker,
+  type WorkflowBundle,
+} from '@temporalio/worker';
 import { type AgentTokenClaims, createActivities, type EngineJobs } from './activities.ts';
 import type { EngineActivities } from './activity-options.ts';
 import { createDecide, type Decide, type FailureTriage } from './decisions/index.ts';
+import {
+  createEngineDrain,
+  type DrainEnd,
+  deadlineFrom,
+  type EngineDrain,
+  type InFlightSession,
+  RELEASE_GRACE_MS,
+  type WaitDrainedOptions,
+  waitDrained,
+} from './drain.ts';
+import { createDrainControl, type DrainControl, shaOfDir } from './drain-control.ts';
+import { startDrainStatusFile } from './drain-file.ts';
 import { createFakeWorld } from './fakes.ts';
 import { ensureEngineSchedules } from './jobs/schedules.ts';
 import type { EnginePorts } from './ports.ts';
@@ -15,7 +36,7 @@ export interface EngineConfig {
   address: string;
   namespace: string;
   taskQueue: string;
-  /** 停机时给在途活动多久收尾。 */
+  /** 工人停下时给在途活动多久收尾（会话已经在排空那一步停下、交回了，这里只剩等 CI、查库这类）。 */
   shutdownGraceSeconds: number;
   /** 同时执行的活动数；会话看守和等 CI 大多在等，真正的并发上限在选路由（账号池空位）那里。 */
   maxConcurrentActivities: number;
@@ -142,15 +163,163 @@ export function portsModeFromEnv(env: Record<string, string | undefined>): Ports
   );
 }
 
-/** 进程入口用：按环境变量起一个 worker，收到 SIGINT/SIGTERM 优雅停机。 */
+/** 装停机信号处理的地方：生产是 process，测试给假的。 */
+export interface SignalSource {
+  on(signal: 'SIGTERM' | 'SIGINT', handler: () => void): unknown;
+  off(signal: 'SIGTERM' | 'SIGINT', handler: () => void): unknown;
+}
+
+export interface GracefulShutdownOptions {
+  worker: Pick<Worker, 'getState' | 'shutdown'>;
+  drain: EngineDrain;
+  /** 到截止、被强停时停下还在跑的会话（real/sessions.ts 的 drainStop；假端口没有会话，给空的）。 */
+  stopSessions(why: string): string[];
+  log: (message: string) => void;
+  /** 停机信号来时给在跑的会话的宽限；不给就是 RELEASE_GRACE_MS。发布请求的截止更早就按它的。 */
+  graceMs?: number;
+  signals?: SignalSource;
+  now?: () => number;
+  sleep?: WaitDrainedOptions['sleep'];
+  pollMs?: number;
+  stopReportMs?: number;
+}
+
+const list = (sessions: InFlightSession[]) =>
+  sessions
+    .map((s) => `${s.stage}（${s.runId.slice(0, 8)}，${s.phase === 'starting' ? '在起' : '在跑'}）`)
+    .join('、');
+
+const DRAIN_END_WORDS: Readonly<Record<DrainEnd, string>> = {
+  empty: '手上的会话都交回了',
+  overdue: '到了截止、停下的会话也等过了交回',
+  forced: '又收到一次停机信号，不等了',
+};
+
+/**
+ * 接停机信号（Temporal 自己的那一套在 runEngineWorker 里关掉了）：第一次 SIGTERM 进排空（drain.ts）——不起新会话，在跑的
+ * 最多再做一段宽限（发布请求的截止更早就按它），到点停下（交回 engine_stop，新引擎起来按编号续上），交回了再让工人停下；
+ * 再来一次 SIGTERM 或 SIGINT：马上停下会话、让工人停下（工人停下时给在途活动 shutdownGraceSeconds 交回）。
+ * done 在交代了工人停下之后落定，带上怎么结束的。
+ */
+export function installGracefulShutdown(o: GracefulShutdownOptions): {
+  done: Promise<DrainEnd>;
+  dispose(): void;
+} {
+  const signals = o.signals ?? process;
+  const now = o.now ?? (() => Date.now());
+  let forced = false;
+  let settle!: (end: DrainEnd) => void;
+  const done = new Promise<DrainEnd>((resolve) => {
+    settle = resolve;
+  });
+  let started = false;
+  let finished = false;
+  const stopWorker = (end: DrainEnd) => {
+    if (finished) return;
+    finished = true;
+    // 工人还没 run 起来、已经在停，都不再叫（shutdown 在不是 RUNNING 时会抛）
+    if (o.worker.getState() === 'RUNNING') o.worker.shutdown();
+    settle(end);
+  };
+  const force = (signal: string) => {
+    if (finished) return;
+    forced = true;
+    const t = now();
+    o.drain.cordon({
+      source: 'signal',
+      since: new Date(t).toISOString(),
+      until: new Date(t).toISOString(),
+      why: `收到 ${signal}`,
+    });
+    const stopped = o.stopSessions(`收到 ${signal}，马上停`);
+    o.log(
+      `收到 ${signal}：不等了，马上停${stopped.length > 0 ? `（停下 ${stopped.length} 个会话，新引擎起来按编号续上：${stopped.join('、')}）` : ''}`,
+    );
+    // 正在排空的那一圈醒来看到 forced 自己收手（stopWorker 只认第一次）
+    stopWorker('forced');
+  };
+  const onTerm = () => {
+    if (started || forced) {
+      force('第二次 SIGTERM');
+      return;
+    }
+    started = true;
+    const t = now();
+    o.drain.cordon({
+      source: 'signal',
+      since: new Date(t).toISOString(),
+      until: deadlineFrom(t, o.graceMs ?? RELEASE_GRACE_MS),
+      why: '收到 SIGTERM（systemd 在停引擎：发布切版本、重启或关机）',
+    });
+    const c = o.drain.stopping();
+    const inFlight = o.drain.inFlight();
+    o.log(
+      inFlight.length === 0
+        ? '收到 SIGTERM：手上没有会话，马上停'
+        : `收到 SIGTERM：不起新会话，手上 ${inFlight.length} 个会话最晚做到 ${c?.until ?? '（截止认不出）'}，到点没做完的停下、新引擎起来按编号续上：${list(inFlight)}`,
+    );
+    let lastReport = t;
+    void waitDrained(o.drain, {
+      stopSessions: o.stopSessions,
+      forced: () => forced,
+      now,
+      ...(o.sleep ? { sleep: o.sleep } : {}),
+      ...(o.pollMs === undefined ? {} : { pollMs: o.pollMs }),
+      ...(o.stopReportMs === undefined ? {} : { stopReportMs: o.stopReportMs }),
+      onTick: (waiting, at) => {
+        // 每分钟报一次还在等谁（journalctl -u fleet-engine 看得到）
+        if (at - lastReport < 60_000) return;
+        lastReport = at;
+        o.log(`排空中：还在等 ${list(waiting)}；截止 ${o.drain.stopping()?.until ?? '（认不出）'}`);
+      },
+      onStopped: (runIds) =>
+        o.log(`到了排空截止：停下还在跑的会话（新引擎起来按编号续上）：${runIds.join('、')}`),
+    }).then(({ end, left }) => {
+      if (finished) return;
+      o.log(
+        `排空结束：${DRAIN_END_WORDS[end]}${left.length > 0 ? `；还没交回的这几个新引擎起来按编号续上：${list(left)}` : ''}；让工人停下`,
+      );
+      stopWorker(end);
+    });
+  };
+  const onInt = () => force('SIGINT');
+  signals.on('SIGTERM', onTerm);
+  signals.on('SIGINT', onInt);
+  return {
+    done,
+    dispose() {
+      signals.off('SIGTERM', onTerm);
+      signals.off('SIGINT', onInt);
+    },
+  };
+}
+
+/** 这个进程在跑哪一版：systemd 起进程时 WorkingDirectory（current）解成的 <提交号> 目录；认不出是 null（开发机、测试）。 */
+export function ownReleaseSha(cwd: string = process.cwd()): string | null {
+  try {
+    return shaOfDir(realpathSync(cwd));
+  } catch {
+    return null;
+  }
+}
+
+/** 进程入口用：按环境变量起一个 worker；要发新版本、停机信号都先排空（drain-control.ts、installGracefulShutdown）。 */
 export async function runEngineWorker(env: Record<string, string | undefined> = process.env): Promise<void> {
   const config = configFromEnv(env);
   const mode = portsModeFromEnv(env);
+  // SDK 默认一收到 SIGTERM 就停工人、30 秒后取消在途活动：会话等不到做完。停机信号改由 installGracefulShutdown 接。
+  // 必须在第一次连 Temporal 之前装（Runtime 只能装一次）。
+  Runtime.install({ shutdownSignals: [] });
+  const drain = createEngineDrain();
   let ports: EnginePorts;
   let reapOrphanSessions: (() => Promise<number>) | undefined;
   let jobs: EngineJobs | undefined;
   let registerJobs: (() => Promise<void>) | undefined;
   let close: () => Promise<void> = async () => {};
+  let statusFile: string | undefined;
+  let control: DrainControl | undefined;
+  let stopSessions: (why: string) => string[] = () => [];
+  let releaseDetached: () => string[] = () => [];
   let signAgentToken = agentTokenSignerFromEnv(env);
   if (mode === 'real') {
     // 真会话里的 fleet 命令要连后端、要通行证：缺一样就不起（起了也只会一个个会话起不来）。
@@ -160,18 +329,25 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
     ];
     if (missing.length > 0) throw new Error(`真端口起不来，本机配置缺：${missing.join('、')}`);
     const { realPortsFromEnv } = await import('./real/index.ts');
-    const real = realPortsFromEnv(env);
+    const real = realPortsFromEnv(env, { drain, ownSha: ownReleaseSha() });
     ports = real.ports;
     reapOrphanSessions = real.reapOrphanSessions;
     jobs = real.jobs;
     registerJobs = real.registerJobs;
     close = real.close;
+    statusFile = join(real.stateDir, 'drain.json');
+    control = createDrainControl({ ...real.drainControl, drain, log: (message) => console.info(message) });
+    stopSessions = real.drainControl.stopSessions;
+    releaseDetached = real.releaseDetached;
   } else {
     ports = createFakeWorld().ports;
     signAgentToken ??= (claims) => `fake-token.${claims.runId}`;
   }
   const connection = await NativeConnection.connect({ address: config.address });
   let clientConnection: Connection | undefined;
+  let status: ReturnType<typeof startDrainStatusFile> | undefined;
+  let shutdown: ReturnType<typeof installGracefulShutdown> | undefined;
+  let stopControl: (() => void) | undefined;
   try {
     if (registerJobs) {
       // 定时任务只由真端口的工人建：假端口不碰库和 GitHub，建了也只会一轮轮报 JOB_NOT_CONFIGURED。
@@ -181,6 +357,21 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
       const client = new Client({ connection: clientConnection, namespace: config.namespace });
       const ensured = await ensureEngineSchedules(client, config.taskQueue);
       console.info(`定时任务已对齐：${JSON.stringify(ensured)}`);
+    }
+    // 排空状态写给发布脚本看（它拿 pid 和 systemd 的 MainPID 比）：假端口没有状态目录，不写
+    if (statusFile) {
+      status = startDrainStatusFile({
+        drain,
+        file: statusFile,
+        pid: process.pid,
+        log: (message) => console.warn(message),
+      });
+    }
+    // 接活之前先看一眼排空请求：发布正在排空时起来的（人手动重启了旧版本），一起来就不起新会话
+    if (control) {
+      await control.resumed();
+      await control.tick();
+      stopControl = control.start();
     }
     const worker = await createEngineWorker({
       // 假实现不真起会话，fleet 命令的后端地址用不上。
@@ -192,11 +383,26 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
       ...(jobs ? { jobs } : {}),
       log: (message) => console.info(message),
     });
+    shutdown = installGracefulShutdown({
+      worker,
+      drain,
+      stopSessions,
+      log: (message) => console.info(message),
+    });
     console.info(
       `fleet 引擎 worker 已起：${config.address} 命名空间 ${config.namespace} 任务队列 ${config.taskQueue}（${mode} 实现）`,
     );
     await worker.run();
   } finally {
+    // 工人停了、关库之前：脱开跑的会话放手（不停、不再写库），新引擎起来接回
+    const released = releaseDetached();
+    if (released.length > 0) {
+      console.info(`停机不停会话：${released.length} 个会话接着跑，新引擎起来接回：${released.join('、')}`);
+    }
+    shutdown?.dispose();
+    stopControl?.();
+    await status?.flush();
+    status?.stop();
     await clientConnection?.close();
     await connection.close();
     await close();

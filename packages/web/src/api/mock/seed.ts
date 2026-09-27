@@ -1065,6 +1065,15 @@ export function createSeed(now: number): MockState {
       taskId: 't-17',
       createdAt: at(-3),
       deliveries: delivered(-3),
+      handling: {
+        stage: 'claimed',
+        stageText: '认领了',
+        since: at(-2),
+        who: '本机/工人A',
+        work: { repo: { owner: 'acme', name: 'orbit' }, issueNumber: 17 },
+        line: '本机/工人A 在处理 · acme/orbit#17 · 查备份机的 ssh · 2 分钟',
+        problems: [],
+      },
     },
     {
       id: 'n-3',
@@ -1073,6 +1082,13 @@ export function createSeed(now: number): MockState {
       body: 'GitHub 接口限流，这次没查成（不是「没问题」）。',
       link: '/schedules',
       createdAt: at(-12),
+      handling: {
+        stage: 'unclaimed',
+        stageText: '没人认领',
+        since: at(-12),
+        line: '没人认领 · 12 分钟',
+        problems: [],
+      },
       deliveries: [
         {
           channel: 'feishu',

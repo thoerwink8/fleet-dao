@@ -1,17 +1,18 @@
-import { Bell, Check, Send, TriangleAlert } from 'lucide-react';
+import { Bell, Check, ExternalLink, Send, TriangleAlert } from 'lucide-react';
 import { Link, useNavigate, useSearchParams } from 'react-router';
 import { toast } from 'sonner';
 import { brand } from '#brand';
 import { errorText, useAllBoards, useMe, useNotifications, useResolveNotification } from '../api/client';
 import type { Notification, NotificationLevel } from '../api/types';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
-import { StatusDot } from '../components/status';
+import { RepoLink } from '../components/repo-link';
+import { StatusChip, StatusDot } from '../components/status';
 import { targetOf, useTaskActions } from '../components/task-actions';
 import { Button } from '../components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../components/ui/tooltip';
-import { formatAgo, formatClock, formatDateTime, TIME } from '../lib/format';
+import { formatAgo, formatClock, formatDateTime, formatDuration, TIME } from '../lib/format';
 import { useNow } from '../lib/hooks';
-import { isMine, noticeLevelMeta } from '../lib/status';
+import { isMine, noticeLevelMeta, type Tone } from '../lib/status';
 import { cn } from '../lib/utils';
 
 export function meta() {
@@ -68,6 +69,82 @@ function Deliveries({ n }: { n: Notification }) {
         </Tooltip>
       ))}
     </span>
+  );
+}
+
+type Handling = NonNullable<Notification['handling']>;
+
+/** 处理到哪一步的颜色：没人管的偏红，有人在修的在跑，合了发布了的偏绿，静默的灰。 */
+const STAGE_TONE: Record<Handling['stage'], Tone> = {
+  resolved: 'done',
+  silenced: 'stop',
+  waiting_founder: 'human',
+  unclaimed: 'fail',
+  engine_stuck: 'stall',
+  claimed: 'run',
+  pr_open: 'run',
+  merged: 'wait',
+  deployed: 'done',
+};
+
+/** 跟进单、PR：正式驾驶舱是外链，演示版只是文字（RepoLink 按品牌定）。 */
+function WorkLink({
+  repo,
+  kind,
+  n,
+  label,
+}: {
+  repo: { owner: string; name: string };
+  kind: 'issues' | 'pull';
+  n: number;
+  label: string;
+}) {
+  return (
+    <RepoLink
+      repo={repo}
+      kind={kind}
+      n={n}
+      className="inline-flex items-center gap-0.5 text-[11px] text-muted-foreground underline-offset-2 [&[href]]:hover:text-foreground [&[href]]:hover:underline"
+      icon={<ExternalLink className="size-2.5" aria-hidden />}
+    >
+      {label}
+    </RepoLink>
+  );
+}
+
+/**
+ * 谁在处理 · 链接 · 多久了（design 15.3「谁在处理」）：后端从认领、PR、发布记录现算的，这里只照着显示；
+ * 没查成的（发布判不了之类）照实列出来。
+ */
+function HandlingRow({ h, now }: { h: Handling; now: number }) {
+  const since = formatDuration(now - Date.parse(h.since));
+  return (
+    <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1" data-testid="alert-handling">
+      <StatusChip tone={STAGE_TONE[h.stage]} label={h.stageText} />
+      {h.who ? <span className="text-[12px] text-foreground">{h.who}</span> : null}
+      {h.work ? (
+        <WorkLink
+          repo={h.work.repo}
+          kind="issues"
+          n={h.work.issueNumber}
+          label={`${h.work.repo.owner}/${h.work.repo.name}#${h.work.issueNumber}`}
+        />
+      ) : null}
+      {h.pr ? <WorkLink repo={h.pr.repo} kind="pull" n={h.pr.number} label={`PR #${h.pr.number}`} /> : null}
+      {h.silence ? (
+        <span className="text-[11px] text-muted-foreground">
+          {h.silence.comment} · 到 {formatDateTime(h.silence.endsAt)}
+        </span>
+      ) : null}
+      <span className="num text-[11px] text-faint" title={formatDateTime(h.since)}>
+        {since}
+      </span>
+      {h.problems.map((p) => (
+        <span key={p} className="text-[11px] text-ink-fail">
+          {p}
+        </span>
+      ))}
+    </div>
   );
 }
 
@@ -154,6 +231,11 @@ export default function Notifications() {
         </div>
       </div>
       {error ? <LoadError what="提醒" error={error} /> : null}
+      {data?.handlingProblem ? (
+        <p className="mb-3 text-xs text-ink-fail" role="status">
+          {data.handlingProblem}（提醒照常列出，只是看不出谁在处理）
+        </p>
+      ) : null}
       {isLoading ? (
         <LoadingRows rows={5} />
       ) : !data ? null : list.length === 0 ? (
@@ -196,6 +278,7 @@ export default function Notifications() {
                           <p className="mt-0.5 text-[13px] whitespace-pre-wrap text-muted-foreground">
                             {n.body}
                           </p>
+                          {!resolved && n.handling ? <HandlingRow h={n.handling} now={now} /> : null}
                           <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
                             <span className="num text-[11px] text-faint" title={formatClock(n.createdAt)}>
                               {formatAgo(n.createdAt, now)}

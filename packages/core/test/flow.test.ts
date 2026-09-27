@@ -1,6 +1,13 @@
 // 执行状态机的边界表：一行一条（当前状态 + 发生的事 → 下一步、要外壳做的事），含故意造出失败的行。
 import { describe, expect, it } from 'vitest';
-import { FLOW_LIMITS, type FlowEvent, type FlowState, nextFlow, startFlow } from '../src/flow.ts';
+import {
+  FLOW_LIMITS,
+  type FlowEvent,
+  type FlowState,
+  nextFlow,
+  startFlow,
+  upgradeFlowState,
+} from '../src/flow.ts';
 
 const base = startFlow('fusion', false);
 const at = (patch: Partial<FlowState>): FlowState => ({ ...base, ...patch });
@@ -157,6 +164,36 @@ const rows: Row[] = [
     { step: 'pr', action: 'recheck-ci', patch: { ciRounds: 1 } },
   ],
   [
+    'CI 报和主线冲突 → 并主线，不算「没查成」的次数（ciRounds 不动）',
+    at({ step: 'pr', blocks: 1, ciRounds: 0, mergeRounds: 1 }),
+    { kind: 'ci', state: 'conflict' },
+    { step: 'pr', action: 'sync-mainline', patch: { mergeRounds: 2, ciRounds: 0 } },
+  ],
+  [
+    `CI 连着报冲突，自动并主线已经试满 ${FLOW_LIMITS.mergeRounds} 次 → 停下等人，回来再给够机会（不留旧计数拉锯）`,
+    at({ step: 'pr', blocks: 1, mergeRounds: FLOW_LIMITS.mergeRounds }),
+    { kind: 'ci', state: 'conflict' },
+    { step: 'parked', action: 'wait-human', patch: { resume: 'pr', mergeRounds: 0 } },
+  ],
+  [
+    '并主线干净地并上了 → 回去查新头的 CI',
+    at({ step: 'pr', blocks: 1, mergeRounds: 1 }),
+    { kind: 'synced', state: 'clean', conflictFiles: [] },
+    { step: 'pr', action: 'recheck-ci', patch: { mergeRounds: 1 } },
+  ],
+  [
+    '并主线遇到真冲突、自动并不上 → 算开了 PR 之后修一轮（派会话解）',
+    at({ step: 'pr', blocks: 1, ciRounds: 0, mergeRounds: 1 }),
+    { kind: 'synced', state: 'conflict', conflictFiles: ['packages/api/test/harness.ts'] },
+    { step: 'pr', action: 'fix-ci', patch: { ciRounds: 1 } },
+  ],
+  [
+    `并主线真冲突解不开、已经修满 ${FLOW_LIMITS.ciRounds} 轮 → 停下等人`,
+    at({ step: 'pr', blocks: 1, ciRounds: FLOW_LIMITS.ciRounds }),
+    { kind: 'synced', state: 'conflict', conflictFiles: ['a.ts'] },
+    { step: 'parked', action: 'wait-human', patch: { resume: 'pr' } },
+  ],
+  [
     'CI 红 → 修一轮',
     at({ step: 'pr', blocks: 1 }),
     { kind: 'ci', state: 'red' },
@@ -304,6 +341,18 @@ const rows: Row[] = [
     { error: /ciRounds/ },
   ],
   [
+    '【失败】并主线的计数是负的',
+    at({ step: 'pr', blocks: 1, mergeRounds: -1 }),
+    { kind: 'ci', state: 'conflict' },
+    { error: /mergeRounds/ },
+  ],
+  [
+    '【失败】并主线的结果在开 PR 之外的步收到',
+    at({ step: 'merge', blocks: 1 }),
+    { kind: 'synced', state: 'clean', conflictFiles: [] },
+    { error: /不该收到/ },
+  ],
+  [
     '【失败】验证轮数配成 3（上限 2）',
     at({ step: 'verify', blocks: 1, verifyLimit: 3 }),
     { kind: 'verified', verdict: 'block' },
@@ -404,5 +453,28 @@ describe('Fusion 执行状态机', () => {
       state = got.state;
     }
     expect(state.step).toBe('done');
+  });
+});
+
+describe('发布前就在跑的工作流：旧版本状态里没有后加的字段', () => {
+  // 09-28 #398 加了 mergeRounds，发布后 #307、#276 的工作流带着旧状态，被判成「状态认不出」一直失败
+  const old = (patch: Partial<FlowState>): FlowState => {
+    const { mergeRounds: _dropped, ...rest } = at(patch);
+    return rest as FlowState;
+  };
+
+  it('缺 mergeRounds 的旧状态照样能判，按 0 起算', () => {
+    const got = nextFlow(old({ step: 'pr', blocks: 1 }), { kind: 'ci', state: 'conflict' });
+    expect(got).toMatchObject({ ok: true, action: 'sync-mainline', state: { step: 'pr', mergeRounds: 1 } });
+  });
+
+  it('已有的值原样保留，不被起始值盖掉', () => {
+    expect(upgradeFlowState(at({ mergeRounds: 2 })).mergeRounds).toBe(2);
+  });
+
+  it('【故意造出的失败】补的是缺的字段，错的值照样判成状态认不出', () => {
+    const got = nextFlow(at({ step: 'pr', blocks: 1, mergeRounds: -1 }), { kind: 'ci', state: 'conflict' });
+    expect(got.ok).toBe(false);
+    if (!got.ok) expect(got.why).toMatch('状态认不出：mergeRounds = -1');
   });
 });

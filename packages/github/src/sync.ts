@@ -37,7 +37,8 @@ export interface SyncMainlineDeps {
 
 export interface SyncMainlineInput {
   repo: RepoRef;
-  prNumber: number;
+  /** 没给（还没开 PR，任务边界并主线可能发生在开 PR 之前）：只影响并主线提交说明里那句话，不影响并不并。 */
+  prNumber?: number | undefined;
   branch: string;
   /** 以为分支现在的头。 */
   head: string;
@@ -193,7 +194,8 @@ export async function syncMainline(
 
       // 5. 干净：生成合并提交（作者/提交者是「干活的」机器人），推到分支（快进，不强推）
       const identity = await deps.bots.identity('agent', repo, input.signal);
-      const message = `引擎并主线：把 ${defaultBranch}@${mainline.slice(0, 12)} 并进 PR #${prNumber} 的 ${branch}`;
+      const target = prNumber === undefined ? branch : `PR #${prNumber} 的 ${branch}`;
+      const message = `引擎并主线：把 ${defaultBranch}@${mainline.slice(0, 12)} 并进 ${target}`;
       const commitEnv = {
         ...local.env,
         GIT_AUTHOR_NAME: identity.name,

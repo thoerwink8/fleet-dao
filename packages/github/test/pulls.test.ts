@@ -45,7 +45,7 @@ describe('开 PR', () => {
     expect(new Set(fake.calls('POST', /\/pulls$/).map((r) => r.as))).toEqual(new Set(['agent']));
     expect(fake.pulls.size).toBe(1);
     expect(pr?.body).toBe(
-      '**做了什么**：\n- 加了验证码输入框\n**怎么验证的**：\n- pnpm check 全绿\n**还欠什么**：无\n**按推荐先做了**：无\n**需求**：#12 · 子任务 A 登录表单\n**这个 PR 做完就关单**：否（引擎合并后第 7 步自己关单）\n**对应计划**：P1「工作流」\n**specs**：specs/12-otp/\n**档位**：先合后看——一般改动\n**文档**：design',
+      '**做了什么**：\n- 加了验证码输入框\n**怎么验证的**：\n- pnpm check 全绿\n**还欠什么**：无\n**按推荐先做了**：无\n**需求**：#12 · 子任务 A 登录表单\n**认领**：引擎\n**修提醒**：无\n**这个 PR 做完就关单**：否（引擎合并后第 7 步自己关单）\n**对应计划**：P1「工作流」\n**specs**：specs/12-otp/\n**档位**：先合后看——一般改动\n**文档**：design',
     );
     expect(pr?.base.ref).toBe('main');
   });
@@ -457,10 +457,30 @@ describe('等 CI', () => {
     expect(await wait(queued.gh, pr3.number)).toMatchObject({ state: 'timeout', pending: ['check'] });
   });
 
-  it('C8：PR 的头变了就不再等这个头', async () => {
+  it('C8：PR 的头变了、新头不含老头（像是被强推改写了）：不再等这个头，报 head_moved', async () => {
     const { gh, fake } = setup();
     const pr = fake.addPull({ head: { ref: 'task/1', sha: B } });
+    // compare A...B 报 behind_by > 0：B 不含 A，是真改写了，不是并主线并出来的
+    fake.behindBy.set(B, 1);
     expect(await wait(gh, pr.number, A)).toMatchObject({ state: 'head_moved', actualHead: B });
+  });
+
+  it('PR 的头变了、新头含着老头（人或引擎自己并了主线又推了）：认新头，接着在它上面等 CI，不算头变了', async () => {
+    const { gh, fake } = setup();
+    const pr = fake.addPull({ head: { ref: 'task/1', sha: B } });
+    // compare A...B 报 behind_by = 0（默认）：B 含着 A，是并主线并出来的新头
+    fake.addCheck(B, 'check', 'success');
+    const res = await wait(gh, pr.number, A);
+    expect(res).toMatchObject({ state: 'green', head: B });
+    // 真去比过 A...B，不是凭空认的
+    expect(fake.calls('GET', /\/compare\//).some((r) => r.path.includes(`${A}...${B}`))).toBe(true);
+  });
+
+  it('【故意造出的失败】头变了、比不出新头含不含老头（compare 形状认不出）：按没查成处理，不当成认了新头', async () => {
+    const { gh, fake } = setup();
+    const pr = fake.addPull({ head: { ref: 'task/1', sha: B } });
+    fake.before.push((req) => (req.path.includes('/compare/') ? json(200, { status: 'ahead' }) : undefined));
+    expect(await wait(gh, pr.number, A)).toMatchObject({ state: 'unknown' });
   });
 
   it('C17：读到红隔一会儿在同一个头上再确认；期间有人重跑就接着等', async () => {

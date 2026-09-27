@@ -20,8 +20,15 @@ ExecStart=/usr/bin/node /srv/fleet-dao-releases/current/packages/engine/src/main
 # always：干净退出也拉起来，on-failure 不管这种情况
 Restart=always
 RestartSec=5
-# 停机时引擎给在途活动收尾（FLEET_SHUTDOWN_GRACE_SECONDS，默认 30 秒），这里多留一些
-TimeoutStopSec=90
+# 停机先排空（packages/engine/src/drain.ts）：收到 SIGTERM 不起新会话，在跑的最多再做 10 分钟宽限，到点停下（新引擎起来按编号
+# 续上），等交回最多 2 分钟，工人再给在途活动 30 秒收尾（FLEET_SHUTDOWN_GRACE_SECONDS）。第二次 SIGTERM 马上停。
+# 会话脱开引擎跑（/var/lib/fleet-sessions，docs/ops.md 第九节「发布不碰会话」）时不等也不停它们：新引擎起来接回；宽限只剩
+# 还接着管道的旧会话用得上。
+# mixed：停机信号只发给引擎主进程；默认的 control-group 会把 SIGTERM 发给引擎 cgroup 里每个 sudo，sudo 原样转给会话，会话当场
+# 就死（2026-09-27 19:28:51、20:46:26 两次发布都这样白杀了在干的活）。主进程退了，剩下的（sudo）才收 SIGKILL。
+KillMode=mixed
+# 盖住宽限 + 等交回 + 工人收尾，再留余量；改宽限要一起改（packages/engine/test/drain.test.ts 核对）
+TimeoutStopSec=15min
 LimitNOFILE=65536
 # 不开 NoNewPrivileges：引擎经 sudo 调 fleet-agent-scope 起 AI 会话，sudo 是 setuid 程序，开了就提不了权。
 # 也不开 ProtectSystem、ProtectHome、PrivateTmp 这类挂载隔离和能力收缩：会话是引擎的子进程，挪进自己的 scope 也还在

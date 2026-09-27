@@ -6,6 +6,7 @@ import {
   appendProgressEvents,
   decideApproval,
   getApproval,
+  getSessionRun,
   openAlertsByPrefix,
   openApproval,
   openEngineAsk,
@@ -281,6 +282,43 @@ describe('appendProgressEvents', () => {
       payload: { text: 'x' },
     }));
     await expect(appendProgressEvents(t.db, run.id, tooMany)).rejects.toThrow('上限');
+    expect(await t.db.select().from(progressEvents)).toEqual([]);
+  });
+
+  it('带输出序号：事件进库和「确认到哪一行」一起落，只往前推', async () => {
+    const { run } = await fixtures();
+    expect((await getSessionRun(t.db, run.id))?.outputSeq).toBeNull();
+    await appendProgressEvents(t.db, run.id, [{ at: NOW, kind: 'say', payload: { text: '一' } }], {
+      outputSeq: 5,
+    });
+    expect((await getSessionRun(t.db, run.id))?.outputSeq).toBe(5);
+    // 晚到的旧批次不把确认往回拉
+    await appendProgressEvents(t.db, run.id, [{ at: NOW, kind: 'say', payload: { text: '二' } }], {
+      outputSeq: 3,
+    });
+    expect((await getSessionRun(t.db, run.id))?.outputSeq).toBe(5);
+    expect(await t.db.select().from(progressEvents).where(eq(progressEvents.runId, run.id))).toHaveLength(2);
+  });
+
+  it('输出序号不是不小于 0 的整数：抛错，一条不写', async () => {
+    const { run } = await fixtures();
+    for (const outputSeq of [-1, 1.5, Number.NaN]) {
+      await expect(
+        appendProgressEvents(t.db, run.id, [{ at: NOW, kind: 'say', payload: { text: 'x' } }], { outputSeq }),
+      ).rejects.toThrow('输出序号');
+    }
+    expect(await t.db.select().from(progressEvents)).toEqual([]);
+    expect((await getSessionRun(t.db, run.id))?.outputSeq).toBeNull();
+  });
+
+  it('事件写不进去（库拒了）：确认也不推——接回时这些行照常重来，不会漏', async () => {
+    const { run } = await fixtures();
+    await expect(
+      appendProgressEvents(t.db, run.id, [{ at: NOW, kind: 'bogus' as never, payload: {} }], {
+        outputSeq: 9,
+      }),
+    ).rejects.toThrow();
+    expect((await getSessionRun(t.db, run.id))?.outputSeq).toBeNull();
     expect(await t.db.select().from(progressEvents)).toEqual([]);
   });
 });

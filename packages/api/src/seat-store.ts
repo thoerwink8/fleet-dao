@@ -127,8 +127,8 @@ const engineClaimRow = (
   note: input.note ?? null,
 });
 
-/** 强制改派给引擎时作废本机认领写的原因。 */
-const reassignReason = (founder: string) => `改派给引擎（创始人原话：${founder}）`;
+/** 强制改派（给引擎、给本机的工人）时作废原来那份写的原因。 */
+const reassignReason = (to: string, founder: string) => `改派给${to}（创始人原话：${founder}）`;
 
 /** 带着帅位来的受保护动作：按库的 now 核任期没换、没过期（判法在 core 的 seatVerdict）。核过是 null。 */
 function seatProblem(
@@ -235,36 +235,56 @@ export function pgSeatStore(db: Db, insertAudit: InsertAudit): SeatStore {
         if (!verdict.ok) return { ok: false as const, reason: 'not_seat' as const, why: verdict.why, now };
         // 这个座位的帅位自己占着的（开单时替帅位认领的）由现任帅位换给工人：换之前记下原来那份
         const prev = await readClaim(tx, input.repoId, input.issueNumber, true);
-        const got = await takeClaimRow(
-          tx,
-          {
-            repoId: input.repoId,
-            issueNumber: input.issueNumber,
-            claimId: randomUUID(),
-            ownerKind: input.owner.kind,
-            ownerMachine: input.seat.machine,
-            ownerLabel: input.owner.label,
-            seatScope: input.seat.scope,
-            seatTerm: input.seat.term,
-            state: 'claimed',
-            workflowId: null,
-            graceMinutes: input.graceMinutes ?? settings.settings.claimGraceMinutes,
-            note: input.note ?? null,
-          },
-          { seatReservationOf: input.seat.scope },
-        );
+        const row = {
+          repoId: input.repoId,
+          issueNumber: input.issueNumber,
+          claimId: randomUUID(),
+          ownerKind: input.owner.kind,
+          ownerMachine: input.seat.machine,
+          ownerLabel: input.owner.label,
+          seatScope: input.seat.scope,
+          seatTerm: input.seat.term,
+          state: 'claimed' as const,
+          workflowId: null,
+          graceMinutes: input.graceMinutes ?? settings.settings.claimGraceMinutes,
+          note: input.note ?? null,
+        };
+        let got = await takeClaimRow(tx, row, { seatReservationOf: input.seat.scope });
+        let voided: IssueClaim | null = null;
         if (!got) {
           const cur = await readClaim(tx, input.repoId, input.issueNumber);
           if (!cur.value) throw new Error(`抢 ${claimTarget(input)} 没抢到，读回来却没有认领`);
-          return {
-            ok: false as const,
-            reason: 'held' as const,
-            claim: toIssueClaim(cur.value),
-            now: iso(cur.now),
-          };
+          const held = toIssueClaim(cur.value);
+          if (!input.founder)
+            return { ok: false as const, reason: 'held' as const, claim: held, now: iso(cur.now) };
+          // 带着创始人原话：原来那份（引擎的、别的工人的）当场作废，再给这次的工人
+          const to = `${input.seat.machine}/${input.owner.label}`;
+          const ended = await endClaimRow(tx, {
+            repoId: input.repoId,
+            issueNumber: input.issueNumber,
+            claimId: held.claimId,
+            state: 'voided',
+            reason: reassignReason(to, input.founder),
+          });
+          if (!ended) throw new Error(`锁住了 ${claimTarget(input)} 的认领，作废时它却变了`);
+          voided = toIssueClaim(ended.value);
+          await insertAudit(tx, {
+            actor: seatActor(input.seat),
+            action: 'claim.reassign',
+            target: claimTarget(input),
+            before: claimSummary(held),
+            after: { state: 'voided', to },
+            reason: reassignReason(to, input.founder),
+            via: 'engine',
+            ok: true,
+          });
+          got = await takeClaimRow(tx, row, { seatReservationOf: input.seat.scope });
+          if (!got) throw new Error(`作废了 ${claimTarget(input)} 原来的认领，新认领却没抢到`);
         }
         const claim = toIssueClaim(got.value);
-        const replaced = prev.value && isActiveClaim(prev.value.state) ? toIssueClaim(prev.value) : null;
+        const previous = voided ?? (prev.value ? toIssueClaim(prev.value) : null);
+        const replaced =
+          !voided && prev.value && isActiveClaim(prev.value.state) ? toIssueClaim(prev.value) : null;
         await insertAudit(tx, {
           actor: seatActor(input.seat),
           action: 'claim.take',
@@ -279,7 +299,7 @@ export function pgSeatStore(db: Db, insertAudit: InsertAudit): SeatStore {
           via: 'engine',
           ok: true,
         });
-        return { ok: true as const, claim, now: iso(got.now) };
+        return { ok: true as const, claim, now: iso(got.now), previous, voided };
       });
     },
 
@@ -389,7 +409,7 @@ export function pgSeatStore(db: Db, insertAudit: InsertAudit): SeatStore {
           issueNumber: input.issueNumber,
           claimId: claim.claimId,
           state: 'voided',
-          reason: reassignReason(input.founder),
+          reason: reassignReason('引擎', input.founder),
         });
         if (!ended) throw new Error(`锁住了 ${claimTarget(input)} 的认领，作废时它却变了`);
         const voided = toIssueClaim(ended.value);
@@ -399,7 +419,7 @@ export function pgSeatStore(db: Db, insertAudit: InsertAudit): SeatStore {
           target: claimTarget(input),
           before: claimSummary(claim),
           after: { state: 'voided', to: 'engine' },
-          reason: reassignReason(input.founder),
+          reason: reassignReason('引擎', input.founder),
           via: 'engine',
           ok: true,
         });
@@ -559,9 +579,30 @@ export function memorySeatStore(
       const cur = claimOf(input);
       // 这个座位的帅位自己占着的（开单时替帅位认领的）由现任帅位换给工人，和 Postgres 版的 seatReservationOf 一样
       const reserved = cur?.ownerKind === 'seat' && cur.seatScope === input.seat.scope;
-      if (cur && isActiveClaim(cur.state) && !reserved)
-        return { ok: false, reason: 'held', claim: copyClaim(cur), now: at };
-      const replaced = cur && isActiveClaim(cur.state) ? copyClaim(cur) : null;
+      let voided: IssueClaim | null = null;
+      if (cur && isActiveClaim(cur.state) && !reserved) {
+        if (!input.founder) return { ok: false, reason: 'held', claim: copyClaim(cur), now: at };
+        // 带着创始人原话：原来那份当场作废，再给这次的工人（和 Postgres 版一样）
+        const to = `${input.seat.machine}/${input.owner.label}`;
+        const before = claimSummary(cur);
+        cur.state = 'voided';
+        cur.endedAt = at;
+        cur.updatedAt = at;
+        cur.endReason = reassignReason(to, input.founder);
+        voided = copyClaim(cur);
+        audit({
+          actor: seatActor(input.seat),
+          action: 'claim.reassign',
+          target: claimTarget(input),
+          before,
+          after: { state: 'voided', to },
+          reason: cur.endReason,
+          via: 'engine',
+          ok: true,
+        });
+      }
+      const previous = voided ?? (cur ? copyClaim(cur) : null);
+      const replaced = !voided && cur && isActiveClaim(cur.state) ? copyClaim(cur) : null;
       const claim: IssueClaim = {
         repoId: input.repoId,
         issueNumber: input.issueNumber,
@@ -597,7 +638,7 @@ export function memorySeatStore(
         via: 'engine',
         ok: true,
       });
-      return { ok: true, claim: copyClaim(claim), now: at };
+      return { ok: true, claim: copyClaim(claim), now: at, previous, voided };
     },
 
     async stepClaim(input) {
@@ -723,7 +764,7 @@ export function memorySeatStore(
       cur.state = 'voided';
       cur.endedAt = at;
       cur.updatedAt = at;
-      cur.endReason = reassignReason(input.founder);
+      cur.endReason = reassignReason('引擎', input.founder);
       const voided = copyClaim(cur);
       audit({
         actor: input.actor,
