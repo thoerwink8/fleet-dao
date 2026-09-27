@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # shellcheck source-path=SCRIPTDIR
+# shellcheck disable=SC2016,SC2317,SC2329 # 单引号里是给 node 的代码；替身函数由被测代码间接调用，shellcheck 看不出来（CI 上的旧版报的是 2317）
 # 会话用户在本机开的口只许它自己和 root 连（#35）：拿真模板 deploy/france/fleet-dao.nft 在一次性的网络命名空间里载入，
 # 以三个临时用户（扮会话用户、fleet、pilot）真连一遍、内核真判，再拿 deploy/lib/session-ports.sh 的读回判一遍：
 #   1. 规则在：别人连不上会话用户的口（127.0.0.1、::1 都试），会话用户和 root 连得上，别人之间照常通，Temporal 这类
@@ -8,6 +9,8 @@
 #      会话用户那头就接到了别人的连接——那条规则挡的是真口子。代价也钉住：这时别人之间连临时口也被复位
 #   3. 读回：规则在全绿；表没装、挡错了人、挡多了都判红；它此刻真在听的口逐个试；查不到会话用户、起不了探针、ss 跑不成
 #      记没查成、不说全绿；内核里的表被手改过、和文件对不上判出来，文件载不进去、表不在记没查成
+#   4. 规则载上之前就连着的连接（第二意见 #343 第 1 轮）：规则管不到、照样通；读回判红写清是谁；装的时候断掉，断不掉、
+#      ss 跑不成判红；断完读回全绿
 # 不碰宿主的防火墙和连接：全在 unshare --net 起的命名空间里（回环是新的，宿主的 nft 表、连接跟踪都看不到）。
 # 要 root（建临时用户、载 nft、换身份）。用法：sudo bash deploy/test/session-ports.test.sh。退出码：0 通过，1 不通过，2 没跑成。
 # 在已有账号上验（不建临时用户，比如在法国真机上拿真的三个账号验规则）：
@@ -47,8 +50,14 @@ lacks() { # 说明 文本 不该有的（grep -F）
     printf '  ✓ %s\n' "$1"
   fi
 }
-greet() { # 用户 地址 端口：读得到问候打 yes，读不到打 no
-  if session_ports_greets "$@"; then echo yes; else echo no; fi
+greet() { # 用户 地址 端口：读得到问候打 yes，读不到打 no，没以他的身份跑起来打 not-run
+  local rc=0
+  session_ports_greets "$@" || rc=$?
+  case $rc in
+  0) echo yes ;;
+  1) echo no ;;
+  *) echo not-run ;;
+  esac
 }
 # 探针接到的连接数：到了要的数就停（接连接和写日志差几毫秒），最多等 2 秒，打出最后数到的
 accepts_settle() { # 要的数
@@ -65,6 +74,48 @@ skip() {
   echo "session-ports：没跑成：$*"
   exit 2
 }
+# 以某个用户连上去不放：读到问候后每 0.1 秒发一行 ping N，对面回了记一行 pong N；断了记 closed 或 error <原因>。
+# 进程号放进 HOLD_PID，20 秒后它自己退
+HOLD_PID=""
+hold_as() { # 用户 端口 日志
+  local gid
+  gid=$(id -g -- "$1") || return 1
+  (cd / && exec setpriv --reuid="$1" --regid="$gid" --init-groups env -i PATH=/usr/bin:/bin "$SESSION_PORTS_NODE" -e '
+    const [port] = process.argv.slice(1);
+    let buf = "";
+    let n = 0;
+    let timer;
+    const c = require("node:net").connect(Number(port), "127.0.0.1");
+    c.on("data", (d) => {
+      buf += d;
+      for (let i = buf.indexOf("\n"); i >= 0; i = buf.indexOf("\n")) {
+        const line = buf.slice(0, i);
+        buf = buf.slice(i + 1);
+        console.log(line.startsWith("ping ") ? `pong ${line.slice(5)}` : `hello ${line}`);
+        if (!timer) timer = setInterval(() => c.write(`ping ${++n}\n`), 100);
+      }
+    });
+    c.on("error", (e) => {
+      console.log(`error ${e.code}`);
+      process.exit(0);
+    });
+    c.on("close", () => {
+      console.log("closed");
+      process.exit(0);
+    });
+    setTimeout(() => process.exit(0), 20000);' "$2") >"$3" 2>&1 &
+  HOLD_PID=$!
+}
+# 日志里出现要的那一行（grep -E）就返回 0，最多等 3 秒
+wait_log() { # 日志 要有的
+  local i
+  for ((i = 0; i < 30; i++)); do
+    if grep -qE -- "$2" "$1" 2>/dev/null; then return 0; fi
+    sleep 0.1
+  done
+  return 1
+}
+pongs() { grep -c '^pong ' "$1" 2>/dev/null || true; }
 
 inner() { # 会话用户 扮fleet 扮pilot node
   local S=$1 F=$2 P=$3 s_uid f_uid rl_pid rl_port rl_log handle out n rc=0
@@ -185,6 +236,68 @@ inner() { # 会话用户 扮fleet 扮pilot node
   has "ss 跑不成：记没查成" "$out" "… ss 跑不成，$S 此刻在听的口没逐个试"
   lacks "ss 跑不成：不说全绿" "$out" "✓"
   check "ss 跑不成：探针那段照样查了、没有红" "${out##*$'\n'}" "0 1"
+  session_ports_greets no-such-user-35 127.0.0.1 "$FIXED_PORT"
+  check "查不到的用户去连：返回 2（没跑起来），不当成连不上" "$?" 2
+  out=$(check_session_ports "$S" "$F" no-such-user-35 2>&1; printf '\n%s %s' "${#REDS[@]}" "${#PENDING[@]}")
+  has "别的用户里有查不到的：记没查成" "$out" "… 查不到用户 no-such-user-35"
+  lacks "别的用户里有查不到的：不说全绿" "$out" "✓"
+  check "别的用户里有查不到的：不判红、只一笔没查成（查得到的照样查了）" "${out##*$'\n'}" "0 1"
+  out=$(
+    session_ports_try() { return 2; }
+    check_session_ports "$S" "$F" "$P" 2>&1
+    printf '\n%s %s' "${#REDS[@]}" "${#PENDING[@]}"
+  )
+  has "runuser 没成：记没查成、写清是谁" "$out" "… 没以 $F 的身份跑起来"
+  lacks "runuser 没成：不说全绿" "$out" "✓"
+  check "runuser 没成：不当成连不上、不判红" "$(cut -d' ' -f1 <<<"${out##*$'\n'}")" 0
+
+  echo "== 4. 规则载上之前就连着的连接：规则管不到，装的时候断掉，读回判出来"
+  nft delete table inet fleet_dao
+  session_ports_listen "$S" 127.0.0.1 || skip "起不了会话用户的探针监听"
+  hold_as "$P" "$PROBE_PORT" "$T/hold.log" || skip "起不了扮 pilot 的长连接"
+  wait_log "$T/hold.log" '^pong 3$' || skip "扮 pilot 的长连接没连上（$(tr '\n' ' ' <"$T/hold.log")）"
+  load
+  n=$(pongs "$T/hold.log")
+  wait_log "$T/hold.log" "^pong $((n + 3))\$"
+  check "对照：规则载上以后，扮 pilot 早先连上的那条照样通（规则只管新连接）" "$?" 0
+  check "认得出这条（发起方是扮 pilot 的）" "$(session_ports_foreign "$s_uid" | cut -d' ' -f1)" "$(id -u -- "$P")"
+  out=$(check_session_ports "$S" "$F" "$P" 2>&1)
+  has "读回判红，写清是谁、哪条" "$out" "✗ $P 手上有一条规则载上之前就连着 $S 的口的连接（127\.0\.0\.1:[0-9]+ → 127\.0\.0\.1:$PROBE_PORT）"
+  out=$(
+    session_ports_kill() { return 0; }
+    CHANGES=() REDS=()
+    session_ports_cut "$S" 2>&1
+    printf '\n%s %s %s' "$?" "${#CHANGES[@]}" "${#REDS[@]}"
+  )
+  check "断不掉（ss -K 没成）：返回 1、不记改动、记一笔红" "${out##*$'\n'}" "1 0 1"
+  has "断不掉：红里写清" "$out" "✗ 断不掉规则载上之前就连着 $S 的口的连接"
+  out=$(
+    session_ports_ss_est() {
+      echo "ss: 故意跑不成" >&2
+      return 1
+    }
+    CHANGES=() REDS=()
+    session_ports_cut "$S" 2>&1
+    printf '\n%s %s %s' "$?" "${#CHANGES[@]}" "${#REDS[@]}"
+  )
+  check "ss 跑不成：返回 1、不记改动、记一笔红" "${out##*$'\n'}" "1 0 1"
+  has "ss 跑不成：红里写清" "$out" "✗ ss 跑不成，规则载上之前就连着 $S 的口的连接没查、没断"
+  CHANGES=() REDS=()
+  session_ports_cut "$S" >"$T/cut.out" 2>&1
+  check "装的时候断掉：返回 0" "$?" 0
+  check "装的时候断掉：记一笔改动、没有红" "${#CHANGES[@]} ${#REDS[@]}" "1 0"
+  has "改动写清断了几条" "$(cat "$T/cut.out")" "↻ 断掉 1 条规则载上之前就连着 $S 的口"
+  wait_log "$T/hold.log" '^(closed|error)'
+  check "扮 pilot 那条真断了" "$?" 0
+  check "断完再查一条都没有" "$(session_ports_foreign "$s_uid")" ""
+  CHANGES=() REDS=()
+  session_ports_cut "$S" >/dev/null 2>&1
+  check "没有要断的：返回 0、不记改动" "$? ${#CHANGES[@]}" "0 0"
+  out=$(check_session_ports "$S" "$F" "$P" 2>&1; printf '\n%s %s' "${#REDS[@]}" "${#PENDING[@]}")
+  check "断完读回：没有红、没有没查成" "${out##*$'\n'}" "0 0"
+  kill "$HOLD_PID" 2>/dev/null
+  wait "$HOLD_PID" 2>/dev/null
+  session_ports_stop
 
   echo "== 3. 读回：内核里的表就是文件那一份"
   nft_table_same_as_file inet fleet_dao "$NFT_FILE"

@@ -646,6 +646,8 @@ setup_firewall() {
     changed "重载 fleet-firewall（nft 表换成新规则）"
   fi
   ensure_unit_running fleet-firewall.service 0
+  # 规则只管新连接：表载上之前就连着会话用户的口、由别人发起的连接在这里断掉（lib/session-ports.sh）
+  session_ports_cut "${SESSION_USERS[0]}"
 }
 
 pnpm_want() { /usr/bin/node -p 'require(process.argv[1]).packageManager' "$DEPLOY_DIR/../package.json"; }
