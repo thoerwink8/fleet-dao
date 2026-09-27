@@ -127,6 +127,13 @@
       "when": 1790512145371,
       "tag": "0017_seat_claims",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1790517266990,
+      "tag": "0018_scheduled_jobs_registered_at",
+      "breakpoints": true
     }
   ]
 }

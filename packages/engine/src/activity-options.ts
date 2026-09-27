@@ -12,6 +12,8 @@ import type {
   MergeItem,
   RouteProbeInput,
   RouteProbeRun,
+  WatchdogInput,
+  WatchdogRun,
 } from './contract.ts';
 import type { CanaryState, CanaryStepResult } from './jobs/canary.ts';
 import type { Limits } from './limits.ts';
@@ -51,6 +53,8 @@ export type EngineActivities = PortActivities & {
    * taskId 记到任务上，巡检自己看的这几下不能记成巡检单的每步耗时（那是记账那一步要核的）。
    */
   canaryCheck(input: { schemaVersion: 1; state: CanaryState }): Promise<CanaryStepResult>;
+  /** 引擎自己的活动：看门狗跑一轮（按登记表看各定时任务新不新鲜、推撤提醒），结局记进 schedule_runs（jobs/watchdog.ts）。 */
+  watchSchedules(input: WatchdogInput): Promise<WatchdogRun>;
 };
 
 export type ActivityName = keyof EngineActivities;
@@ -62,6 +66,7 @@ export type ActivityName = keyof EngineActivities;
  * job：定时任务的一轮——10 分钟，不重试：每次尝试都记一行 schedule_runs，没跑成的等下一轮（间隔 15 分钟），不在这一轮里补。
  * 路由探针一轮里每条路由最长几分钟（起会话、等回答、没通隔 20 秒再探一次），同时探两条，也在 10 分钟里。
  * 每小时对账一轮最多看 80 棵残留的树（每棵以会话用户跑几条 git），也在 10 分钟里。
+ * 看门狗一轮是几条查库、写提醒，秒级；卡住了也在 10 分钟里收场（上一轮没完下一轮跳过，一直卡着后端的看守看得见）。
  */
 export type Profile = 'quick' | 'git' | 'setup' | 'watch' | 'ci' | 'tests' | 'job';
 
@@ -100,6 +105,7 @@ export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
   reconcileHourly: 'job',
   canaryOpen: 'job',
   canaryCheck: 'job',
+  watchSchedules: 'job',
 };
 
 /** quick 一档（含排进合并队列、撤出）一次尝试的限时。合并队列的空闲收工时长不能比它短（limits.ts 的下限）。 */

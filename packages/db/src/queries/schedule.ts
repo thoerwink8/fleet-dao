@@ -9,7 +9,7 @@ import { scheduledJobs, scheduleRuns } from '../schema/index.ts';
 type RunRow = typeof scheduleRuns.$inferSelect;
 type JobRow = typeof scheduledJobs.$inferSelect;
 
-/** 引擎启动时按代码里的声明写入（已有的更新）。没登记的任务记不了运行记录（外键）。 */
+/** 引擎启动时按代码里的声明写入（已有的更新名字、计划、期望间隔；登记时刻不动）。没登记的任务记不了运行记录（外键）。 */
 export async function registerScheduledJobs(
   db: Db,
   jobs: readonly (typeof scheduledJobs.$inferInsert)[],
@@ -66,15 +66,27 @@ export async function finishScheduleRun(
  * never：一次都没跑过；failing：最近一次结束的没跑成；no-samples：最近一次结束的一个对象都没扫到；
  * stale：上次跑成（ok / partial）距今超过 expect_every_minutes，或从没跑成过；ok：新鲜、跑完、扫到了东西。
  * 先看最近一次的结局，再看新鲜度：最近一次没跑成、没扫到，比「多久没成功」更能说明问题。
+ * 要不要报人看 fresh（下面），不只看这个标签：最近一次是 no-samples 的，停在那儿不动了也还是 no-samples。
  */
 export type JobHealthStatus = 'never' | 'failing' | 'no-samples' | 'stale' | 'ok';
+
+/** 看门狗（引擎的定时任务，#203）在登记表上的编号：它自己停没停由后端的健康检查和看守按这一行现算。 */
+export const WATCHDOG_JOB_ID = 'watchdog';
 
 export interface JobHealth {
   job: JobRow;
   status: JobHealthStatus;
+  /**
+   * 在不在期望间隔里：上次跑成距今不超过 expect_every_minutes；从没跑成过的从登记（registered_at）算起——刚登记、
+   * 还没轮到第一次的算新鲜，登记了超过期望间隔还没跑成过的不算。和标签无关：no-samples 一直没扫到东西、停着不跑，
+   * 过了期望间隔一样是 false。看门狗报「停了」就看它。
+   */
+  fresh: boolean;
   /** 最近一次还没结束。 */
   running: boolean;
   lastRun: RunRow | null;
+  /** 最近一次结束了的（结局不为空；还在跑的那次不算）。 */
+  lastFinished: RunRow | null;
   /** 最近一次跑成（ok 或 partial）。 */
   lastSuccess: RunRow | null;
 }
@@ -115,6 +127,15 @@ export async function scheduleHealth(db: Db, now: Date = new Date()): Promise<Jo
     else if (lastSuccess?.endedAt == null || now.getTime() - lastSuccess.endedAt.getTime() > maxAgeMs)
       status = 'stale';
     else status = 'ok';
-    return { job, status, running: lastRun !== null && lastRun.outcome === null, lastRun, lastSuccess };
+    const since = lastSuccess?.endedAt ?? job.registeredAt;
+    return {
+      job,
+      status,
+      fresh: now.getTime() - since.getTime() <= maxAgeMs,
+      running: lastRun !== null && lastRun.outcome === null,
+      lastRun,
+      lastFinished,
+      lastSuccess,
+    };
   });
 }

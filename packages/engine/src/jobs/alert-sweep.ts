@@ -18,7 +18,9 @@
 // - routing:all-open:<阶段> 某阶段的路由全都熔断了：这个阶段有不在熔断的候选路由了就撤（只读判法，和选路同一套；
 //   读不了记没查成，不撤）。
 // - 自己会撤的，这里不管：pool-hold:<池>（探针、会话跑通就撤）、flow-config:<仓>（GitHub 对账）、deploy-lag:（后端健康检查）、
-//   auto-release:（自动发布）、备份脚本的几种（fleet-backup）。
+//   auto-release:（自动发布）、备份脚本的几种（fleet-backup）、canary:broken（全流程巡检下一轮通过）、
+//   watchdog:job:<任务>:…、watchdog:unchecked:<日子>（看门狗 jobs/watchdog.ts：任务按期跑成了、读到登记表了就撤）、
+//   watchdog-down:…（后端看着看门狗，packages/api 的 watchdog-health.ts：看门狗又按期跑完一轮就撤）。
 // - 判不了、还没接的，只靠 24 小时再推：<工作流>:failure:<规则>（封号、换池接着干这类通报，条件就是「发生过」，要人知道）。
 import type { AlertRow } from '@fleet-dao/db';
 import type { StageKind, TaskState } from '@fleet-dao/shared';

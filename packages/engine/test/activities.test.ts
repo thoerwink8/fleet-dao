@@ -54,6 +54,7 @@ describe('活动外壳', () => {
         'reconcileHourly',
         'canaryOpen',
         'canaryCheck',
+        'watchSchedules',
       ].sort(),
     ).toEqual(Object.keys(ACTIVITY_PROFILE).sort());
   });

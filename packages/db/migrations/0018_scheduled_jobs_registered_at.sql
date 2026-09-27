@@ -1,0 +1,1 @@
+ALTER TABLE "scheduled_jobs" ADD COLUMN "registered_at" timestamp with time zone DEFAULT now() NOT NULL;

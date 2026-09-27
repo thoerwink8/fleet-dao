@@ -141,6 +141,22 @@ test('全流程巡检（canary）：显示成「全流程巡检」；通过写�
   assert.equal(byKey(w).canary.reason, '最近一轮（09-27 20:31 有结论）断在「派活」（canary_broken）');
 });
 
+test('看门狗（watchdog）：显示成「看门狗」；跑完一轮写明几点、查了几个，停了照实报红、写明上次几点跑完', () => {
+  const fine = { ok: true, message: '最近一轮 09-27 20:26 跑完：查了 7 个定时任务，都按期跑成' };
+  const v = judge({ status: 200, body: report(true, { ...allOk, watchdog: fine }) });
+  assert.equal(v.ok, true);
+  assert.equal(byKey(v).watchdog.label, '看门狗');
+  assert.equal(byKey(v).watchdog.reason, '在线：最近一轮 09-27 20:26 跑完：查了 7 个定时任务，都按期跑成');
+  const stale = {
+    ok: false,
+    code: 'watchdog_stale',
+    message: '看门狗 09-27 20:10 之后超过 15 分钟没跑完一轮',
+  };
+  const w = judge({ status: 503, body: report(false, { ...allOk, watchdog: stale }) });
+  assert.equal(w.ok, false);
+  assert.equal(byKey(w).watchdog.reason, '看门狗 09-27 20:10 之后超过 15 分钟没跑完一轮（watchdog_stale）');
+});
+
 test('连不上后端：三项都红，说出原因', () => {
   const v = judge({ error: 'Failed to fetch' });
   assert.equal(v.ok, false);
