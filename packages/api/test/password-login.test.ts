@@ -74,6 +74,9 @@ describe('密码哈希（crypto.scrypt）', () => {
     for (const params of [
       { N: 3, r: 8, p: 1 },
       { N: 2 ** 22, r: 8, p: 1 },
+      // 【故意造出的失败】r、p 不是整数：只查范围会放过去，scrypt 抛底层错，不是格式错（第二意见 #389 第 1 轮）
+      { N: 256, r: 1.5, p: 1 },
+      { N: 256, r: 1, p: 1.5 },
     ]) {
       await expect(hashPassword(PASSWORD, params)).rejects.toBeInstanceOf(PasswordHashFormatError);
     }
