@@ -29,11 +29,12 @@ export const IO_ROOT_ALERT_KEY = 'engine-session-io';
 
 /**
  * 根目录能不能用：在、是目录、归引擎自己、自己能读写进、别人只能进不能读写（0711 这一类）。能用回 undefined，不能用回原因。
- * uid 不给就取这个进程的（Windows 上没有：一律不能用，开发机走管道）。
+ * uid 不给就取这个进程的；null = 认不出（Windows 上没有：一律不能用，开发机走管道）。
  */
-export function checkIoRoot(dir: string, uid: number | undefined = process.getuid?.()): string | undefined {
+export function checkIoRoot(dir: string, uid: number | null = process.getuid?.() ?? null): string | undefined {
   if (!dir.startsWith('/')) return `收发目录的根要写绝对路径：${dir}`;
-  if (uid === undefined) return '这台机器认不出进程的用户号（不是 Linux），不脱开跑';
+  // 认不出用 null 表示（显式传 undefined 会被换成默认值）
+  if (uid === null) return '这台机器认不出进程的用户号（不是 Linux），不脱开跑';
   let st: ReturnType<typeof statSync>;
   try {
     st = statSync(dir);

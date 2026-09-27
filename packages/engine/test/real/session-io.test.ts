@@ -78,7 +78,7 @@ describe('收发目录的根', () => {
     writeFileSync(join(d, 'file'), '');
     if (onPosix) expect(checkIoRoot(join(d, 'file'), 1000)).toMatch(/不是目录/);
     expect(checkIoRoot('relative/io', 1000)).toMatch(/绝对路径/);
-    expect(checkIoRoot('/var/lib/fleet-sessions', undefined)).toMatch(/不是 Linux/);
+    expect(checkIoRoot('/var/lib/fleet-sessions', null)).toMatch(/不是 Linux/);
   });
 });
 
