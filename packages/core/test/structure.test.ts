@@ -30,6 +30,7 @@ describe('core 只放纯判断', () => {
       'fusion.ts',
       'index.ts',
       'replica.ts',
+      'seat.ts',
       'verdict.ts',
     ]);
   });

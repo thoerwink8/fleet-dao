@@ -12,6 +12,8 @@
 // @fleet-dao/core 的 dispatch.ts）。要读 GitHub（「引擎」机器人看这张单此刻开没开着、挂在哪个版本）、连 Temporal（起工作流），
 // 都按同一份 api.env。没被拒的（起了、没起成、本来就在跑）都记一条操作记录 task.handover，从库里读回再打印。
 // 驾驶舱的「交给 fleet」按钮随界面单 #282 做，调同一套判法。
+//   seat …、claim …（#299 帅位只一个）：帅位接班、续约、现查、看现状、交接，帅位认领单、工人报进度和结束、作废过了宽限期的认领。
+// 本机经 ssh 调，写法和退出码见 seat-cli.ts（多一个 3：不是你的——不是帅位、别人拿着、认领号对不上）。
 // 每条命令带 --help（或 -h）只打印用法。
 // 退出码（几条命令一样）：0 做成了（或本来就是）；1 没做成（被拒、库里没有、连不上库、读回来不对，一句话说原因）；2 参数不对或没带上库连接。
 import { userInfo } from 'node:os';
@@ -30,6 +32,7 @@ import type {
   Store,
   User,
 } from './ports.ts';
+import { CLAIM_USAGE, runClaim, runSeat, SEAT_USAGE, SeatCliError } from './seat-cli.ts';
 import { isCockpitUser } from './session.ts';
 
 export class CliError extends Error {
@@ -645,6 +648,8 @@ export interface CliDeps {
   /** 连 Temporal 起工作流（handover 用）：地址、命名空间、任务队列按环境读（config.ts 的 temporalSettings）。 */
   openTemporal(env: CliEnv): Promise<HandoverTemporal>;
   now(): Date;
+  /** 标准输入整段读完（seat handoff 的交接说明）。不给就是真的 process.stdin。 */
+  readStdin?: () => Promise<string>;
 }
 
 async function openPgStore(url: string): Promise<{ store: Store; close(): Promise<void> }> {
@@ -686,7 +691,15 @@ export function processDeps(): CliDeps {
     openIssuePlans: openGitHubPlans,
     openTemporal: openTemporalClient,
     now: () => new Date(),
+    readStdin: readAllStdin,
   };
+}
+
+async function readAllStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin)
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+  return Buffer.concat(chunks).toString('utf8');
 }
 
 function databaseUrl(env: CliEnv): string {
@@ -703,6 +716,8 @@ const USAGES: Record<string, string> = {
   'set-password': USAGE,
   dispatch: DISPATCH_USAGE,
   handover: HANDOVER_USAGE,
+  seat: SEAT_USAGE,
+  claim: CLAIM_USAGE,
 };
 
 const isHelp = (arg: string | undefined) => arg === '--help' || arg === '-h';
@@ -761,8 +776,56 @@ export async function runCli(argv: readonly string[], deps: CliDeps = processDep
       await close();
     }
   }
+  if (command === 'seat' || command === 'claim') return runSeatOrClaim(command, rest, deps);
   deps.err(Object.values(USAGES).join('\n'));
   return 2;
+}
+
+/**
+ * seat、claim（#299）：带 --json 只往标准输出打一行 JSON（本机脚本读），不带打给人看的话；出错也照这个样子打。
+ * 退出码见 seat-cli.ts 开头：0 好了，3 不是你的，1 没做成（连不上库、库出错），2 参数不对。
+ */
+async function runSeatOrClaim(
+  command: 'seat' | 'claim',
+  rest: readonly string[],
+  deps: CliDeps,
+): Promise<number> {
+  const json = rest.includes('--json');
+  const fail = (code: number, message: string) => {
+    if (json) deps.out(JSON.stringify({ ok: false, reason: code === 2 ? 'usage' : 'error', why: message }));
+    else deps.err(message);
+    return code;
+  };
+  // 用到库才连：参数不对（退出码 2）的不连库
+  let opened: Promise<{ store: Store; close(): Promise<void> }> | undefined;
+  const connect = () => {
+    opened ??= Promise.resolve().then(() => deps.openStore(databaseUrl(deps.env)));
+    return opened;
+  };
+  const store = new Proxy({} as Store, {
+    get(_target, prop) {
+      if (prop === 'then') return undefined;
+      return async (...args: unknown[]) => {
+        const real = (await connect()).store as unknown as Record<PropertyKey, unknown>;
+        const fn = real[prop];
+        if (typeof fn !== 'function') throw new Error(`Store 没有 ${String(prop)}`);
+        return (fn as (...a: unknown[]) => unknown).apply(real, args);
+      };
+    },
+  });
+  try {
+    const result =
+      command === 'seat'
+        ? await runSeat(rest, { store, readStdin: deps.readStdin ?? readAllStdin })
+        : await runClaim(rest, { store });
+    deps.out(json ? JSON.stringify(result.json) : result.text);
+    return result.code;
+  } catch (err) {
+    if (err instanceof SeatCliError || err instanceof CliError) return fail(err.exitCode, err.message);
+    return fail(1, `没做成：${describeDbError(err)}`);
+  } finally {
+    if (opened) await (await opened.catch(() => undefined))?.close();
+  }
 }
 
 /** 命令行入口（src/bin/fleet-api.ts 调）：跑命令，没做成就打印一句白话，返回退出码。 */

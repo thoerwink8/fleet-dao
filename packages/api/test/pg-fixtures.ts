@@ -16,6 +16,7 @@ import {
   githubEvents,
   githubEventVersions,
   insertSubtasks,
+  issueClaims,
   models,
   notificationDeliveries,
   notifications,
@@ -27,6 +28,7 @@ import {
   routes,
   scheduledJobs,
   scheduleRuns,
+  seatLeases,
   sessionRuns,
   settings,
   specs,
@@ -401,5 +403,27 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
         })),
       );
     }
+  }
+  // 帅位租约和认领（#299）
+  if (data.seatLeases?.length) {
+    await db.insert(seatLeases).values(
+      data.seatLeases.map((l) => ({
+        ...l,
+        acquiredAt: date(l.acquiredAt),
+        renewedAt: date(l.renewedAt),
+        handoffAt: dateOpt(l.handoffAt ?? undefined),
+      })),
+    );
+  }
+  if (data.claims?.length) {
+    await db.insert(issueClaims).values(
+      data.claims.map((c) => ({
+        ...c,
+        claimedAt: date(c.claimedAt),
+        heartbeatAt: date(c.heartbeatAt),
+        updatedAt: date(c.updatedAt),
+        endedAt: dateOpt(c.endedAt ?? undefined),
+      })),
+    );
   }
 }
