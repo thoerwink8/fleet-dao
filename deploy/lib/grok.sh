@@ -6,8 +6,9 @@
 # ~/.grok/downloads/grok-linux-<架构>，~/.grok/bin/grok 链过去），写出来的都归他；在就不动（不重装、不升级）。
 # 不钉版本：安装脚本装当时最新的稳定版（docs/reference/deploy.md P33：跟最新、只留一份）。之后不自己升级：插头起 grok 时关了
 # 更新检查（GROK_DISABLE_AUTOUPDATER=1，免得会话半路换二进制），要升级以会话用户跑 grok update（docs/ops.md 第五节）。
-# 装的时候 PATH 里只有系统目录、不带 SHELL：安装脚本会往 PATH 上他写得动的目录（~/.local/bin）里链 grok 和 agent——agent
-# 这个名字 cursor-agent 的安装脚本也在用，会被盖掉——还会改 shell 的启动文件。不给这两样，它就只写 ~/.grok 下面。
+# 装的时候 PATH 里只有系统目录、SHELL 给 /bin/sh：安装脚本会往 PATH 上他写得动的目录（~/.local/bin）里链 grok 和 agent——
+# agent 这个名字 cursor-agent 的安装脚本也在用，会被盖掉——SHELL 是 bash、zsh、fish 还会改它们的启动文件。SHELL 不能不给：
+# 安装脚本是 bash 跑的，bash 起来时 SHELL 空着会自己照 passwd 填上他的登录 shell（CI 实测）。这样它就只写 ~/.grok 下面。
 # 安装脚本和它下的二进制都不核校验和：官方没给（安装脚本只核下下来的能跑 --version）；它只以会话用户的身份跑，出了事也只在
 # 会话用户自己家里——会话用户本来就要跑 grok。安装脚本先整个下下来再跑（不 curl | bash：下到一半断了会跑半截），退出 0 也
 # 不算装成，装完照读回的判法再核一遍。
@@ -32,7 +33,7 @@ GROK_VERSION_RE='^grok ([0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9._]+)?)( \([0-9a-f]+\)
 grok_bin() { printf '%s' "${GROK_BIN//\{user\}/$1}"; }             # 会话用户
 grok_auth_file() { printf '%s' "${GROK_AUTH_FILE//\{user\}/$1}"; } # 会话用户
 
-# 以那个用户的身份跑一条命令：环境清干净，PATH 只有系统目录、没有 SHELL（为什么见开头）；照 lib/cursor-agent.sh 的
+# 以那个用户的身份跑一条命令：环境清干净，PATH 只有系统目录、SHELL 是 /bin/sh（为什么见开头）；照 lib/cursor-agent.sh 的
 # cursor_agent_as 防卡——不带控制终端（setsid），到点叫停、不理叫停的再过 5 秒强杀（被强杀时 timeout 连自己一起杀掉，退出码
 # 是 137 而不是 124）；标准输出、标准错误落进 root 建的两个文件（不走 $(...) 的管道：他留个后台进程占着写端，管道就一直等）。
 # 返回命令的退出码
@@ -40,7 +41,7 @@ grok_as() { # 用户 家目录 秒数 标准输出文件 标准错误文件 命�
   local u=$1 home=$2 secs=$3 out=$4 err=$5
   shift 5
   (cd -- "$home" && runuser -u "$u" -- env -i HOME="$home" USER="$u" LOGNAME="$u" PATH=/usr/local/bin:/usr/bin:/bin \
-    LANG=C.UTF-8 /usr/bin/setsid -w /usr/bin/timeout -k 5 "$secs" "$@") </dev/null >"$out" 2>"$err"
+    SHELL=/bin/sh LANG=C.UTF-8 /usr/bin/setsid -w /usr/bin/timeout -k 5 "$secs" "$@") </dev/null >"$out" 2>"$err"
 }
 
 # 报错里带的那几行：去掉终端控制符，\r 刷新的进度条拆成行，留最后 3 行非空的

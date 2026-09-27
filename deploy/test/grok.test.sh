@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # shellcheck source-path=SCRIPTDIR
 # deploy/lib/grok.sh（给会话用户装、查 grok 命令行和它的登录态）的判据，每条失败路径都故意造出来：
-#   1. 没装：判红、说清没装；装：以那个用户自己的身份、在他家里、环境清干净（PATH 里只有系统目录、没有 SHELL）地跑官方
-#      安装脚本，先下成文件再跑、跑完删掉，装出来的都归他、只在 ~/.grok 下面（~/.local/bin 里的 agent 不被盖掉），装完核得上；
-#      第二遍不再跑安装脚本、一处不改
+#   1. 没装：判红、说清没装；装：以那个用户自己的身份、在他家里、环境清干净（PATH 里只有系统目录、SHELL 是 /bin/sh）地跑
+#      官方安装脚本，先下成文件再跑、跑完删掉，装出来的都归他、只在 ~/.grok 下面（~/.local/bin 里的 agent 不被盖掉、启动文件
+#      不改），装完核得上；第二遍不再跑安装脚本、一处不改
 #   2. 不是文件（目录）、不能跑、链接断了：算没装（和引擎起 grok 的判法一样）
 #   3. 装着却跑不成（退出非 0、解释器没了）、输出认不出、卡住、不理叫停：判红，不重装、不删
 #   4. 装的时候出错（安装脚本失败、下不到、退出 0 却什么都没装、卡住）：只记红、不中断，不算装了
@@ -11,7 +11,10 @@
 #   6. 登录态：没有记待配、写清怎么登录；是符号链接、目录、属主不对、权限不是 600、空的判红；在就只报属主、权限、大小，
 #      全部输出里没有文件内容
 # 不出网：官方安装脚本换成假的（照官方的样子把二进制放进 ~/.grok/downloads、~/.grok/bin 下链过去；PATH 上有他写得动的
-# ~/.local/bin 就往里链 agent），经 file:// 下；$T 下放开关文件让它故意出错。
+# ~/.local/bin 就往里链 agent；SHELL 是 bash、zsh、fish 就改启动文件——它是 bash 跑的，SHELL 空着 bash 会自己填上登录 shell），
+# 经 file:// 下；$T 下放开关文件让它故意出错。
+# 临时用户的编号会被下一个测试的临时用户重用（cursor-agent 的测试卡住那一条也会在 /tmp 留下文件）：查「下下来的安装脚本删了」
+# 只看这一次下的那个文件，收尾时把这个用户留在 /tmp 的东西删掉，不留给后面的测试。
 # 要 root：得建临时用户、以他的身份跑。用法：sudo bash deploy/test/grok.test.sh。退出码：0 通过，1 不通过，2 没跑成。
 set -uo pipefail
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -29,6 +32,7 @@ U=fleet-grok-test-$$
 T=$(mktemp -d /var/tmp/grok-test.XXXXXX)
 cleanup() {
   pkill -KILL -u "$U" >/dev/null 2>&1
+  find /tmp -maxdepth 1 -user "$U" -exec rm -rf -- {} + >/dev/null 2>&1
   userdel "$U" >/dev/null 2>&1
   rm -rf -- "$T"
 }
@@ -71,9 +75,9 @@ chmod 755 "\$d/grok-linux-x86_64.tmp.\$\$"
 mv -f "\$d/grok-linux-x86_64.tmp.\$\$" "\$d/grok-linux-x86_64"
 ln -sf ../downloads/grok-linux-x86_64 "\$b/grok"
 ln -sf ../downloads/grok-linux-x86_64 "\$b/agent"
-# 和官方的一样：PATH 上有他写得动的 ~/.local/bin 就往里链；有 SHELL 就改它的启动文件
+# 和官方的一样：PATH 上有他写得动的 ~/.local/bin 就往里链；SHELL 是 bash、zsh、fish 就改它的启动文件
 case ":\$PATH:" in *":\$HOME/.local/bin:"*) ln -sf "\$b/agent" "\$HOME/.local/bin/agent" ;; esac
-if [ -n "\${SHELL-}" ]; then printf '\n# >>> grok installer >>>\n' >>"\$HOME/.bashrc"; fi
+case "\$(basename "\${SHELL:-}")" in bash | zsh | fish) printf '\n# >>> grok installer >>>\n' >>"\$HOME/.bashrc" ;; esac
 EOF
 chmod 644 "$T/install.sh"
 URL=file://$T/install.sh
@@ -125,10 +129,10 @@ check "安装脚本跑了一次" "$(runs)" 1
 read -r who home pwd leak shell self path <"$T/install.log"
 check "以他的身份、家目录和当前目录都是他家" "$who $home $pwd" "$U $H $H"
 check "root 这边的环境变量带不进去" "$leak" unset
-check "不带 SHELL（安装脚本就不改他的启动文件）" "$shell" unset
+check "SHELL 是 /bin/sh（安装脚本就不改他的启动文件；root 这边的 /bin/bash 带不进去）" "$shell" /bin/sh
 check "PATH 只有系统目录（没有他写得动的 ~/.local/bin）" "$path" /usr/local/bin:/usr/bin:/bin
 has "安装脚本先下成文件再跑（不是 curl | bash）" "$self" '^/tmp/'
-check "下下来的安装脚本跑完删了" "$(find /tmp -maxdepth 1 -user "$U" -printf '%p\n' | head -3)" ""
+check "下下来的安装脚本跑完删了" "$(if [[ -e "$self" ]]; then echo "还在：$self"; fi)" ""
 check "他家 .local/bin 里 cursor-agent 链的 agent 没被盖掉" "$(readlink "$H/.local/bin/agent")" /nonexistent/cursor-agent
 check "启动文件没被改" "$(cat -- "$H/.bashrc" 2>/dev/null | grep -c 'grok installer')" 0
 grok_version "$U" "$B"
