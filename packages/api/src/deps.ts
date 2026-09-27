@@ -48,6 +48,11 @@ export interface Deps {
    * 另写一句「谁在处理没接上」，不拿「没人认领」顶。
    */
   alertWork?: AlertWorkPort | undefined;
+  /**
+   * 进程要停了（main.ts 收到 SIGTERM）：只有生产装配会给。飞书 outbox 的长轮询（feishu-routes.ts）拿它跟请求自己的
+   * signal 合并着等，停机时马上醒、不再查库（#364：库关到一半时还查会报错，被当成「未处理的错误」500）。
+   */
+  shutdownSignal?: AbortSignal | undefined;
   log: Logger;
   now: () => Date;
   /** 演示版可见范围的发布处；null = 没配（FLEET_DEMO_DIR）。 */

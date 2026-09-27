@@ -44,14 +44,15 @@ import {
   pendingOutbox,
 } from './feishu-views.ts';
 import { ApiError, readJson, readQuery, reply } from './http.ts';
-import type {
-  Actor,
-  ChangeFeed,
-  DraftRecord,
-  FeishuMessageKey,
-  FeishuMessageRecord,
-  FeishuMessageResult,
-  NewAuditEntry,
+import {
+  type Actor,
+  type ChangeFeed,
+  type DraftRecord,
+  type FeishuMessageKey,
+  type FeishuMessageRecord,
+  type FeishuMessageResult,
+  type NewAuditEntry,
+  TableLockedError,
 } from './ports.ts';
 import { actingFounder, type CockpitUser, checkGatewayPass } from './session.ts';
 import { routeLookup } from './views.ts';
@@ -561,15 +562,51 @@ export function feishuRoutes(deps: Deps, opening: DraftOpenRunner): Hono<FeishuE
     const { waitSeconds } = readQuery(c, FeishuOutboxQuery);
     const quiet = await quietHours();
     const deadline = Date.now() + waitSeconds * 1000;
-    const signal = c.req.raw.signal;
-    let batch = await pendingBatch();
-    while (batch.items.length === 0 && !signal.aborted) {
+    // 停机时（main.ts 的 shutdown）deps.shutdownSignal 会 abort：马上醒、直接回手上已有的这批，不再查库——
+    // 停机顺序是先给这个信号，库要过一会儿才真的关，但库这时可能已经在关的路上，query 随时会失败（#364：
+    // 反复看到「Failed query」500，原因就是这里醒了之后又查了一次库，撞上正在关闭的连接）。
+    const signal = deps.shutdownSignal
+      ? AbortSignal.any([c.req.raw.signal, deps.shutdownSignal])
+      : c.req.raw.signal;
+    // 查到的 tasks/repos 联表被发布的迁移 DDL 锁住时，store 抛 TableLockedError（pg-store.ts）：这不是真故障，
+    // 当成「再等一下」继续轮询，不直接 500（#364：这条链反复报错的根因是发布跑迁移时表被锁、联表查询等锁超时，
+    // 不是进程重启本身；重启造成的那半（停机时查到正在关的库）由上面的 shutdownSignal 处理，这两种触发条件不同，
+    // 但对调用方要的效果一样——都该是「再等一下、自己重试」，不是 500）。
+    let batch: Awaited<ReturnType<typeof pendingBatch>> | undefined;
+    let lastLockError: TableLockedError | undefined;
+    for (;;) {
+      // 先看是不是已经断了（客户端断线，或者上面那种停机）：断了不该再查一次库，直接拿手上已有的批次回。
+      // 只在没断的时候才查——上一圈的 sleep 也是被这个信号叫醒的，叫醒原因可能正是「断了」本身。
+      if (!signal.aborted) {
+        try {
+          batch = await pendingBatch();
+          lastLockError = undefined;
+        } catch (err) {
+          if (!(err instanceof TableLockedError)) throw err;
+          lastLockError = err;
+          log.warn('outbox 轮询联表查询被锁住（多半是发布在跑迁移），当成"再等一下"，继续轮询', {
+            error: err.message,
+          });
+        }
+      }
+      if (signal.aborted) break;
+      if (batch !== undefined && batch.items.length > 0) break;
       const left = deadline - Date.now();
       if (left <= 0) break;
       const untilHold =
-        batch.nextHoldAt === undefined ? Number.POSITIVE_INFINITY : batch.nextHoldAt - deps.now().getTime();
+        batch?.nextHoldAt === undefined ? Number.POSITIVE_INFINITY : batch.nextHoldAt - deps.now().getTime();
       await outboxWake.sleep(Math.max(0, Math.min(left, OUTBOX_POLL_MS, untilHold)), signal);
-      batch = await pendingBatch();
+    }
+    if (batch === undefined) {
+      // 一次都没读成过：不能拿空批次冒充「没有待推送的」（底线：不许用空、0、ok 冒充没事），回一个调用方认得出
+      // 「再等一下、自己重试」的明确错误，不是笼统的 500（#364）。
+      throw new ApiError(
+        503,
+        'outbox_locked',
+        `outbox 查询被表锁挡了 ${waitSeconds} 秒都没读成一次，多半是发布在跑迁移，稍后重试${
+          lastLockError ? `：${lastLockError.message}` : ''
+        }`,
+      );
     }
     return reply(c, FeishuOutboxResponse, {
       items: batch.items,
