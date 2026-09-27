@@ -83,7 +83,7 @@ const cases: Case[] = [
   ['Write-Output "a`nb"', 0, O, 'PowerShell'],
   // 认不出的输入：按拦处理
   ['ls', 2, O, undefined],
-  ['ls', 2, O, 'Read'],
+  ['ls', 2, O, 'Edit'],
 ];
 
 function input(c: Case): string {
@@ -309,12 +309,13 @@ describe('密钥文件：碰到只放行不读内容的，值不进对话', () =
     if (want === 2) expect(got.message).toContain('secret-shape.mjs');
   });
 
-  it('拦下时说清楚怎么办：看结构用旁边的安全查看脚本，判断在不在用 stat、test', () => {
+  it('拦下时第一行就说清怎么办（Grok 只把第一行交给模型）：看结构用旁边的安全查看脚本，判断在不在用 stat、test', () => {
     const got = lib.decide(secretInput('Bash', INCIDENT));
     expect(got.code).toBe(2);
-    expect(got.message).toContain(`node ${SHAPE}`);
-    expect(got.message).toMatch(/stat/);
-    expect(got.message).toMatch(/Test-Path/);
+    const first = got.message?.split('\n')[0] ?? '';
+    expect(first).toContain(`node ${SHAPE}`);
+    expect(first).toMatch(/stat/);
+    expect(first).toMatch(/Test-Path/);
     expect(existsSync(SHAPE_SCRIPT)).toBe(true);
   });
 
@@ -330,6 +331,134 @@ describe('密钥文件：碰到只放行不读内容的，值不进对话', () =
     `~/.fleet-dao/bin/age -d -i ~/.fleet-dao/vault-key.txt france${ETC}/catalog.json.age | sha256sum; ssh fr 'sha256sum < ${ETC}/catalog.json'`,
   ])('文档里照着跑的照样放行：%s', (command) => {
     expect(lib.decide(secretInput('Bash', command)).code).toBe(0);
+  });
+});
+
+// 读文件、搜内容的工具（Claude Code 的 Read、Grep，Cursor 同名；Grok 的 read_file、grep；Devin 的 read、grep）：
+// 要读的路径碰到同一张密钥名单就拦。只拦命令、Read 照样能把密钥文件读进对话，等于没拦。
+// [说明, 钩子输入（原样）, 该给的退出码, 会话目录（输入里没带时钩子进程的工作目录）]
+type ReadCase = [string, Record<string, unknown>, 0 | 2, string?];
+const HOME_A = '/home/alice';
+const readCases: ReadCase[] = [
+  [
+    'Read 读 reclaude 的设备文件',
+    { tool_name: 'Read', tool_input: { file_path: `${HOME_A}/${RC}/device.json` } },
+    2,
+  ],
+  [
+    'Read 读 Windows 路径的设备密钥',
+    { tool_name: 'Read', tool_input: { file_path: `C:\\Users\\alice\\${RC}\\device.key` } },
+    2,
+  ],
+  [
+    'Read 读 Claude 的登录凭据',
+    { tool_name: 'Read', tool_input: { file_path: `${HOME_A}/.claude/${CRED}` } },
+    2,
+  ],
+  ['Read 读法国的环境文件', { tool_name: 'Read', tool_input: { file_path: `${ETC}/api.env` } }, 2],
+  [
+    'Read 读 *.key',
+    { tool_name: 'Read', tool_input: { file_path: '/work/repo/deploy/tls.key', limit: 5 } },
+    2,
+  ],
+  ['Read 读 SSH 私钥', { tool_name: 'Read', tool_input: { file_path: `${HOME_A}/.ssh/id_ed25519` } }, 2],
+  [
+    'Grep 在 reclaude 目录里搜',
+    { tool_name: 'Grep', tool_input: { pattern: 'sk', path: `${HOME_A}/${RC}` } },
+    2,
+  ],
+  [
+    'Grep 的 glob 指到密钥文件',
+    { tool_name: 'Grep', tool_input: { pattern: 'x', path: HOME_A, glob: `${RC}/*.json` } },
+    2,
+  ],
+  ['Grep 搜 *.pem 的内容', { tool_name: 'Grep', tool_input: { pattern: 'BEGIN', glob: '**/*.pem' } }, 2],
+  [
+    'Grep 没给路径、会话目录就在 .secrets 里',
+    { tool_name: 'Grep', tool_input: { pattern: 'x' }, cwd: `${HOME_A}/.secrets` },
+    2,
+  ],
+  // Grok：camelCase 的 toolName、toolInput；路径可以是 ~ 开头、相对会话目录
+  [
+    'Grok 的 read_file',
+    { toolName: 'read_file', toolInput: { path: `~/${RC}/device.json` }, cwd: '/work/repo' },
+    2,
+  ],
+  [
+    'Grok 的 read_file 相对路径、会话目录在 reclaude 里',
+    { toolName: 'read_file', toolInput: { target_file: 'device.json' }, cwd: `${HOME_A}/${RC}` },
+    2,
+  ],
+  [
+    'Grok 的 grep',
+    { toolName: 'grep', toolInput: { pattern: 'x', path: '~/.secrets' }, cwd: '/work/repo' },
+    2,
+  ],
+  // Devin：自己的小写工具名，输入里没有会话目录
+  ['Devin 的 read', { tool_name: 'read', tool_input: { file_path: `${HOME_A}/.claude/${CRED}` } }, 2],
+  ['Devin 的 exec', { tool_name: 'exec', tool_input: { command: `cat ~/${RC}/device.json` } }, 2],
+  // Cursor：Read、Grep 同名，路径字段叫什么都认
+  [
+    'Cursor 的 Read',
+    { tool_name: 'Read', tool_input: { path: `${HOME_A}/${RC}/device.json` }, cwd: '/w' },
+    2,
+  ],
+  // 认不出的输入：按拦处理
+  ['Read 没有要读的路径', { tool_name: 'Read', tool_input: {} }, 2],
+  ['Read 没有 tool_input', { tool_name: 'Read' }, 2],
+  ['Grep 的输入不是对象', { tool_name: 'Grep', tool_input: 'x' }, 2],
+  // —— 放行 ——
+  [
+    'Read 读代码',
+    { tool_name: 'Read', tool_input: { file_path: '/work/repo/README.md' }, cwd: '/work/repo' },
+    0,
+  ],
+  [
+    'Read 读 reclaude 的 state.json（自检文档照读的那份）',
+    { tool_name: 'Read', tool_input: { file_path: `${HOME_A}/${RC}/state.json` } },
+    0,
+  ],
+  ['Read 读 SSH 公钥', { tool_name: 'Read', tool_input: { file_path: `${HOME_A}/.ssh/id_ed25519.pub` } }, 0],
+  [
+    'Grep 在代码里搜密钥文件的名字（名字写在 pattern 里）',
+    { tool_name: 'Grep', tool_input: { pattern: `\\${RC}/device\\.json|${CRED}`, path: '/work/repo' } },
+    0,
+  ],
+  [
+    'Grep 按类型、glob 搜代码',
+    {
+      tool_name: 'Grep',
+      tool_input: { pattern: 'TODO', path: '/work/repo/src', glob: '*.ts', output_mode: 'content' },
+    },
+    0,
+  ],
+  [
+    'Grep 没给路径、会话目录是代码目录',
+    { tool_name: 'Grep', tool_input: { pattern: 'x' }, cwd: '/work/repo' },
+    0,
+  ],
+  [
+    'Grok 的 read_file 读代码',
+    { toolName: 'read_file', toolInput: { target_file: 'src/main.rs' }, cwd: '/work/repo' },
+    0,
+  ],
+  ['Devin 的 grep', { tool_name: 'grep', tool_input: { pattern: 'x', path: '/work/repo' } }, 0],
+];
+
+describe('读文件、搜内容的工具：路径碰到密钥名单就拦', () => {
+  it.each(readCases.map((c) => [c[0], c[2], c] as const))('%s → 退出码 %i', (_name, want, c) => {
+    const [, input, , fallback] = c;
+    const got = lib.decide(JSON.stringify(input), fallback ?? '/work/repo');
+    expect(got.code).toBe(want);
+    if (want === 2 && !String(_name).includes('没有') && !String(_name).includes('不是对象')) {
+      expect(got.message?.split('\n')[0]).toContain('secret-shape.mjs');
+    }
+  });
+
+  it('Devin 的输入里没有会话目录：按钩子进程的工作目录认', () => {
+    const devin = JSON.stringify({ tool_name: 'grep', tool_input: { pattern: 'x' } });
+    expect(lib.decide(devin, `${HOME_A}/${RC}`).code).toBe(2);
+    expect(lib.decide(devin, '/work/repo').code).toBe(0);
   });
 });
 

@@ -1,7 +1,7 @@
-// PreToolUse 钩子（agents-sync 装进 ~/.fleet-dao/hooks/，Claude Code 每次调 Bash、PowerShell 之前跑）：拦住绕过仓里脚本、
-// 会把本机会话全弄断、会把密钥文件的内容打进对话的命令。只是止血：正式的强制点在仓里（packages/conventions、卫生检查），
-// 这里挡的是会话自己手滑。
-// 协议：stdin 一份 JSON（tool_name、tool_input.command、cwd）；退出码 2 = 拦下，stderr 给模型看；0 = 放行。
+// PreToolUse 钩子（agents-sync 装进 ~/.fleet-dao/hooks/，Claude Code 每次调 Bash、PowerShell、Read、Grep 之前跑）：
+// 拦住绕过仓里脚本、会把本机会话全弄断、会把密钥文件的内容读进对话的调用。只是止血：正式的强制点在仓里
+// （packages/conventions、卫生检查），这里挡的是会话自己手滑。
+// 协议：stdin 一份 JSON（tool_name、tool_input、cwd）；退出码 2 = 拦下，stderr 给模型看；0 = 放行。
 // 输入认不出一律按拦处理（退出码 2），不当成没事放行。
 // 规矩本身由 agents/test/rules/pretool.rules.test.ts 钉住：改这里的判断改了规矩，那边会红。
 import { readFileSync } from 'node:fs';
@@ -647,12 +647,15 @@ function describeCmd(c, kind) {
 
 const SHAPE = '"$HOME/.fleet-dao/hooks/secret-shape.mjs"';
 
+/** 拦下时第一行就要说清怎么办：Grok 只把 stderr 的第一行交给模型（~/.grok/docs/user-guide/10-hooks.md「Exit Codes」） */
+const SECRET_WAY = `看结构用 node ${SHAPE} <文件>（只打字段名、类型、长度，一个值都不打），看在不在、权限用 stat、test -f、Test-Path`;
+
 function secretBlock(label, why) {
   return block(
     [
-      `fleet-guard：这条命令碰到了${label}${why ? `，又${why}` : ''}，按拦处理：密钥、令牌、口令的值不能进对话。`,
+      `fleet-guard：这条命令碰到了${label}${why ? `，又${why}` : ''}，按拦处理（密钥、令牌、口令的值不进对话）；${SECRET_WAY}。`,
       '碰到密钥文件只放行不读内容的：ls、stat、test、Test-Path、Get-Item 这类看在不在、看权限的，单独一条跑（别 cd 进去、别赋给变量、别套循环或 $( )）。',
-      `要看结构：node ${SHAPE} <文件>…（只打字段名、类型、长度，一个值都不打；认 JSON、env、PEM）；别的机器上的：cat ${SHAPE} | ssh <机器> 'node --input-type=module - <文件>'。`,
+      `查看脚本认 JSON、env、PEM；别的机器上的文件：cat ${SHAPE} | ssh <机器> 'node --input-type=module - <文件>'。`,
       '提交信息、PR 正文里要写这些路径：先用 Write 写进文件，再 -F / --body-file；在代码里搜这些名字用 Grep 工具。',
     ].join('\n'),
   );
@@ -738,8 +741,9 @@ function secretVerdict(command, kind) {
 
 /**
  * 跑命令的工具在各家叫什么。登记在 ~/.claude/settings.json 的这条钩子，Grok、Devin、Cursor 默认也借道读，
- * 送进来的是它们自己的工具名：Grok 是 run_terminal_command（输入是 camelCase 的 toolName、toolInput），Devin 是 exec，
- * Cursor 是 Shell。bash 语法的检查（反引号）只对确定是 bash 的 Bash 做：别家的终端在 Windows 上未必是 bash。
+ * 送进来的是它们自己的工具名：Grok 是 run_terminal_command（输入是 camelCase 的 toolName、toolInput），Devin 是 exec
+ * （它按自己的名字匹配，靠 targets.ts 里锚定的那组 matcher 才进得来），Cursor 是 Shell。
+ * bash 语法的检查（反引号）只对确定是 bash 的 Bash 做：别家的终端在 Windows 上未必是 bash。
  */
 export const SHELL_TOOLS = {
   Bash: 'bash',
@@ -748,6 +752,70 @@ export const SHELL_TOOLS = {
   exec: 'shell',
   Shell: 'shell',
 };
+
+/**
+ * 读文件、搜内容的工具在各家叫什么（登记在哪、各家怎么对上 matcher 见 packages/agents-sync/src/targets.ts 的 HOOK_TARGETS）：
+ * Claude Code、Cursor 是 Read、Grep；Grok 是 read_file、grep；Devin 是 read、grep。值：read 读一个文件的内容；search 在目录
+ * 或文件里搜内容，它的 pattern 是要搜的正则、不是路径。Glob 只列路径（和 ls 一样放行），不登记。
+ * 登记了、这里却认不得的名字，按「认不出按拦处理」会把那个工具的每次调用都拦下：两边一起改（agents-sync 的测试逐个核对）。
+ */
+export const READ_TOOLS = {
+  Read: 'read',
+  Grep: 'search',
+  read_file: 'read',
+  read: 'read',
+  grep: 'search',
+};
+
+/** 输入里的字符串（数组里的也算），跳过 skip 里的字段 */
+function inputStrings(args, skip) {
+  const out = [];
+  for (const [k, v] of Object.entries(args)) {
+    if (skip.has(k)) continue;
+    if (typeof v === 'string') out.push(v);
+    else if (Array.isArray(v)) out.push(...v.filter((x) => typeof x === 'string'));
+  }
+  return out;
+}
+
+const isAbsolutePath = (p) => /^(?:[\\/~$%]|[A-Za-z]:)/.test(p);
+
+/**
+ * 读文件、搜内容的工具碰到密钥路径就拦（和命令那条同一张名单）。路径在哪个字段各家不一样（file_path、path、target_file、
+ * glob……），所以除了搜内容的 pattern，输入里每个字符串都看；相对路径接上会话目录再看一遍；搜内容没给路径的，看会话目录。
+ */
+function readVerdict(tool, what, input, fallbackCwd) {
+  const args = input?.tool_input ?? input?.toolInput;
+  if (typeof args !== 'object' || args === null || Array.isArray(args)) {
+    return block(`fleet-guard：${tool} 的输入认不出（${JSON.stringify(args)}），按拦处理`);
+  }
+  const values = inputStrings(args, new Set(what === 'search' ? ['pattern'] : []));
+  if (what === 'read' && values.length === 0) {
+    return block(`fleet-guard：${tool} 的输入里认不出要读的路径，按拦处理`);
+  }
+  const cwd = String(input?.cwd ?? input?.workspaceRoot ?? fallbackCwd);
+  const where = typeof args.path === 'string' ? args.path : cwd;
+  const seen = [
+    ...values,
+    ...values.filter((v) => cwd && !isAbsolutePath(v)).map((v) => `${cwd}/${v}`),
+    ...(what === 'search'
+      ? [where, ...(typeof args.glob === 'string' ? [`${where}/${args.glob}`] : [])]
+      : []),
+  ];
+  for (const v of seen) {
+    const label = secretMention(v);
+    if (label !== null) {
+      return block(
+        [
+          `fleet-guard：${tool} 要${what === 'read' ? '读' : '搜'}的是${label}，按拦处理（密钥、令牌、口令的值不进对话）；${SECRET_WAY}（在终端跑）。`,
+          '查看脚本认 JSON、env、PEM；只要文件列表用 Glob、ls。',
+          '在代码里搜这些名字：Grep 的 path 指到代码目录、名字写在 pattern 里，别把 path、glob 指到密钥文件上。',
+        ].join('\n'),
+      );
+    }
+  }
+  return { code: 0 };
+}
 
 /** 判一条钩子输入（原文）：{ code: 0 } 放行，{ code: 2, message } 拦下。 */
 export function decide(raw, fallbackCwd = '') {
@@ -758,6 +826,9 @@ export function decide(raw, fallbackCwd = '') {
     return block('fleet-guard：钩子输入不是 JSON，按拦处理');
   }
   const tool = input?.tool_name ?? input?.toolName;
+  if (typeof tool === 'string' && Object.hasOwn(READ_TOOLS, tool)) {
+    return readVerdict(tool, READ_TOOLS[tool], input, fallbackCwd);
+  }
   const kind = typeof tool === 'string' && Object.hasOwn(SHELL_TOOLS, tool) ? SHELL_TOOLS[tool] : undefined;
   if (kind === undefined) {
     return block(`fleet-guard：钩子输入里认不出工具名（${JSON.stringify(tool)}），按拦处理`);

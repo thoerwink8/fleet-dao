@@ -1,7 +1,8 @@
 // 钩子：agents/hooks/ 下的脚本整份拷进 ~/.fleet-dao/hooks/，再在各家的设置文件里登记（targets.ts 的 HOOK_TARGETS）。
 // 设置文件里只动本脚本管的那几条：命令指向 ~/.fleet-dao/hooks/ 下的脚本，或者以前手装在 fleet-guard 目录的两条（接管时换掉）。
 // 别的钩子、别的设置一条不碰；设置文件读不懂（不是 JSON、整份不是对象、hooks 不是对象）就不动，报没做成——不当成空的重写。
-// 替别的用户写（--user，法国装机）时整段不装：开会话钩子要在这个用户自己能拉、能写的 fleet-dao 检出里快进、同步。
+// 替别的用户写（--user，法国装机）时开会话那条不登记（HookSkip）：它要在这个用户自己能拉、能写的 fleet-dao 检出里快进、同步；
+// 调工具前那条照装：法国会话用户家里就有 reclaude 的设备密钥，借道读这份设置的 Grok、Cursor 起的会话也要拦。
 import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { Backups } from './backup.ts';
@@ -69,6 +70,10 @@ function scan(hooks: Obj): { owned: Found[]; others: number } {
 const sameMatcher = (have: unknown, want: string | undefined): boolean =>
   want === undefined ? have === undefined || have === '' : have === want;
 
+/** 报出来的名字：事件（脚本，matcher） */
+const specName = (h: HookSpec): string =>
+  `${h.event}（${h.script}${h.matcher === undefined ? '' : `，matcher ${h.matcher}`}）`;
+
 interface Judged {
   /** 一条都没登记的事件（脚本名） */
   missing: string[];
@@ -85,7 +90,7 @@ function judge(root: unknown, t: HookTarget, home: string, platform: Platform): 
   }
   if (root.disableAllHooks === true) out.problems.push('disableAllHooks 开着：钩子一条都不跑');
   if (root.hooks === undefined) {
-    out.missing.push(...t.hooks.map((h) => `${h.event}（${h.script}）`));
+    out.missing.push(...t.hooks.map(specName));
     return out;
   }
   if (!isObj(root.hooks)) {
@@ -94,33 +99,43 @@ function judge(root: unknown, t: HookTarget, home: string, platform: Platform): 
   }
   const { owned, others } = scan(root.hooks);
   out.others = others;
+  // 同一个脚本可以按不同的 matcher 登记几条（调工具前那条：Claude 的工具名一组、Devin 的一组），按事件加 matcher 对号
+  const claimed = new Set<Found>();
   for (const spec of t.hooks) {
-    const mine = owned.filter((f) => f.script === spec.script && !f.legacy);
-    const old = owned.filter((f) => f.script === spec.script && f.legacy);
-    out.legacy += old.length;
-    if (old.length > 0) out.problems.push(`还挂着以前手装的 ${spec.script}（fleet-guard 目录那份）`);
+    const mine = owned.filter(
+      (f) =>
+        !f.legacy &&
+        f.script === spec.script &&
+        f.event === spec.event &&
+        sameMatcher(f.matcher, spec.matcher),
+    );
     if (mine.length === 0) {
-      out.missing.push(`${spec.event}（${spec.script}）`);
+      out.missing.push(specName(spec));
       continue;
     }
-    if (mine.length > 1) out.problems.push(`${spec.script} 登记了 ${mine.length} 次`);
+    for (const f of mine) claimed.add(f);
+    if (mine.length > 1) out.problems.push(`${spec.script} 登记了 ${mine.length} 次（${specName(spec)}）`);
     const f = mine[0] as Found;
     const wrong: string[] = [];
-    if (f.event !== spec.event) wrong.push(`挂在 ${f.event} 上，应是 ${spec.event}`);
-    if (!sameMatcher(f.matcher, spec.matcher))
-      wrong.push(
-        `matcher 是 ${JSON.stringify(f.matcher ?? null)}，应是 ${JSON.stringify(spec.matcher ?? null)}`,
-      );
     if (f.handler.type !== 'command') wrong.push('type 不是 command');
     if (f.handler.command !== hookCommand(home, platform, spec.script)) wrong.push('命令和本机该有的不一样');
     if (f.handler.timeout !== spec.timeout)
       wrong.push(`timeout 是 ${String(f.handler.timeout)}，应是 ${spec.timeout}`);
-    if (wrong.length) out.problems.push(`${spec.script}：${wrong.join('、')}`);
+    if (wrong.length) out.problems.push(`${spec.script}（${specName(spec)}）：${wrong.join('、')}`);
   }
   const known = new Set(t.hooks.map((h) => h.script));
+  const legacy = new Set<string>();
   for (const f of owned) {
-    if (!known.has(f.script)) out.problems.push(`还登记着仓里已经没有的 ${f.script}`);
+    if (f.legacy) {
+      out.legacy++;
+      legacy.add(f.script);
+    } else if (!known.has(f.script)) out.problems.push(`还登记着仓里已经没有的 ${f.script}`);
+    else if (!claimed.has(f))
+      out.problems.push(
+        `${f.script} 多登记了一条：挂在 ${f.event} 上、matcher 是 ${JSON.stringify(f.matcher ?? null)}，不是该有的那几条`,
+      );
   }
+  for (const script of legacy) out.problems.push(`还挂着以前手装的 ${script}（fleet-guard 目录那份）`);
   return out;
 }
 
@@ -153,8 +168,21 @@ function noneLine(): string {
   return `没装读钩子设置的那几家（${agentNames(all)}），跳过`;
 }
 
-function wanted(ctx: Ctx): HookTarget[] {
-  return HOOK_TARGETS.filter((t) => t.readers.some((r) => ctx.installed.has(r)));
+/** 这次不登记的一类钩子（事件名）和为什么；脚本目录照装 */
+export interface HookSkip {
+  event: string;
+  why: string;
+}
+
+/** 这台装了的那几家要的钩子；skip 那类去掉（去掉后一条不剩的设置文件整份不管） */
+function wanted(ctx: Ctx, skip?: HookSkip): HookTarget[] {
+  return HOOK_TARGETS.filter((t) => t.readers.some((r) => ctx.installed.has(r)))
+    .map((t) => (skip ? { ...t, hooks: t.hooks.filter((h) => h.event !== skip.event) } : t))
+    .filter((t) => t.hooks.length > 0);
+}
+
+function skipLines(skip?: HookSkip): Line[] {
+  return skip ? [line('skip', skip.event, skip.why)] : [];
 }
 
 /** 装了、但没装钩子的各家：逐家一行说为什么 */
@@ -164,10 +192,6 @@ function gapLines(ctx: Ctx): Line[] {
     if (ctx.installed.has(id)) out.push(line('skip', AGENTS[id].name, `没装钩子——${why}`));
   }
   return out;
-}
-
-function offLines(off: string): Line[] {
-  return [line('skip', '钩子', off)];
 }
 
 function scriptsKey(ctx: Ctx): { abs: string; key: string } {
@@ -193,7 +217,7 @@ function checkScripts(ctx: Ctx, src: Sources): Line {
 }
 
 function describe(t: HookTarget): string {
-  return t.hooks.map((h) => h.event).join('、');
+  return [...new Set(t.hooks.map((h) => h.event))].join('、');
 }
 
 function checkSettings(ctx: Ctx, t: HookTarget): Line {
@@ -213,9 +237,8 @@ function checkSettings(ctx: Ctx, t: HookTarget): Line {
   return line('ok', key, `${describe(t)} 都登记了，别的 ${j.others} 条钩子不归本脚本管${who}`);
 }
 
-export function checkHooks(ctx: Ctx, src: Sources, off?: string): Line[] {
-  if (off !== undefined) return offLines(off);
-  const targets = wanted(ctx);
+export function checkHooks(ctx: Ctx, src: Sources, skip?: HookSkip): Line[] {
+  const targets = wanted(ctx, skip);
   const out: Line[] = [];
   if (targets.length === 0) {
     out.push(line('skip', scriptsKey(ctx).key, noneLine()));
@@ -223,7 +246,7 @@ export function checkHooks(ctx: Ctx, src: Sources, off?: string): Line[] {
     out.push(checkScripts(ctx, src));
     for (const t of targets) out.push(checkSettings(ctx, t));
   }
-  return [...out, ...gapLines(ctx)];
+  return [...out, ...skipLines(skip), ...gapLines(ctx)];
 }
 
 function applyScripts(ctx: Ctx, src: Sources): Line {
@@ -331,13 +354,12 @@ function applySettings(ctx: Ctx, t: HookTarget, backups: Backups): Line {
   }
 }
 
-export function applyHooks(ctx: Ctx, src: Sources, backups: Backups, off?: string): Line[] {
-  if (off !== undefined) return offLines(off);
-  const targets = wanted(ctx);
+export function applyHooks(ctx: Ctx, src: Sources, backups: Backups, skip?: HookSkip): Line[] {
+  const targets = wanted(ctx, skip);
   const out: Line[] = [];
   if (targets.length === 0) {
     out.push(line('skip', scriptsKey(ctx).key, noneLine()));
-    return [...out, ...gapLines(ctx)];
+    return [...out, ...skipLines(skip), ...gapLines(ctx)];
   }
   const scripts = applyScripts(ctx, src);
   out.push(scripts);
@@ -355,5 +377,5 @@ export function applyHooks(ctx: Ctx, src: Sources, backups: Backups, off?: strin
     }
     out.push(applySettings(ctx, t, backups));
   }
-  return [...out, ...gapLines(ctx)];
+  return [...out, ...skipLines(skip), ...gapLines(ctx)];
 }

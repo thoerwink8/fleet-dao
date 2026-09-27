@@ -4,7 +4,7 @@ import { statSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
 import { Backups } from './backup.ts';
 import { installedAgents } from './detect.ts';
-import { applyHooks, checkHooks } from './hooks.ts';
+import { applyHooks, checkHooks, type HookSkip } from './hooks.ts';
 import { takeLock } from './lock.ts';
 import { manifestPath, readManifest } from './manifest.ts';
 import { applyPosition, checkPosition, type Git, type Position, readPosition, runGit } from './position.ts';
@@ -36,7 +36,7 @@ export const USAGE = `agents-sync —— 把 fleet-dao 仓里 AGENTS.md 的通�
 
 选项：
   --home <目录>      家目录（默认：当前用户的家；带 --user 时是那个用户的家）
-  --user <用户名>    替这个用户做（Linux，要 root）：先换成他的身份再动手，写出来的东西都归他；钩子不装、同步位置不记
+  --user <用户名>    替这个用户做（Linux，要 root）：先换成他的身份再动手，写出来的东西都归他；开会话钩子不登记、同步位置不记
   --repo <目录>      fleet-dao 仓的位置（默认：本脚本所在的仓）
   --old-repo <目录>  旧仓在这台机器上的位置（--retire-old 要）
 
@@ -157,9 +157,16 @@ function planIdentity(args: Args, deps: Deps): Identity {
   };
 }
 
-/** 替别的用户写（法国装机）时钩子整段不装的原因 */
-const HOOKS_OFF_FOR_USER =
-  '替别的用户写（--user）时不装钩子：开会话钩子要在这个用户自己能拉、能写的 fleet-dao 检出里快进、同步；法国的会话由引擎管';
+/**
+ * 替别的用户写（法国装机）时开会话那条钩子不登记：它要在这个用户自己能拉、能写的 fleet-dao 检出里快进、同步，法国的检出跟着
+ * 自动发布走。调工具前那条照装：会话用户家里就有 reclaude 的设备密钥，在那台上手开的会话、借道读 ~/.claude/settings.json
+ * 的 Grok、Cursor 起的会话都要拦读密钥文件。引擎起的 Claude 会话带 --setting-sources project、不读用户级设置，这里装了
+ * 也管不到它（packages/adapters/src/claude-code/args.ts），要管得由引擎另外带上。
+ */
+const SESSION_START_OFF_FOR_USER: HookSkip = {
+  event: 'SessionStart',
+  why: '替别的用户写（--user）时不登记开会话钩子：它要在这个用户自己能拉、能写的 fleet-dao 检出里快进、同步，法国的检出跟着自动发布走',
+};
 // 法国的检出由自动发布推进，停在发出去的那个提交上，本来就可能落后主线（等 CI、等引擎空闲）：
 // 拿主线比会把正常的等待判红、让自动发布误报「规矩同步没成」。同步到哪个提交记在自动发布的读数里（ops 第九节）。
 const POSITION_OFF_FOR_USER =
@@ -266,7 +273,7 @@ export function runCli(argv: readonly string[], deps: Deps): number {
         platform: deps.platform,
         installed: installedAgents({ env: deps.env, platform: deps.platform, home }),
       };
-      const hooksOff = args.user === undefined ? undefined : HOOKS_OFF_FOR_USER;
+      const hooksOff = args.user === undefined ? undefined : SESSION_START_OFF_FOR_USER;
       const mf = manifestPath(home, deps.platform);
       if (args.mode === '--check') {
         section('通用段（AGENTS.md 上半段）', checkRules(ctx, src));

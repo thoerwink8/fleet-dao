@@ -1,11 +1,12 @@
 // 钩子：脚本拷进 ~/.fleet-dao/hooks/，在 ~/.claude/settings.json 里登记；只动本脚本管的那几条，别的钩子、别的设置一条不碰。
 import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { Backups } from '../src/backup.ts';
-import { applyHooks, checkHooks, hookCommand, ownedScript } from '../src/hooks.ts';
+import { applyHooks, checkHooks, type HookSkip, hookCommand, ownedScript } from '../src/hooks.ts';
 import { exitCode } from '../src/report.ts';
-import type { AgentId } from '../src/targets.ts';
+import { type AgentId, HOOK_TARGETS } from '../src/targets.ts';
 import {
   cleanup,
   ctxFor,
@@ -26,15 +27,27 @@ afterEach(cleanup);
 const NOW = new Date('2026-09-26T06:00:00Z');
 const SETTINGS = '~/.claude/settings.json';
 const SCRIPTS = '~/.fleet-dao/hooks';
+/** 调工具前那条登记的 matcher（targets.ts，一组一个）：下面「挂在哪些工具上」那组钉住它们的值 */
+const PRETOOL_MATCHERS = HOOK_TARGETS.flatMap((t) => t.hooks)
+  .filter((h) => h.script === 'pretool.mjs')
+  .map((h) => h.matcher ?? '没写 matcher');
 
-function machine(installed: AgentId[] = ['claude'], hooks: Record<string, string> | null = HOOK_FILES) {
+/** 装好以后 PreToolUse 下该有的几组：一个 matcher 一组，都跑 pretool.mjs */
+const pretoolGroups = (command: string): Group[] =>
+  PRETOOL_MATCHERS.map((matcher) => ({ matcher, hooks: [{ type: 'command', command, timeout: 10 }] }));
+
+function machine(
+  installed: AgentId[] = ['claude'],
+  hooks: Record<string, string> | null = HOOK_FILES,
+  skip?: HookSkip,
+) {
   const home = tempDir('home');
   const src = sources(makeRepo({}, undefined, hooks));
   const ctx = ctxFor(home, installed);
   return {
     home,
-    apply: () => applyHooks(ctx, src, new Backups(home, PLATFORM, NOW)),
-    check: () => checkHooks(ctx, src),
+    apply: () => applyHooks(ctx, src, new Backups(home, PLATFORM, NOW), skip),
+    check: () => checkHooks(ctx, src, skip),
     cmd: (script: string) => hookCommand(home, PLATFORM, script),
     settings: () => getJson(home, '.claude/settings.json') as Settings,
   };
@@ -96,12 +109,7 @@ describe('装', () => {
     expect(s.hooks.SessionStart).toEqual([
       { hooks: [{ type: 'command', command: m.cmd('session-start.mjs'), timeout: 90 }] },
     ]);
-    expect(s.hooks.PreToolUse).toEqual([
-      {
-        matcher: 'Bash|PowerShell',
-        hooks: [{ type: 'command', command: m.cmd('pretool.mjs'), timeout: 10 }],
-      },
-    ]);
+    expect(s.hooks.PreToolUse).toEqual(pretoolGroups(m.cmd('pretool.mjs')));
     expect(m.cmd('pretool.mjs')).toMatch(/^node ".*\/\.fleet-dao\/hooks\/pretool\.mjs"$/);
     const checked = m.check();
     expectKind(checked, SCRIPTS, 'ok');
@@ -124,7 +132,7 @@ describe('装', () => {
     const partly = m.check();
     expectKind(partly, SETTINGS, 'missing');
     expect(partly.find((l) => l.key === SETTINGS)?.text).toContain(
-      '没登记 SessionStart（session-start.mjs）、PreToolUse（pretool.mjs）',
+      '没登记 SessionStart（session-start.mjs）、PreToolUse（pretool.mjs，matcher Bash|PowerShell|Read|Grep）',
     );
   });
 
@@ -137,6 +145,97 @@ describe('装', () => {
     expectKind(m.check(), SETTINGS, 'missing');
     expectKind(m.apply(), SETTINGS, 'changed');
     expect(exitCode(m.check())).toBe(0);
+  });
+
+  it('以前装的只挂 Bash|PowerShell 一组：查判漂移（多出那组、缺了该有的），再写换成现在的，别的不动', () => {
+    const m = machine();
+    const before = lived();
+    before.hooks.PreToolUse = [
+      {
+        matcher: 'Bash|PowerShell',
+        hooks: [{ type: 'command', command: m.cmd('pretool.mjs'), timeout: 10 }],
+      },
+      { matcher: 'Edit', hooks: [{ type: 'command', command: 'node /x/my-own-check.mjs' }] },
+    ];
+    before.hooks.SessionStart = [
+      { hooks: [{ type: 'command', command: m.cmd('session-start.mjs'), timeout: 90 }] },
+    ];
+    put(m.home, '.claude/settings.json', JSON.stringify(before));
+    const old = m.check().find((l) => l.key === SETTINGS);
+    expect(old?.kind).toBe('drift');
+    expect(old?.text).toContain('pretool.mjs 多登记了一条：挂在 PreToolUse 上、matcher 是 "Bash|PowerShell"');
+    expectKind(m.apply(), SETTINGS, 'changed');
+    const s = m.settings();
+    expect(s.hooks.PreToolUse).toEqual([before.hooks.PreToolUse[1], ...pretoolGroups(m.cmd('pretool.mjs'))]);
+    expect(s.hooks.PostToolUse).toEqual(before.hooks.PostToolUse);
+    expect(exitCode(m.check())).toBe(0);
+  });
+});
+
+// 调工具前那条挂在哪些工具上（改标准：targets.ts 在 standard-paths.json 里）：跑命令的 Bash、PowerShell，
+// 读文件、搜内容的 Read、Grep——2026-09-27 帅位用命令读漏了 reclaude 的设备密钥，只拦命令、Read 照样能读进对话。
+// Glob 只列路径（和 ls 一样放行），不挂：挂上只会多一个要认的别家工具名（Grok 把 Glob 换成它的 list_dir）。
+// Devin 不换 Claude 的工具名、按不锚定的正则比它自己的小写名字，所以另一组锚定的 ^(exec|read|grep)$。
+describe('调工具前那条挂在哪些工具上', () => {
+  it('两组：Claude 的名字 Bash、PowerShell、Read、Grep（只含字母和 |，逐个全等比）；Devin 的名字 exec、read、grep（锚定）', () => {
+    expect(PRETOOL_MATCHERS).toEqual(['Bash|PowerShell|Read|Grep', '^(exec|read|grep)$']);
+  });
+
+  it('Devin 那组锚定了：不会连 notebook_read、read_subagent、mcp_read_resource、MCP 工具一起匹配上', () => {
+    const devin = new RegExp(PRETOOL_MATCHERS[1] ?? '');
+    for (const name of ['exec', 'read', 'grep']) expect([name, devin.test(name)]).toEqual([name, true]);
+    for (const name of [
+      'notebook_read',
+      'read_subagent',
+      'mcp_read_resource',
+      'mcp__fs__read',
+      'Read',
+      'Bash',
+    ]) {
+      expect([name, devin.test(name)]).toEqual([name, false]);
+    }
+  });
+
+  // 登记了、脚本却认不得的工具名，钩子按「认不出按拦处理」会把那个工具的每次调用都拦下：登记的每一个都要认得
+  it('登记的每个工具名，仓里的 pretool.mjs 都认得：正常的一次调用放行', async () => {
+    const hook = fileURLToPath(new URL('../../../agents/hooks/pretool.mjs', import.meta.url));
+    const lib = (await import(pathToFileURL(hook).href)) as {
+      decide(raw: string, cwd?: string): { code: number; message?: string };
+    };
+    const normal: Record<string, Record<string, unknown>> = {
+      Bash: { command: 'git status' },
+      PowerShell: { command: 'Get-ChildItem' },
+      Read: { file_path: '/work/repo/README.md' },
+      Grep: { pattern: 'TODO', path: '/work/repo/src' },
+      exec: { command: 'git status', shell_id: 'main' },
+      read: { file_path: '/work/repo/README.md' },
+      grep: { pattern: 'TODO', path: '/work/repo/src' },
+    };
+    const names = PRETOOL_MATCHERS.flatMap((m) => m.replace(/^\^\(|\)\$$/g, '').split('|'));
+    expect([...names].sort()).toEqual(Object.keys(normal).sort());
+    for (const name of names) {
+      const got = lib.decide(
+        JSON.stringify({ tool_name: name, tool_input: normal[name], cwd: '/work/repo' }),
+      );
+      expect([name, got.code, got.message]).toEqual([name, 0, undefined]);
+    }
+  });
+
+  it('替别的用户写（法国装机）：开会话那条不登记、说清为什么，调工具前那条照装', () => {
+    const skip: HookSkip = { event: 'SessionStart', why: '开会话钩子要在那个用户自己能写的检出里快进' };
+    const m = machine(['claude'], HOOK_FILES, skip);
+    const lines = m.apply();
+    expectKind(lines, SCRIPTS, 'changed');
+    expectKind(lines, SETTINGS, 'changed');
+    expect(lines.find((l) => l.key === 'SessionStart')).toMatchObject({
+      kind: 'skip',
+      text: `SessionStart：${skip.why}`,
+    });
+    const s = m.settings();
+    expect(Object.keys(s.hooks)).toEqual(['PreToolUse']);
+    expect(s.hooks.PreToolUse).toEqual(pretoolGroups(m.cmd('pretool.mjs')));
+    expect(exitCode(m.check())).toBe(0);
+    expect(m.apply().filter((l) => l.kind === 'changed')).toEqual([]);
   });
 });
 
@@ -159,10 +258,7 @@ describe('别的钩子、别的设置一条不碰', () => {
     expect(s.hooks.PostToolUse).toEqual(before.hooks.PostToolUse);
     expect(s.hooks.PreToolUse).toEqual([
       before.hooks.PreToolUse?.[1],
-      {
-        matcher: 'Bash|PowerShell',
-        hooks: [{ type: 'command', command: m.cmd('pretool.mjs'), timeout: 10 }],
-      },
+      ...pretoolGroups(m.cmd('pretool.mjs')),
     ]);
     expect(s.hooks.SessionStart).toEqual([
       before.hooks.SessionStart?.[1],
@@ -244,7 +340,7 @@ describe('读不懂、被人改坏：不当成空的重写，报出来', () => {
     expectKind(m.apply(), SETTINGS, 'failed');
   });
 
-  it('登记得不对（timeout 被改、登记了两遍）：查判漂移，再写只留一条对的', () => {
+  it('登记得不对（timeout 被改、同一组登记了两遍）：查判漂移，再写每组只留一条对的', () => {
     const m = machine();
     m.apply();
     const s = m.settings();
@@ -256,7 +352,7 @@ describe('读不懂、被人改坏：不当成空的重写，报出来', () => {
     expect(drift).toContain('pretool.mjs 登记了 2 次');
     expect(drift).toContain('timeout 是 99，应是 10');
     m.apply();
-    expect(m.settings().hooks.PreToolUse).toHaveLength(1);
+    expect(m.settings().hooks.PreToolUse).toEqual(pretoolGroups(m.cmd('pretool.mjs')));
     expect(exitCode(m.check())).toBe(0);
   });
 
