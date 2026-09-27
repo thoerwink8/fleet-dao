@@ -6,7 +6,7 @@
 // - 受保护动作在同一个事务里先 lockSeat（for share）再写：接班那条要等这个事务提交才能改座位，动作就排在接班之前。
 import { randomUUID } from 'node:crypto';
 import { requirementWorkflowId } from '@fleet-dao/shared/workflow-ids';
-import { and, eq, getTableColumns, inArray, lt, sql } from 'drizzle-orm';
+import { and, eq, getTableColumns, inArray, lt, or, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { auditLog, issueClaims, repos, seatLeases, settings, tasks } from '../schema/index.ts';
 
@@ -171,8 +171,16 @@ export interface NewClaimRow {
 /**
  * 抢这张单：一条语句。没有行就建；有行但已经结束了（done / released / voided）就整行换成新的认领；还活着就不动、回 null
  * （调用方再读是谁拿着）。两边同时来，后到的那条在冲突上等先到的提交，再按这里的条件判：只有一边拿到。
+ * seatReservationOf 给了座位名：这个座位的帅位自己占着的（owner 是 seat，开单时替帅位认领的那种）也换——调用方在同一个
+ * 事务里核过它就是这个座位的现任帅位（派工人接手帅位占着的单）。
  */
-export async function takeClaimRow(db: Db, input: NewClaimRow): Promise<WithNow<IssueClaimRow> | null> {
+export async function takeClaimRow(
+  db: Db,
+  input: NewClaimRow,
+  options: { seatReservationOf?: string | undefined } = {},
+): Promise<WithNow<IssueClaimRow> | null> {
+  const scope = options.seatReservationOf;
+  const ended = inArray(issueClaims.state, [...ENDED]);
   const [row] = await db
     .insert(issueClaims)
     .values({
@@ -204,7 +212,10 @@ export async function takeClaimRow(db: Db, input: NewClaimRow): Promise<WithNow<
         endReason: sql`null`,
         note: sql`excluded.note`,
       },
-      setWhere: inArray(issueClaims.state, [...ENDED]),
+      setWhere:
+        scope === undefined
+          ? ended
+          : (or(ended, and(eq(issueClaims.ownerKind, 'seat'), eq(issueClaims.seatScope, scope))) ?? ended),
     })
     .returning({ ...getTableColumns(issueClaims), now: nowMs });
   if (!row) return null;

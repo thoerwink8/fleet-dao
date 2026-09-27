@@ -163,6 +163,40 @@ export function describeSeatStoreContract(name: string, make: MakeSeatStore): vo
         expect(second.claim.claimId).toBe(first.claim.claimId);
       });
 
+      it('帅位自己占着的（开单时替帅位认领的）：现任帅位换给工人（新认领号，操作记录记下原来那份）；【故意造出的失败】演练座位的帅位换不了', async () => {
+        await store.takeSeat({ scope: 'main', ...A });
+        const reserved = await store.takeClaim({
+          ...target(49),
+          seat: actor(A, 1),
+          owner: { kind: 'seat', label: '帅位' },
+        });
+        if (!reserved.ok) throw new Error('帅位没占上');
+        // 换了帅位：新帅位照样能把帅位占着的换给工人
+        await store.takeSeat({ scope: 'main', ...B });
+        await store.takeSeat({ scope: 'drill:299', ...A });
+        expect(
+          await store.takeClaim({
+            ...target(49),
+            seat: actor(A, 1, 'drill:299'),
+            owner: { kind: 'worker', label: 'w1' },
+          }),
+        ).toMatchObject({ ok: false, reason: 'held', claim: { claimId: reserved.claim.claimId } });
+        const handed = await take(49, actor(B, 2), '工人乙');
+        expect(handed).toMatchObject({
+          ok: true,
+          claim: { ownerKind: 'worker', ownerLabel: '工人乙', seatTerm: 2 },
+        });
+        if (!handed.ok) throw new Error('没换给工人');
+        expect(handed.claim.claimId).not.toBe(reserved.claim.claimId);
+        const audits = (await store.listAudit({ target: `claim:${IDS.repo}#49`, limit: 5 })).items;
+        expect(audits[0]).toMatchObject({
+          action: 'claim.take',
+          before: { claimId: reserved.claim.claimId, owner: '本机/帅位' },
+        });
+        // 工人拿着的，帅位不能直接换人（那是改派）
+        expect(await take(49, actor(B, 2), '工人丙')).toMatchObject({ ok: false, reason: 'held' });
+      });
+
       it('【故意造出的失败】换帅位后，旧帅位派的工人认领照旧有效：照报进度、开 PR、做完', async () => {
         await store.takeSeat({ scope: 'main', ...A });
         const got = await take(42, actor(A, 1));
