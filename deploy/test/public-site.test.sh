@@ -49,6 +49,105 @@ reset() {
   PENDING=()
 }
 
+# 端口都问内核要一个当场空闲的（node 起个监听 0 口的 TCP server，读它分到的端口号再关掉），不再用
+# 「RANDOM % 20000 + 20000」随手挑：这段和 Linux 默认的临时端口段（32768 起）重叠，CI 机器上别的连接正占着
+# 就 bind 不上（曾经真红过一次：nginx: [emerg] bind() ... failed (98: Address already in use)）。
+# PORT_OVERRIDE 只给下面「端口撞车重来」的自造失败测试用：塞一个进去，逼下一次 free_port 交出那个号，
+# 制造一次真的撞车；用掉就从队列里去掉，后面照常问内核要。
+PORT_OVERRIDE=()
+free_port() {
+  if ((${#PORT_OVERRIDE[@]} > 0)); then
+    printf '%s' "${PORT_OVERRIDE[0]}"
+    PORT_OVERRIDE=("${PORT_OVERRIDE[@]:1}")
+    return 0
+  fi
+  "$NODE" -e '
+    const net = require("node:net");
+    const s = net.createServer();
+    s.on("error", (e) => { console.error(e.message); process.exit(1); });
+    s.listen(0, "127.0.0.1", () => {
+      const p = s.address().port;
+      s.close(() => process.stdout.write(String(p)));
+    });
+  '
+}
+
+# 起 nginx（或起假后端）撞见端口被占（Address already in use）就换一组端口整个重来，最多试 3 次；
+# 换成别的原因失败照旧当失败报出来，不重试（不许把真出的错都吞成「换端口重试」）。
+# 用法：retry_on_port_conflict <起的函数> <重取端口并重新准备的函数>
+#   起的函数：不带参数，自己读当前的端口变量去起服务；成功返回 0；失败把原因存进 RETRY_WHY、返回 1。
+#   重取端口的函数：不带参数，重新给端口变量赋值（用 free_port）、重新渲染要用到这些端口的配置。
+# 起完后 RETRY_ATTEMPTS 记着一共试了几次，供自造失败的测试核对确实重试过。
+RETRY_WHY=""
+RETRY_ATTEMPTS=0
+retry_on_port_conflict() {
+  local start=$1 respin=$2
+  for ((RETRY_ATTEMPTS = 1; RETRY_ATTEMPTS <= 3; RETRY_ATTEMPTS++)); do
+    if "$start"; then return 0; fi
+    if ((RETRY_ATTEMPTS == 3)) || ! grep -qi 'address already in use' <<<"$RETRY_WHY"; then
+      return 1
+    fi
+    "$respin"
+  done
+  return 1
+}
+
+echo "== 端口撞车重来的查法本身：换成不是端口被占的错误，不重来，只试一次就照旧报失败"
+attempts=0
+fake_other_error() {
+  attempts=$((attempts + 1))
+  RETRY_WHY='nginx: [emerg] unknown directive "bogus" in /tmp/x.conf:3'
+  return 1
+}
+fake_respin_should_not_run() { attempts=$((attempts + 100)); } # 真被调用了，attempts 会跳到 100+，露馅
+retry_on_port_conflict fake_other_error fake_respin_should_not_run >/dev/null
+check "不是端口被占的错误：只试一次就报失败，没换端口重来" "$?:$attempts:$RETRY_ATTEMPTS" "1:1:1"
+
+echo "== 端口撞车重来的查法本身：先真占住一个端口，逼起的函数第一次就撞见它，换端口重来后应该照样起得来"
+if [[ -z "$NODE" ]]; then
+  echo "  … 没跑成：这台没有 node"
+  skipped=1
+else
+  occ_port=$(free_port)
+  # 连过来的连接不管读写错误（探活那一下会摸一把就断，占着端口的这个进程不能被摸崩，不然端口就假占了）
+  "$NODE" -e '
+    const s = require("node:net").createServer((sock) => sock.on("error", () => {}));
+    s.on("error", () => {});
+    s.listen(Number(process.argv[1]), "127.0.0.1");
+  ' "$occ_port" &
+  OCC_PID=$!
+  for _ in $(seq 20); do
+    "$NODE" -e '
+      const s = require("node:net").createConnection(Number(process.argv[1]), "127.0.0.1");
+      s.on("error", () => process.exit(1));
+      s.on("connect", () => process.exit(0));
+    ' "$occ_port" >/dev/null 2>&1 && break
+    sleep 0.1
+  done
+  TRIAL_PORT="$occ_port" # 起的函数真去 bind 它，第一次应该真撞见「Address already in use」
+  # 起的函数：真拿 node 去 bind TRIAL_PORT（不是编出来的错误字符串）；bind 不上把 node 报的原因存 RETRY_WHY
+  trial_start() {
+    local out
+    if ! out=$("$NODE" -e '
+      const net = require("node:net");
+      const s = net.createServer(() => {});
+      s.on("error", (e) => { console.error(e.message); process.exit(1); });
+      s.listen(Number(process.argv[1]), "127.0.0.1", () => { s.close(() => process.exit(0)); });
+    ' "$TRIAL_PORT" 2>&1); then
+      RETRY_WHY=$out
+      return 1
+    fi
+    return 0
+  }
+  trial_respin() { TRIAL_PORT=$(free_port); }
+  retry_on_port_conflict trial_start trial_respin
+  rc=$?
+  kill "$OCC_PID" 2>/dev/null
+  wait "$OCC_PID" 2>/dev/null
+  check "占住的端口逼了一次真撞车、换端口重来后照样绑得上（试了几次、最后一个端口不是占着的那个）" \
+    "$rc:$RETRY_ATTEMPTS:$([[ "$TRIAL_PORT" != "$occ_port" ]] && echo 换了)" "0:2:换了"
+fi
+
 # 公开页也会写的两个词：都在演示版的名单里，但健康页得显示 Temporal 在不在线（P0 验收看的就是它），
 # 「驾驶舱」是正式版、演示版都用的中性叫法（#54 第 4 条）
 PUBLIC_OK='temporal 驾驶舱'
@@ -269,6 +368,7 @@ no_tools=""
 for c in nginx openssl curl; do
   if ! command -v "$c" >/dev/null; then no_tools+=" $c"; fi
 done
+if [[ -z "$NODE" ]]; then no_tools+=" node"; fi # 端口靠 free_port（node）分配
 if [[ -n "$no_tools" ]]; then
   echo "  … 没跑成：这台没有$no_tools"
   skipped=1
@@ -283,20 +383,24 @@ else
   printf '<html>演示版</html>\n' >"$SITE/demo/index.html"
   printf '{}\n' >"$SITE/demo/scopes/a.json"
   printf 'probe' >"$ACME/.well-known/acme-challenge/probe"
-  # 三个临时端口：https 模板的 80、443，http 模板的 80
-  P1=$((20000 + RANDOM % 20000))
-  P2=$((P1 + 1))
-  P3=$((P1 + 2))
+  # 三个临时端口：https 模板的 80、443，http 模板的 80；各自问内核要，别假设挨着的号码也空着
+  render_ng_ports() {
+    reset
+    render_site nginx-https.conf 127.0.0.2 >/dev/null
+    local s=${RENDERED//"listen 80;"/"listen 127.0.0.1:$P1;"}
+    s=${s//"listen 443 ssl;"/"listen 127.0.0.1:$P2 ssl;"}
+    s=${s//"/etc/letsencrypt/live/cockpit.example.test/fullchain.pem"/"$NG/cert.pem"}
+    s=${s//"/etc/letsencrypt/live/cockpit.example.test/privkey.pem"/"$NG/key.pem"}
+    printf '%s\n' "$s" >"$NG/site-https.conf"
+    render_site nginx-http.conf 127.0.0.2 >/dev/null
+    printf '%s\n' "${RENDERED//"listen 80;"/"listen 127.0.0.1:$P3;"}" >"$NG/site-http.conf"
+  }
+  respin_ng_ports() { P1=$(free_port); P2=$(free_port); P3=$(free_port); render_ng_ports; }
   started=0
-  reset
-  render_site nginx-https.conf 127.0.0.2 >/dev/null
-  s=${RENDERED//"listen 80;"/"listen 127.0.0.1:$P1;"}
-  s=${s//"listen 443 ssl;"/"listen 127.0.0.1:$P2 ssl;"}
-  s=${s//"/etc/letsencrypt/live/cockpit.example.test/fullchain.pem"/"$NG/cert.pem"}
-  s=${s//"/etc/letsencrypt/live/cockpit.example.test/privkey.pem"/"$NG/key.pem"}
-  printf '%s\n' "$s" >"$NG/site-https.conf"
-  render_site nginx-http.conf 127.0.0.2 >/dev/null
-  printf '%s\n' "${RENDERED//"listen 80;"/"listen 127.0.0.1:$P3;"}" >"$NG/site-http.conf"
+  P1=$(free_port)
+  P2=$(free_port)
+  P3=$(free_port)
+  render_ng_ports
   check "两份模板都渲染成了" "${#REDS[@]}" 0
   # listen 和证书路径换没换干净：换漏了，测试的 nginx 就会去占真端口、找真证书。打印「换成临时端口的/全部 listen」
   listens() { printf '%s/%s' "$(grep -cE '^[[:space:]]*listen 127\.0\.0\.1:' "$1")" "$(grep -cE '^[[:space:]]*listen ' "$1")"; }
@@ -317,16 +421,29 @@ http {
     include $NG/site-http.conf;
 }
 EOF
+  start_ng() { # 起 $NG 里这份配置；起不来把原因存 RETRY_WHY、返回 1（别在 $(...) 里调，NGX_PIDS 要记得出去）
+    local out
+    if ! out=$(nginx -t -p "$NG/" -c "$NG/nginx.conf" 2>&1); then
+      RETRY_WHY="validate:$out"
+      return 1
+    fi
+    if ! out=$(nginx -p "$NG/" -c "$NG/nginx.conf" 2>&1); then
+      RETRY_WHY="start:$out"
+      return 1
+    fi
+    NGX_PIDS+=("$NG/nginx.pid")
+    return 0
+  }
   if ! openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=cockpit.example.test \
     -keyout "$NG/key.pem" -out "$NG/cert.pem" >"$NG/openssl.log" 2>&1; then
     check "自签证书做出来了" "$(tail -2 "$NG/openssl.log" | tr '\n' ' ')" "（做出来了）"
-  elif ! out=$(nginx -t -p "$NG/" -c "$NG/nginx.conf" 2>&1); then
-    check "nginx 验得过这份配置" "$(tail -3 <<<"$out" | tr '\n' ' ')" "（验得过）"
-  elif ! out=$(nginx -p "$NG/" -c "$NG/nginx.conf" 2>&1); then
-    check "测试用的 nginx 起来了" "$(tail -3 <<<"$out" | tr '\n' ' ')" "（起来了）"
-  else
-    NGX_PIDS+=("$NG/nginx.pid")
+  elif retry_on_port_conflict start_ng respin_ng_ports; then
     started=1
+  else
+    case "${RETRY_WHY%%:*}" in
+    validate) check "nginx 验得过这份配置" "$(tail -3 <<<"${RETRY_WHY#*:}" | tr '\n' ' ')" "（验得过）" ;;
+    *) check "测试用的 nginx 起来了" "$(tail -3 <<<"${RETRY_WHY#*:}" | tr '\n' ' ')" "（起来了）" ;;
+    esac
   fi
   if ((started)); then
     # 打一次，打印「状态码 带了几条 X-Robots-Tag: noindex, nofollow」；连不上时状态码是 000
@@ -388,37 +505,48 @@ else
   mkdir -p "$KA"
   chmod 755 "$TMP" "$KA" # root 起的 nginx，干活的进程不是 root，要进得来
   # 假后端：给每条连进来的连接编号，每个请求记一行「路径 连接号」；/api/events 回一条 ready 之后不结束，像真的实时推送
-  BACK=$((20000 + RANDOM % 20000))
-  "$NODE" -e '
-    const http = require("node:http");
-    const fs = require("node:fs");
-    const [port, log] = process.argv.slice(1);
-    let conns = 0;
-    const server = http.createServer((req, res) => {
-      fs.appendFileSync(log, `${req.url} ${req.socket.fleetConn}\n`);
-      if (req.url === "/api/events") {
-        res.writeHead(200, { "Content-Type": "text/event-stream" });
-        res.write("event: ready\ndata: {}\n\n");
-        return;
-      }
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end("{}");
-    });
-    server.on("connection", (s) => {
-      conns += 1;
-      s.fleetConn = conns;
-    });
-    server.keepAliveTimeout = 60000;
-    server.listen(Number(port), "127.0.0.1", () => fs.writeFileSync(`${log}.ready`, ""));
-  ' "$BACK" "$KA/backend.log" >"$KA/backend.out" 2>&1 &
-  STUB_PID=$!
-  for _ in $(seq 50); do
-    if [[ -f "$KA/backend.log.ready" ]]; then break; fi
-    sleep 0.1
-  done
-  # 起一个测试用的 nginx，只含这一份站点（listen 换成临时端口、证书换成自签的）。起不来把原因放进 KA_WHY、返回 1
+  # 起不来（比如端口被占）把原因存 RETRY_WHY、返回 1（别在 $(…) 里调：STUB_PID 要记得出去）
+  start_backend() {
+    : >"$KA/backend.log"
+    rm -f "$KA/backend.log.ready"
+    "$NODE" -e '
+      const http = require("node:http");
+      const fs = require("node:fs");
+      const [port, log] = process.argv.slice(1);
+      let conns = 0;
+      const server = http.createServer((req, res) => {
+        fs.appendFileSync(log, `${req.url} ${req.socket.fleetConn}\n`);
+        if (req.url === "/api/events") {
+          res.writeHead(200, { "Content-Type": "text/event-stream" });
+          res.write("event: ready\ndata: {}\n\n");
+          return;
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end("{}");
+      });
+      server.on("connection", (s) => {
+        conns += 1;
+        s.fleetConn = conns;
+      });
+      server.keepAliveTimeout = 60000;
+      server.listen(Number(port), "127.0.0.1", () => fs.writeFileSync(`${log}.ready`, ""));
+    ' "$BACK" "$KA/backend.log" >"$KA/backend.out" 2>&1 &
+    STUB_PID=$!
+    local waited=0
+    while ((waited < 50)); do
+      if [[ -f "$KA/backend.log.ready" ]]; then return 0; fi
+      if ! kill -0 "$STUB_PID" 2>/dev/null; then break; fi # 进程已经退出，起失败了，不用等满
+      sleep 0.1
+      waited=$((waited + 1))
+    done
+    wait "$STUB_PID" 2>/dev/null
+    STUB_PID=""
+    RETRY_WHY=$(cat -- "$KA/backend.out" 2>/dev/null)
+    return 1
+  }
+  respin_backend() { BACK=$(free_port); }
+  # 起一个测试用的 nginx，只含这一份站点（listen 换成临时端口、证书换成自签的）。起不来把原因存 RETRY_WHY、返回 1
   # （别在 $(…) 里调：pid 文件要记进 NGX_PIDS，子 shell 里记了收尾时看不到）
-  KA_WHY=""
   ka_nginx() { # 目录 站点内容 80口 443口
     local dir=$1 s=$2 out
     mkdir -p "$dir"
@@ -442,7 +570,7 @@ http {
 }
 EOF
     if ! out=$(nginx -t -p "$dir/" -c "$dir/nginx.conf" 2>&1) || ! out=$(nginx -p "$dir/" -c "$dir/nginx.conf" 2>&1); then
-      KA_WHY=$(tail -3 <<<"$out" | tr '\n' ' ')
+      RETRY_WHY=$out
       return 1
     fi
     NGX_PIDS+=("$dir/nginx.pid")
@@ -457,30 +585,42 @@ EOF
     done
     printf '%s%s' "$codes" "$(awk '$1 == "/api/me" { print $2 }' "$KA/backend.log" | sort -u | wc -l | tr -d ' ')"
   }
-  K1=$((20000 + RANDOM % 20000))
+  # 四个临时端口：好的一份站点占两个（80、443），坏的一份（去掉 keepalive 的）另占两个；各自问内核要，
+  # 别假设挨着的号码也空着
+  BACK=$(free_port)
+  retry_on_port_conflict start_backend respin_backend
+  backend_rc=$?
   reset
   render "$HERE/../hk/nginx-https.conf" SERVER_NAME=cockpit.example.test WEB_ROOT="$SITE" ACME_ROOT="$ACME" \
     API_UPSTREAM="127.0.0.1:$BACK" DEMO_PATH=/demo/ DEMO_BASE=/demo TUNNEL_PEER=127.0.0.2 >/dev/null
   good=$RENDERED
   check "带假后端地址的 https 模板渲染成了" "${#REDS[@]}" 0
-  if [[ ! -f "$KA/backend.log.ready" ]]; then
-    check "假后端起来了" "$(tail -3 "$KA/backend.out" 2>/dev/null | tr '\n' ' ')" "（起来了）"
+  K1=$(free_port)
+  K2=$(free_port)
+  K3=$(free_port)
+  K4=$(free_port)
+  start_good() { ka_nginx "$KA/good" "$good" "$K1" "$K2"; }
+  respin_good() { K1=$(free_port); K2=$(free_port); }
+  start_bad() { ka_nginx "$KA/bad" "$(grep -v 'keepalive 16;' <<<"$good")" "$K3" "$K4"; }
+  respin_bad() { K3=$(free_port); K4=$(free_port); }
+  if ((backend_rc != 0)); then
+    check "假后端起来了" "$(tail -3 <<<"$RETRY_WHY" | tr '\n' ' ')" "（起来了）"
   elif ! openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=cockpit.example.test \
     -keyout "$KA/key.pem" -out "$KA/cert.pem" >"$KA/openssl.log" 2>&1; then
     check "自签证书做出来了" "$(tail -2 "$KA/openssl.log" | tr '\n' ' ')" "（做出来了）"
-  elif ! ka_nginx "$KA/good" "$good" "$K1" $((K1 + 1)); then
-    check "测试用的 nginx（仓里的模板）起来了" "$KA_WHY" "（起来了）"
+  elif ! retry_on_port_conflict start_good respin_good; then
+    check "测试用的 nginx（仓里的模板）起来了" "$(tail -3 <<<"$RETRY_WHY" | tr '\n' ' ')" "（起来了）"
   else
-    TLS=(-k --resolve "cockpit.example.test:$((K1 + 1)):127.0.0.1")
-    check "仓里的模板：三个请求都 200，后端看到的是同一条连接" "$(ka_three $((K1 + 1)))" "200 200 200 1"
-    out=$(curl -s -N --max-time 2 "${TLS[@]}" "https://cockpit.example.test:$((K1 + 1))/api/events" 2>/dev/null)
+    TLS=(-k --resolve "cockpit.example.test:$K2:127.0.0.1")
+    check "仓里的模板：三个请求都 200，后端看到的是同一条连接" "$(ka_three "$K2")" "200 200 200 1"
+    out=$(curl -s -N --max-time 2 "${TLS[@]}" "https://cockpit.example.test:$K2/api/events" 2>/dev/null)
     check "实时推送：后端发的第一条事件当场转到（不攒着等连接结束）" "$(grep -cx 'event: ready' <<<"$out")" 1
     check "实时推送的连接留着没断（curl 是自己到点才停的）" \
-      "$(curl -s -o /dev/null -N --max-time 2 "${TLS[@]}" "https://cockpit.example.test:$((K1 + 1))/api/events" >/dev/null 2>&1; echo $?)" 28
-    if ! ka_nginx "$KA/bad" "$(grep -v 'keepalive 16;' <<<"$good")" $((K1 + 2)) $((K1 + 3)); then
-      check "测试用的 nginx（去掉 keepalive 的）起来了" "$KA_WHY" "（起来了）"
+      "$(curl -s -o /dev/null -N --max-time 2 "${TLS[@]}" "https://cockpit.example.test:$K2/api/events" >/dev/null 2>&1; echo $?)" 28
+    if ! retry_on_port_conflict start_bad respin_bad; then
+      check "测试用的 nginx（去掉 keepalive 的）起来了" "$(tail -3 <<<"$RETRY_WHY" | tr '\n' ' ')" "（起来了）"
     else
-      check "故意去掉 keepalive：后端看到三条连接（上面那条查法抓得到不复用）" "$(ka_three $((K1 + 3)))" "200 200 200 3"
+      check "故意去掉 keepalive：后端看到三条连接（上面那条查法抓得到不复用）" "$(ka_three "$K4")" "200 200 200 3"
     fi
     if ((fail)); then
       echo "  测试用的 nginx 的错误日志（最后 10 行）："
