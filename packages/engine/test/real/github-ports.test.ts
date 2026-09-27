@@ -510,6 +510,16 @@ describe('开 PR、CI、合并', () => {
     expect(c2.openPr?.[0]).not.toHaveProperty('inheritFrom');
   });
 
+  it('「按推荐先做了」（#259）照传给正文生成：漏传了 PR 正文里那一栏永远是「无」', async () => {
+    const { ports, calls } = setup();
+    const assumed = ['验证码几位？ → 先按推荐做了「6 位」，创始人还没回'];
+    await ports.openPr(
+      { taskId: 't1', repo, branch: BRANCH, head: m.head, title: '登录', body: { ...body, assumed } },
+      ctx,
+    );
+    expect(calls.openPr?.[0]).toMatchObject({ body: { assumed } });
+  });
+
   it('需求文档没有「对应计划」那一行：不开 PR，明确报错（SPEC_PLAN_MISSING，不重试）', async () => {
     const { ports } = setup({
       readSpecDoc: (input: { path: string }) => ({
