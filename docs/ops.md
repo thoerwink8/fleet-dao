@@ -263,12 +263,13 @@ grok 装在会话用户自己家里：官方安装脚本把二进制放在 `~/.g
 - 派工理由末尾出现「在线是探针 N 前的结论，之后它没再给新结论（探针可能停了）」：探针连着三轮（45 分钟；Cursor、Grok 的路由是 2 小时 30 分，它们探通了隔 2 小时才再探）没给这条路由写新结论，引擎照上一次的结论接着派（不停工）。看驾驶舱「定时任务」页路由探针那一行（没跑、没跑成还是只写进去一部分，`why` 写了原因），再手动跑一轮（上面那条命令）看它报什么。
 - Claude 的探针不存会话记录（`--no-session-persistence`），会话用户家里不攒它的记录；cursor-agent、grok 没有这个开关，探针的会话留在会话用户家里的 `~/.cursor/chats`、`~/.grok/sessions` 下（一条路由一天约 12 个）。Grok 的探针不带 `--always-approve`：要权限的工具一律被拒（无头模式没人批就取消），什么命令都跑不了。目录由引擎经 `fleet-agent-scope adopt` 建，归会话用户、700。
 
-每小时对账（工作树残留、提醒按条件撤和再推；design 第十四节「AI 会话」的目录那条、15.3）：
+每小时对账（工作树残留、三处核对、提醒按条件撤和再推；design 第六节第 4 层、第十四节「AI 会话」的目录那条、15.3）：
 
 - 引擎每小时 41 分跑一轮（定时任务 `hourly-reconcile`）。发布完不想等，手动跑一轮：`fleet-temporal schedule trigger --schedule-id hourly-reconcile`。
 - 工作树：`/var/lib/fleet-work/<owner>_<name>/` 下每一棵（子任务的树 `<需求号>-<子任务>`、检出副本 `<需求号>.<阶段>[.<子任务>]`），这张需求的工作流和它的子任务工作流都不在跑了、树里也没有没结束的会话（`session_runs` 里 `ended_at` 为空的），才算残留；有没结束的会话却没有在跑的工作流，记「没查成」写明是哪个会话（多半是被强行终止的工作流留下的，#247）。残留的以会话用户的身份看里面还剩什么：什么都不剩就经 `fleet-agent-scope remove` 删掉，子任务报的「工作树没收掉」跟着撤；能重新生成的编译和工具缓存（`*.tsbuildinfo`、`node_modules/`、`dist/`、`.turbo/`、`.vite/`、`coverage/`）和 `.fleet-out/`（会话交给引擎的结论文件）不算剩着，是不是 git 仓都一样，只剩这些的照空树删（名单在 `packages/engine/src/real/user-git.ts` 的 `DISPOSABLE`）；还剩没推的提交、没提交的改动、stash、名单以外的文件的不删，报一条「要人拍」（`worktree:<owner>_<name>/<树>`），正文写着哪棵树、剩什么（文件列前 10 个、写明一共几个）、怎么删、怎么留。检出副本里引擎检出过的提交也不算剩着。树里有目录读不了的记「没查成」、不删。`_route-probe/`、`_tmp/` 不碰。一轮最多看 80 棵，多的下一轮再看。
 - 收到「要人拍」的树：先看里面，`sudo -u fleet-agent-carpool git -C <路径> status`、`sudo -u fleet-agent-carpool git -C <路径> log --oneline -5`；提醒里写着「这一层不是 git 仓」的，看 `sudo -u fleet-agent-carpool find <路径> ! -type d`。要删：以 root 跑 `/usr/local/sbin/fleet-agent-scope remove <路径>`，下一轮看它不在了就撤掉那条；要留：驾驶舱点「处理」，之后这棵树不再提醒，里面的东西推走或清掉以后下一轮会自己删。
 - 提醒：条件没了的撤掉（正文开头「已撤：为什么」，处理人 `engine:hourly-reconcile`，操作记录 `notification.resolve`）；卡住报警超过 24 小时没人处理，每天最多再推一条「还没处理：<原标题>」（`remind:<原提醒编号>:<北京日期>`）。哪种提醒谁撤，清单在 `packages/engine/src/jobs/alert-sweep.ts` 开头。
+- 三处核对：库里没结束、不在排队的单，需求工作流不在跑且这张单 10 分钟内没更新过，报 `reconcile:workflow:<任务>`，工作流又在跑或单结束了自己撤。每个受管仓最近 26 小时合了的 PR，镜像没记成已合并的自动补上；我们机器人开的还要是「引擎」合的、有合并记录，没有就报 `reconcile:pr:<仓>#<号>`（不自动撤）。启用渠道下额度读数过期（从没读成、超过 30 分钟、上游数据冻住）汇成一条 `reconcile:quota-stale`，都新了自己撤。
 - 出了事去哪看：驾驶舱「定时任务」页每小时对账那一行（没跑、没跑成、没查全，`why` 写了哪里没查成：读不了的目录、查不了的工作流、删不掉的树都在这里，不算跑成）。库里：
   - 最近几轮：`runuser -u fleet -- psql -d fleet -c "select started_at, outcome, scanned, found, why from schedule_runs where job = 'hourly-reconcile' order by id desc limit 5"`
   - 它撤了什么：`runuser -u fleet -- psql -d fleet -c "select resolved_at, dedupe_key, left(body, 80) from notifications where resolved_by = 'engine:hourly-reconcile' order by resolved_at desc limit 20"`

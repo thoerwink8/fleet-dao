@@ -1,4 +1,4 @@
-// 每小时对账（jobs/hourly-reconcile.ts）两部分共用的：读 Temporal 的口子、读写提醒的口子、每部分的结局，
+// 每小时对账（jobs/hourly-reconcile.ts）这几部分共用的：读 Temporal 的口子、读写提醒的口子、每部分的结局，
 // 写给人看的北京时间和时长。
 import type { AlertRow } from '@fleet-dao/db';
 import type { StageKind } from '@fleet-dao/shared';
@@ -65,7 +65,7 @@ export interface AlertStore {
   updateOpen(input: { dedupeKey: string; title?: string; body?: string }): Promise<'ok' | 'not_open'>;
 }
 
-/** 对账的一部分（工作树、提醒）跑下来的样子。 */
+/** 对账的一部分（工作树、三处核对、提醒）跑下来的样子。 */
 export interface SweepPart {
   /** 这一部分整个没跑成（读不了工作树的根、列不了提醒）。 */
   failed?: string;

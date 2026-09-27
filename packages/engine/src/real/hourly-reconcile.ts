@@ -1,9 +1,11 @@
 // 每小时对账的真装配：工作树按目录真列（根和仓这两级归 root、755，引擎自己读得了）、属主和删经 fleet-agent-scope
 // （real/worktrees.ts）、树里还剩什么以会话用户的身份看（real/user-git.ts 的 treeLeftovers：仓里跑 git，不是仓的用 find
-// 一层层列）；需求、子任务、PR 头、批准从库里读；工作流在不在跑、挂没挂着问这次活动的 Temporal 客户端；这个阶段派不派得
+// 一层层列）；需求、子任务、PR 头、批准、没结束的单、受管的仓、额度表从库里读；合了的 PR 问这次传进来的 GitHub
+// （auditMergedPrs，和 githubReconcile 同一个）；工作流在不在跑、挂没挂着问这次活动的 Temporal 客户端；这个阶段派不派得
 // 出去问选路（store-ports 的 pickRoute：和任务挂起时用的同一套）；提醒的读写、操作记录、结局记账是同一个库。
 import { readdir } from 'node:fs/promises';
 import {
+  activeTaskRefs,
   alertByKey,
   type Db,
   finishScheduleRun,
@@ -14,6 +16,8 @@ import {
   listOpenAlerts,
   openSessionTrees,
   prHeadsOfBranch,
+  quotaTable,
+  reconcileRepos,
   resolveAlertWithReason,
   startScheduleRun,
   subtaskTreeRefs,
@@ -22,6 +26,7 @@ import {
   updateOpenAlert,
   upsertAlert,
 } from '@fleet-dao/db';
+import type { GitHub } from '@fleet-dao/github';
 import { requirementWorkflowId, subtaskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { type Client, WorkflowNotFoundError } from '@temporalio/client';
 import type { HourlyReconcileJobDeps } from '../jobs/hourly-reconcile.ts';
@@ -98,6 +103,8 @@ const NO_CTX: PortContext = {
 
 export interface HourlyReconcileWiring {
   db: Db;
+  /** 和 githubReconcile 同一个：审最近合了的 PR（镜像、合并人、合并记录）。 */
+  gh: Pick<GitHub, 'auditMergedPrs'>;
   trees: WorkTrees;
   exec: UserExec;
   /** 会话用户此刻挂的组织（real/session-org.ts）：判阶段派不派得出去和选路同一套，也要它。 */
@@ -162,6 +169,10 @@ export function hourlyReconcileJob(
     subtaskTrees: (ids) => subtaskTreeRefs(w.db, ids),
     openSessions: () => openSessionTrees(w.db),
     taskState: (taskId) => taskStateOf(w.db, taskId),
+    activeTasks: () => activeTaskRefs(w.db),
+    repos: () => reconcileRepos(w.db),
+    auditMergedPrs: (repo, since) => w.gh.auditMergedPrs(repo, since),
+    quotaPools: () => quotaTable(w.db, { now: now() }),
     async approval(id) {
       const a = await getApproval(w.db, id);
       if (!a) return null;

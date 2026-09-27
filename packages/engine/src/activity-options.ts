@@ -40,7 +40,7 @@ export type EngineActivities = PortActivities & {
   reconcileGitHub(input: GitHubReconcileInput): Promise<GitHubReconcileRun>;
   /** 引擎自己的活动：路由探针跑一轮，每条路由的结论写进 routes、结局记进 schedule_runs（jobs/route-probe.ts）。 */
   probeRoutes(input: RouteProbeInput): Promise<RouteProbeRun>;
-  /** 引擎自己的活动：每小时对账跑一轮（工作树残留、提醒按条件撤和再推），结局记进 schedule_runs（jobs/hourly-reconcile.ts）。 */
+  /** 引擎自己的活动：每小时对账跑一轮（工作树残留、三处核对、提醒按条件撤和再推），结局记进 schedule_runs（jobs/hourly-reconcile.ts）。 */
   reconcileHourly(input: HourlyReconcileInput): Promise<HourlyReconcileRun>;
 };
 

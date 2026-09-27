@@ -266,8 +266,9 @@ export function realPortsFromEnv(
       orgSwitch,
       machine: config.machine,
     }),
-    // 每小时对账：同一个工作树管家（删树经 fleet-agent-scope）、同一个会话用户执行器（看树里还剩什么）
-    hourlyReconcile: hourlyReconcileJob({ db, trees, exec, sessionOrg, machine: config.machine }),
+    // 每小时对账：同一个工作树管家（删树经 fleet-agent-scope）、同一个会话用户执行器（看树里还剩什么）、
+    // 同一个 gh（合了的 PR 对账）
+    hourlyReconcile: hourlyReconcileJob({ db, gh, trees, exec, sessionOrg, machine: config.machine }),
   };
   return {
     ...real,

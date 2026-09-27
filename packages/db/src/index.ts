@@ -14,6 +14,7 @@ export * from './queries/idempotency.ts';
 export * from './queries/jev.ts';
 export * from './queries/probe.ts';
 export * from './queries/quota.ts';
+export * from './queries/reconcile.ts';
 export * from './queries/schedule.ts';
 export * from './queries/session-org.ts';
 export * from './queries/subtasks.ts';

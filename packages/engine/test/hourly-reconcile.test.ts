@@ -72,6 +72,10 @@ function harness(over: Partial<HourlyReconcileJobDeps> = {}): Harness {
       insertOnce: async () => ({ created: true }),
       updateOpen: async () => 'not_open',
     },
+    activeTasks: async () => [],
+    repos: async () => [],
+    auditMergedPrs: async () => ({ outcome: 'ok', scanned: 0, found: 0, fixed: 0, problems: [] }),
+    quotaPools: async () => [],
     runs: {
       async start() {
         return 7;
@@ -138,7 +142,7 @@ describe('几部分的结局并成这一轮的（combineParts）', () => {
   it('什么都没看到、也没出错：unscanned（没扫到 ≠ 没问题），不记 ok', () => {
     expect(combineParts([part(), part()])).toEqual({
       outcome: 'unscanned',
-      why: '工作树的根下什么都没有，也没有没处理的提醒',
+      why: '工作树的根下什么都没有，没有没结束的单，没有要审的合并 PR，没有启用的账号池，也没有没处理的提醒',
     });
   });
 
@@ -243,7 +247,11 @@ describe('一轮（runHourlyReconcileJob，不起 Temporal）', () => {
       },
     });
     const run = await runHourlyReconcileJob(h.deps);
-    expect(run).toMatchObject({ outcome: 'partial', scanned: 1, why: '列没处理的提醒没成：库连不上' });
+    expect(run).toMatchObject({
+      outcome: 'partial',
+      scanned: 1,
+      why: '2 处没查成：列没处理的提醒没成：库连不上；列没处理的提醒没成，工作流核对的旧提醒这一轮不撤：库连不上',
+    });
     expect(h.logs.some((l) => l.startsWith('warn:每小时对账：列没处理的提醒没成'))).toBe(true);
   });
 
@@ -345,10 +353,50 @@ describe('每小时对账的工作流（真 Temporal 测试服务端）', { time
     expect(failure.nonRetryable).toBe(true);
   });
 
+  it('列没结束的单没成：这一轮不记 ok，写明是列单没成', async () => {
+    const h = harness({
+      activeTasks: async () => {
+        throw new Error('库连不上');
+      },
+    });
+    const run = await runHourlyReconcileJob(h.deps);
+    expect(run.outcome).toBe('partial');
+    expect(run.why).toContain('列没结束的单没成：库连不上');
+  });
+
+  it('列合并的 PR 失败：这个仓写进原因，这一轮不记 ok', async () => {
+    const h = harness({
+      repos: async () => [{ owner: 'acme', name: 'widgets' }],
+      auditMergedPrs: async () => ({
+        outcome: 'unscanned',
+        scanned: 0,
+        found: 0,
+        fixed: 0,
+        problems: [],
+        why: '列合并的 PR 失败：403',
+      }),
+    });
+    const run = await runHourlyReconcileJob(h.deps);
+    expect(run.outcome).toBe('partial');
+    expect(run.why).toContain('acme/widgets');
+    expect(run.why).toContain('列合并的 PR 失败：403');
+  });
+
+  it('读额度表没成：这一轮不记 ok，写明是额度表', async () => {
+    const h = harness({
+      quotaPools: async () => {
+        throw new Error('关系 quota_windows 不存在');
+      },
+    });
+    const run = await runHourlyReconcileJob(h.deps);
+    expect(run.outcome).toBe('partial');
+    expect(run.why).toContain('读额度表没成：关系 quota_windows 不存在');
+  });
+
   it('登记的名字、频率：每小时对账、连着两轮没跑成才算过期', () => {
     expect(HOURLY_RECONCILE_JOB).toMatchObject({
       id: 'hourly-reconcile',
-      name: '每小时对账（工作树、提醒）',
+      name: '每小时对账（工作树、工作流、PR 记账、额度、提醒）',
       expectEveryMinutes: 150,
     });
   });

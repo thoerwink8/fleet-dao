@@ -10,7 +10,9 @@ import {
   alertByKey,
   approvals,
   auditLog,
+  channels,
   notifications,
+  pools,
   pullRequests,
   repos,
   scheduleRuns,
@@ -23,6 +25,7 @@ import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fle
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { RouteCheck } from '../../src/jobs/alert-sweep.ts';
 import { HOURLY_RECONCILE_JOB, runHourlyReconcileJob } from '../../src/jobs/hourly-reconcile.ts';
+import { MERGED_PR_LOOKBACK_MS, QUOTA_ALERT_KEY } from '../../src/jobs/reconcile-checks.ts';
 import {
   beijingDate,
   RECONCILE_ACTOR,
@@ -145,6 +148,9 @@ function deps(over: Partial<HourlyReconcileWiring> & { now?: () => Date } = {}) 
     shBin: 'sh',
     log: quiet,
     stageRoutable: async (): Promise<RouteCheck> => ({ kind: 'none', detail: '没有在线的路由' }),
+    gh: {
+      auditMergedPrs: async () => ({ outcome: 'ok', scanned: 0, found: 0, fixed: 0, problems: [] }),
+    },
     ...over,
     workflows: wf,
   })({ workflow: {} as never });
@@ -839,6 +845,146 @@ describe('没人处理的卡住报警：超过 24 小时再推一次，一天最
     expect((await alertByKey(t.db, rb.dedupeKey))?.body).toMatch(/^已撤：原来那条已经处理了/);
     const audits = await t.db.select().from(auditLog);
     expect(audits.every((x) => x.actorId === RECONCILE_ACTOR)).toBe(true);
+  });
+});
+
+describe('三处核对接到真库', { timeout: 60_000 }, () => {
+  it('在干的单工作流不在、超过 10 分钟没更新：报 reconcile:workflow；又在跑了就撤。排队的、刚更新的不报', async () => {
+    probeDir();
+    const { repo, task } = await work('running');
+    await sql('update tasks set updated_at = $1::timestamptz where id = $2', [
+      new Date(Date.now() - 20 * 60_000).toISOString(),
+      task.id,
+    ]);
+    const [queued] = await t.db
+      .insert(tasks)
+      .values({
+        repoId: repo.id,
+        issueNumber: 161,
+        title: '还没派',
+        rawRequest: '排队',
+        requestedBy: 'founder-a',
+        priority: 10,
+        state: 'queued',
+      })
+      .returning();
+    const [fresh] = await t.db
+      .insert(tasks)
+      .values({
+        repoId: repo.id,
+        issueNumber: 162,
+        title: '刚收尾',
+        rawRequest: '刚更新',
+        requestedBy: 'founder-a',
+        priority: 10,
+        state: 'planning',
+        updatedAt: new Date(Date.now() - 60_000),
+      })
+      .returning();
+    if (!queued || !fresh) throw new Error('单没写进去');
+    const wf = fakeWorkflows();
+    const run = await runHourlyReconcileJob(deps({ workflows: wf.reader }));
+    expect(run).toMatchObject({ outcome: 'ok', found: 1 });
+    expect(wf.asked).toContain('req:acme/widgets#160');
+    expect(wf.asked).not.toContain('req:acme/widgets#161');
+    const row = await alertByKey(t.db, `reconcile:workflow:${task.id}`);
+    expect(row).toMatchObject({
+      level: 'alert',
+      taskId: task.id,
+      link: 'https://github.com/acme/widgets/issues/160',
+      resolvedAt: null,
+    });
+    expect(row?.body).toContain('在干');
+    expect(row?.body).toContain('已经不在了');
+    expect(await alertByKey(t.db, `reconcile:workflow:${queued.id}`)).toBeNull();
+    expect(await alertByKey(t.db, `reconcile:workflow:${fresh.id}`)).toBeNull();
+
+    const running = fakeWorkflows({ 'req:acme/widgets#160': { state: 'running' } });
+    await runHourlyReconcileJob(deps({ workflows: running.reader }));
+    expect((await alertByKey(t.db, `reconcile:workflow:${task.id}`))?.body).toMatch(
+      /^已撤：需求工作流又在跑了/,
+    );
+  });
+
+  it('合了的 PR：镜像补上算发现；合并人不对报 reconcile:pr；列不出来这个仓进原因、这一轮不记 ok', async () => {
+    probeDir();
+    await work();
+    const now = new Date('2026-09-26T09:41:00.000Z');
+    const seen: { repo: string; since: Date }[] = [];
+    const first = await runHourlyReconcileJob(
+      deps({
+        now: () => now,
+        gh: {
+          async auditMergedPrs(repo, since) {
+            seen.push({ repo, since });
+            return {
+              outcome: 'ok',
+              scanned: 1,
+              found: 2,
+              fixed: 1,
+              problems: ['#7 合并了但镜像里没有（已补）', '#7 不是「引擎」机器人合的（合并人 founder）'],
+            };
+          },
+        },
+      }),
+    );
+    expect(seen.map((s) => s.repo)).toEqual(['acme/widgets']);
+    expect(now.getTime() - (seen[0]?.since.getTime() ?? 0)).toBe(MERGED_PR_LOOKBACK_MS);
+    expect(first).toMatchObject({ outcome: 'ok', found: 2 });
+    const row = await alertByKey(t.db, 'reconcile:pr:acme/widgets#7');
+    expect(row).toMatchObject({ level: 'alert', taskId: null, resolvedAt: null });
+    expect(row?.body).toContain('不是「引擎」');
+    expect(row?.body).not.toContain('已补');
+    expect(row?.link).toBe('https://github.com/acme/widgets/pull/7');
+
+    const again = await runHourlyReconcileJob(
+      deps({
+        now: () => now,
+        gh: {
+          async auditMergedPrs() {
+            return {
+              outcome: 'unscanned',
+              scanned: 0,
+              found: 0,
+              fixed: 0,
+              problems: [],
+              why: '列合并的 PR 失败：403',
+            };
+          },
+        },
+      }),
+    );
+    expect(again.outcome).not.toBe('ok');
+    expect(again.why).toContain('acme/widgets：列合并的 PR 失败：403');
+    expect((await alertByKey(t.db, 'reconcile:pr:acme/widgets#7'))?.resolvedAt).toBeNull();
+  });
+
+  it('启用渠道的额度读数过期：汇成一条，写出池和从没读成；都新了撤掉。停用的渠道不算', async () => {
+    probeDir();
+    await t.db.insert(channels).values([
+      { id: 'relay', name: '中转', billing: 'subscription', enabled: true },
+      { id: 'old', name: '停用的', billing: 'subscription', enabled: false },
+    ]);
+    await t.db.insert(pools).values([
+      { id: 'relay-a', channelId: 'relay', maxConcurrency: 1 },
+      { id: 'relay-fresh', channelId: 'relay', maxConcurrency: 1, lastReadOkAt: new Date() },
+      { id: 'old-a', channelId: 'old', maxConcurrency: 1 },
+    ]);
+    const run = await runHourlyReconcileJob(deps());
+    expect(run.outcome).toBe('ok');
+    expect(run.found).toBe(1);
+    const row = await alertByKey(t.db, QUOTA_ALERT_KEY);
+    expect(row).toMatchObject({ level: 'alert', taskId: null, resolvedAt: null });
+    expect(row?.body).toContain('中转 / relay-a：从没读成过');
+    expect(row?.body).not.toContain('old-a');
+    expect(row?.body).not.toContain('relay-fresh');
+
+    await sql('update pools set last_read_ok_at = $1::timestamptz where id = $2', [
+      new Date().toISOString(),
+      'relay-a',
+    ]);
+    await runHourlyReconcileJob(deps());
+    expect((await alertByKey(t.db, QUOTA_ALERT_KEY))?.body).toMatch(/^已撤：/);
   });
 });
 

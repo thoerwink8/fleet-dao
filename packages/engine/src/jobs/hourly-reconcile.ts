@@ -1,19 +1,22 @@
-// 每小时对账（design 第六节「断链怎么被发现」第 4 层；现在做两项）：一轮 = 记下开始 → 工作树（jobs/worktree-sweep.ts：
-// 没有在跑的任务在用的树，什么都不剩的删掉，剩着没推的东西的报要人拍）→ 提醒（jobs/alert-sweep.ts：条件没了的撤掉、
-// 卡住报警超过 24 小时没人处理的再推一次）→ 结局记进 schedule_runs。
-// scanned = 看了几个对象（树、探针目录、没处理的提醒），found = 处理了几个问题（删掉的树、改成要人拍的树、撤掉的过时提醒、
-// 再推的提醒）。一部分没跑成、只查了一部分，照实记 failed / partial，写明哪里没查成；不记成 ok（没跑成 ≠ 没问题）。
+// 每小时对账（design 第六节「断链怎么被发现」第 4 层）：一轮 = 记下开始 → 工作树（jobs/worktree-sweep.ts：没有在跑的任务
+// 在用的树，什么都不剩的删掉，剩着没推的东西的报要人拍）→ 三处核对（jobs/reconcile-checks.ts：开着的单都有工作流、合了的
+// PR 都记了账、额度读数不超过 30 分钟）→ 提醒（jobs/alert-sweep.ts：条件没了的撤掉、卡住报警超过 24 小时没人处理的再推一次）
+// → 结局记进 schedule_runs。核对在提醒之前：新报的提醒这一轮还不满 24 小时，不会被再推。
+// scanned = 看了几个对象（树、探针目录、没结束的单、审到的合并 PR、启用的账号池、没处理的提醒），found = 处理了几个问题
+// （删掉的树、改成要人拍的树、没有工作流的单、合并 PR 对上的问题、过期的额度池、撤掉的过时提醒、再推的提醒）。一部分没跑成、
+// 只查了一部分，照实记 failed / partial，写明哪里没查成；不记成 ok（没跑成 ≠ 没问题）。
 import type { AlertRow, ScheduleResult } from '@fleet-dao/db';
 import type { HourlyReconcileRun } from '../contract.ts';
 import { type AlertSweepDeps, sweepAlerts } from './alert-sweep.ts';
 import type { ScheduleRunLog } from './github-reconcile.ts';
+import { checkMergedPrs, checkQuotas, checkWorkflows, type ReconcileCheckDeps } from './reconcile-checks.ts';
 import { clip, message, type SweepPart } from './reconcile-common.ts';
 import { sweepWorktrees, type WorktreeSweepDeps } from './worktree-sweep.ts';
 
 /** 登记进 scheduled_jobs 的那一行：一次都没跑过也列得出来。 */
 export const HOURLY_RECONCILE_JOB = {
   id: 'hourly-reconcile',
-  name: '每小时对账（工作树、提醒）',
+  name: '每小时对账（工作树、工作流、PR 记账、额度、提醒）',
   schedule: '每小时（41 分）',
   // 漏一轮不报，连着两轮没跑成才算过期。
   expectEveryMinutes: 150,
@@ -28,7 +31,8 @@ export const OPEN_ALERT_LIMIT = 500;
 export const WHY_MAX = 1500;
 
 export type HourlyReconcileJobDeps = WorktreeSweepDeps &
-  AlertSweepDeps & {
+  AlertSweepDeps &
+  ReconcileCheckDeps & {
     runs: ScheduleRunLog;
   };
 
@@ -54,7 +58,12 @@ export function combineParts(parts: readonly SweepPart[]): ScheduleResult {
     return { outcome: 'failed', why, scanned, found };
   }
   if (notes.length > 0) return { outcome: 'partial', why, scanned, found };
-  if (scanned === 0) return { outcome: 'unscanned', why: '工作树的根下什么都没有，也没有没处理的提醒' };
+  if (scanned === 0) {
+    return {
+      outcome: 'unscanned',
+      why: '工作树的根下什么都没有，没有没结束的单，没有要审的合并 PR，没有启用的账号池，也没有没处理的提醒',
+    };
+  }
   return { outcome: 'ok', scanned, found };
 }
 
@@ -73,6 +82,10 @@ async function round(deps: HourlyReconcileJobDeps): Promise<ScheduleResult> {
     });
   }
   const trees = await sweepWorktrees(deps, before);
+  // 核对在提醒之前：这一轮新报的还不满 24 小时，提醒那部分不会再推它们
+  const workflows = await checkWorkflows(deps);
+  const merged = await checkMergedPrs(deps);
+  const quotas = await checkQuotas(deps);
   let alerts: SweepPart;
   try {
     const now = await listOpen(deps);
@@ -80,7 +93,7 @@ async function round(deps: HourlyReconcileJobDeps): Promise<ScheduleResult> {
   } catch (err) {
     alerts = { failed: `列没处理的提醒没成：${message(err)}`, scanned: 0, found: 0, unchecked: [] };
   }
-  return combineParts([trees, alerts]);
+  return combineParts([trees, workflows, merged, quotas, alerts]);
 }
 
 /**
