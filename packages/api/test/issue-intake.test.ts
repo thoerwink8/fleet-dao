@@ -839,7 +839,8 @@ describe('只派当前版本的单（0003 第 2、8 条：未排期、别的版�
     expect(res.status).toBe(500);
     expect(await h.store.getDelivery('plan-down')).toMatchObject({
       status: 'failed',
-      reason: '没查成：读不到 example/canary#40 挂在哪个版本（GitHub 回 502），这张单没派；对账重放时再判',
+      reason:
+        '没查成：读不到 example/canary#40 挂在哪个版本、是不是母单子单（GitHub 回 502），这张单没派；对账重放时再判',
     });
     expect(h.starts).toEqual([]);
     expect((await task())?.state).toBe('queued');
@@ -914,6 +915,52 @@ describe('只派当前版本的单（0003 第 2、8 条：未排期、别的版�
       await json(deliver(h, 'issues', issuesEvent('reopened', issue({ updated_at: at(-5) })))),
     ).toMatchObject({ note: 'task=exists, workflow=not_current_version' });
     expect(h.starts).toHaveLength(1);
+  });
+});
+
+// 母单、子单这一道的边界表在 packages/core/test/dispatch.test.ts；#252（母单按块带子单）做完之前，两种都不自动派。
+describe('母单、子单不自动派（#252 之前：一张单只走一块，各起一条会抢同一批文件）', () => {
+  it('【故意造出的失败】母单（贴了「母单」）、子单（挂在 #40 下面）：建了任务行、不派，note 写 mother_ticket、sub_issue；独立的 v1 单照派', async () => {
+    const { h, task } = setup();
+    h.plans.set(40, issuePlan({ labels: ['需求', '母单'], subIssues: 1 }));
+    h.plans.set(41, issuePlan({ parent: 40 }));
+    expect(await json(deliver(h, 'issues', issuesEvent('opened')))).toMatchObject({
+      note: 'task=created, workflow=mother_ticket',
+    });
+    expect(await json(deliver(h, 'issues', issuesEvent('opened', issue({ number: 41 }))))).toMatchObject({
+      note: 'task=created, workflow=sub_issue',
+    });
+    expect(await json(deliver(h, 'issues', issuesEvent('opened', issue({ number: 42 }))))).toMatchObject({
+      note: 'task=created, workflow=started',
+    });
+    expect(h.starts.map((s) => s.issueNumber)).toEqual([42]);
+    expect((await task(40))?.state).toBe('queued');
+    expect((await task(41))?.state).toBe('queued');
+    expect(h.logs.some((l) => l.message.includes('这张单不自动派：是 #40 下面的子单'))).toBe(true);
+  });
+
+  it('【故意造出的失败】标签漏贴、下面却挂着子单的：结构上就是母单，照样不派', async () => {
+    const { h } = setup();
+    h.plans.set(40, issuePlan({ labels: ['需求'], subIssues: 2 }));
+    expect(await json(deliver(h, 'issues', issuesEvent('opened')))).toMatchObject({
+      note: 'task=created, workflow=mother_ticket',
+    });
+    expect(h.starts).toEqual([]);
+  });
+
+  it('【故意造出的失败】查父子关系失败：不派，投递记成出错、写明「没查成」，不当成独立的单', async () => {
+    const { h, task } = setup();
+    h.plans.set(40, new Error('GraphQL 出错：parent 没查到'));
+    const res = await deliver(h, 'issues', issuesEvent('opened'), { delivery: 'family-down' });
+    expect(res.status).toBe(500);
+    expect(await h.store.getDelivery('family-down')).toMatchObject({
+      status: 'failed',
+      reason: expect.stringMatching(
+        /^没查成：读不到 example\/canary#40 挂在哪个版本、是不是母单子单（GraphQL 出错：parent 没查到）/,
+      ),
+    });
+    expect(h.starts).toEqual([]);
+    expect((await task())?.state).toBe('queued');
   });
 });
 

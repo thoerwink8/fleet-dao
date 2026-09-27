@@ -101,7 +101,7 @@ export function githubReconcileJob(
       github,
       workflows: createTemporalWorkflowControl(client),
       requirements: w.requirements ?? createTemporalRequirementWorkflows(client, taskQueue),
-      // 只派当前版本的单：挂在哪、当前版本是哪个，拉起前经「引擎」机器人现读（和后端 webhook 那条同一份判法）
+      // 只派当前版本的独立单：挂在哪、当前版本是哪个、是不是母单子单，拉起前经「引擎」机器人现读（和后端 webhook 那条同一份判法）
       plans: githubIssuePlans(w.gh),
       log,
       now,

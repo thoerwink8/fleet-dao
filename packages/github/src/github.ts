@@ -145,8 +145,8 @@ export interface GitHub {
   /** 读默认分支头上的一个文件，带上读的是哪个提交（仓的流程配置 .fleet/flow.json 这样读）。读不到抛错，不当成文件不在。 */
   readRepoFile(input: ReadRepoFileInput, ctx?: ActivityContext): Promise<ReadRepoFileResult>;
   /**
-   * 一张 issue 此刻挂在哪个里程碑、开没开着、重开过没有，加上仓里还开着的里程碑（「引擎」机器人现读）：接活判当前版本、
-   * fleet-api handover 判能不能交都用它。读不到、认不出抛错，不拿「没挂」「开着」顶。
+   * 一张 issue 此刻挂在哪个里程碑、开没开着、重开过没有、是不是母单子单，加上仓里还开着的里程碑（「引擎」机器人一次 GraphQL
+   * 现读）：接活判当前版本和母单子单、fleet-api handover 判能不能交都用它。读不到、认不出抛错，不拿「没挂」「开着」「独立单」顶。
    */
   readIssuePlan(input: ReadIssuePlanInput, ctx?: ActivityContext): Promise<IssuePlan>;
   /** 会话提交用的身份（「干活的」机器人）：引擎建工作树时写进 user.name / user.email。 */

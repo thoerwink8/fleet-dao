@@ -4,18 +4,18 @@
 // 每一步都能重放：任务行按（仓, issue 号）唯一，起工作流按工作流编号去重，叫停重发引擎回「已经在叫停」。
 // 抛错 = 没处理成：这条投递记成出错，对账重放时整条再来一遍（GitHub 自己不重投）。
 // 派不派（判法都在 @fleet-dao/core 的 dispatch.ts）：开关开着、issue 是开关打开以后开的，还要挂在当前版本上（0003 第 2、8 条：
-// 引擎只做当前版本的单，未排期、别的版本的不碰）——挂在哪、当前版本是哪个，拉起前在 GitHub 上现读（deps.plans），读不到就
-// 当这条没处理成（记成出错、对账重放时再判），不当成挂在当前版本上。开关打开以前开的、别的版本的、未排期的，由人明说交给 fleet
-// （fleet-api handover，cli.ts）。
+// 引擎只做当前版本的单，未排期、别的版本的不碰），还不能是母单或子单（#252 之前：母单和子单各起一条会抢同一批文件）——挂在哪、
+// 当前版本是哪个、是不是母单子单，拉起前在 GitHub 上现读（deps.plans），读不到就当这条没处理成（记成出错、对账重放时再判），
+// 不当成挂在当前版本上的独立单。开关打开以前开的、别的版本的、未排期的、母单和子单，由人明说交给 fleet（fleet-api handover，cli.ts）。
 // 拉起之前看这个仓的流程配置副本（docs/decisions/0003-fusion-flow.md 第 9 条）：认不出、太旧就停派，这条记成等着，
 // 副本好了由对账重放再拉起（判法在 @fleet-dao/core 的 replica.ts）。
 import { randomUUID } from 'node:crypto';
 import {
+  type AutoDispatchGate,
+  autoDispatchGate,
   dispatchDecision,
   isFinishedTask,
   replicaVerdict,
-  type VersionGate,
-  versionGate,
 } from '@fleet-dao/core';
 import { type GitHub, humanPart } from '@fleet-dao/github';
 import { AnswerAskRequest, type Repo, requirementWorkflowId, type Task } from '@fleet-dao/shared';
@@ -77,7 +77,7 @@ const INTAKE: Actor = { kind: 'engine', id: 'github-intake' };
 
 const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
-/** 读 issue 此刻挂在哪个版本、开没开着：经 @fleet-dao/github 的「引擎」机器人现读（后端 main.ts、引擎对账都这样装）。 */
+/** 读 issue 此刻挂在哪个版本、是不是母单子单、开没开着：经 @fleet-dao/github 的「引擎」机器人现读（后端 main.ts、引擎对账都这样装）。 */
 export function githubIssuePlans(gh: Pick<GitHub, 'readIssuePlan'>): IssuePlanReader {
   return {
     read: (repo, issueNumber) =>
@@ -85,11 +85,11 @@ export function githubIssuePlans(gh: Pick<GitHub, 'readIssuePlan'>): IssuePlanRe
   };
 }
 
-/** 机器人凭据没读到（githubAppMissing 那种情况）：一读就抛，接活不派（投递记成出错、对账重放），不当成挂在当前版本上。 */
+/** 机器人凭据没读到（githubAppMissing 那种情况）：一读就抛，接活不派（投递记成出错、对账重放），不当成挂在当前版本上的独立单。 */
 export function issuePlansUnavailable(why: string): IssuePlanReader {
   return {
     async read() {
-      throw new Error(`GitHub 机器人的凭据没读到，读不了 issue 挂在哪个版本：${why}`);
+      throw new Error(`GitHub 机器人的凭据没读到，读不了 issue 挂在哪个版本、是不是母单子单：${why}`);
     },
   };
 }
@@ -105,20 +105,21 @@ export function createIssueIntake(
   const { store, log } = deps;
 
   /**
-   * 挂没挂在当前版本上：GitHub 上现读这张单挂的里程碑和仓里还开着的里程碑（重放时事件里带的那份可能早过时了），交给 core 判。
-   * 读不到、认不出就抛：这条投递记成出错、对账重放时再判，不当成挂在当前版本上。
+   * 挂没挂在当前版本上、是不是母单子单：GitHub 上现读这张单挂的里程碑、仓里还开着的里程碑、标签和父子关系（重放时事件里带的
+   * 那份可能早过时了，事件里也不带父子关系），交给 core 判。读不到、认不出就抛：这条投递记成出错、对账重放时再判，
+   * 不当成挂在当前版本上的独立单。
    */
-  async function versionOf(repo: IntakeRepo, issueNumber: number): Promise<VersionGate> {
+  async function gateOf(repo: IntakeRepo, issueNumber: number): Promise<AutoDispatchGate> {
     let plan: IssuePlan;
     try {
       plan = await deps.plans.read(repo, issueNumber);
     } catch (err) {
       throw new Error(
-        `没查成：读不到 ${repo.owner}/${repo.name}#${issueNumber} 挂在哪个版本（${message(err)}），这张单没派；对账重放时再判`,
+        `没查成：读不到 ${repo.owner}/${repo.name}#${issueNumber} 挂在哪个版本、是不是母单子单（${message(err)}），这张单没派；对账重放时再判`,
         { cause: err },
       );
     }
-    return versionGate(plan);
+    return autoDispatchGate(plan);
   }
 
   async function repoOf(event: IngestedEvent): Promise<IntakeRepo> {
@@ -233,10 +234,12 @@ export function createIssueIntake(
       return notes.join(', ');
     }
     // 只派当前版本的单（0003 第 2、8 条）：未排期、别的版本、挂的里程碑关了的都不派，任务行留着（排队），之后挪进当前版本
-    // （GitHub 的 milestoned 事件）照开关规矩再判一次；认不出版本号的算没查成，告警。人要交就用 fleet-api handover。
+    // （GitHub 的 milestoned 事件）照开关规矩再判一次；认不出版本号的算没查成，告警。
+    // 母单、子单也不派（#252 之前：一张单只走一块，母单和子单各起一条会抢同一批文件）；#252 做完改成母单的 Lead 按块带子单。
+    // 人要交就用 fleet-api handover 一张一张明着交。
     // 急修（0003 第 4、8 条：只有带证据的急修能自动开单，排在本版之前）现在还没有自动开单的来源，这里不开特例；
     // 以后引擎能开急修单时，在这一步之前按单上的急修标记（带证据）放行，不改当前版本的判法。
-    const version = await versionOf(repo, issue.number);
+    const version = await gateOf(repo, issue.number);
     if (!version.ok) {
       log[version.reason === 'version_unreadable' ? 'warn' : 'info'](`这张单不自动派：${version.why}`, {
         deliveryId: event.deliveryId,

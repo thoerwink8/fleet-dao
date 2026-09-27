@@ -23,14 +23,24 @@ const BODY = [
   '',
 ].join('\n');
 
-/** 假 gh：记下每次调用；读里程碑、开单各按给的回。 */
-function setup(opts: { milestones?: GhResult; create?: GhResult; specs?: boolean; body?: string } = {}) {
+/** 假 gh：记下每次调用；读里程碑、开单各按给的回；route 回了的按它（挂子单那几步用）。 */
+function setup(
+  opts: {
+    milestones?: GhResult;
+    create?: GhResult;
+    specs?: boolean;
+    body?: string;
+    route?: (args: string[]) => GhResult | undefined;
+  } = {},
+) {
   const root = mkdtempSync(join(tmpdir(), 'fleet-issue-new-'));
   if (opts.specs !== false) mkdirSync(join(root, 'specs'));
   writeFileSync(join(root, 'body.md'), opts.body ?? BODY);
   const calls: string[][] = [];
   const gh = async (args: string[]): Promise<GhResult> => {
     calls.push(args);
+    const routed = opts.route?.(args);
+    if (routed) return routed;
     if (args[0] === 'api') return opts.milestones ?? ok(MILESTONES);
     return opts.create ?? ok(`${URL36}\n`);
   };
@@ -233,6 +243,123 @@ describe('开单脚本：--mother 多贴「母单」标签', () => {
       '--milestone',
       'P1 核心闭环',
     ]);
+  });
+});
+
+describe('开单脚本：--parent 开子单，先挂到母单下面再挂里程碑（接活不派母单、子单，design 第九节）', () => {
+  const V1 = ok(JSON.stringify([{ title: 'P1 核心闭环' }, { title: 'v1 Fusion 接活' }]));
+  const sub = [...base.slice(0, 3), 'v1', ...base.slice(4), '--parent', '192'];
+  const mother = (over: Record<string, unknown> = {}) =>
+    ok(JSON.stringify({ number: 192, state: 'open', labels: [{ name: '需求' }, { name: '母单' }], ...over }));
+  /** 母单 #192、新开的 #36（id 9036）；挂子议题、挂里程碑按给的回。 */
+  const routes =
+    (o: { parent?: GhResult; link?: GhResult; edit?: GhResult } = {}) =>
+    (args: string[]): GhResult | undefined => {
+      if (args[0] === 'api' && args[1] === 'repos/{owner}/{repo}/issues/192') return o.parent ?? mother();
+      if (args[0] === 'api' && args[1] === 'repos/{owner}/{repo}/issues/36')
+        return ok(JSON.stringify({ number: 36, id: 9036 }));
+      if (args[0] === 'api' && args[1] === '-X') return o.link ?? ok('{}');
+      if (args[0] === 'issue' && args[1] === 'edit') return o.edit ?? ok(`${URL36}\n`);
+      return undefined;
+    };
+
+  it('【故意造出的失败】建单不带里程碑 → 挂到母单下面 → 再挂里程碑：中间哪一下都不是挂在当前版本上的独立单', async () => {
+    const { root, calls, run } = setup({ milestones: V1, route: routes() });
+    await expect(run(...sub)).resolves.toEqual({
+      number: 36,
+      url: URL36,
+      milestone: 'v1 Fusion 接活',
+      specsFile: undefined,
+      parent: 192,
+    });
+    expect(calls).toEqual([
+      ['api', 'repos/{owner}/{repo}/milestones?state=open&per_page=100'],
+      ['api', 'repos/{owner}/{repo}/issues/192'],
+      [
+        'issue',
+        'create',
+        '--title',
+        '登录页加验证码',
+        '--body-file',
+        join(root, 'body.md'),
+        '--label',
+        '需求',
+      ],
+      ['api', 'repos/{owner}/{repo}/issues/36'],
+      ['api', '-X', 'POST', 'repos/{owner}/{repo}/issues/192/sub_issues', '-F', 'sub_issue_id=9036'],
+      ['issue', 'edit', '36', '--milestone', 'v1 Fusion 接活'],
+    ]);
+  });
+
+  it('写成 #192 也行；未排期的子单挂完就停，不挂里程碑', async () => {
+    const { calls, run } = setup({ route: routes() });
+    await run(...base.slice(0, 3), '未排期', ...base.slice(4), '--parent', '#192');
+    expect(calls.map((c) => c.slice(0, 3))).toEqual([
+      ['api', 'repos/{owner}/{repo}/issues/192'],
+      ['issue', 'create', '--title'],
+      ['api', 'repos/{owner}/{repo}/issues/36'],
+      ['api', '-X', 'POST'],
+    ]);
+  });
+
+  it.each([
+    ['号认不出', 'abc'],
+    ['号是 0', '0'],
+    ['空的', ''],
+  ])('【故意造出的失败】--parent %s：不开，gh 一次也不调', async (_name, value) => {
+    const { calls, run } = setup({ route: routes() });
+    await expect(run(...base, '--parent', value)).rejects.toThrow('--parent 写母单的号');
+    expect(calls).toEqual([]);
+  });
+
+  it.each([
+    ['是 PR', mother({ pull_request: { url: 'x' } }), '#192 是 PR，不是母单，单没开。'],
+    ['已经关了', mother({ state: 'closed' }), '母单 #192 已经关了，单没开'],
+    [
+      '没贴「母单」',
+      mother({ labels: [{ name: '需求' }] }),
+      '#192 没贴「母单」标签，单没开：有子单的必须是母单',
+    ],
+    [
+      '读不到',
+      { code: 1, stdout: '', stderr: 'HTTP 404: Not Found\n' },
+      'gh 读母单 #192 失败（退出码 1），单没开：HTTP 404: Not Found',
+    ],
+    ['读回来认不出', ok('<html>'), 'gh 读回来的 #192 认不出'],
+    ['标签认不出', mother({ labels: 'x' }), 'gh 读回来的 #192 的标签认不出，单没开。'],
+  ])('【故意造出的失败】母单%s：不开单', async (_name, parent, message) => {
+    const { calls, run } = setup({ milestones: V1, route: routes({ parent }) });
+    await expect(run(...sub)).rejects.toThrow(message);
+    expect(calls.some((c) => c[0] === 'issue')).toBe(false);
+  });
+
+  it('【故意造出的失败】挂子议题报错：明说单开了、没挂上、现在没挂里程碑不会被派，给手动补的步骤；不挂里程碑、需求文档不建', async () => {
+    const link = { code: 1, stdout: '', stderr: 'HTTP 422: Validation Failed\n' };
+    const { root, calls, run } = setup({ milestones: V1, route: routes({ link }) });
+    await expect(run(...sub, '--specs', '登录验证码')).rejects.toThrow(
+      `单开了（#36 ${URL36}），可没挂到 #192 下面：gh 挂子议题报错（退出码 1）：HTTP 422: Validation Failed。` +
+        '它现在没挂里程碑（未排期，不会被自动派）：在 #192 页面上把它加成子议题，再 gh issue edit 36 --milestone "v1 Fusion 接活"' +
+        '；需求文档还没建，挂好以后补上 specs/36-登录验证码/需求.md。',
+    );
+    expect(calls.some((c) => c[0] === 'issue' && c[1] === 'edit')).toBe(false);
+    expect(existsSync(join(root, 'specs', '36-登录验证码'))).toBe(false);
+  });
+
+  it('【故意造出的失败】新单的 id 认不出：不挂、照实报', async () => {
+    const route = (args: string[]) =>
+      args[1] === 'repos/{owner}/{repo}/issues/36' ? ok('{"number":36}') : routes()(args);
+    const { calls, run } = setup({ milestones: V1, route });
+    await expect(run(...sub)).rejects.toThrow('可没挂到 #192 下面：gh 读回来的这张单认不出 id。');
+    expect(calls.some((c) => c[1] === '-X')).toBe(false);
+  });
+
+  it('【故意造出的失败】挂上了、里程碑没挂上：明说停在哪一步和怎么补', async () => {
+    const edit = { code: 1, stdout: '', stderr: "could not add to milestone 'v1 Fusion 接活'\n" };
+    const { run } = setup({ milestones: V1, route: routes({ edit }) });
+    await expect(run(...sub)).rejects.toThrow(
+      `单开了、挂到 #192 下面了（#36 ${URL36}），可里程碑「v1 Fusion 接活」没挂上（退出码 1）：` +
+        'could not add to milestone \'v1 Fusion 接活\'。手动补：gh issue edit 36 --milestone "v1 Fusion 接活"。',
+    );
   });
 });
 

@@ -98,6 +98,8 @@ export interface IssueState {
   edits: { diff: string; editor: GhUser }[];
   labels: string[];
   milestone: { number: number; title: string } | null;
+  /** 挂在哪张单下面（GitHub 子议题的父单号）；不是子单是 null。 */
+  parent: number | null;
 }
 
 type Handler = (req: Recorded) => Response | undefined | Promise<Response | undefined>;
@@ -130,7 +132,7 @@ export class FakeGitHub {
   issues = new Map<number, IssueState>();
   /** 里程碑编号 → 标题：PATCH 里程碑只带编号，靠这张表把标题配回去。 */
   milestones = new Map<number, string>();
-  /** 已经关了的里程碑编号（列还开着的里程碑时不回它们）。 */
+  /** 已经关了的里程碑编号（GraphQL 列还开着的里程碑时不回它们）。 */
   closedMilestones = new Set<number>();
   /** 需求文档（Contents API），键是仓内路径。 */
   specs = new Map<string, { sha: string; content: string }>();
@@ -176,6 +178,7 @@ export class FakeGitHub {
       edits: init.edits ?? [],
       labels: init.labels ?? [],
       milestone: init.milestone ?? null,
+      parent: init.parent ?? null,
     };
     if (issue.milestone) this.milestones.set(issue.milestone.number, issue.milestone.title);
     this.issues.set(n, issue);
@@ -615,19 +618,6 @@ export class FakeGitHub {
       return new Response(null, { status: 204 });
     }
 
-    // —— 里程碑 ——
-    if (rest === '/milestones' && m === 'GET') {
-      const state = req.query.get('state') ?? 'open';
-      const list = [...this.milestones]
-        .map(([number, title]) => ({
-          number,
-          title,
-          state: this.closedMilestones.has(number) ? 'closed' : 'open',
-        }))
-        .filter((x) => state === 'all' || x.state === state);
-      return this.page(req, list);
-    }
-
     // —— issue ——
     if (rest === '/issues' && m === 'GET') {
       const state = req.query.get('state') ?? 'open';
@@ -806,6 +796,44 @@ export class FakeGitHub {
 
   private graphql(req: Recorded, role: AppRole): Response {
     const { query, variables } = req.body as { query: string; variables: Record<string, unknown> };
+    if (query.includes('query IssuePlan')) {
+      // 一张单挂在哪个版本、是不是母单子单，加上仓里还开着的里程碑（readIssuePlan）
+      const n = Number(variables.number);
+      const issue = this.issues.get(n);
+      const pr = issue ? undefined : this.pulls.get(n);
+      const open = [...this.milestones]
+        .filter(([number]) => !this.closedMilestones.has(number))
+        .map(([number, title]) => ({ number, title }));
+      const milestones = { totalCount: open.length, nodes: open };
+      if (!issue && !pr) {
+        return this.json(200, {
+          data: { repository: { issueOrPullRequest: null, milestones } },
+          errors: [
+            {
+              type: 'NOT_FOUND',
+              message: `Could not resolve to an issue or pull request with the number of ${n}.`,
+            },
+          ],
+        });
+      }
+      const kids = [...this.issues.values()].filter((i) => i.parent === n).length;
+      const node = issue
+        ? {
+            __typename: 'Issue',
+            state: issue.state.toUpperCase(),
+            stateReason: issue.state_reason ? issue.state_reason.toUpperCase() : null,
+            author: { login: issue.user.login },
+            milestone: issue.milestone,
+            labels: { totalCount: issue.labels.length, nodes: issue.labels.map((name) => ({ name })) },
+            parent: issue.parent === null ? null : { number: issue.parent },
+            subIssuesSummary: { total: kids },
+          }
+        : {
+            __typename: 'PullRequest',
+            prState: (pr as PullState).merged ? 'MERGED' : (pr as PullState).state.toUpperCase(),
+          };
+      return this.json(200, { data: { repository: { issueOrPullRequest: node, milestones } } });
+    }
     if (query.includes('markPullRequestReadyForReview')) {
       const n = Number(String(variables.id).replace('PR_', ''));
       const pr = this.pulls.get(n);
