@@ -150,6 +150,8 @@ describe('读不到 ≠ 没有', () => {
       .auditMergedPrs('acme/widgets', new Date('2026-09-25T00:00:00Z'));
     expect(merged.outcome).toBe('partial');
     expect(merged.problems.some((p) => p.startsWith(`#${pr.number} 没查成`))).toBe(true);
+    // 没查成的那张记成 unchecked：不算发现的问题，也不当成对上了
+    expect(merged.findings.filter((f) => f.number === pr.number).map((f) => f.kind)).toContain('unchecked');
   });
 
   it('CI 事件回 GitHub 重读失败：事件处理报错（后端把这条投递记成出错、原文留着，对账时重放），不把镜像写成「没有 CI」', async () => {

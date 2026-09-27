@@ -279,10 +279,11 @@ export function realPortsFromEnv(
       orgSwitch,
       machine: config.machine,
     }),
-    // 每小时对账：同一个工作树管家（删树经 fleet-agent-scope）、同一个会话用户执行器（看树里还剩什么）；两个机器人的
-    // 权限自检用引擎这份 GitHub（同一套 App 凭据）
+    // 每小时对账：同一个工作树管家（删树经 fleet-agent-scope）、同一个会话用户执行器（看树里还剩什么）；引擎这份 GitHub
+    // （同一套 App 凭据）审合了的 PR、给排队的单补拉时现读挂在哪个版本、做两个机器人的权限自检
     hourlyReconcile: hourlyReconcileJob({
       db,
+      gh,
       trees,
       exec,
       sessionOrg,

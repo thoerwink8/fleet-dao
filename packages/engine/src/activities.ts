@@ -254,8 +254,11 @@ export interface EngineJobs {
   githubReconcile?: (client: Client, taskQueue: string) => GitHubReconcileJobDeps;
   /** 路由探针（#129）：读路由、真起最小会话、写结论。 */
   routeProbe?: () => RouteProbeJobDeps;
-  /** 每小时对账：看工作树、撤过时的提醒、再推没人处理的（查工作流在不在跑、挂没挂着用这次活动的 Temporal 客户端）。 */
-  hourlyReconcile?: (client: Client) => HourlyReconcileJobDeps;
+  /**
+   * 每小时对账：看工作树、两处核对、撤过时的提醒、再推没人处理的、机器人权限自检（查工作流在不在跑、挂没挂着用这次活动的
+   * Temporal 客户端；taskQueue 同上：排队的单补拉起的工作流起在这里）。
+   */
+  hourlyReconcile?: (client: Client, taskQueue: string) => HourlyReconcileJobDeps;
   /** 全流程巡检（#223）：在巡检仓开单、看它一路走完（叫停前几轮留下的单、查工作流用这次活动的 Temporal 客户端）。 */
   canary?: (client: Client) => CanaryDeps;
   /** 看门狗（#203）：按登记表看各定时任务新不新鲜、推撤提醒（只读写库）。 */
@@ -322,7 +325,8 @@ async function reconcileHourly(jobs: EngineJobs): Promise<unknown> {
     );
   }
   try {
-    return await runHourlyReconcileJob(make(Context.current().client));
+    const ctx = Context.current();
+    return await runHourlyReconcileJob(make(ctx.client, ctx.info.taskQueue));
   } catch (error) {
     if (error instanceof HourlyReconcileFailedError) {
       throw new PortError('HOURLY_RECONCILE_FAILED', error.message, {

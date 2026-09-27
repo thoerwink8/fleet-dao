@@ -37,7 +37,10 @@ export const WORKFLOW_TYPES = {
   githubReconcile: 'githubReconcileWorkflow',
   /** 路由探针（#129）：Temporal Schedule 每 15 分钟起一条（和对账错开），见 jobs/schedules.ts。 */
   routeProbe: 'routeProbeWorkflow',
-  /** 每小时对账（工作树残留、提醒按条件撤和再推、GitHub 机器人权限自检）：Temporal Schedule 每小时起一条，见 jobs/schedules.ts。 */
+  /**
+   * 每小时对账（工作树残留、两处核对、提醒按条件撤和再推、GitHub 机器人权限自检）：Temporal Schedule 每小时起一条，
+   * 见 jobs/schedules.ts。
+   */
   hourlyReconcile: 'hourlyReconcileWorkflow',
   /** 全流程巡检（#223）：Temporal Schedule 每 6 小时起一条，开一张巡检单一路看到有结论，见 jobs/canary.ts。 */
   canary: 'canaryWorkflow',

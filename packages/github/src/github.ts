@@ -71,7 +71,13 @@ import {
   waitCi,
 } from './pulls.ts';
 import { MAX_BUNDLE_BYTES, type PushBranchInput, type PushBranchResult, pushBranch } from './push.ts';
-import { createReconciler, type Reconciler, type ReconcilerOptions } from './reconcile.ts';
+import {
+  auditMergedPrs,
+  createReconciler,
+  type MergedPrAuditReport,
+  type Reconciler,
+  type ReconcilerOptions,
+} from './reconcile.ts';
 import { RepoFactsCache } from './repos.ts';
 import { type SyncMainlineInput, type SyncMainlineResult, syncMainline } from './sync.ts';
 
@@ -188,6 +194,11 @@ export interface GitHub {
   selfCheck(repos: RepoRef[]): Promise<SelfCheckItem[]>;
   eventSink(waker: WorkflowWaker): EventSink;
   reconciler(options: ReconcilerOptions): Reconciler;
+  /**
+   * 一段时间里合了的 PR：镜像没记成已合并的补上；我们两个机器人开的，还要是「引擎」合的、账上有合并记录。
+   * 不用接活那道门。每小时对账调它（按 findings 的 kind 分，不认 problems 里的字）。
+   */
+  auditMergedPrs(repoFullName: string, since: Date): Promise<MergedPrAuditReport>;
 }
 
 const LEVEL: Record<string, number> = { read: 1, write: 2, admin: 3 };
@@ -323,5 +334,6 @@ export function createGitHub(options: GitHubOptions): GitHub {
     },
     eventSink: (waker) => createEventSink(deps, waker),
     reconciler: (reconcilerOptions) => createReconciler(deps, reconcilerOptions),
+    auditMergedPrs: (repoFullName, since) => auditMergedPrs(deps, repoFullName, since),
   };
 }

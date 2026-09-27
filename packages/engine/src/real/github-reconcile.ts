@@ -12,12 +12,14 @@ import {
   createPgStore,
   createTemporalRequirementWorkflows,
   createTemporalWorkflowControl,
+  type GitHubIntake,
   githubIssuePlans,
   jsonLogger,
   type Logger,
   type RequirementWorkflows,
   reconcileGitHub,
   reconcilerOptions,
+  type Store,
 } from '@fleet-dao/api';
 import { PROJECT_CONFIG_PATH, type Source } from '@fleet-dao/core';
 import {
@@ -138,6 +140,44 @@ export function askIssueJob(w: GitHubReconcileWiring, log: Logger, now: () => Da
   };
 }
 
+/** 接活那道门要的 GitHub：写镜像（PR、CI 事件）、现读 issue 挂在哪个版本、是不是母单子单。 */
+export type IntakeGitHub = Pick<GitHub, 'eventSink' | 'readIssuePlan'>;
+
+/**
+ * 接活那道门的几样依赖（和 webhook 同一份判法、同一个拉起实现）：对账补漏的重放、补收、补起认领，每小时对账给排队的单
+ * 补拉，都用这一份。拉起工作流用这次活动的 Temporal 客户端，起在 taskQueue 上。
+ */
+export function intakeDepsFor(
+  w: { gh: IntakeGitHub; requirements?: RequirementWorkflows | undefined },
+  parts: { store: Store; log: Logger; now: () => Date },
+  client: Client,
+  taskQueue: string,
+) {
+  return {
+    store: parts.store,
+    workflows: createTemporalWorkflowControl(client),
+    requirements: w.requirements ?? createTemporalRequirementWorkflows(client, taskQueue),
+    // 只派当前版本的独立单：挂在哪、当前版本是哪个、是不是母单子单，拉起前经「引擎」机器人现读（和后端 webhook 那条同一份判法）
+    plans: githubIssuePlans(w.gh),
+    log: parts.log,
+    now: parts.now,
+  };
+}
+
+/** 接活那道门（createGitHubIntake）：每小时对账给排队的单补拉经它重放投递，和对账补漏同一份依赖。 */
+export function reconcileIntake(
+  w: { gh: IntakeGitHub; requirements?: RequirementWorkflows | undefined },
+  parts: { store: Store; log: Logger; now: () => Date },
+  client: Client,
+  taskQueue: string,
+): GitHubIntake {
+  return createGitHubIntake({
+    ...intakeDepsFor(w, parts, client, taskQueue),
+    // 引擎等 CI 靠活动自己轮询，PR、CI 事件只写镜像，不按事件叫醒（和后端 main.ts 一样）
+    github: w.gh.eventSink({ async wake() {} }),
+  });
+}
+
 /** 关单对账那一步的真装配（#241）：受管的仓从库里列，现状、留言经「引擎」机器人，提醒进同一个库（要人拍的那一级）。 */
 export function closeSweepJob(
   w: GitHubReconcileWiring,
@@ -178,15 +218,7 @@ export function githubReconcileJob(
     now,
   );
   return (client, taskQueue) => {
-    const intakeDeps = {
-      store,
-      workflows: createTemporalWorkflowControl(client),
-      requirements: w.requirements ?? createTemporalRequirementWorkflows(client, taskQueue),
-      // 只派当前版本的独立单：挂在哪、当前版本是哪个、是不是母单子单，拉起前经「引擎」机器人现读（和后端 webhook 那条同一份判法）
-      plans: githubIssuePlans(w.gh),
-      log,
-      now,
-    };
+    const intakeDeps = intakeDepsFor(w, { store, log, now }, client, taskQueue);
     const intake = createGitHubIntake({ ...intakeDeps, github });
     // 补起待起的认领（#299）：和接活同一套依赖、同一个拉起实现
     const claims = createIssueIntake(intakeDeps);

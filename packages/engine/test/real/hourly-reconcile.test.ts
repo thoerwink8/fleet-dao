@@ -6,11 +6,13 @@ import { randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { type RequirementWorkflows, silentLogger } from '@fleet-dao/api';
 import {
   type AlertRow,
   alertByKey,
   approvals,
   auditLog,
+  githubEvents,
   notifications,
   pullRequests,
   repos,
@@ -19,11 +21,14 @@ import {
   subtasks,
   tasks,
   upsertAlert,
+  users,
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
+import type { IssuePlan } from '@fleet-dao/github';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { type AlertSweepDeps, type RouteCheck, sweepAlerts } from '../../src/jobs/alert-sweep.ts';
 import { HOURLY_RECONCILE_JOB, runHourlyReconcileJob } from '../../src/jobs/hourly-reconcile.ts';
+import { MERGED_PR_LOOKBACK_MS } from '../../src/jobs/reconcile-checks.ts';
 import {
   beijingDate,
   RECONCILE_ACTOR,
@@ -147,9 +152,38 @@ function deps(over: Partial<HourlyReconcileWiring> & { now?: () => Date } = {}) 
     shBin: 'sh',
     log: quiet,
     stageRoutable: async (): Promise<RouteCheck> => ({ kind: 'none', detail: '没有在线的路由' }),
+    gh: ghWith(),
+    requirements: {
+      async start() {
+        throw new Error('用例里不该真拉起工作流');
+      },
+    } as never,
+    intakeLog: silentLogger,
     ...over,
     workflows: wf,
-  })({ workflow: {} as never });
+  })({ workflow: {} as never } as never, 'fleet-test');
+}
+
+/**
+ * 假 GitHub：审合并的 PR 由用例定（默认一条都没合）；补拉时接活那道门要的镜像照收不记，现读 issue 挂在哪个版本
+ * 默认照抛（用例里走到了才给）。
+ */
+function ghWith(over: Partial<HourlyReconcileWiring['gh']> = {}): HourlyReconcileWiring['gh'] {
+  return {
+    auditMergedPrs: async () => ({
+      outcome: 'ok',
+      scanned: 0,
+      found: 0,
+      fixed: 0,
+      problems: [],
+      findings: [],
+    }),
+    eventSink: () => ({ accept: async () => {} }),
+    readIssuePlan: async () => {
+      throw new Error('用例里不该现读 issue');
+    },
+    ...over,
+  };
 }
 
 const alert = (
@@ -955,6 +989,349 @@ describe('没人处理的卡住报警：超过 24 小时再推一次，一天最
     expect((await alertByKey(t.db, rb.dedupeKey))?.body).toMatch(/^已撤：原来那条已经处理了/);
     const audits = await t.db.select().from(auditLog);
     expect(audits.every((x) => x.actorId === RECONCILE_ACTOR)).toBe(true);
+  });
+});
+
+describe('两处核对接到真库', { timeout: 60_000 }, () => {
+  /** 白名单里的创始人：真接活那道门按 GitHub 编号认他。 */
+  const FOUNDER = { login: 'founder-a', id: 4242 };
+
+  /** 仓的「让 AI 接活」一天前打开、流程配置副本刚同步过（接活拉起前两样都看）。 */
+  async function dispatchOn(repoId: string) {
+    await sql(
+      `update repos set auto_dispatch_since = $1::timestamptz, flow_config = '{}'::jsonb, flow_source = 'org_default',
+         flow_commit = $2, flow_synced_at = now() where id = $3`,
+      [new Date(Date.now() - 24 * HOUR).toISOString(), 'c'.repeat(40), repoId],
+    );
+  }
+
+  /**
+   * 一条 issues 投递：status、note、reason 是接活记的；author 是这张 issue 的作者编号（不给是白名单外的人）；at 是这一版
+   * issue 的时刻（默认一小时前）；state 是这一版开着还是关着（默认开着）。
+   */
+  interface DeliveryFixture {
+    id?: string;
+    status: 'accepted' | 'failed' | 'ignored';
+    note?: string;
+    reason?: string;
+    author?: number;
+    at?: Date;
+    state?: 'open' | 'closed';
+  }
+
+  /** 一张排队的单，带（或不带）一条 issues 投递。 */
+  async function queuedWithDelivery(repoId: string, issueNumber: number, delivery: DeliveryFixture | null) {
+    const [row] = await t.db
+      .insert(tasks)
+      .values({
+        repoId,
+        issueNumber,
+        title: '还没派',
+        rawRequest: '排队',
+        requestedBy: 'founder-a',
+        priority: 10,
+        state: 'queued',
+      })
+      .returning();
+    if (!row) throw new Error('单没写进去');
+    if (delivery) await addDelivery(issueNumber, delivery);
+    return row;
+  }
+
+  async function addDelivery(issueNumber: number, delivery: DeliveryFixture) {
+    const id = delivery.id ?? `d-${issueNumber}`;
+    const at = (delivery.at ?? new Date(Date.now() - HOUR)).toISOString();
+    const state = delivery.state ?? 'open';
+    const action = state === 'open' ? 'opened' : 'closed';
+    const author = {
+      login: delivery.author ? FOUNDER.login : 'someone',
+      id: delivery.author ?? 999,
+      type: 'User',
+    };
+    const payload = {
+      action,
+      sender: author,
+      repository: { full_name: 'acme/widgets' },
+      issue: {
+        number: issueNumber,
+        title: '还没派',
+        body: '排队',
+        state,
+        created_at: at,
+        updated_at: at,
+        user: author,
+      },
+    };
+    await sql(
+      `insert into github_events (delivery_id, event, action, source, repo, payload, status, reason, note, finished_at)
+       values ($1, 'issues', $2, 'webhook', 'acme/widgets', $3::jsonb, $4, $5, $6, now())`,
+      [id, action, JSON.stringify(payload), delivery.status, delivery.reason ?? null, delivery.note ?? null],
+    );
+    await sql(
+      `insert into github_event_versions (delivery_id, object, version, state) values ($1, $2, $3::timestamptz, $4)`,
+      [id, `acme/widgets:issue:${issueNumber}`, at, state],
+    );
+  }
+
+  /** 现读的 issue：开着、挂在当前版本 v1 上的独立单；over 改哪样。 */
+  function plan(over: Partial<IssuePlan> = {}): IssuePlan {
+    const v1 = { number: 8, title: 'v1 Fusion 接活' };
+    return {
+      state: 'open',
+      reopened: false,
+      pullRequest: false,
+      author: FOUNDER.login,
+      milestone: v1,
+      openMilestones: [v1],
+      labels: [],
+      parent: null,
+      subIssues: 0,
+      ...over,
+    };
+  }
+
+  it('【故意造出的失败】接活开着：在干的单工作流不在报卡住、又在跑撤掉；排队的记着不派理由不报；没理由的经真接活补拉，门没收、没投递报卡住（下一轮说法不变）；刚更新的不查', async () => {
+    probeDir();
+    const { repo, task } = await work('running');
+    await dispatchOn(repo.id);
+    await sql('update tasks set updated_at = $1::timestamptz where id = $2', [
+      new Date(Date.now() - 20 * 60_000).toISOString(),
+      task.id,
+    ]);
+    const held = await queuedWithDelivery(repo.id, 161, {
+      status: 'accepted',
+      note: 'task=created, workflow=unscheduled',
+    });
+    // 作者不在白名单：真接活重放时门口就不收
+    const outsider = await queuedWithDelivery(repo.id, 163, { status: 'failed', reason: '上次没处理成' });
+    const orphan = await queuedWithDelivery(repo.id, 164, null);
+    // 机器人关的单（接活不叫停自己，库里还排着）：不是开着的单，不补拉、不报
+    const botClosed = await queuedWithDelivery(repo.id, 166, {
+      status: 'accepted',
+      note: 'stop=skip_bot',
+      state: 'closed',
+    });
+    const [fresh] = await t.db
+      .insert(tasks)
+      .values({
+        repoId: repo.id,
+        issueNumber: 162,
+        title: '刚收尾',
+        rawRequest: '刚更新',
+        requestedBy: 'founder-a',
+        priority: 10,
+        state: 'planning',
+        updatedAt: new Date(Date.now() - 60_000),
+      })
+      .returning();
+    if (!fresh) throw new Error('单没写进去');
+    const wf = fakeWorkflows();
+    const run = await runHourlyReconcileJob(deps({ workflows: wf.reader }));
+    expect(run).toMatchObject({ outcome: 'ok', found: 3 });
+    const row = await alertByKey(t.db, `reconcile:workflow:${task.id}`);
+    expect(row).toMatchObject({
+      level: 'alert',
+      taskId: task.id,
+      link: 'https://github.com/acme/widgets/issues/160',
+      resolvedAt: null,
+    });
+    expect(row?.body).toContain('在干');
+    expect(row?.body).toContain('已经不在了');
+    expect(await alertByKey(t.db, `reconcile:workflow:${held.id}`)).toBeNull();
+    expect(await alertByKey(t.db, `reconcile:workflow:${fresh.id}`)).toBeNull();
+    expect(await alertByKey(t.db, `reconcile:workflow:${botClosed.id}`)).toBeNull();
+    const outsiderAlert = `reconcile:workflow:${outsider.id}`;
+    expect((await alertByKey(t.db, outsiderAlert))?.body).toContain(
+      '补拉时接活没收：门口没收（author_not_whitelisted）',
+    );
+    expect((await alertByKey(t.db, `reconcile:workflow:${orphan.id}`))?.body).toContain(
+      '库里没有这张 issue 的投递',
+    );
+
+    // 门口没收的那条重放后记成了不收：下一轮照样认得出是它、说法不变，不改说成「没有投递」
+    const running = fakeWorkflows({ 'req:acme/widgets#160': { state: 'running' } });
+    await runHourlyReconcileJob(deps({ workflows: running.reader }));
+    expect((await alertByKey(t.db, `reconcile:workflow:${task.id}`))?.body).toMatch(/^已撤：需求工作流在跑/);
+    expect((await alertByKey(t.db, outsiderAlert))?.body).toContain('门口没收（author_not_whitelisted）');
+
+    // 项目接活关了：不再查，旧提醒撤掉
+    await sql('update repos set auto_dispatch_since = null where id = $1', [repo.id]);
+    await runHourlyReconcileJob(deps({ workflows: running.reader }));
+    expect((await alertByKey(t.db, `reconcile:workflow:${orphan.id}`))?.body).toMatch(
+      /^已撤：这个项目「让 AI 接活」关着/,
+    );
+  });
+
+  it('没着落的排队单经真接活补拉：挂在当前版本的真拉起来（工作流在跑就算补上、不报）；贴着「本机做」的记成不派、下一轮不再补拉', async () => {
+    probeDir();
+    const { repo } = await work('failed');
+    await dispatchOn(repo.id);
+    await t.db
+      .insert(users)
+      .values({ displayName: '创始人 A', role: 'founder', githubLogin: FOUNDER.login, githubId: FOUNDER.id });
+    // 上次现读版本没读成（记成出错）：两张都是白名单作者开的
+    const missed = await queuedWithDelivery(repo.id, 165, {
+      status: 'failed',
+      reason: '没查成：读不到挂在哪个版本',
+      author: FOUNDER.id,
+    });
+    const local = await queuedWithDelivery(repo.id, 166, {
+      status: 'failed',
+      reason: '没查成：读不到挂在哪个版本',
+      author: FOUNDER.id,
+    });
+    const wf = fakeWorkflows();
+    const started: number[] = [];
+    const requirements: RequirementWorkflows = {
+      async start(input) {
+        started.push(input.issueNumber);
+        wf.states[`req:acme/widgets#${input.issueNumber}`] = { state: 'running' };
+        return 'started';
+      },
+    };
+    const read: number[] = [];
+    const gh = ghWith({
+      async readIssuePlan(input) {
+        read.push(input.issueNumber);
+        return input.issueNumber === 166 ? plan({ labels: ['本机做'] }) : plan();
+      },
+    });
+
+    const first = await runHourlyReconcileJob(deps({ workflows: wf.reader, requirements, gh }));
+    expect(first).toMatchObject({ outcome: 'ok', found: 2 });
+    expect(started).toEqual([165]);
+    expect(read.sort()).toEqual([165, 166]);
+    expect(await alertByKey(t.db, `reconcile:workflow:${missed.id}`)).toBeNull();
+    expect(await alertByKey(t.db, `reconcile:workflow:${local.id}`)).toBeNull();
+    const notes = Object.fromEntries(
+      (await t.db.select().from(githubEvents)).map((e) => [e.deliveryId, `${e.status} ${e.note}`]),
+    );
+    expect(notes['d-165']).toMatch(/^accepted .*workflow=started/);
+    expect(notes['d-166']).toMatch(/^accepted .*workflow=reserved_local/);
+
+    // 下一轮：165 的工作流在跑、166 投递上记着「本机做」，都有着落，一条都不再补拉
+    read.length = 0;
+    const second = await runHourlyReconcileJob(deps({ workflows: wf.reader, requirements, gh }));
+    expect(second).toMatchObject({ outcome: 'ok', found: 0 });
+    expect(read).toEqual([]);
+    expect(started).toEqual([165]);
+  });
+
+  it('合了的 PR：镜像补上算发现；合并人不对报 reconcile:pr；列不出来这个仓进原因、这一轮不记 ok', async () => {
+    probeDir();
+    await work();
+    const now = new Date('2026-09-26T09:41:00.000Z');
+    const seen: { repo: string; since: Date }[] = [];
+    const first = await runHourlyReconcileJob(
+      deps({
+        now: () => now,
+        gh: ghWith({
+          async auditMergedPrs(repo, since) {
+            seen.push({ repo, since });
+            return {
+              outcome: 'ok',
+              scanned: 1,
+              found: 2,
+              fixed: 1,
+              problems: ['#7 合并了但镜像里没有（已补）', '#7 不是「引擎」机器人合的（合并人 founder）'],
+              findings: [
+                { number: 7, kind: 'mirror_fixed', text: '#7 合并了但镜像里没有（已补）' },
+                {
+                  number: 7,
+                  kind: 'not_merged_by_engine',
+                  text: '#7 不是「引擎」机器人合的（合并人 founder）',
+                },
+              ],
+            };
+          },
+        }),
+      }),
+    );
+    expect(seen.map((s) => s.repo)).toEqual(['acme/widgets']);
+    expect(now.getTime() - (seen[0]?.since.getTime() ?? 0)).toBe(MERGED_PR_LOOKBACK_MS);
+    expect(first).toMatchObject({ outcome: 'ok', found: 2 });
+    const row = await alertByKey(t.db, 'reconcile:pr:acme/widgets#7');
+    expect(row).toMatchObject({ level: 'alert', taskId: null, resolvedAt: null });
+    expect(row?.body).toContain('不是「引擎」');
+    expect(row?.body).not.toContain('已补');
+    expect(row?.link).toBe('https://github.com/acme/widgets/pull/7');
+
+    const again = await runHourlyReconcileJob(
+      deps({
+        now: () => now,
+        gh: ghWith({
+          async auditMergedPrs() {
+            return {
+              outcome: 'unscanned',
+              scanned: 0,
+              found: 0,
+              fixed: 0,
+              problems: [],
+              findings: [],
+              why: '列合并的 PR 失败：403',
+            };
+          },
+        }),
+      }),
+    );
+    expect(again.outcome).not.toBe('ok');
+    expect(again.why).toContain('acme/widgets：列合并的 PR 失败：403');
+    expect((await alertByKey(t.db, 'reconcile:pr:acme/widgets#7'))?.resolvedAt).toBeNull();
+  });
+
+  it('【故意造出的失败】合了的 PR 对上的单：会话没结局、单没记成做完，报 reconcile:ledger 写明缺什么；别的分支上的会话不算；补齐了撤掉', async () => {
+    await world(t.db);
+    probeDir();
+    const { repo, task } = await work('merging');
+    const merged = new Date(Date.now() - 2 * HOUR);
+    await t.db.insert(pullRequests).values({
+      repoId: repo.id,
+      number: 9,
+      state: 'merged',
+      headRef: 'fleet/160-abc',
+      headSha: 'a'.repeat(40),
+      updatedAt: merged,
+    });
+    const [run] = await t.db
+      .insert(sessionRuns)
+      .values({
+        taskId: task.id,
+        stage: 'execute',
+        routeId: 'solo',
+        whyRoute: '写码阶段首选',
+        branch: 'fleet/160-abc',
+        queuedAt: new Date(Date.now() - 5 * HOUR),
+        startedAt: new Date(Date.now() - 5 * HOUR),
+      })
+      .returning();
+    if (!run) throw new Error('run 没写进去');
+    // 更早一轮（被强行终止、会话没收，#247）在另一条分支上：不算进这条 PR 的账
+    await t.db.insert(sessionRuns).values({
+      taskId: task.id,
+      stage: 'execute',
+      routeId: 'solo',
+      whyRoute: '写码阶段首选',
+      branch: 'fleet/160-old',
+      queuedAt: new Date(Date.now() - 9 * HOUR),
+      startedAt: new Date(Date.now() - 9 * HOUR),
+    });
+    const first = await runHourlyReconcileJob(deps());
+    expect(first).toMatchObject({ outcome: 'ok', found: 1 });
+    const row = await alertByKey(t.db, 'reconcile:ledger:acme/widgets#9');
+    expect(row).toMatchObject({ level: 'alert', taskId: task.id, resolvedAt: null });
+    expect(row?.body).toContain('单 #160：1 次会话没有结局（execute）');
+    expect(row?.body).toContain('单 #160：合并关单那一步没写完：库里这张单是「在合并」');
+    expect(row?.link).toBe('https://github.com/acme/widgets/pull/9');
+
+    await sql(
+      `update session_runs set ended_at = now(), outcome = 'ok', input_tokens = 10, output_tokens = 5 where id = $1`,
+      [run.id],
+    );
+    await sql(`update tasks set state = 'done' where id = $1`, [task.id]);
+    await runHourlyReconcileJob(deps());
+    expect((await alertByKey(t.db, 'reconcile:ledger:acme/widgets#9'))?.body).toMatch(
+      /^已撤：会话结局、用量、关单都记齐了/,
+    );
   });
 });
 

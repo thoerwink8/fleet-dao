@@ -2,7 +2,8 @@
 // - 重投：GitHub 不自动重投失败的投递。用 App 身份拉投递日志，同一次投递（guid）一次都没成功、后端库里也没有原文的就重投
 //   （重投时编号不变，后端去重认得出）；库里有原文的由后端按原文重放，不再叫 GitHub 重投。
 // - 轮询：按 updated_at 拉 issue、评论、PR，逐条交给后端的同一道门（白名单、去重），漏收的事件这样补回来。
-// - 核对：白名单作者开的开放 issue 都有工作流；合并的 PR 都记在镜像里、都是「引擎」机器人合的（C21/C22）。
+// - 核对：白名单作者开的开放 issue 都有工作流；合并的 PR 都记在镜像里。我们两个机器人开的 PR 还要是「引擎」机器人合的、
+//   账上有合并队列的合并记录（C21/C22）。人开的不查这两项：帅位本机开、GitHub 自动合并，没有合并队列这一步。
 // 每一项都分清「查了、0 个问题」和「这次没查成」：读不到 GitHub 就报 unscanned，不报 ok；做了一半报 partial，全没做成报 failed。
 import { z } from 'zod';
 import { enc, type Logger, parseRepoSlug, repoSlug } from './client.ts';
@@ -50,6 +51,23 @@ export interface AuditReport {
   fixed: number;
   problems: string[];
   why?: string | undefined;
+}
+
+/** 合了的 PR 对账查出来的一条：哪条 PR、哪一种（调用方按 kind 分，不去认 text 里的字）。 */
+export interface MergedPrFinding {
+  number: number;
+  /**
+   * mirror_fixed：镜像没记成已合并，已经补上（人开的、机器人开的都补）；not_merged_by_engine：我们机器人开的，合并人却不是
+   * 「引擎」（C22）；no_merge_record：我们机器人开的，账上却没有合并队列的合并记录（C21）；unchecked：这一条没查成。
+   */
+  kind: 'mirror_fixed' | 'not_merged_by_engine' | 'no_merge_record' | 'unchecked';
+  /** 给人看的一句，也原样进 problems。 */
+  text: string;
+}
+
+/** 合了的 PR 对账的结果：problems 是 findings 的 text 按顺序排下来。 */
+export interface MergedPrAuditReport extends AuditReport {
+  findings: MergedPrFinding[];
 }
 
 export interface ReconcilerOptions {
@@ -109,7 +127,7 @@ export interface Reconciler {
   redeliverFailed(since: Date): Promise<ReconcileReport>;
   poll(repoFullName: string, since: Date): Promise<ReconcileReport>;
   auditOpenIssues(repoFullName: string): Promise<AuditReport>;
-  auditMergedPrs(repoFullName: string, since: Date): Promise<AuditReport>;
+  auditMergedPrs(repoFullName: string, since: Date): Promise<MergedPrAuditReport>;
 }
 
 export function createReconciler(deps: Deps, options: ReconcilerOptions): Reconciler {
@@ -355,85 +373,107 @@ export function createReconciler(deps: Deps, options: ReconcilerOptions): Reconc
       };
     },
 
-    async auditMergedPrs(repoFullName, since) {
-      const repo = parseRepoSlug(repoFullName);
-      const slug = repoSlug(repo);
-      const repoId = await ledger.repoId(repo);
-      if (!repoId)
-        return {
-          outcome: 'unscanned',
-          scanned: 0,
-          found: 0,
-          fixed: 0,
-          problems: [],
-          why: `${slug} 不归本系统管`,
-        };
-      const problems: string[] = [];
-      let scanned = 0;
-      let found = 0;
-      let fixed = 0;
-      let failures = 0;
-      try {
-        outer: for await (const page of client.pages({
-          method: 'GET',
-          path: `/repos/${enc(repo.owner)}/${enc(repo.name)}/pulls`,
-          auth: { as: 'engine', repo },
-          query: { state: 'closed', sort: 'updated', direction: 'desc', per_page: 100 },
-        })) {
-          for (const item of z.array(PullItem).parse(page.data)) {
-            if (Date.parse(item.updated_at) < since.getTime()) break outer;
-            if (!item.merged_at) continue;
-            scanned += 1;
-            try {
-              const mirror = await ledger.getPullRequest(repoId, item.number);
-              if (mirror?.state !== 'merged') {
-                found += 1;
-                await ledger.upsertPullRequest({
-                  repoId,
-                  number: item.number,
-                  state: 'merged',
-                  headRef: item.head.ref,
-                  headSha: item.head.sha,
-                  updatedAt: new Date(item.updated_at),
-                });
-                fixed += 1;
-                problems.push(
-                  `#${item.number} 合并了但镜像里${mirror ? `记的是 ${mirror.state}` : '没有'}（已补）`,
-                );
-              }
-              // 合并人只有单张读才有
-              const pr = await readPull(deps, repo, item.number, 'engine');
-              if (!deps.bots.is('engine', pr.merged_by ?? null)) {
-                found += 1;
-                problems.push(
-                  `#${item.number} 不是「引擎」机器人合的（合并人 ${pr.merged_by?.login ?? '读不到'}）`,
-                );
-              }
-              // 合并队列合的每一张都在幂等账里留了合并记录（C21）
-              const record = await ledger.idempotency.peek(mergeKey(repo, item.number, pr.head.sha));
-              if (!record?.completedAt) {
-                found += 1;
-                problems.push(`#${item.number} 合并了，但账上没有合并队列的合并记录`);
-              }
-            } catch (err) {
-              failures += 1;
-              problems.push(`#${item.number} 没查成：${why(err)}`);
-            }
-          }
-        }
-      } catch (err) {
-        return {
-          outcome: 'unscanned',
-          scanned,
-          found,
-          fixed,
-          problems,
-          why: `列合并的 PR 失败：${why(err)}`,
-        };
-      }
-      if (found > 0)
-        log.warn('合并的 PR 对账有问题', { repo: slug, found, problems: problems.slice(0, 5).join('；') });
-      return { outcome: failures > 0 ? 'partial' : 'ok', scanned, found, fixed, problems };
-    },
+    auditMergedPrs: (repoFullName, since) => auditMergedPrs(deps, repoFullName, since),
   };
+}
+
+/**
+ * 一段时间里合了的 PR：镜像没记成已合并的都补上（人开的、机器人开的一样，补镜像是安全的）。
+ * 合并人必须是「引擎」、账上必须有合并队列的合并记录：只查我们两个机器人开的 PR。人开的没有合并队列这一步，
+ * 查了会把帅位本机开的、GitHub 自动合并的每一张都报出来。
+ */
+export async function auditMergedPrs(
+  deps: Deps,
+  repoFullName: string,
+  since: Date,
+): Promise<MergedPrAuditReport> {
+  const { client, ledger } = deps;
+  const log: Logger = deps.log;
+  const why = (err: unknown) => (err instanceof Error ? err.message : String(err));
+  const repo = parseRepoSlug(repoFullName);
+  const slug = repoSlug(repo);
+  const repoId = await ledger.repoId(repo);
+  if (!repoId) {
+    return {
+      outcome: 'unscanned',
+      scanned: 0,
+      found: 0,
+      fixed: 0,
+      problems: [],
+      findings: [],
+      why: `${slug} 不归本系统管`,
+    };
+  }
+  const findings: MergedPrFinding[] = [];
+  const note = (number: number, kind: MergedPrFinding['kind'], text: string) =>
+    findings.push({ number, kind, text: `#${number} ${text}` });
+  let scanned = 0;
+  const report = (): Omit<MergedPrAuditReport, 'outcome' | 'why'> => ({
+    scanned,
+    found: findings.filter((f) => f.kind !== 'unchecked').length,
+    fixed: findings.filter((f) => f.kind === 'mirror_fixed').length,
+    problems: findings.map((f) => f.text),
+    findings,
+  });
+  try {
+    outer: for await (const page of client.pages({
+      method: 'GET',
+      path: `/repos/${enc(repo.owner)}/${enc(repo.name)}/pulls`,
+      auth: { as: 'engine', repo },
+      query: { state: 'closed', sort: 'updated', direction: 'desc', per_page: 100 },
+    })) {
+      for (const item of z.array(PullItem).parse(page.data)) {
+        if (Date.parse(item.updated_at) < since.getTime()) break outer;
+        if (!item.merged_at) continue;
+        scanned += 1;
+        try {
+          const mirror = await ledger.getPullRequest(repoId, item.number);
+          if (mirror?.state !== 'merged') {
+            await ledger.upsertPullRequest({
+              repoId,
+              number: item.number,
+              state: 'merged',
+              headRef: item.head.ref,
+              headSha: item.head.sha,
+              updatedAt: new Date(item.updated_at),
+            });
+            note(
+              item.number,
+              'mirror_fixed',
+              `合并了但镜像里${mirror ? `记的是 ${mirror.state}` : '没有'}（已补）`,
+            );
+          }
+          const openedByUs = deps.bots.is('engine', item.user) || deps.bots.is('agent', item.user);
+          if (!openedByUs) continue;
+          // 合并人只有单张读才有
+          const pr = await readPull(deps, repo, item.number, 'engine');
+          if (!deps.bots.is('engine', pr.merged_by ?? null)) {
+            note(
+              item.number,
+              'not_merged_by_engine',
+              `不是「引擎」机器人合的（合并人 ${pr.merged_by?.login ?? '读不到'}）`,
+            );
+          }
+          // 合并队列合的每一张都在幂等账里留了合并记录（C21）
+          const record = await ledger.idempotency.peek(mergeKey(repo, item.number, pr.head.sha));
+          if (!record?.completedAt) {
+            note(item.number, 'no_merge_record', '合并了，但账上没有合并队列的合并记录');
+          }
+        } catch (err) {
+          note(item.number, 'unchecked', `没查成：${why(err)}`);
+        }
+      }
+    }
+  } catch (err) {
+    return { outcome: 'unscanned', ...report(), why: `列合并的 PR 失败：${why(err)}` };
+  }
+  const result = report();
+  if (result.found > 0) {
+    log.warn('合并的 PR 对账有问题', {
+      repo: slug,
+      found: result.found,
+      problems: result.problems.slice(0, 5).join('；'),
+    });
+  }
+  return { outcome: findings.some((f) => f.kind === 'unchecked') ? 'partial' : 'ok', ...result };
 }

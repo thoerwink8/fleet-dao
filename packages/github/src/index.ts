@@ -163,6 +163,8 @@ export {
   type AuditReport,
   createReconciler,
   type Intake,
+  type MergedPrAuditReport,
+  type MergedPrFinding,
   type ReconcileReport,
   type Reconciler,
   type ReconcilerOptions,
