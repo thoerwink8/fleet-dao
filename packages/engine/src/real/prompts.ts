@@ -149,7 +149,8 @@ function answersBlock(brief: SessionBrief): string {
 
 const RULES = `## 规矩
 - 当前目录是这个仓的一份副本。只在本地干活：不 push、不开 PR、不改 git 远端——推分支、开 PR 由引擎在外面做，这里也没有任何 GitHub 凭据。
-- 没人盯着屏幕。报进度用 \`fleet plan\`（步骤清单，每推进一步整张重报）和 \`fleet say\`（一句白话）；要创始人拍板用 \`fleet ask\`；卡住、缺权限、缺信息用 \`fleet blocked\`。\`fleet --help\` 看用法。
+- 没人盯着屏幕。报进度用 \`fleet plan\`（步骤清单，每推进一步整张重报）和 \`fleet say\`（一句白话）；卡住、缺权限用 \`fleet blocked\`。\`fleet --help\` 看用法。
+- 要创始人拍板用 \`fleet ask "<问题>" -o <甲> -o <乙> -r <推荐的>\`：一定带选项和推荐。他多半不在场，命令当场返回、不等回答——按推荐接着干，交活总结里写上按推荐先做了什么；他之后改了，下一个存档点会告诉你。超出这张单范围的加 \`--outside\`（另开一张单，这里绕开它接着做）；碰对外发布、花钱、删数据、改标准的加 \`--hold release|spend|delete|standard\`（也先按推荐做，合并前等他批）。只有他本人才有的东西（账号、权限、登录）用 \`fleet blocked "<缺什么>" --needs access\`。
 - 不编造：没查成就写没查成。公开仓：密钥、账号、组织编号、邮箱、IP 一律不写进仓。`;
 
 function taskBlock(input: PromptInput): string {
@@ -234,7 +235,7 @@ function codeBlock(input: PromptInput): string {
 在当前目录（分支 ${brief.branch ?? '（没给）'}）上把活干完：改代码、补测试，${tests}主线在 origin/${repo.defaultBranch}。
 - 改动用 git commit 提交在本地（可以多次提交）；交活前工作区里不能有没提交的已跟踪改动。
 - 做完标准都满足了再交：\`fleet done "<一两句总结：做了什么>" --tests passed\`（测试没过就写 --tests failed，并在总结里说清）。后端会核实，没核实过会退回。
-- 做不下去就 \`fleet blocked "<卡在哪>" --needs human|info|access|other\`，别硬交。`;
+- 做不下去就 \`fleet blocked "<卡在哪>" --needs human|info|access|other\`，别硬交；要他在几个做法里挑一个的不算卡住，用 \`fleet ask\` 带推荐、按推荐接着做。`;
 }
 
 /** 任务简报的形状（core 的 BriefSchema）：Lead 写给副手的，提示词里照这个给例子。 */

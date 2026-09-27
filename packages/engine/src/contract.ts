@@ -461,9 +461,18 @@ export const rejectSignal = defineSignal<[ApprovalCommand]>('reject');
 export const requireApprovalSignal = defineSignal<[RequireApprovalCommand]>('requireApproval');
 
 /** 驾驶舱后端现在会发的信号名全集（和 TaskSignal['name'] 对得上，contract.test.ts 编译期对拍）。 */
-export const TASK_SIGNAL_NAMES = ['pause', 'resume', 'stop', 'reroute', 'answer', 'agentEvent'] as const;
+export const TASK_SIGNAL_NAMES = [
+  'pause',
+  'resume',
+  'stop',
+  'reroute',
+  'answer',
+  'agentEvent',
+  // 会话问创始人时碰了人闸（#259），后端给工作流加人闸
+  'requireApproval',
+] as const;
 /** 引擎已经收、后端还没发的信号（人闸）。后端加进 TaskSignal 后挪进上面那张表——contract.test.ts 编译期会提醒。 */
-export const NEW_TASK_SIGNAL_NAMES = ['approve', 'reject', 'requireApproval'] as const;
+export const NEW_TASK_SIGNAL_NAMES = ['approve', 'reject'] as const;
 
 // ---- 引擎内部信号
 

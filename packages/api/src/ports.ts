@@ -1,7 +1,7 @@
 // 后端依赖的外部能力，一律按接口写：数据库（pg-store.ts 用 @fleet-dao/db 实现）、Temporal、飞书、GitHub 补收
 // 由各自的实现接进来；测试和本地开发用 memory-store.ts。两个 Store 实现过同一套契约测试（test/store-contract.ts），
 // 改这里的语义要两边一起改、契约测试跟着改。
-import type { FlowReplica } from '@fleet-dao/core';
+import type { AskHold, AskScope, FlowReplica } from '@fleet-dao/core';
 import type {
   AuditEntrySchema,
   Ban,
@@ -113,11 +113,23 @@ export interface AskRecord {
   taskId: string;
   runId?: string | undefined;
   question: string;
+  /** 带了推荐的，推荐的排第一个。 */
   options: string[];
   askedAt: string;
   answer?: string | undefined;
   answeredBy?: string | undefined;
   answeredAt?: string | undefined;
+  /**
+   * 问他不挡路（#259，core 的 ask.ts）：task = 这张单范围内的岔路，按推荐先做；outside = 超出范围，另开单等他拍；
+   * hold = 碰了人闸，先按推荐做、合并前等批。没有 = 引擎自己等人的（只有他本人才有的东西），或这之前的老提问。
+   */
+  scope?: AskScope | undefined;
+  recommended?: string | undefined;
+  hold?: AskHold | undefined;
+  /** 另开的单（超出范围的那张，或改选了别的、原单已经合了开的后续单）。 */
+  followUpIssue?: number | undefined;
+  /** 他改选了别的，引擎交给主导照改的时刻。 */
+  appliedAt?: string | undefined;
 }
 
 /** 时间线上的一条原始记录；后端按 kind 和 payload 拼白话（views.ts 的 describeTimeline）。 */
@@ -373,7 +385,11 @@ export interface AgentStore {
     runId: string;
     taskId: string;
     question: string;
+    /** 推荐的排第一个（core 的 checkAsk 排好了）。 */
     options: string[];
+    scope: AskScope;
+    recommended: string;
+    hold?: AskHold | undefined;
   }): Promise<{ ask: AskRecord; created: boolean }>;
   /** 空格分开的每个词都要在标题、原话、需求目录、摘要、结果摘要或改动位置里出现；只找有需求文档索引的需求。 */
   searchHistory(input: { repoId: string; query: string; limit: number }): Promise<HistoryItem[]>;
@@ -870,6 +886,14 @@ export type TaskSignal =
       reason?: string | undefined;
     }
   | { name: 'answer'; by: string; askId: string; answer: string }
+  /** 加人闸（合并前等人批）：会话问创始人时碰了人闸四类（#259）。不点名子任务就是整个需求。 */
+  | {
+      name: 'requireApproval';
+      by: string;
+      holds: string[];
+      subtaskId?: string | undefined;
+      reason?: string | undefined;
+    }
   /** fleet 命令写库之后叫醒工作流（按进展判死活要用）。 */
   | {
       name: 'agentEvent';

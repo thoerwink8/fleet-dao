@@ -365,6 +365,22 @@ export const AskSchema = z.object({
   answer: z.string().optional(),
   answeredBy: z.string().optional(),
   answeredAt: Time.optional(),
+  /**
+   * 问他不挡路（#259）：task = 这张单范围内的岔路，已按推荐先做；outside = 超出范围，另开单等他拍；
+   * hold = 碰了人闸，先按推荐做、合并前等批。没有 = 老式的（会话停着等回答）。
+   */
+  scope: z.enum(['task', 'outside', 'hold']).optional(),
+  /** 推荐的那个（选项里排第一个）。 */
+  recommended: z.string().optional(),
+  /** scope = hold 时碰的是哪类：release 对外发布、spend 花钱、delete 删数据、standard 改标准。 */
+  hold: z.enum(['release', 'spend', 'delete', 'standard']).optional(),
+  /**
+   * 按推荐先做了的、回答了之后会怎样（core 的 lateAnswer）：confirmed 选的就是推荐的；applied 已照改；
+   * change 下个存档点改；follow-up 这张单已合，开后续单；recorded 这张单没做成就停了，只记下。
+   */
+  effect: z.enum(['confirmed', 'applied', 'change', 'follow-up', 'recorded']).optional(),
+  /** 为这条提问另开的单（超出范围的，或合并后才改的后续单）。 */
+  followUpIssue: z.number().int().positive().optional(),
 });
 
 export const TaskDetailResponse = z.object({

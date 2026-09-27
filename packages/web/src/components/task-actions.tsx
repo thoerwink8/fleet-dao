@@ -451,6 +451,11 @@ function AnswerDialog({ target, onClose }: { target: ActionTarget | null; onClos
                       onClick={() => submit(ask.id, o)}
                     >
                       {o}
+                      {o === ask.recommended ? (
+                        <span className="ml-auto text-xs text-muted-foreground">
+                          {ask.scope === 'outside' ? '推荐' : '推荐 · AI 已按它先做'}
+                        </span>
+                      ) : null}
                     </Button>
                   ))}
                 </div>

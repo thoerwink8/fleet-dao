@@ -16,7 +16,18 @@ import {
 } from '../src/queries/engine.ts';
 import { asks, notifications, progressEvents } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
-import { addRepo, addRoute, addRun, addTask, ago, catalog, later, MIN, NOW } from './helpers.ts';
+import {
+  addRepo,
+  addRoute,
+  addRun,
+  addTask,
+  ago,
+  catalog,
+  expectViolation,
+  later,
+  MIN,
+  NOW,
+} from './helpers.ts';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -417,6 +428,85 @@ describe('runProgressFacts', () => {
     expect(facts?.pendingAsk?.question).toBe('先问的');
     expect(facts?.done).toMatchObject({ at: ago(20 * MIN), summary: '写完了', testsPassed: true });
     expect(facts?.blocked).toMatchObject({ at: ago(10 * MIN), reason: '缺凭据', needs: 'access' });
+  });
+
+  it('【故意造出的失败】带了范围的提问（#259，问完当场按推荐接着干）不算会话在等人：不然真停滞会被当成「在等人」放过', async () => {
+    const { task, run } = await fixtures();
+    await t.db.insert(asks).values([
+      {
+        taskId: task.id,
+        runId: run.id,
+        question: '按推荐先做的',
+        options: ['甲', '乙'],
+        scope: 'task',
+        recommended: '甲',
+        askedAt: ago(30 * MIN),
+      },
+      {
+        taskId: task.id,
+        runId: run.id,
+        question: '碰了人闸的',
+        options: ['甲', '乙'],
+        scope: 'hold',
+        recommended: '甲',
+        hold: 'spend',
+        askedAt: ago(20 * MIN),
+      },
+    ]);
+    expect((await runProgressFacts(t.db, run.id))?.pendingAsk).toBeNull();
+    // 老式的（没带范围、会话真在等）照旧算
+    await t.db
+      .insert(asks)
+      .values({ taskId: task.id, runId: run.id, question: '老式的', askedAt: ago(10 * MIN) });
+    expect((await runProgressFacts(t.db, run.id))?.pendingAsk?.question).toBe('老式的');
+  });
+
+  it('【故意造出的失败】提问的范围、推荐、人闸、后续单、生效时间：库里的约束拦下不成形的', async () => {
+    const { task, run } = await fixtures();
+    const base = { taskId: task.id, runId: run.id, options: ['甲', '乙'], askedAt: ago(MIN) };
+    const bad: [typeof asks.$inferInsert, string][] = [
+      [{ ...base, question: '范围认不出', scope: 'maybe' as never, recommended: '甲' }, 'asks_scope_known'],
+      [{ ...base, question: '有范围没推荐', scope: 'task' }, 'asks_scoped_recommendation'],
+      [
+        { ...base, question: '推荐不在选项里', scope: 'task', recommended: '丙' },
+        'asks_scoped_recommendation',
+      ],
+      [{ ...base, question: '人闸没说哪类', scope: 'hold', recommended: '甲' }, 'asks_hold_shape'],
+      [
+        { ...base, question: '不是人闸却带人闸', scope: 'task', recommended: '甲', hold: 'spend' },
+        'asks_hold_shape',
+      ],
+      [
+        { ...base, question: '人闸认不出', scope: 'hold', recommended: '甲', hold: 'secret' as never },
+        'asks_hold_known',
+      ],
+      [
+        { ...base, question: '没回答就生效', scope: 'task', recommended: '甲', appliedAt: ago(0) },
+        'asks_applied_answered',
+      ],
+      [
+        { ...base, question: '后续单号不对', scope: 'task', recommended: '甲', followUpIssue: 0 },
+        'asks_follow_up_positive',
+      ],
+    ];
+    for (const [row, constraint] of bad) await expectViolation(t.db.insert(asks).values(row), constraint);
+    // 合格的写得进：老式的（全空）、按推荐先做的、碰人闸的、回答后生效并开了后续单的
+    await t.db.insert(asks).values([
+      { ...base, question: '老式的' },
+      { ...base, question: '范围内', scope: 'task', recommended: '甲' },
+      { ...base, question: '人闸', scope: 'hold', recommended: '乙', hold: 'standard' },
+      {
+        ...base,
+        question: '晚到的回答',
+        scope: 'task',
+        recommended: '甲',
+        answer: '乙',
+        answeredBy: 'founder',
+        answeredAt: ago(0),
+        appliedAt: ago(0),
+        followUpIssue: 12,
+      },
+    ]);
   });
 
   it("done 事件的 summary / testsPassed 认不出格式时给 '' / null，但原始 payload 照样带出去", async () => {

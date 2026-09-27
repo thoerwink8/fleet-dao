@@ -123,3 +123,4 @@ export {
   runPrLabels,
 } from './pr-labels.ts';
 export { fsRepo, type RepoView } from './repo.ts';
+export { ENGINE_SESSION_MARKER, REFUSED_FULL_RUN } from './test-changed.ts';

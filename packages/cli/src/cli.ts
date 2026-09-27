@@ -2,6 +2,7 @@
 import { type ParseArgsOptionsConfig, parseArgs } from 'node:util';
 import {
   AgentRoutes,
+  ASK_MAX_OPTIONS,
   AskRequest,
   AskResponse,
   BlockedRequest,
@@ -18,12 +19,6 @@ import { COMMAND_HELP, MAIN_HELP } from './help.ts';
 
 z.config(z.locales.zhCN());
 
-/**
- * 等回答的 ask 最多等这么久：要长于后端等回答的上限（否则后端回 pending 之前这边先超时），
- * 又要短于会话里单条命令的超时（否则命令先被执行体杀掉，AI 只看到超时）。后一条有测试钉着。
- */
-export const ASK_WAIT_MS = 6 * 60_000;
-
 export interface CliIo {
   env: Readonly<Record<string, string | undefined>>;
   stdout: (text: string) => void;
@@ -31,7 +26,7 @@ export interface CliIo {
   fetch: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
   /** 测试用：缩短超时和重试间隔。 */
-  timing?: { requestMs?: number; askMs?: number; retryDelaysMs?: readonly number[] };
+  timing?: { requestMs?: number; retryDelaysMs?: readonly number[] };
 }
 
 type Step = z.infer<typeof PlanRequest>['steps'][number];
@@ -103,7 +98,9 @@ function connect(io: CliIo): (call: BackendCall) => Promise<unknown> {
 interface Options {
   json?: boolean;
   option?: string[];
-  'no-wait'?: boolean;
+  recommend?: string;
+  outside?: boolean;
+  hold?: string;
   limit?: string;
   tests?: string;
   needs?: string;
@@ -233,29 +230,44 @@ const COMMANDS: Record<string, Handler> = {
   async ask(args, { io, call }) {
     const { values, positionals } = parse(args, {
       option: { type: 'string', short: 'o', multiple: true },
-      'no-wait': { type: 'boolean' },
+      recommend: { type: 'string', short: 'r' },
+      outside: { type: 'boolean' },
+      hold: { type: 'string' },
     });
     const options = values.option;
-    const blocking = !values['no-wait'];
+    if (options && options.length > ASK_MAX_OPTIONS) {
+      throw new CliError(
+        EXIT.usage,
+        `选项最多 ${ASK_MAX_OPTIONS} 个（现在 ${options.length} 个）：挑出最像样的几个`,
+      );
+    }
     const body = check(AskRequest, {
       question: joined(positionals, '问题'),
       ...(options?.length ? { options } : {}),
-      blocking,
+      ...(values.recommend === undefined ? {} : { recommend: values.recommend }),
+      ...(values.outside ? { outside: true } : {}),
+      ...(values.hold === undefined ? {} : { hold: values.hold }),
     });
-    const raw = await call({
-      method: 'POST',
-      path: AgentRoutes.ask.path,
-      body,
-      ...(blocking ? { timeoutMs: io.timing?.askMs ?? ASK_WAIT_MS, retryOnTimeout: false } : {}),
-    });
+    // 不等回答：后端当场回（按推荐先做、另开单、合并前等批），同一句重试复用同一条追问
+    const raw = await call({ method: 'POST', path: AgentRoutes.ask.path, body });
     const res = expectShape(AskResponse, raw, '回答');
     if (values.json) return printJson(io, res);
-    if (res.status === 'answered') {
-      io.stdout(`回答：${res.answer ?? ''}\n`);
-    } else if (blocking) {
-      io.stdout(`还没人回答（问题编号 ${res.askId}）。先按你写明的假设继续，交活时在总结里注明。\n`);
-    } else {
-      io.stdout(`已发出（问题编号 ${res.askId}），不等回答。\n`);
+    const id = `（问题编号 ${res.askId}）`;
+    switch (res.status) {
+      case 'answered':
+        io.stdout(`创始人回过这一句：${res.answer ?? ''}\n`);
+        return;
+      case 'assumed':
+        io.stdout(
+          `已按推荐先做：${res.answer ?? ''}${id}。别停下等回答；创始人之后改了，下一个存档点会告诉你。交活总结里写上这个假设。\n`,
+        );
+        return;
+      case 'outside':
+        io.stdout(`超出这张单的范围：记下了，另开一张单等创始人拍${id}。这张单绕开它接着做。\n`);
+        return;
+      case 'held':
+        io.stdout(`碰了人闸：先按推荐做（${res.answer ?? ''}），合并前等创始人批${id}。接着做。\n`);
+        return;
     }
   },
 

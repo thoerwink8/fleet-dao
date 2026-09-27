@@ -231,6 +231,16 @@ export function createSeed(now: number): MockState {
           answeredBy: 'u-lan',
           answeredAt: at(-184),
         },
+        {
+          // 问他不挡路（#259）：这张单范围内的岔路，AI 按推荐先做了，他回不回都不挡
+          id: 'ask-12-2',
+          taskId: 't-12',
+          question: '验证码短信的模板用通用模板还是单独报备一个？单独报备要等一两天审核。',
+          options: ['先用通用模板', '单独报备'],
+          askedAt: at(-120),
+          scope: 'task',
+          recommended: '先用通用模板',
+        },
       ],
       subtasks: [
         sub({

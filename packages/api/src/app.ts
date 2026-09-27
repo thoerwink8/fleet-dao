@@ -7,7 +7,6 @@ import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { agentRoutes } from './agent.ts';
 import { authRoutes } from './auth.ts';
-import { createAskWaiters } from './changes.ts';
 import { cockpitRoutes } from './cockpit.ts';
 import type { Deps } from './deps.ts';
 import { createDraftOpenRunner, type DraftOpenLimits, type DraftOpenRunner } from './draft-opening.ts';
@@ -40,7 +39,6 @@ export interface BuildOptions {
 }
 
 export function buildApps(deps: Deps, options: BuildOptions = {}): Apps {
-  const waiters = createAskWaiters(deps.changes);
   const relay = createSseRelay(deps.changes);
   const draftOpening = createDraftOpenRunner({
     store: deps.store,
@@ -58,15 +56,15 @@ export function buildApps(deps: Deps, options: BuildOptions = {}): Apps {
   cockpit.use(`${AUTH_PREFIX}/*`, jsonLimit);
   cockpit.route(AUTH_PREFIX, authRoutes(deps));
   // 飞书接口挂在驾驶舱接口前面：它们只认网关通行证、按各自的 acting 放行，不走驾驶舱的登录门。
-  cockpit.route(WEB_API_PREFIX, feishuRoutes(deps, waiters, draftOpening));
-  cockpit.route(WEB_API_PREFIX, cockpitRoutes(deps, waiters, relay));
+  cockpit.route(WEB_API_PREFIX, feishuRoutes(deps, draftOpening));
+  cockpit.route(WEB_API_PREFIX, cockpitRoutes(deps, relay));
   cockpit.route('/github', githubRoutes(deps, createGitHubIntake(deps)));
 
   const agent = new Hono();
   agent.onError(errorHandler(deps.log));
   agent.notFound(notFound);
   agent.use(`${AGENT_API_PREFIX}/*`, jsonLimit);
-  agent.route(AGENT_API_PREFIX, agentRoutes(deps, waiters));
+  agent.route(AGENT_API_PREFIX, agentRoutes(deps));
 
   return { cockpit, agent, relay, draftOpening };
 }

@@ -8,9 +8,7 @@ export {
 } from './agent-token.ts';
 export { type Apps, type BuildOptions, buildApps } from './app.ts';
 export {
-  type AskWaiters,
   type ChangeHub,
-  createAskWaiters,
   createChangeHub,
   type PgChangeFeed,
   type PgNotify,

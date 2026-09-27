@@ -211,6 +211,11 @@ function toAsk(r: AskRow): AskRecord {
     answer: opt(r.answer),
     answeredBy: opt(r.answeredBy),
     answeredAt: isoOpt(r.answeredAt),
+    scope: opt(r.scope),
+    recommended: opt(r.recommended),
+    hold: opt(r.hold),
+    followUpIssue: opt(r.followUpIssue),
+    appliedAt: isoOpt(r.appliedAt),
   };
 }
 
@@ -1047,12 +1052,21 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
     async appendProgress(runId, kind, payload) {
       await insertProgress(runId, kind, payload);
     },
-    async openAsk({ runId, taskId, question, options: choices }) {
+    async openAsk({ runId, taskId, question, options: choices, scope, recommended, hold }) {
       return db.transaction(async (tx) => {
         // 表上唯一的冲突来源是 (run_id, md5(question)) 这条唯一索引（主键是随机 uuid），所以不写冲突目标。
         const [inserted] = await tx
           .insert(asks)
-          .values({ taskId, runId, question, options: choices, askedAt: now() })
+          .values({
+            taskId,
+            runId,
+            question,
+            options: choices,
+            askedAt: now(),
+            scope,
+            recommended,
+            ...(hold ? { hold } : {}),
+          })
           .onConflictDoNothing()
           .returning();
         if (inserted) {

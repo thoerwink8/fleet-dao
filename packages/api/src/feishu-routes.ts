@@ -28,7 +28,6 @@ import {
 import { type Context, Hono, type MiddlewareHandler } from 'hono';
 import { z } from 'zod';
 import { answerAsk } from './answer-ask.ts';
-import type { AskWaiters } from './changes.ts';
 import type { Deps } from './deps.ts';
 import type { DraftOpenRunner } from './draft-opening.ts';
 import { textHash, wellFormed } from './feishu-records.ts';
@@ -67,7 +66,7 @@ const OUTBOX_BATCH = 100;
 const MessageIdParam = z.string().min(1).max(100);
 const TERMINAL = new Set(['done', 'stopped', 'failed']);
 
-export function feishuRoutes(deps: Deps, waiters: AskWaiters, opening: DraftOpenRunner): Hono<FeishuEnv> {
+export function feishuRoutes(deps: Deps, opening: DraftOpenRunner): Hono<FeishuEnv> {
   const { store, log } = deps;
   const app = new Hono<FeishuEnv>();
   const outboxWake = createOutboxWake(deps.changes);
@@ -258,7 +257,7 @@ export function feishuRoutes(deps: Deps, waiters: AskWaiters, opening: DraftOpen
   ): Promise<Response> {
     const ask = await store.getAsk(askId);
     const result = ask
-      ? await answerAsk(deps, waiters, {
+      ? await answerAsk(deps, {
           askId,
           taskId: ask.taskId,
           answer: text,
@@ -267,7 +266,12 @@ export function feishuRoutes(deps: Deps, waiters: AskWaiters, opening: DraftOpen
         })
       : 'not_found';
     let said: string = ANSWER_TEXTS.askRecorded;
-    if (result === 'already_answered') {
+    if (result === 'ok' && ask?.scope !== undefined) {
+      // 按推荐先做了的、另开单的（#259）：照这张单现在走到哪说清回答之后会怎样。
+      const task = await store.getTask(ask.taskId);
+      if (task) said = ANSWER_TEXTS.askRecordedScoped(ask, text, task.state);
+      else log.warn('回答已记下，但这条追问的需求读不到，回话没说会怎样生效', { askId, taskId: ask.taskId });
+    } else if (result === 'already_answered') {
       const now = await store.getAsk(askId);
       // 自己上一次已经答上了（上次的回应丢了、网关重试）：照样说「记下了」。
       if (!(now?.answeredBy === founder.id && now.answer === text)) {

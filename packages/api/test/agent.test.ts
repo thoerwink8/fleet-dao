@@ -8,6 +8,7 @@ import {
 } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import { AGENT_TOKEN_MAX_TTL_SECONDS, signAgentToken, verifyAgentToken } from '../src/agent-token.ts';
+import { type TaskSignal, WorkflowGoneError, WorkflowUnavailableError } from '../src/ports.ts';
 import { signPayload } from '../src/tokens.ts';
 import { agentRequest, DEV_RUN_ID, errorCode, harness, IDS, write } from './harness.ts';
 
@@ -271,7 +272,11 @@ describe('叫醒目标：只有 ask/done/blocked 才发信号，且发给会话�
     });
     const res = await h.agent.request(
       '/agent/v1/ask',
-      agentRequest(token, 'POST', { question: '要不要支持邮箱验证码？', blocking: false }),
+      agentRequest(token, 'POST', {
+        question: '要不要支持邮箱验证码？',
+        options: ['要', '不要'],
+        recommend: '不要',
+      }),
     );
     expect(res.status).toBe(200);
     expect(h.signals).toHaveLength(1);
@@ -323,8 +328,9 @@ describe('幂等键（插头重试同一条命令用同一个键）', () => {
       'done',
     ]);
 
-    const asked = [await post(h, 'ask', { question: '几位？', blocking: false }, 'key-ask')];
-    asked.push(await post(h, 'ask', { question: '几位？', blocking: false }, 'key-ask'));
+    const askBody = { question: '几位？', options: ['6 位', '4 位'], recommend: '6 位' };
+    const asked = [await post(h, 'ask', askBody, 'key-ask')];
+    asked.push(await post(h, 'ask', askBody, 'key-ask'));
     const [a, b] = await Promise.all(asked.map(async (r) => AskResponse.parse(await r.json())));
     expect(b?.askId).toBe(a?.askId);
     expect(h.store.data.asks).toHaveLength(1);
@@ -439,58 +445,132 @@ describe('幂等键（插头重试同一条命令用同一个键）', () => {
   });
 });
 
-describe('fleet ask', () => {
+describe('fleet ask：问他不挡路（#259）', () => {
   const ask = (h: ReturnType<typeof harness>, body: Record<string, unknown>) =>
     h.agent.request('/agent/v1/ask', agentRequest(h.agentToken(), 'POST', body));
+  const sms = { question: '用哪家短信？', options: ['腾讯云', '阿里云'], recommend: '阿里云' };
 
-  it('不阻塞：立刻返回 pending；同一句再问复用同一条，不重复开', async () => {
+  it('这张单范围内的岔路：当场回「已按推荐先做」，不等回答；推荐的排第一个落库；同一句再问复用同一条、只叫醒一次', async () => {
     const h = harness();
-    const first = AskResponse.parse(
-      await (await ask(h, { question: '验证码几位？', blocking: false })).json(),
-    );
-    expect(first.status).toBe('pending');
-    const again = AskResponse.parse(
-      await (await ask(h, { question: '验证码几位？', blocking: false })).json(),
-    );
-    expect(again.askId).toBe(first.askId);
+    const first = AskResponse.parse(await (await ask(h, sms)).json());
+    expect(first).toMatchObject({ status: 'assumed', answer: '阿里云' });
     expect(h.store.data.asks).toHaveLength(1);
-    expect(h.signals.filter((s) => s.signal.name === 'agentEvent')).toHaveLength(1);
+    expect(h.store.data.asks[0]).toMatchObject({
+      question: '用哪家短信？',
+      options: ['阿里云', '腾讯云'],
+      scope: 'task',
+      recommended: '阿里云',
+    });
+    const again = AskResponse.parse(await (await ask(h, sms)).json());
+    expect(again).toEqual(first);
+    expect(h.store.data.asks).toHaveLength(1);
+    expect(h.signals.map((s) => s.signal.name)).toEqual(['agentEvent']);
   });
 
-  it('阻塞：驾驶舱里有人回答，等着的命令当场拿到答案', async () => {
-    const h = harness({ config: { askWaitMs: 5_000 } });
+  it('超出这张单的范围：回 outside（另开单等他拍，这张单绕开接着做），不给工作流加人闸', async () => {
+    const h = harness();
+    const body = AskResponse.parse(
+      await (await ask(h, { ...sms, question: '注册页也要验证码吗？', outside: true })).json(),
+    );
+    expect(body.status).toBe('outside');
+    expect(body.answer).toBeUndefined();
+    expect(h.store.data.asks[0]).toMatchObject({ scope: 'outside', recommended: '阿里云' });
+    expect(h.signals.map((s) => s.signal.name)).toEqual(['agentEvent']);
+  });
+
+  it('碰了人闸：先按推荐做，给这张单的工作流加人闸（合并前等批）；重问同一句再加一次（工作流自己认「已经有了」）', async () => {
+    const h = harness();
+    const held = { ...sms, question: '短信要开按量付费，用哪家？', hold: 'spend' };
+    const body = AskResponse.parse(await (await ask(h, held)).json());
+    expect(body).toMatchObject({ status: 'held', answer: '阿里云' });
+    expect(h.store.data.asks[0]).toMatchObject({ scope: 'hold', hold: 'spend' });
+    const workflowId = requirementWorkflowId({ owner: 'example', name: 'canary' }, 12);
+    const holds = () => h.signals.filter((s) => s.signal.name === 'requireApproval');
+    expect(holds()).toHaveLength(1);
+    expect(holds()[0]).toMatchObject({
+      workflowId,
+      signal: { name: 'requireApproval', holds: ['spend'], by: `session:${DEV_RUN_ID}` },
+    });
+    await ask(h, held);
+    expect(holds()).toHaveLength(2);
+  });
+
+  it('【故意造出的失败】碰了人闸、引擎连不上：问题记下了，但明说人闸没加上（503），不回「合并前等批」装作拦住了；重试加上', async () => {
+    let down = true;
+    const signals: TaskSignal[] = [];
+    const h = harness({
+      workflows: {
+        async signal(_id, signal) {
+          if (down && signal.name === 'requireApproval')
+            throw new WorkflowUnavailableError('Temporal 连不上');
+          signals.push(signal);
+        },
+      },
+    });
+    const held = {
+      ...sms,
+      question: '要不要删掉旧表？',
+      options: ['删', '留着'],
+      recommend: '留着',
+      hold: 'delete',
+    };
+    const res = await ask(h, held);
+    expect(res.status).toBe(503);
+    expect(await errorCode(res)).toBe('hold_not_set');
+    expect(h.store.data.asks).toHaveLength(1);
+    down = false;
+    const retry = AskResponse.parse(await (await ask(h, held)).json());
+    expect(retry).toMatchObject({ status: 'held', answer: '留着' });
+    expect(signals.filter((s) => s.name === 'requireApproval')).toHaveLength(1);
+    expect(h.store.data.asks).toHaveLength(1);
+  });
+
+  it('碰了人闸、工作流已经结束（这张单不会再合并）：照常回 held，只记日志', async () => {
+    const h = harness({
+      workflows: {
+        async signal(id) {
+          throw new WorkflowGoneError(id);
+        },
+      },
+    });
+    const body = AskResponse.parse(await (await ask(h, { ...sms, hold: 'spend' })).json());
+    expect(body.status).toBe('held');
+  });
+
+  it('【故意造出的失败】没带选项、没带推荐、推荐不在选项里、选项太多、人闸认不出、既超范围又碰人闸：400 ask_incomplete，一条都不记', async () => {
+    const h = harness();
+    const bad: Record<string, unknown>[] = [
+      { question: '用哪家短信？' },
+      { question: '用哪家短信？', options: ['阿里云'], recommend: '阿里云' },
+      { question: '用哪家短信？', options: ['阿里云', '腾讯云'] },
+      { question: '用哪家短信？', options: ['阿里云', '腾讯云'], recommend: '华为云' },
+      { question: '用哪家短信？', options: ['甲', '乙', '丙', '丁', '戊'], recommend: '甲' },
+      { ...sms, hold: 'secret' },
+      { ...sms, hold: 'spend', outside: true },
+    ];
+    for (const body of bad) {
+      const res = await ask(h, body);
+      expect(res.status, JSON.stringify(body)).toBe(400);
+      expect(await errorCode(res)).toBe('ask_incomplete');
+    }
+    expect(h.store.data.asks).toHaveLength(0);
+    expect(h.signals).toHaveLength(0);
+  });
+
+  it('答过了的：再问同一句直接回答案（驾驶舱、飞书、issue 回的都算）', async () => {
+    const h = harness();
     const session = await h.login();
-    const pending = ask(h, { question: '验证码几位？' });
-    // 等追问落库后再回答。
-    for (let i = 0; i < 50 && h.store.data.asks.length === 0; i++) await new Promise((r) => setTimeout(r, 5));
-    const askId = h.store.data.asks[0]?.id ?? '';
+    const first = AskResponse.parse(await (await ask(h, sms)).json());
     const answered = await h.cockpit.request(
-      `/api/asks/${askId}/answer`,
-      write('POST', session, { answer: '6 位' }),
+      `/api/asks/${first.askId}/answer`,
+      write('POST', session, { answer: '腾讯云' }),
     );
     expect(answered.status).toBe(200);
-    const started = Date.now();
-    const body = AskResponse.parse(await (await pending).json());
-    expect(body).toEqual({ askId, status: 'answered', answer: '6 位' });
-    expect(Date.now() - started).toBeLessThan(2_000);
-  });
-
-  it('阻塞：别处（飞书、issue）写进库的回答，靠数据变化通知叫醒', async () => {
-    const h = harness({ config: { askWaitMs: 5_000 } });
-    const pending = ask(h, { question: '用哪家短信？' });
-    for (let i = 0; i < 50 && h.store.data.asks.length === 0; i++) await new Promise((r) => setTimeout(r, 5));
-    const record = h.store.data.asks[0];
-    if (!record) throw new Error('追问没落库');
-    record.answer = '先用阿里云';
-    h.changes.publish({ type: 'change', table: 'asks', id: record.id });
-    const body = AskResponse.parse(await (await pending).json());
-    expect(body.status).toBe('answered');
-  });
-
-  it('阻塞：等到上限还没人答，返回 pending', async () => {
-    const h = harness({ config: { askWaitMs: 50 } });
-    const body = AskResponse.parse(await (await ask(h, { question: '要不要发短信？' })).json());
-    expect(body.status).toBe('pending');
+    expect(AskResponse.parse(await (await ask(h, sms)).json())).toEqual({
+      askId: first.askId,
+      status: 'answered',
+      answer: '腾讯云',
+    });
   });
 });
 

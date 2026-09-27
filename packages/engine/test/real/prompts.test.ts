@@ -67,6 +67,11 @@ describe('提示词', () => {
     expect(text).toContain('fleet done');
     expect(text).toContain('fleet blocked');
     expect(text).toContain('不 push');
+    // 问他不挡路（#259）：提问一定带选项和推荐，按推荐接着干、不等
+    expect(text).toContain('-r <推荐的>');
+    expect(text).toContain('不等回答');
+    expect(text).toContain('--outside');
+    expect(text).toContain('--hold release|spend|delete|standard');
   });
 
   it('非写码阶段：结论写进 .fleet-out 下的文件，不用 fleet done', () => {
