@@ -259,6 +259,13 @@ const secretCases: SecretCase[] = [
   ['Bash', 'cat ~/.fleet-dao/vault-key.txt', 2],
   ['Bash', 'age -d -i ~/.fleet-dao/vault-key.txt x.json.age', 2],
   ['Bash', 'cat ~/.ssh/id_ed25519', 2],
+  // 放着密钥文件的点目录里、能匹配上密钥文件名的通配（* 按匹配点开头的名字算：PowerShell、rg 都这样）
+  ['Bash', 'cat ~/.ssh/*', 2],
+  ['Bash', 'cat ~/.ssh/id_*', 2],
+  ['Bash', 'cat ~/.ssh/{id_rsa,config}', 2],
+  ['Bash', 'cat ~/.claude/.*', 2],
+  ['Bash', 'cat ~/.claude/*', 2],
+  ['PowerShell', 'Get-Content ~\\.ssh\\*', 2],
   // 借道读这条钩子的几家
   ['run_terminal_command', `cat ~/${RC}/device.json`, 2],
   ['exec', `cat ~/${RC}/device.json`, 2],
@@ -281,6 +288,12 @@ const secretCases: SecretCase[] = [
   ['Bash', `ssh fr "echo 'X=1' | sudo tee -a ${ETC}/api.env"`, 0],
   ['Bash', 'ssh-keygen -lf ~/.ssh/id_ed25519', 0],
   ['Bash', 'cat ~/.ssh/id_ed25519.pub', 0],
+  ['Bash', 'cat ~/.ssh/*.pub', 0],
+  ['Bash', 'cat ~/.ssh/config', 0],
+  ['Bash', 'ls ~/.ssh/*', 0],
+  ['Bash', 'chmod 600 ~/.ssh/*', 0],
+  ['Bash', 'cat ~/.claude/*.md', 0],
+  ['Bash', 'cat .claude/settings.json', 0],
   ['Bash', 'openssl x509 -in /etc/letsencrypt/live/x/fullchain.pem -noout -enddate', 0],
   ['Bash', "ssh -i ~/.ssh/fr.key fr 'systemctl status fleet-api'", 0],
   ['Bash', `cat ~/${RC}-org-switch-last.json`, 0],
@@ -459,6 +472,96 @@ describe('读文件、搜内容的工具：路径碰到密钥名单就拦', () =
     const devin = JSON.stringify({ tool_name: 'grep', tool_input: { pattern: 'x' } });
     expect(lib.decide(devin, `${HOME_A}/${RC}`).code).toBe(2);
     expect(lib.decide(devin, '/work/repo').code).toBe(0);
+  });
+});
+
+// 从家目录（或更上层）、~/.claude、~/.ssh 往下搜内容：路径里一个密钥文件名都没写，也会把它们搜进对话（Claude 的 Grep
+// 连点开头的隐藏文件一起搜，2026-09-27 本机实测；grep -r 也搜）。要打出内容的拦；只列文件名、只数个数，或者 glob、
+// 文件类型限定到碰不到密钥文件名的放行。[说明, 钩子输入, 该给的退出码]；输入里没带会话目录的按 /work/repo 算。
+type BroadCase = [string, Record<string, unknown>, 0 | 2];
+const grepTool = (input: Record<string, unknown>, cwd = '/work/repo') => ({
+  tool_name: 'Grep',
+  tool_input: { pattern: 'sk-', ...input },
+  cwd,
+});
+const sh = (command: string, cwd = '/work/repo', tool = 'Bash') => ({
+  tool_name: tool,
+  tool_input: { command },
+  cwd,
+});
+const broadCases: BroadCase[] = [
+  ['Grep 从家目录搜（~）', grepTool({ path: '~' }), 2],
+  ['Grep 从家目录搜、打内容', grepTool({ path: '~', output_mode: 'content' }), 2],
+  ['Grep 从 Windows 的家目录搜', grepTool({ path: 'C:\\Users\\alice\\' }), 2],
+  ['Grep 从 Git Bash 写法的家目录搜', grepTool({ path: '/c/Users/alice' }), 2],
+  ['Grep 从 %USERPROFILE% 搜', grepTool({ path: '%USERPROFILE%' }), 2],
+  ['Grep 从盘符根上搜', grepTool({ path: 'C:\\' }), 2],
+  ['Grep 从根目录搜', grepTool({ path: '/' }), 2],
+  ['Grep 从 /etc 搜（法国的 /etc/fleet-dao 在下面）', grepTool({ path: '/etc' }), 2],
+  ['Grep 从 ~/.claude 搜（登录凭据在里面）', grepTool({ path: '~/.claude' }), 2],
+  ['Grep 从 ~/.ssh 搜', grepTool({ path: '~/.ssh' }), 2],
+  ['Grep 没给路径、会话目录就是家目录', grepTool({}, HOME_A), 2],
+  ['Grep 从 .. 退回家目录', grepTool({ path: '..' }, `${HOME_A}/repo`), 2],
+  ['Grep 的 glob 能匹配上 device.json', grepTool({ path: '~', glob: '*.json', output_mode: 'content' }), 2],
+  ['Grep 的 glob 花括号里有一个能匹配上', grepTool({ path: '~', glob: '*.{ts,json}' }), 2],
+  ['Grep 的 glob 只排除、不限定', grepTool({ path: '~', glob: '!*.ts' }), 2],
+  ['Grep 的类型是 json', grepTool({ path: '~', type: 'json' }), 2],
+  ['Grok 的 grep 从家目录搜', { toolName: 'grep', toolInput: { pattern: 'x', path: '~' }, cwd: '/w' }, 2],
+  ['grep -rn 从 ~ 搜', sh('grep -rn sk- ~'), 2],
+  ['grep -r 从 "$HOME/" 搜', sh('grep -r org_ "$HOME/"'), 2],
+  ['grep -R 从根目录搜', sh('grep -R x /'), 2],
+  ['grep -r 从 /etc 搜', sh('grep -r TOKEN /etc'), 2],
+  ['grep -d recurse', sh('grep -d recurse x ~'), 2],
+  ['grep -r 用 -e 给模式、起点是家目录', sh('grep -r -e x ~'), 2],
+  ['grep -r 的 --include 能匹配上 device.json', sh("grep -r --include='*.json' x ~"), 2],
+  ['grep -r 没写起点、会话目录是家目录', sh('grep -rn x', HOME_A), 2],
+  ['grep -rn 从 . 搜、会话目录是 Windows 的家目录', sh('grep -rn x .', 'C:\\Users\\alice'), 2],
+  ['rg 从家目录搜', sh('rg sk- ~'), 2],
+  ['rg 从 ~/.ssh 搜', sh('rg PRIVATE ~/.ssh'), 2],
+  ['rg 的 -g 只排除', sh("rg -g '!*.ts' x ~"), 2],
+  ['rg -t json', sh('rg -t json x ~'), 2],
+  ['ssh 到别的机器上 grep -r 没写起点（那头的家目录）', sh("ssh fr 'grep -rn TOKEN'"), 2],
+  ['sudo grep -r /etc', sh('sudo grep -r TOKEN /etc'), 2],
+  ['bash -c 里 grep -r ~', sh('bash -c "grep -r x ~"'), 2],
+  ['PowerShell 里 grep -r 家目录', sh('grep -r x $env:USERPROFILE', '/w', 'PowerShell'), 2],
+  ['Grok 的终端 grep -r ~', sh('grep -r x ~', '/w', 'run_terminal_command'), 2],
+  // —— 放行 ——
+  ['Grep 从家目录搜、只列文件名', grepTool({ path: '~', output_mode: 'files_with_matches' }), 0],
+  ['Grep 从家目录搜、只数个数', grepTool({ path: '~', output_mode: 'count' }), 0],
+  ['Grep 从家目录搜、glob 限定到 *.ts', grepTool({ path: '~', glob: '*.ts', output_mode: 'content' }), 0],
+  ['Grep 从家目录搜、glob 限定到 **/*.{ts,tsx}', grepTool({ path: '~', glob: '**/*.{ts,tsx}' }), 0],
+  ['Grep 从家目录搜、类型限定到 ts', grepTool({ path: '~', type: 'ts' }), 0],
+  ['Grep 从 ~/.ssh 搜、glob 只是 config', grepTool({ path: '~/.ssh', glob: 'config' }), 0],
+  ['Grep 从家目录下的代码目录搜', grepTool({ path: 'C:\\Users\\alice\\projects' }), 0],
+  ['Grep 从 ~/.claude/skills 搜', grepTool({ path: '~/.claude/skills', output_mode: 'content' }), 0],
+  ['Grep 从 /etc/nginx 搜', grepTool({ path: '/etc/nginx' }), 0],
+  ['Grep 没给路径、会话目录是代码目录', grepTool({}, `${HOME_A}/repo`), 0],
+  ['grep -rl 只列文件名', sh('grep -rl sk- ~'), 0],
+  ['grep -rc 只数个数', sh('grep -rc sk- ~'), 0],
+  ['grep -r --include=*.ts', sh('grep -r --include=*.ts x ~'), 0],
+  ["grep -r --include '*.ts'", sh("grep -r --include '*.ts' x ~"), 0],
+  ['grep -r 从 /etc/nginx 搜', sh('grep -r server_name /etc/nginx'), 0],
+  ['grep -r 没写起点、会话目录是代码目录', sh('grep -rn x'), 0],
+  ['grep 不递归、读一个文件', sh('grep -A3 alias ~/.bashrc'), 0],
+  ['grep 接在管道后面', sh('git log --oneline | grep -i fix', HOME_A), 0],
+  ['git grep 只搜跟踪的文件', sh('git grep -n x', HOME_A), 0],
+  ['rg -l', sh('rg -l x ~'), 0],
+  ["rg -g '*.ts'", sh("rg -g '*.ts' x ~"), 0],
+  ['rg -tts', sh('rg -tts x ~'), 0],
+  ['rg 在代码目录里搜', sh('rg x src/'), 0],
+  ['ssh 到别的机器上从代码目录 grep -r', sh("ssh fr 'grep -rn x /srv/fleet-dao'"), 0],
+];
+
+describe('从家目录（或更上层）往下搜内容：路径里没写密钥文件名也拦', () => {
+  it.each(broadCases.map((c) => [c[0], c[2], c[1]] as const))('%s → 退出码 %i', (_name, want, input) => {
+    const got = lib.decide(JSON.stringify(input), '/work/repo');
+    expect(got.code).toBe(want);
+    if (want === 2) {
+      const first = got.message?.split('\n')[0] ?? '';
+      expect(first).toContain('往下');
+      expect(first).toContain(CRED);
+      expect(got.message).toContain('secret-shape.mjs');
+    }
   });
 });
 

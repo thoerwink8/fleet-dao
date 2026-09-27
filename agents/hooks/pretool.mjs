@@ -167,6 +167,63 @@ function namedLabel(name) {
   return `口令文件 ${n}`;
 }
 
+/** 放着密钥文件的点目录：里面写死的名字归上面 NAMED_RE 认，这里认直接写在目录下、能匹配上密钥文件名的通配（cat ~/.ssh/*） */
+const DOTDIR_RE = new RegExp(String.raw`(?<![\w.-])\.(?<dir>claude|ssh)(?![\w.-])${DIR_REST}`, 'gi');
+const DOTDIR_SECRETS = {
+  claude: ['.credentials.json'],
+  ssh: ['id_rsa', 'id_dsa', 'id_ecdsa', 'id_ed25519', 'id_ecdsa_sk', 'id_ed25519_sk'],
+};
+
+/**
+ * 通配（shell、rg、.gitignore 的写法）展开花括号后转成正则，整段比。* 也匹配点开头的名字：PowerShell、rg 都这样，
+ * bash 不这样，按宽的算。认不出（括号不配对、展开太多）返回 null。
+ */
+function globRegexes(glob) {
+  const expanded = [];
+  const expand = (g, depth) => {
+    const m = /\{([^{}]*)\}/.exec(g);
+    if (!m || depth > 4) expanded.push(g);
+    else {
+      for (const alt of m[1].split(','))
+        expand(g.slice(0, m.index) + alt + g.slice(m.index + m[0].length), depth + 1);
+    }
+  };
+  expand(glob, 0);
+  // 花括号不配对：多半是命令里的逗号把路径词截断了（~/.ssh/{id_rsa,config}），看不清
+  if (expanded.length > 64 || expanded.some((g) => /[{}]/.test(g))) return null;
+  const out = [];
+  for (const g of expanded) {
+    let re = '';
+    for (let i = 0; i < g.length; i++) {
+      const c = g[i];
+      if (c === '*') re += '.*';
+      else if (c === '?') re += '.';
+      else if (c === '[') {
+        const end = g.indexOf(']', i + 2);
+        if (end < 0) return null;
+        const body = g
+          .slice(i + 1, end)
+          .replace(/^!/, '^')
+          .replace(/\\/g, '\\\\');
+        re += `[${body}]`;
+        i = end;
+      } else re += c.replace(/[.+^${}()|\\/]/g, '\\$&');
+    }
+    try {
+      out.push(new RegExp(`^${re}$`, 'i'));
+    } catch {
+      return null;
+    }
+  }
+  return out;
+}
+
+/** 这个通配能不能匹配上 names 里的名字；认不出按能 */
+function globHits(glob, names) {
+  const res = globRegexes(glob);
+  return res === null || res.some((re) => names.some((n) => re.test(n)));
+}
+
 /** 目录下的路径算不算碰到密钥：目录本身、子目录、通配、变量、. 和 .. 都算；写死的文件名交给 isSecret 判 */
 function secretUnder(rest, isSecret) {
   if (!rest || rest === '/' || rest.endsWith('/') || /[*?[\]{}$~\x60]/.test(rest)) return true;
@@ -192,6 +249,13 @@ export function secretMention(text) {
     const named = NAMED_RE.exec(v);
     if (named?.groups?.name) return namedLabel(named.groups.name);
     if (GENERIC_RE.test(v)) return '密钥文件（*.key、*.pem、*.pass 这类）';
+    for (const m of v.matchAll(DOTDIR_RE)) {
+      const parts = (m.groups?.rest ?? '').split('/').filter(Boolean);
+      const dir = /** @type {'claude' | 'ssh'} */ (m.groups?.dir.toLowerCase());
+      if (parts.length === 1 && /[*?[{]/.test(parts[0]) && globHits(parts[0], DOTDIR_SECRETS[dir])) {
+        return namedLabel(DOTDIR_SECRETS[dir][0]);
+      }
+    }
   }
   return null;
 }
@@ -739,6 +803,175 @@ function secretVerdict(command, kind) {
   }
 }
 
+// —— 从上层目录往下搜 ——
+// 上面按名字认，认的是写出来的密钥路径。从家目录（或更上层）、~/.claude、~/.ssh 往下搜内容，路径里一个名字都不出现，
+// 却会把 ~/.reclaude/device.json、~/.claude/.credentials.json、~/.ssh/id_* 一起搜出来：Claude 的 Grep 连点开头的隐藏文件
+// 一起搜（2026-09-27 本机实测；它认 .gitignore，所以仓里的 .secrets/、*.pem 搜不到），grep -r 也搜。起点是这些目录、
+// 又要打出匹配的内容时按拦处理；只列文件名、只数个数的，或者 glob、文件类型限定到碰不到密钥文件名的（比如 *.ts），放行。
+// 起点写成变量（$REPO）的认不出、不拦；从家目录列出文件再交给别的命令读（find ~ | xargs grep）也认不出：这是止血，不是保险箱。
+
+const HOME_WORD = String.raw`(?:~|\$HOME|\$\{HOME\}|%USERPROFILE%|\$env:USERPROFILE)`;
+const DRIVE = '(?:[a-z]:|/[a-z]|/mnt/[a-z])';
+const HOME_PATH = `(?:/root|/home/[^/]+|/Users/[^/]+|${DRIVE}/Users/[^/]+)`;
+const BROAD_ROOT_RE = new RegExp(
+  String.raw`^(?:(?:${HOME_WORD}|${HOME_PATH})(?:/\.(?:claude|ssh))?|/(?:home|Users|etc|mnt)?|${DRIVE}(?:/Users)?)$`,
+  'i',
+);
+/** 拿来判 glob、文件类型限定得够不够：密钥文件的名字（通用名单的扩展名配个 x） */
+const SECRET_NAMES = [
+  ...RECLAUDE_SECRETS,
+  ...FLEET_ETC_SECRETS,
+  ...DOTDIR_SECRETS.claude,
+  ...DOTDIR_SECRETS.ssh,
+  'vault-key.txt',
+  '.pgpass',
+  '.netrc',
+  ...'pass key pem p12 pfx ppk kdbx jks keystore'.split(' ').map((e) => `x.${e}`),
+];
+/** rg 的文件类型里会带上密钥文件的：json（device.json、.credentials.json）、txt（vault-key.txt） */
+const RISKY_TYPES = new Set(['json', 'jsonl', 'txt']);
+
+/** 搜的起点规整成 / 分隔、去掉 . 和 ..、末尾不带 /；相对路径接在 cwd 后面，cwd 也没有返回 null（看不出来） */
+function normRoot(p, cwd) {
+  let s = String(p).replace(/['"]/g, '').replace(/\\/g, '/');
+  if (!isAbsolutePath(s)) {
+    if (!cwd) return null;
+    s = `${String(cwd).replace(/['"]/g, '').replace(/\\/g, '/')}/${s}`;
+  }
+  const lead = s.startsWith('/') ? '/' : '';
+  const out = [];
+  for (const part of s.split('/')) {
+    if (part === '' || part === '.') continue;
+    if (part !== '..') out.push(part);
+    else if (out.length > (lead ? 0 : 1)) out.pop();
+    else return '/';
+  }
+  return lead + out.join('/') || '/';
+}
+
+/** 起点是不是上层目录；限定到碰不到密钥文件名的 glob、文件类型不算（有一个限定够了就放行，rg 取交集） */
+function broadRoot(root, cwd, globs, types) {
+  const r = normRoot(root, cwd);
+  if (r === null || !BROAD_ROOT_RE.test(r)) return false;
+  const positive = globs.filter((g) => !g.startsWith('!'));
+  if (positive.length > 0 && positive.every((g) => !globHits(g.split('/').pop() ?? g, SECRET_NAMES)))
+    return false;
+  return !(types.length > 0 && types.every((t) => !RISKY_TYPES.has(t.toLowerCase())));
+}
+
+const BROAD_WHY =
+  '会连 ~/.reclaude/device.json、~/.claude/.credentials.json、~/.ssh/id_* 这些密钥文件一起搜进对话，按拦处理（密钥、令牌、口令的值不进对话）';
+
+const GREP_ARG_SHORT = new Set([...'efmABCdD']);
+const GREP_ARG_LONG = opts(
+  '--regexp --file --max-count --after-context --before-context --context --directories --devices --include --exclude --exclude-dir --exclude-from --label --binary-files --group-separator',
+);
+const RG_ARG_SHORT = new Set([...'efgtTmABCMjdEr']);
+const RG_ARG_LONG = opts(
+  '--regexp --file --glob --iglob --type --type-not --max-count --after-context --before-context --context --max-columns --threads --max-depth --encoding --replace --sort --sortr --type-add --type-clear --ignore-file --pre --pre-glob --colors --color --path-separator --context-separator --field-context-separator --field-match-separator --dfa-size-limit --regex-size-limit --engine --max-filesize --hyperlink-format',
+);
+const QUIET_LONG = new Set([
+  '--files-with-matches',
+  '--files-without-match',
+  '--count',
+  '--count-matches',
+  '--quiet',
+  '--silent',
+  '--files',
+]);
+
+/**
+ * grep -r、rg 这类往下递归搜内容的命令：{ roots, quiet, globs, types }（没写起点的，起点是 cwd）；不是这类返回 null。
+ * quiet：只列文件名、只数个数、不出声（-l、-c、-q）。
+ */
+function recursiveSearch(leaf, cwd) {
+  const isGrep = ['grep', 'egrep', 'fgrep'].includes(leaf.name);
+  if (!isGrep && leaf.name !== 'rg') return null;
+  const argShort = isGrep ? GREP_ARG_SHORT : RG_ARG_SHORT;
+  const argLong = isGrep ? GREP_ARG_LONG : RG_ARG_LONG;
+  let recursive = !isGrep;
+  let quiet = false;
+  let patternGiven = false;
+  const globs = [];
+  const types = [];
+  const positional = [];
+  const words = leaf.args.map((x) => x.value);
+  for (let i = 0; i < words.length; i++) {
+    const v = words[i];
+    if (v === '--') {
+      positional.push(...words.slice(i + 1));
+      break;
+    }
+    if (v.startsWith('--')) {
+      const eq = v.indexOf('=');
+      const name = eq < 0 ? v : v.slice(0, eq);
+      const val = eq < 0 ? (argLong.has(name) ? words[++i] : undefined) : v.slice(eq + 1);
+      if (name === '--recursive' || name === '--dereference-recursive') recursive = true;
+      else if (name === '--directories' && val === 'recurse') recursive = true;
+      else if (QUIET_LONG.has(name)) quiet = true;
+      else if (name === '--regexp' || name === '--file') patternGiven = true;
+      else if (['--include', '--glob', '--iglob'].includes(name) && val !== undefined) globs.push(val);
+      else if (name === '--type' && val !== undefined) types.push(val);
+      continue;
+    }
+    if (!v.startsWith('-') || v === '-') {
+      positional.push(v);
+      continue;
+    }
+    for (let k = 1; k < v.length; k++) {
+      const c = v[k];
+      if (argShort.has(c)) {
+        const val = k < v.length - 1 ? v.slice(k + 1) : words[++i];
+        if (c === 'e' || c === 'f') patternGiven = true;
+        else if (isGrep && c === 'd' && val === 'recurse') recursive = true;
+        else if (!isGrep && c === 'g' && val !== undefined) globs.push(val);
+        else if (!isGrep && c === 't' && val !== undefined) types.push(val);
+        break;
+      }
+      if (isGrep && (c === 'r' || c === 'R')) recursive = true;
+      if ((isGrep ? 'lLcq' : 'lcq').includes(c)) quiet = true;
+    }
+  }
+  if (!recursive) return null;
+  const roots = patternGiven ? positional : positional.slice(1);
+  return { roots: roots.length > 0 ? roots : [cwd], quiet, globs, types };
+}
+
+/** 命令行里有没有从上层目录往下递归搜、又要打出内容的；有返回 block。ssh 到别的机器上跑的，没写起点就是那头的家目录 */
+function broadSearchLine(text, kind, cwd, depth) {
+  if (depth > 4) return null;
+  for (const c of scanCommand(text, kind).pipelines.flat()) {
+    const u = unwrap(c.words);
+    if (u.nested) {
+      const r = broadSearchLine(u.nested.text, u.nested.kind, u.name === 'ssh' ? '~' : cwd, depth + 1);
+      if (r) return r;
+      continue;
+    }
+    const s = u.leaf ? recursiveSearch(u.leaf, cwd) : null;
+    if (s === null || s.quiet) continue;
+    const root = s.roots.find((r) => broadRoot(r, cwd, s.globs, s.types));
+    if (root !== undefined) {
+      return block(
+        [
+          `fleet-guard：这条命令从「${root || cwd}」往下递归搜、又要打出匹配的内容，${BROAD_WHY}；搜的起点指到具体的目录，或者用 --include / -g 限定文件类型（比如 '*.ts'），只要文件名用 -l。`,
+          `要看密钥文件的结构：node ${SHAPE} <文件>（只打字段名、类型、长度，一个值都不打）。`,
+        ].join('\n'),
+      );
+    }
+  }
+  return null;
+}
+
+/** 从上层目录往下搜的命令判一下：不是这类返回 null */
+function broadSearchVerdict(command, kind, cwd) {
+  if (!/(?:^|[^\w-])(?:[ef]?grep|rg)(?:\.exe)?(?![\w-])/i.test(command)) return null;
+  try {
+    return broadSearchLine(command, kind, cwd, 0);
+  } catch (err) {
+    return block(`fleet-guard：钩子没看懂这条搜内容的命令（${err?.message ?? err}），按拦处理`);
+  }
+}
+
 /**
  * 跑命令的工具在各家叫什么。登记在 ~/.claude/settings.json 的这条钩子，Grok、Devin、Cursor 默认也借道读，
  * 送进来的是它们自己的工具名：Grok 是 run_terminal_command（输入是 camelCase 的 toolName、toolInput），Devin 是 exec
@@ -814,6 +1047,24 @@ function readVerdict(tool, what, input, fallbackCwd) {
       );
     }
   }
+  // 从上层目录往下搜（上面「从上层目录往下搜」那一段）。Claude 的 Grep 不写 output_mode 时只列文件名，别家的默认打内容：
+  // 不写的一律按打内容算，写明 files_with_matches、count 的放行
+  const mode = args.output_mode ?? args.outputMode;
+  const globs = typeof args.glob === 'string' ? [args.glob] : [];
+  const types = typeof args.type === 'string' ? [args.type] : [];
+  if (
+    what === 'search' &&
+    mode !== 'files_with_matches' &&
+    mode !== 'count' &&
+    broadRoot(where, cwd, globs, types)
+  ) {
+    return block(
+      [
+        `fleet-guard：${tool} 从「${where}」往下搜、又要打出匹配的内容，它连点开头的隐藏文件一起搜，${BROAD_WHY}；path 指到具体的目录，或者用 glob 限定文件类型（比如 *.ts），只要文件名写明 output_mode: files_with_matches。`,
+        `要看密钥文件的结构：node ${SHAPE} <文件>（在终端跑，只打字段名、类型、长度，一个值都不打）。`,
+      ].join('\n'),
+    );
+  }
   return { code: 0 };
 }
 
@@ -838,13 +1089,11 @@ export function decide(raw, fallbackCwd = '') {
     return block(`fleet-guard：${tool} 的输入里认不出命令（${JSON.stringify(command)}），按拦处理`);
   }
   const cmd = command;
-  const cwd = String(input?.cwd ?? input?.workspaceRoot ?? fallbackCwd)
-    .split('\\')
-    .join('/')
-    .toLowerCase();
+  const rawCwd = String(input?.cwd ?? input?.workspaceRoot ?? fallbackCwd);
+  const cwd = rawCwd.split('\\').join('/').toLowerCase();
   const inFleet = cwd.includes('fleet-dao') || /fleet-dao/i.test(cmd);
-  // 密钥文件的内容不进对话（上面「密钥文件」那一段）。不分仓，全机都拦；别家的终端按 bash 的写法切。
-  const secret = secretVerdict(cmd, kind);
+  // 密钥文件的内容不进对话（上面「密钥文件」「从上层目录往下搜」两段）。不分仓，全机都拦；别家的终端按 bash 的写法切。
+  const secret = secretVerdict(cmd, kind) ?? broadSearchVerdict(cmd, kind, rawCwd);
   if (secret) return secret;
   // 2026-09-26 撞过两回：子代理拼命令时反引号误跑了切号登录；总指挥 node -e "…`specs/…/需求.md`…" 把整份需求文档当脚本执行了。
   // PowerShell 里反引号是转义符，不归这条管；别家的终端是不是 bash 说不准，也不管。不分仓，全机都拦。
