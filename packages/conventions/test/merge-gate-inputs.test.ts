@@ -31,6 +31,21 @@ const ALLOWED_CONTEXTS: Record<string, string> = {
   SECOND_OPINION_CONTEXT: 'second-opinion',
 };
 
+const workflow = readFileSync(
+  fileURLToPath(new URL('../../../.github/workflows/merge-gate.yml', import.meta.url)),
+  'utf8',
+);
+
+/** merge-gate.yml 的 job 条件没放行 status 事件的那几个状态名（合并闸自己写的 merge-gate 不用放行：写了会自己转圈）。 */
+function missingTriggers(yml: string): string[] {
+  const cond = /^\s*if: (github\.event_name != 'status'.*)$/m.exec(yml)?.[1];
+  if (!cond) throw new Error('merge-gate.yml 里找不到按 status 事件放行的 if：写法换了，这条测试跟着改');
+  return Object.entries(ALLOWED_CONTEXTS)
+    .filter(([name]) => name !== 'GATE_CONTEXT')
+    .map(([, ctx]) => ctx)
+    .filter((ctx) => !cond.includes(`github.event.context == '${ctx}'`));
+}
+
 function interfaceMethods(code: string, name: string): string[] {
   const start = code.indexOf(`export interface ${name} {`);
   if (start < 0)
@@ -64,6 +79,16 @@ describe('合并闸只汇总 PR 此刻的状态（#299 创始人拍板）', () =
       expect(code, file).not.toMatch(/\bnew Date\s*\(\s*\)/);
       expect(code, file).not.toMatch(/\bperformance\.now\s*\(/);
     }
+  });
+
+  it('合并闸读的每个状态（自己写的 merge-gate 除外）写上来时都会重算：merge-gate.yml 的 if 放行它的 status 事件', () => {
+    expect(missingTriggers(workflow)).toEqual([]);
+  });
+
+  it('【故意造出的失败】merge-gate.yml 只放行 second-opinion：「认领对得上」贴上来不重算，查得出来', () => {
+    const narrowed = workflow.replace(` || github.event.context == '认领对得上'`, '');
+    expect(narrowed).not.toBe(workflow);
+    expect(missingTriggers(narrowed)).toEqual(['认领对得上']);
   });
 
   it('【故意造出的失败】往读写口子里多加一个（比如读单子开没开）：上面那条就红', () => {

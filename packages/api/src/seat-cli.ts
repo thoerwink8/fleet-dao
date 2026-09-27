@@ -480,7 +480,9 @@ async function reassign(rest: readonly string[], deps: ClaimCliDeps): Promise<Se
     const reason = need(p, 'reason', usage);
     const hasSeat = p.options.has('machine') || p.options.has('session') || p.options.has('term');
     if (!hasSeat && founder === undefined)
-      throw new SeatCliError(`--to engine 要带着帅位（--machine … --session … --term …）或创始人原话（--founder）。\n${usage}`);
+      throw new SeatCliError(
+        `--to engine 要带着帅位（--machine … --session … --term …）或创始人原话（--founder）。\n${usage}`,
+      );
     const text = await deps.handoverToEngine({
       owner: repoName.owner,
       name: repoName.name,
@@ -543,7 +545,11 @@ async function reassign(rest: readonly string[], deps: ClaimCliDeps): Promise<Se
         by: `${seat.machine}/${seat.session}`,
         reason: `改派给 ${claimOwnerText(r.claim)}（创始人原话：${founder ?? ''}）`,
       });
-      lines.push(stopped === 'stopped' ? `引擎的工作流 ${r.voided.workflowId} 叫停了` : `引擎的工作流 ${r.voided.workflowId} 已经不在了`);
+      lines.push(
+        stopped === 'stopped'
+          ? `引擎的工作流 ${r.voided.workflowId} 叫停了`
+          : `引擎的工作流 ${r.voided.workflowId} 已经不在了`,
+      );
       json.engine = stopped;
     } catch (err) {
       code = 1;
@@ -555,9 +561,14 @@ async function reassign(rest: readonly string[], deps: ClaimCliDeps): Promise<Se
     }
   }
   if (old) {
-    const why = r.voided ? `创始人原话：${founder ?? ''}` : `原来的认领作废了：${old.endReason ?? '没写原因'}`;
+    const why = r.voided
+      ? `创始人原话：${founder ?? ''}`
+      : `原来的认领作废了：${old.endReason ?? '没写原因'}`;
     try {
-      const closed = await (await deps.claims()).closeForReassign(repo, old, { to: claimOwnerText(r.claim), why });
+      const closed = await (await deps.claims()).closeForReassign(repo, old, {
+        to: claimOwnerText(r.claim),
+        why,
+      });
       lines.push(
         closed.closed.length > 0
           ? `原来那份开着的 PR 关了（分支留着）：${closed.closed.map((n) => `#${n}`).join('、')}`
@@ -571,7 +582,9 @@ async function reassign(rest: readonly string[], deps: ClaimCliDeps): Promise<Se
     } catch (err) {
       code = 1;
       const e = err instanceof Error ? err.message : String(err);
-      lines.push(`原来那份的 PR 没处理（GitHub 没接上：${e}）：撤自动合并、关掉要人补；「认领对得上」GitHub 对账每 15 分钟会重贴`);
+      lines.push(
+        `原来那份的 PR 没处理（GitHub 没接上：${e}）：撤自动合并、关掉要人补；「认领对得上」GitHub 对账每 15 分钟会重贴`,
+      );
       json.closed = { error: e };
     }
   } else {
@@ -752,17 +765,26 @@ export async function runClaim(argv: readonly string[], deps: ClaimCliDeps): Pro
         code: 1,
         text: [
           `作废了 ${voided.length} 张过了宽限期没心跳的认领；PR 那边没做（GitHub 没接上：${why}），撤自动合并、贴红交给引擎每 15 分钟的对账`,
-          ...voided.map((c) => `  ${names.get(c.repoId) ?? c.repoId}#${c.issueNumber} ${describeClaim(c, now)}`),
+          ...voided.map(
+            (c) => `  ${names.get(c.repoId) ?? c.repoId}#${c.issueNumber} ${describeClaim(c, now)}`,
+          ),
         ].join('\n'),
         json: { ok: false, voided: voided.map((c) => claimJson(c, names)), why, now },
       };
     }
     const s = await claims.sweep();
     const lines = [
-      s.voided.length === 0 ? '没有过了宽限期没心跳的认领' : `作废了 ${s.voided.length} 张过了宽限期没心跳的认领：`,
-      ...s.voided.map((c) => `  ${names.get(c.repoId) ?? c.repoId}#${c.issueNumber} ${claimOwnerText(c)}（认领 ${c.claimId.slice(0, 8)}）`),
+      s.voided.length === 0
+        ? '没有过了宽限期没心跳的认领'
+        : `作废了 ${s.voided.length} 张过了宽限期没心跳的认领：`,
+      ...s.voided.map(
+        (c) =>
+          `  ${names.get(c.repoId) ?? c.repoId}#${c.issueNumber} ${claimOwnerText(c)}（认领 ${c.claimId.slice(0, 8)}）`,
+      ),
       `开着的 PR 判了 ${s.checked} 个，「认领对得上」贴了 ${s.posted} 条${s.disabled.length > 0 ? `，撤了自动合并：${s.disabled.join('、')}` : ''}${s.commented > 0 ? `，留言 ${s.commented} 条` : ''}`,
-      ...(s.reposScanned < s.reposTotal ? [`有 ${s.reposTotal - s.reposScanned} 个仓开着的 PR 没列出来`] : []),
+      ...(s.reposScanned < s.reposTotal
+        ? [`有 ${s.reposTotal - s.reposScanned} 个仓开着的 PR 没列出来`]
+        : []),
       ...s.problems.map((x) => `没处理成：${x}`),
     ];
     return {
