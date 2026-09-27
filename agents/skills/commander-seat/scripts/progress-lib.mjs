@@ -446,8 +446,11 @@ export function listProjects(home = homedir()) {
     });
 }
 
-/** 页面服务：/ 给页面，/api/projects 列项目，/api/p/<项目> 给一个项目的数据，/api/ping 认自己。每次现读，不缓存。 */
-export function createProgressServer({ home = homedir(), htmlFile }) {
+/**
+ * 页面服务：/ 给页面，/api/projects 列项目，/api/p/<项目> 给一个项目的数据，/api/ping 认自己。每次现读，不缓存。
+ * 给了 france（france-lib.mjs 的 createFranceSource）：/france 给法国引擎页，/api/france 给它的数据（#328，驾驶舱正式版上线后删）。
+ */
+export function createProgressServer({ home = homedir(), htmlFile, france = null }) {
   return createServer((req, res) => {
     const send = (code, type, body) => {
       res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store' });
@@ -464,6 +467,15 @@ export function createProgressServer({ home = homedir(), htmlFile }) {
       }
     }
     if (path === '/api/ping') return json(200, { app: APP_ID });
+    if (path === '/france' || path === '/api/france') {
+      if (!france) return json(404, { error: '这个页面服务没接法国引擎页' });
+      if (path === '/api/france') return json(200, france.read());
+      try {
+        return send(200, 'text/html; charset=utf-8', readFileSync(france.htmlFile));
+      } catch (e) {
+        return send(500, 'text/plain; charset=utf-8', `页面文件读不到（${e.code ?? e.message}）`);
+      }
+    }
     if (path === '/api/projects') {
       try {
         return json(200, { root: dataRoot(home), projects: listProjects(home) });
@@ -530,9 +542,9 @@ export async function ensureServer({ port, isUp = isOurs, launch, waitMs = 3000,
  * 起页面服务，只听 127.0.0.1。端口上已经是我们的进度页：说一声、退出码 0（开场可以放心重复跑）；
  * 被别的程序占着：退出码 1。返回 { code, server?, port? }。
  */
-export function startServer({ port, home = homedir(), htmlFile, out, err }) {
+export function startServer({ port, home = homedir(), htmlFile, france = null, out, err }) {
   return new Promise((resolve) => {
-    const server = createProgressServer({ home, htmlFile });
+    const server = createProgressServer({ home, htmlFile, france });
     server.once('error', async (e) => {
       if (e.code === 'EADDRINUSE') {
         if (await isOurs(port)) {
