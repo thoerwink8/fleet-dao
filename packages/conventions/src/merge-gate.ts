@@ -56,6 +56,8 @@ export interface GitHubReads {
 const FILES_PER_PAGE = 100;
 const FILES_MAX_PAGES = 30;
 const PRS_MAX_PAGES = 20;
+/** 一个提交上的状态：每个 context 最多 1000 条（GitHub 的上限），合并闸、第二意见、认领对得上三样。 */
+const STATUS_MAX_PAGES = 30;
 
 const encodePath = (p: string) => p.split('/').filter(Boolean).map(encodeURIComponent).join('/');
 
@@ -86,21 +88,17 @@ export function gateGitHub(api: GhApi): GitHubReads {
       return out;
     },
     async statuses(sha) {
+      // 逐条的列表（新到旧，带 creator：「认领对得上」要看是不是引擎机器人贴的）；合并状态接口（/status）不带 creator。
+      // 翻完页：同一个 context 取最新的那条，旧的排在后面
       const all: unknown[] = [];
-      for (let page = 1; ; page++) {
-        const got = await api.get(`/commits/${sha}/status?per_page=100&page=${page}`);
-        if (!isObject(got) || !Array.isArray(got.statuses) || typeof got.total_count !== 'number') {
-          throw new Error(`提交 ${sha.slice(0, 7)} 的状态读回来认不出（没有 statuses、total_count）`);
-        }
-        if (got.sha !== sha) {
-          throw new Error(`要的是提交 ${sha.slice(0, 7)} 的状态，读回来的是 ${String(got.sha).slice(0, 7)}`);
-        }
-        all.push(...got.statuses);
-        if (all.length >= got.total_count) return all;
-        if (got.statuses.length === 0) {
-          throw new Error(`提交 ${sha.slice(0, 7)} 的状态有 ${got.total_count} 条，只读到 ${all.length} 条`);
-        }
+      for (let page = 1; page <= STATUS_MAX_PAGES; page++) {
+        const got = await api.get(`/commits/${sha}/statuses?per_page=100&page=${page}`);
+        if (!Array.isArray(got))
+          throw new Error(`提交 ${sha.slice(0, 7)} 的状态列表第 ${page} 页认不出（不是列表）`);
+        all.push(...got);
+        if (got.length < 100) return all;
       }
+      throw new Error(`提交 ${sha.slice(0, 7)} 的状态超过 ${STATUS_MAX_PAGES * 100} 条，没读完`);
     },
     async fileAt(path, ref) {
       const got = await api.getOrNull(`/contents/${encodePath(path)}?ref=${ref}`);

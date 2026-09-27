@@ -1,5 +1,6 @@
 // 合并闸的判法（design 第五节「流程只为快」，#74）：改到的文件碰没碰先审后合的路径、碰了的当前头上有没有通过的第二意见，
-// 草稿、冲突的说法；PR 正文的档位只做提醒（parseTier 给 pr-fields 用）。纯判断，不碰网络；读写 GitHub 的在 merge-gate.ts。
+// 挂了单的 PR 当前头上有没有引擎机器人贴的、通过的「认领对得上」（#348），草稿、冲突的说法；PR 正文的档位只做提醒
+// （parseTier 给 pr-fields 用）。纯判断，不碰网络；读写 GitHub 的在 merge-gate.ts。
 // 三态纪律：读不到、认不出由调用方判「没查成」（退出码 2），不当成「没问题」。
 
 /** 两档（design 第五节「流程只为快」）；后两个是 2026-09-26 之前的三档叫法，照样认。 */
@@ -10,6 +11,16 @@ export const REVIEW_TIER: Tier = '先审后合';
 export const TIER_COLUMN = '档位';
 /** 本机垫片（将来是引擎）审完写在 PR 当前头上的提交状态。 */
 export const SECOND_OPINION_CONTEXT = 'second-opinion';
+/**
+ * 引擎机器人按库里的认领贴在 PR 当前头上的提交状态（#299、#348）；和 @fleet-dao/core seat.ts 的 CLAIM_STATUS_CONTEXT
+ * 是同一个（这个包不依赖 core，后端的测试对着两边）。
+ */
+export const CLAIM_MATCH_CONTEXT = '认领对得上';
+/**
+ * 只认这个机器人贴的「认领对得上」：「引擎」GitHub App（fleet-dao-engine）的机器人账号。带 [bot] 的名字只有 App 自己有，
+ * 别人注册不了；有推送权限的人（本机的 gh 登的是创始人账号）也贴得出同名的状态，所以要看是谁贴的。
+ */
+export const ENGINE_BOT_LOGIN = 'fleet-dao-engine[bot]';
 /** 高风险路径清单在仓里的位置（design 第五节「路径规则放每个仓的配置」）。 */
 export const RISK_PATHS_FILE = 'packages/conventions/high-risk-paths.json';
 
@@ -274,6 +285,67 @@ export function checkSecondOpinion(
         `第二意见没过：${at} 上的 ${SECOND_OPINION_CONTEXT} 是 ${got.state}${why}，${where}。按意见改完推上去，对新头重跑第二意见。`,
       ];
   }
+}
+
+// —— 认领对得上（#299、#348）——
+
+export interface ClaimMatchStatus {
+  state: StatusState;
+  description: string;
+  /** 是不是引擎机器人贴的（看 creator 的登录名和类型）。 */
+  byEngine: boolean;
+}
+
+/**
+ * 从当前头的提交状态（GET /commits/{sha}/statuses，新到旧、带 creator）里取最新一条「认领对得上」。没有这一条返回 null；
+ * 认不出返回一句为什么（调用方判没查成）。
+ */
+export function claimMatchFrom(statuses: readonly unknown[]): ClaimMatchStatus | null | string {
+  for (const s of statuses) {
+    if (!isObject(s) || typeof s.context !== 'string') return '提交状态里有一条认不出（没有 context）';
+    if (s.context !== CLAIM_MATCH_CONTEXT) continue;
+    if (typeof s.state !== 'string' || !STATES.includes(s.state)) {
+      return `${CLAIM_MATCH_CONTEXT} 的 state「${String(s.state)}」认不出`;
+    }
+    const creator = isObject(s.creator) ? s.creator : null;
+    return {
+      state: s.state as StatusState,
+      description: typeof s.description === 'string' ? s.description.trim() : '',
+      byEngine: creator?.login === ENGINE_BOT_LOGIN && creator.type === 'Bot',
+    };
+  }
+  return null;
+}
+
+/**
+ * 挂了单的 PR：当前头上最新的「认领对得上」要是引擎机器人贴的、通过的，而且是按这张单判的（引擎通过时的说明以「#<单号> 」
+ * 开头，见 core 的 judgeClaimMatch；正文改了挂的单、引擎还没重判时，旧的那条不算）。没挂单的不查（linked 是 undefined）。
+ */
+export function checkClaimMatch(
+  head: string,
+  linked: number | undefined,
+  got: ClaimMatchStatus | null,
+): string[] {
+  if (linked === undefined) return [];
+  const at = `当前头 ${head.slice(0, 7)}`;
+  const wait = `引擎收到 PR 事件就贴（漏了的每 15 分钟对账补上），贴上合并闸自动重算`;
+  if (got === null) {
+    return [`等「${CLAIM_MATCH_CONTEXT}」：PR 挂了 #${linked}，${at} 上还没有引擎机器人贴的这个状态；${wait}。`];
+  }
+  if (!got.byEngine) {
+    return [
+      `${at} 上最新的「${CLAIM_MATCH_CONTEXT}」不是引擎机器人贴的，不认：只有引擎按库里的认领贴的才算，${wait}。`,
+    ];
+  }
+  const why = got.description ? `：${oneLine(got.description)}` : '';
+  if (got.state === 'pending') return [`等「${CLAIM_MATCH_CONTEXT}」：${at} 上的还是 pending${why}。`];
+  if (got.state !== 'success') return [`认领对不上（${at} 上引擎贴的「${CLAIM_MATCH_CONTEXT}」是 ${got.state}）${why}。`];
+  if (!got.description.startsWith(`#${linked} `)) {
+    return [
+      `「${CLAIM_MATCH_CONTEXT}」是按旧正文判的（${oneLine(got.description) || '没写说明'}），PR 现在挂的是 #${linked}；${wait}。`,
+    ];
+  }
+  return [];
 }
 
 // —— 合并闸的其余几条和写回 GitHub 的提交状态 ——
