@@ -8,6 +8,7 @@ import { duration, routeLabel, STAGE_NAMES, stamp } from './names.ts';
 import { resolveRoutingPolicy } from './policy.ts';
 import { type Ranked, rank } from './rank.ts';
 import type {
+  AllOpenCheck,
   Block,
   ChooseRouteInput,
   ChooseRouteResult,
@@ -24,11 +25,12 @@ interface Judged {
   group: BlockGroup;
 }
 
-export function chooseRoute(input: ChooseRouteInput): ChooseRouteResult {
-  const policy = resolveRoutingPolicy(input.policy);
-  const now = validateInput(input, policy.trialEnabled);
-  const stageName = STAGE_NAMES[input.stage];
-  const ctx: FilterContext = {
+function contextOf(
+  input: ChooseRouteInput,
+  policy: ReturnType<typeof resolveRoutingPolicy>,
+  now: number,
+): FilterContext {
+  return {
     stage: input.stage,
     weight: input.weight ?? policy.stageWeight[input.stage],
     policy,
@@ -43,6 +45,26 @@ export function chooseRoute(input: ChooseRouteInput): ChooseRouteResult {
     liveOrgProblem: input.liveOrgProblem,
     uiWork: input.uiWork ?? false,
   };
+}
+
+/** 排序 → 每条算被挡原因 → 分组。chooseRoute 和 stageAllOpen 共用这一段，熔断算不算挡着才不会两套。 */
+function judgeStage(input: ChooseRouteInput, ctx: FilterContext): Judged[] {
+  const factsOf = new Map(input.routes.map((r) => [r.routeId, r]));
+  const rows = [...input.order]
+    .sort((a, b) => a.position - b.position)
+    .map((entry) => ({ route: factsOf.get(entry.routeId) as RouteFacts, entry }));
+  const ranked = rank(rows, input.stagePinned, ctx.policy, ctx.now);
+  return ranked.map((item) => {
+    const blocks = blocksFor(item.route, item.entry, ctx);
+    return { item, blocks, group: groupOf(blocks) };
+  });
+}
+
+export function chooseRoute(input: ChooseRouteInput): ChooseRouteResult {
+  const policy = resolveRoutingPolicy(input.policy);
+  const now = validateInput(input, policy.trialEnabled);
+  const stageName = STAGE_NAMES[input.stage];
+  const ctx = contextOf(input, policy, now);
   const factsOf = new Map(input.routes.map((r) => [r.routeId, r]));
   const fact = (id: string) => factsOf.get(id) as RouteFacts;
 
@@ -59,14 +81,7 @@ export function chooseRoute(input: ChooseRouteInput): ChooseRouteResult {
     return { kind: 'none', reason: `${stageName}阶段一条路由都没配`, verdicts: [] };
   }
 
-  const rows = [...input.order]
-    .sort((a, b) => a.position - b.position)
-    .map((entry) => ({ route: fact(entry.routeId), entry }));
-  const ranked = rank(rows, input.stagePinned, policy, now);
-  const judged: Judged[] = ranked.map((item) => {
-    const blocks = blocksFor(item.route, item.entry, ctx);
-    return { item, blocks, group: groupOf(blocks) };
-  });
+  const judged = judgeStage(input, ctx);
   const verdicts = judged.map((j, i) => verdictOf(j, i));
 
   const ready = judged.filter((j) => j.group.kind === 'ready');
@@ -201,6 +216,41 @@ function pickTrial(
   const pool = thin.length > 0 ? thin : rest;
   // draw < ratio 时 draw / ratio 在 [0, 1) 里均匀：同一个数既决定试不试、又决定试哪条。
   return pool[Math.min(pool.length - 1, Math.floor((draw / policy.trialRatio) * pool.length))] ?? null;
+}
+
+/**
+ * 这个阶段现在是不是全熔断。和 chooseRoute 走出 trial 'all-open' 同一段（judgeStage + allOpenTrial），
+ * 不看任务指定的路由、不用试探的随机数：给对账撤提醒用，判一次不能顺手再报一次。
+ * 阶段没配顺序、一条都没配：不是全熔断（那是别的提醒管的）。
+ */
+export function stageAllOpen(input: ChooseRouteInput): AllOpenCheck {
+  const policy = resolveRoutingPolicy(input.policy);
+  const now = validateInput(input, policy.trialEnabled);
+  const stageName = STAGE_NAMES[input.stage];
+  if (!input.configured) {
+    return { allOpen: false, detail: `${stageName}阶段还没在调度台上排路由顺序` };
+  }
+  if (input.order.length === 0) {
+    return { allOpen: false, detail: `${stageName}阶段一条路由都没配` };
+  }
+  const judged = judgeStage(input, contextOf(input, policy, now));
+  const ready = judged.filter((j) => j.group.kind === 'ready');
+  // 有能派的就先派它，走不到全熔断那一支：这里和 chooseRoute 一样，ready 优先。
+  if (ready.length === 0 && allOpenTrial(judged)) return { allOpen: true };
+  const first = ready[0];
+  if (first) {
+    return {
+      allOpen: false,
+      detail: `第 ${first.item.humanIndex + 1} 条 ${routeLabel(first.item.route)} 不在熔断`,
+    };
+  }
+  const summary = judged
+    .map(
+      (j) =>
+        `第 ${j.item.humanIndex + 1} 条 ${routeLabel(j.item.route)}：${j.blocks.map((b) => b.text).join('、') || '没有被挡'}`,
+    )
+    .join('；');
+  return { allOpen: false, detail: `不再是只被熔断挡着（${summary}）` };
 }
 
 /**

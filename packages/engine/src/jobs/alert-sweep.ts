@@ -15,13 +15,15 @@
 // - req:<…>:failed 需求没做完：需求的状态不再是 failed（重开了、又跑了、做完了、人叫停了）就撤。
 // - mq:<仓>:decide 合并队列判断出错：队列正常收工了（COMPLETED）或工作流已经不在了就撤；还在跑时判不了。
 // - approval:<批准> 要人批：批了、拒了，或者在等它的工作流（子任务的；Fusion 的是需求工作流）不在跑了、不在等这一次了就撤。
+// - routing:all-open:<阶段> 某阶段的路由全都熔断了：这个阶段有不在熔断的候选路由了就撤（只读判法，和选路同一套；
+//   读不了记没查成，不撤）。
 // - 自己会撤的，这里不管：pool-hold:<池>（探针、会话跑通就撤）、flow-config:<仓>（GitHub 对账）、deploy-lag:（后端健康检查）、
 //   auto-release:（自动发布）、备份脚本的几种（fleet-backup）。
-// - 判不了、还没接的，只靠 24 小时再推：<工作流>:failure:<规则>（封号、换池接着干这类通报，条件就是「发生过」，要人知道）；
-//   routing:all-open:<阶段>（全熔断：判得了，但现在只有 pickRoute 能判，它全熔断时会顺手再报一次这条；等只读的判法，#246）。
+// - 判不了、还没接的，只靠 24 小时再推：<工作流>:failure:<规则>（封号、换池接着干这类通报，条件就是「发生过」，要人知道）。
 import type { AlertRow } from '@fleet-dao/db';
 import type { StageKind, TaskState } from '@fleet-dao/shared';
-import { duration } from '../routing/names.ts';
+import { duration, STAGE_NAMES } from '../routing/names.ts';
+import type { AllOpenCheck } from '../routing/types.ts';
 import {
   type AlertStore,
   beijingDate,
@@ -69,6 +71,8 @@ export interface AlertSweepDeps {
   taskState(taskId: string): Promise<TaskState | null>;
   approval(approvalId: string): Promise<ApprovalFacts | null>;
   stageRoutable(stage: StageKind, taskId: string | null): Promise<RouteCheck>;
+  /** 这个阶段现在是不是全熔断（store-ports 的 stageAllOpen：不写库、不报警）。读不了照抛。 */
+  stageAllOpen(stage: StageKind): Promise<AllOpenCheck>;
   alerts: AlertStore;
   now: () => Date;
   log: ReconcileLog;
@@ -192,6 +196,17 @@ export const RULES: readonly Rule[] = [
       return {
         resolve: `任务已经不在等这次批准了（${view.approval ? '它在等的是另一次' : '现在没在等批准'}）`,
       };
+    },
+  },
+  {
+    name: '全熔断',
+    pattern: /^routing:all-open:([a-z]+)$/,
+    async judge(deps, _alert, m) {
+      const stage = m[1] as string;
+      if (!isStage(stage)) return { keep: true };
+      const check = await deps.stageAllOpen(stage);
+      if (check.allOpen) return { keep: true };
+      return { resolve: `${STAGE_NAMES[stage]}有路由不熔断了：${check.detail}` };
     },
   },
 ];

@@ -7,6 +7,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  type AlertRow,
   alertByKey,
   approvals,
   auditLog,
@@ -21,7 +22,7 @@ import {
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import type { RouteCheck } from '../../src/jobs/alert-sweep.ts';
+import { type AlertSweepDeps, type RouteCheck, sweepAlerts } from '../../src/jobs/alert-sweep.ts';
 import { HOURLY_RECONCILE_JOB, runHourlyReconcileJob } from '../../src/jobs/hourly-reconcile.ts';
 import {
   beijingDate,
@@ -764,6 +765,112 @@ describe('提醒：条件没了就撤、还在就留着', { timeout: 60_000 }, (
     expect(run.outcome).toBe('partial');
     expect(run.why).toContain('提醒 req:acme/patrol#11:park:1（挂起）没查成：用例没给');
     expect((await alertByKey(t.db, 'req:acme/patrol#11:park:1'))?.resolvedAt).toBeNull();
+  });
+
+  it('全熔断：还全熔断不撤、不调 updateOpen/raise；熔断解了就撤；判不了记没查成、不撤', async () => {
+    const row = (dedupeKey: string): AlertRow => ({
+      id: 'alert-1',
+      dedupeKey,
+      level: 'alert',
+      taskId: null,
+      title: '「execute」阶段的路由全都熔断了',
+      body: '原来的正文',
+      link: null,
+      createdAt: new Date('2026-09-26T01:00:00.000Z'),
+      updatedAt: new Date('2026-09-26T01:00:00.000Z'),
+      resolvedAt: null,
+      resolvedBy: null,
+    });
+    const calls = { updateOpen: 0, raise: 0 };
+    const resolved: { by: string; why: string }[] = [];
+    let mode: 'open' | 'clear' | 'throw' = 'open';
+    const sweepDeps: AlertSweepDeps = {
+      workflows: {
+        state: async () => ({ state: 'missing' }),
+        view: async () => {
+          throw new Error('不该问');
+        },
+      },
+      taskState: async () => null,
+      approval: async () => null,
+      stageRoutable: async () => ({ kind: 'none', detail: '没有在线的路由' }),
+      stageAllOpen: async () => {
+        if (mode === 'throw') throw new Error('路由事实没读成');
+        if (mode === 'open') return { allOpen: true };
+        return { allOpen: false, detail: '第 2 条 Claude 订阅 · 拼车 · Opus 5.5 · Claude Code 不在熔断' };
+      },
+      alerts: {
+        listOpen: async () => ({ alerts: [], truncated: false }),
+        byKey: async () => null,
+        latestByPrefix: async () => null,
+        resolve: async (x) => {
+          resolved.push({ by: x.by, why: x.why });
+          return 'ok';
+        },
+        raise: async () => {
+          calls.raise += 1;
+        },
+        insertOnce: async () => ({ created: false }),
+        updateOpen: async () => {
+          calls.updateOpen += 1;
+          return 'ok';
+        },
+      },
+      now: () => new Date('2026-09-26T02:00:00.000Z'),
+      log: quiet,
+    };
+    const open = row('routing:all-open:execute');
+    expect(await sweepAlerts(sweepDeps, [open], false)).toMatchObject({ found: 0, unchecked: [] });
+    expect(calls).toEqual({ updateOpen: 0, raise: 0 });
+    expect(resolved).toEqual([]);
+
+    mode = 'clear';
+    expect(await sweepAlerts(sweepDeps, [open], false)).toMatchObject({ found: 1, unchecked: [] });
+    expect(calls).toEqual({ updateOpen: 0, raise: 0 });
+    expect(resolved).toEqual([
+      {
+        by: RECONCILE_ACTOR,
+        why: '写码有路由不熔断了：第 2 条 Claude 订阅 · 拼车 · Opus 5.5 · Claude Code 不在熔断',
+      },
+    ]);
+
+    mode = 'throw';
+    resolved.length = 0;
+    const failed = await sweepAlerts(sweepDeps, [open], false);
+    expect(failed.found).toBe(0);
+    expect(failed.unchecked).toEqual(['提醒 routing:all-open:execute（全熔断）没查成：路由事实没读成']);
+    expect(resolved).toEqual([]);
+    expect(calls).toEqual({ updateOpen: 0, raise: 0 });
+
+    // 阶段名认不出：留着，不去判。
+    expect(await sweepAlerts(sweepDeps, [row('routing:all-open:zzz')], false)).toMatchObject({
+      found: 0,
+      unchecked: [],
+    });
+  });
+
+  it('全熔断解了：真库里撤掉，正文以「已撤：」开头、含「有路由不熔断了」，处理人是每小时对账', async () => {
+    probeDir();
+    await alert('routing:all-open:execute', { title: '「execute」阶段的路由全都熔断了' });
+    const job = (allOpen: boolean) =>
+      deps({
+        stageAllOpen: async () =>
+          allOpen ? { allOpen: true } : { allOpen: false, detail: '第 2 条 Claude 订阅 · 拼车不在熔断' },
+      });
+    const before = await alertByKey(t.db, 'routing:all-open:execute');
+    const kept = await runHourlyReconcileJob(job(true));
+    const mid = await alertByKey(t.db, 'routing:all-open:execute');
+    expect(kept.outcome).toBe('ok');
+    expect(mid).toMatchObject({ resolvedAt: null, body: '原来的正文' });
+    expect(mid?.updatedAt.getTime()).toBe(before?.updatedAt.getTime());
+    expect(await t.db.select().from(notifications)).toHaveLength(1);
+
+    await runHourlyReconcileJob(job(false));
+    const gone = await alertByKey(t.db, 'routing:all-open:execute');
+    expect(gone?.resolvedBy).toBe(RECONCILE_ACTOR);
+    expect(gone?.body.startsWith('已撤：')).toBe(true);
+    expect(gone?.body).toContain('有路由不熔断了');
+    expect(gone?.body).toContain('写码有路由不熔断了');
   });
 });
 

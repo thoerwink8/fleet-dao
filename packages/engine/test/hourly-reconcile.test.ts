@@ -63,6 +63,7 @@ function harness(over: Partial<HourlyReconcileJobDeps> = {}): Harness {
     taskState: async () => null,
     approval: async () => null,
     stageRoutable: async () => ({ kind: 'none', detail: '没有在线的路由' }),
+    stageAllOpen: async () => ({ allOpen: true }),
     alerts: {
       listOpen: async () => ({ alerts: [], truncated: false }),
       byKey: async () => null,

@@ -111,6 +111,8 @@ export interface HourlyReconcileWiring {
   shBin?: string;
   listDir?: HourlyReconcileJobDeps['listDir'];
   stageRoutable?: HourlyReconcileJobDeps['stageRoutable'];
+  /** 测试用：不给就用选路同一份事实的只读判法（store.stageAllOpen）。 */
+  stageAllOpen?: HourlyReconcileJobDeps['stageAllOpen'];
   workflows?: WorkflowReader;
   inspectMax?: number;
 }
@@ -123,8 +125,8 @@ export function hourlyReconcileJob(
   const log: HourlyReconcileJobDeps['log'] =
     w.log ?? ((level, text, fields) => console[level === 'info' ? 'info' : level](text, fields ?? {}));
   const store = createStorePorts({ db: w.db, now, sessionOrg: w.sessionOrg });
-  // 和点「继续」以后选路会怎么选是同一套：全熔断时它放一条去试探，也算派得出去——它这时还会顺手把「全熔断」那条提醒
-  // 再报一次（条件确实还在）；要一个不写库的判法见 #246。
+  // 和点「继续」以后选路会怎么选是同一套：全熔断时它放一条去试探，也算派得出去。这时它还会顺手把「全熔断」那条提醒
+  // 再报一次（条件确实还在）。这条提醒撤不撤不在这里判，走下面的 stageAllOpen（只读，不写库、不报警）。
   const stageRoutable: HourlyReconcileJobDeps['stageRoutable'] =
     w.stageRoutable ??
     (async (stage, taskId) => {
@@ -135,6 +137,8 @@ export function hourlyReconcileJob(
       if (r.ok) return { kind: 'dispatch' };
       return r.waitFor === 'none' ? { kind: 'none', detail: r.detail } : { kind: 'wait', detail: r.detail };
     });
+  const stageAllOpen: HourlyReconcileJobDeps['stageAllOpen'] =
+    w.stageAllOpen ?? ((stage) => store.stageAllOpen(stage));
   return (client) => ({
     root: w.trees.root,
     probeDir: PROBE_DIR,
@@ -175,6 +179,7 @@ export function hourlyReconcileJob(
     },
     workflows: w.workflows ?? temporalWorkflows(client),
     stageRoutable,
+    stageAllOpen,
     alerts: {
       listOpen: (limit) => listOpenAlerts(w.db, { limit }),
       byKey: (key) => alertByKey(w.db, key),
