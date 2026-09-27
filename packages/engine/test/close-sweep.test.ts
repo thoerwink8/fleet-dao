@@ -56,9 +56,16 @@ describe('关单对账：留言一次、驾驶舱一条、没了就撤', () => {
     const h = harness(async () => facts());
     expect(await sweepClosing(h.deps)).toEqual({ scanned: 1, found: 1, unchecked: [] });
     expect(h.since()?.toISOString()).toBe('2026-08-29T01:00:00.000Z');
-    expect(h.comments).toEqual([{ issue: 12, key: 'close-sweep:due', body: expect.stringContaining('pnpm issue:close 12') }]);
-    expect(h.alerts.map((a) => [a.key, a.title])).toEqual([[`close-sweep:${SLUG}:due`, `${SLUG}：1 张单看着做完了没关`]]);
-    expect(h.resolved.map((r) => r.key)).toEqual([`close-sweep:${SLUG}:mother`, `close-sweep:${SLUG}:no-result`]);
+    expect(h.comments).toEqual([
+      { issue: 12, key: 'close-sweep:due', body: expect.stringContaining('pnpm issue:close 12') },
+    ]);
+    expect(h.alerts.map((a) => [a.key, a.title])).toEqual([
+      [`close-sweep:${SLUG}:due`, `${SLUG}：1 张单看着做完了没关`],
+    ]);
+    expect(h.resolved.map((r) => r.key)).toEqual([
+      `close-sweep:${SLUG}:mother`,
+      `close-sweep:${SLUG}:no-result`,
+    ]);
   });
 
   it('以前留过言的（按键认下）不算这一轮新提醒的', async () => {
@@ -68,7 +75,9 @@ describe('关单对账：留言一次、驾驶舱一条、没了就撤', () => {
 
   it('【故意造出的失败】子单全关了：提醒母单照目标看能不能关（留言、驾驶舱各一条）', async () => {
     const h = harness(async () =>
-      facts({ openIssues: [{ number: 20, title: '母单', subIssues: { total: 2, open: [], closed: [21, 22] } }] }),
+      facts({
+        openIssues: [{ number: 20, title: '母单', subIssues: { total: 2, open: [], closed: [21, 22] } }],
+      }),
     );
     await sweepClosing(h.deps);
     expect(h.comments).toEqual([
@@ -102,7 +111,9 @@ describe('关单对账：留言一次、驾驶舱一条、没了就撤', () => {
 
   it('【故意造出的失败】子单一页没读全：这张记没查成，母单那一种的提醒不撤', async () => {
     const h = harness(async () =>
-      facts({ openIssues: [{ number: 20, title: '母单', subIssues: { total: 60, open: [], closed: [21] } }] }),
+      facts({
+        openIssues: [{ number: 20, title: '母单', subIssues: { total: 60, open: [], closed: [21] } }],
+      }),
     );
     const r = await sweepClosing(h.deps);
     expect(r.unchecked).toEqual([`关单对账 ${SLUG} #20 有 60 张子单，只读到 1 张，判不了是不是都关了`]);

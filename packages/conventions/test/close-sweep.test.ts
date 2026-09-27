@@ -106,7 +106,10 @@ describe('关了却没有结果（no-result）：最近 30 天关成「完成」
 
   it('【故意造出的失败】关单时刻认不出：记没查成，不当成没事', () => {
     const got = closeSweep(facts({ openIssues: [], closedIssues: [closed(50, 'completed', '昨天')] }), NOW);
-    expect(got).toEqual({ findings: [], unchecked: [{ kind: 'no-result', text: '#50 的关单时刻认不出（昨天）' }] });
+    expect(got).toEqual({
+      findings: [],
+      unchecked: [{ kind: 'no-result', text: '#50 的关单时刻认不出（昨天）' }],
+    });
   });
 });
 
@@ -118,16 +121,24 @@ describe('留言和驾驶舱提醒的字', () => {
     expect(text).toContain('`pnpm issue:close 12`');
     expect(text).toContain('specs/12-登录/结果.md');
     expect(text).not.toMatch(/#\d/);
-    const noResult = closeComment({ kind: 'no-result', issue: 50, title: 'x', closedAt: '2026-09-27T10:00:00Z' });
+    const noResult = closeComment({
+      kind: 'no-result',
+      issue: 50,
+      title: 'x',
+      closedAt: '2026-09-27T10:00:00Z',
+    });
     expect(noResult).toContain('specs/50-<短名>/结果.md');
     expect(noResult).not.toMatch(/#\d/);
-    expect(closeComment({ kind: 'mother', issue: 20, title: 'x', subs: [40, 41], result: undefined })).toContain(
-      '子单都关了（#40、#41）',
-    );
+    expect(
+      closeComment({ kind: 'mother', issue: 20, title: 'x', subs: [40, 41], result: undefined }),
+    ).toContain('子单都关了（#40、#41）');
   });
 
   it(`提醒一个仓一种一条，最多列 ${CLOSE_ALERT_LINES} 张，多的写「另有」`, () => {
-    const list: CloseFinding[] = Array.from({ length: CLOSE_ALERT_LINES + 2 }, (_, i) => ({ ...due, issue: i + 1 }));
+    const list: CloseFinding[] = Array.from({ length: CLOSE_ALERT_LINES + 2 }, (_, i) => ({
+      ...due,
+      issue: i + 1,
+    }));
     const a = closeAlert('o/r', 'due', list);
     expect(a.title).toBe(`o/r：${CLOSE_ALERT_LINES + 2} 张单看着做完了没关`);
     expect(a.body).toContain('- #1 登录：specs/12-登录/结果.md');

@@ -44,7 +44,13 @@ export interface GitHubReconcileWiring {
   db: Db;
   gh: Pick<
     GitHub,
-    'eventSink' | 'reconciler' | 'readRepoFile' | 'readIssuePlan' | 'openIssue' | 'commentIssue' | 'readCloseFacts'
+    | 'eventSink'
+    | 'reconciler'
+    | 'readRepoFile'
+    | 'readIssuePlan'
+    | 'openIssue'
+    | 'commentIssue'
+    | 'readCloseFacts'
   >;
   /** 测试用：换掉拉起工作流（不给就是真的，经这次活动的 Temporal 客户端起 Fusion）。 */
   requirements?: RequirementWorkflows;

@@ -10,6 +10,20 @@ export {
   resultDocOf,
 } from './close-rule.ts';
 export {
+  CLOSE_ALERT_LINES,
+  CLOSE_KINDS,
+  CLOSE_LOOKBACK_DAYS,
+  type CloseFinding,
+  type CloseKind,
+  type CloseSweep,
+  type CloseSweepFacts,
+  closeAlert,
+  closeAlertKey,
+  closeComment,
+  closeCommentKey,
+  closeSweep,
+} from './close-sweep.ts';
+export {
   checkDebtDocs,
   checkSpecsDone,
   DEFERRAL_PATTERNS,
@@ -59,20 +73,6 @@ export {
   toMilestoneDetail,
   toPlanIssue,
 } from './github-api.ts';
-export {
-  CLOSE_ALERT_LINES,
-  CLOSE_KINDS,
-  CLOSE_LOOKBACK_DAYS,
-  type CloseFinding,
-  type CloseKind,
-  type CloseSweep,
-  type CloseSweepFacts,
-  closeAlert,
-  closeAlertKey,
-  closeComment,
-  closeCommentKey,
-  closeSweep,
-} from './close-sweep.ts';
 export {
   CLOSE_USAGE,
   CloseRefused,

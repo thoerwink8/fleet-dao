@@ -93,7 +93,7 @@ export function closeCommentKey(f: CloseFinding): string {
   return `close-sweep:${f.kind}`;
 }
 
-/** 单上那条留言（只留一次）。不写别的单号以外的 #号：写了就会在那张单上多一条「被提到」。 */
+/** 单上那条留言（只留一次）。除了母单列的子单号，不写别的 #号：写了就会在那张单上多一条「被提到」。 */
 export function closeComment(f: CloseFinding): string {
   const tail = '（关单对账，每天看一遍；这条只留一次。）';
   switch (f.kind) {
@@ -126,7 +126,11 @@ export function closeAlertKey(repo: string, kind: CloseKind): string {
 export const CLOSE_ALERT_LINES = 30;
 
 /** 一个仓、一种的驾驶舱提醒（这一种一张都没有时不报，由调用方撤）。 */
-export function closeAlert(repo: string, kind: CloseKind, list: readonly CloseFinding[]): { title: string; body: string } {
+export function closeAlert(
+  repo: string,
+  kind: CloseKind,
+  list: readonly CloseFinding[],
+): { title: string; body: string } {
   const n = list.length;
   const title =
     kind === 'due'
@@ -150,7 +154,16 @@ export function closeAlert(repo: string, kind: CloseKind, list: readonly CloseFi
     return `- #${f.issue} ${oneLine(f.title)}：${what}`;
   });
   if (n > CLOSE_ALERT_LINES) lines.push(`- ……另有 ${n - CLOSE_ALERT_LINES} 张`);
-  return { title, body: [head, '', ...lines, '', '每张单上也各留了一条言（只留一次）；这一种都处理完了，这条提醒自己撤。'].join('\n') };
+  return {
+    title,
+    body: [
+      head,
+      '',
+      ...lines,
+      '',
+      '每张单上也各留了一条言（只留一次）；这一种都处理完了，这条提醒自己撤。',
+    ].join('\n'),
+  };
 }
 
 function oneLine(s: string): string {

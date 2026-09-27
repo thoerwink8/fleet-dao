@@ -19,7 +19,11 @@ export interface CloseFacts {
   /** 主线上 specs/ 下两层的文件（specs/<目录>/<文件>）；仓里没有 specs/ 是 null。 */
   specsFiles: string[] | null;
   /** 开着的单（不含 PR）。subIssues.total 是 GitHub 报的子单总数，open、closed 是读到的那些（最多一页）。 */
-  openIssues: { number: number; title: string; subIssues: { total: number; open: number[]; closed: number[] } }[];
+  openIssues: {
+    number: number;
+    title: string;
+    subIssues: { total: number; open: number[]; closed: number[] };
+  }[];
   /** since 之后更新过的、关着的单（不含 PR）：关的原因（completed、not_planned、duplicate……，小写）、关单时刻。 */
   closedIssues: { number: number; title: string; stateReason: string | null; closedAt: string }[];
   /** 开着的 PR。 */
@@ -71,10 +75,14 @@ const Entry = z.object({ name: z.string().min(1), type: z.string() });
 const SubTree = z.object({ __typename: z.literal('Tree'), entries: z.array(Entry) });
 const SpecsTree = z.object({
   __typename: z.literal('Tree'),
-  entries: z.array(Entry.extend({ object: z.union([SubTree, z.object({ __typename: z.string() })]).nullable() })),
+  entries: z.array(
+    Entry.extend({ object: z.union([SubTree, z.object({ __typename: z.string() })]).nullable() }),
+  ),
 });
 const SpecsData = z.object({
-  repository: z.object({ object: z.union([SpecsTree, z.object({ __typename: z.string() })]).nullable() }).nullable(),
+  repository: z
+    .object({ object: z.union([SpecsTree, z.object({ __typename: z.string() })]).nullable() })
+    .nullable(),
 });
 
 const Conn = z.object({
@@ -117,13 +125,19 @@ export async function readCloseFacts(client: Client, input: ReadCloseFactsInput)
   let specsFiles: string[] | null = null;
   if (tree !== null) {
     if (!('entries' in tree)) {
-      throw new GitHubError('UNEXPECTED_RESPONSE', `${slug} 主线上的 specs 不是目录（是 ${tree.__typename}）：没查成`);
+      throw new GitHubError(
+        'UNEXPECTED_RESPONSE',
+        `${slug} 主线上的 specs 不是目录（是 ${tree.__typename}）：没查成`,
+      );
     }
     specsFiles = [];
     for (const dir of tree.entries) {
       if (dir.type !== 'tree') continue;
       if (!dir.object || !('entries' in dir.object)) {
-        throw new GitHubError('UNEXPECTED_RESPONSE', `${slug} 主线上 specs/${dir.name}/ 里有什么没读回来：没查成`);
+        throw new GitHubError(
+          'UNEXPECTED_RESPONSE',
+          `${slug} 主线上 specs/${dir.name}/ 里有什么没读回来：没查成`,
+        );
       }
       for (const f of dir.object.entries) {
         if (f.type === 'blob') specsFiles.push(`specs/${dir.name}/${f.name}`);
@@ -131,13 +145,16 @@ export async function readCloseFacts(client: Client, input: ReadCloseFactsInput)
     }
   }
 
+  // 认不出回 undefined、仓不在回 null：两样分开报（不能写成可选链，那样仓不在也成了 undefined）
   const issuesOf = (d: unknown) => {
     const p = IssuesPage.safeParse(d);
-    return p.success ? p.data.repository && p.data.repository.issues : undefined;
+    if (!p.success) return undefined;
+    return p.data.repository === null ? null : p.data.repository.issues;
   };
   const pullsOf = (d: unknown) => {
     const p = PullsPage.safeParse(d);
-    return p.success ? p.data.repository && p.data.repository.pullRequests : undefined;
+    if (!p.success) return undefined;
+    return p.data.repository === null ? null : p.data.repository.pullRequests;
   };
   const openIssues = (
     await pages(client, auth, CLOSE_OPEN_ISSUES_QUERY, vars, issuesOf, OpenIssue, `${slug} 开着的单`, signal)
@@ -152,7 +169,16 @@ export async function readCloseFacts(client: Client, input: ReadCloseFactsInput)
   }));
   const closedVars = { ...vars, since: input.since.toISOString() };
   const closedIssues = (
-    await pages(client, auth, CLOSE_CLOSED_ISSUES_QUERY, closedVars, issuesOf, ClosedIssue, `${slug} 最近关掉的单`, signal)
+    await pages(
+      client,
+      auth,
+      CLOSE_CLOSED_ISSUES_QUERY,
+      closedVars,
+      issuesOf,
+      ClosedIssue,
+      `${slug} 最近关掉的单`,
+      signal,
+    )
   ).map((i) => {
     if (!i.closedAt) {
       throw new GitHubError('UNEXPECTED_RESPONSE', `${slug}#${i.number} 关着却没有关单时刻：没查成`);
@@ -164,7 +190,16 @@ export async function readCloseFacts(client: Client, input: ReadCloseFactsInput)
       closedAt: i.closedAt,
     };
   });
-  const openPulls = await pages(client, auth, CLOSE_OPEN_PULLS_QUERY, vars, pullsOf, OpenPull, `${slug} 开着的 PR`, signal);
+  const openPulls = await pages(
+    client,
+    auth,
+    CLOSE_OPEN_PULLS_QUERY,
+    vars,
+    pullsOf,
+    OpenPull,
+    `${slug} 开着的 PR`,
+    signal,
+  );
   return { specsFiles, openIssues, closedIssues, openPulls };
 }
 
@@ -193,7 +228,10 @@ async function pages<N>(
     if (!conn.pageInfo.endCursor) throw unexpected(`读 ${what}（说有下一页却没给游标）`, data);
     after = conn.pageInfo.endCursor;
   }
-  throw new GitHubError('TOO_MANY_PAGES', `${what}翻了 ${CLOSE_FACTS_MAX_PAGES} 页还没翻完：没查全（没查成）`);
+  throw new GitHubError(
+    'TOO_MANY_PAGES',
+    `${what}翻了 ${CLOSE_FACTS_MAX_PAGES} 页还没翻完：没查全（没查成）`,
+  );
 }
 
 function notFound(what: string): GitHubError {
