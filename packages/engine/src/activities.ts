@@ -240,7 +240,7 @@ function withdrawMerge(input: Parameters<EngineActivities['withdrawMerge']>[0]):
  * 不给（假端口）就不跑，活动明确报 JOB_NOT_CONFIGURED——定时任务是真端口那边建的，假端口的工人接到了也不装作跑过。
  */
 export interface EngineJobs {
-  /** taskQueue：这个工人取活的任务队列，补回来的需求工作流起在这里。 */
+  /** taskQueue：这个工人取活的任务队列，补回来的单的工作流（Fusion）起在这里。 */
   githubReconcile?: (client: Client, taskQueue: string) => GitHubReconcileJobDeps;
   /** 路由探针（#129）：读路由、真起最小会话、写结论。 */
   routeProbe?: () => RouteProbeJobDeps;

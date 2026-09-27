@@ -22,9 +22,12 @@ import type { Limits } from './limits.ts';
 import type { WaitKind } from './ports.ts';
 
 export const WORKFLOW_TYPES = {
-  /** 后端起需求工作流也用这个名字（@fleet-dao/shared/workflow-ids）。 */
+  /** 旧的需求工作流：后端从 #214 起不再起它，留着让在途的跑完（#250 删）。名字和后端共用（@fleet-dao/shared/workflow-ids）。 */
   requirement: REQUIREMENT_WORKFLOW_TYPE,
-  /** Fusion：一张单一个 Lead 会话带一个副手（0003 第 5 条）。编号和需求工作流同一个（requirementWorkflowId）。 */
+  /**
+   * Fusion：一张单一个 Lead 会话带一个副手（0003 第 5 条），后端接活起的就是它（api 的 temporal.ts）。编号和需求工作流
+   * 同一个（requirementWorkflowId）。
+   */
   fusion: FUSION_WORKFLOW_TYPE,
   subtask: 'subtaskWorkflow',
   mergeQueue: 'mergeQueueWorkflow',

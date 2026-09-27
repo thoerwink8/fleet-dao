@@ -31,6 +31,15 @@ const REQUIRED = [
   'requirement-asking',
   'requirement-running',
   'requirement-running-main',
+  // #214 起后端给每张单起 Fusion：在途的 Fusion 停在这些位置时换上新代码也得接得上
+  'fusion-done',
+  'fusion-reworked',
+  'fusion-single',
+  'fusion-asking',
+  'fusion-paused',
+  'fusion-parked',
+  'fusion-awaiting-approval',
+  'fusion-in-merge-queue',
 ];
 
 const HOW =

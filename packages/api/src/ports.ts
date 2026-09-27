@@ -921,12 +921,13 @@ export class WorkflowGoneError extends Error {
 }
 
 /**
- * 拉起需求工作流要给的东西：就是 @fleet-dao/shared 的 RequirementStartInput，引擎 contract.ts 的 RequirementInput
- * 在它上面只加可选字段（limits、routeOverrides 不给，用引擎的默认）。进了工作流历史：以后只许加可选字段。
+ * 拉起一张单的工作流要给的东西：就是 @fleet-dao/shared 的 RequirementStartInput，引擎 contract.ts 的 FusionInput（和旧的
+ * RequirementInput）在它上面只加可选字段（limits、routeOverrides、类别、模式这些不给，用引擎的默认、按流程配置判）。
+ * 进了工作流历史：以后只许加可选字段。
  */
 export type RequirementStart = RequirementStartInput;
 
-/** 拉起需求工作流（一张 issue 一条，工作流编号 requirementWorkflowId(repo, issueNumber)）。 */
+/** 拉起一张单的工作流：Fusion（一张 issue 一条，工作流编号 requirementWorkflowId(repo, issueNumber)）。 */
 export interface RequirementWorkflows {
   /**
    * 同一编号的工作流正在跑：already_running，不起第二条；上一条已经结束（需求重开）就再起一条。
@@ -960,7 +961,7 @@ export class InvalidCursorError extends Error {
   }
 }
 
-/** 连 Temporal 的一份连接：发信号、拉起需求工作流 + 给健康检查用的两项探活。用 @temporalio/client 实现，见 temporal.ts。 */
+/** 连 Temporal 的一份连接：发信号、拉起一张单的工作流 + 给健康检查用的两项探活。用 @temporalio/client 实现，见 temporal.ts。 */
 export interface TemporalConnection {
   control: WorkflowControl;
   requirements: RequirementWorkflows;

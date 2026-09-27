@@ -1,6 +1,6 @@
 // 对账补漏的真装配：后端的 Store（同一个库）、GitHubIntake（同一道门、同一本投递账）、@fleet-dao/github 的真轮询，
-// 记账用 @fleet-dao/db 的 schedule_runs。发信号、拉起需求工作流（后端的 createTemporalRequirementWorkflows，和 webhook 那条
-// 同一份实现）用这次活动自己的 Temporal 客户端，起在这个工人取活的任务队列上。
+// 记账用 @fleet-dao/db 的 schedule_runs。发信号、拉起一张单的工作流（后端的 createTemporalRequirementWorkflows，和 webhook
+// 那条同一份实现，起的都是 Fusion）用这次活动自己的 Temporal 客户端，起在这个工人取活的任务队列上。
 // 每轮先同步各仓的流程配置副本（jobs/flow-config.ts）：「引擎」机器人读默认分支头上的 .fleet/flow.json，全组织默认读这份
 // 代码里带的 packages/core/flow.default.json，写库、报提醒都是同一个库。
 import { readFile } from 'node:fs/promises';
@@ -34,7 +34,7 @@ import type { GitHubReconcileJobDeps } from '../jobs/github-reconcile.ts';
 export interface GitHubReconcileWiring {
   db: Db;
   gh: Pick<GitHub, 'eventSink' | 'reconciler' | 'readRepoFile'>;
-  /** 测试用：换掉拉起需求工作流（不给就是真的，经这次活动的 Temporal 客户端起）。 */
+  /** 测试用：换掉拉起工作流（不给就是真的，经这次活动的 Temporal 客户端起 Fusion）。 */
   requirements?: RequirementWorkflows;
   /** 测试用：换掉全组织默认（不给就读这份代码里带的 packages/core/flow.default.json）。 */
   orgDefault?: () => Promise<Source>;

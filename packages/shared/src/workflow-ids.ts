@@ -8,19 +8,21 @@ export interface WorkflowRepoRef {
 }
 
 /**
- * 需求工作流的类型名：后端按它起工作流，引擎的 WORKFLOW_TYPES.requirement 就是它。
- * 必须等于引擎 workflows/requirement.ts 导出的函数名（Temporal 按导出名找工作流）。
+ * 旧的需求工作流的类型名，引擎的 WORKFLOW_TYPES.requirement 就是它。必须等于引擎 workflows/requirement.ts 导出的函数名
+ * （Temporal 按导出名找工作流）。后端从 #214 第 3 个 PR 起不再起它（接活一律起 FUSION_WORKFLOW_TYPE），引擎留着它只为
+ * 让那之前起的在途任务跑完；整个删掉归 #250。
  */
 export const REQUIREMENT_WORKFLOW_TYPE = 'requirementWorkflow';
 
 /**
  * Fusion 工作流的类型名（docs/decisions/0003-fusion-flow.md 第 5 条：一张单一个 Lead 会话带一个副手，引擎推分支、开 PR、
- * 合并、关单，不直写主线）。必须等于引擎 workflows/fusion.ts 导出的函数名。工作流编号和需求工作流同一个
- * （requirementWorkflowId）：驾驶舱、fleet 命令的信号照旧按它发。
+ * 合并、关单，不直写主线）：后端接活起的就是它（api 的 temporal.ts）。Fusion 模式还是单模型模式（0003 第 7 条）由它开工前
+ * 按流程配置副本判，不是另一种工作流。必须等于引擎 workflows/fusion.ts 导出的函数名。工作流编号和旧的需求工作流同一个
+ * （requirementWorkflowId）：驾驶舱、fleet 命令的信号照旧按它发；同一张单同一时刻只能有一条在跑，切换那一刻也起不了两条。
  */
 export const FUSION_WORKFLOW_TYPE = 'fusionWorkflow';
 
-/** 一张 issue 一条需求工作流，例如 `req:acme/demo#12`。 */
+/** 一张 issue 一条工作流（Fusion；在途的旧需求工作流也是这个编号），例如 `req:acme/demo#12`。 */
 export function requirementWorkflowId(repo: WorkflowRepoRef, issueNumber: number): string {
   return `req:${repo.owner}/${repo.name}#${issueNumber}`;
 }

@@ -2,7 +2,7 @@
 // 走真的 webhook 接口（验签、落库、白名单），工作流用 harness 里记录调用的假的。
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { requirementWorkflowId } from '@fleet-dao/shared';
+import { FUSION_WORKFLOW_TYPE, requirementWorkflowId } from '@fleet-dao/shared';
 import { WorkflowExecutionAlreadyStartedError } from '@temporalio/client';
 import { describe, expect, it } from 'vitest';
 import { devFixtures, IDS } from '../src/dev-fixtures.ts';
@@ -221,9 +221,10 @@ describe('issue 进来：建任务行、拉起需求工作流', () => {
     expect(starts).toEqual([t?.id]);
   });
 
-  it('接上真的拉起实现（假 Temporal 客户端按编号去重）：同一张 issue 投两次只起一条；连不上记成出错，重放再起', async () => {
+  it('接上真的拉起实现（假 Temporal 客户端按编号去重）：起的是 Fusion；同一张 issue 投两次只起一条；连不上记成出错，重放再起', async () => {
     let down = false;
     const started: string[] = [];
+    const types: string[] = [];
     const client: WorkflowStarterLike = {
       connection: {
         async withDeadline(_deadline, fn) {
@@ -245,6 +246,7 @@ describe('issue 进来：建任务行、拉起需求工作流', () => {
             );
           }
           started.push(options.workflowId);
+          types.push(workflowType);
           return {};
         },
       },
@@ -270,6 +272,7 @@ describe('issue 进来：建任务行、拉起需求工作流', () => {
       note: 'task=exists, workflow=started',
     });
     expect(started).toEqual([requirementWorkflowId(CANARY, 40), requirementWorkflowId(CANARY, 41)]);
+    expect(types).toEqual([FUSION_WORKFLOW_TYPE, FUSION_WORKFLOW_TYPE]);
   });
 
   it('/issues 列表里混进来的 PR：不建任务', async () => {
@@ -724,6 +727,40 @@ describe('流程配置副本不能用：这个项目停派（0003 第 9 条，�
       note: 'task=exists, workflow=started',
     });
     expect(h.starts).toHaveLength(1);
+  });
+
+  it('【失败】副本认不出、接上真的拉起实现：Fusion 不起，也不退回去起旧的需求工作流；副本好了重放，起的是 Fusion', async () => {
+    const types: string[] = [];
+    const client: WorkflowStarterLike = {
+      connection: {
+        async withDeadline(_deadline, fn) {
+          return fn();
+        },
+      },
+      workflow: {
+        async start(workflowType) {
+          types.push(workflowType);
+          return {};
+        },
+      },
+    };
+    const { h } = setup({ requirements: createTemporalRequirementWorkflows(client, 'q') });
+    canary(h).flow = {
+      syncedAt: at(-5),
+      error: '项目配置 .fleet/flow.json：格式版本 9 认不出（认 1）（提交 0123456）',
+      unread: null,
+      testCommand: null,
+    };
+    const res = await deliver(h, 'issues', issuesEvent('opened'), { delivery: 'switch' });
+    expect(res.status).toBe(503);
+    expect(types).toEqual([]);
+
+    canary(h).flow = { syncedAt: at(0), error: null, unread: null, testCommand: 'pnpm test:changed' };
+    expect(await createGitHubIntake(h.deps).replay('switch')).toMatchObject({
+      verdict: 'accepted',
+      note: 'task=exists, workflow=started',
+    });
+    expect(types).toEqual([FUSION_WORKFLOW_TYPE]);
   });
 
   it.each<[string, MemoryData['repos'][number]['flow'], RegExp]>([

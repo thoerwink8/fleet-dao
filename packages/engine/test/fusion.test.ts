@@ -176,6 +176,11 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
     expect(comment).toContain('**各模型额度**');
     for (const model of ['m1', 'm2', 'm3']) expect(comment).toContain(`- ${model}：`);
     expect(comment).toContain('读自仓里的 .fleet/flow.json');
+
+    // 任务上记这一轮用的流程配置读自哪（tasks.flow_source）：每一次快照都带着，读自仓里的
+    expect(w.states.length).toBeGreaterThan(0);
+    expect(new Set(w.states.map((s) => s.flowSource))).toEqual(new Set(['project']));
+    expect(w.states.at(-1)).toMatchObject({ state: 'done', specDir: SPEC_DIR, docs: DOCS });
   });
 
   it('副手打回两次还没做好：第三次 Lead 接手自己写，后面照常验证、开 PR；全组织默认的配置在 PR 里写明', async () => {
@@ -230,6 +235,9 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
     expect(body?.owed?.join('\n')).toContain('没有 .fleet/flow.json');
     expect(status.flowSource).toBe('org_default');
     expect(w.callsOf('closeIssue')[0]?.input.comment).toContain('用的全组织默认');
+    // 任务上记下「用的全组织默认」（驾驶舱照它标出来）：从第一次快照起就有
+    expect(w.states[0]?.flowSource).toBe('org_default');
+    expect(w.states.every((s) => s.flowSource === 'org_default')).toBe(true);
   });
 
   it('验证挡了两轮（Lead 没驳回）：回去改一轮还没过，停下等人，不开 PR', async () => {
@@ -378,6 +386,38 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
     expect(result.state).toBe('done');
     expect(w.count('taskRequest')).toBe(1);
     expect(result.docs.requirement).toBe(DOCS.requirement);
+    // 停在收单时库里也看得见（状态、为什么停、用的哪份配置）；认出需求文档之前不写目录和文档，不冲掉库里上一轮的
+    const stuck = w.states.find((s) => s.doing.includes('认不出需求文档'));
+    expect(stuck).toMatchObject({ state: 'triaging', phase: 'fusion:parked', flowSource: 'project' });
+    expect(stuck?.doing).toMatch(/^停下等人：认不出需求文档/);
+    expect(stuck && 'specDir' in stuck).toBe(false);
+    expect(stuck && 'docs' in stuck).toBe(false);
+    // 认不出需求文档的时候 issue 上的进度段不动（进度段里要写文档路径）
+    const firstProgress = w.callsOf('updateIssueProgress')[0];
+    expect(firstProgress?.input.progress.docs.requirement).toBe(DOCS.requirement);
+  });
+
+  it('【失败】流程配置不能用、停派时叫停：库里的任务记成叫停（不留在排队），没有配置就不记读自哪', async () => {
+    const w = world({
+      flow: () => ({
+        replica: {
+          syncedAt: new Date().toISOString(),
+          error: '项目配置 .fleet/flow.json：不是 JSON（提交 0123456）',
+          unread: null,
+          testCommand: null,
+        },
+        source: 'project',
+        config: FAKE_FLOW_CONFIG,
+      }),
+    });
+    const { parked, result } = await runUntilParked(w);
+    expect(parked.lastProblem).toContain('流程配置不能用，这张单停派');
+    expect(result.state).toBe('stopped');
+    expect(w.count('startSession')).toBe(0);
+    const last = w.states.at(-1);
+    expect(last).toMatchObject({ state: 'stopped', doing: '已叫停' });
+    expect(last && 'flowSource' in last).toBe(false);
+    expect(last && 'specDir' in last).toBe(false);
   });
 
   it('单模型模式：Lead 自己写、不派副手，不高风险就不验证，照样最终审查写结果', async () => {

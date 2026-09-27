@@ -179,7 +179,7 @@ beforeEach(async () => {
 /** 受管的仓（自动派活开关一小时前打开）、白名单里的创始人、登记好的定时任务，加一个照 GitHub 回话的假服务。 */
 async function wiring(
   state: GitHubState,
-  /** requirements：'real' = 真的经 Temporal 起需求工作流（后端的 createTemporalRequirementWorkflows）；不给就是只记下的假的。 */
+  /** requirements：'real' = 真的经 Temporal 起工作流（后端的 createTemporalRequirementWorkflows，起 Fusion）；不给就是只记下的假的。 */
   options: {
     requirements?: RequirementWorkflows | 'real';
     register?: boolean;
@@ -256,7 +256,7 @@ describe('对账补漏的工作流（真 Temporal 测试服务端）', { timeout
     return cause as ApplicationFailure;
   }
 
-  it('库里缺一条 issue：跑一轮补上任务行、经 Temporal 真起需求工作流，记一行 ok；再跑一轮不重复建、不重复起', async () => {
+  it('库里缺一条 issue：跑一轮补上任务行、经 Temporal 真起工作流（和 webhook 那条一样起 Fusion），记一行 ok；再跑一轮不重复建、不重复起', async () => {
     const w = await wiring({ issues: [issue(41, -20)] }, { requirements: 'real' });
     const jobs = { githubReconcile: w.job };
     const requirement = () =>
@@ -269,7 +269,8 @@ describe('对账补漏的工作流（真 Temporal 测试服务端）', { timeout
     const rows = (await t.db.select().from(tasks)).filter((r) => r.repoId === w.repoId);
     expect(rows.map((r) => [r.issueNumber, r.title])).toEqual([[41, '需求 41']]);
     const started = await requirement();
-    expect(started.type).toBe(WORKFLOW_TYPES.requirement);
+    // 对账补漏（引擎这边重放投递）和 webhook（后端）用同一份拉起实现：起的一定是同一种，不会一边起 Fusion 一边起旧的
+    expect(started.type).toBe(WORKFLOW_TYPES.fusion);
 
     const second = await runOnce(jobs);
     expect(second).toMatchObject({ outcome: 'ok', scanned: 1, found: 0 });
@@ -307,10 +308,10 @@ describe('对账补漏的工作流（真 Temporal 测试服务端）', { timeout
     expect(await t.db.select().from(tasks)).toHaveLength(0);
   });
 
-  it('拉起需求工作流时 Temporal 连不上：这一轮不记 ok（投递记成出错，等下一轮重放），不装作拉起了', async () => {
+  it('拉起工作流时 Temporal 连不上：这一轮不记 ok（投递记成出错，等下一轮重放），不装作拉起了', async () => {
     const unreachable: RequirementWorkflows = {
       async start() {
-        throw new WorkflowUnavailableError('拉起需求工作流：Temporal 连不上或没回应');
+        throw new WorkflowUnavailableError('拉起工作流：Temporal 连不上或没回应');
       },
     };
     const w = await wiring({ issues: [issue(41, -20)] }, { requirements: unreachable });

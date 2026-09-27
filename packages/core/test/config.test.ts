@@ -53,11 +53,22 @@ describe('流程配置', () => {
     ]);
   });
 
-  it('fleet-dao 自己仓根的 .fleet/flow.json 认得出：测试命令是只跑改动影响到的那条', () => {
+  it('fleet-dao 自己仓根的 .fleet/flow.json 认得出：测试命令是只跑改动影响到的那条；页面代码按界面类派（GPT 不写不验）', () => {
     const own = readFileSync(new URL('../../../.fleet/flow.json', import.meta.url), 'utf8');
     const got = ok(resolveFlowConfig(org, { kind: 'text', text: own }));
     expect(got.usedOrgDefault).toBe(false);
     expect(got.config.testCommand).toBe('pnpm test:changed');
+    // 驾驶舱网页、飞书卡片算页面代码；后端、引擎不算（全组织默认里 uiPaths 是空的，不写这一条改网页的活也会派给 GPT 验）
+    const touched = [
+      'packages/web/src/routes/task-detail.tsx',
+      'packages/web/src/app.css',
+      'packages/feishu/src/cards.ts',
+      'deploy/web/health/index.html',
+      'packages/api/src/views.ts',
+      'packages/engine/src/workflows/fusion.ts',
+      'packages/feishu/src/gateway.ts',
+    ];
+    expect(uiFiles(got.config, touched)).toEqual(touched.slice(0, 4));
   });
 
   it('全组织默认里没有测试命令：项目不写，合并出来的就没有（不拿别的仓的命令顶）', () => {

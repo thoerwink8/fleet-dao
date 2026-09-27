@@ -473,7 +473,7 @@ FLEET_DEMO_PATH=/demo/                  # 演示版的路径，和香港 hk.env 
   - 派活只认副本（判法在 `packages/core/src/replica.ts`）：仓里没有这个文件就用全组织默认（副本标 `org_default`），但全组织默认里不放测试命令，这种仓的写码会话会停下说「项目没写测试命令」；文件认不出（坏 JSON、格式不对）这个项目停派，提醒中心报一条 `flow-config:<owner>/<仓名>`；读的时候 GitHub 出错只记「没查成」、副本不动，超过 45 分钟没同步成同样停派、报提醒。停派时新来的单照收（建任务行），投递记成等着，副本好了那一轮对账重放、自动拉起。核对（加完仓想马上同步，先手动跑一轮下面那条对账）：`sudo -u fleet psql fleet -c "select owner, name, test_command, flow_source, flow_commit, flow_synced_at, flow_error, flow_unread from repos"`。
   - 带 GitHub 账号的成员：白名单按 `users` 表认 GitHub 作者（有数字编号只按编号认），创始人那一行补上 GitHub 的数字编号和登录名，两个机器人各加一行 `role = 'bot'`（编号是 `<App 的 slug>[bot]` 这个用户的编号，不是 App 的编号）；数字编号用 `gh api users/<登录名>` 查：`sudo -u fleet psql fleet -c "update users set github_id = <编号>, github_login = '<登录名>' where id = '<创始人那一行的 id>' and github_id is null"`、`sudo -u fleet psql fleet -c "insert into users (display_name, role, github_login, github_id) values ('<slug>[bot]', 'bot', '<slug>[bot]', <编号>) on conflict (github_id) do nothing"`。
   - 加完手动跑一轮对账（`fleet-temporal schedule trigger --schedule-id github-reconcile`），已经开着的单这一轮就补进来。
-- 受管的仓就是库里 `repos` 表的行，别的仓的事件一律不收。「让 AI 接活」开关是 `repos.auto_dispatch_since`：空 = 关着，只收单（建任务行）、不拉起需求工作流；打开以前就开着的 issue 也不自动派。开关用上面的 `fleet-api dispatch`，别直接改库：直接改的不进操作记录。
+- 受管的仓就是库里 `repos` 表的行，别的仓的事件一律不收。「让 AI 接活」开关是 `repos.auto_dispatch_since`：空 = 关着，只收单（建任务行）、不拉起工作流（打开后给每张单起 Fusion 工作流，design 第五节）；打开以前就开着的 issue 也不自动派。开关用上面的 `fleet-api dispatch`，别直接改库：直接改的不进操作记录。
 
 两台同一份（飞书网关的通行证）：法国生成，原样拷到香港，值不过屏幕。香港那头先落临时名，收到的不是完整的一行通行证（法国那头没读成、传到一半断了、读到的是报错）就不换，原来那份原样留着：
 

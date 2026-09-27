@@ -500,9 +500,12 @@ export interface TaskStateSnapshot extends Scope {
   state: TaskState;
   phase: string;
   doing: string;
-  specDir: string;
-  docs: { requirement?: string; plan?: string; result?: string };
+  /** 需求文档目录和文档：不给就不动库里的（Fusion 认出单子正文指的需求文档之前，写空的会冲掉上一轮记下的）。 */
+  specDir?: string;
+  docs?: { requirement?: string; plan?: string; result?: string };
   lastProblem: string | null;
+  /** 这一轮用的流程配置读自仓里还是全组织默认（驾驶舱要标出后者）：Fusion 开工前判完配置才有，旧的需求工作流不给。 */
+  flowSource?: 'project' | 'org_default';
   subtasks: {
     id: string;
     key: string;

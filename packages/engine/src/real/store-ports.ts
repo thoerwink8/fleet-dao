@@ -540,9 +540,10 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         state: input.state,
         phase: input.phase,
         doing: input.doing,
-        specDir: input.specDir,
-        docs: input.docs,
+        ...(input.specDir !== undefined ? { specDir: input.specDir } : {}),
+        ...(input.docs !== undefined ? { docs: input.docs } : {}),
         lastProblem: input.lastProblem,
+        ...(input.flowSource !== undefined ? { flowSource: input.flowSource } : {}),
         subtasks: input.subtasks,
       });
       if (r === 'task_not_found') {

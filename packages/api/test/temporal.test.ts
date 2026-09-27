@@ -1,4 +1,5 @@
 import {
+  FUSION_WORKFLOW_TYPE,
   REQUIREMENT_WORKFLOW_TYPE,
   type Repo,
   type RequirementStartInput,
@@ -117,7 +118,7 @@ describe('Temporal 信号', () => {
   });
 });
 
-describe('拉起需求工作流（createTemporalRequirementWorkflows）', () => {
+describe('拉起一张单的工作流（createTemporalRequirementWorkflows，起的是 Fusion）', () => {
   const INPUT: RequirementStartInput = {
     schemaVersion: 1,
     taskId: 't1',
@@ -158,13 +159,13 @@ describe('拉起需求工作流（createTemporalRequirementWorkflows）', () => 
     return { client, calls, finish: (id: string) => running.delete(id) };
   }
 
-  it('按 requirementWorkflowId 起引擎的需求工作流：类型名、任务队列、输入原样、编号冲突报错、结束了的可以再起', async () => {
+  it('按 requirementWorkflowId 起引擎的 Fusion 工作流：类型名、任务队列、输入原样、编号冲突报错、结束了的可以再起', async () => {
     const { client, calls } = fakeStarter();
     const requirements = createTemporalRequirementWorkflows(client, 'fleet-main');
     expect(await requirements.start(INPUT)).toBe('started');
     expect(calls).toEqual([
       {
-        workflowType: REQUIREMENT_WORKFLOW_TYPE,
+        workflowType: FUSION_WORKFLOW_TYPE,
         options: {
           taskQueue: 'fleet-main',
           workflowId: requirementWorkflowId(INPUT.repo, 12),
@@ -174,7 +175,39 @@ describe('拉起需求工作流（createTemporalRequirementWorkflows）', () => 
         },
       },
     ]);
-    expect(REQUIREMENT_WORKFLOW_TYPE).toBe('requirementWorkflow');
+    expect(FUSION_WORKFLOW_TYPE).toBe('fusionWorkflow');
+  });
+
+  it('【失败】不再起旧的需求工作流：起过的类型里没有 requirementWorkflow（#214 起接活一律起 Fusion）', async () => {
+    const { client, calls } = fakeStarter();
+    const requirements = createTemporalRequirementWorkflows(client, 'q');
+    await requirements.start(INPUT);
+    await requirements.start({ ...INPUT, issueNumber: 13 });
+    expect(calls.map((c) => c.workflowType)).toEqual([FUSION_WORKFLOW_TYPE, FUSION_WORKFLOW_TYPE]);
+    expect(calls.some((c) => c.workflowType === REQUIREMENT_WORKFLOW_TYPE)).toBe(false);
+  });
+
+  it('切换那一刻：同一张 issue 的旧需求工作流还在跑（切换之前起的），再起回 already_running，不起第二条、不换掉它', async () => {
+    const { client, calls, finish } = fakeStarter();
+    const workflowId = requirementWorkflowId(INPUT.repo, 12);
+    // 旧后端起的：同一个编号、旧类型
+    await client.workflow.start(REQUIREMENT_WORKFLOW_TYPE, {
+      taskQueue: 'q',
+      workflowId,
+      args: [INPUT],
+      workflowIdConflictPolicy: 'FAIL',
+      workflowIdReusePolicy: 'ALLOW_DUPLICATE',
+    });
+    const requirements = createTemporalRequirementWorkflows(client, 'q');
+    expect(await requirements.start(INPUT)).toBe('already_running');
+    // 旧的跑完了（重开）：这回起的是 Fusion
+    finish(workflowId);
+    expect(await requirements.start(INPUT)).toBe('started');
+    expect(calls.map((c) => c.workflowType)).toEqual([
+      REQUIREMENT_WORKFLOW_TYPE,
+      FUSION_WORKFLOW_TYPE,
+      FUSION_WORKFLOW_TYPE,
+    ]);
   });
 
   it('同一张 issue 再起一次（重投、重放）：already_running，不起第二条；上一条结束了（重开）就再起', async () => {
@@ -216,7 +249,7 @@ describe('拉起需求工作流（createTemporalRequirementWorkflows）', () => 
     const requirements = createTemporalRequirementWorkflows(timesOut, 'q', 20);
     await expect(requirements.start(INPUT)).rejects.toThrow(
       new WorkflowUnavailableError(
-        `拉起需求工作流 ${requirementWorkflowId(INPUT.repo, 12)}：Temporal 连不上或没回应`,
+        `拉起工作流 ${requirementWorkflowId(INPUT.repo, 12)}：Temporal 连不上或没回应`,
       ),
     );
   });
