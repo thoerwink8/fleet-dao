@@ -41,6 +41,11 @@ export { buildGrokArgs, type GrokArgsSpec, type GrokSession, grokModelMatches } 
 export { type GrokRunReport, type GrokRunSpec, grokRunFacts, grokRunSummary, runGrok } from './grok/run.ts';
 export { type GrokEnd, GrokStreamReader, type GrokStreamSummary, type GrokUsage } from './grok/stream.ts';
 export {
+  type BridgeConnectorOptions,
+  type BridgeMirasimEndpoint,
+  bridgeMirasimConnector,
+} from './mirasim/bridge-connect.ts';
+export {
   type LedgerFs,
   type LedgerReading,
   type LedgerRouting,

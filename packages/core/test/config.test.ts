@@ -215,4 +215,29 @@ describe('流程配置', () => {
       expect(got.why).toMatch(why);
     }
   });
+
+  // 断链修复（09-28 法国实测）：这版解析器不认识的新字段和真错的配置要分得清（jobs/flow-config.ts 靠 unknownKeys
+  // 判「也许配置比引擎新」，不是真错就不能悄悄放过，两边都要各有一条能通过、一条不能被误判的用例）。
+  describe('unknownFormatKeys：分清「这版没听说过的字段」和「真错了」', () => {
+    it('项目配置里一个压根没写过的字段：判成「新字段」，带上键名', () => {
+      const got = resolveFlowConfig(org, project({ formatVersion: 1, 未来字段: 'x' }));
+      expect(got.ok).toBe(false);
+      if (!got.ok) expect(got.unknownKeys).toEqual(['未来字段']);
+    });
+
+    it('【故意造出的失败】字段是这版认得、只是放错地方的（riskPathsFile 写进了全组织默认）：不算新字段', () => {
+      const got = resolveFlowConfig(
+        orgWith((o) => (o.riskPathsFile = 'packages/conventions/high-risk-paths.json')),
+        { kind: 'missing' },
+      );
+      expect(got.ok).toBe(false);
+      if (!got.ok) expect(got.unknownKeys).toBeUndefined();
+    });
+
+    it('【故意造出的失败】真错的配置（riskPathsFile 类型不对）混着别的问题：不算新字段，不能被判成「也许是新版本」', () => {
+      const got = resolveFlowConfig(org, project({ formatVersion: 1, riskPathsFile: 42 }));
+      expect(got.ok).toBe(false);
+      if (!got.ok) expect(got.unknownKeys).toBeUndefined();
+    });
+  });
 });

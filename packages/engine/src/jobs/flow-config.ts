@@ -6,6 +6,11 @@
 //   - 认不出（坏 JSON、格式不对，或全组织默认坏了）：副本里的配置不动，记下原因——这个仓停派，报一条提醒。
 //   - 没查成（GitHub 接口出错）：副本不动、不当成「没有这个文件」，只记原因；太久没同步成（core 的
 //     FLOW_REPLICA_MAX_AGE_MINUTES）同样停派、报提醒。
+//   - 例外——版本错位（法国 2026-09-28 实测踩过，docs/design.md 第九节）：项目的配置和认得它的引擎代码同一个 PR 进主线，
+//     主线上的配置总是先于能读它的引擎生效。「认不出」只是因为多了几个这版引擎还没听说过的字段（core 的
+//     unknownFormatKeys 判出来），且核实过这份配置确实比引擎自己在跑的提交新（ownCommit、newerThanOwn；判不出就当判不出，
+//     不能悄悄放过）：不写副本、不停派，继续用库里的旧副本，只记一条日报级提醒（notice，不推人），下一轮对账解析成功时
+//     跟别的一样自动撤掉。字段真错了，或者判不出是不是新版本，照老规矩停派、报警。
 import {
   type FlowRead,
   type FlowSync,
@@ -30,10 +35,22 @@ export interface FlowConfigJobDeps {
   read(repo: { owner: string; name: string }): Promise<{ commit: string; file: Source }>;
   /** @fleet-dao/db 的 writeFlowReplica。 */
   write(repoId: string, w: FlowReplicaWrite, at: Date): Promise<'ok' | 'not_found'>;
-  /** 提醒：同一个键只一条，再报原地更新（@fleet-dao/db 的 upsertAlert）。 */
+  /** 提醒：同一个键只一条，再报原地更新（@fleet-dao/db 的 upsertAlert，level: 'alert'）。 */
   alert(key: string, title: string, body: string): Promise<void>;
-  /** 事情好了撤掉提醒（resolveAlertByKey）；本来就没有、已经撤了都不算错。 */
+  /**
+   * 日报级提醒（不推人）：同一个键只一条，原地更新（@fleet-dao/db 的 upsertAlert，level: 'daily'）。「配置比引擎新，
+   * 等发布跟上」这种不算真错，用它，不用 alert。
+   */
+  notice(key: string, title: string, body: string): Promise<void>;
+  /** 事情好了撤掉提醒（resolveAlertByKey）；本来就没有、已经撤了都不算错。alert、notice 用的是同一批键，都靠它撤。 */
   resolve(key: string): Promise<void>;
+  /** 引擎这个进程自己在跑哪个提交（worker.ts 的 ownReleaseSha）；开发机、测试环境认不出是 null——认不出就不判「比我新」。 */
+  ownCommit(): string | null;
+  /**
+   * 判一个仓这次读到的提交，是不是含着 own（引擎自己在跑的那个）：含着就是配置比引擎新（还没发布跟上）。目标仓和
+   * fleet-dao（引擎自己的仓）不是同一个仓时天然判不出（不同仓的提交没有祖先关系），回 null；GitHub 出错原样抛。
+   */
+  newerThanOwn(repo: { owner: string; name: string }, commit: string, own: string): Promise<boolean | null>;
   now: () => Date;
   log: (level: 'info' | 'warn' | 'error', message: string, fields?: Record<string, unknown>) => void;
 }
@@ -41,8 +58,11 @@ export interface FlowConfigJobDeps {
 export interface FlowRepoOutcome {
   /** owner/name。 */
   repo: string;
-  /** gone = 列出来之后这个仓被从库里删了，没写上。 */
-  outcome: 'synced' | 'invalid' | 'unread' | 'gone';
+  /**
+   * gone = 列出来之后这个仓被从库里删了，没写上；ahead_of_engine = 只是有这版引擎还不认得的新字段、核实过确实比引擎
+   * 自己在跑的提交新——不算真错，副本没动，不停派（见文件头「例外」）。
+   */
+  outcome: 'synced' | 'invalid' | 'unread' | 'gone' | 'ahead_of_engine';
   source?: 'project' | 'org_default' | undefined;
   why?: string | undefined;
   /** 这一轮写完之后这个仓停派（认不出，或没查成而副本已经太旧）。 */
@@ -98,6 +118,17 @@ export async function syncFlowConfigs(deps: FlowConfigJobDeps): Promise<FlowSync
       deps.log('error', '流程配置的提醒没写进去（停派照样生效）', { key, title, error: message(err) });
     }
   };
+  const notice = async (key: string, title: string, body: string) => {
+    try {
+      await deps.notice(key, title, body);
+    } catch (err) {
+      deps.log('error', '流程配置「比引擎新」的日报级提醒没写进去（不停派照样生效）', {
+        key,
+        title,
+        error: message(err),
+      });
+    }
+  };
   const resolve = async (key: string) => {
     try {
       await deps.resolve(key);
@@ -128,11 +159,41 @@ export async function syncFlowConfigs(deps: FlowConfigJobDeps): Promise<FlowSync
     }
     const decided = flowSync(org, read);
     const at = deps.now();
+    const key = flowAlertKey(repo);
+
+    // 版本错位那条例外：只在真读成了文件（read.kind === 'read'，flowSync 判 invalid 走的就是这个分支）、且只是这版
+    // 认不出的新字段时才试；引擎自己的提交读不出、GitHub 比不出关系（不是这个仓、判不出）都当「判不出」，落回老规矩。
+    if (decided.write === 'invalid' && decided.scope === 'project' && decided.unknownKeys?.length) {
+      const own = deps.ownCommit();
+      const newer =
+        own !== null && read.kind === 'read'
+          ? await deps.newerThanOwn(repo, read.commit, own).catch((err) => {
+              deps.log('warn', '流程配置的新字段判不出是不是比引擎新（GitHub 出错），照老规矩停派', {
+                repo: slug,
+                error: message(err),
+              });
+              return null;
+            })
+          : null;
+      if (newer === true) {
+        await notice(
+          key,
+          `${slug} 的流程配置比在跑的引擎新（多了 ${decided.unknownKeys.join('、')} 字段）`,
+          `${decided.why}。这不算真错：等自动发布把引擎跟上，下一轮对账解析成功后这条提醒自动撤掉；期间继续用库里的旧副本，不停派。`,
+        );
+        deps.log('info', '流程配置比引擎新：不停派，继续用库里的旧副本', {
+          repo: slug,
+          unknownKeys: decided.unknownKeys,
+        });
+        out.push({ repo: slug, outcome: 'ahead_of_engine', why: decided.why, blocked: false });
+        continue;
+      }
+    }
+
     if ((await deps.write(repo.repoId, toWrite(decided), at)) === 'not_found') {
       out.push({ repo: slug, outcome: 'gone', why: '列出来之后这个仓从库里删了', blocked: false });
       continue;
     }
-    const key = flowAlertKey(repo);
     if (decided.write === 'synced') {
       await resolve(key);
       if (decided.source === 'org_default') {

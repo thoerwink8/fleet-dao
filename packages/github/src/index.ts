@@ -48,6 +48,7 @@ export {
   readCloseFacts,
   SUB_ISSUES_PAGE,
 } from './close-facts.ts';
+export { type CommitAncestryInput, commitContains } from './commit-relation.ts';
 export {
   type ReadRepoFileInput,
   type ReadRepoFileResult,

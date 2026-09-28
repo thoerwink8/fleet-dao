@@ -39,6 +39,7 @@ import {
 } from '@fleet-dao/db';
 import type { GitHub } from '@fleet-dao/github';
 import type { Client } from '@temporalio/client';
+import { ownReleaseSha } from '../drain-control.ts';
 import { type AskIssueJobDeps, openAskIssues } from '../jobs/ask-issues.ts';
 import { type CloseSweepJobDeps, sweepClosing } from '../jobs/close-sweep.ts';
 import { type FlowConfigJobDeps, syncFlowConfigs } from '../jobs/flow-config.ts';
@@ -57,7 +58,10 @@ export interface GitHubReconcileWiring {
     | 'commentIssue'
     | 'readCloseFacts'
     | 'claims'
+    | 'commitContains'
   >;
+  /** 测试用：换掉「引擎自己在跑哪个提交」（不给就是 drain-control.ts 的 ownReleaseSha，开发机/测试认不出是 null）。 */
+  ownCommit?: () => string | null;
   /** 测试用：换掉拉起工作流（不给就是真的，经这次活动的 Temporal 客户端起 Fusion）。 */
   requirements?: RequirementWorkflows;
   /** 测试用：这一轮跑不跑关单对账（不给就是 jobs/close-sweep.ts 的 closeSweepDue，按真钟：北京时间 9:00 起的那一轮）。 */
@@ -102,9 +106,14 @@ export function flowConfigJob(w: GitHubReconcileWiring, log: Logger, now: () => 
     async alert(key, title, body) {
       await upsertAlert(w.db, { dedupeKey: key, level: 'alert', taskId: null, title, body });
     },
+    async notice(key, title, body) {
+      await upsertAlert(w.db, { dedupeKey: key, level: 'daily', taskId: null, title, body });
+    },
     async resolve(key) {
       await resolveAlertByKey(w.db, { dedupeKey: key, by: 'engine:github-reconcile' });
     },
+    ownCommit: w.ownCommit ?? ownReleaseSha,
+    newerThanOwn: (repo, commit, own) => w.gh.commitContains({ repo, base: own, head: commit }),
     now,
     log: (level, text, fields) => log[level](text, fields),
   };

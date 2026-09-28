@@ -4,10 +4,11 @@
 
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
+  bridgeMirasimConnector,
   type LedgerFs,
   type MirasimConnect,
-  mirasimConnector,
   SESSION_USERS,
   type SessionUser,
   switchSessionOrg,
@@ -205,6 +206,16 @@ export const DEFAULT_ENGINE_STATE_DIR = '/var/lib/fleet-dao/engine';
  * 自己定，引擎每次连都现找（discoverMirasimEndpoint）。
  */
 export const DEFAULT_MIRASIM_HOME = '/home/{user}';
+/**
+ * 桥接脚本（adapters 的 bridge.ts）：默认取和这份正在跑的引擎代码同一个检出里的那一份（和 worker.ts 的
+ * DEFAULT_CLI_BIN_DIR 同一个道理——发布是整棵 monorepo 的检出，不是打包过的产物，packages/ 底下各仓还在原位）。
+ * 会话用户读得到这份检出（405 那样的发布目录 755，第三节目录表），不用另外装一份。
+ */
+export const DEFAULT_MIRASIM_BRIDGE_SCRIPT = fileURLToPath(
+  new URL('../../../adapters/src/mirasim/bridge.ts', import.meta.url),
+);
+/** 会话读得到的 node（法国装机脚本、发布脚本到处这么写死，第五节）；桥接不用另外配置。 */
+export const MIRASIM_BRIDGE_NODE = '/usr/bin/node';
 
 export interface RealPortsConfig {
   machine: string;
@@ -217,6 +228,8 @@ export interface RealPortsConfig {
   grokBin: string;
   /** 会话用户家里的 Mirasim 服务（{user} 换成会话用户）：每次连都现找端口、现读令牌。 */
   mirasimHome: string;
+  /** 桥接脚本的绝对路径（会话用户读得到；real/index.ts 的 DEFAULT_MIRASIM_BRIDGE_SCRIPT）。 */
+  mirasimBridge: string;
   forkMaxContextTokens: number;
   /** 会话脱开引擎跑的收发目录的根（FLEET_SESSION_IO_DIR，默认 DEFAULT_SESSION_IO_DIR）。 */
   sessionIoDir: string;
@@ -243,6 +256,14 @@ export function realPortsConfigFromEnv(env: Readonly<Record<string, string | und
   if (!grokBin.startsWith('/')) problems.push(`FLEET_GROK_BIN 要写绝对路径（现在是 ${grokBin}）`);
   const mirasimHome = env.FLEET_MIRASIM_HOME?.trim() || DEFAULT_MIRASIM_HOME;
   if (!mirasimHome.startsWith('/')) problems.push(`FLEET_MIRASIM_HOME 要写绝对路径（现在是 ${mirasimHome}）`);
+  // 默认值是 fileURLToPath 现算的（和 worker.ts 的 DEFAULT_CLI_BIN_DIR 同一个道理），在这台机器上本来就是绝对路径、
+  // 只是开发机（Windows）上是 D:\... 这个样子——只有人手写了 FLEET_MIRASIM_BRIDGE 才照 POSIX 的绝对路径规矩查，
+  // 默认值不查（法国是 Linux，真跑时这条本来就成立）。
+  const rawMirasimBridge = env.FLEET_MIRASIM_BRIDGE?.trim();
+  if (rawMirasimBridge && !rawMirasimBridge.startsWith('/')) {
+    problems.push(`FLEET_MIRASIM_BRIDGE 要写绝对路径（现在是 ${rawMirasimBridge}）`);
+  }
+  const mirasimBridge = rawMirasimBridge || DEFAULT_MIRASIM_BRIDGE_SCRIPT;
   const rawFork = env.FLEET_FORK_MAX_CONTEXT_TOKENS?.trim();
   const forkMaxContextTokens = rawFork ? Number(rawFork) : DEFAULT_FORK_MAX_CONTEXT_TOKENS;
   if (!Number.isInteger(forkMaxContextTokens) || forkMaxContextTokens <= 0) {
@@ -260,6 +281,7 @@ export function realPortsConfigFromEnv(env: Readonly<Record<string, string | und
     cursorVersionsDir,
     grokBin,
     mirasimHome,
+    mirasimBridge,
     forkMaxContextTokens,
     sessionIoDir,
   };
@@ -324,8 +346,8 @@ async function lsAsUser(exec: UserExec, user: SessionUser, dir: string): Promise
 /**
  * 这个会话用户自己的 Mirasim 服务在哪（design 第十四节：给他单独起一份，不借旧系统那份）：列他家里的
  * <home>/.mirasim/run，只认「恰好一份 local-<端口>.token」——一份都没有就是这个会话用户还没配好，不止一份就是认不出
- * 该用哪份（只该有一份 Mirasim 服务）。令牌本身不在这里读（每次建连都现读，不缓存：wire.ts 的 mirasimConnector），
- * 这里只定端口和令牌文件的位置。
+ * 该用哪份（只该有一份 Mirasim 服务）。令牌本身不在这里读（每次建连都现读，不缓存：桥接自己以会话用户的身份读，
+ * bridge.ts），这里只定端口和令牌文件的位置——这一步是 ls 一个目录，不是连端口，不受回环口防火墙限制。
  */
 export async function discoverMirasimEndpoint(
   exec: UserExec,
@@ -360,14 +382,26 @@ export async function discoverMirasimEndpoint(
   return { port, tokenFile: `${dir}/${name}` };
 }
 
+export interface MirasimBridgeConfig {
+  /** node 加桥接脚本的绝对路径（bridge-connect.ts 的 bridgeCommand）。 */
+  command: readonly string[];
+  /** 以下测试用：换假帮手、假 spawn。 */
+  helper?: string;
+  sudo?: readonly string[];
+  spawn?: Parameters<typeof bridgeMirasimConnector>[1]['spawn'];
+}
+
 /**
- * 会话用户自己的 Mirasim 服务：连接工厂、账本目录、读账本用的（as-user）文件访问，三样都经 exec 以那个会话用户读——
- * 引擎自己的进程（fleet 用户）进不去他的家（750，design 第十四节）。connect 每次调用都现发现端口、现读令牌（服务重装、
- * 重启都可能换令牌和端口）。
+ * 会话用户自己的 Mirasim 服务：账本目录、读账本用的（as-user）文件访问经 exec 以那个会话用户读（引擎自己的进程，
+ * fleet 用户，进不去他的家，750，design 第十四节）；连接（connect）经桥接（bridge.ts）以那个会话用户的身份跑，不再由
+ * 引擎的进程直连回环口——法国防火墙只放行会话用户和 root 连那个口（docs/ops.md 第五节「会话用户的口只许它自己连」，
+ * #35），2026-09-28 实测引擎（fleet 用户）连不上，是这条路由派不出去的断链（#345 后续）。discoverMirasimEndpoint
+ * 现找端口（exec 以会话用户 ls，不走网络，不碰防火墙）；令牌桥接自己以会话用户的身份现读，不经引擎传值。
  */
 export function mirasimDepsFor(
   exec: UserExec,
   home: string,
+  bridge: MirasimBridgeConfig,
 ): {
   connect(user: SessionUser): MirasimConnect;
   ledgerDir(user: SessionUser): string;
@@ -378,12 +412,15 @@ export function mirasimDepsFor(
     connect: (user) => async () => {
       const at = homeOf(user);
       const { port, tokenFile } = await discoverMirasimEndpoint(exec, user, at);
-      return mirasimConnector({
-        host: '127.0.0.1',
-        port,
-        tokenFile,
-        readToken: () => catAsUser(exec, user, tokenFile),
-      })();
+      return bridgeMirasimConnector(
+        { user, port, tokenFile },
+        {
+          bridgeCommand: bridge.command,
+          ...(bridge.helper ? { helper: bridge.helper } : {}),
+          ...(bridge.sudo ? { sudo: bridge.sudo } : {}),
+          ...(bridge.spawn ? { spawn: bridge.spawn } : {}),
+        },
+      )();
     },
     ledgerDir: (user) => `${homeOf(user)}/.mirasim/traffic`,
     ledgerFs: (user) => ({
@@ -421,9 +458,11 @@ export function realPortsFromEnv(
   // 判断路由不用重启，和 /healthz 的 judge 项同一个判法）。默认位置上没有 jev.json 才算没接、不问；别的读不成都报错。
   const jev = engineJevFromEnv(db, env);
   const exec = scopeExec();
-  // Mirasim：会话（sessions.ts）和路由探针（route-probe.ts）共用同一份「怎么连、怎么读账本」（都经这个 exec 以会话用户读，
-  // 引擎自己的进程进不去他的家）
-  const mirasim = mirasimDepsFor(exec, config.mirasimHome);
+  // Mirasim：会话（sessions.ts）和路由探针（route-probe.ts）共用同一份「怎么连、怎么读账本」；连接经桥接以会话用户的
+  // 身份跑（法国防火墙只放行它自己和 root 连回环口），账本经这个 exec 以会话用户读（引擎自己的进程进不去他的家）
+  const mirasim = mirasimDepsFor(exec, config.mirasimHome, {
+    command: [MIRASIM_BRIDGE_NODE, config.mirasimBridge],
+  });
   // 会话用户此刻挂的组织：法国只有一个会话用户（design 第九节），两个 Claude 池都跑在它下面、同一时刻只有它挂着的那个能派。
   // 以它跑它家里的 reclaude org list（和会话同一份 reclaude）；选路、探针、切号、每小时对账共用这一个（读成了的留 30 秒），
   // 按同一个起点判：读数变了、引擎没切过号，推 session-org:drift（带前后两次读数），定下来之前谁都不照它来（#335）
