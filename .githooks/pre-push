@@ -1,9 +1,9 @@
 #!/bin/sh
 # 推之前的两步（pnpm install 的 prepare 把 core.hooksPath 设成了 .githooks）：
-# 1. 带着认领的分支查认领还归不归你（#299，agents/skills/commander-seat/scripts/claim.mjs prepush）：对不上就拦；
+# 1. 带着认领的分支查认领还归不归你（#299，agents/skills/commander/scripts/claim.mjs prepush）：对不上就拦；
 #    连不上法国只警告、照推，没带认领的分支不查。
 # 2. 卫生检查（公开仓：推上去就公开了），判定在 packages/hygiene/src/prepush.ts。
 # 两步收到的是 git 给的同一份标准输入（要推的几行引用）。拦下来时先把东西拿掉再推，别用 --no-verify 硬推。
 refs=$(cat)
-printf '%s\n' "$refs" | node agents/skills/commander-seat/scripts/claim.mjs prepush || exit 1
+printf '%s\n' "$refs" | node agents/skills/commander/scripts/claim.mjs prepush || exit 1
 printf '%s\n' "$refs" | node packages/hygiene/src/bin/pre-push.ts "$@"

@@ -1,4 +1,4 @@
-// commander-seat 技能带的脚本（本机进度页、单上的「在做」认领）。脚本是 .mjs（装进各家技能目录后直接 node 跑，不靠类型剥离），
+// commander 技能带的脚本（本机进度页、单上的「在做」认领）。脚本是 .mjs（装进各家技能目录后直接 node 跑，不靠类型剥离），
 // 这里按网址动态加载它们的库、在临时家目录里跑，不碰真家目录、不出网（gh 换成内存里的假 GitHub）；命令行外壳另起进程各跑一遍。
 import { spawn, spawnSync } from 'node:child_process';
 import {
@@ -20,7 +20,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { type DoingIo, doing, fakeGitHub, NOW, runDoing } from './helpers/doing.ts';
 
-const SCRIPTS = fileURLToPath(new URL('../skills/commander-seat/scripts/', import.meta.url));
+const SCRIPTS = fileURLToPath(new URL('../skills/commander/scripts/', import.meta.url));
 
 interface Step {
   id: string;
@@ -104,7 +104,7 @@ afterEach(async () => {
   for (const dir of made.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 function tempHome(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'commander-seat-'));
+  const dir = mkdtempSync(join(tmpdir(), 'commander-'));
   made.push(dir);
   return dir;
 }

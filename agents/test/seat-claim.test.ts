@@ -715,7 +715,7 @@ describe('.githooks/pre-push：两步收到同一份标准输入', () => {
   function repoWithStubs(claimExit: number, hygieneExit: number) {
     const dir = mkdtempSync(join(tmpdir(), 'fleet-hook-'));
     homes.push(dir);
-    const claimDir = join(dir, 'agents', 'skills', 'commander-seat', 'scripts');
+    const claimDir = join(dir, 'agents', 'skills', 'commander', 'scripts');
     const hygieneDir = join(dir, 'packages', 'hygiene', 'src', 'bin');
     mkdirSync(claimDir, { recursive: true });
     mkdirSync(hygieneDir, { recursive: true });

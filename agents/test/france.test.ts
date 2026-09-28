@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 
-const SCRIPTS = fileURLToPath(new URL('../skills/commander-seat/scripts/', import.meta.url));
+const SCRIPTS = fileURLToPath(new URL('../skills/commander/scripts/', import.meta.url));
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const QUERY_FILE = join(SCRIPTS, 'france-query.mjs');
 // 按网址动态加载：.mjs 脚本和 shared 的 .ts 都不进 agents 的类型工程（composite 工程不许引工程外的文件）

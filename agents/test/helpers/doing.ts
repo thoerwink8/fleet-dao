@@ -2,7 +2,7 @@
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-export const SCRIPTS = fileURLToPath(new URL('../../skills/commander-seat/scripts/', import.meta.url));
+export const SCRIPTS = fileURLToPath(new URL('../../skills/commander/scripts/', import.meta.url));
 export const NOW = new Date('2026-09-27T03:00:00Z');
 
 export interface Claim {
