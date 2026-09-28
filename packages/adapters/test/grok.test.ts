@@ -3,6 +3,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ProgressEvent } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
+import type { SessionEffort } from '../src/effort.ts';
 import { buildGrokArgs, grokModelMatches } from '../src/grok/args.ts';
 import { type GrokRunSpec, grokRunSummary, runGrok } from '../src/grok/run.ts';
 import { GrokStreamReader } from '../src/grok/stream.ts';
@@ -76,7 +77,11 @@ describe('grok 参数', () => {
     };
     expect(() => buildGrokArgs({ ...base, model: 'grok 4.7' })).toThrow('模型名');
     expect(() => buildGrokArgs({ ...base, session: { mode: 'new', id: 'abc' } })).toThrow('UUID');
-    expect(() => buildGrokArgs({ ...base, reasoningEffort: 'high; rm' })).toThrow('effort');
+    expect(() => buildGrokArgs({ ...base, reasoningEffort: 'high; rm' as SessionEffort })).toThrow('effort');
+    // turbo 是小写字母，旧的「只查是不是字母」会放过去；不在认的档位里必须拒【故意造出的失败】
+    expect(() => buildGrokArgs({ ...base, reasoningEffort: 'turbo' as SessionEffort })).toThrow('effort');
+    // max 是 Claude 的档，Grok 不认【故意造出的失败】
+    expect(() => buildGrokArgs({ ...base, reasoningEffort: 'max' })).toThrow('不支持');
     expect(() => buildGrokArgs({ ...base, maxTurns: 0 })).toThrow('max turns');
   });
 

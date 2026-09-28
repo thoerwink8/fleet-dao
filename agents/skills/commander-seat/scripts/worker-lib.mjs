@@ -28,6 +28,20 @@
 //   「盘符下的个人目录」拦下，AGENTS.md 也不许公开仓里写个人目录路径；帅位平时就在主检出的检出里跑命令，默认当前
 //   目录已经够用，--repo 留给不在那跑的场景。
 // - 退出码：0 好了；1 用法不对；2 没查成、没做成（读不到、跑不起来）；3 冲突（工作树已经存在、还在跑、PR 没合没关）。
+// - 09-28 晚上真活撞出两个坑，都在这份文件里改：
+//   1. 【安全，当场修】给模型进程的环境变量必须先过 safeEnv() 这道白名单，不能把 io.env（=真的 process.env）
+//      整个透传：worker.mjs 的 spawnDetached 会把 env 写进 launch-spec.json 明文留在磁盘上（起模型的进程要
+//      靠这份 JSON 文件把环境变量带过去，见 worker.mjs 文件头），而 io.env 就是跑 worker.mjs 这个会话自己的
+//      完整环境，真的撞见过里面带着 GITHUB_PERSONAL_ACCESS_TOKEN、MIRASIM_* 好几个真令牌（09-28 一次真起
+//      grok 干活时留下的 launch-spec.json 里现原形，已经把那份文件和另一份冒烟测试留下的都打码删掉了）。
+//      grok/codex 自己根本用不上这些——它们要连 GitHub 靠的是 gh 自己存的登录态，不是这个环境变量。
+//      safeEnv() 是白名单（不是「挡像密钥的名字」那种黑名单）：以后这台机器环境里随便加一个新变量，默认就是
+//      不传，不会因为它的名字「看着不像密钥」就漏出去。
+//   2. cmdStart 起模型这步，io.spawnDetached 抛出来的 Error 不一定是「确认起不来」：可能是 Start-Process
+//      已经真的起来了、只是没能把 pid 传回来（worker.mjs 那边的坑，细节在那份文件头）。这种情况 Error 上会带
+//      err.uncertain = true，cmdStart 要认这个标记：不说「起不了」，把能写的 meta 先写上（pid: null，
+//      pidUncertain: true），让 status/stop/clean 之后还找得到这棵工作树，报错里明说
+//      「进程可能已经在跑、没记上」。metaProblem/oneStatus/cmdStop/cmdClean 都跟着认 pidUncertain 这个状态。
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 
@@ -41,8 +55,11 @@ export const GITHUB_HOSTS = ['github.com', 'api.github.com', 'codeload.github.co
 
 export const USAGE = `用法：node worker.mjs <命令> …（在项目仓的检出里跑，或用 --repo 指一个）
   start --model grok|codex|kimi --name <短名> --brief <文件> [--repo <主检出路径>] [--model-id <型号>]
-        [--effort low|medium|high|xhigh，不给是 ${DEFAULT_EFFORT}] [--no-ship]
+        [--effort low|medium|high|xhigh，不给是 ${DEFAULT_EFFORT}] [--no-ship] [--no-automerge]
                     在主检出的上一级建一棵工作树、起一个别家模型命令行去干活（后台跑，这条命令退出它照跑）
+                    --no-automerge：开非草稿 PR 但不挂自动合并，PR 正文第一行写「人闸：改标准」，CI 绿了就停
+                    （改标准要创始人点头才能合，见 AGENTS.md「改标准是人闸第四类」）；不给就是本机快马老规矩：
+                    CI 绿就合、自动挂上。
   status [--name <短名>]         看工人在跑没跑、跑了多久、最后一句输出、对应的 PR；不带 --name 看全部
   stop --name <短名>             杀掉整棵进程树
   clean --name <短名> [--force]  PR 合了或关了（或带 --force）才删工作树和本地分支，日志留着
@@ -119,6 +136,67 @@ function effortOf(p) {
 /** 相对路径按 io.cwd() 展开，不用真的 process.cwd()（测试里两者不是一回事）。 */
 const resolvePath = (io, p) => (isAbsolute(p) ? p : join(io.cwd(), p));
 
+// —— 传给模型进程的环境变量：白名单 ——
+
+/**
+ * 起的模型进程只给这些名字的环境变量（Windows 标准路径类 + Node/pnpm 常用的几个），谁都用得上、谁都不是
+ * 密钥。09-28 发现的教训见文件头：这是白名单，不是「挡像密钥的名字」那种黑名单——以后环境里加什么新变量，
+ * 默认都不传，要模型真需要了再加名字到这。代理相关的几个（http_proxy 等）单独在 PROXY_ENV_KEYS，因为
+ * mergeNoProxy 还要在它们基础上改 NO_PROXY/no_proxy。
+ */
+export const SAFE_ENV_KEYS = [
+  'PATH',
+  'Path',
+  'PATHEXT',
+  'SYSTEMROOT',
+  'SYSTEMDRIVE',
+  'WINDIR',
+  'COMSPEC',
+  'TEMP',
+  'TMP',
+  'HOMEDRIVE',
+  'HOMEPATH',
+  'HOME',
+  'USERPROFILE',
+  'APPDATA',
+  'LOCALAPPDATA',
+  'USERNAME',
+  'USERDOMAIN',
+  'COMPUTERNAME',
+  'NUMBER_OF_PROCESSORS',
+  'PROCESSOR_ARCHITECTURE',
+  'PROCESSOR_IDENTIFIER',
+  'PROCESSOR_LEVEL',
+  'PROCESSOR_REVISION',
+  'OS',
+  'PROGRAMFILES',
+  'ProgramFiles(x86)',
+  'ProgramW6432',
+  'COMMONPROGRAMFILES',
+  'CommonProgramFiles(x86)',
+  'CommonProgramW6432',
+  'ALLUSERSPROFILE',
+  'ProgramData',
+  'PUBLIC',
+  'PSModulePath',
+  'PNPM_HOME',
+  'NVM_HOME',
+  'NVM_SYMLINK',
+  'NODE_EXTRA_CA_CERTS',
+  'LANG',
+  'PYTHONUTF8',
+];
+const PROXY_ENV_KEYS = ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'no_proxy'];
+
+/** 只挑白名单里有的键，值是 undefined 的也不带（和原来 spawnDetached 里过滤 undefined 的规矩一致）。 */
+export function safeEnv(env) {
+  const out = {};
+  for (const key of [...SAFE_ENV_KEYS, ...PROXY_ENV_KEYS]) {
+    if (env[key] !== undefined) out[key] = env[key];
+  }
+  return out;
+}
+
 // —— 代理 ——
 
 /** 保留原有代理不动，只把 NO_PROXY/no_proxy 加上 GITHUB_HOSTS 里没有的几个域名（大小写两份都补，谁都可能只认一种）。 */
@@ -137,7 +215,13 @@ export function mergeNoProxy(env) {
 
 // —— 收尾交代 ——
 
-export function closingBrief({ branch, noShip }) {
+/**
+ * noAutomerge（创始人 09-28 晚上拍：改标准的活也要能派给别家模型）：开出来的 PR 不挂自动合并、正文第一行
+ * 写「人闸：改标准」，CI 绿了就停手，等创始人自己看了同意——跟 AGENTS.md「改标准是人闸第四类」那条一致，
+ * 不能让模型自己挂自动合并把改标准的 PR 合了。跟 noShip 不冲突但没意义一起用（noShip 压根不开 PR），noShip
+ * 为真时这条不看。
+ */
+export function closingBrief({ branch, noShip, noAutomerge }) {
   if (noShip) {
     return [
       '—— 收尾交代 ——',
@@ -145,6 +229,21 @@ export function closingBrief({ branch, noShip }) {
       '做完上面的事，最后单独一行只输出：完成',
     ].join('\n');
   }
+  const prSteps = noAutomerge
+    ? [
+        '5. gh pr create（不开草稿）：正文第一行写「人闸：改标准」，其余栏目照',
+        '   .github/pull_request_template.md 填；「认领」栏写「无」；「档位」栏也写「人闸：改标准」。',
+        '6. 不要挂自动合并、不要跑 gh pr merge：这条改的是要创始人拍板的标准，他同意之前不能自己合，合并由',
+        '   创始人或帅位在他同意后另外做。',
+        '7. gh pr checks <PR 号> --watch 盯到过或红；红了自己改，最多 3 轮；CI 绿了就停下，不用等合并、不用',
+        '   等创始人回话。',
+      ]
+    : [
+        '5. gh pr create（不开草稿）：正文照 .github/pull_request_template.md 的栏目填；「认领」栏写「无」；',
+        '   「档位」栏写「CI 绿就合（本机快马）」，理由写清楚。',
+        '6. gh pr merge <PR 号> --auto --squash 挂自动合并。',
+        '7. gh pr checks <PR 号> --watch 盯到过或红；红了自己改，最多 3 轮。',
+      ];
   return [
     '—— 收尾交代（帅位自动加的，照做；具体要做的活见上面）——',
     '1. 先读仓根的 AGENTS.md，照它的规矩做。这是本机快马：不开单、不写需求文档和结果文档、不认领。',
@@ -155,10 +254,7 @@ export function closingBrief({ branch, noShip }) {
     '   - pnpm typecheck',
     '3. 提交信息一句话说清改了什么、为什么。',
     `4. git push -u origin ${branch}`,
-    '5. gh pr create（不开草稿）：正文照 .github/pull_request_template.md 的栏目填；「认领」栏写「无」；',
-    '   「档位」栏写「CI 绿就合（本机快马）」，理由写清楚。',
-    '6. gh pr merge <PR 号> --auto --squash 挂自动合并。',
-    '7. gh pr checks <PR 号> --watch 盯到过或红；红了自己改，最多 3 轮。',
+    ...prSteps,
     '8. 不开新 issue，不碰这棵工作树以外的目录、不碰别的检出。',
     '9. 如果 git 或 gh 连 GitHub 失败、像是代理问题：命令前加',
     '   env -u https_proxy -u http_proxy -u HTTPS_PROXY -u HTTP_PROXY 再试一次。',
@@ -171,7 +267,25 @@ export function closingBrief({ branch, noShip }) {
 /**
  * 各模型的无人值守启动方式；kimi 没有可靠的方式，调用方另处理。思考档位总是显式传（不靠模型自己的默认，
  * grok 自己默认 xhigh）：grok 用 --reasoning-effort，codex 用 -c model_reasoning_effort="<档>"（TOML 字符串，
- * 引号是字面量、和 ~/.codex/config.toml 里的键名对得上）。
+ * 引号是字面量、和 ~/.codex/config.toml 里的键名对得上）。extraEnv 是这个模型必须额外给的环境变量（不从
+ * io.env 挑，是我们自己强加的），cmdStart 会把它叠在 safeEnv+mergeNoProxy 算出来的 env 上面。
+ *
+ * grok 的 --no-plan / GROK_FOLDER_TRUST / GROK_ASK_USER_QUESTION（09-28 晚上另一个会话真机撞出来、这边核实
+ * 修的）：我们每个工人都是刚 git worktree add 出来的新目录，grok 认成「没被信任」——这不是权限问题（创始人已经
+ * 拍板不给别家模型关目录/沙箱，见文件头），是 grok 自己一个独立的「目录信任」开关：没信任就不自动加载 AGENTS.md、
+ * 项目钩子、项目 MCP、项目技能（这几个是绑在一起的一个门，见 ~/.grok/docs/user-guide/10-hooks.md「Trusting a
+ * project」），--always-approve 只管工具调用要不要问，管不到这个。另外两张 --always-approve 也管不到的卡片：
+ * 反问选择题（ask_user_question 这个工具本身）、进入计划模式要人点头批准（这是模式切换本身要审批，不是普通工具
+ * 调用）。`grok --help`（这台装的 1.0.41）里没有 --trust、也没有 --no-ask-user 这两个名字——不是瞎编的，是真
+ * 核对过：--trust 在 bundled 文档（~/.grok/docs/user-guide/10-hooks.md、18-sandbox.md 等多处）里确认是真旗标，
+ * 只是不出现在 --help 里，而且会把这次信任写进 ~/.grok/trusted_folders.toml 长期攒着（我们每次都是新目录名，
+ * 攒了也没用，还占地方）；--no-ask-user 从头到尾没找到，真正的开关是 features.ask_user_question 这个配置键，
+ * 环境变量 GROK_ASK_USER_QUESTION（见 ~/.grok/docs/user-guide/26-config-reference.md）。改用等价、不留状态的
+ * 环境变量：GROK_FOLDER_TRUST=0 整个关掉目录信任门（AGENTS.md/钩子/MCP/技能一起放行），
+ * GROK_ASK_USER_QUESTION=0 关掉反问选择题那个工具。--no-plan 是 --help 里明明白白有的真旗标，直接禁掉整个计划
+ * 模式。09-28 用一份带暗号的 AGENTS.md 在全新目录里真跑过对照（prompt 明说「不许主动读文件、只看会话一开始加载
+ * 的内容」，避免模型自己主动 read_file 把这条掩盖掉）：不带这三样时 grok 答「NONE」（复现了问题——AGENTS.md
+ * 确实没被自动加载），带上之后正确答出暗号（过程和命令见 PR 正文）。codex 没有这个概念，extraEnv 给空对象。
  */
 function launchOf(model, { promptFile, worktreeDir, modelId, effort }) {
   if (model === 'grok')
@@ -185,9 +299,11 @@ function launchOf(model, { promptFile, worktreeDir, modelId, effort }) {
         worktreeDir,
         '--reasoning-effort',
         effort,
+        '--no-plan',
         ...(modelId ? ['--model', modelId] : []),
       ],
       stdinFile: null,
+      extraEnv: { GROK_FOLDER_TRUST: '0', GROK_ASK_USER_QUESTION: '0' },
     };
   if (model === 'codex')
     return {
@@ -202,6 +318,7 @@ function launchOf(model, { promptFile, worktreeDir, modelId, effort }) {
         ...(modelId ? ['--model', modelId] : []),
       ],
       stdinFile: promptFile,
+      extraEnv: {},
     };
   return null;
 }
@@ -221,7 +338,14 @@ function metaProblem(m) {
   if (!m || typeof m !== 'object') return '不是一个对象';
   if (typeof m.name !== 'string' || !m.name) return 'name 认不出';
   if (!MODELS.includes(m.model)) return 'model 认不出';
-  if (!Number.isInteger(m.pid) || m.pid <= 0) return 'pid 认不出';
+  if (m.pidUncertain === true) {
+    if (m.pid !== null) return 'pidUncertain 时 pid 应该是 null';
+    if (typeof m.pidUncertainWhy !== 'string' || !m.pidUncertainWhy) return 'pidUncertainWhy 认不出';
+  } else if (m.pidUncertain !== undefined && m.pidUncertain !== false) {
+    return 'pidUncertain 认不出';
+  } else if (!Number.isInteger(m.pid) || m.pid <= 0) {
+    return 'pid 认不出';
+  }
   if (!EFFORTS.includes(m.effort)) return 'effort 认不出';
   if (typeof m.mainRepo !== 'string' || !m.mainRepo) return 'mainRepo 认不出';
   if (typeof m.worktree !== 'string' || !m.worktree) return 'worktree 认不出';
@@ -309,6 +433,7 @@ async function cmdStart(p, io) {
   const modelId = p.options.get('model-id');
   const effort = effortOf(p);
   const noShip = p.flags.has('no-ship');
+  const noAutomerge = p.flags.has('no-automerge');
 
   if (model === 'kimi') return fail(io, KIMI_UNSUPPORTED);
 
@@ -358,7 +483,7 @@ async function cmdStart(p, io) {
   const promptFile = join(dir, 'prompt.txt');
   const outLog = join(dir, 'out.log');
   const errLog = join(dir, 'err.log');
-  writeFileSync(promptFile, `${briefText.trimEnd()}\n\n${closingBrief({ branch, noShip })}\n`);
+  writeFileSync(promptFile, `${briefText.trimEnd()}\n\n${closingBrief({ branch, noShip, noAutomerge })}\n`);
 
   const launch = launchOf(model, { promptFile, worktreeDir, modelId, effort });
   let spawned;
@@ -367,12 +492,47 @@ async function cmdStart(p, io) {
       command: launch.command,
       args: launch.args,
       cwd: worktreeDir,
-      env: mergeNoProxy(io.env),
+      env: { ...mergeNoProxy(safeEnv(io.env)), ...launch.extraEnv },
       stdinFile: launch.stdinFile,
       outFile: outLog,
       errFile: errLog,
     });
   } catch (e) {
+    if (e.uncertain) {
+      // 半成功：起的那一步没能确认成没成，但也没确认失败——不能说「起不了」（09-28 真撞过：进程其实已经在跑，
+      // 见文件头）。工作树、pnpm install、prompt.txt 都留着，把能写的先写上，让 status/stop/clean 之后还找得到。
+      writeFileSync(
+        join(dir, 'meta.json'),
+        `${JSON.stringify(
+          {
+            name,
+            model,
+            modelId: modelId ?? null,
+            effort,
+            pid: null,
+            pidUncertain: true,
+            pidUncertainWhy: e.message,
+            mainRepo: repo,
+            worktree: worktreeDir,
+            branch,
+            startedAt: io.now().toISOString(),
+            promptFile,
+            outLog,
+            errLog,
+            noShip,
+            cleanedAt: null,
+          },
+          null,
+          2,
+        )}\n`,
+      );
+      return fail(
+        io,
+        `不确定：${model} 进程可能已经在跑、没记上 pid（${e.message}）。工作树和日志都留着（${worktreeDir}），` +
+          `确认后 node worker.mjs status --name ${name} 能看到「不确定」这个状态；先手动确认真跑没跑（任务管理器` +
+          `或 tasklist 按工作树路径查），clean 要带 --force。`,
+      );
+    }
     return fail(io, `起不了 ${model}（工作树和 pnpm install 都已经做完，没删）：${e.message}`);
   }
 
@@ -439,17 +599,14 @@ function oneStatus(io, name, at) {
   const r = readMeta(io.home, name);
   if (!r.ok) return { name, ok: false, why: r.why };
   const m = r.meta;
-  const running = io.isRunning(m.pid);
   const last = lastMeaningfulLine(m.outLog);
   if (!last.ok) return { name, ok: false, why: last.why };
   const elapsedMin = Math.max(0, Math.round((at.getTime() - Date.parse(m.startedAt)) / 60_000));
-  return {
+  const base = {
     name,
     ok: true,
     model: m.model,
     effort: m.model === 'kimi' ? null : m.effort,
-    running,
-    pid: m.pid,
     elapsedMin,
     lastLine: last.line,
     cleanedAt: m.cleanedAt,
@@ -457,6 +614,9 @@ function oneStatus(io, name, at) {
     branch: m.branch,
     pr: prOf(io, m),
   };
+  // pidUncertain：起的时候没能确认 pid（见文件头），没法调 io.isRunning——那需要一个真 pid，不能瞎猜。
+  if (m.pidUncertain) return { ...base, pidUncertain: true, pidUncertainWhy: m.pidUncertainWhy, pid: null };
+  return { ...base, pidUncertain: false, running: io.isRunning(m.pid), pid: m.pid };
 }
 
 function formatStatus(s) {
@@ -466,8 +626,11 @@ function formatStatus(s) {
     : s.pr.rows.length === 0
       ? '没有'
       : s.pr.rows.map((r) => `#${r.number}（${r.state}）${r.url}`).join('、');
+  const stateText = s.pidUncertain
+    ? `不确定在跑没跑（起的时候没记上 pid：${s.pidUncertainWhy}）`
+    : `${s.running ? '在跑' : '已经不在跑了'}${s.cleanedAt ? `（已经 clean 过：${s.cleanedAt}）` : ''}，pid ${s.pid}`;
   return [
-    `${s.name}：${s.model}，档位 ${s.effort ?? '不支持'}，${s.running ? '在跑' : '已经不在跑了'}${s.cleanedAt ? `（已经 clean 过：${s.cleanedAt}）` : ''}，pid ${s.pid}，从起来到现在 ${s.elapsedMin} 分钟`,
+    `${s.name}：${s.model}，档位 ${s.effort ?? '不支持'}，${stateText}，从起来到现在 ${s.elapsedMin} 分钟`,
     `  工作树 ${s.worktree}（分支 ${s.branch}）`,
     `  最后一句输出：${s.lastLine ?? '（还没有输出）'}`,
     `  PR：${prText}`,
@@ -514,6 +677,12 @@ async function cmdStop(p, io) {
   const r = readMeta(io.home, name);
   if (!r.ok) return fail(io, r.why);
   const m = r.meta;
+  if (m.pidUncertain)
+    return fail(
+      io,
+      `${name} 没记上 pid，stop 杀不了：自己用任务管理器或 tasklist 按工作树路径（${m.worktree}）找进程手动结束，` +
+        `确认后 node worker.mjs clean --name ${name} --force 收尾`,
+    );
   if (!io.isRunning(m.pid)) {
     io.out(`${name} 已经不在跑了（pid ${m.pid}）`);
     return 0;
@@ -534,8 +703,16 @@ async function cmdClean(p, io) {
   if (!r.ok) return fail(io, r.why);
   const m = r.meta;
 
-  if (io.isRunning(m.pid))
+  if (m.pidUncertain) {
+    if (!force)
+      return conflict(
+        io,
+        `${name} 没记上 pid，不确定还在跑没跑，不敢删：自己确认完了（任务管理器或 tasklist 按工作树路径 ` +
+          `${m.worktree} 查）再带 --force`,
+      );
+  } else if (io.isRunning(m.pid)) {
     return conflict(io, `${name} 还在跑（pid ${m.pid}）：先 node worker.mjs stop --name ${name}`);
+  }
 
   if (!force) {
     const pr = prOf(io, m);
@@ -575,7 +752,9 @@ async function cmdClean(p, io) {
  *   git(args, {cwd}) → {status, stdout, stderr, error?},
  *   gh(args, {cwd}) → 同上,
  *   pnpm(args, {cwd}) → 同上,
- *   spawnDetached({command, args, cwd, env, stdinFile, outFile, errFile}) → {pid}（起不来就抛）,
+ *   spawnDetached({command, args, cwd, env, stdinFile, outFile, errFile}) → {pid}；确认起不来就抛 Error，
+ *     起没起成不确定时（比如中间那步查不到 pid，但也没法排除已经起来了）要在 Error 上标 err.uncertain = true，
+ *     cmdStart 按「不确定」处理、不说「起不了」，把能写的 meta 先写上（见文件头「安全」和「pidUncertain」两条）,
  *   isRunning(pid) → boolean,
  *   killTree(pid) → {ok, why?},
  *   out(text), err(text),
@@ -590,7 +769,11 @@ export async function runWorker(argv, io) {
     const [cmd, ...rest] = argv;
     if (cmd === 'start')
       return await cmdStart(
-        parseArgs(rest, ['model', 'name', 'brief', 'repo', 'model-id', 'effort'], ['no-ship']),
+        parseArgs(
+          rest,
+          ['model', 'name', 'brief', 'repo', 'model-id', 'effort'],
+          ['no-ship', 'no-automerge'],
+        ),
         io,
       );
     if (cmd === 'status') return await cmdStatus(parseArgs(rest, ['name']), io);
