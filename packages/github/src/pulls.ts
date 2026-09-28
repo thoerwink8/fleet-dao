@@ -532,7 +532,11 @@ export type CiWaitResult =
    * `advance`，认新头接着在它上面查，不当成头变了。
    */
   | { state: 'head_moved'; head: string; actualHead: string; detail: string }
-  | { state: 'closed'; head: string; detail: string }
+  /**
+   * PR 关了：merged 结构化地说是不是合并关的（GitHub 自己的自动合并、或人手工合的），不是靠 detail 里的文案猜——
+   * 调用方（引擎）合了就当合上了，走收尾，不是没查成；关了没合才是真的中断，要人看。
+   */
+  | { state: 'closed'; head: string; merged: boolean; mergeCommit?: string | undefined; detail: string }
   /** 一个检查、一个工作流都没起。 */
   | { state: 'missing'; head: string; detail: string }
   /** 起了，没在时限内跑完。 */
@@ -649,7 +653,15 @@ export async function waitCi(
     }
 
     if (pr.state === 'closed') {
-      return { state: 'closed', head, detail: `PR #${prNumber} 已经${pr.merged ? '合并' : '关掉'}了` };
+      const merged = pr.merged ?? false;
+      const mergeCommit = merged && pr.merge_commit_sha ? pr.merge_commit_sha : undefined;
+      return {
+        state: 'closed',
+        head,
+        merged,
+        ...(mergeCommit ? { mergeCommit } : {}),
+        detail: `PR #${prNumber} 已经${merged ? '合并' : '关掉'}了`,
+      };
     }
     if (pr.mergeable === false || pr.mergeable_state === 'dirty') {
       return {

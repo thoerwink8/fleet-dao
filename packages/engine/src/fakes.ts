@@ -16,6 +16,7 @@ import {
   type LeadStep,
   type MergePrInput,
   type OpenPrInput,
+  type PatchIdOfInput,
   type PickRouteInput,
   type PickRouteResult,
   type PortContext,
@@ -117,6 +118,12 @@ export interface FakeScript {
   sync: (input: SyncMainlineInput, n: number) => Partial<SyncResult> | undefined;
   tests: (input: RunTestsInput, n: number) => Partial<TestResult> | undefined;
   merge: (input: MergePrInput, n: number) => Partial<MergeOutcome> | undefined;
+  /**
+   * ref 相对主线的 patch-id（合并前重跑那一步头变了，判能不能沿用上一轮第二意见用）：给了 PortError 就抛它
+   * （假的「git 报错、算不出来」）；不给就回 ref 本身（同一个 ref 总算出同一个值，不同的 ref 默认当不一样——
+   * 要测「不同的头、一样的改动」得自己给一个只看改动、不看 ref 的假实现）。n = 第几次算（从 1 开始）。
+   */
+  patchId: (input: PatchIdOfInput, n: number) => string | PortError | undefined;
   /** 推分支：给了就抛它（假的卫生检查拦下、名单没读到……）；n = 第几次推（从 1 开始）。 */
   push: (input: PushBranchInput, n: number) => PortError | undefined;
   /**
@@ -611,6 +618,11 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
       const scripted = script.postSecondOpinion?.(input, next('postSecondOpinion'));
       if (scripted instanceof PortError) throw scripted;
       return scripted ?? {};
+    },
+    async patchIdOf(input) {
+      const scripted = script.patchId?.(input, next('patchIdOf'));
+      if (scripted instanceof PortError) throw scripted;
+      return scripted ?? input.ref;
     },
     async syncMainline(input) {
       return {

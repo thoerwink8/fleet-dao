@@ -194,6 +194,24 @@ const rows: Row[] = [
     { step: 'parked', action: 'wait-human', patch: { resume: 'pr' } },
   ],
   [
+    '等 CI 查到 PR 已经在外面合并了（GitHub 自动合并先合了）：不当没查成，直接按合上了走，还有块接着下一块',
+    at({ step: 'pr', blocks: 2, block: 0, ciRounds: 2 }),
+    { kind: 'ci', state: 'merged' },
+    { step: 'execute', action: 'dispatch', patch: { block: 1, ciRounds: 0 } },
+  ],
+  [
+    '等 CI 查到 PR 已经在外面合并了、这是最后一块 → 直接关单',
+    at({ step: 'pr', blocks: 1 }),
+    { kind: 'ci', state: 'merged' },
+    { step: 'done', action: 'close' },
+  ],
+  [
+    '合并前重跑那一步查到 PR 已经在外面合并了：一样按合上了走，不算「合并前退回」',
+    at({ step: 'merge', blocks: 1 }),
+    { kind: 'ci', state: 'merged' },
+    { step: 'done', action: 'close' },
+  ],
+  [
     'CI 红 → 修一轮',
     at({ step: 'pr', blocks: 1 }),
     { kind: 'ci', state: 'red' },
