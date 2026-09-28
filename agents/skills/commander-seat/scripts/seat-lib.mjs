@@ -5,6 +5,8 @@
 //   上次续约成功是什么时候」：离上次续约成功超过租期，现查直接判不是帅位，不等法国回话。
 // - 没有登法国的钥匙（~/.fleet-dao/france-ssh 不在）、ssh 连不上、回的东西认不出，一律「没查成」（退出码 2），按不是帅位算，
 //   不当成没事。推前钩子例外：连不上法国只警告、照推（早提醒；真正的边界是合并闸），认领对不上才拦。
+// - ssh 的标准错误交原字节（Windows 上是 GBK，或被 ssh 打成 \NNN）。先 readableStderr 还原再抹字；认不出的照原样留着。
+//   外壳不要用 encoding:'utf8' 解标准错误，解过一遍原字节就丢了。
 // - 单上的「在做」评论只是库的镜子（doing-lib.mjs）：库里成了才改它；改不成照实报，库里那份算数。演练座位不改镜子。
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -44,10 +46,60 @@ export const CLAIM_USAGE = `用法：node claim.mjs <命令> …（经 ssh 调�
 
 class UsageError extends Error {}
 
-/** 法国、ssh 回的话取第一行，抹掉像 IP、令牌、邮箱的（和「法国引擎」页同一个抹法）。 */
+/** ssh 打出来的连续 \200–\377。ASCII 范围的反斜杠（C:\Users 这类）不认，免得把路径拆开。 */
+const HIGH_OCTAL = /\\[23][0-7]{2}(?:\\[23][0-7]{2})*/g;
+
+/** 严格解。编码名不存在、字节对不上，都是 null，不抛。 */
+function tryDecode(bytes, label) {
+  try {
+    return new TextDecoder(label, { fatal: true }).decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+/** 先 UTF-8，再 GB18030（GBK 的超集）。UTF-8 对了就不能再按 GBK 解，两边都合法的字节意思不一样。 */
+function decodeKnown(bytes) {
+  return tryDecode(bytes, 'utf-8') ?? tryDecode(bytes, 'gb18030');
+}
+
+/** 认不出的字节：非 ASCII 写成和 ssh 一样的 \NNN，ASCII 照原样。 */
+function bytesAsOctal(bytes) {
+  let out = '';
+  for (let i = 0; i < bytes.length; i++) {
+    const b = bytes[i];
+    out += b >= 0x80 ? `\\${b.toString(8).padStart(3, '0')}` : String.fromCharCode(b);
+  }
+  return out;
+}
+
+/**
+ * ssh 的标准错误还原成能读的字。字符串或原字节 Buffer 都收。
+ * 认不出的照原样留着：坏字节写成 \NNN，解不开的 \NNN 段保留原文。不吞、不出 �、不抛。
+ */
+export function readableStderr(raw) {
+  if (Buffer.isBuffer(raw)) {
+    const text = decodeKnown(raw);
+    return text === null ? bytesAsOctal(raw) : text;
+  }
+  return String(raw ?? '').replace(HIGH_OCTAL, (run) => {
+    const bytes = [];
+    for (let i = 0; i < run.length; i += 4) bytes.push(Number.parseInt(run.slice(i + 1, i + 4), 8));
+    return decodeKnown(Uint8Array.from(bytes)) ?? run;
+  });
+}
+
+/** 空 Buffer 长度是 0 但是真值，不能用 || 当成「这段有字」。 */
+function hasBody(v) {
+  if (v == null || v === '') return false;
+  if (Buffer.isBuffer(v)) return v.length > 0;
+  return true;
+}
+
+/** 法国、ssh 回的话取第一行，抹掉像 IP、令牌、邮箱的（和「法国引擎」页同一个抹法）。先还原再取行再抹。 */
 const firstLine = (text) =>
   scrubText(
-    String(text ?? '')
+    readableStderr(text ?? '')
       .trim()
       .split('\n')[0] ?? '',
   );
@@ -98,7 +150,7 @@ export function callFrance(io, host, argv, options = {}) {
   if (![0, 1, 2, 3].includes(r.status))
     return {
       kind: 'garbled',
-      why: `法国上的 fleet-api 退出码 ${r.status}（不是它会给的）：${firstLine(r.stderr || r.stdout) || '没有输出'}`,
+      why: `法国上的 fleet-api 退出码 ${r.status}（不是它会给的）：${firstLine(hasBody(r.stderr) ? r.stderr : r.stdout) || '没有输出'}`,
     };
   if (!json) return { kind: 'done', code: r.status, json: null, text: String(r.stdout ?? '').trimEnd() };
   const last =

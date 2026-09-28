@@ -1,5 +1,6 @@
 // 帅位只一个（#299）：帅位认领单、工人报进度和结束、推前查认领，经 ssh 调法国的 fleet-api claim。node claim.mjs 不带参数看用法。
 // 在项目仓的检出里跑（仓从 origin 认，别处加 --repo）；库里成了再改单上的「在做」镜子（doing-lib.mjs）。逻辑都在 seat-lib.mjs。
+// ssh 的标准错误交原字节，由 seat-lib 认编码。git、gh 仍按 UTF-8 字符串。
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -15,6 +16,16 @@ function run(bin, args, input, timeout) {
   };
 }
 
+function ssh(args, input) {
+  const r = spawnSync('ssh', args, { input, timeout: 90_000, windowsHide: true });
+  return {
+    status: r.status,
+    stdout: r.stdout?.toString('utf8') ?? '',
+    stderr: r.stderr ?? Buffer.alloc(0),
+    error: r.error?.code ?? r.error?.message,
+  };
+}
+
 function gh(args, input) {
   const r = run('gh', args, input, 60_000);
   if (r.error) throw new Error(`gh 没跑起来（${r.error}）`);
@@ -24,7 +35,7 @@ function gh(args, input) {
 }
 
 process.exitCode = await runClaim(process.argv.slice(2), {
-  ssh: (args, input) => run('ssh', args, input, 90_000),
+  ssh,
   git: (args) => run('git', args, undefined, 30_000),
   gh,
   env: process.env,

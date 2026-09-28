@@ -12,7 +12,7 @@ import { fakeGitHub, NOW, SCRIPTS } from './helpers/doing.ts';
 interface SshResult {
   status: number | null;
   stdout: string;
-  stderr: string;
+  stderr: string | Buffer;
   error?: string | undefined;
 }
 interface Io {
@@ -30,6 +30,7 @@ interface Io {
 interface SeatLib {
   FLEET_API: string;
   shellQuote(s: string): string;
+  readableStderr(raw: string | Buffer): string;
   runSeat(argv: string[], io: Io): Promise<number>;
   runClaim(argv: string[], io: Io): Promise<number>;
 }
@@ -51,7 +52,7 @@ function remoteArgs(command: string): string[] {
 }
 
 type Reply =
-  | { status: number; json?: unknown; stdout?: string; stderr?: string }
+  | { status: number; json?: unknown; stdout?: string; stderr?: string | Buffer }
   | ((args: string[]) => SshResult);
 
 function world(opts: { host?: string | null; machine?: string } = {}) {
@@ -628,6 +629,76 @@ describe('推前钩子（claim.mjs prepush）', () => {
     w.config.set('branch.feat/40-x.fleetClaim', 'garbage');
     expect(await w.claim(['prepush'])).toBe(1);
     expect(w.err.at(-1)).toContain('fleetClaim「garbage」认不出');
+  });
+});
+
+describe('ssh 标准错误里的中文（Windows 上是 GBK）', () => {
+  const phrase = '不知道这样的主机。';
+  const prefix = 'ssh: Could not resolve hostname contabo: ';
+  // 「不知道这样的主机。」的 GBK：两字节一个字，句号是 A1 A3。写死，不靠运行时编码器。
+  const gbkPhrase = [
+    0xb2, 0xbb, 0xd6, 0xaa, 0xb5, 0xc0, 0xd5, 0xe2, 0xd1, 0xf9, 0xb5, 0xc4, 0xd6, 0xf7, 0xbb, 0xfa, 0xa1,
+    0xa3,
+  ];
+  const gbkLine = () => Buffer.concat([Buffer.from(prefix), Buffer.from(gbkPhrase), Buffer.from('\r\n')]);
+  const escapedLine = () =>
+    `${prefix}${gbkPhrase.map((b) => `\\${b.toString(8).padStart(3, '0')}`).join('')}\r\n`;
+
+  it('GBK 原字节还原成能读的中文', () => {
+    expect(lib.readableStderr(gbkLine())).toBe(`${prefix}${phrase}\r\n`);
+  });
+
+  it('ssh 的 \\NNN 转义还原成同一句中文', () => {
+    const escaped = escapedLine();
+    expect(escaped).toContain('\\262\\273\\326\\252');
+    expect(lib.readableStderr(escaped)).toBe(`${prefix}${phrase}\r\n`);
+  });
+
+  it('UTF-8 原字节的中文照旧能读，不按 GBK 解', () => {
+    expect(lib.readableStderr(Buffer.from(`${prefix}${phrase}\n`, 'utf8'))).toBe(`${prefix}${phrase}\n`);
+    // C2 A5 两边都合法：UTF-8 是 ¥，GB18030 是「楼」。先认 UTF-8 才不会解错。
+    expect(lib.readableStderr(Buffer.from([0xc2, 0xa5]))).toBe('¥');
+  });
+
+  it('【故意造出的失败】坏字节、坏的 \\NNN、ASCII 反斜杠：不抛错，原样留着', () => {
+    const bad = Buffer.concat([
+      Buffer.from('ping '),
+      Buffer.from([0xff, 0xfe, 0x80]),
+      Buffer.from(' contabo'),
+    ]);
+    expect(lib.readableStderr(bad)).toBe('ping \\377\\376\\200 contabo');
+    expect(lib.readableStderr('pre \\377 post')).toBe('pre \\377 post');
+    expect(lib.readableStderr('C:\\Users\\a')).toBe('C:\\Users\\a');
+  });
+
+  it('现查连不上：GBK 原字节和转义串都打出能读的原因，退出码 2', async () => {
+    for (const stderr of [gbkLine(), escapedLine()]) {
+      const w = world();
+      w.replies.push(taken(3));
+      expect(await w.seat(['take', '--session', 's1'])).toBe(0);
+      w.replies.push({ status: 255, stderr });
+      expect(await w.seat(['check'])).toBe(2);
+      const line = w.err.at(-1) ?? '';
+      expect(line).toContain('ssh 连不上法国：');
+      expect(line).toContain(phrase);
+    }
+  });
+
+  it('认领连不上：GBK 原字节打出能读的原因，退出码 2', async () => {
+    const w = world();
+    w.replies.push({ status: 255, stderr: gbkLine() });
+    expect(await w.claim(['show'])).toBe(2);
+    const line = w.err.at(-1) ?? '';
+    expect(line).toContain('ssh 连不上法国：');
+    expect(line).toContain(phrase);
+  });
+
+  it('【故意造出的失败】标准错误是空 Buffer：不当成有输出，改看标准输出', async () => {
+    const w = world();
+    w.replies.push({ status: 127, stderr: Buffer.alloc(0), stdout: 'bash: fleet-api: No such file\n' });
+    expect(await w.seat(['take', '--session', 's1'])).toBe(2);
+    expect(w.err.at(-1)).toContain('bash: fleet-api: No such file');
+    expect(w.err.at(-1)).not.toContain('没有输出');
   });
 });
 
