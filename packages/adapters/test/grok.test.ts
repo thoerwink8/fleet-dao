@@ -42,6 +42,7 @@ describe('grok 参数', () => {
       '--output-format',
       'streaming-json',
       '--always-approve',
+      '--no-plan',
       '-m',
       'grok-4.7',
       '--cwd',
@@ -64,6 +65,8 @@ describe('grok 参数', () => {
       promptFile: '/tmp/p.txt',
     });
     expect(args).not.toContain('--always-approve');
+    // 计划模式不看权限模式，没放开权限也照样关
+    expect(args).toContain('--no-plan');
     expect(args.slice(0, 2)).toEqual(['--prompt-file', '/tmp/p.txt']);
     expect(args.slice(-6)).toEqual(['-r', SESSION, '--reasoning-effort', 'high', '--max-turns', '20']);
   });
@@ -250,9 +253,12 @@ describe('grok 起停', () => {
     expect(JSON.parse(readFileSync(join(out, 'argv'), 'utf8'))).toEqual(
       buildGrokArgs({ model: 'grok-4.7', session: { mode: 'new', id: SESSION }, cwd, alwaysApprove: true }),
     );
-    expect(
-      (JSON.parse(readFileSync(join(out, 'env'), 'utf8')) as Record<string, string>).GROK_DISABLE_AUTOUPDATER,
-    ).toBe('1');
+    // 目录信任、反问选择题两张卡 --always-approve 管不到，靠这两个开关关
+    expect(JSON.parse(readFileSync(join(out, 'env'), 'utf8'))).toMatchObject({
+      GROK_DISABLE_AUTOUPDATER: '1',
+      GROK_FOLDER_TRUST: '0',
+      GROK_ASK_USER_QUESTION: '0',
+    });
     expect(kinds.filter((k) => k === 'say')).toHaveLength(2);
     const summary = grokRunSummary(report);
     expect(summary).toMatchObject({

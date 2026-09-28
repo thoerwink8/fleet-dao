@@ -226,6 +226,8 @@ export const SCOPE_ENV_ARGS: ReadonlySet<string> = new Set([
   'BASH_DEFAULT_TIMEOUT_MS',
   'BASH_MAX_TIMEOUT_MS',
   'GROK_DISABLE_AUTOUPDATER',
+  'GROK_FOLDER_TRUST',
+  'GROK_ASK_USER_QUESTION',
 ]);
 
 export interface ScopeLaunch {

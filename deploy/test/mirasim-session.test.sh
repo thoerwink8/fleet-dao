@@ -62,6 +62,8 @@ has "User 是渲染进去的会话用户" "$RENDERED" '^User=fleet-mirasim-fake$
 has "Group 跟着同一个用户" "$RENDERED" '^Group=fleet-mirasim-fake$'
 has "ExecStart 带上端口、只听回环、不开浏览器、不进 IM" "$RENDERED" \
   'ExecStart=.*--port 54321 --host 127\.0\.0\.1 --no-open --no-im --workdir /home/fleet-mirasim-fake'
+has "经它起的 grok 不认目录信任（不然不加载 AGENTS.md、还弹「信不信」）" "$RENDERED" '^Environment=GROK_FOLDER_TRUST=0$'
+has "经它起的 grok 不给反问选择题（没人答会干等）" "$RENDERED" '^Environment=GROK_ASK_USER_QUESTION=0$'
 has "起不来会重试（on-failure）" "$RENDERED" '^Restart=on-failure$'
 has "不进 fleet-agents.slice（平台常驻服务，不占会话额度）" "$RENDERED" 'MemoryHigh=|MemoryMax='
 

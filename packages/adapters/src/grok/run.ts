@@ -33,6 +33,19 @@ export interface GrokRunReport extends AgentProcessResult {
   stream: GrokStreamSummary;
 }
 
+/**
+ * 无人值守起 grok 必带的执行体开关，名字都要在 procs.ts 的 SCOPE_ENV_ARGS 白名单里（法国经帮手脚本起）。
+ * - GROK_DISABLE_AUTOUPDATER：自动更新会在会话中途换二进制；
+ * - GROK_FOLDER_TRUST=0：工作树是新目录，grok 认成没信任就不加载 AGENTS.md、项目钩子和技能，交互时还弹「信不信」；
+ * - GROK_ASK_USER_QUESTION=0：不给模型反问选择题的工具，没人答会干等。
+ * 后两张卡 --always-approve 管不到（~/.grok/docs/user-guide/10-hooks.md、26-config-reference.md）；计划模式见 args.ts。
+ */
+export const GROK_UNATTENDED_ENV: Readonly<Record<string, string>> = {
+  GROK_DISABLE_AUTOUPDATER: '1',
+  GROK_FOLDER_TRUST: '0',
+  GROK_ASK_USER_QUESTION: '0',
+};
+
 export async function runGrok(spec: GrokRunSpec, options: AgentRunOptions): Promise<GrokRunReport> {
   await assertRunnable(options.command, spec.prompt, spec.cwd);
   const args = buildGrokArgs({
@@ -55,8 +68,7 @@ export async function runGrok(spec: GrokRunSpec, options: AgentRunOptions): Prom
       runId: spec.runId,
       cwd: spec.cwd,
       args,
-      // 自动更新会在会话中途换二进制
-      env: { ...buildSessionEnv(spec.env), GROK_DISABLE_AUTOUPDATER: '1' },
+      env: { ...buildSessionEnv(spec.env), ...GROK_UNATTENDED_ENV },
       stdin: spec.prompt,
       limits: spec.limits,
       cgroup: spec.cgroup,

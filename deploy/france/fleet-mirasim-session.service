@@ -37,6 +37,11 @@ WorkingDirectory=/home/@@SESSION_USER@@
 # 不能沿用起这个单元时 systemd 给的默认环境
 Environment=HOME=/home/@@SESSION_USER@@
 Environment=USER=@@SESSION_USER@@
+# 经它起的 grok（grok agent stdio）只认配置和环境变量、不认 --trust 这类旗标：工作树是新目录，grok 认成没信任就不加载
+# AGENTS.md、还弹「信不信这个目录」；反问选择题没人答会干等。两张卡 bypass 都管不到，和引擎直接起 grok 那条同一对开关
+# （packages/adapters/src/grok/run.ts 的 GROK_UNATTENDED_ENV）
+Environment=GROK_FOLDER_TRUST=0
+Environment=GROK_ASK_USER_QUESTION=0
 ExecStart=/home/@@SESSION_USER@@/.mirasim-remote/current/node /home/@@SESSION_USER@@/.mirasim-remote/current/server.cjs --port @@MIRASIM_SESSION_PORT@@ --host 127.0.0.1 --no-open --no-im --workdir /home/@@SESSION_USER@@
 Restart=on-failure
 RestartSec=5
