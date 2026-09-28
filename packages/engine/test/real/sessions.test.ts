@@ -2488,6 +2488,63 @@ describe('grok：会话端口按执行方式分派（法国真跑夹具驱动，
       expect(grok.specs[1]?.prompt).toContain('grok: 追加一行');
     });
 
+    it('上一轮判了停滞：同池再开是新会话，提示词是接力，不再 -r（#489）', async () => {
+      const { ports, grok } = setup(() => ({}), { grok: () => grokDelivers()() });
+      const firstInput = grokLaunch();
+      const first = await runOnce(ports, firstInput);
+      await t.client.query(
+        `update session_runs set outcome = 'stalled', failure_code = 'SESSION_STALLED', failure_message = $1 where id = $2`,
+        ['L1：反复查同一个输出', firstInput.runId],
+      );
+      await runOnce(
+        ports,
+        grokLaunch({
+          resumeSessionId: first.end.sessionId,
+          baseHead: first.end.output?.kind === 'delivery' ? first.end.output.head : m.head,
+        }),
+      );
+      expect(grok.specs[1]?.session.mode).toBe('new');
+      expect(grok.specs[1]?.session.id).not.toBe(first.end.sessionId);
+      expect(grok.specs[1]?.prompt).toContain('接力');
+      expect(grok.specs[1]?.prompt).toContain('停滞');
+    });
+
+    it('同一个号续起来 startup_timeout：再开一次仍是新会话，不再续它（#489）', async () => {
+      const { ports, grok } = setup(() => ({}), {
+        grok: (_, n) =>
+          n === 1
+            ? grokDelivers()()
+            : n === 2
+              ? { killed: 'startup_timeout', stderr: 'Terminated\n' }
+              : grokDelivers()(),
+      });
+      const first = await runOnce(ports, grokLaunch());
+      const head = first.end.output?.kind === 'delivery' ? first.end.output.head : m.head;
+      // 同一毫秒排队时 latestRunOfSession 分不出先后：续起来的那一轮排在后面，才能被认成最近一轮。
+      const timedOut = await runOnce(
+        ports,
+        grokLaunch({
+          resumeSessionId: first.end.sessionId,
+          baseHead: head,
+          queuedAt: new Date(NOW.getTime() + 60_000).toISOString(),
+        }),
+      );
+      expect(timedOut.end.failure?.code).toBe('startup_timeout');
+      expect(grok.specs[1]?.session).toEqual({ mode: 'resume', id: first.end.sessionId });
+      await runOnce(
+        ports,
+        grokLaunch({
+          resumeSessionId: first.end.sessionId,
+          baseHead: head,
+          queuedAt: new Date(NOW.getTime() + 120_000).toISOString(),
+        }),
+      );
+      expect(grok.specs[2]?.session.mode).toBe('new');
+      expect(grok.specs[2]?.session.id).not.toBe(first.end.sessionId);
+      expect(grok.specs[2]?.prompt).toContain('不再续这个号');
+      expect(grok.specs[2]?.prompt).toContain('接力');
+    });
+
     it('换了执行方式（Claude 的会话号拿到 grok 上续）：续不上，开新会话带接力任务书', async () => {
       const { ports, grok } = setup(commitAndDone(), { grok: () => grokDelivers()() });
       const a = await runOnce(ports, launch());

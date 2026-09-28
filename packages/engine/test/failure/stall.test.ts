@@ -177,6 +177,53 @@ describe('在绕圈', () => {
     expect(v.rule).toBe('G1');
   });
 
+  it('后台命令还在跑、又连着查了 4 次输出：在等工具，不算绕圈（#489）', () => {
+    const poll = {
+      name: 'get_command_or_subagent_output',
+      summary: 'task-1',
+      action: 'other' as const,
+      ok: true,
+    };
+    const v = judgeStall(
+      facts(m(25), {
+        lastEventAt: m(24.9),
+        lastStepAt: m(5),
+        toolsInFlight: [{ name: 'run_terminal_command', since: m(20) }],
+        recentTools: [poll, poll, poll, poll],
+      }),
+    );
+    expect({ state: v.state, waitingOn: v.waitingOn, rule: v.rule }).toEqual({
+      state: 'waiting',
+      waitingOn: 'tool',
+      rule: 'W3',
+    });
+  });
+
+  it('没有后台命令：连着查输出、或反复读会话文件，仍是绕圈', () => {
+    const poll = {
+      name: 'get_command_or_subagent_output',
+      summary: 'task-1',
+      action: 'other' as const,
+      ok: true,
+    };
+    const read = {
+      name: 'read_file',
+      summary: '~/.grok/sessions/abc',
+      action: 'read' as const,
+      ok: true,
+    };
+    expect(
+      judgeStall(
+        facts(m(25), { lastEventAt: m(24.9), lastStepAt: m(5), recentTools: [poll, poll, poll, poll] }),
+      ).rule,
+    ).toBe('L1');
+    expect(
+      judgeStall(
+        facts(m(25), { lastEventAt: m(24.9), lastStepAt: m(5), recentTools: [read, read, read, read] }),
+      ).rule,
+    ).toBe('L1');
+  });
+
   it('有动静但 45 分钟没推进：Jev 不在也判绕圈', () => {
     const v = judgeStall(facts(m(50), { lastEventAt: m(49.9), lastStepAt: m(5) }));
     expect({ state: v.state, rule: v.rule }).toEqual({ state: 'looping', rule: 'L2' });

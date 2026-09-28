@@ -142,6 +142,41 @@ describe('是谁杀的', () => {
     expect(cause.why).not.toMatch(/oom_kill/);
   });
 
+  it('收孤儿的原因写进失败记录；信号文件读不成写没读成，不当成没人发过信号（#489）', async () => {
+    const d = deps({
+      [SLICE]: EVENTS(0),
+      '.auto/state.json': '{}',
+      '/io/reap': '2026-09-28T12:45:56.000Z 已经叫停（工作流收尾）\n',
+    });
+    const cause = await explainKill(d, {
+      ...base,
+      stopping: null,
+      before: { slice: 0 },
+      detached: true,
+      scopeUnit: 'fleet-agent-abc.scope',
+      ioDir: '/io',
+    });
+    expect(cause.code).toBe('signal_unexplained');
+    expect(cause.why).toContain('已经叫停（工作流收尾）');
+    expect(cause.why).toContain('外壳接到的信号没读成');
+    expect(cause.why).toContain('会话脱开引擎跑');
+    expect(cause.why).toContain('fleet-agent-abc.scope');
+    expect(cause.why).not.toContain('没人杀');
+  });
+
+  it('两个文件都空着：写明没有记录，不算没读成', async () => {
+    const d = deps({
+      [SLICE]: EVENTS(0),
+      '.auto/state.json': '{}',
+      '/io/reap': '\n',
+      '/io/signal': '',
+    });
+    const cause = await explainKill(d, { ...base, stopping: null, before: { slice: 0 }, ioDir: '/io' });
+    expect(cause.why).toContain('没有收孤儿的记录');
+    expect(cause.why).toContain('外壳没有记下接到的信号');
+    expect(cause.why).not.toContain('没读成');
+  });
+
   it('交给失败分流：三个码各认成各自的规则，不再写死「多半是内存超限」', async () => {
     const d = deps({ [SLICE]: EVENTS(0), '.auto/state.json': '{}' });
     const unexplained = await explainKill(d, { ...base, stopping: null, before: { slice: 0 } });

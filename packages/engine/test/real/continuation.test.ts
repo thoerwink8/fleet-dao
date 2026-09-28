@@ -78,6 +78,57 @@ describe('续不上：接力（开新会话带接力任务书），why 写清为
 
   it('先后：换了执行方式又是临时号，报的是换了执行方式（先判的那个）', () =>
     relay({ before: claudeBefore, resumeId: `cursor-pending:${REAL}` }, '换了执行方式'));
+
+  it('这个号续起来没有第一帧：不再 resume，也不 fork（#489）', () => {
+    relay({ prior: { ...PRIOR, failureCode: 'startup_timeout' } }, '不再续这个号');
+    const fork = decideContinuation(
+      facts({
+        driver: claude,
+        before: claudeBefore,
+        route: { poolId: 'claude-carpool' },
+        prior: { ...PRIOR, contextTokens: 5_000, failureCode: 'startup_timeout' },
+      }),
+    );
+    expect(fork.mode).toBe('relay');
+    expect(fork.why).toContain('不再续这个号');
+  });
+
+  it('先后：换了执行方式、上一轮又是 startup_timeout，报的是换了执行方式', () =>
+    relay({ before: claudeBefore, prior: { ...PRIOR, failureCode: 'startup_timeout' } }, '换了执行方式'));
+
+  it('Grok 上一轮判了停滞：同池改接力；Claude 停滞仍续；没填结局的同池照旧续', () => {
+    const grok = decideContinuation(
+      facts({
+        driver: { hostId: 'grok', canFork: false },
+        before: { hostId: 'grok', poolId: 'grok' },
+        route: { poolId: 'grok' },
+        prior: { ...PRIOR, outcome: 'stalled' },
+      }),
+    );
+    expect(grok.mode).toBe('relay');
+    expect(grok.why).toContain('停滞');
+    expect(grok.why).toContain('接力');
+    const byCode = decideContinuation(
+      facts({
+        driver: { hostId: 'grok', canFork: false },
+        before: { hostId: 'grok', poolId: 'grok' },
+        route: { poolId: 'grok' },
+        prior: { ...PRIOR, failureCode: 'SESSION_STALLED' },
+      }),
+    );
+    expect(byCode.mode).toBe('relay');
+    expect(
+      decideContinuation(
+        facts({
+          driver: claude,
+          before: claudeBefore,
+          route: { poolId: 'claude-solo' },
+          prior: { ...PRIOR, outcome: 'stalled', failureCode: 'SESSION_STALLED' },
+        }),
+      ),
+    ).toEqual({ mode: 'resume', why: '' });
+    expect(decideContinuation(facts())).toEqual({ mode: 'resume', why: '' });
+  });
 });
 
 describe('fork：只有 Claude，只换了池、上一轮上下文还小', () => {

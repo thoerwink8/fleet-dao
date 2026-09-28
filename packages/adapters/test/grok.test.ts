@@ -216,6 +216,42 @@ describe('grok 过程记录', () => {
       nonJsonLines: 1,
     });
   });
+
+  it('后台命令交回之后还算在跑；查输出说结束才发结束；认不出就不结束、不抛（#489）', () => {
+    const reader = new GrokStreamReader({ runId: 'r1', cwd: '/w', now: () => NOW });
+    const call = (id: string, name: string, kind: string, rawInput: Record<string, unknown>) =>
+      reader.read(JSON.stringify({ type: 'tool_call', toolCallId: id, kind, toolName: name, rawInput }));
+    const update = (id: string, rawOutput: Record<string, unknown>) =>
+      reader.read(
+        JSON.stringify({ type: 'tool_call_update', toolCallId: id, status: 'completed', rawOutput }),
+      );
+
+    call('bg1', 'run_terminal_command', 'execute', { command: 'pnpm test', background: true });
+    const launched = update('bg1', { type: 'Bash', exit_code: 0, output_for_prompt: 'task bg1' });
+    expect(launched.events.filter((e) => e.kind === 'tool')).toEqual([]);
+    expect(reader.toolsInFlight).toBe(1);
+
+    const poll = (id: string, rawOutput: Record<string, unknown>) => {
+      call(id, 'get_command_or_subagent_output', 'other', { task_ids: ['bg1'] });
+      return update(id, rawOutput);
+    };
+    expect(() => poll('p-unknown', { note: '看不懂' })).not.toThrow();
+    expect(reader.toolsInFlight).toBe(1);
+    poll('p-running', { status: 'running' });
+    expect(reader.toolsInFlight).toBe(1);
+    const finished = poll('p-done', { status: 'completed', output_for_prompt: 'exit: 0' });
+    expect(reader.toolsInFlight).toBe(0);
+    const ends = finished.events
+      .filter((e) => e.kind === 'tool')
+      .map((e) => e.payload as ToolPayload)
+      .filter((t) => t.phase === 'end');
+    expect(ends.map((t) => t.toolUseId).sort()).toEqual(['bg1', 'p-done']);
+
+    // 没有 background：查输出自己结束，不占着 toolsInFlight
+    call('q1', 'get_command_or_subagent_output', 'other', { task_ids: ['nobody'] });
+    update('q1', { status: 'running' });
+    expect(reader.toolsInFlight).toBe(0);
+  });
 });
 
 describe('grok 起停', () => {

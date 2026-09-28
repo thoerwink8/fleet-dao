@@ -11,6 +11,7 @@
 import { spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { IO_FILES } from '@fleet-dao/adapters';
 import type { Cordon } from '../drain.ts';
 
 export const CGROUP_ROOT = '/sys/fs/cgroup';
@@ -104,6 +105,15 @@ export interface KillFacts {
   scopeSeen: number | undefined;
   /** 这段时间里同时在跑的别的会话有几个（这个工人进程手上的）。 */
   othersRunning: number;
+  /** 会话是不是脱开引擎跑的。不给 = 调用方没交代。 */
+  detached?: boolean;
+  /** systemd scope 单元名。不给 = 没记。 */
+  scopeUnit?: string;
+  /**
+   * 收发目录。给了就读收孤儿记录和外壳接到的信号（detached.ts 预先建好的两个文件）；
+   * 不给 = 没有收发目录，那两样没得读。
+   */
+  ioDir?: string;
 }
 
 /** 发布那一头此刻在干什么：发布锁占着、自动发布在发哪个。读不成的照实写。 */
@@ -169,11 +179,52 @@ export async function explainKill(deps: KillEvidenceDeps, facts: KillFacts): Pro
   }
   if (s?.source === 'release')
     notes.push(`那一刻在为发布排空（${s.why}，截止 ${s.until}），引擎还没收到停机信号`);
+  else if (s?.source === 'signal')
+    notes.push(`引擎在 ${s.since} 收到过停机信号（${s.why}），和进程退出不是同一刻`);
+  notes.push(
+    facts.detached === true
+      ? '会话脱开引擎跑'
+      : facts.detached === false
+        ? '会话还接着管道'
+        : '有没有脱开跑没交代',
+  );
+  notes.push(facts.scopeUnit ? `scope ${facts.scopeUnit}` : '没记 scope');
+  notes.push(...(await ioNotes(deps, facts.ioDir)));
   const release = await releaseNote(deps);
   return {
     code: 'signal_unexplained',
     why: `没查到是谁杀的（${facts.signal}）：那一刻引擎没在停${release ? `；${release}` : ''}；${notes.join('；')}`,
   };
+}
+
+type IoNote = { state: 'text'; text: string } | { state: 'empty' } | { state: 'error'; error: string };
+
+/** 收发目录里的一行记录：有字、空着、读失败，三样分开，空着不算没读成。 */
+async function readIoNote(deps: KillEvidenceDeps, path: string): Promise<IoNote> {
+  try {
+    const text = (await deps.readText(path)).trim();
+    return text ? { state: 'text', text } : { state: 'empty' };
+  } catch (err) {
+    return { state: 'error', error: message(err) };
+  }
+}
+
+function ioNoteLine(label: string, got: IoNote, empty: string): string {
+  if (got.state === 'error') return `${label}没读成（${got.error}）`;
+  if (got.state === 'empty') return empty;
+  return `${label}：${got.text}`;
+}
+
+async function ioNotes(deps: KillEvidenceDeps, ioDir: string | undefined): Promise<string[]> {
+  if (!ioDir) return ['没有收发目录，收孤儿记录和外壳接到的信号都没得读'];
+  const [reap, signal] = await Promise.all([
+    readIoNote(deps, join(ioDir, IO_FILES.reap)),
+    readIoNote(deps, join(ioDir, IO_FILES.signal)),
+  ]);
+  return [
+    ioNoteLine('收孤儿记录', reap, '没有收孤儿的记录'),
+    ioNoteLine('外壳接到的信号', signal, '外壳没有记下接到的信号'),
+  ];
 }
 
 /** 发布锁有没有人占着：以共享锁试一下（flock -n -s，读得到锁文件就能试），占着 true、空着 false，别的都算没查成。 */

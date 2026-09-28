@@ -37,7 +37,7 @@
 // Jev（判断题）只在这个活动里问（design 第十一节「错误分流」「停滞预判」）：规则认不出的失败问一次，回答随结局交给工作流的
 // 失败分流；停滞拿不准时问，同一个会话隔 stallJevEveryMs 才再问。只记不拦的题、没判出来的一律照规则走。
 
-import { readdir, readFile, rm } from 'node:fs/promises';
+import { appendFile, readdir, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   type CgroupScope,
@@ -222,8 +222,14 @@ export function resumeStartupMs(
 export interface ContinuationFacts {
   /** 工作流要接着的会话号（可能是 cursor 的临时号）。 */
   resumeId: string;
-  /** 这个号最近一轮的记录（latestRunOfSession）；查不到 = null。 */
-  prior: Pick<SessionRunState, 'runAsUser' | 'routeId' | 'worktreePath' | 'contextTokens'> | null;
+  /**
+   * 这个号最近一轮的记录（latestRunOfSession）；查不到 = null。
+   * outcome、failureCode 不给就当上一轮没失败（#489 之前的调用方不带这两项）。
+   */
+  prior:
+    | (Pick<SessionRunState, 'runAsUser' | 'routeId' | 'worktreePath' | 'contextTokens'> &
+        Partial<Pick<SessionRunState, 'outcome' | 'failureCode'>>)
+    | null;
   /** 上一轮的路由现在的样子（routeLaunchFacts）；查不到 = null。 */
   before: { hostId: string; poolId: string } | null;
   /** 这次的路由。 */
@@ -240,6 +246,8 @@ export interface ContinuationFacts {
  * → fork；别的一律接力（开新会话带接力任务书），why 写清为什么续不上。先后就是判断的先后，每个分支都有测试。
  * 不硬续的理由：会话记录存在会话用户家里、按工作目录分（Claude 的 ~/.claude/projects/<目录>、cursor 的 ~/.cursor/chats/<目录的哈希>），
  * 换了用户、目录、执行方式都找不到；cursor 的临时号不是它的会话号；cursor 没有 fork，切了池原会话续不上。
+ * 结构上续得上、却仍改接力的（#489）：这个号上一轮续起来没有第一帧（startup_timeout）——resume 和 fork 都是续这个号，不再试；
+ * Grok 上一轮判了停滞、本来要同池 resume 的，原样 -r 起不来，改开新会话。Claude 判了停滞仍续（失败分流 SL1）。
  */
 export function decideContinuation(x: ContinuationFacts): { mode: ContinueMode; why: string } {
   const { resumeId, prior, before } = x;
@@ -266,7 +274,21 @@ export function decideContinuation(x: ContinuationFacts): { mode: ContinueMode; 
       `上一个会话 ${resumeId} 在 ${prior.worktreePath ?? '没记的目录'} 里跑，这次在 ${x.dir}：过程记录按目录存，换了目录续不上`,
     );
   }
-  if (before.poolId === x.route.poolId) return { mode: 'resume', why: '' };
+  // 不给 failureCode / outcome 就当没失败：#489 之前记下的轮次、测试里没填这两项的，同池照旧 resume。
+  if (prior.failureCode === 'startup_timeout') {
+    return relay(
+      `上一个会话 ${resumeId} 续起来没有第一帧（startup_timeout），不再续这个号，开新会话带接力任务书`,
+    );
+  }
+  if (before.poolId === x.route.poolId) {
+    if (
+      x.driver.hostId === 'grok' &&
+      (prior.outcome === 'stalled' || prior.failureCode === 'SESSION_STALLED')
+    ) {
+      return relay(`上一个会话 ${resumeId} 上一轮判了停滞，原样续起不来，开新会话带接力任务书`);
+    }
+    return { mode: 'resume', why: '' };
+  }
   const moved = `换了账号池（${before.poolId} → ${x.route.poolId}）`;
   if (!x.driver.canFork) return relay(`${moved}，${hostName(x.driver.hostId)} 不能 fork`);
   if (prior.contextTokens !== null && prior.contextTokens < x.forkMax) return { mode: 'fork', why: '' };
@@ -2000,6 +2022,10 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
         before: await live.oomBefore,
         scopeSeen: seen.length > 0 ? Math.max(...seen) : undefined,
         othersRunning: live.peersSeen,
+        detached: live.detached,
+        ...(live.scopeUnit ? { scopeUnit: live.scopeUnit } : {}),
+        // 脱开跑的才有收发目录：收孤儿的原因、外壳接到的信号都写在那里
+        ...(live.detached ? { ioDir: ioDirOf(live.runId) } : {}),
       });
       return failed(cause.code, `${message}；${cause.why}`);
     };
@@ -2296,37 +2322,56 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     await removeIo(input.runId);
   }
 
+  /** 收孤儿之前把原因和时间写进收发目录。写不成只记日志，照样收（失败记录里会写成没读成）。 */
+  async function noteReap(runId: string, why: string): Promise<void> {
+    const dir = ioDirOf(runId);
+    if (!dir) {
+      log(`收孤儿的原因写不进收发目录（${runId}）：没有收发目录`);
+      return;
+    }
+    try {
+      await appendFile(join(dir, IO_FILES.reap), `${clock().toISOString()} ${why}\n`);
+    } catch (error) {
+      log(`收孤儿的原因没写进收发目录（${runId}）`, { error: errorText(error) });
+    }
+  }
+
   async function reapOrphanSessions(): Promise<number> {
     const listed = await listAgentScopes(helperOpts);
     if (!listed.ok) {
       throw new Error(`查不了上一轮留下的会话（fleet-agent-scope list）：${listed.detail}`);
     }
     let reaped = 0;
-    const kept: string[] = [];
+    const alive: string[] = [];
+    /** 已经收掉、收发目录还留着：看守接回时读收孤儿的原因，收场才删。 */
+    const held: string[] = [];
     for (const scope of listed.scopes) {
       if (scope.state === 'inactive') continue;
       // 脱开引擎跑的、还能接回的留着：看守（awaitSession）重试到这个新工人上时接回，停机不碰在跑的会话
       const why = await keepForReattach(scope.id);
       if (why === true) {
-        kept.push(scope.id);
+        alive.push(scope.id);
         continue;
       }
       log(`上一轮留下的会话 ${scope.id} 接不回，收掉：${why}`);
+      // 先把原因写下再收：scope 带 --collect，停完单元就没了，失败记录只能靠这个文件。
+      await noteReap(scope.id, why);
       // stop 只按编号收；用户只过帮手参数的校验。
       const error = await stopScope({ id: scope.id, user: SESSION_USERS[0], ...helperOpts });
       if (error) throw new Error(`收不掉上一轮留下的会话 ${scope.id}：${error}`);
+      held.push(scope.id);
       reaped += 1;
     }
-    if (kept.length > 0) log(`上一轮起的会话还在跑、留给看守接回 ${kept.length} 个：${kept.join('、')}`);
+    if (alive.length > 0) log(`上一轮起的会话还在跑、留给看守接回 ${alive.length} 个：${alive.join('、')}`);
     // 引擎不在的时候跑完了的（scope 已经没了，退出码在收发目录里）：也留着，看守接回时收场、判结局
-    const done = await finishedWhileAway(new Set(kept));
+    const done = await finishedWhileAway(new Set([...alive, ...held]));
     if (done.length > 0)
       log(`上一轮起的会话在引擎不在时跑完了、留给看守收场 ${done.length} 个：${done.join('、')}`);
-    kept.push(...done);
-    // 收掉的会话的临时目录、收发目录（上一轮没来得及删的、工人被强杀时在跑的）一起清掉；留着接回的不动
-    const swept = await sweepTmp(new Set(kept));
+    // 还在跑的、刚收掉但原因还没被看守读走的、引擎不在时跑完的：目录留着。别的清掉。
+    const keep = new Set([...alive, ...held, ...done]);
+    const swept = await sweepTmp(keep);
     if (swept > 0) log(`删掉上一轮会话留下的临时目录 ${swept} 个`);
-    await sweepIo(new Set(kept));
+    await sweepIo(keep);
     return reaped;
   }
 

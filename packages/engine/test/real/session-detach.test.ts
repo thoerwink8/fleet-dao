@@ -352,7 +352,7 @@ describe.skipIf(!onPosix)('发布不碰会话：引擎重启，会话接着跑�
     expect(next).toMatchObject({ action: 'retry', rule: 'EN1' });
   });
 
-  it('引擎不在时叫停了：新引擎收孤儿时不留它，按编号收掉 scope、删收发目录', async () => {
+  it('引擎不在时叫停了：收孤儿收掉 scope，原因留在收发目录给看守读', async () => {
     const input = await launchInput();
     await startThenStopEngineA(input);
     await requestSessionStop(t.db, { runId: input.runId, reason: '工作流收尾' });
@@ -363,6 +363,8 @@ describe.skipIf(!onPosix)('发布不碰会话：引擎重启，会话接着跑�
       { action: 'stop', args: [input.runId] },
     ]);
     expect(b.logs.join('\n')).toContain('已经叫停');
-    expect(existsSync(ioDir(input.runId))).toBe(false);
+    // 目录先留着：scope 停完就没了，失败记录靠这个文件。看守收场才删。
+    expect(existsSync(ioDir(input.runId))).toBe(true);
+    expect(readFileSync(join(ioDir(input.runId), IO_FILES.reap), 'utf8')).toContain('已经叫停');
   });
 });

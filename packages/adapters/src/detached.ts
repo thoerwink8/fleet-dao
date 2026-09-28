@@ -2,12 +2,14 @@
 // 退出码由会话那一侧的外壳写进文件；引擎只是按序号读这些文件。引擎重启了，新引擎照同一个目录从头重读（接回），
 // 会话跑完了也读得到它的结局。
 // 收发目录（引擎的，归 fleet，0711）里：prompt（提示词，0644）、out（执行体的标准输出，一行一帧，0622）、err（标准错误，0622）、
-// exit（外壳写的退出码，0622）、pid（外壳的进程号，0622）、started（起的时刻）、helper.err（帮手、外壳自己的报错，引擎写）。
+// exit（外壳写的退出码，0622）、pid（外壳的进程号，0622）、signal（外壳接到 TERM/INT 时追加的时刻和父进程名，0622）、
+// reap（引擎收孤儿之前写下的原因，0622）、started（起的时刻）、helper.err（帮手、外壳自己的报错，引擎写）。
 // 改这里之前必须知道：
-// - 会话以会话用户的身份跑，写不了引擎的文件：out、err、exit、pid 由引擎先建好、给别人写的权限（0622），目录 0711 别人列不出；
-//   路径里带着会话编号（UUID），猜不到。
+// - 会话以会话用户的身份跑，写不了引擎的文件：out、err、exit、pid、signal、reap 由引擎先建好、给别人写的权限（0622），目录 0711 别人列不出；
+//   路径里带着会话编号（UUID），猜不到。会话用户建不了新文件，所以信号记录只能追加进预先建好的 signal。
 // - 外壳（WRAPPER）接住 TERM、INT：scope 被收时 systemd 给 scope 里每个进程发 SIGTERM，外壳等执行体退了再写退出码
-//   （POSIX：前台命令没结束，trap 不跑）。外壳被 SIGKILL 就没有退出码：读的一方照实报「退出码丢了」（exitLost），不当成 0。
+//   （POSIX：前台命令没结束，trap 不跑），并往 signal 追加一行「信号 时刻 父进程名」。外壳被 SIGKILL 就没有退出码、也没有这一行：
+//   读的一方照实报「退出码丢了」（exitLost）、「外壳没有记下接到的信号」，不当成 0、也不当成没人发信号。
 // - 序号 = out 里第几行（从 0 起，超长丢掉的行不占号）：同一份文件怎么重读都是同一个号，引擎按它去重。
 // - 接回时（attach）不起进程：起的时刻、上一次写输出的时刻从文件读，总时长、停滞照原来的起点算。
 import { spawn } from 'node:child_process';
@@ -45,6 +47,10 @@ export const IO_FILES = {
   err: 'err',
   exit: 'exit',
   pid: 'pid',
+  /** 外壳接到 TERM / INT：一行「信号 时刻 父进程名」。空着 = 没接到（或被 SIGKILL，trap 没跑）。 */
+  signal: 'signal',
+  /** 引擎收孤儿之前写下的原因和时间。空着 = 这次不是收孤儿收的。 */
+  reap: 'reap',
   started: 'started',
   helperErr: 'helper.err',
 } as const;
@@ -52,14 +58,19 @@ export const IO_FILES = {
 /**
  * 会话那一侧的外壳（/bin/sh -c）：记下自己的进程号，接住 TERM、INT，执行体的输入输出接文件，退了写退出码。
  * 参数：输入 输出 错误 退出码 进程号 -- 命令…
+ * signal 文件和 pid 在同一目录（会话用户建不了新文件，只追加引擎预先建好的那个）。
  */
 export const WRAPPER = [
   'in=$1 out=$2 err=$3 st=$4 pidf=$5',
   'shift 5',
   'echo $$ >>"$pidf"',
+  'sig=$(dirname "$pidf")/signal',
   // 挂断信号一律不理（执行体也跟着不理）：引擎、帮手退了都不该带走会话
   "trap '' HUP",
-  "trap 'got=1' TERM INT",
+  // 前台命令没退，trap 先记着，退了再写。写不进去不挡退出码。父进程名读不到就写「读不到」，不当成没有信号。
+  'note() { comm=$(ps -o comm= -p "$PPID" 2>/dev/null) || true; if [ -z "$comm" ]; then comm=读不到; fi; printf \'%s %s %s\\n\' "$1" "$(date +%s)" "$comm" >>"$sig" 2>/dev/null || true; }',
+  "trap 'note TERM' TERM",
+  "trap 'note INT' INT",
   '"$@" <"$in" >>"$out" 2>>"$err"',
   'c=$?',
   'printf \'%s\\n\' "$c" >>"$st"',
@@ -79,7 +90,15 @@ export async function prepareIo(dir: string, prompt: string, startedAt: string):
     await chmod(path, mode);
   };
   await put(IO_FILES.prompt, prompt, 0o644);
-  for (const name of [IO_FILES.out, IO_FILES.err, IO_FILES.exit, IO_FILES.pid]) await put(name, '', 0o622);
+  for (const name of [
+    IO_FILES.out,
+    IO_FILES.err,
+    IO_FILES.exit,
+    IO_FILES.pid,
+    IO_FILES.signal,
+    IO_FILES.reap,
+  ])
+    await put(name, '', 0o622);
   await put(IO_FILES.started, `${startedAt}\n`, 0o644);
   await put(IO_FILES.helperErr, '', 0o600);
 }

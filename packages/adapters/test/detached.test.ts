@@ -55,9 +55,64 @@ describe('退出码文件', () => {
     expect(() => parseExitFile('-1\n')).toThrow(/认不出/);
   });
 
-  it('外壳接住挂断、TERM：写退出码之前不会被带走', () => {
+  it('外壳接住挂断、TERM：写退出码之前不会被带走，并记下接到的信号', () => {
     expect(WRAPPER).toContain("trap '' HUP");
-    expect(WRAPPER).toContain("trap 'got=1' TERM INT");
+    expect(WRAPPER).toContain("trap 'note TERM' TERM");
+    expect(WRAPPER).toContain("trap 'note INT' INT");
+    expect(WRAPPER).toContain('/signal');
+  });
+});
+
+describe.skipIf(!onPosix)('外壳接到 TERM', { timeout: 30_000 }, () => {
+  it('把时刻和父进程名写进 signal，再写退出码；文件预先建好才能追加', async () => {
+    const dir = tempDir('fleet-io-');
+    await prepareIo(dir, 'hi', new Date().toISOString());
+    const arg = (name: string) => join(dir, name);
+    const child = spawn(
+      '/bin/sh',
+      [
+        '-c',
+        WRAPPER,
+        'fleet-session',
+        arg(IO_FILES.prompt),
+        arg(IO_FILES.out),
+        arg(IO_FILES.err),
+        arg(IO_FILES.exit),
+        arg(IO_FILES.pid),
+        '/bin/sleep',
+        '30',
+      ],
+      { detached: true, stdio: 'ignore' },
+    );
+    try {
+      await until(() => {
+        try {
+          return readFileSync(arg(IO_FILES.pid), 'utf8').trim().length > 0;
+        } catch {
+          return false;
+        }
+      });
+      if (child.pid === undefined) throw new Error('外壳没有进程号');
+      process.kill(-child.pid, 'SIGTERM');
+      await until(() => {
+        try {
+          return readFileSync(arg(IO_FILES.exit), 'utf8').trim().length > 0;
+        } catch {
+          return false;
+        }
+      });
+      const line = readFileSync(arg(IO_FILES.signal), 'utf8').trim();
+      expect(line).toMatch(/^TERM \d+ \S+$/);
+    } finally {
+      if (child.pid !== undefined) {
+        try {
+          process.kill(-child.pid, 'SIGKILL');
+        } catch {
+          // 已经退了
+        }
+      }
+      child.unref();
+    }
   });
 });
 
