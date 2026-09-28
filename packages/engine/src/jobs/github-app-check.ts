@@ -40,7 +40,7 @@ export function githubAppAlert(item: SelfCheckItem): { title: string; body: stri
   ].filter(Boolean);
   return {
     title: `${who}在 ${item.repo} 上的权限不对：${parts.join('；')}`,
-    body: `去 GitHub 的 App 设置里改，再到装它的地方（Settings → Applications → Installed GitHub Apps → Configure）点接受新权限；改好下一轮每小时对账自己撤。${item.missing.includes('statuses:write') ? '缺 statuses:write 时引擎贴不了「认领对得上」（#299），合并闸会一直等它。' : ''}`,
+    body: `去 GitHub 的 App 设置里改，再到装它的地方（Settings → Applications → Installed GitHub Apps → Configure）点接受新权限；改好下一轮每小时对账自己撤。${item.missing.includes('statuses:write') ? '缺 statuses:write 时引擎贴不了 second-opinion，高风险路径的 PR 合并闸会一直等着；也贴不了「认领对得上」（#299）。' : ''}`,
   };
 }
 

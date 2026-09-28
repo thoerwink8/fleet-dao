@@ -6,7 +6,7 @@ import type { GitHubPrLabeler, GitHubReader, IssueInfo, PullInfo } from './githu
 import { isKindLabel, type KindLabel } from './labels.ts';
 import { ISSUE_COLUMN, linkedIssue } from './pr-columns.ts';
 
-// 认 PR 挂了哪张单在 pr-columns.ts（合并闸认「认领对得上」也用它）；这里照旧导出，老的引用不用改
+// 认 PR 挂了哪张单在 pr-columns.ts（claim-status.ts 判「认领对得上」也用它）；这里照旧导出，老的引用不用改
 export { ISSUE_COLUMN, linkedIssue };
 
 /** PR 现在的样子（号、标题、正文、标签、里程碑）。 */
