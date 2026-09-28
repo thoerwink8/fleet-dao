@@ -1,8 +1,12 @@
 // 关单对账（#241）要读的仓现状，「引擎」机器人经 GraphQL 读：主线（默认分支头）上 specs/ 下有哪些文件、开着的单连同
-// 子单、最近关掉的单、开着的 PR（号、标题、正文）。判哪张该关、哪张关了没结果在 @fleet-dao/conventions 的
-// close-sweep.ts，引擎的 jobs/close-sweep.ts 把两边接起来。
+// 子单、最近关掉的单、开着的 PR（号、标题、正文）、最近合并的 PR（号、标题、正文，判「填了是却没关」用，#460）。判哪张
+// 该关、哪张挂的 PR 填了是却没关、哪张关了没结果在 @fleet-dao/conventions 的 close-sweep.ts，引擎的
+// jobs/close-sweep.ts 把两边接起来。
 // 读不到、形状认不出、翻到上限没翻完一律抛错（调用方记没查成），不拿「一张都没有」顶；仓里压根没有 specs/ 目录是
 // specsFiles: null（这个仓不按「关单要有结果」查），和没读到分开。子单超过一页照实交回 total，由判的那边记没查成。
+// 合并的 PR 没有 issues 那样的 filterBy 可用：按 updatedAt 从新到旧翻页，翻到一条更新时刻早于 since 的就停——合并本身
+// 会带动 updatedAt，停下那页之后的 PR 一定更早合并（或压根没合并），不会漏掉 since 之后合并的；停之前多读到几条
+// updatedAt 较新但 mergedAt 较早的（合并后又被评论）不算错，交给 close-sweep.ts 精判。
 import { z } from 'zod';
 import type { GitHubClient, RepoRef } from './client.ts';
 import { unexpected } from './client.ts';
@@ -10,7 +14,7 @@ import { GitHubError } from './errors.ts';
 
 export interface ReadCloseFactsInput {
   repo: RepoRef;
-  /** 关掉的单从这一刻往后看（按更新时刻筛；关单时刻由判的那边再挑）。 */
+  /** 关掉的单、合并的 PR 都从这一刻往后看（按更新时刻筛；关单时刻、合并时刻由判的那边再挑）。 */
   since: Date;
   signal?: AbortSignal | undefined;
 }
@@ -28,6 +32,8 @@ export interface CloseFacts {
   closedIssues: { number: number; title: string; stateReason: string | null; closedAt: string }[];
   /** 开着的 PR。 */
   openPulls: { number: number; title: string; body: string }[];
+  /** since 之后更新过的、合并了的 PR。 */
+  mergedPulls: { number: number; title: string; body: string }[];
 }
 
 /** 一种列表最多翻几页：到了还有下一页就算没查全（抛错）。 */
@@ -71,6 +77,16 @@ export const CLOSE_OPEN_PULLS_QUERY = `query CloseOpenPulls($owner: String!, $na
   }
 }`;
 
+/** updatedAt 从新到旧：翻页时按它找该停在哪（PullRequest 没有 issues 那样的 filterBy: since）。 */
+export const CLOSE_MERGED_PULLS_QUERY = `query CloseMergedPulls($owner: String!, $name: String!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(states: [MERGED], first: 50, after: $after, orderBy: { field: UPDATED_AT, direction: DESC }) {
+      pageInfo { hasNextPage endCursor }
+      nodes { number title body updatedAt }
+    }
+  }
+}`;
+
 const Entry = z.object({ name: z.string().min(1), type: z.string() });
 const SubTree = z.object({ __typename: z.literal('Tree'), entries: z.array(Entry) });
 const SpecsTree = z.object({
@@ -107,6 +123,12 @@ const ClosedIssue = z.object({
   closedAt: z.string().nullable(),
 });
 const OpenPull = z.object({ number: z.number().int().positive(), title: z.string(), body: z.string() });
+const MergedPull = z.object({
+  number: z.number().int().positive(),
+  title: z.string(),
+  body: z.string(),
+  updatedAt: z.string(),
+});
 
 type Client = Pick<GitHubClient, 'graphql'>;
 type Auth = { as: 'engine'; repo: RepoRef };
@@ -200,10 +222,36 @@ export async function readCloseFacts(client: Client, input: ReadCloseFactsInput)
     `${slug} 开着的 PR`,
     signal,
   );
-  return { specsFiles, openIssues, closedIssues, openPulls };
+  const sinceMs = input.since.getTime();
+  const mergedPulls = (
+    await pages(
+      client,
+      auth,
+      CLOSE_MERGED_PULLS_QUERY,
+      vars,
+      pullsOf,
+      MergedPull,
+      `${slug} 最近合并的 PR`,
+      signal,
+      (p) => {
+        const t = Date.parse(p.updatedAt);
+        if (Number.isNaN(t)) {
+          throw new GitHubError(
+            'UNEXPECTED_RESPONSE',
+            `${slug}#${p.number} 的更新时刻认不出（${p.updatedAt}）：没查成`,
+          );
+        }
+        return t < sinceMs;
+      },
+    )
+  ).map((p) => ({ number: p.number, title: p.title, body: p.body }));
+  return { specsFiles, openIssues, closedIssues, openPulls, mergedPulls };
 }
 
-/** 按游标翻完一种列表。connOf：认不出回 undefined，仓不在回 null。 */
+/**
+ * 按游标翻完一种列表。connOf：认不出回 undefined，仓不在回 null。stop 给了就每条先判一遍：真了就此打住（这一条和
+ * 后面的都不要）——CLOSE_MERGED_PULLS_QUERY 用它按 updatedAt 停在 since 之前，别的列表不给、翻到没有下一页为止。
+ */
 async function pages<N>(
   client: Client,
   auth: Auth,
@@ -213,6 +261,7 @@ async function pages<N>(
   node: z.ZodType<N>,
   what: string,
   signal: AbortSignal | undefined,
+  stop?: (n: N) => boolean,
 ): Promise<N[]> {
   const out: N[] = [];
   let after: string | null = null;
@@ -223,7 +272,10 @@ async function pages<N>(
     if (conn === null) throw notFound(what);
     const nodes = z.array(node).safeParse(conn.nodes);
     if (!nodes.success) throw unexpected(`读 ${what}（有一条认不出）`, data);
-    out.push(...nodes.data);
+    for (const item of nodes.data) {
+      if (stop?.(item)) return out;
+      out.push(item);
+    }
     if (!conn.pageInfo.hasNextPage) return out;
     if (!conn.pageInfo.endCursor) throw unexpected(`读 ${what}（说有下一页却没给游标）`, data);
     after = conn.pageInfo.endCursor;
