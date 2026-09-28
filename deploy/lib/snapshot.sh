@@ -8,6 +8,9 @@ set -uo pipefail
 
 # fleet-dao 自己的单元。改名或新增单元时同步改这里，否则新单元会被当成「旧系统变了」。
 SNAPSHOT_OURS_UNITS_RE='^(fleet-.*|postgresql.*|wg-quick@wg-fleet[.]service)$'
+# fleet-dao 在公网上开的口（香港 hk.sh 的 WG_PORT、PROXY_PORT）：ufw 里带「# fleet-dao」注释，iptables 里按目的端口认。
+# 改了那两个端口同步改这里（deploy/test/proxy.test.sh 核对）。法国 france.sh source 完本文件后换成它自己的（PROXY_DIRECT_PORT）
+SNAPSHOT_OURS_DPORTS_RE='--dport (4500|8443) '
 # 会随登录会话、临时命令自然变化的单元，不算旧系统的状态。packagekit、fwupd 是按需拉起、闲了自己退的系统守护进程
 # （apt 装完包会通过 D-Bus 把 packagekit 叫起来）。
 SNAPSHOT_NOISE_UNITS_RE='^(run-.*|session-.*|user@.*|user-runtime-dir@.*|systemd-.*[.]service|.*[.]device|packagekit[.]service|fwupd[.]service)$'
@@ -39,7 +42,7 @@ snapshot_others() {
   read -r eph_lo eph_hi </proc/sys/net/ipv4/ip_local_port_range 2>/dev/null || { eph_lo=65536 eph_hi=65536; }
   ss -H -ltnup 2>/dev/null |
     awk -v lo="$eph_lo" -v hi="$eph_hi" '{ proc = "-"; if (match($0, /users:\(\("[^"]+"/)) proc = substr($0, RSTART + 9, RLENGTH - 10)
-           if (proc == "temporal-server" || proc == "postgres") next
+           if (proc == "temporal-server" || proc == "postgres" || proc == "sing-box") next
            if ($1 == "udp" && proc == "-") next
            port = $5; sub(/.*:/, "", port)
            if (port + 0 >= lo + 0 && port + 0 <= hi + 0) next
@@ -49,12 +52,13 @@ snapshot_others() {
 
 snapshot_firewall() {
   echo "## firewall"
-  # 挂在隧道网卡 wg-fleet 上的规则是 fleet-dao 自己加的，不算旧系统的状态
+  # 挂在隧道网卡 wg-fleet 上的、香港公网上 fleet-dao 开的口，都是 fleet-dao 自己加的，不算旧系统的状态
   if command -v ufw >/dev/null 2>&1; then
-    printf 'ufw %s\n' "$(ufw status verbose 2>&1 | { grep -v -e 'wg-fleet' || true; } | sha256sum | cut -c1-16)"
+    printf 'ufw %s\n' "$(ufw status verbose 2>&1 | { grep -v -e 'wg-fleet' -e '# fleet-dao' || true; } | sha256sum | cut -c1-16)"
   fi
   # 计数器和 fail2ban 的封禁条目每分钟都在变，不算状态
-  printf 'iptables %s\n' "$({ iptables-save 2>/dev/null || true; } | { grep -v -e '^#' -e '-A f2b-' -e 'wg-fleet' || true; } |
+  printf 'iptables %s\n' "$({ iptables-save 2>/dev/null || true; } |
+    { grep -v -E -e '^#' -e '-A f2b-' -e 'wg-fleet' -e "$SNAPSHOT_OURS_DPORTS_RE" || true; } |
     sed -E 's/\[[0-9]+:[0-9]+\]//' | sha256sum | cut -c1-16)"
 }
 

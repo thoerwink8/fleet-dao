@@ -1,0 +1,39 @@
+{
+  "log": { "level": "warn", "timestamp": false },
+  "dns": { "servers": [{ "type": "local", "tag": "local" }] },
+  "inbounds": [
+    {
+      "type": "vless",
+      "tag": "entry",
+      "listen": "::",
+      "listen_port": @@PORT@@,
+      "users": [
+        { "name": "hk", "uuid": "@@UUID_HK@@", "flow": "xtls-rprx-vision" },
+        { "name": "fr", "uuid": "@@UUID_FR@@", "flow": "xtls-rprx-vision" }
+      ],
+      "tls": {
+        "enabled": true,
+        "server_name": "@@REALITY_SNI@@",
+        "reality": {
+          "enabled": true,
+          "handshake": { "server": "@@REALITY_SNI@@", "server_port": 443 },
+          "private_key": "@@REALITY_PRIVATE_KEY@@",
+          "short_id": ["@@SHORT_ID@@"]
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    { "type": "direct", "tag": "hk" },
+    { "type": "shadowsocks", "tag": "fr", "server": "@@FR_ADDR@@", "server_port": @@FR_PORT@@, "method": "none", "password": "" }
+  ],
+  "route": {
+    "default_domain_resolver": "local",
+    "rules": [
+      { "auth_user": ["fr"], "outbound": "fr" },
+      { "action": "resolve" },
+      { "ip_is_private": true, "action": "reject" }
+    ],
+    "final": "hk"
+  }
+}

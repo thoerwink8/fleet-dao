@@ -1,0 +1,23 @@
+{
+  "log": { "level": "warn", "timestamp": false },
+  "dns": { "servers": [{ "type": "local", "tag": "local" }] },
+  "inbounds": [
+    {
+      "type": "shadowsocks",
+      "tag": "from-hk",
+      "listen": "@@LISTEN@@",
+      "listen_port": @@PORT@@,
+      "method": "none",
+      "password": ""
+    }
+  ],
+  "outbounds": [{ "type": "direct", "tag": "out" }],
+  "route": {
+    "default_domain_resolver": "local",
+    "rules": [
+      { "action": "resolve" },
+      { "ip_is_private": true, "action": "reject" }
+    ],
+    "final": "out"
+  }
+}

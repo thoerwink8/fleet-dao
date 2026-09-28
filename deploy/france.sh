@@ -53,6 +53,8 @@ source "$DEPLOY_DIR/lib/session-pnpm.sh"
 source "$DEPLOY_DIR/lib/node-cache.sh"
 # shellcheck source=lib/auto-release-state.sh
 source "$DEPLOY_DIR/lib/auto-release-state.sh"
+# shellcheck source=lib/sing-box.sh
+source "$DEPLOY_DIR/lib/sing-box.sh"
 trap 'on_error "$LINENO" "$BASH_COMMAND"' ERR
 
 # ── 钉死的版本与校验和：外部二进制装上机器就进了信任面，不用 latest ──
@@ -114,6 +116,25 @@ API_PORT=8787
 # 本机上只许 root 和 fleet 连的端口：Temporal 没开认证，库和驾驶舱后端也不该让会话直接碰（nft 表 inet fleet_dao）
 PROTECTED_PORTS=("$PG_PORT" "${TEMPORAL_PORTS[@]}" "$API_PORT")
 NFT_FILE=/etc/fleet-dao/nftables.nft
+# 自建代理「法国」节点的出口（lib/sing-box.sh 开头）：香港的代理入口经隧道转过来，从这台出公网。只听隧道地址、只许香港连，
+# 公网上不开；和香港 hk.sh 的 PROXY_FR_PORT 是同一个
+PROXY_EXIT_PORT=8790
+PROXY_EXIT_UNIT=fleet-proxy-exit.service
+PROXY_EXIT_CONFIG=/etc/fleet-dao/fleet-proxy-exit.json
+# 自建代理「法国-直连」节点：公网 TCP 443 上的 VLESS + Reality 入口，不经香港（香港或隧道挂了时的备用）。
+# 单独一个单元，不和只听隧道的出口挤一个进程：隧道断了那个绑不上，这个照常。钥匙本机生成、私钥不出机器；
+# 订阅在香港生成，所以这里把用户号、公钥、short_id、本机地址打印出来填进香港 hk.env（hk.sh 的 FRD_KEYS）
+PROXY_DIRECT_PORT=443
+PROXY_DIRECT_SNI=www.microsoft.com
+PROXY_DIRECT_UNIT=fleet-proxy-direct.service
+PROXY_DIRECT_CONFIG=/etc/fleet-dao/fleet-proxy-direct.json
+PROXY_DIRECT_ENV=/etc/fleet-dao/proxy-direct.env
+PROXY_DIRECT_KEYS=(FLEET_PROXY_UUID_FRD FLEET_PROXY_FRD_REALITY_PRIVATE_KEY FLEET_PROXY_FRD_REALITY_PUBLIC_KEY FLEET_PROXY_FRD_SHORT_ID)
+declare -A PROXY_DIRECT=()
+# 快照里 fleet-dao 自己在公网上开的口（lib/snapshot.sh 默认那份是香港的）：放行 443 那条不算旧系统变了
+SNAPSHOT_OURS_DPORTS_RE="--dport ($PROXY_DIRECT_PORT) "
+# 香港代理入口的公网端口（hk.sh 的 PROXY_PORT）：读回从这台经公网连一次，查香港上游放不放行这个 TCP 端口
+HK_PROXY_PORT=8443
 # 会话用户自己的 Mirasim 服务，本地模式常驻用的固定端口（deploy/france/fleet-mirasim-session.service，#424）：
 # 避开旧系统仍留着共用的 4316（wire.ts 的 assertNotRealMirasimInTests 连测试里都拒它）和同机可能还没清干净的
 # 4315、4317（docs/reference/deploy.md §1.2）。引擎自己认端口靠现读 local-<端口>.token 的文件名，不认这个常量。
@@ -883,6 +904,116 @@ setup_web_upload() {
 $line"
 }
 
+setup_proxy_exit() {
+  if is_local_profile; then
+    step "自建代理的法国出口（本机档跳过：没有香港）"
+    skip_local "没有香港，不装代理出口"
+    return 0
+  fi
+  step "自建代理的法国出口（sing-box 只听隧道地址 ${WG_ADDR%/*}:$PROXY_EXIT_PORT，只许香港连，从这台出公网）"
+  local bin_changed cfg_changed unit_changed rule="allow in on $WG_IF from $WG_HK_ADDR to ${WG_ADDR%/*} port $PROXY_EXIT_PORT"
+  ensure_sing_box
+  bin_changed=$WROTE
+  render "$DEPLOY_DIR/france/proxy-exit.json" LISTEN="${WG_ADDR%/*}" PORT="$PROXY_EXIT_PORT"
+  put_sing_box_config "$PROXY_EXIT_CONFIG" "$RENDERED"
+  cfg_changed=$WROTE
+  # 只听隧道地址：隧道没起时绑不上，单元自己每 5 秒重试
+  put_sing_box_unit "$PROXY_EXIT_UNIT" "fleet-dao 自建代理出口（法国，只听隧道）" "$PROXY_EXIT_CONFIG" "wg-quick@$WG_IF.service"
+  unit_changed=$WROTE
+  # TCP、UDP 都要（代理里的 UDP 也经它出），所以规则不带 proto
+  if command -v ufw >/dev/null && [[ "$(ufw status 2>/dev/null | head -1)" == "Status: active" ]]; then
+    if [[ "$(ufw show added 2>/dev/null)" != *"ufw $rule"* ]]; then
+      # shellcheck disable=SC2086 # 规则按词拆开传给 ufw
+      ufw $rule comment 'fleet-dao proxy exit over wireguard' >/dev/null
+      changed "ufw $rule"
+    fi
+  fi
+  ensure_unit_running "$PROXY_EXIT_UNIT" $((bin_changed || cfg_changed || unit_changed))
+}
+
+# 「法国-直连」的钥匙：缺的生成、已有的不改（私钥和公钥是一对，缺一个两个一起换）；样子不对的判红停下
+ensure_proxy_direct_secrets() {
+  local k v kp content gen=() bad_keys=()
+  if [[ -e "$PROXY_DIRECT_ENV" ]]; then fix_meta "$PROXY_DIRECT_ENV" root:root 600; fi
+  for k in "${PROXY_DIRECT_KEYS[@]}"; do
+    v=$(env_file_value "$PROXY_DIRECT_ENV" "$k")
+    if [[ -n "$v" ]] && ! proxy_value_ok "$k" "$v"; then bad_keys+=("$k"); fi
+    PROXY_DIRECT[$k]=$v
+  done
+  if ((${#bad_keys[@]})); then
+    red "$PROXY_DIRECT_ENV 里这几项不像该有的样子：${bad_keys[*]}（要换新的就删掉那几行再跑）"
+    return 1
+  fi
+  if [[ -z "${PROXY_DIRECT[FLEET_PROXY_FRD_REALITY_PRIVATE_KEY]}" || -z "${PROXY_DIRECT[FLEET_PROXY_FRD_REALITY_PUBLIC_KEY]}" ]]; then
+    kp=$("$SING_BOX_BIN" generate reality-keypair)
+    PROXY_DIRECT[FLEET_PROXY_FRD_REALITY_PRIVATE_KEY]=$(awk '$1 == "PrivateKey:" { print $2 }' <<<"$kp")
+    PROXY_DIRECT[FLEET_PROXY_FRD_REALITY_PUBLIC_KEY]=$(awk '$1 == "PublicKey:" { print $2 }' <<<"$kp")
+    gen+=(Reality 钥匙)
+  fi
+  if [[ -z "${PROXY_DIRECT[FLEET_PROXY_UUID_FRD]}" ]]; then PROXY_DIRECT[FLEET_PROXY_UUID_FRD]=$("$SING_BOX_BIN" generate uuid) && gen+=(用户号); fi
+  if [[ -z "${PROXY_DIRECT[FLEET_PROXY_FRD_SHORT_ID]}" ]]; then PROXY_DIRECT[FLEET_PROXY_FRD_SHORT_ID]=$("$SING_BOX_BIN" generate rand --hex 8) && gen+=(short_id); fi
+  if ((${#gen[@]} == 0)); then
+    ok "$PROXY_DIRECT_ENV 齐了（值不打印）"
+    return 0
+  fi
+  for k in "${PROXY_DIRECT_KEYS[@]}"; do
+    if ! proxy_value_ok "$k" "${PROXY_DIRECT[$k]}"; then
+      red "生成的 $k 不像该有的样子：sing-box generate 的输出变了？没写进 $PROXY_DIRECT_ENV"
+      return 1
+    fi
+  done
+  content="# fleet-dao 自建代理「法国-直连」的钥匙（deploy/france.sh 生成，整份归它管）。要作废就删掉那几行再跑 france.sh，再把新打印的几行填进香港 hk.env"
+  for k in "${PROXY_DIRECT_KEYS[@]}"; do content+=$'\n'"$k=${PROXY_DIRECT[$k]}"; done
+  put_file "$PROXY_DIRECT_ENV" root:root 600 "$content"
+  echo "  生成：${gen[*]}（值不打印）"
+}
+
+# 填进香港 hk.env 的四行（只有公钥、用户号这些订阅里本来就带出去的东西，私钥不打印）
+print_proxy_direct_for_hk() { # 本机公网地址
+  echo "  「法国-直连」要填进香港 /etc/fleet-dao/hk.env 的四行（整行照抄，已有就替换），再在香港重跑 hk.sh："
+  echo "    FLEET_PROXY_FRD_SERVER=$1"
+  echo "    FLEET_PROXY_UUID_FRD=${PROXY_DIRECT[FLEET_PROXY_UUID_FRD]}"
+  echo "    FLEET_PROXY_FRD_REALITY_PUBLIC_KEY=${PROXY_DIRECT[FLEET_PROXY_FRD_REALITY_PUBLIC_KEY]}"
+  echo "    FLEET_PROXY_FRD_SHORT_ID=${PROXY_DIRECT[FLEET_PROXY_FRD_SHORT_ID]}"
+}
+
+setup_proxy_direct() {
+  if is_local_profile; then
+    step "自建代理「法国-直连」入口（本机档跳过）"
+    skip_local "本机档不对公网开代理"
+    return 0
+  fi
+  step "自建代理「法国-直连」入口（sing-box，公网 TCP $PROXY_DIRECT_PORT，VLESS + Reality，不经香港）"
+  local bin_changed cfg_changed unit_changed ip fw
+  ensure_sing_box
+  bin_changed=$WROTE
+  ensure_proxy_direct_secrets
+  render "$DEPLOY_DIR/france/proxy-direct.json" PORT="$PROXY_DIRECT_PORT" UUID="${PROXY_DIRECT[FLEET_PROXY_UUID_FRD]}" \
+    REALITY_SNI="$PROXY_DIRECT_SNI" REALITY_PRIVATE_KEY="${PROXY_DIRECT[FLEET_PROXY_FRD_REALITY_PRIVATE_KEY]}" \
+    SHORT_ID="${PROXY_DIRECT[FLEET_PROXY_FRD_SHORT_ID]}"
+  put_sing_box_config "$PROXY_DIRECT_CONFIG" "$RENDERED"
+  cfg_changed=$WROTE
+  put_sing_box_unit "$PROXY_DIRECT_UNIT" "fleet-dao 自建代理「法国-直连」入口" "$PROXY_DIRECT_CONFIG"
+  unit_changed=$WROTE
+  if port_in_use tcp "$PROXY_DIRECT_PORT" && [[ "$(systemctl is-active "$PROXY_DIRECT_UNIT" 2>/dev/null)" != active ]]; then
+    red "TCP $PROXY_DIRECT_PORT 已被别的程序占着：$(ss -Hltnp "sport = :$PROXY_DIRECT_PORT")"
+    return 1
+  fi
+  if command -v ufw >/dev/null; then
+    fw=$(ufw status 2>/dev/null || true)
+    if [[ "$fw" == "Status: active"* && "$fw" != *"$PROXY_DIRECT_PORT/tcp"*ALLOW* ]]; then
+      ufw allow "$PROXY_DIRECT_PORT/tcp" comment 'fleet-dao proxy direct' >/dev/null
+      changed "ufw 放行 TCP $PROXY_DIRECT_PORT"
+    fi
+  fi
+  ensure_unit_running "$PROXY_DIRECT_UNIT" $((bin_changed || cfg_changed || unit_changed))
+  if ip=$(proxy_server_ip); then
+    print_proxy_direct_for_hk "$ip"
+  else
+    red "取不到这台对外的 IPv4（ip -4 route get 1.1.1.1 的 src 不是公网地址）：香港的订阅里没法填「法国-直连」的地址"
+  fi
+}
+
 # 演示版的可见范围推到香港：范围目录一变就推（path 单元），每 10 分钟再补一次（timer）。推的脚本以 root 跑、
 # 只当数据读 fleet 写的范围文件（认不出的不推），和发布脚本用同一把上传钥匙
 setup_demo_scopes() {
@@ -999,6 +1130,8 @@ readback() {
   readback_profile_diff
   readback_web_upload
   readback_demo_scopes
+  readback_proxy_exit
+  readback_proxy_direct
   readback_auto_release
   readback_proxy_headers
   readback_service_home
@@ -1023,6 +1156,74 @@ readback_auto_release() {
 }
 
 # 演示版的可见范围：两个触发单元在等、上一次推成了没有（一次都没推过是「待配」，推不成、有文件认不出是红）
+# 代理出口：进程、端口、隧道上的放行；再从这台经公网连一次香港的代理入口，查香港上游放不放行那个 TCP 端口
+readback_proxy_exit() {
+  if is_local_profile; then
+    skip_local "没有香港，不查代理出口"
+    return 0
+  fi
+  local rule="allow in on $WG_IF from $WG_HK_ADDR to ${WG_ADDR%/*} port $PROXY_EXIT_PORT" host rc=0
+  readback_sing_box "$PROXY_EXIT_UNIT" "$PROXY_EXIT_PORT"
+  if [[ "$(stat -c '%U:%G %a' -- "$PROXY_EXIT_CONFIG" 2>/dev/null)" != "root:root 600" ]]; then
+    red "$PROXY_EXIT_CONFIG 不在、或不是 root:root 600"
+  fi
+  if command -v ufw >/dev/null && [[ "$(ufw status 2>/dev/null | head -1)" == "Status: active" && "$(ufw show added 2>/dev/null)" != *"ufw $rule"* ]]; then
+    red "ufw 里没有「$rule」：香港转过来的代理流量会被挡"
+  fi
+  host=${FLEET_WG_HK_ENDPOINT%:*}
+  if [[ -z "$host" ]]; then
+    pending "还没有香港地址（FLEET_WG_HK_ENDPOINT），没查香港的代理入口"
+    return 0
+  fi
+  timeout 5 bash -c "exec 3<>/dev/tcp/$host/$HK_PROXY_PORT" 2>/dev/null || rc=$?
+  if ((rc == 0)); then
+    ok "经公网连得上香港的代理入口 TCP $HK_PROXY_PORT"
+  elif ((rc == 124)); then
+    red "经公网连香港的代理入口 TCP $HK_PROXY_PORT 超时：香港 ufw 没放行，或香港上游不放这个端口（换 hk.sh 的 PROXY_PORT）"
+  else
+    pending "香港的代理入口还没起（连接被拒）：香港跑一遍 hk.sh"
+  fi
+}
+
+# 「法国-直连」：进程、端口、防火墙、钥匙、握手站，再本机起临时客户端真走一遍看出口是不是这台
+readback_proxy_direct() {
+  if is_local_profile; then
+    skip_local "本机档不对公网开代理，不查「法国-直连」"
+    return 0
+  fi
+  local k fw mine bad_keys=()
+  readback_sing_box "$PROXY_DIRECT_UNIT" "$PROXY_DIRECT_PORT"
+  if command -v ufw >/dev/null; then
+    fw=$(ufw status 2>/dev/null || true)
+    if [[ "$fw" == "Status: active"* && "$fw" != *"$PROXY_DIRECT_PORT/tcp"*ALLOW* ]]; then red "ufw 没放行 TCP $PROXY_DIRECT_PORT：外面连不进「法国-直连」"; fi
+  fi
+  if [[ "$(stat -c '%U:%G %a' -- "$PROXY_DIRECT_ENV" 2>/dev/null)" != "root:root 600" || "$(stat -c '%U:%G %a' -- "$PROXY_DIRECT_CONFIG" 2>/dev/null)" != "root:root 600" ]]; then
+    red "$PROXY_DIRECT_ENV 或 $PROXY_DIRECT_CONFIG 不在、或不是 root:root 600（里面有私钥）"
+    return 0
+  fi
+  for k in "${PROXY_DIRECT_KEYS[@]}"; do
+    PROXY_DIRECT[$k]=$(env_file_value "$PROXY_DIRECT_ENV" "$k")
+    proxy_value_ok "$k" "${PROXY_DIRECT[$k]}" || bad_keys+=("$k")
+  done
+  if ((${#bad_keys[@]})); then
+    red "$PROXY_DIRECT_ENV 里这几项缺了或不像该有的样子：${bad_keys[*]}（删掉那几行再跑一遍 france.sh，会重新生成）"
+    return 0
+  fi
+  readback_reality_sni "$PROXY_DIRECT_SNI" PROXY_DIRECT_SNI
+  if ! mine=$(proxy_server_ip); then
+    red "取不到这台对外的 IPv4，「法国-直连」的出口地址没法核对"
+    return 0
+  fi
+  if ! proxy_egress_ip 127.0.0.1 "$PROXY_DIRECT_PORT" "${PROXY_DIRECT[FLEET_PROXY_UUID_FRD]}" "$PROXY_DIRECT_SNI" \
+    "${PROXY_DIRECT[FLEET_PROXY_FRD_REALITY_PUBLIC_KEY]}" "${PROXY_DIRECT[FLEET_PROXY_FRD_SHORT_ID]}"; then
+    red "经「法国-直连」打不开网页（拿到「$PROXY_EGRESS」）：journalctl -u $PROXY_DIRECT_UNIT -n 50"
+  elif [[ "$PROXY_EGRESS" == "$mine" ]]; then
+    ok "「法国-直连」走得通，从这台出（香港 hk.env 里的四行见上面「法国-直连」那一步的打印）"
+  else
+    ok "「法国-直连」走得通，出口是 $PROXY_EGRESS（和本机路由的源地址不同）"
+  fi
+}
+
 readback_demo_scopes() {
   if is_local_profile; then
     skip_local "没有香港，不查可见范围推没推"
@@ -1611,6 +1812,8 @@ main() {
     setup_app_config
     setup_web_upload
     setup_demo_scopes
+    setup_proxy_exit
+    setup_proxy_direct
     setup_auto_release
     setup_agent_rules
     setup_cli_tools

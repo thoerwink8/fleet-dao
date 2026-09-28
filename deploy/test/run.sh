@@ -6,6 +6,7 @@
 # 健康页的判定、自动发布的判断和流程（auto-release：CI 红不发、读不到不发、没成不重试、等空闲、人手动切过不动）、
 # 配置对账（config：线上手改报哪一项、私有值只报不一致不带值、期望和钥匙读不到记没查成；本机档和法国的期望
 # 逐项比、versions 钉死几个大版本、没登记的差别报红，也在这个文件里）、
+# 自建代理（proxy：香港、法国两半对得上的端口和握手站、钥匙的样子、订阅模板有没有法国-直连都干净）、
 # 本机档（profile：FLEET_PROFILE 认不认得出、不带就是 france、is_local_profile、skip_local 只进 PENDING）、
 # france.sh 读回自动发布跑得怎么样（auto-release-state：没跑过、读不了、读到了分得清）、
 # 法国只有一个会话用户且读回拦得下故意造的错（session-user）、AI 会话用的 pnpm 的装和查（session-pnpm）、
@@ -138,6 +139,9 @@ case $? in
 2) skipped=1 ;;
 *) fail=1 ;;
 esac
+
+# 自建代理（docs/ops.md 第十四节）：两台对得上的常量、钥匙的样子、订阅模板；不要 root
+run_test proxy.test.sh
 
 # 切会话用户挂的 reclaude 组织（#157）：不要 root，拿假 reclaude 把每种没切成的路径都造一遍
 run_test agent-scope-org-use.test.sh

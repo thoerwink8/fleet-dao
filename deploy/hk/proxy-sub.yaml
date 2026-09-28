@@ -1,0 +1,117 @@
+# 自建代理的订阅（Clash / mihomo 格式，Clash Party 直接导入）。deploy/hk.sh 按 /etc/fleet-dao/proxy.env 渲染，
+# 放在 https://<驾驶舱域名>/sub/<订阅口令>；别在机器上手改，改这份模板再重跑 hk.sh。
+# 三个节点：「香港」香港进香港出；「法国-中转」香港进、经两机隧道从法国出；「法国-直连」直接连法国（不经香港，
+# hk.env 填了法国打印的那几项才有，模板 proxy-sub-frd.yaml）。Claude、ChatGPT 不对香港开放，「AI」组默认用法国。
+# 两个「自动」组是故障转移：排前面的连不上就换下一个，好了再换回来。
+mixed-port: 7890
+allow-lan: false
+mode: rule
+log-level: warning
+ipv6: false
+unified-delay: true
+tcp-concurrent: true
+
+dns:
+  enable: true
+  ipv6: false
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  fake-ip-filter:
+    - "*.lan"
+    - "+.local"
+    - "+.msftconnecttest.com"
+    - "+.msftncsi.com"
+  default-nameserver:
+    - 223.5.5.5
+    - 119.29.29.29
+  nameserver:
+    - https://dns.alidns.com/dns-query
+    - https://doh.pub/dns-query
+
+proxies:
+  - name: 香港
+    type: vless
+    server: @@SERVER@@
+    port: @@PORT@@
+    uuid: @@UUID_HK@@
+    network: tcp
+    tls: true
+    udp: true
+    flow: xtls-rprx-vision
+    servername: @@REALITY_SNI@@
+    client-fingerprint: chrome
+    reality-opts:
+      public-key: @@REALITY_PUBLIC_KEY@@
+      short-id: @@SHORT_ID@@
+  - name: 法国-中转
+    type: vless
+    server: @@SERVER@@
+    port: @@PORT@@
+    uuid: @@UUID_FR@@
+    network: tcp
+    tls: true
+    udp: true
+    flow: xtls-rprx-vision
+    servername: @@REALITY_SNI@@
+    client-fingerprint: chrome
+    reality-opts:
+      public-key: @@REALITY_PUBLIC_KEY@@
+      short-id: @@SHORT_ID@@
+
+@@FRD_PROXY@@
+
+proxy-groups:
+  - name: 节点选择
+    type: select
+    proxies: [自动, 香港, 法国-中转@@FRD_NAME@@, DIRECT]
+  - name: 自动
+    type: fallback
+    proxies: [香港@@FRD_NAME@@, 法国-中转]
+    url: https://www.gstatic.com/generate_204
+    interval: 120
+  - name: AI
+    type: select
+    proxies: [AI-自动, 法国-中转@@FRD_NAME@@, 香港]
+  - name: AI-自动
+    type: fallback
+    proxies: [法国-中转@@FRD_NAME@@]
+    url: https://www.gstatic.com/generate_204
+    interval: 120
+  # Mirasim 云端按出口 IP 判区域，报 403「未在当前网络区域提供服务」时在这里换节点
+  - name: Mirasim
+    type: select
+    proxies: [自动, 香港, 法国-中转@@FRD_NAME@@]
+
+rules:
+  # 原先本机 Clash Party 覆写 mirasim-split.js 做的分流，搬进订阅里：自建网关（国内 VPS，经 sslip.io 访问）直连，
+  # 走节点要绕地球一圈（实测直连 0.13s、走节点 5s 上下）；Mirasim 自家云端走节点。
+  # 下面那行换成 hk.env 的 FLEET_PROXY_DIRECT_CIDRS（直连的地址段，真地址不进公开仓）
+  - DOMAIN-SUFFIX,sslip.io,DIRECT
+@@DIRECT_RULES@@
+  - DOMAIN-SUFFIX,mirasim.ai,Mirasim
+  - DOMAIN-SUFFIX,pqapi.shop,Mirasim
+  - DOMAIN-SUFFIX,anthropic.com,AI
+  - DOMAIN-SUFFIX,claude.ai,AI
+  - DOMAIN-SUFFIX,claude.com,AI
+  - DOMAIN-SUFFIX,claudeusercontent.com,AI
+  - DOMAIN-SUFFIX,openai.com,AI
+  - DOMAIN-SUFFIX,chatgpt.com,AI
+  - DOMAIN-SUFFIX,oaistatic.com,AI
+  - DOMAIN-SUFFIX,oaiusercontent.com,AI
+  - DOMAIN-SUFFIX,sora.com,AI
+  - DOMAIN-SUFFIX,x.ai,AI
+  - DOMAIN-SUFFIX,grok.com,AI
+  - DOMAIN-SUFFIX,cursor.com,AI
+  - DOMAIN-SUFFIX,cursor.sh,AI
+  - DOMAIN-SUFFIX,gemini.google.com,AI
+  - DOMAIN-SUFFIX,aistudio.google.com,AI
+  - DOMAIN-SUFFIX,generativelanguage.googleapis.com,AI
+  # 驾驶舱本来就在香港，直连
+  - DOMAIN,@@COCKPIT_DOMAIN@@,DIRECT
+  - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve
+  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve
+  - GEOSITE,cn,DIRECT
+  - GEOIP,CN,DIRECT
+  - MATCH,节点选择

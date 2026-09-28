@@ -1,0 +1,15 @@
+  # 「法国-直连」：直接连法国 france.sh 开的 443 入口，不经香港（hk.sh 在 hk.env 填齐法国打印的几项后才渲染进订阅）
+  - name: 法国-直连
+    type: vless
+    server: @@FRD_SERVER@@
+    port: @@FRD_PORT@@
+    uuid: @@UUID_FRD@@
+    network: tcp
+    tls: true
+    udp: true
+    flow: xtls-rprx-vision
+    servername: @@FRD_SNI@@
+    client-fingerprint: chrome
+    reality-opts:
+      public-key: @@FRD_PUBLIC_KEY@@
+      short-id: @@FRD_SHORT_ID@@

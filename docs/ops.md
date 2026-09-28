@@ -18,7 +18,7 @@
 
 ## 二、端口表
 
-法国（全部只绑本机或隧道地址）：
+法国（除了自建代理「法国-直连」的 443，全部只绑本机或隧道地址）：
 
 | 端口 | 绑在 | 是谁 | 说明 |
 |---|---|---|---|
@@ -30,6 +30,8 @@
 | 7249、6949 | 127.0.0.1 | Temporal worker | |
 | 8787/tcp | 10.99.0.2 | 驾驶舱后端（`FLEET_COCKPIT_LISTEN`） | ufw 只在隧道网卡 `wg-fleet` 上给 10.99.0.1 放行；后端起了才有 |
 | 8788/tcp | 127.0.0.1 | fleet 命令接口（`FLEET_AGENT_LISTEN`） | 会话用得到，不对外 |
+| 8790/tcp、udp | 10.99.0.2 | 自建代理的法国出口（`fleet-proxy-exit.service`，sing-box） | 「法国-中转」节点：香港入口经隧道转过来，从这台出公网；ufw 只在 `wg-fleet` 上给 10.99.0.1 放行（第十四节） |
+| 443/tcp | 0.0.0.0、:: | 自建代理「法国-直连」入口（`fleet-proxy-direct.service`，sing-box，VLESS + Reality） | 对公网开，ufw 放行带 `# fleet-dao` 注释；不经香港，香港或隧道挂了时的备用（第十四节） |
 | 4318/tcp | 127.0.0.1 | 会话用户自己的 Mirasim 服务，本地模式常驻（`fleet-mirasim-session.service`，第五节「会话用户的 Mirasim」，#424） | 避开旧系统仍留着共用的 4316 和另外两个还可能没清干净的 4315/4317（§1.2）；引擎认端口靠现读 `local-<端口>.token` 的文件名，不认这张表 |
 
 上表里除了 8788、4318，本机上只有 root 和 fleet 连得上：Temporal 没开认证，谁连得上谁就能给任意工作流发信号，会话就能绕过人闸。拦法是一张单独的 nft 表 `inet fleet_dao`（按连接发起方的属主 skuid，别人连就被复位），由 `fleet-firewall.service` 载入。同一张表还管会话用户在回环上开的口（它的 reclaude 代理在临时端口上，现在还有 4318 这个固定端口）：只许它自己和 root 连（第五节「会话用户的口只许它自己连」，#35）——4318 是本地模式 Mirasim 服务，引擎（`fleet`）按设计要直连它，这条规则字面上不分端口地拦，`fleet` 连不连得上还没在真机上核实过，见第五节「会话用户的 Mirasim」第 2 步「已知口子（待核）」。**别启用 `nftables.service`**：它的默认配置开头是 `flush ruleset`，会把 ufw 的规则和这张表一起冲掉。
@@ -42,6 +44,7 @@
 |---|---|---|---|
 | 80/tcp | 0.0.0.0 | nginx | `<驾驶舱域名>`：证书续期的验证路径，其余跳 https |
 | 443/tcp | 0.0.0.0 | nginx | `https://<驾驶舱域名>`：静态页；`/api`、`/auth`、`/github/webhook`、`/healthz` 经隧道转法国 `10.99.0.2:8787`（连接留着复用，第八节），转之前清掉 `Authorization`、`X-Fleet-Acting-Feishu`；`/agent` 不转；`/release.json`（带完整提交号）只给法国经隧道来的（`10.99.0.2`），别处来的回 404 |
+| 8443/tcp | 0.0.0.0、:: | 自建代理入口（`fleet-proxy.service`，sing-box，VLESS + Reality） | 「香港」「法国-中转」两个节点都从这里进；443 被 nginx 占着、同一个 nginx 上还有别家的站点，所以单开（第十四节） |
 | 4500/udp | 0.0.0.0 | WireGuard 服务端 | 香港上游只放行少数常见 UDP 端口（2026-09-25 从法国实测：53/67/69/123/161/500/1701/4500 能到），51820 进不来 |
 
 GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录回调：`https://<驾驶舱域名>/auth/feishu/callback`。
@@ -850,3 +853,28 @@ bash deploy/local/install.sh --check                     # 装机读回：跑法
 3. 引擎没有 GitHub 机器人的凭据时，预期是：`fleet-engine` 照样起、接 Temporal 的任务队列（健康检查这一项照样过），但 GitHub 相关的（收 webhook、写 PR 镜像）记不到、健康页 `github_events` 报红——这是「待配」的自然结果，不是装机脚本的错，配好凭据、重启 `fleet-api` 就好（这一条是照代码读出来的预期，#451 因为上面第 1 条还没能在真机上跑到这一步、实测验证）。
 
 看：`bash deploy/release.sh --check`（在用哪版、服务与健康）、`bash deploy/local/install.sh --check`（机器这一层）、`journalctl -u fleet-engine -u fleet-api`；`deploy/test/run.sh` 能在 `fleet-local` 里跑的都在那里跑（这台是真机、有 root，能测到 Windows 开发机测不到的部分：会话用户、防火墙、systemd 单元）。
+
+## 十四、自建代理
+
+创始人自己的设备翻墙用（2026-09-28 拍：便宜机场不稳，改用自己的两台机器）。和机场一样给一个订阅地址，Clash Party 导入就行，本机不放覆写、不放任何文件；分流规则（含原先本机覆写 `mirasim-split.js` 做的 Mirasim 分流）都在订阅里。
+
+三个节点，协议都是 VLESS + Reality（借 `www.microsoft.com` 的 TLS 握手，外面看像访问微软）：
+
+| 节点 | 路径 | 用途 |
+|---|---|---|
+| 香港 | 本机 → 香港 8443 → 香港出 | 最快；Claude、ChatGPT 不对香港开放 |
+| 法国-中转 | 本机 → 香港 8443 → 隧道 → 法国 10.99.0.2:8790 → 法国出 | 出口是法国，AI 走它 |
+| 法国-直连 | 本机 → 法国 443 → 法国出 | 不经香港，香港或隧道挂了时的备用；国内直连欧洲晚高峰可能慢 |
+
+订阅里的组：「节点选择」默认「自动」（故障转移：香港 → 法国-直连 → 法国-中转）；「AI」默认「AI-自动」（法国-中转 → 法国-直连）；「Mirasim」（`mirasim.ai`、`pqapi.shop`，云端报 403「未在当前网络区域提供服务」时在这里换节点）。自建网关（`sslip.io`，和香港 `hk.env` 的 `FLEET_PROXY_DIRECT_CIDRS` 里的地址段，真地址不进公开仓）、国内网站直连。
+
+装：
+
+1. 香港跑 `hk.sh`：装 sing-box（钉版本、核 sha256，`deploy/lib/sing-box.sh`）、生成 `/etc/fleet-dao/proxy.env`（用户号、Reality 钥匙、订阅口令，root 600，缺才生成）、起 `fleet-proxy.service`、ufw 放行 8443、把订阅放到 `/srv/fleet-dao-sub/<口令>`，站点的 `/sub/<口令>` 读它（口令不对一律 404，不记访问日志）。
+2. 法国跑 `france.sh`：起只听隧道的出口 `fleet-proxy-exit.service`，和公网 443 上的「法国-直连」入口 `fleet-proxy-direct.service`（钥匙在 `/etc/fleet-dao/proxy-direct.env`，本机生成，私钥不出机器），ufw 放行 443。它打印四行 `FLEET_PROXY_FRD_*`，整行填进香港 `hk.env`。
+3. 香港再跑一遍 `hk.sh`：订阅里加上「法国-直连」。读回从香港真走一遍三个节点、核对出口地址。
+4. 取订阅地址：香港 `bash /srv/fleet-dao/deploy/hk.sh --sub-url`（地址带口令，只给创始人，别贴进单子、PR、日志）。
+
+作废：订阅地址泄露了，删掉香港 `proxy.env` 里 `FLEET_PROXY_SUB_TOKEN` 那行重跑 `hk.sh`，旧地址当场 404，各设备重新导入；要连节点钥匙一起换，删对应几行（法国-直连的在法国 `proxy-direct.env`，换完把新打印的四行填回香港）。
+
+看流量：香港 `hk.sh --check` 的读回带这个月进出多少（vnstat），对照香港套餐的额度。

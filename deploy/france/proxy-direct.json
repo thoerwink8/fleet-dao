@@ -1,0 +1,32 @@
+{
+  "log": { "level": "warn", "timestamp": false },
+  "dns": { "servers": [{ "type": "local", "tag": "local" }] },
+  "inbounds": [
+    {
+      "type": "vless",
+      "tag": "direct-in",
+      "listen": "::",
+      "listen_port": @@PORT@@,
+      "users": [{ "name": "frd", "uuid": "@@UUID@@", "flow": "xtls-rprx-vision" }],
+      "tls": {
+        "enabled": true,
+        "server_name": "@@REALITY_SNI@@",
+        "reality": {
+          "enabled": true,
+          "handshake": { "server": "@@REALITY_SNI@@", "server_port": 443 },
+          "private_key": "@@REALITY_PRIVATE_KEY@@",
+          "short_id": ["@@SHORT_ID@@"]
+        }
+      }
+    }
+  ],
+  "outbounds": [{ "type": "direct", "tag": "out" }],
+  "route": {
+    "default_domain_resolver": "local",
+    "rules": [
+      { "action": "resolve" },
+      { "ip_is_private": true, "action": "reject" }
+    ],
+    "final": "out"
+  }
+}

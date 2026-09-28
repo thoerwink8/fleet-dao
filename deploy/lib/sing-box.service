@@ -1,0 +1,27 @@
+# fleet-dao 自建代理（deploy/lib/sing-box.sh 渲染，别手改）。以临时用户跑，配置归 root 600、经 LoadCredential 交进来。
+# 配置文件按单元名定：/etc/fleet-dao/<单元名去掉 .service>.json（%p），put_sing_box_unit 核对调用方给的路径就是它。
+[Unit]
+Description=@@DESCRIPTION@@
+After=network-online.target @@AFTER@@
+Wants=network-online.target
+
+[Service]
+DynamicUser=yes
+LoadCredential=config.json:/etc/fleet-dao/%p.json
+ExecStart=@@BIN@@ run -c ${CREDENTIALS_DIRECTORY}/config.json -D /tmp
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

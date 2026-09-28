@@ -4,9 +4,11 @@
 # WireGuard 服务端、nginx 上 fleet-dao 这一个站点（驾驶舱静态文件 + Let's Encrypt 证书与自动续期；/api、/auth、
 # /github/webhook、/healthz 经隧道转法国）、法国发布脚本用的两把钥匙（都只许经隧道来：一把只能往 /srv/fleet-dao-web
 # 写静态文件，一把只能跑 fleet-gateway-deploy 发飞书网关）、飞书网关要的固定版本 node、单元、配置里缺的几项。
-# 飞书网关的代码由法国 deploy/release.sh 发来。别家的站点和服务一概不动。端口表、怎么跑、怎么看健康、怎么回滚：docs/ops.md。
+# 飞书网关的代码由法国 deploy/release.sh 发来。还装创始人自己用的代理入口和它的订阅（lib/sing-box.sh 开头）。
+# 别家的站点和服务一概不动。端口表、怎么跑、怎么看健康、怎么回滚：docs/ops.md。
 #   bash deploy/hk.sh           装：缺的补上，已有的不动
 #   bash deploy/hk.sh --check   只读回和自检，不改任何东西
+#   bash deploy/hk.sh --sub-url 只打印代理的订阅地址（带口令，别贴进对话、日志）
 set -Eeuo pipefail
 umask 022
 
@@ -17,6 +19,8 @@ source "$DEPLOY_DIR/lib/common.sh"
 source "$DEPLOY_DIR/lib/snapshot.sh"
 # shellcheck source=lib/root-exec-check.sh
 source "$DEPLOY_DIR/lib/root-exec-check.sh"
+# shellcheck source=lib/sing-box.sh
+source "$DEPLOY_DIR/lib/sing-box.sh"
 trap 'on_error "$LINENO" "$BASH_COMMAND"' ERR
 
 # ── 约定（改这里要同步 docs/ops.md）──
@@ -31,7 +35,8 @@ WG_PEER_ADDR=10.99.0.2
 API_UPSTREAM=$WG_PEER_ADDR:8787
 ENV_FILE=/etc/fleet-dao/hk.env
 ENV_KEYS=(FLEET_DOMAIN FLEET_ACME_EMAIL FLEET_WG_FRANCE_PUBLIC_KEY FLEET_WEB_UPLOAD_PUBLIC_KEY
-  FLEET_GATEWAY_DEPLOY_PUBLIC_KEY FLEET_DEMO_PATH)
+  FLEET_GATEWAY_DEPLOY_PUBLIC_KEY FLEET_DEMO_PATH FLEET_PROXY_FRD_SERVER FLEET_PROXY_UUID_FRD
+  FLEET_PROXY_FRD_REALITY_PUBLIC_KEY FLEET_PROXY_FRD_SHORT_ID FLEET_PROXY_DIRECT_CIDRS)
 # 驾驶舱静态文件归 root。法国的发布脚本经隧道用一把只能写这个目录的钥匙往里传（rrsync -wo），钥匙登记在 root 的
 # authorized_keys2：这份文件整份归 fleet-dao 管，root 原有的 authorized_keys 一行不碰
 WEB_ROOT=/srv/fleet-dao-web
@@ -55,6 +60,29 @@ SITE_AVAILABLE=/etc/nginx/sites-available/fleet-dao
 SITE_ENABLED=/etc/nginx/sites-enabled/fleet-dao
 # 没配域名时的 server_name：.invalid 永远解析不到——站点装着、配置验得过，但谁也访问不到
 PLACEHOLDER_NAME=fleet-dao.invalid
+# ── 自建代理（创始人 2026-09-28 拍，docs/ops.md「自建代理」）：香港进；「香港」节点从香港出，「法国」节点经隧道从法国出 ──
+# TCP，VLESS + Reality。443 被 nginx 占着、同一个 nginx 上还有别家的站点，不能改成按域名分流，所以单开一个。
+# 改端口：同步改法国 france.sh 的 HK_PROXY_PORT（法国读回从公网连它，查香港上游放不放行）和 lib/snapshot.sh 的 SNAPSHOT_OURS_DPORTS_RE
+PROXY_PORT=8443
+# Reality 借这个站的 TLS 握手：要从香港连得上、TLS 1.3 + h2（读回核对）
+PROXY_REALITY_SNI=www.microsoft.com
+# 「法国」节点的出口：法国 france.sh 在隧道地址上开的 sing-box（它的 PROXY_EXIT_PORT），公网上不开
+PROXY_FR_PORT=8790
+PROXY_UNIT=fleet-proxy.service
+PROXY_CONFIG=/etc/fleet-dao/fleet-proxy.json
+# 用户号、Reality 钥匙、订阅口令：本机生成、不出机器（订阅里带出去的只有公钥、用户号），缺哪项补哪项，已有的不改。
+# 整份归 hk.sh 管。要作废一项（比如订阅地址泄露了）：删掉那一行再跑一遍，生成新的，各设备重新导入订阅
+PROXY_ENV=/etc/fleet-dao/proxy.env
+PROXY_KEYS=(FLEET_PROXY_UUID_HK FLEET_PROXY_UUID_FR FLEET_PROXY_REALITY_PRIVATE_KEY FLEET_PROXY_REALITY_PUBLIC_KEY
+  FLEET_PROXY_SHORT_ID FLEET_PROXY_SUB_TOKEN)
+declare -A PROXY=()
+# 「法国-直连」节点：法国 france.sh 在公网 TCP 443 上开的入口（它的 PROXY_DIRECT_PORT），不经香港。钥匙在法国生成，
+# 法国跑 france.sh 时打印这几项的值，填进 hk.env（FRD_KEYS）；没填齐订阅里就只有两个节点
+PROXY_FRD_PORT=443
+PROXY_FRD_SNI=www.microsoft.com
+FRD_KEYS=(FLEET_PROXY_FRD_SERVER FLEET_PROXY_UUID_FRD FLEET_PROXY_FRD_REALITY_PUBLIC_KEY FLEET_PROXY_FRD_SHORT_ID)
+# 订阅文件放这里，文件名就是订阅口令；站点的 /sub/<口令> 读它（deploy/hk/nginx-https.conf 里写死的这个目录）
+SUB_ROOT=/srv/fleet-dao-sub
 
 FLEET_DOMAIN=""
 FLEET_ACME_EMAIL=""
@@ -63,14 +91,23 @@ FLEET_WEB_UPLOAD_PUBLIC_KEY=""
 FLEET_GATEWAY_DEPLOY_PUBLIC_KEY=""
 # 演示版在站点上的路径（hk.env，默认 /demo/）：和法国 release.env 的同一个，站点给它单独一段（深链接回落到它自己的首页）
 FLEET_DEMO_PATH=""
+FLEET_PROXY_FRD_SERVER=""
+FLEET_PROXY_UUID_FRD=""
+FLEET_PROXY_FRD_REALITY_PUBLIC_KEY=""
+FLEET_PROXY_FRD_SHORT_ID=""
+# 订阅里另外走直连的地址段（空格隔开，如 203.0.113.7/32）：自建网关那台国内 VPS 这类，走节点要绕地球一圈。
+# 真地址只写在机器上的 hk.env，公开仓不写
+FLEET_PROXY_DIRECT_CIDRS=""
 TLS_ISSUED=0
 
 CHECK_ONLY=0
+SUB_URL_ONLY=0
 case "${1:-}" in
 --check) CHECK_ONLY=1 ;;
+--sub-url) SUB_URL_ONLY=1 ;;
 "") ;;
 *)
-  echo "用法：bash $0 [--check]" >&2
+  echo "用法：bash $0 [--check|--sub-url]" >&2
   exit 64
   ;;
 esac
@@ -416,6 +453,175 @@ setup_tls() {
   changed "签发证书 $FLEET_DOMAIN（HTTP-01，验证文件放 $ACME_ROOT；续期交给 certbot.timer，续完重载 nginx）"
 }
 
+# 读 proxy.env 进 PROXY[键]：每项都得在、样子都得对，缺了或不对判红（不打印值）
+load_proxy_secrets() {
+  local k bad=()
+  for k in "${PROXY_KEYS[@]}"; do
+    PROXY[$k]=$(env_file_value "$PROXY_ENV" "$k")
+    if ! proxy_value_ok "$k" "${PROXY[$k]}"; then bad+=("$k"); fi
+  done
+  if ((${#bad[@]})); then
+    red "$PROXY_ENV 里这几项缺了或不像该有的样子：${bad[*]}（删掉那几行再跑一遍 hk.sh，会重新生成）"
+    return 1
+  fi
+}
+
+# 缺的生成、已有的不改；样子不对的不替人改，判红停下
+ensure_proxy_secrets() {
+  local k v kp content gen=() bad=()
+  if [[ -e "$PROXY_ENV" ]]; then fix_meta "$PROXY_ENV" root:root 600; fi
+  for k in "${PROXY_KEYS[@]}"; do
+    v=$(env_file_value "$PROXY_ENV" "$k")
+    if [[ -n "$v" ]] && ! proxy_value_ok "$k" "$v"; then bad+=("$k"); fi
+    PROXY[$k]=$v
+  done
+  if ((${#bad[@]})); then
+    red "$PROXY_ENV 里这几项不像该有的样子：${bad[*]}（要换新的就删掉那几行再跑）"
+    return 1
+  fi
+  # Reality 的私钥和公钥是一对：缺一个就两个一起换
+  if [[ -z "${PROXY[FLEET_PROXY_REALITY_PRIVATE_KEY]}" || -z "${PROXY[FLEET_PROXY_REALITY_PUBLIC_KEY]}" ]]; then
+    kp=$("$SING_BOX_BIN" generate reality-keypair)
+    PROXY[FLEET_PROXY_REALITY_PRIVATE_KEY]=$(awk '$1 == "PrivateKey:" { print $2 }' <<<"$kp")
+    PROXY[FLEET_PROXY_REALITY_PUBLIC_KEY]=$(awk '$1 == "PublicKey:" { print $2 }' <<<"$kp")
+    gen+=(Reality 钥匙)
+  fi
+  if [[ -z "${PROXY[FLEET_PROXY_UUID_HK]}" ]]; then PROXY[FLEET_PROXY_UUID_HK]=$("$SING_BOX_BIN" generate uuid) && gen+=(香港用户号); fi
+  if [[ -z "${PROXY[FLEET_PROXY_UUID_FR]}" ]]; then PROXY[FLEET_PROXY_UUID_FR]=$("$SING_BOX_BIN" generate uuid) && gen+=(法国用户号); fi
+  if [[ -z "${PROXY[FLEET_PROXY_SHORT_ID]}" ]]; then PROXY[FLEET_PROXY_SHORT_ID]=$("$SING_BOX_BIN" generate rand --hex 8) && gen+=(short_id); fi
+  if [[ -z "${PROXY[FLEET_PROXY_SUB_TOKEN]}" ]]; then PROXY[FLEET_PROXY_SUB_TOKEN]=$("$SING_BOX_BIN" generate rand --hex 24) && gen+=(订阅口令); fi
+  if ((${#gen[@]} == 0)); then
+    ok "$PROXY_ENV 齐了（值不打印）"
+    return 0
+  fi
+  for k in "${PROXY_KEYS[@]}"; do
+    if ! proxy_value_ok "$k" "${PROXY[$k]}"; then
+      red "生成的 $k 不像该有的样子：sing-box generate 的输出变了？没写进 $PROXY_ENV"
+      return 1
+    fi
+  done
+  content="# fleet-dao 自建代理的密钥（deploy/hk.sh 生成，整份归它管）。要作废一项就删掉那一行再跑 hk.sh，各设备重新导入订阅"
+  for k in "${PROXY_KEYS[@]}"; do content+=$'\n'"$k=${PROXY[$k]}"; done
+  put_file "$PROXY_ENV" root:root 600 "$content"
+  echo "  生成：${gen[*]}（值不打印）"
+}
+
+setup_proxy() {
+  step "自建代理入口（sing-box，TCP $PROXY_PORT，VLESS + Reality；「法国」节点经隧道到 $WG_PEER_ADDR:$PROXY_FR_PORT 出）"
+  local bin_changed cfg_changed unit_changed fw
+  ensure_pkgs vnstat
+  ensure_sing_box
+  bin_changed=$WROTE
+  ensure_proxy_secrets
+  render "$DEPLOY_DIR/hk/proxy.json" PORT="$PROXY_PORT" UUID_HK="${PROXY[FLEET_PROXY_UUID_HK]}" UUID_FR="${PROXY[FLEET_PROXY_UUID_FR]}" \
+    REALITY_SNI="$PROXY_REALITY_SNI" REALITY_PRIVATE_KEY="${PROXY[FLEET_PROXY_REALITY_PRIVATE_KEY]}" \
+    SHORT_ID="${PROXY[FLEET_PROXY_SHORT_ID]}" FR_ADDR="$WG_PEER_ADDR" FR_PORT="$PROXY_FR_PORT"
+  put_sing_box_config "$PROXY_CONFIG" "$RENDERED"
+  cfg_changed=$WROTE
+  put_sing_box_unit "$PROXY_UNIT" "fleet-dao 自建代理入口（香港）" "$PROXY_CONFIG"
+  unit_changed=$WROTE
+  if port_in_use tcp "$PROXY_PORT" && [[ "$(systemctl is-active "$PROXY_UNIT" 2>/dev/null)" != active ]]; then
+    red "TCP $PROXY_PORT 已被别的程序占着：$(ss -Hltnp "sport = :$PROXY_PORT")"
+    return 1
+  fi
+  if command -v ufw >/dev/null; then
+    fw=$(ufw status 2>/dev/null || true)
+    if [[ "$fw" == "Status: active"* && "$fw" != *"$PROXY_PORT/tcp"*ALLOW* ]]; then
+      ufw allow "$PROXY_PORT/tcp" comment 'fleet-dao proxy' >/dev/null
+      changed "ufw 放行 TCP $PROXY_PORT"
+    fi
+  fi
+  ensure_unit_running "$PROXY_UNIT" $((bin_changed || cfg_changed || unit_changed))
+  setup_proxy_sub
+}
+
+# 订阅：渲染 proxy-sub.yaml 放到 SUB_ROOT/<口令>；目录里别的文件（作废了的口令）删掉，旧地址当场失效
+# hk.env 里「法国-直连」那几项：都空返回 1（还没配）；填齐且样子都对返回 0；填了一半或样子不对返回 2，原因在 FRD_BAD（不判红，调用方判）
+FRD_BAD=""
+frd_state() {
+  local k filled=0 bad=()
+  for k in "${FRD_KEYS[@]}"; do
+    if [[ -n "${!k}" ]]; then
+      filled=$((filled + 1))
+      proxy_value_ok "$k" "${!k}" || bad+=("$k")
+    fi
+  done
+  if ((filled == 0)); then return 1; fi
+  if ((filled < ${#FRD_KEYS[@]})) || ((${#bad[@]})); then
+    FRD_BAD="$ENV_FILE 里「法国-直连」那几项没填齐或不像该有的样子（${bad[*]:-缺项}）：照法国 france.sh 打印的整行填"
+    return 2
+  fi
+}
+
+# hk.env 的 FLEET_PROXY_DIRECT_CIDRS 变成订阅里的直连规则，放进 DIRECT_RULES；有一段不像 IPv4 地址段就判红返回 1
+DIRECT_RULES=""
+proxy_direct_rules() {
+  local c
+  DIRECT_RULES=""
+  for c in $FLEET_PROXY_DIRECT_CIDRS; do
+    if [[ ! "$c" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$ ]]; then
+      red "$ENV_FILE 的 FLEET_PROXY_DIRECT_CIDRS 里「$c」不像 IPv4 地址段（应为 203.0.113.7/32 这样）"
+      return 1
+    fi
+    DIRECT_RULES+="${DIRECT_RULES:+$'\n'}  - IP-CIDR,$c,DIRECT,no-resolve"
+  done
+}
+
+setup_proxy_sub() {
+  local ip f frd_proxy="" frd_name="" rc=0
+  if [[ -z "$FLEET_DOMAIN" ]]; then
+    pending "没配域名（$ENV_FILE 的 FLEET_DOMAIN），代理的订阅先不放"
+    return 0
+  fi
+  if ! ip=$(proxy_server_ip); then
+    red "取不到这台对外的 IPv4（ip -4 route get 1.1.1.1 的 src 不是公网地址）：订阅里没法填服务器地址"
+    return 1
+  fi
+  frd_state || rc=$?
+  if ((rc == 0)); then
+    render "$DEPLOY_DIR/hk/proxy-sub-frd.yaml" FRD_SERVER="$FLEET_PROXY_FRD_SERVER" FRD_PORT="$PROXY_FRD_PORT" \
+      UUID_FRD="$FLEET_PROXY_UUID_FRD" FRD_SNI="$PROXY_FRD_SNI" FRD_PUBLIC_KEY="$FLEET_PROXY_FRD_REALITY_PUBLIC_KEY" \
+      FRD_SHORT_ID="$FLEET_PROXY_FRD_SHORT_ID"
+    frd_proxy=$RENDERED
+    frd_name=", 法国-直连"
+  elif ((rc == 1)); then
+    pending "hk.env 里还没有「法国-直连」那几项（法国跑 france.sh 时打印），订阅里先只放两个节点"
+  else
+    red "$FRD_BAD"
+    return 1
+  fi
+  proxy_direct_rules || return 1
+  render "$DEPLOY_DIR/hk/proxy-sub.yaml" SERVER="$ip" PORT="$PROXY_PORT" UUID_HK="${PROXY[FLEET_PROXY_UUID_HK]}" \
+    UUID_FR="${PROXY[FLEET_PROXY_UUID_FR]}" REALITY_SNI="$PROXY_REALITY_SNI" \
+    REALITY_PUBLIC_KEY="${PROXY[FLEET_PROXY_REALITY_PUBLIC_KEY]}" SHORT_ID="${PROXY[FLEET_PROXY_SHORT_ID]}" \
+    COCKPIT_DOMAIN="$FLEET_DOMAIN" FRD_PROXY="$frd_proxy" FRD_NAME="$frd_name" DIRECT_RULES="$DIRECT_RULES"
+  # nginx 以 www-data 读：目录和文件归 root、组 www-data，别人读不到
+  ensure_dir "$SUB_ROOT" root:www-data 750
+  put_file "$SUB_ROOT/${PROXY[FLEET_PROXY_SUB_TOKEN]}" root:www-data 640 "$RENDERED"
+  for f in "$SUB_ROOT"/* "$SUB_ROOT"/.[!.]*; do
+    [[ -e "$f" && "${f##*/}" != "${PROXY[FLEET_PROXY_SUB_TOKEN]}" ]] || continue
+    rm -f -- "$f"
+    changed "删掉作废的订阅文件（旧口令的地址当场失效）"
+  done
+  echo "  订阅地址：https://$FLEET_DOMAIN/sub/…（完整的用 bash $0 --sub-url 打印，带口令，别贴进对话、日志）"
+}
+
+# 只打印订阅地址（给人拷进剪贴板用）；缺域名、缺口令就失败，不打半截地址
+print_sub_url() {
+  local domain token
+  if ((EUID != 0)); then
+    echo "要 root：sudo bash $0 --sub-url" >&2
+    return 64
+  fi
+  domain=$(env_file_value "$ENV_FILE" FLEET_DOMAIN)
+  token=$(env_file_value "$PROXY_ENV" FLEET_PROXY_SUB_TOKEN)
+  if [[ -z "$domain" ]] || ! proxy_value_ok FLEET_PROXY_SUB_TOKEN "$token" || [[ ! -f "$SUB_ROOT/$token" ]]; then
+    echo "还没有订阅：$ENV_FILE 缺 FLEET_DOMAIN，或还没跑过 hk.sh 生成订阅" >&2
+    return 1
+  fi
+  printf 'https://%s/sub/%s\n' "$domain" "$token"
+}
+
 readback() {
   step "读回"
   readback_secrets_dir
@@ -427,6 +633,117 @@ readback() {
   readback_release
   readback_gateway_token
   readback_gateway
+  readback_proxy
+}
+
+# 自建代理：进程、端口、防火墙、配置和密钥、借用的握手站、法国出口、订阅，最后真走一遍两个节点看出口地址
+readback_proxy() {
+  local fw why rc=0 code url body want
+  readback_sing_box "$PROXY_UNIT" "$PROXY_PORT"
+  if command -v ufw >/dev/null; then
+    fw=$(ufw status 2>/dev/null || true)
+    if [[ "$fw" == "Status: active"* && "$fw" != *"$PROXY_PORT/tcp"*ALLOW* ]]; then red "ufw 没放行 TCP $PROXY_PORT：外面连不进代理"; fi
+  fi
+  if [[ "$(stat -c '%U:%G %a' -- "$PROXY_ENV" 2>/dev/null)" != "root:root 600" || "$(stat -c '%U:%G %a' -- "$PROXY_CONFIG" 2>/dev/null)" != "root:root 600" ]]; then
+    red "$PROXY_ENV 或 $PROXY_CONFIG 不在、或不是 root:root 600（里面有私钥）"
+    return 0
+  fi
+  load_proxy_secrets || return 0
+  if why=$("$SING_BOX_BIN" check -c "$PROXY_CONFIG" 2>&1); then ok "代理配置验得过（$PROXY_CONFIG）"; else red "代理配置验不过：${why:0:200}"; fi
+  readback_reality_sni "$PROXY_REALITY_SNI" PROXY_REALITY_SNI
+  timeout 5 bash -c "exec 3<>/dev/tcp/$WG_PEER_ADDR/$PROXY_FR_PORT" 2>/dev/null || rc=$?
+  if ((rc == 0)); then
+    ok "经隧道连得上法国的代理出口 $WG_PEER_ADDR:$PROXY_FR_PORT"
+  elif ((rc == 124)); then
+    red "连法国的代理出口 $WG_PEER_ADDR:$PROXY_FR_PORT 超时：隧道断了，或法国 ufw 没在 wg-fleet 上放行它（法国 france.sh 装）"
+  else
+    pending "法国的代理出口还没起（连接被拒）：法国跑一遍 france.sh"
+  fi
+  if [[ -n "$FLEET_DOMAIN" && -f "/etc/letsencrypt/live/$FLEET_DOMAIN/fullchain.pem" ]]; then
+    url="https://$FLEET_DOMAIN/sub/${PROXY[FLEET_PROXY_SUB_TOKEN]}"
+    body=$(curl -s --max-time 10 --resolve "$FLEET_DOMAIN:443:127.0.0.1" "$url" || true)
+    want=2
+    if frd_state; then want=3; fi
+    if [[ "$(grep -c -e '^  - name: 香港$' -e '^  - name: 法国-中转$' -e '^  - name: 法国-直连$' <<<"$body" || true)" == "$want" ]]; then
+      ok "订阅在 https://$FLEET_DOMAIN/sub/…（$want 个节点都在；完整地址 bash $0 --sub-url）"
+    else
+      red "订阅地址没给出 $want 个节点（nginx 站点里的 /sub/、$SUB_ROOT 里的文件）"
+    fi
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 --resolve "$FLEET_DOMAIN:443:127.0.0.1" \
+      "https://$FLEET_DOMAIN/sub/$(printf '0%.0s' {1..48})" || true)
+    if [[ "$code" == 404 ]]; then ok "口令不对的订阅地址回 404"; else red "口令不对的订阅地址回「$code」，应为 404"; fi
+  else
+    pending "还没有域名或证书，订阅没放"
+  fi
+  readback_proxy_path hk
+  readback_proxy_path fr
+  readback_proxy_frd
+  readback_traffic
+}
+
+# 真走一遍：本机起一个临时客户端连自己的代理入口，看出口地址。
+# 香港节点应当是这台的地址；法国中转节点应当是法国的地址（隧道对端的公网地址），至少不能是香港的
+readback_proxy_path() { # hk|fr
+  local who=$1 uuid mine want
+  if ! mine=$(proxy_server_ip); then
+    red "取不到这台对外的 IPv4，代理的出口地址没法核对"
+    return 0
+  fi
+  if ! curl -s --max-time 10 https://api.ipify.org >/dev/null; then
+    pending "这台直连 api.ipify.org 都不通，代理的出口地址没核对"
+    return 0
+  fi
+  if [[ "$who" == hk ]]; then uuid=${PROXY[FLEET_PROXY_UUID_HK]}; else uuid=${PROXY[FLEET_PROXY_UUID_FR]}; fi
+  if ! proxy_egress_ip 127.0.0.1 "$PROXY_PORT" "$uuid" "$PROXY_REALITY_SNI" "${PROXY[FLEET_PROXY_REALITY_PUBLIC_KEY]}" \
+    "${PROXY[FLEET_PROXY_SHORT_ID]}"; then
+    red "经代理的「$who」节点打不开网页（拿到「$PROXY_EGRESS」）：journalctl -u $PROXY_UNIT -n 50"
+    return 0
+  fi
+  if [[ "$who" == hk ]]; then
+    if [[ "$PROXY_EGRESS" == "$mine" ]]; then ok "「香港」节点走得通，从这台出"; else red "「香港」节点的出口是别的地址，不是这台"; fi
+    return 0
+  fi
+  want=$(wg show "$WG_IF" endpoints 2>/dev/null | awk '{ sub(/:[0-9]+$/, "", $2); print $2; exit }')
+  if [[ "$PROXY_EGRESS" == "$mine" ]]; then
+    red "「法国-中转」节点从香港出去了：路由没把它转给法国"
+  elif [[ "$PROXY_EGRESS" == "$want" ]]; then
+    ok "「法国-中转」节点走得通，经隧道从法国出"
+  else
+    ok "「法国-中转」节点走得通，出口不是香港（和隧道对端的地址不同，法国出站可能换了地址）"
+  fi
+}
+
+# 「法国-直连」：从这台经公网连法国的 443 入口，出口应当就是法国那个地址（从香港连不代表国内连得上，只证明入口和钥匙对）
+readback_proxy_frd() {
+  local rc=0
+  frd_state || rc=$?
+  if ((rc == 1)); then
+    pending "hk.env 里还没有「法国-直连」那几项，没查这个节点"
+    return 0
+  fi
+  if ((rc == 2)); then
+    red "$FRD_BAD"
+    return 0
+  fi
+  if ! proxy_egress_ip "$FLEET_PROXY_FRD_SERVER" "$PROXY_FRD_PORT" "$FLEET_PROXY_UUID_FRD" "$PROXY_FRD_SNI" \
+    "$FLEET_PROXY_FRD_REALITY_PUBLIC_KEY" "$FLEET_PROXY_FRD_SHORT_ID"; then
+    red "「法国-直连」节点打不开网页（拿到「$PROXY_EGRESS」）：法国的 fleet-proxy-exit 在不在跑、法国 ufw 放没放 443、hk.env 里的几项是不是法国最新打印的"
+  elif [[ "$PROXY_EGRESS" == "$FLEET_PROXY_FRD_SERVER" ]]; then
+    ok "「法国-直连」节点走得通，从法国 $FLEET_PROXY_FRD_SERVER 出"
+  else
+    ok "「法国-直连」节点走得通，出口是 $PROXY_EGRESS（和入口地址不同，法国出站可能换了地址）"
+  fi
+}
+
+# 这个月走了多少流量（香港套餐的额度看服务商后台；vnstat 刚装时要攒一会儿才有数）
+readback_traffic() {
+  local dev line
+  dev=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }')
+  if ! line=$(vnstat -i "$dev" --oneline 2>/dev/null) || [[ "$(awk -F';' '{ print NF }' <<<"$line")" -lt 11 ]]; then
+    pending "vnstat 还没有 $dev 这个月的流量数（刚装要等几分钟）"
+    return 0
+  fi
+  ok "$dev 这个月（$(cut -d';' -f8 <<<"$line")）进 $(cut -d';' -f9 <<<"$line")、出 $(cut -d';' -f10 <<<"$line")，共 $(cut -d';' -f11 <<<"$line")（对照香港套餐的额度）"
 }
 
 readback_web_upload() {
@@ -642,6 +959,10 @@ readback_cert() {
 
 main() {
   local before=""
+  if ((SUB_URL_ONLY)); then
+    print_sub_url || exit $?
+    return
+  fi
   preflight
   if ((CHECK_ONLY == 0)); then
     before=$(snapshot_others)
@@ -651,6 +972,7 @@ main() {
     setup_web_upload
     setup_node
     setup_gateway
+    setup_proxy
     setup_site
     setup_tls
     # 证书刚签下来：站点从只开 80 换成 80 + 443
