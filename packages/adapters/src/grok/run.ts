@@ -105,6 +105,7 @@ export function grokRunFacts(report: GrokRunReport): RunFacts {
     ...(report.spawnError ? { spawnError: report.spawnError } : {}),
     ...(report.killed ? { killed: report.killed.reason } : {}),
     exitCode: report.exitCode,
+    ...(report.exitLost ? { exitLost: report.exitLost } : {}),
     signal: report.signal,
     ...(mismatch ? { mismatch } : {}),
     ...(end

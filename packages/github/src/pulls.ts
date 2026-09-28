@@ -368,6 +368,58 @@ export async function openPr(
   };
 }
 
+// —— 改到的文件（先审后合按路径判要它，#253）——
+
+/** 一个改到的文件：@fleet-dao/conventions 的 riskyFiles 按这个形状判（结构一致就够，这里不引那个包）。 */
+export interface PrFile {
+  filename: string;
+  status: string;
+  /** 改动内容；文件太大 GitHub 不给（这时判定不了迁移是不是只加不改，按「看不到改动内容」算改了）。 */
+  patch?: string;
+  /** 改名前的名字。 */
+  previous?: string;
+}
+
+const FILES_PER_PAGE = 100;
+const FILES_MAX_PAGES = 30;
+
+/** PR 改到的文件（翻完页，带 patch）：高风险路径按它判，判法在 @fleet-dao/conventions 的 riskyFiles（合并闸同一份）。 */
+export async function pullFiles(
+  deps: Deps,
+  repo: RepoRef,
+  prNumber: number,
+  signal?: AbortSignal,
+): Promise<PrFile[]> {
+  const items = await deps.client.all<unknown>(
+    {
+      method: 'GET',
+      path: `/repos/${enc(repo.owner)}/${enc(repo.name)}/pulls/${prNumber}/files`,
+      auth: { as: 'engine' as const, repo },
+      query: { per_page: FILES_PER_PAGE },
+      signal,
+    },
+    (d) => d,
+    FILES_MAX_PAGES,
+  );
+  return items.map((item) => {
+    if (
+      !item ||
+      typeof item !== 'object' ||
+      typeof (item as { filename?: unknown }).filename !== 'string' ||
+      typeof (item as { status?: unknown }).status !== 'string'
+    ) {
+      throw unexpected(`PR #${prNumber} 的改动文件列表有一条`, item);
+    }
+    const f = item as { filename: string; status: string; patch?: string; previous_filename?: string };
+    return {
+      filename: f.filename,
+      status: f.status,
+      ...(f.patch !== undefined ? { patch: f.patch } : {}),
+      ...(f.previous_filename !== undefined ? { previous: f.previous_filename } : {}),
+    };
+  });
+}
+
 // —— 读 CI ——
 
 export interface CiRead {
@@ -474,7 +526,11 @@ export type CiWaitResult =
     }
   /** 和主线冲突：GitHub 不给冲突的 PR 起 CI，要先同步主线（C1）。 */
   | { state: 'conflict'; head: string; detail: string }
-  /** PR 的头变了：结论必须绑在要合的头上，重新送检。 */
+  /**
+   * PR 的头变了，且新头不含老头（compare 老头...新头 behind_by > 0，像是被强推改写了）：结论必须绑在要合的头上，
+   * 这种没法自己接着查，交回去要人看。新头含着老头的（人或引擎自己并了主线、加了提交）不会走到这里：见下面循环里的
+   * `advance`，认新头接着在它上面查，不当成头变了。
+   */
   | { state: 'head_moved'; head: string; actualHead: string; detail: string }
   | { state: 'closed'; head: string; detail: string }
   /** 一个检查、一个工作流都没起。 */
@@ -495,7 +551,10 @@ export async function waitCi(
   input: WaitCiInput,
   ctx: ActivityContext = {},
 ): Promise<CiWaitResult> {
-  const { repo, prNumber, head } = input;
+  const { repo, prNumber } = input;
+  // 送检的头（心跳恢复时按它对：memo 的头对不上就当没恢复，从头查，见 asMemo）；查到头变了、新头含着老头
+  // 就认它、往下接着用（不当成头变了）——`readCi` 等下面都读这个变量，不是 input.head。
+  let head = input.head;
   const now = () => deps.client.now().getTime();
   const sleep = (ms: number) => deps.client.sleep(ms, ctx.signal);
   const timeoutMs = input.timeoutMs ?? 30 * 60_000;
@@ -507,6 +566,32 @@ export async function waitCi(
   const required = await requiredChecksFor(deps, repo, input.checks, ctx.signal);
   let failures = 0;
   let redSeenAt: number | null = null;
+  const base = `/repos/${enc(repo.owner)}/${enc(repo.name)}`;
+  const auth = { as: 'engine' as const, repo };
+  /**
+   * 新头和老头的关系（GitHub 的 compare：老头...新头）：behind_by = 0 是新头一个不少地含着老头；ahead_by = 0、behind_by > 0
+   * 是读到的「新头」其实是老头的祖先——多半是刚推完 GitHub 还给旧数据（09-28 #389 撞上：读回了早两个提交的头，被当成强推
+   * 停下等人），隔一会儿再读；两边都有对方没有的提交才是真被改写了。
+   */
+  const relation = async (oldHead: string, newHead: string): Promise<'contains' | 'older' | 'rewritten'> => {
+    const cmp = await deps.client.request<{ behind_by?: number; ahead_by?: number }>({
+      method: 'GET',
+      path: `${base}/compare/${encRef(oldHead)}...${encRef(newHead)}`,
+      auth,
+      query: { per_page: 1 },
+      signal: ctx.signal,
+    });
+    const behindBy = cmp.data?.behind_by;
+    const aheadBy = cmp.data?.ahead_by;
+    if (typeof behindBy !== 'number' || typeof aheadBy !== 'number') {
+      throw unexpected(`比较 ${oldHead.slice(0, 7)}...${newHead.slice(0, 7)}`, cmp.data);
+    }
+    if (behindBy === 0) return 'contains';
+    return aheadBy === 0 ? 'older' : 'rewritten';
+  };
+  /** 读到比老头还旧的头时再读几次（每次隔 pollMs）；一直是旧的才当成头真被改回去了。 */
+  const STALE_REREADS = 4;
+  let staleReads = 0;
 
   for (;;) {
     ctx.signal?.throwIfAborted();
@@ -515,8 +600,37 @@ export async function waitCi(
     let ci: CiRead;
     try {
       pr = await readPull(deps, repo, prNumber, 'engine', ctx.signal);
+      if (pr.state !== 'closed' && pr.head.sha !== head) {
+        // 头变了：人或引擎自己把主线并进来又推了（合并队列退回、自动并主线），新头含着老头——认新头，接着在它
+        // 上面查 CI，不当成头变了（不算没查成，也不用停下等人）。新头不含老头（被强推改写了）才真的报出去。
+        const rel = await relation(head, pr.head.sha);
+        if (rel === 'older' && staleReads < STALE_REREADS) {
+          staleReads += 1;
+          await sleep(pollMs);
+          continue;
+        }
+        if (rel === 'contains') {
+          head = pr.head.sha;
+          memo.head = head;
+          memo.startedAt = now();
+          memo.sawActivityAt = null;
+          redSeenAt = null;
+          failures = 0;
+          continue;
+        }
+        return {
+          state: 'head_moved',
+          head,
+          actualHead: pr.head.sha,
+          detail:
+            rel === 'older'
+              ? `PR #${prNumber} 的头从 ${head.slice(0, 7)} 退回到了更早的 ${pr.head.sha.slice(0, 7)}（隔着读了 ${STALE_REREADS} 次都是它，像是被人改回去了）`
+              : `PR #${prNumber} 的头从 ${head.slice(0, 7)} 变成了 ${pr.head.sha.slice(0, 7)}，而且新头不含老头（像是被强推改写了）`,
+        };
+      }
       ci = await readCi(deps, repo, head, required, ctx.signal);
       failures = 0;
+      staleReads = 0;
     } catch (err) {
       if (ctx.signal?.aborted) throw err;
       if (!(isGitHubError(err) && err.retryable)) {
@@ -536,14 +650,6 @@ export async function waitCi(
 
     if (pr.state === 'closed') {
       return { state: 'closed', head, detail: `PR #${prNumber} 已经${pr.merged ? '合并' : '关掉'}了` };
-    }
-    if (pr.head.sha !== head) {
-      return {
-        state: 'head_moved',
-        head,
-        actualHead: pr.head.sha,
-        detail: `PR #${prNumber} 的头从 ${head.slice(0, 7)} 变成了 ${pr.head.sha.slice(0, 7)}`,
-      };
     }
     if (pr.mergeable === false || pr.mergeable_state === 'dirty') {
       return {

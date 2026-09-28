@@ -2,6 +2,7 @@
 // 解析归各家的读取器；这里只管起进程、逐行交给读取器、按它的判断保活或强杀、把事件和额度读数交给调用方。
 import { stat } from 'node:fs/promises';
 import type { ProgressEvent } from '@fleet-dao/shared';
+import type { DetachedIo } from './detached.ts';
 import {
   type AgentProcessResult,
   assertNotRealAgentInTests,
@@ -23,17 +24,30 @@ export interface LineEffect {
   rateLimit?: RateLimitReading;
 }
 
+/** 一个事件出自输出的哪一行：seq 从 0 起；replay = 重读的、上一个引擎已经处理过的行（只重建状态，别再写库）。 */
+export interface LineMeta {
+  seq: number;
+  replay: boolean;
+}
+
 /** 各家插头的公共选项（和 Claude 插头同一套）。 */
 export interface AgentRunOptions {
   /** 起执行体的命令，给绝对路径。没有默认值：谁要起真执行体谁显式给，测试里换成假执行体。 */
   command: readonly string[];
   /** 可以是 async 的：被拒不会炸进程，记进 hookError；交报告之前会等它们落定。 */
-  onEvent?: (event: ProgressEvent) => unknown;
+  onEvent?: (event: ProgressEvent, meta: LineMeta) => unknown;
   onRateLimit?: (reading: RateLimitReading) => unknown;
   /** 进程起来了：引擎记下进程号和 scope，重启后用 reapSession 收旧会话。 */
   onSpawn?: (info: SpawnInfo) => unknown;
   signal?: AbortSignal;
   now?: () => Date;
+  /** 走文件、不接管道（会话脱开引擎进程）；attach = 引擎重启后接回。 */
+  io?: DetachedIo;
+  /**
+   * 接回时：序号小于它的行上一个引擎已经处理过（进度已进库）——照样交给读取器重建状态、事件照样给（meta.replay），
+   * 但不保活、不核对、不报额度读数。
+   */
+  replayUntil?: number;
 }
 
 export interface CliRunPlan<E extends LineEffect> {
@@ -89,6 +103,7 @@ export async function runCliAgent<E extends LineEffect>(
   options: AgentRunOptions,
 ): Promise<AgentProcessResult> {
   const gate = new CallbackGate();
+  let lastSeq = -1;
   const result = await runAgentProcess(
     {
       command: [...options.command, ...plan.args],
@@ -99,22 +114,30 @@ export async function runCliAgent<E extends LineEffect>(
       runId: plan.runId,
       ...(plan.cgroup ? { scope: plan.cgroup } : {}),
       ...(options.signal ? { signal: options.signal } : {}),
+      ...(options.io ? { io: options.io } : {}),
     },
     {
       onLine(line, control) {
         const effect = plan.read(line);
-        if (effect.activity) control.touch();
-        plan.inspect?.(effect, control);
-        for (const event of effect.events) gate.call(() => options.onEvent?.(event));
+        const meta: LineMeta = { seq: control.seq, replay: control.seq < (options.replayUntil ?? 0) };
+        lastSeq = meta.seq;
+        if (!meta.replay) {
+          if (effect.activity) control.touch();
+          plan.inspect?.(effect, control);
+        }
+        for (const event of effect.events) gate.call(() => options.onEvent?.(event, meta));
         const reading = effect.rateLimit;
-        if (reading) gate.call(() => options.onRateLimit?.(reading));
+        if (reading && !meta.replay) gate.call(() => options.onRateLimit?.(reading));
       },
       busy: () => plan.busy(),
       onSpawn: (info) => gate.call(() => options.onSpawn?.(info)),
     },
     options.now ?? (() => new Date()),
   );
-  for (const event of plan.drain?.() ?? []) gate.call(() => options.onEvent?.(event));
+  // 收场时读取器攒着的最后几条：算在最后一行之后的「虚一行」上，接回时照序号去重（上一个引擎确认过它就是重放）
+  const tailSeq = lastSeq + 1;
+  const tailMeta: LineMeta = { seq: tailSeq, replay: tailSeq < (options.replayUntil ?? 0) };
+  for (const event of plan.drain?.() ?? []) gate.call(() => options.onEvent?.(event, tailMeta));
   const callbackError = await gate.settle();
   const hookError = result.hookError ?? callbackError;
   return { ...result, ...(hookError === undefined ? {} : { hookError }) };

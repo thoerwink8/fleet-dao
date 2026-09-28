@@ -3,7 +3,7 @@
 // 只认这个形状，不认哪一家的报告。接上的执行方式就是 WIRED_HOSTS：别的执行方式会话端口明确报 HOST_NOT_WIRED，
 // 选路不派（store-ports.ts），探针记 not_wired。
 //
-// 两家的不同都收在驱动里：
+// 各家的不同都收在驱动里：
 // - Claude Code（经 reclaude）：会话号由我们定（--session-id）；换了账号池还能 fork 续；终帧报会话累计花费、实际回话的模型、
 //   上下文大小，流里有额度读数（带清零时刻）。会话用户按账号池定（pools.run_as_user：它绑着 reclaude 组织）。
 // - cursor-agent：开新会话的会话号是它在 init 帧里自己起的，事先定不了——先回一个一眼看得出不是 UUID 的临时号
@@ -25,6 +25,21 @@
 //   普通文件、没有桌面也存得下，grok 自己续期）；没登录、过期了在 error 帧和 stderr 里说「Not signed in」「Run `grok login`」，
 //   失败分流按 AU7 认。和 Cursor 一样不绑会话用户、跑在法国唯一的会话用户下；装在他家里的 ~/.grok/bin/grok，由会话用户自己
 //   看它是不是能跑的文件（grokLaunchCommand），不是就报没装。
+// - mirasim（#345，只留「中继额度」路由的薄插头，design 第三节第 12 条）：和前三家都不同——不是我们 spawn 一个子进程，
+//   而是引擎自己的进程（fleet 用户）经回环 ws 连一份「已经在跑」的 Mirasim 服务；工具是在那份服务的进程里执行的，所以
+//   design 第十四节要求给会话用户单独起一份（登录一次），不借旧系统那份——配好之前这条路由保持关闭（目录样例的 enabled）。
+//   服务端认的是「执行体」（agent：claude / codex / pi / dsh……），不是路由的模型 id；模型串→执行体的对应表见
+//   MIRASIM_AGENT_BY_MODEL，认不出的模型串明确报错，不落到某个默认执行体上。只留「中转」这一种路由（route: 'cloud'，
+//   MS-28：不许反代，只能用官方客户端），所以结束后一定要给账本目录（ledgerDir）：账本没读成、没查到起针之后的 2xx
+//   都算「中转没查成」（relayUnknown，进 facts，DL3 挂起报警），不当成会话真交了活。
+//   会话号不是我们起的：server 的 accepted 帧回 sessionKey（<agent>:<uuid>），事先给不出，和 cursor 一样先回一个一眼看得出
+//   不是真号的临时号（MIRASIM_PENDING_PREFIX），真号经 onAccepted → onSessionId 报上来。没有 fork（换了账号池一律接力）。
+//   令牌文件、账本都在这份服务的用户家里（~/.mirasim/run/local-<端口>.token、~/.mirasim/traffic），引擎自己的进程进不去
+//   那个家（750）：连接工厂（mirasimConnect）、读账本（mirasimLedgerFs）在生产装配里都经 exec 帮手以那个会话用户读，
+//   不直接读本机文件（real/index.ts）。
+//   协议没有「探针模式」这种权限旗标（不像 Claude 的 dontAsk、cursor 的 --force、grok 的 --always-approve）：探针能不能
+//   不跑工具全靠 PROBE_PROMPT 那句「不要调用任何工具」，服务端那边会不会听不是我们控制得了的——这是协议本身的限制，
+//   不是漏接了什么。
 import { randomUUID } from 'node:crypto';
 import {
   type AgentRunOptions,
@@ -37,15 +52,24 @@ import {
   type CursorRunSpec,
   claudeRunFacts,
   cursorRunFacts,
+  type DetachedIo,
   type GrokRunReport,
   type GrokRunSpec,
   grokRunFacts,
+  type LedgerFs,
+  type LineMeta,
+  type MirasimConnect,
+  type MirasimRunOptions,
+  type MirasimRunReport,
+  type MirasimRunSpec,
+  mirasimRunSummary,
   type ProcessLimits,
   type RateLimitReading,
   type RunFacts,
   runClaudeCode,
   runCursorAgent,
   runGrok,
+  runMirasim,
   SESSION_USERS,
   type SessionEnvInput,
   type SessionUser,
@@ -55,14 +79,19 @@ import type { HostId, ProgressEvent } from '@fleet-dao/shared';
 import { hostName } from '../routing/names.ts';
 
 /** 引擎接上的执行方式。加一家：写它的驱动，探针跟着就能探、选路跟着就派。 */
-export const WIRED_HOSTS = ['claude-code', 'cursor-agent', 'grok'] as const satisfies readonly HostId[];
+export const WIRED_HOSTS = [
+  'claude-code',
+  'cursor-agent',
+  'grok',
+  'mirasim',
+] as const satisfies readonly HostId[];
 export type WiredHost = (typeof WIRED_HOSTS)[number];
 
 export function isWiredHost(hostId: string): hostId is WiredHost {
   return (WIRED_HOSTS as readonly string[]).includes(hostId);
 }
 
-/** 「Claude Code、Cursor Agent」：没接上的报错、探针的原因里用。 */
+/** 「Claude Code、Cursor Agent、Grok 命令行、Mirasim」：没接上的报错、探针的原因里用。 */
 export function wiredHostNames(): string {
   return WIRED_HOSTS.map(hostName).join('、');
 }
@@ -98,7 +127,12 @@ export interface HostRunSpec {
 export interface HostRunHooks {
   signal?: AbortSignal;
   now?: () => Date;
-  onEvent?: (event: ProgressEvent) => unknown;
+  /** meta：出自输出的哪一行、是不是接回时重放的（重放的只重建状态、别再写库）。 */
+  onEvent?: (event: ProgressEvent, meta: LineMeta) => unknown;
+  /** 走文件、脱开引擎进程跑（adapters 的 detached.ts）；attach = 引擎重启后接回，不起进程。 */
+  io?: DetachedIo;
+  /** 接回时：序号小于它的行已经处理过（库里确认过）。 */
+  replayUntil?: number;
   onRateLimit?: (reading: RateLimitReading) => unknown;
   onSpawn?: (info: SpawnInfo) => unknown;
   /** 执行体报出自己的会话号（cursor 的 init 帧）。同步调，别抛。 */
@@ -163,11 +197,12 @@ export interface HostDriver {
   loginFix(machine: string, user: string): string;
 }
 
-/** 起插头的函数：生产是 runClaudeCode / runCursorAgent / runGrok；测试按执行方式给假插头（不起真执行体）。 */
+/** 起插头的函数：生产是 runClaudeCode / runCursorAgent / runGrok / runMirasim；测试按执行方式给假插头（不起真执行体）。 */
 export interface HostRunners {
   'claude-code'?: (spec: ClaudeCodeRunSpec, options: ClaudeCodeRunOptions) => Promise<ClaudeCodeRunReport>;
   'cursor-agent'?: (spec: CursorRunSpec, options: CursorRunOptions) => Promise<CursorRunReport>;
   grok?: (spec: GrokRunSpec, options: AgentRunOptions) => Promise<GrokRunReport>;
+  mirasim?: (spec: MirasimRunSpec, options: MirasimRunOptions) => Promise<MirasimRunReport>;
 }
 
 export interface HostDriverDeps {
@@ -177,6 +212,15 @@ export interface HostDriverDeps {
   cursorCommand(user: SessionUser): string[];
   /** 起 grok 的命令（绝对路径）：装在会话用户自己家里，生产用 grokLaunchCommand 先看在不在。 */
   grokCommand(user: SessionUser): string[];
+  /**
+   * 连到这个会话用户自己的 Mirasim 服务（给他单独起的那份，design 第十四节）：不是起命令，是开一条到本机回环的 ws；
+   * 每次起会话都现连（重试、读令牌的活见 adapters 的 mirasimConnector）。生产装配见 real/index.ts。
+   */
+  mirasimConnect(user: SessionUser): MirasimConnect;
+  /** 这个会话用户的 Mirasim 账本目录（他家里的 ~/.mirasim/traffic）：中转路由结束后核实走没走上游（MS-27）。 */
+  mirasimLedgerDir(user: SessionUser): string;
+  /** 读账本用：引擎自己的进程进不去会话用户的家（750），经这个以他的身份读（real/index.ts 的生产装配）。 */
+  mirasimLedgerFs(user: SessionUser): LedgerFs;
   run?: HostRunners;
 }
 
@@ -185,6 +229,12 @@ export function hostDrivers(deps: HostDriverDeps): Record<WiredHost, HostDriver>
     'claude-code': claudeDriver(deps.claudeCommand, deps.run?.['claude-code'] ?? runClaudeCode),
     'cursor-agent': cursorDriver(deps.cursorCommand, deps.run?.['cursor-agent'] ?? runCursorAgent),
     grok: grokDriver(deps.grokCommand, deps.run?.grok ?? runGrok),
+    mirasim: mirasimDriver(
+      deps.mirasimConnect,
+      deps.mirasimLedgerDir,
+      deps.mirasimLedgerFs,
+      deps.run?.mirasim ?? runMirasim,
+    ),
   };
 }
 
@@ -223,6 +273,8 @@ function agentHooks(command: string[], hooks: HostRunHooks): ClaudeCodeRunOption
     ...(hooks.signal ? { signal: hooks.signal } : {}),
     ...(hooks.now ? { now: hooks.now } : {}),
     ...(hooks.onEvent ? { onEvent: hooks.onEvent } : {}),
+    ...(hooks.io ? { io: hooks.io } : {}),
+    ...(hooks.replayUntil === undefined ? {} : { replayUntil: hooks.replayUntil }),
     ...(hooks.onRateLimit ? { onRateLimit: hooks.onRateLimit } : {}),
     ...(hooks.onSpawn ? { onSpawn: hooks.onSpawn } : {}),
   };
@@ -542,5 +594,104 @@ export function grokReport(report: GrokRunReport): HostReport {
     ...defined('rawError', facts.lastWords),
     wallMs: report.wallMs,
     stderrTail: report.stderrTail,
+  };
+}
+
+// ---- mirasim
+
+/**
+ * 路由的 upstreamModel → Mirasim 服务端认的执行体名（docs/reference/adapters.md 第五~七节；对应
+ * deploy/examples/catalog.example.json 里 mirasim-relay 池现在的四条路由）。认不出的模型串明确报错、不落到某个默认
+ * 执行体上——新增一条 Mirasim 路由时要把这张表也改了，不然只会在真起会话那一刻才报错（mirasimAgentFor 抛出）。
+ */
+export const MIRASIM_AGENT_BY_MODEL: Readonly<Record<string, string>> = {
+  'claude-opus-5-5': 'claude',
+  'gpt-5.6-luna': 'codex',
+  'kimi-k3': 'pi',
+  'deepseek-flash': 'dsh',
+};
+
+/** pi 起会话不带 model（吃服务端全局默认 agents.pi.model），只拿 expectModel 核对回读的快照符不符（PI-02）。 */
+const MIRASIM_MODELLESS_AGENTS = new Set(['pi']);
+
+/** 认不出的模型串明确报错（不瞎猜执行体）：故意造这条失败的测试见 hosts.test.ts「Mirasim 的驱动」。 */
+export function mirasimAgentFor(upstreamModel: string): string {
+  const agent = MIRASIM_AGENT_BY_MODEL[upstreamModel];
+  if (!agent) {
+    throw new Error(
+      `Mirasim 认不出这个模型该起哪个执行体：${upstreamModel}（现在认得 ${Object.keys(MIRASIM_AGENT_BY_MODEL).join('、')}；新路由要把 MIRASIM_AGENT_BY_MODEL 也改了）`,
+    );
+  }
+  return agent;
+}
+
+/** 会话号临时号的前缀：真号是服务端 accepted 帧回的 <agent>:<uuid>，起会话之前给不出（和 cursor 同一个道理）。 */
+export const MIRASIM_PENDING_PREFIX = 'mirasim-pending:';
+
+function mirasimDriver(
+  connect: (user: SessionUser) => MirasimConnect,
+  ledgerDir: (user: SessionUser) => string,
+  ledgerFs: (user: SessionUser) => LedgerFs,
+  run: NonNullable<HostRunners['mirasim']>,
+): HostDriver {
+  return {
+    hostId: 'mirasim',
+    userFrom: 'sole',
+    canFork: false,
+    newSessionId: (runId) => ({ id: `${MIRASIM_PENDING_PREFIX}${runId}`, known: false }),
+    async run(spec, hooks) {
+      if (spec.session.mode === 'fork') {
+        throw new Error('Mirasim 没有 fork：换了账号池要开新会话带接力任务书');
+      }
+      const agent = mirasimAgentFor(spec.model);
+      const report = await run(
+        {
+          runId: spec.runId,
+          cwd: spec.cwd,
+          prompt: spec.prompt,
+          agent,
+          // 只留「中继额度」这一种路由（design 第三节第 12 条；MS-28：不许反代，只能用官方客户端）
+          route: 'cloud',
+          ...(MIRASIM_MODELLESS_AGENTS.has(agent) ? { expectModel: spec.model } : { model: spec.model }),
+          session:
+            spec.session.mode === 'resume' ? { mode: 'resume', key: spec.session.id } : { mode: 'new' },
+          testCommands: spec.testCommands,
+        },
+        {
+          connect: connect(spec.user),
+          ledgerDir: ledgerDir(spec.user),
+          ledgerFs: ledgerFs(spec.user),
+          ...(hooks.signal ? { signal: hooks.signal } : {}),
+          ...(hooks.now ? { now: hooks.now } : {}),
+          ...(hooks.onEvent ? { onEvent: hooks.onEvent } : {}),
+          // 服务端 accepted 帧才给真会话号（和 cursor 的 init 帧一个道理）
+          ...(hooks.onSessionId ? { onAccepted: (info) => hooks.onSessionId?.(info.sessionKey) } : {}),
+        },
+      );
+      return mirasimReport(report);
+    },
+    loginFix: (machine, user) =>
+      `用 Mirasim 桌面端以 SSH 远程模式连 ${user}@${machine}，把这个会话用户自己的 Mirasim 服务装起来、登一次账号（docs/ops.md 第五节「会话用户的 Mirasim」）`,
+  };
+}
+
+/**
+ * Mirasim 的报告整理成同一个形状。没有 stderrTail（协议是 ws 帧、不是子进程）：给空串，不冒充有过程记录可查。起没起来、
+ * 中途停在哪、终帧的原因都已经在 facts 里（mirasimRunSummary → mirasimRunFacts；judgeRun 直接从 facts.spawnError /
+ * launchUnknown / terminal 取详情），不重复进 rawError——和 Claude 一个道理（Claude 的报错也在流里，已经在判定原因里）。
+ * 没有 sessionCostUsd、httpStatus、contextTokens：中转扣的是 Mirasim 账号额度，不折美元，也没有这几个概念。
+ */
+export function mirasimReport(report: MirasimRunReport): HostReport {
+  const summary = mirasimRunSummary(report);
+  const text = report.session.state.text.trim();
+  return {
+    hostId: 'mirasim',
+    facts: summary.facts,
+    ...defined('sessionId', summary.sessionId),
+    usage: summary.usage,
+    ...defined('actualModel', summary.actualModel),
+    ...defined('answer', text || undefined),
+    wallMs: report.wallMs,
+    stderrTail: '',
   };
 }

@@ -18,13 +18,15 @@
 //    会话的 TMPDIR 是这次会话自己的临时目录（工作树根下的 _tmp/<runId>），会话收场就删。
 //    stopSession 按 runId 停（起会话还没返回时工作流只知道 runId）：停掉这个 runId 名下的进程，并记下「这个 runId 已叫停」——
 //    之后（或同时在跑的）startSession 再拿这个 runId 来，不起进程，抛 SESSION_STOPPED。
-// 5. awaitSession 只是「看守」：工人重启后它会被重试。接得上就接着看；接不上（引擎停机排空到了上限、过了时限还没完的，
-//    或者引擎被强杀、会话成了孤儿）就按 handle 把旧会话收掉，回 outcome=failed、code=SESSION_LOST——工作流会续会话重起。
-//    引擎正常停机先排空（drain.ts）：不起新会话（startSession 抛 ENGINE_STOPPING），等在跑的做完再停，不带走它们。
-//    工人进程起来时 createEngineWorker 会先调 reapOrphanSessions（fleet-agent-scope list 再逐个 stop，再清上一轮会话的临时目录）：
-//    上一轮的会话输出管道已经断了，接不上。工作流被强行终止留下的会话，现在要等工人下一次起来时这一步才收
-//    （每小时对账还没接这一项：#247）。
+// 5. awaitSession 只是「看守」：工人重启后它会被重试。会话脱开引擎进程跑（real/session-io.ts：输入输出、退出码走文件），
+//    新工人上的看守照收发目录和库里那一行接回：从头重读输出，库里确认过的行（session_runs.output_seq）只重建状态、不再写库；
+//    引擎不在时跑完了的照样收场。接不回（没有接回记录、库里已经结束或叫停、过了总时限，或者还是接管道跑的旧会话）就按 handle
+//    把旧会话收掉，回 outcome=failed、code=SESSION_LOST——工作流会续会话重起；没留下退出码的判 exit_lost（EN1 续会话）。
+//    引擎正常停机先排空（drain.ts）：不起新会话（startSession 抛 ENGINE_STOPPING）；脱开跑的会话不等、不停，只等接管道的。
+//    工人进程起来时 createEngineWorker 会先调 reapOrphanSessions（fleet-agent-scope list，能接回的留着、其余逐个 stop，再清上一轮
+//    会话的临时目录、收发目录）。工作流被强行终止留下的会话，现在要等工人下一次起来时这一步才收（每小时对账还没接这一项：#247）。
 
+import type { RiskyFile } from '@fleet-dao/conventions';
 import type { Brief, FlowConfigRead, Rebuttable, Rebuttal, TaskAsk, VerifyReport } from '@fleet-dao/core';
 import type {
   HostId,
@@ -38,13 +40,14 @@ import type {
 import type { MergeOutcome, TestResult } from './decisions/merge.ts';
 import type { PlannedSubtask } from './decisions/plan.ts';
 import type { TriageVerdict } from './decisions/triage.ts';
-import type { CiResult, Feedback, ReviewResult, SyncResult } from './decisions/verify.ts';
+import type { CiResult, Feedback, Finding, ReviewResult, SyncResult } from './decisions/verify.ts';
 import type { JevReply } from './failure/jev.ts';
 import type { TriageChoice } from './failure/types.ts';
 
 export type {
   CiResult,
   Feedback,
+  Finding,
   MergeOutcome,
   PlannedSubtask,
   ReviewResult,
@@ -504,12 +507,52 @@ export interface PullRequestRef {
 export interface WaitCiInput extends Scope {
   repo: Repo;
   prNumber: number;
+  branch: string;
   head: string;
+  /**
+   * 子任务的工作树：github 包认了新头（新头含着老头，见 packages/github/src/pulls.ts 的 waitCi）就顺手把它也
+   * 快进到那个头——不给就只更新证据里的 head，不碰工作树（合并队列没有工作树）。会话在跑（工作树里有没提交的
+   * 改动、或本地还有没推的提交）时不碰：等下一轮再试，不强上（#307/#389 那次真事：CI 认了新头，工作树没跟上，
+   * 后面再并主线、再推都是从旧头算起，最后推送被拒）。
+   */
+  worktreePath?: string;
+}
+
+// —— 先审后合：改到的地方碰没碰高风险路径、第二意见写回合并闸认的状态（#253）——
+
+export interface CheckHighRiskInput extends Scope {
+  repo: Repo;
+  prNumber: number;
+}
+
+/** 这个 PR 此刻改到的文件里，落在先审后合路径清单（@fleet-dao/conventions 的 high-risk-paths.json，主线上那份）里的。 */
+export interface CheckHighRiskResult {
+  hits: RiskyFile[];
+}
+
+export interface PostSecondOpinionInput extends Scope {
+  repo: Repo;
+  prNumber: number;
+  /** 贴在哪个头上：头变了旧状态不算，见 merge-gates.ts 的 checkSecondOpinion。 */
+  head: string;
+  /** 第几轮（1 起）：贴进评论标题，和本机第二意见垫片同一个叫法。 */
+  round: number;
+  hits: RiskyFile[];
+  verdict: 'pass' | 'changes';
+  findings: Finding[];
+  /** 审的会话用了哪个模型：贴进评论说明是谁审的。 */
+  model: string;
+}
+
+export interface PostSecondOpinionResult {
+  /** 评论没贴上（卫生检查拦下……）时没有这个字段，调用方只当没贴、不当没查成——状态照样要写上。 */
+  commentUrl?: string;
 }
 
 export interface SyncMainlineInput extends Scope {
   repo: Repo;
-  prNumber: number;
+  /** 没给（还没开 PR）：并主线的提交说明少写一句，不影响并不并（跟着 github 包的 SyncMainlineInput）。 */
+  prNumber?: number | undefined;
   branch: string;
   /** 以为分支现在的头是它；对不上说明被别人推过，先认领新头。 */
   head: string;
@@ -767,6 +810,17 @@ export interface EnginePorts {
   runTests(input: RunTestsInput, ctx: PortContext): Promise<TestResult>;
   openPr(input: OpenPrInput, ctx: PortContext): Promise<PullRequestRef>;
   waitCi(input: WaitCiInput, ctx: PortContext): Promise<CiResult>;
+  /**
+   * 这个 PR 此刻的头碰没碰先审后合的路径（迁移里有删改语句、碰安全）：清单读主线上那份（和合并闸同一份判法），
+   * 文件读这个 PR 现在的（GitHub 现读，带 patch）。清单读不到、文件翻不完页一律抛错，不当「没碰到」。
+   */
+  checkHighRisk(input: CheckHighRiskInput, ctx: PortContext): Promise<CheckHighRiskResult>;
+  /**
+   * 第二意见的结论写回 GitHub：在这个头上贴提交状态 second-opinion（合并闸认的那个 context，通过 = success，必须改 = failure），
+   * 再留一条评论（幂等，按头和轮次去重）。贴状态没权限、GitHub 拒绝一律抛错（这一步没做成，合并闸会一直等）；评论被卫生检查
+   * 拦下、GitHub 一时不通只记进结果里，不影响状态照贴——状态是合并闸认的唯一信号，评论只是给人看。
+   */
+  postSecondOpinion(input: PostSecondOpinionInput, ctx: PortContext): Promise<PostSecondOpinionResult>;
   syncMainline(input: SyncMainlineInput, ctx: PortContext): Promise<SyncResult>;
   mergePr(input: MergePrInput, ctx: PortContext): Promise<MergeOutcome>;
   updateIssueProgress(input: UpdateIssueProgressInput, ctx: PortContext): Promise<void>;

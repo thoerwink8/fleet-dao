@@ -20,6 +20,7 @@ export const SEED = {
     { id: 'gpt-5.6-luna', family: 'gpt', displayName: 'GPT 5.6 luna' },
     { id: 'grok-4.7', family: 'grok', displayName: 'Grok 4.7' },
     { id: 'kimi-k3', family: 'kimi', displayName: 'Kimi k3' },
+    { id: 'deepseek-flash', family: 'deepseek', displayName: 'DeepSeek Flash' },
     { id: 'cursor-auto', family: 'cursor', displayName: 'Cursor Auto' },
   ],
   channels: [

@@ -134,7 +134,8 @@ export function registerCredentialRoutes(app: Hono<CockpitEnv>, deps: Deps): voi
       throw new ApiError(400, 'username_required', '第一次设密码要同时设用户名', { field: 'username' });
     }
 
-    const passwordHash = newPassword === undefined ? undefined : await hashPassword(newPassword);
+    const passwordHash =
+      newPassword === undefined ? undefined : await hashPassword(newPassword, deps.scryptParams);
     const result = await store.setPasswordCredentials(
       { userId: user.id, username, passwordHash, at: now },
       {

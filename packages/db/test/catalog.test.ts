@@ -42,6 +42,12 @@ const LUNA_ROUTE = 'cursor:gpt-5.6-luna:cursor-agent';
  * 写码、界面阶段排第一、开着（副手在这两个阶段派）；别的阶段照 default 挂在最后、关着。
  */
 const GROK_ROUTE = 'grok:grok-4.7:grok';
+/**
+ * Mirasim 中转的 DeepSeek Flash（#345，创始人 2026-09-27 拍「mirasim 额度不够，先只开这一条」）：它挂的每个阶段
+ * （default、verify、execute、ui）里都是开着的——和 Grok 不一样，不是只在某几个阶段单开。同池的 opus-5.5、
+ * gpt-5.6-luna、kimi-k3 仍照旧关着，不受它牵连。
+ */
+const DEEPSEEK_ROUTE = 'mirasim-relay:deepseek-flash:mirasim';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -80,15 +86,15 @@ async function stageOrder(stage: (typeof STAGE_KINDS)[number]) {
 }
 
 describe('示例配置 deploy/examples/catalog.example.json', () => {
-  it('装得进空库：每个阶段先是独享号、拼车号的 Opus（开着），其余挂在后面关着；开 PR 前验证 Cursor 的 GPT-5.6 Luna 排第一、Grok 4.7 第二，写码、界面 Grok 4.7 排第一，都开着；判断阶段 TypeSafe 在前', async () => {
+  it('装得进空库：每个阶段先是独享号、拼车号的 Opus（开着），Mirasim 的 DeepSeek Flash 也开着，其余挂在后面关着；开 PR 前验证 Cursor 的 GPT-5.6 Luna 排第一、Grok 4.7 第二，写码、界面 Grok 4.7 排第一，都开着；判断阶段 TypeSafe 在前', async () => {
     const result = await load();
     expect(result.inserted.stages).toEqual([...STAGE_KINDS]);
     const config = example();
-    // Jev 只挂判断阶段、Cursor 的 GPT-5.6 Luna 只挂验证阶段；其余路由按样例里的先后挂在各阶段，开着的只有两条 Claude
-    // （独享在前、拼车在后）。
+    // Jev 只挂判断阶段、Cursor 的 GPT-5.6 Luna 只挂验证阶段；其余路由按样例里的先后挂在各阶段，开着的是两条 Claude
+    // （独享在前、拼车在后）加 Mirasim 的 DeepSeek Flash（#345，每个挂它的阶段都开着，不像 Grok 只在几个阶段单开）。
     const expected = config.routes
       .filter((r) => r.id !== JEV_ROUTE && r.id !== LUNA_ROUTE)
-      .map((r) => [r.id, CLAUDE_ROUTES.includes(r.id)]);
+      .map((r) => [r.id, CLAUDE_ROUTES.includes(r.id) || r.id === DEEPSEEK_ROUTE]);
     expect(expected.at(-1)).toEqual([GROK_ROUTE, false]);
     const withoutGrok = expected.filter(([id]) => id !== GROK_ROUTE);
     for (const stage of STAGE_KINDS) {

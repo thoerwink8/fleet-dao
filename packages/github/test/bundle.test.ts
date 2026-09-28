@@ -198,3 +198,53 @@ describe('从镜像打包', { timeout: 60_000 }, () => {
     expect(git(mirror, 'for-each-ref', 'refs/fleet/export')).toBe('');
   });
 });
+
+/** 起一个分支、在远端上写一个提交（模拟推被拒时远端此刻的状态）。 */
+function pushBranchCommit(branch: string, file: string, content: string): string {
+  const path = join(root, `br-${branch.replace(/\//g, '-')}-${Math.random().toString(36).slice(2, 7)}`);
+  git(root, 'clone', '-q', remote, path);
+  git(path, 'checkout', '-q', '-b', branch);
+  writeFileSync(join(path, file), content);
+  git(path, 'add', '-A');
+  git(path, 'commit', '-q', '-m', `on ${branch}`);
+  git(path, 'push', '-q', 'origin', `HEAD:${branch}`);
+  return git(path, 'rev-parse', 'HEAD');
+}
+
+describe('抓分支此刻的头（推被拒时认领用）', { timeout: 60_000 }, () => {
+  it('分支在远端：抓到的头能立刻打包（不依赖之前哪次操作留下的引用还在不在）', async () => {
+    const { gh } = bundleSetup();
+    const head = pushBranchCommit('task/adopt-1', 'p.txt', 'p\n');
+    const res = await gh.fetchBranchHead({ repo, branch: 'task/adopt-1' });
+    expect(res).toEqual({ head });
+    const out = outFile('adopt-1');
+    const bundled = await gh.bundleCommits({ repo, tips: [head], outPath: out });
+    expect(bundled.refs).toEqual([{ tip: head, ref: 'refs/fleet/export/0' }]);
+  });
+
+  it('分支在远端不存在（被删了、或从没推过）：回 head: null，不当成读不到', async () => {
+    const { gh } = bundleSetup();
+    const res = await gh.fetchBranchHead({ repo, branch: 'task/adopt-never-existed' });
+    expect(res).toEqual({ head: null });
+  });
+
+  it('【故意造出的失败】分支名不合规：报 BAD_BRANCH_NAME，不发一个请求就拒', async () => {
+    const { gh } = bundleSetup();
+    await expect(gh.fetchBranchHead({ repo, branch: '-x' })).rejects.toMatchObject({
+      code: 'BAD_BRANCH_NAME',
+    });
+  });
+
+  it('【故意造出的失败】抓取失败（网络类）：报 GIT_FAILED，可重试，不当成「分支不在」', async () => {
+    pushBranchCommit('task/adopt-2', 'q.txt', 'q\n');
+    const runner: GitRunner = async (args, call) =>
+      args[0] === 'fetch'
+        ? { code: 128, stdout: '', stderr: 'fatal: unable to access: Could not resolve host: github.test' }
+        : execGit(args, call);
+    const { gh } = setup({ git: runner, gitUrl: () => remote, gitHost: 'https://github.com/', env: {} });
+    await expect(gh.fetchBranchHead({ repo, branch: 'task/adopt-2' })).rejects.toMatchObject({
+      code: 'GIT_FAILED',
+      retryable: true,
+    });
+  });
+});

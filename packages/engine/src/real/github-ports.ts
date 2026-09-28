@@ -8,10 +8,18 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { SessionUser } from '@fleet-dao/adapters';
+import { parseRiskPaths, RISK_PATHS_FILE, riskyFiles, SECOND_OPINION_CONTEXT } from '@fleet-dao/conventions';
 import { criteriaOf } from '@fleet-dao/core';
 import type { GitHub, PrBodyInput } from '@fleet-dao/github';
 import type { CiResult } from '../decisions/verify.ts';
-import { type EnginePorts, type PortContext, PortError, type PrBody, type Worktree } from '../ports.ts';
+import {
+  type EnginePorts,
+  type PortContext,
+  PortError,
+  type PrBody,
+  type WaitCiInput,
+  type Worktree,
+} from '../ports.ts';
 import type { UserExec } from './exec.ts';
 import { bundleFromMirror, mapped } from './mirror.ts';
 import { PLAN_LINE_HINT, planLineOf, REQUIREMENT_DOC } from './spec-doc.ts';
@@ -47,10 +55,14 @@ export type EngineGitHub = Pick<
   | 'commitIdentity'
   | 'syncMainline'
   | 'fetchMainline'
+  | 'fetchBranchHead'
   | 'bundleCommits'
   | 'writeSpecDoc'
   | 'readSpecDoc'
   | 'readIssuePlan'
+  | 'readRepoFile'
+  | 'pullFiles'
+  | 'claims'
 >;
 
 /** 开 PR 的仓（owner、name 够读需求文档、读单子挂的版本）。 */
@@ -93,6 +105,8 @@ type GitHubPorts = Pick<
   | 'pushBranch'
   | 'openPr'
   | 'waitCi'
+  | 'checkHighRisk'
+  | 'postSecondOpinion'
   | 'syncMainline'
   | 'runTests'
   | 'mergePr'
@@ -124,7 +138,12 @@ function prBody(body: PrBody, plan: string, specs: string): PrBodyInput {
   };
 }
 
-/** CI 的结论换成引擎的三态：绿、红、没查成（冲突、头变了、PR 关了、没跑、超时都是没查成，写明哪一种）。 */
+/**
+ * CI 的结论换成引擎的几态：绿、红、和主线冲突、头被改写了、没查成（PR 关了、没跑、超时都是没查成，写明哪一种）。
+ * 冲突、头被改写了单独分出来（不折进没查成）：冲突有确定的解法——并主线（core 的 nextFlow 见到 conflict 走
+ * sync-mainline，不算「没查成」的次数）；头被改写了（github 包已经先排除了「新头含着老头」的良性情形，见
+ * packages/github/src/pulls.ts 的 waitCi）不是重试能解决的，要人看，也不该被当成「没查成」再等三次才停下。
+ */
 export function ciResultOf(r: Awaited<ReturnType<EngineGitHub['waitCi']>>): CiResult {
   switch (r.state) {
     case 'green':
@@ -137,13 +156,18 @@ export function ciResultOf(r: Awaited<ReturnType<EngineGitHub['waitCi']>>): CiRe
         ...(r.digest ? { digest: r.digest } : {}),
       };
     case 'conflict':
-      return { state: 'unknown', head: r.head, failedChecks: [], detail: `和主线冲突，CI 没起：${r.detail}` };
-    case 'head_moved':
       return {
-        state: 'unknown',
+        state: 'conflict',
         head: r.head,
         failedChecks: [],
-        detail: `PR 的头变成了 ${r.actualHead}：${r.detail}`,
+        detail: `和主线冲突，CI 没起：${r.detail}`,
+      };
+    case 'head_moved':
+      return {
+        state: 'diverged',
+        head: r.actualHead,
+        failedChecks: [],
+        detail: `PR 的头从 ${r.head} 变成了 ${r.actualHead}，且新头不含老头：${r.detail}`,
       };
     case 'closed':
       return { state: 'unknown', head: r.head, failedChecks: [], detail: `PR 被关了：${r.detail}` };
@@ -224,6 +248,40 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
       });
     }
     return user;
+  };
+
+  /**
+   * waitCi 认了新头（新头含着老头）：把工作树也快进过去。树不在（没建过、已经收了）就跳过——没有工作树可并。
+   * 工作树不是「干净、正好在旧头」这个能安全快进的状态（有没提交的改动、或本地头已经不是查 CI 时以为的那个）
+   * 就当会话正在用它，跳过、不抛：等下一轮 waitCi 或下一次任务边界再试，不强上。真读不到 GitHub（抓分支、
+   * 打包失败）原样抛出去，交 waitCi 这次活动自己的重试/挂起（不是「会话在跑」，是没查成）。
+   */
+  const adoptCiHead = async (
+    input: Pick<WaitCiInput, 'repo' | 'branch' | 'head' | 'worktreePath' | 'subtaskId' | 'taskId'>,
+    newHead: string,
+    ctx: PortContext,
+  ): Promise<void> => {
+    const dir = input.worktreePath;
+    if (!dir) return;
+    const user = await trees.ownerOf(dir);
+    if (!user) return;
+    const t = treeAs(dir, user, `ci-adopt-${input.subtaskId ?? input.taskId}`, ctx);
+    const [dirty, current] = await Promise.all([uncommittedTracked(t), headOf(t)]);
+    if (dirty.length > 0 || current !== input.head) return;
+    await mapped(() =>
+      gh.fetchBranchHead({ repo: input.repo, branch: input.branch, signal: ctx.signal }, ctx),
+    );
+    const { bytes, ref } = await bundleFromMirror(
+      gh,
+      deps.tmpDir,
+      input.repo,
+      newHead,
+      [input.head],
+      ctx.signal,
+    );
+    const ff = await fastForward(t, bytes, ref, newHead);
+    // ff === 'diverged'：核过之后（上面两行）工作树又变了，极罕见的竞态，一样跳过、不抛，下一轮再试。
+    void ff;
   };
 
   return {
@@ -315,25 +373,103 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
         }
         head = merged.merged;
       }
-      // 推上去的头相对主线的净改动（头里已经含最新主线）：工作流开 PR 前验证判界面、给验证方的清单、PR 正文按它，
-      // 不按一轮轮会话交的累计（撤回了的、老版算进来的主线改动都还在那里面，#293）
-      const changedFiles = await changedFilesAgainst(t, main.head, head);
       // 包的起点：树最后一次从引擎取的头（建树的主线头、并主线后的新头、或刚取进来的最新主线）——引擎的镜像里一定有它。
       const base = await headOfIncoming(t);
-      const bundle = await bundleSince(t, head, base);
-      await mkdir(deps.tmpDir, { recursive: true, mode: 0o700 });
-      const bundlePath = join(deps.tmpDir, `push-${randomUUID()}.bundle`);
-      try {
-        await writeFile(bundlePath, bundle, { mode: 0o600 });
-        const r = await mapped(() =>
-          gh.pushBranch(
-            { repo: input.repo, bundlePath, branch: input.branch, head, signal: ctx.signal },
-            ctx,
-          ),
+      const doPush = async (pushHead: string): Promise<string> => {
+        const bundle = await bundleSince(t, pushHead, base);
+        await mkdir(deps.tmpDir, { recursive: true, mode: 0o700 });
+        const bundlePath = join(deps.tmpDir, `push-${randomUUID()}.bundle`);
+        try {
+          await writeFile(bundlePath, bundle, { mode: 0o600 });
+          const r = await mapped(() =>
+            gh.pushBranch(
+              { repo: input.repo, bundlePath, branch: input.branch, head: pushHead, signal: ctx.signal },
+              ctx,
+            ),
+          );
+          return r.head;
+        } finally {
+          await rm(bundlePath, { force: true });
+        }
+      };
+
+      /**
+       * 推被拒（DIVERGED / REMOTE_AHEAD，github 包的 assertFastForward：「不强推，交给引擎处理」）：先认领远端
+       * 此刻的头，判断是良性前进还是真被改写（#307/#389 那次真事：帅位手工并了主线又推，工作树没跟上；后来再
+       * 推被拒，落进了失败分流的兜底梯）——远端含着 incoming（起会话前的头，工作流上一次确认过的分支头）就是
+       * 良性前进，不是改写：把远端的新提交取进树，能快进就快进认领（REMOTE_AHEAD：远端已经含着我们要推的），
+       * 不能快进就真并一次（DIVERGED：两边都有新东西），并上了改用新头重推一次；并不上（真冲突，双方改了同一
+       * 处）交回去走 MERGE_CONFLICT 现成那条返工路。远端不含 incoming——不是良性前进，是历史被改写过——原样
+       * 报出去，交失败分流按 DIVERGED 明确归类（不走「认不出」兜底，见 failure/rules.ts 的 MC3）。
+       */
+      const recoverDiverged = async (error: PortError): Promise<{ head: string; needsPush: boolean }> => {
+        const remoteHead = (error.details as { remoteHead?: unknown } | undefined)?.remoteHead;
+        if (typeof remoteHead !== 'string' || !/^[0-9a-f]{40}$/.test(remoteHead)) throw error;
+        const branchState = await mapped(() =>
+          gh.fetchBranchHead({ repo: input.repo, branch: input.branch, signal: ctx.signal }, ctx),
         );
-        return { head: r.head, changedFiles };
-      } finally {
-        await rm(bundlePath, { force: true });
+        if (!branchState.head) {
+          throw new PortError('DIVERGED', `推 ${input.branch} 被拒后再看，远端这个分支已经不在了：要人看`, {
+            retryable: false,
+            details: { head },
+          });
+        }
+        const freshHead = branchState.head;
+        const { bytes, ref } = await bundleFromMirror(
+          gh,
+          deps.tmpDir,
+          input.repo,
+          freshHead,
+          [incoming],
+          ctx.signal,
+        );
+        await fetchBundle(t, bytes, ref);
+        if (!(await isAncestor(t, incoming, freshHead))) {
+          throw new PortError(
+            'DIVERGED',
+            `推 ${input.branch} 被拒：远端头 ${freshHead.slice(0, 7)} 不含起会话前的头 ${incoming.slice(0, 7)}（像是被强推改写了历史），不能自动并，要人看`,
+            { retryable: false, details: { remoteHead: freshHead, incoming, head } },
+          );
+        }
+        if (await isAncestor(t, freshHead, head)) return { head, needsPush: true };
+        if (await isAncestor(t, head, freshHead)) {
+          const ff = await fastForward(t, bytes, ref, freshHead);
+          if (ff === 'diverged') {
+            throw new PortError(
+              'DIVERGED',
+              `推 ${input.branch} 被拒：认领远端头 ${freshHead.slice(0, 7)} 时工作树状态和刚核过的不一致，要人看`,
+              { retryable: true, details: { remoteHead: freshHead, head } },
+            );
+          }
+          return { head: freshHead, needsPush: false };
+        }
+        const merged = await mergeInto(t, freshHead);
+        if ('conflict' in merged) {
+          throw new PortError(
+            'MERGE_CONFLICT',
+            `推 ${input.branch} 时发现远端头 ${freshHead.slice(0, 7)} 和要推的 ${head.slice(0, 7)} 都往前走了、内容上真冲突：${merged.conflict.slice(0, 10).join('、')}。在树里 git merge ${freshHead} 解掉冲突、提交后再交`,
+            { retryable: false, details: { remoteHead: freshHead, conflictFiles: merged.conflict } },
+          );
+        }
+        return { head: merged.merged, needsPush: true };
+      };
+
+      try {
+        const pushed = await doPush(head);
+        // 推上去的头相对主线的净改动：工作流开 PR 前验证判界面、给验证方的清单、PR 正文按它，
+        // 不按一轮轮会话交的累计（撤回了的、老版算进来的主线改动都还在那里面，#293）
+        return { head: pushed, changedFiles: await changedFilesAgainst(t, main.head, pushed) };
+      } catch (error) {
+        if (!(error instanceof PortError) || (error.code !== 'DIVERGED' && error.code !== 'REMOTE_AHEAD')) {
+          throw error;
+        }
+        const recovered = await recoverDiverged(error);
+        head = recovered.head;
+        if (!recovered.needsPush) {
+          return { head, changedFiles: await changedFilesAgainst(t, main.head, head) };
+        }
+        const pushed = await doPush(head);
+        return { head: pushed, changedFiles: await changedFilesAgainst(t, main.head, pushed) };
       }
     },
 
@@ -371,9 +507,84 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
     },
 
     async waitCi(input, ctx) {
-      return ciResultOf(
+      const result = ciResultOf(
         await mapped(() => gh.waitCi({ repo: input.repo, prNumber: input.prNumber, head: input.head }, ctx)),
       );
+      // CI 认了新头（新头含着老头，github 包的 waitCi 已经用 compare API 核过）：顺手把工作树也快进过去，
+      // 别让「CI 查到的头」和「工作树实际的头」分家（#307/#389 那次真事：认了新头查 CI，工作树没跟上，后面
+      // 并主线、推分支都从旧头算起，最后推送被拒）。diverged 是新头不含老头的情形，交回去要人看，不在这适用。
+      if (input.worktreePath && result.state !== 'diverged' && result.head !== input.head) {
+        await adoptCiHead(input, result.head, ctx);
+      }
+      return result;
+    },
+
+    async checkHighRisk(input, ctx) {
+      // 清单读主线上那份（和合并闸同一份判法，PR 改不了自己的门槛，design 第五节）；文件读这个 PR 现在的，带 patch
+      // 才判得出新迁移是不是只加不改。两样有一样读不到、翻不完页都明确抛错，不当「没碰到」。
+      const read = await mapped(() =>
+        gh.readRepoFile({ repo: input.repo, path: RISK_PATHS_FILE, signal: ctx.signal }),
+      );
+      if (read.file.kind !== 'text') {
+        const why = read.file.kind === 'missing' ? '文件不在' : read.file.why;
+        throw new PortError(
+          'RISK_PATHS_MISSING',
+          `主线上读不到 ${RISK_PATHS_FILE}（${why}）：判不了这个 PR 碰没碰先审后合的路径`,
+          { retryable: false },
+        );
+      }
+      const list = parseRiskPaths(read.file.text);
+      if (typeof list === 'string') {
+        throw new PortError('RISK_PATHS_INVALID', `${RISK_PATHS_FILE} 认不出：${list}`, { retryable: false });
+      }
+      const files = await mapped(() =>
+        gh.pullFiles({ repo: input.repo, prNumber: input.prNumber, signal: ctx.signal }),
+      );
+      return { hits: riskyFiles(files, list) };
+    },
+
+    async postSecondOpinion(input) {
+      const blocking = input.findings.filter((f) => f.severity === 'blocking');
+      const minor = input.findings.filter((f) => f.severity === 'minor');
+      const description =
+        input.verdict === 'pass' ? '第二意见通过' : `第二意见：必须改 ${blocking.length} 条`;
+      // 状态是合并闸认的唯一信号：这一步没做成必须抛出去（没权限、GitHub 拒绝……），不能拿评论贴没贴顶，也不能悄悄不贴
+      await mapped(() =>
+        gh.claims.setStatus(input.repo, input.head, {
+          context: SECOND_OPINION_CONTEXT,
+          state: input.verdict === 'pass' ? 'success' : 'failure',
+          description: description.slice(0, 140),
+        }),
+      );
+      const where = `改到了先审后合的地方：${input.hits
+        .map((h) => `${h.file}（${h.kind}${h.note ? `：${h.note}` : ''}）`)
+        .join('、')}（清单和理由见 ${RISK_PATHS_FILE}）`;
+      const lines = [
+        `**第二意见 第 ${input.round} 轮**（${input.model}；审的头 ${input.head.slice(0, 7)}）：${
+          input.verdict === 'pass' ? '通过' : `必须改 ${blocking.length} 条`
+        }`,
+        '',
+        where,
+        '',
+        '## 必须改',
+        ...(blocking.length > 0
+          ? blocking.map((f) => `- ${f.file ? `\`${f.file}\` ` : ''}${f.text}`)
+          : ['无']),
+        '## 小毛病',
+        ...(minor.length > 0 ? minor.map((f) => `- ${f.file ? `\`${f.file}\` ` : ''}${f.text}`) : ['无']),
+      ];
+      // 评论被卫生检查拦下、GitHub 一时不通：只记下没贴上，不影响已经写好的状态——合并闸只看状态，评论只是给人看
+      try {
+        const posted = await gh.claims.commentPull(
+          input.repo,
+          input.prNumber,
+          `second-opinion:${input.head}:${input.round}`,
+          lines.join('\n'),
+        );
+        return { commentUrl: posted.url };
+      } catch {
+        return {};
+      }
     },
 
     async syncMainline(input, ctx) {
@@ -428,8 +639,10 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
       const ci = ciResultOf(
         await mapped(() => gh.waitCi({ repo: input.repo, prNumber: input.prNumber, head: input.head }, ctx)),
       );
-      if (ci.state === 'unknown') {
-        // 没查成不是没过：不退回会话，交给失败分流（重试，再不行挂起）。
+      if (ci.state === 'unknown' || ci.state === 'conflict' || ci.state === 'diverged') {
+        // 没查成、和主线冲突、头被改写了：都不是没过，合并队列这一步（合并前在并好的头上再核一遍）还没接
+        // 并主线自己重试的机制（那一套在 Fusion 流程，见 packages/core/src/flow.ts）；不退回会话，交给失败分流
+        // （重试，再不行挂起）。
         throw new PortError('CI_UNKNOWN', ci.detail ?? 'CI 没查成', { retryable: true });
       }
       const failed = ci.failedChecks.join('、');

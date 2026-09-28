@@ -159,6 +159,12 @@ describe('库里的行 → 领域对象', () => {
       acceptance: [],
       createdAt: ago(MIN).toISOString(),
     });
+    // 库里 flow_source 空着就不填这个键；记了才带上，不拿 project 顶空的。
+    expect('flowSource' in toTask(task)).toBe(false);
+    const marked = await addTask(t.db, repo.id, { issueNumber: 13, flowSource: 'org_default' });
+    const fromRepo = await addTask(t.db, repo.id, { issueNumber: 14, flowSource: 'project' });
+    expect(toTask(marked).flowSource).toBe('org_default');
+    expect(toTask(fromRepo).flowSource).toBe('project');
     expect(toSessionRun(run)).toEqual({
       id: run.id,
       taskId: task.id,

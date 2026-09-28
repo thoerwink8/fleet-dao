@@ -400,6 +400,250 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
     expect(result).toMatchObject({ state: 'stopped', prNumber: 100, mergeCommit: null });
   });
 
+  describe('#253 先审后合：请第二意见、写回合并闸认的状态', () => {
+    const HITS = [
+      { file: 'packages/api/src/auth.ts', rule: 'packages/api/src/auth.ts', kind: '碰安全' as const },
+    ];
+
+    it('碰安全的 PR：请第二意见 → 必须改 → 修一轮 → 再审通过 → 照常合并；merge-gate 单独报红不当 CI 没过', async () => {
+      const w = world({
+        highRisk: () => HITS,
+        review: (_input, n) =>
+          n === 1
+            ? {
+                verdict: 'changes',
+                findings: [
+                  { severity: 'blocking', text: '登录态没校验签名', file: 'packages/api/src/auth.ts' },
+                ],
+              }
+            : { verdict: 'pass', findings: [] },
+        // 头一次等 CI：合并闸只报「等第二意见」（碰了高风险路径、这个头还没贴过状态），别的检查都还没绿
+        ci: (_input, n) => (n === 1 ? { state: 'red', failedChecks: ['merge-gate'] } : undefined),
+      });
+      const result = await runToEnd(w);
+      expect(result.state).toBe('done');
+
+      // 请了两轮：第一轮必须改，改完再请一轮，这次通过——每轮都贴了状态（合并闸认的 second-opinion）
+      const posts = w.callsOf('postSecondOpinion');
+      expect(posts.map((c) => [c.input.round, c.input.verdict])).toEqual([
+        [1, 'changes'],
+        [2, 'pass'],
+      ]);
+      expect(posts[0]?.input.hits).toEqual(HITS);
+      expect(posts[0]?.input.findings).toEqual([
+        { severity: 'blocking', text: '登录态没校验签名', file: 'packages/api/src/auth.ts' },
+      ]);
+
+      // 「必须改」的条目进了修一轮的反馈（和 CI 红同一本账：fix-brief），不是被当成「CI 没过」
+      const briefs = w.callsOf('startSession').filter((c) => c.input.brief.lead?.step === 'fix-brief');
+      expect(briefs).toHaveLength(1);
+      expect(briefs[0]?.input.brief.feedback).toEqual([
+        {
+          kind: 'review',
+          summary: '第二意见第 1 轮：必须改',
+          items: ['packages/api/src/auth.ts：登录态没校验签名'],
+        },
+      ]);
+      // merge-gate 单独报红那一次没有被当成「CI 没过」喂给 Lead：没有一条 kind:'ci' 的反馈提过它
+      const ciFeedback = w
+        .callsOf('startSession')
+        .flatMap((c) => c.input.brief.feedback)
+        .filter((f) => f.kind === 'ci');
+      expect(ciFeedback).toHaveLength(0);
+    });
+
+    it('不碰高风险路径：一次都不请第二意见', async () => {
+      const w = world({ highRisk: () => [] });
+      const result = await runToEnd(w);
+      expect(result.state).toBe('done');
+      expect(w.count('checkHighRisk')).toBeGreaterThan(0);
+      expect(w.count('postSecondOpinion')).toBe(0);
+    });
+
+    it('连着两轮都必须改：停下等人，不再拖第三轮', async () => {
+      const w = world({
+        highRisk: () => HITS,
+        review: () => ({
+          verdict: 'changes',
+          findings: [{ severity: 'blocking', text: '还是没改好', file: 'packages/api/src/auth.ts' }],
+        }),
+        ci: () => ({ state: 'red', failedChecks: ['merge-gate'] }),
+      });
+      const { parked, result } = await runUntilParked(w);
+      expect(parked.lastProblem).toContain('第二意见连着 2 轮都要改');
+      expect(w.callsOf('postSecondOpinion').map((c) => c.input.verdict)).toEqual(['changes', 'changes']);
+      expect(result).toMatchObject({ state: 'stopped' });
+    });
+
+    it('【故意造出的失败】高风险路径清单读不到：查不出碰没碰，停下等人', async () => {
+      const w = world({
+        highRisk: () => new PortError('RISK_PATHS_MISSING', '主线上读不到清单', { retryable: false }),
+      });
+      const { parked } = await runUntilParked(w);
+      expect(parked.lastProblem).toContain('主线上读不到清单');
+    });
+
+    it('【故意造出的失败】贴第二意见状态没权限：停下等人，不当「贴上了」', async () => {
+      const w = world({
+        highRisk: () => HITS,
+        review: () => ({ verdict: 'pass', findings: [] }),
+        postSecondOpinion: () =>
+          new PortError('FORBIDDEN', '「引擎」机器人没有 statuses 写权限', { retryable: false }),
+      });
+      const { parked } = await runUntilParked(w);
+      expect(parked.lastProblem).toContain('没有 statuses 写权限');
+    });
+
+    it('【故意造出的失败】写这张单的是 Grok、review 排法第一个也是 grok：整族避开，不许挑到自己审自己', async () => {
+      // 帅位 2026-09-27 夜挑错：光靠「路由配置里 review 阶段本就配的是别的厂商」不够——排法里可能同时有
+      // grok-4.7、deepseek-flash、opus-5.5，写这张单的要是 grok（今晚 #276、#307 都是）就可能挑到 grok 自己审自己。
+      // 用「Lead 是 grok」这个真实过的场景（和上面「副手派不出、Lead 是 Grok」同一族路由）：副手避开同族派不出、
+      // Lead 自己写完整张单，authorFamilies 照实起过的会话算出来就是 ['grok']；第二意见按这套避开，不能拿它顶。
+      const grokLead: RouteChoice = {
+        routeId: 'g1',
+        poolId: 'pg',
+        modelId: 'm1',
+        family: 'grok',
+        hostId: 'grok',
+      };
+      const deepseekReview: RouteChoice = {
+        routeId: 'g2',
+        poolId: 'pg2',
+        modelId: 'deepseek-flash',
+        family: 'deepseek',
+        hostId: 'cursor-agent',
+      };
+      const opusReview: RouteChoice = {
+        routeId: 'g3',
+        poolId: 'pg3',
+        modelId: 'opus-5.5',
+        family: 'claude',
+        hostId: 'claude-code',
+      };
+      // 排法第一个是 grok：不避开的话会挑到它自己
+      const w = createFakeWorld({
+        routes: [grokLead, deepseekReview, opusReview, GPT_ROUTE],
+        highRisk: () => HITS,
+        review: () => ({ verdict: 'pass', findings: [] }),
+      });
+      const result = await runToEnd(w);
+      expect(result.state).toBe('done');
+
+      const reviewPick = w.callsOf('pickRoute').find((c) => c.input.stage === 'review');
+      expect(reviewPick?.input.avoidFamilies).toEqual(['grok']);
+      const reviewSession = w.callsOf('startSession').find((c) => c.input.stage === 'review');
+      expect(reviewSession?.input.route.family).toBe('deepseek');
+      expect(reviewSession?.input.route.family).not.toBe('grok');
+      const post = w.callsOf('postSecondOpinion')[0];
+      expect(post?.input.model).toBe('deepseek-flash');
+    });
+  });
+
+  it('CI 报和主线冲突：自动并主线并上了，接着在新头上查 CI，不算「没查成」的次数、照常走完', async () => {
+    const w = world({
+      ci: (_input, n) => (n === 1 ? { state: 'conflict', detail: '和主线冲突，CI 没起' } : undefined),
+    });
+    const result = await runToEnd(w);
+    expect(result.state).toBe('done');
+    // 5 次：任务边界（执行、验证、开 PR 前）各并一次 + 第 6 步 CI 冲突自己并一次 + 合并队列合并前照旧再并一次
+    expect(w.count('syncMainline')).toBe(5);
+    expect(w.count('waitCi')).toBe(2);
+    // 没走「没查成停下」那条账：没发过要人看的卡
+    expect(w.alerts.some((a) => a.title.includes('没查成'))).toBe(false);
+  });
+
+  it('自动并主线遇到真冲突（并不上）：派会话照冲突的文件解开，改完推上去、CI 绿 → 照常走完', async () => {
+    // 任务边界（执行、验证、开 PR 前）那几次并主线都还没开 PR（input.prNumber undefined），让它们照常并上，
+    // 不干扰；开 PR 之后头一次并主线是第 6 步 CI 冲突触发的那次，让它报真冲突；合并队列合并前那次要能正常并上。
+    let afterOpen = 0;
+    const w = world({
+      ci: (_input, n) => (n === 1 ? { state: 'conflict', detail: '和主线冲突，CI 没起' } : undefined),
+      sync: (input) => {
+        if (input.prNumber === undefined) return undefined;
+        afterOpen += 1;
+        return afterOpen === 1
+          ? { state: 'conflict', conflictFiles: ['packages/api/test/harness.ts'] }
+          : undefined;
+      },
+    });
+    const result = await runToEnd(w);
+    expect(result.state).toBe('done');
+    const fixBrief = w.callsOf('startSession').find((c) => c.input.brief.lead?.step === 'fix-brief');
+    expect(fixBrief?.input.brief.feedback[0]).toMatchObject({
+      kind: 'conflict',
+      items: ['packages/api/test/harness.ts'],
+    });
+  });
+
+  it('CI 一直报和主线冲突：自动并主线连着试满上限还是冲突，停下等人、原因写清（不算「没查成」）', async () => {
+    const w = world({ ci: () => ({ state: 'conflict', detail: '和主线冲突，CI 没起' }) });
+    const { parked, result } = await withWorker(env, w, async (q) => {
+      const handle = await start(q, fusionInput());
+      // 每次冲突都要经「再查一次」那一步的 2 分钟重试等待；连着 3 次并主线要跳够 6 分钟虚拟时间，直接跳 10 分钟。
+      // 查询（handle.query）不像 handle.result() 那样自己跳时间，要自己叫 env.sleep（09-27 撞过，看 merge-queue.test.ts）。
+      await env.sleep('10 minutes');
+      const parkedStatus = await queryUntil<FusionStatus>(handle, (s) => s.parked, '挂起');
+      await handle.signal(stopSignal, { by: 'founder' });
+      return { parked: parkedStatus, result: (await handle.result()) as FusionResult };
+    });
+    expect(parked.lastProblem).toContain('自动并主线已经试了 3 次还是冲突');
+    // 6 次：任务边界（执行、验证、开 PR 前）各并一次干净的 + CI 冲突触发的并主线循环 3 次（触到上限才停）
+    expect(w.count('syncMainline')).toBe(6);
+    expect(w.count('waitCi')).toBe(4);
+    expect(result.state).toBe('stopped');
+  });
+
+  it('【故意造出的失败】PR 的头被改写了（新头不含老头）：立刻停下等人，不当成没查成、不试着并主线', async () => {
+    const w = world({ ci: () => ({ state: 'diverged', detail: '像是被强推改写了' }) });
+    const { parked, result } = await runUntilParked(w);
+    expect(parked.lastProblem).toContain('像是被强推改写了');
+    expect(w.count('waitCi')).toBe(1);
+    // 3 次：任务边界（执行、验证、开 PR 前）各并了一次，都是干净的；头被改写了这条不试着走并主线那条路
+    expect(w.count('syncMainline')).toBe(3);
+    expect(result.state).toBe('stopped');
+  });
+
+  it('任务边界并主线：没有会话在跑的时候点一次，在派新会话之前——不是会话跑着的时候插进去并', async () => {
+    const w = world();
+    await runToEnd(w);
+    // 第 2 步规划（Lead 写方案）前头没有工作树可并，没有边界；第 4 步真正派副手之前才第一次点 syncMainline
+    // （execute 这个边界），点在副手那次 startSession 之前，不是夹在两次会话调用中间。
+    const firstSync = w.calls.findIndex((c) => c.port === 'syncMainline');
+    const execSession = w
+      .callsOf('startSession')
+      .find((c) => c.input.stage === 'execute' && !c.input.brief.lead);
+    const execSessionIdx = execSession ? w.calls.indexOf(execSession) : -1;
+    expect(firstSync).toBeGreaterThanOrEqual(0);
+    expect(execSessionIdx).toBeGreaterThanOrEqual(0);
+    expect(firstSync).toBeLessThan(execSessionIdx);
+  });
+
+  it('【故意造出的失败】任务边界并主线遇到冲突（并不上）：最佳努力，不挡这一步，照常派会话、照常走完', async () => {
+    const w = world({
+      // 还没开 PR（prNumber undefined）的任务边界都报冲突：执行、验证、开 PR 前三次都并不上
+      sync: (input) =>
+        input.prNumber === undefined ? { state: 'conflict', conflictFiles: ['a.ts'] } : undefined,
+    });
+    const result = await runToEnd(w);
+    expect(result.state).toBe('done');
+    // 三次任务边界都报了冲突，都不是拦下这一步的理由：没有因为「冲突」多退回一轮给副手
+    expect(
+      w.callsOf('startSession').filter((c) => c.input.brief.feedback.some((f) => f.kind === 'conflict')),
+    ).toHaveLength(0);
+  });
+
+  it('【故意造出的失败】任务边界并主线读不到 GitHub（活动一直失败、不是内容冲突）：不吞、挂起报警等人，不是静默卡住', async () => {
+    const w = world({ failFirst: { syncMainline: 999 } });
+    const { parked, result } = await runUntilParked(w, fusionInput({ limits: { retryAttempts: 0 } }));
+    expect(w.count('raiseAlert')).toBeGreaterThan(0);
+    expect(parked.lastProblem).toBeTruthy();
+    // 卡在了执行这一步真正派副手之前：只有第 2 步 Lead 写方案那一个会话起过，副手一次都没起
+    expect(
+      w.callsOf('startSession').filter((c) => c.input.stage === 'execute' && !c.input.brief.lead),
+    ).toEqual([]);
+    expect(result.state).toBe('stopped');
+  });
+
   it('Lead 写方案时 fleet blocked --needs human（要人拍）：不停下等，退回让它带推荐用 fleet ask 问，续同一个会话接着写', async () => {
     const w = world({
       session: (input) =>

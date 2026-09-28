@@ -44,11 +44,12 @@ describe('开工前看流程配置（setupFusion）', () => {
       profile: 'default',
       mode: 'fusion',
       // 创始人 2026-09-27 夜、09-28 凌晨拍的顺序（specs/169-Fusion形态/需求.md 那一节，含第 9 条）：Lead 拼车 Opus 在前、
-      // Grok 兜底；副手只用 Grok（DeepSeek Flash 接上 Mirasim 后也只做验证兜底）；不用 Kimi；验证 DeepSeek Flash、Opus
-      // 垫在后面（碰界面的单 GPT 不验）
+      // Grok 兜底；副手排 DeepSeek Flash 第一、Grok 第二（09-28 凌晨改：拼车 Opus 用满、Grok 又留给界面单验证时副手一度
+      // 派不出，改成 DeepSeek Flash 经 Mirasim 真当副手，#345）；不用 Kimi；验证 DeepSeek Flash、Opus 垫在后面（碰界面的单
+      // GPT 不验）
       models: {
         lead: ['opus-5.5', 'grok-4.7'],
-        sidekick: ['grok-4.7'],
+        sidekick: ['deepseek-flash', 'grok-4.7'],
         verify: ['gpt-5.6-luna', 'grok-4.7', 'deepseek-flash', 'opus-5.5'],
       },
       verifyRounds: 2,

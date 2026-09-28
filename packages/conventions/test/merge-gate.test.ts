@@ -46,7 +46,6 @@ interface World {
   /** 前几次读 PR 时 mergeable 还是 null。 */
   unknownReads: number;
   open: Record<string, unknown>[];
-  forCommit: unknown[];
   /** 每次读主线头依次回这些，读完了一直回最后一个。 */
   mains: string[];
   /** files 里这几个是删掉的（status removed）。 */
@@ -84,7 +83,6 @@ function world(
     broken: {},
     unknownReads: 0,
     open: [],
-    forCommit: [],
     mains: [MAIN],
     removed: [],
     filesReads: 0,
@@ -127,10 +125,6 @@ function world(
     async openPrs() {
       boom('openPrs');
       return w.open;
-    },
-    async prsForCommit() {
-      boom('prsForCommit');
-      return w.forCommit;
     },
     async mainHead() {
       boom('mainHead');
@@ -574,19 +568,14 @@ describe('入口：认出要算哪些 PR、写状态、退出码', () => {
     expect(closed.written).toEqual([]);
   });
 
-  it('第二意见状态：按 sha 找头是它、开着的 PR；别的 context 不算', async () => {
-    const w = world({
-      forCommit: [
-        { number: 80, state: 'open', head: { sha: HEAD } },
-        { number: 79, state: 'open', head: { sha: MERGE } },
-        { number: 78, state: 'closed', head: { sha: HEAD } },
-      ],
-    });
+  it('第二意见、「认领对得上」状态：开着的 PR 全重算（不只事件里那个头的）；别的 context 不算', async () => {
+    const w = world({ open: [{ number: 80 }, { number: 81 }] });
     await run(w, 'status', { context: 'second-opinion', sha: HEAD, state: 'success' });
-    expect(w.written.map((s) => s.sha)).toEqual([HEAD]);
-    // 引擎贴了「认领对得上」（#348）也重算
-    await run(w, 'status', { context: '认领对得上', sha: HEAD, state: 'failure' });
-    expect(w.written.map((s) => s.sha)).toEqual([HEAD, HEAD]);
+    expect(w.written).toHaveLength(2);
+    // 【故意造出的失败】#351 演练：一轮对账给几个 PR 贴状态，排队组只留最后一次运行、事件里是最后那个 PR 的头——
+    // 只算那一个的话，另一个 PR 就一直停在「等认领对得上」；全重算了两个都写上
+    await run(w, 'status', { context: '认领对得上', sha: MERGE, state: 'success' });
+    expect(w.written).toHaveLength(4);
     const other = world();
     expect(await run(other, 'status', { context: 'ci', sha: HEAD })).toEqual({
       code: 0,
@@ -627,8 +616,8 @@ describe('入口：认出要算哪些 PR、写状态、退出码', () => {
       run(w, 'pull_request_target', { issue: {} }),
       run(w, 'issue_comment', {}),
       run(world({ broken: { openPrs: '502' } }), 'push', {}),
-      run(world({ broken: { prsForCommit: '502' } }), 'status', { context: 'second-opinion', sha: HEAD }),
-      run(w, 'status', { context: 'second-opinion', sha: 'xyz' }),
+      run(world({ broken: { openPrs: '502' } }), 'status', { context: 'second-opinion', sha: HEAD }),
+      run(w, 'workflow_dispatch', { inputs: { pr: 'x' } }),
       run(w, 'workflow_dispatch', { inputs: { pr: '#80' } }),
       run(world({ broken: { writeStatus: 'GitHub 回了 403' } }), 'pull_request_target', {
         pull_request: { number: 80 },
@@ -641,21 +630,6 @@ describe('入口：认出要算哪些 PR、写状态、退出码', () => {
     expect(bad[8]?.lines).toContain('  没写上状态（GitHub 回了 403）。');
     expect(bad[9]?.lines).toContain('  没写上状态：连 PR 的头都没读到。');
     expect(w.written).toEqual([]);
-  });
-
-  it('第二意见状态：PR 列表里有一条认不出，判没查成，不筛掉了当成没事', async () => {
-    for (const junk of [
-      { number: 80 },
-      { number: 80, state: 'open', head: {} },
-      { number: 82, state: 'open', head: { sha: 'abc' } },
-      'x',
-    ]) {
-      const w = world({ forCommit: [{ number: 81, state: 'open', head: { sha: HEAD } }, junk] });
-      const r = await run(w, 'status', { context: 'second-opinion', sha: HEAD });
-      expect(r.code, JSON.stringify(junk)).toBe(2);
-      expect(r.lines[0]).toMatch(/PR 列表里有一条认不出/);
-      expect(w.written).toEqual([]);
-    }
   });
 
   it('主线在这次运行里变了：不写回（旧结果不盖新结果）；读不到主线头：没查成、一条都不写', async () => {
@@ -765,18 +739,6 @@ describe('读写 GitHub（假的 fetch）', () => {
     await expect(gateGitHub(ghApi(env, junk.fn)).statuses(HEAD)).rejects.toThrow('第 1 页认不出（不是列表）');
     const endless = fakeFetch(() => ({ json: page1 }));
     await expect(gateGitHub(ghApi(env, endless.fn)).statuses(HEAD)).rejects.toThrow('没读完');
-  });
-
-  it('提交关联的 PR 翻页读完；某一页认不出、翻不完都抛（调用方判没查成）', async () => {
-    const page1 = Array.from({ length: 100 }, (_, i) => ({ number: i + 1 }));
-    const f = fakeFetch((url) => (url.endsWith('&page=1') ? { json: page1 } : { json: [{ number: 999 }] }));
-    const got = await gateGitHub(ghApi(env, f.fn)).prsForCommit(HEAD);
-    expect(got).toHaveLength(101);
-    expect(got.at(-1)).toEqual({ number: 999 });
-    const junk = fakeFetch((url) => (url.endsWith('&page=1') ? { json: page1 } : { json: { message: 'x' } }));
-    await expect(gateGitHub(ghApi(env, junk.fn)).prsForCommit(HEAD)).rejects.toThrow('第 2 页认不出');
-    const endless = fakeFetch(() => ({ json: page1 }));
-    await expect(gateGitHub(ghApi(env, endless.fn)).prsForCommit(HEAD)).rejects.toThrow('没读完');
   });
 
   it('主线头：先问默认分支再读它的头；认不出的抛', async () => {

@@ -88,6 +88,17 @@ describe('并主线', { timeout: 60_000 }, () => {
     expect(parentsOf(res.head)).toEqual([branch.head, mainline]);
   });
 
+  it('还没开 PR（任务边界并主线）：不给 prNumber 一样能并，提交说明少写那半句', async () => {
+    const { gh } = syncSetup();
+    const branch = makeBranch('task/1b-no-pr', 'e.txt', 'feature\n');
+    advanceMain('f.txt', 'main moves again\n');
+    const res = await gh.syncMainline({ repo, branch: 'task/1b-no-pr', head: branch.head });
+    if (res.state !== 'clean') throw new Error(`期望 clean，实际 ${res.state}`);
+    const message = git(remote, 'log', '-1', '--format=%s', res.head);
+    expect(message).toContain('并进 task/1b-no-pr');
+    expect(message).not.toContain('PR #');
+  });
+
   it('本来就含最新主线：不用并，头不变', async () => {
     const { gh } = syncSetup();
     const mainline = advanceMain('c.txt', 'advance-before-branch\n');

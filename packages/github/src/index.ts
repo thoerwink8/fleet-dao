@@ -5,8 +5,11 @@ export {
   type BundleCommitsInput,
   type BundleCommitsResult,
   bundleCommits,
+  type FetchBranchInput,
+  type FetchBranchResult,
   type FetchMainlineInput,
   type FetchMainlineResult,
+  fetchBranchHead,
   fetchMainline,
   type MirrorReadDeps,
 } from './bundle.ts';
@@ -157,6 +160,8 @@ export {
   type OpenPrInput,
   type OpenPrResult,
   openPr,
+  type PrFile,
+  pullFiles,
   type WaitCiInput,
   waitCi,
 } from './pulls.ts';
