@@ -1,4 +1,4 @@
-# 会话用户 @@SESSION_USER@@ 自己的 Mirasim 服务，常驻在「本地模式」（#345 接上引擎，本单元 #424）。
+# 会话用户 @@SESSION_USER@@ 自己的 Mirasim 服务，常驻在「本地模式」（#345）。
 # 服务端本体（node、server.cjs）不是这份装机脚本装的：创始人或帅位先用 Mirasim 桌面端以 SSH 远程模式（或
 # `mirasim ssh connect @@SESSION_USER@@@<法国>`）连一次，Mirasim 自己把它装进 @@SESSION_USER@@ 家里的
 # ~/.mirasim-remote/current/（docs/ops.md 第五节「会话用户的 Mirasim」）。这个单元只管「常驻」这一层：
