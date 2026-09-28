@@ -948,6 +948,20 @@ describe('Mirasim 的驱动（#345）', () => {
     expect(report.sessionId).toBe(ids[0]);
   });
 
+  it('【故意造出的失败】服务端 accepted 就报 onSpawn（没有根进程，pid 记 0）：不报的话引擎等满 120 秒判 SPAWN_TIMEOUT', async () => {
+    const { driver } = mirasimWith({ state: { text: 'OK' } });
+    const spawns: { pid: number; runId: string }[] = [];
+    await driver.run(mirasimSpec({ runId: 'run-7' }), { onSpawn: (info) => spawns.push(info) });
+    expect(spawns).toEqual([expect.objectContaining({ pid: 0, runId: 'run-7' })]);
+  });
+
+  it('服务端没接这一针（没有 accepted）：不报 onSpawn，由引擎按起不来收', async () => {
+    const { driver } = mirasimWith({ noAccept: true, report: { launchError: '服务端拒了这一针' } });
+    const spawns: unknown[] = [];
+    await driver.run(mirasimSpec(), { onSpawn: (info) => spawns.push(info) });
+    expect(spawns).toEqual([]);
+  });
+
   it('起会话不带我们造的会话号（服务端自己起）：新会话给 { mode: "new" }，续会话按原 sessionKey 给 { mode: "resume", key }', async () => {
     const { fake, driver } = mirasimWith({ state: { text: 'OK' } });
     await driver.run(mirasimSpec({ session: { mode: 'new', id: 'whatever' } }), {});
