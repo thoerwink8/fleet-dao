@@ -475,6 +475,31 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
       expect(result).toMatchObject({ state: 'stopped' });
     });
 
+    it('【故意造出的失败】合并闸连着 3 次只报自己红、没有别的失败检查：停下等人时带出合并闸自己的说明，不猜「多半是别的原因」（#444）', async () => {
+      const digest =
+        'merge-gate：failure：等第二意见：当前头 aaaaaaa 上还没有 second-opinion 状态，改到了先审后合的地方：packages/api/src/auth.ts（碰安全）。';
+      const w = world({
+        highRisk: () => HITS,
+        // review 用默认的「pass」：不会被第二意见「必须改」那条路拦下，才能连着 3 次都走到「合并闸只自己红」这条分支
+        ci: () => ({ state: 'red', failedChecks: ['merge-gate'], digest }),
+      });
+      const { parked, result } = await runUntilParked(w);
+      expect(parked.lastProblem).toContain(digest);
+      expect(parked.lastProblem).not.toContain('多半是别的原因');
+      expect(w.count('waitCi')).toBe(3);
+      expect(result).toMatchObject({ state: 'stopped' });
+    });
+
+    it('【故意造出的失败】合并闸连着 3 次只报自己红、却没读到它自己的说明：照实说没读到，不退回旧的猜测文案', async () => {
+      const w = world({
+        highRisk: () => HITS,
+        ci: () => ({ state: 'red', failedChecks: ['merge-gate'] }),
+      });
+      const { parked } = await runUntilParked(w);
+      expect(parked.lastProblem).toContain('合并闸没说明白是哪一项、也没读到状态说明');
+      expect(parked.lastProblem).not.toContain('多半是别的原因');
+    });
+
     it('【故意造出的失败】高风险路径清单读不到：查不出碰没碰，停下等人', async () => {
       const w = world({
         highRisk: () => new PortError('RISK_PATHS_MISSING', '主线上读不到清单', { retryable: false }),

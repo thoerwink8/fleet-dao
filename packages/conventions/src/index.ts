@@ -105,9 +105,7 @@ export {
 export { type GateResult, type GitHubReads, gateGitHub, gatePr, runMergeGate } from './merge-gate.ts';
 export {
   type ChangedFile,
-  CLAIM_MATCH_CONTEXT,
   destructiveIn,
-  ENGINE_BOT_LOGIN,
   GATE_CONTEXT,
   parseRiskPaths,
   REVIEW_TIER,
@@ -145,6 +143,8 @@ export {
 } from './plan-snapshot.ts';
 export {
   CLAIM_COLUMN,
+  CLAIM_MATCH_CONTEXT,
+  ENGINE_BOT_LOGIN,
   ISSUE_COLUMN,
   linkedIssue,
   PLAN_COLUMN,

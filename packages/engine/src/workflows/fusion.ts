@@ -111,7 +111,8 @@ const CI_UNKNOWN_LIMIT = 3;
 const SECOND_OPINION_ROUND_LIMIT = 2;
 /**
  * 合并闸报「等第二意见」（或第二意见状态还没被合并闸重算追上）却查不到别的失败检查，连着几次都这样就停下等人：
- * 多半是别的原因（认领对得上、关单要带结果……），不是第二意见能解的，也不能一直空转（#253）。
+ * 停下时把合并闸自己贴的说明（ci.digest）原样报出来，不猜是什么原因；不是第二意见能解的，也不能一直空转
+ * （#253；#444 起合并闸判红只剩草稿、冲突、第二意见三样，不再有「认领对得上」「关单要带结果」这类猜不透的旧原因）。
  */
 const GATE_ONLY_RED_LIMIT = 3;
 /**
@@ -1331,7 +1332,7 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
         gateOnlyRetries = 0;
         return {
           kind: 'needs-human',
-          why: `合并闸连着 ${GATE_ONLY_RED_LIMIT} 次只报「${MERGE_GATE_CONTEXT}」红、没有别的失败检查，这个头也已经贴过第二意见：多半是别的原因（认领对得上、关单要带结果……），要人看`,
+          why: `合并闸连着 ${GATE_ONLY_RED_LIMIT} 次只报「${MERGE_GATE_CONTEXT}」红、没有别的失败检查，这个头也已经贴过第二意见：${ci.digest ?? '合并闸没说明白是哪一项、也没读到状态说明'}，要人看`,
         };
       }
       return waitCiEvent();

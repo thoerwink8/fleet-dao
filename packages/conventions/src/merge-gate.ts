@@ -1,20 +1,17 @@
 // 合并闸（#74）：在 PR 当前头上写提交状态 merge-gate，「按我们的规矩能不能合」只看它一个（design 第五节「流程只为快」）。
-// 判红只有：草稿、和主线冲突、改到先审后合的路径（删改迁移；碰安全：密钥鉴权、CI 和卫生检查、对公网开口子和提权的生产配置）而当前头上没有通过的
-// second-opinion、挂了单却没有引擎机器人贴的通过的「认领对得上」（#348）、写了关单却没带那张单的结果.md（#325，closingCheck）；
-// 读不到、认不出写 failure（没查成），GitHub 还没算完冲突写 pending。必填栏（标签、里程碑、对应计划、specs、档位、这个 PR 做完就关单）只提醒。
-// merge-gate.yml 在 PR 事件、主线推送、second-opinion 和「认领对得上」状态写上来时跑它（后两种逐个重算所有开着的 PR）；
+// 判红只有四样（#444 起去掉「认领对得上」「写了关单却没带结果.md」两项——缺的由每天的关单对账另外提醒，不再挡合并）：
+// 草稿、和主线冲突、改到先审后合的路径（删改迁移；碰安全：密钥鉴权、CI 和卫生检查、对公网开口子和提权的生产配置）而
+// 当前头上没有通过的 second-opinion；读不到、认不出写 failure（没查成），GitHub 还没算完冲突写 pending。必填栏（标签、
+// 里程碑、对应计划、specs、档位、这个 PR 做完就关单）只提醒。
+// merge-gate.yml 在 PR 事件、主线推送、second-opinion 状态写上来时跑它（后两种逐个重算所有开着的 PR）；
 // 不检出、不跑 PR 里的代码：判法和清单都用跑这段代码的那一份（主线的）。
 import { readFileSync } from 'node:fs';
-import { closingTargets, missingResults } from './close-rule.ts';
 import type { GhApi } from './gh-api.ts';
 import { parseMd } from './markdown.ts';
 import {
   type ChangedFile,
-  CLAIM_MATCH_CONTEXT,
   CONFLICT_PROBLEM,
-  checkClaimMatch,
   checkSecondOpinion,
-  claimMatchFrom,
   DRAFT_PROBLEM,
   GATE_CONTEXT,
   MERGEABLE_UNKNOWN,
@@ -28,7 +25,6 @@ import {
   statusDescription,
 } from './merge-gates.ts';
 import { planPhases } from './plan.ts';
-import { linkedIssue } from './pr-columns.ts';
 import { checkPrFields, PLAN_DOC, prColumns, prFromEvent, SPECS_COLUMN, specsPaths } from './pr-fields.ts';
 
 export type GateState = 'success' | 'failure' | 'pending';
@@ -59,7 +55,7 @@ export interface GitHubReads {
 const FILES_PER_PAGE = 100;
 const FILES_MAX_PAGES = 30;
 const PRS_MAX_PAGES = 20;
-/** 一个提交上的状态：每个 context 最多 1000 条（GitHub 的上限），合并闸、第二意见、认领对得上三样。 */
+/** 一个提交上的状态：每个 context 最多 1000 条（GitHub 的上限），合并闸自己、第二意见两样。 */
 const STATUS_MAX_PAGES = 30;
 
 const encodePath = (p: string) => p.split('/').filter(Boolean).map(encodeURIComponent).join('/');
@@ -91,8 +87,7 @@ export function gateGitHub(api: GhApi): GitHubReads {
       return out;
     },
     async statuses(sha) {
-      // 逐条的列表（新到旧，带 creator：「认领对得上」要看是不是引擎机器人贴的）；合并状态接口（/status）不带 creator。
-      // 翻完页：同一个 context 取最新的那条，旧的排在后面
+      // 逐条的列表（新到旧）：翻完页，同一个 context 取最新的那条，旧的排在后面。
       const all: unknown[] = [];
       for (let page = 1; page <= STATUS_MAX_PAGES; page++) {
         const got = await api.get(`/commits/${sha}/statuses?per_page=100&page=${page}`);
@@ -212,8 +207,7 @@ export interface GateDeps {
 
 /**
  * 判一个 PR。只读，不写状态。判红只有：草稿、和主线冲突（这两样 GitHub 本来就合不了）、改到先审后合的路径
- * 而当前头上没有通过的 second-opinion、挂了单而当前头上最新的「认领对得上」不是引擎机器人贴的通过的（#348）、写了关单却没带
- * 那张单的结果.md（#325）；读不到、认不出也判红（没查成）。必填栏只提醒。
+ * 而当前头上没有通过的 second-opinion；读不到、认不出也判红（没查成）。必填栏只提醒。
  */
 export async function gatePr(number: number, deps: GateDeps): Promise<GateResult> {
   const { gh } = deps;
@@ -266,33 +260,20 @@ export async function gatePr(number: number, deps: GateDeps): Promise<GateResult
       notChecked.push(`读不到 PR #${number} 改了哪些文件（${message(e)}）`);
     }
   }
-  // 挂了单的要看引擎贴的「认领对得上」（#348）：挂的是哪张按 pr-labels 同一个认法（正文「需求」栏，其次标题）
-  const linked = linkedOf(live, meta.number);
-  if (typeof linked === 'string') notChecked.push(linked);
-  const claimFor = typeof linked === 'number' ? linked : undefined;
-  if (hits.length > 0 || claimFor !== undefined) {
+  if (hits.length > 0) {
     let statuses: unknown[] | undefined;
     try {
       statuses = await gh.statuses(meta.head);
     } catch (e) {
       notChecked.push(`读不到当前头 ${meta.head.slice(0, 7)} 的提交状态（${message(e)}）`);
     }
-    if (statuses && hits.length > 0) {
+    if (statuses) {
       const got = secondOpinionFrom(statuses);
       if (typeof got === 'string')
         notChecked.push(`当前头 ${meta.head.slice(0, 7)} 的提交状态认不出：${got}`);
       else problems.push(...checkSecondOpinion(meta.head, got, hits));
     }
-    if (statuses && claimFor !== undefined) {
-      const got = claimMatchFrom(statuses);
-      if (typeof got === 'string')
-        notChecked.push(`当前头 ${meta.head.slice(0, 7)} 的提交状态认不出：${got}`);
-      else problems.push(...checkClaimMatch(meta.head, claimFor, got));
-    }
   }
-  const closing = await closingCheck(live, meta, gh);
-  notChecked.push(...closing.notChecked);
-  problems.push(...closing.problems);
   const notes = (await reminders(live, meta, gh)).map((r) => `提醒：${r}`);
 
   const base = { number, head: meta.head };
@@ -312,68 +293,12 @@ export async function gatePr(number: number, deps: GateDeps): Promise<GateResult
     hits.length === 0
       ? '没改到先审后合的地方'
       : `改到 ${hits.length} 个先审后合的地方，当前头上第二意见已通过`;
-  const claim = claimFor === undefined ? '' : `，#${claimFor} 的认领对得上`;
   return {
     ...base,
     state: 'success',
     notChecked: false,
-    lines: [`能合：不是草稿、没冲突，${why}${claim}。`, ...notes],
+    lines: [`能合：不是草稿、没冲突，${why}。`, ...notes],
   };
-}
-
-/** PR 挂的单号（没挂是 undefined）；正文、标题认不出返回一句为什么（没查成：挂没挂单都说不准，不当成没挂）。 */
-function linkedOf(live: unknown, number: number): number | undefined | string {
-  const pr = isObject(live) ? live : {};
-  const { body, title } = pr;
-  if (body !== null && body !== undefined && typeof body !== 'string')
-    return `PR #${number} 的正文认不出，没法判挂没挂单、要不要看「认领对得上」`;
-  if (typeof title !== 'string') return `PR #${number} 的标题认不出，没法判挂没挂单、要不要看「认领对得上」`;
-  return linkedIssue(typeof body === 'string' ? body : '', title);
-}
-
-/**
- * 关单要有结果（#325，创始人 2026-09-27 晚拍）：正文写了关单词（GitHub 合并时会关那张单），就要在这个 PR 自己的改动里带
- * 那张单的 specs/<号>-<短名>/结果.md，没带不让合；「这个 PR 做完就关单」填了「是」却一个关单词都没写（GitHub 不关）也不让合。
- * 判法在 close-rule.ts，只看 PR 的正文和改动文件，同一个 PR 什么时候判都一样；不关单的 PR 不为这一段多读一次改动文件。
- * 正文认不出、改动文件读不到、读不全算没查成。
- */
-async function closingCheck(
-  live: unknown,
-  meta: LiveMeta,
-  gh: GitHubReads,
-): Promise<{ problems: string[]; notChecked: string[] }> {
-  const pr = isObject(live) ? live : {};
-  const { body } = pr;
-  const base = isObject(pr.base) && isObject(pr.base.repo) ? pr.base.repo.full_name : undefined;
-  if (body !== null && body !== undefined && typeof body !== 'string') {
-    return { problems: [], notChecked: [`PR #${meta.number} 的正文认不出，没法判它要关哪几张单`] };
-  }
-  const targets = closingTargets(
-    { number: meta.number, body: typeof body === 'string' ? body : '' },
-    typeof base === 'string' ? base : undefined,
-  );
-  if (targets.issues.length === 0) return { problems: targets.problems, notChecked: [] };
-  const want = targets.issues.map((n) => `#${n}`).join('、');
-  let files: ChangedFile[];
-  try {
-    files = await gh.files(meta.number);
-  } catch (e) {
-    return {
-      problems: targets.problems,
-      notChecked: [
-        `读不到 PR #${meta.number} 改了哪些文件（${message(e)}），没法判要关的 ${want} 带没带结果`,
-      ],
-    };
-  }
-  if (files.length !== meta.changedFiles) {
-    return {
-      problems: targets.problems,
-      notChecked: [
-        `PR #${meta.number} 改了 ${meta.changedFiles} 个文件，只读到 ${files.length} 个，没法判要关的 ${want} 带没带结果`,
-      ],
-    };
-  }
-  return { problems: [...targets.problems, ...missingResults(targets.issues, files)], notChecked: [] };
 }
 
 /**
@@ -432,9 +357,9 @@ export async function targetPrs(
       return numbersOf(await gh.openPrs(), () => true);
     case 'status':
       // 不按事件里的 sha 只算那一个 PR：status 事件共用一个排队组（merge-gate.yml），排着的只留最新一个，中间的被取消——
-      // 引擎一轮对账给好几个 PR 贴「认领对得上」时，只算最后那个的话前面几个就一直停在旧结论上（#351 演练撞到）。
+      // 一轮里给好几个 PR 贴 second-opinion 时，只算最后那个的话前面几个就一直停在旧结论上（#351 演练撞到）。
       // 所以留下来的那一次把开着的 PR 全重算一遍，每个都现读自己此刻的状态。
-      if (ev.context !== SECOND_OPINION_CONTEXT && ev.context !== CLAIM_MATCH_CONTEXT) return [];
+      if (ev.context !== SECOND_OPINION_CONTEXT) return [];
       return numbersOf(await gh.openPrs(), () => true);
     case 'workflow_dispatch': {
       const input = isObject(ev.inputs) ? String(ev.inputs.pr ?? '').trim() : '';

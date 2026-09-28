@@ -1,7 +1,7 @@
-// 钉住合并闸能看的现状只有那几样（创始人 2026-09-27 晚拍，#299；design 第五节「发现问题当场修」第 5 条、AGENTS 本仓段）：
-// CI 里跑的检查必须确定、只看检出来的文件；合并闸 merge-gate 汇总 PR 此刻的状态——PR 本身（草稿、冲突、改了哪些文件，
-// 正文里的必填栏只提醒；#325 起写了关单的 PR 要带那张单的结果.md，看的还是正文和改动文件）和当前头上的提交状态（第二意见；
-// #299 起多认引擎机器人贴的「认领对得上」）。
+// 钉住合并闸能看的现状只有那几样（创始人 2026-09-27 晚拍，#299；2026-09-28 下午拍 #444 收窄成四样；design 第五节
+// 「发现问题当场修」第 5 条、AGENTS 本仓段）：CI 里跑的检查必须确定、只看检出来的文件；合并闸 merge-gate 汇总 PR
+// 此刻的状态——PR 本身（草稿、冲突、改了哪些文件，正文里的必填栏只提醒）和当前头上的提交状态（第二意见）。
+// 「认领对得上」「写了关单却没带结果.md」#444 起不再是合并闸的输入（缺的由每天的关单对账另外提醒，不再挡合并）。
 // 往合并闸里多加别的现状（单子开没开、时间、别的仓……）这里会红：要加得先改上面那两处的规矩，再改这里的清单。
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -13,19 +13,18 @@ const gates = src('merge-gates.ts');
 
 /** 合并闸从 GitHub 读、往 GitHub 写的口子（merge-gate.ts 的 GitHubReads），一样一行写清看的是什么。 */
 const ALLOWED_READS: Record<string, string> = {
-  pr: 'PR 本身：草稿、冲突、当前头、改了几个文件、正文和标签（必填栏只提醒；正文里的关单词定这个 PR 要关哪几张，#325）',
-  files: 'PR 改了哪些文件：判改没改到先审后合的路径；写了关单的带没带那张单的结果.md（#325）',
-  statuses: '当前头上的提交状态（逐条的，带是谁贴的）：第二意见、引擎机器人贴的「认领对得上」（#348）',
+  pr: 'PR 本身：草稿、冲突、当前头、改了几个文件、正文和标签（必填栏只提醒）',
+  files: 'PR 改了哪些文件：判改没改到先审后合的路径',
+  statuses: '当前头上的提交状态（逐条的）：第二意见',
   fileAt: '这个 PR 里的 plan.md：必填栏「对应计划」只提醒',
   exists: '这个 PR 里的 specs 目录在不在：必填栏「specs」只提醒',
-  openPrs: '主线一动、第二意见或「认领对得上」写上来时逐个重算开着的 PR：挑要算哪几个，不参与判',
+  openPrs: '主线一动、第二意见写上来时逐个重算开着的 PR：挑要算哪几个，不参与判',
   mainHead: '写结论前核主线在这一轮里没动：动了不写，不参与判',
   writeStatus: '写 merge-gate 这一个状态',
 };
 
-/** 合并闸认得的提交状态名：自己写的 merge-gate、第二意见、引擎机器人贴的「认领对得上」（#348）。 */
+/** 合并闸认得的提交状态名：自己写的 merge-gate、第二意见（#444 起「认领对得上」不算这里头，合并闸不再等它）。 */
 const ALLOWED_CONTEXTS: Record<string, string> = {
-  CLAIM_MATCH_CONTEXT: '认领对得上',
   GATE_CONTEXT: 'merge-gate',
   SECOND_OPINION_CONTEXT: 'second-opinion',
 };
@@ -84,10 +83,10 @@ describe('合并闸只汇总 PR 此刻的状态（#299 创始人拍板）', () =
     expect(missingTriggers(workflow)).toEqual([]);
   });
 
-  it('【故意造出的失败】merge-gate.yml 只放行 second-opinion：「认领对得上」贴上来不重算，查得出来', () => {
-    const narrowed = workflow.replace(` || github.event.context == '认领对得上'`, '');
+  it('【故意造出的失败】merge-gate.yml 不放行 second-opinion：状态贴上来不重算，查得出来', () => {
+    const narrowed = workflow.replace(` || github.event.context == 'second-opinion'`, '');
     expect(narrowed).not.toBe(workflow);
-    expect(missingTriggers(narrowed)).toEqual(['认领对得上']);
+    expect(missingTriggers(narrowed)).toEqual(['second-opinion']);
   });
 
   it('【故意造出的失败】往读写口子里多加一个（比如读单子开没开）：上面那条就红', () => {
