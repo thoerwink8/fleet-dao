@@ -8,7 +8,14 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { SessionUser } from '@fleet-dao/adapters';
-import { parseRiskPaths, RISK_PATHS_FILE, riskyFiles, SECOND_OPINION_CONTEXT } from '@fleet-dao/conventions';
+import {
+  GATE_CONTEXT,
+  parseRiskPaths,
+  RISK_PATHS_FILE,
+  type RiskyFile,
+  riskyFiles,
+  SECOND_OPINION_CONTEXT,
+} from '@fleet-dao/conventions';
 import { criteriaOf } from '@fleet-dao/core';
 import type { GitHub, PrBodyInput } from '@fleet-dao/github';
 import type { CiResult } from '../decisions/verify.ts';
@@ -28,6 +35,7 @@ import {
   changedFilesAgainst,
   fastForward,
   fetchBundle,
+  patchIdOf as gitPatchIdOf,
   hasCommit,
   headOf,
   headOfIncoming,
@@ -107,6 +115,7 @@ type GitHubPorts = Pick<
   | 'waitCi'
   | 'checkHighRisk'
   | 'postSecondOpinion'
+  | 'patchIdOf'
   | 'syncMainline'
   | 'runTests'
   | 'mergePr'
@@ -282,6 +291,29 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
     const ff = await fastForward(t, bytes, ref, newHead);
     // ff === 'diverged'：核过之后（上面两行）工作树又变了，极罕见的竞态，一样跳过、不抛，下一轮再试。
     void ff;
+  };
+
+  /**
+   * 这个 PR 此刻改到的文件里，落在先审后合路径清单（主线上那份）里的：checkHighRisk 端口和 runTests 里判
+   * 「合并闸红是不是只缺 second-opinion」共用同一份读法——两处判的得是同一件事，不能各写一份、慢慢走岔。
+   * 清单读不到、翻不完页照抛，不当「没碰到」（和 checkHighRisk 原来的行为一样）。
+   */
+  const readHighRisk = async (repo: PrRepo, prNumber: number, ctx: PortContext): Promise<RiskyFile[]> => {
+    const read = await mapped(() => gh.readRepoFile({ repo, path: RISK_PATHS_FILE, signal: ctx.signal }));
+    if (read.file.kind !== 'text') {
+      const why = read.file.kind === 'missing' ? '文件不在' : read.file.why;
+      throw new PortError(
+        'RISK_PATHS_MISSING',
+        `主线上读不到 ${RISK_PATHS_FILE}（${why}）：判不了这个 PR 碰没碰先审后合的路径`,
+        { retryable: false },
+      );
+    }
+    const list = parseRiskPaths(read.file.text);
+    if (typeof list === 'string') {
+      throw new PortError('RISK_PATHS_INVALID', `${RISK_PATHS_FILE} 认不出：${list}`, { retryable: false });
+    }
+    const files = await mapped(() => gh.pullFiles({ repo, prNumber, signal: ctx.signal }));
+    return riskyFiles(files, list);
   };
 
   return {
@@ -522,32 +554,17 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
     async checkHighRisk(input, ctx) {
       // 清单读主线上那份（和合并闸同一份判法，PR 改不了自己的门槛，design 第五节）；文件读这个 PR 现在的，带 patch
       // 才判得出新迁移是不是只加不改。两样有一样读不到、翻不完页都明确抛错，不当「没碰到」。
-      const read = await mapped(() =>
-        gh.readRepoFile({ repo: input.repo, path: RISK_PATHS_FILE, signal: ctx.signal }),
-      );
-      if (read.file.kind !== 'text') {
-        const why = read.file.kind === 'missing' ? '文件不在' : read.file.why;
-        throw new PortError(
-          'RISK_PATHS_MISSING',
-          `主线上读不到 ${RISK_PATHS_FILE}（${why}）：判不了这个 PR 碰没碰先审后合的路径`,
-          { retryable: false },
-        );
-      }
-      const list = parseRiskPaths(read.file.text);
-      if (typeof list === 'string') {
-        throw new PortError('RISK_PATHS_INVALID', `${RISK_PATHS_FILE} 认不出：${list}`, { retryable: false });
-      }
-      const files = await mapped(() =>
-        gh.pullFiles({ repo: input.repo, prNumber: input.prNumber, signal: ctx.signal }),
-      );
-      return { hits: riskyFiles(files, list) };
+      return { hits: await readHighRisk(input.repo, input.prNumber, ctx) };
     },
 
     async postSecondOpinion(input) {
       const blocking = input.findings.filter((f) => f.severity === 'blocking');
       const minor = input.findings.filter((f) => f.severity === 'minor');
-      const description =
-        input.verdict === 'pass' ? '第二意见通过' : `第二意见：必须改 ${blocking.length} 条`;
+      const description = input.reused
+        ? `第二意见沿用第 ${input.reused.round} 轮（头 ${input.reused.fromHead.slice(0, 7)}）`
+        : input.verdict === 'pass'
+          ? '第二意见通过'
+          : `第二意见：必须改 ${blocking.length} 条`;
       // 状态是合并闸认的唯一信号：这一步没做成必须抛出去（没权限、GitHub 拒绝……），不能拿评论贴没贴顶，也不能悄悄不贴
       await mapped(() =>
         gh.claims.setStatus(input.repo, input.head, {
@@ -560,9 +577,14 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
         .map((h) => `${h.file}（${h.kind}${h.note ? `：${h.note}` : ''}）`)
         .join('、')}（清单和理由见 ${RISK_PATHS_FILE}）`;
       const lines = [
-        `**第二意见 第 ${input.round} 轮**（${input.model}；审的头 ${input.head.slice(0, 7)}）：${
-          input.verdict === 'pass' ? '通过' : `必须改 ${blocking.length} 条`
-        }`,
+        input.reused
+          ? `**第二意见 第 ${input.round} 轮**（沿用第 ${input.reused.round} 轮在 ${input.reused.fromHead.slice(
+              0,
+              7,
+            )} 上的通过；审的头 ${input.head.slice(0, 7)}）：只并了主线，PR 自己的改动没变（patch-id 一样），不再拉一次审查`
+          : `**第二意见 第 ${input.round} 轮**（${input.model}；审的头 ${input.head.slice(0, 7)}）：${
+              input.verdict === 'pass' ? '通过' : `必须改 ${blocking.length} 条`
+            }`,
         '',
         where,
         '',
@@ -645,6 +667,26 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
         // （重试，再不行挂起）。
         throw new PortError('CI_UNKNOWN', ci.detail ?? 'CI 没查成', { retryable: true });
       }
+      if (ci.state === 'red' && ci.failedChecks.length === 1 && ci.failedChecks[0] === GATE_CONTEXT) {
+        // 合并闸自己是唯一红的检查：这一步（合并前把主线并进分支）本来就会让头变，第二意见还没追上是常见的良性
+        // 情形，不是真测试红（#307/#389 那次真事：白白退回了三轮）。判「是不是」结构化地看两样：这个 PR 真碰了
+        // 先审后合的路径（不然合并闸红另有原因——草稿、认领对不上……——second-opinion 状态压根不该管）、当前头上
+        // second-opinion 这条提交状态的 state 字段（不匹配合并闸自己写的中文描述）。
+        const hits = await readHighRisk(input.repo, input.prNumber, ctx);
+        if (hits.length > 0) {
+          const so = await mapped(() => gh.claims.latestStatus(input.repo, ci.head, SECOND_OPINION_CONTEXT));
+          if (so === null || so.state === 'pending') {
+            return {
+              passed: false,
+              head: ci.head,
+              summary: `新头上合并闸红，但当前头${so === null ? '还没有' : '还在跑'}第二意见（碰了先审后合的路径：${hits
+                .map((h) => h.file)
+                .join('、')}），不是测试真红`,
+              secondOpinionWait: so === null ? 'missing' : 'pending',
+            };
+          }
+        }
+      }
       const failed = ci.failedChecks.join('、');
       return {
         passed: ci.state === 'green',
@@ -654,6 +696,12 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
             ? '新头上的 CI 全绿'
             : `新头上的 CI 红了：${failed || '（没列出检查名）'}${ci.digest ? `；${ci.digest}` : ''}`,
       };
+    },
+
+    async patchIdOf(input, ctx) {
+      const user = await ownerOrFail(input.worktreePath);
+      const t = treeAs(input.worktreePath, user, `patch-id-${input.subtaskId ?? input.taskId}`, ctx);
+      return gitPatchIdOf(t, input.mainlineBranch, input.ref);
     },
 
     async mergePr(input, ctx) {

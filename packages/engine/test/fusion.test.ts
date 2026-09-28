@@ -539,6 +539,110 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
     });
   });
 
+  describe('合并那一步头变了（合并队列自己把主线并进来）、合并闸只缺 second-opinion：不当「测试没过」退回', () => {
+    // 碰安全的路径：开 PR 前那一轮第二意见已经通过（缓存下 soApprovedHead/Patch-id），推上去的头是 fakeHead(3)。
+    const HITS = [
+      { file: 'packages/api/src/auth.ts', rule: 'packages/api/src/auth.ts', kind: '碰安全' as const },
+    ];
+    const MERGED_HEAD = 'f'.repeat(40);
+    // 合并队列自己的「同步主线」把分支头从 fakeHead(3) 换成 MERGED_HEAD——不管这一步被调几次，同一个头总回同一个
+    // 结果（并且已经并好了、不用再并）：merge-queue 自己的第一次同步、我们 followBranchHead 顺手再核一次，都对得上。
+    const syncedAfterPr = (input: { head: string }) =>
+      input.head === fakeHead(3) ? { head: MERGED_HEAD } : undefined;
+
+    it('(a) 只缺 second-opinion → 请第二意见、不记一次返工（不进 mergeReturns，也不派 Lead 改代码）', async () => {
+      const w = world({
+        highRisk: () => HITS,
+        review: () => ({ verdict: 'pass', findings: [] }),
+        sync: syncedAfterPr,
+        // 合并队列第一次在新头上重跑测试：合并闸红，但结构化地只缺 second-opinion；第二次（第二意见请到手之后）绿
+        tests: (input, n) =>
+          input.head === MERGED_HEAD && n === 1 ? { passed: false, secondOpinionWait: 'missing' } : undefined,
+      });
+      const result = await runToEnd(w);
+      expect(result.state).toBe('done');
+      expect(result.mergeCommit).toBeTruthy();
+
+      // 两轮第二意见都通过：开 PR 前那一轮（PR 送检的头）、合并那一步换头后又请的一轮（新头）——都是真审，不是沿用
+      const posts = w.callsOf('postSecondOpinion');
+      expect(posts.map((c) => [c.input.head, c.input.verdict, c.input.reused])).toEqual([
+        [fakeHead(2), 'pass', undefined],
+        [MERGED_HEAD, 'pass', undefined],
+      ]);
+      const reviews = w.callsOf('startSession').filter((c) => c.input.stage === 'review');
+      expect(reviews).toHaveLength(2);
+
+      // 没有因为这次「合并闸红」派 Lead 写修复简报、副手改代码——这不是真测试红
+      const fixBriefs = w.callsOf('startSession').filter((c) => c.input.brief.lead?.step === 'fix-brief');
+      expect(fixBriefs).toHaveLength(0);
+      expect(w.count('mergePr')).toBe(1);
+    });
+
+    it('(b) 新头相对主线的 patch-id 和上一轮通过时一样：沿用，不再拉一次审查会话', async () => {
+      const w = world({
+        highRisk: () => HITS,
+        review: () => ({ verdict: 'pass', findings: [] }),
+        sync: syncedAfterPr,
+        tests: (input, n) =>
+          input.head === MERGED_HEAD && n === 1 ? { passed: false, secondOpinionWait: 'missing' } : undefined,
+        // 不管算的是哪个头，patch-id 都回同一个值：模拟「这段时间只并了主线，PR 自己的改动没变」
+        patchId: () => 'a'.repeat(40),
+      });
+      const result = await runToEnd(w);
+      expect(result.state).toBe('done');
+      expect(result.mergeCommit).toBeTruthy();
+
+      // 只有开 PR 前那一轮是真审：合并那一步沿用，没有再起第二次审查会话
+      const reviews = w.callsOf('startSession').filter((c) => c.input.stage === 'review');
+      expect(reviews).toHaveLength(1);
+      const posts = w.callsOf('postSecondOpinion');
+      expect(posts.map((c) => [c.input.head, c.input.verdict, c.input.reused])).toEqual([
+        [fakeHead(2), 'pass', undefined],
+        [MERGED_HEAD, 'pass', { fromHead: fakeHead(2), round: 1 }],
+      ]);
+      const fixBriefs = w.callsOf('startSession').filter((c) => c.input.brief.lead?.step === 'fix-brief');
+      expect(fixBriefs).toHaveLength(0);
+    });
+
+    it('(c)【故意造出的失败】patch-id 算不出来（git 报错）：不许当成一样，照常请一轮真的第二意见', async () => {
+      const w = world({
+        highRisk: () => HITS,
+        review: () => ({ verdict: 'pass', findings: [] }),
+        sync: syncedAfterPr,
+        tests: (input, n) =>
+          input.head === MERGED_HEAD && n === 1 ? { passed: false, secondOpinionWait: 'missing' } : undefined,
+        patchId: () => new PortError('GIT_FAILED', '算不出来（假的）', { retryable: false }),
+      });
+      const result = await runToEnd(w);
+      expect(result.state).toBe('done');
+
+      // patch-id 没查成，没法比：没有沿用，照样起了第二次审查会话
+      const reviews = w.callsOf('startSession').filter((c) => c.input.stage === 'review');
+      expect(reviews).toHaveLength(2);
+      const posts = w.callsOf('postSecondOpinion');
+      expect(posts.every((c) => c.input.reused === undefined)).toBe(true);
+    });
+
+    it('(d) 合并前重跑真的红了（不是缺 second-opinion）：照旧算一次返工，退回让 Lead 改代码', async () => {
+      const w = world({
+        highRisk: () => HITS,
+        review: () => ({ verdict: 'pass', findings: [] }),
+        // 没有 secondOpinionWait：这是真测试红，不管改完重推了几次、头变成什么，合并前重跑一直红到退回次数用完
+        tests: () => ({ passed: false, summary: '真的红了：test (engine) 挂了' }),
+      });
+      const { parked, result } = await runUntilParked(w);
+      // 退回次数到了才停下等人（afterMergeReturn 的 escalate）：人看过之后重新计，停下那一刻 rounds.mergeReturn
+      // 已经清零，认那一刻的话（lastProblem 里的「退回 N 次」）不认这个计数。
+      expect(parked.lastProblem).toContain('合并队列已经退回');
+      expect(w.count('mergePr')).toBe(0);
+      expect(result).toMatchObject({ state: 'stopped', mergeCommit: null });
+      // 确实走了「退回让 Lead 改代码」那条老路（merge-return 的反馈进了修复简报）
+      const briefs = w.callsOf('startSession').filter((c) => c.input.brief.lead?.step === 'fix-brief');
+      expect(briefs.length).toBeGreaterThan(0);
+      expect(briefs.some((b) => b.input.brief.feedback.some((f) => f.kind === 'merge-return'))).toBe(true);
+    });
+  });
+
   it('CI 报和主线冲突：自动并主线并上了，接着在新头上查 CI，不算「没查成」的次数、照常走完', async () => {
     const w = world({
       ci: (_input, n) => (n === 1 ? { state: 'conflict', detail: '和主线冲突，CI 没起' } : undefined),
