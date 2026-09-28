@@ -1,5 +1,5 @@
 {
-  "说明": "fleet-dao 自己的流程配置，只写和全组织默认（packages/core/flow.default.json）不同的；格式见 packages/core/src/config.ts。引擎的对账每 15 分钟读一次默认分支上的这份，合并校验后写进库里的副本（repos 表的 flow_* 列），派活只认副本；认不出这个项目就停派。testCommand 是写码会话交活要原样跑的那条：只跑改动影响到的测试（全量检查、卫生检查归 CI）。uiPaths 是算页面代码的路径（以 / 结尾的是目录）：改到它们的活按界面类派，GPT 不写也不验（驾驶舱网页、飞书卡片和卡片上的字、健康页和香港的占位页、帅位进度页和法国引擎页）；新加页面代码的地方要加进来。riskPathsFile 是先审后合的路径清单放在这个仓里的哪个文件（design 第五节「先审后合」）：只有 fleet-dao 自己有这份清单，别的项目（比如巡检仓）没写这一项就是没有先审后合的路径，引擎不查、不请第二意见（#429：巡检仓没这个字段，之前引擎写死读这份文件、读不到整条巡检就断了）。",
+  "说明": "fleet-dao 自己的流程配置，只写和全组织默认（packages/core/flow.default.json）不同的；格式见 packages/core/src/config.ts。引擎的对账每 15 分钟读一次默认分支上的这份，合并校验后写进库里的副本（repos 表的 flow_* 列），派活只认副本；认不出这个项目就停派。testCommand 是写码会话交活要原样跑的那条：只跑改动影响到的测试（全量检查、卫生检查归 CI）。uiPaths 是算页面代码的路径（以 / 结尾的是目录）：改到它们的活按界面类派，GPT 不写也不验（驾驶舱网页、飞书卡片和卡片上的字、健康页和香港的占位页、帅位进度页和法国引擎页）；新加页面代码的地方要加进来。riskPathsFile 是先审后合的路径清单放在这个仓里的哪个文件（design 第五节「先审后合」）：只有 fleet-dao 自己有这份清单，别的项目（比如巡检仓）没写这一项就是没有先审后合的路径，引擎不查、不请第二意见。",
   "formatVersion": 1,
   "testCommand": "pnpm test:changed",
   "riskPathsFile": "packages/conventions/high-risk-paths.json",

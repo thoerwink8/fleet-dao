@@ -90,7 +90,7 @@ export const ProjectConfigSchema = z
     /**
      * 先审后合的路径清单（@fleet-dao/conventions 的 RiskPath[] 格式）放在这个项目仓里的哪个路径（design 第五节
      * 「先审后合」）。只能写在项目里：清单放哪、有没有，每个项目不一样，全组织默认放一条会让别的项目也去找这份文件
-     * （比如巡检仓，见 #429）。没写 = 这个项目没有先审后合的路径，引擎不查、不请第二意见；写了就照严格判法：文件不在、
+     * （比如巡检仓）。没写 = 这个项目没有先审后合的路径，引擎不查、不请第二意见；写了就照严格判法：文件不在、
      * 认不出都是明确失败（RISK_PATHS_MISSING / RISK_PATHS_INVALID），不当「没碰到」。
      */
     riskPathsFile: repoPath.optional(),

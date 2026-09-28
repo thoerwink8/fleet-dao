@@ -521,7 +521,7 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
 
     async checkHighRisk(input, ctx) {
       // 项目没声明先审后合清单（.fleet/flow.json 没写 riskPathsFile）：这个项目没有先审后合的路径，不查、不请第二意见
-      // （不是「读不到就当没碰到」——是这个项目压根没这条路，比如巡检仓，见 #429）。
+      // （不是「读不到就当没碰到」——是这个项目压根没这条路，比如巡检仓）。
       const riskPathsFile = input.riskPathsFile;
       if (riskPathsFile === undefined) {
         return {
