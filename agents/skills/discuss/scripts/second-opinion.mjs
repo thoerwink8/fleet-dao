@@ -14,12 +14,17 @@
 // 有调用没走中继，一律 2，不当通过。这台机器没装、没开 Mirasim，没装、没登录 cursor-agent，就换下一家；几家都用不了照实报。
 
 import { execFileSync, spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { cursorAgentProblem, dataDir, findBin, NotInstalled } from './tools.mjs';
+import { cursorAgentEnv, cursorAgentProblem, dataDir, findBin, NotInstalled } from './tools.mjs';
 import { missingWalkthrough } from './walkthrough.mjs';
+
+// ask.mjs 也要用（两边起 cursor-agent 都要摘同几个环境变量）：定义挪去了 tools.mjs 共用，这里转手导出，
+// 别让已经 import { cursorAgentEnv } from './second-opinion.mjs' 的调用方（包括测试）断掉。
+export { cursorAgentEnv } from './tools.mjs';
 
 const DATA = dataDir();
 const RUNS = join(DATA, 'runs');
@@ -538,25 +543,19 @@ async function critique(o) {
 
 // ---------- 主流程 ----------
 
-// Windows 上 Git Bash 留下的几个环境变量：cursor-agent 靠它们猜「当前是不是 bash 环境」，猜完拿它跑钩子的 stdin 转发脚本，
-// 那脚本本身是 PowerShell 语法，交给 bash 的 eval 直接语法错、钩子判失败＝把这次调用拦掉（agents/hooks/pretool.mjs 的
-// 头几行有同一条注释，附了论证：2026-09-28 本机实测——同一次调用，父进程环境里有没有这几个变量，钩子是崩还是正常跑，
-// 只差这几个变量在不在）。本机会话大多是从 Git Bash 起的，spawn 默认整份带过去；这里起 cursor-agent 时摘掉，让它
-// 猜成本机原生的壳（PowerShell/cmd），钩子才跑得动。摘的是环境变量，不是钩子本身的判断——密钥路径那些规矩照样生效。
-export function cursorAgentEnv(platform = process.platform, env = process.env) {
-  if (platform !== 'win32') return env;
-  const out = { ...env };
-  for (const k of ['SHELL', 'MSYSTEM', 'MSYSTEM_PREFIX', 'MSYSTEM_CHOST', 'TERM']) delete out[k];
-  return out;
-}
+// cursorAgentEnv 挪到 tools.mjs 了（ask.mjs、second-opinion.mjs 两边起 cursor-agent 都要用，见那边的注释）；
+// 这个文件顶部 import 了它、又 re-export 了它，用法不用变。
 
-// cursor-agent 只读跑一轮：题面写进工作目录里的临时文件（Windows 命令行长度有限），让它读文件照做。
-// 退出码非 0、超时、没有输出都算没查成；错误原文带上，供换人判断是不是「连不上」。
+// 断链修复（本机 2026-09-28 两次实测，和 ask.mjs 同一个坑）：原来题面写进工作目录里的临时文件（Windows 命令行
+// 长度有限），让它读文件照做——指望 cursorAgentEnv() 摘掉 Git Bash 留下的环境变量就能让它的钩子猜成本机原生壳。
+// 实测不够：只要父进程链里有 Git Bash，钩子照样把读文件的工具调用拦掉（见 ask.mjs 头几行的论证）。改成不给位置
+// 参数、题面从 stdin 喂给它，模型不用调任何工具就能看到题面（cursorAgentEnv() 留着一起用，多一层保险，不影响）。
+// 题面最前面塞一行随机核对码、要求原样抄进答案：退出码 0、有输出，但输出里没有核对码，照样判没查成，不会被
+// 「有输出就算答了」蒙混过去——不管读不到题面的原因是钩子拦的、权限，还是别的。
 function runCursor({ prompt, profile, workdir, timeoutMin, log }) {
   const problem = cursorAgentProblem();
   if (problem) return Promise.reject(new NotInstalled(problem));
-  const file = join(workdir, `.second-opinion-prompt-${process.pid}.md`);
-  writeFileSync(file, prompt);
+  const nonce = randomUUID().slice(0, 8);
   const started = Date.now();
   log(`[0.0s] cursor-agent 起了（${profile.model}，只读，工作目录 ${workdir}）`);
   return new Promise((resolveP, rejectP) => {
@@ -571,7 +570,6 @@ function runCursor({ prompt, profile, workdir, timeoutMin, log }) {
       workdir,
       '--model',
       profile.model,
-      `读工作目录里的 ${file.split(/[\\/]/).pop()}，完全照里面的要求做，按里面要求的格式作答。`,
     ];
     const child = spawn('cursor-agent', args, {
       cwd: workdir,
@@ -579,6 +577,12 @@ function runCursor({ prompt, profile, workdir, timeoutMin, log }) {
       shell: process.platform === 'win32',
       env: cursorAgentEnv(),
     });
+    child.stdin.on('error', () => {
+      // 执行体提前退出时写 stdin 会 EPIPE，结果以退出码和 stdout 为准
+    });
+    child.stdin.end(
+      `核对码：${nonce}\n（把上面这一行原样抄进你回答的第一行，证明你真的收到了这份题面；然后另起一行再照要求作答，不要写别的过程话。）\n\n${prompt}`,
+    );
     let out = '';
     let err = '';
     child.stdout.on('data', (d) => (out += d));
@@ -593,15 +597,25 @@ function runCursor({ prompt, profile, workdir, timeoutMin, log }) {
     });
     child.on('close', (code) => {
       clearTimeout(timer);
-      rmSync(file, { force: true });
       const secs = ((Date.now() - started) / 1000).toFixed(1);
       if (code !== 0)
         return rejectP(new NotChecked(`cursor-agent 退出码 ${code}：${(err || out).trim().slice(0, 400)}`));
-      if (!out.trim())
+      const trimmed = out.trim();
+      if (!trimmed)
         return rejectP(new NotChecked(`cursor-agent 退出码 0 但没有输出：${err.trim().slice(0, 400)}`));
+      if (!trimmed.includes(nonce))
+        return rejectP(
+          new NotChecked(`cursor-agent 没读到题面（答案里没有核对码）：${trimmed.slice(0, 400)}`),
+        );
+      // 读到了：把核对码那一行从记下的答案里去掉，只留真正的答案
+      const stripped = trimmed
+        .split(/\r?\n/)
+        .filter((line) => !line.includes(nonce))
+        .join('\n')
+        .trim();
       log(`[${secs}s] done（cursor ${profile.model}）`);
       resolveP({
-        text: out,
+        text: stripped,
         sessionKey: `cursor:${process.pid}`,
         model: profile.model,
         ledgerNote: '走 Cursor 订阅（本机 cursor-agent），不经 Mirasim 账本',

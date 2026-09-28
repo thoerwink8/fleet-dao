@@ -10,11 +10,12 @@
 // 并发上限：同一时刻最多 MAX_PAR 个 cursor-agent（design 第九节起步值 3；2026-09-26 五家齐跑 + 工人把进程数顶满、宿主崩过）。
 
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { cursorAgentProblem, dataDir } from './tools.mjs';
+import { cursorAgentEnv, cursorAgentProblem, dataDir } from './tools.mjs';
 import { missingWalkthrough } from './walkthrough.mjs';
 
 export const MODELS = {
@@ -39,27 +40,28 @@ function args(argv) {
   return o;
 }
 
+// 断链修复（本机 2026-09-28 两次实测）：第一版让 cursor-agent 读工作目录里的题面文件，指望 cursorAgentEnv() 摘掉
+// Git Bash 留下的 SHELL/MSYSTEM/TERM 就能让它的钩子猜成本机原生壳。实测发现不够：只要父进程链里有 Git Bash，
+// 就算连 SHELL/MSYSTEM/TERM/SHLVL/_/EXEPATH/PWD/HOME 全摘、直接起 node.exe、甚至经 powershell.exe 起，Cursor
+// 的钩子照样按 bash 跑它那段 PowerShell 转发脚本、把读文件的工具调用拦掉——从纯 PowerShell 会话起才正常。真正
+// 不踩这个坑的办法是压根不用文件：不给位置参数，题面从 stdin 喂给它，模型不用调任何工具就能看到题面、直接作答
+// （实测 6KB 中文题面走 stdin 正常作答）。cursorAgentEnv() 留着一起用（不影响，多一层保险）。
+// 不管是哪种读不到的原因，都用同一招防蒙混：题面最前面塞一行随机核对码，要求原样抄进答案；输出里找不到这个
+// 核对码就一律判没答上，不会再被「退出码 0、有输出」当成答了。
 function askOne(key, model, prompt, limitSec, dir) {
   const started = Date.now();
   return new Promise((resolveP) => {
-    const file = join(dir, `q-${key}.md`);
-    writeFileSync(file, prompt);
+    const nonce = randomUUID().slice(0, 8);
     const child = spawn(
       'cursor-agent',
-      [
-        '-p',
-        '--output-format',
-        'text',
-        '--trust',
-        '--mode',
-        'ask',
-        '--workspace',
-        dir,
-        '--model',
-        model,
-        `读 ${file.split(/[\\/]/).pop()}，照里面的要求作答，只回答案本身。`,
-      ],
-      { cwd: dir, windowsHide: true, shell: process.platform === 'win32' },
+      ['-p', '--output-format', 'text', '--trust', '--mode', 'ask', '--workspace', dir, '--model', model],
+      { cwd: dir, windowsHide: true, shell: process.platform === 'win32', env: cursorAgentEnv() },
+    );
+    child.stdin.on('error', () => {
+      // 执行体提前退出时写 stdin 会 EPIPE，结果以退出码和 stdout 为准
+    });
+    child.stdin.end(
+      `核对码：${nonce}\n（把上面这一行原样抄进你回答的第一行，证明你真的收到了这份题面；然后另起一行再答下面的题面，不要写别的过程话。）\n\n${prompt}`,
     );
     let out = '';
     let err = '';
@@ -69,9 +71,9 @@ function askOne(key, model, prompt, limitSec, dir) {
     child.stderr.on('data', (d) => {
       err += d;
     });
-    const done = (ok, why) => {
+    const done = (ok, why, text = out.trim()) => {
       clearTimeout(timer);
-      resolveP({ key, model, ok, secs: (Date.now() - started) / 1000, text: out.trim(), why });
+      resolveP({ key, model, ok, secs: (Date.now() - started) / 1000, text, why });
     };
     const timer = setTimeout(() => {
       child.kill();
@@ -80,8 +82,17 @@ function askOne(key, model, prompt, limitSec, dir) {
     child.on('error', (e) => done(false, `起不来：${e.message}`));
     child.on('close', (code) => {
       if (code !== 0) return done(false, `退出码 ${code}：${(err || out).trim().slice(0, 200)}`);
-      if (!out.trim()) return done(false, '退出码 0 但没有输出');
-      done(true);
+      const trimmed = out.trim();
+      if (!trimmed) return done(false, '退出码 0 但没有输出');
+      if (!trimmed.includes(nonce))
+        return done(false, `没读到题面（答案里没有题面里的核对码）：${trimmed.slice(0, 200)}`);
+      // 读到了：把核对码那一行从记下的答案里去掉，只留真正的答案
+      const stripped = trimmed
+        .split(/\r?\n/)
+        .filter((line) => !line.includes(nonce))
+        .join('\n')
+        .trim();
+      done(true, undefined, stripped);
     });
   });
 }
