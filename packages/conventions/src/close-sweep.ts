@@ -1,20 +1,23 @@
-// 关单对账（#241）：每天看一遍仓的现状，挑出三种要提醒的——
+// 关单对账（#241）：每天看一遍仓的现状，挑出四种要提醒的——
 // - due：开着、下面没有子单、主线上有它的 结果.md、也没有开着的 PR 还引用它（「需求」栏、标题里的 (#号)、关单词）：
 //   看着做完了没关；
 // - mother：开着的母单，子单都关了：照母单的目标看能不能关；
+// - merged（#460）：合并了的 PR「这个 PR 做完就关单」填了「是」，挂的那张单（「需求」栏，其次标题）却还开着——多半是
+//   正文忘了写关单词，GitHub 没关成；也可能是真没做完。「需求」栏、标题都认不出挂的是哪张单时判不了，记没查成。
 // - no-result：最近关成「完成」、主线上却没有它的 结果.md（直接 gh issue close 关的、Closes 合并时关的都算；关成
 //   「不做了」「重复」的不算）。
 // 纯判断，不碰网络、不读钟（now 由调用方给）：引擎的 jobs/close-sweep.ts 每天经「引擎」机器人读现状、调这里，按结果在单上
-// 留言一次、进驾驶舱提醒。「这张单有没有结果」和 pnpm issue:close、合并闸是同一份判断（close-rule.ts 的 resultDocOf）。
-// 判不了的（子单一页没读全、关单时刻认不出）照实交回 unchecked，由调用方记没查成，不当成没有。
-import { closingIssues, RESULT_FILE, resultDocOf } from './close-rule.ts';
+// 留言一次、进驾驶舱提醒。「这张单有没有结果」和 pnpm issue:close、合并闸是同一份判断（close-rule.ts 的 resultDocOf）；
+// 「这个 PR 做完就关单」填了是却没写关单词，PR 检查页的必填栏提醒（pr-fields.ts）当场就提醒一次，这里是合并后的兜底。
+// 判不了的（子单一页没读全、关单时刻认不出、merged 挂的单认不出）照实交回 unchecked，由调用方记没查成，不当成没有。
+import { closeColumnValue, closingIssues, RESULT_FILE, resultDocOf } from './close-rule.ts';
 import { linkedIssue } from './pr-columns.ts';
 
 /** 关掉的单往回看几天。 */
 export const CLOSE_LOOKBACK_DAYS = 30;
 
-export type CloseKind = 'due' | 'mother' | 'no-result';
-export const CLOSE_KINDS: readonly CloseKind[] = ['due', 'mother', 'no-result'];
+export type CloseKind = 'due' | 'mother' | 'merged' | 'no-result';
+export const CLOSE_KINDS: readonly CloseKind[] = ['due', 'mother', 'merged', 'no-result'];
 
 export interface CloseSweepFacts {
   /** 主线上 specs/ 下的文件（仓内路径）。 */
@@ -27,11 +30,14 @@ export interface CloseSweepFacts {
   }[];
   closedIssues: readonly { number: number; title: string; stateReason: string | null; closedAt: string }[];
   openPulls: readonly { number: number; title: string; body: string }[];
+  /** 最近合并的 PR：判「这个 PR 做完就关单」填了是却没把挂的单关掉用（#460）。 */
+  mergedPulls: readonly { number: number; title: string; body: string }[];
 }
 
 export type CloseFinding =
   | { kind: 'due'; issue: number; title: string; result: string }
   | { kind: 'mother'; issue: number; title: string; subs: number[]; result: string | undefined }
+  | { kind: 'merged'; issue: number; title: string; pr: number }
   | { kind: 'no-result'; issue: number; title: string; closedAt: string };
 
 export interface CloseSweep {
@@ -74,6 +80,20 @@ export function closeSweep(facts: CloseSweepFacts, now: Date, repo?: string): Cl
       findings.push({ kind: 'due', issue: issue.number, title: issue.title, result });
     }
   }
+  const openTitle = new Map(facts.openIssues.map((i) => [i.number, i.title]));
+  for (const pr of [...facts.mergedPulls].sort((a, b) => a.number - b.number)) {
+    if (closeColumnValue(pr.body).value !== 'yes') continue;
+    const linked = linkedIssue(pr.body, pr.title);
+    if (linked === undefined) {
+      unchecked.push({
+        kind: 'merged',
+        text: `PR #${pr.number}「这个 PR 做完就关单」填了「是」，却认不出挂的是哪张单（「需求」栏、标题里的 (#号) 都没写），判不了关没关`,
+      });
+      continue;
+    }
+    const title = openTitle.get(linked);
+    if (title !== undefined) findings.push({ kind: 'merged', issue: linked, title, pr: pr.number });
+  }
   const since = now.getTime() - CLOSE_LOOKBACK_DAYS * 24 * 60 * 60_000;
   for (const issue of [...facts.closedIssues].sort((a, b) => a.number - b.number)) {
     if (issue.stateReason !== 'completed') continue;
@@ -109,6 +129,11 @@ export function closeComment(f: CloseFinding): string {
         : `照这张单的「怎么算做完」看一遍：做到了就写好 \`specs/${f.issue}-<短名>/${RESULT_FILE}\`、随 PR 合进主线，再 \`pnpm issue:close ${f.issue}\`；没做到的开子单挂上来。`;
       return [`子单都关了（${subs}）。`, `${next}${tail}`].join('\n\n');
     }
+    case 'merged':
+      return [
+        `编号 ${f.pr} 的 PR「这个 PR 做完就关单」填了「是」、也合并了，这张单却还开着——多半是正文忘了写关单词，GitHub 没关成。`,
+        `真做完了就 \`pnpm issue:close ${f.issue}\`（查过主线上有结果才关）；没做完的开子单接着做，把这张单的范围改清楚。${tail}`,
+      ].join('\n\n');
     case 'no-result':
       return [
         `这张单关成了「完成」，主线上却没有它的结果 \`specs/${f.issue}-<短名>/${RESULT_FILE}\`。`,
@@ -137,20 +162,26 @@ export function closeAlert(
       ? `${repo}：${n} 张单看着做完了没关`
       : kind === 'mother'
         ? `${repo}：${n} 张母单的子单都关了`
-        : `${repo}：${n} 张单关成了完成却没有结果`;
+        : kind === 'merged'
+          ? `${repo}：${n} 张单的 PR 填了是、合并了却没关`
+          : `${repo}：${n} 张单关成了完成却没有结果`;
   const head =
     kind === 'due'
       ? '主线上有它们的结果，也没有开着的 PR 还引用它们：确认做完了就 pnpm issue:close <单号>。'
       : kind === 'mother'
         ? '子单都关了：照母单的「怎么算做完」看一遍，做到了写好结果再 pnpm issue:close <单号>，没做到的开子单。'
-        : `最近 ${CLOSE_LOOKBACK_DAYS} 天关成「完成」的单，主线上没有 specs/<单号>-<短名>/${RESULT_FILE}：补一份，随 PR 合进主线。`;
+        : kind === 'merged'
+          ? '这些单挂在一个「这个 PR 做完就关单」填了「是」的 PR 上，PR 也合并了，单却还开着（多半是正文忘了写关单词）：确认做完了就 pnpm issue:close <单号>，没做完的开子单接着做。'
+          : `最近 ${CLOSE_LOOKBACK_DAYS} 天关成「完成」的单，主线上没有 specs/<单号>-<短名>/${RESULT_FILE}：补一份，随 PR 合进主线。`;
   const lines = list.slice(0, CLOSE_ALERT_LINES).map((f) => {
     const what =
       f.kind === 'due'
         ? f.result
         : f.kind === 'mother'
           ? `子单 ${f.subs.length} 张都关了${f.result ? `，结果 ${f.result}` : '，还没有结果'}`
-          : `关于 ${f.closedAt.slice(0, 10)}`;
+          : f.kind === 'merged'
+            ? `PR #${f.pr} 填了是、合并了`
+            : `关于 ${f.closedAt.slice(0, 10)}`;
     return `- #${f.issue} ${oneLine(f.title)}：${what}`;
   });
   if (n > CLOSE_ALERT_LINES) lines.push(`- ……另有 ${n - CLOSE_ALERT_LINES} 张`);

@@ -19,6 +19,7 @@ const facts = (over: Partial<CloseSweepFacts> = {}): CloseSweepFacts => ({
   ],
   closedIssues: [],
   openPulls: [],
+  mergedPulls: [],
   ...over,
 });
 const pr = (body: string, title = 't') => ({ number: 90, title, body });
@@ -42,6 +43,37 @@ describe('做完了没关（due）：主线上有结果、没有开着的 PR 还
   it('关单词写的是别的仓：不算引用这张', () => {
     const got = closeSweep(facts({ openPulls: [pr('fixes other/repo#12')] }), NOW, 'o/r');
     expect(got.findings.map((f) => f.issue)).toEqual([12]);
+  });
+});
+
+describe('合并了的 PR 填了是却没关（merged，#460）：挂的单还开着才提醒', () => {
+  const yesPr = (body: string, title = 't') => pr(`**这个 PR 做完就关单**：是\n${body}`, title);
+
+  it('填了是、挂的单（需求栏）还开着：提醒，带 PR 号和单号', () => {
+    const got = closeSweep(facts({ mergedPulls: [yesPr('**需求**：#13')] }), NOW);
+    expect(got.findings).toContainEqual({ kind: 'merged', issue: 13, title: '还在做', pr: 90 });
+  });
+
+  it('号从标题的 (#号) 取（需求栏没写）：一样提醒', () => {
+    const got = closeSweep(facts({ mergedPulls: [yesPr('没写需求', 'fix: 还在做 (#13)')] }), NOW);
+    expect(got.findings).toContainEqual({ kind: 'merged', issue: 13, title: '还在做', pr: 90 });
+  });
+
+  it('填了否：不管挂没挂单都不提醒', () => {
+    const got = closeSweep(facts({ mergedPulls: [pr('**这个 PR 做完就关单**：否\n**需求**：#13')] }), NOW);
+    expect(got.findings.filter((f) => f.kind === 'merged')).toEqual([]);
+  });
+
+  it('填了是、挂的单不在开着的单里（已经关了，或号本来就没有）：不提醒', () => {
+    const got = closeSweep(facts({ mergedPulls: [yesPr('**需求**：#999')] }), NOW);
+    expect(got.findings.filter((f) => f.kind === 'merged')).toEqual([]);
+    expect(got.unchecked).toEqual([]);
+  });
+
+  it('【故意造出的失败】填了是却认不出挂的是哪张单（需求栏、标题都没号）：判不了，记没查成，不当成没关系', () => {
+    const got = closeSweep(facts({ mergedPulls: [yesPr('没写需求', 'fix: 一些事')] }), NOW);
+    expect(got.findings.filter((f) => f.kind === 'merged')).toEqual([]);
+    expect(got.unchecked).toEqual([{ kind: 'merged', text: expect.stringContaining('PR #90') }]);
   });
 });
 
@@ -132,6 +164,11 @@ describe('留言和驾驶舱提醒的字', () => {
     expect(
       closeComment({ kind: 'mother', issue: 20, title: 'x', subs: [40, 41], result: undefined }),
     ).toContain('子单都关了（#40、#41）');
+    // merged 也不写「#PR 号」：写了 GitHub 会在那个 PR 上加一条「被提到」，用不带 # 的「编号 91」代替（#460）
+    const merged = closeComment({ kind: 'merged', issue: 13, title: 'x', pr: 91 });
+    expect(merged).toContain('`pnpm issue:close 13`');
+    expect(merged).toContain('编号 91');
+    expect(merged).not.toMatch(/#\d/);
   });
 
   it(`提醒一个仓一种一条，最多列 ${CLOSE_ALERT_LINES} 张，多的写「另有」`, () => {
@@ -144,5 +181,11 @@ describe('留言和驾驶舱提醒的字', () => {
     expect(a.body).toContain('- #1 登录：specs/12-登录/结果.md');
     expect(a.body).toContain('- ……另有 2 张');
     expect(a.body.split('\n').filter((l) => l.startsWith('- #'))).toHaveLength(CLOSE_ALERT_LINES);
+  });
+
+  it('merged 的驾驶舱提醒：标题、正文都带得上 PR 号（这里不是 GitHub 评论，写 # 没事）', () => {
+    const a = closeAlert('o/r', 'merged', [{ kind: 'merged', issue: 13, title: '还在做', pr: 91 }]);
+    expect(a.title).toBe('o/r：1 张单的 PR 填了是、合并了却没关');
+    expect(a.body).toContain('- #13 还在做：PR #91 填了是、合并了');
   });
 });

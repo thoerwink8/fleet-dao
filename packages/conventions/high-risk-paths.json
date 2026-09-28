@@ -33,6 +33,11 @@
       "why": "读法国配置里的私有值、算指纹、写报警：改错一处，私有值就进了报警、飞书和日志"
     },
     {
+      "path": "deploy/local/desired-config.json",
+      "kind": "碰安全",
+      "why": "本机档（fleet-local，#451）生产配置的期望：和法国那份用同一套判法（config.mjs），改错一项（比如驾驶舱监听地址）就可能对外暴露不该开的口子"
+    },
+    {
       "path": "deploy/hk/nginx-http.conf",
       "kind": "碰安全",
       "why": "香港对公网的入口：哪些路径放出去、转给法国"

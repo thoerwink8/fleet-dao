@@ -1,5 +1,5 @@
-// 关单对账（#241）：每天一次按受管的仓看一遍，做完没关的、子单都关了的母单、关了没结果的，单上留言一次、驾驶舱一条提醒；
-// 这一种都没有了就撤。读不到算没查成，不当成齐了、也不撤提醒。
+// 关单对账（#241）：每天一次按受管的仓看一遍，做完没关的、子单都关了的母单、合并了的 PR 填了是却没关的（#460）、
+// 关了没结果的，单上留言一次、驾驶舱一条提醒；这一种都没有了就撤。读不到算没查成，不当成齐了、也不撤提醒。
 import { describe, expect, it } from 'vitest';
 import {
   type CloseSweepJobDeps,
@@ -18,6 +18,7 @@ const facts = (over: Partial<CloseSweepRead> = {}): CloseSweepRead => ({
   openIssues: [{ number: 12, title: '登录', subIssues: noSubs }],
   closedIssues: [],
   openPulls: [],
+  mergedPulls: [],
   ...over,
 });
 
@@ -52,7 +53,7 @@ function harness(read: () => Promise<CloseSweepRead>, over: Partial<CloseSweepJo
 }
 
 describe('关单对账：留言一次、驾驶舱一条、没了就撤', () => {
-  it('做完没关的：单上留言、驾驶舱一条要人拍；另两种没有的撤掉；关掉的单往回看 30 天', async () => {
+  it('做完没关的：单上留言、驾驶舱一条要人拍；另三种没有的撤掉；关掉的单往回看 30 天', async () => {
     const h = harness(async () => facts());
     expect(await sweepClosing(h.deps)).toEqual({ scanned: 1, found: 1, unchecked: [] });
     expect(h.since()?.toISOString()).toBe('2026-08-29T01:00:00.000Z');
@@ -64,6 +65,7 @@ describe('关单对账：留言一次、驾驶舱一条、没了就撤', () => {
     ]);
     expect(h.resolved.map((r) => r.key)).toEqual([
       `close-sweep:${SLUG}:mother`,
+      `close-sweep:${SLUG}:merged`,
       `close-sweep:${SLUG}:no-result`,
     ]);
   });
@@ -86,13 +88,31 @@ describe('关单对账：留言一次、驾驶舱一条、没了就撤', () => {
     expect(h.alerts.map((a) => a.title)).toEqual([`${SLUG}：1 张母单的子单都关了`]);
   });
 
-  it('都处理完了：三种提醒都撤', async () => {
+  it('【故意造出的失败】合并了的 PR 填了是、挂的单还开着（#460）：单上留言、驾驶舱一条', async () => {
+    const h = harness(async () =>
+      facts({
+        mergedPulls: [{ number: 91, title: 't', body: '**这个 PR 做完就关单**：是\n**需求**：#12' }],
+      }),
+    );
+    await sweepClosing(h.deps);
+    expect(h.comments).toEqual(
+      expect.arrayContaining([
+        { issue: 12, key: 'close-sweep:merged', body: expect.stringContaining('pnpm issue:close 12') },
+      ]),
+    );
+    expect(h.alerts.map((a) => [a.key, a.title])).toEqual(
+      expect.arrayContaining([[`close-sweep:${SLUG}:merged`, `${SLUG}：1 张单的 PR 填了是、合并了却没关`]]),
+    );
+  });
+
+  it('都处理完了：四种提醒都撤', async () => {
     const h = harness(async () => facts({ openIssues: [] }));
     expect(await sweepClosing(h.deps)).toEqual({ scanned: 1, found: 0, unchecked: [] });
     expect(h.alerts).toEqual([]);
     expect(h.resolved.map((r) => r.key)).toEqual([
       `close-sweep:${SLUG}:due`,
       `close-sweep:${SLUG}:mother`,
+      `close-sweep:${SLUG}:merged`,
       `close-sweep:${SLUG}:no-result`,
     ]);
   });
@@ -133,6 +153,7 @@ describe('关单对账：留言一次、驾驶舱一条、没了就撤', () => {
     expect(r.unchecked).toEqual([
       `关单对账 ${SLUG}#12 留言没留成（卫生检查拦下）`,
       `关单对账 ${SLUG} 的「子单都关了的母单」提醒没写成（库连不上）`,
+      `关单对账 ${SLUG} 的「PR 填了是却没关」提醒没写成（库连不上）`,
       `关单对账 ${SLUG} 的「关了没结果」提醒没写成（库连不上）`,
     ]);
     expect(h.alerts.map((a) => a.key)).toEqual([`close-sweep:${SLUG}:due`]);

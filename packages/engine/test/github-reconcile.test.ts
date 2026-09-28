@@ -17,7 +17,12 @@ import {
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { type AppCredentials, createGitHub, pgLedger } from '@fleet-dao/github';
 import { requirementWorkflowId } from '@fleet-dao/shared';
-import { type Client, ScheduleAlreadyRunning, WorkflowFailedError } from '@temporalio/client';
+import {
+  type Client,
+  ScheduleAlreadyRunning,
+  ScheduleNotFoundError,
+  WorkflowFailedError,
+} from '@temporalio/client';
 import { ApplicationFailure } from '@temporalio/common';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { EngineJobs } from '../src/activities.ts';
@@ -31,8 +36,11 @@ import {
   toScheduleResult,
   withFlowSync,
 } from '../src/jobs/github-reconcile.ts';
+import type { RetiredSchedule } from '../src/jobs/retired-schedules.ts';
+import { RETIRED_SCHEDULES } from '../src/jobs/retired-schedules.ts';
 import {
   CANARY_SCHEDULE_ID,
+  deleteRetiredSchedules,
   engineSchedules,
   ensureEngineSchedules,
   GITHUB_RECONCILE_SCHEDULE_ID,
@@ -1103,6 +1111,66 @@ describe('定时任务按固定编号建：重启、重复部署不多出第二�
     } finally {
       await real.teardown();
     }
+  });
+});
+
+describe('退役的定时任务：Temporal 上还在的删掉（断链修复：#445 删「提醒派单」整层，法国的 alert-dispatch 只能帅位手动暂停）', () => {
+  /** 假的删：每个编号的结局按 byId 给，'ok' 删成、'absent' 回 ScheduleNotFoundError、给个 Error 就是删的时候出了别的错。 */
+  function fakeDeleteClient(byId: Record<string, 'ok' | 'absent' | Error>) {
+    const calls: string[] = [];
+    const client = {
+      schedule: {
+        getHandle(id: string) {
+          return {
+            async delete() {
+              calls.push(id);
+              const outcome = byId[id];
+              if (outcome === 'ok') return;
+              if (outcome === 'absent') throw new ScheduleNotFoundError('没有这个 Schedule', id);
+              throw outcome ?? new Error(`测试没给 ${id} 配结局`);
+            },
+          };
+        },
+      },
+    } as unknown as Pick<Client, 'schedule'>;
+    return { client, calls };
+  }
+
+  it('名单目前只有 alert-dispatch（#445 退役的「提醒派单」），两处（这里、看门狗）认同一份', () => {
+    expect(RETIRED_SCHEDULES).toEqual([{ id: 'alert-dispatch', retiredBy: '#445' }]);
+  });
+
+  it('【故意造出的失败】Temporal 上还在：删掉，回 deleted', async () => {
+    const { client, calls } = fakeDeleteClient({ 'alert-dispatch': 'ok' });
+    expect(await deleteRetiredSchedules(client)).toEqual({ 'alert-dispatch': 'deleted' });
+    expect(calls).toEqual(['alert-dispatch']);
+  });
+
+  it('【故意造出的失败】Temporal 上本来就没有（ScheduleNotFoundError）：回 absent，不算错、不多做别的事', async () => {
+    const { client } = fakeDeleteClient({ 'alert-dispatch': 'absent' });
+    expect(await deleteRetiredSchedules(client)).toEqual({ 'alert-dispatch': 'absent' });
+  });
+
+  it('【故意造出的失败】删的时候出了别的错（连不上、没权限）：原文带着报回来，不当成删掉了、不抛出、不挡别的编号', async () => {
+    const { client } = fakeDeleteClient({ 'alert-dispatch': new Error('14 UNAVAILABLE: 连不上') });
+    await expect(deleteRetiredSchedules(client)).resolves.toEqual({
+      'alert-dispatch': { error: '14 UNAVAILABLE: 连不上' },
+    });
+  });
+
+  it('多个编号各自独立：一个删不掉不耽误别的照删、照认「本来就没有」', async () => {
+    const list: RetiredSchedule[] = [
+      { id: 'a', retiredBy: '#1' },
+      { id: 'b', retiredBy: '#2' },
+      { id: 'c', retiredBy: '#3' },
+    ];
+    const { client, calls } = fakeDeleteClient({ a: 'ok', b: 'absent', c: new Error('权限不够') });
+    expect(await deleteRetiredSchedules(client, list)).toEqual({
+      a: 'deleted',
+      b: 'absent',
+      c: { error: '权限不够' },
+    });
+    expect(calls).toEqual(['a', 'b', 'c']);
   });
 });
 

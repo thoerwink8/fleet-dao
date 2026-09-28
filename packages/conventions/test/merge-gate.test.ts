@@ -183,6 +183,19 @@ describe('合并闸：验收场景', () => {
     ]);
   });
 
+  it('④b 填了「是」却没写关单词（#460）→ 照样通过，只提醒该补 Closes；写了关单词就没有这条提醒', async () => {
+    const yesBody = body('直接合——只改文档').replace('否', '是');
+    const noWord = await gatePr(80, deps(world({ prOver: { body: yesBody } })));
+    expect(noWord.state).toBe('success');
+    expect(noWord.lines).toContainEqual(
+      expect.stringMatching(/^提醒：「这个 PR 做完就关单」填了「是」，正文里却没有关单词/),
+    );
+
+    const withWord = await gatePr(80, deps(world({ prOver: { body: `${yesBody}\n\nCloses #12` } })));
+    expect(withWord.state).toBe('success');
+    expect(withWord.lines.join('\n')).not.toContain('却没有关单词');
+  });
+
   it('⑤ 改到先审后合的路径、当前头没有第二意见 → 不通过，报出文件；档位写什么都一样（按路径判）', async () => {
     const files = ['deploy/france.sh', 'docs/x.md'];
     for (const tier of ['先审后合——改部署', '直接合——小改', null]) {

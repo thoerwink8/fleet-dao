@@ -106,7 +106,7 @@ describe('PR 必填栏：齐了就过', () => {
       '**对应计划**：P1「工作流」\n**specs**：不适用\n**档位**：直接合（纯文档）\n**这个 PR 做完就关单**：否',
       '**对应计划：** P1「工作流」\n**specs：** 不适用\n**档位：** 先合后看——一般改动\n**这个 PR 做完就关单：** 否',
       '对应计划：plan.md P1「工作流」（本 PR 新加这一条）\nspecs：`specs/12-登录验证码/`\n档位：先审后合，碰了引擎核心\n这个 PR 做完就关单：否（还有后续）',
-      '- 对应计划：P1「工作流」\n- specs：不适用\n- 档位：`直接合` 只改测试\n- 这个 PR 做完就关单：`是`',
+      '- 对应计划：P1「工作流」\n- specs：不适用\n- 档位：`直接合` 只改测试\n- 这个 PR 做完就关单：`是`\nCloses #1',
       '**对应计划**: P1「工作流」\nSpecs: 不适用\n档位: 直接合 - 纯文档\n这个 PR 做完就关单: 否',
     ]) {
       expect(check({ body: text }), text).toEqual([]);
@@ -294,9 +294,9 @@ describe('「这个 PR 做完就关单」一栏（#241）：只提醒，挡不�
 
   it('是、否都认（带理由、反引号、不加粗都行）', () => {
     for (const line of [
-      '**这个 PR 做完就关单**：是',
+      '**这个 PR 做完就关单**：是\nCloses #12',
       '**这个 PR 做完就关单**：`否`（还有 #13）',
-      '这个 PR 做完就关单：是，Closes 写在最后一行',
+      '这个 PR 做完就关单：是，Closes 写在最后一行\nCloses #12',
     ]) {
       expect(check({ body: withClose(line) }), line).toEqual([]);
     }
@@ -310,6 +310,33 @@ describe('「这个 PR 做完就关单」一栏（#241）：只提醒，挡不�
     ['写了认不出的', '**这个 PR 做完就关单**：看情况', /^「这个 PR 做完就关单」写的「看情况」认不出/],
   ])('%s：提醒一句，说清怎么填', (_name, line, message) => {
     expect(check({ body: withClose(line) })).toEqual([expect.stringMatching(message)]);
+  });
+});
+
+describe('填了「是」却没写关单词（#460）：只提醒，号从「需求」栏取', () => {
+  const withClose = (line: string) => good.body.replace('**这个 PR 做完就关单**：否\n', `${line}\n`);
+
+  it('【故意造出的失败】填了是、正文没有任何关单词：提醒该写 Closes #<需求栏的号>', () => {
+    expect(check({ body: withClose('**这个 PR 做完就关单**：是') })).toEqual([
+      '「这个 PR 做完就关单」填了「是」，正文里却没有关单词：另起一行写 Closes #12（GitHub 合并时才会关，不写不会关）。',
+    ]);
+  });
+
+  it('「需求」栏取不到号（没这一栏、写的是「无」）：提醒写通用的一句，不瞎编号', () => {
+    const noIssue = withClose('**这个 PR 做完就关单**：是').replace('**需求**：#12', '**需求**：无');
+    expect(check({ body: noIssue })).toEqual([
+      '「这个 PR 做完就关单」填了「是」，正文里却没有关单词：另起一行写 写上要关的单号（GitHub 合并时才会关，不写不会关）。',
+    ]);
+  });
+
+  it('写了关单词（Closes、fix、大小写、GH-号都算）：不提醒', () => {
+    for (const word of ['Closes #12', 'fixes #12', 'CLOSES: #12', 'fix GH-12', 'resolve #99']) {
+      expect(check({ body: `${withClose('**这个 PR 做完就关单**：是')}\n${word}` }), word).toEqual([]);
+    }
+  });
+
+  it('填了「否」：不管有没有关单词都不提醒（不要求「否」也写 Closes）', () => {
+    expect(check({ body: withClose('**这个 PR 做完就关单**：否') })).toEqual([]);
   });
 });
 
