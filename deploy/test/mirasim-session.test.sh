@@ -67,6 +67,9 @@ has "不进 fleet-agents.slice（平台常驻服务，不占会话额度）" "$R
 
 U=fleet-mirasim-session-test-$$
 H=/var/tmp/mirasim-session-test-$$
+# 家目录不在真的 /home 下（不碰真机），所以把 lib/mirasim.sh 的模板也指到这儿——
+# 和 mirasim.test.sh 覆盖 MIRASIM_RUN_DIR 是同一个道理（该文件顶上的 shellcheck 注释就是为这个留的）
+MIRASIM_SERVER_BIN="$H/.mirasim-remote/current/server.cjs"
 cleanup() {
   systemctl stop "$UNIT" >/dev/null 2>&1 || true
   systemctl reset-failed "$UNIT" >/dev/null 2>&1 || true
