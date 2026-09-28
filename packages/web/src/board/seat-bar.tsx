@@ -32,8 +32,8 @@ export function SeatBar() {
         <>
           <p className="mb-2 text-xs text-muted-foreground">
             {board.data.seat
-              ? `帅位：第 ${board.data.seat.term} 任 ${board.data.seat.holder}，最后活动 ${formatAgo(board.data.seat.lastActivityAt, now)}`
-              : '帅位：还没人接班'}
+              ? `${brand.seatBarTitle}：第 ${board.data.seat.term} 任 ${board.data.seat.holder}，最后活动 ${formatAgo(board.data.seat.lastActivityAt, now)}`
+              : `${brand.seatBarTitle}：还没人接班`}
           </p>
           <div className="grid gap-3 md:grid-cols-3">
             <Block title="要你定的">
