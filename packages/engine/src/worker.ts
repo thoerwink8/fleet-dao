@@ -307,6 +307,7 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
   let reapOrphanSessions: (() => Promise<number>) | undefined;
   let jobs: EngineJobs | undefined;
   let registerJobs: (() => Promise<void>) | undefined;
+  let retireSchedules: ((client: Pick<Client, 'schedule'>) => Promise<void>) | undefined;
   let close: () => Promise<void> = async () => {};
   let statusFile: string | undefined;
   let control: DrainControl | undefined;
@@ -326,6 +327,7 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
     reapOrphanSessions = real.reapOrphanSessions;
     jobs = real.jobs;
     registerJobs = real.registerJobs;
+    retireSchedules = real.retireSchedules;
     close = real.close;
     statusFile = join(real.stateDir, 'drain.json');
     control = createDrainControl({ ...real.drainControl, drain, log: (message) => console.info(message) });
@@ -349,6 +351,8 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
       const client = new Client({ connection: clientConnection, namespace: config.namespace });
       const ensured = await ensureEngineSchedules(client, config.taskQueue);
       console.info(`定时任务已对齐：${JSON.stringify(ensured)}`);
+      // 退役的定时任务（jobs/retired-schedules.ts）：Temporal 上还在的删掉，删不掉不挡这里往下走（real/retire-schedules.ts）。
+      if (retireSchedules) await retireSchedules(client);
     }
     // 排空状态写给发布脚本看（它拿 pid 和 systemd 的 MainPID 比）：假端口没有状态目录，不写
     if (statusFile) {

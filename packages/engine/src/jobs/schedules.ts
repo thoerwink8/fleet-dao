@@ -3,6 +3,7 @@
 import {
   type Client,
   ScheduleAlreadyRunning,
+  ScheduleNotFoundError,
   type ScheduleOptionsStartWorkflowAction,
   ScheduleOverlapPolicy,
   type ScheduleSpec,
@@ -29,6 +30,7 @@ import {
   HOURLY_RECONCILE_JOB,
   HOURLY_RECONCILE_OFFSET_MINUTES,
 } from './hourly-reconcile.ts';
+import { RETIRED_SCHEDULES, type RetiredSchedule } from './retired-schedules.ts';
 import { ROUTE_PROBE_EVERY_MINUTES, ROUTE_PROBE_JOB, ROUTE_PROBE_OFFSET_MINUTES } from './route-probe.ts';
 import { WATCHDOG_EVERY_MINUTES, WATCHDOG_JOB, WATCHDOG_OFFSET_MINUTES } from './watchdog.ts';
 
@@ -210,4 +212,32 @@ export async function ensureEngineSchedules(
     }
   }
   return out;
+}
+
+/** 一个退役的 Schedule 删的结局：删掉了、本来就不在了、删的时候出了别的错（原文带着，不当成删掉了）。 */
+export type RetiredScheduleOutcome = 'deleted' | 'absent' | { error: string };
+
+/**
+ * 把退役名单（jobs/retired-schedules.ts，不传就用这份）里 Temporal 上还在的 Schedule 删掉。每个编号的结局独立、
+ * 互不影响（一个删不掉不耽误别的照删）；从不抛出——这些 Schedule 已经没有代码在跑了，删不掉不该挡引擎接活，调用方
+ * （real/retire-schedules.ts）按结局决定记日志还是报警，不许把「删的时候出错」当成「删掉了」。
+ */
+export async function deleteRetiredSchedules(
+  client: Pick<Client, 'schedule'>,
+  schedules: readonly RetiredSchedule[] = RETIRED_SCHEDULES,
+): Promise<Record<string, RetiredScheduleOutcome>> {
+  const out: Record<string, RetiredScheduleOutcome> = {};
+  for (const { id } of schedules) {
+    try {
+      await client.schedule.getHandle(id).delete();
+      out[id] = 'deleted';
+    } catch (err) {
+      out[id] = err instanceof ScheduleNotFoundError ? 'absent' : { error: describeError(err) };
+    }
+  }
+  return out;
+}
+
+function describeError(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }

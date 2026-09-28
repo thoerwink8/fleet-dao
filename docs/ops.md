@@ -334,6 +334,13 @@ grok 装在会话用户自己家里：官方安装脚本把二进制放在 `~/.g
   - 日志：`journalctl -u fleet-engine --since '-1h' | grep 看门狗`、`journalctl -u fleet-api --since '-1h' | grep 看门狗`
 - 停：`fleet-temporal schedule toggle --schedule-id watchdog --pause --reason "<为什么>"`，恢复换成 `--unpause`。停了 15 分钟后端就推「看门狗停了」，要停得先说好。
 
+退役的定时任务（断链修复：#445 删掉「提醒派单」整层撞上——代码删了，Temporal 上当初建的 Schedule 不会跟着消失，法国的 `alert-dispatch` 当时只能帅位手动 `fleet-temporal schedule toggle --pause` 止血，见 `specs/445-提醒减负/结果.md`；这里补上「引擎起来自己删」这一步）：
+
+- 名单唯一的出处是 `packages/engine/src/jobs/retired-schedules.ts` 的 `RETIRED_SCHEDULES`（每条 `{ id, retiredBy }`，`retiredBy` 写哪个 PR 把这个定时任务的代码删掉的）。两处认它，不各写一份：看门狗（`packages/engine/src/real/watchdog.ts`）把这几个从「新不新鲜」的判断里剔除；引擎起来对齐定时任务（`ensureEngineSchedules`）之后，紧接着按这份名单把 Temporal 上还在的 Schedule 删掉（`packages/engine/src/jobs/schedules.ts` 的 `deleteRetiredSchedules` 算结局，真装配在 `packages/engine/src/real/retire-schedules.ts` 的 `retireEngineSchedules`，接线在 `worker.ts`）。
+- 退役一个定时任务：把它的代码删掉时，在 `RETIRED_SCHEDULES` 里加一条（`retiredBy` 写这个 PR 号），不用再手动去法国暂停或删 Schedule——下一次引擎起来（发新版本、重启）自动删。
+- 三种结局：Temporal 上还在——删掉，`journalctl -u fleet-engine` 记一行「退役的定时任务已删：<id>」，之前报过的「删不掉」提醒自动撤；本来就不在——什么都不做（不记日志、不碰库，这是常态）；删的时候出了别的错（连不上、没权限）——不当成删掉了，记一行 error 日志，进 `notifications`（`retired-schedule:<id>`，daily 级，日报能看到，不是要当场拍的事），正文带着原始错误；好了下一次自动撤。
+- 手动查：库里 `runuser -u fleet -- psql -d fleet -c "select dedupe_key, title, resolved_at from notifications where dedupe_key like 'retired-schedule:%' order by created_at desc"`；手动删（不想等下一次重启）：`fleet-temporal schedule delete --schedule-id <id>`。
+
 会话用户的口只许它自己连（#35，2026-09-27 堵上；为什么这么挡、比过哪几种做法见 `specs/35-代理口鉴权/方案.md`）：
 
 - 为什么：会话用户的 reclaude 守护在 `127.0.0.1` 上开两个临时端口（一个 HTTP CONNECT 代理，会话的 `HTTPS_PROXY` 指它；一个 MITM TLS 口），端口号每次重启会变。代理不认客户端是谁，`HTTPS_PROXY` 里也没有令牌；回环对本机所有用户都通，堵上之前 `pilot`、`fleet` 连上去就被转发，等于借用会话用户的订阅额度（2026-09-25 审查官发现，2026-09-27 法国复核还开着）。守护不一定跑在会话的 scope 里（那天跑在 root 登录会话的 scope 里），所以不按 cgroup 认，按 uid 认。
