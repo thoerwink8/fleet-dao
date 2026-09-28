@@ -1,5 +1,6 @@
-// PR 正文的栏（pr-columns.ts）：合并闸认挂了哪张单、引擎认 PR 上写的认领号（#348）都靠它。linkedIssue 的边界表在
-// pr-labels.test.ts（原来就在那儿，认法搬到这里后照旧从 pr-labels 导出）；这里管认领号。
+// PR 正文的栏（pr-columns.ts）：claim-status.ts 判挂了哪张单、引擎认 PR 上写的认领号（#348）都靠它（#444 起合并闸
+// 不再用它判挂没挂单）。linkedIssue 的边界表在 pr-labels.test.ts（原来就在那儿，认法搬到这里后照旧从 pr-labels
+// 导出）；这里管认领号。
 import { describe, expect, it } from 'vitest';
 import { linkedIssue, PR_COLUMNS, prClaimId } from '../src/pr-columns.ts';
 import { linkedIssue as fromLabels } from '../src/pr-labels.ts';

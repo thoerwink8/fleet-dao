@@ -10,7 +10,7 @@ import { parseTier, TIER_COLUMN } from './merge-gates.ts';
 import { findItem, itemExample, type PlanPhase, parsePlanRefs, phaseRange, planPhases } from './plan.ts';
 import { PLAN_COLUMN, PR_COLUMNS, prColumns, SPECS_COLUMN } from './pr-columns.ts';
 
-// 各栏怎么认在 pr-columns.ts（合并闸认挂了哪张单也用它，在先审后合的清单里）；这里照旧导出，老的引用不用改
+// 各栏怎么认在 pr-columns.ts（claim-status.ts 判挂了哪张单也用它）；这里照旧导出，老的引用不用改
 export { CLOSE_COLUMN, type CloseColumn, closeColumnValue, PLAN_COLUMN, PR_COLUMNS, prColumns, SPECS_COLUMN };
 
 /** plan.md 在仓里的位置：pr-fields 判「对应计划」、引擎收需求文档时核那一行，都按它找。 */
@@ -63,7 +63,8 @@ export function checkPrFields(pr: PrFacts, repo: RepoFacts): string[] {
   problems.push(...checkSpecs(cols.get(SPECS_COLUMN), repo));
   const tier = parseTier(cols.get(TIER_COLUMN));
   if ('problem' in tier) problems.push(tier.problem);
-  // 「这个 PR 做完就关单」和合并闸认的是同一份（close-rule.ts）：填了「是」却没写关单词，合并闸那边挡
+  // 这一栏只查缺、空、认不出三种；填了「是」却没写关单词不在这里查（#444 起合并闸也不挡这个了：GitHub 不会关那张单，
+  // 单子留着开，没结果文档时连每天的关单对账都不会揪出来——发现这个缺口先报给帅位，看要不要另开单补）
   const close = closeColumnValue(pr.body);
   if (close.value !== 'yes' && close.value !== 'no') problems.push(closeColumnProblem(close));
   return problems;

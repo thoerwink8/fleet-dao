@@ -138,8 +138,6 @@ function world(
   return Object.assign(w, { gh });
 }
 
-const baseWorld = world;
-
 const deps = (w: { gh: GitHubReads }, riskList: GateDeps['riskList'] = RISK): GateDeps => ({
   gh: w.gh,
   riskList,
@@ -217,202 +215,33 @@ describe('合并闸：验收场景', () => {
   });
 });
 
-const ENGINE_BOT = { login: 'fleet-dao-engine[bot]', id: 7, type: 'Bot' };
-const claimStatus = (state: string, description: string, creator: unknown = ENGINE_BOT) => ({
-  context: '认领对得上',
-  state,
-  description,
-  creator,
-});
-const claimOk = (n: number) => claimStatus('success', `#${n} 归 本机/w1，认领号对得上（0f0e0d0c）`);
-const linkedBody = (n: number) =>
-  body('CI 绿就合——只改文档').replace(
-    '**这个 PR 做完就关单**：否',
-    `**需求**：#${n}\n**这个 PR 做完就关单**：否`,
-  );
-
-describe('合并闸：挂了单的 PR 要有引擎机器人贴的、通过的「认领对得上」（#348）', () => {
-  const linked = (over: Parameters<typeof world>[0] = {}) =>
-    world({ ...over, prOver: { body: linkedBody(12), ...over.prOver } });
-
-  it('没挂单：不看这个状态，也不为它读提交状态', async () => {
-    const r = await gatePr(80, deps(world({ broken: { statuses: '不该读' } })));
-    expect(r.state).toBe('success');
-  });
-
-  it('挂了单、当前头上最新的是引擎贴的通过：通过，结论里写上', async () => {
-    const r = await gatePr(80, deps(linked({ statuses: [claimOk(12)] })));
-    expect(r.state).toBe('success');
-    expect(r.lines[0]).toBe('能合：不是草稿、没冲突，没改到先审后合的地方，#12 的认领对得上。');
-  });
-
-  it('标题里的 (#12) 也算挂了单（和 pr-labels 同一个认法）', async () => {
-    const r = await gatePr(80, deps(world({ prOver: { title: '修一下 (#12)' } })));
-    expect(r.state).toBe('failure');
-    expect(r.lines[0]).toMatch(/^等「认领对得上」：PR 挂了 #12/);
-  });
-
-  it('【故意造出的失败】挂了单、当前头上还没有：不通过，等引擎贴', async () => {
-    const r = await gatePr(80, deps(linked()));
-    expect(r).toMatchObject({ state: 'failure', notChecked: false });
-    expect(r.lines[0]).toBe(
-      '等「认领对得上」：PR 挂了 #12，当前头 aaaaaaa 上还没有引擎机器人贴的这个状态；引擎收到 PR 事件就贴（漏了的每 15 分钟对账补上），贴上合并闸自动重算。',
-    );
-  });
-
-  it('【故意造出的失败】旧认领号（引擎判的 failure）：不通过，把引擎说的原因带出来', async () => {
-    const why = '#12 现在归 本机/w2（认领 1a2b3c4d），PR 上写的是 0f0e0d0c；不是这份认领的 PR 合不进去';
-    const r = await gatePr(80, deps(linked({ statuses: [claimStatus('failure', why)] })));
-    expect(r.state).toBe('failure');
-    expect(r.lines[0]).toBe(`认领对不上（当前头 aaaaaaa 上引擎贴的「认领对得上」是 failure）：${why}。`);
-  });
-
-  it('【故意造出的失败】不是引擎机器人贴的（有推送权限的人也贴得出同名的状态）：不认，不通过', async () => {
-    const noCreator = { context: '认领对得上', state: 'success', description: '#12 随便' };
-    for (const status of [
-      claimStatus('success', '#12 随便', { login: 'someone', id: 1, type: 'User' }),
-      claimStatus('success', '#12 随便', { login: 'fleet-dao-engine[bot]', id: 1, type: 'User' }),
-      claimStatus('success', '#12 随便', { login: 'fleet-dao-agent[bot]', id: 2, type: 'Bot' }),
-      claimStatus('success', '#12 随便', null),
-      noCreator,
-    ]) {
-      const r = await gatePr(80, deps(linked({ statuses: [status] })));
-      expect(r.state, JSON.stringify(status)).toBe('failure');
-      expect(r.lines[0]).toMatch(/最新的「认领对得上」不是引擎机器人贴的，不认/);
-    }
-  });
-
-  it('【故意造出的失败】最新的一条说了算：引擎贴过通过，后来别人贴的同名状态照样不认', async () => {
-    const fake = claimStatus('success', '#12 我说行', { login: 'someone', id: 1, type: 'User' });
-    const r = await gatePr(80, deps(linked({ statuses: [fake, claimOk(12)] })));
-    expect(r.state).toBe('failure');
-    // 反过来：引擎的在最新，前面别人贴过的不影响
-    expect((await gatePr(80, deps(linked({ statuses: [claimOk(12), fake] })))).state).toBe('success');
-  });
-
-  it('【故意造出的失败】按旧正文判的（说明开头不是现在挂的单）：不通过，等引擎按新正文重判', async () => {
-    const r = await gatePr(80, deps(world({ prOver: { body: linkedBody(20) }, statuses: [claimOk(12)] })));
-    expect(r.state).toBe('failure');
-    expect(r.lines[0]).toMatch(/^「认领对得上」是按旧正文判的（#12 归 本机\/w1.*），PR 现在挂的是 #20/);
-    const unlinkedBefore = claimStatus('success', '没挂单，不查认领');
-    expect((await gatePr(80, deps(linked({ statuses: [unlinkedBefore] })))).state).toBe('failure');
-  });
-
-  it('还是 pending：不通过', async () => {
-    const r = await gatePr(80, deps(linked({ statuses: [claimStatus('pending', '#12 在判')] })));
-    expect(r.state).toBe('failure');
-    expect(r.lines[0]).toMatch(/^等「认领对得上」：当前头 aaaaaaa 上的还是 pending/);
-  });
-
-  it('【故意造出的失败】状态认不出、读不到、标题认不出：没查成，不当成对得上', async () => {
-    const odd = await gatePr(80, deps(linked({ statuses: [claimStatus('通过', '#12')] })));
-    expect(odd).toMatchObject({ state: 'failure', notChecked: true });
-    expect(odd.lines[0]).toMatch(/提交状态认不出：认领对得上 的 state「通过」认不出/);
-    const blind = await gatePr(80, deps(linked({ broken: { statuses: '502' } })));
-    expect(blind).toMatchObject({ state: 'failure', notChecked: true });
-    const noTitle = await gatePr(80, deps(world({ prOver: { title: null } })));
-    expect(noTitle).toMatchObject({ state: 'failure', notChecked: true });
-    expect(noTitle.lines[0]).toMatch(/标题认不出，没法判挂没挂单/);
-  });
-});
-
-describe('合并闸：写了关单的 PR 要自己带那张单的结果（#325，创始人 2026-09-27 晚拍）', () => {
-  const RESULT = 'specs/12-登录/结果.md';
-  const closing = (column: string, tail: string) =>
+describe('合并闸：#444 起不再判「认领对得上」「写了关单却没带结果.md」（缺的由每天的关单对账另外提醒，不挡合并）', () => {
+  const linkedBody = (column: string, tail = '') =>
     body('CI 绿就合——只改文档').replace(
       '**这个 PR 做完就关单**：否',
       `**需求**：#12\n**这个 PR 做完就关单**：${column}`,
     ) + (tail ? `\n\n${tail}` : '');
-  // 这几条都挂了 #12：引擎贴好了通过的「认领对得上」，只看关单那一段
-  const world = (over: Parameters<typeof baseWorld>[0] = {}) =>
-    baseWorld({ statuses: [claimOk(12)], ...over });
 
-  it('【故意造出的失败】正文写了 Closes #12、改动里没有 specs/12-*/结果.md：不通过，说清怎么补（改动前的合并闸照样放行）', async () => {
-    const r = await gatePr(80, deps(world({ prOver: { body: closing('是', 'Closes #12') } })));
-    expect(r).toMatchObject({ state: 'failure', notChecked: false });
-    expect(r.lines).toEqual([
-      '要关 #12 却没带 specs/12-<短名>/结果.md：结果写进这个 PR；结果不在这里写的，去掉 Closes #12、「这个 PR 做完就关单」改「否」，合完用 pnpm issue:close 12 关。',
-    ]);
+  it('【故意造出的失败】只缺「认领对得上」：挂了单、这个状态压根没贴，或引擎贴过「认领对不上」（failure），合并闸都不查这个，照样判能合', async () => {
+    const noStatus = await gatePr(80, deps(world({ prOver: { body: linkedBody('否') } })));
+    expect(noStatus.state).toBe('success');
+    expect(noStatus.lines.join('\n')).not.toContain('认领');
+
+    const claimFailed = { context: '认领对得上', state: 'failure', description: '认领作废了，改派给了别人' };
+    const claimMismatch = await gatePr(
+      80,
+      deps(world({ prOver: { body: linkedBody('否') }, statuses: [claimFailed] })),
+    );
+    expect(claimMismatch.state).toBe('success');
+    expect(claimMismatch.lines.join('\n')).not.toContain('认领');
   });
 
-  it('带了结果：通过（结果写在这个 PR 里、改名进来的都算）', async () => {
-    const r = await gatePr(
-      80,
-      deps(world({ files: ['docs/x.md', RESULT], prOver: { body: closing('是', 'Closes #12') } })),
-    );
+  it('【故意造出的失败】只缺结果文档：写了 Closes #12、改动里没有 specs/12-*/结果.md，合并闸不查这个，照样判能合，也不为它多读一次改动文件', async () => {
+    const w = world({ prOver: { body: linkedBody('是', 'Closes #12') } });
+    const r = await gatePr(80, deps(w));
     expect(r.state).toBe('success');
-  });
-
-  it('「这个 PR 做完就关单」写「否」、却在正文写了 fixes #12：GitHub 照样会关，照样要带结果', async () => {
-    const r = await gatePr(80, deps(world({ prOver: { body: closing('否', '顺手 fixes #12') } })));
-    expect(r.state).toBe('failure');
-    expect(r.lines[0]).toMatch(/^要关 #12 却没带/);
-  });
-
-  it('结果是这个 PR 删掉的：不算带了', async () => {
-    const w = world({ files: [RESULT], removed: [RESULT], prOver: { body: closing('是', 'Closes #12') } });
-    expect((await gatePr(80, deps(w))).state).toBe('failure');
-  });
-
-  it('【故意造出的失败】填了「是」却一个关单词都没写：GitHub 不关，不通过（结果带了也一样）', async () => {
-    const r = await gatePr(80, deps(world({ files: [RESULT], prOver: { body: closing('是', '') } })));
-    expect(r.state).toBe('failure');
-    expect(r.lines[0]).toBe(
-      '「这个 PR 做完就关单」填了「是」，正文里却没写 Closes #<单号>：GitHub 只认关单词，不写合并了也不关；另起一行写上，还不关就改成「否」。',
-    );
-  });
-
-  it('关好几张：每张都要带自己的结果，缺哪张报哪张', async () => {
-    const r = await gatePr(
-      80,
-      deps(world({ files: [RESULT], prOver: { body: closing('是', 'Closes #12\nCloses #13') } })),
-    );
-    expect(r.state).toBe('failure');
-    expect(r.lines).toEqual([expect.stringMatching(/^要关 #13 却没带 specs\/13-<短名>\/结果\.md/)]);
-  });
-
-  it('关单词写的是别的仓：不关这个仓的单，不挡', async () => {
-    const r = await gatePr(
-      80,
-      deps(
-        world({
-          prOver: { body: closing('否', 'fixes other/repo#12'), base: { repo: { full_name: 'o/r' } } },
-        }),
-      ),
-    );
-    expect(r.state).toBe('success');
-  });
-
-  it('引擎开的 PR（「否」、关单词改成了「关联」）、不关单的 PR：这一段不多读改动文件，照常通过', async () => {
-    const w = world({ prOver: { body: closing('否（引擎合并后第 7 步自己关单）', '关联 #12') } });
-    expect((await gatePr(80, deps(w, '读不到'))).lines.filter((l) => l.includes('#12'))).toEqual([]);
-    expect(w.filesReads).toBe(0);
-  });
-
-  it('【故意造出的失败】要关单、改动文件读不到或读不全：没查成，不当成带了', async () => {
-    const broken = await gatePr(
-      80,
-      deps(world({ broken: { files: 'GitHub 回 502' }, prOver: { body: closing('是', 'Closes #12') } })),
-    );
-    expect(broken).toMatchObject({ state: 'failure', notChecked: true });
-    expect(broken.lines).toContain(
-      '没查成：读不到 PR #80 改了哪些文件（GitHub 回 502），没法判要关的 #12 带没带结果。',
-    );
-    const partial = await gatePr(
-      80,
-      deps(world({ files: [RESULT], prOver: { changed_files: 3, body: closing('是', 'Closes #12') } })),
-    );
-    expect(partial).toMatchObject({ state: 'failure', notChecked: true });
-    expect(partial.lines).toContain(
-      '没查成：PR #80 改了 3 个文件，只读到 1 个，没法判要关的 #12 带没带结果。',
-    );
-  });
-
-  it('PR 读回来正文认不出：认不出要关哪几张、挂没挂单，没查成', async () => {
-    const r = await gatePr(80, deps(world({ prOver: { body: 42 } })));
-    expect(r).toMatchObject({ state: 'failure', notChecked: true });
-    expect(r.lines).toContain('没查成：PR #80 的正文认不出，没法判它要关哪几张单。');
-    expect(r.lines).toContain('没查成：PR #80 的正文认不出，没法判挂没挂单、要不要看「认领对得上」。');
+    expect(r.lines.join('\n')).not.toContain('结果');
+    expect(w.filesReads).toBe(1); // 只有算高风险路径那一次，closingCheck 已经不在了
   });
 });
 
@@ -568,16 +397,20 @@ describe('入口：认出要算哪些 PR、写状态、退出码', () => {
     expect(closed.written).toEqual([]);
   });
 
-  it('第二意见、「认领对得上」状态：开着的 PR 全重算（不只事件里那个头的）；别的 context 不算', async () => {
+  it('第二意见状态：开着的 PR 全重算（不只事件里那个头的）；别的 context（包括「认领对得上」，#444 起）不算', async () => {
     const w = world({ open: [{ number: 80 }, { number: 81 }] });
-    await run(w, 'status', { context: 'second-opinion', sha: HEAD, state: 'success' });
-    expect(w.written).toHaveLength(2);
     // 【故意造出的失败】#351 演练：一轮对账给几个 PR 贴状态，排队组只留最后一次运行、事件里是最后那个 PR 的头——
-    // 只算那一个的话，另一个 PR 就一直停在「等认领对得上」；全重算了两个都写上
-    await run(w, 'status', { context: '认领对得上', sha: MERGE, state: 'success' });
-    expect(w.written).toHaveLength(4);
+    // 只算那一个的话，另一个 PR 就一直停在旧结论上；全重算了两个都写上
+    await run(w, 'status', { context: 'second-opinion', sha: MERGE, state: 'success' });
+    expect(w.written).toHaveLength(2);
     const other = world();
     expect(await run(other, 'status', { context: 'ci', sha: HEAD })).toEqual({
+      code: 0,
+      lines: ['这次没有要算的 PR。'],
+    });
+    // #444：合并闸不再判「认领对得上」，这个状态写上来不用重算了
+    const claimEvent = world({ open: [{ number: 80 }] });
+    expect(await run(claimEvent, 'status', { context: '认领对得上', sha: HEAD, state: 'success' })).toEqual({
       code: 0,
       lines: ['这次没有要算的 PR。'],
     });
@@ -726,7 +559,7 @@ describe('读写 GitHub（假的 fetch）', () => {
     await expect(notList.files(80)).rejects.toThrow('不是列表');
   });
 
-  it('提交状态读逐条的列表（带 creator：「认领对得上」要看是谁贴的），翻页读全；认不出、翻不完都抛', async () => {
+  it('提交状态读逐条的列表，翻页读全；认不出、翻不完都抛', async () => {
     const page1 = Array.from({ length: 100 }, (_, i) => ({ context: `c${i}`, state: 'success' }));
     const f = fakeFetch((url) =>
       url.endsWith('&page=1') ? { json: page1 } : { json: [{ context: 'last', state: 'success' }] },

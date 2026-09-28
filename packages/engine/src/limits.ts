@@ -30,7 +30,8 @@ export interface Limits {
   maxQuestions: number;
   /**
    * 会话 fleet blocked --needs human|info 说要人才能往下做：退回让它带选项和推荐用 fleet ask 重问（#259：问他不挡路），
-   * 一个阶段最多退回几次；到数还这样才停下等人。access、other 不退回，照旧等人。
+   * 一个阶段最多退回几次；到数了还这样，按会话自己写的推荐或假设接着做，不再停下等人，一个字都拿不出才走失败梯子
+   * （换路由、换模型）。access、other 不退回，照旧等人。
    */
   reaskRounds: number;
   /** 方案不合格时重写方案的次数。 */
