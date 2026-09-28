@@ -25,6 +25,15 @@ export const CONFIG_FILES = ['engine.env', 'api.env', 'release.env', 'france.env
 /** 人在法国上跑命令行用的这一份（部署检出里的）。 */
 export const CONFIG_CLI = '/srv/fleet-dao/deploy/france/auto-release/config.mjs';
 const RELEASES = '/srv/fleet-dao-releases';
+/** diff-local 默认比的两份文件：跟着这个脚本在仓里的位置算，不用另外传路径（#451）。 */
+export const FRANCE_DESIRED_FILE = fileURLToPath(new URL('../desired-config.json', import.meta.url));
+export const LOCAL_DESIRED_FILE = fileURLToPath(new URL('../../local/desired-config.json', import.meta.url));
+/**
+ * 本机档和法国要钉住同一套大版本（#451，装机脚本的常量：Postgres、Temporal 服务端与命令行都由同一份
+ * deploy/france.sh 装两个档位，理论上不会漂；这里让「两边一样」这件事能被读出来、被测试故意破坏）。
+ * Node 只写大版本号：france.sh 的前提只要求 /usr/bin/node ≥ 这个数，不是钉死到点号版本。
+ */
+export const PINNED_VERSION_KEYS = ['postgresMajor', 'nodeMajor', 'temporalServer', 'temporalCli'];
 
 const KEY_NAME = /^[A-Z_][A-Z0-9_]*$/;
 const HEX64 = /^[0-9a-f]{64}$/;
@@ -203,8 +212,29 @@ function publicValueProblem(v) {
 }
 
 /**
+ * versions 块（可选；不给就是 null，老的期望文件不用跟着改）：#451 本机档和法国互相比对时钉版本用，
+ * 这份对账（judgeConfig）本身不读它——它比的是线上的环境文件，不是这几个装机脚本的常量。
+ */
+function parseVersions(raw, bad) {
+  if (raw === undefined) return null;
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) bad('versions 要是一个对象');
+  for (const k of Object.keys(raw)) {
+    if (k !== '说明' && !PINNED_VERSION_KEYS.includes(k)) bad(`versions 里不认识的一项「${k}」`);
+  }
+  const missing = PINNED_VERSION_KEYS.filter((k) => !Object.hasOwn(raw, k));
+  if (missing.length > 0) bad(`versions 少了 ${missing.join('、')}`);
+  const out = {};
+  for (const k of PINNED_VERSION_KEYS) {
+    if (typeof raw[k] !== 'string' || raw[k] === '') bad(`versions.${k} 要是非空字符串`);
+    out[k] = raw[k];
+  }
+  return out;
+}
+
+/**
  * 读期望文件、校验。认不出抛 ConfigError（写明哪里不对）；认得出返回
- * { formatVersion, selfHeal, fingerprint: { algorithm, keyId } | null, files: { 文件: [{ key, kind: 'public' | 'private', value?, fp?, note? }] } }。
+ * { formatVersion, selfHeal, fingerprint: { algorithm, keyId } | null, versions: {...} | null,
+ *   files: { 文件: [{ key, kind: 'public' | 'private', value?, fp?, note? }] } }。
  * 私有值的 fp 是 null = 仓里还没记它的指纹（对账记「没查成」，不当成一致）。
  */
 export function parseDesired(text) {
@@ -219,9 +249,10 @@ export function parseDesired(text) {
   };
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) bad('整份要是一个对象');
   for (const k of Object.keys(raw)) {
-    if (!['说明', 'formatVersion', 'selfHeal', 'fingerprint', 'files'].includes(k))
+    if (!['说明', 'formatVersion', 'selfHeal', 'fingerprint', 'versions', 'files'].includes(k))
       bad(`不认识的一项「${k}」`);
   }
+  const versions = parseVersions(raw.versions, bad);
   if (raw.formatVersion !== DESIRED_FORMAT)
     bad(`formatVersion 是 ${JSON.stringify(raw.formatVersion)}，只认 ${DESIRED_FORMAT}`);
   if (typeof raw.selfHeal !== 'boolean') bad('selfHeal 要写 true 或 false（自动改回开不开）');
@@ -285,7 +316,7 @@ export function parseDesired(text) {
   if (lacking.length > 0)
     bad(`少了 ${lacking.join('、')}：受管的 ${CONFIG_FILES.join('、')} 都要写上（一项都不管的写 {}）`);
   if (privateCount > 0 && fingerprint === null) bad('有私有值就要写 fingerprint（算法和钥匙编号）');
-  return { formatVersion: raw.formatVersion, selfHeal: raw.selfHeal, fingerprint, files };
+  return { formatVersion: raw.formatVersion, selfHeal: raw.selfHeal, fingerprint, versions, files };
 }
 
 // ── 指纹 ──
@@ -323,7 +354,7 @@ export function fingerprintOf(key, file, name, value) {
  *   unchecked 每条一句话：这一项、这份文件或整份期望为什么没查成。
  * 文字里只有文件、键名、期望里公开的值；线上的值、私有值一律不写。
  */
-export function judgeConfig({ desired, files = {}, key }) {
+export function judgeConfig({ desired, files = {}, key, desiredPath }) {
   const drift = [];
   const unchecked = [];
   if (!desired || 'error' in desired) {
@@ -390,7 +421,8 @@ export function judgeConfig({ desired, files = {}, key }) {
       byKey.set(e.key, list);
     }
     const add = (k, kind, title, body) => drift.push({ id: `${file}:${k}`, file, key: k, kind, title, body });
-    const fix = `期望在仓里 ${DESIRED_FILE}（在用的那一版）：线上是手改的就改回去；真要改期望，改那份文件、合进主线`;
+    // desiredPath 没给（老调用方、测试）就照旧当法国：不传这个参数时行为不变
+    const fix = `期望在仓里 ${desiredPath ?? DESIRED_FILE}（在用的那一版）：线上是手改的就改回去；真要改期望，改那份文件、合进主线`;
     for (const d of declared) {
       const values = byKey.get(d.key) ?? [];
       const what = d.kind === 'private' ? '私有值' : `期望「${d.value}」`;
@@ -456,6 +488,72 @@ export function judgeConfig({ desired, files = {}, key }) {
   return { result, drift, unchecked, selfHeal: want.selfHeal };
 }
 
+// ── 本机档和法国互相比（#451） ──
+
+/**
+ * 本机档（deploy/local/desired-config.json）和法国（deploy/france/desired-config.json）逐项比：两份都是仓里的
+ * 静态文件，不看任何一台机器此刻的样子。france、local 是 parseDesired() 解析好的样子。
+ * 规矩（本机档的差别只许写在 local 那一份里，#451）：
+ *   - versions 钉死：两边必须逐字一样，写了「说明」也不例外（这一类不许有例外）。
+ *   - 两个文件声明的键集合必须一样：一边有一边没有，就是没登记的差别（要写就两边都写，值可以不同）。
+ *   - 两边都存在的键：都是私有值（各自的凭据，本来就不共用，比如 GitHub webhook 密钥）不算差别，不用登记；
+ *     种类换了（private ↔ public）或都是公开值但值不一样，local 那一条必须有非空的「说明」，没有就是没登记的差别。
+ * 返回 { result: 'ok' | 'drift' | 'unchecked', drift: [{ scope, file?, key, title, body }], unchecked: [...] }。
+ */
+export function diffProfiles(france, local) {
+  const drift = [];
+  if (!france?.versions || !local?.versions) {
+    return {
+      result: 'unchecked',
+      drift,
+      unchecked: ['两份期望里至少一份没写 versions（#451 要求两边都钉版本，才能比）'],
+    };
+  }
+  for (const k of PINNED_VERSION_KEYS) {
+    if (france.versions[k] !== local.versions[k]) {
+      drift.push({
+        scope: 'versions',
+        key: k,
+        title: `本机档和法国的版本没钉住一样：versions.${k}`,
+        body: `法国是 ${JSON.stringify(france.versions[k])}，本机档是 ${JSON.stringify(local.versions[k])}：这一类版本两边必须逐字一样（#451），改 deploy/france.sh 的常量或 deploy/local/desired-config.json 的 versions 让两边一致，没有「说明」能例外这一条。`,
+      });
+    }
+  }
+  const files = new Set([...Object.keys(france.files ?? {}), ...Object.keys(local.files ?? {})]);
+  for (const file of files) {
+    const fKeys = new Map((france.files?.[file] ?? []).map((d) => [d.key, d]));
+    const lKeys = new Map((local.files?.[file] ?? []).map((d) => [d.key, d]));
+    const keys = new Set([...fKeys.keys(), ...lKeys.keys()]);
+    for (const key of keys) {
+      const f = fKeys.get(key);
+      const l = lKeys.get(key);
+      if (!f || !l) {
+        drift.push({
+          scope: 'files',
+          file,
+          key,
+          title: `本机档和法国声明的键不一样：${file} 的 ${key}`,
+          body: `${!f ? '法国' : '本机档'}的期望里没有这一项：本机档要声明和法国一样的键（值、种类可以不同，但要在 deploy/local/desired-config.json 里写「说明」讲清为什么，#451）。`,
+        });
+        continue;
+      }
+      if (f.kind === 'private' && l.kind === 'private') continue; // 各自的凭据，本来就不共用，不用登记
+      const same = f.kind === l.kind && (f.kind !== 'public' || f.value === l.value);
+      if (same) continue;
+      if (!l.note?.trim()) {
+        drift.push({
+          scope: 'files',
+          file,
+          key,
+          title: `本机档和法国不一样、但没登记为什么：${file} 的 ${key}`,
+          body: `本机档这一项要在 deploy/local/desired-config.json 里写「说明」，讲清为什么和法国不一样——本机档的差别只许写在这一处（#451）。`,
+        });
+      }
+    }
+  }
+  return { result: drift.length > 0 ? 'drift' : 'ok', drift, unchecked: [] };
+}
+
 // ── 读法国上的原文（自动发布、france.sh 的读回、命令行共用） ──
 
 /** 读一个文件：{ text }，或 { error }（不在、是符号链接、不是普通文件、读不了）。 */
@@ -501,7 +599,10 @@ export function readLive(paths = {}) {
     }
   }
   const files = Object.fromEntries(CONFIG_FILES.map((f) => [f, readText(`${etc}/${f}`)]));
-  return { commit, desired, files, key: readText(paths.key ?? FINGERPRINT_KEY_FILE) };
+  // 不一致时告诉人改哪份文件：给了 --desired 就是那个路径（本机档，#451）；不然照旧指仓里那份（要改期望，改的
+  // 是仓里现在这份、合进主线，不是某个旧提交里读到的快照，所以不用 commit 拼路径）
+  const desiredPath = paths.desired ?? DESIRED_FILE;
+  return { commit, desired, desiredPath, files, key: readText(paths.key ?? FINGERPRINT_KEY_FILE) };
 }
 
 // ── 命令行（法国，root） ──
@@ -515,13 +616,23 @@ const USAGE = `用法（法国，root；值一律不打印）：
   node config.mjs fingerprint --all [--desired <期望文件>] [--etc <目录>] [--key <钥匙文件>]
       期望里每一项私有值，按线上现在的值算指纹，打印成能贴进期望文件的样子（外加钥匙编号）。
   node config.mjs key-id [--key <钥匙文件>]
-      打印指纹钥匙的编号（期望文件的 fingerprint.keyId）。`;
+      打印指纹钥匙的编号（期望文件的 fingerprint.keyId）。
+  node config.mjs diff-local [--france <期望文件>] [--local <期望文件>]
+      本机档和法国的期望逐项比（#451）：不给路径就用仓里的 deploy/france/desired-config.json、
+      deploy/local/desired-config.json。退出码：0 差别都登记过了；1 有没登记的差别；2 没查成；64 参数不对。`;
 
 function cliArgs(argv) {
   const o = { _: [] };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === '--desired' || a === '--etc' || a === '--key' || a === '--releases') {
+    if (
+      a === '--desired' ||
+      a === '--etc' ||
+      a === '--key' ||
+      a === '--releases' ||
+      a === '--france' ||
+      a === '--local'
+    ) {
       const v = argv[++i];
       if (!v) throw new ConfigError(`${a} 后面要跟路径`);
       o[a.slice(2)] = v;
@@ -576,6 +687,18 @@ export async function cli(
     if (cmd === 'key-id' && rest.length === 0) {
       io.out(keyIdOf(loadKey(o.key)));
       return 0;
+    }
+    if (cmd === 'diff-local' && rest.length === 0) {
+      const franceRaw = readText(o.france ?? FRANCE_DESIRED_FILE);
+      if ('error' in franceRaw) throw new ConfigError(`读不到法国的期望：${franceRaw.error}`);
+      const localRaw = readText(o.local ?? LOCAL_DESIRED_FILE);
+      if ('error' in localRaw) throw new ConfigError(`读不到本机档的期望：${localRaw.error}`);
+      const r = diffProfiles(parseDesired(franceRaw.text), parseDesired(localRaw.text));
+      for (const d of r.drift) io.out(`red ${d.title}：${d.body}`);
+      for (const u of r.unchecked) io.out(`pending 本机档和法国的期望没比成：${u}`);
+      if (r.result === 'ok')
+        io.out('ok 本机档和法国的期望（deploy/local、deploy/france 的 desired-config.json）：差别都登记过了');
+      return r.result === 'ok' ? 0 : r.result === 'drift' ? 1 : 2;
     }
     if (cmd === 'fingerprint' && o.all && rest.length === 0) {
       const live = readLive({ desired: o.desired, etc: o.etc, releases: o.releases });
