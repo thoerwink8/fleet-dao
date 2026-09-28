@@ -37,6 +37,7 @@ ssh_key_fingerprints() { # 文件
 
 # 会话用户家里的 ~/.ssh：不在最好；在的话只许一份 authorized_keys（目录 700、文件 600、都归它自己、都不是链接），
 # 里面每把钥匙 pilot 家里都有。认不出、核对不了一律算不对，不当成没事。返回的问题写进 SSH_BAD
+# shellcheck disable=SC2088 # 报错里的 ~/.ssh 是给人看的文字，不是要展开的路径
 check_session_ssh() { # 用户 家目录
   local u=$1 d="$2/.ssh" f extra keys allow stray
   SSH_BAD=""
