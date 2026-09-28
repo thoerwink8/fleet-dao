@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2034 # MIRASIM_RUN_DIR 是给调用方和测试读写的
+# shellcheck disable=SC2034 # MIRASIM_RUN_DIR、MIRASIM_SERVER_BIN 是给调用方和测试读写的
 # 会话用户自己的 Mirasim 服务（#345 接上引擎；design 第十四节：经 Mirasim 起的会话工具是在 Mirasim 服务的进程里执行的，
-# 所以要给会话用户单独起一份，不借旧系统那份）。这份不像 lib/grok.sh、lib/cursor-agent.sh：装、登录一步做完，装机脚本
-# 装不了——Mirasim 没有能自动跑的无头安装脚本，官方给的路是它自己的桌面端以 SSH 远程模式连上服务器现装、现登录账号
-# （docs/ops.md 第五节「会话用户的 Mirasim」），要创始人在自己电脑上做。这个文件只有读回（check_mirasim）：认这个会话
-# 用户家里有没有恰好一份 <家>/.mirasim/run/local-<端口>.token（引擎连哪个端口、读哪份令牌就看它，
-# packages/engine/src/real/index.ts 的 discoverMirasimEndpoint），不读令牌内容、不管服务进程在不在跑
-# （那是路由探针的事：调度台哪个阶段挂着 Mirasim 的路由、开着，下一轮就真连一次）。
-# france.sh 共用；要先 source common.sh（ok、red、pending）。
+# 所以要给会话用户单独起一份，不借旧系统那份）。服务端本体不是装机脚本装的——Mirasim 没有能自动跑的无头安装脚本，
+# 官方给的路是它自己的桌面端以 SSH 远程模式（或 `mirasim ssh connect`）连上服务器现装，装完顺带就是登录好的
+# （docs/ops.md 第五节「会话用户的 Mirasim」），要创始人或帅位做一次。这个文件管两层：
+#   - check_mirasim：认这个会话用户家里有没有恰好一份 <家>/.mirasim/run/local-<端口>.token（引擎连哪个端口、读哪份
+#     令牌就看它，packages/engine/src/real/index.ts 的 discoverMirasimEndpoint），不读令牌内容、不管服务进程在不在跑
+#     （那是路由探针的事：调度台哪个阶段挂着 Mirasim 的路由、开着，下一轮就真连一次）。
+#   - mirasim_server_installed / check_mirasim_session_unit（#424）：服务端本体装没装，装了就该有一个常驻的本地模式
+#     单元（deploy/france/fleet-mirasim-session.service，france.sh 装）帮它一直开着，这两个函数管「常驻单元该不该
+#     装、装了活没活」这一层，和 check_mirasim 管的「令牌」是两回事：服务端本体没装，常驻单元这轮不装（待配，不算
+#     坏）；装了却没常驻、/api/health 不通才判红。
+# france.sh 共用；要先 source common.sh（ok、changed、red、pending）。
 
 # 会话用户家里放 Mirasim 令牌的目录（{user} 换成会话用户）。和 packages/engine/src/real/index.ts 的
 # DEFAULT_MIRASIM_HOME 拼出同一个位置（那边是 <FLEET_MIRASIM_HOME>/.mirasim/run，这里默认 FLEET_MIRASIM_HOME 就是
@@ -59,4 +63,48 @@ check_mirasim() { # 用户
     port=${port%.token}
     ok "$u 的 Mirasim 服务在：$dir/$names（端口 $port；内容没读，认不认由路由探针判）"
   fi
+}
+
+# 会话用户家里 Mirasim 远程模式装的服务端本体（{user} 换成会话用户）。不在，就是「还没到能起常驻服务这一步」——
+# 第 1 步得先 mirasim ssh connect（或桌面端 SSH 远程模式）一次；在，france.sh 才把它做成常驻单元。
+MIRASIM_SERVER_BIN='/home/{user}/.mirasim-remote/current/server.cjs'
+mirasim_server_bin() { printf '%s' "${MIRASIM_SERVER_BIN//\{user\}/$1}"; } # 会话用户
+
+# 纯判断：服务端本体在不在，不记账、不打印。以那个用户的身份看（和 check_mirasim 一个道理：他看得到的才算数——
+# root 直接 stat 会绕过权限位，看到的不一定是他自己看到的那个文件）。返回 0 在、1 不在或查不了。
+# 调用方要在 if / && / || 里用它（ERR 陷阱安全靠这个，见 check_mirasim 顶上「|| rc=$?」那条注释同样的道理）。
+mirasim_server_installed() { # 用户
+  local u=$1 bin rc=0
+  bin=$(mirasim_server_bin "$u")
+  # shellcheck disable=SC2016 # 单引号里的 $1 在这个用户的 sh 里展开，不是这里
+  runuser -u "$u" -- /bin/sh -c 'test -f "$1"' sh "$bin" >/dev/null 2>&1 || rc=$?
+  ((rc == 0))
+}
+
+# 读回：会话用户自己的 Mirasim 常驻单元（fleet-mirasim-session.service，france.sh 装）这一层装没装、活没活。
+# 和 check_mirasim（认令牌）分开：这条管 france.sh 自己装的那个单元，不是创始人手装的服务端本体。
+# 服务端本体不在：待配，不算坏——这轮 france.sh 不装单元，是「装服务端本体」这一步（要创始人或帅位做）还没做，
+# 不是这个单元坏了。本体在但单元没起、没活、/api/health 不通：判红——这时候是「该常驻却没常驻」。
+check_mirasim_session_unit() { # 用户 单元名 端口
+  local u=$1 unit=$2 port=$3
+  local fix="创始人或帅位用 mirasim ssh connect（或桌面端 SSH 远程模式）连 $u@这台机器装一次服务端本体（docs/ops.md 第五节「会话用户的 Mirasim」）；装好前这个单元不装、Mirasim 路由派不出去"
+  if ! mirasim_server_installed "$u"; then
+    pending "$u 还没有 Mirasim 服务端本体（没有 $(mirasim_server_bin "$u")）：$fix"
+    return 0
+  fi
+  if [[ "$(systemctl is-active "$unit" 2>/dev/null)" != active ]]; then
+    red "$unit 没在跑（服务端本体已装）：journalctl -u $unit -n 50 看现场"
+    return 0
+  fi
+  local health rc=0
+  health=$(curl -fsS --max-time 5 "http://127.0.0.1:$port/api/health" 2>&1) || rc=$?
+  if ((rc != 0)); then
+    red "$unit 在跑但 http://127.0.0.1:$port/api/health 连不上或没回（curl 退出 $rc）：$(tail -c 300 <<<"$health")"
+    return 0
+  fi
+  if [[ "$health" != *'"ok":true'* ]]; then
+    red "$unit 的 /api/health 回了但不是 ok:true：$(tail -c 300 <<<"$health")"
+    return 0
+  fi
+  ok "$unit 在跑，http://127.0.0.1:$port/api/health 回 ok:true"
 }
