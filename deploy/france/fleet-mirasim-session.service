@@ -1,0 +1,54 @@
+# 会话用户 @@SESSION_USER@@ 自己的 Mirasim 服务，常驻在「本地模式」（#345 接上引擎，本单元 #424）。
+# 服务端本体（node、server.cjs）不是这份装机脚本装的：创始人或帅位先用 Mirasim 桌面端以 SSH 远程模式（或
+# `mirasim ssh connect @@SESSION_USER@@@<法国>`）连一次，Mirasim 自己把它装进 @@SESSION_USER@@ 家里的
+# ~/.mirasim-remote/current/（docs/ops.md 第五节「会话用户的 Mirasim」）。这个单元只管「常驻」这一层：
+# 二进制不在时 france.sh 不装它（deploy/lib/mirasim.sh 的 mirasim_server_installed），装了才由 france.sh
+# put_file + enable + start。
+#
+# 远程模式（mirasim ssh connect 起的那个）只听 unix socket、带 stdinShutdown——ssh 断了它就退出，引擎靠不住；
+# 同一个服务端加 --port --host 127.0.0.1 --no-open --no-im 起，就是「本地模式」：绑回环端口，令牌写在
+# ~/.mirasim/run/local-<端口>.token，这是引擎认它的唯一凭据（packages/engine/src/real/index.ts 的
+# discoverMirasimEndpoint）。
+#
+# 端口钉死 @@MIRASIM_SESSION_PORT@@，不跟旧系统共用：
+#   - 4316 是旧系统仍保留的共用 mirasim-server（docs/reference/deploy.md §1.2「留」；
+#     packages/adapters/src/mirasim/wire.ts 的 assertNotRealMirasimInTests 连测试里都拒它），这份是给
+#     会话用户单独起的一份，不能撞上去、也不能被当成那份旧的；
+#   - 4315、4317 是旧系统另外两个绑在本机的服务（mirasim-bridge「停并删」、responses-chat-bridge「待判」，
+#     docs/reference/deploy.md §1.2），清没清干净这台机器上还没有定论，避开一起；
+#   - 端口钉死只是让这个单元本身可预测、好排障：引擎每次连都现读 ~/.mirasim/run/ 下的 local-<端口>.token
+#     文件名认端口，不认这份单元、也不认这张表（docs/ops.md 第二节「端口表」）。
+#
+# 桌面端把服务端升到新版本后，~/.mirasim-remote/current 这个链接会换指向：这个单元的 ExecStart 走的就是
+# current，但常驻进程不会自己感知链接换了——升级后要 systemctl restart 这个单元才会真的换上新版本
+# （docs/ops.md 第五节「会话用户的 Mirasim」）。
+[Unit]
+Description=会话用户 @@SESSION_USER@@ 的 Mirasim 服务（本地模式常驻）
+Documentation=https://github.com/thoerwink8/fleet-dao/blob/main/docs/ops.md
+ConditionPathExists=/home/@@SESSION_USER@@/.mirasim-remote/current/server.cjs
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=@@SESSION_USER@@
+Group=@@SESSION_USER@@
+WorkingDirectory=/home/@@SESSION_USER@@
+# 环境清干净、HOME 定死：Mirasim 拿 HOME 找 ~/.mirasim（状态目录）、~/.mirasim-remote（服务端本体），
+# 不能沿用起这个单元时 systemd 给的默认环境
+Environment=HOME=/home/@@SESSION_USER@@
+Environment=USER=@@SESSION_USER@@
+ExecStart=/home/@@SESSION_USER@@/.mirasim-remote/current/node /home/@@SESSION_USER@@/.mirasim-remote/current/server.cjs --port @@MIRASIM_SESSION_PORT@@ --host 127.0.0.1 --no-open --no-im --workdir /home/@@SESSION_USER@@
+Restart=on-failure
+RestartSec=5
+# 和旧系统那份共用的 mirasim-server 同一套限额（docs/reference/adapters.md 第八节）：这份不算「AI 会话」，不进
+# fleet-agents.slice——那个池子的总量本来就是「能分给会话的量 − 平台常驻服务 600 MiB」算出来的
+# （fleet-agents.slice 顶部注释），Mirasim 服务是那 600 MiB 里占的一份，不该跟会话抢自己的额度；被 OOM 杀掉
+# 也不该拖垮别的服务，所以单独限额、OOMPolicy=continue（杀了算这个服务自己的事，不牵连别的 cgroup）。
+MemoryHigh=2560M
+MemoryMax=4096M
+OOMPolicy=continue
+# 不开 NoNewPrivileges/ProtectHome/ProtectSystem 这类隔离：执行体的工具是在这个 Mirasim 服务自己的进程里跑的
+# （design 第十四节），会话要读写自己整个家目录（工作树、~/.mirasim、~/.cache 之类），加隔离会话就用不了
+
+[Install]
+WantedBy=multi-user.target

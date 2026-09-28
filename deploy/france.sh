@@ -112,6 +112,10 @@ API_PORT=8787
 # 本机上只许 root 和 fleet 连的端口：Temporal 没开认证，库和驾驶舱后端也不该让会话直接碰（nft 表 inet fleet_dao）
 PROTECTED_PORTS=("$PG_PORT" "${TEMPORAL_PORTS[@]}" "$API_PORT")
 NFT_FILE=/etc/fleet-dao/nftables.nft
+# 会话用户自己的 Mirasim 服务，本地模式常驻用的固定端口（deploy/france/fleet-mirasim-session.service，#424）：
+# 避开旧系统仍留着共用的 4316（wire.ts 的 assertNotRealMirasimInTests 连测试里都拒它）和同机可能还没清干净的
+# 4315、4317（docs/reference/deploy.md §1.2）。引擎自己认端口靠现读 local-<端口>.token 的文件名，不认这个常量。
+MIRASIM_SESSION_PORT=4318
 # AI 会话跑在一个专用用户下（lib/session-user.sh：reclaude 设备上限，法国只占 1 台）；引擎（fleet）经 sudo 只能调
 # fleet-agent-scope 起会话。会话用户：没有 sudo、不能提权、家目录干净、没有 GitHub 凭据、读不到 /etc/fleet-dao。
 # 旧系统的会话用户不用、不碰；停用的 fleet-agent-dedicated 不建、不查（已删）。
@@ -731,6 +735,29 @@ setup_grok() {
     fi
     ensure_grok "$u" "$(grok_bin "$u")" "$GROK_INSTALL_URL"
   done
+}
+
+# 会话用户自己的 Mirasim 服务，本地模式常驻（lib/mirasim.sh，#345 接上引擎、单元本身 #424）：服务端本体（node、
+# server.cjs）不是这一步装的，创始人或帅位先用 mirasim ssh connect（或桌面端 SSH 远程模式）连一次装好
+# （docs/ops.md 第五节「会话用户的 Mirasim」）——这一步只把它做成常驻：本体还没到位就不装单元、记待配（不许把
+# 整个装机停下：这里改成一个 if 判断，不走「赋值 || rc=$?」那条容易踩坑的路，见 lib/mirasim.sh 顶上的注释）。
+setup_mirasim_session() {
+  step "会话用户 ${SESSION_USERS[0]} 的 Mirasim 服务（本地模式常驻，端口 $MIRASIM_SESSION_PORT；deploy/france/fleet-mirasim-session.service）"
+  local u=${SESSION_USERS[0]} unit_changed
+  if ! id "$u" >/dev/null 2>&1; then
+    pending "$u 这个用户还没有，Mirasim 常驻单元没装（建了再跑一遍）"
+    return 0
+  fi
+  if ! mirasim_server_installed "$u"; then
+    pending "$u 还没有 Mirasim 服务端本体（没有 $(mirasim_server_bin "$u")），这轮不装常驻单元（docs/ops.md 第五节「会话用户的 Mirasim」）"
+    return 0
+  fi
+  render "$DEPLOY_DIR/france/fleet-mirasim-session.service" \
+    SESSION_USER="$u" MIRASIM_SESSION_PORT="$MIRASIM_SESSION_PORT"
+  put_file /etc/systemd/system/fleet-mirasim-session.service root:root 644 "$RENDERED"
+  unit_changed=$WROTE
+  if ((unit_changed)); then systemctl daemon-reload; fi
+  ensure_unit_running fleet-mirasim-session.service "$unit_changed"
 }
 
 setup_app_config() {
@@ -1411,8 +1438,10 @@ readback_grok() {
   done
 }
 
-# 会话用户自己的 Mirasim 服务（lib/mirasim.sh，#345）：这一步不装，只看有没有——创始人从自己电脑上的 Mirasim 桌面端
-# 以 SSH 远程模式装、登录（docs/ops.md 第五节「会话用户的 Mirasim」）。
+# 会话用户自己的 Mirasim：服务端本体（装、登录要创始人或帅位在自己电脑上做，docs/ops.md 第五节「会话用户的
+# Mirasim」）这一步不装，只看有没有；常驻单元（fleet-mirasim-session.service）是 setup_mirasim_session 装的，
+# 这里核对它活没活、/api/health 通不通（lib/mirasim.sh 的 check_mirasim_session_unit）；令牌恰好一份仍由
+# check_mirasim 认（引擎连哪个端口看的是这份令牌，不是这个单元）。
 readback_mirasim() {
   local u
   for u in "${SESSION_USERS[@]}"; do
@@ -1420,6 +1449,7 @@ readback_mirasim() {
       pending "$u 这个用户还没有，Mirasim 服务没查"
       continue
     fi
+    check_mirasim_session_unit "$u" fleet-mirasim-session.service "$MIRASIM_SESSION_PORT"
     check_mirasim "$u"
   done
 }
@@ -1479,6 +1509,7 @@ main() {
     setup_session_pnpm
     setup_cursor_agent
     setup_grok
+    setup_mirasim_session
     setup_app_config
     setup_web_upload
     setup_demo_scopes
