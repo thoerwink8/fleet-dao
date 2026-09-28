@@ -620,6 +620,7 @@ describe.skipIf(!onPosix)('grok 的真插头接真起法', () => {
           '/dev/stdin',
           '--output-format',
           'streaming-json',
+          '--no-plan',
           '-m',
           'grok-4.7',
           '--cwd',
