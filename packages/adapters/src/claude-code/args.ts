@@ -1,6 +1,7 @@
 // reclaude（原样转给 claude）的无头参数。提示词不进参数，走 stdin：超长会 E2BIG，而且 --allowedTools 吃变长参数，
 // 放在它后面的提示词会被当成工具名（已实测）。
 import { fileURLToPath } from 'node:url';
+import { assertSessionEffort, SESSION_EFFORTS, type SessionEffort } from '../effort.ts';
 
 export const CLAUDE_PERMISSION_MODES = [
   'acceptEdits',
@@ -12,7 +13,8 @@ export const CLAUDE_PERMISSION_MODES = [
 ] as const;
 export type ClaudePermissionMode = (typeof CLAUDE_PERMISSION_MODES)[number];
 
-export type ClaudeEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+/** 和 `claude --effort` 的 help 一致：low、medium、high、xhigh、max。 */
+export type ClaudeEffort = SessionEffort;
 
 /**
  * new = 用我们给的会话号开新会话（进程没起来也知道该续哪个）；resume = 续上这个会话；
@@ -118,7 +120,11 @@ export function buildClaudeArgs(spec: ClaudeArgsSpec): string[] {
       throw new Error(`不存记录的会话只能是新会话，给的是 ${spec.session.mode}`);
     args.push('--no-session-persistence');
   }
-  if (spec.effort) args.push('--effort', spec.effort);
+  if (spec.effort !== undefined) {
+    // 类型擦掉之后，不认识的字符串也会进到这里：不传给命令行
+    assertSessionEffort(spec.effort, SESSION_EFFORTS, 'Claude Code');
+    args.push('--effort', spec.effort);
+  }
   if (spec.appendSystemPrompt) args.push('--append-system-prompt', spec.appendSystemPrompt);
   // 变长参数放最后、值并成一个参数：它后面再没有东西可吞
   if (spec.allowedTools?.length) args.push('--allowedTools', spec.allowedTools.join(','));
