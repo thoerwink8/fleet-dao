@@ -35,8 +35,10 @@
 //   会话号不是我们起的：server 的 accepted 帧回 sessionKey（<agent>:<uuid>），事先给不出，和 cursor 一样先回一个一眼看得出
 //   不是真号的临时号（MIRASIM_PENDING_PREFIX），真号经 onAccepted → onSessionId 报上来。没有 fork（换了账号池一律接力）。
 //   令牌文件、账本都在这份服务的用户家里（~/.mirasim/run/local-<端口>.token、~/.mirasim/traffic），引擎自己的进程进不去
-//   那个家（750）：连接工厂（mirasimConnect）、读账本（mirasimLedgerFs）在生产装配里都经 exec 帮手以那个会话用户读，
-//   不直接读本机文件（real/index.ts）。
+//   那个家（750），连回环口也连不上——法国防火墙只放行这个用户和 root 连它开的口（ops 第五节「会话用户的口只许它自己
+//   连」，#35，2026-09-28 实测断链）：读账本（mirasimLedgerFs）经 exec 帮手以那个会话用户读，连接（mirasimConnect）经
+//   一个同样以那个会话用户身份跑的桥接进程（adapters 的 bridge.ts + bridge-connect.ts），帧经它的 stdin/stdout 转，
+//   引擎自己的进程不直连端口、不直接读令牌文件（real/index.ts 的 mirasimDepsFor）。
 //   协议没有「探针模式」这种权限旗标（不像 Claude 的 dontAsk、cursor 的 --force、grok 的 --always-approve）：探针能不能
 //   不跑工具全靠 PROBE_PROMPT 那句「不要调用任何工具」，服务端那边会不会听不是我们控制得了的——这是协议本身的限制，
 //   不是漏接了什么。
@@ -213,8 +215,9 @@ export interface HostDriverDeps {
   /** 起 grok 的命令（绝对路径）：装在会话用户自己家里，生产用 grokLaunchCommand 先看在不在。 */
   grokCommand(user: SessionUser): string[];
   /**
-   * 连到这个会话用户自己的 Mirasim 服务（给他单独起的那份，design 第十四节）：不是起命令，是开一条到本机回环的 ws；
-   * 每次起会话都现连（重试、读令牌的活见 adapters 的 mirasimConnector）。生产装配见 real/index.ts。
+   * 连到这个会话用户自己的 Mirasim 服务（给他单独起的那份，design 第十四节）：不是起命令，是经桥接进程（会话用户身份，
+   * adapters 的 bridge-connect.ts）转一条到本机回环的 ws；每次起会话都现连（重试、读令牌的活在桥接进程里，见 bridge.ts）。
+   * 生产装配见 real/index.ts。
    */
   mirasimConnect(user: SessionUser): MirasimConnect;
   /** 这个会话用户的 Mirasim 账本目录（他家里的 ~/.mirasim/traffic）：中转路由结束后核实走没走上游（MS-27）。 */
