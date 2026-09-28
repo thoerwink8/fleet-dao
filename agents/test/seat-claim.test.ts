@@ -709,23 +709,21 @@ describe('给远端 shell 的参数', () => {
   });
 });
 
-describe('.githooks/pre-push：两步收到同一份标准输入', () => {
+describe('.githooks/pre-push：只跑卫生检查', () => {
   const HOOK = fileURLToPath(new URL('../../.githooks/pre-push', import.meta.url));
 
-  function repoWithStubs(claimExit: number, hygieneExit: number) {
+  function repoWithStub(hygieneExit: number) {
     const dir = mkdtempSync(join(tmpdir(), 'fleet-hook-'));
     homes.push(dir);
-    const claimDir = join(dir, 'agents', 'skills', 'commander', 'scripts');
     const hygieneDir = join(dir, 'packages', 'hygiene', 'src', 'bin');
-    mkdirSync(claimDir, { recursive: true });
     mkdirSync(hygieneDir, { recursive: true });
-    const stub = (file: string, name: string, code: number) =>
-      writeFileSync(
-        file,
-        `import { readFileSync, writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(join(dir, name))}, JSON.stringify({ argv: process.argv.slice(2), stdin: readFileSync(0, 'utf8') }));\nprocess.exitCode = ${code};\n`,
-      );
-    stub(join(claimDir, 'claim.mjs'), 'claim.json', claimExit);
-    stub(join(hygieneDir, 'pre-push.ts'), 'hygiene.json', hygieneExit);
+    writeFileSync(
+      join(hygieneDir, 'pre-push.ts'),
+      `import { readFileSync, writeFileSync } from 'node:fs';
+writeFileSync(${JSON.stringify(join(dir, 'hygiene.json'))}, JSON.stringify({ argv: process.argv.slice(2), stdin: readFileSync(0, 'utf8') }));
+process.exitCode = ${hygieneExit};
+`,
+    );
     return dir;
   }
   const run = (dir: string, stdin: string) =>
@@ -734,23 +732,20 @@ describe('.githooks/pre-push：两步收到同一份标准输入', () => {
       input: stdin,
       encoding: 'utf8',
     });
-  const read = (dir: string, name: string) => JSON.parse(readFileSync(join(dir, name), 'utf8'));
 
-  it('查认领过了再做卫生检查：两步收到同样的几行，卫生检查的退出码原样交回', () => {
-    const lines = `refs/heads/a ${'1'.repeat(40)} refs/heads/a ${'2'.repeat(40)}\nrefs/heads/b ${'3'.repeat(40)} refs/heads/b ${'4'.repeat(40)}`;
-    const dir = repoWithStubs(0, 0);
-    expect(run(dir, `${lines}\n`).status).toBe(0);
-    expect(read(dir, 'claim.json')).toEqual({ argv: ['prepush'], stdin: `${lines}\n` });
-    expect(read(dir, 'hygiene.json')).toEqual({
+  it('卫生检查收到 git 给的几行和参数，退出码原样交回', () => {
+    const lines = `refs/heads/a ${'1'.repeat(40)} refs/heads/a ${'2'.repeat(40)}
+`;
+    const dir = repoWithStub(0);
+    expect(run(dir, lines).status).toBe(0);
+    expect(JSON.parse(readFileSync(join(dir, 'hygiene.json'), 'utf8'))).toEqual({
       argv: ['origin', 'https://example.test/repo.git'],
-      stdin: `${lines}\n`,
+      stdin: lines,
     });
-    expect(run(repoWithStubs(0, 1), `${lines}\n`).status).toBe(1);
+    expect(run(repoWithStub(1), lines).status).toBe(1);
   });
 
-  it('【故意造出的失败】认领对不上（查认领那步退出码 1）：拦下，卫生检查不跑', () => {
-    const dir = repoWithStubs(1, 0);
-    expect(run(dir, `refs/heads/a ${'1'.repeat(40)} refs/heads/a ${'2'.repeat(40)}\n`).status).toBe(1);
-    expect(() => read(dir, 'hygiene.json')).toThrow();
+  it('【故意造出的失败】钩子不引用技能目录里的脚本：core.hooksPath 常指向主检出，在别的工作树里跑时那个路径可能不存在', () => {
+    expect(readFileSync(HOOK, 'utf8')).not.toMatch(/^[^#]*agents\/skills\//m);
   });
 });
