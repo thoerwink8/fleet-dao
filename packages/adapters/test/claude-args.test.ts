@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildClaudeArgs,
   type ClaudeArgsSpec,
+  type ClaudeEffort,
   PRETOOL_MATCHER,
   PRETOOL_SCRIPT,
   pretoolSettings,
@@ -80,6 +81,10 @@ describe('buildClaudeArgs', () => {
     expect(() => buildClaudeArgs({ ...base, model: '--bare' })).toThrow('模型名');
     expect(() => buildClaudeArgs({ ...base, model: 'opus 5' })).toThrow('模型名');
     expect(() => buildClaudeArgs({ ...base, session: { mode: 'resume', id: 'latest' } })).toThrow('UUID');
+  });
+
+  it('档位不认识：不传给命令行【故意造出的失败】', () => {
+    expect(() => buildClaudeArgs({ ...base, effort: 'turbo' as ClaudeEffort })).toThrow('effort');
   });
 });
 
