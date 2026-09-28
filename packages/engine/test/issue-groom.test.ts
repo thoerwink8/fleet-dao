@@ -187,14 +187,24 @@ describe('类别：Jev 判、只贴不摘', () => {
 });
 
 describe('版本：创始人开的进当前版本，AI 发现的进未排期', () => {
-  it('人开的、没挂里程碑：挂当前版本', async () => {
-    // 类别先贴好，隔开类别那条循环，这个用例只看版本这一件事
+  it('人开的、进门时类别和版本都没有：这一轮贴上类别，也挂当前版本', async () => {
+    const { deps, writes } = fakeDeps({
+      facts: new Map([['o/r', facts({ issues: [issue({ authorIsBot: false })] })]]),
+    });
+    const r = await sweepIssueGroom(deps);
+    expect(writes).toContain('label o/r#1 杂项');
+    expect(writes).toContain('milestone o/r#1 3');
+    expect(r.found).toBe(2);
+  });
+
+  it('【故意造出的失败】人开的、有类别没版本（issue:new 开的「未排期」）：有意未排期，不挂', async () => {
+    // 09-28 上线第一轮就栽在这：52 张有意未排期的单被全挂进 v1，引擎当场照版本接了活
     const { deps, writes } = fakeDeps({
       facts: new Map([['o/r', facts({ issues: [issue({ authorIsBot: false, labels: ['需求'] })] })]]),
     });
     const r = await sweepIssueGroom(deps);
-    expect(writes).toContain('milestone o/r#1 3');
-    expect(r.found).toBe(1);
+    expect(writes.some((w) => w.startsWith('milestone'))).toBe(false);
+    expect(r.unchecked).toEqual([]);
   });
 
   it('机器人开的（引擎对账、提醒）：未排期，不挂，不算没查成', async () => {
@@ -305,12 +315,12 @@ describe('闲置清理（照 Kubernetes）：只查真未排期的单，这一�
   it('人开的单闲置很久：这一轮挂了当前版本，不查闲置（不会既挂版本又被关）', async () => {
     const old = new Date(NOW.getTime() - 999 * 86_400_000).toISOString();
     const { deps, writes } = fakeDeps({
-      facts: new Map([['o/r', facts({ issues: [issue({ updatedAt: old, labels: ['需求'] })] })]]),
+      facts: new Map([['o/r', facts({ issues: [issue({ updatedAt: old })] })]]),
     });
     const r = await sweepIssueGroom(deps);
     expect(writes).toContain('milestone o/r#1 3');
     expect(writes.some((w) => w.includes('过时') || w.startsWith('close'))).toBe(false);
-    expect(r.found).toBe(1);
+    expect(r.found).toBe(2);
   });
 
   it('机器人开的、真未排期、闲置满 30 天：贴「过时」', async () => {

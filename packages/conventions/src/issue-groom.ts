@@ -82,15 +82,20 @@ export type MilestoneDecision =
 
 /**
  * source 由调用方定（AGENTS.md「先后顺序」③④）：'bot' 是我们自己的机器人开的（引擎对账、提醒），照④进未排期；
- * 其余（人类账号，含创始人本人——本机 gh 登的也是他、公开仓万一有外人开单也在这一类）照③进当前版本，
- * 人要是觉得不该进当前版本可以自己改里程碑（这条规矩只管缺里程碑的单，人已经定过的不会再被碰，见 issue-groom 引擎层
- * 只对「milestone === null」的单调用这个判断）。
+ * 其余（人类账号，含创始人本人——本机 gh 登的也是他、公开仓万一有外人开单也在这一类）照③进当前版本。
+ *
+ * triaged：这一轮开始时单上已经有类别标签。改这里之前必须知道：「未排期」在仓里就是「没挂里程碑」（issue:new 的
+ * `--milestone 未排期` 建单不带里程碑），光看 milestone === null 分不出「忘了挂」和「有意放未排期」。issue:new 开的单
+ * 一定带类别标签（缺 --kind 它拒开），人手动归过类的也有——这些单的版本已经有人定过，没挂就是有意未排期，不碰。
+ * 只有进门时类别、版本都没有的（网页上、gh issue create 直接开的）才照③挂当前版本。
+ * 09-28 上线第一轮没有这一条，把 52 张有意未排期的单全挂进了 v1，引擎当场照版本接了活。
  */
 export function milestonePlan(
   source: 'bot' | 'human',
+  triaged: boolean,
   openMilestones: readonly { number: number; title: string }[],
 ): MilestoneDecision {
-  if (source === 'bot') return { action: 'unscheduled' };
+  if (source === 'bot' || triaged) return { action: 'unscheduled' };
   const current = currentVersion(openMilestones);
   if (!current) return { action: 'unknown', why: '现在没有还开着的 v<N> 里程碑，没有当前版本' };
   return { action: 'assign', milestone: current.milestone };

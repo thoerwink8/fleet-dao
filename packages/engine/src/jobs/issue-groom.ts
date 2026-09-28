@@ -203,7 +203,9 @@ async function groomRepo(
   // 二、版本 + 四、闲置（同一个循环：milestone === null 的单；挂了当前版本的这一轮不再查闲置）。
   for (const issue of facts.issues) {
     if (issue.milestone !== null) continue;
-    const decision = milestonePlan(issue.authorIsBot ? 'bot' : 'human', openMilestones);
+    // 归没归过类看这一轮读到的标签（第一步刚贴上类别的不算：它进门时类别、版本都没有）。
+    const triaged = issue.labels.some(isKindLabel);
+    const decision = milestonePlan(issue.authorIsBot ? 'bot' : 'human', triaged, openMilestones);
     if (decision.action === 'assign') {
       try {
         await deps.setMilestone(repo, issue.number, decision.milestone.number);
