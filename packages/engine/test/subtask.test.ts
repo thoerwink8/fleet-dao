@@ -71,9 +71,11 @@ describe('子任务工作流', { timeout: 60_000 }, () => {
     ]);
     expect(order).toContain('waitCi');
     expect(world.callsOf('startSession').map((c) => c.input.stage)).toEqual(['execute', 'review']);
-    // 合并队列里：同步主线 → 在新头上跑测试 → 带头约束合并。
-    const mqOrder = order.slice(order.indexOf('runTests') - 1);
-    expect(mqOrder.slice(0, 3)).toEqual(['syncMainline', 'runTests', 'mergePr']);
+    // 合并队列里：同步主线 → 读这个项目的流程配置（判先审后合清单在哪，riskPathsFileForItem）→ 在新头上跑
+    // 测试 → 带头约束合并（runTests 前面那次 syncMainline 才是合并队列自己的——早前 Fusion 自己「并主线」那步
+    // 也会调 syncMainline，indexOf 找的是第一次，不是这次）。
+    const mqOrder = order.slice(order.indexOf('runTests') - 2);
+    expect(mqOrder.slice(0, 4)).toEqual(['syncMainline', 'flowConfig', 'runTests', 'mergePr']);
     expect(world.callsOf('removeWorktree').map((c) => c.input.archive)).toEqual([false]);
   });
 

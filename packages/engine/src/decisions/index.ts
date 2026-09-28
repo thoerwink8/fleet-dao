@@ -36,8 +36,11 @@ import {
   type Mode,
   nextFlow,
   type Rebuttable,
+  type RiskPathsFileDecision,
+  type RiskPathsFileInput,
   rebuttable,
   resolveFlowConfig,
+  riskPathsFileFor,
   type Source,
   setupFusion,
   specDocs,
@@ -111,6 +114,11 @@ export interface DecisionMap {
   bodyCriteria: { input: { body: string }; output: { ok: string[] } | { error: string } };
   /** 开工前看流程配置副本：能不能派、用哪套、每一步的模型。 */
   fusionSetup: { input: FusionSetupInput; output: FusionSetup };
+  /**
+   * 合并队列（workflows/merge-queue.ts）判「合并闸红是不是只缺 second-opinion」要知道的：这个项目声明的先审后合
+   * 清单在仓里哪个路径；没声明 = 没有这个字段（core 的 riskPathsFileFor）。
+   */
+  riskPathsFileFor: { input: RiskPathsFileInput; output: RiskPathsFileDecision };
   /** Lead 交回的方案和任务简报收不收。 */
   /** Lead 交回的方案和任务简报收不收；withRequirement = 这一步还要提交照正文写的需求文档（#295）。 */
   leadPlan: { input: { output: unknown; specDir: string; withRequirement?: boolean }; output: LeadPlanCheck };
@@ -185,6 +193,7 @@ export function createDecide(deps: DecideDeps = {}): Decide {
     },
     bodyCriteria: ({ body }) => bodyCriteria(body),
     fusionSetup: setupFusion,
+    riskPathsFileFor,
     leadPlan: checkLeadPlan,
     leadReview: checkLeadReview,
     rebuttable,

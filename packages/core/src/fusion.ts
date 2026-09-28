@@ -65,19 +65,23 @@ export type FusionSetup =
     }
   | { ok: false; why: string };
 
+type StoredConfigDecision =
+  | { ok: true; config: FlowConfig; source: 'project' | 'org_default' }
+  | { ok: false; why: string };
+
 /**
- * 开工前（收单）看流程配置：副本认不出、从没同步过、太久没同步成、整份认不出、指的配置不存在，一律不派（外壳挂起、报红，
- * 0003 第 9 条「读不到、认不出就这个项目停派、报红，不拿默认顶」）。仓里没有自己的配置时照全组织默认派，source 标出来。
+ * 副本能不能用、里面的整份认不出认不出——setupFusion 和 riskPathsFileFor 共用同一份判法（同一份副本，不能两处
+ * 各判一遍、慢慢走岔）：副本认不出、从没同步过、太久没同步成、整份认不出，一律不派。
  */
-export function setupFusion(input: FusionSetupInput): FusionSetup {
-  const now = new Date(input.now);
-  if (Number.isNaN(now.getTime())) return { ok: false, why: `判的时刻认不出：${input.now}` };
-  const verdict = replicaVerdict(input.read.replica, now);
+function decideStoredConfig(read: FlowConfigRead, nowText: string): StoredConfigDecision {
+  const now = new Date(nowText);
+  if (Number.isNaN(now.getTime())) return { ok: false, why: `判的时刻认不出：${nowText}` };
+  const verdict = replicaVerdict(read.replica, now);
   if (!verdict.ok) return verdict;
-  if (input.read.source === null) {
+  if (read.source === null) {
     return { ok: false, why: '流程配置副本记着同步过，却没记读自仓里还是全组织默认：认不出，不派' };
   }
-  const parsed = StoredConfigSchema.safeParse(input.read.config);
+  const parsed = StoredConfigSchema.safeParse(read.config);
   if (!parsed.success) {
     const where = parsed.error.issues
       .slice(0, 5)
@@ -85,13 +89,23 @@ export function setupFusion(input: FusionSetupInput): FusionSetup {
       .join('；');
     return { ok: false, why: `流程配置副本里的整份认不出（${where}）：不派` };
   }
-  const config = parsed.data as FlowConfig;
+  return { ok: true, config: parsed.data as FlowConfig, source: read.source };
+}
+
+/**
+ * 开工前（收单）看流程配置：副本认不出、从没同步过、太久没同步成、整份认不出、指的配置不存在，一律不派（外壳挂起、报红，
+ * 0003 第 9 条「读不到、认不出就这个项目停派、报红，不拿默认顶」）。仓里没有自己的配置时照全组织默认派，source 标出来。
+ */
+export function setupFusion(input: FusionSetupInput): FusionSetup {
+  const decided = decideStoredConfig(input.read, input.now);
+  if (!decided.ok) return decided;
+  const config = decided.config;
   const picked = profileFor(config, input.category, input.profile);
   if (!picked.ok) return { ok: false, why: `流程配置：${picked.why}` };
   const p = picked.profile;
   return {
     ok: true,
-    source: input.read.source,
+    source: decided.source,
     profile: picked.name,
     mode: input.mode ?? p.mode,
     models: { lead: [...p.steps.lead], sidekick: [...p.steps.sidekick], verify: [...p.steps.verify] },
@@ -100,6 +114,27 @@ export function setupFusion(input: FusionSetupInput): FusionSetup {
     highRiskPaths: [...config.highRiskPaths],
     ...(config.riskPathsFile !== undefined ? { riskPathsFile: config.riskPathsFile } : {}),
   };
+}
+
+export type RiskPathsFileDecision = { ok: true; riskPathsFile?: string } | { ok: false; why: string };
+
+export interface RiskPathsFileInput {
+  read: FlowConfigRead;
+  /** 判的这一刻（ISO）：副本太久没同步成就停派。 */
+  now: string;
+}
+
+/**
+ * 合并队列（引擎 workflows/merge-queue.ts）判「合并闸红是不是只缺 second-opinion」也要知道这个项目声明的先审后合
+ * 清单在哪——不是 Fusion 任务，没有类别、不选配置，只要 riskPathsFile 这一个字段，和 setupFusion 共用同一份副本判法
+ * （decideStoredConfig），不各写一份走岔。副本认不出、太久没同步成，一样不派（调用方按「基础设施出错」重试，不当
+ * 「没声明」悄悄放过——放过了会把「还在等第二意见」错判成「测试真红」，见 #429 那次教训）。
+ */
+export function riskPathsFileFor(input: RiskPathsFileInput): RiskPathsFileDecision {
+  const decided = decideStoredConfig(input.read, input.now);
+  if (!decided.ok) return decided;
+  const { riskPathsFile } = decided.config;
+  return { ok: true, ...(riskPathsFile !== undefined ? { riskPathsFile } : {}) };
 }
 
 // ---- Lead 交回的方案和任务简报（第 2 步）

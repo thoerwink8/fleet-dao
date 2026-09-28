@@ -12,6 +12,7 @@ import {
   type FusionPrFacts,
   fusionPrParts,
   rebuttable,
+  riskPathsFileFor,
   setupFusion,
   specDocs,
   summaryItems,
@@ -132,6 +133,51 @@ describe('开工前看流程配置（setupFusion）', () => {
     expect(setupFusion({ read: readOf(), now: 'yesterday', category: '需求' })).toMatchObject({
       ok: false,
       why: expect.stringMatching(/时刻认不出/),
+    });
+  });
+});
+
+describe('合并队列判「合并闸红是不是只缺 second-opinion」要知道的清单路径（riskPathsFileFor）', () => {
+  it('项目声明了：带出 riskPathsFile', () => {
+    const config = merged({
+      kind: 'text',
+      text: JSON.stringify({
+        formatVersion: 1,
+        riskPathsFile: 'packages/conventions/high-risk-paths.json',
+      }),
+    });
+    const got = riskPathsFileFor({ read: readOf({ source: 'project', config }), now: NOW });
+    expect(got).toEqual({ ok: true, riskPathsFile: 'packages/conventions/high-risk-paths.json' });
+  });
+
+  it('项目没声明：没有 riskPathsFile 这个字段（不拿全组织默认或别的项目顶）', () => {
+    const got = riskPathsFileFor({ read: readOf(), now: NOW });
+    expect(got).toEqual({ ok: true });
+  });
+
+  it('和 setupFusion 共用同一份副本判法：副本认不出、太久没同步成，一样不派（调用方按基础设施出错重试，不当「没声明」放过）', () => {
+    expect(
+      riskPathsFileFor({ read: readOf({ replica: { ...fresh, error: '格式版本 7 认不出' } }), now: NOW }),
+    ).toEqual({ ok: false, why: expect.stringMatching(/流程配置认不出：格式版本 7/) });
+    expect(
+      riskPathsFileFor({
+        read: readOf({ replica: { ...fresh, syncedAt: ago(90), unread: 'GitHub 502' } }),
+        now: NOW,
+      }),
+    ).toEqual({ ok: false, why: expect.stringMatching(/90 分钟没同步成.*GitHub 502/) });
+  });
+
+  it('【故意造出的失败】判的时刻认不出：不派', () => {
+    expect(riskPathsFileFor({ read: readOf(), now: 'yesterday' })).toEqual({
+      ok: false,
+      why: expect.stringMatching(/时刻认不出/),
+    });
+  });
+
+  it('【故意造出的失败】副本里的整份认不出：不派，不猜有没有声明清单', () => {
+    expect(riskPathsFileFor({ read: readOf({ config: { profiles: 'x' } }), now: NOW })).toEqual({
+      ok: false,
+      why: expect.stringMatching(/整份认不出/),
     });
   });
 });

@@ -580,6 +580,12 @@ export interface RunTestsInput extends Scope {
   prNumber: number;
   branch: string;
   head: string;
+  /**
+   * 这个项目声明的先审后合清单在仓里的路径（core 的 riskPathsFileFor，来自 .fleet/flow.json 的 riskPathsFile）。
+   * 没给 = 项目没声明先审后合的路径：合并闸红了也不查这份清单，不当「只缺 second-opinion」，照真红处理
+   * （不然「还在等第二意见」和「没声明清单」两件事分不清，见 #429）。
+   */
+  riskPathsFile?: string;
 }
 
 export interface PatchIdOfInput extends Scope {
