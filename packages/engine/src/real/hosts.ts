@@ -777,8 +777,13 @@ function mirasimDriver(
           ...(hooks.signal ? { signal: hooks.signal } : {}),
           ...(hooks.now ? { now: hooks.now } : {}),
           ...(hooks.onEvent ? { onEvent: hooks.onEvent } : {}),
-          // 服务端 accepted 帧才给真会话号（和 cursor 的 init 帧一个道理）
-          ...(hooks.onSessionId ? { onAccepted: (info) => hooks.onSessionId?.(info.sessionKey) } : {}),
+          // 服务端 accepted 帧才给真会话号（和 cursor 的 init 帧一个道理）。accepted 也就是「起来了」：引擎起会话
+          // 要等 onSpawn，不报它等满 spawnTimeoutMs 一律判 SPAWN_TIMEOUT（09-28 上线后这条路由一个会话都没起成）。
+          // 没有我们 spawn 的进程：pid 记 0（sessions.ts 认 0 是「没有根进程」，不拿它去杀）。
+          onAccepted: (info) => {
+            hooks.onSpawn?.({ pid: 0, runId: spec.runId, startedAt: info.acceptedAt });
+            hooks.onSessionId?.(info.sessionKey);
+          },
         },
       );
       return mirasimReport(report);
