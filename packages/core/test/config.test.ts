@@ -1,5 +1,5 @@
 // 流程配置的边界表：全组织默认坏了全部停派，项目的坏了这个项目停派，都不拿默认顶；禁令项目改不掉。
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
   type ConfigDecision,
@@ -69,6 +69,18 @@ describe('流程配置', () => {
       'packages/feishu/src/gateway.ts',
     ];
     expect(uiFiles(got.config, touched)).toEqual(touched.slice(0, 4));
+  });
+
+  it('fleet-dao 自己声明了先审后合清单在哪：路径指的文件真在仓里（免得漏配、指错）', () => {
+    const own = readFileSync(new URL('../../../.fleet/flow.json', import.meta.url), 'utf8');
+    const got = ok(resolveFlowConfig(org, { kind: 'text', text: own }));
+    expect(got.config.riskPathsFile).toBe('packages/conventions/high-risk-paths.json');
+    expect(existsSync(new URL(`../../../${got.config.riskPathsFile}`, import.meta.url))).toBe(true);
+  });
+
+  it('项目没声明先审后合清单：合并出来的就没有这个字段（不拿全组织默认或别的项目顶）', () => {
+    const got = ok(resolveFlowConfig(org, project({ formatVersion: 1 })));
+    expect(got.config.riskPathsFile).toBeUndefined();
   });
 
   it('全组织默认里没有测试命令：项目不写，合并出来的就没有（不拿别的仓的命令顶）', () => {
@@ -167,6 +179,34 @@ describe('流程配置', () => {
       /不存在/,
     ],
     ['项目路径跳出仓', org, project({ formatVersion: 1, uiPaths: ['../web/'] }), 'project', /相对路径/],
+    [
+      '全组织默认里写了先审后合清单路径（会让所有项目都去找这份文件）',
+      orgWith((o) => (o.riskPathsFile = 'packages/conventions/high-risk-paths.json')),
+      { kind: 'missing' },
+      'org',
+      /先审后合清单的路径只能写在各项目仓里/,
+    ],
+    [
+      '【故意造出的失败】riskPathsFile 不是字符串',
+      org,
+      project({ formatVersion: 1, riskPathsFile: 42 }),
+      'project',
+      /riskPathsFile/,
+    ],
+    [
+      '【故意造出的失败】riskPathsFile 是空串',
+      org,
+      project({ formatVersion: 1, riskPathsFile: '' }),
+      'project',
+      /riskPathsFile/,
+    ],
+    [
+      '【故意造出的失败】riskPathsFile 带 ..，跳出仓',
+      org,
+      project({ formatVersion: 1, riskPathsFile: '../secrets/high-risk-paths.json' }),
+      'project',
+      /riskPathsFile.*相对路径/,
+    ],
   ])('【失败】%s → 停派', (_name, orgSource, projectSource, scope, why) => {
     const got = resolveFlowConfig(orgSource, projectSource);
     expect(got.ok).toBe(false);

@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { SessionUser } from '@fleet-dao/adapters';
-import { parseRiskPaths, RISK_PATHS_FILE, riskyFiles, SECOND_OPINION_CONTEXT } from '@fleet-dao/conventions';
+import { parseRiskPaths, riskyFiles, SECOND_OPINION_CONTEXT } from '@fleet-dao/conventions';
 import { criteriaOf } from '@fleet-dao/core';
 import type { GitHub, PrBodyInput } from '@fleet-dao/github';
 import type { CiResult } from '../decisions/verify.ts';
@@ -520,22 +520,31 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
     },
 
     async checkHighRisk(input, ctx) {
+      // 项目没声明先审后合清单（.fleet/flow.json 没写 riskPathsFile）：这个项目没有先审后合的路径，不查、不请第二意见
+      // （不是「读不到就当没碰到」——是这个项目压根没这条路，比如巡检仓，见 #429）。
+      const riskPathsFile = input.riskPathsFile;
+      if (riskPathsFile === undefined) {
+        return {
+          hits: [],
+          note: '项目没声明先审后合清单（.fleet/flow.json 没写 riskPathsFile）：不查、不请第二意见',
+        };
+      }
       // 清单读主线上那份（和合并闸同一份判法，PR 改不了自己的门槛，design 第五节）；文件读这个 PR 现在的，带 patch
       // 才判得出新迁移是不是只加不改。两样有一样读不到、翻不完页都明确抛错，不当「没碰到」。
       const read = await mapped(() =>
-        gh.readRepoFile({ repo: input.repo, path: RISK_PATHS_FILE, signal: ctx.signal }),
+        gh.readRepoFile({ repo: input.repo, path: riskPathsFile, signal: ctx.signal }),
       );
       if (read.file.kind !== 'text') {
         const why = read.file.kind === 'missing' ? '文件不在' : read.file.why;
         throw new PortError(
           'RISK_PATHS_MISSING',
-          `主线上读不到 ${RISK_PATHS_FILE}（${why}）：判不了这个 PR 碰没碰先审后合的路径`,
+          `主线上读不到 ${riskPathsFile}（${why}）：判不了这个 PR 碰没碰先审后合的路径`,
           { retryable: false },
         );
       }
       const list = parseRiskPaths(read.file.text);
       if (typeof list === 'string') {
-        throw new PortError('RISK_PATHS_INVALID', `${RISK_PATHS_FILE} 认不出：${list}`, { retryable: false });
+        throw new PortError('RISK_PATHS_INVALID', `${riskPathsFile} 认不出：${list}`, { retryable: false });
       }
       const files = await mapped(() =>
         gh.pullFiles({ repo: input.repo, prNumber: input.prNumber, signal: ctx.signal }),
@@ -558,7 +567,7 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
       );
       const where = `改到了先审后合的地方：${input.hits
         .map((h) => `${h.file}（${h.kind}${h.note ? `：${h.note}` : ''}）`)
-        .join('、')}（清单和理由见 ${RISK_PATHS_FILE}）`;
+        .join('、')}（清单和理由见 ${input.riskPathsFile}）`;
       const lines = [
         `**第二意见 第 ${input.round} 轮**（${input.model}；审的头 ${input.head.slice(0, 7)}）：${
           input.verdict === 'pass' ? '通过' : `必须改 ${blocking.length} 条`

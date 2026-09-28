@@ -17,7 +17,8 @@ export const CATEGORIES = ['需求', '缺陷', '杂项'] as const;
 export type Category = (typeof CATEGORIES)[number];
 
 const modelList = z.array(z.string().trim().min(1));
-const repoPath = z
+/** 仓里的相对路径：不带开头的 /、不带反斜杠、不带 ..（riskPathsFile、uiPaths、highRiskPaths 都用这份判法）。 */
+export const repoPath = z
   .string()
   .trim()
   .min(1)
@@ -86,6 +87,13 @@ export const ProjectConfigSchema = z
      * 没写的项目（拿别的仓的命令去跑），所以全组织默认里写了算认不出。项目没写，写码会话起不来（replica.ts）。
      */
     testCommand: z.string().trim().min(1).optional(),
+    /**
+     * 先审后合的路径清单（@fleet-dao/conventions 的 RiskPath[] 格式）放在这个项目仓里的哪个路径（design 第五节
+     * 「先审后合」）。只能写在项目里：清单放哪、有没有，每个项目不一样，全组织默认放一条会让别的项目也去找这份文件
+     * （比如巡检仓，见 #429）。没写 = 这个项目没有先审后合的路径，引擎不查、不请第二意见；写了就照严格判法：文件不在、
+     * 认不出都是明确失败（RISK_PATHS_MISSING / RISK_PATHS_INVALID），不当「没碰到」。
+     */
+    riskPathsFile: repoPath.optional(),
     ...optionalFields,
   })
   .strict();
@@ -100,6 +108,8 @@ export interface FlowConfig {
   sessionMemoryMb?: number;
   highRiskPaths: string[];
   uiPaths: string[];
+  /** 只来自项目的配置；没写 = 这个项目没有先审后合的路径（config.ts 里 riskPathsFile 的注释）。 */
+  riskPathsFile?: string;
 }
 
 /** 外壳读文件的结果：读到了、文件不在、在却读不了。 */
@@ -128,6 +138,8 @@ function issues(error: z.ZodError): string {
         return '禁令只能写在全组织默认里，项目改不掉';
       if (i.code === 'unrecognized_keys' && i.keys.includes('testCommand'))
         return `测试命令只能写在各项目仓里的 ${PROJECT_CONFIG_PATH}（各仓不一样），全组织默认不放`;
+      if (i.code === 'unrecognized_keys' && i.keys.includes('riskPathsFile'))
+        return `先审后合清单的路径只能写在各项目仓里的 ${PROJECT_CONFIG_PATH}（各仓不一样，没有的项目也不该被逼着有），全组织默认不放`;
       return `${where}：${i.message}`;
     })
     .join('；');
@@ -204,6 +216,7 @@ export function resolveFlowConfig(org: Source, project: Source): ConfigDecision 
     ...(p.sessionMemoryMb !== undefined ? { sessionMemoryMb: p.sessionMemoryMb } : {}),
     ...(p.highRiskPaths !== undefined ? { highRiskPaths: p.highRiskPaths } : {}),
     ...(p.uiPaths !== undefined ? { uiPaths: p.uiPaths } : {}),
+    ...(p.riskPathsFile !== undefined ? { riskPathsFile: p.riskPathsFile } : {}),
   };
   const projectProblem = checkMerged(withProject);
   if (projectProblem) return projectFail(projectProblem);

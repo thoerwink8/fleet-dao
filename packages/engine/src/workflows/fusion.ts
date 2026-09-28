@@ -1026,10 +1026,17 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
    */
   const secondOpinionRound = async (pr: number, atHead: string): Promise<SecondOpinionOutcome> => {
     if (atHead === soHead) return { kind: 'skip' };
+    const riskPathsFile = need(setup, '流程配置').riskPathsFile;
     const risk = await attempt(kit, 'checkHighRisk', () =>
-      acts.checkHighRisk({ ...kit.scope, repo: input.repo, prNumber: pr }),
+      acts.checkHighRisk({
+        ...kit.scope,
+        repo: input.repo,
+        prNumber: pr,
+        ...(riskPathsFile !== undefined ? { riskPathsFile } : {}),
+      }),
     );
     if (risk.hits.length === 0) {
+      if (risk.note) status.lastProblem = risk.note;
       soHead = atHead;
       return { kind: 'skip' };
     }
@@ -1058,6 +1065,8 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
         verdict,
         findings: got.output.review.findings,
         model: got.route.modelId,
+        // 走到这说明 hits 非空，checkHighRisk 只在 riskPathsFile 有值时才会给出命中
+        riskPathsFile: need(riskPathsFile, '先审后合清单路径'),
       }),
     );
     soHead = atHead;

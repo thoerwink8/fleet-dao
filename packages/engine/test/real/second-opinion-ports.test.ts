@@ -56,10 +56,15 @@ function setup(
   return { ports, setStatus, commentPull };
 }
 
+const RISK_PATHS_FILE = 'packages/conventions/high-risk-paths.json';
+
 describe('checkHighRisk：这个 PR 碰没碰先审后合的路径', () => {
   it('文件落在清单里：命中，带上规则和为什么', async () => {
     const { ports } = setup();
-    const res = await ports.checkHighRisk({ ...scope, repo, prNumber: 7 }, ctx);
+    const res = await ports.checkHighRisk(
+      { ...scope, repo, prNumber: 7, riskPathsFile: RISK_PATHS_FILE },
+      ctx,
+    );
     expect(res.hits).toEqual([
       { file: 'packages/api/src/auth.ts', rule: 'packages/api/src/auth.ts', kind: '碰安全' },
     ]);
@@ -67,8 +72,26 @@ describe('checkHighRisk：这个 PR 碰没碰先审后合的路径', () => {
 
   it('文件不在清单里：不命中', async () => {
     const { ports } = setup({ pullFiles: async () => [{ filename: 'docs/design.md', status: 'modified' }] });
+    const res = await ports.checkHighRisk(
+      { ...scope, repo, prNumber: 7, riskPathsFile: RISK_PATHS_FILE },
+      ctx,
+    );
+    expect(res.hits).toEqual([]);
+  });
+
+  it('项目没声明先审后合清单（riskPathsFile 没给）：不查、不请第二意见——不读清单、不翻 PR 文件，直接算没命中', async () => {
+    const readRepoFile = vi.fn(async () => ({
+      defaultBranch: 'main',
+      commit: 'a'.repeat(40),
+      file: { kind: 'text' as const, text: RISK_JSON },
+    }));
+    const pullFiles = vi.fn(async () => [{ filename: 'packages/api/src/auth.ts', status: 'modified' }]);
+    const { ports } = setup({ readRepoFile, pullFiles });
     const res = await ports.checkHighRisk({ ...scope, repo, prNumber: 7 }, ctx);
     expect(res.hits).toEqual([]);
+    expect(res.note).toMatch(/没声明先审后合清单/);
+    expect(readRepoFile).not.toHaveBeenCalled();
+    expect(pullFiles).not.toHaveBeenCalled();
   });
 
   it('【故意造出的失败】主线上读不到清单文件：抛错，不当「没碰到」', async () => {
@@ -79,7 +102,9 @@ describe('checkHighRisk：这个 PR 碰没碰先审后合的路径', () => {
         file: { kind: 'missing' },
       }),
     });
-    await expect(ports.checkHighRisk({ ...scope, repo, prNumber: 7 }, ctx)).rejects.toMatchObject({
+    await expect(
+      ports.checkHighRisk({ ...scope, repo, prNumber: 7, riskPathsFile: RISK_PATHS_FILE }, ctx),
+    ).rejects.toMatchObject({
       code: 'RISK_PATHS_MISSING',
     });
   });
@@ -92,7 +117,9 @@ describe('checkHighRisk：这个 PR 碰没碰先审后合的路径', () => {
         file: { kind: 'text', text: '不是 JSON' },
       }),
     });
-    await expect(ports.checkHighRisk({ ...scope, repo, prNumber: 7 }, ctx)).rejects.toMatchObject({
+    await expect(
+      ports.checkHighRisk({ ...scope, repo, prNumber: 7, riskPathsFile: RISK_PATHS_FILE }, ctx),
+    ).rejects.toMatchObject({
       code: 'RISK_PATHS_INVALID',
     });
   });
@@ -103,7 +130,9 @@ describe('checkHighRisk：这个 PR 碰没碰先审后合的路径', () => {
         throw new Error('翻到上限还没翻完');
       },
     });
-    await expect(ports.checkHighRisk({ ...scope, repo, prNumber: 7 }, ctx)).rejects.toBeTruthy();
+    await expect(
+      ports.checkHighRisk({ ...scope, repo, prNumber: 7, riskPathsFile: RISK_PATHS_FILE }, ctx),
+    ).rejects.toBeTruthy();
   });
 });
 
@@ -125,6 +154,7 @@ describe('postSecondOpinion：第二意见的结论写回 GitHub', () => {
         verdict: 'pass',
         findings: [],
         model: 'gpt-6-luna',
+        riskPathsFile: RISK_PATHS_FILE,
       },
       ctx,
     );
@@ -153,6 +183,7 @@ describe('postSecondOpinion：第二意见的结论写回 GitHub', () => {
           { severity: 'minor', text: '变量名可以更清楚' },
         ],
         model: 'gpt-6-luna',
+        riskPathsFile: RISK_PATHS_FILE,
       },
       ctx,
     );
@@ -181,6 +212,7 @@ describe('postSecondOpinion：第二意见的结论写回 GitHub', () => {
           verdict: 'pass',
           findings: [],
           model: 'x',
+          riskPathsFile: RISK_PATHS_FILE,
         },
         ctx,
       ),
@@ -204,6 +236,7 @@ describe('postSecondOpinion：第二意见的结论写回 GitHub', () => {
         verdict: 'pass',
         findings: [],
         model: 'x',
+        riskPathsFile: RISK_PATHS_FILE,
       },
       ctx,
     );
