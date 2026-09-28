@@ -19,6 +19,7 @@ import {
   DEFAULT_CURSOR_API_KEY_FILE,
   DEFAULT_CURSOR_VERSIONS_DIR,
   DEFAULT_GROK_BIN,
+  DEFAULT_SESSION_EFFORT,
   GROK_MISSING,
   grokLaunchCommand,
   grokReport,
@@ -1099,5 +1100,135 @@ describe('Mirasim 的驱动（#345）', () => {
     expect(driver.loginFix('「法国」', 'fleet-agent-carpool')).toBe(
       '用 Mirasim 桌面端以 SSH 远程模式连 fleet-agent-carpool@「法国」，把这个会话用户自己的 Mirasim 服务装起来、登一次账号（docs/ops.md 第五节「会话用户的 Mirasim」）',
     );
+  });
+});
+
+describe('思考档位（创始人 2026-09-28 傍晚拍：默认 high，#470 以后才在驾驶舱配）', () => {
+  const id = () => randomUUID();
+
+  it('没配的常量是 high', () => {
+    expect(DEFAULT_SESSION_EFFORT).toBe('high');
+  });
+
+  it('没配时 Claude、Grok、Mirasim 起会话的参数里是 high；路由上配了的用配的', async () => {
+    const claude = fakeRun(() => ({ result: { text: 'OK' } }));
+    const grok = fakeGrokRun(() => ({ frames: grokAnswered() }));
+    const mira = fakeMirasimRun(() => ({ state: { text: 'OK' } }));
+    const wired = drivers({ 'claude-code': claude.run, grok: grok.run, mirasim: mira.run });
+    await wired['claude-code'].run(
+      spec({ model: 'claude-opus-5-5', session: { mode: 'new', id: id() } }),
+      {},
+    );
+    await wired.grok.run(spec({ model: 'grok-4.7', session: { mode: 'new', id: id() } }), {});
+    await wired.mirasim.run(spec({ model: 'deepseek-flash' }), {});
+    expect(claude.specs[0]?.effort).toBe('high');
+    expect(grok.specs[0]?.reasoningEffort).toBe('high');
+    expect(mira.specs[0]?.effort).toBe('high');
+
+    await wired['claude-code'].run(
+      spec({ model: 'claude-opus-5-5', session: { mode: 'new', id: id() }, effort: 'medium' }),
+      {},
+    );
+    await wired.grok.run(spec({ model: 'grok-4.7', session: { mode: 'new', id: id() }, effort: 'low' }), {});
+    await wired.mirasim.run(spec({ model: 'kimi-k3', effort: 'xhigh' }), {});
+    expect(claude.specs[1]?.effort).toBe('medium');
+    expect(grok.specs[1]?.reasoningEffort).toBe('low');
+    expect(mira.specs[1]).toMatchObject({ agent: 'pi', expectModel: 'kimi-k3', effort: 'xhigh' });
+  });
+
+  it('配了不认识的档位：报错、插头不起【故意造出的失败】', async () => {
+    const claude = fakeRun(() => ({ result: { text: 'OK' } }));
+    const grok = fakeGrokRun(() => ({ frames: grokAnswered() }));
+    const mira = fakeMirasimRun(() => ({ state: { text: 'OK' } }));
+    const cursor = fakeCursorRun(() => ({ replay: 'cursor-edit-commit' }));
+    const wired = drivers({
+      'claude-code': claude.run,
+      grok: grok.run,
+      mirasim: mira.run,
+      'cursor-agent': cursor.run,
+    });
+    await expect(
+      wired['claude-code'].run(
+        spec({ model: 'claude-opus-5-5', session: { mode: 'new', id: id() }, effort: 'turbo' }),
+        {},
+      ),
+    ).rejects.toThrow('effort');
+    await expect(
+      wired.grok.run(spec({ model: 'grok-4.7', session: { mode: 'new', id: id() }, effort: 'turbo' }), {}),
+    ).rejects.toThrow('effort');
+    await expect(wired.mirasim.run(spec({ model: 'deepseek-flash', effort: 'turbo' }), {})).rejects.toThrow(
+      'effort',
+    );
+    await expect(wired['cursor-agent'].run(spec({ model: 'auto', effort: 'turbo' }), {})).rejects.toThrow(
+      'effort',
+    );
+    expect(claude.count()).toBe(0);
+    expect(grok.count()).toBe(0);
+    expect(mira.count()).toBe(0);
+    expect(cursor.count()).toBe(0);
+  });
+
+  it('Grok 不支持 max：报错、不起会话；Claude 认 max【故意造出的失败】', async () => {
+    const grok = fakeGrokRun(() => ({ frames: grokAnswered() }));
+    const grokDriver = drivers({ grok: grok.run }).grok;
+    await expect(
+      grokDriver.run(spec({ model: 'grok-4.7', session: { mode: 'new', id: id() }, effort: 'max' }), {}),
+    ).rejects.toThrow('不支持');
+    expect(grok.count()).toBe(0);
+
+    const claude = fakeRun(() => ({ result: { text: 'OK' } }));
+    await drivers({ 'claude-code': claude.run })['claude-code'].run(
+      spec({ model: 'claude-opus-5-5', session: { mode: 'new', id: id() }, effort: 'max' }),
+      {},
+    );
+    expect(claude.specs[0]?.effort).toBe('max');
+  });
+
+  it('方括号里已经有档位的模型串原样传，不另传', async () => {
+    const cursor = fakeCursorRun(() => ({ replay: 'cursor-edit-commit' }));
+    const model = 'grok-4.7[context=256k,reasoning_effort=high,fast=true]';
+    await drivers({ 'cursor-agent': cursor.run })['cursor-agent'].run(spec({ model }), {});
+    expect(cursor.specs[0]?.model).toBe(model);
+    expect(cursor.specs[0]).not.toHaveProperty('effort');
+
+    const claude = fakeRun(() => ({ result: { text: 'OK' } }));
+    const claudeModel = 'claude-opus-4-8[context=1m,effort=medium,fast=false]';
+    await drivers({ 'claude-code': claude.run })['claude-code'].run(
+      spec({ model: claudeModel, session: { mode: 'new', id: id() } }),
+      {},
+    );
+    expect(claude.specs[0]?.model).toBe(claudeModel);
+    expect(claude.specs[0]).not.toHaveProperty('effort');
+  });
+
+  it('方括号模型没写档位：补上默认 high；路由上配了就用配的', async () => {
+    const cursor = fakeCursorRun(() => ({ replay: 'cursor-edit-commit' }));
+    const driver = drivers({ 'cursor-agent': cursor.run })['cursor-agent'];
+    await driver.run(spec({ model: 'composer-2.5[fast=true]' }), {});
+    expect(cursor.specs[0]?.model).toBe('composer-2.5[fast=true,effort=high]');
+    await driver.run(spec({ model: 'composer-2.5[fast=true]', effort: 'medium' }), {});
+    expect(cursor.specs[1]?.model).toBe('composer-2.5[fast=true,effort=medium]');
+  });
+
+  it('没方括号的 cursor 模型串保持原样；再单独配档位就报错、不起【故意造出的失败】', async () => {
+    const cursor = fakeCursorRun(() => ({ replay: 'cursor-edit-commit' }));
+    const driver = drivers({ 'cursor-agent': cursor.run })['cursor-agent'];
+    await driver.run(spec({ model: 'auto' }), {});
+    await driver.run(spec({ model: 'gpt-5.6-luna-high' }), {});
+    expect(cursor.specs.map((s) => s.model)).toEqual(['auto', 'gpt-5.6-luna-high']);
+    await expect(driver.run(spec({ model: 'auto', effort: 'high' }), {})).rejects.toThrow('不支持');
+    expect(cursor.count()).toBe(2);
+  });
+
+  it('方括号里的档位不认识，或和路由上另配的对不上：报错、不起【故意造出的失败】', async () => {
+    const cursor = fakeCursorRun(() => ({ replay: 'cursor-edit-commit' }));
+    const driver = drivers({ 'cursor-agent': cursor.run })['cursor-agent'];
+    await expect(
+      driver.run(spec({ model: 'grok-4.7[context=256k,reasoning_effort=ludicrous,fast=true]' }), {}),
+    ).rejects.toThrow('effort');
+    await expect(
+      driver.run(spec({ model: 'grok-4.7[reasoning_effort=high]', effort: 'low' }), {}),
+    ).rejects.toThrow('两处');
+    expect(cursor.count()).toBe(0);
   });
 });

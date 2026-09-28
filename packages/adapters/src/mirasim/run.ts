@@ -7,6 +7,7 @@ import { stat } from 'node:fs/promises';
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { ProgressEvent } from '@fleet-dao/shared';
 import { CallbackGate, type LineMeta } from '../cli-run.ts';
+import { assertSessionEffort, SESSION_EFFORTS } from '../effort.ts';
 import type { RunFacts, RunSummary } from '../judge.ts';
 import { looksLikeQuotaExhausted, num, rec, str } from '../stream-kit.ts';
 import type { KillReason } from '../types.ts';
@@ -65,6 +66,7 @@ export interface MirasimRunSpec {
   model?: string;
   /** 期望在快照里看到的模型（例如 kimi-code/k3、kimi-k3）：不点名也要声明，起后回读核对，不符就停（KM-01）。 */
   expectModel?: string;
+  /** 不给就不写进 prompt 帧。引擎起会话时总是给。不认识的值在发出去之前抛错。 */
   effort?: string;
   session: MirasimSessionRef;
   limits?: Partial<MirasimLimits>;
@@ -176,6 +178,7 @@ export async function runMirasim(
   options: MirasimRunOptions,
 ): Promise<MirasimRunReport> {
   if (!spec.prompt.trim()) throw new Error('提示词是空的');
+  if (spec.effort !== undefined) assertSessionEffort(spec.effort, SESSION_EFFORTS, 'Mirasim');
   if (!AGENT.test(spec.agent)) throw new Error(`执行体名不合法：${JSON.stringify(spec.agent)}`);
   if (spec.agent === 'pi' && spec.model && !spec.model.startsWith('profile:')) {
     throw new Error(
