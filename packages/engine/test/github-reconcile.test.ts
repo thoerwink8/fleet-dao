@@ -87,6 +87,11 @@ interface GitHubState {
   flowDown?: number;
   /** 默认分支头的提交。 */
   head?: string;
+  /**
+   * compare base...head 回的 behind_by（流程配置「比引擎新」那条例外用它判祖先关系）：不给就是没配这条路，
+   * 回 404（当「比较不出关系」，见 packages/github 的 commitContains）。
+   */
+  compareBehindBy?: number;
   /** 设了就只有开单（POST issues）这样回（#259：开单的端口没成）。 */
   createDown?: number;
   /** 单子上的评论（按单号）：引擎留的回答在这里。 */
@@ -140,6 +145,10 @@ function githubApi(state: GitHubState): typeof fetch {
         path: '.fleet/flow.json',
         content: Buffer.from(state.flowFile, 'utf8').toString('base64'),
       });
+    }
+    if (url.pathname.startsWith(`${base}/compare/`)) {
+      if (state.compareBehindBy === undefined) return reply(404, { message: 'no common ancestor' });
+      return reply(200, { ahead_by: 1, behind_by: state.compareBehindBy });
     }
     // 开单（#259 对账给提问另开单）：「引擎」机器人开，编号接着排，标签、里程碑照请求挂上
     if (url.pathname === `${base}/issues` && init?.method === 'POST') {
@@ -297,6 +306,8 @@ async function wiring(
     register?: boolean;
     /** 换掉全组织默认（不给就读代码里带的 packages/core/flow.default.json）。 */
     orgDefault?: () => Promise<Source>;
+    /** 测试用：引擎自己在跑哪个提交（不给就是真的 ownReleaseSha，测试进程里认不出，回 null）。 */
+    ownCommit?: () => string | null;
   } = {},
 ) {
   const [repo] = await t.db
@@ -328,6 +339,7 @@ async function wiring(
     gh,
     ...(options.requirements === 'real' ? {} : { requirements: options.requirements ?? fake.requirements }),
     ...(options.orgDefault ? { orgDefault: options.orgDefault } : {}),
+    ...(options.ownCommit ? { ownCommit: options.ownCommit } : {}),
     // 关单对账（#241）按真钟每天北京 9:00 那一轮跑：这里的用例不看它，关掉，免得几点跑测试结果就不一样
     closeSweepDue: () => false,
     log: quiet,
@@ -552,6 +564,33 @@ describe('流程配置副本：每轮对账从仓里同步（真库、照 GitHub
     expect(await row()).toMatchObject({ flowError: null, testCommand: 'pnpm test:changed' });
     expect((await alertOf(KEY))?.resolvedAt).toBeInstanceOf(Date);
     expect(w.starts.map((s) => s.issueNumber)).toEqual([41]);
+  });
+
+  it('版本错位：先正常同步过一轮，下一轮多了新字段、核实过配置比引擎新——不停派，副本留着上一轮同步成的样子，只报日报级提醒', async () => {
+    const OWN_SHA = 'f'.repeat(40);
+    const state: GitHubState = { issues: [issue(41, -20)], flowFile: config({ testCommand: 'pnpm check' }) };
+    const w = await wiring(state, { ownCommit: () => OWN_SHA });
+    // 第一轮：配置还是这版认得的样子，正常同步成
+    await round(w);
+    const synced = await row();
+    expect(synced).toMatchObject({ flowSource: 'project', flowError: null, testCommand: 'pnpm check' });
+    expect(synced.flowSyncedAt).toBeInstanceOf(Date);
+
+    // 第二轮：主线加了个这版还不认得的新字段，且 GitHub compare 核实过这份配置确实含着引擎自己在跑的 OWN_SHA
+    state.flowFile = config({ testCommand: 'pnpm check', 未来字段: 'x' });
+    state.compareBehindBy = 0;
+    state.issues.push(issue(42, -5));
+    const second = await round(w);
+    // 不算「找到问题」：这个仓不记进 found，新单子照常拉起
+    expect(second).toMatchObject({ outcome: 'ok', scanned: 1, found: 1 });
+    expect(w.starts.map((s) => s.issueNumber)).toEqual([41, 42]);
+    // 副本原样留着上一轮同步成的（没有因为这版认不出的新字段就停派、清掉）
+    expect(await row()).toEqual(synced);
+    expect(await alertOf(KEY)).toMatchObject({
+      level: 'daily',
+      resolvedAt: null,
+      title: expect.stringContaining('比在跑的引擎新（多了 未来字段 字段）'),
+    });
   });
 
   it('【失败】读 .fleet/flow.json 时 GitHub 出错：记下没查成，副本一样不动（不当成没有这个文件）；这一轮记成没查全', async () => {

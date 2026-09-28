@@ -8,6 +8,7 @@
 //   不认、照实记日志。
 // - 请求要发的就是这个引擎在跑的版本（切完新引擎起来那一下请求还没撤）：不认。
 // - 提醒只在开始、撤掉时各写一次，不写会变的倒计时（飞书卡片每改一次都算接口调用，design 15.4）；「还剩几分钟」按截止算。
+import { realpathSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
@@ -279,6 +280,18 @@ export function shaOfDir(dir: string): string | null {
       .split(/[\\/]/)
       .pop() ?? '';
   return SHA.test(name) ? name : null;
+}
+
+/**
+ * 这个进程在跑哪一版：systemd 起进程时 WorkingDirectory（current）解成的 <提交号> 目录，认不出是 null（开发机、测试）。
+ * jobs/flow-config.ts 靠它判「流程配置副本里这版认不出的新字段，是不是配置比引擎新」。
+ */
+export function ownReleaseSha(cwd: string = process.cwd()): string | null {
+  try {
+    return shaOfDir(realpathSync(cwd));
+  } catch {
+    return null;
+  }
 }
 
 export function drainRequestFile(releasesDir: string): string {

@@ -18,6 +18,7 @@ import {
 import { type ClaimsGitHub, createClaimsGitHub } from './claims.ts';
 import { GitHubClient, type Logger, type RepoRef, repoSlug, type Sleep, unexpected } from './client.ts';
 import { type CloseFacts, type ReadCloseFactsInput, readCloseFacts } from './close-facts.ts';
+import { type CommitAncestryInput, commitContains } from './commit-relation.ts';
 import {
   type ReadRepoFileInput,
   type ReadRepoFileResult,
@@ -178,6 +179,11 @@ export interface GitHub {
   /** 读默认分支头上的一个文件，带上读的是哪个提交（仓的流程配置 .fleet/flow.json 这样读）。读不到抛错，不当成文件不在。 */
   readRepoFile(input: ReadRepoFileInput, ctx?: ActivityContext): Promise<ReadRepoFileResult>;
   /**
+   * head 是不是一个不少地包含 base（GitHub compare）：流程配置对账判「读到的新字段是不是还没发布的引擎版本才认得」用它
+   * （jobs/flow-config.ts）。比较不出关系（多半是不同的仓）回 null，不当成「不含」。GitHub 接口出错照样抛。
+   */
+  commitContains(input: CommitAncestryInput, ctx?: ActivityContext): Promise<boolean | null>;
+  /**
    * 一张 issue 此刻挂在哪个里程碑、开没开着、重开过没有、是不是母单子单，加上仓里还开着的里程碑（「引擎」机器人一次 GraphQL
    * 现读）：接活判当前版本和母单子单、fleet-api handover 判能不能交都用它。读不到、认不出抛错，不拿「没挂」「开着」「独立单」顶。
    */
@@ -282,6 +288,9 @@ export function createGitHub(options: GitHubOptions): GitHub {
     },
     async readRepoFile(input, ctx = {}) {
       return readRepoFile(deps, { ...input, signal: input.signal ?? ctx.signal });
+    },
+    async commitContains(input, ctx = {}) {
+      return commitContains(deps, { ...input, signal: input.signal ?? ctx.signal });
     },
     async readIssuePlan(input, ctx = {}) {
       return readIssuePlan(client, { ...input, signal: input.signal ?? ctx.signal });

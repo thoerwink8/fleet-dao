@@ -120,7 +120,7 @@ export type Source =
 
 export type ConfigDecision =
   | { ok: true; config: FlowConfig; usedOrgDefault: boolean }
-  | { ok: false; scope: 'org' | 'project'; why: string };
+  | { ok: false; scope: 'org' | 'project'; why: string; unknownKeys?: string[] };
 
 function parseJson(text: string): { ok: true; value: unknown } | { ok: false; why: string } {
   try {
@@ -145,6 +145,27 @@ function issues(error: z.ZodError): string {
     .join('；');
 }
 
+/** 这几个字段这版代码认得，只是限定了只能写在项目里、不许出现在全组织默认（issues() 里的专门提示）：项目仓写错地方
+ * 是真错，不算「这版认不出的新字段」。 */
+const SCOPE_RESTRICTED_KEYS = new Set(['bans', 'testCommand', 'riskPathsFile']);
+
+/**
+ * 校验失败是不是「只因为有这版认不出的字段」：zod 的问题全都是 unrecognized_keys，且这些键都不是上面那几个已经
+ * 认得、只是放错了地方的（那是真错）。断链修复用它分「引擎版本落后，配置比我新」和「配置真错了」（jobs/flow-config.ts、
+ * docs/design.md「流程配置副本」）：这里只管「像不像新字段」，判「是不是真的更新的版本」交给调用方（比提交、读引擎自己
+ * 的版本），这里判不出版本新旧、只判字段形状。有别的问题（类型不对、必填缺失……）混在一起，不算，回 undefined。
+ */
+export function unknownFormatKeys(error: z.ZodError): string[] | undefined {
+  const keys = new Set<string>();
+  for (const issue of error.issues) {
+    if (issue.code !== 'unrecognized_keys') return undefined;
+    for (const k of issue.keys) keys.add(k);
+  }
+  if (keys.size === 0) return undefined;
+  for (const k of keys) if (SCOPE_RESTRICTED_KEYS.has(k)) return undefined;
+  return [...keys];
+}
+
 const FABLE = /fable/i;
 
 /** 合并后再查一遍：类别指的配置要在，禁令不能少，配置里不许出现禁用的模型。 */
@@ -167,10 +188,11 @@ function checkMerged(config: FlowConfig): string | undefined {
 
 export function resolveFlowConfig(org: Source, project: Source): ConfigDecision {
   const orgFail = (why: string): ConfigDecision => ({ ok: false, scope: 'org', why: `全组织默认：${why}` });
-  const projectFail = (why: string): ConfigDecision => ({
+  const projectFail = (why: string, unknownKeys?: string[]): ConfigDecision => ({
     ok: false,
     scope: 'project',
     why: `项目配置 ${PROJECT_CONFIG_PATH}：${why}`,
+    ...(unknownKeys ? { unknownKeys } : {}),
   });
 
   if (org.kind === 'missing') return orgFail(`找不到 ${ORG_DEFAULT_PATH}`);
@@ -200,7 +222,9 @@ export function resolveFlowConfig(org: Source, project: Source): ConfigDecision 
   const projJson = parseJson(project.text);
   if (!projJson.ok) return projectFail(projJson.why);
   const projParsed = ProjectConfigSchema.safeParse(projJson.value);
-  if (!projParsed.success) return projectFail(issues(projParsed.error));
+  if (!projParsed.success) {
+    return projectFail(issues(projParsed.error), unknownFormatKeys(projParsed.error));
+  }
   const p = projParsed.data;
   if (!SUPPORTED_FORMATS.includes(p.formatVersion)) {
     return projectFail(`格式版本 ${p.formatVersion} 认不出（认 ${SUPPORTED_FORMATS.join('、')}）`);
