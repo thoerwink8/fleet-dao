@@ -50,14 +50,14 @@ export interface ClaudeArgsSpec {
 }
 
 /**
- * 调工具前那条钩子（拦把密钥文件读进对话的命令和 Read、Grep，拦切号、git stash 这类，规矩在脚本里）：仓里这一份，
+ * 调工具前那条钩子（只拦本机 reclaude login / logout / org use，和直接 gh issue create；规矩在脚本里）：仓里这一份，
  * 和引擎同一版。法国上它在 /srv/fleet-dao-releases/<提交号>/ 下，归 root、谁都能读：会话改不了、删不掉它；会话用户家里
  * agents-sync 装的那份归会话用户（会话自己就能改掉），引擎也读不到那个家目录，所以不用那份。
  */
 export const PRETOOL_SCRIPT = fileURLToPath(new URL('../../../../agents/hooks/pretool.mjs', import.meta.url));
 
-/** 和 packages/agents-sync/src/targets.ts 里 Claude 那组一样：跑命令的、读文件的、搜内容的。 */
-export const PRETOOL_MATCHER = 'Bash|PowerShell|Read|Grep';
+/** 和 packages/agents-sync/src/targets.ts 里 Claude 那组一样：只挂跑命令的 Bash、PowerShell。 */
+export const PRETOOL_MATCHER = 'Bash|PowerShell';
 
 const shellQuote = (s: string) => `'${s.replaceAll("'", `'\\''`)}'`;
 

@@ -395,7 +395,7 @@ describe('second-opinion.mjs：缺东西照实报', SLOW, () => {
 // SHELL/MSYSTEM/TERM 猜「现在是不是 bash」，猜完拿这几个变量去跑钩子的 stdin 转发脚本——那脚本是 PowerShell
 // 语法，猜成 bash 就整个交给 bash 的 eval，直接语法错、钩子判失败＝把这次工具调用拦掉（agents/hooks/pretool.mjs
 // 挂着同一条注释）。second-opinion.mjs 起 cursor-agent 的会话大多是从 Git Bash 起的，spawn 默认整份带过去，
-// 摘掉这几个变量让它猜成本机原生的壳，钩子才跑得动；摘的是环境变量，不碰钩子本身的判断，密钥路径照样拦。
+// 摘掉这几个变量让它猜成本机原生的壳，钩子才跑得动；摘的是环境变量，不碰钩子本身的判断。
 describe('cursorAgentEnv：起 cursor-agent 时把 Git Bash 留的几个变量摘掉，别的原样', () => {
   const dirty = { SHELL: '/bin/bash.exe', MSYSTEM: 'MINGW64', TERM: 'xterm-256color', PATH: '/x' };
 

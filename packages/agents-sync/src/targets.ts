@@ -136,15 +136,13 @@ export interface HookTarget {
  * 输入是 camelCase、终端工具叫 run_terminal_command，开会话钩子的输出不进上下文）；Devin CLI 默认 read_config_from.claude
  * （docs.devin.ai/cli/extensibility/hooks/overview，终端工具叫 exec）。Cursor 的命令行默认也读（cursor.com/docs/reference/third-party-hooks，
  * Bash 对应它的 Shell），它不在本脚本分发的各家里。脚本按这几种输入都认得（agents/hooks/pretool.mjs 的 SHELL_TOOLS）。
- * 调工具前那条还挂在读文件、搜内容的 Read、Grep 上：会话用它们把密钥文件读进对话的也拦（2026-09-27 用命令读漏过一回，
- * 只拦命令等于没拦）。Glob 只列路径、和 ls 一样放行，不挂。借道的几家怎么对上：Claude Code 的 matcher 只含字母和 | 时
- * 按工具名逐个全等比（code.claude.com/docs/en/hooks「Matcher patterns」）；Grok 把 Bash、Read、Grep 换成它的
- * run_terminal_command、read_file、grep 再匹配（~/.grok/docs/user-guide/10-hooks.md「Tool Name Aliases」）；Cursor 把 Bash
- * 换成 Shell，Read、Grep 照原名（cursor.com/docs/reference/third-party-hooks「Tool Name Mapping」）。Devin 不换名字，
- * matcher 是不锚定的正则、对它自己的小写工具名（docs.devin.ai/cli/extensibility/hooks/lifecycle-hooks「Tool names you can
- * match」）：第一组它一个都匹配不上，所以另登记锚定的一组 ^(exec|read|grep)$（不锚定的 read 会连 notebook_read、
- * read_subagent、mcp_read_resource 一起匹配上，脚本认不得那些名字就会把它们全拦下；这组在 Claude Code、Cursor 里匹配不到
- * 任何工具，在 Grok 里只多匹配一次它的 grep）。脚本认得的名字：agents/hooks/pretool.mjs 的 SHELL_TOOLS、READ_TOOLS。
+ * 调工具前那条只挂跑命令的 Bash、PowerShell（创始人 2026-09-28 傍晚：拦读密钥文件的整段删掉，不再挂 Read、Grep）。
+ * 借道的几家怎么对上：Claude Code 的 matcher 只含字母和 | 时按工具名逐个全等比（code.claude.com/docs/en/hooks「Matcher patterns」）；
+ * Grok 把 Bash 换成它的 run_terminal_command 再匹配（~/.grok/docs/user-guide/10-hooks.md「Tool Name Aliases」）；Cursor 把 Bash
+ * 换成 Shell（cursor.com/docs/reference/third-party-hooks「Tool Name Mapping」）。Devin 不换名字，matcher 是不锚定的正则、
+ * 对它自己的小写工具名（docs.devin.ai/cli/extensibility/hooks/lifecycle-hooks「Tool names you can match」）：第一组它一个都
+ * 匹配不上，所以另登记锚定的 ^(exec)$（不锚定的话会连别的带 exec 的工具名一起匹配上，脚本认不得就会把它们全拦下；这组在
+ * Claude Code、Cursor、Grok 里匹配不到它们的终端工具）。脚本认得的名字：agents/hooks/pretool.mjs 的 SHELL_TOOLS。
  * Stop 事件借道的几家支不支持没一一核过：不支持就是从来不触发，装了也无害。
  */
 export const HOOK_TARGETS: readonly HookTarget[] = [
@@ -154,8 +152,8 @@ export const HOOK_TARGETS: readonly HookTarget[] = [
     borrowed: ['grok', 'devin'],
     hooks: [
       { event: 'SessionStart', script: 'session-start.mjs', timeout: 90 },
-      { event: 'PreToolUse', matcher: 'Bash|PowerShell|Read|Grep', script: 'pretool.mjs', timeout: 10 },
-      { event: 'PreToolUse', matcher: '^(exec|read|grep)$', script: 'pretool.mjs', timeout: 10 },
+      { event: 'PreToolUse', matcher: 'Bash|PowerShell', script: 'pretool.mjs', timeout: 10 },
+      { event: 'PreToolUse', matcher: '^(exec)$', script: 'pretool.mjs', timeout: 10 },
       { event: 'Stop', script: 'stop.mjs', timeout: 10 },
     ],
   },

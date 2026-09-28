@@ -133,7 +133,7 @@ describe('装', () => {
     const partly = m.check();
     expectKind(partly, SETTINGS, 'missing');
     expect(partly.find((l) => l.key === SETTINGS)?.text).toContain(
-      '没登记 SessionStart（session-start.mjs）、PreToolUse（pretool.mjs，matcher Bash|PowerShell|Read|Grep）',
+      '没登记 SessionStart（session-start.mjs）、PreToolUse（pretool.mjs，matcher Bash|PowerShell）',
     );
   });
 
@@ -148,12 +148,12 @@ describe('装', () => {
     expect(exitCode(m.check())).toBe(0);
   });
 
-  it('以前装的只挂 Bash|PowerShell 一组：查判漂移（多出那组、缺了该有的），再写换成现在的，别的不动', () => {
+  it('以前装的还挂着 Read、Grep：查判漂移（多出那组、缺了该有的），再写换成现在的，别的不动', () => {
     const m = machine();
     const before = lived();
     before.hooks.PreToolUse = [
       {
-        matcher: 'Bash|PowerShell',
+        matcher: 'Bash|PowerShell|Read|Grep',
         hooks: [{ type: 'command', command: m.cmd('pretool.mjs'), timeout: 10 }],
       },
       { matcher: 'Edit', hooks: [{ type: 'command', command: 'node /x/my-own-check.mjs' }] },
@@ -164,7 +164,9 @@ describe('装', () => {
     put(m.home, '.claude/settings.json', JSON.stringify(before));
     const old = m.check().find((l) => l.key === SETTINGS);
     expect(old?.kind).toBe('drift');
-    expect(old?.text).toContain('pretool.mjs 多登记了一条：挂在 PreToolUse 上、matcher 是 "Bash|PowerShell"');
+    expect(old?.text).toContain(
+      'pretool.mjs 多登记了一条：挂在 PreToolUse 上、matcher 是 "Bash|PowerShell|Read|Grep"',
+    );
     expectKind(m.apply(), SETTINGS, 'changed');
     const s = m.settings();
     expect(s.hooks.PreToolUse).toEqual([before.hooks.PreToolUse[1], ...pretoolGroups(m.cmd('pretool.mjs'))]);
@@ -173,23 +175,25 @@ describe('装', () => {
   });
 });
 
-// 调工具前那条挂在哪些工具上（改标准：targets.ts 在 standard-paths.json 里）：跑命令的 Bash、PowerShell，
-// 读文件、搜内容的 Read、Grep——2026-09-27 帅位用命令读漏了 reclaude 的设备密钥，只拦命令、Read 照样能读进对话。
-// Glob 只列路径（和 ls 一样放行），不挂：挂上只会多一个要认的别家工具名（Grok 把 Glob 换成它的 list_dir）。
-// Devin 不换 Claude 的工具名、按不锚定的正则比它自己的小写名字，所以另一组锚定的 ^(exec|read|grep)$。
+// 调工具前那条挂在哪些工具上（改标准：targets.ts 在 standard-paths.json 里）：只挂跑命令的 Bash、PowerShell。
+// 读文件、搜内容的不再挂（创始人 2026-09-28 傍晚把拦读密钥的整段删了）。Devin 不换 Claude 的工具名，终端叫 exec，
+// 所以另一组锚定的 ^(exec)$；read、grep 不再登记，免得把读文件也挂上。
 describe('调工具前那条挂在哪些工具上', () => {
-  it('两组：Claude 的名字 Bash、PowerShell、Read、Grep（只含字母和 |，逐个全等比）；Devin 的名字 exec、read、grep（锚定）', () => {
-    expect(PRETOOL_MATCHERS).toEqual(['Bash|PowerShell|Read|Grep', '^(exec|read|grep)$']);
+  it('两组：Claude 的名字 Bash、PowerShell（只含字母和 |，逐个全等比）；Devin 的名字 exec（锚定）', () => {
+    expect(PRETOOL_MATCHERS).toEqual(['Bash|PowerShell', '^(exec)$']);
   });
 
-  it('Devin 那组锚定了：不会连 notebook_read、read_subagent、mcp_read_resource、MCP 工具一起匹配上', () => {
+  it('Devin 那组只匹配 exec：read、grep 和别的读文件工具匹配不上', () => {
     const devin = new RegExp(PRETOOL_MATCHERS[1] ?? '');
-    for (const name of ['exec', 'read', 'grep']) expect([name, devin.test(name)]).toEqual([name, true]);
+    expect(devin.test('exec')).toBe(true);
     for (const name of [
+      'read',
+      'grep',
       'notebook_read',
       'read_subagent',
       'mcp_read_resource',
       'mcp__fs__read',
+      'exec_extra',
       'Read',
       'Bash',
     ]) {
@@ -206,11 +210,7 @@ describe('调工具前那条挂在哪些工具上', () => {
     const normal: Record<string, Record<string, unknown>> = {
       Bash: { command: 'git status' },
       PowerShell: { command: 'Get-ChildItem' },
-      Read: { file_path: '/work/repo/README.md' },
-      Grep: { pattern: 'TODO', path: '/work/repo/src' },
       exec: { command: 'git status', shell_id: 'main' },
-      read: { file_path: '/work/repo/README.md' },
-      grep: { pattern: 'TODO', path: '/work/repo/src' },
     };
     const names = PRETOOL_MATCHERS.flatMap((m) => m.replace(/^\^\(|\)\$$/g, '').split('|'));
     expect([...names].sort()).toEqual(Object.keys(normal).sort());

@@ -148,18 +148,18 @@ const hookCommand = (settings: string) => {
 const bash = (command: string) => ({ tool_name: 'Bash', tool_input: { command }, cwd: tmpdir() });
 
 describe('调工具前那条钩子经 --settings 带上', { timeout: 0 }, () => {
-  it('只登记 PreToolUse 一组：挂在 Bash、PowerShell、Read、Grep 上（和 agents-sync 给 Claude 登记的那组一样），跑仓里这份 pretool.mjs', () => {
+  it('只登记 PreToolUse 一组：只挂 Bash、PowerShell（和 agents-sync 给 Claude 登记的那组一样），跑仓里这份 pretool.mjs', () => {
     const settings = JSON.parse(pretoolSettings()) as Record<string, unknown>;
     expect(Object.keys(settings)).toEqual(['hooks']);
     expect(settings.hooks).toEqual({
       PreToolUse: [
         {
-          matcher: 'Bash|PowerShell|Read|Grep',
+          matcher: 'Bash|PowerShell',
           hooks: [{ type: 'command', command: hookCommand(pretoolSettings()), timeout: 10 }],
         },
       ],
     });
-    expect(PRETOOL_MATCHER).toBe('Bash|PowerShell|Read|Grep');
+    expect(PRETOOL_MATCHER).toBe('Bash|PowerShell');
     expect(PRETOOL_SCRIPT.replaceAll('\\', '/')).toMatch(/\/agents\/hooks\/pretool\.mjs$/);
     expect(existsSync(PRETOOL_SCRIPT)).toBe(true);
     expect(hookCommand(pretoolSettings())).toContain(`'${process.execPath}' '${PRETOOL_SCRIPT}'`);
@@ -172,13 +172,9 @@ describe('调工具前那条钩子经 --settings 带上', { timeout: 0 }, () => 
     expect(blocked.status).toBe(2);
     expect(blocked.stderr).toContain('reclaude');
     expect(blocked.stderr).not.toContain('没跑成');
-    // 读密钥文件：命令和 Read 都拦，指到安全查看脚本
-    const device = `/home/u/.recl${'aude'}/device.json`;
-    for (const input of [bash(`cat ${device}`), { tool_name: 'Read', tool_input: { file_path: device } }]) {
-      const secret = runHook(command, input);
-      expect(secret.status).toBe(2);
-      expect(secret.stderr).toContain('secret-shape.mjs');
-    }
+    // 正文里的字样不拦：改成整段字符串包含，这条会红
+    const mentioned = runHook(command, bash("cat <<'EOF'\ngh issue create\nEOF"));
+    expect(mentioned).toEqual({ status: 0, stderr: '' });
   });
 
   it.skipIf(!hasSh)(

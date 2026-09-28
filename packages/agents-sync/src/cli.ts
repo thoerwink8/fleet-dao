@@ -164,9 +164,9 @@ function planIdentity(args: Args, deps: Deps): Identity {
 
 /**
  * 替别的用户写（法国装机）时开会话那条钩子不登记：它要在这个用户自己能拉、能写的 fleet-dao 检出里快进、同步，法国的检出跟着
- * 自动发布走。调工具前那条照装：会话用户家里就有 reclaude 的设备密钥，在那台上手开的会话、借道读 ~/.claude/settings.json
- * 的 Grok、Cursor 起的会话都要拦读密钥文件。引擎起的 Claude 会话带 --setting-sources project、不读用户级设置，这里装了
- * 也管不到它（packages/adapters/src/claude-code/args.ts），要管得由引擎另外带上。
+ * 自动发布走。调工具前那条照装：在那台上手开的会话、借道读 ~/.claude/settings.json 的 Grok、Cursor 起的会话也拦本机切号
+ * 和直接 gh issue create。引擎起的 Claude 会话带 --setting-sources project、不读用户级设置，这里装了也管不到它
+ * （packages/adapters/src/claude-code/args.ts），要管得由引擎另外带上。
  */
 const SESSION_START_OFF_FOR_USER: HookSkip = {
   event: 'SessionStart',

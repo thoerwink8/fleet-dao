@@ -1,6 +1,6 @@
 // Cursor CLI 在 Windows 上借道读这份钩子登记（targets.ts 的注释）时，喂给钩子的 stdin 有时带 UTF-8 BOM
 // （社区已知的坑，forum.cursor.com「On Windows, Cursor's hook stdin JSON payload includes a UTF-8 BOM…」）：
-// Node 的 readFileSync(0,'utf8') 不会替你摘掉，见 agents/hooks/pretool.mjs 的 decide()。密钥路径判断本身由
+// Node 的 readFileSync(0,'utf8') 不会替你摘掉，见 agents/hooks/pretool.mjs 的 decide()。两条小拦本身由
 // agents/test/rules/pretool.rules.test.ts 钉住；这里只测「打头多一个 BOM 字符」这一件事，不改、不碰那份钉住的规矩。
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
