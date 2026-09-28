@@ -906,7 +906,8 @@ describe('报到驾驶舱：法国连不上不写本地文件，评论失败不�
       readText: (path) => readFileSync(path, 'utf8'),
       ssh: (args, input) => {
         const cmd = args.at(-1) ?? '';
-        seen.push({ cmd, input });
+        // input 缺省是 undefined；可选字段在开着 exactOptionalPropertyTypes 时不能赋 undefined。
+        seen.push(input === undefined ? { cmd } : { cmd, input });
         return { status: 0, stdout: `${JSON.stringify({ ok: true })}\n`, stderr: '' };
       },
       gh: () => ({ status: 0, stdout: '', stderr: '' }),
