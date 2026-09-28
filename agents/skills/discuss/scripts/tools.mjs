@@ -39,6 +39,20 @@ export function runTool(name, args, opts = {}) {
   return spawnSync(name, args, opts);
 }
 
+// Windows 上 Git Bash 留下的几个环境变量：cursor-agent 靠它们猜「当前是不是 bash 环境」，猜完拿它跑钩子的 stdin 转发脚本，
+// 那脚本本身是 PowerShell 语法，交给 bash 的 eval 直接语法错、钩子判失败＝把这次调用拦掉（fleet-dao#435；forum.cursor.com
+// 和多个不相关项目的 GitHub issue 报过同一段崩溃文本，是 Cursor 自己未解决的上游 bug）。本机 2026-09-28 二次实测：单摘这几个
+// 变量不够——只要父进程链里有 Git Bash，就算连 SHELL/MSYSTEM/TERM/SHLVL/_/EXEPATH/PWD/HOME 全摘、直接起 node.exe、甚至
+// 经 powershell.exe 起，钩子照样按 bash 判、把工具调用拦掉；真正绕开的办法是题面走 stdin、不要它调工具去读文件
+// （ask.mjs、second-opinion.mjs 都已经这样改）。这个函数留着当多一层保险（摘的是环境变量，不是钩子本身的判断——密钥
+// 路径那些规矩照样生效），起 cursor-agent 的地方都带上，别漏一个，但别指望单靠它就能让读文件的工具调用畅通。
+export function cursorAgentEnv(platform = process.platform, env = process.env) {
+  if (platform !== 'win32') return env;
+  const out = { ...env };
+  for (const k of ['SHELL', 'MSYSTEM', 'MSYSTEM_PREFIX', 'MSYSTEM_CHOST', 'TERM']) delete out[k];
+  return out;
+}
+
 /**
  * cursor-agent 能不能用：装了（PATH 上有）、登录了（status --format json 的 isAuthenticated 是 true）。
  * 返回 null 表示能用，否则是一句为什么（给人看）。
@@ -50,7 +64,7 @@ export function cursorAgentProblem({ env = process.env, run = runTool } = {}) {
     encoding: 'utf8',
     timeout: 30_000,
     windowsHide: true,
-    env,
+    env: cursorAgentEnv(process.platform, env),
   });
   if (r.error)
     return `查不了 cursor-agent 登没登录（${r.error.code === 'ETIMEDOUT' ? '30 秒没回' : r.error.message}）`;

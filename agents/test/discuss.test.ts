@@ -68,7 +68,14 @@ function temp(name: string): string {
 
 const LONG = `【推演】${'从开单走到关单，每个阶段的边界和最坏情况都列了，对照了成熟产品的做法。'.repeat(3)}`;
 
-/** 假的 cursor-agent：status 按 FAKE_LOGGED 说登没登录；问答按 FAKE_ANSWER 回（'' 就是没输出） */
+/**
+ * 假的 cursor-agent：status 按 FAKE_LOGGED 说登没登录，不碰 stdin（真实的 status 查询也不喂它东西）。
+ * 问答（-p ... 不带位置参数）默认老实读 stdin 里的题面、把里面的核对码原样抄回去、后面接 FAKE_ANSWER——
+ * 模拟真收到题面的模型（ask.mjs、second-opinion.mjs 的核对码机制见各自 askOne / runCursor 的注释）。
+ * FAKE_RAW=1 时不管 stdin、直接吐 FAKE_ANSWER（'' 就是没输出）——模拟读不到题面那种坏模型，或单纯造
+ * 「没有输出」这种边界。FAKE_DUMP_ENV=1 时只把关心的几个环境变量吐成 JSON，查传给它的环境干不干净。
+ * FAKE_ASSERT=1 时断言 argv 里没有多余的位置参数（没让它去读文件）、stdin 里确实有题面，吐一份 JSON。
+ */
 function fakeCursor(): string {
   const bin = temp('bin');
   const script = join(bin, 'fake-cursor.mjs');
@@ -78,7 +85,34 @@ function fakeCursor(): string {
       "if (process.argv.includes('status')) {",
       "  process.stdout.write(JSON.stringify({ status: 'x', isAuthenticated: process.env.FAKE_LOGGED === '1' }));",
       '} else {',
-      "  process.stdout.write(process.env.FAKE_ANSWER ?? '');",
+      "  let stdinData = '';",
+      "  process.stdin.on('data', (d) => {",
+      '    stdinData += d;',
+      '  });',
+      "  process.stdin.on('end', () => {",
+      "    if (process.env.FAKE_DUMP_ENV === '1') {",
+      "      const keys = ['SHELL', 'MSYSTEM', 'MSYSTEM_PREFIX', 'MSYSTEM_CHOST', 'TERM'];",
+      '      process.stdout.write(',
+      '        JSON.stringify(Object.fromEntries(keys.map((k) => [k, process.env[k] ?? null]))),',
+      '      );',
+      "    } else if (process.env.FAKE_ASSERT === '1') {",
+      '      // 认识的这几个 flag、以及 --workspace/--model 后面各跟的那一个值；除此之外不该再有别的位置参数',
+      '      // （老版本那句「读 xxx.md，照里面的要求作答」就是这种多余的位置参数）。',
+      "      const known = new Set(['-p', '--output-format', 'text', '--trust', '--mode', 'ask', '--workspace', '--model']);",
+      '      const rest = process.argv.slice(2);',
+      '      const extraArgs = rest.filter(',
+      "        (a, i) => !known.has(a) && rest[i - 1] !== '--workspace' && rest[i - 1] !== '--model',",
+      '      );',
+      '      process.stdout.write(',
+      "        JSON.stringify({ extraArgs, stdinHasTopic: stdinData.includes('【推演】') }),",
+      '      );',
+      "    } else if (process.env.FAKE_RAW === '1') {",
+      "      process.stdout.write(process.env.FAKE_ANSWER ?? '');",
+      '    } else {',
+      "      const nonce = (/^核对码：(\\S+)/m.exec(stdinData) ?? [])[1] ?? '';",
+      "      process.stdout.write(nonce + '\\n' + (process.env.FAKE_ANSWER ?? ''));",
+      '    }',
+      '  });',
       '}',
       '',
     ].join('\n'),
@@ -229,10 +263,78 @@ describe('ask.mjs：这台机器缺 cursor-agent', SLOW, () => {
     const r = run('ask.mjs', ['--text', topic(LONG), '--round', '1'], {
       home: temp('home'),
       path: fakeCursor(),
-      env: { FAKE_LOGGED: '1', FAKE_ANSWER: '' },
+      env: { FAKE_LOGGED: '1', FAKE_RAW: '1', FAKE_ANSWER: '' },
     });
     expect(r.code).toBe(2);
     expect(r.out).toContain('没答上：退出码 0 但没有输出');
+  });
+});
+
+// 断链修复（本机 2026-09-28 两次实测）：第一版让 askOne 起 cursor-agent 读工作目录里的题面文件，指望
+// cursorAgentEnv() 摘掉 Git Bash 留下的环境变量就够。实测不够：只要父进程链里有 Git Bash，Cursor 的钩子照样把
+// 读文件的工具调用拦掉（见 scripts/ask.mjs askOne 头上的论证），模型读不到题面时回一句「无法读取 xxx」——但
+// 退出码 0、有输出，原来的判断（退出码 0 且有输出就算答了）会把这句「读不到」当成结论。改法是压根不用文件：不给
+// 位置参数，题面从 stdin 喂给它；再加一层防蒙混——题面最前面塞一行随机核对码，要求原样抄进答案，输出里找不到
+// 核对码就一律判没答上，不管缘由是什么（钩子拦的、权限、压根没读 stdin）。
+describe('askOne：题面从 stdin 喂给 cursor-agent，核对码没读回来不当成答上', SLOW, () => {
+  it('假 cursor-agent 不管 stdin、直接回一句没有核对码的话（退出码 0）：判没答上，ask.mjs 退出码 2', () => {
+    const r = run('ask.mjs', ['--text', topic(LONG), '--round', '1'], {
+      home: temp('home'),
+      path: fakeCursor(),
+      env: { FAKE_LOGGED: '1', FAKE_RAW: '1', FAKE_ANSWER: '无法读取题面。' },
+    });
+    expect(r.code).toBe(2);
+    expect(r.out).toContain('没读到题面（答案里没有题面里的核对码）');
+    expect(r.out).toContain('无法读取题面');
+  });
+
+  it('假 cursor-agent 老实读了 stdin、原样带回核对码：判答上，记下的答案里没有核对码那一行', () => {
+    const r = run('ask.mjs', ['--text', topic(LONG), '--round', '1'], {
+      home: temp('home'),
+      path: fakeCursor(),
+      env: { FAKE_LOGGED: '1', FAKE_ANSWER: '这才是真正的答案' },
+    });
+    expect(r.code).toBe(0);
+    const body = /## gpt[^\n]*\n\n([\s\S]*)/.exec(r.out)?.[1]?.trim();
+    expect(body).toBe('这才是真正的答案');
+  });
+
+  // 故意造出失败：askOne 的 spawn 要是又给带上了「读 xxx.md」那种位置参数、或者忘了把题面喂进 stdin，
+  // 这条就会看到 extraArgs 非空、或 stdinHasTopic 是 false，断言失败。
+  it('起 cursor-agent 时不带位置参数（不再叫它去读文件），题面真的从 stdin 送过去', () => {
+    const r = run('ask.mjs', ['--text', topic(LONG), '--round', '1'], {
+      home: temp('home'),
+      path: fakeCursor(),
+      env: { FAKE_LOGGED: '1', FAKE_ASSERT: '1' },
+    });
+    const dumped = JSON.parse(/\{[\s\S]*\}/.exec(r.out)?.[0] ?? '{}');
+    expect(dumped).toEqual({ extraArgs: [], stdinHasTopic: true });
+  });
+
+  // 故意造出失败：不给 ask.mjs 里 askOne 的 spawn 带 env: cursorAgentEnv()，这条就会看到 SHELL/MSYSTEM 原样传下去，
+  // 断言失败。只测 win32：cursorAgentEnv 在别的平台是恒等函数，摘不掉什么，纯函数那组测试已经覆盖了。
+  it.skipIf(!WIN)('win32：起 cursor-agent 时环境里没有 Git Bash 留下的 SHELL/MSYSTEM 等', () => {
+    const r = run('ask.mjs', ['--text', topic(LONG), '--round', '1'], {
+      home: temp('home'),
+      path: fakeCursor(),
+      env: {
+        FAKE_LOGGED: '1',
+        FAKE_DUMP_ENV: '1',
+        SHELL: '/bin/bash.exe',
+        MSYSTEM: 'MINGW64',
+        MSYSTEM_PREFIX: '/mingw64',
+        MSYSTEM_CHOST: 'x86_64-w64-mingw32',
+        TERM: 'xterm-256color',
+      },
+    });
+    const dumped = JSON.parse(/\{[\s\S]*\}/.exec(r.out)?.[0] ?? '{}');
+    expect(dumped).toEqual({
+      SHELL: null,
+      MSYSTEM: null,
+      MSYSTEM_PREFIX: null,
+      MSYSTEM_CHOST: null,
+      TERM: null,
+    });
   });
 });
 
