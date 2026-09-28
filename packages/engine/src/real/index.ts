@@ -15,6 +15,7 @@ import {
 } from '@fleet-dao/adapters';
 import { createDb, type Db } from '@fleet-dao/db';
 import { assertPublishable, createGitHub, pgLedger, pgLocker } from '@fleet-dao/github';
+import type { Client } from '@temporalio/client';
 import type { EngineJobs } from '../activities.ts';
 import type { EngineDrain } from '../drain.ts';
 import { type DrainControlDeps, drainRequestFile, readDrainRequest } from '../drain-control.ts';
@@ -37,6 +38,7 @@ import { engineJevFromEnv } from './jev-port.ts';
 import { registerEngineJobs } from './jobs.ts';
 import { realKillEvidence } from './kill-evidence.ts';
 import { orgDriftReporter, orgSwitchRound } from './org-switch.ts';
+import { retireEngineSchedules } from './retire-schedules.ts';
 import { routeProbeJob } from './route-probe.ts';
 import { checkIoRoot, DEFAULT_SESSION_IO_DIR, reportIoRoot } from './session-io.ts';
 import { type SessionOrgReader, sessionOrgReader } from './session-org.ts';
@@ -439,6 +441,8 @@ export function realPortsFromEnv(
 ): RealPorts & {
   jobs: EngineJobs;
   registerJobs(): Promise<void>;
+  /** 引擎起来对齐定时任务之后跑一遍：把退役名单（jobs/retired-schedules.ts）里 Temporal 上还在的删掉，见 real/retire-schedules.ts。 */
+  retireSchedules(client: Pick<Client, 'schedule'>): Promise<void>;
   close(): Promise<void>;
   stateDir: string;
   /** 排空要的几样（drain-control.ts）：读发布脚本的排空请求、查发布锁、到点停会话、报提醒。 */
@@ -562,6 +566,7 @@ export function realPortsFromEnv(
       if (registered.level === 'error') console.error(registered.message);
       else console.info(registered.message);
     },
+    retireSchedules: (client: Pick<Client, 'schedule'>) => retireEngineSchedules(client, db),
     close,
   };
 }
