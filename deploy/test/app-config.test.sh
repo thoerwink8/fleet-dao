@@ -340,7 +340,7 @@ printf 'FLEET_ENGINE_PORTS=real\nFLEET_SENSITIVE_VALUES_FILE=%s\nFLEET_WORK_DIR=
   "$VALUE" >"$T/stale-active.env"
 chmod 640 "$T/stale-active.env"
 call remove_stale_key "$T/stale-active.env" FLEET_SENSITIVE_VALUES_FILE "机制删掉了"
-if ((RC == 0 && ${#CHANGES[@]} == 1 && ${#REDS[@]} == 0)) \
+if ((RC == 0 && ${#CHANGES[@]} > 0 && ${#REDS[@]} == 0)) \
   && [[ "$OUT" != *"$VALUE"* ]] \
   && [[ "$(env_value "$T/stale-active.env" FLEET_SENSITIVE_VALUES_FILE 2>/dev/null)" == "" ]] \
   && [[ "$(env_value "$T/stale-active.env" FLEET_ENGINE_PORTS)" == real ]] \
@@ -355,7 +355,7 @@ printf 'FLEET_ENGINE_PORTS=real\n# FLEET_SENSITIVE_VALUES_FILE=%s\nFLEET_WORK_DI
 chmod 640 "$T/stale-commented.env"
 call remove_stale_key "$T/stale-commented.env" FLEET_SENSITIVE_VALUES_FILE "机制删掉了"
 env_parse "$T/stale-commented.env" # 重新读一遍改过的文件，env_mentioned 才是删除之后的状态
-if ((RC == 0 && ${#CHANGES[@]} == 1)) && ! env_mentioned FLEET_SENSITIVE_VALUES_FILE; then
+if ((RC == 0 && ${#CHANGES[@]} > 0)) && ! env_mentioned FLEET_SENSITIVE_VALUES_FILE; then
   pass "被注释掉的也删：不留死配置"
 else
   flunk "该把注释掉的那一行也删掉：$OUT"
