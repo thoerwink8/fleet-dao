@@ -1049,10 +1049,17 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
    */
   const secondOpinionRound = async (pr: number, atHead: string): Promise<SecondOpinionOutcome> => {
     if (atHead === soHead) return { kind: 'skip' };
+    const riskPathsFile = need(setup, '流程配置').riskPathsFile;
     const risk = await attempt(kit, 'checkHighRisk', () =>
-      acts.checkHighRisk({ ...kit.scope, repo: input.repo, prNumber: pr }),
+      acts.checkHighRisk({
+        ...kit.scope,
+        repo: input.repo,
+        prNumber: pr,
+        ...(riskPathsFile !== undefined ? { riskPathsFile } : {}),
+      }),
     );
     if (risk.hits.length === 0) {
+      if (risk.note) status.lastProblem = risk.note;
       soHead = atHead;
       return { kind: 'skip' };
     }
@@ -1081,6 +1088,8 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
         verdict,
         findings: got.output.review.findings,
         model: got.route.modelId,
+        // 走到这说明 hits 非空，checkHighRisk 只在 riskPathsFile 有值时才会给出命中
+        riskPathsFile: need(riskPathsFile, '先审后合清单路径'),
       }),
     );
     soHead = atHead;
@@ -1139,7 +1148,13 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
     const approvedPatchId = soApprovedPatchId;
     if (approvedHead === null || approvedPatchId === null) return false;
     try {
-      const risk = await acts.checkHighRisk({ ...kit.scope, repo: input.repo, prNumber: pr });
+      const riskPathsFile = need(setup, '流程配置').riskPathsFile;
+      const risk = await acts.checkHighRisk({
+        ...kit.scope,
+        repo: input.repo,
+        prNumber: pr,
+        ...(riskPathsFile !== undefined ? { riskPathsFile } : {}),
+      });
       if (risk.hits.length === 0) return false; // 不该走到这里（没风险就没有 second-opinion 要求），保险按老路
       const newPatchId = await patchIdOfSafe(atHead);
       if (newPatchId === null || newPatchId !== approvedPatchId) return false;
@@ -1154,6 +1169,8 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
         findings: [],
         model: '沿用，没有再审',
         reused: { fromHead: approvedHead, round: soApprovedRound },
+        // 走到这说明 hits 非空，checkHighRisk 只在 riskPathsFile 有值时才会给出命中
+        riskPathsFile: need(riskPathsFile, '先审后合清单路径'),
       });
       soHead = atHead;
       return true;
