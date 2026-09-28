@@ -5,7 +5,7 @@
 import { z } from 'zod';
 import type { AskTally } from './ask.ts';
 import { type Brief, checkBrief } from './brief.ts';
-import { CATEGORIES, type Category, type FlowConfig, ProfileSchema, profileFor } from './config.ts';
+import { CATEGORIES, type Category, type FlowConfig, ProfileSchema, profileFor, repoPath } from './config.ts';
 import type { Mode } from './flow.ts';
 import { type FlowReplica, replicaVerdict } from './replica.ts';
 import type { VerifyReport } from './verdict.ts';
@@ -32,6 +32,7 @@ const StoredConfigSchema = z.object({
   sessionMemoryMb: z.number().optional(),
   highRiskPaths: z.array(z.string()),
   uiPaths: z.array(z.string()),
+  riskPathsFile: repoPath.optional(),
 });
 
 export interface FusionSetupInput {
@@ -59,6 +60,8 @@ export type FusionSetup =
       /** 算页面代码的路径：改到它们的活按界面类派（GPT 不做界面）。 */
       uiPaths: string[];
       highRiskPaths: string[];
+      /** 先审后合清单放在这个项目仓里的哪个路径；项目没声明就没有这个字段（config.ts riskPathsFile 的注释）。 */
+      riskPathsFile?: string;
     }
   | { ok: false; why: string };
 
@@ -95,6 +98,7 @@ export function setupFusion(input: FusionSetupInput): FusionSetup {
     verifyRounds: p.verify.rounds,
     uiPaths: [...config.uiPaths],
     highRiskPaths: [...config.highRiskPaths],
+    ...(config.riskPathsFile !== undefined ? { riskPathsFile: config.riskPathsFile } : {}),
   };
 }
 

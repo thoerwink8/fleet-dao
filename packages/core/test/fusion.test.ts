@@ -88,6 +88,25 @@ describe('开工前看流程配置（setupFusion）', () => {
     ).toMatchObject({ ok: true, profile: 'default', mode: 'single', verifyRounds: 2 });
   });
 
+  it('项目声明了先审后合清单：带进 FusionSetup 给工作流转给 checkHighRisk；没声明就没有这个字段', () => {
+    const withList = merged({
+      kind: 'text',
+      text: JSON.stringify({
+        formatVersion: 1,
+        riskPathsFile: 'packages/conventions/high-risk-paths.json',
+      }),
+    });
+    const got = setupFusion({
+      read: readOf({ source: 'project', config: withList }),
+      now: NOW,
+      category: '需求',
+    });
+    expect(got).toMatchObject({ ok: true, riskPathsFile: 'packages/conventions/high-risk-paths.json' });
+
+    const withoutList = setupFusion({ read: readOf(), now: NOW, category: '需求' });
+    expect(withoutList.ok && 'riskPathsFile' in withoutList).toBe(false);
+  });
+
   it.each<[string, Partial<FlowConfigRead>, RegExp]>([
     ['仓里的配置认不出', { replica: { ...fresh, error: '格式版本 7 认不出' } }, /流程配置认不出：格式版本 7/],
     ['从没同步过', { replica: { ...fresh, syncedAt: null }, config: null, source: null }, /还没从仓里同步过/],
