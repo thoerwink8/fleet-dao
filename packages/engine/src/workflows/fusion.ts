@@ -1417,8 +1417,12 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
       await syncWorktreeAtBoundary('open-pr');
       const current = need(setup, '流程配置');
       const lines = rounds.length > 0 ? await verifyLines(kit, rounds) : null;
-      // 「按推荐先做了」一栏（#259）：照开 PR 这一刻库里这张单的提问写
-      const assumed = patched(ASK_PATCH) ? await judge(kit, 'assumedLines', await readAsks()) : [];
+      // 「按推荐先做了」一栏（#259）：照开 PR 这一刻库里这张单的提问写，加上退回重问到数、会话按自己的话接着做的
+      // 那几条（#259 第 3 个 PR：kit.assumedNotes，不经 fleet ask、asks 表里没有，assumedLines 读不到）。
+      const assumed = [
+        ...(patched(ASK_PATCH) ? await judge(kit, 'assumedLines', await readAsks()) : []),
+        ...kit.assumedNotes,
+      ];
       let planSummary = need(plan, '方案').summary;
       let summary = lastDelivery?.summary ?? '';
       for (;;) {
