@@ -79,6 +79,17 @@ check_mirasim "$U" >/dev/null
 check "记一笔待配、没有红" "${#PENDING[@]} ${#REDS[@]}" "1 0"
 has "待配写清没有这个目录、怎么配" "$(last PENDING)" "还没有自己的 Mirasim 服务（没有 $DIR）：创始人.*docs/ops.md 第五节「会话用户的 Mirasim」"
 
+echo "== 1b.【故意造出的失败】照 france.sh 挂上 ERR 陷阱再跑「目录不在」：陷阱不许响，照样记待配、返回 0"
+# france.sh 挂着 trap on_error ERR；赋值 out=$(失败的命令) 会触发它、整个装机停下（09-28 真撞过，读回后面全跳了）
+fresh
+trapped=$(
+  trap 'echo 陷阱响了' ERR
+  set -E
+  check_mirasim "$U" >/dev/null
+  echo "返回 $? 待配 ${#PENDING[@]} 红 ${#REDS[@]}"
+)
+check "挂着 ERR 陷阱：陷阱没响、记一笔待配" "$trapped" "返回 0 待配 1 红 0"
+
 echo "== 2. 目录在、一份令牌都没有：待配，同一条 fix"
 install -d -o "$U" -g "$U" -m 755 "$DIR"
 fresh
