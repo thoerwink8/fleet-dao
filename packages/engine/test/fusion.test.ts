@@ -483,6 +483,48 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
       expect(parked.lastProblem).toContain('主线上读不到清单');
     });
 
+    it('请第二意见前不信开工时的快照：项目开工后才声明清单，现读一样查得到（#199 那次教训：读不到就当没碰到，白白红了 3 次）', async () => {
+      const { riskPathsFile: _omit, ...noRiskPaths } = FAKE_FLOW_CONFIG;
+      const freshConfig = (config: Record<string, unknown>) => ({
+        replica: {
+          syncedAt: new Date().toISOString(),
+          error: null,
+          unread: null,
+          testCommand: FAKE_FLOW_CONFIG.testCommand,
+        },
+        source: 'project' as const,
+        config,
+      });
+      const w = world({
+        highRisk: () => HITS,
+        review: () => ({ verdict: 'pass', findings: [] }),
+        // 第 1 次（开工时的快照）：项目还没声明清单；之后（现读）：已经声明了
+        flow: (_input, n) => (n === 1 ? freshConfig(noRiskPaths) : freshConfig(FAKE_FLOW_CONFIG)),
+      });
+      const result = await runToEnd(w);
+      expect(result.state).toBe('done');
+      const checks = w.callsOf('checkHighRisk');
+      expect(checks.length).toBeGreaterThan(0);
+      for (const c of checks) expect(c.input.riskPathsFile).toBe(FAKE_FLOW_CONFIG.riskPathsFile);
+      expect(w.callsOf('postSecondOpinion')[0]?.input.riskPathsFile).toBe(FAKE_FLOW_CONFIG.riskPathsFile);
+    });
+
+    it('【故意造出的失败】请第二意见前现读流程配置副本读不到：明确失败，不当「没声明」悄悄放过', async () => {
+      const w = world({
+        // 第 1 次（开工时）：用默认（已经声明了清单）；之后（现读）：读不到
+        flow: (_input, n) =>
+          n === 1
+            ? undefined
+            : {
+                replica: { syncedAt: null, error: null, unread: 'GitHub 502', testCommand: null },
+                source: null,
+                config: null,
+              },
+      });
+      const { parked } = await runUntilParked(w);
+      expect(parked.lastProblem).toContain('流程配置读不到');
+    });
+
     it('【故意造出的失败】贴第二意见状态没权限：停下等人，不当「贴上了」', async () => {
       const w = world({
         highRisk: () => HITS,
@@ -1072,9 +1114,10 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
     const red = w.alerts.filter((a) => a.level === 'stuck' && a.title.startsWith('流程配置不能用'));
     expect(red).toHaveLength(2);
     expect(result.state).toBe('done');
-    // 2 次停派重读 + 1 次这张单收单读成 + 1 次合并队列判「合并闸红是不是只缺 second-opinion」要知道清单在哪
-    // （riskPathsFileForItem，merge-queue.ts）也读一次流程配置。
-    expect(w.count('flowConfig')).toBe(4);
+    // 2 次停派重读 + 1 次这张单收单读成 + 1 次请第二意见前现读（freshRiskPathsFile，不信开工时的快照，#199 那次
+    // 教训）+ 1 次合并队列判「合并闸红是不是只缺 second-opinion」要知道清单在哪（riskPathsFileForItem，
+    // merge-queue.ts）也读一次流程配置。
+    expect(w.count('flowConfig')).toBe(5);
   });
 
   it('没有别家可验（写过这张单的两族之外没有能派的路由）：停下等人，不拿同族顶、不开 PR', async () => {

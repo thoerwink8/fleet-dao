@@ -155,6 +155,14 @@ const ASK_PATCH = 'ask-not-blocking';
  */
 const MAINLINE_SYNC_PATCH = 'mainline-sync-boundary';
 /**
+ * 请第二意见前判碰没碰先审后合的路径：改成不信开工时的 FusionSetup 快照（先声明清单再开工的单快照里没有
+ * riskPathsFile，会被当成「项目没声明、不查」，读不到就当没碰到——#199 那次真事：合并闸红了 3 次才停下等人，
+ * 其实是快照过期，项目早就声明了清单），现读库里当前的配置副本（core 的 riskPathsFileFor，和合并队列那条
+ * 共用同一份判法）。副本读不到、认不出，明确失败（走 attempt 的失败分流，不当「没声明」悄悄放过）。在途任务
+ * 的历史里没调过这多出来的 flowConfig、decide：没打这个标记（老历史）就照老步序走，用开工时的快照。
+ */
+const RISK_PATHS_FRESH_PATCH = 'second-opinion-fresh-risk-paths';
+/**
  * 存档点看晚到的回答的几步：规划做完、合进去之前（core 的 nextFlow 收「changed」的也是这几步）。规划之前方案还没有，
  * 读到的留到规划之后；合进去以后的归对账开后续单。
  */
@@ -1047,17 +1055,42 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
    * 「必须改」的反馈和 CI 红走同一条账（fix，由 doFix 派会话去改）；连着 SECOND_OPINION_ROUND_LIMIT 轮还是必须改
    * 才停下等人。
    */
+  /**
+   * 请第二意见前判碰没碰先审后合的路径要知道的：现读库里当前的配置副本，不用开工时的 FusionSetup 快照
+   * （RISK_PATHS_FRESH_PATCH 注释：先声明清单再开工的单，快照里没有 riskPathsFile，会被当成「没声明」悄悄
+   * 放过）。和合并队列 workflows/merge-queue.ts 用的是同一份 core 判法（riskPathsFileFor），但这里读不到、
+   * 认不出要明确失败（不像合并队列那样退化成「不查」）——这一步管的是「要不要拦下这个 PR 等审查」，读不出来
+   * 不能悄悄放行，得停下等人把配置修好。
+   */
+  const freshRiskPathsFile = async (): Promise<
+    { ok: true; riskPathsFile?: string } | { ok: false; why: string }
+  > => {
+    const flow = await acts.flowConfig({ ...kit.scope });
+    return judge(kit, 'riskPathsFileFor', { read: flow, now: iso(Date.now()) });
+  };
+
   const secondOpinionRound = async (pr: number, atHead: string): Promise<SecondOpinionOutcome> => {
     if (atHead === soHead) return { kind: 'skip' };
-    const riskPathsFile = need(setup, '流程配置').riskPathsFile;
-    const risk = await attempt(kit, 'checkHighRisk', () =>
-      acts.checkHighRisk({
+    // patched() 本身也要记进历史、调用次数不能跟着分支变，所以先问一次存起来（见 RISK_PATHS_FRESH_PATCH 注释）。
+    const riskPathsFreshOn = patched(RISK_PATHS_FRESH_PATCH);
+    let riskPathsFile: string | undefined;
+    const risk = await attempt(kit, 'checkHighRisk', async () => {
+      if (riskPathsFreshOn) {
+        const decided = await freshRiskPathsFile();
+        if (!decided.ok) {
+          throw new Error(`流程配置读不到，判不了先审后合清单在哪：${decided.why}`);
+        }
+        riskPathsFile = decided.riskPathsFile;
+      } else {
+        riskPathsFile = need(setup, '流程配置').riskPathsFile;
+      }
+      return acts.checkHighRisk({
         ...kit.scope,
         repo: input.repo,
         prNumber: pr,
         ...(riskPathsFile !== undefined ? { riskPathsFile } : {}),
-      }),
-    );
+      });
+    });
     if (risk.hits.length === 0) {
       if (risk.note) status.lastProblem = risk.note;
       soHead = atHead;
@@ -1148,7 +1181,16 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
     const approvedPatchId = soApprovedPatchId;
     if (approvedHead === null || approvedPatchId === null) return false;
     try {
-      const riskPathsFile = need(setup, '流程配置').riskPathsFile;
+      // 这一步只是「能不能沿用」的抄近道：读不到配置不明确失败——直接按「不能沿用」退回 false，落到
+      // secondOpinionRound 那条真请一轮的路，那边会用同一份 patched 把关，读不到才明确失败。
+      let riskPathsFile: string | undefined;
+      if (patched(RISK_PATHS_FRESH_PATCH)) {
+        const decided = await freshRiskPathsFile();
+        if (!decided.ok) return false;
+        riskPathsFile = decided.riskPathsFile;
+      } else {
+        riskPathsFile = need(setup, '流程配置').riskPathsFile;
+      }
       const risk = await acts.checkHighRisk({
         ...kit.scope,
         repo: input.repo,
