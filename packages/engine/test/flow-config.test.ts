@@ -2,7 +2,7 @@
 // 都照实记下，不挡别的仓；真库、假 GitHub 走一整轮的在 github-reconcile.test.ts。
 import { FLOW_REPLICA_MAX_AGE_MINUTES, resolveFlowConfig, type Source } from '@fleet-dao/core';
 import type { FlowReplicaState, FlowReplicaWrite } from '@fleet-dao/db';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   type FlowConfigJobDeps,
   flowAlertKey,
@@ -32,9 +32,12 @@ function state(over: Partial<FlowReplicaState> = {}): FlowReplicaState {
   };
 }
 
+const OWN_COMMIT = 'e'.repeat(40);
+
 function deps(over: Partial<FlowConfigJobDeps> = {}) {
   const writes: { repoId: string; w: FlowReplicaWrite }[] = [];
   const alerts: { key: string; title: string; body: string }[] = [];
+  const notices: { key: string; title: string; body: string }[] = [];
   const resolved: string[] = [];
   const logs: { level: string; message: string }[] = [];
   const d: FlowConfigJobDeps = {
@@ -51,14 +54,20 @@ function deps(over: Partial<FlowConfigJobDeps> = {}) {
     alert: async (key, title, body) => {
       alerts.push({ key, title, body });
     },
+    notice: async (key, title, body) => {
+      notices.push({ key, title, body });
+    },
     resolve: async (key) => {
       resolved.push(key);
     },
+    // 默认判不出引擎自己在跑哪个提交（像开发机、测试环境）：版本错位那条例外默认不触发，老测试照样走老路径
+    ownCommit: () => null,
+    newerThanOwn: async () => null,
     now: () => NOW,
     log: (level, message) => logs.push({ level, message }),
     ...over,
   };
-  return { d, writes, alerts, resolved, logs };
+  return { d, writes, alerts, notices, resolved, logs };
 }
 
 describe('流程配置副本那一步', () => {
@@ -160,5 +169,95 @@ describe('流程配置副本那一步', () => {
         body: expect.stringMatching(/还没从仓里同步过流程配置.*最近一次没查成：GitHub 回 502/),
       },
     ]);
+  });
+
+  // 断链修复（法国 2026-09-28 实测）：项目仓的配置和认得它的代码同一个 PR 进主线，主线上的配置总是先于能读它的引擎生效。
+  // 只是这版还不认得的新字段、且核实过确实比引擎自己在跑的提交新，不算真错，不停派。
+  describe('版本错位（配置比引擎自己在跑的提交新）', () => {
+    const aheadRead = {
+      read: async () => ({
+        commit: COMMIT,
+        file: {
+          kind: 'text' as const,
+          text: JSON.stringify({ formatVersion: 1, testCommand: 'pnpm test:changed', 未来字段: 'x' }),
+        },
+      }),
+    };
+
+    it('新字段 + 核实过确实比引擎新：不停派，副本不写（继续用旧的），只记一条日报级提醒（不报 alert）', async () => {
+      const newerThanOwn = vi.fn(async () => true);
+      const { d, writes, alerts, notices } = deps({
+        ...aheadRead,
+        ownCommit: () => OWN_COMMIT,
+        newerThanOwn,
+      });
+      expect((await syncFlowConfigs(d)).repos[0]).toMatchObject({
+        outcome: 'ahead_of_engine',
+        blocked: false,
+      });
+      expect(writes).toEqual([]); // 副本一个字都没动
+      expect(alerts).toEqual([]);
+      expect(notices).toEqual([
+        {
+          key: flowAlertKey({ owner: 'acme', name: 'widgets' }),
+          title: expect.stringContaining('比在跑的引擎新（多了 未来字段 字段）'),
+          body: expect.stringContaining('等自动发布把引擎跟上'),
+        },
+      ]);
+      // repo 是 list() 给的那一整行（带着库里其余字段，不是干净的 {owner,name}）：只核对认得出的这两个字段
+      expect(newerThanOwn).toHaveBeenCalledWith(
+        expect.objectContaining({ owner: 'acme', name: 'widgets' }),
+        COMMIT,
+        OWN_COMMIT,
+      );
+    });
+
+    it('【失败】新字段，但读不到引擎自己在跑的版本（ownCommit 认不出）：照老规矩停派', async () => {
+      const newerThanOwn = vi.fn(async () => true);
+      const { d, writes, alerts, notices } = deps({ ...aheadRead, ownCommit: () => null, newerThanOwn });
+      expect((await syncFlowConfigs(d)).repos[0]).toMatchObject({ outcome: 'invalid', blocked: true });
+      expect(newerThanOwn).not.toHaveBeenCalled(); // 判不出自己的版本，压根不去比
+      expect(alerts).toHaveLength(1);
+      expect(alerts[0]?.title).toContain('这个项目停派');
+      expect(notices).toEqual([]);
+      expect(writes[0]?.w.write).toBe('invalid');
+    });
+
+    it('【失败】新字段，但比较不出关系（GitHub 出错、或不是同一个仓）：照老规矩停派，不悄悄放过', async () => {
+      const { d, writes, alerts, notices, logs } = deps({
+        ...aheadRead,
+        ownCommit: () => OWN_COMMIT,
+        newerThanOwn: async () => {
+          throw new Error('GitHub 回 500');
+        },
+      });
+      expect((await syncFlowConfigs(d)).repos[0]).toMatchObject({ outcome: 'invalid', blocked: true });
+      expect(alerts).toHaveLength(1);
+      expect(notices).toEqual([]);
+      expect(writes[0]?.w.write).toBe('invalid');
+      expect(logs.some((l) => l.level === 'warn' && l.message.includes('判不出是不是比引擎新'))).toBe(true);
+    });
+
+    it('【失败】真错的配置（不是新字段，是值类型不对）：不试版本错位那条例外，照旧停派', async () => {
+      const newerThanOwn = vi.fn(async () => true);
+      const { d, alerts, notices } = deps({
+        read: async () => ({
+          commit: COMMIT,
+          file: { kind: 'text', text: JSON.stringify({ formatVersion: 1, riskPathsFile: 42 }) },
+        }),
+        ownCommit: () => OWN_COMMIT,
+        newerThanOwn,
+      });
+      expect((await syncFlowConfigs(d)).repos[0]).toMatchObject({ outcome: 'invalid', blocked: true });
+      expect(newerThanOwn).not.toHaveBeenCalled(); // 不算「新字段」，压根不去核实版本
+      expect(alerts).toHaveLength(1);
+      expect(notices).toEqual([]);
+    });
+
+    it('发布跟上后解析成功：resolve 撤的是同一个键（和 alert、notice 用的一样，见上面两条用例）', async () => {
+      const round2 = deps({ read: async () => ({ commit: COMMIT, file: { kind: 'missing' } }) });
+      expect((await syncFlowConfigs(round2.d)).repos[0]).toMatchObject({ outcome: 'synced' });
+      expect(round2.resolved).toContain(flowAlertKey({ owner: 'acme', name: 'widgets' }));
+    });
   });
 });

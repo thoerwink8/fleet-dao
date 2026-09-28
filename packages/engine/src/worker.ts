@@ -1,7 +1,6 @@
 // worker：连 Temporal、打包工作流、挂上活动。地址、命名空间、任务队列等从本机配置（环境变量）读，不写死进代码。
 // 排空（drain.ts）：要发新版本、收到停机信号，都先不起新会话，在跑的最多再做一小段宽限，到点停下（按编号续上），再让工人停下。
 
-import { realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { signAgentToken } from '@fleet-dao/api/agent-token';
@@ -26,7 +25,7 @@ import {
   type WaitDrainedOptions,
   waitDrained,
 } from './drain.ts';
-import { createDrainControl, type DrainControl, shaOfDir } from './drain-control.ts';
+import { createDrainControl, type DrainControl, ownReleaseSha } from './drain-control.ts';
 import { startDrainStatusFile } from './drain-file.ts';
 import { createFakeWorld } from './fakes.ts';
 import { ensureEngineSchedules } from './jobs/schedules.ts';
@@ -294,14 +293,7 @@ export function installGracefulShutdown(o: GracefulShutdownOptions): {
   };
 }
 
-/** 这个进程在跑哪一版：systemd 起进程时 WorkingDirectory（current）解成的 <提交号> 目录；认不出是 null（开发机、测试）。 */
-export function ownReleaseSha(cwd: string = process.cwd()): string | null {
-  try {
-    return shaOfDir(realpathSync(cwd));
-  } catch {
-    return null;
-  }
-}
+export { ownReleaseSha };
 
 /** 进程入口用：按环境变量起一个 worker；要发新版本、停机信号都先排空（drain-control.ts、installGracefulShutdown）。 */
 export async function runEngineWorker(env: Record<string, string | undefined> = process.env): Promise<void> {

@@ -71,6 +71,17 @@ describe('对账读完一个仓，往副本里写什么', () => {
     expect(flowSync(org, { kind: 'unread', why: ' ' })).toEqual({ write: 'unread', why: '没带原因' });
   });
 
+  it('仓里有一个这版没听说过的字段：invalid 带上 unknownKeys（jobs/flow-config.ts 拿它去核实是不是配置比引擎新）', () => {
+    const got = flowSync(org, read(text({ formatVersion: 1, 未来字段: 'x' })));
+    expect(got).toMatchObject({ write: 'invalid', scope: 'project', unknownKeys: ['未来字段'] });
+  });
+
+  it('【失败】真错的配置（riskPathsFile 类型不对）：不带 unknownKeys，不能被误判成「也许是新版本」', () => {
+    const got = flowSync(org, read(text({ formatVersion: 1, riskPathsFile: 42 })));
+    expect(got).toMatchObject({ write: 'invalid', scope: 'project' });
+    if (got.write === 'invalid') expect(got.unknownKeys).toBeUndefined();
+  });
+
   it('【失败】全组织默认坏了：仓里读没读成都判认不出（org），一律停派', () => {
     const broken: Source = { kind: 'text', text: '{' };
     expect(flowSync(broken, read(text({ formatVersion: 1, testCommand: 'x' })))).toMatchObject({

@@ -90,8 +90,12 @@ export type FlowSync =
       commit: string;
       testCommand: string | null;
     }
-  /** 认不出（全组织默认坏了是 org）：副本里的配置不动，记下原因，这个项目停派、报提醒。 */
-  | { write: 'invalid'; scope: 'org' | 'project'; why: string }
+  /**
+   * 认不出（全组织默认坏了是 org）：副本里的配置不动，记下原因，这个项目停派、报提醒。unknownKeys 非空时：这些字段
+   * 这版解析器压根没听说过（config.ts 的 unknownFormatKeys）——调用方（jobs/flow-config.ts）再核实这份配置是不是真比
+   * 引擎自己在跑的版本新，新就不当真错、不停派。
+   */
+  | { write: 'invalid'; scope: 'org' | 'project'; why: string; unknownKeys?: string[] }
   /** 没查成：副本一样不动（不当成「没有这个文件」），只记下原因；太久没同步成由 replicaVerdict 停派。 */
   | { write: 'unread'; why: string };
 
@@ -107,6 +111,7 @@ export function flowSync(org: Source, read: FlowRead): FlowSync {
       write: 'invalid',
       scope: decided.scope,
       why: `${decided.why}（提交 ${read.commit.slice(0, 7)}）`,
+      ...(decided.unknownKeys ? { unknownKeys: decided.unknownKeys } : {}),
     };
   }
   return {
