@@ -82,6 +82,26 @@ export {
   issueClose,
 } from './issue-close.ts';
 export {
+  type CategoryPlan,
+  categoryPlan,
+  categoryRemovedByHuman,
+  DEFAULT_IDLE_POLICY,
+  daysBetween,
+  type HandoffDecision,
+  handoffComment,
+  handoffPlan,
+  type IdleDecision,
+  type IdleFacts,
+  type IdlePolicy,
+  idleCloseComment,
+  idlePlan,
+  type JevKindAnswer,
+  type LabelEvent,
+  type MilestoneDecision,
+  milestonePlan,
+  staleSinceOf,
+} from './issue-groom.ts';
+export {
   type Gh,
   type GhResult,
   ghRunner,
@@ -94,10 +114,14 @@ export {
   USAGE,
 } from './issue-new.ts';
 export {
+  currentVersion,
+  FROZEN_LABEL,
+  IDLE_LABEL,
   isKindLabel,
   KIND_LABELS,
   type KindLabel,
   LOCAL_LABEL,
+  type MilestoneRef,
   MOTHER_LABEL,
   milestonePhase,
   milestoneVersion,
@@ -163,7 +187,14 @@ export {
   type RepoFacts,
   specsPaths,
 } from './pr-fields.ts';
-export { type LabelPlan, type LabelRun, type PrState, planLabels, runPrLabels } from './pr-labels.ts';
+export {
+  type LabelPlan,
+  type LabelRun,
+  type PrState,
+  planLabels,
+  runPrLabels,
+  titlePrefixKind,
+} from './pr-labels.ts';
 export { FIX_ALERT_COLUMN, fixAlertRefs, prLinks } from './pr-links.ts';
 export { fsRepo, type RepoView } from './repo.ts';
 export { ENGINE_SESSION_MARKER, REFUSED_FULL_RUN } from './test-changed.ts';

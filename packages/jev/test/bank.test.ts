@@ -1,4 +1,4 @@
-// 题库：九个接入点都有题，每道题写得对，分诊四题能一次问完；不接「选哪条路由」。
+// 题库：十个接入点都有题，每道题写得对，分诊四题能一次问完；不接「选哪条路由」。
 import { describe, expect, it } from 'vitest';
 import { BANK, questionsOfSite, TRIAGE_QUESTIONS, TRIAGE_UI } from '../src/bank.ts';
 import {
@@ -11,7 +11,7 @@ import {
 } from '../src/questions.ts';
 
 describe('题库', () => {
-  it('九个接入点正好是设计文档第十一节那张表，每个都有题', () => {
+  it('十个接入点正好是设计文档第十一节那张表，每个都有题', () => {
     expect(Object.keys(SITES)).toEqual([
       'triage',
       'dedupe',
@@ -22,6 +22,7 @@ describe('题库', () => {
       'stall-check',
       'feishu-intent',
       'daily-digest',
+      'issue-kind',
     ]);
     for (const site of Object.keys(SITES) as (keyof typeof SITES)[]) {
       expect(questionsOfSite(site).length, site).toBeGreaterThan(0);
