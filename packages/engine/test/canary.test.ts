@@ -464,7 +464,7 @@ describe('开单、看一回、记结论（假的库、GitHub、Temporal）', ()
       {},
       {
         openIssue: async () => {
-          throw new Error('HYGIENE_BLOCKED：单子正文里有名单上的值');
+          throw new Error('HYGIENE_BLOCKED：单子正文里有真密钥');
         },
       },
     );

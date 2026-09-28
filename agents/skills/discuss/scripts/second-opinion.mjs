@@ -765,18 +765,11 @@ export function prComment(round, head, model, verdict, text, postMerge = false) 
   ].join('\n');
 }
 
-/** 贴之前按仓里的卫生检查扫一遍：名单读不到、没扫成、扫出东西，一律抛（不贴）。loadOpts 只给自测用。 */
-export async function checkPublishable(repo, body, loadOpts = {}) {
+/** 贴之前按仓里的卫生检查扫一遍：没扫成、扫出真密钥，一律抛（不贴；账号、组织编号、邮箱、IP 这类标识不算泄漏，
+ * 不拦，创始人 2026-09-28 傍晚拍，specs/169-Fusion形态/需求.md）。 */
+export async function checkPublishable(repo, body) {
   const scan = await import(pathToFileURL(join(repo, 'packages', 'hygiene', 'src', 'scan.ts')).href);
-  const values = await import(pathToFileURL(join(repo, 'packages', 'hygiene', 'src', 'values.ts')).href);
-  const loaded = values.loadSensitiveValues(loadOpts);
-  if (!loaded.ok) throw new Error(`卫生检查没法做（${loaded.reason}），没贴`);
-  const report = scan.scanFiles(
-    ['second-opinion.md'],
-    () => Buffer.from(body, 'utf8'),
-    undefined,
-    loaded.values,
-  );
+  const report = scan.scanFiles(['second-opinion.md'], () => Buffer.from(body, 'utf8'));
   if (report.binary.length > 0 || report.scanned.length !== 1) throw new Error('卫生检查没扫成，没贴');
   if (report.findings.length > 0)
     throw new Error(`卫生检查拦下了（${report.findings.map(scan.formatFinding).join('；')}），没贴`);
@@ -913,29 +906,16 @@ async function selftest(repo) {
     false,
     '贴 PR 的正文去掉过程话、带着头',
   );
-  // 卫生检查：名单读不到不贴、扫出名单上的值不贴、干净的放行（名单是假的，不碰本机那份；卫生检查的代码用 repo 里那份）
-  const fakeList = {
-    env: {},
-    home: 'FAKEHOME',
-    exists: (p) => p.startsWith('FAKEHOME') && p.endsWith('sensitive-values.txt'),
-    read: () => 'SECRETVAL-9f3a\n',
-  };
+  // 卫生检查：扫出真密钥不贴、干净的放行（卫生检查的代码用 repo 里那份；账号、组织编号、邮箱、IP 这类标识不算
+  // 泄漏，不拦，创始人 2026-09-28 傍晚拍，specs/169-Fusion形态/需求.md）
+  const leakToken = ['ghp', 'Q3mNz8VbTf6RpLc2WdYs5HuXa9GjKe4B'].join('_');
   const rejects = async (p) =>
     p.then(
       () => false,
       () => true,
     );
-  eq(
-    await rejects(checkPublishable(repo, '干净的正文', { env: {}, home: 'FAKEHOME', exists: () => false })),
-    true,
-    '名单读不到不贴',
-  );
-  eq(
-    await rejects(checkPublishable(repo, '里面有 SECRETVAL-9f3a 这个值', fakeList)),
-    true,
-    '扫出名单上的值不贴',
-  );
-  eq(await rejects(checkPublishable(repo, '干净的正文', fakeList)), false, '干净的放行');
+  eq(await rejects(checkPublishable(repo, `里面有 ${leakToken} 这个值`)), true, '扫出真密钥不贴');
+  eq(await rejects(checkPublishable(repo, '干净的正文')), false, '干净的放行');
   eq(parseCritique('## 漏掉的\n无\n结论：同意'), { agree: true, objections: 0 }, '反方同意');
   eq(parseCritique('**结论：有异议 3 条**'), { agree: false, objections: 3 }, '反方有异议');
   eq(parseCritique('结论：有异议 0 条'), null, '有异议 0 条认不出');

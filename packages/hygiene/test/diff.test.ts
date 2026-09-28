@@ -61,7 +61,6 @@ describe('addedHunks', () => {
 describe('scanAdded', () => {
   it('新增行里的令牌、跨行的私钥（行号是新文件里的），新出现的密钥文件名，都报；删掉的行不报', () => {
     const found = scanAdded(addedHunks(DIFF), ['docs/a.md', 'deploy/key.md', 'logo.png', '.secrets/x.pass'], {
-      values: [],
       allowlist: [],
     });
     expect(found.map(formatFinding).sort()).toEqual(
@@ -74,18 +73,17 @@ describe('scanAdded', () => {
     );
   });
 
-  it('名单里的值、白名单都照全仓检查的规矩来', () => {
-    const hunks = [{ path: 'docs/b.md', startLine: 7, text: '用户 fake-org-778899' }];
-    expect(scanAdded(hunks, [], { values: ['fake-org-778899'], allowlist: [] }).map(formatFinding)).toEqual([
-      'docs/b.md:7 名单里的敏感值',
-    ]);
-    const allow = [{ rule: 'known-value' as const, path: /^docs\//, reason: '测试用：放行 docs 里的。' }];
-    expect(scanAdded(hunks, [], { values: ['fake-org-778899'], allowlist: allow })).toEqual([]);
-  });
-
-  it('新出现的文件名里带名单上的值（推上去名字一样公开）：报，记在打了码的名字上', () => {
-    const found = scanAdded([], ['src/fake-org-778899.ts'], { values: ['fake-org-778899'], allowlist: [] });
-    expect(found.map(formatFinding)).toEqual(['src/〔名单上的值〕.ts 名单里的敏感值']);
-    expect(found.map((f) => f.path).join()).not.toContain('778899');
+  it('白名单照全仓检查的规矩来', () => {
+    // export GH_TOKEN=… 这种写法同时对上 token（前缀）和 secret-assign（键名像密钥）两条规则，和上面那条一样。
+    const otherToken = ['ghp', pseudoRandom(36, 303)].join('_');
+    const hunks = [{ path: 'docs/b.md', startLine: 7, text: `export GH_TOKEN=${otherToken}` }];
+    expect(scanAdded(hunks, [], { allowlist: [] }).map(formatFinding).sort()).toEqual(
+      ['docs/b.md:7 令牌', 'docs/b.md:7 像密钥的赋值'].sort(),
+    );
+    const allow = [
+      { rule: 'token' as const, path: /^docs\//, reason: '测试用：放行 docs 里的。' },
+      { rule: 'secret-assign' as const, path: /^docs\//, reason: '测试用：放行 docs 里的。' },
+    ];
+    expect(scanAdded(hunks, [], { allowlist: allow })).toEqual([]);
   });
 });

@@ -31,7 +31,6 @@
       "FLEET_ENGINE_STATE_DIR": "/var/lib/fleet-dao/engine",
       "FLEET_CLAUDE_BIN": "/home/{user}/.local/bin/reclaude",
       "FLEET_FORK_MAX_CONTEXT_TOKENS": "100000",
-      "FLEET_SENSITIVE_VALUES_FILE": "/etc/fleet-dao/sensitive-values.txt",
       "FLEET_CURSOR_VERSIONS_DIR": "/home/{user}/.local/share/cursor-agent/versions",
       "FLEET_CANARY_REPO": {
         "private": null,

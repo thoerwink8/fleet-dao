@@ -362,7 +362,6 @@ test('仓里的期望文件认得出，钉住的几个值和 france.sh 一样，
   const engine = Object.fromEntries(want.files['engine.env'].map((d) => [d.key, d.value]));
   assert.equal(engine.FLEET_WORK_DIR, constant('WORK_DIR'), 'FLEET_WORK_DIR 和 france.sh 的 WORK_DIR 一样');
   assert.equal(engine.FLEET_ENGINE_STATE_DIR, constant('ENGINE_STATE_DIR'));
-  assert.equal(engine.FLEET_SENSITIVE_VALUES_FILE, constant('SENSITIVE_VALUES'));
   assert.equal(engine.FLEET_ENGINE_PORTS, 'real');
 });
 

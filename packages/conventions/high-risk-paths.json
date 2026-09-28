@@ -25,7 +25,7 @@
     {
       "path": "deploy/france/desired-config.json",
       "kind": "碰安全",
-      "why": "法国生产配置的期望（#323）：监听地址、敏感值名单的位置、起哪些服务、私有值的指纹都在这，自动发布照它对账、以后照它写"
+      "why": "法国生产配置的期望（#323）：监听地址、起哪些服务、私有值的指纹都在这，自动发布照它对账、以后照它写"
     },
     {
       "path": "deploy/france/auto-release/config.mjs",
@@ -100,7 +100,7 @@
     {
       "path": "packages/hygiene/",
       "kind": "碰安全",
-      "why": "公开仓卫生检查，漏拦一次密钥、账号就公开了"
+      "why": "公开仓卫生检查，漏拦一次真密钥就公开了"
     },
     {
       "path": ".gitignore",
@@ -110,7 +110,7 @@
     {
       "path": ".github/workflows/",
       "kind": "碰安全",
-      "why": "用仓库密钥（已知敏感值名单）、定令牌权限；合并闸、pull_request_target 拿写令牌也在这"
+      "why": "定令牌权限；合并闸、pull_request_target 拿写令牌也在这"
     },
     {
       "path": "packages/conventions/high-risk-paths.json",

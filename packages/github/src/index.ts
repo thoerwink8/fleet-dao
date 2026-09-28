@@ -157,7 +157,7 @@ export {
   renderProgress,
   spliceProgress,
 } from './progress.ts';
-export { assertPublishable, type PublishName, type PublishText } from './publish-check.ts';
+export { assertPublishable, type PublishText } from './publish-check.ts';
 export {
   CATEGORY_LABELS,
   type CiWaitResult,

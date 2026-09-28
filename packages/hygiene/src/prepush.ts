@@ -1,17 +1,14 @@
 // git pre-push 钩子的判定（人手推用；引擎推分支走 packages/github 的 push.ts，那边推带 --no-verify、自己扫）。
-// 公开仓一推就公开了，CI 只在 PR 上跑太晚，所以主闸在推之前：远端还没有的提交逐个过规则和名单（history.ts）——
-// 推上去的是整段历史，先加后删的东西照样在里面。「远端还没有」按本地记着的所有远端分支（refs/remotes/*）算：
-// 只认这次的远端名的话，推到网址、推到没 fetch 过的远端名会把早就公开的历史整段重扫、必被拒，还叫人去改写主线。
-// 钩子参数里的远端（可能是带令牌的网址）不用、也不打印。
-// 退出码和全仓检查一样：0 = 没问题；1 = 查出了，拒推；2 = 没扫全（名单放了却读不了或是空的、环境变量指错、git 出错、输出认不出），也拒推。
-// 这台机器压根没放名单（values.absent）不拒推：令牌、密钥文件这些不靠名单的规则照查，名单上的值写明「没查、交给 CI」
-// ——CI 在每个 PR 上用 Actions 密钥里的名单再查（创始人 2026-09-26 拍：新机器因为没名单推不上，名单又只是账号、编号、IP 这类标识）。
+// 公开仓一推就公开了，CI 上的卫生检查只报警、不挡合并（packages/conventions 的 ci-plan.ts），所以真密钥的主闸在
+// 推之前：远端还没有的提交逐个过规则（history.ts）——推上去的是整段历史，先加后删的东西照样在里面。
+// 「远端还没有」按本地记着的所有远端分支（refs/remotes/*）算：只认这次的远端名的话，推到网址、推到没 fetch 过的
+// 远端名会把早就公开的历史整段重扫、必被拒，还叫人去改写主线。钩子参数里的远端（可能是带令牌的网址）不用、也不打印。
+// 退出码和全仓检查一样：0 = 没问题；1 = 查出了，拒推；2 = 没扫全（git 出错、输出认不出），也拒推。
 import type { Allow } from './allowlist.ts';
 import type { CheckResult } from './check.ts';
 import { FIX_HINT } from './check.ts';
 import { historyArgs, REWRITE_HINT, scanHistory } from './history.ts';
 import { formatFinding } from './scan.ts';
-import type { LoadedValues } from './values.ts';
 
 export interface PushedRef {
   localRef: string;
@@ -39,14 +36,13 @@ export function parsePushedRefs(stdin: string): PushedRef[] {
 export interface PrePushInput {
   refs: readonly PushedRef[];
   git: GitSync;
-  values: LoadedValues;
   allowlist?: readonly Allow[];
 }
 
 const isZero = (oid: string) => /^0+$/.test(oid);
 
 export function prePushCheck(input: PrePushInput): CheckResult {
-  const { git, values } = input;
+  const { git } = input;
   const pushed = input.refs.filter((ref) => !isZero(ref.localOid)); // 本地提交全 0 是删远端分支，没有新内容
   if (pushed.length === 0) return { code: 0, lines: [] };
   // 远端这几个分支现在的头：本地有这个提交就一起排除（没 fetch 过的远端分支不在 refs/remotes 里）。
@@ -65,7 +61,7 @@ export function prePushCheck(input: PrePushInput): CheckResult {
   try {
     scan = scanHistory(
       { patch: runs[0].stdout, names: runs[1].stdout, messages: runs[2].stdout },
-      { values: values.ok ? values.values : [], ...(input.allowlist && { allowlist: input.allowlist }) },
+      input.allowlist ? { allowlist: input.allowlist } : {},
     );
   } catch (e) {
     return {
@@ -100,16 +96,5 @@ export function prePushCheck(input: PrePushInput): CheckResult {
   ];
   if (scan.findings.length > 0)
     lines.push(FIX_HINT, `没推。${REWRITE_HINT}别用 --no-verify 硬推：公开仓推上去就公开了。`);
-  if (!values.ok && values.absent) {
-    lines.push(
-      `这台机器没放已知敏感值名单，这次没查名单上的值（账号、编号、IP 这类）；推上去后 CI 会在 PR 上用名单再查。` +
-        `要本机也查，见 README「密钥和本机配置在哪」。`,
-    );
-  } else if (!values.ok) {
-    lines.push(
-      `没扫全：${values.reason}。修好它之前不推（本机名单是可选的：不想放就删掉这个文件、去掉 FLEET_SENSITIVE_VALUES_FILE，改成交给 CI 查）。`,
-    );
-    return { code: 2, lines };
-  }
   return { code: scan.findings.length > 0 ? 1 : 0, lines };
 }

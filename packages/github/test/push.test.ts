@@ -213,15 +213,12 @@ describe('会话外推分支', { timeout: 60_000 }, () => {
     expect(remoteHead('task/4-empty')).toBeNull();
   });
 
-  it('卫生检查：新增内容里有令牌、名单里的值、强行加进来的密钥文件，都不推；报错只有文件、行、规则名', async () => {
+  it('卫生检查：新增内容里有令牌、强行加进来的密钥文件，都不推；报错只有文件、行、规则名', async () => {
     const { gh } = pushSetup();
     const repo = { owner: 'acme', name: 'widgets' };
     // 值在运行时拼：整段写在源码里，全仓卫生检查会拦这个文件自己。
     const token = ['ghp', 'q7Rz2LmX9vKp4TnB8wYc1HdF6jGs3NaEw5Yu'].join('_');
-    const wt = worktree('task/12-leak', {
-      'deploy.md': `第一行\nexport GH_TOKEN=${token}\n`,
-      'who.md': '用户 fake-org-778899\n',
-    });
+    const wt = worktree('task/12-leak', { 'deploy.md': `第一行\nexport GH_TOKEN=${token}\n` });
     const err = await gh
       .pushBranch({ repo, bundlePath: wt.bundle, branch: 'task/12-leak', head: wt.head })
       .then(
@@ -230,45 +227,8 @@ describe('会话外推分支', { timeout: 60_000 }, () => {
       );
     expect(err).toMatchObject({ code: 'HYGIENE_BLOCKED', retryable: false });
     expect(err?.message).toContain('deploy.md:2 令牌');
-    expect(err?.message).toContain('who.md:1 名单里的敏感值');
     expect(`${err?.message}${JSON.stringify(err?.details)}`).not.toContain(token.slice(4));
-    expect(`${err?.message}${JSON.stringify(err?.details)}`).not.toContain('fake-org-778899');
     expect(remoteHead('task/12-leak')).toBeNull();
-  });
-
-  it('卫生检查：名单没读到就不推（HYGIENE_LIST_MISSING），不当成没问题', async () => {
-    const { gh } = pushSetup(undefined, {
-      sensitiveValues: () => ({
-        ok: false,
-        reason: '已知敏感值名单没读到',
-        tried: ['/etc/fleet-dao/sensitive-values.txt'],
-      }),
-    });
-    const repo = { owner: 'acme', name: 'widgets' };
-    const wt = worktree('task/13-no-list');
-    await expect(
-      gh.pushBranch({ repo, bundlePath: wt.bundle, branch: 'task/13-no-list', head: wt.head }),
-    ).rejects.toMatchObject({ code: 'HYGIENE_LIST_MISSING', retryable: false });
-    expect(remoteHead('task/13-no-list')).toBeNull();
-  });
-
-  it('分支名里带名单上的值（提交干净）：不推（HYGIENE_NAME_BLOCKED：分支名是引擎拼的，会话改不了），一个请求都不发，分支名打了码', async () => {
-    const record: { args: string[]; cwd: string; env: Record<string, string> }[] = [];
-    const { gh, fake } = pushSetup(record);
-    const repo = { owner: 'acme', name: 'widgets' };
-    const branch = 'task/30-fake-org-778899';
-    const wt = worktree(branch, { 'ok.md': '干净的内容\n' });
-    const err = await gh.pushBranch({ repo, bundlePath: wt.bundle, branch, head: wt.head }).then(
-      () => null,
-      (e: unknown) => e as { code: string; message: string; retryable: boolean; details: unknown },
-    );
-    expect(err).toMatchObject({ code: 'HYGIENE_NAME_BLOCKED', retryable: false });
-    expect(err?.message).toContain('分支名 task/30-〔名单上的值〕 名单里的敏感值');
-    expect(`${err?.message}${JSON.stringify(err?.details)}`).not.toContain('778899');
-    // 名单先比、再干别的：git 一次没跑，GitHub 接口一个没调
-    expect(record).toEqual([]);
-    expect(fake.requests).toHaveLength(0);
-    expect(remoteHead(branch)).toBeNull();
   });
 
   it('卫生检查逐个提交扫：先加后删（最后的样子干净）、写进提交说明的，照样不推，报出是哪个提交', async () => {
@@ -297,7 +257,8 @@ describe('会话外推分支', { timeout: 60_000 }, () => {
     expect(remoteHead('task/14-add-then-remove')).toBeNull();
 
     const said = worktree('task/15-message');
-    git(said.path, 'commit', '-q', '--amend', '-m', '顺手切到 fake-org-778899');
+    const messageToken = ['ghp', 'q7Rz2LmX9vKp4TnB8wYc1HdF6jGs3NaEw5Yu'].join('_');
+    git(said.path, 'commit', '-q', '--amend', '-m', `令牌 ${messageToken}`);
     const saidHead = git(said.path, 'rev-parse', 'HEAD');
     await expect(
       gh.pushBranch({
@@ -308,7 +269,7 @@ describe('会话外推分支', { timeout: 60_000 }, () => {
       }),
     ).rejects.toMatchObject({
       code: 'HYGIENE_BLOCKED',
-      message: expect.stringContaining(`提交说明:1 名单里的敏感值（提交 ${saidHead.slice(0, 7)}）`),
+      message: expect.stringContaining(`提交说明:1 令牌（提交 ${saidHead.slice(0, 7)}）`),
     });
     expect(remoteHead('task/15-message')).toBeNull();
   });

@@ -233,17 +233,11 @@ export async function openPr(
   const body = neutralizeCloseKeywords(rawBody);
   const title = neutralizeCloseKeywords(input.title.trim());
   assertBodySize('PR 正文', body);
-  // 标题和正文（会话交活时写的总结在里面）开出去就公开了，不经 git 推送、推前扫描拦不到：开之前过一遍；
-  // PR 上也挂着分支名，一起按名单比（名字里查出来是 HYGIENE_NAME_BLOCKED，见 publish-check.ts）
-  assertPublishable(
-    `开 ${slug} 上 ${branch} 的 PR`,
-    [
-      { path: 'PR 标题', text: title },
-      { path: 'PR 正文', text: body },
-    ],
-    deps.sensitiveValues,
-    [{ label: '分支名', name: branch }],
-  );
+  // 标题和正文（会话交活时写的总结在里面）开出去就公开了，不经 git 推送、推前扫描拦不到：开之前过一遍（publish-check.ts）
+  assertPublishable(`开 ${slug} 上 ${branch} 的 PR`, [
+    { path: 'PR 标题', text: title },
+    { path: 'PR 正文', text: body },
+  ]);
   const facts = await deps.facts.get(repo, 'agent', ctx.signal);
   if (branch.toLowerCase() === facts.defaultBranch.toLowerCase()) {
     throw new GitHubError('BRANCH_FORBIDDEN', `不能拿主线 ${facts.defaultBranch} 开 PR`);

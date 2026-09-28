@@ -1,16 +1,15 @@
-// CI 上按提交扫一段还没进主线的历史：两处用它——.github/workflows/ci.yml 的 hygiene job 扫这个 PR 的 base..head；
-// .github/workflows/hygiene-push.yml 扫某个分支上 main 还没有的部分。base、head 收版本号（分支名、SHA 都行），
+// CI 上按提交扫一段还没进主线的历史：.github/workflows/ci.yml 的 hygiene job 扫这个 PR 的 base..head（只报警、
+// 不挡合并：见 packages/conventions 的 ci-plan.ts）。base、head 收版本号（分支名、SHA 都行），
 // 这里自己 rev-parse 成完整提交号——调用方不用先解析，参数像 flag（以 - 开头）也不会被当成 git 的选项。
 // 和推送前的闸（prepush.ts）、引擎推分支（packages/github 的 push.ts）同一份判定：historyArgs / scanHistory。
 // 执行哪份代码由调用方的检出方式决定（这个文件本身只管判定，不关心自己是不是在 trusted/ 里跑）；git 命令的 cwd
 // 由调用方传的 git 决定，要有完整提交历史（CI 工作流里检出时设 fetch-depth: 0，默认浅克隆拿不到 base..head）。
-// 退出码和全仓检查一样：0 干净；1 查出了；2 没扫全（base/head 解析不出、git 出错、输出认不出、已知敏感值名单没读到）。
+// 退出码和全仓检查一样：0 干净；1 查出了；2 没扫全（base/head 解析不出、git 出错、输出认不出）。
 import type { Allow } from './allowlist.ts';
 import { type CheckResult, FIX_HINT } from './check.ts';
 import { historyArgs, REWRITE_HINT, scanHistory } from './history.ts';
 import type { GitSync } from './prepush.ts';
 import { formatFinding } from './scan.ts';
-import type { LoadedValues } from './values.ts';
 
 export interface CiHistoryInput {
   git: GitSync;
@@ -18,7 +17,6 @@ export interface CiHistoryInput {
   base: string;
   /** 终点（含）。分支名、SHA 都行。 */
   head: string;
-  values: LoadedValues;
   allowlist?: readonly Allow[];
 }
 
@@ -34,7 +32,7 @@ function resolve(git: GitSync, rev: string): string | undefined {
 }
 
 export function ciHistoryCheck(input: CiHistoryInput): CheckResult {
-  const { git, values } = input;
+  const { git } = input;
   const base = resolve(git, input.base);
   const head = resolve(git, input.head);
   if (base === undefined || head === undefined) {
@@ -60,7 +58,7 @@ export function ciHistoryCheck(input: CiHistoryInput): CheckResult {
   try {
     scan = scanHistory(
       { patch: runs[0].stdout, names: runs[1].stdout, messages: runs[2].stdout },
-      { values: values.ok ? values.values : [], ...(input.allowlist && { allowlist: input.allowlist }) },
+      input.allowlist ? { allowlist: input.allowlist } : {},
     );
   } catch (e) {
     return { code: 2, lines: [`按提交扫没扫成：${e instanceof Error ? e.message : String(e)}`] };
@@ -81,10 +79,6 @@ export function ciHistoryCheck(input: CiHistoryInput): CheckResult {
   ];
   if (scan.findings.length > 0) {
     lines.push(FIX_HINT, `这些提交已经推上去、公开了。${REWRITE_HINT}改完强推这个分支覆盖远端。`);
-  }
-  if (!values.ok) {
-    lines.push(`没扫全：${values.reason}。真实的组织编号、账号靠这份名单才认得出，名单没读到不算干净。`);
-    return { code: 2, lines };
   }
   return { code: scan.findings.length > 0 ? 1 : 0, lines };
 }

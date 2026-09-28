@@ -1,6 +1,6 @@
 // 会话外推分支：AI 会话只在本地提交，这里用「干活的」机器人把会话交出来的提交推到远端任务分支。
-// 推之前核对五件事：不是主线（拒绝推默认分支）、包含此刻最新的主线、相对主线真有内容（不推空交付，C7）、
-// 还没推上去的提交逐个过卫生检查、分支名也按名单比（公开仓推上去就公开了；这里推带 --no-verify，git 钩子不跑，只能在这儿拦）、
+// 推之前核对四件事：不是主线（拒绝推默认分支）、包含此刻最新的主线、相对主线真有内容（不推空交付，C7）、
+// 还没推上去的提交逐个过卫生检查（公开仓推上去就公开了；这里推带 --no-verify，git 钩子不跑，只能在这儿拦）、
 // 远端分支要么没有、要么是我们的祖先（别人在上面推进过就报出来让引擎认领新头，分叉就停，绝不强推，C6）。
 // 会话的提交由会话用户打成包（git bundle）交出来，这里只把包导入引擎自己的裸仓；带令牌的 git 只在这个裸仓里跑
 // （为什么见 git.ts 开头）。
@@ -8,15 +8,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { constants, existsSync, lstatSync, mkdirSync, rmSync } from 'node:fs';
 import { type FileHandle, open } from 'node:fs/promises';
 import { join } from 'node:path';
-import {
-  formatFinding,
-  type HistoryScan,
-  historyArgs,
-  type LoadedValues,
-  loadSensitiveValues,
-  REWRITE_HINT,
-  scanHistory,
-} from '@fleet-dao/hygiene';
+import { formatFinding, type HistoryScan, historyArgs, REWRITE_HINT, scanHistory } from '@fleet-dao/hygiene';
 import type { GitHubClient, Logger, RepoRef } from './client.ts';
 import { repoSlug } from './client.ts';
 import { GitHubError, redact } from './errors.ts';
@@ -29,7 +21,6 @@ import {
   gitEnv,
   tail,
 } from './git.ts';
-import { assertPublishable } from './publish-check.ts';
 import type { RepoFactsCache } from './repos.ts';
 
 export interface PushDeps {
@@ -46,8 +37,6 @@ export interface PushDeps {
   maxBundleBytes: number;
   log: Logger;
   baseEnv?: Readonly<Record<string, string | undefined>>;
-  /** 卫生检查用的已知敏感值名单（真实的组织编号、账号）。不给就按 packages/hygiene 的顺序去找；没读到一律不推。 */
-  sensitiveValues?: () => LoadedValues;
 }
 
 export interface PushBranchInput {
@@ -115,10 +104,6 @@ export async function pushBranch(deps: PushDeps, input: PushBranchInput): Promis
     );
   }
   if (!SHA.test(head)) throw new GitHubError('BAD_INPUT', `要推的提交「${head}」不是完整的提交号`);
-  // 卫生检查的名单先读（没读到一律不推），分支名推上去一样公开：一个请求都不发之前先按名单比一遍
-  // （查出来 HYGIENE_NAME_BLOCKED：分支名是引擎按子任务的 key 拼的，会话改不了）。后面逐个提交扫用同一份名单。
-  const values = loadValues(deps, slug);
-  assertPublishable(`推 ${slug} 上的 ${branch}`, [], () => values, [{ label: '分支名', name: branch }]);
   const facts = await deps.facts.get(repo, 'agent', input.signal);
   const defaultBranch = facts.defaultBranch;
   if (branch.toLowerCase() === defaultBranch.toLowerCase()) {
@@ -213,7 +198,7 @@ export async function pushBranch(deps: PushDeps, input: PushBranchInput): Promis
       }
 
       // 6. 卫生检查：主线和远端分支上都没有的提交逐个扫（命中就不推，报文件、行、规则名、提交号，不带值）
-      await assertClean(git, local, { head, mainline, remoteBefore }, slug, values.values);
+      await assertClean(git, local, { head, mainline, remoteBefore }, slug);
 
       // 7. 远端分支的状态
       if (remoteBefore) await assertFastForward(git, local, remoteBefore, head, slug, branch);
@@ -271,24 +256,9 @@ export async function pushBranch(deps: PushDeps, input: PushBranchInput): Promis
 /** 最多在报错信息里列几条命中（全部命中在 details 里）。 */
 const MAX_LISTED_FINDINGS = 10;
 
-/** 卫生检查用的已知敏感值名单：没读到（HYGIENE_LIST_MISSING）一律不推，不当成「没问题」。 */
-function loadValues(deps: PushDeps, slug: string): Extract<LoadedValues, { ok: true }> {
-  const values = (
-    deps.sensitiveValues ?? (() => loadSensitiveValues({ env: deps.baseEnv ?? process.env }))
-  )();
-  if (!values.ok) {
-    throw new GitHubError(
-      'HYGIENE_LIST_MISSING',
-      `推 ${slug} 之前的卫生检查没法做：${values.reason}。名单放好之前一律不推（引擎读 /etc/fleet-dao/sensitive-values.txt）`,
-      { details: { tried: values.tried } },
-    );
-  }
-  return values;
-}
-
 /**
  * 推之前的卫生检查：主线和远端分支上都还没有的提交，逐个把新增的行、文件名、提交说明和作者过 packages/hygiene 的
- * 规则和名单（推上去的是整段历史，先加后删的也在里面）。查出来就拒推（HYGIENE_BLOCKED，不可重试：得改写那几个提交）；
+ * 规则（推上去的是整段历史，先加后删的也在里面）。查出来就拒推（HYGIENE_BLOCKED，不可重试：得改写那几个提交）；
  * git 的输出认不出（HYGIENE_UNSCANNED）也拒推，不当成「没问题」。报错只带文件、行、规则名和提交号，不带值。
  */
 async function assertClean(
@@ -296,7 +266,6 @@ async function assertClean(
   local: GitCall,
   range: { head: string; mainline: string; remoteBefore: string | null },
   slug: string,
-  values: readonly string[],
 ): Promise<void> {
   const { head, mainline, remoteBefore } = range;
   const args = historyArgs([head, '--not', mainline, ...(remoteBefore ? [remoteBefore] : [])]);
@@ -308,7 +277,7 @@ async function assertClean(
   if (messages.code !== 0) throw fromGitFailure('卫生检查取提交说明', slug, messages);
   let scan: HistoryScan;
   try {
-    scan = scanHistory({ patch: patch.stdout, names: names.stdout, messages: messages.stdout }, { values });
+    scan = scanHistory({ patch: patch.stdout, names: names.stdout, messages: messages.stdout });
   } catch (e) {
     throw new GitHubError(
       'HYGIENE_UNSCANNED',

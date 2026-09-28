@@ -436,7 +436,7 @@ export const RULES: readonly FailureRule[] = [
     routeOutcome: 'neutral',
   },
   // 推分支前的卫生检查（packages/hygiene，github 的 pushBranch 推之前扫相对主线新增的行和文件名）拦下了会话交的内容：
-  // 密钥、账号编号、名单里的敏感值……公开仓推上去就公开了。是会话交的东西有问题：退回会话去掉再交（记返工账）；
+  // 令牌、私钥、口令这类真密钥……公开仓推上去就公开了。是会话交的东西有问题：退回会话去掉再交（记返工账）；
   // 同一处连续被拦两次（端口把命中处整理成稳定的一句，和上一次一字不差）就挂起报警。码只认结构化的 code 字段：
   // 测试输出、源码里常有这个词。
   {
@@ -450,30 +450,16 @@ export const RULES: readonly FailureRule[] = [
     routeOutcome: 'neutral',
     hint: '退回会话把这些内容从提交里拿掉再交',
   },
-  // 卫生检查的名单（法国上是 /etc/fleet-dao/sensitive-values.txt）没读到，或根本扫不成（git 的输出认不出、要推的头
-  // 不在扫过的提交里）：不推，也不当成「查过没事」。都是这台机器这一侧的事，不是会话的错：不退回会话，挂起报警，
-  // 等人把名单放好、或看过之后点「继续」。
+  // 卫生检查根本扫不成（git 的输出认不出、要推的头不在扫过的提交里）：不推，也不当成「查过没事」。都是这台机器
+  // 这一侧的事，不是会话的错：不退回会话，挂起报警，等人看过之后点「继续」。
   {
     id: 'HY2',
-    title: '卫生检查做不了（名单没读到、或没扫成）',
-    codes: ['hygiene_list_missing', 'hygiene_unscanned'],
+    title: '卫生检查没扫成',
+    codes: ['hygiene_unscanned'],
     codeFieldOnly: true,
     ladder: ['park'],
     alert: true,
     routeOutcome: 'neutral',
-  },
-  // 卫生检查拦的是名字（需求文档的路径、分支名、进度段里的文档路径）：名字是开工时按 issue 标题、子任务的 key
-  // 定下的，会话改不了，原样重试还是它——退回会话只会白跑一轮。挂起报警，要人看。
-  {
-    id: 'HY3',
-    title: '卫生检查拦下了引擎起的名字',
-    codes: ['hygiene_name_blocked'],
-    codeFieldOnly: true,
-    ladder: ['park'],
-    alert: true,
-    routeOutcome: 'neutral',
-    humanFix:
-      '名字是开工时按 issue 标题、子任务的 key 定下的，点「继续」还是它：误报就把这一条加进卫生检查的白名单再继续；真带了值就叫停这张需求，改掉 issue 标题再重开',
   },
   // 开 PR 前验证要发给别家的材料（「怎么算做完」、方案摘要、改动清单拼成的提示词）没过卫生检查：材料是工作流从需求文档、
   // 方案、改动里取的，换路由、退回会话都还是它——不发，挂起报警，要人看是误报还是材料里真带了值。

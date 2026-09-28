@@ -342,8 +342,6 @@ async function wiring(
     fetch: githubApi(state),
     sleep: async () => {},
     env: {},
-    // 往公开的单子上写（#259 对账开单、写回答）之前过卫生检查：给一份测试名单
-    sensitiveValues: () => ({ ok: true, source: '测试名单', values: ['fake-org-778899'] }),
   });
   const fake = fakeRequirements();
   const job = githubReconcileJob({
@@ -1342,7 +1340,9 @@ describe('给提问另开单：每轮对账（真库、照 GitHub 回话的假�
     expect((await askRow(ask.id))?.appliedAt).not.toBeNull();
   });
 
-  it('【失败】开单没成（GitHub 开单接口报错、卫生检查拦下提问里的敏感值）：记成没开成（partial、写明哪条），报提醒，单号不回写；好了下一轮补开', async () => {
+  it('【失败】开单没成（GitHub 开单接口报错、卫生检查拦下提问里的真密钥）：记成没开成（partial、写明哪条），报提醒，单号不回写；好了下一轮补开', async () => {
+    // 装成真密钥的值（运行时拼，源码里不出现整段，全仓卫生检查不会拦这个文件自己）
+    const leakToken = ['ghp', 'Xk92LqTz7WmN4vRs1JhY8fDc3PbGa6Ue'].join('_');
     const state: GitHubState = { issues: [original('closed', ['需求'])], createDown: 422 };
     const w = await wiring(state);
     const { ask } = await taskWithAsk(w.repoId, 12, 'done', {
@@ -1351,7 +1351,7 @@ describe('给提问另开单：每轮对账（真库、照 GitHub 回话的假�
       ...answered('4 位'),
     });
     const { ask: leaky } = await taskWithAsk(w.repoId, 14, 'running', {
-      question: '接到组织 fake-org-778899 的账号上吗？',
+      question: `这个令牌是不是该轮换：${leakToken}`,
       options: ['接', '不接'],
       scope: 'outside',
       recommended: '接',
@@ -1361,8 +1361,8 @@ describe('给提问另开单：每轮对账（真库、照 GitHub 回话的假�
     expect(run.outcome).toBe('partial');
     expect(run.why).toContain(`#12 的提问 ${ask.id.slice(0, 8)} 开后续单没成`);
     expect(run.why).toContain(`#14 的提问 ${leaky.id.slice(0, 8)} 另开单没成`);
-    // 卫生检查拦下的只写哪一条规则、在哪，不把敏感值原样写进结局
-    expect(run.why).not.toContain('fake-org-778899');
+    // 卫生检查拦下的只写哪一条规则、在哪，不把真密钥原样写进结局
+    expect(run.why).not.toContain(leakToken);
     expect((await askRow(ask.id))?.followUpIssue).toBeNull();
     expect((await askRow(leaky.id))?.followUpIssue).toBeNull();
     expect(byEngine(state)).toEqual([]);

@@ -119,7 +119,7 @@ describe('需求工作流', { timeout: 60_000 }, () => {
     const world = createFakeWorld({
       specDoc: (input, n) =>
         input.doc === 'requirement' && n === 1
-          ? new PortError('HYGIENE_BLOCKED', '卫生检查拦下了要公开的内容：specs/12-x/需求.md:3 known-value', {
+          ? new PortError('HYGIENE_BLOCKED', '卫生检查拦下了要公开的内容：specs/12-x/需求.md:3 令牌', {
               retryable: false,
             })
           : undefined,
@@ -135,7 +135,7 @@ describe('需求工作流', { timeout: 60_000 }, () => {
     expect(specs[1]?.input.resumeSessionId).toBeTruthy();
     const feedback = specs[1]?.input.brief.feedback ?? [];
     expect(feedback.map((f) => f.kind)).toEqual(['hygiene']);
-    expect(feedback[0]?.items).toEqual(['卫生检查拦下了要公开的内容：specs/12-x/需求.md:3 known-value']);
+    expect(feedback[0]?.items).toEqual(['卫生检查拦下了要公开的内容：specs/12-x/需求.md:3 令牌']);
     expect(world.callsOf('writeSpecDoc').map((c) => c.input.doc)).toEqual([
       'requirement',
       'requirement',
@@ -144,25 +144,29 @@ describe('需求工作流', { timeout: 60_000 }, () => {
     ]);
   });
 
-  it('方案写进主线前被拦下：退回写方案的会话重写；名单没读到就挂起报警，放好点继续', async () => {
+  it('方案写进主线前被拦下：退回写方案的会话重写；没扫成就挂起报警，放好点继续', async () => {
     const world = createFakeWorld({
       specDoc: (input, n) => {
         if (input.doc !== 'plan') return undefined;
         if (n === 2)
-          return new PortError('HYGIENE_BLOCKED', '卫生检查拦下了要公开的内容：specs/12-x/方案.md:9 ip', {
+          return new PortError('HYGIENE_BLOCKED', '卫生检查拦下了要公开的内容：specs/12-x/方案.md:9 令牌', {
             retryable: false,
           });
         if (n === 3)
-          return new PortError('HYGIENE_LIST_MISSING', '写之前的卫生检查没法做：已知敏感值名单没读到', {
-            retryable: false,
-          });
+          return new PortError(
+            'HYGIENE_UNSCANNED',
+            '写之前的卫生检查没扫成：specs/12-x/方案.md 的内容没扫到',
+            {
+              retryable: false,
+            },
+          );
         return undefined;
       },
     });
     const result = await withWorker(env, world, async (q) => {
       const handle = await startRequirement(q);
       const parked = await queryUntil<RequirementStatus>(handle, (s) => s.parked, '挂起');
-      expect(parked.lastProblem).toContain('名单没读到');
+      expect(parked.lastProblem).toContain('没扫成');
       await handle.signal(resumeSignal, { by: 'founder' });
       return (await handle.result()) as RequirementResult;
     });
@@ -182,7 +186,7 @@ describe('需求工作流', { timeout: 60_000 }, () => {
         return titled === 1
           ? new PortError(
               'HYGIENE_BLOCKED',
-              '卫生检查拦下了要公开的内容：#12 的进度段：第 1 个子任务:1 known-value',
+              '卫生检查拦下了要公开的内容：#12 的进度段：第 1 个子任务:1 令牌',
               { retryable: false },
             )
           : undefined;
@@ -199,9 +203,7 @@ describe('需求工作流', { timeout: 60_000 }, () => {
     const feedback = plans[1]?.input.brief.feedback ?? [];
     expect(feedback.map((f) => f.kind)).toEqual(['hygiene']);
     expect(feedback[0]?.summary).toContain('进度段');
-    expect(feedback[0]?.items).toEqual([
-      '卫生检查拦下了要公开的内容：#12 的进度段：第 1 个子任务:1 known-value',
-    ]);
+    expect(feedback[0]?.items).toEqual(['卫生检查拦下了要公开的内容：#12 的进度段：第 1 个子任务:1 令牌']);
     // 标题过了检查才开工：子任务的会话都在第二次写方案之后
     const firstExec = world.calls.findIndex(
       (c) => c.port === 'startSession' && (c.input as StartSessionInput).stage === 'execute',
@@ -209,14 +211,14 @@ describe('需求工作流', { timeout: 60_000 }, () => {
     expect(firstExec).toBeGreaterThan(world.calls.indexOf(plans[1] as FakeCall));
   });
 
-  it('写进度段前卫生检查的名单没读到：挂起报警、不退回写方案的会话；放好点继续就开工', async () => {
+  it('写进度段前卫生检查没扫成：挂起报警、不退回写方案的会话；放好点继续就开工', async () => {
     let titled = 0;
     const world = createFakeWorld({
       progress: (input) => {
         if (input.progress.subtasks.length === 0) return undefined;
         titled += 1;
         return titled === 1
-          ? new PortError('HYGIENE_LIST_MISSING', '写进度段之前的卫生检查没法做：已知敏感值名单没读到', {
+          ? new PortError('HYGIENE_UNSCANNED', '写进度段之前的卫生检查没扫成：进度段的内容没扫到', {
               retryable: false,
             })
           : undefined;
@@ -225,7 +227,7 @@ describe('需求工作流', { timeout: 60_000 }, () => {
     const result = await withWorker(env, world, async (q) => {
       const handle = await startRequirement(q);
       const parked = await queryUntil<RequirementStatus>(handle, (s) => s.parked, '挂起');
-      expect(parked.lastProblem).toContain('名单没读到');
+      expect(parked.lastProblem).toContain('没扫成');
       await handle.signal(resumeSignal, { by: 'founder' });
       return (await handle.result()) as RequirementResult;
     });

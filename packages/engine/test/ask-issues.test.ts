@@ -173,7 +173,7 @@ describe('对账开单', () => {
   it('【失败】开单的端口报错：记成没开成、报提醒，单号不回写（下一轮再开），不当成开了', async () => {
     const f = fake([candidate()], {
       openIssue: async () => {
-        throw new Error('HYGIENE_BLOCKED：单子正文里有名单里的敏感值（第 5 行）');
+        throw new Error('HYGIENE_BLOCKED：单子正文里有真密钥（第 5 行）');
       },
     });
     const r = await openAskIssues(f.deps);

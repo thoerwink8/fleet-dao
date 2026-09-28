@@ -1,24 +1,19 @@
-// 公开仓卫生规则：一段文本里有没有能认出人、账号、机器、凭据的东西。全仓检查（scan.ts）、推送前的闸（diff.ts）、
-// 各包的夹具测试共用这一份。规则看形状加上下文：凭据看前缀或键名，编号只在 org / account / 组织 这类上下文里算；
-// 没有上下文也认得出的编号（真实的组织编号、账号）走已知敏感值名单（values.ts），不靠形状猜。
+// 公开仓卫生规则：一段文本里有没有真密钥（凭据）。全仓检查（scan.ts）、推送前的闸（diff.ts）、各包的夹具测试
+// 共用这一份。规则看形状加上下文：凭据看前缀或键名（令牌、私钥、口令、webhook 地址这类）。账号、组织编号、邮箱、
+// IP、个人目录路径这类「标识」不算泄漏，不拦（创始人 2026-09-28 傍晚拍，specs/169-Fusion形态/需求.md：这类值进
+// 公开仓不再拦，GitHub 自带的密钥扫描管真密钥）。
 // 明显编出来的值（顺序、重复、带 fake / example 字样、只有头没有正文的私钥）放行；其余按白名单（allowlist.ts）放行。
 
 export type RuleId =
-  | 'email'
-  | 'ipv4'
-  | 'ipv6'
   | 'private-key'
   | 'token'
   | 'jwt'
   | 'secret-assign'
   | 'url-password'
   | 'webhook'
-  | 'home-user'
   | 'request-id'
-  | 'account-id'
   | 'signature'
   | 'signature-header'
-  | 'known-value'
   | 'secret-file';
 
 export interface Rule {
@@ -93,19 +88,6 @@ export function isPlaceholderId(id: string): boolean {
   return (digits.match(/0/g) ?? []).length * 2 >= digits.length;
 }
 
-/** 一眼是占位的数字编号：同一个数字重复（1111）、顺着数（1234、9876）。 */
-function isPlaceholderNumber(n: string): boolean {
-  return /^(\d)\1+$/.test(n) || '0123456789'.includes(n) || '9876543210'.includes(n);
-}
-
-const UUID = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
-
-/** 账号编号规则里取出的那个编号（哪个命名分组对上了就是哪个）是不是占位的。 */
-function placeholderAccount(_match: string, m: RegExpMatchArray): boolean {
-  const id = Object.values(m.groups ?? {}).find((v) => v !== undefined) ?? '';
-  return id.includes('-') ? isPlaceholderId(id) : isPlaceholderNumber(id);
-}
-
 /**
  * 键名像密钥的赋值里，值像不像真密钥：够长；不是路径 / 变量 / 网址 / 代码里的成员访问；
  * 有字母，并且有数字、或者大小写加符号都有（_ . - 是标识符里的连接符，不算符号）；不是编出来的。
@@ -142,100 +124,6 @@ function looksLikeRealSecret(raw: string): boolean {
   return !isFakeValue(v);
 }
 
-// —— 邮箱、IP ——
-
-/** 域名很短的真邮箱服务：玩具地址的判法（每段不超过三个字符）对它们不适用，qq.com、163.com 上两三个字母的地址是真能收信的。 */
-const REAL_MAIL_DOMAINS =
-  /^(?:(?:vip\.)?qq\.com|163\.com|126\.com|139\.com|188\.com|189\.cn|wo\.cn|tom\.com|me\.com|mac\.com|msn\.com|aol\.com|hey\.com|pm\.me|gmx\.[a-z]{2,3}|web\.de|ya\.ru|bk\.ru|wp\.pl|o2\.pl)$/;
-
-/**
- * 形状像邮箱但不算的：GitHub 隐私邮箱、不回信的系统地址（noreply@…）、git 远端（git@github.com）、
- * RFC 2606 / 6761 留给示例的域名，以及 systemd 的模板单元名（postgresql@16-main.service）。
- */
-function harmlessEmail(address: string): boolean {
-  const lower = address.toLowerCase();
-  const at = lower.lastIndexOf('@');
-  const local = lower.slice(0, at);
-  const domain = lower.slice(at + 1);
-  if (domain === 'users.noreply.github.com' || /^no-?reply(?:\+[\w.-]*)?$/.test(local)) return true;
-  // 玩具地址：本地部分、域名每段都不超过三个字符（a@b.com、x.y+z@q-r.io，连写的 a@b.com_c@d.com 会被认成 b.com_c@d.com），
-  // 真邮箱服务的短域名除外；或者本地部分是 user / someone 这类泛称。
-  const labels = domain.split('.').slice(0, -1);
-  if (
-    !REAL_MAIL_DOMAINS.test(domain) &&
-    local.split(/[^a-z0-9]+/).every((run) => run.length <= 3) &&
-    labels.every((l) => l.length <= 3)
-  )
-    return true;
-  if (/^(?:user|username|someone|somebody|name|foo|bar|baz|me|you)$/.test(local)) return true;
-  if (local === 'git' && /^(?:github\.com|gitlab\.com|bitbucket\.org|ssh\.dev\.azure\.com)$/.test(domain))
-    return true;
-  if (/^(?:.+\.)?example\.(?:com|org|net)$/.test(domain)) return true;
-  if (/\.(?:example|test|invalid|localhost)$/.test(domain)) return true;
-  return /\.(?:service|socket|timer|target|mount|automount|path|slice|scope|swap|device)$/.test(domain);
-}
-
-/** 内网、回环、链路本地、共享地址、文档保留段、基准测试段、组播与保留段都不是公网地址。 */
-export function isPublicIPv4(address: string): boolean {
-  const parts = address.split('.').map(Number);
-  if (parts.length !== 4 || parts.some((p) => !Number.isInteger(p) || p < 0 || p > 255)) return false;
-  const [a = 0, b = 0, c = 0] = parts;
-  if (a === 0 || a === 10 || a === 127 || a >= 224) return false;
-  if (a === 100 && b >= 64 && b <= 127) return false;
-  if (a === 169 && b === 254) return false;
-  if (a === 172 && b >= 16 && b <= 31) return false;
-  if (a === 192 && b === 168) return false;
-  if (a === 192 && b === 0 && (c === 0 || c === 2)) return false;
-  if (a === 198 && (b === 18 || b === 19)) return false;
-  if (a === 198 && b === 51 && c === 100) return false;
-  if (a === 203 && b === 0 && c === 113) return false;
-  return true;
-}
-
-/** 人人都知道的公网地址：公共 DNS、惯用的示例地址。写进文档不暴露谁的机器。 */
-const WELL_KNOWN_IPV4 = new Set([
-  '1.1.1.1',
-  '1.0.0.1',
-  '8.8.8.8',
-  '8.8.4.4',
-  '9.9.9.9',
-  '149.112.112.112',
-  '208.67.222.222',
-  '208.67.220.220',
-  '223.5.5.5',
-  '223.6.6.6',
-  '119.29.29.29',
-  '114.114.114.114',
-  '1.2.3.4',
-]);
-
-/** 全球单播（2000::/3）的完整或压缩写法才算；文档段 2001:db8::/32、3fff::/20 不算；只有前缀没有主机的（少于 3 段）不算。 */
-export function isPublicIPv6(address: string): boolean {
-  const halves = address.split('::');
-  if (halves.length > 2) return false;
-  const groups = (s: string | undefined) => (s ? s.split(':') : []);
-  const head = groups(halves[0]);
-  const all = [...head, ...groups(halves[1])];
-  if (!all.every((g) => /^[0-9a-f]{1,4}$/i.test(g))) return false;
-  if (halves.length === 1 ? all.length !== 8 : all.length > 7) return false;
-  if (all.length < 3) return false;
-  const first = Number.parseInt(head[0] ?? '0', 16);
-  const second = Number.parseInt(head[1] ?? '0', 16);
-  if (first < 0x2000 || first > 0x3fff) return false;
-  if (first === 0x2001 && second === 0x0db8) return false;
-  return !(first === 0x3fff && second < 0x1000);
-}
-
-// —— 家目录 ——
-
-/**
- * 家目录里不算泄漏的用户名：本仓装机脚本自己建的系统用户、CI 与云镜像的默认用户、惯用的假名字、单个字母。
- * 名字里带 fake / example / someone 这类字样的也算假名字。
- */
-const HARMLESS_USERS =
-  /^(?:agent|fleet|fleet-agent-(?:[a-z]*|\*)|pilot|runner|root|ubuntu|debian|ec2-user|admin|administrator|shared|public|default|linuxbrew|alice|bob|carol|user|username|tester|me|you|nobody|[a-z])$/i;
-const FAKE_USER_WORDS = /fake|example|someone|somebody|dummy|sample|test|placeholder/i;
-
 // —— 私钥 ——
 
 /** PEM 头后面第一段 base64 正文（跳过 Proc-Type 这类头字段；JSON 里的 \n 也当换行）。 */
@@ -266,25 +154,6 @@ const secretAssign = (label: string, source: string, flags: string): Rule => ({
 });
 
 export const RULES: readonly Rule[] = [
-  {
-    id: 'email',
-    label: '邮箱',
-    pattern: /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b/g,
-    harmless: harmlessEmail,
-  },
-  {
-    id: 'ipv4',
-    label: '公网 IPv4',
-    // 前面紧跟着 v / version / 版本 的是版本号。
-    pattern: /(?<![\d.])(?<!(?:\bv|\bver|version|版本)[\s:：=.]*)(?:\d{1,3}\.){3}\d{1,3}(?![\d.])/gi,
-    harmless: (ip) => !isPublicIPv4(ip) || WELL_KNOWN_IPV4.has(ip),
-  },
-  {
-    id: 'ipv6',
-    label: '公网 IPv6',
-    pattern: /(?<![0-9A-Za-z:])[23][0-9A-Fa-f]{3}(?::[0-9A-Fa-f]{0,4}){2,7}(?![0-9A-Za-z:])/g,
-    harmless: (ip) => !isPublicIPv6(ip),
-  },
   {
     // 只认带正文的：只有头（测试里判 PEM 格式的）、正文是编出来的，都不算。
     id: 'private-key',
@@ -374,82 +243,10 @@ export const RULES: readonly Rule[] = [
     },
   },
   {
-    // 大小写都算，JSON 转义的斜杠（\/）、Windows 反斜杠（C:\\Users\\…）也算；http(s) 网址里的路径不是家目录。
-    id: 'home-user',
-    label: '家目录里的用户名',
-    pattern:
-      /(?<!\bhttps?:\/\/[^\s"'<>]*)[\\/]{1,2}(?:home|users)[\\/]{1,2}(?<value>[A-Za-z0-9_][A-Za-z0-9_.-]*)/gi,
-    harmless: (_match, m) => {
-      const name = m.groups?.value ?? '';
-      return HARMLESS_USERS.test(name) || FAKE_USER_WORDS.test(name);
-    },
-  },
-  {
-    // Windows 盘符下直接放的个人目录（D:/某人/…）；系统目录、常见的工程目录、假名字不算。
-    id: 'home-user',
-    label: '盘符下的个人目录',
-    pattern: /(?<![\w/\\])[A-Za-z]:[\\/]{1,2}(?<value>[A-Za-z0-9_][A-Za-z0-9_.-]*)(?=[\\/])/g,
-    harmless: (_match, m) => {
-      const name = m.groups?.value ?? '';
-      return (
-        HARMLESS_USERS.test(name) ||
-        FAKE_USER_WORDS.test(name) ||
-        /^(?:users|windows|program ?files|programdata|temp|tmp|dev|src|code|work|workspace|repos?|projects?|data|git|apps?|tools?|opt|srv|build|dist|cache|bin|etc|var|usr|msys64|cygwin(?:64)?|scoop|nodejs|node|go|python\d*|java|x|a|b)$/i.test(
-          name,
-        )
-      );
-    },
-  },
-  {
     // 上游给每次请求起的编号：拿去问上游能对上账号。
     id: 'request-id',
     label: '请求编号',
     pattern: /\breq_[A-Za-z0-9]{8,}|\brequest[ _-]?id["']?\s*[:=：]\s*["']?[0-9a-f]{16,}/gi,
-  },
-  {
-    // 账号 / 组织编号只在上下文里认：键名是 org / account / tenant… 的数字或 UUID；命令行的 --org N；reclaude org use / switch N；
-    // 「N 号组织」「N 独享号」；「组织编号 N」「账号 id N」「组织 N」（后面跟着人、个、次这类量词的是计数，不算）。
-    // 「账号 400」这种光秃秃的账号加数字多半是状态码，不算；真实的账号靠名单认。
-    // 键名前后只拦字母数字，不用 \b：\b 把下划线当单词的一部分，ANTHROPIC_ORG_ID=、CLAUDE_ORG= 会漏。
-    id: 'account-id',
-    label: '账号或组织编号',
-    pattern: new RegExp(
-      [
-        String.raw`(?<![A-Za-z0-9])(?:org|organi[sz]ation|account|tenant|workspace)(?:[_-]?(?:id|uuid|number|no))?["']?\s*[:=：]\s*["']?(?<a>${UUID}|\d{3,})(?![\w-])`,
-        String.raw`(?<![A-Za-z0-9])(?:user|member|customer)[_-]?(?:id|uuid)["']?\s*[:=：]\s*["']?(?<b>${UUID}|\d{3,})(?![\w-])`,
-        String.raw`(?<![A-Za-z0-9])org\s+(?:use|switch|set|select)\s+(?<c>\d{3,})`,
-        String.raw`(?<![\d.])(?<d>\d{3,})\s*号?\s*(?:组织|独享号|拼车号)`,
-        String.raw`(?:组织(?:编号|号|\s*id)?|(?:账号|账户)(?:编号|号|\s*id))\s*[:=：]?\s*(?<e>\d{3,})(?!\s*[人个次名家位天份条张%])(?![\d.])`,
-        String.raw`(?<![A-Za-z0-9-])--(?:org|organi[sz]ation|account|tenant|workspace)(?:[_-]?(?:id|uuid))?(?:=|[ \t]+)["']?(?<f>${UUID}|\d{3,})(?![\w-])`,
-      ].join('|'),
-      'gi',
-    ),
-    harmless: placeholderAccount,
-  },
-  {
-    // 驼峰键名里带前缀的（anthropicOrgId、claudeAccountUuid）：前缀小写、Org 大写开头才算，所以单列一条、分大小写。
-    id: 'account-id',
-    label: '账号或组织编号',
-    pattern: new RegExp(
-      String.raw`(?<=[a-z0-9])(?:Org|Organi[sz]ation|Account|Tenant|Workspace)(?:Id|ID|Uuid|UUID|Number|No)?["']?\s*[:=：]\s*["']?(?<g>${UUID}|\d{3,})(?![\w-])`,
-      'g',
-    ),
-    harmless: placeholderAccount,
-  },
-  {
-    // 带账号编号的地址和编号：飞书的 open_id / union_id / 会话 / 消息 / 应用编号，GitHub 头像地址里的账号编号，
-    // OAuth 应用的 client_id（夹具里写成 Iv1.CLIENT_ID 这类占位的不算）。
-    id: 'account-id',
-    label: '账号或组织编号',
-    pattern:
-      /\b(?:ou|oc|om|on|cli)_(?<feishu>[0-9a-f]{12,})\b|avatars\.githubusercontent\.com\/u\/(?<avatar>\d+)|"client_id"\s*:\s*"(?<client>[^"\s]{6,})"/g,
-    harmless: (_match, m) => {
-      const g = m.groups ?? {};
-      if (g.avatar !== undefined) return isPlaceholderNumber(g.avatar);
-      if (g.client !== undefined)
-        return /client_id|example|fake|test|placeholder|your/i.test(g.client) || isFakeValue(g.client);
-      return isFakeValue(g.feishu ?? '');
-    },
   },
   {
     // Claude 的 thinking signature 里编着账号级编号，必须打码。git 提交的 PGP / SSH 签名本来就公开，不算。

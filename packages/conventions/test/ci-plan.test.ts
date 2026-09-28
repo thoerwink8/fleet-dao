@@ -376,12 +376,21 @@ describe('汇总（必过检查 check）：该跑的跑了且绿，不该跑的�
     expect(ciVerdict(needs({ web: { result: 'success' } })).ok).toBe(false);
   });
 
-  it('changes 没算成、hygiene 红了、少了某个 job 的结果：不过', () => {
+  it('changes 没算成、少了某个 job 的结果：不过', () => {
     expect(ciVerdict(needs({ changes: { result: 'failure', outputs: {} } })).ok).toBe(false);
-    expect(ciVerdict(needs({ hygiene: { result: 'failure' } })).ok).toBe(false);
     expect(ciVerdict(needs({ docs: { result: 'skipped' } })).ok).toBe(false);
     const { deploy: _, ...rest } = needs();
     expect(ciVerdict(rest).lines.join('\n')).toContain('✗ deploy：没有这个 job 的结果');
+  });
+
+  it('hygiene 红了：汇总 check 照样过，不挡合并（卫生检查改成挡在推之前，创始人 2026-09-28 傍晚拍）', () => {
+    const v = ciVerdict(needs({ hygiene: { result: 'failure' } }));
+    expect(v.ok).toBe(true);
+    // hygiene 不在必过名单里：不管它跑成什么样，汇总的结论文字里都不提它
+    expect(v.lines.join('\n')).not.toContain('hygiene');
+    for (const result of ['skipped', 'cancelled']) {
+      expect(ciVerdict(needs({ hygiene: { result } })).ok, result).toBe(true);
+    }
   });
 
   it('plan 读不出（空、不是 JSON、缺字段）、needs 不是对象：不过，不当成全跳过', () => {
@@ -463,8 +472,12 @@ describe('入口', () => {
     };
     expect(run(verdict, [], { CI_NEEDS: JSON.stringify(base) }).status).toBe(0);
     expect(
-      run(verdict, [], { CI_NEEDS: JSON.stringify({ ...base, hygiene: { result: 'failure' } }) }).status,
+      run(verdict, [], { CI_NEEDS: JSON.stringify({ ...base, docs: { result: 'failure' } }) }).status,
     ).toBe(1);
+    // hygiene 红了不挡：汇总入口照样退出 0（卫生检查改成挡在推之前，创始人 2026-09-28 傍晚拍）
+    expect(
+      run(verdict, [], { CI_NEEDS: JSON.stringify({ ...base, hygiene: { result: 'failure' } }) }).status,
+    ).toBe(0);
   });
 });
 
@@ -506,14 +519,11 @@ describe('ci.yml 和这里对得上', () => {
     expect(job('changes')).toContain('node packages/conventions/src/bin/ci-plan.ts');
   });
 
-  it('真的已知敏感值名单只给 hygiene job，它一行 PR 里的代码都不执行：代码取目标分支上的 trusted/，PR 检出到 pr/ 只当数据扫（#115 第二意见）', () => {
+  it('没有 job 用仓库密钥；hygiene 一行 PR 里的代码都不执行：代码取目标分支上的 trusted/，PR 检出到 pr/ 只当数据扫（这个 PR 自己改不宽卫生检查的规则，#115 第二意见）', () => {
     const ids = [...yml.matchAll(/^ {2}([\w-]+):$/gm)].map((m) => m[1] as string);
     expect(ids).toContain('hygiene');
-    for (const id of ids) {
-      if (id !== 'hygiene') expect(job(id), id).not.toContain('secrets.');
-    }
+    for (const id of ids) expect(job(id), id).not.toContain('secrets.');
     const h = job('hygiene');
-    expect(h).toContain('secrets.FLEET_SENSITIVE_VALUES');
     expect(h).not.toMatch(/pnpm|npm |npx|vitest|cache:/);
     // 两次检出：PR 的在 pr/，执行的代码在 trusted/，取目标分支的提交
     expect(h).toMatch(/path: pr\n/);

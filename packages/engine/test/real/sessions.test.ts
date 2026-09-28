@@ -831,8 +831,8 @@ describe('分诊、需求文档、方案、审查：读结论文件', () => {
 
 describe('开 PR 前验证：检出送检的头，发出去的材料先过卫生检查，读结论文件', () => {
   const CRITERIA = ['过期的验证码登录不了', '有一条故意造出失败的测试'];
-  /** 名单上的一个假值（测试自己给的名单，不是真名单上的）。 */
-  const LISTED = 'zeta-crane-5521';
+  /** 装成真密钥的值（运行时拼，源码里不出现整段，全仓卫生检查不会拦这个文件自己）。 */
+  const LEAK = ['ghp', 'q7Rz2LmX9vKp4TnB8wYc1HdF6jGs3NaEw5Yu'].join('_');
   const verifyLaunch = (head: string, criteria: string[] = CRITERIA): LaunchSessionInput => {
     const base = launch({ stage: 'verify' });
     const { worktreePath: _w, baseHead: _b, ...rest } = base;
@@ -862,8 +862,7 @@ describe('开 PR 前验证：检出送检的头，发出去的材料先过卫生
     results: CRITERIA.map((criterion) => ({ criterion, answer: 'done', evidence: '看过 a.ts' })),
     findings: [],
   });
-  const listed = (what: string, texts: { path: string; text: string }[]) =>
-    assertPublishable(what, texts, () => ({ ok: true, source: '测试名单', values: [LISTED] }));
+  const checked = (what: string, texts: { path: string; text: string }[]) => assertPublishable(what, texts);
   const caught = (fn: () => void): unknown => {
     try {
       fn();
@@ -878,7 +877,7 @@ describe('开 PR 前验证：检出送检的头，发出去的材料先过卫生
     const { ports, fake } = setup(() => writes(JSON.stringify(report(m.head))), {
       screen: (what, texts) => {
         screened.push({ what, texts });
-        listed(what, texts);
+        checked(what, texts);
       },
     });
     const { end } = await runOnce(ports, verifyLaunch(m.head));
@@ -892,15 +891,15 @@ describe('开 PR 前验证：检出送检的头，发出去的材料先过卫生
     expect(git(sent?.cwd as string, 'rev-parse', 'HEAD')).toBe(m.head);
   });
 
-  it('【故意造出的失败】材料里有名单上的值：不发、不起会话，报 MATERIAL_BLOCKED，报错里只有位置和规则、没有那个值', async () => {
-    const { ports, fake } = setup(() => writes(JSON.stringify(report(m.head))), { screen: listed });
-    const input = verifyLaunch(m.head, [`别把 ${LISTED} 写进日志`]);
+  it('【故意造出的失败】材料里有真密钥：不发、不起会话，报 MATERIAL_BLOCKED，报错里只有位置和规则、没有那个值', async () => {
+    const { ports, fake } = setup(() => writes(JSON.stringify(report(m.head))), { screen: checked });
+    const input = verifyLaunch(m.head, [`别把 ${LEAK} 写进日志`]);
     const error = await ports.startSession(input, ctx()).catch((e: unknown) => e);
     expect(error).toMatchObject({ code: 'MATERIAL_BLOCKED', retryable: false });
     const message = String((error as Error).message);
     expect(message).toContain('没过卫生检查，没发给Claude Code：查出 1 处（验证提示词 第');
-    expect(message).toContain('known-value');
-    expect(message).not.toContain(LISTED);
+    expect(message).toContain('token');
+    expect(message).not.toContain(LEAK);
     expect(fake.specs).toEqual([]);
     expect((await runRow(input.runId))?.startedAt).toBeNull();
   });
@@ -912,16 +911,7 @@ describe('开 PR 前验证：检出送检的头，发出去的材料先过卫生
     expect(fake.specs).toEqual([]);
   });
 
-  it('【故意造出的失败】名单没读到、检查自己出错：原样报 HYGIENE_LIST_MISSING、算没扫成，都不发', () => {
-    const missing = caught(() =>
-      screenForOtherVendor(
-        (what, texts) =>
-          assertPublishable(what, texts, () => ({ ok: false, reason: '没找到名单', tried: [] })),
-        '提示词',
-        'Cursor Agent',
-      ),
-    );
-    expect(missing).toMatchObject({ code: 'HYGIENE_LIST_MISSING', retryable: false });
+  it('【故意造出的失败】检查自己出错：原样报 HYGIENE_UNSCANNED、算没扫成，不发', () => {
     const broken = caught(() =>
       screenForOtherVendor(
         () => {
@@ -942,7 +932,7 @@ describe('开 PR 前验证：检出送检的头，发出去的材料先过卫生
     ];
     const answer = (criterion: string) => ({ criterion, answer: 'done', evidence: '看过 a.ts' });
     const written = { head: m.head, results: ticked.map((c) => answer(c.replaceAll('`', ''))), findings: [] };
-    const { ports } = setup(() => writes(JSON.stringify(written)), { screen: listed });
+    const { ports } = setup(() => writes(JSON.stringify(written)), { screen: checked });
     const { end } = await runOnce(ports, verifyLaunch(m.head, ticked));
     expect(end).toMatchObject({
       outcome: 'done',
@@ -969,7 +959,7 @@ describe('开 PR 前验证：检出送检的头，发出去的材料先过卫生
         '答了清单外的一条：「有两条故意造出失败的测试」',
       ],
     ] as const) {
-      const { ports } = setup(() => writes(text), { screen: listed });
+      const { ports } = setup(() => writes(text), { screen: checked });
       const { end } = await runOnce(ports, verifyLaunch(m.head));
       expect(end.outcome).toBe('failed');
       expect(end.failure).toMatchObject({ code: 'wrong_output', message: expect.stringContaining(why) });
@@ -1469,8 +1459,8 @@ describe('Fusion 的 Lead：在这张单的工作树里跑，按这一步读结�
     expect(again.end.failure?.message).toContain('没写结论 .fleet-out/lead-verdict.json');
   });
 
-  it('派给别家的（cursor 上的副手）：整份提示词先过卫生检查，查出名单上的值不发、不起会话', async () => {
-    const LISTED = 'zeta-crane-5521';
+  it('派给别家的（cursor 上的副手）：整份提示词先过卫生检查，查出真密钥不发、不起会话', async () => {
+    const leak = ['ghp', 'Zt4wQ9mB2xKc7RvN1pLs8HdJ3fGy6TaEu5Vo'].join('_');
     const { routeId, poolId } = await addCursorRoute(t.db);
     const route = {
       routeId,
@@ -1484,16 +1474,16 @@ describe('Fusion 的 Lead：在这张单的工作树里跑，按这一步读结�
       cursor: () => ({ replay: 'cursor-edit-commit' }),
       screen: (what, texts) => {
         screened.push(what);
-        assertPublishable(what, texts, () => ({ ok: true, source: '测试名单', values: [LISTED] }));
+        assertPublishable(what, texts);
       },
     });
     const input = launch({ route, worktreePath: freshTree() });
     const error = await ports
-      .startSession({ ...input, brief: { ...input.brief, request: `别把 ${LISTED} 写进日志` } }, ctx())
+      .startSession({ ...input, brief: { ...input.brief, request: `别把 ${leak} 写进日志` } }, ctx())
       .catch((e: unknown) => e);
     expect(error).toMatchObject({ code: 'MATERIAL_BLOCKED', retryable: false });
     expect(String((error as Error).message)).toContain('发给别家的交代没过卫生检查，没发给Cursor Agent');
-    expect(String((error as Error).message)).not.toContain(LISTED);
+    expect(String((error as Error).message)).not.toContain(leak);
     expect(screened).toEqual(['发给别家的交代']);
     expect(cursor.specs).toEqual([]);
   });
@@ -2408,20 +2398,19 @@ describe('grok：会话端口按执行方式分派（法国真跑夹具驱动，
     expect(git(grok.specs[0]?.cwd as string, 'rev-parse', 'HEAD')).toBe(m.head);
   });
 
-  it('派给 Grok 的副手：整份提示词先过卫生检查，查出名单上的值不发、不起会话', async () => {
-    const LISTED = 'zeta-crane-5521';
+  it('派给 Grok 的副手：整份提示词先过卫生检查，查出真密钥不发、不起会话', async () => {
+    const leak = ['ghp', 'yU1zL5aC3Kp9mQ2xR7bN4wT8Zt4wQ9mB'].join('_');
     const { ports, grok } = setup(() => ({}), {
       grok: grokDelivers(),
-      screen: (what, texts) =>
-        assertPublishable(what, texts, () => ({ ok: true, source: '测试名单', values: [LISTED] })),
+      screen: (what, texts) => assertPublishable(what, texts),
     });
     const input = grokLaunch();
     const error = await ports
-      .startSession({ ...input, brief: { ...input.brief, request: `别把 ${LISTED} 写进日志` } }, ctx())
+      .startSession({ ...input, brief: { ...input.brief, request: `别把 ${leak} 写进日志` } }, ctx())
       .catch((e: unknown) => e);
     expect(error).toMatchObject({ code: 'MATERIAL_BLOCKED', retryable: false });
     expect(String((error as Error).message)).toContain('没发给Grok 命令行');
-    expect(String((error as Error).message)).not.toContain(LISTED);
+    expect(String((error as Error).message)).not.toContain(leak);
     expect(grok.specs).toEqual([]);
   });
 

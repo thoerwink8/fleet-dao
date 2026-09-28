@@ -3,6 +3,7 @@
 import { describe, expect, it } from 'vitest';
 import { historyArgs, scanHistory } from '../src/history.ts';
 import { formatFinding } from '../src/scan.ts';
+import { pseudoRandom } from './helpers.ts';
 
 const A = 'a'.repeat(40);
 const B = 'b'.repeat(40);
@@ -10,7 +11,8 @@ const mark = (sha: string) => `\x01fleet-commit ${sha}`;
 const message = (sha: string, body: string, who = 't <t@example.invalid>') =>
   `\0${sha}\x01${who}\x01${who}\x01${body}\n`;
 const scan = (patch: string, names: string, messages: string) =>
-  scanHistory({ patch, names, messages }, { values: ['fake-org-778899'], allowlist: [] });
+  scanHistory({ patch, names, messages }, { allowlist: [] });
+const token = (seed: number) => ['ghp', pseudoRandom(36, seed)].join('_');
 
 describe('scanHistory', () => {
   it('按提交切开：每条命中带上它出在哪个提交；带引号的路径照样认', () => {
@@ -22,14 +24,14 @@ describe('scanHistory', () => {
       '+++ b/docs/a.md',
       '@@ -0,0 +1,2 @@',
       '+第一行',
-      '+用户 fake-org-778899',
+      `+令牌 ${token(801)}`,
       mark(B),
       '',
       'diff --git "a/docs/\\346\\226\\207.md" "b/docs/\\346\\226\\207.md"',
       '--- "a/docs/\\346\\226\\207.md"',
       '+++ "b/docs/\\346\\226\\207.md"',
       '@@ -3,0 +4 @@',
-      '+又是 fake-org-778899',
+      `+又是 ${token(802)}`,
     ].join('\n');
     const names = [
       mark(A),
@@ -44,9 +46,9 @@ describe('scanHistory', () => {
     expect(result.commits).toEqual([A, B]);
     expect(result.addedLines).toBe(3);
     expect(result.findings.map(formatFinding)).toEqual([
-      'docs/a.md:2 名单里的敏感值（提交 aaaaaaa）',
+      'docs/a.md:2 令牌（提交 aaaaaaa）',
       '.secrets/x.pass 密钥文件（提交 bbbbbbb）',
-      'docs/文.md:4 名单里的敏感值（提交 bbbbbbb）',
+      'docs/文.md:4 令牌（提交 bbbbbbb）',
     ]);
   });
 
@@ -63,16 +65,16 @@ describe('scanHistory', () => {
       '+++ b/logo.png',
       '@@ -0,0 +1,2 @@',
       '+\x89PNG\0\x01',
-      '+又是 fake-org-778899',
+      `+又是 ${token(803)}`,
       'diff --git a/docs/a.md b/docs/a.md',
       '--- /dev/null',
       '+++ b/docs/a.md',
       '@@ -0,0 +1 @@',
-      '+用户 fake-org-778899',
+      `+令牌 ${token(804)}`,
     ].join('\n');
     const result = scan(patch, [mark(A), '', 'logo.png', 'docs/a.md'].join('\n'), message(A, 'x'));
     expect(result).toMatchObject({ binaryHunks: 1, addedLines: 1 });
-    expect(result.findings.map(formatFinding)).toEqual(['docs/a.md:1 名单里的敏感值（提交 aaaaaaa）']);
+    expect(result.findings.map(formatFinding)).toEqual(['docs/a.md:1 令牌（提交 aaaaaaa）']);
   });
 
   it('认不出、对不上就抛错，不当成扫过没事', () => {

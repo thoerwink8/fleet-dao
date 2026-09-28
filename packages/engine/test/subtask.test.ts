@@ -807,31 +807,6 @@ describe('子任务工作流', { timeout: 60_000 }, () => {
     expect(world.count('pushBranch')).toBe(3);
   });
 
-  it('卫生检查的名单没读到：配置问题，挂起报警、不退回会话；名单放好点继续就推', async () => {
-    const world = createFakeWorld({
-      push: (_input, n) =>
-        n === 1
-          ? new PortError(
-              'HYGIENE_LIST_MISSING',
-              '推之前的卫生检查没法做：没找到已知敏感值名单（引擎读 /etc/fleet-dao/sensitive-values.txt）',
-              { retryable: false },
-            )
-          : undefined,
-    });
-    const result = await withWorker(env, world, async (q) => {
-      const handle = await startSubtask(q);
-      const parked = await queryUntil<SubtaskStatus>(handle, (s) => s.parked, '挂起');
-      expect(parked.lastProblem).toContain('名单没读到');
-      expect(world.alerts.map((a) => a.level)).toEqual(['stuck']);
-      await handle.signal(resumeSignal, { by: 'founder' });
-      return (await handle.result()) as SubtaskResult;
-    });
-    expect(result.state).toBe('merged');
-    // 会话只跑了一次：名单的事不是会话的错，不退回。
-    expect(world.callsOf('startSession').filter((c) => c.input.stage === 'execute')).toHaveLength(1);
-    expect(world.count('pushBranch')).toBe(2);
-  });
-
   it('卫生检查没扫成：同样挂起报警、不退回会话（不当成查过没事）；人看过点继续就推', async () => {
     const world = createFakeWorld({
       push: (_input, n) =>
@@ -921,7 +896,7 @@ describe('子任务工作流', { timeout: 60_000 }, () => {
     const world = createFakeWorld({
       openPr: (_input, n) =>
         n === 1
-          ? new PortError('HYGIENE_BLOCKED', '卫生检查拦下了要公开的内容：PR 正文:2 known-value', {
+          ? new PortError('HYGIENE_BLOCKED', '卫生检查拦下了要公开的内容：PR 正文:2 令牌', {
               retryable: false,
             })
           : undefined,
@@ -941,11 +916,11 @@ describe('子任务工作流', { timeout: 60_000 }, () => {
     expect(world.count('raiseAlert')).toBe(0);
   });
 
-  it('开 PR 前卫生检查的名单没读到：挂起报警、不退回会话；名单放好点继续就开', async () => {
+  it('开 PR 前卫生检查没扫成：挂起报警、不退回会话；放好点继续就开', async () => {
     const world = createFakeWorld({
       openPr: (_input, n) =>
         n === 1
-          ? new PortError('HYGIENE_LIST_MISSING', '开 PR 之前的卫生检查没法做：已知敏感值名单没读到', {
+          ? new PortError('HYGIENE_UNSCANNED', '开 PR 之前的卫生检查没扫成：PR 正文的内容没扫到', {
               retryable: false,
             })
           : undefined,
@@ -953,7 +928,7 @@ describe('子任务工作流', { timeout: 60_000 }, () => {
     const result = await withWorker(env, world, async (q) => {
       const handle = await startSubtask(q);
       const parked = await queryUntil<SubtaskStatus>(handle, (s) => s.parked, '挂起');
-      expect(parked.lastProblem).toContain('名单没读到');
+      expect(parked.lastProblem).toContain('没扫成');
       await handle.signal(resumeSignal, { by: 'founder' });
       return (await handle.result()) as SubtaskResult;
     });

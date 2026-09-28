@@ -66,7 +66,8 @@ function replay(routes: Route[]) {
 
 describe('夹具脱敏（公开仓）', () => {
   const files = readdirSync(DIR).filter((f) => f.endsWith('.json'));
-  /** 邮箱、IP、令牌、JWT、App 的 client_id、头像地址里的账号编号……规则用全仓卫生检查那一份（packages/hygiene），这里不另写。 */
+  /** 令牌、JWT、私钥这类真密钥：规则用全仓卫生检查那一份（packages/hygiene），这里不另写。
+   * 账号、组织编号、邮箱、IP 这类标识不再拦（创始人 2026-09-28 傍晚拍），录夹具时不用再为这些脱敏。 */
   const leaks = (text: string) => findHits(text).map((h) => `${h.label}：第 ${h.line} 行`);
 
   it('录了东西（没扫到不能当干净）', () => {
@@ -96,22 +97,14 @@ describe('夹具脱敏（公开仓）', () => {
   it('故意放进去的违规样本都拦得住', () => {
     // 样本在运行时拼起来：整段写在源码里，全仓卫生检查会拦这个文件自己。值是随手编的、不指向任何人。
     const samples = [
-      `mail me: ${['zhang.san', 'corp-mail.co'].join('@')}`,
-      `host ${[51, 38, 4, 17].join('.')}`,
       `token ${['ghs', 'q7Rz2LmX9vKp4TnB8wYc1HdF6jGs3NaEw5Yu'].join('_')}`,
-      `"client_id": "${['Iv23li', 'Q7rZ2mXw9vKp4T'].join('')}"`,
-      `https://avatars.githubusercontent.com/u/${['5832', '9147'].join('')}?v=4`,
+      `"webhook_secret": "${['Q7rZ2mXw9vKp4T', 'Ns8Bx3'].join('')}"`,
     ];
     for (const s of samples) expect(leaks(s), s).not.toEqual([]);
   });
 
-  it('夹具里的占位不算：示例域名的邮箱、文档段的 IP、Iv1.CLIENT_ID、编出来的令牌', () => {
-    const placeholders = [
-      'mail me: someone@example.invalid',
-      'host 192.0.2.10',
-      '"client_id": "Iv1.CLIENT_ID"',
-      'token ghs_abcdefghijklmnop',
-    ];
+  it('夹具里的占位不算：编出来的令牌', () => {
+    const placeholders = ['token ghs_abcdefghijklmnop'];
     for (const s of placeholders) expect(leaks(s), s).toEqual([]);
   });
 });
