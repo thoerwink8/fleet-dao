@@ -134,24 +134,28 @@ describe('版本：创始人开的进当前版本，AI 发现的进未排期', (
   ];
 
   it('机器人开的（引擎对账、提醒）：未排期，不挂', () => {
-    expect(milestonePlan('bot', milestones)).toEqual({ action: 'unscheduled' });
+    expect(milestonePlan('bot', false, milestones)).toEqual({ action: 'unscheduled' });
   });
 
-  it('人开的：挂当前版本（N 最小的那个）', () => {
-    expect(milestonePlan('human', milestones)).toEqual({
+  it('人开的、进门时没归过类：挂当前版本（N 最小的那个）', () => {
+    expect(milestonePlan('human', false, milestones)).toEqual({
       action: 'assign',
       milestone: { number: 3, title: 'v1 Fusion 接活' },
     });
   });
 
+  it('人开的、已经有类别（issue:new 开的「未排期」）：有意未排期，不挂', () => {
+    expect(milestonePlan('human', true, milestones)).toEqual({ action: 'unscheduled' });
+  });
+
   it('当前版本读不到（没有还开着的 v<N> 里程碑）：不挂、报没查成', () => {
-    const got = milestonePlan('human', [{ number: 9, title: '杂项收尾' }]);
+    const got = milestonePlan('human', false, [{ number: 9, title: '杂项收尾' }]);
     expect(got).toMatchObject({ action: 'unknown' });
     expect((got as { why: string }).why).toContain('没有当前版本');
   });
 
   it('一个里程碑都没有：一样是没查成，不是「没有当前版本就当未排期」', () => {
-    expect(milestonePlan('human', [])).toMatchObject({ action: 'unknown' });
+    expect(milestonePlan('human', false, [])).toMatchObject({ action: 'unknown' });
   });
 });
 
