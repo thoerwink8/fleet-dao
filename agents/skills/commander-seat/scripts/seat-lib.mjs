@@ -21,21 +21,23 @@ const MAX_NOTE = 500;
 export const SEAT_USAGE = `用法：node seat.mjs <命令> …（经 ssh 调法国的 fleet-api seat；法国的 ssh 主机名写在 ~/.fleet-dao/france-ssh）
   take --session <会话号> [--scope main|drill:<名字>] [--machine <机器名>]   接班（永远成功，后说的算；不是锁）
   show [--scope …]                                                          看现状：现在是谁、最后活动多久前、在做的认领、引擎在跑的单
-  handoff [--scope …] [--session …]                                        存交接说明（从标准输入读；座位上没人时存不进）
-机器名不给就用 doing.mjs 记的那个；这台只有一份这个座位的记录时 --session 可以不给。
-退出码：0 好了；1 用法不对；2 没查成、没做成。`;
+  handoff --session <会话号> [--scope …]                                    存交接说明（从标准输入读；座位上没人时存不进）
+机器名不给就用 doing.mjs 记的那个。handoff 是身份判断，--session 必须带、不猜：这台上可能不止一个会话
+take 过（真出过事：一个会话没带 --session，把这台上另一个会话的帅位记录当成了自己的，以为自己是帅位）。
+退出码：0 好了；1 用法不对（含没带 --session）；2 没查成、没做成。`;
 
 export const CLAIM_USAGE = `用法：node claim.mjs <命令> …（经 ssh 调法国的 fleet-api claim；在项目仓的检出里跑，别处加 --repo <owner/仓名>）
-  take <单号> --label <工人名> [--owner worker|seat] [--note "<一句话>"] [--branch <分支>] [--scope …] [--session …]
+  take <单号> --label <工人名> --session <会话号> [--owner worker|seat] [--note "<一句话>"] [--branch <分支>] [--scope …]
                      认领一张单（派给工人或自己做）；别人还活着拿着的拒绝（3），要抢用 reassign
   step <单号> --claim <认领号> [--note "<一句话>"] [--pr <PR 号>]   工人报一步、登记 PR（纯记录）
   done <单号> --claim <认领号> --note "<一句话>"                      做完了
   release <单号> --claim <认领号> --note "<一句话>"                   放下（不做了、交出去）
   show [<单号>…] [--all]                                              看认领
-  reassign <单号> --to worker|seat --label <工人名> [--note "<一句话>"] [--founder "<有的话>"]
-  reassign <单号> --to engine --reason "<为什么>" [--founder "<有的话>"]
+  reassign <单号> --to worker|seat --label <工人名> --session <会话号> [--note "<一句话>"] [--founder "<有的话>"]
+  reassign <单号> --to engine --reason "<为什么>" --session <会话号> [--founder "<有的话>"]
                      改派：原来的还活着（引擎、别的工人）当场作废、换给这次的、叫停引擎（#446 起不用创始人原话，写 --note 记一句为什么）
-退出码：0 好了；1 用法不对；2 没查成、没做成；3 不是你的（别人拿着、认领号对不上）。`;
+take、reassign 都是身份判断，--session 必须带、不猜是这台唯一的一份（同一个道理，见 seat.mjs 的用法）。
+退出码：0 好了；1 用法不对（含没带 --session）；2 没查成、没做成；3 不是你的（别人拿着、认领号对不上）。`;
 
 class UsageError extends Error {}
 
@@ -128,7 +130,13 @@ function stateProblem(s) {
   return null;
 }
 
-/** 这台机器上这个座位的帅位记录：scope 必给，session 不给时这个座位只能有一份。认不出的明说，不当成没有。 */
+/**
+ * 这台机器上这个座位的帅位记录：scope 必给。认不出的明说，不当成没有。
+ * session 不给时按「这个座位只有一份」猜——只给 p.mjs 报进度这类非身份判断的场景用；
+ * 身份判断（seat handoff、claim take/reassign、p.mjs handoff）一律要求调用方带 --session、
+ * 不许猜：这台可能不止一个会话 take 过，「只有一份」不代表那一份就是问的这个会话（真出过事：
+ * 会话 A 没带 --session 去查，机器上只有会话 B 的记录，A 被当成了 B）。
+ */
 export function pickState(home, scope, session) {
   let names;
   try {
@@ -273,7 +281,7 @@ export async function runSeat(argv, io) {
       io.out(r.text);
       return 0;
     }
-    if (cmd === 'handoff') return seatHandoff(parseArgs(rest, ['session', 'scope']), io);
+    if (cmd === 'handoff') return await seatHandoff(parseArgs(rest, ['session', 'scope']), io);
     throw new UsageError(`没有「${cmd}」这个命令\n${SEAT_USAGE}`);
   } catch (e) {
     if (e instanceof UsageError) {
@@ -339,7 +347,7 @@ function seatTake(p, io) {
 async function seatHandoff(p, io) {
   if (p.positional.length > 0) throw new UsageError('seat handoff 不收位置参数：交接说明从标准输入读');
   const scope = scopeOf(p);
-  const picked = pickState(io.home, scope, sessionOf(p, false));
+  const picked = pickState(io.home, scope, sessionOf(p, true));
   if (!picked.ok) return fail(io, picked.why);
   const s = picked.state;
   const text = String(await io.readStdin()).trim();
@@ -466,7 +474,7 @@ async function claimTake(p, io) {
     throw new UsageError(`分支名「${branch}」认不出`);
   const repo = repoOf(p, io);
   const scope = scopeOf(p);
-  const picked = pickState(io.home, scope, sessionOf(p, false));
+  const picked = pickState(io.home, scope, sessionOf(p, true));
   if (!picked.ok) return fail(io, picked.why);
   const s = picked.state;
   const host = franceHost(io);
@@ -596,7 +604,7 @@ async function claimReassign(p, io) {
       ...(note === undefined ? [] : ['--note', note]),
     );
   }
-  const picked = pickState(io.home, scope, sessionOf(p, false));
+  const picked = pickState(io.home, scope, sessionOf(p, true));
   if (!picked.ok) return fail(io, picked.why);
   const s = picked.state;
   const host = franceHost(io);

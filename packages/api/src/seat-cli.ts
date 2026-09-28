@@ -622,17 +622,23 @@ async function reassign(rest: readonly string[], deps: ClaimCliDeps): Promise<Se
   let code = 0;
   const old = r.voided ?? (r.previous?.state === 'voided' ? r.previous : null);
   if (old) {
+    const engineOwned = old.ownerKind === 'engine';
     lines.push(
-      `原来那份作废了：${claimOwnerText(old)}（认领 ${old.claimId.slice(0, 8)}，${old.endReason ?? '没写原因'}）；开着的 PR 不动，旧主自己关或帅位手动关`,
+      `原来那份作废了：${claimOwnerText(old)}（认领 ${old.claimId.slice(0, 8)}，${old.endReason ?? '没写原因'}）` +
+        (engineOwned ? '' : '；开着的 PR 不动，旧主自己关或帅位手动关'),
     );
     json.voided = claimJson(old, names);
   }
-  // 原来归引擎、这次强制作废的：叫停它的工作流（工作流不知道认领已经不归它了，得有人去叫停，不然接着跑）
+  // 原来归引擎、这次强制作废的：叫停它的工作流（工作流不知道认领已经不归它了，得有人去叫停，不然接着跑）。停成了
+  // （或已经不在了）才关它的 PR——引擎的运行叫停了要关它的 PR，specs/169-Fusion形态/需求.md「删减清单全按帅位的做」
+  // 第 1 条第 5 点：GPT 两轮标了这条不能删，创始人收了（这不算「拦人」，引擎不是人，是没人管的机器）。人和人之间的
+  // 改派不碰 PR（上面 engineOwned 那句），只有引擎这条留着。
   if (r.voided?.ownerKind === 'engine' && r.voided.workflowId) {
+    const reason = `改派给 ${claimOwnerText(r.claim)}（${founder ? `创始人原话：${founder}` : note ? note : '没写原因'}）`;
     try {
       const stopped = await deps.stopEngine(r.voided.workflowId, {
         by: `${seat.machine}/${seat.session}`,
-        reason: `改派给 ${claimOwnerText(r.claim)}（${founder ? `创始人原话：${founder}` : note ? note : '没写原因'}）`,
+        reason,
       });
       lines.push(
         stopped === 'stopped'
@@ -640,11 +646,29 @@ async function reassign(rest: readonly string[], deps: ClaimCliDeps): Promise<Se
           : `引擎的工作流 ${r.voided.workflowId} 已经不在了`,
       );
       json.engine = stopped;
+      if (r.voided.prNumbers.length > 0) {
+        const closed = await deps.closeEnginePr({
+          owner: repo.owner,
+          name: repo.name,
+          prNumbers: r.voided.prNumbers,
+          reason,
+        });
+        lines.push(
+          closed.closed.length > 0
+            ? `它开着的 PR 关了（分支留着）：${closed.closed.map((n) => `#${n}`).join('、')}`
+            : '它没有开着的 PR',
+        );
+        if (closed.problems.length > 0) {
+          code = 1;
+          lines.push(...closed.problems.map((x) => `没关成：${x}`));
+        }
+        json.closedPr = closed;
+      }
     } catch (err) {
       code = 1;
       const why = err instanceof Error ? err.message : String(err);
       lines.push(
-        `引擎的工作流 ${r.voided.workflowId} 没叫停成（${why}）：它开的 PR 合不进去（认领已经不归引擎），但它还在跑，要人去叫停`,
+        `引擎的工作流 ${r.voided.workflowId} 没叫停成（${why}）：它开的 PR 合不进去（认领已经不归引擎），但它还在跑，先不关 PR，要人去叫停`,
       );
       json.engine = { error: why };
     }
@@ -652,11 +676,25 @@ async function reassign(rest: readonly string[], deps: ClaimCliDeps): Promise<Se
   return { code, text: lines.join('\n'), json };
 }
 
-/** fleet-api claim 碰外面的几样：库；Temporal、交单用到才连（#446 起不再碰 GitHub：没有「认领对得上」要贴、要重判了）。 */
+/**
+ * fleet-api claim 碰外面的几样：库；Temporal、交单、关引擎的 PR 用到才连（#446 起不再碰 GitHub 贴「认领对得上」、
+ * 不再重判——留着的只有下面这条关 PR，见 closeEnginePr）。
+ */
 export interface ClaimCliDeps {
   store: Store;
   /** 改派给本机时叫停引擎在跑的工作流：叫停了 stopped；工作流已经不在 gone；连不上抛错。 */
   stopEngine: (workflowId: string, input: { by: string; reason: string }) => Promise<'stopped' | 'gone'>;
+  /**
+   * 引擎的工作流叫停之后，把它开着的 PR 关掉、撤自动合并、留一句为什么（分支不删）：specs/169-Fusion形态/需求.md
+   * 「删减清单全按帅位的做」第 1 条第 5 点留下的一条——引擎的运行叫停了要关它的 PR，GPT 两轮标了不能删、创始人收了。
+   * 单个 PR 关不了写进 problems，不抛错（不影响改派本身，已经记上了）。
+   */
+  closeEnginePr: (input: {
+    owner: string;
+    name: string;
+    prNumbers: readonly number[];
+    reason: string;
+  }) => Promise<{ closed: number[]; problems: string[] }>;
   /** 改派给引擎：交单（cli.ts 的 handover）同一条路，回给人看的那段话；没交成抛 CliError（带退出码）。 */
   handoverToEngine: (input: {
     owner: string;

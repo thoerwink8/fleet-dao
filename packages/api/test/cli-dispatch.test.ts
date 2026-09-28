@@ -34,12 +34,15 @@ function refusedQuery(): Error {
 }
 
 /** dispatch 只连库：读 GitHub、连 Temporal 一碰就红。 */
-const notForDispatch: Pick<CliDeps, 'openIssuePlans' | 'openTemporal' | 'now'> = {
+const notForDispatch: Pick<CliDeps, 'openIssuePlans' | 'openTemporal' | 'openClaimsGitHub' | 'now'> = {
   openIssuePlans: async () => {
     throw new Error('dispatch 不该读 GitHub');
   },
   openTemporal: async () => {
     throw new Error('dispatch 不该连 Temporal');
+  },
+  openClaimsGitHub: async () => {
+    throw new Error('dispatch 不该关引擎的 PR');
   },
   now: () => T0,
 };

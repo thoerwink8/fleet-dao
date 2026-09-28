@@ -4,6 +4,7 @@
 // 判法、存取的边界表在 core 的 seat.test.ts、db 的 seat.test.ts 和 Store 契约（store-contract-seat.ts）；这里管命令这一层。
 import { fileURLToPath } from 'node:url';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
+import type { ClaimsGitHub, PullFacts } from '@fleet-dao/github';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { type CliDeps, main } from '../src/cli.ts';
 import { devFixtures } from '../src/dev-fixtures.ts';
@@ -27,6 +28,47 @@ function setup(base?: Store) {
   /** 发给引擎工作流的信号；gone 里的工作流算已经不在了。 */
   const signals: { workflowId: string; signal: TaskSignal }[] = [];
   const gone = new Set<string>();
+  /** 关引擎 PR 用的假 GitHub（claim reassign 才连）：readPull 默认当 open，seed 里 closed 的跳过、fail 里的抛错。 */
+  const pulls = new Map<number, 'open' | 'closed'>();
+  const failPulls = new Set<number>();
+  let claimsGithubOpens = 0;
+  let claimsGithubClosed = 0;
+  const prActions: { disabled: number[]; closed: number[]; comments: { pr: number; body: string }[] } = {
+    disabled: [],
+    closed: [],
+    comments: [],
+  };
+  const fakePull = (number: number): PullFacts => ({
+    number,
+    nodeId: `PR_${number}`,
+    state: pulls.get(number) ?? 'open',
+    merged: false,
+    draft: false,
+    title: `PR #${number}`,
+    body: '',
+    headSha: '0'.repeat(40),
+    headRef: `feat/${number}`,
+    fromFork: false,
+    author: { login: 'engine-bot', id: 1, type: 'Bot' },
+    autoMerge: true,
+  });
+  const claims: Pick<ClaimsGitHub, 'readPull' | 'disableAutoMerge' | 'closePull' | 'commentPull'> = {
+    readPull: async (_repo, number) => {
+      if (failPulls.has(number)) throw new Error(`模拟 GitHub 读不到 PR #${number}`);
+      return fakePull(number);
+    },
+    disableAutoMerge: async (_repo, pull) => {
+      prActions.disabled.push(pull.number);
+    },
+    closePull: async (_repo, number) => {
+      prActions.closed.push(number);
+      pulls.set(number, 'closed');
+    },
+    commentPull: async (_repo, number, _key, body) => {
+      prActions.comments.push({ pr: number, body });
+      return { commentId: prActions.comments.length, url: '', created: true };
+    },
+  };
   const deps: CliDeps = {
     env: { DATABASE_URL: 'postgres:///fleet' },
     out: (text) => out.push(text),
@@ -52,6 +94,15 @@ function setup(base?: Store) {
       },
       close: async () => {},
     }),
+    openClaimsGitHub: async () => {
+      claimsGithubOpens += 1;
+      return {
+        claims,
+        close: async () => {
+          claimsGithubClosed += 1;
+        },
+      };
+    },
     now: () => clock.now,
     readStdin: async () => stdin,
   };
@@ -73,6 +124,13 @@ function setup(base?: Store) {
     run,
     json,
     opened: () => opened,
+    pr: {
+      close: (number: number) => pulls.set(number, 'closed'),
+      fail: (number: number) => failPulls.add(number),
+      actions: prActions,
+      opens: () => claimsGithubOpens,
+      closed: () => claimsGithubClosed,
+    },
     setStdin: (text: string) => {
       stdin = text;
     },
@@ -309,7 +367,7 @@ describe('认领', () => {
 });
 
 describe('改派（claim reassign，#446 起不用创始人原话）', () => {
-  const engineHolds = async (t: ReturnType<typeof setup>, issueNumber: number) => {
+  const engineHolds = async (t: ReturnType<typeof setup>, issueNumber: number, prs: number[] = []) => {
     const r = await t.memory.claimForEngine({
       repoId: t.memory.data.repos[0]?.id ?? '',
       issueNumber,
@@ -317,12 +375,29 @@ describe('改派（claim reassign，#446 起不用创始人原话）', () => {
       actor: { kind: 'engine', id: 'github-intake' },
     });
     if (!r.ok) throw new Error('引擎没拿到');
-    return r.claim;
+    let claim = r.claim;
+    if (prs.length > 0) {
+      // stepClaim 不认「待起」（工作流还没真起来，没什么可报的）：先起成，和真实流程一样
+      const started = await t.memory.startEngineClaim({ repoId: claim.repoId, issueNumber });
+      if (!started.changed || !started.claim) throw new Error('没起成');
+      claim = started.claim;
+    }
+    for (const pr of prs) {
+      const stepped = await t.memory.stepClaim({
+        repoId: claim.repoId,
+        issueNumber,
+        claimId: claim.claimId,
+        pr,
+      });
+      if (!stepped.ok) throw new Error('没登记上 PR');
+      claim = stepped.claim;
+    }
+    return claim;
   };
   const reassign = (t: ReturnType<typeof setup>, issue: string, ...more: string[]) =>
     t.run('claim', 'reassign', REPO, issue, '--to', 'worker', ...A, '--label', 'w2', ...more);
 
-  it('引擎拿着、不带 --founder：照样改派（#446 起改派永远 force，不用创始人原话）；叫停它的工作流', async () => {
+  it('引擎拿着、没登记 PR、不带 --founder：照样改派（#446 起改派永远 force，不用创始人原话）；叫停它的工作流，不提 PR（没有可关的）', async () => {
     const t = setup();
     await t.run('seat', 'take', ...A);
     const eng = await engineHolds(t, 70);
@@ -330,8 +405,67 @@ describe('改派（claim reassign，#446 起不用创始人原话）', () => {
     expect(r.code).toBe(0);
     expect(r.out).toContain('改派了 example/canary#70：归 本机/w2');
     expect(r.out).toContain(`原来那份作废了：引擎（认领 ${eng.claimId.slice(0, 8)}`);
-    expect(r.out).toContain('开着的 PR 不动，旧主自己关或帅位手动关');
+    expect(r.out).not.toContain('开着的 PR 不动'); // #446 起这句只留给人对人改派，引擎的这份不该有
+    expect(r.out).not.toContain('它没有开着的 PR'); // prNumbers 空数组：连 GitHub 都不该碰
     expect(r.out).toContain('引擎的工作流 req:example/canary#70 叫停了');
+    expect(t.pr.opens()).toBe(0);
+  });
+
+  it('引擎拿着、登记过一个 PR：工作流叫停成了，跟着关它的 PR（撤自动合并、留言、分支留着）', async () => {
+    const t = setup();
+    await t.run('seat', 'take', ...A);
+    const eng = await engineHolds(t, 76, [301]);
+    const r = await reassign(t, '76');
+    expect(r.code).toBe(0);
+    expect(r.out).toContain(`原来那份作废了：引擎（认领 ${eng.claimId.slice(0, 8)}`);
+    expect(r.out).not.toContain('开着的 PR 不动');
+    expect(r.out).toContain('引擎的工作流 req:example/canary#76 叫停了');
+    expect(r.out).toContain('它开着的 PR 关了（分支留着）：#301');
+    expect(t.pr.actions.disabled).toEqual([301]);
+    expect(t.pr.actions.closed).toEqual([301]);
+    expect(t.pr.actions.comments).toEqual([{ pr: 301, body: expect.stringContaining('改派给 本机/w2') }]);
+    expect(t.pr.opens()).toBe(1);
+    expect(t.pr.closed()).toBe(1); // 用完关了，没有连接泄露
+  });
+
+  it('引擎拿着、登记过的 PR 已经关了：跳过（不重复关、不算失败）；带了两个 PR 一个已关一个还开着，只报开着那个', async () => {
+    const t = setup();
+    await t.run('seat', 'take', ...A);
+    t.pr.close(302);
+    await engineHolds(t, 77, [302, 303]);
+    const r = await reassign(t, '77');
+    expect(r.code).toBe(0);
+    expect(r.out).toContain('它开着的 PR 关了（分支留着）：#303');
+    expect(t.pr.actions.closed).toEqual([303]); // 302 已经关了，没再关一遍
+  });
+
+  it('【故意造出的失败】关 PR 没成（GitHub 读不到）：退出码 1，写明没关成哪个，改派本身不回滚', async () => {
+    const t = setup();
+    await t.run('seat', 'take', ...A);
+    t.pr.fail(304);
+    const eng = await engineHolds(t, 78, [304]);
+    const r = await reassign(t, '78');
+    expect(r.code).toBe(1);
+    expect(r.out).toContain(`原来那份作废了：引擎（认领 ${eng.claimId.slice(0, 8)}`); // 改派本身照样记上了
+    expect(r.out).toContain('引擎的工作流 req:example/canary#78 叫停了');
+    expect(r.out).toContain('没关成：PR #304');
+  });
+
+  it('工作流叫停没成：不去动 PR（认领已经不归引擎，但工作流还在跑，先不关，等人叫停）', async () => {
+    const t = setup();
+    await t.run('seat', 'take', ...A);
+    await engineHolds(t, 79, [305]);
+    const broken = { ...t };
+    broken.signals.push = () => {
+      throw new Error('Temporal 连不上');
+    };
+    const r = await reassign(broken, '79');
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('没叫停成');
+    expect(r.out).not.toContain('它开着的 PR 关了');
+    expect(r.out).not.toContain('它没有开着的 PR');
+    expect(r.out).not.toContain('没关成：PR');
+    expect(t.pr.opens()).toBe(0); // 没叫停成就不该去碰 GitHub（closeEnginePr 根本没被调用）
   });
 
   it('带 --founder：原因记进作废说明（创始人原话：…）；工作流叫停', async () => {

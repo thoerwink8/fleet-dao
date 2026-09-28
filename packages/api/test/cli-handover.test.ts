@@ -98,6 +98,9 @@ function setup(options: { switchOn?: string | null; data?: (d: Data) => void } =
         },
       };
     },
+    openClaimsGitHub: async () => {
+      throw new Error('handover 不该关引擎的 PR（那是 claim reassign 的事）');
+    },
     now: () => T0,
   });
   const run = (args: string[], s?: Store) => main(['handover', ...args], deps(s));

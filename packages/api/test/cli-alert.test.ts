@@ -49,6 +49,9 @@ function setup(over: { alerts?: AlertWorkPort; store?: Store } = {}) {
     openTemporal: async () => {
       throw new Error('alert 不该连 Temporal');
     },
+    openClaimsGitHub: async () => {
+      throw new Error('alert 不该关引擎的 PR');
+    },
     now: () => new Date(),
   };
   const run = async (...args: string[]) => {

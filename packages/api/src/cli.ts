@@ -34,6 +34,7 @@ import {
   sessionProblem,
   versionGate,
 } from '@fleet-dao/core';
+import type { ClaimsGitHub } from '@fleet-dao/github';
 import { requirementWorkflowId } from '@fleet-dao/shared';
 import { ALERT_USAGE, runAlert } from './alert-cli.ts';
 import type { AlertWorkPort } from './alert-work.ts';
@@ -786,6 +787,14 @@ export interface CliDeps {
   readStdin?: () => Promise<string>;
   /** 提醒的处理状态、跟进单、静默（alert 命令用）。不给就是真的：连库，法国上再读发布记录。 */
   openAlertWork?: (url: string, env: CliEnv) => Promise<{ alerts: AlertWorkPort; close(): Promise<void> }>;
+  /**
+   * 「引擎」机器人凭据的 GitHub 读写，只用来关它被叫停的 PR（claim reassign 用；specs/169 第 1 条第 5 点，见
+   * seat-cli.ts 的 closeEnginePr）。防重复写的账要连库，用到才连、连自己的、用完关。
+   */
+  openClaimsGitHub(env: CliEnv): Promise<{
+    claims: Pick<ClaimsGitHub, 'readPull' | 'disableAutoMerge' | 'closePull' | 'commentPull'>;
+    close(): Promise<void>;
+  }>;
 }
 
 async function openPgStore(url: string): Promise<{ store: Store; close(): Promise<void> }> {
@@ -823,6 +832,19 @@ async function openGitHubPlans(env: CliEnv): Promise<IssuePlanReader> {
   };
 }
 
+/** claim reassign 关引擎 PR 用到才连（自己的库连接，和 openPgAlertWork 同一个写法：用完各自关）。 */
+async function openRealClaimsGitHub(env: CliEnv): Promise<{
+  claims: Pick<ClaimsGitHub, 'readPull' | 'disableAutoMerge' | 'closePull' | 'commentPull'>;
+  close(): Promise<void>;
+}> {
+  const { createDb } = await import('@fleet-dao/db');
+  const { withStatementTimeout } = await import('./pg-store.ts');
+  const { createGitHub, pgLedger } = await import('@fleet-dao/github');
+  const { db, close } = createDb({ url: withStatementTimeout(databaseUrl(env)) });
+  const gh = createGitHub({ ledger: pgLedger(db), env });
+  return { claims: gh.claims, close };
+}
+
 async function openTemporalClient(env: CliEnv): Promise<HandoverTemporal> {
   // 懒连接：这一步不连网络，起工作流时才连，连不上、5 秒没回应抛 WorkflowUnavailableError
   const { connectTemporal } = await import('./temporal.ts');
@@ -846,6 +868,7 @@ export function processDeps(): CliDeps {
     now: () => new Date(),
     readStdin: readAllStdin,
     openAlertWork: openPgAlertWork,
+    openClaimsGitHub: openRealClaimsGitHub,
   };
 }
 
@@ -991,6 +1014,28 @@ async function runSeatOrClaim(
     alertsOpened ??= Promise.resolve().then(() => openAlertWork(databaseUrl(deps.env), deps.env));
     return (await alertsOpened).alerts;
   });
+  // 关引擎的 PR 用到才连（改派走引擎、工作流叫停成了才用得上；用完各自关，和 alerts 同一个懒连接写法）
+  let claimsGithubOpened: ReturnType<CliDeps['openClaimsGitHub']> | undefined;
+  const closeEnginePr: ClaimCliDeps['closeEnginePr'] = async ({ owner, name, prNumbers, reason }) => {
+    claimsGithubOpened ??= deps.openClaimsGitHub(deps.env);
+    const { claims } = await claimsGithubOpened;
+    const repo = { owner, name };
+    const closed: number[] = [];
+    const problems: string[] = [];
+    for (const n of prNumbers) {
+      try {
+        const pull = await claims.readPull(repo, n);
+        if (pull.state !== 'open') continue; // 已经关了、合了：不用关，不算它
+        await claims.disableAutoMerge(repo, pull);
+        await claims.closePull(repo, n);
+        await claims.commentPull(repo, n, 'claim-reassigned', `${reason}；分支留着，要接着做请帅位重新认领`);
+        closed.push(n);
+      } catch (err) {
+        problems.push(`PR #${n}：${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    return { closed, problems };
+  };
   // 叫停引擎用到 Temporal 才连（用完各自关：handover 自己关它开的那份）
   const claimDeps: ClaimCliDeps = {
     store,
@@ -1007,6 +1052,7 @@ async function runSeatOrClaim(
         await t.close().catch(() => {});
       }
     },
+    closeEnginePr,
     handoverToEngine: ({ owner, name, issueNumber, reason, seat, founder }) =>
       handover({
         store,
@@ -1039,6 +1085,7 @@ async function runSeatOrClaim(
   } finally {
     if (opened) await (await opened.catch(() => undefined))?.close();
     if (alertsOpened) await (await alertsOpened.catch(() => undefined))?.close();
+    if (claimsGithubOpened) await (await claimsGithubOpened.catch(() => undefined))?.close();
   }
 }
 

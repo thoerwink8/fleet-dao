@@ -898,7 +898,7 @@ describe('报到驾驶舱：法国连不上不写本地文件，评论失败不�
     writeFileSync(file, '在做首页\n等拍选项\n');
     const seen: { cmd: string; input?: string }[] = [];
     const err: string[] = [];
-    const code = await boardCli.runBoardCli(['demo', 'handoff', file], {
+    const code = await boardCli.runBoardCli(['demo', 'handoff', file, '--session', 's1'], {
       home,
       env: { FLEET_FRANCE_SSH: 'france' },
       now: () => NOW,
@@ -917,19 +917,87 @@ describe('报到驾驶舱：法国连不上不写本地文件，评论失败不�
     expect(seen[0]?.cmd).toContain("seat' 'handoff'");
     expect(seen[0]?.input).toContain('在做首页');
     expect(seen[1]?.cmd).toContain('写了交接说明');
-    const missing = await boardCli.runBoardCli(['demo', 'handoff', join(home, '没有.md')], {
+    const missing = await boardCli.runBoardCli(
+      ['demo', 'handoff', join(home, '没有.md'), '--session', 's1'],
+      {
+        home,
+        env: { FLEET_FRANCE_SSH: 'france' },
+        now: () => NOW,
+        readText: (path) => readFileSync(path, 'utf8'),
+        ssh: () => {
+          throw new Error('不该连法国');
+        },
+        gh: () => ({ status: 0, stdout: '', stderr: '' }),
+        out: () => {},
+        err: (t) => err.push(t),
+      },
+    );
+    expect(missing).toBe(2);
+    expect(err.join('\n')).toContain('读不到');
+  });
+
+  it('【故意造出的失败】这台不止一个会话 take 过：handoff 不带 --session 不猜、明确拒绝，不连法国（真出过事：一个会话没带 --session，把这台上另一个会话的帅位记录当成了自己的）', async () => {
+    const home = tempHome();
+    seated(home); // main__s1.json：会话 s1
+    writeFileSync(
+      join(home, '.fleet-dao', 'seat', 'main__s2.json'),
+      JSON.stringify({
+        scope: 'main',
+        machine: '本机',
+        session: 's2',
+        term: 2,
+        takenAt: new Date().toISOString(),
+      }),
+    );
+    const file = join(home, 'handoff.md');
+    writeFileSync(file, '在做首页\n');
+    const err: string[] = [];
+    const code = await boardCli.runBoardCli(['demo', 'handoff', file], {
       home,
       env: { FLEET_FRANCE_SSH: 'france' },
       now: () => NOW,
       readText: (path) => readFileSync(path, 'utf8'),
       ssh: () => {
-        throw new Error('不该连法国');
+        throw new Error('session 认不出就不该连法国');
       },
       gh: () => ({ status: 0, stdout: '', stderr: '' }),
       out: () => {},
       err: (t) => err.push(t),
     });
-    expect(missing).toBe(2);
-    expect(err.join('\n')).toContain('读不到');
+    expect(code).toBe(1);
+    expect(err.join('\n')).toContain('要带 --session');
+    // 带对了会话号照样能交接：不是这台整个坏了，只是不许猜
+    const seen: string[] = [];
+    const ok = await boardCli.runBoardCli(['demo', 'handoff', file, '--session', 's2'], {
+      home,
+      env: { FLEET_FRANCE_SSH: 'france' },
+      now: () => NOW,
+      readText: (path) => readFileSync(path, 'utf8'),
+      ssh: (args) => {
+        seen.push(args.at(-1) ?? '');
+        return { status: 0, stdout: `${JSON.stringify({ ok: true })}\n`, stderr: '' };
+      },
+      gh: () => ({ status: 0, stdout: '', stderr: '' }),
+      out: () => {},
+      err: () => {},
+    });
+    expect(ok).toBe(0);
+    expect(seen[0]).toContain("'--session' 's2'");
+  });
+
+  it('log、record 这类不算身份判断：这台不止一个会话 take 过，不带 --session 照样挑得到（低风险，只是报进度，#446 起本就不核是不是现任）', async () => {
+    const home = tempHome();
+    seated(home); // 只有 main__s1.json：唯一一份，ambient 挑得到
+    const err: string[] = [];
+    const code = await boardCli.runBoardCli(['demo', 'log', '一步'], {
+      home,
+      env: { FLEET_FRANCE_SSH: 'france' },
+      now: () => NOW,
+      ssh: () => ({ status: 0, stdout: `${JSON.stringify({ ok: true })}\n`, stderr: '' }),
+      gh: () => ({ status: 0, stdout: '', stderr: '' }),
+      out: () => {},
+      err: (t) => err.push(t),
+    });
+    expect(code).toBe(0);
   });
 });

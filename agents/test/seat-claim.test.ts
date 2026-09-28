@@ -251,11 +251,11 @@ describe('seat.mjs：show、handoff', () => {
     expect(w.out.join('\n')).toContain('帅位（main）：第 3 任 本机/s1，最后活动 0 分钟前');
   });
 
-  it('交接说明：带着本机记的身份存（不带 --term 了）；座位上没人法国说存不进（退出码 3）', async () => {
+  it('交接说明：必须带 --session（身份判断，不猜），带着本机记的身份存（不带 --term 了）；座位上没人法国说存不进（退出码 3）', async () => {
     const w = await seated();
     w.setStdin('#40 在等创始人拍；工人 w1 在做 #41');
     w.replies.push({ status: 0, json: { ok: true, seat: lease(3) } });
-    expect(await w.seat(['handoff'])).toBe(0);
+    expect(await w.seat(['handoff', '--session', 's1'])).toBe(0);
     expect(w.calls.at(-1)).toMatchObject({
       args: ['seat', 'handoff', '--machine', '本机', '--session', 's1', '--scope', 'main', '--json'],
       input: '#40 在等创始人拍；工人 w1 在做 #41',
@@ -264,7 +264,7 @@ describe('seat.mjs：show、handoff', () => {
 
     w.setStdin('座位上没人');
     w.replies.push({ status: 3, json: { ok: false, seat: null } });
-    expect(await w.seat(['handoff'])).toBe(3);
+    expect(await w.seat(['handoff', '--session', 's1'])).toBe(3);
     expect(w.err.at(-1)).toContain('座位上没人（还没接过班），没什么可交接的');
   });
 
@@ -273,28 +273,45 @@ describe('seat.mjs：show、handoff', () => {
     w.advance(6 * 60); // 6 小时过去
     w.setStdin('好久没动过了，但照样能写');
     w.replies.push({ status: 0, json: { ok: true, seat: lease(3) } });
-    expect(await w.seat(['handoff'])).toBe(0);
+    expect(await w.seat(['handoff', '--session', 's1'])).toBe(0);
     expect(w.out.join('\n')).toContain('交接说明存上了');
   });
 
-  it('【故意造出的失败】这台没接过班、有好几份记录、记录坏了：都明说，不当成能写', async () => {
+  it('【故意造出的失败】不带 --session：退出码 1，明确报，不猜是哪个会话（不当成能写，也不连法国）', async () => {
     const w = world();
-    w.setStdin('没人接过班');
-    expect(await w.seat(['handoff'])).toBe(2);
-    expect(w.err.at(-1)).toContain('这台没有 main 的帅位记录');
+    w.setStdin('没带会话号');
+    expect(await w.seat(['handoff'])).toBe(1);
+    expect(w.err.at(-1)).toContain('要带 --session');
+    expect(w.calls).toEqual([]);
+  });
+
+  it('【故意造出的失败】这台不止一个会话 take 过：不带 --session 照样拒绝，不会因为「只有一份」或「随便一份」就当成是你（真出过事：另一个会话没带 --session，把这台上别人的帅位记录当成了自己的）', async () => {
+    const w = world();
     w.replies.push(taken(3), {
       status: 0,
       json: { ok: true, seat: lease(4, '本机', 's2'), now: NOW.toISOString() },
     });
     await w.seat(['take', '--session', 's1']);
     await w.seat(['take', '--session', 's2']);
-    w.setStdin('两份都在');
-    expect(await w.seat(['handoff'])).toBe(2);
-    expect(w.err.at(-1)).toContain('这台有好几份 main 的帅位记录（会话 s1、s2）');
+    w.setStdin('两份都在，但没说是哪个');
+    expect(await w.seat(['handoff'])).toBe(1);
+    expect(w.err.at(-1)).toContain('要带 --session');
+    // 带对了会话号能正常写；带一个这台没有的会话号，明说没有，不当成随便一份顶上
+    w.replies.push({ status: 0, json: { ok: true, seat: lease(4, '本机', 's2') } });
+    expect(await w.seat(['handoff', '--session', 's2'])).toBe(0);
+    w.setStdin('假冒 s1');
+    expect(await w.seat(['handoff', '--session', 's9'])).toBe(2);
+    expect(w.err.at(-1)).toContain('这台没有 main 会话 s9 的帅位记录');
+  });
+
+  it('【故意造出的失败】记录坏了：明说，不当成能写', async () => {
+    const w = world();
+    w.replies.push(taken(3));
+    await w.seat(['take', '--session', 's1']);
     const dir = join(w.home, '.fleet-dao', 'seat');
     writeFileSync(join(dir, readdirSync(dir)[0] ?? 'x.json'), '{"scope":"main"');
     w.setStdin('坏的');
-    expect(await w.seat(['handoff', '--session', 's2'])).toBe(2);
+    expect(await w.seat(['handoff', '--session', 's1'])).toBe(2);
     expect(w.err.at(-1)).toMatch(/帅位记录 .+ 认不出/);
   });
 });
@@ -310,7 +327,20 @@ describe('claim.mjs：认领、报一步、做完', () => {
   it('帅位认领：经 ssh 调 claim take（带着本机记的任期），认领号记进分支的 git 配置，单上留「在做」镜子', async () => {
     const w = await seated();
     w.replies.push({ status: 0, json: { ok: true, claim: claimJson(), now: NOW.toISOString() } });
-    expect(await w.claim(['take', '40', '--label', 'w1', '--note', '开工', '--branch', 'feat/40-x'])).toBe(0);
+    expect(
+      await w.claim([
+        'take',
+        '40',
+        '--label',
+        'w1',
+        '--session',
+        's1',
+        '--note',
+        '开工',
+        '--branch',
+        'feat/40-x',
+      ]),
+    ).toBe(0);
     expect(w.calls.at(-1)?.args).toEqual([
       'claim',
       'take',
@@ -343,7 +373,7 @@ describe('claim.mjs：认领、报一步、做完', () => {
     const w = await seated();
     w.advance(6 * 60);
     w.replies.push({ status: 0, json: { ok: true, claim: claimJson() } });
-    expect(await w.claim(['take', '40', '--label', 'w1'])).toBe(0);
+    expect(await w.claim(['take', '40', '--label', 'w1', '--session', 's1'])).toBe(0);
   });
 
   it('演练座位：不改单上的镜子', async () => {
@@ -352,7 +382,7 @@ describe('claim.mjs：认领、报一步、做完', () => {
       status: 0,
       json: { ok: true, claim: claimJson({ seat: { scope: 'drill:299', term: 3 } }) },
     });
-    expect(await w.claim(['take', '40', '--label', 'w1', '--scope', 'drill:299'])).toBe(0);
+    expect(await w.claim(['take', '40', '--label', 'w1', '--session', 's1', '--scope', 'drill:299'])).toBe(0);
     expect(w.github.comments).toEqual([]);
   });
 
@@ -366,10 +396,12 @@ describe('claim.mjs：认领、报一步、做完', () => {
         claim: claimJson({ owner: { kind: 'engine', machine: null, label: null }, state: 'doing' }),
       },
     });
-    expect(await w.claim(['take', '40', '--label', 'w1', '--branch', 'feat/40-x'])).toBe(3);
+    expect(await w.claim(['take', '40', '--label', 'w1', '--session', 's1', '--branch', 'feat/40-x'])).toBe(
+      3,
+    );
     expect(w.err.at(-1)).toContain(`没认领上：${REPO}#40 归 引擎（doing）`);
     w.replies.push({ status: 3, json: { ok: false, reason: 'held' } });
-    expect(await w.claim(['take', '40', '--label', 'w1'])).toBe(3);
+    expect(await w.claim(['take', '40', '--label', 'w1', '--session', 's1'])).toBe(3);
     expect(w.err.at(-1)).toContain('没认领上：不是你的');
     expect(w.config.has('branch.feat/40-x.fleetClaim')).toBe(false);
     expect(w.github.comments).toEqual([]);
@@ -378,7 +410,7 @@ describe('claim.mjs：认领、报一步、做完', () => {
   it('工人报一步、登记 PR、做完：认领号对得上才记；【故意造出的失败】对不上退出码 3，写明现在归谁、别再动', async () => {
     const w = await seated();
     w.replies.push({ status: 0, json: { ok: true, claim: claimJson() } });
-    await w.claim(['take', '40', '--label', 'w1']);
+    await w.claim(['take', '40', '--label', 'w1', '--session', 's1']);
     w.replies.push({ status: 0, json: { ok: true, claim: claimJson({ state: 'pr_open', prs: [88] }) } });
     expect(await w.claim(['step', '40', '--claim', CLAIM_ID, '--note', '开了 PR', '--pr', '#88'])).toBe(0);
     expect(w.calls.at(-1)?.args).toEqual([
@@ -412,6 +444,14 @@ describe('claim.mjs：认领、报一步、做完', () => {
     expect(await w.claim(['done', '40', '--claim', CLAIM_ID])).toBe(1);
     expect(await w.claim(['step', '40', '--claim', 'abc'])).toBe(1);
   });
+
+  it('【故意造出的失败】不带 --session：退出码 1，明确报，不猜是这台唯一一份就当成是你、不连法国', async () => {
+    const w = await seated();
+    const before = w.calls.length;
+    expect(await w.claim(['take', '40', '--label', 'w1'])).toBe(1);
+    expect(w.err.at(-1)).toContain('要带 --session');
+    expect(w.calls.length).toBe(before);
+  });
 });
 
 describe('claim.mjs reassign：帅位改派（#446 起不用创始人原话，不用等法国核任期）', () => {
@@ -429,7 +469,18 @@ describe('claim.mjs reassign：帅位改派（#446 起不用创始人原话，�
       stdout: `改派了 ${REPO}#40：归 本机/w2，认领号 ${CLAIM_ID}（开 PR 时正文「认领」栏写它）\n原来那份作废了：引擎（认领 0a0b0c0d，改派给本机/w2（创始人原话：40 本机做））；开着的 PR 不动，旧主自己关或帅位手动关\n`,
     });
     expect(
-      await w.claim(['reassign', '40', '--to', 'worker', '--label', 'w2', '--founder', '40 本机做']),
+      await w.claim([
+        'reassign',
+        '40',
+        '--to',
+        'worker',
+        '--label',
+        'w2',
+        '--session',
+        's1',
+        '--founder',
+        '40 本机做',
+      ]),
     ).toBe(0);
     expect(w.calls.at(-1)?.args).toEqual([
       'claim',
@@ -458,7 +509,20 @@ describe('claim.mjs reassign：帅位改派（#446 起不用创始人原话，�
   it('不带 --founder 也能改派（#446 起不再要求创始人原话，只用来记一句为什么）', async () => {
     const w = await seated();
     w.replies.push({ status: 0, stdout: `改派了 ${REPO}#40：归 本机/w2，认领号 ${CLAIM_ID}\n` });
-    expect(await w.claim(['reassign', '40', '--to', 'worker', '--label', 'w2', '--note', '换人做'])).toBe(0);
+    expect(
+      await w.claim([
+        'reassign',
+        '40',
+        '--to',
+        'worker',
+        '--label',
+        'w2',
+        '--session',
+        's1',
+        '--note',
+        '换人做',
+      ]),
+    ).toBe(0);
     expect(w.calls.at(-1)?.args).not.toContain('--founder');
     expect(w.calls.at(-1)?.args).toEqual(expect.arrayContaining(['--note', '换人做']));
   });
@@ -473,7 +537,18 @@ describe('claim.mjs reassign：帅位改派（#446 起不用创始人原话，�
     expect(w.calls.length).toBe(before);
     w.replies.push({ status: 0, stdout: `已交给 fleet：${REPO}#40\n` });
     expect(
-      await w.claim(['reassign', '40', '--to', 'engine', '--reason', '交给引擎', '--founder', '给引擎']),
+      await w.claim([
+        'reassign',
+        '40',
+        '--to',
+        'engine',
+        '--reason',
+        '交给引擎',
+        '--session',
+        's1',
+        '--founder',
+        '给引擎',
+      ]),
     ).toBe(0);
     expect(w.calls.at(-1)?.args).toEqual(
       expect.arrayContaining(['--to', 'engine', '--reason', '交给引擎', '--founder', '给引擎']),
@@ -487,17 +562,51 @@ describe('claim.mjs reassign：帅位改派（#446 起不用创始人原话，�
       status: 3,
       stdout: `没改派（${REPO}#40 没动）：引擎 在做，还活着。\n`,
     });
-    expect(await w.claim(['reassign', '40', '--to', 'worker', '--label', 'w2'])).toBe(3);
+    expect(await w.claim(['reassign', '40', '--to', 'worker', '--label', 'w2', '--session', 's1'])).toBe(3);
     expect(w.err.at(-1)).toContain('没改派');
     w.replies.push({
       status: 1,
       stdout: `改派了 ${REPO}#40：归 本机/w2，认领号 ${CLAIM_ID}\n原来那份的 PR 没处理（GitHub 没接上：限流了）：撤自动合并、关掉要人补\n`,
     });
-    expect(await w.claim(['reassign', '40', '--to', 'worker', '--label', 'w2', '--founder', 'x'])).toBe(2);
+    expect(
+      await w.claim([
+        'reassign',
+        '40',
+        '--to',
+        'worker',
+        '--label',
+        'w2',
+        '--session',
+        's1',
+        '--founder',
+        'x',
+      ]),
+    ).toBe(2);
     expect(w.err.at(-1)).toContain('撤自动合并、关掉要人补');
     w.replies.push({ status: 255, stderr: 'ssh: Could not resolve hostname contabo\n' });
-    expect(await w.claim(['reassign', '40', '--to', 'worker', '--label', 'w2', '--founder', 'x'])).toBe(2);
+    expect(
+      await w.claim([
+        'reassign',
+        '40',
+        '--to',
+        'worker',
+        '--label',
+        'w2',
+        '--session',
+        's1',
+        '--founder',
+        'x',
+      ]),
+    ).toBe(2);
     expect(w.err.at(-1)).toContain('不知道法国那边做没做');
+  });
+
+  it('【故意造出的失败】不带 --session：退出码 1，明确报，不猜是这台唯一一份就当成是你、不连法国', async () => {
+    const w = await seated();
+    const before = w.calls.length;
+    expect(await w.claim(['reassign', '40', '--to', 'worker', '--label', 'w2'])).toBe(1);
+    expect(w.err.at(-1)).toContain('要带 --session');
+    expect(w.calls.length).toBe(before);
   });
 });
 

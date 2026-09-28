@@ -1,7 +1,7 @@
 // 帅位进度报到法国库（#199）。不写本机 progress.json。经 ssh 调 fleet-api seat board，和 claim.mjs 同一条路。
 import { callFrance, franceHost, pickState } from './seat-lib.mjs';
 
-const USAGE = `用法：node p.mjs <项目> <命令> …
+const USAGE = `用法：node p.mjs <项目> <命令> … [--session <会话号>]
   head "<一句话现状>"
   add <id> <序号> <标题> [说明]
   step <id> <done|doing|waiting|needs|blocked> [说明]
@@ -12,17 +12,20 @@ const USAGE = `用法：node p.mjs <项目> <命令> …
   show
   pending
   record
-  handoff <文件>
+  handoff <文件> --session <会话号>
 没配法国、连不上：退出码 2，不写本地文件。这台没有本地帅位记录（没 seat.mjs take 过）：退出码 3——
-#446 起帅位不是锁，写板子不核是不是现任，只要这台曾经接过班就能写。`;
+#446 起帅位不是锁，写板子不核是不是现任，只要这台曾经接过班就能写；--session 不给就挑这台唯一的
+一份（这台不止一个会话 take 过时，报进度这类用不着精确身份的命令，加 --session 说是哪个）。
+handoff 是交接说明，算身份判断：必须带 --session，不猜（这台哪怕只有一份记录也不猜——不能确定
+那一份就是你；真出过事：一个会话没带 --session，把别的会话的帅位记录当成了自己的）。`;
 
 function fail(io, code, msg) {
   io.err(msg);
   return code;
 }
 
-function seatOf(io) {
-  const picked = pickState(io.home, 'main');
+function seatOf(io, session) {
+  const picked = pickState(io.home, 'main', session);
   if (!picked.ok) return picked;
   return { ok: true, state: picked.state };
 }
@@ -34,11 +37,17 @@ function seatOf(io) {
 export async function runBoardCli(argv, io) {
   if (argv.includes('--help') || argv.includes('-h') || argv.length === 0)
     return fail(io, argv.length === 0 ? 1 : 0, USAGE);
-  const [project, cmd, ...rest] = argv;
+  const sessionAt = argv.indexOf('--session');
+  const session = sessionAt < 0 ? undefined : argv[sessionAt + 1];
+  if (sessionAt >= 0 && session === undefined) return fail(io, 1, '--session 后面要跟值');
+  const bare = sessionAt < 0 ? argv : [...argv.slice(0, sessionAt), ...argv.slice(sessionAt + 2)];
+  const [project, cmd, ...rest] = bare;
   if (!project || !cmd) return fail(io, 1, USAGE);
+  if (cmd === 'handoff' && session === undefined)
+    return fail(io, 1, 'handoff 是身份判断，要带 --session <会话号>：这台哪怕只有一份记录也不猜是你');
   const host = franceHost({ env: io.env, home: io.home });
   if (!host.ok) return fail(io, 2, host.why);
-  const seat = seatOf(io);
+  const seat = seatOf(io, session);
   if (!seat.ok) return fail(io, 3, seat.why);
   const ident = [
     '--machine',
