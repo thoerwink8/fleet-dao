@@ -270,7 +270,7 @@ grok 装在会话用户自己家里：官方安装脚本把二进制放在 `~/.g
 和 grok、cursor-agent 不一样：Mirasim 没有能自动跑的无头安装脚本，服务端本体不是装机脚本装的——官方给的路是它自己的桌面端以 ssh 远程模式连上服务器现装、现登录，或者帅位／创始人在本机用 `mirasim ssh connect` 命令行现装（两条路装出来是同一份东西，见下面第 1 步）。这一步装出来的只是「远程模式」：只听 unix socket、ssh 一断就退出，靠不住——要另外让它常驻在「本地模式」（第 2 步），这才是装机脚本管的那一层。引擎经它派 DeepSeek Flash 的活（`packages/adapters/src/mirasim/`，协议与坑见 `docs/reference/adapters.md` 第八节 MS-01…28），选路、失败分流、记账和别家执行方式同一套（`packages/engine/src/real/hosts.ts` 的 `mirasimDriver`）。
 
 1. 装服务端本体（帅位或创始人做，一次；这条本身是「怎么装」的说明，不是装机脚本的一步）：
-   1. 先给会话用户开一条能连的 ssh 口子（一次性、root 做，写法照 pilot 那条）：`sudo -iu <会话用户> sh -c 'umask 077; mkdir -p ~/.ssh; cat >> ~/.ssh/authorized_keys' < <连接方的公钥>.pub`
+   1. 先给会话用户开一条能连的 ssh 口子（root 做，写法照 pilot 那条；装完留着，以后升级、换账号还要连，创始人 2026-09-29 拍）：`sudo -iu <会话用户> sh -c 'umask 077; mkdir -p ~/.ssh; cat >> ~/.ssh/authorized_keys' < <连接方的公钥>.pub`。只许放创始人登录 pilot 的那几把：`france.sh` 读回照 `/home/pilot/.ssh/authorized_keys` 核对，多一把别人的、`~/.ssh` 里放了私钥或配置、权限不是 700/600、认不出都判红（`deploy/lib/session-user.sh` 的 `check_session_ssh`）
    2. 装：桌面端新建一条 ssh 远程连接，目标 `<会话用户>@<法国的地址>`；或者在本机命令行 `MIRASIM_SERVER_DL_ROOT=https://cdn-assets.mirasim.ai/mirasim/releases mirasim ssh connect <会话用户>@<法国的地址>`。连上那一下会在它家里自己装起服务端（`~/.mirasim-remote/servers/<版本>/`，`current` 链到在用的那版；数据在 `~/.mirasim/`；服务端要的 `curl`、`tar`、`gzip`、`sha256sum`、`AllowStreamLocalForwarding` 法国上都已具备）。
    3. 这一下装出来的是「远程模式」：只听 unix socket（`~/.mirasim-remote/run/server.sock`），带 `stdinShutdown`——连接一断（ssh 断了、命令行退出）它就跟着退出，引擎靠不住，不算「已经装好常驻服务」，只是把服务端本体和账号放到位。
    4. 创始人在桌面端（登录着要给这份服务用的那个账号）连一次这台主机：这一下把中转账号推进 `~/.mirasim/setting.json`（常驻服务读的是同一份状态目录，账号跟着生效，不用给常驻那份另外登录一次）。
