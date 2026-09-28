@@ -210,4 +210,157 @@ describe('postSecondOpinion：第二意见的结论写回 GitHub', () => {
     expect(setStatus).toHaveBeenCalledOnce();
     expect(res.commentUrl).toBeUndefined();
   });
+
+  it('沿用上一轮通过的结论（合并前重跑头变了、patch-id 一样）：状态还是贴 success，评论写清是沿用、不是真审', async () => {
+    const { ports, setStatus, commentPull } = setup();
+    const res = await ports.postSecondOpinion(
+      {
+        ...scope,
+        repo,
+        prNumber: 7,
+        head: 'e'.repeat(40),
+        round: 2,
+        hits,
+        verdict: 'pass',
+        findings: [],
+        model: '沿用，没有再审',
+        reused: { fromHead: 'a'.repeat(40), round: 1 },
+      },
+      ctx,
+    );
+    expect(setStatus).toHaveBeenCalledWith(repo, 'e'.repeat(40), {
+      context: 'second-opinion',
+      state: 'success',
+      description: '第二意见沿用第 1 轮（头 aaaaaaa）',
+    });
+    const body = vi.mocked(commentPull).mock.calls[0]?.[3] as string;
+    expect(body).toContain('沿用第 1 轮在 aaaaaaa 上的通过');
+    expect(body).toContain('不再拉一次审查');
+    expect(res.commentUrl).toBe('https://x/comment/1');
+  });
+});
+
+describe('runTests：合并前重跑那一步，判合并闸红是不是只缺 second-opinion（结构化，不匹配文案）', () => {
+  const ciRed = (failedChecks: string[]) => ({
+    state: 'red' as const,
+    head: 'a'.repeat(40),
+    checks: [],
+    failedChecks,
+  });
+
+  function setupRunTests(
+    over: {
+      waitCi?: EngineGitHub['waitCi'];
+      latestStatus?: EngineGitHub['claims']['latestStatus'];
+      readRepoFile?: EngineGitHub['readRepoFile'];
+      pullFiles?: EngineGitHub['pullFiles'];
+    } = {},
+  ) {
+    const latestStatus =
+      over.latestStatus ?? (vi.fn(async () => null) as EngineGitHub['claims']['latestStatus']);
+    const gh = {
+      waitCi: over.waitCi ?? (async () => ({ state: 'green' as const, head: 'a'.repeat(40), checks: [] })),
+      readRepoFile:
+        over.readRepoFile ??
+        (async () => ({
+          defaultBranch: 'main',
+          commit: 'a'.repeat(40),
+          file: { kind: 'text', text: RISK_JSON },
+        })),
+      pullFiles:
+        over.pullFiles ?? (async () => [{ filename: 'packages/api/src/auth.ts', status: 'modified' }]),
+      claims: { latestStatus } as unknown as EngineGitHub['claims'],
+    } as unknown as EngineGitHub;
+    const ports = createGitHubPorts({
+      gh,
+      trees: {} as never,
+      exec: {} as never,
+      tmpDir: '/tmp/fake',
+      archiveDir: '/tmp/fake-archive',
+    });
+    return { ports, latestStatus };
+  }
+
+  it('合并闸红、碰了先审后合的路径、当前头上还没有 second-opinion 状态：secondOpinionWait=missing，不是测试真红', async () => {
+    const { ports } = setupRunTests({ waitCi: async () => ciRed(['merge-gate']) });
+    const res = await ports.runTests(
+      { ...scope, repo, prNumber: 7, branch: 'fleet/12-a', head: 'a'.repeat(40) },
+      ctx,
+    );
+    expect(res).toMatchObject({ passed: false, secondOpinionWait: 'missing' });
+  });
+
+  it('合并闸红、second-opinion 还在跑（pending）：secondOpinionWait=pending，不是测试真红', async () => {
+    const { ports } = setupRunTests({
+      waitCi: async () => ciRed(['merge-gate']),
+      latestStatus: async () => ({ state: 'pending', description: '', byEngine: true }),
+    });
+    const res = await ports.runTests(
+      { ...scope, repo, prNumber: 7, branch: 'fleet/12-a', head: 'a'.repeat(40) },
+      ctx,
+    );
+    expect(res).toMatchObject({ passed: false, secondOpinionWait: 'pending' });
+  });
+
+  it('合并闸红、但这个 PR 没碰先审后合的路径：不当「缺 second-opinion」，按真测试红交回（另有原因——草稿、认领对不上……）', async () => {
+    const { ports, latestStatus } = setupRunTests({
+      waitCi: async () => ciRed(['merge-gate']),
+      pullFiles: async () => [{ filename: 'docs/design.md', status: 'modified' }],
+    });
+    const res = await ports.runTests(
+      { ...scope, repo, prNumber: 7, branch: 'fleet/12-a', head: 'a'.repeat(40) },
+      ctx,
+    );
+    expect(res.passed).toBe(false);
+    expect(res.secondOpinionWait).toBeUndefined();
+    expect(latestStatus).not.toHaveBeenCalled();
+  });
+
+  it('还有别的检查也红了（不只是合并闸）：真测试红，不查 second-opinion（有没有它都改不了这一次的结论）', async () => {
+    const { ports, latestStatus } = setupRunTests({
+      waitCi: async () => ciRed(['merge-gate', 'test (engine)']),
+    });
+    const res = await ports.runTests(
+      { ...scope, repo, prNumber: 7, branch: 'fleet/12-a', head: 'a'.repeat(40) },
+      ctx,
+    );
+    expect(res.passed).toBe(false);
+    expect(res.secondOpinionWait).toBeUndefined();
+    expect(latestStatus).not.toHaveBeenCalled();
+  });
+
+  it('second-opinion 已经是通过的：合并闸红另有原因，按真测试红交回', async () => {
+    const { ports } = setupRunTests({
+      waitCi: async () => ciRed(['merge-gate']),
+      latestStatus: async () => ({ state: 'success', description: '第二意见通过', byEngine: true }),
+    });
+    const res = await ports.runTests(
+      { ...scope, repo, prNumber: 7, branch: 'fleet/12-a', head: 'a'.repeat(40) },
+      ctx,
+    );
+    expect(res.passed).toBe(false);
+    expect(res.secondOpinionWait).toBeUndefined();
+  });
+
+  it('绿了：照常交回 passed true，不查 second-opinion', async () => {
+    const { ports, latestStatus } = setupRunTests();
+    const res = await ports.runTests(
+      { ...scope, repo, prNumber: 7, branch: 'fleet/12-a', head: 'a'.repeat(40) },
+      ctx,
+    );
+    expect(res.passed).toBe(true);
+    expect(latestStatus).not.toHaveBeenCalled();
+  });
+
+  it('【故意造出的失败】second-opinion 状态读不到（GitHub 报错）：抛错，不当「查成了、缺状态」', async () => {
+    const { ports } = setupRunTests({
+      waitCi: async () => ciRed(['merge-gate']),
+      latestStatus: async () => {
+        throw new Error('GitHub 一时读不到');
+      },
+    });
+    await expect(
+      ports.runTests({ ...scope, repo, prNumber: 7, branch: 'fleet/12-a', head: 'a'.repeat(40) }, ctx),
+    ).rejects.toBeTruthy();
+  });
 });
