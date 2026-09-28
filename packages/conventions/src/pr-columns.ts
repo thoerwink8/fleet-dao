@@ -75,14 +75,15 @@ export function prColumns(body: string): Map<string, string> {
 }
 
 /**
- * PR 对应的 issue 号：先看正文「需求」栏里第一个 #号，没有再看标题里第一个 (#号)（全角括号也算）。
- * 「owner/仓#号」这种别的仓的不算。都没有返回 undefined。
+ * PR 对应的 issue 号：先看正文「需求」栏里第一个 #号，没有再看标题里第一处紧挨左括号的 #号
+ * （全角括号也算；#号后面可以有别的字，比如「（#345，说明） (#392)」认 345，不认末尾这个 PR 自己的号）。
+ * 「（见 #12）」这种 # 号不挨着左括号的、不带括号的 #号、「owner/仓#号」这种别的仓的，都不算。都没有返回 undefined。
  */
 export function linkedIssue(body: string, title: string): number | undefined {
   const col = prColumns(body).get(ISSUE_COLUMN.toLowerCase());
   const fromBody = col && /(?<![\w/#])#(\d+)\b/.exec(col)?.[1];
   if (fromBody) return Number(fromBody);
-  const fromTitle = /[(（]\s*#(\d+)\s*[)）]/.exec(title)?.[1];
+  const fromTitle = /[(（]\s*#(\d+)\b/.exec(title)?.[1];
   return fromTitle ? Number(fromTitle) : undefined;
 }
 

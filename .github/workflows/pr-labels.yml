@@ -1,7 +1,9 @@
 name: pr-labels
-# PR 补贴（创始人 2026-09-26：类别标签、里程碑缺了不判红，由脚本按对应 issue 自动补；design 第七节「标签和里程碑不靠人记得贴」）。
-# 对应 issue 从正文「需求」栏的 #号认，没有再看标题里的 (#号)；PR 缺类别标签就照抄 issue 的，缺里程碑就照抄 issue 的，已有的不动。
-# 找不到对应 issue、issue 自己也没有：job summary 里提醒，不失败。读、写 GitHub 出错：job 红，写明原因（packages/conventions/src/pr-labels.ts）。
+# PR 补贴（创始人 2026-09-26：类别标签、里程碑缺了不判红，由脚本补；design 第七节「标签和里程碑不靠人记得贴」；#425）。
+# 对应 issue 从正文「需求」栏的 #号认，没有再看标题里紧挨左括号的 #号（括号里 #号后面可以有别的字）。
+# 挂了单：缺类别照抄那张单的，缺里程碑照抄那张单的；单自己未排期的不挂。不挂单（认不出号，或认到的就是这个 PR 自己）：
+# 缺类别按标题开头补（fix 缺陷、feat 需求、其余杂项），缺里程碑挂当前版本（还开着的 v<N> 里号最小的）；对应计划写了未排期的不挂。
+# 已有的不动。补不上：job summary 里提醒，不失败。读、写 GitHub 出错：job 红，写明原因（packages/conventions/src/pr-labels.ts）。
 #
 # 改这里之前必须知道：
 # - 用 pull_request_target 是为了拿到能写 PR 的令牌（别人仓 fork 来的 PR 在 pull_request 下只有只读令牌）。代价是这个令牌能写，

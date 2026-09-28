@@ -58,6 +58,12 @@ describe('挂的单：需求栏（没有再看标题）+ 关单词，只算同�
     });
   });
 
+  it('标题括号里 #号后面有字：认这一处，不认末尾这个 PR 自己的号', () => {
+    expect(
+      prLinks({ body: '**需求**：无', title: 'feat: x（#345，创始人 09-28） (#392)' }, 'acme/fleet-dao'),
+    ).toEqual({ issues: [345], alerts: [] });
+  });
+
   it('代码块里举例的关单词不算（和合并闸同一个认法）', () => {
     expect(prLinks({ body: '```\nCloses #1\n```\n**需求**：无', title: 'x' }, 'acme/r')).toEqual({
       issues: [],

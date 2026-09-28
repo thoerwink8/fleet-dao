@@ -46,7 +46,7 @@ export function checkPrFields(pr: PrFacts, repo: RepoFacts): string[] {
   const cols = prColumns(pr.body);
   let milestone: number | undefined;
   if (pr.milestone === null || !pr.milestone.trim()) {
-    if (!isUnscheduled(cols.get(PLAN_COLUMN))) {
+    if (!planSaysUnscheduled(cols.get(PLAN_COLUMN))) {
       problems.push('没挂里程碑：在 PR 右边的 Milestone 里挂上对应单所在的版本；对应的单未排期就不用挂。');
     }
   } else if (milestoneVersion(pr.milestone) === undefined) {
@@ -78,8 +78,11 @@ function closeColumnProblem(c: CloseColumn): string {
   return `「${CLOSE_COLUMN}」一栏是空的：${how}。`;
 }
 
-/** 「对应计划」写「未排期」（可以带别的字）：这一单本来就没排版本。判不了（没这一栏、写的是别的）时不算未排期。 */
-function isUnscheduled(value: string | undefined): boolean {
+/**
+ * 「对应计划」这一栏以「未排期」开头（可以带别的字、反引号）：这条工作本来就没有版本。
+ * 没这一栏、写的是别的，不算未排期。pr-labels 和这里用同一份，不要另写一份。
+ */
+export function planSaysUnscheduled(value: string | undefined): boolean {
   return (value ?? '').replace(/`/g, '').trim().startsWith('未排期');
 }
 

@@ -1,5 +1,6 @@
 // PR 补贴入口（.github/workflows/pr-labels.yml）：node packages/conventions/src/bin/pr-labels.ts [--dry-run]
-// 从事件（GITHUB_EVENT_PATH）认出是哪个 PR，用 GITHUB_TOKEN 现读它和对应 issue，缺类别标签、里程碑就照抄 issue 的。
+// 从事件（GITHUB_EVENT_PATH）认出是哪个 PR，用 GITHUB_TOKEN 现读它。挂了单的，缺类别、缺里程碑就照抄那张单的；
+// 不挂单的按标题补类别、挂当前版本（#425，判法在 pr-labels.ts）。
 // 提醒写进 job summary（GITHUB_STEP_SUMMARY），不失败；退出码 2 = 没补成（读、写 GitHub 出错，summary 写不进去）。
 // 本机试跑：GITHUB_EVENT_PATH 指向一个 {"pull_request":{"number":N}} 的文件，带 --dry-run 只说要补什么。
 import { appendFileSync } from 'node:fs';
