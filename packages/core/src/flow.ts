@@ -67,8 +67,13 @@ export type FlowEvent =
   | { kind: 'accepted' }
   | { kind: 'rejected' }
   | { kind: 'verified'; verdict: 'pass' | 'block' }
-  /** conflict = GitHub 不给这个头起 CI（和主线冲突），走「并主线」，不算「没查成」的次数（unknown 才是没查成）。 */
-  | { kind: 'ci'; state: 'green' | 'red' | 'unknown' | 'conflict' }
+  /**
+   * conflict = GitHub 不给这个头起 CI（和主线冲突），走「并主线」，不算「没查成」的次数（unknown 才是没查成）。
+   * merged = 等 CI（或合并前重跑）查到 PR 已经在外面合并了（GitHub 自己挂的自动合并，合并闸绿就合，不是引擎自己
+   * 合的）：不是「没查成」，直接当合上了，和 merge 这一步收到 { kind: 'merged' } 走一样的路（第 6 步「等 CI」
+   * 和第 7 步「合并」都可能撞上这条——法国那次真事：合并闸绿了 GitHub 自动合并先合了，引擎的等 CI 那一步才读到）。
+   */
+  | { kind: 'ci'; state: 'green' | 'red' | 'unknown' | 'conflict' | 'merged' }
   /** 并主线的结果（sync-mainline 这个动作做完交回）：干净并上了接着查新头的 CI；冲突解不开要派会话改一轮。 */
   | { kind: 'synced'; state: 'clean' | 'conflict'; conflictFiles: string[] }
   /** CI 绿了之后 Lead 的最终审查：过了进合并；要改就回第 6 步修一轮。 */
@@ -183,6 +188,20 @@ const park = (state: FlowState, resume: Step, why: string): FlowDecision =>
 
 /** 换到下一块：每块自己的计数清零。 */
 const freshBlock = { reworks: 0, takeover: false, verifyRounds: 0, ciRounds: 0, mergeRounds: 0 } as const;
+
+/**
+ * 合上了：还有块接着下一块（计数清零）；母单最后一块进母单级验证；小单最后一块关单。
+ * 合并这一步自己合上了（{ kind: 'merged' }）、或等 CI/合并前重跑查到已经在外面合上了（{ kind: 'ci', state: 'merged' }）
+ * 都走这条——两处收到的事件不一样，落的地方一样。
+ */
+function mergedOutcome(state: FlowState): FlowDecision {
+  if (state.block + 1 < state.blocks) {
+    return go(state, { step: 'execute', block: state.block + 1, ...freshBlock }, 'dispatch');
+  }
+  return state.mother
+    ? go(state, { step: 'mother-verify' }, 'verify-mother')
+    : go(state, { step: 'done' }, 'close');
+}
 
 /**
  * 后加进 FlowState 的计数和它的起始值。发布前就在跑的工作流带着旧版本的状态，里面没有这些字段；
@@ -339,6 +358,8 @@ export function nextFlow(saved: FlowState, event: FlowEvent): FlowDecision {
         );
       }
       if (event.kind !== 'ci') return unexpected();
+      // 等 CI 查到 PR 已经在外面合并了（GitHub 自己的自动合并先合了）：不当「没查成」，直接按合上了走
+      if (event.state === 'merged') return mergedOutcome(state);
       // 绿了 Lead 最终审查、把结果.md 提交进这个 PR（两种模式都要：需求、方案、结果随 PR 进仓，引擎不直写主线）
       if (event.state === 'green') return go(state, { step: 'final-review' }, 'final-review');
       if (event.state === 'unknown') return go(state, {}, 'recheck-ci');
@@ -372,13 +393,10 @@ export function nextFlow(saved: FlowState, event: FlowEvent): FlowDecision {
 
     case 'merge': {
       if (event.kind === 'merge-returned') return fixRound(state, '合并前退回要改');
+      // 合并前重跑那一步查到 PR 已经在外面合并了：一样按合上了走，不是「合并前退回」也不是「没查成」
+      if (event.kind === 'ci' && event.state === 'merged') return mergedOutcome(state);
       if (event.kind !== 'merged') return unexpected();
-      if (state.block + 1 < state.blocks) {
-        return go(state, { step: 'execute', block: state.block + 1, ...freshBlock }, 'dispatch');
-      }
-      return state.mother
-        ? go(state, { step: 'mother-verify' }, 'verify-mother')
-        : go(state, { step: 'done' }, 'close');
+      return mergedOutcome(state);
     }
 
     case 'mother-verify': {

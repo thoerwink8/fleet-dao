@@ -133,6 +133,14 @@ const SECOND_OPINION_PATCH = 'second-opinion-253';
  * 合并闸红一律当「测试没过」退回一轮。
  */
 const MERGE_SECOND_OPINION_PATCH = 'merge-second-opinion-return';
+/**
+ * 等 CI（或合并前重跑）查到 PR 已经在外面合并了（GitHub 自己挂的自动合并，合并闸绿就合，不是引擎自己合的）：
+ * 改成不当「没查成」，直接按合上了走（法国那次真事：账密测试那张单的 PR 合并闸绿了，GitHub 自动合并先合了，
+ * 引擎的等 CI 那一步才读到「PR 被关了：已经合并了」，连 3 次当没查成停下等人）。在途任务的历史里，ciResultOf
+ * 对「关了、合并的」这种情形只会记出老的 unknown 结果（没有 mergeCommit）：没打这个标记（老历史）照老步序走，
+ * 一直当没查成。
+ */
+const MERGED_ELSEWHERE_PATCH = 'ci-merged-elsewhere';
 /** 在合并队列里的这一块叫什么（合并条目、快照里的块）。一张单一块（母单按块循环归 #252）。 */
 const BLOCK_KEY = 'fusion';
 /**
@@ -1169,6 +1177,7 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
     const atHead = head;
     // patched() 本身也要记进历史、调用次数和顺序不能跟着分支变，所以先问一次存起来，不要在 Promise.all 里现问。
     const soOn = patched(SECOND_OPINION_PATCH);
+    const mergedElsewhereOn = patched(MERGED_ELSEWHERE_PATCH);
     const [ci, so] = await Promise.all([
       attempt(kit, 'waitCi', () =>
         acts.waitCi({
@@ -1194,6 +1203,25 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
       head = ci.head;
       treeHead = ci.head;
       status.head = head;
+    }
+    if (ci.state === 'merged') {
+      if (!mergedElsewhereOn) {
+        // 接这道改法之前起的执行：照老步序当「没查成」处理，不认「合并闸自己判的合并」
+        ciUnknown += 1;
+        if (ciUnknown >= CI_UNKNOWN_LIMIT) {
+          ciUnknown = 0;
+          return {
+            kind: 'needs-human',
+            why: `CI 连着 ${CI_UNKNOWN_LIMIT} 次没查成（没查成不是没过）：PR 已经在外面合并了，但接这道改法之前起的执行不认，要人看`,
+          };
+        }
+        return { kind: 'ci', state: 'unknown' };
+      }
+      // PR 已经在外面合上了（GitHub 自己的自动合并）：不是没查成，记下合并提交，直接按合上了走
+      // （nextFlow 收到 { kind: 'ci', state: 'merged' } 和收到 { kind: 'merged' } 走一样的路）。
+      ciUnknown = 0;
+      if (ci.mergeCommit) mergeCommit = ci.mergeCommit;
+      return { kind: 'ci', state: 'merged' };
     }
     if (ci.state === 'unknown') {
       ciUnknown += 1;
@@ -1753,8 +1781,10 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
         const event = await waitCiEvent();
         if (event.kind === 'needs-human') return event;
         // 真红了（第二意见真审过判「必须改」、或碰巧这时候测试真的红了）：fix 已经由 waitCiEvent 填好，
-        // 照修一轮的路走；绿了（含刚沿用/请到手、合并闸还没追上而稍等重查出来的绿）就回去接着排队合并。
+        // 照修一轮的路走；绿了（含刚沿用/请到手、合并闸还没追上而稍等重查出来的绿）就回去接着排队合并；
+        // 这期间 PR 在外面已经合并了（GitHub 自动合并先合了）：交回去，nextFlow 按合上了走。
         if (event.kind === 'ci' && event.state === 'red') return { kind: 'merge-returned' };
+        if (event.kind === 'ci' && event.state === 'merged') return event;
         continue;
       }
       const after = await judge(kit, 'mergeReturn', {

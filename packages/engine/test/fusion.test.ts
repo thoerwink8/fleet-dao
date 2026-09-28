@@ -643,6 +643,32 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
     });
   });
 
+  it('(e) 等 CI 查到 PR 已经在外面合并了（GitHub 自动合并先合了）：当合并成功走收尾，不算没查成', async () => {
+    const w = world({ ci: () => ({ state: 'merged', mergeCommit: 'mc-external-1' }) });
+    const result = await runToEnd(w);
+    expect(result).toMatchObject({ state: 'done', mergeCommit: 'mc-external-1' });
+    // 没有走引擎自己的合并队列合并、也没有走最终审查（PR 已经在外面合了，不用再改、再合一次）
+    expect(w.count('mergePr')).toBe(0);
+    const finalReviews = w.callsOf('startSession').filter((c) => c.input.brief.lead?.step === 'review');
+    expect(finalReviews).toHaveLength(0);
+    expect(w.alerts.some((a) => a.title.includes('没查成'))).toBe(false);
+  });
+
+  it('(f)【故意造出的失败】PR 被关但没合并（不是合并关的）：仍按现在的判法，连着 3 次没查成停下等人', async () => {
+    const w = world({ ci: () => ({ state: 'unknown', detail: 'PR #100 已经关掉了' }) });
+    const { parked, result } = await withWorker(env, w, async (q) => {
+      const handle = await start(q, fusionInput());
+      // 每次没查成都要经「再查一次」那一步的 2 分钟重试等待，连着 3 次要跳够 4 分钟虚拟时间，直接跳 10 分钟；
+      // 查询不像 handle.result() 那样自己跳时间，要自己叫 env.sleep（同一个坑，见上面「CI 一直报和主线冲突」那条）。
+      await env.sleep('10 minutes');
+      const parkedStatus = await queryUntil<FusionStatus>(handle, (s) => s.parked, '挂起');
+      await handle.signal(stopSignal, { by: 'founder' });
+      return { parked: parkedStatus, result: (await handle.result()) as FusionResult };
+    });
+    expect(parked.lastProblem).toContain('CI 连着 3 次没查成');
+    expect(result).toMatchObject({ state: 'stopped', mergeCommit: null });
+  });
+
   it('CI 报和主线冲突：自动并主线并上了，接着在新头上查 CI，不算「没查成」的次数、照常走完', async () => {
     const w = world({
       ci: (_input, n) => (n === 1 ? { state: 'conflict', detail: '和主线冲突，CI 没起' } : undefined),

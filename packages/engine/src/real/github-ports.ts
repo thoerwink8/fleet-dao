@@ -179,7 +179,11 @@ export function ciResultOf(r: Awaited<ReturnType<EngineGitHub['waitCi']>>): CiRe
         detail: `PR 的头从 ${r.head} 变成了 ${r.actualHead}，且新头不含老头：${r.detail}`,
       };
     case 'closed':
-      return { state: 'unknown', head: r.head, failedChecks: [], detail: `PR 被关了：${r.detail}` };
+      // merged 结构化地说是不是合并关的（packages/github 的 waitCi 已经从 PR 的 merged 字段读出来，不是猜文案）：
+      // 合了就当合上了（mergeCommit 带着合并提交），关了没合才是真的没查成——调用方（waitCiEvent）按它分岔。
+      return r.merged && r.mergeCommit
+        ? { state: 'merged', head: r.head, failedChecks: [], mergeCommit: r.mergeCommit }
+        : { state: 'unknown', head: r.head, failedChecks: [], detail: `PR 被关了：${r.detail}` };
     case 'missing':
       return { state: 'unknown', head: r.head, failedChecks: [], detail: `CI 根本没跑：${r.detail}` };
     case 'timeout':
