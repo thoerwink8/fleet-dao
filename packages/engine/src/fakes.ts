@@ -247,6 +247,7 @@ export const FAKE_FLOW_CONFIG = {
   testCommand: 'pnpm test:changed',
   highRiskPaths: [],
   uiPaths: ['web/'],
+  riskPathsFile: 'packages/conventions/high-risk-paths.json',
 } as const;
 
 /** 假 Lead 默认写的任务简报：只许改 src/login/。 */

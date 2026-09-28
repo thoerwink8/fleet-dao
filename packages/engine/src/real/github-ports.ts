@@ -298,23 +298,31 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
   };
 
   /**
-   * 这个 PR 此刻改到的文件里，落在先审后合路径清单（主线上那份）里的：checkHighRisk 端口和 runTests 里判
-   * 「合并闸红是不是只缺 second-opinion」共用同一份读法——两处判的得是同一件事，不能各写一份、慢慢走岔。
-   * 清单读不到、翻不完页照抛，不当「没碰到」（和 checkHighRisk 原来的行为一样）。
+   * 这个 PR 此刻改到的文件里，落在先审后合路径清单（riskPathsFile 指的、主线上那份）里的：checkHighRisk 端口和
+   * runTests 里判「合并闸红是不是只缺 second-opinion」共用同一份读法——两处判的得是同一件事，不能各写一份、慢慢走岔。
+   * 清单读不到、翻不完页照抛，不当「没碰到」（和 checkHighRisk 原来的行为一样）。riskPathsFile 由调用方给：
+   * checkHighRisk 走项目声明的路径（没声明就不叫这个函数）；runTests 服务合并队列，合并队列现在还没接上按项目读
+   * 流程配置那一层，暂时仍传 fleet-dao 自己的 RISK_PATHS_FILE（这个仓自己合的时候没问题；别的项目一旦真走到合并
+   * 队列这一步、又没声明清单，会重新踩到「写死一份清单」的坑，算已知缺口，留给合并队列接上项目配置那张单）。
    */
-  const readHighRisk = async (repo: PrRepo, prNumber: number, ctx: PortContext): Promise<RiskyFile[]> => {
-    const read = await mapped(() => gh.readRepoFile({ repo, path: RISK_PATHS_FILE, signal: ctx.signal }));
+  const readHighRisk = async (
+    repo: PrRepo,
+    prNumber: number,
+    riskPathsFile: string,
+    ctx: PortContext,
+  ): Promise<RiskyFile[]> => {
+    const read = await mapped(() => gh.readRepoFile({ repo, path: riskPathsFile, signal: ctx.signal }));
     if (read.file.kind !== 'text') {
       const why = read.file.kind === 'missing' ? '文件不在' : read.file.why;
       throw new PortError(
         'RISK_PATHS_MISSING',
-        `主线上读不到 ${RISK_PATHS_FILE}（${why}）：判不了这个 PR 碰没碰先审后合的路径`,
+        `主线上读不到 ${riskPathsFile}（${why}）：判不了这个 PR 碰没碰先审后合的路径`,
         { retryable: false },
       );
     }
     const list = parseRiskPaths(read.file.text);
     if (typeof list === 'string') {
-      throw new PortError('RISK_PATHS_INVALID', `${RISK_PATHS_FILE} 认不出：${list}`, { retryable: false });
+      throw new PortError('RISK_PATHS_INVALID', `${riskPathsFile} 认不出：${list}`, { retryable: false });
     }
     const files = await mapped(() => gh.pullFiles({ repo, prNumber, signal: ctx.signal }));
     return riskyFiles(files, list);
@@ -556,9 +564,19 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
     },
 
     async checkHighRisk(input, ctx) {
+      // 项目没声明先审后合清单（.fleet/flow.json 没写 riskPathsFile）：这个项目没有先审后合的路径，不查、不请第二意见
+      // （不是「读不到就当没碰到」——是这个项目压根没这条路，比如巡检仓）。
+      const riskPathsFile = input.riskPathsFile;
+      if (riskPathsFile === undefined) {
+        return {
+          hits: [],
+          note: '项目没声明先审后合清单（.fleet/flow.json 没写 riskPathsFile）：不查、不请第二意见',
+        };
+      }
       // 清单读主线上那份（和合并闸同一份判法，PR 改不了自己的门槛，design 第五节）；文件读这个 PR 现在的，带 patch
-      // 才判得出新迁移是不是只加不改。两样有一样读不到、翻不完页都明确抛错，不当「没碰到」。
-      return { hits: await readHighRisk(input.repo, input.prNumber, ctx) };
+      // 才判得出新迁移是不是只加不改。两样有一样读不到、翻不完页都明确抛错，不当「没碰到」（readHighRisk 和 runTests
+      // 里判「合并闸红是不是只缺 second-opinion」共用同一份读法）。
+      return { hits: await readHighRisk(input.repo, input.prNumber, riskPathsFile, ctx) };
     },
 
     async postSecondOpinion(input) {
@@ -579,7 +597,7 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
       );
       const where = `改到了先审后合的地方：${input.hits
         .map((h) => `${h.file}（${h.kind}${h.note ? `：${h.note}` : ''}）`)
-        .join('、')}（清单和理由见 ${RISK_PATHS_FILE}）`;
+        .join('、')}（清单和理由见 ${input.riskPathsFile}）`;
       const lines = [
         input.reused
           ? `**第二意见 第 ${input.round} 轮**（沿用第 ${input.reused.round} 轮在 ${input.reused.fromHead.slice(
@@ -676,7 +694,8 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
         // 情形，不是真测试红（#307/#389 那次真事：白白退回了三轮）。判「是不是」结构化地看两样：这个 PR 真碰了
         // 先审后合的路径（不然合并闸红另有原因——草稿、认领对不上……——second-opinion 状态压根不该管）、当前头上
         // second-opinion 这条提交状态的 state 字段（不匹配合并闸自己写的中文描述）。
-        const hits = await readHighRisk(input.repo, input.prNumber, ctx);
+        // 合并队列现在还没接上按项目读流程配置那一层（见 readHighRisk 上面的注释），暂时仍用 fleet-dao 自己的路径
+        const hits = await readHighRisk(input.repo, input.prNumber, RISK_PATHS_FILE, ctx);
         if (hits.length > 0) {
           const so = await mapped(() => gh.claims.latestStatus(input.repo, ci.head, SECOND_OPINION_CONTEXT));
           if (so === null || so.state === 'pending') {

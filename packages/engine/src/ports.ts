@@ -523,11 +523,18 @@ export interface WaitCiInput extends Scope {
 export interface CheckHighRiskInput extends Scope {
   repo: Repo;
   prNumber: number;
+  /**
+   * 这个项目声明的先审后合清单在仓里的路径（core 的 FusionSetup.riskPathsFile，来自 .fleet/flow.json 的 riskPathsFile）。
+   * 没给 = 项目没声明先审后合的路径，不查、不请第二意见（不当「没碰到」，是「这个项目没有这条路」）。
+   */
+  riskPathsFile?: string;
 }
 
-/** 这个 PR 此刻改到的文件里，落在先审后合路径清单（@fleet-dao/conventions 的 high-risk-paths.json，主线上那份）里的。 */
+/** 这个 PR 此刻改到的文件里，落在先审后合路径清单（项目声明的 riskPathsFile，主线上那份）里的。 */
 export interface CheckHighRiskResult {
   hits: RiskyFile[];
+  /** 项目没声明 riskPathsFile 时的说明（给工作流写进进度）；声明了就没有这个字段。 */
+  note?: string;
 }
 
 export interface PostSecondOpinionInput extends Scope {
@@ -542,6 +549,8 @@ export interface PostSecondOpinionInput extends Scope {
   findings: Finding[];
   /** 审的会话用了哪个模型：贴进评论说明是谁审的。reused 给了的话这个字段不进评论（没有会话审这一次）。 */
   model: string;
+  /** 这个项目声明的先审后合清单路径（评论里「清单和理由见」那句要指对地方）：这一步能走到说明 hits 非空，riskPathsFile 一定有。 */
+  riskPathsFile: string;
   /**
    * 合并前重跑那一步头变了（合并队列自己把主线并进来）：这一轮没有真审，是沿用 fromHead 上第 round 轮通过的
    * 结论（新头相对主线的 patch-id 和 fromHead 一样，见 workflows/fusion.ts 的 tryReuseSecondOpinion）。
