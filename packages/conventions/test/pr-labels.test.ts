@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { GitHubPrLabeler, GitHubReader, IssueInfo, MilestoneInfo, PullInfo } from '../src/github-api.ts';
-import { linkedIssue, type PrState, planLabels, runPrLabels } from '../src/pr-labels.ts';
+import { linkedIssue, type PrState, planLabels, runPrLabels, titlePrefixKind } from '../src/pr-labels.ts';
 
 const body = (issue: string) => `**做了什么**：x\n\n**需求**：${issue}\n\n**对应计划**：P1「工作流」\n`;
 
@@ -43,47 +43,114 @@ describe('认对应的 issue', () => {
   });
 });
 
+/** 大多数测试用不到里程碑列表：给个含当前版本的默认值，要测「没有当前版本」的用例自己传 []。 */
+const OPEN_MILESTONES = [{ number: 2, title: 'v1 Fusion 接活' }];
+
 describe('要补什么', () => {
   it('缺类别和里程碑：照抄 issue 的；issue 上别的标签不抄', () => {
-    expect(planLabels(pr(), 74, issue())).toEqual({
+    expect(planLabels(pr(), 74, issue(), OPEN_MILESTONES)).toEqual({
       issue: 74,
       addLabel: '杂项',
+      labelSource: 'issue',
       milestone: 'P1 核心闭环',
+      milestoneSource: 'issue',
       notes: [],
     });
   });
 
   it('PR 已有的不动：有类别不补标签，有里程碑不补里程碑', () => {
-    const p = planLabels(pr({ labels: ['需求'], milestone: 'P2 驾驶舱' }), 74, issue());
+    const p = planLabels(pr({ labels: ['需求'], milestone: 'P2 驾驶舱' }), 74, issue(), OPEN_MILESTONES);
     expect(p).toMatchObject({ addLabel: undefined, milestone: undefined, notes: [] });
-    expect(planLabels(pr({ labels: ['缺陷'] }), 74, issue())).toMatchObject({
+    expect(planLabels(pr({ labels: ['缺陷'] }), 74, issue(), OPEN_MILESTONES)).toMatchObject({
       addLabel: undefined,
       milestone: 'P1 核心闭环',
+      milestoneSource: 'issue',
     });
   });
 
-  it('找不到对应 issue：只提醒', () => {
-    const p = planLabels(pr({ body: body('无') }), undefined, undefined);
-    expect(p).toMatchObject({ addLabel: undefined, milestone: undefined });
-    expect(p.notes).toEqual([expect.stringContaining('没找到对应 issue 的 #号')]);
-  });
-
-  it('号在 GitHub 上没有、是个 PR、是这个 PR 自己：只提醒', () => {
-    expect(planLabels(pr(), 74, undefined).notes[0]).toContain('GitHub 上没有这个号');
-    expect(planLabels(pr(), 74, issue({ isPr: true })).notes[0]).toContain('是个 PR');
-    expect(planLabels(pr(), 100, undefined).notes[0]).toContain('是这个 PR 自己');
-  });
-
-  it('issue 自己也没有：提醒两边都贴；有好几个类别：不猜', () => {
-    const none = planLabels(pr(), 74, issue({ labels: ['要人看'], milestone: null }));
+  it('issue 自己也没有：提醒两边都贴；有好几个类别：不猜（有效的对应 issue 存在，不落到按标题猜那条路）', () => {
+    const none = planLabels(pr(), 74, issue({ labels: ['要人看'], milestone: null }), OPEN_MILESTONES);
     expect(none).toMatchObject({ addLabel: undefined, milestone: undefined });
     expect(none.notes).toEqual([
       expect.stringContaining('自己也没有，请两边都贴上'),
       expect.stringContaining('自己也没有，请两边都挂上'),
     ]);
-    const many = planLabels(pr({ milestone: 'P1 核心闭环' }), 74, issue({ labels: ['需求', '缺陷'] }));
+    const many = planLabels(
+      pr({ milestone: 'P1 核心闭环' }),
+      74,
+      issue({ labels: ['需求', '缺陷'] }),
+      OPEN_MILESTONES,
+    );
     expect(many.addLabel).toBeUndefined();
     expect(many.notes[0]).toContain('有好几个类别标签（需求、缺陷）');
+  });
+});
+
+describe('titlePrefixKind：PR 标题前缀猜类别', () => {
+  it.each([
+    ['fix: 修好', '缺陷'],
+    ['fix(engine): 修好', '缺陷'],
+    ['fix!: 修好', '缺陷'],
+    ['feat: 加个东西', '需求'],
+    ['feature(web): 加个东西', '需求'],
+    ['docs: 补文档', '杂项'],
+    ['chore(deps): 升级', '杂项'],
+    ['test: 补测试', '杂项'],
+    ['refactor: 改改', '杂项'],
+    ['std(commander-seat): 改规矩', '杂项'],
+  ])('%s → %s', (title, kind) => {
+    expect(titlePrefixKind(title)).toBe(kind);
+  });
+
+  it('认不出前缀（没有冒号、纯中文一句话）：undefined，不猜', () => {
+    expect(titlePrefixKind('提醒减负：删提醒派单整层')).toBeUndefined();
+    expect(titlePrefixKind('随手改了一下')).toBeUndefined();
+  });
+});
+
+describe('没有有效的对应 issue：按标题猜类别、挂当前版本（#448，替掉 #425「没有就只提醒」）', () => {
+  it('没找到对应 issue 的 #号：标题能猜出类别、有当前版本——都补上，不提醒', () => {
+    const p = planLabels(
+      pr({ body: body('无'), title: 'fix: 修一下' }),
+      undefined,
+      undefined,
+      OPEN_MILESTONES,
+    );
+    expect(p).toEqual({
+      issue: undefined,
+      addLabel: '缺陷',
+      labelSource: 'title',
+      milestone: 'v1 Fusion 接活',
+      milestoneSource: 'current-version',
+      notes: [],
+    });
+  });
+
+  it('标题猜不出类别：提醒手动贴，里程碑照样能挂', () => {
+    const p = planLabels(
+      pr({ body: body('无'), title: '随手改了一下' }),
+      undefined,
+      undefined,
+      OPEN_MILESTONES,
+    );
+    expect(p.addLabel).toBeUndefined();
+    expect(p.milestone).toBe('v1 Fusion 接活');
+    expect(p.notes).toEqual([expect.stringContaining('标题看不出 fix/feat 这类常见前缀')]);
+  });
+
+  it('现在没有还开着的 v<N> 里程碑：类别照样能猜，里程碑提醒手动挂，不猜', () => {
+    const p = planLabels(pr({ body: body('无'), title: 'feat: 加个东西' }), undefined, undefined, []);
+    expect(p.addLabel).toBe('需求');
+    expect(p.milestone).toBeUndefined();
+    expect(p.notes).toEqual([expect.stringContaining('现在也没有还开着的 v<N> 里程碑')]);
+  });
+
+  it('号在 GitHub 上没有、是个 PR、是这个 PR 自己：都算「没有有效的对应 issue」，一样走标题/当前版本这条路', () => {
+    expect(planLabels(pr({ title: 'fix: x' }), 74, undefined, OPEN_MILESTONES).addLabel).toBe('缺陷');
+    expect(planLabels(pr({ title: 'fix: x' }), 74, issue({ isPr: true }), OPEN_MILESTONES).addLabel).toBe(
+      '缺陷',
+    );
+    expect(planLabels(pr({ title: 'fix: x' }), 100, undefined, OPEN_MILESTONES).addLabel).toBe('缺陷');
   });
 });
 
@@ -158,12 +225,28 @@ describe('跑一遍（读、补、核对 GitHub 回的）', () => {
     expect(r.lines[0]).toContain('（试跑，没写）');
   });
 
-  it('找不到对应 issue：提醒，不失败', async () => {
-    const { gh, writes } = fakeGh({ pull: pr({ body: body('无') }) });
+  it('找不到对应 issue、标题猜不出类别、里程碑列表里没有当前版本：两条都提醒，不失败、不写', async () => {
+    const { gh, writes } = fakeGh({ pull: pr({ body: body('无'), title: '随手改的' }) });
     const r = await runPrLabels({ eventPath: EVENT, gh });
     expect(r.code).toBe(0);
     expect(writes).toEqual([]);
-    expect(r.notes).toHaveLength(1);
+    expect(r.notes).toHaveLength(2);
+  });
+
+  it('找不到对应 issue，但标题猜得出类别、里程碑列表里有当前版本：按标题贴、挂当前版本（#448）', async () => {
+    const { gh, writes } = fakeGh({
+      pull: pr({ body: body('无'), title: 'fix: 修一下' }),
+      milestones: [{ number: 3, title: 'v1 Fusion 接活', state: 'open' as const }],
+      milestoneAfter: 'v1 Fusion 接活',
+    });
+    const r = await runPrLabels({ eventPath: EVENT, gh });
+    expect(r.code).toBe(0);
+    expect(writes).toEqual(['label 100 缺陷', 'milestone 100 3']);
+    expect(r.lines).toEqual([
+      'PR #100 补上类别标签「缺陷」（按标题猜的）。',
+      'PR #100 补上里程碑「v1 Fusion 接活」（挂当前版本）。',
+    ]);
+    expect(r.notes).toEqual([]);
   });
 
   it('issue 读不到（接口出错）：判没补成，不当成没有这张单', async () => {

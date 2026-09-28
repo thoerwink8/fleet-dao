@@ -33,7 +33,7 @@ export const DEFAULT_POLICY: JevPolicy = {
   examAnsweredShare: 0.8,
   shadowStallDays: 14,
   dailyCallLimit: 200,
-  examDailyCallLimit: 600,
+  examDailyCallLimit: 650,
   dailyUsdCap: 0.3,
 };
 

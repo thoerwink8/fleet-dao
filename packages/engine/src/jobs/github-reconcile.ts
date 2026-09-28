@@ -9,6 +9,7 @@ import type { GitHubReconcileRun } from '../contract.ts';
 import type { AskIssuesResult } from './ask-issues.ts';
 import { type CloseSweepResult, closeSweepDue } from './close-sweep.ts';
 import type { FlowSyncResult } from './flow-config.ts';
+import { type IssueGroomResult, issueGroomDue } from './issue-groom.ts';
 
 /** 登记进 scheduled_jobs 的那一行：一次都没跑过也列得出来（看门狗按登记表查，不按跑过的记录查）。 */
 export const GITHUB_RECONCILE_JOB = {
@@ -40,6 +41,10 @@ export interface GitHubReconcileJobDeps {
   closeSweep(): Promise<CloseSweepResult>;
   /** 这一轮跑不跑关单对账；不给就是 closeSweepDue（北京时间 9:00 起的那一轮）。测试换掉它，免得按真钟跑出不一样的结果。 */
   closeSweepDue?: ((at: Date) => boolean) | undefined;
+  /** 单子进门自动打标挂版本（issue-groom.ts 的 sweepIssueGroom，#448）：只在 issueGroomDue 说到点的那一轮调。 */
+  issueGroom(): Promise<IssueGroomResult>;
+  /** 这一轮跑不跑单子打标挂版本；不给就是 issueGroomDue（每小时一次）。测试换掉它，免得按真钟跑出不一样的结果。 */
+  issueGroomDue?: ((at: Date) => boolean) | undefined;
   runs: ScheduleRunLog;
   now: () => Date;
   log: (level: 'info' | 'warn' | 'error', message: string, fields?: Record<string, unknown>) => void;
@@ -160,6 +165,40 @@ export function withCloseSweep(
 /** 一轮的原因里最多写几条关单对账没查成的。 */
 const CLOSE_WHY_LINES = 3;
 
+/**
+ * 单子打标挂版本这一步并进这一轮的结局（#448）：没到点（null）原样；贴的类别标签、挂的里程碑、交接挪的、闲置清理的
+ * 都算处理了的（found 加上）；整步没跑成、有单没查成、写不成的，这一轮不算查全（ok 降成 partial），前几条写进
+ * why——没查成不当成齐了。日报级的活动摘要已经在 sweepIssueGroom 里写进对应仓的提醒，这里不重复。
+ */
+export function withIssueGroom(
+  r: GitHubReconcileResult,
+  groom: IssueGroomResult | { failed: string } | null,
+): GitHubReconcileResult {
+  if (groom === null) return r;
+  if ('failed' in groom) {
+    return {
+      ...r,
+      outcome: r.outcome === 'ok' ? 'partial' : r.outcome,
+      why: [r.why, `单子打标挂版本没跑成：${groom.failed}`].filter(Boolean).join('；'),
+    };
+  }
+  const found = r.found + groom.found;
+  const n = groom.unchecked.length;
+  if (n === 0) return { ...r, found };
+  const shown = groom.unchecked.slice(0, GROOM_WHY_LINES);
+  if (n > GROOM_WHY_LINES)
+    shown.push(`单子打标挂版本另有 ${n - GROOM_WHY_LINES} 条没查成、没写成（看引擎日志）`);
+  return {
+    ...r,
+    outcome: r.outcome === 'ok' ? 'partial' : r.outcome,
+    found,
+    why: [r.why, ...shown].filter(Boolean).join('；'),
+  };
+}
+
+/** 一轮的原因里最多写几条单子打标挂版本没查成的。 */
+const GROOM_WHY_LINES = 3;
+
 /** 对账的结局换成 schedule_runs 的写法：ok 必须真查了东西，其余都要写原因。 */
 export function toScheduleResult(r: GitHubReconcileResult): ScheduleResult {
   switch (r.outcome) {
@@ -211,7 +250,16 @@ export async function runGitHubReconcileJob(deps: GitHubReconcileJobDeps): Promi
         close = { failed: message(err) };
       }
     }
-    result = toScheduleResult(withCloseSweep(withAskIssues(reconciled, asks), close));
+    // 单子打标挂版本每小时一次（#448）；没跑成不挡对账本身：这一轮记成没查全，下个整点再来（贴标签、挂里程碑都是幂等的）
+    let groom: IssueGroomResult | { failed: string } | null = null;
+    if ((deps.issueGroomDue ?? issueGroomDue)(startedAt)) {
+      try {
+        groom = await deps.issueGroom();
+      } catch (err) {
+        groom = { failed: message(err) };
+      }
+    }
+    result = toScheduleResult(withIssueGroom(withCloseSweep(withAskIssues(reconciled, asks), close), groom));
   } catch (err) {
     result = { outcome: 'failed', why: `对账没跑成：${message(err)}` };
   }

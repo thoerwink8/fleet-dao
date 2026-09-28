@@ -34,3 +34,32 @@ export function milestoneVersion(title: string): number | undefined {
   const m = /^v(\d+)(?:\s|$)/.exec(title.trim());
   return m?.[1] ? Number(m[1]) : undefined;
 }
+
+/** 一个里程碑：编号和标题（GitHub 上现读的）。 */
+export interface MilestoneRef {
+  number: number;
+  title: string;
+}
+
+/**
+ * 当前版本：还开着的 v<N> 里程碑里 N 最小的那个。一个都没有是 null（没有当前版本，单子打标、闲置清理都不猜）。
+ * 和 @fleet-dao/core 的 dispatch.ts 同名的一份是同一条规矩（那边判「派不派」，这边判「打标、挪版本挂哪」）：
+ * conventions 不依赖 core（改写法两边一起改，和 milestoneVersion、MOTHER_LABEL 是同一个理由）。
+ */
+export function currentVersion(
+  openMilestones: readonly MilestoneRef[],
+): { version: number; milestone: MilestoneRef } | null {
+  let best: { version: number; milestone: MilestoneRef } | null = null;
+  for (const m of openMilestones) {
+    const version = milestoneVersion(m.title);
+    if (version !== undefined && (best === null || version < best.version)) best = { version, milestone: m };
+  }
+  return best;
+}
+
+/**
+ * 「过时」标签（照 Kubernetes 的 stale/rotten 两段式，#448）：未排期的单闲置够久先贴这个，人不理再关成「不做了」。
+ * 「冻结」标签：贴了这个的单，闲置清理绕开不动（照 Kubernetes 的 frozen）。
+ */
+export const IDLE_LABEL = '过时';
+export const FROZEN_LABEL = '冻结';

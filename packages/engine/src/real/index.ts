@@ -34,6 +34,8 @@ import {
   grokLaunchCommand,
 } from './hosts.ts';
 import { hourlyReconcileJob } from './hourly-reconcile.ts';
+import { issueGroomIdlePolicyFromEnv } from './issue-groom.ts';
+import { issueKindJevFromEnv } from './issue-kind-jev.ts';
 import { engineJevFromEnv } from './jev-port.ts';
 import { registerEngineJobs } from './jobs.ts';
 import { realKillEvidence } from './kill-evidence.ts';
@@ -460,6 +462,9 @@ export function realPortsFromEnv(
   // 判断题：起来时读一遍 jev.json、建一遍后端、登记两道题（registerJobs）；之后每次问都现找一遍（改了配置、调度台换了
   // 判断路由不用重启，和 /healthz 的 judge 项同一个判法）。默认位置上没有 jev.json 才算没接、不问；别的读不成都报错。
   const jev = engineJevFromEnv(db, env);
+  // 单子归类（#448）问的是同一份判断题配置，只是另一道题（issue-kind），走自己的一份轻量装配，不挤 jev.port 那套
+  // choice/effect 抽象（见 issue-kind-jev.ts 顶注）；起来时也要登记，同一个 registerJobs 里跟着登记。
+  const issueKindJev = issueKindJevFromEnv(db, env);
   const exec = scopeExec();
   // Mirasim：会话（sessions.ts）和路由探针（route-probe.ts）共用同一份「怎么连、怎么读账本」；连接经桥接以会话用户的
   // 身份跑（法国防火墙只放行它自己和 root 连回环口），账本经这个 exec 以会话用户读（引擎自己的进程进不去他的家）
@@ -515,7 +520,12 @@ export function realPortsFromEnv(
     machine: config.machine,
   });
   const jobs: EngineJobs = {
-    githubReconcile: githubReconcileJob({ db, gh }),
+    githubReconcile: githubReconcileJob({
+      db,
+      gh,
+      askIssueKind: issueKindJev.askKind,
+      issueGroomIdlePolicy: issueGroomIdlePolicyFromEnv(env),
+    }),
     // 路由探针和干活的会话用同一份执行体（reclaude、cursor-agent、grok、Mirasim）、同一个工作树的根（探针目录在它下面）
     routeProbe: routeProbeJob({
       db,
@@ -565,6 +575,9 @@ export function realPortsFromEnv(
       const registered = await jev.register();
       if (registered.level === 'error') console.error(registered.message);
       else console.info(registered.message);
+      const issueKindRegistered = await issueKindJev.register();
+      if (issueKindRegistered.level === 'error') console.error(issueKindRegistered.message);
+      else console.info(issueKindRegistered.message);
     },
     retireSchedules: (client: Pick<Client, 'schedule'>) => retireEngineSchedules(client, db),
     close,

@@ -1,4 +1,4 @@
-// 考题：九个接入点都有、每道题都够数、标准答案对得上题库、证据能直接喂进去；公开仓，不许带能认出人、账号、机器的东西。
+// 考题：十个接入点都有、每道题都够数、标准答案对得上题库、证据能直接喂进去；公开仓，不许带能认出人、账号、机器的东西。
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
