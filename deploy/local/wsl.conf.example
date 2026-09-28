@@ -1,0 +1,15 @@
+# fleet-local（本机档，#451）：发行版内 /etc/wsl.conf 样例。从零建 fleet-local 时，装完发行版先放这份、
+# 用 `wsl --shutdown` 重启这台发行版再继续装东西（systemd 要重启才生效）。见 docs/ops.md「本机环境
+# （fleet-local）」一节。
+[boot]
+# 法国也是 systemd + 原生软件包（不用 Docker），本机档要能原样装同一份 deploy/france.sh，systemd 缺不了
+systemd=true
+
+[user]
+# 装机、真机演练都要 root；这台不是给别人登录用的公用机器，不单独建交互账号
+default=root
+
+[interop]
+# 不把 Windows 的 PATH 带进 Linux 这边：AI 会话工具（Cursor CLI 等）在 Windows 上按 Windows 的规矩找可执行文件，
+# 混进 Linux 的 PATH 会把它们误判成 bash 脚本（09-28 踩过，见仓库 #435 那次修复）
+appendWindowsPath=false

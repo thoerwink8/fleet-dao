@@ -6,6 +6,13 @@
     "algorithm": "hmac-sha256/v1",
     "keyId": "310517c602b7adb85476e5d131cc206b"
   },
+  "versions": {
+    "说明": "本机档（deploy/local/desired-config.json）要和这里逐字一样，两边都由 deploy/france.sh 装（#451：装机脚本一份、两个档位，理论上不会漂）；node config.mjs diff-local 比这个。",
+    "postgresMajor": "16",
+    "nodeMajor": "22",
+    "temporalServer": "1.32.0",
+    "temporalCli": "1.9.1"
+  },
   "files": {
     "engine.env": {
       "FLEET_ENGINE_PORTS": {

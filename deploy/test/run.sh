@@ -4,7 +4,9 @@
 # 演示版照「上次发的是哪一版」的记录核对（自动发布不发也照样查，坏了要红）、
 # 演示版的可见范围推到香港、公网上看得到的几样（占位页、健康页不带真名，release.json 只给隧道，整站不让搜索引擎收录）、
 # 健康页的判定、自动发布的判断和流程（auto-release：CI 红不发、读不到不发、没成不重试、等空闲、人手动切过不动）、
-# 配置对账（config：线上手改报哪一项、私有值只报不一致不带值、期望和钥匙读不到记没查成）、
+# 配置对账（config：线上手改报哪一项、私有值只报不一致不带值、期望和钥匙读不到记没查成；本机档和法国的期望
+# 逐项比、versions 钉死几个大版本、没登记的差别报红，也在这个文件里）、
+# 本机档（profile：FLEET_PROFILE 认不认得出、不带就是 france、is_local_profile、skip_local 只进 PENDING）、
 # france.sh 读回自动发布跑得怎么样（auto-release-state：没跑过、读不了、读到了分得清）、
 # 法国只有一个会话用户且读回拦得下故意造的错（session-user）、AI 会话用的 pnpm 的装和查（session-pnpm）、
 # 会话用户的 cursor-agent 的装和查（cursor-agent）、会话用户的 Cursor 密钥的放、查、撤（cursor-key）、
@@ -156,7 +158,7 @@ else
   skipped=1
 fi
 
-for t in agents-sync agents-sync-account cli-tools session-pnpm cursor-agent cursor-key grok mirasim mirasim-session node-cache session-ports; do
+for t in agents-sync agents-sync-account cli-tools session-pnpm cursor-agent cursor-key grok mirasim mirasim-session node-cache session-ports profile; do
   bash "$HERE/$t.test.sh"
   case $? in
   0) ;;

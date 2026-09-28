@@ -2,7 +2,7 @@
 
 装法在 `deploy/`，这里讲怎么用、怎么看、怎么退。机器的公网 IP 和驾驶舱域名不进仓，下文写作 `<法国IP>`、`<香港IP>`、`<驾驶舱域名>`；域名的真值只在机器配置里（香港 `hk.env`、法国 `release.env` 的 `FLEET_DOMAIN`）。
 旧系统（windsurf-dao、ai-gateway-stack 那一套）已于 2026-09-25 从两台机器上全部清退：单元、用户、目录、数据都删了。它留下的坑与由来见 [reference/deploy.md](reference/deploy.md)（文中的 P01、P02 等编号出自那里；那份记的是清退前的现场）。
-两层：`deploy/france.sh`、`deploy/hk.sh` 装机器（第一到第八节）；`deploy/release.sh` 发布应用（第九节），连同香港的飞书网关（第十二节）。备份与换机恢复另有一个装机脚本 `deploy/backup/install.sh`（「备份与恢复」一节）。
+两层：`deploy/france.sh`、`deploy/hk.sh` 装机器（第一到第八节）；`deploy/release.sh` 发布应用（第九节），连同香港的飞书网关（第十二节）。备份与换机恢复另有一个装机脚本 `deploy/backup/install.sh`（「备份与恢复」一节）。本机（Windows 上的 WSL2）也能装一份和法国一样的环境，用来本机走全流程、不急着上线的活交给它（`deploy/france.sh` 的「本机档」，第十三节）。
 
 ## 一、两台机器
 
@@ -790,3 +790,62 @@ ssh <法国> 'sha256sum < /etc/fleet-dao/gateway-token.env'; ssh <香港> 'sha25
 
 - 团队群：机器人不在任何群里时 `FEISHU_TEAM_CHAT_ID` 补不上，网关不起（发布记待配）。建好团队群、把机器人拉进去，重跑 `hk.sh`（补上群号），再发布一次。
 - 「收得到事件」要有人在飞书里给机器人发一条消息才验得到：`status` 的 `messages` 加一、日志里有「消息处理完」。
+
+## 十三、本机环境（fleet-local）
+
+本机（Windows 11，32G/16 线程）装一台 WSL2 的 Ubuntu 24.04，和法国一样用 `deploy/france.sh` 装（不用 Docker），只加一个「本机档」跳过只有法国才要的几步；本机全流程走通、不急着上线的活交给它，而不是直接在法国上试（#451，决定记在 `specs/169-Fusion形态/需求.md`「本机建一个和法国一样的环境」）。
+
+### 从零建 fleet-local
+
+Windows 侧（管理员 PowerShell）：
+
+```
+wsl --install Ubuntu-24.04 --name fleet-local --location D:\srv\fleet-local --no-launch
+```
+
+1. 把 `deploy/local/wslconfig.example` 的内容放进 `%UserProfile%\.wslconfig`（管全部发行版的全局设置，已有别的发行版在用就商量着改，别整份覆盖），`wsl --shutdown` 让它生效。
+2. 进这台发行版一次（`wsl -d fleet-local`），把 `deploy/local/wsl.conf.example` 的内容放进 `/etc/wsl.conf`，`wsl --shutdown` 再进一次（systemd、默认 root 要重启才生效）。
+3. 本机上网经 Windows 上的代理：把 `deploy/local/environment.example` 的内容追加进 `/etc/environment`（不覆盖已有的 `PATH` 那行），`deploy/local/zz-local-proxy.sh.example` 放进 `/etc/profile.d/zz-local-proxy.sh`（`chmod +x`），`deploy/local/95local-proxy.example` 放进 `/etc/apt/apt.conf.d/95local-proxy`。这三份是登记过的差别（法国没有代理）——代理不是 `/etc/fleet-dao/*.env` 里的一项，不进 `deploy/local/desired-config.json`（那份只管应用的环境文件），差别就记在这里。
+4. `deploy/france.sh` 要求 `/usr/bin/node` 22 或更高，但它不负责装 node（法国的机器镜像本来就带；WSL 的 Ubuntu 24.04 默认仓库只有 18.x）：用 NodeSource 的官方安装脚本装 22.x（`curl -fsSL https://deb.nodesource.com/setup_22.x | bash -` 再 `apt-get install -y nodejs`）。这一步不归 `deploy/france.sh` 管，重建 fleet-local 时要记得先做。
+5. 把要装机的分支推上去，以 root 跑：
+
+   ```
+   git clone https://github.com/thoerwink8/fleet-dao /srv/fleet-dao
+   cd /srv/fleet-dao && git checkout <分支>
+   bash deploy/local/install.sh          # 等价于 FLEET_PROFILE=local bash deploy/france.sh
+   ```
+
+   长命令甩后台跑、看日志（同第四节「法国经跳板登录，长连接会被重置」那条）：`nohup setsid bash deploy/local/install.sh > /root/fleet-local-install.log 2>&1 < /dev/null &`。
+
+### 本机档和法国哪里不一样
+
+`deploy/lib/profile.sh` 的 `FLEET_PROFILE=local`（默认不给就是 `france`，行为和加本机档之前一个字节都不变）：跳过只有法国才要的几步——
+
+- 创始人的登录用户 `pilot`（经 Mirasim ssh 远程模式登进来）：本机档不建，创始人直接用 Windows/WSL 登这台机器。
+- 往香港去的部分：钉香港 sshd 主机钥匙、生成往香港传静态文件和发飞书网关用的钥匙、把演示版可见范围推到香港的单元、装机读回里查香港 nginx 清没清请求头那一项。
+- WireGuard：没有香港对端，`wg-fleet` 接口只留本机地址（`10.99.0.2/24`，没有 `[Peer]`）——这不是跳过，是唯一一处「装法不同」：驾驶舱后端还是要绑住这个隧道地址才起得来（和法国一样），只是没有对端、没有真的隧道流量。
+
+其余（防火墙 nft 表、会话用户、`fleet-agents.slice`、Temporal、PostgreSQL、pnpm、cursor-agent、grok 命令行、会话用户的 Mirasim、应用的本机配置骨架、自动发布）照装，和法国一样。跳过的每一步在输出里显示「本机档跳过：为什么」（`deploy/lib/profile.sh` 的 `skip_local`，记进「待配」那一类：不算红也不算绿）。
+
+要人才能做的几样，本机档和法国一样报「待配」，不当成装好了：两个 GitHub 机器人的凭据（本机档要用自己的 App，不和法国共用）、会话用户登录 reclaude、grok 登录、目录配置 `catalog.json`。引擎只接演练仓（`engine.env` 的 `FLEET_CANARY_REPO`），配的时候填演练仓，不是法国那个真的全流程巡检仓。
+
+本机档和法国的差别只登记在一处：`deploy/local/desired-config.json`（和 `deploy/france/desired-config.json` 同一份格式，读法见 `deploy/france/auto-release/config.mjs`）。两份文件必须声明同一套键；哪个键的值或种类不一样，`deploy/local/desired-config.json` 里那一条必须写「说明」讲清为什么——没写就是「没登记的差别」。两边都是私有值（各自的凭据，本来就不共用）不算差别，不用登记。系统包版本钉死（`versions` 块：PostgreSQL、Node、Temporal 服务端与命令行的大版本）两边必须逐字一样，写了说明也不例外——这几个版本都是同一份 `deploy/france.sh` 装的，理论上不会漂，钉住是为了防手滑。
+
+对账：
+
+```
+node deploy/france/auto-release/config.mjs diff-local   # 本机档和法国的期望逐项比；不给路径就用仓里这两份
+bash deploy/local/install.sh --check                     # 装机读回：跑法一样的一环（readback_profile_diff）
+```
+
+退出码：0 差别都登记过了，1 有没登记的差别，2 没查成。CI 每次 PR 都跑这条（`deploy/test/config.test.mjs` 里拿仓里这两份真文件跑），改了一份没跟着改另一份或没写说明，合并前就会看到，不用等到在 `fleet-local` 上跑 `--check` 才发现。
+
+### 部署应用、怎么查
+
+装完机器（`deploy/local/install.sh`）只是地基，引擎、驾驶舱后端要另外发布一次（和法国同一个 `deploy/release.sh`，本机档不用改它）：
+
+1. 编辑 `/etc/fleet-dao/release.env`（第一次从样例建出来是空的，要人定）：`FLEET_SERVICES=fleet-engine fleet-api`、`FLEET_HK_PARTS=`（显式写成空字符串——不写这一项会被脚本自己的默认值 `gateway` 顶上，本机档没有香港，一样都不发）、`FLEET_DOMAIN=fleet-local.invalid`（RFC 2606 保留的占位域名，本机档没有对外域名，但这一项的格式要过 `^[a-z0-9.-]+$`）。`api.env` 的 `FLEET_PUBLIC_URL` 同理填占位地址，但要写 `https://fleet-local.invalid`（`FLEET_ENV=production` 时 `packages/api/src/config.ts` 的 `loadConfig` 强制 https，写 `http://` 后端直接拒绝启动；`deploy/local/desired-config.json` 里写明了为什么用占位域名）；`FEISHU_APP_ID`/`FEISHU_APP_SECRET` 本机档按登记的差别不接飞书、留空——但 `loadConfig` 在 `FLEET_ENV=production` 下两个都空会直接拒绝启动（生产必填，没有区分「不接飞书」和「没配」），这台机器上 `fleet-api` 要起来，目前只能等人放一对凭据（哪怕先放着以后再换），这是本机档还没解决、需要创始人/帅位另外拍板的一处（#451 的结果文档记了细节）。
+2. `bash deploy/release.sh`：取主线、构建、跑迁移、装目录（`catalog.json` 没放会停在这一步，待配）、切版本、健康检查。`release.sh` 的健康检查固定探 `10.99.0.2:8787`（`api.env` 的 `FLEET_COCKPIT_LISTEN`），这就是为什么本机档的 WireGuard 接口不能整个跳过。
+3. 引擎没有 GitHub 机器人的凭据时，预期是：`fleet-engine` 照样起、接 Temporal 的任务队列（健康检查这一项照样过），但 GitHub 相关的（收 webhook、写 PR 镜像）记不到、健康页 `github_events` 报红——这是「待配」的自然结果，不是装机脚本的错，配好凭据、重启 `fleet-api` 就好（这一条是照代码读出来的预期，#451 因为上面第 1 条还没能在真机上跑到这一步、实测验证）。
+
+看：`bash deploy/release.sh --check`（在用哪版、服务与健康）、`bash deploy/local/install.sh --check`（机器这一层）、`journalctl -u fleet-engine -u fleet-api`；`deploy/test/run.sh` 能在 `fleet-local` 里跑的都在那里跑（这台是真机、有 root，能测到 Windows 开发机测不到的部分：会话用户、防火墙、systemd 单元）。

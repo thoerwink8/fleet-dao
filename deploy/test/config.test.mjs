@@ -12,10 +12,13 @@ import {
   ConfigError,
   cli,
   DESIRED_FILE,
+  diffProfiles,
   FINGERPRINT_ALGORITHM,
+  FRANCE_DESIRED_FILE,
   fingerprintOf,
   judgeConfig,
   keyIdOf,
+  LOCAL_DESIRED_FILE,
   parseDesired,
   parseEnv,
   parseFingerprintKey,
@@ -120,9 +123,12 @@ test('照 systemd 读环境文件：和 deploy/lib/app-config.sh 的 env_parse �
   );
 });
 
+const VERSIONS = { postgresMajor: '16', nodeMajor: '22', temporalServer: '1.32.0', temporalCli: '1.9.1' };
+
 test('期望文件：认得出的和各种认不出的', () => {
   const ok = parseDesired(desiredText());
   assert.equal(ok.selfHeal, false);
+  assert.equal(ok.versions, null, '没写 versions 就是 null，老的期望文件不用跟着改');
   assert.deepEqual(
     ok.files['engine.env'].map((d) => [d.key, d.kind]),
     [
@@ -131,6 +137,8 @@ test('期望文件：认得出的和各种认不出的', () => {
       ['FLEET_CANARY_REPO', 'private'],
     ],
   );
+  const withVersions = parseDesired(desiredText({ versions: { 说明: '随便写点', ...VERSIONS } }));
+  assert.deepEqual(withVersions.versions, VERSIONS, '说明字段不算进解析出来的版本里');
   const bad = [
     ['不是 JSON', '{', /不是 JSON/],
     ['格式版本不认识', desiredText({ formatVersion: 2 }), /formatVersion/],
@@ -165,6 +173,27 @@ test('期望文件：认得出的和各种认不出的', () => {
       '钥匙编号不对',
       desiredText({ fingerprint: { algorithm: FINGERPRINT_ALGORITHM, keyId: 'xyz' } }),
       /keyId/,
+    ],
+    ['versions 不是对象', desiredText({ versions: '1.32.0' }), /versions 要是一个对象/],
+    [
+      'versions 里有不认识的键',
+      desiredText({ versions: { ...VERSIONS, 别的: '1' } }),
+      /不认识的一项「别的」/,
+    ],
+    [
+      'versions 少了一项（#451：漏一项就比不全）',
+      desiredText({ versions: { postgresMajor: '16' } }),
+      /versions 少了.*nodeMajor/,
+    ],
+    [
+      'versions 的值不是字符串',
+      desiredText({ versions: { ...VERSIONS, nodeMajor: 22 } }),
+      /nodeMajor 要是非空字符串/,
+    ],
+    [
+      'versions 的值是空字符串',
+      desiredText({ versions: { ...VERSIONS, temporalCli: '' } }),
+      /temporalCli 要是非空字符串/,
     ],
   ];
   for (const [what, text, why] of bad) {
@@ -209,6 +238,23 @@ test('线上配置被手改：报出偏离，指明是哪份文件的哪一项�
   assert.match(r.drift[0].title, /engine\.env 的 FLEET_WORK_DIR/);
   assert.match(r.drift[0].body, /期望「\/var\/lib\/fleet-work」/, '公开的期望照写，人知道该改成什么');
   noValues(r, '/tmp/手改的', SECRET, SECRET2);
+});
+
+test('不一致时报哪份文件要改：默认指仓里的法国期望，本机档（#451）传了 desiredPath 就指那一份', () => {
+  const edited = ENGINE.replace('FLEET_WORK_DIR=/var/lib/fleet-work', 'FLEET_WORK_DIR=/tmp/手改的');
+  const withFiles = { files: files({ 'engine.env': { text: edited }, 'api.env': { text: API } }) };
+  const france = judgeConfig(live(withFiles));
+  assert.match(
+    france.drift[0].body,
+    new RegExp(`期望在仓里 ${DESIRED_FILE.replaceAll('/', '\\/')}`),
+    '不传 desiredPath（readback_config 不带本机档时的样子）：还是指法国那份，行为不变',
+  );
+  const local = judgeConfig(live({ ...withFiles, desiredPath: LOCAL_DESIRED_FILE }));
+  assert.match(
+    local.drift[0].body,
+    new RegExp(`期望在仓里 ${LOCAL_DESIRED_FILE.replaceAll('\\', '\\\\').replaceAll('/', '\\/')}`),
+    '传了 desiredPath（readback_config 本机档时的样子）：指本机档那份，不是法国那份',
+  );
 });
 
 test('私有值不一致：只报「不一致」，结果和报警里搜不到线上的值，也搜不到原来的值', () => {
@@ -320,6 +366,154 @@ test('仓里的期望文件认得出，钉住的几个值和 france.sh 一样，
   assert.equal(engine.FLEET_ENGINE_PORTS, 'real');
 });
 
+/**
+ * 一对期望：france、local 默认和 desiredText() 一样（含同一份 versions），patch.files 按文件把某几个键换掉
+ * （同一份文件里没提到的键照旧留着），patch.versions 整个换掉。深合并只到「文件」这一层，够这里的用例用。
+ */
+function profilePair(patchFrance = {}, patchLocal = {}) {
+  const build = (patch) => {
+    const obj = JSON.parse(desiredText({ versions: VERSIONS }));
+    for (const [file, keys] of Object.entries(patch.files ?? {}))
+      obj.files[file] = { ...obj.files[file], ...keys };
+    if (patch.versions) obj.versions = patch.versions;
+    return parseDesired(JSON.stringify(obj));
+  };
+  return { france: build(patchFrance), local: build(patchLocal) };
+}
+
+test('diffProfiles：本机档和法国逐项比，没登记的差别报红，版本没有例外（#451）', () => {
+  const { france, local } = profilePair();
+  assert.deepEqual(diffProfiles(france, local), { result: 'ok', drift: [], unchecked: [] }, '两份一样：ok');
+
+  // 公开值不一样、本机那份写了说明：登记过的差别，不报
+  {
+    const r = diffProfiles(
+      ...Object.values(
+        profilePair(
+          {},
+          { files: { 'engine.env': { FLEET_MACHINE_NAME: { value: '本机', 说明: '登记过' } } } },
+        ),
+      ),
+    );
+    assert.equal(r.result, 'ok', '写了说明就不算没登记的差别');
+  }
+
+  // 公开值不一样、本机那份没写说明：没登记的差别，报红
+  {
+    const r = diffProfiles(
+      ...Object.values(profilePair({}, { files: { 'engine.env': { FLEET_MACHINE_NAME: '本机' } } })),
+    );
+    assert.equal(r.result, 'drift');
+    assert.deepEqual(
+      r.drift.map((d) => [d.scope, d.file, d.key]),
+      [['files', 'engine.env', 'FLEET_MACHINE_NAME']],
+    );
+    assert.match(r.drift[0].title, /engine\.env 的 FLEET_MACHINE_NAME/);
+  }
+
+  // 两边都是私有值（各自的凭据）：本来就不比、不用登记，哪怕没写说明
+  {
+    const r = diffProfiles(
+      ...Object.values(
+        profilePair(
+          {},
+          { files: { 'engine.env': { FLEET_CANARY_REPO: { private: fingerprintOf(KEY, 'x', 'y', 'z') } } } },
+        ),
+      ),
+    );
+    assert.equal(r.result, 'ok', '两边都是私有值，各自的凭据，不需要登记');
+  }
+
+  // 一边私有一边公开：换了种类，也要登记
+  {
+    const r = diffProfiles(
+      ...Object.values(profilePair({}, { files: { 'engine.env': { FLEET_CANARY_REPO: '演练仓' } } })),
+    );
+    assert.equal(r.result, 'drift');
+    assert.match(r.drift[0].title, /FLEET_CANARY_REPO/);
+  }
+
+  // 一边声明了一个键、另一边没有：也要登记（两边键集合要一样）
+  {
+    const r = diffProfiles(
+      ...Object.values(profilePair({}, { files: { 'engine.env': { FLEET_ONLY_LOCAL: '仅本机' } } })),
+    );
+    assert.equal(r.result, 'drift');
+    assert.deepEqual(
+      r.drift.map((d) => d.key),
+      ['FLEET_ONLY_LOCAL'],
+    );
+  }
+
+  // 故意改一处没登记的版本（比如本机期望里的 Temporal 版本）：版本钉死，报红，写了说明也不例外
+  {
+    const r = diffProfiles(
+      ...Object.values(profilePair({}, { versions: { ...VERSIONS, temporalServer: '1.31.0' } })),
+    );
+    assert.equal(r.result, 'drift');
+    assert.deepEqual(
+      r.drift.map((d) => [d.scope, d.key]),
+      [['versions', 'temporalServer']],
+    );
+    assert.match(r.drift[0].body, /1\.32\.0.*1\.31\.0/);
+  }
+
+  // 两份里至少一份没写 versions：没查成，不当成一致
+  {
+    const noVersions = parseDesired(desiredText());
+    const r = diffProfiles(noVersions, profilePair().local);
+    assert.equal(r.result, 'unchecked');
+    assert.match(r.unchecked[0], /versions/);
+  }
+});
+
+test('仓里 deploy/local 和 deploy/france 的期望：差别都登记过了（#451，改一处没登记的这里会红）', () => {
+  const franceText = readFileSync(FRANCE_DESIRED_FILE, 'utf8');
+  const localText = readFileSync(LOCAL_DESIRED_FILE, 'utf8');
+  const france = parseDesired(franceText);
+  const r = diffProfiles(france, parseDesired(localText));
+  assert.deepEqual(r, { result: 'ok', drift: [], unchecked: [] }, JSON.stringify(r.drift, null, 2));
+
+  // 故意把本机档里一条登记过的差别，换成另一个没写说明的值：诚实地报红，不是摆设（#451「怎么算做完」要求的用例）
+  const brokenObj = JSON.parse(localText);
+  brokenObj.files['release.env'].FLEET_HK_PARTS = 'gateway'; // 原来是 { value: "", 说明: "..." }
+  const rBroken = diffProfiles(france, parseDesired(JSON.stringify(brokenObj)));
+  assert.equal(rBroken.result, 'drift', '换成没写说明的新值：没登记的差别，报红');
+  assert.deepEqual(
+    rBroken.drift.map((d) => d.key),
+    ['FLEET_HK_PARTS'],
+  );
+
+  // 故意改本机档里的 Temporal 版本，不动说明：版本钉死，报红
+  const brokenVersions = JSON.parse(localText);
+  brokenVersions.versions.temporalServer = '1.0.0';
+  const rVersion = diffProfiles(france, parseDesired(JSON.stringify(brokenVersions)));
+  assert.equal(rVersion.result, 'drift');
+  assert.deepEqual(
+    rVersion.drift.map((d) => [d.scope, d.key]),
+    [['versions', 'temporalServer']],
+  );
+});
+
+test('命令行 diff-local：不给路径就用仓里两份真文件，退出码分得清一致、不一致、没查成', async () => {
+  const r = await cli(['diff-local'], { out: () => {}, err: () => {} });
+  assert.equal(r, 0, '仓里现在这两份应该是一致的（差别都登记过了）');
+  const dir = mkdtempSync(join(tmpdir(), 'fleet-config-'));
+  try {
+    writeFileSync(join(dir, 'a.json'), desiredText({ versions: VERSIONS }));
+    writeFileSync(join(dir, 'b.json'), desiredText({ versions: { ...VERSIONS, nodeMajor: '20' } }));
+    const out = [];
+    const code = await cli(['diff-local', '--france', join(dir, 'a.json'), '--local', join(dir, 'b.json')], {
+      out: (s) => out.push(s),
+      err: () => {},
+    });
+    assert.equal(code, 1);
+    assert.match(out.join('\n'), /red .*版本没钉住一样.*nodeMajor/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('命令行：算指纹只打印指纹；对账不打印值、退出码分得清一致、不一致、没查成', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'fleet-config-'));
   try {
@@ -397,6 +591,22 @@ test('读法国上的原文：在用那一版里的期望、几份环境文件�
     assert.match(got.key.error, /没有/);
     assert.match(got.files['api.env'].error, /没有/);
     assert.equal(got.files['engine.env'].text, ENGINE);
+    assert.equal(
+      got.desiredPath,
+      DESIRED_FILE,
+      '不给 --desired：不一致时指仓里的法国期望，和加本机档之前一样',
+    );
+    got = readLive({
+      releases: join(dir, 'releases'),
+      etc: join(dir, 'etc'),
+      key: join(dir, 'key'),
+      desired: join(dir, 'local-desired.json'),
+    });
+    assert.equal(
+      got.desiredPath,
+      join(dir, 'local-desired.json'),
+      '给了 --desired（本机档，#451）：指那份文件，不是法国的',
+    );
     let canLink = true;
     try {
       symlinkSync(sha, join(dir, 'releases', 'current'));

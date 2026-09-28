@@ -25,6 +25,8 @@ source "$DEPLOY_DIR/lib/common.sh"
 source "$DEPLOY_DIR/lib/snapshot.sh"
 # shellcheck source=lib/root-exec-check.sh
 source "$DEPLOY_DIR/lib/root-exec-check.sh"
+# shellcheck source=lib/profile.sh
+source "$DEPLOY_DIR/lib/profile.sh"
 # shellcheck source=lib/login-user.sh
 source "$DEPLOY_DIR/lib/login-user.sh"
 # shellcheck source=lib/session-user.sh
@@ -196,6 +198,14 @@ case "${1:-}" in
   ;;
 esac
 
+# 本机档（#451，deploy/lib/profile.sh）：FLEET_PROFILE=local 时跳过只有法国才要的步骤（往香港去的 WireGuard
+# 对端、钉香港主机钥匙、往香港传文件和发飞书网关的钥匙、pilot 经 Mirasim 远程登录）；不带这个变量就是 france，
+# 和加本机档之前一个字节都不变。日常在本机上跑 deploy/local/install.sh，不用记这个变量名
+PROFILE=$(resolve_profile) || exit $?
+if [[ "$PROFILE" == local ]]; then
+  echo "== 本机档（FLEET_PROFILE=local）：跳过法国专属的步骤，标成「本机档跳过：...」；差别登记在 deploy/local/desired-config.json =="
+fi
+
 # shellcheck disable=SC1091 # /etc/os-release 是目标机器上的文件
 preflight() {
   step "前提"
@@ -268,6 +278,11 @@ setup_identity() {
 }
 
 setup_pilot() {
+  if is_local_profile; then
+    step "创始人的登录用户 $PILOT_USER（本机档跳过：不用 Mirasim ssh 远程登本机）"
+    skip_local "创始人直接用 Windows/WSL 登这台机器，不经 Mirasim ssh 远程模式登 $PILOT_USER，不建这个用户"
+    return 0
+  fi
   step "创始人的登录用户 $PILOT_USER（经 Mirasim 的 ssh 远程模式登进来；没有 sudo，看得了日志）"
   # Mirasim 桌面端连进来时在它家里自己装服务端（~/.mirasim-remote，自带 node）：这头要 curl 直接下服务端包
   # （下不了由桌面端经 scp 传）、tar 和 gzip 解包（Ubuntu 必装的包）；干活要 git 和 ssh 客户端
@@ -304,6 +319,24 @@ setup_packages() {
 }
 
 setup_wireguard() {
+  if is_local_profile; then
+    step "WireGuard（本机档：只建本机地址 ${WG_ADDR%/*}，没有香港对端）"
+    local key_changed conf
+    ensure_dir /etc/wireguard root:root 700
+    ensure_wg_key "$WG_IF"
+    key_changed=$WROTE
+    # 本机档没有香港：接口只留 [Interface]，没有 [Peer]，不会往外发任何 WireGuard 包。驾驶舱后端要绑住这个
+    # 隧道地址（api.env 的 FLEET_COCKPIT_LISTEN，和法国一样，#451）才起得来，所以地址还是要建——
+    # 这不算装了「WireGuard 隧道」：没有对端，就没有隧道，见 deploy/local/desired-config.json 里的说明
+    conf="# fleet-dao 本机档：没有香港对端，只留本机地址给驾驶舱后端绑（和法国一样要绑隧道地址才起得来）。
+# deploy/france.sh（FLEET_PROFILE=local）生成，别手改；私钥在 /etc/wireguard/$WG_IF.key。
+[Interface]
+Address = $WG_ADDR
+PostUp = wg set %i private-key /etc/wireguard/%i.key"
+    put_file "/etc/wireguard/$WG_IF.conf" root:root 600 "$conf"
+    ensure_unit_running "wg-quick@$WG_IF.service" $((key_changed || WROTE))
+    return 0
+  fi
   step "WireGuard 客户端（法国主动连香港，不开入站端口）"
   local key_changed conf
   ensure_dir /etc/wireguard root:root 700
@@ -821,6 +854,11 @@ ensure_deploy_key() { # 私钥文件 注释 香港 hk.env 里的键 用途
 }
 
 setup_web_upload() {
+  if is_local_profile; then
+    step "发布脚本登香港用的钥匙（本机档跳过：没有香港）"
+    skip_local "没有香港，不钉主机钥匙、不生成往香港传文件和发飞书网关用的钥匙"
+    return 0
+  fi
   step "发布脚本登香港用的钥匙（香港只许它们经隧道来：一把只能往 /srv/fleet-dao-web 写，一把只能发飞书网关）"
   local line re
   ensure_deploy_key "$WEB_UPLOAD_KEY" fleet-dao-web-upload FLEET_WEB_UPLOAD_PUBLIC_KEY 传静态文件
@@ -848,6 +886,11 @@ $line"
 # 演示版的可见范围推到香港：范围目录一变就推（path 单元），每 10 分钟再补一次（timer）。推的脚本以 root 跑、
 # 只当数据读 fleet 写的范围文件（认不出的不推），和发布脚本用同一把上传钥匙
 setup_demo_scopes() {
+  if is_local_profile; then
+    step "演示版的可见范围推到香港（本机档跳过：没有香港）"
+    skip_local "没有香港，不装往香港推可见范围的单元"
+    return 0
+  fi
   step "演示版的可见范围推到香港（$DEMO_DIR/scopes → 香港演示版目录下的 scopes/）"
   local u unit_changed=0
   put_file "$DEMO_SCOPES_BIN" root:root 755 "$(<"$DEPLOY_DIR/france/fleet-demo-scopes.sh")"
@@ -953,6 +996,7 @@ readback() {
   readback_firewall
   readback_session_ports
   readback_app_config
+  readback_profile_diff
   readback_web_upload
   readback_demo_scopes
   readback_auto_release
@@ -980,6 +1024,10 @@ readback_auto_release() {
 
 # 演示版的可见范围：两个触发单元在等、上一次推成了没有（一次都没推过是「待配」，推不成、有文件认不出是红）
 readback_demo_scopes() {
+  if is_local_profile; then
+    skip_local "没有香港，不查可见范围推没推"
+    return 0
+  fi
   local u result status at
   for u in fleet-demo-scopes.path fleet-demo-scopes.timer; do
     if [[ "$(systemctl is-active "$u" 2>/dev/null)" != active ]]; then red "$u 没在跑：可见范围变了不会推到香港"; fi
@@ -1005,6 +1053,10 @@ readback_demo_scopes() {
 # 探针头证明请求确实到了这里；后端在跑：看它怎么答——收到 Authorization 答 bearer_not_allowed，没收到答
 # unauthenticated（packages/api 的 session.ts）
 readback_proxy_headers() {
+  if is_local_profile; then
+    skip_local "没有香港 nginx，不查它转发时清没清 Authorization、X-Fleet-Acting-Feishu"
+    return 0
+  fi
   local domain url nonce tmp pid i out code body verdict rc=0
   env_get /etc/fleet-dao/release.env FLEET_DOMAIN || rc=$?
   domain=$APP_ENV_VALUE
@@ -1118,8 +1170,11 @@ readback_app_config() {
 
 # 配置和仓里的期望对账（#323）：和自动发布每一轮同一份判法（deploy/france/auto-release/config.mjs），拿在用那一版里的期望比；
 # 不一致判红，没查成记待配，一行一条、值不打印。指纹钥匙要 root:root 600（它在，私有值的指纹才算得出来）
+# 本机档比的是 deploy/local/desired-config.json，不是法国那份（#451）：不然本机档登记过的差别——比如
+# FLEET_MACHINE_NAME 改成「本机」——会被这里当成「手改了、改回去」误判成红；不带本机档时不传 --desired，
+# 法国的判法（拿在用那一版里的 deploy/france/desired-config.json 比）一个字节都不变。
 readback_config() {
-  local out line rc=0 meta
+  local out line rc=0 meta desired_args=() desired_file
   if [[ -L "$CONFIG_KEY" ]]; then
     red "$CONFIG_KEY 是符号链接：要 root:root 600 的普通文件（配置对账的指纹钥匙）"
   elif [[ -e "$CONFIG_KEY" ]]; then
@@ -1128,7 +1183,9 @@ readback_config() {
       red "$CONFIG_KEY 是「$meta」，要 root:root 600 的普通文件（配置对账的指纹钥匙，别人读到就能拿指纹猜私有值）"
     fi
   fi
-  out=$(/usr/bin/node "$CONFIG_CLI" check 2>&1) || rc=$?
+  desired_file=$(profile_desired_file "$DEPLOY_DIR")
+  if [[ -n "$desired_file" ]]; then desired_args=(--desired "$desired_file"); fi
+  out=$(/usr/bin/node "$CONFIG_CLI" check "${desired_args[@]}" 2>&1) || rc=$?
   while IFS= read -r line; do
     case $line in
     "ok "*) ok "${line#ok }" ;;
@@ -1145,8 +1202,33 @@ readback_config() {
   esac
 }
 
+# 本机档和法国的期望逐项比（#451，deploy/local/desired-config.json）：两份都是仓里的静态文件，这项对账不看
+# 这台机器此刻的样子，两个档位都跑、结论一样——真正钉住它的是 deploy/test/config.test.mjs 里拿这两份真文件跑的
+# 那条测试，改动一进 PR、CI 就会看到；这里跑一遍只是让人在装机输出里也看得到。命令行、判法都在 $CONFIG_CLI。
+readback_profile_diff() {
+  local out line rc=0
+  out=$(/usr/bin/node "$CONFIG_CLI" diff-local 2>&1) || rc=$?
+  while IFS= read -r line; do
+    case $line in
+    "ok "*) ok "${line#ok }" ;;
+    "red "*) red "${line#red }" ;;
+    "pending "*) pending "${line#pending }" ;;
+    "") ;;
+    *) pending "本机档和法国的期望对账说了认不出的一行：${line:0:200}" ;;
+    esac
+  done <<<"$out"
+  case $rc in
+  0 | 1 | 2) ;;
+  *) red "本机档和法国的期望对账没跑成（$CONFIG_CLI diff-local 退出码 $rc）" ;;
+  esac
+}
+
 # 往香港传静态文件的通路：用发布脚本同一套参数试跑一次 rsync（-n，什么都不传）
 readback_web_upload() {
+  if is_local_profile; then
+    skip_local "没有香港，不查往香港传文件、发网关的钥匙和通路"
+    return 0
+  fi
   local empty rc=0 out
   if [[ ! -s "$WEB_UPLOAD_KEY" ]]; then
     red "没有上传钥匙 $WEB_UPLOAD_KEY"
@@ -1190,6 +1272,10 @@ readback_session_users() {
 
 # 创始人的登录用户：判据在 lib/login-user.sh。reclaude 登没登录、家里放了什么钥匙是创始人自己的事，不查
 readback_pilot() {
+  if is_local_profile; then
+    skip_local "创始人直接用 Windows/WSL 登这台机器，不建、不查 $PILOT_USER"
+    return 0
+  fi
   local line
   if check_login_user "$PILOT_USER"; then
     ok "$PILOT_USER：在，家目录 750，只在自己的组和 $LOGIN_USER_LOG_GROUP 里，没有 sudo，reclaude 执行得了、登录 shell 里找得到"
@@ -1455,6 +1541,18 @@ readback_mirasim() {
 }
 
 readback_wireguard() {
+  if is_local_profile; then
+    if [[ "$(systemctl is-active "wg-quick@$WG_IF.service" 2>/dev/null)" != active ]]; then
+      red "wg-quick@$WG_IF 没在跑：驾驶舱后端绑不住 ${WG_ADDR%/*}:$API_PORT"
+      return 0
+    fi
+    if [[ "$(ip -4 -o addr show dev "$WG_IF" 2>/dev/null)" == *"${WG_ADDR%/*}"* ]]; then
+      ok "本机档：wg-fleet 只有本机地址 ${WG_ADDR%/*}（没有香港对端，驾驶舱后端靠它绑住 $API_PORT）"
+    else
+      red "wg-fleet 在跑，但没有地址 ${WG_ADDR%/*}：驾驶舱后端绑不住 $API_PORT"
+    fi
+    return 0
+  fi
   local latest
   if [[ -z "$FLEET_WG_HK_PUBLIC_KEY" || -z "$FLEET_WG_HK_ENDPOINT" ]]; then
     pending "WireGuard 待配：照香港 hk.sh 打印的提示，把香港公钥和 <香港公网IP>:<端口> 填进 $ENV_FILE，再跑一遍（法国公钥：$(wg pubkey <"/etc/wireguard/$WG_IF.key" 2>/dev/null || echo 读不到)）"

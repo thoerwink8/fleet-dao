@@ -1,0 +1,91 @@
+{
+  "说明": "本机档（fleet-local，#451）/etc/fleet-dao 下几份环境文件「应该是什么」。和法国用同一份 deploy/france.sh 装（FLEET_PROFILE=local），键集合要和 deploy/france/desired-config.json 一样；这一份存在的意义就是让『本机档和法国哪里不一样』只写在这一处——每一项和法国不一样的地方都在它自己的「说明」里写清为什么，没写说明的差别，node deploy/france/auto-release/config.mjs diff-local 会报红（#451：本机档的差别只许写在这一处）。versions 钉住的几个大版本不许有任何差别，写了说明也不例外。格式和 desired-config.json 相同（读法见 deploy/france/auto-release/config.mjs），改这份不影响本机档装机脚本本身怎么装（那是 deploy/lib/profile.sh 管的）。私有值的指纹要在 fleet-local 上用它自己的 config-fingerprint.key 现算（docs/ops.md 第九节「配置进仓对账」），换机、重装会跟着变，这里先留 null（#451 装机时还没有这几个人放的凭据：GitHub 机器人、飞书应用、演练仓）。",
+  "formatVersion": 1,
+  "selfHeal": false,
+  "fingerprint": {
+    "algorithm": "hmac-sha256/v1",
+    "keyId": null
+  },
+  "versions": {
+    "说明": "必须和 deploy/france/desired-config.json 的 versions 逐字一样：两边由同一份 deploy/france.sh 装，理论上不会漂，这里只是让『一样』这件事可被读、可被测试故意破坏（#451）。",
+    "postgresMajor": "16",
+    "nodeMajor": "22",
+    "temporalServer": "1.32.0",
+    "temporalCli": "1.9.1"
+  },
+  "files": {
+    "engine.env": {
+      "FLEET_ENGINE_PORTS": "real",
+      "TEMPORAL_ADDRESS": "127.0.0.1:7243",
+      "TEMPORAL_NAMESPACE": "fleet",
+      "FLEET_TASK_QUEUE": "fleet",
+      "FLEET_AGENT_API_URL": "http://127.0.0.1:8788",
+      "DATABASE_URL": "postgres:///fleet",
+      "PGHOST": "/var/run/postgresql",
+      "PGUSER": "fleet",
+      "FLEET_MACHINE_NAME": {
+        "value": "本机",
+        "说明": "登记的差别：这台给人看的名字不是「法国」（本机档，#451）"
+      },
+      "FLEET_WORK_DIR": "/var/lib/fleet-work",
+      "FLEET_ENGINE_STATE_DIR": "/var/lib/fleet-dao/engine",
+      "FLEET_CLAUDE_BIN": "/home/{user}/.local/bin/reclaude",
+      "FLEET_FORK_MAX_CONTEXT_TOKENS": "100000",
+      "FLEET_SENSITIVE_VALUES_FILE": "/etc/fleet-dao/sensitive-values.txt",
+      "FLEET_CURSOR_VERSIONS_DIR": "/home/{user}/.local/share/cursor-agent/versions",
+      "FLEET_CANARY_REPO": {
+        "private": null,
+        "说明": "登记的差别：用本机自己的演练仓，不是法国的全流程巡检仓（本机档只接演练仓，specs/451 的「AI 理解」）；还没配，指纹先留空"
+      }
+    },
+    "api.env": {
+      "FLEET_ENV": "production",
+      "FLEET_PUBLIC_URL": {
+        "value": "https://fleet-local.invalid",
+        "说明": "登记的差别：法国这项是私有值（真域名），本机档没有对外入口（没有香港、没有隧道），改成占位地址、当公开值处理，不是要保密的东西；FLEET_ENV=production 两边一样，packages/api/src/config.ts 的 loadConfig 生产模式下强制 https，占位域名也要写 https://"
+      },
+      "FLEET_COCKPIT_LISTEN": "10.99.0.2:8787",
+      "FLEET_AGENT_LISTEN": "127.0.0.1:8788",
+      "DATABASE_URL": "postgres:///fleet",
+      "PGHOST": "/var/run/postgresql",
+      "PGUSER": "fleet",
+      "FLEET_GITHUB_WEBHOOK_SECRET": {
+        "private": null,
+        "说明": "登记的差别：本机档用自己的 GitHub App，不和法国共用凭据；还没放，指纹先留空（#451「要人才能做的」）"
+      },
+      "FEISHU_APP_ID": {
+        "private": null,
+        "说明": "登记的差别：本机档不接飞书（没有香港网关），这项留空待配"
+      },
+      "FEISHU_APP_SECRET": {
+        "private": null,
+        "说明": "登记的差别：同 FEISHU_APP_ID，本机档不接飞书"
+      },
+      "TEMPORAL_ADDRESS": "127.0.0.1:7243",
+      "TEMPORAL_NAMESPACE": "fleet",
+      "FLEET_TASK_QUEUE": "fleet",
+      "FLEET_DEMO_DIR": "/var/lib/fleet-dao/demo"
+    },
+    "release.env": {
+      "FLEET_SERVICES": "fleet-engine fleet-api",
+      "FLEET_DOMAIN": {
+        "value": "fleet-local.invalid",
+        "说明": "登记的差别：法国这项是私有值（真域名），本机档没有域名（没有香港、没有隧道对外），用 RFC 2606 保留的 .invalid 占位、当公开值处理"
+      },
+      "FLEET_HK_PARTS": {
+        "value": "",
+        "说明": "登记的差别：本机档没有香港，往香港发的三样（gateway、web、demo）一样都不发，留空——不写这一项会被脚本自己的默认值 gateway 顶上，必须显式写成空字符串"
+      }
+    },
+    "france.env": {
+      "FLEET_WG_HK_ENDPOINT": {
+        "value": "",
+        "说明": "登记的差别：本机档没有香港，没有隧道对端，留空——法国这项是私有值（真地址），本机档改成空字符串、当公开值处理"
+      },
+      "FLEET_WG_HK_PUBLIC_KEY": {
+        "value": "",
+        "说明": "登记的差别：同 FLEET_WG_HK_ENDPOINT，本机档没有对端，这项也留空"
+      }
+    }
+  }
+}
