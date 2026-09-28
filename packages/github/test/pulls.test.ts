@@ -574,6 +574,29 @@ describe('等 CI', () => {
     const pr = fake.addPull({ head: { ref: 'task/1', sha: A } });
     await expect(wait(gh, pr.number)).rejects.toMatchObject({ code: 'NO_REQUIRED_CHECKS' });
   });
+
+  it('PR 关了、是合并关的（GitHub 自己的自动合并先合了）：merged=true，带合并提交，结构化地说清楚', async () => {
+    const { gh, fake } = setup();
+    const pr = fake.addPull({
+      head: { ref: 'task/1', sha: A },
+      state: 'closed',
+      merged: true,
+      merge_commit_sha: sha('mc'),
+    });
+    expect(await wait(gh, pr.number)).toMatchObject({
+      state: 'closed',
+      merged: true,
+      mergeCommit: sha('mc'),
+    });
+  });
+
+  it('PR 关了、不是合并关的（人手工关掉了）：merged=false，没有合并提交', async () => {
+    const { gh, fake } = setup();
+    const pr = fake.addPull({ head: { ref: 'task/1', sha: A }, state: 'closed', merged: false });
+    const res = await wait(gh, pr.number);
+    expect(res).toMatchObject({ state: 'closed', merged: false });
+    expect((res as { mergeCommit?: string }).mergeCommit).toBeUndefined();
+  });
 });
 
 describe('合并', () => {

@@ -176,6 +176,33 @@ export async function hasMainline(t: UserTree, defaultBranch: string): Promise<b
 }
 
 /**
+ * ref 相对主线的 patch-id：先找 merge-base(origin/<主线>, ref)，diff 那一段再喂给 `git patch-id --stable`。
+ * 判「这段时间是不是只并了主线、PR 自己的改动没变」用（fusion.ts 的 tryReuseSecondOpinion）：树里没有 ref、
+ * 没钉主线、git 报错都照抛 PortError，一个字都不吞——调用方按「没查成」处理，不许当成能比。
+ */
+export async function patchIdOf(t: UserTree, defaultBranch: string, ref: string): Promise<string> {
+  assertSha(ref, '要算 patch-id 的提交');
+  const baseR = await git(
+    t,
+    ['merge-base', mainlineRef(defaultBranch), ref],
+    `算 ${ref.slice(0, 7)} 和主线的分叉点`,
+  );
+  const base = text(baseR).trim();
+  assertSha(base, '分叉点');
+  const diffR = await git(t, ['diff', base, ref], `算 ${base.slice(0, 7)}..${ref.slice(0, 7)} 的改动`);
+  const idR = await git(t, ['patch-id', '--stable'], '算 patch-id', { stdin: diffR.stdout });
+  const id = text(idR).trim().split(/\s+/)[0];
+  if (!id || !/^[0-9a-f]{40}$/.test(id)) {
+    throw new PortError(
+      'GIT_FAILED',
+      `patch-id 算不出来：「${text(idR).trim() || '（没有输出，可能是空改动）'}」`,
+      { retryable: false },
+    );
+  }
+  return id;
+}
+
+/**
  * 把「主线」钉在树里的一个主线提交上。树是从 bundle 建的、没有远端，git diff origin/main...HEAD 和 pnpm test:changed
  * （和 origin/main 比改了什么，specs/164-会话内存与交活测试/）都靠这个引用；没有它 test:changed 明确报「认不出 origin/main」。
  * 三个点的比法只看分叉点：钉得比分支并进来的主线旧，会把并进来的主线改动也算成这次改的（多跑测试，不会少跑），

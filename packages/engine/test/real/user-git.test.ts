@@ -26,6 +26,7 @@ import {
   mainlineRef,
   mergeInto,
   ownSpan,
+  patchIdOf,
   pinMainline,
   readFileAs,
   treeLeftovers,
@@ -299,6 +300,74 @@ describe('会话目录里的 git', { timeout: 60_000 }, () => {
       code: 'BAD_INPUT',
     });
     await expect(checkoutBranch(t, 'b', 'HEAD')).rejects.toMatchObject({ code: 'BAD_INPUT' });
+  });
+});
+
+// patch-id：合并前重跑那一步头变了（合并队列自己把主线并进分支），判「这段时间是不是只并了主线、PR 自己的改动
+// 没变」用（fusion.ts 的 tryReuseSecondOpinion，#307/#389 那次真事：白白退回了三轮，其实测试没红）。
+describe('patch-id：ref 相对主线的改动', { timeout: 60_000 }, () => {
+  it('只并了主线、PR 自己的改动没变：两个不同的头，patch-id 一样', async () => {
+    const m = mirror();
+    const t = tree('work');
+    await fetchBundle(t, m.bundle(m.head), 'refs/fleet/export/0');
+    await checkoutBranch(t, 'fleet/12-a', m.head);
+    await pinMainline(t, 'main', m.head);
+    writeFileSync(join(t.dir, 'feature.ts'), 'export const feature = 1;\n');
+    execFileSync('git', ['add', '.'], { cwd: t.dir });
+    execFileSync('git', ['commit', '-q', '-m', 'add feature'], { cwd: t.dir, env: ENV });
+    const head1 = sh(t.dir, 'rev-parse', 'HEAD');
+    const id1 = await patchIdOf(t, 'main', head1);
+    expect(id1).toMatch(/^[0-9a-f]{40}$/);
+
+    // 主线又往前走了一步：合并队列把它并进分支（普通合并，不是 rebase），PR 自己一个字都没再改
+    writeFileSync(join(m.dir, 'c.ts'), 'export const c = 1;\n');
+    sh(m.dir, 'add', '.');
+    sh(m.dir, 'commit', '-q', '-m', 'mainline moves on');
+    const mainNext = sh(m.dir, 'rev-parse', 'HEAD');
+    await fetchBundle(t, m.bundle(mainNext, m.head), 'refs/fleet/export/0');
+    await pinMainline(t, 'main', mainNext);
+    execFileSync('git', ['merge', '-q', '--no-ff', '--no-edit', 'refs/fleet/incoming'], {
+      cwd: t.dir,
+      env: ENV,
+    });
+    const head2 = sh(t.dir, 'rev-parse', 'HEAD');
+    expect(head2).not.toBe(head1);
+
+    const id2 = await patchIdOf(t, 'main', head2);
+    expect(id2).toBe(id1);
+  });
+
+  it('PR 自己又真改了一处：patch-id 跟着变，不当成一样', async () => {
+    const m = mirror();
+    const t = tree('work');
+    await fetchBundle(t, m.bundle(m.head), 'refs/fleet/export/0');
+    await checkoutBranch(t, 'fleet/12-a', m.head);
+    await pinMainline(t, 'main', m.head);
+    writeFileSync(join(t.dir, 'feature.ts'), 'export const feature = 1;\n');
+    execFileSync('git', ['add', '.'], { cwd: t.dir });
+    execFileSync('git', ['commit', '-q', '-m', 'add feature'], { cwd: t.dir, env: ENV });
+    const id1 = await patchIdOf(t, 'main', sh(t.dir, 'rev-parse', 'HEAD'));
+
+    writeFileSync(join(t.dir, 'feature.ts'), 'export const feature = 2;\n');
+    execFileSync('git', ['add', '.'], { cwd: t.dir });
+    execFileSync('git', ['commit', '-q', '-m', 'change feature again'], { cwd: t.dir, env: ENV });
+    const id2 = await patchIdOf(t, 'main', sh(t.dir, 'rev-parse', 'HEAD'));
+    expect(id2).not.toBe(id1);
+  });
+
+  it('【故意造出的失败】没钉主线、给的提交不在树里：算不出来，抛 GIT_FAILED（调用方按「没查成」处理，不许当成一样）', async () => {
+    const empty = tree('empty');
+    await expect(patchIdOf(empty, 'main', 'a'.repeat(40))).rejects.toMatchObject({ code: 'GIT_FAILED' });
+
+    const m = mirror();
+    const t = tree('work2');
+    await fetchBundle(t, m.bundle(m.head), 'refs/fleet/export/0');
+    await checkoutBranch(t, 'fleet/12-b', m.head);
+    // 没钉主线：merge-base 找不到 origin/main
+    await expect(patchIdOf(t, 'main', m.head)).rejects.toMatchObject({ code: 'GIT_FAILED' });
+    // 主线钉了，但给的提交不在树里
+    await pinMainline(t, 'main', m.head);
+    await expect(patchIdOf(t, 'main', 'f'.repeat(40))).rejects.toMatchObject({ code: 'GIT_FAILED' });
   });
 });
 

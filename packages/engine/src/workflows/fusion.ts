@@ -125,6 +125,22 @@ export const MERGE_GATE_CONTEXT = 'merge-gate';
  * 换上新代码直接调会报「历史对不上」（replay.test.ts 钉住）；没打这个标记（老历史）就照老步序走，一个字都不多问。
  */
 const SECOND_OPINION_PATCH = 'second-opinion-253';
+/**
+ * 合并那一步（合并队列自己把主线并进分支）头变了、合并闸只缺 second-opinion：改走请第二意见（或沿用上一轮通过的
+ * 结论）再看合并闸，不当「测试没过」去退回返工（账密测试那张单实测：白白退回了三轮，其实测试没红，只是合并队列
+ * 换了头，第二意见还没追上）。在途任务的历史里没调过这几个新活动（patchIdOf、这里多调的 checkHighRisk /
+ * postSecondOpinion / waitCi），换上新代码直接调会报「历史对不上」；没打这个标记（老历史）就照老步序走，
+ * 合并闸红一律当「测试没过」退回一轮。
+ */
+const MERGE_SECOND_OPINION_PATCH = 'merge-second-opinion-return';
+/**
+ * 等 CI（或合并前重跑）查到 PR 已经在外面合并了（GitHub 自己挂的自动合并，合并闸绿就合，不是引擎自己合的）：
+ * 改成不当「没查成」，直接按合上了走（法国那次真事：账密测试那张单的 PR 合并闸绿了，GitHub 自动合并先合了，
+ * 引擎的等 CI 那一步才读到「PR 被关了：已经合并了」，连 3 次当没查成停下等人）。在途任务的历史里，ciResultOf
+ * 对「关了、合并的」这种情形只会记出老的 unknown 结果（没有 mergeCommit）：没打这个标记（老历史）照老步序走，
+ * 一直当没查成。
+ */
+const MERGED_ELSEWHERE_PATCH = 'ci-merged-elsewhere';
 /** 在合并队列里的这一块叫什么（合并条目、快照里的块）。一张单一块（母单按块循环归 #252）。 */
 const BLOCK_KEY = 'fusion';
 /**
@@ -372,6 +388,13 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
   /** 第二意见（#253）：已经贴过状态的头（同一个头只请一次，头变了要重新请）；「必须改」的轮数，封顶见上面的常量。 */
   let soHead: string | null = null;
   let soRounds = 0;
+  /**
+   * 上一轮第二意见通过时的头、轮次、和它的 patch-id（合并前重跑那一步头变了要不要沿用，见 tryReuseSecondOpinion）。
+   * patch-id 算不到（tree 不在、git 报错……）就是 null：不当「跟当前这个一样」，照常请一轮真的。
+   */
+  let soApprovedHead: string | null = null;
+  let soApprovedRound = 0;
+  let soApprovedPatchId: string | null = null;
   /** 合并闸只报「等第二意见」（或还没追上我们刚贴的状态）却没有别的失败检查，连着几次——不占 CI 没查成、也不占修的轮数。 */
   let gateOnlyRetries = 0;
   let intakeTries = 0;
@@ -1061,7 +1084,17 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
       }),
     );
     soHead = atHead;
-    if (verdict === 'pass') return { kind: 'pass' };
+    if (verdict === 'pass') {
+      if (patched(MERGE_SECOND_OPINION_PATCH)) {
+        // 缓存这一轮通过时的头和它的 patch-id：合并那一步头再变了（合并队列自己并主线），先看能不能沿用
+        // （tryReuseSecondOpinion），不用每次都拉一次真审查。算不出来（tree 不在、git 报错）就是 null——
+        // 落到 tryReuseSecondOpinion 里当「没法比」，不许当成一样。
+        soApprovedHead = atHead;
+        soApprovedRound = soRounds + 1;
+        soApprovedPatchId = await patchIdOfSafe(atHead);
+      }
+      return { kind: 'pass' };
+    }
     soRounds += 1;
     if (soRounds >= SECOND_OPINION_ROUND_LIMIT) {
       return {
@@ -1072,6 +1105,62 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
       };
     }
     return { kind: 'changes', items: blocking.map((f) => (f.file ? `${f.file}：${f.text}` : f.text)) };
+  };
+
+  /**
+   * ref 相对主线的 patch-id：算不出来（没有工作树、git 报错……）一律回 null，不许当成「和别的一样」——
+   * 调用方（tryReuseSecondOpinion）按「没查成」处理，落到正常请一轮真的第二意见。
+   */
+  const patchIdOfSafe = async (ref: string): Promise<string | null> => {
+    if (!tree) return null;
+    try {
+      return await acts.patchIdOf({
+        ...kit.scope,
+        repo: input.repo,
+        worktreePath: tree.path,
+        mainlineBranch: input.repo.defaultBranch,
+        ref,
+      });
+    } catch (error) {
+      if (isCancellation(error)) throw error;
+      return null;
+    }
+  };
+
+  /**
+   * 合并那一步头变了（合并队列自己把主线并进分支）、合并闸只缺 second-opinion：看能不能沿用上一轮通过的结论——
+   * 新头相对主线的 patch-id 和上一轮通过时的头一样，说明这段时间只并了主线，PR 自己的改动没变，不用再拉一次
+   * 审查会话（账密测试那张单实测：白白退回了三轮，其实测试没红）。任何一步没查成、或 patch-id 不一样，回 false，
+   * 交给调用方（doMerge）落到 waitCiEvent 里正常请一轮真的——不许把「没法比」当成「一样」。
+   */
+  const tryReuseSecondOpinion = async (pr: number, atHead: string): Promise<boolean> => {
+    if (atHead === soHead) return false; // 已经贴过这个头了（比如上一次调用就沿用过），不重贴
+    const approvedHead = soApprovedHead;
+    const approvedPatchId = soApprovedPatchId;
+    if (approvedHead === null || approvedPatchId === null) return false;
+    try {
+      const risk = await acts.checkHighRisk({ ...kit.scope, repo: input.repo, prNumber: pr });
+      if (risk.hits.length === 0) return false; // 不该走到这里（没风险就没有 second-opinion 要求），保险按老路
+      const newPatchId = await patchIdOfSafe(atHead);
+      if (newPatchId === null || newPatchId !== approvedPatchId) return false;
+      await acts.postSecondOpinion({
+        ...kit.scope,
+        repo: input.repo,
+        prNumber: pr,
+        head: atHead,
+        round: soApprovedRound,
+        hits: risk.hits,
+        verdict: 'pass',
+        findings: [],
+        model: '沿用，没有再审',
+        reused: { fromHead: approvedHead, round: soApprovedRound },
+      });
+      soHead = atHead;
+      return true;
+    } catch (error) {
+      if (isCancellation(error)) throw error;
+      return false;
+    }
   };
 
   /**
@@ -1088,6 +1177,7 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
     const atHead = head;
     // patched() 本身也要记进历史、调用次数和顺序不能跟着分支变，所以先问一次存起来，不要在 Promise.all 里现问。
     const soOn = patched(SECOND_OPINION_PATCH);
+    const mergedElsewhereOn = patched(MERGED_ELSEWHERE_PATCH);
     const [ci, so] = await Promise.all([
       attempt(kit, 'waitCi', () =>
         acts.waitCi({
@@ -1113,6 +1203,25 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
       head = ci.head;
       treeHead = ci.head;
       status.head = head;
+    }
+    if (ci.state === 'merged') {
+      if (!mergedElsewhereOn) {
+        // 接这道改法之前起的执行：照老步序当「没查成」处理，不认「合并闸自己判的合并」
+        ciUnknown += 1;
+        if (ciUnknown >= CI_UNKNOWN_LIMIT) {
+          ciUnknown = 0;
+          return {
+            kind: 'needs-human',
+            why: `CI 连着 ${CI_UNKNOWN_LIMIT} 次没查成（没查成不是没过）：PR 已经在外面合并了，但接这道改法之前起的执行不认，要人看`,
+          };
+        }
+        return { kind: 'ci', state: 'unknown' };
+      }
+      // PR 已经在外面合上了（GitHub 自己的自动合并）：不是没查成，记下合并提交，直接按合上了走
+      // （nextFlow 收到 { kind: 'ci', state: 'merged' } 和收到 { kind: 'merged' } 走一样的路）。
+      ciUnknown = 0;
+      if (ci.mergeCommit) mergeCommit = ci.mergeCommit;
+      return { kind: 'ci', state: 'merged' };
     }
     if (ci.state === 'unknown') {
       ciUnknown += 1;
@@ -1661,6 +1770,22 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
       if (result.outcome === 'merged') {
         mergeCommit = result.mergeCommit;
         return { kind: 'merged' };
+      }
+      if (patched(MERGE_SECOND_OPINION_PATCH) && result.reason === 'second-opinion') {
+        // 合并闸红只是结构化地缺 second-opinion（合并队列自己把主线并进来，头变了）：不算一次真退回——
+        // 不进返工账（mergeReturns 不加）、不把 Lead 拉进来改代码。先跟上合并队列推的新头，看能不能沿用
+        // 上一轮通过的结论，再走等 CI 那条已经有的「请第二意见 / 合并闸还没追上就再等一等」的路（#417）。
+        status.lastProblem = `合并前重跑：${result.detail}`;
+        await followBranchHead();
+        await tryReuseSecondOpinion(pr, head);
+        const event = await waitCiEvent();
+        if (event.kind === 'needs-human') return event;
+        // 真红了（第二意见真审过判「必须改」、或碰巧这时候测试真的红了）：fix 已经由 waitCiEvent 填好，
+        // 照修一轮的路走；绿了（含刚沿用/请到手、合并闸还没追上而稍等重查出来的绿）就回去接着排队合并；
+        // 这期间 PR 在外面已经合并了（GitHub 自动合并先合了）：交回去，nextFlow 按合上了走。
+        if (event.kind === 'ci' && event.state === 'red') return { kind: 'merge-returned' };
+        if (event.kind === 'ci' && event.state === 'merged') return event;
+        continue;
       }
       const after = await judge(kit, 'mergeReturn', {
         reason: result.reason,
