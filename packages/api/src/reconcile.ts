@@ -4,7 +4,6 @@
 // （packages/engine/src/jobs/，specs/43-接活入口/方案-对账调度.md）。
 import type { Reconciler, ReconcilerOptions } from '@fleet-dao/github';
 import type { ScheduleOutcome } from '@fleet-dao/shared';
-import type { ClaimStatus } from './claim-status.ts';
 import { DELIVERY_STALE_MS, type GitHubIntake, MAX_AUTO_REPLAYS, pollDeliveryId } from './github.ts';
 import { type IssueIntake, RetryLaterError } from './issue-intake.ts';
 import type { GitHubDelivery, Logger, Store } from './ports.ts';
@@ -30,7 +29,7 @@ export function reconcilerOptions(parts: {
 }
 
 export interface ReconcileStep {
-  step: 'redeliver' | 'poll' | 'audit' | 'replay' | 'claims' | 'claim-status';
+  step: 'redeliver' | 'poll' | 'audit' | 'replay' | 'claims';
   repo?: string | undefined;
   outcome: 'ok' | 'partial' | 'unscanned' | 'failed';
   /** 查了几样（投递、事件、开放 issue、要重放的投递）。 */
@@ -61,11 +60,6 @@ export interface ReconcileParts {
   intake: Pick<GitHubIntake, 'replay'>;
   /** 接活里补起待起认领的那一步（#299，issue-intake.ts 的 restartPending；和 intake 同一套依赖）。 */
   claims: Pick<IssueIntake, 'restartPending'>;
-  /**
-   * 「认领对得上」那一步（#348，claim-status.ts 的 sweep）：作废过了宽限期没心跳的本机认领，所有开着的 PR 按库里的认领重判重贴，
-   * 作废的认领开着的 PR 先撤自动合并、再贴红、留一句。
-   */
-  claimStatus: Pick<ClaimStatus, 'sweep'>;
   /** @fleet-dao/github 的 createGitHub(...).reconciler(reconcilerOptions(...))。 */
   reconciler: Pick<Reconciler, 'redeliverFailed' | 'poll' | 'auditOpenIssues'>;
   log: Logger;
@@ -179,33 +173,6 @@ export async function reconcileGitHub(
       checked: 0,
       recovered: 0,
       why: `补起待起的认领没跑成：${why(err)}`,
-    });
-  }
-
-  // 「认领对得上」（#348）：PR 事件漏了、认领变了当场没贴上的都在这补；没处理成的记进这一步、报提醒，下一轮再做
-  try {
-    const s = await parts.claimStatus.sweep();
-    const notes = [
-      s.voided.length > 0 ? `作废了 ${s.voided.length} 张过了宽限期没心跳的认领` : '',
-      s.disabled.length > 0 ? `撤了自动合并：${s.disabled.join('、')}` : '',
-      s.problems.length > 0
-        ? `「认领对得上」有 ${s.problems.length} 处没处理成：${s.problems.slice(0, 3).join('；')}`
-        : '',
-    ].filter(Boolean);
-    steps.push({
-      step: 'claim-status',
-      outcome: s.problems.length > 0 ? 'partial' : 'ok',
-      checked: s.checked,
-      recovered: s.posted,
-      why: notes.join('；') || undefined,
-    });
-  } catch (err) {
-    steps.push({
-      step: 'claim-status',
-      outcome: 'failed',
-      checked: 0,
-      recovered: 0,
-      why: `「认领对得上」这一轮没跑成：${why(err)}`,
     });
   }
 

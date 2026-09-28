@@ -1,9 +1,9 @@
-// PR 正文里的各栏怎么认（模板 .github/pull_request_template.md 的「**栏名**：值」）。PR 挂了哪张单（「需求」栏，其次
-// 标题）给 claim-status.ts 判要不要贴「认领对得上」用；引擎认 PR 上写的认领号（「认领」栏）、pr-labels 照抄标签、必填栏
-// 提醒（pr-fields.ts）、每天的关单对账都用这一份，认法只有一处。
-// 改这里之前必须知道：#444 起合并闸不再靠这份判「挂没挂单」（认领对得上不再是判红的输入），这份文件已经不在先审后合的
-// 清单里；ENGINE_BOT_LOGIN、CLAIM_MATCH_CONTEXT 两个常量从 merge-gates.ts 搬过来放这——认领这套东西（引擎照样贴状态、
-// 帅位照样认领）还在用它们，和 linkedIssue、prClaimId 放一处更合适。
+// PR 正文里的各栏怎么认（模板 .github/pull_request_template.md 的「**栏名**：值」）。引擎认 PR 上写的认领号（「认领」栏，
+// #446 起纯记录，不再有谁贴状态去核对它）、pr-labels 照抄标签、必填栏提醒（pr-fields.ts）、每天的关单对账都用这一份，
+// 认法只有一处。
+// 改这里之前必须知道：这份文件不在先审后合的清单里；ENGINE_BOT_LOGIN 这个常量从 merge-gates.ts 搬过来放这，和
+// linkedIssue、prClaimId 放一处更合适（「认领对得上」那套已经删了，#446；这个常量现在没有实际调用方，留着给以后
+// 要认「是不是引擎机器人贴的」的场景用，比如 second-opinion）。
 
 import { CLOSE_COLUMN } from './close-rule.ts';
 import { TIER_COLUMN } from './merge-gates.ts';
@@ -12,16 +12,11 @@ export const PLAN_COLUMN = '对应计划';
 export const SPECS_COLUMN = 'specs';
 /** 正文里写对应 issue 的那一栏。 */
 export const ISSUE_COLUMN = '需求';
-/** 正文里写认领号的那一栏（#348）：本机认领的单写 claim.mjs take 打印的认领号，引擎开的写「引擎」。 */
+/** 正文里写认领号的那一栏：本机认领的单写 claim.mjs take 打印的认领号，引擎开的写「引擎」；#446 起纯记录，没有谁核对它。 */
 export const CLAIM_COLUMN = '认领';
 /**
- * 引擎机器人按库里的认领贴在 PR 当前头上的提交状态（#299、#348；#444 起合并闸不再等它，只是还在贴）；和 @fleet-dao/core
- * seat.ts 的 CLAIM_STATUS_CONTEXT 是同一个（这个包不依赖 core，后端的测试对着两边）。
- */
-export const CLAIM_MATCH_CONTEXT = '认领对得上';
-/**
- * 只认这个机器人贴的「认领对得上」：「引擎」GitHub App（fleet-dao-engine）的机器人账号。带 [bot] 的名字只有 App 自己有，
- * 别人注册不了；有推送权限的人（本机的 gh 登的是创始人账号）也贴得出同名的状态，所以要看是谁贴的。
+ * 「引擎」GitHub App（fleet-dao-engine）的机器人账号。带 [bot] 的名字只有 App 自己有，别人注册不了；要认「这条是不是
+ * 引擎贴的」（不是有推送权限的人手贴的同名东西）时看这个。
  */
 export const ENGINE_BOT_LOGIN = 'fleet-dao-engine[bot]';
 

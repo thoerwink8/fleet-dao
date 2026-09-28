@@ -11,16 +11,14 @@ import {
   readClaim,
   readDbNow,
   readSeat,
-  readSeatSetting,
-  renewSeatRow,
   startEngineClaimRow,
   stepClaimRow,
   takeClaimRow,
   takeSeatRow,
-  voidExpiredClaimRows,
+  touchSeatActivityRow,
   writeHandoffRow,
 } from '../src/queries/seat.ts';
-import { auditLog, issueClaims, seatLeases, settings } from '../src/schema/index.ts';
+import { auditLog, issueClaims, seatLeases } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import { addRepo, addTask, expectViolation } from './helpers.ts';
 
@@ -101,13 +99,19 @@ describe('帅位：接班一条语句，任期只增不减', () => {
     expect((await readSeat(t.db, 'drill:299')).value).toMatchObject({ term: 2, holderMachine: '演练乙' });
   });
 
-  it('【故意造出的失败】带旧任期号、别的会话来续约：不续（回 null），座位不动', async () => {
+  it('touchSeatActivityRow：#446 起没有续约了，只顶「最后活动时间」（renewed_at 那一列，给人看用）', async () => {
     await takeSeatRow(t.db, { scope: 'main', machine: '本机', session: 's1' });
-    await takeSeatRow(t.db, { scope: 'main', machine: '笔记本', session: 's9' });
-    expect(await renewSeatRow(t.db, { scope: 'main', term: 1, machine: '本机', session: 's1' })).toBeNull();
-    expect(await renewSeatRow(t.db, { scope: 'main', term: 2, machine: '本机', session: 's1' })).toBeNull();
-    const ok = await renewSeatRow(t.db, { scope: 'main', term: 2, machine: '笔记本', session: 's9' });
-    expect(ok?.value).toMatchObject({ term: 2, holderMachine: '笔记本' });
+    const before = (await readSeat(t.db, 'main')).value?.renewedAt.getTime();
+    await new Promise((r) => setTimeout(r, 5));
+    await touchSeatActivityRow(t.db, 'main');
+    const after = (await readSeat(t.db, 'main')).value?.renewedAt.getTime();
+    expect(before).toBeDefined();
+    expect(after).toBeGreaterThan(before ?? 0);
+  });
+
+  it('【故意造出的失败】座位上没人时 touchSeatActivityRow 什么都不做：不报错，也不会凭空造一个座位出来', async () => {
+    await expect(touchSeatActivityRow(t.db, 'main')).resolves.toBeUndefined();
+    expect((await readSeat(t.db, 'main')).value).toBeNull();
   });
 
   it('座位上没人：读回 null 和库的 now；锁着读要在事务里', async () => {
@@ -128,14 +132,6 @@ describe('帅位：接班一条语句，任期只增不减', () => {
       takeSeatRow(t.db, { scope: 'prod', machine: '本机', session: 's1' }),
       'seat_leases_scope_known',
     );
-  });
-
-  it('租期、宽限期的配置：settings 表的 seat.leaseMinutes、seat.claimGraceMinutes，没写的不出现', async () => {
-    expect(await readSeatSetting(t.db)).toEqual({});
-    await t.db.insert(settings).values({ key: 'seat.leaseMinutes', value: 30 });
-    expect(await readSeatSetting(t.db)).toEqual({ leaseMinutes: 30 });
-    await t.db.insert(settings).values({ key: 'seat.claimGraceMinutes', value: 'x' });
-    expect(await readSeatSetting(t.db)).toEqual({ leaseMinutes: 30, claimGraceMinutes: 'x' });
   });
 });
 
@@ -208,22 +204,21 @@ describe('认领：每张单一行，一条语句抢，只有一边拿到', () =
     expect(await endClaimRow(t.db, { ...key, state: 'released', reason: '再放一次' })).toBeNull();
   });
 
-  it('【故意造出的失败】过了宽限期没心跳的本机认领作废，写明原因；引擎的、还在宽限期里的不动', async () => {
+  it('【故意造出的失败】过了宽限期没心跳：#446 起没有 sweep 了，不再自动作废，一直显示在活跃认领里', async () => {
     const repo = await addRepo(t.db);
     await takeClaimRow(t.db, worker(repo.id, 45));
     await takeClaimRow(t.db, worker(repo.id, 46, { graceMinutes: 2 }));
     await takeClaimRow(t.db, engine(repo.id, 47));
     await backdateHeartbeat(repo.id, 45, 119);
-    await backdateHeartbeat(repo.id, 46, 3);
+    await backdateHeartbeat(repo.id, 46, 3); // 过了它自己的 2 分钟宽限期，放在 #446 之前这里会被作废
     await backdateHeartbeat(repo.id, 47, 600);
-    const swept = await voidExpiredClaimRows(t.db, { limit: 50 });
-    expect(swept.value.map((c) => [c.issueNumber, c.state, c.endReason])).toEqual([
-      [46, 'voided', '过了宽限期（2 分钟）没心跳'],
-    ]);
-    expect((await voidExpiredClaimRows(t.db, { limit: 50 })).value).toEqual([]);
+    // 库里已经没有 voidExpiredClaimRows 这个函数了：没有东西会去扫、去作废，三份认领原样躺着
     const active = await listClaimRows(t.db, { repoId: repo.id, activeOnly: true });
-    expect(active.value.map((c) => c.issueNumber)).toEqual([45, 47]);
-    expect((await listClaimRows(t.db, { activeOnly: false })).value).toHaveLength(3);
+    expect(active.value.map((c) => c.issueNumber).sort()).toEqual([45, 46, 47]);
+    expect(active.value.find((c) => c.issueNumber === 46)).toMatchObject({
+      state: 'claimed',
+      endReason: null,
+    });
   });
 
   it('库里的约束兜底：待起只有引擎有；引擎要有工作流编号、不带机器；本机要有机器和工人名；作废、放下要写原因', async () => {

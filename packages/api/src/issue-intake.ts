@@ -116,7 +116,7 @@ export interface PendingRestartReport {
 const PENDING_BATCH = 20;
 
 export interface IssueIntake {
-  /** issue、评论、PR 事件（PR 的贴「认领对得上」，#348）：一句做了什么（记进这条投递的 note）；别的事件 undefined。 */
+  /** issue、评论事件：一句做了什么（记进这条投递的 note）；别的事件（含 PR）undefined。 */
   handle(event: IngestedEvent): Promise<string | undefined>;
   /**
    * 待起超过几分钟还没起来的引擎认领再起一次（GitHub 对账每轮调，方案第四节）：起工作流没成的投递最多自动重放 5 次、之后不再
@@ -127,7 +127,7 @@ export interface IssueIntake {
 }
 
 export function createIssueIntake(
-  deps: Pick<Deps, 'store' | 'workflows' | 'requirements' | 'plans' | 'log' | 'now' | 'claims'>,
+  deps: Pick<Deps, 'store' | 'workflows' | 'requirements' | 'plans' | 'log' | 'now'>,
 ): IssueIntake {
   const { store, log } = deps;
 
@@ -300,8 +300,7 @@ export function createIssueIntake(
       note: decision === 'restart' ? 'GitHub 上重开了，接活再派一轮' : '接活自动派',
     });
     if (!claim.ok) {
-      // 不带帅位、不带创始人原话来抢，只会是别人拿着；别的结果是认领这一步自己坏了，照实报错（投递记成出错、对账重放）
-      if (claim.reason !== 'held') throw new Error(`没查成：认领这一步回了 ${claim.reason}（${claim.why}）`);
+      // #446 起 claimForEngine 不带 force 的失败只有一种：本机（帅位、工人）拿着还没结束（reason 恒为 'held'）
       log.info(`这张单不自动派：${heldByOtherText(claim.claim, claim.now)}`, {
         deliveryId: event.deliveryId,
         repo: event.repo,
@@ -539,9 +538,7 @@ export function createIssueIntake(
     async handle(event) {
       if (event.event === 'issues') return onIssue(event);
       if (event.event === 'issue_comment') return onComment(event);
-      // PR 事件：按库里的认领贴「认领对得上」（#348）；机器人自己开的 PR 事件（不叫醒工作流的那种）也贴
-      if (event.event === 'pull_request')
-        return deps.claims ? deps.claims.onPullEvent(event) : 'claim_status=not_wired';
+      // PR 事件（#446 起没有「认领对得上」要贴了，认领账不再挂着 GitHub 状态）：不用处理，交给 eventSink 写镜像、CI 汇总
       return undefined;
     },
     restartPending,

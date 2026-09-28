@@ -191,19 +191,25 @@ describe('静默（Alertmanager 式：谁、为什么、必带到期）', () => 
     expect((await t.run('alert', 'show', 'pool-hold:claude-solo')).out).not.toContain('静默：');
   });
 
-  it('【故意造出的失败】不带 --term 也能静默（#445 删掉了帅位任期这条要求）；带了 --term 却不是帅位照样拒；不带 --note 照旧拒绝', async () => {
+  it('#446：--term 给了也不再核对是不是真帅位了，只当一句参考记进静默；不带 --note 照旧拒绝', async () => {
     const t = setup();
     await t.run('seat', 'take', ...A);
     const base = ['alert', 'silence', '--prefix', 'watchdog:job:backup:', '--until', '2h', '--note', '换盘'];
-    // 不带 --term：帅位已经上线也不再拦，只记 --machine/--session 是谁
+    // 不带 --term：只记 --machine/--session 是谁
     const ok = await t.json(...base, '--machine', '笔记本', '--session', 'b1');
     expect(ok).toMatchObject({ code: 0, body: { ok: true, basis: '没带帅位任期，按 --note 记的人处理' } });
-    // 带了 --term 但不是那一任帅位：照样核验、照样拒
-    const wrongTerm = await t.run(...base, '--machine', '笔记本', '--session', 'b1', '--term', '1');
-    expect(wrongTerm.code).toBe(3);
-    expect(wrongTerm.err).toContain('不是帅位');
-    // 真帅位带对任期：照样能核验通过
-    expect((await t.run(...base, ...A, '--term', '1')).code).toBe(0);
+    // 带了 --term，但笔记本根本没接过班、不是真帅位：#446 起不核了，照样建得上，只是记进 basis
+    const wrongTerm = await t.json(...base, '--machine', '笔记本', '--session', 'b1', '--term', '1');
+    expect(wrongTerm).toMatchObject({
+      code: 0,
+      body: { ok: true, basis: '说自己是帅位第 1 任（#446 起不核，只记这句）' },
+    });
+    // 真帅位带对任期：同样只是记录，不是「核过了才放行」
+    const rightTerm = await t.json(...base, ...A, '--term', '1');
+    expect(rightTerm).toMatchObject({
+      code: 0,
+      body: { ok: true, basis: '说自己是帅位第 1 任（#446 起不核，只记这句）' },
+    });
     // 不带 --term、也不带 --note：--note 这条要求没变，照旧拒绝
     const noNote = await t.run(
       'alert',

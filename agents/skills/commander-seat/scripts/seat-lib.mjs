@@ -1,10 +1,9 @@
-// 帅位只一个（#299，specs/299-帅位只一个/方案.md「本机这边」）：本机的帅位、工人经 ssh 调法国的 fleet-api seat / claim。
-// seat.mjs、claim.mjs 是外壳；推前钩子（.githooks/pre-push）调 claim.mjs prepush。
+// 帅位记「现在是谁」（#446，specs/446-帅位认领简化/需求.md）：本机的帅位、工人经 ssh 调法国的 fleet-api seat / claim。
+// seat.mjs、claim.mjs 是外壳。
 // 改这里之前必须知道：
-// - 真相在法国的库里（每张单一个认领、每个座位一个帅位，时间用库的钟）。本机的 ~/.fleet-dao/seat/ 只记「我是谁、第几任、
-//   上次续约成功是什么时候」：离上次续约成功超过租期，现查直接判不是帅位，不等法国回话。
-// - 没有登法国的钥匙（~/.fleet-dao/france-ssh 不在）、ssh 连不上、回的东西认不出，一律「没查成」（退出码 2），按不是帅位算，
-//   不当成没事。推前钩子例外：连不上法国只警告、照推（早提醒；真正的边界是合并闸），认领对不上才拦。
+// - 真相在法国的库里（每张单一个认领、每个座位一个帅位）。本机的 ~/.fleet-dao/seat/ 只是本地缓存「我是谁、第几任」，
+//   免得每条命令都要重新给 --machine --session；不是锁，#446 起没有续约、没有现查，不因为放久了就失效。
+// - 没有登法国的钥匙（~/.fleet-dao/france-ssh 不在）、ssh 连不上、回的东西认不出，一律「没查成」（退出码 2），不当成没事。
 // - 单上的「在做」评论只是库的镜子（doing-lib.mjs）：库里成了才改它；改不成照实报，库里那份算数。演练座位不改镜子。
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -17,30 +16,26 @@ const SCOPE = /^(main|drill:[\p{L}\p{N}_.-]{1,32})$/u;
 const SESSION = /^[\p{L}\p{N}_.:-]{1,64}$/u;
 const REPO = /^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9._-]+$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-const ZERO = /^0+$/;
 const MAX_NOTE = 500;
 
 export const SEAT_USAGE = `用法：node seat.mjs <命令> …（经 ssh 调法国的 fleet-api seat；法国的 ssh 主机名写在 ~/.fleet-dao/france-ssh）
-  take --session <会话号> [--scope main|drill:<名字>] [--machine <机器名>]   接班（创始人指定了才接）
-  renew [--scope …] [--session …]                                          续约（每 15 分钟一次）
-  check [--scope …] [--session …]                                          现查：受保护动作前查一次还是不是帅位
-  show [--scope …]                                                          看现状（帅位、在做的认领、引擎在跑的单）
-  handoff [--scope …] [--session …]                                        存交接说明（从标准输入读）
+  take --session <会话号> [--scope main|drill:<名字>] [--machine <机器名>]   接班（永远成功，后说的算；不是锁）
+  show [--scope …]                                                          看现状：现在是谁、最后活动多久前、在做的认领、引擎在跑的单
+  handoff [--scope …] [--session …]                                        存交接说明（从标准输入读；座位上没人时存不进）
 机器名不给就用 doing.mjs 记的那个；这台只有一份这个座位的记录时 --session 可以不给。
-退出码：0 好了、是帅位；1 用法不对；2 没查成、没做成（按不是帅位算）；3 不是帅位、已退役。`;
+退出码：0 好了；1 用法不对；2 没查成、没做成。`;
 
 export const CLAIM_USAGE = `用法：node claim.mjs <命令> …（经 ssh 调法国的 fleet-api claim；在项目仓的检出里跑，别处加 --repo <owner/仓名>）
-  take <单号> --label <工人名> [--owner worker|seat] [--grace-minutes <分>] [--note "<一句话>"] [--branch <分支>] [--scope …] [--session …]
-                     帅位认领一张单（派给工人或自己做）；带 --branch 把认领号记进这个分支的 git 配置（推前钩子查它）
-  step <单号> --claim <认领号> [--note "<一句话>"] [--pr <PR 号>]   工人报一步（心跳）、登记 PR
+  take <单号> --label <工人名> [--owner worker|seat] [--note "<一句话>"] [--branch <分支>] [--scope …] [--session …]
+                     认领一张单（派给工人或自己做）；别人还活着拿着的拒绝（3），要抢用 reassign
+  step <单号> --claim <认领号> [--note "<一句话>"] [--pr <PR 号>]   工人报一步、登记 PR（纯记录）
   done <单号> --claim <认领号> --note "<一句话>"                      做完了
   release <单号> --claim <认领号> --note "<一句话>"                   放下（不做了、交出去）
   show [<单号>…] [--all]                                              看认领
-  reassign <单号> --to worker|seat --label <工人名> [--founder "<创始人原话>"] [--note …] [--grace-minutes <分>]
-  reassign <单号> --to engine --reason "<为什么>" [--founder "<创始人原话>"]
-                     帅位改派：原来的还活着（引擎、别的工人）要带创始人原话，当场作废、叫停引擎、关掉它开着的 PR（分支留着）
-  prepush                                                             推前钩子调：分支带着认领的，查认领还归不归你
-退出码：0 好了；1 用法不对（prepush：拦下这次推送）；2 没查成、没做成；3 不是你的（不是帅位、别人拿着、认领号对不上）。`;
+  reassign <单号> --to worker|seat --label <工人名> [--note "<一句话>"] [--founder "<有的话>"]
+  reassign <单号> --to engine --reason "<为什么>" [--founder "<有的话>"]
+                     改派：原来的还活着（引擎、别的工人）当场作废、换给这次的、叫停引擎（#446 起不用创始人原话，写 --note 记一句为什么）
+退出码：0 好了；1 用法不对；2 没查成、没做成；3 不是你的（别人拿着、认领号对不上）。`;
 
 class UsageError extends Error {}
 
@@ -129,14 +124,8 @@ function stateProblem(s) {
   if (typeof s.machine !== 'string' || machineProblem(s.machine)) return 'machine 认不出';
   if (typeof s.session !== 'string' || !SESSION.test(s.session)) return 'session 认不出';
   if (!Number.isInteger(s.term) || s.term < 1) return 'term 认不出';
-  if (!Number.isFinite(Date.parse(s.renewedOkAt))) return 'renewedOkAt 认不出';
-  if (!isLeaseMinutes(s.leaseMinutes)) return 'leaseMinutes 认不出';
+  if (!Number.isFinite(Date.parse(s.takenAt))) return 'takenAt 认不出';
   return null;
-}
-
-/** 租期（分钟）：正整数才认；没有、认不出的不记帅位（本机判不了过期）。 */
-function isLeaseMinutes(v) {
-  return Number.isInteger(v) && v > 0;
 }
 
 /** 这台机器上这个座位的帅位记录：scope 必给，session 不给时这个座位只能有一份。认不出的明说，不当成没有。 */
@@ -164,7 +153,7 @@ export function pickState(home, scope, session) {
   if (found.length === 0)
     return {
       ok: false,
-      why: `这台没有 ${scope}${session ? ` 会话 ${session}` : ''} 的帅位记录：没接过班（node seat.mjs take），按不是帅位算`,
+      why: `这台没有 ${scope}${session ? ` 会话 ${session}` : ''} 的帅位记录：先 node seat.mjs take 接班`,
     };
   if (found.length > 1)
     return {
@@ -179,13 +168,6 @@ function saveState(home, state) {
   const file = stateFile(home, state.scope, state.session);
   writeFileSync(file, `${JSON.stringify(state, null, 2)}\n`);
   return file;
-}
-
-/** 离上次续约成功超过租期：不等法国回话，直接判不是帅位（先续约）。没超是 null。 */
-function localLapse(state, now) {
-  const ms = now.getTime() - Date.parse(state.renewedOkAt);
-  if (ms < state.leaseMinutes * 60_000) return null;
-  return `离上次续约成功已经 ${Math.floor(ms / 60_000)} 分钟（租期 ${state.leaseMinutes} 分钟）：先续约（node seat.mjs renew）再动手`;
 }
 
 // —— 参数 ——
@@ -269,12 +251,6 @@ function repoOf(p, io) {
 /** 法国那边回的「没做成」「参数不对」：一句话。 */
 const whyOf = (json, fallback) => (typeof json?.why === 'string' && json.why ? json.why : fallback);
 
-function holder(seat) {
-  return seat?.holder
-    ? `${seat.holder.machine}/${seat.holder.session}（第 ${seat.term} 任）`
-    : '（座位上没人）';
-}
-
 // —— seat ——
 
 /** seat.mjs 的全部逻辑。io：{ ssh(args, input?) → { status, stdout, stderr, error? }, env, home, now(), readStdin(), out, err }。 */
@@ -286,8 +262,6 @@ export async function runSeat(argv, io) {
     }
     const [cmd, ...rest] = argv;
     if (cmd === 'take') return seatTake(parseArgs(rest, ['session', 'scope', 'machine']), io);
-    if (cmd === 'renew' || cmd === 'check')
-      return seatRenewOrCheck(cmd, parseArgs(rest, ['session', 'scope']), io);
     if (cmd === 'show') {
       const p = parseArgs(rest, ['scope']);
       if (p.positional.length > 0) throw new UsageError('seat show 不收位置参数');
@@ -306,7 +280,7 @@ export async function runSeat(argv, io) {
       io.err(e.message);
       return 1;
     }
-    return fail(io, `没查成、没做成：${e.message}（按不是帅位算）`);
+    return fail(io, `没查成、没做成：${e.message}`);
   }
 }
 
@@ -337,7 +311,7 @@ function seatTake(p, io) {
     '--scope',
     scope,
   ]);
-  if (r.kind !== 'done') return fail(io, `没接上班：${r.why}（按不是帅位算）`);
+  if (r.kind !== 'done') return fail(io, `没接上班：${r.why}`);
   if (r.code !== 0 || r.json.ok !== true)
     return fail(io, `没接上班：${whyOf(r.json, `法国回的退出码 ${r.code}`)}`);
   const seat = r.json.seat;
@@ -347,95 +321,19 @@ function seatTake(p, io) {
     seat.holder?.session !== session ||
     seat.scope !== scope
   )
-    return fail(io, `没查成：法国回的接班结果对不上（${JSON.stringify(seat).slice(0, 160)}），按不是帅位算`);
-  // 租期认不出不记：没有租期，本机就判不了多久没续约算过期，这份记录会一直算数
-  const leaseMinutes = r.json.leaseMinutes;
-  if (!isLeaseMinutes(leaseMinutes))
-    return fail(
-      io,
-      `没查成：法国回的租期认不出（leaseMinutes=${JSON.stringify(leaseMinutes)}），没记帅位，按不是帅位算；先查 settings 表的 seat.leaseMinutes`,
-    );
+    return fail(io, `没查成：法国回的接班结果对不上（${JSON.stringify(seat).slice(0, 160)}）`);
   const file = saveState(io.home, {
     scope,
     machine,
     session,
     term: seat.term,
-    leaseMinutes,
-    renewedOkAt: io.now().toISOString(),
-    expiresAt: typeof r.json.expiresAt === 'string' ? r.json.expiresAt : null,
-    retired: null,
+    takenAt: io.now().toISOString(),
   });
   const prev = seat.previous
-    ? `上一任是 ${seat.previous.machine}/${seat.previous.session}（第 ${seat.term - 1} 任），它下一次动手前现查就会退役`
+    ? `上一任是 ${seat.previous.machine}/${seat.previous.session}（第 ${seat.term - 1} 任），它下次 seat show 看一眼就知道该退了`
     : '座位原来没人';
-  io.out(
-    `接班了：${scope} 第 ${seat.term} 任是 ${machine}/${session}；${prev}。租期 ${leaseMinutes} 分钟，每 15 分钟续一次约（记在 ${file}）`,
-  );
+  io.out(`接班了：${scope} 第 ${seat.term} 任是 ${machine}/${session}；${prev}（记在 ${file}）`);
   return 0;
-}
-
-function seatRenewOrCheck(cmd, p, io) {
-  if (p.positional.length > 0) throw new UsageError(`seat ${cmd} 不收位置参数`);
-  const scope = scopeOf(p);
-  const picked = pickState(io.home, scope, sessionOf(p, false));
-  if (!picked.ok) return fail(io, picked.why);
-  const s = picked.state;
-  if (s.retired) {
-    io.err(`不是帅位：${scope} 第 ${s.term} 任 ${s.machine}/${s.session} 已退役（${s.retired.why}）`);
-    return 3;
-  }
-  if (cmd === 'check') {
-    const lapse = localLapse(s, io.now());
-    if (lapse) {
-      io.err(`不是帅位：${lapse}`);
-      return 3;
-    }
-  }
-  const host = franceHost(io);
-  if (!host.ok) return fail(io, host.why);
-  const r = callFrance(io, host.host, [
-    'seat',
-    cmd,
-    '--machine',
-    s.machine,
-    '--session',
-    s.session,
-    '--term',
-    String(s.term),
-    '--scope',
-    scope,
-  ]);
-  if (r.kind !== 'done') return fail(io, `没查成：${r.why}（按不是帅位算；受保护动作先别做）`);
-  if (r.code === 0 && r.json.ok === true) {
-    if (cmd === 'renew')
-      saveState(io.home, {
-        ...s,
-        leaseMinutes: isLeaseMinutes(r.json.leaseMinutes) ? r.json.leaseMinutes : s.leaseMinutes,
-        renewedOkAt: io.now().toISOString(),
-        expiresAt: typeof r.json.expiresAt === 'string' ? r.json.expiresAt : s.expiresAt,
-      });
-    io.out(
-      cmd === 'renew'
-        ? `续上了：${scope} 第 ${s.term} 任 ${s.machine}/${s.session}，租约到 ${r.json.expiresAt ?? '（没读到）'}（库的时钟）`
-        : `是帅位：${scope} 第 ${s.term} 任，租约到 ${r.json.expiresAt ?? '（没读到）'}（库的时钟）`,
-    );
-    return 0;
-  }
-  if (r.code === 3) {
-    const reason = r.json.reason;
-    // 换了人、座位上没人：退役（交接说明照样能补）；过了期只是联系不上，续约成了照旧
-    if (reason === 'replaced' || reason === 'vacant') {
-      const why = reason === 'vacant' ? '座位上没人' : `帅位已经是 ${holder(r.json.seat)}`;
-      saveState(io.home, { ...s, retired: { at: io.now().toISOString(), why } });
-      io.err(
-        `不是帅位了：${why}。你已经退役——停派新活，把没记的话写进交接（node seat.mjs handoff），只回「我已退役，帅位在 ${holder(r.json.seat)}」`,
-      );
-      return 3;
-    }
-    io.err(`不是帅位：${whyOf(r.json, '法国说不是')}`);
-    return 3;
-  }
-  return fail(io, `没查成：${whyOf(r.json, `法国回的退出码 ${r.code}`)}（按不是帅位算）`);
 }
 
 async function seatHandoff(p, io) {
@@ -452,27 +350,16 @@ async function seatHandoff(p, io) {
   const r = callFrance(
     io,
     host.host,
-    [
-      'seat',
-      'handoff',
-      '--machine',
-      s.machine,
-      '--session',
-      s.session,
-      '--term',
-      String(s.term),
-      '--scope',
-      scope,
-    ],
+    ['seat', 'handoff', '--machine', s.machine, '--session', s.session, '--scope', scope],
     { input: text },
   );
   if (r.kind !== 'done') return fail(io, `交接说明没存上：${r.why}`);
   if (r.code === 0 && r.json.ok === true) {
-    io.out(`交接说明存上了（${[...text].length} 字）${s.retired ? '：退役前补的，接在现任那份后面' : ''}`);
+    io.out(`交接说明存上了（${[...text].length} 字）`);
     return 0;
   }
   if (r.code === 3) {
-    io.err(`交接说明没存上：帅位是 ${holder(r.json.seat)}；只有现任、刚被换下的上一任能写`);
+    io.err('交接说明没存上：座位上没人（还没接过班），没什么可交接的');
     return 3;
   }
   return fail(io, `交接说明没存上：${whyOf(r.json, `法国回的退出码 ${r.code}`)}`);
@@ -534,7 +421,6 @@ export async function runClaim(argv, io) {
         ]),
         io,
       );
-    if (cmd === 'prepush') return await prePush(await io.readStdin(), io);
     throw new UsageError(`没有「${cmd}」这个命令\n${CLAIM_USAGE}`);
   } catch (e) {
     if (e instanceof UsageError) {
@@ -583,15 +469,6 @@ async function claimTake(p, io) {
   const picked = pickState(io.home, scope, sessionOf(p, false));
   if (!picked.ok) return fail(io, picked.why);
   const s = picked.state;
-  if (s.retired) {
-    io.err(`没认领：你已经不是帅位（${scope} 第 ${s.term} 任已退役：${s.retired.why}）`);
-    return 3;
-  }
-  const lapse = localLapse(s, io.now());
-  if (lapse) {
-    io.err(`没认领：不是帅位——${lapse}`);
-    return 3;
-  }
   const host = franceHost(io);
   if (!host.ok) return fail(io, host.why);
   const r = callFrance(io, host.host, [
@@ -621,13 +498,12 @@ async function claimTake(p, io) {
       const g = io.git(['config', `branch.${branch}.fleetClaim`, `${repo}#${n}:${claim.claimId}`]);
       if (g.status !== 0)
         io.err(
-          `认领上了，但认领号没记进分支 ${branch} 的 git 配置（${firstLine(g.stderr)}）：推前钩子查不到它，手动 git config branch.${branch}.fleetClaim ${repo}#${n}:${claim.claimId}`,
+          `认领上了，但认领号没记进分支 ${branch} 的 git 配置（${firstLine(g.stderr)}）：纯记录用、不影响推送（#446 起推前钩子不查这个了），手动 git config branch.${branch}.fleetClaim ${repo}#${n}:${claim.claimId}`,
         );
     }
     io.out(
-      `认领了 ${repo}#${n}：归 ${s.machine}/${label}${owner === 'seat' ? '（帅位自己）' : ''}，认领号 ${claim.claimId}（开 PR 时正文「认领」栏写它），宽限期 ${claim.graceMinutes} 分钟没心跳就作废`,
+      `认领了 ${repo}#${n}：归 ${s.machine}/${label}${owner === 'seat' ? '（帅位自己）' : ''}，认领号 ${claim.claimId}（开 PR 时正文「认领」栏写它）`,
     );
-    prStatusNote(io, r.json.prStatus);
     if (!isDrill(scope))
       await mirror(io, repo, n, ['claim', note ?? `${label} 在做（认领 ${claim.claimId.slice(0, 8)}）`]);
     return 0;
@@ -668,7 +544,6 @@ async function claimUpdate(cmd, p, io) {
     io.out(
       `${repo}#${n}：${cmd === 'step' ? `报上了${pr ? `，登记了 PR #${pr.replace('#', '')}` : ''}` : cmd === 'done' ? '做完了' : '放下了'}`,
     );
-    prStatusNote(io, r.json.prStatus);
     if (!isDrill(claim?.seat?.scope)) {
       if (cmd === 'step' && note) await mirror(io, repo, n, ['say', note]);
       if (cmd === 'done') await mirror(io, repo, n, ['done', note]);
@@ -686,24 +561,6 @@ async function claimUpdate(cmd, p, io) {
     return 3;
   }
   return fail(io, `没记上：${whyOf(r.json, `法国回的退出码 ${r.code}`)}`);
-}
-
-/**
- * 认领变了之后法国当场重贴 PR 上的「认领对得上」（#348）：没贴成的照实打到标准错误（认领已经记上，不改退出码）；
- * 法国还没有这一段（旧版本）就不打。
- */
-function prStatusNote(io, p) {
-  if (!p || typeof p !== 'object') return;
-  if (p.ok === false) {
-    const why =
-      typeof p.error === 'string' ? p.error : Array.isArray(p.problems) ? p.problems.join('；') : '没说原因';
-    io.err(
-      `PR 上的「认领对得上」没重贴成（${firstLine(why)}）：法国的 GitHub 对账每 15 分钟会补，补上之前合并闸按旧的算`,
-    );
-    return;
-  }
-  if (Array.isArray(p.posted) && p.posted.length > 0)
-    io.out(`PR 上的「认领对得上」重贴了：${p.posted.map((x) => `#${x}`).join('、')}`);
 }
 
 async function claimReassign(p, io) {
@@ -742,15 +599,6 @@ async function claimReassign(p, io) {
   const picked = pickState(io.home, scope, sessionOf(p, false));
   if (!picked.ok) return fail(io, picked.why);
   const s = picked.state;
-  if (s.retired) {
-    io.err(`没改派：你已经不是帅位（${scope} 第 ${s.term} 任已退役：${s.retired.why}）`);
-    return 3;
-  }
-  const lapse = localLapse(s, io.now());
-  if (lapse) {
-    io.err(`没改派：不是帅位——${lapse}`);
-    return 3;
-  }
   const host = franceHost(io);
   if (!host.ok) return fail(io, host.why);
   const r = callFrance(
@@ -790,7 +638,7 @@ async function claimReassign(p, io) {
     return 0;
   }
   if (r.code === 3) {
-    io.err(r.text || '没改派：不是你的（不是帅位，或原来的还活着、没带创始人原话）');
+    io.err(r.text || '没改派：法国说不是你的（#446 起 reassign 永远 force，理论上不该发生，把这行报给帅位）');
     return 3;
   }
   if (r.code === 1 && r.text) {
@@ -799,67 +647,4 @@ async function claimReassign(p, io) {
     return 2;
   }
   return fail(io, `没改派：法国回的退出码 ${r.code}${r.text ? `：${firstLine(r.text)}` : ''}`);
-}
-
-// —— 推前钩子 ——
-
-/**
- * git pre-push 给的每一行：<本地引用> <本地提交> <远端引用> <远端提交>。推的分支带着认领（branch.<分支>.fleetClaim）的，
- * 经 ssh 查一次认领还归不归你：对不上就拦（退出码 1），连不上法国只警告、照推；没带认领的分支不查。
- */
-export async function prePush(stdin, io) {
-  let blocked = 0;
-  for (const line of String(stdin).split(/\r?\n/)) {
-    const parts = line.trim().split(/\s+/);
-    if (parts.length !== 4) continue;
-    const [localRef, localSha] = parts;
-    if (!localRef.startsWith('refs/heads/') || ZERO.test(localSha)) continue;
-    const branch = localRef.slice('refs/heads/'.length);
-    const got = io.git(['config', '--get', `branch.${branch}.fleetClaim`]);
-    if (got.status === 1) continue;
-    if (got.status !== 0) {
-      io.err(
-        `推前查认领：读分支 ${branch} 的 git 配置没成（${firstLine(got.stderr)}），拦下这次推送；修好 git 再推`,
-      );
-      blocked += 1;
-      continue;
-    }
-    const value = got.stdout.trim();
-    const m = /^([A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9._-]+)#(\d{1,9}):([0-9a-f-]{36})$/.exec(value);
-    if (!m || !UUID.test(m[3])) {
-      io.err(
-        `推前查认领：分支 ${branch} 的 fleetClaim「${value.slice(0, 80)}」认不出，拦下这次推送。改成 <owner/仓名>#<单号>:<认领号>，或不要了就 git config --unset branch.${branch}.fleetClaim`,
-      );
-      blocked += 1;
-      continue;
-    }
-    const [, repo, num, id] = m;
-    const host = franceHost(io);
-    if (!host.ok) {
-      io.err(`推前查认领：${host.why}；这次没查 ${repo}#${num} 的认领，照推（合并闸那一侧照样查）`);
-      continue;
-    }
-    const r = callFrance(io, host.host, ['claim', 'show', repo, num, '--all']);
-    if (r.kind !== 'done' || r.code !== 0 || !Array.isArray(r.json.claims)) {
-      io.err(
-        `推前查认领：没查成（${r.kind === 'done' ? whyOf(r.json, `法国回的退出码 ${r.code}`) : r.why}）；这次没查 ${repo}#${num} 的认领，照推（合并闸那一侧照样查）`,
-      );
-      continue;
-    }
-    const cur = r.json.claims.find((c) => c.issue === Number(num));
-    if (cur && cur.claimId === id && cur.active === true) {
-      io.out(`推前查认领：${repo}#${num} 还归你（认领 ${id.slice(0, 8)}）`);
-      continue;
-    }
-    const now = !cur
-      ? '库里没有这张单的认领'
-      : cur.claimId !== id
-        ? `现在归 ${cur.owner?.kind === 'engine' ? '引擎' : `${cur.owner?.machine}/${cur.owner?.label}`}（认领 ${String(cur.claimId).slice(0, 8)}，${cur.active ? '还活着' : '已经结束'}）`
-        : `你的认领已经结束（${cur.state}：${cur.endReason ?? '没写原因'}）`;
-    io.err(
-      `推前查认领：分支 ${branch} 带的是 ${repo}#${num} 的认领 ${id.slice(0, 8)}，${now}。这张已经不归你：别再推（合并闸也不会放行），把手上的东西交给现在的主；分支留着给新主用`,
-    );
-    blocked += 1;
-  }
-  return blocked > 0 ? 1 : 0;
 }

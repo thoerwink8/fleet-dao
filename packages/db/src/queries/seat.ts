@@ -1,14 +1,15 @@
-// 帅位租约和认领的读写语句（#299，specs/299-帅位只一个/方案.md 第二节）。判法在 @fleet-dao/core 的 seat.ts，把几条语句
-// 串进一个事务、记操作记录的是 @fleet-dao/api 的 pg-store.ts；这里只有语句本身。
+// 帅位和认领的读写语句（#446，specs/446-帅位认领简化/需求.md）。判法在 @fleet-dao/core 的 seat.ts，把几条语句串进一个
+// 事务、记操作记录的是 @fleet-dao/api 的 pg-store.ts；这里只有语句本身。
 // 改这里之前必须知道：
-// - 时间一律用库的 now()（事务开始的时刻）：心跳、续约写它，读回时把它一起交出去（毫秒数），判过期用它，不用调用方的钟。
+// - 时间一律用库的 now()（事务开始的时刻），读回时把它一起交出去（毫秒数），不用调用方的钟。
 // - 接班、抢认领都是一条语句（insert … on conflict … returning）：两边同时来只有一边拿到，不靠先读后写。
-// - 受保护动作在同一个事务里先 lockSeat（for share）再写：接班那条要等这个事务提交才能改座位，动作就排在接班之前。
+// - #446 起帅位不再是锁：没有续约、没有「受保护动作前先锁座位核任期」这一步；seat_leases 的 renewed_at 只当「最后活动
+//   时间」给人看（touchSeatActivityRow、writeHandoffRow 会顶它），term、holder_* 这些列还在，只是没人拿它们拦写入。
 import { randomUUID } from 'node:crypto';
 import { requirementWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { and, eq, getTableColumns, inArray, lt, or, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
-import { auditLog, issueClaims, repos, seatBoards, seatLeases, settings, tasks } from '../schema/index.ts';
+import { auditLog, issueClaims, repos, seatBoards, seatLeases, tasks } from '../schema/index.ts';
 
 export type SeatLeaseRow = typeof seatLeases.$inferSelect;
 export type IssueClaimRow = typeof issueClaims.$inferSelect;
@@ -101,53 +102,23 @@ export async function takeSeatRow(
   return { value: lease, now: toDate(now) };
 }
 
-/** 续约：任期、持有人都对得上才续（过了期也续：过期只说明联系不上，没有别人接班就还是它）。对不上回 null。 */
-export async function renewSeatRow(
-  db: Db,
-  input: { scope: string; term: number; machine: string; session: string },
-): Promise<WithNow<SeatLeaseRow> | null> {
-  const [row] = await db
-    .update(seatLeases)
-    .set({ renewedAt: sql`now()` })
-    .where(
-      and(
-        eq(seatLeases.scope, input.scope),
-        eq(seatLeases.term, input.term),
-        eq(seatLeases.holderMachine, input.machine),
-        eq(seatLeases.holderSession, input.session),
-      ),
-    )
-    .returning({ ...getTableColumns(seatLeases), now: nowMs });
-  if (!row) return null;
-  const { now, ...lease } = row;
-  return { value: lease, now: toDate(now) };
+/**
+ * 帅位真做了件事（写交接、写进度板……）：把 renewed_at 顶成现在，当「最后活动时间」给人看（#446，K8s Lease 的
+ * renewTime 那个思路，但没人读它来判断谁能写）。没有这个座位就什么都不做——board 写入不因为帅位没接过班而失败。
+ */
+export async function touchSeatActivityRow(db: Db, scope: string): Promise<void> {
+  await db.update(seatLeases).set({ renewedAt: sql`now()` }).where(eq(seatLeases.scope, scope));
 }
 
-/** 写交接说明（整份换掉），带上写的时刻（库的 now）。调用方先在同一个事务里核过是谁写的。 */
+/** 写交接说明（整份换掉），同时把 renewed_at 顶成现在（写交接也是活动）。调用方先核过座位在不在。 */
 export async function writeHandoffRow(db: Db, input: { scope: string; text: string }): Promise<SeatLeaseRow> {
   const [row] = await db
     .update(seatLeases)
-    .set({ handoff: input.text, handoffAt: sql`now()` })
+    .set({ handoff: input.text, handoffAt: sql`now()`, renewedAt: sql`now()` })
     .where(eq(seatLeases.scope, input.scope))
     .returning();
   if (!row) throw new Error(`写交接说明时座位 ${input.scope} 不在了`);
   return row;
-}
-
-/** settings 表里 seat.leaseMinutes、seat.claimGraceMinutes 两项的原值（没写的是 undefined）；认不认得出由 core 的 readSeatSettings 判。 */
-export async function readSeatSetting(
-  db: Db,
-): Promise<{ leaseMinutes?: unknown; claimGraceMinutes?: unknown }> {
-  const rows = await db
-    .select({ key: settings.key, value: settings.value })
-    .from(settings)
-    .where(inArray(settings.key, ['seat.leaseMinutes', 'seat.claimGraceMinutes']));
-  const out: { leaseMinutes?: unknown; claimGraceMinutes?: unknown } = {};
-  for (const r of rows) {
-    if (r.key === 'seat.leaseMinutes') out.leaseMinutes = r.value;
-    else out.claimGraceMinutes = r.value;
-  }
-  return out;
 }
 
 // —— 认领 ——
@@ -321,43 +292,6 @@ export async function endClaimRow(
   return { value: claim, now: toDate(now) };
 }
 
-/**
- * 作废过了宽限期没心跳的本机认领（引擎的不按心跳作废）：一条语句，按库的 now 判，回作废了的那几行。
- * limit 防一次扫太多；剩下的下一轮再扫。
- */
-export async function voidExpiredClaimRows(
-  db: Db,
-  input: { limit: number },
-): Promise<WithNow<IssueClaimRow[]>> {
-  const due = db
-    .select({ repoId: issueClaims.repoId, issueNumber: issueClaims.issueNumber })
-    .from(issueClaims)
-    .where(
-      and(
-        inArray(issueClaims.state, ['claimed', 'doing', 'pr_open']),
-        sql`${issueClaims.ownerKind} <> 'engine'`,
-        lt(issueClaims.heartbeatAt, sql`now() - make_interval(mins => ${issueClaims.graceMinutes})`),
-      ),
-    )
-    .limit(input.limit)
-    .for('update', { skipLocked: true });
-  const rows = await db
-    .update(issueClaims)
-    .set({
-      state: 'voided',
-      endedAt: sql`now()`,
-      updatedAt: sql`now()`,
-      endReason: sql`'过了宽限期（' || ${issueClaims.graceMinutes} || ' 分钟）没心跳'`,
-    })
-    .where(sql`(${issueClaims.repoId}, ${issueClaims.issueNumber}) in (${due})`)
-    .returning({ ...getTableColumns(issueClaims), now: nowMs });
-  const now = rows[0]?.now;
-  return {
-    value: rows.map(({ now: _now, ...claim }) => claim),
-    now: now === undefined ? await readDbNow(db) : toDate(now),
-  };
-}
-
 /** 列认领：只要活着的（默认），或全部；可以只看一个仓。按仓、单号排。 */
 export async function listClaimRows(
   db: Db,
@@ -487,7 +421,7 @@ export async function followTaskOnEngineClaim(
     seatTerm: null,
     state: 'doing',
     workflowId: requirementWorkflowId({ owner: task.owner, name: task.name }, task.issueNumber),
-    // 引擎的认领不按心跳作废，这一格用不上：填默认（和 core 的 SEAT_DEFAULTS.claimGraceMinutes 同一个数）
+    // #446 起没有东西按心跳作废认领，这一格用不上：填默认（和 core 的 DEFAULT_CLAIM_GRACE_MINUTES 同一个数）
     graceMinutes: 120,
     note: '引擎在做这张单，库里却没有还活着的认领：写快照时补上',
   });

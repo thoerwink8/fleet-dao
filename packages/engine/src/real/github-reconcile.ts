@@ -7,8 +7,6 @@
 import { readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import {
-  type ClaimAlerts,
-  createClaimStatus,
   createGitHubIntake,
   createIssueIntake,
   createPgStore,
@@ -57,7 +55,6 @@ export interface GitHubReconcileWiring {
     | 'openIssue'
     | 'commentIssue'
     | 'readCloseFacts'
-    | 'claims'
     | 'commitContains'
   >;
   /** 测试用：换掉「引擎自己在跑哪个提交」（不给就是 drain-control.ts 的 ownReleaseSha，开发机/测试认不出是 null）。 */
@@ -152,11 +149,8 @@ export function askIssueJob(w: GitHubReconcileWiring, log: Logger, now: () => Da
   };
 }
 
-/**
- * 接活那道门要的 GitHub：写镜像（PR、CI 事件）、现读 issue 挂在哪个版本、是不是母单子单；PR 事件按库里的认领贴
- * 「认领对得上」（#348，claims）。
- */
-export type IntakeGitHub = Pick<GitHub, 'eventSink' | 'readIssuePlan' | 'claims'>;
+/** 接活那道门要的 GitHub：写镜像（PR、CI 事件）、现读 issue 挂在哪个版本、是不是母单子单。 */
+export type IntakeGitHub = Pick<GitHub, 'eventSink' | 'readIssuePlan'>;
 
 /**
  * 接活那道门的几样依赖（和 webhook 同一份判法、同一个拉起实现）：对账补漏的重放、补收、补起认领，每小时对账给排队的单
@@ -174,22 +168,8 @@ export function intakeDepsFor(
     requirements: w.requirements ?? createTemporalRequirementWorkflows(client, taskQueue),
     // 只派当前版本的独立单：挂在哪、当前版本是哪个、是不是母单子单，拉起前经「引擎」机器人现读（和后端 webhook 那条同一份判法）
     plans: githubIssuePlans(w.gh),
-    // 补收、重放的 PR 事件照样贴「认领对得上」（#348，和后端 webhook 那条同一份实现）
-    claims: createClaimStatus({ store: parts.store, github: w.gh.claims, log: parts.log }),
     log: parts.log,
     now: parts.now,
-  };
-}
-
-/** 「认领对得上」对账那一轮没处理成的报「要人看」提醒、好了撤（#348）：进同一个库。 */
-export function claimAlerts(db: Db, now: () => Date): ClaimAlerts {
-  return {
-    async raise(key, title, body) {
-      await upsertAlert(db, { dedupeKey: key, level: 'alert', taskId: null, title, body });
-    },
-    async resolve(key, why) {
-      await resolveAlertWithReason(db, { dedupeKey: key, by: 'engine:github-reconcile', why, at: now() });
-    },
   };
 }
 
@@ -254,18 +234,10 @@ export function githubReconcileJob(
     const intake = createGitHubIntake({ ...intakeDeps, github });
     // 补起待起的认领（#299）：和接活同一套依赖、同一个拉起实现
     const claims = createIssueIntake(intakeDeps);
-    // 「认领对得上」（#348）：作废过了宽限期的认领、所有开着的 PR 重判重贴，没处理成的报提醒
-    const claimStatus = createClaimStatus({
-      store,
-      github: w.gh.claims,
-      alerts: claimAlerts(w.db, now),
-      log,
-    });
     const reconciler = w.gh.reconciler(reconcilerOptions({ store, intake }));
     return {
       syncFlowConfigs: () => syncFlowConfigs(flow),
-      reconcile: (options) =>
-        reconcileGitHub({ store, intake, claims, claimStatus, reconciler, log, now }, options),
+      reconcile: (options) => reconcileGitHub({ store, intake, claims, reconciler, log, now }, options),
       askIssues: () => openAskIssues(asks),
       closeSweep: () => sweepClosing(close),
       ...(w.closeSweepDue ? { closeSweepDue: w.closeSweepDue } : {}),

@@ -1,5 +1,5 @@
-// GitHub 事件接收：验签名（X-Hub-Signature-256）→ 原文落库、投递编号去重 → 白名单过滤 → PR 镜像 → issue 变成任务和工作流、
-// PR 按库里的认领贴「认领对得上」（#348，issue-intake.ts 交给 claim-status.ts）。
+// GitHub 事件接收：验签名（X-Hub-Signature-256）→ 原文落库、投递编号去重 → 白名单过滤 → PR 镜像 → issue 变成任务和工作流
+// （issue-intake.ts）。
 // 香港只转发不验签：请求体和几个头原样透传，签名必须对收到的原始字节算，不许先解析再序列化。
 // 验签不过的不落库（没认证的请求不许往库里写），只回 401、记日志。
 import { createHmac, timingSafeEqual } from 'node:crypto';
@@ -325,7 +325,7 @@ export interface GitHubIntake {
 
 /** 收件（webhook）、补收（对账、轮询）、重放共用这一道门和这一本投递账（github_events）。 */
 export function createGitHubIntake(
-  deps: Pick<Deps, 'store' | 'github' | 'workflows' | 'requirements' | 'plans' | 'log' | 'now' | 'claims'>,
+  deps: Pick<Deps, 'store' | 'github' | 'workflows' | 'requirements' | 'plans' | 'log' | 'now'>,
 ): GitHubIntake {
   const { store, log } = deps;
   const issues = createIssueIntake(deps);

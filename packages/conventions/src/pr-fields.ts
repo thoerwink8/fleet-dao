@@ -10,7 +10,7 @@ import { parseTier, TIER_COLUMN } from './merge-gates.ts';
 import { findItem, itemExample, type PlanPhase, parsePlanRefs, phaseRange, planPhases } from './plan.ts';
 import { PLAN_COLUMN, PR_COLUMNS, prColumns, SPECS_COLUMN } from './pr-columns.ts';
 
-// 各栏怎么认在 pr-columns.ts（claim-status.ts 判挂了哪张单也用它）；这里照旧导出，老的引用不用改
+// 各栏怎么认在 pr-columns.ts；这里照旧导出，老的引用不用改
 export { CLOSE_COLUMN, type CloseColumn, closeColumnValue, PLAN_COLUMN, PR_COLUMNS, prColumns, SPECS_COLUMN };
 
 /** plan.md 在仓里的位置：pr-fields 判「对应计划」、引擎收需求文档时核那一行，都按它找。 */

@@ -1,5 +1,4 @@
 import type { AlertWorkPort } from './alert-work.ts';
-import type { ClaimStatus } from './claim-status.ts';
 import type { Config } from './config.ts';
 import type { DemoPublisher } from './demo.ts';
 import type { GatewaySeen } from './gateway-seen.ts';
@@ -33,11 +32,6 @@ export interface Deps {
   /** null = 飞书登录没配置（只允许在开发环境）。 */
   feishu: FeishuAuth | null;
   github: GitHubEventSink;
-  /**
-   * 「认领对得上」（#348，claim-status.ts）：PR 事件进来时现读 PR、按库里的认领贴状态（引擎机器人）。没给（开发环境没接 GitHub）
-   * 的只在投递说明里记「没接」；生产在 main.ts 装上，机器人凭据读不到时 PR 事件在写镜像那一步就如实失败了。
-   */
-  claims?: ClaimStatus | undefined;
   /** 飞书里确认的草稿去开单（开 issue、建任务、拉起工作流）。没接上时用 notWiredDraftOpener：草稿留在待开单。 */
   draftOpener: DraftOpener;
   /** /healthz 逐项探的依赖；空 = 没有外部依赖（内存版）。 */

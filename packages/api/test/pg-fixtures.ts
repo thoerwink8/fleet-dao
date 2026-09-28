@@ -410,7 +410,8 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
       data.seatLeases.map((l) => ({
         ...l,
         acquiredAt: date(l.acquiredAt),
-        renewedAt: date(l.renewedAt),
+        // DB 列还叫 renewed_at（#446 没改名，避免迁移）：领域类型 SeatLease 上它叫 lastActivityAt
+        renewedAt: date(l.lastActivityAt),
         handoffAt: dateOpt(l.handoffAt ?? undefined),
       })),
     );

@@ -1,7 +1,8 @@
 // 钉住帅位技能规矩的测试（改标准：改这个文件要创始人同意，packages/conventions/standard-paths.json）。
-// 脚本怎么改都行，这几条规矩不能被脚本悄悄改掉：全局只一个帅位，受保护动作前现查、换了人就退役（#299）；派工先在库里认领，
-// 本机的 Sonnet 工人开草稿、帅位验收过了再转正（技能说明里写着）；库里没有的仓照旧靠单上的「在做」：别的机器在做的不碰、
-// 撞车时早留的算数、接手要创始人说了才行。
+// 脚本怎么改都行，这几条规矩不能被脚本悄悄改掉：全局只一个帅位、接班永远成功（#446 起不是锁，没有续约、没有受保护
+// 动作前现查、换了人自己退，不是系统判的）；派工先在库里认领（留作记录，不拦人）；本机的 Sonnet 工人开草稿、帅位验收
+// 过了再转正（技能说明里写着）；库里没有的仓照旧靠单上的「在做」：别的机器在做的不碰、撞车时早留的算数、接手要创始人
+// 说了才行。
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -24,6 +25,9 @@ interface SeatIo {
 const seatLib = (await import(pathToFileURL(join(SCRIPTS, 'seat-lib.mjs')).href)) as {
   runSeat(argv: string[], io: SeatIo): Promise<number>;
   runClaim(argv: string[], io: SeatIo): Promise<number>;
+};
+const boardLib = (await import(pathToFileURL(join(SCRIPTS, 'board-cli.mjs')).href)) as {
+  runBoardCli(argv: string[], io: SeatIo): Promise<number>;
 };
 
 const made: string[] = [];
@@ -84,7 +88,7 @@ describe('规矩（库里没有的仓）：动一张单之前先在单上认领�
   });
 });
 
-// —— 只一个帅位（#299、#349）：技能说明里的规矩，和脚本守着的那两条 ——
+// —— 只一个帅位（#299，#446 起不是锁）：技能说明里的规矩，和脚本守着的那几条 ——
 
 const SKILL = readFileSync(join(SCRIPTS, '..', 'SKILL.md'), 'utf8');
 
@@ -92,18 +96,21 @@ const SKILL = readFileSync(join(SCRIPTS, '..', 'SKILL.md'), 'utf8');
 const SEAT_RULES: Record<string, RegExp> = {
   全局只一个帅位: /全局只一个帅位/,
   创始人指定了才接班: /只在创始人指定了才接/,
-  续约: /seat\.mjs renew/,
-  受保护动作前现查: /\*\*受保护动作\*\*：[^\n]*每做一个之前先 `node \$S\/seat\.mjs check`/,
-  换了人就退役: /不是帅位了，这个动作不做[\s\S]{0,40}退役/,
+  接班永远成功不是锁: /接班永远成功[\s\S]{0,30}后说的算/,
+  换了人自己退不是系统判的: /自己看[\s\S]{0,10}seat\.mjs show[\s\S]{0,60}该退了/,
+  最后活动时间只给人看: /最后活动[\s\S]{0,60}只给人看/,
+  认领不拦人只留记录: /认领账?[\s\S]{0,60}(?:只留作记录|留作记录|不拦人)/,
   派工先在库里认领: /claim\.mjs take <单号>/,
   工人每步报进度: /claim\.mjs step <单号> --claim <认领号>/,
-  强制改派要创始人原话: /还活着的[\s\S]{0,40}要带创始人原话/,
+  改派不用创始人原话: /改派[\s\S]{0,60}不用创始人原话/,
   Sonnet工人开草稿: /Sonnet 5[\s\S]{0,120}一律开成草稿、不挂自动合并/,
   帅位验收四样: /断点找得对[\s\S]{0,40}必经的那一步[\s\S]{0,40}故意造出失败的测试[\s\S]{0,20}没夹带别的改动/,
   两次没过改派Opus: /两次没过验收，改派 Opus/,
-  看到提醒先认领: /看到要修的提醒先认领[\s\S]{0,120}alert claim/,
+  看到提醒先认领: /看到要修的提醒先认领/,
   修完随PR撤: /修完随 PR 撤[\s\S]{0,40}「修提醒」栏写提醒的键/,
   本机快马: /「本机快马」[\s\S]{0,200}不开单[\s\S]{0,200}CI 绿就合[\s\S]{0,400}做完关老单/,
+  进度板不核是不是现任: /进度板[\s\S]{0,120}不核是不是现任|不核是不是现任[\s\S]{0,120}进度板/,
+  交接整份换掉不追加: /整份换掉[\s\S]{0,30}不是追加/,
 };
 
 function missingSeatRules(text: string): string[] {
@@ -112,42 +119,53 @@ function missingSeatRules(text: string): string[] {
     .map(([name]) => name);
 }
 
-describe('规矩：全局只一个帅位，受保护动作前现查、换了人就退役（#299）', () => {
+describe('规矩：全局只一个帅位；接班永远成功、不是锁；换了人自己退，不是系统判的（#299，#446 起简化）', () => {
   it('技能说明里这几条都在', () => {
     expect(missingSeatRules(SKILL)).toEqual([]);
   });
 
-  it('【故意造出的失败】技能说明删掉「受保护动作前现查」「换了人就退役」：查得出缺了哪条', () => {
-    const cut = SKILL.replace(/## 受保护动作前现查，换了人就退役[\s\S]*?## 派工/, '## 派工');
+  it('【故意造出的失败】技能说明删掉「换了人自己退」那一节：查得出缺了哪条', () => {
+    const cut = SKILL.replace(/## 换了人自己退[\s\S]*?## 派工/, '## 派工');
     expect(cut).not.toBe(SKILL);
-    expect(missingSeatRules(cut)).toEqual(expect.arrayContaining(['受保护动作前现查', '换了人就退役']));
+    expect(missingSeatRules(cut)).toEqual(
+      expect.arrayContaining(['换了人自己退不是系统判的', '最后活动时间只给人看']),
+    );
   });
 
-  it('【故意造出的失败】现查发现换了人：记成已退役，之后认领新单不再去法国、直接拒（退出码 3）', async () => {
+  it('【故意造出的失败】很久没有任何活动（#446 起没有续约、没有现查这回事了）：seat show 照样看得到自己，进度板照样写得进', async () => {
     const home = mkdtempSync(join(tmpdir(), 'commander-seat-rules-'));
     made.push(home);
     mkdirSync(join(home, '.fleet-dao'), { recursive: true });
     writeFileSync(join(home, '.fleet-dao', 'france-ssh'), 'france\n');
-    const replies: unknown[] = [
+    const replies: { status: number; stdout: string }[] = [
       {
-        ok: true,
-        seat: { scope: 'main', term: 3, holder: { machine: '本机', session: 's1' }, previous: null },
-        leaseMinutes: 45,
-        expiresAt: new Date(NOW.getTime() + 45 * 60_000).toISOString(),
-        now: NOW.toISOString(),
+        status: 0,
+        stdout: `${JSON.stringify({
+          ok: true,
+          seat: {
+            scope: 'main',
+            term: 3,
+            holder: { machine: '本机', session: 's1' },
+            previous: null,
+            acquiredAt: NOW.toISOString(),
+            lastActivityAt: NOW.toISOString(),
+            handoff: null,
+            handoffAt: null,
+          },
+          now: NOW.toISOString(),
+        })}\n`,
       },
-      { ok: false, reason: 'replaced', why: '帅位已经是 笔记本/s2（第 4 任）', now: NOW.toISOString() },
+      { status: 0, stdout: '帅位（main）：第 3 任 本机/s1，最后活动 6 小时 0 分钟前\n' },
+      { status: 0, stdout: `${JSON.stringify({ ok: true })}\n` },
     ];
-    const codes = [0, 3];
     let sshCalls = 0;
-    const err: string[] = [];
-    const io = {
+    let clock = NOW.getTime();
+    const io: SeatIo = {
       ssh: () => {
-        const json = replies[sshCalls];
-        const status = codes[sshCalls] ?? 0;
+        const r = replies[sshCalls];
         sshCalls += 1;
-        if (json === undefined) throw new Error('退役后不该再去法国');
-        return { status, stdout: `${JSON.stringify(json)}\n`, stderr: '' };
+        if (r === undefined) throw new Error(`用例没给第 ${sshCalls} 次 ssh 的回话`);
+        return { status: r.status, stdout: r.stdout, stderr: '' };
       },
       git: (args: string[]) =>
         args[1] === '--get' && args[2] === 'remote.origin.url'
@@ -156,17 +174,20 @@ describe('规矩：全局只一个帅位，受保护动作前现查、换了人�
       gh: () => '',
       env: { FLEET_MACHINE: '本机' },
       home,
-      now: () => NOW,
+      now: () => new Date(clock),
       sleep: async () => {},
       readStdin: async () => '',
       out: () => {},
-      err: (t: string) => err.push(t),
+      err: () => {},
     };
+    // 接班
     expect(await seatLib.runSeat(['take', '--session', 's1'], io)).toBe(0);
-    expect(await seatLib.runSeat(['check'], io)).toBe(3);
-    expect(sshCalls).toBe(2);
-    expect(await seatLib.runClaim(['take', '41', '--label', 'w1'], io)).toBe(3);
-    expect(err.at(-1)).toContain('你已经不是帅位');
-    expect(sshCalls).toBe(2);
+    // 时间往后跳 6 小时（#446 之前的租期早过了好几倍）：本地缓存不因为放久了失效
+    clock += 6 * 60 * 60_000;
+    // seat show：法国照样给现状，不会因为「太久没续」被拒
+    expect(await seatLib.runSeat(['show'], io)).toBe(0);
+    // 写进度板：本地缓存过了很久也照样写得进（board 不核是不是现任）
+    expect(await boardLib.runBoardCli(['demo', 'log', '很久之后还能写'], io)).toBe(0);
+    expect(sshCalls).toBe(3);
   });
 });

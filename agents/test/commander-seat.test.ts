@@ -833,8 +833,7 @@ describe('报到驾驶舱：法国连不上不写本地文件，评论失败不�
         machine: '本机',
         session: 's1',
         term: 1,
-        renewedOkAt: new Date().toISOString(),
-        leaseMinutes: 45,
+        takenAt: new Date().toISOString(),
       }),
     );
   }

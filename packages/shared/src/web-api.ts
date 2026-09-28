@@ -499,8 +499,20 @@ export const SeatBoardProjectSchema = z.object({
   log: z.array(z.object({ at: z.string(), text: z.string() })),
   needs: z.array(SeatBoardNeedSchema),
 });
+/** 帅位现在的样子（只给人看，#446 起不再是锁）：没人接过班是 null，不是错误。 */
+export const SeatBoardSeatSchema = z.object({
+  /** 第几任：纯记录，接班一次加一。 */
+  term: z.number().int().positive(),
+  /** `机器/会话`，和 CLI 的 holderText 一个写法。 */
+  holder: z.string().min(1),
+  /** 最后一次真活动（接班、写交接、写进度板）：像 K8s Lease 的 renewTime，没人拿它判断谁能写。 */
+  lastActivityAt: z.string(),
+});
 /** 首页帅位栏。没有任何项目是空列表，不是错误。 */
-export const SeatBoardResponse = z.object({ projects: z.array(SeatBoardProjectSchema) });
+export const SeatBoardResponse = z.object({
+  seat: SeatBoardSeatSchema.nullable(),
+  projects: z.array(SeatBoardProjectSchema),
+});
 export const AnswerSeatNeedRequest = z.object({ option: z.string().min(1).max(500) });
 export const AnswerSeatNeedResponse = z.object({ ok: z.literal(true) });
 export const AnswerAskResponse = z.object({ ok: z.literal(true) });

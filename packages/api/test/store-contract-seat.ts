@@ -1,5 +1,7 @@
-// 帅位租约和认领的 Store 契约（#299，ports.ts 的 SeatStore）：内存版和 Postgres 版过同一套。时间是库的 now()：
+// 帅位和认领的 Store 契约（#446，ports.ts 的 SeatStore）：内存版和 Postgres 版过同一套。时间是库的 now()：
 // 内存版用 Store 的钟，Postgres 版用库的钟，所以「过了多久」一律靠把记下的时刻往前挪（backdate），不靠拨钟。
+// #446 起帅位不是锁：接班永远成功、认领不核「是不是现在的帅位」——只挡「这张单已经被别人活着拿着」这一种冲突，
+// 除非带 force（改派）。lastActivityAt 只给人看，backdateSeat 用来证明没有东西拿它判断谁能写。
 import { beforeEach, describe, expect, it } from 'vitest';
 import { devFixtures, IDS } from '../src/dev-fixtures.ts';
 import type { MemoryData } from '../src/memory-store.ts';
@@ -9,7 +11,7 @@ export const SEAT_T0 = new Date('2026-09-27T08:00:00.000Z');
 
 export interface SeatStoreUnderTest {
   store: Store;
-  /** 把座位上次续约的时刻往前挪 minutes 分钟（造「很久没续约」）。 */
+  /** 把座位「最后活动时间」往前挪 minutes 分钟（造「很久没有任何动静」，证明没有东西拿它判断谁能写）。 */
   backdateSeat(scope: string, minutes: number): Promise<void>;
   /** 把一张单认领的心跳和最后一次改动往前挪 minutes 分钟（造「很久没心跳」「待起很久了」）。 */
   backdateClaim(repoId: string, issueNumber: number, minutes: number): Promise<void>;
@@ -58,32 +60,42 @@ export function describeSeatStoreContract(name: string, make: MakeSeatStore): vo
         ]);
       });
 
-      it('读座位：没人是 null；带着库的 now 和租期设置（没写用默认）；演练座位和真帅位互不影响', async () => {
+      it('读座位：没人是 null；带着库的 now；演练座位和真帅位互不影响', async () => {
         const empty = await store.readSeat('main');
         expect(empty.lease).toBeNull();
         expect(Number.isFinite(Date.parse(empty.now))).toBe(true);
-        expect(empty.settings).toEqual({
-          ok: true,
-          settings: { leaseMinutes: 45, claimGraceMinutes: 120 },
-          source: 'default',
-        });
         await store.takeSeat({ scope: 'drill:299', ...A });
         expect((await store.readSeat('main')).lease).toBeNull();
         expect((await store.readSeat('drill:299')).lease?.term).toBe(1);
       });
 
-      it('【故意造出的失败】续约：带旧任期号、别的会话来续都不续，交回座位此刻的样子；对得上的续上（过了期也续得上）', async () => {
+      it('#446：帅位不是锁，接班永远成功——不管座位上是谁、换没换人，后说的都直接接得上，没有「抢不到」这回事', async () => {
         await store.takeSeat({ scope: 'main', ...A });
-        await s.backdateSeat('main', 60);
-        const late = await store.renewSeat(actor(A, 1));
-        expect(late).toMatchObject({ ok: true, lease: { term: 1 } });
-        await store.takeSeat({ scope: 'main', ...B });
-        const stale = await store.renewSeat(actor(A, 1));
-        expect(stale).toMatchObject({ ok: false, lease: { term: 2, holderMachine: '笔记本' } });
-        expect(await store.renewSeat(actor(A, 2))).toMatchObject({ ok: false });
+        // 别人马上又接：不用先交、不用等，照样成
+        const again = await store.takeSeat({ scope: 'main', ...B });
+        expect(again.lease).toMatchObject({ term: 2, holderMachine: '笔记本' });
+        // A 自己也还能再接一次（不因为已经换给了 B 就被拒绝）
+        expect((await store.takeSeat({ scope: 'main', ...A })).lease).toMatchObject({ term: 3 });
       });
 
-      it('交接说明：现任整份换掉；刚被换下的上一任接在后面补一段；别人写不进', async () => {
+      it('很久没有任何活动（backdate 最后活动时间）不影响任何操作：没有续约这回事了，seat 不会因为「太久没动」失效', async () => {
+        await store.takeSeat({ scope: 'main', ...A });
+        await s.backdateSeat('main', 6 * 60); // 6 小时前的最后活动时间
+        expect(await store.writeHandoff({ ...actor(A, 1), text: '好久没动过了，但照样能写' })).toMatchObject({
+          ok: true,
+        });
+        expect(
+          await store.takeClaim({
+            repoId: IDS.repo,
+            issueNumber: 40,
+            seat: actor(A, 1),
+            owner: { kind: 'worker', label: '工人甲' },
+            note: '开工',
+          }),
+        ).toMatchObject({ ok: true });
+      });
+
+      it('交接说明：座位上有人就整份换掉，lastActivityAt 顶成现在，不核写的人是不是现任；座位上没人写不进', async () => {
         await store.takeSeat({ scope: 'main', ...A });
         expect(
           await store.writeHandoff({ ...actor(A, 1), text: '在做 #299；等创始人拍 App 权限' }),
@@ -92,17 +104,22 @@ export function describeSeatStoreContract(name: string, make: MakeSeatStore): vo
           lease: { handoff: '在做 #299；等创始人拍 App 权限' },
         });
         await store.takeSeat({ scope: 'main', ...B });
+        // #446 起旧帅位（A，第 1 任）照样写得进——不核是不是现任了
         const tail = await store.writeHandoff({ ...actor(A, 1), text: '创始人刚说：先演练再换真帅位' });
-        expect(tail).toMatchObject({ ok: true });
-        if (!tail.ok) throw new Error('上一任补不上交接');
-        expect(tail.lease.handoff).toBe(
-          '在做 #299；等创始人拍 App 权限\n\n（第 1 任 本机/a1 退役时补的）\n创始人刚说：先演练再换真帅位',
-        );
-        expect(
-          await store.writeHandoff({ ...actor({ machine: '手机', session: 'x' }, 2), text: '冒名' }),
-        ).toMatchObject({
-          ok: false,
-        });
+        expect(tail).toMatchObject({ ok: true, lease: { handoff: '创始人刚说：先演练再换真帅位' } });
+        // 座位从没接过班：没什么可交接的
+        const vacant = await store.writeHandoff({ ...actor(A, 1, 'drill:没人来过'), text: '交接' });
+        expect(vacant).toMatchObject({ ok: false, lease: null });
+      });
+
+      it('写交接说明会把 lastActivityAt 顶成现在（只给人看，像 K8s Lease 的 renewTime）', async () => {
+        const { lease: taken } = await store.takeSeat({ scope: 'main', ...A });
+        await s.backdateSeat('main', 120);
+        const before = (await store.readSeat('main')).lease?.lastActivityAt;
+        expect(Date.parse(before ?? '')).toBeLessThan(Date.parse(taken.lastActivityAt));
+        const r = await store.writeHandoff({ ...actor(A, 1), text: '刚写了一句' });
+        if (!r.ok) throw new Error('没写进交接');
+        expect(Date.parse(r.lease.lastActivityAt)).toBeGreaterThan(Date.parse(before ?? ''));
       });
     });
 
@@ -137,20 +154,18 @@ export function describeSeatStoreContract(name: string, make: MakeSeatStore): vo
         expect(await seatAudits(`claim:${IDS.repo}#40`)).toEqual([['claim.take', '本机/a1']]);
       });
 
-      it('【故意造出的失败】不是帅位的认领被拒、这张单一点没动：座位上没人、带旧任期号、过了租期', async () => {
-        expect(await take(40, actor(A, 1))).toMatchObject({ ok: false, reason: 'not_seat' });
+      it('#446：认领不核是不是帅位——没接过班、带旧任期号、很久没动静，都照样认领得上；term 也可以不给', async () => {
+        // 座位从没人接过班：照样认领得上（不再是「按不是帅位算」）
+        expect(await take(40, actor(A, 1))).toMatchObject({ ok: true });
         await store.takeSeat({ scope: 'main', ...A });
         await store.takeSeat({ scope: 'main', ...B });
-        const stale = await take(40, actor(A, 1));
-        expect(stale).toMatchObject({ ok: false, reason: 'not_seat' });
-        if (stale.ok || stale.reason !== 'not_seat') throw new Error('旧任期还认领得上');
-        expect(stale.why).toContain('帅位已经是 笔记本/b1（第 2 任）');
-        await s.backdateSeat('main', 46);
-        expect(await take(40, actor(B, 2))).toMatchObject({ ok: false, reason: 'not_seat' });
-        expect((await store.getClaim(IDS.repo, 40)).claim).toBeNull();
-        // 续约成了再认领就行
-        await store.renewSeat(actor(B, 2));
-        expect(await take(40, actor(B, 2))).toMatchObject({ ok: true });
+        // A 带着旧任期号（第 1 任，其实已经是第 2 任 B 了）：照样认领得上
+        expect(await take(41, actor(A, 1))).toMatchObject({ ok: true });
+        await s.backdateSeat('main', 6 * 60);
+        expect(await take(42, actor(B, 2))).toMatchObject({ ok: true });
+        // term 不给也行（纯记录，没人拿它核对）：写成 0（issue_claims_seat_shape 要求 scope 非空时 term 也非空）
+        const noTerm: SeatActor = { machine: '手机', session: 'x1', scope: 'main' };
+        expect(await take(43, noTerm)).toMatchObject({ ok: true, claim: { seatTerm: 0 } });
       });
 
       it('【故意造出的失败】别人拿着还没结束：抢不到，交回是谁拿着', async () => {
@@ -193,11 +208,11 @@ export function describeSeatStoreContract(name: string, make: MakeSeatStore): vo
           action: 'claim.take',
           before: { claimId: reserved.claim.claimId, owner: '本机/帅位' },
         });
-        // 工人拿着的，帅位不能直接换人（那是改派）
+        // 工人拿着的，帅位不能直接换人（那是改派，要 force）
         expect(await take(49, actor(B, 2), '工人丙')).toMatchObject({ ok: false, reason: 'held' });
       });
 
-      it('【故意造出的失败】换帅位后，旧帅位派的工人认领照旧有效：照报进度、开 PR、做完', async () => {
+      it('换帅位后，旧帅位派的工人认领照旧有效：照报进度、开 PR、做完；旧帅位自己也还能接着派新活（#446 不核身份）', async () => {
         await store.takeSeat({ scope: 'main', ...A });
         const got = await take(42, actor(A, 1));
         if (!got.ok) throw new Error('没认领上');
@@ -215,8 +230,8 @@ export function describeSeatStoreContract(name: string, make: MakeSeatStore): vo
           ok: true,
           claim: { state: 'done', endReason: 'PR #306 合了' },
         });
-        // 旧帅位（第 1 任）派不了新活：认领新单被拒
-        expect(await take(43, actor(A, 1))).toMatchObject({ ok: false, reason: 'not_seat' });
+        // 旧帅位（第 1 任）没被拦：照样能派新活（真要换人接管靠人手工交接，不是系统挡着）
+        expect(await take(43, actor(A, 1))).toMatchObject({ ok: true });
         expect(await seatAudits(`claim:${IDS.repo}#42`)).toEqual([
           ['claim.take', '本机/a1'],
           ['claim.step', '本机/工人甲'],
@@ -257,42 +272,19 @@ export function describeSeatStoreContract(name: string, make: MakeSeatStore): vo
         expect(again.claim.claimId).not.toBe(got.claim.claimId);
       });
 
-      it('【故意造出的失败】工人过了宽限期没心跳：认领作废、写明原因、记在引擎名下；还在宽限期里的不动', async () => {
+      it('【故意造出的失败】过了宽限期没心跳：#446 起没有 voidExpiredClaims 了，不再自动作废、一直显示在活跃认领里', async () => {
         await store.takeSeat({ scope: 'main', ...A });
         await take(46, actor(A, 1));
         await take(47, actor(A, 1), '工人乙', 2);
         await s.backdateClaim(IDS.repo, 46, 119);
-        await s.backdateClaim(IDS.repo, 47, 3);
-        const swept = await store.voidExpiredClaims({ limit: 50 });
-        expect(swept.voided.map((c) => [c.issueNumber, c.state, c.endReason])).toEqual([
-          [47, 'voided', '过了宽限期（2 分钟）没心跳'],
-        ]);
-        expect((await store.voidExpiredClaims({ limit: 50 })).voided).toEqual([]);
-        expect(await seatAudits(`claim:${IDS.repo}#47`)).toEqual([
-          ['claim.take', '本机/a1'],
-          ['claim.void', 'claims-sweep'],
-        ]);
-        expect((await store.listClaims({ activeOnly: true })).claims.map((c) => c.issueNumber)).toEqual([46]);
+        await s.backdateClaim(IDS.repo, 47, 3); // 过了它自己 2 分钟的宽限期，#446 之前这里会被作废
         expect(
-          (await store.listClaims({ activeOnly: false, repoId: IDS.repo })).claims.map((c) => c.issueNumber),
+          (await store.listClaims({ activeOnly: true })).claims.map((c) => c.issueNumber).sort(),
         ).toEqual([46, 47]);
-      });
-
-      it('租期、宽限期的设置认不出：认领不做，写明是哪一项', async () => {
-        const bad = await make(
-          { ...devFixtures(SEAT_T0), settings: [{ key: 'seat.claimGraceMinutes', value: 'x', version: 1 }] },
-          { now: new Date(SEAT_T0) },
-        );
-        await bad.store.takeSeat({ scope: 'main', ...A });
-        const got = await bad.store.takeClaim({
-          ...target(48),
-          seat: actor(A, 1),
-          owner: { kind: 'worker', label: '工人甲' },
+        expect((await store.getClaim(IDS.repo, 47)).claim).toMatchObject({
+          state: 'claimed',
+          endReason: null,
         });
-        expect(got).toMatchObject({ ok: false, reason: 'settings' });
-        if (got.ok || got.reason !== 'settings') throw new Error('认不出的设置不该往下做');
-        expect(got.why).toContain('seat.claimGraceMinutes');
-        expect((await bad.store.getClaim(IDS.repo, 48)).claim).toBeNull();
       });
     });
 
@@ -359,11 +351,13 @@ export function describeSeatStoreContract(name: string, make: MakeSeatStore): vo
         });
       });
 
-      it('带创始人原话：作废本机的认领（写明原话，记 claim.reassign）、给引擎；旧工人拿着旧认领号报进度写不进', async () => {
+      it('force: true 才作废本机的认领、给引擎（founder 只是记进原因，不是触发条件）；旧工人拿着旧认领号报进度写不进', async () => {
         await store.takeSeat({ scope: 'main', ...A });
         const local = await worker(63, actor(A, 1));
         if (!local.ok) throw new Error('本机没认领上');
-        const got = await engine(63, { founder: '这张给引擎' });
+        // 只带 founder、不带 force：不触发强制改派，照样 held（#446 起触发条件是 force，不是 founder）
+        expect(await engine(63, { founder: '这张给引擎' })).toMatchObject({ ok: false, reason: 'held' });
+        const got = await engine(63, { founder: '这张给引擎', force: true });
         expect(got).toMatchObject({
           ok: true,
           fresh: true,
@@ -384,16 +378,20 @@ export function describeSeatStoreContract(name: string, make: MakeSeatStore): vo
         ]);
       });
 
-      it('帅位改派给本机（#348）：带创始人原话作废引擎的、别的工人的（记 claim.reassign，写明给谁、原话），交回作废的那份；【故意造出的失败】不带原话 held、这张没动', async () => {
+      it('帅位改派给本机（#348）：force: true 作废引擎的、别的工人的（记 claim.reassign，写明给谁、原话），交回作废的那份；【故意造出的失败】不带 force 就是 held，这张没动', async () => {
         await store.takeSeat({ scope: 'main', ...A });
         const eng = await engine(65);
         if (!eng.ok) throw new Error('引擎没拿到');
-        const reassign = (issueNumber: number, label: string, founder?: string) =>
+        const reassign = (
+          issueNumber: number,
+          label: string,
+          opts: { force?: boolean; founder?: string } = {},
+        ) =>
           store.takeClaim({
             ...target(issueNumber),
             seat: actor(A, 1),
             owner: { kind: 'worker', label },
-            founder,
+            ...opts,
           });
         expect(await reassign(65, '工人乙')).toMatchObject({
           ok: false,
@@ -401,7 +399,7 @@ export function describeSeatStoreContract(name: string, make: MakeSeatStore): vo
           claim: { ownerKind: 'engine' },
         });
         expect((await store.getClaim(IDS.repo, 65)).claim).toMatchObject({ claimId: eng.claim.claimId });
-        const got = await reassign(65, '工人乙', '65 本机做');
+        const got = await reassign(65, '工人乙', { force: true, founder: '65 本机做' });
         expect(got).toMatchObject({
           ok: true,
           claim: { ownerKind: 'worker', ownerLabel: '工人乙', state: 'claimed' },
@@ -413,7 +411,7 @@ export function describeSeatStoreContract(name: string, make: MakeSeatStore): vo
           previous: { claimId: eng.claim.claimId, state: 'voided' },
         });
         // 工人拿着的也能强制改派给另一个工人
-        const again = await reassign(65, '工人丙', '换丙做');
+        const again = await reassign(65, '工人丙', { force: true, founder: '换丙做' });
         if (!got.ok || !again.ok) throw new Error('改派没成');
         expect(again.voided).toMatchObject({ claimId: got.claim.claimId, ownerLabel: '工人乙' });
         expect(await seatAudits(`claim:${IDS.repo}#65`)).toEqual([
@@ -423,7 +421,7 @@ export function describeSeatStoreContract(name: string, make: MakeSeatStore): vo
           ['claim.reassign', '本机/a1'],
           ['claim.take', '本机/a1'],
         ]);
-        // 原来的已经结束了的：不用原话，不作废谁，previous 交回原来那份
+        // 原来的已经结束了的：不用 force 也能认领，previous 交回原来那份（不是 voided，是 released）
         await store.endClaim({
           ...target(65),
           claimId: again.claim.claimId,
@@ -438,37 +436,18 @@ export function describeSeatStoreContract(name: string, make: MakeSeatStore): vo
         });
       });
 
-      it('【故意造出的失败】带着帅位来（交单）：不是帅位（换了人、过了租期、座位上没人）什么都不做；设置认不出也不做', async () => {
-        expect(await engine(64, { seat: actor(A, 1) })).toMatchObject({ ok: false, reason: 'not_seat' });
+      it('#446：带不带帅位、帅位新不新（没接过班、旧任期、很久没动静）都不影响引擎能不能拿到——seat 只是记进操作记录', async () => {
+        expect(await engine(64, { seat: actor(A, 1) })).toMatchObject({ ok: true });
         await store.takeSeat({ scope: 'main', ...A });
         await store.takeSeat({ scope: 'main', ...B });
-        const stale = await engine(64, { seat: actor(A, 1) });
-        expect(stale).toMatchObject({ ok: false, reason: 'not_seat' });
-        if (stale.ok || stale.reason !== 'not_seat') throw new Error('旧任期不该拿到');
-        expect(stale.why).toContain('帅位已经是 笔记本/b1（第 2 任）');
-        await s.backdateSeat('main', 60);
-        expect(await engine(64, { seat: actor(B, 2) })).toMatchObject({ ok: false, reason: 'not_seat' });
-        expect((await store.getClaim(IDS.repo, 64)).claim).toBeNull();
-        await store.renewSeat(actor(B, 2));
-        expect(await engine(64, { seat: actor(B, 2) })).toMatchObject({ ok: true, fresh: true });
-        expect((await store.listAudit({ target: `claim:${IDS.repo}#64`, limit: 5 })).items[0]).toMatchObject({
+        await s.backdateSeat('main', 6 * 60);
+        expect(await engine(70, { seat: actor(A, 1) })).toMatchObject({ ok: true });
+        expect((await store.listAudit({ target: `claim:${IDS.repo}#70`, limit: 5 })).items[0]).toMatchObject({
           actor: { id: 'github-intake' },
-          after: { seat: 'main#2' },
+          after: { seat: 'main#1' },
         });
-
-        const bad = await make(
-          { ...devFixtures(SEAT_T0), settings: [{ key: 'seat.leaseMinutes', value: 0, version: 1 }] },
-          { now: new Date(SEAT_T0) },
-        );
-        await bad.store.takeSeat({ scope: 'main', ...A });
-        const got = await bad.store.claimForEngine({
-          ...target(64),
-          workflowId: 'req:example/canary#64',
-          actor: INTAKE,
-          seat: actor(A, 1),
-        });
-        expect(got).toMatchObject({ ok: false, reason: 'settings' });
-        expect((await bad.store.getClaim(IDS.repo, 64)).claim).toBeNull();
+        // 不带 seat 也一样能拿到（接活自动派本来就不带帅位）
+        expect(await engine(71)).toMatchObject({ ok: true });
       });
 
       it('待起很久的：只列引擎待起超过几分钟的（在做的、本机的不列）；放下要认领号对得上，放下了本机能接着认领', async () => {

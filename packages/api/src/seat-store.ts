@@ -1,24 +1,21 @@
-// 帅位租约和认领的 Store 两份实现（#299，ports.ts 的 SeatStore）：Postgres 版把 @fleet-dao/db 的几条语句串进一个事务、
+// 帅位和认领的 Store 两份实现（#446，ports.ts 的 SeatStore）：Postgres 版把 @fleet-dao/db 的几条语句串进一个事务、
 // 记操作记录；内存版照同样的语义用 Store 的钟顶替库的 now()。两份过同一套契约测试（test/store-contract-seat.ts）。
-// 改这里之前必须知道：受保护动作（帅位认领新单、帅位交单给引擎）在同一个事务里先锁座位（for share）、按库的 now 核任期，
-// 再抢这一行；核不过、抢不到都什么也不改。引擎接活和本机认领抢的是同一行、同一句（takeClaimRow），只有一边拿到。
+// 改这里之前必须知道：#446 起帅位不再是锁——claim/board/handoff 都不核「是不是帅位」，永远按给的身份直接做。认领本身
+// 还留着「别人拿着不能抢」的规矩（除非 force）：引擎接活和本机认领抢的是同一行、同一句（takeClaimRow），只有一边拿到。
 // 判法在 @fleet-dao/core 的 seat.ts。
 import { randomUUID } from 'node:crypto';
 import {
   applyBoardWrite,
   boardProjectProblem,
-  claimExpired,
+  DEFAULT_CLAIM_GRACE_MINUTES,
   emptySeatBoard,
   holderText,
   type IssueClaim,
   isActiveClaim,
   isDrillScope,
   readSeatBoard,
-  readSeatSettings,
-  SEAT_DEFAULTS,
   type SeatBoardDoc,
   type SeatLease,
-  seatVerdict,
 } from '@fleet-dao/core';
 import {
   type Db,
@@ -33,27 +30,23 @@ import {
   type NewClaimRow,
   readClaim,
   readSeat as readSeatRow,
-  readSeatSetting,
-  renewSeatRow,
   type SeatBoardRow,
   type SeatLeaseRow,
   startEngineClaimRow,
   stepClaimRow,
   takeClaimRow,
   takeSeatRow,
+  touchSeatActivityRow,
   updateSeatBoardRow,
-  voidExpiredClaimRows,
   writeHandoffRow,
 } from '@fleet-dao/db';
 import type {
   Actor,
   AnswerSeatNeedResult,
-  ApplySeatBoardResult,
   ClaimTarget,
   EngineClaimResult,
   ListSeatBoardsResult,
   NewAuditEntry,
-  SeatActor,
   SeatBoardRecord,
   SeatIdentity,
   SeatStore,
@@ -68,7 +61,8 @@ export function toSeatLease(r: SeatLeaseRow): SeatLease {
     holderMachine: r.holderMachine,
     holderSession: r.holderSession,
     acquiredAt: iso(r.acquiredAt),
-    renewedAt: iso(r.renewedAt),
+    // DB 列还叫 renewed_at（没改名，避免迁移）：#446 起当「最后活动时间」用，take/handoff/board 写入都会顶它。
+    lastActivityAt: iso(r.renewedAt),
     previousMachine: r.previousMachine,
     previousSession: r.previousSession,
     handoff: r.handoff,
@@ -105,8 +99,6 @@ const claimActor = (c: IssueClaim): Actor =>
   c.ownerKind === 'engine'
     ? { kind: 'engine', id: 'fusion' }
     : { kind: 'ai', id: `${c.ownerMachine ?? '?'}/${c.ownerLabel ?? '?'}` };
-/** 作废是引擎的定时任务做的。 */
-export const CLAIMS_SWEEP: Actor = { kind: 'engine', id: 'claims-sweep' };
 
 export const seatTarget = (scope: string) => `seat:${scope}`;
 export const claimTarget = (t: ClaimTarget) => `claim:${t.repoId}#${t.issueNumber}`;
@@ -120,8 +112,8 @@ const claimSummary = (c: IssueClaim) => ({
 type InsertAudit = (tx: Db, entry: NewAuditEntry) => Promise<string>;
 
 /**
- * 引擎的新认领：待起、带工作流编号，不属于哪个座位。宽限期这一格引擎用不上（引擎的认领不按心跳作废，死活归工作流和停滞检测管），
- * 填默认值，不去读设置：设置写坏了不该连接活一起拦住。
+ * 引擎的新认领：待起、带工作流编号，不属于哪个座位。宽限期这一格引擎用不上（不按心跳作废，死活归工作流和停滞检测管），
+ * 填默认值——这一格现在纯记录，没有什么会按它自动作废任何认领了（#446）。
  */
 const engineClaimRow = (
   input: ClaimTarget & { workflowId: string; note?: string | undefined; drill?: string | undefined },
@@ -138,55 +130,19 @@ const engineClaimRow = (
   seatTerm: input.drill === undefined ? null : 0,
   state: 'pending_start',
   workflowId: input.workflowId,
-  graceMinutes: SEAT_DEFAULTS.claimGraceMinutes,
+  graceMinutes: DEFAULT_CLAIM_GRACE_MINUTES,
   note: input.note ?? null,
 });
 
-/** 强制改派（给引擎、给本机的工人）时作废原来那份写的原因。 */
-const reassignReason = (to: string, founder: string) => `改派给${to}（创始人原话：${founder}）`;
-
-/** 带着帅位来的受保护动作：按库的 now 核任期没换、没过期（判法在 core 的 seatVerdict）。核过是 null。 */
-function seatProblem(
-  lease: SeatLease | null,
-  seat: SeatActor,
-  now: string,
-  settings: ReturnType<typeof readSeatSettings>,
-): { reason: 'settings' | 'not_seat'; why: string } | null {
-  if (!settings.ok) return { reason: 'settings', why: settings.why };
-  const verdict = seatVerdict(lease, seat, now, settings.settings.leaseMinutes);
-  return verdict.ok ? null : { reason: 'not_seat', why: verdict.why };
-}
-
-/** 交接说明：现任整份换掉；刚被换下的上一任接在后面补一段。 */
-function handoffText(
-  lease: SeatLease,
-  input: { term: number; machine: string; session: string; text: string },
-) {
-  const current =
-    lease.term === input.term &&
-    lease.holderMachine === input.machine &&
-    lease.holderSession === input.session;
-  if (current) return input.text;
-  const previous =
-    lease.term === input.term + 1 &&
-    lease.previousMachine === input.machine &&
-    lease.previousSession === input.session;
-  if (!previous) return null;
-  const note = `（第 ${input.term} 任 ${input.machine}/${input.session} 退役时补的）\n${input.text}`;
-  return lease.handoff ? `${lease.handoff}\n\n${note}` : note;
-}
+/** 强制改派（给引擎、给本机的工人）时作废原来那份写的原因：有创始人原话就带上，没有就写没写原因（#446 起不再必须要）。 */
+const reassignReason = (to: string, why: string | undefined) =>
+  `改派给${to}（${why?.trim() ? `创始人原话：${why}` : '没写原因'}）`;
 
 export function pgSeatStore(db: Db, insertAudit: InsertAudit): SeatStore {
   return {
     async readSeat(scope) {
-      // 一条一条读：并发的两条里一条连不上时另一条会挂着，关连接要等它（postgres.js 的 end 等在途的查询）
       const seat = await readSeatRow(db, scope);
-      const raw = await readSeatSetting(db);
-      return {
-        lease: seat.value && toSeatLease(seat.value),
-        now: iso(seat.now),
-        settings: readSeatSettings(raw),
-      };
+      return { lease: seat.value && toSeatLease(seat.value), now: iso(seat.now) };
     },
 
     async takeSeat(input) {
@@ -209,25 +165,16 @@ export function pgSeatStore(db: Db, insertAudit: InsertAudit): SeatStore {
       });
     },
 
-    async renewSeat(input) {
-      const r = await renewSeatRow(db, input);
-      if (r) return { ok: true, lease: toSeatLease(r.value), now: iso(r.now) };
-      const cur = await readSeatRow(db, input.scope);
-      return { ok: false, lease: cur.value && toSeatLease(cur.value), now: iso(cur.now) };
-    },
-
     async writeHandoff(input) {
       return db.transaction(async (tx) => {
         const cur = await readSeatRow(tx, input.scope, true);
-        const lease = cur.value && toSeatLease(cur.value);
-        const text = lease && handoffText(lease, input);
-        if (!lease || text === null) return { ok: false as const, lease, now: iso(cur.now) };
-        const row = await writeHandoffRow(tx, { scope: input.scope, text });
+        if (!cur.value) return { ok: false as const, lease: null, now: iso(cur.now) };
+        const row = await writeHandoffRow(tx, { scope: input.scope, text: input.text });
         await insertAudit(tx, {
           actor: seatActor(input),
           action: 'seat.handoff',
           target: seatTarget(input.scope),
-          after: { term: input.term, chars: input.text.length },
+          after: { chars: input.text.length },
           via: 'engine',
           ok: true,
         });
@@ -237,17 +184,6 @@ export function pgSeatStore(db: Db, insertAudit: InsertAudit): SeatStore {
 
     async takeClaim(input) {
       return db.transaction(async (tx) => {
-        const settings = readSeatSettings(await readSeatSetting(tx));
-        const seat = await readSeatRow(tx, input.seat.scope, true);
-        const now = iso(seat.now);
-        if (!settings.ok) return { ok: false as const, reason: 'settings' as const, why: settings.why, now };
-        const verdict = seatVerdict(
-          seat.value && toSeatLease(seat.value),
-          input.seat,
-          now,
-          settings.settings.leaseMinutes,
-        );
-        if (!verdict.ok) return { ok: false as const, reason: 'not_seat' as const, why: verdict.why, now };
         // 这个座位的帅位自己占着的（开单时替帅位认领的）由现任帅位换给工人：换之前记下原来那份
         const prev = await readClaim(tx, input.repoId, input.issueNumber, true);
         const row = {
@@ -258,10 +194,12 @@ export function pgSeatStore(db: Db, insertAudit: InsertAudit): SeatStore {
           ownerMachine: input.seat.machine,
           ownerLabel: input.owner.label,
           seatScope: input.seat.scope,
-          seatTerm: input.seat.term,
+          // seat_scope 非空时 seat_term 也必须非空（issue_claims_seat_shape）：term 没给就写 0（和演练引擎那份
+          // 同一个「没有真任期」的写法），不是 null——这里 scope 永远给了（SeatActor.scope 必填）
+          seatTerm: input.seat.term ?? 0,
           state: 'claimed' as const,
           workflowId: null,
-          graceMinutes: input.graceMinutes ?? settings.settings.claimGraceMinutes,
+          graceMinutes: input.graceMinutes ?? DEFAULT_CLAIM_GRACE_MINUTES,
           note: input.note ?? null,
         };
         let got = await takeClaimRow(tx, row, { seatReservationOf: input.seat.scope });
@@ -270,16 +208,16 @@ export function pgSeatStore(db: Db, insertAudit: InsertAudit): SeatStore {
           const cur = await readClaim(tx, input.repoId, input.issueNumber);
           if (!cur.value) throw new Error(`抢 ${claimTarget(input)} 没抢到，读回来却没有认领`);
           const held = toIssueClaim(cur.value);
-          if (!input.founder)
+          if (!input.force)
             return { ok: false as const, reason: 'held' as const, claim: held, now: iso(cur.now) };
-          // 带着创始人原话：原来那份（引擎的、别的工人的）当场作废，再给这次的工人
+          // 强制改派（#446 起不用创始人原话）：原来那份（引擎的、别的工人的）当场作废，再给这次的工人
           const to = `${input.seat.machine}/${input.owner.label}`;
           const ended = await endClaimRow(tx, {
             repoId: input.repoId,
             issueNumber: input.issueNumber,
             claimId: held.claimId,
             state: 'voided',
-            reason: reassignReason(to, input.founder),
+            reason: reassignReason(to, input.founder ?? input.note),
           });
           if (!ended) throw new Error(`锁住了 ${claimTarget(input)} 的认领，作废时它却变了`);
           voided = toIssueClaim(ended.value);
@@ -289,7 +227,7 @@ export function pgSeatStore(db: Db, insertAudit: InsertAudit): SeatStore {
             target: claimTarget(input),
             before: claimSummary(held),
             after: { state: 'voided', to },
-            reason: reassignReason(to, input.founder),
+            reason: reassignReason(to, input.founder ?? input.note),
             via: 'engine',
             ok: true,
           });
@@ -307,7 +245,7 @@ export function pgSeatStore(db: Db, insertAudit: InsertAudit): SeatStore {
           ...(replaced ? { before: claimSummary(replaced) } : {}),
           after: {
             ...claimSummary(claim),
-            seat: `${input.seat.scope}#${input.seat.term}`,
+            seat: `${input.seat.scope}#${input.seat.term ?? '?'}`,
             grace: claim.graceMinutes,
           },
           reason: input.note,
@@ -362,35 +300,8 @@ export function pgSeatStore(db: Db, insertAudit: InsertAudit): SeatStore {
       });
     },
 
-    async voidExpiredClaims(input) {
-      return db.transaction(async (tx) => {
-        const r = await voidExpiredClaimRows(tx, input);
-        const voided = r.value.map(toIssueClaim);
-        for (const claim of voided) {
-          await insertAudit(tx, {
-            actor: CLAIMS_SWEEP,
-            action: 'claim.void',
-            target: claimTarget(claim),
-            before: { ...claimSummary(claim), heartbeatAt: claim.heartbeatAt },
-            after: { state: 'voided' },
-            reason: claim.endReason ?? undefined,
-            via: 'engine',
-            ok: true,
-          });
-        }
-        return { voided, now: iso(r.now) };
-      });
-    },
-
     async claimForEngine(input) {
       return db.transaction(async (tx): Promise<EngineClaimResult> => {
-        if (input.seat) {
-          const settings = readSeatSettings(await readSeatSetting(tx));
-          const seat = await readSeatRow(tx, input.seat.scope, true);
-          const now = iso(seat.now);
-          const problem = seatProblem(seat.value && toSeatLease(seat.value), input.seat, now, settings);
-          if (problem) return { ok: false, ...problem, now };
-        }
         const taken = async (claimId: string) => {
           const got = await takeClaimRow(tx, engineClaimRow(input, claimId));
           if (!got) return null;
@@ -402,7 +313,7 @@ export function pgSeatStore(db: Db, insertAudit: InsertAudit): SeatStore {
             after: {
               ...claimSummary(claim),
               workflowId: claim.workflowId,
-              ...(input.seat ? { seat: `${input.seat.scope}#${input.seat.term}` } : {}),
+              ...(input.seat ? { seat: `${input.seat.scope}#${input.seat.term ?? '?'}` } : {}),
             },
             reason: input.note,
             via: 'engine',
@@ -418,13 +329,13 @@ export function pgSeatStore(db: Db, insertAudit: InsertAudit): SeatStore {
         const claim = toIssueClaim(cur.value);
         const now = iso(cur.now);
         if (claim.ownerKind === 'engine') return { ok: true, claim, fresh: false, voided: null, now };
-        if (!input.founder) return { ok: false, reason: 'held', claim, now };
+        if (!input.force) return { ok: false, reason: 'held', claim, now };
         const ended = await endClaimRow(tx, {
           repoId: input.repoId,
           issueNumber: input.issueNumber,
           claimId: claim.claimId,
           state: 'voided',
-          reason: reassignReason('引擎', input.founder),
+          reason: reassignReason('引擎', input.founder ?? input.note),
         });
         if (!ended) throw new Error(`锁住了 ${claimTarget(input)} 的认领，作废时它却变了`);
         const voided = toIssueClaim(ended.value);
@@ -434,7 +345,7 @@ export function pgSeatStore(db: Db, insertAudit: InsertAudit): SeatStore {
           target: claimTarget(input),
           before: claimSummary(claim),
           after: { state: 'voided', to: 'engine' },
-          reason: reassignReason('引擎', input.founder),
+          reason: reassignReason('引擎', input.founder ?? input.note),
           via: 'engine',
           ok: true,
         });
@@ -494,13 +405,12 @@ export function pgSeatStore(db: Db, insertAudit: InsertAudit): SeatStore {
     },
 
     async applySeatBoard(input) {
+      // #446 起谁都能写（board 只给人看，不是锁）：不核是不是帅位，只锁这一行、按格式判。
       return db.transaction(async (tx) => {
-        const gate = await gateSeat(tx, input.seat);
-        if (!gate.ok) return gate;
-        const projectWhy = boardProjectProblem(input.project);
-        if (projectWhy) return { ok: false as const, reason: 'bad' as const, why: projectWhy, now: gate.now };
         const locked = await lockSeatBoardRow(tx, input.seat.scope, input.project);
         const now = iso(locked.now);
+        const projectWhy = boardProjectProblem(input.project);
+        if (projectWhy) return { ok: false as const, reason: 'bad' as const, why: projectWhy, now };
         const current = locked.value
           ? boardFromRow(locked.value)
           : { ok: true as const, doc: emptySeatBoard() };
@@ -517,6 +427,8 @@ export function pgSeatStore(db: Db, insertAudit: InsertAudit): SeatStore {
           doc: applied.doc,
           updatedAt: locked.now,
         });
+        // 顺手把这个座位的「最后活动时间」顶成现在（只给人看）：座位还没人接过班就是 0 行，不影响 board 写入成功。
+        await touchSeatActivityRow(tx, input.seat.scope);
         return { ok: true as const, board: saved, now };
       });
     },
@@ -562,19 +474,6 @@ function toBoardRecord(
   doc: SeatBoardDoc,
 ): SeatBoardRecord {
   return { id: row.id, scope: row.scope, project: row.project, updatedAt: iso(row.updatedAt), doc };
-}
-
-async function gateSeat(
-  db: Db,
-  seat: SeatActor,
-): Promise<{ ok: true; now: string } | Extract<ApplySeatBoardResult, { ok: false }>> {
-  const settings = readSeatSettings(await readSeatSetting(db));
-  const cur = await readSeatRow(db, seat.scope, true);
-  const now = iso(cur.now);
-  if (!settings.ok) return { ok: false, reason: 'settings', why: settings.why, now };
-  const verdict = seatVerdict(cur.value && toSeatLease(cur.value), seat, now, settings.settings.leaseMinutes);
-  if (!verdict.ok) return { ok: false, reason: 'not_seat', why: verdict.why, now };
-  return { ok: true, now };
 }
 
 async function saveBoard(
@@ -631,8 +530,6 @@ async function answerLocked(
 export interface SeatMemoryData {
   seatLeases: SeatLease[];
   claims: IssueClaim[];
-  /** settings 表那两项（键是 seat.leaseMinutes、seat.claimGraceMinutes）。 */
-  settings: { key: string; value: unknown }[];
   /** 帅位栏（#199）。 */
   boards: SeatBoardRecord[];
 }
@@ -645,10 +542,6 @@ export function memorySeatStore(
   touch: (id: string) => void = () => {},
 ): SeatStore {
   const nowIso = () => now().toISOString();
-  const rawSettings = () => ({
-    leaseMinutes: data.settings.find((s) => s.key === 'seat.leaseMinutes')?.value,
-    claimGraceMinutes: data.settings.find((s) => s.key === 'seat.claimGraceMinutes')?.value,
-  });
   const seatOf = (scope: string) => data.seatLeases.find((l) => l.scope === scope) ?? null;
   const claimOf = (t: ClaimTarget) =>
     data.claims.find((c) => c.repoId === t.repoId && c.issueNumber === t.issueNumber) ?? null;
@@ -660,7 +553,7 @@ export function memorySeatStore(
   return {
     async readSeat(scope) {
       const lease = seatOf(scope);
-      return { lease: lease && copyLease(lease), now: nowIso(), settings: readSeatSettings(rawSettings()) };
+      return { lease: lease && copyLease(lease), now: nowIso() };
     },
 
     async takeSeat(input) {
@@ -674,7 +567,7 @@ export function memorySeatStore(
         holderMachine: input.machine,
         holderSession: input.session,
         acquiredAt: at,
-        renewedAt: at,
+        lastActivityAt: at,
         previousMachine: old ? old.holderMachine : null,
         previousSession: old ? old.holderSession : null,
         handoff: old ? old.handoff : null,
@@ -693,31 +586,17 @@ export function memorySeatStore(
       return { lease: copyLease(lease), now: at };
     },
 
-    async renewSeat(input) {
-      const lease = seatOf(input.scope);
-      if (
-        lease &&
-        lease.term === input.term &&
-        lease.holderMachine === input.machine &&
-        lease.holderSession === input.session
-      ) {
-        lease.renewedAt = nowIso();
-        return { ok: true, lease: copyLease(lease), now: lease.renewedAt };
-      }
-      return { ok: false, lease: lease && copyLease(lease), now: nowIso() };
-    },
-
     async writeHandoff(input) {
       const lease = seatOf(input.scope);
-      const text = lease && handoffText(lease, input);
-      if (!lease || text === null) return { ok: false, lease: lease && copyLease(lease), now: nowIso() };
-      lease.handoff = text;
+      if (!lease) return { ok: false, lease: null, now: nowIso() };
+      lease.handoff = input.text;
       lease.handoffAt = nowIso();
+      lease.lastActivityAt = lease.handoffAt;
       audit({
         actor: seatActor(input),
         action: 'seat.handoff',
         target: seatTarget(input.scope),
-        after: { term: input.term, chars: input.text.length },
+        after: { chars: input.text.length },
         via: 'engine',
         ok: true,
       });
@@ -726,23 +605,19 @@ export function memorySeatStore(
 
     async takeClaim(input) {
       const at = nowIso();
-      const settings = readSeatSettings(rawSettings());
-      if (!settings.ok) return { ok: false, reason: 'settings', why: settings.why, now: at };
-      const verdict = seatVerdict(seatOf(input.seat.scope), input.seat, at, settings.settings.leaseMinutes);
-      if (!verdict.ok) return { ok: false, reason: 'not_seat', why: verdict.why, now: at };
       const cur = claimOf(input);
       // 这个座位的帅位自己占着的（开单时替帅位认领的）由现任帅位换给工人，和 Postgres 版的 seatReservationOf 一样
       const reserved = cur?.ownerKind === 'seat' && cur.seatScope === input.seat.scope;
       let voided: IssueClaim | null = null;
       if (cur && isActiveClaim(cur.state) && !reserved) {
-        if (!input.founder) return { ok: false, reason: 'held', claim: copyClaim(cur), now: at };
-        // 带着创始人原话：原来那份当场作废，再给这次的工人（和 Postgres 版一样）
+        if (!input.force) return { ok: false, reason: 'held', claim: copyClaim(cur), now: at };
+        // 强制改派（#446 起不用创始人原话）：原来那份当场作废，再给这次的工人（和 Postgres 版一样）
         const to = `${input.seat.machine}/${input.owner.label}`;
         const before = claimSummary(cur);
         cur.state = 'voided';
         cur.endedAt = at;
         cur.updatedAt = at;
-        cur.endReason = reassignReason(to, input.founder);
+        cur.endReason = reassignReason(to, input.founder ?? input.note);
         voided = copyClaim(cur);
         audit({
           actor: seatActor(input.seat),
@@ -765,11 +640,12 @@ export function memorySeatStore(
         ownerMachine: input.seat.machine,
         ownerLabel: input.owner.label,
         seatScope: input.seat.scope,
-        seatTerm: input.seat.term,
+        // term 没给就是 0（和 Postgres 版一样：scope 非空时 term 不能是 null，0 表示「没有真任期」）
+        seatTerm: input.seat.term ?? 0,
         state: 'claimed',
         workflowId: null,
         prNumbers: [],
-        graceMinutes: input.graceMinutes ?? settings.settings.claimGraceMinutes,
+        graceMinutes: input.graceMinutes ?? DEFAULT_CLAIM_GRACE_MINUTES,
         claimedAt: at,
         heartbeatAt: at,
         updatedAt: at,
@@ -785,7 +661,7 @@ export function memorySeatStore(
         ...(replaced ? { before: claimSummary(replaced) } : {}),
         after: {
           ...claimSummary(claim),
-          seat: `${input.seat.scope}#${input.seat.term}`,
+          seat: `${input.seat.scope}#${input.seat.term ?? '?'}`,
           grace: claim.graceMinutes,
         },
         reason: input.note,
@@ -844,40 +720,8 @@ export function memorySeatStore(
       return { ok: true, claim: copyClaim(cur), now: at };
     },
 
-    async voidExpiredClaims(input) {
-      const at = nowIso();
-      const due = data.claims.filter((c) => claimExpired(c, at)).slice(0, input.limit);
-      for (const c of due) {
-        const before = { ...claimSummary(c), heartbeatAt: c.heartbeatAt };
-        c.state = 'voided';
-        c.endedAt = at;
-        c.updatedAt = at;
-        c.endReason = `过了宽限期（${c.graceMinutes} 分钟）没心跳`;
-        audit({
-          actor: CLAIMS_SWEEP,
-          action: 'claim.void',
-          target: claimTarget(c),
-          before,
-          after: { state: 'voided' },
-          reason: c.endReason,
-          via: 'engine',
-          ok: true,
-        });
-      }
-      return { voided: due.map(copyClaim), now: at };
-    },
-
     async claimForEngine(input) {
       const at = nowIso();
-      if (input.seat) {
-        const problem = seatProblem(
-          seatOf(input.seat.scope),
-          input.seat,
-          at,
-          readSeatSettings(rawSettings()),
-        );
-        if (problem) return { ok: false, ...problem, now: at };
-      }
       const take = (): IssueClaim => {
         const row = engineClaimRow(input, randomUUID());
         const claim: IssueClaim = {
@@ -900,7 +744,7 @@ export function memorySeatStore(
           after: {
             ...claimSummary(claim),
             workflowId: claim.workflowId,
-            ...(input.seat ? { seat: `${input.seat.scope}#${input.seat.term}` } : {}),
+            ...(input.seat ? { seat: `${input.seat.scope}#${input.seat.term ?? '?'}` } : {}),
           },
           reason: input.note,
           via: 'engine',
@@ -913,12 +757,12 @@ export function memorySeatStore(
         return { ok: true, claim: take(), fresh: true, voided: null, now: at };
       if (cur.ownerKind === 'engine')
         return { ok: true, claim: copyClaim(cur), fresh: false, voided: null, now: at };
-      if (!input.founder) return { ok: false, reason: 'held', claim: copyClaim(cur), now: at };
+      if (!input.force) return { ok: false, reason: 'held', claim: copyClaim(cur), now: at };
       const before = claimSummary(cur);
       cur.state = 'voided';
       cur.endedAt = at;
       cur.updatedAt = at;
-      cur.endReason = reassignReason('引擎', input.founder);
+      cur.endReason = reassignReason('引擎', input.founder ?? input.note);
       const voided = copyClaim(cur);
       audit({
         actor: input.actor,
@@ -1010,11 +854,8 @@ export function memorySeatStore(
     },
 
     async applySeatBoard(input) {
+      // #446 起谁都能写（board 只给人看，不是锁）：不核是不是帅位。
       const now = nowIso();
-      const settings = readSeatSettings(rawSettings());
-      if (!settings.ok) return { ok: false, reason: 'settings', why: settings.why, now };
-      const verdict = seatVerdict(seatOf(input.seat.scope), input.seat, now, settings.settings.leaseMinutes);
-      if (!verdict.ok) return { ok: false, reason: 'not_seat', why: verdict.why, now };
       const projectWhy = boardProjectProblem(input.project);
       if (projectWhy) return { ok: false, reason: 'bad', why: projectWhy, now };
       const idx = data.boards.findIndex((b) => b.scope === input.seat.scope && b.project === input.project);
@@ -1034,6 +875,9 @@ export function memorySeatStore(
       if (idx >= 0) data.boards[idx] = record;
       else data.boards.push(record);
       touch(record.id);
+      // 顺手把这个座位的「最后活动时间」顶成现在（只给人看）；座位还没人接过班就什么都不做。
+      const lease = seatOf(input.seat.scope);
+      if (lease) lease.lastActivityAt = now;
       return { ok: true, board: copyBoard(record), now };
     },
 

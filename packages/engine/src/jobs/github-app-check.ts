@@ -1,5 +1,5 @@
 // GitHub 两个机器人的权限自检（每小时对账的一项）：@fleet-dao/github 的 selfCheck 写了却从没跑过——权限不够时（比如 App
-// 设置里加了 statuses:write、安装处没点接受，#299 的「认领对得上」就贴不上）没有任何地方报出来。这里每轮对每个受管的仓
+// 设置里加了 statuses:write、安装处没点接受，second-opinion 就贴不上）没有任何地方报出来。这里每轮对每个受管的仓
 // 查一次两个机器人实际拿到的权限，缺的、不该有的、没查成的各报一条「要人看」提醒（键 github-app:<机器人>:<仓>），好了下一轮
 // 自己撤；后端健康页的 github_app 项看这些提醒开没开着（同一个前缀 GITHUB_APP_ALERT_PREFIX）。
 // 改这里之前必须知道：没查成（没装到这个仓、凭据读不到、GitHub 回的认不出）也报提醒、这一轮记没查全，不当成权限够。
@@ -31,7 +31,7 @@ export function githubAppAlert(item: SelfCheckItem): { title: string; body: stri
   if (item.why) {
     return {
       title: `${who}在 ${item.repo} 上的权限没查成`,
-      body: `${item.why}。查成之前按权限不够算：要它做的事（合并、改单、贴「认领对得上」……）可能做不成。好了下一轮每小时对账自己撤。`,
+      body: `${item.why}。查成之前按权限不够算：要它做的事（合并、改单、贴 second-opinion……）可能做不成。好了下一轮每小时对账自己撤。`,
     };
   }
   const parts = [
@@ -40,7 +40,7 @@ export function githubAppAlert(item: SelfCheckItem): { title: string; body: stri
   ].filter(Boolean);
   return {
     title: `${who}在 ${item.repo} 上的权限不对：${parts.join('；')}`,
-    body: `去 GitHub 的 App 设置里改，再到装它的地方（Settings → Applications → Installed GitHub Apps → Configure）点接受新权限；改好下一轮每小时对账自己撤。${item.missing.includes('statuses:write') ? '缺 statuses:write 时引擎贴不了 second-opinion，高风险路径的 PR 合并闸会一直等着；也贴不了「认领对得上」（#299）。' : ''}`,
+    body: `去 GitHub 的 App 设置里改，再到装它的地方（Settings → Applications → Installed GitHub Apps → Configure）点接受新权限；改好下一轮每小时对账自己撤。${item.missing.includes('statuses:write') ? '缺 statuses:write 时引擎贴不了 second-opinion，高风险路径的 PR 合并闸会一直等着。' : ''}`,
   };
 }
 

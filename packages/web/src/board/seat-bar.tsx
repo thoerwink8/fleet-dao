@@ -29,58 +29,65 @@ export function SeatBar() {
         </p>
       ) : null}
       {board.data ? (
-        <div className="grid gap-3 md:grid-cols-3">
-          <Block title="要你定的">
-            {board.data.projects.every((p) => p.needs.length === 0) ? <Empty>没有要你定的</Empty> : null}
-            {board.data.projects.flatMap((p) =>
-              p.needs.map((n) => (
-                <div key={n.id} className="mb-2">
-                  <p>
-                    {p.project} · {n.question}
-                  </p>
-                  <div className="mt-1 flex flex-wrap gap-1">
-                    {n.options.map((option) => (
-                      <Button
-                        key={option}
-                        size="sm"
-                        variant={option === n.recommended ? 'default' : 'outline'}
-                        className="h-7 px-2 text-xs"
-                        disabled={answer.isPending}
-                        onClick={() => answer.mutate({ needId: n.id, option })}
-                      >
-                        {option}
-                      </Button>
-                    ))}
+        <>
+          <p className="mb-2 text-xs text-muted-foreground">
+            {board.data.seat
+              ? `帅位：第 ${board.data.seat.term} 任 ${board.data.seat.holder}，最后活动 ${formatAgo(board.data.seat.lastActivityAt, now)}`
+              : '帅位：还没人接班'}
+          </p>
+          <div className="grid gap-3 md:grid-cols-3">
+            <Block title="要你定的">
+              {board.data.projects.every((p) => p.needs.length === 0) ? <Empty>没有要你定的</Empty> : null}
+              {board.data.projects.flatMap((p) =>
+                p.needs.map((n) => (
+                  <div key={n.id} className="mb-2">
+                    <p>
+                      {p.project} · {n.question}
+                    </p>
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {n.options.map((option) => (
+                        <Button
+                          key={option}
+                          size="sm"
+                          variant={option === n.recommended ? 'default' : 'outline'}
+                          className="h-7 px-2 text-xs"
+                          disabled={answer.isPending}
+                          onClick={() => answer.mutate({ needId: n.id, option })}
+                        >
+                          {option}
+                        </Button>
+                      ))}
+                    </div>
                   </div>
-                </div>
-              )),
-            )}
-          </Block>
-          <Block title="在做的">
-            {board.data.projects.every((p) => p.steps.length === 0) ? <Empty>没有在做的</Empty> : null}
-            {board.data.projects.flatMap((p) =>
-              [...p.steps]
-                .sort((a, b) => a.order - b.order)
-                .map((s) => (
-                  <p key={`${p.project}-${s.id}`}>
-                    {p.project} · {STATUS[s.status] ?? s.status} · {s.title}
-                    <span className="text-muted-foreground"> · {formatAgo(s.updatedAt, now)}</span>
+                )),
+              )}
+            </Block>
+            <Block title="在做的">
+              {board.data.projects.every((p) => p.steps.length === 0) ? <Empty>没有在做的</Empty> : null}
+              {board.data.projects.flatMap((p) =>
+                [...p.steps]
+                  .sort((a, b) => a.order - b.order)
+                  .map((s) => (
+                    <p key={`${p.project}-${s.id}`}>
+                      {p.project} · {STATUS[s.status] ?? s.status} · {s.title}
+                      <span className="text-muted-foreground"> · {formatAgo(s.updatedAt, now)}</span>
+                    </p>
+                  )),
+              )}
+            </Block>
+            <Block title="最近动态">
+              {board.data.projects.every((p) => p.log.length === 0) ? <Empty>没有动态</Empty> : null}
+              {board.data.projects.flatMap((p) =>
+                p.log.map((e) => (
+                  <p key={`${p.project}-${e.at}-${e.text}`}>
+                    {e.text}
+                    <span className="text-muted-foreground"> · {formatAgo(e.at, now)}</span>
                   </p>
                 )),
-            )}
-          </Block>
-          <Block title="最近动态">
-            {board.data.projects.every((p) => p.log.length === 0) ? <Empty>没有动态</Empty> : null}
-            {board.data.projects.flatMap((p) =>
-              p.log.map((e) => (
-                <p key={`${p.project}-${e.at}-${e.text}`}>
-                  {e.text}
-                  <span className="text-muted-foreground"> · {formatAgo(e.at, now)}</span>
-                </p>
-              )),
-            )}
-          </Block>
-        </div>
+              )}
+            </Block>
+          </div>
+        </>
       ) : null}
     </section>
   );

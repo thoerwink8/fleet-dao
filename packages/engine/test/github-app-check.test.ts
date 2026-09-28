@@ -90,7 +90,7 @@ describe('GitHub 机器人权限自检（每小时对账的一项）', () => {
     expect(w.resolved).toEqual([]);
   });
 
-  it('【故意造出的失败】「引擎」缺 statuses:write（设置里加了、安装处没点接受）：报一条要人看，写明贴不了「认领对得上」', async () => {
+  it('【故意造出的失败】「引擎」缺 statuses:write（设置里加了、安装处没点接受）：报一条要人看，写明贴不了 second-opinion', async () => {
     const w = world([item({ role: 'agent' }), item({ ok: false, missing: ['statuses:write'] })]);
     expect(await checkGitHubApps(w.deps)).toEqual({ scanned: 2, found: 1, unchecked: [] });
     expect(w.raised).toHaveLength(1);
@@ -100,7 +100,7 @@ describe('GitHub 机器人权限自检（每小时对账的一项）', () => {
       title: '「引擎」机器人在 acme/widgets 上的权限不对：缺 statuses:write',
     });
     expect(w.raised[0]?.body).toContain('点接受新权限');
-    expect(w.raised[0]?.body).toContain('认领对得上');
+    expect(w.raised[0]?.body).toContain('second-opinion');
   });
 
   it('【故意造出的失败】「干活的」多了 issues:write：权限「够」也照报（不该有的写权限）', async () => {

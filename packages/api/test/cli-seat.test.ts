@@ -1,24 +1,22 @@
-// fleet-api seat …、fleet-api claim …（#299 帅位只一个，specs/299-帅位只一个/方案.md 第三节）：本机经 ssh 调的那几条命令。
-// 参数不对不连库（退出码 2）；不是帅位、别人拿着、认领号对不上退出码 3；连不上库退出码 1；带 --json 只打一行 JSON 给脚本读。
+// fleet-api seat …、fleet-api claim …（#446 帅位认领简化，specs/446-帅位认领简化/需求.md）：本机经 ssh 调的那几条命令。
+// #446 起帅位不是锁：接班永远成功，没有 renew/check 了；认领不核是不是帅位，只挡「这张单已经被别人活着拿着」——退出码 3；
+// 连不上库退出码 1；参数不对退出码 2，不连库；带 --json 只打一行 JSON 给脚本读。
 // 判法、存取的边界表在 core 的 seat.test.ts、db 的 seat.test.ts 和 Store 契约（store-contract-seat.ts）；这里管命令这一层。
 import { fileURLToPath } from 'node:url';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createClaimStatus } from '../src/claim-status.ts';
 import { type CliDeps, main } from '../src/cli.ts';
 import { devFixtures } from '../src/dev-fixtures.ts';
-import { silentLogger } from '../src/log.ts';
 import { createMemoryStore } from '../src/memory-store.ts';
 import { createPgStore } from '../src/pg-store.ts';
 import { type Store, type TaskSignal, WorkflowGoneError } from '../src/ports.ts';
 import { runChild } from './child.ts';
-import { AGENT_BOT, fakeClaimsGitHub } from './fake-claims-github.ts';
 import { seedPg } from './pg-fixtures.ts';
 
 const T0 = new Date('2026-09-27T08:00:00.000Z');
 const REPO = 'example/canary';
 
-function setup(base?: Store, options: { noGitHub?: boolean } = {}) {
+function setup(base?: Store) {
   const clock = { now: new Date(T0) };
   const memory = createMemoryStore(devFixtures(T0), { now: () => clock.now });
   const store = base ?? memory;
@@ -26,7 +24,6 @@ function setup(base?: Store, options: { noGitHub?: boolean } = {}) {
   const err: string[] = [];
   let opened = 0;
   let stdin = '';
-  const gh = fakeClaimsGitHub();
   /** 发给引擎工作流的信号；gone 里的工作流算已经不在了。 */
   const signals: { workflowId: string; signal: TaskSignal }[] = [];
   const gone = new Set<string>();
@@ -55,14 +52,6 @@ function setup(base?: Store, options: { noGitHub?: boolean } = {}) {
       },
       close: async () => {},
     }),
-    ...(options.noGitHub
-      ? {}
-      : {
-          openClaims: async () => ({
-            claims: createClaimStatus({ store, github: gh, log: silentLogger }),
-            close: async () => {},
-          }),
-        }),
     now: () => clock.now,
     readStdin: async () => stdin,
   };
@@ -78,7 +67,6 @@ function setup(base?: Store, options: { noGitHub?: boolean } = {}) {
   };
   return {
     memory,
-    gh,
     signals,
     gone,
     clock,
@@ -106,12 +94,9 @@ describe('参数', () => {
       ['seat', 'take'],
       ['seat', 'take', '--machine', '本机'],
       ['seat', 'take', ...A, '--scope', 'prod'],
-      ['seat', 'check', ...A, '--term', 'x'],
       ['seat', 'take', ...A, '--machine', '又一个'],
       ['seat', 'take', '--machine', 'a b', '--session', 's'],
-      ['claim', 'take', 'canary', '1', ...A, '--term', '1', '--label', 'w'],
-      ['claim', 'take', REPO, '1', ...A, '--term', '1'],
-      ['claim', 'take', REPO, '1', ...A, '--term', '1', '--label', 'w', '--owner', 'engine'],
+      ['claim', 'take', 'canary', '1', ...A, '--label', 'w', '--owner', 'engine'],
       ['claim', 'step', REPO, '1', '--claim', 'abc'],
       ['claim', 'done', REPO, '1', '--claim', '00000000-0000-4000-8000-000000000000'],
       ['claim', 'step', REPO, '1', '--claim', '00000000-0000-4000-8000-000000000000', '--pr', '0'],
@@ -131,13 +116,13 @@ describe('参数', () => {
     const t = setup();
     expect((await t.run('seat', '--help')).out).toContain('seat take --machine');
     expect((await t.run('claim', '--help')).out).toContain('claim take <owner/仓名> <单号>');
-    expect((await t.run('--help')).out).toContain('fleet-api seat <take|renew|check|show|handoff|board>');
+    expect((await t.run('--help')).out).toContain('fleet-api seat <take|show|handoff|board>');
     expect(t.opened()).toBe(0);
   });
 });
 
 describe('帅位', () => {
-  it('接班、续约、现查：打新任期和上一任；--json 带任期、持有人、租约到几点（库的时钟）', async () => {
+  it('接班：永远成功，打新任期和上一任；--json 带任期、持有人、最后活动时间（库的时钟）', async () => {
     const t = setup();
     const took = await t.run('seat', 'take', ...A);
     expect(took.code).toBe(0);
@@ -151,61 +136,41 @@ describe('帅位', () => {
           term: 2,
           holder: { machine: '笔记本', session: 'b1' },
           previous: { machine: '本机', session: 'a1' },
+          lastActivityAt: t.clock.now.toISOString(),
         },
-        leaseMinutes: 45,
       },
     });
-    expect(await t.json('seat', 'renew', ...B, '--term', '2')).toMatchObject({ code: 0, body: { ok: true } });
-    expect(await t.json('seat', 'check', ...B, '--term', '2')).toMatchObject({
-      code: 0,
-      body: { ok: true, term: 2, expiresAt: new Date(T0.getTime() + 45 * 60_000).toISOString() },
-    });
   });
 
-  it('【故意造出的失败】租期设置认不出：不接班（座位没动），退出码 1——接了本机也判不了多久没续约算过期', async () => {
-    const bad = createMemoryStore(
-      { ...devFixtures(T0), settings: [{ key: 'seat.leaseMinutes', value: 0, version: 1 }] },
-      { now: () => T0 },
-    );
-    const t = setup(bad);
-    const took = await t.json('seat', 'take', ...A);
-    expect(took).toMatchObject({ code: 1, body: { ok: false, reason: 'settings' } });
-    expect((await bad.readSeat('main')).lease).toBeNull();
-  });
-
-  it('【故意造出的失败】旧帅位：续约、现查都说「不是帅位」、写明现在是谁，退出码 3', async () => {
+  it('#446：接班不核旧的同不同意——同一台机器反复接、A 接完 B 马上又接，永远成功，后说的算', async () => {
     const t = setup();
     await t.run('seat', 'take', ...A);
-    await t.run('seat', 'take', ...B);
-    const renew = await t.run('seat', 'renew', ...A, '--term', '1');
-    expect(renew.code).toBe(3);
-    expect(renew.out).toContain('帅位已经是 笔记本/b1（第 2 任）');
-    expect(renew.out).toContain('只回「我已退役，帅位在 笔记本/b1」');
-    const check = await t.json('seat', 'check', ...A, '--term', '1');
-    expect(check).toMatchObject({ code: 3, body: { ok: false, reason: 'replaced' } });
+    const again = await t.json('seat', 'take', ...A);
+    expect(again).toMatchObject({ code: 0, body: { seat: { term: 2 } } });
+    const handedToB = await t.json('seat', 'take', ...B);
+    expect(handedToB).toMatchObject({ code: 0, body: { seat: { term: 3, holder: { machine: '笔记本' } } } });
+    // A 还能再接回来：没有谁「不是帅位」拦着
+    expect(await t.json('seat', 'take', ...A)).toMatchObject({ code: 0, body: { seat: { term: 4 } } });
   });
 
-  it('【故意造出的失败】过了租期没续上：现查说不是帅位（fail closed）；续上以后又是', async () => {
+  it('很久没有任何活动也不影响能不能写：没有续约、现查这回事了，旧帅位一样能写交接、认领新单', async () => {
     const t = setup();
     await t.run('seat', 'take', ...A);
-    t.tick(46);
-    expect(await t.json('seat', 'check', ...A, '--term', '1')).toMatchObject({
-      code: 3,
-      body: { ok: false, reason: 'expired' },
-    });
-    expect((await t.run('seat', 'renew', ...A, '--term', '1')).code).toBe(0);
-    expect((await t.run('seat', 'check', ...A, '--term', '1')).code).toBe(0);
+    t.tick(6 * 60); // 6 小时过去，#446 之前的「租期」早过了几倍
+    t.setStdin('好久没动过了，但照样能写');
+    expect((await t.run('seat', 'handoff', ...A)).code).toBe(0);
+    expect((await t.run('claim', 'take', REPO, '40', ...A, '--label', '工人甲')).code).toBe(0);
   });
 
-  it('看现状：帅位、在做的认领、引擎在跑的单、没答的提问、交接说明；座位上没人也照打', async () => {
+  it('看现状：帅位（含最后活动多久前）、在做的认领、引擎在跑的单、没答的提问、交接说明；座位上没人也照打', async () => {
     const t = setup();
     expect((await t.run('seat', 'show')).out).toContain('帅位（main）：座位上没人');
     await t.run('seat', 'take', ...A);
-    await t.run('claim', 'take', REPO, '40', ...A, '--term', '1', '--label', '工人甲', '--note', '开工');
+    await t.run('claim', 'take', REPO, '40', ...A, '--label', '工人甲', '--note', '开工');
     t.setStdin('在做 #299\n等创始人拍 App 权限');
-    expect((await t.run('seat', 'handoff', ...A, '--term', '1')).code).toBe(0);
+    expect((await t.run('seat', 'handoff', ...A)).code).toBe(0);
     const show = await t.run('seat', 'show');
-    expect(show.out).toContain('帅位（main）：第 1 任 本机/a1');
+    expect(show.out).toContain('帅位（main）：第 1 任 本机/a1，最后活动');
     expect(show.out).toContain('在做的认领（1）：');
     expect(show.out).toContain('example/canary#40 本机/工人甲 认领了：开工');
     expect(show.out).toContain('引擎在跑的单（1）：');
@@ -219,30 +184,29 @@ describe('帅位', () => {
     });
   });
 
-  it('【故意造出的失败】交接说明：空的拒（退出码 2）；不是现任、也不是刚被换下的上一任写不进（退出码 3）', async () => {
+  it('【故意造出的失败】交接说明：空的拒（退出码 2）；座位上没人存不进（退出码 3）；换了人旧帅位照样写得进（不核是不是现任）', async () => {
     const t = setup();
+    const vacant = await t.run('seat', 'handoff', ...A);
+    t.setStdin('没人接过班');
+    expect((await t.run('seat', 'handoff', ...A)).code).toBe(3);
+    void vacant;
     await t.run('seat', 'take', ...A);
     t.setStdin('   ');
-    expect((await t.run('seat', 'handoff', ...A, '--term', '1')).code).toBe(2);
-    t.setStdin('冒名');
-    expect((await t.run('seat', 'handoff', ...B, '--term', '1')).code).toBe(3);
+    expect((await t.run('seat', 'handoff', ...A)).code).toBe(2);
+    await t.run('seat', 'take', ...B);
+    t.setStdin('A 换下来了，但照样能写一段交接');
+    expect((await t.run('seat', 'handoff', ...A)).code).toBe(0);
   });
 });
 
 describe('认领', () => {
-  const take = (
-    t: ReturnType<typeof setup>,
-    issue: string,
-    who = A,
-    term = '1',
-    label = '工人甲',
-    ...more: string[]
-  ) => t.json('claim', 'take', REPO, issue, ...who, '--term', term, '--label', label, ...more);
+  const take = (t: ReturnType<typeof setup>, issue: string, who = A, label = '工人甲', ...more: string[]) =>
+    t.json('claim', 'take', REPO, issue, ...who, '--label', label, ...more);
 
   it('帅位认领、工人报一步、登记 PR、做完：每步都读回打出来；--json 带认领号', async () => {
     const t = setup();
     await t.run('seat', 'take', ...A);
-    const got = await take(t, '40', A, '1', '工人甲', '--note', '开工');
+    const got = await take(t, '40', A, '工人甲', '--note', '开工');
     expect(got).toMatchObject({
       code: 0,
       body: { ok: true, claim: { repo: REPO, issue: 40, state: 'claimed', graceMinutes: 120 } },
@@ -258,78 +222,53 @@ describe('认领', () => {
     expect(done).toMatchObject({ code: 0, body: { ok: true, claim: { state: 'done', prs: [306] } } });
   });
 
-  it('【故意造出的失败】旧任期号来认领被拒（退出码 3），单子一点没动', async () => {
+  it('#446：认领不核是不是帅位——没接过班、不带 --term、很久没动静，都认领得上（不再有「旧任期号被拒」这回事）', async () => {
     const t = setup();
+    // 座位从没人接过班：照样认领得上
+    expect(await take(t, '41')).toMatchObject({ code: 0, body: { ok: true } });
     await t.run('seat', 'take', ...A);
     await t.run('seat', 'take', ...B);
-    const r = await take(t, '41');
-    expect(r).toMatchObject({ code: 3, body: { ok: false, reason: 'not_seat' } });
-    expect((await t.json('claim', 'show', REPO, '41', '--all')).body).toMatchObject({
-      claims: [],
-      missing: [41],
-    });
+    t.tick(6 * 60);
+    // A 带着早被换下的身份来：照样认领得上
+    expect(await take(t, '42')).toMatchObject({ code: 0, body: { ok: true } });
   });
 
-  it('【故意造出的失败】别人拿着：认领不上（退出码 3），写清谁拿着', async () => {
+  it('【故意造出的失败】别人拿着：认领不上（退出码 3），写清谁拿着，提示用 reassign 强制改派', async () => {
     const t = setup();
     await t.run('seat', 'take', ...A);
-    await take(t, '42');
-    const r = await t.run('claim', 'take', REPO, '42', ...A, '--term', '1', '--label', '工人乙');
+    await take(t, '43');
+    const r = await t.run('claim', 'take', REPO, '43', ...A, '--label', '工人乙');
     expect(r.code).toBe(3);
-    expect(r.out).toContain('没认领上：example/canary#42 本机/工人甲 认领了');
+    expect(r.out).toContain('没认领上：example/canary#43 本机/工人甲 认领了');
+    expect(r.out).toContain('要接手用 claim reassign 强制改派（不用创始人原话）');
   });
 
-  it('【故意造出的失败】拿着作废了的认领号来报进度：没记上（退出码 3），说这张已经不归你', async () => {
+  it('【故意造出的失败】拿着作废了的、认领号对不上的：没记上（退出码 3），说这张已经不归你；#446 起没有 sweep、没有自动作废了', async () => {
     const t = setup();
     await t.run('seat', 'take', ...A);
-    const got = await take(t, '43', A, '1', '工人甲', '--grace-minutes', '2');
+    const got = await take(t, '44', A, '工人甲');
     const claimId = (got.body.claim as { claimId: string }).claimId;
-    t.tick(3);
-    const swept = await t.run('claim', 'sweep');
-    expect(swept.out).toContain('作废了 1 张');
-    expect(swept.out).toContain(`example/canary#43 本机/工人甲（认领 ${claimId.slice(0, 8)}）`);
-    const back = await t.run('claim', 'step', REPO, '43', '--claim', claimId, '--note', '我回来了');
-    expect(back.code).toBe(3);
-    expect(back.out).toContain('这张已经不归你');
-    expect((await t.run('claim', 'sweep')).out).toContain('没有过了宽限期没心跳的认领');
-  });
-
-  it('【故意造出的失败】sweep 时没接 GitHub：库里照样作废，PR 那边没做照实说（退出码 1）', async () => {
-    const t = setup(undefined, { noGitHub: true });
-    await t.run('seat', 'take', ...A);
-    await take(t, '46', A, '1', '工人甲', '--grace-minutes', '2');
-    t.tick(3);
-    const swept = await t.run('claim', 'sweep');
-    expect(swept.code).toBe(1);
-    expect(swept.out).toContain('作废了 1 张过了宽限期没心跳的认领；PR 那边没做（GitHub 没接上');
-    expect((await t.json('claim', 'show', REPO, '46', '--all')).body).toMatchObject({
-      claims: [{ state: 'voided' }],
-    });
-  });
-
-  it('认领、登记 PR 之后当场重贴挂这张单的 PR（#348）；没接 GitHub 的照实说没重贴成，认领照样记上', async () => {
-    const t = setup();
-    await t.run('seat', 'take', ...A);
-    t.gh.addPull(REPO, { number: 306, body: '**需求**：#47' });
-    const got = await take(t, '47');
-    expect(got.body.prStatus).toMatchObject({ ok: true, checked: 1, posted: [306] });
-    expect(t.gh.latest(REPO, 306)).toMatchObject({ state: 'failure' });
-    const claimId = (got.body.claim as { claimId: string }).claimId;
-    const step = await t.run('claim', 'step', REPO, '47', '--claim', claimId, '--pr', '306');
-    expect(step.out).toContain('重贴了 #306');
-    expect(t.gh.latest(REPO, 306)).toMatchObject({ state: 'success' });
-
-    const bare = setup(undefined, { noGitHub: true });
-    await bare.run('seat', 'take', ...A);
-    const r = await bare.run('claim', 'take', REPO, '47', ...A, '--term', '1', '--label', 'w');
-    expect(r.code).toBe(0);
-    expect(r.out).toContain('「认领对得上」没重贴成（这里没接 GitHub');
+    t.tick(6 * 60); // 就算过去很久也不会被谁作废
+    const wrong = await t.run(
+      'claim',
+      'step',
+      REPO,
+      '44',
+      '--claim',
+      '00000000-0000-4000-8000-000000000000',
+      '--note',
+      '认领号写错了',
+    );
+    expect(wrong.code).toBe(3);
+    expect(wrong.out).toContain('别再动（推不上、合不进）');
+    // 真正的认领号过了很久也照样报得上（没有心跳过期这回事了）
+    expect((await t.run('claim', 'step', REPO, '44', '--claim', claimId, '--note', '还在做')).code).toBe(0);
   });
 
   it('【故意造出的失败】库里没有这个仓：说清认领只管导入过的项目（退出码 1）', async () => {
     const t = setup();
     await t.run('seat', 'take', ...A);
-    const r = await t.run('claim', 'take', 'someone/else', '1', ...A, '--term', '1', '--label', 'w');
+    const r = await t.run('claim', 'take', 'someone/else', '1', ...A, '--label', 'w');
     expect(r.code).toBe(1);
     expect(r.err).toContain('库里没有仓 someone/else');
   });
@@ -344,26 +283,14 @@ describe('认领', () => {
       claim: { owner: { kind: 'engine' }, seat: { scope: 'drill:299', term: 0 }, state: 'pending_start' },
     });
     await t.run('seat', 'take', ...A, '--scope', 'drill:299');
-    const local = await t.run(
-      'claim',
-      'take',
-      REPO,
-      '60',
-      ...A,
-      '--term',
-      '1',
-      '--scope',
-      'drill:299',
-      '--label',
-      'w1',
-    );
+    const local = await t.run('claim', 'take', REPO, '60', ...A, '--scope', 'drill:299', '--label', 'w1');
     expect(local.code).toBe(3);
     expect(local.out).toContain('引擎 待起');
     // 待起补起不碰演练的
     t.tick(10);
     expect((await t.memory.listStalePendingEngineClaims({ minutes: 5, limit: 10 })).claims).toEqual([]);
     // 本机先拿到的，引擎那一边抢不到
-    await t.run('claim', 'take', REPO, '61', ...A, '--term', '1', '--scope', 'drill:299', '--label', 'w1');
+    await t.run('claim', 'take', REPO, '61', ...A, '--scope', 'drill:299', '--label', 'w1');
     expect((await t.run('claim', 'take', REPO, '61', '--owner', 'engine', '--scope', 'drill:299')).code).toBe(
       3,
     );
@@ -371,9 +298,9 @@ describe('认领', () => {
 
   it('【故意造出的失败】--owner engine 不在演练座位下、带了帅位身份：参数不对（退出码 2），不连库', async () => {
     const t = setup();
-    const main = await t.run('claim', 'take', REPO, '60', '--owner', 'engine');
-    expect(main.code).toBe(2);
-    expect(main.err).toContain('--owner engine 只在演练座位');
+    const main1 = await t.run('claim', 'take', REPO, '60', '--owner', 'engine');
+    expect(main1.code).toBe(2);
+    expect(main1.err).toContain('--owner engine 只在演练座位');
     expect(
       (await t.run('claim', 'take', REPO, '60', '--owner', 'engine', '--scope', 'drill:299', ...A)).code,
     ).toBe(2);
@@ -381,7 +308,7 @@ describe('认领', () => {
   });
 });
 
-describe('改派（claim reassign，#348）', () => {
+describe('改派（claim reassign，#446 起不用创始人原话）', () => {
   const engineHolds = async (t: ReturnType<typeof setup>, issueNumber: number) => {
     const r = await t.memory.claimForEngine({
       repoId: t.memory.data.repos[0]?.id ?? '',
@@ -393,40 +320,36 @@ describe('改派（claim reassign，#348）', () => {
     return r.claim;
   };
   const reassign = (t: ReturnType<typeof setup>, issue: string, ...more: string[]) =>
-    t.run('claim', 'reassign', REPO, issue, '--to', 'worker', ...A, '--term', '1', '--label', 'w2', ...more);
+    t.run('claim', 'reassign', REPO, issue, '--to', 'worker', ...A, '--label', 'w2', ...more);
 
-  it('【故意造出的失败】引擎拿着、不带创始人原话：不改派（退出码 3），这张没动、没叫停、没关 PR', async () => {
+  it('引擎拿着、不带 --founder：照样改派（#446 起改派永远 force，不用创始人原话）；叫停它的工作流', async () => {
     const t = setup();
     await t.run('seat', 'take', ...A);
     const eng = await engineHolds(t, 70);
-    t.gh.addPull(REPO, { number: 700, body: '**需求**：#70', author: AGENT_BOT, autoMerge: true });
     const r = await reassign(t, '70');
-    expect(r.code).toBe(3);
-    expect(r.out).toContain('要强制改派带上创始人原话 --founder');
-    expect((await t.memory.getClaim(eng.repoId, 70)).claim).toMatchObject({ claimId: eng.claimId });
-    expect(t.signals).toEqual([]);
-    expect(t.gh.writes).toEqual([]);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain('改派了 example/canary#70：归 本机/w2');
+    expect(r.out).toContain(`原来那份作废了：引擎（认领 ${eng.claimId.slice(0, 8)}`);
+    expect(r.out).toContain('开着的 PR 不动，旧主自己关或帅位手动关');
+    expect(r.out).toContain('引擎的工作流 req:example/canary#70 叫停了');
   });
 
-  it('带创始人原话：引擎那份作废、叫停它的工作流、它开的 PR 撤自动合并留言关掉（分支留着），归这次的工人', async () => {
+  it('带 --founder：原因记进作废说明（创始人原话：…）；工作流叫停', async () => {
     const t = setup();
     await t.run('seat', 'take', ...A);
     const eng = await engineHolds(t, 71);
-    t.gh.addPull(REPO, { number: 710, body: '**需求**：#71', author: AGENT_BOT, autoMerge: true });
     const r = await reassign(t, '71', '--founder', '71 本机做');
     expect(r.code).toBe(0);
     expect(r.out).toContain('改派了 example/canary#71：归 本机/w2');
-    expect(r.out).toContain(`原来那份作废了：引擎（认领 ${eng.claimId.slice(0, 8)}）`);
-    expect(r.out).toContain('引擎的工作流 req:example/canary#71 叫停了');
-    expect(r.out).toContain('原来那份开着的 PR 关了（分支留着）：#710');
+    expect(r.out).toContain(
+      `原来那份作废了：引擎（认领 ${eng.claimId.slice(0, 8)}，改派给本机/w2（创始人原话：71 本机做））`,
+    );
     expect(t.signals).toEqual([
       {
         workflowId: 'req:example/canary#71',
         signal: { name: 'stop', by: '本机/a1', reason: '改派给 本机/w2（创始人原话：71 本机做）' },
       },
     ]);
-    expect(t.gh.writes).toEqual([`disable ${REPO}#710`, `comment ${REPO}#710`, `close ${REPO}#710`]);
-    expect(t.gh.comments[0]?.body).toContain('改派给 本机/w2（创始人原话：71 本机做）');
   });
 
   it('【故意造出的失败】工作流已经不在：照改派、说已经不在；叫停连不上：退出码 1、写要人去叫停', async () => {
@@ -453,40 +376,25 @@ describe('改派（claim reassign，#348）', () => {
     expect(r2.out).toContain('要人去叫停');
   });
 
-  it('原来的认领过了宽限期作废了：不用原话，改派后它开着的 PR 关掉（留言写作废原因）', async () => {
+  it('原来那份已经结束了（做完、放下）的：直接改派，不作废谁，不叫停', async () => {
     const t = setup();
     await t.run('seat', 'take', ...A);
-    const got = await t.json(
-      'claim',
-      'take',
-      REPO,
-      '74',
-      ...A,
-      '--term',
-      '1',
-      '--label',
-      'w1',
-      '--grace-minutes',
-      '2',
-    );
+    const got = await t.json('claim', 'take', REPO, '74', ...A, '--label', 'w1');
     const claimId = (got.body.claim as { claimId: string }).claimId;
-    t.gh.addPull(REPO, { number: 740, body: `**需求**：#74\n**认领**：${claimId}` });
-    t.tick(3);
-    await t.run('claim', 'sweep');
-    t.gh.writes.length = 0;
+    await t.run('claim', 'release', REPO, '74', '--claim', claimId, '--note', '放下了');
     const r = await reassign(t, '74');
     expect(r.code).toBe(0);
-    expect(r.out).toContain('原来那份开着的 PR 关了（分支留着）：#740');
-    expect(t.gh.comments.at(-1)?.body).toContain('原来的认领作废了：过了宽限期');
+    expect(r.out).toContain('改派了 example/canary#74：归 本机/w2');
+    expect(r.out).not.toContain('原来那份作废了');
   });
 
   it('【故意造出的失败】参数不对：--to 认不出、--to engine 不带 --reason、--to worker 带 --reason：退出码 2，不连库', async () => {
     const t = setup();
     for (const extra of [
-      ['--to', 'robot', ...A, '--term', '1', '--label', 'w'],
+      ['--to', 'robot', ...A, '--label', 'w'],
       ['--to', 'engine', '--founder', 'x'],
       ['--to', 'engine', '--reason', 'r'],
-      ['--to', 'worker', ...A, '--term', '1', '--label', 'w', '--reason', 'r'],
+      ['--to', 'worker', ...A, '--label', 'w', '--reason', 'r'],
     ]) {
       const r = await t.run('claim', 'reassign', REPO, '75', ...extra);
       expect(r.code, extra.join(' ')).toBe(2);
@@ -498,10 +406,10 @@ describe('改派（claim reassign，#348）', () => {
 describe('帅位栏 seat board（#199）', () => {
   const term = ['--term', '1'];
 
-  it('不是现任写不进；点了不在选项里的这一问还在；点了合法的就从要你定的里消失、pending 里有', async () => {
+  it('#446 起谁都写得进（不核是不是现任）；点了不在选项里的这一问还在；点了合法的就从要你定的里消失、pending 里有', async () => {
     const t = setup();
-    const denied = await t.run('seat', 'board', 'head', 'demo', ...A, ...term, '--text', '在写');
-    expect(denied.code).toBe(3);
+    const beforeTake = await t.run('seat', 'board', 'head', 'demo', ...A, ...term, '--text', '在写');
+    expect(beforeTake.code).toBe(0); // 座位从没人接过班也写得进：board 不核身份
     expect((await t.run('seat', 'take', ...A)).code).toBe(0);
     expect((await t.run('seat', 'board', 'head', 'demo', ...A, ...term, '--text', '在写')).code).toBe(0);
     expect(
@@ -575,6 +483,17 @@ describe('帅位栏 seat board（#199）', () => {
     expect(pending.code).toBe(0);
     expect(pending.body.pending).toMatchObject([{ id: 'n1', option: '页面', issue: 12 }]);
   });
+
+  it('写进度板顺手把座位的最后活动时间顶成现在（只给人看）：很久没动过，写一次板子照样把它顶成现在', async () => {
+    const t = setup();
+    await t.run('seat', 'take', ...A);
+    t.tick(6 * 60);
+    const before = ((await t.json('seat', 'show')).body.seat as { lastActivityAt: string }).lastActivityAt;
+    await t.run('seat', 'board', 'head', 'demo', ...A, '--text', '刚写了板子');
+    const after = ((await t.json('seat', 'show')).body.seat as { lastActivityAt: string }).lastActivityAt;
+    expect(Date.parse(after)).toBeGreaterThan(Date.parse(before));
+    expect(after).toBe(t.clock.now.toISOString());
+  });
 });
 
 describe('接在真库上（PGlite 跑真迁移）', () => {
@@ -584,29 +503,24 @@ describe('接在真库上（PGlite 跑真迁移）', () => {
   }, TEST_DB_TIMEOUT_MS);
   afterAll(() => db.close());
 
-  it('接班、认领、换班后工人照旧报进度、旧帅位认领被拒：和内存版一样', async () => {
+  it('接班、认领、换班后工人照旧报进度、旧帅位照旧能派新活：和内存版一样（#446 起不核是不是帅位）', async () => {
     await resetTestDb(db);
     await seedPg(db.db, devFixtures(T0));
     const t = setup(createPgStore(db.db));
     expect((await t.run('seat', 'take', ...A)).code).toBe(0);
-    expect((await t.run('seat', 'board', 'head', 'demo', ...A, '--term', '1', '--text', '在写')).code).toBe(
-      0,
-    );
+    expect((await t.run('seat', 'board', 'head', 'demo', ...A, '--text', '在写')).code).toBe(0);
     const shown = await t.json('seat', 'board', 'show', 'demo');
     expect(shown.code).toBe(0);
     expect(shown.body.boards).toMatchObject([{ project: 'demo', headline: '在写' }]);
-    const got = await take2(t);
+    const got = await t.json('claim', 'take', REPO, '44', ...A, '--label', '工人甲');
     const claimId = (got.body.claim as { claimId: string }).claimId;
     expect((await t.run('seat', 'take', ...B)).code).toBe(0);
     expect(
       (await t.run('claim', 'step', REPO, '44', '--claim', claimId, '--note', '换班后接着做')).code,
     ).toBe(0);
-    expect((await t.run('claim', 'take', REPO, '45', ...A, '--term', '1', '--label', '工人乙')).code).toBe(3);
-    expect((await t.json('seat', 'check', ...B, '--term', '2')).code).toBe(0);
+    // 旧帅位（A，第 1 任）没被拦：照样能派新活
+    expect((await t.run('claim', 'take', REPO, '45', ...A, '--label', '工人乙')).code).toBe(0);
   });
-
-  const take2 = (t: ReturnType<typeof setup>) =>
-    t.json('claim', 'take', REPO, '44', ...A, '--term', '1', '--label', '工人甲');
 });
 
 // 同步起 node：不设 vitest 的超时，卡死由子进程自己的上限管（为什么见 child.ts 开头）。
@@ -619,8 +533,8 @@ describe('命令行入口（真起一个 node 进程）', { timeout: 0 }, () => 
   };
   const REFUSED_DB = 'postgres://fleet@127.0.0.1:1/fleet';
 
-  it('【故意造出的失败】连不上库（法国的库停了）：退出码 1，--json 打一行没查成，本机脚本按「不是帅位」算', () => {
-    const r = exec(['seat', 'check', ...A, '--term', '1', '--json'], { DATABASE_URL: REFUSED_DB });
+  it('【故意造出的失败】连不上库（法国的库停了）：退出码 1，--json 打一行没查成', () => {
+    const r = exec(['seat', 'show', '--json'], { DATABASE_URL: REFUSED_DB });
     expect(r.status).toBe(1);
     const body = JSON.parse(r.stdout) as { ok: boolean; reason: string; why: string };
     expect(body).toMatchObject({ ok: false, reason: 'error' });

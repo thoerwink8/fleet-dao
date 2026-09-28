@@ -1,15 +1,12 @@
 // fleet-api alert …：提醒是一件活（design 15.3「谁在处理」）。帅位经 ssh 以 root 调（和 fleet-api seat、claim 一样，机器名、
 // 会话号放参数里）：看开着的提醒、跟进单、PR（show，不显示谁在处理、认领——#445 起这份状态只给驾驶舱看，不再自动开跟进单、
-// 不用认领）；Alertmanager 式静默（silence / unsilence / silences：谁、为什么、必带到期，不必带帅位任期——#445 删掉了这条
-// 要求，带了照样核验）。判法在 @fleet-dao/core 的 alert-work.ts。
+// 不用认领）；Alertmanager 式静默（silence / unsilence / silences：谁、为什么、必带到期，任期、创始人原话都是可选的身份
+// 记录——#446 起带了也不核，只记进 basis 那句）。判法在 @fleet-dao/core 的 alert-work.ts。
 // 每条都能带 --json：只往标准输出打一行 JSON 给脚本读（本机看板、帅位脚本），认不出按「没查成」算。
-// 退出码：0 做成了；3 带了任期或创始人原话核验没过（不是帅位）；1 没做成（库出错、设置认不出）；2 参数不对（不连库）。
+// 退出码：0 做成了；1 没做成（库出错、设置认不出）；2 参数不对（不连库，或缺 --note/--until 这类必带参数）。
 import {
   alertHandling,
-  MAIN_SEAT,
   machineProblem,
-  seatScopeProblem,
-  seatVerdict,
   sessionProblem,
   silenceMinutes,
   silenceProblem,
@@ -93,13 +90,6 @@ function positiveInt(raw: string, what: string): number {
   const n = digits === undefined ? 0 : Number(digits);
   if (n <= 0) throw new SeatCliError(`认不出${what}「${raw}」：要写成正整数。\n${ALERT_USAGE}`);
   return n;
-}
-
-function scopeOf(p: Parsed): string {
-  const scope = p.options.get('scope')?.trim() || MAIN_SEAT;
-  const why = seatScopeProblem(scope);
-  if (why) throw new SeatCliError(`${why}。\n${ALERT_USAGE}`);
-  return scope;
 }
 
 async function alertOf(alerts: AlertWorkPort, ref: string | undefined): Promise<AlertRow> {
@@ -194,28 +184,21 @@ const SHOW_LIMIT = 200;
 // —— 静默 ——
 
 /**
- * 静默、撤静默不必带帅位任期（#445：只要 --note 写明谁拍的、为什么就行，不再逼着走 seat check 那一套）：带了创始人原话
- * 或任期的，照旧核一遍（认不出、不是帅位一律拒），没带的只记 --machine/--session 是谁、basis 写明没核过身份。
- * 回操作记录里写的「谁」和一句说明。
+ * 静默、撤静默不核身份（#445 起只要 --note 写明谁拍的、为什么就行；#446 起帅位不是锁，就算带了 --term 也不再拿它去
+ * 查库核对是不是帅位——只当一句参考记进操作记录）：带创始人原话的记原话；否则记 --machine/--session，带了 --term 就
+ * 附带写上，没带就说没带。
  */
-async function silenceActor(
-  p: Parsed,
-  store: Store,
-): Promise<{ machine: string; session: string; basis: string }> {
+function silenceActor(p: Parsed): { machine: string; session: string; basis: string } {
   const who = identityOf(p);
   const founder = text(p, 'founder', '创始人的原话');
   if (founder) return { ...who, basis: `创始人原话：${founder}` };
-  if (!p.options.has('term')) return { ...who, basis: '没带帅位任期，按 --note 记的人处理' };
-  const scope = scopeOf(p);
-  const snap = await store.readSeat(scope);
-  const term = positiveInt(need(p, 'term'), '任期');
-  if (!snap.settings.ok) throw new SeatCliError(`没查成：${snap.settings.why}`, 1);
-  const v = seatVerdict(snap.lease, { ...who, term }, snap.now, snap.settings.settings.leaseMinutes);
-  if (!v.ok) throw new SeatCliError(`不是帅位：${v.why}`, 3);
-  return { ...who, basis: `帅位 ${scope} 第 ${term} 任` };
+  const termRaw = p.options.get('term');
+  if (termRaw === undefined) return { ...who, basis: '没带帅位任期，按 --note 记的人处理' };
+  const term = positiveInt(termRaw, '任期');
+  return { ...who, basis: `说自己是帅位第 ${term} 任（#446 起不核，只记这句）` };
 }
 
-async function silence(p: Parsed, { store, alerts }: AlertCliDeps): Promise<SeatCliResult> {
+async function silence(p: Parsed, { alerts }: AlertCliDeps): Promise<SeatCliResult> {
   if (p.positional.length !== 1)
     throw new SeatCliError(`要一个位置参数：提醒的键或编号（--prefix 时是前缀）。\n${ALERT_USAGE}`);
   const until = need(p, 'until');
@@ -228,7 +211,7 @@ async function silence(p: Parsed, { store, alerts }: AlertCliDeps): Promise<Seat
   const match = prefix ? raw : (await alertOf(alerts, raw)).dedupeKey;
   const why = silenceProblem({ matchKind: prefix ? 'prefix' : 'key', match, comment: note, minutes });
   if (why) throw new SeatCliError(`${why}。\n${ALERT_USAGE}`);
-  const actor = await silenceActor(p, store);
+  const actor = silenceActor(p);
   const s = await alerts.createSilence({
     matchKind: prefix ? 'prefix' : 'key',
     match,
@@ -244,14 +227,14 @@ async function silence(p: Parsed, { store, alerts }: AlertCliDeps): Promise<Seat
   };
 }
 
-async function unsilence(p: Parsed, { store, alerts }: AlertCliDeps): Promise<SeatCliResult> {
+async function unsilence(p: Parsed, { alerts }: AlertCliDeps): Promise<SeatCliResult> {
   if (p.positional.length !== 1) throw new SeatCliError(`要一个位置参数：静默编号。\n${ALERT_USAGE}`);
   const id = (p.positional[0] ?? '').trim().toLowerCase();
   if (!UUID.test(id))
     throw new SeatCliError(`认不出静默编号「${id}」（fleet-api alert silences 看得到）。\n${ALERT_USAGE}`);
   const note = text(p, 'note', '为什么提前撤');
   if (!note) throw new SeatCliError(`撤静默要带 --note：为什么提前撤。\n${ALERT_USAGE}`);
-  const actor = await silenceActor(p, store);
+  const actor = silenceActor(p);
   const r = await alerts.expireSilence({
     id,
     by: `${actor.machine}/${actor.session}`,

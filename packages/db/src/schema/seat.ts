@@ -20,8 +20,9 @@ import { repos } from './work.ts';
 const tz = { withTimezone: true, mode: 'date' } as const;
 
 /**
- * 帅位租约：scope = main 是真帅位，drill:<名字> 是演练（和真帅位互不影响）。term 是第几任，接班一次加一、只增不减，
- * 就是栅栏号：受保护动作带着它来，对不上当场拒。previous_* 是接班时从旧行抄过来的上一任。
+ * 帅位：scope = main 是真帅位，drill:<名字> 是演练（和真帅位互不影响）。term 是第几任，接班一次加一、只增不减，纯
+ * 记录用（#446 起不再是栅栏号：没有什么会核它对不对得上再放行）。previous_* 是接班时从旧行抄过来的上一任。renewed_at
+ * 这一列没改名（避免迁移），#446 起当「最后活动时间」用，只给人看。
  */
 export const seatLeases = pgTable(
   'seat_leases',

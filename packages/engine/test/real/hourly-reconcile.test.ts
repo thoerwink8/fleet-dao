@@ -182,12 +182,6 @@ function ghWith(over: Partial<HourlyReconcileWiring['gh']> = {}): HourlyReconcil
     readIssuePlan: async () => {
       throw new Error('用例里不该现读 issue');
     },
-    // 补拉只重放 issue 的投递：走到「认领对得上」（PR 事件）就是用例写错了
-    claims: new Proxy({} as HourlyReconcileWiring['gh']['claims'], {
-      get: (_t, prop) => () => {
-        throw new Error(`用例里不该碰「认领对得上」的 GitHub 读写（${String(prop)}）`);
-      },
-    }),
     ...over,
   };
 }

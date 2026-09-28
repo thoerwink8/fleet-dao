@@ -37,6 +37,13 @@ describe('首页帅位栏', () => {
     expect(screen.queryByText(/先做哪一件/)).toBeNull();
   });
 
+  // #446：帅位不再是锁，栏里只显示「谁、最后活动多久前」，没有租约、任期核对这类拦人的逻辑
+  test('显示帅位是谁、最后活动多久前（只给人看，不拦任何东西）', async () => {
+    const api = createMockApi({ live: false });
+    renderApp(<SeatBar />, { api });
+    expect(await screen.findByText(/帅位：第 3 任 本机\/s1，最后活动/)).toBeTruthy();
+  });
+
   test('电脑宽和 375 宽都渲染这三块', async () => {
     for (const mobile of [false, true]) {
       cleanup();

@@ -13,7 +13,8 @@ const USAGE = `用法：node p.mjs <项目> <命令> …
   pending
   record
   handoff <文件>
-没配法国、连不上：退出码 2，不写本地文件。还不是现任：退出码 3。`;
+没配法国、连不上：退出码 2，不写本地文件。这台没有本地帅位记录（没 seat.mjs take 过）：退出码 3——
+#446 起帅位不是锁，写板子不核是不是现任，只要这台曾经接过班就能写。`;
 
 function fail(io, code, msg) {
   io.err(msg);

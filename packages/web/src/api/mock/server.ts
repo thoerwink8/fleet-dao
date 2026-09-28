@@ -207,6 +207,12 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     defaultScope: DemoScope;
     defaultPublished: boolean;
   } = { links: [], defaultScope: DEMO_STRICT_DEFAULT, defaultPublished: false };
+  // 帅位栏的「帅位现在是谁」（#446 起只给人看）：假数据固定一份，不走真的接班流程。
+  const seatMock: { term: number; holder: string; lastActivityAt: string } | null = {
+    term: 3,
+    holder: '本机/s1',
+    lastActivityAt: '2026-09-01T00:00:00.000Z',
+  };
 
   const iso = () => new Date(now()).toISOString();
   const nextId = (p: string) => `${p}-${++st.seq}`;
@@ -988,6 +994,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     async seatBoard() {
       await wait();
       return {
+        seat: seatMock,
         projects: seatProjects.map((p) => ({
           ...p,
           steps: p.steps.map((s) => ({ ...s, links: [...s.links] })),

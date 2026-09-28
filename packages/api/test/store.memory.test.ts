@@ -26,7 +26,8 @@ const makeSeat: MakeSeatStore = async (data, clock) => {
   return {
     store,
     async backdateSeat(scope, minutes) {
-      for (const l of store.data.seatLeases) if (l.scope === scope) l.renewedAt = back(l.renewedAt, minutes);
+      for (const l of store.data.seatLeases)
+        if (l.scope === scope) l.lastActivityAt = back(l.lastActivityAt, minutes);
     },
     async backdateClaim(repoId, issueNumber, minutes) {
       for (const c of store.data.claims)

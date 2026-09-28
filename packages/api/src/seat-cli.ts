@@ -1,9 +1,9 @@
-// fleet-api seat …、fleet-api claim …：帅位只一个（#299，specs/299-帅位只一个/方案.md 第三节）。本机的帅位、工人经 ssh 以
-// root 调（ssh <法国> 'bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api seat …'），机器名、会话号放参数里：
-// 经 ssh 进来的一律是 root，看不出是谁。判法在 @fleet-dao/core 的 seat.ts，读写在 Store（seat-store.ts）。
-// 每条都能带 --json：只往标准输出打一行 JSON，给本机的脚本认（认不出按「不是帅位、没查成」算）；不带就打给人看的话。
-// 退出码：0 做成了、是帅位；3 不是你的（不是帅位、过了租期、别人拿着、认领号对不上）；1 没做成（库出错、设置认不出）；
-// 2 参数不对。
+// fleet-api seat …、fleet-api claim …：帅位记「现在是谁」（#446，specs/446-帅位认领简化/需求.md）。本机的帅位、工人经
+// ssh 以 root 调（ssh <法国> 'bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api seat …'），机器名、会话号
+// 放参数里：经 ssh 进来的一律是 root，看不出是谁。判法在 @fleet-dao/core 的 seat.ts，读写在 Store（seat-store.ts）。
+// 每条都能带 --json：只往标准输出打一行 JSON，给本机的脚本认；不带就打给人看的话。
+// 退出码：0 做成了；3 别人拿着这张单、认领号对不上（claim 的事，和是不是帅位无关——#446 起没有「不是帅位」这回事）；
+// 1 没做成（库出错）；2 参数不对。
 import {
   type BoardWrite,
   claimOwnerText,
@@ -13,54 +13,47 @@ import {
   type IssueClaim,
   isActiveClaim,
   isDrillScope,
+  lastActivityText,
   MAIN_SEAT,
   machineProblem,
   pendingBoardAnswers,
   type SeatLease,
-  type SeatSettingsRead,
-  seatExpiresAt,
   seatScopeProblem,
-  seatVerdict,
   sessionProblem,
 } from '@fleet-dao/core';
 import { type Repo, requirementWorkflowId, type Task } from '@fleet-dao/shared';
-import { type ClaimStatus, refreshText } from './claim-status.ts';
 import type { AskRecord, SeatActor, Store } from './ports.ts';
 
 export const SEAT_USAGE = [
-  '用法：fleet-api seat <take|renew|check|show|handoff|board> …（帅位只一个，#299；都能带 --scope drill:<名字> 用演练座位、带 --json 给脚本读）',
-  '  seat board head <项目> --machine … --session … --term <任期> --text "<一句话>"',
-  '  seat board add <项目> --machine … --session … --term <任期> --id <步骤> --order <序号> --title "<标题>" [--detail "<说明>"]',
-  '  seat board step <项目> --machine … --session … --term <任期> --id <步骤> --status <done|doing|waiting|needs|blocked> [--detail "<说明>"]',
-  '  seat board log <项目> --machine … --session … --term <任期> --text "<动态>"',
-  '  seat board link <项目> --machine … --session … --term <任期> --id <步骤> --label "<名字>" --url <http(s) 网址>',
-  '  seat board need <项目> --machine … --session … --term <任期> --id <编号> --issue <单号> --repo <owner/仓> --recommend <选项> <问题> <选项…>',
-  '  seat board clear-needs <项目> --machine … --session … --term <任期>',
-  '  seat board pending [<项目>] --machine … --session … --term <任期>   已拍、还没写进单子的',
-  '  seat board ack <项目> --machine … --session … --term <任期> --id <编号>',
-  '  seat board show [<项目>] [--scope …]   看板上的样子（不核是不是现任）',
-  '  seat take --machine <机器名> --session <会话号>                  接班（后说的算，任期号加一）',
-  '  seat renew --machine <机器名> --session <会话号> --term <任期>   续约（每 15 分钟一次）',
-  '  seat check --machine <机器名> --session <会话号> --term <任期>   现查：受保护动作前查一次还是不是帅位',
-  '  seat show                                                         看现状：帅位、在做的认领、引擎在跑的单、没答的提问',
-  '  seat handoff --machine <机器名> --session <会话号> --term <任期> 存交接说明（从标准输入读）',
+  '用法：fleet-api seat <take|show|handoff|board> …（#446 起帅位只记「现在是谁」，不是锁；都能带 --scope drill:<名字> 用演练座位、带 --json 给脚本读）',
+  '  seat board head <项目> --machine … --session … --text "<一句话>"',
+  '  seat board add <项目> --machine … --session … --id <步骤> --order <序号> --title "<标题>" [--detail "<说明>"]',
+  '  seat board step <项目> --machine … --session … --id <步骤> --status <done|doing|waiting|needs|blocked> [--detail "<说明>"]',
+  '  seat board log <项目> --machine … --session … --text "<动态>"',
+  '  seat board link <项目> --machine … --session … --id <步骤> --label "<名字>" --url <http(s) 网址>',
+  '  seat board need <项目> --machine … --session … --id <编号> --issue <单号> --repo <owner/仓> --recommend <选项> <问题> <选项…>',
+  '  seat board clear-needs <项目> --machine … --session …',
+  '  seat board pending [<项目>] --machine … --session …   已拍、还没写进单子的',
+  '  seat board ack <项目> --machine … --session … --id <编号>',
+  '  seat board show [<项目>] [--scope …]   看板上的样子；谁都写得进（board 只给人看，不核是不是现任）',
+  '  seat take --machine <机器名> --session <会话号>   接班（永远成功，后说的算；换了人旧帅位下次 show 就看得到）',
+  '  seat show                                          看现状：现在是谁、最后活动多久前、在做的认领、引擎在跑的单、没答的提问',
+  '  seat handoff --machine <机器名> --session <会话号> 存交接说明（从标准输入读；座位上没人时存不进）',
 ].join('\n');
 
 export const CLAIM_USAGE = [
-  '用法：fleet-api claim <take|step|done|release|reassign|show|sweep> …（每张单一个认领，#299；都能带 --json 给脚本读）',
-  '  claim take <owner/仓名> <单号> --machine <机器名> --session <会话号> --term <任期> --label <工人名> [--owner worker|seat] [--grace-minutes <分>] [--note "<一句话>"] [--scope drill:<名字>]',
-  '                                         帅位认领一张单（派给工人或自己做；帅位自己占着的也换给工人）',
+  '用法：fleet-api claim <take|step|done|release|reassign|show> …（每张单一个认领，留作记录，不再拦人；都能带 --json 给脚本读）',
+  '  claim take <owner/仓名> <单号> --machine <机器名> --session <会话号> --label <工人名> [--owner worker|seat] [--note "<一句话>"] [--scope drill:<名字>]',
+  '                                         认领一张单（派给工人或自己做；帅位自己占着的也换给工人）；别人还活着拿着的拒绝（3），要抢用 reassign',
   '  claim take <owner/仓名> <单号> --owner engine --scope drill:<名字>   演练：引擎那一边抢（只在演练座位下，不起工作流）',
-  '  claim step <owner/仓名> <单号> --claim <认领号> [--note "<一句话>"] [--pr <PR 号>]   工人报一步（心跳）、登记 PR',
+  '  claim step <owner/仓名> <单号> --claim <认领号> [--note "<一句话>"] [--pr <PR 号>]   工人报一步、登记 PR（纯记录，没有心跳过期这回事）',
   '  claim done <owner/仓名> <单号> --claim <认领号> --note "<一句话>"                    做完了',
   '  claim release <owner/仓名> <单号> --claim <认领号> --note "<一句话>"                 放下（不做了、交出去）',
-  '  claim reassign <owner/仓名> <单号> --to worker|seat --label <工人名> --machine <机器名> --session <会话号> --term <任期> [--founder "<创始人原话>"] [--grace-minutes <分>] [--note "<一句话>"] [--scope drill:<名字>]',
-  '                                         帅位改派给本机：原来的作废了的直接改；还活着的（引擎、别的工人）要带创始人原话，引擎的工作流叫停；旧的 PR 撤自动合并、关掉（分支留着）',
-  '  claim reassign <owner/仓名> <单号> --to engine --reason "<为什么>" (--machine … --session … --term … | --founder "<创始人原话>")',
+  '  claim reassign <owner/仓名> <单号> --to worker|seat --label <工人名> --machine <机器名> --session <会话号> [--note "<一句话>"] [--founder "<有的话>"] [--scope drill:<名字>]',
+  '                                         改派给本机：原来的结束了的直接改；还活着的（引擎、别的工人）当场作废、换给这次的（#446 起不用带创始人原话，写 --note 记一句为什么）',
+  '  claim reassign <owner/仓名> <单号> --to engine --reason "<为什么>" (--machine … --session … | --founder "<有的话>")',
   '                                         改派给引擎：走交单（fleet-api handover）同一条路',
   '  claim show <owner/仓名> [<单号>…] [--all]   看认领（默认只列还活着的）',
-  '  claim sweep                                 作废过了宽限期没心跳的本机认领，它们开着的 PR 撤自动合并、贴红、留言（引擎每轮 GitHub 对账都跑；演练时手动跑）',
-  '认领变了（认领、登记 PR、做完、放下、改派）当场重贴挂这张单的开着的 PR 上的「认领对得上」（引擎机器人）；没贴成照实说，GitHub 对账每 15 分钟会补。',
 ].join('\n');
 
 export class SeatCliError extends Error {
@@ -149,11 +142,13 @@ function positiveInt(raw: string, what: string, usage: string): number {
   return n;
 }
 
+/** #446 起 --term 不用带（帅位不是锁）：给了就认一下、纯记录进认领行，不给也照做。 */
 function actorOf(p: Parsed, usage: string): SeatActor {
+  const term = p.options.get('term');
   return {
     ...identityOf(p, usage),
     scope: scopeOf(p, usage),
-    term: positiveInt(need(p, 'term', usage), '任期', usage),
+    ...(term === undefined ? {} : { term: positiveInt(term, '任期', usage) }),
   };
 }
 
@@ -197,7 +192,7 @@ function leaseJson(lease: SeatLease | null) {
             ? null
             : { machine: lease.previousMachine, session: lease.previousSession },
         acquiredAt: lease.acquiredAt,
-        renewedAt: lease.renewedAt,
+        lastActivityAt: lease.lastActivityAt,
         handoff: lease.handoff,
         handoffAt: lease.handoffAt,
       };
@@ -221,11 +216,6 @@ function claimJson(c: IssueClaim, repos: ReadonlyMap<string, string>) {
     note: c.note,
   };
 }
-
-const settingsText = (s: SeatSettingsRead) =>
-  s.ok
-    ? `租期 ${s.settings.leaseMinutes} 分钟、认领宽限期 ${s.settings.claimGraceMinutes} 分钟${s.source === 'default' ? '（没设过，用的默认）' : ''}`
-    : `设置认不出：${s.why}`;
 
 async function repoNames(store: Store): Promise<Map<string, string>> {
   return new Map((await store.listRepos()).map((r) => [r.id, `${r.owner}/${r.name}`]));
@@ -253,7 +243,7 @@ function boardFail(reason: string, why: string, now: string, code: number): Seat
   return { code, text: why, json: { ok: false, reason, why, now } };
 }
 
-/** 帅位栏：写要现任，看不用。 */
+/** 帅位栏：#446 起写、看都不核是不是现任（帅位不是锁）。 */
 async function runBoard(rest: readonly string[], store: Store): Promise<SeatCliResult> {
   const usage = SEAT_USAGE;
   const [action = '', ...args] = rest;
@@ -334,7 +324,8 @@ async function runBoard(rest: readonly string[], store: Store): Promise<SeatCliR
   }
   const op = boardOp(action, p, usage);
   const r = await store.applySeatBoard({ seat, project: project ?? '', op });
-  if (!r.ok) return boardFail(r.reason, r.why, r.now, r.reason === 'not_seat' ? 3 : 1);
+  // #446 起写板子不核是不是现任：失败只剩「op 认不出」「项目名不对」，都是 1，没有 3 那一档了
+  if (!r.ok) return boardFail(r.reason, r.why, r.now, 1);
   return {
     code: 0,
     text: `改好了（${r.board.project} ${action}）`,
@@ -407,79 +398,16 @@ export async function runSeat(
     if (p.positional.length > 0) throw new SeatCliError(`seat take 不收位置参数。\n${usage}`);
     const me = identityOf(p, usage);
     const scope = scopeOf(p, usage);
-    // 租期认不出就不接班（什么都不改）：接了班本机也不知道多久没续约算过期，帅位记录就一直算数
-    const before = await store.readSeat(scope);
-    if (!before.settings.ok)
-      return {
-        code: 1,
-        text: `没接班（座位没动）：${before.settings.why}。先把设置改对`,
-        json: { ok: false, reason: 'settings', why: before.settings.why, now: before.now },
-      };
+    // #446 起接班永远成功（后说的算），不核旧的同不同意
     const { lease, now } = await store.takeSeat({ scope, ...me });
-    const snap = await store.readSeat(scope);
-    const lm = snap.settings.ok ? snap.settings.settings.leaseMinutes : undefined;
     const prev =
       lease.previousMachine === null
         ? '座位原来没人'
-        : `上一任是 ${lease.previousMachine}/${lease.previousSession}（第 ${lease.term - 1} 任），它下一次动手前现查就会退役`;
+        : `上一任是 ${lease.previousMachine}/${lease.previousSession}（第 ${lease.term - 1} 任），它下次 seat show 看一眼就知道该退了`;
     return {
       code: 0,
-      text: `接班了：${scope} 第 ${lease.term} 任是 ${holderText(lease)}；${prev}。${settingsText(snap.settings)}，每 15 分钟续一次约`,
-      json: {
-        ok: true,
-        seat: leaseJson(lease),
-        leaseMinutes: lm ?? null,
-        expiresAt: lm === undefined ? null : seatExpiresAt(lease, lm),
-        now,
-      },
-    };
-  }
-  if (sub === 'renew' || sub === 'check') {
-    const p = parse(rest, ['machine', 'session', 'scope', 'term'], usage);
-    if (p.positional.length > 0) throw new SeatCliError(`seat ${sub} 不收位置参数。\n${usage}`);
-    const me = actorOf(p, usage);
-    if (sub === 'renew') {
-      const r = await store.renewSeat(me);
-      if (!r.ok) {
-        const who = r.lease ? `帅位已经是 ${holderText(r.lease)}（第 ${r.lease.term} 任）` : '座位上没人';
-        return {
-          code: 3,
-          text: `没续上：${who}，不是 ${me.machine}/${me.session}（第 ${me.term} 任）。你已经不是帅位：停派新活，只回「我已退役，帅位在 ${r.lease ? holderText(r.lease) : '（没人）'}」`,
-          json: { ok: false, reason: r.lease ? 'replaced' : 'vacant', seat: leaseJson(r.lease), now: r.now },
-        };
-      }
-      const snap = await store.readSeat(me.scope);
-      const lm = snap.settings.ok ? snap.settings.settings.leaseMinutes : null;
-      return {
-        code: 0,
-        text: `续上了：${me.scope} 第 ${r.lease.term} 任 ${holderText(r.lease)}${lm === null ? `；${settingsText(snap.settings)}` : `，租约到 ${seatExpiresAt(r.lease, lm)}`}（库的时钟）`,
-        json: {
-          ok: true,
-          seat: leaseJson(r.lease),
-          leaseMinutes: lm,
-          expiresAt: lm === null ? null : seatExpiresAt(r.lease, lm),
-          now: r.now,
-        },
-      };
-    }
-    const snap = await store.readSeat(me.scope);
-    if (!snap.settings.ok)
-      return {
-        code: 1,
-        text: `没查成：${snap.settings.why}。按不是帅位算，先把设置改对`,
-        json: { ok: false, reason: 'settings', why: snap.settings.why, now: snap.now },
-      };
-    const v = seatVerdict(snap.lease, me, snap.now, snap.settings.settings.leaseMinutes);
-    if (!v.ok)
-      return {
-        code: 3,
-        text: `不是帅位：${v.why}`,
-        json: { ok: false, reason: v.reason, why: v.why, seat: leaseJson(snap.lease), now: snap.now },
-      };
-    return {
-      code: 0,
-      text: `是帅位：${me.scope} 第 ${v.term} 任，租约到 ${v.expiresAt}（库的时钟）`,
-      json: { ok: true, term: v.term, expiresAt: v.expiresAt, now: snap.now },
+      text: `接班了：${scope} 第 ${lease.term} 任是 ${holderText(lease)}；${prev}。`,
+      json: { ok: true, seat: leaseJson(lease), now },
     };
   }
   if (sub === 'show') {
@@ -498,12 +426,13 @@ export async function runSeat(
         `交接说明是空的：从标准输入给（在做什么、等谁拍什么、开着的 PR 和工人、下一步）。\n${usage}`,
       );
     if ([...text].length > MAX_HANDOFF) throw new SeatCliError(`交接说明太长（最多 ${MAX_HANDOFF} 个字）`);
+    // #446 起谁都能写（不核是不是现任）：座位上没人（从没接过班）才存不进
     const r = await store.writeHandoff({ ...me, text });
     if (!r.ok)
       return {
         code: 3,
-        text: `没存上：${r.lease ? `帅位是 ${holderText(r.lease)}（第 ${r.lease.term} 任）` : '座位上没人'}；只有现任、刚被换下的上一任能写交接`,
-        json: { ok: false, seat: leaseJson(r.lease), now: r.now },
+        text: '没存上：座位上没人（还没接过班），没什么可交接的',
+        json: { ok: false, seat: null, now: r.now },
       };
     return {
       code: 0,
@@ -516,7 +445,7 @@ export async function runSeat(
 
 const ACTIVE_TASK = (state: string) => !['queued', 'done', 'stopped', 'failed'].includes(state);
 
-/** 看现状：新帅位开场从库里现算的那一份交接（加上最新一份交接说明，只算补充）。 */
+/** 看现状：现在是谁、最后活动多久前、在做的认领、引擎在跑的单、没答的提问、交接说明。 */
 async function showSeat(store: Store, scope: string): Promise<SeatCliResult> {
   const snap = await store.readSeat(scope);
   const names = await repoNames(store);
@@ -531,14 +460,10 @@ async function showSeat(store: Store, scope: string): Promise<SeatCliResult> {
     for (const a of await store.listAsks(t.id)) if (a.answer === undefined) asks.push({ task: t, ask: a });
   const alerts = await store.listNotifications({ status: 'open', limit: 50 });
   const lease = snap.lease;
-  const lm = snap.settings.ok ? snap.settings.settings.leaseMinutes : null;
-  const expired =
-    lease !== null && lm !== null && Date.parse(seatExpiresAt(lease, lm) ?? '') <= Date.parse(snap.now);
   const lines = [
     lease === null
       ? `帅位（${scope}）：座位上没人`
-      : `帅位（${scope}）：第 ${lease.term} 任 ${holderText(lease)}，上次续约 ${lease.renewedAt}${expired ? '（过了租期没续：可能断了）' : ''}${lease.previousMachine ? `；上一任 ${lease.previousMachine}/${lease.previousSession}` : ''}`,
-    settingsText(snap.settings),
+      : `帅位（${scope}）：第 ${lease.term} 任 ${holderText(lease)}，${lastActivityText(lease.lastActivityAt, snap.now)}${lease.previousMachine ? `；上一任 ${lease.previousMachine}/${lease.previousSession}` : ''}`,
     `在做的认领（${claims.length}）：`,
     ...claims.map((c) => `  ${names.get(c.repoId) ?? c.repoId}#${c.issueNumber} ${describeClaim(c, now)}`),
     `引擎在跑的单（${tasks.length}）：`,
@@ -556,9 +481,6 @@ async function showSeat(store: Store, scope: string): Promise<SeatCliResult> {
     text: lines.join('\n'),
     json: {
       seat: leaseJson(lease),
-      leaseMinutes: lm,
-      expired,
-      settings: snap.settings,
       claims: claims.map((c) => claimJson(c, names)),
       tasks: tasks.map((t) => ({
         repo: names.get(t.repoId) ?? t.repoId,
@@ -572,7 +494,7 @@ async function showSeat(store: Store, scope: string): Promise<SeatCliResult> {
         question: ask.question,
       })),
       openAlerts: alerts.items.length,
-      now,
+      now: snap.now,
     },
   };
 }
@@ -616,23 +538,18 @@ async function drillEngineTake(
       text: `演练：引擎拿到了 ${label}（${r.fresh ? '新认领' : '本来就拿着'}，认领号 ${r.claim.claimId}，待起；不起工作流）`,
       json: { ok: true, claim: claimJson(r.claim, names), fresh: r.fresh, now: r.now },
     };
-  if (r.reason === 'held')
-    return {
-      code: 3,
-      text: `演练：引擎没抢到 ${label}：${describeClaim(r.claim, r.now)}`,
-      json: { ok: false, reason: 'held', claim: claimJson(r.claim, names), now: r.now },
-    };
+  // #446 起 claimForEngine 不带 force 的失败只有一种：held（reason 恒为 'held'，没有别的分支了）
   return {
-    code: 1,
-    text: `演练：引擎没抢到 ${label}：${r.why}`,
-    json: { ok: false, reason: r.reason, why: r.why, now: r.now },
+    code: 3,
+    text: `演练：引擎没抢到 ${label}：${describeClaim(r.claim, r.now)}`,
+    json: { ok: false, reason: 'held', claim: claimJson(r.claim, names), now: r.now },
   };
 }
 
 /**
- * 帅位改派（方案「法国命令行」的表，#348）。给本机（--to worker|seat）：同一个事务里核任期、抢这一行——原来的作废了、放下了、
- * 做完了的直接改；还活着的（引擎、别的工人）要带创始人原话，当场作废、给这次的工人；引擎的工作流叫停。原来那份是作废的（这次
- * 强制作废的、宽限期过了作废的），它开着的 PR 撤自动合并、关掉、留言指向新主，分支留着。给引擎（--to engine）走交单同一条路。
+ * 改派（#446 起不用创始人原话）。给本机（--to worker|seat）：抢这一行——原来的作废了、放下了、做完了的直接改；还活着的
+ * （引擎、别的工人）当场作废、给这次的工人，写 --note 记一句为什么（有创始人原话就用 --founder，纯记录）；引擎的工作流
+ * 叫停。给引擎（--to engine）走交单同一条路。
  */
 async function reassign(rest: readonly string[], deps: ClaimCliDeps): Promise<SeatCliResult> {
   const usage = CLAIM_USAGE;
@@ -688,18 +605,14 @@ async function reassign(rest: readonly string[], deps: ClaimCliDeps): Promise<Se
     graceMinutes,
     note,
     founder,
+    force: true,
   });
   if (!r.ok) {
-    if (r.reason === 'held')
-      return {
-        code: 3,
-        text: `没改派（${label2} 没动）：${describeClaim(r.claim, r.now)}，还活着。要强制改派带上创始人原话 --founder "…"：原来那份当场作废`,
-        json: { ok: false, reason: 'held', claim: claimJson(r.claim, names), now: r.now },
-      };
+    // #446 起 reassign 永远 force=true：held 理论上不会再出现，留着是防御性分支
     return {
-      code: r.reason === 'not_seat' ? 3 : 1,
-      text: `没改派（${label2} 没动）：${r.why}`,
-      json: { ok: false, reason: r.reason, why: r.why, now: r.now },
+      code: 1,
+      text: `没改派（${label2} 没动）：${r.reason === 'held' ? describeClaim(r.claim, r.now) : '没做成'}`,
+      json: { ok: false, reason: r.reason, now: r.now },
     };
   }
   const lines = [
@@ -709,15 +622,17 @@ async function reassign(rest: readonly string[], deps: ClaimCliDeps): Promise<Se
   let code = 0;
   const old = r.voided ?? (r.previous?.state === 'voided' ? r.previous : null);
   if (old) {
-    lines.push(`原来那份作废了：${claimOwnerText(old)}（认领 ${old.claimId.slice(0, 8)}）`);
+    lines.push(
+      `原来那份作废了：${claimOwnerText(old)}（认领 ${old.claimId.slice(0, 8)}，${old.endReason ?? '没写原因'}）；开着的 PR 不动，旧主自己关或帅位手动关`,
+    );
     json.voided = claimJson(old, names);
   }
-  // 原来归引擎、这次强制作废的：叫停它的工作流（叫停不成它的 PR 也合不进——认领已经不归引擎——但要人去停）
+  // 原来归引擎、这次强制作废的：叫停它的工作流（工作流不知道认领已经不归它了，得有人去叫停，不然接着跑）
   if (r.voided?.ownerKind === 'engine' && r.voided.workflowId) {
     try {
       const stopped = await deps.stopEngine(r.voided.workflowId, {
         by: `${seat.machine}/${seat.session}`,
-        reason: `改派给 ${claimOwnerText(r.claim)}（创始人原话：${founder ?? ''}）`,
+        reason: `改派给 ${claimOwnerText(r.claim)}（${founder ? `创始人原话：${founder}` : note ? note : '没写原因'}）`,
       });
       lines.push(
         stopped === 'stopped'
@@ -734,46 +649,12 @@ async function reassign(rest: readonly string[], deps: ClaimCliDeps): Promise<Se
       json.engine = { error: why };
     }
   }
-  if (old) {
-    const why = r.voided
-      ? `创始人原话：${founder ?? ''}`
-      : `原来的认领作废了：${old.endReason ?? '没写原因'}`;
-    try {
-      const closed = await (await deps.claims()).closeForReassign(repo, old, {
-        to: claimOwnerText(r.claim),
-        why,
-      });
-      lines.push(
-        closed.closed.length > 0
-          ? `原来那份开着的 PR 关了（分支留着）：${closed.closed.map((n) => `#${n}`).join('、')}`
-          : '原来那份没有开着的 PR',
-      );
-      if (closed.problems.length > 0) {
-        code = 1;
-        lines.push(...closed.problems.map((x) => `没处理成：${x}`));
-      }
-      json.closed = closed;
-    } catch (err) {
-      code = 1;
-      const e = err instanceof Error ? err.message : String(err);
-      lines.push(
-        `原来那份的 PR 没处理（GitHub 没接上：${e}）：撤自动合并、关掉要人补；「认领对得上」GitHub 对账每 15 分钟会重贴`,
-      );
-      json.closed = { error: e };
-    }
-  } else {
-    const pr = await refreshAfter(deps, repo, issueNumber);
-    lines.push(pr.line);
-    json.prStatus = pr.json;
-  }
   return { code, text: lines.join('\n'), json };
 }
 
-/** fleet-api claim 碰外面的几样：库；GitHub（引擎机器人）、Temporal、交单用到才连。 */
+/** fleet-api claim 碰外面的几样：库；Temporal、交单用到才连（#446 起不再碰 GitHub：没有「认领对得上」要贴、要重判了）。 */
 export interface ClaimCliDeps {
   store: Store;
-  /** 「认领对得上」那一侧（claim-status.ts）：认领变了重贴、sweep 撤自动合并、改派关旧 PR。用到才连；连不上抛错。 */
-  claims: () => Promise<ClaimStatus>;
   /** 改派给本机时叫停引擎在跑的工作流：叫停了 stopped；工作流已经不在 gone；连不上抛错。 */
   stopEngine: (workflowId: string, input: { by: string; reason: string }) => Promise<'stopped' | 'gone'>;
   /** 改派给引擎：交单（cli.ts 的 handover）同一条路，回给人看的那段话；没交成抛 CliError（带退出码）。 */
@@ -785,21 +666,6 @@ export interface ClaimCliDeps {
     seat?: SeatActor | undefined;
     founder?: string | undefined;
   }) => Promise<string>;
-}
-
-/** 认领变了之后当场重贴挂这张单的开着的 PR（没贴成照实说，不改这条命令的退出码：认领已经记上了）。 */
-async function refreshAfter(
-  deps: ClaimCliDeps,
-  repo: Repo,
-  issueNumber: number,
-): Promise<{ line: string; json: Record<string, unknown> }> {
-  try {
-    const r = await (await deps.claims()).refreshIssue(repo, issueNumber);
-    return { line: refreshText(r), json: { ok: r.problems.length === 0, ...r } };
-  } catch (err) {
-    const error = err instanceof Error ? err.message : String(err);
-    return { line: refreshText({ error }), json: { ok: false, error } };
-  }
 }
 
 export async function runClaim(argv: readonly string[], deps: ClaimCliDeps): Promise<SeatCliResult> {
@@ -840,23 +706,16 @@ export async function runClaim(argv: readonly string[], deps: ClaimCliDeps): Pro
     });
     const label2 = `${repo.owner}/${repo.name}#${issueNumber}`;
     if (r.ok) {
-      const pr = await refreshAfter(deps, repo, issueNumber);
       return {
         code: 0,
-        text: `认领了 ${label2}：归 ${claimOwnerText(r.claim)}，认领号 ${r.claim.claimId}（开 PR 时正文「认领」栏写它），宽限期 ${r.claim.graceMinutes} 分钟没心跳就作废\n${pr.line}`,
-        json: { ok: true, claim: claimJson(r.claim, names), prStatus: pr.json, now: r.now },
+        text: `认领了 ${label2}：归 ${claimOwnerText(r.claim)}，认领号 ${r.claim.claimId}`,
+        json: { ok: true, claim: claimJson(r.claim, names), now: r.now },
       };
     }
-    if (r.reason === 'held')
-      return {
-        code: 3,
-        text: `没认领上：${label2} ${describeClaim(r.claim, r.now)}；不碰这张。要接手得等它结束、作废，或者创始人说了改派`,
-        json: { ok: false, reason: 'held', claim: claimJson(r.claim, names), now: r.now },
-      };
     return {
-      code: r.reason === 'not_seat' ? 3 : 1,
-      text: `没认领上（${label2} 没动）：${r.why}`,
-      json: { ok: false, reason: r.reason, why: r.why, now: r.now },
+      code: 3,
+      text: `没认领上：${label2} ${describeClaim(r.claim, r.now)}；不碰这张。要接手用 claim reassign 强制改派（不用创始人原话）`,
+      json: { ok: false, reason: 'held', claim: claimJson(r.claim, names), now: r.now },
     };
   }
   if (sub === 'step' || sub === 'done' || sub === 'release') {
@@ -889,14 +748,7 @@ export async function runClaim(argv: readonly string[], deps: ClaimCliDeps): Pro
         json: { ok: false, claim: r.claim && claimJson(r.claim, names), now: r.now },
       };
     const text = `${label2}：${claimOwnerText(r.claim)} ${claimStateText(r.claim.state)}${sub === 'step' && pr !== undefined ? `，登记了 PR #${pr}` : ''}`;
-    if (sub === 'step' && pr === undefined)
-      return { code: 0, text, json: { ok: true, claim: claimJson(r.claim, names), now: r.now } };
-    const prStatus = await refreshAfter(deps, repo, issueNumber);
-    return {
-      code: 0,
-      text: `${text}\n${prStatus.line}`,
-      json: { ok: true, claim: claimJson(r.claim, names), prStatus: prStatus.json, now: r.now },
-    };
+    return { code: 0, text, json: { ok: true, claim: claimJson(r.claim, names), now: r.now } };
   }
   if (sub === 'reassign') return reassign(rest, deps);
   if (sub === 'show') {
@@ -922,57 +774,6 @@ export async function runClaim(argv: readonly string[], deps: ClaimCliDeps): Pro
           ? lines.join('\n')
           : `${repo.owner}/${repo.name} 没有${p.flags.has('all') ? '' : '还活着的'}认领`,
       json: { claims: picked.map((c) => claimJson(c, names)), missing, now },
-    };
-  }
-  if (sub === 'sweep') {
-    const p = parse(rest, [], usage);
-    if (p.positional.length > 0) throw new SeatCliError(`claim sweep 不收位置参数。\n${usage}`);
-    const names = await repoNames(store);
-    let claims: ClaimStatus;
-    try {
-      claims = await deps.claims();
-    } catch (err) {
-      // GitHub 连不上也照样作废（库里的事先做）；PR 那边交给引擎每轮的对账
-      const { voided, now } = await store.voidExpiredClaims({ limit: 200 });
-      const why = err instanceof Error ? err.message : String(err);
-      return {
-        code: 1,
-        text: [
-          `作废了 ${voided.length} 张过了宽限期没心跳的认领；PR 那边没做（GitHub 没接上：${why}），撤自动合并、贴红交给引擎每 15 分钟的对账`,
-          ...voided.map(
-            (c) => `  ${names.get(c.repoId) ?? c.repoId}#${c.issueNumber} ${describeClaim(c, now)}`,
-          ),
-        ].join('\n'),
-        json: { ok: false, voided: voided.map((c) => claimJson(c, names)), why, now },
-      };
-    }
-    const s = await claims.sweep();
-    const lines = [
-      s.voided.length === 0
-        ? '没有过了宽限期没心跳的认领'
-        : `作废了 ${s.voided.length} 张过了宽限期没心跳的认领：`,
-      ...s.voided.map(
-        (c) =>
-          `  ${names.get(c.repoId) ?? c.repoId}#${c.issueNumber} ${claimOwnerText(c)}（认领 ${c.claimId.slice(0, 8)}）`,
-      ),
-      `开着的 PR 判了 ${s.checked} 个，「认领对得上」贴了 ${s.posted} 条${s.disabled.length > 0 ? `，撤了自动合并：${s.disabled.join('、')}` : ''}${s.commented > 0 ? `，留言 ${s.commented} 条` : ''}`,
-      ...(s.reposScanned < s.reposTotal
-        ? [`有 ${s.reposTotal - s.reposScanned} 个仓开着的 PR 没列出来`]
-        : []),
-      ...s.problems.map((x) => `没处理成：${x}`),
-    ];
-    return {
-      code: s.problems.length > 0 ? 1 : 0,
-      text: lines.join('\n'),
-      json: {
-        ok: s.problems.length === 0,
-        voided: s.voided.map((c) => claimJson(c, names)),
-        checked: s.checked,
-        posted: s.posted,
-        disabled: s.disabled,
-        commented: s.commented,
-        problems: s.problems,
-      },
     };
   }
   throw new SeatCliError(sub ? `没有 claim ${sub} 这条命令。\n${usage}` : usage);

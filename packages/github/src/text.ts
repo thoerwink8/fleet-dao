@@ -82,8 +82,8 @@ export const PR_BODY_MAX_LINES = 16;
 export const ENGINE_CLOSE_COLUMN = '否（引擎合并后第 7 步自己关单）';
 
 /**
- * 「认领」一栏（#348）：引擎开的 PR 不写认领号——认领归引擎、PR 是「干活的」机器人开的，引擎贴的「认领对得上」就算对得上
- * （core 的 judgeClaimMatch）。
+ * 「认领」一栏：引擎开的 PR 不写认领号，写「引擎」——纯记录，#446 起没有谁核对这一栏对不对得上了（「认领对得上」
+ * 那套机制、core 的 judgeClaimMatch 都已经删掉）。
  */
 export const ENGINE_CLAIM_COLUMN = '引擎';
 

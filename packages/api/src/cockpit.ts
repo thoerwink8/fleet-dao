@@ -1,5 +1,6 @@
 // 驾驶舱接口（/api）：看板、任务、步骤、调度台、账号池与额度、定时任务、通知、操作记录、设置、实时推送、发给工作流的信号。
 // 读一律从数据库读（不直接查 GitHub）；每个写操作都留操作记录。路径取自 shared/web-api.ts 的 WebRoutes。
+import { holderText } from '@fleet-dao/core';
 import {
   AnswerAskRequest,
   AnswerAskResponse,
@@ -297,9 +298,13 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
   });
 
   app.get(WebRoutes.seatBoard.path, async (c) => {
-    const listed = await store.listSeatBoards('main');
+    const [listed, seat] = await Promise.all([store.listSeatBoards('main'), store.readSeat('main')]);
     if (!listed.ok) throw new ApiError(500, 'seat_board_unreadable', listed.why);
     return reply(c, SeatBoardResponse, {
+      // 没人接过班（座位上没人）时是 null，不算错误；#446 起不核是不是「现任」，读到啥就显示啥
+      seat: seat.lease
+        ? { term: seat.lease.term, holder: holderText(seat.lease), lastActivityAt: seat.lease.lastActivityAt }
+        : null,
       projects: listed.boards.map((b) => ({
         project: b.project,
         headline: b.doc.headline,

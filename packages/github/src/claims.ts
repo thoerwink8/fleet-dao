@@ -1,8 +1,8 @@
-// 「认领对得上」这一侧要的 GitHub 读写（#348，都用「引擎」机器人）：现读 PR、列开着的 PR、读头上某个 context 最新的一条提交
-// 状态、贴提交状态（读得到 statuses 写权限才贴）、撤自动合并、关 PR、在 PR 上留言。判法在 @fleet-dao/core 的 judgeClaimMatch，
-// 谁什么时候调在 @fleet-dao/api 的 claim-status.ts。
-// 改这里之前必须知道：合并闸只认「引擎」机器人贴的那条（@fleet-dao/conventions 的 ENGINE_BOT_LOGIN），所以贴一律用引擎的身份；
-// 没有 statuses 写权限、GitHub 没回权限表，都明确报错，不当成贴上了。
+// 贴提交状态、读 PR、撤自动合并、留言这一侧要的 GitHub 读写（都用「引擎」机器人）：现读 PR、列开着的 PR、读头上某个
+// context 最新的一条提交状态、贴提交状态（读得到 statuses 写权限才贴）、撤自动合并、关 PR、在 PR 上留言。原是给「认领
+// 对得上」（#348）用的，那套 #446 起删了；second-opinion（@fleet-dao/engine 的 github-ports.ts）接着用它贴状态、读状态、
+// 留言，接口不用改。
+// 改这里之前必须知道：贴状态一律用引擎的身份；没有 statuses 写权限、GitHub 没回权限表，都明确报错，不当成贴上了。
 import { z } from 'zod';
 import { enc, type RepoRef, repoSlug, unexpected } from './client.ts';
 import { botLogin } from './credentials.ts';

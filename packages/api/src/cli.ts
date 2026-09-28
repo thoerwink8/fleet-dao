@@ -6,16 +6,15 @@
 //   dispatch <owner/仓名> on|off|status
 // 「让 AI 接活」开关（repos.auto_dispatch_since）：驾驶舱的开关页面（#131）之前的唯一入口，之后留作运维的后备。
 // 写入口和页面同一个（Store.setAutoDispatch）；改了记一条操作记录，改完从库里读回开关和那条记录再打印。
-//   handover <owner/仓名> <issue 号> --reason "<谁说的、为什么>" [--machine … --session … --term … | --founder "<创始人原话>"]
+//   handover <owner/仓名> <issue 号> --reason "<谁说的、为什么>" [--machine … --session … | --founder "<有的话>"]
 // 交给 fleet：人明说把一张自动派管不到的单（开关打开以前就开着的、别的版本的、未排期的、母单和子单、贴了「本机做」的）交给引擎，起 Fusion 工作流。
 // 开关关着、这个项目停派、GitHub 上关着一律拒；在跑的不重复起，结束了的只有 GitHub 上重开过才再起一轮（判法在
 // @fleet-dao/core 的 dispatch.ts）。要读 GitHub（「引擎」机器人看这张单此刻开没开着、挂在哪个版本）、连 Temporal（起工作流），
 // 都按同一份 api.env。没被拒的（起了、没起成、本来就在跑）都记一条操作记录 task.handover，从库里读回再打印。
-// 交单要和本机抢这张单的认领（#299）：本机认领着的拒（退出码 3），带创始人原话（--founder）才改派给引擎；帅位上线后（库里有
-// main 座位）交单是受保护动作，帅位带着任期来（--machine、--session、--term，同一个事务里核），运维手敲的带 --founder。
-// 驾驶舱的「交给 fleet」按钮随界面单 #282 做，调同一套判法。
-//   seat …、claim …（#299 帅位只一个）：帅位接班、续约、现查、看现状、交接，帅位认领单、工人报进度和结束、作废过了宽限期的认领。
-// 本机经 ssh 调，写法和退出码见 seat-cli.ts（多一个 3：不是你的——不是帅位、别人拿着、认领号对不上）。
+// 交单要和本机抢这张单的认领：本机认领着的直接强制改派给引擎（#446 起不用创始人原话，跑这条命令本身就是决定）；
+// --machine --session 只是留个身份记录（不核任期，帅位不是锁）。驾驶舱的「交给 fleet」按钮随界面单 #282 做，调同一套判法。
+//   seat …、claim …（#446 帅位认领简化）：帅位接班、看现状、交接（不再是锁：没有续约、现查），认领单、工人报进度和结束、改派。
+// 本机经 ssh 调，写法和退出码见 seat-cli.ts（多一个 3：别人拿着、认领号对不上）。
 //   alert …（design 15.3「谁在处理」）：开着的提醒谁在处理、修到哪；认领一条提醒（认领它的跟进单，就是上面的认领）；静默。
 // 写法和退出码见 alert-cli.ts，和 seat、claim 一样。
 // 每条命令带 --help（或 -h）只打印用法。
@@ -27,7 +26,6 @@ import {
   familyGate,
   handoverDecision,
   heldByOtherText,
-  holderText,
   localGate,
   MAIN_SEAT,
   machineProblem,
@@ -39,7 +37,6 @@ import {
 import { requirementWorkflowId } from '@fleet-dao/shared';
 import { ALERT_USAGE, runAlert } from './alert-cli.ts';
 import type { AlertWorkPort } from './alert-work.ts';
-import type { ClaimStatus } from './claim-status.ts';
 import { temporalSettings } from './config.ts';
 import { checkNewPassword, checkUsername, hashPassword } from './password.ts';
 import type {
@@ -445,7 +442,7 @@ export function operatorName(env: CliEnv): string {
 // —— handover：交给 fleet ——
 
 const HANDOVER_USAGE =
-  '用法：fleet-api handover <owner/仓名> <issue 号> --reason "<谁说的、为什么>" [--machine <机器名> --session <会话号> --term <任期> [--scope main] | --founder "<创始人原话>"]（把开关打开以前开的、别的版本的、未排期的、母单和子单、贴了「本机做」的交给引擎，起 Fusion 工作流。帅位上线后交单是受保护动作：帅位带着任期来，运维手敲的带创始人原话；本机认领着的单要带创始人原话才改派给引擎）';
+  '用法：fleet-api handover <owner/仓名> <issue 号> --reason "<谁说的、为什么>" [--machine <机器名> --session <会话号> [--scope main] | --founder "<有的话>"]（把开关打开以前开的、别的版本的、未排期的、母单和子单、贴了「本机做」的交给引擎，起 Fusion 工作流。#446 起交单不再是受保护动作：带 --machine --session 只是留个身份记录，本机认领着的单会被自动改派给引擎，不用带创始人原话）';
 
 export interface HandoverArgs {
   owner: string;
@@ -521,20 +518,26 @@ export function parseHandoverArgs(argv: readonly string[]): HandoverArgs {
     if (!founder) throw new CliError(`--founder 要写创始人的原话，不能是空的。${HANDOVER_USAGE}`, 2);
     args.founder = founder;
   }
-  const seatKeys = (['machine', 'session', 'term'] as const).filter((k) => options.has(k));
-  if (seatKeys.length > 0 || options.has('scope')) {
-    if (seatKeys.length !== 3)
-      throw new CliError(`帅位交单要 --machine、--session、--term 三样一起给。${HANDOVER_USAGE}`, 2);
+  const seatKeys = (['machine', 'session'] as const).filter((k) => options.has(k));
+  if (seatKeys.length > 0 || options.has('scope') || options.has('term')) {
+    if (seatKeys.length !== 2)
+      throw new CliError(`帅位交单要 --machine、--session 一起给（--term 不用带了）。${HANDOVER_USAGE}`, 2);
     const machine = options.get('machine')?.trim() ?? '';
     const session = options.get('session')?.trim() ?? '';
     const scope = options.get('scope')?.trim() || MAIN_SEAT;
     const bad = machineProblem(machine) ?? sessionProblem(session) ?? seatScopeProblem(scope);
     if (bad) throw new CliError(`${bad}。${HANDOVER_USAGE}`, 2);
-    const termDigits = /^(\d{1,9})$/.exec(options.get('term')?.trim() ?? '')?.[1];
-    const term = termDigits === undefined ? 0 : Number(termDigits);
-    if (term <= 0)
-      throw new CliError(`认不出任期「${options.get('term')}」：要写成正整数。${HANDOVER_USAGE}`, 2);
-    args.seat = { machine, session, scope, term };
+    args.seat = { machine, session, scope };
+    if (options.has('term')) {
+      const termDigits = /^(\d{1,9})$/.exec(options.get('term')?.trim() ?? '')?.[1];
+      const term = termDigits === undefined ? 0 : Number(termDigits);
+      if (term <= 0)
+        throw new CliError(
+          `认不出任期「${options.get('term')}」：要写成正整数，或者不带它。${HANDOVER_USAGE}`,
+          2,
+        );
+      args.seat.term = term;
+    }
   }
   return args;
 }
@@ -544,12 +547,6 @@ export interface HandoverTemporal {
   requirements: RequirementWorkflows;
   /** 没给（测试里只起工作流的）就叫停不了：用到时明确报错。 */
   workflows?: WorkflowControl | undefined;
-  close(): Promise<void>;
-}
-
-/** 「认领对得上」那一侧（#348）连上的一份：用完关掉（它自己连库记评论、关 PR 的账）。 */
-export interface ClaimsConnection {
-  claims: ClaimStatus;
   close(): Promise<void>;
 }
 
@@ -588,8 +585,6 @@ export async function handover(input: {
   store: Store;
   plans: () => Promise<IssuePlanReader>;
   temporal: () => Promise<HandoverTemporal>;
-  /** 强制改派作废了本机的认领时，它开着的 PR 撤自动合并、关掉、留言（#348）。没给的照实打出来要人补。 */
-  claims?: (() => Promise<ClaimStatus>) | undefined;
   args: HandoverArgs;
   operator: string;
   now: () => Date;
@@ -628,21 +623,14 @@ export async function handover(input: {
   const restart = decision.act === 'restart';
   const workflowId = requirementWorkflowId(repo, args.issueNumber);
   const who = args.seat
-    ? `（帅位 ${args.seat.machine}/${args.seat.session}，${args.seat.scope} 第 ${args.seat.term} 任）`
+    ? `（帅位 ${args.seat.machine}/${args.seat.session}）`
     : args.founder
       ? `（创始人原话：${args.founder}）`
       : '';
-  // 认领（#299，方案第四节）：交单也和本机（帅位、工人）抢库里同一行。帅位上线后（库里有 main 这个座位）交单是受保护动作：
-  // 帅位带着任期来、和认领同一个事务里核；运维手敲的带创始人原话。帅位还没人接过时照旧不核（上线过渡）
+  // 认领：交单也和本机（帅位、工人）抢库里同一行。#446 起交单不是受保护动作、也不用创始人原话——跑这条命令本身就是
+  // 交单的决定，本机认领着的单直接强制改派（force: true）。
   let claimed: Extract<EngineClaimResult, { ok: true }> | undefined;
   if (decision.act !== 'noop') {
-    if (!args.seat && !args.founder) {
-      const seat = await dbStep(no, () => store.readSeat(MAIN_SEAT));
-      if (seat.lease)
-        throw new CliError(
-          `${no}帅位已经上线（现在是 ${holderText(seat.lease)}，第 ${seat.lease.term} 任）：交单要带着任期（--machine … --session … --term …），运维手敲的带创始人原话（--founder "…"）`,
-        );
-    }
     const r = await dbStep(no, () =>
       store.claimForEngine({
         repoId: repo.id,
@@ -652,17 +640,10 @@ export async function handover(input: {
         seat: args.seat,
         founder: args.founder,
         note: `交给 fleet${who}：${args.reason}`,
+        force: true,
       }),
     );
-    if (!r.ok) {
-      if (r.reason === 'held')
-        throw new CliError(
-          `${no}${label}（${place}）${heldByOtherText(r.claim, r.now)}。要改派给引擎，带上创始人原话 --founder "…"：本机那份认领当场作废`,
-          3,
-        );
-      if (r.reason === 'not_seat') throw new CliError(`${no}不是帅位：${r.why}`, 3);
-      throw new CliError(`${no}${r.why}`);
-    }
+    if (!r.ok) throw new CliError(`${no}${label}（${place}）${heldByOtherText(r.claim, r.now)}`, 3);
     claimed = r;
   }
   let started: 'started' | 'already_running' | undefined;
@@ -717,22 +698,10 @@ export async function handover(input: {
     }
     const v = claimed.voided;
     if (v) {
-      const head = `作废了本机的认领（原来归 ${claimOwnerText(v)}，认领 ${v.claimId.slice(0, 8)}）`;
-      // 它开着的 PR：撤自动合并、关掉（分支留着）、留言指向引擎；没做成的照实写，要人补
-      try {
-        if (!input.claims) throw new Error('这里没接 GitHub');
-        const closed = await (await input.claims()).closeForReassign(repo, v, {
-          to: '引擎',
-          why: `创始人原话：${args.founder ?? ''}`,
-        });
-        claimNotes.push(
-          `${head}${closed.closed.length > 0 ? `，它开着的 PR ${closed.closed.map((n) => `#${n}`).join('、')} 撤了自动合并、关了（分支留着）` : '，它没有开着的 PR'}${closed.problems.length > 0 ? `；没处理成：${closed.problems.join('；')}` : ''}`,
-        );
-      } catch (err) {
-        claimNotes.push(
-          `${head}；它开着的 PR 没处理（${errText(err)}）${v.prNumbers.length > 0 ? `，登记过的 ${v.prNumbers.map((n) => `#${n}`).join('、')} 要人撤自动合并、关掉` : ''}`,
-        );
-      }
+      // #446 起不再自动碰 GitHub（认领对得上、自动关 PR 那一套删了）：旧主开着的 PR 原样留着，要收尾自己动手
+      claimNotes.push(
+        `作废了本机的认领（原来归 ${claimOwnerText(v)}，认领 ${v.claimId.slice(0, 8)}）${v.prNumbers.length > 0 ? `；它登记过的 PR ${v.prNumbers.map((n) => `#${n}`).join('、')} 不动，要收尾自己关` : ''}`,
+      );
     }
   }
   const outcome =
@@ -817,11 +786,6 @@ export interface CliDeps {
   readStdin?: () => Promise<string>;
   /** 提醒的处理状态、跟进单、静默（alert 命令用）。不给就是真的：连库，法国上再读发布记录。 */
   openAlertWork?: (url: string, env: CliEnv) => Promise<{ alerts: AlertWorkPort; close(): Promise<void> }>;
-  /**
-   * 「认领对得上」那一侧（#348，claim、handover 用）：「引擎」机器人（凭据和 fleet-api.service 同一份）加一个连库（评论、关 PR
-   * 记账）。不给的用到时明确报错，不当成贴上了。
-   */
-  openClaims?: (url: string, env: CliEnv) => Promise<ClaimsConnection>;
 }
 
 async function openPgStore(url: string): Promise<{ store: Store; close(): Promise<void> }> {
@@ -847,26 +811,6 @@ async function openPgAlertWork(
     alerts: pgAlertWork(db, () => (production ? deployFacts(readDeployLagInput()) : null)),
     close,
   };
-}
-
-async function openPgClaims(url: string, env: CliEnv): Promise<ClaimsConnection> {
-  // 用得着才加载、才读凭据：凭据读不到抛 GitHubError（只带文件路径，不带内容）
-  const { createDb } = await import('@fleet-dao/db');
-  const { createGitHub, pgLedger, pgLocker } = await import('@fleet-dao/github');
-  const { createPgStore, withStatementTimeout } = await import('./pg-store.ts');
-  const { createClaimStatus } = await import('./claim-status.ts');
-  const { silentLogger } = await import('./log.ts');
-  const { db, close } = createDb({ url: withStatementTimeout(url) });
-  try {
-    const gh = createGitHub({ ledger: pgLedger(db), locker: pgLocker(db), env });
-    return {
-      claims: createClaimStatus({ store: createPgStore(db), github: gh.claims, log: silentLogger }),
-      close,
-    };
-  } catch (err) {
-    await close();
-    throw err;
-  }
 }
 
 async function openGitHubPlans(env: CliEnv): Promise<IssuePlanReader> {
@@ -902,7 +846,6 @@ export function processDeps(): CliDeps {
     now: () => new Date(),
     readStdin: readAllStdin,
     openAlertWork: openPgAlertWork,
-    openClaims: openPgClaims,
   };
 }
 
@@ -972,14 +915,12 @@ export async function runCli(argv: readonly string[], deps: CliDeps = processDep
   if (command === 'handover') {
     const args = parseHandoverArgs(rest);
     const { store, close } = await deps.openStore(databaseUrl(deps.env));
-    const claims = claimsOnDemand(deps);
     try {
       deps.out(
         await handover({
           store,
           plans: () => deps.openIssuePlans(deps.env),
           temporal: () => deps.openTemporal(deps.env),
-          claims: claims.get,
           args,
           operator: operatorName(deps.env),
           now: () => deps.now(),
@@ -987,7 +928,6 @@ export async function runCli(argv: readonly string[], deps: CliDeps = processDep
       );
       return 0;
     } finally {
-      await claims.close();
       await close();
     }
   }
@@ -995,24 +935,6 @@ export async function runCli(argv: readonly string[], deps: CliDeps = processDep
     return runSeatOrClaim(command, rest, deps);
   deps.err(Object.values(USAGES).join('\n'));
   return 2;
-}
-
-/** 「认领对得上」那一侧用到才连（#348）：没接（openClaims 没给）的用到时抛错，不当成贴上了；用完 close。 */
-function claimsOnDemand(deps: CliDeps): { get: () => Promise<ClaimStatus>; close(): Promise<void> } {
-  let opened: Promise<ClaimsConnection> | undefined;
-  return {
-    get: async () => {
-      const open = deps.openClaims;
-      if (!open) throw new CliError('这里没接 GitHub（openClaims），贴不了「认领对得上」', 1);
-      opened ??= Promise.resolve().then(() => open(databaseUrl(deps.env), deps.env));
-      return (await opened).claims;
-    },
-    close: async () => {
-      if (!opened) return;
-      const c = await opened.catch(() => undefined);
-      await c?.close();
-    },
-  };
 }
 
 /** 用到才连：参数不对（退出码 2）的不连库。给出一个替身，第一次调方法时才打开真的（方法一律当成异步的）。 */
@@ -1069,11 +991,9 @@ async function runSeatOrClaim(
     alertsOpened ??= Promise.resolve().then(() => openAlertWork(databaseUrl(deps.env), deps.env));
     return (await alertsOpened).alerts;
   });
-  // 认领那几样外面的（#348）：GitHub、Temporal 都用到才连（Temporal 用完各自关：handover 自己关它开的那份）
-  const claims = claimsOnDemand(deps);
+  // 叫停引擎用到 Temporal 才连（用完各自关：handover 自己关它开的那份）
   const claimDeps: ClaimCliDeps = {
     store,
-    claims: claims.get,
     stopEngine: async (workflowId, { by, reason }) => {
       const t = await deps.openTemporal(deps.env);
       try {
@@ -1092,7 +1012,6 @@ async function runSeatOrClaim(
         store,
         plans: () => deps.openIssuePlans(deps.env),
         temporal: () => deps.openTemporal(deps.env),
-        claims: claims.get,
         args: {
           owner,
           name,
@@ -1120,7 +1039,6 @@ async function runSeatOrClaim(
   } finally {
     if (opened) await (await opened.catch(() => undefined))?.close();
     if (alertsOpened) await (await alertsOpened.catch(() => undefined))?.close();
-    await claims.close();
   }
 }
 

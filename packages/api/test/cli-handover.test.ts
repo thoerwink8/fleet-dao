@@ -9,17 +9,14 @@ import { FUSION_WORKFLOW_TYPE, type RequirementStartInput, requirementWorkflowId
 import { WorkflowExecutionAlreadyStartedError } from '@temporalio/client';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createClaimStatus } from '../src/claim-status.ts';
 import { type CliDeps, CliError, main, parseHandoverArgs, TASK_HANDOVER } from '../src/cli.ts';
 import { devFixtures, IDS } from '../src/dev-fixtures.ts';
-import { silentLogger } from '../src/log.ts';
 import type { MemoryData } from '../src/memory-store.ts';
 import { createMemoryStore } from '../src/memory-store.ts';
 import { createPgStore } from '../src/pg-store.ts';
 import type { IssuePlan, Store } from '../src/ports.ts';
 import { createTemporalRequirementWorkflows, type WorkflowStarterLike } from '../src/temporal.ts';
 import { runChild } from './child.ts';
-import { fakeClaimsGitHub } from './fake-claims-github.ts';
 import { issuePlan, V2 } from './harness.ts';
 import { seedPg } from './pg-fixtures.ts';
 
@@ -60,7 +57,7 @@ function fakeTemporal() {
 
 type Data = Partial<MemoryData>;
 
-function setup(options: { switchOn?: string | null; data?: (d: Data) => void; noGitHub?: boolean } = {}) {
+function setup(options: { switchOn?: string | null; data?: (d: Data) => void } = {}) {
   const data: Data = devFixtures(T0);
   const since = options.switchOn === undefined ? SWITCH_ON : options.switchOn;
   data.repos = (data.repos ?? []).map((r) => ({ ...r, ...(since ? { autoDispatchSince: since } : {}) }));
@@ -69,7 +66,6 @@ function setup(options: { switchOn?: string | null; data?: (d: Data) => void; no
   const out: string[] = [];
   const err: string[] = [];
   const temporal = fakeTemporal();
-  const gh = fakeClaimsGitHub();
   const plans = new Map<number, IssuePlan | Error>();
   const planReads: number[] = [];
   const opened = { store: 0, plans: 0 };
@@ -102,14 +98,6 @@ function setup(options: { switchOn?: string | null; data?: (d: Data) => void; no
         },
       };
     },
-    ...(options.noGitHub
-      ? {}
-      : {
-          openClaims: async () => ({
-            claims: createClaimStatus({ store: s, github: gh, log: silentLogger }),
-            close: async () => {},
-          }),
-        }),
     now: () => T0,
   });
   const run = (args: string[], s?: Store) => main(['handover', ...args], deps(s));
@@ -136,7 +124,7 @@ function setup(options: { switchOn?: string | null; data?: (d: Data) => void; no
     return id;
   };
   const handovers = () => store.data.audit.filter((a) => a.action === TASK_HANDOVER);
-  return { store, out, err, temporal, gh, plans, planReads, opened, deps, run, queued, handovers };
+  return { store, out, err, temporal, plans, planReads, opened, deps, run, queued, handovers };
 }
 
 describe('参数', () => {
@@ -486,9 +474,9 @@ describe('交给 fleet', () => {
   });
 });
 
-describe('认领（#299）：交单和本机抢同一行；帅位上线后交单要带任期或创始人原话', () => {
+describe('认领（#446 起交单永远强制改派，不用创始人原话、不用带帅位任期）', () => {
   const MAIN = { scope: 'main', machine: '本机', session: 's1' };
-  const SEAT_ARGS = ['--machine', '本机', '--session', 's1', '--term', '1'];
+  const SEAT_ARGS = ['--machine', '本机', '--session', 's1'];
 
   /** 帅位接班、派一个工人认领 #40（本机拿着）。 */
   async function localHolds(t: ReturnType<typeof setup>, pr?: number) {
@@ -505,21 +493,25 @@ describe('认领（#299）：交单和本机抢同一行；帅位上线后交单
     return r.claim;
   }
 
-  it('参数：帅位三样一起给（--scope 不给是 main），--founder 要写原话；少一样、认不出的一律拒（退出码 2）', () => {
+  it('参数：--machine --session 一起给就行（--term 不用带了，给了也认）；少一样、认不出的一律拒（退出码 2）', () => {
     expect(parseHandoverArgs(['example/canary', '40', '--reason', REASON, ...SEAT_ARGS])).toMatchObject({
-      seat: { machine: '本机', session: 's1', term: 1, scope: 'main' },
+      seat: { machine: '本机', session: 's1', scope: 'main' },
     });
+    expect(
+      parseHandoverArgs(['example/canary', '40', '--reason', REASON, ...SEAT_ARGS, '--term', '3']),
+    ).toMatchObject({ seat: { machine: '本机', session: 's1', scope: 'main', term: 3 } });
     expect(
       parseHandoverArgs(['example/canary', '40', '--reason', REASON, '--founder', '  这张给引擎做  ']),
     ).toMatchObject({ founder: '这张给引擎做' });
     for (const extra of [
-      ['--machine', '本机', '--session', 's1'],
+      ['--machine', '本机'],
+      ['--session', 's1'],
       ['--term', '1'],
       ['--scope', 'main'],
       ['--machine', '本机', '--session', 's1', '--term', 'x'],
       ['--machine', '本机', '--session', 's1', '--term', '0'],
-      ['--machine', 'a b', '--session', 's1', '--term', '1'],
-      ['--machine', '本机', '--session', 's1', '--term', '1', '--scope', 'prod'],
+      ['--machine', 'a b', '--session', 's1'],
+      ['--machine', '本机', '--session', 's1', '--scope', 'prod'],
       ['--founder', '   '],
       ['--founder', '字'.repeat(501)],
       ['--founder', 'a', '--founder', 'b'],
@@ -535,90 +527,41 @@ describe('认领（#299）：交单和本机抢同一行；帅位上线后交单
     }
   });
 
-  it('【故意造出的失败】本机认领着：拒（退出码 3），写明谁拿着、怎么强制改派；不起工作流、不记 task.handover', async () => {
-    const t = setup();
-    await t.queued();
-    const held = await localHolds(t);
-    expect(await t.run(['example/canary', '40', '--reason', REASON, ...SEAT_ARGS])).toBe(3);
-    expect(t.err.at(-1)).toContain(
-      `没交成（什么都没派）：example/canary#40（挂在当前版本「v1 Fusion 接活」上）这张单本机认领着（main 第 1 任帅位认领的）：本机/w1 认领了`,
-    );
-    expect(t.err.at(-1)).toContain('要改派给引擎，带上创始人原话 --founder');
-    expect(t.temporal.started).toEqual([]);
-    expect(t.handovers()).toEqual([]);
-    expect(t.store.data.claims).toMatchObject([{ claimId: held.claimId, state: 'claimed' }]);
-  });
-
-  it('带创始人原话：本机那份认领当场作废（记 claim.reassign），归引擎、起工作流；它开着的 PR 撤自动合并、留言、关掉（#348）', async () => {
+  it('#446：本机认领着的单，不用创始人原话、不用带帅位任期也能强制改派给引擎（跑这条命令本身就是决定）', async () => {
     const t = setup();
     await t.queued();
     const held = await localHolds(t, 88);
-    t.gh.addPull('example/canary', { number: 88, body: '**需求**：#40', autoMerge: true });
-    expect(
-      await t.run(['example/canary', '40', '--reason', REASON, '--founder', '这张交给引擎做', ...SEAT_ARGS]),
-    ).toBe(0);
-    expect(t.temporal.started.map((s) => s.input.issueNumber)).toEqual([40]);
+    expect(await t.run(['example/canary', '40', '--reason', REASON])).toBe(0);
     const [claim] = t.store.data.claims;
     expect(claim).toMatchObject({ ownerKind: 'engine', state: 'doing' });
     expect(t.store.data.audit.find((a) => a.action === 'claim.reassign')).toMatchObject({
-      actor: { kind: 'ai', id: '本机/s1' },
+      actor: { kind: 'engine', id: 'ops:handover' },
       target: `claim:${IDS.repo}#40`,
       before: { claimId: held.claimId, owner: '本机/w1' },
-      reason: '改派给引擎（创始人原话：这张交给引擎做）',
     });
+    // #446 起不再碰 GitHub（认领对得上、自动撤合并、关 PR 那一套删了）：旧主登记过的 PR 原样留着，写明要人自己收尾
     expect(t.out.at(-1)).toContain(
-      `认领：归引擎（认领 ${claim?.claimId.slice(0, 8)}）；作废了本机的认领（原来归 本机/w1，认领 ${held.claimId.slice(0, 8)}），它开着的 PR #88 撤了自动合并、关了（分支留着）`,
+      `认领：归引擎（认领 ${claim?.claimId.slice(0, 8)}）；作废了本机的认领（原来归 本机/w1，认领 ${held.claimId.slice(0, 8)}）；它登记过的 PR #88 不动，要收尾自己关`,
     );
-    expect(t.gh.writes).toEqual([
-      'disable example/canary#88',
-      'comment example/canary#88',
-      'close example/canary#88',
-    ]);
-    expect(t.gh.comments[0]?.body).toContain('改派给 引擎（创始人原话：这张交给引擎做）');
-    expect(t.handovers()[0]).toMatchObject({
-      after: { claim: { voided: held.claimId, fresh: true } },
-      reason: expect.stringContaining('（帅位 本机/s1，main 第 1 任）'),
-    });
+    expect(t.handovers()[0]).toMatchObject({ after: { claim: { voided: held.claimId, fresh: true } } });
   });
 
-  it('【故意造出的失败】强制改派时没接 GitHub：照交，照实写旧 PR 没处理、要人撤自动合并关掉', async () => {
-    const t = setup({ noGitHub: true });
-    await t.queued();
-    await localHolds(t, 88);
-    expect(
-      await t.run(['example/canary', '40', '--reason', REASON, '--founder', '这张交给引擎做', ...SEAT_ARGS]),
-    ).toBe(0);
-    expect(t.out.at(-1)).toContain('它开着的 PR 没处理（这里没接 GitHub（openClaims）');
-    expect(t.out.at(-1)).toContain('登记过的 #88 要人撤自动合并、关掉');
-  });
-
-  it('【故意造出的失败】帅位上线后：不带任期也不带原话拒（退出码 1）；带着换下来的任期拒（退出码 3）；都不派', async () => {
-    const t = setup();
-    await t.queued();
-    await t.store.takeSeat(MAIN);
-    expect(await t.run(['example/canary', '40', '--reason', REASON])).toBe(1);
-    expect(t.err.at(-1)).toContain('帅位已经上线（现在是 本机/s1，第 1 任）：交单要带着任期');
-    await t.store.takeSeat({ ...MAIN, machine: '笔记本', session: 's2' });
-    expect(await t.run(['example/canary', '40', '--reason', REASON, ...SEAT_ARGS])).toBe(3);
-    expect(t.err.at(-1)).toContain('没交成（什么都没派）：不是帅位：帅位已经是 笔记本/s2（第 2 任）');
-    expect(t.temporal.started).toEqual([]);
-    expect(t.store.data.claims).toEqual([]);
-    expect(t.handovers()).toEqual([]);
-  });
-
-  it('帅位带着任期交：照交，认领记在帅位名下；运维手敲的带创始人原话也能交（不核任期）', async () => {
+  it('带着帅位身份（--machine --session，不用带任期）：认领记在帅位名下', async () => {
     const t = setup();
     await t.queued(40);
-    await t.queued(41);
     await t.store.takeSeat(MAIN);
     expect(await t.run(['example/canary', '40', '--reason', REASON, ...SEAT_ARGS])).toBe(0);
     expect(t.store.data.audit.find((a) => a.action === 'claim.take')).toMatchObject({
       actor: { kind: 'ai', id: '本机/s1' },
-      after: { owner: 'engine', seat: 'main#1' },
+      after: { owner: 'engine' },
     });
+  });
+
+  it('带创始人原话（运维手敲）：也能交，原因记进操作记录', async () => {
+    const t = setup();
+    await t.queued(41);
     expect(await t.run(['example/canary', '41', '--reason', REASON, '--founder', '41 也给引擎'])).toBe(0);
-    expect(t.temporal.started.map((s) => s.input.issueNumber)).toEqual([40, 41]);
-    expect(t.handovers()[1]).toMatchObject({
+    expect(t.handovers()[0]).toMatchObject({
       reason: expect.stringContaining('（创始人原话：41 也给引擎）'),
     });
   });

@@ -118,7 +118,8 @@ export interface GitHubOptions {
 
 /**
  * 各身份要有的权限（自检用，引擎每小时对账跑一次、缺了报提醒、健康页 github_app 跟着红）。「干活的」只推分支、开 PR；
- * 「引擎」合并、改 issue、续互动限制、读 CI，还要在 PR 头上贴「认领对得上」（#299，commit status 要 statuses:write）。
+ * 「引擎」合并、改 issue、续互动限制、读 CI，还要在 PR 头上贴提交状态（commit status 要 statuses:write；原是给「认领
+ * 对得上」#299 用的，那套 #446 起删了，现在是 second-opinion 在用，见 claims.ts）。
  */
 export const REQUIRED_PERMISSIONS: Record<AppRole, Record<string, 'read' | 'write'>> = {
   agent: { contents: 'write', pull_requests: 'write', metadata: 'read' },

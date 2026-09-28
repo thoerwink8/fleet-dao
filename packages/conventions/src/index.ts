@@ -142,7 +142,6 @@ export {
 } from './plan-snapshot.ts';
 export {
   CLAIM_COLUMN,
-  CLAIM_MATCH_CONTEXT,
   ENGINE_BOT_LOGIN,
   ISSUE_COLUMN,
   linkedIssue,
