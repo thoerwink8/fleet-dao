@@ -318,7 +318,14 @@ describe('runTests：合并前重跑那一步，判合并闸红是不是只缺 s
   it('合并闸红、碰了先审后合的路径、当前头上还没有 second-opinion 状态：secondOpinionWait=missing，不是测试真红', async () => {
     const { ports } = setupRunTests({ waitCi: async () => ciRed(['merge-gate']) });
     const res = await ports.runTests(
-      { ...scope, repo, prNumber: 7, branch: 'fleet/12-a', head: 'a'.repeat(40) },
+      {
+        ...scope,
+        repo,
+        prNumber: 7,
+        branch: 'fleet/12-a',
+        head: 'a'.repeat(40),
+        riskPathsFile: RISK_PATHS_FILE,
+      },
       ctx,
     );
     expect(res).toMatchObject({ passed: false, secondOpinionWait: 'missing' });
@@ -330,7 +337,14 @@ describe('runTests：合并前重跑那一步，判合并闸红是不是只缺 s
       latestStatus: async () => ({ state: 'pending', description: '', byEngine: true }),
     });
     const res = await ports.runTests(
-      { ...scope, repo, prNumber: 7, branch: 'fleet/12-a', head: 'a'.repeat(40) },
+      {
+        ...scope,
+        repo,
+        prNumber: 7,
+        branch: 'fleet/12-a',
+        head: 'a'.repeat(40),
+        riskPathsFile: RISK_PATHS_FILE,
+      },
       ctx,
     );
     expect(res).toMatchObject({ passed: false, secondOpinionWait: 'pending' });
@@ -342,11 +356,42 @@ describe('runTests：合并前重跑那一步，判合并闸红是不是只缺 s
       pullFiles: async () => [{ filename: 'docs/design.md', status: 'modified' }],
     });
     const res = await ports.runTests(
+      {
+        ...scope,
+        repo,
+        prNumber: 7,
+        branch: 'fleet/12-a',
+        head: 'a'.repeat(40),
+        riskPathsFile: RISK_PATHS_FILE,
+      },
+      ctx,
+    );
+    expect(res.passed).toBe(false);
+    expect(res.secondOpinionWait).toBeUndefined();
+    expect(latestStatus).not.toHaveBeenCalled();
+  });
+
+  it('【故意造出的失败】项目没声明先审后合清单：合并闸红也不去读 fleet-dao 的清单，照真红处理，不当「只缺 second-opinion」', async () => {
+    const readRepoFile = vi.fn(async () => ({
+      defaultBranch: 'main',
+      commit: 'a'.repeat(40),
+      file: { kind: 'text' as const, text: RISK_JSON },
+    }));
+    const pullFiles = vi.fn(async () => [{ filename: 'packages/api/src/auth.ts', status: 'modified' }]);
+    const { ports, latestStatus } = setupRunTests({
+      waitCi: async () => ciRed(['merge-gate']),
+      readRepoFile,
+      pullFiles,
+    });
+    const res = await ports.runTests(
       { ...scope, repo, prNumber: 7, branch: 'fleet/12-a', head: 'a'.repeat(40) },
       ctx,
     );
     expect(res.passed).toBe(false);
     expect(res.secondOpinionWait).toBeUndefined();
+    expect(res.summary).toContain('merge-gate');
+    expect(readRepoFile).not.toHaveBeenCalled();
+    expect(pullFiles).not.toHaveBeenCalled();
     expect(latestStatus).not.toHaveBeenCalled();
   });
 
@@ -369,7 +414,14 @@ describe('runTests：合并前重跑那一步，判合并闸红是不是只缺 s
       latestStatus: async () => ({ state: 'success', description: '第二意见通过', byEngine: true }),
     });
     const res = await ports.runTests(
-      { ...scope, repo, prNumber: 7, branch: 'fleet/12-a', head: 'a'.repeat(40) },
+      {
+        ...scope,
+        repo,
+        prNumber: 7,
+        branch: 'fleet/12-a',
+        head: 'a'.repeat(40),
+        riskPathsFile: RISK_PATHS_FILE,
+      },
       ctx,
     );
     expect(res.passed).toBe(false);
@@ -394,7 +446,17 @@ describe('runTests：合并前重跑那一步，判合并闸红是不是只缺 s
       },
     });
     await expect(
-      ports.runTests({ ...scope, repo, prNumber: 7, branch: 'fleet/12-a', head: 'a'.repeat(40) }, ctx),
+      ports.runTests(
+        {
+          ...scope,
+          repo,
+          prNumber: 7,
+          branch: 'fleet/12-a',
+          head: 'a'.repeat(40),
+          riskPathsFile: RISK_PATHS_FILE,
+        },
+        ctx,
+      ),
     ).rejects.toBeTruthy();
   });
 });

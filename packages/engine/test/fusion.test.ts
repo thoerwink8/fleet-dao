@@ -1072,7 +1072,9 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
     const red = w.alerts.filter((a) => a.level === 'stuck' && a.title.startsWith('流程配置不能用'));
     expect(red).toHaveLength(2);
     expect(result.state).toBe('done');
-    expect(w.count('flowConfig')).toBe(3);
+    // 2 次停派重读 + 1 次这张单收单读成 + 1 次合并队列判「合并闸红是不是只缺 second-opinion」要知道清单在哪
+    // （riskPathsFileForItem，merge-queue.ts）也读一次流程配置。
+    expect(w.count('flowConfig')).toBe(4);
   });
 
   it('没有别家可验（写过这张单的两族之外没有能派的路由）：停下等人，不拿同族顶、不开 PR', async () => {

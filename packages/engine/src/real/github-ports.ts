@@ -11,7 +11,6 @@ import type { SessionUser } from '@fleet-dao/adapters';
 import {
   GATE_CONTEXT,
   parseRiskPaths,
-  RISK_PATHS_FILE,
   type RiskyFile,
   riskyFiles,
   SECOND_OPINION_CONTEXT,
@@ -300,10 +299,8 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
   /**
    * 这个 PR 此刻改到的文件里，落在先审后合路径清单（riskPathsFile 指的、主线上那份）里的：checkHighRisk 端口和
    * runTests 里判「合并闸红是不是只缺 second-opinion」共用同一份读法——两处判的得是同一件事，不能各写一份、慢慢走岔。
-   * 清单读不到、翻不完页照抛，不当「没碰到」（和 checkHighRisk 原来的行为一样）。riskPathsFile 由调用方给：
-   * checkHighRisk 走项目声明的路径（没声明就不叫这个函数）；runTests 服务合并队列，合并队列现在还没接上按项目读
-   * 流程配置那一层，暂时仍传 fleet-dao 自己的 RISK_PATHS_FILE（这个仓自己合的时候没问题；别的项目一旦真走到合并
-   * 队列这一步、又没声明清单，会重新踩到「写死一份清单」的坑，算已知缺口，留给合并队列接上项目配置那张单）。
+   * 清单读不到、翻不完页照抛，不当「没碰到」（和 checkHighRisk 原来的行为一样）。riskPathsFile 由调用方给：两处都是
+   * 项目没声明就不叫这个函数（checkHighRisk、runTests 各自的调用点先判 undefined）。
    */
   const readHighRisk = async (
     repo: PrRepo,
@@ -689,13 +686,19 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
         // （重试，再不行挂起）。
         throw new PortError('CI_UNKNOWN', ci.detail ?? 'CI 没查成', { retryable: true });
       }
-      if (ci.state === 'red' && ci.failedChecks.length === 1 && ci.failedChecks[0] === GATE_CONTEXT) {
+      // 项目没声明先审后合清单：这个项目没有先审后合的路径，合并闸红了也不查这份清单——不是「读不到就当没碰到」，
+      // 是压根没这条路，不查、也不当成「只缺 second-opinion」（照真红处理，落到下面的正常判法）。
+      if (
+        ci.state === 'red' &&
+        ci.failedChecks.length === 1 &&
+        ci.failedChecks[0] === GATE_CONTEXT &&
+        input.riskPathsFile !== undefined
+      ) {
         // 合并闸自己是唯一红的检查：这一步（合并前把主线并进分支）本来就会让头变，第二意见还没追上是常见的良性
         // 情形，不是真测试红（#307/#389 那次真事：白白退回了三轮）。判「是不是」结构化地看两样：这个 PR 真碰了
         // 先审后合的路径（不然合并闸红另有原因——草稿、认领对不上……——second-opinion 状态压根不该管）、当前头上
         // second-opinion 这条提交状态的 state 字段（不匹配合并闸自己写的中文描述）。
-        // 合并队列现在还没接上按项目读流程配置那一层（见 readHighRisk 上面的注释），暂时仍用 fleet-dao 自己的路径
-        const hits = await readHighRisk(input.repo, input.prNumber, RISK_PATHS_FILE, ctx);
+        const hits = await readHighRisk(input.repo, input.prNumber, input.riskPathsFile, ctx);
         if (hits.length > 0) {
           const so = await mapped(() => gh.claims.latestStatus(input.repo, ci.head, SECOND_OPINION_CONTEXT));
           if (so === null || so.state === 'pending') {

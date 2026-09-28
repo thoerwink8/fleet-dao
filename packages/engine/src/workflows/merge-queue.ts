@@ -3,6 +3,8 @@
 // 撤出（子任务暂停、要等人批准、叫停）一定回话：还没开始合的当场回 withdrawn；正在合的等那一步做完，合上了回 merged。
 // 回过的话都记在 recent 里，撤回也记：排队信号比撤出晚到（排队的活动还在路上就叫停了），会被挡回去、不再排进来。
 // 空闲计时从最后一个信号算起，刚记下的撤回至少留一个空闲期（mergeQueueIdleMinutes）。
+// 这里是工作流代码：改调度顺序（多调、少调、换顺序调活动或 decide）要用 patched()，见 test/replay.test.ts
+// 和 workflows/kit.ts 头注释——在途的合并队列条目换上新代码也得接得上老历史，不许重录夹具让它变绿。
 
 import {
   allHandlersFinished,
@@ -11,6 +13,7 @@ import {
   getExternalWorkflowHandle,
   isCancellation,
   log,
+  patched,
   setHandler,
   workflowInfo,
 } from '@temporalio/workflow';
@@ -28,11 +31,17 @@ import {
 } from '../contract.ts';
 import type { MergeOutcome, MergeStep, MergeStepInput, TestResult } from '../decisions/merge.ts';
 import type { SyncResult } from '../decisions/verify.ts';
-import { activitiesFor, failureOf, judgeRetrying, limitsFor } from './kit.ts';
+import type { Scope } from '../ports.ts';
+import { activitiesFor, failureOf, iso, judgeRetrying, limitsFor } from './kit.ts';
 
 const RECENT_KEPT = 50;
 /** 判断连着出错几次报警（之后照样退避着试，修好代码换上新工人就接着合）。 */
 const ALERT_AFTER_FAILURES = 3;
+/**
+ * 合并前重跑测试改成按项目的流程配置读先审后合清单在哪（riskPathsFileForItem）：老历史里没有这一步多调的
+ * flowConfig、decide 这两下，直接换上新代码重放会报「历史对不上」——在途的合并队列条目就得当僵尸终止。
+ */
+const RISK_PATHS_FILE_PATCH = 'merge-queue-risk-paths-file';
 
 interface Entry {
   item: MergeItem;
@@ -138,6 +147,30 @@ export async function mergeQueueWorkflow(input: MergeQueueInput): Promise<MergeQ
       },
     });
 
+  /**
+   * 判「合并闸红是不是只缺 second-opinion」要知道这个项目声明的先审后合清单在哪（没声明就不查，见 runTests 里的
+   * 判法）；和 Fusion 任务读的是同一份副本、同一份判法（core 的 riskPathsFileFor），不各写一份走岔。副本认不出、
+   * 太久没同步成、活动读不到：这里不当基础设施出错把整个条目退回子任务——查不出就等于「这一次不查」，落到
+   * runTests 里没声明的老路（按真红处理）。宁可偶尔把还在等第二意见的合并闸红错当真红多退一轮，也不能让合并
+   * 队列卡在读配置这一步上（写死一份清单、读不到就抛错断流程是 #429 那次教训；反过来在这一步抛错卡住条目是
+   * 同一类坑，不能反着再踩一次）。
+   */
+  const riskPathsFileForItem = async (scope: Scope): Promise<{ riskPathsFile?: string }> => {
+    try {
+      const flow = await acts.flowConfig({ ...scope });
+      const risk = await judgeRetrying('riskPathsFileFor', { read: flow, now: iso(Date.now()) });
+      if (!risk.ok) {
+        log.warn('先审后合清单的路径判不出，这一次不查（照真红处理）', { why: risk.why });
+        return {};
+      }
+      return risk.riskPathsFile !== undefined ? { riskPathsFile: risk.riskPathsFile } : {};
+    } catch (error) {
+      if (isCancellation(error)) throw error;
+      log.warn('先审后合清单的路径读不到，这一次不查（照真红处理）', { error: String(error) });
+      return {};
+    }
+  };
+
   const handleItem = async (entry: Entry): Promise<MergeResult> => {
     const { item } = entry;
     const scope = { taskId: item.taskId, subtaskId: item.subtaskId, subtaskKey: item.subtaskKey };
@@ -173,12 +206,16 @@ export async function mergeQueueWorkflow(input: MergeQueueInput): Promise<MergeQ
             head: item.head,
           });
         } else if (step.next === 'test') {
+          // patched() 本身也要记进历史、调用次数不能跟着分支变，所以先问一次存起来（老历史没打过这个标记，
+          // 一直走没有 riskPathsFile 的老路；见 kit.ts 头注释、fusion.ts 里 second-opinion 那几个 PATCH 的用法）。
+          const riskPathsFileOn = patched(RISK_PATHS_FILE_PATCH);
           tests = await acts.runTests({
             ...scope,
             repo: item.repo,
             prNumber: item.prNumber,
             branch: item.branch,
             head: step.head,
+            ...(riskPathsFileOn ? await riskPathsFileForItem(scope) : {}),
           });
         } else {
           merge = await acts.mergePr({

@@ -17,7 +17,7 @@ import {
   WORKFLOW_TYPES,
   withdrawSignal,
 } from '../src/contract.ts';
-import { createFakeWorld, type FakeCall, type FakeWorld } from '../src/fakes.ts';
+import { createFakeWorld, FAKE_FLOW_CONFIG, type FakeCall, type FakeWorld } from '../src/fakes.ts';
 import {
   createRealEnv,
   freshRepo,
@@ -175,6 +175,40 @@ describe('合并队列', { timeout: 60_000 }, () => {
     expect(first && second && overlaps(first, second)).toBe(false);
     // 合并都带着「只合这个头」的约束。
     for (const m of merges) expect(m.input.expectedHead).toBeTruthy();
+    // 合并前重跑测试要判「合并闸红是不是只缺 second-opinion」：项目的先审后合清单在哪先经 flowConfig 读一遍
+    // （#429 那次教训之后，合并队列不再写死 fleet-dao 自己的清单路径），带给 runTests。
+    expect(world.callsOf('flowConfig').length).toBeGreaterThan(0);
+    for (const t of world.callsOf('runTests'))
+      expect(t.input.riskPathsFile).toBe(FAKE_FLOW_CONFIG.riskPathsFile);
+  });
+
+  it('项目没声明先审后合清单：合并前重跑测试不带 riskPathsFile（不查、不当「只缺 second-opinion」，见 runTests 的判法）', async () => {
+    const repo = freshRepo();
+    const world = createFakeWorld({
+      flow: () => ({
+        replica: {
+          syncedAt: new Date().toISOString(),
+          error: null,
+          unread: null,
+          testCommand: FAKE_FLOW_CONFIG.testCommand,
+        },
+        source: 'project',
+        config: { ...FAKE_FLOW_CONFIG, riskPathsFile: undefined },
+      }),
+    });
+    const result = await withWorker(env, world, async (q) => {
+      const input = subtaskInput(spec('a'), { repo });
+      const handle = await env.client.workflow.start(WORKFLOW_TYPES.subtask, {
+        taskQueue: q,
+        workflowId: `sub-${input.subtaskId}`,
+        args: [input],
+      });
+      return (await handle.result()) as SubtaskResult;
+    });
+    expect(result.state).toBe('merged');
+    const tests = world.callsOf('runTests');
+    expect(tests.length).toBeGreaterThan(0);
+    for (const t of tests) expect(t.input.riskPathsFile).toBeUndefined();
   });
 
   it('子任务叫停时从队里撤出，轮到它也不合', async () => {
