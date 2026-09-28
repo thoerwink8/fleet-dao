@@ -1072,7 +1072,7 @@ export function createSeed(now: number): MockState {
       deliveries: delivered(-3),
       handling: {
         stage: 'claimed',
-        stageText: '认领了',
+        stageText: '有人在修',
         since: at(-2),
         who: '本机/工人A',
         work: { repo: { owner: 'acme', name: 'orbit' }, issueNumber: 17 },
@@ -1089,9 +1089,9 @@ export function createSeed(now: number): MockState {
       createdAt: at(-12),
       handling: {
         stage: 'unclaimed',
-        stageText: '没人认领',
+        stageText: '没人在修',
         since: at(-12),
-        line: '没人认领 · 12 分钟',
+        line: '没人在修 · 12 分钟',
         problems: [],
       },
       deliveries: [

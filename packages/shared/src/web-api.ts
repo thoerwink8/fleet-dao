@@ -771,13 +771,13 @@ const AlertRepoSchema = z.object({ owner: z.string(), name: z.string() });
 
 export const AlertHandlingSchema = z.object({
   stage: z.enum(ALERT_STAGES),
-  /** 阶段说成人话：没人认领、认领了、PR 开着、合进主线、等发布…… */
+  /** 阶段说成人话：没人在修、有人在修、PR 开着、合进主线、等发布…… */
   stageText: z.string(),
   /** 进这个阶段的时刻：「多久了」从它算。 */
   since: Time,
   /** 谁在处理：机器/工人、PR #号、建静默的人、创始人；没人是空。 */
   who: z.string().optional(),
-  /** 跟进单：提醒挂的任务的单、提醒派单开的小单、帅位挂的单。 */
+  /** 跟进单：提醒挂的任务的单，或者 alert_work 表里挂的单（原来「提醒派单」自动开、`alert claim` 手动挂，#445 起这两条写路都删了，只留历史挂的）。 */
   work: z.object({ repo: AlertRepoSchema, issueNumber: z.number().int().positive() }).optional(),
   /** 带动这个阶段的 PR。 */
   pr: z
@@ -874,21 +874,6 @@ export const SETTING_SCHEMAS = {
   'notify.quietHours': z.object({ start: HHMM, end: HHMM }).nullable(),
   /** Jev 每天最多调用多少次。 */
   'judge.dailyCallLimit': z.number().int().min(0).max(100_000),
-  /**
-   * 提醒没人认领多久再推一次、没挂单的开一张跟进单（分钟；design 15.3「谁在处理」）。没设用 20。
-   * 读的地方是 @fleet-dao/core 的 readAlertSettings：设了却认不出明确失败，不拿默认顶。
-   */
-  'alerts.claimAfterMinutes': z.number().int().min(1).max(1440),
-  /** 提醒停在一个阶段（认领了、PR 开着、合进主线、法国已发布）多久没往前走，再推一次（分钟）。没设用 60。 */
-  'alerts.stuckAfterMinutes': z.number().int().min(5).max(10_080),
-  /**
-   * 没挂单的提醒，跟进单开在哪个仓（owner/仓名，要是受管的仓）。null = 不设：除了巡检仓只有一个受管的仓时用它，
-   * 不止一个就不开、明说要设这一项。
-   */
-  'alerts.issueRepo': z
-    .string()
-    .regex(/^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9._-]+$/, '写成 owner/仓名')
-    .nullable(),
 } as const;
 export type SettingKey = keyof typeof SETTING_SCHEMAS;
 

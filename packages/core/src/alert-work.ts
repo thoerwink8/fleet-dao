@@ -1,79 +1,15 @@
 // 提醒是一件活（design 15.3「谁在处理」；创始人 2026-09-27 夜：「标上谁在处理……更类似于一个派单状态」）：要修的提醒挂在
-// 一张跟进单上（有 task_id 的就是那张单，没挂单的由定时任务「提醒派单」开一张，或帅位 alert claim --issue 挂），谁在处理
+// 一张跟进单上（有 task_id 的就是那张单，没挂单的由人另开一张、挂到提醒上），谁在处理
 // 就是那张单上的认领（#299，seat.ts），不另记；状态从认领、PR 镜像、发布记录读时现算（照 k8s Conditions：只看真实记录，
-// 每个阶段带进入的时刻）。没人认领、停在一个阶段太久，由「提醒派单」再推。这里只判，读库、读文件、开单是外壳的事。
+// 每个阶段带进入的时刻）。这里只判，读库、读文件、开单是外壳的事；这份「谁在处理」只给驾驶舱看，
+// `fleet-api alert show` 不再显示（#445，删掉了自动开跟进单、要认领、按分钟再推那一层——原来这里的「提醒派单」）。
 // 改这里之前必须知道：
 // - 引擎自己的认领不算有人在处理：提醒是引擎自己搞不定才报的（#293「没有别家可验」时 #293 的认领在引擎手里）。单列成
-//   engine_stuck，和没人认领一样升级；转人工两条路：创始人说改派，或另开跟进单 alert claim --issue。
+//   engine_stuck，和没人在修一样；转人工要创始人说改派。
 // - 读不到、认不出的写进 problems、阶段不猜：发布判不了就停在「合进主线」并写明没查成；整条读不到的由外壳报没查成，
-//   不当成「没人认领」去开单、再推。
-// - 升级、跟进单的键在这里定（unclaimed:、stuck:、alert:），外壳只照着写：同一段一条，人处理过的不再打开。
-import { type ALERT_STAGES, SETTING_SCHEMAS } from '@fleet-dao/shared';
+//   不当成「没人在修」（创始人 2026-09-28：删减只删拦人催人的，不许驾驶舱少看到东西——没查成和没人在修必须分得开）。
+import type { ALERT_STAGES } from '@fleet-dao/shared';
 import { claimOwnerText, type IssueClaim, isActiveClaim } from './seat.ts';
-
-// —— 设置（settings 表；驾驶舱设置页能改，键和校验就是 @fleet-dao/shared 的 SETTING_SCHEMAS）——
-
-export const ALERT_SETTING_KEYS = {
-  claimAfterMinutes: 'alerts.claimAfterMinutes',
-  stuckAfterMinutes: 'alerts.stuckAfterMinutes',
-  issueRepo: 'alerts.issueRepo',
-} as const;
-
-export interface AlertSettings {
-  /** 没人认领多久再推一次、没挂单的开跟进单（分钟）。 */
-  claimAfterMinutes: number;
-  /** 停在一个阶段多久没往前走再推一次（分钟）。 */
-  stuckAfterMinutes: number;
-  /** 跟进单开在哪个仓；null = 没设（外壳按「除了巡检仓只有一个受管的仓」挑，挑不出就不开、明说）。 */
-  issueRepo: { owner: string; name: string } | null;
-}
-
-export const ALERT_DEFAULTS: Omit<AlertSettings, 'issueRepo'> = {
-  claimAfterMinutes: 20,
-  stuckAfterMinutes: 60,
-};
-
-export type AlertSettingsRead =
-  | { ok: true; settings: AlertSettings; source: 'settings' | 'default' }
-  | { ok: false; why: string };
-
-/** settings 表里那三项的原值（没写是 undefined）：没写的用默认；写了却认不出明确失败，不拿默认顶。 */
-export function readAlertSettings(raw: {
-  claimAfterMinutes?: unknown;
-  stuckAfterMinutes?: unknown;
-  issueRepo?: unknown;
-}): AlertSettingsRead {
-  const problems: string[] = [];
-  const minutes = (field: 'claimAfterMinutes' | 'stuckAfterMinutes'): number => {
-    const x = raw[field];
-    if (x === undefined) return ALERT_DEFAULTS[field];
-    const key = ALERT_SETTING_KEYS[field];
-    const parsed = SETTING_SCHEMAS[key].safeParse(x);
-    if (parsed.success) return parsed.data;
-    problems.push(`设置 ${key} 认不出（${JSON.stringify(x)}）：${parsed.error.issues[0]?.message ?? '不对'}`);
-    return ALERT_DEFAULTS[field];
-  };
-  const claimAfterMinutes = minutes('claimAfterMinutes');
-  const stuckAfterMinutes = minutes('stuckAfterMinutes');
-  let issueRepo: AlertSettings['issueRepo'] = null;
-  if (raw.issueRepo !== undefined) {
-    const parsed = SETTING_SCHEMAS[ALERT_SETTING_KEYS.issueRepo].safeParse(raw.issueRepo);
-    if (!parsed.success) {
-      problems.push(
-        `设置 ${ALERT_SETTING_KEYS.issueRepo} 认不出（${JSON.stringify(raw.issueRepo)}）：${parsed.error.issues[0]?.message ?? '不对'}`,
-      );
-    } else if (parsed.data !== null) {
-      const [owner = '', name = ''] = parsed.data.split('/');
-      issueRepo = { owner, name };
-    }
-  }
-  if (problems.length > 0) return { ok: false, why: problems.join('；') };
-  const source =
-    raw.claimAfterMinutes === undefined && raw.stuckAfterMinutes === undefined && raw.issueRepo === undefined
-      ? 'default'
-      : 'settings';
-  return { ok: true, settings: { claimAfterMinutes, stuckAfterMinutes, issueRepo }, source };
-}
 
 // —— 事实：外壳从库里、文件里读出来交给这里 ——
 
@@ -95,8 +31,9 @@ export interface AlertRef {
 }
 
 /**
- * 跟进单：task = 提醒挂的任务对应的那张单；engine = 提醒派单开的小单；claim = 帅位 alert claim --issue 挂的
- * （后两种记在 alert_work，一条提醒一张，像 k8s ownerReferences 里 controller=true 的那一个）。
+ * 跟进单：task = 提醒挂的任务对应的那张单；engine、claim = 历史上由提醒派单开的小单、或帅位 `alert claim --issue`
+ * 挂的（#445 起两条路都删了，只剩历史数据；记在 alert_work，一条提醒一张，像 k8s ownerReferences 里 controller=true
+ * 的那一个）。
  */
 export interface WorkIssue {
   repoId: string;
@@ -138,7 +75,7 @@ export interface AlertSilence {
 export interface AlertWorkFacts {
   alert: AlertRef;
   work: WorkIssue | null;
-  /** 跟进单上的认领（活着的、结束了的都给：结束了的用来算「没人认领」从哪算起）；没有是 null。 */
+  /** 跟进单上的认领（活着的、结束了的都给：结束了的用来算「没人在修」从哪算起）；没有是 null。 */
   claim: IssueClaim | null;
   prs: readonly FixPr[];
   /** 和这条提醒的键对得上的静默（活着的、过期的都行，这里判）。 */
@@ -281,13 +218,16 @@ export function deployStateOf(
 /** 阶段的名字就是驾驶舱接口里的那一份（@fleet-dao/shared 的 ALERT_STAGES）。 */
 export type AlertStage = (typeof ALERT_STAGES)[number];
 
+// 「没人在修」「有人在修」不是「没人认领」「认领了」（#445，创始人 2026-09-28：删减只删拦人催人的，不许驾驶舱少看到
+// 东西——认领本身没删，issue_claims、帅位这一套照旧；只是提醒这一层不再拿「认领没认领」当第一位的说法，
+// 改成直接说「谁在修、修到哪」，没人在修就照实说没人在修，不是报错也不是没人认领这种听着像在催人的说法）。
 const STAGE_WORDS: Readonly<Record<AlertStage, string>> = {
   resolved: '已撤',
   silenced: '已静默',
   waiting_founder: '等创始人拍',
-  unclaimed: '没人认领',
+  unclaimed: '没人在修',
   engine_stuck: '引擎拿着、它自己卡住了',
-  claimed: '认领了',
+  claimed: '有人在修',
   pr_open: 'PR 开着',
   merged: '合进主线、等发布',
   deployed: '法国已发布、等条件撤',
@@ -297,9 +237,9 @@ export function alertStageText(stage: AlertStage): string {
   return STAGE_WORDS[stage];
 }
 
-/** 有人在处理的几个阶段（升级看「停得太久」，不看「没人认领」）。 */
+/** 有人在处理的几个阶段（升级看「停得太久」，不看「没人在修」）。 */
 export const HANDLED_STAGES: readonly AlertStage[] = ['claimed', 'pr_open', 'merged', 'deployed'];
-/** 没人在处理的几个阶段（升级看「没人认领」）。 */
+/** 没人在处理的几个阶段（升级看「没人在修」）。 */
 export const UNHANDLED_STAGES: readonly AlertStage[] = ['waiting_founder', 'unclaimed', 'engine_stuck'];
 
 export interface AlertHandling {
@@ -317,7 +257,7 @@ export interface AlertHandling {
   /** 合了以后才有：发布了没有。 */
   deploy: DeployState | null;
   /**
-   * 「没人认领」这一段从哪算起（再推的键用）：first = 提醒开着以来没人认领过；after-<认领号前 8 位> = 那份认领结束以后。
+   * 「没人在修」这一段从哪算起（再推的键用）：first = 提醒开着以来没人在修过；after-<认领号前 8 位> = 那份认领结束以后。
    * 有人在处理、静默、已撤的是 null。
    */
   episode: string | null;
@@ -350,8 +290,9 @@ function minutesBetween(from: string, to: string): number {
 const later = (a: string, b: string | null | undefined) => (b && Date.parse(b) > Date.parse(a) ? b : a);
 
 /**
- * 一条提醒此刻的处理状态（纯函数：驾驶舱、本机看板、alert show、提醒派单都用它）。先后：
- * 已撤 → 静默 → 修复的 PR（开着的先于合了的：还在往下修）→ 本机的认领 → 等创始人拍（decision）→ 引擎自己卡住 → 没人认领。
+ * 一条提醒此刻的处理状态（纯函数：驾驶舱、本机看板都用它；`fleet-api alert show` 只借它读静默、没查成，
+ * 不再显示 `line`/`who`，#445）。先后：
+ * 已撤 → 静默 → 修复的 PR（开着的先于合了的：还在往下修）→ 本机的认领 → 等创始人拍（decision）→ 引擎自己卡住 → 没人在修。
  */
 export function alertHandling(f: AlertWorkFacts, deploy: DeployFacts | null, now: string): AlertHandling {
   const { alert, work } = f;
@@ -493,144 +434,19 @@ export function alertHandling(f: AlertWorkFacts, deploy: DeployFacts | null, now
     since,
     who: null,
     episode,
-    line: `没人认领${workText}${endedText} · ${ago(since)}`,
+    line: `没人在修${workText}${endedText} · ${ago(since)}`,
   };
 }
 
-// —— 升级：没人认领、停得太久（定时任务「提醒派单」每 5 分钟照这个判）——
+// —— 每小时对账的 24 小时再推（谁在处理、静默了的不推；条件按 alert-sweep.ts 的 RULES 现算就撤）——
 
-/** 「没人认领」再推的键：unclaimed:<提醒编号>:<这一段>。 */
-export const UNCLAIMED_PREFIX = 'unclaimed:';
-/** 「停得太久」再推的键：stuck:<提醒编号>:<停在哪>。 */
-export const STUCK_PREFIX = 'stuck:';
 /** 每小时对账的 24 小时再推（engine 的 alert-sweep.ts）用的前缀；这里只认，不写。 */
 export const REMIND_KEY_PREFIX = 'remind:';
-/** 跟进单开单的幂等键：alert:<提醒编号>（一条提醒最多开一张）。 */
-export const alertIssueKey = (alertId: string) => `alert:${alertId}`;
 
-/** 再推出来的那几种（不再为它们升级、开单）。 */
+/** 再推出来的那一种（不再为它自己又推一条）：这里只剩每小时对账自己的 24 小时再推（#445 删掉了会自动开单、要认领、
+ * 按分钟再推的「提醒派单」；它推出来的 unclaimed:、stuck: 两种键不会再有新的了）。 */
 export function isEscalationKey(key: string): boolean {
-  return (
-    key.startsWith(UNCLAIMED_PREFIX) || key.startsWith(STUCK_PREFIX) || key.startsWith(REMIND_KEY_PREFIX)
-  );
-}
-
-export const unclaimedKey = (alertId: string, episode: string) => `${UNCLAIMED_PREFIX}${alertId}:${episode}`;
-export const stuckKey = (alertId: string, stageRef: string) => `${STUCK_PREFIX}${alertId}:${stageRef}`;
-
-/** 再推那条的键拆开：原来那条的编号、这一段（episode 或 stageRef）。认不出是 null。 */
-export function parseEscalationKey(
-  key: string,
-): { kind: 'unclaimed' | 'stuck'; alertId: string; ref: string } | null {
-  const kind = key.startsWith(UNCLAIMED_PREFIX) ? 'unclaimed' : key.startsWith(STUCK_PREFIX) ? 'stuck' : null;
-  if (!kind) return null;
-  const rest = key.slice(kind === 'unclaimed' ? UNCLAIMED_PREFIX.length : STUCK_PREFIX.length);
-  const m = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}):(.+)$/.exec(rest);
-  return m?.[1] && m[2] ? { kind, alertId: m[1], ref: m[2] } : null;
-}
-
-export type Escalation =
-  | { kind: 'none' }
-  | {
-      kind: 'unclaimed' | 'stuck';
-      key: string;
-      level: 'alert' | 'decision';
-      title: string;
-      body: string;
-      /** 没挂单的卡住报警：同一轮开一张跟进单。 */
-      openIssue: boolean;
-    };
-
-const TITLE_MAX = 300;
-const clipTitle = (s: string) =>
-  [...s].length > TITLE_MAX ? `${[...s].slice(0, TITLE_MAX - 1).join('')}…` : s;
-
-/** 怎么认领（再推、跟进单的正文里写）。 */
-export function claimHowTo(dedupeKey: string): string {
-  return `认领：帅位经 ssh 调 fleet-api alert claim ${dedupeKey} --machine <机器名> --session <会话号> --term <任期> --label <工人名>（有跟进单就认领那张；引擎卡住的要另开单跟进时加 --issue <号>）；修复的 PR 正文「修提醒」栏写这个键。确认不用处理的：fleet-api alert silence ${dedupeKey} --until +2h --note "<谁拍的、为什么>"（必带到期）。`;
-}
-
-/**
- * 这条提醒要不要再推（纯函数）：没人在处理（没人认领、引擎卡住、等创始人拍）超过 claimAfter，推「没人认领」/「还没拍」；
- * 有人在处理但停在一个阶段超过 stuckAfter，推「停着没动」。日报、已撤、静默、再推出来的那几种不推。标题不带时长
- * （飞书卡片不用每轮改），正文写绝对时刻。
- */
-export function escalationFor(
-  f: AlertWorkFacts,
-  h: AlertHandling,
-  settings: Pick<AlertSettings, 'claimAfterMinutes' | 'stuckAfterMinutes'>,
-  now: string,
-): Escalation {
-  const { alert } = f;
-  if (alert.level === 'daily' || isEscalationKey(alert.dedupeKey)) return { kind: 'none' };
-  if (h.stage === 'resolved' || h.stage === 'silenced') return { kind: 'none' };
-  const waited = minutesBetween(h.since, now);
-  const at = `北京时间 ${beijing(h.since)}`;
-  const original = [
-    `原来那条：${alert.title}`,
-    `键：${alert.dedupeKey}（编号 ${alert.id}），北京时间 ${beijing(alert.createdAt)} 报的`,
-  ];
-  if (UNHANDLED_STAGES.includes(h.stage)) {
-    if (waited < settings.claimAfterMinutes || h.episode === null) return { kind: 'none' };
-    const decision = h.stage === 'waiting_founder';
-    const openIssue = alert.level === 'alert' && h.work === null;
-    const lines = [
-      decision
-        ? `这条要创始人拍的，${at}起到现在超过 ${settings.claimAfterMinutes} 分钟还没拍。`
-        : h.stage === 'engine_stuck'
-          ? `这条是引擎自己卡住了报的：跟进单 ${h.work ? issueRef(h.work) : ''} 的认领在引擎手里，${at}起超过 ${settings.claimAfterMinutes} 分钟没人接手。本机接手要创始人说改派（fleet-api claim reassign），或者另开一张单跟进（alert claim 加 --issue <号>）。`
-          : `这条${at}起超过 ${settings.claimAfterMinutes} 分钟没人认领${h.work ? `，跟进单是 ${issueRef(h.work)}` : ''}。`,
-      ...(openIssue ? ['没挂单：提醒派单给它开一张跟进单（贴「本机做」），开好就挂在这条提醒上。'] : []),
-      ...original,
-      claimHowTo(alert.dedupeKey),
-    ];
-    return {
-      kind: 'unclaimed',
-      key: unclaimedKey(alert.id, h.episode),
-      level: decision ? 'decision' : 'alert',
-      title: clipTitle(`${decision ? '还没拍' : '没人认领'}：${alert.title}`),
-      body: lines.join('\n'),
-      openIssue,
-    };
-  }
-  if (waited < settings.stuckAfterMinutes || h.stageRef === null) return { kind: 'none' };
-  const what: Record<string, string> = {
-    claimed: `${h.who ?? '有人'} ${at}认领了，到现在超过 ${settings.stuckAfterMinutes} 分钟还没开 PR（认领 120 分钟没心跳会被作废、回到没人认领）。`,
-    pr_open: `PR #${h.pr?.number ?? '?'} ${at}开着，到现在超过 ${settings.stuckAfterMinutes} 分钟没合（看 CI、合并闸）。`,
-    merged: `PR #${h.pr?.number ?? '?'} ${at}合进主线，到现在超过 ${settings.stuckAfterMinutes} 分钟还没看到法国发布${h.deploy?.state === 'unknown' ? '（发布没查成，原因在驾驶舱这条提醒下面）' : ''}（看健康页的 deploy_lag）。`,
-    deployed: `PR #${h.pr?.number ?? '?'} ${at}起法国已经发布，到现在超过 ${settings.stuckAfterMinutes} 分钟提醒还没自己撤：条件判法没接上，或者没修好。`,
-  };
-  return {
-    kind: 'stuck',
-    key: stuckKey(alert.id, h.stageRef),
-    level: 'alert',
-    title: clipTitle(`停着没动（${STAGE_WORDS[h.stage]}）：${alert.title}`),
-    body: [
-      what[h.stage] ?? `停在「${STAGE_WORDS[h.stage]}」超过 ${settings.stuckAfterMinutes} 分钟。`,
-      ...original,
-    ].join('\n'),
-    openIssue: false,
-  };
-}
-
-/**
- * 一条再推出来的（unclaimed:/stuck:）还该不该留着：原来那条撤了、静默了、有人接手了、往前走了、这一段过去了，就撤，
- * 回为什么；该留着回 null。h 是 null = 原来那条不在开着的提醒里（撤了）。
- */
-export function retireEscalationWhy(
-  parsed: { kind: 'unclaimed' | 'stuck'; ref: string },
-  h: AlertHandling | null,
-): string | null {
-  if (h === null || h.stage === 'resolved') return '原来那条已经撤了';
-  if (h.stage === 'silenced' && h.silence)
-    return `原来那条静默了（${h.silence.createdBy}：${h.silence.comment}，到 ${h.silence.endsAt}）`;
-  if (parsed.kind === 'unclaimed') {
-    if (HANDLED_STAGES.includes(h.stage)) return `有人在处理了：${h.line}`;
-    if (h.episode !== parsed.ref) return '这一段过去了（中间有人认领过），现在的情况另推一条';
-    return null;
-  }
-  if (h.stageRef !== parsed.ref) return `往前走了：现在是「${STAGE_WORDS[h.stage]}」（${h.line}）`;
-  return null;
+  return key.startsWith(REMIND_KEY_PREFIX);
 }
 
 /** 北京时间「9 月 27 日 23:16」（再推的正文写绝对时刻，不写「多久以前」：卡片不用每轮改）。 */
@@ -640,87 +456,4 @@ export function beijing(iso: string): string {
   const d = new Date(t + 8 * 3_600_000);
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${d.getUTCMonth() + 1} 月 ${d.getUTCDate()} 日 ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
-}
-
-// —— 跟进单：没挂单的卡住报警，提醒派单开一张（开在哪、写什么在这里定，开单、挂单是外壳的事）——
-
-/** 跟进单贴的标签：类别「缺陷」；「本机做」——提醒是引擎自己搞不定才报的，由本机带外修，接活不自动派给引擎。 */
-export const FOLLOW_UP_LABELS: readonly string[] = ['缺陷', '本机做'];
-
-export interface ManagedRepoRef {
-  id: string;
-  owner: string;
-  name: string;
-}
-
-/**
- * 跟进单开在哪个仓：设置 alerts.issueRepo 写了就用它（得是驾驶舱导入过的项目）；没写就在受管的项目里去掉巡检仓，
- * 恰好剩一个用它。挑不出（一个没有、不止一个、设置写的不在库里）回原因，不猜。
- */
-export function followUpRepo(
-  repos: readonly ManagedRepoRef[],
-  issueRepo: AlertSettings['issueRepo'],
-  canaryRepo: string | null,
-): { ok: true; repo: ManagedRepoRef } | { ok: false; why: string } {
-  const slug = (r: { owner: string; name: string }) => `${r.owner}/${r.name}`.toLowerCase();
-  if (issueRepo) {
-    const hit = repos.find((r) => slug(r) === slug(issueRepo));
-    return hit
-      ? { ok: true, repo: hit }
-      : {
-          ok: false,
-          why: `设置 ${ALERT_SETTING_KEYS.issueRepo} 写的 ${issueRepo.owner}/${issueRepo.name} 不是驾驶舱导入过的项目`,
-        };
-  }
-  const canary = canaryRepo?.trim().toLowerCase() || null;
-  const rest = repos.filter((r) => slug(r) !== canary);
-  if (rest.length === 1 && rest[0]) return { ok: true, repo: rest[0] };
-  return {
-    ok: false,
-    why:
-      rest.length === 0
-        ? '除了巡检仓没有受管的项目，不知道开在哪'
-        : `受管的项目有 ${rest.length} 个（${rest.map((r) => `${r.owner}/${r.name}`).join('、')}），不知道开在哪：在驾驶舱设置里填「提醒跟进单开在哪个仓」（${ALERT_SETTING_KEYS.issueRepo}）`,
-  };
-}
-
-const clipText = (s: string, max: number) =>
-  [...s].length > max ? `${[...s].slice(0, max - 1).join('')}…` : s;
-
-/**
- * 跟进单的标题和正文（引擎开，写进公开的单：开之前 github 包过卫生检查）。需求写全在正文里、没有单独的需求文档
- * （和引擎对账开的单一样，#295）；「怎么算做完」放最后。version：挂的当前版本标题，null = 仓里没有开着的 v<N>，未排期。
- */
-export function followUpIssueText(
-  f: Pick<AlertWorkFacts, 'alert'>,
-  settings: Pick<AlertSettings, 'claimAfterMinutes'>,
-  version: string | null,
-): { title: string; body: string } {
-  const { alert } = f;
-  const key = alert.dedupeKey;
-  return {
-    title: clipText(`跟进提醒：${alert.title.replace(/\s+/g, ' ').trim()}`, 200),
-    body: [
-      `引擎北京时间 ${beijing(alert.createdAt)} 报的这条卡住报警没挂单，超过 ${settings.claimAfterMinutes} 分钟没人认领；提醒派单开这张单跟进（design 15.3「谁在处理」）。这张单是引擎开的，需求就写在这里。`,
-      '',
-      `- 提醒：${clipText(alert.title, 300)}`,
-      `- 键：\`${key}\`（编号 ${alert.id}）`,
-      `- 版本：${version ? `挂当前版本「${version}」（坏了的立刻修）` : '仓里没有还开着的 v<N> 里程碑，先未排期'}`,
-      '- 贴「本机做」：提醒是引擎自己搞不定才报的，由本机带外修（AGENTS.md 本仓段「本机和法国怎么分活」），接活不自动派给引擎。',
-      '',
-      '## 提醒原文',
-      '',
-      clipText(alert.body.trim(), 2000) || '（没写）',
-      '',
-      '## 怎么接',
-      '',
-      claimHowTo(key),
-      `修复的 PR 正文「修提醒」栏写 \`${key}\`：驾驶舱照它显示 PR 开着、合进主线、法国已发布。`,
-      '',
-      '## 怎么算做完',
-      '',
-      `- 提醒 \`${key}\` 撤掉了：条件判法自己撤（修好了），或确认不用修、由人点「处理」并写明为什么；`,
-      '- 修复的 PR 合进主线，法国发布了这一版。',
-    ].join('\n'),
-  };
 }

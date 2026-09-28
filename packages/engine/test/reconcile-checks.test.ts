@@ -14,7 +14,6 @@ import {
   LEDGER_GRACE_MS,
   ledgerAlertKey,
   MERGED_PR_LOOKBACK_MS,
-  prAlertKey,
   type ReconcileCheckDeps,
   type RepullResult,
   WORKFLOW_ALERT_PREFIX,
@@ -599,7 +598,7 @@ describe('合了的 PR：镜像、合并人、合并记录', () => {
     expect(w.inserted).toEqual([]);
   });
 
-  it('【故意造出的失败】机器人开的 PR 合并人不是引擎、没有合并记录：报 reconcile:pr，一条里写全；已经报过的不再报', async () => {
+  it('【故意造出的失败】机器人开的 PR 合并人不是引擎、没有合并记录：只算进 found 计数，不再报 reconcile:pr 提醒（#445：仓里没开合并队列，这条检查已经删掉）', async () => {
     const report = audit([
       { number: 7, kind: 'not_merged_by_engine', text: '#7 不是「引擎」机器人合的（合并人 founder）' },
       { number: 7, kind: 'no_merge_record', text: '#7 合并了，但账上没有合并队列的合并记录' },
@@ -607,22 +606,13 @@ describe('合了的 PR：镜像、合并人、合并记录', () => {
     const w = world({ repos: [{ owner: 'acme', name: 'widgets' }], audit: async () => report });
     const part = await checkMergedPrs(w.deps);
     expect(part).toMatchObject({ scanned: 1, found: 2, unchecked: [] });
-    expect(w.inserted).toHaveLength(1);
-    expect(w.inserted[0]).toMatchObject({
-      dedupeKey: prAlertKey('acme', 'widgets', 7),
-      title: '机器人开的 PR 没经合并队列合：acme/widgets#7',
-      link: 'https://github.com/acme/widgets/pull/7',
-      created: true,
-    });
-    expect(w.inserted[0]?.body).toContain(
-      '#7 不是「引擎」机器人合的（合并人 founder）\n#7 合并了，但账上没有合并队列的合并记录',
-    );
+    expect(w.inserted).toEqual([]);
 
     await checkMergedPrs(w.deps);
-    expect(w.inserted.map((x) => x.created)).toEqual([true, false]);
+    expect(w.inserted).toEqual([]);
   });
 
-  it('只有镜像补上的（人开的 PR 对账结果就是这样）：不报合并人那两项', async () => {
+  it('只有镜像补上的（人开的 PR 对账结果就是这样）：一样不报', async () => {
     const w = world({
       repos: [{ owner: 'acme', name: 'widgets' }],
       audit: async () => audit([{ number: 9, kind: 'mirror_fixed', text: '#9 合并了但镜像里没有（已补）' }]),

@@ -426,7 +426,7 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
   app.get(WebRoutes.notifications.path, async (c) => {
     const query = readQuery(c, NotificationsQuery);
     const page = await store.listNotifications(query);
-    // 谁在处理、修到哪（design 15.3）：读的时候现算；没接上、读不到照实写在 handlingProblem，不拿「没人认领」顶
+    // 谁在处理、修到哪（design 15.3）：读的时候现算；没接上、读不到照实写在 handlingProblem，不拿「没人在修」顶
     const handling = deps.alertWork
       ? await handlingOf(
           deps.alertWork,
