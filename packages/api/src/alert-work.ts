@@ -1,8 +1,8 @@
 // 提醒是一件活（design 15.3「谁在处理」）的外壳：从库里读一批提醒的跟进单、认领、挂钩的 PR、静默，从法国的发布记录读在用的
-// 版本，拼成 @fleet-dao/core 的 AlertWorkFacts，交给 core 的 alertHandling 现算「谁在处理、修到哪」。驾驶舱提醒列表、
-// fleet-api alert、引擎的提醒派单（packages/engine 的 jobs/alert-dispatch.ts）都经这里读，判法只 core 那一份。
+// 版本，拼成 @fleet-dao/core 的 AlertWorkFacts，交给 core 的 alertHandling 现算「谁在处理、修到哪」。驾驶舱提醒列表都经这里读，
+// 判法只 core 那一份；`fleet-api alert show` 只读跟进单、PR、静默，不再显示这份「谁在处理」（#445）。
 // 改这里之前必须知道：
-// - 读不到就抛（连不上库、语句出错），调用方写明「没查成」，不当成「没人认领」。
+// - 读不到就抛（连不上库、语句出错），调用方写明「没查成」，不当成「没人在修」。
 // - 发布记录只在法国上有（readDeployLagInput 读 current 链接和自动发布的状态文件）；别处给 null，core 写明「这里查不了发布」。
 import {
   type AlertHandling,
@@ -140,7 +140,7 @@ export function deployFacts(input: DeployLagInput): DeployFacts {
   return { ok: true, currentSha: sha, commits: main.commits, checkedAt: ranAt, deployedAt };
 }
 
-/** 驾驶舱、fleet-api alert、提醒派单读提醒处理状态的那一个口子。 */
+/** 驾驶舱、fleet-api alert（只借来读静默）、每小时对账（谁在处理，判 24 小时要不要再推）读提醒处理状态的那一个口子（原来提醒派单也读，#445 删掉了）。 */
 export interface AlertWorkPort {
   /** 这一批提醒（编号）的事实，按库的 now 读。读不到抛。 */
   read(ids: readonly string[]): Promise<{ now: string; facts: AlertWorkFacts[] }>;
@@ -219,7 +219,7 @@ export function handlingView(h: AlertHandling): z.input<typeof AlertHandlingSche
 }
 
 /**
- * 一批提醒的处理状态（按编号）。读不到回 { ok: false, why }（调用方照实写「没查成」），不回空当成都没人认领。
+ * 一批提醒的处理状态（按编号）。读不到回 { ok: false, why }（调用方照实写「没查成」），不回空当成都没人在修。
  * 分批读（一次最多 500 条）。
  */
 export async function handlingOf(

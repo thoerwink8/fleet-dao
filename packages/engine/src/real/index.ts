@@ -20,7 +20,6 @@ import type { EngineDrain } from '../drain.ts';
 import { type DrainControlDeps, drainRequestFile, readDrainRequest } from '../drain-control.ts';
 import type { JevPort } from '../failure/jev.ts';
 import type { EnginePorts } from '../ports.ts';
-import { alertDispatchJob } from './alert-dispatch.ts';
 import { canaryJob } from './canary.ts';
 import { drainNotifier } from './drain-alerts.ts';
 import { describeFailure, scopeExec, type UserExec } from './exec.ts';
@@ -542,8 +541,6 @@ export function realPortsFromEnv(
     canary: canaryJob({ db, gh, repo: env.FLEET_CANARY_REPO }),
     // 看门狗（#203）：按登记表看上面这些（和备份那几个）新不新鲜，没跑成、停了推提醒，恢复了自己撤
     watchdog: watchdogJob({ db }),
-    // 提醒派单（design 15.3「谁在处理」）：没人认领、停着没动的提醒再推，没挂单的卡住报警开跟进单（「引擎」机器人开，不开在巡检仓）
-    alertDispatch: alertDispatchJob({ db, gh, canaryRepo: env.FLEET_CANARY_REPO }),
   };
   const evidence = realKillEvidence(extra.releasesDir ? { releasesDir: extra.releasesDir } : {});
   const drainControl: Omit<DrainControlDeps, 'drain' | 'log'> = {

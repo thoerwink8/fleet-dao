@@ -135,11 +135,7 @@ function NumberSetting({
   unit,
   placeholder,
 }: {
-  k:
-    | 'sessions.maxConcurrent'
-    | 'judge.dailyCallLimit'
-    | 'alerts.claimAfterMinutes'
-    | 'alerts.stuckAfterMinutes';
+  k: 'sessions.maxConcurrent' | 'judge.dailyCallLimit';
   s: Setting | undefined;
   hint: string;
   unit: string;
@@ -183,51 +179,6 @@ function NumberSetting({
           保存
         </Button>
       </div>
-      <SettingMeta s={s} />
-    </form>
-  );
-}
-
-/** 没挂单的提醒开跟进单的仓（owner/仓名）；清空 = 不设（后端按「除了巡检仓只有一个受管的仓」挑）。 */
-function IssueRepoSetting({ s }: { s: Setting | undefined }) {
-  const k = 'alerts.issueRepo';
-  const current = SETTING_SCHEMAS[k].safeParse(s?.value);
-  const shown = current.success && current.data ? current.data : '';
-  const [draft, setDraft] = useState(shown);
-  const { save, pending } = useSaveSetting();
-  // biome-ignore lint/correctness/useExhaustiveDependencies: 只跟版本号走，不跟着输入框重置。
-  useEffect(() => setDraft(shown), [s?.version]);
-  const value = draft.trim();
-  const valid = value === '' || SETTING_SCHEMAS[k].safeParse(value).success;
-  const submit = (e: FormEvent) => {
-    e.preventDefault();
-    if (!valid) return;
-    save(k, value === '' ? null : value, s);
-  };
-  const id = `setting-${k}`;
-  return (
-    <form onSubmit={submit} className="rounded-xl border bg-card p-4">
-      <Label htmlFor={id} className="text-sm font-medium">
-        {settingLabel[k]}
-      </Label>
-      <p className="mt-0.5 text-xs text-muted-foreground">
-        写成
-        owner/仓名，要是受管的项目；空着就用唯一一个不是巡检仓的受管项目，不止一个时不开单、推一条提醒要你设。
-      </p>
-      <div className="mt-3 flex items-center gap-2">
-        <Input
-          id={id}
-          value={draft}
-          placeholder="没设"
-          onChange={(e) => setDraft(e.target.value)}
-          aria-invalid={!valid}
-          className="h-8 w-56"
-        />
-        <Button type="submit" size="sm" className="ml-auto" disabled={pending || value === shown || !valid}>
-          保存
-        </Button>
-      </div>
-      {!valid ? <p className="mt-1 text-xs text-ink-fail">要写成 owner/仓名</p> : null}
       <SettingMeta s={s} />
     </form>
   );
@@ -388,21 +339,6 @@ export default function Settings() {
         ) : (
           <div className="grid max-w-3xl gap-3 md:grid-cols-2">
             <QuietHours s={find('notify.quietHours')} />
-            <NumberSetting
-              k="alerts.claimAfterMinutes"
-              s={find('alerts.claimAfterMinutes')}
-              hint="卡住报警、要你拍的提醒开着这么久没人认领：再推一次「没人认领」，没挂单的同时开一张跟进单（1–1440）。"
-              unit="分钟"
-              placeholder="默认 20"
-            />
-            <NumberSetting
-              k="alerts.stuckAfterMinutes"
-              s={find('alerts.stuckAfterMinutes')}
-              hint="有人认领了、却停在一步（没开 PR、PR 没合、合了没发布、发布了没撤）这么久：再推一次（5–10080）。"
-              unit="分钟"
-              placeholder="默认 60"
-            />
-            <IssueRepoSetting s={find('alerts.issueRepo')} />
           </div>
         )}
       </Section>

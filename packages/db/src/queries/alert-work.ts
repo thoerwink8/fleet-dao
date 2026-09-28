@@ -1,10 +1,11 @@
 // 提醒是一件活（design 15.3「谁在处理」）的读写：一批提醒现算处理状态要的事实（跟进单、认领、挂钩的 PR、静默），
 // 挂跟进单、建和撤静默。判法在 @fleet-dao/core 的 alert-work.ts；把行拼成 core 的样子在 @fleet-dao/api 的 alert-facts.ts。
 // 改这里之前必须知道：
-// - 挂跟进单两种写法：if_absent（提醒派单开的小单，只在没有时写，不覆盖人挂的）、replace（帅位 alert claim --issue，
-//   换单记操作记录：原来是哪张、为什么换）。同一事务里写操作记录。
+// - 挂跟进单两种写法：if_absent（原「提醒派单」开的小单专用，只在没有时写，不覆盖人挂的）、replace（原帅位
+//   `alert claim --issue` 专用，换单记操作记录：原来是哪张、为什么换）。两条调用方都在 #445 删了，函数留着给以后
+//   要挂跟进单的功能用；同一事务里写操作记录。
 // - 静默的到期一律按库的 now() 算（ends_at = now() + 分钟数），不拿各机器的钟；最长 7 天由表约束钉死。
-// - 读不到就抛（连不上库、语句出错），不回空：外壳把它当「没查成」，不当「没人认领」。
+// - 读不到就抛（连不上库、语句出错），不回空：外壳把它当「没查成」，不当「没人在修」。
 import { and, asc, eq, getTableColumns, gt, inArray, isNull, or, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import {
@@ -15,7 +16,6 @@ import {
   notifications,
   pullRequests,
   repos,
-  settings,
   tasks,
 } from '../schema/index.ts';
 import type { AlertRow } from './alerts.ts';
@@ -56,29 +56,6 @@ const alertColumns = {
 };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-
-/**
- * settings 表里提醒那三项的原值（没写的是 undefined）；认不认得出由 core 的 readAlertSettings 判。读不到照抛。
- */
-export async function readAlertSettingRaw(
-  db: Db,
-): Promise<{ claimAfterMinutes?: unknown; stuckAfterMinutes?: unknown; issueRepo?: unknown }> {
-  const keys = {
-    'alerts.claimAfterMinutes': 'claimAfterMinutes',
-    'alerts.stuckAfterMinutes': 'stuckAfterMinutes',
-    'alerts.issueRepo': 'issueRepo',
-  } as const;
-  const rows = await db
-    .select({ key: settings.key, value: settings.value })
-    .from(settings)
-    .where(inArray(settings.key, Object.keys(keys)));
-  const out: { claimAfterMinutes?: unknown; stuckAfterMinutes?: unknown; issueRepo?: unknown } = {};
-  for (const r of rows) {
-    const field = keys[r.key as keyof typeof keys];
-    if (field) out[field] = r.value;
-  }
-  return out;
-}
 
 /** 按编号或键找一条提醒（处理没处理都给）；没有是 null。 */
 export async function findAlert(db: Db, ref: string): Promise<AlertRow | null> {
@@ -194,8 +171,9 @@ export interface AuditWho {
 }
 
 /**
- * 挂跟进单。if_absent：这条提醒还没有跟进单才写（提醒派单开的小单），有了一概不动、回 kept；replace：换成这一张
- * （帅位 alert claim --issue），和原来一样回 same，不一样的记操作记录（原来是哪张、为什么）。提醒不在回 not_found。
+ * 挂跟进单（#445 起没有产品代码调它了——原「提醒派单」开小单、`alert claim --issue` 换单这两条路都删了，函数留着
+ * 给以后的功能用，测试也还拿它搭「已经挂了跟进单」的场景）。if_absent：这条提醒还没有跟进单才写，有了一概不动、
+ * 回 kept；replace：换成这一张，和原来一样回 same，不一样的记操作记录（原来是哪张、为什么）。提醒不在回 not_found。
  */
 export async function linkAlertWork(
   db: Db,

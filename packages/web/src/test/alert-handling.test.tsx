@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 // 通知中心每条提醒下面一行「谁在处理 · 链接 · 多久了」（design 15.3「谁在处理」）：后端现算，这里照着显示；
-// 这一页算不出来（没接上、读不到）时照实写一句，不给每条编一个「没人认领」。
+// 这一页算不出来（没接上、读不到）时照实写一句，不给每条编一个「没人在修」。
 import { cleanup, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'vitest';
 import { createMockApi } from '../api/mock/server';
@@ -10,13 +10,13 @@ import { renderApp } from './harness';
 afterEach(cleanup);
 
 describe('通知中心：谁在处理', () => {
-  test('有人认领的写谁、跟进单的链接、多久了；没人认领的标出来', async () => {
+  test('有人在修的写谁、跟进单的链接、多久了；没人在修的标出来', async () => {
     renderApp(<NotificationsPage />, { api: createMockApi({ live: false }) });
     const title = await screen.findByText('#17 子任务 A 停滞 22 分钟');
     const row = title.closest('li');
     if (!row) throw new Error('找不到这条提醒那一行');
     const handling = within(row).getByTestId('alert-handling');
-    expect(within(handling).getByText('认领了')).toBeTruthy();
+    expect(within(handling).getByText('有人在修')).toBeTruthy();
     expect(within(handling).getByText('本机/工人A')).toBeTruthy();
     const link = within(handling).getByRole('link', { name: /acme\/orbit#17/ });
     expect(link.getAttribute('href')).toBe('https://github.com/acme/orbit/issues/17');
@@ -24,10 +24,10 @@ describe('通知中心：谁在处理', () => {
 
     const other = (await screen.findByText('每小时对账没查成')).closest('li');
     if (!other) throw new Error('找不到这条提醒那一行');
-    expect(within(within(other).getByTestId('alert-handling')).getByText('没人认领')).toBeTruthy();
+    expect(within(within(other).getByTestId('alert-handling')).getByText('没人在修')).toBeTruthy();
   });
 
-  test('【故意造出的失败】这一页谁在处理没算成：照实写一句，提醒照常列出、不编「没人认领」', async () => {
+  test('【故意造出的失败】这一页谁在处理没算成：照实写一句，提醒照常列出、不编「没人在修」', async () => {
     const api = createMockApi({ live: false });
     const list = api.notifications;
     api.notifications = async (query) => {
@@ -42,6 +42,6 @@ describe('通知中心：谁在处理', () => {
     expect(await screen.findByText(/谁在处理没查成：statement timeout/)).toBeTruthy();
     expect(screen.getByText('#17 子任务 A 停滞 22 分钟')).toBeTruthy();
     expect(screen.queryByTestId('alert-handling')).toBeNull();
-    expect(screen.queryByText('没人认领')).toBeNull();
+    expect(screen.queryByText('没人在修')).toBeNull();
   });
 });

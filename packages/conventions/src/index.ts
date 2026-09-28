@@ -122,7 +122,6 @@ export {
   TIERS,
   type Tier,
 } from './merge-gates.ts';
-export { type CloseCheck, MILESTONE_USAGE, milestoneCloseCheck } from './milestone-close.ts';
 export { type PlanPhase, type PlanRef, parsePlanRefs, planPhases } from './plan.ts';
 export {
   escapeText,

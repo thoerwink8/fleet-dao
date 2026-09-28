@@ -433,6 +433,14 @@ describe('看门狗一轮（真库）', () => {
     expect(looked).toBe(false);
     expect(await allAlerts()).toEqual([]);
   });
+
+  it('【故意造出的失败】退役的任务（alert-dispatch，#445「提醒派单」整层删掉）：登记表上还在、早停了也不报——它不会再跑，报了也没人能处理；没登记在 ENGINE_JOBS 里的别的任务（这里的 route-probe）照样正常管，不因为筛退役任务被连带漏管', async () => {
+    await register({ id: 'alert-dispatch' }, { id: 'route-probe' });
+    await run('alert-dispatch', -120, { outcome: 'ok', scanned: 1, found: 0 });
+    const ok = await run('route-probe', -120, { outcome: 'ok', scanned: 3, found: 0 });
+    expect(await runWatchdogJob(deps())).toMatchObject({ outcome: 'ok' });
+    expect((await openAlerts()).map((a) => a.dedupeKey)).toEqual([`watchdog:job:route-probe:after-${ok}`]);
+  });
 });
 
 describe('键和说法', () => {

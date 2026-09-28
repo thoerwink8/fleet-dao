@@ -488,17 +488,8 @@ describe('和 systemd 单元、发布脚本对得上', () => {
 });
 
 describe('排空的提醒只是告知', () => {
-  it('记成日报级：提醒派单不推「没人认领」、不开跟进单（09-28 第一次真排空被推过）', async () => {
+  it('记成日报级：不会被每小时对账的 24 小时再提醒当成没人处理的卡住报警（09-28 第一次真排空被提醒派单推过；#445 起提醒派单整层删掉，日报级不再被 24 小时再提醒盯上）', async () => {
     const { DRAIN_ALERT_LEVEL } = await import('../src/real/drain-alerts.ts');
-    const { escalationFor } = await import('@fleet-dao/core');
     expect(DRAIN_ALERT_LEVEL).toBe('daily');
-    const alert = { dedupeKey: 'drain', level: DRAIN_ALERT_LEVEL, title: '排空', taskId: null } as never;
-    const got = escalationFor(
-      { alert } as never,
-      { stage: 'unclaimed', since: '2026-09-28T00:00:00Z' } as never,
-      { claimAfterMinutes: 20, stuckAfterMinutes: 60 },
-      '2026-09-28T02:00:00Z',
-    );
-    expect(got).toEqual({ kind: 'none' });
   });
 });

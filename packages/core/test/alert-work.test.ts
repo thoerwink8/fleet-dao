@@ -1,7 +1,7 @@
-// 提醒是一件活（design 15.3「谁在处理」）：谁在处理 = 跟进单上的认领，状态从认领、PR、发布记录现算，没人认领、停太久再推。
+// 提醒是一件活（design 15.3「谁在处理」）：谁在处理 = 跟进单上的认领，状态从认领、PR、发布记录现算（只给驾驶舱看，
+// #445 起 `alert show` 不显示，也不会再没人认领、停太久就自动升级或开单——那一层已经删掉）。
 import { describe, expect, it } from 'vitest';
 import {
-  ALERT_DEFAULTS,
   type AlertRef,
   type AlertSilence,
   type AlertWorkFacts,
@@ -9,18 +9,9 @@ import {
   alertHandling,
   type DeployFacts,
   deployStateOf,
-  escalationFor,
   type FixPr,
-  followUpIssueText,
-  followUpRepo,
-  isEscalationKey,
-  parseEscalationKey,
-  readAlertSettings,
-  retireEscalationWhy,
   silenceMinutes,
   silenceProblem,
-  stuckKey,
-  unclaimedKey,
   type WorkIssue,
 } from '../src/alert-work.ts';
 import type { IssueClaim } from '../src/seat.ts';
@@ -111,43 +102,6 @@ const deploy = (over: Partial<Extract<DeployFacts, { ok: true }>> = {}): DeployF
   ...over,
 });
 
-describe('设置（alerts.claimAfterMinutes、alerts.stuckAfterMinutes、alerts.issueRepo）', () => {
-  it('没写：用默认 20、60，跟进单的仓不设', () => {
-    expect(readAlertSettings({})).toEqual({
-      ok: true,
-      settings: { ...ALERT_DEFAULTS, issueRepo: null },
-      source: 'default',
-    });
-    expect(ALERT_DEFAULTS).toEqual({ claimAfterMinutes: 20, stuckAfterMinutes: 60 });
-  });
-
-  it('写了：照写的，仓拆成 owner、仓名', () => {
-    expect(readAlertSettings({ claimAfterMinutes: 5, issueRepo: 'owner/fleet-dao' })).toEqual({
-      ok: true,
-      settings: {
-        claimAfterMinutes: 5,
-        stuckAfterMinutes: 60,
-        issueRepo: { owner: 'owner', name: 'fleet-dao' },
-      },
-      source: 'settings',
-    });
-  });
-
-  it('【故意造出的失败】写了却认不出：明确失败、写明是哪一项，不拿默认顶', () => {
-    for (const raw of [
-      { claimAfterMinutes: 0 },
-      { claimAfterMinutes: 'x' },
-      { stuckAfterMinutes: 1.5 },
-      { issueRepo: 'not a repo' },
-    ]) {
-      const got = readAlertSettings(raw);
-      expect(got.ok, JSON.stringify(raw)).toBe(false);
-      if (got.ok) throw new Error('认不出的设置不该当成能用');
-      expect(got.why).toMatch(/^设置 alerts\.\w+ 认不出/);
-    }
-  });
-});
-
 describe('静默（Alertmanager 式：谁、为什么、必带到期）', () => {
   const silence = (over: Partial<AlertSilence> = {}): AlertSilence => ({
     id: 's1',
@@ -236,10 +190,10 @@ describe('发布了没有：合并提交在不在在用的那版里（主线第�
 });
 
 describe('谁在处理、到哪一步了（读时现算）', () => {
-  it('没挂单、没人认领：没人认领，从报的时刻算起', () => {
+  it('没挂单、没人在修：没人在修，从报的时刻算起', () => {
     const h = alertHandling(facts(), null, at(25));
     expect(h).toMatchObject({ stage: 'unclaimed', since: at(0), who: null, episode: 'first' });
-    expect(h.line).toBe('没人认领 · 25 分钟');
+    expect(h.line).toBe('没人在修 · 25 分钟');
   });
 
   it('本机认领了跟进单：谁、哪张单、一句进度、多久了', () => {
@@ -270,7 +224,7 @@ describe('谁在处理、到哪一步了（读时现算）', () => {
     expect(h.line).toMatch(/^没人接手：引擎拿着/);
   });
 
-  it('认领作废了：回到没人认领，从作废那一刻算新的一段', () => {
+  it('认领作废了：回到没人在修，从作废那一刻算新的一段', () => {
     const voided = claim({ state: 'voided', endedAt: at(130), endReason: '过了宽限期（120 分钟）没心跳' });
     const h = alertHandling(facts({ work, claim: voided }), null, at(140));
     expect(h).toMatchObject({ stage: 'unclaimed', since: at(130), episode: 'after-aaaaaaaa' });
@@ -336,147 +290,5 @@ describe('谁在处理、到哪一步了（读时现算）', () => {
         at(30),
       ),
     ).toMatchObject({ stage: 'resolved', who: 'engine:watchdog' });
-  });
-});
-
-describe('升级：没人认领、停得太久', () => {
-  const settings = ALERT_DEFAULTS;
-
-  it('没人认领不到 20 分钟不推；过了推一条「没人认领」，没挂单的同一轮开跟进单', () => {
-    const f = facts();
-    expect(escalationFor(f, alertHandling(f, null, at(19)), settings, at(19))).toEqual({ kind: 'none' });
-    const e = escalationFor(f, alertHandling(f, null, at(21)), settings, at(21));
-    expect(e).toMatchObject({
-      kind: 'unclaimed',
-      key: unclaimedKey(ID, 'first'),
-      level: 'alert',
-      title: '没人认领：定时任务「备份」没跑成',
-      openIssue: true,
-    });
-    if (e.kind === 'none') throw new Error('该推');
-    expect(e.body).toMatch(/fleet-api alert claim watchdog:job:backup:after-12/);
-    expect(e.title).not.toMatch(/分钟/);
-  });
-
-  it('挂了单的不再开单；要创始人拍的推「还没拍」、不开单；日报、静默、再推出来的不推', () => {
-    const linked = facts({ work });
-    expect(escalationFor(linked, alertHandling(linked, null, at(30)), settings, at(30))).toMatchObject({
-      kind: 'unclaimed',
-      openIssue: false,
-    });
-    const d = facts({ alert: alert({ level: 'decision' }) });
-    expect(escalationFor(d, alertHandling(d, null, at(30)), settings, at(30))).toMatchObject({
-      kind: 'unclaimed',
-      level: 'decision',
-      title: '还没拍：定时任务「备份」没跑成',
-      openIssue: false,
-    });
-    for (const f of [
-      facts({ alert: alert({ level: 'daily' }) }),
-      facts({ alert: alert({ dedupeKey: unclaimedKey(ID, 'first') }) }),
-      facts({ alert: alert({ dedupeKey: `remind:${ID}:2026-09-27` }) }),
-    ]) {
-      expect(escalationFor(f, alertHandling(f, null, at(300)), settings, at(300))).toEqual({ kind: 'none' });
-    }
-  });
-
-  it('认领了 60 分钟还没开 PR：推一条「停着没动」，键带认领号；开了 PR 是新的一段', () => {
-    const f = facts({ work, claim: claim() });
-    expect(escalationFor(f, alertHandling(f, null, at(69)), settings, at(69))).toEqual({ kind: 'none' });
-    expect(escalationFor(f, alertHandling(f, null, at(71)), settings, at(71))).toMatchObject({
-      kind: 'stuck',
-      key: stuckKey(ID, 'claimed-aaaaaaaa'),
-      title: '停着没动（认领了）：定时任务「备份」没跑成',
-    });
-    const withPr = facts({ work, claim: claim(), prs: [pr()] });
-    expect(escalationFor(withPr, alertHandling(withPr, null, at(71)), settings, at(71))).toEqual({
-      kind: 'none',
-    });
-  });
-
-  it('发布了 60 分钟提醒还没撤：条件判法没接上或没修好，推一次', () => {
-    const merged = pr({ state: 'merged', mergedAt: at(75), mergeSha: SHA('a') });
-    const f = facts({ prs: [merged] });
-    const e = escalationFor(f, alertHandling(f, deploy({ checkedAt: at(150) }), at(150)), settings, at(150));
-    expect(e).toMatchObject({ kind: 'stuck' });
-    if (e.kind === 'none') throw new Error('该推');
-    expect(e.body).toMatch(/条件判法没接上，或者没修好/);
-  });
-
-  it('键拆得开、认得出；不是这两种的是 null', () => {
-    expect(parseEscalationKey(unclaimedKey(ID, 'after-aaaaaaaa'))).toEqual({
-      kind: 'unclaimed',
-      alertId: ID,
-      ref: 'after-aaaaaaaa',
-    });
-    expect(parseEscalationKey(stuckKey(ID, 'pr_open-350'))).toEqual({
-      kind: 'stuck',
-      alertId: ID,
-      ref: 'pr_open-350',
-    });
-    expect(parseEscalationKey('unclaimed:not-a-uuid:first')).toBeNull();
-    expect(parseEscalationKey('watchdog:job:x')).toBeNull();
-    expect(isEscalationKey(`remind:${ID}:2026-09-27`)).toBe(true);
-    expect(isEscalationKey('pool-hold:claude-solo')).toBe(false);
-  });
-
-  it('再推的那条什么时候撤：原来的撤了、静默了、有人接手了、这一段过去了、往前走了', () => {
-    const unclaimed = { kind: 'unclaimed' as const, ref: 'first' };
-    expect(retireEscalationWhy(unclaimed, null)).toBe('原来那条已经撤了');
-    expect(retireEscalationWhy(unclaimed, alertHandling(facts(), null, at(30)))).toBeNull();
-    expect(
-      retireEscalationWhy(unclaimed, alertHandling(facts({ work, claim: claim() }), null, at(30))),
-    ).toMatch(/^有人在处理了：本机\/工人A/);
-    const voided = claim({ state: 'voided', endedAt: at(130), endReason: '过了宽限期' });
-    expect(
-      retireEscalationWhy(unclaimed, alertHandling(facts({ work, claim: voided }), null, at(140))),
-    ).toMatch(/这一段过去了/);
-    const stuck = { kind: 'stuck' as const, ref: 'claimed-aaaaaaaa' };
-    expect(
-      retireEscalationWhy(stuck, alertHandling(facts({ work, claim: claim() }), null, at(80))),
-    ).toBeNull();
-    expect(
-      retireEscalationWhy(stuck, alertHandling(facts({ work, claim: claim(), prs: [pr()] }), null, at(80))),
-    ).toMatch(/^往前走了：现在是「PR 开着」/);
-  });
-});
-
-describe('跟进单：开在哪、写什么', () => {
-  const repos = [
-    { id: 'r1', owner: 'owner', name: 'fleet-dao' },
-    { id: 'r2', owner: 'owner', name: 'canary' },
-  ];
-
-  it('没设：受管的项目去掉巡检仓，恰好剩一个就用它；设了用设的（大小写不论）', () => {
-    expect(followUpRepo(repos, null, 'owner/canary')).toEqual({ ok: true, repo: repos[0] });
-    expect(followUpRepo(repos, { owner: 'Owner', name: 'Canary' }, 'owner/canary')).toEqual({
-      ok: true,
-      repo: repos[1],
-    });
-  });
-
-  it('【故意造出的失败】挑不出：不止一个、一个没有、设的不在库里——回原因，不猜', () => {
-    const why = (r: ReturnType<typeof followUpRepo>) => (r.ok ? '' : r.why);
-    const many = followUpRepo(repos, null, null);
-    expect(many.ok).toBe(false);
-    expect(why(many)).toContain('受管的项目有 2 个');
-    expect(why(many)).toContain('alerts.issueRepo');
-    expect(why(followUpRepo(repos.slice(1), null, 'owner/canary'))).toContain('没有受管的项目');
-    expect(why(followUpRepo(repos, { owner: 'x', name: 'y' }, null))).toContain('x/y 不是驾驶舱导入过的项目');
-  });
-
-  it('标题、正文：键、版本、「本机做」的理由、怎么接，「怎么算做完」放最后', () => {
-    const t = followUpIssueText({ alert: alert() }, ALERT_DEFAULTS, 'v1 Fusion 接活');
-    expect(t.title).toBe('跟进提醒：定时任务「备份」没跑成');
-    expect(t.body).toContain('`watchdog:job:backup:after-12`');
-    expect(t.body).toContain('挂当前版本「v1 Fusion 接活」');
-    expect(t.body).toContain('本机做');
-    expect(t.body).toContain('fleet-api alert claim watchdog:job:backup:after-12');
-    expect(t.body).toContain('最近一次没跑成：磁盘满了');
-    expect(t.body.indexOf('## 怎么算做完')).toBeGreaterThan(t.body.indexOf('## 怎么接'));
-    expect(t.body.trimEnd().endsWith('- 修复的 PR 合进主线，法国发布了这一版。')).toBe(true);
-    const unscheduled = followUpIssueText({ alert: alert({ title: 'x'.repeat(400) }) }, ALERT_DEFAULTS, null);
-    expect(unscheduled.body).toContain('先未排期');
-    expect([...unscheduled.title].length).toBe(200);
   });
 });

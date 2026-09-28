@@ -1237,7 +1237,7 @@ describe('两处核对接到真库', { timeout: 60_000 }, () => {
     expect(started).toEqual([165]);
   });
 
-  it('合了的 PR：镜像补上算发现；合并人不对报 reconcile:pr；列不出来这个仓进原因、这一轮不记 ok', async () => {
+  it('合了的 PR：镜像补上、合并人不对都只算进发现计数，不再报 reconcile:pr 提醒（#445：仓里没开合并队列，这条检查已经删掉）；列不出来这个仓进原因、这一轮不记 ok', async () => {
     probeDir();
     await work();
     const now = new Date('2026-09-26T09:41:00.000Z');
@@ -1270,11 +1270,7 @@ describe('两处核对接到真库', { timeout: 60_000 }, () => {
     expect(seen.map((s) => s.repo)).toEqual(['acme/widgets']);
     expect(now.getTime() - (seen[0]?.since.getTime() ?? 0)).toBe(MERGED_PR_LOOKBACK_MS);
     expect(first).toMatchObject({ outcome: 'ok', found: 2 });
-    const row = await alertByKey(t.db, 'reconcile:pr:acme/widgets#7');
-    expect(row).toMatchObject({ level: 'alert', taskId: null, resolvedAt: null });
-    expect(row?.body).toContain('不是「引擎」');
-    expect(row?.body).not.toContain('已补');
-    expect(row?.link).toBe('https://github.com/acme/widgets/pull/7');
+    expect(await alertByKey(t.db, 'reconcile:pr:acme/widgets#7')).toBeNull();
 
     const again = await runHourlyReconcileJob(
       deps({
@@ -1296,7 +1292,6 @@ describe('两处核对接到真库', { timeout: 60_000 }, () => {
     );
     expect(again.outcome).not.toBe('ok');
     expect(again.why).toContain('acme/widgets：列合并的 PR 失败：403');
-    expect((await alertByKey(t.db, 'reconcile:pr:acme/widgets#7'))?.resolvedAt).toBeNull();
   });
 
   it('【故意造出的失败】合了的 PR 对上的单：会话没结局、单没记成做完，报 reconcile:ledger 写明缺什么；别的分支上的会话不算；补齐了撤掉', async () => {

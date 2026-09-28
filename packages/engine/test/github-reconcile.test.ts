@@ -32,7 +32,6 @@ import {
   withFlowSync,
 } from '../src/jobs/github-reconcile.ts';
 import {
-  ALERT_DISPATCH_SCHEDULE_ID,
   CANARY_SCHEDULE_ID,
   engineSchedules,
   ensureEngineSchedules,
@@ -41,7 +40,11 @@ import {
   ROUTE_PROBE_SCHEDULE_ID,
   WATCHDOG_SCHEDULE_ID,
 } from '../src/jobs/schedules.ts';
-import { githubReconcileJob } from '../src/real/github-reconcile.ts';
+import {
+  closeSweepJob,
+  type GitHubReconcileWiring,
+  githubReconcileJob,
+} from '../src/real/github-reconcile.ts';
 import { ENGINE_JOBS, registerEngineJobs } from '../src/real/jobs.ts';
 import { createRealEnv, useEnv, withWorker } from './helpers.ts';
 
@@ -991,7 +994,6 @@ describe('定时任务按固定编号建：重启、重复部署不多出第二�
       [HOURLY_RECONCILE_SCHEDULE_ID]: 'created',
       [CANARY_SCHEDULE_ID]: 'created',
       [WATCHDOG_SCHEDULE_ID]: 'created',
-      [ALERT_DISPATCH_SCHEDULE_ID]: 'created',
     });
     const again = fakeScheduleClient(true);
     expect(await ensureEngineSchedules(again.client, 'fleet')).toEqual({
@@ -1000,7 +1002,6 @@ describe('定时任务按固定编号建：重启、重复部署不多出第二�
       [HOURLY_RECONCILE_SCHEDULE_ID]: 'updated',
       [CANARY_SCHEDULE_ID]: 'updated',
       [WATCHDOG_SCHEDULE_ID]: 'updated',
-      [ALERT_DISPATCH_SCHEDULE_ID]: 'updated',
     });
     expect(again.calls).toEqual([
       `create:${GITHUB_RECONCILE_SCHEDULE_ID}`,
@@ -1013,8 +1014,6 @@ describe('定时任务按固定编号建：重启、重复部署不多出第二�
       `update:${CANARY_SCHEDULE_ID}`,
       `create:${WATCHDOG_SCHEDULE_ID}`,
       `update:${WATCHDOG_SCHEDULE_ID}`,
-      `create:${ALERT_DISPATCH_SCHEDULE_ID}`,
-      `update:${ALERT_DISPATCH_SCHEDULE_ID}`,
     ]);
     expect(again.updated(GITHUB_RECONCILE_SCHEDULE_ID)).toMatchObject({
       state: { paused: true, note: '人停的' },
@@ -1050,13 +1049,6 @@ describe('定时任务按固定编号建：重启、重复部署不多出第二�
       action: { workflowType: WORKFLOW_TYPES.watchdog, taskQueue: 'fleet' },
       policies: { overlap: 'SKIP' },
     });
-    // 提醒派单：每 5 分钟，3 分起（和看门狗错开），上一轮没完就跳过
-    expect(again.updated(ALERT_DISPATCH_SCHEDULE_ID)).toMatchObject({
-      state: { paused: true, note: '人停的' },
-      spec: { intervals: [{ every: '5 minutes', offset: '3 minutes' }] },
-      action: { workflowType: WORKFLOW_TYPES.alertDispatch, taskQueue: 'fleet' },
-      policies: { overlap: 'SKIP' },
-    });
   });
 
   it('建的时候出了别的错（连不上、没权限）：原样抛出，引擎起不来要看得见', async () => {
@@ -1076,7 +1068,6 @@ describe('定时任务按固定编号建：重启、重复部署不多出第二�
         [HOURLY_RECONCILE_SCHEDULE_ID]: 'created',
         [CANARY_SCHEDULE_ID]: 'created',
         [WATCHDOG_SCHEDULE_ID]: 'created',
-        [ALERT_DISPATCH_SCHEDULE_ID]: 'created',
       });
       await client.schedule.getHandle(GITHUB_RECONCILE_SCHEDULE_ID).pause('人停的');
       expect(await ensureEngineSchedules(client, 'fleet-b')).toEqual({
@@ -1085,7 +1076,6 @@ describe('定时任务按固定编号建：重启、重复部署不多出第二�
         [HOURLY_RECONCILE_SCHEDULE_ID]: 'updated',
         [CANARY_SCHEDULE_ID]: 'updated',
         [WATCHDOG_SCHEDULE_ID]: 'updated',
-        [ALERT_DISPATCH_SCHEDULE_ID]: 'updated',
       });
       const d = await client.schedule.getHandle(GITHUB_RECONCILE_SCHEDULE_ID).describe();
       expect(d.spec.intervals?.map((i) => i.every)).toEqual([15 * 60_000]);
@@ -1287,5 +1277,30 @@ describe('给提问另开单：每轮对账（真库、照 GitHub 回话的假�
       (n) => n.dedupeKey === `ask-issue:${ask.id}`,
     );
     expect(after?.resolvedAt).not.toBeNull();
+  });
+});
+
+describe('关单对账的提醒：日报级，不算「要你拍」（#445）', () => {
+  it('【故意造出的失败】closeSweepJob 报的提醒记成 daily，不是 decision；正文原样带着调用方给的单号', async () => {
+    const w = { db: t.db } as unknown as GitHubReconcileWiring;
+    const deps = closeSweepJob(
+      w,
+      async () => [],
+      quiet,
+      () => new Date(),
+    );
+    const body =
+      '主线上有它们的结果，也没有开着的 PR 还引用它们：确认做完了就 pnpm issue:close <单号>。\n\n- #12 登录：specs/12-登录/结果.md';
+    await deps.alert(
+      'close-sweep:example/canary:due',
+      'example/canary：1 张单看着做完了没关',
+      body,
+      'https://github.com/example/canary/issues',
+    );
+    const row = (await t.db.select().from(notifications)).find(
+      (n) => n.dedupeKey === 'close-sweep:example/canary:due',
+    );
+    expect(row?.level).toBe('daily');
+    expect(row?.body).toContain('#12');
   });
 });

@@ -1,5 +1,4 @@
 // 工作流打包入口：worker 只打包这个文件能走到的代码。
-export { alertDispatchWorkflow } from './alert-dispatch.ts';
 export { canaryWorkflow } from './canary.ts';
 export { fusionWorkflow } from './fusion.ts';
 export { githubReconcileWorkflow } from './github-reconcile.ts';

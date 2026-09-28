@@ -46,7 +46,7 @@ export interface Deps {
   gatewaySeen?: GatewaySeen | undefined;
   /**
    * 提醒谁在处理、修到哪（design 15.3，alert-work.ts）：驾驶舱提醒列表现算用。没给（开发、内存版）的提醒列表照样出，
-   * 另写一句「谁在处理没接上」，不拿「没人认领」顶。
+   * 另写一句「谁在处理没接上」，不拿「没人在修」顶。
    */
   alertWork?: AlertWorkPort | undefined;
   /**

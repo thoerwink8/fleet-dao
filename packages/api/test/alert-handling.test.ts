@@ -1,5 +1,5 @@
 // 驾驶舱提醒列表的「谁在处理 · 链接 · 多久了」（design 15.3）：读的时候从认领、PR 镜像、发布记录现算（core 的 alertHandling），
-// 没接上、读不到照实写 handlingProblem，不拿「没人认领」顶。拼事实（toAlertWorkFacts）和发布记录（deployFacts）也在这里验。
+// 没接上、读不到照实写 handlingProblem，不拿「没人在修」顶。拼事实（toAlertWorkFacts）和发布记录（deployFacts）也在这里验。
 import { issueClaims, linkAlertWork, pullRequests, upsertAlert } from '@fleet-dao/db';
 import { createTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { NotificationsResponse } from '@fleet-dao/shared';
@@ -29,7 +29,7 @@ async function notifications(h: Pick<Harness, 'cockpit'>, cookie: string) {
 }
 
 describe('驾驶舱提醒列表：谁在处理', () => {
-  it('接上了：每条带现算的处理状态——没人认领；本机认领了跟进单；PR 正文「修提醒」栏写了它、合了、法国已发布', async () => {
+  it('接上了：每条带现算的处理状态——没人在修；本机认领了跟进单；PR 正文「修提醒」栏写了它、合了、法国已发布', async () => {
     const deploy: DeployLagInput = {
       current: { sha: SHA('b') },
       currentOnMain: null,
@@ -120,7 +120,7 @@ describe('驾驶舱提醒列表：谁在处理', () => {
     const list = await notifications(h, cookie);
     expect(list.handlingProblem).toBeUndefined();
     const by = new Map(list.items.map((n) => [n.id, n.handling]));
-    expect(by.get(unclaimed.id)).toMatchObject({ stage: 'unclaimed', stageText: '没人认领' });
+    expect(by.get(unclaimed.id)).toMatchObject({ stage: 'unclaimed', stageText: '没人在修' });
     expect(by.get(claimed.id)).toMatchObject({
       stage: 'claimed',
       who: '本机/工人A',
@@ -137,7 +137,7 @@ describe('驾驶舱提醒列表：谁在处理', () => {
     });
   });
 
-  it('【故意造出的失败】没接上（开发环境、内存版）：列表照出，另写 handlingProblem，不给每条编一个「没人认领」', async () => {
+  it('【故意造出的失败】没接上（开发环境、内存版）：列表照出，另写 handlingProblem，不给每条编一个「没人在修」', async () => {
     const h = harness();
     const { cookie } = await h.login();
     const list = await notifications(h, cookie);
