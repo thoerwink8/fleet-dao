@@ -3,6 +3,7 @@ import type { ClaimStatus } from './claim-status.ts';
 import type { Config } from './config.ts';
 import type { DemoPublisher } from './demo.ts';
 import type { GatewaySeen } from './gateway-seen.ts';
+import type { ScryptParams } from './password.ts';
 import type {
   ChangeFeed,
   DraftOpener,
@@ -57,6 +58,11 @@ export interface Deps {
   now: () => Date;
   /** 演示版可见范围的发布处；null = 没配（FLEET_DEMO_DIR）。 */
   demo: DemoPublisher | null;
+  /**
+   * 只有测试传入。不设时新哈希用 password.ts 的 SCRYPT_PARAMS（N=2^15、r=8、p=3）。
+   * 改这里之前必须知道：不读环境变量，生产装配（main.ts）不设它；设了也只影响新算的哈希，验旧哈希仍看哈希自己带的参数。
+   */
+  scryptParams?: ScryptParams;
   /**
    * 还没做的读取器（装配时定）：驾驶舱对应那一块整块显示「待实现」占位（阶段 + 单号），不说成「没查成」。
    * quota = 额度读取（#76）。接上了就删掉这一项。路由探针（#129）已接上：路由在线状态照库里探针的结论显示。

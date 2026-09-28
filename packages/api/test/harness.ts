@@ -15,6 +15,7 @@ import { DEV_RUN_ID, DEV_USER_ID, devFixtures, IDS } from '../src/dev-fixtures.t
 import { type DraftOpenLimits, type DraftOpenRunner, notWiredDraftOpener } from '../src/draft-opening.ts';
 import { FeishuRejectedError } from '../src/feishu.ts';
 import { createMemoryStore, type MemoryData } from '../src/memory-store.ts';
+import type { ScryptParams } from '../src/password.ts';
 import { createPgStore } from '../src/pg-store.ts';
 import type {
   ChangeFeed,
@@ -37,6 +38,9 @@ import type { SseRelay } from '../src/sse.ts';
 import { seedPg } from './pg-fixtures.ts';
 
 export const T0 = new Date('2026-09-25T08:00:00.000Z');
+
+/** 测试用的 scrypt 参数：真算，但比生产小很多。不许拿到生产去（#307）。 */
+export const TEST_SCRYPT_PARAMS = { N: 2 ** 8, r: 8, p: 1 } as const;
 
 /** 样例仓里的版本（GitHub 上的里程碑）：v1 是当前版本。 */
 export const V1 = { number: 8, title: 'v1 Fusion 接活' };
@@ -156,6 +160,11 @@ export interface HarnessOptions {
   gatewaySeen?: Deps['gatewaySeen'];
   /** 提醒谁在处理（design 15.3）；不给就是没接上（内存版、开发环境一样）。 */
   alertWork?: Deps['alertWork'];
+  /**
+   * 新哈希用的 scrypt 参数。不传用 TEST_SCRYPT_PARAMS。
+   * 传 null：不设到 Deps 上，跟生产 main.ts 一样走 SCRYPT_PARAMS（慢，一条测试里最多用一次）。
+   */
+  scryptParams?: ScryptParams | null;
 }
 
 function wire<S extends Store>(
@@ -231,6 +240,7 @@ function wire<S extends Store>(
         }),
     },
     draftOpener: options.draftOpener ?? notWiredDraftOpener(),
+    ...(options.scryptParams === null ? {} : { scryptParams: options.scryptParams ?? TEST_SCRYPT_PARAMS }),
   };
   const { cockpit, agent, relay, draftOpening } = buildApps(deps, {
     draftOpenLimits: options.draftOpenLimits,
