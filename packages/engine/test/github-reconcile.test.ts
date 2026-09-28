@@ -35,6 +35,7 @@ import {
   runGitHubReconcileJob,
   toScheduleResult,
   withFlowSync,
+  withIssueGroom,
 } from '../src/jobs/github-reconcile.ts';
 import type { RetiredSchedule } from '../src/jobs/retired-schedules.ts';
 import { RETIRED_SCHEDULES } from '../src/jobs/retired-schedules.ts';
@@ -348,11 +349,15 @@ async function wiring(
   const job = githubReconcileJob({
     db: t.db,
     gh,
+    // 单子打标挂版本（#448）这里的用例不看它：没接判断题就是「没问成」，categoryPlan 不贴、只记没查成
+    askIssueKind: async () => ({ judged: false, reason: 'unreachable', detail: '这个用例没接判断题' }),
     ...(options.requirements === 'real' ? {} : { requirements: options.requirements ?? fake.requirements }),
     ...(options.orgDefault ? { orgDefault: options.orgDefault } : {}),
     ...(options.ownCommit ? { ownCommit: options.ownCommit } : {}),
     // 关单对账（#241）按真钟每天北京 9:00 那一轮跑：这里的用例不看它，关掉，免得几点跑测试结果就不一样
     closeSweepDue: () => false,
+    // 单子打标挂版本（#448）按真钟每小时跑：这里的用例不看它，关掉，免得几点跑测试结果就不一样
+    issueGroomDue: () => false,
     log: quiet,
   });
   return { repoId: repo?.id ?? '', starts: fake.starts, job };
@@ -722,6 +727,7 @@ describe('对账补漏一轮的记账（不起 Temporal）', () => {
       unchecked: [],
     }),
     closeSweep: GitHubReconcileJobDeps['closeSweep'] = async () => ({ scanned: 0, found: 0, unchecked: [] }),
+    issueGroom: GitHubReconcileJobDeps['issueGroom'] = async () => ({ scanned: 0, found: 0, unchecked: [] }),
   ) {
     const finished: { id: number; result: unknown }[] = [];
     const logs: string[] = [];
@@ -730,6 +736,7 @@ describe('对账补漏一轮的记账（不起 Temporal）', () => {
       reconcile,
       askIssues,
       closeSweep,
+      issueGroom,
       runs: {
         async start() {
           return 7;
@@ -837,6 +844,37 @@ describe('对账补漏一轮的记账（不起 Temporal）', () => {
   it('流程配置全同步成、没问题：这一轮的结局照对账的原样', () => {
     const r = { outcome: 'unscanned' as const, scanned: 0, found: 0, why: '没有受管的仓', steps: [] };
     expect(withFlowSync(r, { repos: [] })).toBe(r);
+  });
+
+  describe('单子打标挂版本这一步并进这一轮的结局（#448）', () => {
+    const ok = { outcome: 'ok' as const, scanned: 1, found: 2, steps: [] };
+
+    it('没到点（null）：原样', () => {
+      expect(withIssueGroom(ok, null)).toBe(ok);
+    });
+
+    it('跑成了、没有没查成的：found 加上，outcome 不降级', () => {
+      expect(withIssueGroom(ok, { scanned: 3, found: 5, unchecked: [] })).toEqual({ ...ok, found: 7 });
+    });
+
+    it('有没查成的：outcome 降成 partial，原因写进 why', () => {
+      const got = withIssueGroom(ok, { scanned: 3, found: 1, unchecked: ['o/r#1 贴类别标签没写成'] });
+      expect(got.outcome).toBe('partial');
+      expect(got.found).toBe(3);
+      expect(got.why).toContain('o/r#1 贴类别标签没写成');
+    });
+
+    it('没查成的太多：只写前几条，剩下的说还有几条（看引擎日志）', () => {
+      const unchecked = Array.from({ length: 5 }, (_, i) => `o/r#${i} 没查成`);
+      const got = withIssueGroom(ok, { scanned: 1, found: 0, unchecked });
+      expect(got.why).toContain('o/r#0 没查成');
+      expect(got.why).toContain('另有 2 条没查成、没写成（看引擎日志）');
+    });
+
+    it('整步没跑成：outcome 降成 partial，原因写明是单子打标挂版本没跑成', () => {
+      const got = withIssueGroom(ok, { failed: '读 repos 表超时' });
+      expect(got).toMatchObject({ outcome: 'partial', why: expect.stringContaining('读 repos 表超时') });
+    });
   });
 
   it('给提问另开单（#259）在对账之后跑；开出的单、写上的回答算处理了的', async () => {

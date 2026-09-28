@@ -43,6 +43,14 @@ import { GitHubError } from './errors.ts';
 import { createEventSink, type EventSink, type WorkflowWaker } from './events.ts';
 import { execGit, type GitRunner } from './git.ts';
 import {
+  addIssueLabel,
+  type GroomFacts,
+  type GroomLabelEvent,
+  readGroomFacts,
+  readIssueLabelEvents,
+  setIssueMilestone,
+} from './groom.ts';
+import {
   type InteractionLimitInput,
   type InteractionLimitResult,
   renewInteractionLimit,
@@ -211,6 +219,27 @@ export interface GitHub {
   claims: ClaimsGitHub;
   /** 两个机器人在这些仓上的权限够不够。读不到算没查成（ok=false、why 写原因），不算「没有差异」。 */
   selfCheck(repos: RepoRef[]): Promise<SelfCheckItem[]>;
+  /**
+   * 单子进门自动打标挂版本（#448，「引擎」机器人现读）：开着的单（标题、正文、作者、标签、里程碑、创建/更新时刻）
+   * 加全部里程碑（含关了的，判版本交接用）。读不到、认不出、翻不完抛错，不拿「一张都没有」顶。
+   */
+  readGroomFacts(input: { repo: RepoRef; signal?: AbortSignal | undefined }): Promise<GroomFacts>;
+  /** 一张单标签加/摘的时间线（#448）：判「类别标签是不是被人摘过」「过时是什么时候贴上的」。读不到、翻不完抛错。 */
+  readIssueLabelEvents(input: {
+    repo: RepoRef;
+    issueNumber: number;
+    signal?: AbortSignal | undefined;
+  }): Promise<GroomLabelEvent[]>;
+  /** 给一张单加一个标签（#448，幂等）：返回加完之后单上的全部标签。 */
+  addIssueLabel(
+    input: { repo: RepoRef; issueNumber: number; label: string },
+    ctx?: ActivityContext,
+  ): Promise<string[]>;
+  /** 给一张单挂里程碑（#448）：返回挂完之后的里程碑。 */
+  setIssueMilestone(
+    input: { repo: RepoRef; issueNumber: number; milestone: number },
+    ctx?: ActivityContext,
+  ): Promise<{ number: number; title: string } | null>;
   eventSink(waker: WorkflowWaker): EventSink;
   reconciler(options: ReconcilerOptions): Reconciler;
   /**
@@ -300,6 +329,14 @@ export function createGitHub(options: GitHubOptions): GitHub {
       return readOpenMilestones(client, input);
     },
     readCloseFacts: (input) => readCloseFacts(client, input),
+    readGroomFacts: (input) => readGroomFacts(deps, input),
+    readIssueLabelEvents: (input) => readIssueLabelEvents(deps, input),
+    async addIssueLabel(input, ctx = {}) {
+      return addIssueLabel(deps, input, ctx);
+    },
+    async setIssueMilestone(input, ctx = {}) {
+      return setIssueMilestone(deps, input, ctx);
+    },
     async readIssueState(input) {
       const issue = await readIssue(deps, input.repo, input.issueNumber, input.signal);
       if (issue.pull_request !== undefined && issue.pull_request !== null) {

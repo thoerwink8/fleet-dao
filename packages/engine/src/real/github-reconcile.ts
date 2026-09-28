@@ -42,6 +42,8 @@ import { type AskIssueJobDeps, openAskIssues } from '../jobs/ask-issues.ts';
 import { type CloseSweepJobDeps, sweepClosing } from '../jobs/close-sweep.ts';
 import { type FlowConfigJobDeps, syncFlowConfigs } from '../jobs/flow-config.ts';
 import type { GitHubReconcileJobDeps } from '../jobs/github-reconcile.ts';
+import { sweepIssueGroom } from '../jobs/issue-groom.ts';
+import { type GroomGitHub, type IssueGroomWiring, issueGroomJob } from './issue-groom.ts';
 import { toTaskAsk } from './store-ports.ts';
 
 export interface GitHubReconcileWiring {
@@ -56,13 +58,20 @@ export interface GitHubReconcileWiring {
     | 'commentIssue'
     | 'readCloseFacts'
     | 'commitContains'
-  >;
+  > &
+    GroomGitHub;
+  /** 单子打标挂版本问 Jev（#448，issue-kind-jev.ts 的 createIssueKindAsker）。 */
+  askIssueKind: IssueGroomWiring['askKind'];
+  /** 闲置清理的天数（#448，不给用默认 30/14）。 */
+  issueGroomIdlePolicy?: IssueGroomWiring['idlePolicy'];
   /** 测试用：换掉「引擎自己在跑哪个提交」（不给就是 drain-control.ts 的 ownReleaseSha，开发机/测试认不出是 null）。 */
   ownCommit?: () => string | null;
   /** 测试用：换掉拉起工作流（不给就是真的，经这次活动的 Temporal 客户端起 Fusion）。 */
   requirements?: RequirementWorkflows;
   /** 测试用：这一轮跑不跑关单对账（不给就是 jobs/close-sweep.ts 的 closeSweepDue，按真钟：北京时间 9:00 起的那一轮）。 */
   closeSweepDue?: (at: Date) => boolean;
+  /** 测试用：这一轮跑不跑单子打标挂版本（不给就是 jobs/issue-groom.ts 的 issueGroomDue：每小时一次）。 */
+  issueGroomDue?: (at: Date) => boolean;
   /** 测试用：换掉全组织默认（不给就读这份代码里带的 packages/core/flow.default.json）。 */
   orgDefault?: () => Promise<Source>;
   log?: Logger;
@@ -229,6 +238,17 @@ export function githubReconcileJob(
     log,
     now,
   );
+  const groom = issueGroomJob(
+    {
+      db: w.db,
+      gh: w.gh,
+      askKind: w.askIssueKind,
+      ...(w.issueGroomIdlePolicy ? { idlePolicy: w.issueGroomIdlePolicy } : {}),
+      log: (level, text, fields) => log[level](text, fields),
+      now,
+    },
+    async () => (await store.listRepos()).map((r) => ({ owner: r.owner, name: r.name })),
+  );
   return (client, taskQueue) => {
     const intakeDeps = intakeDepsFor(w, { store, log, now }, client, taskQueue);
     const intake = createGitHubIntake({ ...intakeDeps, github });
@@ -241,6 +261,8 @@ export function githubReconcileJob(
       askIssues: () => openAskIssues(asks),
       closeSweep: () => sweepClosing(close),
       ...(w.closeSweepDue ? { closeSweepDue: w.closeSweepDue } : {}),
+      issueGroom: () => sweepIssueGroom(groom),
+      ...(w.issueGroomDue ? { issueGroomDue: w.issueGroomDue } : {}),
       runs: {
         start: (job, at) => startScheduleRun(w.db, job, at),
         finish: (id, result, at) => finishScheduleRun(w.db, id, result, at),

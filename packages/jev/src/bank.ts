@@ -1,4 +1,4 @@
-// 题库：设计文档第十一节的九个接入点。分诊要判的四件事各成一题（一道题只问一件事，四题同一次问）；其余每个接入点一题。
+// 题库：设计文档第十一节的十个接入点。分诊要判的四件事各成一题（一道题只问一件事，四题同一次问）；其余每个接入点一题。
 // 选项的效果只许收紧（见 effects.ts）。每道题至少一个 none 选项；拿不准、没判出来、只记不拦时一律当它不存在，照 whenUnsure 走。
 // 考题（真实样本 + 标准答案）在 packages/jev/exams/<接入点>.json。改题面或选项之后，旧的判断记录不再算进准确率。
 import { DEFAULT_CONFIDENCE_LINE } from './policy.ts';
@@ -448,6 +448,47 @@ export const DIGEST_PICK = defineQuestion({
   confidenceLine: DEFAULT_CONFIDENCE_LINE,
 });
 
+/**
+ * 单子进门自动打标（#448）：新开的 GitHub issue 没有类别标签，问 Jev 是哪一类，只贴不摘（人摘掉就不再碰，
+ * 判法在 @fleet-dao/conventions 的 issue-groom.ts）。三个选项和 `packages/conventions` 的 KIND_LABELS 一一对应
+ * （需求→feature、缺陷→bug、杂项→chore）；改了名字两边要一起改，考题的标准答案跟着题库走（issue-groom.ts 不重复这份判据）。
+ * 「缺陷」标 flag：多一句日报里能挑出来看（新开的缺陷值得多看一眼），其余不改流程；三个选项目前都不接「拦」，
+ * 效果字段只是记着以后转真拦时该怎么走，调用方现在只看 option 和 confidence，不看 act。
+ */
+export const ISSUE_KIND = defineQuestion({
+  id: 'issue-kind',
+  site: 'issue-kind',
+  title: '这张 issue 是哪一类',
+  instructions: '这张 GitHub issue 属于哪一类？',
+  options: [
+    {
+      id: 'feature',
+      label: '需求',
+      criteria: '要新做的东西，或者给现有的东西加能力、改流程',
+      effect: 'none',
+      does: '贴「需求」标签',
+    },
+    {
+      id: 'bug',
+      label: '缺陷',
+      criteria: '现有的东西不对、坏了、和预期不符，要修',
+      effect: 'flag',
+      does: '贴「缺陷」标签，日报里也提一句',
+    },
+    {
+      id: 'chore',
+      label: '杂项',
+      criteria: '文档、整理、依赖升级、删减机制这类不改变外部行为的维护性工作',
+      effect: 'none',
+      does: '贴「杂项」标签',
+    },
+  ],
+  evidence: [{ key: 'issue', label: 'issue 原文（标题、正文）', required: true }],
+  whenUnsure: '不贴类别标签，留给人手动贴，记进日报',
+  confidenceLine: DEFAULT_CONFIDENCE_LINE,
+  askWhen: '新开（或重新打开）的 issue 没有类别标签，且类别标签没被人摘过时才问；每小时补扫一遍漏的',
+});
+
 /** 全部题目，按接入点排好。 */
 export const BANK = [
   TRIAGE_KIND,
@@ -462,6 +503,7 @@ export const BANK = [
   STALL_STATE,
   FEISHU_INTENT,
   DIGEST_PICK,
+  ISSUE_KIND,
 ] as const satisfies readonly QuestionDef[];
 
 export type BankQuestion = (typeof BANK)[number];

@@ -98,6 +98,16 @@ export {
   type SelfCheckItem,
 } from './github.ts';
 export {
+  addIssueLabel,
+  type GroomFacts,
+  type GroomIssue,
+  type GroomLabelEvent,
+  type GroomMilestone,
+  readGroomFacts,
+  readIssueLabelEvents,
+  setIssueMilestone,
+} from './groom.ts';
+export {
   CLAIM_RENEW_EVERY_MS,
   CLAIM_STALE_AFTER_MS,
   holdLease,
