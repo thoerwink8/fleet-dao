@@ -22,6 +22,7 @@ export const AGENTS = {
   dsh: { name: 'dsh', bins: ['dsh'] },
   agy: { name: 'Antigravity', bins: ['agy'] },
   gemini: { name: 'Gemini CLI', bins: ['gemini'] },
+  cursor: { name: 'Cursor CLI', bins: ['cursor-agent'] },
 } as const satisfies Record<string, Agent>;
 
 export type AgentId = keyof typeof AGENTS;
@@ -125,6 +126,21 @@ export interface HookTarget {
   /** readers 里借道读这份的 */
   borrowed?: readonly AgentId[];
   hooks: readonly HookSpec[];
+  /**
+   * 设置文件里 hooks[event] 的形状。不写＝ Claude 那种嵌套（[{matcher?, hooks:[{type:'command',command,timeout}]}]）；
+   * 'flat' 是 Cursor CLI 自己的格式（[{command,timeout}]，没有 matcher、没有 type，见 cursor.com/docs/hooks 2026-09-28）。
+   */
+  format?: 'flat';
+  /**
+   * 这条命令在 Windows 上要不要包成不管被哪个壳转手都安全的形式（hooks.ts 的 hookCommand）：
+   * Cursor CLI 在 Windows 上把导入的钩子命令拼成 PowerShell 语法，却实测会交给不是 PowerShell 的壳去跑
+   * （2026-09-28 本机实测：`node "…pretool.mjs"` 被包成 `$OutputEncoding = …; … | & { $input | node "…" }`
+   * 这样的 PowerShell 片段，交给 bash 的 eval 执行，含 $、&、{ } 的内容直接语法错，钩子判失败＝把工具调用全拦下；
+   * 社区也报过同类问题，见 github.com/obra/superpowers issues #871、#1449，
+   * blog.gitbutler.com/cursor-hooks-deep-dive「Deep Dive into the new Cursor Hooks」）。
+   * 开着时命令行本身只剩 `powershell.exe -EncodedCommand <base64>`，没有会被别的壳切错的字符，随便哪个壳转手都一样。
+   */
+  winSafeCommand?: boolean;
 }
 
 /**
@@ -134,18 +150,28 @@ export interface HookTarget {
  * 开会话那条要取远端、快进、跑一遍同步，给足 90 秒。
  * 借道读这份的：Grok 默认扫 ~/.claude/settings.json 的钩子（~/.grok/docs/user-guide/10-hooks.md「Hook Locations」，
  * 输入是 camelCase、终端工具叫 run_terminal_command，开会话钩子的输出不进上下文）；Devin CLI 默认 read_config_from.claude
- * （docs.devin.ai/cli/extensibility/hooks/overview，终端工具叫 exec）。Cursor 的命令行默认也读（cursor.com/docs/reference/third-party-hooks，
- * Bash 对应它的 Shell），它不在本脚本分发的各家里。脚本按这几种输入都认得（agents/hooks/pretool.mjs 的 SHELL_TOOLS）。
- * 调工具前那条还挂在读文件、搜内容的 Read、Grep 上：会话用它们把密钥文件读进对话的也拦（2026-09-27 用命令读漏过一回，
- * 只拦命令等于没拦）。Glob 只列路径、和 ls 一样放行，不挂。借道的几家怎么对上：Claude Code 的 matcher 只含字母和 | 时
- * 按工具名逐个全等比（code.claude.com/docs/en/hooks「Matcher patterns」）；Grok 把 Bash、Read、Grep 换成它的
- * run_terminal_command、read_file、grep 再匹配（~/.grok/docs/user-guide/10-hooks.md「Tool Name Aliases」）；Cursor 把 Bash
- * 换成 Shell，Read、Grep 照原名（cursor.com/docs/reference/third-party-hooks「Tool Name Mapping」）。Devin 不换名字，
- * matcher 是不锚定的正则、对它自己的小写工具名（docs.devin.ai/cli/extensibility/hooks/lifecycle-hooks「Tool names you can
- * match」）：第一组它一个都匹配不上，所以另登记锚定的一组 ^(exec|read|grep)$（不锚定的 read 会连 notebook_read、
- * read_subagent、mcp_read_resource 一起匹配上，脚本认不得那些名字就会把它们全拦下；这组在 Claude Code、Cursor 里匹配不到
- * 任何工具，在 Grok 里只多匹配一次它的 grep）。脚本认得的名字：agents/hooks/pretool.mjs 的 SHELL_TOOLS、READ_TOOLS。
- * Stop 事件借道的几家支不支持没一一核过：不支持就是从来不触发，装了也无害。
+ * （docs.devin.ai/cli/extensibility/hooks/overview，终端工具叫 exec）。Cursor CLI 默认也读（cursor.com/docs/reference/third-party-hooks，
+ * Bash 对应它的 Shell），这条不管它——Cursor 是不是导入这份完全是它自己的事（Cursor Settings → Agents → Third-Party Imports
+ * 那个开关，本脚本没有能改它的落点），下面另给它登记自己的 ~/.cursor/hooks.json，两条一起生效。脚本按这几种输入都认得
+ * （agents/hooks/pretool.mjs 的 SHELL_TOOLS）。调工具前那条还挂在读文件、搜内容的 Read、Grep 上：会话用它们把密钥文件读进
+ * 对话的也拦（2026-09-27 用命令读漏过一回，只拦命令等于没拦）。Glob 只列路径、和 ls 一样放行，不挂。借道的几家怎么对上：
+ * Claude Code 的 matcher 只含字母和 | 时按工具名逐个全等比（code.claude.com/docs/en/hooks「Matcher patterns」）；Grok 把
+ * Bash、Read、Grep 换成它的 run_terminal_command、read_file、grep 再匹配（~/.grok/docs/user-guide/10-hooks.md「Tool Name
+ * Aliases」）；Cursor 把 Bash 换成 Shell，Read、Grep 照原名（cursor.com/docs/reference/third-party-hooks「Tool Name
+ * Mapping」）。Devin 不换名字，matcher 是不锚定的正则、对它自己的小写工具名（docs.devin.ai/cli/extensibility/hooks/lifecycle-hooks
+ * 「Tool names you can match」）：第一组它一个都匹配不上，所以另登记锚定的一组 ^(exec|read|grep)$（不锚定的 read 会连
+ * notebook_read、read_subagent、mcp_read_resource 一起匹配上，脚本认不得那些名字就会把它们全拦下；这组在 Claude Code、
+ * Cursor 里匹配不到任何工具，在 Grok 里只多匹配一次它的 grep）。脚本认得的名字：agents/hooks/pretool.mjs 的
+ * SHELL_TOOLS、READ_TOOLS。Stop 事件借道的几家支不支持没一一核过：不支持就是从来不触发，装了也无害。
+ *
+ * Cursor CLI 另外登记自己的 ~/.cursor/hooks.json（cursor.com/docs/hooks，2026-09-28 查）：格式是它自己的
+ * 「扁平」（HookTarget.format 'flat'）——preToolUse 这个通用事件的工具名猜不准（借道 Claude 时它翻成 Shell，
+ * 那是兼容层的名字，native 事件里叫什么没查到出处），改用两个语义写死、不用猜名字的专用事件：beforeShellExecution
+ * （payload 只有 command、cwd，没有 tool_name）、beforeReadFile（payload 只有 file_path，见
+ * ntorres.dev/blog/cursor-hooks-json-guide）；pretool.mjs 的 decide() 靠 payload 里的 hook_event_name 认这两种、
+ * 不靠 tool_name。命令本身要 winSafeCommand（HookTarget 那条注释），不然 Windows 上钩子照样全灭。
+ * Cursor 原生没有对应 Grep 的「递归搜内容」事件，从上层目录往下搜密钥文件那层保护（broadSearchVerdict）盖不到
+ * Cursor 的原生钩子，只有 beforeReadFile 的单文件读还护得住；这是目前查得到的官方事件表的天花板，不是本脚本漏做。
  */
 export const HOOK_TARGETS: readonly HookTarget[] = [
   {
@@ -157,6 +183,18 @@ export const HOOK_TARGETS: readonly HookTarget[] = [
       { event: 'PreToolUse', matcher: 'Bash|PowerShell|Read|Grep', script: 'pretool.mjs', timeout: 10 },
       { event: 'PreToolUse', matcher: '^(exec|read|grep)$', script: 'pretool.mjs', timeout: 10 },
       { event: 'Stop', script: 'stop.mjs', timeout: 10 },
+    ],
+  },
+  {
+    settings: { win32: '.cursor\\hooks.json', linux: '.cursor/hooks.json' },
+    readers: ['cursor'],
+    format: 'flat',
+    winSafeCommand: true,
+    hooks: [
+      { event: 'sessionStart', script: 'session-start.mjs', timeout: 90 },
+      { event: 'beforeShellExecution', script: 'pretool.mjs', timeout: 10 },
+      { event: 'beforeReadFile', script: 'pretool.mjs', timeout: 10 },
+      { event: 'stop', script: 'stop.mjs', timeout: 10 },
     ],
   },
 ];

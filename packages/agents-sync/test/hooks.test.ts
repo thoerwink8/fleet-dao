@@ -27,9 +27,11 @@ afterEach(cleanup);
 const NOW = new Date('2026-09-26T06:00:00Z');
 const SETTINGS = '~/.claude/settings.json';
 const SCRIPTS = '~/.fleet-dao/hooks';
-/** 调工具前那条登记的 matcher（targets.ts，一组一个）：下面「挂在哪些工具上」那组钉住它们的值 */
+/** 调工具前那条登记的 matcher（targets.ts，一组一个）：下面「挂在哪些工具上」那组钉住它们的值。
+ * 只看 Claude 那份嵌套格式的 PreToolUse（Cursor 是另一份 flat 格式、事件名也不叫 PreToolUse，
+ * 见 hooks.test.ts 里单独的「Cursor 原生钩子」那组，两边不共用这个矩阵）。 */
 const PRETOOL_MATCHERS = HOOK_TARGETS.flatMap((t) => t.hooks)
-  .filter((h) => h.script === 'pretool.mjs')
+  .filter((h) => h.script === 'pretool.mjs' && h.event === 'PreToolUse')
   .map((h) => h.matcher ?? '没写 matcher');
 
 /** 装好以后 PreToolUse 下该有的几组：一个 matcher 一组，都跑 pretool.mjs */
@@ -420,5 +422,106 @@ describe('各家：装在哪、没装的说为什么', () => {
     expect(ownedScript('node /x/.local/share/jev-shim/ledger.mjs')).toBeNull();
     expect(ownedScript('node /x/fleet-guard/pretool.mjs.bak')).toBeNull();
     expect(ownedScript(undefined)).toBeNull();
+  });
+});
+
+// Cursor CLI 自己的 ~/.cursor/hooks.json：格式是它自己的「扁平」（没有 matcher、没有 type），2026-09-28 #431 加的——
+// 本机 Cursor 在 Windows 上把借道读来的 Claude 钩子命令拼成 PowerShell 语法却交给 bash 执行，工具全被拦；
+// 给它登记自己的原生钩子，命令包成 -EncodedCommand，不管被哪个壳转手都不会被切错（targets.ts HookTarget.winSafeCommand）。
+describe('Cursor CLI：~/.cursor/hooks.json（flat 格式，命令包过 -EncodedCommand）', () => {
+  const CURSOR_SETTINGS = '~/.cursor/hooks.json';
+  interface FlatHandler {
+    command?: string;
+    timeout?: number;
+    [k: string]: unknown;
+  }
+  interface CursorSettings {
+    hooks: Record<string, FlatHandler[]>;
+    version?: number;
+    [k: string]: unknown;
+  }
+  function cursorMachine() {
+    const home = tempDir('home');
+    const src = sources(makeRepo({}, undefined, HOOK_FILES));
+    const ctx = ctxFor(home, ['cursor']);
+    return {
+      home,
+      apply: () => applyHooks(ctx, src, new Backups(home, PLATFORM, NOW)),
+      check: () => checkHooks(ctx, src),
+      settings: () => getJson(home, '.cursor/hooks.json') as CursorSettings,
+    };
+  }
+
+  it('装：四个原生事件各登记一条 {command,timeout}，没有 matcher、没有 type；带上 version:1；查判一致；第二遍零改动', () => {
+    const m = cursorMachine();
+    const lines = m.apply();
+    expectKind(lines, CURSOR_SETTINGS, 'changed');
+    const s = m.settings();
+    expect(s.version).toBe(1);
+    expect(Object.keys(s.hooks).sort()).toEqual(
+      ['beforeReadFile', 'beforeShellExecution', 'sessionStart', 'stop'].sort(),
+    );
+    for (const [event, timeout, script] of [
+      ['sessionStart', 90, 'session-start.mjs'],
+      ['beforeShellExecution', 10, 'pretool.mjs'],
+      ['beforeReadFile', 10, 'pretool.mjs'],
+      ['stop', 10, 'stop.mjs'],
+    ] as const) {
+      const handlers = s.hooks[event] ?? [];
+      expect(handlers).toHaveLength(1);
+      expect(handlers[0]?.timeout).toBe(timeout);
+      expect(handlers[0]?.type).toBeUndefined();
+      expect(handlers[0]?.matcher).toBeUndefined();
+      expect(ownedScript(handlers[0]?.command)).toEqual({ script, legacy: false });
+    }
+    expectKind(m.check(), CURSOR_SETTINGS, 'ok');
+    expect(exitCode(m.check())).toBe(0);
+    expect(m.apply().filter((l) => l.kind === 'changed')).toEqual([]);
+  });
+
+  it('Windows 上命令包成 -EncodedCommand：只剩字母数字和几个安全符号，不管被哪个壳转手都不会被当语法错', () => {
+    const command = hookCommand('C:/Users/u', 'win32', 'pretool.mjs', true);
+    // 故意造出失败的写法长这样：$OutputEncoding = …; … | & { … } —— 含 $、&、{ }、|，交给 bash 的 eval 就会在这些
+    // 字符上炸开（本机 2026-09-28 实测的原始报错：eval: line 1: syntax error near unexpected token '&'）。
+    // 包过 -EncodedCommand 之后，命令行本身只准出现这些字符：字母数字、空格、连字符、加减号、等号（base64）。
+    expect(command).toMatch(/^powershell\.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand [\w+/=-]+$/);
+    for (const bad of ['$', '&', '{', '}', '|', "'", '"']) expect(command.includes(bad)).toBe(false);
+    // 解出来是真的会去跑那个脚本、按 node 的退出码收尾（不是随便什么占位文本）
+    const decoded = Buffer.from(command.split(' ').pop() ?? '', 'base64').toString('utf16le');
+    expect(decoded).toBe('node "C:/Users/u/.fleet-dao/hooks/pretool.mjs"; exit $LASTEXITCODE');
+  });
+
+  it('linux 上不用包：还是普通的 node "路径"（Cursor 在 linux 上没有这个借道-bash 的毛病）', () => {
+    expect(hookCommand('/home/u', 'linux', 'pretool.mjs', true)).toBe(
+      'node "/home/u/.fleet-dao/hooks/pretool.mjs"',
+    );
+  });
+
+  it('登记得不对（timeout 被人改了）：查判漂移，再写换成该有的', () => {
+    const m = cursorMachine();
+    m.apply();
+    const s = m.settings();
+    (s.hooks.stop as FlatHandler[])[0] = { ...(s.hooks.stop as FlatHandler[])[0], timeout: 5 };
+    put(m.home, '.cursor/hooks.json', JSON.stringify(s));
+    const drift = m.check().find((l) => l.key === CURSOR_SETTINGS)?.text ?? '';
+    expect(drift).toContain('漂移');
+    expect(drift).toContain('timeout 是 5，应是 10');
+    expectKind(m.apply(), CURSOR_SETTINGS, 'changed');
+    expect(exitCode(m.check())).toBe(0);
+  });
+
+  it('别的钩子、Cursor 自己加的原样留着，只动本脚本管的那几条', () => {
+    const m = cursorMachine();
+    put(
+      m.home,
+      '.cursor/hooks.json',
+      JSON.stringify({
+        hooks: { afterFileEdit: [{ command: './hooks/format.sh', timeout: 5 }] },
+        version: 1,
+      }),
+    );
+    m.apply();
+    const s = m.settings();
+    expect(s.hooks.afterFileEdit).toEqual([{ command: './hooks/format.sh', timeout: 5 }]);
   });
 });

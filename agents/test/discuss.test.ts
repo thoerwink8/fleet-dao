@@ -27,6 +27,10 @@ interface SecondOpinionLib {
   ): string;
   stripLocalPaths(text: string, dirs: string[]): string;
   checkPublishable(repo: string, body: string, loadOpts?: unknown): Promise<void>;
+  cursorAgentEnv(
+    platform?: string,
+    env?: Record<string, string | undefined>,
+  ): Record<string, string | undefined>;
   UNAVAILABLE: RegExp;
 }
 interface ToolsLib {
@@ -282,6 +286,34 @@ describe('second-opinion.mjs：缺东西照实报', SLOW, () => {
     const r = run('second-opinion.mjs', ['--pr', '5', '--high-risk'], { home: temp('home') });
     expect(r.code).toBe(2);
     expect(r.err).toContain('认不出要审的是哪个仓');
+  });
+});
+
+// 断链修复（本机 2026-09-28 实测）：cursor-agent 在 Windows 上靠父进程环境里 Git Bash 留下的
+// SHELL/MSYSTEM/TERM 猜「现在是不是 bash」，猜完拿这几个变量去跑钩子的 stdin 转发脚本——那脚本是 PowerShell
+// 语法，猜成 bash 就整个交给 bash 的 eval，直接语法错、钩子判失败＝把这次工具调用拦掉（agents/hooks/pretool.mjs
+// 挂着同一条注释）。second-opinion.mjs 起 cursor-agent 的会话大多是从 Git Bash 起的，spawn 默认整份带过去，
+// 摘掉这几个变量让它猜成本机原生的壳，钩子才跑得动；摘的是环境变量，不碰钩子本身的判断，密钥路径照样拦。
+describe('cursorAgentEnv：起 cursor-agent 时把 Git Bash 留的几个变量摘掉，别的原样', () => {
+  const dirty = { SHELL: '/bin/bash.exe', MSYSTEM: 'MINGW64', TERM: 'xterm-256color', PATH: '/x' };
+
+  it('win32：SHELL、MSYSTEM、MSYSTEM_PREFIX、MSYSTEM_CHOST、TERM 都摘掉，别的（PATH）留着', () => {
+    const got = so.cursorAgentEnv('win32', dirty);
+    expect(got).toEqual({ PATH: '/x' });
+  });
+
+  // 故意造出失败：这几个变量摘漏一个，猜壳又会猜错、钩子又会崩——不能只摘一半
+  it('win32：摘的是这五个，一个都不能漏', () => {
+    const got = so.cursorAgentEnv('win32', {
+      ...dirty,
+      MSYSTEM_PREFIX: '/mingw64',
+      MSYSTEM_CHOST: 'x86_64-w64-mingw32',
+    });
+    expect(Object.keys(got)).toEqual(['PATH']);
+  });
+
+  it('linux：原样返回，不摘（本来就不是这个 bug）', () => {
+    expect(so.cursorAgentEnv('linux', dirty)).toEqual(dirty);
   });
 });
 

@@ -25,15 +25,36 @@ type Obj = Record<string, unknown>;
 
 const isObj = (v: unknown): v is Obj => typeof v === 'object' && v !== null && !Array.isArray(v);
 
-/** 设置里登记的命令：node 加脚本的绝对路径（一律 / 分隔、加引号：cmd、PowerShell、bash 都认） */
-export function hookCommand(home: string, platform: Platform, script: string): string {
-  return `node "${join(home, placeOn(HOOKS_DIR, platform), script).replaceAll('\\', '/')}"`;
+/** 设置里登记的命令：node 加脚本的绝对路径（一律 / 分隔、加引号：cmd、PowerShell、bash 都认）。
+ * winSafe 开着、平台是 win32 时（targets.ts HookTarget.winSafeCommand 的注释）：包成
+ * `powershell.exe -EncodedCommand <base64>`，命令行本身只剩字母数字，不管被哪个壳转手都不会切错。 */
+export function hookCommand(home: string, platform: Platform, script: string, winSafe = false): string {
+  const plain = `node "${join(home, placeOn(HOOKS_DIR, platform), script).replaceAll('\\', '/')}"`;
+  if (!winSafe || platform !== 'win32') return plain;
+  return windowsSafeCommand(`${plain}; exit $LASTEXITCODE`);
+}
+
+/** PowerShell 脚本文本包成 -EncodedCommand（UTF-16LE 再转 base64，PowerShell 自己吃这个编码） */
+function windowsSafeCommand(script: string): string {
+  const b64 = Buffer.from(script, 'utf16le').toString('base64');
+  return `powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${b64}`;
+}
+
+/** 命令是不是 windowsSafeCommand 包出来的；是就把里面的 PowerShell 脚本文本解出来 */
+function decodeWindowsSafe(command: string): string | null {
+  const m = /-EncodedCommand\s+(\S+)/i.exec(command);
+  if (!m?.[1]) return null;
+  try {
+    return Buffer.from(m[1], 'base64').toString('utf16le');
+  } catch {
+    return null;
+  }
 }
 
 /** 这条命令是不是本脚本管的：返回它跑的脚本名、是不是以前手装的那份；不是就返回 null */
 export function ownedScript(command: unknown): { script: string; legacy: boolean } | null {
   if (typeof command !== 'string') return null;
-  const c = command.replaceAll('\\', '/');
+  const c = (decodeWindowsSafe(command) ?? command).replaceAll('\\', '/');
   const now = /\/\.fleet-dao\/hooks\/([\w.-]+\.mjs)(?![\w.-])/.exec(c);
   if (now?.[1]) return { script: now[1], legacy: false };
   const old = /\/fleet-guard\/(session-start|pretool)\.mjs(?![\w.-])/.exec(c);
@@ -49,12 +70,21 @@ interface Found {
   legacy: boolean;
 }
 
-/** hooks 里本脚本管的每一条，外加不归它管的有几条 */
-function scan(hooks: Obj): { owned: Found[]; others: number } {
+/** hooks 里本脚本管的每一条，外加不归它管的有几条。flat 格式（Cursor）没有 matcher、没有分组，
+ * hooks[event] 数组里的每一项直接就是一条 handler（{command,timeout}）。 */
+function scan(hooks: Obj, format: 'nested' | 'flat'): { owned: Found[]; others: number } {
   const owned: Found[] = [];
   let others = 0;
   for (const [event, groups] of Object.entries(hooks)) {
     if (!Array.isArray(groups)) continue;
+    if (format === 'flat') {
+      for (const handler of groups) {
+        const mine = isObj(handler) ? ownedScript(handler.command) : null;
+        if (mine && isObj(handler)) owned.push({ event, matcher: undefined, handler, ...mine });
+        else others++;
+      }
+      continue;
+    }
     for (const group of groups) {
       if (!isObj(group) || !Array.isArray(group.hooks)) continue;
       for (const handler of group.hooks) {
@@ -97,7 +127,8 @@ function judge(root: unknown, t: HookTarget, home: string, platform: Platform): 
     out.problems.push('hooks 不是对象');
     return out;
   }
-  const { owned, others } = scan(root.hooks);
+  const format = t.format ?? 'nested';
+  const { owned, others } = scan(root.hooks, format);
   out.others = others;
   // 同一个脚本可以按不同的 matcher 登记几条（调工具前那条：Claude 的工具名一组、Devin 的一组），按事件加 matcher 对号
   const claimed = new Set<Found>();
@@ -117,8 +148,9 @@ function judge(root: unknown, t: HookTarget, home: string, platform: Platform): 
     if (mine.length > 1) out.problems.push(`${spec.script} 登记了 ${mine.length} 次（${specName(spec)}）`);
     const f = mine[0] as Found;
     const wrong: string[] = [];
-    if (f.handler.type !== 'command') wrong.push('type 不是 command');
-    if (f.handler.command !== hookCommand(home, platform, spec.script)) wrong.push('命令和本机该有的不一样');
+    if (format === 'nested' && f.handler.type !== 'command') wrong.push('type 不是 command');
+    if (f.handler.command !== hookCommand(home, platform, spec.script, t.winSafeCommand === true))
+      wrong.push('命令和本机该有的不一样');
     if (f.handler.timeout !== spec.timeout)
       wrong.push(`timeout 是 ${String(f.handler.timeout)}，应是 ${spec.timeout}`);
     if (wrong.length) out.problems.push(`${spec.script}（${specName(spec)}）：${wrong.join('、')}`);
@@ -271,12 +303,20 @@ function applyScripts(ctx: Ctx, src: Sources): Line {
   }
 }
 
-/** 去掉本脚本管的（含以前手装的），再按仓里的登记一遍；别的钩子原样留着 */
+/** 去掉本脚本管的（含以前手装的），再按仓里的登记一遍；别的钩子原样留着。flat 格式（Cursor）没有分组，
+ * hooks[event] 数组里直接是 handler，本脚本管的挑出来就地删掉即可，不用剥分组。 */
 function merged(root: Obj, t: HookTarget, home: string, platform: Platform): Obj {
+  const format = t.format ?? 'nested';
   const next = structuredClone(root);
   const hooks: Obj = isObj(next.hooks) ? next.hooks : {};
   for (const [event, groups] of Object.entries(hooks)) {
     if (!Array.isArray(groups)) continue;
+    if (format === 'flat') {
+      const left = groups.filter((h) => !(isObj(h) && ownedScript(h.command)));
+      if (left.length === 0) delete hooks[event];
+      else hooks[event] = left;
+      continue;
+    }
     let removed = false;
     const kept = groups.filter((g) => {
       if (!isObj(g) || !Array.isArray(g.hooks)) return true;
@@ -291,11 +331,14 @@ function merged(root: Obj, t: HookTarget, home: string, platform: Platform): Obj
     else hooks[event] = kept;
   }
   for (const spec of t.hooks) {
+    const command = hookCommand(home, platform, spec.script, t.winSafeCommand === true);
     const list = Array.isArray(hooks[spec.event]) ? (hooks[spec.event] as unknown[]) : [];
-    list.push(group(spec, hookCommand(home, platform, spec.script)));
+    list.push(format === 'flat' ? { command, timeout: spec.timeout } : group(spec, command));
     hooks[spec.event] = list;
   }
   next.hooks = hooks;
+  // Cursor 的 hooks.json 要有顶层 version（cursor.com/docs/hooks）：机器上第一次跑、文件还不在时补上
+  if (format === 'flat' && next.version === undefined) next.version = 1;
   return next;
 }
 

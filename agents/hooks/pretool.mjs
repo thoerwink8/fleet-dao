@@ -1189,7 +1189,14 @@ function readVerdict(tool, what, input, fallbackCwd) {
 export function decide(raw, fallbackCwd = '') {
   let input;
   try {
-    input = JSON.parse(raw);
+    // Cursor CLI 在 Windows 上喂给钩子的 stdin 有时带 UTF-8 BOM（社区已知的坑，
+    // forum.cursor.com「On Windows, Cursor's hook stdin JSON payload includes a UTF-8 BOM…」）：
+    // Node 的 readFileSync(0,'utf8') 不会替你摘掉，打头那个字符（U+FEFF）会让 JSON.parse 直接炸。
+    // 这里摘掉不算放松拦截——摘不掉、后面还是解不出 JSON 照样按拦处理；只是不让「读得懂的 JSON 前面多一个字符」
+    // 变成把所有 Cursor 原生钩子的调用一律拦掉。不直接在源码里写那个字符（容易和真的文件头 BOM 搞混、也不好认），
+    // 用字符码判断。
+    const noBom = raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
+    input = JSON.parse(noBom);
   } catch {
     return block('fleet-guard：钩子输入不是 JSON，按拦处理');
   }
@@ -1197,7 +1204,33 @@ export function decide(raw, fallbackCwd = '') {
   if (typeof tool === 'string' && Object.hasOwn(READ_TOOLS, tool)) {
     return readVerdict(tool, READ_TOOLS[tool], input, fallbackCwd);
   }
-  const kind = typeof tool === 'string' && Object.hasOwn(SHELL_TOOLS, tool) ? SHELL_TOOLS[tool] : undefined;
+  // Cursor CLI 自己的原生钩子（~/.cursor/hooks.json，packages/agents-sync 的 targets.ts HOOK_TARGETS 那条 format:'flat'
+  // 的登记）：没有 tool_name，靠 hook_event_name 认，字段名和 Claude 那套（tool_input 套一层）不一样。
+  // beforeReadFile：payload 只有 file_path（没有 cwd，Cursor 给的就是绝对路径，见 ntorres.dev/blog/cursor-hooks-json-guide）。
+  const hookEvent = input?.hook_event_name;
+  if (tool === undefined && hookEvent === 'beforeReadFile') {
+    const filePath = input?.file_path;
+    if (typeof filePath !== 'string') {
+      return block('fleet-guard：beforeReadFile 的输入里认不出要读的路径，按拦处理');
+    }
+    const label = secretMention(filePath);
+    if (label === null) return { code: 0 };
+    return block(
+      [
+        `fleet-guard：要读的是${label}，按拦处理（密钥、令牌、口令的值不进对话）；${SECRET_WAY}（在终端跑）。`,
+        '查看脚本认 JSON、env、PEM；只要文件列表用 ls。',
+      ].join('\n'),
+    );
+  }
+  // beforeShellExecution：payload 只有 command、cwd（没有 tool_name），跑的是哪个壳（cmd/PowerShell/bash）没有字段说，
+  // 按最保守的 'shell' 判（和借道 Claude 钩子时 Cursor 把 Bash 翻成的 Shell 同一个 kind）：反引号那条 bash 专属检查
+  // 不适用，密钥路径、从上层目录搜这几条通用检查照样跑。
+  const kind =
+    typeof tool === 'string' && Object.hasOwn(SHELL_TOOLS, tool)
+      ? SHELL_TOOLS[tool]
+      : tool === undefined && hookEvent === 'beforeShellExecution' && typeof input?.command === 'string'
+        ? 'shell'
+        : undefined;
   if (kind === undefined) {
     return block(`fleet-guard：钩子输入里认不出工具名（${JSON.stringify(tool)}），按拦处理`);
   }
