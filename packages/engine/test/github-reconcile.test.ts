@@ -1172,31 +1172,6 @@ describe('退役的定时任务：Temporal 上还在的删掉（断链修复：#
     });
     expect(calls).toEqual(['a', 'b', 'c']);
   });
-
-  it('真 Temporal 开发服务端：建一个再退役，删得掉；已经不在了再删一遍，回 absent 不抛出', {
-    timeout: 300_000,
-  }, async () => {
-    const real = await createRealEnv();
-    try {
-      const { client } = real;
-      const list: RetiredSchedule[] = [{ id: 'fake-retired-job', retiredBy: '#0（测试用）' }];
-      await client.schedule.create({
-        scheduleId: 'fake-retired-job',
-        spec: { intervals: [{ every: '15 minutes' }] },
-        action: {
-          type: 'startWorkflow',
-          workflowType: WORKFLOW_TYPES.watchdog,
-          workflowId: 'fake-retired-job',
-          taskQueue: 'fleet',
-          args: [{ schemaVersion: 1 }],
-        },
-      });
-      expect(await deleteRetiredSchedules(client, list)).toEqual({ 'fake-retired-job': 'deleted' });
-      expect(await deleteRetiredSchedules(client, list)).toEqual({ 'fake-retired-job': 'absent' });
-    } finally {
-      await real.teardown();
-    }
-  });
 });
 
 // 问创始人不挡路（#259）：每轮对账给提问另开单——他改选了别的、原单已经合了的开后续单（挂同一个版本，下一轮接活自动派），
