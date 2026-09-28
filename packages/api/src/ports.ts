@@ -4,11 +4,13 @@
 import type {
   AskHold,
   AskScope,
+  BoardWrite,
   FlowReplica,
   IssueClaim,
   IssueFamily,
   IssueMilestones,
   IssueNow,
+  SeatBoardDoc,
   SeatLease,
   SeatSettingsRead,
 } from '@fleet-dao/core';
@@ -916,6 +918,28 @@ export type ClaimUpdateResult =
   /** 认领号对不上、已经结束了、这张单没有认领：claim 是此刻的样子（没有是 null），什么都没改。 */
   | { ok: false; claim: IssueClaim | null; now: string };
 
+/** 库里的一块帅位栏。doc 已经过 core 的 readSeatBoard。 */
+export interface SeatBoardRecord {
+  id: string;
+  scope: string;
+  project: string;
+  updatedAt: string;
+  doc: SeatBoardDoc;
+}
+
+export type ListSeatBoardsResult =
+  | { ok: true; boards: SeatBoardRecord[]; now: string }
+  | { ok: false; why: string; now: string };
+
+export type ApplySeatBoardResult =
+  | { ok: true; board: SeatBoardRecord; now: string }
+  | { ok: false; reason: 'not_seat' | 'settings'; why: string; now: string }
+  | { ok: false; reason: 'bad' | 'missing'; why: string; now: string };
+
+export type AnswerSeatNeedResult =
+  | { ok: true; board: SeatBoardRecord; now: string }
+  | { ok: false; reason: 'missing' | 'already' | 'bad' | 'duplicate'; why: string; now: string };
+
 export interface SeatStore {
   /** 座位此刻的样子、库的 now、租期和宽限期的设置。 */
   readSeat(scope: string): Promise<SeatSnapshot>;
@@ -997,6 +1021,19 @@ export interface SeatStore {
     repoId?: string | undefined;
     activeOnly: boolean;
   }): Promise<{ claims: IssueClaim[]; now: string }>;
+  /**
+   * 一个座位下的帅位栏。某一行形状认不出：整份失败（why），不把认不出的当成空板。
+   */
+  listSeatBoards(scope: string): Promise<ListSeatBoardsResult>;
+  /**
+   * 现任帅位改一块板（没有就新建）。同一个事务里锁座位、按库的 now 核任期，再锁这一行。
+   * 不是帅位、设置认不出：什么都不改。
+   */
+  applySeatBoard(input: { seat: SeatActor; project: string; op: BoardWrite }): Promise<ApplySeatBoardResult>;
+  /**
+   * 创始人在驾驶舱点一个选项。不核帅位（点的人已经登录）。选项不在列表里、已经拍过：这一行不动。
+   */
+  answerSeatNeed(input: { id: string; option: string; by: string }): Promise<AnswerSeatNeedResult>;
 }
 
 export type Store = UserStore &

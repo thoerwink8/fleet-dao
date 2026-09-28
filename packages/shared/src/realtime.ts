@@ -17,6 +17,7 @@ export const REALTIME_TABLES = [
   'settings',
   'audit_log',
   'approvals',
+  'seat_boards',
 ] as const;
 
 export type RealtimeTable = (typeof REALTIME_TABLES)[number];

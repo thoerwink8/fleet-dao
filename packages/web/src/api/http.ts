@@ -2,6 +2,7 @@
 // 路径和形状全部取自 WebRoutes / AuthRoutes，不在这里另写。
 import {
   AnswerAskRequest,
+  AnswerSeatNeedRequest,
   ApiErrorBody,
   AUTH_PREFIX,
   AuthRoutes,
@@ -171,6 +172,12 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
     async answerAsk(askId, answer) {
       await send('POST', apiUrl(R.answerAsk.path, { askId }), R.answerAsk.response, {
         body: AnswerAskRequest.parse({ answer }),
+      });
+    },
+    seatBoard: () => send('GET', apiUrl(R.seatBoard.path), R.seatBoard.response),
+    async answerSeatNeed(needId, option) {
+      await send('POST', apiUrl(R.answerSeatNeed.path, { needId }), R.answerSeatNeed.response, {
+        body: AnswerSeatNeedRequest.parse({ option }),
       });
     },
     routing: () => send('GET', apiUrl(R.routing.path), R.routing.response),

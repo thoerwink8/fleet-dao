@@ -47,5 +47,6 @@ export const brand: Brand = {
     orgDefaultDetail:
       '这个项目没有自己的流程配置文件，这一轮按组织的全组织默认流程配置派（每步模型顺序、验证几轮都用默认的）',
   },
+  seatBarTitle: '进度',
   repoLink: () => undefined,
 };

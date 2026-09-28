@@ -7,6 +7,7 @@ import {
   check,
   index,
   integer,
+  jsonb,
   pgTable,
   primaryKey,
   text,
@@ -106,5 +107,32 @@ export const issueClaims = pgTable(
     check('issue_claims_grace_positive', sql`${t.graceMinutes} > 0`),
     // 作废扫的是还活着的认领按心跳
     index('issue_claims_state_heartbeat_idx').on(t.state, t.heartbeatAt),
+  ],
+);
+
+/**
+ * 帅位栏（#199）：一个座位、一个项目一行。四段 jsonb 都是数组，细形状由 core 的 readSeatBoard 判。
+ * 首页只读 scope = main。updated_at 和步骤里的时刻都用库的 now()。
+ */
+export const seatBoards = pgTable(
+  'seat_boards',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    scope: text('scope').notNull(),
+    project: text('project').notNull(),
+    headline: text('headline').notNull().default(''),
+    steps: jsonb('steps').notNull().default(sql`'[]'::jsonb`),
+    log: jsonb('log').notNull().default(sql`'[]'::jsonb`),
+    needs: jsonb('needs').notNull().default(sql`'[]'::jsonb`),
+    answers: jsonb('answers').notNull().default(sql`'[]'::jsonb`),
+    updatedAt: timestamp('updated_at', tz).notNull(),
+  },
+  (t) => [
+    unique('seat_boards_scope_project_unique').on(t.scope, t.project),
+    check('seat_boards_scope_known', sql`${t.scope} = 'main' or ${t.scope} like 'drill:%'`),
+    check('seat_boards_steps_array', sql`jsonb_typeof(${t.steps}) = 'array'`),
+    check('seat_boards_log_array', sql`jsonb_typeof(${t.log}) = 'array'`),
+    check('seat_boards_needs_array', sql`jsonb_typeof(${t.needs}) = 'array'`),
+    check('seat_boards_answers_array', sql`jsonb_typeof(${t.answers}) = 'array'`),
   ],
 );

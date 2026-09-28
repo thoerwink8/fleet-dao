@@ -77,6 +77,24 @@ interface ProgressLib {
 
 const load = async (name: string) => import(pathToFileURL(join(SCRIPTS, name)).href);
 const progress = (await load('progress-lib.mjs')) as ProgressLib;
+const boardCli = (await load('board-cli.mjs')) as {
+  runBoardCli(
+    argv: string[],
+    io: {
+      home: string;
+      env: Record<string, string | undefined>;
+      now: () => Date;
+      readText?: (file: string) => string;
+      ssh: (
+        args: string[],
+        input?: string,
+      ) => { status: number | null; stdout: string; stderr: string; error?: string };
+      gh: (args: string[]) => { status: number | null; stdout: string; stderr: string; error?: string };
+      out: (t: string) => void;
+      err: (t: string) => void;
+    },
+  ): Promise<number>;
+};
 const HTML = join(SCRIPTS, 'index.html');
 
 const made: string[] = [];
@@ -341,10 +359,15 @@ describe('写锁：同一个项目同时两条命令，一条都不丢', () => {
   });
 
   // 这条只证明「抢锁时都等得到、都记上」；丢更新的竞态在 Windows 上起进程太慢、不一定撞得出，锁本身由上面两条定死
-  it('六条 p.mjs 同时往一个项目里加动态：都成功，六条都在', async () => {
+  it('六条 p.mjs 同时报动态、这台没有登法国的钥匙：都退出码 2，不写本地进度文件', async () => {
     const home = tempHome();
-    p(home, 'demo', 'init');
-    const env = { ...process.env, HOME: home, USERPROFILE: home, FLEET_PROGRESS_AUTOSTART: '0' };
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      HOME: home,
+      USERPROFILE: home,
+      FLEET_PROGRESS_AUTOSTART: '0',
+    };
+    delete env.FLEET_FRANCE_SSH;
     const codes = await Promise.all(
       [0, 1, 2, 3, 4, 5].map(
         (i) =>
@@ -356,9 +379,8 @@ describe('写锁：同一个项目同时两条命令，一条都不丢', () => {
           }),
       ),
     );
-    expect(codes).toEqual([0, 0, 0, 0, 0, 0]);
-    const texts = readData(home, 'demo').log.map((e) => e.text);
-    for (let i = 0; i < 6; i++) expect(texts).toContain(`并行 ${i}`);
+    expect(codes).toEqual([2, 2, 2, 2, 2, 2]);
+    expect(existsSync(join(home, '.local', 'share', 'fleet-progress', 'demo', 'progress.json'))).toBe(false);
   });
 });
 
@@ -407,6 +429,8 @@ describe('页面服务', () => {
     expect(page.status).toBe(200);
     expect(page.type).toContain('text/html');
     expect(page.text).toContain('帅位进度');
+    expect(page.text).toContain('搬到驾驶舱');
+    expect(page.text).not.toContain('/api/projects');
   });
 
   it('这台机器还没有任何项目：明说是空的（200、空列表），和读不了分开', async () => {
@@ -538,14 +562,15 @@ describe('写进度顺手拉起页面（页面进程退出后没人拉，数据�
     expect(r).toEqual({ state: 'started' });
   });
 
-  it('p.mjs：端口被别的程序占着、拉不起来，数据照写，退出码 2 并写明原因', async () => {
+  it('p.mjs：没有登法国的钥匙，退出码 2，不写本地进度文件', async () => {
     const home = tempHome();
-    const other = createServer((_req, res) => res.end('别人的'));
-    servers.push(other);
-    await new Promise<void>((resolve) => other.listen(0, '127.0.0.1', resolve));
-    const address = other.address();
-    if (address === null || typeof address === 'string') throw new Error('没拿到端口');
-    const env = { ...process.env, HOME: home, USERPROFILE: home, FLEET_PROGRESS_PORT: String(address.port) };
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      HOME: home,
+      USERPROFILE: home,
+      FLEET_PROGRESS_AUTOSTART: '0',
+    };
+    delete env.FLEET_FRANCE_SSH;
     const r = await new Promise<{ status: number | null; stderr: string }>((resolve) => {
       const child = spawn(process.execPath, [join(SCRIPTS, 'p.mjs'), 'demo', 'init'], { env });
       let stderr = '';
@@ -555,23 +580,26 @@ describe('写进度顺手拉起页面（页面进程退出后没人拉，数据�
       child.on('close', (status) => resolve({ status, stderr }));
     });
     expect(r.status).toBe(2);
-    expect(r.stderr).toContain('进度写好了，但进度页没开着');
-    expect(existsSync(join(home, '.local', 'share', 'fleet-progress', 'demo', 'progress.json'))).toBe(true);
-  }, 20_000);
+    expect(r.stderr).toContain('没有登法国的钥匙');
+    expect(existsSync(join(home, '.local', 'share', 'fleet-progress', 'demo', 'progress.json'))).toBe(false);
+  });
 });
 
 describe('命令行外壳：数据按 os.homedir() 放', () => {
-  it('p.mjs：写进这个家目录下；不带参数给用法、退出码 1', () => {
+  it('p.mjs：不带参数给用法、退出码 1；没有法国钥匙时不写本地进度文件', () => {
     const home = tempHome();
-    const env = { ...process.env, HOME: home, USERPROFILE: home, FLEET_PROGRESS_AUTOSTART: '0' };
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      HOME: home,
+      USERPROFILE: home,
+      FLEET_PROGRESS_AUTOSTART: '0',
+    };
+    delete env.FLEET_FRANCE_SSH;
     const run = (...argv: string[]) =>
       spawnSync(process.execPath, [join(SCRIPTS, 'p.mjs'), ...argv], { env, encoding: 'utf8' });
     expect(run().status).toBe(1);
-    expect(run('demo', 'init').status).toBe(0);
-    expect(existsSync(join(home, '.local', 'share', 'fleet-progress', 'demo', 'progress.json'))).toBe(true);
-    const shown = run('demo', 'show');
-    expect(shown.status).toBe(0);
-    expect(shown.stdout).toContain('刚接手，还没写现状');
+    expect(run('demo', 'init').status).toBe(2);
+    expect(existsSync(join(home, '.local', 'share', 'fleet-progress', 'demo', 'progress.json'))).toBe(false);
   });
 
   it('server.mjs --port 0：起来、报地址、读的是这个家目录', async () => {
@@ -791,5 +819,118 @@ describe('doing.mjs say、done、drop、show', () => {
     const failed = await run(gh.gh, ['show', '12']);
     expect(failed.code).toBe(2);
     expect(failed.out).toContain('#12 没查成');
+  });
+});
+
+describe('报到驾驶舱：法国连不上不写本地文件，评论失败不记账', () => {
+  function seated(home: string) {
+    const dir = join(home, '.fleet-dao', 'seat');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'main__s1.json'),
+      JSON.stringify({
+        scope: 'main',
+        machine: '本机',
+        session: 's1',
+        term: 1,
+        renewedOkAt: new Date().toISOString(),
+        leaseMinutes: 45,
+      }),
+    );
+  }
+
+  it('没有法国钥匙：退出码 2，不写 progress.json', async () => {
+    const home = tempHome();
+    seated(home);
+    const err: string[] = [];
+    const code = await boardCli.runBoardCli(['demo', 'log', '一步'], {
+      home,
+      env: {},
+      now: () => NOW,
+      ssh: () => ({ status: 0, stdout: '', stderr: '' }),
+      gh: () => ({ status: 0, stdout: '', stderr: '' }),
+      out: () => {},
+      err: (t) => err.push(t),
+    });
+    expect(code).toBe(2);
+    expect(err.join('\n')).toContain('没有登法国的钥匙');
+    expect(existsSync(join(home, '.local', 'share', 'fleet-progress'))).toBe(false);
+  });
+
+  it('gh 评论失败：不发 ack', async () => {
+    const home = tempHome();
+    seated(home);
+    const calls: string[][] = [];
+    const err: string[] = [];
+    const code = await boardCli.runBoardCli(['demo', 'record'], {
+      home,
+      env: { FLEET_FRANCE_SSH: 'france' },
+      now: () => NOW,
+      ssh: (args) => {
+        calls.push(args);
+        const command = args.at(-1) ?? '';
+        if (command.includes('pending')) {
+          return {
+            status: 0,
+            stdout: `${JSON.stringify({
+              ok: true,
+              pending: [
+                { project: 'demo', id: 'n1', question: '先做哪件', option: '接口', repo: 'o/r', issue: 12 },
+              ],
+            })}\n`,
+            stderr: '',
+          };
+        }
+        return { status: 0, stdout: `${JSON.stringify({ ok: true })}\n`, stderr: '' };
+      },
+      gh: () => ({ status: 1, stdout: '', stderr: 'gh 拒绝了' }),
+      out: () => {},
+      err: (t) => err.push(t),
+    });
+    expect(code).toBe(2);
+    expect(err.join('\n')).toContain('还没记账');
+    expect(calls.some((a) => (a.at(-1) ?? '').includes("board' 'ack'"))).toBe(false);
+  });
+
+  it('handoff：把文件交给座位，并在栏里记一条；文件读不到就退出，不假装存上', async () => {
+    const home = tempHome();
+    seated(home);
+    const file = join(home, 'handoff.md');
+    writeFileSync(file, '在做首页\n等拍选项\n');
+    const seen: { cmd: string; input?: string }[] = [];
+    const err: string[] = [];
+    const code = await boardCli.runBoardCli(['demo', 'handoff', file], {
+      home,
+      env: { FLEET_FRANCE_SSH: 'france' },
+      now: () => NOW,
+      readText: (path) => readFileSync(path, 'utf8'),
+      ssh: (args, input) => {
+        const cmd = args.at(-1) ?? '';
+        // input 缺省是 undefined；可选字段在开着 exactOptionalPropertyTypes 时不能赋 undefined。
+        seen.push(input === undefined ? { cmd } : { cmd, input });
+        return { status: 0, stdout: `${JSON.stringify({ ok: true })}\n`, stderr: '' };
+      },
+      gh: () => ({ status: 0, stdout: '', stderr: '' }),
+      out: () => {},
+      err: (t) => err.push(t),
+    });
+    expect(code).toBe(0);
+    expect(seen[0]?.cmd).toContain("seat' 'handoff'");
+    expect(seen[0]?.input).toContain('在做首页');
+    expect(seen[1]?.cmd).toContain('写了交接说明');
+    const missing = await boardCli.runBoardCli(['demo', 'handoff', join(home, '没有.md')], {
+      home,
+      env: { FLEET_FRANCE_SSH: 'france' },
+      now: () => NOW,
+      readText: (path) => readFileSync(path, 'utf8'),
+      ssh: () => {
+        throw new Error('不该连法国');
+      },
+      gh: () => ({ status: 0, stdout: '', stderr: '' }),
+      out: () => {},
+      err: (t) => err.push(t),
+    });
+    expect(missing).toBe(2);
+    expect(err.join('\n')).toContain('读不到');
   });
 });

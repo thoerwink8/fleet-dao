@@ -5,13 +5,18 @@
 // 判法在 @fleet-dao/core 的 seat.ts。
 import { randomUUID } from 'node:crypto';
 import {
+  applyBoardWrite,
+  boardProjectProblem,
   claimExpired,
+  emptySeatBoard,
   holderText,
   type IssueClaim,
   isActiveClaim,
   isDrillScope,
+  readSeatBoard,
   readSeatSettings,
   SEAT_DEFAULTS,
+  type SeatBoardDoc,
   type SeatLease,
   seatVerdict,
 } from '@fleet-dao/core';
@@ -19,27 +24,37 @@ import {
   type Db,
   endClaimRow,
   type IssueClaimRow,
+  insertSeatBoardRow,
   listClaimRows,
+  listSeatBoardRows,
   listStalePendingEngineClaimRows,
+  lockMainSeatBoards,
+  lockSeatBoardRow,
   type NewClaimRow,
   readClaim,
   readSeat as readSeatRow,
   readSeatSetting,
   renewSeatRow,
+  type SeatBoardRow,
   type SeatLeaseRow,
   startEngineClaimRow,
   stepClaimRow,
   takeClaimRow,
   takeSeatRow,
+  updateSeatBoardRow,
   voidExpiredClaimRows,
   writeHandoffRow,
 } from '@fleet-dao/db';
 import type {
   Actor,
+  AnswerSeatNeedResult,
+  ApplySeatBoardResult,
   ClaimTarget,
   EngineClaimResult,
+  ListSeatBoardsResult,
   NewAuditEntry,
   SeatActor,
+  SeatBoardRecord,
   SeatIdentity,
   SeatStore,
 } from './ports.ts';
@@ -472,7 +487,143 @@ export function pgSeatStore(db: Db, insertAudit: InsertAudit): SeatStore {
       const r = await listClaimRows(db, input);
       return { claims: r.value.map(toIssueClaim), now: iso(r.now) };
     },
+
+    async listSeatBoards(scope) {
+      const r = await listSeatBoardRows(db, scope);
+      return boardsFromRows(r.value, iso(r.now));
+    },
+
+    async applySeatBoard(input) {
+      return db.transaction(async (tx) => {
+        const gate = await gateSeat(tx, input.seat);
+        if (!gate.ok) return gate;
+        const projectWhy = boardProjectProblem(input.project);
+        if (projectWhy) return { ok: false as const, reason: 'bad' as const, why: projectWhy, now: gate.now };
+        const locked = await lockSeatBoardRow(tx, input.seat.scope, input.project);
+        const now = iso(locked.now);
+        const current = locked.value
+          ? boardFromRow(locked.value)
+          : { ok: true as const, doc: emptySeatBoard() };
+        if (!current.ok) return { ok: false as const, reason: 'bad' as const, why: current.why, now };
+        const applied = applyBoardWrite(current.doc, input.op, now);
+        if (!applied.ok) {
+          const reason = applied.reason === 'bad' ? 'bad' : 'missing';
+          return { ok: false as const, reason, why: applied.why, now };
+        }
+        const saved = await saveBoard(tx, {
+          id: locked.value?.id,
+          scope: input.seat.scope,
+          project: input.project,
+          doc: applied.doc,
+          updatedAt: locked.now,
+        });
+        return { ok: true as const, board: saved, now };
+      });
+    },
+
+    async answerSeatNeed(input) {
+      return db.transaction(async (tx) => {
+        const locked = await lockMainSeatBoards(tx);
+        const now = iso(locked.now);
+        return answerLocked(locked.value.map(boardFromRow), input, now, async (row, doc) => {
+          const saved = await saveBoard(tx, {
+            id: row.id,
+            scope: row.scope,
+            project: row.project,
+            doc,
+            updatedAt: locked.now,
+          });
+          return saved;
+        });
+      });
+    },
   };
+}
+
+function boardFromRow(
+  row: SeatBoardRow,
+): { ok: true; row: SeatBoardRow; doc: SeatBoardDoc } | { ok: false; why: string } {
+  const read = readSeatBoard(row);
+  return read.ok ? { ok: true, row, doc: read.doc } : read;
+}
+
+function boardsFromRows(rows: SeatBoardRow[], now: string): ListSeatBoardsResult {
+  const boards: SeatBoardRecord[] = [];
+  for (const row of rows) {
+    const read = boardFromRow(row);
+    if (!read.ok) return { ok: false, why: read.why, now };
+    boards.push(toBoardRecord(row, read.doc));
+  }
+  return { ok: true, boards, now };
+}
+
+function toBoardRecord(
+  row: { id: string; scope: string; project: string; updatedAt: Date },
+  doc: SeatBoardDoc,
+): SeatBoardRecord {
+  return { id: row.id, scope: row.scope, project: row.project, updatedAt: iso(row.updatedAt), doc };
+}
+
+async function gateSeat(
+  db: Db,
+  seat: SeatActor,
+): Promise<{ ok: true; now: string } | Extract<ApplySeatBoardResult, { ok: false }>> {
+  const settings = readSeatSettings(await readSeatSetting(db));
+  const cur = await readSeatRow(db, seat.scope, true);
+  const now = iso(cur.now);
+  if (!settings.ok) return { ok: false, reason: 'settings', why: settings.why, now };
+  const verdict = seatVerdict(cur.value && toSeatLease(cur.value), seat, now, settings.settings.leaseMinutes);
+  if (!verdict.ok) return { ok: false, reason: 'not_seat', why: verdict.why, now };
+  return { ok: true, now };
+}
+
+async function saveBoard(
+  db: Db,
+  input: { id?: string | undefined; scope: string; project: string; doc: SeatBoardDoc; updatedAt: Date },
+): Promise<SeatBoardRecord> {
+  const fields = {
+    headline: input.doc.headline,
+    steps: input.doc.steps,
+    log: input.doc.log,
+    needs: input.doc.needs,
+    answers: input.doc.answers,
+    updatedAt: input.updatedAt,
+  };
+  const row = input.id
+    ? await updateSeatBoardRow(db, { id: input.id, ...fields })
+    : await insertSeatBoardRow(db, {
+        id: randomUUID(),
+        scope: input.scope,
+        project: input.project,
+        ...fields,
+      });
+  return toBoardRecord(row, input.doc);
+}
+
+async function answerLocked(
+  rows: ({ ok: true; row: SeatBoardRow; doc: SeatBoardDoc } | { ok: false; why: string })[],
+  input: { id: string; option: string; by: string },
+  now: string,
+  save: (row: SeatBoardRow, doc: SeatBoardDoc) => Promise<SeatBoardRecord>,
+): Promise<AnswerSeatNeedResult> {
+  const bad = rows.find((r) => !r.ok);
+  if (bad && !bad.ok) return { ok: false, reason: 'bad', why: bad.why, now };
+  const hits = rows.flatMap((r) =>
+    r.ok && (r.doc.needs.some((n) => n.id === input.id) || r.doc.answers.some((a) => a.id === input.id))
+      ? [r]
+      : [],
+  );
+  if (hits.length > 1)
+    return { ok: false, reason: 'duplicate', why: `有好几块板都有 ${input.id} 这一问`, now };
+  const hit = hits[0];
+  if (!hit?.ok) return { ok: false, reason: 'missing', why: `没有 ${input.id} 这一问`, now };
+  const applied = applyBoardWrite(hit.doc, { kind: 'answer', ...input }, now);
+  if (!applied.ok) {
+    const reason =
+      applied.reason === 'already' ? 'already' : applied.reason === 'missing' ? 'missing' : 'bad';
+    return { ok: false, reason, why: applied.why, now };
+  }
+  return { ok: true, board: await save(hit.row, applied.doc), now };
 }
 
 // —— 内存版 ——
@@ -482,6 +633,8 @@ export interface SeatMemoryData {
   claims: IssueClaim[];
   /** settings 表那两项（键是 seat.leaseMinutes、seat.claimGraceMinutes）。 */
   settings: { key: string; value: unknown }[];
+  /** 帅位栏（#199）。 */
+  boards: SeatBoardRecord[];
 }
 
 /** 内存版：语义照 Postgres 版，库的 now() 用 Store 的钟顶替；每个方法同步做完，天然是原子的。 */
@@ -489,6 +642,7 @@ export function memorySeatStore(
   data: SeatMemoryData,
   now: () => Date,
   audit: (entry: NewAuditEntry) => string,
+  touch: (id: string) => void = () => {},
 ): SeatStore {
   const nowIso = () => now().toISOString();
   const rawSettings = () => ({
@@ -848,6 +1002,77 @@ export function memorySeatStore(
         .sort((a, b) => (a.repoId < b.repoId ? -1 : a.repoId > b.repoId ? 1 : a.issueNumber - b.issueNumber))
         .map(copyClaim);
       return { claims, now: nowIso() };
+    },
+
+    async listSeatBoards(scope) {
+      const boards = data.boards.filter((b) => b.scope === scope).map(copyBoard);
+      return { ok: true, boards, now: nowIso() };
+    },
+
+    async applySeatBoard(input) {
+      const now = nowIso();
+      const settings = readSeatSettings(rawSettings());
+      if (!settings.ok) return { ok: false, reason: 'settings', why: settings.why, now };
+      const verdict = seatVerdict(seatOf(input.seat.scope), input.seat, now, settings.settings.leaseMinutes);
+      if (!verdict.ok) return { ok: false, reason: 'not_seat', why: verdict.why, now };
+      const projectWhy = boardProjectProblem(input.project);
+      if (projectWhy) return { ok: false, reason: 'bad', why: projectWhy, now };
+      const idx = data.boards.findIndex((b) => b.scope === input.seat.scope && b.project === input.project);
+      const current = idx >= 0 ? data.boards[idx]?.doc : undefined;
+      const applied = applyBoardWrite(current ?? emptySeatBoard(), input.op, now);
+      if (!applied.ok) {
+        const reason = applied.reason === 'bad' ? 'bad' : 'missing';
+        return { ok: false, reason, why: applied.why, now };
+      }
+      const record: SeatBoardRecord = {
+        id: idx >= 0 ? (data.boards[idx]?.id ?? randomUUID()) : randomUUID(),
+        scope: input.seat.scope,
+        project: input.project,
+        updatedAt: now,
+        doc: applied.doc,
+      };
+      if (idx >= 0) data.boards[idx] = record;
+      else data.boards.push(record);
+      touch(record.id);
+      return { ok: true, board: copyBoard(record), now };
+    },
+
+    async answerSeatNeed(input) {
+      const now = nowIso();
+      const main = data.boards.filter((b) => b.scope === 'main');
+      const hits = main.filter(
+        (b) => b.doc.needs.some((n) => n.id === input.id) || b.doc.answers.some((a) => a.id === input.id),
+      );
+      if (hits.length > 1)
+        return { ok: false, reason: 'duplicate', why: `有好几块板都有 ${input.id} 这一问`, now };
+      const hit = hits[0];
+      if (!hit) return { ok: false, reason: 'missing', why: `没有 ${input.id} 这一问`, now };
+      const applied = applyBoardWrite(hit.doc, { kind: 'answer', ...input }, now);
+      if (!applied.ok) {
+        const reason =
+          applied.reason === 'already' ? 'already' : applied.reason === 'missing' ? 'missing' : 'bad';
+        return { ok: false, reason, why: applied.why, now };
+      }
+      hit.doc = applied.doc;
+      hit.updatedAt = now;
+      touch(hit.id);
+      return { ok: true, board: copyBoard(hit), now };
+    },
+  };
+}
+
+function copyBoard(b: SeatBoardRecord): SeatBoardRecord {
+  return {
+    id: b.id,
+    scope: b.scope,
+    project: b.project,
+    updatedAt: b.updatedAt,
+    doc: {
+      headline: b.doc.headline,
+      steps: b.doc.steps.map((s) => ({ ...s, links: s.links.map((l) => ({ ...l })) })),
+      log: b.doc.log.map((e) => ({ ...e })),
+      needs: b.doc.needs.map((n) => ({ ...n, options: [...n.options] })),
+      answers: b.doc.answers.map((a) => ({ ...a, options: [...a.options] })),
     },
   };
 }

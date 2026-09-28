@@ -233,6 +233,8 @@ export interface MemoryData {
   seatLeases: SeatLease[];
   /** 认领（issue_claims），每张单一个（#299）。 */
   claims: IssueClaim[];
+  /** 帅位栏（seat_boards），一个座位一个项目一块（#199）。 */
+  boards: import('./ports.ts').SeatBoardRecord[];
 }
 
 export function emptyData(): MemoryData {
@@ -268,6 +270,7 @@ export function emptyData(): MemoryData {
     credentials: new Map(),
     seatLeases: [],
     claims: [],
+    boards: [],
   };
 }
 
@@ -593,7 +596,7 @@ export function createMemoryStore(
 
   return {
     data,
-    ...memorySeatStore(data, now, audit),
+    ...memorySeatStore(data, now, audit, (id) => changed('seat_boards', id)),
 
     // —— 人 ——
     async getUser(id) {
