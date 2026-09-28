@@ -10,11 +10,14 @@ export interface Agent {
   name: string;
   /** PATH 或家目录的 .local/bin 里找得到其中一个，就算这台装了 */
   bins: readonly string[];
+  /** 另外还在家目录下的这几处找（官方安装脚本装在自己目录、不进 PATH 的） */
+  homeDirs?: readonly Place[];
 }
 
 export const AGENTS = {
   claude: { name: 'Claude Code', bins: ['claude', 'reclaude'] },
-  grok: { name: 'Grok', bins: ['grok'] },
+  // 官方安装脚本装在 ~/.grok/bin/grok；法国装的时候故意不让它往 ~/.local/bin 链（deploy/lib/grok.sh 开头），不在 PATH 上
+  grok: { name: 'Grok', bins: ['grok'], homeDirs: [{ win32: '.grok\\bin', linux: '.grok/bin' }] },
   devin: { name: 'Devin CLI', bins: ['devin'] },
   codex: { name: 'Codex', bins: ['codex'] },
   pi: { name: 'pi', bins: ['pi'] },
@@ -180,6 +183,51 @@ export const HOOK_GAPS: Partial<Record<AgentId, string>> = {
   pi: '它没有配置式的钩子（要写成 TypeScript 扩展）',
   dsh: '它没有自带的全局钩子（只有要手动挂的桥接插件）',
 };
+
+/** 配置文件里本脚本管的一个开关：TOML 里 [table] 下的 key = value（value 照 TOML 字面量写，比如 false） */
+export interface ConfigKey {
+  table: string;
+  key: string;
+  value: string;
+  /** 为什么要它：写进文件里那一项上面的注释，查出不对时也报这句 */
+  why: string;
+}
+
+export interface ConfigKeyTarget {
+  /** TOML 配置文件 */
+  file: Place;
+  readers: readonly AgentId[];
+  keys: readonly ConfigKey[];
+}
+
+/**
+ * 各家配置文件里本脚本管的开关：只动这里列的几项，文件里别的内容一行不碰；读不懂（多行字符串、表重复、
+ * 用点号或内联表写在别处）就不动、报出来，不猜。
+ * - Grok（~/.grok/config.toml）：免确认（permission_mode = "always-approve"）只管工具权限，管不到下面两张卡，
+ *   无人值守和 Mirasim 经 grok agent stdio 起的会话都会卡着等人（docs/reference/adapters.md GK-12）。
+ *   folder_trust.enabled 在 grok inspect 里报「unrecognized」，1.0.41 实测照样生效（没信任过的新目录照读 AGENTS.md）；
+ *   计划模式没有配置开关（只有 grok -p 的 --no-plan），这里管不了。
+ */
+export const CONFIG_KEY_TARGETS: readonly ConfigKeyTarget[] = [
+  {
+    file: { win32: '.grok\\config.toml', linux: '.grok/config.toml' },
+    readers: ['grok'],
+    keys: [
+      {
+        table: 'folder_trust',
+        key: 'enabled',
+        value: 'false',
+        why: '不弹「信不信这个目录」：没信任的目录 grok 不加载 AGENTS.md、项目钩子和技能，每个新工作树都是',
+      },
+      {
+        table: 'features',
+        key: 'ask_user_question',
+        value: 'false',
+        why: '不给模型反问选择题的工具：无人值守、Mirasim 里没人答会干等',
+      },
+    ],
+  },
+];
 
 /** --retire-old 在这些 skill 目录里找指向旧仓的链接（各家的都扫，不只本脚本分发的那几个） */
 export const RETIRE_SKILL_DIRS: readonly Place[] = [
