@@ -836,34 +836,56 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
     expect(reask?.items.join('\n')).toContain('fleet ask "<问题>" -o <甲> -o <乙> -r <推荐的>');
   });
 
-  it(`【失败】退回 ${2} 次还说要人：才停下等人（老样子发卡等回答），回答到了续同一个会话`, async () => {
+  it('退回到数还说要人、但带着推荐：不停下等，按会话自己的话接着做，PR 正文「按推荐先做了」记一条、照常发卡片（#259 第 3 个 PR）', async () => {
     const w = world({
       session: (input) =>
         input.brief.lead?.step === 'plan' && !input.brief.answers.length
-          ? { outcome: 'blocked', blocked: { reason: '验证码几位？', needs: 'info' } }
+          ? {
+              outcome: 'blocked',
+              blocked: { reason: '验证码位数没定，推荐 6 位（和短信一致）', needs: 'human' },
+            }
           : undefined,
     });
-    const result = await withWorker(env, w, async (q) => {
-      const handle = await start(q, fusionInput());
-      const asking = await queryUntil<FusionStatus>(handle, (s) => Boolean(s.waiting?.askId), '在等回答');
-      expect(asking.waiting?.detail).toContain('验证码几位？');
-      await handle.signal(answerSignal, {
-        by: 'founder',
-        askId: asking.waiting?.askId ?? '',
-        answer: '6 位',
-      });
-      return (await handle.result()) as FusionResult;
-    });
+    const result = await runToEnd(w);
     expect(result.state).toBe('done');
+    // 一次都没真的停下等人：没发过「等回答」的卡
+    expect(w.asks).toEqual([]);
+    // 但照常发了卡（驾驶舱、飞书的「已按推荐先做」）
+    expect(w.count('raiseAlert')).toBeGreaterThan(0);
     const plans = w.callsOf('startSession').filter((c) => c.input.brief.lead?.step === 'plan');
-    // 第一次说卡住 + 退回两次还说卡住 → 第四次是答了之后续的
+    // 第一次说卡住 + 退回两次（reaskRounds 默认 2）还说卡住 + 到数按会话自己的话接着做那一次续的会话，一共 3 次报卡住
     expect(plans).toHaveLength(4);
     expect(plans.slice(1, 3).map((p) => p.input.brief.feedback.some((f) => f.kind === 'ask'))).toEqual([
       true,
       true,
     ]);
-    expect(w.asks).toHaveLength(1);
-    expect(plans[3]?.input.brief.answers).toEqual([{ question: '验证码几位？', answer: '6 位' }]);
+    expect(plans[3]?.input.brief.answers).toEqual([
+      {
+        question: '会话说卡住（要人拍板）：验证码位数没定，推荐 6 位（和短信一致）',
+        answer: '验证码位数没定，推荐 6 位（和短信一致）',
+      },
+    ]);
+    // PR 正文「按推荐先做了」一栏有这条（不经 fleet ask、asks 表里没有，靠 kit.assumedNotes 并进来）
+    expect(w.callsOf('openPr')[0]?.input.body.assumed).toEqual([
+      '会话说卡住（要人拍板）：验证码位数没定，推荐 6 位（和短信一致） → 退回 2 次还这样，按会话自己写的话接着做，不再停下等人',
+    ]);
+  });
+
+  it('【失败】退回到数还说要人，却一个字的推荐或假设都拿不出：说不清，照失败梯子走，不当成按推荐放行', async () => {
+    const w = world({
+      session: (input) =>
+        input.brief.lead?.step === 'plan' && !input.brief.answers.length
+          ? { outcome: 'blocked', blocked: { reason: '', needs: 'human' } }
+          : undefined,
+    });
+    const { parked, result } = await runUntilParked(
+      w,
+      fusionInput({ limits: { retryAttempts: 0, routeSwaps: 0, modelSwaps: 0 } }),
+    );
+    // 没有一次落到「等回答」：不是老样子停下等人（那是发一张卡等回答），是走失败梯子最后挂起
+    expect(w.asks).toEqual([]);
+    expect(parked.lastProblem).toBeTruthy();
+    expect(result.state).toBe('stopped');
   });
 
   it('要的是只有他本人才有的东西（--needs access）：不退回，照旧停下等人', async () => {
