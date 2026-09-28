@@ -154,6 +154,24 @@ describe('Mirasim 会话状态（真跑夹具）', () => {
 });
 
 describe('Mirasim 起会话到判定（假服务端）', () => {
+  it('档位不认识：prompt 还没发出去就拒【故意造出的失败】', async () => {
+    const server = new FakeMirasim({});
+    await expect(runMirasim(spec({ effort: 'turbo' }), { connect: server.connect })).rejects.toThrow(
+      'effort',
+    );
+    expect(server.connects).toBe(0);
+    expect(server.framesOf('prompt')).toEqual([]);
+  });
+
+  it('带了档位就写进 prompt 帧', async () => {
+    const server = new FakeMirasim({ reply: accepted(kimi), stream: kimi.stream });
+    await runMirasim(spec({ effort: 'high' }), {
+      connect: server.connect,
+      ledgerDir: okLedger(kimi.sessionKey),
+    });
+    expect(server.framesOf('prompt')[0]).toMatchObject({ effort: 'high' });
+  });
+
   it('kimi 回放：发对了 prompt，只认本会话的帧，判正常结束', async () => {
     const foreignDone = {
       type: 'session',
