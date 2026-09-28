@@ -86,13 +86,22 @@ export function prColumns(body: string): Map<string, string> {
 }
 
 /**
+ * 「需求」栏里第一个 #号（不看标题）：pr-fields.ts 提醒「这个 PR 做完就关单」该补哪个 Closes、
+ * 关单对账认合并了的 PR 挂的是哪张单，都从这来（#460）；linkedIssue 在这基础上加了标题兜底。
+ */
+export function issueColumnNumber(body: string): number | undefined {
+  const col = prColumns(body).get(ISSUE_COLUMN.toLowerCase());
+  const m = col && /(?<![\w/#])#(\d+)\b/.exec(col)?.[1];
+  return m ? Number(m) : undefined;
+}
+
+/**
  * PR 对应的 issue 号：先看正文「需求」栏里第一个 #号，没有再看标题里第一个 (#号)（全角括号也算）。
  * 「owner/仓#号」这种别的仓的不算。都没有返回 undefined。
  */
 export function linkedIssue(body: string, title: string): number | undefined {
-  const col = prColumns(body).get(ISSUE_COLUMN.toLowerCase());
-  const fromBody = col && /(?<![\w/#])#(\d+)\b/.exec(col)?.[1];
-  if (fromBody) return Number(fromBody);
+  const fromBody = issueColumnNumber(body);
+  if (fromBody !== undefined) return fromBody;
   const fromTitle = /[(（]\s*#(\d+)\s*[)）]/.exec(title)?.[1];
   return fromTitle ? Number(fromTitle) : undefined;
 }
