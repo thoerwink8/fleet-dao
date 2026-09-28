@@ -8,6 +8,12 @@ export interface TestResult {
   /** 测的是哪个头；和要合的头对不上不算数。 */
   head: string;
   summary: string;
+  /**
+   * 红了、且结构化地判定（读当前头上 second-opinion 提交状态的 state 字段，不匹配合并闸的文案，见
+   * real/github-ports.ts 的 runTests）只是合并闸缺 second-opinion——missing 是这个头上还没有这条状态、
+   * pending 是还在跑：不算「测试真红」，见 mergeStep。真正测试红、或第二意见真审过判「必须改」都没有这个字段。
+   */
+  secondOpinionWait?: 'missing' | 'pending';
 }
 
 export interface MergeOutcome {
@@ -25,7 +31,18 @@ export interface MergeStepInput {
   failed?: { step: string; message: string } | null | undefined;
 }
 
-export type ReturnReason = 'conflict' | 'tests-red' | 'tests-stale' | 'merge-failed' | 'infra';
+export type ReturnReason =
+  | 'conflict'
+  | 'tests-red'
+  | 'tests-stale'
+  | 'merge-failed'
+  | 'infra'
+  /**
+   * 合并前重跑，红的结构化地只是「当前头还没有 second-opinion」（tests.secondOpinionWait）：不是测试真红，
+   * 调用方（fusion.ts 的 doMerge）改走请第二意见（或沿用上一轮通过的结论）再看合并闸，不当一次真退回
+   * （不进 afterMergeReturn 的返工账、不算 returnsSoFar）。
+   */
+  | 'second-opinion';
 
 export type MergeStep =
   | { next: 'sync' }
@@ -72,6 +89,9 @@ export function mergeStep(input: MergeStepInput): MergeStep {
     };
   }
   if (!tests.passed) {
+    if (tests.secondOpinionWait) {
+      return { next: 'done', result: 'returned', reason: 'second-opinion', detail: tests.summary, files: [] };
+    }
     return { next: 'done', result: 'returned', reason: 'tests-red', detail: tests.summary, files: [] };
   }
   if (!merge) return { next: 'merge', head: sync.head };

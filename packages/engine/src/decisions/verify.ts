@@ -24,15 +24,18 @@ export interface SyncResult {
 /**
  * CI 结果，证据绑定 head。unknown = 没查成（没有检查、超时读不到……），不是没过也不是过了；conflict = GitHub 不给
  * 冲突的 PR 起 CI（和 unknown 分开：这个有确定的解法，并主线，不是读不到）；diverged = PR 的头变了、新头不含老头
- * （像是被强推改写了），不是自动并主线能接的，要人看。
+ * （像是被强推改写了），不是自动并主线能接的，要人看；merged = 查到 PR 已经在外面合并了（GitHub 自己的自动合并，
+ * 合并闸绿就合，不是引擎自己合的）：不是没查成，直接当合上了（mergeCommit 带着合并提交）。
  */
 export interface CiResult {
-  state: 'green' | 'red' | 'unknown' | 'conflict' | 'diverged';
+  state: 'green' | 'red' | 'unknown' | 'conflict' | 'diverged' | 'merged';
   head: string;
   failedChecks: string[];
   /** 失败摘要（首个失败的测试名、报错首行）；有它才判「同一假设」。 */
   digest?: string;
   detail?: string;
+  /** state 是 'merged' 时才有：合并提交。 */
+  mergeCommit?: string;
 }
 
 export interface Finding {

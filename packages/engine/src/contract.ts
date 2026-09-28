@@ -17,6 +17,7 @@ import {
   AGENT_EVENT_WAKE_KINDS as SHARED_WAKE_KINDS,
 } from '@fleet-dao/shared/workflow-ids';
 import { defineQuery, defineSignal } from '@temporalio/workflow';
+import type { ReturnReason } from './decisions/merge.ts';
 import type { SubtaskSpec } from './decisions/plan.ts';
 import type { Limits } from './limits.ts';
 import type { WaitKind } from './ports.ts';
@@ -226,7 +227,7 @@ export type MergeResult =
   | {
       itemId: string;
       outcome: 'returned';
-      reason: 'conflict' | 'tests-red' | 'tests-stale' | 'merge-failed' | 'infra';
+      reason: ReturnReason;
       detail: string;
       files: string[];
     }

@@ -689,6 +689,42 @@ describe('合并队列的条目状态机', () => {
     expect(mergeStep({ ...none, withdrawn: true })).toMatchObject({ result: 'withdrawn' });
   });
 
+  it('红了但结构化地只缺 second-opinion（missing/pending）：退回原因是 second-opinion，不是 tests-red', () => {
+    const none = { withdrawn: false, sync: null, tests: null, merge: null };
+    const reason = (input: Parameters<typeof mergeStep>[0]) => {
+      const step = mergeStep(input);
+      return step.next === 'done' && step.result === 'returned' ? step.reason : step.next;
+    };
+    expect(
+      reason({
+        ...none,
+        sync: clean,
+        tests: {
+          passed: false,
+          head: 'h2',
+          summary: '合并闸红，缺 second-opinion',
+          secondOpinionWait: 'missing',
+        },
+      }),
+    ).toBe('second-opinion');
+    expect(
+      reason({
+        ...none,
+        sync: clean,
+        tests: {
+          passed: false,
+          head: 'h2',
+          summary: '合并闸红，second-opinion 还在跑',
+          secondOpinionWait: 'pending',
+        },
+      }),
+    ).toBe('second-opinion');
+    // 没有这个结构化字段（真测试红）还是走老路
+    expect(reason({ ...none, sync: clean, tests: { passed: false, head: 'h2', summary: '真红了' } })).toBe(
+      'tests-red',
+    );
+  });
+
   it('撤出晚到一步、已经合上了：按合上算，不当成撤回丢掉；没合上的才算撤回', () => {
     const tests = { passed: true, head: 'h2', summary: '绿' };
     const late = { withdrawn: true, sync: clean, tests };

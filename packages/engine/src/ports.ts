@@ -547,10 +547,16 @@ export interface PostSecondOpinionInput extends Scope {
   hits: RiskyFile[];
   verdict: 'pass' | 'changes';
   findings: Finding[];
-  /** 审的会话用了哪个模型：贴进评论说明是谁审的。 */
+  /** 审的会话用了哪个模型：贴进评论说明是谁审的。reused 给了的话这个字段不进评论（没有会话审这一次）。 */
   model: string;
   /** 这个项目声明的先审后合清单路径（评论里「清单和理由见」那句要指对地方）：这一步能走到说明 hits 非空，riskPathsFile 一定有。 */
   riskPathsFile: string;
+  /**
+   * 合并前重跑那一步头变了（合并队列自己把主线并进来）：这一轮没有真审，是沿用 fromHead 上第 round 轮通过的
+   * 结论（新头相对主线的 patch-id 和 fromHead 一样，见 workflows/fusion.ts 的 tryReuseSecondOpinion）。
+   * 给了就贴 verdict:'pass'，评论写清是沿用、不是真审。
+   */
+  reused?: { fromHead: string; round: number };
 }
 
 export interface PostSecondOpinionResult {
@@ -574,6 +580,15 @@ export interface RunTestsInput extends Scope {
   prNumber: number;
   branch: string;
   head: string;
+}
+
+export interface PatchIdOfInput extends Scope {
+  repo: Repo;
+  /** 算的时候要在哪棵树里跑 git（子任务自己的工作树；合并前重跑那一步用的是子任务自己这棵，不是合并队列的）。 */
+  worktreePath: string;
+  /** 主线分支名（input.repo.defaultBranch）：先找 merge-base(origin/<主线>, ref) 再从那儿算 diff。 */
+  mainlineBranch: string;
+  ref: string;
 }
 
 export interface MergePrInput extends Scope {
@@ -830,6 +845,13 @@ export interface EnginePorts {
    * 拦下、GitHub 一时不通只记进结果里，不影响状态照贴——状态是合并闸认的唯一信号，评论只是给人看。
    */
   postSecondOpinion(input: PostSecondOpinionInput, ctx: PortContext): Promise<PostSecondOpinionResult>;
+  /**
+   * ref 相对主线的 patch-id（git patch-id --stable，diff 从 merge-base(origin/<主线>, ref) 起算）：合并前重跑
+   * 那一步头变了，判「这段时间是不是只并了主线、PR 自己的改动没变」用，不是别的判法能替的（结构化，不匹配文案）。
+   * 工作树不在、git 报错一律抛 PortError（GIT_FAILED / WORKTREE_MISSING）：调用方按「没查成」处理，不许当成
+   * 能比、更不许当成一样。
+   */
+  patchIdOf(input: PatchIdOfInput, ctx: PortContext): Promise<string>;
   syncMainline(input: SyncMainlineInput, ctx: PortContext): Promise<SyncResult>;
   mergePr(input: MergePrInput, ctx: PortContext): Promise<MergeOutcome>;
   updateIssueProgress(input: UpdateIssueProgressInput, ctx: PortContext): Promise<void>;
