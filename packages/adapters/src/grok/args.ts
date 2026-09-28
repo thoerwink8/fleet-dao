@@ -3,7 +3,9 @@
 //   不进参数（Node 给子进程的 stdin 是 socketpair，读不了，run.ts 前面垫一个 cat）；
 // - 旗标都在前面、不用子命令：放在子命令之后会报 unexpected argument 退出 2（GK-03）；
 // - 免确认用 --always-approve：--permission-mode auto 每条外部命令还要确认（GK-04）；
-// - 新会话用我们起的 UUID（-s），续跑 -r 同一个号，终帧 end.sessionId 回的就是它。
+// - 新会话用我们起的 UUID（-s），续跑 -r 同一个号，终帧 end.sessionId 回的就是它；
+// - 总带 --no-plan：--always-approve 管不到计划模式（进计划模式要人批，计划里除计划文件外的编辑一律拒，
+//   ~/.grok/docs/user-guide/19-plan-mode.md），无人值守会卡着等人点头。目录信任、反问选择题两张卡走环境变量，见 run.ts。
 import { assertSessionEffort, GROK_EFFORTS, type SessionEffort } from '../effort.ts';
 
 export type GrokSession = { mode: 'new'; id: string } | { mode: 'resume'; id: string };
@@ -42,6 +44,7 @@ export function buildGrokArgs(spec: GrokArgsSpec): string[] {
     '--output-format',
     'streaming-json',
     ...(spec.alwaysApprove ? ['--always-approve'] : []),
+    '--no-plan',
     '-m',
     spec.model,
     '--cwd',
