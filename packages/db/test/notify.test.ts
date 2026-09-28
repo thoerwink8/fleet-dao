@@ -231,4 +231,17 @@ describe('写入即通知 fleet_changes', () => {
     await settle();
     expect([...new Set(tables())].sort()).toEqual([...REALTIME_TABLES].sort());
   });
+
+  it('seat_boards 一写，通知在 10 秒内到', async () => {
+    await freshEars();
+    const start = Date.now();
+    const [row] = await t.db
+      .insert(seatBoards)
+      .values({ scope: 'main', project: 'timed', updatedAt: NOW })
+      .returning({ id: seatBoards.id });
+    for (let i = 0; i < 50 && heard.length === 0; i++) await settle();
+    const ms = Date.now() - start;
+    expect(heard).toEqual([{ table: 'seat_boards', id: row?.id }]);
+    expect(ms).toBeLessThan(10_000);
+  });
 });

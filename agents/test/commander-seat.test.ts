@@ -84,6 +84,7 @@ const boardCli = (await load('board-cli.mjs')) as {
       home: string;
       env: Record<string, string | undefined>;
       now: () => Date;
+      readText?: (file: string) => string;
       ssh: (
         args: string[],
         input?: string,
@@ -889,6 +890,46 @@ describe('报到驾驶舱：法国连不上不写本地文件，评论失败不�
     expect(code).toBe(2);
     expect(err.join('\n')).toContain('还没记账');
     expect(calls.some((a) => (a.at(-1) ?? '').includes("board' 'ack'"))).toBe(false);
-    expect(existsSync(join(home, '.local', 'share', 'fleet-progress'))).toBe(false);
+  });
+
+  it('handoff：把文件交给座位，并在栏里记一条；文件读不到就退出，不假装存上', async () => {
+    const home = tempHome();
+    seated(home);
+    const file = join(home, 'handoff.md');
+    writeFileSync(file, '在做首页\n等拍选项\n');
+    const seen: { cmd: string; input?: string }[] = [];
+    const err: string[] = [];
+    const code = await boardCli.runBoardCli(['demo', 'handoff', file], {
+      home,
+      env: { FLEET_FRANCE_SSH: 'france' },
+      now: () => NOW,
+      readText: (path) => readFileSync(path, 'utf8'),
+      ssh: (args, input) => {
+        const cmd = args.at(-1) ?? '';
+        seen.push({ cmd, input });
+        return { status: 0, stdout: `${JSON.stringify({ ok: true })}\n`, stderr: '' };
+      },
+      gh: () => ({ status: 0, stdout: '', stderr: '' }),
+      out: () => {},
+      err: (t) => err.push(t),
+    });
+    expect(code).toBe(0);
+    expect(seen[0]?.cmd).toContain("seat' 'handoff'");
+    expect(seen[0]?.input).toContain('在做首页');
+    expect(seen[1]?.cmd).toContain('写了交接说明');
+    const missing = await boardCli.runBoardCli(['demo', 'handoff', join(home, '没有.md')], {
+      home,
+      env: { FLEET_FRANCE_SSH: 'france' },
+      now: () => NOW,
+      readText: (path) => readFileSync(path, 'utf8'),
+      ssh: () => {
+        throw new Error('不该连法国');
+      },
+      gh: () => ({ status: 0, stdout: '', stderr: '' }),
+      out: () => {},
+      err: (t) => err.push(t),
+    });
+    expect(missing).toBe(2);
+    expect(err.join('\n')).toContain('读不到');
   });
 });

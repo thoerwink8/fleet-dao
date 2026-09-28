@@ -12,6 +12,7 @@ const USAGE = `用法：node p.mjs <项目> <命令> …
   show
   pending
   record
+  handoff <文件>
 没配法国、连不上：退出码 2，不写本地文件。还不是现任：退出码 3。`;
 
 function fail(io, code, msg) {
@@ -50,6 +51,7 @@ export async function runBoardCli(argv, io) {
   if (cmd === 'pending') return call(io, host.host, ['seat', 'board', 'pending', project, ...ident]);
   if (cmd === 'record') return record(io, host.host, project, ident);
   if (cmd === 'show') return call(io, host.host, ['seat', 'board', 'show', project, ...ident]);
+  if (cmd === 'handoff') return handoff(io, host.host, project, ident, rest);
   if (cmd === 'init') {
     const text = rest.filter((a) => a !== '--repo').join(' ') || '刚接手，还没写现状';
     return call(io, host.host, ['seat', 'board', 'head', project, ...ident, '--text', text]);
@@ -193,6 +195,40 @@ async function call(io, host, argv) {
   if (argv[2] === 'show') io.out(showText(r.json));
   else if (argv[2] === 'pending') io.out(JSON.stringify(r.json));
   else io.out('改好了');
+  return 0;
+}
+
+async function handoff(io, host, project, ident, rest) {
+  const [file] = rest;
+  if (!file) return fail(io, 1, '用法：handoff <文件>');
+  let text;
+  try {
+    text = io.readText(file);
+  } catch (e) {
+    return fail(io, 2, `交接说明 ${file} 读不到（${e.code ?? e.message}）`);
+  }
+  if (!String(text).trim()) return fail(io, 1, `交接说明 ${file} 是空的`);
+  const sent = callFrance({ ...io, env: io.env }, host, ['seat', 'handoff', ...ident], { input: text });
+  if (sent.kind !== 'done') return fail(io, 2, `交接说明没存上：${sent.why}`);
+  if (sent.code !== 0) {
+    const why = sent.json && typeof sent.json.why === 'string' ? sent.json.why : '交接说明没存上';
+    return fail(io, sent.code, why);
+  }
+  const logged = callFrance({ ...io, env: io.env }, host, [
+    'seat',
+    'board',
+    'log',
+    project,
+    ...ident,
+    '--text',
+    '写了交接说明',
+  ]);
+  if (logged.kind !== 'done') return fail(io, 2, `交接说明存上了，帅位栏没记上：${logged.why}`);
+  if (logged.code !== 0) {
+    const why = logged.json && typeof logged.json.why === 'string' ? logged.json.why : '没记上';
+    return fail(io, logged.code, `交接说明存上了，帅位栏没记上：${why}`);
+  }
+  io.out('交接说明存上了');
   return 0;
 }
 

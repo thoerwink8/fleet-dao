@@ -2,6 +2,7 @@
 // 写成功后如果本机页没开，拉起来——页面上只写「进度搬到驾驶舱了」，不当账本。
 // FLEET_PROGRESS_AUTOSTART=0 不拉（测试里用）。
 import { spawn, spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -23,6 +24,7 @@ const code = await runBoardCli(argv, {
   home: homedir(),
   env: process.env,
   now: () => new Date(),
+  readText: (file) => readFileSync(file, 'utf8'),
   ssh: (args, input) => run('ssh', args, input, 90_000),
   gh: (args) => run('gh', args, undefined, 60_000),
   out: (text) => console.log(text),
