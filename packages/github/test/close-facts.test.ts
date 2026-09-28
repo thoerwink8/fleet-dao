@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import {
   CLOSE_CLOSED_ISSUES_QUERY,
   CLOSE_FACTS_MAX_PAGES,
+  CLOSE_MERGED_PULLS_QUERY,
   CLOSE_OPEN_ISSUES_QUERY,
   CLOSE_OPEN_PULLS_QUERY,
   CLOSE_SPECS_QUERY,
@@ -36,7 +37,7 @@ const conn = (field: 'issues' | 'pullRequests', nodes: unknown[], next: string |
 type Answer = (vars: Record<string, unknown>) => unknown;
 
 /** 假的 graphql：按查的是哪一条回话；calls 记下每次的变量。 */
-function client(answers: Partial<Record<'specs' | 'open' | 'closed' | 'pulls', Answer>>) {
+function client(answers: Partial<Record<'specs' | 'open' | 'closed' | 'pulls' | 'merged', Answer>>) {
   const calls: { which: string; vars: Record<string, unknown> }[] = [];
   const which = (q: string) =>
     q === CLOSE_SPECS_QUERY
@@ -47,7 +48,9 @@ function client(answers: Partial<Record<'specs' | 'open' | 'closed' | 'pulls', A
           ? 'closed'
           : q === CLOSE_OPEN_PULLS_QUERY
             ? 'pulls'
-            : 'unknown';
+            : q === CLOSE_MERGED_PULLS_QUERY
+              ? 'merged'
+              : 'unknown';
   return {
     calls,
     c: {
@@ -86,10 +89,14 @@ const defaults = {
       { number: 51, title: '不做了', stateReason: 'NOT_PLANNED', closedAt: '2026-09-27T10:00:00Z' },
     ]),
   pulls: () => conn('pullRequests', [{ number: 90, title: 't', body: '**需求**：#12' }]),
+  merged: () =>
+    conn('pullRequests', [
+      { number: 91, title: 't2', body: '**需求**：#13', updatedAt: '2026-09-27T10:00:00Z' },
+    ]),
 };
 
 describe('关单对账读的仓现状', () => {
-  it('一次读全：specs/ 两层的文件、开着的单连同子单、最近关掉的单（原因小写）、开着的 PR', async () => {
+  it('一次读全：specs/ 两层的文件、开着的单连同子单、最近关掉的单（原因小写）、开着的 PR、最近合并的 PR', async () => {
     const { c, calls } = client(defaults);
     expect(await readCloseFacts(c, { repo, since: SINCE })).toEqual({
       specsFiles: ['specs/12-登录/需求.md', 'specs/12-登录/结果.md', 'specs/13-x/需求.md'],
@@ -102,8 +109,29 @@ describe('关单对账读的仓现状', () => {
         { number: 51, title: '不做了', stateReason: 'not_planned', closedAt: '2026-09-27T10:00:00Z' },
       ],
       openPulls: [{ number: 90, title: 't', body: '**需求**：#12' }],
+      mergedPulls: [{ number: 91, title: 't2', body: '**需求**：#13' }],
     });
     expect(calls.find((x) => x.which === 'closed')?.vars.since).toBe(SINCE.toISOString());
+  });
+
+  it('合并的 PR 按 updatedAt 翻到早于 since 就停：停之前的都要，游标不再往下翻', async () => {
+    const { c, calls } = client({
+      ...defaults,
+      merged: (v) =>
+        v.after === null
+          ? conn(
+              'pullRequests',
+              [
+                { number: 3, title: '新', body: '', updatedAt: '2026-09-27T10:00:00Z' },
+                { number: 2, title: '旧', body: '', updatedAt: '2026-08-01T10:00:00Z' },
+              ],
+              'C1',
+            )
+          : conn('pullRequests', [{ number: 1, title: '更旧', body: '', updatedAt: '2026-07-01T10:00:00Z' }]),
+    });
+    const got = await readCloseFacts(c, { repo, since: SINCE });
+    expect(got.mergedPulls.map((p) => p.number)).toEqual([3]);
+    expect(calls.filter((x) => x.which === 'merged')).toHaveLength(1);
   });
 
   it('按游标翻完：有下一页就接着读，游标照传', async () => {
@@ -124,7 +152,11 @@ describe('关单对账读的仓现状', () => {
     expect((await readCloseFacts(c, { repo, since: SINCE })).specsFiles).toBeNull();
   });
 
-  const failures: [string, Partial<Record<'specs' | 'open' | 'closed' | 'pulls', Answer>>, string][] = [
+  const failures: [
+    string,
+    Partial<Record<'specs' | 'open' | 'closed' | 'pulls' | 'merged', Answer>>,
+    string,
+  ][] = [
     ['仓读不到（没装到这个仓）', { specs: () => ({ repository: null }) }, 'NOT_FOUND'],
     [
       'specs 不是目录',
@@ -144,6 +176,28 @@ describe('关单对账读的仓现状', () => {
     [
       `翻了 ${CLOSE_FACTS_MAX_PAGES} 页还没完`,
       { pulls: () => conn('pullRequests', [{ number: 1, title: 't', body: '' }], 'next') },
+      'TOO_MANY_PAGES',
+    ],
+    [
+      '合并的 PR 形状不对（少了 updatedAt）',
+      { merged: () => conn('pullRequests', [{ number: 1, title: 't', body: '' }]) },
+      'UNEXPECTED_RESPONSE',
+    ],
+    [
+      '合并的 PR 更新时刻认不出：判不了该不该停，没查成',
+      { merged: () => conn('pullRequests', [{ number: 1, title: 't', body: '', updatedAt: '昨天' }]) },
+      'UNEXPECTED_RESPONSE',
+    ],
+    [
+      `合并的 PR 每一条都比 since 新：翻了 ${CLOSE_FACTS_MAX_PAGES} 页还没到停的地方，没查全`,
+      {
+        merged: () =>
+          conn(
+            'pullRequests',
+            [{ number: 1, title: 't', body: '', updatedAt: '2026-09-27T10:00:00Z' }],
+            'next',
+          ),
+      },
       'TOO_MANY_PAGES',
     ],
   ];

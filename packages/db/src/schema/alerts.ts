@@ -3,7 +3,8 @@
 // （@fleet-dao/core 的 alert-work.ts）。读写在 queries/alert-work.ts。
 // 改这里之前必须知道：
 // - alert_work 只记「没挂任务」或「挂了别的单」的：有 task_id 又没另挂的，跟进单就是那个任务的单，这里没有行。
-//   提醒派单开的小单只在没有行时写（on conflict do nothing），不覆盖人挂的；帅位 alert claim --issue 换单记操作记录。
+//   原来「提醒派单」自动开小单写 source='engine'、`alert claim --issue` 手动换单写 source='claim'，2026-09-28
+//   起这两条写路都删了（#445，噪音比防住的事故还多）：这张表和历史行都留着给驾驶舱读，只是不会再有新行写进来。
 // - 静默的到期由库的 now() 定（建的时候 ends_at = now() + 分钟数），最长 7 天由约束钉死：忘了撤也不会一直压着。
 import { sql } from 'drizzle-orm';
 import { check, index, integer, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core';
@@ -23,9 +24,9 @@ export const alertWork = pgTable(
       .notNull()
       .references(() => repos.id),
     issueNumber: integer('issue_number').notNull(),
-    /** engine = 提醒派单开的小单；claim = 帅位 alert claim --issue 挂的。 */
+    /** engine = 原「提醒派单」开的小单；claim = 原 `alert claim --issue` 挂的（两条写路都在 #445 删了，只剩历史行）。 */
     source: text('source').$type<'engine' | 'claim'>().notNull(),
-    /** 谁挂的：engine:alert-dispatch，或 <机器名>/<会话号>。 */
+    /** 谁挂的：历史上是 engine:alert-dispatch，或 <机器名>/<会话号>。 */
     linkedBy: text('linked_by').notNull(),
     linkedAt: timestamp('linked_at', tz).notNull().defaultNow(),
     /** 为什么挂这张（换单时写原来是哪张、为什么换）。 */

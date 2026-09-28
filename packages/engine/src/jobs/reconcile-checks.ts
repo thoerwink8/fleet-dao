@@ -13,7 +13,7 @@ import {
   type MergedPrLedger,
   TERMINAL_TASK_STATES,
 } from '@fleet-dao/db';
-import type { MergedPrAuditReport, MergedPrFinding, RepoRef } from '@fleet-dao/github';
+import type { MergedPrAuditReport, RepoRef } from '@fleet-dao/github';
 import type { TaskState } from '@fleet-dao/shared';
 import { requirementWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import type { AlertSweepDeps } from './alert-sweep.ts';
@@ -44,8 +44,6 @@ const TASK_STATE_WORDS: Readonly<Record<TaskState, string>> = {
 export const WORKFLOW_ALERT_PREFIX = 'reconcile:workflow:';
 /** 合了的 PR 对上的单记账不全。后面是 <owner>/<name>#<PR 号>。 */
 export const LEDGER_ALERT_PREFIX = 'reconcile:ledger:';
-/** 我们机器人开的 PR 合并人不是「引擎」、或没有合并队列的合并记录。后面是 <owner>/<name>#<PR 号>。 */
-export const PR_ALERT_PREFIX = 'reconcile:pr:';
 /**
  * 工作流刚收尾、库里的状态还没写上的那一下：单在这之内更新过，不查、也不撤旧的。
  * 再短会把正常收尾报出来，再长会把真断了的单多瞒一阵。
@@ -83,10 +81,6 @@ export const INTAKE_HOLDS: Readonly<Record<IntakeHold, string | null>> = {
   in_progress: null,
   finished: null,
 };
-
-export function prAlertKey(owner: string, name: string, number: number): string {
-  return `${PR_ALERT_PREFIX}${owner}/${name}#${number}`;
-}
 
 export function ledgerAlertKey(owner: string, name: string, number: number): string {
   return `${LEDGER_ALERT_PREFIX}${owner}/${name}#${number}`;
@@ -361,19 +355,10 @@ async function resolveOne(deps: ReconcileCheckDeps, part: SweepPart, dedupeKey: 
   }
 }
 
-/** 按 PR 归拢要报的两种（合并人不是「引擎」、没有合并记录）。 */
-function prProblems(findings: readonly MergedPrFinding[]): Map<number, string[]> {
-  const byPr = new Map<number, string[]>();
-  for (const f of findings) {
-    if (f.kind !== 'not_merged_by_engine' && f.kind !== 'no_merge_record') continue;
-    byPr.set(f.number, [...(byPr.get(f.number) ?? []), f.text]);
-  }
-  return byPr;
-}
-
 /**
- * 每个受管的仓，最近 26 小时合了的 PR：镜像补上算发现（记账那一部分靠镜像认合了的 PR，放在它前面跑）；我们机器人开的
- * 合并人、合并记录不对按 PR 报一条（条件就是「发生过」，只报一次、不自动撤）。
+ * 每个受管的仓，最近 26 小时合了的 PR：镜像补上算发现（记账那一部分靠镜像认合了的 PR，放在它前面跑）。我们机器人开的
+ * PR 合并人不是「引擎」、或没有合并队列的合并记录这两种问题（MergedPrFinding 的 not_merged_by_engine、no_merge_record）
+ * 不再报提醒（仓里根本没开合并队列，#389 那类是正常合进去的；#445 删掉了这条检查），只算进 found 计数。
  */
 export async function checkMergedPrs(deps: ReconcileCheckDeps): Promise<SweepPart> {
   const part = empty();
@@ -409,26 +394,6 @@ export async function checkMergedPrs(deps: ReconcileCheckDeps): Promise<SweepPar
     } else if (report.outcome === 'partial' || failed.length > 0) {
       const detail = failed.length > 0 ? failed.join('；') : (report.why ?? '有的没查成');
       part.unchecked.push(`${slug} 合并的 PR 没查全：${detail}`);
-    }
-    for (const [number, lines] of prProblems(report.findings)) {
-      const dedupeKey = prAlertKey(repo.owner, repo.name, number);
-      try {
-        const { created } = await deps.alerts.insertOnce({
-          dedupeKey,
-          level: 'alert',
-          taskId: null,
-          title: clip(`机器人开的 PR 没经合并队列合：${slug}#${number}`, 300),
-          body: [
-            ...lines,
-            '我们机器人开的 PR 该由合并队列以「引擎」机器人合、账上留合并记录；不是这样合的，合并前那几道核对（不落后主线、' +
-              'CI 全绿、人闸）可能没走。这条不会自己撤，看过点「处理」。',
-          ].join('\n'),
-          link: `https://github.com/${slug}/pull/${number}`,
-        });
-        if (created) deps.log('info', '每小时对账：机器人开的 PR 没经合并队列合', { dedupeKey });
-      } catch (err) {
-        part.unchecked.push(`${dedupeKey} 没报成：${message(err)}`);
-      }
     }
   }
   return part;

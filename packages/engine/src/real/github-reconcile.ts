@@ -207,7 +207,10 @@ export function reconcileIntake(
   });
 }
 
-/** 关单对账那一步的真装配（#241）：受管的仓从库里列，现状、留言经「引擎」机器人，提醒进同一个库（要人拍的那一级）。 */
+/**
+ * 关单对账那一步的真装配（#241）：受管的仓从库里列，现状、留言经「引擎」机器人，提醒进同一个库。日报级（#445：这不是要
+ * 创始人拍的事——没人拍它也不会自己变好，是要干活的人自己去关、去补结果；正文已经列了是哪几张单，见 close-sweep.ts）。
+ */
 export function closeSweepJob(
   w: GitHubReconcileWiring,
   repos: () => Promise<{ owner: string; name: string }[]>,
@@ -219,7 +222,7 @@ export function closeSweepJob(
     facts: (repo, since) => w.gh.readCloseFacts({ repo, since }),
     comment: (input) => w.gh.commentIssue(input),
     async alert(key, title, body, link) {
-      await upsertAlert(w.db, { dedupeKey: key, level: 'decision', taskId: null, title, body, link });
+      await upsertAlert(w.db, { dedupeKey: key, level: 'daily', taskId: null, title, body, link });
     },
     async resolve(key, why) {
       await resolveAlertWithReason(w.db, { dedupeKey: key, by: 'engine:github-reconcile', why, at: now() });

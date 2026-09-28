@@ -174,7 +174,7 @@ export function hourlyReconcileJob(
   // 补拉用的接活那道门：和对账补漏同一份实现（后端的 Store 是同一个库）
   const intakeStore = createPgStore(w.db, { now });
   const intakeLog = w.intakeLog ?? jsonLogger();
-  // 谁在处理（24 小时再推不给有人在处理、静默了的推）：和驾驶舱、提醒派单同一个口子、同一份判法
+  // 谁在处理（24 小时再推不给有人在处理、静默了的推）：和驾驶舱同一个口子、同一份判法（原来还有提醒派单，#445 删掉了）
   const alertWork = pgAlertWork(w.db, () => deployFacts(readDeployLagInput()));
   const handling: HourlyReconcileJobDeps['handling'] = async (ids) => {
     const r = await handlingOf(alertWork, ids);

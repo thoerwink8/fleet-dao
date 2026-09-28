@@ -1,8 +1,9 @@
 // 关单对账（#241）：每天一次（GitHub 对账补漏里北京时间 9:00 起的那一轮），按受管的仓看一遍——做完没关的、子单都关了的
-// 母单、关成「完成」却没有结果的。判法在 @fleet-dao/conventions 的 close-sweep.ts（「有没有结果」和 pnpm issue:close、合并闸
-// 同一份）；这里读现状（「引擎」机器人，@fleet-dao/github 的 readCloseFacts）、在单上留言一次（按键认，重跑不重复）、
-// 每个仓每一种在驾驶舱一条要人拍的提醒，这一种一张都没有了就撤。只留言、只提醒，不挡 PR、不关单：看的是单子开关这类外部
-// 状态（design 第五节「发现问题当场修」第 5 条）。
+// 母单、合并了的 PR 填了是却没关的（#460）、关成「完成」却没有结果的。判法在 @fleet-dao/conventions 的 close-sweep.ts
+// （「有没有结果」和 pnpm issue:close、合并闸同一份）；这里读现状（「引擎」机器人，@fleet-dao/github 的
+// readCloseFacts）、在单上留言一次（按键认，重跑不重复）、每个仓每一种在驾驶舱一条日报级的提醒（正文列出是哪几张单；
+// #445：这不是要创始人拍的事，不算「要你拍」），这一种一张都没有了就撤。只留言、只提醒，不挡 PR、不关单：看的是单子
+// 开关这类外部状态（design 第五节「发现问题当场修」第 5 条）。
 // 读不到、认不出：这个仓记没查成，提醒一条都不撤（没查成不是「都齐了」）；留言、提醒没写成也照实记，不当成写上了。
 import {
   CLOSE_KINDS,
@@ -36,7 +37,7 @@ export interface CloseSweepJobDeps {
     key: string;
     body: string;
   }): Promise<{ created: boolean }>;
-  /** 驾驶舱提醒（要人拍）：同一个键只一条，再报原地更新、处理过的重新打开。 */
+  /** 驾驶舱提醒（日报级，#445）：同一个键只一条，再报原地更新、处理过的重新打开。 */
   alert(key: string, title: string, body: string, link: string): Promise<void>;
   /** 撤提醒：本来就没有、已经撤了都不算错。 */
   resolve(key: string, why: string): Promise<void>;
@@ -66,7 +67,12 @@ export function closeSweepDue(at: Date): boolean {
   return bj.getUTCHours() === CLOSE_SWEEP_BEIJING_HOUR && bj.getUTCMinutes() < 15;
 }
 
-const KIND_WORDS = { due: '做完没关', mother: '子单都关了的母单', 'no-result': '关了没结果' } as const;
+const KIND_WORDS = {
+  due: '做完没关',
+  mother: '子单都关了的母单',
+  merged: 'PR 填了是却没关',
+  'no-result': '关了没结果',
+} as const;
 
 export async function sweepClosing(deps: CloseSweepJobDeps): Promise<CloseSweepResult> {
   const now = deps.now();
@@ -121,6 +127,7 @@ export async function sweepClosing(deps: CloseSweepJobDeps): Promise<CloseSweepR
       repo: slug,
       due: sweep.findings.filter((f) => f.kind === 'due').length,
       mother: sweep.findings.filter((f) => f.kind === 'mother').length,
+      merged: sweep.findings.filter((f) => f.kind === 'merged').length,
       noResult: sweep.findings.filter((f) => f.kind === 'no-result').length,
       unchecked: sweep.unchecked.length,
     });

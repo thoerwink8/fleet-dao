@@ -47,29 +47,7 @@ export const WORKFLOW_TYPES = {
   canary: 'canaryWorkflow',
   /** 看门狗（#203）：Temporal Schedule 每 5 分钟起一条，按登记表看各定时任务新不新鲜，见 jobs/watchdog.ts。 */
   watchdog: 'watchdogWorkflow',
-  /**
-   * 提醒派单（design 15.3「谁在处理」）：Temporal Schedule 每 5 分钟起一条，没人认领、停着没动的提醒再推，没挂单的卡住报警
-   * 开跟进单，见 jobs/alert-dispatch.ts。
-   */
-  alertDispatch: 'alertDispatchWorkflow',
 } as const;
-
-/** 提醒派单一轮的输入：看哪些提醒、几点看，都由活动按当时的库定（工作流里不取时刻）。 */
-export interface AlertDispatchInput {
-  schemaVersion: 1;
-}
-
-/**
- * 提醒派单一轮的结局：和记进 schedule_runs 的同一份。scanned = 看了几条开着的提醒再加 1（开着的提醒这一页本身：一条都没有
- * 也是查过了，不记成「没扫到」），found = 这一轮要再推的几条。
- */
-export interface AlertDispatchRun {
-  runId: number;
-  outcome: ScheduleOutcome;
-  scanned: number;
-  found: number;
-  why?: string | undefined;
-}
 
 /** 看门狗一轮的输入：看哪些任务、几点看，都由活动按当时的库和时刻定（工作流里不取时刻）。 */
 export interface WatchdogInput {

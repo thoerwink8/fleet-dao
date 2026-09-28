@@ -17,7 +17,12 @@ import {
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { type AppCredentials, createGitHub, pgLedger } from '@fleet-dao/github';
 import { requirementWorkflowId } from '@fleet-dao/shared';
-import { type Client, ScheduleAlreadyRunning, WorkflowFailedError } from '@temporalio/client';
+import {
+  type Client,
+  ScheduleAlreadyRunning,
+  ScheduleNotFoundError,
+  WorkflowFailedError,
+} from '@temporalio/client';
 import { ApplicationFailure } from '@temporalio/common';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { EngineJobs } from '../src/activities.ts';
@@ -31,9 +36,11 @@ import {
   toScheduleResult,
   withFlowSync,
 } from '../src/jobs/github-reconcile.ts';
+import type { RetiredSchedule } from '../src/jobs/retired-schedules.ts';
+import { RETIRED_SCHEDULES } from '../src/jobs/retired-schedules.ts';
 import {
-  ALERT_DISPATCH_SCHEDULE_ID,
   CANARY_SCHEDULE_ID,
+  deleteRetiredSchedules,
   engineSchedules,
   ensureEngineSchedules,
   GITHUB_RECONCILE_SCHEDULE_ID,
@@ -41,7 +48,11 @@ import {
   ROUTE_PROBE_SCHEDULE_ID,
   WATCHDOG_SCHEDULE_ID,
 } from '../src/jobs/schedules.ts';
-import { githubReconcileJob } from '../src/real/github-reconcile.ts';
+import {
+  closeSweepJob,
+  type GitHubReconcileWiring,
+  githubReconcileJob,
+} from '../src/real/github-reconcile.ts';
 import { ENGINE_JOBS, registerEngineJobs } from '../src/real/jobs.ts';
 import { createRealEnv, useEnv, withWorker } from './helpers.ts';
 
@@ -991,7 +1002,6 @@ describe('定时任务按固定编号建：重启、重复部署不多出第二�
       [HOURLY_RECONCILE_SCHEDULE_ID]: 'created',
       [CANARY_SCHEDULE_ID]: 'created',
       [WATCHDOG_SCHEDULE_ID]: 'created',
-      [ALERT_DISPATCH_SCHEDULE_ID]: 'created',
     });
     const again = fakeScheduleClient(true);
     expect(await ensureEngineSchedules(again.client, 'fleet')).toEqual({
@@ -1000,7 +1010,6 @@ describe('定时任务按固定编号建：重启、重复部署不多出第二�
       [HOURLY_RECONCILE_SCHEDULE_ID]: 'updated',
       [CANARY_SCHEDULE_ID]: 'updated',
       [WATCHDOG_SCHEDULE_ID]: 'updated',
-      [ALERT_DISPATCH_SCHEDULE_ID]: 'updated',
     });
     expect(again.calls).toEqual([
       `create:${GITHUB_RECONCILE_SCHEDULE_ID}`,
@@ -1013,8 +1022,6 @@ describe('定时任务按固定编号建：重启、重复部署不多出第二�
       `update:${CANARY_SCHEDULE_ID}`,
       `create:${WATCHDOG_SCHEDULE_ID}`,
       `update:${WATCHDOG_SCHEDULE_ID}`,
-      `create:${ALERT_DISPATCH_SCHEDULE_ID}`,
-      `update:${ALERT_DISPATCH_SCHEDULE_ID}`,
     ]);
     expect(again.updated(GITHUB_RECONCILE_SCHEDULE_ID)).toMatchObject({
       state: { paused: true, note: '人停的' },
@@ -1050,13 +1057,6 @@ describe('定时任务按固定编号建：重启、重复部署不多出第二�
       action: { workflowType: WORKFLOW_TYPES.watchdog, taskQueue: 'fleet' },
       policies: { overlap: 'SKIP' },
     });
-    // 提醒派单：每 5 分钟，3 分起（和看门狗错开），上一轮没完就跳过
-    expect(again.updated(ALERT_DISPATCH_SCHEDULE_ID)).toMatchObject({
-      state: { paused: true, note: '人停的' },
-      spec: { intervals: [{ every: '5 minutes', offset: '3 minutes' }] },
-      action: { workflowType: WORKFLOW_TYPES.alertDispatch, taskQueue: 'fleet' },
-      policies: { overlap: 'SKIP' },
-    });
   });
 
   it('建的时候出了别的错（连不上、没权限）：原样抛出，引擎起不来要看得见', async () => {
@@ -1076,7 +1076,6 @@ describe('定时任务按固定编号建：重启、重复部署不多出第二�
         [HOURLY_RECONCILE_SCHEDULE_ID]: 'created',
         [CANARY_SCHEDULE_ID]: 'created',
         [WATCHDOG_SCHEDULE_ID]: 'created',
-        [ALERT_DISPATCH_SCHEDULE_ID]: 'created',
       });
       await client.schedule.getHandle(GITHUB_RECONCILE_SCHEDULE_ID).pause('人停的');
       expect(await ensureEngineSchedules(client, 'fleet-b')).toEqual({
@@ -1085,7 +1084,6 @@ describe('定时任务按固定编号建：重启、重复部署不多出第二�
         [HOURLY_RECONCILE_SCHEDULE_ID]: 'updated',
         [CANARY_SCHEDULE_ID]: 'updated',
         [WATCHDOG_SCHEDULE_ID]: 'updated',
-        [ALERT_DISPATCH_SCHEDULE_ID]: 'updated',
       });
       const d = await client.schedule.getHandle(GITHUB_RECONCILE_SCHEDULE_ID).describe();
       expect(d.spec.intervals?.map((i) => i.every)).toEqual([15 * 60_000]);
@@ -1113,6 +1111,66 @@ describe('定时任务按固定编号建：重启、重复部署不多出第二�
     } finally {
       await real.teardown();
     }
+  });
+});
+
+describe('退役的定时任务：Temporal 上还在的删掉（断链修复：#445 删「提醒派单」整层，法国的 alert-dispatch 只能帅位手动暂停）', () => {
+  /** 假的删：每个编号的结局按 byId 给，'ok' 删成、'absent' 回 ScheduleNotFoundError、给个 Error 就是删的时候出了别的错。 */
+  function fakeDeleteClient(byId: Record<string, 'ok' | 'absent' | Error>) {
+    const calls: string[] = [];
+    const client = {
+      schedule: {
+        getHandle(id: string) {
+          return {
+            async delete() {
+              calls.push(id);
+              const outcome = byId[id];
+              if (outcome === 'ok') return;
+              if (outcome === 'absent') throw new ScheduleNotFoundError('没有这个 Schedule', id);
+              throw outcome ?? new Error(`测试没给 ${id} 配结局`);
+            },
+          };
+        },
+      },
+    } as unknown as Pick<Client, 'schedule'>;
+    return { client, calls };
+  }
+
+  it('名单目前只有 alert-dispatch（#445 退役的「提醒派单」），两处（这里、看门狗）认同一份', () => {
+    expect(RETIRED_SCHEDULES).toEqual([{ id: 'alert-dispatch', retiredBy: '#445' }]);
+  });
+
+  it('【故意造出的失败】Temporal 上还在：删掉，回 deleted', async () => {
+    const { client, calls } = fakeDeleteClient({ 'alert-dispatch': 'ok' });
+    expect(await deleteRetiredSchedules(client)).toEqual({ 'alert-dispatch': 'deleted' });
+    expect(calls).toEqual(['alert-dispatch']);
+  });
+
+  it('【故意造出的失败】Temporal 上本来就没有（ScheduleNotFoundError）：回 absent，不算错、不多做别的事', async () => {
+    const { client } = fakeDeleteClient({ 'alert-dispatch': 'absent' });
+    expect(await deleteRetiredSchedules(client)).toEqual({ 'alert-dispatch': 'absent' });
+  });
+
+  it('【故意造出的失败】删的时候出了别的错（连不上、没权限）：原文带着报回来，不当成删掉了、不抛出、不挡别的编号', async () => {
+    const { client } = fakeDeleteClient({ 'alert-dispatch': new Error('14 UNAVAILABLE: 连不上') });
+    await expect(deleteRetiredSchedules(client)).resolves.toEqual({
+      'alert-dispatch': { error: '14 UNAVAILABLE: 连不上' },
+    });
+  });
+
+  it('多个编号各自独立：一个删不掉不耽误别的照删、照认「本来就没有」', async () => {
+    const list: RetiredSchedule[] = [
+      { id: 'a', retiredBy: '#1' },
+      { id: 'b', retiredBy: '#2' },
+      { id: 'c', retiredBy: '#3' },
+    ];
+    const { client, calls } = fakeDeleteClient({ a: 'ok', b: 'absent', c: new Error('权限不够') });
+    expect(await deleteRetiredSchedules(client, list)).toEqual({
+      a: 'deleted',
+      b: 'absent',
+      c: { error: '权限不够' },
+    });
+    expect(calls).toEqual(['a', 'b', 'c']);
   });
 });
 
@@ -1287,5 +1345,30 @@ describe('给提问另开单：每轮对账（真库、照 GitHub 回话的假�
       (n) => n.dedupeKey === `ask-issue:${ask.id}`,
     );
     expect(after?.resolvedAt).not.toBeNull();
+  });
+});
+
+describe('关单对账的提醒：日报级，不算「要你拍」（#445）', () => {
+  it('【故意造出的失败】closeSweepJob 报的提醒记成 daily，不是 decision；正文原样带着调用方给的单号', async () => {
+    const w = { db: t.db } as unknown as GitHubReconcileWiring;
+    const deps = closeSweepJob(
+      w,
+      async () => [],
+      quiet,
+      () => new Date(),
+    );
+    const body =
+      '主线上有它们的结果，也没有开着的 PR 还引用它们：确认做完了就 pnpm issue:close <单号>。\n\n- #12 登录：specs/12-登录/结果.md';
+    await deps.alert(
+      'close-sweep:example/canary:due',
+      'example/canary：1 张单看着做完了没关',
+      body,
+      'https://github.com/example/canary/issues',
+    );
+    const row = (await t.db.select().from(notifications)).find(
+      (n) => n.dedupeKey === 'close-sweep:example/canary:due',
+    );
+    expect(row?.level).toBe('daily');
+    expect(row?.body).toContain('#12');
   });
 });

@@ -60,9 +60,6 @@ export const settingLabel: Record<SettingKey, string> = {
   'sessions.maxConcurrent': '同时跑的会话上限',
   'notify.quietHours': '飞书免打扰时段',
   'judge.dailyCallLimit': `${brand.terms.judgeQuiz}每天调用上限`,
-  'alerts.claimAfterMinutes': '提醒没人认领多久再推',
-  'alerts.stuckAfterMinutes': '提醒停着没动多久再推',
-  'alerts.issueRepo': '没挂单的提醒开跟进单的仓',
 };
 
 function isStage(s: string): s is StageKind {

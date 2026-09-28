@@ -15,12 +15,12 @@ import {
 } from '@fleet-dao/adapters';
 import { createDb, type Db } from '@fleet-dao/db';
 import { assertPublishable, createGitHub, pgLedger, pgLocker } from '@fleet-dao/github';
+import type { Client } from '@temporalio/client';
 import type { EngineJobs } from '../activities.ts';
 import type { EngineDrain } from '../drain.ts';
 import { type DrainControlDeps, drainRequestFile, readDrainRequest } from '../drain-control.ts';
 import type { JevPort } from '../failure/jev.ts';
 import type { EnginePorts } from '../ports.ts';
-import { alertDispatchJob } from './alert-dispatch.ts';
 import { canaryJob } from './canary.ts';
 import { drainNotifier } from './drain-alerts.ts';
 import { describeFailure, scopeExec, type UserExec } from './exec.ts';
@@ -38,6 +38,7 @@ import { engineJevFromEnv } from './jev-port.ts';
 import { registerEngineJobs } from './jobs.ts';
 import { realKillEvidence } from './kill-evidence.ts';
 import { orgDriftReporter, orgSwitchRound } from './org-switch.ts';
+import { retireEngineSchedules } from './retire-schedules.ts';
 import { routeProbeJob } from './route-probe.ts';
 import { checkIoRoot, DEFAULT_SESSION_IO_DIR, reportIoRoot } from './session-io.ts';
 import { type SessionOrgReader, sessionOrgReader } from './session-org.ts';
@@ -440,6 +441,8 @@ export function realPortsFromEnv(
 ): RealPorts & {
   jobs: EngineJobs;
   registerJobs(): Promise<void>;
+  /** 引擎起来对齐定时任务之后跑一遍：把退役名单（jobs/retired-schedules.ts）里 Temporal 上还在的删掉，见 real/retire-schedules.ts。 */
+  retireSchedules(client: Pick<Client, 'schedule'>): Promise<void>;
   close(): Promise<void>;
   stateDir: string;
   /** 排空要的几样（drain-control.ts）：读发布脚本的排空请求、查发布锁、到点停会话、报提醒。 */
@@ -542,8 +545,6 @@ export function realPortsFromEnv(
     canary: canaryJob({ db, gh, repo: env.FLEET_CANARY_REPO }),
     // 看门狗（#203）：按登记表看上面这些（和备份那几个）新不新鲜，没跑成、停了推提醒，恢复了自己撤
     watchdog: watchdogJob({ db }),
-    // 提醒派单（design 15.3「谁在处理」）：没人认领、停着没动的提醒再推，没挂单的卡住报警开跟进单（「引擎」机器人开，不开在巡检仓）
-    alertDispatch: alertDispatchJob({ db, gh, canaryRepo: env.FLEET_CANARY_REPO }),
   };
   const evidence = realKillEvidence(extra.releasesDir ? { releasesDir: extra.releasesDir } : {});
   const drainControl: Omit<DrainControlDeps, 'drain' | 'log'> = {
@@ -565,6 +566,7 @@ export function realPortsFromEnv(
       if (registered.level === 'error') console.error(registered.message);
       else console.info(registered.message);
     },
+    retireSchedules: (client: Pick<Client, 'schedule'>) => retireEngineSchedules(client, db),
     close,
   };
 }

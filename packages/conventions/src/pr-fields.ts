@@ -3,12 +3,12 @@
 // 每缺一样给一句话：缺什么、怎么补——没挂里程碑但「对应计划」写着未排期就不提醒。design 第七节「标签和里程碑不靠人记得贴」。
 // 纯判断，不碰网络：合并闸（merge-gate.ts）现读 PR 和仓里的文件后调这里；这些只是提醒，不挡合并（创始人 2026-09-26）。
 
-import { CLOSE_COLUMN, type CloseColumn, closeColumnValue } from './close-rule.ts';
+import { CLOSE_COLUMN, type CloseColumn, closeColumnValue, closingIssues } from './close-rule.ts';
 import { isKindLabel, KIND_LABELS, milestonePhase, milestoneVersion } from './labels.ts';
 import { parseMd } from './markdown.ts';
 import { parseTier, TIER_COLUMN } from './merge-gates.ts';
 import { findItem, itemExample, type PlanPhase, parsePlanRefs, phaseRange, planPhases } from './plan.ts';
-import { PLAN_COLUMN, PR_COLUMNS, prColumns, SPECS_COLUMN } from './pr-columns.ts';
+import { issueColumnNumber, PLAN_COLUMN, PR_COLUMNS, prColumns, SPECS_COLUMN } from './pr-columns.ts';
 
 // 各栏怎么认在 pr-columns.ts（claim-status.ts 判挂了哪张单也用它）；这里照旧导出，老的引用不用改
 export { CLOSE_COLUMN, type CloseColumn, closeColumnValue, PLAN_COLUMN, PR_COLUMNS, prColumns, SPECS_COLUMN };
@@ -63,11 +63,22 @@ export function checkPrFields(pr: PrFacts, repo: RepoFacts): string[] {
   problems.push(...checkSpecs(cols.get(SPECS_COLUMN), repo));
   const tier = parseTier(cols.get(TIER_COLUMN));
   if ('problem' in tier) problems.push(tier.problem);
-  // 这一栏只查缺、空、认不出三种；填了「是」却没写关单词不在这里查（#444 起合并闸也不挡这个了：GitHub 不会关那张单，
-  // 单子留着开，没结果文档时连每天的关单对账都不会揪出来——发现这个缺口先报给帅位，看要不要另开单补）
+  // 这一栏查缺、空、认不出三种，外加（#460）填了「是」却一个关单词都没写：GitHub 不会关那张单，这里另起一行提醒该
+  // 补哪个 Closes；每天的关单对账（close-sweep.ts）合并后再兜底一次——这个 PR 合进去以后挂的单还开着照样会被列出来。
   const close = closeColumnValue(pr.body);
-  if (close.value !== 'yes' && close.value !== 'no') problems.push(closeColumnProblem(close));
+  if (close.value !== 'yes' && close.value !== 'no') {
+    problems.push(closeColumnProblem(close));
+  } else if (close.value === 'yes' && closingIssues(pr.body).length === 0) {
+    problems.push(closeWordMissingProblem(pr.body));
+  }
   return problems;
+}
+
+/** 「是」却一个关单词都没写（#460）：号从「需求」栏取，取不到就提通用的一句，不瞎编号。 */
+function closeWordMissingProblem(body: string): string {
+  const n = issueColumnNumber(body);
+  const fix = n === undefined ? '写上要关的单号' : `Closes #${n}`;
+  return `「${CLOSE_COLUMN}」填了「是」，正文里却没有关单词：另起一行写 ${fix}（GitHub 合并时才会关，不写不会关）。`;
 }
 
 function closeColumnProblem(c: CloseColumn): string {

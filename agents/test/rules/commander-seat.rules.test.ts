@@ -103,6 +103,7 @@ const SEAT_RULES: Record<string, RegExp> = {
   两次没过改派Opus: /两次没过验收，改派 Opus/,
   看到提醒先认领: /看到要修的提醒先认领[\s\S]{0,120}alert claim/,
   修完随PR撤: /修完随 PR 撤[\s\S]{0,40}「修提醒」栏写提醒的键/,
+  本机快马: /「本机快马」[\s\S]{0,200}不开单[\s\S]{0,200}CI 绿就合[\s\S]{0,400}做完关老单/,
 };
 
 function missingSeatRules(text: string): string[] {

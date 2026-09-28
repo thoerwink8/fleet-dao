@@ -1,7 +1,8 @@
-// fleet-api alert …（design 15.3「谁在处理」）：帅位经 ssh 看提醒谁在处理、认领提醒（认领它的跟进单，就是 #299 的认领）、静默。
-// 参数不对不连库（退出码 2）；不是帅位、跟进单在别人手里、提醒撤了退出码 3；连不上库退出码 1；--json 只打一行 JSON。
+// fleet-api alert …（design 15.3「谁在处理」）：帅位经 ssh 看开着的提醒、跟进单、PR（不显示谁在处理、认领——#445 起只给
+// 驾驶舱看，`alert claim` 也在这一版删掉了）、静默（不必带帅位任期，#445）。
+// 参数不对不连库（退出码 2）；带了任期或创始人原话却核验没过退出码 3；连不上库退出码 1；--json 只打一行 JSON。
 // 判法的边界表在 core 的 alert-work.test.ts，读写在 db 的 alert-work.test.ts；这里管命令这一层（真 Postgres：PGlite）。
-import { resolveAlertWithReason, upsertAlert } from '@fleet-dao/db';
+import { upsertAlert } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { type AlertWorkPort, pgAlertWork } from '../src/alert-work.ts';
@@ -12,7 +13,6 @@ import type { Store } from '../src/ports.ts';
 import { seedPg } from './pg-fixtures.ts';
 
 const T0 = new Date('2026-09-27T08:00:00.000Z');
-const REPO = 'example/canary';
 const A = ['--machine', '本机', '--session', 'a1'];
 
 let db: TestDb;
@@ -79,12 +79,6 @@ describe('参数', () => {
     for (const args of [
       ['alert'],
       ['alert', 'nuke'],
-      ['alert', 'claim'],
-      ['alert', 'claim', 'k:1', '--machine', '本机'],
-      ['alert', 'claim', 'k:1', ...A, '--term', 'x', '--label', 'w'],
-      ['alert', 'claim', 'k:1', ...A, '--term', '1'],
-      ['alert', 'claim', 'k:1', ...A, '--term', '1', '--label', 'w', '--owner', 'engine'],
-      ['alert', 'claim', 'k:1', ...A, '--term', '1', '--label', 'w', '--bogus', 'x'],
       ['alert', 'unsilence', 'not-an-id', '--note', 'x', ...A],
       ['alert', 'unsilence', '00000000-0000-4000-8000-000000000000', ...A],
       ['alert', 'silences', 'extra'],
@@ -94,44 +88,54 @@ describe('参数', () => {
       expect(r.err, args.join(' ')).toContain('用法：fleet-api alert');
     }
     expect(t.opened()).toBe(0);
-    expect(await t.json('alert', 'claim')).toMatchObject({ code: 2, body: { ok: false, reason: 'usage' } });
+    expect(await t.json('alert', 'nuke')).toMatchObject({ code: 2, body: { ok: false, reason: 'usage' } });
+  });
+
+  it('【故意造出的失败】alert claim 已经删掉（#445）：认不出这条命令，退出码 2、不连库', async () => {
+    const t = setup();
+    const r = await t.run('alert', 'claim', 'k:1', ...A, '--term', '1', '--label', '工人A');
+    expect(r.code).toBe(2);
+    expect(r.err).toContain('没有 alert claim 这条命令');
+    expect(t.opened()).toBe(0);
   });
 
   it('--help 只打用法、不连库', async () => {
     const t = setup();
-    expect((await t.run('alert', '--help')).out).toContain('alert claim <键|编号>');
-    expect((await t.run('--help')).out).toContain('fleet-api alert <show|claim|silence|unsilence|silences>');
+    expect((await t.run('alert', '--help')).out).toContain('alert silence <键|编号>');
+    expect((await t.run('alert', '--help')).out).not.toContain('alert claim');
+    expect((await t.run('--help')).out).toContain('fleet-api alert <show|silence|unsilence|silences>');
     expect(t.opened()).toBe(0);
   });
 });
 
-describe('alert show：谁在处理、修到哪', () => {
-  it('开着的一条一行：没人认领、多久了；--json 带现算的处理状态', async () => {
+describe('alert show：跟进单、PR，不显示谁在处理、认领（#445，只给驾驶舱看）', () => {
+  it('开着的一条一行：级别、标题、键；不带谁在处理那一行，--json 也不带 handling', async () => {
     const t = setup();
     const a = await taskless();
     const r = await t.run('alert', 'show');
     expect(r.code).toBe(0);
     expect(r.out).toContain('[卡住报警] 定时任务「备份」没跑成（watchdog:job:backup:after-12）');
-    expect(r.out).toMatch(/没人认领 · \d+/);
+    expect(r.out).not.toMatch(/没人在修|没人认领/);
     const j = await t.json('alert', 'show');
     expect(j.body.alerts).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          id: a.id,
-          key: 'watchdog:job:backup:after-12',
-          handling: expect.objectContaining({ stage: 'unclaimed', stageText: '没人认领' }),
-        }),
-      ]),
+      expect.arrayContaining([expect.objectContaining({ id: a.id, key: 'watchdog:job:backup:after-12' })]),
     );
+    const row = (j.body.alerts as Record<string, unknown>[]).find((x) => x.id === a.id);
+    expect(row).not.toHaveProperty('handling');
   });
 
-  it('给了键只看那一条：跟进单、认领、PR、怎么认领', async () => {
+  it('给了键只看那一条：跟进单、PR；不显示谁在处理、认领，也不再提「alert claim」', async () => {
     const t = setup();
     await taskless();
     const r = await t.run('alert', 'show', 'watchdog:job:backup:after-12');
     expect(r.code).toBe(0);
     expect(r.out).toContain('跟进单：没有');
-    expect(r.out).toContain('认领：帅位经 ssh 调 fleet-api alert claim watchdog:job:backup:after-12');
+    expect(r.out).not.toContain('处理：');
+    expect(r.out).not.toContain('认领：');
+    expect(r.out).not.toContain('alert claim');
+    const j = await t.json('alert', 'show', 'watchdog:job:backup:after-12');
+    expect(j.body).not.toHaveProperty('handling');
+    expect(j.body).not.toHaveProperty('claim');
   });
 
   it('【故意造出的失败】认不出的键：退出码 2，写明没有这个键', async () => {
@@ -157,132 +161,8 @@ describe('alert show：谁在处理、修到哪', () => {
   });
 });
 
-describe('alert claim：认领提醒的跟进单', () => {
-  it('没挂单的：退出码 2，写明先开单带 --issue 或等提醒派单开', async () => {
-    const t = setup();
-    await taskless();
-    await t.run('seat', 'take', ...A);
-    const r = await t.run(
-      'alert',
-      'claim',
-      'watchdog:job:backup:after-12',
-      ...A,
-      '--term',
-      '1',
-      '--label',
-      '工人A',
-    );
-    expect(r.code).toBe(2);
-    expect(r.err).toContain('还没挂单');
-    expect(r.err).toContain('--issue <owner/仓#号>');
-  });
-
-  it('带 --issue：认领那张单、挂上跟进单，show 显示谁在处理；再来一次认得出是自己拿着', async () => {
-    const t = setup();
-    await taskless();
-    await t.run('seat', 'take', ...A);
-    const claim = ['alert', 'claim', 'watchdog:job:backup:after-12', ...A, '--term', '1', '--label', '工人A'];
-    const got = await t.json(...claim, '--issue', `${REPO}#360`, '--note', '查备份盘');
-    expect(got).toMatchObject({
-      code: 0,
-      body: {
-        ok: true,
-        work: { repo: REPO, issueNumber: 360 },
-        claim: { owner: { kind: 'worker', machine: '本机', label: '工人A' }, state: 'claimed' },
-        linked: 'linked',
-        already: false,
-      },
-    });
-    const show = await t.run('alert', 'show');
-    expect(show.out).toMatch(/本机\/工人A 在处理 · example\/canary#360 · 查备份盘 · \d+ 分钟/);
-    // 再来一次（比如挂单那步上次没成）：认领那步认得出是自己拿着，跟进单已经一样
-    expect(await t.json(...claim, '--issue', '360')).toMatchObject({
-      code: 0,
-      body: { ok: true, already: true, linked: 'same' },
-    });
-  });
-
-  it('【故意造出的失败】不是帅位（没接班、任期不对）：退出码 3，单子一点没动', async () => {
-    const t = setup();
-    await taskless();
-    const r = await t.run(
-      'alert',
-      'claim',
-      'watchdog:job:backup:after-12',
-      ...A,
-      '--term',
-      '1',
-      '--label',
-      '工人A',
-      '--issue',
-      `${REPO}#360`,
-    );
-    expect(r.code).toBe(3);
-    expect(r.out).toContain('没认领上');
-    const show = await t.run('alert', 'show');
-    expect(show.out).toMatch(/没人认领 · \d+/);
-  });
-
-  it('【故意造出的失败】跟进单在引擎手里（它自己卡住才报的）：退出码 3，写明转人工的两条路', async () => {
-    const t = setup();
-    const store = createPgStore(db.db);
-    const repo = await store.findRepoByName('example', 'canary');
-    if (!repo) throw new Error('夹具里没有 example/canary');
-    const got = await store.claimForEngine({
-      repoId: repo.id,
-      issueNumber: 293,
-      workflowId: `req:${REPO}#293`,
-      actor: { kind: 'engine', id: 'fusion' },
-    });
-    expect(got.ok).toBe(true);
-    await taskless();
-    await t.run('seat', 'take', ...A);
-    const r = await t.run(
-      'alert',
-      'claim',
-      'watchdog:job:backup:after-12',
-      ...A,
-      '--term',
-      '1',
-      '--label',
-      '工人A',
-      '--issue',
-      `${REPO}#293`,
-    );
-    expect(r.code).toBe(3);
-    expect(r.out).toContain('在引擎手里');
-    expect(r.out).toContain('创始人说改派');
-  });
-
-  it('【故意造出的失败】已经撤了的提醒：退出码 3，不认领', async () => {
-    const t = setup();
-    const a = await taskless();
-    expect(
-      await resolveAlertWithReason(db.db, {
-        dedupeKey: 'watchdog:job:backup:after-12',
-        by: 'engine:watchdog',
-        why: '按期跑成了',
-      }),
-    ).toBe('ok');
-    await t.run('seat', 'take', ...A);
-    const r = await t.json(
-      'alert',
-      'claim',
-      a.id,
-      ...A,
-      '--term',
-      '1',
-      '--label',
-      '工人A',
-      '--issue',
-      `${REPO}#360`,
-    );
-    expect(r).toMatchObject({ code: 3, body: { ok: false, reason: 'resolved' } });
-  });
-});
-
 describe('静默（Alertmanager 式：谁、为什么、必带到期）', () => {
-  it('帅位还没人接过（上线过渡）：记是谁照样建；show 显示「已静默」；撤了照常', async () => {
+  it('不带 --term（这一套本来就不必须，#445）：记是谁照样建；show <键> 显示「静默：」；撤了照常', async () => {
     const t = setup();
     await upsertAlert(db.db, {
       dedupeKey: 'pool-hold:claude-solo',
@@ -301,35 +181,44 @@ describe('静默（Alertmanager 式：谁、为什么、必带到期）', () => 
       '创始人 09-27 晚拍：法国暂时不用独享号',
       ...A,
     );
-    expect(s).toMatchObject({ code: 0, body: { ok: true, basis: '帅位还没人接过（上线过渡）' } });
-    const show = await t.run('alert', 'show');
-    expect(show.out).toContain('已静默（本机/a1：创始人 09-27 晚拍：法国暂时不用独享号）');
+    expect(s).toMatchObject({ code: 0, body: { ok: true, basis: '没带帅位任期，按 --note 记的人处理' } });
+    const show = await t.run('alert', 'show', 'pool-hold:claude-solo');
+    expect(show.out).toContain('静默：本机/a1：创始人 09-27 晚拍：法国暂时不用独享号');
     const id = (s.body.silence as { id: string }).id;
     expect((await t.run('alert', 'silences')).out).toContain(id);
     const un = await t.run('alert', 'unsilence', id, '--note', '恢复独享号了', ...A);
     expect(un.code).toBe(0);
-    expect((await t.run('alert', 'show')).out).toMatch(/没人认领 · \d+/);
+    expect((await t.run('alert', 'show', 'pool-hold:claude-solo')).out).not.toContain('静默：');
   });
 
-  it('【故意造出的失败】帅位上线后不带任期、没有创始人原话：退出码 3；带创始人原话照建', async () => {
+  it('【故意造出的失败】不带 --term 也能静默（#445 删掉了帅位任期这条要求）；带了 --term 却不是帅位照样拒；不带 --note 照旧拒绝', async () => {
     const t = setup();
     await t.run('seat', 'take', ...A);
     const base = ['alert', 'silence', '--prefix', 'watchdog:job:backup:', '--until', '2h', '--note', '换盘'];
-    const r = await t.run(...base, '--machine', '笔记本', '--session', 'b1');
-    expect(r.code).toBe(3);
-    expect(r.err).toContain('静默要带任期');
-    expect((await t.run(...base, '--machine', '笔记本', '--session', 'b1', '--term', '1')).code).toBe(3);
-    const ok = await t.json(
-      ...base,
+    // 不带 --term：帅位已经上线也不再拦，只记 --machine/--session 是谁
+    const ok = await t.json(...base, '--machine', '笔记本', '--session', 'b1');
+    expect(ok).toMatchObject({ code: 0, body: { ok: true, basis: '没带帅位任期，按 --note 记的人处理' } });
+    // 带了 --term 但不是那一任帅位：照样核验、照样拒
+    const wrongTerm = await t.run(...base, '--machine', '笔记本', '--session', 'b1', '--term', '1');
+    expect(wrongTerm.code).toBe(3);
+    expect(wrongTerm.err).toContain('不是帅位');
+    // 真帅位带对任期：照样能核验通过
+    expect((await t.run(...base, ...A, '--term', '1')).code).toBe(0);
+    // 不带 --term、也不带 --note：--note 这条要求没变，照旧拒绝
+    const noNote = await t.run(
+      'alert',
+      'silence',
+      '--prefix',
+      'watchdog:job:',
+      '--until',
+      '2h',
       '--machine',
       '笔记本',
       '--session',
       'b1',
-      '--founder',
-      '备份盘今晚换，先别吵',
     );
-    expect(ok).toMatchObject({ code: 0, body: { ok: true, basis: '创始人原话：备份盘今晚换，先别吵' } });
-    expect((await t.run(...base, ...A, '--term', '1')).code).toBe(0);
+    expect(noNote.code).toBe(2);
+    expect(noNote.err).toContain('静默要带 --note');
   });
 
   it('【故意造出的失败】不带到期、超过 7 天、前缀太宽、没写为什么：退出码 2，什么都不建', async () => {

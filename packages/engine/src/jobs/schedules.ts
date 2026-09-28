@@ -3,6 +3,7 @@
 import {
   type Client,
   ScheduleAlreadyRunning,
+  ScheduleNotFoundError,
   type ScheduleOptionsStartWorkflowAction,
   ScheduleOverlapPolicy,
   type ScheduleSpec,
@@ -10,7 +11,6 @@ import {
 } from '@temporalio/client';
 import type { Workflow } from '@temporalio/common';
 import {
-  type AlertDispatchInput,
   type CanaryInput,
   type GitHubReconcileInput,
   type HourlyReconcileInput,
@@ -18,11 +18,6 @@ import {
   type WatchdogInput,
   WORKFLOW_TYPES,
 } from '../contract.ts';
-import {
-  ALERT_DISPATCH_EVERY_MINUTES,
-  ALERT_DISPATCH_JOB,
-  ALERT_DISPATCH_OFFSET_MINUTES,
-} from './alert-dispatch.ts';
 import {
   CANARY_EVERY_HOURS,
   CANARY_JOB,
@@ -35,6 +30,7 @@ import {
   HOURLY_RECONCILE_JOB,
   HOURLY_RECONCILE_OFFSET_MINUTES,
 } from './hourly-reconcile.ts';
+import { RETIRED_SCHEDULES, type RetiredSchedule } from './retired-schedules.ts';
 import { ROUTE_PROBE_EVERY_MINUTES, ROUTE_PROBE_JOB, ROUTE_PROBE_OFFSET_MINUTES } from './route-probe.ts';
 import { WATCHDOG_EVERY_MINUTES, WATCHDOG_JOB, WATCHDOG_OFFSET_MINUTES } from './watchdog.ts';
 
@@ -43,7 +39,6 @@ export const ROUTE_PROBE_SCHEDULE_ID = ROUTE_PROBE_JOB.id;
 export const HOURLY_RECONCILE_SCHEDULE_ID = HOURLY_RECONCILE_JOB.id;
 export const CANARY_SCHEDULE_ID = CANARY_JOB.id;
 export const WATCHDOG_SCHEDULE_ID = WATCHDOG_JOB.id;
-export const ALERT_DISPATCH_SCHEDULE_ID = ALERT_DISPATCH_JOB.id;
 
 interface EngineSchedule {
   scheduleId: string;
@@ -59,7 +54,6 @@ export function engineSchedules(taskQueue: string): EngineSchedule[] {
   const hourlyInput: HourlyReconcileInput = { schemaVersion: 1 };
   const canaryInput: CanaryInput = { schemaVersion: 1 };
   const watchdogInput: WatchdogInput = { schemaVersion: 1 };
-  const alertDispatchInput: AlertDispatchInput = { schemaVersion: 1 };
   return [
     {
       scheduleId: GITHUB_RECONCILE_SCHEDULE_ID,
@@ -185,34 +179,6 @@ export function engineSchedules(taskQueue: string): EngineSchedule[] {
         pauseOnFailure: false,
       },
     },
-    {
-      // 提醒派单（design 15.3「谁在处理」）：每 5 分钟，没人认领、停着没动的提醒再推，没挂单的开跟进单；和看门狗错开
-      scheduleId: ALERT_DISPATCH_SCHEDULE_ID,
-      spec: {
-        intervals: [
-          {
-            every: `${ALERT_DISPATCH_EVERY_MINUTES} minutes`,
-            offset: `${ALERT_DISPATCH_OFFSET_MINUTES} minutes`,
-          },
-        ],
-      },
-      action: {
-        type: 'startWorkflow',
-        workflowType: WORKFLOW_TYPES.alertDispatch,
-        workflowId: ALERT_DISPATCH_SCHEDULE_ID,
-        taskQueue,
-        args: [alertDispatchInput],
-        // 一轮秒级；活动最多 10 分钟（job 档），卡死的不拖到下一轮之后太久
-        workflowRunTimeout: '15 minutes',
-      },
-      policies: {
-        // 上一轮还没完就跳过：两轮叠着跑会同时推、撤同一条
-        overlap: ScheduleOverlapPolicy.SKIP,
-        // Temporal 停了一阵再起来：只补最近一轮（每轮都是看当时的库）
-        catchupWindow: `${ALERT_DISPATCH_EVERY_MINUTES} minutes`,
-        pauseOnFailure: false,
-      },
-    },
   ];
 }
 
@@ -246,4 +212,32 @@ export async function ensureEngineSchedules(
     }
   }
   return out;
+}
+
+/** 一个退役的 Schedule 删的结局：删掉了、本来就不在了、删的时候出了别的错（原文带着，不当成删掉了）。 */
+export type RetiredScheduleOutcome = 'deleted' | 'absent' | { error: string };
+
+/**
+ * 把退役名单（jobs/retired-schedules.ts，不传就用这份）里 Temporal 上还在的 Schedule 删掉。每个编号的结局独立、
+ * 互不影响（一个删不掉不耽误别的照删）；从不抛出——这些 Schedule 已经没有代码在跑了，删不掉不该挡引擎接活，调用方
+ * （real/retire-schedules.ts）按结局决定记日志还是报警，不许把「删的时候出错」当成「删掉了」。
+ */
+export async function deleteRetiredSchedules(
+  client: Pick<Client, 'schedule'>,
+  schedules: readonly RetiredSchedule[] = RETIRED_SCHEDULES,
+): Promise<Record<string, RetiredScheduleOutcome>> {
+  const out: Record<string, RetiredScheduleOutcome> = {};
+  for (const { id } of schedules) {
+    try {
+      await client.schedule.getHandle(id).delete();
+      out[id] = 'deleted';
+    } catch (err) {
+      out[id] = err instanceof ScheduleNotFoundError ? 'absent' : { error: describeError(err) };
+    }
+  }
+  return out;
+}
+
+function describeError(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }

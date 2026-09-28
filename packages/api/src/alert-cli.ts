@@ -1,17 +1,11 @@
 // fleet-api alert …：提醒是一件活（design 15.3「谁在处理」）。帅位经 ssh 以 root 调（和 fleet-api seat、claim 一样，机器名、
-// 会话号放参数里）：看开着的提醒谁在处理、修到哪（show）；认领一条提醒（claim：认领它的跟进单，就是 #299 的认领，不另记）；
-// Alertmanager 式静默（silence / unsilence / silences：谁、为什么、必带到期）。判法在 @fleet-dao/core 的 alert-work.ts。
+// 会话号放参数里）：看开着的提醒、跟进单、PR（show，不显示谁在处理、认领——#445 起这份状态只给驾驶舱看，不再自动开跟进单、
+// 不用认领）；Alertmanager 式静默（silence / unsilence / silences：谁、为什么、必带到期，不必带帅位任期——#445 删掉了这条
+// 要求，带了照样核验）。判法在 @fleet-dao/core 的 alert-work.ts。
 // 每条都能带 --json：只往标准输出打一行 JSON 给脚本读（本机看板、帅位脚本），认不出按「没查成」算。
-// 退出码和 seat、claim 一样：0 做成了；3 不是你的（不是帅位、跟进单在别人手里、提醒已经撤了）；1 没做成（库出错、设置认不出、
-// 跟进单的仓不受管）；2 参数不对（不连库）。
+// 退出码：0 做成了；3 带了任期或创始人原话核验没过（不是帅位）；1 没做成（库出错、设置认不出）；2 参数不对（不连库）。
 import {
   alertHandling,
-  claimHowTo,
-  claimOwnerText,
-  describeClaim,
-  holderText,
-  type IssueClaim,
-  isActiveClaim,
   MAIN_SEAT,
   machineProblem,
   seatScopeProblem,
@@ -21,18 +15,16 @@ import {
   silenceProblem,
 } from '@fleet-dao/core';
 import type { AlertRow } from '@fleet-dao/db';
-import { type AlertWorkPort, handlingView, seatAuditWho } from './alert-work.ts';
-import type { SeatActor, Store } from './ports.ts';
+import { type AlertWorkPort, seatAuditWho } from './alert-work.ts';
+import type { Store } from './ports.ts';
 import { SeatCliError, type SeatCliResult } from './seat-cli.ts';
 
 export const ALERT_USAGE = [
-  '用法：fleet-api alert <show|claim|silence|unsilence|silences> …（提醒是一件活，design 15.3「谁在处理」；都能带 --json 给脚本读）',
-  '  alert show [<键|编号>]                     开着的提醒谁在处理、修到哪、多久了；给了键只看那一条（带跟进单、认领、PR、发布）',
-  '  alert claim <键|编号> --machine <机器名> --session <会话号> --term <任期> --label <工人名> [--owner worker|seat] [--issue <号>|<owner/仓#号>] [--grace-minutes <分>] [--note "<一句话>"] [--scope drill:<名字>]',
-  '                                             认领这条提醒的跟进单（有任务的就是那张单，--issue 另挂一张）；修复的 PR 正文「修提醒」栏写它的键',
-  '  alert silence <键|编号> | --prefix <前缀:>  --until <+2h|+3d|带时区的时刻> --note "<谁拍的、为什么>" --machine <机器名> --session <会话号> (--term <任期> | --founder "<创始人原话>")',
-  '                                             静默：到期前不升级、不开跟进单，显示「已静默」；最长 7 天，到期自动恢复',
-  '  alert unsilence <静默编号> --note "<为什么提前撤>" --machine <机器名> --session <会话号> (--term <任期> | --founder "<创始人原话>")',
+  '用法：fleet-api alert <show|silence|unsilence|silences> …（提醒是一件活，design 15.3「谁在处理」；都能带 --json 给脚本读）',
+  '  alert show [<键|编号>]                     开着的提醒、跟进单、PR、多久了；给了键只看那一条（不显示谁在处理、认领，只给驾驶舱看）',
+  '  alert silence <键|编号> | --prefix <前缀:>  --until <+2h|+3d|带时区的时刻> --note "<谁拍的、为什么>" --machine <机器名> --session <会话号> [--term <任期> | --founder "<创始人原话>"]',
+  '                                             静默：到期前不再 24 小时提醒、显示「已静默」；最长 7 天，到期自动恢复；不带任期或创始人原话也能建，只记 --note 写的人',
+  '  alert unsilence <静默编号> --note "<为什么提前撤>" --machine <机器名> --session <会话号> [--term <任期> | --founder "<创始人原话>"]',
   '  alert silences [--all]                     还管用的静默（--all 连撤了、到期的最近 50 条）',
 ].join('\n');
 
@@ -110,22 +102,6 @@ function scopeOf(p: Parsed): string {
   return scope;
 }
 
-function actorOf(p: Parsed): SeatActor {
-  return { ...identityOf(p), scope: scopeOf(p), term: positiveInt(need(p, 'term'), '任期') };
-}
-
-/** --issue：<号>（跟进单的仓照提醒原来挂的）或 <owner/仓#号>。 */
-function issueArg(raw: string, fallbackRepo: string | null): { repo: string; issueNumber: number } {
-  const full = /^([A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9._-]+)#(\d{1,9})$/.exec(raw.trim());
-  if (full?.[1] && full[2]) return { repo: full[1], issueNumber: positiveInt(full[2], '单号') };
-  const n = positiveInt(raw.trim(), '跟进单');
-  if (!fallbackRepo)
-    throw new SeatCliError(
-      `这条提醒没挂过单，--issue 要写成 <owner/仓#号>（不知道是哪个仓的 #${n}）。\n${ALERT_USAGE}`,
-    );
-  return { repo: fallbackRepo, issueNumber: n };
-}
-
 async function alertOf(alerts: AlertWorkPort, ref: string | undefined): Promise<AlertRow> {
   const r = ref?.trim();
   if (!r) throw new SeatCliError(`要给提醒的键或编号（fleet-api alert show 看得到）。\n${ALERT_USAGE}`);
@@ -134,21 +110,17 @@ async function alertOf(alerts: AlertWorkPort, ref: string | undefined): Promise<
   return found;
 }
 
-function claimJson(c: IssueClaim) {
-  return {
-    claimId: c.claimId,
-    owner: { kind: c.ownerKind, machine: c.ownerMachine, label: c.ownerLabel },
-    state: c.state,
-    active: isActiveClaim(c.state),
-    prs: c.prNumbers,
-    claimedAt: c.claimedAt,
-    heartbeatAt: c.heartbeatAt,
-    note: c.note,
-  };
-}
-
-function alertJson(a: Pick<AlertRow, 'id' | 'dedupeKey' | 'level' | 'title' | 'createdAt'>) {
-  return { id: a.id, key: a.dedupeKey, level: a.level, title: a.title, createdAt: a.createdAt.toISOString() };
+// 单条（alertOf 来的 AlertRow）createdAt 是 Date；列表（alerts.read 的 facts.alert，@fleet-dao/core 的 AlertRef）
+// 已经是 ISO 字符串——两处共用一个函数，两种都收。
+function alertJson(a: {
+  id: string;
+  dedupeKey: string;
+  level: AlertRow['level'];
+  title: string;
+  createdAt: Date | string;
+}) {
+  const createdAt = typeof a.createdAt === 'string' ? a.createdAt : a.createdAt.toISOString();
+  return { id: a.id, key: a.dedupeKey, level: a.level, title: a.title, createdAt };
 }
 
 const LEVEL_TEXT = { decision: '要你拍', alert: '卡住报警', daily: '日报' } as const;
@@ -161,21 +133,6 @@ export interface AlertCliDeps {
 export async function runAlert(argv: readonly string[], deps: AlertCliDeps): Promise<SeatCliResult> {
   const [sub = '', ...rest] = argv;
   if (sub === 'show') return show(parse(rest, []), deps);
-  if (sub === 'claim')
-    return claim(
-      parse(rest, [
-        'machine',
-        'session',
-        'scope',
-        'term',
-        'label',
-        'owner',
-        'grace-minutes',
-        'note',
-        'issue',
-      ]),
-      deps,
-    );
   if (sub === 'silence')
     return silence(parse(rest, ['until', 'note', 'machine', 'session', 'scope', 'term', 'founder']), deps);
   if (sub === 'unsilence')
@@ -193,54 +150,38 @@ async function show(p: Parsed, { store, alerts }: AlertCliDeps): Promise<SeatCli
     const r = await alerts.read([a.id]);
     const f = r.facts[0];
     if (!f) throw new Error(`提醒 ${a.id} 刚找到、再读就没了`);
+    // 谁在处理、认领只给驾驶舱看（#445）：这里只借 alertHandling 读静默、没查成，不显示 h.line/h.who。
     const h = alertHandling(f, await alerts.deploy(), r.now);
     const lines = [
       `[${LEVEL_TEXT[a.level]}] ${a.title}`,
       `键：${a.dedupeKey}（编号 ${a.id}），${a.createdAt.toISOString()} 报的${a.resolvedAt ? `，${a.resolvedAt.toISOString()} 由 ${a.resolvedBy ?? '?'} 撤了` : ''}`,
-      `处理：${h.line}`,
-      `跟进单：${f.work ? `${f.work.repo}#${f.work.issueNumber}（${f.work.source === 'task' ? '提醒挂的任务' : f.work.source === 'engine' ? '提醒派单开的' : `${f.work.linkedBy ?? '?'} 挂的`}）` : '没有'}`,
-      `认领：${f.claim ? describeClaim(f.claim, r.now) : '没有'}`,
+      `跟进单：${f.work ? `${f.work.repo}#${f.work.issueNumber}` : '没有'}`,
       `PR：${f.prs.length ? f.prs.map((x) => `#${x.number} ${x.state}（${x.via.join('、')}）`).join('；') : '没有'}`,
       ...(h.silence ? [`静默：${h.silence.createdBy}：${h.silence.comment}，到 ${h.silence.endsAt}`] : []),
       ...h.problems.map((x) => `没查成：${x}`),
-      ...(h.stage === 'unclaimed' || h.stage === 'engine_stuck' ? [claimHowTo(a.dedupeKey)] : []),
     ];
     return {
       code: 0,
       text: lines.join('\n'),
-      json: {
-        alert: alertJson(a),
-        handling: handlingView(h),
-        claim: f.claim && claimJson(f.claim),
-        now: r.now,
-      },
+      json: { alert: alertJson(a), now: r.now },
     };
   }
   const open = await store.listNotifications({ status: 'open', limit: SHOW_LIMIT });
+  // 列表这一页不显示谁在处理（#445），但照旧经 alerts.read 走一遍：读不到库要照实报「没做成」，不能拿
+  // 「没有开着的提醒」冒充查过了（AGENTS.md 底线）。
   const read = await alerts.read(open.items.map((n) => n.id));
-  const deploy = await alerts.deploy();
-  const rows = read.facts.map((f) => ({ a: f.alert, h: alertHandling(f, deploy, read.now) }));
+  const rows = read.facts.map((f) => f.alert);
   const truncated = open.nextCursor !== undefined;
   const lines =
     rows.length === 0
       ? ['没有开着的提醒']
-      : rows.flatMap(({ a, h }) => [
-          `[${LEVEL_TEXT[a.level]}] ${a.title}（${a.dedupeKey}）`,
-          `    ${h.line}`,
-        ]);
+      : rows.map((a) => `[${LEVEL_TEXT[a.level]}] ${a.title}（${a.dedupeKey}）`);
   if (truncated) lines.push(`（开着的超过 ${SHOW_LIMIT} 条，只列了最近的 ${SHOW_LIMIT} 条）`);
   return {
     code: 0,
     text: lines.join('\n'),
     json: {
-      alerts: rows.map(({ a, h }) => ({
-        id: a.id,
-        key: a.dedupeKey,
-        level: a.level,
-        title: a.title,
-        createdAt: a.createdAt,
-        handling: handlingView(h),
-      })),
+      alerts: rows.map((a) => alertJson(a)),
       truncated,
       now: read.now,
     },
@@ -250,131 +191,11 @@ async function show(p: Parsed, { store, alerts }: AlertCliDeps): Promise<SeatCli
 /** alert show 一次最多列多少条开着的提醒（最近的在前）。 */
 const SHOW_LIMIT = 200;
 
-// —— claim ——
-
-async function claim(p: Parsed, { store, alerts }: AlertCliDeps): Promise<SeatCliResult> {
-  if (p.positional.length !== 1) throw new SeatCliError(`要一个位置参数：提醒的键或编号。\n${ALERT_USAGE}`);
-  const seat = actorOf(p);
-  const label = need(p, 'label');
-  const labelWhy = sessionProblem(label, '工人名');
-  if (labelWhy) throw new SeatCliError(`${labelWhy}。\n${ALERT_USAGE}`);
-  const kind = p.options.get('owner') ?? 'worker';
-  if (kind !== 'worker' && kind !== 'seat')
-    throw new SeatCliError(`--owner 只收 worker、seat，没有「${kind}」。\n${ALERT_USAGE}`);
-  const graceRaw = p.options.get('grace-minutes');
-  const graceMinutes = graceRaw === undefined ? undefined : positiveInt(graceRaw, '宽限期（分钟）');
-  const note = text(p, 'note', '一句话');
-  const issueRaw = p.options.get('issue');
-
-  const a = await alertOf(alerts, p.positional[0]);
-  const alertText = `提醒「${a.title}」（${a.dedupeKey}）`;
-  if (a.resolvedAt)
-    return {
-      code: 3,
-      text: `不用认领：${alertText}已经撤了（${a.resolvedBy ?? '没记是谁'}，${a.resolvedAt.toISOString()}）`,
-      json: { ok: false, reason: 'resolved', alert: alertJson(a) },
-    };
-  const r = await alerts.read([a.id]);
-  const facts = r.facts[0];
-  if (!facts) throw new Error(`提醒 ${a.id} 刚找到、再读就没了`);
-  const current = facts.work;
-  const target = issueRaw === undefined ? current : issueArg(issueRaw, current?.repo ?? null);
-  if (!target)
-    throw new SeatCliError(
-      `${alertText}还没挂单：先开一张跟进单（pnpm issue:new --local …，正文写清要修的；PR 正文「修提醒」栏写 ${a.dedupeKey}），再带 --issue <owner/仓#号> 认领；或者等提醒派单（没人认领 20 分钟后）自己开一张`,
-    );
-  const [owner = '', name = ''] = target.repo.split('/');
-  const repo = await store.findRepoByName(owner, name);
-  if (!repo)
-    return {
-      code: 1,
-      text: `没认领上：${target.repo} 不在库里（认领只管驾驶舱导入过的项目）`,
-      json: { ok: false, reason: 'repo_not_managed', repo: target.repo },
-    };
-  const issueText = `${target.repo}#${target.issueNumber}`;
-  const took = await store.takeClaim({
-    repoId: repo.id,
-    issueNumber: target.issueNumber,
-    seat,
-    owner: { kind, label },
-    graceMinutes,
-    note: note ?? `修${alertText}`,
-  });
-  let held: IssueClaim | null = null;
-  if (!took.ok) {
-    if (took.reason === 'held') {
-      const mine =
-        took.claim.ownerKind !== 'engine' &&
-        took.claim.ownerMachine === seat.machine &&
-        took.claim.ownerLabel === label;
-      if (!mine) {
-        const engine = took.claim.ownerKind === 'engine';
-        return {
-          code: 3,
-          text: engine
-            ? `没认领上：跟进单 ${issueText} 在引擎手里（它自己卡住了才报的这条）。本机接手要创始人说改派；或者另开一张单跟进，带 --issue <owner/仓#号> 再认领`
-            : `没认领上：跟进单 ${issueText} ${describeClaim(took.claim, took.now)}；不碰它`,
-          json: { ok: false, reason: 'held', claim: claimJson(took.claim), now: took.now },
-        };
-      }
-      held = took.claim;
-    } else {
-      return {
-        code: took.reason === 'not_seat' ? 3 : 1,
-        text: `没认领上（${issueText} 没动）：${took.why}`,
-        json: { ok: false, reason: took.reason, why: took.why, now: took.now },
-      };
-    }
-  }
-  const claimRow = took.ok ? took.claim : (held as IssueClaim);
-  // 跟进单换了（--issue 给了另一张，或者原来没挂）才挂：认领在前、挂在后，认领没成的不留半截
-  const differs =
-    !current ||
-    current.repoId !== repo.id ||
-    current.issueNumber !== target.issueNumber ||
-    current.source === 'task';
-  let linked: 'linked' | 'same' | 'none' = issueRaw !== undefined && !differs ? 'same' : 'none';
-  if (issueRaw !== undefined && differs) {
-    try {
-      const got = await alerts.link({
-        notificationId: a.id,
-        repoId: repo.id,
-        issueNumber: target.issueNumber,
-        source: 'claim',
-        linkedBy: `${seat.machine}/${seat.session}`,
-        note: note ?? (current ? `原来挂的是 ${current.repo}#${current.issueNumber}` : null),
-        mode: 'replace',
-        audit: seatAuditWho(seat.machine, seat.session),
-      });
-      if (got.result === 'not_found') throw new Error('提醒刚找到、挂单时不在了');
-      linked = got.result === 'same' ? 'same' : 'linked';
-    } catch (err) {
-      return {
-        code: 1,
-        text: `认领上了 ${issueText}（认领号 ${claimRow.claimId}），可跟进单没挂到${alertText}上：${err instanceof Error ? err.message : String(err)}。再跑一次同一条命令会接着挂（认领那步认得出是你拿着）`,
-        json: { ok: false, reason: 'link_failed', claim: claimJson(claimRow) },
-      };
-    }
-  }
-  return {
-    code: 0,
-    text: `${held ? '本来就是你拿着' : '认领了'}${alertText}：跟进单 ${issueText} 归 ${claimOwnerText(claimRow)}，认领号 ${claimRow.claimId}${linked === 'linked' ? '（跟进单挂上了）' : ''}。修复的 PR 正文「修提醒」栏写 ${a.dedupeKey}，「认领」栏写认领号`,
-    json: {
-      ok: true,
-      alert: alertJson(a),
-      work: { repo: target.repo, issueNumber: target.issueNumber },
-      claim: claimJson(claimRow),
-      linked,
-      already: held !== null,
-      now: took.now,
-    },
-  };
-}
-
 // —— 静默 ——
 
 /**
- * 静默、撤静默要么是帅位（带任期，库里核），要么带创始人原话（运维以 root 手敲）；帅位还没人接过时（上线过渡）只记是谁。
+ * 静默、撤静默不必带帅位任期（#445：只要 --note 写明谁拍的、为什么就行，不再逼着走 seat check 那一套）：带了创始人原话
+ * 或任期的，照旧核一遍（认不出、不是帅位一律拒），没带的只记 --machine/--session 是谁、basis 写明没核过身份。
  * 回操作记录里写的「谁」和一句说明。
  */
 async function silenceActor(
@@ -384,16 +205,9 @@ async function silenceActor(
   const who = identityOf(p);
   const founder = text(p, 'founder', '创始人的原话');
   if (founder) return { ...who, basis: `创始人原话：${founder}` };
+  if (!p.options.has('term')) return { ...who, basis: '没带帅位任期，按 --note 记的人处理' };
   const scope = scopeOf(p);
   const snap = await store.readSeat(scope);
-  if (!p.options.has('term')) {
-    if (snap.lease)
-      throw new SeatCliError(
-        `帅位已经上线（现在是 ${holderText(snap.lease)}，第 ${snap.lease.term} 任）：静默要带任期（--term），运维手敲的带创始人原话（--founder "…"）`,
-        3,
-      );
-    return { ...who, basis: '帅位还没人接过（上线过渡）' };
-  }
   const term = positiveInt(need(p, 'term'), '任期');
   if (!snap.settings.ok) throw new SeatCliError(`没查成：${snap.settings.why}`, 1);
   const v = seatVerdict(snap.lease, { ...who, term }, snap.now, snap.settings.settings.leaseMinutes);
@@ -425,7 +239,7 @@ async function silence(p: Parsed, { store, alerts }: AlertCliDeps): Promise<Seat
   });
   return {
     code: 0,
-    text: `静默了：${prefix ? `键以 ${match} 开头的提醒` : match}，到 ${s.endsAt}（${actor.basis}；${note}）。到期前不升级、不开跟进单，到期自动恢复；提前撤：fleet-api alert unsilence ${s.id} --note "…"`,
+    text: `静默了：${prefix ? `键以 ${match} 开头的提醒` : match}，到 ${s.endsAt}（${actor.basis}；${note}）。到期前不再 24 小时提醒，到期自动恢复；提前撤：fleet-api alert unsilence ${s.id} --note "…"`,
     json: { ok: true, silence: s, basis: actor.basis },
   };
 }
@@ -453,7 +267,7 @@ async function unsilence(p: Parsed, { store, alerts }: AlertCliDeps): Promise<Se
     };
   return {
     code: 0,
-    text: `撤了静默：${r.silence.match}（${note}）；对得上的提醒照常升级`,
+    text: `撤了静默：${r.silence.match}（${note}）；对得上的提醒照常显示、按 24 小时再提醒`,
     json: { ok: true, silence: r.silence },
   };
 }
