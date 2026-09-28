@@ -70,15 +70,25 @@ H=/var/tmp/mirasim-session-test-$$
 # 家目录不在真的 /home 下（不碰真机），所以把 lib/mirasim.sh 的模板也指到这儿——
 # 和 mirasim.test.sh 覆盖 MIRASIM_RUN_DIR 是同一个道理（该文件顶上的 shellcheck 注释就是为这个留的）
 MIRASIM_SERVER_BIN="$H/.mirasim-remote/current/server.cjs"
+# 1、1b 两步服务端本体都还没装，check_mirasim_session_unit 在看 systemctl 之前就已经因为「没装」提前返回了——
+# 这个名字不会真被 systemd-run 起过，只是占位。2、3、4 各用一个没起过的单元名（不复用同一个）：transient 单元被
+# systemd-run 的 --collect 标了自动收，stop + reset-failed 之后是不是已经收干净、能不能马上拿同一个名字重开一个
+# 新的，没在真机上验证过；各起各的名字，不管收得快不快，后一个都是全新的单元，不会撞上前一个还没收完
+UNIT1=fleet-mirasim-session-test-$$-1.service
+UNIT2=fleet-mirasim-session-test-$$-2.service
+UNIT3=fleet-mirasim-session-test-$$-3.service
+UNIT4=fleet-mirasim-session-test-$$-4.service
 cleanup() {
-  systemctl stop "$UNIT" >/dev/null 2>&1 || true
-  systemctl reset-failed "$UNIT" >/dev/null 2>&1 || true
+  local u
+  for u in "$UNIT2" "$UNIT3" "$UNIT4"; do
+    systemctl stop "$u" >/dev/null 2>&1 || true
+    systemctl reset-failed "$u" >/dev/null 2>&1 || true
+  done
   pkill -KILL -u "$U" >/dev/null 2>&1
   userdel "$U" >/dev/null 2>&1
   rm -rf -- "$H"
 }
 trap cleanup EXIT
-UNIT=fleet-mirasim-session-test-$$.service
 if ! useradd --system --user-group --home-dir "$H" --create-home --shell /bin/bash "$U" >/dev/null 2>&1; then
   echo "mirasim-session：没跑成：建不了临时用户 $U"
   exit 2
@@ -87,7 +97,7 @@ fi
 echo "== 1. 服务端本体不在（最常见的起始状态）：待配，不判红"
 fresh
 check "mirasim_server_installed 判假" "$(mirasim_server_installed "$U" && echo 真 || echo 假)" "假"
-check_mirasim_session_unit "$U" "$UNIT" 54321
+check_mirasim_session_unit "$U" "$UNIT1" 54321
 check "记一笔待配、没有红" "${#PENDING[@]} ${#REDS[@]}" "1 0"
 has "待配写清没装服务端本体、去哪装" "$(last PENDING)" "还没有 Mirasim 服务端本体.*docs/ops.md 第五节「会话用户的 Mirasim」"
 
@@ -96,7 +106,7 @@ fresh
 trapped=$(
   trap 'echo 陷阱响了' ERR
   set -E
-  check_mirasim_session_unit "$U" "$UNIT" 54321 >/dev/null
+  check_mirasim_session_unit "$U" "$UNIT1" 54321 >/dev/null
   echo "返回 $? 待配 ${#PENDING[@]} 红 ${#REDS[@]}"
 )
 check "挂着 ERR 陷阱：陷阱没响、记一笔待配" "$trapped" "返回 0 待配 1 红 0"
@@ -106,47 +116,45 @@ install -d -o "$U" -g "$U" -m 755 "$H/.mirasim-remote/current"
 install -o "$U" -g "$U" -m 755 /dev/null "$H/.mirasim-remote/current/server.cjs"
 fresh
 check "mirasim_server_installed 判真" "$(mirasim_server_installed "$U" && echo 真 || echo 假)" "真"
-check_mirasim_session_unit "$U" "$UNIT" 54321
+check_mirasim_session_unit "$U" "$UNIT2" 54321
 check "判红、不是待配" "${#REDS[@]} ${#PENDING[@]}" "1 0"
-has "红里带 journalctl 提示" "$(last REDS)" "$UNIT 没在跑.*journalctl -u $UNIT"
+has "红里带 journalctl 提示" "$(last REDS)" "$UNIT2 没在跑.*journalctl -u $UNIT2"
 
 echo "== 3. 服务端本体在、单元在跑、但 /api/health 连不上（起一个只听着不回应的假单元）"
 PORT3=$((20000 + RANDOM % 10000))
-systemd-run --unit="$UNIT" --uid="$U" --gid="$U" -p Type=simple --collect --quiet -- \
+systemd-run --unit="$UNIT3" --uid="$U" --gid="$U" -p Type=simple --collect --quiet -- \
   node -e 'require("node:net").createServer((c)=>c.on("data",()=>{})).listen(process.argv[1])' "$PORT3" \
   >/dev/null 2>&1
 for ((i = 0; i < 50; i++)); do
-  [[ "$(systemctl is-active "$UNIT" 2>/dev/null)" == active ]] && break
+  [[ "$(systemctl is-active "$UNIT3" 2>/dev/null)" == active ]] && break
   sleep 0.1
 done
 fresh
-check_mirasim_session_unit "$U" "$UNIT" "$PORT3"
+check_mirasim_session_unit "$U" "$UNIT3" "$PORT3"
 check "判红、不是待配" "${#REDS[@]} ${#PENDING[@]}" "1 0"
 has "红里说 health 连不上" "$(last REDS)" "在跑但 http://127\.0\.0\.1:$PORT3/api/health 连不上或没回"
-systemctl stop "$UNIT" >/dev/null 2>&1
-systemctl reset-failed "$UNIT" >/dev/null 2>&1
 
 echo "== 4. 服务端本体在、单元在跑、/api/health 回 ok:true：判绿"
 PORT4=$((20000 + RANDOM % 10000))
-systemd-run --unit="$UNIT" --uid="$U" --gid="$U" -p Type=simple --collect --quiet -- \
+systemd-run --unit="$UNIT4" --uid="$U" --gid="$U" -p Type=simple --collect --quiet -- \
   node -e '
     require("node:http").createServer((req,res)=>{
       if (req.url === "/api/health") { res.end(JSON.stringify({ok:true})); }
       else { res.statusCode = 404; res.end(); }
     }).listen(Number(process.argv[1]), "127.0.0.1");' "$PORT4" \
   >/dev/null 2>&1
+# 单元一 fork 出主进程就算 active（Type=simple），不等于 node 已经跑到 .listen() 真正开始收连接——
+# 等 is-active 不够，直接等 curl 真的连得上（到点了还连不上就别等了，交给下面的断言去报）
 for ((i = 0; i < 50; i++)); do
-  [[ "$(systemctl is-active "$UNIT" 2>/dev/null)" == active ]] && break
+  curl -fsS --max-time 1 "http://127.0.0.1:$PORT4/api/health" >/dev/null 2>&1 && break
   sleep 0.1
 done
 fresh
 OUT4=$(mktemp)
-check_mirasim_session_unit "$U" "$UNIT" "$PORT4" >"$OUT4" 2>&1
+check_mirasim_session_unit "$U" "$UNIT4" "$PORT4" >"$OUT4" 2>&1
 check "判绿：没有待配、没有红" "${#PENDING[@]} ${#REDS[@]}" "0 0"
-has "报了在跑、health 回 ok" "$(cat -- "$OUT4")" "$UNIT 在跑.*api/health 回 ok:true"
+has "报了在跑、health 回 ok" "$(cat -- "$OUT4")" "$UNIT4 在跑.*api/health 回 ok:true"
 rm -f -- "$OUT4"
-systemctl stop "$UNIT" >/dev/null 2>&1
-systemctl reset-failed "$UNIT" >/dev/null 2>&1
 
 if ((fail)); then
   echo "mirasim-session：不通过"
