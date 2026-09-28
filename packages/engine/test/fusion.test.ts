@@ -1200,8 +1200,11 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
       expect(w.callsOf('openPr')[0]?.input.body.changedFiles).toContain(`${dir}/需求.md`);
     });
 
-    it('对账真开出来的后续单、超出范围的单（core 的 askIssueText 写的正文）照收，做到合并', async () => {
-      for (const kind of ['follow-up', 'outside'] as const) {
+    // 一种一条用例（各起一个测试服务端）：同一条用例里连跑两张单，前一张留下的合并队列空闲计时器会在跑后一张时把
+    // 快进时钟拨过去一小时，假配置副本的同步时间是真钟，后一张就被判成「副本太久没同步」停派（#433 合并后主线红过）。
+    it.each(['follow-up', 'outside'] as const)(
+      '对账真开出来的后续单、超出范围的单（core 的 askIssueText 写的正文）照收，做到合并：%s',
+      async (kind) => {
         const text = askIssueText({
           kind,
           ask: {
@@ -1220,8 +1223,8 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
         const result = await runToEnd(w, fusionInput({ title: text.title, rawRequest: text.body }));
         expect(result.state).toBe('done');
         expect(w.verifications[0]?.criteria).toHaveLength(2);
-      }
-    });
+      },
+    );
 
     it('【失败】Lead 只提交了方案、没提交需求文档：方案不收，退回写明要提交哪份；几次都不交就停下等人，不推', async () => {
       const w = world({
