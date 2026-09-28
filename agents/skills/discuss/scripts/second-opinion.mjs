@@ -538,6 +538,18 @@ async function critique(o) {
 
 // ---------- 主流程 ----------
 
+// Windows 上 Git Bash 留下的几个环境变量：cursor-agent 靠它们猜「当前是不是 bash 环境」，猜完拿它跑钩子的 stdin 转发脚本，
+// 那脚本本身是 PowerShell 语法，交给 bash 的 eval 直接语法错、钩子判失败＝把这次调用拦掉（agents/hooks/pretool.mjs 的
+// 头几行有同一条注释，附了论证：2026-09-28 本机实测——同一次调用，父进程环境里有没有这几个变量，钩子是崩还是正常跑，
+// 只差这几个变量在不在）。本机会话大多是从 Git Bash 起的，spawn 默认整份带过去；这里起 cursor-agent 时摘掉，让它
+// 猜成本机原生的壳（PowerShell/cmd），钩子才跑得动。摘的是环境变量，不是钩子本身的判断——密钥路径那些规矩照样生效。
+export function cursorAgentEnv(platform = process.platform, env = process.env) {
+  if (platform !== 'win32') return env;
+  const out = { ...env };
+  for (const k of ['SHELL', 'MSYSTEM', 'MSYSTEM_PREFIX', 'MSYSTEM_CHOST', 'TERM']) delete out[k];
+  return out;
+}
+
 // cursor-agent 只读跑一轮：题面写进工作目录里的临时文件（Windows 命令行长度有限），让它读文件照做。
 // 退出码非 0、超时、没有输出都算没查成；错误原文带上，供换人判断是不是「连不上」。
 function runCursor({ prompt, profile, workdir, timeoutMin, log }) {
@@ -565,6 +577,7 @@ function runCursor({ prompt, profile, workdir, timeoutMin, log }) {
       cwd: workdir,
       windowsHide: true,
       shell: process.platform === 'win32',
+      env: cursorAgentEnv(),
     });
     let out = '';
     let err = '';

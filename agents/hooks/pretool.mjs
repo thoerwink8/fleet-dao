@@ -1189,7 +1189,13 @@ function readVerdict(tool, what, input, fallbackCwd) {
 export function decide(raw, fallbackCwd = '') {
   let input;
   try {
-    input = JSON.parse(raw);
+    // Cursor CLI（借道读这份钩子登记，targets.ts 的注释）在 Windows 上喂给钩子的 stdin 有时带 UTF-8 BOM
+    // （社区已知的坑，forum.cursor.com「On Windows, Cursor's hook stdin JSON payload includes a UTF-8 BOM…」）：
+    // Node 的 readFileSync(0,'utf8') 不会替你摘掉，打头那个字符（U+FEFF）会让 JSON.parse 直接炸。
+    // 这里摘掉不算放松拦截——摘不掉、后面还是解不出 JSON 照样按拦处理；只是不让「读得懂的 JSON 前面多一个字符」
+    // 变成把这次调用也一律拦掉。不直接在源码里写那个字符（容易和真的文件头 BOM 搞混、也不好认），用字符码判断。
+    const noBom = raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
+    input = JSON.parse(noBom);
   } catch {
     return block('fleet-guard：钩子输入不是 JSON，按拦处理');
   }
