@@ -330,10 +330,18 @@ export interface Kit {
    * Fusion 关单评论写「各模型额度」用；折成额度当量、按步骤进库归 #216。只在内存里（从历史重放出来）。
    */
   usage: Record<string, ModelUsage>;
+  /**
+   * 退回重问到数了、会话还说要人却带着推荐或假设：按它接着做时记一条（#259 第 3 个 PR）。Fusion 开 PR 时并进
+   * 「按推荐先做了」一栏（这些不是经 fleet ask 问出来的，asks 表里没有这一条，assumedLines 读不到）。
+   */
+  assumedNotes: string[];
 }
 
 export function newKit(
-  fields: Omit<Kit, 'parkCount' | 'active' | 'costSeen' | 'clock' | 'historyAlarmed' | 'usage'>,
+  fields: Omit<
+    Kit,
+    'parkCount' | 'active' | 'costSeen' | 'clock' | 'historyAlarmed' | 'usage' | 'assumedNotes'
+  >,
 ): Kit {
   return {
     ...fields,
@@ -343,6 +351,7 @@ export function newKit(
     clock: { depth: 0, since: 0, offMs: 0 },
     historyAlarmed: false,
     usage: {},
+    assumedNotes: [],
   };
 }
 
@@ -732,8 +741,9 @@ export async function attemptOrRework<T>(
 
 /**
  * 问创始人一句，等回答（老样子：停下等）。提问编号由工作流先定好（进历史）再发卡：发卡的活动重试时端口按编号去重，只有一张卡；
- * 编号在发卡前就登记为「在等」，人回答得再快也不会落空。#259 起只剩两处用它：会话要的是只有他本人才有的东西
- * （fleet blocked --needs access、other），和说要人拍却退回几次都不肯带推荐问的（reaskLimit）。
+ * 编号在发卡前就登记为「在等」，人回答得再快也不会落空。#259 起只剩会话要的是只有他本人才有的东西这一种会用它
+ * （fleet blocked --needs access、other）；说要人拍却退回几次都不肯带推荐问的，到数改按它自己写的推荐或假设接着做
+ * （assumedFromBlocked），不再落到这里等——真的一个字都拿不出才走失败梯子（park，也不经这里）。
  */
 export async function askAndWait(
   kit: Kit,
@@ -783,6 +793,46 @@ export function reaskFeedback(needs: 'human' | 'info', said: string): Feedback {
       '只有他本人才有的东西（账号、权限、登录）才用 fleet blocked "<缺什么>" --needs access',
     ],
   };
+}
+
+/** 会话按自己的话接着做时的那一条（question 喂回 brief.answers，让它续着干；line 进 PR 正文「按推荐先做了」）。 */
+export interface AssumedBlocked {
+  question: string;
+  said: string;
+  line: string;
+}
+
+/**
+ * 退回重问到数了、会话还说要人才能往下做（#259 第 3 个 PR，创始人 2026-09-28 下午拍的删减清单第 1 条：
+ * 「单子范围内的岔路按推荐先走，只有人闸和安全边界才停」）：不再停下等人——把它自己写的话（question 优先，
+ * 没有就 reason）当推荐或假设，接着干。一个字都拿不出（说不清）才回 null，交回调用方走失败梯子（换路由、
+ * 换模型），不装作有话可接、也不无限重试——这是和分诊说不清（triage.ts 的 decideTriage）不一样的地方：分诊
+ * 好歹有一份「AI 理解为」兜底，会话明说卡住却什么都拿不出时没有东西可接，换一条路由、换一个模型更可能有用。
+ */
+export function assumedFromBlocked(
+  needs: 'human' | 'info',
+  said: string,
+  reasked: number,
+): AssumedBlocked | null {
+  const trimmed = said.trim();
+  if (!trimmed) return null;
+  const needsWord = needs === 'human' ? '要人拍板' : '缺信息';
+  const question = `会话说卡住（${needsWord}）：${trimmed}`;
+  return {
+    question,
+    said: trimmed,
+    line: `${question} → 退回 ${reasked} 次还这样，按会话自己写的话接着做，不再停下等人`,
+  };
+}
+
+/** 到数按会话自己的话接着做时告诉人一声（照常发卡片：驾驶舱、飞书的「已按推荐先做」，#259）；报不出去不挡流程。 */
+async function alertAssumedBlocked(kit: Kit, detail: string, dedupeKey: string): Promise<void> {
+  try {
+    await kit.acts.raiseAlert({ ...kit.scope, level: 'info', title: '已按推荐先做', detail, dedupeKey });
+  } catch (error) {
+    if (isCancellation(error)) throw error;
+    log.warn('报警没发出去，照样按会话自己的话接着做', { error: String(error) });
+  }
 }
 
 // ---- 跑一个阶段的会话
@@ -1172,8 +1222,11 @@ async function stageLoop<K extends OutputKind>(
     if (end.outcome === 'blocked') {
       const blocked = end.blocked;
       // 问他不挡路（#259）：说要人拍、缺信息（human、info）的不停下等，退回会话让它带选项和推荐用 fleet ask 问（命令当场
-      // 返回）、按推荐接着干；退回到数还这样才停下等人。只有他本人才有的东西（access）、别的（other）照旧等人。
-      // 接这道改法之前起的执行，重放时照老样子问了等回答。
+      // 返回）、按推荐接着干。只有他本人才有的东西（access）、别的（other）照旧等人（下面 else 分支）。
+      // 判 needs 的写法在两个 if 里各写一遍（没抽成变量）：TS 从 blocked?.needs 那样的可选链推出的字面量类型，抽成
+      // 单独的 boolean 存起来会丢；重复这几个字换来两处都能直接用 blocked.needs、不用再判一次 undefined。
+      // patched('blocked-reask') 的调用位置和接这道改法之前一字不差——老执行到数那一轮压根不会走到这句，
+      // call 的次数不能因为这次改动多问一次，见文件头「patched() 本身也要记进历史」。
       if (
         (blocked?.needs === 'human' || blocked?.needs === 'info') &&
         reasked < reaskLimit(kit.limits) &&
@@ -1186,36 +1239,65 @@ async function stageLoop<K extends OutputKind>(
         stick = picked.route.routeId;
         continue;
       }
-      const question = blocked?.question ?? blocked?.reason ?? '会话说需要人回答';
-      const answer = await askAndWait(kit, question, blocked?.options, runId);
-      answers.push({ question, answer });
-      stick = picked.route.routeId;
-      continue;
+      if ((blocked?.needs === 'human' || blocked?.needs === 'info') && patched('blocked-proceed')) {
+        // 退回到数还这样（#259 第 3 个 PR）：按会话自己写的推荐或假设接着做，只有说不清（下面 assumed 是 null）才落到
+        // 下面的失败分流（换路由、换模型），不无限重试。接这道改法之前起的执行，重放时照老样子往下问了等回答（else 分支）。
+        const assumed = assumedFromBlocked(blocked.needs, blocked.question ?? blocked.reason, reasked);
+        if (assumed) {
+          kit.assumedNotes = [...kit.assumedNotes, assumed.line];
+          kit.view.lastProblem = assumed.line;
+          kit.onChange();
+          await alertAssumedBlocked(
+            kit,
+            assumed.line,
+            `${workflowInfo().workflowId}:assumed-blocked:${kit.assumedNotes.length}`,
+          );
+          answers.push({ question: assumed.question, answer: assumed.said });
+          stick = picked.route.routeId;
+          continue;
+        }
+        // 两样都没有：说不清，往下走（不 continue）到下面的失败分流，不装作按推荐放行了。
+      } else {
+        const question = blocked?.question ?? blocked?.reason ?? '会话说需要人回答';
+        const answer = await askAndWait(kit, question, blocked?.options, runId);
+        answers.push({ question, answer });
+        stick = picked.route.routeId;
+        continue;
+      }
     }
 
     const failure: FailureInfo =
-      end.outcome === 'stalled'
+      end.outcome === 'blocked'
         ? {
             source,
-            code: 'SESSION_STALLED',
-            message: end.failure?.message ?? '会话没动静了',
+            code: 'BLOCKED_NO_ASSUMPTION',
+            message: `会话说卡住要人才能往下做，退回 ${reasked} 次让它带推荐重问，还是一个字的推荐或假设都拿不出：${
+              (end.blocked?.question ?? end.blocked?.reason ?? '').trim() || '（没写卡在哪）'
+            }`,
             retryable: true,
           }
-        : end.outcome === 'stopped'
-          ? { source, code: 'SESSION_STOPPED', message: '会话被外面停掉了', retryable: true }
-          : end.outcome === 'done'
-            ? {
-                source,
-                code: 'WRONG_OUTPUT',
-                message: `要的是 ${request.expect}，交回来的是 ${end.output?.kind ?? '空'}`,
-                retryable: true,
-              }
-            : {
-                source,
-                code: end.failure?.code ?? 'SESSION_FAILED',
-                message: end.failure?.message ?? '',
-                retryable: end.failure?.retryable ?? null,
-              };
+        : end.outcome === 'stalled'
+          ? {
+              source,
+              code: 'SESSION_STALLED',
+              message: end.failure?.message ?? '会话没动静了',
+              retryable: true,
+            }
+          : end.outcome === 'stopped'
+            ? { source, code: 'SESSION_STOPPED', message: '会话被外面停掉了', retryable: true }
+            : end.outcome === 'done'
+              ? {
+                  source,
+                  code: 'WRONG_OUTPUT',
+                  message: `要的是 ${request.expect}，交回来的是 ${end.output?.kind ?? '空'}`,
+                  retryable: true,
+                }
+              : {
+                  source,
+                  code: end.failure?.code ?? 'SESSION_FAILED',
+                  message: end.failure?.message ?? '',
+                  retryable: end.failure?.retryable ?? null,
+                };
     const next = await judge(kit, 'failure', {
       failure,
       counters,
