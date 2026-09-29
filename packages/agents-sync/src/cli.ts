@@ -24,7 +24,7 @@ import {
 import type { Platform } from './targets.ts';
 import { applyToolConfig, checkToolConfig } from './tool-config.ts';
 
-export const USAGE = `agents-sync —— 把 fleet-dao 仓里 AGENTS.md 的通用段、agents/skills/、agents/hooks/ 分发到这台机器上各家 AI 的全局入口
+export const USAGE = `agents-sync —— 把 fleet-dao 仓里 AGENTS.md 的通用段、agents/skills/（自研）、agents/skills-vendor/（第三方，照锁文件核过才发）、agents/hooks/ 分发到这台机器上各家 AI 的全局入口
 
 用法（三种模式挑一种）：
   agents-sync --check        只读：逐家报 一致 / 漂移 / 缺失 / 没装（跳过）/ 没查成；最后报这台同步到哪个提交、落后主线几个
@@ -285,7 +285,7 @@ export function runCli(argv: readonly string[], deps: Deps): number {
       const mf = manifestPath(home, deps.platform);
       if (args.mode === '--check') {
         section('通用段（AGENTS.md 上半段）', checkRules(ctx, src));
-        section('skill（agents/skills/）', checkSkills(ctx, src, readManifest(mf)));
+        section('skill（agents/skills/、agents/skills-vendor/）', checkSkills(ctx, src, readManifest(mf)));
         section('钩子（agents/hooks/）', checkHooks(ctx, src, hooksOff));
         section('全局 git 忽略（_tmp/）', checkGitExcludes(ctx));
         section('各家配置里的开关', checkToolConfig(ctx));
@@ -294,7 +294,7 @@ export function runCli(argv: readonly string[], deps: Deps): number {
         const rules = applyRules(ctx, src, backups);
         section('通用段（AGENTS.md 上半段）', rules);
         const skills = applySkills(ctx, src, readManifest(mf));
-        section('skill（agents/skills/）', skills);
+        section('skill（agents/skills/、agents/skills-vendor/）', skills);
         const hooks = applyHooks(ctx, src, backups, hooksOff);
         section('钩子（agents/hooks/）', hooks);
         const config = applyToolConfig(ctx, backups);

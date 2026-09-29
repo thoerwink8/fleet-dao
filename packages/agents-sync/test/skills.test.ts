@@ -101,11 +101,13 @@ describe('装', () => {
     expect(get(m.home, '.claude/skills/grill-me/SKILL.md')).toBe(GRILL['SKILL.md']);
   });
 
-  it('只差 \\r：不算漂移', () => {
+  it('只差 \\r\\n 行尾：不算漂移；单独的 \\r（终端里能盖住前面的字）算漂移', () => {
     const m = machine({ 'grill-me': GRILL });
     m.apply();
     put(m.home, '.claude/skills/grill-me/SKILL.md', GRILL['SKILL.md'].replaceAll('\n', '\r\n'));
     expectKind(m.check(), '~/.claude/skills', 'ok');
+    put(m.home, '.claude/skills/grill-me/SKILL.md', GRILL['SKILL.md'].replace('拷问我。', '拷问\r我。'));
+    expectKind(m.check(), '~/.claude/skills/grill-me', 'drift');
   });
 });
 
