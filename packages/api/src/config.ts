@@ -86,6 +86,23 @@ export function temporalSettings(
   };
 }
 
+/** release.env 的 FLEET_SERVICES 里认识的应用服务名：要和 deploy/release.sh 的 APP_UNITS 一样（config.test.ts 核对）。 */
+export const APP_SERVICES: readonly string[] = ['fleet-engine', 'fleet-api'];
+
+/**
+ * 这台机器开没开引擎：release.env 的 FLEET_SERVICES（空格分隔的应用服务名，发布脚本照它起停）里有没有 fleet-engine。
+ * 后端单元把 release.env 也读进环境（deploy/france/fleet-api.service），后端和发布脚本认同一处声明，不另写一份。
+ * 没读到这一项（开发、测试、机器上没有 release.env）、或里面有不认识的名字（拼错了）：读不懂，一律按开着算——宁可多报
+ * 一项红，也不把引擎坏了说成没事。
+ */
+export function engineEnabled(env: Env): boolean {
+  const services = env.FLEET_SERVICES;
+  if (services === undefined) return true;
+  const listed = services.split(/\s+/).filter(Boolean);
+  if (listed.some((s) => !APP_SERVICES.includes(s))) return true;
+  return listed.includes('fleet-engine');
+}
+
 export function loadConfig(env: Env): Config {
   const problems: string[] = [];
   const fleetEnv = parseEnv(env.FLEET_ENV, problems);

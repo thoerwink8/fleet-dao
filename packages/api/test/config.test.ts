@@ -1,5 +1,6 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { ConfigError, loadConfig } from '../src/config.ts';
+import { APP_SERVICES, ConfigError, engineEnabled, loadConfig } from '../src/config.ts';
 
 const PROD = {
   FLEET_ENV: 'production',
@@ -58,6 +59,58 @@ describe('配置', () => {
       temporalNamespace: 'fleet-prod',
       fleetTaskQueue: 'fleet-main',
     });
+  });
+
+  it('这台机器开没开引擎看 release.env 的 FLEET_SERVICES：列了 fleet-engine 才算开，只留 fleet-api 或空的算关', () => {
+    expect(engineEnabled({ FLEET_SERVICES: 'fleet-engine fleet-api' })).toBe(true);
+    expect(engineEnabled({ FLEET_SERVICES: 'fleet-api fleet-engine' })).toBe(true);
+    expect(engineEnabled({ FLEET_SERVICES: '  fleet-engine  ' })).toBe(true);
+    expect(engineEnabled({ FLEET_SERVICES: 'fleet-api' })).toBe(false);
+    expect(engineEnabled({ FLEET_SERVICES: '' })).toBe(false);
+  });
+
+  it('故意造出失败：读不懂的一律按开着算，不能当成「关了」把引擎的红盖住（没读到、拼错了名字、多了不认识的名字）', () => {
+    expect(engineEnabled({})).toBe(true);
+    expect(engineEnabled({ FLEET_SERVICES: undefined })).toBe(true);
+    expect(engineEnabled({ FLEET_SERVICES: 'fleet-engin fleet-api' })).toBe(true);
+    expect(engineEnabled({ FLEET_SERVICES: 'fleet-engine-old fleet-api' })).toBe(true);
+    expect(engineEnabled({ FLEET_SERVICES: 'fleet-api fleet-gateway' })).toBe(true);
+  });
+
+  it('认识的服务名和发布脚本的 APP_UNITS 是同一份（一边加了服务、这边不认，就会一律按开着算）', () => {
+    const script = readFileSync(new URL('../../../deploy/release.sh', import.meta.url), 'utf8');
+    const units = /^APP_UNITS=\(([^)]*)\)/m.exec(script)?.[1]?.trim().split(/\s+/);
+    expect(units).toBeDefined();
+    expect([...(units ?? [])].sort()).toEqual([...APP_SERVICES].sort());
+  });
+
+  /** fleet-api.service 把 release.env 读进环境：带「-」（机器上没有这个文件也起）、放在 api.env 前面（同名键以 api.env 为准）。 */
+  const readsReleaseEnvBeforeApiEnv = (unit: string): boolean => {
+    const files = [...unit.matchAll(/^EnvironmentFile=(.+)$/gm)].map((m) => m[1]);
+    const release = files.indexOf('-/etc/fleet-dao/release.env');
+    const api = files.indexOf('/etc/fleet-dao/api.env');
+    return release >= 0 && api >= 0 && release < api;
+  };
+
+  it('后端单元真把 release.env 读进环境（否则 engineEnabled 永远读不到 FLEET_SERVICES、一直按开着算）；故意改坏的三种都查得出', () => {
+    const unit = readFileSync(new URL('../../../deploy/france/fleet-api.service', import.meta.url), 'utf8');
+    expect(readsReleaseEnvBeforeApiEnv(unit)).toBe(true);
+    const line = 'EnvironmentFile=-/etc/fleet-dao/release.env\n';
+    expect(unit).toContain(line);
+    expect(readsReleaseEnvBeforeApiEnv(unit.replace(line, ''))).toBe(false); // 没读
+    expect(
+      readsReleaseEnvBeforeApiEnv(
+        unit
+          .replace(line, '')
+          .replace(
+            'EnvironmentFile=/etc/fleet-dao/api.env\n',
+            `EnvironmentFile=/etc/fleet-dao/api.env\n${line}`,
+          ),
+      ),
+    ).toBe(false); // 放到 api.env 后面
+    expect(
+      readsReleaseEnvBeforeApiEnv(unit.replace(line, 'EnvironmentFile=/etc/fleet-dao/release.env\n')),
+    ).toBe(false); // 少了「-」：没这个文件时起不来
   });
 
   it('什么都不给就拒绝启动，并且一次列出全部缺的', () => {

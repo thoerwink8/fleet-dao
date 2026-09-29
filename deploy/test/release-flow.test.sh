@@ -284,6 +284,9 @@ if [[ -z "$NODE" ]]; then
 else
   body='{"ok":false,"checks":{"database":{"ok":true},"temporal":{"ok":false,"code":"not_connected","message":"Temporal 客户端还没接上"}}}'
   check "503 的报告逐项给出" "$(report_items "$body" | tr '\t\n' '|;')" "database|ok|;temporal|bad|Temporal 客户端还没接上;"
+  # 引擎按设置没开时后端报「未接」（ok:true + status:not_wired）：发布脚本当好的看，整体也回 200
+  body='{"ok":true,"checks":{"database":{"ok":true},"engine":{"ok":true,"status":"not_wired","message":"这台机器按设置没开引擎"}}}'
+  check "「未接」的项按好的给出" "$(report_items "$body" | tr '\t\n' '|;')" "database|ok|;engine|ok|;"
   for body in '<html>502 Bad Gateway</html>' '{"ok":true}' '{"ok":"true","checks":{}}' '{"ok":true,"checks":[]}' ''; do
     report_items "$body" >/dev/null 2>&1
     check "认不出的回答退出 1：${body:-（空）}" "$?" 1
@@ -333,6 +336,23 @@ compare_api_items "$before_items" \
 check "库切之前好、切之后坏：算这一版的错" "$?" 1
 check "库变坏：报红" "$(printf '%s\n' "${REDS[@]}" | grep -c 'database 切之前是好的，换了这一版不好了：连不上')" 1
 check "切之前就不好的（temporal）：只标待处理" "$(printf '%s\n' "${PENDING[@]}" | grep -c 'temporal 不好：没接上（切之前就不好')" 1
+
+_fs_saved="$FLEET_SERVICES"
+FLEET_SERVICES="fleet-api" # 本机没启用引擎（法国 2026-09-29 起临时关了）
+reset
+compare_api_items "$(printf 'database\tok\t\nengine\tok\t\n')" \
+  "$(printf 'database\tok\t\nengine\tbad\t引擎工人不在（engine_offline）\n')" >/dev/null
+check "本机没启用引擎：切之前引擎好、切之后后端报引擎不在——预期的，不算这一版的错" "$?" 0
+check "没启用引擎：没有红" "${#REDS[@]}" 0
+check "没启用引擎：记成待处理、写明是预期的" \
+  "$(printf '%s\n' "${PENDING[@]}" | grep -c 'engine 不好.*本机没启用引擎.*不退回')" 1
+FLEET_SERVICES="fleet-engine fleet-api" # 故意造出失败：引擎启用了却坏了，照旧算这一版的错，不能被上面那条放过
+reset
+compare_api_items "$(printf 'database\tok\t\nengine\tok\t\n')" \
+  "$(printf 'database\tok\t\nengine\tbad\t引擎工人不在（engine_offline）\n')" >/dev/null
+check "本机启用了引擎：切之前好、切之后坏——算这一版的错（真坏的不能放过）" "$?" 1
+check "启用了引擎：报红" "$(printf '%s\n' "${REDS[@]}" | grep -c 'engine 切之前是好的，换了这一版不好了')" 1
+FLEET_SERVICES="$_fs_saved"
 
 echo "== 飞书网关：这一版带网关、香港配置齐了才发过去切过去；香港已收下的不再传；配置不齐、这一版没网关都不动香港网关"
 rm -rf "${RELEASES:?}"/* "$RELEASES"/.history

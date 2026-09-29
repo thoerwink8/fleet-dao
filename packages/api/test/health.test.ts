@@ -6,7 +6,7 @@ import { PublicHealthError, runHealthChecks, serviceHealthChecks } from '../src/
 import { silentLogger } from '../src/log.ts';
 import { probeDb, sqlState, withStatementTimeout } from '../src/pg-store.ts';
 import type { Logger, Store } from '../src/ports.ts';
-import { notConnectedTemporal } from '../src/temporal.ts';
+import { ENGINE_OFF, notConnectedTemporal } from '../src/temporal.ts';
 import { errorCode, harness, IDS, write } from './harness.ts';
 
 /** 有一张确认了很久的待开单。 */
@@ -49,8 +49,11 @@ describe('健康检查', () => {
     expect(h.logs.some((l) => String(l.fields?.error).includes(internal))).toBe(true);
   });
 
-  /** serviceHealthChecks 的一套：库、实时推送、Temporal、GitHub 事件、判断题都好，只看飞书草稿开单这两项。 */
-  const services = (draftOpener: { check(): Promise<void>; readonly notWired?: string }) =>
+  /** serviceHealthChecks 的一套：库、实时推送、Temporal、GitHub 事件、判断题都好，只看飞书草稿开单这两项；extra 盖掉默认的几项。 */
+  const services = (
+    draftOpener: { check(): Promise<void>; readonly notWired?: string },
+    extra: Partial<Parameters<typeof serviceHealthChecks>[0]> = {},
+  ) =>
     serviceHealthChecks({
       probeDb: async () => {},
       feed: { probe: async () => {} },
@@ -65,6 +68,7 @@ describe('健康检查', () => {
       githubApp: async () => {},
       canary: { check: async () => {} },
       watchdog: { check: async () => {} },
+      ...extra,
     });
 
   it('还没接上的功能报「未接」：整体照样 200，这一项看得到「未接」和单号，积压也不算坏', async () => {
@@ -83,6 +87,41 @@ describe('健康检查', () => {
       status: 'not_wired',
       message: '飞书草稿开成 issue 还没接上（#91）：确认了的草稿先留在待开单',
     });
+  });
+
+  it('这台机器按设置没开引擎：engine 项报「未接」、不去查任务队列，整体照样 200（发布时不会被它退回）', async () => {
+    let asked = 0;
+    const engineDown = {
+      check: async () => {},
+      checkEngine: async () => {
+        asked++;
+        throw new PublicHealthError('engine_offline', '引擎不在线');
+      },
+    };
+    const h = harness({
+      health: services(notWiredDraftOpener(), { temporal: engineDown, engineNotWired: ENGINE_OFF }),
+    });
+    const res = await h.cockpit.request('/healthz');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { ok: boolean; checks: Record<string, unknown> };
+    expect(body.ok).toBe(true);
+    expect(body.checks.engine).toEqual({ ok: true, status: 'not_wired', message: ENGINE_OFF });
+    expect(asked).toBe(0);
+  });
+
+  it('故意造出失败：开着引擎（没有 engineNotWired）而引擎不在，engine 项照样红、整体 503——「没开」的声明只认装配时给的', async () => {
+    const engineDown = {
+      check: async () => {},
+      checkEngine: async () => {
+        throw new PublicHealthError('engine_offline', '引擎不在线');
+      },
+    };
+    const report = await runHealthChecks(
+      services(notWiredDraftOpener(), { temporal: engineDown }),
+      silentLogger,
+    );
+    expect(report.ok).toBe(false);
+    expect(report.checks.engine).toEqual({ ok: false, code: 'engine_offline', message: '引擎不在线' });
   });
 
   it('接上以后出错照样红：真实现的 check 抛错、积压太久，整体 503', async () => {

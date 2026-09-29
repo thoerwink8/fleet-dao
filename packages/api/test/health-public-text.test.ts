@@ -28,7 +28,12 @@ import { silentLogger } from '../src/log.ts';
 import { probeDb } from '../src/pg-store.ts';
 import type { Logger, Store } from '../src/ports.ts';
 import { sessionOrgHealthCheck } from '../src/session-org-health.ts';
-import { createEnginePollerCheck, createNamespaceCheck, notConnectedTemporal } from '../src/temporal.ts';
+import {
+  createEnginePollerCheck,
+  createNamespaceCheck,
+  ENGINE_OFF,
+  notConnectedTemporal,
+} from '../src/temporal.ts';
 import { WATCHDOG_NOT_HERE, watchdogHealthCheck } from '../src/watchdog-health.ts';
 import { fakePostgres } from './fake-postgres.ts';
 import { judgeCatalog, judgeMachine, makeFakeBackend, recordJudgeCall } from './judge-fixture.ts';
@@ -285,6 +290,7 @@ describe('公开的健康报告', () => {
           probeDb: async () => {},
           feed: { probe: async () => {} },
           temporal: { check: async () => {}, checkEngine: async () => {} },
+          engineNotWired: ENGINE_OFF,
           githubEvents: async () => {},
           draftOpener: notWiredDraftOpener(),
           draftBacklog: async () => {},
@@ -306,6 +312,7 @@ describe('公开的健康报告', () => {
       services: await services({ check: async () => {}, notWired: GATEWAY_NO_PASS }),
       noted: await services(seen),
     };
+    expect(pending.services.checks.engine).toEqual({ ok: true, status: 'not_wired', message: ENGINE_OFF });
     expect(pending.services.checks.draft_opener).toMatchObject({ ok: true, status: 'not_wired' });
     expect(pending.services.checks.draft_backlog).toMatchObject({ ok: true, status: 'not_wired' });
     // 项名叫 judge 不叫 jev：jev 在公开页的禁用词名单上
