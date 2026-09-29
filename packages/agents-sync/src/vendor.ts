@@ -5,7 +5,7 @@
 import { createHash } from 'node:crypto';
 import { type Dirent, lstatSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { type Tree, withoutCr } from './tree.ts';
+import { crlfToLf, type Tree } from './tree.ts';
 
 export const VENDOR_DIR = ['agents', 'skills-vendor'] as const;
 export const LOCK_NAME = 'vendor.lock.json';
@@ -31,7 +31,7 @@ export interface VendorSkill {
   license: string;
   reviewedAt: string;
   reviewedBy: string;
-  /** 相对路径 → 内容的 sha256（\r 不算，和 sameTree 同一种比法） */
+  /** 相对路径 → 内容的 sha256（CRLF 行尾不算，和 sameTree 同一种比法） */
   files: Record<string, string>;
   /** 收进来时加的文件（上游这个目录里没有的，如从仓根拷来的 LICENSE）→ 为什么加 */
   added: Record<string, string>;
@@ -56,9 +56,9 @@ export type VendorRead =
   | { ok: true; skills: Map<string, Tree>; lock: VendorLock | null }
   | { ok: false; why: string };
 
-/** 一段内容的哈希：\r 不算，Windows 检出和 Linux 检出算出来一样 */
+/** 一段内容的哈希：只有 CRLF 行尾不算（Windows 检出和 Linux 检出算出来一样）；单独的 \r 算内容，塞一个进去哈希就变 */
 export function hashOf(content: Buffer): string {
-  return createHash('sha256').update(withoutCr(content)).digest('hex');
+  return createHash('sha256').update(crlfToLf(content)).digest('hex');
 }
 
 const isObj = (v: unknown): v is Record<string, unknown> =>
