@@ -18,7 +18,7 @@ async function claimLocal(issueNumber: number): Promise<LocalClaim> {
   const r = spawnSync(
     process.execPath,
     [
-      join(root, 'agents', 'skills', 'commander-seat', 'scripts', 'claim.mjs'),
+      join(root, 'agents', 'skills', 'commander', 'scripts', 'claim.mjs'),
       'take',
       String(issueNumber),
       '--owner',
@@ -50,7 +50,7 @@ try {
   if (r.claimed?.state === 'skipped') console.log(r.claimed.why);
   if (r.claimed?.state === 'failed') {
     console.error(
-      `单开了（#${r.number}），但替帅位在库里认领没成：${r.claimed.why}\n「本机做」标签照旧挡住自动派；认领用 node agents/skills/commander-seat/scripts/claim.mjs take ${r.number} --owner seat --label 帅位。别重开单。`,
+      `单开了（#${r.number}），但替帅位在库里认领没成：${r.claimed.why}\n「本机做」标签照旧挡住自动派；认领用 node agents/skills/commander/scripts/claim.mjs take ${r.number} --owner seat --label 帅位。别重开单。`,
     );
     process.exitCode = 3;
   }

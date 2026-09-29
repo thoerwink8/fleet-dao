@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 
-const SCRIPTS = fileURLToPath(new URL('../skills/commander-seat/scripts/', import.meta.url));
+const SCRIPTS = fileURLToPath(new URL('../skills/commander/scripts/', import.meta.url));
 const NOW = new Date('2026-09-28T02:00:00Z');
 
 interface RunResult {
