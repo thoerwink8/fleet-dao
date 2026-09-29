@@ -31,12 +31,15 @@ import {
   slashed,
 } from './targets.ts';
 import { linkTarget, readTree, removeEntry, sameTree, type Tree, treeDiff, writeTree } from './tree.ts';
+import { readVendor } from './vendor.ts';
 
 export interface Sources {
   /** 通用段：含两行标记，\n 换行 */
   block: string;
-  /** agents/skills/ 下的各个 skill（目录名 → 文件） */
+  /** agents/skills/（自研）和 agents/skills-vendor/（第三方，照锁文件核过）下的各个 skill（目录名 → 文件） */
   skills: Map<string, Tree>;
+  /** skills 里哪几个是第三方的（报告里标出来） */
+  vendor: ReadonlySet<string>;
   /** agents/hooks/ 下的脚本；读不到时是为什么（只影响钩子这一段，规矩和 skill 照写） */
   hooks: { ok: true; tree: Tree } | { ok: false; why: string };
 }
@@ -78,7 +81,19 @@ export function readSources(repo: string): { ok: true; value: Sources } | { ok: 
   } catch (err) {
     return { ok: false, why: `读不了仓里的 agents/skills/ 下的文件（${code(err)}）` };
   }
-  return { ok: true, value: { block: shared.block, skills, hooks: readHooks(repo) } };
+  // 第三方的要先照锁文件核过才发：核不过就整体没查成，不拿核不过的顶上、也不悄悄少发（少发会让清单把已装的当成仓里删了、撤掉）
+  const vendor = readVendor(repo);
+  if (!vendor.ok) return { ok: false, why: `第三方 skill（agents/skills-vendor/）：${vendor.why}` };
+  for (const name of vendor.skills.keys()) {
+    if (skills.has(name))
+      return {
+        ok: false,
+        why: `agents/skills/ 和 agents/skills-vendor/ 里都有「${name}」：名字撞了，不知道该装哪份`,
+      };
+  }
+  const vendorNames = new Set(vendor.skills.keys());
+  for (const [name, tree] of vendor.skills) skills.set(name, tree);
+  return { ok: true, value: { block: shared.block, skills, vendor: vendorNames, hooks: readHooks(repo) } };
 }
 
 /** agents/hooks/：读不到不挡规矩和 skill（旧检出里还没有它），钩子那一段报没查成 */
@@ -289,7 +304,11 @@ function nothingToDo(src: Sources, m: Manifest): boolean {
 }
 
 function noSkillsLine(): Line {
-  return line('skip', 'agents/skills', '仓里的 agents/skills/ 是空的：没有 skill 可分发');
+  return line(
+    'skip',
+    'agents/skills',
+    '仓里的 agents/skills/ 和 agents/skills-vendor/ 都是空的：没有 skill 可分发',
+  );
 }
 
 export function checkSkills(ctx: Ctx, src: Sources, manifest: ManifestRead): Line[] {
@@ -446,13 +465,14 @@ export function applySkills(ctx: Ctx, src: Sources, manifest: ManifestRead): Lin
       const dest = join(abs, s.name);
       const k = `${key}/${s.name}`;
       try {
+        const third = src.vendor.has(s.name) ? '（第三方 skill，锁文件核过）' : '';
         if (s.do === 'install') {
           writeTree(dest, s.tree);
-          out.push(line('changed', k, `装上了${who}`));
+          out.push(line('changed', k, `装上了${who}${third}`));
         } else if (s.do === 'replace') {
           removeEntry(dest);
           writeTree(dest, s.tree);
-          out.push(line('changed', k, `换成了仓里的版本（原来${s.was}）`));
+          out.push(line('changed', k, `换成了仓里的版本（原来${s.was}）${third}`));
         } else {
           if (lstatOrNull(dest) !== null) {
             removeEntry(dest);

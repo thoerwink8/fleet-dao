@@ -45,7 +45,7 @@ export function readTree(dir: string): ReadTree {
 
 const CR = 0x0d;
 
-function withoutCr(buf: Buffer): Buffer {
+export function withoutCr(buf: Buffer): Buffer {
   return buf.includes(CR) ? Buffer.from(buf.filter((b) => b !== CR)) : buf;
 }
 
