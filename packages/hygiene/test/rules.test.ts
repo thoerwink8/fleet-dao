@@ -17,6 +17,11 @@ const B64 = (n: number, seed: number) =>
   pseudoRandom(n, seed, 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/');
 const HEX = (n: number, seed: number) => pseudoRandom(n, seed, '0123456789abcdef');
 const ORG = pseudoNumber(4, 7);
+const B64URL = (n: number, seed: number) =>
+  pseudoRandom(n, seed, 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_');
+// GitHub 2026-04-27 起新换的安装令牌：ghs_<应用号>_<JWT>（应用号后面还有下划线，JWT 三段之间是点、段里有 - 和 _）。
+// 分段拼、源码里不出现整段。
+const NEW_INSTALL_TOKEN = `${['ghs', pseudoNumber(7, 61)].join('_')}_${['eyJhbGciOiJSUzI1NiJ9', `eyJpYXQiOj${B64URL(30, 62)}`, B64URL(43, 63)].join('.')}`;
 
 const planted: [RuleId, string][] = [
   ['email', `mail me: ${[R(8, 2).toLowerCase(), 'mail.co'].join('@')}`],
@@ -39,6 +44,9 @@ const planted: [RuleId, string][] = [
   ['token', `aws ${['AKIA', pseudoRandom(16, 15, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567')].join('')}`],
   ['token', `bot ${['7' + pseudoNumber(8, 16), `AA${R(33, 17)}`].join(':')}`],
   ['token', `Authorization: ${['Bearer', R(40, 18)].join(' ')}`],
+  // 新格式的安装令牌：旧写法（ghs_ 后面连着 16 位字母数字）认不出它，报的是「没有问题」。
+  ['token', `installation token ${NEW_INSTALL_TOKEN}`],
+  ['token', `git remote set-url origin https://x-access-token:${NEW_INSTALL_TOKEN}@github.com/o/r.git`],
   ['jwt', `bearer ${['eyJhbGciOiJSUzI1NiJ9', `eyJzdWIiOi${R(24, 19)}`].join('.')}`],
   ['secret-assign', `{"app_secret": "${R(32, 20)}"}`],
   ['secret-assign', `FEISHU_APP_SECRET=${R(32, 21)}`],
@@ -136,6 +144,10 @@ describe('形状像、但不算的', () => {
     [
       '顺序、重复、带假字样的令牌',
       'ghs_abcdefghijklmnop · ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx · ghs_replayreplayreplay · sk-proj-abcdefghijklmnopqrstuvwxyz · Bearer abcdefghijklmnopqrstuvwxyz',
+    ],
+    [
+      '新格式安装令牌的文字说明、过短的串、代码里的标识符',
+      'ghs_APPID_JWT · ghs_1234567_abc.def · ghs_some_long_identifier_name_in_code · ghs_1234567_ 后面没东西',
     ],
     ['单词里的 sk-', 'task-abcdefghijklmnopqrstuvwxyz'],
     [
