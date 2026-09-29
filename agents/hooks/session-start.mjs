@@ -57,10 +57,24 @@ export function why(r) {
     .split(/\r?\n/)
     .map((l) => l.trim())
     .find(Boolean);
-  return first || `退出码 ${r.status}`;
+  if (first) return first;
+  // Windows 上程序没起来会给 0xC000xxxx 这类很大的退出码（缺 DLL 是 0xC0000135）：光写十进制看不出来
+  if (typeof r.status === 'number' && r.status > 0x7fffffff)
+    return `退出码 ${r.status}（0x${r.status.toString(16).toUpperCase()}，Windows 上程序没起来，多半缺 DLL）`;
+  return `退出码 ${r.status}`;
 }
 
 const ok = (r) => r.status === 0 && !r.error;
+
+/**
+ * git 自己没跑起来（起不来、超时、被系统叫停、没有退出码），和「git 说这里不是仓」是两回事：git 说话了，
+ * 不是仓时退出码是 128（或者 0 加一个 false）。前者不能说成后者——2026-09-30 本机 git 缺 DLL（退出码 3221225781）
+ * 被说成「不是 git 仓」，把真毛病盖住了。
+ */
+export function gitBroken(r) {
+  if (r.error || typeof r.status !== 'number') return true;
+  return r.status !== 0 && r.status !== 128;
+}
 const short = (sha) => String(sha).slice(0, 7);
 
 function commonOf(g) {
@@ -77,6 +91,7 @@ function commonOf(g) {
 export function checkHere(cwd, git) {
   const g = (...a) => git(cwd, a);
   const inside = g('rev-parse', '--is-inside-work-tree');
+  // 不是 git 仓的目录不出声；git 自己跑不起来也不在这儿说（第 2 件同步那一句会说清，免得同一个毛病说两遍）
   if (!ok(inside) || inside.stdout.trim() !== 'true') return { line: null, fetch: null };
   const common = commonOf(g);
   const fetched = g('fetch', '-q', 'origin');
@@ -203,6 +218,8 @@ export function syncFleet({ home, git, sync, fetch = null, now = Date.now() }) {
     return `规矩同步没查成：记下的 fleet-dao 检出 ${repo} 不在了；在现在的检出里跑一遍 node packages/agents-sync/bin/agents-sync --apply，${READ_MAIN}。`;
   const g = (...a) => git(repo, a);
   const inside = g('rev-parse', '--is-inside-work-tree');
+  if (gitBroken(inside))
+    return `规矩同步没查成：这台的 git 跑不起来（${why(inside)}），没法核对记下的检出 ${repo}；${READ_MAIN}。`;
   if (!ok(inside) || inside.stdout.trim() !== 'true')
     return `规矩同步没查成：记下的检出 ${repo} 不是 git 仓（${why(inside)}）；${READ_MAIN}。`;
   const common = commonOf(g);

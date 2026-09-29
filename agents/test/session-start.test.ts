@@ -254,6 +254,61 @@ describe('同步这台机器：没查成、没做成都明说', SLOW, () => {
     expect(f.calls).toEqual([]);
   });
 
+  // 2026-09-30 本机 git 缺 DLL（退出码 3221225781、什么都不打），钩子说成「记下的检出不是 git 仓」，把真毛病盖住了
+  it('【故意造出的失败】git 起来就被系统叫停（退出码 3221225781，没有任何输出）：说 git 跑不起来，不说不是 git 仓', () => {
+    const w = world();
+    record(w.home, w.work, g(w.work, 'rev-parse', 'HEAD'));
+    const f = fakeSync();
+    const dead: Git = () => ({ status: 3221225781, stdout: '', stderr: '' });
+    const line = hook.syncFleet({ home: w.home, git: dead, sync: f.sync });
+    expect(line).toMatch(/规矩同步没查成：这台的 git 跑不起来/);
+    expect(line).toContain('3221225781（0xC0000135');
+    expect(line).not.toMatch(/不是 git 仓/);
+    expect(f.calls).toEqual([]);
+  });
+
+  it('【故意造出的失败】git 根本起不来（找不到命令）、超时：同样说 git 跑不起来', () => {
+    const w = world();
+    record(w.home, w.work, g(w.work, 'rev-parse', 'HEAD'));
+    const missing: Git = () => ({
+      status: null,
+      stdout: '',
+      stderr: '',
+      error: Object.assign(new Error('spawnSync git ENOENT'), { code: 'ENOENT' }),
+    });
+    expect(hook.syncFleet({ home: w.home, git: missing, sync: fakeSync().sync })).toMatch(
+      /这台的 git 跑不起来（起不来：spawnSync git ENOENT）/,
+    );
+    const slow: Git = () => ({
+      status: null,
+      stdout: '',
+      stderr: '',
+      error: Object.assign(new Error('spawnSync git ETIMEDOUT'), { code: 'ETIMEDOUT' }),
+      timeoutMs: 15_000,
+    });
+    expect(hook.syncFleet({ home: w.home, git: slow, sync: fakeSync().sync })).toMatch(
+      /这台的 git 跑不起来（超过 15 秒没完）/,
+    );
+  });
+
+  it('git 说话了、这里不是仓（退出码 128）：还是「不是 git 仓」，带 git 的原话', () => {
+    const w = world();
+    record(w.home, w.work, g(w.work, 'rev-parse', 'HEAD'));
+    const notRepo: Git = () => ({
+      status: 128,
+      stdout: '',
+      stderr: 'fatal: not a git repository (or any of the parent directories): .git\n',
+    });
+    const line = hook.syncFleet({ home: w.home, git: notRepo, sync: fakeSync().sync });
+    expect(line).toMatch(/不是 git 仓（fatal: not a git repository/);
+    expect(line).not.toMatch(/git 跑不起来/);
+  });
+
+  it('会话所在的仓那一件：git 跑不起来时不出声、不崩（同步那一句会说清）', () => {
+    const dead: Git = () => ({ status: 3221225781, stdout: '', stderr: '' });
+    expect(hook.checkHere(temp('plain'), dead)).toEqual({ line: null, fetch: null });
+  });
+
   it('会话就开在 fleet-dao 检出里：远端只取一次', () => {
     const w = world();
     record(w.home, w.work, g(w.work, 'rev-parse', 'HEAD'));
