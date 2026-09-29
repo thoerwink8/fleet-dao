@@ -93,6 +93,11 @@ export function serviceHealthChecks(parts: {
   feed: { probe(timeoutMs?: number): Promise<void> };
   /** Temporal 本身，和它上面查引擎工人在不在（两项都来自同一份连接，见 temporal.ts 的 TemporalConnection）。 */
   temporal: { check(): Promise<void>; checkEngine(): Promise<void> };
+  /**
+   * 这台机器按设置没开引擎（temporal.ts 的 ENGINE_OFF，由 config.ts 的 engineEnabled 定）：engine 项报「未接」、不去查任务
+   * 队列，不算坏。开着就没有这一项，引擎不在照样红。发版脚本对「没开引擎」的机器另有一条（deploy/release.sh 的 compare_api_items）。
+   */
+  engineNotWired?: string;
   githubEvents: () => Promise<void>;
   /** 飞书草稿开单那一步（ports.ts 的 DraftOpener）：接了开不了报红；压根没接上（带 notWired）报「未接」。 */
   draftOpener: { check(): Promise<void>; readonly notWired?: string };
@@ -121,7 +126,7 @@ export function serviceHealthChecks(parts: {
     // 留出余量：比单项上限（CHECK_TIMEOUT_MS）早到点，报出来的是「ping 收不回来」而不是笼统的超时。
     { name: 'realtime', check: () => parts.feed.probe(CHECK_TIMEOUT_MS - 1_000) },
     { name: 'temporal', check: () => parts.temporal.check() },
-    { name: 'engine', check: () => parts.temporal.checkEngine() },
+    { name: 'engine', check: () => parts.temporal.checkEngine(), ...notWired(parts.engineNotWired) },
     { name: 'github_events', check: parts.githubEvents },
     { name: 'draft_opener', check: () => parts.draftOpener.check(), ...notWired(parts.draftOpener.notWired) },
     // 开单压根没接上时积压是必然的，不是坏了；接上以后等太久照样红

@@ -198,6 +198,9 @@ function isAlreadyStarted(err: unknown): boolean {
 /** FLEET_TASK_QUEUE 上 workflow、activity 两类都要有 poller、且最近一次拉活在这么久以内，才算引擎在线。 */
 const DEFAULT_POLLER_FRESH_MS = 2 * 60 * 1000;
 
+/** 这台机器按设置没开引擎（config.ts 的 engineEnabled）时，/healthz 的 engine 项报「未接」带的说明；公网看得到，只写中性的话。 */
+export const ENGINE_OFF = '这台机器按设置没开引擎';
+
 export interface PollerSnapshot {
   /** 最近一次拉活的时刻；查得到 poller 但没带这个字段时为 null。 */
   lastAccessAt: Date | null;

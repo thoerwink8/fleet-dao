@@ -17,7 +17,7 @@ import { buildApps } from './app.ts';
 import { CANARY_NOT_HERE, canaryHealthCheck } from './canary-health.ts';
 import { createChangeHub, startPgChangeFeed } from './changes.ts';
 import { createClaimStatus } from './claim-status.ts';
-import { ConfigError, loadConfig } from './config.ts';
+import { ConfigError, engineEnabled, loadConfig } from './config.ts';
 import { createDirDemoPublisher, sweepExpiredDemoLinks } from './demo.ts';
 import {
   DEPLOY_LAG_NOT_HERE,
@@ -43,7 +43,7 @@ import { createPgStore, probeDb, withStatementTimeout } from './pg-store.ts';
 import type { GitHubEventSink, IssuePlanReader } from './ports.ts';
 import { sessionOrgHealthCheck } from './session-org-health.ts';
 import { closeConnectionWhenStopping, gracefulShutdown } from './shutdown.ts';
-import { connectTemporal } from './temporal.ts';
+import { connectTemporal, ENGINE_OFF } from './temporal.ts';
 import { startWatchdogWatch, WATCHDOG_NOT_HERE, watchdogHealthCheck } from './watchdog-health.ts';
 
 const log = jsonLogger();
@@ -195,6 +195,8 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
       probeDb: () => probeDb(db),
       feed,
       temporal,
+      // 这台机器按 release.env 的 FLEET_SERVICES 没开引擎（比如法国 2026-09-29 起临时关了）：engine 项报「未接」，不报红
+      ...(engineEnabled(process.env) ? {} : { engineNotWired: ENGINE_OFF }),
       githubEvents: githubEventsCheck({ store, now, credentialsMissing: github.credentialsMissing }),
       draftOpener,
       draftBacklog: draftBacklogCheck(store, now),

@@ -709,7 +709,7 @@ ssh <法国> 'sha256sum < /etc/fleet-dao/gateway-token.env'; ssh <香港> 'sha25
 3. 从 `executions_visibility` 读这一次的开始、结束、耗时。以后再查：`fleet-temporal workflow describe --workflow-id hello-<时间>`，或以 postgres 在库 `temporal_visibility` 里：
    `select workflow_id, start_time, close_time, execution_duration / 1e6 as ms from executions_visibility where workflow_type_name = 'helloWorkflow' order by start_time desc;`
 
-要先齐的：引擎里注册 `helloWorkflow(name: string): Promise<string>`（不调活动也行）并合进主线；`release.env` 的 `FLEET_SERVICES` 加上 `fleet-engine`，发布一次。健康页的「引擎」一项要后端也在跑（`FLEET_SERVICES` 里也有 `fleet-api`）：它是后端去 Temporal 查任务队列上有没有引擎工人在取活。
+要先齐的：引擎里注册 `helloWorkflow(name: string): Promise<string>`（不调活动也行）并合进主线；`release.env` 的 `FLEET_SERVICES` 加上 `fleet-engine`，发布一次。健康页的「引擎」一项要后端也在跑（`FLEET_SERVICES` 里也有 `fleet-api`）：它是后端去 Temporal 查任务队列上有没有引擎工人在取活。`FLEET_SERVICES` 里没有 `fleet-engine`（比如法国 2026-09-29 起临时关了引擎）时，这一项报「未接」（`{ ok: true, status: 'not_wired' }`，说明「这台机器按设置没开引擎」）、整体照样 200：后端单元 `fleet-api.service` 把 `release.env` 也读进环境（放在 `api.env` 前面、带「-」），`packages/api/src/config.ts` 的 `engineEnabled` 照这一行定，没读到或认不出的名字一律按开着算（多报红、不漏报）。发布脚本对「没开引擎」的机器另有一条（`compare_api_items`）：切之前引擎还好、这一版把它撤掉，后端报引擎不在，标待处理、不退回。改 `FLEET_SERVICES` 后发布一轮，`release.env` 改过会让 `fleet-api` 重启一次才读到。
 
 ## 十一、备份与恢复
 
