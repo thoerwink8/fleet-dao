@@ -307,10 +307,12 @@ export const RULES: readonly Rule[] = [
   },
   {
     // 各家有固定前缀的令牌；Telegram 机器人令牌（编号:AA…）；Authorization 里的 Bearer 不透明令牌。
+    // GitHub 2026-04-27 起新换的安装令牌是 ghs_<应用号>_<JWT>（应用号后面还有下划线、JWT 里有点），前一种写法认不出它：
+    // 第二段专门认这个形状（应用号 + JWT 至少两段），别放宽第一段，免得代码里的 ghs_xxx_yyy 标识符都被当成令牌。
     id: 'token',
     label: '令牌',
     pattern:
-      /\b(?:gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{22,}|sk-ant-[A-Za-z0-9_-]{16,}|sk-[A-Za-z0-9_-]{20,}|xai-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|xox[abprs]-[A-Za-z0-9-]{10,}|xapp-\d-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}|glpat-[A-Za-z0-9_-]{20,}|npm_[A-Za-z0-9]{36}|tvly-[A-Za-z0-9_-]{20,}|rck_[A-Za-z0-9_-]{20,}|\d{6,10}:AA[0-9A-Za-z_-]{30,}|Bearer\s+[A-Za-z0-9._~+/-]{20,}=*)/g,
+      /\b(?:gh[pousr]_[A-Za-z0-9]{16,}|ghs_\d{1,12}_[A-Za-z0-9_-]{16,}(?:\.[A-Za-z0-9_-]{6,}){1,2}|github_pat_[A-Za-z0-9_]{22,}|sk-ant-[A-Za-z0-9_-]{16,}|sk-[A-Za-z0-9_-]{20,}|xai-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|xox[abprs]-[A-Za-z0-9-]{10,}|xapp-\d-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}|glpat-[A-Za-z0-9_-]{20,}|npm_[A-Za-z0-9]{36}|tvly-[A-Za-z0-9_-]{20,}|rck_[A-Za-z0-9_-]{20,}|\d{6,10}:AA[0-9A-Za-z_-]{30,}|Bearer\s+[A-Za-z0-9._~+/-]{20,}=*)/g,
     harmless: (token) => isFakeValue(token.replace(TOKEN_PREFIX, '')),
   },
   {
