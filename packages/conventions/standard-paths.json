@@ -15,6 +15,10 @@
       "why": "钉住技能规矩的测试：脚本改了规矩它会红，改它就是改规矩"
     },
     {
+      "path": "agents/config/claude-permissions.json",
+      "why": "各机器 Claude Code 的用户级权限（defaultMode、allow、deny）：由同步脚本写进 ~/.claude/settings.json，改它就是改每台机器上 AI 能不问就做什么"
+    },
+    {
       "path": "packages/agents-sync/src/targets.ts",
       "why": "同步工具的目标清单：规矩和技能装到哪些家、哪些位置"
     },

@@ -42,6 +42,8 @@ export interface Sources {
   vendor: ReadonlySet<string>;
   /** agents/hooks/ 下的脚本；读不到时是为什么（只影响钩子这一段，规矩和 skill 照写） */
   hooks: { ok: true; tree: Tree } | { ok: false; why: string };
+  /** agents/config/claude-permissions.json 的原文；读不到时是为什么（只影响权限那一段，别的照写）。认内容在 permissions.ts */
+  permissions: { ok: true; text: string } | { ok: false; why: string };
 }
 
 export interface Ctx {
@@ -93,7 +95,33 @@ export function readSources(repo: string): { ok: true; value: Sources } | { ok: 
   }
   const vendorNames = new Set(vendor.skills.keys());
   for (const [name, tree] of vendor.skills) skills.set(name, tree);
-  return { ok: true, value: { block: shared.block, skills, vendor: vendorNames, hooks: readHooks(repo) } };
+  return {
+    ok: true,
+    value: {
+      block: shared.block,
+      skills,
+      vendor: vendorNames,
+      hooks: readHooks(repo),
+      permissions: readPermissionsFile(repo),
+    },
+  };
+}
+
+/** agents/config/claude-permissions.json：读不到不挡规矩和 skill（旧检出里还没有它），权限那一段报没查成 */
+function readPermissionsFile(repo: string): Sources['permissions'] {
+  try {
+    return {
+      ok: true,
+      text: readFileSync(join(repo, 'agents', 'config', 'claude-permissions.json'), 'utf8'),
+    };
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT')
+      return {
+        ok: false,
+        why: '仓里没有 agents/config/claude-permissions.json（检出太旧或不全，或 --repo 指错了）',
+      };
+    return { ok: false, why: `读不了仓里的 agents/config/claude-permissions.json（${code(err)}）` };
+  }
 }
 
 /** agents/hooks/：读不到不挡规矩和 skill（旧检出里还没有它），钩子那一段报没查成 */

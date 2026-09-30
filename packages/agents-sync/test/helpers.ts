@@ -55,11 +55,22 @@ export const HOOK_FILES: Record<string, string> = {
   'stop.mjs': '// 假的收尾提醒钩子\n',
 };
 
-/** 假仓：AGENTS.md 带通用段；skills 为 null 时没有 agents/skills/ 这个目录，hooks 为 null 时没有 agents/hooks/ */
+/** 假仓里的权限源文件（agents/config/claude-permissions.json） */
+export const PERMS_SPEC = {
+  defaultMode: 'auto',
+  additionalDirectories: ['${HOME}/.claude'],
+  allow: ['Read', 'Bash(git:*)'],
+  deny: ['Bash(cat:*)'],
+  retired: ['Bash(old:*)'],
+};
+export const PERMS_JSON = `${JSON.stringify({ ...PERMS_SPEC, 说明: '测试用' }, null, 2)}\n`;
+
+/** 假仓：AGENTS.md 带通用段；skills 为 null 时没有 agents/skills/ 这个目录，hooks 为 null 时没有 agents/hooks/，permissions 为 null 时没有权限源文件 */
 export function makeRepo(
   skills: Record<string, Record<string, string>> | null,
   agentsMd = AGENTS_MD,
   hooks: Record<string, string> | null = HOOK_FILES,
+  permissions: string | null = PERMS_JSON,
 ): string {
   const repo = tempDir('repo');
   put(repo, 'AGENTS.md', agentsMd);
@@ -73,6 +84,7 @@ export function makeRepo(
     mkdirSync(join(repo, 'agents', 'hooks'), { recursive: true });
     for (const [rel, content] of Object.entries(hooks)) put(repo, `agents/hooks/${rel}`, content);
   }
+  if (permissions !== null) put(repo, 'agents/config/claude-permissions.json', permissions);
   return repo;
 }
 
