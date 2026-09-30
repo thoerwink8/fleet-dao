@@ -165,6 +165,16 @@ export const HOOK_TARGETS: readonly HookTarget[] = [
 ];
 
 /**
+ * 权限装到哪：Claude Code 的用户级权限在 ~/.claude/settings.json 的 permissions 里（code.claude.com/docs/en/permissions），
+ * defaultMode 只认用户级和 --settings 的（项目级的 auto 它会忽略）。内容来自仓里 agents/config/claude-permissions.json。
+ * 只给 Claude Code：别家的权限不是这个格式，Grok、Devin 借道读钩子那份设置文件，不代表它们按这个格式认 permissions。
+ */
+export const PERMISSIONS_TARGET: { settings: Place; readers: readonly AgentId[] } = {
+  settings: { win32: '.claude\\settings.json', linux: '.claude/settings.json' },
+  readers: ['claude'],
+};
+
+/**
  * 装了、但没装钩子的各家，逐家报一行为什么（不假装装了）。能接的几家接上是 #232。2026-09-26 查的各家文档和本机装的版本：
  * - Codex：~/.codex/hooks.json 和 Claude 同一个格式，可每条非托管的钩子都要人在 Codex 里 /hooks 审过、信任了才跑
  *   （learn.chatgpt.com/docs/hooks）。

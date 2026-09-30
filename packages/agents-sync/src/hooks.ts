@@ -139,9 +139,13 @@ function judge(root: unknown, t: HookTarget, home: string, platform: Platform): 
   return out;
 }
 
-type Read = { kind: 'none' } | { kind: 'ok'; text: string; root: unknown } | { kind: 'bad'; why: string };
+export type Read =
+  | { kind: 'none' }
+  | { kind: 'ok'; text: string; root: unknown }
+  | { kind: 'bad'; why: string };
 
-function readSettings(abs: string): Read {
+/** 读一份 JSON 设置文件（钩子和权限两段共用）：不存在、是链接、不是 JSON 都说清，不当成空的 */
+export function readSettings(abs: string): Read {
   const st = lstatOrNull(abs);
   if (st === null) return { kind: 'none' };
   if (st.isSymbolicLink())

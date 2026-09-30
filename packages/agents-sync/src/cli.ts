@@ -8,6 +8,7 @@ import { applyGitExcludes, checkGitExcludes } from './git-excludes.ts';
 import { applyHooks, checkHooks, type HookSkip } from './hooks.ts';
 import { takeLock } from './lock.ts';
 import { manifestPath, readManifest } from './manifest.ts';
+import { applyPermissions, checkPermissions } from './permissions.ts';
 import { applyPosition, checkPosition, type Git, type Position, readPosition, runGit } from './position.ts';
 import { exitCode, type Line, line, render, summary } from './report.ts';
 import { retireOld } from './retire.ts';
@@ -31,6 +32,8 @@ export const USAGE = `agents-sync —— 把 fleet-dao 仓里 AGENTS.md 的通�
   agents-sync --apply        写：通用段写进各家的全局文件（只动标记圈起来的那一块；第一次接管先整份备份），
                              skill 拷进各家的 skill 目录（只动清单里记着是本脚本装的），
                              钩子脚本拷进 ~/.fleet-dao/hooks/、在各家设置里登记（只动指向它们的那几条），
+                             agents/config/claude-permissions.json 合进 ~/.claude/settings.json 的 permissions
+                             （defaultMode 覆盖；allow、deny 补缺、不删机器上自己加的；相反的、读不懂的不动、报出来），
                              _tmp/ 加进这台的 git 全局忽略（core.excludesFile 没设过就新建一份；已经指到别的文件，
                              就在那份文件里接管一小块，不碰其余内容），
                              各家配置文件里本脚本管的几个开关改成该有的值（targets.ts 的 CONFIG_KEY_TARGETS，比如
@@ -42,7 +45,7 @@ export const USAGE = `agents-sync —— 把 fleet-dao 仓里 AGENTS.md 的通�
 
 选项：
   --home <目录>      家目录（默认：当前用户的家；带 --user 时是那个用户的家）
-  --user <用户名>    替这个用户做（Linux，要 root）：先换成他的身份再动手，写出来的东西都归他；开会话钩子不登记、同步位置不记
+  --user <用户名>    替这个用户做（Linux，要 root）：先换成他的身份再动手，写出来的东西都归他；开会话钩子不登记、权限不写、同步位置不记
                      （调工具前、Stop 那两条钩子，还有全局 git 忽略都照写：不需要会话、不用等自动发布，
                      写出来的东西也归他）
   --repo <目录>      fleet-dao 仓的位置（默认：本脚本所在的仓）
@@ -175,6 +178,9 @@ const SESSION_START_OFF_FOR_USER: HookSkip = {
   event: 'SessionStart',
   why: '替别的用户写（--user）时不登记开会话钩子：它要在这个用户自己能拉、能写的 fleet-dao 检出里快进、同步，法国的检出跟着自动发布走',
 };
+/** 权限整段不写：defaultMode auto 会让那台上的 AI 会话少一道人工确认，法国的工人会话要不要放开由引擎自己带的参数定，不靠共用的用户级设置 */
+const PERMISSIONS_OFF_FOR_USER =
+  '替别的用户写（--user）时不写权限：defaultMode auto 会让那个用户的 AI 会话少一道确认，法国的会话放不放开由引擎起会话时的参数定，不靠用户级设置';
 // 法国的检出由自动发布推进，停在发出去的那个提交上，本来就可能落后主线（等 CI、等引擎空闲）：
 // 拿主线比会把正常的等待判红、让自动发布误报「规矩同步没成」。同步到哪个提交记在自动发布的读数里（ops 第九节）。
 const POSITION_OFF_FOR_USER =
@@ -282,11 +288,13 @@ export function runCli(argv: readonly string[], deps: Deps): number {
         installed: installedAgents({ env: deps.env, platform: deps.platform, home }),
       };
       const hooksOff = args.user === undefined ? undefined : SESSION_START_OFF_FOR_USER;
+      const permsOff = args.user === undefined ? undefined : PERMISSIONS_OFF_FOR_USER;
       const mf = manifestPath(home, deps.platform);
       if (args.mode === '--check') {
         section('通用段（AGENTS.md 上半段）', checkRules(ctx, src));
         section('skill（agents/skills/、agents/skills-vendor/）', checkSkills(ctx, src, readManifest(mf)));
         section('钩子（agents/hooks/）', checkHooks(ctx, src, hooksOff));
+        section('权限（agents/config/claude-permissions.json）', checkPermissions(ctx, src, permsOff));
         section('全局 git 忽略（_tmp/）', checkGitExcludes(ctx));
         section('各家配置里的开关', checkToolConfig(ctx));
         section('同步位置', position ? checkPosition(position) : positionOff);
@@ -297,15 +305,18 @@ export function runCli(argv: readonly string[], deps: Deps): number {
         section('skill（agents/skills/、agents/skills-vendor/）', skills);
         const hooks = applyHooks(ctx, src, backups, hooksOff);
         section('钩子（agents/hooks/）', hooks);
+        const perms = applyPermissions(ctx, src, backups, permsOff);
+        section('权限（agents/config/claude-permissions.json）', perms);
         const config = applyToolConfig(ctx, backups);
         section('各家配置里的开关', config);
         const after = [
           ...checkRules(ctx, src),
           ...checkSkills(ctx, src, readManifest(mf)),
           ...checkHooks(ctx, src, hooksOff),
+          ...checkPermissions(ctx, src, permsOff),
           ...checkToolConfig(ctx),
         ];
-        const bad = verify([...rules, ...skills, ...hooks, ...config], after);
+        const bad = verify([...rules, ...skills, ...hooks, ...perms, ...config], after);
         if (bad.length) section('读回', bad);
         section('全局 git 忽略（_tmp/）', applyGitExcludes(ctx, backups));
         section('同步位置', position ? applyPosition(position, all, deps.now()) : positionOff);
