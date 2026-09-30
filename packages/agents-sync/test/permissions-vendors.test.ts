@@ -69,6 +69,19 @@ describe('翻译', () => {
     expect(toKimi('WebFetch')).toBeNull();
   });
 
+  it('整个 shell 放开（Bash、PowerShell 不带括号）和整个 MCP 服务：Kimi、Devin 有对应写法，Codex 没有', () => {
+    expect(toKimi('Bash')).toBe('Bash');
+    expect(toKimi('PowerShell')).toBe('Bash');
+    expect(toKimi('mcp__playwright')).toBe('mcp__playwright__*');
+    expect(toKimi('mcp__claude_ai_Claude_Docs')).toBe('mcp__claude_ai_Claude_Docs__*');
+    expect(toKimi('mcp__playwright__browser_click')).toBeNull();
+    expect(toDevin('Bash')).toBe('exec');
+    expect(toDevin('PowerShell')).toBe('exec');
+    expect(toDevin('mcp__chrome-devtools')).toBe('mcp__chrome-devtools__*');
+    expect(toCodex('Bash')).toBeNull();
+    expect(toCodex('mcp__playwright')).toBeNull();
+  });
+
   it('Codex：只有命令前缀', () => {
     expect(toCodex('Bash(git:*)')).toBe('git');
     expect(toCodex('PowerShell(pnpm:*)')).toBe('pnpm');
@@ -86,12 +99,12 @@ describe('翻译', () => {
 });
 
 describe('Kimi', () => {
-  it('没有配置文件：新建，最前面一行默认模式 yolo，规则块拒绝在放行前', () => {
+  it('没有配置文件：新建，最前面一行默认模式 auto，规则块拒绝在放行前', () => {
     const m = machine(['kimi']);
     expectKind(m.check(), KIMI, 'missing');
     expectKind(m.apply(), KIMI, 'changed');
     const text = get(m.home, '.kimi-code/config.toml');
-    expect(text).toContain('default_permission_mode = "yolo"');
+    expect(text).toContain('default_permission_mode = "auto"');
     expect(text.indexOf('default_permission_mode')).toBeLessThan(text.indexOf('[[permission.rules]]'));
     const deny = text.indexOf('decision = "deny"');
     const allow = text.indexOf('decision = "allow"');
@@ -114,15 +127,17 @@ describe('Kimi', () => {
     expect(text.indexOf('[loop_control]')).toBeLessThan(text.indexOf('[[permission.rules]]'));
   });
 
-  it('默认模式写成别的（auto 是什么都不问）：漂移、改回 yolo，只动这一行', () => {
-    const m = machine(['kimi']);
-    put(m.home, '.kimi-code/config.toml', 'default_permission_mode = "auto"   # 旧的\n[a]\nb = 1\n');
-    expectKind(m.check(), KIMI, 'drift');
-    m.apply();
-    const text = get(m.home, '.kimi-code/config.toml');
-    expect(text).toContain('default_permission_mode = "yolo"');
-    expect(text).not.toContain('"auto"');
-    expect(text).toContain('[a]\nb = 1');
+  it('默认模式写成别的（比如上一版同步写的 yolo、或 manual）：漂移、改成 auto，只动这一行', () => {
+    for (const old of ['yolo', 'manual']) {
+      const m = machine(['kimi']);
+      put(m.home, '.kimi-code/config.toml', `default_permission_mode = "${old}"   # 旧的\n[a]\nb = 1\n`);
+      expectKind(m.check(), KIMI, 'drift');
+      m.apply();
+      const text = get(m.home, '.kimi-code/config.toml');
+      expect(text).toContain('default_permission_mode = "auto"');
+      expect(text).not.toContain(`"${old}"`);
+      expect(text).toContain('[a]\nb = 1');
+    }
   });
 
   it('已经一致：再跑不改文件、不备份', () => {
