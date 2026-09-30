@@ -94,9 +94,7 @@ describe('规矩：进度要落盘，不能只发在对话里（2026-10-01）', 
   );
   // commander 技能自己的「报进度」一节也要跟上：它以前写「进度就在对话里报」，
   // 和通用段「进度也要落盘」直接冲突；只改通用段、不改技能，照技能做的人又断了。
-  const COMMANDER = read(
-    'commander',
-  );
+  const COMMANDER = read('commander');
 
   it('通用段里这几条都在', () => {
     expect(missing(PROGRESS_RULES, AGENTS)).toEqual([]);
