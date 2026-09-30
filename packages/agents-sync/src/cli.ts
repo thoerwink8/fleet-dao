@@ -9,6 +9,7 @@ import { applyHooks, checkHooks, type HookSkip } from './hooks.ts';
 import { takeLock } from './lock.ts';
 import { manifestPath, readManifest } from './manifest.ts';
 import { applyPermissions, checkPermissions } from './permissions.ts';
+import { applyOtherPermissions, checkOtherPermissions } from './permissions-vendors.ts';
 import { applyPosition, checkPosition, type Git, type Position, readPosition, runGit } from './position.ts';
 import { exitCode, type Line, line, render, summary } from './report.ts';
 import { retireOld } from './retire.ts';
@@ -34,6 +35,8 @@ export const USAGE = `agents-sync —— 把 fleet-dao 仓里 AGENTS.md 的通�
                              钩子脚本拷进 ~/.fleet-dao/hooks/、在各家设置里登记（只动指向它们的那几条），
                              agents/config/claude-permissions.json 合进 ~/.claude/settings.json 的 permissions
                              （defaultMode 覆盖；allow、deny 补缺、不删机器上自己加的；相反的、读不懂的不动、报出来），
+                             并翻译成 Kimi（config.toml 里一块托管块加默认模式）、Codex（rules/default.rules 里一块托管块）、
+                             Devin（config.json 的 permissions）各自的写法；Grok 直接读 Claude 那份，不另写，
                              _tmp/ 加进这台的 git 全局忽略（core.excludesFile 没设过就新建一份；已经指到别的文件，
                              就在那份文件里接管一小块，不碰其余内容），
                              各家配置文件里本脚本管的几个开关改成该有的值（targets.ts 的 CONFIG_KEY_TARGETS，比如
@@ -295,6 +298,7 @@ export function runCli(argv: readonly string[], deps: Deps): number {
         section('skill（agents/skills/、agents/skills-vendor/）', checkSkills(ctx, src, readManifest(mf)));
         section('钩子（agents/hooks/）', checkHooks(ctx, src, hooksOff));
         section('权限（agents/config/claude-permissions.json）', checkPermissions(ctx, src, permsOff));
+        section('其他几家 AI 的权限（Kimi、Codex、Devin）', checkOtherPermissions(ctx, src, permsOff));
         section('全局 git 忽略（_tmp/）', checkGitExcludes(ctx));
         section('各家配置里的开关', checkToolConfig(ctx));
         section('同步位置', position ? checkPosition(position) : positionOff);
@@ -307,6 +311,8 @@ export function runCli(argv: readonly string[], deps: Deps): number {
         section('钩子（agents/hooks/）', hooks);
         const perms = applyPermissions(ctx, src, backups, permsOff);
         section('权限（agents/config/claude-permissions.json）', perms);
+        const otherPerms = applyOtherPermissions(ctx, src, backups, permsOff);
+        section('其他几家 AI 的权限（Kimi、Codex、Devin）', otherPerms);
         const config = applyToolConfig(ctx, backups);
         section('各家配置里的开关', config);
         const after = [
@@ -314,9 +320,10 @@ export function runCli(argv: readonly string[], deps: Deps): number {
           ...checkSkills(ctx, src, readManifest(mf)),
           ...checkHooks(ctx, src, hooksOff),
           ...checkPermissions(ctx, src, permsOff),
+          ...checkOtherPermissions(ctx, src, permsOff),
           ...checkToolConfig(ctx),
         ];
-        const bad = verify([...rules, ...skills, ...hooks, ...perms, ...config], after);
+        const bad = verify([...rules, ...skills, ...hooks, ...perms, ...otherPerms, ...config], after);
         if (bad.length) section('读回', bad);
         section('全局 git 忽略（_tmp/）', applyGitExcludes(ctx, backups));
         section('同步位置', position ? applyPosition(position, all, deps.now()) : positionOff);

@@ -175,6 +175,43 @@ export const PERMISSIONS_TARGET: { settings: Place; readers: readonly AgentId[] 
 };
 
 /**
+ * 其他几家的权限（2026-09-30 逐家核过文档、能装的在本机实测；写法各不相同，都不读 Claude 的 permissions，Grok 除外）：
+ * - Kimi Code：~/.kimi-code/config.toml 的顶层 default_permission_mode（manual / yolo / auto：yolo 是「日常自动、危险的仍问」，
+ *   最接近 Claude 的 auto；它的 auto 是「什么都不问」，不许用）和 [[permission.rules]]（decision、pattern，先匹配的生效，
+ *   所以拒绝排在放行前面；moonshotai.github.io/kimi-code/en/configuration/config-files.md）。
+ * - Codex：~/.codex/rules/default.rules 里的 prefix_rule(pattern=["git"], decision="allow" | "forbidden")，只按命令前缀、
+ *   不支持通配符，几条同时命中取最严的；本机用 codex execpolicy check 核过写法（learn.chatgpt.com/docs/agent-configuration/rules）。
+ * - Devin：Windows %APPDATA%\devin\config.json、Linux ~/.config/devin/config.json 的 permissions.allow/deny（Exec(git)、Read(**)、
+ *   Write(**)），不读 Claude 的权限；默认模式的键文档没说清在不在 config.json 里，不同步（docs.devin.ai/cli/reference/permissions，
+ *   本机没装、没实测）。
+ */
+export const KIMI_PERMISSIONS: { file: Place; readers: readonly AgentId[] } = {
+  file: { win32: '.kimi-code\\config.toml', linux: '.kimi-code/config.toml' },
+  readers: ['kimi'],
+};
+export const CODEX_PERMISSIONS: { file: Place; readers: readonly AgentId[] } = {
+  file: { win32: '.codex\\rules\\default.rules', linux: '.codex/rules/default.rules' },
+  readers: ['codex'],
+};
+export const DEVIN_PERMISSIONS: { file: Place; readers: readonly AgentId[] } = {
+  file: { win32: 'AppData\\Roaming\\devin\\config.json', linux: '.config/devin/config.json' },
+  readers: ['devin'],
+};
+
+/**
+ * 装了、但权限没接的各家，逐家报一行为什么（不假装装了）。
+ * - Grok：直接读 ~/.claude/settings.json 的 permissions（含 defaultMode），随 Claude 那份生效，不另写
+ *   （~/.grok/docs/user-guide/22-permissions-and-safety.md 第 3 节）；它不认的工具（NotebookEdit、PowerShell 这类）开会话时跳过并警告。
+ */
+export const PERMISSION_GAPS: Partial<Record<AgentId, string>> = {
+  grok: '没另写——它直接读 ~/.claude/settings.json 的 permissions（含 defaultMode），随上面 Claude 那份生效（本机 grok inspect 实测：读到 34 条，跳过 9 条它不认的 NotebookEdit 和 PowerShell(…)，开会话时警告，不影响别的）',
+  pi: '没接——它没有审批功能（默认全放行），只能靠扩展，本脚本不做',
+  dsh: '没接——它只有 ask / never 两档，不能按命令写规则，没法照 Claude 的清单翻译',
+  agy: '没接——写法（settings.json 的 permissions、command(git)）只来自博客，官方 issue #548 说无头模式会忽略 allow，装上实测后再接',
+  gemini: '没接——规则要写在 ~/.gemini/policies/*.toml，还没实测，装上核过后再接',
+};
+
+/**
  * 装了、但没装钩子的各家，逐家报一行为什么（不假装装了）。能接的几家接上是 #232。2026-09-26 查的各家文档和本机装的版本：
  * - Codex：~/.codex/hooks.json 和 Claude 同一个格式，可每条非托管的钩子都要人在 Codex 里 /hooks 审过、信任了才跑
  *   （learn.chatgpt.com/docs/hooks）。

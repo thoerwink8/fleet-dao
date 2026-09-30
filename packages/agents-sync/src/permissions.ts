@@ -3,27 +3,33 @@
 // defaultMode 归本脚本管、每次覆盖。allow 和 deny 里同一条落在相反的两边、类型不对这类不能自动定的，只报漂移、写的时候整份不动，不猜着改。
 // 设置文件读不懂（不是 JSON、整份不是对象、permissions 不是对象）就不动，报没做成——不当成空的重写。
 // 仓里的源文件读不到、不合规矩（含 bypassPermissions）也报没查成、没做成，不拿空的顶上。
+// 合并那套（judge、merged、checkJson、applyJson）不只给 Claude 用：Devin 的 config.json 也是 permissions.allow/deny 三个数组，
+// 见 permissions-vendors.ts，翻译成它的写法后走同一套。
 import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { Backups } from './backup.ts';
 import { readSettings } from './hooks.ts';
 import { type Line, line } from './report.ts';
 import { type Ctx, code, relOf, type Sources, writeAtomic } from './sync.ts';
-import { PERMISSIONS_TARGET } from './targets.ts';
+import { PERMISSIONS_TARGET, type Place } from './targets.ts';
 
 type Obj = Record<string, unknown>;
 
 const isObj = (v: unknown): v is Obj => typeof v === 'object' && v !== null && !Array.isArray(v);
 
-/** 仓里 agents/config/claude-permissions.json 认出来的样子 */
-export interface PermSpec {
-  defaultMode: string;
-  /** 已把 ${HOME} 换成这台的家目录 */
+/** 要合进一份 JSON 设置的那几项：defaultMode 不写就不管模式（Devin 那边文档没说清模式键在不在 config.json 里） */
+export interface ListSpec {
+  defaultMode?: string;
   additionalDirectories: string[];
   allow: string[];
   deny: string[];
   /** 从 allow、deny 里摘掉的（两边都摘） */
   retired: string[];
+}
+
+/** 仓里 agents/config/claude-permissions.json 认出来的样子 */
+export interface PermSpec extends ListSpec {
+  defaultMode: string;
 }
 
 /** 不许同步下去的模式：一台机器上的会话全放开检查，不能靠仓里一份文件推给所有机器 */
@@ -74,8 +80,8 @@ export function parsePermissions(text: string, home: string): PermSource {
 }
 
 /** 机器上 permissions 一处和源文件对不上的地方 */
-interface Diff {
-  /** 该有、没有的（defaultMode 不一样也算） */
+export interface Diff {
+  /** 该有、没有的（defaultMode 没写也算） */
   missing: string[];
   /** 读到了但要改的：已退役的还留着、defaultMode 不一样 */
   drift: string[];
@@ -88,7 +94,7 @@ interface Diff {
 const LISTS = ['allow', 'deny', 'additionalDirectories'] as const;
 
 /** 逐项对：root 是整份设置文件 */
-function judge(root: unknown, spec: PermSpec): Diff {
+export function judge(root: unknown, spec: ListSpec): Diff {
   const out: Diff = { missing: [], drift: [], stuck: [], others: 0 };
   if (!isObj(root)) {
     out.stuck.push('整份不是一个 JSON 对象');
@@ -100,9 +106,11 @@ function judge(root: unknown, spec: PermSpec): Diff {
     return out;
   }
   const perm: Obj = have ?? {};
-  if (perm.defaultMode === undefined) out.missing.push(`defaultMode（该是 ${spec.defaultMode}）`);
-  else if (perm.defaultMode !== spec.defaultMode)
-    out.drift.push(`defaultMode 是 ${JSON.stringify(perm.defaultMode)}，该是 ${spec.defaultMode}`);
+  if (spec.defaultMode !== undefined) {
+    if (perm.defaultMode === undefined) out.missing.push(`defaultMode（该是 ${spec.defaultMode}）`);
+    else if (perm.defaultMode !== spec.defaultMode)
+      out.drift.push(`defaultMode 是 ${JSON.stringify(perm.defaultMode)}，该是 ${spec.defaultMode}`);
+  }
   for (const name of LISTS) {
     const cur = perm[name];
     if (cur !== undefined && !Array.isArray(cur)) {
@@ -128,55 +136,14 @@ function judge(root: unknown, spec: PermSpec): Diff {
   return out;
 }
 
-const KEY = (ctx: Ctx): string => `${relOf(ctx, PERMISSIONS_TARGET.settings).key}#permissions`;
-
-/** 这台有没有装读它的那家 */
-const wanted = (ctx: Ctx): boolean => PERMISSIONS_TARGET.readers.some((r) => ctx.installed.has(r));
-
-/** 这次整段不写的原因（--user 替别的用户写时给），不写就只报一行 skip */
-export type PermSkip = string;
-
-function source(ctx: Ctx, src: Sources): PermSource {
-  if (!src.permissions.ok) return src.permissions;
-  return parsePermissions(src.permissions.text, ctx.home);
-}
-
-export function checkPermissions(ctx: Ctx, src: Sources, skip?: PermSkip): Line[] {
-  const key = KEY(ctx);
-  if (skip) return [line('skip', key, skip)];
-  if (!wanted(ctx)) return [line('skip', key, '没装 Claude Code，跳过')];
-  const spec = source(ctx, src);
-  if (!spec.ok)
-    return [line('unknown', key, `没查成——仓里的 agents/config/claude-permissions.json：${spec.why}`)];
-  const { abs } = relOf(ctx, PERMISSIONS_TARGET.settings);
-  let read: ReturnType<typeof readSettings>;
-  try {
-    read = readSettings(abs);
-  } catch (err) {
-    return [line('unknown', key, `没查成——读不了（${code(err)}）`)];
-  }
-  if (read.kind === 'none')
-    return [line('missing', key, '缺失——没有 ~/.claude/settings.json，权限（defaultMode、allow、deny）没装')];
-  if (read.kind === 'bad') return [line('drift', key, `漂移——${read.why}，权限等于没装`)];
-  const d = judge(read.root, spec.value);
-  const bad = [...d.stuck, ...d.drift];
-  if (bad.length) return [line('drift', key, `漂移——${bad.join('；')}`)];
-  if (d.missing.length) return [line('missing', key, `缺失——${d.missing.join('；')}`)];
-  return [
-    line(
-      'ok',
-      key,
-      `defaultMode ${spec.value.defaultMode}、allow ${spec.value.allow.length} 条、deny ${spec.value.deny.length} 条都在，机器上自己加的 ${d.others} 条没动`,
-    ),
-  ];
-}
-
 /** 去掉已退役的、补上仓里有而机器上没有的；别的一条不碰 */
-function merged(root: Obj, spec: PermSpec): Obj {
+export function merged(root: Obj, spec: ListSpec): Obj {
   const next = structuredClone(root);
   const perm: Obj = isObj(next.permissions) ? next.permissions : {};
-  perm.defaultMode = spec.defaultMode;
+  if (spec.defaultMode !== undefined) perm.defaultMode = spec.defaultMode;
   for (const name of LISTS) {
+    // 仓里这项是空的、机器上也没有：不凭空建一个空数组
+    if (spec[name].length === 0 && !Array.isArray(perm[name])) continue;
     const list: unknown[] = Array.isArray(perm[name]) ? (perm[name] as unknown[]) : [];
     const kept =
       name === 'additionalDirectories' ? list : list.filter((x) => !spec.retired.includes(x as string));
@@ -187,23 +154,41 @@ function merged(root: Obj, spec: PermSpec): Obj {
   return next;
 }
 
-export function applyPermissions(ctx: Ctx, src: Sources, backups: Backups, skip?: PermSkip): Line[] {
-  const key = KEY(ctx);
-  if (skip) return [line('skip', key, skip)];
-  if (!wanted(ctx)) return [line('skip', key, '没装 Claude Code，跳过')];
-  const spec = source(ctx, src);
-  if (!spec.ok)
-    return [line('failed', key, `没做成——仓里的 agents/config/claude-permissions.json：${spec.why}`)];
-  const { rel, abs } = relOf(ctx, PERMISSIONS_TARGET.settings);
+/** 查一份 JSON 设置里的 permissions；key 是报告里这一项的名字，noFile 是文件不存在时说的话 */
+export function checkJson(abs: string, key: string, spec: ListSpec, noFile: string): Line[] {
+  let read: ReturnType<typeof readSettings>;
+  try {
+    read = readSettings(abs);
+  } catch (err) {
+    return [line('unknown', key, `没查成——读不了（${code(err)}）`)];
+  }
+  if (read.kind === 'none') return [line('missing', key, `缺失——没有这个文件，${noFile}`)];
+  if (read.kind === 'bad') return [line('drift', key, `漂移——${read.why}，权限等于没装`)];
+  const d = judge(read.root, spec);
+  const bad = [...d.stuck, ...d.drift];
+  if (bad.length) return [line('drift', key, `漂移——${bad.join('；')}`)];
+  if (d.missing.length) return [line('missing', key, `缺失——${d.missing.join('；')}`)];
+  return [
+    line(
+      'ok',
+      key,
+      `${spec.defaultMode === undefined ? '' : `defaultMode ${spec.defaultMode}、`}allow ${spec.allow.length} 条、deny ${spec.deny.length} 条都在，机器上自己加的 ${d.others} 条没动`,
+    ),
+  ];
+}
+
+/** 写一份 JSON 设置里的 permissions：补缺、摘退役的，别的不碰；读不懂、相反的整份不动 */
+export function applyJson(ctx: Ctx, place: Place, key: string, spec: ListSpec, backups: Backups): Line[] {
+  const { rel, abs } = relOf(ctx, place);
   try {
     const read = readSettings(abs);
     if (read.kind === 'bad') return [line('failed', key, `没动——${read.why}；要人看`)];
     const root: unknown = read.kind === 'none' ? {} : read.root;
-    const before = judge(root, spec.value);
+    const before = judge(root, spec);
     if (before.stuck.length) return [line('failed', key, `没动——${before.stuck.join('；')}；要人看`)];
     if (before.missing.length === 0 && before.drift.length === 0)
       return [line('ok', key, `已经一致，机器上自己加的 ${before.others} 条没动`)];
-    const next = merged(root as Obj, spec.value);
+    const next = merged(root as Obj, spec);
     const eol = read.kind === 'ok' && read.text.includes('\r\n') ? '\r\n' : '\n';
     const text = `${JSON.stringify(next, null, 2)}\n`.replaceAll('\n', eol);
     const saved = read.kind === 'ok' ? backups.saveFile(abs, rel.replaceAll('\\', '/')) : undefined;
@@ -219,4 +204,43 @@ export function applyPermissions(ctx: Ctx, src: Sources, backups: Backups, skip?
   } catch (err) {
     return [line('failed', key, `没做成——${code(err)}`)];
   }
+}
+
+const KEY = (ctx: Ctx): string => `${relOf(ctx, PERMISSIONS_TARGET.settings).key}#permissions`;
+
+/** 这台有没有装读它的那家 */
+const wanted = (ctx: Ctx): boolean => PERMISSIONS_TARGET.readers.some((r) => ctx.installed.has(r));
+
+/** 这次整段不写的原因（--user 替别的用户写时给），不写就只报一行 skip */
+export type PermSkip = string;
+
+/** 仓里的源文件认出来；读不到或不合规矩就是没认成，说清为什么 */
+export function permissionSource(ctx: Ctx, src: Sources): PermSource {
+  if (!src.permissions.ok) return src.permissions;
+  return parsePermissions(src.permissions.text, ctx.home);
+}
+
+export function checkPermissions(ctx: Ctx, src: Sources, skip?: PermSkip): Line[] {
+  const key = KEY(ctx);
+  if (skip) return [line('skip', key, skip)];
+  if (!wanted(ctx)) return [line('skip', key, '没装 Claude Code，跳过')];
+  const spec = permissionSource(ctx, src);
+  if (!spec.ok)
+    return [line('unknown', key, `没查成——仓里的 agents/config/claude-permissions.json：${spec.why}`)];
+  return checkJson(
+    relOf(ctx, PERMISSIONS_TARGET.settings).abs,
+    key,
+    spec.value,
+    '权限（defaultMode、allow、deny）没装',
+  );
+}
+
+export function applyPermissions(ctx: Ctx, src: Sources, backups: Backups, skip?: PermSkip): Line[] {
+  const key = KEY(ctx);
+  if (skip) return [line('skip', key, skip)];
+  if (!wanted(ctx)) return [line('skip', key, '没装 Claude Code，跳过')];
+  const spec = permissionSource(ctx, src);
+  if (!spec.ok)
+    return [line('failed', key, `没做成——仓里的 agents/config/claude-permissions.json：${spec.why}`)];
+  return applyJson(ctx, PERMISSIONS_TARGET.settings, key, spec.value, backups);
 }
