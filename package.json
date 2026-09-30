@@ -13,6 +13,7 @@
     "format": "biome check --write .",
     "typecheck": "tsc -b",
     "test": "vitest run",
+    "agents:sync": "node packages/agents-sync/bin/agents-sync-now",
     "test:changed": "node packages/conventions/src/bin/test-changed.ts",
     "issue:new": "node packages/conventions/src/bin/issue-new.ts",
     "issue:close": "node packages/conventions/src/bin/issue-close.ts",
