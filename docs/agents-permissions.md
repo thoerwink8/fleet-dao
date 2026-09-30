@@ -2,7 +2,7 @@
 
 一份意图，各家一个翻译：仓里 `agents/config/claude-permissions.json` 写「日常放行什么、禁掉什么、默认怎么问」，`agents-sync` 把它写进每台机器上各家 AI 自己的配置。要一次全生效，在 fleet-dao 检出里跑 `pnpm agents:sync`。
 
-需求和决定记录：`specs/517-各家权限同步/需求.md`（创始人 2026-09-30）；Claude Code 那一家是 #516。
+需求和决定记录：`specs/517-各家权限同步/需求.md`（创始人 2026-09-30）；Claude Code 那一家是 #516；为什么放到最宽松、原话、更正和撤回条件见 `docs/decisions/0005-agent-permissions-loosest.md`。
 
 ## 一条命令
 
@@ -57,6 +57,19 @@ pnpm agents:sync --repo <目录> # 指定 fleet-dao 检出（默认：~/.fleet-d
 - **Kimi 的默认模式用 `auto`（不打断、自动判断）**，不用 `yolo`（日常自动、危险的仍问）：`yolo` 遇到要问的会在没人点的界面里卡住。
 - **本仓的 PreToolUse 钩子不受影响**：它拦「读到密钥文件、口令值」，不属于权限清单，照旧生效。
 - **Codex 的 `allow` 是「不问、不进沙箱直接跑」**：`git`、`node`、`python`、`pnpm` 这类前缀放行后，带任何参数都不再问，和 Claude 里 `Bash(python:*)` 一样宽；只按前缀匹配、没有通配符，`git` 不会匹配 `gitk`（本机核过）。
+
+## 生效的条件（做了什么、什么时候才算生效）
+
+同步工具「写进去了」不等于「AI 那边用上了」，逐条对：
+
+1. **仓里的清单合进主线**（#516、#519、#520 已合）。没合进主线，`pnpm agents:sync` 同步的还是旧的。
+2. **这台机器同步过**：开新会话时钩子自动同步，或者手动跑 `pnpm agents:sync`（要 `node`、`git` 能用；Windows 上 git 缺 DLL 时先把 `D:\Tools\Git\cmd` 放进 PATH 前面）。同步完 `pnpm agents:sync --check` 应该零漂移、零缺失。
+3. **重开 AI 会话**：已开着的会话读的是开场时的配置。
+4. **那一家真的读这份文件**：Claude Code 读 `~/.claude/settings.json`；Grok 借道读同一份；Kimi、Codex 读各自的文件（都在本机用各家自己的命令核过：`kimi doctor`、`codex execpolicy check`、`grok inspect --json`）。Devin 没装、没实测；Gemini CLI、Antigravity 没接。
+5. **图形界面（Mirasim）**：它起 CLI 时读不读用户级设置、有没有自己带模式参数，**没实测**。在里面开新会话让 AI 跑一条 `ssh` 试，被拦就把报错给 AI 查。
+6. **法国不生效**：`--user` 整段不写，法国的会话放不放开由引擎起会话的参数定。
+
+本机核过的结果（2026-09-30，同步后）：`~/.claude/settings.json` 里 `defaultMode = auto`、allow 139 条、deny 0 条；`grok inspect` 读到 131 条、跳过 8 条它不认的（`NotebookEdit` 和带括号的 `PowerShell(…)`）；`kimi doctor` 通过、默认模式 `auto`；`codex execpolicy check` 对 `git`、`ssh`、`scp`、`kubectl`、`docker`、`sudo`、`rm -rf`、`cat`、`grep` 都放行，`cmd /c`、`powershell -c` 没命中（Codex 只按命令前缀匹配、没有「所有命令」的写法，这两个外壳前缀要放开得加进清单）。
 
 ## 怎么加、怎么撤一条
 
