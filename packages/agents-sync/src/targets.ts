@@ -176,9 +176,10 @@ export const PERMISSIONS_TARGET: { settings: Place; readers: readonly AgentId[] 
 
 /**
  * 其他几家的权限（2026-09-30 逐家核过文档、能装的在本机实测；写法各不相同，都不读 Claude 的 permissions，Grok 除外）：
- * - Kimi Code：~/.kimi-code/config.toml 的顶层 default_permission_mode（manual / yolo / auto：yolo 是「日常自动、危险的仍问」，
- *   最接近 Claude 的 auto；它的 auto 是「什么都不问」，不许用）和 [[permission.rules]]（decision、pattern，先匹配的生效，
- *   所以拒绝排在放行前面；moonshotai.github.io/kimi-code/en/configuration/config-files.md）。
+ * - Kimi Code：~/.kimi-code/config.toml 的顶层 default_permission_mode（manual / yolo / auto）和 [[permission.rules]]
+ *   （decision、pattern，先匹配的生效，所以拒绝排在放行前面；moonshotai.github.io/kimi-code/en/configuration/config-files.md）。
+ *   同步用 auto（不打断、自动判断）：创始人 2026-09-30 要最宽松，他有时在图形界面里起 CLI、没法切模式也没人点确认；
+ *   yolo 是「日常自动、危险的仍问」，会在没人点的界面里卡住。
  * - Codex：~/.codex/rules/default.rules 里的 prefix_rule(pattern=["git"], decision="allow" | "forbidden")，只按命令前缀、
  *   不支持通配符，几条同时命中取最严的；本机用 codex execpolicy check 核过写法（learn.chatgpt.com/docs/agent-configuration/rules）。
  * - Devin：Windows %APPDATA%\devin\config.json、Linux ~/.config/devin/config.json 的 permissions.allow/deny（Exec(git)、Read(**)、

@@ -25,6 +25,8 @@ export interface ListSpec {
   deny: string[];
   /** 从 allow、deny 里摘掉的（两边都摘） */
   retired: string[];
+  /** 只从 deny 里摘的：放宽时把旧的拒绝撤了、同一条又放进 allow（retired 是两边都摘，这种只能用它） */
+  retiredDeny?: string[];
 }
 
 /** 仓里 agents/config/claude-permissions.json 认出来的样子 */
@@ -66,6 +68,9 @@ export function parsePermissions(text: string, home: string): PermSource {
     if (typeof got === 'string') return { ok: false, why: got };
     lists[name] = got;
   }
+  // retiredDeny 可以不写
+  const gotDeny = root.retiredDeny === undefined ? [] : strings(root.retiredDeny, 'retiredDeny');
+  if (typeof gotDeny === 'string') return { ok: false, why: gotDeny };
   const allow = lists.allow as string[];
   const deny = lists.deny as string[];
   const retired = lists.retired as string[];
@@ -73,10 +78,15 @@ export function parsePermissions(text: string, home: string): PermSource {
   if (both) return { ok: false, why: `「${both}」同时在 allow 和 deny 里` };
   const gone = retired.find((r) => allow.includes(r) || deny.includes(r));
   if (gone) return { ok: false, why: `「${gone}」既在 retired 里、又还在 allow 或 deny 里` };
+  const goneDeny = gotDeny.find((r) => deny.includes(r));
+  if (goneDeny) return { ok: false, why: `「${goneDeny}」既在 retiredDeny 里、又还在 deny 里` };
   const dirs = (lists.additionalDirectories as string[]).map((d) =>
     d.startsWith('${HOME}') ? join(home, d.slice('${HOME}'.length)) : d,
   );
-  return { ok: true, value: { defaultMode: mode, additionalDirectories: dirs, allow, deny, retired } };
+  return {
+    ok: true,
+    value: { defaultMode: mode, additionalDirectories: dirs, allow, deny, retired, retiredDeny: gotDeny },
+  };
 }
 
 /** 机器上 permissions 一处和源文件对不上的地方 */
@@ -121,17 +131,18 @@ export function judge(root: unknown, spec: ListSpec): Diff {
     const want = spec[name];
     const missing = want.filter((w) => !list.includes(w));
     if (missing.length) out.missing.push(`${name} 少 ${missing.length} 条（${missing.join('、')}）`);
-    const retired = list.filter((x): x is string => typeof x === 'string' && spec.retired.includes(x));
+    const gone = [...spec.retired, ...(name === 'deny' ? (spec.retiredDeny ?? []) : [])];
+    const retired = list.filter((x): x is string => typeof x === 'string' && gone.includes(x));
     if (name !== 'additionalDirectories' && retired.length)
       out.drift.push(`${name} 还留着已退役的 ${retired.join('、')}`);
-    // 相反的一边：allow 里出现仓里要 deny 的，或反过来
+    // 相反的一边：allow 里出现仓里要 deny 的，或反过来（要摘掉的不算：它们这次就被摘了）
     const opposite = name === 'allow' ? spec.deny : name === 'deny' ? spec.allow : [];
-    const clash = list.filter((x): x is string => typeof x === 'string' && opposite.includes(x));
+    const clash = list.filter(
+      (x): x is string => typeof x === 'string' && opposite.includes(x) && !gone.includes(x),
+    );
     if (clash.length)
       out.stuck.push(`${name} 里有仓里放在另一边的 ${clash.join('、')}（allow 和 deny 相反）`);
-    out.others += list.filter(
-      (x) => !want.includes(x as string) && !spec.retired.includes(x as string),
-    ).length;
+    out.others += list.filter((x) => !want.includes(x as string) && !gone.includes(x as string)).length;
   }
   return out;
 }
@@ -145,8 +156,8 @@ export function merged(root: Obj, spec: ListSpec): Obj {
     // 仓里这项是空的、机器上也没有：不凭空建一个空数组
     if (spec[name].length === 0 && !Array.isArray(perm[name])) continue;
     const list: unknown[] = Array.isArray(perm[name]) ? (perm[name] as unknown[]) : [];
-    const kept =
-      name === 'additionalDirectories' ? list : list.filter((x) => !spec.retired.includes(x as string));
+    const gone = [...spec.retired, ...(name === 'deny' ? (spec.retiredDeny ?? []) : [])];
+    const kept = name === 'additionalDirectories' ? list : list.filter((x) => !gone.includes(x as string));
     for (const w of spec[name]) if (!kept.includes(w)) kept.push(w);
     perm[name] = kept;
   }

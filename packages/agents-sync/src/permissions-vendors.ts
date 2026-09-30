@@ -51,6 +51,8 @@ export interface Translated {
   allow: string[];
   deny: string[];
   retired: string[];
+  /** 只从 deny 里摘的（放宽时撤掉的旧拒绝） */
+  retiredDeny: string[];
   /** 这家没有对应写法、没同步的规则条数（allow 和 deny 里的，按 Claude 的写法数） */
   skipped: number;
 }
@@ -72,30 +74,43 @@ function translate(spec: PermSpec, map: Mapper): Translated | string {
   const allow = conv(spec.allow, true);
   const deny = conv(spec.deny, true);
   const retired = conv(spec.retired, false);
+  const retiredDeny = conv(spec.retiredDeny ?? [], false);
   const both = allow.find((a) => deny.includes(a));
   if (both) return `翻译后「${both}」既在放行里、又在拒绝里`;
-  return { allow, deny, retired, skipped };
+  return { allow, deny, retired, retiredDeny, skipped };
+}
+
+/** mcp__服务名（整个 MCP 服务，Claude 的写法）→ 服务名后面加 __*（Kimi、Devin 的写法）；mcp__服务名__工具 是单个工具，不算 */
+function mcpServer(rule: string): string | null {
+  const p = parseRule(rule);
+  return p.arg === null && p.tool.startsWith('mcp__') && p.tool.split('__').length === 2
+    ? `${p.tool}__*`
+    : null;
 }
 
 const KIMI_TOOLS = ['Read', 'Grep', 'Glob', 'Write', 'Edit'];
 
-/** Kimi：工具名照抄（只认它文档里列的），Bash(git:*) → Bash(git *) */
+/** Kimi：工具名照抄（只认它文档里列的），Bash(git:*) → Bash(git *)，整个 Bash 或 PowerShell → Bash，mcp__服务 → mcp__服务__* */
 export const toKimi: Mapper = (rule) => {
   const cmd = shellPrefix(rule);
   if (cmd) return `Bash(${cmd} *)`;
   const p = parseRule(rule);
-  return p.arg === null && KIMI_TOOLS.includes(p.tool) ? p.tool : null;
+  if (p.arg === null && (p.tool === 'Bash' || p.tool === 'PowerShell')) return 'Bash';
+  return mcpServer(rule) ?? (p.arg === null && KIMI_TOOLS.includes(p.tool) ? p.tool : null);
 };
 
 /** Codex：只有命令前缀（Bash、PowerShell 的 x:* 都翻成 x），别的工具 Codex 的规则管不到 */
 export const toCodex: Mapper = (rule) => shellPrefix(rule);
 
-/** Devin：Bash(git:*) → Exec(git)，Read → Read(**)，Write、Edit → Write(**)，Grep、Glob → 工具名小写 */
+/** Devin：Bash(git:*) → Exec(git)，整个 Bash 或 PowerShell → exec，Read → Read(**)，Write、Edit → Write(**)，Grep、Glob → 工具名小写，mcp__服务 → mcp__服务__* */
 export const toDevin: Mapper = (rule) => {
   const cmd = shellPrefix(rule);
   if (cmd) return `Exec(${cmd})`;
   const p = parseRule(rule);
   if (p.arg !== null) return null;
+  const mcp = mcpServer(rule);
+  if (mcp) return mcp;
+  if (p.tool === 'Bash' || p.tool === 'PowerShell') return 'exec';
   if (p.tool === 'Read') return 'Read(**)';
   if (p.tool === 'Write' || p.tool === 'Edit') return 'Write(**)';
   if (p.tool === 'Grep') return 'grep';
@@ -152,11 +167,11 @@ function withBlock(
 
 // ───────────────────────── Kimi 的 default_permission_mode ─────────────────────────
 
-const KIMI_MODE = '"yolo"';
+const KIMI_MODE = '"auto"';
 const KIMI_MODE_WHY =
-  '# fleet-dao 同步脚本管：yolo = 日常编辑和命令自动跑、危险的仍问（Kimi 的 auto 是什么都不问，不用）';
+  '# fleet-dao 同步脚本管：auto = 不打断、自动判断（创始人 2026-09-30：尽量宽松，图形界面里没人点确认）';
 
-/** 顶层那行 default_permission_mode（第一个 [表头] 之前）：不对就改成 yolo，没有就加在文件最前面 */
+/** 顶层那行 default_permission_mode（第一个 [表头] 之前）：不对就改成 auto，没有就加在文件最前面 */
 function withKimiMode(
   text: string,
 ): { ok: true; text: string | null; state: 'ok' | 'missing' | 'drift' } | { ok: false; why: string } {
@@ -237,7 +252,7 @@ function plan(v: TextVendor, before: string, t: Translated): Planned {
       text = m.text;
       problems.push({
         kind: m.state === 'drift' ? 'drift' : 'missing',
-        text: m.state === 'drift' ? 'default_permission_mode 不是 yolo' : '没有 default_permission_mode',
+        text: m.state === 'drift' ? 'default_permission_mode 不是 auto' : '没有 default_permission_mode',
       });
     }
   }
@@ -328,7 +343,13 @@ function applyText(ctx: Ctx, v: TextVendor, t: Translated, backups: Backups): Li
 const TEXT_VENDORS = [KIMI, CODEX] as const;
 
 function devinSpec(t: Translated): ListSpec {
-  return { additionalDirectories: [], allow: t.allow, deny: t.deny, retired: t.retired };
+  return {
+    additionalDirectories: [],
+    allow: t.allow,
+    deny: t.deny,
+    retired: t.retired,
+    retiredDeny: t.retiredDeny,
+  };
 }
 
 /** 装了、但权限没接的各家，逐家一行为什么 */

@@ -1,5 +1,7 @@
 // 权限：仓里 agents/config/claude-permissions.json 合进 ~/.claude/settings.json 的 permissions；补缺、不删机器上自己加的，读不懂就不动。
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { Backups } from '../src/backup.ts';
 import { applyPermissions, checkPermissions, parsePermissions } from '../src/permissions.ts';
@@ -101,6 +103,65 @@ describe('装', () => {
     const [l] = m.apply();
     expect(l?.text).toContain('备份');
     expect(get(m.home, '.claude/settings.json')).toContain('\r\n');
+  });
+});
+
+describe('仓里真的那份权限文件（agents/config/claude-permissions.json）', () => {
+  const real = parsePermissions(
+    readFileSync(
+      fileURLToPath(new URL('../../../agents/config/claude-permissions.json', import.meta.url)),
+      'utf8',
+    ),
+    '/h',
+  );
+
+  it('合规矩、认得出：默认模式 auto，不能是 bypassPermissions', () => {
+    expect(real.ok).toBe(true);
+    if (!real.ok) return;
+    expect(real.value.defaultMode).toBe('auto');
+  });
+
+  it('创始人 2026-09-30 要的最宽松：shell 整个放开、没有 deny，旧的 9 条拒绝只摘不留', () => {
+    if (!real.ok) throw new Error(real.why);
+    expect(real.value.allow).toContain('Bash');
+    expect(real.value.allow).toContain('PowerShell');
+    expect(real.value.deny).toEqual([]);
+    expect(real.value.retiredDeny).toContain('Bash(cat:*)');
+    expect(real.value.retiredDeny).toContain('PowerShell(Select-String:*)');
+  });
+});
+
+describe('放宽：把旧的拒绝撤了、同一条改放行（retiredDeny）', () => {
+  const spec = { ...PERMS_SPEC, allow: ['Read', 'Bash(cat:*)'], deny: [], retiredDeny: ['Bash(cat:*)'] };
+
+  it('机器上旧的 deny 被摘掉、allow 补上；不算「allow 和 deny 相反」', () => {
+    const m = machine(['claude'], JSON.stringify(spec));
+    put(
+      m.home,
+      '.claude/settings.json',
+      JSON.stringify({ permissions: { deny: ['Bash(cat:*)', 'Bash(mine:*)'] } }),
+    );
+    expectKind(m.check(), KEY, 'drift');
+    expectKind(m.apply(), KEY, 'changed');
+    const p = permOf(m);
+    expect(p.deny).toEqual(['Bash(mine:*)']);
+    expect(p.allow).toEqual(['Read', 'Bash(cat:*)']);
+    expectKind(m.check(), KEY, 'ok');
+  });
+
+  it('没写在 retiredDeny 里的相反条目照旧不动、报没做成（不因为放宽就乱摘）', () => {
+    const m = machine(['claude'], JSON.stringify(spec));
+    const text = JSON.stringify({ permissions: { deny: ['Read'] } });
+    put(m.home, '.claude/settings.json', text);
+    expectKind(m.apply(), KEY, 'failed');
+    expect(get(m.home, '.claude/settings.json')).toBe(text);
+  });
+
+  it('源文件里 retiredDeny 的条目还留在 deny 里：拒收', () => {
+    const bad = JSON.stringify({ ...spec, deny: ['Bash(cat:*)'], allow: ['Read'] });
+    const m = machine(['claude'], bad);
+    expectKind(m.check(), KEY, 'unknown');
+    expectKind(m.apply(), KEY, 'failed');
   });
 });
 

@@ -25,7 +25,7 @@ pnpm agents:sync --repo <目录> # 指定 fleet-dao 检出（默认：~/.fleet-d
 |---|---|---|---|
 | Claude Code | `~/.claude/settings.json` 的 `permissions` | `defaultMode`（覆盖）、`allow`/`deny`/`additionalDirectories`（补缺、不删自己加的） | 已合并（#516）、本机实测 |
 | Grok | 不另写 | 它直接读 `~/.claude/settings.json` 的 `permissions`（含 `defaultMode`），随 Claude 那份生效；它不认的工具（`NotebookEdit`、`PowerShell(…)`）开会话时跳过并警告，不影响别的 | 本机实测：`grok inspect --json` 的 `permissions` 里读到 34 条、跳过 9 条（依据 `~/.grok/docs/user-guide/22-permissions-and-safety.md` 第 3 节） |
-| Kimi Code | `~/.kimi-code/config.toml` | 最前面一行 `default_permission_mode = "yolo"`；文件末尾一块托管块，里面是 `[[permission.rules]]`（先匹配的生效，所以拒绝排在放行前面） | 本机装了：`kimi doctor` 认这份配置 |
+| Kimi Code | `~/.kimi-code/config.toml` | 最前面一行 `default_permission_mode = "auto"`；文件末尾一块托管块，里面是 `[[permission.rules]]`（先匹配的生效，所以拒绝排在放行前面；现在没有拒绝） | 本机装了：`kimi doctor` 认这份配置 |
 | Codex | `~/.codex/rules/default.rules` | 一块托管块，里面是 `prefix_rule(pattern=["git"], decision="allow")` / `decision="forbidden"` | 本机装了：`codex execpolicy check` 核过匹配结果 |
 | Devin CLI | Windows `%APPDATA%\devin\config.json`、Linux `~/.config/devin/config.json` 的 `permissions` | `allow`/`deny` 里写 `Exec(git)`、`Read(**)`、`Write(**)`、`grep`；补缺、不删自己加的；不同步默认模式（文档没说清 config.json 里有没有这个键） | 依据是官方文档，本机没装、没实测 |
 | Gemini CLI | 还没接 | 规则要写在 `~/.gemini/policies/*.toml`，`--yolo` 写不进配置 | 本机没装，装上核过再接 |
@@ -38,6 +38,8 @@ pnpm agents:sync --repo <目录> # 指定 fleet-dao 检出（默认：~/.fleet-d
 ## 翻译规则（Claude 的写法 → 各家）
 
 - `Bash(git:*)` / `PowerShell(git:*)`（命令名后面只有 `:*`）：Kimi → `Bash(git *)`；Codex → `["git"]`；Devin → `Exec(git)`。带空格、通配在中间的写法翻不了。
+- 整个 shell 放开（`Bash`、`PowerShell` 不带括号）：Kimi → `Bash`；Devin → `exec`；Codex 的规则没有「所有命令」的写法，靠清单里逐个列出的命令前缀（约 100 个）近似。
+- 整个 MCP 服务（`mcp__服务名`）：Kimi、Devin → `mcp__服务名__*`；Codex 没有对应。
 - `Read`、`Grep`、`Glob`、`Write`、`Edit` 这类工具名：Kimi 照抄；Devin 翻成 `Read(**)`、`Write(**)`、`grep`、`glob`；Codex 的规则只管命令，没有对应。
 - `WebFetch`、`WebSearch`、`Agent`、`Workflow`、`NotebookEdit`：各家都没有对应写法，不同步，报告里数出「有几条没同步」。
 - 翻译后同一条既放行又拒绝、源文件不合规矩（含 `defaultMode` 写 `bypassPermissions`）：装了的各家都报没查成 / 没做成，一个都不写。
@@ -51,12 +53,14 @@ pnpm agents:sync --repo <目录> # 指定 fleet-dao 检出（默认：~/.fleet-d
 
 ## 要注意的两点
 
-- **Kimi 的默认模式用 `yolo`，不是 `auto`**：Kimi 的 `yolo` 是「日常编辑和命令自动跑、危险的仍问」，最接近 Claude 的 `auto`；它的 `auto` 是「什么都不问」，更接近 bypass，不许同步。
+- **原则：尽量宽松、只放不收**（创始人 2026-09-30）。他有时用 Mirasim 这类图形界面起 CLI，没法切模式、也没人点确认，凡是要问的都会卡死。所以 Claude 保持 `defaultMode: auto`（同步工具仍拒收 `bypassPermissions`），`Bash`、`PowerShell`、各工具和常用 MCP 服务整个放开，`deny` 是空的，早先那 9 条拒绝（`grep`、`cat`、`head`、`tail`、`find`、`rg`、`ag`、`ack`、`Select-String`）在 `retiredDeny` 里，各机器同步时摘掉。以后要收紧，先找创始人。
+- **Kimi 的默认模式用 `auto`（不打断、自动判断）**，不用 `yolo`（日常自动、危险的仍问）：`yolo` 遇到要问的会在没人点的界面里卡住。
+- **本仓的 PreToolUse 钩子不受影响**：它拦「读到密钥文件、口令值」，不属于权限清单，照旧生效。
 - **Codex 的 `allow` 是「不问、不进沙箱直接跑」**：`git`、`node`、`python`、`pnpm` 这类前缀放行后，带任何参数都不再问，和 Claude 里 `Bash(python:*)` 一样宽；只按前缀匹配、没有通配符，`git` 不会匹配 `gitk`（本机核过）。
 
 ## 怎么加、怎么撤一条
 
-1. 改 `agents/config/claude-permissions.json`：加就加进 `allow` / `deny`；撤就从里面删掉、写进 `retired`（各机器下一次同步才会摘掉）。
+1. 改 `agents/config/claude-permissions.json`：加就加进 `allow` / `deny`；撤就从里面删掉、写进 `retired`（两边都摘）或 `retiredDeny`（只从 deny 里摘，放宽时把旧拒绝撤了、同一条又放进 allow 用它），各机器下一次同步才会摘掉。
 2. 这份文件在 `packages/conventions/standard-paths.json` 里，改它是「改标准」：PR 正文写「人闸：改标准」，创始人同意才合。
 3. 合进主线后，各开发机开会话时自动同步，或者手动 `pnpm agents:sync`。
 
