@@ -70,3 +70,47 @@ describe('规矩：设计在用户评判的那一层、那个精度上做和验�
     );
   });
 });
+
+/**
+ * 钉住通用段里「进度要落盘」这条（改标准：改这个文件要创始人同意，standard-paths.json）。
+ *
+ * 2026-10-01 的断链：一个仓里四五个 AI 会话并行干了一整天，进度全在各自的对话里。
+ * 对话会断、会被总结、会换机器（那天正赶上节前下电、要换机接手），
+ * 下一个 AI 拿到手只剩一份代码，不知道上一轮做到哪、哪条验证过、哪条只是「看着过了」。
+ * 只发在对话里、没落盘的进度，等于没写。下面这几条钉住它，通用段改写时不能悄悄丢掉。
+ */
+const PROGRESS_RULES: Record<string, RegExp> = {
+  进度文件要落盘: /进度也要落盘，不能只发在对话里/,
+  给下一个AI看: /文件是给\*\*下一个 AI\*\*/,
+  说清没落盘等于没写: /只发在对话里没落盘的进度，等于没写/,
+  放哪要写明: /仓里没这个约定的，在仓根 `docs\/PROGRESS\.md`/,
+  无人值守时同步更新: /同一时刻进度文件也更新到位/,
+};
+
+describe('规矩：进度要落盘，不能只发在对话里（2026-10-01）', () => {
+  const AGENTS = readFileSync(fileURLToPath(new URL('../../../AGENTS.md', import.meta.url)), 'utf8').replace(
+    /\r\n/g,
+    '\n',
+  );
+
+  it('通用段里这几条都在', () => {
+    expect(missing(PROGRESS_RULES, AGENTS)).toEqual([]);
+  });
+
+  it('【故意造出的失败】把「进度也要落盘」整条删掉：查得出来', () => {
+    const cut = AGENTS.replace(/- 进度也要落盘，不能只发在对话里[\s\S]*?(?=\n- 我让你无人值守推进时)/, '');
+    expect(cut).not.toBe(AGENTS);
+    expect(missing(PROGRESS_RULES, cut)).toEqual(
+      expect.arrayContaining(['进度文件要落盘', '给下一个AI看', '放哪要写明']),
+    );
+  });
+
+  it('【故意造出的失败】只留「发在对话里」，退回改之前那句：查得出来', () => {
+    const cut = AGENTS.replace(
+      /- 我让你无人值守推进时[\s\S]*?(?=\n\n)/,
+      '- 我让你无人值守推进时，每做完一件事就发一次，只发变了的行和要我拍的，不只在最后给总报告；没新进展不刷屏。',
+    );
+    expect(cut).not.toBe(AGENTS);
+    expect(missing(PROGRESS_RULES, cut)).toEqual(['无人值守时同步更新']);
+  });
+});
