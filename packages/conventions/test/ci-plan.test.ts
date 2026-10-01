@@ -9,6 +9,7 @@ import {
   ALWAYS_JOBS,
   type CiPlan,
   ciVerdict,
+  PATH_RULES,
   type PackageGraph,
   PLANNED_JOBS,
   planCi,
@@ -182,10 +183,12 @@ describe('按改动算要跑什么', () => {
   });
 
   it('测试会读的包外文件：AGENTS.md、docs/ops.md、agents/、PR 模板、.gitignore 各自带上读它的包', () => {
+    // AGENTS.md 要带两家：agents-sync 分发它，agents 的钉子测试读它（agents/test/rules/design-skills.rules.test.ts，#522）；
+    // 只带 agents-sync 的话改通用段的 PR 不测 agents，那条钉子测试根本不跑（主线从 1bff4dbc 起红了 8+ 个提交）
     expect(pr('AGENTS.md')).toMatchObject({
       lint: false,
       deploy: 'none',
-      tests: [{ args: ['packages/agents-sync/'] }],
+      tests: [{ args: ['agents/', 'packages/agents-sync/'] }],
     });
     expect(pr('docs/ops.md')).toMatchObject({ deploy: 'ops', tests: [{ name: 'db' }] });
     expect(testArgs(pr('agents/skills/discuss/SKILL.md'))).toEqual(['agents/', 'packages/agents-sync/']);
@@ -311,7 +314,8 @@ describe('测试读包外的文件，改那个文件的 PR 一定测到它（漏
     }
   });
 
-  it('每一处都落进 PATH_RULES / 依赖图 / TEST_READS', () => {
+  /** 拿一个「算要跑什么」的函数扫一遍：每个测试读的包外文件，改它的 PR 都得测到读的那个单元。返回漏记的清单。 */
+  const scan = (plan: (changed: string[]) => CiPlan) => {
     const missed: string[] = [];
     for (const { unit, rel } of files) {
       if (ALWAYS.has(rel)) continue;
@@ -319,11 +323,39 @@ describe('测试读包外的文件，改那个文件的 PR 一定测到它（漏
       for (const ref of refs(rel)) {
         if (`${ref}/`.startsWith(own)) continue;
         const probe = statSync(join(ROOT, ref)).isDirectory() ? `${ref}/x` : ref;
-        const p = pr(probe);
+        const p = plan([probe]);
         if (!p.full && !testArgs(p).includes(own)) missed.push(`${rel} 读 ${ref}，改它的 PR 不测 ${unit}`);
       }
     }
-    expect(missed).toEqual([]);
+    return missed;
+  };
+
+  it('每一处都落进 PATH_RULES / 依赖图 / TEST_READS', () => {
+    expect(scan((changed) => pr(...changed))).toEqual([]);
+  });
+
+  /**
+   * 【故意造出的失败】上面那条平时绿着，看不出它还在不在查。真要拦住的是「漏记一处」，
+   * 所以这里把门开一次、关一次，对着看：开着时一处都不漏，关掉 AGENTS.md 这道门里的 agents 后
+   * 正好红在那一处。少了这条，改 AGENTS.md 不测 agents 又能悄悄过去
+   * （主线从 1bff4dbc（#527）起红了 8+ 个提交就是这么来的）。
+   */
+  it('【故意造出的失败】把 agents 从 AGENTS.md 这道门里去掉：扫出来必须正好是那一处', () => {
+    // 开着：改 AGENTS.md 测 agents 和 agents-sync，读它的那条测试算进了门里，一处都不漏
+    expect(testArgs(pr('AGENTS.md'))).toEqual(['agents/', 'packages/agents-sync/']);
+    expect(scan((changed) => planCi({ event: 'pull_request', changed, graph: graph() }))).toEqual([]);
+    // 关掉：只把管 AGENTS.md 那道门的 agents 去掉，别的门一个都不碰
+    const shut = PATH_RULES.map((r) =>
+      r.match('AGENTS.md') && 'units' in r ? { ...r, units: r.units.filter((u) => u !== AGENTS_UNIT) } : r,
+    );
+    expect(
+      shut.filter((r, i) => r !== PATH_RULES[i]),
+      '没关掉任何门：管 AGENTS.md 的那道门写法换了，这条测试跟着改',
+    ).toHaveLength(1);
+    // 关掉后，上面那条正对着的那处漏记必须报出来——且只报这一处
+    expect(
+      scan((changed) => planCi({ event: 'pull_request', changed, graph: graph(), rules: shut })),
+    ).toEqual(['agents/test/rules/design-skills.rules.test.ts 读 AGENTS.md，改它的 PR 不测 agents']);
   });
 });
 

@@ -1,10 +1,13 @@
-// 权限：agents/config/claude-permissions.json 里的 defaultMode、allow、deny、additionalDirectories 合进 ~/.claude/settings.json 的 permissions。
+// 权限：agents/config/claude-permissions.json 里的 defaultMode、allow、deny、additionalDirectories 合进 ~/.claude/settings.json 的 permissions，
+// 它的 autoMode（environment、allow）合进同一份设置的 autoMode——auto 模式下宽规则会被撤掉、交给分类器判，autoMode 是给分类器看的自然语言规则。
 // allow、deny、additionalDirectories 按并集合并：仓里有、机器上没有的补上，机器上自己加的不删；只有 retired 里写明的才摘。
+// autoMode 的两个数组同样按并集合并，但仓里的源数组必须带 "$defaults"：Claude Code 文档里那段 Danger 写明，少一个 "$defaults" 就把那一类的
+// 内置规则整段换掉（force push、curl | bash、生产发布、往外发数据这些都不再拦），所以源文件不带就拒收——不是逐条补上、也不当没看见。
 // defaultMode 归本脚本管、每次覆盖。allow 和 deny 里同一条落在相反的两边、类型不对这类不能自动定的，只报漂移、写的时候整份不动，不猜着改。
-// 设置文件读不懂（不是 JSON、整份不是对象、permissions 不是对象）就不动，报没做成——不当成空的重写。
-// 仓里的源文件读不到、不合规矩（含 bypassPermissions）也报没查成、没做成，不拿空的顶上。
+// 设置文件读不懂（不是 JSON、整份不是对象、permissions 不是对象、autoMode 不是对象/数组不是数组）就不动，报没做成——不当成空的重写。
+// 仓里的源文件读不到、不合规矩（含 bypassPermissions、autoMode 少了 "$defaults"）也报没查成、没做成，不拿空的顶上。
 // 合并那套（judge、merged、checkJson、applyJson）不只给 Claude 用：Devin 的 config.json 也是 permissions.allow/deny 三个数组，
-// 见 permissions-vendors.ts，翻译成它的写法后走同一套。
+// 见 permissions-vendors.ts，翻译成它的写法后走同一套；Devin 那边没有 autoMode 这一层（不写 autoMode 就整段不管）。
 import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { Backups } from './backup.ts';
@@ -17,6 +20,19 @@ type Obj = Record<string, unknown>;
 
 const isObj = (v: unknown): v is Obj => typeof v === 'object' && v !== null && !Array.isArray(v);
 
+/**
+ * auto 模式分类器那一组（~/.claude/settings.json 的 autoMode）：environment 说什么是「自己人」，allow 是内置软拦规则的例外。
+ * 数组里写的是自然语言，分类器当规则读，不是工具名/正则。同步的只有这两项：soft_deny、hard_deny（收紧）不推给所有机器，
+ * classifyAllShell 也不动（改了它每条 shell 命令都过分类器，费时，是每台自己愿不愿意的事）。
+ * 文档：https://code.claude.com/docs/en/auto-mode-config（哪些 scope 会读、并集怎么算、Danger 那段的原话）。
+ */
+export interface AutoModeSpec {
+  /** 自己是谁、什么算外面（Classifier 的 environment 一档） */
+  environment: string[];
+  /** 内置软拦规则的例外：日常动作写在这里 */
+  allow: string[];
+}
+
 /** 要合进一份 JSON 设置的那几项：defaultMode 不写就不管模式（Devin 那边文档没说清模式键在不在 config.json 里） */
 export interface ListSpec {
   defaultMode?: string;
@@ -27,6 +43,8 @@ export interface ListSpec {
   retired: string[];
   /** 只从 deny 里摘的：放宽时把旧的拒绝撤了、同一条又放进 allow（retired 是两边都摘，这种只能用它） */
   retiredDeny?: string[];
+  /** 不写就整段不管 autoMode（Devin 那份没有这一层；写了但仓里没写 autoMode 时是空的两个数组） */
+  autoMode?: AutoModeSpec;
 }
 
 /** 仓里 agents/config/claude-permissions.json 认出来的样子 */
@@ -37,6 +55,12 @@ export interface PermSpec extends ListSpec {
 /** 不许同步下去的模式：一台机器上的会话全放开检查，不能靠仓里一份文件推给所有机器 */
 const FORBIDDEN_MODES = ['bypassPermissions'];
 
+/** 少了它，Claude Code 会把那一类的内置规则整段换掉；文档 Danger 那段点名的是软拦和防外传的规则 */
+const DEFAULTS = '$defaults';
+
+/** autoMode 里同步的两项，数组顺序就是这里的顺序 */
+const AUTO_LISTS = ['environment', 'allow'] as const;
+
 export type PermSource = { ok: true; value: PermSpec } | { ok: false; why: string };
 
 function strings(v: unknown, name: string): string[] | string {
@@ -46,6 +70,29 @@ function strings(v: unknown, name: string): string[] | string {
     if (typeof x !== 'string' || x.trim() === '') return `${name} 里有不是非空字符串的项`;
     if (out.includes(x)) return `${name} 里「${x}」写了两遍`;
     out.push(x);
+  }
+  return out;
+}
+
+/**
+ * 认 autoMode：可以有，可以没有（没有就整段不管）。有就必须是一个对象、两个数组都合规矩、都带 "$defaults"。
+ * 少了 "$defaults" 是拒收而不是替你补上：补上了源文件本身还是错的，下一个人照它改、范围就在他手里悄悄变了。
+ * 也拒绝只有 "$defaults" 的空壳。多出来的键（soft_deny、hard_deny、classifyAllShell）照旧：本脚本不写它们，机器上原有的也不动。
+ */
+function parseAutoMode(v: unknown): AutoModeSpec | string | undefined {
+  if (v === undefined) return undefined;
+  if (!isObj(v)) return 'autoMode 不是对象';
+  const out: AutoModeSpec = { environment: [], allow: [] };
+  for (const name of AUTO_LISTS) {
+    const raw = v[name];
+    if (raw === undefined) return `autoMode.${name} 没写（两项都要，且都要带 "${DEFAULTS}"）`;
+    const got = strings(raw, `autoMode.${name}`);
+    if (typeof got === 'string') return got;
+    if (!got.includes(DEFAULTS))
+      return `autoMode.${name} 里没有 "${DEFAULTS}"：没它 Claude Code 会把这一类的内置规则整段换掉（强推、curl | bash、生产发布、往外发数据这些就不再拦），拒收`;
+    if (got.length < 2)
+      return `autoMode.${name} 里只有 "${DEFAULTS}"、没有自己的规则：要么写一条，要么整段不写`;
+    out[name] = got;
   }
   return out;
 }
@@ -71,6 +118,8 @@ export function parsePermissions(text: string, home: string): PermSource {
   // retiredDeny 可以不写
   const gotDeny = root.retiredDeny === undefined ? [] : strings(root.retiredDeny, 'retiredDeny');
   if (typeof gotDeny === 'string') return { ok: false, why: gotDeny };
+  const auto = parseAutoMode(root.autoMode);
+  if (typeof auto === 'string') return { ok: false, why: auto };
   const allow = lists.allow as string[];
   const deny = lists.deny as string[];
   const retired = lists.retired as string[];
@@ -85,7 +134,15 @@ export function parsePermissions(text: string, home: string): PermSource {
   );
   return {
     ok: true,
-    value: { defaultMode: mode, additionalDirectories: dirs, allow, deny, retired, retiredDeny: gotDeny },
+    value: {
+      defaultMode: mode,
+      additionalDirectories: dirs,
+      allow,
+      deny,
+      retired,
+      retiredDeny: gotDeny,
+      ...(auto === undefined ? {} : { autoMode: auto }),
+    },
   };
 }
 
@@ -102,6 +159,39 @@ export interface Diff {
 }
 
 const LISTS = ['allow', 'deny', 'additionalDirectories'] as const;
+
+/** 报告里带一句规则原文会很长：截短，够认出是哪条 */
+function short(s: string): string {
+  return s.length > 24 ? `${s.slice(0, 24)}…` : s;
+}
+
+/**
+ * 机器上 autoMode 那一层和源文件对不上的地方。
+ * 机器上的数组带了 "$defaults" 才算数：不带就是那一类的内置规则已经被整段换掉了，这是没有源文件也认得出的漂移，单独报。
+ */
+function judgeAuto(have: unknown, spec: AutoModeSpec, out: Diff): void {
+  if (have !== undefined && !isObj(have)) {
+    out.stuck.push('autoMode 不是对象');
+    return;
+  }
+  const am: Obj = have ?? {};
+  for (const name of AUTO_LISTS) {
+    const cur = am[name];
+    if (cur !== undefined && !Array.isArray(cur)) {
+      out.stuck.push(`autoMode.${name} 不是数组`);
+      continue;
+    }
+    const list: unknown[] = cur ?? [];
+    const want = spec[name];
+    const missing = want.filter((w) => !list.includes(w));
+    if (missing.length)
+      out.missing.push(`autoMode.${name} 少 ${missing.length} 条（${missing.map(short).join('、')}）`);
+    // 机器上那一档也在、却没有 "$defaults"：内置规则已经被换掉了（这一档是不是本脚本写的无从判断，只报不动）
+    if (list.length > 0 && !list.includes(DEFAULTS))
+      out.stuck.push(`autoMode.${name} 里没有 "${DEFAULTS}"：这一类的内置规则不生效，要人看`);
+    out.others += list.filter((x) => !want.includes(x as string)).length;
+  }
+}
 
 /** 逐项对：root 是整份设置文件 */
 export function judge(root: unknown, spec: ListSpec): Diff {
@@ -144,6 +234,7 @@ export function judge(root: unknown, spec: ListSpec): Diff {
       out.stuck.push(`${name} 里有仓里放在另一边的 ${clash.join('、')}（allow 和 deny 相反）`);
     out.others += list.filter((x) => !want.includes(x as string) && !gone.includes(x as string)).length;
   }
+  if (spec.autoMode !== undefined) judgeAuto(root.autoMode, spec.autoMode, out);
   return out;
 }
 
@@ -162,6 +253,16 @@ export function merged(root: Obj, spec: ListSpec): Obj {
     perm[name] = kept;
   }
   next.permissions = perm;
+  if (spec.autoMode !== undefined) {
+    const am: Obj = isObj(next.autoMode) ? next.autoMode : {};
+    // 机器上别的档（soft_deny、hard_deny、classifyAllShell）一个不碰，只并这两档
+    for (const name of AUTO_LISTS) {
+      const list: unknown[] = Array.isArray(am[name]) ? (am[name] as unknown[]) : [];
+      for (const w of spec.autoMode[name]) if (!list.includes(w)) list.push(w);
+      am[name] = list;
+    }
+    next.autoMode = am;
+  }
   return next;
 }
 
@@ -183,7 +284,7 @@ export function checkJson(abs: string, key: string, spec: ListSpec, noFile: stri
     line(
       'ok',
       key,
-      `${spec.defaultMode === undefined ? '' : `defaultMode ${spec.defaultMode}、`}allow ${spec.allow.length} 条、deny ${spec.deny.length} 条都在，机器上自己加的 ${d.others} 条没动`,
+      `${spec.defaultMode === undefined ? '' : `defaultMode ${spec.defaultMode}、`}allow ${spec.allow.length} 条、deny ${spec.deny.length} 条都在${spec.autoMode === undefined ? '' : `、autoMode ${AUTO_LISTS.map((n) => `${n} ${spec.autoMode?.[n].length ?? 0} 条`).join('、')}都在`}，机器上自己加的 ${d.others} 条没动`,
     ),
   ];
 }
@@ -242,7 +343,7 @@ export function checkPermissions(ctx: Ctx, src: Sources, skip?: PermSkip): Line[
     relOf(ctx, PERMISSIONS_TARGET.settings).abs,
     key,
     spec.value,
-    '权限（defaultMode、allow、deny）没装',
+    '权限（defaultMode、allow、deny、autoMode）没装',
   );
 }
 

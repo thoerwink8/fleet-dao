@@ -52,7 +52,7 @@ export const DEPLOY_READS_PACKAGES = ['agents-sync', 'feishu', 'web'] as const;
  */
 export const TEST_READS: Record<string, string[]> = { api: ['web'], feishu: ['web'] };
 
-type Rule =
+export type Rule =
   | { match: (f: string) => boolean; full: string }
   | { match: (f: string) => boolean; units: string[]; deploy?: 'all' | 'ops'; why: string };
 
@@ -84,9 +84,14 @@ export const PATH_RULES: readonly Rule[] = [
     deploy: 'ops',
     why: 'deploy/test 核对端口表、放文件的命令，db 的测试读它',
   },
-  // AGENTS.md、agents/ 只是 agents-sync 的输入：标记成对、skill 格式由 agents-sync 和 agents 的单测读真文件核对；
+  // AGENTS.md、agents/ 是 agents-sync 的输入，也是 agents 单测的输入：标记成对、skill 格式由 agents-sync 和 agents 的单测读真文件核对，
+  // 通用段自己也被 agents 的钉子测试读（agents/test/rules/design-skills.rules.test.ts 读这几条规矩在不在，#522）；
   // deploy/test 的同步测试只验换身份写文件，内容换了结果不变，所以不跑 deploy（纯说明 PR 曾被拖 2 分多钟）。
-  { match: exact('AGENTS.md'), units: ['agents-sync'], why: '通用段由 agents-sync 分发' },
+  {
+    match: exact('AGENTS.md'),
+    units: [AGENTS_UNIT, 'agents-sync'],
+    why: '通用段由 agents-sync 分发，agents 的测试读它核规矩',
+  },
   // 引擎起 Claude 会话经 --settings 直接用仓里这份调工具前的钩子（adapters 的 PRETOOL_SCRIPT），adapters 的测试真跑它
   {
     match: under('agents/hooks/'),
@@ -208,9 +213,11 @@ export interface PlanInput {
   /** 这次改了的文件，仓内相对路径（git diff --name-only --no-renames base...HEAD）。 */
   changed: readonly string[];
   graph: PackageGraph | string;
+  /** 包外路径的去处；只在测试里换掉（ci-plan.test.ts 拿漏记一处的版本核对扫描器查不查得出来）。 */
+  rules?: readonly Rule[];
 }
 
-export function planCi({ event, changed, graph }: PlanInput): CiPlan {
+export function planCi({ event, changed, graph, rules = PATH_RULES }: PlanInput): CiPlan {
   if (event !== 'pull_request') return fullPlan([`${event} 事件：全跑（主线上兜底）`]);
   if (typeof graph === 'string') return fullPlan([`包依赖图读不出（${graph}）：全跑`]);
   if (changed.length === 0) return fullPlan(['改动列表是空的：认不出这次改了什么，全跑']);
@@ -224,7 +231,7 @@ export function planCi({ event, changed, graph }: PlanInput): CiPlan {
   /** 取最大的：有一条要全套就全套。 */
   let deploy: DeployMode = 'none';
   for (const f of changed) {
-    const rule = PATH_RULES.find((r) => r.match(f));
+    const rule = rules.find((r) => r.match(f));
     if (rule && 'full' in rule) {
       fullWhy.push(`${f}：${rule.full}`);
       continue;

@@ -7,15 +7,17 @@
 ## 一条命令
 
 ```
-pnpm agents:sync              # 取远端 → 把检出快进到主线 → 同步（规矩、技能、钩子、权限）→ 每家一行报结果
+pnpm agents:sync              # 取远端 → 把同步专用的检出切到 origin/main → 同步（规矩、技能、钩子、权限）→ 每家一行报结果
 pnpm agents:sync --check      # 只读，不取远端、不写，只报差在哪
-pnpm agents:sync --offline    # 网络不通时用：不取远端，按检出里现有的主线同步
-pnpm agents:sync --repo <目录> # 指定 fleet-dao 检出（默认：~/.fleet-dao/synced.json 记的，再没有就是脚本所在的检出）
+pnpm agents:sync --offline    # 网络不通时用：不取远端，按本机上次取到的 origin/main 同步
+pnpm agents:sync --seed <目录> # 拿这个 fleet-dao 检出当种子（第一次建、或专用检出坏了要重建时用；
+                              # 默认：~/.fleet-dao/synced.json 记的检出，再没有就是脚本所在的检出）
 ```
 
 - 开发机开新会话时，开会话钩子自己做同样的事（三分钟内同步成功过就跳过），所以平时不用手敲；这条是「现在就要、要看到每家结果」时用。
+- 同步用的是一份**只归同步工具的检出** `~/.fleet-dao/origin-main`：永远停在 `origin/main` 的分离头上。本机自己的 fleet-dao 检出在哪个分支、有没有没提交的改动都不影响同步；那边的检出只被当「种子」读（拿它的 origin 地址、本地对象），一个写操作都没有。专用检出里要是被人改了，整份挪到它旁边（`origin-main.bak-<时间>`）再从零建一份——不拿没推的内容去同步，也不删东西。
 - **同步完要重开 AI 会话才生效**：已经开着的会话读的是开场时的配置。
-- 不满足就明说、不同步：git 跑不起来、取不到远端（`--offline` 才放行）、检出不在 main 上、`AGENTS.md` 或 `agents/` 有没提交的改动、main 和 origin/main 分叉。退出码 0 都对，1 有前置不满足或有没做成，2 有没查成。
+- 不满足就明说、不同步：git 跑不起来、取不到远端（`--offline` 才放行）、专用检出建不起来、专用检出的锁被别的同步拿着。退出码 0 都对，1 有没做成的，2 有没查成的。
 - 对 AI 说：「跑 `pnpm agents:sync`，把这台的权限同步到最新」。
 - Windows 上如果这台的 git 跑不起来（缺 DLL），先把 `D:\Tools\Git\cmd` 放进 PATH 前面。
 
@@ -23,7 +25,7 @@ pnpm agents:sync --repo <目录> # 指定 fleet-dao 检出（默认：~/.fleet-d
 
 | 家 | 写到哪 | 怎么写 | 状态 |
 |---|---|---|---|
-| Claude Code | `~/.claude/settings.json` 的 `permissions` | `defaultMode`（覆盖）、`allow`/`deny`/`additionalDirectories`（补缺、不删自己加的） | 已合并（#516）、本机实测 |
+| Claude Code | `~/.claude/settings.json` 的 `permissions` 和 `autoMode` | `defaultMode`（覆盖）、`allow`/`deny`/`additionalDirectories`（补缺、不删自己加的）；`autoMode` 的 `environment`、`allow`（并集、不删自己加的，见下面一节） | 已合并（#516）、本机实测；`autoMode` 2026-10-01 加（同 PR 带进主线） |
 | Grok | 不另写 | 它直接读 `~/.claude/settings.json` 的 `permissions`（含 `defaultMode`），随 Claude 那份生效；它不认的工具（`NotebookEdit`、`PowerShell(…)`）开会话时跳过并警告，不影响别的 | 本机实测：`grok inspect --json` 的 `permissions` 里读到 34 条、跳过 9 条（依据 `~/.grok/docs/user-guide/22-permissions-and-safety.md` 第 3 节） |
 | Kimi Code | `~/.kimi-code/config.toml` | 最前面一行 `default_permission_mode = "auto"`；文件末尾一块托管块，里面是 `[[permission.rules]]`（先匹配的生效，所以拒绝排在放行前面；现在没有拒绝） | 本机装了：`kimi doctor` 认这份配置 |
 | Codex | `~/.codex/rules/default.rules` | 一块托管块，里面是 `prefix_rule(pattern=["git"], decision="allow")` / `decision="forbidden"` | 本机装了：`codex execpolicy check` 核过匹配结果 |
@@ -43,6 +45,39 @@ pnpm agents:sync --repo <目录> # 指定 fleet-dao 检出（默认：~/.fleet-d
 - `Read`、`Grep`、`Glob`、`Write`、`Edit` 这类工具名：Kimi 照抄；Devin 翻成 `Read(**)`、`Write(**)`、`grep`、`glob`；Codex 的规则只管命令，没有对应。
 - `WebFetch`、`WebSearch`、`Agent`、`Workflow`、`NotebookEdit`：各家都没有对应写法，不同步，报告里数出「有几条没同步」。
 - 翻译后同一条既放行又拒绝、源文件不合规矩（含 `defaultMode` 写 `bypassPermissions`）：装了的各家都报没查成 / 没做成，一个都不写。
+
+## `autoMode`：给分类器看的那一段
+
+`permissions` 管的是「哪些工具调用不用问」，`autoMode` 管的是**另一个东西**：`defaultMode: auto` 之下，每条工具调用还要过一遍 auto 模式的分类器，它默认拦掉不可逆的、破坏性的、以及指向你这套环境之外的调用。分类器会拦下不认识的日常动作（2026-10-01 就拦过一次：#509 那份正文被当成「用户没明确要的覆盖」）。`autoMode` 就是跟它说清楚「自己人是谁、什么算外面、哪些日常动作是例外」的地方，写的是自然语言整句，分类器当规则读，不是工具名或正则。
+
+装到哪：`~/.claude/settings.json` 的 `autoMode`，跟 `permissions` 是同一份文件、两段。**只认用户级**——项目里的 `.claude/settings.json` 和 `.claude/settings.local.json` 里的 `autoMode` 分类器不读（文档写明是防着仓里替自己开后门），所以仓里这份清单必须靠同步工具落到每台机器的家目录，写进仓里不管用。`--user`（法国装机）整段不写。
+
+仓里 `agents/config/claude-permissions.json` 的 `autoMode` 只写两档，同步工具按并集合并进机器上那一档（机器上自己加的、本脚本没管的两档都不动）：
+
+| 档 | 是什么 | 仓里现在写了什么 |
+|---|---|---|
+| `environment` | 什么是「自己人」：分类器拿它判断「外面」是哪儿 | 和工作仓同一个 GitHub 主人的仓算自己的；这个范围之外（别人的仓、公开的粘贴站和代码托管、外部服务、域名、云存储）算外面 |
+| `allow` | 内置软拦规则的例外：日常动作写这里 | 改自己仓里单子和 PR 的标题、正文、标签、评论、子单关系；另加一条说明这些不等于别的也放行（推、删、发布、强推照旧按各自的规矩判） |
+
+为什么不写别的：`soft_deny`、`hard_deny` 是收紧，不推给所有机器；`classifyAllShell` 改了之后每条 shell 命令都过分类器、费时，是每台自己愿不愿意的事。这三样同步工具一个不碰，机器上原有的照旧生效。
+
+### `"$defaults"`：少一个就把内置规则整段换掉
+
+两个数组**都必须带字面量 `"$defaults"`**，它在数组里的位置决定内置的那批规则插在哪。文档里那段 Danger 写得很清楚：哪一档的数组没带 `"$defaults"`，那一档的内置规则就**整段**被换掉——软拦那一类丢掉的是强推、`curl | bash`、生产发布、绕过 auto 模式这些，硬拦那一类丢掉的是防外传那条。所以：
+
+- 仓里的源文件少了 `"$defaults"`（或只有 `"$defaults"`、没有自己的规则）：同步工具**拒收**，报没查成 / 没做成，一台机器都不写。不替它补上——补上了源文件本身还是错的，下一个人照它改、拦住和放开的东西就在他手里悄悄变了。
+- 机器上那一档在、却没带 `"$defaults"`（谁改的不知道，可能是人自己动了、也可能是别处装的）：报漂移，**整份不动**，要人看。这是没有源文件也认得出的漂移，`--check` 单独会报出来。
+- `additionalDirectories`、`permissions` 那几档不受影响：文档说四档各算各的，只写 `environment` 不动另外三档。
+
+### 和 `permissions.allow` 怎么配合
+
+两层闸、两套写法，别混：
+
+1. **`permissions.allow` 在前**：命中的工具调用直接放行、不进分类器。但 auto 模式会**暂时撤掉**那些「能跑任意代码」的宽规则（`Bash`、`PowerShell`、`Bash(node:*)`、`Bash(python:*)` 这类），把它们交给分类器；窄规则（`Bash(gh:*)`、`Bash(git:*)`）照旧直接放。所以清单里那条 `Bash(gh:*)` 在 auto 模式下仍然有效，而写一条宽规则指望它绕开分类器是行不通的。
+2. **`autoMode` 在后**：分类器按 `environment` 判「这是不是外面」、按 `soft_deny` / `hard_deny` 判危险、按 `allow` 放行例外。`deny` 和 `ask` 排在分类器之前，谁也覆盖不了。
+3. 所以一条命令被拦，先看是哪一层拦的：说 `Denied by auto mode classifier` 是第二层，要动的是 `autoMode`；说「权限被拒」是第一层，要动的是 `permissions`。
+
+改这一段是改标准（这份清单在 `packages/conventions/standard-paths.json` 里）：PR 正文写「人闸：改标准」，创始人同意才合。合进主线后各台开会话时自动同步，机器上重开会话才生效。
 
 ## 托管块和「不删你自己加的」
 
@@ -65,7 +100,8 @@ pnpm agents:sync --repo <目录> # 指定 fleet-dao 检出（默认：~/.fleet-d
 1. **仓里的清单合进主线**（#516、#519、#520 已合）。没合进主线，`pnpm agents:sync` 同步的还是旧的。
 2. **这台机器同步过**：开新会话时钩子自动同步，或者手动跑 `pnpm agents:sync`（要 `node`、`git` 能用；Windows 上 git 缺 DLL 时先把 `D:\Tools\Git\cmd` 放进 PATH 前面）。同步完 `pnpm agents:sync --check` 应该零漂移、零缺失。
 3. **重开 AI 会话**：已开着的会话读的是开场时的配置。
-4. **那一家真的读这份文件**：Claude Code 读 `~/.claude/settings.json`；Grok 借道读同一份；Kimi、Codex 读各自的文件（都在本机用各家自己的命令核过：`kimi doctor`、`codex execpolicy check`、`grok inspect --json`）。Devin 没装、没实测；Gemini CLI、Antigravity 没接。
+4. **那一家真的读这份文件**：Claude Code 读 `~/.claude/settings.json`（`permissions` 和 `autoMode` 同一份，`autoMode` 只认用户级、项目级不读）；Grok 借道读同一份；Kimi、Codex 读各自的文件（都在本机用各家自己的命令核过：`kimi doctor`、`codex execpolicy check`、`grok inspect --json`）。Devin 没装、没实测；Gemini CLI、Antigravity 没接。
+5. **`autoMode` 那一刻生效还看得到**：同步完可以跑 `claude auto-mode config`（打印分类器实际用的那几档规则）核一遍，`claude auto-mode defaults` 看内置的。仓里写的是自然语言，判断在分类器那边，本机没法逐条断言「这条一定拦、那条一定放」。
 5. **图形界面（Mirasim）**：它起 CLI 时读不读用户级设置、有没有自己带模式参数，**没实测**。在里面开新会话让 AI 跑一条 `ssh` 试，被拦就把报错给 AI 查。
 6. **法国不生效**：`--user` 整段不写，法国的会话放不放开由引擎起会话的参数定。
 
@@ -74,6 +110,7 @@ pnpm agents:sync --repo <目录> # 指定 fleet-dao 检出（默认：~/.fleet-d
 ## 怎么加、怎么撤一条
 
 1. 改 `agents/config/claude-permissions.json`：加就加进 `allow` / `deny`；撤就从里面删掉、写进 `retired`（两边都摘）或 `retiredDeny`（只从 deny 里摘，放宽时把旧拒绝撤了、同一条又放进 allow 用它），各机器下一次同步才会摘掉。
+   `autoMode` 的 `environment` / `allow` 直接改那两条数组，**`"$defaults"` 别动**（见上面那一节）；只写「日常」，推送、删除、发布、强推这些不写进去。撤一条就从数组里删掉——`autoMode` 没有 `retired` 那一套：它按并集合并，机器上原来装过的条目不会自动摘掉，要摘得在机器上手动删（这类条目不多，且多半是各台自己加的）。
 2. 这份文件在 `packages/conventions/standard-paths.json` 里，改它是「改标准」：PR 正文写「人闸：改标准」，创始人同意才合。
 3. 合进主线后，各开发机开会话时自动同步，或者手动 `pnpm agents:sync`。
 
@@ -83,7 +120,7 @@ pnpm agents:sync --repo <目录> # 指定 fleet-dao 检出（默认：~/.fleet-d
 
 ## 代码在哪
 
-- `packages/agents-sync/src/permissions.ts`：Claude 的合并逻辑，也给 Devin 用（`judge`、`merged`、`checkJson`、`applyJson`）。
+- `packages/agents-sync/src/permissions.ts`：Claude 的合并逻辑（`permissions` 和 `autoMode` 两段），也给 Devin 用（`judge`、`merged`、`checkJson`、`applyJson`；Devin 那边不写 `autoMode`）。
 - `packages/agents-sync/src/permissions-vendors.ts`：翻译和 Kimi、Codex 的托管块。
 - `packages/agents-sync/src/targets.ts`：每家写到哪（`PERMISSIONS_TARGET`、`KIMI_PERMISSIONS` 等）和做不到的几家的理由（`PERMISSION_GAPS`）。
 - `packages/agents-sync/src/sync-now.ts`：一键命令。
