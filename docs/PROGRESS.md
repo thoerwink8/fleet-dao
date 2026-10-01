@@ -57,3 +57,101 @@
 - **本机网络的坑**：`~/.claude/settings.json` 的 env 把代理写成 `127.0.0.1:59822`（reclaude 的口），现在没在听，git/gh 全断；Clash 的 `7890` 是通的。会话里先 `export https_proxy=http://127.0.0.1:7890`；改设置文件要等创始人回来（不重启、不改本机配置）。
 - **在做**：#481 工人按创始人「一次性全修完」把 `request-id`、`signature`、`signature-header` 三条规则一起删、改完第二意见那条；#549 reclaude 两份文档跟上 ai-gateway-stack 已退役（CI 绿自动合）。
 - **等创始人拍**：装机三件（第一版做到哪 / 盘符 / 代理客户端的指针放哪——ai-gateway-stack 已退役，原推荐「指针放那个仓」要改成放 fleet-dao `docs/ops.md` + 保险箱订阅）；法国 root 登录恢复（保险箱换钥匙卡在这）。
+
+
+## 2026-10-01 晚上（法国 root 打通、保险箱换钥匙）
+
+- **法国 root 通了，不用 VNC 了**。路：Contabo 面板里 `Reset credentials → Password` 重设 root 口令——**这条会重启那台**（约 3 分钟，Contabo 的文档写的，实测也是），重启后 18:22 起来；然后 TightVNC 连面板 `VNC` 那行给出的地址（VNC 密码在那行的锁形图标按钮 `title="VNC Control"` 里设），在控制台里 `root` + 新口令登进去，把 `workstation/ssh/fleet_login.pub` 追加进 `/root/.ssh/authorized_keys`（600）。本机 `ssh contabo-jump whoami` → `root`、`hostname` → 那台的短名。**`hk-jump` 这个别名本机没配**（试了报 `Could not resolve hostname`），要走香港跳板得先配。
+  - 地址、实例号不写进公开仓，要连的时候从 Contabo 面板或保险箱取。
+  - 踩过的坑：Contabo 的「Add and Store SSH-Key」存在**账号**上，不会下发到正在跑的实例，对这台没用；VNC 密码和 Linux root 口令是**两把不同的钥匙**，VNC 密码只开屏幕。
+  - **两串口令进了对话**（VNC 密码、新 root 口令），要找时间在面板里换掉。
+- **保险箱换了钥匙**（`fleet-dao-vault` `3ae943d` + `f4dc486`）。旧钥匙（本机 `.fleet-dao/vault-key.txt`、仓里 `workstation/age-identity.txt`）随 09-29 那次 C 盘被清没了，两台服务器上明文都还在（法国 26+2 个、香港 5+2 个），所以照新写的 `rekey.sh` 重生成一把、35 个 `.age` 全部按新公钥重加密。**验证**：`verify-rekey.sh` 报「解开 35 个，解不开 0 个」「新公钥加密 → 新钥匙解密，通了」。
+  - 顺手补进仓三样一直没进仓的：`rekey.sh`（换钥匙）、`verify-rekey.sh`（只读核对）、`workstation/ssh/config.sh`（配 ssh 别名）——最后一个还没提交。
+  - README 两处按 10-01 那条拍板改对：钥匙正本**在私有仓里**（只靠私有仓 + GitHub 账号保护），本机那份是方便副本。
+- **法国那个 OOM 是旧账，不是现在的病**。查清了：`journalctl -k -b -1` 显示被杀的是 **09-25 那天的 4 次**，`oom_memcg=/fleet.slice/fleet-agents.slice/fleet-agent-e2e-*-mem.scope`——是 09-25 那次演练起的**临时 e2e 会话**（`python3`，UID 994）把自己那格内存撑爆了，不是常驻服务。重启后（18:22 起）`free -h` 是 11Gi 里用 1.0Gi、available 10Gi，一次没再发生。**结论：不修**；那种 `fleet-agent-e2e-*` 的临时 scope 现在也不在跑了。
+- **待办**：① 轮换进对话的那两串口令；② 保险箱 README 里「服务器上真正要紧的密钥也换掉」（GitHub 机器人私钥、飞书 App Secret、备份口令）那句，要不要现在做——**这是另一件事，还没动**；③ 新机器一键配置那三个待定项（第一版做到哪、盘符、代理归谁管）还没起草。
+
+## 2026-10-01 深夜（保险箱收窄、跳板别名、换钥匙收尾）
+
+- **创始人当晚那句「韶关 3 号楼这一种根本就不需要存进我们的保险箱里」是纠错，照办**：下午那条判准写「丢了以后除了创始人脑子里别处还有没有」，却把别人家的现场凭据算进了「放」那一栏——跟判准自己矛盾（那种丢了跟现场要一份就有）。收窄成「我们自己有、丢了别处再也没有」：自建 VPS 订阅、`france/`、`hk/` 里的配置和密钥留下，现场凭据撤掉。
+  - 私有仓：删 `workstation/sites/`，`workstation/README.md` 重写（`48f7deb`，已 push）。
+  - fleet-dao：`agents/config/claude-permissions.json` 的 `autoMode.allow` 删掉 `workstation/sites/`、`docs/agents-permissions.md` 同步改、`docs/decisions/0005` 补「当晚再收窄」、README 改 → **PR #552**（改标准，正文贴了原话，CI 全绿、已挂自动合并）。
+- **ssh 别名补 `hk-jump`**（香港，和 `myserver` 等价、给跳板用）。实测四条路都通：本机直连法国、直连香港、`ssh -J hk-jump contabo-jump` 经香港跳法国、法国→香港隧道对端 22 也通。脚本在私有仓 `workstation/ssh/config.sh`（`c986007`）。
+- **换钥匙那件事彻底收尾**：「服务器上的密钥也要换」那句改成条件句——**丢了**不用换（09-29 那次就是丢了），**怀疑泄露**才换。创始人当晚拍「口令就不需要换了」，服务器上一个密钥没动。`rekey.sh`、`verify-rekey.sh` 一并进仓（`48f7deb` 之前那次提交）。
+- **待办**：① 新机器一键配置按「以我的标准为主」起草（创始人当晚授权），三项待定我自己定、草案出来给他看一眼；② 那台 Mac 的 `.env` 等的是它自己现场那套凭据，现在知道**不走保险箱**了，得由创始人或现场给。
+
+## 2026-10-02 补记（当晚的收尾）
+
+- **#552 已合**（12:51，改标准，CI 全绿含 deploy）。合进去的是：保险箱收窄到只放「我们自己有、丢了别处再也没有」的凭据；`workstation/sites/` 从私有仓删掉。
+- **CI 那两处红也修了**（同 PR 第二个提交）：biome 要求 `additionalDirectories` 收成一行；`packages/agents-sync/test/permissions.test.ts` 里原来断言放行**必须**含 `workstation/sites/`，跟着改成断言**不许**含。本地 279 条过。
+- **那台 Mac 的 `.env` 怎么办（结论）**：`GRAB_*`（平台账号）、`SRC_DB_*`（现场库账号）是**别人家的**，按新规矩**不走保险箱**，由创始人或现场给；`JEV_API_KEY` 是**我们自己**的（TypeSafe System One，保险箱 `france/etc/fleet-dao/typesafe.key.age` 里有），可以从保险箱取。
+
+## 2026-10-02 深夜（流程重做：方案定稿、清单清理完）
+
+**起因**：创始人 2026-10-02 说「必须重做，因为那套流程太复杂，而且既不快又不省，也不一定好」。一整轮拷问（`grill-me`）后定出三段一条龙。
+
+**落盘的**（`specs/509-需求梳理/`）：
+- `流程重做方案.md` —— 三段、分档、验收、路由两层、留什么删什么、验收标准
+- `执行计划.md` —— 六步顺序、怎么并行、没验证的
+
+**清理做完**（第 0 步）：
+- 开 `v3 三段一条龙` 里程碑（`#10`）；关掉 `v1 Fusion 接活`（`#8`，关了 239 张）、`v2 引擎打磨`（`#9`）
+- 18 张还有效的单移进 v3（`#489 #454 #453 #452 #450 #446 #443 #440 #380 #345 #323 #242 #227 #216 #194 #157 #76 #59`）
+- 13 张 Fusion 零件**关掉留史**（评论写明被 #509 取代，不删）：`#252 #249 #251 #215 #250 #277 #419 #257 #300 #193 #191 #247 #284`
+- `#443` 合进 `#509`；四个母单开出并挂上：`#553` 对题 / `#554` 动手 / `#555` 验收 / `#556` 清理
+
+**待创始人拍**（醒了回）：
+1. Mirasim 那三条路由（Opus / GPT-Luna / Kimi）现在打开吗？（`mirasim-relay` 池现在只开 deepseek-flash）
+2. 探针频率（现在 2 小时真探一次、探通也扣额度）要不要降到 6 小时？
+
+**在验**：实测 Mirasim 能不能真起无头会话（后台 agent 在跑，结论写 `_tmp/mirasim-headless-实测.md`）。
+
+**注意两处**：
+- 代理口 59822 是坏的，用 Clash 的 7890（`export http_proxy=http://127.0.0.1:7890`）
+- `pnpm issue:new --specs` 的用法：正文开头要先写创始人原话 + AI 理解，正文要有 `## 怎么算做完`；`--specs` 传短名，脚本会拼成 `specs/<号>-<短名>`
+
+## 2026-10-02 深夜（worktree 清理、救回决定 0006）
+
+- **worktree：29 棵 → 1 棵**（创始人拍的「不要积累」，理由是他自己的实战教训：Mirasim 会随 worktree 和会话变多越来越卡）。清之前**逐棵查了「有没有没进主线的提交、没提交的改动」**——这是仓里的规矩，删数据要人拍。
+  - 清掉 23 棵干净的。
+  - **救回一个真东西**：`.claude/worktrees/decision-align` 里躺着 `docs/decisions/0006-discussion-model-order.md`——创始人 09-30 拍的「讨论与独立 Review 的模型顺序 GPT→Claude→DeepSeek→Grok→Kimi、都走无头、约 30 秒」，**从没进过主线**。写它的那个会话收了尾就没人管这棵树，内容一直躺在里面。已一字未改落进主线（`d22fda5c`）。
+  - 其余 3 棵的内容确认都在主线上：`537-resolve` 那 3 个提交 → 主线 `e56bd4a9`；`second-opinion` 那个 ci-plan 修复 → 主线 `packages/conventions/src/ci-plan.ts:91`。
+- **教训**：`worktree-sweep.ts` 现在只认「需求工作流和子任务工作流」，**认不出讨论 skill 的临时树**，所以它们永远攒着。创始人拍了要扩，归到 #556。
+- **顺带**：清了本机 `_route-probe` 之外的残留后，本机 `git worktree list` 只剩主检出。
+
+**在跑**：三个后台 agent 探 Mirasim 全部 15 个模型（claude 7、codex 6、dsh 1、kimi 1），结果写 `_tmp/probe-{claude,codex,dsh-kimi}.md`。
+
+## 2026-10-02 深夜（Mirasim 实测全部完成、修了一个真 bug、方案过了一轮挑错）
+
+### Mirasim 无头：**能起**，15 个模型探完
+
+| 执行体 | 结果 |
+|---|---|
+| **codex** | **6 个全成**：`gpt-6-astra` `gpt-6.1-sol` `gpt-6-luna` `gpt-5.6-sol` `gpt-5.6-luna` `gpt-5.6-terra`（6.1–11.5 秒） |
+| **claude** | 7 个本来全成，**被我们自己的 bug 全判失败**（见下），修完待复跑 |
+| **kimi** | **成**（`kimi-code/k3`，22.6 秒）。上一轮报「起不来」是**名字用错**（用了上游名 `kimi-k3`，服务端认 roster 名） |
+| **dsh** | **不能用**：会话起得来，账本 8 行 `viaRelay` 全 true、**status 503×7**、判 `incomplete`。中继上没有这个模型 |
+
+- `gpt-5.6-luna` 和 `gpt-6-luna` 是**两个独立模型，两个都能起**（各起一个会话、账本各留一条）。
+- 扣的都是 **Mirasim 中继额度**（`viaRelay=true`、`upstreamHost=relay.mirasim.ai`），不占本机订阅。
+- `~/.pi/agent/auth.json` 和 `models-store.json` **都是空的 `{}`**。
+
+### 修了一个真 bug（`e1d7bc69`）
+
+`packages/adapters/src/mirasim/run.ts` 的 `modelMatches` 要求模型名**一字不差**，而服务端回读 claude 时多一个 `[1m]` 后缀（上下文窗口标记）→ **7 个 claude 模型全被判 `model_mismatch` 当场叫停**。叫停发生在发出任何上游请求**之前**，所以 7 条会话一条真话都没收到、账本 0 行——**看着像「模型起不来」，其实是自己停的**。
+
+改成只剥末尾方括号标记（不宽松到「前缀相同就算」）。配两条测试，**回退修复即红，验过**。
+
+### 方案过了一轮挑错（GPT 经 Mirasim，gpt-6-luna）
+
+四条异议全部收到方案第十三节：
+1. **验收只判「做到了没有」**，不判「做得好不好」——后者要另写标准，现在没有。
+2. **每类重试要有总次数 + 最长等待两个上限**，超任一个停下报人；停下时要写「这原因出现过几次、原文」。
+3. **驾驶舱要显示「卡在哪 + 在等谁」**，而且**「还没验」不许显示成「失败」**。
+4. **「交接次数」的口径定死**：一次交接 = 控制权转移；**读已有记录不算**。按这个口径三段正好 2 次。
+
+### 工具情况（下一个 AI 要知道）
+
+- **代理**：59822 是坏的，用 `export http_proxy=http://127.0.0.1:7890 https_proxy=http://127.0.0.1:7890`
+- **`cursor-agent` 不在 PATH** → `discuss` 的 `ask.mjs` 不能用；走 Mirasim 的 `second-opinion.mjs` 可用（13.5 秒一轮）。
+- **`worktree-sweep.ts` 认不出讨论 skill 的临时树** → 它们会永远攒着（创始人拍了要扩，归 #556）。

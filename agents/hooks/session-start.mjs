@@ -13,7 +13,7 @@
 // 没查成、没做成都明说原因和这台落后主线几个提交，不当成是最新的。一律退出 0：开会话钩子退出码非 0 也挡不住会话，
 // 只会把输出丢掉；钩子自己出了意外也要打一句「没查成」。
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -409,8 +409,97 @@ export function sessionStart({ cwd, home, git, sync, localGit = git, now = Date.
   return [
     ...(here.line ? [here.line] : []),
     ...checkTemporary(cwd, localGit, now),
+    ...sweepWorktrees(cwd, localGit),
     syncFleet({ home, git, sync, fetch: here.fetch, now }),
   ];
+}
+
+/**
+ * 顺手清掉本仓 `.claude/worktrees/` 下攒着的旧树。
+ *
+ * 起因（创始人 2026-10-02，实战教训）：「任何 work tree 里的任务在完成之后，本地的 work tree 必须清掉……
+ * 不要积累，因为 Mirasim 会因为 work tree 和会话越来越多导致越来越卡」。本机实测攒到 29 棵。
+ * `.claude/worktrees/` 在 .gitignore 里，所以没有别的东西会管它：开会话钩子是唯一每次都会跑的地方。
+ *
+ * **只删证据齐全的，删不掉任何独有东西**（这三条全过才删，任一条不成立就跳过、且不报成失败）：
+ * 1. 不是那个固定名：`second-opinion*` 是 discuss 技能**故意复用**的审查树（它每轮 git clean 自己管，
+ *    而且 Windows 上 Mirasim 的进程占着目录、本来就删不掉）。
+ * 2. 没有未提交的改动（含未跟踪文件）：有就说明可能有人的东西在里面。
+ * 3. 这个树上的提交**一条都不比远端多**（`rev-list HEAD --not --remotes` 是空的）：
+ *    多一条就是有没推上去的活，**绝不删**，照实报。（判「远端」不判「origin/main」：
+ *    树常常建在某条开着 PR 的分支的头上，那些提交在对应的远端分支上、安全，判 main 会把它们全留下。）
+ * 4. **最近 30 分钟没动过**：另一个会话此刻正开着一棵树干活时，它可能刚好是「干净、已推」的
+ *    ——只按前三条就会把它删掉、把人家正在干的事打断。刚建出来、刚提交过的树都不碰。
+ *    （代价是刚做完的树要等半小时才收走，而这条命中率低、留着也无害。）
+ *
+ * 超出这四条的一律不动、也不当成「查成」——2026-10-02 清那 29 棵时，就是靠第 3 条救回了决定 0006
+ * （`decision-align` 树里那份决定从没进过主线）。
+ */
+
+/** 多久没动过才收走（第 4 条）：另一个会话可能正开着一棵树干活。 */
+export const SWEEP_IDLE_MS = 30 * 60_000;
+
+export function sweepWorktrees(cwd, git, now = Date.now()) {
+  const g = (...a) => git(cwd, a);
+  if (!ok(g('rev-parse', '--is-inside-work-tree'))) return [];
+  const top = g('rev-parse', '--show-toplevel');
+  if (!ok(top)) return [];
+  const root = join(top.stdout.trim(), '.claude', 'worktrees');
+  let names;
+  try {
+    names = readdirSync(root, { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => d.name);
+  } catch {
+    return []; // 没有这个目录是常态，不出声
+  }
+  if (names.length === 0) return [];
+  const kept = [];
+  let removed = 0;
+  for (const name of names) {
+    if (/^second-opinion/.test(name)) continue; // discuss 自己的复用树
+    const dir = join(root, name);
+    const head = g('-C', dir, 'rev-parse', 'HEAD');
+    if (!ok(head)) {
+      kept.push(name);
+      continue;
+    }
+    let touched;
+    try {
+      touched = statSync(dir).mtimeMs;
+    } catch {
+      kept.push(name);
+      continue;
+    }
+    if (now - touched < SWEEP_IDLE_MS) {
+      kept.push(name); // 刚动过：可能有人正在里面干活
+      continue;
+    }
+    const dirty = g('-C', dir, 'status', '--porcelain');
+    if (!ok(dirty) || dirty.stdout.trim() !== '') {
+      kept.push(name);
+      continue;
+    }
+    const unmerged = g('-C', dir, 'rev-list', 'HEAD', '--not', '--remotes');
+    if (!ok(unmerged)) {
+      kept.push(name);
+      continue;
+    }
+    if (unmerged.stdout.trim() !== '') {
+      kept.push(name); // 有没推上去的提交：不删，且要报给人
+      continue;
+    }
+    if (ok(g('worktree', 'remove', '--force', dir))) removed += 1;
+    else kept.push(name);
+  }
+  const lines = [];
+  if (removed > 0)
+    lines.push(`顺手清掉了 ${removed} 棵本机没用的工作树（.claude/worktrees/，提交都在远端上了）。`);
+  if (kept.length > 0)
+    lines.push(
+      `注意：.claude/worktrees/ 下还有 ${kept.length} 棵没清（刚动过的、有未提交的改动、或有没推上去的提交）：${kept.slice(0, 5).join('、')}${kept.length > 5 ? ' …' : ''}；看一眼是不是还要，不要了自己删。`,
+    );
+  return lines;
 }
 
 /** Claude Code、Codex、Devin 都认的开会话输出 */
