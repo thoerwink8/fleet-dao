@@ -93,3 +93,38 @@
 - **顺带**：清了本机 `_route-probe` 之外的残留后，本机 `git worktree list` 只剩主检出。
 
 **在跑**：三个后台 agent 探 Mirasim 全部 15 个模型（claude 7、codex 6、dsh 1、kimi 1），结果写 `_tmp/probe-{claude,codex,dsh-kimi}.md`。
+
+## 2026-10-02 深夜（Mirasim 实测全部完成、修了一个真 bug、方案过了一轮挑错）
+
+### Mirasim 无头：**能起**，15 个模型探完
+
+| 执行体 | 结果 |
+|---|---|
+| **codex** | **6 个全成**：`gpt-6-astra` `gpt-6.1-sol` `gpt-6-luna` `gpt-5.6-sol` `gpt-5.6-luna` `gpt-5.6-terra`（6.1–11.5 秒） |
+| **claude** | 7 个本来全成，**被我们自己的 bug 全判失败**（见下），修完待复跑 |
+| **kimi** | **成**（`kimi-code/k3`，22.6 秒）。上一轮报「起不来」是**名字用错**（用了上游名 `kimi-k3`，服务端认 roster 名） |
+| **dsh** | **不能用**：会话起得来，账本 8 行 `viaRelay` 全 true、**status 503×7**、判 `incomplete`。中继上没有这个模型 |
+
+- `gpt-5.6-luna` 和 `gpt-6-luna` 是**两个独立模型，两个都能起**（各起一个会话、账本各留一条）。
+- 扣的都是 **Mirasim 中继额度**（`viaRelay=true`、`upstreamHost=relay.mirasim.ai`），不占本机订阅。
+- `~/.pi/agent/auth.json` 和 `models-store.json` **都是空的 `{}`**。
+
+### 修了一个真 bug（`e1d7bc69`）
+
+`packages/adapters/src/mirasim/run.ts` 的 `modelMatches` 要求模型名**一字不差**，而服务端回读 claude 时多一个 `[1m]` 后缀（上下文窗口标记）→ **7 个 claude 模型全被判 `model_mismatch` 当场叫停**。叫停发生在发出任何上游请求**之前**，所以 7 条会话一条真话都没收到、账本 0 行——**看着像「模型起不来」，其实是自己停的**。
+
+改成只剥末尾方括号标记（不宽松到「前缀相同就算」）。配两条测试，**回退修复即红，验过**。
+
+### 方案过了一轮挑错（GPT 经 Mirasim，gpt-6-luna）
+
+四条异议全部收到方案第十三节：
+1. **验收只判「做到了没有」**，不判「做得好不好」——后者要另写标准，现在没有。
+2. **每类重试要有总次数 + 最长等待两个上限**，超任一个停下报人；停下时要写「这原因出现过几次、原文」。
+3. **驾驶舱要显示「卡在哪 + 在等谁」**，而且**「还没验」不许显示成「失败」**。
+4. **「交接次数」的口径定死**：一次交接 = 控制权转移；**读已有记录不算**。按这个口径三段正好 2 次。
+
+### 工具情况（下一个 AI 要知道）
+
+- **代理**：59822 是坏的，用 `export http_proxy=http://127.0.0.1:7890 https_proxy=http://127.0.0.1:7890`
+- **`cursor-agent` 不在 PATH** → `discuss` 的 `ask.mjs` 不能用；走 Mirasim 的 `second-opinion.mjs` 可用（13.5 秒一轮）。
+- **`worktree-sweep.ts` 认不出讨论 skill 的临时树** → 它们会永远攒着（创始人拍了要扩，归 #556）。
