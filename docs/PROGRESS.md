@@ -32,3 +32,11 @@
 - **auto 模式为什么拦**（查的是 Claude Code 文档 auto-mode-config 一页）：进 auto 模式时，能跑任意代码的宽规则（`Bash`、`PowerShell`、`Bash(node:*)`、`Bash(python:*)` 这类）会被暂时撤掉、交给分类器判，窄规则（`Bash(gh:*)`）照旧直接放；那条命令前面带了 `cd`、`timeout`，配不上 `Bash(gh:*)`，于是进了分类器。分类器没给规则名，最可能是把「用一份 136 行的文件整个覆盖一张已有单子的正文」判成了用户没明确要的覆盖。用户在对话里说的话分类器看得到，但要具体到动作本身才算数。根治办法是 `~/.claude/settings.json` 的 `autoMode`（`environment`、`allow`，用自然语言写；只认用户级，项目里的 `.claude/settings.json` 不认）。仓里的权限清单 `agents/config/claude-permissions.json` 和同步工具现在不管 `autoMode`；要加是改标准，等创始人拍。
 - **顺带发现**：本机的 `pretool.mjs` 钩子把 `node -e` 字符串里出现的「reclaude login」几个字当成要执行的切号命令拦了。09-28 傍晚拍过这两条小拦「改成只认命令本身、不认正文里的字样」，没做到；归到删读密钥钩子那张子单一起改（钩子里的这两条小拦留，只是改判法）。
 - **时间写错过一次，已改**：这台机器的 Git Bash 里 `TZ=Asia/Shanghai date` 不生效、照样打 UTC，我据此把创始人回复的时间写成了「01:35」，实际是北京时间 09:35 前后。仓里文档已改；单子和 PR 上的同一处另改。**看本地时间用 PowerShell 的 `Get-Date`**（会带出 `+08:00`），别信 Git Bash 的 `date`。
+
+## 2026-10-01 上午（创始人第二条回复之后）
+
+- **创始人原话**（10:00 前后，北京时间）：「#481，比如c盘删了，和我有一台新机器，能不能有办法git clone fleet-dao仓库后，就能自动帮我配置好?（readme应该有指向fleet-dao-vault这个仓库），所以要以这个为核心考虑，因为直接c盘出事故了，然后卫生检查我东西全丢了，并且卫生检查不应该卡住流程」；对 auto 模式那一问：「我没看懂来龙去脉，给我再详细介绍来龙去脉」。
+- **#481 按这个核心判，接着做**：名单正是「本机上会丢、丢了得从保险箱补」的东西；删掉以后卫生检查只认真密钥的样子，不靠任何本机配置，新机器 clone 完就能用，名单丢了也卡不住。后台工人在并主线（用 merge、不 rebase、不强推）、解冲突、过第二意见；不合、不挂自动合并，指挥官看过再说。
+- **查出一个要紧的：保险箱的解密钥匙这台已经没了**。`~/.fleet-dao/` 里只剩同步工具的几样东西，C 盘事故把解密钥匙和名单都冲掉了；保险箱只有一把锁（`recipients.txt` 里 1 把公钥）。钥匙要是没抄进创始人的密码管理器，法国、香港那些加密副本（包括香港备份的解密口令）这台已经解不开；法国机器上还有明文，可以趁它在换一把新钥匙、重新加密（保险箱 README「换钥匙」一节）。已问创始人。
+- **保险箱现在管的是服务器**：法国、香港的配置和钥匙是加密副本；`workstation/` 只有 ssh 登录钥匙（明文，创始人 09-30 拍「电脑上的东西明文放私有仓，电脑没了还找得回」）。新电脑缺的登录（Claude/reclaude、Grok、gh、Mirasim）、Clash 配置、用户级代理变量、各仓的检出，现在没有一处管。
+- **一键装机（clone fleet-dao → 一条命令配好）按 best-practice-first 走**：先和创始人对齐「新电脑上靠哪把总钥匙」等前提，再写业务说明、查业界、让别家挑错、出方案给他拍。业界对照两条：chezmoi 新机器一条命令 `chezmoi init --apply <仓>`（https://www.chezmoi.io/quick-start/ ，10-01 查）；GitHub Codespaces 建新环境时自动克隆 dotfiles 仓、跑里面的 `install.sh` 或 `bootstrap.sh`（https://docs.github.com/en/codespaces/setting-your-user-preferences/personalizing-github-codespaces-for-your-account ，10-01 查）。
