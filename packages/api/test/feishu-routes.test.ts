@@ -1747,6 +1747,50 @@ describe('GET /feishu/outbox 与 POST /feishu/outbox/acks：待推送与回执',
     });
   });
 
+  // #364 开工时留下的疑问之一：报错日志里是 inner join tasks→repos，怀疑的是「联表字段大小写不匹配
+  // （仓名大写开头）」。schema 上两边都是 uuid，真库上一致；这里拿一份「owner、name 都大写」的仓跑一遍
+  // 联查走通的链路，钉住「这条联表在健康数据上就该 200」，不许被修锁那半的过程里打松。
+  it('联查的仓带大写的 owner、name（事故里在等的几张单到的仓）：回 200，联表路径照走', async () => {
+    const data = feishuData();
+    data.repos = [
+      {
+        id: FEISHU_IDS.repo2,
+        owner: 'ThoerWink8',
+        name: 'Fleet-DAO',
+        defaultBranch: 'main',
+        testCommand: 'pnpm test',
+      },
+    ];
+    data.tasks = [
+      {
+        id: FEISHU_IDS.task2of12,
+        repoId: FEISHU_IDS.repo2,
+        issueNumber: 12,
+        title: '大写仓里的单',
+        rawRequest: '大写仓的活',
+        requestedBy: IDS.founderB,
+        state: 'queued',
+        priority: 5,
+        acceptance: [],
+        createdAt: new Date(T0.getTime() - 30 * MIN).toISOString(),
+      },
+    ];
+    data.asks = [
+      {
+        id: FEISHU_IDS.askOpen,
+        taskId: FEISHU_IDS.task2of12,
+        question: '要不要大写字段？',
+        options: [],
+        askedAt: new Date(T0.getTime() - 5 * MIN).toISOString(),
+      },
+    ];
+    const h = harness({ data });
+    const res = await h.cockpit.request('/api/feishu/outbox?waitSeconds=0', gw('GET', undefined, null));
+    expect(res.status).toBe(200); // 不是 500：联表在健康数据上就走通
+    const body = FeishuOutboxResponse.parse(await res.json());
+    expect(body.items.map((i) => i.id)).toContain(`ask:${FEISHU_IDS.askOpen}`);
+  });
+
   it('免打扰时段照设置给；设置读不懂 500（不当成「不设」，免得半夜推卡）；参数认不出 400', async () => {
     const h = harness();
     h.store.data.settings.push({
