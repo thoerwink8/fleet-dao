@@ -21,7 +21,7 @@ import {
   gitEnv,
   tail,
 } from './git.ts';
-import { guardedByHygiene } from './hygiene-scope.ts';
+import { guardedByHygiene, redactValues, screenBranchName } from './hygiene-scope.ts';
 import type { RepoFactsCache } from './repos.ts';
 
 export interface PushDeps {
@@ -101,15 +101,19 @@ export async function pushBranch(deps: PushDeps, input: PushBranchInput): Promis
   const { repo, branch, head } = input;
   const slug = repoSlug(repo);
   if (!validBranchName(branch)) {
+    // 分支名不合规时也不能把原样打进报错：它可能嵌着密钥（这条消息会进日志和会话记录）
     throw new GitHubError(
       'BAD_BRANCH_NAME',
-      `分支名「${branch}」不合规（git 的规矩，且不许 refs/ 开头、不许是 HEAD）`,
+      `分支名「${redactValues(branch)}」不合规（git 的规矩，且不许 refs/ 开头、不许是 HEAD）`,
     );
   }
   if (!SHA.test(head)) throw new GitHubError('BAD_INPUT', `要推的提交「${head}」不是完整的提交号`);
   // 卫生检查只管 fleet-dao 这一个仓（创始人 2026-10-01 10:50 前后拍）：别的仓按它们自己的标准推，不扫
   // （认不出是哪个仓时 guardedByHygiene 自己抛，不默认放过去）
   const guard = guardedByHygiene(repo, deps.hygieneRepo);
+  // 分支名推上去就公开了（远端分支列表、网页地址），而且它会留在远端：和要推的内容一样先过一遍。
+  // 放在最前面：真密钥的分支名一个请求都不发，别等推到一半才发现。
+  if (guard) screenBranchName(branch);
   const facts = await deps.facts.get(repo, 'agent', input.signal);
   const defaultBranch = facts.defaultBranch;
   if (branch.toLowerCase() === defaultBranch.toLowerCase()) {

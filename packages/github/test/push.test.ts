@@ -274,6 +274,25 @@ describe('会话外推分支', { timeout: 60_000 }, () => {
     expect(remoteHead('task/15-message')).toBeNull();
   });
 
+  it('【故意造出的失败】分支名里带真密钥：不推，报错里也不回显——分支名推上去就公开了', async () => {
+    // 提交内容干净也不行：远端的分支列表、PR 的网页地址都带着分支名，而且它会一直留在远端。
+    // 夹具的仓是 acme/widgets，把「卫生检查管的就是它」明确指过去（默认只管 fleet-dao）。
+    const repo = { owner: 'acme', name: 'widgets' };
+    const { gh } = pushSetup(undefined, { hygieneRepo: repo });
+    const secret = ['ghp', 'Wv4Qt9Mn2Kb7Xs5Rz1Yc8HdJ3fLg6TaEu'].join('_');
+    const branch = `task/${secret}`;
+    const wt = worktree('task/18-branchname');
+    const err = await gh
+      .pushBranch({ repo, bundlePath: wt.bundle, branch, head: wt.head })
+      .catch((e: unknown) => e);
+    expect(err).toMatchObject({ code: 'HYGIENE_BLOCKED', retryable: false });
+    expect((err as Error).message).toContain('分支名');
+    expect(
+      `${(err as Error).message}${JSON.stringify((err as { details?: unknown }).details)}`,
+    ).not.toContain(secret);
+    expect(remoteHead(branch)).toBeNull();
+  });
+
   it('别的仓：同样带真密钥也照推——卫生检查只管 fleet-dao 这一个仓（创始人 2026-10-01 10:50 前后拍）', async () => {
     // 卫生检查管的是另一个仓（这里指成 fleet-dao 那个默认值）：推的这个仓（夹具的 acme/widgets）不该被套上这套规则
     const { gh } = pushSetup(undefined, { hygieneRepo: { owner: 'thoerwink8', name: 'fleet-dao' } });

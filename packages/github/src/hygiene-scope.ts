@@ -7,6 +7,7 @@
 // 这一份是默认值（不配就是它）。哪份配置想指别处（测试夹具、迁移期），在 createGitHub 的 hygieneRepo 上传一份；
 // 只改这一处，推分支、写需求文档、开 PR、写单子都跟着。本机人推那条路不用动：`git push` 跑的是仓里的
 // `.githooks/pre-push`（core.hooksPath 是仓级的），只在这个仓里生效。
+import { findHits } from '@fleet-dao/hygiene';
 import type { RepoRef } from './client.ts';
 import { repoSlug } from './client.ts';
 import { GitHubError } from './errors.ts';
@@ -25,5 +26,33 @@ export function guardedByHygiene(repo: RepoRef | undefined | null, guard: RepoRe
   return (
     repo.owner.toLowerCase() === guard.owner.toLowerCase() &&
     repo.name.toLowerCase() === guard.name.toLowerCase()
+  );
+}
+
+/**
+ * 一句话、一个名字（分支名、「开 x 上 y 的 PR」这类说明）里嵌着的真密钥遮掉再往报错里放：报错会进 CI 日志、
+ * 推送报错和会话记录，输出里不带值。按 `/` 分段遮，命中的那段整个换成「…」（JWT 的规则只匹配前两段，
+ * 只擦匹配到的一截会把签名留下）。
+ */
+export function redactValues(text: string): string {
+  return text
+    .split('/')
+    .map((segment) => (findHits(segment).length > 0 ? '…' : segment))
+    .join('/');
+}
+
+/**
+ * 分支名推上去就公开了（远端分支列表、PR 的网页地址），命中的那段遮掉再报（`redactValues`）。
+ * 命中就抛 HYGIENE_BLOCKED（不可重试：得换个分支名）。
+ */
+export function screenBranchName(branch: string): void {
+  const findings = findHits(branch);
+  if (findings.length === 0) return;
+  throw new GitHubError(
+    'HYGIENE_BLOCKED',
+    `分支名「${redactValues(branch)}」没推：卫生检查查出 ${findings.length} 处（${findings
+      .map((f) => f.label)
+      .join('、')}）。分支名推上去就公开了，换一个再推`,
+    { details: { findings: findings.map((f) => ({ rule: f.rule, label: f.label })) } },
   );
 }

@@ -4,10 +4,10 @@
 // 名字、行、规则名），不带值。
 // 只管 fleet-dao 这一个仓（创始人 2026-10-01 10:50 前后拍）：往别的仓写东西不套这套规则，按那个仓自己的标准来
 // （hygiene-scope.ts）；认不出是哪个仓时明确报错，不默认放过去。
-import { ALLOWLIST, findHits, formatFinding, scanFiles } from '@fleet-dao/hygiene';
+import { ALLOWLIST, formatFinding, scanFiles } from '@fleet-dao/hygiene';
 import type { RepoRef } from './client.ts';
 import { GitHubError } from './errors.ts';
-import { guardedByHygiene } from './hygiene-scope.ts';
+import { guardedByHygiene, redactValues } from './hygiene-scope.ts';
 
 /** 要写出去的一段字：path 是它在仓里的位置（需求文档，名字本身也扫），不是文件的写「PR 标题」这类说明。 */
 export interface PublishText {
@@ -17,17 +17,6 @@ export interface PublishText {
 
 /** 最多在报错信息里列几条命中（全部命中在 details 里）。 */
 const MAX_LISTED = 10;
-
-/**
- * `what` 这类说明里嵌着的真密钥遮掉再报（报错会进 CI 日志、推送报错和会话记录，输出里不带值）。
- * 按 `/` 分段遮：命中的那段整个换成「…」（JWT 的规则只匹配前两段，只擦匹配到的一截会把签名留下）。
- */
-function redactValues(text: string): string {
-  return text
-    .split('/')
-    .map((segment) => (findHits(segment).length > 0 ? '…' : segment))
-    .join('/');
-}
 
 export function assertPublishable(
   repo: RepoRef,
