@@ -78,6 +78,50 @@ describe('续不上：接力（开新会话带接力任务书），why 写清为
 
   it('先后：换了执行方式又是临时号，报的是换了执行方式（先判的那个）', () =>
     relay({ before: claudeBefore, resumeId: `cursor-pending:${REAL}` }, '换了执行方式'));
+
+  it('这个号上一轮续起来 startup_timeout：不再续它，开新会话带接力任务书（#489）', () => {
+    // 连续两个 startup_timeout 同一个 session_id：第二次必须被设定成「要换」，不许再试（同池 resume 和跨池 fork 都算续这个号）。
+    relay({ prior: { ...PRIOR, failureCode: 'startup_timeout' } }, '不再续这个号');
+    const claudeForkWanted = decideContinuation(
+      facts({
+        driver: claude,
+        before: claudeBefore,
+        route: { poolId: 'claude-carpool' },
+        prior: { ...PRIOR, contextTokens: 5_000, failureCode: 'startup_timeout' },
+      }),
+    );
+    expect(claudeForkWanted.mode).toBe('relay');
+    expect(claudeForkWanted.why).toContain('不再续这个号');
+  });
+
+  it('上一轮判了停滞、本来要同池 resume：也开新会话带接力任务书（#489）', () => {
+    // 09-28 晚 6 次 startup_timeout 全都是续上刚判停滞的同一个 Grok 会话：判停滞的会话不再原样续，和换账号池同一套接力。
+    const grok = decideContinuation(
+      facts({
+        driver: { hostId: 'grok', canFork: false },
+        before: { hostId: 'grok', poolId: 'grok' },
+        route: { poolId: 'grok' },
+        prior: { ...PRIOR, outcome: 'stalled' },
+      }),
+    );
+    expect(grok.mode).toBe('relay');
+    expect(grok.why).toContain('停滞');
+    expect(grok.why).toContain('接力');
+    const byCode = decideContinuation(
+      facts({
+        driver: { hostId: 'grok', canFork: false },
+        before: { hostId: 'grok', poolId: 'grok' },
+        route: { poolId: 'grok' },
+        prior: { ...PRIOR, failureCode: 'SESSION_STALLED' },
+      }),
+    );
+    expect(byCode.mode).toBe('relay');
+  });
+
+  it('没填上一轮失败信息的，照旧同池 resume；换了执行方式 + startup_timeout 时先报换了执行方式', () => {
+    expect(decideContinuation(facts())).toEqual({ mode: 'resume', why: '' });
+    relay({ before: claudeBefore, prior: { ...PRIOR, failureCode: 'startup_timeout' } }, '换了执行方式');
+  });
 });
 
 describe('fork：只有 Claude，只换了池、上一轮上下文还小', () => {
