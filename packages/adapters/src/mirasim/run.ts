@@ -178,7 +178,11 @@ async function hello(wire: MirasimWire, ms: number): Promise<Record<string, unkn
  * 也会被认成对。
  */
 function modelMatches(expected: string, observed: string): boolean {
-  const strip = (s: string) => s.trim().toLowerCase().replace(/\[[^\]]*\]$/, '');
+  const strip = (s: string) =>
+    s
+      .trim()
+      .toLowerCase()
+      .replace(/\[[^\]]*\]$/, '');
   return strip(expected) === strip(observed);
 }
 
