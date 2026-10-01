@@ -1,10 +1,10 @@
-// 法国引擎页（#328）：在法国跑的只读查询（france-query.mjs）、本机这头的读、认、判、缓存（france-lib.mjs）、页面服务的两个
-// 地址、命令行 france.mjs。不连法国：ssh 换成本机的 node（跑同一份查询脚本，或假的输出），库、systemctl 换成假的 io。
+// 法国引擎页（#328）：在法国跑的只读查询（france-query.mjs）、本机这头的读、认、判、缓存和页面服务（france-lib.mjs，
+// 外壳 server.mjs）、命令行 france.mjs。不连法国：ssh 换成本机的 node（跑同一份查询脚本，或假的输出），库、systemctl 换成假的 io。
 // 每一种「没读到」各有一条故意造出来的失败：没配 ssh 名字、ssh 连不上、超时、法国上脚本没跑成、库查询出错、库连不上、
 // 读数文件读不了或认不出、回来的不是 JSON、形状不对。
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import type { Server } from 'node:http';
+import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -153,14 +153,21 @@ interface FranceLib {
     refreshMs?: number;
     htmlFile?: string;
   }): FranceSource;
-}
-interface ProgressLib {
-  createProgressServer(opts: { home: string; htmlFile: string; france?: FranceSource | null }): Server;
+  DEFAULT_PORT: number;
+  APP_ID: string;
+  createFranceServer(opts: { france: FranceSource }): Server;
+  parsePort(argv: string[], env: Record<string, string | undefined>): number | string;
+  isOurs(port: number): Promise<boolean>;
+  startFranceServer(opts: {
+    port: number;
+    france: FranceSource;
+    out: (text: string) => void;
+    err: (text: string) => void;
+  }): Promise<{ code: number; server?: Server; port?: number }>;
 }
 
 const query = (await load(QUERY_FILE)) as QueryLib;
 const lib = (await load(join(SCRIPTS, 'france-lib.mjs'))) as FranceLib;
-const progress = (await load(join(SCRIPTS, 'progress-lib.mjs'))) as ProgressLib;
 // 驾驶舱那边的算法：页面上的额度、探针过期线要和它一样
 const sharedUsage = (await load(join(ROOT, 'packages/shared/src/usage.ts'))) as {
   summarizeUsage(runs: Record<string, unknown>[]): Usage;
@@ -1541,23 +1548,21 @@ describe('取一次的整条路：读名字、喂脚本、认回来的', () => {
   });
 });
 
-// —— 页面服务的两个地址、页面、命令行 ——
+// —— 页面服务、页面、命令行 ——
 
-describe('页面服务：/france 给页面，/api/france 给数据', () => {
-  async function serve(france: FranceSource | null) {
-    const server = progress.createProgressServer({
-      home: tempDir(),
-      htmlFile: join(SCRIPTS, 'index.html'),
-      france,
-    });
+describe('页面服务：/ 转到 /france，/france 给页面，/api/france 给数据', () => {
+  async function serve(france: FranceSource) {
+    const server = lib.createFranceServer({ france });
     servers.push(server);
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     const address = server.address();
     if (address === null || typeof address === 'string') throw new Error('没拿到端口');
-    return (path: string) => fetch(`http://127.0.0.1:${address.port}${path}`);
+    // 不跟着跳：要看 / 回的是不是转到 /france
+    return (path: string, init: RequestInit = {}) =>
+      fetch(`http://127.0.0.1:${address.port}${path}`, { redirect: 'manual', ...init });
   }
 
-  it('接了法国：页面 200、数据是缓存那一份；首页有去法国引擎页的页签，法国页有回来的页签', async () => {
+  it('页面 200、数据是缓存那一份；/ 转到 /france；页面上没有回本机进度页的页签（#530 删了进度页）', async () => {
     const source = lib.createFranceSource({
       htmlFile: join(SCRIPTS, 'france.html'),
       fetchOnce: async () => ({ ok: true, data: parsed(healthy()) }),
@@ -1567,28 +1572,78 @@ describe('页面服务：/france 给页面，/api/france 给数据', () => {
     expect(page.status).toBe(200);
     const html = await page.text();
     expect(html).toContain('<title>法国引擎</title>');
-    expect(html).toContain('href="/"');
-    expect(await (await get('/')).text()).toContain('href="/france"');
+    expect(html).not.toContain('href="/"');
+    expect(html).not.toContain('帅位进度');
+    for (const path of ['/', '/index.html']) {
+      const root = await get(path);
+      expect(root.status, path).toBe(302);
+      expect(root.headers.get('location'), path).toBe('/france');
+    }
+    expect(await (await get('/api/ping')).json()).toEqual({ app: lib.APP_ID });
     await get('/api/france');
     await source.refresh();
     const data = (await (await get('/api/france')).json()) as SourceState;
     expect(data.good?.view.counts).toMatchObject({ bad: 0, unread: 0 });
   });
 
-  it('没接法国：两个地址都 404 并说明；页面文件读不到：500 带原因', async () => {
-    const get = await serve(null);
-    const r = await get('/api/france');
-    expect(r.status).toBe(404);
-    expect(((await r.json()) as { error: string }).error).toContain('没接法国引擎页');
-    expect((await get('/france')).status).toBe(404);
+  it('【故意造出的失败】页面文件读不到：500 带原因，不给空页面；只许读；没有的地址（含进度页原来的几个）404', async () => {
     const missing = lib.createFranceSource({
       htmlFile: join(tmpdir(), 'no-such-france.html'),
       fetchOnce: async () => ({ ok: false, kind: 'x', why: 'x' }),
     });
-    const get2 = await serve(missing);
-    const page = await get2('/france');
+    const get = await serve(missing);
+    const page = await get('/france');
     expect(page.status).toBe(500);
     expect(await page.text()).toContain('页面文件读不到');
+    expect((await get('/api/france', { method: 'POST' })).status).toBe(405);
+    for (const gone of ['/api/projects', '/api/p/fleet-dao', '/nope']) {
+      expect((await get(gone)).status, gone).toBe(404);
+    }
+  });
+});
+
+describe('页面服务的端口和起法', () => {
+  const source = () =>
+    lib.createFranceSource({
+      htmlFile: join(SCRIPTS, 'france.html'),
+      fetchOnce: async () => ({ ok: false, kind: 'x', why: 'x' }),
+    });
+
+  it('端口：默认 1127，环境变量和 --port 能改，认不出就说', () => {
+    expect(lib.parsePort([], {})).toBe(lib.DEFAULT_PORT);
+    expect(lib.DEFAULT_PORT).toBe(1127);
+    expect(lib.parsePort([], { FLEET_PROGRESS_PORT: '2000' })).toBe(2000);
+    expect(lib.parsePort(['--port', '3000'], { FLEET_PROGRESS_PORT: '2000' })).toBe(3000);
+    expect(typeof lib.parsePort(['--port', 'abc'], {})).toBe('string');
+    expect(typeof lib.parsePort(['--port'], {})).toBe('string');
+    expect(typeof lib.parsePort([], { FLEET_PROGRESS_PORT: '70000' })).toBe('string');
+  });
+
+  it('再起一遍：端口上已经是这个页面服务就说「已经在跑」、退出码 0；被别的程序占着退出码 1', async () => {
+    const lines: string[] = [];
+    const log = (t: string) => lines.push(t);
+    const first = await lib.startFranceServer({ port: 0, france: source(), out: log, err: log });
+    if (first.server) servers.push(first.server);
+    expect(first.code).toBe(0);
+    expect(await lib.isOurs(first.port ?? -1)).toBe(true);
+    const again = await lib.startFranceServer({
+      port: first.port ?? -1,
+      france: source(),
+      out: log,
+      err: log,
+    });
+    expect(again).toEqual({ code: 0 });
+    expect(lines.at(-1)).toContain('已经在跑');
+
+    const other = createServer((_req, res) => res.end('别人的'));
+    servers.push(other);
+    await new Promise<void>((resolve) => other.listen(0, '127.0.0.1', resolve));
+    const address = other.address();
+    if (address === null || typeof address === 'string') throw new Error('没拿到端口');
+    expect(await lib.isOurs(address.port)).toBe(false);
+    const taken = await lib.startFranceServer({ port: address.port, france: source(), out: log, err: log });
+    expect(taken).toEqual({ code: 1 });
+    expect(lines.at(-1)).toContain('被别的程序占着');
   });
 });
 
@@ -1623,7 +1678,7 @@ describe('命令行 france.mjs', () => {
 });
 
 describe('server.mjs 起来就接了法国引擎页', () => {
-  it('/france 是页面，/api/france 回缓存的样子（这台没配名字：马上报 not-configured）', async () => {
+  it('/ 转到 /france，/france 是页面，/api/france 回缓存的样子（这台没配名字：马上报 not-configured）', async () => {
     const home = tempDir();
     mkdirSync(join(home, '.fleet-dao'), { recursive: true });
     const child = spawn(process.execPath, [join(SCRIPTS, 'server.mjs'), '--port', '0'], {
@@ -1644,6 +1699,9 @@ describe('server.mjs 起来就接了法国引擎页', () => {
         child.on('exit', (code) => reject(new Error(`退出了（${code}）：${buf}`)));
       });
       expect((await fetch(`${url}/france`)).status).toBe(200);
+      const root = await fetch(`${url}/`, { redirect: 'manual' });
+      expect(root.status).toBe(302);
+      expect(root.headers.get('location')).toBe('/france');
       let last: SourceState | null = null;
       for (let i = 0; i < 50 && !last?.lastTry; i++) {
         last = (await (await fetch(`${url}/api/france`)).json()) as SourceState;

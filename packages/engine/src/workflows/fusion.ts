@@ -14,7 +14,7 @@
 // 步骤交界（stepBoundary）是 #215（存档点、换 Lead）、#216（每步耗时和额度进库）要接的地方。
 // 问创始人不挡路（#259）：会话 fleet ask 当场按推荐接着干，他晚到、改选了别的回答在存档点（每一步开工前，checkpoint）读库
 // 交给 Lead 照改——没开 PR 的回第 4 步，开了 PR 的算修一轮，改完推上去记 applied_at；开 PR 写「按推荐先做了」一栏、关单记数。
-// 合进去以后才到的由对账开后续单（jobs/ask-issues.ts）。
+// 合进去以后才到的只记在库里（原来由对账开后续单，#530 删了）。
 // 这里是工作流代码：判断只经 judge、编号只经 newId、core 只许 import type；改调度顺序要 patched()（kit.ts 头注释）。
 
 import type {
@@ -165,7 +165,7 @@ const MAINLINE_SYNC_PATCH = 'mainline-sync-boundary';
 const RISK_PATHS_FRESH_PATCH = 'second-opinion-fresh-risk-paths';
 /**
  * 存档点看晚到的回答的几步：规划做完、合进去之前（core 的 nextFlow 收「changed」的也是这几步）。规划之前方案还没有，
- * 读到的留到规划之后；合进去以后的归对账开后续单。
+ * 读到的留到规划之后；合进去以后的只记在库里（原来由对账开后续单，#530 删了）。
  */
 const CHECKPOINT_STEPS: readonly Step[] = ['review', 'execute', 'verify', 'pr', 'final-review', 'merge'];
 /**
@@ -344,7 +344,7 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
   let specDir = '';
   let docs: Docs | null = null;
   /**
-   * 正文写全了需求、没有需求文档的单（#295，引擎开的后续单、巡检单）：照正文写的需求文档。Lead 在第 2 步原样提交进
+   * 正文写全了需求、没有需求文档的单（#295，巡检单这类引擎自己开的单）：照正文写的需求文档。Lead 在第 2 步原样提交进
    * docs.requirement、随 PR 进主线；开 PR 前验证照正文核，「对应计划」照单子挂的版本写。有需求文档的单是 null。
    */
   let requirementSeed: string | null = null;

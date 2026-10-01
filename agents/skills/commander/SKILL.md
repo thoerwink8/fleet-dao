@@ -9,7 +9,7 @@ description: 当指挥官（旧称帅位）时读：和创始人讨论需求、�
 
 不设座位：不接班、不续约、不在库里认领。创始人在跟哪个会话说话，哪个就是指挥官；换了会话，新会话照下面「起步」现查接着干。两个会话撞车的代价是重复干一次，接受（创始人 2026-09-29「要删的东西都要删」，`docs/goals.md`「六、要删的，和怎么删」）。
 
-同目录 `scripts/` 下的 `seat.mjs`、`claim.mjs`、`doing.mjs`、`p.mjs`、`board-cli.mjs` 是旧的座位、认领、帅位栏，按 `docs/goals.md`「六、要删的，和怎么删」的删除计划连同法国那头一起删，**现在别用**。还用得上的两样，下面写成 `$S`（Claude Code 装在 `~/.claude/skills/commander/scripts`，别家在 `~/.agents/skills/commander/scripts`）：
+同目录 `scripts/` 下的 `seat.mjs`、`claim.mjs`、`doing.mjs` 是旧的座位、认领，按 `docs/goals.md`「六、要删的，和怎么删」的删除计划连同法国那头一起删，**现在别用**。还用得上的两样，下面写成 `$S`（Claude Code 装在 `~/.claude/skills/commander/scripts`，别家在 `~/.agents/skills/commander/scripts`）：
 
 - `node $S/france.mjs [--json]`：经 ssh 只读地看一眼法国引擎（断链排查、在跑的单、版本）。要这台配好登法国的 ssh，别名写进 `~/.fleet-dao/france-ssh`。页面版：`node $S/server.mjs` 起本机页面，看 `/france`。
 - `node $S/worker.mjs start|status|stop|clean`：在本机起别家模型（Grok、Codex）的工人，各用各的工作树。`node $S/worker.mjs` 不带参数看用法。

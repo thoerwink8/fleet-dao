@@ -248,7 +248,7 @@ const BEFORE_PR: readonly Step[] = ['review', 'execute', 'verify', 'pr'];
 const AFTER_PR: readonly Step[] = ['pr', 'final-review', 'merge'];
 
 /**
- * 存档点读到他改选了别的（#259）：交给 Lead 照改。规划做完之前（方案还没有）、合进去以后（归对账开后续单）没有这一步，
+ * 存档点读到他改选了别的（#259）：交给 Lead 照改。规划做完之前（方案还没有）、合进去以后（只记下）没有这一步，
  * 走到这里的都是外壳叫错了（null）。第 6 步开 PR 之前（pr 这一步刚要开 PR）和之后都是 pr：看 PR 开没开出来。
  */
 function changedAt(state: FlowState, prOpen: boolean): FlowDecision | null {

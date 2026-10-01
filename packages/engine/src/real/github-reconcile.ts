@@ -3,7 +3,6 @@
 // 那条同一份实现，起的都是 Fusion）用这次活动自己的 Temporal 客户端，起在这个工人取活的任务队列上。
 // 每轮先同步各仓的流程配置副本（jobs/flow-config.ts）：「引擎」机器人读默认分支头上的 .fleet/flow.json，全组织默认读这份
 // 代码里带的 packages/core/flow.default.json，写库、报提醒都是同一个库。重放、补收拉起前判「挂没挂在当前版本」，也经这个机器人现读。
-// 对账之后给问创始人的提问另开单（jobs/ask-issues.ts，#259）：读库里的提问，「引擎」机器人现读原单、开单、写评论，单号回写库里。
 import { readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import {
@@ -25,14 +24,11 @@ import {
 } from '@fleet-dao/api';
 import { PROJECT_CONFIG_PATH, type Source } from '@fleet-dao/core';
 import {
-  askIssueCandidates,
   type Db,
   finishScheduleRun,
   listFlowReplicas,
-  markAsksApplied,
   resolveAlertByKey,
   resolveAlertWithReason,
-  setAskFollowUpIssue,
   startScheduleRun,
   upsertAlert,
   writeFlowReplica,
@@ -40,13 +36,11 @@ import {
 import type { GitHub } from '@fleet-dao/github';
 import type { Client } from '@temporalio/client';
 import { ownReleaseSha } from '../drain-control.ts';
-import { type AskIssueJobDeps, openAskIssues } from '../jobs/ask-issues.ts';
 import { type CloseSweepJobDeps, sweepClosing } from '../jobs/close-sweep.ts';
 import { type FlowConfigJobDeps, syncFlowConfigs } from '../jobs/flow-config.ts';
 import type { GitHubReconcileJobDeps } from '../jobs/github-reconcile.ts';
 import { sweepIssueGroom } from '../jobs/issue-groom.ts';
 import { type GroomGitHub, type IssueGroomWiring, issueGroomJob } from './issue-groom.ts';
-import { toTaskAsk } from './store-ports.ts';
 
 export interface GitHubReconcileWiring {
   db: Db;
@@ -56,7 +50,6 @@ export interface GitHubReconcileWiring {
     | 'reconciler'
     | 'readRepoFile'
     | 'readIssuePlan'
-    | 'openIssue'
     | 'commentIssue'
     | 'readCloseFacts'
     | 'claims'
@@ -124,39 +117,6 @@ export function flowConfigJob(w: GitHubReconcileWiring, log: Logger, now: () => 
     ownCommit: w.ownCommit ?? ownReleaseSha,
     newerThanOwn: (repo, commit, own) => w.gh.commitContains({ repo, base: own, head: commit }),
     now,
-    log: (level, text, fields) => log[level](text, fields),
-  };
-}
-
-/** 给提问另开单那一步的真装配（#259）。 */
-export function askIssueJob(w: GitHubReconcileWiring, log: Logger, now: () => Date): AskIssueJobDeps {
-  return {
-    async candidates() {
-      return (await askIssueCandidates(w.db)).map((c) => ({
-        ask: toTaskAsk(c.ask),
-        taskId: c.ask.taskId,
-        taskState: c.taskState,
-        taskTitle: c.taskTitle,
-        issueNumber: c.issueNumber,
-        repo: c.repo,
-      }));
-    },
-    async original(repo, issueNumber) {
-      const plan = await w.gh.readIssuePlan({ repo, issueNumber });
-      return { labels: plan.labels, milestone: plan.milestone, openMilestones: plan.openMilestones };
-    },
-    openIssue: (input) => w.gh.openIssue(input),
-    setFollowUp: (askId, issueNumber) => setAskFollowUpIssue(w.db, { askId, issueNumber }),
-    comment: (input) => w.gh.commentIssue(input),
-    async relayed(c) {
-      await markAsksApplied(w.db, { taskId: c.taskId, askIds: [c.ask.id], at: now() });
-    },
-    async alert(key, taskId, title, body) {
-      await upsertAlert(w.db, { dedupeKey: key, level: 'alert', taskId, title, body });
-    },
-    async resolve(key) {
-      await resolveAlertByKey(w.db, { dedupeKey: key, by: 'engine:github-reconcile' });
-    },
     log: (level, text, fields) => log[level](text, fields),
   };
 }
@@ -251,7 +211,6 @@ export function githubReconcileJob(
   // 引擎等 CI 靠活动自己轮询，PR、CI 事件只写镜像，不按事件叫醒（和后端 main.ts 一样）
   const github = w.gh.eventSink({ async wake() {} });
   const flow = flowConfigJob(w, log, now);
-  const asks = askIssueJob(w, log, now);
   const close = closeSweepJob(
     w,
     async () => (await store.listRepos()).map((r) => ({ owner: r.owner, name: r.name })),
@@ -286,7 +245,6 @@ export function githubReconcileJob(
       syncFlowConfigs: () => syncFlowConfigs(flow),
       reconcile: (options) =>
         reconcileGitHub({ store, intake, claims, claimStatus, reconciler, log, now }, options),
-      askIssues: () => openAskIssues(asks),
       closeSweep: () => sweepClosing(close),
       ...(w.closeSweepDue ? { closeSweepDue: w.closeSweepDue } : {}),
       issueGroom: () => sweepIssueGroom(groom),

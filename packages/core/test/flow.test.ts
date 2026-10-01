@@ -407,7 +407,7 @@ const rows: Row[] = [
     { error: /不该收到/ },
   ],
   [
-    '【失败】合进去了才说他改选了别的（归对账开后续单）',
+    '【失败】合进去了才说他改选了别的（只记下，不交给 Lead）',
     at({ step: 'done', blocks: 1 }),
     { kind: 'changed', prOpen: true },
     { error: /已经关了/ },
