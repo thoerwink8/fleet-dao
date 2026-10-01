@@ -4,7 +4,7 @@
 // 名字、行、规则名），不带值。
 // 只管 fleet-dao 这一个仓（创始人 2026-10-01 10:50 前后拍）：往别的仓写东西不套这套规则，按那个仓自己的标准来
 // （hygiene-scope.ts）；认不出是哪个仓时明确报错，不默认放过去。
-import { ALLOWLIST, formatFinding, scanFiles } from '@fleet-dao/hygiene';
+import { ALLOWLIST, findHits, formatFinding, scanFiles } from '@fleet-dao/hygiene';
 import type { RepoRef } from './client.ts';
 import { GitHubError } from './errors.ts';
 import { guardedByHygiene } from './hygiene-scope.ts';
@@ -17,6 +17,17 @@ export interface PublishText {
 
 /** 最多在报错信息里列几条命中（全部命中在 details 里）。 */
 const MAX_LISTED = 10;
+
+/**
+ * `what` 这类说明里嵌着的真密钥遮掉再报（报错会进 CI 日志、推送报错和会话记录，输出里不带值）。
+ * 按 `/` 分段遮：命中的那段整个换成「…」（JWT 的规则只匹配前两段，只擦匹配到的一截会把签名留下）。
+ */
+function redactValues(text: string): string {
+  return text
+    .split('/')
+    .map((segment) => (findHits(segment).length > 0 ? '…' : segment))
+    .join('/');
+}
 
 export function assertPublishable(
   repo: RepoRef,
@@ -32,11 +43,14 @@ export function assertPublishable(
     (path) => Buffer.from(byPath.get(path) ?? '', 'utf8'),
     ALLOWLIST,
   );
+  // `what` 里也可能嵌着真密钥（「开 x 上 feature/<令牌> 的 PR」「写 specs/<令牌>.md」）：报出来的话
+  // 等于把拦下的密钥又打了一遍，所以一律先把里面的密钥遮掉再往消息里放（报错会进日志和会话记录）。
+  const safeWhat = redactValues(what);
   // 带 NUL 的当二进制只按名字判、内容没扫：不许当成扫过没事
   if (report.binary.length > 0 || report.scanned.length !== byPath.size) {
     throw new GitHubError(
       'HYGIENE_UNSCANNED',
-      `${what}之前的卫生检查没扫成：${report.binary.join('、') || '有一段'}的内容没扫到。没扫成一律不写`,
+      `${safeWhat}之前的卫生检查没扫成：${report.binary.join('、') || '有一段'}的内容没扫到。没扫成一律不写`,
       { details: { binary: report.binary, scanned: report.scanned.length, total: byPath.size } },
     );
   }
@@ -47,7 +61,7 @@ export function assertPublishable(
   const details = { findings: findings.map((f) => ({ path: f.path, line: f.line, rule: f.rule })) };
   throw new GitHubError(
     'HYGIENE_BLOCKED',
-    `${what}被卫生检查拦下：查出 ${findings.length} 处（${listed.join('；')}${more}）。公开仓写上去就公开了，改掉再写`,
+    `${safeWhat}被卫生检查拦下：查出 ${findings.length} 处（${listed.join('；')}${more}）。公开仓写上去就公开了，改掉再写`,
     { details },
   );
 }

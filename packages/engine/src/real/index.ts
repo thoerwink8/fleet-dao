@@ -491,8 +491,9 @@ export function realPortsFromEnv(
     db,
     jev: jev.port,
     gh,
-    // 发给别家的验证材料和推分支、开 PR 用同一套卫生检查（真密钥；只管 fleet-dao 这个仓，别的仓按它们自己的标准）
-    screen: (repo, what, texts) => assertPublishable(repo, what, texts),
+    // 发给别家的验证材料和推分支、开 PR 用同一套卫生检查（真密钥；只管 fleet-dao 这个仓，别的仓按它们自己的标准）。
+    // guard 从 gh 里取同一份：配置里改了 hygieneRepo，这条路上也得跟着改，不然两边认的仓不一样。
+    screen: (repo, what, texts) => assertPublishable(repo, what, texts, gh.deps.hygieneRepo),
     trees,
     exec,
     sessionOrg,
