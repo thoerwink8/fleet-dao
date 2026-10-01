@@ -1,11 +1,9 @@
 // 单子里问创始人（#259）落地之后要读写的几样：引擎在存档点看晚到的回答、决定要不要照改（listTaskAsks），
 // 改完记 markAsksApplied；开 PR 写「按推荐先做了」、关单记数（core 的 tallyAsks）也从 listTaskAsks 读。
-// GitHub 对账（每 15 分钟一轮）拿 askIssueCandidates 粗筛出「该开后续单」「超出范围该开单」的提问（开不开、怎么开单
-// 由 core 和引擎判，这里只挑候选），开完单用 setAskFollowUpIssue 回写单号。
-import type { TaskState } from '@fleet-dao/shared';
-import { and, asc, eq, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
+// follow_up_issue 这一栏原来由 GitHub 对账开单后回写，#530 删了那一步，现在只读、没人写；列留到删库表那一步。
+import { and, asc, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
 import type { Db } from '../client.ts';
-import { asks, repos, tasks } from '../schema/index.ts';
+import { asks } from '../schema/index.ts';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -78,85 +76,4 @@ export async function markAsksApplied(
     )
     .returning({ id: asks.id });
   return updated.length;
-}
-
-export interface AskIssueCandidate {
-  ask: TaskAskRow;
-  taskState: TaskState;
-  taskTitle: string;
-  issueNumber: number;
-  repo: { owner: string; name: string };
-}
-
-/**
- * 对账要看的提问（粗筛，开不开单由 core 判）：
- * (a) scope = 'outside' 且（follow_up_issue 为空，或回答了、applied_at 还空着——回答要写到另开的那张单上，写上了记
- *     applied_at，之后不再进来）；
- * (b) scope in ('task','hold')、回答了、follow_up_issue 为空、applied_at 为空、btrim(answer) <> btrim(recommended)、
- *     这张单 tasks.state = 'done'（改选了别的、原单已经合了，要开后续单）。
- * 老式提问（scope 为空）两条都进不来。连上 tasks（state、title、issue_number）和 repos（owner、name），
- * 按 asked_at、id 排。
- */
-export async function askIssueCandidates(db: Db): Promise<AskIssueCandidate[]> {
-  const rows = await db
-    .select({
-      ask: asks,
-      taskState: tasks.state,
-      taskTitle: tasks.title,
-      issueNumber: tasks.issueNumber,
-      owner: repos.owner,
-      name: repos.name,
-    })
-    .from(asks)
-    .innerJoin(tasks, eq(tasks.id, asks.taskId))
-    .innerJoin(repos, eq(repos.id, tasks.repoId))
-    .where(
-      or(
-        and(
-          eq(asks.scope, 'outside'),
-          or(isNull(asks.followUpIssue), and(isNotNull(asks.answer), isNull(asks.appliedAt))),
-        ),
-        and(
-          inArray(asks.scope, ['task', 'hold']),
-          isNotNull(asks.answer),
-          isNull(asks.followUpIssue),
-          isNull(asks.appliedAt),
-          eq(tasks.state, 'done'),
-          sql`btrim(${asks.answer}) <> btrim(${asks.recommended})`,
-        ),
-      ),
-    )
-    .orderBy(asc(asks.askedAt), asc(asks.id));
-  return rows.map((r) => ({
-    ask: mapAsk(r.ask),
-    taskState: r.taskState,
-    taskTitle: r.taskTitle,
-    issueNumber: r.issueNumber,
-    repo: { owner: r.owner, name: r.name },
-  }));
-}
-
-/**
- * 回写另开的单号：只在还空着时写。ok = 写上了；same = 本来就是这个号（不重写，也不报错）；
- * conflict = 已经是别的号（不动）；not_found = 没这条。issueNumber 不是正整数是调用方的错，抛错。
- */
-export async function setAskFollowUpIssue(
-  db: Db,
-  input: { askId: string; issueNumber: number },
-): Promise<'ok' | 'same' | 'conflict' | 'not_found'> {
-  if (!Number.isInteger(input.issueNumber) || input.issueNumber <= 0) {
-    throw new Error(`issueNumber 要是正整数：${input.issueNumber}`);
-  }
-  const updated = await db
-    .update(asks)
-    .set({ followUpIssue: input.issueNumber })
-    .where(and(eq(asks.id, input.askId), isNull(asks.followUpIssue)))
-    .returning({ id: asks.id });
-  if (updated.length > 0) return 'ok';
-  const [existing] = await db
-    .select({ followUpIssue: asks.followUpIssue })
-    .from(asks)
-    .where(eq(asks.id, input.askId));
-  if (!existing) return 'not_found';
-  return existing.followUpIssue === input.issueNumber ? 'same' : 'conflict';
 }

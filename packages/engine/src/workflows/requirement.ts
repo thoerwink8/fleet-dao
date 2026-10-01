@@ -537,7 +537,7 @@ export async function requirementWorkflow(input: RequirementInput): Promise<Requ
         const ask = decision.ask;
         if (ask) {
           // 问他一句（发卡、记进库：这张单范围内的岔路，卡片写「已按推荐先做」），不等回答。编号先定好进历史，发卡重试只有一张卡。
-          // 他之后改了别的：旧的需求工作流不接存档点（#250 删它），合进去以后由对账开后续单照他选的改。
+          // 他之后改了别的：旧的需求工作流不接存档点（#250 删它），只记在库里（原来合进去以后由对账开后续单，#530 删了）。
           const askId = await newId(kit);
           await attempt(kit, 'askHuman', () =>
             acts.askHuman({

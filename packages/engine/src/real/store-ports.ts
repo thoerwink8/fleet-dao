@@ -148,7 +148,7 @@ type StorePorts = Pick<
   stageAllOpen(stage: StageKind): Promise<AllOpenCheck>;
 };
 
-/** 库里的一条提问 → core 的 TaskAsk（存档点、PR 正文、关单记数、对账开单都按它判）：空的列不给，不拿空串、0 顶。 */
+/** 库里的一条提问 → core 的 TaskAsk（存档点、PR 正文、关单记数都按它判）：空的列不给，不拿空串、0 顶。 */
 export function toTaskAsk(r: TaskAskRow): TaskAsk {
   return {
     id: r.id,

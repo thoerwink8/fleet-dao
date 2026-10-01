@@ -5,7 +5,6 @@ import { generateKeyPairSync, randomUUID } from 'node:crypto';
 import { type RequirementStart, type RequirementWorkflows, WorkflowUnavailableError } from '@fleet-dao/api';
 import type { Source } from '@fleet-dao/core';
 import {
-  asks,
   githubEvents,
   notifications,
   repos,
@@ -104,18 +103,9 @@ interface GitHubState {
    * 回 404（当「比较不出关系」，见 packages/github 的 commitContains）。
    */
   compareBehindBy?: number;
-  /** 设了就只有开单（POST issues）这样回（#259：开单的端口没成）。 */
-  createDown?: number;
-  /** 单子上的评论（按单号）：引擎留的回答在这里。 */
-  comments?: Map<
-    number,
-    { id: number; body: string; user: typeof engineBot; updated_at: string; html_url: string }[]
-  >;
 }
 
 const HEAD_A = 'a'.repeat(40);
-/** 「引擎」机器人（apps() 里 slug 是 fleet-test-engine）：它开的单、留的评论作者是它。 */
-const engineBot = { login: 'fleet-test-engine[bot]', id: 202_000, type: 'Bot' };
 
 /**
  * 只答对账会问的几条：安装、令牌、仓（默认分支）、默认分支头、.fleet/flow.json、issue 列表、单张 issue、还开着的里程碑、
@@ -162,33 +152,6 @@ function githubApi(state: GitHubState): typeof fetch {
       if (state.compareBehindBy === undefined) return reply(404, { message: 'no common ancestor' });
       return reply(200, { ahead_by: 1, behind_by: state.compareBehindBy });
     }
-    // 开单（#259 对账给提问另开单）：「引擎」机器人开，编号接着排，标签、里程碑照请求挂上
-    if (url.pathname === `${base}/issues` && init?.method === 'POST') {
-      if (state.createDown) return reply(state.createDown, { message: 'Server Error' });
-      const req = JSON.parse(String(init.body)) as {
-        title: string;
-        body: string;
-        labels?: string[];
-        milestone?: number;
-      };
-      const number = Math.max(0, ...state.issues.map((i) => (i as { number?: number }).number ?? 0)) + 1;
-      const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
-      const created = {
-        number,
-        node_id: `I_${number}`,
-        html_url: `https://github.test/${SLUG}/issues/${number}`,
-        title: req.title,
-        body: req.body,
-        state: 'open',
-        user: engineBot,
-        created_at: now,
-        updated_at: now,
-        labels: req.labels ?? [],
-        milestone: [V1, V2].find((m) => m.number === req.milestone) ?? null,
-      };
-      state.issues.push(created);
-      return reply(201, created);
-    }
     if (url.pathname === `${base}/issues`) {
       const open = url.searchParams.get('state') === 'open';
       return reply(
@@ -196,27 +159,10 @@ function githubApi(state: GitHubState): typeof fetch {
         state.issues.filter((i) => (open ? (i as { state?: unknown }).state === 'open' : fresh(i))),
       );
     }
-    const single = new RegExp(`^${base}/issues/(\\d+)(/comments)?$`).exec(url.pathname);
+    const single = new RegExp(`^${base}/issues/(\\d+)$`).exec(url.pathname);
     if (single) {
-      const n = Number(single[1]);
-      const found = state.issues.find((i) => (i as { number?: number }).number === n);
-      if (!found) return reply(404, { message: 'Not Found' });
-      if (!single[2]) return reply(200, found);
-      state.comments ??= new Map();
-      const list = state.comments.get(n) ?? [];
-      if (init?.method === 'POST') {
-        const id = 7000 + list.length;
-        const comment = {
-          id,
-          body: (JSON.parse(String(init.body)) as { body: string }).body,
-          user: engineBot,
-          updated_at: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
-          html_url: `https://github.test/${SLUG}/issues/${n}#issuecomment-${id}`,
-        };
-        state.comments.set(n, [...list, comment]);
-        return reply(201, comment);
-      }
-      return reply(200, list);
+      const found = state.issues.find((i) => (i as { number?: number }).number === Number(single[1]));
+      return found ? reply(200, found) : reply(404, { message: 'Not Found' });
     }
     // 拉起前一次 GraphQL 现读这张单挂在哪个里程碑、是不是母单子单、仓里还开着哪些里程碑（接活只派当前版本的独立单）
     if (url.pathname === '/graphql' && init?.method === 'POST') {
@@ -256,8 +202,6 @@ function githubApi(state: GitHubState): typeof fetch {
         },
       });
     }
-    // 补收认回声：自家机器人写出来的那一版（开的单）按它的账号当 sender，账号编号现查一次
-    if (url.pathname === `/users/${encodeURIComponent(engineBot.login)}`) return reply(200, engineBot);
     if (url.pathname === `${base}/issues/comments`) return reply(200, []);
     if (url.pathname === `${base}/pulls`) return reply(200, []);
     if (url.pathname === '/app/hook/deliveries') return reply(200, []);
@@ -718,12 +662,6 @@ describe('对账补漏一轮的记账（不起 Temporal）', () => {
   function deps(
     reconcile: GitHubReconcileJobDeps['reconcile'],
     syncFlowConfigs: GitHubReconcileJobDeps['syncFlowConfigs'] = async () => ({ repos: [] }),
-    askIssues: GitHubReconcileJobDeps['askIssues'] = async () => ({
-      scanned: 0,
-      found: 0,
-      opened: [],
-      unchecked: [],
-    }),
     closeSweep: GitHubReconcileJobDeps['closeSweep'] = async () => ({ scanned: 0, found: 0, unchecked: [] }),
     issueGroom: GitHubReconcileJobDeps['issueGroom'] = async () => ({ scanned: 0, found: 0, unchecked: [] }),
   ) {
@@ -732,7 +670,6 @@ describe('对账补漏一轮的记账（不起 Temporal）', () => {
     const d: GitHubReconcileJobDeps = {
       syncFlowConfigs,
       reconcile,
-      askIssues,
       closeSweep,
       issueGroom,
       runs: {
@@ -875,78 +812,11 @@ describe('对账补漏一轮的记账（不起 Temporal）', () => {
     });
   });
 
-  it('给提问另开单（#259）在对账之后跑；开出的单、写上的回答算处理了的', async () => {
-    const order: string[] = [];
-    const { d } = deps(
-      async () => {
-        order.push('reconcile');
-        return { outcome: 'ok', scanned: 1, found: 0, steps: [] };
-      },
-      undefined,
-      async () => {
-        order.push('asks');
-        return {
-          scanned: 2,
-          found: 2,
-          opened: [{ askId: 'a', kind: 'follow-up', issueNumber: 301, created: true }],
-          unchecked: [],
-        };
-      },
-    );
-    expect(await runGitHubReconcileJob(d)).toEqual({ runId: 7, outcome: 'ok', scanned: 1, found: 2 });
-    expect(order).toEqual(['reconcile', 'asks']);
-  });
-
-  it('【失败】有提问的单没开成：这一轮记成 partial（没查全），哪一条没开成写进原因，不当成开了', async () => {
-    const { d, finished } = deps(
-      async () => ({ outcome: 'ok', scanned: 1, found: 0, steps: [] }),
-      undefined,
-      async () => ({
-        scanned: 1,
-        found: 0,
-        opened: [],
-        unchecked: ['#12 的提问 11111111 开后续单没成：GitHub 回 502'],
-      }),
-    );
-    const run = await runGitHubReconcileJob(d);
-    expect(run).toMatchObject({ outcome: 'partial', why: '#12 的提问 11111111 开后续单没成：GitHub 回 502' });
-    expect(finished[0]?.result).toMatchObject({ outcome: 'partial' });
-  });
-
-  it('【失败】没开成的多：原因里只写前 3 条，其余写明还有几条、去提醒中心看，不悄悄丢掉', async () => {
-    const lines = [1, 2, 3, 4, 5].map((i) => `#${i} 的提问 0000000${i} 另开单没成：GitHub 回 502`);
-    const { d } = deps(
-      async () => ({ outcome: 'ok', scanned: 1, found: 0, steps: [] }),
-      undefined,
-      async () => ({ scanned: 5, found: 0, opened: [], unchecked: lines }),
-    );
-    const run = await runGitHubReconcileJob(d);
-    expect(run.outcome).toBe('partial');
-    expect(run.why?.split('；')).toEqual([
-      ...lines.slice(0, 3),
-      '另有 2 条提问没开成单或没写成回答（提醒中心 ask-issue:、ask-answer: 开头的）',
-    ]);
-  });
-
-  it('【失败】另开单整步没跑成（读库里的提问出错）：不挡对账本身，这一轮记成 partial 写明原因', async () => {
-    const { d } = deps(
-      async () => ({ outcome: 'ok', scanned: 1, found: 0, steps: [] }),
-      undefined,
-      async () => {
-        throw new Error('读 asks 表超时');
-      },
-    );
-    expect(await runGitHubReconcileJob(d)).toMatchObject({
-      outcome: 'partial',
-      why: '给提问另开单没跑成：读 asks 表超时',
-    });
-  });
-
   describe('关单对账（#241）：一天一次，北京时间 9:00 起的那一轮', () => {
     const ok = async () => ({ outcome: 'ok' as const, scanned: 1, found: 0, steps: [] });
     const at = (iso: string, d: GitHubReconcileJobDeps) => ({ ...d, now: () => new Date(iso) });
 
-    it('到点的那一轮在另开单之后跑，新留的言算处理了的；别的轮不跑', async () => {
+    it('到点的那一轮在对账之后跑，新留的言算处理了的；别的轮不跑', async () => {
       const order: string[] = [];
       const { d } = deps(
         async () => {
@@ -954,10 +824,6 @@ describe('对账补漏一轮的记账（不起 Temporal）', () => {
           return ok();
         },
         undefined,
-        async () => {
-          order.push('asks');
-          return { scanned: 0, found: 0, opened: [], unchecked: [] };
-        },
         async () => {
           order.push('close');
           return { scanned: 1, found: 2, unchecked: [] };
@@ -969,14 +835,14 @@ describe('对账补漏一轮的记账（不起 Temporal）', () => {
         scanned: 1,
         found: 2,
       });
-      expect(order).toEqual(['reconcile', 'asks', 'close']);
+      expect(order).toEqual(['reconcile', 'close']);
       order.length = 0;
       await runGitHubReconcileJob(at('2026-09-28T01:15:04Z', d));
-      expect(order).toEqual(['reconcile', 'asks']);
+      expect(order).toEqual(['reconcile']);
     });
 
     it('【故意造出的失败】关单对账整步没跑成：不挡对账本身，这一轮记成 partial 写明原因（不当成查过、都齐了）', async () => {
-      const { d } = deps(ok, undefined, undefined, async () => {
+      const { d } = deps(ok, undefined, async () => {
         throw new Error('读 repos 表超时');
       });
       expect(await runGitHubReconcileJob(at('2026-09-28T01:00:04Z', d))).toMatchObject({
@@ -987,7 +853,7 @@ describe('对账补漏一轮的记账（不起 Temporal）', () => {
 
     it('【故意造出的失败】有仓没查成、留言没留成：这一轮记成 partial，前 3 条写进原因、其余写明还有几条', async () => {
       const lines = [1, 2, 3, 4].map((i) => `关单对账 example/canary#${i} 留言没留成（GitHub 回 502）`);
-      const { d } = deps(ok, undefined, undefined, async () => ({ scanned: 1, found: 0, unchecked: lines }));
+      const { d } = deps(ok, undefined, async () => ({ scanned: 1, found: 0, unchecked: lines }));
       const run = await runGitHubReconcileJob(at('2026-09-28T01:00:04Z', d));
       expect(run.outcome).toBe('partial');
       expect(run.why?.split('；')).toEqual([
@@ -1207,182 +1073,6 @@ describe('退役的定时任务：Temporal 上还在的删掉（断链修复：#
       c: { error: '权限不够' },
     });
     expect(calls).toEqual(['a', 'b', 'c']);
-  });
-});
-
-// 问创始人不挡路（#259）：每轮对账给提问另开单——他改选了别的、原单已经合了的开后续单（挂同一个版本，下一轮接活自动派），
-// 超出范围的开一张未排期的等他拍（原单接着做）；开单没成的照实记没开成。不起 Temporal：直接跑一轮，库是 PGlite 上跑真迁移，
-// GitHub 是照接口回话的假服务（开单、评论都在它身上看得见）。
-describe('给提问另开单：每轮对账（真库、照 GitHub 回话的假服务）', () => {
-  const round = (w: Awaited<ReturnType<typeof wiring>>) =>
-    runGitHubReconcileJob(w.job({} as unknown as Client, 'fleet-test'));
-  /** 原单 #12：五个小时前动过（不在这一轮补收的范围里），开着还是关了由用例定。 */
-  const original = (state: 'open' | 'closed', labels: string[]) => ({
-    ...issue(12, -300),
-    title: '登录页加验证码',
-    state,
-    labels,
-  });
-  const byEngine = (state: GitHubState) =>
-    state.issues.filter((i) => (i as { user: unknown }).user === engineBot) as {
-      number: number;
-      title: string;
-      body: string;
-      labels: string[];
-      milestone: unknown;
-    }[];
-
-  async function taskWithAsk(
-    repoId: string,
-    issueNumber: number,
-    taskState: 'running' | 'done',
-    ask: Partial<typeof asks.$inferInsert>,
-  ) {
-    const [task] = await t.db
-      .insert(tasks)
-      .values({
-        repoId,
-        issueNumber,
-        title: '登录页加验证码',
-        rawRequest: '给登录页加手机验证码',
-        requestedBy: 'founder',
-        state: taskState,
-        priority: 0,
-      })
-      .returning();
-    if (!task) throw new Error('任务没建上');
-    const [row] = await t.db
-      .insert(asks)
-      .values({ taskId: task.id, question: '验证码几位？', options: ['6 位', '4 位'], ...ask })
-      .returning();
-    if (!row) throw new Error('提问没建上');
-    return { task, ask: row };
-  }
-  const answered = (answer: string) => ({ answer, answeredBy: 'founder', answeredAt: new Date() });
-  /** 「引擎」机器人在白名单里（ops 第五节：两个机器人各一行 role = bot）：它开的单接活才收。 */
-  const botMember = () =>
-    t.db
-      .insert(users)
-      .values({ displayName: '引擎', role: 'bot', githubLogin: engineBot.login, githubId: engineBot.id });
-  const askRow = async (id: string) => {
-    return (await t.db.select().from(asks)).find((a) => a.id === id);
-  };
-
-  it('他改选了别的、原单已经合了：开一张后续单（照抄类别、挂原单的同一个版本、链接原单），单号回写；下一轮接活自动派它', async () => {
-    const state: GitHubState = { issues: [original('closed', ['缺陷'])] };
-    const w = await wiring(state);
-    await botMember();
-    const { ask } = await taskWithAsk(w.repoId, 12, 'done', {
-      scope: 'task',
-      recommended: '6 位',
-      ...answered('4 位'),
-    });
-
-    const first = await round(w);
-    expect(first).toMatchObject({ outcome: 'ok', found: 1 });
-    const opened = byEngine(state);
-    expect(opened).toHaveLength(1);
-    expect(opened[0]).toMatchObject({
-      number: 13,
-      title: '#12 的后续：验证码几位？改成「4 位」',
-      labels: ['缺陷'],
-      milestone: V1,
-    });
-    expect(opened[0]?.body).toContain('创始人在 #12（登录页加验证码）的提问里改选了「4 位」');
-    expect(opened[0]?.body).toContain('## 怎么算做完');
-    expect((await askRow(ask.id))?.followUpIssue).toBe(13);
-    expect(w.starts).toEqual([]);
-
-    // 下一轮：后续单被补收进来，挂在当前版本上、是独立单，接活自动派；不再开第二张
-    expect((await round(w)).outcome).toBe('ok');
-    expect(w.starts.map((s) => s.issueNumber)).toEqual([13]);
-    expect(byEngine(state)).toHaveLength(1);
-  });
-
-  it('超出范围的：开一张未排期的等他拍，原单接着做（任务不动、不派新单）；他之后在卡片上回答了，回答写到那张单的评论里', async () => {
-    const state: GitHubState = { issues: [original('open', ['需求'])] };
-    const w = await wiring(state);
-    await botMember();
-    const { task, ask } = await taskWithAsk(w.repoId, 12, 'running', {
-      question: '要不要顺手改注册页？',
-      options: ['不改', '改'],
-      scope: 'outside',
-      recommended: '不改',
-    });
-
-    expect(await round(w)).toMatchObject({ outcome: 'ok', found: 1 });
-    expect(byEngine(state)).toEqual([
-      expect.objectContaining({
-        number: 13,
-        title: '#12 问到的、超出范围的：要不要顺手改注册页？',
-        labels: ['需求'],
-        milestone: null,
-      }),
-    ]);
-    expect((await askRow(ask.id))?.followUpIssue).toBe(13);
-    // 原单接着做：任务状态没动；未排期的那张下一轮也不派
-    const still = (await t.db.select().from(tasks)).find((r) => r.id === task.id);
-    expect(still?.state).toBe('running');
-    await round(w);
-    expect(w.starts).toEqual([]);
-
-    // 他在卡片上回答了：下一轮把回答写到那张单上，再下一轮不重写
-    await t.client.query(
-      "update asks set answer = '改', answered_by = 'founder', answered_at = now() where id = $1",
-      [ask.id],
-    );
-    expect(await round(w)).toMatchObject({ outcome: 'ok', found: 1 });
-    await round(w);
-    const comments = state.comments?.get(13) ?? [];
-    expect(comments).toHaveLength(1);
-    expect(comments[0]?.body).toContain('创始人在 #12 的提问卡片上选了「改」：这一块照它做。');
-    // 写上了记成转交完（applied_at），之后的对账不再看这条
-    expect((await askRow(ask.id))?.appliedAt).not.toBeNull();
-  });
-
-  it('【失败】开单没成（GitHub 开单接口报错、卫生检查拦下提问里的真密钥）：记成没开成（partial、写明哪条），报提醒，单号不回写；好了下一轮补开', async () => {
-    // 装成真密钥的值（运行时拼，源码里不出现整段，全仓卫生检查不会拦这个文件自己）
-    const leakToken = ['ghp', 'Xk92LqTz7WmN4vRs1JhY8fDc3PbGa6Ue'].join('_');
-    const state: GitHubState = { issues: [original('closed', ['需求'])], createDown: 422 };
-    const w = await wiring(state);
-    const { ask } = await taskWithAsk(w.repoId, 12, 'done', {
-      scope: 'task',
-      recommended: '6 位',
-      ...answered('4 位'),
-    });
-    const { ask: leaky } = await taskWithAsk(w.repoId, 14, 'running', {
-      question: `这个令牌是不是该轮换：${leakToken}`,
-      options: ['接', '不接'],
-      scope: 'outside',
-      recommended: '接',
-    });
-
-    const run = await round(w);
-    expect(run.outcome).toBe('partial');
-    expect(run.why).toContain(`#12 的提问 ${ask.id.slice(0, 8)} 开后续单没成`);
-    expect(run.why).toContain(`#14 的提问 ${leaky.id.slice(0, 8)} 另开单没成`);
-    // 卫生检查拦下的只写哪一条规则、在哪，不把真密钥原样写进结局
-    expect(run.why).not.toContain(leakToken);
-    expect((await askRow(ask.id))?.followUpIssue).toBeNull();
-    expect((await askRow(leaky.id))?.followUpIssue).toBeNull();
-    expect(byEngine(state)).toEqual([]);
-    const alerts = (await t.db.select().from(notifications)).filter((n) =>
-      n.dedupeKey.startsWith('ask-issue:'),
-    );
-    expect(alerts.map((a) => a.dedupeKey).sort()).toEqual(
-      [`ask-issue:${ask.id}`, `ask-issue:${leaky.id}`].sort(),
-    );
-    expect((await runsOf()).at(-1)).toMatchObject({ outcome: 'partial' });
-
-    // GitHub 好了：下一轮补开、撤掉那条提醒；卫生检查拦下的那条照旧没开成
-    delete state.createDown;
-    const again = await round(w);
-    expect((await askRow(ask.id))?.followUpIssue).toBe(13);
-    expect(again.why).toContain(`#14 的提问 ${leaky.id.slice(0, 8)} 另开单没成`);
-    const after = (await t.db.select().from(notifications)).find(
-      (n) => n.dedupeKey === `ask-issue:${ask.id}`,
-    );
-    expect(after?.resolvedAt).not.toBeNull();
   });
 });
 

@@ -352,10 +352,16 @@ describe('测试读包外的文件，改那个文件的 PR 一定测到它（漏
       shut.filter((r, i) => r !== PATH_RULES[i]),
       '没关掉任何门：管 AGENTS.md 的那道门写法换了，这条测试跟着改',
     ).toHaveLength(1);
-    // 关掉后，上面那条正对着的那处漏记必须报出来——且只报这一处
+    // 关掉后，上面那条正对着的那处漏记必须报出来——读 AGENTS.md 的每个测试都得报，一封不少、也不多报别人。
+    // 报几条是从 files 现算的：以后再加一个读 AGENTS.md 的测试（2026-10-01 加 ask-scope.rules.test.ts 时
+    // 这里写死成一条、主线当场红），不会因为写死的条数又红一次；反过来，门还开着却少报一条，照样红。
+    const readers = files
+      .filter(({ unit, rel }) => unit === AGENTS_UNIT && refs(rel).includes('AGENTS.md'))
+      .map(({ rel }) => `${rel} 读 AGENTS.md，改它的 PR 不测 agents`);
+    expect(readers.length, '没有测试读 AGENTS.md 了：这条查的漏记不存在，测试该删').toBeGreaterThan(0);
     expect(
       scan((changed) => planCi({ event: 'pull_request', changed, graph: graph(), rules: shut })),
-    ).toEqual(['agents/test/rules/design-skills.rules.test.ts 读 AGENTS.md，改它的 PR 不测 agents']);
+    ).toEqual(readers);
   });
 });
 
