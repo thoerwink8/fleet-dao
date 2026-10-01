@@ -39,6 +39,7 @@ import { issueKindJevFromEnv } from './issue-kind-jev.ts';
 import { engineJevFromEnv } from './jev-port.ts';
 import { registerEngineJobs } from './jobs.ts';
 import { realKillEvidence } from './kill-evidence.ts';
+import { realMemoryAdmission } from './memory-admission.ts';
 import { orgDriftReporter, orgSwitchRound } from './org-switch.ts';
 import { retireEngineSchedules } from './retire-schedules.ts';
 import { routeProbeJob } from './route-probe.ts';
@@ -127,6 +128,8 @@ export function createRealPorts(deps: RealPortsDeps): RealPorts {
     ...(deps.drain ? { drain: deps.drain } : {}),
     ...(deps.now ? { now: deps.now } : {}),
     ...(deps.log ? { log: deps.log } : {}),
+    // 派活时按内存做准入（#219）：读父节点 fleet-agents.slice 的 memory.current；本机开发没有这层就跳过（skip），不拦。
+    memoryAdmission: realMemoryAdmission(),
   });
   const github = createGitHubPorts({
     gh: deps.gh,

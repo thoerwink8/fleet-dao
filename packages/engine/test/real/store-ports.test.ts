@@ -20,6 +20,7 @@ import {
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import type { StageKind } from '@fleet-dao/shared';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { SLICE_MEMORY_HIGH_MB } from '../../src/limits.ts';
 import type { PickRouteInput } from '../../src/ports.ts';
 import type { UserExec } from '../../src/real/exec.ts';
 import { type SessionOrgReader, sessionOrgReader } from '../../src/real/session-org.ts';
@@ -262,6 +263,78 @@ describe('选路', () => {
       "update stage_policy_routes set enabled = false where stage = 'triage' and route_id = 'solo'",
     );
     expect(await pick()).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+  });
+
+  it('派活时按内存做准入（#219）：父节点增长过大被挡、恢复后又派得动；读不出来不闷头派', async () => {
+    await world(t.db);
+    // 默认本机开发（测试没接 memoryAdmission）：跳过准入，照派。这守住「本机没有 cgroup 不拦」的退路。
+    expect((await pick()).ok).toBe(true);
+
+    // 顶住：父节点现在用到高水位 - 1M，放不下一份新会话预留。
+    const used = { mb: SLICE_MEMORY_HIGH_MB - 1 };
+    const gated = createStorePorts({
+      db: t.db,
+      now: () => NOW,
+      draw: () => 0.5,
+      log: () => {},
+      sessionOrg: onCarpool,
+      memoryAdmission: {
+        readText: async () => String(used.mb * 1024 * 1024),
+        cgroupRoot: '/sys/fs/cgroup',
+        slicePath: 'fleet.slice/fleet-agents.slice',
+        sliceHighMb: SLICE_MEMORY_HIGH_MB,
+        reservePerSessionMb: 2048,
+      },
+    });
+    const blocked = await pick({}, gated);
+    expect(blocked).toMatchObject({ ok: false, waitFor: 'slot' });
+    expect(!blocked.ok && blocked.detail).toContain('在等内存');
+    expect(!blocked.ok && blocked.detail).toContain('fleet-agents.slice');
+
+    // 同一份依赖：父节点回落，余量放得下一份预留，第二发就派出去了——「被挡 → 恢复后又派得动」。
+    used.mb = SLICE_MEMORY_HIGH_MB - 2200;
+    expect(await pick({}, gated)).toMatchObject({ ok: true, route: { routeId: 'solo' } });
+
+    // 文件在、但读不出来：明确的失败，不闷头派。这是需求.md「算不出上限要明确报错、不派」的那一格。
+    const errored = createStorePorts({
+      db: t.db,
+      now: () => NOW,
+      draw: () => 0.5,
+      log: () => {},
+      sessionOrg: onCarpool,
+      memoryAdmission: {
+        readText: async () => {
+          throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+        },
+        cgroupRoot: '/sys/fs/cgroup',
+        slicePath: 'fleet.slice/fleet-agents.slice',
+        sliceHighMb: SLICE_MEMORY_HIGH_MB,
+        reservePerSessionMb: 2048,
+      },
+    });
+    await expect(pick({}, errored)).rejects.toMatchObject({
+      name: 'PortError',
+      code: 'MEMORY_ADMISSION_UNREADABLE',
+    });
+
+    // 本机开发（cgroup 那一层不在）：跳过，不拦派。
+    const skipped = createStorePorts({
+      db: t.db,
+      now: () => NOW,
+      draw: () => 0.5,
+      log: () => {},
+      sessionOrg: onCarpool,
+      memoryAdmission: {
+        readText: async () => {
+          throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+        },
+        cgroupRoot: '/sys/fs/cgroup',
+        slicePath: 'fleet.slice/fleet-agents.slice',
+        sliceHighMb: SLICE_MEMORY_HIGH_MB,
+        reservePerSessionMb: 2048,
+      },
+    });
+    expect(await pick({}, skipped)).toMatchObject({ ok: true, route: { routeId: 'solo' } });
   });
 });
 
