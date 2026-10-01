@@ -103,9 +103,6 @@
   .top { display: grid; gap: 4px; min-width: 0; }
   .top-row { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 8px 24px; }
   .eyebrow { font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.06em; color: var(--muted); }
-  .tabs { display: flex; flex-wrap: wrap; gap: 6px; }
-  .tabs a { font-size: 13px; padding: 3px 12px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); background: var(--surface); }
-  .tabs a[aria-current="page"] { border-color: var(--accent); color: var(--accent); }
   .headline { margin: 4px 0 0; font-size: 16px; overflow-wrap: anywhere; }
   .headline.error { color: var(--block); }
   .meta-row { display: flex; flex-wrap: wrap; gap: 2px 18px; color: var(--muted); font-size: 12.5px; }
@@ -179,7 +176,6 @@
         <div class="eyebrow">法国引擎 · 过渡页（驾驶舱 #216、#199 上线后停用）</div>
         <h1>法国引擎</h1>
       </div>
-      <nav class="tabs" aria-label="页面"><a href="/">帅位进度</a><a href="/france" aria-current="page">法国引擎</a></nav>
     </div>
     <p class="headline" id="headline">正在从法国读……</p>
     <div class="meta-row"><span id="fresh"></span><span id="took"></span><span class="conn" id="conn" role="status"></span></div>
@@ -785,11 +781,11 @@
     } catch (e) {
       const conn = $("conn");
       conn.className = "conn error";
-      conn.textContent = `连不上本机进度服务（${e?.message ?? e}）：帅位会话开场会起它。${lastState?.good ? "下面是之前读到的。" : ""}每 5 秒重试。`;
+      conn.textContent = `连不上本机页面服务（${e?.message ?? e}）：在 commander 技能的 scripts 目录跑 node server.mjs 起它。${lastState?.good ? "下面是之前读到的。" : ""}每 5 秒重试。`;
       if (!lastState?.good) {
         const hl = $("headline");
         hl.className = "headline error";
-        hl.textContent = "本机进度服务没在跑，读不到法国。";
+        hl.textContent = "本机页面服务没在跑，读不到法国。";
       }
       return;
     }
