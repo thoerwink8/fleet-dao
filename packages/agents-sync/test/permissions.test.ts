@@ -241,6 +241,10 @@ describe('仓里真的那份权限文件（agents/config/claude-permissions.json
     // 2026-10-01 下午加的：从保险箱取凭证是日常，但「到处翻找凭证」不在这条里（放行的是正规取法，不是翻记录）
     expect(am.allow.join('\n')).toContain('取凭证走保险箱是日常');
     expect(am.allow.join('\n')).toContain('不含');
+    // 同一天再收窄（创始人指出两处）：只指保险箱里那两个目录；写清登一次就回来的东西不在保险箱里
+    expect(am.allow.join('\n')).toContain('workstation/sites/');
+    expect(am.allow.join('\n')).toContain('workstation/vps-subscription/');
+    expect(am.allow.join('\n')).toContain('登一次就能回来的');
     // 不放宽的那几样：没有一条是给「推送/强推/删除/发布」开路的
     const allowed = am.allow.filter((r) => r !== '$defaults');
     expect(allowed.length).toBeGreaterThan(0);
