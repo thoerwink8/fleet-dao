@@ -598,7 +598,7 @@ describe('合了的 PR：镜像、合并人、合并记录', () => {
     expect(w.inserted).toEqual([]);
   });
 
-  it('【故意造出的失败】机器人开的 PR 合并人不是引擎、没有合并记录：只算进 found 计数，不再报 reconcile:pr 提醒（#445：仓里没开合并队列，这条检查已经删掉）', async () => {
+  it('【故意造出的失败】机器人开的 PR 合并人不是引擎、没有合并记录：报 reconcile:pr 提醒（#440 恢复：#431 就是这么漏的，合并前那几道核对可能没走）；同一张 PR 插过的不再重报', async () => {
     const report = audit([
       { number: 7, kind: 'not_merged_by_engine', text: '#7 不是「引擎」机器人合的（合并人 founder）' },
       { number: 7, kind: 'no_merge_record', text: '#7 合并了，但账上没有合并队列的合并记录' },
@@ -606,9 +606,31 @@ describe('合了的 PR：镜像、合并人、合并记录', () => {
     const w = world({ repos: [{ owner: 'acme', name: 'widgets' }], audit: async () => report });
     const part = await checkMergedPrs(w.deps);
     expect(part).toMatchObject({ scanned: 1, found: 2, unchecked: [] });
-    expect(w.inserted).toEqual([]);
+    expect(w.inserted).toHaveLength(1);
+    const alert = w.inserted[0];
+    if (!alert) throw new Error('该有一条 insertOnce 落过的提醒');
+    expect(alert.dedupeKey).toBe('reconcile:pr:acme/widgets#7');
+    expect(alert.created).toBe(true);
+    expect(alert.title).toBe('机器人开的 PR 没经合并队列合：acme/widgets#7');
+    expect(alert.body).toContain('#7 不是「引擎」机器人合的（合并人 founder）');
+    expect(alert.body).toContain('#7 合并了，但账上没有合并队列的合并记录');
+    expect(alert.body).toContain('不会自己撤');
+    expect(alert.link).toBe('https://github.com/acme/widgets/pull/7');
 
+    // 再来一轮（库里已有这条 insertOnce 落过的）：不应重复插
     await checkMergedPrs(w.deps);
+    expect(w.inserted).toHaveLength(2);
+    expect(w.inserted[1]?.dedupeKey).toBe('reconcile:pr:acme/widgets#7');
+    expect(w.inserted[1]?.created).toBe(false);
+  });
+
+  it('【故意造出的失败】机器人开的 PR 合并人对、账上有合并记录：不报', async () => {
+    const w = world({
+      repos: [{ owner: 'acme', name: 'widgets' }],
+      audit: async () => audit([]),
+    });
+    const part = await checkMergedPrs(w.deps);
+    expect(part).toEqual({ scanned: 0, found: 0, unchecked: [] });
     expect(w.inserted).toEqual([]);
   });
 

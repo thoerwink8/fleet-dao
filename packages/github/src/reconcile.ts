@@ -10,7 +10,7 @@ import { enc, type Logger, parseRepoSlug, repoSlug } from './client.ts';
 import type { Deps } from './deps.ts';
 import { type EchoKind, echoOf } from './echo.ts';
 import { mirrorExtrasOf } from './events.ts';
-import { mergeKey, readPull } from './pulls.ts';
+import { type MergeReceipt, mergeKey, readPull } from './pulls.ts';
 
 /**
  * 和 @fleet-dao/api 的 GitHubIntake 同形：补收的东西走同一道门、同一本投递账。seenBefore = 这一版以前的投递带过
@@ -59,9 +59,11 @@ export interface MergedPrFinding {
   number: number;
   /**
    * mirror_fixed：镜像没记成已合并，已经补上（人开的、机器人开的都补）；not_merged_by_engine：我们机器人开的，合并人却不是
-   * 「引擎」（C22）；no_merge_record：我们机器人开的，账上却没有合并队列的合并记录（C21）；unchecked：这一条没查成。
+   * 「引擎」（C22）；no_merge_record：我们机器人开的，账上却没有合并队列的合并记录（C21）；backfill_merge_record：
+   * 手动合的机器人 PR，账上原来没有合并队列的合并记录，按合并回执补上了（receipt.mergedBy 写实际合并人）；unchecked：
+   * 这一条没查成。
    */
-  kind: 'mirror_fixed' | 'not_merged_by_engine' | 'no_merge_record' | 'unchecked';
+  kind: 'mirror_fixed' | 'not_merged_by_engine' | 'no_merge_record' | 'backfill_merge_record' | 'unchecked';
   /** 给人看的一句，也原样进 problems。 */
   text: string;
 }
@@ -462,10 +464,39 @@ export async function auditMergedPrs(
               `不是「引擎」机器人合的（合并人 ${pr.merged_by?.login ?? '读不到'}）`,
             );
           }
-          // 合并队列合的每一张都在幂等账里留了合并记录（C21）
-          const record = await ledger.idempotency.peek(mergeKey(repo, item.number, pr.head.sha));
-          if (!record?.completedAt) {
+          // 合并队列合的每一张都在幂等账里留了合并记录（C21）。没留的：多半是绕开了合并队列（#431 那种——账号
+          // 手动合的、合并前那几道核对可能没走），账上要补上：receipt 里写明实际合并人，让账反映事实。提醒照报，
+          // 创始人兼断一次要不要走合并队列；补账完下一轮 no_merge_record 不再起。
+          const key = mergeKey(repo, item.number, pr.head.sha);
+          const existing = await ledger.idempotency.peek(key);
+          if (!existing?.completedAt) {
             note(item.number, 'no_merge_record', '合并了，但账上没有合并队列的合并记录');
+            if (pr.merged_at) {
+              try {
+                const receipt: MergeReceipt = {
+                  number: item.number,
+                  head: pr.head.sha,
+                  mergeCommit: pr.merge_commit_sha ?? null,
+                  mergedBy: pr.merged_by?.login ?? null,
+                };
+                const claim = await ledger.idempotency.claim(
+                  { key, action: 'github.merge_pr_backfill', target: `${slug}#${item.number}` },
+                  new Date(pr.merged_at),
+                );
+                if (claim.status === 'claimed') {
+                  await ledger.idempotency.complete(key, receipt, new Date(pr.merged_at));
+                  note(
+                    item.number,
+                    'backfill_merge_record',
+                    `按合并回执补上了合并记录（实际合并人 ${pr.merged_by?.login ?? '读不到'}，未经合并队列）`,
+                  );
+                }
+              } catch (err) {
+                // 补账失败不能算这个 PR 没查成：补不上并不影响上面已经报出来的绕过合并队列事实，
+                // 下一轮还会再来一次（existing?.completedAt 还是空）。
+                log.warn('补记合并记录失败', { repo: slug, number: item.number, why: why(err) });
+              }
+            }
           }
         } catch (err) {
           note(item.number, 'unchecked', `没查成：${why(err)}`);
