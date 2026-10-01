@@ -40,3 +40,10 @@
 - **查出一个要紧的：保险箱的解密钥匙这台已经没了**。`~/.fleet-dao/` 里只剩同步工具的几样东西，C 盘事故把解密钥匙和名单都冲掉了；保险箱只有一把锁（`recipients.txt` 里 1 把公钥）。钥匙要是没抄进创始人的密码管理器，法国、香港那些加密副本（包括香港备份的解密口令）这台已经解不开；法国机器上还有明文，可以趁它在换一把新钥匙、重新加密（保险箱 README「换钥匙」一节）。已问创始人。
 - **保险箱现在管的是服务器**：法国、香港的配置和钥匙是加密副本；`workstation/` 只有 ssh 登录钥匙（明文，创始人 09-30 拍「电脑上的东西明文放私有仓，电脑没了还找得回」）。新电脑缺的登录（Claude/reclaude、Grok、gh、Mirasim）、Clash 配置、用户级代理变量、各仓的检出，现在没有一处管。
 - **一键装机（clone fleet-dao → 一条命令配好）按 best-practice-first 走**：先和创始人对齐「新电脑上靠哪把总钥匙」等前提，再写业务说明、查业界、让别家挑错、出方案给他拍。业界对照两条：chezmoi 新机器一条命令 `chezmoi init --apply <仓>`（https://www.chezmoi.io/quick-start/ ，10-01 查）；GitHub Codespaces 建新环境时自动克隆 dotfiles 仓、跑里面的 `install.sh` 或 `bootstrap.sh`（https://docs.github.com/en/codespaces/setting-your-user-preferences/personalizing-github-codespaces-for-your-account ，10-01 查）。
+
+## 2026-10-01 上午（创始人第三条回复之后）
+
+- **创始人拍了**：三个问题都按推荐（GitHub 账号当总钥匙；保险箱钥匙按已丢处理、换新的；auto 模式的说明写进仓、随同步装到每台机器），另外两条新要求：卫生检查「都不想拦」、改了规矩每台机器自动同步。原话和决定记进 `docs/decisions/0007-new-machine-and-hygiene.md`。
+- **被 auto 模式分类器拦了一次**：我给并 #481 的后台工人追加「推之前查出真密钥也只报不拦」，判为 Security Weaken、没发出去。#481 照现做法（真密钥照拦）继续；要改成不拦，得创始人在对话里点名这个动作，而且前提要先对清：卫生检查管的是往公开仓 fleet-dao 推东西，保险箱私密护不住这里。
+- **在做**：后台工人修「主检出不在 main 上就整轮跳过同步」（同步只认 origin/main，开 PR 挂自动合并）；#481 并主线和第二意见；#530。
+- **保险箱换钥匙还没动**：`refresh.sh` 认的 ssh 别名（法国、香港两台）这台的 `~/.ssh/` 里没有 config，要先恢复；而且换钥匙、把新私钥放进保险箱、auto 模式说明进仓这几步分类器会当成放宽安全的动作，要创始人点名具体动作才放行。
