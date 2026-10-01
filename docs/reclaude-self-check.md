@@ -3,7 +3,7 @@
 > 给谁看：拿到这份文档的人（包括之后每一台机器上的 AI）。装了 reclaude 的机器，上机前 / 换机后 / 觉得「怎么老被踢」时照这份做。
 > 配套：装法与原理在 `docs/reclaude-in-mirasim.md`。本文讲两件事：先清掉 reclaude 使用前那个 Claude 账号留在本机的 id，再查有没有在产生上报。
 >
-> **脚本在哪**：`reclaude-old-account-clean.mjs`、`machine-check.mjs`、`reclaude-mirasim.mjs` 都在 ai-gateway-stack 仓 `deploy/` 下；下面写 `deploy/…` 的都是那个仓里的路径，在那个仓的 checkout 里跑。本仓只放这两份文档。
+> **脚本在哪**：`reclaude-old-account-clean.mjs`、`machine-check.mjs`、`reclaude-mirasim.mjs` 只在已退役的 ai-gateway-stack 仓（私有只读存档，创始人 2026-10-01 确认退役）`origin/master` 的 `deploy/` 下；下面写 `deploy/…` 的都是那个仓里的路径，要用先拉一份存档仓的检出、`git pull` 到 `origin/master` 再跑。没人再定时跑这些检查，换机后照本文手动查一遍。本仓只放这两份文档。
 
 ## 0. 立场
 
