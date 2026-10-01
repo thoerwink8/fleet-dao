@@ -47,6 +47,13 @@ interface Perm {
 }
 const permOf = (m: ReturnType<typeof machine>): Perm => m.settings().permissions as Perm;
 
+/** 这一项报告那行的话（同一项只报一行，断言看它说了什么） */
+const textOf = (lines: { kind: string; key: string; text: string }[]): string =>
+  lines
+    .filter((l) => l.key === KEY)
+    .map((l) => l.text)
+    .join('\n');
+
 /** 机器上 autoMode 那一层 */
 interface Am {
   environment?: string[];
@@ -150,6 +157,36 @@ describe('装', () => {
     expect(permOf(m).defaultMode).toBe('auto');
   });
 
+  // 创始人 2026-10-01：这台自己设成 bypassPermissions 的，保留、只报一行（仓里那份仍不许写，见下面的源文件用例）
+  it('机器上自己设成 bypassPermissions：保留、不覆盖，报告里报出来', () => {
+    const m = machine();
+    put(
+      m.home,
+      '.claude/settings.json',
+      JSON.stringify({ permissions: { defaultMode: 'bypassPermissions' } }),
+    );
+    expectKind(m.check(), KEY, 'missing');
+    expect(textOf(m.check())).toContain('这台自己设成 bypassPermissions');
+    expectKind(m.apply(), KEY, 'changed');
+    expect(textOf(m.apply())).toContain('这台自己设成 bypassPermissions');
+    expect(permOf(m).defaultMode).toBe('bypassPermissions');
+    // 保留的只是 defaultMode：allow、additionalDirectories、autoMode 照旧补上
+    expect(permOf(m).allow).toEqual(PERMS_SPEC.allow);
+    expect(permOf(m).additionalDirectories).toEqual([join(m.home, '.claude')]);
+    expect(amOf(m).allow?.[0]).toBe('$defaults');
+    // 改完再查：别的都补上了，只剩「这台自己设成 bypass」这一句
+    expectKind(m.check(), KEY, 'ok');
+    expect(textOf(m.check())).toContain('这台自己设成 bypassPermissions');
+  });
+
+  it('机器上是 auto、仓里也是 auto：照旧一致，不提 bypass 那句', () => {
+    const m = machine();
+    m.apply();
+    expectKind(m.check(), KEY, 'ok');
+    expect(textOf(m.check())).not.toContain('bypass');
+    expect(textOf(m.apply())).not.toContain('bypass');
+  });
+
   it('已经一致：再跑不改、不备份', () => {
     const m = machine();
     m.apply();
@@ -201,6 +238,9 @@ describe('仓里真的那份权限文件（agents/config/claude-permissions.json
     // 决定 0007 第 5 条：和工作仓同一个主人的仓算自己的；改自己仓里单子和 PR 的标题、正文、标签、评论、子单关系是日常
     expect(am.environment.join('\n')).toContain('同一个 GitHub 主人');
     expect(am.allow.join('\n')).toContain('子单关系');
+    // 2026-10-01 下午加的：从保险箱取凭证是日常，但「到处翻找凭证」不在这条里（放行的是正规取法，不是翻记录）
+    expect(am.allow.join('\n')).toContain('取凭证走保险箱是日常');
+    expect(am.allow.join('\n')).toContain('不含');
     // 不放宽的那几样：没有一条是给「推送/强推/删除/发布」开路的
     const allowed = am.allow.filter((r) => r !== '$defaults');
     expect(allowed.length).toBeGreaterThan(0);
@@ -287,6 +327,39 @@ describe('仓里的源文件', () => {
     expectKind(m.check(), KEY, 'unknown');
     expectKind(m.apply(), KEY, 'failed');
     expect(() => m.settings()).toThrow();
+  });
+
+  // 机器上自己设成 bypassPermissions 保留（上面「装」那一节的用例），源文件里写 bypassPermissions 照旧拒收：
+  // 仓里那份会装到无人值守的机器上，写它就是要把「不用问」推给所有机器
+  it('机器上、仓里都是 bypassPermissions：源文件拒收（FORBIDDEN_MODES 那条仍在），机器上的一个字节不碰', () => {
+    const bypass = JSON.stringify({ ...PERMS_SPEC, defaultMode: 'bypassPermissions' });
+    const m = machine(['claude'], bypass);
+    const text = JSON.stringify({ permissions: { defaultMode: 'bypassPermissions' } });
+    put(m.home, '.claude/settings.json', text);
+    const parsed = parsePermissions(bypass, '/h');
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.why).toContain('defaultMode 不许写 bypassPermissions');
+    expectKind(m.check(), KEY, 'unknown');
+    expectKind(m.apply(), KEY, 'failed');
+    expect(get(m.home, '.claude/settings.json')).toBe(text);
+  });
+
+  it('仓里的 autoMode.allow 少一条（含新增的那类日常）：算缺失，--check 报出来，补上后 "$defaults" 还在最前', () => {
+    // 拿真装过一遍的那份当底：别的项都在，只从机器上的 autoMode.allow 里去掉仓里有的一条
+    const gone = PERMS_SPEC.autoMode.allow.find((r) => r !== '$defaults') as string;
+    const m = machine();
+    m.apply();
+    const have = getJson(m.home, '.claude/settings.json') as { autoMode: { allow: string[] } };
+    have.autoMode.allow = have.autoMode.allow.filter((r) => r !== gone);
+    put(m.home, '.claude/settings.json', JSON.stringify(have));
+    const check = m.check();
+    expectKind(check, KEY, 'missing');
+    expect(textOf(check)).toContain('autoMode.allow 少 1 条');
+    expectKind(m.apply(), KEY, 'changed');
+    const after = amOf(m);
+    expect(after.allow?.[0]).toBe('$defaults');
+    expect(after.allow).toContain(gone);
+    expectKind(m.check(), KEY, 'ok');
   });
 
   const invalid: [string, string][] = [

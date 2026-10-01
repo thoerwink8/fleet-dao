@@ -21,7 +21,7 @@ AI 理解：「auto」指 Claude Code 的自动模式（每个动作由审查员
 
 ## 决定
 
-1. Claude Code：`defaultMode` 保持 `auto`（同步工具仍拒收 `bypassPermissions`）；`Bash`、`PowerShell`、各工具和常用 MCP 服务整个放开，另列约 100 个命令前缀（给 Codex 用）；**不设 deny**；早先 9 条拒绝（`grep`、`cat`、`head`、`tail`、`find`、`rg`、`ag`、`ack`、`Select-String`）写进 `retiredDeny`，各机器同步时摘掉。
+1. Claude Code：`defaultMode` 保持 `auto`（同步工具仍拒收 `bypassPermissions`；机器上自己设成 `bypassPermissions` 的保留、只报不改，见下面「2026-10-01 下午的修正」）；`Bash`、`PowerShell`、各工具和常用 MCP 服务整个放开，另列约 100 个命令前缀（给 Codex 用）；**不设 deny**；早先 9 条拒绝（`grep`、`cat`、`head`、`tail`、`find`、`rg`、`ag`、`ack`、`Select-String`）写进 `retiredDeny`，各机器同步时摘掉。
 2. 其他几家照同一份意图翻译：Kimi Code 默认模式 `auto` 加规则块；Codex 用命令前缀规则块；Devin 走 `config.json` 的 `permissions`；Grok 直接读 Claude 那份，不另写；pi、dsh 做不到；Gemini CLI、Antigravity 没装、没实测，待补。
 3. `pnpm agents:sync` 一条命令取远端、快进主线、同步、逐家报结果；文档 `docs/agents-permissions.md`。
 4. 法国（`--user`）整段不写权限，不变；要不要写另请他拍。
@@ -44,6 +44,14 @@ AI 理解：「auto」指 Claude Code 的自动模式（每个动作由审查员
 - Codex 没法写「所有命令」：`cmd /c`、`powershell -c` 这两个外壳前缀不在清单里，会走 Codex 自己的默认询问；要放开就把这两个前缀加进清单（改标准）。
 - Devin 依据官方文档，本机没装、没实测；Gemini CLI、Antigravity 没装，装上后核过写法再接。
 - 「换成 `bypassPermissions`」始终不同步：他要的是 auto，不是 bypass。
+  - **2026-10-01 下午修正**：默认仍是 `auto`，但机器上自己设的 `bypassPermissions` 保留、只报不改；仓里的源文件仍拒收它。见下面「2026-10-01 下午的修正」。
+
+## 2026-10-01 下午的修正（创始人拍）
+
+- 原话：「我一般都是开启 `bypassPermissions` 模式的，如果按照我的用法，其实我不希望拦，或者 `auto` 拦小部分，`bypassPermissions` 都不拦，你觉得怎么做」。AI 给的推荐：仓里默认仍写 `auto`；同步时不再把机器上已有的 `bypassPermissions` 改回 `auto`（保留、只报一行）；`autoMode.allow` 加一条「从保险箱取凭证是日常」。他回：「**1,2 都照做**」。
+- 落到哪：`packages/agents-sync/src/permissions.ts`（机器上自己设的 `bypassPermissions` 保留，源文件写 bypass 仍拒收）；`agents/config/claude-permissions.json` 的 `autoMode.allow` 加「取凭证走保险箱」；`docs/agents-permissions.md` 跟着改。
+- 没变的：仓里默认仍是 `auto`，仓里的源文件**仍不许写** `bypassPermissions`——那份会装到法国那台无人值守的引擎上，放行它等于把「不用问」推给每一台别人盯不到的机器。
+- 这条不改上面的「撤回条件」：要收紧仍先找创始人。
 
 ## 撤回条件
 
