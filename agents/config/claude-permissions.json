@@ -1,5 +1,5 @@
 {
-  "说明": "各机器 ~/.claude/settings.json 里 permissions 和 autoMode 的期望：由 packages/agents-sync 的 permissions.ts 同步，只动这里列出来的项。原则（创始人 2026-09-30）：尽量宽松、只放不收——他有时用 Mirasim 这类图形界面起 CLI，没法切模式、也没人点确认，凡是要问的都会卡死；所以 defaultMode 保持 auto，shell 和各工具整个放开，不设 deny。allow、deny、additionalDirectories 按并集合并（机器上自己加的不删）；defaultMode 平常归本文件管、每次覆盖，但机器上自己设成 bypassPermissions 的例外（创始人 2026-10-01）：那种保留机器上的、只报一行，不当漂移、不覆盖。**仓里这份不许写 bypassPermissions**（源文件写它同步工具照旧拒收，报没查成 / 没做成）：这份清单会装到法国那台无人值守的引擎上，仓里写 bypass 等于把「不用问」推给每一台别人盯不到的机器——机器上自己设的是那台自己的选择，仓里写的是给所有机器定的规矩，两件事。要撤掉一条，从 allow/deny 里删掉、写进 retired，各机器下一次同步时才会摘掉。autoMode 是给 auto 模式的分类器看的一组自然语言规则（见 docs/agents-permissions.md）：它也按并集合并，两个数组都必须带 \"$defaults\"——文档写得很清楚，不带就是把那一类的内置规则整段换掉（force push、curl | bash、生产发布、往外发数据这些都不再拦），所以同步工具见到不带 \"$defaults\" 的源文件直接拒收。两条数组只写「日常」，不写 push、删除、发布、强推这类放宽。这份清单在公开仓，不写主机名、IP、账号、组织名。替别的用户写（--user，法国装机）时整段不写。来源：windsurf-dao 07b32ce2 的 common_config_claude，2026-09-30 放宽；autoMode 见 docs/decisions/0007-new-machine-and-hygiene.md 第 5 条（创始人 2026-10-01 上午拍）；保险箱那一条 2026-10-01 下午拍，见 docs/decisions/0005-agent-permissions-loosest.md。",
+  "说明": "各机器 ~/.claude/settings.json 里 permissions 和 autoMode 的期望：由 packages/agents-sync 的 permissions.ts 同步，只动这里列出来的项。原则（创始人 2026-09-30）：尽量宽松、只放不收——他有时用 Mirasim 这类图形界面起 CLI，没法切模式、也没人点确认，凡是要问的都会卡死；所以 defaultMode 保持 auto，shell 和各工具整个放开，不设 deny。allow、deny、additionalDirectories 按并集合并（机器上自己加的不删）；defaultMode 平常归本文件管、每次覆盖，但机器上自己设成 bypassPermissions 的例外（创始人 2026-10-01）：那种保留机器上的、只报一行，不当漂移、不覆盖。**仓里这份不许写 bypassPermissions**（源文件写它同步工具照旧拒收，报没查成 / 没做成）：这份清单会装到法国那台无人值守的引擎上，仓里写 bypass 等于把「不用问」推给每一台别人盯不到的机器——机器上自己设的是那台自己的选择，仓里写的是给所有机器定的规矩，两件事。要撤掉一条，从 allow/deny 里删掉、写进 retired，各机器下一次同步时才会摘掉。autoMode 是给 auto 模式的分类器看的一组自然语言规则（见 docs/agents-permissions.md）：它也按并集合并，两个数组都必须带 \"$defaults\"——文档写得很清楚，不带就是把那一类的内置规则整段换掉（force push、curl | bash、生产发布、往外发数据这些都不再拦），所以同步工具见到不带 \"$defaults\" 的源文件直接拒收。两条数组只写「日常」，不写 push、删除、发布、强推这类放宽。这份清单在公开仓，不写主机名、IP、账号、组织名。替别的用户写（--user，法国装机）时整段不写。来源：windsurf-dao 07b32ce2 的 common_config_claude，2026-09-30 放宽；autoMode 见 docs/decisions/0007-new-machine-and-hygiene.md 第 5 条（创始人 2026-10-01 上午拍）；保险箱那一条 2026-10-01 下午拍，当晚收窄到「只放我们自己的凭据、别人家的现场凭据不算」（创始人「韶关 3 号楼这一种根本就不需要存进我们的保险箱里」），见 docs/decisions/0005-agent-permissions-loosest.md。",
   "defaultMode": "auto",
   "autoMode": {
     "environment": [
@@ -9,11 +9,13 @@
     "allow": [
       "$defaults",
       "改自己仓里单子和 PR 的标题、正文、标签、评论、子单关系是日常：改标题、改正文、加标签、去标签、写评论、编辑评论、改里程碑、把子单挂到母单下面、把子单摘下来、开合单子、开合 PR，都直接做，不用问。",
-      "取凭证走保险箱是日常：从私有仓 fleet-dao-vault 的 workstation/sites/（现场服务器、数据库的账号口令）和 workstation/vps-subscription/（创始人自建 VPS 的订阅地址与节点）取当前任务要用的凭证、写进本仓的 .env、用它做只读查询，都直接做，不用问。别处拿不到、且必须用的凭证才在保险箱里，登一次就能回来的（各家 AI 的登录态、普通订阅）不在那儿。不含「去翻会话记录、日志、别的会话的文件找凭证」——那是在到处翻找凭证，照旧拦。",
+      "取凭证走保险箱是日常：从私有仓 fleet-dao-vault 的 workstation/vps-subscription/（创始人自建 VPS 的订阅地址与节点）、france/ 和 hk/（两台机器上的配置与密钥的加密副本）取当前任务要用的凭证、写进本仓的 .env、用它做只读查询，都直接做，不用问。保险箱只放「我们自己有、丢了别处再也没有」的东西；别人家的现场凭据（现场服务器的 root、数据库账号这类）不算——那种丢了跟现场要一份就有，要的时候由创始人或现场给，不走保险箱。登一次就能回来的（各家 AI 的登录态、普通订阅）也不在那儿。不含「去翻会话记录、日志、别的会话的文件找凭证」——那是在到处翻找凭证，照旧拦。",
       "这些是日常不等于别的也放行：往仓里推东西、删东西（本地文件、分支、标签、发布、单子和 PR 的删除）、发布和部署、强推、改仓库设置不在这几条里，照旧按各自的规矩判。"
     ]
   },
-  "additionalDirectories": ["${HOME}/.claude"],
+  "additionalDirectories": [
+    "${HOME}/.claude"
+  ],
   "allow": [
     "Bash",
     "PowerShell",
