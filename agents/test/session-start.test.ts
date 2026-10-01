@@ -1,6 +1,7 @@
 // 开会话钩子（agents/hooks/session-start.mjs）：会话所在的仓快进或提醒；这台机器的 fleet-dao 检出快进后跑同步，结论一句话；
 // 没查成、没做成都要明说原因和落后几个。真 git（临时目录里的裸仓当 origin），同步换成假的（agents-sync 本身的测试在它的包里，
 // 装进去的钩子真跑一遍同步在 packages/agents-sync/test/session-hook.test.ts）。
+// 第 3 件「生效中的临时调整」表：真 git 仓里放 .md，到期、缺列、日期认不出、表坏了、git 坏了各一条。
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -27,7 +28,16 @@ interface HookLib {
   gitRunner(timeoutMs?: number): Git;
   checkHere(cwd: string, git: Git): { line: string | null; fetch: Fetch | null };
   syncFleet(o: { home: string; git: Git; sync: Sync; fetch?: Fetch | null; now?: number }): string;
-  sessionStart(o: { cwd: string; home: string; git: Git; sync: Sync; now?: number }): string[];
+  sessionStart(o: {
+    cwd: string;
+    home: string;
+    git: Git;
+    sync: Sync;
+    localGit?: Git;
+    now?: number;
+  }): string[];
+  checkTemporary(cwd: string, git: Git, now?: number): string[];
+  beijingToday(now?: number): string;
   render(lines: string[]): string;
   pickCwd(input: unknown): string;
 }
@@ -358,5 +368,161 @@ describe('命令行外壳：一律退出 0，输出是各家都认的开会话 J
     expect(hook.pickCwd({ workspace_roots: ['/c'] })).toBe('/c');
     expect(hook.pickCwd({})).toBe(process.cwd());
     expect(JSON.parse(hook.render(['一', '二'])).hookSpecificOutput.additionalContext).toBe('一\n二');
+  });
+});
+
+describe('会话所在仓的「生效中的临时调整」表', SLOW, () => {
+  const HEAD =
+    '| 内容 | 当时为什么 | 谁拍的（原话和日期） | 撤回条件 | 最迟复查日期 |\n|---|---|---|---|---|\n';
+  /** 北京时间 2026-10-06 上午十点 */
+  const NOW = Date.parse('2026-10-06T02:00:00Z');
+
+  /** 一个只有本地提交的仓：files 全部提交（untracked 里的不提交） */
+  function repo(files: Record<string, string>, untracked: Record<string, string> = {}) {
+    const dir = temp('tmp-adj');
+    g(dir, 'init', '-q', '-b', 'main');
+    for (const [name, text] of Object.entries({ 'README.md': '# 仓\n', ...files })) {
+      mkdirSync(join(dir, name, '..'), { recursive: true });
+      writeFileSync(join(dir, name), text);
+    }
+    g(dir, 'add', '-A');
+    g(dir, 'commit', '-q', '-m', 'init');
+    for (const [name, text] of Object.entries(untracked)) writeFileSync(join(dir, name), text);
+    return dir;
+  }
+  const plan = (rows: string, before = '') =>
+    `# 计划\n\n## 生效中的临时调整\n\n${before}${HEAD}${rows}\n## 版本\n\n- 交付 3\n`;
+  const row = (...cells: string[]) => `| ${cells.join(' | ')} |\n`;
+  const subagent = row(
+    '不开子代理',
+    '额度不够',
+    '创始人 2026-09-28「我额度不太够」',
+    '额度恢复或创始人说撤',
+    '2026-10-05',
+  );
+
+  it('今天按北京时间算：UTC 还是前一天的下午，北京已经是第二天', () => {
+    expect(hook.beijingToday(Date.parse('2026-10-04T17:00:00Z'))).toBe('2026-10-05');
+    expect(hook.beijingToday(Date.parse('2026-10-04T15:59:00Z'))).toBe('2026-10-04');
+  });
+
+  it('表在、都没到复查日期：不出声（表前有说明、表是空的也一样）', () => {
+    const dir = repo({ 'docs/plan.md': plan(subagent, '撤回就删行。\n\n') });
+    expect(hook.checkTemporary(dir, git, Date.parse('2026-10-03T02:00:00Z'))).toEqual([]);
+    expect(hook.checkTemporary(repo({ 'docs/plan.md': plan('') }), git, NOW)).toEqual([]);
+  });
+
+  it('到了最迟复查日期（含今天）：一行列出来，提醒照读法②问创始人', () => {
+    const today = row('停法国池', '机器坏了', '创始人 2026-10-01「先停」', '机器修好', '2026-10-06');
+    const later = row('只开一条路由', '额度紧', '创始人 2026-10-01「先这样」', '额度恢复', '2026-10-20');
+    const dir = repo({ 'docs/plan.md': plan(subagent + today + later) });
+    const lines = hook.checkTemporary(join(dir, 'docs'), git, NOW);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('临时调整到了最迟复查日期 2 条（docs/plan.md，今天 2026-10-06）');
+    expect(lines[0]).toContain('不开子代理（最迟 2026-10-05）；停法国池（最迟 2026-10-06）');
+    expect(lines[0]).toContain('读法②问创始人');
+    expect(lines[0]).not.toContain('只开一条路由');
+  });
+
+  it('北京时间过了零点就算到期，不按 UTC 晚一天', () => {
+    const dir = repo({ 'docs/plan.md': plan(subagent) });
+    expect(hook.checkTemporary(dir, git, Date.parse('2026-10-04T17:00:00Z'))[0]).toMatch(
+      /到了最迟复查日期 1 条/,
+    );
+  });
+
+  it('【故意造出的失败】缺列：少一列、有一格空着，都报是哪一行', () => {
+    const short = '| 不开子代理 | 额度不够 | 创始人 09-28 | 2026-10-05 |\n';
+    const empty = row('停池', '机器坏了', '创始人 2026-10-01「先停」', '', '2026-10-30');
+    const dir = repo({ 'docs/PROGRESS.md': plan(short + empty) });
+    const lines = hook.checkTemporary(dir, git, NOW);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/临时调整表有 2 行缺列（docs\/PROGRESS\.md）/);
+    expect(lines[0]).toContain('第 7 行「不开子代理」只有 4 列');
+    expect(lines[0]).toContain('第 8 行「停池」的「撤回条件」空着');
+    expect(lines[0]).toContain('补齐五列');
+  });
+
+  it('【故意造出的失败】最迟复查日期认不出：写成口语、不存在的日子、少了年份都报', () => {
+    const rows =
+      row('甲', '额度', '创始人 2026-09-28', '额度恢复', '下周五') +
+      row('乙', '额度', '创始人 2026-09-28', '额度恢复', '2026-02-30') +
+      row('丙', '额度', '创始人 2026-09-28', '额度恢复', '10-05');
+    const lines = hook.checkTemporary(repo({ 'docs/plan.md': plan(rows) }), git, NOW);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('临时调整表有 3 行最迟复查日期认不出（docs/plan.md）');
+    expect(lines[0]).toContain('「甲」的「下周五」');
+    expect(lines[0]).toContain('「乙」的「2026-02-30」');
+    expect(lines[0]).toContain('「丙」的「10-05」');
+  });
+
+  it('【故意造出的失败】有标题、表认不出：没有表格、没有分隔行、表头不是五列，都明说没查成', () => {
+    const none = repo({
+      'docs/plan.md': '## 生效中的临时调整\n\n（还没有）\n\n## 版本\n| a | b |\n|---|---|\n',
+    });
+    expect(hook.checkTemporary(none, git, NOW)).toEqual([
+      '临时调整表没查成（docs/plan.md）：标题下面没有表格。',
+    ]);
+    const noSep = repo({ 'docs/plan.md': `## 生效中的临时调整\n\n${HEAD.split('\n')[0]}\n${subagent}` });
+    expect(hook.checkTemporary(noSep, git, NOW)[0]).toMatch(
+      /临时调整表没查成（docs\/plan\.md）：第 3 行的表头下面没有 \|---\| 分隔行/,
+    );
+    const fourCols = repo({
+      'docs/plan.md': '## 生效中的临时调整\n| 内容 | 为什么 | 谁拍的 | 复查 |\n|---|---|---|---|\n',
+    });
+    expect(hook.checkTemporary(fourCols, git, NOW)[0]).toMatch(
+      /临时调整表没查成.*表头是「内容｜为什么｜谁拍的｜复查」，要五列/,
+    );
+  });
+
+  it('没有这张表不出声：没提这个标题、只在句子里提到、只在没跟踪的文件里有、不是 git 仓', () => {
+    expect(hook.checkTemporary(repo({ 'docs/plan.md': '# 计划\n' }), git, NOW)).toEqual([]);
+    const inline = repo({ 'AGENTS.md': '登进「## 生效中的临时调整」表\n' }, { 'scratch.md': plan(subagent) });
+    expect(hook.checkTemporary(inline, git, NOW)).toEqual([]);
+    expect(hook.checkTemporary(temp('plain'), git, NOW)).toEqual([]);
+  });
+
+  it('中文路径照样认得出；一个仓里有两张表要说并成一张', () => {
+    const dir = repo({ 'specs/12-额度/需求.md': plan(subagent), 'docs/plan.md': plan('') });
+    const lines = hook.checkTemporary(dir, git, NOW);
+    expect(lines[0]).toMatch(/临时调整表不止一张（.*docs\/plan\.md:3.*specs\/12-额度\/需求\.md:3.*）/);
+    expect(lines[1]).toContain('临时调整到了最迟复查日期 1 条（specs/12-额度/需求.md:3');
+  });
+
+  it('【故意造出的失败】git 跑不起来、git grep 出错：明说没查成，不当成没有表', () => {
+    const dead: Git = () => ({ status: 3221225781, stdout: '', stderr: '' });
+    expect(hook.checkTemporary(temp('plain'), dead, NOW)).toEqual([
+      '临时调整表没查成：这台的 git 跑不起来（退出码 3221225781（0xC0000135，Windows 上程序没起来，多半缺 DLL）），会话所在仓里有没有到期的临时调整不知道。',
+    ]);
+    const dir = repo({});
+    const grepBroken: Git = (cwd, args) =>
+      args[0] === 'grep'
+        ? {
+            status: null,
+            stdout: '',
+            stderr: '',
+            error: Object.assign(new Error('spawnSync git ETIMEDOUT'), { code: 'ETIMEDOUT' }),
+            timeoutMs: 5_000,
+          }
+        : git(cwd, args);
+    expect(hook.checkTemporary(dir, grepBroken, NOW)).toEqual([
+      '临时调整表没查成：git grep 找表没成（超过 5 秒没完）。',
+    ]);
+    const grepGarbled: Git = (cwd, args) =>
+      args[0] === 'grep'
+        ? { status: 0, stdout: 'docs/plan.md:3:## 生效中的临时调整\n', stderr: '' }
+        : git(cwd, args);
+    expect(hook.checkTemporary(dir, grepGarbled, NOW)[0]).toMatch(/临时调整表没查成：git grep 的输出认不出/);
+  });
+
+  it('开会话时这几行进上下文，排在同步那一句前面', () => {
+    const w = world();
+    writeFileSync(join(w.work, 'plan.md'), plan(subagent));
+    g(w.work, 'add', '-A');
+    g(w.work, 'commit', '-q', '-m', 'plan');
+    record(w.home, w.work, g(w.work, 'rev-parse', 'HEAD'));
+    const lines = hook.sessionStart({ cwd: w.work, home: w.home, git, sync: fakeSync().sync, now: NOW });
+    expect(lines[0]).toMatch(/临时调整到了最迟复查日期 1 条（plan\.md/);
+    expect(lines.at(-1)).toMatch(/^规矩同步/);
   });
 });
