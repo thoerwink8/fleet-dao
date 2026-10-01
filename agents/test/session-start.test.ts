@@ -5,7 +5,16 @@
 // 装进去的钩子真跑一遍同步在 packages/agents-sync/test/session-hook.test.ts；专用检出本身在 sync-source.test.ts）。
 // 第 3 件「生效中的临时调整」表：真 git 仓里放 .md，到期、缺列、日期认不出、表坏了、git 坏了各一条。
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -39,6 +48,7 @@ interface HookLib {
     now?: number;
   }): string[];
   checkTemporary(cwd: string, git: Git, now?: number): string[];
+  sweepWorktrees(cwd: string, git: Git, now?: number): string[];
   beijingToday(now?: number): string;
   render(lines: string[]): string;
   pickCwd(input: unknown): string;
@@ -547,5 +557,87 @@ describe('会话所在仓的「生效中的临时调整」表', SLOW, () => {
     const lines = hook.sessionStart({ cwd: w.work, home: w.home, git, sync: fakeSync().sync, now: NOW });
     expect(lines[0]).toMatch(/临时调整到了最迟复查日期 1 条（plan\.md/);
     expect(lines.at(-1)).toMatch(/^规矩同步/);
+  });
+});
+
+describe('顺手清 .claude/worktrees/ 里攒着的旧树', SLOW, () => {
+  /** 在 work 检出里建一棵树，返回它的名字 */
+  function tree(w: ReturnType<typeof world>, name: string): string {
+    const dir = join(w.work, '.claude', 'worktrees', name);
+    mkdirSync(join(w.work, '.claude', 'worktrees'), { recursive: true });
+    g(w.work, 'worktree', 'add', '-q', '--detach', dir, 'HEAD');
+    return name;
+  }
+  const listTrees = (w: ReturnType<typeof world>) => {
+    const dir = join(w.work, '.claude', 'worktrees');
+    if (!existsSync(dir)) return [];
+    return readdirSync(dir);
+  };
+
+  it('提交都在远端上、没有未提交的改动、也搁了半小时：删掉，并说一句', () => {
+    const w = world();
+    tree(w, 'old-merged');
+    expect(listTrees(w)).toContain('old-merged');
+    const lines = hook.sweepWorktrees(w.work, git, Date.now() + 31 * 60_000);
+    expect(listTrees(w)).not.toContain('old-merged');
+    expect(lines.join('\n')).toMatch(/清掉了 1 棵/);
+  });
+
+  it('有没提交的改动：留着，并报给人', () => {
+    const w = world();
+    tree(w, 'has-dirty');
+    writeFileSync(join(w.work, '.claude', 'worktrees', 'has-dirty', 'notes.md'), '没提交的东西\n');
+    const lines = hook.sweepWorktrees(w.work, git);
+    expect(listTrees(w)).toContain('has-dirty');
+    expect(lines.join('\n')).toMatch(/还有 1 棵没清.*has-dirty/s);
+  });
+
+  it('有没推上去的提交：绝不删（2026-10-02 靠这条救回决定 0006）', () => {
+    const w = world();
+    tree(w, 'unpushed');
+    const dir = join(w.work, '.claude', 'worktrees', 'unpushed');
+    writeFileSync(join(dir, 'decision.md'), '# 一个还没进主线的决定\n');
+    g(dir, 'add', '-A');
+    g(dir, 'commit', '-q', '-m', '一个还没进主线的决定');
+    const lines = hook.sweepWorktrees(w.work, git);
+    expect(listTrees(w)).toContain('unpushed');
+    expect(lines.join('\n')).toMatch(/还有 1 棵没清.*unpushed/s);
+  });
+
+  it('discuss 的复用树（second-opinion*）：不碰，也不报', () => {
+    const w = world();
+    tree(w, 'second-opinion');
+    tree(w, 'second-opinion-2');
+    const lines = hook.sweepWorktrees(w.work, git);
+    expect(listTrees(w)).toContain('second-opinion');
+    expect(listTrees(w)).toContain('second-opinion-2');
+    expect(lines).toEqual([]);
+  });
+
+  it('没有这个目录：不出声', () => {
+    const w = world();
+    expect(hook.sweepWorktrees(w.work, git)).toEqual([]);
+  });
+
+  it('跑在非 git 目录里：不出声，不报错', () => {
+    const dir = temp('nogit');
+    expect(hook.sweepWorktrees(dir, git)).toEqual([]);
+  });
+});
+
+describe('刚动过的树不碰（可能有人正在里面干活）', SLOW, () => {
+  it('刚建出来的树：这一轮不收走', () => {
+    const w = world();
+    const dir = join(w.work, '.claude', 'worktrees', 'just-now');
+    mkdirSync(join(w.work, '.claude', 'worktrees'), { recursive: true });
+    g(w.work, 'worktree', 'add', '-q', '--detach', dir, 'HEAD');
+    // 不给 now：用当前时间，树刚建出来
+    const lines = hook.sweepWorktrees(w.work, git);
+    expect(existsSync(dir)).toBe(true);
+    expect(lines.join('\n')).toMatch(/还有 1 棵没清/);
+    // 过了半小时再跑：收走
+    const later = hook.sweepWorktrees(w.work, git, Date.now() + 31 * 60_000);
+    expect(existsSync(dir)).toBe(false);
+    expect(later.join('\n')).toMatch(/清掉了 1 棵/);
   });
 });
