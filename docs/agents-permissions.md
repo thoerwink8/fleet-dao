@@ -7,15 +7,17 @@
 ## 一条命令
 
 ```
-pnpm agents:sync              # 取远端 → 把检出快进到主线 → 同步（规矩、技能、钩子、权限）→ 每家一行报结果
+pnpm agents:sync              # 取远端 → 把同步专用的检出切到 origin/main → 同步（规矩、技能、钩子、权限）→ 每家一行报结果
 pnpm agents:sync --check      # 只读，不取远端、不写，只报差在哪
-pnpm agents:sync --offline    # 网络不通时用：不取远端，按检出里现有的主线同步
-pnpm agents:sync --repo <目录> # 指定 fleet-dao 检出（默认：~/.fleet-dao/synced.json 记的，再没有就是脚本所在的检出）
+pnpm agents:sync --offline    # 网络不通时用：不取远端，按本机上次取到的 origin/main 同步
+pnpm agents:sync --seed <目录> # 拿这个 fleet-dao 检出当种子（第一次建、或专用检出坏了要重建时用；
+                              # 默认：~/.fleet-dao/synced.json 记的检出，再没有就是脚本所在的检出）
 ```
 
 - 开发机开新会话时，开会话钩子自己做同样的事（三分钟内同步成功过就跳过），所以平时不用手敲；这条是「现在就要、要看到每家结果」时用。
+- 同步用的是一份**只归同步工具的检出** `~/.fleet-dao/origin-main`：永远停在 `origin/main` 的分离头上。本机自己的 fleet-dao 检出在哪个分支、有没有没提交的改动都不影响同步；那边的检出只被当「种子」读（拿它的 origin 地址、本地对象），一个写操作都没有。专用检出里要是被人改了，整份挪到它旁边（`origin-main.bak-<时间>`）再从零建一份——不拿没推的内容去同步，也不删东西。
 - **同步完要重开 AI 会话才生效**：已经开着的会话读的是开场时的配置。
-- 不满足就明说、不同步：git 跑不起来、取不到远端（`--offline` 才放行）、检出不在 main 上、`AGENTS.md` 或 `agents/` 有没提交的改动、main 和 origin/main 分叉。退出码 0 都对，1 有前置不满足或有没做成，2 有没查成。
+- 不满足就明说、不同步：git 跑不起来、取不到远端（`--offline` 才放行）、专用检出建不起来、专用检出的锁被别的同步拿着。退出码 0 都对，1 有没做成的，2 有没查成的。
 - 对 AI 说：「跑 `pnpm agents:sync`，把这台的权限同步到最新」。
 - Windows 上如果这台的 git 跑不起来（缺 DLL），先把 `D:\Tools\Git\cmd` 放进 PATH 前面。
 
