@@ -102,6 +102,7 @@ export {
   staleSinceOf,
 } from './issue-groom.ts';
 export {
+  checkRequiredSections,
   type Gh,
   type GhResult,
   ghRunner,
@@ -109,6 +110,7 @@ export {
   type IssueNewResult,
   issueNew,
   issueSummary,
+  type MissingSection,
   specsDoc,
   specsHint,
   USAGE,

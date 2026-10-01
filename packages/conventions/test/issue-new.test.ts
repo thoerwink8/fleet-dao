@@ -22,6 +22,18 @@ const BODY = [
   '原话：给登录页加验证码（提出人：某某）',
   'AI 理解：登录页发短信验证码，五分钟过期。',
   '',
+  '## 场景',
+  '',
+  '登录页现在只有密码，被撞库；先加一道验证码。',
+  '',
+  '## 原话',
+  '',
+  '「登录页加验证码。」（创始人 2026-09-26）',
+  '',
+  '## 已知的模块',
+  '',
+  '- packages/web 的登录页。',
+  '',
   '## 要什么',
   '',
   '- 登录页多一个验证码框。',
@@ -102,16 +114,22 @@ describe('开单脚本：缺类别或里程碑就不开', () => {
 });
 
 describe('开单脚本：以后要做的事得写清怎么算做完（design 第三节第 35 条）', () => {
+  // 三栏（场景、原话、已知的模块）先用最小写法撑住，让「怎么算做完」那一节是要被拦下的那一节
+  const PROLOGUE = '## 场景\n\n登录页要加验证码。\n\n## 原话\n\n「加验证码。」\n\n## 已知的模块\n\n暂无。\n';
   it.each([
-    ['正文里没有「怎么算做完」', '原话：给登录页加验证码\n', '正文里没有「## 怎么算做完」一节，单没开'],
+    [
+      '正文里没有「怎么算做完」',
+      `原话：给登录页加验证码\n\n${PROLOGUE}`,
+      '正文里没有「## 怎么算做完」一节，单没开',
+    ],
     [
       '「怎么算做完」只有标题、下面空着',
-      '原话：x\n\n## 怎么算做完\n\n\n## 现状\n\n未开工。\n',
+      `${PROLOGUE}\n## 怎么算做完\n\n\n## 现状\n\n未开工。\n`,
       '正文里「怎么算做完」一节是空的，单没开',
     ],
     [
       '怎么算做完写在围栏代码块里不算小标题',
-      '原话：x\n\n```\n## 怎么算做完\n- 测试\n```\n',
+      `${PROLOGUE}\n\`\`\`\n## 怎么算做完\n- 测试\n\`\`\`\n`,
       '正文里没有「## 怎么算做完」一节',
     ],
   ])('%s：不开，gh 一次也不调', async (_name, body, message) => {
@@ -121,11 +139,84 @@ describe('开单脚本：以后要做的事得写清怎么算做完（design 第
   });
 
   it('带 --specs 可正文开头就是小标题（没有原话和 AI 理解）：不开', async () => {
-    const { calls, run } = setup({ body: '## 怎么算做完\n\n- 测试\n' });
+    const { calls, run } = setup({
+      body: `${PROLOGUE}\n## 怎么算做完\n\n- 测试\n`,
+    });
     await expect(run(...base, '--specs', '登录验证码')).rejects.toThrow(
       '--specs 时正文开头（第一个小标题之前）要写原话和 AI 理解',
     );
     expect(calls).toEqual([]);
+  });
+});
+
+describe('开单脚本：单子必带场景、原话、已知的模块（specs/553-对题；创始人 2026-10-02）', () => {
+  // 最小可开单的正文骨架：四个必填小节都写了字、不写涉及面。砍掉一节、留空一节、加一节涉及面，各成一类故意造出的失败。
+  const full = (
+    cut: Partial<Record<'场景' | '原话' | '已知的模块' | '怎么算做完' | '涉及面', string | 'omit'>>,
+  ) => {
+    const blocks: string[] = [];
+    const push = (head: string, value: string | 'omit' | undefined, fallback: string) => {
+      if (value === 'omit') return;
+      blocks.push(head, '', value === undefined ? fallback : value, '');
+    };
+    push('## 场景', cut['场景'], '登录页要加验证码，被撞库。');
+    push('## 原话', cut['原话'], '「登录页加验证码。」（创始人 2026-09-26）');
+    push('## 已知的模块', cut['已知的模块'], '- packages/web 的登录页。');
+    if (cut['涉及面'] !== undefined) push('## 涉及面', cut['涉及面'], '');
+    push('## 怎么算做完', cut['怎么算做完'], '- 测试 x。');
+    return blocks.join('\n');
+  };
+
+  it('四节都有字：能开', async () => {
+    const { calls, run } = setup({ body: full({}) });
+    await run(...base);
+    expect(calls.length).toBeGreaterThan(0);
+  });
+
+  it.each([
+    ['场景', '正文里没有「## 场景」一节'],
+    ['原话', '正文里没有「## 原话」一节'],
+    ['已知的模块', '正文里没有「## 已知的模块」一节'],
+  ])('【故意造出的失败】没有「%s」这一节：拒开，gh 一次也不调', async (name, message) => {
+    const { calls, run } = setup({ body: full({ [name]: 'omit' }) });
+    await expect(run(...base)).rejects.toThrow(message);
+    expect(calls).toEqual([]);
+  });
+
+  it.each([
+    ['场景', '「## 场景」一节是空的'],
+    ['原话', '「## 原话」一节是空的'],
+    ['已知的模块', '「## 已知的模块」一节是空的'],
+  ])('【故意造出的失败】「%s」只有标题、下面空着：拒开，gh 一次也不调', async (name, message) => {
+    const { calls, run } = setup({ body: full({ [name]: '' }) });
+    await expect(run(...base)).rejects.toThrow(message);
+    expect(calls).toEqual([]);
+  });
+
+  it('【故意造出的失败】写了「## 涉及面」一节：拒开，明说「那不是算出来的」', async () => {
+    const { calls, run } = setup({ body: full({ 涉及面: 'packages/web、packages/api 都要改。' }) });
+    await expect(run(...base)).rejects.toThrow(
+      '涉及面一律不写：那是算出来的、不是知道的（创始人 2026-10-02「那（涉及面）是算出来的、不是知道的」，specs/553-对题）。建单的 AI 动手前没读过代码，写它只会是猜；把它整节删掉。',
+    );
+    expect(calls).toEqual([]);
+  });
+
+  it('「## 涉及面」只有标题、下面空着也拒开', async () => {
+    const { calls, run } = setup({ body: full({ 涉及面: '' }) });
+    await expect(run(...base)).rejects.toThrow('涉及面一律不写');
+    expect(calls).toEqual([]);
+  });
+
+  it('原话写「无（AI 发现）」：能开（单子是 AI 发现的，没有创始人原话可抄）', async () => {
+    const { calls, run } = setup({ body: full({ 原话: '无（AI 发现）。' }) });
+    await run(...base);
+    expect(calls.length).toBeGreaterThan(0);
+  });
+
+  it('已知的模块写「暂无」：能开（建单时确实不知道的就照实写）', async () => {
+    const { calls, run } = setup({ body: full({ 已知的模块: '暂无。' }) });
+    await run(...base);
+    expect(calls.length).toBeGreaterThan(0);
   });
 });
 

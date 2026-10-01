@@ -24,7 +24,7 @@ import {
   milestonePhase,
   milestoneVersion,
 } from './labels.ts';
-import { parseMd } from './markdown.ts';
+import { type MdDoc, norm, parseMd, sectionRange } from './markdown.ts';
 
 export interface GhResult {
   code: number;
@@ -66,12 +66,85 @@ export interface IssueNewResult {
 
 export const USAGE =
   '用法：pnpm issue:new --kind 需求|缺陷|杂项 --milestone v1 --title "一句话" --body-file 正文.md [--specs 短名] [--mother] [--parent 母单号] [--local]' +
-  '（--milestone 认全名、v<N>、旧的 P<N>，或「未排期」；正文要有写了字的「## 怎么算做完」；' +
-  '带 --specs 时，第一个小标题之前写原话和 AI 理解；--mother 多贴「母单」标签；' +
+  '（--milestone 认全名、v<N>、旧的 P<N>，或「未排期」；正文要带写了字的「## 场景」「## 原话」「## 已知的模块」「## 怎么算做完」四节，' +
+  '涉及面一律不写（那是算出来的、不是知道的）；带 --specs 时，第一个小标题之前写原话和 AI 理解；--mother 多贴「母单」标签；' +
   '--parent 开子单：先挂到那张母单下面再挂里程碑；--local 多贴「本机做」：帅位留给本机做，接活不自动派）';
 
 /** --milestone 写这个值：这张单没有版本（未排期）。不去查 GitHub 的里程碑列表，建单也不带 --milestone。 */
 const UNSCHEDULED = '未排期';
+
+/**
+ * 一张单必带三栏——场景、原话、已知的模块（两张创始人 2026-10-02 拍「建单那个会话把只有它知道的事写进单子」，specs/553-对题
+ * 和 specs/509-需求梳理/流程重做方案 第三节）。要什么、怎么算做完照旧。各栏是小标题（## 场景 / ## 原话 / ## 已知的模块），
+ * 后续段落就算它的字；缺栏、空栏拒开。涉及面一律不写：那是算出来的、不是知道的，建单的 AI 没读过代码，它写的只是猜；
+ * 单子里见「涉及面」一节就拒开，并点明「那不是算出来的」。
+ *
+ * 原话栏允许写「（AI 发现）」：单子是 AI 发现的问题／缺陷／杂项时，没有创始人原话可抄，写明来源就好。光是
+ * 「## 原话」四个字不算写了。
+ */
+export interface MissingSection {
+  /** 缺哪一栏（拒开时报的栏目名）。 */
+  label: string;
+  why: string;
+}
+
+/**
+ * 正文里认出的小节里有没有「场景 / 原话 / 已知的模块」三栏、有没有「涉及面」不该出现的栏；缺或者写错就给一句为什么。
+ * 一节下面只有标题、没有字也算缺。一级到六级小标题都算。
+ */
+export function checkRequiredSections(doc: MdDoc): MissingSection | undefined {
+  const sections = new Map<string, string>();
+  for (const h of doc.headings) {
+    const key = norm(h.title);
+    if (!key) continue;
+    const { start, end } = sectionRange(doc, h);
+    const text = doc.lines
+      .slice(start + 1, end)
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .join(' ');
+    if (!sections.has(key)) sections.set(key, text);
+  }
+  const has = (name: string): boolean => {
+    const text = sections.get(name);
+    return text !== undefined && text.length > 0;
+  };
+  const dummy = (name: string): boolean => sections.has(name) && (sections.get(name) ?? '').length === 0;
+  if (sections.has('涉及面')) {
+    return {
+      label: '涉及面',
+      why: '涉及面一律不写：那是算出来的、不是知道的（创始人 2026-10-02「那（涉及面）是算出来的、不是知道的」，specs/553-对题）。建单的 AI 动手前没读过代码，写它只会是猜；把它整节删掉。',
+    };
+  }
+  if (dummy('场景'))
+    return { label: '场景', why: '「## 场景」一节是空的：写清这是干什么的、为什么现在做（一段话就好）。' };
+  if (dummy('原话'))
+    return {
+      label: '原话',
+      why: '「## 原话」一节是空的：抄创始人当时的原话（逐字）；AI 自己发现的问题就写「无（AI 发现）」。',
+    };
+  if (dummy('已知的模块'))
+    return {
+      label: '已知的模块',
+      why: '「## 已知的模块」一节是空的：建单时确实知道的模块（创始人提到的、建单前聊出来的）；不知道就写「暂无」。',
+    };
+  if (!has('场景'))
+    return {
+      label: '场景',
+      why: '正文里没有「## 场景」一节：单子必须写清这是干什么的、为什么现在做（创始人 2026-10-02，specs/553-对题）。',
+    };
+  if (!has('原话'))
+    return {
+      label: '原话',
+      why: '正文里没有「## 原话」一节：单子必须抄创始人当时的原话（逐字）；AI 自己发现的问题写「无（AI 发现）」（创始人 2026-10-02，specs/553-对题）。',
+    };
+  if (!has('已知的模块'))
+    return {
+      label: '已知的模块',
+      why: '正文里没有「## 已知的模块」一节：单子必须写建单时确实知道的模块；不知道写「暂无」（创始人 2026-10-02，specs/553-对题）。',
+    };
+  return undefined;
+}
 
 export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Promise<IssueNewResult> {
   const o = parse(argv);
@@ -82,7 +155,10 @@ export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Pro
   } catch (e) {
     throw new Error(`--body-file 读不到：${bodyPath}（${message(e)}），单没开。`);
   }
-  const done = doneSection(parseMd('body.md', body));
+  const doc = parseMd('body.md', body);
+  const missing = checkRequiredSections(doc);
+  if (missing) throw new Error(`${missing.why}，单没开。`);
+  const done = doneSection(doc);
   if (done !== 'ok') {
     throw new Error(
       `正文里${done === 'missing' ? '没有「## 怎么算做完」一节' : '「怎么算做完」一节是空的'}，单没开：以后要做的事得写清怎么算做完（测试名、脚本、真机上看到什么）。`,
