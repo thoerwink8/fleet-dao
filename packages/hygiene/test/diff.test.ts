@@ -73,10 +73,13 @@ describe('scanAdded', () => {
     );
   });
 
-  it('【故意造出的失败】新出现的路径里带真密钥（目录名）也报：正文干净不算过', () => {
-    // 路径本身就是写出去的东西：文件名会进 commit 和网页地址。和全仓检查一样，行号 0。
-    const leakPath = `specs/532-x/${['ghp', pseudoRandom(36, 304)].join('_')}/需求.md`;
-    expect(scanAdded([], [leakPath], { allowlist: [] }).map(formatFinding)).toEqual([`${leakPath} 令牌`]);
+  it('【故意造出的失败】新出现的路径里带真密钥（目录名）也报：正文干净不算过，报出来的路径要遮住那段', () => {
+    // 路径本身就是写出去的东西：文件名会进 commit 和网页地址。和全仓检查一样，行号 0、命中那段遮成「…」。
+    const secret = ['ghp', pseudoRandom(36, 304)].join('_');
+    const leakPath = `specs/532-x/${secret}/需求.md`;
+    const found = scanAdded([], [leakPath], { allowlist: [] });
+    expect(found.map(formatFinding)).toEqual(['specs/532-x/…/需求.md 令牌']);
+    for (const f of found) expect(f.path).not.toContain(secret);
   });
 
   it('白名单照全仓检查的规矩来', () => {

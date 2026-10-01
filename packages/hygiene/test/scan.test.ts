@@ -45,14 +45,29 @@ describe('scanFiles', () => {
     expect(report.unusedAllows).toEqual([staleAllow]);
   });
 
-  it('【故意造出的失败】真密钥藏在路径里（文件名 / 目录名）也拦：正文干净不算过', () => {
+  it('【故意造出的失败】真密钥藏在路径里（文件名 / 目录名）也拦：正文干净不算过，报出来的路径要遮住那段', () => {
     // 路径本身就是写出去的东西（commit 里的文件名、网页地址、目录名）：`writeSpecDoc` 的路径是 AI 给的、
     // 可变的，把令牌样式的密钥拼进去就会连文件名一起公开。只看内容会放过去。
-    const leakPath = `specs/532-x/${['ghp', pseudoRandom(36, 203)].join('_')}/需求.md`;
+    const secret = ['ghp', pseudoRandom(36, 203)].join('_');
+    const leakPath = `specs/532-x/${secret}/需求.md`;
     const clean = new Map([[leakPath, Buffer.from('正文干净\n')]]);
     const report = scanFiles([leakPath], (p) => clean.get(p) ?? Buffer.from(''), []);
-    // 行号 0：命中的是路径本身，不是哪一行
-    expect(report.findings.map(formatFinding)).toEqual([`${leakPath} 令牌`]);
+    // 行号 0：命中的是路径本身，不是哪一行。路径里那段遮成「…」——报出来的东西里不带值
+    expect(report.findings.map(formatFinding)).toEqual(['specs/532-x/…/需求.md 令牌']);
+    for (const f of report.findings) expect(f.path).not.toContain(secret);
+  });
+
+  it('路径里藏了密钥时，内容里的命中也不遮不白名单地放过去（整条都不白名单）', () => {
+    const secret = ['ghp', pseudoRandom(36, 205)].join('_');
+    const other = ['ghp', pseudoRandom(36, 206)].join('_');
+    const leakPath = `packages/x/test/fixtures/${secret}/run.md`;
+    const files = new Map([[leakPath, Buffer.from(`令牌 ${other}\n`)]]);
+    // 这条白名单本来会放行 packages/x/test/fixtures 下的 request-id；路径脏了就不放行任何一条
+    const allow: Allow = { rule: 'token', path: /^packages\/x\/test\/fixtures\//, reason: '测试用：放行。' };
+    const report = scanFiles([leakPath], (p) => files.get(p) ?? Buffer.from(''), [allow]);
+    const lines = report.findings.map(formatFinding);
+    expect(lines).toContain(`packages/x/test/fixtures/…/run.md:1 令牌`);
+    for (const f of report.findings) expect(f.path).not.toContain(secret);
   });
 
   it('正常的仓内路径不会误报', () => {

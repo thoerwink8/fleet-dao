@@ -2,7 +2,7 @@
 // 加上新增、改动、改名的文件名。和全仓扫同一套规则、白名单。推送前逐个提交扫（history.ts）用它。
 import { ALLOWLIST, type Allow } from './allowlist.ts';
 import { findHits, findSecretFile } from './rules.ts';
-import { applyAllowlist, type Finding } from './scan.ts';
+import { applyAllowlist, type Finding, redactPathValue } from './scan.ts';
 
 export interface AddedHunk {
   path: string;
@@ -84,16 +84,33 @@ export function scanAdded(
   options: { allowlist?: readonly Allow[] } = {},
 ): Finding[] {
   const found: Finding[] = [];
+  /** 路径里藏了真密钥的那些路径：它们报出来的每一处都要用遮过的路径，且一律不白名单（和 scan.ts 一个规矩）。 */
+  const tainted = new Set<string>();
   for (const path of changedPaths) {
+    // 路径本身也是写出去的东西（文件名、目录名）：里面的真密钥照样拦，和 scan.ts 一样（行号 0）
+    const inPath = findHits(path);
+    if (inPath.length > 0) tainted.add(path);
+    const shown =
+      inPath.length > 0
+        ? redactPathValue(
+            path,
+            inPath.map((h) => h.match),
+          )
+        : path;
     const hit = findSecretFile(path);
-    if (hit) found.push({ ...hit, path });
-    // 路径本身就是写出去的东西（文件名、目录名）：里面的真密钥照样拦，和 scan.ts 一样（行号 0）
-    for (const textHit of findHits(path)) found.push({ ...textHit, path, line: 0 });
+    if (hit) found.push({ ...hit, path: shown });
+    for (const textHit of inPath) found.push({ ...textHit, path: shown, line: 0 });
   }
   for (const hunk of hunks) {
+    const shown = tainted.has(hunk.path)
+      ? redactPathValue(
+          hunk.path,
+          findHits(hunk.path).map((h) => h.match),
+        )
+      : hunk.path;
     for (const hit of findHits(hunk.text)) {
-      found.push({ ...hit, path: hunk.path, line: hunk.startLine + hit.line - 1 });
+      found.push({ ...hit, path: shown, line: hunk.startLine + hit.line - 1 });
     }
   }
-  return applyAllowlist(found, options.allowlist ?? ALLOWLIST, new Set());
+  return tainted.size > 0 ? found : applyAllowlist(found, options.allowlist ?? ALLOWLIST, new Set());
 }

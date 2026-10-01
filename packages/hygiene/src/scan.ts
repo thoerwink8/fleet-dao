@@ -62,11 +62,21 @@ export function scanFiles(
   const used = new Set<Allow>();
   for (const path of paths) {
     const hits: Finding[] = [];
+    // 路径命中的真密钥：命中段先算出来，所有报出来的东西（文件内容命中也一样）都用遮过的路径，
+    // 免得「内容有命中」那条把没遮的原路径一起带出去。
+    const inPath = findHits(path);
+    const shown =
+      inPath.length > 0
+        ? redactPathValue(
+            path,
+            inPath.map((h) => h.match),
+          )
+        : path;
     // 先按文件名判：密钥文件不管是不是二进制、工作树里还在不在（还在 git 里就算），都要拦。
     const secretFile = findSecretFile(path);
-    if (secretFile) hits.push({ ...secretFile, path });
+    if (secretFile) hits.push({ ...secretFile, path: shown });
     // 路径本身就是写出去的东西（文件名会进 commit、网页地址、目录名）：它里面的真密钥照样拦，别只看内容。
-    for (const hit of findHits(path)) hits.push({ ...hit, path, line: 0 });
+    for (const hit of inPath) hits.push({ ...hit, path: shown, line: 0 });
     let content: Buffer | undefined;
     try {
       content = read(path);
@@ -78,12 +88,24 @@ export function scanFiles(
     else if (content) {
       report.scanned.push(path);
       const text = content.toString('utf8');
-      for (const hit of findHits(text)) hits.push({ ...hit, path });
+      for (const hit of findHits(text)) hits.push({ ...hit, path: shown });
     }
-    report.findings.push(...applyAllowlist(hits, allowlist, used));
+    // 路径里有真密钥时，命中一律不白名单（白名单是「这类文件里这条不算」的约定，不是「藏起来也算」的出口）
+    report.findings.push(...(inPath.length > 0 ? hits : applyAllowlist(hits, allowlist, used)));
   }
   report.unusedAllows = allowlist.filter((a) => !used.has(a));
   return report;
+}
+
+/**
+ * 路径里命中过真密钥时，把命中的那段换成「…」再放进报告：路径会进 CI 日志、推送报错和会话记录，
+ * 原样打出来等于把刚拦下的密钥又打了一遍（输出里不带值，这是底线）。只遮命中的那几段，好在还能看出是哪个文件。
+ * 文件名规则（`findSecretFile`）不看内容，路径照旧。
+ */
+export function redactPathValue(path: string, matches: readonly string[]): string {
+  let out = path;
+  for (const m of matches) if (m) out = out.split(m).join('…');
+  return out;
 }
 
 /** 一条命中打成一行：只有文件、行和规则名（逐个提交扫的再带提交号），值一律不打（检查的输出会进 CI 日志、会话记录）。 */
