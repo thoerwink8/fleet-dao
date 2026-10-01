@@ -64,6 +64,12 @@ export interface ClaimsGitHub {
   setStatus(repo: RepoRef, sha: string, status: CommitStatusInput): Promise<void>;
   /** 撤掉这个 PR 的自动合并（GraphQL disablePullRequestAutoMerge）。 */
   disableAutoMerge(repo: RepoRef, pull: Pick<PullFacts, 'number' | 'nodeId'>): Promise<void>;
+  /**
+   * 给这个 PR 挂上自动合并（GraphQL enablePullRequestAutoMerge，squash）：用机器人（GitHub App）的身份挂，
+   * 不用 Actions 自带的 GITHUB_TOKEN——它挂的自动合并合进主线后，不会触发主线上后面的工作流（#242）。
+   * 挂不上（权限不够、GitHub 报错）照抛，调用方不当成已经挂上。
+   */
+  enableAutoMerge(repo: RepoRef, pull: Pick<PullFacts, 'number' | 'nodeId'>): Promise<void>;
   /** 关掉 PR（分支不动）。已经关了的不报错。 */
   closePull(repo: RepoRef, number: number): Promise<void>;
   /** 在 PR 上留一条评论（幂等，同一个 key 只发一次）。 */
@@ -203,6 +209,15 @@ export function createClaimsGitHub(deps: Deps): ClaimsGitHub {
       await client.graphql(
         auth(repo),
         'mutation($id: ID!) { disablePullRequestAutoMerge(input: { pullRequestId: $id }) { pullRequest { number } } }',
+        { id: pull.nodeId },
+        { mutation: true },
+      );
+    },
+
+    async enableAutoMerge(repo, pull) {
+      await client.graphql(
+        auth(repo),
+        'mutation($id: ID!) { enablePullRequestAutoMerge(input: { pullRequestId: $id, mergeMethod: SQUASH }) { pullRequest { number } } }',
         { id: pull.nodeId },
         { mutation: true },
       );

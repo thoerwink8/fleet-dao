@@ -10,6 +10,7 @@
 import type { AlertRow, ScheduleResult } from '@fleet-dao/db';
 import type { HourlyReconcileRun } from '../contract.ts';
 import { type AlertSweepDeps, sweepAlerts } from './alert-sweep.ts';
+import { type AutoMergeCheckDeps, checkAutoMerges } from './auto-merge-check.ts';
 import { checkGitHubApps, type GitHubAppCheckDeps } from './github-app-check.ts';
 import type { ScheduleRunLog } from './github-reconcile.ts';
 import { checkLedgers, checkMergedPrs, checkWorkflows, type ReconcileCheckDeps } from './reconcile-checks.ts';
@@ -36,6 +37,7 @@ export const WHY_MAX = 1500;
 export type HourlyReconcileJobDeps = WorktreeSweepDeps &
   AlertSweepDeps &
   ReconcileCheckDeps &
+  AutoMergeCheckDeps &
   Pick<GitHubAppCheckDeps, 'apps'> & {
     runs: ScheduleRunLog;
   };
@@ -90,6 +92,7 @@ async function round(deps: HourlyReconcileJobDeps): Promise<ScheduleResult> {
   const workflows = await checkWorkflows(deps);
   const merged = await checkMergedPrs(deps);
   const ledgers = await checkLedgers(deps);
+  const autoMerges = await checkAutoMerges(deps);
   let alerts: SweepPart;
   try {
     const now = await listOpen(deps);
@@ -99,7 +102,7 @@ async function round(deps: HourlyReconcileJobDeps): Promise<ScheduleResult> {
   }
   // 权限自检放最后：它新报、撤的提醒这一轮提醒那部分不再碰
   const apps = await checkGitHubApps(deps);
-  return combineParts([trees, workflows, merged, ledgers, alerts, apps]);
+  return combineParts([trees, workflows, merged, ledgers, autoMerges, alerts, apps]);
 }
 
 /**

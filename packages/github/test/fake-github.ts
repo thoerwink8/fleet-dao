@@ -932,6 +932,18 @@ export class FakeGitHub {
       pr.auto_merge = false;
       return this.json(200, { data: { disablePullRequestAutoMerge: { pullRequest: { number: n } } } });
     }
+    if (query.includes('enablePullRequestAutoMerge')) {
+      const n = Number(String(variables.id).replace('PR_', ''));
+      const pr = this.pulls.get(n);
+      if (!pr) return this.json(200, { data: null, errors: [{ type: 'NOT_FOUND', message: 'not found' }] });
+      if (pr.auto_merge)
+        return this.json(200, {
+          data: { enablePullRequestAutoMerge: null },
+          errors: [{ type: 'UNPROCESSABLE', message: 'Pull request auto merge is already enabled' }],
+        });
+      pr.auto_merge = true;
+      return this.json(200, { data: { enablePullRequestAutoMerge: { pullRequest: { number: n } } } });
+    }
     if (query.includes('markPullRequestReadyForReview')) {
       const n = Number(String(variables.id).replace('PR_', ''));
       const pr = this.pulls.get(n);
