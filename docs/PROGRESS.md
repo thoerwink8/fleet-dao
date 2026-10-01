@@ -52,3 +52,9 @@
 - **ssh 别名补 `hk-jump`**（香港，和 `myserver` 等价、给跳板用）。实测四条路都通：本机直连法国、直连香港、`ssh -J hk-jump contabo-jump` 经香港跳法国、法国→香港隧道对端 22 也通。脚本在私有仓 `workstation/ssh/config.sh`（`c986007`）。
 - **换钥匙那件事彻底收尾**：「服务器上的密钥也要换」那句改成条件句——**丢了**不用换（09-29 那次就是丢了），**怀疑泄露**才换。创始人当晚拍「口令就不需要换了」，服务器上一个密钥没动。`rekey.sh`、`verify-rekey.sh` 一并进仓（`48f7deb` 之前那次提交）。
 - **待办**：① 新机器一键配置按「以我的标准为主」起草（创始人当晚授权），三项待定我自己定、草案出来给他看一眼；② 那台 Mac 的 `.env` 等的是它自己现场那套凭据，现在知道**不走保险箱**了，得由创始人或现场给。
+
+## 2026-10-02 补记（当晚的收尾）
+
+- **#552 已合**（12:51，改标准，CI 全绿含 deploy）。合进去的是：保险箱收窄到只放「我们自己有、丢了别处再也没有」的凭据；`workstation/sites/` 从私有仓删掉。
+- **CI 那两处红也修了**（同 PR 第二个提交）：biome 要求 `additionalDirectories` 收成一行；`packages/agents-sync/test/permissions.test.ts` 里原来断言放行**必须**含 `workstation/sites/`，跟着改成断言**不许**含。本地 279 条过。
+- **那台 Mac 的 `.env` 怎么办（结论）**：`GRAB_*`（平台账号）、`SRC_DB_*`（现场库账号）是**别人家的**，按新规矩**不走保险箱**，由创始人或现场给；`JEV_API_KEY` 是**我们自己**的（TypeSafe System One，保险箱 `france/etc/fleet-dao/typesafe.key.age` 里有），可以从保险箱取。
