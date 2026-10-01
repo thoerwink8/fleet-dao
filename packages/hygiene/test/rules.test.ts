@@ -59,9 +59,6 @@ const planted: [RuleId, string][] = [
     'webhook',
     `${['https://hooks.slack.com/services', `T${R(8, 27).toUpperCase()}`, `B${R(8, 28).toUpperCase()}`, R(24, 29)].join('/')}`,
   ],
-  ['request-id', `（请求 ID: ${['req', R(24, 30)].join('_')}）`],
-  ['signature', JSON.stringify({ type: 'thinking', signature: `ErEE${B64(40, 35)}` })],
-  ['signature-header', ['X-Reclaude-Signature', R(24, 36)].join(': ')],
 ];
 
 describe('每一类违规样本都拦得住', () => {
@@ -77,6 +74,29 @@ describe('每一类违规样本都拦得住', () => {
   it('命中带着行号', () => {
     const text = ['第一行', '第二行', `第三行 export GH_TOKEN=${['ghp', R(36, 54)].join('_')}`].join('\n');
     expect(findHits(text).map((h) => [h.rule, h.line])).toEqual([['token', 3]]);
+  });
+});
+
+describe('编号、签名这类标识不再拦（创始人 2026-09-28 傍晚「只拦真密钥、标识不拦」；2026-10-01 下午「#481 一次性全修完」）', () => {
+  it.each([
+    ['上游的请求编号', `（请求 ID: ${['req', R(24, 30)].join('_')}）`],
+    ['request_id 键名带十六进制值', `request_id: ${HEX(32, 31)}`],
+    [
+      'Claude thinking 的 signature（没打码也不拦）',
+      JSON.stringify({ type: 'thinking', signature: `ErEE${B64(40, 35)}` }),
+    ],
+    ['签名头', ['X-Reclaude-Signature', R(24, 36)].join(': ')],
+  ])('【故意造出的失败】%s：不报（拦了就是误拦）', (_name, text) => {
+    expect(findHits(text).map((h) => h.rule)).toEqual([]);
+  });
+
+  it('【故意造出的失败】同一段里放一个真密钥形状的照样拦：删的是标识那几条，不是把闸门关了', () => {
+    const mixed = [
+      `（请求 ID: ${['req', R(24, 30)].join('_')}）`,
+      // 新格式的安装令牌（ghs_<应用号>_<JWT>）和它同处一段：标识放行、真密钥照拦
+      `installation token ${NEW_INSTALL_TOKEN}`,
+    ].join('\n');
+    expect(findHits(mixed).map((h) => `${h.rule}@${h.line}`)).toEqual(['token@2']);
   });
 });
 

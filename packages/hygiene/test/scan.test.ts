@@ -4,13 +4,19 @@ import type { Allow } from '../src/allowlist.ts';
 import { formatFinding, scanFiles } from '../src/scan.ts';
 import { pseudoRandom } from './helpers.ts';
 
+const slackHook = [
+  'https://hooks.slack.com/services',
+  `T${pseudoRandom(8, 210).toUpperCase()}`,
+  `B${pseudoRandom(8, 211).toUpperCase()}`,
+  pseudoRandom(24, 212),
+].join('/');
 const reqId = ['req', pseudoRandom(24, 201)].join('_');
 const leakToken = ['ghp', pseudoRandom(36, 202)].join('_');
 const files: Record<string, Buffer> = {
   'docs/ok.md': Buffer.from('没有问题的一段话\n'),
   'docs/leak.md': Buffer.from(`第一行\n令牌 ${leakToken}\n`),
-  'packages/x/test/fixtures/run.ndjson': Buffer.from(`{"request":"${reqId}"}\n`),
-  'packages/x/quota/fixtures/org.json': Buffer.from(`{"note":"${reqId}"}\n`),
+  'packages/x/test/fixtures/run.ndjson': Buffer.from(`{"webhook":"${slackHook}"}\n`),
+  'packages/x/quota/fixtures/org.json': Buffer.from(`{"webhook":"${slackHook}"}\n`),
   'assets/logo.png': Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]),
 };
 const read = (path: string) => {
@@ -19,9 +25,9 @@ const read = (path: string) => {
   return content;
 };
 const fixturesAllow: Allow = {
-  rule: 'request-id',
+  rule: 'webhook',
   path: /\/test\/fixtures\//,
-  reason: '测试用：插头夹具里的请求号放行。',
+  reason: '测试用：插头夹具里的 webhook 地址放行。',
 };
 const staleAllow: Allow = { rule: 'webhook', path: /^nowhere\//, reason: '测试用：一处都用不上的条目。' };
 
@@ -30,7 +36,7 @@ describe('scanFiles', () => {
     const report = scanFiles([...Object.keys(files), 'docs/deleted.md'], read, [fixturesAllow, staleAllow]);
     expect(report.findings.map(formatFinding)).toEqual([
       'docs/leak.md:2 令牌',
-      'packages/x/quota/fixtures/org.json:1 请求编号',
+      'packages/x/quota/fixtures/org.json:1 webhook 地址',
     ]);
     // 二进制、工作树里已删的单列，不混进「扫了没事」。
     expect(report.scanned).toEqual([
@@ -115,6 +121,14 @@ describe('scanFiles', () => {
       [],
     );
     expect(report.findings).toEqual([]);
+  });
+
+  it('请求编号不再算命中：夹具里原样放着也不报（创始人 2026-09-28 傍晚「只拦真密钥、标识不拦」）', () => {
+    const reqPath = 'packages/adapters/test/fixtures/claude-code/run.ndjson';
+    const content = new Map([[reqPath, Buffer.from(`{"request_id":"${reqId}"}\n`)]]);
+    const report = scanFiles([reqPath], (p) => content.get(p) ?? Buffer.from(''), []);
+    expect(report.findings).toEqual([]);
+    expect(report.scanned).toEqual([reqPath]);
   });
 
   it('一个文件都没给：扫了 0 个，和「扫了没事」分得开', () => {

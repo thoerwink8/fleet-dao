@@ -13,16 +13,6 @@ export interface Allow {
   reason: string;
 }
 
-export const ALLOWLIST: readonly Allow[] = [
-  {
-    rule: 'request-id',
-    path: /^packages\/adapters\/test\/fixtures\/claude-code\//,
-    reason:
-      '插头真跑录下来的请求号：上游给每次请求起的一次性编号，不指向账号或机器（原 fixtures-clean 测试的约定）。',
-  },
-  {
-    rule: 'request-id',
-    path: /^packages\/jev\/exams\/error-route\.json$/,
-    reason: '判断题考题里原样收的上游报错：请求号是上游给每次请求起的一次性编号，和插头夹具同一个约定。',
-  },
-];
+// 现在一条都没有：原来那两条放行的是请求编号（`request-id`），那条规则 2026-10-01 删了（编号不算密钥，创始人
+// 2026-09-28 傍晚拍的「只拦真密钥、标识不拦」）。以后真要放行什么，照上面的规矩加回来。
+export const ALLOWLIST: readonly Allow[] = [];

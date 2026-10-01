@@ -84,14 +84,14 @@ describe('runCheck', () => {
 
   it('白名单没用上的只提示、不判红；没写理由的判红', () => {
     const unused = run(clean, [
-      { rule: 'request-id', path: /^nowhere\//, reason: '测试用：一处都用不上的条目。' },
+      { rule: 'webhook', path: /^nowhere\//, reason: '测试用：一处都用不上的条目。' },
     ]);
     expect(unused.code).toBe(0);
     expect(unused.lines).toContain(
-      '提示：白名单这条这次一处都没用上，确实不用了就删掉：request-id /^nowhere\\//',
+      '提示：白名单这条这次一处都没用上，确实不用了就删掉：webhook /^nowhere\\//',
     );
-    const unreasoned = run(clean, [{ rule: 'request-id', path: /^README\.md$/, reason: '' }]);
+    const unreasoned = run(clean, [{ rule: 'webhook', path: /^README\.md$/, reason: '' }]);
     expect(unreasoned.code).toBe(1);
-    expect(unreasoned.lines).toContain('白名单这条没写清理由：request-id /^README\\.md$/');
+    expect(unreasoned.lines).toContain('白名单这条没写清理由：webhook /^README\\.md$/');
   });
 });

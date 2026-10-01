@@ -11,9 +11,6 @@ export type RuleId =
   | 'secret-assign'
   | 'url-password'
   | 'webhook'
-  | 'request-id'
-  | 'signature'
-  | 'signature-header'
   | 'secret-file';
 
 export interface Rule {
@@ -244,25 +241,8 @@ export const RULES: readonly Rule[] = [
       return isFakeValue(id.replace(/[-/]/g, '')) || isPlaceholderId(id);
     },
   },
-  {
-    // 上游给每次请求起的编号：拿去问上游能对上账号。
-    id: 'request-id',
-    label: '请求编号',
-    pattern: /\breq_[A-Za-z0-9]{8,}|\brequest[ _-]?id["']?\s*[:=：]\s*["']?[0-9a-f]{16,}/gi,
-  },
-  {
-    // Claude 的 thinking signature 里编着账号级编号，必须打码。git 提交的 PGP / SSH 签名本来就公开，不算。
-    id: 'signature',
-    label: '没打码的 signature',
-    pattern: /"signature"\s*:\s*"(?!<redacted>")(?<value>[^"]+)"/gi,
-    harmless: (_match, m) => /^-----BEGIN (?:PGP|SSH) SIGNATURE-----/.test(m.groups?.value ?? ''),
-  },
-  {
-    id: 'signature-header',
-    label: '签名头',
-    pattern: /\bx-[a-z-]*signature\b\s*[:=]\s*(?<value>[A-Za-z0-9+/=_-]{8,})/gi,
-    harmless: (_match, m) => isFakeValue(m.groups?.value ?? ''),
-  },
+  // 请求编号（req_…、request_id）、Claude thinking 的 signature、x-…-signature 签名头不再拦：它们是编号 / 签名这类
+  // 标识，不是私钥、令牌、口令（创始人 2026-09-28 傍晚「只拦真密钥、标识不拦」；2026-10-01 下午「#481 一次性全修完」）。
 ];
 
 // —— 按文件名 ——
