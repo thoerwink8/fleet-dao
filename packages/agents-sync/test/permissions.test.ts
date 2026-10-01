@@ -1,4 +1,4 @@
-// 权限：仓里 agents/config/claude-permissions.json 合进 ~/.claude/settings.json 的 permissions；补缺、不删机器上自己加的，读不懂就不动。
+// 权限：仓里 agents/config/claude-permissions.json 合进 ~/.claude/settings.json 的 permissions 和 autoMode；补缺、不删机器上自己加的，读不懂就不动。
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -47,8 +47,18 @@ interface Perm {
 }
 const permOf = (m: ReturnType<typeof machine>): Perm => m.settings().permissions as Perm;
 
+/** 机器上 autoMode 那一层 */
+interface Am {
+  environment?: string[];
+  allow?: string[];
+  soft_deny?: string[];
+  hard_deny?: string[];
+  classifyAllShell?: boolean;
+}
+const amOf = (m: ReturnType<typeof machine>): Am => m.settings().autoMode as Am;
+
 describe('装', () => {
-  it('没有设置文件：新建，四项都写上，家目录占位符换成这台的家目录', () => {
+  it('没有设置文件：新建，permissions 四项和 autoMode 两档都写上，家目录占位符换成这台的家目录', () => {
     const m = machine();
     expectKind(m.check(), KEY, 'missing');
     expectKind(m.apply(), KEY, 'changed');
@@ -58,6 +68,7 @@ describe('装', () => {
       allow: PERMS_SPEC.allow,
       deny: PERMS_SPEC.deny,
     });
+    expect(amOf(m)).toEqual(PERMS_SPEC.autoMode);
     expectKind(m.check(), KEY, 'ok');
   });
 
@@ -79,6 +90,56 @@ describe('装', () => {
     const p = s.permissions as Perm & { ask: string[] };
     expect(p.ask).toEqual(['Edit']);
     expect(p.allow).toEqual(['Bash(mine:*)', 'Read', 'Bash(git:*)']);
+  });
+
+  it('机器上的 autoMode：并进仓里的两条，机器上自己加的、别的档、别的键都不动', () => {
+    const m = machine();
+    put(
+      m.home,
+      '.claude/settings.json',
+      JSON.stringify({
+        autoMode: {
+          environment: ['$defaults', '机器上自己加的一条'],
+          allow: ['$defaults', '机器上自己加的例外'],
+          soft_deny: ['机器上自己加的软拦'],
+          hard_deny: ['机器上自己加的硬拦'],
+          classifyAllShell: true,
+        },
+      }),
+    );
+    // 机器上这两档都在、都带了 "$defaults"，只少仓里的两条：算缺失，不算漂移
+    expectKind(m.check(), KEY, 'missing');
+    expectKind(m.apply(), KEY, 'changed');
+    const am = amOf(m);
+    expect(am.environment).toEqual(['$defaults', '机器上自己加的一条', '自己人：和工作仓同一个主人的仓']);
+    expect(am.allow).toEqual([
+      '$defaults',
+      '机器上自己加的例外',
+      '改自己仓里单子和 PR 的标题、正文、标签、评论、子单关系是日常',
+    ]);
+    // 本脚本不写 soft_deny、hard_deny、classifyAllShell：机器上的原样留着
+    expect(am.soft_deny).toEqual(['机器上自己加的软拦']);
+    expect(am.hard_deny).toEqual(['机器上自己加的硬拦']);
+    expect(am.classifyAllShell).toBe(true);
+    expectKind(m.check(), KEY, 'ok');
+  });
+
+  it('一直不写 autoMode 的老机器：同步时补上，两个数组的第一条都是 "$defaults"', () => {
+    const m = machine();
+    put(m.home, '.claude/settings.json', JSON.stringify({ permissions: { defaultMode: 'auto' } }));
+    expectKind(m.apply(), KEY, 'changed');
+    const am = amOf(m);
+    expect(am.environment?.[0]).toBe('$defaults');
+    expect(am.allow?.[0]).toBe('$defaults');
+  });
+
+  it('仓里没写 autoMode（Devin 那种）：整段不管，机器上原有的一个不动', () => {
+    const noAuto = JSON.stringify({ ...PERMS_SPEC, autoMode: undefined });
+    const m = machine(['claude'], noAuto);
+    const text = JSON.stringify({ autoMode: { environment: ['机器上的'], allow: ['机器上的'] } });
+    put(m.home, '.claude/settings.json', text);
+    expectKind(m.apply(), KEY, 'changed');
+    expect(amOf(m)).toEqual({ environment: ['机器上的'], allow: ['机器上的'] });
   });
 
   it('defaultMode 不一样：覆盖成仓里的', () => {
@@ -128,6 +189,22 @@ describe('仓里真的那份权限文件（agents/config/claude-permissions.json
     expect(real.value.deny).toEqual([]);
     expect(real.value.retiredDeny).toContain('Bash(cat:*)');
     expect(real.value.retiredDeny).toContain('PowerShell(Select-String:*)');
+  });
+
+  it('autoMode：两档都带 "$defaults"（不带就是把内置规则整段换掉），而且只写日常、不写推删发强推', () => {
+    if (!real.ok) throw new Error(real.why);
+    const am = real.value.autoMode;
+    expect(am).toBeDefined();
+    if (am === undefined) return;
+    expect(am.environment[0]).toBe('$defaults');
+    expect(am.allow[0]).toBe('$defaults');
+    // 决定 0007 第 5 条：和工作仓同一个主人的仓算自己的；改自己仓里单子和 PR 的标题、正文、标签、评论、子单关系是日常
+    expect(am.environment.join('\n')).toContain('同一个 GitHub 主人');
+    expect(am.allow.join('\n')).toContain('子单关系');
+    // 不放宽的那几样：没有一条是给「推送/强推/删除/发布」开路的
+    const allowed = am.allow.filter((r) => r !== '$defaults');
+    expect(allowed.length).toBeGreaterThan(0);
+    for (const r of allowed) expect(r).not.toMatch(/允许(推送|强推|删除|发布)/);
   });
 });
 
@@ -197,6 +274,11 @@ describe('读不懂就不动', () => {
   bad('allow 不是数组', '{"permissions": {"allow": "Read"}}', 'drift');
   bad('机器上把仓里 deny 的放进了 allow', '{"permissions": {"allow": ["Bash(cat:*)"]}}', 'drift');
   bad('机器上把仓里 allow 的放进了 deny', '{"permissions": {"deny": ["Read"]}}', 'drift');
+  bad('autoMode 不是对象', '{"autoMode": []}', 'drift');
+  bad('autoMode.environment 不是数组', '{"autoMode": {"environment": "x"}}', 'drift');
+  bad('autoMode.allow 不是数组', '{"autoMode": {"allow": 3}}', 'drift');
+  // 机器上那一档在、却没带 "$defaults"：内置规则已经被整段换掉了，没有源文件也认得出，报出来、整份不动
+  bad('机器上 autoMode.environment 没带 "$defaults"', '{"autoMode": {"environment": ["机器上的"]}}', 'drift');
 });
 
 describe('仓里的源文件', () => {
@@ -216,6 +298,32 @@ describe('仓里的源文件', () => {
     ['allow 有重复', JSON.stringify({ ...PERMS_SPEC, allow: ['Read', 'Read'] })],
     ['allow 里有空串', JSON.stringify({ ...PERMS_SPEC, allow: [''] })],
     ['retired 不是数组', JSON.stringify({ ...PERMS_SPEC, retired: 'x' })],
+    // autoMode：Danger 那句「少一个 "$defaults" 就把这一类的内置规则整段换掉」，宁可拒收也不替它补上
+    ['autoMode 不是对象', JSON.stringify({ ...PERMS_SPEC, autoMode: [] })],
+    [
+      'autoMode.environment 没带 "$defaults"',
+      JSON.stringify({
+        ...PERMS_SPEC,
+        autoMode: { ...PERMS_SPEC.autoMode, environment: ['只有自己的规则'] },
+      }),
+    ],
+    [
+      'autoMode.allow 没带 "$defaults"',
+      JSON.stringify({ ...PERMS_SPEC, autoMode: { ...PERMS_SPEC.autoMode, allow: ['只有自己的规则'] } }),
+    ],
+    [
+      'autoMode 里只有 "$defaults"、没有自己的规则',
+      JSON.stringify({ ...PERMS_SPEC, autoMode: { environment: ['$defaults'], allow: ['$defaults'] } }),
+    ],
+    ['autoMode 少写一档', JSON.stringify({ ...PERMS_SPEC, autoMode: { allow: ['$defaults', '一条'] } })],
+    [
+      'autoMode.allow 不是数组',
+      JSON.stringify({ ...PERMS_SPEC, autoMode: { ...PERMS_SPEC.autoMode, allow: 'x' } }),
+    ],
+    [
+      'autoMode.allow 里有空串',
+      JSON.stringify({ ...PERMS_SPEC, autoMode: { ...PERMS_SPEC.autoMode, allow: ['$defaults', ''] } }),
+    ],
   ];
   for (const [name, text] of invalid) {
     it(`${name}：拒收，设置文件不碰`, () => {

@@ -1,6 +1,17 @@
 {
-  "说明": "各机器 ~/.claude/settings.json 里 permissions 的期望：由 packages/agents-sync 的 permissions.ts 同步，只动这里列出来的项。原则（创始人 2026-09-30）：尽量宽松、只放不收——他有时用 Mirasim 这类图形界面起 CLI，没法切模式、也没人点确认，凡是要问的都会卡死；所以 defaultMode 保持 auto，shell 和各工具整个放开，不设 deny。allow、deny、additionalDirectories 按并集合并（机器上自己加的不删）；defaultMode 归本文件管，每次覆盖；不要写 bypassPermissions，同步工具会拒收。要撤掉一条，从 allow/deny 里删掉、写进 retired，各机器下一次同步时才会摘掉。这份清单在公开仓，不写主机名、IP、账号。替别的用户写（--user，法国装机）时整段不写。来源：windsurf-dao 07b32ce2 的 common_config_claude，2026-09-30 放宽。",
+  "说明": "各机器 ~/.claude/settings.json 里 permissions 和 autoMode 的期望：由 packages/agents-sync 的 permissions.ts 同步，只动这里列出来的项。原则（创始人 2026-09-30）：尽量宽松、只放不收——他有时用 Mirasim 这类图形界面起 CLI，没法切模式、也没人点确认，凡是要问的都会卡死；所以 defaultMode 保持 auto，shell 和各工具整个放开，不设 deny。allow、deny、additionalDirectories 按并集合并（机器上自己加的不删）；defaultMode 归本文件管，每次覆盖；不要写 bypassPermissions，同步工具会拒收。要撤掉一条，从 allow/deny 里删掉、写进 retired，各机器下一次同步时才会摘掉。autoMode 是给 auto 模式的分类器看的一组自然语言规则（见 docs/agents-permissions.md）：它也按并集合并，两个数组都必须带 \"$defaults\"——文档写得很清楚，不带就是把那一类的内置规则整段换掉（force push、curl | bash、生产发布、往外发数据这些都不再拦），所以同步工具见到不带 \"$defaults\" 的源文件直接拒收。两条数组只写「日常」，不写 push、删除、发布、强推这类放宽。这份清单在公开仓，不写主机名、IP、账号、组织名。替别的用户写（--user，法国装机）时整段不写。来源：windsurf-dao 07b32ce2 的 common_config_claude，2026-09-30 放宽；autoMode 见 docs/decisions/0007-new-machine-and-hygiene.md 第 5 条（创始人 2026-10-01 上午拍）。",
   "defaultMode": "auto",
+  "autoMode": {
+    "environment": [
+      "$defaults",
+      "自己人：和当前工作仓属于同一个 GitHub 主人的仓，都算自己的。在这个范围里改单子、改 PR、开分支、推分支、拉取，都是日常工作；这个范围以外的东西——别人的仓、公开的粘贴站和代码托管、外部服务、外部域名、外部云存储——都算外面，动手前先问。"
+    ],
+    "allow": [
+      "$defaults",
+      "改自己仓里单子和 PR 的标题、正文、标签、评论、子单关系是日常：改标题、改正文、加标签、去标签、写评论、编辑评论、改里程碑、把子单挂到母单下面、把子单摘下来、开合单子、开合 PR，都直接做，不用问。",
+      "这些是日常不等于别的也放行：往仓里推东西、删东西（本地文件、分支、标签、发布、单子和 PR 的删除）、发布和部署、强推、改仓库设置不在这几条里，照旧按各自的规矩判。"
+    ]
+  },
   "additionalDirectories": ["${HOME}/.claude"],
   "allow": [
     "Bash",
