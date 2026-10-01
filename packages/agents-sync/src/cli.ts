@@ -8,6 +8,7 @@ import { applyGitExcludes, checkGitExcludes } from './git-excludes.ts';
 import { applyHooks, checkHooks, type HookSkip } from './hooks.ts';
 import { takeLock } from './lock.ts';
 import { manifestPath, readManifest } from './manifest.ts';
+import { applyMcp, checkMcp } from './mcp.ts';
 import { applyPermissions, checkPermissions } from './permissions.ts';
 import { applyOtherPermissions, checkOtherPermissions } from './permissions-vendors.ts';
 import { applyPosition, checkPosition, type Git, type Position, readPosition, runGit } from './position.ts';
@@ -44,6 +45,9 @@ export const USAGE = `agents-sync —— 把 fleet-dao 仓里 AGENTS.md 的通�
                              就在那份文件里接管一小块，不碰其余内容），
                              各家配置文件里本脚本管的几个开关改成该有的值（targets.ts 的 CONFIG_KEY_TARGETS，比如
                              ~/.grok/config.toml 的目录信任、反问选择题；别的内容不碰，读不懂就不动、报出来），
+                             ~/.claude.json 里 mcpServers.playwright 已经配了的那条 args 加上 --output-dir
+                             _tmp/playwright（已经有这个参数但值不对的改成这个值；这台没配 Playwright MCP 的
+                             跳过、不新增；读不懂就不动、报出来），
                              写完照查一遍，记下这台同步到哪个提交
   agents-sync --retire-old --old-repo <旧仓的位置>
                              撤掉旧仓留下的东西：各家 skill 目录里指向旧仓的链接、~/.claude/agents 里两个旧子代理；
@@ -191,6 +195,10 @@ const PERMISSIONS_OFF_FOR_USER =
 // 拿主线比会把正常的等待判红、让自动发布误报「规矩同步没成」。同步到哪个提交记在自动发布的读数里（ops 第九节）。
 const POSITION_OFF_FOR_USER =
   '替别的用户写（--user）时不记同步位置：法国的规矩跟着自动发布走，同步到哪个提交、落后主线多少看自动发布的读数（release.sh --check）';
+// ~/.claude.json 是 Claude Code 每次会话自己都要读写的活文件，替别的用户写超出 #380 定的范围；
+// 那边工人会话要不要 Playwright、输出的目录，由引擎起会话时自己带参数定，不靠用户级的这份。
+const MCP_OFF_FOR_USER =
+  '替别的用户写（--user）时不管 MCP 服务器配置（~/.claude.json）：那份是 Claude Code 每次会话自己读写的活文件，替别的用户写超出这张单的范围';
 
 export function runCli(argv: readonly string[], deps: Deps): number {
   let args: Args | 'help';
@@ -295,6 +303,8 @@ export function runCli(argv: readonly string[], deps: Deps): number {
       };
       const hooksOff = args.user === undefined ? undefined : SESSION_START_OFF_FOR_USER;
       const permsOff = args.user === undefined ? undefined : PERMISSIONS_OFF_FOR_USER;
+      const mcpOff = args.user === undefined ? undefined : MCP_OFF_FOR_USER;
+      const mcpSection = 'MCP 服务器（~/.claude.json 里的 Playwright 输出目录）';
       const mf = manifestPath(home, deps.platform);
       if (args.mode === '--check') {
         section('通用段（AGENTS.md 上半段）', checkRules(ctx, src));
@@ -304,6 +314,7 @@ export function runCli(argv: readonly string[], deps: Deps): number {
         section('其他几家 AI 的权限（Kimi、Codex、Devin）', checkOtherPermissions(ctx, src, permsOff));
         section('全局 git 忽略（_tmp/）', checkGitExcludes(ctx));
         section('各家配置里的开关', checkToolConfig(ctx));
+        section(mcpSection, mcpOff ? [line('skip', 'MCP', mcpOff)] : checkMcp(ctx));
         section('同步位置', position ? checkPosition(position) : positionOff);
       } else {
         const rules = applyRules(ctx, src, backups);
@@ -318,6 +329,8 @@ export function runCli(argv: readonly string[], deps: Deps): number {
         section('其他几家 AI 的权限（Kimi、Codex、Devin）', otherPerms);
         const config = applyToolConfig(ctx, backups);
         section('各家配置里的开关', config);
+        const mcp = mcpOff ? [line('skip', 'MCP', mcpOff)] : applyMcp(ctx, backups);
+        section(mcpSection, mcp);
         const after = [
           ...checkRules(ctx, src),
           ...checkSkills(ctx, src, readManifest(mf)),
@@ -325,8 +338,12 @@ export function runCli(argv: readonly string[], deps: Deps): number {
           ...checkPermissions(ctx, src, permsOff),
           ...checkOtherPermissions(ctx, src, permsOff),
           ...checkToolConfig(ctx),
+          ...(mcpOff ? [] : checkMcp(ctx)),
         ];
-        const bad = verify([...rules, ...skills, ...hooks, ...perms, ...otherPerms, ...config], after);
+        const bad = verify(
+          [...rules, ...skills, ...hooks, ...perms, ...otherPerms, ...config, ...mcp],
+          after,
+        );
         if (bad.length) section('读回', bad);
         section('全局 git 忽略（_tmp/）', applyGitExcludes(ctx, backups));
         section('同步位置', position ? applyPosition(position, all, deps.now()) : positionOff);
