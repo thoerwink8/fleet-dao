@@ -700,6 +700,14 @@ ssh <法国> 'sha256sum < /etc/fleet-dao/gateway-token.env'; ssh <香港> 'sha25
 - 指纹漏什么：没有钥匙猜不出值（普通 sha256 对域名、仓名这种低熵的值一撞就出来，所以用带钥匙的 HMAC）；输入绑了文件名和键名，看不出两项的值一样不一样；看得出的只有「这一项哪天换过」（期望文件的历史）。
 - 自测：`deploy/test/config.test.mjs`（读法和 `app-config.sh` 的 env_parse 同一批样本、期望认不出的每一种、指纹绑键名、手改报哪一项、私有值不带值、期望和钥匙读不到记没查成、命令行不打印值），`deploy/test/auto-release.test.mjs` 最后几条（一轮里报警、不重发、改回自己撤、库连不上下一轮再发再撤）。
 
+**CI 测试的 Postgres 服务**（#220，只在 CI，不装到任何机器：
+
+- 在哪：`ci.yml` 的 `test` job 旁边起一个 `postgres:16-alpine` 服务容器（大版本和法国生产一致，第二节），`fleet_test`/`fleet_test`，库 `fleet_test_admin`，健康检查 `pg_isready`。只在 tests 那个分片的运行期间活，跑完整只容器销毁，不写持久化，也不是生产。
+- 用法：`packages/db/src/testing.ts` 在 `FLEET_TEST_PG_URL` 有值时真连过去：第一次跑迁移建一个模板库 `fleet_test_template`（同一台服务的多个测试进程用咨询锁串行，不重建），之后每个测试文件 `CREATE DATABASE <随机名> TEMPLATE fleet_test_template` 克隆一份当自己的测试库，跑完整张删（`drop database … with (force)`），堆不出几 G。`ci.yml` 只把 `FLEET_TEST_PG_URL` 给到 `db` 分片；`engine`、`rest` 不设、本机也不设，都照 PGlite 走。
+- 登不上去、建不了模板当场红（packages/db/test/real-pg.test.ts 故意造出失败的那条：`createTestDb` 克隆出来的库里业务表必须全是空的，读到正式库数据一定红）。**不静默退回 PGlite 冒充**——#220「测试库连不上要明确报错」。
+- 为什么这么写：每个测试进程不再各建一份内存 PGlite（峰值 800+ MiB），共用一张真库之后降到 ~0.3G；`packages/conventions/src/test-run.ts` 的 `WORKER_MIB`/`RESERVE_MIB` 等实测过再调。CI 上这个容器是 GitHub Actions 的 service container（runner 内部账号、监听 localhost:5432，跟生产用户、登录鉴权没有任何关系）。
+- 装机法国侧**不装**：这是 CI 的事，法国那台生产 Postgres 里没有 `fleet_test_template` 这张库，也不应该有——第二条已经讲过它只放 `fleet` 和 `temporal_*`。机器的 docker、镜像源都不为它配。
+
 ## 十、「你好」工作流（P0 验收）
 
 让引擎工人跑一次 `helloWorkflow`，耗时查得到：Temporal 把每次执行的开始、结束、耗时记在本机 Postgres（库 `temporal_visibility` 的表 `executions_visibility`）。

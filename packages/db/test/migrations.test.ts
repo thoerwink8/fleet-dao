@@ -616,11 +616,13 @@ describe('0013：会话记缓存读写 token（只加列，#216）', () => {
 
 describe('测试库', () => {
   it(
-    '在内存里，两份测试库互相看不见对方的数据',
+    '两份测试库互相看不见对方的数据',
     async () => {
       const other = await createTestDb();
       try {
-        expect(t.client.dataDir ?? 'memory://').toMatch(/^memory:\/\//);
+        // 本机内存 PGlite：dataDir 必须是 memory://（防 PGlite 落到磁盘）。真 Postgres：一份独立的库（CREATE DATABASE … TEMPLATE
+        // 克隆出来的），dataDir 字段没有，隔离由「各拿一份库」这条断言本身验。
+        if (t.client.dataDir !== undefined) expect(t.client.dataDir).toMatch(/^memory:\/\//);
         await t.db.insert(schema.families).values({ id: 'only-in-t', displayName: 'T', vendor: 'T' });
         expect(await other.db.select().from(schema.families)).toEqual([]);
       } finally {
