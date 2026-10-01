@@ -65,6 +65,7 @@ import {
   STAGE_NAMES,
 } from '../routing/index.ts';
 import { WIRED_HOSTS as WIRED_HOST_IDS } from './hosts.ts';
+import { admitSessionMemory, type MemoryAdmissionDeps } from './memory-admission.ts';
 import { orgPlanView } from './org-plan.ts';
 import type { SessionOrgReader } from './session-org.ts';
 
@@ -95,6 +96,8 @@ export const MAX_ROUTE_WAIT_SECONDS = 600;
 export const ORG_READ_WAIT_MS = 15_000;
 /** 组织还没读出来时隔多久再选：平时一读 0.3 秒，慢的是 reclaude 首跑同步配置（上百秒），读在后台接着跑。 */
 export const ORG_READ_RETRY_SECONDS = 30;
+/** 父节点内存放不下一个新会话时，隔多久再选一次：内核回收、别家收场都不会立刻反映到 memory.current，按轮询间隔。 */
+export const MEMORY_ADMISSION_RETRY_SECONDS = 30;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -124,6 +127,12 @@ export interface StorePortsDeps {
    * 新引擎起来再派。不给就不闸。
    */
   drain?: EngineDrain;
+  /**
+   * 派活时按内存做准入（#219）：读父节点 fleet-agents.slice 的 memory.current 看余量放不放得下一个新会话，放不下就等、
+   * 读不出来就不派（明确的失败）。本机开发没有 cgroup：文件不存在就跳过准入、照派。生产由 real/index.ts 接
+   * 真路径；不给就不闸（老历史回放、单测路由纯函数时也不用）。
+   */
+  memoryAdmission?: MemoryAdmissionDeps;
 }
 
 type StorePorts = Pick<
@@ -417,6 +426,24 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
           detail: stoppingNote(stopping),
           retryAfterSeconds: DRAIN_ROUTE_RETRY_SECONDS,
         };
+      }
+      // 派活时按内存做准入（#219）：父节点 fleet-agents.slice 余量放不下一个新会话就等、读不出来照抛，不闷头派。
+      // 排在选路之前：一道闸的事，不为又一次派不出去的选路查库、读组织。本机开发没有 cgroup 时这一步自己跳过（skip）。
+      if (deps.memoryAdmission) {
+        const verdict = await admitSessionMemory(deps.memoryAdmission);
+        if (verdict.kind === 'wait') {
+          return {
+            ok: false,
+            waitFor: 'slot',
+            detail: `在等内存：${verdict.detail}`,
+            retryAfterSeconds: MEMORY_ADMISSION_RETRY_SECONDS,
+          };
+        }
+        if (verdict.kind === 'readError') {
+          throw new PortError('MEMORY_ADMISSION_UNREADABLE', `按内存做准入没查成：${verdict.detail}`, {
+            retryable: true,
+          });
+        }
       }
       const now = clock();
       const all = await loadStage(input.stage, now);

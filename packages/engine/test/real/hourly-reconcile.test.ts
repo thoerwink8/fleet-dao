@@ -1237,7 +1237,7 @@ describe('两处核对接到真库', { timeout: 60_000 }, () => {
     expect(started).toEqual([165]);
   });
 
-  it('合了的 PR：镜像补上、合并人不对都只算进发现计数，不再报 reconcile:pr 提醒（#445：仓里没开合并队列，这条检查已经删掉）；列不出来这个仓进原因、这一轮不记 ok', async () => {
+  it('合了的 PR：镜像补上算发现计数；机器人开的 PR 合并人不对报 reconcile:pr 提醒（#440 恢复：#431 就是这么漏的）；列不出来这个仓进原因、这一轮不记 ok', async () => {
     probeDir();
     await work();
     const now = new Date('2026-09-26T09:41:00.000Z');
@@ -1270,7 +1270,14 @@ describe('两处核对接到真库', { timeout: 60_000 }, () => {
     expect(seen.map((s) => s.repo)).toEqual(['acme/widgets']);
     expect(now.getTime() - (seen[0]?.since.getTime() ?? 0)).toBe(MERGED_PR_LOOKBACK_MS);
     expect(first).toMatchObject({ outcome: 'ok', found: 2 });
-    expect(await alertByKey(t.db, 'reconcile:pr:acme/widgets#7')).toBeNull();
+    // #440：机器人开的 PR 没经合并队列合，报一条 insertOnce 提醒；不会自己撤。
+    const prAlert = await alertByKey(t.db, 'reconcile:pr:acme/widgets#7');
+    expect(prAlert).toMatchObject({
+      level: 'alert',
+      title: '机器人开的 PR 没经合并队列合：acme/widgets#7',
+      link: 'https://github.com/acme/widgets/pull/7',
+    });
+    expect(prAlert?.resolvedAt).toBeNull();
 
     const again = await runHourlyReconcileJob(
       deps({

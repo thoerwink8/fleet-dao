@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { draftBacklogCheck, notWiredDraftOpener } from '../src/draft-opening.ts';
 import { PublicHealthError, runHealthChecks, serviceHealthChecks } from '../src/health.ts';
 import { silentLogger } from '../src/log.ts';
-import { probeDb, sqlState, withStatementTimeout } from '../src/pg-store.ts';
+import { isLockWaitError, probeDb, sqlState, withStatementTimeout } from '../src/pg-store.ts';
 import type { Logger, Store } from '../src/ports.ts';
 import { ENGINE_OFF, notConnectedTemporal } from '../src/temporal.ts';
 import { errorCode, harness, IDS, write } from './harness.ts';
@@ -267,5 +267,37 @@ describe('查库限时', () => {
     await expect(probeDb(failing('08006'), 2_000)).rejects.toThrow('Failed query');
     expect(sqlState(new Error('x', { cause: { code: '57014' } }))).toBe('57014');
     expect(sqlState(new Error('没有错误码'))).toBeUndefined();
+  });
+
+  // isLockWaitError：outbox 长轮询联查撞上「等锁」的三种样子（Postgres 自己的两种锁超时，加
+  // 迁移会话被 systemd 发布超时就地杀掉时 postgres.js 的 fatal）。等锁是「有个会话占着锁」，
+  // 不是数据错——不能冒到顶层 500。钉住：这三种都认得出来，并且普通错误不误判（含故意造的）。
+  it('等锁的三种样子都认得出来（57014 语句超时、55P03 等锁超时、迁移被发布超时杀掉的 session terminated）；别的错不认', () => {
+    const failedQuery = (cause: unknown) => new Error('Failed query', { cause });
+    expect(isLockWaitError(failedQuery(Object.assign(new Error('timout'), { code: '57014' })))).toBe(true);
+    expect(isLockWaitError(failedQuery(Object.assign(new Error('lock wait'), { code: '55P03' })))).toBe(true);
+    expect(
+      isLockWaitError(
+        failedQuery(
+          new Error(
+            'X PostgreSQL-backend-error: session terminated: terminating connection due to administrator command',
+          ),
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      isLockWaitError(
+        failedQuery(new Error('postgres-backend-error: connection terminated by administrator')),
+      ),
+    ).toBe(true);
+    // 别的库错、普通错、结构和「等锁」长得像但不是的，都不误判（故意造的失败）。
+    expect(isLockWaitError(failedQuery(Object.assign(new Error('syntax error'), { code: '42601' })))).toBe(
+      false,
+    );
+    expect(isLockWaitError(failedQuery(new Error('duplicate key value violates unique constraint')))).toBe(
+      false,
+    );
+    expect(isLockWaitError(new Error('飞出对话的锅'))).toBe(false);
+    expect(isLockWaitError(null)).toBe(false);
   });
 });

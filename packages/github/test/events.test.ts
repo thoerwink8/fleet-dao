@@ -536,12 +536,13 @@ describe('对账与补漏', () => {
     const report = await gh
       .reconciler({ intake, pollDeliveryId })
       .auditMergedPrs('acme/widgets', new Date('2026-09-25T00:00:00Z'));
-    expect(report).toMatchObject({ outcome: 'ok', scanned: 2, found: 3, fixed: 1 });
+    expect(report).toMatchObject({ outcome: 'ok', scanned: 2, found: 4, fixed: 1 });
     expect([...report.problems].sort()).toEqual(
       [
         `#${byEngine.number} 合并了但镜像里没有（已补）`,
         `#${byAgent.number} 不是「引擎」机器人合的（合并人 fleet-test-agent[bot]）`,
         `#${byAgent.number} 合并了，但账上没有合并队列的合并记录`,
+        `#${byAgent.number} 按合并回执补上了合并记录（实际合并人 fleet-test-agent[bot]，未经合并队列）`,
       ].sort(),
     );
     // 每小时对账按种类分（不认上面那几句字）：种类和 PR 号要对得上
@@ -550,10 +551,20 @@ describe('对账与补漏', () => {
         `${byEngine.number} mirror_fixed`,
         `${byAgent.number} not_merged_by_engine`,
         `${byAgent.number} no_merge_record`,
+        `${byAgent.number} backfill_merge_record`,
       ].sort(),
     );
     expect(report.problems).toEqual(report.findings.map((f) => f.text));
     expect((await ledger.getPullRequest(REPO_ID, byEngine.number))?.state).toBe('merged');
+    // #440：手动合的机器人 PR，按合并回执补上幂等账——账要反映事实（实际合并人、合并提交），
+    // 下一轮对账认得出这张已经补过，不再重复报 no_merge_record。
+    const backfilled = await ledger.idempotency.peek(mergeKey(repo, byAgent.number, B));
+    expect(backfilled?.completedAt).toBeTruthy();
+    expect(backfilled?.result).toMatchObject({
+      number: byAgent.number,
+      head: B,
+      mergedBy: 'fleet-test-agent[bot]',
+    });
   });
 
   it('人开的 PR：镜像没记的照样补上；不报合并人、也不报没有合并记录', async () => {

@@ -1590,10 +1590,9 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         };
       } catch (err) {
         if (err instanceof TableLockedError) throw err;
-        const code = sqlState(err);
-        if (code === '57014' || code === '55P03') {
+        if (isLockWaitError(err)) {
           throw new TableLockedError(
-            `outbox 联查 tasks/repos 时表被锁住、等锁超时（sqlstate ${code}）：${err instanceof Error ? err.message : String(err)}`,
+            `outbox 联查 tasks/repos 时表被锁住、等锁超时（${lockWaitWhy(err)}）：${err instanceof Error ? err.message : String(err)}`,
           );
         }
         throw err;
@@ -2050,4 +2049,35 @@ export function sqlState(err: unknown): string | undefined {
     e = (e as { cause?: unknown }).cause;
   }
   return undefined;
+}
+
+/**
+ * 这条数据库错误是不是「在等一把锁等到超时 / 等不到」：Postgres 的 57014（语句超时）和 55P03（等锁超时）之外，
+ * 迁移会话本身不设锁超时，卡在 DDL 等锁上的迁移会被 systemd 的发布超时就地杀掉，它连接里的 postgres.js
+ * 把「session/connection terminated」当成致命错往外抛（X PostgreSQL-backend-error，不带 SQLSTATE）。
+ * 三种都是「有个会话占着锁不放」，不是数据或代码的错；归成一类（见 withStatementTimeout 处。
+ */
+const LOCK_WAIT_SQLSTATES = new Set(['57014', '55P03']);
+
+/** postgres.js 的致命错前缀（文档：*`X PostgreSQL-backend-error`*），内容原文照抄驱动的 ErroneousSocketError。 */
+const LOCK_WAIT_FATAL_MARKS = ['postgres-backend-error', 'session terminated', 'connection terminated'];
+
+/** 看整串 cause 链（含 Error.cause 外层）有没有「等锁等到死或等到被杀」的记号；全串小写比对。 */
+export function isLockWaitError(err: unknown): boolean {
+  const code = sqlState(err);
+  if (code !== undefined && LOCK_WAIT_SQLSTATES.has(code)) return true;
+  let e: unknown = err;
+  for (let depth = 0; depth < 5 && e !== null && typeof e === 'object'; depth++) {
+    const message = e instanceof Error ? e.message.toLowerCase() : String(e);
+    if (LOCK_WAIT_FATAL_MARKS.some((mark) => message.includes(mark))) return true;
+    e = (e as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
+/** isLockWaitError 命中的原因，写成给日志看的；（isLockWaitError 返回真才对它有意义）。 */
+function lockWaitWhy(err: unknown): string {
+  const code = sqlState(err);
+  if (code !== undefined) return `sqlstate ${code}`;
+  return '连接中断（多半是迁移等不到锁、被发布超时就地杀掉）';
 }
