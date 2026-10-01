@@ -82,3 +82,14 @@
 **注意两处**：
 - 代理口 59822 是坏的，用 Clash 的 7890（`export http_proxy=http://127.0.0.1:7890`）
 - `pnpm issue:new --specs` 的用法：正文开头要先写创始人原话 + AI 理解，正文要有 `## 怎么算做完`；`--specs` 传短名，脚本会拼成 `specs/<号>-<短名>`
+
+## 2026-10-02 深夜（worktree 清理、救回决定 0006）
+
+- **worktree：29 棵 → 1 棵**（创始人拍的「不要积累」，理由是他自己的实战教训：Mirasim 会随 worktree 和会话变多越来越卡）。清之前**逐棵查了「有没有没进主线的提交、没提交的改动」**——这是仓里的规矩，删数据要人拍。
+  - 清掉 23 棵干净的。
+  - **救回一个真东西**：`.claude/worktrees/decision-align` 里躺着 `docs/decisions/0006-discussion-model-order.md`——创始人 09-30 拍的「讨论与独立 Review 的模型顺序 GPT→Claude→DeepSeek→Grok→Kimi、都走无头、约 30 秒」，**从没进过主线**。写它的那个会话收了尾就没人管这棵树，内容一直躺在里面。已一字未改落进主线（`d22fda5c`）。
+  - 其余 3 棵的内容确认都在主线上：`537-resolve` 那 3 个提交 → 主线 `e56bd4a9`；`second-opinion` 那个 ci-plan 修复 → 主线 `packages/conventions/src/ci-plan.ts:91`。
+- **教训**：`worktree-sweep.ts` 现在只认「需求工作流和子任务工作流」，**认不出讨论 skill 的临时树**，所以它们永远攒着。创始人拍了要扩，归到 #556。
+- **顺带**：清了本机 `_route-probe` 之外的残留后，本机 `git worktree list` 只剩主检出。
+
+**在跑**：三个后台 agent 探 Mirasim 全部 15 个模型（claude 7、codex 6、dsh 1、kimi 1），结果写 `_tmp/probe-{claude,codex,dsh-kimi}.md`。
