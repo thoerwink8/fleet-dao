@@ -10,11 +10,14 @@ export interface Agent {
   name: string;
   /** PATH 或家目录的 .local/bin 里找得到其中一个，就算这台装了 */
   bins: readonly string[];
+  /** 另外还在家目录下的这几处找（官方安装脚本装在自己目录、不进 PATH 的） */
+  homeDirs?: readonly Place[];
 }
 
 export const AGENTS = {
   claude: { name: 'Claude Code', bins: ['claude', 'reclaude'] },
-  grok: { name: 'Grok', bins: ['grok'] },
+  // 官方安装脚本装在 ~/.grok/bin/grok；法国装的时候故意不让它往 ~/.local/bin 链（deploy/lib/grok.sh 开头），不在 PATH 上
+  grok: { name: 'Grok', bins: ['grok'], homeDirs: [{ win32: '.grok\\bin', linux: '.grok/bin' }] },
   devin: { name: 'Devin CLI', bins: ['devin'] },
   codex: { name: 'Codex', bins: ['codex'] },
   pi: { name: 'pi', bins: ['pi'] },
@@ -162,6 +165,54 @@ export const HOOK_TARGETS: readonly HookTarget[] = [
 ];
 
 /**
+ * 权限装到哪：Claude Code 的用户级权限在 ~/.claude/settings.json 的 permissions 里（code.claude.com/docs/en/permissions），
+ * defaultMode 只认用户级和 --settings 的（项目级的 auto 它会忽略）。内容来自仓里 agents/config/claude-permissions.json。
+ * 只给 Claude Code：别家的权限不是这个格式，Grok、Devin 借道读钩子那份设置文件，不代表它们按这个格式认 permissions。
+ */
+export const PERMISSIONS_TARGET: { settings: Place; readers: readonly AgentId[] } = {
+  settings: { win32: '.claude\\settings.json', linux: '.claude/settings.json' },
+  readers: ['claude'],
+};
+
+/**
+ * 其他几家的权限（2026-09-30 逐家核过文档、能装的在本机实测；写法各不相同，都不读 Claude 的 permissions，Grok 除外）：
+ * - Kimi Code：~/.kimi-code/config.toml 的顶层 default_permission_mode（manual / yolo / auto）和 [[permission.rules]]
+ *   （decision、pattern，先匹配的生效，所以拒绝排在放行前面；moonshotai.github.io/kimi-code/en/configuration/config-files.md）。
+ *   同步用 auto（不打断、自动判断）：创始人 2026-09-30 要最宽松，他有时在图形界面里起 CLI、没法切模式也没人点确认；
+ *   yolo 是「日常自动、危险的仍问」，会在没人点的界面里卡住。
+ * - Codex：~/.codex/rules/default.rules 里的 prefix_rule(pattern=["git"], decision="allow" | "forbidden")，只按命令前缀、
+ *   不支持通配符，几条同时命中取最严的；本机用 codex execpolicy check 核过写法（learn.chatgpt.com/docs/agent-configuration/rules）。
+ * - Devin：Windows %APPDATA%\devin\config.json、Linux ~/.config/devin/config.json 的 permissions.allow/deny（Exec(git)、Read(**)、
+ *   Write(**)），不读 Claude 的权限；默认模式的键文档没说清在不在 config.json 里，不同步（docs.devin.ai/cli/reference/permissions，
+ *   本机没装、没实测）。
+ */
+export const KIMI_PERMISSIONS: { file: Place; readers: readonly AgentId[] } = {
+  file: { win32: '.kimi-code\\config.toml', linux: '.kimi-code/config.toml' },
+  readers: ['kimi'],
+};
+export const CODEX_PERMISSIONS: { file: Place; readers: readonly AgentId[] } = {
+  file: { win32: '.codex\\rules\\default.rules', linux: '.codex/rules/default.rules' },
+  readers: ['codex'],
+};
+export const DEVIN_PERMISSIONS: { file: Place; readers: readonly AgentId[] } = {
+  file: { win32: 'AppData\\Roaming\\devin\\config.json', linux: '.config/devin/config.json' },
+  readers: ['devin'],
+};
+
+/**
+ * 装了、但权限没接的各家，逐家报一行为什么（不假装装了）。
+ * - Grok：直接读 ~/.claude/settings.json 的 permissions（含 defaultMode），随 Claude 那份生效，不另写
+ *   （~/.grok/docs/user-guide/22-permissions-and-safety.md 第 3 节）；它不认的工具（NotebookEdit、PowerShell 这类）开会话时跳过并警告。
+ */
+export const PERMISSION_GAPS: Partial<Record<AgentId, string>> = {
+  grok: '没另写——它直接读 ~/.claude/settings.json 的 permissions（含 defaultMode），随上面 Claude 那份生效（本机 grok inspect 实测：读到 34 条，跳过 9 条它不认的 NotebookEdit 和 PowerShell(…)，开会话时警告，不影响别的）',
+  pi: '没接——它没有审批功能（默认全放行），只能靠扩展，本脚本不做',
+  dsh: '没接——它只有 ask / never 两档，不能按命令写规则，没法照 Claude 的清单翻译',
+  agy: '没接——写法（settings.json 的 permissions、command(git)）只来自博客，官方 issue #548 说无头模式会忽略 allow，装上实测后再接',
+  gemini: '没接——规则要写在 ~/.gemini/policies/*.toml，还没实测，装上核过后再接',
+};
+
+/**
  * 装了、但没装钩子的各家，逐家报一行为什么（不假装装了）。能接的几家接上是 #232。2026-09-26 查的各家文档和本机装的版本：
  * - Codex：~/.codex/hooks.json 和 Claude 同一个格式，可每条非托管的钩子都要人在 Codex 里 /hooks 审过、信任了才跑
  *   （learn.chatgpt.com/docs/hooks）。
@@ -180,6 +231,51 @@ export const HOOK_GAPS: Partial<Record<AgentId, string>> = {
   pi: '它没有配置式的钩子（要写成 TypeScript 扩展）',
   dsh: '它没有自带的全局钩子（只有要手动挂的桥接插件）',
 };
+
+/** 配置文件里本脚本管的一个开关：TOML 里 [table] 下的 key = value（value 照 TOML 字面量写，比如 false） */
+export interface ConfigKey {
+  table: string;
+  key: string;
+  value: string;
+  /** 为什么要它：写进文件里那一项上面的注释，查出不对时也报这句 */
+  why: string;
+}
+
+export interface ConfigKeyTarget {
+  /** TOML 配置文件 */
+  file: Place;
+  readers: readonly AgentId[];
+  keys: readonly ConfigKey[];
+}
+
+/**
+ * 各家配置文件里本脚本管的开关：只动这里列的几项，文件里别的内容一行不碰；读不懂（多行字符串、表重复、
+ * 用点号或内联表写在别处）就不动、报出来，不猜。
+ * - Grok（~/.grok/config.toml）：免确认（permission_mode = "always-approve"）只管工具权限，管不到下面两张卡，
+ *   无人值守和 Mirasim 经 grok agent stdio 起的会话都会卡着等人（docs/reference/adapters.md GK-12）。
+ *   folder_trust.enabled 在 grok inspect 里报「unrecognized」，1.0.41 实测照样生效（没信任过的新目录照读 AGENTS.md）；
+ *   计划模式没有配置开关（只有 grok -p 的 --no-plan），这里管不了。
+ */
+export const CONFIG_KEY_TARGETS: readonly ConfigKeyTarget[] = [
+  {
+    file: { win32: '.grok\\config.toml', linux: '.grok/config.toml' },
+    readers: ['grok'],
+    keys: [
+      {
+        table: 'folder_trust',
+        key: 'enabled',
+        value: 'false',
+        why: '不弹「信不信这个目录」：没信任的目录 grok 不加载 AGENTS.md、项目钩子和技能，每个新工作树都是',
+      },
+      {
+        table: 'features',
+        key: 'ask_user_question',
+        value: 'false',
+        why: '不给模型反问选择题的工具：无人值守、Mirasim 里没人答会干等',
+      },
+    ],
+  },
+];
 
 /** --retire-old 在这些 skill 目录里找指向旧仓的链接（各家的都扫，不只本脚本分发的那几个） */
 export const RETIRE_SKILL_DIRS: readonly Place[] = [

@@ -66,7 +66,10 @@
       "FLEET_DEMO_DIR": "/var/lib/fleet-dao/demo"
     },
     "release.env": {
-      "FLEET_SERVICES": "fleet-engine fleet-api",
+      "FLEET_SERVICES": {
+        "value": "fleet-engine fleet-api",
+        "说明": "登记的差别：法国 2026-09-29 起临时只留 fleet-api（创始人要求关闭引擎、不再派单，见法国档这一项的说明）；本机演练环境（fleet-local）继续带引擎，演练要用。法国撤回后这条差别删掉。"
+      },
       "FLEET_DOMAIN": {
         "value": "fleet-local.invalid",
         "说明": "登记的差别：法国这项是私有值（真域名），本机档没有域名（没有香港、没有隧道对外），用 RFC 2606 保留的 .invalid 占位、当公开值处理"

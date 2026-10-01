@@ -1,11 +1,11 @@
 ---
 name: discuss
-description: 重大方案要人拍板之前，让别家模型挑错（默认只找 GPT；没收敛能接着聊），把结论和分歧交人拍时读：用户说「出设计题」「先出盲设计题」「讨论一下」「让别家看看」，或自己要请人拍碰人闸、和已拍规矩冲突、新加外部服务、改架构或阶段的决定时。
+description: 两件事读它：重大方案拍板前让别家挑错（默认 GPT，没收敛接着聊）；PR 改到先审后合的路径、合并前要第二家审一轮。用户说「讨论一下」「让别家看看」时也读。
 ---
 
-# `discuss`：讨论
+# `discuss`：讨论和第二意见
 
-规矩本身在 `docs/design.md` 第五节「讨论」（什么时候触发、拍板怎么走、没人拍怎么办），这里只写本机怎么做。和审查是两回事：审查看代码，讨论定方案。盲设计题就是讨论的第 0 轮，是同一种东西。
+两件事共用一套本机工具：**讨论**定方案（拍板前让别家挑错），**审 PR** 看代码（改到先审后合的路径时合并前要第二家审过）。规矩本身在 `docs/design.md` 第五节「讨论」「合并闸」，这里只写本机怎么做。盲设计题就是讨论的第 0 轮。
 
 ## 何时用
 
@@ -41,7 +41,19 @@ description: 重大方案要人拍板之前，让别家模型挑错（默认只�
 - `--round 0` 是各自独立答，1 起是挑错。默认只问 GPT；要盲设计、或者 GPT 答不上时才加别家（`--models gpt,kimi,glm`，最多 3 家：本机同时有工人在跑，五家齐跑加工人顶满进程数，宿主崩过）。界面类的题不找 GPT，换 Kimi 或 GLM。
 - 每家一个 `cursor-agent --mode ask` 只读会话（空目录、不读仓），硬上限 30 秒（GPT 偶尔要 `--limit 45`）；超时、退出码非 0、没输出都照实记成「没答上」。退出码 2 = 没讨论成（一家都没答上，或这台没装、没登录 Cursor 命令行），别拿自己的方案冒充结论。
 - 接着聊：把上一轮的原话、你的回应和新证据写进新题面再问一次（`ask.mjs` 每次都是新会话，所以上一轮要贴全）。
-- Mirasim 云端这条路用 `node $S/second-opinion.mjs --text 材料.md --name 短名 --effort medium [--blind] [--agent code|kimi]`，要几十秒到几分钟，Cursor 那几家答不上时再用。
+- `node $S/second-opinion.mjs --text 材料.md --name 短名 --author-family <族[,族…]> --effort medium [--blind] [--agent <profile>]`
+  - `--author-family` 必须显式给出当前作者模型族，可重复传或用逗号分隔：`gpt`、`claude`、`deepseek`、`grok`、`kimi`。缺失或写了未知族直接退出，不从环境变量、会话名或模型字符串猜。
+  - 候选族固定按 `GPT → Claude → DeepSeek → Grok → Kimi` 排序；作者是 GPT 就跳过 GPT，作者是多族就全部跳过。显式 `--agent` 也要经过同族排除，不能手动绕过。
+  - 讨论默认每家最多 30 秒，整轮总预算也为 30 秒；本家超时或端点不可用会停掉当前会话后换下一家。结论已经收到后由本机解析，不因不喜欢结论换家。可用 `--budget-sec` 调整讨论总预算。
+  - 已接入的真实端点：GPT=`Mirasim/codex/gpt-6-luna`、DeepSeek=`Mirasim/dsh/deepseek-flash`、Kimi=`Mirasim/kimi/kimi-code/k3`、Claude=`reclaude -p --output-format json --effort medium --max-turns 1`。Grok 只在本机/Mirasim 真有执行体和登录态时尝试；端点缺失、未登录或 roster 不含该模型都照实记录并换下一家，不假定按量 API 可用。
+
+## 审 PR（第二意见）
+
+先审后合只剩两种改动：迁移里有删改语句；碰安全（密钥与登录鉴权、CI 工作流和卫生检查、法国防火墙、sudoers、香港 nginx），清单在 `packages/conventions/high-risk-paths.json`。其余 CI 绿就合，合并后不补审。
+
+- `node $S/second-opinion.mjs --pr <号> --high-risk --author-family <族[,族…]> [--ui]`：起一个全新的不同厂商会话审这个 PR，通过就在 PR 当前的头上写上合并闸认的「第二意见」提交状态；头变了要重审。改到页面代码的加 `--ui`，不找 GPT。先审后合的 PR 若所有候选都不可用，退出码 2、合并闸不通过，不能自己写状态冒充通过；普通 PR 仍按 CI 绿就合的规则走。
+- 退出码：0 通过；1 必须改（改完推上去再审，最多 2 轮）；2 没查成（连不上、没起来、超时、结论认不出），不当通过；3 没带 `--high-risk`。
+- 主审连不上换下一家；几家都用不了照实报，别自己写状态冒充审过。
 
 ## 判例
 

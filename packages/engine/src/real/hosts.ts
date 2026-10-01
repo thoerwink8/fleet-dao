@@ -45,6 +45,7 @@
 import { randomUUID } from 'node:crypto';
 import {
   type AgentRunOptions,
+  assertSessionEffort,
   type CgroupScope,
   type ClaudeCodeRunOptions,
   type ClaudeCodeRunReport,
@@ -55,6 +56,7 @@ import {
   claudeRunFacts,
   cursorRunFacts,
   type DetachedIo,
+  GROK_EFFORTS,
   type GrokRunReport,
   type GrokRunSpec,
   grokRunFacts,
@@ -72,7 +74,9 @@ import {
   runCursorAgent,
   runGrok,
   runMirasim,
+  SESSION_EFFORTS,
   SESSION_USERS,
+  type SessionEffort,
   type SessionEnvInput,
   type SessionUser,
   type SpawnInfo,
@@ -91,6 +95,100 @@ export type WiredHost = (typeof WIRED_HOSTS)[number];
 
 export function isWiredHost(hostId: string): hostId is WiredHost {
   return (WIRED_HOSTS as readonly string[]).includes(hostId);
+}
+
+/**
+ * 路由没写思考档位时用这个。
+ * 创始人 2026-09-28 傍晚拍（specs/169-Fusion形态/需求.md「各家模型干活的会话思考档位默认 high」）：
+ * 显式传，不靠各家命令行自己的默认（Grok 自己默认 xhigh）。
+ * #470 以后在驾驶舱按模型配；这次只认路由上已经写了的。
+ */
+export const DEFAULT_SESSION_EFFORT: SessionEffort = 'high';
+
+/** 模型串方括号里表示档位的键（cursor / ACP，docs/reference/adapters.md）。 */
+const MODEL_EFFORT_KEYS = ['effort', 'reasoning_effort', 'reasoning', 'thought_level'] as const;
+
+/** 有单独参数的执行方式，和它认的档。cursor 没有单独参数，档位写在模型串方括号里。 */
+const HOST_EFFORTS: Record<WiredHost, readonly SessionEffort[] | null> = {
+  'claude-code': SESSION_EFFORTS,
+  grok: GROK_EFFORTS,
+  mirasim: SESSION_EFFORTS,
+  'cursor-agent': null,
+};
+
+/** 方括号里已经写了的档位。写了两处还对不上就抛错。没有方括号、或方括号里没有档位键，返回 undefined。 */
+export function modelBracketEffort(model: string): string | undefined {
+  let found: string | undefined;
+  for (const group of model.matchAll(/\[([^\]]*)\]/g)) {
+    for (const part of (group[1] ?? '').split(',')) {
+      const eq = part.indexOf('=');
+      if (eq < 0) continue;
+      const key = part.slice(0, eq).trim();
+      if (!(MODEL_EFFORT_KEYS as readonly string[]).includes(key)) continue;
+      const value = part.slice(eq + 1).trim();
+      if (found !== undefined && found !== value) {
+        throw new Error(`模型串里的思考档位写了两处还对不上：${JSON.stringify(model)}`);
+      }
+      found = value;
+    }
+  }
+  return found;
+}
+
+function insertBracketEffort(model: string, effort: SessionEffort): string {
+  return model.replace(/\[([^\]]*)\]/, (_all, inner: string) => {
+    const body = inner.trim() === '' ? `effort=${effort}` : `${inner},effort=${effort}`;
+    return `[${body}]`;
+  });
+}
+
+/**
+ * 起会话时档位怎么给这家。
+ * - 方括号里已经有档位：模型串原样，不再另传（值不认识、或和路由上另配的对不上，都抛错）。
+ * - 这家有单独参数、方括号里没有：用路由上写的，没有就用 DEFAULT_SESSION_EFFORT。
+ * - cursor 没有单独参数：方括号里没写档位、但已经是方括号模型的，把档位补进方括号；
+ *   没方括号的模型串是上游目录里的整串（auto、gpt-5.6-luna-high），自己加方括号会被拒（CU-02），保持原样。
+ *   这种路由上又单独配了档位，传不出去，抛错，不许静默丢掉。
+ * 不认识、这家不支持：抛错，调用方不起会话。
+ */
+export function applySessionEffort(
+  host: WiredHost,
+  spec: Pick<HostRunSpec, 'model' | 'effort'>,
+): { model: string; pass?: SessionEffort } {
+  const allowed = HOST_EFFORTS[host];
+  const embedded = modelBracketEffort(spec.model);
+  if (embedded !== undefined) {
+    assertSessionEffort(embedded, allowed ?? SESSION_EFFORTS, hostName(host));
+    if (spec.effort !== undefined && spec.effort !== embedded) {
+      throw new Error(
+        `思考档位写了两处：模型串方括号里是 ${embedded}，路由上又配了 ${JSON.stringify(spec.effort)}。方括号里已经有的不再另传`,
+      );
+    }
+    return { model: spec.model };
+  }
+  if (allowed === null) {
+    // 已经是方括号模型、里面还没写档位：补进方括号，不另造一个参数。
+    if (/\[[^\]]*\]/.test(spec.model)) {
+      const effort = assertSessionEffort(
+        spec.effort ?? DEFAULT_SESSION_EFFORT,
+        SESSION_EFFORTS,
+        hostName(host),
+      );
+      return { model: insertBracketEffort(spec.model, effort) };
+    }
+    if (spec.effort !== undefined) {
+      // 先认值：不认识的报不认识，认得但没地方写的才报这家不支持单独传
+      assertSessionEffort(spec.effort, SESSION_EFFORTS, hostName(host));
+      throw new Error(
+        `${hostName(host)} 不支持单独传思考档位（effort）${JSON.stringify(spec.effort)}：要写在模型串的方括号里，不许另传`,
+      );
+    }
+    return { model: spec.model };
+  }
+  return {
+    model: spec.model,
+    pass: assertSessionEffort(spec.effort ?? DEFAULT_SESSION_EFFORT, allowed, hostName(host)),
+  };
 }
 
 /** 「Claude Code、Cursor Agent、Grok 命令行、Mirasim」：没接上的报错、探针的原因里用。 */
@@ -118,6 +216,11 @@ export interface HostRunSpec {
   cgroup: CgroupScope;
   /** 发给执行体的模型串：路由的 upstream_model，没有就用模型 id。 */
   model: string;
+  /**
+   * 路由上写的思考档位。不给就用 DEFAULT_SESSION_EFFORT。
+   * 模型串方括号里已经编了档位的不再另传（applySessionEffort）。
+   */
+  effort?: string;
   session: HostSession;
   /**
    * work = 干活的会话：命令一律放行（会话用户读不到引擎的配置和机器人凭据，design 第十四节；无头会话没人批权限）；
@@ -295,6 +398,7 @@ function claudeDriver(
     canFork: true,
     newSessionId: () => ({ id: randomUUID(), known: true }),
     async run(spec, hooks) {
+      const effort = applySessionEffort('claude-code', spec);
       const report = await run(
         {
           runId: spec.runId,
@@ -304,7 +408,8 @@ function claudeDriver(
           limits: spec.limits,
           testCommands: spec.testCommands,
           cgroup: spec.cgroup,
-          model: spec.model,
+          model: effort.model,
+          ...(effort.pass ? { effort: effort.pass } : {}),
           session: spec.session,
           // 探针一个工具都不给（dontAsk）、不存会话记录（每 15 分钟一次，不往会话用户家里攒）
           ...(spec.purpose === 'probe'
@@ -458,12 +563,13 @@ function cursorDriver(
       if (spec.session.mode === 'fork') {
         throw new Error('cursor-agent 没有 fork：换了账号池要开新会话带接力任务书');
       }
+      const effort = applySessionEffort('cursor-agent', spec);
       const report = await run(
         {
           runId: spec.runId,
           cwd: spec.cwd,
           prompt: spec.prompt,
-          model: spec.model,
+          model: effort.model,
           session: spec.session.mode === 'resume' ? { mode: 'resume', id: spec.session.id } : { mode: 'new' },
           // 干活的会话照 Claude 的理由放开命令（--force）；探针不放，什么命令都不许跑。不管放不放，插头都带 --trust（只信任
           // 工作目录、不放开命令）：不带的话，没信任过的目录里 -p 只打一段 Workspace Trust 提示就退出（CU-01）
@@ -546,12 +652,14 @@ function grokDriver(
       if (spec.session.mode === 'fork') {
         throw new Error('grok 不 fork：换了账号池要开新会话带接力任务书');
       }
+      const effort = applySessionEffort('grok', spec);
       const report = await run(
         {
           runId: spec.runId,
           cwd: spec.cwd,
           prompt: spec.prompt,
-          model: spec.model,
+          model: effort.model,
+          ...(effort.pass ? { reasoningEffort: effort.pass } : {}),
           session:
             spec.session.mode === 'resume'
               ? { mode: 'resume', id: spec.session.id }
@@ -646,7 +754,8 @@ function mirasimDriver(
       if (spec.session.mode === 'fork') {
         throw new Error('Mirasim 没有 fork：换了账号池要开新会话带接力任务书');
       }
-      const agent = mirasimAgentFor(spec.model);
+      const effort = applySessionEffort('mirasim', spec);
+      const agent = mirasimAgentFor(effort.model);
       const report = await run(
         {
           runId: spec.runId,
@@ -655,7 +764,8 @@ function mirasimDriver(
           agent,
           // 只留「中继额度」这一种路由（design 第三节第 12 条；MS-28：不许反代，只能用官方客户端）
           route: 'cloud',
-          ...(MIRASIM_MODELLESS_AGENTS.has(agent) ? { expectModel: spec.model } : { model: spec.model }),
+          ...(effort.pass ? { effort: effort.pass } : {}),
+          ...(MIRASIM_MODELLESS_AGENTS.has(agent) ? { expectModel: effort.model } : { model: effort.model }),
           session:
             spec.session.mode === 'resume' ? { mode: 'resume', key: spec.session.id } : { mode: 'new' },
           testCommands: spec.testCommands,
@@ -667,8 +777,13 @@ function mirasimDriver(
           ...(hooks.signal ? { signal: hooks.signal } : {}),
           ...(hooks.now ? { now: hooks.now } : {}),
           ...(hooks.onEvent ? { onEvent: hooks.onEvent } : {}),
-          // 服务端 accepted 帧才给真会话号（和 cursor 的 init 帧一个道理）
-          ...(hooks.onSessionId ? { onAccepted: (info) => hooks.onSessionId?.(info.sessionKey) } : {}),
+          // 服务端 accepted 帧才给真会话号（和 cursor 的 init 帧一个道理）。accepted 也就是「起来了」：引擎起会话
+          // 要等 onSpawn，不报它等满 spawnTimeoutMs 一律判 SPAWN_TIMEOUT（09-28 上线后这条路由一个会话都没起成）。
+          // 没有我们 spawn 的进程：pid 记 0（sessions.ts 认 0 是「没有根进程」，不拿它去杀）。
+          onAccepted: (info) => {
+            hooks.onSpawn?.({ pid: 0, runId: spec.runId, startedAt: info.acceptedAt });
+            hooks.onSessionId?.(info.sessionKey);
+          },
         },
       );
       return mirasimReport(report);

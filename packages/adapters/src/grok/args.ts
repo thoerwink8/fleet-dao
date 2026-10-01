@@ -3,7 +3,11 @@
 //   不进参数（Node 给子进程的 stdin 是 socketpair，读不了，run.ts 前面垫一个 cat）；
 // - 旗标都在前面、不用子命令：放在子命令之后会报 unexpected argument 退出 2（GK-03）；
 // - 免确认用 --always-approve：--permission-mode auto 每条外部命令还要确认（GK-04）；
-// - 新会话用我们起的 UUID（-s），续跑 -r 同一个号，终帧 end.sessionId 回的就是它。
+// - 新会话用我们起的 UUID（-s），续跑 -r 同一个号，终帧 end.sessionId 回的就是它；
+// - 总带 --no-plan：--always-approve 管不到计划模式（进计划模式要人批，计划里除计划文件外的编辑一律拒，
+//   ~/.grok/docs/user-guide/19-plan-mode.md），无人值守会卡着等人点头。目录信任、反问选择题两张卡走环境变量，见 run.ts。
+import { assertSessionEffort, GROK_EFFORTS, type SessionEffort } from '../effort.ts';
+
 export type GrokSession = { mode: 'new'; id: string } | { mode: 'resume'; id: string };
 
 export interface GrokArgsSpec {
@@ -14,7 +18,8 @@ export interface GrokArgsSpec {
   cwd: string;
   /** --always-approve：工具一律放行。放开权限必须是显式决定，前提是执行体用户读不到凭据。 */
   alwaysApprove: boolean;
-  reasoningEffort?: string;
+  /** 不给就不传，Grok 自己会落到 xhigh。引擎起会话时总是给。max 类型上过得去，运行时拒（Grok 没有这一档）。 */
+  reasoningEffort?: SessionEffort;
   maxTurns?: number;
   /** 提示词文件，默认 /dev/stdin（提示词走 stdin）。 */
   promptFile?: string;
@@ -26,8 +31,8 @@ const MODEL = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 export function buildGrokArgs(spec: GrokArgsSpec): string[] {
   if (!MODEL.test(spec.model)) throw new Error(`模型名不合法：${JSON.stringify(spec.model)}`);
   if (!UUID.test(spec.session.id)) throw new Error(`会话号必须是 UUID：${JSON.stringify(spec.session.id)}`);
-  if (spec.reasoningEffort !== undefined && !/^[a-z]+$/.test(spec.reasoningEffort)) {
-    throw new Error(`reasoning effort 不合法：${JSON.stringify(spec.reasoningEffort)}`);
+  if (spec.reasoningEffort !== undefined) {
+    assertSessionEffort(spec.reasoningEffort, GROK_EFFORTS, 'Grok 命令行');
   }
   if (spec.maxTurns !== undefined && !(Number.isInteger(spec.maxTurns) && spec.maxTurns > 0)) {
     throw new Error(`max turns 不合法：${spec.maxTurns}`);
@@ -39,6 +44,7 @@ export function buildGrokArgs(spec: GrokArgsSpec): string[] {
     '--output-format',
     'streaming-json',
     ...(spec.alwaysApprove ? ['--always-approve'] : []),
+    '--no-plan',
     '-m',
     spec.model,
     '--cwd',

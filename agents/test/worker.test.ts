@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 
-const SCRIPTS = fileURLToPath(new URL('../skills/commander-seat/scripts/', import.meta.url));
+const SCRIPTS = fileURLToPath(new URL('../skills/commander/scripts/', import.meta.url));
 const NOW = new Date('2026-09-28T02:00:00Z');
 
 interface RunResult {
@@ -45,8 +45,10 @@ interface WorkerLib {
   EFFORTS: string[];
   DEFAULT_EFFORT: string;
   GITHUB_HOSTS: string[];
+  SAFE_ENV_KEYS: string[];
   KIMI_UNSUPPORTED: string;
   mergeNoProxy(env: Record<string, string | undefined>): Record<string, string | undefined>;
+  safeEnv(env: Record<string, string | undefined>): Record<string, string | undefined>;
   closingBrief(o: { branch: string; noShip: boolean }): string;
   runWorker(argv: string[], io: WorkerIo): Promise<number>;
 }
@@ -56,9 +58,20 @@ interface WindowsQuote {
   windowsQuoteArg(arg: string): string;
   windowsCmdLine(command: string, args: string[]): string;
 }
-// worker.mjs 顶层直接跑 runWorker（真的读 argv、真的起子进程），不能直接 import 来测；这两个函数单独放在
-// windows-quote.mjs 就是为了能在这里安全 import。
+// worker.mjs 顶层直接跑 runWorker（真的读 argv、真的起子进程），不能直接 import 来测；这两个文件的函数单独
+//拆出来就是为了能在这里安全 import。
 const winQuote = (await import(pathToFileURL(join(SCRIPTS, 'windows-quote.mjs')).href)) as WindowsQuote;
+interface SpawnDetachedSupport {
+  powershellSpawnOptions(o: { timeoutMs: number }): { stdio: string; windowsHide: boolean; timeout: number };
+  interpretLaunchResult(o: {
+    spawnError: string | null;
+    spawnStatus: number | null;
+    resultText: string | null;
+  }): { ok: true; pid: number } | { ok: false; confirmed: boolean; why: string };
+}
+const spawnSupport = (await import(
+  pathToFileURL(join(SCRIPTS, 'spawn-detached-support.mjs')).href
+)) as SpawnDetachedSupport;
 
 const ok = (stdout = ''): RunResult => ({ status: 0, stdout, stderr: '' });
 const bad = (stderr: string, status = 1): RunResult => ({ status, stdout: '', stderr });
@@ -103,7 +116,10 @@ function world() {
   };
 
   const io: WorkerIo = {
-    env: { SOME_VAR: '1' },
+    // PATH 是白名单里的（应该原样透传给模型）；另外两个不是——SOME_VAR 是普通变量，
+    // GITHUB_PERSONAL_ACCESS_TOKEN 是看着就像密钥的变量，两个都不该出现在 spawnDetached 收到的 env 里
+    // （09-28 的安全教训：白名单，不是挡「像密钥的名字」那种黑名单，所以两种都要挡住，见 safeEnv 那节）。
+    env: { PATH: 'C:\\fake\\path', SOME_VAR: '1', GITHUB_PERSONAL_ACCESS_TOKEN: 'ghp_should_never_leak' },
     home,
     now: () => new Date(clock),
     cwd: () => repo,
@@ -251,11 +267,17 @@ describe('start：happy path', () => {
       worktreeDir,
       '--reasoning-effort',
       'high',
+      '--no-plan',
     ]);
     expect(spec.cwd).toBe(worktreeDir);
     expect(spec.stdinFile).toBeNull();
     expect(spec.env.NO_PROXY).toContain('github.com');
-    expect(spec.env.SOME_VAR).toBe('1'); // 原有的环境变量原样带过去
+    expect(spec.env.PATH).toBe('C:\\fake\\path'); // 白名单里的环境变量原样带过去
+    expect(spec.env.SOME_VAR).toBeUndefined(); // 白名单之外的普通变量不传
+    expect(spec.env.GITHUB_PERSONAL_ACCESS_TOKEN).toBeUndefined(); // 看着像密钥的更不能传（09-28 真撞过）
+    // grok 目录信任 + 反问选择题：09-28 另一撞，见 launchOf 里的注释和 PR 正文的真跑对照
+    expect(spec.env.GROK_FOLDER_TRUST).toBe('0');
+    expect(spec.env.GROK_ASK_USER_QUESTION).toBe('0');
 
     const meta = w.meta('w1');
     expect(meta).toMatchObject({
@@ -318,6 +340,12 @@ describe('start：happy path', () => {
       'gpt-5.6-luna',
     ]);
     expect(spec.stdinFile).toBe(promptFile);
+    // codex 没有 grok 那两个目录信任/反问相关的环境变量；env 过滤对它一样生效
+    expect(spec.env.PATH).toBe('C:\\fake\\path');
+    expect(spec.env.SOME_VAR).toBeUndefined();
+    expect(spec.env.GITHUB_PERSONAL_ACCESS_TOKEN).toBeUndefined();
+    expect(spec.env.GROK_FOLDER_TRUST).toBeUndefined();
+    expect(spec.env.GROK_ASK_USER_QUESTION).toBeUndefined();
     const meta = w.meta('w2');
     expect(meta.modelId).toBe('gpt-5.6-luna');
     expect(meta.effort).toBe('low');
@@ -337,6 +365,31 @@ describe('start：happy path', () => {
     const spec = must(w.spawnCalls[0], '没有 spawnCalls[0]');
     expect(spec.args).toEqual(expect.arrayContaining(['--reasoning-effort', 'high']));
     expect(w.meta('w3').effort).toBe('high');
+  });
+
+  it('--no-automerge：收尾交代改成开人闸 PR、不挂自动合并、CI 绿就停；不带还是本机快马老规矩', async () => {
+    // 创始人 09-28 晚上拍：改标准的活也要能派给别家模型，但改标准是人闸第四类（AGENTS.md），不能让模型自己
+    // 挂自动合并把改标准的 PR 合了。
+    const w = world();
+    w.gitReplies.push(ok('true'), ok(''), ok(''), ok(''));
+    w.pnpmReplies.push(ok());
+    w.spawnReplies.push({ pid: 1 });
+    await w.run(['start', '--model', 'grok', '--name', 'w-gate', '--brief', brief(w), '--no-automerge']);
+    const gated = w.prompt('w-gate');
+    expect(gated).toContain('人闸：改标准');
+    expect(gated).toContain('不要挂自动合并');
+    expect(gated).not.toContain('gh pr merge <PR 号> --auto --squash');
+    expect(gated).not.toContain('CI 绿就合（本机快马）');
+
+    const w2 = world();
+    w2.gitReplies.push(ok('true'), ok(''), ok(''), ok(''));
+    w2.pnpmReplies.push(ok());
+    w2.spawnReplies.push({ pid: 2 });
+    await w2.run(['start', '--model', 'grok', '--name', 'w-fast', '--brief', brief(w2)]);
+    const fast = w2.prompt('w-fast');
+    expect(fast).toContain('gh pr merge <PR 号> --auto --squash');
+    expect(fast).toContain('CI 绿就合（本机快马）');
+    expect(fast).not.toContain('人闸：改标准');
   });
 });
 
@@ -461,6 +514,30 @@ describe('start：【故意造出的失败】', () => {
     expect(w.err.at(-1)).toContain('spawn grok ENOENT');
     expect(w.err.at(-1)).toContain('没删');
   });
+
+  it('起模型这步 spawn 抛出「不确定」（err.uncertain=true）：不说「起不了」，写一份 pidUncertain 的 meta', async () => {
+    // 09-28 真活撞过：launch-detached.ps1 其实已经把 grok 起起来了，只是这条链路没能把 pid 确认回来
+    // （worker.mjs 那边的坑，细节写在那份文件头）；这种半成功绝不能被说成「起不了」。
+    const w = world();
+    w.gitReplies.push(ok('true'), ok(''), ok(''), ok(''));
+    w.pnpmReplies.push(ok());
+    const e = Object.assign(new Error('powershell.exe 退出码 1，没读到有效的 launch-result.json'), {
+      uncertain: true,
+    });
+    w.spawnReplies.push(e);
+    const code = await w.run(['start', '--model', 'grok', '--name', 'w12', '--brief', brief(w)]);
+    expect(code).toBe(2);
+    expect(w.err.at(-1)).not.toContain('起不了');
+    expect(w.err.at(-1)).toContain('进程可能已经在跑、没记上');
+    expect(w.err.at(-1)).toContain('没读到有效的 launch-result.json');
+
+    const meta = w.meta('w12');
+    expect(meta.pid).toBeNull();
+    expect(meta.pidUncertain).toBe(true);
+    expect(meta.pidUncertainWhy).toContain('没读到有效的 launch-result.json');
+    expect(meta.model).toBe('grok');
+    expect(meta.worktree).toBe(join(w.parent, 'fd-w-w12'));
+  });
 });
 
 describe('Windows 引号（windows-quote.mjs）', () => {
@@ -495,6 +572,77 @@ describe('Windows 引号（windows-quote.mjs）', () => {
   });
 });
 
+describe('spawn-detached-support.mjs（ETIMEDOUT 那次真活撞出来的修法）', () => {
+  it("powershellSpawnOptions：钉死 stdio:'ignore'——这是修 ETIMEDOUT 的关键，回归了要在这测破", () => {
+    // 09-28 真活撞过：默认的管道 stdio 会被 Start-Process 底下的 CreateProcess 传给孙进程（cmd.exe ->
+    // grok/codex），Node 读这个管道会一直等到孙进程退出才算完，对一个跑好几分钟的模型会话就是卡到超时。
+    expect(spawnSupport.powershellSpawnOptions({ timeoutMs: 20_000 })).toEqual({
+      stdio: 'ignore',
+      windowsHide: true,
+      timeout: 20_000,
+    });
+  });
+
+  describe('interpretLaunchResult', () => {
+    it('确认成功：结果文件里有合法的 pid', () => {
+      expect(
+        spawnSupport.interpretLaunchResult({
+          spawnError: null,
+          spawnStatus: 0,
+          resultText: '{"pid":4242,"error":null}',
+        }),
+      ).toEqual({ ok: true, pid: 4242 });
+    });
+
+    it('【故意造出的失败】确认失败：powershell.exe 自己都没能跑起来', () => {
+      const r = spawnSupport.interpretLaunchResult({
+        spawnError: 'ENOENT',
+        spawnStatus: null,
+        resultText: null,
+      });
+      expect(r.ok).toBe(false);
+      expect(r).toMatchObject({ confirmed: true });
+      expect((r as { why: string }).why).toContain('起不了 powershell.exe');
+      expect((r as { why: string }).why).toContain('ENOENT');
+    });
+
+    it('【故意造出的失败】确认失败：launch-detached.ps1 自己报了 Start-Process 没成', () => {
+      const r = spawnSupport.interpretLaunchResult({
+        spawnError: null,
+        spawnStatus: 1,
+        resultText: '{"pid":null,"error":"找不到 cmd.exe"}',
+      });
+      expect(r.ok).toBe(false);
+      expect(r).toMatchObject({ confirmed: true });
+      expect((r as { why: string }).why).toContain('找不到 cmd.exe');
+    });
+
+    it('【故意造出的失败】不确定（绝不能说「起不了」）：结果文件没读到——可能已经在跑，09-28 真撞过这个场景', () => {
+      const r = spawnSupport.interpretLaunchResult({ spawnError: null, spawnStatus: 0, resultText: null });
+      expect(r.ok).toBe(false);
+      expect(r).toMatchObject({ confirmed: false });
+      expect((r as { why: string }).why).not.toContain('起不了');
+      expect((r as { why: string }).why).toContain('不确定');
+    });
+
+    it('【故意造出的失败】不确定：结果文件不是合法 JSON', () => {
+      const r = spawnSupport.interpretLaunchResult({
+        spawnError: null,
+        spawnStatus: 0,
+        resultText: 'not json',
+      });
+      expect(r.ok).toBe(false);
+      expect(r).toMatchObject({ confirmed: false });
+    });
+
+    it('【故意造出的失败】不确定：结果文件是合法 JSON，但既没有 pid 也没有 error', () => {
+      const r = spawnSupport.interpretLaunchResult({ spawnError: null, spawnStatus: 1, resultText: '{}' });
+      expect(r.ok).toBe(false);
+      expect(r).toMatchObject({ confirmed: false });
+    });
+  });
+});
+
 describe('mergeNoProxy', () => {
   it('原来没有 NO_PROXY：加上三个 GitHub 域名', () => {
     const out = lib.mergeNoProxy({ FOO: 'bar' });
@@ -522,6 +670,34 @@ describe('mergeNoProxy', () => {
   it('不碰其它代理变量（https_proxy 原样保留，给模型自己连后端用）', () => {
     const out = lib.mergeNoProxy({ https_proxy: 'http://127.0.0.1:7890' });
     expect(out.https_proxy).toBe('http://127.0.0.1:7890');
+  });
+});
+
+describe('safeEnv（09-28 安全教训：白名单，不是挡「像密钥的名字」那种黑名单）', () => {
+  it('【故意造出的失败】白名单里的原样带过去，不在白名单的一律不带——哪怕看着不像密钥', () => {
+    const out = lib.safeEnv({
+      PATH: 'C:\\x',
+      TEMP: 'C:\\temp',
+      SOME_RANDOM_VAR: 'whatever', // 不像密钥，但也不在白名单里，照样不该出现
+      GITHUB_PERSONAL_ACCESS_TOKEN: 'ghp_real_looking_secret', // 09-28 真撞见过这个
+      MIRASIM_LOCAL_TOKEN: 'also_a_real_secret_shape',
+    });
+    expect(out.PATH).toBe('C:\\x');
+    expect(out.TEMP).toBe('C:\\temp');
+    expect(out.SOME_RANDOM_VAR).toBeUndefined();
+    expect(out.GITHUB_PERSONAL_ACCESS_TOKEN).toBeUndefined();
+    expect(out.MIRASIM_LOCAL_TOKEN).toBeUndefined();
+  });
+
+  it('值是 undefined 的键不带（跟原来 spawnDetached 里过滤 undefined 的规矩一致）', () => {
+    const out = lib.safeEnv({ PATH: undefined });
+    expect('PATH' in out).toBe(false);
+  });
+
+  it('SAFE_ENV_KEYS 本身不含任何看着像密钥/令牌/密码的名字（钉住这条底线，以后加白名单条目时会在这测破）', () => {
+    const looksSecret = /token|secret|key|password|credential|passwd|auth/i;
+    const offenders = lib.SAFE_ENV_KEYS.filter((k) => looksSecret.test(k));
+    expect(offenders).toEqual([]);
   });
 });
 
@@ -572,6 +748,21 @@ describe('status', () => {
     expect(w.out.join('\n')).toContain('档位 不支持');
   });
 
+  it('pidUncertain 的记录：报「不确定在跑没跑」，不调 io.isRunning（没有真 pid 可查）', async () => {
+    const w = world();
+    w.writeMeta(
+      's2c',
+      validMeta(w, 's2c', { pid: null, pidUncertain: true, pidUncertainWhy: '没读到 launch-result.json' }),
+    );
+    w.ghReplies.push(ok('[]'));
+    const code = await w.run(['status', '--name', 's2c']);
+    expect(code).toBe(0);
+    const text = w.out.join('\n');
+    expect(text).toContain('不确定在跑没跑');
+    expect(text).toContain('没读到 launch-result.json');
+    expect(text).not.toContain('pid null'); // 不确定时不打 pid
+  });
+
   it('【故意造出的失败】meta.json 不存在：明确失败，退出码 2', async () => {
     const w = world();
     const code = await w.run(['status', '--name', 'nope']);
@@ -593,6 +784,21 @@ describe('status', () => {
     w.writeMeta('broken2', partial);
     expect(await w.run(['status', '--name', 'broken2'])).toBe(2);
     expect(w.out.at(-1)).toContain('pid 认不出');
+  });
+
+  it('【故意造出的失败】pidUncertain 的 meta 形状不对：两种坏法都明确失败，退出码 2', async () => {
+    const w = world();
+    // 坏法一：pidUncertain=true 却带了个真 pid（应该是 null）
+    w.writeMeta('broken3', { ...validMeta(w, 'broken3'), pidUncertain: true, pidUncertainWhy: '随便' });
+    expect(await w.run(['status', '--name', 'broken3'])).toBe(2);
+    expect(w.out.at(-1)).toContain('pidUncertain 时 pid 应该是 null');
+
+    // 坏法二：pidUncertain=true、pid 也是 null，但没给 pidUncertainWhy
+    const broken4 = validMeta(w, 'broken4', { pid: null, pidUncertain: true }) as Record<string, unknown>;
+    delete broken4.pidUncertainWhy;
+    w.writeMeta('broken4', broken4);
+    expect(await w.run(['status', '--name', 'broken4'])).toBe(2);
+    expect(w.out.at(-1)).toContain('pidUncertainWhy 认不出');
   });
 
   it('不带 --name：列出全部工人；有一个坏的照样往下走，整体退出码 2；一个都没有就说清楚、退出码 0', async () => {
@@ -645,6 +851,19 @@ describe('stop', () => {
   it('【故意造出的失败】--name 里带路径穿越：退出码 1，不碰文件系统', async () => {
     const w = world();
     expect(await w.run(['stop', '--name', '../../evil'])).toBe(1);
+  });
+
+  it('【故意造出的失败】pidUncertain：没有真 pid 可杀，明确拒绝、不碰 killTree', async () => {
+    const w = world();
+    w.writeMeta(
+      't3',
+      validMeta(w, 't3', { pid: null, pidUncertain: true, pidUncertainWhy: '没读到 launch-result.json' }),
+    );
+    const code = await w.run(['stop', '--name', 't3']);
+    expect(code).toBe(2);
+    expect(w.err.at(-1)).toContain('没记上 pid');
+    expect(w.err.at(-1)).toContain('手动结束');
+    expect(w.killed).toEqual([]);
   });
 });
 
@@ -737,5 +956,30 @@ describe('clean', () => {
     w.gitReplies.push(ok(), bad('branch is checked out somewhere'));
     expect(await w.run(['clean', '--name', 'c8', '--force'])).toBe(2);
     expect(w.err.at(-1)).toContain('工作树删了，但分支');
+  });
+
+  it('【故意造出的失败】pidUncertain 不带 --force：不敢删，退出码 3', async () => {
+    const w = world();
+    w.writeMeta(
+      'c9',
+      validMeta(w, 'c9', { pid: null, pidUncertain: true, pidUncertainWhy: '没读到 launch-result.json' }),
+    );
+    const code = await w.run(['clean', '--name', 'c9']);
+    expect(code).toBe(3);
+    expect(w.err.at(-1)).toContain('没记上 pid');
+    expect(w.err.at(-1)).toContain('--force');
+    expect(w.gitCalls).toEqual([]);
+  });
+
+  it('pidUncertain 带 --force：照样能删（跳过 isRunning 检查，因为没有真 pid）', async () => {
+    const w = world();
+    w.writeMeta(
+      'c10',
+      validMeta(w, 'c10', { pid: null, pidUncertain: true, pidUncertainWhy: '没读到 launch-result.json' }),
+    );
+    w.gitReplies.push(ok(), ok());
+    const code = await w.run(['clean', '--name', 'c10', '--force']);
+    expect(code).toBe(0);
+    expect(w.gitCalls).toHaveLength(2);
   });
 });

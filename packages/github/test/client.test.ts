@@ -321,6 +321,23 @@ describe('凭据不外泄', () => {
       JSON.stringify({ a: [{ b: 'token <redacted>' }], c: 'Error: boom <redacted>', d: 3 }),
     );
   });
+
+  // GitHub 2026-04-27 起新换的安装令牌是 ghs_<应用号>_<JWT>：JWT 三段之间是点、段里有 - 和 _。
+  // 旧的字符类少了 - 和点，打码停在第一个点或 - 处，JWT 后面的段原样漏出来（换来的令牌另按原值登记，这里测的是没登记的）。
+  it('新格式安装令牌 ghs_<应用号>_<JWT> 没登记过也整段打码，后面的段不漏', () => {
+    const token = `ghs_1234567_eyJ${'a'.repeat(20)}.${'b-_'.repeat(8)}.${'c'.repeat(20)}`;
+    const err = new GitHubError('X', `bad token ${token} for repo`, {
+      details: {
+        a: `Authorization: token ${token}`,
+        b: [token],
+        c: `https://x-access-token:${token}@github.com/o/r.git`,
+      },
+    });
+    expect(err.message).toBe('bad token <redacted> for repo');
+    const details = JSON.stringify(err.details);
+    expect(details).not.toMatch(/b-_b-_|cccc|eyJ|1234567/);
+    expect(details).toContain('<redacted>');
+  });
 });
 
 describe('A2：凭据文件', () => {

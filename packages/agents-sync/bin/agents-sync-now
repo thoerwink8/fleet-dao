@@ -1,0 +1,3 @@
+#!/usr/bin/env node
+// 一键同步入口（pnpm agents:sync）：取远端、把检出快进到主线、跑 agents-sync --apply。用法：node <本文件> --help
+import('../src/sync-now-main.ts');

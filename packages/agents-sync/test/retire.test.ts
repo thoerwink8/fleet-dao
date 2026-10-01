@@ -1,11 +1,11 @@
 // --retire-old：只撤指向旧仓的链接和那两个旧子代理，每项先备份；别的一律不碰。
-import { existsSync, lstatSync, readdirSync, readFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { Backups } from '../src/backup.ts';
 import { exitCode } from '../src/report.ts';
 import { retireOld } from '../src/retire.ts';
-import { cleanup, expectKind, get, linkDir, PLATFORM, put, tempDir } from './helpers.ts';
+import { cleanup, expectKind, get, IS_ROOT, linkDir, PLATFORM, put, tempDir } from './helpers.ts';
 
 afterEach(cleanup);
 
@@ -97,4 +97,30 @@ describe('--retire-old', () => {
     expect(again.filter((l) => l.kind !== 'ok')).toEqual([]);
     expect(again[0]?.text).toContain('没有要撤的');
   });
+
+  it.skipIf(PLATFORM === 'win32' || IS_ROOT)(
+    '要扫的 skill 目录在但读不了：这一项没查成，不当成没有要撤的',
+    () => {
+      const home = tempDir('home');
+      const old = tempDir('old-repo');
+      put(old, 'host/skills/dispatch/SKILL.md', '旧仓的 dispatch\n');
+      linkDir(join(old, 'host', 'skills', 'dispatch'), join(home, '.claude', 'skills', 'dispatch'));
+      const dir = join(home, '.claude', 'skills');
+      chmodSync(dir, 0o000);
+      let lines: ReturnType<typeof retireOld> = [];
+      try {
+        lines = retireOld({ home, platform: PLATFORM, oldRepo: old }, new Backups(home, PLATFORM, NOW));
+      } finally {
+        chmodSync(dir, 0o755);
+      }
+      expectKind(lines, '~/.claude/skills', 'unknown');
+      const item = lines.find((l) => l.key === '~/.claude/skills');
+      expect(item?.text).toContain('没查成');
+      expect(item?.text).toContain('读不了');
+      expect(item?.text).toContain('EACCES');
+      expect(lines.some((l) => l.text.includes('没有要撤的'))).toBe(false);
+      expect(exitCode(lines)).toBe(2);
+      expect(lstatSync(join(dir, 'dispatch')).isSymbolicLink()).toBe(true);
+    },
+  );
 });

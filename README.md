@@ -15,6 +15,8 @@
 
 法国干活、香港当门面。各跑什么、端口、用户、目录、怎么看健康、怎么回滚：[docs/ops.md](docs/ops.md)。
 
+两台上还另跑着一个不归本仓管的私有项目 **self-proxy**（创始人自用的代理，2026-09-28 起）：单元 `self-proxy-*`、目录 `/etc/self-proxy`、`/opt/self-proxy`，香港还有 nginx 站点 `self-proxy` 和 `/srv/self-proxy-sub`；「法国-中转」借用本仓的隧道。端口见 ops 第二节端口表。本仓的装机脚本不装、不查、不删它们，排查时也别动。
+
 ## 仓库地图
 
 | 目录 | 是什么 |

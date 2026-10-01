@@ -9,7 +9,7 @@
     "packages/feishu/src/words.ts",
     "deploy/web/",
     "deploy/hk/placeholder.html",
-    "agents/skills/commander-seat/scripts/index.html",
-    "agents/skills/commander-seat/scripts/france.html"
+    "agents/skills/commander/scripts/index.html",
+    "agents/skills/commander/scripts/france.html"
   ]
 }

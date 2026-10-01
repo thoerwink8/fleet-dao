@@ -47,7 +47,9 @@ export function forgetSecret(value: string): void {
 
 const PATTERNS: RegExp[] = [
   // GitHub 各类令牌（安装令牌 ghs_，个人 ghp_/github_pat_……）。官方预告长度会变，只认前缀。
-  /\b(?:ghs|ghp|gho|ghu|ghr)_[A-Za-z0-9_]{8,}/g,
+  // 2026-04-27 起新换的安装令牌是 ghs_<应用号>_<JWT>：JWT 三段之间是点、段里有 - 和 _，字符类少了 - 和点，
+  // 打码会在第一个点或 - 处停下、把 JWT 后面的段原样漏出来（换来的令牌另按原值登记打码，这里兜的是没登记的）。
+  /\b(?:ghs|ghp|gho|ghu|ghr)_[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]{6,}){0,2}/g,
   /\bgithub_pat_[A-Za-z0-9_]{8,}/g,
   // JWT（App 身份）：三段 base64url。
   /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g,

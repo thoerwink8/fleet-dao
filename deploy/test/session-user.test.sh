@@ -4,8 +4,8 @@
 # getent / sudo -l / id 三样换成假的，家目录在临时目录里造。
 #   1. 只有一个会话用户 fleet-agent-carpool；france.sh 不建、不查停用的 fleet-agent-dedicated（重新加回来这里会红）
 #   2. 干净的家 + 登录过：两条都绿，没有红和待配
-#   3. 故意造错：家目录不在 /home/<用户>、是符号链接、属主或权限不对、有 sudo 条目、多一个组、家里有 ~/.ssh、
-#      用户不在——都判红，不当成没事
+#   3. 故意造错：家目录不在 /home/<用户>、是符号链接、属主或权限不对、有 sudo 条目、多一个组、用户不在——都判红，不当成没事
+#   3b. ~/.ssh：只放创始人登录 pilot 的钥匙判绿；多一把别人的、放了私钥或配置、权限不对、认不出、pilot 那份读不了——都判红
 #   4. 没装 reclaude：红（france.sh 该装，引擎起不了会话）；装了没登录：记「待配」，不判绿
 #   5. pilot 不登录 reclaude：它的判据（lib/login-user.sh）不看登没登录
 # 用法：bash deploy/test/session-user.test.sh。退出码：0 通过，1 不通过。
@@ -37,6 +37,9 @@ session_user_home() { printf '%s' "$FAKE_HOME"; }
 session_user_home_meta() { printf '%s' "$FAKE_META"; }
 session_user_sudo_list() { printf '%s' "$FAKE_SUDO"; }
 session_user_groups() { printf '%s' "$FAKE_GROUPS"; }
+# 属主换成假的（测试不是 root，建不出归会话用户的文件），权限照真的读
+FAKE_SSH_OWNER=""
+session_user_path_meta() { printf '%s %s' "${FAKE_SSH_OWNER:-$SESSION_USER:$SESSION_USER}" "$(stat -c %a -- "$1")"; }
 
 U=$SESSION_USER
 clean_home() { # 家目录 登录过没有（1/0）
@@ -119,9 +122,67 @@ FAKE_SUDO="User $U is not allowed to run sudo on france."
 FAKE_GROUPS="$U fleet"
 check "多在一个组里：红" 1 0 1 "附加组「$U fleet」"
 FAKE_GROUPS=$U
-mkdir -p "$FAKE_HOME/.ssh"
-check "家里有 ~/.ssh：红" 1 0 1 "家里有 ~/.ssh"
-rm -rf -- "$FAKE_HOME/.ssh"
+
+echo "== 3b. ~/.ssh 只许放创始人登录 pilot 的钥匙"
+if ! command -v ssh-keygen >/dev/null; then
+  flunk "这台没有 ssh-keygen，3b 没跑成（读回在法国上要用它认钥匙）"
+else
+  ssh-keygen -q -t ed25519 -N '' -C founder -f "$T/founder" >/dev/null
+  ssh-keygen -q -t ed25519 -N '' -C stranger -f "$T/stranger" >/dev/null
+  mkdir -p "$T/pilot-ssh"
+  SESSION_SSH_ALLOW_FILE=$T/pilot-ssh/authorized_keys
+  cp "$T/founder.pub" "$SESSION_SSH_ALLOW_FILE"
+  put_keys() { # 公钥文件…（一个不给就是空文件）
+    rm -rf -- "$FAKE_HOME/.ssh"
+    mkdir -p "$FAKE_HOME/.ssh"
+    chmod 700 "$FAKE_HOME/.ssh"
+    : >"$FAKE_HOME/.ssh/authorized_keys"
+    local k
+    for k in "$@"; do cat -- "$k" >>"$FAKE_HOME/.ssh/authorized_keys"; done
+    chmod 600 "$FAKE_HOME/.ssh/authorized_keys"
+  }
+  mkdir -p "$FAKE_HOME/.ssh"
+  chmod 700 "$FAKE_HOME/.ssh"
+  check "只有空的 ~/.ssh：绿" 0 0 2
+  put_keys "$T/founder.pub"
+  check "只放了创始人登录 pilot 的那把：绿" 0 0 2
+  put_keys
+  check "authorized_keys 是空的：绿" 0 0 2
+  { echo '# 注释'; echo 'restrict,port-forwarding '"$(cat "$T/founder.pub")"; } >"$FAKE_HOME/.ssh/authorized_keys"
+  check "那把钥匙前面带了限制选项、还有注释行：照样认得，绿" 0 0 2
+  put_keys "$T/founder.pub" "$T/stranger.pub"
+  check "【故意造出的失败】多了一把 pilot 家里没有的：红" 1 0 1 "有 1 把钥匙不在"
+  put_keys "$T/founder.pub"
+  echo 'ssh-ed25519 这不是钥匙 x' >>"$FAKE_HOME/.ssh/authorized_keys"
+  check "【故意造出的失败】有一行认不出：红，不当成只有认得的那几把" 1 0 1 "认不全"
+  put_keys "$T/founder.pub"
+  cp "$T/stranger" "$FAKE_HOME/.ssh/id_ed25519"
+  check "【故意造出的失败】会话用户有了自己的私钥：红" 1 0 1 "还有 id_ed25519"
+  put_keys "$T/founder.pub"
+  chmod 644 "$FAKE_HOME/.ssh/authorized_keys"
+  check "【故意造出的失败】authorized_keys 是 644：红" 1 0 1 "要 $U:$U 600"
+  put_keys "$T/founder.pub"
+  chmod 755 "$FAKE_HOME/.ssh"
+  check "【故意造出的失败】~/.ssh 是 755：红" 1 0 1 "要 $U:$U 700"
+  put_keys "$T/founder.pub"
+  FAKE_SSH_OWNER="root:root"
+  check "【故意造出的失败】authorized_keys 归 root：红" 1 0 1 "要 $U:$U 600"
+  FAKE_SSH_OWNER=""
+  rm -f -- "$FAKE_HOME/.ssh/authorized_keys"
+  ln -s "$T/founder.pub" "$FAKE_HOME/.ssh/authorized_keys"
+  check "【故意造出的失败】authorized_keys 是链接：红" 1 0 1 "是链接"
+  put_keys "$T/founder.pub"
+  SESSION_SSH_ALLOW_FILE=$T/nowhere/authorized_keys
+  check "【故意造出的失败】pilot 那份读不到：红，核对不了不当成对" 1 0 1 "核对不了"
+  SESSION_SSH_ALLOW_FILE=$T/pilot-ssh/authorized_keys
+  : >"$SESSION_SSH_ALLOW_FILE"
+  check "【故意造出的失败】pilot 那份是空的：红" 1 0 1 "核对不了"
+  cp "$T/founder.pub" "$SESSION_SSH_ALLOW_FILE"
+  rm -rf -- "$FAKE_HOME/.ssh"
+  printf 'x' >"$FAKE_HOME/.ssh"
+  check "【故意造出的失败】~/.ssh 是个文件：红" 1 0 1 "不是目录"
+  rm -f -- "$FAKE_HOME/.ssh"
+fi
 FAKE_HOME=""
 check "用户不在（getent 查不到）：红，不当成没事" 1 0 0 "不在"
 

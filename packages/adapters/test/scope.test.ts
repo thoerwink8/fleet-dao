@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { GROK_UNATTENDED_ENV } from '../src/grok/run.ts';
 import { DEFAULT_PROCESS_LIMITS, runAgentProcess, type SpawnInfo } from '../src/process.ts';
 import {
   assertScopeInProduction,
@@ -114,6 +115,14 @@ describe('scope 的参数与环境', () => {
     expect(
       scopeLaunch({ CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', BASH_MAX_TIMEOUT_MS: '1' }).envArgs,
     ).toEqual(['CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1', 'BASH_MAX_TIMEOUT_MS=1']);
+  });
+
+  it('grok 无人值守那几个开关都在白名单里：少一个，法国经帮手脚本起 grok 就当场拒', () => {
+    expect(scopeLaunch({ ...GROK_UNATTENDED_ENV }).envArgs).toEqual(
+      Object.entries(GROK_UNATTENDED_ENV).map(([k, v]) => `${k}=${v}`),
+    );
+    // 【故意造出的失败】不在白名单里的 GROK_ 开关照样拒，白名单不是按前缀放行
+    expect(() => scopeLaunch({ GROK_SOMETHING: '1' })).toThrow('GROK_SOMETHING 进不了会话用户的会话');
   });
 
   it('白名单里的值带任何控制字符（\\r、\\n、\\t、ESC、DEL）也拒；工作目录同样', () => {

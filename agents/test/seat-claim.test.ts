@@ -12,7 +12,7 @@ import { fakeGitHub, NOW, SCRIPTS } from './helpers/doing.ts';
 interface SshResult {
   status: number | null;
   stdout: string;
-  stderr: string;
+  stderr: string | Buffer;
   error?: string | undefined;
 }
 interface Io {
@@ -30,6 +30,7 @@ interface Io {
 interface SeatLib {
   FLEET_API: string;
   shellQuote(s: string): string;
+  readableStderr(raw: string | Buffer): string;
   runSeat(argv: string[], io: Io): Promise<number>;
   runClaim(argv: string[], io: Io): Promise<number>;
 }
@@ -51,7 +52,7 @@ function remoteArgs(command: string): string[] {
 }
 
 type Reply =
-  | { status: number; json?: unknown; stdout?: string; stderr?: string }
+  | { status: number; json?: unknown; stdout?: string; stderr?: string | Buffer }
   | ((args: string[]) => SshResult);
 
 function world(opts: { host?: string | null; machine?: string } = {}) {
@@ -631,6 +632,76 @@ describe('推前钩子（claim.mjs prepush）', () => {
   });
 });
 
+describe('ssh 标准错误里的中文（Windows 上是 GBK）', () => {
+  const phrase = '不知道这样的主机。';
+  const prefix = 'ssh: Could not resolve hostname contabo: ';
+  // 「不知道这样的主机。」的 GBK：两字节一个字，句号是 A1 A3。写死，不靠运行时编码器。
+  const gbkPhrase = [
+    0xb2, 0xbb, 0xd6, 0xaa, 0xb5, 0xc0, 0xd5, 0xe2, 0xd1, 0xf9, 0xb5, 0xc4, 0xd6, 0xf7, 0xbb, 0xfa, 0xa1,
+    0xa3,
+  ];
+  const gbkLine = () => Buffer.concat([Buffer.from(prefix), Buffer.from(gbkPhrase), Buffer.from('\r\n')]);
+  const escapedLine = () =>
+    `${prefix}${gbkPhrase.map((b) => `\\${b.toString(8).padStart(3, '0')}`).join('')}\r\n`;
+
+  it('GBK 原字节还原成能读的中文', () => {
+    expect(lib.readableStderr(gbkLine())).toBe(`${prefix}${phrase}\r\n`);
+  });
+
+  it('ssh 的 \\NNN 转义还原成同一句中文', () => {
+    const escaped = escapedLine();
+    expect(escaped).toContain('\\262\\273\\326\\252');
+    expect(lib.readableStderr(escaped)).toBe(`${prefix}${phrase}\r\n`);
+  });
+
+  it('UTF-8 原字节的中文照旧能读，不按 GBK 解', () => {
+    expect(lib.readableStderr(Buffer.from(`${prefix}${phrase}\n`, 'utf8'))).toBe(`${prefix}${phrase}\n`);
+    // C2 A5 两边都合法：UTF-8 是 ¥，GB18030 是「楼」。先认 UTF-8 才不会解错。
+    expect(lib.readableStderr(Buffer.from([0xc2, 0xa5]))).toBe('¥');
+  });
+
+  it('【故意造出的失败】坏字节、坏的 \\NNN、ASCII 反斜杠：不抛错，原样留着', () => {
+    const bad = Buffer.concat([
+      Buffer.from('ping '),
+      Buffer.from([0xff, 0xfe, 0x80]),
+      Buffer.from(' contabo'),
+    ]);
+    expect(lib.readableStderr(bad)).toBe('ping \\377\\376\\200 contabo');
+    expect(lib.readableStderr('pre \\377 post')).toBe('pre \\377 post');
+    expect(lib.readableStderr('C:\\Users\\a')).toBe('C:\\Users\\a');
+  });
+
+  it('现查连不上：GBK 原字节和转义串都打出能读的原因，退出码 2', async () => {
+    for (const stderr of [gbkLine(), escapedLine()]) {
+      const w = world();
+      w.replies.push(taken(3));
+      expect(await w.seat(['take', '--session', 's1'])).toBe(0);
+      w.replies.push({ status: 255, stderr });
+      expect(await w.seat(['check'])).toBe(2);
+      const line = w.err.at(-1) ?? '';
+      expect(line).toContain('ssh 连不上法国：');
+      expect(line).toContain(phrase);
+    }
+  });
+
+  it('认领连不上：GBK 原字节打出能读的原因，退出码 2', async () => {
+    const w = world();
+    w.replies.push({ status: 255, stderr: gbkLine() });
+    expect(await w.claim(['show'])).toBe(2);
+    const line = w.err.at(-1) ?? '';
+    expect(line).toContain('ssh 连不上法国：');
+    expect(line).toContain(phrase);
+  });
+
+  it('【故意造出的失败】标准错误是空 Buffer：不当成有输出，改看标准输出', async () => {
+    const w = world();
+    w.replies.push({ status: 127, stderr: Buffer.alloc(0), stdout: 'bash: fleet-api: No such file\n' });
+    expect(await w.seat(['take', '--session', 's1'])).toBe(2);
+    expect(w.err.at(-1)).toContain('bash: fleet-api: No such file');
+    expect(w.err.at(-1)).not.toContain('没有输出');
+  });
+});
+
 describe('给远端 shell 的参数', () => {
   it('单引号包起来，里面的单引号拆开转义', () => {
     expect(lib.shellQuote("it's")).toBe(`'it'\\''s'`);
@@ -638,23 +709,21 @@ describe('给远端 shell 的参数', () => {
   });
 });
 
-describe('.githooks/pre-push：两步收到同一份标准输入', () => {
+describe('.githooks/pre-push：只跑卫生检查', () => {
   const HOOK = fileURLToPath(new URL('../../.githooks/pre-push', import.meta.url));
 
-  function repoWithStubs(claimExit: number, hygieneExit: number) {
+  function repoWithStub(hygieneExit: number) {
     const dir = mkdtempSync(join(tmpdir(), 'fleet-hook-'));
     homes.push(dir);
-    const claimDir = join(dir, 'agents', 'skills', 'commander-seat', 'scripts');
     const hygieneDir = join(dir, 'packages', 'hygiene', 'src', 'bin');
-    mkdirSync(claimDir, { recursive: true });
     mkdirSync(hygieneDir, { recursive: true });
-    const stub = (file: string, name: string, code: number) =>
-      writeFileSync(
-        file,
-        `import { readFileSync, writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(join(dir, name))}, JSON.stringify({ argv: process.argv.slice(2), stdin: readFileSync(0, 'utf8') }));\nprocess.exitCode = ${code};\n`,
-      );
-    stub(join(claimDir, 'claim.mjs'), 'claim.json', claimExit);
-    stub(join(hygieneDir, 'pre-push.ts'), 'hygiene.json', hygieneExit);
+    writeFileSync(
+      join(hygieneDir, 'pre-push.ts'),
+      `import { readFileSync, writeFileSync } from 'node:fs';
+writeFileSync(${JSON.stringify(join(dir, 'hygiene.json'))}, JSON.stringify({ argv: process.argv.slice(2), stdin: readFileSync(0, 'utf8') }));
+process.exitCode = ${hygieneExit};
+`,
+    );
     return dir;
   }
   const run = (dir: string, stdin: string) =>
@@ -663,23 +732,20 @@ describe('.githooks/pre-push：两步收到同一份标准输入', () => {
       input: stdin,
       encoding: 'utf8',
     });
-  const read = (dir: string, name: string) => JSON.parse(readFileSync(join(dir, name), 'utf8'));
 
-  it('查认领过了再做卫生检查：两步收到同样的几行，卫生检查的退出码原样交回', () => {
-    const lines = `refs/heads/a ${'1'.repeat(40)} refs/heads/a ${'2'.repeat(40)}\nrefs/heads/b ${'3'.repeat(40)} refs/heads/b ${'4'.repeat(40)}`;
-    const dir = repoWithStubs(0, 0);
-    expect(run(dir, `${lines}\n`).status).toBe(0);
-    expect(read(dir, 'claim.json')).toEqual({ argv: ['prepush'], stdin: `${lines}\n` });
-    expect(read(dir, 'hygiene.json')).toEqual({
+  it('卫生检查收到 git 给的几行和参数，退出码原样交回', () => {
+    const lines = `refs/heads/a ${'1'.repeat(40)} refs/heads/a ${'2'.repeat(40)}
+`;
+    const dir = repoWithStub(0);
+    expect(run(dir, lines).status).toBe(0);
+    expect(JSON.parse(readFileSync(join(dir, 'hygiene.json'), 'utf8'))).toEqual({
       argv: ['origin', 'https://example.test/repo.git'],
-      stdin: `${lines}\n`,
+      stdin: lines,
     });
-    expect(run(repoWithStubs(0, 1), `${lines}\n`).status).toBe(1);
+    expect(run(repoWithStub(1), lines).status).toBe(1);
   });
 
-  it('【故意造出的失败】认领对不上（查认领那步退出码 1）：拦下，卫生检查不跑', () => {
-    const dir = repoWithStubs(1, 0);
-    expect(run(dir, `refs/heads/a ${'1'.repeat(40)} refs/heads/a ${'2'.repeat(40)}\n`).status).toBe(1);
-    expect(() => read(dir, 'hygiene.json')).toThrow();
+  it('【故意造出的失败】钩子不引用技能目录里的脚本：core.hooksPath 常指向主检出，在别的工作树里跑时那个路径可能不存在', () => {
+    expect(readFileSync(HOOK, 'utf8')).not.toMatch(/^[^#]*agents\/skills\//m);
   });
 });

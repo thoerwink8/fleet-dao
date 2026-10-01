@@ -45,16 +45,30 @@ export function readTree(dir: string): ReadTree {
 
 const CR = 0x0d;
 
-function withoutCr(buf: Buffer): Buffer {
-  return buf.includes(CR) ? Buffer.from(buf.filter((b) => b !== CR)) : buf;
+const LF = 0x0a;
+
+/**
+ * CRLF 换成 LF：行尾的 \r 不算内容（Windows 检出会把 LF 换成 CRLF）。单独的 \r 留着、算内容：它在终端里能把前面的字盖住，
+ * 有人往审过的文件里塞一个，看着一样、字节不一样——所以只去掉紧挨着 \n 的那个（第二意见 #507 第 1 轮指出）。
+ */
+export function crlfToLf(buf: Buffer): Buffer {
+  if (!buf.includes(CR)) return buf;
+  const out = Buffer.allocUnsafe(buf.length);
+  let n = 0;
+  for (let i = 0; i < buf.length; i++) {
+    const b = buf[i] as number;
+    if (b === CR && buf[i + 1] === LF) continue;
+    out[n++] = b;
+  }
+  return out.subarray(0, n);
 }
 
-/** 一样的文件、一样的内容（\r 不算） */
+/** 一样的文件、一样的内容（CRLF 行尾不算） */
 export function sameTree(a: Tree, b: Tree): boolean {
   if (a.size !== b.size) return false;
   for (const [rel, content] of a) {
     const other = b.get(rel);
-    if (other === undefined || !withoutCr(content).equals(withoutCr(other))) return false;
+    if (other === undefined || !crlfToLf(content).equals(crlfToLf(other))) return false;
   }
   return true;
 }
@@ -67,7 +81,7 @@ export function treeDiff(want: Tree, have: Tree): string {
   const changed = [...want.keys()].filter((k) => {
     const h = have.get(k);
     const w = want.get(k);
-    return h !== undefined && w !== undefined && !withoutCr(h).equals(withoutCr(w));
+    return h !== undefined && w !== undefined && !crlfToLf(h).equals(crlfToLf(w));
   });
   if (missing.length) parts.push(`少了 ${missing.join('、')}`);
   if (extra.length) parts.push(`多了 ${extra.join('、')}`);

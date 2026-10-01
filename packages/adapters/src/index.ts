@@ -10,6 +10,13 @@ export * from './cursor/run.ts';
 export * from './cursor/stream.ts';
 export * from './delivery.ts';
 export * from './detached.ts';
+export {
+  assertSessionEffort,
+  GROK_EFFORTS,
+  isSessionEffort,
+  SESSION_EFFORTS,
+  type SessionEffort,
+} from './effort.ts';
 export * from './env.ts';
 export * from './grok/args.ts';
 export * from './grok/run.ts';

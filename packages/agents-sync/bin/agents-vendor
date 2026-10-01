@@ -1,0 +1,3 @@
+#!/usr/bin/env node
+// agents-vendor 入口：直接跑 TypeScript 源码（同 agents-sync）。用法：node <本文件> --help
+import('../src/vendor-main.ts');

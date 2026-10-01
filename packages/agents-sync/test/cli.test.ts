@@ -1,5 +1,5 @@
 // 命令行：参数、身份、退出码。和系统打交道的几样换成假的。
-import { existsSync } from 'node:fs';
+import { chmodSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { type Deps, type PasswdEntry, runCli } from '../src/cli.ts';
@@ -247,6 +247,125 @@ describe('--user：替别的用户写', () => {
       expect(r.code).toBe(64);
       expect(r.err).toContain('加 --user');
       expect(existsSync(join(home, '.claude'))).toBe(false);
+    },
+  );
+});
+
+describe('仓里的原件在但读不了', () => {
+  // 家里先放一份装过的 skill 和记着它的清单。仓里同名 skill 内容不同：读不了若被当成「仓里没有」，
+  // --apply 会把家里这份撤掉；若读成功并往下走，会新建 ~/.claude/CLAUDE.md。
+  function seeded() {
+    const home = tempDir('home');
+    put(home, '.claude/skills/grill-me/SKILL.md', '装过的\n');
+    const manifestText = `${JSON.stringify({ skills: { '.claude/skills': ['grill-me'] } })}\n`;
+    put(home, '.fleet-dao/agents-sync.json', manifestText);
+    const repo = makeRepo({ 'grill-me': { 'SKILL.md': '仓里的、和家里不一样\n' } });
+    return { home, repo, manifestText };
+  }
+
+  function expectStopped(home: string, repo: string, manifestText: string, why: string, absent?: string) {
+    for (const mode of ['--check', '--apply']) {
+      const r = run([mode, '--home', home, '--repo', repo]);
+      expect(r.code, mode).toBe(2);
+      expect(r.out, mode).toBe('');
+      expect(r.err, mode).toContain('没查成');
+      expect(r.err, mode).toContain(why);
+      expect(r.err, mode).toContain('EACCES');
+      if (absent !== undefined) expect(r.err, mode).not.toContain(absent);
+    }
+    expect(get(home, '.claude/skills/grill-me/SKILL.md')).toBe('装过的\n');
+    expect(existsSync(join(home, '.claude', 'CLAUDE.md'))).toBe(false);
+    expect(get(home, '.fleet-dao/agents-sync.json')).toBe(manifestText);
+  }
+
+  it.skipIf(PLATFORM === 'win32' || IS_ROOT)(
+    '仓里的 AGENTS.md 在但读不了：查和写都没查成，一个文件都不写',
+    () => {
+      const { home, repo, manifestText } = seeded();
+      const file = join(repo, 'AGENTS.md');
+      chmodSync(file, 0o000);
+      try {
+        expectStopped(home, repo, manifestText, '读不了仓里的 AGENTS.md（');
+      } finally {
+        chmodSync(file, 0o644);
+      }
+    },
+  );
+
+  it.skipIf(PLATFORM === 'win32' || IS_ROOT)(
+    '仓里的 agents/skills/ 在但读不了：查和写都没查成，装过的 skill 一个不撤',
+    () => {
+      const { home, repo, manifestText } = seeded();
+      const dir = join(repo, 'agents', 'skills');
+      chmodSync(dir, 0o000);
+      try {
+        expectStopped(home, repo, manifestText, '读不了仓里的 agents/skills/（', '没有 agents/skills/');
+      } finally {
+        chmodSync(dir, 0o755);
+      }
+    },
+  );
+
+  it.skipIf(PLATFORM === 'win32' || IS_ROOT)(
+    '仓里的 agents/skills/ 下有文件读不了：查和写都没查成，装过的 skill 一个不撤',
+    () => {
+      const { home, repo, manifestText } = seeded();
+      const file = join(repo, 'agents', 'skills', 'grill-me', 'SKILL.md');
+      chmodSync(file, 0o000);
+      try {
+        expectStopped(home, repo, manifestText, '读不了仓里的 agents/skills/ 下的文件（');
+      } finally {
+        chmodSync(file, 0o644);
+      }
+    },
+  );
+});
+
+describe('清单在但读不了', () => {
+  // 两次 --apply 加一次 --check，每次都会真跑 git（全局忽略）：默认 5 秒在机器忙的时候不够
+  it.skipIf(PLATFORM === 'win32' || IS_ROOT)(
+    '清单文件在但读不了：不当成空清单，--apply 不撤也不新装',
+    { timeout: 30_000 },
+    () => {
+      const bin = tempDir('bin');
+      fakeBin(bin, 'claude');
+      fakeBin(bin, 'codex');
+      const env = { PATH: bin, PATHEXT: '.CMD' };
+      const home = tempDir('home');
+      const repo = makeRepo({ 'grill-me': { 'SKILL.md': '仓里的\n' } });
+      const first = run(['--apply', '--home', home, '--repo', repo], { env });
+      expect(first.code, first.out + first.err).toBe(0);
+
+      rmSync(join(home, '.agents', 'skills', 'grill-me'), { recursive: true });
+      put(home, '.claude/skills/chain-first/SKILL.md', '别撤我\n');
+      const manifestFile = join(home, '.fleet-dao', 'agents-sync.json');
+      const doc = JSON.parse(readFileSync(manifestFile, 'utf8')) as { skills: Record<string, string[]> };
+      doc.skills['.claude/skills'] = [...(doc.skills['.claude/skills'] ?? []), 'chain-first'];
+      const manifestText = `${JSON.stringify(doc, null, 2)}\n`;
+      writeFileSync(manifestFile, manifestText);
+
+      chmodSync(manifestFile, 0o000);
+      try {
+        const check = run(['--check', '--home', home, '--repo', repo], { env });
+        expect(check.code, check.out).toBe(2);
+        expect(check.out).toContain('没查成');
+        expect(check.out).toContain('读不了（EACCES）');
+        expect(check.out).not.toContain('没有 skill 可分发');
+
+        const applied = run(['--apply', '--home', home, '--repo', repo], { env });
+        expect(applied.code, applied.out).toBe(1);
+        expect(applied.out).toContain('没做成');
+        expect(applied.out).toContain('读不了（EACCES）');
+        expect(applied.out).toContain('一个没动');
+        expect(applied.out).not.toContain('装上了');
+        expect(applied.out).not.toContain('撤掉了');
+        expect(get(home, '.claude/skills/chain-first/SKILL.md')).toBe('别撤我\n');
+        expect(existsSync(join(home, '.agents', 'skills', 'grill-me'))).toBe(false);
+        expect(get(home, '.claude/skills/grill-me/SKILL.md')).toBe('仓里的\n');
+      } finally {
+        chmodSync(manifestFile, 0o644);
+      }
+      expect(readFileSync(manifestFile, 'utf8')).toBe(manifestText);
     },
   );
 });
