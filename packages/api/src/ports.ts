@@ -1200,10 +1200,11 @@ export class InvalidCursorError extends Error {
 }
 
 /**
- * 查询撞上了被 DDL 锁住的表，等锁本身也超时了（Postgres 57014 语句超时 / 55P03 等锁超时，见
- * pg-store.ts 的 withStatementTimeout、sqlState）：不是数据或代码的错，是「发布跑迁移的这几秒表被锁着」——
- * 调用方该当成「再等一下、自己重试」，不是当场 500（#364：飞书 outbox 长轮询联查 tasks/repos 撞上这个，
- * 之前直接被 Hono 的全局错误处理接住回 500，回错了「真故障」）。
+ * 查询撞上了被占着锁的会话挡住：等锁等到 Postgres 计时到点（57014 语句超时 / 55P03 等锁超时），
+ * 或卡了几个小时、被 systemd 发布超时就地杀掉（连接的 postgres.js 报「session/connection terminated」，
+ * 不带 SQLSTATE）。三种都是「有个会话占着锁」，不是数据或代码的错——调用方该当成「再等一下、自己重试」，
+ * 不是当场 500（#364：飞书 outbox 长轮询联查 tasks/repos 撞上这个；发现链是 09-27 晚一条迁移
+ * 等锁 4 小时被超时就地杀掉，之前直接被 Hono 的全局错误处理接住回 500，回错了「真故障」）。
  */
 export class TableLockedError extends Error {
   constructor(message: string) {
