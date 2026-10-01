@@ -13,9 +13,7 @@
       "这些是日常不等于别的也放行：往仓里推东西、删东西（本地文件、分支、标签、发布、单子和 PR 的删除）、发布和部署、强推、改仓库设置不在这几条里，照旧按各自的规矩判。"
     ]
   },
-  "additionalDirectories": [
-    "${HOME}/.claude"
-  ],
+  "additionalDirectories": ["${HOME}/.claude"],
   "allow": [
     "Bash",
     "PowerShell",
