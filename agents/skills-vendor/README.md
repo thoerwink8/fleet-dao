@@ -25,8 +25,8 @@
 
 | skill | 为什么 |
 |---|---|
-| `subagent-driven-development`、`dispatching-parallel-agents`（superpowers） | 整套靠派子代理，和创始人 2026-09-28「不再开 Claude 子代理」冲突 |
-| `requesting-code-review`（superpowers） | 流程就是「派一个子代理去审」，同上；本仓审 PR 走 `discuss` 技能的第二意见（别家模型）。创始人 2026-09-30 00:08 列的第一批里有它，逐个文件通读时才发现，所以没收 |
+| `subagent-driven-development`、`dispatching-parallel-agents`（superpowers） | 整套靠派子代理，和创始人 2026-09-28「不再开 Claude 子代理」冲突（那条临时调整 2026-10-01 已撤回，这两个要不要收另走下面「加一个新的」） |
+| `requesting-code-review`（superpowers） | 流程就是「派一个子代理去审」，同上（那条已撤回）；本仓审 PR 走 `discuss` 技能的第二意见（别家模型）。创始人 2026-09-30 00:08 列的第一批里有它，逐个文件通读时才发现，所以没收 |
 | `skill-creator`（anthropics/skills） | 默认流程靠派子代理、用 `claude -p` 循环几百次调 Claude（烧额度），教的描述写法和 `agents/test/skills.test.ts` 的 120 字上限冲突；同上是通读时才发现。本仓写 skill 照 `agents/skills/README.md` |
 | `using-superpowers`、`brainstorming`、`writing-plans`（superpowers） | 会和本仓的规矩抢谁说了算，或和 `best-practice-first`、`discuss` 重叠 |
 
@@ -62,7 +62,6 @@
 
 这些 skill 是别人写给别的环境的，遇到和本仓 `AGENTS.md`、创始人当轮指示冲突，以本仓和创始人为准。已知的几处（全文在 `vendor.lock.json` 的 `notes`）：
 
-- **不开 Claude 子代理**（创始人 2026-09-28）：教「派子代理」的整个 skill 都没收；收下的几个里偶尔提到「委派」，只是提醒核对结果，不是教你去派。
 - **本机不跑全量测试**：skill 里的 `npm test`、「先跑整个项目的测试」，在本仓换成 `pnpm exec vitest run <文件>` 或 `pnpm test:changed`，全量交给 CI；本仓用 pnpm，不用 npm。
 - **密钥、令牌的值不进对话和日志**：`systematic-debugging` 的多层诊断示例（`echo "IDENTITY: ${IDENTITY:+SET}${IDENTITY:-UNSET}"`、`env | grep …`）会把值打出来，本仓只报「有没有设」。
 - **规矩靠 `agents/test/rules/` 里对说明文字的断言钉住**：`test-driven-development/writing-good-tests.md` 说「不要断言文件里有某行文字」，不适用那一处。
