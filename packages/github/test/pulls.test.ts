@@ -130,7 +130,7 @@ describe('开 PR', () => {
     );
   });
 
-  describe('开之前的卫生检查：标题和正文开出去就公开了', () => {
+  describe('开之前的卫生检查：标题、正文、分支名开出去就公开了', () => {
     it('正文里（会话交活时写的总结）有真密钥：不开（HYGIENE_BLOCKED，不可重试），一个请求都不发', async () => {
       const { gh, fake } = setup();
       fake.refs.set('task/24-leak', A);
@@ -169,6 +169,26 @@ describe('开 PR', () => {
           body: { did: ['x'], verified: ['x'], plan: 'P1「工作流」', specs: 'specs/25-x/', changedFiles: [] },
         }),
       ).rejects.toMatchObject({ code: 'HYGIENE_BLOCKED' });
+      expect(fake.requests).toHaveLength(0);
+    });
+
+    it('【故意造出的失败】分支名里有真密钥，标题正文都干净：也不开', async () => {
+      // 分支名进 PR 的网页地址和 git 的分支列表，同样不经推送、推前扫描拦不到
+      const { gh, fake } = setup();
+      const branch = `task/${['ghp', 'M8kD3vQz5nRp1TcW7yLb2HsX4jFg9NaEu6Vi'].join('_')}`;
+      fake.refs.set(branch, A);
+      const err = await gh
+        .openPr({
+          repo,
+          branch,
+          head: A,
+          title: '登录页加验证码',
+          body: { did: ['x'], verified: ['x'], plan: 'P1「工作流」', specs: 'specs/26-x/', changedFiles: [] },
+        })
+        .catch((e: unknown) => e);
+      expect(err).toMatchObject({ code: 'HYGIENE_BLOCKED', retryable: false });
+      expect((err as Error).message).toContain('分支名');
+      expect((err as Error).message).not.toContain('M8kD3vQz5nRp1TcW7yLb2HsX4jFg9NaEu6Vi');
       expect(fake.requests).toHaveLength(0);
     });
 

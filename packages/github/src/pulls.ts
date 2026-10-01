@@ -233,14 +233,15 @@ export async function openPr(
   const body = neutralizeCloseKeywords(rawBody);
   const title = neutralizeCloseKeywords(input.title.trim());
   assertBodySize('PR 正文', body);
-  // 标题和正文（会话交活时写的总结在里面）开出去就公开了，不经 git 推送、推前扫描拦不到：开之前过一遍
-  // （publish-check.ts，只管 fleet-dao 这个仓）
+  // 标题、正文（会话交活时写的总结在里面）和分支名开出去就公开了（分支名进 PR 的网页地址和 git 的分支列表），
+  // 不经 git 推送、推前扫描拦不到：开之前过一遍（publish-check.ts，只管 fleet-dao 这个仓）
   assertPublishable(
     repo,
     `开 ${slug} 上 ${branch} 的 PR`,
     [
       { path: 'PR 标题', text: title },
       { path: 'PR 正文', text: body },
+      { path: '分支名', text: branch },
     ],
     deps.hygieneRepo,
   );

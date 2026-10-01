@@ -87,6 +87,8 @@ export function scanAdded(
   for (const path of changedPaths) {
     const hit = findSecretFile(path);
     if (hit) found.push({ ...hit, path });
+    // 路径本身就是写出去的东西（文件名、目录名）：里面的真密钥照样拦，和 scan.ts 一样（行号 0）
+    for (const textHit of findHits(path)) found.push({ ...textHit, path, line: 0 });
   }
   for (const hunk of hunks) {
     for (const hit of findHits(hunk.text)) {
