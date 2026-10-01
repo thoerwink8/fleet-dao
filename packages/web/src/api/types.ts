@@ -34,7 +34,6 @@ import type {
   RoutingResponse,
   RunSchema,
   RunStepsResponse,
-  SeatBoardResponse,
   SettingSchema,
   SettingsResponse,
   StagePolicySchema,
@@ -78,7 +77,6 @@ export type Ask = z.infer<typeof AskSchema>;
 export type Timeline = z.infer<typeof TimelineResponse>;
 export type TimelineItem = z.infer<typeof TimelineItemSchema>;
 export type RunSteps = z.infer<typeof RunStepsResponse>;
-export type SeatBoard = z.infer<typeof SeatBoardResponse>;
 export type TaskActionBody = z.input<typeof TaskActionRequest>;
 
 export type Routing = z.infer<typeof RoutingResponse>;

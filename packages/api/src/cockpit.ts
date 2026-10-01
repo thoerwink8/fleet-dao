@@ -3,8 +3,6 @@
 import {
   AnswerAskRequest,
   AnswerAskResponse,
-  AnswerSeatNeedRequest,
-  AnswerSeatNeedResponse,
   AuditQuery,
   AuditResponse,
   BoardResponse,
@@ -21,7 +19,6 @@ import {
   RoutingResponse,
   RunStepsResponse,
   SETTING_SCHEMAS,
-  SeatBoardResponse,
   type SettingKey,
   SettingsResponse,
   StageKindSchema,
@@ -294,35 +291,6 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     if (result === 'not_found') throw new ApiError(404, 'ask_not_found', '没有这条追问');
     if (result === 'already_answered') throw new ApiError(409, 'already_answered', '这条追问已经有人回答了');
     return reply(c, AnswerAskResponse, { ok: true });
-  });
-
-  app.get(WebRoutes.seatBoard.path, async (c) => {
-    const listed = await store.listSeatBoards('main');
-    if (!listed.ok) throw new ApiError(500, 'seat_board_unreadable', listed.why);
-    return reply(c, SeatBoardResponse, {
-      projects: listed.boards.map((b) => ({
-        project: b.project,
-        headline: b.doc.headline,
-        updatedAt: b.updatedAt,
-        steps: b.doc.steps,
-        log: b.doc.log,
-        needs: b.doc.needs,
-      })),
-    });
-  });
-
-  app.post(WebRoutes.answerSeatNeed.path, async (c) => {
-    const { option } = await readJson(c, AnswerSeatNeedRequest);
-    const result = await store.answerSeatNeed({
-      id: c.req.param('needId'),
-      option,
-      by: actorOf(c).id,
-    });
-    if (!result.ok && result.reason === 'missing') throw new ApiError(404, 'need_not_found', result.why);
-    if (!result.ok && result.reason === 'already') throw new ApiError(409, 'already_answered', result.why);
-    if (!result.ok && result.reason === 'duplicate') throw new ApiError(409, 'need_duplicate', result.why);
-    if (!result.ok) throw new ApiError(400, 'bad_option', result.why);
-    return reply(c, AnswerSeatNeedResponse, { ok: true });
   });
 
   app.get(WebRoutes.routing.path, async (c) => {

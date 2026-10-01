@@ -27,7 +27,6 @@ import {
   routes,
   scheduledJobs,
   scheduleRuns,
-  seatLeases,
   sessionRuns,
   settings,
   specs,
@@ -404,17 +403,7 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
       );
     }
   }
-  // 帅位租约和认领（#299）
-  if (data.seatLeases?.length) {
-    await db.insert(seatLeases).values(
-      data.seatLeases.map((l) => ({
-        ...l,
-        acquiredAt: date(l.acquiredAt),
-        renewedAt: date(l.renewedAt),
-        handoffAt: dateOpt(l.handoffAt ?? undefined),
-      })),
-    );
-  }
+  // 认领账（#299；帅位座位整张删掉，库表先留着见 #531）
   if (data.claims?.length) {
     await db.insert(issueClaims).values(
       data.claims.map((c) => ({

@@ -300,8 +300,6 @@ export function createIssueIntake(
       note: decision === 'restart' ? 'GitHub 上重开了，接活再派一轮' : '接活自动派',
     });
     if (!claim.ok) {
-      // 不带帅位、不带创始人原话来抢，只会是别人拿着；别的结果是认领这一步自己坏了，照实报错（投递记成出错、对账重放）
-      if (claim.reason !== 'held') throw new Error(`没查成：认领这一步回了 ${claim.reason}（${claim.why}）`);
       log.info(`这张单不自动派：${heldByOtherText(claim.claim, claim.now)}`, {
         deliveryId: event.deliveryId,
         repo: event.repo,

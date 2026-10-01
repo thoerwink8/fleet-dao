@@ -1,11 +1,9 @@
-// 帅位租约和认领的判法（#299，specs/299-帅位只一个/方案.md 第二节）：时间都是库的 now()，读不到、认不出按不是帅位算。
+// 认领账和「认领对得上」的判法（#299，specs/299-帅位只一个/方案.md）：时间都是库的 now()，读不到、认不出算没查成。
 import { describe, expect, it } from 'vitest';
 import {
-  applyBoardWrite,
   CLAIM_STATUS_MAX,
   claimExpired,
   describeClaim,
-  emptySeatBoard,
   engineClaimEnd,
   heldByOtherText,
   type IssueClaim,
@@ -13,100 +11,12 @@ import {
   judgeClaimMatch,
   machineProblem,
   pullOfClaim,
-  readSeatBoard,
-  readSeatSettings,
-  SEAT_DEFAULTS,
-  type SeatLease,
   seatScopeProblem,
-  seatVerdict,
   sessionProblem,
 } from '../src/seat.ts';
 
 const T0 = '2026-09-27T08:00:00.000Z';
 const at = (minutes: number) => new Date(Date.parse(T0) + minutes * 60_000).toISOString();
-
-const lease: SeatLease = {
-  scope: 'main',
-  term: 3,
-  holderMachine: '本机',
-  holderSession: 's1',
-  acquiredAt: at(-100),
-  renewedAt: at(-10),
-  previousMachine: '笔记本',
-  previousSession: 's0',
-  handoff: null,
-  handoffAt: null,
-};
-const me = { machine: '本机', session: 's1', term: 3 };
-
-describe('帅位栏（#199）', () => {
-  const need = {
-    kind: 'need' as const,
-    id: 'n1',
-    question: '先做哪件',
-    options: ['接口', '页面'],
-    recommended: '接口',
-    repo: 'o/r',
-    issue: 12,
-  };
-
-  it('状态写错：拒绝，板不动', () => {
-    const added = applyBoardWrite(
-      emptySeatBoard(),
-      { kind: 'add', id: 's1', order: 1, title: '写', detail: '' },
-      T0,
-    );
-    expect(added.ok).toBe(true);
-    if (!added.ok) return;
-    const bad = applyBoardWrite(added.doc, { kind: 'step', id: 's1', status: 'nope' }, T0);
-    expect(bad).toMatchObject({ ok: false, reason: 'bad' });
-    expect(added.doc.steps[0]?.status).toBe('waiting');
-  });
-
-  it('选项不在列表里：拒绝，这一问还在', () => {
-    const withNeed = applyBoardWrite(emptySeatBoard(), need, T0);
-    expect(withNeed.ok).toBe(true);
-    if (!withNeed.ok) return;
-    const bad = applyBoardWrite(withNeed.doc, { kind: 'answer', id: 'n1', option: '别的', by: 'u' }, T0);
-    expect(bad).toMatchObject({ ok: false, reason: 'bad' });
-    expect(withNeed.doc.needs).toHaveLength(1);
-    const ok = applyBoardWrite(withNeed.doc, { kind: 'answer', id: 'n1', option: '页面', by: 'u' }, T0);
-    expect(ok.ok).toBe(true);
-    if (!ok.ok) return;
-    expect(ok.doc.needs).toHaveLength(0);
-    expect(ok.doc.answers[0]).toMatchObject({ option: '页面', ackedAt: null });
-    const again = applyBoardWrite(ok.doc, { kind: 'answer', id: 'n1', option: '接口', by: 'u' }, T0);
-    expect(again).toMatchObject({ ok: false, reason: 'already' });
-  });
-
-  it('认不出的板不能当成空的', () => {
-    expect(readSeatBoard({ headline: '', steps: 'x', log: [], needs: [], answers: [] }).ok).toBe(false);
-  });
-});
-
-describe('租期、宽限期的配置（settings 表的 seat.leaseMinutes、seat.claimGraceMinutes）', () => {
-  it('没写：用默认，写明用的是默认', () => {
-    expect(readSeatSettings({})).toEqual({ ok: true, settings: SEAT_DEFAULTS, source: 'default' });
-    expect(SEAT_DEFAULTS).toEqual({ leaseMinutes: 45, claimGraceMinutes: 120 });
-  });
-
-  it('写了一项：另一项用默认', () => {
-    expect(readSeatSettings({ leaseMinutes: 30 })).toEqual({
-      ok: true,
-      settings: { leaseMinutes: 30, claimGraceMinutes: 120 },
-      source: 'settings',
-    });
-  });
-
-  it('【故意造出的失败】写了却认不出：明确失败、写明是哪一项，不拿默认顶', () => {
-    for (const bad of [null, 'x', 0, 1.5, 7 * 24 * 60 + 1]) {
-      const got = readSeatSettings({ claimGraceMinutes: bad });
-      expect(got.ok, JSON.stringify(bad)).toBe(false);
-      if (got.ok) throw new Error('认不出的设置不该当成能用');
-      expect(got.why).toMatch(/^设置 seat.claimGraceMinutes 要是 1 到 10080 之间的整数/);
-    }
-  });
-});
 
 describe('座位名、机器名、会话号', () => {
   it('座位只认 main 和 drill:<名字>', () => {
@@ -123,42 +33,6 @@ describe('座位名、机器名、会话号', () => {
     expect(machineProblem('a:b')).toContain('不行');
     expect(sessionProblem('agent:a9f1')).toBeNull();
     expect(sessionProblem('有 空格', '工人名')).toContain('工人名「有 空格」不行');
-  });
-});
-
-describe('现查：还是不是帅位（dbNow 是库的 now()）', () => {
-  it('任期、持有人对得上、没过期：是帅位，带上租约到几点', () => {
-    expect(seatVerdict(lease, me, T0, 45)).toEqual({ ok: true, term: 3, expiresAt: at(35) });
-  });
-
-  it('【故意造出的失败】座位上没人：不是帅位', () => {
-    expect(seatVerdict(null, me, T0, 45)).toMatchObject({ ok: false, reason: 'vacant' });
-  });
-
-  it('【故意造出的失败】帅位换了人（任期号更大、或持有人不同）：不是帅位，写明现在是谁、第几任', () => {
-    const got = seatVerdict({ ...lease, term: 4, holderMachine: '笔记本', holderSession: 's9' }, me, T0, 45);
-    expect(got).toMatchObject({ ok: false, reason: 'replaced' });
-    if (got.ok) throw new Error('换了人还当自己是帅位');
-    expect(got.why).toBe('帅位已经是 笔记本/s9（第 4 任），不是 本机/s1（第 3 任）');
-    // 同一台机器、同一任期，会话不同也不算（两个窗口都被说了「你当帅位」，后说的那个接了班）
-    expect(seatVerdict(lease, { ...me, session: 's2' }, T0, 45)).toMatchObject({ reason: 'replaced' });
-    // 带旧任期号来的：拒
-    expect(seatVerdict(lease, { ...me, term: 2 }, T0, 45)).toMatchObject({ reason: 'replaced' });
-  });
-
-  it('【故意造出的失败】过了租期没续上：不是帅位（fail closed），写明多久没续', () => {
-    const got = seatVerdict(lease, me, at(35), 45);
-    expect(got).toMatchObject({ ok: false, reason: 'expired' });
-    if (got.ok) throw new Error('过期了还当自己是帅位');
-    expect(got.why).toContain('上次续约是 45 分钟前（租期 45 分钟）');
-  });
-
-  it('【故意造出的失败】时刻认不出：没查成，按不是帅位算', () => {
-    expect(seatVerdict({ ...lease, renewedAt: 'yesterday' }, me, T0, 45)).toMatchObject({
-      ok: false,
-      reason: 'unreadable',
-    });
-    expect(seatVerdict(lease, me, 'now', 45)).toMatchObject({ ok: false, reason: 'unreadable' });
   });
 });
 

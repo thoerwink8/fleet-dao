@@ -1,6 +1,6 @@
-// 帅位只一个（#299，specs/299-帅位只一个/方案.md 第二节）：帅位租约一个座位一行，认领每张单一行。判法在 @fleet-dao/core 的
-// seat.ts（状态、主人的几种字样和这里的约束是同一组，改一边两边一起改）；读写在 @fleet-dao/api 的 pg-store.ts。
-// 改这里之前必须知道：心跳、续约、过期一律写库的 now()，不拿各机器的时钟；接班和抢认领都是一条原子语句（方案第二节）。
+// 认领账一张单一行（#299，specs/299-帅位只一个/方案.md 第二节；帅位座位整张删掉见 #531，库表随数据留到删库表那一步）。
+// 判法在 @fleet-dao/core 的 seat.ts（状态、主人的几种字样和这里的约束是同一组，改一边两边一起改）；
+// 读写在 @fleet-dao/api 的 seat-store.ts。库表（0017_seat_claims.sql）暂时保留，和 #531 拆 data 一起删。
 import { sql } from 'drizzle-orm';
 import {
   bigint,
@@ -18,33 +18,6 @@ import {
 import { repos } from './work.ts';
 
 const tz = { withTimezone: true, mode: 'date' } as const;
-
-/**
- * 帅位租约：scope = main 是真帅位，drill:<名字> 是演练（和真帅位互不影响）。term 是第几任，接班一次加一、只增不减，
- * 就是栅栏号：受保护动作带着它来，对不上当场拒。previous_* 是接班时从旧行抄过来的上一任。
- */
-export const seatLeases = pgTable(
-  'seat_leases',
-  {
-    scope: text('scope').primaryKey(),
-    term: bigint('term', { mode: 'number' }).notNull(),
-    holderMachine: text('holder_machine').notNull(),
-    holderSession: text('holder_session').notNull(),
-    acquiredAt: timestamp('acquired_at', tz).notNull(),
-    renewedAt: timestamp('renewed_at', tz).notNull(),
-    previousMachine: text('previous_machine'),
-    previousSession: text('previous_session'),
-    /** 最新一份交接说明（只算补充：交接以从库里现算的为准）。 */
-    handoff: text('handoff'),
-    handoffAt: timestamp('handoff_at', tz),
-  },
-  (t) => [
-    check('seat_leases_term_positive', sql`${t.term} > 0`),
-    check('seat_leases_scope_known', sql`${t.scope} = 'main' or ${t.scope} like 'drill:%'`),
-    check('seat_leases_handoff_shape', sql`(${t.handoff} is null) = (${t.handoffAt} is null)`),
-    check('seat_leases_previous_shape', sql`(${t.previousMachine} is null) = (${t.previousSession} is null)`),
-  ],
-);
 
 /**
  * 认领：每张单一行（主键），记归谁——引擎，或某台机器上的帅位、工人。claim_id 是认领号，每认领一次换一个，是工人的栅栏号。
@@ -111,8 +84,33 @@ export const issueClaims = pgTable(
 );
 
 /**
- * 帅位栏（#199）：一个座位、一个项目一行。四段 jsonb 都是数组，细形状由 core 的 readSeatBoard 判。
- * 首页只读 scope = main。updated_at 和步骤里的时刻都用库的 now()。
+ * 帅位租约（seat_leases）：帅位座位整张删掉（#531）后代码不再读它；表和数据留到删库表那一步（要创始人点头才删数据）。
+ * 这里留着和 `packages/db/migrations/0017_seat_claims.sql` 一致的一份定义，免得 drizzle 把这张表当成多出来的要 drop。
+ */
+export const seatLeases = pgTable(
+  'seat_leases',
+  {
+    scope: text('scope').primaryKey(),
+    term: bigint('term', { mode: 'number' }).notNull(),
+    holderMachine: text('holder_machine').notNull(),
+    holderSession: text('holder_session').notNull(),
+    acquiredAt: timestamp('acquired_at', tz).notNull(),
+    renewedAt: timestamp('renewed_at', tz).notNull(),
+    previousMachine: text('previous_machine'),
+    previousSession: text('previous_session'),
+    handoff: text('handoff'),
+    handoffAt: timestamp('handoff_at', tz),
+  },
+  (t) => [
+    check('seat_leases_term_positive', sql`${t.term} > 0`),
+    check('seat_leases_scope_known', sql`${t.scope} = 'main' or ${t.scope} like 'drill:%'`),
+    check('seat_leases_handoff_shape', sql`(${t.handoff} is null) = (${t.handoffAt} is null)`),
+    check('seat_leases_previous_shape', sql`(${t.previousMachine} is null) = (${t.previousSession} is null)`),
+  ],
+);
+
+/**
+ * 帅位栏（seat_boards）：帅位栏整张删掉（#531）；表和数据同上，留着和 `packages/db/migrations/0022_seat_boards.sql` 一致的一份。
  */
 export const seatBoards = pgTable(
   'seat_boards',

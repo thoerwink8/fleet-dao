@@ -15,8 +15,8 @@ export const MOTHER_LABEL = '母单';
 /**
  * 「本机做」标签（#299 止血，帅位 2026-09-27 定）：帅位留给本机做的单，接活不自动派（判法在 @fleet-dao/core 的 dispatch.ts
  * localGate，那边有同名的一份，两份是同一条规矩）；人明说交给引擎（fleet-api handover）照交。要开单那一刻就贴上
- * （`pnpm issue:new --local`）：事后补贴时，开单那个事件已经把它派走了。认领进库（#299）后它只挡开单那一刻：接过帅位的
- * 机器开完单当场替帅位在库里认领（issue-new 的 claimLocal），之后接活、交单都认库里的认领，标签是它的镜子。
+ * （`pnpm issue:new --local`）：事后补贴时，开单那个事件已经把它派走了。帅位座位整张删掉（#531）后它只挡开单那一刻：
+ * 本机不再在库里认领，之后接活、交单都按自动派的规矩；要拦就 `--founder "<创始人原话>"` 明说不派。
  */
 export const LOCAL_LABEL = '本机做';
 

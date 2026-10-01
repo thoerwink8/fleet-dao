@@ -27,13 +27,8 @@ import {
   familyGate,
   handoverDecision,
   heldByOtherText,
-  holderText,
   localGate,
-  MAIN_SEAT,
-  machineProblem,
   replicaVerdict,
-  seatScopeProblem,
-  sessionProblem,
   versionGate,
 } from '@fleet-dao/core';
 import { requirementWorkflowId } from '@fleet-dao/shared';
@@ -50,14 +45,11 @@ import type {
   IssuePlan,
   IssuePlanReader,
   RequirementWorkflows,
-  SeatActor,
   Store,
   User,
   WorkflowControl,
 } from './ports.ts';
-import { WorkflowGoneError } from './ports.ts';
-import { CLAIM_USAGE, type ClaimCliDeps, runClaim, runSeat, SEAT_USAGE, SeatCliError } from './seat-cli.ts';
-import { seatActor } from './seat-store.ts';
+import { CLAIM_USAGE, type ClaimCliDeps, runClaim, SeatCliError } from './seat-cli.ts';
 import { isCockpitUser } from './session.ts';
 
 export class CliError extends Error {
@@ -453,9 +445,7 @@ export interface HandoverArgs {
   issueNumber: number;
   /** 谁说的、为什么交：原样写进操作记录。 */
   reason: string;
-  /** 帅位交单（#299）：带着座位和任期来，和认领同一个事务里核。 */
-  seat?: SeatActor;
-  /** 创始人原话（#299）：运维手敲、不带任期时要它；本机认领着的单要它才能改派给引擎。 */
+  /** 创始人原话：本机认领着的单要它才能改派给引擎。 */
   founder?: string;
 }
 
@@ -468,12 +458,13 @@ const OPS_HANDOVER = { kind: 'engine', id: 'ops:handover' } as const;
 /** --reason、--founder 最长几个字：操作记录里的一句话，不是一篇文档。 */
 const MAX_HANDOVER_REASON = 500;
 
-const HANDOVER_OPTIONS = ['reason', 'machine', 'session', 'term', 'scope', 'founder'] as const;
+const HANDOVER_OPTIONS = ['reason', 'founder'] as const;
 type HandoverOption = (typeof HANDOVER_OPTIONS)[number];
 
 /**
- * 仓、issue 号两个位置参数，外加必带的 --reason（也认 --reason=…）；帅位交单带 --machine、--session、--term（三样一起给，
- * --scope 不给是 main），运维手敲的带 --founder。认不出的一律拒（退出码 2），不猜。
+ * 仓、issue 号两个位置参数，外加必带的 --reason（也认 --reason=…）；本机认领着的要带 --founder。
+ * 认不出的一律拒（退出码 2），不猜。帅位交单（--machine、--session、--term、--scope）随座位整张删掉（#531）：
+ * 给了那些参数在这里就认不出。
  */
 export function parseHandoverArgs(argv: readonly string[]): HandoverArgs {
   const positional: string[] = [];
@@ -520,21 +511,6 @@ export function parseHandoverArgs(argv: readonly string[]): HandoverArgs {
     const founder = text('founder', '创始人的原话');
     if (!founder) throw new CliError(`--founder 要写创始人的原话，不能是空的。${HANDOVER_USAGE}`, 2);
     args.founder = founder;
-  }
-  const seatKeys = (['machine', 'session', 'term'] as const).filter((k) => options.has(k));
-  if (seatKeys.length > 0 || options.has('scope')) {
-    if (seatKeys.length !== 3)
-      throw new CliError(`帅位交单要 --machine、--session、--term 三样一起给。${HANDOVER_USAGE}`, 2);
-    const machine = options.get('machine')?.trim() ?? '';
-    const session = options.get('session')?.trim() ?? '';
-    const scope = options.get('scope')?.trim() || MAIN_SEAT;
-    const bad = machineProblem(machine) ?? sessionProblem(session) ?? seatScopeProblem(scope);
-    if (bad) throw new CliError(`${bad}。${HANDOVER_USAGE}`, 2);
-    const termDigits = /^(\d{1,9})$/.exec(options.get('term')?.trim() ?? '')?.[1];
-    const term = termDigits === undefined ? 0 : Number(termDigits);
-    if (term <= 0)
-      throw new CliError(`认不出任期「${options.get('term')}」：要写成正整数。${HANDOVER_USAGE}`, 2);
-    args.seat = { machine, session, scope, term };
   }
   return args;
 }
@@ -627,41 +603,26 @@ export async function handover(input: {
 
   const restart = decision.act === 'restart';
   const workflowId = requirementWorkflowId(repo, args.issueNumber);
-  const who = args.seat
-    ? `（帅位 ${args.seat.machine}/${args.seat.session}，${args.seat.scope} 第 ${args.seat.term} 任）`
-    : args.founder
-      ? `（创始人原话：${args.founder}）`
-      : '';
-  // 认领（#299，方案第四节）：交单也和本机（帅位、工人）抢库里同一行。帅位上线后（库里有 main 这个座位）交单是受保护动作：
-  // 帅位带着任期来、和认领同一个事务里核；运维手敲的带创始人原话。帅位还没人接过时照旧不核（上线过渡）
+  const who = args.founder ? `（创始人原话：${args.founder}）` : '';
+  // 认领（#299，方案第四节）：交单也和本机（帅位、工人）抢库里同一行。帅位座位整张删掉（#531）后，交单只剩运维
+  // 这一路：要打创始人原话才能越过仍活着的本机认领。
   let claimed: Extract<EngineClaimResult, { ok: true }> | undefined;
   if (decision.act !== 'noop') {
-    if (!args.seat && !args.founder) {
-      const seat = await dbStep(no, () => store.readSeat(MAIN_SEAT));
-      if (seat.lease)
-        throw new CliError(
-          `${no}帅位已经上线（现在是 ${holderText(seat.lease)}，第 ${seat.lease.term} 任）：交单要带着任期（--machine … --session … --term …），运维手敲的带创始人原话（--founder "…"）`,
-        );
-    }
     const r = await dbStep(no, () =>
       store.claimForEngine({
         repoId: repo.id,
         issueNumber: args.issueNumber,
         workflowId,
-        actor: args.seat ? seatActor(args.seat) : OPS_HANDOVER,
-        seat: args.seat,
+        actor: OPS_HANDOVER,
         founder: args.founder,
         note: `交给 fleet${who}：${args.reason}`,
       }),
     );
     if (!r.ok) {
-      if (r.reason === 'held')
-        throw new CliError(
-          `${no}${label}（${place}）${heldByOtherText(r.claim, r.now)}。要改派给引擎，带上创始人原话 --founder "…"：本机那份认领当场作废`,
-          3,
-        );
-      if (r.reason === 'not_seat') throw new CliError(`${no}不是帅位：${r.why}`, 3);
-      throw new CliError(`${no}${r.why}`);
+      throw new CliError(
+        `${no}${label}（${place}）${heldByOtherText(r.claim, r.now)}。要改派给引擎，带上创始人原话 --founder "…"：本机那份认领当场作废`,
+        3,
+      );
     }
     claimed = r;
   }
@@ -708,7 +669,7 @@ export async function handover(input: {
           ...target,
           claimId: claimed.claim.claimId,
           reason: `交单时${failure}`,
-          actor: args.seat ? seatActor(args.seat) : OPS_HANDOVER,
+          actor: OPS_HANDOVER,
         });
         claimNotes.push(`这次新认领的（认领 ${id}）已放下`);
       }
@@ -813,7 +774,7 @@ export interface CliDeps {
   /** 连 Temporal 起工作流（handover 用）：地址、命名空间、任务队列按环境读（config.ts 的 temporalSettings）。 */
   openTemporal(env: CliEnv): Promise<HandoverTemporal>;
   now(): Date;
-  /** 标准输入整段读完（seat handoff 的交接说明）。不给就是真的 process.stdin。 */
+  /** 标准输入整段读完。不给就是真的 process.stdin。 */
   readStdin?: () => Promise<string>;
   /** 提醒的处理状态、跟进单、静默（alert 命令用）。不给就是真的：连库，法国上再读发布记录。 */
   openAlertWork?: (url: string, env: CliEnv) => Promise<{ alerts: AlertWorkPort; close(): Promise<void> }>;
@@ -927,7 +888,6 @@ const USAGES: Record<string, string> = {
   'set-password': USAGE,
   dispatch: DISPATCH_USAGE,
   handover: HANDOVER_USAGE,
-  seat: SEAT_USAGE,
   claim: CLAIM_USAGE,
   alert: ALERT_USAGE,
 };
@@ -991,8 +951,7 @@ export async function runCli(argv: readonly string[], deps: CliDeps = processDep
       await close();
     }
   }
-  if (command === 'seat' || command === 'claim' || command === 'alert')
-    return runSeatOrClaim(command, rest, deps);
+  if (command === 'claim' || command === 'alert') return runSeatOrClaim(command, rest, deps);
   deps.err(Object.values(USAGES).join('\n'));
   return 2;
 }
@@ -1031,11 +990,11 @@ function lazy<T extends object>(open: () => Promise<T>): T {
 }
 
 /**
- * seat、claim（#299）、alert（design 15.3「谁在处理」）：带 --json 只往标准输出打一行 JSON（本机脚本读），不带打给人看的话；
+ * claim（#299）、alert（design 15.3「谁在处理」）：带 --json 只往标准输出打一行 JSON（本机脚本读），不带打给人看的话；
  * 出错也照这个样子打。退出码见 seat-cli.ts 开头：0 好了，3 不是你的，1 没做成（连不上库、库出错），2 参数不对。
  */
 async function runSeatOrClaim(
-  command: 'seat' | 'claim' | 'alert',
+  command: 'claim' | 'alert',
   rest: readonly string[],
   deps: CliDeps,
 ): Promise<number> {
@@ -1069,49 +1028,15 @@ async function runSeatOrClaim(
     alertsOpened ??= Promise.resolve().then(() => openAlertWork(databaseUrl(deps.env), deps.env));
     return (await alertsOpened).alerts;
   });
-  // 认领那几样外面的（#348）：GitHub、Temporal 都用到才连（Temporal 用完各自关：handover 自己关它开的那份）
+  // 认领那几样外面的（#348）：GitHub 用到才连
   const claims = claimsOnDemand(deps);
   const claimDeps: ClaimCliDeps = {
     store,
     claims: claims.get,
-    stopEngine: async (workflowId, { by, reason }) => {
-      const t = await deps.openTemporal(deps.env);
-      try {
-        if (!t.workflows) throw new CliError('这里没接 Temporal 的工作流信号，叫停不了引擎', 1);
-        await t.workflows.signal(workflowId, { name: 'stop', by, reason });
-        return 'stopped';
-      } catch (err) {
-        if (err instanceof WorkflowGoneError) return 'gone';
-        throw err;
-      } finally {
-        await t.close().catch(() => {});
-      }
-    },
-    handoverToEngine: ({ owner, name, issueNumber, reason, seat, founder }) =>
-      handover({
-        store,
-        plans: () => deps.openIssuePlans(deps.env),
-        temporal: () => deps.openTemporal(deps.env),
-        claims: claims.get,
-        args: {
-          owner,
-          name,
-          issueNumber,
-          reason,
-          ...(seat ? { seat } : {}),
-          ...(founder !== undefined ? { founder } : {}),
-        },
-        operator: operatorName(deps.env),
-        now: () => deps.now(),
-      }),
   };
   try {
     const result =
-      command === 'seat'
-        ? await runSeat(rest, { store, readStdin: deps.readStdin ?? readAllStdin })
-        : command === 'claim'
-          ? await runClaim(rest, claimDeps)
-          : await runAlert(rest, { store, alerts });
+      command === 'claim' ? await runClaim(rest, claimDeps) : await runAlert(rest, { store, alerts });
     deps.out(json ? JSON.stringify(result.json) : result.text);
     return result.code;
   } catch (err) {

@@ -1,23 +1,22 @@
-// 帅位租约和认领的读写语句（#299，specs/299-帅位只一个/方案.md 第二节）。判法在 @fleet-dao/core 的 seat.ts，把几条语句
-// 串进一个事务、记操作记录的是 @fleet-dao/api 的 pg-store.ts；这里只有语句本身。
+// 认领账的读写语句（#299，specs/299-帅位只一个/方案.md 第二节；帅位座位整张删掉见 #531）。
+// 判法在 @fleet-dao/core 的 seat.ts，把几条语句串进一个事务、记操作记录的是 @fleet-dao/api 的 seat-store.ts；
+// 这里只有语句本身。
 // 改这里之前必须知道：
-// - 时间一律用库的 now()（事务开始的时刻）：心跳、续约写它，读回时把它一起交出去（毫秒数），判过期用它，不用调用方的钟。
-// - 接班、抢认领都是一条语句（insert … on conflict … returning）：两边同时来只有一边拿到，不靠先读后写。
-// - 受保护动作在同一个事务里先 lockSeat（for share）再写：接班那条要等这个事务提交才能改座位，动作就排在接班之前。
+// - 时间一律用库的 now()（事务开始的时刻）：心跳写它，读回时把它一起交出去（毫秒数），判过期用它，不用调用方的钟。
+// - 抢认领都是一条语句（insert … on conflict … returning）：两边同时来只有一边拿到，不靠先读后写。
 import { randomUUID } from 'node:crypto';
 import { requirementWorkflowId } from '@fleet-dao/shared/workflow-ids';
-import { and, eq, getTableColumns, inArray, lt, or, sql } from 'drizzle-orm';
+import { and, eq, getTableColumns, inArray, lt, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
-import { auditLog, issueClaims, repos, seatBoards, seatLeases, settings, tasks } from '../schema/index.ts';
+import { auditLog, issueClaims, repos, tasks } from '../schema/index.ts';
 
-export type SeatLeaseRow = typeof seatLeases.$inferSelect;
 export type IssueClaimRow = typeof issueClaims.$inferSelect;
 export type ClaimOwnerKindRow = IssueClaimRow['ownerKind'];
 export type ClaimStateRow = IssueClaimRow['state'];
 
 /** 库的 now()，毫秒数（两种驱动都读成数字）。 */
 const nowMs = sql<number>`floor(extract(epoch from now()) * 1000)::float8`.mapWith(Number);
-/** 只有一行的表：座位、认领那一行不在时也读得到库的 now()。 */
+/** 只有一行的表：认领那一行不在时也读得到库的 now()。 */
 const ONE_ROW = sql`(values (1)) as one (x)`;
 const toDate = (ms: number) => new Date(ms);
 
@@ -42,114 +41,6 @@ export async function readDbNow(db: Db): Promise<Date> {
   return toDate(row.now);
 }
 
-// —— 帅位 ——
-
-/** 读一个座位此刻的样子。lock 给 true 就 `for share` 锁住这一行（受保护动作用，要在事务里）。 */
-export async function readSeat(db: Db, scope: string, lock = false): Promise<WithNow<SeatLeaseRow | null>> {
-  if (lock) {
-    // for share 不能加在外连接可能为空的那一侧：直接查这一行；同一个事务里 now() 都是同一个时刻
-    const [row] = await db
-      .select({ ...getTableColumns(seatLeases), now: nowMs })
-      .from(seatLeases)
-      .where(eq(seatLeases.scope, scope))
-      .for('share');
-    if (!row) return { value: null, now: await readDbNow(db) };
-    const { now, ...lease } = row;
-    return { value: lease, now: toDate(now) };
-  }
-  const [row] = await db
-    .select({ now: nowMs, lease: seatLeases })
-    .from(ONE_ROW)
-    .leftJoin(seatLeases, eq(seatLeases.scope, scope));
-  if (!row) throw new Error('读座位时库连一行都没回（select 一行常量也没回来）');
-  return { value: row.lease, now: toDate(row.now) };
-}
-
-/**
- * 接班：一条语句。座位上没人就当第 1 任；有人就任期加一、把原来的持有人抄进 previous_*。不看旧的同不同意、过没过期：
- * 后说的算，任期号一直往上加。
- */
-export async function takeSeatRow(
-  db: Db,
-  input: { scope: string; machine: string; session: string },
-): Promise<WithNow<SeatLeaseRow>> {
-  const [row] = await db
-    .insert(seatLeases)
-    .values({
-      scope: input.scope,
-      term: 1,
-      holderMachine: input.machine,
-      holderSession: input.session,
-      acquiredAt: sql`now()`,
-      renewedAt: sql`now()`,
-    })
-    .onConflictDoUpdate({
-      target: seatLeases.scope,
-      set: {
-        term: sql`${seatLeases.term} + 1`,
-        previousMachine: sql`${seatLeases.holderMachine}`,
-        previousSession: sql`${seatLeases.holderSession}`,
-        holderMachine: sql`excluded.holder_machine`,
-        holderSession: sql`excluded.holder_session`,
-        acquiredAt: sql`now()`,
-        renewedAt: sql`now()`,
-      },
-    })
-    .returning({ ...getTableColumns(seatLeases), now: nowMs });
-  if (!row) throw new Error(`接班没写进去：座位 ${input.scope} 的 insert … on conflict 没回行`);
-  const { now, ...lease } = row;
-  return { value: lease, now: toDate(now) };
-}
-
-/** 续约：任期、持有人都对得上才续（过了期也续：过期只说明联系不上，没有别人接班就还是它）。对不上回 null。 */
-export async function renewSeatRow(
-  db: Db,
-  input: { scope: string; term: number; machine: string; session: string },
-): Promise<WithNow<SeatLeaseRow> | null> {
-  const [row] = await db
-    .update(seatLeases)
-    .set({ renewedAt: sql`now()` })
-    .where(
-      and(
-        eq(seatLeases.scope, input.scope),
-        eq(seatLeases.term, input.term),
-        eq(seatLeases.holderMachine, input.machine),
-        eq(seatLeases.holderSession, input.session),
-      ),
-    )
-    .returning({ ...getTableColumns(seatLeases), now: nowMs });
-  if (!row) return null;
-  const { now, ...lease } = row;
-  return { value: lease, now: toDate(now) };
-}
-
-/** 写交接说明（整份换掉），带上写的时刻（库的 now）。调用方先在同一个事务里核过是谁写的。 */
-export async function writeHandoffRow(db: Db, input: { scope: string; text: string }): Promise<SeatLeaseRow> {
-  const [row] = await db
-    .update(seatLeases)
-    .set({ handoff: input.text, handoffAt: sql`now()` })
-    .where(eq(seatLeases.scope, input.scope))
-    .returning();
-  if (!row) throw new Error(`写交接说明时座位 ${input.scope} 不在了`);
-  return row;
-}
-
-/** settings 表里 seat.leaseMinutes、seat.claimGraceMinutes 两项的原值（没写的是 undefined）；认不认得出由 core 的 readSeatSettings 判。 */
-export async function readSeatSetting(
-  db: Db,
-): Promise<{ leaseMinutes?: unknown; claimGraceMinutes?: unknown }> {
-  const rows = await db
-    .select({ key: settings.key, value: settings.value })
-    .from(settings)
-    .where(inArray(settings.key, ['seat.leaseMinutes', 'seat.claimGraceMinutes']));
-  const out: { leaseMinutes?: unknown; claimGraceMinutes?: unknown } = {};
-  for (const r of rows) {
-    if (r.key === 'seat.leaseMinutes') out.leaseMinutes = r.value;
-    else out.claimGraceMinutes = r.value;
-  }
-  return out;
-}
-
 // —— 认领 ——
 
 export interface NewClaimRow {
@@ -171,15 +62,8 @@ export interface NewClaimRow {
 /**
  * 抢这张单：一条语句。没有行就建；有行但已经结束了（done / released / voided）就整行换成新的认领；还活着就不动、回 null
  * （调用方再读是谁拿着）。两边同时来，后到的那条在冲突上等先到的提交，再按这里的条件判：只有一边拿到。
- * seatReservationOf 给了座位名：这个座位的帅位自己占着的（owner 是 seat，开单时替帅位认领的那种）也换——调用方在同一个
- * 事务里核过它就是这个座位的现任帅位（派工人接手帅位占着的单）。
  */
-export async function takeClaimRow(
-  db: Db,
-  input: NewClaimRow,
-  options: { seatReservationOf?: string | undefined } = {},
-): Promise<WithNow<IssueClaimRow> | null> {
-  const scope = options.seatReservationOf;
+export async function takeClaimRow(db: Db, input: NewClaimRow): Promise<WithNow<IssueClaimRow> | null> {
   const ended = inArray(issueClaims.state, [...ENDED]);
   const [row] = await db
     .insert(issueClaims)
@@ -212,10 +96,7 @@ export async function takeClaimRow(
         endReason: sql`null`,
         note: sql`excluded.note`,
       },
-      setWhere:
-        scope === undefined
-          ? ended
-          : (or(ended, and(eq(issueClaims.ownerKind, 'seat'), eq(issueClaims.seatScope, scope))) ?? ended),
+      setWhere: ended,
     })
     .returning({ ...getTableColumns(issueClaims), now: nowMs });
   if (!row) return null;
@@ -487,106 +368,11 @@ export async function followTaskOnEngineClaim(
     seatTerm: null,
     state: 'doing',
     workflowId: requirementWorkflowId({ owner: task.owner, name: task.name }, task.issueNumber),
-    // 引擎的认领不按心跳作废，这一格用不上：填默认（和 core 的 SEAT_DEFAULTS.claimGraceMinutes 同一个数）
+    // 引擎的认领不按心跳作废，这一格用不上：填默认（和 core 的默认值同一个数）
     graceMinutes: 120,
     note: '引擎在做这张单，库里却没有还活着的认领：写快照时补上',
   });
   if (!adopted) return null;
   await audit(adopted.value, 'claim.take', '引擎在做这张单，库里却没有还活着的认领：写快照时补上');
   return adopted.value;
-}
-
-// —— 帅位栏（#199）——
-
-export type SeatBoardRow = typeof seatBoards.$inferSelect;
-
-/** 一个座位下的板，按项目名排。 */
-export async function listSeatBoardRows(db: Db, scope: string): Promise<WithNow<SeatBoardRow[]>> {
-  const now = await readDbNow(db);
-  const rows = await db
-    .select()
-    .from(seatBoards)
-    .where(eq(seatBoards.scope, scope))
-    .orderBy(seatBoards.project);
-  return { value: rows, now };
-}
-
-/** 锁住这一行（要在事务里）。没有是 null。 */
-export async function lockSeatBoardRow(
-  db: Db,
-  scope: string,
-  project: string,
-): Promise<WithNow<SeatBoardRow | null>> {
-  const [row] = await db
-    .select({ ...getTableColumns(seatBoards), now: nowMs })
-    .from(seatBoards)
-    .where(and(eq(seatBoards.scope, scope), eq(seatBoards.project, project)))
-    .for('update');
-  if (!row) return { value: null, now: await readDbNow(db) };
-  const { now, ...board } = row;
-  return { value: board, now: toDate(now) };
-}
-
-/** 锁住首页要的全部板（scope = main），点选项时用，免得两下同时改同一行。 */
-export async function lockMainSeatBoards(db: Db): Promise<WithNow<SeatBoardRow[]>> {
-  const rows = await db
-    .select({ ...getTableColumns(seatBoards), now: nowMs })
-    .from(seatBoards)
-    .where(eq(seatBoards.scope, 'main'))
-    .orderBy(seatBoards.project)
-    .for('update');
-  if (rows.length === 0) return { value: [], now: await readDbNow(db) };
-  const now = rows[0]?.now;
-  if (now === undefined) return { value: [], now: await readDbNow(db) };
-  return {
-    value: rows.map(({ now: _now, ...board }) => board),
-    now: toDate(now),
-  };
-}
-
-export async function insertSeatBoardRow(
-  db: Db,
-  row: {
-    id: string;
-    scope: string;
-    project: string;
-    headline: string;
-    steps: unknown;
-    log: unknown;
-    needs: unknown;
-    answers: unknown;
-    updatedAt: Date;
-  },
-): Promise<SeatBoardRow> {
-  const [saved] = await db.insert(seatBoards).values(row).returning();
-  if (!saved) throw new Error('写入帅位栏没有返回行');
-  return saved;
-}
-
-export async function updateSeatBoardRow(
-  db: Db,
-  row: {
-    id: string;
-    headline: string;
-    steps: unknown;
-    log: unknown;
-    needs: unknown;
-    answers: unknown;
-    updatedAt: Date;
-  },
-): Promise<SeatBoardRow> {
-  const [saved] = await db
-    .update(seatBoards)
-    .set({
-      headline: row.headline,
-      steps: row.steps,
-      log: row.log,
-      needs: row.needs,
-      answers: row.answers,
-      updatedAt: row.updatedAt,
-    })
-    .where(eq(seatBoards.id, row.id))
-    .returning();
-  if (!saved) throw new Error(`帅位栏 ${row.id} 锁住了却更新不到`);
-  return saved;
 }

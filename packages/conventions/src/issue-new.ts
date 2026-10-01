@@ -7,12 +7,11 @@
 // 再挂里程碑——接活只派挂在当前版本上的独立单（design 第九节「在哪能做与接活开关」，母单、子单不派），带着当前版本先建、
 // 事后再挂到母单下面的，中间那一下是一张挂在当前版本上的独立单，开关开着就被派走了。--local 给这张单多贴「本机做」标签
 // （帅位留给本机做的，接活不自动派）：和类别标签在同一次建单里贴上，不事后补——开单那个事件一到，没贴的已经被派走了。
-// 这台接过帅位的（~/.fleet-dao/seat/ 里有 main 的记录），开完再当场替帅位在库里认领这张单（#299，claim.mjs take --owner
-// seat）：标签挡开单那一刻，库里的认领挡之后（接活、交单都认它）；没接过帅位的只贴标签、明说没认领。
 // 带 --specs 时，完整正文写进 specs/<号>-<短名>/需求.md，issue 上只留第一个小标题之前那段（原话、AI 理解）
 // 和需求文档的路径（第七节：完整需求只在仓里存一份）。gh 出错原样报出来，退出码非 0。
+// 帅位座位整张删掉（#531）：开单时替帅位认领那一步（claimLocal）一并删——本机不再在库里认领。
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { doneSection } from './debt.ts';
@@ -33,16 +32,8 @@ export interface GhResult {
 }
 export type Gh = (args: string[]) => Promise<GhResult>;
 
-/** --local 开完单替帅位认领的结果（#299）：认领上了、没接过帅位所以没认领、认领没成。 */
-export type LocalClaim =
-  | { state: 'claimed'; text: string }
-  | { state: 'skipped'; why: string }
-  | { state: 'failed'; why: string };
-
 export interface IssueNewDeps {
   gh: Gh;
-  /** --local 开完单替帅位在库里认领（claim.mjs take --owner seat）；不给就不认领（测试、没装脚本的地方）。不抛错。 */
-  claimLocal?: (issueNumber: number) => Promise<LocalClaim>;
   /** 仓根：specs/ 在它下面。 */
   root: string;
   /** --body-file 相对哪个目录（pnpm 跑脚本时是 INIT_CWD，也就是敲命令的地方）。 */
@@ -60,8 +51,6 @@ export interface IssueNewResult {
   parent?: number | undefined;
   /** 贴了「本机做」（--local）时是 true。 */
   local?: true | undefined;
-  /** --local 时替帅位认领的结果（给了 claimLocal 才有）。 */
-  claimed?: LocalClaim | undefined;
 }
 
 export const USAGE =
@@ -133,9 +122,7 @@ export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Pro
   const { parent } = o;
   const local = o.local || undefined;
   if (parent !== undefined) await attachToParent(deps.gh, { number, url, parent, milestone, specs: o.specs });
-  // 替帅位认领：单一开就认，越早越好（标签只挡开单那一刻）
-  const claimed = o.local && deps.claimLocal ? await deps.claimLocal(number) : undefined;
-  if (o.specs === undefined) return { number, url, milestone, specsFile: undefined, parent, local, claimed };
+  if (o.specs === undefined) return { number, url, milestone, specsFile: undefined, parent, local };
   try {
     return {
       number,
@@ -144,7 +131,6 @@ export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Pro
       specsFile: writeSpecs(deps.root, number, o.specs, specsDoc(o.title, number, milestone, body)),
       parent,
       local,
-      claimed,
     };
   } catch (e) {
     throw new Error(`单开了（#${number} ${url}），可需求文档没建成：${message(e)}。`);
@@ -413,25 +399,4 @@ function isDir(path: string): boolean {
 
 function message(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
-}
-
-/**
- * 这台接没接过某个座位的帅位（seat.mjs take 记在 ~/.fleet-dao/seat/<座位>__<会话号>.json，文件名是 encodeURIComponent 过的）。
- * 目录不在是没接过；读不了、文件名认不出算「可能接过」：交给 claim.mjs 去认，它会把读不了、认不出照实报出来。
- */
-export function hasSeatRecord(home: string, scope = 'main'): boolean {
-  let names: string[];
-  try {
-    names = readdirSync(join(home, '.fleet-dao', 'seat'));
-  } catch (e) {
-    return (e as NodeJS.ErrnoException).code !== 'ENOENT';
-  }
-  return names.some((n) => {
-    if (!n.endsWith('.json')) return false;
-    try {
-      return decodeURIComponent(n).startsWith(`${scope}__`);
-    } catch {
-      return true;
-    }
-  });
 }

@@ -1,5 +1,6 @@
 // issue 进来 → 任务行、需求工作流；关了、重开、改了、评论了 → 按设计发信号（specs/43-接活入口/方案.md）。
 // 走真的 webhook 接口（验签、落库、白名单），工作流用 harness 里记录调用的假的。
+import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { FUSION_WORKFLOW_TYPE, requirementWorkflowId } from '@fleet-dao/shared';
@@ -1045,19 +1046,32 @@ describe('读不到、认不出：明确失败或记下原因，并告警', () =
 
 describe('认领（#299）：接活和本机抢同一行，本机拿着就不派；待起的由对账补起', () => {
   const INTAKE_ACTOR = { kind: 'engine', id: 'github-intake' } as const;
-  const MAIN = { scope: 'main', machine: '本机', session: 's1' };
 
-  /** 帅位接班、派工人认领这张单（本机拿着）。 */
-  async function localHolds(h: ReturnType<typeof setup>['h'], issueNumber = 40) {
-    await h.store.takeSeat(MAIN);
-    const r = await h.store.takeClaim({
+  /** 直接在本机的认领账里塞一份本机工人的认领（帅位座位整张删掉 #531：本机不再经 Store 拿，这里照老样子造出来）。 */
+  function localHolds(h: ReturnType<typeof setup>['h'], issueNumber = 40) {
+    const at = T0.toISOString();
+    const claim = {
       repoId: IDS.repo,
       issueNumber,
-      seat: { ...MAIN, term: 1 },
-      owner: { kind: 'worker', label: 'w1' },
-    });
-    if (!r.ok) throw new Error('用例没认领上');
-    return r.claim;
+      claimId: randomUUID(),
+      ownerKind: 'worker' as const,
+      ownerMachine: '本机',
+      ownerLabel: 'w1',
+      seatScope: 'main',
+      seatTerm: 1,
+      state: 'claimed' as const,
+      workflowId: null,
+      prNumbers: [],
+      graceMinutes: 120,
+      claimedAt: at,
+      heartbeatAt: at,
+      updatedAt: at,
+      endedAt: null,
+      endReason: null,
+      note: null,
+    };
+    h.store.data.claims.push(claim);
+    return claim;
   }
 
   /** 引擎抢到了、还在待起（接活起工作流没成那种）。 */
@@ -1118,16 +1132,15 @@ describe('认领（#299）：接活和本机抢同一行，本机拿着就不派
     expect((await deliver(h, 'issues', issuesEvent('opened'), { delivery: 'first' })).status).toBe(500);
     const pending = claimOf(h);
     expect(pending).toMatchObject({ ownerKind: 'engine', state: 'pending_start' });
-    // 本机这时来认领：引擎拿着（待起），抢不到
-    await h.store.takeSeat(MAIN);
-    expect(
-      await h.store.takeClaim({
-        repoId: IDS.repo,
-        issueNumber: 40,
-        seat: { ...MAIN, term: 1 },
-        owner: { kind: 'worker', label: 'w1' },
-      }),
-    ).toMatchObject({ ok: false, reason: 'held' });
+    // 引擎在 pending_start 拿着（待起）：再来一次不另抢，fresh=false（本机工人那一半的抢法随座位整张删掉，见 #531）
+    const again = await h.store.claimForEngine({
+      repoId: IDS.repo,
+      issueNumber: 40,
+      workflowId: 'req:example/canary#40',
+      actor: { kind: 'engine', id: 'github-intake' },
+    });
+    expect(again).toMatchObject({ ok: true, fresh: false });
+    expect(claimOf(h)).toMatchObject({ claimId: pending?.claimId, state: 'pending_start' });
 
     down = false;
     expect(await createGitHubIntake(h.deps).replay('first')).toMatchObject({

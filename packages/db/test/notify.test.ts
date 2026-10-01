@@ -227,21 +227,9 @@ describe('写入即通知 fleet_changes', () => {
     await t.db
       .insert(auditLog)
       .values({ actorKind: 'engine', actorId: 'w1', action: 'x', target: 'task:x', via: 'engine' });
+    // 帅位栏整张删掉（#531）后代码不再读这张表；表和数据先留着（删库表那一步再说），触发器还在，写一行报一条名字
     await t.db.insert(seatBoards).values({ scope: 'main', project: 'fleet-dao', updatedAt: NOW });
     await settle();
     expect([...new Set(tables())].sort()).toEqual([...REALTIME_TABLES].sort());
-  });
-
-  it('seat_boards 一写，通知在 10 秒内到', async () => {
-    await freshEars();
-    const start = Date.now();
-    const [row] = await t.db
-      .insert(seatBoards)
-      .values({ scope: 'main', project: 'timed', updatedAt: NOW })
-      .returning({ id: seatBoards.id });
-    for (let i = 0; i < 50 && heard.length === 0; i++) await settle();
-    const ms = Date.now() - start;
-    expect(heard).toEqual([{ table: 'seat_boards', id: row?.id }]);
-    expect(ms).toBeLessThan(10_000);
   });
 });

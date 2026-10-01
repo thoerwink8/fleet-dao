@@ -150,58 +150,6 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
   let counter = 0;
   /** 进合并队列的先后。 */
   const queuedAt = new Map<string, number>();
-  /** 演示链接：只在内存里，不真发布（假数据模式没有后端的发布目录）。 */
-  const seatProjects: {
-    project: string;
-    headline: string;
-    updatedAt: string;
-    steps: {
-      id: string;
-      order: number;
-      title: string;
-      status: 'done' | 'doing' | 'waiting' | 'needs' | 'blocked';
-      detail: string;
-      updatedAt: string;
-      links: { label: string; url: string }[];
-    }[];
-    log: { at: string; text: string }[];
-    needs: {
-      id: string;
-      question: string;
-      options: string[];
-      recommended: string;
-      repo: string;
-      issue: number;
-    }[];
-  }[] = [
-    {
-      project: 'orbit',
-      headline: '首页这一栏在写',
-      updatedAt: '2026-09-01T00:00:00.000Z',
-      steps: [
-        {
-          id: 's1',
-          order: 1,
-          title: '在改首页',
-          status: 'doing',
-          detail: '三块都要有',
-          updatedAt: '2026-09-01T00:00:00.000Z',
-          links: [],
-        },
-      ],
-      log: [{ at: '2026-09-01T00:00:00.000Z', text: '开始写了' }],
-      needs: [
-        {
-          id: 'n1',
-          question: '先做哪一件',
-          options: ['先做接口', '先做页面'],
-          recommended: '先做接口',
-          repo: 'example/orbit',
-          issue: 12,
-        },
-      ],
-    },
-  ];
   const demo: {
     links: Omit<DemoLink, 'expired'>[];
     defaultScope: DemoScope;
@@ -984,26 +932,6 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         ...('reason' in body && body.reason ? { reason: body.reason } : {}),
       });
       emit('tasks', taskId);
-    },
-    async seatBoard() {
-      await wait();
-      return {
-        projects: seatProjects.map((p) => ({
-          ...p,
-          steps: p.steps.map((s) => ({ ...s, links: [...s.links] })),
-          log: [...p.log],
-          needs: p.needs.map((n) => ({ ...n, options: [...n.options] })),
-        })),
-      };
-    },
-    async answerSeatNeed(needId, option) {
-      await wait();
-      const project = seatProjects.find((p) => p.needs.some((n) => n.id === needId));
-      const need = project?.needs.find((n) => n.id === needId);
-      if (!project || !need) throw new ApiError(404, 'need_not_found', `没有 ${needId} 这一问`);
-      if (!need.options.includes(option)) throw new ApiError(400, 'bad_option', `「${option}」不在选项里`);
-      project.needs = project.needs.filter((n) => n.id !== needId);
-      emit('seat_boards', project.project);
     },
     async answerAsk(askId, answer) {
       await wait();
