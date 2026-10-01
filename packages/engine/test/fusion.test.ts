@@ -1,7 +1,6 @@
 // Fusion 工作流（src/workflows/fusion.ts，#214）：在真 Temporal（测试服务端）里跑，端口是假的（src/fakes.ts）。
 // 走通一条全程，再每条要紧的岔路各一条：副手打回两次 Lead 接手、验证挡两轮停下、CI 红三轮停下、要问创始人、
 // 流程配置读不到或认不出（停派报红，修好点「继续」接着走）、没有别家可验、单子正文没指需求文档、单模型模式、人闸。
-import { askIssueText } from '@fleet-dao/core';
 import type { WorkflowHandle } from '@temporalio/client';
 import type { TestWorkflowEnvironment } from '@temporalio/testing';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -1205,7 +1204,7 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
     expect(firstProgress?.input.progress.docs.requirement).toBe(DOCS.requirement);
   });
 
-  describe('正文写全了需求、没有需求文档的单（#295：引擎对账开的后续单、巡检单）', () => {
+  describe('正文写全了需求、没有需求文档的单（#295：巡检单这类引擎自己开的单）', () => {
     const title = '#11 的后续：验证码几位？改成「4 位」';
     const body = [
       '创始人在 #11（登录页加验证码）的提问里改选了「4 位」。',
@@ -1246,32 +1245,6 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
       expect(w.callsOf('openPr')[0]?.input.body).toMatchObject({ specs: dir, planFromIssue: true });
       expect(w.callsOf('openPr')[0]?.input.body.changedFiles).toContain(`${dir}/需求.md`);
     });
-
-    // 一种一条用例（各起一个测试服务端）：同一条用例里连跑两张单，前一张留下的合并队列空闲计时器会在跑后一张时把
-    // 快进时钟拨过去一小时，假配置副本的同步时间是真钟，后一张就被判成「副本太久没同步」停派（#433 合并后主线红过）。
-    it.each(['follow-up', 'outside'] as const)(
-      '对账真开出来的后续单、超出范围的单（core 的 askIssueText 写的正文）照收，做到合并：%s',
-      async (kind) => {
-        const text = askIssueText({
-          kind,
-          ask: {
-            id: 'ask-1',
-            question: '验证码几位？',
-            options: ['6 位', '4 位'],
-            scope: kind === 'outside' ? 'outside' : 'task',
-            recommended: '6 位',
-            answer: '4 位',
-            applied: false,
-          },
-          original: { issueNumber: 11, title: '登录页加验证码' },
-          placement: { labels: ['需求'], milestone: null },
-        });
-        const w = world({ request: () => ({ title: text.title, rawRequest: text.body }) });
-        const result = await runToEnd(w, fusionInput({ title: text.title, rawRequest: text.body }));
-        expect(result.state).toBe('done');
-        expect(w.verifications[0]?.criteria).toHaveLength(2);
-      },
-    );
 
     it('【失败】Lead 只提交了方案、没提交需求文档：方案不收，退回写明要提交哪份；几次都不交就停下等人，不推', async () => {
       const w = world({

@@ -58,6 +58,15 @@ function machine() {
     );
     return { code: r.status, out: `${r.stdout}${r.stderr}` };
   };
+  /** 换一个 --repo（比如同步专用的检出） */
+  const syncAt = (at: string, ...args: string[]) => {
+    const r = spawnSync(
+      process.execPath,
+      [join(repo, 'packages', 'agents-sync', 'bin', 'agents-sync'), ...args, '--repo', at, '--home', home],
+      { env, encoding: 'utf8' },
+    );
+    return { code: r.status, out: `${r.stdout}${r.stderr}` };
+  };
   /** 开一个会话：钩子装在家里的 ~/.fleet-dao/hooks/，会话开在别的目录（不在 fleet-dao 里） */
   const session = () => {
     const r = spawnSync(process.execPath, [join(home, '.fleet-dao', 'hooks', 'session-start.mjs')], {
@@ -82,7 +91,7 @@ function machine() {
     git(other, 'commit', '-q', '-am', '改规矩');
     git(other, 'push', '-q', 'origin', 'HEAD:main');
   };
-  return { repo, home, sync, session, pushAgents };
+  return { repo, home, sync, syncAt, session, pushAgents };
 }
 
 describe('开会话钩子装上、真跑同步', { timeout: 180_000 }, () => {
@@ -104,11 +113,13 @@ describe('开会话钩子装上、真跑同步', { timeout: 180_000 }, () => {
     expect(behind.code).toBe(1);
     expect(behind.out).toContain('落后主线 1 个提交');
 
-    // 开会话：钩子快进检出、同步，这台跟上主线
+    // 开会话：钩子把同步专用的检出切到主线（专用检出没建过就现建一份）、同步，这台跟上主线
     const said = m.session();
     expect(said).toContain('规矩同步：这台刚同步到主线最新');
     expect(get(m.home, '.claude/CLAUDE.md')).toContain('- 测试加的一条规矩。');
-    const after = m.sync('--check');
+    // --check 的 --repo 指的是「读哪份规矩」：这里给同步专用的检出（钩子用的就是它）
+    const mirror = join(m.home, '.fleet-dao', 'origin-main');
+    const after = m.syncAt(mirror, '--check');
     expect(after.code, after.out).toBe(0);
 
     // 三分钟内再开会话不再同步；过了三分钟（删掉记号）照常。主线上的 AGENTS.md 标记坏了：同步不成，会话里明说

@@ -130,10 +130,11 @@ describe('开 PR', () => {
     );
   });
 
-  describe('开之前的卫生检查：标题和正文开出去就公开了', () => {
-    it('正文里（会话交活时写的总结）有名单上的值：不开（HYGIENE_BLOCKED，不可重试），一个请求都不发', async () => {
+  describe('开之前的卫生检查：标题、正文、分支名开出去就公开了', () => {
+    it('正文里（会话交活时写的总结）有真密钥：不开（HYGIENE_BLOCKED，不可重试），一个请求都不发', async () => {
       const { gh, fake } = setup();
       fake.refs.set('task/24-leak', A);
+      const token = ['ghp', 'q7Rz2LmX9vKp4TnB8wYc1HdF6jGs3NaEw5Yu'].join('_');
       const err = await gh
         .openPr({
           repo,
@@ -141,7 +142,7 @@ describe('开 PR', () => {
           head: A,
           title: '登录页加验证码',
           body: {
-            did: ['在组织 fake-org-778899 下试过'],
+            did: [`令牌 ${token}`],
             verified: ['x'],
             plan: 'P1「工作流」',
             specs: 'specs/24-x/',
@@ -151,28 +152,51 @@ describe('开 PR', () => {
         .catch((e: unknown) => e);
       expect(err).toMatchObject({ code: 'HYGIENE_BLOCKED', retryable: false });
       expect((err as Error).message).toContain('PR 正文');
-      expect((err as Error).message).not.toContain('fake-org-778899');
+      expect((err as Error).message).not.toContain(token);
       expect(fake.requests).toHaveLength(0);
     });
 
     it('标题里有也拦', async () => {
       const { gh, fake } = setup();
       fake.refs.set('task/25-leak', A);
+      const token = ['ghp', 'Zt4wQ9mB2xKc7RvN1pLs8HdJ3fGy6TaEu5Vo'].join('_');
       await expect(
         gh.openPr({
           repo,
           branch: 'task/25-leak',
           head: A,
-          title: '切到组织 fake-org-778899',
+          title: `令牌 ${token}`,
           body: { did: ['x'], verified: ['x'], plan: 'P1「工作流」', specs: 'specs/25-x/', changedFiles: [] },
         }),
       ).rejects.toMatchObject({ code: 'HYGIENE_BLOCKED' });
       expect(fake.requests).toHaveLength(0);
     });
 
-    it('分支名里带名单上的值（PR 上挂着分支名）：不开（HYGIENE_NAME_BLOCKED，不退回会话），一个请求都不发，分支名打了码', async () => {
+    it('【故意造出的失败】分支名里有真密钥，标题正文都干净：也不开', async () => {
+      // 分支名进 PR 的网页地址和 git 的分支列表，同样不经推送、推前扫描拦不到
       const { gh, fake } = setup();
-      const branch = 'task/28-fake-org-778899';
+      const branch = `task/${['ghp', 'M8kD3vQz5nRp1TcW7yLb2HsX4jFg9NaEu6Vi'].join('_')}`;
+      fake.refs.set(branch, A);
+      const err = await gh
+        .openPr({
+          repo,
+          branch,
+          head: A,
+          title: '登录页加验证码',
+          body: { did: ['x'], verified: ['x'], plan: 'P1「工作流」', specs: 'specs/26-x/', changedFiles: [] },
+        })
+        .catch((e: unknown) => e);
+      expect(err).toMatchObject({ code: 'HYGIENE_BLOCKED', retryable: false });
+      expect((err as Error).message).toContain('分支名');
+      expect((err as Error).message).not.toContain('M8kD3vQz5nRp1TcW7yLb2HsX4jFg9NaEu6Vi');
+      expect(fake.requests).toHaveLength(0);
+    });
+
+    it('【故意造出的失败】分支名里有真密钥：报错里那句说明也不许把密钥打出来', async () => {
+      // 「开 x 上 <分支> 的 PR」这句说明本身会把分支名带出去，报错又会进日志和会话记录，所以那句也要遮。
+      const { gh, fake } = setup();
+      const secret = ['ghp', 'Rb7Nm2Ks9Qd4Wt1Zx6Cv8Hj3Fp5Gy0LaEu'].join('_');
+      const branch = `feature/${secret}`;
       fake.refs.set(branch, A);
       const err = await gh
         .openPr({
@@ -183,12 +207,9 @@ describe('开 PR', () => {
           body: { did: ['x'], verified: ['x'], plan: 'P1「工作流」', specs: 'specs/28-x/', changedFiles: [] },
         })
         .catch((e: unknown) => e);
-      expect(err).toMatchObject({ code: 'HYGIENE_NAME_BLOCKED', retryable: false });
-      expect((err as Error).message).toContain('分支名 task/28-〔名单上的值〕 名单里的敏感值');
-      expect(
-        `${(err as Error).message}${JSON.stringify((err as { details: unknown }).details)}`,
-      ).not.toContain('778899');
-      expect(fake.requests).toHaveLength(0);
+      expect(err).toMatchObject({ code: 'HYGIENE_BLOCKED' });
+      expect((err as Error).message).not.toContain(secret);
+      expect((err as Error).message).toContain('…');
     });
 
     it('正文里带 NUL（扫不成内容，只能按二进制算）：不开（HYGIENE_UNSCANNED），一个请求都不发，不当成扫过没事', async () => {
@@ -211,23 +232,6 @@ describe('开 PR', () => {
         .catch((e: unknown) => e);
       expect(err).toMatchObject({ code: 'HYGIENE_UNSCANNED' });
       expect((err as Error).message).toContain('PR 正文');
-      expect(fake.requests).toHaveLength(0);
-    });
-
-    it('名单没读到：不开（HYGIENE_LIST_MISSING），不当成查过没事', async () => {
-      const { gh, fake } = setup({
-        sensitiveValues: () => ({ ok: false, reason: '已知敏感值名单没读到', tried: ['/nonexistent'] }),
-      });
-      fake.refs.set('task/26-nolist', A);
-      await expect(
-        gh.openPr({
-          repo,
-          branch: 'task/26-nolist',
-          head: A,
-          title: 'x',
-          body: { did: ['x'], verified: ['x'], plan: 'P1「工作流」', specs: 'specs/26-x/', changedFiles: [] },
-        }),
-      ).rejects.toMatchObject({ code: 'HYGIENE_LIST_MISSING', retryable: false });
       expect(fake.requests).toHaveLength(0);
     });
   });

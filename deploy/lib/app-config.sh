@@ -9,7 +9,7 @@
 #   3. api.env 的 FLEET_GITHUB_WEBHOOK_SECRET：要和 GitHub 上「引擎」App 设置里的 Webhook secret 一致（App 级 webhook
 #      挂在引擎机器人上），值就在 /etc/fleet-dao/github/ 引擎那份 json 的 webhook_secret 里。api.env 里为空才填；
 #      json 里没有、或者值的样子写不进环境文件，就记待配，不瞎填（瞎填的值和 App 的对不上，webhook 签名全部验不过）。
-#   4. 读回：卫生检查的已知敏感值名单 sensitive-values.txt（手放）、引擎的 engine.env、上线后要退役的垫片。
+#   4. 读回：引擎的 engine.env、上线后要退役的垫片；功能删掉了、键还留着的环境文件（remove_stale_key）。
 # 读不到（不在、读不了）、认不出（引号到文件末尾都没配上）一律判红、返回 1、文件不动，不当成「没有这个键」往下改。
 # check_* 是读回用的：判红返回 1（红已经记进 REDS，france.sh 的读回照样往下查），待配、通过返回 0。
 # 值一律不打印、不上命令行（/proc 里别的用户看得到命令行）：只在 bash 变量里过手，经 put_file 写文件。
@@ -455,47 +455,14 @@ check_env_duplicates() { # 文件…
   ((bad == 0))
 }
 
-# 读回：卫生检查的已知敏感值名单（真实的组织编号、账号，一行一个，手放）。引擎推分支、写需求文档、开 PR 之前都读它，
-# 缺了、空的一律不推不写（packages/hygiene）：没有、空的记待配；属主权限不对、读不了判红（里面是真值）。只看，不打印内容
-check_sensitive_values() { # 名单文件
-  local file=$1 meta line has=0
-  if [[ ! -e "$file" ]]; then
-    pending "没有 $file（已知敏感值名单，手放，root:fleet 640）：引擎推分支、写需求文档、开 PR 之前都读它，缺了一律不推不写"
-    return 0
-  fi
-  meta=$(stat -c '%U:%G %a' -- "$file" 2>/dev/null) || meta="读不了"
-  if [[ "$meta" != "$APP_CONFIG_OWNER 640" ]]; then
-    red "$file 的属主权限是「$meta」，要 $APP_CONFIG_OWNER 640（里面是真实的组织编号、账号）"
-    return 1
-  fi
-  if [[ ! -f "$file" || ! -r "$file" ]]; then
-    red "$file 读不了"
-    return 1
-  fi
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    line=${line#"${line%%[![:space:]]*}"}
-    if [[ -n "$line" && "$line" != \#* ]]; then
-      has=1
-      break
-    fi
-  done <"$file"
-  if ((has == 0)); then
-    pending "$file 里一个值都没有（只有空行、注释）：卫生检查按「名单没读到」处理，一律不推不写"
-    return 0
-  fi
-  ok "已知敏感值名单 $file 在、$APP_CONFIG_OWNER 640、有值（内容不打印）"
-}
-
 # 读回引擎的 engine.env（fleet-engine.service 的 EnvironmentFile），按 systemd 的读法：
 #   FLEET_ENGINE_PORTS 要人定（real / fake；缺了引擎起不来，装机脚本不补）；
-#   下面三个键要钉在约定的值上，补键只补缺、不改已有的，所以旧值（比如 FLEET_WORK_DIR=/tmp）只有读回拦得住：
-#   FLEET_SENSITIVE_VALUES_FILE 要钉在读回核的那份名单上：不钉的话引擎按 packages/hygiene 的顺序先找 fleet 家里的
-#   ~/.fleet-dao/sensitive-values.txt，那里有一份就悄悄换成那份；
+#   下面两个键要钉在约定的值上，补键只补缺、不改已有的，所以旧值（比如 FLEET_WORK_DIR=/tmp）只有读回拦得住：
 #   FLEET_WORK_DIR 要是 fleet-agent-scope 认的工作树的根（它只认这一个，引擎算到别处建树、交树都会被拒）；
 #   FLEET_ENGINE_STATE_DIR 要是 france.sh 建好、属 fleet 的那个目录。
 # 文件读不到、认不出，和键没写、写了几行、值不认识，各报各的
-check_engine_env() { # engine.env 名单文件 工作树的根 引擎状态目录
-  local file=$1 list=$2 work=$3 state=$4 rc=0 bad=0
+check_engine_env() { # engine.env 工作树的根 引擎状态目录
+  local file=$1 work=$2 state=$3 rc=0 bad=0
   env_get "$file" FLEET_ENGINE_PORTS || rc=$?
   if ((rc == 2)); then
     red "核对不了引擎的配置：$APP_CONFIG_WHY"
@@ -517,7 +484,6 @@ check_engine_env() { # engine.env 名单文件 工作树的根 引擎状态目�
       ;;
     esac
   fi
-  pin_engine_key "$file" FLEET_SENSITIVE_VALUES_FILE "$list" "卫生检查的名单" || bad=1
   pin_engine_key "$file" FLEET_WORK_DIR "$work" "AI 会话的工作树的根（fleet-agent-scope 只认这一个）" || bad=1
   pin_engine_key "$file" FLEET_ENGINE_STATE_DIR "$state" "引擎状态目录" || bad=1
   ((bad == 0))
@@ -549,6 +515,33 @@ pin_engine_key() { # engine.env 键 约定值 是什么
     return 1
   fi
   ok "engine.env：$what钉在 $want"
+}
+
+# 功能删掉了、键还留在环境文件里（生效的赋值、被注释掉的都算）：删掉那一行，别留着骗后面的对账（比如
+# desired-config.json 的期望里已经没有它，线上却还有，会被判成「多出来一项」）。没有这个键：什么都不做，通过。
+# 文件读不到、认不出：判红、返回 1、文件不动。第二遍零改动
+remove_stale_key() { # 文件 键 为什么删
+  local file=$1 key=$2 why=$3 content line out="" re removed=0
+  if ! env_parse "$file"; then
+    red "删不了 $file 里的 $key：$APP_CONFIG_WHY（文件不动）"
+    return 1
+  fi
+  if ! env_mentioned "$key"; then return 0; fi
+  if ! { content=$(<"$file"); } 2>/dev/null; then
+    red "删不了 $file 里的 $key：读不了 $file（不动）"
+    return 1
+  fi
+  re="^[[:space:]]*[#;]?[[:space:]]*${key}[[:space:]]*="
+  while IFS= read -r line; do
+    if [[ "$line" =~ $re ]]; then
+      removed=$((removed + 1))
+    else
+      out+="$line"$'\n'
+    fi
+  done <<<"$content"
+  if ((removed == 0)); then return 0; fi
+  put_file "$file" "$APP_CONFIG_OWNER" 640 "${out%$'\n'}"
+  changed "$file 删掉了不再用的 $key（$why，$removed 行）"
 }
 
 # 读回：上线后要退役的垫片还在不在。在就记待配（等引擎接真活以后删），不在就通过

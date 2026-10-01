@@ -1,5 +1,4 @@
 // 包内共用的依赖与小工具：活动上下文、机器人身份（数字编号、提交身份）、锁。
-import type { LoadedValues } from '@fleet-dao/hygiene';
 import { z } from 'zod';
 import type { GitHubClient, Logger, RepoRef } from './client.ts';
 import { enc, unexpected } from './client.ts';
@@ -91,6 +90,9 @@ export interface Deps {
   log: Logger;
   /** 防重复写的占用多久续一次（不给用默认 30 秒；测试调短）。 */
   leaseRenewMs?: number | undefined;
-  /** 往公开仓写东西（需求文档、PR 标题和正文）之前卫生检查用的已知敏感值名单；不给按 packages/hygiene 的顺序找。 */
-  sensitiveValues?: (() => LoadedValues) | undefined;
+  /**
+   * 卫生检查管的是哪个仓（默认 fleet-dao 自己，见 hygiene-scope.ts）；只管它一个，别的仓按它们自己的标准。
+   * 测试夹具的仓不是 fleet-dao 时，在这里指过去（不给就用 HYGIENE_REPO）。
+   */
+  hygieneRepo?: RepoRef | undefined;
 }

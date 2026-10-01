@@ -9,6 +9,7 @@ import {
   ALWAYS_JOBS,
   type CiPlan,
   ciVerdict,
+  PATH_RULES,
   type PackageGraph,
   PLANNED_JOBS,
   planCi,
@@ -182,10 +183,12 @@ describe('按改动算要跑什么', () => {
   });
 
   it('测试会读的包外文件：AGENTS.md、docs/ops.md、agents/、PR 模板、.gitignore 各自带上读它的包', () => {
+    // AGENTS.md 要带两家：agents-sync 分发它，agents 的钉子测试读它（agents/test/rules/design-skills.rules.test.ts，#522）；
+    // 只带 agents-sync 的话改通用段的 PR 不测 agents，那条钉子测试根本不跑（主线从 1bff4dbc 起红了 8+ 个提交）
     expect(pr('AGENTS.md')).toMatchObject({
       lint: false,
       deploy: 'none',
-      tests: [{ args: ['packages/agents-sync/'] }],
+      tests: [{ args: ['agents/', 'packages/agents-sync/'] }],
     });
     expect(pr('docs/ops.md')).toMatchObject({ deploy: 'ops', tests: [{ name: 'db' }] });
     expect(testArgs(pr('agents/skills/discuss/SKILL.md'))).toEqual(['agents/', 'packages/agents-sync/']);
@@ -311,7 +314,8 @@ describe('测试读包外的文件，改那个文件的 PR 一定测到它（漏
     }
   });
 
-  it('每一处都落进 PATH_RULES / 依赖图 / TEST_READS', () => {
+  /** 拿一个「算要跑什么」的函数扫一遍：每个测试读的包外文件，改它的 PR 都得测到读的那个单元。返回漏记的清单。 */
+  const scan = (plan: (changed: string[]) => CiPlan) => {
     const missed: string[] = [];
     for (const { unit, rel } of files) {
       if (ALWAYS.has(rel)) continue;
@@ -319,11 +323,45 @@ describe('测试读包外的文件，改那个文件的 PR 一定测到它（漏
       for (const ref of refs(rel)) {
         if (`${ref}/`.startsWith(own)) continue;
         const probe = statSync(join(ROOT, ref)).isDirectory() ? `${ref}/x` : ref;
-        const p = pr(probe);
+        const p = plan([probe]);
         if (!p.full && !testArgs(p).includes(own)) missed.push(`${rel} 读 ${ref}，改它的 PR 不测 ${unit}`);
       }
     }
-    expect(missed).toEqual([]);
+    return missed;
+  };
+
+  it('每一处都落进 PATH_RULES / 依赖图 / TEST_READS', () => {
+    expect(scan((changed) => pr(...changed))).toEqual([]);
+  });
+
+  /**
+   * 【故意造出的失败】上面那条平时绿着，看不出它还在不在查。真要拦住的是「漏记一处」，
+   * 所以这里把门开一次、关一次，对着看：开着时一处都不漏，关掉 AGENTS.md 这道门里的 agents 后
+   * 正好红在那一处。少了这条，改 AGENTS.md 不测 agents 又能悄悄过去
+   * （主线从 1bff4dbc（#527）起红了 8+ 个提交就是这么来的）。
+   */
+  it('【故意造出的失败】把 agents 从 AGENTS.md 这道门里去掉：扫出来必须正好是那一处', () => {
+    // 开着：改 AGENTS.md 测 agents 和 agents-sync，读它的那条测试算进了门里，一处都不漏
+    expect(testArgs(pr('AGENTS.md'))).toEqual(['agents/', 'packages/agents-sync/']);
+    expect(scan((changed) => planCi({ event: 'pull_request', changed, graph: graph() }))).toEqual([]);
+    // 关掉：只把管 AGENTS.md 那道门的 agents 去掉，别的门一个都不碰
+    const shut = PATH_RULES.map((r) =>
+      r.match('AGENTS.md') && 'units' in r ? { ...r, units: r.units.filter((u) => u !== AGENTS_UNIT) } : r,
+    );
+    expect(
+      shut.filter((r, i) => r !== PATH_RULES[i]),
+      '没关掉任何门：管 AGENTS.md 的那道门写法换了，这条测试跟着改',
+    ).toHaveLength(1);
+    // 关掉后，上面那条正对着的那处漏记必须报出来——读 AGENTS.md 的每个测试都得报，一封不少、也不多报别人。
+    // 报几条是从 files 现算的：以后再加一个读 AGENTS.md 的测试（2026-10-01 加 ask-scope.rules.test.ts 时
+    // 这里写死成一条、主线当场红），不会因为写死的条数又红一次；反过来，门还开着却少报一条，照样红。
+    const readers = files
+      .filter(({ unit, rel }) => unit === AGENTS_UNIT && refs(rel).includes('AGENTS.md'))
+      .map(({ rel }) => `${rel} 读 AGENTS.md，改它的 PR 不测 agents`);
+    expect(readers.length, '没有测试读 AGENTS.md 了：这条查的漏记不存在，测试该删').toBeGreaterThan(0);
+    expect(
+      scan((changed) => planCi({ event: 'pull_request', changed, graph: graph(), rules: shut })),
+    ).toEqual(readers);
   });
 });
 
@@ -376,12 +414,21 @@ describe('汇总（必过检查 check）：该跑的跑了且绿，不该跑的�
     expect(ciVerdict(needs({ web: { result: 'success' } })).ok).toBe(false);
   });
 
-  it('changes 没算成、hygiene 红了、少了某个 job 的结果：不过', () => {
+  it('changes 没算成、少了某个 job 的结果：不过', () => {
     expect(ciVerdict(needs({ changes: { result: 'failure', outputs: {} } })).ok).toBe(false);
-    expect(ciVerdict(needs({ hygiene: { result: 'failure' } })).ok).toBe(false);
     expect(ciVerdict(needs({ docs: { result: 'skipped' } })).ok).toBe(false);
     const { deploy: _, ...rest } = needs();
     expect(ciVerdict(rest).lines.join('\n')).toContain('✗ deploy：没有这个 job 的结果');
+  });
+
+  it('hygiene 红了：汇总 check 照样过，不挡合并（卫生检查改成挡在推之前，创始人 2026-09-28 傍晚拍）', () => {
+    const v = ciVerdict(needs({ hygiene: { result: 'failure' } }));
+    expect(v.ok).toBe(true);
+    // hygiene 不在必过名单里：不管它跑成什么样，汇总的结论文字里都不提它
+    expect(v.lines.join('\n')).not.toContain('hygiene');
+    for (const result of ['skipped', 'cancelled']) {
+      expect(ciVerdict(needs({ hygiene: { result } })).ok, result).toBe(true);
+    }
   });
 
   it('plan 读不出（空、不是 JSON、缺字段）、needs 不是对象：不过，不当成全跳过', () => {
@@ -463,8 +510,12 @@ describe('入口', () => {
     };
     expect(run(verdict, [], { CI_NEEDS: JSON.stringify(base) }).status).toBe(0);
     expect(
-      run(verdict, [], { CI_NEEDS: JSON.stringify({ ...base, hygiene: { result: 'failure' } }) }).status,
+      run(verdict, [], { CI_NEEDS: JSON.stringify({ ...base, docs: { result: 'failure' } }) }).status,
     ).toBe(1);
+    // hygiene 红了不挡：汇总入口照样退出 0（卫生检查改成挡在推之前，创始人 2026-09-28 傍晚拍）
+    expect(
+      run(verdict, [], { CI_NEEDS: JSON.stringify({ ...base, hygiene: { result: 'failure' } }) }).status,
+    ).toBe(0);
   });
 });
 
@@ -506,14 +557,11 @@ describe('ci.yml 和这里对得上', () => {
     expect(job('changes')).toContain('node packages/conventions/src/bin/ci-plan.ts');
   });
 
-  it('真的已知敏感值名单只给 hygiene job，它一行 PR 里的代码都不执行：代码取目标分支上的 trusted/，PR 检出到 pr/ 只当数据扫（#115 第二意见）', () => {
+  it('没有 job 用仓库密钥；hygiene 一行 PR 里的代码都不执行：代码取目标分支上的 trusted/，PR 检出到 pr/ 只当数据扫（这个 PR 自己改不宽卫生检查的规则，#115 第二意见）', () => {
     const ids = [...yml.matchAll(/^ {2}([\w-]+):$/gm)].map((m) => m[1] as string);
     expect(ids).toContain('hygiene');
-    for (const id of ids) {
-      if (id !== 'hygiene') expect(job(id), id).not.toContain('secrets.');
-    }
+    for (const id of ids) expect(job(id), id).not.toContain('secrets.');
     const h = job('hygiene');
-    expect(h).toContain('secrets.FLEET_SENSITIVE_VALUES');
     expect(h).not.toMatch(/pnpm|npm |npx|vitest|cache:/);
     // 两次检出：PR 的在 pr/，执行的代码在 trusted/，取目标分支的提交
     expect(h).toMatch(/path: pr\n/);

@@ -39,12 +39,11 @@
 
 ## 密钥和本机配置在哪
 
-这是公开仓：密钥、账号、组织编号、邮箱、IP 一律不进。
+这是公开仓：私钥、令牌、密码这类真密钥一律不进；账号、组织编号、邮箱、IP 这类标识不算泄漏，不当密钥藏（创始人 2026-09-28 傍晚拍，specs/169-Fusion形态/需求.md）。
 
 - **服务器上**：`/etc/fleet-dao/`，不进 git；每个文件放什么见 ops 第三节（用户、目录、库）。
-- **加密副本**：私有仓 [fleet-dao-vault](https://github.com/thoerwink8/fleet-dao-vault)，age 加密，一个文件一个 `.age`，仓里有密文、公钥和解密钥匙本身（明文，只靠那个私有仓和 GitHub 账号保护）。在创始人电脑上跑那个仓里的 `bash refresh.sh` 刷新；怎么解开、机器没了怎么恢复、钥匙丢了怎么换（`bash rekey.sh`），见那个仓 README。
-- **创始人电脑上**：`~/.fleet-dao/`，放解密钥匙 `vault-key.txt`（正本在私有仓的 `workstation/age-identity.txt`，电脑丢了从那里拉回来）和 age；只有拿着这把钥匙的人解得开。钥匙还要抄一份进创始人的密码管理器（plan 第五节）。
-- **已知敏感值名单**（`sensitive-values.txt`，一行一个真实的账号、组织编号、域名、IP，给卫生检查认「光看形状认不出」的值）：法国 `/etc/fleet-dao/sensitive-values.txt`（引擎推分支、写单子前必读，缺了不推不写）；CI 的 Actions 密钥 `FLEET_SENSITIVE_VALUES`（每个 PR 都查，不光扫文件树，还按提交、连 PR 标题正文一起查；推任何非 main 分支哪怕没开 PR 也按提交查一遍，见 `.github/workflows/hygiene-push.yml`）；保险箱里有加密副本 `france/etc/fleet-dao/sensitive-values.txt.age`；创始人电脑 `~/.fleet-dao/sensitive-values.txt`。新机器可以不放：推之前的钩子会写明「这台没放名单、交给 CI 查」照样放行，令牌、密钥文件照拦；想本机也查，只把这一个文件拷过去放到同样位置，别为它把保险箱的解密钥匙拷过去（那把钥匙能解开全部）。
+- **加密副本**：私有仓 [fleet-dao-vault](https://github.com/thoerwink8/fleet-dao-vault)，age 加密，一个文件一个 `.age`，仓里有密文、公钥和解密钥匙本身（明文，只靠那个私有仓和 GitHub 账号保护）。它只放**我们自己有、丢了别处再也没有**的东西：两台机器上的配置和密钥、自建 VPS 的订阅地址；别人家的现场凭据不进这里（丢了跟现场要一份就有）。在创始人电脑上跑那个仓里的 `bash refresh.sh` 刷新；怎么解开、机器没了怎么恢复、钥匙丢了怎么换（`bash rekey.sh`），见那个仓 README。
+- **创始人电脑上**：`~/.fleet-dao/`，放解密钥匙 `vault-key.txt` 和 age；只有拿着这把钥匙的人解得开。钥匙还要抄一份进创始人的密码管理器（plan 第五节）。
 - 数据库备份不在保险箱里，见 plan 第二节「备份」。
 
 ## 常用
@@ -57,7 +56,7 @@
 - 关单：`pnpm issue:close <号>`，主线上有 `specs/<号>-<短名>/结果.md` 才关成「完成」、评论里贴结果链接；没有结果、子单还开着都不关（退出码 1），读不到 GitHub 报错不关（退出码 2）。或者最后一个 PR「这个 PR 做完就关单」填「是」、写 `Closes #<号>`，合并时关。见 design 第七节「关单要有结果」。
 - 欠账：`pnpm debt:check` 只看文件，查文档里推后的话带着单号、需求.md 写了怎么算做完（PR 和主线上 debt.yml 也跑，只报告、不挡合并，不读 GitHub）；加 `--live` 另读 GitHub，查挂的单号开没开着、开着的单都有需求文档（定时任务 debt.yml 用，它再加 `--comment` 留言到单上）。见 design 第七节「欠账不漏」。
 - 计划快照：每个版本开始和结束时由总指挥跑 `pnpm plan:snapshot`（加 `--at 2026-09-27T09:00+08:00` 定快照时间，不加取现在），从 GitHub 读版本、先后、母单和子单，重写 `docs/plan.md` 两行快照标记之间的几节，标记外面不动，改动照常开 PR；没登录、GitHub 读不到、先后标记认不出都不写、退出码 2。
-- 各家 AI 的全局说明、技能和钩子：`node packages/agents-sync/bin/agents-sync --check`（只读，最后报这台同步到哪个提交、落后主线几个），`--apply` 写；开发机装过一次以后，每次开会话由开会话钩子自动同步；`--help` 看全部用法，法国怎么跑见 ops 第五节。
+- 各家 AI 的全局说明、技能和钩子：开发机上由开会话钩子自动同步（同步用的是一份只归它的检出 `~/.fleet-dao/origin-main`，永远停在 `origin/main` 上，本机自己的检出在哪个分支都不影响）；手动跑 `pnpm agents:sync`（`--check` 只读，最后报这台同步到哪个提交、落后主线几个；`--offline` 不取远端），直接查仓里的原文件用 `node packages/agents-sync/bin/agents-sync --check`；`--help` 看全部用法，法国怎么跑见 ops 第五节。
 
 ## 文档各管什么
 

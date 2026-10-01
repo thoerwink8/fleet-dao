@@ -397,24 +397,7 @@ describe('认得出的：按各自的梯子走', () => {
     );
   });
 
-  it('卫生检查的名单没读到：是配置问题，不退回会话，挂起报警', () => {
-    const v = classifyFailure({
-      source: 'pushBranch',
-      routeBound: false,
-      code: 'HYGIENE_LIST_MISSING',
-      retryable: false,
-      message: '推之前的卫生检查没法做：没找到已知敏感值名单',
-      now: NOW,
-    });
-    expect({ rule: v.rule, action: v.action, alert: v.alert, counter: v.counter }).toEqual({
-      rule: 'HY2',
-      action: 'park',
-      alert: true,
-      counter: null,
-    });
-  });
-
-  it('卫生检查没扫成：同样不推、不当成查过没事，挂起报警（和名单没读到一条规则）', () => {
+  it('卫生检查没扫成：不推、不当成查过没事，挂起报警', () => {
     const v = classifyFailure({
       source: 'pushBranch',
       routeBound: false,

@@ -5,13 +5,14 @@
 // 帧协议照 fleet-dao docs/reference/adapters.md 第八节。完工判据借旧仓 windsurf-dao 的 scripts/lib/mirasim-runtime.mjs
 // judgeCompletion：phase 到 done 且没有 error、没有 incomplete；走中继的还要账本里起针后有 2xx 行。
 //
-//   node second-opinion.mjs --pr 50 --high-risk [--repo <检出>] [--ui] [--round 1] [--timeout-min 45] [--slot 2]
-//   node second-opinion.mjs --text 分析.md [--name 短名]   拍板前的反方：把分析喂给另一家，退出码 0 同意 / 1 有异议 / 2 没查成
+//   node second-opinion.mjs --pr 50 --high-risk --author-family <族[,族…]> [--repo <检出>] [--ui] [--round 1] [--timeout-min 45] [--slot 2]
+//   node second-opinion.mjs --text 分析.md --author-family <族[,族…]> [--name 短名] [--budget-sec 30]
+//     拍板前的反方：按 GPT→Claude→DeepSeek→Grok→Kimi 选不同族，退出码 0 同意 / 1 有异议 / 2 没查成
 //   node second-opinion.mjs --selftest [--repo <检出>]
 //   --repo 不给就用当前目录所在的 git 检出。
 //
 // 退出码：0 通过；1 必须改；2 没查成；3 PR 审查没开（不带 --high-risk）。连不上、没起来、超时、结论认不出、账本对不上、
-// 有调用没走中继，一律 2，不当通过。这台机器没装、没开 Mirasim，没装、没登录 cursor-agent，就换下一家；几家都用不了照实报。
+// 有调用没走中继，一律 2，不当通过。端点没装、没开、未登录、roster 不含模型或超时都换下一家；几家都用不了照实报。
 
 import { execFileSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -29,20 +30,33 @@ export { cursorAgentEnv } from './tools.mjs';
 const DATA = dataDir();
 const RUNS = join(DATA, 'runs');
 const MIRA = join(homedir(), '.mirasim');
+// 讨论/第二意见共同的厂商族顺序。作者族由调用方显式传入；不能从环境变量或当前进程名猜。
+export const FAMILY_ORDER = ['gpt', 'claude', 'deepseek', 'grok', 'kimi'];
 const PROFILES = {
-  // 写码是 Claude，第二意见换厂商；GPT 不碰界面，界面类走 Gemini（创始人 2026-09-25 拍）。
-  code: { agent: 'codex', model: 'gpt-6-luna', route: 'cloud' },
-  // 同一个上游没有 gpt-6-luna 时顶上来（2026-09-26 实测 relay 回 503 no upstream available for model "gpt-6-luna"）
-  code5: { agent: 'codex', model: 'gpt-5.6-luna', route: 'cloud' },
-  // Mirasim 那条上游挂了时换渠道：Cursor 订阅里的 gpt-5.6-luna，走本机 cursor-agent 命令行、只读模式（创始人 2026-09-26 提）
-  cursor: { agent: 'cursor-cli', model: 'gpt-5.6-luna-high', route: 'local' },
-  // 讨论要多家时点名用（同走 Cursor 订阅）：--agent glm / --agent kimi3
-  glm: { agent: 'cursor-cli', model: 'glm-5.2-high', route: 'local' },
-  kimi3: { agent: 'cursor-cli', model: 'kimi-k3-high', route: 'local' },
-  grok: { agent: 'cursor-cli', model: 'grok-4.7-medium', route: 'local' },
-  ui: { agent: 'antigravity', model: 'gemini-3.8-flash-high', route: null },
-  // pi 吃服务端默认模型（kimi-k3），不点名（adapters.md pi 一节）
-  kimi: { agent: 'pi', model: null, route: 'cloud' },
+  // Mirasim 2026-09-30 的真实 modelRosterCache：codex/gpt-6-luna。
+  code: { family: 'gpt', agent: 'codex', model: 'gpt-6-luna', route: 'cloud' },
+  // Claude 必须经 reclaude；不要直接起 claude。model 留空，由 reclaude 的 JSON 输出报告实际模型。
+  claude: { family: 'claude', agent: 'reclaude', model: null, route: 'local' },
+  // Mirasim modelRosterCache：dsh/deepseek-flash。若这台 Mirasim 没有 dsh，照实换下一家。
+  deepseek: { family: 'deepseek', agent: 'dsh', model: 'deepseek-flash', route: 'cloud' },
+  // Mirasim 的 grok 执行体不点名模型；本机未登录时会明确报不可用。
+  grok: { family: 'grok', agent: 'grok', model: null, route: 'cloud' },
+  // Mirasim modelRosterCache：kimi/kimi-code/k3。
+  kimi: { family: 'kimi', agent: 'kimi', model: 'kimi-code/k3', route: 'cloud' },
+  // 旧显式参数保留兼容，但不进入新的族顺序；它们仍带 family，不能绕过同族排除。
+  code5: { family: 'gpt', agent: 'codex', model: 'gpt-5.6-luna', route: 'cloud' },
+  cursor: { family: 'gpt', agent: 'cursor-cli', model: 'gpt-5.6-luna-high', route: 'local' },
+  glm: { family: 'glm', agent: 'cursor-cli', model: 'glm-5.2-high', route: 'local' },
+  kimi3: { family: 'kimi', agent: 'cursor-cli', model: 'kimi-k3-high', route: 'local' },
+  'grok-cli': { family: 'grok', agent: 'cursor-cli', model: 'grok-4.7-medium', route: 'local' },
+  ui: { family: 'gemini', agent: 'antigravity', model: 'gemini-3.8-flash-high', route: null },
+};
+const PROFILE_BY_FAMILY = {
+  gpt: PROFILES.code,
+  claude: PROFILES.claude,
+  deepseek: PROFILES.deepseek,
+  grok: PROFILES.grok,
+  kimi: PROFILES.kimi,
 };
 const DONE = new Set(['done', 'complete', 'completed']);
 const FAILED = new Set(['error', 'failed', 'aborted', 'cancelled', 'canceled']);
@@ -50,39 +64,90 @@ const FAILED = new Set(['error', 'failed', 'aborted', 'cancelled', 'canceled']);
 class NotChecked extends Error {}
 
 // 主审连不上就换下一家（创始人 2026-09-25：一个渠道不生效，讨论和审查的主体就换）。
-// 只在「上游没有可用的」这类连不上时换；审出结论、认不出结论、超时都不换，照原样报。
-const FALLBACK = ['code', 'cursor', 'code5', 'kimi'];
+// 族顺序由 FAMILY_ORDER + PROFILE_BY_FAMILY 唯一决定；审出结论后不因不喜欢结论换人。
 // 「模型满载」也算连不上（2026-09-26：codex 快照报 done 带 incomplete「Selected model is at capacity」，没换人直接判没查成）。
 export const UNAVAILABLE =
   /\b(502|503|529)\b|no upstream available|Service Unavailable|overloaded|at capacity|try a different model/i;
 function pickProfile(name) {
   const p = PROFILES[name];
-  if (!p) throw new NotChecked(`不认识的 --agent ${name}（code / code5 / kimi / ui）`);
+  if (!p)
+    throw new NotChecked(
+      `不认识的 --agent ${name}（code / claude / deepseek / grok / kimi / code5 / cursor / kimi3 / ui）`,
+    );
   return p;
 }
-function prProfiles(o) {
-  if (o.agent) return [pickProfile(o.agent)];
-  if (o.ui) return [PROFILES.ui]; // 界面类只给 Gemini，不拿别家顶
-  return FALLBACK.map((k) => PROFILES[k]);
+
+function splitFamilies(raw, label = '--author-family') {
+  const values = (Array.isArray(raw) ? raw : String(raw ?? '').split(/[\s,]+/))
+    .map((s) => String(s).trim().toLowerCase())
+    .filter(Boolean);
+  if (values.length === 0)
+    throw new NotChecked(
+      `要 ${label} <gpt|claude|deepseek|grok|kimi>：讨论/第二意见不能确认作者模型族（可逗号分隔），不会从环境变量猜`,
+    );
+  const unknown = values.filter((family) => !FAMILY_ORDER.includes(family));
+  if (unknown.length)
+    throw new NotChecked(`不认识的作者模型族：${unknown.join('、')}（可用：${FAMILY_ORDER.join('、')}）`);
+  return new Set(values);
 }
-async function withFallback(chain, log, run) {
+
+/**
+ * 为讨论和第二意见生成候选链。作者族可传多个；显式执行体也必须经过同族排除。
+ * UI 仍固定走 Gemini，且不借此绕过作者族校验。
+ */
+export function discussionProfiles(o = {}) {
+  if (o.authorFamily && o.excludeFamily)
+    throw new NotChecked('--author-family 和 --exclude-family 只能选一个');
+  const excluded = splitFamilies(o.authorFamily ?? o.excludeFamily);
+  if (o.agent) {
+    const profile = pickProfile(o.agent);
+    if (excluded.has(profile.family))
+      throw new NotChecked(`不能选与作者同一模型族的执行体：${profile.family}（${o.agent}）`);
+    return [profile];
+  }
+  if (o.ui) {
+    if (excluded.has(PROFILES.ui.family))
+      throw new NotChecked(`不能选与作者同一模型族的执行体：${PROFILES.ui.family}（ui）`);
+    return [PROFILES.ui]; // 界面类只给 Gemini，不拿别家顶
+  }
+  const candidates = FAMILY_ORDER.filter((family) => !excluded.has(family)).map(
+    (family) => PROFILE_BY_FAMILY[family],
+  );
+  if (candidates.length === 0) throw new NotChecked('作者模型族覆盖全部候选，没有可用的不同模型族');
+  return candidates;
+}
+
+function prProfiles(o) {
+  return discussionProfiles(o);
+}
+async function withFallback(chain, log, run, { budgetMs } = {}) {
   const misses = [];
+  const deadline = Number.isFinite(budgetMs) ? Date.now() + budgetMs : null;
   for (const p of chain) {
     const who = `${p.agent}/${p.model ?? '服务端默认'}`;
+    const remainingMs = deadline === null ? undefined : deadline - Date.now();
+    if (remainingMs !== undefined && remainingMs <= 0) {
+      misses.push(`${who}：讨论总预算已用完`);
+      break;
+    }
     try {
-      const r = await run(p);
+      const r = await run(p, remainingMs);
       if (misses.length) r.fallbackNote = `主审连不上换了人：${misses.join('；')}`;
       return { ...r, profile: p };
     } catch (e) {
-      // 这台机器没装、没开、没登录这一家要的工具：和连不上一样换下一家，原因照实记下
+      // 候选端点没装、没开、没登录、模型不在 roster、或本轮超时，都换下一家并照实记下。
+      // 结论解析发生在 withFallback 之后，所以「不喜欢结论」不会触发换家。
       if (e instanceof NotInstalled) {
         misses.push(`${who}：${e.message}`);
         log(`${who} 用不了（${e.message}），换下一家`);
         continue;
       }
-      if (!(e instanceof NotChecked) || !UNAVAILABLE.test(e.message)) throw e;
-      misses.push(`${who} 连不上`);
-      log(`${who} 连不上（${e.message.slice(0, 160)}），换下一家`);
+      if (e instanceof NotChecked) {
+        misses.push(`${who}：${e.message}`);
+        log(`${who} 没查成（${e.message.slice(0, 160)}），换下一家`);
+        continue;
+      }
+      throw e;
     }
   }
   throw new NotChecked(`候选的几家全没成：${misses.join('；')}`);
@@ -503,20 +568,26 @@ async function critique(o) {
   const name = (o.name ?? 'critique').replace(/[^\w一-鿿-]/g, '-');
   const out = join(RUNS, `critique-${name}-${stamp}.md`);
   try {
-    const chain = o.agent ? [pickProfile(o.agent)] : FALLBACK.map((k) => PROFILES[k]);
+    const chain = discussionProfiles(o);
+    const budgetSec = Number(o.budgetSec ?? 30);
+    if (!Number.isFinite(budgetSec) || budgetSec <= 0)
+      throw new NotChecked('--budget-sec 必须是正数（讨论默认 30 秒）');
+    const budgetMs = budgetSec * 1000;
     const r = await withFallback(
       chain,
       (s) => console.error(s),
-      (p) =>
+      (p, remainingMs) =>
         runSession({
           prompt: o.blind ? blindPrompt(material) : critiquePrompt(material),
           profile: p,
           workdir: dir,
-          timeoutMin: o.timeoutMin,
+          timeoutMin: Math.min(o.timeoutMin, (remainingMs ?? o.timeoutMin * 60_000) / 60_000),
           log: (s) => console.error(s),
           pollMs: 1_000,
           effort: o.effort,
+          discussion: true,
         }),
+      { budgetMs },
     );
     const profile = r.profile;
     const v = o.blind ? (r.text.trim() ? { agree: true, objections: 0 } : null) : parseCritique(r.text);
@@ -524,7 +595,7 @@ async function critique(o) {
       `# ${o.blind ? '盲答' : '反方'}：${name}`,
       '',
       `- 题面：${src}`,
-      `- 会话：${r.sessionKey}（${r.model ?? profile.model ?? '服务端默认'}，思考强度 ${o.effort ?? '默认'}）${r.fallbackNote ? `；${r.fallbackNote}` : ''}`,
+      `- 会话：${r.sessionKey}（${r.model ?? profile.model ?? profile.agent}，思考强度 ${o.effort ?? '默认'}）${r.fallbackNote ? `；${r.fallbackNote}` : ''}`,
       `- 账本：${r.ledgerNote}；${r.usage}`,
       `- 结论：${o.blind ? (v ? '答了' : '空的（没查成）') : v ? (v.agree ? '同意' : `有异议 ${v.objections} 条`) : '认不出（没查成）'}`,
       '',
@@ -545,6 +616,107 @@ async function critique(o) {
 
 // cursorAgentEnv 挪到 tools.mjs 了（ask.mjs、second-opinion.mjs 两边起 cursor-agent 都要用，见那边的注释）；
 // 这个文件顶部 import 了它、又 re-export 了它，用法不用变。
+
+/** 从 reclaude --output-format json 的结果里取正文；形状认不出就明确失败。 */
+export function parseReclaudeOutput(raw) {
+  const source = String(raw ?? '').trim();
+  if (!source) throw new NotChecked('reclaude 退出码 0 但没有输出');
+  const values = [];
+  try {
+    values.push(JSON.parse(source));
+  } catch {
+    for (const line of source.split(/\r?\n/).reverse()) {
+      if (!line.trim()) continue;
+      try {
+        values.push(JSON.parse(line));
+        break;
+      } catch {
+        // JSON 输出有时是逐行事件；继续尝试下一行，全部失败再报格式认不出。
+      }
+    }
+  }
+  const textOf = (value) => {
+    if (typeof value === 'string') return value.trim();
+    if (Array.isArray(value)) {
+      const parts = value.map(textOf).filter(Boolean);
+      return parts.join('\n').trim();
+    }
+    if (!value || typeof value !== 'object') return '';
+    for (const key of ['result', 'text', 'response', 'content', 'output']) {
+      const text = textOf(value[key]);
+      if (text) return text;
+    }
+    const message = textOf(value.message);
+    if (message) return message;
+    return '';
+  };
+  for (const value of values) {
+    const text = textOf(value);
+    if (text) return text;
+  }
+  throw new NotChecked('reclaude JSON 输出格式认不出（缺 result/text/content）');
+}
+
+function runClaude({ prompt, workdir, timeoutMin, log }) {
+  if (!findBin('reclaude'))
+    return Promise.reject(new NotInstalled('这台机器没装 reclaude（PATH 上找不到；Claude 必须经 reclaude）'));
+  const started = Date.now();
+  // prompt 走 stdin，不把题面拼进 Windows shell 的命令行；`-p` 无位置参数时由 reclaude 从 stdin 读。
+  const args = ['-p', '--output-format', 'json', '--effort', 'medium', '--max-turns', '1'];
+  log(`[0.0s] reclaude 起了（只读，单回合）`);
+  return new Promise((resolveP, rejectP) => {
+    const child = spawn('reclaude', args, {
+      cwd: workdir,
+      windowsHide: true,
+      shell: process.platform === 'win32',
+      env: process.env,
+    });
+    let out = '';
+    let err = '';
+    let settled = false;
+    child.stdin.on('error', () => {
+      // 执行体提前退出时写 stdin 会 EPIPE，最终以退出码和 stdout 为准。
+    });
+    child.stdin.end(prompt);
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn(value);
+    };
+    const timer = setTimeout(
+      () => {
+        child.kill();
+        finish(rejectP, new NotChecked(`reclaude ${timeoutMin} 分钟没答完，已停掉`));
+      },
+      Math.max(1, timeoutMin * 60_000),
+    );
+    child.stdout.on('data', (d) => (out += d));
+    child.stderr.on('data', (d) => (err += d));
+    child.on('error', (e) => finish(rejectP, new NotChecked(`reclaude 起不来：${e.message}`)));
+    child.on('close', (code) => {
+      if (code !== 0)
+        return finish(
+          rejectP,
+          new NotChecked(`reclaude 退出码 ${code}：${(err || out).trim().slice(0, 400)}`),
+        );
+      try {
+        const text = parseReclaudeOutput(out);
+        const secs = ((Date.now() - started) / 1000).toFixed(1);
+        log(`[${secs}s] done（reclaude）`);
+        finish(resolveP, {
+          text,
+          sessionKey: `reclaude:${process.pid}:${started}`,
+          model: null,
+          ledgerNote: '走本机 reclaude，不经 Mirasim 中继',
+          usage: `${secs} 秒`,
+        });
+      } catch (e) {
+        finish(rejectP, e);
+      }
+    });
+  });
+}
 
 // 断链修复（本机 2026-09-28 两次实测，和 ask.mjs 同一个坑）：原来题面写进工作目录里的临时文件（Windows 命令行
 // 长度有限），让它读文件照做——指望 cursorAgentEnv() 摘掉 Git Bash 留下的环境变量就能让它的钩子猜成本机原生壳。
@@ -625,7 +797,17 @@ function runCursor({ prompt, profile, workdir, timeoutMin, log }) {
   });
 }
 
-async function runSession({ prompt, profile, workdir, timeoutMin, log, pollMs = 10_000, effort }) {
+async function runSession({
+  prompt,
+  profile,
+  workdir,
+  timeoutMin,
+  log,
+  pollMs = 10_000,
+  effort,
+  discussion = false,
+}) {
+  if (profile.agent === 'reclaude') return runClaude({ prompt, workdir, timeoutMin, log });
   if (profile.agent === 'cursor-cli') return runCursor({ prompt, profile, workdir, timeoutMin, log });
   const { url, wire, state } = await connect();
   const agents = Array.isArray(state.agentsAvailable) ? state.agentsAvailable : [];
@@ -646,7 +828,10 @@ async function runSession({ prompt, profile, workdir, timeoutMin, log, pollMs = 
     clientRef: `second-opinion-${since}`,
   });
   // 起 codex 会堵服务端 40–58 秒（adapters.md MS-08），等足 120 秒。没回应答也不重发（MS-18：会烧两次额度）。
-  const ack = await wire.waitFor((m) => m.type === 'accepted' || m.type === 'error', 120_000);
+  const ack = await wire.waitFor(
+    (m) => m.type === 'accepted' || m.type === 'error',
+    discussion ? Math.max(1, Math.min(30_000, timeoutMin * 60_000)) : 120_000,
+  );
   wire.close();
   if (!ack)
     throw new NotChecked(
@@ -765,18 +950,11 @@ export function prComment(round, head, model, verdict, text, postMerge = false) 
   ].join('\n');
 }
 
-/** 贴之前按仓里的卫生检查扫一遍：名单读不到、没扫成、扫出东西，一律抛（不贴）。loadOpts 只给自测用。 */
-export async function checkPublishable(repo, body, loadOpts = {}) {
+/** 贴之前按仓里的卫生检查扫一遍：没扫成、扫出真密钥，一律抛（不贴；账号、组织编号、邮箱、IP 这类标识不算泄漏，
+ * 不拦，创始人 2026-09-28 傍晚拍，specs/169-Fusion形态/需求.md）。 */
+export async function checkPublishable(repo, body) {
   const scan = await import(pathToFileURL(join(repo, 'packages', 'hygiene', 'src', 'scan.ts')).href);
-  const values = await import(pathToFileURL(join(repo, 'packages', 'hygiene', 'src', 'values.ts')).href);
-  const loaded = values.loadSensitiveValues(loadOpts);
-  if (!loaded.ok) throw new Error(`卫生检查没法做（${loaded.reason}），没贴`);
-  const report = scan.scanFiles(
-    ['second-opinion.md'],
-    () => Buffer.from(body, 'utf8'),
-    undefined,
-    loaded.values,
-  );
+  const report = scan.scanFiles(['second-opinion.md'], () => Buffer.from(body, 'utf8'));
   if (report.binary.length > 0 || report.scanned.length !== 1) throw new Error('卫生检查没扫成，没贴');
   if (report.findings.length > 0)
     throw new Error(`卫生检查拦下了（${report.findings.map(scan.formatFinding).join('；')}），没贴`);
@@ -866,6 +1044,9 @@ function args(argv) {
     else if (a === '--name') o.name = argv[++i];
     else if (a === '--effort') o.effort = argv[++i];
     else if (a === '--agent') o.agent = argv[++i];
+    else if (a === '--author-family') o.authorFamily = [o.authorFamily, argv[++i]].filter(Boolean).join(',');
+    else if (a === '--exclude-family') o.excludeFamily = argv[++i];
+    else if (a === '--budget-sec') o.budgetSec = Number(argv[++i]);
     else if (a === '--blind') o.blind = true;
     else if (a === '--slow') o.slow = true;
     else if (a === '--high-risk') o.highRisk = true;
@@ -913,29 +1094,16 @@ async function selftest(repo) {
     false,
     '贴 PR 的正文去掉过程话、带着头',
   );
-  // 卫生检查：名单读不到不贴、扫出名单上的值不贴、干净的放行（名单是假的，不碰本机那份；卫生检查的代码用 repo 里那份）
-  const fakeList = {
-    env: {},
-    home: 'FAKEHOME',
-    exists: (p) => p.startsWith('FAKEHOME') && p.endsWith('sensitive-values.txt'),
-    read: () => 'SECRETVAL-9f3a\n',
-  };
+  // 卫生检查：扫出真密钥不贴、干净的放行（卫生检查的代码用 repo 里那份；账号、组织编号、邮箱、IP 这类标识不算
+  // 泄漏，不拦，创始人 2026-09-28 傍晚拍，specs/169-Fusion形态/需求.md）
+  const leakToken = ['ghp', 'Q3mNz8VbTf6RpLc2WdYs5HuXa9GjKe4B'].join('_');
   const rejects = async (p) =>
     p.then(
       () => false,
       () => true,
     );
-  eq(
-    await rejects(checkPublishable(repo, '干净的正文', { env: {}, home: 'FAKEHOME', exists: () => false })),
-    true,
-    '名单读不到不贴',
-  );
-  eq(
-    await rejects(checkPublishable(repo, '里面有 SECRETVAL-9f3a 这个值', fakeList)),
-    true,
-    '扫出名单上的值不贴',
-  );
-  eq(await rejects(checkPublishable(repo, '干净的正文', fakeList)), false, '干净的放行');
+  eq(await rejects(checkPublishable(repo, `里面有 ${leakToken} 这个值`)), true, '扫出真密钥不贴');
+  eq(await rejects(checkPublishable(repo, '干净的正文')), false, '干净的放行');
   eq(parseCritique('## 漏掉的\n无\n结论：同意'), { agree: true, objections: 0 }, '反方同意');
   eq(parseCritique('**结论：有异议 3 条**'), { agree: false, objections: 3 }, '反方有异议');
   eq(parseCritique('结论：有异议 0 条'), null, '有异议 0 条认不出');
@@ -990,7 +1158,7 @@ async function main() {
     process.exitCode = 3;
     return;
   }
-  if (o.text) return await critique({ ...o, timeoutMin: o.timeoutMin === 45 ? 20 : o.timeoutMin });
+  if (o.text) return await critique({ ...o, timeoutMin: o.timeoutMin === 45 ? 0.5 : o.timeoutMin });
   if (!Number.isInteger(o.pr) || o.pr <= 0) throw new NotChecked('要 --pr <号> 或 --text <文件>');
   const repo = repoOf(o);
   const runs = RUNS;
@@ -1033,7 +1201,7 @@ async function main() {
       `# PR #${o.pr} 第二意见 第 ${o.round} 轮`,
       '',
       `- 审的头：${info.head}`,
-      `- 会话：${r.sessionKey}（${r.model ?? r.profile.model ?? '服务端默认'}）${r.fallbackNote ? `；${r.fallbackNote}` : ''}`,
+      `- 会话：${r.sessionKey}（${r.model ?? r.profile.model ?? r.profile.agent}）${r.fallbackNote ? `；${r.fallbackNote}` : ''}`,
       `- 账本：${r.ledgerNote}；${r.usage}`,
       `- 结论：${v ? (v.pass ? '通过' : `必须改 ${v.blocking} 条`) : '认不出（没查成，不算通过）'}`,
       '',
@@ -1053,7 +1221,7 @@ async function main() {
           prComment(
             o.round,
             info.head,
-            r.model ?? r.profile.model ?? '服务端默认',
+            r.model ?? r.profile.model ?? r.profile.agent,
             v,
             r.fallbackNote
               ? `（${r.fallbackNote}）

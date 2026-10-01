@@ -153,7 +153,9 @@ APP_SECRETS=("agent-token:FLEET_AGENT_TOKEN_SECRET:签 fleet 通行证（引擎�
   "gateway-token:FLEET_FEISHU_GATEWAY_TOKEN:飞书网关的通行证（香港放同一份）")
 # 「引擎」GitHub App 的凭据（手放）：api.env 的 FLEET_GITHUB_WEBHOOK_SECRET 照它的 webhook_secret 填（lib/app-config.sh）
 ENGINE_APP_JSON=/etc/fleet-dao/github/gh-app-fleet-dao-engine.json
-SENSITIVE_VALUES=/etc/fleet-dao/sensitive-values.txt # 卫生检查的已知敏感值名单，手放（docs/ops.md 目录一节）
+# 卫生检查已知敏感值名单机制整个删掉了（创始人 2026-09-28 傍晚拍，specs/169-Fusion形态/需求.md）：早先版本放过的
+# 这份名单文件、engine.env 里指它的键，装机脚本这次清掉，别留着骗后面 desired-config.json 的对账
+STALE_SENSITIVE_VALUES=/etc/fleet-dao/sensitive-values.txt
 # 拼车用户家里的派活垫片：引擎接真活以后退役（#28 登记），读回在它还在时记待配。装机脚本不碰它
 CARPOOL_SHIM=/home/fleet-agent-carpool/bin/carpool-run.sh
 # AI 会话的工作树的根（引擎真端口的 FLEET_WORK_DIR，fleet-agent-scope 的 WORK_BASE）、引擎自己的状态目录（FLEET_ENGINE_STATE_DIR）
@@ -809,6 +811,10 @@ setup_app_config() {
       fix_meta "$file" root:fleet 640
       # 样例后来加的键补上（只补缺，已有的不动）；release.env 不补：它的每一项都要人定
       if [[ "$name" != release ]]; then add_missing_keys "$file" "$DEPLOY_DIR/france/$name.env.example"; fi
+      # 功能删掉了、机器上还留着的键：这里清掉（remove_stale_key 只删这一个键那一行，不碰旁的）
+      if [[ "$name" == engine ]]; then
+        remove_stale_key "$file" FLEET_SENSITIVE_VALUES_FILE "卫生检查已知敏感值名单机制删掉了"
+      fi
     else
       # 要人定的键（FLEET_ENGINE_PORTS）建出来是注释掉的，读回判红等人定
       if content=$(example_for_new_file "$DEPLOY_DIR/france/$name.env.example"); then
@@ -819,6 +825,8 @@ setup_app_config() {
     fi
   done
   if ((api_ok)); then fill_webhook_secret /etc/fleet-dao/api.env "$ENGINE_APP_JSON"; fi
+  # 早先版本手放的已知敏感值名单文件：机制删掉了，没人读了，删掉（只删装机脚本认识的这一个路径）
+  remove_legacy "$STALE_SENSITIVE_VALUES" "卫生检查早先的已知敏感值名单"
   # 随机密钥：首次生成，之后不再动（换了会让已发出的登录、通行证全部作废；真要换就删掉文件再跑）。值不进日志
   for spec in "${APP_SECRETS[@]}"; do
     IFS=: read -r name key what <<<"$spec"
@@ -1162,8 +1170,7 @@ readback_app_config() {
   check_env_duplicates /etc/fleet-dao/engine.env /etc/fleet-dao/api.env /etc/fleet-dao/release.env || :
   # api.env 不在的话上面已经判红
   if [[ -f /etc/fleet-dao/api.env ]]; then check_webhook_secret /etc/fleet-dao/api.env "$ENGINE_APP_JSON" || :; fi
-  check_sensitive_values "$SENSITIVE_VALUES" || :
-  check_engine_env /etc/fleet-dao/engine.env "$SENSITIVE_VALUES" "$WORK_DIR" "$ENGINE_STATE_DIR" || :
+  check_engine_env /etc/fleet-dao/engine.env "$WORK_DIR" "$ENGINE_STATE_DIR" || :
   check_retired "$CARPOOL_SHIM" 拼车用户家里的派活垫片
   readback_config
 }

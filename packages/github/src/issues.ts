@@ -3,9 +3,9 @@
 // 内容没变就不写（省 GitHub 的内容创建配额）。GitHub 的写没有「版本不对就拒」，所以写完用编辑历史核对：
 // 我们读和写之间要是插进了人手编辑（被我们这次盖掉了），把人写的那一版找回来、重新放进进度段，并报警。
 // 关单：先发一条写明去向的评论（带标记，幂等），再关（带 state_reason），回读 state 与 state_reason 才算成（A8）。
-// 开单、发评论（#259：引擎对账时给提问另开单、把回答写到另开的单上）：正文都是标记 + 幂等键防重复写，账丢了
-// 按正文里的隐藏标记翻页回查；正文来自 AI（提问、回答），写之前先中和 @ 提醒和能伪造/截断标记的 <!-- -->、
-// 再过卫生检查——这两步进度段、关单评论都不用（进度段的字段、关单去向不是 AI 自由写的正文）。
+// 开单、发评论（巡检开单，关单对账、单子打标挂版本留言；最早是 #259 对账给提问另开单写的，#530 删了那一步）：
+// 正文都是标记 + 幂等键防重复写，账丢了按正文里的隐藏标记翻页回查；正文可能来自 AI，写之前先中和 @ 提醒和能伪造/截断
+// 标记的 <!-- -->、再过卫生检查——这两步进度段、关单评论都不用（进度段的字段、关单去向不是 AI 自由写的正文）。
 // 每次写完都把回执里的 updated_at 记成「自家的回声」（echo.ts），轮询补收时据此不叫醒自己。
 import { z } from 'zod';
 import { enc, type RepoRef, repoSlug, unexpected } from './client.ts';
@@ -21,7 +21,7 @@ import {
   renderProgress,
   spliceProgress,
 } from './progress.ts';
-import { assertPublishable, type PublishName, type PublishText } from './publish-check.ts';
+import { assertPublishable, type PublishText } from './publish-check.ts';
 import { assertBodySize, neutralizeMentions, oneLine } from './text.ts';
 
 const User = z.object({ login: z.string(), id: z.number(), type: z.string() });
@@ -104,26 +104,18 @@ export interface UpdateIssueProgressResult {
 }
 
 /**
- * 进度段里要公开的字：会话写的子任务标题（方案拆出来的）、「正在」那句话（可能带着分诊追问的原话）；
- * 文档路径是名字（引擎按 issue 标题定的，和写文档时一样按名单比）。
+ * 进度段里要公开的字：会话写的子任务标题（方案拆出来的）、「正在」那句话（可能带着分诊追问的原话）。
  * 位置名只用序号，不用子任务的 key（key 也是会话写的，报错只带位置、不带值）。
  */
-function progressTexts(
-  issueNumber: number,
-  progress: IssueProgress,
-): { texts: PublishText[]; names: PublishName[] } {
+function progressTexts(issueNumber: number, progress: IssueProgress): PublishText[] {
   const where = `#${issueNumber} 的进度段`;
-  const docs = Object.entries(progress.docs).filter((e): e is [string, string] => typeof e[1] === 'string');
-  return {
-    texts: [
-      { path: `${where}：正在`, text: progress.current },
-      ...progress.subtasks.map((s, i) => ({
-        path: `${where}：第 ${i + 1} 个子任务`,
-        text: `${s.key} ${s.title}`,
-      })),
-    ],
-    names: docs.map(([kind, path]) => ({ label: `${where}：文档（${kind}）`, name: path })),
-  };
+  return [
+    { path: `${where}：正在`, text: progress.current },
+    ...progress.subtasks.map((s, i) => ({
+      path: `${where}：第 ${i + 1} 个子任务`,
+      text: `${s.key} ${s.title}`,
+    })),
+  ];
 }
 
 export async function updateIssueProgress(
@@ -133,13 +125,13 @@ export async function updateIssueProgress(
 ): Promise<UpdateIssueProgressResult> {
   const { repo, issueNumber } = input;
   const slug = repoSlug(repo);
-  // 进度段写进公开的 issue 正文，不经 git 推送、推前扫描拦不到：一个请求都不发之前先过卫生检查（publish-check.ts）
-  const publish = progressTexts(issueNumber, input.progress);
+  // 进度段写进公开的 issue 正文，不经 git 推送、推前扫描拦不到：一个请求都不发之前先过卫生检查（publish-check.ts；
+  // 只管 fleet-dao 这个仓）
   assertPublishable(
+    repo,
     `写 ${slug} #${issueNumber} 的进度段`,
-    publish.texts,
-    deps.sensitiveValues,
-    publish.names,
+    progressTexts(issueNumber, input.progress),
+    deps.hygieneRepo,
   );
   const asOf = (
     input.asOf instanceof Date ? input.asOf : new Date(input.asOf ?? deps.client.now())
@@ -504,12 +496,13 @@ export async function openIssue(
   const safeTitle = neutralizeMentions(title);
   const safeBody = neutralizeMentions(input.body);
   assertPublishable(
+    repo,
     `开 ${slug} 的单子`,
     [
       { path: '单子标题', text: safeTitle },
       { path: '单子正文', text: safeBody },
     ],
-    deps.sensitiveValues,
+    deps.hygieneRepo,
   );
   const marker = `<!-- fleet:issue:${digest({ key })} -->`;
   const body = `${safeBody}\n\n${marker}`;
@@ -583,7 +576,7 @@ export async function openIssue(
   return { number: value.number, url: value.url, created: !replay };
 }
 
-// —— 在 issue 上留一条评论（不关单、不改进度段：#259 引擎对账时给提问另开单，回答写到那张单上）——
+// —— 在 issue 上留一条评论（不关单、不改进度段：关单对账、单子打标挂版本留言用）——
 
 export interface CommentIssueInput {
   repo: RepoRef;
@@ -642,9 +635,10 @@ async function commentOn(
   // 正文是 AI 写的（提问或回答）：中和之后照开单一样过卫生检查
   const safeBody = neutralizeMentions(input.body);
   assertPublishable(
+    repo,
     `写 ${slug} #${issueNumber} 的评论`,
     [{ path: '评论正文', text: safeBody }],
-    deps.sensitiveValues,
+    deps.hygieneRepo,
   );
   const marker = `<!-- fleet:comment:${digest({ key })} -->`;
   const body = `${safeBody}\n\n${marker}`;

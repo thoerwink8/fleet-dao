@@ -26,12 +26,23 @@ interface SecondOpinionLib {
     postMerge?: boolean,
   ): string;
   stripLocalPaths(text: string, dirs: string[]): string;
-  checkPublishable(repo: string, body: string, loadOpts?: unknown): Promise<void>;
+  checkPublishable(repo: string, body: string): Promise<void>;
   cursorAgentEnv(
     platform?: string,
     env?: Record<string, string | undefined>,
   ): Record<string, string | undefined>;
   UNAVAILABLE: RegExp;
+  parseReclaudeOutput(raw: string): string;
+  discussionProfiles(options: {
+    authorFamily?: string;
+    excludeFamily?: string;
+    agent?: string;
+    ui?: boolean;
+  }): Array<{
+    family: string;
+    agent: string;
+    model: string | null;
+  }>;
 }
 interface ToolsLib {
   dataDir(home?: string): string;
@@ -121,6 +132,27 @@ function fakeCursor(): string {
   else {
     writeFileSync(join(bin, 'cursor-agent'), `#!/bin/sh\nexec "${process.execPath}" "${script}" "$@"\n`);
     chmodSync(join(bin, 'cursor-agent'), 0o755);
+  }
+  return bin;
+}
+
+/** 假的 reclaude：只验证讨论脚本使用无头 JSON 参数并能读出正文，不连接真实 Claude。 */
+function fakeReclaude(): string {
+  const bin = temp('reclaude-bin');
+  const script = join(bin, 'fake-reclaude.mjs');
+  writeFileSync(
+    script,
+    [
+      "if (!process.argv.includes('-p') || !process.argv.includes('--output-format') || !process.argv.includes('json') || !process.argv.includes('--effort') || !process.argv.includes('medium') || !process.argv.includes('--max-turns') || !process.argv.includes('1')) process.exit(9);",
+      'if (process.env.FAKE_RECLAUDE_SLEEP_MS) await new Promise((resolve) => setTimeout(resolve, Number(process.env.FAKE_RECLAUDE_SLEEP_MS)));',
+      "process.stdout.write(JSON.stringify({ result: '## 框架对不对\\n一致\\n## 漏掉的\\n无\\n## 选项怎么改\\n无\\n结论：同意' }));",
+      '',
+    ].join('\n'),
+  );
+  if (WIN) writeFileSync(join(bin, 'reclaude.cmd'), `@"${process.execPath}" "${script}" %*\r\n`);
+  else {
+    writeFileSync(join(bin, 'reclaude'), `#!/bin/sh\nexec "${process.execPath}" "${script}" "$@"\n`);
+    chmodSync(join(bin, 'reclaude'), 0o755);
   }
   return bin;
 }
@@ -351,12 +383,16 @@ describe('second-opinion.mjs：缺东西照实报', SLOW, () => {
     expect(r.all).toContain('【推演】');
   });
 
-  it('这台没装 Mirasim、也没装 cursor-agent：几家都换过，退出码 2，逐家写明缺的是什么', () => {
+  it('固定候选都不可用：几家都换过，退出码 2，逐家写明缺的是什么', () => {
     const home = temp('home');
-    const r = run('second-opinion.mjs', ['--text', topic(LONG), '--name', 'no-tools'], { home });
+    const r = run(
+      'second-opinion.mjs',
+      ['--text', topic(LONG), '--name', 'no-tools', '--author-family', 'gpt'],
+      { home },
+    );
     expect(r.code).toBe(2);
     expect(r.err).toContain('这台机器没装 Mirasim');
-    expect(r.err).toContain('这台机器没装 cursor-agent');
+    expect(r.err).toContain('这台机器没装 reclaude');
     expect(r.err).toContain('候选的几家全没成');
     const runs = join(tools.dataDir(home), 'runs');
     expect(readdirSync(runs).some((f) => f.startsWith('critique-no-tools-'))).toBe(true);
@@ -365,7 +401,11 @@ describe('second-opinion.mjs：缺东西照实报', SLOW, () => {
   it('Mirasim 装了没开：写明没开', () => {
     const home = temp('home');
     mkdirSync(join(home, '.mirasim', 'run'), { recursive: true });
-    const r = run('second-opinion.mjs', ['--text', topic(LONG), '--name', 'mira-off'], { home });
+    const r = run(
+      'second-opinion.mjs',
+      ['--text', topic(LONG), '--name', 'mira-off', '--author-family', 'gpt'],
+      { home },
+    );
     expect(r.code).toBe(2);
     expect(r.err).toContain('本机 Mirasim 没开');
   });
@@ -501,29 +541,107 @@ describe('second-opinion.mjs 的纯判断（原来 --selftest 的那几条）', 
     expect(so.UNAVAILABLE.test('结论认不出')).toBe(false);
   });
 
-  it('贴之前过卫生检查：名单读不到不贴、扫出名单上的值不贴、干净的放行（卫生检查换成假的）', async () => {
+  it('贴之前过卫生检查：扫出真密钥不贴、干净的放行（卫生检查换成假的；账号、组织编号、邮箱、IP 这类标识不算泄漏，不拦，创始人 2026-09-28 傍晚拍）', async () => {
     const repo = temp('repo');
     const src = join(repo, 'packages', 'hygiene', 'src');
     mkdirSync(src, { recursive: true });
     writeFileSync(
-      join(src, 'values.ts'),
-      "export function loadSensitiveValues(o) { return o && o.fail ? { ok: false, reason: '名单读不到' } : { ok: true, values: ['SECRETVAL-9f3a'] }; }\n",
-    );
-    writeFileSync(
       join(src, 'scan.ts'),
       [
-        'export function scanFiles(paths, read, _x, values) {',
+        'export function scanFiles(paths, read) {',
         "  const text = read(paths[0]).toString('utf8');",
-        "  return { binary: [], scanned: paths, findings: values.filter((v) => text.includes(v)).map(() => ({ rule: 'known-value' })) };",
+        "  const findings = text.includes('LEAKED-TOKEN') ? [{ rule: 'token' }] : [];",
+        '  return { binary: [], scanned: paths, findings };',
         '}',
         'export function formatFinding(f) { return f.rule; }',
         '',
       ].join('\n'),
     );
-    await expect(so.checkPublishable(repo, '干净的正文', { fail: true })).rejects.toThrow('卫生检查没法做');
-    await expect(so.checkPublishable(repo, '里面有 SECRETVAL-9f3a 这个值', {})).rejects.toThrow(
-      '卫生检查拦下了',
+    await expect(so.checkPublishable(repo, '里面有 LEAKED-TOKEN 这个值')).rejects.toThrow('卫生检查拦下了');
+    await expect(so.checkPublishable(repo, '干净的正文')).resolves.toBeUndefined();
+  });
+});
+
+describe('讨论/第二意见：按作者模型族排除同族', () => {
+  it('作者是 GPT 时跳过 GPT，按固定顺序给出 Claude、DeepSeek、Grok、Kimi', () => {
+    expect(so.discussionProfiles({ authorFamily: 'gpt' }).map((p) => p.family)).toEqual([
+      'claude',
+      'deepseek',
+      'grok',
+      'kimi',
+    ]);
+  });
+
+  it('作者是非 GPT 时默认 GPT 首选', () => {
+    expect(so.discussionProfiles({ authorFamily: 'claude' }).map((p) => p.family)).toEqual([
+      'gpt',
+      'deepseek',
+      'grok',
+      'kimi',
+    ]);
+  });
+
+  it('作者族可以是多个，所有同族都跳过', () => {
+    expect(so.discussionProfiles({ authorFamily: 'gpt,deepseek' }).map((p) => p.family)).toEqual([
+      'claude',
+      'grok',
+      'kimi',
+    ]);
+  });
+
+  it('缺作者族或含未知族时明确失败，不猜环境变量', () => {
+    expect(() => so.discussionProfiles({})).toThrow('要 --author-family');
+    expect(() => so.discussionProfiles({ authorFamily: 'mystery' })).toThrow('不认识的作者模型族');
+  });
+
+  it('显式指定同作者族的执行体时拒绝，不能靠手点绕过同族排除', () => {
+    expect(() => so.discussionProfiles({ authorFamily: 'gpt', agent: 'code' })).toThrow('同一模型族');
+  });
+});
+
+describe('讨论/第二意见：作者为 GPT 时候选全不可用', SLOW, () => {
+  it('候选端点都没装或没开时退出码 2，并列出全没成，不伪造 DeepSeek 已可用', () => {
+    const r = run(
+      'second-opinion.mjs',
+      ['--text', topic(LONG), '--name', 'all-unavailable', '--author-family', 'gpt'],
+      {
+        home: temp('home'),
+      },
     );
-    await expect(so.checkPublishable(repo, '干净的正文', {})).resolves.toBeUndefined();
+    expect(r.code).toBe(2);
+    expect(r.err).toContain('候选的几家全没成');
+    expect(r.err).toContain('reclaude');
+    expect(r.err).toContain('dsh');
+  });
+});
+
+describe('Claude 讨论端点：只经 reclaude 的无头 JSON', SLOW, () => {
+  it('作者是 GPT 时 Claude 先被选中，reclaude 参数和 JSON 正文都能核对', () => {
+    const r = run(
+      'second-opinion.mjs',
+      ['--text', topic(LONG), '--name', 'fake-claude', '--author-family', 'gpt'],
+      {
+        home: temp('home'),
+        path: fakeReclaude(),
+      },
+    );
+    expect(r.code).toBe(0);
+    expect(r.out).toContain('critique-fake-claude-');
+    expect(r.err).toContain('reclaude 起了');
+  });
+
+  it('reclaude JSON 形状认不出时明确失败', () => {
+    expect(() => so.parseReclaudeOutput('{"unexpected":true}')).toThrow('reclaude JSON 输出格式认不出');
+    expect(so.parseReclaudeOutput('{"result":"结论：同意"}')).toBe('结论：同意');
+  });
+
+  it('单家超时后不把预算带给下一家，整轮到时退出码 2', () => {
+    const r = run(
+      'second-opinion.mjs',
+      ['--text', topic(LONG), '--name', 'budget', '--author-family', 'gpt', '--budget-sec', '0.05'],
+      { home: temp('home'), path: fakeReclaude(), env: { FAKE_RECLAUDE_SLEEP_MS: '100' } },
+    );
+    expect(r.code).toBe(2);
+    expect(r.err).toContain('讨论总预算已用完');
   });
 });

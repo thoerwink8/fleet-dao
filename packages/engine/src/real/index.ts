@@ -83,7 +83,7 @@ export interface RealPortsDeps {
    */
   drain?: EngineDrain;
   /**
-   * 发给别家（开 PR 前验证）的材料过卫生检查：生产用 github 包的 assertPublishable 和推分支同一份名单。
+   * 发给别家（开 PR 前验证）的材料过卫生检查：生产用 github 包的 assertPublishable，和推分支、开 PR 同一套规则。
    * 不给就发不出去（验证会话起不来，报 HYGIENE_UNSCANNED），不当成查过了。
    */
   screen?: SessionPortsDeps['screen'];
@@ -491,8 +491,9 @@ export function realPortsFromEnv(
     db,
     jev: jev.port,
     gh,
-    // 发给别家的验证材料和推分支、开 PR 用同一份已知敏感值名单（createGitHub 按环境变量找的那份）
-    screen: (what, texts) => assertPublishable(what, texts, gh.deps.sensitiveValues),
+    // 发给别家的验证材料和推分支、开 PR 用同一套卫生检查（真密钥；只管 fleet-dao 这个仓，别的仓按它们自己的标准）。
+    // guard 从 gh 里取同一份：配置里改了 hygieneRepo，这条路上也得跟着改，不然两边认的仓不一样。
+    screen: (repo, what, texts) => assertPublishable(repo, what, texts, gh.deps.hygieneRepo),
     trees,
     exec,
     sessionOrg,

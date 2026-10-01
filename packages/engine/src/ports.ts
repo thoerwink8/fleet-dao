@@ -214,7 +214,7 @@ export interface LeadBrief {
   /** takeover：为什么 Lead 自己写。 */
   why?: string;
   /**
-   * plan：这张单还没有需求文档、正文写全了需求（#295，引擎开的后续单、巡检单）：引擎照正文写好的需求文档全文，Lead 原样
+   * plan：这张单还没有需求文档、正文写全了需求（#295，巡检单这类引擎自己开的单）：引擎照正文写好的需求文档全文，Lead 原样
    * 写进 docs.requirement、和方案一起提交（随 PR 进主线）。
    */
   requirementText?: string;

@@ -1,8 +1,9 @@
 // 法国引擎页（#328）的本机这头：从哪台机器读（ssh 名字）、经 ssh 跑查询脚本、回来的认不认得、抹字、断链怎么判、页面要的
-// 汇总，和页面服务里「多久读一次」的那份缓存。在法国上跑的查询脚本是 france-query.mjs；页面是 france.html；命令行是 france.mjs。
+// 汇总，页面服务里「多久读一次」的那份缓存，和页面服务本身（server.mjs 是它的外壳）。在法国上跑的查询脚本是
+// france-query.mjs；页面是 france.html；命令行是 france.mjs。
 // 改这里之前必须知道：
 // - 这是驾驶舱正式版（#216 每步耗时和额度、#199 帅位栏）上线前的过渡页：那两张上线后整页停用，这份和 france-query.mjs、
-//   france.html、france.mjs 一起删，progress-lib.mjs 里的两个地址跟着删。
+//   france.html、france.mjs、server.mjs 一起删。
 // - 读不到一律明说「没读到」和原因，kind 分得开：not-configured、bad-config、no-script、ssh-failed、timeout、query-failed、
 //   bad-json、bad-shape；一块没读到只标那一块。不拿空、0 顶。
 // - 额度的算法跟 packages/shared/src/usage.ts 走（输入当量的折法、没读到另记次数、花费按计费方式分开）：
@@ -11,6 +12,7 @@
 // - 页面上的字都过 scrubText（邮箱、IP、令牌、长串抹掉）；ssh 的名字不上页面（可能写的是 IP）。
 import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { APP, SCHEMA, SQL, UNITS } from './france-query.mjs';
 
@@ -1321,4 +1323,89 @@ export function createFranceSource({
     /** 马上读一次（已经在读就等那一次）。 */
     refresh: () => (inflight ? inflight.promise : start()),
   };
+}
+
+// —— 本机页面服务（server.mjs 是它的外壳）——
+// 端口、端口的环境变量、认自己用的 APP_ID 都沿用帅位本机进度页时代的名字（进度页 #530 删了）：
+// 以前起的、还开着的页面服务进程照样认得出是自己的（再起一遍说「已经在跑」，不报端口被别人占着），书签也照样能用。
+
+export const DEFAULT_PORT = 1127;
+export const PORT_ENV = 'FLEET_PROGRESS_PORT';
+/** /api/ping 回这个，起服务时用它认「端口上已经是我们自己的页面服务」。 */
+export const APP_ID = 'fleet-progress';
+
+/**
+ * 页面服务：/ 转到 /france；/france 给法国引擎页，/api/france 给它的数据（france.read()），/api/ping 认自己。只许读。
+ * 页面文件每次现读：读不到 500 带原因，不给空页面。france 是 createFranceSource 的那一份，必给。
+ */
+export function createFranceServer({ france }) {
+  return createServer((req, res) => {
+    const send = (code, type, body) => {
+      res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store' });
+      res.end(body);
+    };
+    const json = (code, value) => send(code, 'application/json; charset=utf-8', JSON.stringify(value));
+    if (req.method !== 'GET' && req.method !== 'HEAD') return json(405, { error: '只能读' });
+    const path = new URL(req.url ?? '/', 'http://127.0.0.1').pathname;
+    if (path === '/' || path === '/index.html') {
+      res.writeHead(302, { location: '/france', 'cache-control': 'no-store' });
+      return res.end();
+    }
+    if (path === '/api/ping') return json(200, { app: APP_ID });
+    if (path === '/api/france') return json(200, france.read());
+    if (path === '/france') {
+      try {
+        return send(200, 'text/html; charset=utf-8', readFileSync(france.htmlFile));
+      } catch (e) {
+        return send(500, 'text/plain; charset=utf-8', `页面文件读不到（${e?.code ?? message(e)}）`);
+      }
+    }
+    return json(404, { error: '没有这个地址' });
+  });
+}
+
+/** 端口：--port <n>，其次环境变量 FLEET_PROGRESS_PORT，都没有用 1127。认不出返回原因（字符串）。 */
+export function parsePort(argv, env) {
+  const i = argv.indexOf('--port');
+  const raw = i >= 0 ? argv[i + 1] : env[PORT_ENV];
+  if (raw === undefined || raw === '') return i >= 0 ? '用法：--port <端口>' : DEFAULT_PORT;
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 0 && n <= 65535 ? n : `端口要是 0–65535 的整数，「${raw}」不行`;
+}
+
+/** 端口上是不是我们自己的页面服务（问 /api/ping）。连不上、回的不对都算不是。 */
+export async function isOurs(port) {
+  try {
+    const r = await fetch(`http://127.0.0.1:${port}/api/ping`, { signal: AbortSignal.timeout(2000) });
+    return r.ok && (await r.json()).app === APP_ID;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 起页面服务，只听 127.0.0.1。端口上已经是我们的页面服务：说一声、退出码 0（可以放心重复跑）；被别的程序占着：退出码 1。
+ * 返回 { code, server?, port? }。
+ */
+export function startFranceServer({ port, france, out, err }) {
+  return new Promise((resolve) => {
+    const server = createFranceServer({ france });
+    server.once('error', async (e) => {
+      if (e.code === 'EADDRINUSE') {
+        if (await isOurs(port)) {
+          out(`法国引擎页已经在跑：http://127.0.0.1:${port}/france`);
+          return resolve({ code: 0 });
+        }
+        err(`端口 ${port} 被别的程序占着（不是这个页面服务）：换一个，--port <端口> 或 ${PORT_ENV}`);
+        return resolve({ code: 1 });
+      }
+      err(`页面服务起不来：${e.message}`);
+      resolve({ code: 1 });
+    });
+    server.listen(port, '127.0.0.1', () => {
+      const actual = server.address().port;
+      out(`法国引擎页：http://127.0.0.1:${actual}/france`);
+      resolve({ code: 0, server, port: actual });
+    });
+  });
 }
