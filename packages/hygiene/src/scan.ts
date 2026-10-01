@@ -82,11 +82,11 @@ export function scanFiles(
       content = read(path);
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
-      report.missing.push(path);
+      report.missing.push(shown);
     }
-    if (content && isBinary(content)) report.binary.push(path);
+    if (content && isBinary(content)) report.binary.push(shown);
     else if (content) {
-      report.scanned.push(path);
+      report.scanned.push(shown);
       const text = content.toString('utf8');
       for (const hit of findHits(text)) hits.push({ ...hit, path: shown });
     }

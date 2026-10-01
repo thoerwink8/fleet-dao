@@ -57,6 +57,28 @@ describe('scanFiles', () => {
     for (const f of report.findings) expect(f.path).not.toContain(secret);
   });
 
+  it('【故意造出的失败】路径藏密钥 + 文件是二进制（或工作树里已删）：这两个清单里也不许出现原路径', () => {
+    // report.binary / report.missing 会进 publish-check 的 HYGIENE_UNSCANNED 报错，一样会写进日志。
+    const secret = ['ghp', pseudoRandom(36, 209)].join('_');
+    const binaryPath = `assets/${secret}.png`;
+    const gonePath = `docs/${secret}/gone.md`;
+    const files = new Map([[binaryPath, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01])]]);
+    const report = scanFiles(
+      [binaryPath, gonePath],
+      (p) => {
+        const c = files.get(p);
+        if (!c) throw Object.assign(new Error(`ENOENT: ${p}`), { code: 'ENOENT' });
+        return c;
+      },
+      [],
+    );
+    expect(report.binary).toEqual(['assets/…']);
+    expect(report.missing).toEqual(['docs/…/gone.md']);
+    for (const p of [...report.binary, ...report.missing, ...report.findings.map((f) => f.path)]) {
+      expect(p).not.toContain(secret);
+    }
+  });
+
   it('路径里藏了密钥时，内容里的命中也不遮不白名单地放过去（整条都不白名单）', () => {
     const secret = ['ghp', pseudoRandom(36, 205)].join('_');
     const other = ['ghp', pseudoRandom(36, 206)].join('_');
