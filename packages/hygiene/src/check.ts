@@ -55,6 +55,17 @@ export function runCheck(options: CheckOptions): CheckResult {
   if (report.scanned.length === 0) {
     return { code: 2, lines: [summary, '一个文件都没扫到：这不算干净，先查 git ls-files 为什么没列出东西'] };
   }
+  // git 列出来、工作树里却读不到（删了还没提交、或者权限不对）：内容根本没看，不算扫过。不许当成没事。
+  if (report.missing.length > 0) {
+    return {
+      code: 2,
+      lines: [
+        summary,
+        `这些文件在 git 里、工作树里读不到，内容没扫：${report.missing.join('、')}`,
+        '先把它们恢复（git checkout -- <路径>）或提交删除，再跑一次。没扫成不算干净。',
+      ],
+    };
+  }
   if (options.mustInclude && !report.scanned.includes(options.mustInclude)) {
     return {
       code: 2,

@@ -49,6 +49,23 @@ describe('runCheck', () => {
     expect(result.lines[1]).toContain('一个文件都没扫到');
   });
 
+  it('【故意造出的失败】git 里有、工作树里读不到：退出码 2，不当成扫过没事', () => {
+    // 删了还没提交（或者权限不对）就是这种：内容根本没看，剩下的文件再干净也不算扫全。
+    const result = runCheck({
+      root: '/repo',
+      list: () => ['README.md', 'packages/hygiene/src/rules.ts', 'docs/gone.md'],
+      read: (path) => {
+        if (path === 'docs/gone.md') throw Object.assign(new Error(`ENOENT: ${path}`), { code: 'ENOENT' });
+        return Buffer.from('没有问题\n');
+      },
+      allowlist: [],
+      mustInclude: 'packages/hygiene/src/rules.ts',
+    });
+    expect(result.code).toBe(2);
+    expect(result.lines.join('\n')).toContain('docs/gone.md');
+    expect(result.lines.join('\n')).toContain('内容没扫');
+  });
+
   it('列文件出错（不在 git 仓库里之类）：退出码 2，写明没扫成', () => {
     const result = runCheck({
       root: '/repo',
