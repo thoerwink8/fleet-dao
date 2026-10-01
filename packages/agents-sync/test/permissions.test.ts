@@ -242,9 +242,13 @@ describe('仓里真的那份权限文件（agents/config/claude-permissions.json
     expect(am.allow.join('\n')).toContain('取凭证走保险箱是日常');
     expect(am.allow.join('\n')).toContain('不含');
     // 同一天再收窄（创始人指出两处）：只指保险箱里那两个目录；写清登一次就回来的东西不在保险箱里
-    expect(am.allow.join('\n')).toContain('workstation/sites/');
+    // 当晚再收窄（创始人：「韶关 3 号楼这一种根本就不需要存进我们的保险箱里」）：保险箱只放我们自己有、
+    // 丢了别处再也没有的东西；别人家的现场凭据（现场服务器 root、数据库账号）不算。
     expect(am.allow.join('\n')).toContain('workstation/vps-subscription/');
     expect(am.allow.join('\n')).toContain('登一次就能回来的');
+    expect(am.allow.join('\n')).toContain('丢了别处再也没有');
+    expect(am.allow.join('\n')).not.toContain('workstation/sites');
+    expect(am.allow.join('\n')).toContain('别人家的现场凭据');
     // 不放宽的那几样：没有一条是给「推送/强推/删除/发布」开路的
     const allowed = am.allow.filter((r) => r !== '$defaults');
     expect(allowed.length).toBeGreaterThan(0);
