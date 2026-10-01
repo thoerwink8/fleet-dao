@@ -185,8 +185,9 @@ describe('按改动算要跑什么', () => {
     expect(pr('AGENTS.md')).toMatchObject({
       lint: false,
       deploy: 'none',
-      tests: [{ args: ['packages/agents-sync/'] }],
     });
+    // agents/test/rules/ 里钉住通用段那几条规矩的测试直接读 AGENTS.md 的真文件，所以也跑 agents
+    expect(testArgs(pr('AGENTS.md'))).toEqual(['agents/', 'packages/agents-sync/']);
     expect(pr('docs/ops.md')).toMatchObject({ deploy: 'ops', tests: [{ name: 'db' }] });
     expect(testArgs(pr('agents/skills/discuss/SKILL.md'))).toEqual(['agents/', 'packages/agents-sync/']);
     // 调工具前的钩子：引擎起 Claude 会话也直接用仓里这份（adapters 的测试真跑它）
