@@ -123,7 +123,9 @@ async function createPgliteTestDb(): Promise<TestDb> {
 
 // ---------- 真 Postgres（CI） ----------
 
-/** 模板库名：固定一个，连真库时并发的多个进程共用。 */
+/** 模板库名：固定一个，连真库时并发的多个进程共用。
+ *  要独占模板的测试（比如「故意写脏模板验证 createTestDb 拒绝」）走 createTestDbFromTemplate + ensureTemplateDb，
+ *  用 dirty_template_<UUID> 这类自己的名，不动这个。 */
 const TEMPLATE_DB = 'fleet_test_template';
 /** 拿模板库的咨询锁：同时只有一个进程重建模板，其他进程等它建完直接用。 */
 const TEMPLATE_LOCK_KEY = 818_220;
@@ -191,9 +193,20 @@ class RealTestClient implements TestClient {
     this.dbName = dbName;
   }
 
-  static async create(url: string): Promise<RealTestClient> {
-    realTemplate ??= ensureTemplate(url);
-    const template = await realTemplate;
+  /**
+   * 建一份从模板克隆的测试库。
+   * @param url 真 Postgres 的连接串（指向 admin 库）
+   * @param templateName 可选：模板库名。不传走 ensureTemplate + 进程级缓存（默认共享模板）；
+   *                     传了直接用这个名字（调用方得先建好，见 ensureTemplateDb），用于「要独占模板」的测试。
+   */
+  static async create(url: string, templateName?: string): Promise<RealTestClient> {
+    let template: string;
+    if (templateName !== undefined) {
+      template = templateName;
+    } else {
+      realTemplate ??= ensureTemplate(url);
+      template = await realTemplate;
+    }
     const dbName = `fleet_test_${randomUUID().replace(/-/g, '')}`;
     await withAdminClient(url, async (sql) => {
       // 并发克隆同一个模板是安全的；模板库此时没被任何连接占着（ensureTemplate 跑完就关了自己的连接）。
@@ -273,6 +286,59 @@ export async function createTestDb(): Promise<TestDb> {
   const url = realTestPgUrl();
   if (url) return createRealTestDb(url);
   return createPgliteTestDb();
+}
+
+/**
+ * 测试专用：直接指定一个模板库名克隆。给「故意把模板写脏、验证 createTestDb 拒绝」这类用例：
+ * 它需要一个独占的模板（不污染共享那个），又不想动 realTemplate 的进程级缓存影响别的用例。
+ * 只在真 Postgres 后端下用；url 为空就抛错（不要让本机 PGlite 调用方误用）。
+ *
+ * 调用方负责：
+ * - 先 ensureTemplateDb(url, templateName) 把模板建好；
+ * - 给一个独占的模板名（比如 `dirty_template_<UUID>`），别用共享那个；
+ * - 跑完之后自己 dropDatabaseForce(url, templateName) 把模板收掉（这个函数不会替它清）。
+ */
+export async function createTestDbFromTemplate(url: string, templateName: string): Promise<TestDb> {
+  const client = await RealTestClient.create(url, templateName);
+  const sqlUnsafe = postgres(urlForDb(url, client.dbName), { max: 5, onnotice: () => {} });
+  const db = drizzlePostgres(sqlUnsafe, { schema }) as unknown as Db;
+  return {
+    db,
+    client,
+    close: async () => {
+      await sqlUnsafe.end({ timeout: 5 });
+      await client.close(url);
+    },
+  };
+}
+
+/**
+ * 测试专用：在指定 url 上建一份新模板（建库 + 跑迁移），返回模板名。
+ * 给「我要造一个独立模板」配合 createTestDbFromTemplate 使用。
+ */
+export async function ensureTemplateDb(url: string, templateName: string): Promise<string> {
+  await withAdminClient(url, async (sql) => {
+    const exists = await sql<{ n: number }[]>`
+      select count(*)::int as n from pg_database where datname = ${templateName}
+    `;
+    if ((exists[0]?.n ?? 0) === 0) {
+      await sql.unsafe(`create database ${templateName}`);
+    }
+  });
+  const tpl = postgres(urlForDb(url, templateName), { max: 1, onnotice: () => {} });
+  try {
+    await migratePostgres(drizzlePostgres(tpl, { schema }), { migrationsFolder: MIGRATIONS_FOLDER });
+  } finally {
+    await tpl.end({ timeout: 5 });
+  }
+  return templateName;
+}
+
+/** 测试专用：drop 一个数据库（WITH FORCE），不存在就当成功。给 ensureTemplateDb 的清理侧。 */
+export async function dropDatabaseForce(url: string, dbName: string): Promise<void> {
+  await withAdminClient(url, async (sql) => {
+    await sql.unsafe(`drop database if exists ${dbName} with (force)`);
+  });
 }
 
 /** 清空所有表（迁移记录在 drizzle 模式里，不动），自增序号从头来。比每个测试克隆一份快一个数量级。 */
