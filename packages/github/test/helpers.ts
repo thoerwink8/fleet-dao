@@ -49,6 +49,8 @@ export function setup(overrides: Partial<GitHubOptions> = {}) {
     },
     env: {},
     stateDir: tempDir('fleet-gh-state-'),
+    // 卫生检查只管一个仓（默认 fleet-dao 自己）：夹具用的是 acme/widgets，指过去，测试才测得到扫不扫
+    hygieneRepo: repo,
     log: {
       info: (message, fields) => logs.push({ level: 'info', message, fields }),
       warn: (message, fields) => logs.push({ level: 'warn', message, fields }),

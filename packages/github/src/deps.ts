@@ -90,4 +90,9 @@ export interface Deps {
   log: Logger;
   /** 防重复写的占用多久续一次（不给用默认 30 秒；测试调短）。 */
   leaseRenewMs?: number | undefined;
+  /**
+   * 卫生检查管的是哪个仓（默认 fleet-dao 自己，见 hygiene-scope.ts）；只管它一个，别的仓按它们自己的标准。
+   * 测试夹具的仓不是 fleet-dao 时，在这里指过去（不给就用 HYGIENE_REPO）。
+   */
+  hygieneRepo?: RepoRef | undefined;
 }

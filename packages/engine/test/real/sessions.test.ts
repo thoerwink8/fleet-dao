@@ -862,7 +862,12 @@ describe('开 PR 前验证：检出送检的头，发出去的材料先过卫生
     results: CRITERIA.map((criterion) => ({ criterion, answer: 'done', evidence: '看过 a.ts' })),
     findings: [],
   });
-  const checked = (what: string, texts: { path: string; text: string }[]) => assertPublishable(what, texts);
+  // 卫生检查只管一个仓（hygiene-scope.ts，默认 fleet-dao 自己）：测试里的任务挂在夹具仓上，把管的就是这个夹具仓
+  const checked = (
+    repo: { owner: string; name: string },
+    what: string,
+    texts: { path: string; text: string }[],
+  ) => assertPublishable(repo, what, texts, repo);
   const caught = (fn: () => void): unknown => {
     try {
       fn();
@@ -875,9 +880,9 @@ describe('开 PR 前验证：检出送检的头，发出去的材料先过卫生
   it('检出送检的头；这次真要发的整份提示词先过卫生检查；写对了交回结论', async () => {
     const screened: { what: string; texts: { path: string; text: string }[] }[] = [];
     const { ports, fake } = setup(() => writes(JSON.stringify(report(m.head))), {
-      screen: (what, texts) => {
+      screen: (repo, what, texts) => {
         screened.push({ what, texts });
-        checked(what, texts);
+        checked(repo, what, texts);
       },
     });
     const { end } = await runOnce(ports, verifyLaunch(m.head));
@@ -914,6 +919,7 @@ describe('开 PR 前验证：检出送检的头，发出去的材料先过卫生
   it('【故意造出的失败】检查自己出错：原样报 HYGIENE_UNSCANNED、算没扫成，不发', () => {
     const broken = caught(() =>
       screenForOtherVendor(
+        repo,
         () => {
           throw new Error('扫描器坏了');
         },
@@ -1472,9 +1478,9 @@ describe('Fusion 的 Lead：在这张单的工作树里跑，按这一步读结�
     const screened: string[] = [];
     const { ports, cursor } = setup(() => ({}), {
       cursor: () => ({ replay: 'cursor-edit-commit' }),
-      screen: (what, texts) => {
+      screen: (repo, what, texts) => {
         screened.push(what);
-        assertPublishable(what, texts);
+        assertPublishable(repo, what, texts, repo);
       },
     });
     const input = launch({ route, worktreePath: freshTree() });
@@ -2373,7 +2379,7 @@ describe('grok：会话端口按执行方式分派（法国真跑夹具驱动，
           writeFileSync(join(spec.cwd, '.fleet-out', 'verify.json'), JSON.stringify(report));
         },
       }),
-      screen: (what) => {
+      screen: (_repo, what) => {
         screened.push(what);
       },
     });
@@ -2402,7 +2408,7 @@ describe('grok：会话端口按执行方式分派（法国真跑夹具驱动，
     const leak = ['ghp', 'yU1zL5aC3Kp9mQ2xR7bN4wT8Zt4wQ9mB'].join('_');
     const { ports, grok } = setup(() => ({}), {
       grok: grokDelivers(),
-      screen: (what, texts) => assertPublishable(what, texts),
+      screen: (repo, what, texts) => assertPublishable(repo, what, texts, repo),
     });
     const input = grokLaunch();
     const error = await ports

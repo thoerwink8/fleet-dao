@@ -79,6 +79,7 @@ import {
   taskContext,
   upsertAlert,
 } from '@fleet-dao/db';
+import type { RepoRef } from '@fleet-dao/github';
 import type { ProgressEvent, RunOutcome, StageKind } from '@fleet-dao/shared';
 import { type EngineDrain, stoppingNote } from '../drain.ts';
 import { judgeStallWithJev, NO_JEV, triageFailureAsked } from '../failure/ask.ts';
@@ -311,11 +312,12 @@ export interface SessionPortsDeps {
   /** 起会话的插头，按执行方式给；测试里换成假的（不起真执行体）。没给的用真插头。 */
   run?: HostRunners;
   /**
-   * 发给别家之前的卫生检查（和推分支、开 PR 同一套规则：github 包的 assertPublishable，只管真密钥）。查出来、
-   * 没扫成都抛带码的错（HYGIENE_BLOCKED / HYGIENE_UNSCANNED）。
+   * 发给别家之前的卫生检查（和推分支、开 PR 同一套规则：github 包的 assertPublishable，只管真密钥；也只管
+   * fleet-dao 这个仓——别的仓按它们自己的标准，见 packages/github 的 hygiene-scope.ts）。查出来、没扫成都抛
+   * 带码的错（HYGIENE_BLOCKED / HYGIENE_UNSCANNED）。
    * 开 PR 前验证的会话起之前整份提示词过一遍；没配就不起验证会话（明确报错），不当成查过没事。
    */
-  screen?: (what: string, texts: { path: string; text: string }[]) => void;
+  screen?: (repo: RepoRef, what: string, texts: { path: string; text: string }[]) => void;
   stallPolicy?: Partial<StallPolicy>;
   /** 规则认不出的失败、拿不准的停滞去问 Jev（real/jev-port.ts）；不给就不问，照默认走。 */
   jev?: JevPort;
@@ -520,6 +522,7 @@ export function otherVendor(family: string): boolean {
  * 报错里只有位置、行号和规则名（assertPublishable 不打值）。
  */
 export function screenForOtherVendor(
+  repo: RepoRef,
   screen: SessionPortsDeps['screen'],
   prompt: string,
   to: string,
@@ -535,7 +538,7 @@ export function screenForOtherVendor(
     );
   }
   try {
-    screen(material.what, [{ path: material.path, text: prompt }]);
+    screen(repo, material.what, [{ path: material.path, text: prompt }]);
   } catch (error) {
     const code = (error as { code?: unknown } | null)?.code;
     const details = (error as { details?: unknown } | null)?.details;
@@ -1347,6 +1350,7 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     // 先过卫生检查，过不了不起会话。简报是 Lead 写的，没进过公开的地方
     if (kind === 'verify' || otherVendor(input.route.family)) {
       screenForOtherVendor(
+        { owner: task.repo.owner, name: task.repo.name },
         deps.screen,
         prompt,
         hostName(route.hostId),

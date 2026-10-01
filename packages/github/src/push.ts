@@ -1,9 +1,9 @@
 // 会话外推分支：AI 会话只在本地提交，这里用「干活的」机器人把会话交出来的提交推到远端任务分支。
 // 推之前核对四件事：不是主线（拒绝推默认分支）、包含此刻最新的主线、相对主线真有内容（不推空交付，C7）、
-// 还没推上去的提交逐个过卫生检查（公开仓推上去就公开了；这里推带 --no-verify，git 钩子不跑，只能在这儿拦）、
-// 远端分支要么没有、要么是我们的祖先（别人在上面推进过就报出来让引擎认领新头，分叉就停，绝不强推，C6）。
-// 会话的提交由会话用户打成包（git bundle）交出来，这里只把包导入引擎自己的裸仓；带令牌的 git 只在这个裸仓里跑
-// （为什么见 git.ts 开头）。
+// 还没推上去的提交逐个过卫生检查（推带 --no-verify，git 钩子不跑，只能在这儿拦；只管 fleet-dao 这一个仓——
+// 别的仓按它们自己的标准，见 hygiene-scope.ts）、远端分支要么没有、要么是我们的祖先（别人在上面推进过就报出来
+// 让引擎认领新头，分叉就停，绝不强推，C6）。会话的提交由会话用户打成包（git bundle）交出来，这里只把包导入引擎
+// 自己的裸仓；带令牌的 git 只在这个裸仓里跑（为什么见 git.ts 开头）。
 import { createHash, randomUUID } from 'node:crypto';
 import { constants, existsSync, lstatSync, mkdirSync, rmSync } from 'node:fs';
 import { type FileHandle, open } from 'node:fs/promises';
@@ -21,6 +21,7 @@ import {
   gitEnv,
   tail,
 } from './git.ts';
+import { guardedByHygiene } from './hygiene-scope.ts';
 import type { RepoFactsCache } from './repos.ts';
 
 export interface PushDeps {
@@ -37,6 +38,8 @@ export interface PushDeps {
   maxBundleBytes: number;
   log: Logger;
   baseEnv?: Readonly<Record<string, string | undefined>>;
+  /** 卫生检查管的是哪个仓（默认 fleet-dao 自己，见 hygiene-scope.ts）；不给就用默认那个。 */
+  hygieneRepo?: RepoRef | undefined;
 }
 
 export interface PushBranchInput {
@@ -104,6 +107,9 @@ export async function pushBranch(deps: PushDeps, input: PushBranchInput): Promis
     );
   }
   if (!SHA.test(head)) throw new GitHubError('BAD_INPUT', `要推的提交「${head}」不是完整的提交号`);
+  // 卫生检查只管 fleet-dao 这一个仓（创始人 2026-10-01 10:50 前后拍）：别的仓按它们自己的标准推，不扫
+  // （认不出是哪个仓时 guardedByHygiene 自己抛，不默认放过去）
+  const guard = guardedByHygiene(repo, deps.hygieneRepo);
   const facts = await deps.facts.get(repo, 'agent', input.signal);
   const defaultBranch = facts.defaultBranch;
   if (branch.toLowerCase() === defaultBranch.toLowerCase()) {
@@ -197,8 +203,9 @@ export async function pushBranch(deps: PushDeps, input: PushBranchInput): Promis
         );
       }
 
-      // 6. 卫生检查：主线和远端分支上都没有的提交逐个扫（命中就不推，报文件、行、规则名、提交号，不带值）
-      await assertClean(git, local, { head, mainline, remoteBefore }, slug);
+      // 6. 卫生检查：主线和远端分支上都没有的提交逐个扫（命中就不推，报文件、行、规则名、提交号，不带值）。
+      // 只有 fleet-dao 自己扫；别的仓按它们自己的标准推（guard 在推之前算好了，见上面）
+      if (guard) await assertClean(git, local, { head, mainline, remoteBefore }, slug);
 
       // 7. 远端分支的状态
       if (remoteBefore) await assertFastForward(git, local, remoteBefore, head, slug, branch);

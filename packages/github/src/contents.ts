@@ -207,11 +207,16 @@ export async function writeSpecDoc(deps: Deps, input: WriteSpecDocInput): Promis
       details: { length: bytes, limit: MAX_CONTENT_BYTES },
     });
   }
-  // 直写主线不经 git 推送，推前扫描拦不到：写之前正文、提交说明各过一遍（publish-check.ts）
-  assertPublishable(`写 ${path}`, [
-    { path, text: input.content },
-    { path: '提交说明', text: input.message },
-  ]);
+  // 直写主线不经 git 推送，推前扫描拦不到：写之前正文、提交说明各过一遍（publish-check.ts；只管 fleet-dao 这个仓）
+  assertPublishable(
+    repo,
+    `写 ${path}`,
+    [
+      { path, text: input.content },
+      { path: '提交说明', text: input.message },
+    ],
+    deps.hygieneRepo,
+  );
   const apiPath = `/repos/${enc(repo.owner)}/${enc(repo.name)}/contents/${encRef(path)}`;
   const auth = { as: 'engine' as const, repo };
 

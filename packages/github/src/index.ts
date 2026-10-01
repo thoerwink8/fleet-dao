@@ -107,6 +107,7 @@ export {
   readIssueLabelEvents,
   setIssueMilestone,
 } from './groom.ts';
+export { guardedByHygiene, HYGIENE_REPO } from './hygiene-scope.ts';
 export {
   CLAIM_RENEW_EVERY_MS,
   CLAIM_STALE_AFTER_MS,

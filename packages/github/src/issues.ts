@@ -125,8 +125,14 @@ export async function updateIssueProgress(
 ): Promise<UpdateIssueProgressResult> {
   const { repo, issueNumber } = input;
   const slug = repoSlug(repo);
-  // 进度段写进公开的 issue 正文，不经 git 推送、推前扫描拦不到：一个请求都不发之前先过卫生检查（publish-check.ts）
-  assertPublishable(`写 ${slug} #${issueNumber} 的进度段`, progressTexts(issueNumber, input.progress));
+  // 进度段写进公开的 issue 正文，不经 git 推送、推前扫描拦不到：一个请求都不发之前先过卫生检查（publish-check.ts；
+  // 只管 fleet-dao 这个仓）
+  assertPublishable(
+    repo,
+    `写 ${slug} #${issueNumber} 的进度段`,
+    progressTexts(issueNumber, input.progress),
+    deps.hygieneRepo,
+  );
   const asOf = (
     input.asOf instanceof Date ? input.asOf : new Date(input.asOf ?? deps.client.now())
   ).toISOString();
@@ -489,10 +495,15 @@ export async function openIssue(
   // 标题、正文都可能是 AI 写的：中和 @ 提醒（别打扰人）和 <!-- -->（别让它伪造或截断我们下面拼的标记）
   const safeTitle = neutralizeMentions(title);
   const safeBody = neutralizeMentions(input.body);
-  assertPublishable(`开 ${slug} 的单子`, [
-    { path: '单子标题', text: safeTitle },
-    { path: '单子正文', text: safeBody },
-  ]);
+  assertPublishable(
+    repo,
+    `开 ${slug} 的单子`,
+    [
+      { path: '单子标题', text: safeTitle },
+      { path: '单子正文', text: safeBody },
+    ],
+    deps.hygieneRepo,
+  );
   const marker = `<!-- fleet:issue:${digest({ key })} -->`;
   const body = `${safeBody}\n\n${marker}`;
   assertBodySize('单子正文', body);
@@ -623,7 +634,12 @@ async function commentOn(
 
   // 正文是 AI 写的（提问或回答）：中和之后照开单一样过卫生检查
   const safeBody = neutralizeMentions(input.body);
-  assertPublishable(`写 ${slug} #${issueNumber} 的评论`, [{ path: '评论正文', text: safeBody }]);
+  assertPublishable(
+    repo,
+    `写 ${slug} #${issueNumber} 的评论`,
+    [{ path: '评论正文', text: safeBody }],
+    deps.hygieneRepo,
+  );
   const marker = `<!-- fleet:comment:${digest({ key })} -->`;
   const body = `${safeBody}\n\n${marker}`;
   assertBodySize(`#${issueNumber} 的评论`, body);

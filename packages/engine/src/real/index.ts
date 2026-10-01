@@ -491,8 +491,8 @@ export function realPortsFromEnv(
     db,
     jev: jev.port,
     gh,
-    // 发给别家的验证材料和推分支、开 PR 用同一套卫生检查（真密钥；标识不再拦，创始人 2026-09-28 傍晚拍）
-    screen: (what, texts) => assertPublishable(what, texts),
+    // 发给别家的验证材料和推分支、开 PR 用同一套卫生检查（真密钥；只管 fleet-dao 这个仓，别的仓按它们自己的标准）
+    screen: (repo, what, texts) => assertPublishable(repo, what, texts),
     trees,
     exec,
     sessionOrg,

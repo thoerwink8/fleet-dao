@@ -274,6 +274,22 @@ describe('会话外推分支', { timeout: 60_000 }, () => {
     expect(remoteHead('task/15-message')).toBeNull();
   });
 
+  it('别的仓：同样带真密钥也照推——卫生检查只管 fleet-dao 这一个仓（创始人 2026-10-01 10:50 前后拍）', async () => {
+    // 卫生检查管的是另一个仓（这里指成 fleet-dao 那个默认值）：推的这个仓（夹具的 acme/widgets）不该被套上这套规则
+    const { gh } = pushSetup(undefined, { hygieneRepo: { owner: 'thoerwink8', name: 'fleet-dao' } });
+    const repo = { owner: 'acme', name: 'widgets' };
+    const token = ['ghp', 'kM2xT7pQ4nZb9vRc1wYs6HdJ3fLg8TaEu5Vo'].join('_');
+    const wt = worktree('task/17-other', { 'deploy.md': `export GH_TOKEN=${token}\n` });
+    const out = await gh.pushBranch({
+      repo,
+      bundlePath: wt.bundle,
+      branch: 'task/17-other',
+      head: wt.head,
+    });
+    expect(out.head).toBe(wt.head);
+    expect(remoteHead('task/17-other')).toBe(wt.head);
+  });
+
   it('卫生检查认不出 git 的输出：不推（HYGIENE_UNSCANNED），不当成扫过没事', async () => {
     const garbled: GitRunner = async (args, call) =>
       args.includes('log') ? { code: 0, stdout: '+不是 git log 的输出\n', stderr: '' } : execGit(args, call);

@@ -119,6 +119,8 @@ export interface GitHubOptions {
   leaseRenewMs?: number;
   /** 会话交来的包最大多少字节，默认 MAX_BUNDLE_BYTES。 */
   maxBundleBytes?: number;
+  /** 卫生检查管的是哪个仓，默认 fleet-dao 自己（见 hygiene-scope.ts）；测试夹具的仓不是它时指过去。 */
+  hygieneRepo?: RepoRef;
 }
 
 /**
@@ -268,6 +270,7 @@ export function createGitHub(options: GitHubOptions): GitHub {
     bots: new Bots(client),
     log: client.log,
     leaseRenewMs: options.leaseRenewMs,
+    ...(options.hygieneRepo ? { hygieneRepo: options.hygieneRepo } : {}),
   };
   const stateDir = options.stateDir ?? env.FLEET_GITHUB_STATE_DIR ?? '/var/lib/fleet-dao/github';
   const gitHost = options.gitHost ?? 'https://github.com/';
@@ -282,6 +285,7 @@ export function createGitHub(options: GitHubOptions): GitHub {
     maxBundleBytes: options.maxBundleBytes ?? MAX_BUNDLE_BYTES,
     log: client.log,
     baseEnv: env,
+    ...(options.hygieneRepo ? { hygieneRepo: options.hygieneRepo } : {}),
   };
 
   return {
