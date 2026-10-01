@@ -155,3 +155,19 @@
 - **代理**：59822 是坏的，用 `export http_proxy=http://127.0.0.1:7890 https_proxy=http://127.0.0.1:7890`
 - **`cursor-agent` 不在 PATH** → `discuss` 的 `ask.mjs` 不能用；走 Mirasim 的 `second-opinion.mjs` 可用（13.5 秒一轮）。
 - **`worktree-sweep.ts` 认不出讨论 skill 的临时树** → 它们会永远攒着（创始人拍了要扩，归 #556）。
+
+## 2026-10-02 深夜（#557 合并；worktree 清理进了开会话钩子）
+
+**#557 已合**（`fc6bd745`）：方案、执行计划、v3 里程碑、Fusion 时代单的清理、决定 0006、Mirasim 的 `modelMatches` 修复、需求文档的指针修复。CI 全绿后手动合的。
+
+**worktree 清理已落进开会话钩子**（`agents/hooks/session-start.mjs` 的 `sweepWorktrees`）：`.claude/worktrees/` 在 .gitignore 里，没有别的东西会管它，开会话钩子是唯一每次都会跑的地方。**四条全过才删**：
+1. 不是 `second-opinion*`（discuss 故意复用的审查树，它自己每轮 git clean；Windows 上 Mirasim 占着目录本来就删不掉）；
+2. 最近 30 分钟没动过（另一个会话可能正开着一棵树干活）；
+3. 没有未提交的改动；
+4. **提交一条都不比远端多**（`rev-list HEAD --not --remotes`）。
+
+**第 4 条的判据咬过一次**：第一版写的是「不比 origin/main 多」，**实测两棵都留下了**——因为树常建在开着 PR 的分支头上，那些提交在对应的远端分支上。改成判「远端」才对。
+
+**一条要传给下一个 AI 的经验**：2026-10-02 清那 29 棵时，「有没推上去的提交」这条**救回了决定 0006**——那个树里躺着创始人 09-30 拍的一份决定，从没进过主线，写它的会话收了尾就没人管那棵树。
+
+**在做的**：第 2 步「测试移出会话」（`#219` `#220`），并行的前提。
