@@ -14,6 +14,9 @@ import { availableParallelism } from 'node:os';
  * - 法国 2026-09-26（临时 scope，含页缓存）：开 1、2、3 个进程峰值约 1613、2493、3164，每多一个多 880、671；
  * - 本机 Windows 2026-09-27（整棵进程树的工作集）：1510、2344、2971，每多一个多 834、627。
  * 取两边最大的 880，往上取整。
+ * #220：上面两组实测都是「每个进程一份内存 PGlite」的时候测的。CI 改成共用一个真 Postgres、从模板库克隆之后，
+ * 需求文档估每个进程降到 ~300 MiB。这个值还没在 CI（带 FLEET_TEST_PG_URL 的那条分片）实测过，所以现在不改；
+ * 测过之后再调，连同下面 RESERVE_MIB 一起。
  */
 export const WORKER_MIB = 900;
 /**
@@ -21,6 +24,8 @@ export const WORKER_MIB = 900;
  * 比上面含页缓存的 1613 还高，按 1700 算）减掉一个 WORKER_MIB，加会话自己的 Claude Code 进程（#160 那次约 270，按 300 算）
  * 和外面那层 pnpm（约 60），再留约 140（峰值的 5% 上下）：1700 - 900 + 300 + 60 + 140 = 1300。
  * 在法国复测：docs/ops.md 第五节「会话的内存上限和测试进程数」。
+ * #220：和 WORKER_MIB 一起等 CI 实测过真 Postgres 后端再调（一个进程建库克隆那部分省掉了，但 pnpm 和 Claude Code 那俩
+ * 一直是 360 上下）。
  */
 export const RESERVE_MIB = 1300;
 

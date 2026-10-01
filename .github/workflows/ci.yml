@@ -149,6 +149,10 @@ jobs:
           if [[ $TSC == all ]]; then pnpm exec tsc -b; else read -ra projects <<<"$TSC"; pnpm exec tsc -b "${projects[@]}"; fi
 
   # engine、db 各一台（最慢的两个），其余一台；只跑受影响的包（改到的 + 依赖它们的）。
+  # db 分片旁边起一个 postgres:16 服务容器（和法国生产同大版本，ops.md 第二节），测试经 FLEET_TEST_PG_URL 连上，
+  # 第一次跑迁移建模板库、之后每个测试文件 CREATE DATABASE … TEMPLATE 克隆一份（#220）：一个测试进程的内存从
+  # ~1G 降到 ~0.3G，不再每个进程各建一份内存 PGlite。engine、rest 不连这张库，照 PGlite 走；本机没设这个变量也
+  # 照 PGlite 走（packages/db/src/testing.ts，ops.md 第九节「CI 测试的 Postgres 服务」）。
   test:
     needs: changes
     if: needs.changes.outputs.tests != '[]'
@@ -159,6 +163,20 @@ jobs:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.changes.outputs.tests) }}
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: fleet_test
+          POSTGRES_PASSWORD: fleet_test
+          POSTGRES_DB: fleet_test_admin
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fleet_test -d fleet_test_admin"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
         with:
@@ -215,8 +233,11 @@ jobs:
           "$cli" --version | grep -qF "$VERSION"
           echo "FLEET_TEST_TEMPORAL_CLI=$cli" >> "$GITHUB_ENV"
       # 参数是 ci-plan 给的包目录（或全跑时 rest 的 --exclude）；经环境变量传、按数组展开，不拼进命令行
+      # FLEET_TEST_PG_URL 只给 db 分片：连旁边的 postgres:16 服务、从模板库克隆各自的测试库（#220）。
+      # 不设给 engine、rest：它们的测试照 PGlite 走，免得挂上这张白起的库。
       - env:
           ARGS: ${{ join(matrix.args, ' ') }}
+          FLEET_TEST_PG_URL: ${{ matrix.name == 'db' && 'postgres://fleet_test:fleet_test@localhost:5432/fleet_test_admin' || '' }}
         run: |
           set -euo pipefail
           read -ra args <<<"$ARGS"
