@@ -28,7 +28,6 @@ import type {
   Repo,
   Routing,
   RunSteps,
-  SeatBoard,
   Setting,
   SettingKey,
   Settings,
@@ -60,8 +59,6 @@ export interface FleetApi {
   runSteps(runId: string): Promise<RunSteps>;
   taskAction(taskId: string, body: TaskActionBody): Promise<void>;
   answerAsk(askId: string, answer: string): Promise<void>;
-  seatBoard(): Promise<SeatBoard>;
-  answerSeatNeed(needId: string, option: string): Promise<void>;
   routing(): Promise<Routing>;
   updateStagePolicy(stage: StageKind, body: UpdateStagePolicyBody): Promise<StagePolicy>;
   updateChannel(channelId: string, body: UpdateChannelBody): Promise<void>;
@@ -131,7 +128,6 @@ export const keys = {
   audit: (target: string) => ['audit', target] as const,
   settings: ['settings'] as const,
   demoLinks: ['demo-links'] as const,
-  seatBoard: ['seat-board'] as const,
 };
 
 // ---------- 读 ----------
@@ -258,21 +254,6 @@ export function useAudit(target?: string) {
 export function useSettings() {
   const api = useApi();
   return useQuery({ queryKey: keys.settings, queryFn: () => api.settings(), enabled: canSee('settings') });
-}
-
-export function useSeatBoard() {
-  const api = useApi();
-  return useQuery({ queryKey: keys.seatBoard, queryFn: () => api.seatBoard() });
-}
-
-export function useAnswerSeatNeed() {
-  const api = useApi();
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ needId, option }: { needId: string; option: string }) =>
-      api.answerSeatNeed(needId, option),
-    onSettled: () => qc.invalidateQueries({ queryKey: keys.seatBoard }),
-  });
 }
 
 export function useDemoLinks() {
@@ -404,7 +385,8 @@ const TABLE_KEYS: Record<RealtimeTable, readonly (readonly string[])[]> = {
   asks: [['board'], ['task'], ['timeline']],
   // approvals 还没有专门的页面查询键；按它和 asks 一样挂在任务 / 子任务上，先失效这三处。
   approvals: [['board'], ['task'], ['timeline']],
-  seat_boards: [['seat-board']],
+  // 帅位栏整张删掉（#531）：驾驶舱没有 seatBoard 订阅了，触发的全量重拉是无害的兜底
+  seat_boards: [],
   quota_windows: [['pools']],
   channels: [['routing'], ['pools']],
   stage_policies: [['routing']],

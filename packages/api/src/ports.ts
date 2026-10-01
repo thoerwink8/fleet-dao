@@ -4,15 +4,11 @@
 import type {
   AskHold,
   AskScope,
-  BoardWrite,
   FlowReplica,
   IssueClaim,
   IssueFamily,
   IssueMilestones,
   IssueNow,
-  SeatBoardDoc,
-  SeatLease,
-  SeatSettingsRead,
 } from '@fleet-dao/core';
 import type {
   AuditEntrySchema,
@@ -846,21 +842,9 @@ export interface FeishuStore {
   ackOutbox(acks: readonly FeishuOutboxAck[], at: string): Promise<FeishuAckReport>;
 }
 
-// —— 帅位只一个（#299，specs/299-帅位只一个/方案.md 第二、三节）——
-// 帅位租约一个座位一行（任期号只增不减，就是栅栏号），认领每张单一行（认领号是工人的栅栏号）。时间一律是库的 now()：
-// 每个结果都带着库的 now（ISO），判过期用它（判法在 core 的 seat.ts），不用调用方的钟。内存版用 Store 的钟顶替。
-
-/** 本机的帅位、工人是谁：经 ssh 调命令时放在参数里（进来的一律是 root，看不出是谁）。 */
-export interface SeatIdentity {
-  machine: string;
-  session: string;
-}
-
-/** 带着任期号来做事的帅位。 */
-export interface SeatActor extends SeatIdentity {
-  scope: string;
-  term: number;
-}
+// —— 认领账（#299，specs/299-帅位只一个/方案.md 第四节；帅位座位 2026-10-01 起整张删掉，见 #531 和 docs/goals.md「六、要删的，和怎么删」）——
+// 每张单一个认领（认领号是工人的栅栏号）。时间一律是库的 now()：每个结果都带着库的 now（ISO），判过期用它
+// （判法在 core 的 seat.ts），不用调用方的钟。内存版用 Store 的钟顶替。
 
 /** 要认领的这张单：仓（库里的编号）和单号。操作记录记成 claim:<仓的编号>#<单号>。 */
 export interface ClaimTarget {
@@ -868,116 +852,19 @@ export interface ClaimTarget {
   issueNumber: number;
 }
 
-export interface SeatSnapshot {
-  lease: SeatLease | null;
-  /** 库的 now()。 */
-  now: string;
-  /** settings 表里租期、宽限期那两项（认不出就明确失败，不拿默认顶）。 */
-  settings: SeatSettingsRead;
-}
-
-export type RenewSeatResult =
-  | { ok: true; lease: SeatLease; now: string }
-  /** 任期、持有人对不上：lease 是座位此刻的样子（可能没人）。 */
-  | { ok: false; lease: SeatLease | null; now: string };
-
-export type WriteHandoffResult =
-  | { ok: true; lease: SeatLease }
-  | { ok: false; lease: SeatLease | null; now: string };
-
-export type TakeClaimResult =
-  | {
-      ok: true;
-      claim: IssueClaim;
-      now: string;
-      /** 这一行原来那份（结束了的、帅位自己占着被换掉的、这次强制作废的）；原来没有是 null。 */
-      previous: IssueClaim | null;
-      /** 这次带创始人原话强制作废掉的那份（claim reassign）；没有是 null。 */
-      voided: IssueClaim | null;
-    }
-  /** 不是帅位（换了人、过了期、座位上没人）：这张单一点没动。 */
-  | { ok: false; reason: 'not_seat'; why: string; now: string }
-  /** 别人（引擎、别的工人）拿着还没结束：这张单一点没动。 */
-  | { ok: false; reason: 'held'; claim: IssueClaim; now: string }
-  /** 租期、宽限期的设置认不出：什么都没做。 */
-  | { ok: false; reason: 'settings'; why: string; now: string };
-
 /** 引擎拿一张单（接活、交单）的结果。 */
 export type EngineClaimResult =
   /** 拿到了：fresh = 这次新认领的（待起）；false = 引擎本来就拿着（重投、重放）。voided = 强制改派作废掉的本机认领。 */
   | { ok: true; claim: IssueClaim; fresh: boolean; voided: IssueClaim | null; now: string }
   /** 本机（帅位、工人）拿着还没结束：这张单一点没动。 */
-  | { ok: false; reason: 'held'; claim: IssueClaim; now: string }
-  /** 带着帅位来（交单）却不是帅位（换了人、过了期、座位上没人）：什么都没做。 */
-  | { ok: false; reason: 'not_seat'; why: string; now: string }
-  /** 核帅位要的租期设置认不出：什么都没做。 */
-  | { ok: false; reason: 'settings'; why: string; now: string };
+  | { ok: false; reason: 'held'; claim: IssueClaim; now: string };
 
 export type ClaimUpdateResult =
   | { ok: true; claim: IssueClaim; now: string }
   /** 认领号对不上、已经结束了、这张单没有认领：claim 是此刻的样子（没有是 null），什么都没改。 */
   | { ok: false; claim: IssueClaim | null; now: string };
 
-/** 库里的一块帅位栏。doc 已经过 core 的 readSeatBoard。 */
-export interface SeatBoardRecord {
-  id: string;
-  scope: string;
-  project: string;
-  updatedAt: string;
-  doc: SeatBoardDoc;
-}
-
-export type ListSeatBoardsResult =
-  | { ok: true; boards: SeatBoardRecord[]; now: string }
-  | { ok: false; why: string; now: string };
-
-export type ApplySeatBoardResult =
-  | { ok: true; board: SeatBoardRecord; now: string }
-  | { ok: false; reason: 'not_seat' | 'settings'; why: string; now: string }
-  | { ok: false; reason: 'bad' | 'missing'; why: string; now: string };
-
-export type AnswerSeatNeedResult =
-  | { ok: true; board: SeatBoardRecord; now: string }
-  | { ok: false; reason: 'missing' | 'already' | 'bad' | 'duplicate'; why: string; now: string };
-
 export interface SeatStore {
-  /** 座位此刻的样子、库的 now、租期和宽限期的设置。 */
-  readSeat(scope: string): Promise<SeatSnapshot>;
-  /** 接班：座位上没人就当第 1 任，有人就任期加一、原来的抄进上一任；不看旧的同不同意。和操作记录（seat.take）同一事务。 */
-  takeSeat(input: SeatIdentity & { scope: string }): Promise<{ lease: SeatLease; now: string }>;
-  /** 续约：任期、持有人对得上才续（过了期也续得上：过期只说明联系不上）。不记操作记录（每 15 分钟一次）。 */
-  renewSeat(input: SeatActor): Promise<RenewSeatResult>;
-  /**
-   * 写交接说明：现任（任期、持有人对得上）整份换掉；刚被换下的上一任（上一任是它、任期是现任的）接在现有的后面补一段
-   * （旧帅位退役时把没记的话转进交接）。别的一律不写。和操作记录（seat.handoff）同一事务。
-   */
-  writeHandoff(input: SeatActor & { text: string }): Promise<WriteHandoffResult>;
-  /**
-   * 帅位认领一张单（受保护动作）：同一个事务里锁住座位、按库的 now 核任期没换、没过期，再抢这一行——结束了的整行换成
-   * 新的认领号，这个座位的帅位自己占着的（开单时替帅位认领的）也换（派工人接手），别的还活着的不动。owner 是 seat（帅位自己动手）或 worker（派的工人，在帅位同一台机器上）。
-   * graceMinutes 不给用设置里的。和操作记录（claim.take）同一事务。
-   */
-  takeClaim(
-    input: ClaimTarget & {
-      seat: SeatActor;
-      owner: { kind: 'seat' | 'worker'; label: string };
-      graceMinutes?: number | undefined;
-      note?: string | undefined;
-      /** 创始人原话（强制改派，claim reassign）：别人还活着拿着的（引擎、别的工人）当场作废、给这次的工人。 */
-      founder?: string | undefined;
-    },
-  ): Promise<TakeClaimResult>;
-  /**
-   * 工人报一步（心跳）：认领号对得上、还活着才写；note 给了换成这一句，pr 给了记进这份认领开过的 PR、到「开了 PR」。
-   * 带了 note 或 pr 的记操作记录（claim.step / claim.pr），光心跳不记。
-   */
-  stepClaim(
-    input: ClaimTarget & { claimId: string; note?: string | undefined; pr?: number | undefined },
-  ): Promise<ClaimUpdateResult>;
-  /** 工人做完、放下：认领号对得上、还活着才写。和操作记录（claim.done / claim.release）同一事务。 */
-  endClaim(
-    input: ClaimTarget & { claimId: string; state: 'done' | 'released'; reason: string },
-  ): Promise<ClaimUpdateResult>;
   /**
    * 作废过了宽限期没心跳的本机认领（按库的 now；引擎的不按心跳作废），一次最多 limit 张。每张一条操作记录（claim.void，
    * 记在引擎名下）。回作废了的那几张。
@@ -985,14 +872,13 @@ export interface SeatStore {
   voidExpiredClaims(input: { limit: number }): Promise<{ voided: IssueClaim[]; now: string }>;
   /**
    * 引擎拿这张单（接活、交单，方案第四节）：同一句抢——没有认领、结束了的换成引擎的新认领（待起，带工作流编号）；引擎本来就
-   * 拿着的照旧（fresh = false）；本机拿着的不动（held），除非带了创始人原话（founder）：作废掉本机的、再给引擎。带着帅位来的
-   * （seat，交单）在同一个事务里先锁座位、核任期。新认领、作废都记操作记录（claim.take / claim.reassign），记在 actor 名下。
+   * 拿着的照旧（fresh = false）；本机拿着的不动（held），除非带了创始人原话（founder）：作废掉本机的、再给引擎。新认领、作废
+   * 都记操作记录（claim.take / claim.reassign），记在 actor 名下。
    */
   claimForEngine(
     input: ClaimTarget & {
       workflowId: string;
       actor: Actor;
-      seat?: SeatActor | undefined;
       founder?: string | undefined;
       /** 记进认领的那一句（接活自动派、交给 fleet 的原因）。 */
       note?: string | undefined;
@@ -1021,19 +907,6 @@ export interface SeatStore {
     repoId?: string | undefined;
     activeOnly: boolean;
   }): Promise<{ claims: IssueClaim[]; now: string }>;
-  /**
-   * 一个座位下的帅位栏。某一行形状认不出：整份失败（why），不把认不出的当成空板。
-   */
-  listSeatBoards(scope: string): Promise<ListSeatBoardsResult>;
-  /**
-   * 现任帅位改一块板（没有就新建）。同一个事务里锁座位、按库的 now 核任期，再锁这一行。
-   * 不是帅位、设置认不出：什么都不改。
-   */
-  applySeatBoard(input: { seat: SeatActor; project: string; op: BoardWrite }): Promise<ApplySeatBoardResult>;
-  /**
-   * 创始人在驾驶舱点一个选项。不核帅位（点的人已经登录）。选项不在列表里、已经拍过：这一行不动。
-   */
-  answerSeatNeed(input: { id: string; option: string; by: string }): Promise<AnswerSeatNeedResult>;
 }
 
 export type Store = UserStore &

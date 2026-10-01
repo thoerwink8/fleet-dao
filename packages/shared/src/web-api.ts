@@ -473,36 +473,6 @@ export const TaskActionResponse = z.object({ ok: z.literal(true) });
 
 export const AnswerAskRequest = z.object({ answer: z.string().min(1).max(4000) });
 
-const SeatBoardStatus = z.enum(['done', 'doing', 'waiting', 'needs', 'blocked']);
-export const SeatBoardStepSchema = z.object({
-  id: z.string().min(1),
-  order: z.number(),
-  title: z.string(),
-  status: SeatBoardStatus,
-  detail: z.string(),
-  updatedAt: z.string(),
-  links: z.array(z.object({ label: z.string(), url: z.string() })),
-});
-export const SeatBoardNeedSchema = z.object({
-  id: z.string().min(1),
-  question: z.string(),
-  options: z.array(z.string()).min(2),
-  recommended: z.string(),
-  repo: z.string(),
-  issue: z.number().int().positive(),
-});
-export const SeatBoardProjectSchema = z.object({
-  project: z.string(),
-  headline: z.string(),
-  updatedAt: z.string(),
-  steps: z.array(SeatBoardStepSchema),
-  log: z.array(z.object({ at: z.string(), text: z.string() })),
-  needs: z.array(SeatBoardNeedSchema),
-});
-/** 首页帅位栏。没有任何项目是空列表，不是错误。 */
-export const SeatBoardResponse = z.object({ projects: z.array(SeatBoardProjectSchema) });
-export const AnswerSeatNeedRequest = z.object({ option: z.string().min(1).max(500) });
-export const AnswerSeatNeedResponse = z.object({ ok: z.literal(true) });
 export const AnswerAskResponse = z.object({ ok: z.literal(true) });
 
 // —— 调度台：路由与阶段策略 ——
@@ -1031,13 +1001,6 @@ export const WebRoutes = {
     path: '/asks/:askId/answer',
     request: AnswerAskRequest,
     response: AnswerAskResponse,
-  },
-  seatBoard: { method: 'GET', path: '/seat-board', response: SeatBoardResponse },
-  answerSeatNeed: {
-    method: 'POST',
-    path: '/seat-board/needs/:needId/answer',
-    request: AnswerSeatNeedRequest,
-    response: AnswerSeatNeedResponse,
   },
   routing: { method: 'GET', path: '/routing', response: RoutingResponse },
   updateStagePolicy: {

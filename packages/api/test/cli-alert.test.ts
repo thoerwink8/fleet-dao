@@ -181,7 +181,7 @@ describe('静默（Alertmanager 式：谁、为什么、必带到期）', () => 
       '创始人 09-27 晚拍：法国暂时不用独享号',
       ...A,
     );
-    expect(s).toMatchObject({ code: 0, body: { ok: true, basis: '没带帅位任期，按 --note 记的人处理' } });
+    expect(s).toMatchObject({ code: 0, body: { ok: true, basis: '按 --note 记的人处理' } });
     const show = await t.run('alert', 'show', 'pool-hold:claude-solo');
     expect(show.out).toContain('静默：本机/a1：创始人 09-27 晚拍：法国暂时不用独享号');
     const id = (s.body.silence as { id: string }).id;
@@ -191,20 +191,22 @@ describe('静默（Alertmanager 式：谁、为什么、必带到期）', () => 
     expect((await t.run('alert', 'show', 'pool-hold:claude-solo')).out).not.toContain('静默：');
   });
 
-  it('【故意造出的失败】不带 --term 也能静默（#445 删掉了帅位任期这条要求）；带了 --term 却不是帅位照样拒；不带 --note 照旧拒绝', async () => {
+  it('【故意造出的失败】静默只按 --machine/--session 记是谁（#445 起就不必带任期；#531 起 --term、--founder 整张删掉，给了认不出）', async () => {
     const t = setup();
-    await t.run('seat', 'take', ...A);
     const base = ['alert', 'silence', '--prefix', 'watchdog:job:backup:', '--until', '2h', '--note', '换盘'];
-    // 不带 --term：帅位已经上线也不再拦，只记 --machine/--session 是谁
     const ok = await t.json(...base, '--machine', '笔记本', '--session', 'b1');
-    expect(ok).toMatchObject({ code: 0, body: { ok: true, basis: '没带帅位任期，按 --note 记的人处理' } });
-    // 带了 --term 但不是那一任帅位：照样核验、照样拒
-    const wrongTerm = await t.run(...base, '--machine', '笔记本', '--session', 'b1', '--term', '1');
-    expect(wrongTerm.code).toBe(3);
-    expect(wrongTerm.err).toContain('不是帅位');
-    // 真帅位带对任期：照样能核验通过
-    expect((await t.run(...base, ...A, '--term', '1')).code).toBe(0);
-    // 不带 --term、也不带 --note：--note 这条要求没变，照旧拒绝
+    expect(ok).toMatchObject({ code: 0, body: { ok: true, basis: '按 --note 记的人处理' } });
+    // 帅位座位整张删掉（#531）：给 --term、--scope、--founder 在这里认不出，退出码 2
+    for (const extra of [
+      ['--term', '1'],
+      ['--scope', 'main'],
+      ['--founder', 'x'],
+    ]) {
+      const r = await t.run(...base, '--machine', '笔记本', '--session', 'b1', ...extra);
+      expect(r.code, extra.join(' ')).toBe(2);
+      expect(r.err, extra.join(' ')).toContain('认不出参数');
+    }
+    // 不带 --note：这条要求没变，照旧拒绝
     const noNote = await t.run(
       'alert',
       'silence',

@@ -1,24 +1,25 @@
 // 「认领对得上」（#348，claim-status.ts）：PR 事件现读、判、和头上现有的比；认领变了重贴；每轮对账作废过了宽限期的、撤自动合并、
 // 贴红、留言；改派关旧 PR（分支留着）。判法的边界表在 core 的 seat.test.ts，合并闸认它在 conventions 的 merge-gate.test.ts。
+// 本机不再在库里认领（帅位座位整张删掉，#531）：测试里本机工人的认领由直接写库（store.data.claims）造出来。
+
+import { randomUUID } from 'node:crypto';
 import { CLAIM_MATCH_CONTEXT } from '@fleet-dao/conventions';
-import { CLAIM_STATUS_CONTEXT } from '@fleet-dao/core';
+import { CLAIM_STATUS_CONTEXT, type IssueClaim } from '@fleet-dao/core';
 import { describe, expect, it } from 'vitest';
 import { CLAIM_STATUS_ALERT_KEY, createClaimStatus, refreshText } from '../src/claim-status.ts';
 import { devFixtures, IDS } from '../src/dev-fixtures.ts';
 import { silentLogger } from '../src/log.ts';
 import { createMemoryStore } from '../src/memory-store.ts';
-import type { IngestedEvent, SeatActor } from '../src/ports.ts';
+import type { IngestedEvent } from '../src/ports.ts';
 import { AGENT_BOT, fakeClaimsGitHub } from './fake-claims-github.ts';
 
 const T0 = new Date('2026-09-27T08:00:00.000Z');
 const SLUG = 'example/canary';
 const REPO = { id: IDS.repo, owner: 'example', name: 'canary' };
-const SEAT: SeatActor = { machine: '本机', session: 'a1', scope: 'main', term: 1 };
 
 async function setup() {
   const clock = { now: new Date(T0) };
   const store = createMemoryStore(devFixtures(T0), { now: () => clock.now });
-  await store.takeSeat({ scope: 'main', machine: '本机', session: 'a1' });
   const gh = fakeClaimsGitHub();
   const alerts: string[] = [];
   const claims = createClaimStatus({
@@ -34,15 +35,31 @@ async function setup() {
       },
     },
   });
-  const take = async (issueNumber: number, label = 'w1') => {
-    const r = await store.takeClaim({
+  /** 直接在本机的认领账里塞一份本机工人的认领（帅位座位整张删掉 #531：本机不再经 Store 拿，这里照老样子造出来）。 */
+  const take = (issueNumber: number, label = 'w1'): IssueClaim => {
+    const at = clock.now.toISOString();
+    const claim: IssueClaim = {
       repoId: IDS.repo,
       issueNumber,
-      seat: SEAT,
-      owner: { kind: 'worker', label },
-    });
-    if (!r.ok) throw new Error(`没认领上 #${issueNumber}`);
-    return r.claim;
+      claimId: randomUUID(),
+      ownerKind: 'worker',
+      ownerMachine: '本机',
+      ownerLabel: label,
+      seatScope: 'main',
+      seatTerm: 1,
+      state: 'claimed',
+      workflowId: null,
+      prNumbers: [],
+      graceMinutes: 120,
+      claimedAt: at,
+      heartbeatAt: at,
+      updatedAt: at,
+      endedAt: null,
+      endReason: null,
+      note: null,
+    };
+    store.data.claims.push(claim);
+    return claim;
   };
   const body = (issue: number, claimId?: string) =>
     `**做了什么**：x\n**需求**：#${issue}\n**认领**：${claimId ?? ''}\n**档位**：CI 绿就合`;
@@ -69,7 +86,7 @@ describe('贴状态', () => {
 
   it('PR 开了：现读 PR、按认领贴 success；同样的再来一次不再贴；正文认领号改错了贴 failure', async () => {
     const t = await setup();
-    const c = await t.take(40);
+    const c = t.take(40);
     t.gh.addPull(SLUG, { number: 5, body: t.body(40, c.claimId) });
     expect(await t.claims.onPullEvent(t.event(5))).toBe('claim_status=success');
     expect(t.gh.latest(SLUG, 5)).toMatchObject({ context: CLAIM_STATUS_CONTEXT, state: 'success' });
@@ -136,7 +153,7 @@ describe('贴状态', () => {
     expect(r).toEqual({ checked: 1, posted: [11], problems: [] });
     expect(t.gh.latest(SLUG, 11)?.description).toContain('#45 没有认领记录');
     expect(t.gh.latest(SLUG, 12)).toBeUndefined();
-    const c = await t.take(45);
+    const c = t.take(45);
     t.gh.failNext.setStatus = '网络断了';
     const bad = await t.claims.refreshIssue(REPO, 45);
     expect(bad.problems).toEqual(['#11：网络断了']);
@@ -149,7 +166,7 @@ describe('贴状态', () => {
 describe('每轮对账', () => {
   it('过了宽限期没心跳的本机认领作废：它的 PR 先撤自动合并、再贴红、留一句（第二轮不重复留言）；别人的 PR 不撤', async () => {
     const t = await setup();
-    const c = await t.take(50);
+    const c = t.take(50);
     t.gh.addPull(SLUG, { number: 20, body: t.body(50, c.claimId), autoMerge: true });
     // 同一张单上别人开的（正文没写这份认领号）：判红但不撤它的自动合并、不留言
     t.gh.addPull(SLUG, { number: 21, body: t.body(50), autoMerge: true });
@@ -174,7 +191,7 @@ describe('每轮对账', () => {
 
   it('【故意造出的失败】撤自动合并没成：记进 problems、报提醒，不贴（下一轮再撤）；列不出 PR 的仓也报', async () => {
     const t = await setup();
-    const c = await t.take(51);
+    const c = t.take(51);
     t.gh.addPull(SLUG, { number: 22, body: t.body(51, c.claimId), autoMerge: true });
     t.tick(121);
     t.gh.failNext.disableAutoMerge = 'GraphQL 出错';
@@ -196,19 +213,19 @@ describe('每轮对账', () => {
 describe('改派关旧 PR', () => {
   it('旧认领自己的 PR：撤自动合并、留言指向新主、关掉；别人的不关、按新认领重贴', async () => {
     const t = await setup();
-    const old = await t.take(60);
+    const old = t.take(60);
     t.gh.addPull(SLUG, { number: 30, body: t.body(60, old.claimId), autoMerge: true });
     t.gh.addPull(SLUG, { number: 31, body: t.body(60) });
-    const r = await t.store.takeClaim({
+    const r = await t.store.claimForEngine({
       repoId: IDS.repo,
       issueNumber: 60,
-      seat: SEAT,
-      owner: { kind: 'worker', label: 'w2' },
+      workflowId: 'req:example/canary#60',
+      actor: { kind: 'engine', id: 'github-intake' },
       founder: '换 w2',
     });
     if (!r.ok || !r.voided) throw new Error('没改派');
     const closed = await t.claims.closeForReassign(REPO, r.voided, {
-      to: '本机/w2',
+      to: '引擎',
       why: '创始人原话：换 w2',
     });
     expect(closed).toEqual({ closed: [30], problems: [] });
@@ -218,13 +235,12 @@ describe('改派关旧 PR', () => {
       `close ${SLUG}#30`,
       `status ${SLUG}@sha31 failure`,
     ]);
-    expect(t.gh.comments[0]?.body).toContain('改派给 本机/w2（创始人原话：换 w2）；分支留着');
     expect(t.gh.pulls.get(`${SLUG}#31`)?.state).toBe('open');
   });
 
   it('【故意造出的失败】关不掉的记进 problems，不算关了', async () => {
     const t = await setup();
-    const old = await t.take(61);
+    const old = t.take(61);
     t.gh.addPull(SLUG, { number: 32, body: t.body(61, old.claimId) });
     t.gh.failNext.closePull = '403';
     const closed = await t.claims.closeForReassign(REPO, old, { to: '引擎', why: '创始人原话：x' });

@@ -7,7 +7,6 @@ import { Route, Routes } from 'react-router';
 import { afterEach, describe, expect, test } from 'vitest';
 import { ApiError, type FleetApi } from '../api/client';
 import { createMockApi, type MockApi } from '../api/mock/server';
-import { SeatBar } from '../board/seat-bar';
 import { SidebarNav } from '../components/shell/sidebar';
 import { Topbar } from '../components/shell/topbar';
 import { targetOf, useTaskActions } from '../components/task-actions';
@@ -16,6 +15,7 @@ import ChannelsPage from '../routes/channels';
 import NotificationsPage from '../routes/notifications';
 import OverviewPage from '../routes/overview';
 import SchedulesPage from '../routes/schedules';
+import SettingsPage from '../routes/settings';
 import TaskDetailPage from '../routes/task-detail';
 import TasksPage from '../routes/tasks';
 import { renderApp } from './harness';
@@ -32,11 +32,9 @@ function failing(...methods: (keyof FleetApi)[]): MockApi {
 }
 
 describe('读不到时照实说，不冒充「没有」', () => {
-  test('帅位栏：接口失败写没读到，不说没有要你定的', async () => {
-    renderApp(<SeatBar />, { api: failing('seatBoard') });
-    expect(await screen.findByText(/没读到：后端出错了/)).toBeTruthy();
-    expect(screen.queryByText('没有要你定的')).toBeNull();
-    expect(screen.queryByText('要你定的')).toBeNull();
+  test('设置页：接口失败写没查成，不瞒着假装出空设置', async () => {
+    renderApp(<SettingsPage />, { api: failing('settings') });
+    expect(await screen.findByText(/没查成：后端出错了/)).toBeTruthy();
   });
 
   test('通知中心：提醒没读成，不说「没有待处理的提醒」', async () => {

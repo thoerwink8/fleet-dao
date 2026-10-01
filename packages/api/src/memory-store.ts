@@ -1,13 +1,7 @@
 // 内存里的 Store：测试和本地开发用，也是 ports.ts 语义的参照实现。数据按 Postgres 的表来摆（packages/db 的 schema），
 // 行为照库的约束来（比较后再改、和操作记录同一「事务」、同一会话同一句追问只一条、ok=false 的操作记录必须带原因……），
 // 和 pg-store.ts 过同一套契约测试（test/store-contract.ts）。onChange 模拟数据库的 NOTIFY fleet_changes。
-import {
-  type FlowReplica,
-  type IssueClaim,
-  isActiveClaim,
-  type SeatLease,
-  UNSYNCED_REPLICA,
-} from '@fleet-dao/core';
+import { type FlowReplica, type IssueClaim, isActiveClaim, UNSYNCED_REPLICA } from '@fleet-dao/core';
 import type {
   Ban,
   Channel,
@@ -229,12 +223,8 @@ export interface MemoryData {
   githubEvents: Map<string, GitHubDelivery>;
   /** 账密登录的几列（库里是 users 表上的列），按用户编号；没设过的人不在里面。 */
   credentials: Map<string, PasswordCredentials>;
-  /** 帅位租约（seat_leases），一个座位一个（#299）。 */
-  seatLeases: SeatLease[];
   /** 认领（issue_claims），每张单一个（#299）。 */
   claims: IssueClaim[];
-  /** 帅位栏（seat_boards），一个座位一个项目一块（#199）。 */
-  boards: import('./ports.ts').SeatBoardRecord[];
 }
 
 export function emptyData(): MemoryData {
@@ -268,9 +258,7 @@ export function emptyData(): MemoryData {
     feishuCards: [],
     githubEvents: new Map(),
     credentials: new Map(),
-    seatLeases: [],
     claims: [],
-    boards: [],
   };
 }
 
@@ -596,7 +584,7 @@ export function createMemoryStore(
 
   return {
     data,
-    ...memorySeatStore(data, now, audit, (id) => changed('seat_boards', id)),
+    ...memorySeatStore(data, now, audit),
 
     // —— 人 ——
     async getUser(id) {

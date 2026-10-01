@@ -3,16 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { checkDocPointers, formatProblem } from '../src/doc-pointers.ts';
-import {
-  type GhResult,
-  ghRunner,
-  hasSeatRecord,
-  issueNew,
-  issueSummary,
-  type LocalClaim,
-  specsDoc,
-  specsHint,
-} from '../src/issue-new.ts';
+import { type GhResult, ghRunner, issueNew, issueSummary, specsDoc, specsHint } from '../src/issue-new.ts';
 import { memRepo } from './helpers.ts';
 
 const MILESTONES = JSON.stringify([{ title: 'P0 地基' }, { title: 'P1 核心闭环' }, { title: 'P4 飞书 v2' }]);
@@ -382,54 +373,12 @@ describe('开单脚本：--local 多贴「本机做」（#299 止血：帅位留
     expect(calls[1]).not.toContain('本机做');
   });
 
-  it('--local 开完单当场替帅位认领（#299）：单开了才认，认领的结果（认上了、没接过帅位、没认成）原样交回；不带 --local 不认', async () => {
-    const { calls, root } = setup({ milestones: ok(JSON.stringify([{ title: 'v1 Fusion 接活' }])) });
-    const asked: { issue: number; afterCreate: boolean }[] = [];
-    const deps = (result: LocalClaim) => ({
-      gh: async (args: string[]): Promise<GhResult> => {
-        calls.push(args);
-        return args[0] === 'api' ? ok(JSON.stringify([{ title: 'v1 Fusion 接活' }])) : ok(`${URL36}\n`);
-      },
-      root,
-      cwd: root,
-      claimLocal: async (issue: number) => {
-        asked.push({ issue, afterCreate: calls.some((c) => c[1] === 'create') });
-        return result;
-      },
-    });
-    const argv = [...base.slice(0, 3), 'v1', ...base.slice(4), '--local'];
-    const claimed: LocalClaim = { state: 'claimed', text: '认领了 o/r#36：认领号 x' };
-    expect((await issueNew(argv, deps(claimed))).claimed).toEqual(claimed);
-    const failed: LocalClaim = { state: 'failed', why: '没认领上：ssh 连不上 contabo' };
-    expect((await issueNew(argv, deps(failed))).claimed).toEqual(failed);
-    expect(asked).toEqual([
-      { issue: 36, afterCreate: true },
-      { issue: 36, afterCreate: true },
-    ]);
-    expect(
-      (await issueNew(base.slice(0, 3).concat('v1', ...base.slice(4)), deps(claimed))).claimed,
-    ).toBeUndefined();
-    expect(asked).toHaveLength(2);
-  });
-
-  it('这台接没接过帅位：~/.fleet-dao/seat/ 里有 main 的记录才算；目录不在是没接过；【故意造出的失败】读不了、名字认不出算「可能接过」（交给 claim.mjs 照实报）', () => {
-    const home = mkdtempSync(join(tmpdir(), 'fleet-seat-home-'));
-    expect(hasSeatRecord(home)).toBe(false);
-    const dir = join(home, '.fleet-dao', 'seat');
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, `${encodeURIComponent('drill:299__a1')}.json`), '{}');
-    expect(hasSeatRecord(home)).toBe(false);
-    expect(hasSeatRecord(home, 'drill:299')).toBe(true);
-    writeFileSync(join(dir, `${encodeURIComponent('main__s1')}.json`), '{}');
-    expect(hasSeatRecord(home)).toBe(true);
-    const other = mkdtempSync(join(tmpdir(), 'fleet-seat-home-'));
-    mkdirSync(join(other, '.fleet-dao'), { recursive: true });
-    writeFileSync(join(other, '.fleet-dao', 'seat'), '不是目录');
-    expect(hasSeatRecord(other)).toBe(true);
-    const bad = mkdtempSync(join(tmpdir(), 'fleet-seat-home-'));
-    mkdirSync(join(bad, '.fleet-dao', 'seat'), { recursive: true });
-    writeFileSync(join(bad, '.fleet-dao', 'seat', '%E0%A4%A.json'), '{}');
-    expect(hasSeatRecord(bad)).toBe(true);
+  it('帅位座位整张删掉（#531）：--local 不再替帅位在库里认领（claimLocal 一并删）', async () => {
+    const { calls, run } = setup({ milestones: ok(JSON.stringify([{ title: 'v1 Fusion 接活' }])) });
+    const r = await run(...base.slice(0, 3), 'v1', ...base.slice(4), '--local');
+    expect(r.local).toBe(true);
+    expect('claimed' in r).toBe(false);
+    expect(calls.some((c) => c[0] === 'api' && JSON.stringify(c).includes('fleetClaim'))).toBe(false);
   });
 });
 
