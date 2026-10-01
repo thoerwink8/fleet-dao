@@ -57,7 +57,7 @@
 - 关单：`pnpm issue:close <号>`，主线上有 `specs/<号>-<短名>/结果.md` 才关成「完成」、评论里贴结果链接；没有结果、子单还开着都不关（退出码 1），读不到 GitHub 报错不关（退出码 2）。或者最后一个 PR「这个 PR 做完就关单」填「是」、写 `Closes #<号>`，合并时关。见 design 第七节「关单要有结果」。
 - 欠账：`pnpm debt:check` 只看文件，查文档里推后的话带着单号、需求.md 写了怎么算做完（PR 和主线上 debt.yml 也跑，只报告、不挡合并，不读 GitHub）；加 `--live` 另读 GitHub，查挂的单号开没开着、开着的单都有需求文档（定时任务 debt.yml 用，它再加 `--comment` 留言到单上）。见 design 第七节「欠账不漏」。
 - 计划快照：每个版本开始和结束时由总指挥跑 `pnpm plan:snapshot`（加 `--at 2026-09-27T09:00+08:00` 定快照时间，不加取现在），从 GitHub 读版本、先后、母单和子单，重写 `docs/plan.md` 两行快照标记之间的几节，标记外面不动，改动照常开 PR；没登录、GitHub 读不到、先后标记认不出都不写、退出码 2。
-- 各家 AI 的全局说明、技能和钩子：`node packages/agents-sync/bin/agents-sync --check`（只读，最后报这台同步到哪个提交、落后主线几个），`--apply` 写；开发机装过一次以后，每次开会话由开会话钩子自动同步；`--help` 看全部用法，法国怎么跑见 ops 第五节。
+- 各家 AI 的全局说明、技能和钩子：开发机上由开会话钩子自动同步（同步用的是一份只归它的检出 `~/.fleet-dao/origin-main`，永远停在 `origin/main` 上，本机自己的检出在哪个分支都不影响）；手动跑 `pnpm agents:sync`（`--check` 只读，最后报这台同步到哪个提交、落后主线几个；`--offline` 不取远端），直接查仓里的原文件用 `node packages/agents-sync/bin/agents-sync --check`；`--help` 看全部用法，法国怎么跑见 ops 第五节。
 
 ## 文档各管什么
 

@@ -1,14 +1,19 @@
 // SessionStart 钩子（agents-sync 装进 ~/.fleet-dao/hooks/，登记在 ~/.claude/settings.json；Grok、Devin、Cursor 默认借道读这份）。
-// 开会话、续会话时跑；stdout 打一段 JSON，hookSpecificOutput.additionalContext 进会话上下文（Grok 不收开会话钩子的输出）。两件事：
+// 开会话、续会话时跑；stdout 打一段 JSON，hookSpecificOutput.additionalContext 进会话上下文（Grok 不收开会话钩子的输出）。三件事：
 // 1. 会话所在的仓：取一下远端；在 main 上、没有未提交的改动、落后了就快进；快进不了，或在别的分支上而 AGENTS.md 和主线不同，
 //    提醒一句（#72 撞过：会话读到旧的 AGENTS.md）。不是 git 仓、没有 origin/main 的不出声。
-// 2. 这台机器的 fleet-dao 检出（agents-sync 记在 ~/.fleet-dao/synced.json 的 repo）：取远端、快进 main，再跑一遍
-//    agents-sync --apply，规矩、技能、钩子自己跟上主线；结论一句话。在别的仓里开会话也照做。
+// 2. 这台机器的规矩、技能、钩子、权限：同步脚本另有**一份只归它的检出**（~/.fleet-dao/origin-main，
+//    agents/hooks/sync-source.mjs），永远停在 origin/main 的分离头上，再跑一遍 agents-sync --apply；结论一句话。
+//    在别的仓里开会话也照做。这台机器自己的 fleet-dao 检出在哪、在哪个分支、有没有没提交的改动，都不影响这一件
+//    （2026-10-01 创始人：「我希望每台机器，能在我们改动后，自动就同步，而不是人为提醒」）：主检出停在功能分支上
+//    不再让这台机器停在旧规矩上。那边的检出只被当「种子」读，一个写操作都没有。
 //    上次同步成功不到 QUIET_MS 就不再跑：Cursor 讨论一次并行起好几个会话，每个都会触发这个钩子。
+// 3. 会话所在仓的「## 生效中的临时调整」表（通用段「我拍了板」那条）：到了最迟复查日期的、缺列的、日期认不出的
+//    各说一行，提醒照读法②问创始人。2026-09-28 拍的临时调整抄进产品仓时丢了撤回条件和复查日期，额度恢复了新会话还照做。
 // 没查成、没做成都明说原因和这台落后主线几个提交，不当成是最新的。一律退出 0：开会话钩子退出码非 0 也挡不住会话，
 // 只会把输出丢掉；钩子自己出了意外也要打一句「没查成」。
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -18,6 +23,16 @@ export const SYNC_MS = 30_000;
 export const QUIET_MS = 3 * 60_000;
 const ORIGIN_MAIN = 'refs/remotes/origin/main';
 const READ_MAIN = '规矩以 origin/main 的 AGENTS.md 为准（git show origin/main:AGENTS.md）';
+
+/** 同步专用的检出、拿它的锁、把它准备好：和 pnpm agents:sync 走同一份（agents/hooks/sync-source.mjs）。
+ *  人家是钩子家的脚本，装在 ~/.fleet-dao/hooks/ 里，这里按路径动态加载；加载不了也要照旧说一句，不静默。 */
+let source = null;
+let sourceWhy = null;
+try {
+  source = await import('./sync-source.mjs');
+} catch (err) {
+  sourceWhy = err?.message ?? String(err);
+}
 
 /** git 跑一条命令：{ status, stdout, stderr, error } */
 export function gitRunner(timeoutMs = FETCH_MS) {
@@ -33,7 +48,7 @@ export function gitRunner(timeoutMs = FETCH_MS) {
   };
 }
 
-/** 用检出里的 agents-sync 同步这台机器 */
+/** 用同步专用检出里的 agents-sync 同步这台机器 */
 export function syncRunner(timeoutMs = SYNC_MS) {
   return (repo, home) => {
     const bin = join(repo, 'packages', 'agents-sync', 'bin', 'agents-sync');
@@ -67,13 +82,13 @@ export function why(r) {
 const ok = (r) => r.status === 0 && !r.error;
 
 /**
- * git 自己没跑起来（起不来、超时、被系统叫停、没有退出码），和「git 说这里不是仓」是两回事：git 说话了，
- * 不是仓时退出码是 128（或者 0 加一个 false）。前者不能说成后者——2026-09-30 本机 git 缺 DLL（退出码 3221225781）
- * 被说成「不是 git 仓」，把真毛病盖住了。
+ * git 自己没跑起来（起不来、超时、被系统叫停、没有退出码，或者 Windows 上 0xC0000xxx 那一类），
+ * 和「git 说这里不是仓」是两回事：git 说话了，不是仓时退出码是 128（或者 0 加一个 false）。前者不能说成后者——
+ * 2026-09-30 本机 git 缺 DLL（退出码 3221225781）被说成「不是 git 仓」，把真毛病盖住了。
  */
 export function gitBroken(r) {
   if (r.error || typeof r.status !== 'number') return true;
-  return r.status !== 0 && r.status !== 128;
+  return r.status !== 0 && r.status !== 128 && r.status > 0x7fffffff;
 }
 const short = (sha) => String(sha).slice(0, 7);
 
@@ -123,27 +138,162 @@ export function checkHere(cwd, git) {
   return { line: null, fetch };
 }
 
-/** 这台同步到哪个提交、落后主线几个（按本机的 origin/main 算） */
+/** 这台同步到哪个提交、落后主线几个（g 已经钉在同步专用的检出上了；算不了就说算不了） */
+export const TEMP_HEADING = '## 生效中的临时调整';
+export const GREP_MS = 5_000;
+const TEMP_COLS = ['内容', '当时为什么', '谁拍的', '撤回条件', '最迟复查日期'];
+const TEMP_HINT = '照通用段「我拍了板」那条补齐五列，日期一律 YYYY-MM-DD 北京时间';
+const NOT_CHECKED = '临时调整表没查成';
+
+/** 北京时间的今天，YYYY-MM-DD */
+export function beijingToday(now = Date.now()) {
+  return new Date(now + 8 * 3_600_000).toISOString().slice(0, 10);
+}
+
+/** 格子开头是 YYYY-MM-DD、且是真有的一天 → 那一天；认不出 → null */
+function dayOf(cell) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?!\d)/.exec(cell);
+  if (!m) return null;
+  const iso = `${m[1]}-${m[2]}-${m[3]}`;
+  const d = new Date(`${iso}T00:00:00Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === iso ? iso : null;
+}
+
+/** 表格的一行 → 各格（去掉两头的竖线；\| 是格子里的竖线） */
+function cellsOf(line) {
+  const body = line
+    .trim()
+    .replace(/^\|/, '')
+    .replace(/(?<!\\)\|$/, '');
+  return body.split(/(?<!\\)\|/).map((c) => c.trim().replaceAll('\\|', '|'));
+}
+
+const brief = (s) => (s.length > 30 ? `${s.slice(0, 30)}…` : s) || '（内容空着）';
+
+/**
+ * 解析「## 生效中的临时调整」（在 headingLine 行，从 1 数）下面的表：到下一个一、二级标题之前的第一张表，
+ * 表前可以有说明文字，表头 + 分隔行之后可以一行都没有。认不出 → { broken }；认得出 → { due, missing, badDate }。
+ */
+export function parseTempTable(text, headingLine, today) {
+  const lines = text.split(/\r?\n/);
+  const rows = [];
+  for (let i = headingLine; i < lines.length; i++) {
+    const t = lines[i].trim();
+    if (/^#{1,2}\s/.test(t)) break;
+    if (t.startsWith('|')) rows.push({ no: i + 1, line: t });
+    else if (rows.length > 0) break;
+  }
+  if (rows.length === 0) return { broken: '标题下面没有表格' };
+  if (rows.length < 2 || !cellsOf(rows[1].line).every((c) => /^:?-{3,}:?$/.test(c)))
+    return { broken: `第 ${rows[0].no} 行的表头下面没有 |---| 分隔行，认不出是表格` };
+  const head = cellsOf(rows[0].line);
+  if (head.length !== TEMP_COLS.length || !head[4].includes('复查'))
+    return { broken: `表头是「${head.join('｜')}」，要五列：${TEMP_COLS.join('｜')}` };
+  const due = [];
+  const missing = [];
+  const badDate = [];
+  for (const r of rows.slice(2)) {
+    const c = cellsOf(r.line);
+    const name = brief(c[0] ?? '');
+    if (c.length !== TEMP_COLS.length) {
+      missing.push(`第 ${r.no} 行「${name}」${c.length < TEMP_COLS.length ? '只有' : '有'} ${c.length} 列`);
+      continue;
+    }
+    const empty = TEMP_COLS.filter((_, k) => !c[k]);
+    if (empty.length > 0) missing.push(`第 ${r.no} 行「${name}」的「${empty.join('、')}」空着`);
+    if (!c[4]) continue;
+    const day = dayOf(c[4]);
+    if (day === null) badDate.push(`第 ${r.no} 行「${name}」的「${brief(c[4])}」`);
+    else if (day <= today) due.push(`${name}（最迟 ${day}）`);
+  }
+  return { due, missing, badDate };
+}
+
+/**
+ * 第 3 件：会话所在仓里的「## 生效中的临时调整」表（通用段「我拍了板」那条）。到了最迟复查日期的、缺列的、
+ * 日期认不出的各说一行；有标题却认不出表，明说没查成；没有这张表、不是 git 仓不出声；git 跑不起来明说。
+ * 只用本地 git grep 找已跟踪的 .md（不取远端，限时 GREP_MS），不拖慢开会话。返回要说的几行。
+ */
+export function checkTemporary(cwd, git, now = Date.now()) {
+  const top = git(cwd, ['rev-parse', '--show-toplevel']);
+  if (gitBroken(top))
+    return [`${NOT_CHECKED}：这台的 git 跑不起来（${why(top)}），会话所在仓里有没有到期的临时调整不知道。`];
+  const root = top.stdout.trim();
+  if (!ok(top) || !root) return [];
+  // -z：文件名原样、和行号用 \0 隔开（中文文件名不会被转义成 "\345..."，文件名里有冒号也不乱）
+  const found = git(root, ['grep', '-n', '-z', '-I', '-E', `^${TEMP_HEADING}[[:space:]]*$`, '--', '*.md']);
+  if (found.status === 1 && !found.error && !found.stderr.trim()) return [];
+  if (!ok(found)) return [`${NOT_CHECKED}：git grep 找表没成（${why(found)}）。`];
+  const hits = found.stdout
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => /^([^\0]+)\0(\d+)\0/.exec(l));
+  if (hits.length === 0 || hits.some((m) => m === null))
+    return [`${NOT_CHECKED}：git grep 的输出认不出（${why(found)}）。`];
+  const today = beijingToday(now);
+  const out = [];
+  const many = hits.length > 1;
+  if (many)
+    out.push(
+      `临时调整表不止一张（${hits.map((m) => `${m[1]}:${m[2]}`).join('、')}）：一个仓只该有一张，并成一张。`,
+    );
+  for (const [, file, n] of hits) {
+    const at = many ? `${file}:${n}` : file;
+    let text;
+    try {
+      text = readFileSync(join(root, file), 'utf8');
+    } catch (err) {
+      out.push(`${NOT_CHECKED}（${at}）：读不了（${err?.code ?? err?.message ?? err}）。`);
+      continue;
+    }
+    const r = parseTempTable(text, Number(n), today);
+    if (r.broken) {
+      out.push(`${NOT_CHECKED}（${at}）：${r.broken}。`);
+      continue;
+    }
+    if (r.due.length > 0)
+      out.push(
+        `临时调整到了最迟复查日期 ${r.due.length} 条（${at}，今天 ${today}）：${r.due.join('；')}。照通用段读法②问创始人一句，不默认照做也不自己撤。`,
+      );
+    if (r.missing.length > 0)
+      out.push(`临时调整表有 ${r.missing.length} 行缺列（${at}）：${r.missing.join('；')}。${TEMP_HINT}。`);
+    if (r.badDate.length > 0)
+      out.push(
+        `临时调整表有 ${r.badDate.length} 行最迟复查日期认不出（${at}）：${r.badDate.join('；')}。${TEMP_HINT}。`,
+      );
+  }
+  return out;
+}
+
+/** 这台同步到哪个提交、落后主线几个（g 已经钉在同步专用的检出上了；算不了就说算不了） */
 function lag(g, synced, stale) {
+  const basis = stale ? '（按本机上次取到的主线算）' : '';
   if (!synced) return `这台还没记过同步到哪个提交，${READ_MAIN}`;
   const c = g('rev-list', '--count', `${synced}..${ORIGIN_MAIN}`);
   const n = Number(c.stdout.trim());
   if (!ok(c) || c.stdout.trim() === '' || !Number.isInteger(n))
     return `这台同步到 ${short(synced)}，和主线比不了（${why(c)}），${READ_MAIN}`;
-  const basis = stale ? '（按本机上次取到的主线算）' : '';
   if (n === 0) return `这台同步到 ${short(synced)}，没落后主线${basis}`;
-  return `这台同步到 ${short(synced)}，落后主线 ${n} 个提交${basis}，${READ_MAIN}`;
+  return `这台同步到 ${short(synced)}，落后主线 ${n} 个提交${basis}`;
+}
+
+/** 同步专用检出这一趟做的事：切了、修过还是新建了 */
+function sourceNote(prepared) {
+  if (prepared.repaired === true) return '同步专用的检出修好了一份（原来那份挪到旁边留着了）';
+  if (prepared.moved === true) return '同步专用的检出新切了一下';
+  return '';
 }
 
 /** agents-sync 的输出 → 一句话 */
-export function describeSync(r, repo, origin, lagText) {
+export function describeSync(r, repo, origin, lagText, note = '') {
   const check = `node ${join(repo, 'packages', 'agents-sync', 'bin', 'agents-sync').replaceAll('\\', '/')} --check`;
+  const tail = [note, lagText].filter(Boolean).join('；');
   if (r.error) {
     const what =
       r.error.code === 'ETIMEDOUT'
         ? `${Math.round((r.timeoutMs ?? SYNC_MS) / 1000)} 秒没跑完`
         : `起不来（${r.error.message}）`;
-    return `规矩同步没查成：agents-sync ${what}；${lagText}。`;
+    return `规矩同步没查成：agents-sync ${what}；${tail}。`;
   }
   const lines = String(r.stdout ?? '').split(/\r?\n/);
   const pick = (glyph) => lines.filter((l) => l.startsWith(`  ${glyph} `)).map((l) => l.slice(4));
@@ -154,19 +304,18 @@ export function describeSync(r, repo, origin, lagText) {
   const summary = lines.some((l) => l.startsWith('结论：'));
   if (r.status === 0 && summary) {
     if (changed.length === 0)
-      return `规矩同步：这台已同步到主线最新（${short(origin)}），规矩、技能、钩子都和仓里一致。`;
+      return `规矩同步：这台已同步到主线最新（${short(origin)}），规矩、技能、钩子、权限都和仓里一致。`;
     const keys = changed.map((l) => l.split('：')[0]);
     const listed = keys.slice(0, 3).join('、') + (keys.length > 3 ? ' 等' : '');
     return `规矩同步：这台刚同步到主线最新（${short(origin)}），改了 ${changed.length} 处（${listed}）；本会话开场已经读进来的全局说明和技能还是旧的，下次开会话才生效，拿不准以 origin/main 的 AGENTS.md 为准。`;
   }
   if (r.status === 1 && bad.length > 0) {
     const shown = bad.slice(0, 2).join('；') + (bad.length > 2 ? '……' : '');
-    return `规矩同步有没做成的（${bad.length} 处）：${shown}。全部看 ${check}；${lagText}。`;
+    return `规矩同步有没做成的（${bad.length} 处）：${shown}。全部看 ${check}；${tail}。`;
   }
   // 退出码 2：逐项里有没查成的，或者原件读不到、根本没往下走（那时原因只在 stderr）
-  if (r.status === 2)
-    return `规矩同步没查成：${(unknown[0] ?? why(r)).replace(/^没查成：/, '')}；${lagText}。`;
-  return `规矩同步没查成：agents-sync 退出码 ${r.status}，没给出逐项结论（${why(r)}）；${lagText}。`;
+  if (r.status === 2) return `规矩同步没查成：${(unknown[0] ?? why(r)).replace(/^没查成：/, '')}；${tail}。`;
+  return `规矩同步没查成：agents-sync 退出码 ${r.status}，没给出逐项结论（${why(r)}）；${tail}。`;
 }
 
 function readRecord(home) {
@@ -176,6 +325,15 @@ function readRecord(home) {
   } catch (err) {
     return { ok: false, missing: err?.code === 'ENOENT', why: err?.code ?? err?.message ?? String(err) };
   }
+}
+
+/**
+ * 这一件要起 git 跑好几条：拿锁、把专用检出新切一下、建的时候还要取远端（取远端那几条自己会放宽超时）。
+ * 这台 git 跑不起来（缺 DLL、PATH 上没有）就说清是 git 的毛病，别让每条命令各自报成别的原因。
+ */
+function gitAlive(git) {
+  const r = git(process.cwd(), ['--version']);
+  return ok(r) ? null : why(r);
 }
 
 function quietFor(stamp, now) {
@@ -197,68 +355,62 @@ function touch(stamp, now) {
   }
 }
 
-const RERUN = '在 fleet-dao 的检出里跑一遍 node packages/agents-sync/bin/agents-sync --apply';
+const RERUN =
+  '在 fleet-dao 的检出里跑一遍 node packages/agents-sync/bin/agents-sync --apply --repo ~/.fleet-dao/origin-main';
 
-/** 第 2 件：同步这台机器。fetch 是第 1 件在同一个仓里取远端的结果（没取过是 null）。返回一句话 */
+/**
+ * 第 2 件：同步这台机器。fetch 是第 1 件在同一个仓里取远端的结果（没取过是 null，这里用不到：这件在专用检出里取）。
+ * 返回一句话。做不成的原因分得清：git 起不来、取不到远端、专用检出建不起来、agents-sync 没做成。
+ */
 export function syncFleet({ home, git, sync, fetch = null, now = Date.now() }) {
+  // fetch 是第 1 件在会话所在的仓里取远端的结果。这一件不走它：用的是同步专用的检出，自己在那里面取（见下面）
+  void fetch;
   const rec = readRecord(home);
-  if (!rec.ok) {
-    if (rec.missing)
-      return `规矩同步没查成：这台没记 fleet-dao 检出在哪（没有 ~/.fleet-dao/synced.json）；${RERUN}，${READ_MAIN}。`;
-    return `规矩同步没查成：~/.fleet-dao/synced.json 读不懂（${rec.why}）；${RERUN}，${READ_MAIN}。`;
-  }
-  const repo = typeof rec.value?.repo === 'string' ? rec.value.repo : '';
-  if (!repo) return `规矩同步没查成：~/.fleet-dao/synced.json 里没有 repo；${RERUN}，${READ_MAIN}。`;
-  const synced = typeof rec.value?.synced?.commit === 'string' ? rec.value.synced.commit : null;
+  const recorded = rec.ok && typeof rec.value?.repo === 'string' ? rec.value.repo : null;
+  const synced = rec.ok && typeof rec.value?.synced?.commit === 'string' ? rec.value.synced.commit : null;
   const stamp = join(home, '.fleet-dao', 'session-sync.ok');
   const quiet = synced ? quietFor(stamp, now) : null;
   if (quiet !== null)
     return `规矩同步：${Math.max(1, Math.round(quiet / 60_000))} 分钟内刚同步成功过（这台同步到 ${short(synced)}），这次没再取远端。`;
-  if (!existsSync(repo))
-    return `规矩同步没查成：记下的 fleet-dao 检出 ${repo} 不在了；在现在的检出里跑一遍 node packages/agents-sync/bin/agents-sync --apply，${READ_MAIN}。`;
-  const g = (...a) => git(repo, a);
-  const inside = g('rev-parse', '--is-inside-work-tree');
-  if (gitBroken(inside))
-    return `规矩同步没查成：这台的 git 跑不起来（${why(inside)}），没法核对记下的检出 ${repo}；${READ_MAIN}。`;
-  if (!ok(inside) || inside.stdout.trim() !== 'true')
-    return `规矩同步没查成：记下的检出 ${repo} 不是 git 仓（${why(inside)}）；${READ_MAIN}。`;
-  const common = commonOf(g);
-  // 会话就开在这个仓（或它的工作树）里时，第 1 件已经取过远端，不再取第二遍
-  let fetchWhy = null;
-  if (fetch !== null && common !== null && fetch.common === common) fetchWhy = fetch.ok ? null : fetch.why;
-  else {
-    const f = g('fetch', '-q', 'origin');
-    if (!ok(f)) fetchWhy = why(f);
+
+  if (source === null)
+    return `规矩同步没查成：开会话钩子读不了同步专用检出那一段（${sourceWhy}）；${RERUN}，${READ_MAIN}。`;
+
+  const mirror = source.syncDirIn(home);
+  // prepareSource 起 git 用的是「git -C <目录> …」的写法（sync-source 自己的 runner 就这样）
+  const g = (...a) => git(mirror, a);
+  const dead = gitAlive(git);
+  if (dead !== null)
+    return `规矩同步没跑：这台的 git 跑不起来（${dead}），没法核对 ${mirror}；${lag(g, synced, true)}。`;
+  const lock = source.takeSourceLock(home, { now });
+  if (!lock.ok) return `规矩同步没跑：${lock.why}；${lag(g, synced, true)}。`;
+
+  try {
+    const prepared = source.prepareSource(home, recorded, { repair: true, deps: { gitFactory: () => git } });
+    if (!prepared.ok) return `规矩同步没跑：${prepared.why}；${lag(g, synced, true)}。`;
+
+    const origin = String(prepared.head ?? '');
+    const lagText = lag(g, synced, false);
+    const r = sync(prepared.dir, home);
+    if (r.status === 0 && !r.error) touch(stamp, now);
+    const note = sourceNote(prepared);
+    const said = describeSync(r, prepared.dir, origin, lagText, note);
+    return rec.ok
+      ? said
+      : `${said.replace(/。$/, '')}；~/.fleet-dao/synced.json ${rec.missing ? '还没记过' : `读不懂（${rec.why}）`}，这次同步会重写一份。`;
+  } finally {
+    lock.release();
   }
-  if (fetchWhy !== null)
-    return `规矩同步没查成：在 ${repo} 取远端失败（${fetchWhy}）；${lag(g, synced, true)}。`;
-  const originRead = g('rev-parse', '-q', '--verify', `${ORIGIN_MAIN}^{commit}`);
-  if (!ok(originRead)) return `规矩同步没查成：${repo} 里没有 origin/main；${READ_MAIN}。`;
-  const origin = originRead.stdout.trim();
-  const lagText = lag(g, synced, false);
-  const branch = g('branch', '--show-current').stdout.trim();
-  if (branch !== 'main')
-    return `规矩同步没跑：检出 ${repo} 不在 main 上（在 ${branch || '分离头'}），不拿别的分支同步；${lagText}。`;
-  let head = g('rev-parse', 'HEAD').stdout.trim();
-  if (head !== origin) {
-    if (g('status', '--porcelain', '--untracked-files=no').stdout.trim() !== '')
-      return `规矩同步没跑：检出 ${repo} 的 main 有没提交的改动，快进不了；${lagText}。`;
-    const ff = g('merge', '--ff-only', '-q', ORIGIN_MAIN);
-    if (!ok(ff)) return `规矩同步没跑：检出 ${repo} 的 main 快进不了（${why(ff)}）；${lagText}。`;
-    head = g('rev-parse', 'HEAD').stdout.trim();
-    if (head !== origin)
-      return `规矩同步没跑：检出 ${repo} 的 main（${short(head)}）和 origin/main（${short(origin)}）分叉了，不拿它同步；${lagText}。`;
-  }
-  if (g('status', '--porcelain', '--', 'AGENTS.md', 'agents').stdout.trim() !== '')
-    return `规矩同步没跑：检出 ${repo} 里 AGENTS.md 或 agents/ 有没提交的改动，不拿它们同步；${lagText}。`;
-  const r = sync(repo, home);
-  if (r.status === 0 && !r.error) touch(stamp, now);
-  return describeSync(r, repo, origin, lagText);
 }
 
-export function sessionStart({ cwd, home, git, sync, now = Date.now() }) {
+/** localGit 只跑本地命令（找临时调整表），限时比取远端短 */
+export function sessionStart({ cwd, home, git, sync, localGit = git, now = Date.now() }) {
   const here = checkHere(cwd, git);
-  return [...(here.line ? [here.line] : []), syncFleet({ home, git, sync, fetch: here.fetch, now })];
+  return [
+    ...(here.line ? [here.line] : []),
+    ...checkTemporary(cwd, localGit, now),
+    syncFleet({ home, git, sync, fetch: here.fetch, now }),
+  ];
 }
 
 /** Claude Code、Codex、Devin 都认的开会话输出 */
@@ -292,7 +444,13 @@ if (isMain()) {
     } catch {
       // 输入读不懂不要紧：会话目录退回到钩子自己的工作目录
     }
-    lines = sessionStart({ cwd: pickCwd(input), home: homedir(), git: gitRunner(), sync: syncRunner() });
+    lines = sessionStart({
+      cwd: pickCwd(input),
+      home: homedir(),
+      git: gitRunner(),
+      sync: syncRunner(),
+      localGit: gitRunner(GREP_MS),
+    });
   } catch (err) {
     lines = [`开场核规矩没查成：开会话钩子自己出错了（${err?.message ?? err}）；${READ_MAIN}。`];
   }
