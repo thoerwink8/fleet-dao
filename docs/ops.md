@@ -150,7 +150,7 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 
 资源池与起会话：
 
-- 池子 `fleet-agents.slice`（cgroup 路径 `/fleet.slice/fleet-agents.slice`）：CPU、内存、进程数、IO 都记账（按 windsurf-dao 仓 `docs/decisions/2026-09-24-agent-isolation-and-error-routing.md` 的「先观测」起步），内存设了总量上限（2026-09-28 起，断链之后：见下面「会话的内存上限和测试进程数」）；CPUWeight、TasksMax 还没实测画像，先不设。
+- 池子 `fleet-agents.slice`（cgroup 路径 `/fleet.slice/fleet-agents.slice`）：CPU、内存、进程数、IO 都记账（按 windsurf-dao 仓 `docs/decisions/2026-09-24-agent-isolation-and-error-routing.md` 的「先观测」起步），内存设了总量上限（2026-09-28 起，断链之后：见下面「会话的内存上限和测试进程数」）；CPUWeight、TasksMax 还没实测画像，这两个值目前空着（还没实测，不算推后要做的事）。
 - 每个会话一个 scope：`fleet-agent-<编号>.scope`，身份是会话用户，上限由引擎起会话时给。
 - 引擎（fleet）自己建不了系统级 scope，会话还得换成会话用户。polkit 管不窄——systemd 255 建临时单元时不把单元名交给 polkit，放行就等于放行任何单元、任何身份——所以 sudoers 只放行 fleet 以 root 跑一个脚本：
 
