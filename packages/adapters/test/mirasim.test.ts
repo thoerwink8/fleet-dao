@@ -387,6 +387,35 @@ describe('Mirasim 起会话到判定（假服务端）', () => {
     expect(judgeRun(mirasimRunSummary(report).facts).reason).toBe('model_mismatch');
   });
 
+  it('回读的模型名只多一点方括号后缀：认成同一个，不当成点错模型把它停掉', async () => {
+    // 2026-10-02 实测：claude 的点名 `claude-opus-5-5`、服务端回读 `claude-opus-5-5[1m]`，
+    // `[1m]` 只是上下文窗口标记。一字不差的比对会把 7 个 claude 模型全判成 model_mismatch
+    // 当场叫停——叫停发生在发出任何上游请求之前，一次真话都收不到。
+    const server = new FakeMirasim({
+      reply: accepted(kimi),
+      stream: kimi.stream.map((f) => {
+        const patch = (f as { patch?: { set?: Record<string, unknown> } }).patch;
+        if (patch?.set?.model === 'kimi-code/k3') patch.set.model = 'kimi-code/k3[1m]';
+        const snap = (f as { snapshot?: Record<string, unknown> }).snapshot;
+        if (snap?.model === 'kimi-code/k3') snap.model = 'kimi-code/k3[1m]';
+        return f;
+      }),
+    });
+    const report = await runMirasim(spec({ expectModel: 'kimi-code/k3' }), {
+      connect: server.connect,
+    });
+    expect(report.killed?.reason).toBeUndefined();
+    expect(report.session.state.model).toBe('kimi-code/k3[1m]');
+  });
+
+  it('回读的是另一个模型（不只是后缀）：照旧判点错，停会话', async () => {
+    const server = new FakeMirasim({ reply: accepted(kimi), stream: kimi.stream.slice(0, 6) });
+    const report = await runMirasim(spec({ expectModel: 'kimi-code/k3-preview' }), {
+      connect: server.connect,
+    });
+    expect(report.killed?.reason).toBe('model_mismatch');
+  });
+
   it('服务端没有这个执行体、拒了这一针、连不上、不回 state：都是没起来，原因照实写', async () => {
     const noAgent = await runMirasim(spec({ agent: 'dsh' }), {
       connect: new FakeMirasim({ agents: ['kimi'] }).connect,

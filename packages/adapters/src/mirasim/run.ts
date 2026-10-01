@@ -169,8 +169,17 @@ async function hello(wire: MirasimWire, ms: number): Promise<Record<string, unkn
   return rec(frame.state) ?? {};
 }
 
+/**
+ * 回读的模型名是不是点名的那个。
+ * 服务端会给出比点名多一个后缀的写法：claude 的点名 `claude-opus-5-5`、回读 `claude-opus-5-5[1m]`，
+ * `[1m]` 只是上下文窗口标记，是同一个模型（2026-10-02 实测：7 个 claude 模型全被这条一字不差
+ * 的比对判成 model_mismatch 当场叫停，叫停发生在发出任何上游请求之前，一次真话都没收到）。
+ * 只剥末尾的方括号标记，不宽松到「前缀相同就算」——那样点 `gpt-5.6-luna` 回 `gpt-5.6-luna-preview`
+ * 也会被认成对。
+ */
 function modelMatches(expected: string, observed: string): boolean {
-  return expected.trim().toLowerCase() === observed.trim().toLowerCase();
+  const strip = (s: string) => s.trim().toLowerCase().replace(/\[[^\]]*\]$/, '');
+  return strip(expected) === strip(observed);
 }
 
 export async function runMirasim(
