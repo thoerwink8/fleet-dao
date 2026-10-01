@@ -173,7 +173,7 @@ async function ensureTemplate(url: string): Promise<string> {
 function urlForDb(url: string, db: string): string {
   const u = new URL(url);
   if (!u.pathname || u.pathname === '/') {
-    throw new Error(`FLEET_TEST_PG_URL 里没写库名：${url}（要 postgres://…/<库>）；测试要从它克隆出模板库`);
+    throw new Error(`FLEET_TEST_PG_URL 里没写库名（要 postgres://…/<库>）；测试要从它克隆出模板库`);
   }
   u.pathname = `/${db}`;
   return u.toString();
