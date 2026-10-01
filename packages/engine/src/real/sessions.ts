@@ -223,8 +223,14 @@ export function resumeStartupMs(
 export interface ContinuationFacts {
   /** 工作流要接着的会话号（可能是 cursor 的临时号）。 */
   resumeId: string;
-  /** 这个号最近一轮的记录（latestRunOfSession）；查不到 = null。 */
-  prior: Pick<SessionRunState, 'runAsUser' | 'routeId' | 'worktreePath' | 'contextTokens'> | null;
+  /**
+   * 这个号最近一轮的记录（latestRunOfSession）；查不到 = null。
+   * outcome、failureCode 不给就当上一轮没失败（调方在 #489 之前不带这两项时照旧同池 resume）。
+   */
+  prior:
+    | (Pick<SessionRunState, 'runAsUser' | 'routeId' | 'worktreePath' | 'contextTokens'> &
+        Partial<Pick<SessionRunState, 'outcome' | 'failureCode'>>)
+    | null;
   /** 上一轮的路由现在的样子（routeLaunchFacts）；查不到 = null。 */
   before: { hostId: string; poolId: string } | null;
   /** 这次的路由。 */
@@ -241,6 +247,8 @@ export interface ContinuationFacts {
  * → fork；别的一律接力（开新会话带接力任务书），why 写清为什么续不上。先后就是判断的先后，每个分支都有测试。
  * 不硬续的理由：会话记录存在会话用户家里、按工作目录分（Claude 的 ~/.claude/projects/<目录>、cursor 的 ~/.cursor/chats/<目录的哈希>），
  * 换了用户、目录、执行方式都找不到；cursor 的临时号不是它的会话号；cursor 没有 fork，切了池原会话续不上。
+ * 结构上续得上、却仍改接力的（#489）：这个号上一轮续起来没有第一帧（startup_timeout）——resume 和 fork 都是续这个号，不再连试；
+ * 本来要同池 resume、执行方式是 Grok、上一轮判了停滞的：原样 -r 起不来，改开新会话带接力任务书。Claude 判了停滞仍续（失败分流 SL1）。
  */
 export function decideContinuation(x: ContinuationFacts): { mode: ContinueMode; why: string } {
   const { resumeId, prior, before } = x;
@@ -267,7 +275,21 @@ export function decideContinuation(x: ContinuationFacts): { mode: ContinueMode; 
       `上一个会话 ${resumeId} 在 ${prior.worktreePath ?? '没记的目录'} 里跑，这次在 ${x.dir}：过程记录按目录存，换了目录续不上`,
     );
   }
-  if (before.poolId === x.route.poolId) return { mode: 'resume', why: '' };
+  // 不给 failureCode / outcome 就当没失败：#489 之前记下的轮次、调用方没带这两项的，同池照旧 resume（上面各分支的「续不上」理由在先）。
+  if (prior.failureCode === 'startup_timeout') {
+    return relay(
+      `上一个会话 ${resumeId} 续起来没有第一帧（startup_timeout），不再续这个号，开新会话带接力任务书`,
+    );
+  }
+  if (before.poolId === x.route.poolId) {
+    if (
+      x.driver.hostId === 'grok' &&
+      (prior.outcome === 'stalled' || prior.failureCode === 'SESSION_STALLED')
+    ) {
+      return relay(`上一个会话 ${resumeId} 上一轮判了停滞，原样续起不来，开新会话带接力任务书`);
+    }
+    return { mode: 'resume', why: '' };
+  }
   const moved = `换了账号池（${before.poolId} → ${x.route.poolId}）`;
   if (!x.driver.canFork) return relay(`${moved}，${hostName(x.driver.hostId)} 不能 fork`);
   if (prior.contextTokens !== null && prior.contextTokens < x.forkMax) return { mode: 'fork', why: '' };
