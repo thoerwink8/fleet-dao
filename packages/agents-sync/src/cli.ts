@@ -34,7 +34,10 @@ export const USAGE = `agents-sync —— 把 fleet-dao 仓里 AGENTS.md 的通�
                              skill 拷进各家的 skill 目录（只动清单里记着是本脚本装的），
                              钩子脚本拷进 ~/.fleet-dao/hooks/、在各家设置里登记（只动指向它们的那几条），
                              agents/config/claude-permissions.json 合进 ~/.claude/settings.json 的 permissions
-                             （defaultMode 覆盖；allow、deny 补缺、不删机器上自己加的；相反的、读不懂的不动、报出来），
+                             （defaultMode 覆盖；allow、deny 补缺、不删机器上自己加的；相反的、读不懂的不动、报出来）
+                             和同一份设置的 autoMode（给 auto 模式分类器看的自然语言规则：environment、allow
+                             按并集合并、不删机器上自己加的；源文件里少了 "$defaults" 就拒收——没它 Claude Code
+                             会把那一类的内置规则整段换掉），
                              并翻译成 Kimi（config.toml 里一块托管块加默认模式）、Codex（rules/default.rules 里一块托管块）、
                              Devin（config.json 的 permissions）各自的写法；Grok 直接读 Claude 那份，不另写，
                              _tmp/ 加进这台的 git 全局忽略（core.excludesFile 没设过就新建一份；已经指到别的文件，
