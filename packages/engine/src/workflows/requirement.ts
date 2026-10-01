@@ -575,7 +575,7 @@ export async function requirementWorkflow(input: RequirementInput): Promise<Requ
 
     await setPhase('spec', '写需求文档');
     // 需求文档、方案直写进主线（公开）：写之前 github 包过卫生检查，拦下了退回写它的会话拿掉再交（HY1，同一处
-    // 连续两次挂起报警）；名单没读到、没扫成挂起报警（HY2）；路径（开工时按标题定的）里查出来会话改不了，挂起（HY3）。
+    // 连续两次挂起报警）；没扫成挂起报警（HY2）。
     let specFeedback: Feedback[] = [];
     let specRework: ReworkCarry = NO_REWORK;
     let specSession: string | undefined;
@@ -650,7 +650,7 @@ export async function requirementWorkflow(input: RequirementInput): Promise<Requ
         }
         status.docs = { ...status.docs, plan: planDoc.ok.path };
         // 子任务的标题（会话写的）从这里起写进公开的 issue 进度段：先照这份方案写一次，github 包写之前过卫生检查，
-        // 拦下了退回写方案的会话改标题（HY1，同一处连续两次挂起报警），名单没读到挂起报警（HY2）。这一次写成了，
+        // 拦下了退回写方案的会话改标题（HY1，同一处连续两次挂起报警），没扫成挂起报警（HY2）。这一次写成了，
         // 后面各阶段的进度段里是同样的标题（进度段平时尽力写、写不上只记日志）。
         if (patched('plan-titles-hygiene')) {
           const titles = await attemptOrRework(

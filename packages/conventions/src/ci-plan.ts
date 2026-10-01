@@ -288,9 +288,12 @@ export function planOutputs(plan: CiPlan): Record<string, string> {
   };
 }
 
-/** 汇总 job 核对的几个 job（ci.yml 里的 job id）；changes、hygiene、docs 每次都得跑。 */
+/**
+ * 汇总 job 核对的几个 job（ci.yml 里的 job id）；changes、docs 每次都得跑且绿。hygiene 也每次都跑，但只报不挡
+ * （卫生检查改成挡在推之前，创始人 2026-09-28 傍晚拍），不在这两份名单里：它红不红不影响 ciVerdict 的结论。
+ */
 export const PLANNED_JOBS = ['lint', 'test', 'web', 'deploy'] as const;
-export const ALWAYS_JOBS = ['changes', 'hygiene', 'docs'] as const;
+export const ALWAYS_JOBS = ['changes', 'docs'] as const;
 
 function expected(plan: CiPlan, job: (typeof PLANNED_JOBS)[number]): boolean {
   if (job === 'test') return plan.tests.length > 0;
@@ -324,7 +327,8 @@ function parsePlan(text: unknown): CiPlan | string {
 
 /**
  * 汇总 job 的结论：`needs` 是 ci.yml 里 `toJSON(needs)` 原样给的。每个 job 的 result 必须是
- * 「本该跑 → success、本该不跑 → skipped」，changes、hygiene、docs 必须 success；有一条不对、认不出，就不通过。
+ * 「本该跑 → success、本该不跑 → skipped」，changes、docs 必须 success；有一条不对、认不出，就不通过。
+ * hygiene 不在这条判定里（红了不挡，见 ALWAYS_JOBS 的注释），但 ci.yml 仍然 needs 它，check 会等它跑完。
  */
 export function ciVerdict(needs: unknown): { ok: boolean; lines: string[] } {
   const lines: string[] = [];

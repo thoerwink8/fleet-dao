@@ -1,4 +1,5 @@
-// 考题：十个接入点都有、每道题都够数、标准答案对得上题库、证据能直接喂进去；公开仓，不许带能认出人、账号、机器的东西。
+// 考题：十个接入点都有、每道题都够数、标准答案对得上题库、证据能直接喂进去；公开仓，不许带真密钥（账号、组织编号、
+// 邮箱、IP 这类标识不算泄漏，不拦，创始人 2026-09-28 傍晚拍，specs/169-Fusion形态/需求.md）。
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
@@ -19,7 +20,8 @@ const SITE_IDS = Object.keys(SITES) as SiteId[];
 const SELF_GRADE = /不阻塞|非阻塞|不计入红项|不挡|不追|顺手改|随后续|不在本单|可选改进|blocking|\bP[0-3]\b/i;
 
 /**
- * 能认出人、账号、机器的东西：规则、白名单都用全仓卫生检查那一份（packages/hygiene），这里不另写一套。
+ * 真密钥：规则、白名单都用全仓卫生检查那一份（packages/hygiene），这里不另写一套（账号、组织编号、邮箱、
+ * IP 这类标识不算泄漏，不拦，创始人 2026-09-28 傍晚拍，specs/169-Fusion形态/需求.md）。
  * 只报文件和规则名，不打命中的值。path 给白名单用（考题里原样收的上游请求号按那边的约定放行）。
  */
 export function findLeaks(text: string, path = 'packages/jev/test/samples'): string[] {
@@ -63,7 +65,7 @@ describe('考题文件', () => {
     expect(DEFAULT_POLICY.examDailyCallLimit).toBeGreaterThanOrEqual(4 * fullExam);
   });
 
-  it('脱敏：不许有邮箱、IP、令牌、家目录用户名、飞书编号', () => {
+  it('脱敏：考题文件里不许有真密钥（令牌）', () => {
     const leaks = SITE_IDS.flatMap((site) => {
       const parsed: unknown = JSON.parse(readFileSync(join(EXAMS_DIR, `${site}.json`), 'utf8'));
       const path = `packages/jev/exams/${site}.json`;
@@ -88,24 +90,26 @@ describe('考题文件', () => {
     for (const bad of planted) expect(SELF_GRADE.test(bad), bad).toBe(true);
   });
 
-  it('故意放进去的违规样本都拦得住', () => {
+  it('故意放进去的违规样本都拦得住：真密钥', () => {
     // 样本在运行时拼起来：整段写在源码里，全仓卫生检查会拦这个文件自己。值是随手编的、不指向任何人。
     const samples = [
+      `token ${['ghs', 'q7Rz2LmX9vKp4TnB8wYc1HdF6jGs3NaE'].join('_')}`,
+      `Authorization: ${['Bearer', 'Q9vKp4TnB8wYc1HdF6jGs3NaEq7Rz2LmX'].join(' ')}`,
+    ];
+    for (const s of samples) expect(findLeaks(s).length, s).toBeGreaterThan(0);
+  });
+
+  it('账号、组织编号、邮箱、IP 这类标识不算泄漏，不拦（创始人 2026-09-28 傍晚拍，specs/169-Fusion形态/需求.md）', () => {
+    const clean = [
       `mail me: ${['zhangsan', 'corp-mail.co'].join('@')}`,
       `host ${[51, 38, 4, 17].join('.')}`,
       `"cwd":"${['', 'home', 'zhangsan', '.claude', 'projects', 'x'].join('/')}"`,
       ['C:', 'Users', 'zhangsan', 'x'].join('\\'),
       ['D:', 'zhangsan', 'windsurf-dao'].join('/'),
-      `token ${['ghs', 'q7Rz2LmX9vKp4TnB8wYc1HdF6jGs3NaE'].join('_')}`,
-      `Authorization: ${['Bearer', 'Q9vKp4TnB8wYc1HdF6jGs3NaEq7Rz2LmX'].join(' ')}`,
       `from ${['ou', '5e1d9a40c82f97b13c57af599cdc6e0d'].join('_')}`,
+      '127.0.0.1 · /home/agent · /home/a,/home/b · C:/Users/alice · C:\\Users\\bob · D:/agent · Bearer <令牌> · ou_xxx · jev-1.13.0',
     ];
-    for (const s of samples) expect(findLeaks(s).length, s).toBeGreaterThan(0);
-    expect(
-      findLeaks(
-        '127.0.0.1 · /home/agent · /home/a,/home/b · C:/Users/alice · C:\\Users\\bob · D:/agent · Bearer <令牌> · ou_xxx · jev-1.13.0',
-      ),
-    ).toEqual([]);
+    for (const s of clean) expect(findLeaks(s), s).toEqual([]);
   });
 });
 

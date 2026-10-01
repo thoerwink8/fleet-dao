@@ -79,6 +79,7 @@ import {
   taskContext,
   upsertAlert,
 } from '@fleet-dao/db';
+import type { RepoRef } from '@fleet-dao/github';
 import type { ProgressEvent, RunOutcome, StageKind } from '@fleet-dao/shared';
 import { type EngineDrain, stoppingNote } from '../drain.ts';
 import { judgeStallWithJev, NO_JEV, triageFailureAsked } from '../failure/ask.ts';
@@ -311,11 +312,12 @@ export interface SessionPortsDeps {
   /** 起会话的插头，按执行方式给；测试里换成假的（不起真执行体）。没给的用真插头。 */
   run?: HostRunners;
   /**
-   * 发给别家之前的卫生检查（和推分支、开 PR 同一套规则和名单：github 包的 assertPublishable）。查出来、名单没读到、
-   * 没扫成都抛带码的错（HYGIENE_BLOCKED / HYGIENE_NAME_BLOCKED / HYGIENE_LIST_MISSING / HYGIENE_UNSCANNED）。
+   * 发给别家之前的卫生检查（和推分支、开 PR 同一套规则：github 包的 assertPublishable，只管真密钥；也只管
+   * fleet-dao 这个仓——别的仓按它们自己的标准，见 packages/github 的 hygiene-scope.ts）。查出来、没扫成都抛
+   * 带码的错（HYGIENE_BLOCKED / HYGIENE_UNSCANNED）。
    * 开 PR 前验证的会话起之前整份提示词过一遍；没配就不起验证会话（明确报错），不当成查过没事。
    */
-  screen?: (what: string, texts: { path: string; text: string }[]) => void;
+  screen?: (repo: RepoRef, what: string, texts: { path: string; text: string }[]) => void;
   stallPolicy?: Partial<StallPolicy>;
   /** 规则认不出的失败、拿不准的停滞去问 Jev（real/jev-port.ts）；不给就不问，照默认走。 */
   jev?: JevPort;
@@ -515,11 +517,12 @@ export function otherVendor(family: string): boolean {
 }
 
 /**
- * 发给别家之前的卫生检查：查出来的报 MATERIAL_BLOCKED（不可重试；失败分流 HY4 当场挂起报警——材料是工作流交代的，
- * 换路由、退回会话都还是它）；名单没读到、没扫成原样报 HYGIENE_LIST_MISSING / HYGIENE_UNSCANNED（HY2 挂起）；没配检查、
- * 检查自己出错都算没扫成，不发。报错里只有位置、行号和规则名（assertPublishable 不打值）。
+ * 发给别家之前的卫生检查：查出真密钥的报 MATERIAL_BLOCKED（不可重试；失败分流 HY4 当场挂起报警——材料是工作流交代的，
+ * 换路由、退回会话都还是它）；没扫成原样报 HYGIENE_UNSCANNED（HY2 挂起）；没配检查、检查自己出错都算没扫成，不发。
+ * 报错里只有位置、行号和规则名（assertPublishable 不打值）。
  */
 export function screenForOtherVendor(
+  repo: RepoRef,
   screen: SessionPortsDeps['screen'],
   prompt: string,
   to: string,
@@ -535,11 +538,11 @@ export function screenForOtherVendor(
     );
   }
   try {
-    screen(material.what, [{ path: material.path, text: prompt }]);
+    screen(repo, material.what, [{ path: material.path, text: prompt }]);
   } catch (error) {
     const code = (error as { code?: unknown } | null)?.code;
     const details = (error as { details?: unknown } | null)?.details;
-    if (code === 'HYGIENE_BLOCKED' || code === 'HYGIENE_NAME_BLOCKED') {
+    if (code === 'HYGIENE_BLOCKED') {
       const raw = (details as { findings?: unknown } | undefined)?.findings;
       const findings = Array.isArray(raw)
         ? (raw as { path?: unknown; line?: unknown; rule?: unknown }[])
@@ -559,7 +562,7 @@ export function screenForOtherVendor(
         { retryable: false, details },
       );
     }
-    if (code === 'HYGIENE_LIST_MISSING' || code === 'HYGIENE_UNSCANNED') {
+    if (code === 'HYGIENE_UNSCANNED') {
       throw new PortError(code, errorText(error), { retryable: false, details });
     }
     throw new PortError('HYGIENE_UNSCANNED', `${material.what}没扫成，不发给${to}：${errorText(error)}`, {
@@ -1347,6 +1350,7 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     // 先过卫生检查，过不了不起会话。简报是 Lead 写的，没进过公开的地方
     if (kind === 'verify' || otherVendor(input.route.family)) {
       screenForOtherVendor(
+        { owner: task.repo.owner, name: task.repo.name },
         deps.screen,
         prompt,
         hostName(route.hostId),

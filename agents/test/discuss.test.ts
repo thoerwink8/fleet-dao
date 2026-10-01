@@ -26,7 +26,7 @@ interface SecondOpinionLib {
     postMerge?: boolean,
   ): string;
   stripLocalPaths(text: string, dirs: string[]): string;
-  checkPublishable(repo: string, body: string, loadOpts?: unknown): Promise<void>;
+  checkPublishable(repo: string, body: string): Promise<void>;
   cursorAgentEnv(
     platform?: string,
     env?: Record<string, string | undefined>,
@@ -541,30 +541,24 @@ describe('second-opinion.mjs 的纯判断（原来 --selftest 的那几条）', 
     expect(so.UNAVAILABLE.test('结论认不出')).toBe(false);
   });
 
-  it('贴之前过卫生检查：名单读不到不贴、扫出名单上的值不贴、干净的放行（卫生检查换成假的）', async () => {
+  it('贴之前过卫生检查：扫出真密钥不贴、干净的放行（卫生检查换成假的；账号、组织编号、邮箱、IP 这类标识不算泄漏，不拦，创始人 2026-09-28 傍晚拍）', async () => {
     const repo = temp('repo');
     const src = join(repo, 'packages', 'hygiene', 'src');
     mkdirSync(src, { recursive: true });
     writeFileSync(
-      join(src, 'values.ts'),
-      "export function loadSensitiveValues(o) { return o && o.fail ? { ok: false, reason: '名单读不到' } : { ok: true, values: ['SECRETVAL-9f3a'] }; }\n",
-    );
-    writeFileSync(
       join(src, 'scan.ts'),
       [
-        'export function scanFiles(paths, read, _x, values) {',
+        'export function scanFiles(paths, read) {',
         "  const text = read(paths[0]).toString('utf8');",
-        "  return { binary: [], scanned: paths, findings: values.filter((v) => text.includes(v)).map(() => ({ rule: 'known-value' })) };",
+        "  const findings = text.includes('LEAKED-TOKEN') ? [{ rule: 'token' }] : [];",
+        '  return { binary: [], scanned: paths, findings };',
         '}',
         'export function formatFinding(f) { return f.rule; }',
         '',
       ].join('\n'),
     );
-    await expect(so.checkPublishable(repo, '干净的正文', { fail: true })).rejects.toThrow('卫生检查没法做');
-    await expect(so.checkPublishable(repo, '里面有 SECRETVAL-9f3a 这个值', {})).rejects.toThrow(
-      '卫生检查拦下了',
-    );
-    await expect(so.checkPublishable(repo, '干净的正文', {})).resolves.toBeUndefined();
+    await expect(so.checkPublishable(repo, '里面有 LEAKED-TOKEN 这个值')).rejects.toThrow('卫生检查拦下了');
+    await expect(so.checkPublishable(repo, '干净的正文')).resolves.toBeUndefined();
   });
 });
 

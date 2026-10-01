@@ -286,8 +286,6 @@ async function wiring(
     fetch: githubApi(state),
     sleep: async () => {},
     env: {},
-    // 往公开的单子上写之前要过卫生检查：给一份测试名单，不读这台机器上的
-    sensitiveValues: () => ({ ok: true, source: '测试名单', values: ['fake-org-778899'] }),
   });
   const fake = fakeRequirements();
   const job = githubReconcileJob({

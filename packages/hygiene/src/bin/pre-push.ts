@@ -4,7 +4,6 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { type GitSync, parsePushedRefs, prePushCheck } from '../prepush.ts';
-import { loadSensitiveValues } from '../values.ts';
 
 const git: GitSync = (args) => {
   const r = spawnSync('git', args, { encoding: 'utf8', maxBuffer: 512 * 1024 * 1024 });
@@ -14,7 +13,6 @@ const git: GitSync = (args) => {
 const { code, lines } = prePushCheck({
   refs: parsePushedRefs(readFileSync(0, 'utf8')),
   git,
-  values: loadSensitiveValues(),
 });
 for (const line of lines) (code === 0 ? console.log : console.error)(line);
 process.exitCode = code;

@@ -11,12 +11,8 @@ import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { ciHistoryCheck } from '../src/ci-history.ts';
 import type { GitSync } from '../src/prepush.ts';
-import type { LoadedValues } from '../src/values.ts';
 import { gitIn, gitSyncIn, runChild } from './child.ts';
 import { pseudoRandom } from './helpers.ts';
-
-const LIST: LoadedValues = { ok: true, source: '测试名单', values: ['fake-org-778899'] };
-const NO_LIST: LoadedValues = { ok: false, reason: '已知敏感值名单没读到（找过：/nope）', tried: ['/nope'] };
 
 let repo: string;
 let start: string;
@@ -34,8 +30,7 @@ const commit = (files: Record<string, string | null>, message = 'x') => {
   git('commit', '-q', '--allow-empty', '-m', message);
   return git('rev-parse', 'HEAD');
 };
-const check = (base: string, head: string, values: LoadedValues = LIST) =>
-  ciHistoryCheck({ git: gitSync, base, head, values });
+const check = (base: string, head: string) => ciHistoryCheck({ git: gitSync, base, head });
 const short = (oid: string) => oid.slice(0, 7);
 
 beforeAll(() => {
@@ -56,46 +51,25 @@ describe('ciHistoryCheck', { timeout: 0 }, () => {
     expect(result.lines[0]).toContain('有 1 个提交');
   });
 
-  it('提交说明里有名单上的值：退出码 1，不打值', () => {
+  it('提交说明里有令牌：退出码 1，不打值', () => {
     const base = git('rev-parse', 'HEAD');
-    const head = commit({ 'docs/b.md': '没问题\n' }, '改文档\n\n顺手切到 fake-org-778899');
+    const token = ['ghp', pseudoRandom(36, 503)].join('_');
+    const head = commit({ 'docs/b.md': '没问题\n' }, `改文档\n\n令牌 ${token}`);
     const result = check(base, head);
     expect(result.code).toBe(1);
-    expect(result.lines).toEqual(
-      expect.arrayContaining([`提交说明:3 名单里的敏感值（提交 ${short(head)}）`]),
-    );
-    expect(result.lines.join('\n')).not.toContain('fake-org-778899');
+    expect(result.lines).toEqual(expect.arrayContaining([`提交说明:3 令牌（提交 ${short(head)}）`]));
+    expect(result.lines.join('\n')).not.toContain(token);
   });
 
-  it('先加后删：最后的样子干净，中间那个提交照样拦（令牌、名单里的值都算），报出是哪个提交', () => {
+  it('先加后删：最后的样子干净，中间那个提交照样拦，报出是哪个提交', () => {
     const base = git('rev-parse', 'HEAD');
     const token = ['ghp', pseudoRandom(36, 501)].join('_');
-    const added = commit({
-      'docs/c.md': `export GH_TOKEN=${token}\n`,
-      'docs/c2.md': '用户 fake-org-778899\n',
-    });
-    const head = commit({ 'docs/c.md': null, 'docs/c2.md': null });
+    const added = commit({ 'docs/c.md': `export GH_TOKEN=${token}\n` });
+    const head = commit({ 'docs/c.md': null });
     expect(git('diff', '--stat', base, head)).toBe('');
     const result = check(base, head);
     expect(result.code).toBe(1);
-    expect(result.lines).toEqual(
-      expect.arrayContaining([
-        `docs/c.md:1 令牌（提交 ${short(added)}）`,
-        `docs/c2.md:1 名单里的敏感值（提交 ${short(added)}）`,
-      ]),
-    );
-    expect(result.lines.join('\n')).not.toContain(token);
-    expect(result.lines.join('\n')).not.toContain('fake-org-778899');
-  });
-
-  it('名单没读到：退出码 2（不靠名单的规则，比如令牌，照样查出来、照样列出来）', () => {
-    const base = git('rev-parse', 'HEAD');
-    const token = ['ghp', pseudoRandom(36, 502)].join('_');
-    const head = commit({ 'docs/d.md': `export GH_TOKEN=${token}\n` });
-    const result = check(base, head, NO_LIST);
-    expect(result.code).toBe(2);
-    expect(result.lines.at(-1)).toMatch(/^没扫全：/);
-    expect(result.lines.join('\n')).toContain(`docs/d.md:1 令牌（提交 ${short(head)}）`);
+    expect(result.lines).toEqual(expect.arrayContaining([`docs/c.md:1 令牌（提交 ${short(added)}）`]));
     expect(result.lines.join('\n')).not.toContain(token);
   });
 
@@ -113,7 +87,7 @@ describe('ciHistoryCheck', { timeout: 0 }, () => {
       calls.push(args);
       return gitSync(args);
     };
-    const result = ciHistoryCheck({ git: spy, base: '--upload-pack=x', head, values: LIST });
+    const result = ciHistoryCheck({ git: spy, base: '--upload-pack=x', head });
     expect(result.code).toBe(2);
     // head 的解析照样走（合法版本号），但 base 那个像参数的字符串一次都没被递给 git。
     expect(calls.length).toBeGreaterThan(0);
@@ -124,7 +98,7 @@ describe('ciHistoryCheck', { timeout: 0 }, () => {
     const head = commit({ 'docs/e.md': '没问题\n' });
     const failing: GitSync = (args) =>
       args.includes('log') ? { code: 128, stdout: '', stderr: 'fatal: 故意出错' } : gitSync(args);
-    const result = ciHistoryCheck({ git: failing, base: 'HEAD~1', head, values: LIST });
+    const result = ciHistoryCheck({ git: failing, base: 'HEAD~1', head });
     expect(result.code).toBe(2);
     expect(result.lines[0]).toContain('没扫成');
   });
@@ -149,28 +123,16 @@ describe('ciHistoryCheck', { timeout: 0 }, () => {
     const head = commit({ 'docs/g.md': '没问题\n' });
     const silent: GitSync = (args) =>
       args.includes('log') ? { code: 0, stdout: '', stderr: '' } : gitSync(args);
-    const result = ciHistoryCheck({ git: silent, base, head, values: LIST });
+    const result = ciHistoryCheck({ git: silent, base, head });
     expect(result.code).toBe(2);
     expect(result.lines[0]).toContain(`${short(head)} 不在扫过的提交里`);
   });
 });
 
-// 真跑一遍命令行入口（不止测判定函数）：参数怎么解析、名单从哪读、退出码怎么落到进程上，和 ci-plan.test.ts 的
-// 「入口」一节同一个套路。名单指到临时文件，不读这台机器上真的名单（不然结果随机器而变，必过检查必须确定）。
+// 真跑一遍命令行入口（不止测判定函数）：参数怎么解析、退出码怎么落到进程上，和 ci-plan.test.ts 的「入口」一节同一个套路。
 describe('入口（bin/ci-history.ts）', { timeout: 0 }, () => {
   const bin = fileURLToPath(new URL('../src/bin/ci-history.ts', import.meta.url));
-  let scratch: string;
-  const run = (args: string[]) =>
-    runChild(process.execPath, [bin, ...args], {
-      cwd: repo,
-      env: { ...process.env, FLEET_SENSITIVE_VALUES_FILE: join(scratch, 'list.txt') },
-    });
-
-  beforeAll(() => {
-    scratch = mkdtempSync(join(tmpdir(), 'fleet-hygiene-ci-history-bin-'));
-    writeFileSync(join(scratch, 'list.txt'), 'fake-org-778899\n');
-  });
-  afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+  const run = (args: string[]) => runChild(process.execPath, [bin, ...args], { cwd: repo, env: process.env });
 
   it('缺 --base 或 --head：退出码 2', () => {
     expect(run(['--base', 'HEAD']).status).toBe(2);
@@ -188,12 +150,13 @@ describe('入口（bin/ci-history.ts）', { timeout: 0 }, () => {
     expect(r.stdout).toContain('有 0 个提交');
   });
 
-  it('真跑：范围里有名单上的值，退出码 1，标准错误里报出来但不打值', () => {
+  it('真跑：范围里有令牌，退出码 1，标准错误里报出来但不打值', () => {
     const base = git('rev-parse', 'HEAD');
-    const head = commit({ 'docs/bin.md': '用户 fake-org-778899\n' });
+    const token = ['ghp', pseudoRandom(36, 504)].join('_');
+    const head = commit({ 'docs/bin.md': `令牌 ${token}\n` });
     const r = run(['--base', base, '--head', head]);
     expect(r.status).toBe(1);
-    expect(r.stderr).toContain('名单里的敏感值');
-    expect(r.stderr).not.toContain('fake-org-778899');
+    expect(r.stderr).toContain('令牌');
+    expect(r.stderr).not.toContain(token);
   });
 });

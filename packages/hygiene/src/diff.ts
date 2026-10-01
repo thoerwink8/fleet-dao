@@ -1,9 +1,8 @@
 // 只看新增的东西：一段 diff 里加出来的行（按文件、按连续的一段，跨行的规则如私钥正文照样认得出），
-// 加上新增、改动、改名的文件名。和全仓扫同一套规则、名单、白名单。推送前逐个提交扫（history.ts）用它。
+// 加上新增、改动、改名的文件名。和全仓扫同一套规则、白名单。推送前逐个提交扫（history.ts）用它。
 import { ALLOWLIST, type Allow } from './allowlist.ts';
 import { findHits, findSecretFile } from './rules.ts';
-import { applyAllowlist, type Finding } from './scan.ts';
-import { maskValues, valueHitsInName, valueMatcher } from './values.ts';
+import { applyAllowlist, type Finding, redactPathValue } from './scan.ts';
 
 export interface AddedHunk {
   path: string;
@@ -82,21 +81,36 @@ export function addedHunks(diffText: string): AddedHunk[] {
 export function scanAdded(
   hunks: readonly AddedHunk[],
   changedPaths: readonly string[],
-  options: { values: readonly string[]; allowlist?: readonly Allow[] },
+  options: { allowlist?: readonly Allow[] } = {},
 ): Finding[] {
-  const matcher = valueMatcher(options.values);
   const found: Finding[] = [];
-  // 名字里带名单上的值（推上去文件名一样公开）也算；这样的文件报出来的位置一律用打了码的名字，不把值带出去
+  /** 路径里藏了真密钥的那些路径：它们报出来的每一处都要用遮过的路径，且一律不白名单（和 scan.ts 一个规矩）。 */
+  const tainted = new Set<string>();
   for (const path of changedPaths) {
+    // 路径本身也是写出去的东西（文件名、目录名）：里面的真密钥照样拦，和 scan.ts 一样（行号 0）
+    const inPath = findHits(path);
+    if (inPath.length > 0) tainted.add(path);
+    const shown =
+      inPath.length > 0
+        ? redactPathValue(
+            path,
+            inPath.map((h) => h.match),
+          )
+        : path;
     const hit = findSecretFile(path);
-    if (hit) found.push({ ...hit, path: maskValues(path, matcher) });
-    found.push(...valueHitsInName(path, matcher));
+    if (hit) found.push({ ...hit, path: shown });
+    for (const textHit of inPath) found.push({ ...textHit, path: shown, line: 0 });
   }
   for (const hunk of hunks) {
-    const shown = maskValues(hunk.path, matcher);
-    for (const hit of [...findHits(hunk.text), ...matcher.find(hunk.text)]) {
+    const shown = tainted.has(hunk.path)
+      ? redactPathValue(
+          hunk.path,
+          findHits(hunk.path).map((h) => h.match),
+        )
+      : hunk.path;
+    for (const hit of findHits(hunk.text)) {
       found.push({ ...hit, path: shown, line: hunk.startLine + hit.line - 1 });
     }
   }
-  return applyAllowlist(found, options.allowlist ?? ALLOWLIST, new Set());
+  return tainted.size > 0 ? found : applyAllowlist(found, options.allowlist ?? ALLOWLIST, new Set());
 }

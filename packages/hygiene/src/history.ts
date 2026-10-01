@@ -1,12 +1,11 @@
-// 逐个提交扫：推上去的是整段提交历史，不只是最后的样子——先加后删的密钥、写进提交说明的组织编号，照样留在远端历史里。
+// 逐个提交扫：推上去的是整段提交历史，不只是最后的样子——先加后删的密钥照样留在远端历史里。
 // 三次 git log 取这段提交各自的东西：新增的行（合并提交只看它自己改的：两边重新合一遍、和实际结果的差），新增、改动、
-// 改名的文件名，提交说明和作者、提交者。和全仓扫同一套规则、名单、白名单。推送前的钩子（prepush.ts）和会话外推分支
+// 改名的文件名，提交说明和作者、提交者。和全仓扫同一套规则、白名单。推送前的钩子（prepush.ts）和会话外推分支
 // （packages/github 的 push.ts）共用。git 的输出认不出就抛错，调用方按「没扫成」拒推，不当成扫过没事。
 import { ALLOWLIST, type Allow } from './allowlist.ts';
 import { addedHunks, scanAdded, unquotePath } from './diff.ts';
 import { findHits } from './rules.ts';
 import { applyAllowlist, type Finding } from './scan.ts';
-import { valueMatcher } from './values.ts';
 
 export interface CommitFinding extends Finding {
   /** 出在哪个提交里（完整提交号）。 */
@@ -100,12 +99,8 @@ function byCommit(what: string, out: string): Map<string, string> {
  * 逐个提交扫：每个提交新增的行和文件名、提交说明、作者和提交者。三份输出要对得上（新增行、文件名里出现的提交
  * 都得在提交清单里），对不上、认不出就抛错。
  */
-export function scanHistory(
-  out: HistoryOutput,
-  options: { values: readonly string[]; allowlist?: readonly Allow[] },
-): HistoryScan {
+export function scanHistory(out: HistoryOutput, options: { allowlist?: readonly Allow[] } = {}): HistoryScan {
   const allowlist = options.allowlist ?? ALLOWLIST;
-  const matcher = valueMatcher(options.values);
   const used = new Set<Allow>();
   const order = new Map<string, number>();
   const inMessages: CommitFinding[] = [];
@@ -125,7 +120,7 @@ export function scanHistory(
       ['提交者', committer],
     ];
     for (const [path, text] of texts) {
-      for (const hit of [...findHits(text), ...matcher.find(text)])
+      for (const hit of findHits(text))
         found.push({ ...hit, path, line: path === '提交说明' ? hit.line : 0 });
     }
     for (const f of applyAllowlist(found, allowlist, used)) inMessages.push({ ...f, commit });
@@ -150,8 +145,7 @@ export function scanHistory(
       .map((p) => p.replace(/\r$/, ''))
       .filter(Boolean)
       .map(unquotePath);
-    for (const f of scanAdded(hunks, paths, { values: options.values, allowlist }))
-      inContent.push({ ...f, commit });
+    for (const f of scanAdded(hunks, paths, { allowlist })) inContent.push({ ...f, commit });
   }
 
   // 按提交从旧到新排，同一个提交里先内容、后说明和作者（sort 是稳定的）。

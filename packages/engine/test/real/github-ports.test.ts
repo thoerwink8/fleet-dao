@@ -168,8 +168,8 @@ describe('GitHubError → PortError', () => {
         retryable: false,
         details: {
           findings: [
-            { path: 'src/b.ts', line: 3, rule: 'email' },
-            { path: 'src/a.ts', line: 9, rule: 'ip' },
+            { path: 'src/b.ts', line: 3, rule: 'token' },
+            { path: 'src/a.ts', line: 9, rule: 'webhook' },
           ],
         },
       }),
@@ -177,7 +177,7 @@ describe('GitHubError → PortError', () => {
     expect(e).toBeInstanceOf(PortError);
     expect(e.code).toBe('HYGIENE_BLOCKED');
     expect(e.retryable).toBe(false);
-    expect(e.message).toBe('卫生检查拦下了要公开的内容：src/a.ts:9 ip；src/b.ts:3 email');
+    expect(e.message).toBe('卫生检查拦下了要公开的内容：src/a.ts:9 webhook；src/b.ts:3 token');
   });
 
   it('workflows 权限的码按引擎的叫法；不是 GitHubError 的原样放行', () => {
@@ -310,7 +310,7 @@ describe('推分支', () => {
       pushBranch: () => {
         throw new GitHubError('HYGIENE_BLOCKED', 'x', {
           retryable: false,
-          details: { findings: [{ path: 'src/login.ts', line: 1, rule: 'email' }] },
+          details: { findings: [{ path: 'src/login.ts', line: 1, rule: 'token' }] },
         });
       },
     });

@@ -55,10 +55,6 @@
         "value": "100000",
         "说明": "换账号池接着干时，上一轮的上下文比这个小才 fork 续，大了开新会话带接力任务书"
       },
-      "FLEET_SENSITIVE_VALUES_FILE": {
-        "value": "/etc/fleet-dao/sensitive-values.txt",
-        "说明": "卫生检查的已知敏感值名单（手放，root:fleet 640）：推分支、写需求文档、开 PR 之前都读；钉在这一份上"
-      },
       "FLEET_CURSOR_VERSIONS_DIR": {
         "value": "/home/{user}/.local/share/cursor-agent/versions",
         "说明": "cursor-agent 装在会话用户自己家里，每次起会话在这下面现找 current → 最新版本；{user} 换成会话用户"

@@ -7,14 +7,11 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { type GitSync, type PrePushInput, parsePushedRefs, prePushCheck } from '../src/prepush.ts';
-import type { LoadedValues } from '../src/values.ts';
 import { GIT_ID, gitIn, gitSyncIn, runChild } from './child.ts';
 import { pseudoRandom } from './helpers.ts';
 
-const LIST: LoadedValues = { ok: true, source: '测试名单', values: ['fake-org-778899'] };
 const HOOK = fileURLToPath(new URL('../src/bin/pre-push.ts', import.meta.url));
 let repo: string;
-let scratch: string;
 let base: string;
 const git = (...args: string[]) => gitIn(repo, ...args);
 const gitSync: GitSync = gitSyncIn(() => repo);
@@ -43,21 +40,15 @@ const fresh = () => git('checkout', '-q', '--detach', base);
 const ZERO = '0'.repeat(40);
 const refLine = (oid: string, remoteOid = ZERO) => `refs/heads/task ${oid} refs/heads/task ${remoteOid}\n`;
 const check = (head: string, over: Partial<PrePushInput> = {}) =>
-  prePushCheck({ refs: parsePushedRefs(refLine(head)), git: gitSync, values: LIST, ...over });
+  prePushCheck({ refs: parsePushedRefs(refLine(head)), git: gitSync, ...over });
 const short = (oid: string) => oid.slice(0, 7);
-/** 像 git 那样调钩子本身：参数是远端名和网址，标准输入是要推的引用；名单用测试的假名单。 */
+/** 像 git 那样调钩子本身：参数是远端名和网址，标准输入是要推的引用。 */
 const runHook = (cwd: string, stdin: string, args: string[]) => {
-  const r = runChild(process.execPath, [HOOK, ...args], {
-    cwd,
-    input: stdin,
-    env: { ...process.env, FLEET_SENSITIVE_VALUES_FILE: join(scratch, 'list.txt') },
-  });
+  const r = runChild(process.execPath, [HOOK, ...args], { cwd, input: stdin, env: process.env });
   return { code: r.status, out: `${r.stdout}${r.stderr}` };
 };
 
 beforeAll(() => {
-  scratch = mkdtempSync(join(tmpdir(), 'fleet-hygiene-prepush-list-'));
-  writeFileSync(join(scratch, 'list.txt'), 'fake-org-778899\n');
   repo = mkdtempSync(join(tmpdir(), 'fleet-hygiene-prepush-'));
   git('init', '-q', '-b', 'main');
   base = commit({ 'README.md': 'hello\n' });
@@ -66,7 +57,6 @@ beforeAll(() => {
 }, 0);
 afterAll(() => {
   rmSync(repo, { recursive: true, force: true });
-  rmSync(scratch, { recursive: true, force: true });
 });
 
 describe('prePushCheck', { timeout: 0 }, () => {
@@ -91,13 +81,12 @@ describe('prePushCheck', { timeout: 0 }, () => {
     ]);
   });
 
-  it('新提交里有令牌、强行加进来的密钥文件、名单里的值：退出码 1，只报文件、行、规则名和提交号', () => {
+  it('新提交里有令牌、强行加进来的密钥文件：退出码 1，只报文件、行、规则名和提交号', () => {
     fresh();
-    const token = ['ghp', pseudoRandom(36, 401)].join('_');
+    const leak = ['ghp', pseudoRandom(36, 401)].join('_');
     const head = commit({
-      'docs/deploy.md': `第一行\nexport GH_TOKEN=${token}\n`,
+      'docs/deploy.md': `第一行\nexport GH_TOKEN=${leak}\n`,
       '.secrets/vault.pass': 'x\n',
-      'docs/who.md': '用户 fake-org-778899\n',
     });
     const result = check(head);
     expect(result.code).toBe(1);
@@ -105,22 +94,19 @@ describe('prePushCheck', { timeout: 0 }, () => {
       expect.arrayContaining([
         `.secrets/vault.pass 密钥文件（提交 ${short(head)}）`,
         `docs/deploy.md:2 令牌（提交 ${short(head)}）`,
-        `docs/who.md:1 名单里的敏感值（提交 ${short(head)}）`,
       ]),
     );
-    expect(result.lines.join('\n')).not.toContain(token);
-    expect(result.lines.join('\n')).not.toContain('fake-org-778899');
+    expect(result.lines.join('\n')).not.toContain(leak);
   });
 
   it('先加后删：最后的样子干净，中间那个提交照样会推上去，照样拦，报出是哪个提交', () => {
     fresh();
-    const token = ['ghp', pseudoRandom(36, 402)].join('_');
+    const leak = ['ghp', pseudoRandom(36, 402)].join('_');
     const added = commit({
-      'docs/deploy.md': `export GH_TOKEN=${token}\n`,
+      'docs/deploy.md': `export GH_TOKEN=${leak}\n`,
       '.secrets/vault.pass': 'x\n',
-      'docs/who.md': '用户 fake-org-778899\n',
     });
-    const head = commit({ 'docs/deploy.md': null, '.secrets/vault.pass': null, 'docs/who.md': null });
+    const head = commit({ 'docs/deploy.md': null, '.secrets/vault.pass': null });
     // 总差异里什么都没有：只看总差异的闸会放过去。
     expect(git('diff', '--stat', base, head)).toBe('');
     const result = check(head);
@@ -128,17 +114,16 @@ describe('prePushCheck', { timeout: 0 }, () => {
     expect(result.lines[0]).toContain('有 2 个提交远端还没有');
     // 全出在加进来的那个提交上；删掉它们的提交本身不算问题。
     const findings = result.lines.filter((l) => l.includes('（提交 '));
-    expect(findings.length).toBeGreaterThanOrEqual(3);
+    expect(findings.length).toBeGreaterThanOrEqual(2);
     expect(findings.filter((l) => !l.endsWith(`（提交 ${short(added)}）`))).toEqual([]);
     expect(result.lines).toEqual(
       expect.arrayContaining([
         `.secrets/vault.pass 密钥文件（提交 ${short(added)}）`,
         `docs/deploy.md:1 令牌（提交 ${short(added)}）`,
-        `docs/who.md:1 名单里的敏感值（提交 ${short(added)}）`,
       ]),
     );
     expect(result.lines.join('\n')).toContain('只在后面补一个删掉它的提交不算');
-    expect(result.lines.join('\n')).not.toContain(token);
+    expect(result.lines.join('\n')).not.toContain(leak);
   });
 
   it('git 把文本文件当二进制（.gitattributes 标 -diff、core.bigFileThreshold 调低）：内容照样扫，先加后删也拦', () => {
@@ -189,24 +174,18 @@ describe('prePushCheck', { timeout: 0 }, () => {
     ]);
   });
 
-  it('提交说明、作者邮箱也会推上去：名单里的值、令牌、真邮箱都拦', () => {
+  it('提交说明也会推上去：令牌照拦；作者、提交者的邮箱是标识，不再拦（创始人 2026-09-28 傍晚拍）', () => {
     fresh();
     const token = ['ghp', pseudoRandom(36, 403)].join('_');
     const email = [pseudoRandom(8, 404, 'abcdefghijklmnopqrstuvwxyz'), 'mail.co'].join('@');
-    const head = commit({ 'docs/ok.md': '没问题\n' }, `改文档\n\n顺手切到 fake-org-778899\n令牌 ${token}`, [
+    const head = commit({ 'docs/ok.md': '没问题\n' }, `改文档\n\n令牌 ${token}`, [
       '-c',
       `user.email=${email}`,
     ]);
     const result = check(head);
     expect(result.code).toBe(1);
-    expect(result.lines).toEqual(
-      expect.arrayContaining([
-        `提交说明:3 名单里的敏感值（提交 ${short(head)}）`,
-        `提交说明:4 令牌（提交 ${short(head)}）`,
-        `提交作者 邮箱（提交 ${short(head)}）`,
-        `提交者 邮箱（提交 ${short(head)}）`,
-      ]),
-    );
+    expect(result.lines).toEqual(expect.arrayContaining([`提交说明:3 令牌（提交 ${short(head)}）`]));
+    expect(result.lines.some((l) => l.includes('邮箱'))).toBe(false);
     expect(result.lines.join('\n')).not.toContain(email);
     expect(result.lines.join('\n')).not.toContain(token);
   });
@@ -214,7 +193,8 @@ describe('prePushCheck', { timeout: 0 }, () => {
   it('合并提交只看它自己改的：解冲突时新写进去的要拦；合进来的、远端早就有的旧东西不重复报', () => {
     // 远端另一条分支上早有一处（已经公开了，这次推不推都在那儿）。
     fresh();
-    const old = commit({ 'docs/old.md': '用户 fake-org-778899\n' });
+    const staleToken = ['ghp', pseudoRandom(36, 409)].join('_');
+    const old = commit({ 'docs/old.md': `令牌 ${staleToken}\n` });
     git('update-ref', 'refs/remotes/origin/legacy', old);
     fresh();
     const side = commit({ 'docs/a.md': 'side\n' });
@@ -222,32 +202,38 @@ describe('prePushCheck', { timeout: 0 }, () => {
     commit({ 'docs/a.md': 'mine\n' });
     // 这一步故意冲突（退出码不是 0），下面手写解好的内容再提交。
     runChild('git', [...GIT_ID, 'merge', '-q', '--no-edit', side], { cwd: repo });
-    writeFileSync(join(repo, 'docs/a.md'), 'mine\n用户 fake-org-778899\n');
+    const mergeToken = ['ghp', pseudoRandom(36, 410)].join('_');
+    writeFileSync(join(repo, 'docs/a.md'), `mine\n令牌 ${mergeToken}\n`);
     const merged = commit({}, '合并 side');
     git(...['merge', '-q', '--no-edit', old]);
     const head = git('rev-parse', 'HEAD');
     const result = check(head);
     expect(result.code).toBe(1);
-    expect(result.lines.filter((l) => l.includes('名单里的敏感值'))).toEqual([
-      `docs/a.md:2 名单里的敏感值（提交 ${short(merged)}）`,
+    expect(result.lines.filter((l) => l.includes('（提交 '))).toEqual([
+      `docs/a.md:2 令牌（提交 ${short(merged)}）`,
     ]);
   });
 
   it('远端分支现在的头本地有：它和它之前的提交远端都有了，不再扫', () => {
     fresh();
-    const pushedBefore = commit({ 'docs/who.md': '用户 fake-org-778899\n' });
+    const pushedBeforeToken = ['ghp', pseudoRandom(36, 411)].join('_');
+    const pushedBefore = commit({ 'docs/who.md': `令牌 ${pushedBeforeToken}\n` });
     const head = commit({ 'docs/ok.md': '没问题\n' });
     const result = check(head, { refs: parsePushedRefs(refLine(head, pushedBefore)) });
     expect(result).toMatchObject({ code: 0 });
     expect(result.lines[0]).toContain('有 1 个提交远端还没有');
-    // 远端的头本地没有（没 fetch 过）：排除不了，照样扫，不因为它不在就出错。
+    // 远端的头本地没有（没 fetch 过）：排除不了，照样扫，不因为它不在就出错——这次范围里带进了上一个提交的令牌。
     const unknown = check(head, { refs: parsePushedRefs(refLine(head, 'f'.repeat(40))) });
     expect(unknown.code).toBe(1);
+    expect(unknown.lines).toEqual(
+      expect.arrayContaining([`docs/who.md:1 令牌（提交 ${short(pushedBefore)}）`]),
+    );
   });
 
   it('推到网址、推到没 fetch 过的远端名：别的远端分支上早有的不重扫；网址里的令牌不进输出', () => {
     fresh();
-    const leaky = commit({ 'docs/old.md': '用户 fake-org-778899\n' });
+    const leakyToken = ['ghp', pseudoRandom(36, 412)].join('_');
+    const leaky = commit({ 'docs/old.md': `令牌 ${leakyToken}\n` });
     git('update-ref', 'refs/remotes/origin/leaky', leaky);
     const head = commit({ 'docs/ok.md': '没问题\n' });
     const token = ['ghp', pseudoRandom(36, 405)].join('_');
@@ -260,6 +246,8 @@ describe('prePushCheck', { timeout: 0 }, () => {
       expect(hook.code).toBe(0);
       expect(hook.out).toContain('有 1 个提交远端还没有');
       expect(hook.out).not.toContain('整段历史');
+      // 早就在远端分支上的那个提交（带着它自己的令牌）不重扫。
+      expect(hook.out).not.toContain(leakyToken);
       expect(hook.out).not.toContain(token);
       expect(hook.out).not.toContain('example.invalid');
     }
@@ -270,69 +258,21 @@ describe('prePushCheck', { timeout: 0 }, () => {
     try {
       gitIn(solo, 'init', '-q', '-b', 'main');
       commitIn(solo, { 'README.md': 'hello\n' });
-      const head = commitIn(solo, { 'docs/who.md': '用户 fake-org-778899\n' });
+      const leak = ['ghp', pseudoRandom(36, 413)].join('_');
+      const head = commitIn(solo, { 'docs/who.md': `令牌 ${leak}\n` });
       const token = ['ghp', pseudoRandom(36, 408)].join('_');
       const url = `https://x-access-token:${token}@example.invalid/o/r.git`;
       const hook = runHook(solo, refLine(head), ['origin', url]);
       expect(hook.code).toBe(1);
       expect(hook.out).toContain('有 2 个提交远端还没有');
       expect(hook.out).toContain('本地没记着任何远端分支，整段历史都扫了');
-      expect(hook.out).toContain(`docs/who.md:1 名单里的敏感值（提交 ${short(head)}）`);
+      expect(hook.out).toContain(`docs/who.md:1 令牌（提交 ${short(head)}）`);
       expect(hook.out).not.toContain(token);
       expect(hook.out).not.toContain('example.invalid');
-      expect(hook.out).not.toContain('fake-org-778899');
+      expect(hook.out).not.toContain(leak);
     } finally {
       rmSync(solo, { recursive: true, force: true });
     }
-  });
-
-  it('名单放了却读不了、是空的、环境变量指错（不是 absent）：退出码 2，不推', () => {
-    fresh();
-    const result = check(commit({ 'docs/ok.md': '没问题\n' }), {
-      values: { ok: false, reason: '已知敏感值名单 /x 是空的', tried: ['/x'] },
-    });
-    expect(result.code).toBe(2);
-    expect(result.lines.at(-1)).toMatch(/^没扫全：已知敏感值名单 \/x 是空的/);
-  });
-
-  // 这台机器压根没放名单：不拒推，但要明说没查名单、交给 CI；不靠名单的规则照拦（创始人 2026-09-26 拍）。
-  const ABSENT: LoadedValues = {
-    ok: false,
-    reason: '已知敏感值名单没读到（找过：/nope）',
-    tried: ['/nope'],
-    absent: true,
-  };
-
-  it('没放名单、内容干净：放行，并写明没查名单、交给 CI', () => {
-    fresh();
-    const result = check(commit({ 'docs/ok.md': '没问题\n' }), { values: ABSENT });
-    expect(result.code).toBe(0);
-    expect(result.lines.at(-1)).toMatch(
-      /^这台机器没放已知敏感值名单，这次没查名单上的值.*CI 会在 PR 上用名单再查/,
-    );
-  });
-
-  it('没放名单也照拦令牌和密钥文件：退出码 1', () => {
-    fresh();
-    const token = ['ghp', pseudoRandom(36, 402)].join('_');
-    const head = commit({ 'docs/deploy.md': `export GH_TOKEN=${token}\n`, '.secrets/vault.pass': 'x\n' });
-    const result = check(head, { values: ABSENT });
-    expect(result.code).toBe(1);
-    expect(result.lines).toEqual(
-      expect.arrayContaining([
-        `.secrets/vault.pass 密钥文件（提交 ${short(head)}）`,
-        `docs/deploy.md:1 令牌（提交 ${short(head)}）`,
-      ]),
-    );
-    expect(result.lines.join('\n')).not.toContain(token);
-  });
-
-  it('没放名单时名单上的值本机查不出（有意接受：交给 CI），但照样写明没查', () => {
-    fresh();
-    const result = check(commit({ 'docs/who.md': '用户 fake-org-778899\n' }), { values: ABSENT });
-    expect(result.code).toBe(0);
-    expect(result.lines.some((l) => l.includes('名单里的敏感值'))).toBe(false);
-    expect(result.lines.at(-1)).toContain('这次没查名单上的值');
   });
 
   it('git 出错、输出认不出：退出码 2，不当成扫过没事', () => {

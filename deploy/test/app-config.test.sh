@@ -7,8 +7,9 @@
 #   2. api.env 的 FLEET_GITHUB_WEBHOOK_SECRET：空着才照「引擎」App 的 json 填，第二遍零改动；json 没有、不是 JSON、
 #      值的样子写不进环境文件、这一行被注释掉，都记待配、文件不动；同一个键写了两行判红、不改；读回两边不一致判红；
 #      值从头到尾不进输出
-#   3. 读回已知敏感值名单：没有、只有注释记待配，谁都能读判红，好的通过；内容不进输出
-#   4. 读回引擎的 engine.env：端口实现（要人定）、名单的路径（钉在读回核的那一份上）
+#   3. 功能删掉了、键还留在环境文件里：装机脚本删掉那一行（生效的、被注释掉的都算）；没有这个键什么都不做；
+#      读不到、认不出判红；第二遍零改动
+#   4. 读回引擎的 engine.env：端口实现（要人定）、工作树的根和引擎状态目录钉在约定值上
 #   5. 每一种读不到（文件不在、是个目录）、认不出（引号没配上、样例里有看不懂的行）：判红、返回非 0、文件没动
 #   6. 读回要退役的垫片：在记待配，不在通过
 #   7. 读回环境文件的属主权限：不是 640（组读不到、谁都能读）、不在、是符号链接，判红
@@ -333,50 +334,59 @@ else
   flunk "读回：api.env 不在该判红：$OUT"
 fi
 
-echo "== 已知敏感值名单"
+echo "== 删掉不再用的键（remove_stale_key）"
 VALUE=fake-org-778899
-call check_sensitive_values "$T/no-such-values.txt"
-if ((RC == 0 && ${#PENDING[@]} == 1 && ${#REDS[@]} == 0)); then pass "没有：记待配"; else flunk "没有该记待配：$OUT"; fi
-
-printf '# 真值一行一个\n\n' >"$T/empty-values.txt"
-chmod 640 "$T/empty-values.txt"
-call check_sensitive_values "$T/empty-values.txt"
-if ((RC == 0 && ${#PENDING[@]} == 1 && ${#REDS[@]} == 0)); then
-  pass "只有注释、空行：记待配（卫生检查按没读到处理）"
+printf 'FLEET_ENGINE_PORTS=real\nFLEET_SENSITIVE_VALUES_FILE=%s\nFLEET_WORK_DIR=/var/lib/fleet-work\n' \
+  "$VALUE" >"$T/stale-active.env"
+chmod 640 "$T/stale-active.env"
+call remove_stale_key "$T/stale-active.env" FLEET_SENSITIVE_VALUES_FILE "机制删掉了"
+if ((RC == 0 && ${#CHANGES[@]} > 0 && ${#REDS[@]} == 0)) \
+  && [[ "$OUT" != *"$VALUE"* ]] \
+  && [[ "$(env_value "$T/stale-active.env" FLEET_SENSITIVE_VALUES_FILE 2>/dev/null)" == "" ]] \
+  && [[ "$(env_value "$T/stale-active.env" FLEET_ENGINE_PORTS)" == real ]] \
+  && [[ "$(env_value "$T/stale-active.env" FLEET_WORK_DIR)" == /var/lib/fleet-work ]]; then
+  pass "生效的赋值：删掉那一行，旁的键不动，值不打印"
 else
-  flunk "空的该记待配：$OUT"
+  flunk "该删掉生效的赋值、留着旁的键：$OUT"
 fi
 
-printf '%s\n' "$VALUE" >"$T/open-values.txt"
-chmod 644 "$T/open-values.txt"
-call check_sensitive_values "$T/open-values.txt"
-if ((RC != 0 && ${#REDS[@]} == 1)) && [[ "$OUT" != *"$VALUE"* ]]; then
-  pass "谁都能读（644）：判红、返回非 0，值不打印"
+printf 'FLEET_ENGINE_PORTS=real\n# FLEET_SENSITIVE_VALUES_FILE=%s\nFLEET_WORK_DIR=/var/lib/fleet-work\n' \
+  "$VALUE" >"$T/stale-commented.env"
+chmod 640 "$T/stale-commented.env"
+call remove_stale_key "$T/stale-commented.env" FLEET_SENSITIVE_VALUES_FILE "机制删掉了"
+env_parse "$T/stale-commented.env" # 重新读一遍改过的文件，env_mentioned 才是删除之后的状态
+if ((RC == 0 && ${#CHANGES[@]} > 0)) && ! env_mentioned FLEET_SENSITIVE_VALUES_FILE; then
+  pass "被注释掉的也删：不留死配置"
 else
-  flunk "644 该判红：$OUT"
+  flunk "该把注释掉的那一行也删掉：$OUT"
 fi
 
-printf '# 注释\n  %s\n' "$VALUE" >"$T/values.txt"
-chmod 640 "$T/values.txt"
-call check_sensitive_values "$T/values.txt"
-if ((RC == 0 && ${#REDS[@]} == 0 && ${#PENDING[@]} == 0)) && [[ "$OUT" == *"有值"* && "$OUT" != *"$VALUE"* ]]; then
-  pass "在、640、有值：通过，内容不打印"
+printf 'FLEET_ENGINE_PORTS=real\nFLEET_WORK_DIR=/var/lib/fleet-work\n' >"$T/no-stale.env"
+chmod 640 "$T/no-stale.env"
+before=$(digest "$T/no-stale.env")
+call remove_stale_key "$T/no-stale.env" FLEET_SENSITIVE_VALUES_FILE "机制删掉了"
+if ((RC == 0 && ${#CHANGES[@]} == 0 && ${#REDS[@]} == 0)) && [[ "$(digest "$T/no-stale.env")" == "$before" ]]; then
+  pass "没有这个键：什么都不做，第二遍零改动"
 else
-  flunk "好的名单没认出来：$OUT"
+  flunk "没有这个键不该动文件：$OUT"
 fi
+
+call remove_stale_key "$T/no-such-stale.env" FLEET_SENSITIVE_VALUES_FILE "机制删掉了"
+expect_red_untouched "文件不在" "$T/no-such-stale.env" "不在"
+call remove_stale_key "$T/dir.env" FLEET_SENSITIVE_VALUES_FILE "机制删掉了"
+expect_red_untouched "文件是个目录" "$T/dir.env" "目录"
 
 echo "== 引擎的 engine.env"
-LIST=/etc/fleet-dao/sensitive-values.txt
 WORK=/var/lib/fleet-work
 STATE=/var/lib/fleet-dao/engine
-# 工作树的根、引擎状态目录钉对了的两行：前面的用例只看端口和名单，都带上它们；看这两个键的用例把 TAIL 换掉
+# 工作树的根、引擎状态目录钉对了的两行：前面的用例只看端口，都带上它们；看这两个键的用例把 TAIL 换掉
 PINS="FLEET_WORK_DIR=$WORK
 FLEET_ENGINE_STATE_DIR=$STATE"
 TAIL=$PINS
 engine_case() { # 说明 期望（ok / pending / red） 文件内容 [输出里要有的字]
   local what=$1 want=$2 words=${4:-} got=ok rc_ok=0
   printf '%s\n%s\n' "$3" "$TAIL" >"$T/check-engine.env"
-  call check_engine_env "$T/check-engine.env" "$LIST" "$WORK" "$STATE"
+  call check_engine_env "$T/check-engine.env" "$WORK" "$STATE"
   if ((${#REDS[@]})); then
     got=red
   elif ((${#PENDING[@]})); then
@@ -394,56 +404,39 @@ engine_case() { # 说明 期望（ok / pending / red） 文件内容 [输出里�
     flunk "$what：该是 $want，实际 $got、返回 $RC：$OUT"
   fi
 }
-engine_case '真端口、名单钉对了' ok "FLEET_ENGINE_PORTS=real
-FLEET_SENSITIVE_VALUES_FILE=$LIST"
-engine_case '值带引号（去一层）' ok "FLEET_ENGINE_PORTS=\"real\"
-FLEET_SENSITIVE_VALUES_FILE='$LIST'"
-engine_case '假端口' pending "FLEET_ENGINE_PORTS=fake
-FLEET_SENSITIVE_VALUES_FILE=$LIST" 'fake'
+engine_case '真端口' ok 'FLEET_ENGINE_PORTS=real'
+engine_case '值带引号（去一层）' ok 'FLEET_ENGINE_PORTS="real"'
+engine_case '假端口' pending 'FLEET_ENGINE_PORTS=fake' 'fake'
 engine_case 'real 在前、fake 在后：生效的是 fake，写了两行判红' red "FLEET_ENGINE_PORTS=real
-FLEET_ENGINE_PORTS=fake
-FLEET_SENSITIVE_VALUES_FILE=$LIST" '「fake」'
-engine_case '缩进、KEY = 值照样认' pending "   FLEET_ENGINE_PORTS = fake
-FLEET_SENSITIVE_VALUES_FILE=$LIST" 'fake'
-engine_case '没写端口实现（要人定）' red "FLEET_SENSITIVE_VALUES_FILE=$LIST" 'FLEET_ENGINE_PORTS'
-engine_case '端口实现被注释掉' red "# FLEET_ENGINE_PORTS=real
-FLEET_SENSITIVE_VALUES_FILE=$LIST" '注释'
-engine_case '端口实现不认识' red "FLEET_ENGINE_PORTS=maybe
-FLEET_SENSITIVE_VALUES_FILE=$LIST" '「maybe」'
-engine_case '名单钉在别处' red "FLEET_ENGINE_PORTS=real
-FLEET_SENSITIVE_VALUES_FILE=/home/fleet/.fleet-dao/sensitive-values.txt" '不是同一处'
-engine_case '没钉名单' pending 'FLEET_ENGINE_PORTS=real' '补上'
-engine_case '名单那一行被注释掉' pending "FLEET_ENGINE_PORTS=real
-# FLEET_SENSITIVE_VALUES_FILE=$LIST" '注释'
+FLEET_ENGINE_PORTS=fake" '「fake」'
+engine_case '缩进、KEY = 值照样认' pending '   FLEET_ENGINE_PORTS = fake' 'fake'
+engine_case '没写端口实现（要人定）' red '' 'FLEET_ENGINE_PORTS'
+engine_case '端口实现被注释掉' red '# FLEET_ENGINE_PORTS=real' '注释'
+engine_case '端口实现不认识' red 'FLEET_ENGINE_PORTS=maybe' '「maybe」'
 # 补键只补缺、不改已有的：机器上留着的旧值只有读回拦得住
 TAIL="FLEET_ENGINE_STATE_DIR=$STATE"
 engine_case '工作树的根是旧值 /tmp' red "FLEET_ENGINE_PORTS=real
-FLEET_SENSITIVE_VALUES_FILE=$LIST
 FLEET_WORK_DIR=/tmp" '「/tmp」'
-engine_case '没写工作树的根' pending "FLEET_ENGINE_PORTS=real
-FLEET_SENSITIVE_VALUES_FILE=$LIST" 'FLEET_WORK_DIR'
+engine_case '没写工作树的根' pending 'FLEET_ENGINE_PORTS=real' 'FLEET_WORK_DIR'
 engine_case '工作树的根写了两行' red "FLEET_ENGINE_PORTS=real
-FLEET_SENSITIVE_VALUES_FILE=$LIST
 FLEET_WORK_DIR=$WORK
 FLEET_WORK_DIR=/tmp" '写了 2 行'
 TAIL="FLEET_WORK_DIR=$WORK"
 engine_case '引擎状态目录不对' red "FLEET_ENGINE_PORTS=real
-FLEET_SENSITIVE_VALUES_FILE=$LIST
 FLEET_ENGINE_STATE_DIR=/var/tmp/engine" '「/var/tmp/engine」'
 engine_case '引擎状态目录被注释掉' pending "FLEET_ENGINE_PORTS=real
-FLEET_SENSITIVE_VALUES_FILE=$LIST
 # FLEET_ENGINE_STATE_DIR=$STATE" '注释'
 TAIL=$PINS
 
-call check_engine_env "$T/no-such-engine.env" "$LIST" "$WORK" "$STATE"
+call check_engine_env "$T/no-such-engine.env" "$WORK" "$STATE"
 missing_out=$OUT
 expect_red_untouched "engine.env 不在" "$T/no-such-engine.env" "不在"
-call check_engine_env "$T/dir.env" "$LIST" "$WORK" "$STATE"
+call check_engine_env "$T/dir.env" "$WORK" "$STATE"
 dir_out=$OUT
 expect_red_untouched "engine.env 是个目录" "$T/dir.env" "目录"
 printf 'FLEET_ENGINE_PORTS="real\n' >"$T/openquote-engine.env"
 before=$(digest "$T/openquote-engine.env")
-call check_engine_env "$T/openquote-engine.env" "$LIST" "$WORK" "$STATE"
+call check_engine_env "$T/openquote-engine.env" "$WORK" "$STATE"
 open_out=$OUT
 expect_red_untouched "engine.env 引号没配上" "$T/openquote-engine.env" "$before"
 if [[ "$missing_out" == *"没有"* && "$dir_out" == *"读不了"* && "$open_out" == *"认不出"* ]]; then
@@ -495,7 +488,7 @@ echo "== 第一次照样例建：要人定的键不替人选"
 printf '# 说明\nFLEET_ENGINE_PORTS=real\nTEMPORAL_ADDRESS=127.0.0.1:7243\n' >"$T/new-example.env"
 if new_content=$(example_for_new_file "$T/new-example.env"); then
   printf '%s\n' "$new_content" >"$T/new-engine.env"
-  call check_engine_env "$T/new-engine.env" "$LIST" "$WORK" "$STATE"
+  call check_engine_env "$T/new-engine.env" "$WORK" "$STATE"
   if ((RC != 0)) && [[ "$(env_value "$T/new-engine.env" TEMPORAL_ADDRESS)" == 127.0.0.1:7243 && "$OUT" == *"FLEET_ENGINE_PORTS"* ]]; then
     pass "样例里的 FLEET_ENGINE_PORTS=real 建出来是注释，读回判红；别的键照抄"
   else

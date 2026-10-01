@@ -124,7 +124,7 @@ export interface FakeScript {
    * 要测「不同的头、一样的改动」得自己给一个只看改动、不看 ref 的假实现）。n = 第几次算（从 1 开始）。
    */
   patchId: (input: PatchIdOfInput, n: number) => string | PortError | undefined;
-  /** 推分支：给了就抛它（假的卫生检查拦下、名单没读到……）；n = 第几次推（从 1 开始）。 */
+  /** 推分支：给了就抛它（假的卫生检查拦下、没扫成……）；n = 第几次推（从 1 开始）。 */
   push: (input: PushBranchInput, n: number) => PortError | undefined;
   /**
    * 推上去的头相对主线的净改动（推分支交回的 changedFiles）；n 同 push。不给就不交：老版端口的样子，Fusion 照会话交的

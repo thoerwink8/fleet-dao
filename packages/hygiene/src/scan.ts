@@ -1,10 +1,9 @@
-// 全仓扫：进 git 的每个文件（外加还没提交、也没被忽略的新文件）先按文件名判是不是密钥文件、名字里有没有名单上的值，
-// 再把内容过一遍 rules.ts 和已知敏感值名单（values.ts），最后按 allowlist.ts 放行。
+// 全仓扫：进 git 的每个文件（外加还没提交、也没被忽略的新文件）先按文件名判是不是密钥文件，
+// 再把内容过一遍 rules.ts，最后按 allowlist.ts 放行。
 // 只读本地文件、跑一次 git ls-files，不出网。任何输出只报文件、行和规则名，不打命中的值。
 import { execFileSync } from 'node:child_process';
 import { ALLOWLIST, type Allow } from './allowlist.ts';
 import { findHits, findSecretFile, type Hit } from './rules.ts';
-import { maskValues, valueHitsInName, valueMatcher } from './values.ts';
 
 export interface Finding extends Hit {
   /** 相对仓库根。 */
@@ -54,45 +53,64 @@ export function applyAllowlist(
   });
 }
 
-/** 一段文本里的全部命中：规则表加名单。 */
-export function hitsIn(text: string, values: readonly string[]): Hit[] {
-  return [...findHits(text), ...valueMatcher(values).find(text)];
-}
-
 export function scanFiles(
   paths: readonly string[],
   read: (path: string) => Buffer,
   allowlist: readonly Allow[] = ALLOWLIST,
-  values: readonly string[] = [],
 ): ScanReport {
   const report: ScanReport = { scanned: [], binary: [], missing: [], findings: [], unusedAllows: [] };
   const used = new Set<Allow>();
-  const matcher = valueMatcher(values);
   for (const path of paths) {
     const hits: Finding[] = [];
-    // 名字里带名单上的值：这个文件的命中一律记在打了码的名字上，报出来的位置不带值。
-    const shown = maskValues(path, matcher);
-    // 先按文件名判：密钥文件不管是不是二进制、工作树里还在不在（还在 git 里就算），都要拦；名字里带名单上的值也拦。
+    // 路径命中的真密钥：命中段先算出来，所有报出来的东西（文件内容命中也一样）都用遮过的路径，
+    // 免得「内容有命中」那条把没遮的原路径一起带出去。
+    const inPath = findHits(path);
+    const shown =
+      inPath.length > 0
+        ? redactPathValue(
+            path,
+            inPath.map((h) => h.match),
+          )
+        : path;
+    // 先按文件名判：密钥文件不管是不是二进制、工作树里还在不在（还在 git 里就算），都要拦。
     const secretFile = findSecretFile(path);
     if (secretFile) hits.push({ ...secretFile, path: shown });
-    hits.push(...valueHitsInName(path, matcher));
+    // 路径本身就是写出去的东西（文件名会进 commit、网页地址、目录名）：它里面的真密钥照样拦，别只看内容。
+    for (const hit of inPath) hits.push({ ...hit, path: shown, line: 0 });
     let content: Buffer | undefined;
     try {
       content = read(path);
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
-      report.missing.push(path);
+      report.missing.push(shown);
     }
-    if (content && isBinary(content)) report.binary.push(path);
+    if (content && isBinary(content)) report.binary.push(shown);
     else if (content) {
-      report.scanned.push(path);
+      report.scanned.push(shown);
       const text = content.toString('utf8');
-      for (const hit of [...findHits(text), ...matcher.find(text)]) hits.push({ ...hit, path: shown });
+      for (const hit of findHits(text)) hits.push({ ...hit, path: shown });
     }
-    report.findings.push(...applyAllowlist(hits, allowlist, used));
+    // 路径里有真密钥时，命中一律不白名单（白名单是「这类文件里这条不算」的约定，不是「藏起来也算」的出口）
+    report.findings.push(...(inPath.length > 0 ? hits : applyAllowlist(hits, allowlist, used)));
   }
   report.unusedAllows = allowlist.filter((a) => !used.has(a));
   return report;
+}
+
+/**
+ * 路径里命中过真密钥时，把命中的那一段（整段，不是规则匹配到的那一小截）换成「…」再放进报告：路径会进 CI 日志、
+ * 推送报错和会话记录，原样打出来等于把刚拦下的密钥又打了一遍（输出里不带值，这是底线）。
+ * 遮整段是有意的：规则只认一段里像密钥的部分（JWT 的规则只匹配前两段，第三段签名留在后面），
+ * 只遮匹配到的那一截等于把剩下那段泄出去。只遮命中的段，其余照旧，好在还能看出是哪个文件。
+ * 文件名规则（`findSecretFile`）不看内容，路径照旧。
+ */
+export function redactPathValue(path: string, matches: readonly string[]): string {
+  if (matches.length === 0) return path;
+  const hit = (segment: string): boolean => matches.some((m) => m && segment.includes(m));
+  return path
+    .split('/')
+    .map((segment) => (hit(segment) ? '…' : segment))
+    .join('/');
 }
 
 /** 一条命中打成一行：只有文件、行和规则名（逐个提交扫的再带提交号），值一律不打（检查的输出会进 CI 日志、会话记录）。 */

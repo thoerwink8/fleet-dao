@@ -49,13 +49,13 @@ export function setup(overrides: Partial<GitHubOptions> = {}) {
     },
     env: {},
     stateDir: tempDir('fleet-gh-state-'),
+    // 卫生检查只管一个仓（默认 fleet-dao 自己）：夹具用的是 acme/widgets，指过去，测试才测得到扫不扫
+    hygieneRepo: repo,
     log: {
       info: (message, fields) => logs.push({ level: 'info', message, fields }),
       warn: (message, fields) => logs.push({ level: 'warn', message, fields }),
       error: (message, fields) => logs.push({ level: 'error', message, fields }),
     },
-    // 推分支前卫生检查的名单用假的：测试不读本机真名单（没有也不该因此红）。
-    sensitiveValues: () => ({ ok: true, source: '测试名单', values: ['fake-org-778899'] }),
     ...overrides,
   });
   return { gh, fake, clock, sleeps, ledger, logs };

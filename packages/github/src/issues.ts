@@ -21,7 +21,7 @@ import {
   renderProgress,
   spliceProgress,
 } from './progress.ts';
-import { assertPublishable, type PublishName, type PublishText } from './publish-check.ts';
+import { assertPublishable, type PublishText } from './publish-check.ts';
 import { assertBodySize, neutralizeMentions, oneLine } from './text.ts';
 
 const User = z.object({ login: z.string(), id: z.number(), type: z.string() });
@@ -104,26 +104,18 @@ export interface UpdateIssueProgressResult {
 }
 
 /**
- * 进度段里要公开的字：会话写的子任务标题（方案拆出来的）、「正在」那句话（可能带着分诊追问的原话）；
- * 文档路径是名字（引擎按 issue 标题定的，和写文档时一样按名单比）。
+ * 进度段里要公开的字：会话写的子任务标题（方案拆出来的）、「正在」那句话（可能带着分诊追问的原话）。
  * 位置名只用序号，不用子任务的 key（key 也是会话写的，报错只带位置、不带值）。
  */
-function progressTexts(
-  issueNumber: number,
-  progress: IssueProgress,
-): { texts: PublishText[]; names: PublishName[] } {
+function progressTexts(issueNumber: number, progress: IssueProgress): PublishText[] {
   const where = `#${issueNumber} 的进度段`;
-  const docs = Object.entries(progress.docs).filter((e): e is [string, string] => typeof e[1] === 'string');
-  return {
-    texts: [
-      { path: `${where}：正在`, text: progress.current },
-      ...progress.subtasks.map((s, i) => ({
-        path: `${where}：第 ${i + 1} 个子任务`,
-        text: `${s.key} ${s.title}`,
-      })),
-    ],
-    names: docs.map(([kind, path]) => ({ label: `${where}：文档（${kind}）`, name: path })),
-  };
+  return [
+    { path: `${where}：正在`, text: progress.current },
+    ...progress.subtasks.map((s, i) => ({
+      path: `${where}：第 ${i + 1} 个子任务`,
+      text: `${s.key} ${s.title}`,
+    })),
+  ];
 }
 
 export async function updateIssueProgress(
@@ -133,13 +125,13 @@ export async function updateIssueProgress(
 ): Promise<UpdateIssueProgressResult> {
   const { repo, issueNumber } = input;
   const slug = repoSlug(repo);
-  // 进度段写进公开的 issue 正文，不经 git 推送、推前扫描拦不到：一个请求都不发之前先过卫生检查（publish-check.ts）
-  const publish = progressTexts(issueNumber, input.progress);
+  // 进度段写进公开的 issue 正文，不经 git 推送、推前扫描拦不到：一个请求都不发之前先过卫生检查（publish-check.ts；
+  // 只管 fleet-dao 这个仓）
   assertPublishable(
+    repo,
     `写 ${slug} #${issueNumber} 的进度段`,
-    publish.texts,
-    deps.sensitiveValues,
-    publish.names,
+    progressTexts(issueNumber, input.progress),
+    deps.hygieneRepo,
   );
   const asOf = (
     input.asOf instanceof Date ? input.asOf : new Date(input.asOf ?? deps.client.now())
@@ -504,12 +496,13 @@ export async function openIssue(
   const safeTitle = neutralizeMentions(title);
   const safeBody = neutralizeMentions(input.body);
   assertPublishable(
+    repo,
     `开 ${slug} 的单子`,
     [
       { path: '单子标题', text: safeTitle },
       { path: '单子正文', text: safeBody },
     ],
-    deps.sensitiveValues,
+    deps.hygieneRepo,
   );
   const marker = `<!-- fleet:issue:${digest({ key })} -->`;
   const body = `${safeBody}\n\n${marker}`;
@@ -642,9 +635,10 @@ async function commentOn(
   // 正文是 AI 写的（提问或回答）：中和之后照开单一样过卫生检查
   const safeBody = neutralizeMentions(input.body);
   assertPublishable(
+    repo,
     `写 ${slug} #${issueNumber} 的评论`,
     [{ path: '评论正文', text: safeBody }],
-    deps.sensitiveValues,
+    deps.hygieneRepo,
   );
   const marker = `<!-- fleet:comment:${digest({ key })} -->`;
   const body = `${safeBody}\n\n${marker}`;
