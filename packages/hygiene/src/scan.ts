@@ -65,6 +65,8 @@ export function scanFiles(
     // 先按文件名判：密钥文件不管是不是二进制、工作树里还在不在（还在 git 里就算），都要拦。
     const secretFile = findSecretFile(path);
     if (secretFile) hits.push({ ...secretFile, path });
+    // 路径本身就是写出去的东西（文件名会进 commit、网页地址、目录名）：它里面的真密钥照样拦，别只看内容。
+    for (const hit of findHits(path)) hits.push({ ...hit, path, line: 0 });
     let content: Buffer | undefined;
     try {
       content = read(path);

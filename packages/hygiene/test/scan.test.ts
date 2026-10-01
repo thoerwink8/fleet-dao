@@ -45,6 +45,25 @@ describe('scanFiles', () => {
     expect(report.unusedAllows).toEqual([staleAllow]);
   });
 
+  it('【故意造出的失败】真密钥藏在路径里（文件名 / 目录名）也拦：正文干净不算过', () => {
+    // 路径本身就是写出去的东西（commit 里的文件名、网页地址、目录名）：`writeSpecDoc` 的路径是 AI 给的、
+    // 可变的，把令牌样式的密钥拼进去就会连文件名一起公开。只看内容会放过去。
+    const leakPath = `specs/532-x/${['ghp', pseudoRandom(36, 203)].join('_')}/需求.md`;
+    const clean = new Map([[leakPath, Buffer.from('正文干净\n')]]);
+    const report = scanFiles([leakPath], (p) => clean.get(p) ?? Buffer.from(''), []);
+    // 行号 0：命中的是路径本身，不是哪一行
+    expect(report.findings.map(formatFinding)).toEqual([`${leakPath} 令牌`]);
+  });
+
+  it('正常的仓内路径不会误报', () => {
+    const report = scanFiles(
+      ['specs/532-删敏感值名单/需求.md', 'packages/hygiene/src/allowlist.ts'],
+      () => Buffer.from('干净\n'),
+      [],
+    );
+    expect(report.findings).toEqual([]);
+  });
+
   it('一个文件都没给：扫了 0 个，和「扫了没事」分得开', () => {
     const report = scanFiles([], read, []);
     expect([report.scanned.length, report.findings.length]).toEqual([0, 0]);
