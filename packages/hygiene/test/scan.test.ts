@@ -70,6 +70,22 @@ describe('scanFiles', () => {
     for (const f of report.findings) expect(f.path).not.toContain(secret);
   });
 
+  it('【故意造出的失败】JWT 藏在路径里：遮的是整段，不是规则匹配到的那一截', () => {
+    // JWT 的规则只匹配前两段（`eyJ…` 开头那两截），签名那一段不在匹配里；只遮匹配到的一截等于把签名泄出去。
+    // 值在测试里拼出来（`eyJ` 也拆开写），免得文件自己长得像 JWT。
+    const head = ['ey', 'J'].join('');
+    const body = pseudoRandom(10, 207);
+    const signature = pseudoRandom(18, 208);
+    const jwt = `${head}${body}.${head}${body}.${signature}`;
+    const leakPath = `docs/${jwt}`;
+    const report = scanFiles([leakPath], () => Buffer.from('正文干净\n'), []);
+    expect(report.findings.map(formatFinding)).toEqual(['docs/… JWT']);
+    for (const f of report.findings) {
+      expect(f.path).not.toContain(signature);
+      expect(f.path).not.toContain(head);
+    }
+  });
+
   it('正常的仓内路径不会误报', () => {
     const report = scanFiles(
       ['specs/532-删敏感值名单/需求.md', 'packages/hygiene/src/allowlist.ts'],

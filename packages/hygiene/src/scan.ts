@@ -98,14 +98,19 @@ export function scanFiles(
 }
 
 /**
- * 路径里命中过真密钥时，把命中的那段换成「…」再放进报告：路径会进 CI 日志、推送报错和会话记录，
- * 原样打出来等于把刚拦下的密钥又打了一遍（输出里不带值，这是底线）。只遮命中的那几段，好在还能看出是哪个文件。
+ * 路径里命中过真密钥时，把命中的那一段（整段，不是规则匹配到的那一小截）换成「…」再放进报告：路径会进 CI 日志、
+ * 推送报错和会话记录，原样打出来等于把刚拦下的密钥又打了一遍（输出里不带值，这是底线）。
+ * 遮整段是有意的：规则只认一段里像密钥的部分（JWT 的规则只匹配前两段，第三段签名留在后面），
+ * 只遮匹配到的那一截等于把剩下那段泄出去。只遮命中的段，其余照旧，好在还能看出是哪个文件。
  * 文件名规则（`findSecretFile`）不看内容，路径照旧。
  */
 export function redactPathValue(path: string, matches: readonly string[]): string {
-  let out = path;
-  for (const m of matches) if (m) out = out.split(m).join('…');
-  return out;
+  if (matches.length === 0) return path;
+  const hit = (segment: string): boolean => matches.some((m) => m && segment.includes(m));
+  return path
+    .split('/')
+    .map((segment) => (hit(segment) ? '…' : segment))
+    .join('/');
 }
 
 /** 一条命中打成一行：只有文件、行和规则名（逐个提交扫的再带提交号），值一律不打（检查的输出会进 CI 日志、会话记录）。 */
