@@ -31,3 +31,15 @@
 - **#509 的单子正文不用改**：单子上只留原话、AI 理解和需求文档路径，`<本单号>` 是故意的占位（`packages/core/src/criteria.ts` 认它）；数字、漂移、版本名这些更新全进 `specs/509-需求梳理/需求.md`（#533）。之前想整个覆盖单子正文是走错了地方，分类器拦得对。
 - **auto 模式为什么拦**（查的是 Claude Code 文档 auto-mode-config 一页）：进 auto 模式时，能跑任意代码的宽规则（`Bash`、`PowerShell`、`Bash(node:*)`、`Bash(python:*)` 这类）会被暂时撤掉、交给分类器判，窄规则（`Bash(gh:*)`）照旧直接放；那条命令前面带了 `cd`、`timeout`，配不上 `Bash(gh:*)`，于是进了分类器。分类器没给规则名，最可能是把「用一份 136 行的文件整个覆盖一张已有单子的正文」判成了用户没明确要的覆盖。用户在对话里说的话分类器看得到，但要具体到动作本身才算数。根治办法是 `~/.claude/settings.json` 的 `autoMode`（`environment`、`allow`，用自然语言写；只认用户级，项目里的 `.claude/settings.json` 不认）。仓里的权限清单 `agents/config/claude-permissions.json` 和同步工具现在不管 `autoMode`；要加是改标准，等创始人拍。
 - **顺带发现**：本机的 `pretool.mjs` 钩子把 `node -e` 字符串里出现的「reclaude login」几个字当成要执行的切号命令拦了。09-28 傍晚拍过这两条小拦「改成只认命令本身、不认正文里的字样」，没做到；归到删读密钥钩子那张子单一起改（钩子里的这两条小拦留，只是改判法）。
+
+## 2026-10-01 晚上（法国 root 打通、保险箱换钥匙）
+
+- **法国 root 通了，不用 VNC 了**。路：Contabo 面板里 `Reset credentials → Password` 重设 root 口令——**这条会重启那台**（约 3 分钟，Contabo 的文档写的，实测也是），重启后 18:22 起来；然后 TightVNC 连面板 `VNC` 那行给出的地址（VNC 密码在那行的锁形图标按钮 `title="VNC Control"` 里设），在控制台里 `root` + 新口令登进去，把 `workstation/ssh/fleet_login.pub` 追加进 `/root/.ssh/authorized_keys`（600）。本机 `ssh contabo-jump whoami` → `root`、`hostname` → 那台的短名。**`hk-jump` 这个别名本机没配**（试了报 `Could not resolve hostname`），要走香港跳板得先配。
+  - 地址、实例号不写进公开仓，要连的时候从 Contabo 面板或保险箱取。
+  - 踩过的坑：Contabo 的「Add and Store SSH-Key」存在**账号**上，不会下发到正在跑的实例，对这台没用；VNC 密码和 Linux root 口令是**两把不同的钥匙**，VNC 密码只开屏幕。
+  - **两串口令进了对话**（VNC 密码、新 root 口令），要找时间在面板里换掉。
+- **保险箱换了钥匙**（`fleet-dao-vault` `3ae943d` + `f4dc486`）。旧钥匙（本机 `.fleet-dao/vault-key.txt`、仓里 `workstation/age-identity.txt`）随 09-29 那次 C 盘被清没了，两台服务器上明文都还在（法国 26+2 个、香港 5+2 个），所以照新写的 `rekey.sh` 重生成一把、35 个 `.age` 全部按新公钥重加密。**验证**：`verify-rekey.sh` 报「解开 35 个，解不开 0 个」「新公钥加密 → 新钥匙解密，通了」。
+  - 顺手补进仓三样一直没进仓的：`rekey.sh`（换钥匙）、`verify-rekey.sh`（只读核对）、`workstation/ssh/config.sh`（配 ssh 别名）——最后一个还没提交。
+  - README 两处按 10-01 那条拍板改对：钥匙正本**在私有仓里**（只靠私有仓 + GitHub 账号保护），本机那份是方便副本。
+- **法国那个 OOM 是旧账，不是现在的病**。查清了：`journalctl -k -b -1` 显示被杀的是 **09-25 那天的 4 次**，`oom_memcg=/fleet.slice/fleet-agents.slice/fleet-agent-e2e-*-mem.scope`——是 09-25 那次演练起的**临时 e2e 会话**（`python3`，UID 994）把自己那格内存撑爆了，不是常驻服务。重启后（18:22 起）`free -h` 是 11Gi 里用 1.0Gi、available 10Gi，一次没再发生。**结论：不修**；那种 `fleet-agent-e2e-*` 的临时 scope 现在也不在跑了。
+- **待办**：① 轮换进对话的那两串口令；② 保险箱 README 里「服务器上真正要紧的密钥也换掉」（GitHub 机器人私钥、飞书 App Secret、备份口令）那句，要不要现在做——**这是另一件事，还没动**；③ 新机器一键配置那三个待定项（第一版做到哪、盘符、代理归谁管）还没起草。
