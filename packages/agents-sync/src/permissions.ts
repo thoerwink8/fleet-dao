@@ -3,9 +3,11 @@
 // allow、deny、additionalDirectories 按并集合并：仓里有、机器上没有的补上，机器上自己加的不删；只有 retired 里写明的才摘。
 // autoMode 的两个数组同样按并集合并，但仓里的源数组必须带 "$defaults"：Claude Code 文档里那段 Danger 写明，少一个 "$defaults" 就把那一类的
 // 内置规则整段换掉（force push、curl | bash、生产发布、往外发数据这些都不再拦），所以源文件不带就拒收——不是逐条补上、也不当没看见。
-// defaultMode 归本脚本管、每次覆盖。allow 和 deny 里同一条落在相反的两边、类型不对这类不能自动定的，只报漂移、写的时候整份不动，不猜着改。
+// defaultMode 平常归本脚本管、每次覆盖；**机器上自己设成 bypassPermissions 的例外**（创始人 2026-10-01）：保留机器上的、只报一行，不当漂移。
+// 仓里的源文件写 bypassPermissions 仍然拒收：仓里那一份会装到无人值守的机器上，放行它等于把「不用问」推给每一台别人盯不到的机器。
 // 设置文件读不懂（不是 JSON、整份不是对象、permissions 不是对象、autoMode 不是对象/数组不是数组）就不动，报没做成——不当成空的重写。
 // 仓里的源文件读不到、不合规矩（含 bypassPermissions、autoMode 少了 "$defaults"）也报没查成、没做成，不拿空的顶上。
+// 「源文件里写 bypass 拒收」和「机器上自己设的 bypass 保留」是两件事：前者是把「不用问」推给所有机器，后者是这台自己选的做法。
 // 合并那套（judge、merged、checkJson、applyJson）不只给 Claude 用：Devin 的 config.json 也是 permissions.allow/deny 三个数组，
 // 见 permissions-vendors.ts，翻译成它的写法后走同一套；Devin 那边没有 autoMode 这一层（不写 autoMode 就整段不管）。
 import { mkdirSync } from 'node:fs';
@@ -52,8 +54,14 @@ export interface PermSpec extends ListSpec {
   defaultMode: string;
 }
 
-/** 不许同步下去的模式：一台机器上的会话全放开检查，不能靠仓里一份文件推给所有机器 */
+/**
+ * 仓里的源文件里不许写的模式：一台机器上的会话全放开检查，不能靠仓里一份文件推给所有机器。
+ * 这是「源文件拒收」、不是「机器上不许有」：机器上自己设成 bypassPermissions 的由下面的 KEEP_AS_IS 保留。
+ */
 const FORBIDDEN_MODES = ['bypassPermissions'];
+
+/** 机器上自己设的、本脚本不改也不当漂移的模式：创始人 2026-10-01「我一般都是开启 bypass 模式的……不希望拦」 */
+const KEEP_AS_IS = ['bypassPermissions'];
 
 /** 少了它，Claude Code 会把那一类的内置规则整段换掉；文档 Danger 那段点名的是软拦和防外传的规则 */
 const DEFAULTS = '$defaults';
@@ -150,12 +158,14 @@ export function parsePermissions(text: string, home: string): PermSource {
 export interface Diff {
   /** 该有、没有的（defaultMode 没写也算） */
   missing: string[];
-  /** 读到了但要改的：已退役的还留着、defaultMode 不一样 */
+  /** 读到了但要改的：已退役的还留着、defaultMode 不一样（机器上自己设成 bypassPermissions 的除外） */
   drift: string[];
   /** 本脚本不替人定的：allow 和 deny 相反、类型不对 */
   stuck: string[];
   /** 机器上自己加的、不归本脚本管的条数 */
   others: number;
+  /** 机器上自己设成 bypassPermissions：本脚本保留、不改也不当漂移，只报一行 */
+  bypass: boolean;
 }
 
 const LISTS = ['allow', 'deny', 'additionalDirectories'] as const;
@@ -195,7 +205,7 @@ function judgeAuto(have: unknown, spec: AutoModeSpec, out: Diff): void {
 
 /** 逐项对：root 是整份设置文件 */
 export function judge(root: unknown, spec: ListSpec): Diff {
-  const out: Diff = { missing: [], drift: [], stuck: [], others: 0 };
+  const out: Diff = { missing: [], drift: [], stuck: [], others: 0, bypass: false };
   if (!isObj(root)) {
     out.stuck.push('整份不是一个 JSON 对象');
     return out;
@@ -208,6 +218,8 @@ export function judge(root: unknown, spec: ListSpec): Diff {
   const perm: Obj = have ?? {};
   if (spec.defaultMode !== undefined) {
     if (perm.defaultMode === undefined) out.missing.push(`defaultMode（该是 ${spec.defaultMode}）`);
+    // 机器上自己设成 bypassPermissions：这台的人主动要的，保留、不当漂移，只让报告多提一句
+    else if (KEEP_AS_IS.includes(perm.defaultMode as string)) out.bypass = true;
     else if (perm.defaultMode !== spec.defaultMode)
       out.drift.push(`defaultMode 是 ${JSON.stringify(perm.defaultMode)}，该是 ${spec.defaultMode}`);
   }
@@ -238,11 +250,13 @@ export function judge(root: unknown, spec: ListSpec): Diff {
   return out;
 }
 
-/** 去掉已退役的、补上仓里有而机器上没有的；别的一条不碰 */
+/** 去掉已退役的、补上仓里有而机器上没有的；别的一条不碰；机器上自己设成 bypassPermissions 的 defaultMode 也不碰 */
 export function merged(root: Obj, spec: ListSpec): Obj {
   const next = structuredClone(root);
   const perm: Obj = isObj(next.permissions) ? next.permissions : {};
-  if (spec.defaultMode !== undefined) perm.defaultMode = spec.defaultMode;
+  // 机器上自己设成 bypassPermissions：保留机器上的那个值，仓里写的是 auto 也不覆盖（创始人 2026-10-01）
+  if (spec.defaultMode !== undefined && !KEEP_AS_IS.includes(perm.defaultMode as string))
+    perm.defaultMode = spec.defaultMode;
   for (const name of LISTS) {
     // 仓里这项是空的、机器上也没有：不凭空建一个空数组
     if (spec[name].length === 0 && !Array.isArray(perm[name])) continue;
@@ -266,6 +280,9 @@ export function merged(root: Obj, spec: ListSpec): Obj {
   return next;
 }
 
+/** 报告里补的一句：机器上自己设成 bypassPermissions，本脚本保留它（ok 和 changed 两条路都带） */
+const bypassNote = (d: Diff): string => (d.bypass ? '；这台自己设成 bypassPermissions，保留、没改' : '');
+
 /** 查一份 JSON 设置里的 permissions；key 是报告里这一项的名字，noFile 是文件不存在时说的话 */
 export function checkJson(abs: string, key: string, spec: ListSpec, noFile: string): Line[] {
   let read: ReturnType<typeof readSettings>;
@@ -278,13 +295,13 @@ export function checkJson(abs: string, key: string, spec: ListSpec, noFile: stri
   if (read.kind === 'bad') return [line('drift', key, `漂移——${read.why}，权限等于没装`)];
   const d = judge(read.root, spec);
   const bad = [...d.stuck, ...d.drift];
-  if (bad.length) return [line('drift', key, `漂移——${bad.join('；')}`)];
-  if (d.missing.length) return [line('missing', key, `缺失——${d.missing.join('；')}`)];
+  if (bad.length) return [line('drift', key, `漂移——${bad.join('；')}${bypassNote(d)}`)];
+  if (d.missing.length) return [line('missing', key, `缺失——${d.missing.join('；')}${bypassNote(d)}`)];
   return [
     line(
       'ok',
       key,
-      `${spec.defaultMode === undefined ? '' : `defaultMode ${spec.defaultMode}、`}allow ${spec.allow.length} 条、deny ${spec.deny.length} 条都在${spec.autoMode === undefined ? '' : `、autoMode ${AUTO_LISTS.map((n) => `${n} ${spec.autoMode?.[n].length ?? 0} 条`).join('、')}都在`}，机器上自己加的 ${d.others} 条没动`,
+      `${spec.defaultMode === undefined ? '' : `defaultMode ${spec.defaultMode}、`}allow ${spec.allow.length} 条、deny ${spec.deny.length} 条都在${spec.autoMode === undefined ? '' : `、autoMode ${AUTO_LISTS.map((n) => `${n} ${spec.autoMode?.[n].length ?? 0} 条`).join('、')}都在`}，机器上自己加的 ${d.others} 条没动${bypassNote(d)}`,
     ),
   ];
 }
@@ -297,9 +314,10 @@ export function applyJson(ctx: Ctx, place: Place, key: string, spec: ListSpec, b
     if (read.kind === 'bad') return [line('failed', key, `没动——${read.why}；要人看`)];
     const root: unknown = read.kind === 'none' ? {} : read.root;
     const before = judge(root, spec);
-    if (before.stuck.length) return [line('failed', key, `没动——${before.stuck.join('；')}；要人看`)];
+    if (before.stuck.length)
+      return [line('failed', key, `没动——${before.stuck.join('；')}；要人看${bypassNote(before)}`)];
     if (before.missing.length === 0 && before.drift.length === 0)
-      return [line('ok', key, `已经一致，机器上自己加的 ${before.others} 条没动`)];
+      return [line('ok', key, `已经一致，机器上自己加的 ${before.others} 条没动${bypassNote(before)}`)];
     const next = merged(root as Obj, spec);
     const eol = read.kind === 'ok' && read.text.includes('\r\n') ? '\r\n' : '\n';
     const text = `${JSON.stringify(next, null, 2)}\n`.replaceAll('\n', eol);
@@ -310,6 +328,7 @@ export function applyJson(ctx: Ctx, place: Place, key: string, spec: ListSpec, b
       read.kind === 'none' ? '新建' : '改了',
       [...before.missing, ...before.drift].join('；'),
       `机器上自己加的 ${before.others} 条没动`,
+      ...(before.bypass ? ['这台自己设成 bypassPermissions，保留、没改'] : []),
       ...(saved ? [`原文件备份在 ${saved}`] : []),
     ];
     return [line('changed', key, parts.join('，'))];
