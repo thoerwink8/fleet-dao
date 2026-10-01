@@ -55,13 +55,17 @@ export const HOOK_FILES: Record<string, string> = {
   'stop.mjs': '// 假的收尾提醒钩子\n',
 };
 
-/** 假仓里的权限源文件（agents/config/claude-permissions.json） */
+/** 假仓里的权限源文件（agents/config/claude-permissions.json）；autoMode 两个数组都带 "$defaults"（不带会被拒收） */
 export const PERMS_SPEC = {
   defaultMode: 'auto',
   additionalDirectories: ['${HOME}/.claude'],
   allow: ['Read', 'Bash(git:*)'],
   deny: ['Bash(cat:*)'],
   retired: ['Bash(old:*)'],
+  autoMode: {
+    environment: ['$defaults', '自己人：和工作仓同一个主人的仓'],
+    allow: ['$defaults', '改自己仓里单子和 PR 的标题、正文、标签、评论、子单关系是日常'],
+  },
 };
 export const PERMS_JSON = `${JSON.stringify({ ...PERMS_SPEC, 说明: '测试用' }, null, 2)}\n`;
 
