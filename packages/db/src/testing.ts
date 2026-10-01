@@ -200,7 +200,34 @@ class RealTestClient implements TestClient {
       await sql.unsafe(`create database ${dbName} template ${template}`);
     });
     const sql = postgres(urlForDb(url, dbName), { max: 5, onnotice: () => {} });
-    return new RealTestClient(sql, dbName);
+    const client = new RealTestClient(sql, dbName);
+    try {
+      await client.assertCleanClone();
+    } catch (err) {
+      // 克隆出来的库里就算一行数据，说明模板库（上游）被当成正式库写过：这份测试库不能发还，回收后如实报错。
+      await sql.end({ timeout: 5 }).catch(() => {});
+      await withAdminClient(url, async (admin) => {
+        await admin.unsafe(`drop database if exists ${dbName} with (force)`);
+      });
+      throw err;
+    }
+    return client;
+  }
+
+  /** 真克隆库必须在 public schema 下一张业务表的任何行都没有——有行就是模板被写脏过。 */
+  private async assertCleanClone(): Promise<void> {
+    const tables = await this.sql<{ tablename: string }[]>`
+      select tablename from pg_tables where schemaname = 'public'
+    `;
+    for (const { tablename } of tables) {
+      const rows = await this.sql.unsafe(`select 1 as x from "${tablename.replaceAll('"', '""')}" limit 1`);
+      if (rows.length > 0) {
+        throw new Error(
+          `ERR_DIRTY_TEMPLATE ${this.dbName}：克隆库的 ${tablename} 表里有 ${rows.length} 行——` +
+            '模板库很可能被当成正式库写过。把它删掉重建（drop database fleet_test_template），下一次跑测试会重跑迁移。',
+        );
+      }
+    }
   }
 
   async query<R = Record<string, unknown>>(sql: string, params: unknown[] = []): Promise<{ rows: R[] }> {
