@@ -1,13 +1,13 @@
 # Mirasim 里让 claude「自有」会话吃 reclaude 订阅
 
 > 给谁看：在装了 reclaude 的桌面机上，要让 Mirasim 起的 claude 会话（路由选「自有」的）走 reclaude 订阅的 AI 或人。
-> 一次配置，之后由 ai-gateway-stack 仓 `deploy/machine-check.mjs` 的 `reclaude-launch-bare` / `reclaude-shim-missing` 两道闸兜着。
+> 一次配置。**ai-gateway-stack 已退役**（创始人 2026-10-01 确认；2026-09-25 起两台服务器上的那一套已清退，仓转私有只读存档）：原来兜底的 `deploy/machine-check.mjs`（`reclaude-launch-bare` / `reclaude-shim-missing` 两道闸）**现在没人跑**，装好以后照第 0 节的判据自己核。
 >
 > **两份文档**：本文＝**reclaude 迁移指南**（怎么装、怎么换机、服务器上怎么装）；
 > 姊妹篇 `docs/reclaude-self-check.md`＝**防封环境自检指南**（先清旧账号 id，再照那四步查）。
 > 可以清理下旧账号绑定的 id 和痕迹：reclaude 使用前那个 Claude 账号留在本机 Claude 配置和 memory 里的，按姊妹篇第 1 节清。本文不写步骤。
 >
-> **脚本在哪**：本文提到的启动器、脚本都在 ai-gateway-stack 仓（`deploy/reclaude-mirasim.mjs`、`deploy/reclaude-mirasim/`、`deploy/machine-check.mjs`）；下面写 `deploy/…` 的都是那个仓里的路径，在那个仓的 checkout 里跑。本仓只放这两份文档。
+> **脚本在哪**：启动器源码和装法脚本（`deploy/reclaude-mirasim.mjs`、`deploy/reclaude-mirasim/`、`deploy/machine-check.mjs`）只在已退役的 ai-gateway-stack 仓的 `origin/master` 上（本地检出要先 `git pull` 才有，旧检出里可能已经没有这几个文件）；下面写 `deploy/…` 的都是那个仓里的路径。**已经装好的机器不用它**：Mirasim 的启动命令指的是 `~/.local/bin/reclaude-mirasim.exe` 这个编好的文件，存档仓只在换机重装、要重新编译时才用得上。本仓只放这两份文档。
 >
 > 更早散在 ai-gateway-stack `docs/MIRASIM.md` 与 windsurf-dao `docs/observations/2026-09-*` 的 reclaude 笔记是历史判例，要结论来这两份。
 
@@ -58,7 +58,7 @@ ai-gateway-stack 仓 `deploy/reclaude-mirasim/`（Go，无依赖）。Mirasim �
 
 ## 3. 装 / 查 / 撤
 
-在 ai-gateway-stack 仓里跑：
+在 ai-gateway-stack 存档仓（先 `git pull` 到 `origin/master`）里跑：
 
 ```bash
 node deploy/reclaude-mirasim.mjs                    # 只读：启动命令现在指谁
@@ -88,7 +88,7 @@ GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o reclaude-mirasim 
 # 2. 拷到 reclaude 同目录——启动器按「同目录的 reclaude」找目标
 scp reclaude-mirasim root@<server>:/root/.local/bin/
 # 3. 在服务器上切启动命令（有在途回合就先等，理由见上一节）
-cd /srv/projects/ai-gateway-stack        # 服务器上那份 checkout，ags-sync.timer 跟着 origin/master
+cd <ai-gateway-stack 存档仓的检出>        # 服务器上原来那份和 ags-sync.timer 已于 2026-09-25 随旧系统清退，现在要临时拉一份
 node deploy/reclaude-mirasim.mjs apply --no-build --when-idle
 ```
 
