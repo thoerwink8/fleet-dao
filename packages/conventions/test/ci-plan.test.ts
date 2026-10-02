@@ -543,9 +543,11 @@ describe('ci.yml 和这里对得上', () => {
     expect(tsc).toMatch(/^ {4}if: needs\.changes\.outputs\.tsc != ''$/m);
     expect(biome).toContain('pnpm exec biome check .');
     expect(tsc).toContain('pnpm exec tsc -b');
-    // biome 那个 job 里不许有 tsc 的 step（连着写就又是「前一步红了后一步不跑」）
-    expect(biome).not.toMatch(/^\s+- name: tsc$/m);
-    expect(biome).not.toContain('pnpm exec tsc');
+    // biome 那个 job 里不许再出现 tsc 的 step（连着写就又是「前一步红了后一步不跑」）。
+    // 不认命令怎么写（pnpm/npx/裸跑都算），也不认 step 叫什么名：一行里出现 tsc 就判红。
+    expect(biome).not.toMatch(/^\s+- name: tsc\s*$/m);
+    expect(biome).not.toMatch(/(?:^|\s)(?:pnpm|npx|yarn|bunx)\s+(?:exec\s+)?tsc\b/m);
+    expect(biome).not.toMatch(/^\s*run:.*\btsc\b.*$/m);
   });
 
   it('必过检查 check 是汇总 job：always() 跑、needs 全部 job、跑汇总入口', () => {
