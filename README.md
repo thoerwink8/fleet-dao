@@ -31,7 +31,7 @@
 | `packages/github` | 引擎对 GitHub 的读写：推分支、开 PR、等 CI、合并、issue 进度段与关单、对账补漏 |
 | `packages/jev` | Jev 判断题服务：题库、提问接口、从只记不拦转到真拦 |
 | `packages/feishu` | 飞书网关（跑在香港） |
-| `packages/conventions` | design 第七节的约定写成检查：合并闸 merge-gate（必填栏提醒、先审后合路径等第二意见）、开单脚本、文档指针检查、欠账检查、阶段收口 |
+| `packages/conventions` | design 第七节的约定写成检查：合并闸 merge-gate（先审后合路径等第二意见、引擎任务 PR 等冷验收）、开单脚本、文档指针检查、欠账检查、阶段收口 |
 | `packages/agents-sync` | 同步脚本：把 `AGENTS.md` 上半段、`agents/skills/`、`agents/hooks/` 装进这台机器上各家 AI 的全局入口，记下这台同步到哪个提交，另能查漂移、撤旧仓留下的东西 |
 | `deploy/` | 装机、发版、健康页，和它们的检查 |
 | `docs/` | 设计、计划、运维；`docs/reference/` 是旧系统的坑 |
@@ -74,4 +74,4 @@
 
 ## 协作
 
-GitHub 上只用标签和里程碑：每个标签的意思写在[标签页](https://github.com/thoerwink8/fleet-dao/labels)，里程碑就是版本（没挂就是未排期），母单贴「母单」标签、子单用子议题挂在它下面，P0–P6 已关留作历史；怎么用、为什么这样定，见 design 第七节。开 issue 用上面的 `pnpm issue:new`，做完用 `pnpm issue:close` 关；开 PR 照模板填，写明「这个 PR 做完就关单」「对应计划」和「specs」；PR 不贴类别标签、不挂里程碑（里程碑页只数单子，#654），这几栏缺了只在合并闸里提醒、不挡合并（能不能合只看 merge-gate，见 design 第五节）；最后一栏「文档」写改了哪份文档，或「不适用」。
+GitHub 上只用标签和里程碑：每个标签的意思写在[标签页](https://github.com/thoerwink8/fleet-dao/labels)，里程碑就是版本（没挂就是未排期），母单贴「母单」标签、子单用子议题挂在它下面，P0–P6 已关留作历史；怎么用、为什么这样定，见 design 第七节。开 issue 用上面的 `pnpm issue:new`，做完用 `pnpm issue:close` 关；开 PR 照模板填，只有四栏：做了什么、怎么验证的、还欠什么、需求（要在合并时关单，「需求」栏下面另起一行写 `Closes #号`）；PR 不贴类别标签、不挂里程碑（里程碑页只数单子，#654）；能不能合只看 CI 和 merge-gate（见 design 第五节）。

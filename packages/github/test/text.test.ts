@@ -29,14 +29,13 @@ describe('PR 正文模板', () => {
   /** 栏目标题：行首的「**标题**：」。自己按文字认，不借 renderPrBody 的任何东西。 */
   const columns = (text: string) => [...text.matchAll(/^\*\*([^*\n]+)\*\*：/gm)].map((m) => m[1]);
 
-  it('栏目和仓里的 .github/pull_request_template.md 一样、顺序也一样：引擎开的 PR 和人开的长一个样', () => {
+  it('栏目和仓里的 .github/pull_request_template.md 一样、顺序也一样（四栏，#654）：引擎开的 PR 和人开的长一个样', () => {
     const template = readFileSync(
       new URL('../../../.github/pull_request_template.md', import.meta.url),
       'utf8',
     );
     const fromTemplate = columns(template);
-    expect(fromTemplate).not.toEqual([]); // 模板里一栏都没认出来，下面那条就成了拿空的去比
-    expect(fromTemplate).toEqual(expect.arrayContaining(['对应计划', 'specs'])); // CI 的 pr-fields 查的两栏
+    expect(fromTemplate).toEqual(['做了什么', '怎么验证的', '还欠什么', '需求']); // 模板里一栏都没认出来，下面那条就成了拿空的去比
     const body = renderPrBody({
       requirement: 12,
       subtask: 'B 验证码',
@@ -44,138 +43,74 @@ describe('PR 正文模板', () => {
       verified: ['pnpm check'],
       owed: ['过期提示放到子任务 C'],
       risks: ['旧的登录接口还在用'],
-      plan: 'P1「工作流」',
-      specs: 'specs/12-登录验证码/',
-      changedFiles: ['docs/design.md'],
     });
     expect(columns(body)).toEqual(fromTemplate);
   });
 
-  it('16 行以内：条目多了从最长的一栏砍，砍掉的写「另有 N 条」；风险并进「还欠什么」', () => {
+  it('14 行以内：条目多了从最长的一栏砍，砍掉的写「另有 N 条」；风险并进「还欠什么」', () => {
     const body = renderPrBody({
       requirement: 12,
       subtask: 'B 验证码',
-      did: Array.from({ length: 12 }, (_, i) => `改动 ${i}`),
+      did: Array.from({ length: 20 }, (_, i) => `改动 ${i}`),
       verified: ['pnpm check', 'CI 链接'],
       owed: ['过期提示放到子任务 C'],
       risks: ['旧的登录接口还在用'],
-      plan: 'P1「工作流」',
-      specs: 'specs/12-登录验证码/',
-      changedFiles: ['packages/web/src/login.tsx'],
     });
     const lines = body.split('\n');
     expect(lines.length).toBeLessThanOrEqual(PR_BODY_MAX_LINES);
     expect(body).toContain('- ……另有');
     expect(body).toContain('**还欠什么**：\n- 过期提示放到子任务 C\n- 风险：旧的登录接口还在用');
-    expect(lines.slice(-8)).toEqual([
-      '**需求**：#12 · 子任务 B 验证码',
-      '**认领**：引擎',
-      '**修提醒**：无',
-      '**这个 PR 做完就关单**：否（引擎合并后第 7 步自己关单）',
-      '**对应计划**：P1「工作流」',
-      '**specs**：specs/12-登录验证码/',
-      '**档位**：（没写）',
-      '**文档**：不适用',
-    ]);
+    expect(lines.at(-1)).toBe('**需求**：#12 · 子任务 B 验证码');
   });
 
-  it('「文档」按改到的文件写：只认仓根 README 和 docs 下的 design、ops、plan，顺序同模板；一份没改写「不适用」', () => {
-    const docs = (changedFiles: string[]) =>
-      renderPrBody({ did: ['a'], verified: ['b'], plan: 'P1「工作流」', specs: null, changedFiles })
-        .split('\n')
-        .at(-1);
-    expect(docs(['docs/plan.md', 'packages/x.ts', 'README.md'])).toBe('**文档**：README、plan');
-    expect(docs(['deploy/README.md', 'docs/reference/deploy.md', 'packages/x.ts'])).toBe('**文档**：不适用');
+  it('没有需求号写「无」，还欠的没有写「无」；按推荐先做了、修提醒没有就不占栏', () => {
+    expect(renderPrBody({ did: ['a'], verified: ['b'] })).toBe(
+      ['**做了什么**：', '- a', '**怎么验证的**：', '- b', '**还欠什么**：无', '**需求**：无'].join('\n'),
+    );
   });
 
-  it('没有需求号写「无」，还欠的、按推荐先做了的没有写「无」', () => {
-    const body = renderPrBody({
-      did: ['a'],
-      verified: ['b'],
-      plan: 'P1「工作流」',
-      specs: null,
-      changedFiles: [],
-    });
-    expect(body).toContain('**还欠什么**：无\n**按推荐先做了**：无\n**需求**：无\n**认领**：引擎\n');
-  });
-
-  it('按推荐先做了（#259）：问创始人的岔路一条一行，排在「还欠什么」后面', () => {
+  it('按推荐先做了（#259）：有才写，问创始人的岔路一条一行，排在「还欠什么」后面、「需求」前面', () => {
     const body = renderPrBody({
       did: ['a'],
       verified: ['b'],
       assumed: ['验证码几位？ → 先按推荐做了「6 位」，创始人还没回'],
-      plan: 'P1「工作流」',
-      specs: null,
-      changedFiles: [],
     });
     expect(body).toContain(
-      '**还欠什么**：无\n**按推荐先做了**：\n- 验证码几位？ → 先按推荐做了「6 位」，创始人还没回\n',
+      '**还欠什么**：无\n**按推荐先做了**：\n- 验证码几位？ → 先按推荐做了「6 位」，创始人还没回\n**需求**：无',
     );
   });
 
-  it('specs 给 null 写「不适用」；对应计划、specs、档位给空的或没给写「（没写）」（合并闸照样判红），不冒充填了', () => {
-    const tail = (plan: string, specs: string | null, tier?: string) =>
-      renderPrBody({
-        did: ['a'],
-        verified: ['b'],
-        plan,
-        specs,
-        ...(tier === undefined ? {} : { tier }),
-        changedFiles: [],
-      })
-        .split('\n')
-        .slice(-4, -1);
-    expect(tail('P0「仓骨架」', null, '直接合（纯文档）')).toEqual([
-      '**对应计划**：P0「仓骨架」',
-      '**specs**：不适用',
-      '**档位**：直接合（纯文档）',
-    ]);
-    expect(tail(' ', '', ' ')).toEqual([
-      '**对应计划**：（没写）',
-      '**specs**：（没写）',
-      '**档位**：（没写）',
-    ]);
-    expect(tail('P0「仓骨架」', null)[2]).toBe('**档位**：（没写）');
-  });
-
-  it('「这个 PR 做完就关单」一律写「否」（#241）：GitHub 替引擎关了单，接活当成叫停，第 7 步的关单评论和记账就做不完', () => {
-    const body = renderPrBody({
-      requirement: 12,
-      did: ['做完了 closes #12'],
-      verified: ['ok'],
-      plan: 'v1 Fusion 接活',
-      specs: 'specs/12-x/',
-      changedFiles: ['specs/12-x/结果.md'],
-    });
-    expect(body).toContain(
-      '**需求**：#12\n**认领**：引擎\n**修提醒**：无\n**这个 PR 做完就关单**：否（引擎合并后第 7 步自己关单）\n',
-    );
-    expect(hasCloseKeywords(body)).toBe(false);
-  });
-
-  it('「修提醒」：写了修哪几条提醒就照写（驾驶舱据此显示修到哪），没写是「无」', () => {
+  it('「修提醒」：写了修哪几条提醒就多写一行放最后（驾驶舱据此显示修到哪），没写就没有这一栏', () => {
     const body = renderPrBody({
       requirement: 12,
       did: ['修了'],
       verified: ['ok'],
-      plan: 'v1 Fusion 接活',
-      specs: null,
-      changedFiles: [],
       fixesAlerts: ['watchdog:job:backup:after-12', 'pool-hold:x'],
     });
-    expect(body).toContain('**修提醒**：watchdog:job:backup:after-12 pool-hold:x\n');
+    expect(body.split('\n').at(-1)).toBe('**修提醒**：watchdog:job:backup:after-12 pool-hold:x');
+    expect(renderPrBody({ did: ['修了'], verified: ['ok'] })).not.toContain('修提醒');
+  });
+
+  it('【故意造出的失败】旧模板的栏（认领、这个 PR 做完就关单、对应计划、specs、档位、文档）一个都不写（#654）', () => {
+    const body = renderPrBody({ requirement: 12, did: ['a'], verified: ['b'], assumed: ['x'] });
+    for (const old of ['认领', '这个 PR 做完就关单', '对应计划', 'specs', '档位', '文档']) {
+      expect(body, old).not.toContain(`**${old}**`);
+    }
+  });
+
+  it('引擎开的 PR 不关单（#241：GitHub 替引擎关了单，接活当成叫停，第 7 步的关单评论和记账就做不完）：条目里的关单词也改成「关联」', () => {
+    const body = renderPrBody({
+      requirement: 12,
+      did: ['做完了 closes #12'],
+      verified: ['ok'],
+    });
+    expect(hasCloseKeywords(body)).toBe(false);
+    expect(body).toContain('- 做完了 关联 #12');
+    expect(body).toContain('**需求**：#12');
   });
 
   it('条目里的关单词也改掉', () => {
-    expect(
-      renderPrBody({
-        did: ['fixes #3'],
-        verified: ['ok'],
-        plan: 'P1「工作流」',
-        specs: null,
-        changedFiles: [],
-      }),
-    ).toContain('- 关联 #3');
+    expect(renderPrBody({ did: ['fixes #3'], verified: ['ok'] })).toContain('- 关联 #3');
   });
 });
 

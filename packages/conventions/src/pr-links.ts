@@ -2,10 +2,9 @@
 // 走同一处），驾驶舱、看板、`alert show` 据此现算「PR 开着 / 合进主线 / 法国已发布」（提醒派单已经删掉，#445）。
 // 挂的单 = 「需求」栏（没有再看标题）的 #号（认法只有一处，pr-columns.ts 的 linkedIssue）——
 // 加上 GitHub 合并时会关的关单词（close-rule.ts 的 closingIssues，和合并闸同一个认法），只算同仓的。
-// 修的提醒 = 「修提醒」栏（.github/pull_request_template.md），写提醒的键或编号。
+// 修的提醒 = 「修提醒」栏（模板注释里讲的、有这个情况才多写一行的栏），写提醒的键或编号。
 import { closingIssues } from './close-rule.ts';
-import { linkedIssue } from './pr-columns.ts';
-import { prColumns } from './pr-fields.ts';
+import { linkedIssue, prColumns } from './pr-columns.ts';
 
 /** PR 模板里写这个 PR 修哪几条提醒的那一栏。 */
 export const FIX_ALERT_COLUMN = '修提醒';

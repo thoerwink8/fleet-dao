@@ -99,11 +99,6 @@ export interface OpenPrInput {
   /** 字符串原样用；给结构就按仓里的 PR 模板渲染（renderPrBody）。 */
   body: string | PrBodyInput;
   draft?: boolean | undefined;
-  /**
-   * design §7：PR 的类别标签、里程碑对齐到这张需求 issue（以 issue 为准，复用的旧 PR 身上不对的会改掉；
-   * issue 自己贴了两个类别报 ISSUE_CATEGORY_CONFLICT；读不到 issue 就报错，不当「issue 没标签」）。
-   */
-  inheritFrom?: { issueNumber: number } | undefined;
 }
 
 export interface OpenPrResult {
@@ -116,93 +111,6 @@ export interface OpenPrResult {
   headMatches: boolean;
   /** PR 的作者（按分支找到别人开的 PR 时，不是「干活的」机器人）。 */
   author: string | null;
-  /** 没给 inheritFrom 时不存在。这次对齐到 PR 上的类别标签与里程碑；PR 原本已经有的也算在内（不是新加的才算）。 */
-  inherited?: { labels: string[]; milestone: string | null } | undefined;
-}
-
-/** design §7：类别标签互斥（这个固定集合里恰好一个），PR 跟 issue 贴同一个。 */
-export const CATEGORY_LABELS = ['需求', '缺陷', '杂项'] as const;
-
-const IssueLabelsAndMilestone = z.object({
-  labels: z.array(z.object({ name: z.string() })),
-  milestone: z.object({ number: z.number(), title: z.string() }).nullable(),
-});
-
-/**
- * 把 PR 的类别标签、里程碑对齐到 issue：以 issue 为准（人要改类别、换阶段就改 issue，PR 下一轮开 PR 时跟上）。
- * 复用已有的 PR 时它身上可能是旧的（issue 后来改过类别、换过里程碑）：只加不减会留下两个类别、旧里程碑，pr-fields 一直红。
- * 所以 PR 身上别的类别标签摘掉、issue 的补上，里程碑和 issue 的不是同一个就改成 issue 的；类别以外的标签不碰。
- * issue 自己贴了不止一个类别：没法判以哪个为准，明确报 ISSUE_CATEGORY_CONFLICT 等人把 issue 改成一个，PR 一样不动。
- * issue 没有类别、没有里程碑：没有可对齐的，PR 上原有的不动。
- * PR 在 GitHub 眼里也是一张 issue，标签/里程碑走 /issues/ 这一套接口，不是 /pulls/。
- * 读 issue 或 PR 失败让它原样抛出去：读不到不等于「没有标签」。
- */
-async function inheritFromIssue(
-  deps: Deps,
-  repo: RepoRef,
-  prNumber: number,
-  issueNumber: number,
-  signal: AbortSignal | undefined,
-): Promise<{ labels: string[]; milestone: string | null }> {
-  const base = `/repos/${enc(repo.owner)}/${enc(repo.name)}/issues`;
-  const auth = { as: 'engine' as const, repo };
-  const [issueRes, prRes] = await Promise.all([
-    deps.client.request({ method: 'GET', path: `${base}/${issueNumber}`, auth, signal }),
-    deps.client.request({ method: 'GET', path: `${base}/${prNumber}`, auth, signal }),
-  ]);
-  const issue = IssueLabelsAndMilestone.safeParse(issueRes.data);
-  if (!issue.success) throw unexpected(`读 issue #${issueNumber} 的标签与里程碑`, issueRes.data);
-  const pr = IssueLabelsAndMilestone.safeParse(prRes.data);
-  if (!pr.success) throw unexpected(`读 PR #${prNumber} 的标签与里程碑`, prRes.data);
-
-  const issueLabels = new Set(issue.data.labels.map((l) => l.name));
-  const wanted = CATEGORY_LABELS.filter((l) => issueLabels.has(l));
-  if (wanted.length > 1) {
-    throw new GitHubError(
-      'ISSUE_CATEGORY_CONFLICT',
-      `issue #${issueNumber} 同时贴了 ${wanted.join('、')}：类别只能有一个，PR #${prNumber} 没法照抄。在 issue 上只留一个再继续`,
-      { details: { issueNumber, prNumber, labels: wanted } },
-    );
-  }
-  const prLabels = new Set(pr.data.labels.map((l) => l.name));
-  let labels: string[] = CATEGORY_LABELS.filter((l) => prLabels.has(l));
-  const [want] = wanted;
-  if (want !== undefined) {
-    for (const name of labels.filter((l) => l !== want)) {
-      // 404 = 已经不在了（别人刚摘掉）：要的就是它不在
-      await deps.client.request({
-        method: 'DELETE',
-        path: `${base}/${prNumber}/labels/${enc(name)}`,
-        auth,
-        allow: [404],
-        signal,
-      });
-    }
-    if (!prLabels.has(want)) {
-      await deps.client.request({
-        method: 'POST',
-        path: `${base}/${prNumber}/labels`,
-        auth,
-        body: { labels: [want] },
-        signal,
-      });
-    }
-    labels = [want];
-  }
-
-  let milestone = pr.data.milestone?.title ?? null;
-  const target = issue.data.milestone;
-  if (target && pr.data.milestone?.number !== target.number) {
-    await deps.client.request({
-      method: 'PATCH',
-      path: `${base}/${prNumber}`,
-      auth,
-      body: { milestone: target.number },
-      signal,
-    });
-    milestone = target.title;
-  }
-  return { labels, milestone };
 }
 
 interface PrReceipt {
@@ -355,9 +263,6 @@ export async function openPr(
   // 认回声：开 PR 的回执；再加上这次回读——引擎每推一轮都会调 openPr，推送带来的 PR 更新也就认得出
   if (!replay && value.updatedAt) await pullEcho(deps, repo, pr.number, value.updatedAt, 'agent');
   if (pr.head.sha === input.head) await pullEcho(deps, repo, pr.number, pr.updated_at, 'agent');
-  const inherited = input.inheritFrom
-    ? await inheritFromIssue(deps, repo, pr.number, input.inheritFrom.issueNumber, ctx.signal)
-    : undefined;
   return {
     number: pr.number,
     url: pr.html_url,
@@ -365,7 +270,6 @@ export async function openPr(
     created: !replay,
     headMatches: pr.head.sha === input.head,
     author,
-    inherited,
   };
 }
 

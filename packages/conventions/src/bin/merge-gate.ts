@@ -31,9 +31,7 @@ const { code, lines } = await runMergeGate({
 });
 const inActions = env.GITHUB_ACTIONS === 'true';
 for (const line of lines) {
-  // 必填栏只提醒：黄色警告，不算红
-  if (line.trim().startsWith('提醒：')) console.log(inActions ? annotation(line.trim(), 'warning') : line);
-  else if (code === 0) console.log(line);
+  if (code === 0) console.log(line);
   else console.error(inActions && !line.startsWith('PR #') ? annotation(line.trim()) : line);
 }
 process.exitCode = code;
