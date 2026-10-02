@@ -34,7 +34,7 @@ describe('演示版：模块开关', () => {
     // 主页只在正式驾驶舱有（导航给它的没有 module），演示版里只有 /quota 列出来。
     expect(visibleNav().flatMap((g) => g.items.map((i) => i.to))).toEqual(['/quota']);
     expect(demoBlocked('/')).toBe(true);
-    expect(demoBlocked('/dispatch')).toBe(true);
+    expect(demoBlocked('/schedules')).toBe(true);
     expect(demoBlocked('/demo-links')).toBe(true);
     expect(demoBlocked('/models')).toBe(true);
     // 不是导航里的路径交给 404 页
@@ -42,10 +42,10 @@ describe('演示版：模块开关', () => {
   });
 
   test('侧栏照范围列，底部写明是假数据', async () => {
-    scope(['board', 'dispatch']);
+    scope(['board', 'quota']);
     renderApp(<SidebarNav />, { api: demoApi() });
-    expect(screen.getByRole('link', { name: /调度台/ })).toBeTruthy();
-    expect(screen.queryByRole('link', { name: /额度/ })).toBeNull();
+    expect(screen.getByRole('link', { name: /额度/ })).toBeTruthy();
+    expect(screen.queryByRole('link', { name: /定时任务/ })).toBeNull();
     expect(screen.queryByRole('link', { name: /演示版/ })).toBeNull();
     expect(screen.getByText('子午')).toBeTruthy();
     expect(screen.getByText('假数据（演示）')).toBeTruthy();
@@ -56,13 +56,13 @@ describe('演示版：模块开关', () => {
     renderApp(
       <Routes>
         <Route element={<Shell />}>
-          <Route path="dispatch" element={<p>调度台的页面</p>} />
+          <Route path="schedules" element={<p>定时任务的页面</p>} />
         </Route>
       </Routes>,
-      { api: demoApi(), route: '/dispatch' },
+      { api: demoApi(), route: '/schedules' },
     );
     expect(await screen.findByText('演示版没开放这一块')).toBeTruthy();
-    expect(screen.queryByText('调度台的页面')).toBeNull();
+    expect(screen.queryByText('定时任务的页面')).toBeNull();
     expect(screen.getByText('演示版·全是假数据，操作不会有任何影响')).toBeTruthy();
     expect(screen.getByText('这条演示链接已过期，下面按默认范围展示。')).toBeTruthy();
     // 通知没开：顶栏没有提醒的铃铛
@@ -70,16 +70,16 @@ describe('演示版：模块开关', () => {
   });
 
   test('开了的模块照常显示', async () => {
-    scope(['board', 'dispatch']);
+    scope(['board', 'schedules']);
     renderApp(
       <Routes>
         <Route element={<Shell />}>
-          <Route path="dispatch" element={<p>调度台的页面</p>} />
+          <Route path="schedules" element={<p>定时任务的页面</p>} />
         </Route>
       </Routes>,
-      { api: demoApi(), route: '/dispatch' },
+      { api: demoApi(), route: '/schedules' },
     );
-    expect(await screen.findByText('调度台的页面')).toBeTruthy();
+    expect(await screen.findByText('定时任务的页面')).toBeTruthy();
   });
 });
 
@@ -122,11 +122,12 @@ describe('演示版：数据层', () => {
     expect((await api.board('r-orbit')).tasks.every((t) => t.title === `需求 #${t.issueNumber}`)).toBe(true);
   });
 
-  test('只开调度台：操作记录只给改路由顺序的那几条（调度台的「最近改动」要用）', async () => {
-    scope(['dispatch']);
-    const res = await demoApi().audit();
-    expect(res.items.length).toBeGreaterThan(0);
-    expect(new Set(res.items.map((e) => e.action))).toEqual(new Set(['stage_policy.update']));
+  test('没开操作记录：前端直回「没开放」，不给数据', async () => {
+    scope(['board']);
+    const err = await demoApi()
+      .audit()
+      .catch((e: unknown) => e);
+    expect((err as ApiError).code).toBe('demo_hidden');
   });
 
   test('访客：不用登录，名字是访客', async () => {

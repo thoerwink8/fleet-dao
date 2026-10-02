@@ -871,8 +871,6 @@ export const UpdateSettingResponse = z.object({ setting: SettingSchema });
 export const DEMO_MODULES = [
   'board',
   'task',
-  'dispatch',
-  'channels',
   'quota',
   'schedules',
   'notifications',
@@ -887,10 +885,19 @@ export const DemoModuleSchema = z.enum(DEMO_MODULES);
  */
 export const DemoDetailSchema = z.enum(['status', 'titles', 'process']);
 
-const DemoModuleList = z
-  .array(DemoModuleSchema)
-  .max(DEMO_MODULES.length)
-  .refine((ms) => new Set(ms).size === ms.length, { message: '同一个模块不能出现两次' });
+/**
+ * 删掉的模块（调度台、渠道页，#556）：法国上已经写下的范围文件（default.json、各链接的）里还有它们，
+ * 读的时候丢掉、不当成「读不懂」——否则演示链接列表、每小时撤过期链接、香港同步都会整个停下。
+ */
+export const RETIRED_DEMO_MODULES: readonly string[] = ['dispatch', 'channels'];
+
+const DemoModuleList = z.preprocess(
+  (v) => (Array.isArray(v) ? v.filter((m) => !RETIRED_DEMO_MODULES.includes(m)) : v),
+  z
+    .array(DemoModuleSchema)
+    .max(DEMO_MODULES.length)
+    .refine((ms) => new Set(ms).size === ms.length, { message: '同一个模块不能出现两次' }),
+);
 
 /**
  * 可见范围文件：后端发布到静态托管上，演示版只读它（法国停了照样能看）。演示链接的那份按链接口令的

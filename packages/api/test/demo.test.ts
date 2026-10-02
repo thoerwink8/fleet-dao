@@ -9,6 +9,7 @@ import {
   DemoDetailSchema,
   DemoLinksResponse,
   DemoScopeSchema,
+  RETIRED_DEMO_MODULES,
   UpdateDemoDefaultResponse,
 } from '@fleet-dao/shared';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -188,7 +189,13 @@ describe('推到香港的脚本认得后端写的文件（deploy/france/fleet-de
   );
 
   it('脚本认的模块、细节级别和约定里的一致', () => {
-    expect(script.match(/^MODULES='([^']+)'/m)?.[1]?.split('|')).toEqual([...DEMO_MODULES]);
+    // 删掉的模块线上老文件里还有，脚本照收（RETIRED_DEMO_MODULES）
+    expect(
+      script
+        .match(/^MODULES='([^']+)'/m)?.[1]
+        ?.split('|')
+        .sort(),
+    ).toEqual([...DEMO_MODULES, ...RETIRED_DEMO_MODULES].sort());
     expect(script.match(/\\"detail\\":\\"\(([a-z|]+)\)\\"/)?.[1]?.split('|')).toEqual(
       DemoDetailSchema.options,
     );
@@ -227,5 +234,50 @@ describe('演示版的配置', () => {
     );
     expect(() => loadConfig({ ...base, FLEET_DEMO_DIR: 'relative/dir' })).toThrow(/FLEET_DEMO_DIR/);
     expect(loadConfig(base).demoDir).toBeNull();
+  });
+});
+
+describe('删掉的模块（调度台、渠道，#556）', () => {
+  it('【故意造出的失败】法国上老的 default.json 还带 dispatch、channels：照读，这两个丢掉，列表不 500', async () => {
+    const { h, session, dir } = await setup();
+    // 法国 2026-10-02 实际的 default.json 就是这个样子
+    const old = {
+      v: 1,
+      modules: [
+        'board',
+        'task',
+        'dispatch',
+        'channels',
+        'quota',
+        'schedules',
+        'notifications',
+        'audit',
+        'settings',
+      ],
+      detail: 'status',
+    };
+    expect(DemoScopeSchema.parse(old).modules).not.toContain('dispatch');
+    await createDirDemoPublisher(dir).putDefault(
+      DemoScopeSchema.parse({ v: 1, modules: [], detail: 'status' }),
+    );
+    writeFileSync(join(dir, 'scopes', 'default.json'), JSON.stringify(old));
+    const res = await h.cockpit.request('/api/demo/links', { headers: { cookie: session.cookie } });
+    expect(res.status).toBe(200);
+    const body = DemoLinksResponse.parse(await res.json());
+    expect(body.defaultScope?.modules).toEqual([
+      'board',
+      'task',
+      'quota',
+      'schedules',
+      'notifications',
+      'audit',
+      'settings',
+    ]);
+  });
+
+  it('认不出的模块照样读不懂（只放过删掉的那两个）', () => {
+    expect(DemoScopeSchema.safeParse({ v: 1, modules: ['board', 'secrets'], detail: 'status' }).success).toBe(
+      false,
+    );
   });
 });

@@ -13,10 +13,7 @@ const PLANS: Record<string, { what: string; bullets: string[]; related: { to: st
       '模型下架后，对应路由自动离线并推通知',
       '新模型先考试，考过了再进调度台',
     ],
-    related: [
-      { to: '/dispatch', label: '调度台' },
-      { to: '/channels', label: '渠道与账号' },
-    ],
+    related: [{ to: '/quota', label: '额度' }],
   },
   '/billing': {
     what: '花了多少、值不值：每个会话记模型、路由、token、耗时和所属任务。',
@@ -37,7 +34,7 @@ const PLANS: Record<string, { what: string; bullets: string[]; related: { to: st
       '战绩明显差的路由调度会往后放；样本少时不动',
       '约 10% 的任务试探派给非首选路由，攒战绩',
     ],
-    related: [{ to: '/dispatch', label: '调度台' }],
+    related: [{ to: '/schedules', label: '定时任务' }],
   },
   '/judge': {
     what: `${brand.terms.judgeQuiz}的记录：九个接入点，每道题的答案、把握度和准确率。`,

@@ -9,7 +9,6 @@ import { createMockApi, type MockApi } from '../api/mock/server';
 import { Topbar } from '../components/shell/topbar';
 import { targetOf, useTaskActions } from '../components/task-actions';
 import AuditPage from '../routes/audit';
-import ChannelsPage from '../routes/channels';
 import NotificationsPage from '../routes/notifications';
 import SchedulesPage from '../routes/schedules';
 import SettingsPage from '../routes/settings';
@@ -49,13 +48,6 @@ describe('读不到时照实说，不冒充「没有」', () => {
     renderApp(<AuditPage />, { api: failing('audit') });
     expect(await screen.findByText(/操作记录没读成/)).toBeTruthy();
     expect(screen.queryByText('没有符合条件的记录')).toBeNull();
-  });
-
-  test('渠道与账号：账号池没读成时不说「这个渠道下还没有账号池」', async () => {
-    renderApp(<ChannelsPage />, { api: failing('pools') });
-    expect(await screen.findByText(/账号池没读成/)).toBeTruthy();
-    expect((await screen.findAllByText('账号池没读到')).length).toBeGreaterThan(0);
-    expect(screen.queryByText('这个渠道下还没有账号池')).toBeNull();
   });
 
   test('顶栏的铃：没读成显示「!」，不显示成 0 条', async () => {

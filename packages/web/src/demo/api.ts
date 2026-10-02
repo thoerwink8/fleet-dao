@@ -62,14 +62,8 @@ export function createDemoApi(inner: MockApi): FleetApi {
       return inner.resolveNotification(id);
     },
     async audit(query) {
-      // 调度台的「最近改动」也读操作记录：只开了调度台时，只给改路由顺序的那几条。
       if (canSee('audit')) return redactAudit(await inner.audit(query), detailLevel());
-      if (!canSee('dispatch')) throw hidden('操作记录');
-      const res = await inner.audit(query);
-      return redactAudit(
-        { ...res, items: res.items.filter((e) => e.action === 'stage_policy.update') },
-        detailLevel(),
-      );
+      throw hidden('操作记录');
     },
     async settings() {
       need('settings', '设置');
