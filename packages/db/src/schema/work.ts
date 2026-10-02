@@ -486,7 +486,7 @@ export const pullRequests = pgTable(
     /** 合并的时刻、合进默认分支的那个提交（squash 的那一个）；没合、没读到是空。 */
     mergedAt: timestamp('merged_at', tz),
     mergeSha: text('merge_sha'),
-    /** 正文挂的单：「需求」栏（没有再看标题）的 #号、关单词（Closes #号），同仓的；和 PR 补贴、合并闸同一个认法。 */
+    /** 正文挂的单：「需求」栏（没有再看标题）的 #号、关单词（Closes #号），同仓的；认法只有一处（conventions 的 linkedIssue）。 */
     issueRefs: integer('issue_refs').array().notNull().default(sql`'{}'::integer[]`),
     /** 正文「修提醒」栏写的提醒（键或编号）。 */
     alertRefs: text('alert_refs').array().notNull().default(sql`'{}'::text[]`),

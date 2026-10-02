@@ -170,7 +170,7 @@ export function heldByOtherText(c: IssueClaim, dbNow: string): string {
 // —— 「认领对得上」（#348，方案「认领对得上」）——
 // 引擎机器人在每个开着的 PR 当前头上贴 commit status「认领对得上」，合并闸（@fleet-dao/conventions 的 merge-gate）认它。
 // 这里只判：PR 挂的是哪张单、正文「认领」栏写的认领号由外壳用 @fleet-dao/conventions 的 linkedIssue、prClaimId 认（和
-// pr-labels、合并闸同一个认法），这张单此刻的认领由外壳从库里读。状态说明要短（GitHub 限 140 个字符）；「过」只有下面
+// 认法只有一处），这张单此刻的认领由外壳从库里读。状态说明要短（GitHub 限 140 个字符）；「过」只有下面
 // 写明的几种，其余一律红——红了合不进去，所以原因写清现在归谁、怎么办。
 
 /** 引擎贴的 commit status 名字；和 @fleet-dao/conventions merge-gates.ts 的 CLAIM_MATCH_CONTEXT 是同一个（那个包不依赖 core，后端的测试对着两边）。 */
