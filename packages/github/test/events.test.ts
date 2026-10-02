@@ -374,7 +374,11 @@ describe('对账与补漏', () => {
     expect(report.outcome).toBe('ok');
     expect(
       seen
-        .filter((s) => s.event === 'pull_request' && (s.payload.pull_request as { number: number }).number === opened.number)
+        .filter(
+          (s) =>
+            s.event === 'pull_request' &&
+            (s.payload.pull_request as { number: number }).number === opened.number,
+        )
         .map((s) => s.wake),
     ).toEqual([false]);
   });

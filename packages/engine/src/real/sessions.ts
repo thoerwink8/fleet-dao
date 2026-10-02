@@ -99,7 +99,6 @@ import {
 } from '../ports.ts';
 import { hostName } from '../routing/names.ts';
 import type { UserExec } from './exec.ts';
-import { sessionTestCommandOrStop } from './flow-gate.ts';
 import {
   type ContinueMode,
   type HostDriver,
@@ -1296,8 +1295,8 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     }
     // 资源上限先换算、先校验：不对就在登记这一行之前拒，库里不留没起也没结束的会话
     const limits = scopeLimitsOf(input.resources);
-    // 流程配置副本也先核（flow-gate.ts）：坏了、太旧不起；写码阶段项目没写测试命令明确失败。交代的命令记进这一行，交活认它
-    const testCommand = sessionTestCommandOrStop(task, input.stage, clock());
+    // 交代的测试命令记进这一行，交活认它（没有每仓流程配置了，直接用仓的 test_command）
+    const testCommand = task.repo.testCommand;
     let dir: string;
     if (kind === 'delivery' || isLeadKind(kind)) {
       // Fusion 的 Lead 每一步都在这张单的工作树里（续同一个会话要同一个目录；写方案、写结果就提交在分支上）

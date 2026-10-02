@@ -1,4 +1,4 @@
-import { type Repo, requirementWorkflowId, type Task } from '@fleet-dao/shared';
+import type { Repo, Task } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import type { BoardStore } from '../src/ports.ts';
 import { WorkflowGoneError, WorkflowTargetNotFoundError, WorkflowUnavailableError } from '../src/ports.ts';
@@ -8,7 +8,6 @@ import {
   createTemporalWorkflowControl,
   type EnginePollerSource,
   type NamespaceCheckClient,
-  notConnectedTemporal,
   type PollerSnapshot,
   requirementWorkflowIdForTask,
   type TemporalClientLike,

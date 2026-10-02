@@ -293,7 +293,9 @@ describe('对账补漏', () => {
     const result = await run();
     expect(result).toMatchObject({ outcome: 'partial', scanned: 1, found: 1 });
     expect(result.why).toContain('example/other');
-    expect(h.accepted.map((e) => e.deliveryId)).toEqual([pollDeliveryId(SLUG, 'pull', 48, pull(48, -10).updated_at)]);
+    expect(h.accepted.map((e) => e.deliveryId)).toEqual([
+      pollDeliveryId(SLUG, 'pull', 48, pull(48, -10).updated_at),
+    ]);
   });
 
   it('GitHub 读不到：这一轮报没查成（unscanned），不报 ok', async () => {

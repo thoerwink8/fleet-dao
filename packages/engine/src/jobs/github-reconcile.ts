@@ -1,13 +1,12 @@
-// 定时对账补漏（#43，specs/43-接活入口/方案-对账调度.md）：一轮 = 记下开始 → 同步各仓的流程配置副本（flow-config.ts）→
-// 调后端的 reconcileGitHub → 每天一次的关单对账（close-sweep.ts，#241，只在北京时间 9:00 起的那一轮）→ 每小时一次的单子
-// 打标挂版本（issue-groom.ts，#448）→ 把结局记进 schedule_runs。副本先同步：同一轮里重放「等着」的投递时，接活看到的就是新副本。
+// 定时对账补漏（#43，specs/43-接活入口/方案-对账调度.md）：一轮 = 记下开始 → 调后端的 reconcileGitHub（重投、轮询 PR、
+// 重放）→ 每天一次的关单对账（close-sweep.ts，#241，只在北京时间 9:00 起的那一轮）→ 每小时一次的单子
+// 打标挂版本（issue-groom.ts，#448）→ 把结局记进 schedule_runs。各仓的流程配置副本不再同步（没有每仓流程配置了，#556）。
 // 没跑成、一个仓都没查成、只查了一部分，都照实记成 failed / unscanned / partial，不记成 ok（没跑成 ≠ 没问题）；
 // 驾驶舱「定时任务」页和看门狗按 scheduled_jobs 登记的 expect_every_minutes 看它新不新鲜。
 import type { GitHubReconcileResult } from '@fleet-dao/api';
 import type { ScheduleResult } from '@fleet-dao/db';
 import type { GitHubReconcileRun } from '../contract.ts';
 import { type CloseSweepResult, closeSweepDue } from './close-sweep.ts';
-import type { FlowSyncResult } from './flow-config.ts';
 import { type IssueGroomResult, issueGroomDue } from './issue-groom.ts';
 
 /** 登记进 scheduled_jobs 的那一行：一次都没跑过也列得出来（看门狗按登记表查，不按跑过的记录查）。 */
@@ -30,9 +29,7 @@ export interface ScheduleRunLog {
 }
 
 export interface GitHubReconcileJobDeps {
-  /** 各仓的流程配置副本从仓里同步一遍（flow-config.ts 的 syncFlowConfigs）。 */
-  syncFlowConfigs(): Promise<FlowSyncResult>;
-  /** 后端的 reconcileGitHub（按受管的仓串起重投、轮询、查开放 issue、重放）。 */
+  /** 后端的 reconcileGitHub（按受管的仓串起重投、轮询 PR、重放）。 */
   reconcile(options: { since: Date }): Promise<GitHubReconcileResult>;
   /** 关单对账（close-sweep.ts 的 sweepClosing，#241）：只在 closeSweepDue 说到点的那一轮调。 */
   closeSweep(): Promise<CloseSweepResult>;
@@ -58,41 +55,6 @@ export class GitHubReconcileFailedError extends Error {
 }
 
 const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
-
-/**
- * 流程配置这一步并进这一轮的结局：有仓没查成（或整步没跑成）这一轮就不算查全（ok 降成 partial）；认不出的仓算发现的
- * 问题（found 加一，要人改仓里的文件）。原因都写进 why。副本本身、停派、提醒已经由 syncFlowConfigs 写好。
- */
-export function withFlowSync(
-  r: GitHubReconcileResult,
-  flow: FlowSyncResult | { failed: string },
-): GitHubReconcileResult {
-  const notes: string[] = [];
-  let found = r.found;
-  let unchecked = false;
-  if ('failed' in flow) {
-    unchecked = true;
-    notes.push(`流程配置没同步成：${flow.failed}`);
-  } else {
-    for (const repo of flow.repos) {
-      const why = repo.why ?? '没带原因';
-      if (repo.outcome === 'unread') {
-        unchecked = true;
-        notes.push(`流程配置 ${repo.repo} 没查成（${why}）${repo.blocked ? '，副本不能用、停派' : ''}`);
-      } else if (repo.outcome === 'invalid') {
-        found += 1;
-        notes.push(`流程配置 ${repo.repo} 认不出、停派（${why}）`);
-      }
-    }
-  }
-  if (notes.length === 0) return r;
-  return {
-    ...r,
-    outcome: unchecked && r.outcome === 'ok' ? 'partial' : r.outcome,
-    found,
-    why: [r.why, ...notes].filter(Boolean).join('；'),
-  };
-}
 
 /**
  * 关单对账这一步并进这一轮的结局（#241）：没到点（null）原样；新留的言算处理了的（found 加上）；整步没跑成、有仓没查成、
@@ -186,15 +148,8 @@ export async function runGitHubReconcileJob(deps: GitHubReconcileJobDeps): Promi
   const runId = await deps.runs.start(GITHUB_RECONCILE_JOB.id, startedAt);
   let result: ScheduleResult;
   try {
-    // 流程配置没同步成不挡对账本身（照样补收、重放）；这一轮记成没查全，原因写进去
-    let flow: FlowSyncResult | { failed: string };
-    try {
-      flow = await deps.syncFlowConfigs();
-    } catch (err) {
-      flow = { failed: message(err) };
-    }
     const since = new Date(startedAt.getTime() - GITHUB_RECONCILE_LOOKBACK_MS);
-    const reconciled = withFlowSync(await deps.reconcile({ since }), flow);
+    const reconciled = await deps.reconcile({ since });
     // 关单对账一天一次（#241）；没跑成不挡对账本身：这一轮记成没查全，第二天再来（留言、提醒都按键认，重跑不重复）
     let close: CloseSweepResult | { failed: string } | null = null;
     if ((deps.closeSweepDue ?? closeSweepDue)(startedAt)) {

@@ -1,15 +1,7 @@
 // 后端依赖的外部能力，一律按接口写：数据库（pg-store.ts 用 @fleet-dao/db 实现）、Temporal、飞书、GitHub 补收
 // 由各自的实现接进来；测试和本地开发用 memory-store.ts。两个 Store 实现过同一套契约测试（test/store-contract.ts），
 // 改这里的语义要两边一起改、契约测试跟着改。
-import type {
-  AskHold,
-  AskScope,
-  FlowReplica,
-  IssueClaim,
-  IssueFamily,
-  IssueMilestones,
-  IssueNow,
-} from '@fleet-dao/core';
+import type { AskHold, AskScope } from '@fleet-dao/core';
 import type {
   AuditEntrySchema,
   Ban,
@@ -23,7 +15,6 @@ import type {
   QuotaWindow,
   RealtimeTable,
   Repo,
-  RequirementStartInput,
   Route,
   ScheduleOutcome,
   SessionRun,
@@ -320,24 +311,9 @@ export interface UserStore {
   recordPasswordSuccess(userId: string): Promise<void>;
 }
 
-/**
- * 一个仓此刻的流程配置副本，给看板顶栏（repos 表这五列的原值）。
- * 提交是全长，截到前 7 位在视图里做。没有这个仓是 null，不是「还没同步」。
- */
-export interface RepoFlowRow {
-  source: 'project' | 'org_default' | null;
-  commit: string | null;
-  /** ISO。从没同步成过是 null。 */
-  syncedAt: string | null;
-  error: string | null;
-  unread: string | null;
-}
-
 export interface BoardStore {
   listRepos(): Promise<Repo[]>;
   getRepo(id: string): Promise<Repo | null>;
-  /** 这个仓的流程配置副本。没有这个仓（含编号不是 uuid）回 null。 */
-  getRepoFlow(repoId: string): Promise<RepoFlowRow | null>;
   /** 看板上的需求：没结束的，加上进入终态不到 7 天的。按优先级、再按建单先后排。 */
   listBoardTasks(repoId: string): Promise<Task[]>;
   getTask(id: string): Promise<Task | null>;
@@ -569,13 +545,9 @@ export interface GitHubStore {
   }): Promise<{ exhausted: number; stale: number }>;
 }
 
-/**
- * 受管的仓，带自动派活开关：autoDispatchSince = 打开的时刻，null = 关着（只收单、显示，不拉起工作流）。
- * flow = 流程配置的副本（repos 表的 flow_* 列，对账从仓里 .fleet/flow.json 同步）：认不出、太旧就停派（core 的 replicaVerdict）。
- */
+/** 受管的仓，带「让 AI 接活」开关：autoDispatchSince = 打开的时刻，null = 关着（引擎拉单不派）。 */
 export interface IntakeRepo extends Repo {
   autoDispatchSince: string | null;
-  flow: FlowReplica;
 }
 
 /** 改「让 AI 接活」开关的结果（setAutoDispatch）。 */

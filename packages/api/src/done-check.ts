@@ -12,10 +12,12 @@
 //    认不出的那一次也算最后一次）。Fusion 还在跑时这条不能拔。
 //
 // 以最后一次为准。带 PR 编号同时顺带核它的分支和状态（没被关、是本会话的分支）。
-import { CODE_STAGES } from '@fleet-dao/core';
 import type { DoneRequest, StageKind } from '@fleet-dao/shared';
 import type { z } from 'zod';
 import type { PullRequestRecord, TestRunRecord } from './ports.ts';
+
+/** 写码类的阶段：交活核对要这次会话跑过测试命令的证据，没有测试命令就不起。 */
+const CODE_STAGES: ReadonlySet<StageKind> = new Set<StageKind>(['execute', 'ui']);
 
 /**
  * kind=test 的进度载荷 → 一次测试记录。插头写的是 { command, passed } 或 { command, unknownBecause }；

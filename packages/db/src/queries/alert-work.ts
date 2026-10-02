@@ -19,12 +19,25 @@ import {
   tasks,
 } from '../schema/index.ts';
 import type { AlertRow } from './alerts.ts';
-import { readDbNow } from './seat.ts';
 
 export type AlertWorkRow = typeof alertWork.$inferSelect & { owner: string; name: string };
 export type AlertSilenceRow = typeof alertSilences.$inferSelect;
 export type PullRequestRefRow = typeof pullRequests.$inferSelect & { owner: string; name: string };
 export type ClaimRow = typeof issueClaims.$inferSelect;
+/** 认领账的一行（issue_claims）。没有新认领了（#556），提醒的「谁在处理」还读老的行；整张表等创始人点头再删。 */
+export type IssueClaimRow = ClaimRow;
+
+/** 库的 now()，毫秒数（两种驱动都读成数字）。 */
+const nowMs = sql<number>`floor(extract(epoch from now()) * 1000)::float8`.mapWith(Number);
+/** 只有一行的表：读库的 now() 用。 */
+const ONE_ROW = sql`(values (1)) as one (x)`;
+
+/** 库的 now()。 */
+export async function readDbNow(db: Db): Promise<Date> {
+  const [row] = await db.select({ now: nowMs }).from(ONE_ROW);
+  if (!row) throw new Error('读库的时钟时连一行都没回（select 一行常量也没回来）');
+  return new Date(row.now);
+}
 
 /** 一批提醒现算处理状态要的全部行（按库的 now 读的）。 */
 export interface AlertWorkRaw {

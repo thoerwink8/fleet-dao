@@ -12,8 +12,7 @@ import {
   readAlertWork,
 } from '../src/queries/alert-work.ts';
 import { upsertAlert } from '../src/queries/engine.ts';
-import { takeClaimRow } from '../src/queries/seat.ts';
-import { alertSilences, auditLog, pullRequests } from '../src/schema/index.ts';
+import { alertSilences, auditLog, issueClaims, pullRequests } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import { addRepo, addTask, expectViolation, NOW } from './helpers.ts';
 
@@ -43,31 +42,31 @@ async function pr(
   });
 }
 
+/** 往认领账里直接写一行（老的行：没有新认领了，提醒的「谁在处理」还读它）。 */
 async function claimOn(repoId: string, issueNumber: number, over: { prs?: number[]; engine?: boolean } = {}) {
-  const got = await takeClaimRow(t.db, {
-    repoId,
-    issueNumber,
-    claimId: randomUUID(),
-    ownerKind: over.engine ? 'engine' : 'worker',
-    ownerMachine: over.engine ? null : '本机',
-    ownerLabel: over.engine ? null : '工人A',
-    seatScope: over.engine ? null : 'main',
-    seatTerm: over.engine ? null : 3,
-    state: over.engine ? 'pending_start' : 'claimed',
-    workflowId: over.engine ? `req:acme/x#${issueNumber}` : null,
-    graceMinutes: 120,
-    note: null,
-  });
-  if (!got) throw new Error('认领没抢到');
-  if (over.prs?.length) {
-    await t.db.execute(
-      sql`update issue_claims set pr_numbers = ${sql`array[${sql.join(
-        over.prs.map((n) => sql`${n}`),
-        sql`, `,
-      )}]::integer[]`}, state = 'pr_open' where repo_id = ${repoId} and issue_number = ${issueNumber}`,
-    );
-  }
-  return got.value;
+  const [row] = await t.db
+    .insert(issueClaims)
+    .values({
+      repoId,
+      issueNumber,
+      claimId: randomUUID(),
+      ownerKind: over.engine ? 'engine' : 'worker',
+      ownerMachine: over.engine ? null : '本机',
+      ownerLabel: over.engine ? null : '工人A',
+      seatScope: over.engine ? null : 'main',
+      seatTerm: over.engine ? null : 3,
+      state: over.prs?.length ? 'pr_open' : over.engine ? 'pending_start' : 'claimed',
+      workflowId: over.engine ? `req:acme/x#${issueNumber}` : null,
+      prNumbers: over.prs ?? [],
+      graceMinutes: 120,
+      claimedAt: NOW,
+      heartbeatAt: NOW,
+      updatedAt: NOW,
+      note: null,
+    })
+    .returning();
+  if (!row) throw new Error('认领没写进去');
+  return row;
 }
 
 describe('findAlert：按编号或键找', () => {

@@ -43,11 +43,10 @@ import {
   UpdateStagePolicyResponse,
 } from '@fleet-dao/shared';
 import type { z } from 'zod';
-import { brand } from '#brand';
 import { sha256Hex } from '../../demo/scope';
 import { ApiError, type FleetApi } from '../client';
 import type { Ask, AuditEntry, DemoLink, LiveEvent, TaskState } from '../types';
-import type { MAsk, MLog, MockRepoFlow, MockState, MSubtask, MTask } from './model';
+import type { MAsk, MLog, MockState, MSubtask, MTask } from './model';
 import { createSeed, fakeAction, fakeUsage } from './seed';
 
 export interface MockOptions {
@@ -269,33 +268,8 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     return { id: repo.id, owner: repo.owner, name: repo.name, defaultBranch: repo.defaultBranch };
   }
 
-  // 文件名从品牌读。假数据写死三种样子，不在这里重算 45 分钟，也不拿 project 去填空的来源。
-  function flowView(row: MockRepoFlow) {
-    const commit =
-      row.commit == null || row.commit === ''
-        ? undefined
-        : row.commit.length <= 7
-          ? row.commit
-          : row.commit.slice(0, 7);
-    if (row.error) {
-      return {
-        paused: true as const,
-        why: `流程配置认不出：${row.error}。改好仓里的 ${brand.flow.fileName}，合进主线、对账读成后自动恢复`,
-        ...(row.source ? { source: row.source } : {}),
-        ...(commit ? { commit } : {}),
-        ...(row.syncedAt ? { syncedAt: row.syncedAt } : {}),
-      };
-    }
-    if (row.source && commit && row.syncedAt) {
-      return { paused: false as const, source: row.source, commit, syncedAt: row.syncedAt };
-    }
-    throw new Error('假数据的流程配置副本对不上：没有错误，也凑不齐来源、提交和同步时刻，不拿 project 顶');
-  }
-
   function boardOf(repoId: string) {
     const repo = repoView(repoId);
-    const replica = st.repoFlows[repoId];
-    if (!replica) throw new Error(`假数据没有仓 ${repoId} 的流程配置副本`);
     const tasks = st.tasks
       .filter((t) => t.task.repoId === repoId)
       .sort((a, b) => a.task.priority - b.task.priority || a.task.createdAt.localeCompare(b.task.createdAt));
@@ -326,7 +300,6 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
           priority: t.task.priority,
           requestedBy: t.task.requestedBy,
           createdAt: t.task.createdAt,
-          ...(t.task.flowSource ? { flowSource: t.task.flowSource } : {}),
           progress: {
             done: t.subtasks.filter((s) => s.subtask.state === 'merged').length,
             total: t.subtasks.length,
@@ -336,7 +309,6 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         };
       }),
       now: nowItems,
-      flow: flowView(replica),
       asOf: iso(),
     });
   }

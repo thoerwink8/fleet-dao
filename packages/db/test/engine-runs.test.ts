@@ -14,7 +14,6 @@ import {
   routeOutcomesSince,
   taskContext,
 } from '../src/queries/engine.ts';
-import { writeFlowReplica } from '../src/queries/flow.ts';
 import { pools, sessionRuns } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import {
@@ -490,7 +489,7 @@ describe('routeOutcomesSince', () => {
 });
 
 describe('taskContext', () => {
-  it('给出任务属于哪个仓、哪张 issue，连同仓的流程配置副本；测试命令只认副本里的（从没同步过就没有，不拿 test_command 列顶）', async () => {
+  it('给出任务属于哪个仓、哪张 issue，连同仓的测试命令（repos.test_command）', async () => {
     const repo = await addRepo(t.db, 'shop');
     const task = await addTask(t.db, repo.id, { issueNumber: 42, title: '标题', rawRequest: '原话' });
     expect(await taskContext(t.db, task.id)).toEqual({
@@ -500,48 +499,7 @@ describe('taskContext', () => {
       rawRequest: '原话',
       specDir: null,
       acceptance: [],
-      repo: {
-        id: repo.id,
-        owner: 'acme',
-        name: 'shop',
-        defaultBranch: 'main',
-        testCommand: null,
-        flow: {
-          repoId: repo.id,
-          owner: 'acme',
-          name: 'shop',
-          syncedAt: null,
-          error: null,
-          unread: null,
-          testCommand: null,
-          config: null,
-          source: null,
-          commit: null,
-          checkedAt: null,
-        },
-      },
-    });
-    await writeFlowReplica(
-      t.db,
-      repo.id,
-      {
-        write: 'synced',
-        config: { formatVersion: 1, testCommand: 'pnpm test:changed' },
-        source: 'project',
-        commit: 'c'.repeat(40),
-        testCommand: 'pnpm test:changed',
-      },
-      NOW,
-    );
-    expect((await taskContext(t.db, task.id))?.repo).toMatchObject({
-      testCommand: 'pnpm test:changed',
-      flow: {
-        syncedAt: NOW,
-        testCommand: 'pnpm test:changed',
-        source: 'project',
-        // 整份原样交出去（Fusion 起步前由 core 判认不认得出），不补默认值
-        config: { formatVersion: 1, testCommand: 'pnpm test:changed' },
-      },
+      repo: { id: repo.id, owner: 'acme', name: 'shop', defaultBranch: 'main', testCommand: 'pnpm check' },
     });
   });
 

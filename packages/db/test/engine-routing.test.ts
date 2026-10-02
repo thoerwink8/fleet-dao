@@ -96,7 +96,6 @@ describe('saveTaskSnapshot', () => {
       docs: { requirement: '需求.md' },
       lastProblem: null,
       subtasks: [],
-      claimEnd: null,
       ...over,
     });
   }
@@ -213,54 +212,30 @@ describe('saveTaskSnapshot', () => {
     expect(active.map((s) => [s.id, s.index])).toEqual([[ids.b, 0]]);
   });
 
-  it('Fusion 认出需求文档之前的快照（不带目录和文档）不动这两列；带了流程配置读自哪就记下，不带的快照不动它', async () => {
+  it('不带目录和文档的快照不动这两列：上一轮记下的不被冲成空', async () => {
     const repo = await addRepo(t.db);
     const task = await addTask(t.db, repo.id);
-    // 上一轮（重开之前）记下的：读自仓里的配置、三份文档
     await baseSnapshot(task.id, {
       specDir: 'specs/1-x',
       docs: { requirement: 'specs/1-x/需求.md', plan: 'specs/1-x/方案.md' },
-      flowSource: 'project',
     });
-    // 重开后新一轮刚开工：配置这回是全组织默认（仓里的文件删了），还没认出需求文档
     expect(
       await saveTaskSnapshot(t.db, {
         taskId: task.id,
         state: 'triaging',
-        phase: 'fusion:intake',
-        doing: '收单：看流程配置、认需求文档、建工作树',
-        lastProblem: '这个项目没有 .fleet/flow.json，按全组织默认的流程配置派',
-        flowSource: 'org_default',
+        phase: 'triage',
+        doing: '分诊',
+        lastProblem: null,
         subtasks: [],
-        claimEnd: null,
       }),
     ).toBe('saved');
     const [row] = await t.db.select().from(tasks).where(eq(tasks.id, task.id));
     expect(row).toMatchObject({
       state: 'triaging',
-      phase: 'fusion:intake',
+      phase: 'triage',
       specDir: 'specs/1-x',
       docs: { requirement: 'specs/1-x/需求.md', plan: 'specs/1-x/方案.md' },
-      flowSource: 'org_default',
     });
-    // 不带 flowSource 的快照（旧的需求工作流不读流程配置）：不把记下的冲成空
-    await baseSnapshot(task.id);
-    const [after] = await t.db.select().from(tasks).where(eq(tasks.id, task.id));
-    expect(after?.flowSource).toBe('org_default');
-  });
-
-  it('【失败】流程配置读自哪只认 project、org_default：别的值被库拦住', async () => {
-    const repo = await addRepo(t.db);
-    const task = await addTask(t.db, repo.id);
-    const wrong = 'default' as unknown as 'project';
-    await expectViolation(baseSnapshot(task.id, { flowSource: wrong }), 'tasks_flow_source_known');
-    await expectViolation(
-      t.db
-        .update(tasks)
-        .set({ flowSource: '' as unknown as 'project' })
-        .where(eq(tasks.id, task.id)),
-      'tasks_flow_source_known',
-    );
   });
 
   it('依赖指向快照外、库里也没有的子任务，被外键拦住', async () => {

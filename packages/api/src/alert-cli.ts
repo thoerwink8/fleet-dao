@@ -104,7 +104,8 @@ async function alertOf(alerts: AlertWorkPort, ref: string | undefined): Promise<
   const r = ref?.trim();
   if (!r) throw new AlertCliError(`要给提醒的键或编号（fleet-api alert show 看得到）。\n${ALERT_USAGE}`);
   const found = await alerts.find(r);
-  if (!found) throw new AlertCliError(`认不出提醒「${r}」：没有这个键或编号（fleet-api alert show 看开着的）`);
+  if (!found)
+    throw new AlertCliError(`认不出提醒「${r}」：没有这个键或编号（fleet-api alert show 看开着的）`);
   return found;
 }
 

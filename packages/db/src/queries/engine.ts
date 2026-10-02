@@ -33,8 +33,6 @@ import {
   tasks,
 } from '../schema/index.ts';
 import { type Blocker, type RouteCandidate, stageCandidates } from './candidates.ts';
-import { type FlowReplicaState, flowReplicaOf } from './flow.ts';
-import { followTaskOnEngineClaim } from './seat.ts';
 
 /** 起出来的会话进程在哪；会话状态、markSessionRunStarted 的输入用同一个形状。 */
 type RunHandle = { pid?: number; scope?: string };
@@ -343,17 +341,12 @@ export interface TaskContext {
     owner: string;
     name: string;
     defaultBranch: string;
-    /**
-     * 流程配置副本里的测试命令（flow_config 的 testCommand，不是给人看的 test_command 列）；项目没写、从没同步成过
-     * 都是 null。起会话前按 core 的 sessionTestCommand 核过再用（packages/engine/src/real/flow-gate.ts）。
-     */
+    /** 仓的测试命令（repos.test_command，建仓时填）。 */
     testCommand: string | null;
-    /** 副本此刻的样子：派活前判能不能用。 */
-    flow: FlowReplicaState;
   };
 }
 
-/** 起会话、拼接力任务书要的：任务属于哪个仓、哪张 issue，连同仓的流程配置副本。任务不在返回 null。 */
+/** 起会话、拼接力任务书要的：任务属于哪个仓、哪张 issue，连同仓的测试命令。任务不在返回 null。 */
 export async function taskContext(db: Db, taskId: string): Promise<TaskContext | null> {
   const [row] = await db
     .select({ task: tasks, repo: repos })
@@ -361,7 +354,6 @@ export async function taskContext(db: Db, taskId: string): Promise<TaskContext |
     .innerJoin(repos, eq(repos.id, tasks.repoId))
     .where(eq(tasks.id, taskId));
   if (!row) return null;
-  const flow = flowReplicaOf(row.repo);
   return {
     taskId: row.task.id,
     issueNumber: row.task.issueNumber,
@@ -374,8 +366,7 @@ export async function taskContext(db: Db, taskId: string): Promise<TaskContext |
       owner: row.repo.owner,
       name: row.repo.name,
       defaultBranch: row.repo.defaultBranch,
-      testCommand: flow.testCommand,
-      flow,
+      testCommand: row.repo.testCommand,
     },
   };
 }
@@ -998,13 +989,6 @@ export interface TaskSnapshotInput {
   specDir?: string;
   docs?: { requirement?: string; plan?: string; result?: string };
   lastProblem: string | null;
-  /** 这一轮用的流程配置读自哪（tasks.flow_source）；不给就不动（旧的需求工作流不读流程配置，不给）。 */
-  flowSource?: 'project' | 'org_default';
-  /**
-   * 这张单上引擎的认领（#299）怎么跟着走：任务结束了给结束成什么（@fleet-dao/core 的 engineClaimEnd），没结束给 null
-   * （还在待起的改成在做：工作流在跑了）。本机的认领不碰。
-   */
-  claimEnd: { state: 'done' | 'released'; reason: string } | null;
   subtasks: {
     id: string;
     key: string;
@@ -1043,13 +1027,11 @@ export async function saveTaskSnapshot(
         ...(input.specDir !== undefined ? { specDir: input.specDir } : {}),
         ...(input.docs !== undefined ? { docs: input.docs } : {}),
         lastProblem: input.lastProblem,
-        ...(input.flowSource !== undefined ? { flowSource: input.flowSource } : {}),
         updatedAt: new Date(),
       })
       .where(eq(tasks.id, input.taskId))
       .returning({ id: tasks.id });
     if (updated.length === 0) return 'task_not_found';
-    await followTaskOnEngineClaim(tx, { taskId: input.taskId, end: input.claimEnd });
 
     const keepIds = input.subtasks.map((s) => s.id);
     await tx

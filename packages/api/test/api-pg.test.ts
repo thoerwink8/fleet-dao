@@ -222,14 +222,22 @@ describe('接口跑在真库上', () => {
     // issue 的事件门口不收（单子由引擎自己拉）：记成不处理，不建任务
     const issue = {
       action: 'opened',
-      issue: { number: 40, title: '给 README 加一行', state: 'open', created_at: '2026-09-25T07:30:00Z', user: founderA },
+      issue: {
+        number: 40,
+        title: '给 README 加一行',
+        state: 'open',
+        created_at: '2026-09-25T07:30:00Z',
+        user: founderA,
+      },
       sender: founderA,
       repository,
     };
-    expect(await deliverGithub(h, 'issues', issue, { delivery: 'pg-2' }).then((r) => r.json())).toMatchObject({
-      verdict: 'ignored',
-      reason: 'event_not_handled',
-    });
+    expect(await deliverGithub(h, 'issues', issue, { delivery: 'pg-2' }).then((r) => r.json())).toMatchObject(
+      {
+        verdict: 'ignored',
+        reason: 'event_not_handled',
+      },
+    );
     expect(await t.db.select().from(tasks).where(eq(tasks.issueNumber, 40))).toHaveLength(0);
   });
 

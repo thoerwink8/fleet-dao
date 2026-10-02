@@ -5,12 +5,7 @@
 // 阶段派不派得出去问选路（store-ports 的 pickRoute：和任务挂起时用的同一套）；GitHub 两个机器人的权限自检问
 // @fleet-dao/github 的 selfCheck（受管的仓从库里的 repos 表列）；提醒的读写、操作记录、结局记账是同一个库。
 import { readdir } from 'node:fs/promises';
-import {
-  deployFacts,
-  handlingOf,
-  pgAlertWork,
-  readDeployLagInput,
-} from '@fleet-dao/api';
+import { deployFacts, handlingOf, pgAlertWork, readDeployLagInput } from '@fleet-dao/api';
 import {
   alertByKey,
   type Db,
@@ -19,7 +14,7 @@ import {
   insertAlertOnce,
   issueWorkFacts,
   latestAlertByPrefix,
-  listFlowReplicas,
+  listManagedRepos,
   listOpenAlerts,
   mergedPrLedgers,
   openSessionTrees,
@@ -176,7 +171,7 @@ export function hourlyReconcileJob(
     w.stageAllOpen ?? ((stage) => store.stageAllOpen(stage));
   // 受管的仓：两处核对里审合并的 PR、机器人权限自检都按这一份（库里的 repos 表）
   const managedRepos = async () =>
-    (await listFlowReplicas(w.db)).map((r) => ({ owner: r.owner, name: r.name }));
+    (await listManagedRepos(w.db)).map((r) => ({ owner: r.owner, name: r.name }));
   // 谁在处理（24 小时再推不给有人在处理、静默了的推）：和驾驶舱同一个口子、同一份判法（原来还有提醒派单，#445 删掉了）
   const alertWork = pgAlertWork(w.db, () => deployFacts(readDeployLagInput()));
   const handling: HourlyReconcileJobDeps['handling'] = async (ids) => {

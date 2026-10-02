@@ -13,7 +13,12 @@ import { type AlertSweepDeps, sweepAlerts } from './alert-sweep.ts';
 import { type AutoMergeCheckDeps, checkAutoMerges } from './auto-merge-check.ts';
 import { checkGitHubApps, type GitHubAppCheckDeps } from './github-app-check.ts';
 import type { ScheduleRunLog } from './github-reconcile.ts';
-import { checkLedgers, checkMergedPrs, type ReconcileCheckDeps, retireWorkflowAlerts } from './reconcile-checks.ts';
+import {
+  checkLedgers,
+  checkMergedPrs,
+  type ReconcileCheckDeps,
+  retireWorkflowAlerts,
+} from './reconcile-checks.ts';
 import { clip, message, type SweepPart } from './reconcile-common.ts';
 import { sweepWorktrees, type WorktreeSweepDeps } from './worktree-sweep.ts';
 

@@ -27,7 +27,7 @@
 //    会话的临时目录、收发目录）。工作流被强行终止留下的会话，现在要等工人下一次起来时这一步才收（每小时对账还没接这一项：#247）。
 
 import type { RiskyFile } from '@fleet-dao/conventions';
-import type { Brief, Rebuttable, Rebuttal, VerifyReport } from '@fleet-dao/core';
+import type { Brief, Rebuttal, VerifyReport } from '@fleet-dao/core';
 import type {
   HostId,
   OrgKind,
@@ -224,6 +224,13 @@ export interface SessionBrief {
  * （副手打回两次还没做好、副手派不出、单模型模式）。
  */
 export type LeadStep = 'plan' | 'accept' | 'rebut' | 'fix-brief' | 'review' | 'pr-text' | 'takeover';
+
+/** 能驳回的一条：target 照抄，kind 说是哪种挡法（Fusion 的 Lead 简报用；随 real/sessions.ts 的会话链一起删，#556）。 */
+export interface Rebuttable {
+  target: string;
+  kind: 'not-done' | 'breaks-existing' | 'security' | 'data-loss';
+  evidence: string;
+}
 
 export interface LeadBrief {
   step: LeadStep;
@@ -660,8 +667,6 @@ export interface TaskStateSnapshot extends Scope {
   specDir?: string;
   docs?: { requirement?: string; plan?: string; result?: string };
   lastProblem: string | null;
-  /** 这一轮用的流程配置读自仓里还是全组织默认（驾驶舱要标出后者）：Fusion 开工前判完配置才有，旧的需求工作流不给。 */
-  flowSource?: 'project' | 'org_default';
   subtasks: {
     id: string;
     key: string;

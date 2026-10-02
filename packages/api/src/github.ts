@@ -292,9 +292,7 @@ export interface GitHubIntake {
 }
 
 /** 收件（webhook）、补收（对账、轮询）、重放共用这一道门和这一本投递账（github_events）。 */
-export function createGitHubIntake(
-  deps: Pick<Deps, 'store' | 'github' | 'log' | 'now'>,
-): GitHubIntake {
+export function createGitHubIntake(deps: Pick<Deps, 'store' | 'github' | 'log' | 'now'>): GitHubIntake {
   const { store, log } = deps;
   const staleBefore = () => new Date(deps.now().getTime() - DELIVERY_STALE_MS).toISOString();
 
@@ -344,7 +342,11 @@ export function createGitHubIntake(
       };
       await deps.github.accept(ingested);
       await finish(deliveryId, token, { status: 'accepted' });
-      return { verdict: 'accepted', wake: screening.wake, ...(delivery.seenBefore ? { seenBefore: true } : {}) };
+      return {
+        verdict: 'accepted',
+        wake: screening.wake,
+        ...(delivery.seenBefore ? { seenBefore: true } : {}),
+      };
     } catch (err) {
       const reason =
         (err instanceof Error ? err.message : String(err)).slice(0, MAX_REASON_CHARS) || '没带原因';

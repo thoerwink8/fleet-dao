@@ -80,7 +80,12 @@ export async function retireWorkflowAlerts(deps: ReconcileCheckDeps): Promise<Sw
   for (const alert of listed.alerts) {
     if (!alert.dedupeKey.startsWith(WORKFLOW_ALERT_PREFIX)) continue;
     part.scanned += 1;
-    await resolveOne(deps, part, alert.dedupeKey, '这一项核对随 Fusion 的「一张单一个需求工作流」一起删了（#556），提醒不会再有人跟');
+    await resolveOne(
+      deps,
+      part,
+      alert.dedupeKey,
+      '这一项核对随 Fusion 的「一张单一个需求工作流」一起删了（#556），提醒不会再有人跟',
+    );
   }
   return part;
 }

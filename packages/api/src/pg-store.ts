@@ -15,7 +15,6 @@ import {
   feishuDrafts,
   feishuFollows,
   feishuOutbox,
-  flowReplicaOf,
   githubEvents,
   githubEventVersions,
   idempotencyKeys,
@@ -518,7 +517,6 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
   }
 
   return {
-
     // —— 人 ——
     async getUser(id) {
       if (!isUuid(id)) return null;
@@ -616,19 +614,6 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       if (!isUuid(id)) return null;
       const [row] = await db.select().from(repos).where(eq(repos.id, id));
       return row ? toRepo(row) : null;
-    },
-    async getRepoFlow(id) {
-      if (!isUuid(id)) return null;
-      const [row] = await db.select().from(repos).where(eq(repos.id, id));
-      if (!row) return null;
-      const flow = flowReplicaOf(row);
-      return {
-        source: flow.source,
-        commit: flow.commit,
-        syncedAt: flow.syncedAt ? iso(flow.syncedAt) : null,
-        error: flow.error,
-        unread: flow.unread,
-      };
     },
     async listBoardTasks(repoId) {
       if (!isUuid(repoId)) return [];
@@ -1863,16 +1848,9 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         .where(and(sql`lower(${repos.owner}) = lower(${owner})`, sql`lower(${repos.name}) = lower(${name})`))
         .limit(1);
       if (!row) return null;
-      const flow = flowReplicaOf(row);
       return {
         ...toRepo(row),
         autoDispatchSince: row.autoDispatchSince ? iso(row.autoDispatchSince) : null,
-        flow: {
-          syncedAt: flow.syncedAt ? iso(flow.syncedAt) : null,
-          error: flow.error,
-          unread: flow.unread,
-          testCommand: flow.testCommand,
-        },
       };
     },
     async findTaskByIssue(repoId, issueNumber) {

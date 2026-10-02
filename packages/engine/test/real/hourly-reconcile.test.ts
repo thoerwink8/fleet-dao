@@ -11,7 +11,6 @@ import {
   alertByKey,
   approvals,
   auditLog,
-  githubEvents,
   notifications,
   pullRequests,
   repos,
@@ -20,7 +19,6 @@ import {
   subtasks,
   tasks,
   upsertAlert,
-  users,
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';

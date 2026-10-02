@@ -35,29 +35,10 @@ import {
   users,
 } from '@fleet-dao/db';
 import { sql } from 'drizzle-orm';
-import type { MemoryData, MemoryFlow } from '../src/memory-store.ts';
+import type { MemoryData } from '../src/memory-store.ts';
 
 const date = (iso: string) => new Date(iso);
 const dateOpt = (iso: string | undefined) => (iso === undefined ? null : new Date(iso));
-
-/**
- * 内存版的流程配置副本 → repos 表的 flow_* 列。同步过的要凑齐「读自哪个提交、是不是仓里自己的」（约束要求四样一起有）。
- * 内存对象上写了来源、提交就用写的；没写时维持旧夹具：同步过就是读自仓里、40 个 f。整份配置只放测试命令。
- */
-function flowColumns(flow: MemoryFlow) {
-  const synced = flow.syncedAt === null ? null : date(flow.syncedAt);
-  return {
-    flowConfig: synced
-      ? { formatVersion: 1, ...(flow.testCommand ? { testCommand: flow.testCommand } : {}) }
-      : null,
-    flowSource: synced ? (flow.source ?? ('project' as const)) : null,
-    flowCommit: synced ? (flow.commit ?? 'f'.repeat(40)) : null,
-    flowSyncedAt: synced,
-    flowError: flow.error,
-    flowUnread: flow.unread,
-    flowCheckedAt: synced,
-  };
-}
 
 export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
   const familyIds = [...new Set((data.models ?? []).map((m) => m.family))];
@@ -152,13 +133,9 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
     );
   }
   if (data.repos?.length) {
-    await db.insert(repos).values(
-      data.repos.map(({ flow, ...r }) => ({
-        ...r,
-        autoDispatchSince: dateOpt(r.autoDispatchSince),
-        ...(flow ? flowColumns(flow) : {}),
-      })),
-    );
+    await db
+      .insert(repos)
+      .values(data.repos.map((r) => ({ ...r, autoDispatchSince: dateOpt(r.autoDispatchSince) })));
   }
   if (data.tasks?.length) {
     await db.insert(tasks).values(
@@ -173,7 +150,6 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
         priority: t.priority,
         specDir: t.specDir ?? null,
         acceptance: t.acceptance ?? [],
-        flowSource: t.flowSource ?? null,
         createdAt: date(t.createdAt),
       })),
     );

@@ -1,5 +1,5 @@
 // 每小时对账的两处核对要从库里认的事：没结束的单（去问它的需求工作流还在不在跑、投递上记没记为什么不派）、合了的 PR
-// 对上的单记没记账（会话结局、用量、关单）。受管的仓按 repos 表列（flow.ts 的 listFlowReplicas），不在这里另写一份。
+// 对上的单记没记账（会话结局、用量、关单）。受管的仓按 repos 表列（listManagedRepos）。
 // 终态的单不在第一份清单里：做完、叫停、没做完都不再要求有一条在跑的工作流。
 import type { RunOutcome, TaskState } from '@fleet-dao/shared';
 import { and, asc, desc, eq, gte, inArray, notInArray, or, sql } from 'drizzle-orm';
@@ -13,6 +13,14 @@ import {
   sessionRuns,
   tasks,
 } from '../schema/index.ts';
+
+/** 受管的仓（repos 表的每一行）：对账逐个去查。 */
+export async function listManagedRepos(db: Db): Promise<{ id: string; owner: string; name: string }[]> {
+  return db
+    .select({ id: repos.id, owner: repos.owner, name: repos.name })
+    .from(repos)
+    .orderBy(repos.owner, repos.name);
+}
 
 export interface ActiveTaskRef {
   taskId: string;
