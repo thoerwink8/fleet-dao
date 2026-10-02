@@ -305,6 +305,8 @@ describe('publishPr：编排（deps 换 mock）', () => {
         env: { GITHUB_TOKEN: 'x' },
         root,
         currentBranch: 'release/v2',
+        // CI 上没有 gh 身份：身份那一步换成 mock，测的是后面 rev-parse 那一步
+        gh: async () => ({ code: 0, stdout: '', stderr: '' }),
         git: async (args) => {
           ops.push(`git ${args.join(' ')}`);
           if (args[0] === 'status') return { code: 0, stdout: '', stderr: '' };
@@ -324,6 +326,8 @@ describe('publishPr：编排（deps 换 mock）', () => {
         env: { GITHUB_TOKEN: 'x' },
         root,
         currentBranch: 'release/v2',
+        // CI 上没有 gh 身份：身份那一步换成 mock，测的是后面 rev-parse 那一步
+        gh: async () => ({ code: 0, stdout: '', stderr: '' }),
         git: async (args) => {
           if (args[0] === 'status') return { code: 0, stdout: '', stderr: '' };
           if (args[0] === 'rev-parse' && args.includes('HEAD'))
