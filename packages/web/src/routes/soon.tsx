@@ -48,15 +48,6 @@ const PLANS: Record<string, { what: string; bullets: string[]; related: { to: st
     ],
     related: [{ to: '/schedules', label: '定时任务' }],
   },
-  '/members': {
-    what: `谁能进${brand.product}、能做什么。`,
-    bullets: [
-      '飞书账号登录，只放行白名单',
-      '以后加人在这里加，写 GitHub 的动作由机器人代发并记下提出人',
-      '每个操作都留记录',
-    ],
-    related: [{ to: '/audit', label: '操作记录' }],
-  },
 };
 
 export default function Soon() {

@@ -11,7 +11,6 @@ import {
   ScrollText,
   Settings,
   Trophy,
-  Users,
   Wallet,
   Waypoints,
 } from 'lucide-react';
@@ -95,7 +94,6 @@ export const NAV: { group: string; items: NavItem[] }[] = [
   {
     group: '管理',
     items: [
-      { to: '/members', label: '成员与权限', icon: Users, soon: true, hint: `谁能进${brand.product}` },
       { to: '/demo-links', label: '演示版', icon: Presentation, hint: '发演示链接、定游客能看什么' },
       { to: '/audit', label: '操作记录', icon: ScrollText, hint: '谁在什么时候做了什么', module: 'audit' },
       { to: '/settings', label: '设置', icon: Settings, hint: '外观、通知、订阅月费', module: 'settings' },

@@ -15,7 +15,6 @@ const cockpitOnly = demo
       route('billing', 'routes/soon.tsx', { id: 'soon-billing' }),
       route('record', 'routes/soon.tsx', { id: 'soon-record' }),
       route('judge', 'routes/soon.tsx', { id: 'soon-judge' }),
-      route('members', 'routes/soon.tsx', { id: 'soon-members' }),
     ];
 
 export default [
