@@ -20,7 +20,10 @@ export interface FakeClaimsGitHub extends ClaimsGitHub {
   addPull(repo: string, pull: Partial<PullFacts> & { number: number }): PullFacts;
   /** 下一次这几样调用抛错（造「GitHub 出错」）。 */
   failNext: Partial<
-    Record<'openPulls' | 'setStatus' | 'disableAutoMerge' | 'closePull' | 'readPull', string>
+    Record<
+      'openPulls' | 'setStatus' | 'enableAutoMerge' | 'disableAutoMerge' | 'closePull' | 'readPull',
+      string
+    >
   >;
   /** 引擎登录名（改了造「身份对不上」）。 */
   login: string;
@@ -94,6 +97,12 @@ export function fakeClaimsGitHub(): FakeClaimsGitHub {
       trip('setStatus');
       statuses.push({ ...status, sha, byEngine: true });
       writes.push(`status ${slug(repo)}@${sha} ${status.state}`);
+    },
+    async enableAutoMerge(repo, pull) {
+      trip('enableAutoMerge');
+      const p = pulls.get(`${slug(repo)}#${pull.number}`);
+      if (p) p.autoMerge = true;
+      writes.push(`enable ${slug(repo)}#${pull.number}`);
     },
     async disableAutoMerge(repo, pull) {
       trip('disableAutoMerge');

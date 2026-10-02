@@ -159,6 +159,21 @@ function deps(over: Partial<HourlyReconcileWiring> & { now?: () => Date } = {}) 
       },
     } as never,
     intakeLog: silentLogger,
+    // 自动合并兜底（#242）部分在这一组里不走到 GitHub：默认空装；要走到那个部分的用例（看那个部分
+    // 的测试，本文件不安排）再单独装这一份
+    autoMergeGh: {
+      listPrs: async () => [],
+      pullFiles: async () => [],
+      checksEvaluate: async () => 'none',
+      requiredChecks: async () => ['check'],
+      readStandardPathsFile: async () => '{"paths":[]}',
+      enableAutoMerge: async () => {},
+    },
+    autoMergeAlerts: {
+      raise: async () => {},
+      resolve: async () => 'not_found',
+      listOpenByPrefix: async () => [],
+    },
     ...over,
     workflows: wf,
   })({ workflow: {} as never } as never, 'fleet-test');
@@ -186,6 +201,18 @@ function ghWith(over: Partial<HourlyReconcileWiring['gh']> = {}): HourlyReconcil
     claims: new Proxy({} as HourlyReconcileWiring['gh']['claims'], {
       get: (_t, prop) => () => {
         throw new Error(`用例里不该碰「认领对得上」的 GitHub 读写（${String(prop)}）`);
+      },
+    }),
+    // 自动合并兜底（#242）那部分的 GitHub：走到就是「用例写错了」
+    pullFiles: async () => {
+      throw new Error('用例里不该读 PR 改到的文件');
+    },
+    readRepoFile: async () => {
+      throw new Error('用例里不该读主线上文件');
+    },
+    deps: new Proxy({} as HourlyReconcileWiring['gh']['deps'], {
+      get: (_t, prop) => () => {
+        throw new Error(`用例里不该碰 GitHub 的 deps（${String(prop)}）`);
       },
     }),
     ...over,

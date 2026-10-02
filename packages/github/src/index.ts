@@ -174,6 +174,8 @@ export {
   openPr,
   type PrFile,
   pullFiles,
+  readCi,
+  requiredChecksFor,
   type WaitCiInput,
   waitCi,
 } from './pulls.ts';

@@ -88,6 +88,19 @@ function harness(over: Partial<HourlyReconcileJobDeps> = {}): Harness {
     },
     ledgers: async () => [],
     apps: { repos: async () => [], selfCheck: async () => [] },
+    gh: {
+      listPrs: async () => [],
+      pullFiles: async () => [],
+      checksEvaluate: async () => 'none',
+      requiredChecks: async () => ['check'],
+      readStandardPathsFile: async () => '{"paths":[]}',
+      enableAutoMerge: async () => {},
+    },
+    autoMergeAlerts: {
+      raise: async () => {},
+      resolve: async () => 'not_found',
+      listOpenByPrefix: async () => [],
+    },
     runs: {
       async start() {
         return 7;

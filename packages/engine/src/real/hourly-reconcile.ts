@@ -40,9 +40,10 @@ import {
   updateOpenAlert,
   upsertAlert,
 } from '@fleet-dao/db';
-import type { GitHub } from '@fleet-dao/github';
+import { type GitHub, type RepoRef, readCi, requiredChecksFor } from '@fleet-dao/github';
 import { requirementWorkflowId, subtaskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { type Client, WorkflowNotFoundError } from '@temporalio/client';
+import type { AutoMergeGitHub } from '../jobs/auto-merge-check.ts';
 import type { GitHubAppCheckDeps } from '../jobs/github-app-check.ts';
 import type { HourlyReconcileJobDeps } from '../jobs/hourly-reconcile.ts';
 import type { WorkflowReader, WorkflowView } from '../jobs/reconcile-common.ts';
@@ -117,10 +118,25 @@ const NO_CTX: PortContext = {
   lastHeartbeat: undefined,
 };
 
+/**
+ * 自动合并兜底那部分要的 GitHub：这里只声明它要的形状，真装配在 hourlyReconcileJob 里把
+ * createGitHub 拿到的那个 GitHub 接进来。
+ */
+export interface AutoMergeWiringGitHub {
+  claims: GitHub['claims'];
+  pullFiles: GitHub['pullFiles'];
+  readRepoFile: GitHub['readRepoFile'];
+  deps: GitHub['deps'];
+  /** 主线上读的改标准路径清单文件名；默认 packages/conventions/standard-paths.json（#242）。*/
+  standardPathsFile?: string;
+}
+/** 默认的改标准路径清单（自动合并兜底按这份判 #242）。 */
+export const STANDARD_PATHS_FILE = 'packages/conventions/standard-paths.json';
+
 export interface HourlyReconcileWiring {
   db: Db;
-  /** 和对账补漏同一个：审最近合了的 PR（镜像、合并人、合并记录）；补拉经接活那道门时现读挂在哪个版本。 */
-  gh: Pick<GitHub, 'auditMergedPrs'> & IntakeGitHub;
+  /** 和对账补漏同一个：审最近合了的 PR（镜像、合并人、合并记录）；补拉经接活那道门时现读挂在哪个版本；自动合并兜底用它列 PR、读文件、挂自动合并。 */
+  gh: Pick<GitHub, 'auditMergedPrs'> & AutoMergeWiringGitHub & IntakeGitHub;
   trees: WorkTrees;
   exec: UserExec;
   /** 会话用户此刻挂的组织（real/session-org.ts）：判阶段派不派得出去和选路同一套，也要它。 */
@@ -144,6 +160,9 @@ export interface HourlyReconcileWiring {
   requirements?: RequirementWorkflows;
   /** 测试用：接活那道门的日志（不给就是和对账补漏一样的 JSON 日志）。 */
   intakeLog?: Logger;
+  /** 测试用：换掉自动合并兜底那部分的 GitHub / 提醒；不给就照 wiring 的 gh 装。 */
+  autoMergeGh?: AutoMergeGitHub;
+  autoMergeAlerts?: HourlyReconcileJobDeps['autoMergeAlerts'];
 }
 
 /** 给 EngineJobs.hourlyReconcile 用的工厂。 */
@@ -181,10 +200,65 @@ export function hourlyReconcileJob(
     if (!r.ok) throw new Error(r.why);
     return new Map([...r.byId].map(([id, h]) => [id, { stage: h.stage, line: h.line }]));
   };
+  // 自动合并兜底（#242）要的 GitHub：列 PR 经 claims.openPulls，把作者是不是机器人、自动合并开没开带过来；
+  // 必过检查、CI 判读照和合并闸同一份 readCi / requiredChecksFor；改标准路径的清单照 main 上的 standard-paths.json 读
+  // （现在借 parseRiskPaths 判，TODO(#133)：standard-paths.json 自己的判法落地后换）。
+  const standardPathsFile = w.gh.standardPathsFile ?? STANDARD_PATHS_FILE;
+  const autoMergeGh: AutoMergeGitHub = w.autoMergeGh ?? {
+    async listPrs(repo: RepoRef) {
+      const pulls = await w.gh.claims.openPulls(repo);
+      return pulls.map((p) => ({
+        number: p.number,
+        nodeId: p.nodeId,
+        state: p.state,
+        draft: p.draft,
+        authorIsBot: w.gh.claims.isAgentBot(p.author),
+        autoMerge: p.autoMerge,
+        headSha: p.headSha,
+      }));
+    },
+    pullFiles: (repo: RepoRef, prNumber: number) => w.gh.pullFiles({ repo, prNumber }),
+    async checksEvaluate(repo: RepoRef, sha: string, required: string[]) {
+      const ci = await readCi(w.gh.deps, repo, sha, required);
+      return ci.evaluation.overall;
+    },
+    requiredChecks: (repo: RepoRef) => requiredChecksFor(w.gh.deps, repo),
+    async readStandardPathsFile(repo: RepoRef) {
+      const r = await w.gh.readRepoFile({ repo, path: standardPathsFile });
+      if (r.file.kind !== 'text') {
+        throw new Error(
+          `读 ${standardPathsFile} 没成（${r.file.kind === 'missing' ? '文件不在' : r.file.why}）`,
+        );
+      }
+      return r.file.text;
+    },
+    enableAutoMerge: (repo: RepoRef, pull) => w.gh.claims.enableAutoMerge(repo, pull),
+  };
+  const autoMergeAlerts: HourlyReconcileJobDeps['autoMergeAlerts'] = w.autoMergeAlerts ?? {
+    async raise(x) {
+      await upsertAlert(w.db, {
+        dedupeKey: x.dedupeKey,
+        level: x.level,
+        taskId: x.taskId,
+        title: x.title,
+        body: x.body,
+        ...(x.link ? { link: x.link } : {}),
+      });
+    },
+    async resolve(x) {
+      return resolveAlertWithReason(w.db, { dedupeKey: x.dedupeKey, by: x.by, why: x.why, at: now() });
+    },
+    async listOpenByPrefix(prefix) {
+      const rows = await listOpenAlerts(w.db, { limit: 500 });
+      return rows.alerts.filter((r) => r.dedupeKey.startsWith(prefix));
+    },
+  };
   return (client, taskQueue) => {
     const intake = reconcileIntake(w, { store: intakeStore, log: intakeLog, now }, client, taskQueue);
     return {
       root: w.trees.root,
+      gh: autoMergeGh,
+      autoMergeAlerts,
       probeDir: PROBE_DIR,
       sessionTmpDir: SESSION_TMP_DIR,
       machine: w.machine,
