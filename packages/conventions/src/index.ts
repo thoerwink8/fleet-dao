@@ -59,7 +59,6 @@ export {
 export { FLOW_BRANCH_PATTERN, isFlowBranch } from './flow-branch.ts';
 export {
   type GitHubCommenter,
-  type GitHubPrLabeler,
   type GitHubReader,
   githubToken,
   type IssueInfo,
@@ -68,7 +67,6 @@ export {
   type MilestoneInfo,
   type PlanIssue,
   type PlanReader,
-  type PullInfo,
   repoName,
   toIssue,
   toMilestoneDetail,
@@ -200,14 +198,6 @@ export {
   type RepoFacts,
   specsPaths,
 } from './pr-fields.ts';
-export {
-  type LabelPlan,
-  type LabelRun,
-  type PrState,
-  planLabels,
-  runPrLabels,
-  titlePrefixKind,
-} from './pr-labels.ts';
 export { FIX_ALERT_COLUMN, fixAlertRefs, prLinks } from './pr-links.ts';
 export { fsRepo, type RepoView } from './repo.ts';
 export {

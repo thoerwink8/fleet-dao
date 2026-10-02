@@ -72,7 +72,7 @@ function dateOf(text: string | null | undefined): Date | null | undefined {
 
 /**
  * PR 镜像里给「提醒谁在处理」用的几样：开的时刻、合并的时刻和提交、正文挂的单和修的提醒（@fleet-dao/conventions 的
- * prLinks，和 PR 补贴、合并闸同一个认法）。事件里没带正文（undefined）就不给链接：镜像里的旧值留着。
+ * prLinks，认法只有一处）。事件里没带正文（undefined）就不给链接：镜像里的旧值留着。
  */
 export function mirrorExtras(
   pr: Pick<PullFields, 'created_at' | 'merged_at' | 'merge_commit_sha' | 'title' | 'body'>,

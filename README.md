@@ -74,4 +74,4 @@
 
 ## 协作
 
-GitHub 上只用标签和里程碑：每个标签的意思写在[标签页](https://github.com/thoerwink8/fleet-dao/labels)，里程碑就是版本（没挂就是未排期），母单贴「母单」标签、子单用子议题挂在它下面，P0–P6 已关留作历史；怎么用、为什么这样定，见 design 第七节。开 issue 用上面的 `pnpm issue:new`，做完用 `pnpm issue:close` 关；开 PR 照模板填，写明「这个 PR 做完就关单」「对应计划」和「specs」；类别标签、里程碑缺了由 pr-labels 按对应 issue 自动补，这几栏缺了只在合并闸里提醒、不挡合并（能不能合只看 merge-gate，见 design 第五节）；最后一栏「文档」写改了哪份文档，或「不适用」。
+GitHub 上只用标签和里程碑：每个标签的意思写在[标签页](https://github.com/thoerwink8/fleet-dao/labels)，里程碑就是版本（没挂就是未排期），母单贴「母单」标签、子单用子议题挂在它下面，P0–P6 已关留作历史；怎么用、为什么这样定，见 design 第七节。开 issue 用上面的 `pnpm issue:new`，做完用 `pnpm issue:close` 关；开 PR 照模板填，写明「这个 PR 做完就关单」「对应计划」和「specs」；PR 不贴类别标签、不挂里程碑（里程碑页只数单子，#654），这几栏缺了只在合并闸里提醒、不挡合并（能不能合只看 merge-gate，见 design 第五节）；最后一栏「文档」写改了哪份文档，或「不适用」。
