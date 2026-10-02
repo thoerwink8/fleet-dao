@@ -188,9 +188,11 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "$VERSION" -m "$VERSION"
+          # tag 显式打在 $MERGE_SHA（本次发布那次 merge 提交）上：不指名的话 git tag 默认打在 HEAD，
+          # workflow_dispatch 手动补跑时 main 已前进、就会把 vN 指错提交（第二意见 2026-10-02）。
+          git tag -a "$VERSION" -m "$VERSION" "$MERGE_SHA"
           git push origin "$VERSION"
-          echo "tag $VERSION 已打。"
+          echo "tag $VERSION 已打（指向 $MERGE_SHA）。"
 
       # d. 建 GitHub release：已存在且正文一致跳；正文不一致更新；不存在就建。
       - name: 建 GitHub release（幂等：不存在就建、正文不一致就改回）
