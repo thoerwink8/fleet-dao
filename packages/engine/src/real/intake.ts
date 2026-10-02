@@ -37,6 +37,8 @@ export interface IntakeWiring {
   log?: IntakeDeps['log'];
   /** 起工作流最多等多久（毫秒）。 */
   startTimeoutMs?: number;
+  /** 测试用：换掉「合并闸认冷验收了没有」（jobs/intake.ts 的 MERGE_GATE_REQUIRES_COLD_VERIFY）。 */
+  gateLive?: boolean;
 }
 
 const DEFAULT_START_TIMEOUT_MS = 15_000;
@@ -170,6 +172,7 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
         });
         return { created: posted.created };
       },
+      ...(w.gateLive === undefined ? {} : { gateLive: w.gateLive }),
       runs: {
         start: (job, at) => startScheduleRun(w.db, job, at),
         finish: (id, result, at) => finishScheduleRun(w.db, id, result, at),

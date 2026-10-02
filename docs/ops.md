@@ -342,7 +342,7 @@ grok 装在会话用户自己家里：官方安装脚本把二进制放在 `~/.g
 - 开关全关是正常的空闲：这一轮记 ok、不读 GitHub。在跑的任务数、白名单、开着的单任何一样读不到：这一轮记没跑成（`schedule_runs` 里 `failed` 或 `partial`，看门狗照登记表报），不拿 0 或「没有」顶。
 - 看：`select * from schedule_runs where job = 'intake' order by id desc limit 5`、`journalctl -u fleet-engine --since '-1h' | grep 拉单`。
 - 停：`fleet-temporal schedule toggle --schedule-id intake --pause --reason "<为什么>"`，恢复换成 `--unpause`。停了超过 15 分钟看门狗会报「拉单停了」，要停得先说好。更常用的停法是把项目的「让 AI 接活」关掉。
-- **硬前提：合并闸认冷验收（#625，S2-5）合进来之前，不给任何仓打开「让 AI 接活」。**
+- **硬前提：合并闸认冷验收（#625，S2-5）合进来之前，不给任何仓打开「让 AI 接活」。**代码里也卡着：`jobs/intake.ts` 的 `MERGE_GATE_REQUIRES_COLD_VERIFY` 在 S2-5 之前是 false，开着开关的仓会让这一轮记没跑成（`schedule_runs` 里 `failed`、看门狗报）、一张单都不拉；S2-5 的 PR 把它改成 true。
 
 退役的定时任务（断链修复：#445 删掉「提醒派单」整层撞上——代码删了，Temporal 上当初建的 Schedule 不会跟着消失，法国的 `alert-dispatch` 当时只能帅位手动 `fleet-temporal schedule toggle --pause` 止血，见 `specs/445-提醒减负/结果.md`；这里补上「引擎起来自己删」这一步）：
 

@@ -157,7 +157,7 @@ function fakeClient(
 
 const logs: string[] = [];
 const wire = (gh: IntakeGitHub) =>
-  intakeJob({ db: t.db, gh, now: () => NOW, log: (_l, text) => logs.push(text) });
+  intakeJob({ db: t.db, gh, now: () => NOW, log: (_l, text) => logs.push(text), gateLive: true });
 
 describe('拉单的真装配', { timeout: 60_000 }, () => {
   it('开关开着的仓里一张好单：建任务行（谁要的、原话）、记操作记录、按定死的编号起任务工作流，这一轮记 ok', async () => {

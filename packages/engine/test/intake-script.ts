@@ -27,6 +27,7 @@ export function idleDeps(over: Partial<IntakeDeps> = {}): IntakeDeps {
     runningTasks: unexpected('在跑的数') as never,
     start: unexpected('起工作流') as never,
     comment: unexpected('留言') as never,
+    gateLive: true,
     runs: {
       async start() {
         runs += 1;
