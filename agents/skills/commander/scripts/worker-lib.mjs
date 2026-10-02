@@ -1,5 +1,6 @@
 // 帅位「开别家模型的会话去干活」的启动器（创始人原话：「可以帅位自己干，也可以帅位开新会话去让别的模型干」）。
-// worker.mjs 是外壳（真的 git/gh/pnpm/spawn/进程查杀），全部逻辑在这份 worker-lib.mjs（照 seat-lib.mjs 那种注入 io 的写法）。
+// worker.mjs 是外壳（真的 git/gh/pnpm/spawn/进程查杀），全部逻辑在这份 worker-lib.mjs（照认领那套 seat-lib.mjs 那种注入 io 的写法；
+// 那几份 2026-10-02 随认领账删了，#446）。
 // 改这里之前必须知道：
 // - 创始人已拍：不给别家模型关目录/沙箱，它能读创始人账号能读的一切——不额外加 --sandbox、不用容器或受限令牌；
 //   本文件只解决「无人值守跑得起来」（grok --always-approve、codex --dangerously-bypass-approvals-and-sandbox），
@@ -18,8 +19,7 @@
 //   完整实测到底（细节写在 PR 正文），只测过它不会误伤模型自己那条到后端的代理路。
 // - 进程用 detached + windowsHide + stdio 指向真文件描述符（不是管道）起，spawn 完立刻 unref：这样 `start` 这条命令
 //   退出之后子进程照样活着；用文件描述符不用 pipe，是因为 pipe 要父进程留着读写端才不出问题，文件描述符不需要。
-// - 状态记在 ~/.fleet-dao/workers/<短名>/（meta.json、out.log、err.log、prompt.txt）：和 seat.mjs 的
-//   ~/.fleet-dao/seat/ 一个放法，机器本地、不进仓。
+// - 状态记在 ~/.fleet-dao/workers/<短名>/（meta.json、out.log、err.log、prompt.txt）：机器本地、不进仓。
 // - 思考档位（创始人 2026-09-28 拍）：默认 high，简单活可以 medium，不用 xhigh；--effort 不给就是 high，
 //   总是显式传给命令行，不靠模型自己的默认（grok 自己的默认是 xhigh，09-28 冒烟撞过）。grok 传
 //   --reasoning-effort <档>；codex 传 -c model_reasoning_effort="<档>"（TOML 字符串，引号是字面量，
