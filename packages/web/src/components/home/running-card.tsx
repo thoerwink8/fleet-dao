@@ -14,13 +14,16 @@ import { type Tone, toneBg, toneText } from '../../lib/status';
 import { cn } from '../../lib/utils';
 import type { HomeRunning } from './types';
 
-const SEGMENT_LABEL: Record<HomeRunning['segment'], string> = {
+const SEGMENT_LABEL: Record<NonNullable<HomeRunning['segment']>, string> = {
   scoping: '在写需求 / 拆活',
   doing: '在干活',
   verifying: '在自己验',
   verify_pending: '还没验',
   merge: '在合并队列',
 };
+
+/** segment 还没接上（home-api 现在一律 null）时卡上怎么写：不猜、不画成「卡住了」。 */
+const SEGMENT_NOT_WIRED = '在跑';
 
 const WAIT_LABEL: Record<HomeRunning['waitingReason'], string> = {
   queue: '排队',
@@ -47,6 +50,7 @@ function toneOf(item: HomeRunning): { tone: Tone; icon: typeof CircleDot } {
     case 'scoping':
     case 'doing':
     case 'verifying':
+    case null:
       if (item.waitingReason === 'nothing' || item.waitingReason === 'ci') {
         return { tone: 'run', icon: CircleDot };
       }
@@ -82,7 +86,9 @@ export function RunningCard({ item, className }: { item: HomeRunning; className?
           <div className="mt-0.5 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
             <span className="num">{item.repo}</span>
             <span aria-hidden>·</span>
-            <span className={toneText[tone]}>{SEGMENT_LABEL[item.segment]}</span>
+            <span className={toneText[tone]}>
+              {item.segment === null ? SEGMENT_NOT_WIRED : SEGMENT_LABEL[item.segment]}
+            </span>
             {item.waitingReason !== 'nothing' ? (
               <>
                 <span aria-hidden>·</span>

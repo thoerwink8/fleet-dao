@@ -419,7 +419,10 @@ describe('发给工作流的信号', () => {
     });
     const res = await h.cockpit.request('/api/asks/ask-1/answer', write('POST', s, { answer: '6' }));
     expect(res.status).toBe(200);
-    expect(h.store.data.asks[0]).toMatchObject({ answer: '6', answeredBy: DEV_USER_ID });
+    expect(h.store.data.asks.find((a) => a.id === 'ask-1')).toMatchObject({
+      answer: '6',
+      answeredBy: DEV_USER_ID,
+    });
     expect(h.signals.at(-1)).toEqual({
       workflowId: TASK12_WORKFLOW_ID,
       signal: { name: 'answer', by: DEV_USER_ID, askId: 'ask-1', answer: '6' },
@@ -807,6 +810,7 @@ describe('账号池、定时任务、通知、操作记录、设置', () => {
     );
     expect(list.items.map((n) => [n.id, n.deliveries[0]?.delivered])).toEqual([
       ['n-2', false],
+      [IDS.notification2, true],
       [IDS.notification1, true],
     ]);
     expect((await h.cockpit.request('/api/notifications/n-2/resolve', write('POST', s))).status).toBe(200);
@@ -815,7 +819,7 @@ describe('账号池、定时任务、通知、操作记录、设置', () => {
         await h.cockpit.request('/api/notifications?status=open', { headers: { cookie: s.cookie } })
       ).json(),
     );
-    expect(open.items.map((n) => n.id)).toEqual([IDS.notification1]);
+    expect(open.items.map((n) => n.id)).toEqual([IDS.notification2, IDS.notification1]);
     const audit = AuditResponse.parse(
       await (
         await h.cockpit.request('/api/audit?target=notification:n-2', { headers: { cookie: s.cookie } })

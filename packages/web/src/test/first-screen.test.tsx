@@ -127,13 +127,13 @@ describe('首屏：读取和确认登录一起发，一轮发完', () => {
     }
   });
 
-  test('新主页 /home3（回访）：me、repos、notifications 都第 1 轮发；不拉路由（路由是看板用）', async () => {
+  test('新主页 /home3（回访）：me、repos、notifications、home 都第 1 轮发；不拉路由（路由是看板用）', async () => {
     localStorage.setItem(HINT_KEY, JSON.stringify(REPOS));
     const w = waved();
     await open(w.api, '/home3');
-    // /home3 现在 NotWired，三块都还没接，所以只发 shell 和通知的；不要拉路由——避免未经确认的白等一趟往返。
+    // home-api（#589）落地后 /home3 一个往返聚齐三块：/api/home 和 me/repos/notifications 同一轮发。
     // （shell 的顶栏 / 侧栏 / ⌘K 会拉看板，那是壳的事，不是 /home3 自己发的。）
-    for (const call of ['me', 'repos', 'notifications']) {
+    for (const call of ['me', 'repos', 'notifications', 'home']) {
       expect([call, w.first(call)]).toEqual([call, 1]);
     }
     await w.release();

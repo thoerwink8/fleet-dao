@@ -8,32 +8,39 @@ import type { HomeDone } from './types';
 
 export function DoneCard({ item, className }: { item: HomeDone; className?: string }) {
   const now = useNow();
+  const body = (
+    <>
+      <span
+        className="mt-1 grid size-6 shrink-0 place-items-center rounded-full bg-st-done/12 text-ink-done"
+        aria-hidden
+      >
+        <GitPullRequestArrow className="size-3" />
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+          <span className="num text-xs font-semibold text-muted-foreground">PR #{item.prNumber}</span>
+          <span className="truncate text-sm font-medium">{item.title}</span>
+        </div>
+        <div className="mt-0.5 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
+          <span className="num">{item.repo}</span>
+          <span aria-hidden>·</span>
+          <span className="num">合于 {formatAgo(item.mergedAt, now)}</span>
+        </div>
+      </div>
+    </>
+  );
+  const cls =
+    'flex items-start gap-3 rounded-lg border px-3 py-2.5 transition-colors hover:border-border-strong';
   return (
     <li data-done-card className={cn('block', className)}>
-      <a
-        href={item.link}
-        target="_blank"
-        rel="noreferrer"
-        className="flex items-start gap-3 rounded-lg border px-3 py-2.5 transition-colors hover:border-border-strong"
-      >
-        <span
-          className="mt-1 grid size-6 shrink-0 place-items-center rounded-full bg-st-done/12 text-ink-done"
-          aria-hidden
-        >
-          <GitPullRequestArrow className="size-3" />
-        </span>
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-            <span className="num text-xs font-semibold text-muted-foreground">PR #{item.prNumber}</span>
-            <span className="truncate text-sm font-medium">{item.title}</span>
-          </div>
-          <div className="mt-0.5 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
-            <span className="num">{item.repo}</span>
-            <span aria-hidden>·</span>
-            <span className="num">合于 {formatAgo(item.mergedAt, now)}</span>
-          </div>
-        </div>
-      </a>
+      {/* 演示版不带外链：纯展示，不可点。 */}
+      {item.link ? (
+        <a href={item.link} target="_blank" rel="noreferrer" className={cls}>
+          {body}
+        </a>
+      ) : (
+        <div className={cls}>{body}</div>
+      )}
     </li>
   );
 }

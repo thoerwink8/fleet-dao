@@ -52,6 +52,11 @@ export interface Config {
   temporalNamespace: string;
   /** 引擎工人取活的任务队列；只给健康检查的 engine 项（查这条队列上有没有 poller）用，发信号按工作流编号直接找。 */
   fleetTaskQueue: string;
+  /**
+   * 这台机器按 release.env 的 FLEET_SERVICES 没开引擎（法国 2026-09-29 起的临时调整）：主页持续状态条的那一格
+   * 「引擎关着」就按它显示（持续显示、不伪装成失败）。读不到这项的按开着算（和 engineEnabled 一个判法）。
+   */
+  engineOff: boolean;
 }
 
 export class ConfigError extends Error {
@@ -198,6 +203,7 @@ export function loadConfig(env: Env): Config {
     temporalAddress,
     temporalNamespace,
     fleetTaskQueue,
+    engineOff: !engineEnabled(env),
   };
 }
 

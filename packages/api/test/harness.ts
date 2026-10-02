@@ -85,6 +85,7 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     temporalAddress: '127.0.0.1:7243',
     temporalNamespace: 'fleet',
     fleetTaskQueue: 'fleet',
+    engineOff: false,
     ...overrides,
   };
 }

@@ -11,6 +11,11 @@ import {
   type BoardSubtaskSchema,
   type BoardTaskSchema,
   type Channel,
+  type HomeDecisionSchema,
+  type HomeDoneSchema,
+  type HomeHealthSchema,
+  type HomeResponseSchema,
+  type HomeRunningSchema,
   type HostId,
   hardBanFor,
   type JobViewSchema,
@@ -35,6 +40,7 @@ import type {
   AskRecord,
   JobRecord,
   NotificationRecord,
+  PullRequestRecord,
   QuotaWindowRecord,
   RepoFlowRow,
   RunPlan,
@@ -402,6 +408,216 @@ export function buildPools(
       windows,
     };
   });
+}
+
+// —— 新主页（/home3，#589）——
+
+type HomeDecision = z.input<typeof HomeDecisionSchema>;
+type HomeRunning = z.input<typeof HomeRunningSchema>;
+type HomeDone = z.input<typeof HomeDoneSchema>;
+type HomeHealth = z.input<typeof HomeHealthSchema>;
+
+/**
+ * 「要你拍的」：decision 级未处理通知（approvals 未决在写下那一刻就同步开了这么一条，不另查 approvals 表，
+ * 免得一件事显示两回）+ 还没答的追问。通知在前（它是真「要他拍」的），追问在后；各按时刻新到旧。
+ */
+export function homeDecisions(input: {
+  notifications: NotificationRecord[];
+  pendingAsks: AskRecord[];
+  taskOf: (taskId: string) => { issueNumber: number; title: string } | undefined;
+}): HomeDecision[] {
+  const items: HomeDecision[] = [];
+  for (const n of input.notifications) {
+    if (n.level !== 'decision') continue;
+    const task = n.taskId ? input.taskOf(n.taskId) : undefined;
+    items.push({
+      kind: n.dedupeKey?.startsWith('approval:') ? 'approval' : 'notification',
+      id: n.id,
+      title: n.title,
+      ...(task ? { context: `#${task.issueNumber} ${task.title}` } : {}),
+      since: n.createdAt,
+      link: n.link ?? (n.taskId ? `/tasks/${n.taskId}` : '/notifications'),
+    });
+  }
+  for (const a of input.pendingAsks) {
+    const task = input.taskOf(a.taskId);
+    items.push({
+      kind: 'ask',
+      id: a.id,
+      title: a.question,
+      ...(task ? { context: `#${task.issueNumber} ${task.title}` } : {}),
+      since: a.askedAt,
+      link: `/tasks/${a.taskId}`,
+    });
+  }
+  return items.sort((a, b) => b.since.localeCompare(a.since));
+}
+
+/**
+ * 「在跑的」：没结束的需求（don​​e / stopped / failed 之外），segment 还没接上（#556-1+ 落真时补），一律 null——
+ * 「还没验」不许按字段猜成失败。waitingReason 现在只能判两种：有人在等创始人回答（state=asking）→ founder_decision；
+ * 正常在跑 / 排队 → nothing / queue（现在有 run 排队没开工的算 queue）。其余（内存、额度、CI、第二意见、合并队列）
+ * 等 segment 接上再分；分不出时不猜。
+ */
+export function homeRunning(input: {
+  tasks: Task[];
+  activeRuns: SessionRun[];
+  repoOf: (repoId: string) => { owner: string; name: string } | undefined;
+}): HomeRunning[] {
+  const taskIds = new Set(input.tasks.map((t) => t.id));
+  const queuedByTask = new Map<string, SessionRun>();
+  for (const r of input.activeRuns) {
+    if (r.taskId === undefined || !taskIds.has(r.taskId) || r.startedAt !== undefined) continue;
+    const prev = queuedByTask.get(r.taskId);
+    if (!prev || r.queuedAt < prev.queuedAt) queuedByTask.set(r.taskId, r);
+  }
+  return [...input.tasks]
+    .sort((a, b) => a.priority - b.priority || a.createdAt.localeCompare(b.createdAt))
+    .map((t) => {
+      const repo = input.repoOf(t.repoId);
+      const queued = queuedByTask.get(t.id);
+      const asking = t.state === 'asking';
+      return {
+        issueNumber: t.issueNumber,
+        title: t.title,
+        repo: repo ? `${repo.owner}/${repo.name}` : '（仓不在库里）',
+        segment: null,
+        waitingReason: asking
+          ? ('founder_decision' as const)
+          : queued
+            ? ('queue' as const)
+            : ('nothing' as const),
+        // 排队的从进队列算起；asking 的「什么时候开始等」要 stateChanges，这里不猜，先不带。
+        ...(queued ? { waitingSince: queued.queuedAt } : {}),
+        link: `/tasks/${t.id}`,
+      };
+    });
+}
+
+/** 「做完的」：镜像里 merged 的 PR，按合并时刻新到旧；打开/合并时刻没读到过的排不进（listPullRequests 已兜住）。 */
+export function homeDone(input: {
+  merged: PullRequestRecord[];
+  repoOf: (repoId: string) => { owner: string; name: string } | undefined;
+  taskOfIssue: (repoId: string, issueNumber: number) => { title: string } | undefined;
+}): HomeDone[] {
+  const out: HomeDone[] = [];
+  for (const p of input.merged) {
+    if (!p.mergedAt) continue;
+    const repo = input.repoOf(p.repoId);
+    // 挂的单反查标题；一篇 PR 挂几张单时取第一张（镜像的认法）。一个都没挂上只显示 PR 号。
+    const issue = p.issueRefs?.[0];
+    const task = issue === undefined ? undefined : input.taskOfIssue(p.repoId, issue);
+    out.push({
+      prNumber: p.number,
+      title: task?.title ?? `PR #${p.number}`,
+      repo: repo ? `${repo.owner}/${repo.name}` : '（仓不在库里）',
+      mergedAt: p.mergedAt,
+      ...(issue === undefined ? {} : { issueNumber: issue }),
+    });
+  }
+  return out;
+}
+
+/**
+ * 持续状态条。额度看各池的「读成没有、快清零没有」（unread/stale 是「没查成」不是「没用量」）；
+ * 中转看有在线路由没有、有没有探不通的；引擎只看这台机器 release.env 的开关（运行时状态不在这里判）。
+ * 有问题都持续显示、不伪装成失败：tight / degraded / off 都不是红。
+ */
+export function homeHealth(input: {
+  pools: z.input<typeof PoolViewSchema>[];
+  routes: Route[];
+  engineOff: boolean;
+}): HomeHealth {
+  const pools = input.pools;
+  let quota: HomeHealth['quota'];
+  if (pools.length === 0) {
+    quota = { state: 'empty', detail: '还没配账号池' };
+  } else if (pools.every((p) => p.quotaStatus === 'unread')) {
+    quota = { state: 'unknown', detail: '额度一次都还没读成' };
+  } else {
+    const tight = pools.filter((p) =>
+      p.windows.some(
+        (w) =>
+          !w.stale &&
+          ((w.utilization !== undefined && w.utilization >= 0.9) || w.upstreamStatus === 'limit_reached'),
+      ),
+    );
+    const unreadCount = pools.filter((p) => p.quotaStatus === 'unread').length;
+    quota =
+      tight.length > 0
+        ? {
+            state: 'tight',
+            detail: `${tight.map((p) => p.channelName).join('、')}快清零或已超限`,
+          }
+        : {
+            state: 'ok',
+            detail:
+              unreadCount > 0
+                ? `${pools.length - unreadCount} 块池在限度内；${unreadCount} 块还没读成`
+                : `${pools.length} 块池都在限度内`,
+          };
+  }
+
+  const routes = input.routes;
+  let routesHealth: HomeHealth['routes'];
+  if (routes.length === 0 || routes.every((r) => r.probe === undefined)) {
+    routesHealth = { state: 'unknown', detail: '探针还没出过结论' };
+  } else {
+    const alive = routes.filter((r) => r.alive).length;
+    const failed = routes.filter((r) => r.probe?.state === 'failed');
+    routesHealth =
+      failed.length > 0 || alive === 0
+        ? {
+            state: 'degraded',
+            detail: failed.length > 0 ? `${failed.length} 条路由探不通；${alive} 条在线` : '没有在线路由',
+          }
+        : { state: 'ok', detail: `${alive} 条路由在线` };
+  }
+
+  return {
+    quota,
+    routes: routesHealth,
+    engine: input.engineOff
+      ? { state: 'off', detail: '这台机器按 release.env 的 FLEET_SERVICES 没开引擎（临时调整）' }
+      : { state: 'on' },
+  };
+}
+
+export function buildHome(input: {
+  notifications: NotificationRecord[];
+  pendingAsks: AskRecord[];
+  tasks: Task[];
+  activeRuns: SessionRun[];
+  merged: PullRequestRecord[];
+  repos: Repo[];
+  pools: z.input<typeof PoolViewSchema>[];
+  routes: Route[];
+  engineOff: boolean;
+  now: Date;
+}): z.input<typeof HomeResponseSchema> {
+  const taskById = new Map(input.tasks.map((t) => [t.id, t]));
+  const taskByIssue = new Map(input.tasks.map((t) => [`${t.repoId}#${t.issueNumber}`, t]));
+  const repoById = new Map(input.repos.map((r) => [r.id, r]));
+  // 「要你拍的」「做完的」可能挂到不在 running 那份清单里的单（做完了的）；反查用全量。这里 tasks 由调用方给全量。
+  return {
+    decisions: homeDecisions({
+      notifications: input.notifications,
+      pendingAsks: input.pendingAsks,
+      taskOf: (taskId) => taskById.get(taskId),
+    }),
+    running: homeRunning({
+      tasks: input.tasks.filter((t) => !TERMINAL_TASK_STATES.has(t.state)),
+      activeRuns: input.activeRuns,
+      repoOf: (repoId) => repoById.get(repoId),
+    }),
+    done: homeDone({
+      merged: input.merged,
+      repoOf: (repoId) => repoById.get(repoId),
+      taskOfIssue: (repoId, issueNumber) => taskByIssue.get(`${repoId}#${issueNumber}`),
+    }),
+    health: homeHealth({ pools: input.pools, routes: input.routes, engineOff: input.engineOff }),
+    asOf: input.now.toISOString(),
+  };
 }
 
 // —— 定时任务 ——
