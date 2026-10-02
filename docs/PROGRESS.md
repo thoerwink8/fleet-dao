@@ -297,3 +297,36 @@
 5. 按「能并行 ≠ 碰同一批文件」派实现 worker。引擎那批只能一串；新机器、docs-drift、#227 下半可并行；#452/#450 要等三段骨架。
 
 **教训写进来**：等额度回来的那段时间，能做：写文档、改 plan、重排、清理（不用动代码的活）。额度的真相 `packages/adapters/src/mirasim/`、`worktree-agent-*`、`p*-*` 这些 REF NOT 的工作树也看得到，下次先给个再看。
+
+## 2026-10-02 下午（收割返回、拍板、动手）
+
+**收割返回（v3-harvest w56jpm7sa）**：6 路全成，142 万 token、294 次调用。
+
+- **engine-map**：一张单现在怎么走 = issue-intake → temporal.ts 起 FUSION → workflows/fusion.ts（2077 行）照 core/nextFlow 走 0–7 步；编排层 17 张表哪些删（flow/fusion/seat/replica/config + 4 个 workflows + 5 个 decisions）、runs 表 schema、验收现在分两套（PR 前验证 + 第二意见）。13 张切片分成 554-1→554-2→554-3→554-4→555-1→555-2→555-3→555-4→556-1→…→556-7。
+- **issue-triage**：60 张开单逐张处置。#531 可关（cli.ts:440 残留一行要补）、#440/#489 关留史（机制被 #509 取代）、#446 改写挂 #556、#69 关留史、#227 改走「release PR + GitHub Actions」、#450 重写怎么算做完。分支 388 个：365 merged 可删、9 closed 可删、14 无 PR 逐个看。issue-close.ts 缺「关成 not_planned / superseded」的合法路径——**#557 那批 13 张被误关成 COMPLETED**。
+- **routing-quota**：路由两层 DB/engine 切片（catalog+package 迁移挂 #76；engine 后接 554-1）；quota-scheduler 挂在 #76 下做；org-switch-wrap、effort-config、discuss-light 等切片已就绪。
+- **cockpit**：驾驶舱 24k 行 web 现状 + 11 切片：tokens → home3 → home-api → changelog → issue-detail → models → delete-board → delete-dispatch → delete-task-detail → delete-soon-members → upgrade-demo。画像「后建先建后删」（避免合并一路中间创始人看到的破窗）。
+- **rehearsal-deploy**：#450 母单按新三段重写「怎么算做完」；#454 关成留史（Grok 普通模式被 #509 取代、令牌由小号 GitHub App 承接）；7 条要创始人拍的事已选好推荐项。
+- **docs-drift**：AGENTS.md 本仓段（4 处要改）、goals.md 第七节（5 条已定搬到七之附、只剩「项目与标准」）、design.md 横幅+5 旧节的「先别照做」指针、0003 整份标替代 + 新建 0008、skills-claim-cleanup 切片（#446 剩）；ops.md 571-596 的 Fusion/认领段收口。
+
+**拍板了 8 件事**：
+1. **0008 决定**：讨论/第二意见改走本机 Grok 4.7 无头（ds 暂不可用；不落新闸门；云路回来仍按 0006 顺序）。
+2. **0009 排期**（本表上面的「拍板了 4 件事」主要是它）：W0 不做、W1 文档对齐、W2 当场修、W3 待拍、W4 代码主线（556-556-7 串行）、W5 并行轨道（驾驶舱 11 片、路由两层 8 片、演练场）。
+3. **Fleet:order 已按此更新**（v3 里程碑 #10，09:40 UTC 提交）。
+4. **#69 关留史**：决定 0006 已把讨论顺序钉死，方案 §十三 GPT 挑错吃进后无「定期巡审」落点（goals 附录本来就建议关）。
+5. **#440 / #489 / #454 关留史**：机制属 Fusion 概念或被取代；**用新加的 `--superseded-by` 参数关**（不能用原 `issue:close`）。
+6. **issue-close.ts 补 `--superseded-by`**：合法路径（原 existant 结果.md 会拒关 #440/#489 这类「需求写在正文」的单）。
+7. **#227 改走 release PR + GitHub Actions**（不是 deploy/release.sh 在法国 root 上跑）：创始人反对他回，否则按推荐做。
+8. **runner 的「体力上限」**：Mirasim 拼车 5 小时池重置 ~1:24 后继续踩；#217 找那张限额度单挂一步，「要根据剩多少先限轨道」。
+
+**动了（3 件）**：
+- `docs/1002-v3-plan` 四个提交已落（进度 + 0008 + 0009）。
+- v3 里程碑 #10 说明 fleet:order 更新为 #509/#554/#555/#556/#227/#450/#194/#76/#323。
+- 起 `v3-quick-fixes` 工作流（w56jpm7sa 完成后），4 个 agent 并行：W1 文档对齐（1 PR）+ fix-531 一行 + s489-spec-salvage + issue-close-superseded（3 个小 PR）。
+- 起 `v3-routing-db` 工作流（routing-two-layer-db 切片，1 个大 PR）。
+
+**下一步（合并下来）**：
+- #531/#440/#489 走 `--superseded-by` 关掉（如果 issue-close PR 挂上了就顺手加；等 PR 合后底子到主线）。
+- 等 `v3-quick-fixes` 回来后挂起 `v3-w4-fusion-runner`（554-1 无头一次性子进程段 runner，W4 第一片，夜里最大）；
+- 等 `v3-routing-db` 回来后挂起 `routing-two-layer-engine`；
+- 家长醒过来前提下：W3 那 7 件要拍的事按个回 1/2 选项。
