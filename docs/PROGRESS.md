@@ -242,3 +242,22 @@
 **下一步**：等 5 张 PR 全合了再发第四波——#554（动手：无头进程+分档+测试）、#555（验收：合前冷调用）、 #556（清理：删编排层+runs 表）+#450 演练场。这些碰 packages/engine，**只能一起拆、不能同时上**——跟主 #531 有 SEAT 联动（#531 改的 TEST + SEAT_LEASES 一栏，#556 要把认领账的推进侧摘走时一起看它）。
 
 **标号**：总 PR 14 张（含已合 8） + 2 个跨流程 (#562/#565/#566/#568/#569 5 张挂起自合）。
+
+## 2026-10-02 08:50（北京时间；#565 #566 挂着红，不是等 CI）
+
+**核实结果**：昨晚以为这两张是「挂着等 CI」，实际两张早就跑完且红了。
+
+- **#566（#227）**：CI 的 `lint` job 里 biome 先红就停，**`tsc` 那一步根本没跑（skipped）**——所以 `release-notes.ts` 里 `lines[i]`、`m[1]`/`m[2]` 在 `noUncheckedIndexedAccess` 下的 7 个 TS2532/TS2322 一路没被看见。这暴露一条机制问题：lint job 把 biome 和 tsc 串在一个 job 的连续 step 里，biome 红 = tsc 静默不跑。**留待开单**（不挡住当前版本，但要按 CI 那套规矩查一次还有多少地方是这么漏的）。
+- **#565（#242）**：`packages/api/test/fake-claims-github.ts` 缺 `enableAutoMerge`，TS2741。
+
+**改法**：
+- #566 的 tsc 错照仓里已有写法补齐（`lines[i] ?? ''`、`m[1] ?? ''`）；另外 `tag 已经有了：tag 跳、其余照走` 那条用例的断言写成四个 false，和用例名、和需求「打到一半再跑一遍补齐」都对不上——**实现是对的**，改断言成 `{ tag: false, release: true, closeMilestone: false, notify: false }`，注释写明「只跳 tag、其余照走」。
+- #565 补 `enableAutoMerge`（`trip('enableAutoMerge')` + 置 `autoMerge` + 记 writes），和 `disableAutoMerge` 对称；`failNext` 键集合照样加。
+
+**本机验过**：`pnpm exec tsc -b` 通过；#566 的 16 个用例、#565 的 116 文件 / 2514 用例全绿。
+
+**已推**：`477291f9`（feat/227-changelog）、`bb29fa5a`（feat/242-auto-merge-reconcile），两张的 auto-merge 都还挂着。
+
+**下一步**：#565 #566 合了之后发第四波 —— #554（动手：无头进程 + 分档 + 测试移出会话）、#555（验收：合前冷调用）、#556（清理：删编排层 + runs 表）+ #450 演练场。这些碰 packages/engine 的同一批文件，**只能一串做、不能同时上**；#556 摘认领账推进侧时和 #531 的 SEAT 侧一起看。
+
+**这次学到的**：「挂着等 CI」不等于「CI 还没跑」——写进度之前先 `gh pr checks` 看一眼，红了就是红了。
