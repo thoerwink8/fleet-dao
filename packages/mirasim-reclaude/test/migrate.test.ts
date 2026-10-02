@@ -48,7 +48,14 @@ afterAll(() => {
 });
 
 async function machine(
-  options: { busy?: boolean; ignoreSet?: boolean; custom?: boolean; badClis?: boolean } = {},
+  options: {
+    busy?: boolean;
+    ignoreSet?: boolean;
+    custom?: boolean;
+    badClis?: boolean;
+    replyDelayMs?: number;
+    silentClis?: boolean;
+  } = {},
 ) {
   const home = tempDir();
   const repo = tempDir();
@@ -80,18 +87,28 @@ async function machine(
   };
   writeFileSync(setting, JSON.stringify(initial));
   const frames: Record<string, unknown>[] = [];
+  const pending = new Set<ReturnType<typeof setTimeout>>();
   const server = await startWsServer((peer) => {
+    const send = (response: unknown) => {
+      if (options.replyDelayMs) {
+        const timer = setTimeout(() => {
+          pending.delete(timer);
+          peer.send(response);
+        }, options.replyDelayMs);
+        pending.add(timer);
+      } else peer.send(response);
+    };
     peer.onMessage((f) => {
       frames.push(f);
       // 实机 getConfig 是脱敏后的功能设置，不含 agentLaunch；启动器须从 listClis 回读。
       if (f.type === 'getConfig')
-        peer.send({
+        send({
           type: 'config',
           config: { agents: { claude: { model: 'sonnet', approvalMode: 'default' } } },
         });
-      if (f.type === 'listClis') {
+      if (f.type === 'listClis' && !options.silentClis) {
         const data = JSON.parse(readFileSync(setting, 'utf8'));
-        peer.send({
+        send({
           type: 'clis',
           clis: options.badClis
             ? []
@@ -127,15 +144,26 @@ async function machine(
     platform: process.platform,
     arch: process.arch,
     pollMs: 5,
-    maxWaitMs: 80,
-    replyMs: 150,
     prepare: async ({ destination }) => {
       mkdirSync(resolve(destination, '..'), { recursive: true });
       copyFileSync(nativeBinary, destination);
       return destination;
     },
   };
-  return { home, repo, record, setting, oldCommand, initial, frames, config, close: server.close };
+  return {
+    home,
+    repo,
+    record,
+    setting,
+    oldCommand,
+    initial,
+    frames,
+    config,
+    close: async () => {
+      for (const timer of pending) clearTimeout(timer);
+      await server.close();
+    },
+  };
 }
 
 describe('旧接入迁移与回读', { timeout: 20_000 }, () => {
@@ -177,10 +205,42 @@ describe('旧接入迁移与回读', { timeout: 20_000 }, () => {
     }
   });
 
+  it('WS 回读延迟 250ms 仍在默认限时内，迁移与撤回均确认真实配置', async () => {
+    const m = await machine({ replyDelayMs: 250 });
+    try {
+      const first = await migrate(m.config);
+      expect(first.state).toBe('migrated');
+      expect(JSON.parse(readFileSync(m.setting, 'utf8')).agentLaunch.claude.command).toBe(first.command);
+      const back = await migrate({ ...m.config, rollback: true });
+      expect(back.state).toBe('restored');
+      expect(JSON.parse(readFileSync(m.setting, 'utf8')).agentLaunch.claude).toEqual({
+        command: m.oldCommand,
+        args: '--original',
+      });
+    } finally {
+      await m.close();
+    }
+  });
+
+  it('启动器列表始终不响应：到限时明确失败，不写启动配置或迁移记录', async () => {
+    const m = await machine({ silentClis: true });
+    try {
+      await expect(migrate({ ...m.config, replyMs: 75 })).rejects.toThrow(/启动器列表.*超时/);
+      expect(JSON.parse(readFileSync(m.setting, 'utf8')).agentLaunch.claude).toEqual({
+        command: m.oldCommand,
+        args: '--original',
+      });
+      expect(existsSync(join(m.home, '.fleet-dao', 'mirasim-reclaude', 'migration.json'))).toBe(false);
+      expect(m.frames.some((f) => f.type === 'setAgentLaunch')).toBe(false);
+    } finally {
+      await m.close();
+    }
+  });
+
   it('在途回合没结束：等待到上限也不改命令、不宣称已迁移', async () => {
     const m = await machine({ busy: true });
     try {
-      const result = await migrate({ ...m.config, wait: true });
+      const result = await migrate({ ...m.config, wait: true, maxWaitMs: 80 });
       expect(result.state).toBe('waiting');
       expect(JSON.parse(readFileSync(m.setting, 'utf8')).agentLaunch.claude.command).toBe(m.oldCommand);
       expect(m.frames.some((f) => f.type === 'setAgentLaunch')).toBe(false);
@@ -200,7 +260,7 @@ describe('旧接入迁移与回读', { timeout: 20_000 }, () => {
       20,
     );
     try {
-      expect((await migrate({ ...m.config, wait: true, maxWaitMs: 500 })).state).toBe('migrated');
+      expect((await migrate({ ...m.config, wait: true })).state).toBe('migrated');
       expect(m.frames.filter((f) => f.type === 'setAgentLaunch')).toHaveLength(1);
     } finally {
       clearTimeout(timer);
