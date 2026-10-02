@@ -2,6 +2,17 @@
 
 > 一行一条、带日期和对应提交。规矩在 `AGENTS.md` 通用段「进度也要落盘」。
 
+## 2026-10-02（W4 顺位 9 / #605 / PR #606）
+
+- **556-1 删 Fusion 工作流 + 对应 decisions 实现**：分支 `feat/556-1-big-delete`，工作树 `.claude/worktrees/556-1-big-delete`。
+- 删的：`packages/engine/src/workflows/{fusion,requirement,subtask,merge-queue,sync-mainline}.ts`、`packages/engine/src/decisions/{triage,plan,delivery,verify,merge}.ts`、7 个对应的测试文件（fusion / requirement / requirement-start / subtask / merge-queue / replay / org-drift）。
+- 留的：`decisions/types.ts`（共享类型：Feedback/SyncResult/CiResult/PlannedSubtask/SubtaskSpec/TriageVerdict/MergeOutcome/TestResult），DecisionMap 只留 limits/newIds/failure/brief/parallelBriefs/acceptance/verdict/bodyCriteria/verifyLines/fusionStart/fusionFlow/leadPlan/leadReview/rebuttable/filesUnder/fusionPr/closeComment；`fusionFlow` 保留给开 PR 前验证回环的测试宿主。
+- spec 结果.md 里指向已删文件的指针改成「代码于 #556-1 删除」（#214/#253/#259/#335/#43/#444/#460/#598/ops.md）。
+- 单子 `gh issue view 605`，母单 #556；挂 v3 三段一条龙 里程碑（`gh issue edit` 补的：pnpm issue:new 报 graphql EOF 后手动补）。
+- PR [#606](https://github.com/thoerwink8/fleet-dao/pull/606)，`--auto --squash` 已挂；CI 还在跑；mergeStateStatus=BLOCKED（等 CI 绿）。
+- 验证：`pnpm test:changed`（115 文件 2577 过 / 32 跳过）、`pnpm exec tsc -b` 绿、`pnpm exec biome check` 0 错。
+- **接下来**：556-2 删 `packages/core/src/{flow,fusion}.ts` + `flow.default.json`（DecisionMap 里 leadPlan/fusionFlow 等还指着它）；556-3 删 API 侧 Fusion 接活（本切片没动 `packages/api/`）。
+
 # 进度（本机恢复与重做前置）
 
 > 一行一条、带日期和对应提交。规矩在 `AGENTS.md` 通用段「进度也要落盘」。
