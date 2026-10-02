@@ -4,5 +4,6 @@ export * from './catalog.ts';
 export * from './enums.ts';
 export * from './feishu.ts';
 export * from './ops.ts';
+export * from './routing-catalog.ts';
 export * from './seat.ts';
 export * from './work.ts';

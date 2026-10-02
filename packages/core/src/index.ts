@@ -11,5 +11,6 @@ export * from './dispatch.ts';
 export * from './flow.ts';
 export * from './fusion.ts';
 export * from './replica.ts';
+export * from './routing-catalog.ts';
 export * from './seat.ts';
 export * from './verdict.ts';

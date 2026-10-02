@@ -31,6 +31,7 @@ describe('core 只放纯判断', () => {
       'fusion.ts',
       'index.ts',
       'replica.ts',
+      'routing-catalog.ts',
       'seat.ts',
       'verdict.ts',
     ]);

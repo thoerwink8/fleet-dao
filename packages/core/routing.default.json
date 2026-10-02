@@ -1,0 +1,27 @@
+{
+  "说明": "全组织默认的两层路由目录（specs/509-需求梳理/流程重做方案.md 第八节、specs/574-路由两层DB/需求.md）。第一层「用途 → 模型顺序」，第二层「模型 → 渠道顺序」。所有用途都得挂、第一层挂到的模型第二层都得列，core 的 routing-catalog.ts 在读取时拒收缺漏。grok-4.7 由决定 0008 救为本机纠集，不进渠道（讨论这条用途除外——那一层是「征求别家意见」、属于人点名用的场景）；它出现在 discuss 的模型顺序里、但 channels 列的是 mirasim（走讨论中继）。",
+  "formatVersion": 1,
+  "models": {
+    "opus-5.5": { "channels": ["carpool", "solo", "mirasim"] },
+    "gpt-6-luna": { "channels": ["mirasim"] },
+    "gpt-5.6-luna": { "channels": ["mirasim"] },
+    "kimi-k3": { "channels": ["mirasim"] },
+    "deepseek-flash": { "channels": ["mirasim"] },
+    "glm-5.2": { "channels": ["mirasim"] },
+    "grok-4.7": { "channels": ["mirasim"] }
+  },
+  "purposes": {
+    "triage": { "models": ["opus-5.5", "glm-5.2"] },
+    "spec": { "models": ["opus-5.5", "gpt-5.6-luna"] },
+    "plan": { "models": ["opus-5.5", "kimi-k3"] },
+    "execute": { "models": ["opus-5.5", "gpt-5.6-luna"] },
+    "ui": { "models": ["opus-5.5", "glm-5.2"] },
+    "review": { "models": ["gpt-6-luna", "opus-5.5", "kimi-k3"] },
+    "verify": { "models": ["gpt-6-luna", "glm-5.2", "deepseek-flash"] },
+    "research": { "models": ["gpt-6-luna", "deepseek-flash"] },
+    "judge": { "models": ["deepseek-flash", "gpt-5.6-luna"] },
+    "autoDispatchGate": { "models": ["opus-5.5"] },
+    "discuss": { "models": ["gpt-6-luna", "opus-5.5", "deepseek-flash", "grok-4.7", "kimi-k3"] },
+    "sidekick": { "models": ["gpt-6-luna"] }
+  }
+}

@@ -39,6 +39,26 @@ export type SubtaskState =
 
 export type StepState = 'pending' | 'in_progress' | 'done';
 
+/**
+ * 路由两层的「用途」（第一层，specs/509-需求梳理/流程重做方案.md 第八节、
+ * specs/574-路由两层DB/需求.md）：比 StageKind 多三种——autoDispatchGate、
+ * discuss、sidekick——那三种不是干活的阶段、但都要走同一张两层路由。
+ * 引擎实际派活时把 StageKind 映射到对应用途（一一对应 stage → 同名用途）。
+ */
+export type RoutingPurpose =
+  | 'triage' // 对题（建单那一刻的对话路由）
+  | 'spec' // 写需求文档
+  | 'plan' // 规划
+  | 'execute' // 动手
+  | 'ui' // UI 类动手（GPT 族禁入）
+  | 'review' // 验收
+  | 'verify' // 合之前一次冷调用（只派别家、只读）
+  | 'research' // 调研
+  | 'judge' // 判断题小模型
+  | 'autoDispatchGate' // 自动派活的闸门判题
+  | 'discuss' // 独立讨论（决定 0006 定的顺序）
+  | 'sidekick'; // 副手问答
+
 /** 套餐内 = 不算花钱；按量 = 要先有创始人定的月度上限。 */
 export type BillingKind = 'subscription' | 'metered';
 
