@@ -1,6 +1,14 @@
 // 开 PR 前验证照哪几条问：单子正文指的需求文档目录、需求文档里「怎么算做完」逐条原文。认不出的一律明确报错，不拿空清单顶。
 import { describe, expect, it } from 'vitest';
-import { bodyCriteria, criteriaOf, specDirOf, specOf, specShortName } from '../src/criteria.ts';
+import {
+  bodyCriteria,
+  cleanBody,
+  criteriaOf,
+  hasSpecPointer,
+  specDirOf,
+  specOf,
+  specShortName,
+} from '../src/criteria.ts';
 
 const ok = <T>(r: { ok: T } | { error: string }): T => {
   if ('error' in r) throw new Error(r.error);
@@ -174,5 +182,24 @@ describe('「怎么算做完」逐条原文', () => {
   ])('【失败】%s → 明确报错，不回空清单', (_name, md, why) => {
     const got = criteriaOf(md);
     expect('error' in got && got.error).toMatch(why);
+  });
+});
+
+describe('hasSpecPointer / cleanBody（派活读交代时用，#632 S2-1）', () => {
+  it('正文里有指需求文档的那一行（占位或真号都算）才是 true；没有、或只提到 specs/ 不算', () => {
+    expect(hasSpecPointer('概述。\n\n文档：`specs/<本单号>-短名/需求.md`（完整需求）')).toBe(true);
+    expect(hasSpecPointer('文档：`specs/12-短名/需求.md`')).toBe(true);
+    expect(hasSpecPointer('## 场景\n\n正文自己写全了。')).toBe(false);
+    expect(hasSpecPointer('见 specs/12-短名/需求.md')).toBe(false);
+  });
+
+  it('指错了（别的单的）是另一回事：hasSpecPointer 仍是 true，由 specDirOf 报错', () => {
+    const body = '文档：`specs/99-别的单/需求.md`';
+    expect(hasSpecPointer(body)).toBe(true);
+    expect('error' in specDirOf(body, 7)).toBe(true);
+  });
+
+  it('cleanBody：去 BOM、统一换行、去 HTML 注释、压空行、掐头尾', () => {
+    expect(cleanBody('﻿\r\n甲\r\n\r\n\r\n\r\n<!-- 提示 -->乙\r\n')).toBe('甲\n\n乙');
   });
 });

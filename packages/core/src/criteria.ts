@@ -12,6 +12,11 @@ const PLACEHOLDER = '<本单号>';
 /** 目录名：specs/<号>-<短名>，短名不许带斜杠、反斜杠、空白。 */
 const SPEC_DIR = /^specs\/(\d+)-([^/\\\s]+)$/;
 
+/** 单子正文里有没有指需求文档的那一行（有，但指错了，specDirOf 才报错；没有，是另一种情形：正文自己写全了需求）。 */
+export function hasSpecPointer(issueBody: string): boolean {
+  return POINTER.test(issueBody);
+}
+
 /** 单子正文指的需求文档目录（例如 specs/213-开PR前验证）。没写、写的不是这张单的、目录名认不出，都回 error。 */
 export function specDirOf(issueBody: string, issueNumber: number): { ok: string } | { error: string } {
   const m = POINTER.exec(issueBody);
@@ -37,7 +42,7 @@ export function specShortName(title: string): string {
 }
 
 /** 单子正文当需求文档用之前：去掉 HTML 注释（引擎开单留的标记、模板里的提示）、统一换行、掐头去尾。 */
-function cleanBody(body: string): string {
+export function cleanBody(body: string): string {
   return body
     .replace(/^﻿/, '')
     .replace(/\r\n?/g, '\n')
