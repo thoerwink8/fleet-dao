@@ -67,13 +67,16 @@ export type ReleaseBodyPick =
 export function extractReleaseBody(changelog: string, version: `v${number}`): ReleaseBodyPick {
   if (!isVersionTag(version)) throw new Error(`版本号不是 v<N> 的模样：「${version}」`);
   const lines = changelog.replace(/\r\n?/g, '\n').split('\n');
-  const heading = `## [${version}] - `;
-  const start = lines.findIndex((l) => l.trim().startsWith(heading));
+  // 「## [vN] - YYYY-MM-DD」整行都得对得上：「## [v2] - nonsense」不能让过（Keep a Changelog 钉死的格式，
+  // shared/changelog.ts 的 HEADING_LINE 同一套；第二意见 2026-10-02）。
+  const headingRe = new RegExp(`^## \\[${version}\\] - \\d{4}-\\d{2}-\\d{2}\\s*$`);
+  const headingDisplay = `## [${version}] - <YYYY-MM-DD>`;
+  const start = lines.findIndex((l) => headingRe.test(l.trim()));
   if (start === -1) {
     return {
       kind: 'missing-heading',
       message:
-        `CHANGELOG.md 里没有「${heading}…」这一版：发起人没把 Unreleased 段收进标题，或 write_dispatch 的 version 写错了。` +
+        `CHANGELOG.md 里没有「${headingDisplay}」这一版（标题要 YYYY-MM-DD）：发起人没把 Unreleased 段收进标题，或 write_dispatch 的 version 写错了。` +
         `先把正文写进 Unreleased 段、重跑发布流程（不拿 Unreleased 顶：那里多是占位「还没有」，发了就是假 release）。`,
     };
   }

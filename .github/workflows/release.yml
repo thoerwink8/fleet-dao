@@ -242,7 +242,20 @@ jobs:
           # 不然重跑这一轮会先把正文改回去、飞书那步接着判「没标过」再发一遍（第二意见 2026-10-02）。
           # 同时核 tagName：vN 这个 release 名字、tag 却不是 vN 的话——名字撞了但指着别的（第二意见 2026-10-02）。
           version=$(echo "$VERSION")
-          if existing=$(gh release view "$VERSION" --json body,tagName 2>/dev/null); then
+          # 拿 release 要分清「404 不在」和「读挂了」：GitHub 临时故障时把整个失败都当「不在」会接着 create、可能重复或覆盖
+          # （第二意见 2026-10-02）。任何非 0 退出码都先看 stderr 里有没有 release not found，不再一律当 404 处理。
+          existing_err=/tmp/release-view-err.log
+          if ! existing=$(gh release view "$VERSION" --json body,tagName 2>"$existing_err"); then
+            err_text=$(<"$existing_err")
+            if grep -qiE "release not found|not found" <<<"$err_text"; then
+              : # 这是「不在」，走下面 create 那一头
+              existing=""
+            else
+              echo "::error::gh release view $VERSION 失败（不是「不存在」）：$err_text"
+              exit 1
+            fi
+          fi
+          if [[ -n $existing ]]; then
             existing_tag=$(jq -r '.tagName' <<<"$existing")
             if [[ $existing_tag != "$VERSION" ]]; then
               echo "::error::release「$VERSION」在，但 tagName 是「$existing_tag」——名字撞但 tag 指着别的、不接着走。"

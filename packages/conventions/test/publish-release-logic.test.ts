@@ -97,6 +97,13 @@ describe('extractReleaseBody：从 CHANGELOG.md 拿「## [vN] - 」那一段当�
     if (r.kind === 'missing-heading') expect(r.message).toMatch(/假 release/);
   });
 
+  it('故意造出的失败：版本标题不是 YYYY-MM-DD（## [v2] - nonsense）→ 拒绝（Keep a Changelog 钉死，第二意见 2026-10-02）', () => {
+    const text = `# Changelog\n\n## [v2] - nonsense\n\n- x\n\n## [v1] - 2026-10-01\n\n- y\n`;
+    const r = extractReleaseBody(text, 'v2');
+    expect(r.kind).toBe('missing-heading');
+    if (r.kind === 'missing-heading') expect(r.message).toMatch(/YYYY-MM-DD/);
+  });
+
   it('故意造出的失败：这一版正文是空的 → 明确失败、不拿空串当正文', () => {
     const text = `# Changelog\n\n## [v2] - 2026-10-02\n\n## [v1] - 2026-10-01\n\n- x\n`;
     const r = extractReleaseBody(text, 'v2');
