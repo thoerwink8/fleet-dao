@@ -139,19 +139,34 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          if git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null; then
-            echo "::notice::tag $VERSION 已经在，跳打 tag（幂等）。"
+          # 已存在的 tag 不能只说「在就跳」：得核它指向的提交是不是本次 merge（HEAD）——撞名字的 tag 指向旧提交的话，
+          # 后面建 release、关 milestone、推飞书每一步都把错的那个版本当真发的那一份（第二意见 2026-10-02）。
+          MERGE_SHA="${GITHUB_SHA}"
+          check_tag() {
+            if ! git rev-parse -q --verify "refs/tags/$VERSION^{}" >/dev/null; then return 1; fi
+            local target
+            target=$(git rev-list -n 1 "refs/tags/$VERSION^{}" 2>/dev/null || echo "")
+            if [[ -z $target ]]; then return 1; fi
+            if [[ $target == "$MERGE_SHA" ]]; then return 0; fi
+            echo "::error::tag $VERSION 已存在但指向的提交（$target）不是本次 merge（$MERGE_SHA）——撞名字的 tag 指着别人，"
+            echo "::error::发起人要看一眼，不接着走（不把它当真发的那一份）。"
+            exit 1
+          }
+          if check_tag; then
+            echo "::notice::tag $VERSION 已经在、指向本次 merge（幂等跳）。"
             exit 0
           fi
-          if gh api "repos/${{ github.repository }}/git/ref/tags/$VERSION" >/dev/null 2>&1; then
-            echo "::notice::远端 tag $VERSION 已经在，跳打 tag（幂等）。"
-            exit 0
-          fi
-          # 拉下远端 tag 列表：fetch-depth: 0 带了提交图，但 tag 引用未必都在 refs/tags 下
+          # 本地没有：拉下远端 tag 再核一次；gh api 用返回码判存在（pull request 检出默认不带这套 ref）
           git fetch origin "+refs/tags/*:refs/tags/*" || true
-          if git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null; then
-            echo "::notice::tag $VERSION 已经在，跳打 tag（幂等）。"
+          if check_tag; then
+            echo "::notice::tag $VERSION 已经在、指向本次 merge（幂等跳）。"
             exit 0
+          fi
+          # 本地还不在：或许远端有，但 fetch 失败；直接问 gh
+          if gh api "repos/${{ github.repository }}/git/ref/tags/$VERSION" >/dev/null 2>&1; then
+            echo "::error::远端 tag $VERSION 存在但本地查不到指向的提交：不假定它和本次 merge 一致、也不接着走。"
+            echo "::error::发起人本地 git fetch --tags 看一眼指向，然后手动 cleanup 或 gh api -X DELETE …/git/refs/tags/$VERSION 再重跑。"
+            exit 1
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -182,8 +197,14 @@ jobs:
           " > /tmp/release-body.md
           # 已存在：读回比正文。比对时把 fleet-notified 标记剥掉——飞书那一步打在末尾的标签不能当「被人手改了正文」，
           # 不然重跑这一轮会先把正文改回去、飞书那步接着判「没标过」再发一遍（第二意见 2026-10-02）。
+          # 同时核 tagName：vN 这个 release 名字、tag 却不是 vN 的话——名字撞了但指着别的（第二意见 2026-10-02）。
           version=$(echo "$VERSION")
           if existing=$(gh release view "$VERSION" --json body,tagName 2>/dev/null); then
+            existing_tag=$(jq -r '.tagName' <<<"$existing")
+            if [[ $existing_tag != "$VERSION" ]]; then
+              echo "::error::release「$VERSION」在，但 tagName 是「$existing_tag」——名字撞但 tag 指着别的、不接着走。"
+              exit 1
+            fi
             existing_body=$(jq -r '.body' <<<"$existing")
             # 剥掉 <!-- fleet-notified: vN --> 那一行再比。
             existing_changelog_part=$(grep -vE '^<!-- fleet-notified: [^ ]+ -->$' <<<"$existing_body" | sed -e 's/[[:space:]]*$//')

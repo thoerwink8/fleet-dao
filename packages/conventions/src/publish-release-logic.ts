@@ -94,7 +94,16 @@ export function extractReleaseBody(changelog: string, version: `v${number}`): Re
       message: `CHANGELOG.md 这一版（${version}）正文是空的：发起前要把话写进 Unreleased 段。`,
     };
   }
-  if (PLACEHOLDER_HEADING_MARKS.some((m) => section === m || section.includes(m))) {
+  // 只把「整段就是占位」或「整行就是占位」当占位——用户写一句「新增无障碍模式」里带「无」不能误伤（第二意见 2026-10-02 小毛病）。
+  const sectionIsPlaceholder = PLACEHOLDER_HEADING_MARKS.some((m) => section === m || section === `${m}\n`);
+  const everyLineIsPlaceholder =
+    section.length > 0 &&
+    section
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0)
+      .every((l) => PLACEHOLDER_HEADING_MARKS.some((m) => l === m));
+  if (sectionIsPlaceholder || everyLineIsPlaceholder) {
     return {
       kind: 'placeholder',
       message: `CHANGELOG.md 这一版（${version}）正文只剩占位「${section.slice(0, 20)}…」：发起前要把话写进 Unreleased 段。`,

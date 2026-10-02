@@ -104,6 +104,27 @@ describe('extractReleaseBody：从 CHANGELOG.md 拿「## [vN] - 」那一段当�
     const r = extractReleaseBody(text, 'v2');
     expect(r.kind).toBe('placeholder');
   });
+
+  it('不能误伤带「无」的合法正文：「新增无障碍模式」是合法发布内容（第二意见 2026-10-02 小毛病）', () => {
+    const text = `# Changelog\n\n## [v2] - 2026-10-02\n\n- 新增无障碍模式
+- 修了一个无伤大雅的错
+
+## [v1] - 2026-10-01\n\n- x\n`;
+    const r = extractReleaseBody(text, 'v2');
+    expect(r.kind).toBe('ok');
+    if (r.kind === 'ok') {
+      expect(r.body).toContain('新增无障碍模式');
+    }
+  });
+
+  it('整段占位的别的模样：一堆「还没有」「无」各行一条，都整行占位也算占位', () => {
+    const text = `# Changelog\n\n## [v2] - 2026-10-02\n\n还没有
+无
+
+## [v1] - 2026-10-01\n\n- x\n`;
+    const r = extractReleaseBody(text, 'v2');
+    expect(r.kind).toBe('placeholder');
+  });
 });
 
 describe('飞书幂等：release 正文末尾的「<!-- fleet-notified: vN -->」标签', () => {

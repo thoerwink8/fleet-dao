@@ -95,6 +95,16 @@ export async function publishPr(deps: PublishDeps): Promise<PublishResult> {
     );
   }
 
+  // 先核 gh 身份再动仓（第二意见 2026-10-02）：写 CHANGELOG.md、commit、push 都是动仓，缺身份的时候跑到这一步
+  // 应当明说然后停，别先把仓改了再说「没身份」——人补了身份再重跑会撞「没有改动可提交」。
+  const auth = await gh(['auth', 'status'], deps.root);
+  if (auth.code !== 0) {
+    throw new Error(
+      `gh 没有可用的身份（gh auth status 退出码 ${auth.code}）：` +
+        '发起人先 gh auth login、或把 GITHUB_TOKEN/GH_TOKEN 放进环境，再重跑。没令牌不伪造成功、也不动仓。',
+    );
+  }
+
   // 改写 CHANGELOG.md：Unreleased 段收进 ## [vN] - 日期。
   await writeFile(changelogPath, plan.nextChangelog, 'utf8');
   const add = await git(['add', 'CHANGELOG.md'], deps.root);
@@ -116,17 +126,6 @@ export async function publishPr(deps: PublishDeps): Promise<PublishResult> {
   const push = await git(['push', '-u', 'origin', plan.headBranch], deps.root);
   if (push.code !== 0) throw fail(`git push -u origin ${plan.headBranch} 失败`, push);
   note(`推好了 ${plan.headBranch}（连带 CHANGELOG.md 收尾那一个提交）`);
-
-  // 核查 gh 有没有可用身份（gh auth login 的存放凭据 或 GITHUB_TOKEN/GH_TOKEN，第二意见 2026-10-02）：
-  // 没有就明说、不伪造 PR 号。放这里（推完分支、真要开 PR 之前），前面的纯判定（分支名、CHANGELOG 格式）挂的话
-  // 不用 gh 也能在测试里跑到——「先查身份」会让前面那些不用 gh 的失败也要求测试 mock gh，太冤。
-  const auth = await gh(['auth', 'status'], deps.root);
-  if (auth.code !== 0) {
-    throw new Error(
-      `gh 没有可用的身份（gh auth status 退出码 ${auth.code}）：` +
-        '发起人先 gh auth login、或把 GITHUB_TOKEN/GH_TOKEN 放进环境，再重跑。没令牌不伪造成功。',
-    );
-  }
 
   const created = await gh(
     [
