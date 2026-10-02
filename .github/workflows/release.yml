@@ -137,11 +137,26 @@ jobs:
         env:
           VERSION: ${{ steps.invoke.outputs.version }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
-          # 已存在的 tag 不能只说「在就跳」：得核它指向的提交是不是本次 merge（HEAD）——撞名字的 tag 指向旧提交的话，
-          # 后面建 release、关 milestone、推飞书每一步都把错的那个版本当真发的那一份（第二意见 2026-10-02）。
-          MERGE_SHA="${GITHUB_SHA}"
+          # 已存在的 tag 不能只说「在就跳」：得核它指向的提交是不是本次发布合并（merge commit）。
+          # pull_request 触发：merge 提交就是 GITHUB_SHA（GitHub 在 PR 合上那一刻写的）。
+          # workflow_dispatch 手动补跑：当前 HEAD 已经走到「合并后又合进来几个」的下一版，不能拿 HEAD 当这次发布的提交——
+          # 得在 git log 主干按「发布 v<N>：CHANGELOG.md …」提交信息找回真发的那一次（第二意见 2026-10-02）。
+          if [[ $EVENT_NAME == pull_request ]]; then
+            MERGE_SHA="${GITHUB_SHA}"
+          else
+            # 发起 CLI 用「发布 v<N>：CHANGELOG.md 的 Unreleased 段收进 ## [vN] - 日期」这一条提交信息
+            # （packages/conventions/src/publish-actions.ts 的 commitMessage）。
+            MERGE_SHA=$(git log --first-parent --grep="^发布 ${VERSION}：CHANGELOG.md 的 Unreleased 段收进" --format=%H -n 1 main || echo "")
+            if [[ -z $MERGE_SHA ]]; then
+              echo "::error::workflow_dispatch 手动补跑：在 main 主干上按提交信息「发布 ${VERSION}：…」找不到对应的 merge 提交——"
+              echo "::error::发起人把 version 写错了吧（$VERSION 不是真发过的版本号）？用 git log --grep 看一眼再重试。"
+              exit 1
+            fi
+          fi
+          echo "本次发布的 merge 提交：$MERGE_SHA（事件=$EVENT_NAME）"
           check_tag() {
             if ! git rev-parse -q --verify "refs/tags/$VERSION^{}" >/dev/null; then return 1; fi
             local target
