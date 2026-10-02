@@ -2,6 +2,15 @@
 
 > 一行一条、带日期和对应提交。规矩在 `AGENTS.md` 通用段「进度也要落盘」。
 
+## 生效中的临时调整
+
+> 五列：内容｜当时为什么｜谁拍的（原话和日期）｜撤回条件｜最迟复查日期。撤回就删行（git 有历史）。规矩在 `AGENTS.md` 通用段「我拍了板，当场记进项目里记决定的地方」（日期一律 YYYY-MM-DD 北京时间）。
+
+| 内容 | 当时为什么 | 谁拍的（原话和日期） | 撤回条件 | 最迟复查日期 |
+|---|---|---|---|---|
+| 法国引擎关闭：不再派单、不接新活，`/etc/fleet-dao/release.env` 的 `FLEET_SERVICES` 只留 `fleet-api`；期望配置写在 `deploy/france/desired-config.json` 的【临时】段 | 引擎 3 天半只做完 12 张单（真需求 4 张）、写码会话成功率 38%；流程重做前不再让它接活 | 创始人 2026-09-29 叫停引擎、要改成三段一条龙（原话：「要删的东西都要删」） | 新流程（v3 三段一条龙）演练通过、创始人说重开；撤回做法：改回 `fleet-engine fleet-api`、发布一轮，再把 `canary`、`route-probe`、`hourly-reconcile`、`github-reconcile` 四个 Temporal 定时任务用 `fleet-temporal schedule toggle --unpause` 恢复 | 2026-10-05 |
+| 指挥官派工人用 Grok，不用 Claude：新派的活走 `commander` 技能的 `worker.mjs` 起 Grok 会话；改标准的活也派给 Grok，PR 不挂自动合并、等创始人点头；不开 Claude 子代理 | reclaude 独享号额度紧 | 创始人 2026-09-28 晚（原话：「reclaude独享号额度不多了，能不能尽量都grok做，帥位查看盯着进度，临时看板也能看」，`specs/169-Fusion形态/需求.md` 行 270、第 4 条撤回条件在行 278；同晚追加「后续不要开subagent了」在行 279；同晚「本机快马」第 5 条「最迟 2026-10-05 帅位复查」在行 333） | reclaude 独享号额度恢复，或创始人说撤 | 2026-10-05 |
+
 ## 2026-10-02（Mirasim 自有 / 平台切换与 macOS，先调研出方案）
 
 - 基线提交 `dfd604f8`；本轮按创始人「调研完先给方案」只做只读排查、验证和方案记录，不切启动命令、不切 reclaude 账号、不停正在运行的会话。
