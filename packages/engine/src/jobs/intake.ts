@@ -28,6 +28,7 @@ import {
   versionGate,
 } from '@fleet-dao/core';
 import type { ScheduleResult } from '@fleet-dao/db';
+import type { IntakeRun } from '../contract.ts';
 import { type BriefProblem, describeBriefProblems, readTaskBrief } from '../runner/task-brief.ts';
 import type { ScheduleRunLog } from './github-reconcile.ts';
 import { clip, message } from './reconcile-common.ts';
@@ -41,7 +42,16 @@ export const INTAKE_JOB = {
   expectEveryMinutes: 15,
 } as const;
 
+/**
+ * 合并闸认冷验收的结论了没有（S2-5，#625）。没认之前拉单不起任务：任务工作流挂的自动合并不能绕过验收，而人手挂、别的路径挂
+ * 要等合并闸那一层才拦得住。S2-5 的 PR 把它改成 true（同一个 PR 让合并闸认 cold-verify 提交状态）。
+ * 开着「让 AI 接活」的仓又碰上它是 false：这一轮记没跑成、一张单都不拉——开关开早了要看得见，不悄悄空转。
+ */
+export const MERGE_GATE_REQUIRES_COLD_VERIFY = false;
+
 export const INTAKE_EVERY_MINUTES = 5;
+/** 和对账补漏（整点起每 15 分钟）、路由探针（7、22、37、52 分）、看门狗（4、9、14…分）、每小时对账（41 分）错开：每小时 3、8、13……分。 */
+export const INTAKE_OFFSET_MINUTES = 3;
 /** 每轮最多起几条任务工作流。 */
 export const MAX_STARTS_PER_ROUND = 5;
 /** 同时在跑的任务工作流最多几条（再多就等，不是丢）。 */
@@ -53,6 +63,8 @@ export interface IntakeRepo {
   id: string;
   owner: string;
   name: string;
+  defaultBranch: string;
+  testCommand: string;
   /** 「让 AI 接活」打开的时刻（ISO）；null＝关着。 */
   autoDispatchSince: string | null;
 }
@@ -176,6 +188,9 @@ export interface IntakeDeps {
     repo: IntakeRepo;
     issueNumber: number;
     title: string;
+    /** 单子正文原样（建任务行的「原话」）。 */
+    body: string;
+    author: IntakeIssue['author'];
   }): Promise<'started' | 'already_exists'>;
   /** 在单子上留言（同一个键只留一条）；以前留过回 created: false。 */
   comment(input: {
@@ -189,14 +204,8 @@ export interface IntakeDeps {
   log: (level: 'info' | 'warn' | 'error', message: string, fields?: Record<string, unknown>) => void;
   /** 测试用：换掉每轮上限。 */
   limits?: { maxStartsPerRound?: number; maxRunningTasks?: number };
-}
-
-export interface IntakeRun {
-  runId: number;
-  outcome: 'ok' | 'partial' | 'unscanned' | 'failed';
-  scanned: number;
-  found: number;
-  why?: string | undefined;
+  /** 测试用：换掉「合并闸认冷验收了没有」（默认 MERGE_GATE_REQUIRES_COLD_VERIFY）。 */
+  gateLive?: boolean;
 }
 
 /** 这一轮没跑成：结局已经记进 schedule_runs，活动照样报失败，Temporal 里也看得见。 */
@@ -296,7 +305,13 @@ async function intakeIssue(
       why: `在跑的任务已经 ${t.running} 条（上限 ${maxRunning}），等有空的`,
     });
   }
-  const got = await deps.start({ repo, issueNumber: issue.number, title: brief.brief.title });
+  const got = await deps.start({
+    repo,
+    issueNumber: issue.number,
+    title: brief.brief.title,
+    body: issue.body,
+    author: issue.author,
+  });
   if (got === 'already_exists') {
     return skip(t, slug, issue.number, { reason: 'already_exists', why: '任务工作流的编号已经用过' });
   }
@@ -366,6 +381,13 @@ async function round(deps: IntakeDeps): Promise<ScheduleResult> {
     running: 0,
   };
   if (repos.some((r) => r.autoDispatchSince !== null)) {
+    if (!(deps.gateLive ?? MERGE_GATE_REQUIRES_COLD_VERIFY)) {
+      return {
+        outcome: 'failed',
+        why: '「让 AI 接活」开着，但合并闸还没认冷验收的结论（S2-5，#625）：这一轮一张单都没拉。把项目的开关关掉，或等 S2-5 合进来',
+        scanned: repos.length,
+      };
+    }
     let whitelist: GithubWhitelist | undefined;
     try {
       whitelist = await deps.whitelist();

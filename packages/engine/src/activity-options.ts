@@ -9,6 +9,8 @@ import type {
   GitHubReconcileRun,
   HourlyReconcileInput,
   HourlyReconcileRun,
+  IntakeInput,
+  IntakeRun,
   MergeItem,
   RouteProbeInput,
   RouteProbeRun,
@@ -76,6 +78,8 @@ export type EngineActivities = PortActivities & {
   canaryCheck(input: { schemaVersion: 1; state: CanaryState }): Promise<CanaryStepResult>;
   /** 引擎自己的活动：看门狗跑一轮（按登记表看各定时任务新不新鲜、推撤提醒），结局记进 schedule_runs（jobs/watchdog.ts）。 */
   watchSchedules(input: WatchdogInput): Promise<WatchdogRun>;
+  /** 引擎自己的活动：拉单跑一轮（读开着开关的仓里该做的单、逐道过关、起任务工作流），结局记进 schedule_runs（jobs/intake.ts）。 */
+  intakeRound(input: IntakeInput): Promise<IntakeRun>;
   // —— 任务工作流（task-contract.ts；#632）要的活动：现读单子、起一次无头动手会话、读交付、冷验收、合并这几步 ——
   /** 现读单子和它指着的需求文档，拼出动手的交代（runner/task-brief.ts）。单子读不到抛错；缺栏回 problems。 */
   readTaskBrief(input: ReadTaskBriefInput): Promise<TaskBriefResult>;
@@ -148,6 +152,7 @@ export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
   canaryOpen: 'job',
   canaryCheck: 'job',
   watchSchedules: 'job',
+  intakeRound: 'job',
   readTaskBrief: 'git',
   runSegment: 'segment',
   readDelivery: 'git',

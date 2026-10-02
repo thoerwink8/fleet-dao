@@ -60,6 +60,7 @@ describe('活动外壳', () => {
         'canaryOpen',
         'canaryCheck',
         'watchSchedules',
+        'intakeRound',
         ...TASK_ACTIVITY_NAMES,
       ].sort(),
     ).toEqual(Object.keys(ACTIVITY_PROFILE).sort());

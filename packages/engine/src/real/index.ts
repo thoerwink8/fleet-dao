@@ -36,6 +36,7 @@ import {
   hostDrivers,
 } from './hosts.ts';
 import { hourlyReconcileJob } from './hourly-reconcile.ts';
+import { intakeJob } from './intake.ts';
 import { issueGroomIdlePolicyFromEnv } from './issue-groom.ts';
 import { issueKindJevFromEnv } from './issue-kind-jev.ts';
 import { engineJevFromEnv } from './jev-port.ts';
@@ -568,6 +569,8 @@ export function realPortsFromEnv(
     canary: canaryJob({ db, gh, repo: env.FLEET_CANARY_REPO }),
     // 看门狗（#203）：按登记表看上面这些（和备份那几个）新不新鲜，没跑成、停了推提醒，恢复了自己撤
     watchdog: watchdogJob({ db }),
+    // 拉单（#632）：每 5 分钟读开着「让 AI 接活」的仓里该做的单、起任务工作流；开关全关时是正常的空闲
+    intake: intakeJob({ db, gh }),
   };
   const taskLog = (message: string, fields?: Record<string, unknown>) => console.info(message, fields ?? {});
   // 动手会话（#632 S2-4b-2）和冷验收会话（S2-5b）：和 Fusion 的会话用同一份执行方式驱动，但自己一份（驱动没有状态，只是包着各家的
