@@ -2,6 +2,14 @@
 
 > 一行一条、带日期和对应提交。规矩在 `AGENTS.md` 通用段「进度也要落盘」。
 
+## 2026-10-02（钩子层不再从打印出来的命令行漏密钥）
+
+- 分支 `guard/redact-command-lines`，工作树 `.claude/worktrees/redact-lines`，基线 `3cccf20a`。创始人 2026-10-02 拍（原话「2」，对应「加一条钩子：打印进程命令行时先把密钥打码」）：`agents/hooks/` 加 `redact.mjs`（纯函数，把 `-s` / `--secret` / `--token` / `--password` 这类参数的值、名字带 secret / token / password 的 JSON 字段换成 `***`）和 `redact-secrets.mjs`（命令行外壳：管道进、打码后的文字出，读不了标准输入或文件就退出码 1 并说明，不打空）。
+- `pretool.mjs` 加一段：认打印进程命令行的命令（`ps -ef` / `ps aux` / `ps -o pid,cmd` / `/proc/*/cmdline` / `wmic process` / `Get-CimInstance Win32_Process` / 挑 `CommandLine` 那一列），**不接 redactor 就拦下**、拦下的消息里给几条照着敲的配方；接上的放行；只列进程名和 pid 的（`ps -A`、`ps -eo pid,comm`、`tasklist`、`Get-Process`）照样放行。认不出的输入照旧按拦处理。
+- 钉住规矩的测试在 `agents/test/rules/pretool.rules.test.ts`（+368 条里新增的那批）：两种故意造出失败都验过——把 `SHORT_FLAGS` 抽空、让 `ps -ef` 直接过，都会红；夹具里的密钥一律带 `FAKE`（卫生检查按值判，不用进白名单）。
+- 已跑：`pnpm exec vitest run agents/test/`（13 文件 / 687 过）、`packages/agents-sync/`（22 文件 / 307 过）、`packages/conventions/`（23 文件 / 662 过）、`pnpm exec tsc -b`、`biome check`（干净）、`node packages/hygiene/src/bin/check.ts`（0 条）。没跑全量 `pnpm check`（仓规）。
+- 还没验证：这台机器上 `pnpm agents:sync` 之后新脚本真的落到 `~/.fleet-dao/hooks/`（同步工具整份拷目录，`packages/agents-sync/test/hooks.test.ts` 覆盖拷贝，但本机没实地同步）；法国那两台的实际行为；引擎经 `--settings` 起会话时的表现。
+
 ## 2026-10-02（Mirasim 切换与一条命令迁移，实施）
 
 - 16:28 收尾：PR [#621](https://github.com/thoerwink8/fleet-dao/pull/621) 已合并，主线 `20a7e476`；必过 CI 及 Windows、Intel Mac、Apple Silicon Mac、Linux 原生测试/构建全部通过（Actions `36983791868` / `36983791622`）。16:29 本机一键同步已取到该主线，退出 0，并确认 Mirasim 已是当前新版、未重启会话；旧命令与参数备份保留。实现与本机迁移已交付；未验的仍为真实两向模型请求的服务端额度、用户 Mac GUI、法国现场，不能用上述检查替代。
