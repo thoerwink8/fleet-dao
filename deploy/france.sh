@@ -27,6 +27,8 @@ source "$DEPLOY_DIR/lib/snapshot.sh"
 source "$DEPLOY_DIR/lib/root-exec-check.sh"
 # shellcheck source=lib/profile.sh
 source "$DEPLOY_DIR/lib/profile.sh"
+# shellcheck source=lib/listen.sh
+source "$DEPLOY_DIR/lib/listen.sh"
 # shellcheck source=lib/login-user.sh
 source "$DEPLOY_DIR/lib/login-user.sh"
 # shellcheck source=lib/session-user.sh
@@ -1398,11 +1400,12 @@ readback_postgres() {
     return 0
   fi
   if pg_isready -q -h 127.0.0.1 -p "$PG_PORT"; then ok "库在 127.0.0.1:$PG_PORT 就绪"; else red "库在 127.0.0.1:$PG_PORT 没就绪"; fi
+  # 只听回环的判法在 lib/listen.sh（deploy/test/listen.test.sh 钉住）：机器没开 IPv6 的，只听 127.0.0.1 一个也是只听本机
   listen=$(ss -Hltn "sport = :$PG_PORT" 2>/dev/null | awk '{ print $4 }' | sort | tr '\n' ' ')
-  if [[ "$listen" == "127.0.0.1:$PG_PORT [::1]:$PG_PORT " ]]; then
+  if listens_loopback_only_on "$PG_PORT" "$listen"; then
     ok "库只听本机：$listen"
   else
-    red "库在听「$listen」，应只听 127.0.0.1 和 ::1"
+    red "库在听「$listen」，应只听 127.0.0.1 和 ::1（回环以外的地址、或一个都没听，都不对）"
   fi
   restart=$(unit_prop "$PG_UNIT" Restart)
   if [[ "$restart" == always ]]; then ok "库的进程没了会被拉起（Restart=always）"; else red "$PG_UNIT 是 Restart=$restart，进程没了就一直躺着"; fi

@@ -862,6 +862,16 @@ bash deploy/local/install.sh --check                     # 装机读回：跑法
 
 退出码：0 差别都登记过了，1 有没登记的差别，2 没查成。CI 每次 PR 都跑这条（`deploy/test/config.test.mjs` 里拿仓里这两份真文件跑），改了一份没跟着改另一份或没写说明，合并前就会看到，不用等到在 `fleet-local` 上跑 `--check` 才发现。
 
+### 这台本机现在的样子（2026-10-02 夜重跑装机脚本之后，退出码 0）
+
+红 33 项降到 18 项；这 18 项里「库在听」那一项已由下面最后一条的改动修掉，其余都不是装机脚本能自己解决的：
+
+- **会话用户的回环防火墙探针读红**（「会话用户连得上 7243/5432」「连不上自己开的口」「fleet 连不上 fleet 开的口」）：nft 表装上了、规则也在，但这台 WSL 起不来 `.wslconfig` 要的 Nat 网络、每次 `wsl` 都提示「无法配置网络 (networkingMode Nat)，回退到 networkingMode VirtioProxy」，疑似回环规则在这个回退网络下不对会话用户生效——**原因没查明**。演练环境里会话用户的隔离因此还不能算数；Nat 起得来之前，别在这台 WSL 里拿会话用户跑不受信的活。
+- **grok 命令行装不上**：`https://x.ai/cli/install.sh` 从 WSL 经 Windows 代理连不通（curl 120 秒超时，重试三次）。创始人在 Windows 上的 grok 是另装的、能用；WSL 里的等能连上这个地址再装。
+- **应用的环境文件还没填**（`FLEET_ENGINE_PORTS`、机器名、演练仓、公开地址、`release.env` 三项、webhook 密钥、飞书一对）：这些要人定或要凭据，见下面「部署应用」第 1 条；`FEISHU_APP_ID/SECRET` 在 `FLEET_ENV=production` 下必填、本机档却不接飞书，这一处还没解决。
+- 要创始人动手的登录：reclaude、grok、Mirasim 服务端本体、GitHub 机器人（本机档要用自己的 App）。
+- 「库在听 127.0.0.1:5432」曾读红：WSL 里没有 `::1` 上的监听，读回原来要求两个都在；已改成「每个监听地址都是回环、至少一个」（`deploy/lib/listen.sh`，`deploy/test/listen.test.sh` 钉住）。
+
 ### 部署应用、怎么查
 
 装完机器（`deploy/local/install.sh`）只是地基，引擎、驾驶舱后端要另外发布一次（和法国同一个 `deploy/release.sh`，本机档不用改它）：
