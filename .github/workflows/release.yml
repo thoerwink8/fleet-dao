@@ -213,23 +213,32 @@ jobs:
           echo "release $VERSION 已建。"
 
       # e. 关 milestone：读回开放 milestone 里叫 v<N> 的那一张，关它。没开着的那一张不算错（可能已经关过了）。
-      - name: 关 milestone（开放里叫 v<N> 的那一张；不在就跳）
+      - name: 关 milestone（开放里恰好叫这一版的那一张；对不上 / 撞号都明说）
         if: steps.invoke.outputs.proceed == 'true'
         env:
           VERSION: ${{ steps.invoke.outputs.version }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          # GitHub 的 milestone 名是开放时起的（比如「v1 Fusion 接活」）；我们挂版本挂的是全名，不只 v<N>。这里认
-          # 「以 v<N> 开头的开放 milestone」：startwith 匹配，取第一张。
-          num=$(gh api "repos/${{ github.repository }}/milestones?state=open&per_page=100" | \
-                jq -r --arg v "$VERSION" '[.[] | select(.title | startswith($v))][0].number // empty')
-          if [[ -z $num ]]; then
+          # GitHub 的 milestone 名是开放时起的（比如「v1 Fusion 接活」「v10 xxx」）；只按「v<N> 开头 + 词边界」放行——
+          # 不能 startsWith($v)，否则 v1 会同时撞上 v1 和 v10（第二意见 2026-10-02）。撞好几张照样错：可能是两张开放
+          # milestone 都叫 v1…，发起人要看一眼，不拿「第一张」糊弄。
+          rows=$(gh api "repos/${{ github.repository }}/milestones?state=open&per_page=100" | \
+                 jq -r --arg v "$VERSION" '[.[] | select(.title | test("^" + $v + "([^0-9]|$)"))]')
+          count=$(jq -r 'length' <<<"$rows")
+          if [[ $count == 0 ]]; then
             echo "::notice::开放 milestone 里没找到以 $VERSION 开头的；多半已经被关过了，跳。"
             exit 0
           fi
+          if [[ $count != 1 ]]; then
+            echo "::error::开放 milestone 里有 $count 张都以 $VERSION 开头（词边界匹配也分不清）——发起人先看一眼要关哪一张，再手动 gh api -X PATCH repos/<仓>/milestones/<号> -F state=closed；这里不瞎猜。"
+            jq -r '.[] | "  #\(.number)  \(.title)"' <<<"$rows"
+            exit 1
+          fi
+          num=$(jq -r '.[0].number' <<<"$rows")
+          title=$(jq -r '.[0].title' <<<"$rows")
           gh api -X PATCH "repos/${{ github.repository }}/milestones/$num" -F state=closed >/dev/null
-          echo "milestone #$num（$VERSION…）已关。"
+          echo "milestone #$num（$title）已关。"
 
       # f. 飞书：配了 webhook 就发一条，没配写清「没配飞书，未通知」。
       - name: 飞书推一条（FLEET_FEISHU 没配就明说、不算错）

@@ -63,13 +63,13 @@ export default function Changelog() {
           </AlertDialogHeader>
           <div className="rounded-md bg-muted p-3 font-mono text-xs whitespace-pre-wrap">
             {`git switch -c release/${next.version}
-git push -u origin release/${next.version}
 pnpm exec tsx packages/conventions/src/bin/publish-pr.ts`}
           </div>
           <AlertDialogDescription className="mt-2">
-            publish-pr 会核 head 分支必须是 release/{next.version}（release.yml 只放行这个名字），开一张「发布
-            {next.version}」PR（head release/{next.version} → main）。你点合并之后，
-            .github/workflows/release.yml 接手打 tag → 建 release → 关 milestone → 推飞书。
+            publish-pr 会把 CHANGELOG.md 的 Unreleased 段收进「## [{next.version}] - 日期」、提交、推到
+            release/{next.version}，再开一张「发布 {next.version}」PR（→ main，正文含「Closes
+            #227」）。你点合并 之后，.github/workflows/release.yml 接手打 tag → 建 release → 关 milestone →
+            推飞书。
           </AlertDialogDescription>
           <AlertDialogFooter>
             <AlertDialogCancel>取消</AlertDialogCancel>
