@@ -5,9 +5,10 @@
 // - head 分支（release/v<N>）由发起人自己推好再开 PR——这份 CLI 不改仓、不建分支、不提交。
 // - head 分支名的协议在 ./publish.ts 的 RELEASE_BRANCH_RE；这里只跟着它起名，不另写正则。
 import { splitChangelog } from '@fleet-dao/shared';
+import { RELEASE_BRANCH_RE } from './publish.ts';
 
 export interface PublishOptions {
-  /** 已经推好的 head 分支名（默认拿当前分支，由调用方读）。 */
+  /** 已经推好的 head 分支名（默认拿当前分支，由调用方读）。必须是 release/v<N>，且 N 和 CHANGELOG.md 算出来的版本一致。 */
   head?: string;
   /** 仓根 CHANGELOG.md 的内容。 */
   changelog: string;
@@ -34,6 +35,8 @@ export function publishPrName(version: `v${number}`): string {
 /**
  * 算「该怎么开这张发布 PR」。不 env、不 gh、不 fs；从 CHANGELOG.md 拿版本号、用 head（或当前分支）拼分支名。
  * CHANGELOG.md 认不出来（缺 Unreleased 段、格式漂了）直接抛出 splitChangelog 的错——发起人得先把 CHANGELOG.md 写好。
+ * head 分支必须长得像 release/v<N>，且 N 就是 CHANGELOG.md 算出来的版本号：release.yml 只放行 release/v<N>，
+ * 分支不对的话 PR 开出来合并之后工作流落不进 proceed；与其开了一张注定红的 PR，不如 CLI 这里就明说不开（第二意见 2026-10-02）。
  */
 export function publishReleasePlan(options: PublishOptions): PublishPlan {
   const split = splitChangelog(options.changelog);
@@ -42,6 +45,20 @@ export function publishReleasePlan(options: PublishOptions): PublishPlan {
   if (!headBranch.trim()) {
     throw new Error(
       '没有 head 分支名：发起人先推好一个分支，再把分支名传进来；这份 CLI 不改仓、不替你提交。',
+    );
+  }
+  const m = RELEASE_BRANCH_RE.exec(headBranch);
+  if (!m || m[1] === undefined) {
+    throw new Error(
+      `head 分支「${headBranch}」不是 release/v<N> 的模样：release.yml 只放行 release/v<N>，这张 PR 合并之后工作流落不进 proceed。` +
+        `先建一个 release/${version} 分支（git switch -c release/${version} 推上去），再重跑 publish-pr。`,
+    );
+  }
+  if (`v${Number.parseInt(m[1], 10)}` !== version) {
+    throw new Error(
+      `head 分支「${headBranch}」和 CHANGELOG.md 算出来的版本（${version}）对不上：` +
+        `CHANGELOG.md Unreleased 段准备发的是 ${version}，分支名却贴的是 v${Number.parseInt(m[1], 10)}。` +
+        `要么改 CHANGELOG.md、要么换个对得上的分支（release/${version}）。`,
     );
   }
   const body = [

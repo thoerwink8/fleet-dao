@@ -58,14 +58,17 @@ export default function Changelog() {
             <AlertDialogTitle>发布 {next.version}</AlertDialogTitle>
             <AlertDialogDescription>
               发布是「对外发布」人闸（AGENTS.md「什么时候停下来问我」第四类）——浏览器不替你按。到本机一个
-              fleet-dao 检出里跑：
+              fleet-dao 检出里：
             </AlertDialogDescription>
           </AlertDialogHeader>
           <div className="rounded-md bg-muted p-3 font-mono text-xs whitespace-pre-wrap">
-            pnpm exec tsx packages/conventions/src/bin/publish-pr.ts
+            {`git switch -c release/${next.version}
+git push -u origin release/${next.version}
+pnpm exec tsx packages/conventions/src/bin/publish-pr.ts`}
           </div>
           <AlertDialogDescription className="mt-2">
-            它会开一张「发布 {next.version}」PR（head release/{next.version} → main）。你点合并之后，
+            publish-pr 会核 head 分支必须是 release/{next.version}（release.yml 只放行这个名字），开一张「发布
+            {next.version}」PR（head release/{next.version} → main）。你点合并之后，
             .github/workflows/release.yml 接手打 tag → 建 release → 关 milestone → 推飞书。
           </AlertDialogDescription>
           <AlertDialogFooter>
