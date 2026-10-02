@@ -31,6 +31,7 @@ on:
 permissions:
   contents: write # 打 tag、建 release
   issues: write # 关 milestone（milestone API 在 issues 权限下）
+  pull-requests: read # workflow_dispatch 手动补跑时按 head=release/v<N> 查已合并 PR 的 merge_commit_sha（第二意见 2026-10-02）
 
 jobs:
   finalize:
