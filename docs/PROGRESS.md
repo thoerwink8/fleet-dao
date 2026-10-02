@@ -8,7 +8,8 @@
 - 写方：Mirasim 0.0.394 在没钉住平台时仍写入本机代理地址，平台令牌只在网关凭证打开时才加。读方：`applyRouteSettings`，未标且令牌不齐就按自有剥掉；明确 `cloud` 缺令牌仍拒绝，不回落到自有。
 - 为什么没人发现：拒绝日志以前不写 route。现已加上 `event=reject route=...`。
 - 验证：先看到 `TestUnmarkedProxyWithoutCredentialStripsToOwn` 以同一句报错失败，改完 `go test`（launcher）通过。20:18 本机迁移回读：`migration.json` 状态 `migrated`，磁盘命令和 Mirasim 的 Claude 启动命令都是 `releases/44e35673b882e819a76c0bbb7b5c6322152cdaf067fdd2ef9b42fb525c1d064b/mirasim-reclaude.exe`；`--fleet-version` 的 `sourceCommit` 是 `c7c77f0eba8c313ac284f9092fac610075d8882c`，`sourceHash` 与目录一致。
-- 还没验证：真实两向请求扣费；明确选了「平台」但 Mirasim 仍不带令牌时，仍会拒绝。PR [#627](https://github.com/thoerwink8/fleet-dao/pull/627) 合进主线之前，开会话钩子或 `pnpm agents:sync` 会按旧主线把启动命令换回去。
+- 20:26 PR [#627](https://github.com/thoerwink8/fleet-dao/pull/627) 已合进主线 `e1d35186`。别的机器在 fleet-dao 检出里跑 `pnpm agents:sync`（或新开 AI 会话，开会话钩子自己同步）就会换上。有 Go 的当场编译；没有 Go 的等主线 `mirasim-launcher` 这轮构建成功再同步。
+- 还没验证：真实两向请求扣费；明确选了「平台」但 Mirasim 仍不带令牌时，仍会拒绝。
 
 ## 2026-10-02（Mirasim 切换与一条命令迁移，实施）
 
