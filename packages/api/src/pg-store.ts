@@ -222,6 +222,21 @@ function toAsk(r: AskRow): AskRecord {
   };
 }
 
+function toPullRequest(r: typeof pullRequests.$inferSelect): PullRequestRecord {
+  return {
+    repoId: r.repoId,
+    number: r.number,
+    state: r.state,
+    headRef: r.headRef,
+    headSha: r.headSha,
+    checks: r.checks,
+    updatedAt: iso(r.updatedAt),
+    openedAt: isoOpt(r.openedAt),
+    mergedAt: isoOpt(r.mergedAt),
+    issueRefs: r.issueRefs,
+  };
+}
+
 function toAudit(r: AuditRow): AuditRecord {
   return {
     id: String(r.id),
@@ -947,6 +962,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
           createdAt: iso(n.createdAt),
           resolvedAt: isoOpt(n.resolvedAt),
           resolvedBy: opt(n.resolvedBy),
+          dedupeKey: n.dedupeKey,
           deliveries: deliveries
             .filter((d) => d.notificationId === n.id)
             .map((d) => ({
@@ -1112,16 +1128,31 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         .select()
         .from(pullRequests)
         .where(and(eq(pullRequests.repoId, repoId), eq(pullRequests.number, number)));
-      return row
-        ? {
-            repoId: row.repoId,
-            number: row.number,
-            state: row.state,
-            headRef: row.headRef,
-            headSha: row.headSha,
-            checks: row.checks,
-          }
-        : null;
+      return row ? toPullRequest(row) : null;
+    },
+    async listPendingAsks() {
+      const rows = await db
+        .select()
+        .from(asks)
+        .where(isNull(asks.answer))
+        .orderBy(asc(asks.askedAt), asc(asks.id));
+      return rows.map(toAsk);
+    },
+    async listPullRequests(input = {}) {
+      const limit = input.limit ?? 50;
+      const rows = await db
+        .select()
+        .from(pullRequests)
+        .where(input.state === undefined ? undefined : eq(pullRequests.state, input.state))
+        // merged 按合并时刻倒序、其余按镜像更新时刻倒序；两个时刻都 NULL 的排最后（不拿它们当「最新」）。
+        .orderBy(
+          input.state === 'merged'
+            ? sql`${pullRequests.mergedAt} DESC NULLS LAST`
+            : sql`${pullRequests.updatedAt} DESC`,
+          sql`${pullRequests.number} DESC`,
+        )
+        .limit(limit);
+      return rows.map(toPullRequest);
     },
     async listTestRuns(runId) {
       if (!isUuid(runId)) return [];

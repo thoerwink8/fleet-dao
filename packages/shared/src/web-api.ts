@@ -958,6 +958,90 @@ export const UpdateDemoDefaultRequest = z.object({
 });
 export const UpdateDemoDefaultResponse = z.object({ defaultScope: DemoScopeSchema });
 
+// —— 新主页（/home3）：一屏三块 + 持续状态条（#589）——
+
+/**
+ * 「要你拍的」一条：decision 级通知（approvals 未决开的时候就经 openApproval 同步写了这么一条，
+ * 不另查 approvals 表，免得一条事显示两回）+ 还没答的追问。
+ */
+export const HomeDecisionSchema = z.object({
+  kind: z.enum(['notification', 'approval', 'ask']),
+  id: Id,
+  title: z.string(),
+  /** 来源需求 / PR / 会话的一句话背景；没有就没有这个键。 */
+  context: z.string().optional(),
+  since: Time,
+  /** 站内路径：通知详情 / 任务详情。 */
+  link: z.string(),
+});
+
+/** 「在跑的」一张单。segment 还没接上（#556-1+ 落真时补）：现在一律 null，不许按字段猜成失败。 */
+export const HomeRunningSchema = z.object({
+  issueNumber: z.number().int().positive(),
+  title: z.string(),
+  /** owner/name。 */
+  repo: z.string(),
+  /** 卡在哪一段；还没接上（null）。verify_pending 是「合完在等 CI / 等验」，不是失败。 */
+  segment: z.enum(['scoping', 'doing', 'verifying', 'verify_pending', 'merge']).nullable(),
+  /** 为什么这一刻没进展。nothing = 正常在跑。 */
+  waitingReason: z.enum([
+    'queue',
+    'memory',
+    'quota_reset',
+    'ci',
+    'verify_round',
+    'founder_decision',
+    'merge_queue',
+    'nothing',
+  ]),
+  /** 从什么时候起在等；waitingReason === 'nothing' 时没有。 */
+  waitingSince: Time.optional(),
+  /** 站内路径：任务详情。 */
+  link: z.string(),
+});
+
+/**
+ * 「做完的」一篇 PR。链接前端按品牌拼（brand.repoLink，和 alert-work 一个规矩：后端不发网址）；
+ * 这里给拼链接要的两段（repo 拆 owner/name 由前端按字符串切，和 alert-work 的 repoRef 一个切法）。
+ */
+export const HomeDoneSchema = z.object({
+  prNumber: z.number().int().positive(),
+  title: z.string(),
+  /** owner/name。 */
+  repo: z.string(),
+  mergedAt: Time,
+  /** 这篇 PR 挂的单（issueRefs 反查到的）；一个都没挂上没有这个键。 */
+  issueNumber: z.number().int().positive().optional(),
+});
+
+/**
+ * 持续状态条：额度、中转、引擎开关。有问题一直显示、不伪装成失败（tight/degraded/off 都不是「坏了」）。
+ * engine 一项：后端读的是这台机器 release.env 的 FLEET_SERVICES（库自主管理才写的期望；运行时状态由 Temporal 拉，
+ * 本切片只展示这个开关）。读不到（开发环境、机器上没有 release.env）按开着算，和 config.ts 的 engineEnabled 一个判法。
+ */
+export const HomeHealthSchema = z.object({
+  quota: z.object({
+    state: z.enum(['ok', 'tight', 'empty', 'unknown']),
+    detail: z.string(),
+  }),
+  routes: z.object({
+    state: z.enum(['ok', 'degraded', 'unknown']),
+    detail: z.string(),
+  }),
+  engine: z.object({
+    state: z.enum(['on', 'off']),
+    detail: z.string().optional(),
+  }),
+});
+
+export const HomeResponseSchema = z.object({
+  decisions: z.array(HomeDecisionSchema),
+  running: z.array(HomeRunningSchema),
+  done: z.array(HomeDoneSchema),
+  health: HomeHealthSchema,
+  asOf: Time,
+});
+
 // —— 实时推送（SSE：GET /api/events）——
 
 /**
@@ -986,6 +1070,8 @@ export const WebRoutes = {
   updateCredentials: { method: 'PUT', path: '/me/credentials', request: UpdateCredentialsRequest },
   events: { method: 'GET', path: '/events' },
   repos: { method: 'GET', path: '/repos', response: ReposResponse },
+  /** 新主页（/home3）的一屏三块 + 持续状态条，一个往返聚齐（#589）。 */
+  home: { method: 'GET', path: '/home', response: HomeResponseSchema },
   board: { method: 'GET', path: '/repos/:repoId/board', response: BoardResponse },
   task: { method: 'GET', path: '/tasks/:taskId', response: TaskDetailResponse },
   timeline: { method: 'GET', path: '/tasks/:taskId/timeline', query: PageQuery, response: TimelineResponse },

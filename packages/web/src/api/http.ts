@@ -154,6 +154,7 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
       return me;
     },
     repos: () => send('GET', apiUrl(R.repos.path), R.repos.response),
+    home: () => send('GET', apiUrl(R.home.path), R.home.response),
     board: (repoId) => send('GET', apiUrl(R.board.path, { repoId }), R.board.response),
     task: (taskId) => send('GET', apiUrl(R.task.path, { taskId }), R.task.response),
     timeline: (taskId, page) =>

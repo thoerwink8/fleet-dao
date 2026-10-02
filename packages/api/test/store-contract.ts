@@ -715,8 +715,8 @@ export function describeStoreContract(name: string, make: MakeStore): void {
 
       it('通知：只看未处理的；处理掉之后不在里面；送达记录跟着；翻页不重不漏', async () => {
         const open = await store.listNotifications({ status: 'open', limit: 10 });
-        expect(open.items.map((n) => n.id)).toEqual([IDS.notification1]);
-        expect(open.items[0]?.deliveries).toEqual([
+        expect(open.items.map((n) => n.id)).toEqual([IDS.notification2, IDS.notification1]);
+        expect(open.items[1]?.deliveries).toEqual([
           {
             channel: 'feishu',
             messageId: 'om_dev_1',
@@ -731,9 +731,20 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         );
         expect(await store.resolveNotification({ id: OTHER_UUID, by }, audit())).toBe('not_found');
         expect(await store.resolveNotification({ id: 'nope', by }, audit())).toBe('not_found');
-        expect((await store.listNotifications({ status: 'open', limit: 10 })).items).toEqual([]);
+        // 处理掉 notification1，open 里还剩 notification2（approval 那条）。
+        expect((await store.listNotifications({ status: 'open', limit: 10 })).items.map((n) => n.id)).toEqual(
+          [IDS.notification2],
+        );
         const all = await store.listNotifications({ status: 'all', limit: 10 });
-        expect(all.items[0]).toMatchObject({ resolvedBy: DEV_USER_ID, resolvedAt: clock.now.toISOString() });
+        // 刚处理掉的 notification1 带上了处理人和处理时刻；notification2（approval 那条）还开着、没这两条。
+        expect(all.items.find((n) => n.id === IDS.notification1)).toMatchObject({
+          resolvedBy: DEV_USER_ID,
+          resolvedAt: clock.now.toISOString(),
+        });
+        // notification2（approval 那条）还开着：没被这条 resolve 波及。
+        const stillOpen = all.items.find((n) => n.id === IDS.notification2);
+        expect(stillOpen?.resolvedAt).toBeUndefined();
+        expect(stillOpen?.resolvedBy).toBeUndefined();
       });
 
       it('操作记录：倒序、按对象过滤、同一毫秒的几条翻页不重不漏；编号是字符串', async () => {
@@ -826,7 +837,7 @@ export function describeStoreContract(name: string, make: MakeStore): void {
       });
 
       it('PR 镜像', async () => {
-        expect(await store.getPullRequest(IDS.repo, 31)).toEqual({
+        expect(await store.getPullRequest(IDS.repo, 31)).toMatchObject({
           repoId: IDS.repo,
           number: 31,
           state: 'open',
@@ -836,6 +847,12 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         });
         expect(await store.getPullRequest(IDS.repo, 32)).toBeNull();
         expect(await store.getPullRequest('repo-1', 31)).toBeNull();
+        // 主页「做完的」读它：merged 按合并时刻倒序、开着的按镜像更新时刻倒序。
+        const merged = await store.listPullRequests({ state: 'merged' });
+        expect(merged.map((p) => p.number)).toEqual([]);
+        const open = await store.listPullRequests({ state: 'open' });
+        expect(open.map((p) => p.number)).toEqual([31]);
+        expect((await store.listPullRequests()).map((p) => p.number)).toEqual([31]);
       });
 
       /** 默认不接管任何占用（接管界线在很久以前）。 */

@@ -7,6 +7,7 @@ import {
   AuditResponse,
   BoardResponse,
   HARD_BANS,
+  HomeResponseSchema,
   JobsResponse,
   MeResponse,
   NotificationsQuery,
@@ -58,6 +59,7 @@ import { requirementWorkflowIdForTask } from './temporal.ts';
 import {
   askLate,
   buildBoard,
+  buildHome,
   buildPools,
   describeTimeline,
   isTaskFinished,
@@ -112,6 +114,63 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
   app.get(WebRoutes.repos.path, async (c) => {
     const repos = await store.listRepos();
     return reply(c, ReposResponse, { repos });
+  });
+
+  /**
+   * 新主页（/home3）的一屏三块 + 持续状态条，一个往返聚齐（#589）。
+   * 为了「要你拍的」「做完的」反查标题，tasks 用全量（不是看板那份 7 天窗口）：各仓的看板需求合起来去重。
+   * 库读不到就任它抛（errorHandler 回 500），不拿「空主页」顶——主页那个形状没有「这块没查成」的位置。
+   */
+  app.get(WebRoutes.home.path, async (c) => {
+    const repos = await store.listRepos();
+    const taskLists = await Promise.all(repos.map((r) => store.listBoardTasks(r.id)));
+    const tasks = [...new Map(taskLists.flat().map((t) => [t.id, t])).values()];
+    // 「做完的」里的单可能早已进了终态、掉出了看板的 7 天窗口：按主页最多用得到的（镜像里 merged PR 挂的单）补回来。
+    const merged = await store.listPullRequests({ state: 'merged', limit: 10 });
+    const missing = new Set<string>();
+    for (const p of merged) {
+      for (const issue of p.issueRefs ?? []) {
+        if (!tasks.some((t) => t.repoId === p.repoId && t.issueNumber === issue)) {
+          const task = await store.findTaskByIssue(p.repoId, issue);
+          if (task) {
+            tasks.push(task);
+          } else {
+            missing.add(`${p.repoId}#${issue}`);
+          }
+        }
+      }
+    }
+    for (const key of missing) deps.log.warn('主页「做完的」反查不到挂的单，只显示 PR 号', { issue: key });
+    const taskIds = tasks.map((t) => t.id);
+    const [notifications, pendingAsks, activeRuns, pools, channels, windows, routes] = await Promise.all([
+      store.listNotifications({ status: 'open', limit: 200 }),
+      store.listPendingAsks(),
+      store.listRuns({ taskIds, active: true }),
+      store.listPools(),
+      store.listChannels(),
+      store.listQuotaWindows(),
+      store.listRoutes(),
+    ]);
+    const now = deps.now();
+    const poolViews = buildPools(
+      { pools, channels, windows, routes, activeRuns },
+      now,
+      config.quotaStaleAfterMs,
+    );
+    return reply(c, HomeResponseSchema, {
+      ...buildHome({
+        notifications: notifications.items,
+        pendingAsks,
+        tasks,
+        activeRuns,
+        merged,
+        repos,
+        pools: poolViews,
+        routes,
+        engineOff: config.engineOff,
+        now,
+      }),
+    });
   });
 
   app.get(WebRoutes.board.path, async (c) => {

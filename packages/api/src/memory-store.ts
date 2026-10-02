@@ -833,6 +833,21 @@ export function createMemoryStore(
     async getAsk(id) {
       return data.asks.find((a) => a.id === id) ?? null;
     },
+    async listPendingAsks() {
+      return data.asks
+        .filter((a) => a.answer === undefined)
+        .sort((a, b) => a.askedAt.localeCompare(b.askedAt));
+    },
+    async listPullRequests(input = {}) {
+      const limit = input.limit ?? 50;
+      const rows = data.pullRequests.filter((p) => input.state === undefined || p.state === input.state);
+      // merged 按合并时刻倒序、其余按镜像更新时刻倒序；镜像里没读到这两个时刻的排最后，不拿它们当「最新」。
+      const keyOf = (p: (typeof rows)[number]) =>
+        (input.state === 'merged' ? p.mergedAt : undefined) ?? p.updatedAt ?? '';
+      return [...rows]
+        .sort((a, b) => keyOf(b).localeCompare(keyOf(a)) || b.number - a.number)
+        .slice(0, limit);
+    },
     async answerAsk({ askId, answer, by }, entry) {
       const ask = data.asks.find((a) => a.id === askId);
       if (!ask) return 'not_found';

@@ -17,6 +17,7 @@ import type {
   DemoLinkSchema,
   DemoLinksResponse,
   DemoScopeSchema,
+  HomeResponseSchema,
   JobsResponse,
   JobViewSchema,
   MeResponse,
@@ -95,6 +96,9 @@ export type QuotaWindowView = z.infer<typeof QuotaWindowViewSchema>;
 
 export type Jobs = z.infer<typeof JobsResponse>;
 export type JobView = z.infer<typeof JobViewSchema>;
+
+/** 新主页一屏三块 + 持续状态条（#589）。 */
+export type HomeResponse = z.infer<typeof HomeResponseSchema>;
 
 export type Notifications = z.infer<typeof NotificationsResponse>;
 export type Notification = z.infer<typeof NotificationSchema>;

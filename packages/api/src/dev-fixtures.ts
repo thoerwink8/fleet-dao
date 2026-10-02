@@ -16,6 +16,7 @@ export const IDS = {
   botWorker: 'e0000000-0000-4000-8000-000000009001',
   botEngine: 'e0000000-0000-4000-8000-000000009002',
   notification1: 'f0000000-0000-4000-8000-000000000001',
+  notification2: 'f0000000-0000-4000-8000-000000000102',
 } as const;
 
 export const DEV_USER_ID = IDS.founderA;
@@ -289,7 +290,51 @@ export function devFixtures(now: Date): Partial<MemoryData> {
         link: `/tasks/${IDS.task12}`,
         taskId: IDS.task12,
         createdAt: ago(8),
+        dedupeKey: 'stalled:task12',
         deliveries: [{ channel: 'feishu', messageId: 'om_dev_1', attempts: 1, lastAttemptAt: ago(8) }],
+      },
+      {
+        // 主页「要你拍的」：approvals 未决写下那一刻就同步开了这么一条 decision 通知（approval:<编号>）。
+        id: IDS.notification2,
+        level: 'decision',
+        title: '等你批：合并 PR #41（碰了删数据的人闸）',
+        body: '请批 delete：PR #41（a1b2c3d）。旧的验证码发送记录在合并后清掉。',
+        link: `/tasks/${IDS.task12}`,
+        taskId: IDS.task12,
+        createdAt: ago(6),
+        dedupeKey: 'approval:11111111-0000-4000-8000-00000000ap01',
+        deliveries: [{ channel: 'feishu', messageId: 'om_dev_2', attempts: 1, lastAttemptAt: ago(6) }],
+      },
+    ],
+    // 追问样例不进共享 fixture：agent / 契约 / 飞书 outbox 多处按「手上的 this.store.data.asks 全表」算条数，
+    // task12 被默认是「干净」的。主页「要你拍的」的未答追问样例由 home.test 自己往 store.data 里 push（web 端 dev:mock 的那份在
+    // packages/web/src/api/mock/seed.ts 的 ask-12-2，5173 三块照常可见）。
+    asks: [],
+    pullRequests: [
+      {
+        // 主页「做完的」：最近合进主线的 PR，正文挂了 #13（issueRefs）。
+        repoId: IDS.repo,
+        number: 39,
+        state: 'merged',
+        headRef: 'fleet/13-readme-time',
+        headSha: 'b'.repeat(40),
+        checks: 'success',
+        updatedAt: ago(500),
+        openedAt: ago(520),
+        mergedAt: ago(500),
+        issueRefs: [13],
+      },
+      {
+        // 开着的（主页「在跑的」将来判合并段用；现在不上主页）。
+        repoId: IDS.repo,
+        number: 41,
+        state: 'open',
+        headRef: 'fleet/12-a-code',
+        headSha: 'c'.repeat(40),
+        checks: 'pending',
+        updatedAt: ago(3),
+        openedAt: ago(10),
+        issueRefs: [12],
       },
     ],
     settings: [
