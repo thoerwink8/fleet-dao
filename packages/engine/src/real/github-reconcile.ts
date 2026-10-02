@@ -1,27 +1,10 @@
 // 对账补漏的真装配：后端的 Store（同一个库）、GitHubIntake（同一道门、同一本投递账）、@fleet-dao/github 的真轮询，
-// 记账用 @fleet-dao/db 的 schedule_runs。发信号、拉起一张单的工作流（后端的 createTemporalRequirementWorkflows，和 webhook
-// 那条同一份实现，起的都是 Fusion）用这次活动自己的 Temporal 客户端，起在这个工人取活的任务队列上。
+// 记账用 @fleet-dao/db 的 schedule_runs。
 // 每轮先同步各仓的流程配置副本（jobs/flow-config.ts）：「引擎」机器人读默认分支头上的 .fleet/flow.json，全组织默认读这份
 // 代码里带的 packages/core/flow.default.json，写库、报提醒都是同一个库。重放、补收拉起前判「挂没挂在当前版本」，也经这个机器人现读。
 import { readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
-import {
-  type ClaimAlerts,
-  createClaimStatus,
-  createGitHubIntake,
-  createIssueIntake,
-  createPgStore,
-  createTemporalRequirementWorkflows,
-  createTemporalWorkflowControl,
-  type GitHubIntake,
-  githubIssuePlans,
-  jsonLogger,
-  type Logger,
-  type RequirementWorkflows,
-  reconcileGitHub,
-  reconcilerOptions,
-  type Store,
-} from '@fleet-dao/api';
+import { createGitHubIntake, createPgStore, jsonLogger, type Logger, reconcileGitHub, reconcilerOptions } from '@fleet-dao/api';
 import { PROJECT_CONFIG_PATH, type Source } from '@fleet-dao/core';
 import {
   type Db,
@@ -49,10 +32,8 @@ export interface GitHubReconcileWiring {
     | 'eventSink'
     | 'reconciler'
     | 'readRepoFile'
-    | 'readIssuePlan'
     | 'commentIssue'
     | 'readCloseFacts'
-    | 'claims'
     | 'commitContains'
   > &
     GroomGitHub;
@@ -62,8 +43,6 @@ export interface GitHubReconcileWiring {
   issueGroomIdlePolicy?: IssueGroomWiring['idlePolicy'];
   /** 测试用：换掉「引擎自己在跑哪个提交」（不给就是 drain-control.ts 的 ownReleaseSha，开发机/测试认不出是 null）。 */
   ownCommit?: () => string | null;
-  /** 测试用：换掉拉起工作流（不给就是真的，经这次活动的 Temporal 客户端起 Fusion）。 */
-  requirements?: RequirementWorkflows;
   /** 测试用：这一轮跑不跑关单对账（不给就是 jobs/close-sweep.ts 的 closeSweepDue，按真钟：北京时间 9:00 起的那一轮）。 */
   closeSweepDue?: (at: Date) => boolean;
   /** 测试用：这一轮跑不跑单子打标挂版本（不给就是 jobs/issue-groom.ts 的 issueGroomDue：每小时一次）。 */
@@ -122,61 +101,6 @@ export function flowConfigJob(w: GitHubReconcileWiring, log: Logger, now: () => 
 }
 
 /**
- * 接活那道门要的 GitHub：写镜像（PR、CI 事件）、现读 issue 挂在哪个版本、是不是母单子单；PR 事件按库里的认领贴
- * 「认领对得上」（#348，claims）。
- */
-export type IntakeGitHub = Pick<GitHub, 'eventSink' | 'readIssuePlan' | 'claims'>;
-
-/**
- * 接活那道门的几样依赖（和 webhook 同一份判法、同一个拉起实现）：对账补漏的重放、补收、补起认领，每小时对账给排队的单
- * 补拉，都用这一份。拉起工作流用这次活动的 Temporal 客户端，起在 taskQueue 上。
- */
-export function intakeDepsFor(
-  w: { gh: IntakeGitHub; requirements?: RequirementWorkflows | undefined },
-  parts: { store: Store; log: Logger; now: () => Date },
-  client: Client,
-  taskQueue: string,
-) {
-  return {
-    store: parts.store,
-    workflows: createTemporalWorkflowControl(client),
-    requirements: w.requirements ?? createTemporalRequirementWorkflows(client, taskQueue),
-    // 只派当前版本的独立单：挂在哪、当前版本是哪个、是不是母单子单，拉起前经「引擎」机器人现读（和后端 webhook 那条同一份判法）
-    plans: githubIssuePlans(w.gh),
-    // 补收、重放的 PR 事件照样贴「认领对得上」（#348，和后端 webhook 那条同一份实现）
-    claims: createClaimStatus({ store: parts.store, github: w.gh.claims, log: parts.log }),
-    log: parts.log,
-    now: parts.now,
-  };
-}
-
-/** 「认领对得上」对账那一轮没处理成的报「要人看」提醒、好了撤（#348）：进同一个库。 */
-export function claimAlerts(db: Db, now: () => Date): ClaimAlerts {
-  return {
-    async raise(key, title, body) {
-      await upsertAlert(db, { dedupeKey: key, level: 'alert', taskId: null, title, body });
-    },
-    async resolve(key, why) {
-      await resolveAlertWithReason(db, { dedupeKey: key, by: 'engine:github-reconcile', why, at: now() });
-    },
-  };
-}
-
-/** 接活那道门（createGitHubIntake）：每小时对账给排队的单补拉经它重放投递，和对账补漏同一份依赖。 */
-export function reconcileIntake(
-  w: { gh: IntakeGitHub; requirements?: RequirementWorkflows | undefined },
-  parts: { store: Store; log: Logger; now: () => Date },
-  client: Client,
-  taskQueue: string,
-): GitHubIntake {
-  return createGitHubIntake({
-    ...intakeDepsFor(w, parts, client, taskQueue),
-    // 引擎等 CI 靠活动自己轮询，PR、CI 事件只写镜像，不按事件叫醒（和后端 main.ts 一样）
-    github: w.gh.eventSink({ async wake() {} }),
-  });
-}
-
-/**
  * 关单对账那一步的真装配（#241）：受管的仓从库里列，现状、留言经「引擎」机器人，提醒进同一个库。日报级（#445：这不是要
  * 创始人拍的事——没人拍它也不会自己变好，是要干活的人自己去关、去补结果；正文已经列了是哪几张单，见 close-sweep.ts）。
  */
@@ -228,23 +152,12 @@ export function githubReconcileJob(
     },
     async () => (await store.listRepos()).map((r) => ({ owner: r.owner, name: r.name })),
   );
-  return (client, taskQueue) => {
-    const intakeDeps = intakeDepsFor(w, { store, log, now }, client, taskQueue);
-    const intake = createGitHubIntake({ ...intakeDeps, github });
-    // 补起待起的认领（#299）：和接活同一套依赖、同一个拉起实现
-    const claims = createIssueIntake(intakeDeps);
-    // 「认领对得上」（#348）：作废过了宽限期的认领、所有开着的 PR 重判重贴，没处理成的报提醒
-    const claimStatus = createClaimStatus({
-      store,
-      github: w.gh.claims,
-      alerts: claimAlerts(w.db, now),
-      log,
-    });
+  return () => {
+    const intake = createGitHubIntake({ store, github, log, now });
     const reconciler = w.gh.reconciler(reconcilerOptions({ store, intake }));
     return {
       syncFlowConfigs: () => syncFlowConfigs(flow),
-      reconcile: (options) =>
-        reconcileGitHub({ store, intake, claims, claimStatus, reconciler, log, now }, options),
+      reconcile: (options) => reconcileGitHub({ store, intake, reconciler, log, now }, options),
       closeSweep: () => sweepClosing(close),
       ...(w.closeSweepDue ? { closeSweepDue: w.closeSweepDue } : {}),
       issueGroom: () => sweepIssueGroom(groom),

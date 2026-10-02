@@ -148,25 +148,6 @@ describe('事件之后的处理', () => {
     expect(await ledger.getPullRequest(REPO_ID, 5)).not.toBeNull();
   });
 
-  it('issue、评论事件按 issue 号叫醒；PR 上的评论按 PR 号', async () => {
-    const { gh } = setup();
-    const woke: WakeEvent[] = [];
-    const sink = gh.eventSink({ wake: async (e) => void woke.push(e) });
-    await sink.accept(
-      event({ event: 'issues', action: 'opened', payload: { action: 'opened', issue: { number: 12 } } }),
-    );
-    await sink.accept(
-      event({
-        event: 'issue_comment',
-        payload: { action: 'created', issue: { number: 31, pull_request: {} } },
-      }),
-    );
-    expect(woke.map((w) => [w.issueNumber, w.prNumbers])).toEqual([
-      [12, undefined],
-      [undefined, [31]],
-    ]);
-  });
-
   it('叫醒失败就抛：后端把这条投递记成出错、原文留着，对账时按原文重放', async () => {
     const { gh } = setup();
     const sink = gh.eventSink({ wake: async () => Promise.reject(new Error('Temporal 连不上')) });
@@ -353,38 +334,7 @@ describe('对账与补漏', () => {
     expect(fake.redelivered).toEqual([]);
   });
 
-  it('补收看到的评论：从没改过的带上作者（自家的回声认得出），改过的看不出是谁改的不带', async () => {
-    const { gh, fake } = setup();
-    const unedited = fake.addIssue();
-    const edited = fake.addIssue();
-    unedited.comments.push({
-      id: 91,
-      body: '自家机器人发的',
-      user: fake.bots.engine,
-      created_at: '2026-09-25T11:00:00Z',
-      updated_at: '2026-09-25T11:00:00Z',
-    });
-    edited.comments.push({
-      id: 92,
-      body: '外人改过',
-      user: fake.human,
-      created_at: '2026-09-25T11:00:00Z',
-      updated_at: '2026-09-25T12:00:00Z',
-    });
-    const { intake, ingested } = fakeIntake(() => true);
-    await gh.reconciler({ intake, pollDeliveryId }).poll('acme/widgets', new Date(0));
-    const comment = (id: number) =>
-      ingested.find((i) => i.event === 'issue_comment' && (i.payload.comment as { id: number }).id === id)
-        ?.payload;
-    expect(comment(91)?.sender).toEqual(fake.bots.engine);
-    expect(comment(92)).not.toHaveProperty('sender');
-    // 补收拼出来的评论都记成 synced：后端认 synced 的回答，还要它从没改过（updated_at 等于 created_at）
-    expect(
-      ingested.filter((i) => i.event === 'issue_comment').every((i) => i.payload.action === 'synced'),
-    ).toBe(true);
-  });
-
-  it('轮询：issue、评论、PR 逐条过后端那道门；同一版本只收一次', async () => {
+  it('轮询：PR 逐条过后端那道门；同一版本只收一次；issue 和评论不拉', async () => {
     const { gh, fake } = setup();
     fake.addIssue({ title: '人开的' });
     const pr = fake.addPull({ head: { ref: 'task/1', sha: A } });
@@ -393,61 +343,17 @@ describe('对账与补漏', () => {
     const { intake, ingested } = fakeIntake(() => true);
     const rec = gh.reconciler({ intake, pollDeliveryId });
     const first = await rec.poll('acme/widgets', new Date('2026-09-25T00:00:00Z'));
-    expect(first).toEqual({ outcome: 'ok', checked: 3, recovered: 3 });
-    expect(ingested.map((i) => i.event).sort()).toEqual(['issue_comment', 'issues', 'pull_request']);
-    expect(ingested.find((i) => i.event === 'issue_comment')?.payload.issue).toEqual({ number: 1 });
+    expect(first).toEqual({ outcome: 'ok', checked: 1, recovered: 1 });
+    expect(ingested.map((i) => i.event)).toEqual(['pull_request']);
     expect(ingested.find((i) => i.event === 'pull_request')?.deliveryId).toBe(
       `poll:acme/widgets:pull:${pr.number}:${pr.updated_at}`,
     );
     const second = await rec.poll('acme/widgets', new Date('2026-09-25T00:00:00Z'));
-    expect(second).toEqual({ outcome: 'ok', checked: 3, recovered: 0 });
+    expect(second).toEqual({ outcome: 'ok', checked: 1, recovered: 0 });
   });
 
-  it('轮询把 issue、评论整条原样送进门：标题、正文、开关状态、建立时刻都在（后端建任务、认回答要用）', async () => {
+  it('轮询认得出自家的回声：引擎开和合的 PR 都不叫醒', async () => {
     const { gh, fake } = setup();
-    const opened = fake.addIssue({ title: '人开的', body: '原话' });
-    opened.comments.push({
-      id: 78,
-      body: '5 分钟',
-      user: fake.human,
-      created_at: '2026-09-25T11:00:00Z',
-      updated_at: '2026-09-25T12:00:00Z',
-    });
-    const { intake, ingested } = fakeIntake(() => true);
-    await gh.reconciler({ intake, pollDeliveryId }).poll('acme/widgets', new Date('2026-09-25T00:00:00Z'));
-    expect(ingested.find((i) => i.event === 'issues')?.payload.issue).toMatchObject({
-      number: opened.number,
-      title: '人开的',
-      body: '原话',
-      state: 'open',
-      created_at: opened.created_at,
-      user: fake.human,
-    });
-    expect(ingested.find((i) => i.event === 'issue_comment')?.payload.comment).toMatchObject({
-      id: 78,
-      body: '5 分钟',
-      created_at: '2026-09-25T11:00:00Z',
-      user: fake.human,
-    });
-  });
-
-  it('轮询认得出自家的回声：引擎改进度段、关单、发的评论、开和合的 PR 都不叫醒；人改的、人写的照样叫醒', async () => {
-    const { gh, fake, clock } = setup();
-    const progress = { state: 'running', current: 'x', done: 0, total: 1, subtasks: [], docs: {} };
-    const edited = fake.addIssue({ body: '原话' });
-    await gh.updateIssueProgress({ repo, issueNumber: edited.number, progress });
-    const closed = fake.addIssue();
-    await gh.closeIssue({ repo, issueNumber: closed.number, reason: 'completed', comment: '去向：并入 #9' });
-    const touched = fake.addIssue({ body: '原话' });
-    await gh.updateIssueProgress({ repo, issueNumber: touched.number, progress });
-    clock.advance(5000);
-    fake.editBody(touched, '原话\n人后来补的一句', fake.human);
-    edited.comments.push({
-      id: 88,
-      body: '人问了一句',
-      user: fake.human,
-      updated_at: clock.now().toISOString(),
-    });
     fake.refs.set('task/9', A);
     const opened = await gh.openPr({ repo, branch: 'task/9', head: A, title: 't', body: 'b' });
     fake.addCheck(A, 'check', 'success');
@@ -466,40 +372,11 @@ describe('对账与补漏', () => {
     };
     const report = await gh.reconciler({ intake, pollDeliveryId }).poll('acme/widgets', new Date(0));
     expect(report.outcome).toBe('ok');
-    const wakeOf = (event: string, match: (p: Record<string, unknown>) => boolean) =>
-      seen.filter((s) => s.event === event && match(s.payload)).map((s) => s.wake);
-    const issueNo = (p: Record<string, unknown>) => (p.issue as { number?: number } | undefined)?.number;
-    expect(wakeOf('issues', (p) => issueNo(p) === edited.number)).toEqual([false]);
-    expect(wakeOf('issues', (p) => issueNo(p) === closed.number)).toEqual([false]);
-    expect(wakeOf('issues', (p) => issueNo(p) === touched.number)).toEqual([true]);
-    expect(wakeOf('issue_comment', (p) => issueNo(p) === closed.number)).toEqual([false]);
-    expect(wakeOf('issue_comment', (p) => issueNo(p) === edited.number)).toEqual([true]);
     expect(
-      wakeOf('pull_request', (p) => (p.pull_request as { number: number }).number === opened.number),
+      seen
+        .filter((s) => s.event === 'pull_request' && (s.payload.pull_request as { number: number }).number === opened.number)
+        .map((s) => s.wake),
     ).toEqual([false]);
-  });
-
-  it('白名单作者开的开放 issue 没有工作流：重新送进引擎；陌生人的不算问题', async () => {
-    const { gh, fake, ledger } = setup();
-    const withTask = fake.addIssue();
-    ledger.tasks.set(`${REPO_ID}#${withTask.number}`, { id: 't1', state: 'running' });
-    const orphan = fake.addIssue();
-    fake.addIssue({ user: { login: 'stranger', id: 666, type: 'User' } });
-    const { intake, ingested } = fakeIntake((p) => (p.issue as { user: { id: number } }).user.id !== 666);
-    const report = await gh.reconciler({ intake, pollDeliveryId }).auditOpenIssues('acme/widgets');
-    expect(report).toMatchObject({ outcome: 'ok', scanned: 3, found: 1, fixed: 1 });
-    expect(report.problems).toEqual([`#${orphan.number} 是白名单作者开的，却没有工作流（已重新送进引擎）`]);
-    expect(ingested.map((i) => i.payload.action)).toEqual(['reconcile', 'reconcile']);
-    // 投递编号按 issue 的这一版起（不带这一轮的时刻）：同一版每轮都来核对，后端投递账里也只有一条
-    expect(ingested.map((i) => i.deliveryId)).toEqual([
-      pollDeliveryId('acme/widgets', 'issue-audit', orphan.number, orphan.updated_at),
-      pollDeliveryId(
-        'acme/widgets',
-        'issue-audit',
-        orphan.number + 1,
-        fake.issues.get(orphan.number + 1)?.updated_at ?? '',
-      ),
-    ]);
   });
 
   it('我们机器人开的、合并的 PR：镜像里没记的补上；不是「引擎」合的报出来（C21/C22）', async () => {

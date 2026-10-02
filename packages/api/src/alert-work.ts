@@ -13,6 +13,7 @@ import {
   alertStageText,
   type DeployFacts,
   type FixPr,
+  type IssueClaim,
   type WorkIssue,
 } from '@fleet-dao/core';
 import {
@@ -24,6 +25,7 @@ import {
   type Db,
   expireSilence,
   findAlert,
+  type IssueClaimRow,
   linkAlertWork,
   listSilences,
   readAlertWork,
@@ -32,10 +34,33 @@ import {
 import type { AlertHandlingSchema } from '@fleet-dao/shared';
 import type { z } from 'zod';
 import type { DeployLagInput } from './deploy-lag.ts';
-import { toIssueClaim } from './seat-store.ts';
 
 const iso = (d: Date) => d.toISOString();
 const isoOpt = (d: Date | null) => (d ? d.toISOString() : null);
+
+/** 认领账的行（issue_claims）读成 core 的 IssueClaim：提醒的「谁在处理」还读它；没有新认领了（#556），只剩老的行。 */
+export function toIssueClaim(r: IssueClaimRow): IssueClaim {
+  return {
+    repoId: r.repoId,
+    issueNumber: r.issueNumber,
+    claimId: r.claimId,
+    ownerKind: r.ownerKind,
+    ownerMachine: r.ownerMachine,
+    ownerLabel: r.ownerLabel,
+    seatScope: r.seatScope,
+    seatTerm: r.seatTerm,
+    state: r.state,
+    workflowId: r.workflowId,
+    prNumbers: [...r.prNumbers],
+    graceMinutes: r.graceMinutes,
+    claimedAt: iso(r.claimedAt),
+    heartbeatAt: iso(r.heartbeatAt),
+    updatedAt: iso(r.updatedAt),
+    endedAt: r.endedAt && iso(r.endedAt),
+    endReason: r.endReason,
+    note: r.note,
+  };
+}
 
 export function toAlertSilence(r: AlertSilenceRow): AlertSilence {
   return {

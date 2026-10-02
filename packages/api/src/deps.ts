@@ -1,5 +1,4 @@
 import type { AlertWorkPort } from './alert-work.ts';
-import type { ClaimStatus } from './claim-status.ts';
 import type { Config } from './config.ts';
 import type { DemoPublisher } from './demo.ts';
 import type { GatewaySeen } from './gateway-seen.ts';
@@ -10,9 +9,7 @@ import type {
   FeishuAuth,
   GitHubEventSink,
   HealthCheck,
-  IssuePlanReader,
   Logger,
-  RequirementWorkflows,
   Store,
   WorkflowControl,
 } from './ports.ts';
@@ -22,22 +19,10 @@ export interface Deps {
   config: Config;
   store: Store;
   workflows: WorkflowControl;
-  /** 拉起一张单的工作流（issue 进来之后；起的是 Fusion，见 temporal.ts）。 */
-  requirements: RequirementWorkflows;
-  /**
-   * 读一张 issue 此刻挂在哪个版本、是不是母单子单、开没开着（GitHub 上现读）：接活只派挂在当前版本上的独立单。机器人凭据没读到时是一个读就抛错的
-   * （issue-intake.ts 的 issuePlansUnavailable），不拿「挂在当前版本」顶。
-   */
-  plans: IssuePlanReader;
   changes: ChangeFeed;
   /** null = 飞书登录没配置（只允许在开发环境）。 */
   feishu: FeishuAuth | null;
   github: GitHubEventSink;
-  /**
-   * 「认领对得上」（#348，claim-status.ts）：PR 事件进来时现读 PR、按库里的认领贴状态（引擎机器人）。没给（开发环境没接 GitHub）
-   * 的只在投递说明里记「没接」；生产在 main.ts 装上，机器人凭据读不到时 PR 事件在写镜像那一步就如实失败了。
-   */
-  claims?: ClaimStatus | undefined;
   /** 飞书里确认的草稿去开单（开 issue、建任务、拉起工作流）。没接上时用 notWiredDraftOpener：草稿留在待开单。 */
   draftOpener: DraftOpener;
   /** /healthz 逐项探的依赖；空 = 没有外部依赖（内存版）。 */

@@ -15,7 +15,6 @@ import {
   githubEvents,
   githubEventVersions,
   insertSubtasks,
-  issueClaims,
   models,
   notificationDeliveries,
   notifications,
@@ -418,17 +417,5 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
         })),
       );
     }
-  }
-  // 认领账（#299；帅位座位整张删掉，库表先留着见 #531）
-  if (data.claims?.length) {
-    await db.insert(issueClaims).values(
-      data.claims.map((c) => ({
-        ...c,
-        claimedAt: date(c.claimedAt),
-        heartbeatAt: date(c.heartbeatAt),
-        updatedAt: date(c.updatedAt),
-        endedAt: dateOpt(c.endedAt ?? undefined),
-      })),
-    );
   }
 }

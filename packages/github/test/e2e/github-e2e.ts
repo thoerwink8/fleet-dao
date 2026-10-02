@@ -493,24 +493,16 @@ try {
   const pollId = (r: string, kind: string, id: number | string, at: string) =>
     `poll:${r}:${kind}:${id}:${at}`;
   await step(
-    '轮询补收（只读）：捞得回这次的 issue、评论、PR，都认得出是自家的回声',
+    '轮询补收（只读）：捞得回这次的 PR，认得出是自家的回声',
     () => github.reconciler({ intake, pollDeliveryId: pollId }).poll(repoSlug(repo), started),
     (r) => {
       const kinds = new Set(seen.map((s) => s.event));
-      const want = ['issues', 'issue_comment', 'pull_request'].filter((k) => !kinds.has(k));
+      const want = ['pull_request'].filter((k) => !kinds.has(k));
       const woke = seen.filter((s) => s.wake).map((s) => s.deliveryId.replace(/^poll:[^:]+:/, ''));
       return r.outcome === 'ok' && want.length === 0 && woke.length === 0
         ? null
         : `outcome=${r.outcome} 缺 ${want.join('、')} 会叫醒 ${woke.join('、')} ${r.why ?? ''}`;
     },
-  );
-  await step(
-    '开放 issue 对账（只读）',
-    () =>
-      github
-        .reconciler({ intake, pollDeliveryId: pollId, hasWorkflow: async () => true })
-        .auditOpenIssues(repoSlug(repo)),
-    (r) => (r.outcome === 'ok' ? null : brief(r)),
   );
 } catch (err) {
   exitCode = 1;

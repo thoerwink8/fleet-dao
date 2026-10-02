@@ -16,7 +16,6 @@ import {
   feishuFollows,
   feishuOutbox,
   flowReplicaOf,
-  followTaskOnEngineClaim,
   githubEvents,
   githubEventVersions,
   idempotencyKeys,
@@ -100,7 +99,6 @@ import {
   type TimelineRecord,
   type User,
 } from './ports.ts';
-import { pgSeatStore } from './seat-store.ts';
 
 export interface PgStoreOptions {
   now?: () => Date;
@@ -520,7 +518,6 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
   }
 
   return {
-    ...pgSeatStore(db, insertAudit),
 
     // —— 人 ——
     async getUser(id) {
@@ -1949,11 +1946,6 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
           .returning({ id: tasks.id });
         if (stopped.length === 0) return 'not_queued';
         await insertAudit(tx, entry);
-        // 没派出去过就叫停了：引擎待起的认领跟着放下（#299），本机能接着认领
-        await followTaskOnEngineClaim(tx, {
-          taskId,
-          end: { state: 'released', reason: '任务没派出去过就叫停了' },
-        });
         return 'ok';
       });
     },

@@ -1,4 +1,4 @@
-// fleet-api alert …：提醒是一件活（design 15.3「谁在处理」）。经 ssh 以 root 调（和 fleet-api claim 一样，机器名、
+// fleet-api alert …：提醒是一件活（design 15.3「谁在处理」）。经 ssh 以 root 调（机器名、
 // 会话号放参数里）：看开着的提醒、跟进单、PR（show，不显示谁在处理、认领——#445 起这份状态只给驾驶舱看，不再自动开跟进单、
 // 不用认领）；Alertmanager 式静默（silence / unsilence / silences：谁、为什么、必带到期）。判法在 @fleet-dao/core 的 alert-work.ts。
 // 每条都能带 --json：只往标准输出打一行 JSON 给脚本读（本机看板、脚本），认不出按「没查成」算。
@@ -14,7 +14,22 @@ import {
 import type { AlertRow } from '@fleet-dao/db';
 import { type AlertWorkPort, seatAuditWho } from './alert-work.ts';
 import type { Store } from './ports.ts';
-import { SeatCliError, type SeatCliResult } from './seat-cli.ts';
+
+export class AlertCliError extends Error {
+  readonly exitCode: number;
+  constructor(message: string, exitCode = 2) {
+    super(message);
+    this.name = 'AlertCliError';
+    this.exitCode = exitCode;
+  }
+}
+
+/** 一条命令跑完：退出码、给人看的话、给脚本读的 JSON。 */
+export interface AlertCliResult {
+  code: number;
+  text: string;
+  json: Record<string, unknown>;
+}
 
 export const ALERT_USAGE = [
   '用法：fleet-api alert <show|silence|unsilence|silences> …（提醒是一件活，design 15.3「谁在处理」；都能带 --json 给脚本读）',
@@ -48,15 +63,15 @@ function parse(argv: readonly string[], allowed: readonly string[]): Parsed {
     const eq = arg.indexOf('=');
     const name = arg.slice(2, eq < 0 ? undefined : eq);
     if (FLAGS.has(name)) {
-      if (eq >= 0) throw new SeatCliError(`--${name} 不带值。\n${ALERT_USAGE}`);
+      if (eq >= 0) throw new AlertCliError(`--${name} 不带值。\n${ALERT_USAGE}`);
       flags.add(name);
       continue;
     }
-    if (!allowed.includes(name)) throw new SeatCliError(`认不出参数 --${name}。\n${ALERT_USAGE}`);
+    if (!allowed.includes(name)) throw new AlertCliError(`认不出参数 --${name}。\n${ALERT_USAGE}`);
     const value = eq >= 0 ? arg.slice(eq + 1) : argv[++i];
     if (value === undefined || (eq < 0 && value.startsWith('--')))
-      throw new SeatCliError(`--${name} 后面要跟值。\n${ALERT_USAGE}`);
-    if (options.has(name)) throw new SeatCliError(`--${name} 给了两次。\n${ALERT_USAGE}`);
+      throw new AlertCliError(`--${name} 后面要跟值。\n${ALERT_USAGE}`);
+    if (options.has(name)) throw new AlertCliError(`--${name} 给了两次。\n${ALERT_USAGE}`);
     options.set(name, value);
   }
   return { positional, options, flags };
@@ -64,16 +79,16 @@ function parse(argv: readonly string[], allowed: readonly string[]): Parsed {
 
 function need(p: Parsed, name: string): string {
   const v = p.options.get(name)?.trim();
-  if (!v) throw new SeatCliError(`要带 --${name}。\n${ALERT_USAGE}`);
+  if (!v) throw new AlertCliError(`要带 --${name}。\n${ALERT_USAGE}`);
   return v;
 }
 
 function text(p: Parsed, name: string, what: string): string | undefined {
   const v = p.options.get(name)?.trim();
   if (v === undefined) return undefined;
-  if (!v) throw new SeatCliError(`--${name} 要写${what}，不能是空的。\n${ALERT_USAGE}`);
+  if (!v) throw new AlertCliError(`--${name} 要写${what}，不能是空的。\n${ALERT_USAGE}`);
   if ([...v].length > MAX_NOTE)
-    throw new SeatCliError(`--${name} 太长（最多 ${MAX_NOTE} 个字）。\n${ALERT_USAGE}`);
+    throw new AlertCliError(`--${name} 太长（最多 ${MAX_NOTE} 个字）。\n${ALERT_USAGE}`);
   return v;
 }
 
@@ -81,15 +96,15 @@ function identityOf(p: Parsed): { machine: string; session: string } {
   const machine = need(p, 'machine');
   const session = need(p, 'session');
   const why = machineProblem(machine) ?? sessionProblem(session);
-  if (why) throw new SeatCliError(`${why}。\n${ALERT_USAGE}`);
+  if (why) throw new AlertCliError(`${why}。\n${ALERT_USAGE}`);
   return { machine, session };
 }
 
 async function alertOf(alerts: AlertWorkPort, ref: string | undefined): Promise<AlertRow> {
   const r = ref?.trim();
-  if (!r) throw new SeatCliError(`要给提醒的键或编号（fleet-api alert show 看得到）。\n${ALERT_USAGE}`);
+  if (!r) throw new AlertCliError(`要给提醒的键或编号（fleet-api alert show 看得到）。\n${ALERT_USAGE}`);
   const found = await alerts.find(r);
-  if (!found) throw new SeatCliError(`认不出提醒「${r}」：没有这个键或编号（fleet-api alert show 看开着的）`);
+  if (!found) throw new AlertCliError(`认不出提醒「${r}」：没有这个键或编号（fleet-api alert show 看开着的）`);
   return found;
 }
 
@@ -113,19 +128,19 @@ export interface AlertCliDeps {
   alerts: AlertWorkPort;
 }
 
-export async function runAlert(argv: readonly string[], deps: AlertCliDeps): Promise<SeatCliResult> {
+export async function runAlert(argv: readonly string[], deps: AlertCliDeps): Promise<AlertCliResult> {
   const [sub = '', ...rest] = argv;
   if (sub === 'show') return show(parse(rest, []), deps);
   if (sub === 'silence') return silence(parse(rest, ['until', 'note', 'machine', 'session']), deps);
   if (sub === 'unsilence') return unsilence(parse(rest, ['note', 'machine', 'session']), deps);
   if (sub === 'silences') return silences(parse(rest, []), deps);
-  throw new SeatCliError(sub ? `没有 alert ${sub} 这条命令。\n${ALERT_USAGE}` : ALERT_USAGE);
+  throw new AlertCliError(sub ? `没有 alert ${sub} 这条命令。\n${ALERT_USAGE}` : ALERT_USAGE);
 }
 
 // —— show ——
 
-async function show(p: Parsed, { store, alerts }: AlertCliDeps): Promise<SeatCliResult> {
-  if (p.positional.length > 1) throw new SeatCliError(`alert show 最多给一条提醒的键。\n${ALERT_USAGE}`);
+async function show(p: Parsed, { store, alerts }: AlertCliDeps): Promise<AlertCliResult> {
+  if (p.positional.length > 1) throw new AlertCliError(`alert show 最多给一条提醒的键。\n${ALERT_USAGE}`);
   if (p.positional.length === 1) {
     const a = await alertOf(alerts, p.positional[0]);
     const r = await alerts.read([a.id]);
@@ -183,19 +198,19 @@ async function silenceActor(p: Parsed): Promise<{ machine: string; session: stri
   return { ...who, basis: '按 --note 记的人处理' };
 }
 
-async function silence(p: Parsed, { alerts }: AlertCliDeps): Promise<SeatCliResult> {
+async function silence(p: Parsed, { alerts }: AlertCliDeps): Promise<AlertCliResult> {
   if (p.positional.length !== 1)
-    throw new SeatCliError(`要一个位置参数：提醒的键或编号（--prefix 时是前缀）。\n${ALERT_USAGE}`);
+    throw new AlertCliError(`要一个位置参数：提醒的键或编号（--prefix 时是前缀）。\n${ALERT_USAGE}`);
   const until = need(p, 'until');
   const note = text(p, 'note', '为什么（谁拍的、为什么不用处理）');
-  if (!note) throw new SeatCliError(`静默要带 --note：谁拍的、为什么不用处理。\n${ALERT_USAGE}`);
+  if (!note) throw new AlertCliError(`静默要带 --note：谁拍的、为什么不用处理。\n${ALERT_USAGE}`);
   const prefix = p.flags.has('prefix');
   const raw = (p.positional[0] ?? '').trim();
   const minutes = silenceMinutes(until, await alerts.now());
-  if (typeof minutes === 'string') throw new SeatCliError(`${minutes}。\n${ALERT_USAGE}`);
+  if (typeof minutes === 'string') throw new AlertCliError(`${minutes}。\n${ALERT_USAGE}`);
   const match = prefix ? raw : (await alertOf(alerts, raw)).dedupeKey;
   const why = silenceProblem({ matchKind: prefix ? 'prefix' : 'key', match, comment: note, minutes });
-  if (why) throw new SeatCliError(`${why}。\n${ALERT_USAGE}`);
+  if (why) throw new AlertCliError(`${why}。\n${ALERT_USAGE}`);
   const actor = await silenceActor(p);
   const s = await alerts.createSilence({
     matchKind: prefix ? 'prefix' : 'key',
@@ -212,13 +227,13 @@ async function silence(p: Parsed, { alerts }: AlertCliDeps): Promise<SeatCliResu
   };
 }
 
-async function unsilence(p: Parsed, { alerts }: AlertCliDeps): Promise<SeatCliResult> {
-  if (p.positional.length !== 1) throw new SeatCliError(`要一个位置参数：静默编号。\n${ALERT_USAGE}`);
+async function unsilence(p: Parsed, { alerts }: AlertCliDeps): Promise<AlertCliResult> {
+  if (p.positional.length !== 1) throw new AlertCliError(`要一个位置参数：静默编号。\n${ALERT_USAGE}`);
   const id = (p.positional[0] ?? '').trim().toLowerCase();
   if (!UUID.test(id))
-    throw new SeatCliError(`认不出静默编号「${id}」（fleet-api alert silences 看得到）。\n${ALERT_USAGE}`);
+    throw new AlertCliError(`认不出静默编号「${id}」（fleet-api alert silences 看得到）。\n${ALERT_USAGE}`);
   const note = text(p, 'note', '为什么提前撤');
-  if (!note) throw new SeatCliError(`撤静默要带 --note：为什么提前撤。\n${ALERT_USAGE}`);
+  if (!note) throw new AlertCliError(`撤静默要带 --note：为什么提前撤。\n${ALERT_USAGE}`);
   const actor = await silenceActor(p);
   const r = await alerts.expireSilence({
     id,
@@ -226,7 +241,7 @@ async function unsilence(p: Parsed, { alerts }: AlertCliDeps): Promise<SeatCliRe
     note,
     audit: seatAuditWho(actor.machine, actor.session),
   });
-  if (r.result === 'not_found') throw new SeatCliError(`没有静默 ${id}`);
+  if (r.result === 'not_found') throw new AlertCliError(`没有静默 ${id}`);
   if (r.result === 'ended')
     return {
       code: 0,
@@ -240,8 +255,8 @@ async function unsilence(p: Parsed, { alerts }: AlertCliDeps): Promise<SeatCliRe
   };
 }
 
-async function silences(p: Parsed, { alerts }: AlertCliDeps): Promise<SeatCliResult> {
-  if (p.positional.length > 0) throw new SeatCliError(`alert silences 不收位置参数。\n${ALERT_USAGE}`);
+async function silences(p: Parsed, { alerts }: AlertCliDeps): Promise<AlertCliResult> {
+  if (p.positional.length > 0) throw new AlertCliError(`alert silences 不收位置参数。\n${ALERT_USAGE}`);
   const r = await alerts.listSilences({ all: p.flags.has('all') });
   const lines = r.silences.map(
     (s) =>
