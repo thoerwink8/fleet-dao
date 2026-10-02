@@ -11,6 +11,7 @@ import { createMockApi } from '../api/mock/server';
 import { ThemeProvider } from '../components/theme-provider';
 import { TooltipProvider } from '../components/ui/tooltip';
 import BoardPage from '../routes/board';
+import HomePage from '../routes/home';
 import OverviewPage from '../routes/overview';
 import Shell from '../routes/shell';
 
@@ -78,6 +79,7 @@ async function open(api: FleetApi, route: string) {
                 <Route element={<Shell />}>
                   <Route index element={<BoardPage />} />
                   <Route path="overview" element={<OverviewPage />} />
+                  <Route path="home3" element={<HomePage />} />
                 </Route>
               </Routes>
             </TooltipProvider>
@@ -123,6 +125,19 @@ describe('首屏：读取和确认登录一起发，一轮发完', () => {
     ]) {
       expect([call, w.first(call)]).toEqual([call, 1]);
     }
+  });
+
+  test('新主页 /home3（回访）：me、repos、notifications 都第 1 轮发；不拉路由（路由是看板用）', async () => {
+    localStorage.setItem(HINT_KEY, JSON.stringify(REPOS));
+    const w = waved();
+    await open(w.api, '/home3');
+    // /home3 现在 NotWired，三块都还没接，所以只发 shell 和通知的；不要拉路由——避免未经确认的白等一趟往返。
+    // （shell 的顶栏 / 侧栏 / ⌘K 会拉看板，那是壳的事，不是 /home3 自己发的。）
+    for (const call of ['me', 'repos', 'notifications']) {
+      expect([call, w.first(call)]).toEqual([call, 1]);
+    }
+    await w.release();
+    expect(w.called('routing')).toBe(false);
   });
 
   test('头一回打开（本机没记过仓）：看板要等仓列表，第 2 轮；读到的仓记下来，下回就是第 1 轮', async () => {
