@@ -539,6 +539,16 @@ describe('认领（#299）：交单和本机抢同一行；帅位座位整张删
     }
   });
 
+  it('钉子：usage 里不再出现拒收的那四个旗（#531；删掉以后照拒收测试的错拒得有据）', async () => {
+    const t = setup();
+    await t.run(['--help']);
+    const usage = t.out.join('\n');
+    expect(usage).not.toContain('--term');
+    expect(usage).not.toContain('--machine');
+    expect(usage).not.toContain('--session');
+    expect(usage).not.toContain('--scope');
+  });
+
   it('【故意造出的失败】本机认领着：拒（退出码 3），写明谁拿着、怎么强制改派；不起工作流、不记 task.handover', async () => {
     const t = setup();
     await t.queued();

@@ -437,7 +437,7 @@ export function operatorName(env: CliEnv): string {
 // —— handover：交给 fleet ——
 
 const HANDOVER_USAGE =
-  '用法：fleet-api handover <owner/仓名> <issue 号> --reason "<谁说的、为什么>" [--machine <机器名> --session <会话号> --term <任期> [--scope main] | --founder "<创始人原话>"]（把开关打开以前开的、别的版本的、未排期的、母单和子单、贴了「本机做」的交给引擎，起 Fusion 工作流。帅位上线后交单是受保护动作：帅位带着任期来，运维手敲的带创始人原话；本机认领着的单要带创始人原话才改派给引擎）';
+  '用法：fleet-api handover <owner/仓名> <issue 号> --reason "<谁说的、为什么>" [--founder "<创始人原话>"]（把开关打开以前开的、别的版本的、未排期的、母单和子单、贴了「本机做」的交给引擎，起 Fusion 工作流。本机认领着的单要带创始人原话才改派给引擎）';
 
 export interface HandoverArgs {
   owner: string;
