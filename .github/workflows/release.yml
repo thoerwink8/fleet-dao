@@ -320,8 +320,12 @@ $body
           fi
           if ! jq -n --arg text "$msg" '{msg_type:"text", content:{text:$text}}' | \
                curl -fsS -X POST -H 'content-type: application/json' --data-binary @- "$FLEET_FEISHU" >/dev/null; then
-            # 飞书发失败：把刚写的标记原位剥掉，别把「已发」的假证据留下；剥不成两边都失败，发起人要看一眼。
-            jq -r '.body' <<<"$existing" | gh release edit "$VERSION" --notes-file - >/dev/null || true
+            # 飞书发失败：把刚写的标记原位剥掉，别把「已发」的假证据留下（剥不成下一轮会当已发而跳过、飞书永远漏发）。
+            if ! jq -r '.body' <<<"$existing" | gh release edit "$VERSION" --notes-file - >/dev/null; then
+              echo "::error::飞书发送失败，且 release 正文的 <!-- fleet-notified: $VERSION --> 标记剥不回去——下次重跑会当已发过而跳过，飞书永远漏发。"
+              echo "::error::发起人手动改一下：gh release edit $VERSION --notes-file <CHANGELOG.md 里这一版原文>，剥掉 marker，再重跑 workflow_dispatch（version=$VERSION）。"
+              exit 1
+            fi
             echo "::error::飞书发送失败：$VERSION 已回滚 release 正文标记，下一轮重试会真发。"
             exit 1
           fi
