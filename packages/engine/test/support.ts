@@ -10,7 +10,7 @@ import type { EngineActivities } from '../src/activity-options.ts';
 import type { FusionInput, RequirementInput, SubtaskInput } from '../src/contract.ts';
 import type { FailureTriage } from '../src/decisions/failure.ts';
 import type { Decide } from '../src/decisions/index.ts';
-import type { SubtaskSpec } from '../src/decisions/plan.ts';
+import type { SubtaskSpec } from '../src/decisions/types.ts';
 import type { FakeWorld } from '../src/fakes.ts';
 import { bundleEngineWorkflows, createEngineWorker } from '../src/worker.ts';
 

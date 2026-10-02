@@ -2,18 +2,22 @@
 // 不重算——改判断条件（阈值、分类表、默认值）不会让在途任务的历史对不上（windsurf-dao#1633、#1813）。
 // 工作流文件只许 `import type` 这里的东西；直接调用会把判断搬回工作流、失去这层保护（test/structure.test.ts 盯着）。
 // 库主键也从这里出（newIds）：理由一样，要进历史。
+//
+// #556-1：Fusion 流程的 triage / plan / runnable / delivery / verify / mergeStep / mergeReturn，加上只被
+// Fusion 用的 state 机（fusionFlow）、流程配置接活（flowConfig / specDir / fusionSetup / riskPathsFileFor）、
+// 问创始人不挡路的那几样（lateChanges / assumedLines / askTally）都跟着 workflows/{fusion,requirement,subtask,
+// merge-queue}.ts 一起删了。这里留的是跑流程的零件（failure / newIds / limits）、554-1 三段还在用的
+// 简报校验和验收（brief / parallelBriefs / acceptance / verdict）、开 PR 前验证（bodyCriteria / verifyLines）
+// 和 Fusion 表单里留着的纯函数（leadPlan / leadReview / rebuttable / filesUnder / fusionPr / closeComment /
+// fusionStart，它们的实现在 core 里没动，等 556-2 一起清）。
 
 import {
   type AcceptanceDecision,
   type AcceptanceInput,
-  type AskTally,
-  assumedLines,
   type Brief,
   type BriefCheck,
   bodyCriteria,
   type CloseFacts,
-  type ConfigDecision,
-  changeLine,
   checkBrief,
   checkLeadPlan,
   checkLeadReview,
@@ -26,101 +30,41 @@ import {
   type FlowState,
   type FusionPrFacts,
   type FusionPrParts,
-  type FusionSetup,
-  type FusionSetupInput,
   filesUnder,
   fusionPrParts,
   type LeadPlanCheck,
   type LeadReviewCheck,
-  lateChanges,
   type Mode,
   nextFlow,
   type Rebuttable,
-  type RiskPathsFileDecision,
-  type RiskPathsFileInput,
   rebuttable,
-  resolveFlowConfig,
-  riskPathsFileFor,
-  type Source,
-  setupFusion,
-  specDocs,
-  specOf,
   startFlow,
-  type TaskAsk,
-  tallyAsks,
   type VerdictDecision,
   type VerdictInput,
   type VerifiedRound,
-  type VerifyReport,
   verificationLines,
 } from '@fleet-dao/core';
 import { type Limits, resolveLimits } from '../limits.ts';
-import { checkDelivery, type DeliveryDecision, type DeliveryInput } from './delivery.ts';
 import { type FailureInput, type FailureTriage, type NextAction, nextAction } from './failure.ts';
 import { type NewIdsInput, newIds } from './ids.ts';
-import {
-  afterMergeReturn,
-  type MergeReturnDecision,
-  type MergeReturnInput,
-  type MergeStep,
-  type MergeStepInput,
-  mergeStep,
-} from './merge.ts';
-import {
-  type PlanDecision,
-  type PlanInput,
-  pickRunnable,
-  type RunnableDecision,
-  type RunnableInput,
-  validatePlan,
-} from './plan.ts';
-import { decideTriage, type TriageDecision, type TriageInput } from './triage.ts';
-import { decideAfterVerify, type VerifyDecision, type VerifyInput } from './verify.ts';
 
 export interface DecisionMap {
   limits: { input: Partial<Limits> | undefined; output: Limits };
   newIds: { input: NewIdsInput; output: string[] };
-  triage: { input: TriageInput; output: TriageDecision };
-  plan: { input: PlanInput; output: PlanDecision };
-  runnable: { input: RunnableInput; output: RunnableDecision };
   failure: { input: FailureInput; output: NextAction };
-  delivery: { input: DeliveryInput; output: DeliveryDecision };
-  verify: { input: VerifyInput; output: VerifyDecision };
-  mergeStep: { input: MergeStepInput; output: MergeStep };
-  mergeReturn: { input: MergeReturnInput; output: MergeReturnDecision };
-  // Fusion 的判断在 core 包（docs/decisions/0003-fusion-flow.md 第 12 条），这里只接上，工作流照样经 decide 调、结果进历史。
-  fusionFlow: { input: { state: FlowState; event: FlowEvent }; output: FlowDecision };
   brief: { input: unknown; output: BriefCheck };
   parallelBriefs: { input: Brief[]; output: { ok: true } | { ok: false; problems: string[] } };
   acceptance: { input: AcceptanceInput; output: AcceptanceDecision };
   verdict: { input: VerdictInput; output: VerdictDecision };
-  /** 开 PR 前验证写进 PR 正文的几行（「怎么验证的」「还欠什么」）。 */
-  verifyLines: { input: VerifiedRound[]; output: { verified: string[]; owed: string[] } };
-  flowConfig: { input: { org: Source; project: Source }; output: ConfigDecision };
-  // ---- Fusion 工作流（workflows/fusion.ts）
-  /** 起步的状态（0 创单并讨论）：模式、是不是母单、验证最多几轮。 */
-  fusionStart: { input: { mode: Mode; mother: boolean; verifyRounds: number }; output: FlowState };
-  /**
-   * 这张单的需求文档目录，连同目录下需求、方案、结果三份的路径：正文里指的那个（不按标题拼）；没指、正文写全了需求的
-   * （#295）按标题取短名，requirement 是照正文写的需求文档（Lead 原样提交、随 PR 进主线）。
-   */
-  specDir: {
-    input: { body: string; issueNumber: number; title: string };
-    output:
-      | { ok: string; docs: { requirement: string; plan: string; result: string }; requirement?: string }
-      | { error: string };
-  };
   /** 单子正文里「怎么算做完」逐条原文（正文写全了需求、主线上还没有需求文档的单，开 PR 前验证照它核，#295）。 */
   bodyCriteria: { input: { body: string }; output: { ok: string[] } | { error: string } };
-  /** 开工前看流程配置副本：能不能派、用哪套、每一步的模型。 */
-  fusionSetup: { input: FusionSetupInput; output: FusionSetup };
-  /**
-   * 合并队列（workflows/merge-queue.ts）判「合并闸红是不是只缺 second-opinion」要知道的：这个项目声明的先审后合
-   * 清单在仓里哪个路径；没声明 = 没有这个字段（core 的 riskPathsFileFor）。
-   */
-  riskPathsFileFor: { input: RiskPathsFileInput; output: RiskPathsFileDecision };
+  /** 开 PR 前验证写进 PR 正文的几行（「怎么验证的」「还欠什么」）。 */
+  verifyLines: { input: VerifiedRound[]; output: { verified: string[]; owed: string[] } };
+  /** 起步的状态（0 创单并讨论）：模式、是不是母单、验证最多几轮。 */
+  fusionStart: { input: { mode: Mode; mother: boolean; verifyRounds: number }; output: FlowState };
+  /** Fusion 状态机（开 PR 前验证的回环：挡了回哪一步、第几轮挡住）：实现在 core 的 flow.ts，没在工作流。 */
+  fusionFlow: { input: { state: FlowState; event: FlowEvent }; output: FlowDecision };
   /** Lead 交回的方案和任务简报收不收。 */
-  /** Lead 交回的方案和任务简报收不收；withRequirement = 这一步还要提交照正文写的需求文档（#295）。 */
   leadPlan: { input: { output: unknown; specDir: string; withRequirement?: boolean }; output: LeadPlanCheck };
   /** Lead 的最终审查收不收。 */
   leadReview: {
@@ -128,23 +72,13 @@ export interface DecisionMap {
     output: LeadReviewCheck;
   };
   /** 验证挡住的几条原文（给 Lead 驳回用）。 */
-  rebuttable: { input: VerifyReport; output: Rebuttable[] };
+  rebuttable: { input: import('@fleet-dao/core').VerifyReport; output: Rebuttable[] };
   /** 改到的文件里落在这几个路径下的（算不算页面代码）。 */
   filesUnder: { input: { paths: string[]; files: string[] }; output: string[] };
   /** PR 正文的几栏。 */
   fusionPr: { input: FusionPrFacts; output: FusionPrParts };
   /** 关单评论的正文：定一次、进历史，重试和重放都发同一份。 */
   closeComment: { input: CloseFacts; output: string };
-  // ---- 问创始人不挡路（#259，core 的 ask.ts）
-  /** 存档点：他晚到、改选了别的、还没照改的（handed = 已经交给 Lead、还没照改完的），连同交给 Lead 的话。 */
-  lateChanges: {
-    input: { asks: TaskAsk[]; handed: string[] };
-    output: { askIds: string[]; items: string[] };
-  };
-  /** PR 正文「按推荐先做了」一栏。 */
-  assumedLines: { input: TaskAsk[]; output: string[] };
-  /** 关单评论的记数：按推荐先做了几条、事后被改了几条。 */
-  askTally: { input: TaskAsk[]; output: AskTally };
 }
 
 export type DecisionKind = keyof DecisionMap;
@@ -166,46 +100,21 @@ export function createDecide(deps: DecideDeps = {}): Decide {
   const table: Table = {
     limits: resolveLimits,
     newIds,
-    triage: decideTriage,
-    plan: validatePlan,
-    runnable: pickRunnable,
     failure: (input) => (triage ? nextAction(input, triage) : nextAction(input)),
-    delivery: checkDelivery,
-    verify: decideAfterVerify,
-    mergeStep,
-    mergeReturn: afterMergeReturn,
-    fusionFlow: ({ state, event }) => nextFlow(state, event),
     brief: checkBrief,
     parallelBriefs: checkParallel,
     acceptance: decideAcceptance,
     verdict: decideVerdict,
-    verifyLines: verificationLines,
-    flowConfig: ({ org, project }) => resolveFlowConfig(org, project),
-    fusionStart: ({ mode, mother, verifyRounds }) => startFlow(mode, mother, { verifyRounds }),
-    specDir: ({ body, issueNumber, title }) => {
-      const got = specOf({ body, issueNumber, title });
-      if ('error' in got) return got;
-      return {
-        ok: got.ok,
-        docs: specDocs(got.ok),
-        ...(got.requirement === undefined ? {} : { requirement: got.requirement }),
-      };
-    },
     bodyCriteria: ({ body }) => bodyCriteria(body),
-    fusionSetup: setupFusion,
-    riskPathsFileFor,
+    verifyLines: verificationLines,
+    fusionStart: ({ mode, mother, verifyRounds }) => startFlow(mode, mother, { verifyRounds }),
+    fusionFlow: ({ state, event }) => nextFlow(state, event),
     leadPlan: checkLeadPlan,
     leadReview: checkLeadReview,
     rebuttable,
     filesUnder: ({ paths, files }) => filesUnder(paths, files),
     fusionPr: fusionPrParts,
     closeComment,
-    lateChanges: ({ asks, handed }) => {
-      const late = lateChanges(asks, handed);
-      return { askIds: late.map((a) => a.id), items: late.map(changeLine) };
-    },
-    assumedLines,
-    askTally: tallyAsks,
   };
   return async (kind, input) => {
     const fn = table[kind] as ((input: unknown) => unknown) | undefined;
@@ -214,10 +123,6 @@ export function createDecide(deps: DecideDeps = {}): Decide {
   };
 }
 
-export * from './delivery.ts';
 export * from './failure.ts';
 export * from './ids.ts';
-export * from './merge.ts';
-export * from './plan.ts';
-export * from './triage.ts';
-export * from './verify.ts';
+export * from './types.ts';

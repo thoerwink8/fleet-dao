@@ -23,7 +23,7 @@ import {
   subtaskWorkflowId,
   WORKFLOW_TYPES,
 } from '../../src/contract.ts';
-import type { SubtaskSpec } from '../../src/decisions/plan.ts';
+import type { SubtaskSpec } from '../../src/decisions/types.ts';
 import {
   createFakeWorld,
   FAKE_BRIEF,

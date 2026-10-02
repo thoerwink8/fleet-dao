@@ -7,9 +7,14 @@
 
 import { checkReport, outsideBrief, type Rebuttal, type VerifyReport } from '@fleet-dao/core';
 import type { Repo, StageKind } from '@fleet-dao/shared';
-import type { PlannedSubtask, Risk, SubtaskStage } from '../decisions/plan.ts';
-import type { TriageVerdict } from '../decisions/triage.ts';
-import type { Finding, ReviewResult } from '../decisions/verify.ts';
+import type {
+  Finding,
+  PlannedSubtask,
+  ReviewResult,
+  Risk,
+  SubtaskStage,
+  TriageVerdict,
+} from '../decisions/types.ts';
 import type { LeadBrief, LeadStep, SessionBrief } from '../ports.ts';
 import { type AnyBrief, AnyBriefSchema } from '../runner/brief.ts';
 import { checkPlanLine, PLAN_LINE_HINT, planLineOf } from './spec-doc.ts';
