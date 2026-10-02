@@ -1,6 +1,8 @@
 // agents-sync 可执行入口：接上真的参数、环境、输出和身份。
 import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { type PasswdEntry, runCli } from './cli.ts';
 
@@ -47,3 +49,37 @@ process.exitCode = runCli(process.argv.slice(2), {
   lookupUser,
   becomeUser,
 });
+
+// 同步专用检出已取到主线；旧检出的 agents:sync 也能借这个入口迁移旧封装。
+if (
+  process.exitCode === 0 &&
+  process.argv.includes('--apply') &&
+  !process.argv.includes('--help') &&
+  process.platform !== 'linux'
+) {
+  const args = process.argv.slice(2);
+  const argValue = (name: string): string | undefined => {
+    const i = args.indexOf(name);
+    return i >= 0 ? args[i + 1] : undefined;
+  };
+  const migrationHome = argValue('--home') ?? homedir();
+  if (existsSync(join(migrationHome, '.mirasim', 'setting.json')))
+    try {
+      const output = execFileSync(
+        process.execPath,
+        [
+          fileURLToPath(new URL('../../mirasim-reclaude/bin/migrate', import.meta.url)),
+          '--auto',
+          '--home',
+          migrationHome,
+          '--repo',
+          argValue('--repo') ?? fileURLToPath(new URL('../../..', import.meta.url)),
+        ],
+        { encoding: 'utf8', timeout: 60_000, windowsHide: true },
+      );
+      if (output.trim()) process.stdout.write(output);
+    } catch {
+      process.stderr.write('Mirasim 旧封装自动迁移未确认；原配置保留，可用 pnpm mirasim:migrate 检查\n');
+      process.exitCode = 1;
+    }
+}

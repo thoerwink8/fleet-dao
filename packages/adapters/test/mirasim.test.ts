@@ -595,6 +595,64 @@ describe('Mirasim 起会话到判定（假服务端）', () => {
     expect(judgeRun(mirasimRunSummary(local).facts).reason).toBe('answered');
   });
 
+  it('cloud 成功但实际走自有：拒绝按平台成功入账', async () => {
+    const report = await runMirasim(spec(), {
+      connect: new FakeMirasim({ reply: accepted(kimi), stream: kimi.stream }).connect,
+      ledgerDir: okLedger(kimi.sessionKey),
+    });
+    report.ledger = {
+      state: 'read',
+      rows: [{ at: Date.now(), status: 200, viaRelay: false, upstreamHost: 'api.anthropic.com' }],
+      unparsed: 0,
+    };
+    expect(judgeRun(mirasimRunSummary(report).facts).reason).toBe('agent_error');
+  });
+
+  it('cloud 混入成功的直连调用：有中继成功也不能掩盖串账', async () => {
+    const report = await runMirasim(spec(), {
+      connect: new FakeMirasim({ reply: accepted(kimi), stream: kimi.stream }).connect,
+      ledgerDir: okLedger(kimi.sessionKey),
+    });
+    report.ledger = {
+      state: 'read',
+      rows: [
+        { at: Date.now(), status: 200, viaRelay: true, upstreamHost: 'relay.mirasim.ai' },
+        { at: Date.now(), status: 200, viaRelay: false, upstreamHost: 'api.anthropic.com' },
+      ],
+      unparsed: 0,
+    };
+    expect(judgeRun(mirasimRunSummary(report).facts).reason).toBe('agent_error');
+  });
+
+  it('cloud 来源缺字段或账本有坏行：明确没查成，不当平台成功', async () => {
+    const report = await runMirasim(spec(), {
+      connect: new FakeMirasim({ reply: accepted(kimi), stream: kimi.stream }).connect,
+      ledgerDir: okLedger(kimi.sessionKey),
+    });
+    report.ledger = { state: 'read', rows: [{ status: 200 }], unparsed: 0 };
+    expect(judgeRun(mirasimRunSummary(report).facts).reason).toBe('relay_unknown');
+    report.ledger = { state: 'read', rows: [{ status: 200, viaRelay: true }], unparsed: 1 };
+    expect(judgeRun(mirasimRunSummary(report).facts).reason).toBe('relay_unknown');
+  });
+
+  it('平台模型成功时，本地 count_tokens 不应被误判成串账；只有辅助调用不能证明模型成功', async () => {
+    const dir = okLedger(kimi.sessionKey);
+    const file = join(dir, kimi.sessionKey.split(':')[1] as string, 'index-0.ndjson');
+    const rows = [
+      { ts: Date.now(), path: '/v1/messages', status: 200, viaRelay: true },
+      { ts: Date.now(), path: '/v1/messages/count_tokens', status: 200, viaRelay: false },
+    ];
+    writeFileSync(file, rows.map((r) => JSON.stringify(r)).join('\n'));
+    const report = await runMirasim(spec(), {
+      connect: new FakeMirasim({ reply: accepted(kimi), stream: kimi.stream }).connect,
+      ledgerDir: dir,
+    });
+    expect(judgeRun(mirasimRunSummary(report).facts).reason).toBe('answered');
+    writeFileSync(file, JSON.stringify({ ...rows[1], viaRelay: true }));
+    report.ledger = await readMirasimLedger(dir, kimi.sessionKey);
+    expect(judgeRun(mirasimRunSummary(report).facts).reason).toBe('agent_error');
+  });
+
   it('引擎重启后收旧会话：看到终态才算收好', async () => {
     const server = new FakeMirasim({
       afterStop: [{ type: 'snapshot', sessionKey: kimi.sessionKey, seq: 7, snapshot: { phase: 'stopped' } }],

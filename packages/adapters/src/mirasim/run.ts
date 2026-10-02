@@ -517,13 +517,31 @@ export function mirasimRouting(report: MirasimRunReport): LedgerRouting | undefi
 export function mirasimRunFacts(report: MirasimRunReport): RunFacts {
   let terminal = report.terminal;
   let relayUnknown: string | undefined;
-  // 中转路由：快照说 done 还要账本里起针之后有 2xx 行（8.4）。账本没读成、没给账本目录都是「没查成」，不当成干完了
+  // 来源校验必须在成功进入统一记账前完成；2xx 本身不能证明用了平台额度。
   if (terminal && !terminal.isError && report.route === 'cloud') {
     const ledger = report.ledger;
     if (!ledger) relayUnknown = '没给账本目录，上游有没有真的干活核实不了';
     else if (ledger.state === 'unknown') relayUnknown = `账本没读成：${ledger.detail}`;
-    else if (ledgerRouting(ledger.rows).ok === 0) {
-      terminal = { isError: true, detail: '快照说 done，但账本里起针之后没有一次 2xx 的上游调用' };
+    else if (ledger.unparsed > 0) relayUnknown = '账本有格式无法识别的行，实际额度来源核实不了';
+    else {
+      const successes = ledger.rows.filter(
+        (r) =>
+          r.status !== undefined &&
+          r.status >= 200 &&
+          r.status < 300 &&
+          !r.path?.split('?')[0]?.endsWith('/messages/count_tokens') &&
+          !r.path?.split('?')[0]?.endsWith('/v1/models'),
+      );
+      if (successes.length === 0) {
+        terminal = { isError: true, detail: '快照说 done，但账本里起针之后没有一次 2xx 的上游调用' };
+      } else if (successes.some((r) => r.viaRelay === false)) {
+        terminal = {
+          isError: true,
+          detail: '选择了平台，但成功的上游调用包含自有或直连来源，拒绝按平台成功入账',
+        };
+      } else if (successes.some((r) => r.viaRelay !== true)) {
+        relayUnknown = '成功的上游调用缺少中继来源标记，实际额度来源核实不了';
+      }
     }
   }
   const error = report.session.state.error;

@@ -2,6 +2,16 @@
 
 > 一行一条、带日期和对应提交。规矩在 `AGENTS.md` 通用段「进度也要落盘」。
 
+## 2026-10-02（Mirasim 切换与一条命令迁移，实施）
+
+- 基线 `06533e1a`；创始人已同意实现并要求「一条命令或者不用命令」从旧机制迁移，决定记在 `docs/decisions/0012-mirasim-routing-and-migration.md`。独立工作树 `.claude/worktrees/mirasim-routing-impl`。
+- 做到哪：新增 `packages/mirasim-reclaude`（Go 会话启动器、Node 迁移），自有 / 平台双向切换、严格选路、SDK 初始化/权限恢复、正常退出后 resume、父进程强杀后子孙回收、一次性 stdin EOF 保留退出码均已用真实编译的假执行体验证。暂未切本机启动命令、停会话或改法国配置。
+- 迁移：`pnpm mirasim:migrate` 支持检查、等待和撤回；`agents:sync --apply` 自动识别旧封装并安排隐藏后台任务，两个独立调用不会同时写配置或重复安排。备份只存启动字段；核源码、架构、文件校验和 reclaude 目标；保留原参数，损坏记录/文件明确失败。真实会话档案的 `incomplete` 已纳入已结束状态。
+- 验证：新包完整测试首轮 13 条通过（含 Go 生命周期），随后新增并复现并发、文件损坏、坏撤回记录、平台注入缺失、已退出执行体的控制恢复失败；相关迁移/后台 14 条、同步真实入口 4 条通过。Linux cloud 入账前核计费调用来源；本地 count_tokens / models 与模型调用分开。四平台原生测试/构建工作流已写，尚未运行到 GitHub。
+- 13:08 验证：受影响三包整轮 786 条中 740 通过、44 平台跳过、2 个同步回归失败；修正无 Mirasim 时的入口后，两条失败与真实 CLI、新包复测 23 条通过。补齐撤回不自动重装、编译期间人改配置不覆盖后，新包完整 19 条通过（包含真实 Go 生命周期测试）；适配器/同步真实 CLI 44 条、文档指针 54 条通过。TS 编译已过；全量由 `test:changed` 正确判到 CI，本机未跑 `pnpm check`。
+- 下一步：本机 Grok 独立审查（决定 0008），开 PR 后盯 CI 和两种 Mac 的真实 runner，再安全迁移本机；指南、README、design/ops 和旧自检指针已同步对齐。
+- 还没验证：新版与真实 Mirasim 的请求归属、Mac 用户机器的 GUI 接入、法国真实渠道与记账；没有把编译成功、日志 route=cloud 或先前讨论失败当作验收。
+
 # 进度（本机恢复与重做前置）
 
 > 一行一条、带日期和对应提交。规矩在 `AGENTS.md` 通用段「进度也要落盘」。
@@ -30,6 +40,8 @@
 - Linux 补充调研提交 `32b924d6`，PR [#579](https://github.com/thoerwink8/fleet-dao/pull/579)；仍为未实施的建议，没有改法国配置或发布二进制。
 
 ## 2026-09-30 / 10-01（本机，指挥官会话）
+
+> 后续修正（2026-10-02）：下方「机制没坏」「启动器没问题」仅观察了进程启动，没覆盖进程内回合切换；已被本文件 Mirasim 调研/实施节的真实复现与决定 0012 取代。旧的「只对新起进程生效」是旧封装限制，不作为新版操作指南。
 
 - **Grok 在本机修好了**（2026-09-30）。原因：C 盘事故把 `~/.grok/auth.json` 冲掉，且 Grok 只认代理环境变量、不读 Windows 系统代理。做法：1) `grok login --device-auth` 重新登录（创始人本人在浏览器确认）；2) 给这台机器的用户级环境加 `HTTP_PROXY` / `HTTPS_PROXY = http://127.0.0.1:7890`（Clash 混合口），`NO_PROXY` 原有值不动。**法国 VPS 直连能通，不需要这段配置。** 验证：只带用户级环境变量跑 `grok -p …` 返回 OK，模型 `grok-4.7`。没验证的：Mirasim 里新开 Grok 会话（要人在界面上点）。
 - **Mirasim 的「平台 / 自有」两个额度来源按钮：机制没坏，是两边都没配好。** 查到的：`~/.mirasim/plugin-index/<机器>.json` 的 `routes` 按**会话**记路由，本机 262 条里 `cloud` 233 / `local` 29；本会话被钉在 `cloud`，所以每次调用都进 `relay.mirasim.ai`（`~/.mirasim/traffic/<会话>/index-0.ndjson` 494 行全部 `viaRelay=true`、`accountId=null`）。「自有」那条路要求「本机有该智能体的账号凭据」，`setting.json` 的 `agent_accounts` 是空的。
