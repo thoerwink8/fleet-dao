@@ -89,6 +89,8 @@ export async function readMirasimLedger(
         continue;
       }
       const at = typeof row.ts === 'string' ? Date.parse(row.ts) : num(row.ts);
+      if (since !== undefined && (at === undefined || !Number.isFinite(at)))
+        return { state: 'unknown', detail: `账本 ${name} 有时间认不出的行，无法确认属于本次调用` };
       if (since !== undefined && at !== undefined && Number.isFinite(at) && at < since) continue;
       rows.push({
         ...optional('at', at !== undefined && Number.isFinite(at) ? at : undefined),

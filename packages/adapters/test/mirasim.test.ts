@@ -653,6 +653,24 @@ describe('Mirasim 起会话到判定（假服务端）', () => {
     expect(judgeRun(mirasimRunSummary(report).facts).reason).toBe('agent_error');
   });
 
+  it('账本成功行时间认不出，不能拿它证明本次平台调用成功', async () => {
+    const dir = okLedger(kimi.sessionKey);
+    writeFileSync(
+      join(dir, kimi.sessionKey.split(':')[1] as string, 'index-0.ndjson'),
+      JSON.stringify({
+        ts: 'not-a-date',
+        status: 200,
+        viaRelay: true,
+        path: '/v1/messages',
+      }),
+    );
+    const report = await runMirasim(spec(), {
+      connect: new FakeMirasim({ reply: accepted(kimi), stream: kimi.stream }).connect,
+      ledgerDir: dir,
+    });
+    expect(judgeRun(mirasimRunSummary(report).facts).reason).toBe('relay_unknown');
+  });
+
   it('引擎重启后收旧会话：看到终态才算收好', async () => {
     const server = new FakeMirasim({
       afterStop: [{ type: 'snapshot', sessionKey: kimi.sessionKey, seq: 7, snapshot: { phase: 'stopped' } }],
