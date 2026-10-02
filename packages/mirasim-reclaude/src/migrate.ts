@@ -188,6 +188,29 @@ async function configOf(wire: MirasimWire, replyMs = 5_000): Promise<Json> {
   throw new Error('Mirasim 配置回读超时');
 }
 
+async function liveLaunchOf(wire: MirasimWire, replyMs = 5_000): Promise<Launch> {
+  // getConfig 只暴露功能设置，启动命令在 listClis 的 launch 字段。
+  wire.send({ type: 'listClis' });
+  const end = Date.now() + replyMs;
+  while (Date.now() < end) {
+    const frame = await wire.next(Math.max(1, end - Date.now()));
+    if (frame === 'closed') throw new Error('Mirasim 启动器列表连接断开');
+    if (frame === 'timeout') break;
+    if (frame.type === 'error') throw new Error('Mirasim 启动器列表请求失败');
+    if (frame.type !== 'clis') continue;
+    if (!Array.isArray(frame.clis)) throw new Error('Mirasim 启动器列表格式错误');
+    const rows = frame.clis.map(object).filter((row) => row?.id === 'claude');
+    if (rows.length !== 1) throw new Error('Mirasim 启动器列表没有唯一 Claude 条目');
+    const launch = object(rows[0]?.launch);
+    const command = launch?.command ?? launch?.defaultBin;
+    if (typeof command !== 'string' || !command.trim()) throw new Error('Mirasim 启动器列表缺少有效命令');
+    if (launch?.args !== undefined && typeof launch.args !== 'string')
+      throw new Error('Mirasim 启动器参数格式错误');
+    return { command, ...(typeof launch?.args === 'string' ? { args: launch.args } : {}) };
+  }
+  throw new Error('Mirasim 启动器列表回读超时');
+}
+
 async function connectInstances(home: string, replyMs: number): Promise<MirasimWire[]> {
   const dir = join(home, '.mirasim', 'run');
   if (!existsSync(dir)) return [];
@@ -250,7 +273,7 @@ async function setLaunch(wires: MirasimWire[], wanted: Launch, replyMs = 5_000):
     const end = Date.now() + replyMs;
     let matched = false;
     while (Date.now() < end) {
-      const actual = launchOf(await configOf(wire, replyMs));
+      const actual = await liveLaunchOf(wire, replyMs);
       if (actual.command === wanted.command && (actual.args ?? '') === (wanted.args ?? '')) {
         matched = true;
         break;
@@ -366,7 +389,7 @@ async function migrateUnlocked(o: MigrationOptions): Promise<MigrationResult> {
     const current = launchOf(readJson(setting, 'Mirasim 设置'));
     if (!sameLaunch(current, before)) throw new Error('等待期间启动配置被其他操作修改，未覆盖');
     for (const wire of wires) {
-      if (!sameLaunch(launchOf(await configOf(wire, o.replyMs)), before))
+      if (!sameLaunch(await liveLaunchOf(wire, o.replyMs), before))
         throw new Error('Mirasim 实例启动配置已修改，未覆盖');
     }
     if (o.rollback && saved) {
@@ -388,7 +411,7 @@ async function migrateUnlocked(o: MigrationOptions): Promise<MigrationResult> {
     if (!sameLaunch(launchOf(readJson(setting, 'Mirasim 设置')), before))
       throw new Error('准备期间启动配置被其他操作修改，未覆盖');
     for (const wire of wires) {
-      if (!sameLaunch(launchOf(await configOf(wire, o.replyMs)), before))
+      if (!sameLaunch(await liveLaunchOf(wire, o.replyMs), before))
         throw new Error('准备期间 Mirasim 启动配置已修改，未覆盖');
     }
     const previous = saved && before.command === saved.command ? saved.previous : before;

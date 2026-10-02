@@ -43,7 +43,7 @@ pnpm mirasim:migrate --rollback    # 等空闲，恢复迁移前的命令与参�
 
 Node 须为 22.22 或以上。目标机器无需安装 Go：有 Go 时从本仓编译；没有时用已登录的 `gh` 下载主线成功工作流中与源码匹配的构建，核对 manifest、架构、SHA-256 和版本。构建不存在、下载/校验失败或目标 reclaude 不可用都明确报错，不把旧文件或自报版本当作新版。
 
-迁移通过 Mirasim 的本地认证 WS `setAgentLaunch` 更新并回读，使用连续空闲确认。此 API 会重建 Claude driver，所以首次迁移等待所有在途 Claude 回合结束。Mirasim 未运行则后台等待它启动；最长等 6 小时，到期明确记 `expired`，后续同步可以重新安排。
+迁移通过 Mirasim 的本地认证 WS `setAgentLaunch` 更新，从 `listClis` 返回的 `clis[].launch` 回读启动命令/参数，再核磁盘配置；`getConfig` 只返回功能设置，不含启动命令，不能拿它的缺字段当默认 claude。默认使用连续空闲确认：此 API 会重建 Claude driver，所以首次迁移等待所有在途 Claude 回合结束。Mirasim 未运行则后台等待它启动；最长等 6 小时，到期明确记 `expired`，后续同步可以重新安排。
 
 状态保存在 `~/.fleet-dao/mirasim-reclaude/`：
 
