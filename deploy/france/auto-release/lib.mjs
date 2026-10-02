@@ -1,10 +1,15 @@
-// 自动发布（法国，root；fleet-auto-release.timer 每 5 分钟拉起一轮）：主线上比在用的新、CI 全绿的最新一个提交（主线头的
-// CI 还在跑、红了，就沿主线往回找），马上用 deploy/release.sh 发到本机（发布脚本先排空引擎：不起新会话，在跑的最多再做
-// 10 分钟，到点停下、按编号续上），发完把各家 AI 的规矩同步给会话用户；
+// 自动发布（法国，root；fleet-auto-release.timer 每 5 分钟拉起一轮）：发的不是主线头，是**版本标记**——版本号最新的那个
+// `v<N>` tag 指向的提交，且它得是 origin/main 的祖先（`git merge-base --is-ancestor`），CI 全绿才发，用 deploy/release.sh
+// 发到本机（发布脚本先排空引擎：不起新会话，在跑的最多再做 10 分钟，到点停下、按编号续上），发完把各家 AI 的规矩同步给会话用户；
 // 每一轮的读数写进状态文件，后端的 /healthz 读它现算「跟不跟得上主线」。规矩和由来见 docs/ops.md 第九节「自动发布」。
 // 这里是判断和「跑一轮」的流程；和系统打交道的（git、GitHub 接口、会话、发布脚本、库）都从 io 进来：真的在
 // fleet-auto-release.mjs，测试换成假的（deploy/test/auto-release.test.mjs）。
 // 改这里之前必须知道：
+// - **主线合并本身不再触发发布**（决定 0011 第 3 条）：只有带版本标记（`v<N>` tag，由「发布 vN」PR 合并时 release.yml 打上）
+//   的提交才发。没有标记、标记读不出、标记指向的提交不是 origin/main 的祖先，一律**明确失败并报警**（下面 markerError），
+//   绝不退回发主线头——这条是这个切片的全部意义（否则一次误打 tag 或一次 fetch 不对，就又把没确认的提交发上线了）。
+// - 版本号按**数字**排（v10 > v9），不许按字符串排（'v10' < 'v9'）；判定和 packages/conventions/src/publish-release-logic.ts
+//   的 isVersionTag 同一套，测试核对两边写法一致（VERSION_PATTERN_VS_CONVENTIONS）。
 // - 状态文件后端也读（packages/api/src/deploy-lag.ts 按 STATE_SCHEMA 认），改字段两边一起改，那边的测试拿这里造的状态核对。
 // - RULES_USERS 要和 deploy/france.sh 的 AGENT_RULES_USERS 一样；INSTALL_PATHS 要盖住 france.sh 读的仓里文件（测试都核对）。
 // - 读不到、认不出的一律记成「没查成」、不发，不拿空、0 当没事（AGENTS.md「底线」）。
@@ -37,6 +42,20 @@ export const CI_WORKFLOW = '.github/workflows/ci.yml';
 export const CI_RUNS_PAGE = 100;
 /** 提交落到主线这么久还查不到它的 CI 记录：不再当「还没开跑」，记没查成。 */
 export const CI_NO_RUN_MS = 30 * 60_000;
+/**
+ * 版本标记（release.yml 在「发布 vN」PR 合并时打在 main 上的那个提交）：`v<N>`，版本号是十进制整数。
+ * 和 packages/conventions/src/publish-release-logic.ts 的 isVersionTag 同一个模样——那边是那条工作流的判定、
+ * 这里是法国这一侧的判定，谁改了都要两边一起改（deploy/test/auto-release.test.mjs 有一条约住两边写法的测试）。
+ */
+export const VERSION_TAG_RE = /^v\d+$/;
+/** 认版本号里那一串数字（VERSION_TAG_RE 是「是不是版本标记」，这个是「是第几版」）。 */
+export const VERSION_NUMBER_RE = /^v(\d+)$/;
+/** 读版本标记的 git 命令（fleet-auto-release.mjs 的 realIo.readVersionTags 用）：名字、提交号、提交时间，一次问完。 */
+export const VERSION_TAGS_ARGS = [
+  'for-each-ref',
+  '--format=%(refname:short) %(objectname) %(*objectname) %(creatordate:iso-strict)',
+  'refs/tags',
+];
 /** 规矩同步给谁：和 deploy/france.sh 的 AGENT_RULES_USERS 同一份（会话用户、创始人的登录用户）。 */
 export const RULES_USERS = ['fleet-agent-carpool', 'pilot'];
 /**
@@ -55,13 +74,21 @@ export const INSTALL_PATHS = [
 ];
 /**
  * 这边发的报警都以它开头：发布没成 `auto-release:failed:<提交号>`，规矩同步没成 `auto-release:rules:<提交号>`，
- * 配置和期望不一致 `auto-release:config:<文件>:<键>`（一项一条），配置没查成 `auto-release:config-unchecked`。
+ * 配置和期望不一致 `auto-release:config:<文件>:<键>`（一项一条），配置没查成 `auto-release:config-unchecked`，
+ * 版本标记读不到 / 不是主线上的提交 `auto-release:marker-unreadable`、`auto-release:marker:<tag>`（决定 0011 第 3 条），
+ * 查不出引擎开没开着 `auto-release:engine-unknown`。
  */
 export const ALERT_PREFIX = 'auto-release:';
 export const FAILED_PREFIX = `${ALERT_PREFIX}failed:`;
 export const RULES_PREFIX = `${ALERT_PREFIX}rules:`;
 export const CONFIG_PREFIX = `${ALERT_PREFIX}config:`;
 export const CONFIG_UNCHECKED_KEY = `${ALERT_PREFIX}config-unchecked`;
+/** 版本标记读不到 / 认不出（git 没跑成、一行认不出、一个 `v<N>` tag 都没有）：这一轮不发，报警等下一轮查成自己撤。 */
+export const MARKER_UNREADABLE_KEY = `${ALERT_PREFIX}marker-unreadable`;
+/** 版本标记指向的提交不是 origin/main 的祖先（tag 打在别的分支、或主线被强推过）：一件一条，人看了手动处理。 */
+export const MARKER_PREFIX = `${ALERT_PREFIX}marker:`;
+/** 查不出引擎开没开着（systemctl 没跑成、回的认不出）：发布那一刻的四步没法照实记，这一轮不发，查成了自己撤。 */
+export const ENGINE_UNKNOWN_KEY = `${ALERT_PREFIX}engine-unknown`;
 /** release.sh --auto 的两种「这次不发、什么都没动」：另一个发布在跑；引擎不会排空、切之前看到会话在跑。 */
 export const EXIT_RELEASE_BUSY = 75;
 export const EXIT_SESSIONS_BUSY = 76;
@@ -88,6 +115,83 @@ export function parseMainLog(text) {
   }
   if (commits.length === 0) throw new Error('主线的提交列表是空的');
   return commits;
+}
+
+/**
+ * `git for-each-ref --format='%(refname:short) %(objectname) %(*objectname) %(creatordate:iso-strict)' refs/tags`：
+ * 每一个 tag 一行，四段、**单个空格**隔开。只认 `v<N>` 那种版本标记（别人的 tag 一概不看），返回 { tag, version, n, commit, at }，
+ * 按 n 从大到小排（`v10` 在 `v9` 前面——版本号是数字，不许按字符串排）。
+ * 认不出一行就抛（不拿半截当全部，免得漏掉最新的那个标记去发一个旧的）；非版本 tag 跳过不算认不出，但它的行也得是这个样子。
+ * 注：annotated tag 的 `%(objectname)` 是 tag 对象、`%(*objectname)` 才是它指的提交；**轻量 tag 的 `%(*objectname)` 是空的**，
+ * 所以那一行名字和时间之间隔着两个空格——不能把连着的空格当一个拆（那样人手打的轻量 tag 会把整份列表判成认不出，法国从此不发）。
+ */
+export function parseVersionTags(text) {
+  const out = [];
+  for (const raw of String(text).split('\n')) {
+    const line = raw.trim();
+    if (line === '') continue;
+    const [name, object, peeled, when, ...extra] = line.split(' ');
+    const at = Date.parse(when ?? '');
+    if (
+      extra.length > 0 ||
+      !name ||
+      !SHA.test(object ?? '') ||
+      !(peeled === '' || SHA.test(peeled ?? '')) ||
+      Number.isNaN(at)
+    ) {
+      throw new Error(`tag 列表里有认不出的一行：${line.slice(0, 100)}`);
+    }
+    const vm = VERSION_NUMBER_RE.exec(name);
+    if (!vm) continue;
+    out.push({
+      tag: name,
+      version: `v${Number(vm[1])}`,
+      n: Number(vm[1]),
+      commit: peeled || object,
+      at: iso(at),
+    });
+  }
+  return out.sort((a, b) => b.n - a.n || String(b.at).localeCompare(String(a.at)));
+}
+
+/**
+ * 挑这一轮要发的版本标记：版本号最大、且它指向的提交是 origin/main 祖先的那个。
+ * `isAncestor(commit)` 由调用方给（真机上是 `git merge-base --is-ancestor <commit> origin/main`），
+ * 它是 async、可能抛（git 没跑成）——抛出来的当「没查成」，不悄悄当成「不是祖先」。
+ * 返回：
+ * - `{ ok: true, tag }`：tag 就是这一轮要发的标记；
+ * - `{ ok: false, kind: 'none', why }`：一个版本标记都没有（还没发布过／tag 没取到）——**明确失败、不发主线**；
+ * - `{ ok: false, kind: 'unchecked', tag, why }`：判祖先关系时 git 没跑成——**明确失败**，不猜；
+ * - `{ ok: false, kind: 'not-ancestor', tag, why }`：最新的那个标记不是主线上的提交——**明确失败、不发主线**，
+ *   也不往回找更旧的（那等于把一次没能生效的发布默默跳过去，人会以为这一版上线了）。
+ */
+export async function pickVersionMarker(tags, isAncestor) {
+  if (tags.length === 0) {
+    return { ok: false, kind: 'none', why: '一个 v<N> 版本标记都没有（还没发布过，或 tag 没取回来）' };
+  }
+  const newest = tags[0];
+  let ancestor;
+  try {
+    ancestor = await isAncestor(newest.commit);
+  } catch (e) {
+    return {
+      ok: false,
+      kind: 'unchecked',
+      tag: newest,
+      why: `拿 ${newest.tag} 指向的 ${short(newest.commit)} 判是不是主线上的提交没查成：${why(e)}`,
+    };
+  }
+  if (!ancestor) {
+    return {
+      ok: false,
+      kind: 'not-ancestor',
+      tag: newest,
+      why:
+        `最新的版本标记 ${newest.tag} 指向 ${short(newest.commit)}，它不是 origin/main 的祖先` +
+        '（tag 打在别的分支上、或主线被强推过）：不拿它发，也不退回发主线头',
+    };
+  }
+  return { ok: true, tag: newest };
 }
 
 /** 发布历史（release.sh 的 .history）：一行「时间 提交号 事件 [unmerged] [auto]」。认不出的行抛：拿不准人动没动过手。 */
@@ -132,15 +236,16 @@ export function judgedUnhealthy(history, sha) {
 }
 
 /**
- * 这一轮能发的提交 candidates（新的在前，有的话第一个就是主线头）。hold：人按住了、主线头也在按住之前（这时 candidates
- * 是空的）；failed：往回找停在了哪个发过没成的提交上（它是主线头时 candidates 是空的）；stop：停在人按住、发过没成那儿时
- * 人看的一句（停在在用的那儿不用说）。只往前走，往回找到下面三处里最近的一处就停：
+ * 这个版本标记指着的提交，能不能自动发。返回 candidates（比在用的新、且没被人按住/没被判过没成的那一段，新的在前）、
+ * hold（人按住了）、failed（往回看停在哪个发过没成的提交上）。判定和下面三处里最近的一处对齐：
  * - 在用的：主线按 --first-parent 排，排在它前面的都是它的后代。在用的不在主线最近的提交里（还没发布过、落后太多、
  *   没合进主线的），主线上的都算比它新——没合进主线的是人手动发的，由下一条管住。
  * - 人最近一次手动切版本那一刻：那之前合进主线的（含人退回掉的那个）一律不自动发（manualHold）。
  * - 发过没成的：自动发布没成（attempt）、发过没过健康检查（历史里最后是 unhealthy，状态文件丢了也认得）——它和比它旧的
- *   都不再自动试，等主线出比它新的全绿提交。不往回挑它前面没试过的：没成的原因可能在机器上（香港不通、配置坏了），
+ *   都不再自动试，等下一个版本标记。不往回挑它前面没试过的：没成的原因可能在机器上（香港不通、配置坏了），
  *   往回一个个试就是一轮轮重启服务、一条条报警。
+ * 调用方（deployStep）拿这三个分别判：hold 就记 hold；failed 正好是这个标记指着的提交就记 failed-before；
+ * candidates 里没有标记指着的提交（比在用的旧、落后太多、读不到）记 marker-not-newer——都不发。
  */
 export function releasable(commits, current, history, attempt) {
   const at = commits.findIndex((c) => c.sha === current);
@@ -220,6 +325,12 @@ export function carryOver(prev) {
     mainError: null,
     current: p.current ?? null,
     ci: p.ci ?? null,
+    /**
+     * 这一轮要发的版本标记（版本号最大的那个 v<N> tag，且是主线上的提交）：要发的是它指向的提交。
+     * 读不到、认不出、不是祖先时为 null，原因写在 markerError 里——**不发主线头**（决定 0011 第 3 条）。
+     */
+    marker: null,
+    markerError: null,
     hold: null,
     waitingSince: p.waitingSince ?? null,
     busy: null,
@@ -227,6 +338,9 @@ export function carryOver(prev) {
     rules: p.rules ?? null,
     system: p.system ?? null,
     config: null,
+    /** 发布那一刻四步（停派活/等收尾/部署/恢复派活）这一轮各是什么状态；见 publishSequence。 */
+    sequence: p.sequence ?? null,
+    sequenceError: null,
     alerts: Array.isArray(p.alerts) ? p.alerts : [],
     resolve: Array.isArray(p.resolve) ? p.resolve : [],
     resolveKeys: Array.isArray(p.resolveKeys) ? p.resolveKeys : [],
@@ -282,7 +396,81 @@ function resolveKeyLater(st, key) {
   if (had.raised && !st.resolveKeys.includes(key)) st.resolveKeys.push(key);
 }
 
-/** 发布那一半：返回在用的提交号（读到了，含「还没发布过」的 null），读不到返回 undefined（规矩那一半也不做）。 */
+/** 这个提交在主线上是什么时候落的（不在读回来的那段历史里就是 null）。 */
+function pickCommitAt(commits, sha) {
+  return commits.find((c) => c.sha === sha)?.at ?? null;
+}
+
+/**
+ * 版本标记那一半（决定 0011 第 3 条）：读 `v<N>` tag、挑出版本号最大且指向 origin/main 上提交的那个，写进 st.marker。
+ * 读不到（git 没跑成、某一行认不出）、一个标记都没有、判不出祖先关系、最新的那个不是主线上的提交：
+ * 都写进 st.markerError、报一条警、返回 null——**这一轮不发，绝不退回发主线头**。
+ * 查成了：写 st.marker（{ tag, commit, at, ... }）、把之前那两条报警撤掉，返回它。
+ */
+async function markerStep(io, st, now, commits) {
+  let tags;
+  try {
+    tags = parseVersionTags(await io.readVersionTags());
+  } catch (e) {
+    return markerFailed(st, now, 'unreadable', why(e));
+  }
+  const picked = await pickVersionMarker(tags, (commit) => io.isAncestorOfMain(commit));
+  if (!picked.ok) {
+    if (picked.kind === 'none') return markerFailed(st, now, 'none', picked.why);
+    if (picked.kind === 'unchecked') return markerFailed(st, now, 'unchecked', picked.why);
+    return markerFailed(st, now, 'not-ancestor', picked.why, picked.tag);
+  }
+  st.marker = {
+    tag: picked.tag.tag,
+    commit: picked.tag.commit,
+    /**
+     * 这个提交落到主线的时间（判 CI「还没开跑」用它；CI_NO_RUN_MS 那个宽限是按提交上主线的时刻算的）。
+     * 它不在我们读回来的这段主线历史里（很老的标记）：退回用打 tag 的时刻——只影响「刚合进来还没开跑」
+     * 这个宽限的起点，不影响发不发哪一版。
+     */
+    at: pickCommitAt(commits, picked.tag.commit) ?? picked.tag.at,
+    taggedAt: picked.tag.at,
+    checkedAt: iso(now),
+  };
+  // 查成了：这两类报警（读不到、不是主线上的提交）都不再成立
+  resolveKeyLater(st, MARKER_UNREADABLE_KEY);
+  for (const a of [...st.alerts]) {
+    if (a.key.startsWith(MARKER_PREFIX)) resolveKeyLater(st, a.key);
+  }
+  return st.marker;
+}
+
+/** 版本标记没查成 / 认不出 / 不是主线上的提交：写状态、报警、返回 null（调用方这一轮不发）。 */
+function markerFailed(st, now, kind, whyText, tag = null) {
+  st.marker = null;
+  st.markerError = { kind, why: whyText, at: iso(now) };
+  if (kind === 'not-ancestor') {
+    act(st, now, 'marker-not-ancestor', `${whyText}；这一轮不发（不发主线头）`);
+    raise(
+      st,
+      `${MARKER_PREFIX}${tag?.tag ?? 'unknown'}`,
+      `版本标记 ${tag?.tag ?? '（没有）'} 不是主线上的提交`,
+      `${whyText}。这一版不会自动发到法国；要么在「发布 vN」PR 里重新合一次（release.yml 把 tag 打在 main 上那次 merge），` +
+        `要么在法国以 root 手动发一次 bash ${CHECKOUT}/deploy/release.sh <提交号>（手动发之后自动发布按人按住算）。`,
+    );
+    return null;
+  }
+  act(st, now, kind === 'none' ? 'marker-none' : 'marker-unknown', `${whyText}；这一轮不发（不发主线头）`);
+  keepRaised(
+    st,
+    MARKER_UNREADABLE_KEY,
+    '自动发布读不到版本标记，停着不发',
+    `${whyText}。没有版本标记就不发主线头（决定 0011 第 3 条：发布 = 创始人拍了「发布 vN」那一版）；` +
+      `在 ${CHECKOUT} 检出里跑 git fetch --tags 看一眼，或确认「发布 vN」PR 合了、release.yml 把 tag 打上了；查成了这条自己撤。`,
+  );
+  return null;
+}
+
+/**
+ * 发布那一半：返回在用的提交号（读到了，含「还没发布过」的 null），读不到返回 undefined（规矩那一半也不做）。
+ * 发的不是主线头，是**版本标记**（版本号最大的那个 `v<N>` tag，且它指向的提交是 origin/main 的祖先；决定 0011 第 3 条）。
+ * 标记读不到、认不出、不是祖先：明确失败 + 报警，不发主线头。
+ */
 async function deployStep(io, st, now) {
   let commits;
   try {
@@ -309,6 +497,11 @@ async function deployStep(io, st, now) {
     return undefined;
   }
   st.current = current;
+
+  // 版本标记：这一轮发什么全看它。读不到 / 认不出 / 不是主线上的提交：报警、不发主线头（下面 markerStep 收尾）
+  const marker = await markerStep(io, st, now, commits);
+  if (!marker) return current;
+
   if (st.attempt?.result === 'running') {
     // 上一轮的发布没收到结果（那一轮被杀了、机器重启了）：发布锁还占着就接着等，空了按现在在用的是谁定成败
     let still;
@@ -325,10 +518,11 @@ async function deployStep(io, st, now) {
     settleDangling(st, now, current);
   }
 
-  if (current === head.sha) {
+  // 在用的就是这个标记指向的提交：这一版已经上过线了，收工
+  if (current === marker.commit) {
     st.waitingSince = null;
     resolveLater(st, FAILED_PREFIX);
-    act(st, now, 'up-to-date');
+    act(st, now, 'up-to-date', `在用的 ${short(current)} 就是 ${marker.tag} 那一版`);
     return current;
   }
 
@@ -339,31 +533,49 @@ async function deployStep(io, st, now) {
     act(st, now, 'history-unreadable', why(e));
     return current;
   }
+  // 人按住 / 这个标记指向的提交被判过没成：都不自动发。两个闸先判，免得被下面的 CI 结论盖住原因。
   const { candidates, hold, failed, stop } = releasable(commits, current, history, st.attempt);
-  if (candidates.length === 0) {
-    // 这几种「主线头不发」：之前等空闲的钟不接着走，下一个要发的从头等
+  if (hold) {
     st.waitingSince = null;
-    if (hold) {
-      st.hold = hold;
-      act(
-        st,
-        now,
-        'hold',
-        `人 ${hold.since} 手动${hold.event === 'rollback' ? '退回' : '切'}到 ${short(hold.sha)}${hold.unmerged ? '（没合进主线的提交）' : ''}，主线上还没有更新的提交`,
-      );
-    } else {
-      act(st, now, 'failed-before', `这个提交${failed?.why ?? '找不到能发的'}，等主线出新提交`);
-    }
+    st.hold = hold;
+    act(
+      st,
+      now,
+      'hold',
+      `人 ${hold.since} 手动${hold.event === 'rollback' ? '退回' : '切'}到 ${short(hold.sha)}${hold.unmerged ? '（没合进主线的提交）' : ''}，主线上还没有更新的提交`,
+    );
     return current;
   }
-
-  const pick = await pickTarget(io, st, now, candidates, stop);
+  if (failed && failed.sha === marker.commit) {
+    st.waitingSince = null;
+    act(st, now, 'failed-before', `${marker.tag} 指向的提交${failed.why}，等下一个版本标记`);
+    return current;
+  }
+  if (candidates.length === 0) {
+    // 没有别的能发的原因：标记指向的提交不在主线最近的提交里（落后太多、或读不到），等下一轮
+    st.waitingSince = null;
+    act(st, now, 'failed-before', `${marker.tag} 指向的提交${failed?.why ?? '找不到能发的'}，等主线出新提交`);
+    return current;
+  }
+  // 要发的只能是「比在用的新、没被人按住、没被判过没成」的那一段里的提交（candidates）。标记指的不在里面——比在用的旧
+  // （人手动发过更新的、或有人补打了老 tag）、或在最近这段主线之外——发它就是降级或发没人核过的：不发，照实记。
+  if (!candidates.some((c) => c.sha === marker.commit)) {
+    st.waitingSince = null;
+    act(
+      st,
+      now,
+      'marker-not-newer',
+      `${marker.tag} 指向的 ${short(marker.commit)} 不比在用的 ${short(current)} 新（或落在最近这段主线之外）：不发，不降级`,
+    );
+    return current;
+  }
+  const pick = await pickTarget(io, st, now, marker, stop);
   if (!pick.target) {
     if (pick.verdict === 'red') st.waitingSince = null;
     act(st, now, `ci-${pick.verdict}`, pick.detail);
     return current;
   }
-  // 要发的：主线头全绿就是它；不然是往回找到的最新全绿提交（via 说为什么不是主线头）
+  // 要发的：版本标记指向的那个提交（它的 CI 全绿；不是主线头也照发，这正是「按版本发」的意思）
   const target = pick.target.sha;
   const via = pick.via ? `：${pick.via}` : '';
 
@@ -379,6 +591,27 @@ async function deployStep(io, st, now) {
     return current;
   }
 
+  // 停派活 → 等在跑的收尾 → 部署 → 恢复派活（决定 0011 第 4 条）：这几步由 release.sh 真做（排空协议），这里要先问清引擎
+  // 开没开着，才能照实记「做了」还是「引擎关着，跳过」。问不出来这一轮就不发（也不动部署检出）：不能在状态里写「引擎关着，
+  // 四步跳过」，而实际上引擎开着、发布脚本正在排空它——读不到不许拿「关着」冒充（通用段底线）。下一轮再问；一直问不出来，
+  // 报警和 /healthz 的 deploy_lag 会看出来。
+  let engineOn;
+  try {
+    engineOn = await io.engineOn();
+  } catch (e) {
+    st.sequenceError = `引擎开没开着没查成：${why(e)}`;
+    act(st, now, 'engine-unknown', `${st.sequenceError}；这一轮不发（不拿「关着」冒充）`);
+    keepRaised(
+      st,
+      ENGINE_UNKNOWN_KEY,
+      '自动发布查不出引擎开没开着，停着不发',
+      `${st.sequenceError}。发布那一刻的四步（停派活→等收尾→部署→恢复派活）要先知道引擎开没开着才能照实记，所以这一轮没发；` +
+        '查成了这条自己撤。在法国看：systemctl is-active fleet-engine.service。',
+    );
+    return current;
+  }
+  resolveKeyLater(st, ENGINE_UNKNOWN_KEY);
+
   let checkout;
   try {
     checkout = await io.prepareCheckout(target);
@@ -393,6 +626,8 @@ async function deployStep(io, st, now) {
   // 不先看有没有会话在跑：发布脚本先排空引擎（不起新会话、宽限到点停下），不会排空的旧引擎由它退出 76、这里等空闲
   const waited = st.waitingSince ? now - Date.parse(st.waitingSince) : 0;
   const busyOk = st.waitingSince !== null && waited >= IDLE_WAIT_MS;
+
+  st.sequence = publishSequence({ engineOn, target, tag: marker.tag });
 
   const before = st.attempt;
   st.attempt = {
@@ -465,16 +700,94 @@ async function deployStep(io, st, now) {
   }
   const where =
     after === target ? `停在新版 ${short(target)}（没退回：见日志里的红）` : `在用的还是 ${short(after)}`;
+  const which = marker.tag ? `${marker.tag}（${short(target)}）` : short(target);
   raise(
     st,
     `${FAILED_PREFIX}${target}`,
-    `自动发布 ${short(target)} 没成`,
+    `自动发布 ${which} 没成`,
     `release.sh 退出码 ${r.code}：${r.detail || '没给原因'}。${where}。日志：${r.log || '（没拿到路径）'}。` +
-      '这个提交和比它旧的不再自动试，主线出了比它新的全绿提交再发；要现在重试，在法国以 root 跑 ' +
-      `bash ${CHECKOUT}/deploy/release.sh ${target}`,
+      '这个版本标记和比它旧的不再自动试，等下一个版本标记（或人在法国以 root 重试：' +
+      `bash ${CHECKOUT}/deploy/release.sh ${target}）。`,
   );
-  act(st, end, 'release-failed', `${short(target)} 退出码 ${r.code}：${r.detail}`);
+  act(st, end, 'release-failed', `${which} 退出码 ${r.code}：${r.detail}`);
   return after;
+}
+
+/**
+ * 发布那一刻的四步（决定 0011 第 4 条「github actions 通过后可以暂停派活，然后引擎手头活都干完后，自动部署到引擎，
+ * 然后接着进行活和派活」）在法国这一侧各是什么状态。四步是：停派活 → 等在跑的收尾 → 部署 → 恢复派活。
+ *
+ * 复用**已有的排空协议**（packages/engine/src/drain-control.ts + deploy/release.sh 的 .drain-request），不新加全局开关、
+ * 不加库里的列、不加迁移：排空请求的语义本来就是「别再起新会话，在跑的做到截止就停下」。所以
+ * - 停派活 = release.sh 发布一开始写的排空请求（引擎每 5 秒看一眼，认了马上不起新会话）；
+ * - 等在跑的收尾 = release.sh 的 drain_engine（读引擎的 drain.json 数还有几个会话，到上限照实报、不硬切）；
+ * - 部署 = release.sh 迁移 + 切版本 + 健康检查（不过自动退回）；
+ * - 恢复派活 = release.sh 切完撤掉排空请求（引擎下一眼就接着派）+ 新引擎起来接管在跑的会话。
+ *
+ * 引擎关着时（法国现在 FLEET_SERVICES=fleet-api，没有 fleet-engine；见 deploy/france/desired-config.json）这四步
+ * **一步都没跑**：这里照实写「引擎关着，跳过」，返回 engineOn:false——绝不假装做过（AGENTS.md「底线」）。
+ * 引擎开着时这四步由 release.sh 真做，结果在它的日志和退出码里（这里不重复判，只说明它在哪）。
+ *
+ * 返回 { engineOn, steps: [{ name, state, detail }] }；state 取 done / skipped-engine-off / delegated。
+ */
+export function publishSequence({ engineOn, target, tag }) {
+  const which = tag ? `${tag}（${short(target)}）` : short(target);
+  if (!engineOn) {
+    return {
+      engineOn: false,
+      steps: [
+        {
+          name: '停派活',
+          state: 'skipped-engine-off',
+          detail: '引擎关着（FLEET_SERVICES 里没有 fleet-engine），没有派活可停',
+        },
+        { name: '等在跑的收尾', state: 'skipped-engine-off', detail: '引擎关着，没有在跑的会话可等' },
+        {
+          name: '部署',
+          state: 'delegated',
+          detail: `由 deploy/release.sh 发 ${which}（构建、迁移、切版本、健康检查都在它那里）`,
+        },
+        { name: '恢复派活', state: 'skipped-engine-off', detail: '引擎关着，没有派活可恢复；排空请求不会写' },
+      ],
+    };
+  }
+  return {
+    engineOn: true,
+    steps: [
+      {
+        name: '停派活',
+        state: 'delegated',
+        detail: `release.sh 发布一开始写排空请求 ${RELEASES}/.drain-request，引擎认了马上不起新会话`,
+      },
+      {
+        name: '等在跑的收尾',
+        state: 'delegated',
+        detail: 'release.sh 读引擎的 drain.json 数还在跑的会话，等到截止；到点照实报、不硬切',
+      },
+      {
+        name: '部署',
+        state: 'delegated',
+        detail: `由 deploy/release.sh 发 ${which}（构建、迁移、切版本、健康检查都在它那里）`,
+      },
+      {
+        name: '恢复派活',
+        state: 'delegated',
+        detail: '切完撤掉排空请求，引擎下一眼就接着派；新引擎起来按编号续上停下的会话',
+      },
+    ],
+  };
+}
+
+/** 四步的一行人话（进 journal / 状态文件 / --check 的读数；引擎关着时写「跳过」）。 */
+export function publishSequenceSummary(seq) {
+  if (!seq) return '';
+  return seq.steps
+    .map((s) => {
+      const word =
+        s.state === 'done' ? '做了' : s.state === 'skipped-engine-off' ? '跳过（引擎关着）' : '交给发布脚本';
+      return `${s.name}：${word}`;
+    })
+    .join('；');
 }
 
 /** 上一轮的发布没收到结果、发布锁也空了：按现在在用的是谁定成败（没成的照样不再试）。 */
@@ -499,18 +812,18 @@ function settleDangling(st, now, current) {
 }
 
 /**
- * 要发哪个：候选（新的在前，candidates[0] 是主线头）里第一个 CI 全绿的——持续交付「发最新的绿构建」（Google SRE 书
- * 「Release Engineering」：在最近一次全部测试都过了的那个修订上出版本；Chromium 的 LKGR）。主线头的 CI 还在跑、红了、
- * 被后面的推送挤掉了，都往回找，不等它：合并一密（主线全量 CI 要 3–4 分钟），只看主线头就一轮轮跳过，一直发不出去。
- * GitHub 一轮最多问一次：一次读回主线最近 CI_RUNS_PAGE 次 ci.yml 的运行，候选都从这一份里判；主线头全绿了记下，等空闲的
- * 那几轮不再问。整份读不到（限流、连不上、回的认不出）这一轮一个都不发、写明没查成，不当成绿；单个提交查不到它的运行，
- * 那一个跳过（刚合进来的当还没开跑）。st.ci 记主线头的结论（读数、后端用）。
- * 找到了返回 { target, via }（via：发的不是主线头时，写明主线头和跳过的那几个怎么了）；没找到返回
- * { target: null, verdict（主线头的结论）, detail }。stop：往回找停在哪（人按住、发过没成），写进读数。
+ * 要发的那个提交的 CI 是不是全绿：**只认版本标记指向的那个提交**，不往回找别的（决定 0011 第 3 条：发布的就是创始人
+ * 拍的那一版；往回找一个更旧的全绿提交，等于把创始人拍的那一版默默换掉）。它在主线上那次 `ci.yml` 的运行结论：
+ * 还没跑完 / 还没开跑 → pending 下一轮再看；红了 / cancelled → red，报警要人修（这一版发不出去）；查不到、整份读不到
+ * （限流、连不上、回的认不出）→ unknown，记没查成、这一轮不发、也不当成绿。
+ * GitHub 一轮最多问一次：一次读回主线最近 CI_RUNS_PAGE 次 ci.yml 的运行，结论从这一份里判；上一轮已经读出绿了、
+ * 标记还是同一个，就不再问（等空闲的那几轮）。st.ci 记这个标记的结论（读数、后端用）。
+ * 返回 { target, via }（via：标记指向的不是主线头时写明主线头是谁）或 { target: null, verdict, detail }。
  */
-async function pickTarget(io, st, now, candidates, stop) {
-  const head = candidates[0];
-  if (st.ci?.sha === head.sha && st.ci.verdict === 'green') return { target: head, via: '' };
+async function pickTarget(io, st, now, marker, stop) {
+  if (st.ci?.sha === marker.commit && st.ci.verdict === 'green') {
+    return { target: { sha: marker.commit, at: marker.at }, via: '' };
+  }
   let body = null;
   let unread = '';
   try {
@@ -533,28 +846,20 @@ async function pickTarget(io, st, now, candidates, stop) {
     unread = `连不上 GitHub：${why(e)}`;
   }
   if (unread) {
-    st.ci = { sha: head.sha, verdict: 'unknown', detail: unread, checkedAt: iso(now) };
+    st.ci = { sha: marker.commit, verdict: 'unknown', detail: unread, checkedAt: iso(now) };
     return { target: null, verdict: 'unknown', detail: `CI 的结论没查成：${unread}；这一轮不发` };
   }
-  const seen = candidates.map((c) => ({ c, v: ciVerdict(body, c.sha, c.at, now) }));
-  const top = seen[0].v;
-  st.ci = { sha: head.sha, verdict: top.verdict, detail: top.detail, checkedAt: iso(now) };
-  const at = seen.findIndex((s) => s.v.verdict === 'green');
-  // 跳过的几个各一句：主线头打头，太多了只写前几个
-  const told = (list) => {
-    const said = list
-      .slice(0, 4)
-      .map((s) => `${s.c === head ? '主线头 ' : ''}${short(s.c.sha)} 的 ${s.v.detail}`);
-    if (list.length > 4) said.push(`等 ${list.length} 个`);
-    return said.join('、');
-  };
-  if (at === 0) return { target: head, via: '' };
-  if (at > 0) {
-    return { target: seen[at].c, via: `${told(seen.slice(0, at))}，往回找到最近全绿的是它` };
+  const v = ciVerdict(body, marker.commit, marker.at, now);
+  st.ci = { sha: marker.commit, verdict: v.verdict, detail: v.detail, checkedAt: iso(now) };
+  if (v.verdict === 'green') {
+    return { target: { sha: marker.commit, at: marker.at }, via: '' };
   }
-  const lead = top.verdict === 'unknown' ? `没查成：${top.detail}` : top.detail;
-  const rest = seen.length > 1 ? `；往回 ${seen.length - 1} 个也没全绿（${told(seen.slice(1))}）` : '';
-  return { target: null, verdict: top.verdict, detail: `${lead}${rest}${stop ? `；${stop}` : ''}` };
+  const lead = v.verdict === 'unknown' ? `没查成：${v.detail}` : v.detail;
+  return {
+    target: null,
+    verdict: v.verdict,
+    detail: `${marker.tag}（${short(marker.commit)}）的 ${lead}${stop ? `；${stop}` : ''}`,
+  };
 }
 
 /** 装机层：france.sh 装到哪个提交、那之后主线上它管的文件改过几次。读不到记 error，不挡发布。 */
@@ -693,10 +998,38 @@ async function flushAlerts(io, st) {
   }
 }
 
-/** 一行人看的读数（进 journal）：主线头、CI、在用、落后几个、这一轮干了什么、规矩和装机层到哪了。 */
+/**
+ * 在用的相对版本标记在哪儿（读数里「落后几个」按它数，和 /healthz 的 deploy_lag 同一个口径，见 packages/api/src/deploy-lag.ts
+ * 的 lagView）：就是标记那一版 / 比标记新（人手动发过更新的）/ 落后几个 / 数不了。
+ */
+function markerLag(st) {
+  const marker = st.marker;
+  if (!marker) return '没有版本标记可比';
+  if (st.current === marker.commit) return '跟上了版本标记';
+  if (!st.main) return '主线没读到，数不了落后几个';
+  const m = st.main.commits.findIndex(([sha]) => sha === marker.commit);
+  const c = st.main.commits.findIndex(([sha]) => sha === st.current);
+  if (c < 0) return '不在主线最近的提交里';
+  if (m < 0 || c <= m) return '比版本标记新';
+  return `落后版本标记 ${c - m} 个提交`;
+}
+
+/**
+ * 一行人看的读数（进 journal、release.sh --check）：版本标记、CI、在用、落后几个、这一轮干了什么、发布四步、规矩和装机层到哪了。
+ * 状态里有 marker 这个字段（新版自动发布写的，值可以是 null＝没查成）按版本标记说；没有这个字段的（老版本写的）照老样子按主线头说。
+ */
 export function summary(st) {
   const parts = [];
-  if (st.main) {
+  if (st.marker !== undefined) {
+    if (st.marker) {
+      const ci = st.ci?.sha === st.marker.commit ? `，CI ${st.ci.verdict}` : '';
+      parts.push(`版本标记 ${st.marker.tag}（${short(st.marker.commit)}）${ci}`);
+    } else {
+      parts.push(st.markerError?.why ? `版本标记没有（${st.markerError.why}）` : '版本标记这一轮没读到');
+    }
+    parts.push(`在用 ${short(st.current)}，${markerLag(st)}`);
+    parts.push(st.main ? `主线头 ${short(st.main.head)}（只作参考，没有新标记不上线）` : '主线头没读到过');
+  } else if (st.main) {
     const idx = st.main.commits.findIndex(([sha]) => sha === st.current);
     const lag =
       st.current === st.main.head ? '跟上了' : idx > 0 ? `落后 ${idx} 个提交` : '不在主线最近的提交里';
@@ -707,6 +1040,12 @@ export function summary(st) {
   }
   if (st.mainError) parts.push(`这轮主线没读到：${st.mainError}`);
   if (st.last) parts.push(`这轮：${st.last.action}${st.last.detail ? `（${st.last.detail}）` : ''}`);
+  if (st.sequence) {
+    parts.push(
+      `发布四步（${st.sequence.engineOn ? '引擎开着' : '引擎关着'}）：${publishSequenceSummary(st.sequence)}`,
+    );
+  }
+  if (st.sequenceError) parts.push(`四步没查成：${st.sequenceError}`);
   parts.push(
     st.rules
       ? `规矩同步到 ${short(st.rules.commit)}（${st.rules.result}${st.rules.detail ? `：${st.rules.detail}` : ''}）`
