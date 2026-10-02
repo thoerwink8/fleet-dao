@@ -365,12 +365,21 @@ $body
             echo "::error::「尝试标记」写不进 release 正文：不接着发（不冒险变成「没标就发了」）。"
             exit 1
           fi
+          # 飞书 webhook 即便 HTTP 200，JSON 里也会用 code != 0 表示业务失败（第二意见 2026-10-02）；
+          # curl 拿 -o 把响应体留下，发完看 code 是不是 0，不是就当失败处理，别把假 attempt 换 notified。
+          FEISHU_RESP_FILE=/tmp/feishu-resp.json
           if ! jq -n --arg text "$msg" '{msg_type:"text", content:{text:$text}}' | \
-               curl -fsS -X POST -H 'content-type: application/json' --data-binary @- "$FLEET_FEISHU" >/dev/null; then
-            # 飞书发失败：把刚写的 attempt 标记原位剥掉，别把「已尝过」的假证据留下（剥不成下一轮读到 attempt 会再发一次，
-            # 能补发但不能精确剥——所以继续把 attempt 留着，告诉发起人怎么手动剥，同时继续让下一轮能重发）。
-            echo "::error::飞书发送失败：release 正文里留着 <!-- fleet-notify-attempt: $VERSION -->——下一轮重跑会再发一次（不重不漏，因为还没换 notified）。"
+               curl -fsS -X POST -H 'content-type: application/json' --data-binary @- -o "$FEISHU_RESP_FILE" "$FLEET_FEISHU"; then
+            echo "::error::飞书 HTTP 调用失败：release 正文里留着 <!-- fleet-notify-attempt: $VERSION -->——下一轮重跑会再发一次（不重不漏，因为还没换 notified）。"
             echo "::error::发起人手动补救：gh release edit $VERSION --notes-file <CHANGELOG.md 里这一版原文>，再重跑 workflow_dispatch（version=$VERSION）。"
+            exit 1
+          fi
+          # 飞书 webhook 的成功响应形如 {"code":0,"msg":"success"}；读不出 code、code 不是 0 都算失败
+          feishu_code=$(jq -r '.code // "missing"' < "$FEISHU_RESP_FILE" 2>/dev/null || echo "unparseable")
+          feishu_msg=$(jq -r '.msg // ""' < "$FEISHU_RESP_FILE" 2>/dev/null || echo "")
+          if [[ $feishu_code != 0 ]]; then
+            echo "::error::飞书 webhook 回的业务码不是 0（code=$feishu_code, msg=$feishu_msg）：发布 ${VERSION} 未真的会通知——"
+            echo "::error::attempt 标记留着、下一轮重跑会再发一次；查 webhook 是不是失效，处理完再 workflow_dispatch（version=$VERSION）。"
             exit 1
           fi
           # 发成了：把 attempt 换成 notified，下一轮幂等跳
