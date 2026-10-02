@@ -366,6 +366,23 @@
 - 554-1 无头一次性子进程段 runner（#577/#581）：骨架已合主线；runs 是 NotWired 占位（写 _tmp/runs-not-wired/*.jsonl，等真 runs 表落上再补）。
 - 4 穴 cockpit （v3-cockpit-batch1）：tokens、home3、home-api、changelog——全部挂 PR 上、跑 CI 中。
 
+## 2026-10-02 10:40 UTC（v3-cockpit-batch1 完成、新一轮派工）
+
+**4/4 完成**：tokens（#587 已合主线）、home3（#584 已合主线）、**home-api（拒绝，新单 #589 出市；开始的具体工作流符人）**、changelog（#585 **已合主线**）。
+
+**新开**：#589 home-api（specs/589-驾驶舱-home-api/需求.md）。
+
+**新派**（10:40 UTC时刻，3 个工作流并行）：
+- **v3-554-next**（wf_435865ff-ddd）：554-2、554-3、554-4 三片。
+- **v3-home-api**（wf_6c4c1a59-564）：home-api（#589）。
+- **v3-227-release**（wf_ccb7ab48-99c）：release.yml GitHub Actions + 引擎暂停派活闸（先审后合）。
+
+**下一步**：554-2/3/4 合主线 → **556-1-3 删除**；home-api 合主线 → **delete-*** 系列 4 张；release.yml 合主线 → **#227** + **#453** 重写。
+
+- routing-two-layer-db（#574/#580）：routing_catalog 表 + routing.default.json 骨架已落主线；engine 解析（pickRoute 走两级）**未做**——那是 routing-two-layer-engine 切片。
+- 554-1 无头一次性子进程段 runner（#577/#581）：骨架已合主线；runs 是 NotWired 占位（写 _tmp/runs-not-wired/*.jsonl，等真 runs 表落上再补）。
+- 4 穴 cockpit （v3-cockpit-batch1）：tokens、home3、home-api、changelog——全部挂 PR 上、跑 CI 中。
+
 ## 2026-10-02 10:3x UTC（收尾、接种、补漏）
 
 **补漏**：ci-plan 的 db test 依赖里没有「读 core」——我加上 `db: ['core']` 修 #580 的 ci 红（ebcad840）；做一次 merge 主线（f1f070f2）消大节纷。
