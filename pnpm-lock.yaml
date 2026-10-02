@@ -159,6 +159,9 @@ importers:
       '@temporalio/workflow':
         specifier: 1.24.0
         version: 1.24.0
+      zod:
+        specifier: ^4.6.5
+        version: 4.6.5
     devDependencies:
       '@temporalio/testing':
         specifier: 1.24.0
