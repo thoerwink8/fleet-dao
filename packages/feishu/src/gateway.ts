@@ -399,7 +399,7 @@ export function createGateway(o: GatewayOptions): Gateway {
     if (res.kind === 'answer') {
       const ref = res.taskId ? { taskId: res.taskId } : {};
       if (placeholder) {
-        await patch(placeholder.messageId, answerCard(res.text, ctx(), res.taskId), 'answer');
+        await patch(placeholder.messageId, answerCard(res.text, ctx()), 'answer');
         reRemember(placeholder.messageId, placeholder.chatId, 'answer', ref);
       } else {
         remember(await reply(msg.messageId, { text: res.text }, 'answer'), 'answer', ref);

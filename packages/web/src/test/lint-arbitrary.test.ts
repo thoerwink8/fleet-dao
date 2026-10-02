@@ -1,6 +1,6 @@
 // 任意尺寸 lint（#182）：写死 text-[13px] 这种类名不再让进。
 // 扫描脚本在 packages/web/scripts/lint-arbitrary.ts。
-// 仓里还在删的页面（board/tasks/dispatch/overview/soon/task-detail、demo-links、ui/*）
+// 仓里还在删的页面（board/dispatch/overview/soon、demo-links、ui/*）
 // 由后面的删除切片带走；本测试盯两块：
 //   1) 扫描器本身：造几段假的代码看它是否认得出 / 认得对。
 //   2) 留存页面：settings/notifications/audit/quota/shell 这些 0 处写死尺寸。

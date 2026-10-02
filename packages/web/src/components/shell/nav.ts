@@ -5,7 +5,6 @@ import {
   CalendarClock,
   Gauge,
   Home,
-  ListChecks,
   Presentation,
   Radio,
   Scale,
@@ -42,7 +41,6 @@ export const NAV: { group: string; items: NavItem[] }[] = [
         hint: '一屏三块：要你拍的、在跑的、做完的',
         // 演示版里没有这一页（只在正式驾驶舱建主页）。
       },
-      { to: '/tasks', label: '任务', icon: ListChecks, hint: '所有需求的清单', module: 'task' },
     ],
   },
   {

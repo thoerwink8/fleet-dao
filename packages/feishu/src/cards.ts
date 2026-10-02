@@ -54,7 +54,7 @@ export const FORM = { note: 'note', repo: 'repo' } as const;
 export const COCKPIT_PATHS = {
   overview: '/',
   notifications: '/notifications',
-  task: (taskId: string) => `/tasks/${encodeURIComponent(taskId)}`,
+  home: '/home3',
 };
 
 export interface RenderContext {
@@ -160,7 +160,7 @@ export function draftCard(
         text(`提出：${draft.proposedBy}${draft.confirmedBy ? ` · 确认：${draft.confirmedBy}` : ''}`, 'note'),
         ...(opts.note ? [text(opts.note, 'note')] : []),
         buttons([
-          cockpit(ctx, COCKPIT_PATHS.task(t.taskId)),
+          cockpit(ctx, COCKPIT_PATHS.home),
           {
             label: '关注',
             value: { a: 'task.follow', t: t.taskId, f: true, c: 'draft', d: draft.id, _n: ctx.nonce },
@@ -286,14 +286,11 @@ export function draftWaitCard(
 }
 
 /** 先发了「正在理解」卡、后端最后回的是一段话（问题或闲聊）时，把那张卡改成这段话。 */
-export function answerCard(answer: string, ctx: RenderContext, taskId?: string): Card {
+export function answerCard(answer: string, ctx: RenderContext): Card {
   return card({
     title: '回答',
     template: 'blue',
-    elements: [
-      text(answer),
-      buttons([cockpit(ctx, taskId ? COCKPIT_PATHS.task(taskId) : COCKPIT_PATHS.overview)]),
-    ],
+    elements: [text(answer), buttons([cockpit(ctx, COCKPIT_PATHS.home)])],
   });
 }
 
@@ -330,7 +327,7 @@ export function progressCard(
   }
   if (opts.note) lines.push(text(opts.note, 'note'));
   const actions: Button[] = [
-    cockpit(ctx, COCKPIT_PATHS.task(task.id)),
+    cockpit(ctx, COCKPIT_PATHS.home),
     { label: '关注', value: { a: 'task.follow', t: task.id, f: true, c: 'progress', _n: ctx.nonce } },
   ];
   if (!FINISHED.has(task.state)) {
@@ -509,7 +506,7 @@ export function outboxCard(
   ctx: RenderContext,
   overlay: { doneText?: string; note?: string } = {},
 ): Card {
-  const link = item.link ?? (item.taskId ? COCKPIT_PATHS.task(item.taskId) : COCKPIT_PATHS.overview);
+  const link = item.link ?? COCKPIT_PATHS.overview;
   const done = item.status === 'done' || overlay.doneText !== undefined;
   const elements: El[] = item.lines.map((l) => text(l));
   if (done) elements.push(text(overlay.doneText ?? item.doneText ?? '已处理'));

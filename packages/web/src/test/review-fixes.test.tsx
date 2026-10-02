@@ -7,7 +7,6 @@ import { ApiError, type FleetApi, type LiveStatus, useLiveSync } from '../api/cl
 import { createMockApi, type MockApi } from '../api/mock/server';
 import type { PoolView, QuotaWindowView } from '../api/types';
 import { QuotaCell } from '../components/quota';
-import { CommandMenu } from '../components/shell/command-menu';
 import { Topbar } from '../components/shell/topbar';
 import { routeOptions } from '../components/task-actions';
 import {
@@ -261,11 +260,6 @@ describe('仓列表没读成，不冒充「没有仓」', () => {
     api.repos = async () => ({ repos: [] });
     renderApp(<SettingsPage />, { api });
     expect(await screen.findByText('还没有仓')).toBeTruthy();
-  });
-
-  test('⌘K：说明仓列表没读成、搜不到需求', async () => {
-    renderApp(<CommandMenu open onOpenChange={() => {}} />, { api: reposFail() });
-    expect(await screen.findByText(/仓列表没读成，这里搜不到任何需求/)).toBeTruthy();
   });
 
   test('顶栏的仓切换：写「仓列表没读成」，不是一直转圈', async () => {

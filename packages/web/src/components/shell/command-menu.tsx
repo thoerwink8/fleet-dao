@@ -1,13 +1,8 @@
 import { FolderGit2, Moon, Palette, Sun } from 'lucide-react';
 import { useEffect } from 'react';
 import { useNavigate } from 'react-router';
-import { useAllBoards } from '../../api/client';
-import type { BoardTask, Repo } from '../../api/types';
-import { canSee } from '../../demo/access';
-import { isTaskClosed, taskStateLabel, taskTone } from '../../lib/status';
 import { PALETTES } from '../../lib/theme';
 import { useRepo } from '../repo-context';
-import { StatusChip } from '../status';
 import { useTheme } from '../theme-provider';
 import {
   CommandDialog,
@@ -20,11 +15,10 @@ import {
 } from '../ui/command';
 import { visibleNav } from './nav';
 
-/** ⌘K：跳页面、找需求、切仓、切主题。 */
+/** ⌘K：跳页面、切仓、切主题。 */
 export function CommandMenu({ open, onOpenChange }: { open: boolean; onOpenChange(o: boolean): void }) {
   const navigate = useNavigate();
-  const { boards, failed } = useAllBoards();
-  const { repos, setRepoId, error: reposError } = useRepo();
+  const { repos, setRepoId } = useRepo();
   const theme = useTheme();
 
   useEffect(() => {
@@ -43,29 +37,11 @@ export function CommandMenu({ open, onOpenChange }: { open: boolean; onOpenChang
     fn();
   };
 
-  const multiRepo = boards.length > 1;
-  const sorted = boards
-    .flatMap((b) => b.tasks.map((t) => ({ t, repo: b.repo })))
-    .sort((a, b) => Number(isTaskClosed(a.t)) - Number(isTaskClosed(b.t)) || a.t.priority - b.t.priority);
-
   return (
     <CommandDialog open={open} onOpenChange={onOpenChange} className="sm:max-w-xl">
-      <CommandInput placeholder="输入页面名、需求编号或标题、操作…" />
+      <CommandInput placeholder="输入页面名、操作…" />
       <CommandList className="max-h-command-list">
         <CommandEmpty>没找到</CommandEmpty>
-        {canSee('task') ? (
-          <>
-            <TaskGroup
-              sorted={sorted}
-              multiRepo={multiRepo}
-              reposError={reposError}
-              reposKnown={repos.length}
-              failed={failed}
-              onPick={(id) => run(() => navigate(`/tasks/${id}`))}
-            />
-            <CommandSeparator />
-          </>
-        ) : null}
         <CommandGroup heading="跳转">
           {visibleNav()
             .flatMap((g) => g.items)
@@ -126,53 +102,5 @@ export function CommandMenu({ open, onOpenChange }: { open: boolean; onOpenChang
         </CommandGroup>
       </CommandList>
     </CommandDialog>
-  );
-}
-
-function TaskGroup({
-  sorted,
-  multiRepo,
-  reposError,
-  reposKnown,
-  failed,
-  onPick,
-}: {
-  sorted: { t: BoardTask; repo: Repo }[];
-  multiRepo: boolean;
-  reposError: unknown;
-  reposKnown: number;
-  failed: Repo[];
-  onPick(taskId: string): void;
-}) {
-  return (
-    <CommandGroup heading="需求">
-      {reposError ? (
-        // 仓列表没读成：一个仓都不知道，需求自然也搜不到——照实说，不让空列表冒充「没有」。
-        <CommandItem disabled forceMount value="仓列表没读成 需求 仓">
-          <span className="text-xs text-ink-fail">
-            仓列表没读成，这里{reposKnown ? '只有上次读到的仓的需求' : '搜不到任何需求'}
-          </span>
-        </CommandItem>
-      ) : null}
-      {failed.length ? (
-        <CommandItem disabled forceMount value={`没读成 ${failed.map((r) => r.name).join(' ')}`}>
-          <span className="text-xs text-ink-fail">
-            仓 {failed.map((r) => r.name).join('、')} 的需求没读成，这里搜不到它们
-          </span>
-        </CommandItem>
-      ) : null}
-      {sorted.map(({ t, repo }) => (
-        <CommandItem
-          key={t.id}
-          value={`#${t.issueNumber} ${t.title} ${t.requestedBy} ${repo.name}`}
-          onSelect={() => onPick(t.id)}
-        >
-          <span className="num w-9 shrink-0 text-muted-foreground">#{t.issueNumber}</span>
-          <span className="min-w-0 flex-1 truncate">{t.title}</span>
-          {multiRepo ? <span className="num shrink-0 text-xs text-muted-foreground">{repo.name}</span> : null}
-          <StatusChip tone={taskTone(t)} label={taskStateLabel[t.state]} />
-        </CommandItem>
-      ))}
-    </CommandGroup>
   );
 }

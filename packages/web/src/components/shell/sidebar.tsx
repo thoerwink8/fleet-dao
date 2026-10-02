@@ -1,8 +1,7 @@
 import { Database, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import { NavLink } from 'react-router';
 import { brand } from '#brand';
-import { useAllBoards, useApi, useNotifications } from '../../api/client';
-import { needsAttention } from '../../lib/status';
+import { useApi, useNotifications } from '../../api/client';
 import { cn } from '../../lib/utils';
 import { LogoMark } from '../logo';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../ui/tooltip';
@@ -11,14 +10,12 @@ import { type NavItem, visibleNav } from './nav';
 /** 侧栏角标：数字，或者「!」表示没读成（不拿 0 冒充没事）。 */
 function useBadges(): Record<string, number | '!'> {
   const notices = useNotifications('open');
-  const { boards, error } = useAllBoards();
   return {
     '/notifications': notices.data
       ? notices.data.items.filter((n) => n.level !== 'daily').length
       : notices.error
         ? '!'
         : 0,
-    '/tasks': error ? '!' : boards.flatMap((b) => b.tasks).filter(needsAttention).length,
   };
 }
 

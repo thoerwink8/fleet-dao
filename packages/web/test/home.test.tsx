@@ -57,7 +57,7 @@ const SAMPLE: HomeData = {
       title: 'PR #421「把路由配置改两层」要审',
       context: 'fleet-dao · 改了调度台的路由装配方式，审一轮再挂自动合并。',
       since: '2026-10-02T08:12:00Z',
-      link: '/tasks/t-1',
+      link: '/home3',
     },
     {
       kind: 'ask',
@@ -74,7 +74,7 @@ const SAMPLE: HomeData = {
       repo: 'thoerwink8/fleet-dao',
       segment: 'doing',
       waitingReason: 'nothing',
-      link: '/tasks/t-556',
+      link: '/home3',
     },
     {
       issueNumber: 76,
@@ -83,7 +83,7 @@ const SAMPLE: HomeData = {
       segment: 'verify_pending',
       waitingReason: 'ci',
       waitingSince: '2026-10-02T08:30:00Z',
-      link: '/tasks/t-76',
+      link: '/home3',
     },
     {
       issueNumber: 450,
@@ -92,7 +92,7 @@ const SAMPLE: HomeData = {
       segment: 'scoping',
       waitingReason: 'founder_decision',
       waitingSince: '2026-10-01T22:00:00Z',
-      link: '/tasks/t-450',
+      link: '/home3',
     },
   ],
   done: [

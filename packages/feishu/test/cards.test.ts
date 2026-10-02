@@ -50,7 +50,7 @@ function allCards(): Array<[string, Card]> {
     ['草稿·已确认·待开单', draftCard(pendingIssue, ctx, { note: '已确认（乙），没有重复开任务。' })],
     ['正在理解', draftWaitCard(ctx, { title: '收到，正在理解…', rawText: '原话' })],
     ['没记成', draftWaitCard(ctx, { title: '这句话没记成', failed: true, lines: ['后端没回应'] })],
-    ['回答', answerCard('在等 PR 合并。', ctx, 'task-12')],
+    ['回答', answerCard('在等 PR 合并。', ctx)],
     [
       '进度·挑选',
       pickTaskCard(12, [{ taskId: 't', repo: 'acme/web', issueNumber: 12, title: 'x', state: 'done' }], ctx),
@@ -196,9 +196,9 @@ describe('卡片', () => {
 
   it('「打开驾驶舱」直达对应页', () => {
     const urls = (card: Card) => buttonsOf(card).flatMap((b) => (b.url ? [b.url] : []));
-    expect(urls(draftCard(confirmed(), ctx))).toEqual(['https://cockpit.example.test/tasks/task-12']);
+    expect(urls(draftCard(confirmed(), ctx))).toEqual(['https://cockpit.example.test/home3']);
     expect(urls(waitingListCard(snapshot(), ctx))).toEqual(['https://cockpit.example.test/notifications']);
-    expect(urls(outboxCard(outboxItem(), ctx))).toEqual(['https://cockpit.example.test/tasks/task-7']);
+    expect(urls(outboxCard(outboxItem(), ctx))).toEqual(['https://cockpit.example.test/home3']);
   });
 
   it('自检器能抓到违规：2.0 不支持的 note 组件、两个主按钮、没有主按钮、内部代号、坏回传值、超大卡', () => {
