@@ -56,6 +56,7 @@ export {
   type Problem,
   type Report,
 } from './doc-pointers.ts';
+export { FLOW_BRANCH_PATTERN, isFlowBranch } from './flow-branch.ts';
 export {
   type GitHubCommenter,
   type GitHubPrLabeler,

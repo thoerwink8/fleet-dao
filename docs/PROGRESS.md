@@ -33,14 +33,14 @@
 
 - 555-2（母单 #555，排期见 `docs/decisions/0009-v3-implementation-plan.md` 第 6 行）：**合并闸加一条输入 `cold-verify`**——
   闸只读这条状态（闸里不起模型调用，判法必须确定，design 第五节），冷调用在装配侧跑、结论贴成状态；新开 context，
-  不复用 `second-opinion`。`.github/workflows/merge-gate.yml` 的 status 事件放行它；
-  `packages/conventions/test/merge-gate-inputs.test.ts` 的放行清单跟着加一条（**改标准**）。装配侧新增
+  不复用 `second-opinion`。**范围是引擎任务工作流（#632）开的 PR**（分支 `fleet/<单号>-t<8 位>`）：它们合之前要有通过的 cold-verify；
+  人手开的 PR（含碰先审后合路径的）照旧只要第二意见。`.github/workflows/merge-gate.yml` 的 status 事件放行它；
+  `packages/conventions/test/merge-gate-inputs.test.ts` 的放行清单跟着加一条。装配侧新增
   `packages/engine/src/cold-verify-{status,post,pick,run}.ts`：结论→状态（只有 pass 才 success）、贴状态、
   `ChooseModelForFamily` 的生产实现（#555-1 留下的注入缺口）、装配入口（读不到一律贴 failure）。结果：
   `specs/555-2-冷调用进合并闸/结果.md`。
-- 555-2 还欠：**没人自动起这一遍**（定时/事件触发没接）——在那之前改到先审后合路径的 PR 会一直卡「还没验」
-  （宁可卡住也不放行没验的改动）；`ColdVerifySources` 的三个真取样口（GitHub diff / 需求文档 / 作者族）也只有接口和测试。
-  两样都归母单 #555 下一片。
+- 555-2 还欠：`ColdVerifySources` 的三个真取样口（GitHub diff / 需求文档 / 作者族）和任务工作流的 `coldVerify` 活动真实现
+  （S2-5b，母单 #632）。闸合进来以后，引擎的任务 PR 没有 cold-verify 就合不了；人手的 PR 不受影响。
 
 ## 2026-10-02（Mirasim 切换与一条命令迁移，实施）
 

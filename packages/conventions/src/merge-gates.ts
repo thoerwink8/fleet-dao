@@ -313,12 +313,10 @@ export function checkSecondOpinion(
 /**
  * 这个 PR 该不该有冷调用（合前验收）的结论。`needed` 为假就是不用验。
  *
- * 该验的范围**照搬先审后合那一份路径判法**（riskyFiles 的命中），不另写一套：两处判「改了要紧的东西」必须同源，
- * 各写一套就会一边说改到了一边没改到。
- *
- * 判不了改没改到时（清单读不到、PR 的文件列表没读全）传 `problem`：回 needed=false，**但调用方不许就此当成
- * 「不用验」**——调用方那条「没法判」的 notChecked 早就写下了，闸照样判红（拿不到当没问题那条底线）。
- * 这一层不自己回一个字串让调用方去 push（那样两条一模一样的红字会重复出现，也会让调用方以为必须用它的措辞）。
+ * **范围是引擎任务工作流（#632）开的 PR，不是改到先审后合路径的 PR**：验收是三段流程的第三段，由引擎在合之前跑、把结论贴成状态；
+ * 闸要保证的是「引擎的 PR 没验过就合不进去」——不论是引擎自己的顺序出了错、有人手挂了自动合并，还是兜底的对账挂了它。
+ * 人手开的 PR（含碰先审后合路径的）走第二意见那一套，没有引擎替它们验，也就不能要这条状态（要了就永远卡在「还没验」）。
+ * 认「引擎的 PR」靠分支名（flow-branch.ts 的 isFlowBranch）：它防的是引擎的 bug 和漏挂，不防存心绕过的人（那样的人本来就能直接合）。
  */
 export interface ColdVerifyNeed {
   needed: boolean;
@@ -326,21 +324,10 @@ export interface ColdVerifyNeed {
   why: string;
 }
 
-/**
- * 合并闸要不要等这一条冷调用状态：只看改到的文件落没落进先审后合清单（和 second-opinion 同一处、同一份 hits）。
- * 判「要不要验」放在这里而不是 checkColdVerify 里，是因为「没改到要紧的地方」和「改到了但没验」在合并闸看来
- * 必须给出不同的结论，而 checkColdVerify 只拿得到状态、拿不到改动面。
- *
- * `problem` 给了就回 needed=false（判不了就不许说「要验」：那会拦下一个可能压根没改到要紧地方的 PR）。
- * 调用方照样因为那条 problem 判红，所以这里不做「未查成」的二次表达。
- */
-export function coldVerifyNeed(hits: readonly RiskyFile[], problem?: string): ColdVerifyNeed {
-  if (problem !== undefined) return { needed: false, why: '' };
-  if (hits.length === 0) return { needed: false, why: '' };
-  return {
-    needed: true,
-    why: `改到 ${hits.length} 个合前要验的地方：${listHits(hits)}`,
-  };
+export function coldVerifyNeed(flowPr: boolean): ColdVerifyNeed {
+  return flowPr
+    ? { needed: true, why: '这是引擎任务工作流开的 PR（分支名 fleet/<单号>-t<8 位>）' }
+    : { needed: false, why: '' };
 }
 
 /**
@@ -351,13 +338,13 @@ export function coldVerifyNeed(hits: readonly RiskyFile[], problem?: string): Co
  *    「还没验 / 没验成」而不是第二意见那种「等它写着」。
  * 2. **error 也算没过**：GitHub 自己把状态写成 error（写的时候网络断在半路之类）时不能当通过。
  *
- * 调用方只在需要它的地方问（改到先审后合那片路径的 PR，与 second-opinion 同一处）：没改到那些地方的 PR 不验，
- * 也就没有这条状态——那是「不用验」，不是「没验成」，所以判「要不要验」必须在调用方，不在这里。
+ * 调用方只在需要它的地方问（引擎任务工作流开的 PR，见 coldVerifyNeed）：别的 PR 不验，也就没有这条状态——那是「不用验」，
+ * 不是「没验成」，所以判「要不要验」必须在调用方，不在这里。
  */
-export function checkColdVerify(head: string, got: SecondOpinion | null, needed: boolean): string[] {
-  if (!needed) return [];
+export function checkColdVerify(head: string, got: SecondOpinion | null, need: ColdVerifyNeed): string[] {
+  if (!need.needed) return [];
   const at = `当前头 ${head.slice(0, 7)}`;
-  const why = `改到了合前要验的地方，${at} 上要有通过的 ${COLD_VERIFY_CONTEXT} 状态（specs/555：合之前一次冷调用，换家族验「单子说要的东西真做了没有」）`;
+  const why = `${need.why}，${at} 上要有通过的 ${COLD_VERIFY_CONTEXT} 状态（specs/555：合之前一次冷调用，换家族验「单子说要的东西真做了没有」）`;
   if (got === null) {
     // 没有这条 = 没验成（不是「等它写」）：装配侧要么没跑、要么写了没写成，两种都不放行。
     return [

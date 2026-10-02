@@ -64,7 +64,7 @@ function world(
       labels: [{ name: '杂项' }],
       milestone: { title: 'P1 核心闭环' },
       body: body('直接合——只改文档'),
-      head: { sha: HEAD },
+      head: { sha: HEAD, ref: 'feat/x' },
       changed_files: 1,
       draft: false,
       mergeable: true,
@@ -145,7 +145,7 @@ const deps = (w: { gh: GitHubReads }, riskList: GateDeps['riskList'] = RISK): Ga
 });
 
 const SO_OK = [{ context: 'second-opinion', state: 'success', description: '通过' }];
-/** #555-2：改到先审后合那片路径的 PR 还要有一条通过的冷调用结论（另一个 context，闸只读）。 */
+/** #555-2：引擎任务工作流开的 PR 还要有一条通过的冷调用结论（另一个 context，闸只读）。 */
 const CV_OK = [{ context: 'cold-verify', state: 'success', description: '验收通过' }];
 
 describe('合并闸：验收场景', () => {
@@ -207,12 +207,10 @@ describe('合并闸：验收场景', () => {
         /^等第二意见：当前头 aaaaaaa 上还没有 second-opinion 状态，改到了先审后合的地方：deploy\/france\.sh（碰安全）/,
       );
     }
-    // 两条都通过才放行（第二意见 + 冷调用；#555-2）
-    const passed = await gatePr(80, deps(world({ files, statuses: [...SO_OK, ...CV_OK] })));
+    // 人手开的 PR 不要冷调用的结论：第二意见过了就放行（冷调用只管引擎任务工作流开的 PR）
+    const passed = await gatePr(80, deps(world({ files, statuses: SO_OK })));
     expect(passed.state).toBe('success');
-    expect(passed.lines[0]).toBe(
-      '能合：不是草稿、没冲突，改到 1 个先审后合的地方，当前头上第二意见已通过、验收那一遍也通过。',
-    );
+    expect(passed.lines[0]).toBe('能合：不是草稿、没冲突，改到 1 个先审后合的地方，当前头上第二意见已通过。');
   });
 
   it('没改到先审后合的地方：档位写「先审后合」也不等第二意见', async () => {
@@ -225,10 +223,7 @@ describe('合并闸：验收场景', () => {
       gatePr(
         80,
         deps(
-          world({
-            files: ['packages/api/src/auth.ts'],
-            statuses: [{ context: 'second-opinion', state }, ...CV_OK],
-          }),
+          world({ files: ['packages/api/src/auth.ts'], statuses: [{ context: 'second-opinion', state }] }),
         ),
       );
     expect((await at('failure')).lines).toEqual([expect.stringMatching(/^第二意见没过/)]);
@@ -236,31 +231,45 @@ describe('合并闸：验收场景', () => {
   });
 });
 
-describe('合并闸：#555-2 合前一次冷调用的结论（cold-verify）也是输入', () => {
-  const riskyFiles = ['deploy/france.sh', 'docs/x.md'];
+describe('合并闸：#555-2 引擎任务工作流开的 PR，合前一次冷调用的结论（cold-verify）也是输入', () => {
+  /** 引擎任务工作流起的分支（fleet/<单号>-t<8 位>）。 */
+  const FLOW = { head: { sha: HEAD, ref: 'fleet/12-t1a2b3c4d' } };
+  const flowWorld = (over: Parameters<typeof world>[0] = {}) =>
+    world({ ...over, prOver: { ...FLOW, ...over.prOver } });
 
-  it('改到要验的地方、第二意见过了但没有冷调用结论 → 不通过，写明「还没验」', async () => {
-    const r = await gatePr(80, deps(world({ files: riskyFiles, statuses: SO_OK })));
+  it('引擎的 PR、还没有冷调用结论 → 不通过，写明「还没验」和为什么要验（哪怕没碰任何先审后合的路径）', async () => {
+    const r = await gatePr(80, deps(flowWorld()));
     expect(r.state).toBe('failure');
     expect(r.lines[0]).toMatch(/^还没验：当前头 aaaaaaa 上没有 cold-verify 状态/);
+    expect(r.lines[0]).toContain('引擎任务工作流开的 PR');
   });
 
-  it('【故意造出的失败】少了这条状态就是过不去（合并闸不会因为「没看到它」就放行）', async () => {
-    // 「拿掉」的写法：第二意见那条在，冷调用那条被摘掉。
-    const withoutCold = [...SO_OK];
-    const r = await gatePr(80, deps(world({ files: riskyFiles, statuses: withoutCold })));
-    expect(r.state).toBe('failure');
-    expect(r.lines.join('\n')).toContain('cold-verify');
+  it('引擎的 PR、冷调用通过 → 通过；没碰先审后合的路径就不等第二意见', async () => {
+    const r = await gatePr(80, deps(flowWorld({ statuses: CV_OK })));
+    expect(r.state).toBe('success');
+    expect(r.lines[0]).toBe('能合：不是草稿、没冲突，没改到先审后合的地方，引擎任务 PR 的验收那一遍也通过。');
+  });
+
+  it('引擎的 PR 又碰了先审后合的路径：第二意见和冷调用两条都要，缺哪条报哪条，各认各的 context', async () => {
+    const files = ['deploy/france.sh'];
+    const onlyCv = await gatePr(80, deps(flowWorld({ files, statuses: CV_OK })));
+    expect(onlyCv.state).toBe('failure');
+    expect(onlyCv.lines[0]).toMatch(/^等第二意见：/);
+    const onlySo = await gatePr(80, deps(flowWorld({ files, statuses: SO_OK })));
+    expect(onlySo.state).toBe('failure');
+    expect(onlySo.lines[0]).toContain('没有 cold-verify 状态');
+    const both = await gatePr(80, deps(flowWorld({ files, statuses: [...SO_OK, ...CV_OK] })));
+    expect(both.state).toBe('success');
+    expect(both.lines[0]).toBe(
+      '能合：不是草稿、没冲突，改到 1 个先审后合的地方，当前头上第二意见已通过，引擎任务 PR 的验收那一遍也通过。',
+    );
   });
 
   it('冷调用 pending → 不通过（还在跑，等它）', async () => {
     const r = await gatePr(
       80,
       deps(
-        world({
-          files: riskyFiles,
-          statuses: [...SO_OK, { context: 'cold-verify', state: 'pending', description: '第 1 轮跑着' }],
-        }),
+        flowWorld({ statuses: [{ context: 'cold-verify', state: 'pending', description: '第 1 轮跑着' }] }),
       ),
     );
     expect(r.state).toBe('failure');
@@ -271,10 +280,8 @@ describe('合并闸：#555-2 合前一次冷调用的结论（cold-verify）也�
     const r = await gatePr(
       80,
       deps(
-        world({
-          files: riskyFiles,
+        flowWorld({
           statuses: [
-            ...SO_OK,
             {
               context: 'cold-verify',
               state: 'failure',
@@ -292,12 +299,7 @@ describe('合并闸：#555-2 合前一次冷调用的结论（cold-verify）也�
   it('【故意造出的失败】冷调用写成 error（GitHub 半路把状态写成 error）也算没过，不算通过', async () => {
     const r = await gatePr(
       80,
-      deps(
-        world({
-          files: riskyFiles,
-          statuses: [...SO_OK, { context: 'cold-verify', state: 'error', description: '' }],
-        }),
-      ),
+      deps(flowWorld({ statuses: [{ context: 'cold-verify', state: 'error', description: '' }] })),
     );
     expect(r.state).toBe('failure');
     expect(r.lines[0]).toMatch(/^验收没过：.* 是 error/);
@@ -306,51 +308,63 @@ describe('合并闸：#555-2 合前一次冷调用的结论（cold-verify）也�
   it('【故意造出的失败】冷调用那条的 state 认不出 → 判「没查成」（不当成没问题）', async () => {
     const r = await gatePr(
       80,
-      deps(
-        world({
-          files: riskyFiles,
-          statuses: [...SO_OK, { context: 'cold-verify', state: 'whatever', description: '' }],
-        }),
-      ),
+      deps(flowWorld({ statuses: [{ context: 'cold-verify', state: 'whatever', description: '' }] })),
     );
     expect(r.state).toBe('failure');
     expect(r.notChecked).toBe(true);
     expect(r.lines[0]).toMatch(/^没查成：.*cold-verify 的 state「whatever」认不出/);
   });
 
-  it('没改到要验的地方 → 压根不等这条状态（那条 pending 不该拦住没碰要紧地方的 PR）', async () => {
+  it('【故意造出的失败】读不到当前头的提交状态 → 判「没查成」，不许当成「验过了」', async () => {
+    const r = await gatePr(80, deps(flowWorld({ broken: { statuses: '状态接口 502' } })));
+    expect(r.state).toBe('failure');
+    expect(r.notChecked).toBe(true);
+    expect(r.lines.join('\n')).toContain('读不到当前头');
+  });
+
+  it('人手开的 PR（分支名不是引擎的）：压根不等这条状态——哪怕碰了先审后合的路径，也只要第二意见', async () => {
     const r = await gatePr(
       80,
       deps(
         world({
-          files: ['docs/x.md'],
-          statuses: [{ context: 'cold-verify', state: 'failure', description: '别的 PR 的结论' }],
+          files: ['deploy/france.sh'],
+          statuses: [...SO_OK, { context: 'cold-verify', state: 'failure', description: '别的 PR 的结论' }],
         }),
       ),
     );
     expect(r.state).toBe('success');
-    expect(r.lines[0]).toBe('能合：不是草稿、没冲突，没改到先审后合的地方。');
+    expect(r.lines[0]).toBe('能合：不是草稿、没冲突，改到 1 个先审后合的地方，当前头上第二意见已通过。');
   });
 
-  it('两条状态各自认各自的 context：second-opinion 的结论不会被当成冷调用的', async () => {
-    // 只有 second-opinion（success）时，冷调用那一条照样缺 —— 不许拿第二意见顶。
-    const onlySo = await gatePr(80, deps(world({ files: riskyFiles, statuses: SO_OK })));
-    expect(onlySo.state).toBe('failure');
-    expect(onlySo.lines[0]).toContain('没有 cold-verify 状态');
-    // 反过来：只有 cold-verify（success）时，第二意见照样缺。
-    const onlyCv = await gatePr(80, deps(world({ files: riskyFiles, statuses: CV_OK })));
-    expect(onlyCv.state).toBe('failure');
-    expect(onlyCv.lines[0]).toMatch(/^等第二意见：/);
+  it('像引擎分支又不是的名字（位数不对、前缀不对）：当人手开的 PR 看', async () => {
+    for (const ref of [
+      'fleet/12-t1a2b3c',
+      'fleet/12-tXYZ12345',
+      'feat/fleet/12-t1a2b3c4d',
+      'fleet/x-t1a2b3c4d',
+    ]) {
+      const r = await gatePr(80, deps(world({ prOver: { head: { sha: HEAD, ref } } })));
+      expect(r.state, ref).toBe('success');
+    }
   });
 
-  it('【故意造出的失败】判不了改没改到要紧的地方（清单读不到）→ 判「没查成」，不许当成「不用验」', async () => {
+  it('【故意造出的失败】PR 读回来没有分支名（head.ref）→ 判「没查成」：认不出是不是引擎的 PR，不能当成人手开的放行', async () => {
+    const r = await gatePr(80, deps(world({ prOver: { head: { sha: HEAD } } })));
+    expect(r.state).toBe('failure');
+    expect(r.notChecked).toBe(true);
+    expect(r.lines[0]).toMatch(/head.ref 认不出/);
+  });
+
+  it('引擎的 PR、先审后合的清单读不到：照样要冷调用结论（要不要验和清单无关），清单那条「没查成」也照样报', async () => {
     const r = await gatePr(
       80,
-      deps(world({ files: riskyFiles, statuses: [...SO_OK, ...CV_OK] }), '不是合法的 JSON'),
+      deps(flowWorld({ files: ['deploy/france.sh'], statuses: CV_OK }), '不是合法的 JSON'),
     );
     expect(r.state).toBe('failure');
     expect(r.notChecked).toBe(true);
     expect(r.lines.join('\n')).toContain('没法判改没改到先审后合的地方');
+    const missing = await gatePr(80, deps(flowWorld({ files: ['deploy/france.sh'] }), '不是合法的 JSON'));
+    expect(missing.lines.join('\n')).toContain('没有 cold-verify 状态');
   });
 });
 
