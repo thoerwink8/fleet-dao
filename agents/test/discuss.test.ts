@@ -26,6 +26,8 @@ interface SecondOpinionLib {
     postMerge?: boolean,
   ): string;
   stripLocalPaths(text: string, dirs: string[]): string;
+  reviewRound(bodies: string[], head: string): { round: number; heads: string[] };
+  MAX_REVIEW_ROUNDS: number;
   checkPublishable(repo: string, body: string): Promise<void>;
   cursorAgentEnv(
     platform?: string,
@@ -643,5 +645,32 @@ describe('Claude 讨论端点：只经 reclaude 的无头 JSON', SLOW, () => {
     );
     expect(r.code).toBe(2);
     expect(r.err).toContain('讨论总预算已用完');
+  });
+});
+
+describe('第二意见第几轮按 PR 上审过的头数，不信 --round', () => {
+  const posted = (head: string, round = 1) =>
+    so.prComment(
+      round,
+      head,
+      'gpt-6-luna',
+      { pass: false, blocking: 1 },
+      '## 必须改\n- x\n结论：必须改 1 条',
+    );
+  it('没审过是第 1 轮；同一个头重审还是那一轮；换了头算下一轮', () => {
+    expect(so.reviewRound([], 'aaaaaaa1234')).toEqual({ round: 1, heads: [] });
+    const one = [posted('aaaaaaa1234'), '别的评论'];
+    expect(so.reviewRound(one, 'aaaaaaa9999').round).toBe(1);
+    expect(so.reviewRound(one, 'bbbbbbb0000')).toEqual({ round: 2, heads: ['aaaaaaa'] });
+  });
+  it('【故意造出的失败】#597 那样每次都写「第 1 轮」：照审过的头数算，第 3 个头超过上限', () => {
+    const bodies = ['aaaaaaa', 'bbbbbbb'].map((h) => posted(h, 1));
+    const r = so.reviewRound(bodies, 'ccccccc0000');
+    expect(r.round).toBe(3);
+    expect(r.round).toBeGreaterThan(so.MAX_REVIEW_ROUNDS);
+  });
+  it('合并后补审的评论不算进先审后合的轮数', () => {
+    const after = so.prComment(1, 'aaaaaaa', 'm', { pass: true, blocking: 0 }, '结论：通过', true);
+    expect(so.reviewRound([after], 'bbbbbbb').round).toBe(1);
   });
 });

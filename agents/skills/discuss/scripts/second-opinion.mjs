@@ -935,6 +935,41 @@ export function stripLocalPaths(text, dirs) {
   return out;
 }
 
+/**
+ * 先审后合的第二意见最多 2 轮（SKILL.md「最多 2 轮」、design 第五节）。第几轮按 PR 上已经贴过的「第二意见 第 N 轮」评论里
+ * 审过几个不同的头来数，不信调用方的 --round：2026-10-02 #597 贴了 8 次、每次都写「第 1 轮」。同一个头重审还算那一轮。
+ */
+export const MAX_REVIEW_ROUNDS = 2;
+
+export function reviewRound(commentBodies, head) {
+  const heads = [];
+  for (const body of commentBodies) {
+    const m = /^\*\*第二意见 第 \d+ 轮\*\*（[^）]*审的头 ([0-9a-f]{7})）/.exec(String(body));
+    if (m && !heads.includes(m[1])) heads.push(m[1]);
+  }
+  const at = heads.indexOf(String(head).slice(0, 7));
+  return { round: at >= 0 ? at + 1 : heads.length + 1, heads };
+}
+
+/** PR 上所有评论的正文；读不到抛 NotChecked（数不出第几轮就不审，不当成第 1 轮）。 */
+function prCommentBodies(repo, pr) {
+  try {
+    const nwo = gh(['repo', 'view', '--json', 'nameWithOwner', '--jq', '.nameWithOwner'], repo);
+    const out = gh(
+      ['api', '--paginate', `repos/${nwo}/issues/${pr}/comments`, '--jq', '.[].body | @json'],
+      repo,
+    );
+    return out
+      .split('\n')
+      .filter((l) => l.trim())
+      .map((l) => JSON.parse(l));
+  } catch (e) {
+    throw new NotChecked(
+      `读不到 PR #${pr} 上已有的评论（${String(e.stderr ?? e.message).trim()}），数不出这是第几轮，不审`,
+    );
+  }
+}
+
 export function prComment(round, head, model, verdict, text, postMerge = false) {
   const at = String(text).indexOf('## 必须改');
   const body = (at >= 0 ? String(text).slice(at) : String(text)).trim();
@@ -1033,8 +1068,10 @@ function args(argv) {
     const a = argv[i];
     if (a === '--pr') o.pr = Number(argv[++i]);
     else if (a === '--repo') o.repo = argv[++i];
-    else if (a === '--round') o.round = Number(argv[++i]);
-    else if (a === '--slot') o.slot = Number(argv[++i]);
+    else if (a === '--round') {
+      o.round = Number(argv[++i]);
+      o.roundGiven = true;
+    } else if (a === '--slot') o.slot = Number(argv[++i]);
     else if (a === '--timeout-min') o.timeoutMin = Number(argv[++i]);
     else if (a === '--ui') o.ui = true;
     else if (a === '--selftest') o.selftest = true;
@@ -1178,6 +1215,16 @@ async function main() {
   writeFileSync(lock, String(process.pid));
   process.on('exit', () => rmSync(lock, { force: true }));
   const info = preparePr(repo, o.pr, o.slot);
+  if (!o.postMerge) {
+    const r = reviewRound(prCommentBodies(repo, o.pr), info.head);
+    if (o.roundGiven && o.round !== r.round)
+      log(`--round ${o.round} 不算数：PR 上已经审过 ${r.heads.length} 个头，这是第 ${r.round} 轮`);
+    if (r.round > MAX_REVIEW_ROUNDS)
+      throw new NotChecked(
+        `PR #${o.pr} 已经审过 ${r.heads.length} 个头（${r.heads.join('、')}），第二意见最多 ${MAX_REVIEW_ROUNDS} 轮：不跑第 ${r.round} 轮，交接给指挥官，写清卡在哪`,
+      );
+    o.round = r.round;
+  }
   const out = join(runs, `pr${o.pr}-${info.head.slice(0, 7)}-r${o.round}.md`);
   log(`PR #${o.pr} 头 ${info.head.slice(0, 7)}，工作树 ${info.tree}`);
   let code = 2;
