@@ -33,6 +33,13 @@ permissions:
   issues: write # 关 milestone（milestone API 在 issues 权限下）
   pull-requests: read # workflow_dispatch 手动补跑时按 head=release/v<N> 查已合并 PR 的 merge_commit_sha（第二意见 2026-10-02）
 
+# 同一版本并发跑两轮会都读到「未通知」、各推一条飞书（第二意见 2026-10-02）。
+# 按版本分组：pull_request 触发用 head 分支名，dispatch 用手动输入的 version；同组只跑一轮，cancel-in-progress=false
+# 让后来的等（不是挤掉）——「发布 vN 收尾」对都是会写仓的（tag、release、milestone、飞书），并发跑会互相覆盖。
+concurrency:
+  group: release-${{ github.event.pull_request.head.ref || inputs.version || 'unknown' }}
+  cancel-in-progress: false
+
 jobs:
   finalize:
     runs-on: ubuntu-latest
