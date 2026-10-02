@@ -105,7 +105,15 @@ export async function publishPr(deps: PublishDeps): Promise<PublishResult> {
   if (add.code !== 0) throw fail('git add CHANGELOG.md 失败', add);
   const commit = await git(['commit', '-m', plan.commitMessage], deps.root);
   if (commit.code !== 0) throw fail('git commit 失败', commit);
-  const commitSha = (await git(['rev-parse', 'HEAD'], deps.root)).stdout.trim();
+  const revParse = await git(['rev-parse', 'HEAD'], deps.root);
+  if (revParse.code !== 0)
+    throw fail('git rev-parse HEAD 失败（刚 commit 完就读不回，发起不下去了）', revParse);
+  const commitSha = revParse.stdout.trim();
+  if (!/^[0-9a-f]{40}$/i.test(commitSha)) {
+    throw new Error(
+      `git rev-parse HEAD 的输出认不出提交号：「${commitSha.slice(0, 80)}」；不拿空字符串冒充。`,
+    );
+  }
   note(`提交了 CHANGELOG.md 收尾：${commitSha.slice(0, 8)}`);
 
   // 推 head 分支到 origin：head=release/v<N> 要带这次 commit，gh pr create 才不撞 GraphQL: No commits。

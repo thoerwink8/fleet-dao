@@ -49,6 +49,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       # a. 事件过滤：从 pull_request closed 触发时，只放行「合到 main、head 是 release/v<N>」；其余场合明说为什么不动作。
+      # base/head 不 Bash 插值进 node 源码：分支名由仓库贡献者控制，单引号/反引号拼进 -e 的字符串就是远程代码执行。
+      # 整段事件 JSON 走环境变量送过去，node 那边 JSON.parse（第二意见 2026-10-02）。
       - name: 认出这一版要不要发（pull_request closed）
         if: github.event_name == 'pull_request'
         id: classify
@@ -56,12 +58,10 @@ jobs:
           EVENT: ${{ toJSON(github.event.pull_request) }}
         run: |
           set -euo pipefail
-          merged=$(jq -r '.merged' <<<"$EVENT")
-          base=$(jq -r '.base.ref' <<<"$EVENT")
-          head=$(jq -r '.head.ref' <<<"$EVENT")
-          out=$(node --input-type=module -e "
+          out=$(EVENT_JSON="$EVENT" node --input-type=module -e "
             import { classifyPullRequestClosed } from './packages/conventions/src/publish.ts';
-            const r = classifyPullRequestClosed({ merged: $merged, baseRef: '$base', headRef: '$head' });
+            const pr = JSON.parse(process.env.EVENT_JSON);
+            const r = classifyPullRequestClosed({ merged: pr.merged === true, baseRef: pr.base.ref, headRef: pr.head.ref });
             console.log(JSON.stringify(r));
           ")
           kind=$(jq -r '.kind' <<<"$out")
@@ -167,32 +167,36 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          # 从仓根 CHANGELOG.md 拿 Unreleased 段当正文（或当已发版本的原文）。已发版本的正文必须和 CHANGELOG.md 里
-          # 这一段原样一致；不一致就当被人手改坏了，改回来。
-          node --input-type=module -e "
+          # 从仓根 CHANGELOG.md 拿「## [$VERSION] - 日期」那一段的原文当正文（发起人已经把它从 Unreleased 收进标题）。
+          # 找不到这一版的标题 → 直接失败：说明这一版没把 Unreleased 段收进标题（发起人忘了，或 dispatch 写错版本）；
+          # 不拿 Unreleased 段顶替（那里多是占位「还没有」，照抄就发了假 release，第二意见 2026-10-02）。
+          # 正文是占位符（只剩「还没有」「没有内容」「无」）也失败：发起前没写正文不许发。
+          VERSION_ENV="$VERSION" node --input-type=module -e "
             import { readFileSync } from 'node:fs';
-            import { splitChangelog, UNRELEASED_HEADING } from './packages/shared/src/changelog.ts';
+            import { splitChangelog } from './packages/shared/src/changelog.ts';
+            const VERSION = process.env.VERSION_ENV;
+            const PLACEHOLDER = ['还没有', '没有内容', '无'];
             const body = readFileSync('CHANGELOG.md', 'utf8');
-            // 发布的是「已发 vN」之后那一次的 Unreleased → 当前版本里应出现的段。但 splitChangelog 的合同是「Unreleased
-            // → 下一版」。本步要求发布 PR 合并之后 CHANGELOG.md 的 Unreleased 段就是这一版的东西（发起人已经写好）。
-            // 已发过这一版的文案要查：读 CHANGELOG.md 里 ## [$VERSION] - <date> 那一段的原文。
             const lines = body.split(/\r?\n/);
-            const heading = '## [$VERSION] - ';
+            const heading = \`## [\${VERSION}] - \`;
             const start = lines.findIndex((l) => l.trim().startsWith(heading));
-            let section;
             if (start === -1) {
-              // CHANGELOG.md 还没把 Unreleased 段改到 ## [$VERSION]（发起人只写了 Unreleased）：就拿 Unreleased 段当正文。
-              const s = splitChangelog(body);
-              section = s.section;
-            } else {
-              let end = lines.length;
-              for (let i = start + 1; i < lines.length; i++) {
-                if (/^## \[/.test(lines[i]?.trim() ?? '')) { end = i; break; }
-              }
-              section = lines.slice(start + 1, end).join('\n').trim();
+              console.error(\`::error::CHANGELOG.md 里没有「\${heading}…」这一版：发起人没把 Unreleased 段收进标题，\`);
+              console.error(\`::error::或 workflow_dispatch 的 version 写错了。先把正文写进 Unreleased 段、\`);
+              console.error(\`::error::再重跑发布流程（不拿 Unreleased 段顶：那里多是占位「还没有」，发了就是假 release）。\`);
+              process.exit(1);
             }
+            let end = lines.length;
+            for (let i = start + 1; i < lines.length; i++) {
+              if (/^## \[/.test(lines[i]?.trim() ?? '')) { end = i; break; }
+            }
+            const section = lines.slice(start + 1, end).join('\n').trim();
             if (!section) {
-              console.error('::error::CHANGELOG.md 里这一版（$VERSION）和 Unreleased 段都是空的：发布正文没东西可贴。');
+              console.error(\`::error::CHANGELOG.md 这一版（\${VERSION}）正文是空的：发起前要把话写进 Unreleased 段。\`);
+              process.exit(1);
+            }
+            if (PLACEHOLDER.some((m) => section === m || section.includes(m))) {
+              console.error(\`::error::CHANGELOG.md 这一版（\${VERSION}）正文只剩占位「\${section.slice(0, 20)}…」，发起前要把话写进去。\`);
               process.exit(1);
             }
             console.log(section);

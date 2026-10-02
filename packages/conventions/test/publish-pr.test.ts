@@ -157,7 +157,8 @@ describe('publishPr：编排（deps 换 mock）', () => {
       git: async (args) => {
         ops.push(`git ${args.join(' ')}`);
         if (args[0] === 'status') return { code: 0, stdout: '', stderr: '' };
-        if (args[0] === 'rev-parse') return { code: 0, stdout: 'abc1234567\n', stderr: '' };
+        if (args[0] === 'rev-parse')
+          return { code: 0, stdout: 'ab1234567890abcdef1234567890abcdef123456\n', stderr: '' };
         return { code: 0, stdout: '', stderr: '' };
       },
       gh: async (args) => {
@@ -169,7 +170,7 @@ describe('publishPr：编排（deps 换 mock）', () => {
     expect(r.url).toBe('https://github.com/x/y/pull/42');
     expect(r.version).toBe('v2');
     expect(r.headBranch).toBe('release/v2');
-    expect(r.commitSha).toBe('abc1234567');
+    expect(r.commitSha).toBe('ab1234567890abcdef1234567890abcdef123456');
     // 顺序：add → commit → rev-parse → push → gh pr create
     const addIdx = ops.indexOf('git add CHANGELOG.md');
     const commitIdx = ops.indexOf(
@@ -201,7 +202,8 @@ describe('publishPr：编排（deps 换 mock）', () => {
         git: async (args) => {
           ops.push(`git ${args.join(' ')}`);
           if (args[0] === 'status') return { code: 0, stdout: '', stderr: '' };
-          if (args[0] === 'rev-parse') return { code: 0, stdout: 'abc1234567\n', stderr: '' };
+          if (args[0] === 'rev-parse')
+            return { code: 0, stdout: 'ab1234567890abcdef1234567890abcdef123456\n', stderr: '' };
           if (args[0] === 'push') return { code: 1, stdout: '', stderr: 'remote rejected' };
           return { code: 0, stdout: '', stderr: '' };
         },
@@ -222,7 +224,8 @@ describe('publishPr：编排（deps 换 mock）', () => {
         currentBranch: 'release/v2',
         git: async (args) => {
           if (args[0] === 'status') return { code: 0, stdout: '', stderr: '' };
-          if (args[0] === 'rev-parse') return { code: 0, stdout: 'abc1234567\n', stderr: '' };
+          if (args[0] === 'rev-parse')
+            return { code: 0, stdout: 'ab1234567890abcdef1234567890abcdef123456\n', stderr: '' };
           return { code: 0, stdout: '', stderr: '' };
         },
         gh: async () => ({ code: 1, stdout: '', stderr: 'GraphQL: No commits between main and release/v2' }),
@@ -238,7 +241,8 @@ describe('publishPr：编排（deps 换 mock）', () => {
         currentBranch: 'release/v2',
         git: async (args) => {
           if (args[0] === 'status') return { code: 0, stdout: '', stderr: '' };
-          if (args[0] === 'rev-parse') return { code: 0, stdout: 'abc1234567\n', stderr: '' };
+          if (args[0] === 'rev-parse')
+            return { code: 0, stdout: 'ab1234567890abcdef1234567890abcdef123456\n', stderr: '' };
           return { code: 0, stdout: '', stderr: '' };
         },
         gh: async () => ({ code: 0, stdout: 'weird output with no url\n', stderr: '' }),
@@ -258,5 +262,41 @@ describe('publishPr：编排（deps 换 mock）', () => {
         },
       }),
     ).rejects.toThrow(/查当前分支失败/);
+  });
+
+  it('故意造出的失败：commit 之后 git rev-parse HEAD 挂 → 明确失败、不拿空提交号接着 push（第二意见 2026-10-02 小毛病）', async () => {
+    const ops: string[] = [];
+    await expect(
+      publishPr({
+        env: { GITHUB_TOKEN: 'x' },
+        root,
+        currentBranch: 'release/v2',
+        git: async (args) => {
+          ops.push(`git ${args.join(' ')}`);
+          if (args[0] === 'status') return { code: 0, stdout: '', stderr: '' };
+          if (args[0] === 'rev-parse' && args.includes('HEAD'))
+            return { code: 128, stdout: '', stderr: 'something broke' };
+          return { code: 0, stdout: '', stderr: '' };
+        },
+      }),
+    ).rejects.toThrow(/git rev-parse HEAD 失败/);
+    // push / gh pr create 都没动
+    expect(ops.some((l) => l.includes('push'))).toBe(false);
+  });
+
+  it('故意造出的失败：commit 之后 git rev-parse HEAD 输出认不出提交号 → 不拿空串顶替', async () => {
+    await expect(
+      publishPr({
+        env: { GITHUB_TOKEN: 'x' },
+        root,
+        currentBranch: 'release/v2',
+        git: async (args) => {
+          if (args[0] === 'status') return { code: 0, stdout: '', stderr: '' };
+          if (args[0] === 'rev-parse' && args.includes('HEAD'))
+            return { code: 0, stdout: '???\n', stderr: '' };
+          return { code: 0, stdout: '', stderr: '' };
+        },
+      }),
+    ).rejects.toThrow(/认不出提交号/);
   });
 });
