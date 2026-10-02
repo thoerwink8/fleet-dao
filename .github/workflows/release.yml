@@ -42,12 +42,12 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: pnpm/action-setup@v4
+      # 分类要在 pnpm install 之前：普通 feat/… 合到 main 会触发这条 workflow，要先判成 noop、安安静静不动作（第二意见
+      # 2026-10-02）。判成 noop 的场合不安装依赖就让后续 step 全 if proceed 跳掉——安装撞网/锁的时候也不会把「日常合并」
+      # 这个无问题事件当红。classify 用的 packages/conventions/src/publish.ts 只用 Node 内置 API、不装依赖能直接跑。
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
 
       # a. 事件过滤：从 pull_request closed 触发时，只放行「合到 main、head 是 release/v<N>」；其余场合明说为什么不动作。
       # base/head 不 Bash 插值进 node 源码：分支名由仓库贡献者控制，单引号/反引号拼进 -e 的字符串就是远程代码执行。
@@ -123,6 +123,17 @@ jobs:
             echo "::error::这一版要不要发认不出来（merged 和分支黑白没进 classify 的三态）"
             exit 1
           fi
+
+      # 安装依赖挪到「确定要发」之后：noop / error 的场合不安装（第二意见 2026-10-02，普通 feat 合到 main 不该撞安装失败当红）。
+      - uses: pnpm/action-setup@v4
+        if: steps.invoke.outputs.proceed == 'true'
+      - uses: actions/setup-node@v4
+        if: steps.invoke.outputs.proceed == 'true'
+        with:
+          node-version: 22
+          cache: pnpm
+      - if: steps.invoke.outputs.proceed == 'true'
+        run: pnpm install --frozen-lockfile
 
       # b. 停派遣（说明性空转）：法国引擎当前 FLEET_SERVICES=fleet-api（不含 fleet-engine），派遣已经停着；
       # 等决定 0011 第 3/4 条把法国发改成「按版本+创始人拍」接了 release.yml 之后，这里才是真的动派遣。
@@ -362,6 +373,9 @@ $body
           #   ① 发之前写「尝试标记」<!-- fleet-notify-attempt: vN --> 占住位置——runner 在「写完标记、还没发出去」之间崩了的话，
           #      下一次读到的是 attempt 而不是 notified，会再发一次，不重不漏；
           #   ② 发成功才把 attempt 换成 <!-- fleet-notified: vN -->；发失败把 attempt 剥掉，别把假证据留下。
+          #   已知取舍（飞书 webhook 没有幂等键——做不到「发了不重、没发不漏」全都要）：runner 在「飞书发成、还没换
+          #   notified」之间被 cancel/超时杀掉时，下一次还会再发一次，收两条重复通知。这个窗口小于 1 秒、只在
+          #   runner 被外部杀时撞得上；选「重发优先于漏发」是因为漏一条通知比多一条难发现得多。
           jq -r '.body' <<<"$existing" | node --input-type=module -e "
             import { appendFeishuAttemptMark } from './packages/conventions/src/publish-release-logic.ts';
             let body = '';
