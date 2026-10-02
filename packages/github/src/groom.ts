@@ -32,6 +32,9 @@ export interface GroomIssue {
   body: string;
   /** 开单人的 GitHub 登录名；账号删了是 null。 */
   author: string | null;
+  /** 开单人的 GitHub 数字编号和类型（User、Bot…）：拉单按作者白名单认人用（白名单有数字编号的只按编号认）；账号删了是 null。 */
+  authorId: number | null;
+  authorType: string | null;
   /** 开单人是不是我们自己的机器人（「干活的」「引擎」两个之一）：milestonePlan 判「机器人开的」用它。 */
   authorIsBot: boolean;
   createdAt: string;
@@ -108,6 +111,8 @@ export async function readGroomFacts(
       title: i.title,
       body: i.body ?? '',
       author: i.user?.login ?? null,
+      authorId: i.user?.id ?? null,
+      authorType: i.user?.type ?? null,
       authorIsBot: deps.bots.is('engine', i.user) || deps.bots.is('agent', i.user),
       createdAt: i.created_at,
       updatedAt: i.updated_at,
