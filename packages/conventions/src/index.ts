@@ -56,6 +56,7 @@ export {
   type Problem,
   type Report,
 } from './doc-pointers.ts';
+export { FLOW_BRANCH_PATTERN, isFlowBranch } from './flow-branch.ts';
 export {
   type GitHubCommenter,
   type GitHubPrLabeler,
@@ -134,6 +135,12 @@ export { type MdDoc, parseMd } from './markdown.ts';
 export { type GateResult, type GitHubReads, gateGitHub, gatePr, runMergeGate } from './merge-gate.ts';
 export {
   type ChangedFile,
+  COLD_VERIFY_CONTEXT,
+  COLD_VERIFY_MAX_ROUND,
+  type ColdVerifyNeed,
+  checkColdVerify,
+  coldVerifyFrom,
+  coldVerifyNeed,
   destructiveIn,
   GATE_CONTEXT,
   parseRiskPaths,
@@ -145,6 +152,7 @@ export {
   type RiskyFile,
   riskyFiles,
   SECOND_OPINION_CONTEXT,
+  statusByContext,
   TIER_COLUMN,
   TIERS,
   type Tier,

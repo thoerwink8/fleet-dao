@@ -5,7 +5,10 @@
  * 任务的分支：带上执行编号——同一张单被重新起一轮（上一条放弃了或做完了）时，上一轮的分支在 GitHub 上还在，同名会推不上去。
  */
 export function taskBranch(issueNumber: number, runKey: string): string {
-  return `fleet/${issueNumber}-t${runKey.replace(/-/g, '').slice(0, 8)}`;
+  const name = `fleet/${issueNumber}-t${runKey.replace(/-/g, '').slice(0, 8).toLowerCase()}`;
+  // 起出来的名字一定要被 isTaskBranch（以及合并闸的 isFlowBranch）认得：认不得的分支名会让引擎的 PR 绕开合并闸的验收要求
+  if (!isTaskBranch(name)) throw new Error(`执行编号「${runKey}」起不出合规的任务分支名（${name}）`);
+  return name;
 }
 
 const TASK_BRANCH = /^fleet\/\d+-t[0-9a-f]{8}$/;

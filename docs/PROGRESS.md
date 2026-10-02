@@ -29,6 +29,18 @@
 - 验证：先看到 `TestUnmarkedProxyWithoutCredentialStripsToOwn` 以同一句报错失败，改完 `go test`（launcher）通过。20:18 本机迁移回读：`migration.json` 状态 `migrated`，磁盘命令和 Mirasim 的 Claude 启动命令都是 `releases/44e35673b882e819a76c0bbb7b5c6322152cdaf067fdd2ef9b42fb525c1d064b/mirasim-reclaude.exe`；`--fleet-version` 的 `sourceCommit` 是 `c7c77f0eba8c313ac284f9092fac610075d8882c`，`sourceHash` 与目录一致。
 - 20:26 PR [#627](https://github.com/thoerwink8/fleet-dao/pull/627) 已合进主线 `e1d35186`。别的机器在 fleet-dao 检出里跑 `pnpm agents:sync`（或新开 AI 会话，开会话钩子自己同步）就会换上。有 Go 的当场编译；没有 Go 的等主线 `mirasim-launcher` 这轮构建成功再同步。
 - 还没验证：真实两向请求扣费；明确选了「平台」但 Mirasim 仍不带令牌时，仍会拒绝。
+## 2026-10-02（验收段 555-2：冷调用接通合并闸）
+
+- 555-2（母单 #555，排期见 `docs/decisions/0009-v3-implementation-plan.md` 第 6 行）：**合并闸加一条输入 `cold-verify`**——
+  闸只读这条状态（闸里不起模型调用，判法必须确定，design 第五节），冷调用在装配侧跑、结论贴成状态；新开 context，
+  不复用 `second-opinion`。**范围是引擎任务工作流（#632）开的 PR**（分支 `fleet/<单号>-t<8 位>`）：它们合之前要有通过的 cold-verify；
+  人手开的 PR（含碰先审后合路径的）照旧只要第二意见。`.github/workflows/merge-gate.yml` 的 status 事件放行它；
+  `packages/conventions/test/merge-gate-inputs.test.ts` 的放行清单跟着加一条。装配侧新增
+  `packages/engine/src/cold-verify-{status,post,pick,run}.ts`：结论→状态（只有 pass 才 success）、贴状态、
+  `ChooseModelForFamily` 的生产实现（#555-1 留下的注入缺口）、装配入口（读不到一律贴 failure）。结果：
+  `specs/555-2-冷调用进合并闸/结果.md`。
+- 555-2 还欠：`ColdVerifySources` 的三个真取样口（GitHub diff / 需求文档 / 作者族）和任务工作流的 `coldVerify` 活动真实现
+  （S2-5b，母单 #632）。闸合进来以后，引擎的任务 PR 没有 cold-verify 就合不了；人手的 PR 不受影响。
 
 ## 2026-10-02（Mirasim 切换与一条命令迁移，实施）
 
