@@ -5,6 +5,7 @@ import { type Db, registerScheduledJobs } from '@fleet-dao/db';
 import { CANARY_JOB } from '../jobs/canary.ts';
 import { GITHUB_RECONCILE_JOB } from '../jobs/github-reconcile.ts';
 import { HOURLY_RECONCILE_JOB } from '../jobs/hourly-reconcile.ts';
+import { INTAKE_JOB } from '../jobs/intake.ts';
 import { ROUTE_PROBE_JOB } from '../jobs/route-probe.ts';
 import { WATCHDOG_JOB } from '../jobs/watchdog.ts';
 
@@ -14,6 +15,7 @@ export const ENGINE_JOBS = [
   HOURLY_RECONCILE_JOB,
   CANARY_JOB,
   WATCHDOG_JOB,
+  INTAKE_JOB,
 ] as const;
 
 export async function registerEngineJobs(db: Db): Promise<void> {

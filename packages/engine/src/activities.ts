@@ -29,6 +29,7 @@ import {
   type HourlyReconcileJobDeps,
   runHourlyReconcileJob,
 } from './jobs/hourly-reconcile.ts';
+import { type IntakeDeps, IntakeFailedError, runIntakeJob } from './jobs/intake.ts';
 import { RouteProbeFailedError, type RouteProbeJobDeps, runRouteProbeJob } from './jobs/route-probe.ts';
 import { runWatchdogJob, type WatchdogDeps, WatchdogFailedError } from './jobs/watchdog.ts';
 import type { Limits } from './limits.ts';
@@ -282,6 +283,8 @@ export interface EngineJobs {
   canary?: (client: Client) => CanaryDeps;
   /** 看门狗（#203）：按登记表看各定时任务新不新鲜、推撤提醒（只读写库）。 */
   watchdog?: () => WatchdogDeps;
+  /** 拉单（#632）：读开着开关的仓里该做的单、起任务工作流（起工作流、数在跑的用这次活动的 Temporal 客户端；taskQueue 同上）。 */
+  intake?: (client: Client, taskQueue: string) => IntakeDeps;
 }
 
 /**
@@ -406,6 +409,30 @@ async function watchSchedules(jobs: EngineJobs): Promise<unknown> {
   }
 }
 
+/** 引擎自己的活动：拉单跑一轮。没跑成的已经记进 schedule_runs，这里再报成不重试的失败（下一轮 5 分钟后照来）。 */
+async function intakeRound(jobs: EngineJobs): Promise<unknown> {
+  const make = jobs.intake;
+  if (!make) {
+    throw new PortError(
+      'JOB_NOT_CONFIGURED',
+      '这个引擎工人没装拉单（假端口，或真端口没接上库和 GitHub）：不装作拉过',
+      { retryable: false },
+    );
+  }
+  try {
+    const ctx = Context.current();
+    return await runIntakeJob(make(ctx.client, ctx.info.taskQueue));
+  } catch (error) {
+    if (error instanceof IntakeFailedError) {
+      throw new PortError('INTAKE_FAILED', error.message, {
+        retryable: false,
+        details: { runId: error.runId },
+      });
+    }
+    throw error;
+  }
+}
+
 /** 巡检没装（假端口，或真端口没接上库和 GitHub）：明确报 JOB_NOT_CONFIGURED，不装作巡检过。 */
 function canaryDeps(jobs: EngineJobs): CanaryDeps {
   const make = jobs.canary;
@@ -495,6 +522,7 @@ export function createActivities(
   out.canaryOpen = timed('canaryOpen', () => canaryOpen(jobs), record);
   out.canaryCheck = timed('canaryCheck', (input) => canaryCheck(jobs, input), record);
   out.watchSchedules = timed('watchSchedules', () => watchSchedules(jobs), record);
+  out.intakeRound = timed('intakeRound', () => intakeRound(jobs), record);
   for (const name of TASK_ACTIVITY_NAMES) {
     out[name] = timed(
       name,

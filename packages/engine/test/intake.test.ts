@@ -15,6 +15,7 @@ import {
   incompleteKey,
   MAX_RUNNING_TASKS,
   MAX_STARTS_PER_ROUND,
+  MERGE_GATE_REQUIRES_COLD_VERIFY,
   runIntakeJob,
   screenListed,
   screenPlan,
@@ -24,7 +25,14 @@ const NOW = new Date('2026-10-02T14:00:00.000Z');
 const SINCE = '2026-09-30T00:00:00.000Z';
 const V1 = { number: 3, title: 'v1 三段一条龙' };
 const V2 = { number: 4, title: 'v2 下一版' };
-const REPO: IntakeRepo = { id: 'r1', owner: 'acme', name: 'demo', autoDispatchSince: SINCE };
+const REPO: IntakeRepo = {
+  id: 'r1',
+  owner: 'acme',
+  name: 'demo',
+  defaultBranch: 'main',
+  testCommand: 'pnpm check',
+  autoDispatchSince: SINCE,
+};
 
 const BODY = [
   '## 场景',
@@ -76,7 +84,7 @@ const plan = (over: Partial<IntakePlan> = {}): IntakePlan => ({
 
 interface Harness {
   deps: IntakeDeps;
-  started: { issueNumber: number; title: string }[];
+  started: { issueNumber: number; title: string; body: string; author: IntakeIssue['author'] }[];
   comments: { issueNumber: number; key: string; body: string }[];
   finished: { id: number; result: ScheduleResult }[];
   logs: { level: string; text: string }[];
@@ -117,8 +125,8 @@ function harness(
     async runningTasks() {
       return 0;
     },
-    async start({ issueNumber, title }) {
-      started.push({ issueNumber, title });
+    async start({ issueNumber, title, body, author }) {
+      started.push({ issueNumber, title, body, author });
       return 'started';
     },
     async comment({ issueNumber, key, body }) {
@@ -136,6 +144,7 @@ function harness(
         finished.push({ id, result });
       },
     },
+    gateLive: true,
     now: () => NOW,
     log: (level, text) => {
       logs.push({ level, text });
@@ -192,11 +201,50 @@ describe('screenPlan · 现读之后再核一遍', () => {
   });
 });
 
+describe('runIntakeJob · 合并闸还没认冷验收', () => {
+  it('【故意造出的失败】开着「让 AI 接活」的仓、合并闸却还没认冷验收：这一轮记没跑成、一张单都不拉、不读 GitHub——开关开早了要看得见', async () => {
+    const h = harness({ gateLive: false });
+    await expect(runIntakeJob(h.deps)).rejects.toThrow(/合并闸还没认冷验收/);
+    expect(h.started).toEqual([]);
+    expect(h.planReads).toEqual([]);
+    expect(h.finished[0]?.result).toMatchObject({ outcome: 'failed' });
+  });
+
+  it('开关全关：合并闸认没认都是正常的空闲，记 ok', async () => {
+    const h = harness({
+      gateLive: false,
+      async repos() {
+        return [{ ...REPO, autoDispatchSince: null }];
+      },
+    });
+    expect(await runIntakeJob(h.deps)).toMatchObject({ outcome: 'ok', scanned: 1, found: 0 });
+  });
+
+  it('默认值：没有显式给的时候用代码里的常量（S2-5 合并闸认了冷验收才会改成 true）', async () => {
+    const { gateLive: _unused, ...rest } = harness().deps;
+    const h = harness();
+    const deps: IntakeDeps = { ...rest };
+    // 常量现在是 false：开着开关的仓就是拒绝（S2-5 把常量改成 true 时，这条跟着改成「照常拉」）
+    if (!MERGE_GATE_REQUIRES_COLD_VERIFY)
+      await expect(runIntakeJob(deps)).rejects.toThrow(/合并闸还没认冷验收/);
+    else expect(await runIntakeJob(deps)).toMatchObject({ outcome: 'ok' });
+    expect(h.started).toEqual([]);
+  });
+});
+
 describe('runIntakeJob · 一轮', () => {
   it('一张好单 → 起一条任务工作流，记 ok（扫了 仓+单，处理了 1）', async () => {
     const h = harness();
     const run = await runIntakeJob(h.deps);
-    expect(h.started).toEqual([{ issueNumber: 12, title: '给驾驶舱加状态' }]);
+    // 起的时候把开单人和正文原样交过去（真依赖据此建任务行：原话、谁要的）
+    expect(h.started).toEqual([
+      {
+        issueNumber: 12,
+        title: '给驾驶舱加状态',
+        body: BODY,
+        author: { login: 'frank', id: 1, type: 'User' },
+      },
+    ]);
     expect(run).toMatchObject({ runId: 7, outcome: 'ok', scanned: 2, found: 1 });
     expect(h.finished).toEqual([{ id: 7, result: { outcome: 'ok', scanned: 2, found: 1 } }]);
   });
@@ -261,9 +309,9 @@ describe('runIntakeJob · 一轮', () => {
       async dispatched(_r, n) {
         return dispatched.includes(n);
       },
-      async start({ issueNumber, title }) {
+      async start({ issueNumber, title, body, author }) {
         dispatched.push(issueNumber);
-        h.started.push({ issueNumber, title });
+        h.started.push({ issueNumber, title, body, author });
         return 'started';
       },
     });

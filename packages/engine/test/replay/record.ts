@@ -15,7 +15,7 @@ import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import type { WorkflowHandle } from '@temporalio/client';
 import { historyToJSON } from '@temporalio/common/lib/proto-utils.js';
 import type { TestWorkflowEnvironment } from '@temporalio/testing';
-import type { EngineTasks } from '../../src/activities.ts';
+import type { EngineJobs, EngineTasks } from '../../src/activities.ts';
 import {
   type FusionStatus,
   pauseSignal,
@@ -37,6 +37,7 @@ import {
 } from '../../src/fakes.ts';
 import type { RouteChoice } from '../../src/ports.ts';
 import { type TaskStatus, type TaskWorkflowInput, taskStatusQuery } from '../../src/task-contract.ts';
+import { idleDeps } from '../intake-script.ts';
 import {
   createEnv,
   engineBundle,
@@ -64,6 +65,8 @@ type Scenario = {
   script?: Partial<FakeScript>;
   /** 任务工作流要的活动（脚本化的）；不给就是没装。 */
   tasks?: EngineTasks;
+  /** 定时任务要的东西（脚本化的）；不给就是没装。 */
+  jobs?: EngineJobs;
   run(run: Run): Promise<Record<string, WorkflowHandle>>;
 };
 
@@ -131,6 +134,19 @@ const taskStatusUntil = (handle: WorkflowHandle, check: (s: TaskStatus) => boole
   waitUntil(async () => check(await handle.query(taskStatusQuery)), what);
 
 const SCENARIOS: Record<string, Scenario> = {
+  // 拉单（#632）：开关全关的一轮，工作流调一个活动就收工。
+  'intake-idle': {
+    jobs: { intake: () => idleDeps() },
+    async run({ env, queue }) {
+      const handle = await env.client.workflow.start(WORKFLOW_TYPES.intake, {
+        taskQueue: queue,
+        workflowId: 'intake-fixture',
+        args: [{ schemaVersion: 1 }],
+      });
+      await handle.result();
+      return { 'intake-idle': handle };
+    },
+  },
   // 任务工作流最顺的一条：读交代、动手、推分支开 PR、CI 绿、验收过、挂自动合并、合上、关单、收树。
   'task-merged': {
     tasks: scripted().tasks,
@@ -476,7 +492,10 @@ for (const name of names) {
         }
         return out;
       },
-      scenario.tasks ? { tasks: scenario.tasks } : {},
+      {
+        ...(scenario.tasks ? { tasks: scenario.tasks } : {}),
+        ...(scenario.jobs ? { jobs: scenario.jobs } : {}),
+      },
     );
     for (const [fixture, { workflowId, json }] of Object.entries(captured)) {
       const file = `${OUT}${fixture}.json`;

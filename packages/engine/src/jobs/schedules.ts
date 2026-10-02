@@ -14,6 +14,7 @@ import {
   type CanaryInput,
   type GitHubReconcileInput,
   type HourlyReconcileInput,
+  type IntakeInput,
   type RouteProbeInput,
   type WatchdogInput,
   WORKFLOW_TYPES,
@@ -30,6 +31,7 @@ import {
   HOURLY_RECONCILE_JOB,
   HOURLY_RECONCILE_OFFSET_MINUTES,
 } from './hourly-reconcile.ts';
+import { INTAKE_EVERY_MINUTES, INTAKE_JOB, INTAKE_OFFSET_MINUTES } from './intake.ts';
 import { RETIRED_SCHEDULES, type RetiredSchedule } from './retired-schedules.ts';
 import { ROUTE_PROBE_EVERY_MINUTES, ROUTE_PROBE_JOB, ROUTE_PROBE_OFFSET_MINUTES } from './route-probe.ts';
 import { WATCHDOG_EVERY_MINUTES, WATCHDOG_JOB, WATCHDOG_OFFSET_MINUTES } from './watchdog.ts';
@@ -39,6 +41,7 @@ export const ROUTE_PROBE_SCHEDULE_ID = ROUTE_PROBE_JOB.id;
 export const HOURLY_RECONCILE_SCHEDULE_ID = HOURLY_RECONCILE_JOB.id;
 export const CANARY_SCHEDULE_ID = CANARY_JOB.id;
 export const WATCHDOG_SCHEDULE_ID = WATCHDOG_JOB.id;
+export const INTAKE_SCHEDULE_ID = INTAKE_JOB.id;
 
 interface EngineSchedule {
   scheduleId: string;
@@ -54,6 +57,7 @@ export function engineSchedules(taskQueue: string): EngineSchedule[] {
   const hourlyInput: HourlyReconcileInput = { schemaVersion: 1 };
   const canaryInput: CanaryInput = { schemaVersion: 1 };
   const watchdogInput: WatchdogInput = { schemaVersion: 1 };
+  const intakeInput: IntakeInput = { schemaVersion: 1 };
   return [
     {
       scheduleId: GITHUB_RECONCILE_SCHEDULE_ID,
@@ -176,6 +180,30 @@ export function engineSchedules(taskQueue: string): EngineSchedule[] {
         overlap: ScheduleOverlapPolicy.SKIP,
         // Temporal 停了一阵再起来：只补最近一轮（每轮都是看当时的库）
         catchupWindow: `${WATCHDOG_EVERY_MINUTES} minutes`,
+        pauseOnFailure: false,
+      },
+    },
+    {
+      // 拉单（#632）：每 5 分钟引擎自己到 GitHub 读该做的单、起任务工作流；和别的定时任务错开。一轮秒到分钟级（读 GitHub），
+      // 活动最多 10 分钟（job 档），卡死的不拖到下一轮之后太久
+      scheduleId: INTAKE_SCHEDULE_ID,
+      spec: {
+        intervals: [{ every: `${INTAKE_EVERY_MINUTES} minutes`, offset: `${INTAKE_OFFSET_MINUTES} minutes` }],
+      },
+      action: {
+        type: 'startWorkflow',
+        workflowType: WORKFLOW_TYPES.intake,
+        workflowId: INTAKE_SCHEDULE_ID,
+        taskQueue,
+        args: [intakeInput],
+        workflowRunTimeout: '15 minutes',
+      },
+      policies: {
+        // 上一轮还没完就跳过：两轮叠着拉同一批单，会重复读 GitHub、重复留言（留言有幂等键，起工作流有 REJECT_DUPLICATE，
+        // 但没必要叠）
+        overlap: ScheduleOverlapPolicy.SKIP,
+        // Temporal 停了一阵再起来：只补最近一轮（每轮都是看当时的 GitHub，补旧的没意义）
+        catchupWindow: `${INTAKE_EVERY_MINUTES} minutes`,
         pauseOnFailure: false,
       },
     },

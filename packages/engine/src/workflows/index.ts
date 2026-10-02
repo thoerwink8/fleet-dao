@@ -5,6 +5,7 @@ export { canaryWorkflow } from './canary.ts';
 export { githubReconcileWorkflow } from './github-reconcile.ts';
 export { helloWorkflow } from './hello.ts';
 export { hourlyReconcileWorkflow } from './hourly-reconcile.ts';
+export { intakeWorkflow } from './intake.ts';
 export { routeProbeWorkflow } from './route-probe.ts';
 export { taskWorkflow } from './task.ts';
 export { watchdogWorkflow } from './watchdog.ts';
