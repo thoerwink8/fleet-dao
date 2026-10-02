@@ -351,3 +351,27 @@
 - 等 `v3-quick-fixes` 回来后挂起 `v3-w4-fusion-runner`（554-1 无头一次性子进程段 runner，W4 第一片，夜里最大）；
 - 等 `v3-routing-db` 回来后挂起 `routing-two-layer-engine`；
 - 家长醒过来前提下：W3 那 7 件要拍的事按个回 1/2 选项。
+
+## 2026-10-02 10:20 UTC（关了、改写、起单）
+
+**关了的**：
+- **#440/#454/#69/#489 关成 NOT_PLANNED**（#440 合并队列概念随 Fusion 删；#454 被 #509 删两个模式 + #561 内存准入取代；#69 讨论半已被决定 0006 + discuss skill 落地、巡审被方案 §十三 GPT 挑错吃掉；#489 第 1 条已修 #564，第 2/3 条属旧 Fusion 会话模型）。`gh issue close <#> --reason "not planned" --comment <取代关系>`。
+- **#531 关成 COMPLETED**（`pnpm issue:close 531`；specs/531-删帅位座位/结果.md 在主线上）。
+
+**改写/重挂**：
+- **#446**（从已关的 #443 母单下拆出、挂 #556、改写为「#531 后续：删 claim 脚本、推前钩子、claim-status、库表（删数据单独清单）」）；
+- **#556**（按方案第九节逐条重写怎么算做完）；
+- **#69**（改写挂 #555）；
+- **#577**（#554-1 无头 runner，agent 自动开）；
+- **#574**（routing-two-layer-db，agent 自动开）。
+
+**还在等**：v3-quick-fixes（4 PR 全回收：#571、#572、#575、#576、#578）+ v3-routing-db（#580）+ v3-headless-runner（#577）三个工作流回来。
+
+## 2026-10-02 10:25 UTC（01 批 6 张 PR 已合主线）
+
+**合主线（2026-10-02 02:10-02:30 间）**：#571（决策 0008/0009、进度落盘）、#572（#531 HANDOVER_USAGE 删除钉子测试）、#575（#489 spec 捞回主线）、#576（issue-close 加 `--superseded-by`）、#578（W1 文档对齐，主线即认定 0003 标替代/goals 收口/AGENTS 本仓段同步/临时调整表/ops 收口）、#579（Mirasim 方案）。
+
+**下一步**：
+1. **`v3-headless-runner`**（#577，W4 主骨架）合并下来后 → 派 **554-2**（done-check 重做到看 CI 而非 lastSessionTest）→ **554-3**（tier.ts 纯函数）→ **554-4**（runs 迁移）。
+2. **`v3-routing-db`**（#574/#580）合并下来后 → 派 **routing-two-layer-engine**（pickRoute 走两级）。
+3. W3 那 7 件（WSL 修、法国引擎重开、法国发布机制、#227 走 GitHub Actions、飞书推不推、#454 关留史、#323 开关放哪）家长醒后按 1/2 回。
