@@ -66,6 +66,7 @@ export type EngineGitHub = Pick<
   | 'bundleCommits'
   | 'writeSpecDoc'
   | 'readSpecDoc'
+  | 'readIssue'
   | 'readIssuePlan'
   | 'readRepoFile'
   | 'pullFiles'

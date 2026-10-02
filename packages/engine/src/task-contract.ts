@@ -130,6 +130,11 @@ export interface DeliveryRead {
   head: string;
   commits: number;
   changedFiles: string[];
+  /**
+   * 工作树里还有没提交的改动（含没加进 git 的新文件，不含 .gitignore 忽略的）。有就不算交付完：只有提交了的才会进 PR。
+   * 真实现一定给；老历史里没有这个字段（当作没有）。
+   */
+  leftover?: string[];
 }
 
 export interface ColdVerifyInput {
@@ -188,8 +193,10 @@ export interface ArmAutoMergeInput {
 export interface ArmAutoMergeResult {
   /** 自动合并挂上了（或本来就挂着）。 */
   armed: boolean;
-  /** 挂的时候发现已经合了。 */
+  /** 挂的时候发现已经合了（或本来就满足合并条件、当场合了）。 */
   merged: boolean;
+  /** merged 时的合并提交。 */
+  mergeCommit?: string;
   why?: string;
 }
 
@@ -205,4 +212,6 @@ export type MergeWait =
   | { state: 'merged'; mergeCommit?: string }
   | { state: 'closed' }
   | { state: 'head_moved'; head: string }
+  /** 自动合并被撤掉了（人撤的，或 GitHub 因为头变了撤的）：回去重新挂。 */
+  | { state: 'unarmed' }
   | { state: 'waiting'; detail: string };

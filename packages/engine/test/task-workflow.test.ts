@@ -481,3 +481,80 @@ describe('任务工作流 · 【故意造出的失败】不装作做过', { time
     );
   });
 });
+
+describe('任务工作流 · 交付和合并的细节', { timeout: 60_000 }, () => {
+  it('提交了一部分、工作树里还留着没提交的改动：不推，意见写明是哪些文件，下一轮提交完再推', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({
+      delivery: (n) => ({
+        head: fakeHead(300 + n),
+        commits: 1,
+        changedFiles: ['a.ts'],
+        leftover: n === 1 ? [' M b.ts', '?? c.ts'] : [],
+      }),
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 2 });
+    expect(calls.segment[1]?.feedback.join('\n')).toContain('还有没提交的改动');
+    expect(calls.segment[1]?.feedback.join('\n')).toContain('?? c.ts');
+    expect(world.count('pushBranch')).toBe(1); // 第一轮没推
+  });
+
+  it('一个提交都没有、工作树里却有改动：意见两样都说', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({
+      delivery: (n) => ({
+        head: fakeHead(400 + n),
+        commits: n === 1 ? 0 : 1,
+        changedFiles: [],
+        leftover: n === 1 ? ['?? new.ts'] : [],
+      }),
+    });
+    await withWorker(env, world, async (q) => (await start(q, input())).result() as Promise<TaskRun>, {
+      tasks,
+    });
+    const text = calls.segment[1]?.feedback.join('\n') ?? '';
+    expect(text).toContain('没有产生新的提交');
+    expect(text).toContain('?? new.ts');
+  });
+
+  it('挂的时候发现已经满足合并条件、当场合了：不再等，关单评论里带合并提交', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({
+      arm: () => ({ armed: false, merged: true, mergeCommit: 'cafe1234567890' }),
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(calls.merged).toBe(0);
+    expect(world.callsOf('closeIssue')[0]?.input).toMatchObject({
+      comment: expect.stringContaining('cafe123'),
+    });
+  });
+
+  it('等合并时自动合并被撤掉了：回去重新挂，挂上再等', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({
+      merged: (n) => (n === 1 ? { state: 'unarmed' } : { state: 'merged', mergeCommit: 'beef1234567890' }),
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(calls.arm).toBe(2);
+    expect(calls.merged).toBe(2);
+    expect(calls.order.slice(-4)).toEqual(['arm', 'merged', 'arm', 'merged']);
+  });
+});
