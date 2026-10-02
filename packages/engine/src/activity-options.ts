@@ -18,6 +18,24 @@ import type {
 import type { CanaryState, CanaryStepResult } from './jobs/canary.ts';
 import type { Limits } from './limits.ts';
 import type { EnginePorts, StartSessionInput, StartSessionResult } from './ports.ts';
+import type { TaskBriefResult } from './runner/task-brief.ts';
+import {
+  type ArmAutoMergeInput,
+  type ArmAutoMergeResult,
+  type CheckGuardedInput,
+  type ColdVerifyInput,
+  type ColdVerifyResult,
+  type DeliveryRead,
+  type GuardedPaths,
+  MERGE_POLL_MINUTES,
+  type MergeWait,
+  type ReadDeliveryInput,
+  type ReadTaskBriefInput,
+  type RunSegmentInput,
+  type RunSegmentResult,
+  SEGMENT_MINUTES,
+  type WaitMergedInput,
+} from './task-contract.ts';
 
 type PortActivities = {
   [K in Exclude<keyof EnginePorts, 'startSession'>]: (
@@ -58,6 +76,21 @@ export type EngineActivities = PortActivities & {
   canaryCheck(input: { schemaVersion: 1; state: CanaryState }): Promise<CanaryStepResult>;
   /** 引擎自己的活动：看门狗跑一轮（按登记表看各定时任务新不新鲜、推撤提醒），结局记进 schedule_runs（jobs/watchdog.ts）。 */
   watchSchedules(input: WatchdogInput): Promise<WatchdogRun>;
+  // —— 任务工作流（task-contract.ts；#632）要的活动：现读单子、起一次无头动手会话、读交付、冷验收、合并这几步 ——
+  /** 现读单子和它指着的需求文档，拼出动手的交代（runner/task-brief.ts）。单子读不到抛错；缺栏回 problems。 */
+  readTaskBrief(input: ReadTaskBriefInput): Promise<TaskBriefResult>;
+  /** 起一次无头动手会话（one-shot）：会话没跑成回 ok:false 和证据，交给失败分流；起不来的基础设施问题抛错。 */
+  runSegment(input: RunSegmentInput): Promise<RunSegmentResult>;
+  /** 读会话交付的东西（工作树现在的头、比起点多几个提交、改了哪些文件）。读不到抛错，不回空。 */
+  readDelivery(input: ReadDeliveryInput): Promise<DeliveryRead>;
+  /** 合并之前的冷验收（换一个不同的族）。没能做出来回 unavailable，不当成没过。 */
+  coldVerify(input: ColdVerifyInput): Promise<ColdVerifyResult>;
+  /** 这个 PR 改到的文件里，哪些是改标准的路径（要创始人同意）、哪些是先审后合的路径。读不到抛错，不当成没碰到。 */
+  checkGuarded(input: CheckGuardedInput): Promise<GuardedPaths>;
+  /** 给 PR 挂上自动合并（squash，只合 expectedHead）。 */
+  armAutoMerge(input: ArmAutoMergeInput): Promise<ArmAutoMergeResult>;
+  /** 等 PR 合并（长轮询，到点回 waiting 由工作流再来一次）。 */
+  waitMerged(input: WaitMergedInput): Promise<MergeWait>;
 };
 
 export type ActivityName = keyof EngineActivities;
@@ -70,8 +103,11 @@ export type ActivityName = keyof EngineActivities;
  * 路由探针一轮里每条路由最长几分钟（起会话、等回答、没通隔 20 秒再探一次），同时探两条，也在 10 分钟里。
  * 每小时对账一轮最多看 80 棵残留的树（每棵以会话用户跑几条 git），也在 10 分钟里。
  * 看门狗一轮是几条查库、写提醒，秒级；卡住了也在 10 分钟里收场（上一轮没完下一轮跳过，一直卡着后端的看守看得见）。
+ * segment：一次无头会话（动手、冷验收）——限时是会话最长时间加一刻钟收尾，必须心跳；只试一次：会话贵又不幂等，
+ * 活动失败怎么办（重试、换路由、挂起）由工作流按失败分流定，不在 Temporal 这一层自动再起一遍。
+ * poll：长轮询（等合并）——一次最多 MERGE_POLL_MINUTES 分钟加余量，必须心跳；工人丢了重试没有副作用（只读）。
  */
-export type Profile = 'quick' | 'git' | 'setup' | 'watch' | 'ci' | 'tests' | 'job';
+export type Profile = 'quick' | 'git' | 'setup' | 'watch' | 'ci' | 'tests' | 'job' | 'segment' | 'poll';
 
 export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
   pickRoute: 'quick',
@@ -112,6 +148,13 @@ export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
   canaryOpen: 'job',
   canaryCheck: 'job',
   watchSchedules: 'job',
+  readTaskBrief: 'git',
+  runSegment: 'segment',
+  readDelivery: 'git',
+  coldVerify: 'segment',
+  checkGuarded: 'git',
+  armAutoMerge: 'git',
+  waitMerged: 'poll',
 };
 
 /** quick 一档（含排进合并队列、撤出）一次尝试的限时。合并队列的空闲收工时长不能比它短（limits.ts 的下限）。 */
@@ -173,6 +216,18 @@ export function profileOptions(profile: Profile, limits: Limits): ActivityOption
       };
     case 'job':
       return { startToCloseTimeout: '10 minutes', retry: retry(1, '1 second', '1 second') };
+    case 'segment':
+      return {
+        startToCloseTimeout: `${SEGMENT_MINUTES + 15} minutes`,
+        heartbeatTimeout,
+        retry: retry(1, '1 second', '1 second'),
+      };
+    case 'poll':
+      return {
+        startToCloseTimeout: `${MERGE_POLL_MINUTES + 5} minutes`,
+        heartbeatTimeout,
+        retry: retry(3, '5 seconds', '1 minute'),
+      };
     case 'tests':
       return {
         startToCloseTimeout: `${limits.testsMinutes} minutes`,

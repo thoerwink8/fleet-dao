@@ -59,6 +59,7 @@ describe('工作流文件的规矩', () => {
       'index.ts',
       'kit.ts',
       'route-probe.ts',
+      'task.ts',
       'verify.ts',
       'watchdog.ts',
     ]);

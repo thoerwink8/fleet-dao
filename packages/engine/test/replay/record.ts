@@ -11,9 +11,11 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import type { WorkflowHandle } from '@temporalio/client';
 import { historyToJSON } from '@temporalio/common/lib/proto-utils.js';
 import type { TestWorkflowEnvironment } from '@temporalio/testing';
+import type { EngineTasks } from '../../src/activities.ts';
 import {
   type FusionStatus,
   pauseSignal,
@@ -34,6 +36,7 @@ import {
   fakeHead,
 } from '../../src/fakes.ts';
 import type { RouteChoice } from '../../src/ports.ts';
+import { type TaskStatus, type TaskWorkflowInput, taskStatusQuery } from '../../src/task-contract.ts';
 import {
   createEnv,
   engineBundle,
@@ -46,6 +49,7 @@ import {
   waitUntil,
   withWorker,
 } from '../support.ts';
+import { scripted } from '../task-script.ts';
 
 const OUT = fileURLToPath(new URL('./fixtures/', import.meta.url));
 const repo = { ...REPO, id: 'repo-fixture', name: 'fixture' };
@@ -56,7 +60,12 @@ interface Run {
   queue: string;
 }
 /** 返回「夹具名 → 工作流」：跑到想要的位置就返回，那一刻的历史就是夹具。 */
-type Scenario = { script?: Partial<FakeScript>; run(run: Run): Promise<Record<string, WorkflowHandle>> };
+type Scenario = {
+  script?: Partial<FakeScript>;
+  /** 任务工作流要的活动（脚本化的）；不给就是没装。 */
+  tasks?: EngineTasks;
+  run(run: Run): Promise<Record<string, WorkflowHandle>>;
+};
 
 const startSubtask = ({ env, queue }: Run, key: string, over: Partial<SubtaskSpec> = {}) => {
   const input = subtaskInput(spec(key, over), {
@@ -102,7 +111,64 @@ const GPT_ROUTE: RouteChoice = {
 };
 const FUSION_ROUTES = [...FAKE_ROUTES, GPT_ROUTE];
 
+/** 任务工作流（#632 S2-4）：驾驶舱后端按这张单起的那一个。 */
+const startTask = ({ env, queue }: Run) => {
+  const input: TaskWorkflowInput = {
+    schemaVersion: 1,
+    taskId: 'task-fixture',
+    repo,
+    issueNumber: 12,
+    title: '给驾驶舱加状态',
+  };
+  return env.client.workflow.start(WORKFLOW_TYPES.task, {
+    taskQueue: queue,
+    workflowId: taskWorkflowId(repo, input.issueNumber),
+    args: [input],
+  });
+};
+
+const taskStatusUntil = (handle: WorkflowHandle, check: (s: TaskStatus) => boolean, what: string) =>
+  waitUntil(async () => check(await handle.query(taskStatusQuery)), what);
+
 const SCENARIOS: Record<string, Scenario> = {
+  // 任务工作流最顺的一条：读交代、动手、推分支开 PR、CI 绿、验收过、挂自动合并、合上、关单、收树。
+  'task-merged': {
+    tasks: scripted().tasks,
+    async run(r) {
+      const handle = await startTask(r);
+      await handle.result();
+      return { 'task-merged': handle };
+    },
+  },
+  // 交代不全：一个会话都没起，停着等人补齐点「继续」。
+  'task-parked-brief': {
+    tasks: scripted({
+      brief: () => ({ ok: false, problems: [{ field: '场景', why: '正文里没有「## 场景」一节' }] }),
+    }).tasks,
+    async run(r) {
+      const handle = await startTask(r);
+      await taskStatusUntil(handle, (s) => s.waiting?.kind === 'human', '交代不全，停下等人');
+      return { 'task-parked-brief': handle };
+    },
+  },
+  // 改到了标准路径：PR 开了、CI 绿了、验收过了，停在挂自动合并之前等创始人（卡片已发）。
+  'task-parked-guarded': {
+    tasks: scripted({ guarded: () => ({ standards: ['AGENTS.md'], highRisk: [] }) }).tasks,
+    async run(r) {
+      const handle = await startTask(r);
+      await taskStatusUntil(handle, (s) => s.waiting?.kind === 'human', '改标准，停下等创始人');
+      return { 'task-parked-guarded': handle };
+    },
+  },
+  // 自动合并挂上了，在等 GitHub 把它合进主线（一直在长轮询）。
+  'task-merging': {
+    tasks: scripted({ merged: () => ({ state: 'waiting', detail: '必过检查还没齐' }) }).tasks,
+    async run(r) {
+      const handle = await startTask(r);
+      await taskStatusUntil(handle, (s) => s.phase === 'merge' && s.waiting?.kind === 'merge', '在等合并');
+      return { 'task-merging': handle };
+    },
+  },
   // 最顺的一条：写码、推分支开 PR、CI 和第二意见都过、合并队列合上、收树。
   'subtask-merged': {
     async run(r) {
@@ -399,14 +465,19 @@ for (const name of names) {
   const env = await createEnv();
   try {
     const world = createFakeWorld(scenario.script ?? {});
-    const captured = await withWorker(env, world, async (queue) => {
-      const handles = await scenario.run({ env, world, queue });
-      const out: Record<string, { workflowId: string; json: string }> = {};
-      for (const [fixture, handle] of Object.entries(handles)) {
-        out[fixture] = { workflowId: handle.workflowId, json: historyToJSON(await handle.fetchHistory()) };
-      }
-      return out;
-    });
+    const captured = await withWorker(
+      env,
+      world,
+      async (queue) => {
+        const handles = await scenario.run({ env, world, queue });
+        const out: Record<string, { workflowId: string; json: string }> = {};
+        for (const [fixture, handle] of Object.entries(handles)) {
+          out[fixture] = { workflowId: handle.workflowId, json: historyToJSON(await handle.fetchHistory()) };
+        }
+        return out;
+      },
+      scenario.tasks ? { tasks: scenario.tasks } : {},
+    );
     for (const [fixture, { workflowId, json }] of Object.entries(captured)) {
       const file = `${OUT}${fixture}.json`;
       if (existsSync(file)) {
