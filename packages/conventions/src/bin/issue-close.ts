@@ -10,8 +10,8 @@ try {
   if (r.outcome === 'already') {
     console.log(`#${r.number} 本来就关着（${r.stateReason ?? '没写原因'}），没动：${r.issueUrl}`);
   } else {
-    console.log(`关了 #${r.number}（完成）：${r.issueUrl}`);
-    console.log(`结果：${r.resultUrl}`);
+    console.log(`关了 #${r.number}：${r.issueUrl}`);
+    if (r.resultUrl) console.log(`结果：${r.resultUrl}`);
   }
 } catch (e) {
   console.error(e instanceof Error ? e.message : String(e));

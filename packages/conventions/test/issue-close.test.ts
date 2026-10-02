@@ -78,6 +78,8 @@ describe('GitHub 合并时认的关单写法', () => {
 
 interface World {
   issue: Record<string, unknown>;
+  /** --superseded-by 指向的那张单长什么样（默认是一张开着的单）。 */
+  byIssue: Record<string, unknown> | null;
   subs: unknown;
   specs: unknown;
   dir: unknown;
@@ -92,6 +94,12 @@ interface World {
 function world(over: Partial<World> = {}): World & { gh: (args: string[]) => Promise<GhResult> } {
   const w: World = {
     issue: { number: 241, state: 'open', state_reason: null, html_url: 'https://github.com/o/r/issues/241' },
+    byIssue: {
+      number: 999,
+      state: 'open',
+      state_reason: null,
+      html_url: 'https://github.com/o/r/issues/999',
+    },
     subs: [],
     specs: [
       { name: '24-x', type: 'dir' },
@@ -121,6 +129,10 @@ function world(over: Partial<World> = {}): World & { gh: (args: string[]) => Pro
     if (path === 'repos/{owner}/{repo}')
       return ok({ default_branch: 'main', html_url: 'https://github.com/o/r' });
     if (path === 'repos/{owner}/{repo}/issues/241') return ok(w.issue);
+    if (path === 'repos/{owner}/{repo}/issues/999') {
+      if (w.byIssue === null) return fail('Not Found', 1);
+      return ok(w.byIssue);
+    }
     if (path === 'repos/{owner}/{repo}/issues/241/sub_issues?per_page=100') return ok(w.subs);
     if (path === 'repos/{owner}/{repo}/contents/specs?ref=main') return ok(w.specs);
     if (path === `repos/{owner}/{repo}/contents/specs/${encodeURIComponent(DIR)}?ref=main`) return ok(w.dir);
@@ -219,6 +231,124 @@ describe('pnpm issue:close：主线上有结果文档才关', () => {
       issueUrl: 'https://github.com/o/r/issues/241',
       stateReason: 'not_planned',
     });
+    expect(closeCalls(w)).toEqual([]);
+  });
+});
+
+describe('pnpm issue:close --superseded-by / --reason：关掉被取代的、不做完的', () => {
+  it('--superseded-by：<号> 不要结果.md，关成 not_planned，评论写「被 #<号> 取代」', async () => {
+    const w = world({
+      // 主线上没有结果.md、连需求目录都没有——superseded-by 路径不去查
+      specs: [],
+      dir: [],
+      afterClose: { state: 'closed', state_reason: 'not_planned' },
+    });
+    const r = await issueClose(['241', '--superseded-by', '999'], w);
+    expect(r).toEqual({
+      outcome: 'closed',
+      number: 241,
+      issueUrl: 'https://github.com/o/r/issues/241',
+      resultDoc: undefined,
+      resultUrl: undefined,
+    });
+    const [close] = closeCalls(w);
+    expect(close?.slice(0, 5)).toEqual(['issue', 'close', '241', '--reason', 'not_planned']);
+    expect(close?.[6]).toContain('被 #999 取代');
+    // 没去查主线 specs（specs 是给空数组都能过——如果查了会报错）
+    expect(w.calls.some((c) => c[1] === 'repos/{owner}/{repo}/contents/specs?ref=main')).toBe(false);
+  });
+
+  it('--superseded-by 隐含 not_planned；同时给 --reason completed 会拒关', async () => {
+    const w = world();
+    const err = await issueClose(['241', '--superseded-by', '999', '--reason', 'completed'], w).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(CloseRefused);
+    expect((err as Error).message).toMatch(/隐含关成 not_planned/);
+    expect(closeCalls(w)).toEqual([]);
+  });
+
+  it('--superseded-by 不能给这张单自己；给的号得是单，不能是 PR', async () => {
+    const w1 = world();
+    await expect(issueClose(['241', '--superseded-by', '241'], w1)).rejects.toThrow(/不能给这张单自己/);
+    expect(closeCalls(w1)).toEqual([]);
+
+    const w2 = world({ byIssue: { number: 999, state: 'open', pull_request: {}, html_url: 'u' } });
+    await expect(issueClose(['241', '--superseded-by', '999'], w2)).rejects.toThrow(/是 PR，不是单/);
+    expect(closeCalls(w2)).toEqual([]);
+  });
+
+  it('【故意造出的失败】主线没结果也不传 --superseded-by：照走 completed，被结果.md 拒关', async () => {
+    const w = world({ dir: [{ name: '需求.md', type: 'file' }] });
+    const err = await issueClose(['241', '--reason', 'completed'], w).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CloseRefused);
+    expect((err as Error).message).toMatch(/没有 结果\.md/);
+    expect(closeCalls(w)).toEqual([]);
+  });
+
+  it('【故意造出的失败】默认（不传任何选项）没结果也照拒——行为没变', async () => {
+    const w = world({ dir: [{ name: '需求.md', type: 'file' }] });
+    const err = await issueClose(['241'], w).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CloseRefused);
+    expect((err as Error).message).toMatch(/没有 结果\.md/);
+    expect(closeCalls(w)).toEqual([]);
+  });
+
+  it('--reason duplicate：不查结果.md，关成 duplicate，评论里说清', async () => {
+    const w = world({
+      specs: [],
+      dir: [],
+      afterClose: { state: 'closed', state_reason: 'duplicate' },
+    });
+    const r = await issueClose(['241', '--reason', 'duplicate'], w);
+    expect(r.outcome).toBe('closed');
+    const [close] = closeCalls(w);
+    expect(close?.slice(0, 5)).toEqual(['issue', 'close', '241', '--reason', 'duplicate']);
+    expect(close?.[6]).toContain('duplicate');
+    expect(w.calls.some((c) => c[1] === 'repos/{owner}/{repo}/contents/specs?ref=main')).toBe(false);
+  });
+
+  it('--reason not_planned（不带 superseded-by）：不查结果.md，关成 not_planned', async () => {
+    const w = world({ specs: [], dir: [], afterClose: { state: 'closed', state_reason: 'not_planned' } });
+    const r = await issueClose(['241', '--reason', 'not_planned'], w);
+    expect(r.outcome).toBe('closed');
+    const [close] = closeCalls(w);
+    expect(close?.slice(0, 5)).toEqual(['issue', 'close', '241', '--reason', 'not_planned']);
+  });
+
+  it('--reason 的值不在三种里：拒关，写清只认哪三种', async () => {
+    const w = world();
+    const err = await issueClose(['241', '--reason', 'wontfix'], w).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CloseRefused);
+    expect((err as Error).message).toMatch(/--reason 只认 completed \/ not_planned \/ duplicate/);
+    expect(w.calls).toEqual([]);
+  });
+
+  it('--superseded-by 给的不是单号：拒关', async () => {
+    const w = world();
+    const err = await issueClose(['241', '--superseded-by', 'abc'], w).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CloseRefused);
+    expect((err as Error).message).toMatch(/--superseded-by 要给存在的单号/);
+    expect(w.calls).toEqual([]);
+  });
+
+  it('【故意造出的失败】--superseded-by 指向的单读不到：报错不关（不拿 404 当不存在就行）', async () => {
+    const w = world({ byIssue: null });
+    const err = await issueClose(['241', '--superseded-by', '999'], w).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CloseUnchecked);
+    expect((err as Error).message).toMatch(/读取代它的 #999失败/);
+    expect(closeCalls(w)).toEqual([]);
+  });
+
+  it('子单还开着这条照走：superseded-by 不豁免子单', async () => {
+    const w = world({
+      subs: [{ number: 302, state: 'open' }],
+      specs: [],
+      dir: [],
+    });
+    const err = await issueClose(['241', '--superseded-by', '999'], w).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CloseRefused);
+    expect((err as Error).message).toMatch(/还有 1 张子单开着/);
     expect(closeCalls(w)).toEqual([]);
   });
 });
