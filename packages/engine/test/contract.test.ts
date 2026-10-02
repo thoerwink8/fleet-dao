@@ -1,33 +1,20 @@
 // 和驾驶舱后端（packages/api）的约定：两边各写各的，这里拿后端真的代码来对。
 // 1. fleet 通行证：引擎签，后端验，两边得是一回事。
 // 2. 信号：后端按 TaskSignal 发（信号名 = name，参数 = 其余字段），引擎按同名同形收。
-import {
-  AGENT_TOKEN_MAX_TTL_SECONDS,
-  createTemporalWorkflowControl,
-  type TaskSignal,
-  verifyAgentToken,
-} from '@fleet-dao/api';
-import type { TestWorkflowEnvironment } from '@temporalio/testing';
-import { beforeEach, describe, expect, it } from 'vitest';
+// #556-1：Fusion / 需求 / 子任务 / 合并队列工作流删了，原来端到端发信号那一条没法跑——等 555-2 有了新流程补。
+import { AGENT_TOKEN_MAX_TTL_SECONDS, type TaskSignal, verifyAgentToken } from '@fleet-dao/api';
+import { describe, expect, it } from 'vitest';
 import { agentTokenTtlSeconds } from '../src/activities.ts';
-import {
-  type AgentEventCommand,
-  type AnswerCommand,
-  type CommandMeta,
-  type NEW_TASK_SIGNAL_NAMES,
-  type RequireApprovalCommand,
-  type RequirementResult,
-  type RequirementStatus,
-  type RerouteCommand,
-  requirementWorkflowId,
-  type SubtaskStatus,
-  subtaskWorkflowId,
-  type TASK_SIGNAL_NAMES,
-  WORKFLOW_TYPES,
+import type {
+  AgentEventCommand,
+  AnswerCommand,
+  CommandMeta,
+  NEW_TASK_SIGNAL_NAMES,
+  RequireApprovalCommand,
+  RerouteCommand,
+  TASK_SIGNAL_NAMES,
 } from '../src/contract.ts';
-import { createFakeWorld } from '../src/fakes.ts';
 import { agentTokenSignerFromEnv } from '../src/worker.ts';
-import { queryUntil, requirementInput, useEnv, waitUntil, withWorker } from './helpers.ts';
 
 // ---- 编译期：后端发的每种信号，引擎都有同名的、参数收得下的定义。
 type ApiName = TaskSignal['name'];
@@ -70,95 +57,8 @@ describe('fleet 通行证', () => {
   });
 });
 
-describe('后端发来的信号', { timeout: 60_000 }, () => {
-  const currentEnv = useEnv();
-  let env: TestWorkflowEnvironment;
-  beforeEach(() => {
-    env = currentEnv();
-  });
-
-  it('编译期对上了名字和参数', () => {
+describe('后端发来的信号（编译期对拍）', () => {
+  it('名字和参数都对上了', () => {
     expect([noneMissing, noneExtra, noneSentYet, ...argsFit]).toEqual(Array(10).fill(true));
-  });
-
-  it('用后端真的发信号代码发：暂停、换路由、叫醒、回答、加人闸、继续、叫停，引擎都收得到、有回执', async () => {
-    const world = createFakeWorld({
-      // 两次写码会话都挂住：叫停时子任务正停在「等会话」上。可跳时间的测试服务端取消「已排队、还没开始」的活动会报
-      // ACTIVITY_UNKNOWN、把工作流任务卡死（真服务端没有这个问题），所以别在活动刚排上队的那一瞬间叫停。
-      session: (input, n) => (input.stage === 'execute' && n <= 2 ? { hold: true } : {}),
-    });
-    const input = requirementInput();
-    // 后端现在的接口是 signal(workflowId, signal)：编号由调用方算好再传——需求工作流编号固定，
-    // 子任务工作流编号等子任务报上了会话才知道（sub?.id）。
-    const control = createTemporalWorkflowControl(env.client);
-    const requirementId = requirementWorkflowId(input.repo, input.issueNumber);
-    const result = await withWorker(env, world, async (q) => {
-      const handle = await env.client.workflow.start(WORKFLOW_TYPES.requirement, {
-        taskQueue: q,
-        workflowId: requirementId,
-        args: [input],
-      });
-      await waitUntil(() => world.held().length === 1, '写码会话挂着');
-      const running = await queryUntil<RequirementStatus>(
-        handle,
-        (s) => Boolean(s.subtasks[0]?.workflowId),
-        '子任务在写码',
-      );
-      const sub = running.subtasks[0];
-      const child = env.client.workflow.getHandle(sub?.workflowId ?? '');
-      const writing = await queryUntil<SubtaskStatus>(child, (s) => Boolean(s.runId), '子任务报上了会话');
-
-      // 叫醒按会话发给所属的工作流（后端要改的就是这一处的编号）：子任务的会话发 sub:<subtask_id>。
-      await control.signal(subtaskWorkflowId(sub?.id ?? ''), {
-        name: 'agentEvent',
-        runId: writing.runId ?? '',
-        kind: 'ask',
-        askId: 'ask-1',
-      });
-      await queryUntil<SubtaskStatus>(
-        child,
-        (s) => s.lastAgentEvent?.kind === 'ask',
-        '子任务收到 agentEvent',
-      );
-
-      await control.signal(requirementId, { name: 'pause', by: 'founder', reason: '先停一下' });
-      await queryUntil<SubtaskStatus>(child, (s) => s.paused && s.waiting?.kind === 'human', '子任务暂停');
-
-      await control.signal(requirementId, {
-        name: 'reroute',
-        by: 'founder',
-        routeId: 'r3',
-        subtaskId: sub?.id ?? '',
-      });
-      await control.signal(requirementId, {
-        name: 'answer',
-        by: 'founder',
-        askId: 'ask-nobody',
-        answer: '好',
-      });
-      // 会话问创始人时碰了人闸（#259）：后端点名这次会话的子任务加人闸
-      await control.signal(requirementId, {
-        name: 'requireApproval',
-        by: 'session:run-1',
-        holds: ['spend'],
-        subtaskId: sub?.id ?? '',
-        reason: '会话问创始人时碰了人闸',
-      });
-      await control.signal(requirementId, { name: 'resume', by: 'founder' });
-      await waitUntil(() => world.held().length === 1 && world.held()[0]?.n === 2, '按新路由接着写');
-      const receipts = ((await handle.query('status')) as RequirementStatus).commands;
-      await control.signal(requirementId, { name: 'stop', by: 'founder', reason: '不做了' });
-      return { receipts, final: (await handle.result()) as RequirementResult };
-    });
-    expect(result.receipts.map((r) => [r.command, r.accepted, r.by])).toEqual([
-      ['pause', true, 'founder'],
-      ['reroute', true, 'founder'],
-      ['answer', true, 'founder'],
-      ['requireApproval', true, 'session:run-1'],
-      ['resume', true, 'founder'],
-    ]);
-    const execs = world.callsOf('startSession').filter((c) => c.input.stage === 'execute');
-    expect(execs.map((c) => c.input.route.routeId)).toEqual(['r1', 'r3']);
-    expect(result.final.state).toBe('stopped');
   });
 });

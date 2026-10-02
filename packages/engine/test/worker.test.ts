@@ -4,10 +4,10 @@ import { type ChildProcess, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import type { TestWorkflowEnvironment } from '@temporalio/testing';
 import { afterEach, describe, expect, it } from 'vitest';
-import { type RequirementResult, requirementWorkflowId, WORKFLOW_TYPES } from '../src/contract.ts';
+import { WORKFLOW_TYPES } from '../src/contract.ts';
 import { createFakeWorld } from '../src/fakes.ts';
 import { configFromEnv, createEngineWorker, DEFAULT_CLI_BIN_DIR } from '../src/worker.ts';
-import { createEnv, engineBundle, requirementInput, waitUntil } from './support.ts';
+import { createEnv, engineBundle, waitUntil } from './support.ts';
 
 const MAIN = fileURLToPath(new URL('../src/main.ts', import.meta.url));
 
@@ -138,7 +138,7 @@ describe('worker 进程', { timeout: 120_000 }, () => {
     expect(second.out.join('')).toContain('DATABASE_URL');
   });
 
-  it('按环境变量连上服务端，用假实现把一个需求从头跑到关单', async () => {
+  it('按环境变量连上服务端，跑完一个 P0 验收（hello）工作流', async () => {
     env = await createEnv();
     const taskQueue = `smoke-${Date.now()}`;
     const { proc, out } = run({
@@ -154,14 +154,14 @@ describe('worker 进程', { timeout: 120_000 }, () => {
       60_000,
     );
     expect(out.join('')).toContain(`任务队列 ${taskQueue}`);
-    const input = requirementInput();
-    const handle = await env.client.workflow.start(WORKFLOW_TYPES.requirement, {
+    // #556-1：Fusion / 需求 / 子任务 / 合并队列工作流删了，不能拿一张真单跑；hello 是剩下来最小的工作流，
+    // 起起来走完一轮 = worker 入口、打包、活动注册都还活着。
+    const handle = await env.client.workflow.start(WORKFLOW_TYPES.hello, {
       taskQueue,
-      workflowId: requirementWorkflowId(input.repo, input.issueNumber),
-      args: [input],
+      workflowId: `hello-${Date.now()}`,
+      args: ['smoke'],
     });
-    const result = (await handle.result()) as RequirementResult;
-    expect(result.state).toBe('done');
-    expect(result.subtasks.map((s) => s.state)).toEqual(['merged']);
+    const result = (await handle.result()) as string;
+    expect(result).toContain('smoke');
   });
 });

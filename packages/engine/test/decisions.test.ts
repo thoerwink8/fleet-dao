@@ -1,25 +1,12 @@
 // 流程判断全是纯函数：不起 Temporal 直接测。
+// #556-1：Fusion 流程走的 triage / plan / runnable / delivery / verify / mergeStep / mergeReturn 删了（连同
+// 工作流），只留跑流程的零件（newIds、failure、limits）、554-1 三段还在用的（brief / parallelBriefs /
+// acceptance / verdict / verifyLines）和 OpeningGate 还没接的 Lead 检查（leadPlan / leadReview / rebuttable /
+// filesUnder / fusionPr / closeComment / fusionStart，实现在 core 里没动）。
 import { startFlow } from '@fleet-dao/core';
 import { describe, expect, it } from 'vitest';
 import { activityOptions, QUICK_TIMEOUT_SECONDS } from '../src/activity-options.ts';
-import {
-  afterMergeReturn,
-  checkDelivery,
-  createDecide,
-  decideAfterVerify,
-  decideTriage,
-  evidenceOf,
-  fingerprint,
-  mergeStep,
-  nextAction,
-  normalizeTouch,
-  pickRunnable,
-  retryDelaySeconds,
-  type SchedItem,
-  touchesOverlap,
-  type VerifyInput,
-  validatePlan,
-} from '../src/decisions/index.ts';
+import { createDecide, evidenceOf, nextAction, retryDelaySeconds } from '../src/decisions/index.ts';
 import type { FailureVerdict } from '../src/failure/index.ts';
 import { describeHolds, normalizeHolds } from '../src/holds.ts';
 import {
@@ -96,140 +83,10 @@ describe('上限：读时现算默认值', () => {
   });
 });
 
-describe('方案校验', () => {
-  it('改动位置规整：通配符截成前缀、去掉 ./ 和首尾斜杠；没写就是整个仓', () => {
-    expect(normalizeTouch('./src/login/')).toBe('src/login');
-    expect(normalizeTouch('src\\login\\form.ts')).toBe('src/login/form.ts');
-    expect(normalizeTouch('src/**/*.ts')).toBe('src');
-    expect(normalizeTouch('*.md')).toBe('*');
-    const ok = validatePlan({ subtasks: [{ key: 'a', title: 'A' }], maxSubtasks: 12 });
-    expect(ok.ok && ok.subtasks[0]?.touches).toEqual(['*']);
-  });
-
-  it('编号不合规、重复、依赖不存在、依赖成环都挑出来', () => {
-    const bad = validatePlan({
-      subtasks: [
-        { key: 'A B', title: 'x' },
-        { key: 'a', title: 'x', dependsOn: ['missing'] },
-        { key: 'a', title: '' },
-      ],
-      maxSubtasks: 12,
-    });
-    expect(bad.ok).toBe(false);
-    if (!bad.ok) {
-      expect(bad.problems.join('\n')).toContain('「A B」不合规');
-      expect(bad.problems.join('\n')).toContain('「a」重复');
-      expect(bad.problems.join('\n')).toContain('「missing」不存在');
-      expect(bad.problems.join('\n')).toContain('没有标题');
-    }
-    const cycle = validatePlan({
-      subtasks: [
-        { key: 'a', title: 'a', dependsOn: ['b'] },
-        { key: 'b', title: 'b', dependsOn: ['a'] },
-      ],
-      maxSubtasks: 12,
-    });
-    expect(cycle.ok ? '' : cycle.problems[0]).toContain('依赖成环');
-    expect(validatePlan({ subtasks: [], maxSubtasks: 12 }).ok).toBe(false);
-  });
-
-  it('只有高风险合并前要第二意见，没写风险按高风险算；UI 活单独标出来', () => {
-    const plan = validatePlan({
-      subtasks: [
-        { key: 'docs', title: 'd', touches: ['docs'], risk: 'low' },
-        { key: 'api', title: 'a', touches: ['api'], risk: 'normal' },
-        { key: 'db', title: 'm', touches: ['db'], risk: 'high' },
-        { key: 'page', title: 'p', touches: ['web'], stage: 'ui' },
-      ],
-      maxSubtasks: 12,
-    });
-    expect(plan.ok && plan.subtasks.map((s) => [s.key, s.secondOpinion, s.stage])).toEqual([
-      ['docs', false, 'execute'],
-      ['api', false, 'execute'],
-      ['db', true, 'execute'],
-      ['page', true, 'ui'],
-    ]);
-  });
-
-  it('人闸：方案标的和整个需求的合在一起，规整成小写、去重、排序；认不得的也留着（宁可多拦一次）', () => {
-    const plan = validatePlan({
-      subtasks: [
-        { key: 'api', title: 'a', holds: ['Delete', ' release ', 'delete'] },
-        { key: 'page', title: 'p' },
-        { key: 'misc', title: 'm', holds: ['上线'] },
-      ],
-      maxSubtasks: 12,
-      holds: ['spend'],
-    });
-    expect(plan.ok && plan.subtasks.map((s) => s.holds)).toEqual([
-      ['delete', 'release', 'spend'],
-      ['spend'],
-      ['spend', '上线'],
-    ]);
+describe('人闸标记规整', () => {
+  it('规整成小写、去重、排序；认不得的也留着（宁可多拦一次）', () => {
     expect(normalizeHolds([' Spend', 3, '', 'spend'])).toEqual(['spend']);
     expect(describeHolds(['release', 'spend', 'delete', '上线'])).toBe('对外发布、花钱、删数据、上线');
-  });
-});
-
-describe('不撞车调度', () => {
-  it('同一块地方按路径段判：前缀相同算撞，名字相近不算', () => {
-    expect(touchesOverlap(['src/login'], ['src/login/form.ts'])).toBe(true);
-    expect(touchesOverlap(['src/login'], ['src/login-page'])).toBe(false);
-    expect(touchesOverlap(['*'], ['README.md'])).toBe(true);
-  });
-
-  const item = (key: string, over: Partial<SchedItem> = {}): SchedItem => ({
-    key,
-    touches: [`src/${key}`],
-    dependsOn: [],
-    state: 'pending',
-    ...over,
-  });
-
-  it('依赖没合并的等依赖，撞地方的等它做完，并发满了的等空位', () => {
-    const decision = pickRunnable({
-      items: [
-        item('a', { state: 'running', touches: ['src/login'] }),
-        item('b', { touches: ['src/login/form.ts'] }),
-        item('c', { dependsOn: ['a'] }),
-        item('d'),
-        item('e'),
-      ],
-      maxParallel: 2,
-    });
-    expect(decision.start).toEqual(['d']);
-    expect(decision.waiting).toEqual([
-      { key: 'b', kind: 'overlap', on: ['a'] },
-      { key: 'c', kind: 'deps', on: ['a'] },
-      { key: 'e', kind: 'capacity', on: ['a', 'd'] },
-    ]);
-  });
-
-  it('同一轮里新起的也算「在跑」：两个撞地方的不会一起起', () => {
-    const decision = pickRunnable({
-      items: [item('a', { touches: ['src'] }), item('b', { touches: ['src/x'] })],
-      maxParallel: 5,
-    });
-    expect(decision.start).toEqual(['a']);
-    expect(decision.waiting).toEqual([{ key: 'b', kind: 'overlap', on: ['a'] }]);
-  });
-
-  it('依赖（直接或间接）没做成的永远起不来；依赖了不存在的也一样，不会干等', () => {
-    const decision = pickRunnable({
-      items: [
-        item('a', { state: 'stopped' }),
-        item('b', { dependsOn: ['a'] }),
-        item('c', { dependsOn: ['b'] }),
-        item('d', { dependsOn: ['ghost'] }),
-      ],
-      maxParallel: 3,
-    });
-    expect(decision.start).toEqual([]);
-    expect(decision.unreachable).toEqual([
-      { key: 'b', because: ['a'] },
-      { key: 'c', because: ['b'] },
-      { key: 'd', because: ['ghost'] },
-    ]);
   });
 });
 
@@ -463,180 +320,6 @@ describe('失败分流：接的是规则表（failure/classify.ts），认不出
   });
 });
 
-describe('验证之后怎么走', () => {
-  const base: VerifyInput = {
-    sync: { state: 'clean', head: 'h1', conflictFiles: [] },
-    ci: { state: 'green', head: 'h1', failedChecks: [] },
-    review: { verdict: 'pass', head: 'h1', findings: [] },
-    reviewRequired: true,
-    limits,
-  };
-
-  it('CI 绿、第二意见通过：合并；小毛病不挡合并，带出来攒着', () => {
-    const d = decideAfterVerify({
-      ...base,
-      review: { verdict: 'changes', head: 'h1', findings: [{ severity: 'minor', text: '变量名' }] },
-    });
-    expect(d).toMatchObject({ action: 'merge', minorFindings: [{ text: '变量名' }] });
-  });
-
-  it('没查成不是没过也不是过了：交人，不合也不返工', () => {
-    expect(
-      decideAfterVerify({ ...base, ci: { state: 'unknown', head: 'h1', failedChecks: [] } }).action,
-    ).toBe('escalate');
-  });
-
-  it('证据要绑头：CI 或第二意见的头对不上送检的头，交人', () => {
-    expect(decideAfterVerify({ ...base, ci: { state: 'green', head: 'old', failedChecks: [] } }).action).toBe(
-      'escalate',
-    );
-    expect(
-      decideAfterVerify({ ...base, review: { verdict: 'pass', head: 'old', findings: [] } }).action,
-    ).toBe('escalate');
-  });
-
-  it('同步主线有冲突：回主会话解决，冲突轮数单独计', () => {
-    const d = decideAfterVerify({
-      ...base,
-      sync: { state: 'conflict', head: 'h1', conflictFiles: ['a.ts'] },
-      ci: null,
-      review: null,
-    });
-    expect(d).toMatchObject({
-      action: 'rework',
-      count: 'conflict',
-      feedback: [{ kind: 'conflict', items: ['a.ts'] }],
-    });
-  });
-
-  it('CI 修了几轮不占第二意见的额度（F1）', () => {
-    const d = decideAfterVerify({
-      ...base,
-      review: { verdict: 'changes', head: 'h1', findings: [{ severity: 'blocking', text: '漏了过期' }] },
-      rounds: { ciFix: 3, review: 0 },
-    });
-    expect(d).toMatchObject({ action: 'rework', count: 'review' });
-  });
-
-  it('第二意见最多两轮；同一条必须改连续两轮出现就交人，不开第三轮（F4）', () => {
-    const blocking = {
-      ...base,
-      review: {
-        verdict: 'changes' as const,
-        head: 'h1',
-        findings: [{ severity: 'blocking' as const, text: '第 12 行漏了过期' }],
-      },
-    };
-    const first = decideAfterVerify(blocking);
-    expect(first.action).toBe('rework');
-    const print = first.action === 'rework' ? first.fingerprint : '';
-    const again = decideAfterVerify({
-      ...blocking,
-      review: {
-        verdict: 'changes',
-        head: 'h1',
-        findings: [{ severity: 'blocking', text: '第 13 行漏了过期' }],
-      },
-      rounds: { review: 1 },
-      lastFingerprints: { review: print },
-    });
-    expect(again).toMatchObject({ action: 'escalate' });
-    expect(decideAfterVerify({ ...blocking, rounds: { review: 2 } }).action).toBe('escalate');
-  });
-
-  it('CI 红：带失败摘要的，同一处连红两轮就交人；不带摘要的只按轮数上限', () => {
-    const red = { state: 'red' as const, head: 'h1', failedChecks: ['check'], digest: 'login.test.ts 超时' };
-    const first = decideAfterVerify({ ...base, ci: red, review: null, reviewRequired: false });
-    expect(first).toMatchObject({ action: 'rework', count: 'ciFix' });
-    const print = first.action === 'rework' ? first.fingerprint : '';
-    expect(
-      decideAfterVerify({
-        ...base,
-        ci: red,
-        review: null,
-        reviewRequired: false,
-        lastFingerprints: { ci: print },
-      }).action,
-    ).toBe('escalate');
-    const noDigest = { state: 'red' as const, head: 'h1', failedChecks: ['check'] };
-    const r1 = decideAfterVerify({ ...base, ci: noDigest, review: null, reviewRequired: false });
-    const r2 = decideAfterVerify({
-      ...base,
-      ci: noDigest,
-      review: null,
-      reviewRequired: false,
-      rounds: { ciFix: 1 },
-      lastFingerprints: { ci: r1.action === 'rework' ? r1.fingerprint : '' },
-    });
-    expect(r2.action).toBe('rework');
-    expect(
-      decideAfterVerify({ ...base, ci: noDigest, review: null, reviewRequired: false, rounds: { ciFix: 3 } })
-        .action,
-    ).toBe('escalate');
-  });
-
-  it('指纹不看行号和提交号', () => {
-    expect(fingerprint('第 12 行漏了过期 abcdef1')).toBe(fingerprint('第 99 行漏了过期 1234567890ab'));
-    expect(fingerprint('漏了过期')).not.toBe(fingerprint('漏了测试'));
-  });
-});
-
-describe('交付对账（windsurf-dao#1572 的假完成）', () => {
-  const touches = ['src/login'];
-  it('改在方案点名的地方：收；顺手改了方案外的也收，但记下来', () => {
-    expect(checkDelivery({ touches, changedFiles: ['src/login/a.ts'], offPlanSoFar: 0, limits })).toEqual({
-      action: 'accept',
-      outside: [],
-      note: '',
-    });
-    expect(
-      checkDelivery({ touches, changedFiles: ['src/login/a.ts', 'package.json'], offPlanSoFar: 0, limits }),
-    ).toMatchObject({ action: 'accept', outside: ['package.json'] });
-  });
-
-  it('一个都对不上：退回重做；再对不上就交人', () => {
-    const off = { touches, changedFiles: ['docs/x.md'], limits };
-    expect(checkDelivery({ ...off, offPlanSoFar: 0 })).toMatchObject({
-      action: 'rework',
-      feedback: [{ kind: 'plan' }],
-    });
-    expect(checkDelivery({ ...off, offPlanSoFar: 1 }).action).toBe('escalate');
-  });
-
-  it('改动清单没查成的先收下（不当成对不上）；方案写的是整个仓的都收', () => {
-    expect(checkDelivery({ touches, changedFiles: undefined, offPlanSoFar: 0, limits }).action).toBe(
-      'accept',
-    );
-    expect(checkDelivery({ touches: ['*'], changedFiles: ['x'], offPlanSoFar: 0, limits }).action).toBe(
-      'accept',
-    );
-  });
-});
-
-describe('子任务的墙钟预算（F5）', () => {
-  const red = {
-    sync: { state: 'clean' as const, head: 'h1', conflictFiles: [] },
-    ci: { state: 'red' as const, head: 'h1', failedChecks: ['check'] },
-    review: null,
-    reviewRequired: false,
-    limits,
-  };
-  it('超了预算不再自动返工，交帅位；能合的照合', () => {
-    expect(decideAfterVerify({ ...red, elapsedMinutes: 30 }).action).toBe('rework');
-    expect(decideAfterVerify({ ...red, elapsedMinutes: 300 })).toMatchObject({
-      action: 'escalate',
-      reason: '子任务已经干了 300 分钟，超过预算 240 分钟',
-    });
-    expect(
-      decideAfterVerify({
-        ...red,
-        ci: { state: 'green', head: 'h1', failedChecks: [] },
-        elapsedMinutes: 300,
-      }).action,
-    ).toBe('merge');
-  });
-});
-
 describe('这一次的花费（执行体报的是会话累计）', () => {
   it('头一回跑取累计；续会话取差；上一轮没读到就不给，不记 0', () => {
     expect(costOfRun(undefined, 0.3)).toBe(0.3);
@@ -644,158 +327,6 @@ describe('这一次的花费（执行体报的是会话累计）', () => {
     expect(costOfRun(null, 0.5)).toBeUndefined();
     expect(costOfRun(0.3, undefined)).toBeUndefined();
     expect(costOfRun(0.5, 0.3)).toBe(0);
-  });
-});
-
-describe('合并队列的条目状态机', () => {
-  const clean = { state: 'clean' as const, head: 'h2', conflictFiles: [] };
-  it('同步 → 测试（新头上）→ 合并（带头约束）→ 合上', () => {
-    const none = { withdrawn: false, sync: null, tests: null, merge: null };
-    expect(mergeStep(none)).toEqual({ next: 'sync' });
-    expect(mergeStep({ ...none, sync: clean })).toEqual({ next: 'test', head: 'h2' });
-    const tests = { passed: true, head: 'h2', summary: '绿' };
-    expect(mergeStep({ ...none, sync: clean, tests })).toEqual({ next: 'merge', head: 'h2' });
-    expect(mergeStep({ ...none, sync: clean, tests, merge: { merged: true, mergeCommit: 'm' } })).toEqual({
-      next: 'done',
-      result: 'merged',
-      mergeCommit: 'm',
-    });
-  });
-
-  it('冲突、测红、测的不是这个头、回读没合上、某一步出错：都退回', () => {
-    const none = { withdrawn: false, sync: null, tests: null, merge: null };
-    const reason = (input: Parameters<typeof mergeStep>[0]) => {
-      const step = mergeStep(input);
-      return step.next === 'done' && step.result === 'returned' ? step.reason : step.next;
-    };
-    expect(reason({ ...none, sync: { state: 'conflict', head: 'h2', conflictFiles: ['x'] } })).toBe(
-      'conflict',
-    );
-    expect(reason({ ...none, sync: clean, tests: { passed: false, head: 'h2', summary: '红' } })).toBe(
-      'tests-red',
-    );
-    expect(reason({ ...none, sync: clean, tests: { passed: true, head: 'old', summary: '绿' } })).toBe(
-      'tests-stale',
-    );
-    expect(
-      reason({
-        ...none,
-        sync: clean,
-        tests: { passed: true, head: 'h2', summary: '' },
-        merge: { merged: false },
-      }),
-    ).toBe('merge-failed');
-    expect(reason({ ...none, failed: { step: 'sync', message: 'GitHub 挂了' } })).toBe('infra');
-    expect(mergeStep({ ...none, withdrawn: true })).toMatchObject({ result: 'withdrawn' });
-  });
-
-  it('红了但结构化地只缺 second-opinion（missing/pending）：退回原因是 second-opinion，不是 tests-red', () => {
-    const none = { withdrawn: false, sync: null, tests: null, merge: null };
-    const reason = (input: Parameters<typeof mergeStep>[0]) => {
-      const step = mergeStep(input);
-      return step.next === 'done' && step.result === 'returned' ? step.reason : step.next;
-    };
-    expect(
-      reason({
-        ...none,
-        sync: clean,
-        tests: {
-          passed: false,
-          head: 'h2',
-          summary: '合并闸红，缺 second-opinion',
-          secondOpinionWait: 'missing',
-        },
-      }),
-    ).toBe('second-opinion');
-    expect(
-      reason({
-        ...none,
-        sync: clean,
-        tests: {
-          passed: false,
-          head: 'h2',
-          summary: '合并闸红，second-opinion 还在跑',
-          secondOpinionWait: 'pending',
-        },
-      }),
-    ).toBe('second-opinion');
-    // 没有这个结构化字段（真测试红）还是走老路
-    expect(reason({ ...none, sync: clean, tests: { passed: false, head: 'h2', summary: '真红了' } })).toBe(
-      'tests-red',
-    );
-  });
-
-  it('撤出晚到一步、已经合上了：按合上算，不当成撤回丢掉；没合上的才算撤回', () => {
-    const tests = { passed: true, head: 'h2', summary: '绿' };
-    const late = { withdrawn: true, sync: clean, tests };
-    expect(mergeStep({ ...late, merge: { merged: true, mergeCommit: 'm' } })).toEqual({
-      next: 'done',
-      result: 'merged',
-      mergeCommit: 'm',
-    });
-    expect(mergeStep({ ...late, merge: { merged: false } })).toMatchObject({ result: 'withdrawn' });
-    expect(mergeStep({ ...late, merge: null })).toMatchObject({ result: 'withdrawn' });
-  });
-
-  it('退回之后：基础设施出错等一会儿原样重排；冲突、测红回主会话；次数到了交人', () => {
-    const lim = { mergeReturns: 3 };
-    expect(
-      afterMergeReturn({ reason: 'infra', detail: 'x', files: [], returnsSoFar: 0, limits: lim }).action,
-    ).toBe('requeue');
-    expect(
-      afterMergeReturn({ reason: 'conflict', detail: 'x', files: ['a.ts'], returnsSoFar: 1, limits: lim }),
-    ).toMatchObject({ action: 'rework', feedback: [{ kind: 'merge-return', items: ['a.ts'] }] });
-    expect(
-      afterMergeReturn({ reason: 'tests-red', detail: 'x', files: [], returnsSoFar: 3, limits: lim }).action,
-    ).toBe('escalate');
-  });
-});
-
-describe('分诊之后', () => {
-  it('清楚开工；没判出来按默认走，不当成「否」；看不懂的带选项和推荐问、按推荐先做不等回答（#259）', () => {
-    expect(decideTriage({ verdict: { clear: true }, asked: 0, maxQuestions: 2 }).action).toBe('proceed');
-    expect(decideTriage({ verdict: { clear: null }, asked: 0, maxQuestions: 2 })).toMatchObject({
-      action: 'proceed',
-      assumed: true,
-    });
-    expect(
-      decideTriage({
-        verdict: { clear: false, question: '哪个页面？', options: ['注册页', '登录页'], recommend: '登录页' },
-        asked: 0,
-        maxQuestions: 2,
-      }),
-    ).toEqual({
-      action: 'proceed',
-      assumed: true,
-      note: '分诊说不清：哪个页面？——问了创始人（不等回答），按推荐先做「登录页」',
-      holds: [],
-      ask: { question: '哪个页面？', options: ['登录页', '注册页'], recommended: '登录页' },
-    });
-  });
-
-  it('【失败】看不懂却没带选项和推荐：退回分诊补上（写明缺什么），不再停下问；退回够了按假设继续', () => {
-    expect(
-      decideTriage({ verdict: { clear: false, question: '哪个页面？' }, asked: 0, maxQuestions: 2 }),
-    ).toMatchObject({ action: 'retriage', question: '哪个页面？', why: expect.stringContaining('推荐') });
-    expect(
-      decideTriage({
-        verdict: { clear: false, question: '哪个页面？', options: ['注册页', '登录页'], recommend: '首页' },
-        asked: 1,
-        maxQuestions: 2,
-      }),
-    ).toMatchObject({ action: 'retriage', why: expect.stringContaining('不在选项里') });
-    expect(
-      decideTriage({ verdict: { clear: false, question: '哪个页面？' }, asked: 2, maxQuestions: 2 }),
-    ).toMatchObject({ action: 'proceed', assumed: true });
-  });
-
-  it('分诊判出的人闸（会碰花钱、删数据、对外发布）带出来，规整过', () => {
-    expect(
-      decideTriage({ verdict: { clear: true, holds: ['Spend', 'spend'] }, asked: 0, maxQuestions: 2 }),
-    ).toEqual({ action: 'proceed', assumed: false, note: '需求清楚', holds: ['spend'] });
-    expect(decideTriage({ verdict: { clear: null }, asked: 0, maxQuestions: 2 })).toMatchObject({
-      holds: [],
-    });
   });
 });
 
@@ -812,13 +343,10 @@ describe('编号（库主键）', () => {
   });
 });
 
-describe('Fusion 的判断经 decide 调（core 包，0003 第 12 条）', () => {
+describe('554-1 三段和开 PR 前验证用的判断（core 里）', () => {
   const decide = createDecide();
 
-  it('状态机、简报、验收、验证、流程配置都接上了', async () => {
-    const state = startFlow('fusion', false);
-    const step = await decide('fusionFlow', { state, event: { kind: 'discussed' } });
-    expect(step).toMatchObject({ ok: true, action: 'intake' });
+  it('简报、并行简报、验收、验证、verified / owed 几行都接上了', async () => {
     expect((await decide('brief', { goal: 'x' })).ok).toBe(false);
     expect(await decide('parallelBriefs', [])).toEqual({ ok: true });
     const verdict = await decide('verdict', {
@@ -848,36 +376,20 @@ describe('Fusion 的判断经 decide 调（core 包，0003 第 12 条）', () =>
     expect(await decide('verifyLines', [])).toEqual({ verified: ['开 PR 前别家验证：没有记录'], owed: [] });
   });
 
-  it('【故意造出的失败】全组织默认读不到：判停派，不拿空配置顶', async () => {
-    const got = await decide('flowConfig', { org: { kind: 'missing' }, project: { kind: 'missing' } });
-    expect(got).toMatchObject({ ok: false, scope: 'org' });
+  it('正文写全了需求（#295）：开 PR 前验证照正文逐条核', async () => {
+    const body = '创始人改选了「4 位」。\n\n## 怎么算做完\n\n- 改成 4 位\n';
+    expect(await decide('bodyCriteria', { body })).toEqual({ ok: ['改成 4 位'] });
   });
+});
 
-  it('Fusion 工作流用的几样也接上了：起步、需求文档目录、配置副本、Lead 交回的、PR 正文、关单评论', async () => {
+describe('Fusion 里留着的纯函数（实现在 core，556-2 一起清）', () => {
+  const decide = createDecide();
+
+  it('起步、Lead 交回的、PR 正文、关单评论都接上了', async () => {
     expect(await decide('fusionStart', { mode: 'fusion', mother: false, verifyRounds: 1 })).toMatchObject({
       step: 'discuss',
       verifyLimit: 1,
     });
-    expect(
-      await decide('specDir', { body: '文档：`specs/12-登录/需求.md`', issueNumber: 12, title: '登录' }),
-    ).toEqual({
-      ok: 'specs/12-登录',
-      docs: {
-        requirement: 'specs/12-登录/需求.md',
-        plan: 'specs/12-登录/方案.md',
-        result: 'specs/12-登录/结果.md',
-      },
-    });
-    const setup = await decide('fusionSetup', {
-      read: {
-        replica: { syncedAt: null, error: null, unread: null, testCommand: null },
-        source: null,
-        config: null,
-      },
-      now: '2026-09-27T08:00:00.000Z',
-      category: '需求',
-    });
-    expect(setup.ok).toBe(false);
     expect((await decide('leadPlan', { output: {}, specDir: 'specs/12-登录' })).ok).toBe(false);
     expect((await decide('leadReview', { output: {}, specDir: 'specs/12-登录', committed: [] })).ok).toBe(
       false,
@@ -913,30 +425,8 @@ describe('Fusion 的判断经 decide 调（core 包，0003 第 12 条）', () =>
     });
     expect(comment).toContain('做完了：PR #7 已合并');
   });
-
-  it('【故意造出的失败】单子正文指的是别的单的需求文档：判认不出，不拿别人的顶', async () => {
-    expect(
-      await decide('specDir', { body: '文档：`specs/13-别的/需求.md`', issueNumber: 12, title: '别的' }),
-    ).toEqual({
-      error: expect.stringContaining('不是这张单 #12 的'),
-    });
-  });
-
-  it('正文写全了需求、没有指需求文档的那一行（引擎开的单，#295）：照收，带上照正文写的需求文档；验证照正文逐条核', async () => {
-    const body = '创始人改选了「4 位」。\n\n## 怎么算做完\n\n- 改成 4 位\n';
-    expect(await decide('specDir', { body, issueNumber: 13, title: '#12 的后续' })).toEqual({
-      ok: 'specs/13-12的后续',
-      docs: {
-        requirement: 'specs/13-12的后续/需求.md',
-        plan: 'specs/13-12的后续/方案.md',
-        result: 'specs/13-12的后续/结果.md',
-      },
-      requirement: '# #12 的后续（#13）\n\n创始人改选了「4 位」。\n\n## 怎么算做完\n\n- 改成 4 位\n',
-    });
-    expect(await decide('bodyCriteria', { body })).toEqual({ ok: ['改成 4 位'] });
-    // 【故意造出的失败】正文也没写全：照样认不出、停下等人
-    expect(await decide('specDir', { body: '原话：加验证码', issueNumber: 13, title: '加验证码' })).toEqual({
-      error: expect.stringContaining('也没写全需求'),
-    });
-  });
 });
+
+// startFlow 是被 fusionStart 经 decide 调进去的（上面那条），这里编译期明说它从 core 来——556-2 删 core/src/flow.ts
+// 时要把上面那两条「Fusion 里留着的纯函数」一起带走。
+void startFlow;

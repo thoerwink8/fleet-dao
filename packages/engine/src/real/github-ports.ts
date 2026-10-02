@@ -17,7 +17,7 @@ import {
 } from '@fleet-dao/conventions';
 import { criteriaOf } from '@fleet-dao/core';
 import type { GitHub, PrBodyInput } from '@fleet-dao/github';
-import type { CiResult } from '../decisions/verify.ts';
+import type { CiResult } from '../decisions/types.ts';
 import {
   type EnginePorts,
   type PortContext,

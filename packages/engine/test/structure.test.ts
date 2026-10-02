@@ -53,17 +53,12 @@ describe('工作流文件的规矩', () => {
   it('扫到了工作流文件和它们的 import（不是空扫一遍就算过）', () => {
     expect(files.sort()).toEqual([
       'canary.ts',
-      'fusion.ts',
       'github-reconcile.ts',
       'hello.ts',
       'hourly-reconcile.ts',
       'index.ts',
       'kit.ts',
-      'merge-queue.ts',
-      'requirement.ts',
       'route-probe.ts',
-      'subtask.ts',
-      'sync-mainline.ts',
       'verify.ts',
       'watchdog.ts',
     ]);

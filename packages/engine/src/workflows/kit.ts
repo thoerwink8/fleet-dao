@@ -52,7 +52,7 @@ import {
 } from '../contract.ts';
 import type { FailureContext, FailureInfo, LadderCounters, NextAction } from '../decisions/failure.ts';
 import type { Decide, DecisionKind, DecisionMap } from '../decisions/index.ts';
-import type { Feedback } from '../decisions/verify.ts';
+import type { Feedback } from '../decisions/types.ts';
 import { historyAlertLine, type Limits, reaskLimit } from '../limits.ts';
 import type {
   KeepVerifierRequest,
