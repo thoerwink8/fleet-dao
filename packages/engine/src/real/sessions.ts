@@ -145,6 +145,12 @@ import {
   stagePrompt,
 } from './prompts.ts';
 import { readSessionMeta, type SessionMeta, writeSessionMeta } from './session-io.ts';
+import {
+  launchSegment,
+  SEGMENT_NOT_WIRED_CODE,
+  type SegmentOutcome,
+  type SegmentPortsDepsForSessions,
+} from './sessions-segment.ts';
 import { POOL_HOLD_PREFIX, poolHoldKey } from './store-ports.ts';
 import {
   changedFilesSince,
@@ -365,6 +371,12 @@ export interface SessionPortsDeps {
    * 引擎重启后照目录接回。不给就照旧接管道（测试、只起一次的工具）：引擎一退会话就断。
    */
   ioRoot?: string;
+  /**
+   * 三段（对题 / 动手 / 验收）走 runner 的依赖（#554-4）：`brief.segment` 给定了就调 launchSegment；
+   * 不给就走 Fusion 原链路（其余字段都不动）。生产 Spawner 还没接（#554-2 / #555 那一档）——
+   * 本切片只挂了测试入口；没装 spawner / buildCommand / runs 时，launchSegment 当场 SEGMENT_NOT_WIRED。
+   */
+  segment?: SegmentPortsDepsForSessions;
   log?: (message: string, fields?: Record<string, unknown>) => void;
 }
 
@@ -628,6 +640,12 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     ...(deps.sudo ? { sudo: deps.sudo } : {}),
   };
   const registry = new Map<string, Live>();
+  /**
+   * 三段（对题 / 动手 / 验收）走 runner 的会话 registry（#554-4）：`brief.segment` 给定了的 startSession
+   * 起的 runId 在这里；awaitSession 先查这里，查到走 runner 路径（与 Fusion 链路不交叉）。
+   * 会话跑完 / 异常后从 map 里取走（runner 是 fire-and-forget，不存在重复 await 的语义）。
+   */
+  const segments = new Map<string, Promise<SegmentOutcome>>();
   const identities = new Map<string, Promise<{ name: string; email: string }>>();
 
   const treeAs = (dir: string, user: SessionUser, prefix: string, signal?: AbortSignal): UserTree => ({
@@ -1173,6 +1191,34 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
    * 起来了改成按会话自己的时限等，没起来就撤掉。同一个 runId 的重试（这个进程里已经起了的）不拦。
    */
   async function startSession(input: LaunchSessionInput, ctx: Parameters<EnginePorts['startSession']>[1]) {
+    // 三段（对题 / 动手 / 验收）走 runner（#554-4）：起一个无头进程，登记 promise；立即返回 sessionId，
+    // awaitSession 拿那个 promise 的 SegmentOutcome。不动 Fusion 的 registry / db session_runs 行 / 插头链。
+    // Spawner 没接（生产）时，launchSegment 当场 SEGMENT_NOT_WIRED——同步返错，不留登记。
+    if (input.brief.segment !== undefined) {
+      if (!deps.segment) {
+        throw new PortError(SEGMENT_NOT_WIRED_CODE, 'runner 段会话的依赖没装（deps.segment 没给）', {
+          retryable: false,
+        });
+      }
+      // 验证 buildCommand/spawner/runs upfront（launchSegment 内还会再挡一道；这里挡是登记进 segments map 之前）。
+      if (deps.segment.spawner === undefined || deps.segment.buildCommand === undefined) {
+        throw new PortError(
+          SEGMENT_NOT_WIRED_CODE,
+          'runner 段会话的生产 Spawner 还没接（#554-2 / #555 那一档）：起不了',
+          { retryable: false },
+        );
+      }
+      if (deps.segment.runs === undefined) {
+        throw new PortError(SEGMENT_NOT_WIRED_CODE, 'runner 段会话没装 runs Writer（NotWired 也要装）', {
+          retryable: false,
+        });
+      }
+      // 起一个根本就没法起（形状不对）的会话时，launchSegment 同步抛——删登记，把错原样递出去。
+      const pending = launchSegment(input, { db, ...deps.segment });
+      segments.set(input.runId, pending);
+      pending.catch(() => segments.delete(input.runId));
+      return { sessionId: input.runId, resumed: false };
+    }
     const known = registry.get(input.runId);
     if (known) return resultOf(known, await known.spawned);
     const stopping = deps.drain?.stopping();
@@ -2124,7 +2170,47 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     return { ...common, outcome: 'done', output: output.ok };
   }
 
+  /**
+   * 三段（对题 / 动手 / 验收）走 runner 的 SessionEnd 转换（#554-4）：
+   * runner 没 OutputKind / 没 .fleet-out/（那是 Lead / Verify 一路的形状），产出 = stdout 短句 + verdict。
+   * - outcome done + verdict ok → done（会话跑通；output 不写——三段的调用方自己拿 SegmentOutcome 的事由 #554-2 接）
+   * - outcome done + verdict failed / outcome != done → failed，failure.code 用 runner 的形状。
+   * **没拿到 evidence 时不在这里判 manual 的业务对错**（那是 #554-2）；本切片只保证「会话起完不起坏」。
+   */
+  function sessionEndFromSegment(outcome: SegmentOutcome, input: AwaitSessionInput): SessionEnd {
+    const { result, verdict } = outcome;
+    const ok = result.outcome === 'done' && verdict.kind === 'ok';
+    if (ok) {
+      return { sessionId: outcome.sessionId, outcome: 'done' };
+    }
+    const failedReason = verdict.kind === 'failed' ? verdict.reason : `outcome=${result.outcome}`;
+    return {
+      sessionId: outcome.sessionId,
+      outcome: result.outcome === 'timeout' || result.outcome === 'killed' ? 'stopped' : 'failed',
+      failure: {
+        code:
+          result.outcome === 'done' ? 'SEGMENT_VERDICT_FAILED' : `SEGMENT_${result.outcome.toUpperCase()}`,
+        message: `runner 段会话 ${input.runId} ${result.outcome}：${failedReason}`,
+        retryable: result.outcome === 'timeout' || result.outcome === 'failed',
+        exitCode: result.exitCode,
+      },
+    };
+  }
+
   async function awaitSession(input: AwaitSessionInput, ctx: Parameters<EnginePorts['awaitSession']>[1]) {
+    // 三段（对题 / 动手 / 验收）走 runner（#554-4）：先看 segments registry；查到了等那个 promise，
+    // 把 SegmentOutcome 折成 SessionEnd 交回。查不到才走 Fusion 老链路（registry / db / reattach）。
+    const segPromise = segments.get(input.runId);
+    if (segPromise) {
+      try {
+        const outcome = await segPromise;
+        segments.delete(input.runId);
+        return sessionEndFromSegment(outcome, input);
+      } catch (error) {
+        segments.delete(input.runId);
+        throw error;
+      }
+    }
     let live = registry.get(input.runId);
     let whyLost = '引擎工人重启过，输出管道断了';
     if (!live) {
