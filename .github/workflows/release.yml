@@ -389,11 +389,9 @@ jobs:
           fi
           body=$(cat /tmp/release-body.md)
           url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/blob/main/CHANGELOG.md"
-          msg="$VERSION 上线了。
-
-$body
-
-— $url"
+          # 多行文字不许顶格写：run 块里比块缩进浅的行会让 YAML 提前收块，整个工作流文件变成无效文件
+          # （#597 起这里写了顶格的 $body，每次推主线都多一条红，「发布 vN」从来没真跑起来过）。用 printf 拼。
+          msg=$(printf '%s 上线了。\n\n%s\n\n— %s' "$VERSION" "$body" "$url")
           # 标记两段式（第二意见 2026-10-02）：
           #   ① 发之前写「尝试标记」<!-- fleet-notify-attempt: vN --> 占住位置——runner 在「写完标记、还没发出去」之间崩了的话，
           #      下一次读到的是 attempt 而不是 notified，会再发一次，不重不漏；
