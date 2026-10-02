@@ -194,7 +194,7 @@ export function outboxItem(o: Partial<OutboxItem> = {}): OutboxItem {
     issueNumber: 7,
     askId: 'ask-1',
     options: ['批准', '拒绝'],
-    link: '/tasks/task-7',
+    link: '/home3',
     createdAt: ago(0),
     ...o,
   });

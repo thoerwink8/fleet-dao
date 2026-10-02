@@ -24,8 +24,6 @@ export default [
     index('routes/board.tsx'),
     route('overview', 'routes/overview.tsx'),
     route('home3', 'routes/home.tsx'),
-    route('tasks', 'routes/tasks.tsx'),
-    route('tasks/:taskId', 'routes/task-detail.tsx'),
     route('dispatch', 'routes/dispatch.tsx'),
     route('channels', 'routes/channels.tsx'),
     route('quota', 'routes/quota.tsx'),

@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 // 演示版的界面：换成演示版的品牌（#brand → demo.tsx），按可见范围开关模块、收细节；数据层也挡一道。
-import { cleanup, screen, waitFor } from '@testing-library/react';
+import { cleanup, screen } from '@testing-library/react';
 import { Route, Routes } from 'react-router';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 
@@ -12,7 +12,6 @@ import { demoBlocked, visibleNav } from '../components/shell/nav';
 import { SidebarNav } from '../components/shell/sidebar';
 import NotificationsPage from '../routes/notifications';
 import Shell from '../routes/shell';
-import TaskDetailPage from '../routes/task-detail';
 import { renderApp } from '../test/harness';
 import { loadDemoScope, setDemoScopeForTest } from './access';
 import { createDemoApi } from './api';
@@ -35,7 +34,6 @@ describe('演示版：模块开关', () => {
     expect(visibleNav().flatMap((g) => g.items.map((i) => i.to))).toEqual(['/', '/overview', '/quota']);
     expect(demoBlocked('/')).toBe(false);
     expect(demoBlocked('/dispatch')).toBe(true);
-    expect(demoBlocked('/tasks/t-12')).toBe(true);
     expect(demoBlocked('/demo-links')).toBe(true);
     expect(demoBlocked('/models')).toBe(true);
     // 不是导航里的路径交给 404 页
@@ -179,35 +177,12 @@ describe('演示版：本机记着的口令', () => {
 });
 
 describe('演示版：任务详情按细节级别收', () => {
-  test('只到标题：原话、步骤清单、日志都写「没开放」，标题照常', async () => {
-    scope(['board', 'task'], 'titles');
-    renderApp(
-      <Routes>
-        <Route path="tasks/:taskId" element={<TaskDetailPage />} />
-      </Routes>,
-      { api: demoApi(), route: '/tasks/t-12?sub=t-12-b' },
-    );
-    expect(await screen.findByText('登录页加手机验证码')).toBeTruthy();
-    await waitFor(() => expect(screen.getByText('演示版没开放需求的原话')).toBeTruthy());
-    expect(screen.getByText('演示版没开放步骤清单')).toBeTruthy();
-    expect(screen.getAllByText('演示版没开放过程日志').length).toBeGreaterThan(0);
-  });
-
-  test('用量只到状态一级也看得到，「没读到」「不全」照样写明（演示用量读不到时长什么样）', async () => {
-    scope(['board', 'task'], 'status');
-    renderApp(
-      <Routes>
-        <Route path="tasks/:taskId" element={<TaskDetailPage />} />
-      </Routes>,
-      { api: demoApi(), route: '/tasks/t-12?sub=t-12-a' },
-    );
-    // 会话时间线：A 的第一个会话没交终帧就断了；第二意见走 Grok，不报花费
-    expect(await screen.findByText('token 和缓存都没读到')).toBeTruthy();
-    expect(screen.getAllByText(/花费没读到/).length).toBeGreaterThan(0);
-    // 时间与用量：合计里有没读到的标「不全」，花费分按量、套餐内
-    expect(screen.getAllByText('不全').length).toBeGreaterThan(0);
-    expect(screen.getByText('按量', { selector: 'dt' })).toBeTruthy();
-    expect(screen.getByText('套餐内', { selector: 'dt' })).toBeTruthy();
-    expect(screen.queryByText('没有按量花费')).toBeNull();
+  test('细节不到「过程」：看板标题按级别收、步骤时间线不给数据', async () => {
+    // 任务详情页已删（delete-task-detail），这里剩「数据层按级别收」的半边：
+    // 时间线、步骤清单接口在细节不到「过程」时回 demo_hidden。
+    scope(['board'], 'status');
+    const api = demoApi();
+    expect(((await api.timeline('t-12').catch((e: unknown) => e)) as ApiError).code).toBe('demo_hidden');
+    expect(((await api.runSteps('run-x').catch((e: unknown) => e)) as ApiError).code).toBe('demo_hidden');
   });
 });
