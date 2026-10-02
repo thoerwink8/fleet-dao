@@ -52,7 +52,7 @@ export function CommandMenu({ open, onOpenChange }: { open: boolean; onOpenChang
   return (
     <CommandDialog open={open} onOpenChange={onOpenChange} className="sm:max-w-xl">
       <CommandInput placeholder="输入页面名、需求编号或标题、操作…" />
-      <CommandList className="max-h-[440px]">
+      <CommandList className="max-h-command-list">
         <CommandEmpty>没找到</CommandEmpty>
         {canSee('task') ? (
           <>

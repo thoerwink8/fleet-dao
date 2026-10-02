@@ -46,7 +46,7 @@ function ActorIcon({ actor, me }: { actor: AuditEntry['actor']; me: Me | undefin
   }
   return (
     <span
-      className="grid size-7 shrink-0 place-items-center rounded-full bg-foreground text-[11px] font-semibold text-background"
+      className="grid size-7 shrink-0 place-items-center rounded-full bg-foreground text-caption font-semibold text-background"
       title={actorKindLabel[actor.kind]}
     >
       {actorName(actor, me).slice(0, 1)}
@@ -109,7 +109,7 @@ export default function Audit() {
               aria-selected={filter === f.id}
               onClick={() => setFilter(f.id)}
               className={cn(
-                'h-7 shrink-0 rounded-md px-3 text-[13px] text-muted-foreground transition-colors',
+                'h-7 shrink-0 rounded-md px-3 text-sub text-muted-foreground transition-colors',
                 filter === f.id ? 'bg-card font-medium text-foreground shadow-sm' : 'hover:text-foreground',
               )}
             >
@@ -118,7 +118,7 @@ export default function Audit() {
           ))}
         </div>
         {target ? (
-          <span className="inline-flex h-8 items-center gap-1.5 rounded-full border bg-card pr-1 pl-3 text-[13px]">
+          <span className="inline-flex h-8 items-center gap-1.5 rounded-full border bg-card pr-1 pl-3 text-sub">
             只看 {targetLabel(target, tasks)}
             <button
               type="button"
@@ -186,15 +186,15 @@ export default function Audit() {
                       {targetLabel(a.target, tasks)}
                     </button>
                     {!a.ok ? (
-                      <Badge variant="outline" className="h-5 border-st-fail/50 text-[10px] text-ink-fail">
+                      <Badge variant="outline" className="h-5 border-st-fail/50 text-micro text-ink-fail">
                         没做成
                       </Badge>
                     ) : null}
                   </div>
                   {a.reason ? (
-                    <p className="mt-0.5 text-[13px] text-muted-foreground">理由：{a.reason}</p>
+                    <p className="mt-0.5 text-sub text-muted-foreground">理由：{a.reason}</p>
                   ) : null}
-                  {a.error ? <p className="mt-0.5 text-[13px] text-ink-fail">{a.error}</p> : null}
+                  {a.error ? <p className="mt-0.5 text-sub text-ink-fail">{a.error}</p> : null}
                   {a.before !== undefined || a.after !== undefined ? (
                     <details className="mt-1 text-xs text-muted-foreground">
                       <summary className="cursor-pointer select-none hover:text-foreground">
@@ -204,7 +204,7 @@ export default function Audit() {
                         {a.before !== undefined ? (
                           <div>
                             <div className="mb-1">之前</div>
-                            <pre className="num overflow-x-auto rounded-md bg-muted/70 p-2 text-[11px] scrollbar-thin">
+                            <pre className="num overflow-x-auto rounded-md bg-muted/70 p-2 text-caption scrollbar-thin">
                               {json(a.before)}
                             </pre>
                           </div>
@@ -212,7 +212,7 @@ export default function Audit() {
                         {a.after !== undefined ? (
                           <div>
                             <div className="mb-1">之后</div>
-                            <pre className="num overflow-x-auto rounded-md bg-muted/70 p-2 text-[11px] scrollbar-thin">
+                            <pre className="num overflow-x-auto rounded-md bg-muted/70 p-2 text-caption scrollbar-thin">
                               {json(a.after)}
                             </pre>
                           </div>
@@ -225,7 +225,7 @@ export default function Audit() {
                   <span className="num text-xs text-muted-foreground" title={formatDateTime(a.at)}>
                     {formatAgo(a.at, now)}
                   </span>
-                  <span className="rounded bg-muted px-1.5 text-[10px] leading-4 text-muted-foreground">
+                  <span className="rounded bg-muted px-1.5 text-micro leading-4 text-muted-foreground">
                     经{viaLabel[a.via]}
                   </span>
                 </div>

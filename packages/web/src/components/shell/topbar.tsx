@@ -52,7 +52,7 @@ import { PaletteSwatch } from './palette-swatch';
 
 export function Topbar({ onMenu, onSearch }: { onMenu(): void; onSearch(): void }) {
   return (
-    <header className="flex h-[52px] shrink-0 items-center gap-2 border-b bg-panel/80 px-3 backdrop-blur md:px-4">
+    <header className="flex h-topbar shrink-0 items-center gap-2 border-b bg-panel/80 px-3 backdrop-blur md:px-4">
       <Button size="icon" variant="ghost" className="size-8 md:hidden" onClick={onMenu} aria-label="打开导航">
         <Menu />
       </Button>
@@ -60,7 +60,7 @@ export function Topbar({ onMenu, onSearch }: { onMenu(): void; onSearch(): void 
       <button
         type="button"
         onClick={onSearch}
-        className="ml-1 hidden h-8 w-full max-w-[380px] items-center gap-2 rounded-lg border bg-background/60 px-2.5 text-[13px] text-muted-foreground transition-colors hover:border-border-strong sm:flex"
+        className="ml-1 hidden h-8 w-full max-w-search items-center gap-2 rounded-lg border bg-background/60 px-2.5 text-sub text-muted-foreground transition-colors hover:border-border-strong sm:flex"
       >
         <Search className="size-3.5" aria-hidden />
         <span className="flex-1 text-left">搜任务、页面、操作…</span>
@@ -93,7 +93,7 @@ function RepoSwitcher() {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="ghost" className="h-8 gap-1.5 px-2 text-[13px]" aria-label="切换仓">
+        <Button variant="ghost" className="h-8 gap-1.5 px-2 text-sub" aria-label="切换仓">
           <span className="num hidden text-muted-foreground lg:inline">{repo?.owner}/</span>
           {repo ? (
             <span className="num max-w-40 truncate font-semibold">{repo.name}</span>
@@ -186,7 +186,7 @@ function LiveIndicator() {
             className={cn(
               'size-1.5 rounded-full transition-[box-shadow,transform] duration-300',
               ok ? 'bg-st-done' : status === 'down' ? 'bg-st-fail' : 'bg-st-stall',
-              flash && 'scale-125 shadow-[0_0_0_4px_color-mix(in_oklab,var(--st-done)_30%,transparent)]',
+              flash && 'scale-125 shadow-done-pop',
             )}
           />
           <span className={cn(ok && 'sr-only md:not-sr-only')}>
@@ -229,17 +229,17 @@ function NotificationBell() {
         >
           {urgent ? <BellRing /> : <Bell />}
           {error && !data ? (
-            <span className="absolute -top-0.5 -right-0.5 grid size-4 place-items-center rounded-full bg-st-fail text-[10px] leading-4 font-bold text-white">
+            <span className="absolute -top-0.5 -right-0.5 grid size-4 place-items-center rounded-full bg-st-fail text-micro leading-4 font-bold text-white">
               !
             </span>
           ) : urgent ? (
-            <span className="num absolute -top-0.5 -right-0.5 grid min-w-4 place-items-center rounded-full bg-st-human px-1 text-[10px] leading-4 font-semibold text-white">
+            <span className="num absolute -top-0.5 -right-0.5 grid min-w-4 place-items-center rounded-full bg-st-human px-1 text-micro leading-4 font-semibold text-white">
               {urgent}
             </span>
           ) : null}
         </Button>
       </PopoverTrigger>
-      <PopoverContent align="end" className="w-[380px] p-0">
+      <PopoverContent align="end" className="w-notifications p-0">
         <div className="flex items-center justify-between border-b px-3 py-2">
           <span className="text-sm font-semibold">待处理的提醒</span>
           <span className="num text-xs text-muted-foreground">{data ? items.length : '—'}</span>
@@ -251,7 +251,7 @@ function NotificationBell() {
         ) : data && items.length === 0 ? (
           <p className="px-3 py-6 text-center text-sm text-muted-foreground">没有待处理的提醒</p>
         ) : null}
-        <ul className="max-h-[360px] overflow-y-auto scrollbar-thin">
+        <ul className="max-h-notifications-list overflow-y-auto scrollbar-thin">
           {items.slice(0, 8).map((n) => (
             <li key={n.id} className="flex items-start gap-1 border-b pr-2 last:border-b-0">
               <button
@@ -261,10 +261,10 @@ function NotificationBell() {
               >
                 <StatusDot tone={noticeLevelMeta[n.level].tone} className="mt-1.5" />
                 <span className="min-w-0 flex-1">
-                  <span className="block truncate text-[13px] font-medium">{n.title}</span>
+                  <span className="block truncate text-sub font-medium">{n.title}</span>
                   <span className="block truncate text-xs text-muted-foreground">{n.body}</span>
                 </span>
-                <span className="num shrink-0 text-[11px] text-muted-foreground">
+                <span className="num shrink-0 text-caption text-muted-foreground">
                   {formatAgo(n.createdAt, now)}
                 </span>
               </button>
@@ -346,7 +346,7 @@ function ThemeMenu() {
         </TooltipTrigger>
         <TooltipContent>主题色与深浅</TooltipContent>
       </Tooltip>
-      <PopoverContent align="end" className="w-[340px]">
+      <PopoverContent align="end" className="w-usage">
         <div className="mb-2 text-xs text-muted-foreground">深浅</div>
         <ModeSwitch />
         <div className="mt-4 mb-2 text-xs text-muted-foreground">主题色</div>

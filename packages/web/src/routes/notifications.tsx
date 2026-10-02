@@ -40,7 +40,7 @@ const DELIVERY_NAME: Record<string, string> = { feishu: '飞书' };
 
 /** 飞书等渠道送没送到：没拿到消息编号就算没送到。 */
 function Deliveries({ n }: { n: Notification }) {
-  if (!n.deliveries.length) return <span className="text-[11px] text-faint">只在{brand.product}</span>;
+  if (!n.deliveries.length) return <span className="text-caption text-faint">只在{brand.product}</span>;
   return (
     <span className="flex flex-wrap gap-1.5">
       {n.deliveries.map((d, i) => (
@@ -49,7 +49,7 @@ function Deliveries({ n }: { n: Notification }) {
           <TooltipTrigger asChild>
             <span
               className={cn(
-                'inline-flex items-center gap-1 rounded px-1.5 text-[10px] leading-4',
+                'inline-flex items-center gap-1 rounded px-1.5 text-micro leading-4',
                 d.delivered ? 'bg-muted text-muted-foreground' : 'bg-st-fail/10 text-ink-fail',
               )}
             >
@@ -104,7 +104,7 @@ function WorkLink({
       repo={repo}
       kind={kind}
       n={n}
-      className="inline-flex items-center gap-0.5 text-[11px] text-muted-foreground underline-offset-2 [&[href]]:hover:text-foreground [&[href]]:hover:underline"
+      className="inline-flex items-center gap-0.5 text-caption text-muted-foreground underline-offset-2 [&[href]]:hover:text-foreground [&[href]]:hover:underline"
       icon={<ExternalLink className="size-2.5" aria-hidden />}
     >
       {label}
@@ -121,7 +121,7 @@ function HandlingRow({ h, now }: { h: Handling; now: number }) {
   return (
     <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1" data-testid="alert-handling">
       <StatusChip tone={STAGE_TONE[h.stage]} label={h.stageText} />
-      {h.who ? <span className="text-[12px] text-foreground">{h.who}</span> : null}
+      {h.who ? <span className="text-xs text-foreground">{h.who}</span> : null}
       {h.work ? (
         <WorkLink
           repo={h.work.repo}
@@ -132,15 +132,15 @@ function HandlingRow({ h, now }: { h: Handling; now: number }) {
       ) : null}
       {h.pr ? <WorkLink repo={h.pr.repo} kind="pull" n={h.pr.number} label={`PR #${h.pr.number}`} /> : null}
       {h.silence ? (
-        <span className="text-[11px] text-muted-foreground">
+        <span className="text-caption text-muted-foreground">
           {h.silence.comment} · 到 {formatDateTime(h.silence.endsAt)}
         </span>
       ) : null}
-      <span className="num text-[11px] text-faint" title={formatDateTime(h.since)}>
+      <span className="num text-caption text-faint" title={formatDateTime(h.since)}>
         {since}
       </span>
       {h.problems.map((p) => (
-        <span key={p} className="text-[11px] text-ink-fail">
+        <span key={p} className="text-caption text-ink-fail">
           {p}
         </span>
       ))}
@@ -198,7 +198,7 @@ export default function Notifications() {
               aria-selected={status === s}
               onClick={() => set('status', s === 'open' ? null : 'all')}
               className={cn(
-                'h-7 rounded-md px-3 text-[13px] text-muted-foreground transition-colors',
+                'h-7 rounded-md px-3 text-sub text-muted-foreground transition-colors',
                 status === s ? 'bg-card font-medium text-foreground shadow-sm' : 'hover:text-foreground',
               )}
             >
@@ -216,7 +216,7 @@ export default function Notifications() {
                 aria-pressed={level === l.id}
                 onClick={() => set('level', l.id === 'all' ? null : l.id)}
                 className={cn(
-                  'inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-[13px] transition-colors',
+                  'inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-sub transition-colors',
                   level === l.id
                     ? 'border-foreground bg-foreground text-background'
                     : 'bg-card text-muted-foreground',
@@ -224,7 +224,7 @@ export default function Notifications() {
               >
                 {l.id !== 'all' ? <StatusDot tone={noticeLevelMeta[l.id].tone} className="size-1.5" /> : null}
                 {l.label}
-                <span className="num text-[11px] opacity-70">{n}</span>
+                <span className="num text-caption opacity-70">{n}</span>
               </button>
             );
           })}
@@ -271,21 +271,21 @@ export default function Notifications() {
                         <div className="min-w-0 flex-1">
                           <div className="flex flex-wrap items-center gap-2">
                             <span className={cn('text-sm', !resolved && 'font-semibold')}>{n.title}</span>
-                            <span className="rounded bg-muted px-1.5 text-[10px] text-muted-foreground">
+                            <span className="rounded bg-muted px-1.5 text-micro text-muted-foreground">
                               {noticeLevelMeta[n.level].label}
                             </span>
                           </div>
-                          <p className="mt-0.5 text-[13px] whitespace-pre-wrap text-muted-foreground">
+                          <p className="mt-0.5 text-sub whitespace-pre-wrap text-muted-foreground">
                             {n.body}
                           </p>
                           {!resolved && n.handling ? <HandlingRow h={n.handling} now={now} /> : null}
                           <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
-                            <span className="num text-[11px] text-faint" title={formatClock(n.createdAt)}>
+                            <span className="num text-caption text-faint" title={formatClock(n.createdAt)}>
                               {formatAgo(n.createdAt, now)}
                             </span>
                             <Deliveries n={n} />
                             {resolved && n.resolvedAt ? (
-                              <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
+                              <span className="inline-flex items-center gap-1 text-caption text-muted-foreground">
                                 <Check className="size-3" aria-hidden />
                                 {n.resolvedBy ? (isMine(n.resolvedBy, me) ? '我' : n.resolvedBy) : ''}处理于{' '}
                                 <span className="num">{formatAgo(n.resolvedAt, now)}</span>
