@@ -180,16 +180,26 @@ jobs:
             }
             console.log(r.body);
           " > /tmp/release-body.md
-          # 已存在：读回比正文
+          # 已存在：读回比正文。比对时把 fleet-notified 标记剥掉——飞书那一步打在末尾的标签不能当「被人手改了正文」，
+          # 不然重跑这一轮会先把正文改回去、飞书那步接着判「没标过」再发一遍（第二意见 2026-10-02）。
+          version=$(echo "$VERSION")
           if existing=$(gh release view "$VERSION" --json body,tagName 2>/dev/null); then
             existing_body=$(jq -r '.body' <<<"$existing")
-            want=$(cat /tmp/release-body.md)
-            if [[ $existing_body == "$want" ]]; then
-              echo "::notice::release $VERSION 已经在，正文一致（幂等跳）。"
+            # 剥掉 <!-- fleet-notified: vN --> 那一行再比。
+            existing_changelog_part=$(grep -vE '^<!-- fleet-notified: [^ ]+ -->$' <<<"$existing_body" | sed -e 's/[[:space:]]*$//')
+            want=$(cat /tmp/release-body.md | sed -e 's/[[:space:]]*$//')
+            if [[ $existing_changelog_part == "$want" ]]; then
+              echo "::notice::release $VERSION 已经在，正文一致（幂等跳，fleet-notified 标记保留）。"
               exit 0
             fi
-            echo "::notice::release $VERSION 正文被人手改过（不一致），改回 CHANGELOG.md 里的原文并记一笔。"
-            printf '%s' "$want" | gh release edit "$VERSION" --notes-file -
+            echo "::notice::release $VERSION 正文被人手改过（不一致，剥掉 fleet-notified 标记后还是对不上 CHANGELOG.md），改回原文并记一笔。"
+            # 把剥掉的 fleet-notified 行贴回去，别把上次发飞书的证据一起抹了。
+            notified_marks=$(grep -E '^<!-- fleet-notified: [^ ]+ -->$' <<<"$existing_body" || true)
+            {
+              printf '%s' "$want"
+              if [[ -n $notified_marks ]]; then printf '\n\n%s\n' "$notified_marks"; fi
+            } > /tmp/release-body-rewrite.md
+            gh release edit "$VERSION" --notes-file /tmp/release-body-rewrite.md
             exit 0
           fi
           gh release create "$VERSION" --title "$VERSION" --notes-file /tmp/release-body.md
@@ -242,8 +252,13 @@ jobs:
             exit 0
           fi
           # 幂等：这一版的 release 正文里已经写了 <!-- fleet-notified: vN --> → 上次发过，跳。
+          # 读 release 读不出来不许|||| 兜成空正文：GitHub 临时故障时「查不到」被当「没发过」，会重复推飞书；
+          # 读不出就明确失败、这一轮中止（第二意见 2026-10-02）。
           export VERSION_ENV="$VERSION"
-          existing=$(gh release view "$VERSION" --json body 2>/dev/null || echo '{"body":""}')
+          if ! existing=$(gh release view "$VERSION" --json body 2>&1); then
+            echo "::error::gh release view $VERSION 失败：$existing"
+            exit 1
+          fi
           notified=$(jq -r '.body' <<<"$existing" | node --input-type=module -e "
             import { feishuAlreadyNotified } from './packages/conventions/src/publish-release-logic.ts';
             let body = '';
