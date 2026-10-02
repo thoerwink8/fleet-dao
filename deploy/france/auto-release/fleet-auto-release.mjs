@@ -19,6 +19,7 @@ import {
   runOnce,
   STATE_FILE,
   summary,
+  VERSION_TAGS_ARGS,
 } from './lib.mjs';
 
 const NODE = '/usr/bin/node';
@@ -111,14 +112,40 @@ function runRelease(sha, busyOk) {
 export const realIo = {
   now: () => new Date(),
   async readMain() {
+    // 连 tag 一起取：这一轮发哪个版本全看版本标记（v<N> tag），没取到 tag 会当成「一个标记都没有」明确失败——
+    // 不是「没有标记就发主线」（决定 0011 第 3 条）。带 --no-tags 的老写法在这里就是错的。
     gitOk(
-      ['fetch', '--quiet', '--no-tags', 'origin', '+refs/heads/main:refs/remotes/origin/main'],
-      '从 GitHub 取主线',
+      [
+        'fetch',
+        '--quiet',
+        '--prune',
+        'origin',
+        '+refs/heads/main:refs/remotes/origin/main',
+        '+refs/tags/*:refs/tags/*',
+      ],
+      '从 GitHub 取主线和版本标记',
       { timeoutMs: 180_000 },
     );
     return gitOk(
       ['log', '--first-parent', `-n${MAIN_HISTORY}`, '--format=%H %cI', 'refs/remotes/origin/main'],
       '读主线的提交',
+    );
+  },
+  /** 版本标记（`v<N>` tag）：名字、它指的提交、时间。读不到就抛，由 lib.mjs 记成「标记没查成」、这一轮不发。 */
+  async readVersionTags() {
+    return gitOk(VERSION_TAGS_ARGS, '读版本标记');
+  },
+  /**
+   * 这个提交是不是 origin/main 的祖先（`git merge-base --is-ancestor` 退出码 0 是、1 不是、别的算没查成）。
+   * 只把上一次 readMain 取回来的 refs/remotes/origin/main 当真，不再取一次 GitHub（一轮一次）。
+   */
+  async isAncestorOfMain(commit) {
+    if (!SHA.test(commit)) throw new Error(`认不出的提交号「${String(commit).slice(0, 60)}」`);
+    const r = git(['merge-base', '--is-ancestor', commit, 'refs/remotes/origin/main']);
+    if (r.code === 0) return true;
+    if (r.code === 1) return false;
+    throw new Error(
+      `比不出 ${commit.slice(0, 12)} 和 origin/main 谁在前（git 退出码 ${r.code}）：${tail(r.stderr || r.stdout)}`,
     );
   },
   async readSystem(head) {
@@ -182,6 +209,23 @@ export const realIo = {
     if (r.code === 0) return false;
     if (r.code === 1) return true;
     throw new Error(`flock 退出码 ${r.code}：${tail(r.stderr)}`);
+  },
+  /**
+   * 本机有没有在跑引擎（决定 0011 第 4 条的「停派活 → 等收尾 → 部署 → 恢复派活」四步做不做得了）。
+   * 和 release.sh 的 `has_service fleet-engine` 同一个判法：看 systemctl 说这个单元活没活
+   * （france 现在 FLEET_SERVICES=fleet-api，没有 fleet-engine，is-active 回的不是 active）。
+   * systemctl 没跑成、回认不出的：抛（调用方按关着算、照实写「没查成，按关着算」），不当成开着。
+   * 注：这里说的是「本机跑不跑引擎」，和「让 AI 接活」那个按仓的开关（fleet-api dispatch）不是一回事——
+   * 引擎关着时那四步本来就没得做，见 lib.mjs 的 publishSequence。
+   */
+  async engineOn() {
+    const r = run('systemctl', ['is-active', 'fleet-engine.service'], { timeoutMs: 10_000 });
+    const state = r.stdout.trim();
+    if (state === 'active' || state === 'activating' || state === 'reloading') return true;
+    if (['inactive', 'failed', 'deactivating', 'unknown', 'not-found'].includes(state)) return false;
+    throw new Error(
+      `systemctl is-active fleet-engine.service 回的认不出（退出码 ${r.code}、回「${state.slice(0, 40)}」）：${tail(r.stderr)}`,
+    );
   },
   async prepareCheckout(sha) {
     try {

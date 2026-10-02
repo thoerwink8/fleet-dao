@@ -11,9 +11,11 @@ name: release
 #      没合（merged=false）→ 不动作也不算红（这本来就是合法的「这张发布 PR 不发了」）。
 #   2. workflow_dispatch：给一个 version 输入，照样走；多半是上次「发布 vN」PR 合并之后这条跑挂了，人手动补一轮。
 #
-# 国外停机状态下的「停机 → 等等 → 部署 → 恢复」四步（决定 0011 第 4 条）：法国引擎当前 FLEET_SERVICES=fleet-api（不含 fleet-engine，
-# 即停机在.deploy/france/desired-config.json），所以「停派遣」和「恢复派遣」这两步是说明性的空转，只把状态写进日志；
-# #453 把法国发改成按版本+创始人拍之后，这里才真正接 deploy/france/。
+# 国外停机状态下的「停机 → 等等 → 部署 → 恢复」四步（决定 0011 第 4 条）：这一条工作流**不做**这四步——法国那一侧自己
+# 按版本标记拉（#618）：`deploy/france/auto-release` 每 5 分钟挑版本号最大的 `v<N>` tag（这里刚打的这个）指向的提交，
+# 在签出目录里做「停派活 → 等在跑的收尾 → 部署 → 恢复派活」（复用已有的排空协议 `.drain-request`），引擎关着时那四步
+# 照实写「跳过」。这条工作流只负责把标记打出来（tag → release → milestone → 飞书）；下面两个说明步骤保留，提醒读的人
+# 四步在哪做、为什么不在这里做。
 #
 # 改这里之前必须知道：
 # - 每一小节 step 都做一件事、打一行日志；哪一步挂了从日志一眼看得到。
@@ -142,13 +144,16 @@ jobs:
       - if: steps.invoke.outputs.proceed == 'true'
         run: pnpm install --frozen-lockfile
 
-      # b. 停派遣（说明性空转）：法国引擎当前 FLEET_SERVICES=fleet-api（不含 fleet-engine），派遣已经停着；
-      # 等决定 0011 第 3/4 条把法国发改成「按版本+创始人拍」接了 release.yml 之后，这里才是真的动派遣。
-      - name: 法国派遣已停（说明）
+      # b. 停派遣：这条工作流**不做**——法国那一侧自己按版本标记排空（#618 的「停派活 → 等在跑的收尾 → 部署 → 恢复派活」，
+      # 复用已有的排空协议 .drain-request，引擎关着时照实写「跳过」）。这里只说明在哪儿做，免得读的人以为漏了一步。
+      - name: 停在法国的哪一侧做（说明）
         if: steps.invoke.outputs.proceed == 'true'
+        env:
+          VERSION: ${{ steps.invoke.outputs.version }}
         run: |
-          echo "法国引擎当前 FLEET_SERVICES=fleet-api（deploy/france/desired-config.json），派遣已停；这里是空转。"
-          echo "等 #453（本机验过再发）把「按版本+创始人拍」接到这条工作流上，这一步才真动。"
+          echo "「停派活 → 等在跑的收尾 → 部署 → 恢复派活」四步由法国那一侧做：deploy/france/auto-release 每 5 分钟挑"
+          echo "版本号最大的 v<N> tag（刚打的 $VERSION）指向的提交，写排空请求、等引擎手上收尾、发、撤请求（#618）。"
+          echo "法国引擎当前 FLEET_SERVICES=fleet-api（deploy/france/desired-config.json），那四步照实写「跳过」，不假装做过。"
 
       # c. 打 tag：已存在就跳；不存在就打、推。
       - name: 打 tag（已存在就跳）
@@ -442,9 +447,8 @@ $body
           echo "飞书已推一条（release 正文末尾已经把 fleet-notify-attempt 换成 fleet-notified）。"
 
 
-      # g. 恢复派遣（说明性空转：引擎当前就不开派遣）。
-      - name: 法国派遣恢复（说明）
+      # g. 恢复派活：同 b，由法国那一侧做（切完撤掉排空请求，引擎下一眼就接着派；引擎关着时照实写「跳过」）。
+      - name: 恢复派活也由法国那一侧做（说明）
         if: steps.invoke.outputs.proceed == 'true'
         run: |
-          echo "法国派遣本来就不开（FLEET_SERVICES=fleet-api）；这里同样是空转。"
-          echo "等 #453 把法国发按版本+创始人拍接上，这一步才真动。"
+          echo "恢复派活同上：法国那一侧发布切完撤掉排空请求，引擎下一眼就接着派；引擎关着时照实写「跳过」（#618）。"

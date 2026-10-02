@@ -180,6 +180,34 @@ describe('判定：读的时候现算', () => {
     expect(codes(v)).toEqual(['stale']);
   });
 
+  it('版本标记读不到（决定 0011 第 3 条）：标出来、写明「没有标记就不发」，自动发布那边报过了不重报', () => {
+    const stuck = state({
+      marker: null,
+      markerError: { kind: 'none', why: '一个 v<N> 版本标记都没有', at: ago(MIN) },
+      last: { action: 'marker-none', detail: '', at: ago(MIN) },
+    });
+    const v = judge(input(H0, stuck));
+    expect(codes(v)).toEqual(['marker']);
+    expect(v.problems[0]?.alreadyAlerted).toBe(true);
+    expect(v.problems[0]?.steady).toBe('版本标记读不到（没有标记就不发）');
+    expect(v.problems[0]?.detail).toContain('一个 v<N> 版本标记都没有');
+    // 不是祖先的那一种：对外说清是「不是主线上的提交」
+    const notAncestor = state({
+      marker: null,
+      markerError: { kind: 'not-ancestor', why: 'v2 指向的提交不是 origin/main 的祖先', at: ago(MIN) },
+      last: { action: 'marker-not-ancestor', detail: '', at: ago(MIN) },
+    });
+    expect(judge(input(H0, notAncestor)).problems[0]?.message).toContain('不是主线上的提交');
+    // 标记正常（这一轮只是在等 CI）：不报这一条
+    expect(
+      codes(
+        judge(
+          input(H0, state({ marker: { tag: 'v1', commit: H2, at: ago(MIN), checkedAt: ago(MIN) } })),
+        ),
+      ),
+    ).toEqual([]);
+  });
+
   it('一轮里在发：按发布本身的时限（60 分钟）算，不当成没报到；超了报「跑了太久」', () => {
     const running = (m: number) =>
       state({ ranAt: ago(m * MIN), attempt: { sha: H2, startedAt: ago(m * MIN), result: 'running' } });
@@ -318,9 +346,14 @@ describe('状态文件：和自动发布写的对得上', () => {
         EXIT_SESSIONS_BUSY: number;
       };
       const t = { now: Date.parse('2026-09-27T08:00:00Z'), current: H0 as string, release: 0 };
+      // 版本标记（决定 0011 第 3 条）：这一段拿真跑出来的状态核对字段，所以标记也得给——不然连不上发。
+      const tags = (sha: string, tag = 'v1') => `${tag} ${sha} 2026-09-27T07:31:00Z\n`;
       const io = {
         now: () => new Date(t.now),
         readMain: async () => `${H1} 2026-09-27T07:30:00Z\n${H0} 2026-09-27T06:00:00Z`,
+        readVersionTags: async () => tags(H1),
+        isAncestorOfMain: async (c: string) => c === H1 || c === H0,
+        engineOn: async () => false, // 法国现在 FLEET_SERVICES=fleet-api：引擎关着
         readSystem: async () => ({ applied: H0, log: '' }),
         readCurrent: async () => t.current,
         readHistory: async () => '',
@@ -363,12 +396,16 @@ describe('状态文件：和自动发布写的对得上', () => {
       const roundTrip = (s: unknown) => DeployLagState.parse(JSON.parse(JSON.stringify(s)));
       const w = roundTrip(waiting);
       expect(w.last?.action).toBe('wait-idle');
+      expect(w.marker?.tag).toBe('v1');
+      expect(w.marker?.commit).toBe(H1);
       const f = roundTrip(failed);
       expect(f.attempt?.result).toBe('failed');
       // 第一轮在等空闲时，在用的 H0 和检出对得上，规矩同步了一次（没成）
       expect(codes(judgeDeployLag(input(H0, f), new Date(t.now)))).toEqual(['failed', 'rules_failed']);
       // 发成了、规矩没成
       const other = { ...io, readMain: async () => `${H2} 2026-09-27T08:02:00Z\n${H1} 2026-09-27T07:30:00Z` };
+      other.readVersionTags = async () => tags(H2, 'v2');
+      other.isAncestorOfMain = async (c: string) => c === H2 || c === H1 || c === H0;
       other.ciRuns = async () => ({
         status: 200,
         body: JSON.stringify({

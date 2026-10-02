@@ -55,6 +55,18 @@ export const DeployLagState = z.object({
     })
     .nullable(),
   mainError: z.string().nullable(),
+  /**
+   * 这一轮要发的版本标记（决定 0011 第 3 条）：版本号最大的那个 `v<N>` tag 且它指向的提交在 origin/main 上。
+   * 读不到、认不出、不是主线上的提交时是 null，原因在 markerError——**发的一直是它，不是主线头**。
+   */
+  marker: z
+    .object({ tag: z.string(), commit: Sha, at: Iso, taggedAt: Iso.optional(), checkedAt: Iso })
+    .nullable()
+    .optional(),
+  markerError: z
+    .object({ kind: z.string(), why: z.string(), at: Iso })
+    .nullable()
+    .optional(),
   ci: z
     .object({
       sha: Sha,
@@ -137,7 +149,7 @@ function waitingFor(st: DeployLagState): string {
     case 'wait-idle':
       return '（在等引擎空闲）';
     case 'hold':
-      return '（人手动切过版本，等主线出新提交）';
+      return '（人手动切过版本，等下一个版本标记）';
     case 'release-busy':
     case 'releasing':
       return '（在发）';
@@ -145,6 +157,9 @@ function waitingFor(st: DeployLagState): string {
       return '';
   }
 }
+
+/** 这几样是「版本标记没查成、这一轮不发」：自动发布当场已经报过警（alreadyAlerted），这里只标出来。 */
+const MARKER_STUCK_ACTIONS = new Set(['marker-none', 'marker-unknown', 'marker-not-ancestor']);
 
 /** 判一次。now 由调用方给（测试好造）；input 由 readDeployLagInput 读，测试直接造。 */
 export function judgeDeployLag(input: DeployLagInput, now: Date): DeployLagVerdict {
@@ -221,6 +236,18 @@ export function judgeDeployLag(input: DeployLagInput, now: Date): DeployLagVerdi
   // 主线读数是新的才数落后几个：读数旧了上面已经报了「没查成」，拿旧读数数出来的不作数
   if (current && st.main && fresh) {
     lagOf(st, current, input.currentOnMain, t, add);
+  }
+
+  // 版本标记没查成（决定 0011 第 3 条）：没标记就不发主线头，所以它卡住 = 线上停在旧版本、等创始人拍下一版。
+  // 自动发布当场已经报过一次（alreadyAlerted），这里不再报一遍，只让它进读数。
+  if (fresh && st.marker === null && st.markerError && MARKER_STUCK_ACTIONS.has(st.last?.action ?? '')) {
+    add({
+      code: 'marker',
+      message: `没查成：版本标记读不到（${st.markerError.kind === 'not-ancestor' ? '不是主线上的提交' : '没有或认不出'}）`,
+      steady: '版本标记读不到（没有标记就不发）',
+      detail: `${st.markerError.why}；这一轮 ${st.last?.action ?? '（没记）'}`,
+      alreadyAlerted: true,
+    });
   }
 
   if (st.rules?.result === 'failed') {
