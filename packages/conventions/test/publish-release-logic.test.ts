@@ -1,10 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
-  appendFeishuNotifiedMark,
+  appendFeishuAttemptMark,
   extractReleaseBody,
   feishuAlreadyNotified,
+  feishuAttemptMark,
+  feishuAttemptWritten,
   feishuNotifiedMark,
   pickOpenMilestone,
+  promoteFeishuAttemptToNotified,
+  stripFeishuAttemptMark,
 } from '../src/publish-release-logic.ts';
 
 describe('pickOpenMilestone：从开放 milestone 里挑要关的那一张', () => {
@@ -127,24 +131,49 @@ describe('extractReleaseBody：从 CHANGELOG.md 拿「## [vN] - 」那一段当�
   });
 });
 
-describe('飞书幂等：release 正文末尾的「<!-- fleet-notified: vN -->」标签', () => {
-  it('没标过 → appendFeishuNotifiedMark 加上；标过 → 幂等不再加', () => {
-    const body = '- 一条\n- 两条';
+describe('飞书幂等：release 正文末尾的「<!-- fleet-notify-attempt/notified: vN -->」标签', () => {
+  it('尝试标记：append → written；发成之后 promote → notified；发失败 strip 剥掉', () => {
+    let body = '- 一条\n- 两条';
     expect(feishuAlreadyNotified(body, 'v2')).toBe(false);
-    const withMark = appendFeishuNotifiedMark(body, 'v2');
-    expect(feishuAlreadyNotified(withMark, 'v2')).toBe(true);
-    expect(withMark).toContain(feishuNotifiedMark('v2'));
-    expect(appendFeishuNotifiedMark(withMark, 'v2')).toBe(withMark);
+    expect(feishuAttemptWritten(body, 'v2')).toBe(false);
+    body = appendFeishuAttemptMark(body, 'v2');
+    expect(feishuAttemptWritten(body, 'v2')).toBe(true);
+    expect(feishuAlreadyNotified(body, 'v2')).toBe(false);
+    body = promoteFeishuAttemptToNotified(body, 'v2');
+    expect(feishuAttemptWritten(body, 'v2')).toBe(false);
+    expect(feishuAlreadyNotified(body, 'v2')).toBe(true);
+    expect(body).toContain(feishuNotifiedMark('v2'));
+    expect(body).not.toContain(feishuAttemptMark('v2'));
+  });
+
+  it('发失败 → stripFeishuAttemptMark 剥掉尝试标记，下一次能再发（第二意见 2026-10-02：发送失败+标记回不去会重复推）', () => {
+    let body = '- 一条\n- 两条';
+    body = appendFeishuAttemptMark(body, 'v2');
+    expect(feishuAttemptWritten(body, 'v2')).toBe(true);
+    body = stripFeishuAttemptMark(body, 'v2');
+    expect(feishuAttemptWritten(body, 'v2')).toBe(false);
+    expect(feishuAlreadyNotified(body, 'v2')).toBe(false);
+  });
+
+  it('正文中间出现同样注释不算已发（放宽 includes 会把正文里随手一句「<!-- fleet-notified: v2 -->」当成已发而跳过，第二意见 2026-10-02）', () => {
+    const sneaky = `- 一条\n- 顺手写一行 ${feishuNotifiedMark('v2')}\n- 还一条`;
+    expect(feishuAlreadyNotified(sneaky, 'v2')).toBe(false);
+    // 但独立成行在末尾几行才算
+    const real = `- 一条\n\n${feishuNotifiedMark('v2')}\n`;
+    expect(feishuAlreadyNotified(real, 'v2')).toBe(true);
   });
 
   it('v1 和 v10 是两张，vN 的标对不上别的版本', () => {
-    const body = appendFeishuNotifiedMark('x', 'v1');
-    expect(feishuAlreadyNotified(body, 'v1')).toBe(true);
-    expect(feishuAlreadyNotified(body, 'v10')).toBe(false);
+    const body = appendFeishuAttemptMark('x', 'v1');
+    expect(feishuAttemptWritten(body, 'v1')).toBe(true);
+    expect(feishuAttemptWritten(body, 'v10')).toBe(false);
+    expect(feishuAlreadyNotified(body, 'v1')).toBe(false);
   });
 
   it('v<非数字> 直接拒绝', () => {
     expect(() => feishuAlreadyNotified('x', 'vNext' as `v${number}`)).toThrow(/不是 v<N>/);
-    expect(() => appendFeishuNotifiedMark('x', 'vNext' as `v${number}`)).toThrow(/不是 v<N>/);
+    expect(() => appendFeishuAttemptMark('x', 'vNext' as `v${number}`)).toThrow(/不是 v<N>/);
+    expect(() => promoteFeishuAttemptToNotified('x', 'vNext' as `v${number}`)).toThrow(/不是 v<N>/);
+    expect(() => stripFeishuAttemptMark('x', 'vNext' as `v${number}`)).toThrow(/不是 v<N>/);
   });
 });

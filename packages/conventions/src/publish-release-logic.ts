@@ -112,20 +112,62 @@ export function extractReleaseBody(changelog: string, version: `v${number}`): Re
   return { kind: 'ok', body: section };
 }
 
-/** 飞书已发标记：会写进 Release 正文末尾，下次先读出来比对（幂等，第二意见 2026-10-02）。 */
+/** 飞书已发标记：会写进 Release 正文末尾，下次先读出来比对（幂等，第二意见 2026-10-02）。
+ * 发之前用「尝试标记」<!-- fleet-notify-attempt: vN --> 占住位置，发成功才换成「已确认标记」<!-- fleet-notified: vN -->——
+ * runner 崩在「尝试标记写完、发送还没出去」之间时，下一次读到的是 attempt 而不是 notified，会再发一次（不重不漏）。 */
 export const FEISHU_NOTIFIED_PREFIX = '<!-- fleet-notified: ';
+export const FEISHU_ATTEMPT_PREFIX = '<!-- fleet-notify-attempt: ';
 export const feishuNotifiedMark = (version: `v${number}`) => `${FEISHU_NOTIFIED_PREFIX}${version} -->`;
+export const feishuAttemptMark = (version: `v${number}`) => `${FEISHU_ATTEMPT_PREFIX}${version} -->`;
 
-/** 看 release 正文里有没有「已发过飞书 @ vN」；返回 true 表示已走过通知这步（跳这步，不重发）。 */
+/** 看 release 正文末尾有没有「已发过飞书 @ vN」的确认标记（只看末尾几行；正文中间出现同样注释不算，第二意见 2026-10-02）。 */
 export function feishuAlreadyNotified(releaseBody: string, version: `v${number}`): boolean {
   if (!isVersionTag(version)) throw new Error(`版本号不是 v<N> 的模样：「${version}」`);
-  return releaseBody.includes(feishuNotifiedMark(version));
+  const mark = `${feishuNotifiedMark(version)}`;
+  const lines = releaseBody.replace(/\r\n?/g, '\n').split('\n');
+  // 只认末尾 5 行里独立成行的标记
+  const tail = lines.slice(Math.max(0, lines.length - 5));
+  return tail.some((l) => l.trim() === mark);
 }
 
-/** 把「已发过飞书 @ vN」标记追加到 Release 正文末尾；Release 正文读不到时由 release.yml 拒绝继续。 */
-export function appendFeishuNotifiedMark(releaseBody: string, version: `v${number}`): string {
+/** 「尝试过」标记：写在 Release 正文末尾；下一次再跑看到它（没确认）就再发一次。 */
+export function feishuAttemptWritten(releaseBody: string, version: `v${number}`): boolean {
+  if (!isVersionTag(version)) throw new Error(`版本号不是 v<N> 的模样：「${version}」`);
+  const mark = `${feishuAttemptMark(version)}`;
+  const lines = releaseBody.replace(/\r\n?/g, '\n').split('\n');
+  const tail = lines.slice(Math.max(0, lines.length - 5));
+  return tail.some((l) => l.trim() === mark);
+}
+
+/** 发之前写「尝试标记」（已有确认标记、已有同版本尝试标记都幂等不动）。 */
+export function appendFeishuAttemptMark(releaseBody: string, version: `v${number}`): string {
   if (!isVersionTag(version)) throw new Error(`版本号不是 v<N> 的模样：「${version}」`);
   if (feishuAlreadyNotified(releaseBody, version)) return releaseBody;
+  if (feishuAttemptWritten(releaseBody, version)) return releaseBody;
   const tail = releaseBody.endsWith('\n') || releaseBody.length === 0 ? '' : '\n\n';
-  return `${releaseBody}${tail}${feishuNotifiedMark(version)}\n`;
+  return `${releaseBody}${tail}${feishuAttemptMark(version)}\n`;
+}
+
+/** 发成功之后把「尝试标记」换成「已确认标记」。 */
+export function promoteFeishuAttemptToNotified(releaseBody: string, version: `v${number}`): string {
+  if (!isVersionTag(version)) throw new Error(`版本号不是 v<N> 的模样：「${version}」`);
+  if (feishuAlreadyNotified(releaseBody, version)) return releaseBody;
+  const attempt = feishuAttemptMark(version);
+  const confirmed = feishuNotifiedMark(version);
+  const lines = releaseBody.replace(/\r\n?/g, '\n').split('\n');
+  const idx = lines.findLastIndex((l) => l.trim() === attempt);
+  if (idx === -1) {
+    const tail = releaseBody.endsWith('\n') || releaseBody.length === 0 ? '' : '\n\n';
+    return `${releaseBody}${tail}${confirmed}\n`;
+  }
+  lines[idx] = confirmed;
+  return lines.join('\n');
+}
+
+/** 发失败之后把「尝试标记」剥掉，别把「已尝过」的假证据留下让下一次当已发而跳过。 */
+export function stripFeishuAttemptMark(releaseBody: string, version: `v${number}`): string {
+  if (!isVersionTag(version)) throw new Error(`版本号不是 v<N> 的模样：「${version}」`);
+  const attempt = feishuAttemptMark(version);
+  const lines = releaseBody.replace(/\r\n?/g, '\n').split('\n');
+  return lines.filter((l) => l.trim() !== attempt).join('\n');
 }

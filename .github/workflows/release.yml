@@ -147,12 +147,14 @@ jobs:
           if [[ $EVENT_NAME == pull_request ]]; then
             MERGE_SHA="${GITHUB_SHA}"
           else
-            # 发起 CLI 用「发布 v<N>：CHANGELOG.md 的 Unreleased 段收进 ## [vN] - 日期」这一条提交信息
-            # （packages/conventions/src/publish-actions.ts 的 commitMessage）。
-            MERGE_SHA=$(git log --first-parent --grep="^发布 ${VERSION}：CHANGELOG.md 的 Unreleased 段收进" --format=%H -n 1 main || echo "")
+            # workflow_dispatch 手动补跑：HEAD 已经走到「发布 PR 合了又合了几个」，不能拿 HEAD 当这次发布的提交。
+            # 用 gh 查 head=release/v<N> 已 merge 的那张 PR，拿它的 merge_commit_sha——squash / merge commit / rebase 都对得上
+            # （第二意见 2026-10-02：主线上的提交信息不一定是「发布 v<N>：CHANGELOG.md …」，squash 时尤其不是）。
+            MERGE_SHA=$(gh api "repos/${{ github.repository }}/pulls?state=closed&head=${{ github.repository_owner }}:release/$VERSION&per_page=10" | \
+              jq -r '[.[] | select(.merged_at != null)][0].merge_commit_sha // empty')
             if [[ -z $MERGE_SHA ]]; then
-              echo "::error::workflow_dispatch 手动补跑：在 main 主干上按提交信息「发布 ${VERSION}：…」找不到对应的 merge 提交——"
-              echo "::error::发起人把 version 写错了吧（$VERSION 不是真发过的版本号）？用 git log --grep 看一眼再重试。"
+              echo "::error::workflow_dispatch 手动补跑：没找到 head=release/$VERSION 已 merge 的 PR（抓取的是「release/$VERSION」分支在 ${GITHUB_REPOSITORY_OWNER:-仓库 owner} 名下），"
+              echo "::error::发起人先核 version（多半写错了）、或这张发布 PR 走的是别的 head 分支名；确实存在的话手动 gh api 查 merge_commit_sha 再走下一步。"
               exit 1
             fi
           fi
@@ -339,33 +341,46 @@ jobs:
 $body
 
 — $url"
-          # 先把「已发」标记写进 release 正文，再发飞书：反过来的话「飞书发成、release edit 挂」会让下一轮读到没标，重复推飞书
-          # （第二意见 2026-10-02）。反过来「标记写进、飞书发失败」会把标记留下——好在这一步接着会把标记原位剥掉、
-          # 把失败传给 Actions，下一轮重跑照走发送。
+          # 标记两段式（第二意见 2026-10-02）：
+          #   ① 发之前写「尝试标记」<!-- fleet-notify-attempt: vN --> 占住位置——runner 在「写完标记、还没发出去」之间崩了的话，
+          #      下一次读到的是 attempt 而不是 notified，会再发一次，不重不漏；
+          #   ② 发成功才把 attempt 换成 <!-- fleet-notified: vN -->；发失败把 attempt 剥掉，别把假证据留下。
           jq -r '.body' <<<"$existing" | node --input-type=module -e "
-            import { appendFeishuNotifiedMark } from './packages/conventions/src/publish-release-logic.ts';
+            import { appendFeishuAttemptMark } from './packages/conventions/src/publish-release-logic.ts';
             let body = '';
             process.stdin.on('data', (c) => (body += c));
             process.stdin.on('end', () => {
-              console.log(appendFeishuNotifiedMark(body, process.env.VERSION_ENV));
+              console.log(appendFeishuAttemptMark(body, process.env.VERSION_ENV));
             });
-          " > /tmp/release-body-with-mark.md
-          if ! gh release edit "$VERSION" --notes-file /tmp/release-body-with-mark.md >/dev/null; then
-            echo "::error::标记写不进 release 正文：不接着发（不冒险变成「没标就发了」）。"
+          " > /tmp/release-body-attempt.md
+          if ! gh release edit "$VERSION" --notes-file /tmp/release-body-attempt.md >/dev/null; then
+            echo "::error::「尝试标记」写不进 release 正文：不接着发（不冒险变成「没标就发了」）。"
             exit 1
           fi
           if ! jq -n --arg text "$msg" '{msg_type:"text", content:{text:$text}}' | \
                curl -fsS -X POST -H 'content-type: application/json' --data-binary @- "$FLEET_FEISHU" >/dev/null; then
-            # 飞书发失败：把刚写的标记原位剥掉，别把「已发」的假证据留下（剥不成下一轮会当已发而跳过、飞书永远漏发）。
-            if ! jq -r '.body' <<<"$existing" | gh release edit "$VERSION" --notes-file - >/dev/null; then
-              echo "::error::飞书发送失败，且 release 正文的 <!-- fleet-notified: $VERSION --> 标记剥不回去——下次重跑会当已发过而跳过，飞书永远漏发。"
-              echo "::error::发起人手动改一下：gh release edit $VERSION --notes-file <CHANGELOG.md 里这一版原文>，剥掉 marker，再重跑 workflow_dispatch（version=$VERSION）。"
-              exit 1
-            fi
-            echo "::error::飞书发送失败：$VERSION 已回滚 release 正文标记，下一轮重试会真发。"
+            # 飞书发失败：把刚写的 attempt 标记原位剥掉，别把「已尝过」的假证据留下（剥不成下一轮读到 attempt 会再发一次，
+            # 能补发但不能精确剥——所以继续把 attempt 留着，告诉发起人怎么手动剥，同时继续让下一轮能重发）。
+            echo "::error::飞书发送失败：release 正文里留着 <!-- fleet-notify-attempt: $VERSION -->——下一轮重跑会再发一次（不重不漏，因为还没换 notified）。"
+            echo "::error::发起人手动补救：gh release edit $VERSION --notes-file <CHANGELOG.md 里这一版原文>，再重跑 workflow_dispatch（version=$VERSION）。"
             exit 1
           fi
-          echo "飞书已推一条（release 正文末尾已打 fleet-notified 标签）。"
+          # 发成了：把 attempt 换成 notified，下一轮幂等跳
+          jq -r '.body' <<<"$(gh release view "$VERSION" --json body)" | node --input-type=module -e "
+            import { promoteFeishuAttemptToNotified } from './packages/conventions/src/publish-release-logic.ts';
+            let body = '';
+            process.stdin.on('data', (c) => (body += c));
+            process.stdin.on('end', () => {
+              console.log(promoteFeishuAttemptToNotified(body, process.env.VERSION_ENV));
+            });
+          " > /tmp/release-body-notified.md
+          if ! gh release edit "$VERSION" --notes-file /tmp/release-body-notified.md >/dev/null; then
+            echo "::error::飞书发成了但 attempt→notified 换标记写不回去：下一轮读到 attempt 会再发一次（能补发但重复）。"
+            echo "::error::发起人手动 gh release edit $VERSION --notes-file <正文>，把 attempt 换成 notified。"
+            exit 1
+          fi
+          echo "飞书已推一条（release 正文末尾已经把 fleet-notify-attempt 换成 fleet-notified）。"
+
 
       # g. 恢复派遣（说明性空转：引擎当前就不开派遣）。
       - name: 法国派遣恢复（说明）
