@@ -47,7 +47,9 @@ afterAll(() => {
     rmSync(nativeDir, { recursive: true, force: true });
 });
 
-async function machine(options: { busy?: boolean; ignoreSet?: boolean; custom?: boolean } = {}) {
+async function machine(
+  options: { busy?: boolean; ignoreSet?: boolean; custom?: boolean; badClis?: boolean } = {},
+) {
   const home = tempDir();
   const repo = tempDir();
   const launcher = join(repo, 'packages', 'mirasim-reclaude', 'launcher');
@@ -81,8 +83,35 @@ async function machine(options: { busy?: boolean; ignoreSet?: boolean; custom?: 
   const server = await startWsServer((peer) => {
     peer.onMessage((f) => {
       frames.push(f);
+      // 实机 getConfig 是脱敏后的功能设置，不含 agentLaunch；启动器须从 listClis 回读。
       if (f.type === 'getConfig')
-        peer.send({ type: 'config', config: JSON.parse(readFileSync(setting, 'utf8')) });
+        peer.send({
+          type: 'config',
+          config: { agents: { claude: { model: 'sonnet', approvalMode: 'default' } } },
+        });
+      if (f.type === 'listClis') {
+        const data = JSON.parse(readFileSync(setting, 'utf8'));
+        peer.send({
+          type: 'clis',
+          clis: options.badClis
+            ? []
+            : [
+                {
+                  id: 'claude',
+                  label: 'Claude Code',
+                  kind: 'agent',
+                  installed: true,
+                  launch: {
+                    ...data.agentLaunch.claude,
+                    binEnv: 'MIRASIM_CLAUDE_BIN',
+                    defaultBin: 'claude',
+                    argsApply: true,
+                  },
+                  probing: false,
+                },
+              ],
+        });
+      }
       if (f.type === 'getState') peer.send({ type: 'state', sessions: [] });
       if (f.type === 'setAgentLaunch' && !options.ignoreSet) {
         const data = JSON.parse(readFileSync(setting, 'utf8'));
@@ -207,6 +236,17 @@ describe('旧接入迁移与回读', { timeout: 20_000 }, () => {
     try {
       await expect(migrate(m.config)).rejects.toThrow(/回读|设置/);
       expect(JSON.parse(readFileSync(m.setting, 'utf8')).agentLaunch.claude.command).toBe(m.oldCommand);
+    } finally {
+      await m.close();
+    }
+  });
+
+  it('启动器列表没有 Claude：明确读回失败，不猜默认命令、不改配置', async () => {
+    const m = await machine({ badClis: true });
+    try {
+      await expect(migrate(m.config)).rejects.toThrow(/启动器列表/);
+      expect(JSON.parse(readFileSync(m.setting, 'utf8')).agentLaunch.claude.command).toBe(m.oldCommand);
+      expect(m.frames.some((f) => f.type === 'setAgentLaunch')).toBe(false);
     } finally {
       await m.close();
     }
