@@ -15,6 +15,7 @@ import {
   FUSION_WORKFLOW_TYPE,
   REQUIREMENT_WORKFLOW_TYPE,
   AGENT_EVENT_WAKE_KINDS as SHARED_WAKE_KINDS,
+  TASK_WORKFLOW_TYPE,
 } from '@fleet-dao/shared/workflow-ids';
 import { defineQuery, defineSignal } from '@temporalio/workflow';
 import type { ReturnReason, SubtaskSpec } from './decisions/types.ts';
@@ -46,6 +47,8 @@ export const WORKFLOW_TYPES = {
   canary: 'canaryWorkflow',
   /** 看门狗（#203）：Temporal Schedule 每 5 分钟起一条，按登记表看各定时任务新不新鲜，见 jobs/watchdog.ts。 */
   watchdog: 'watchdogWorkflow',
+  /** 任务（#632）：拉单（jobs/intake.ts）起的，一张单一条，编号 taskWorkflowId（shared/workflow-ids.ts），见 task-contract.ts。 */
+  task: TASK_WORKFLOW_TYPE,
 } as const;
 
 /** 看门狗一轮的输入：看哪些任务、几点看，都由活动按当时的库和时刻定（工作流里不取时刻）。 */
