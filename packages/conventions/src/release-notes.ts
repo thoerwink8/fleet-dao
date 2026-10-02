@@ -29,27 +29,29 @@ export function splitChangelog(text: string): ChangelogSplit {
   if (start === -1) throw new Error(`CHANGELOG.md 缺 ${UNRELEASED_HEADING}`);
   let end = lines.length;
   for (let i = start + 1; i < lines.length; i++) {
-    const m = HEADING_LINE.exec(lines[i].trim());
-    if (m) {
+    const line = (lines[i] ?? '').trim();
+    if (HEADING_LINE.test(line)) {
       end = i;
       break;
     }
-    if (lines[i].startsWith('## ') && !HEADING_LINE.test(lines[i].trim()))
-      throw new Error(`CHANGELOG.md 里认不出的二级标题：「${lines[i].trim()}」（版本标题应为 ## [v<N>] - YYYY-MM-DD）`);
+    if (line.startsWith('## '))
+      throw new Error(`CHANGELOG.md 里认不出的二级标题：「${line}」（版本标题应为 ## [v<N>] - YYYY-MM-DD）`);
   }
-  const section = lines.slice(start + 1, end).join('\n').trim();
+  const section = lines
+    .slice(start + 1, end)
+    .join('\n')
+    .trim();
   const released: Version[] = [];
   for (let i = start + 1; i < lines.length; i++) {
-    const m = HEADING_LINE.exec(lines[i].trim());
-    if (m) released.push({ version: m[1], date: m[2] });
+    const m = HEADING_LINE.exec((lines[i] ?? '').trim());
+    if (m) released.push({ version: m[1] ?? '', date: m[2] ?? '' });
   }
   released.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : a.version < b.version ? 1 : -1));
   const last = released[0];
   const lastNum = last ? parseInt(last.version.slice(1), 10) : 0;
   const nextVersion = `v${lastNum + 1}`;
   const hasContent =
-    section.length > 0 &&
-    !UNRELEASED_EMPTY_MARKS.some((mark) => section === mark || section.includes(mark));
+    section.length > 0 && !UNRELEASED_EMPTY_MARKS.some((mark) => section === mark || section.includes(mark));
   const date = today();
   return { section, next: { version: nextVersion, date }, released, hasContent };
 }
@@ -102,7 +104,13 @@ export type FinalizeState =
   | { schema: 1; kind: 'tagging' }
   | { schema: 1; kind: 'tagged'; tagCreated: boolean }
   | { schema: 1; kind: 'release-created'; tagCreated: boolean; releaseCreated: boolean }
-  | { schema: 1; kind: 'milestone-closed'; tagCreated: boolean; releaseCreated: boolean; milestoneClosed: boolean }
+  | {
+      schema: 1;
+      kind: 'milestone-closed';
+      tagCreated: boolean;
+      releaseCreated: boolean;
+      milestoneClosed: boolean;
+    }
   | {
       schema: 1;
       kind: 'notified';
@@ -118,14 +126,15 @@ export function nextState(
   s: FinalizeState,
   step: 'tagged' | 'release-created' | 'milestone-closed' | 'notified',
 ): FinalizeState {
-  if (step === 'tagged')
-    return { schema: 1, kind: 'tagged', tagCreated: true };
+  if (step === 'tagged') return { schema: 1, kind: 'tagged', tagCreated: true };
   if (step === 'release-created') {
-    if (s.kind === 'pending' || s.kind === 'tagging') throw new Error(`建 release 之前要先打 tag（现在在「${s.kind}」）`);
+    if (s.kind === 'pending' || s.kind === 'tagging')
+      throw new Error(`建 release 之前要先打 tag（现在在「${s.kind}」）`);
     return { schema: 1, kind: 'release-created', tagCreated: true, releaseCreated: true };
   }
   if (step === 'milestone-closed') {
-    if (s.kind !== 'release-created') throw new Error(`关 milestone 之前要先建 release（现在在「${s.kind}」）`);
+    if (s.kind !== 'release-created')
+      throw new Error(`关 milestone 之前要先建 release（现在在「${s.kind}」）`);
     return {
       schema: 1,
       kind: 'milestone-closed',
@@ -161,11 +170,6 @@ export function planFinalize(opts: {
     tag: !tagExists,
     release: tagExists && (!releaseExists || (releaseExists && !releaseBodyMatches)),
     closeMilestone: tagExists && releaseExists && releaseBodyMatches && milestoneOpen,
-    notify:
-      tagExists &&
-      releaseExists &&
-      releaseBodyMatches &&
-      !milestoneOpen &&
-      state.kind !== 'notified',
+    notify: tagExists && releaseExists && releaseBodyMatches && !milestoneOpen && state.kind !== 'notified',
   };
 }

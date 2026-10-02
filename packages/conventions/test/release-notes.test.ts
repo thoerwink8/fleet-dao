@@ -1,8 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import {
-  INITIAL_STATE,
-  UNRELEASED_HEADING,
   feishuBody,
+  INITIAL_STATE,
   namesFor,
   nextState,
   nextVersion,
@@ -10,6 +9,7 @@ import {
   releaseBody,
   splitChangelog,
   today,
+  UNRELEASED_HEADING,
 } from '../src/release-notes.ts';
 
 const HEADING_V1 = `## [v1] - 2026-10-09`;
@@ -161,7 +161,9 @@ describe('幂等（已经做过的不再重做）', () => {
       releaseBodyMatches: false,
       milestoneOpen: true,
     });
-    expect(p).toEqual({ tag: false, release: false, closeMilestone: false, notify: false });
+    // 「照走」是指打到一半、tag 那步已经在 GitHub 上了：不重打 tag，但后面的 release 还得建。
+    // 只有 release 也建好、正文也对上，才轮到关 milestone、推飞书（下一用例）。
+    expect(p).toEqual({ tag: false, release: true, closeMilestone: false, notify: false });
   });
 
   test('tag 有了，release 也有了但正文对的：只关 milestone、推飞书', () => {
