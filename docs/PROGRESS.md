@@ -6,6 +6,7 @@
 
 - 基线 `06533e1a`；创始人已同意实现并要求「一条命令或者不用命令」从旧机制迁移，决定记在 `docs/decisions/0012-mirasim-routing-and-migration.md`。独立工作树 `.claude/worktrees/mirasim-routing-impl`。
 - 实施提交 `0c323645`；首次提交包含启动器、迁移入口、失败测试、指南与 CI；正在合入并发推进的主线更新后审查。
+- PR [#614](https://github.com/thoerwink8/fleet-dao/pull/614)，当前实现头 `2130f557`；第一次 Linux CI 的真实 Go 生命周期测试通过，迁移夹具首次编译耗时 14 秒，超过测试框架默认 10 秒的 setup 限时，已将 setup 限时与编译上限对齐，尚待重跑；本机 Grok 首次审查因材料截断尝试工具而到回合上限，不算通过。
 - 做到哪：新增 `packages/mirasim-reclaude`（Go 会话启动器、Node 迁移），自有 / 平台双向切换、严格选路、SDK 初始化/权限恢复、正常退出后 resume、父进程强杀后子孙回收、一次性 stdin EOF 保留退出码均已用真实编译的假执行体验证。暂未切本机启动命令、停会话或改法国配置。
 - 迁移：`pnpm mirasim:migrate` 支持检查、等待和撤回；`agents:sync --apply` 自动识别旧封装并安排隐藏后台任务，两个独立调用不会同时写配置或重复安排。备份只存启动字段；核源码、架构、文件校验和 reclaude 目标；保留原参数，损坏记录/文件明确失败。真实会话档案的 `incomplete` 已纳入已结束状态。
 - 验证：新包完整测试首轮 13 条通过（含 Go 生命周期），随后新增并复现并发、文件损坏、坏撤回记录、平台注入缺失、已退出执行体的控制恢复失败；相关迁移/后台 14 条、同步真实入口 4 条通过。Linux cloud 入账前核计费调用来源；本地 count_tokens / models 与模型调用分开。四平台原生测试/构建工作流已写，尚未运行到 GitHub。

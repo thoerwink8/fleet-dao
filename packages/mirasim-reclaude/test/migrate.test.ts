@@ -41,7 +41,7 @@ beforeAll(() => {
     cwd: dir,
     timeout: 60_000,
   });
-});
+}, 70_000);
 afterAll(() => {
   if (nativeDir.startsWith(join(resolve('_tmp'), 'migration-native-')))
     rmSync(nativeDir, { recursive: true, force: true });
