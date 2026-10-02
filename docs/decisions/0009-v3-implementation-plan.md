@@ -53,7 +53,7 @@
 
 | 事 | 类 | 备注 |
 |----|----|----|
-| skills-claim-cleanup（#446 剩余）删 claim.mjs/doing.mjs/doing-lib.mjs/seat-lib.mjs + SKILL.md 改写 | 改标准 | 单独小 PR，正文贴原话 |
+| skills-claim-cleanup（#446 脚本那半）删 claim.mjs/doing.mjs/doing-lib.mjs/seat-lib.mjs + SKILL.md、ops.md、design.md、goals.md 改写 | 改标准 | 已做完：创始人 2026-10-02 批「3. 同意」；PR 正文贴原话 |
 | issue-close.ts 补 `--superseded-by` 参数 | 无 | 但改变关单行为，写测试 |
 | #227 改走「release PR + GitHub Actions」 | 先审后合 | 单独 PR |
 | 删认领账库表 `issue_claims`/seat_*（属于 goals §6 第 4 条删数据） | 删数据 | 离开本 PR 范围 |

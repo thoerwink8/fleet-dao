@@ -79,17 +79,39 @@ func writeFrame(w io.Writer, f frame) error {
 	return nil
 }
 
-func startManaged(cfg configuration, args []string, sel selection, generation int, events chan<- event) (*managedChild, error) {
-	env := cfg.env
-	temps := []string{}
-	if sel.mode == "local" {
-		var err error
-		args, temps, _, err = rewriteArgs(args)
+// 未标路由时，只有回环地址加上平台令牌才保留注入。
+// 只写了本机代理、没有令牌，是捕获地址，不是平台身份，按自有剥掉。
+// 明确的 cloud 缺令牌仍拒绝，不回落到自有。
+func applyRouteSettings(mode string, args []string, env []string) ([]string, []string, []string, error) {
+	if mode == "local" || mode == "default" {
+		if mode == "default" {
+			loopback, credential, err := gatewayFacts(args)
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			if loopback && credential {
+				return args, env, nil, nil
+			}
+		}
+		out, temps, _, err := rewriteArgs(args)
 		if err != nil {
-			return nil, err
+			return nil, nil, nil, err
 		}
 		env, _ = stripEnv(env)
-	} else if err := verifyGatewaySettings(args); err != nil {
+		return out, env, temps, nil
+	}
+	if mode != "gateway" {
+		if err := verifyGatewaySettings(args); err != nil {
+			return nil, nil, nil, err
+		}
+	}
+	return args, env, nil, nil
+}
+
+func startManaged(cfg configuration, args []string, sel selection, generation int, events chan<- event) (*managedChild, error) {
+	args, env, temps, err := applyRouteSettings(sel.mode, args, cfg.env)
+	if err != nil {
+		logLine("event=reject route=" + sel.mode + " " + err.Error())
 		return nil, err
 	}
 	self, err := os.Executable()
@@ -458,19 +480,13 @@ func runOnce(cfg configuration) int {
 			return fail("route_unreadable", err)
 		}
 	}
-	env := cfg.env
-	temps := []string{}
-	if sel.mode == "local" {
-		var err error
-		args, temps, _, err = rewriteArgs(args)
-		if err != nil {
-			return fail("settings_unreadable", err)
+	args, env, temps, err := applyRouteSettings(sel.mode, args, cfg.env)
+	if err != nil {
+		code := "settings_unreadable"
+		if sel.mode == "cloud" {
+			code = "gateway_missing"
 		}
-		env, _ = stripEnv(env)
-	} else if sel.mode != "gateway" {
-		if err := verifyGatewaySettings(args); err != nil {
-			return fail("gateway_missing", err)
-		}
+		return fail(code, err)
 	}
 	defer func() {
 		for _, p := range temps {
