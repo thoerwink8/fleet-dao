@@ -240,6 +240,7 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
           armed: false,
           merged: false,
           why: `PR #${prNumber} 的头是 ${short(pull.headSha)}，不是引擎验过、推上去的 ${short(expectedHead)}（有人改过）`,
+          headMoved: pull.headSha,
         };
       }
       if (pull.autoMerge) return { armed: true, merged: false };

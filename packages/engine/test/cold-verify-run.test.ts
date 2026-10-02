@@ -41,7 +41,7 @@ function mkSources(o: {
   pr?: () => Promise<{ head: string; baseSha: string; branch: string }>;
   diff?: () => Promise<{ diffText: string; changedFiles: string[] }>;
   spec?: () => Promise<{ taskId: string; what: string; howToFinish: string[]; specDir?: string }>;
-  author?: () => Promise<string>;
+  authors?: () => Promise<string[]>;
 }) {
   return {
     pr: o.pr ?? (async () => ({ head: HEAD, baseSha: BASE, branch: 'feat/x' })),
@@ -54,7 +54,7 @@ function mkSources(o: {
         howToFinish: ['代码里有 A'],
         specDir: 'specs/42-做A/',
       })),
-    authorFamily: o.author ?? (async () => 'gpt'),
+    authorFamilies: o.authors ?? (async () => ['gpt']),
   };
 }
 
@@ -91,9 +91,17 @@ describe('runColdVerifyForPr：跑通一路', () => {
     expect(r.status.state).toBe('success');
     expect(r.head).toBe(HEAD);
     expect(r.sourceProblem).toBeUndefined();
-    expect(rec.posted).toEqual([
-      { prNumber: 42, head: HEAD, state: 'success', description: '验收通过（第 1 轮冷调用）' },
+    // 开跑前先贴一条 pending（闸显示「等验收」而不是「还没验」），跑完再贴结论，都贴在同一个头上
+    expect(rec.posted.map((x) => [x.head, x.state])).toEqual([
+      [HEAD, 'pending'],
+      [HEAD, 'success'],
     ]);
+    expect(rec.posted.at(-1)).toEqual({
+      prNumber: 42,
+      head: HEAD,
+      state: 'success',
+      description: '验收通过（第 1 轮冷调用）',
+    });
   });
 
   it('模型说 fail → 贴上 failure', async () => {
@@ -113,8 +121,8 @@ describe('runColdVerifyForPr：跑通一路', () => {
       writeStatus: rec.writeStatus,
     });
     expect(r.status.state).toBe('failure');
-    expect(rec.posted[0]?.state).toBe('failure');
-    expect(rec.posted[0]?.description).toContain('没做到验收条');
+    expect(rec.posted.at(-1)?.state).toBe('failure');
+    expect(rec.posted.at(-1)?.description).toContain('没做到验收条');
     // 「验了没过」不是「没验成」：sourceProblem 留给读不到那几种
     expect(r.sourceProblem).toBeUndefined();
   });
@@ -182,15 +190,18 @@ describe('runColdVerifyForPr：【故意造出的失败】每条「读不到」�
     });
     expect(r.status.state).toBe('failure');
     expect(r.sourceProblem).toContain('读不到单子');
-    expect(rec.posted).toEqual([expect.objectContaining({ prNumber: 42, head: HEAD, state: 'failure' })]);
-    expect(rec.posted[0]?.description).toContain('需求文档目录读不出来');
+    expect(rec.posted.map((x) => x.state)).toEqual(['pending', 'failure']);
+    expect(rec.posted.at(-1)).toEqual(
+      expect.objectContaining({ prNumber: 42, head: HEAD, state: 'failure' }),
+    );
+    expect(rec.posted.at(-1)?.description).toContain('需求文档目录读不出来');
   });
 
   it('读不到作者族 → 贴 failure（认不出就挑不出「不同族」，硬跑就是同族自审）', async () => {
     const rec = recorder();
     const r = await runColdVerifyForPr(42, {
       sources: sources({
-        author: async () => {
+        authors: async () => {
           throw new Error('库里查不到这张单起过哪个族的会话');
         },
       }),
@@ -202,14 +213,14 @@ describe('runColdVerifyForPr：【故意造出的失败】每条「读不到」�
     });
     expect(r.status.state).toBe('failure');
     expect(r.sourceProblem).toContain('读不到单子');
-    expect(rec.posted[0]?.state).toBe('failure');
+    expect(rec.posted.at(-1)?.state).toBe('failure');
   });
 
   it('作者族认不出（不在 0006 那五个里）→ 贴 failure，不硬跑', async () => {
     const rec = recorder();
     let invoked = 0;
     const r = await runColdVerifyForPr(42, {
-      sources: sources({ author: async () => 'gemini' }),
+      sources: sources({ authors: async () => ['gemini'] }),
       invoke: async (input, deps) => {
         invoked += 1;
         return await invokeVerifier(input, deps);
@@ -222,7 +233,7 @@ describe('runColdVerifyForPr：【故意造出的失败】每条「读不到」�
     expect(r.status.state).toBe('failure');
     expect(r.status.description).toContain('认不出');
     expect(invoked).toBe(0); // 压根没起调用
-    expect(rec.posted[0]?.state).toBe('failure');
+    expect(rec.posted.at(-1)?.state).toBe('failure');
   });
 
   it('【故意造出的失败】拉 diff 时炸了 → 贴 failure、算「没验成」（sourceProblem 有值）', async () => {
@@ -241,7 +252,7 @@ describe('runColdVerifyForPr：【故意造出的失败】每条「读不到」�
     });
     expect(r.status.state).toBe('failure');
     expect(r.sourceProblem).toContain('读不到 diff');
-    expect(rec.posted[0]?.state).toBe('failure');
+    expect(rec.posted.at(-1)?.state).toBe('failure');
   });
 
   it('【故意造出的失败】没有家族可挑 → 贴 failure、算「没验成」', async () => {
@@ -257,7 +268,7 @@ describe('runColdVerifyForPr：【故意造出的失败】每条「读不到」�
     expect(r.status.state).toBe('failure');
     expect(r.status.description).toContain('没讨论成');
     expect(r.sourceProblem).toContain('没讨论成');
-    expect(rec.posted[0]?.state).toBe('failure');
+    expect(rec.posted.at(-1)?.state).toBe('failure');
   });
 
   it('【故意造出的失败】冷调用本体抛错（起进程炸了）→ 贴 failure', async () => {
@@ -274,7 +285,7 @@ describe('runColdVerifyForPr：【故意造出的失败】每条「读不到」�
     });
     expect(r.status.state).toBe('failure');
     expect(r.status.description).toContain('spawn EACCES');
-    expect(rec.posted[0]?.state).toBe('failure');
+    expect(rec.posted.at(-1)?.state).toBe('failure');
   });
 
   it('【故意造出的失败】贴状态本身失败 → 抛出去，不当成「验过了」（闸看不到就是没验过）', async () => {
@@ -290,5 +301,127 @@ describe('runColdVerifyForPr：【故意造出的失败】每条「读不到」�
         },
       }),
     ).rejects.toThrow('GitHub 回了 403');
+  });
+});
+
+describe('runColdVerifyForPr：作者族是一张表；开跑前先贴 pending；过一会儿再来的不贴 failure', () => {
+  it('写过这张单的族不止一个：全部跳过再选（先 gpt 后 claude 写的 → 验的是 deepseek，前两家压根没被问）', async () => {
+    const asked: string[] = [];
+    const r = await runColdVerifyForPr(42, {
+      sources: sources({ authors: async () => ['gpt', ' Claude '] }),
+      invoke: invokeVerifier,
+      oneShot: ONE_SHOT,
+      chooseModelForFamily: async (family) => {
+        asked.push(family);
+        return family === 'deepseek' ? { modelId: 'ds-x' } : undefined;
+      },
+      cwd: 'C:/work/x',
+    });
+    expect(r.status.state).toBe('success');
+    expect(asked).toEqual(['deepseek']);
+  });
+
+  it('【故意造出的失败】一个作者族都没记下 → 贴 failure、不起调用（不知道该避开谁，就没法保证换了家族）', async () => {
+    const rec = recorder();
+    let invoked = 0;
+    const r = await runColdVerifyForPr(42, {
+      sources: sources({ authors: async () => [] }),
+      invoke: async (input, deps) => {
+        invoked += 1;
+        return await invokeVerifier(input, deps);
+      },
+      oneShot: ONE_SHOT,
+      chooseModelForFamily: PICK_CLAUDE,
+      cwd: 'C:/work/x',
+      writeStatus: rec.writeStatus,
+    });
+    expect(r.status.state).toBe('failure');
+    expect(r.status.description).toContain('没有记下是哪一族写的');
+    expect(r.sourceProblem).toContain('作者族认不出');
+    expect(invoked).toBe(0);
+    expect(rec.posted.at(-1)?.state).toBe('failure');
+  });
+
+  it('【故意造出的失败】作者族里有一个认不出（claude + gemini）→ 贴 failure、不起调用：认不出的可能就是某个已知族的别名', async () => {
+    const rec = recorder();
+    let invoked = 0;
+    const r = await runColdVerifyForPr(42, {
+      sources: sources({ authors: async () => ['claude', 'gemini'] }),
+      invoke: async (input, deps) => {
+        invoked += 1;
+        return await invokeVerifier(input, deps);
+      },
+      oneShot: ONE_SHOT,
+      chooseModelForFamily: PICK_CLAUDE,
+      cwd: 'C:/work/x',
+      writeStatus: rec.writeStatus,
+    });
+    expect(r.status.state).toBe('failure');
+    expect(r.status.description).toContain('gemini');
+    expect(invoked).toBe(0);
+  });
+
+  it('【故意造出的失败】开跑前那条 pending 贴不上 → 抛出去，一次模型调用都没起（别花一次调用再发现结论贴不上）', async () => {
+    let invoked = 0;
+    await expect(
+      runColdVerifyForPr(42, {
+        sources: sources(),
+        invoke: async (input, deps) => {
+          invoked += 1;
+          return await invokeVerifier(input, deps);
+        },
+        oneShot: ONE_SHOT,
+        chooseModelForFamily: PICK_CLAUDE,
+        cwd: 'C:/work/x',
+        writeStatus: async () => {
+          throw new Error('没有 statuses 写权限');
+        },
+      }),
+    ).rejects.toThrow('没有 statuses 写权限');
+    expect(invoked).toBe(0);
+  });
+
+  it('waitReason 认出「过一会儿再来」（内存放不下没派出去）→ 贴 pending 写明在等什么，不贴 failure，也不算 sourceProblem', async () => {
+    const rec = recorder();
+    const r = await runColdVerifyForPr(42, {
+      sources: sources(),
+      invoke: async (input) => ({
+        pass: false,
+        problems: ['冷调用没跑成：outcome=admission_blocked，不是 done'],
+        round: input.round,
+        session: { runId: 'run-1', outcome: 'admission_blocked', family: 'claude', modelId: 'claude-x' },
+      }),
+      oneShot: ONE_SHOT,
+      chooseModelForFamily: PICK_CLAUDE,
+      cwd: 'C:/work/x',
+      writeStatus: rec.writeStatus,
+      waitReason: (v) => (v.session?.outcome === 'admission_blocked' ? '机器内存放不下新会话' : undefined),
+    });
+    expect(r.status.state).toBe('pending');
+    expect(r.wait).toBe('机器内存放不下新会话');
+    expect(r.sourceProblem).toBeUndefined();
+    expect(rec.posted.map((x) => x.state)).toEqual(['pending', 'pending']);
+    expect(rec.posted.at(-1)?.description).toContain('机器内存放不下新会话');
+  });
+
+  it('waitReason 没认出（验了、没过）→ 照常贴 failure，不被当成「在等」', async () => {
+    const rec = recorder();
+    const failShot = fakeOneShot({
+      exitCode: 0,
+      stdout: ['## 问题', '- 没做到验收条：单子要 A、代码做了 B', '', 'verdict: fail'].join('\n'),
+      stderr: '',
+      killed: false,
+    });
+    const r = await runColdVerifyForPr(42, {
+      sources: sources(),
+      invoke: invokeVerifier,
+      oneShot: failShot,
+      chooseModelForFamily: PICK_CLAUDE,
+      cwd: 'C:/work/x',
+      writeStatus: rec.writeStatus,
+      waitReason: (v) => (v.session?.outcome === 'admission_blocked' ? '机器内存放不下新会话' : undefined),
+    });
+    expect(r.status.state).toBe('failure');
+    expect(r.wait).toBeUndefined();
   });
 });

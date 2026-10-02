@@ -379,6 +379,8 @@ export interface PrFile {
   patch?: string;
   /** 改名前的名字。 */
   previous?: string;
+  /** 增删的行数合计（GitHub 的 changes）。没有 patch 时靠它分得开「二进制、纯改名」（0）和「文件太大 GitHub 不给」（大于 0）。 */
+  changes?: number;
 }
 
 const FILES_PER_PAGE = 100;
@@ -411,12 +413,21 @@ export async function pullFiles(
     ) {
       throw unexpected(`PR #${prNumber} 的改动文件列表有一条`, item);
     }
-    const f = item as { filename: string; status: string; patch?: string; previous_filename?: string };
+    const f = item as {
+      filename: string;
+      status: string;
+      patch?: string;
+      previous_filename?: string;
+      changes?: unknown;
+    };
     return {
       filename: f.filename,
       status: f.status,
       ...(f.patch !== undefined ? { patch: f.patch } : {}),
       ...(f.previous_filename !== undefined ? { previous: f.previous_filename } : {}),
+      ...(typeof f.changes === 'number' && Number.isInteger(f.changes) && f.changes >= 0
+        ? { changes: f.changes }
+        : {}),
     };
   });
 }

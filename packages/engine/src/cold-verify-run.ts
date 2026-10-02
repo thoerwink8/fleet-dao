@@ -3,22 +3,24 @@
 //
 // **为什么要有这一条**：#555-1 把冷调用做成了纯接口、555-2 把它接进合并闸；「谁在什么时候跑它、读不到时怎么办」
 // 落不成代码的话，合并闸等的那条状态就永远没人写（闸判「还没验」，PR 一直卡着）。这一条就是那个「谁」：
-// 三段的第三段在装配侧的真身，本机垫片 / 定时对账 / 以后会话交活都走它。
+// 三段的第三段在装配侧的真身，真活动（real/task-verify.ts，任务工作流的 coldVerify）走它。
 //
 // **一条都不许悄悄过去**（通用段底线第三条，specs/555 第 4 条）：
 // - 取三样里任何一样读不成（读 PR、读 diff、读单子、读作者族）→ 照样**贴** failure（cold-verify-post 那一层），
 //   不贴 = 闸判「还没验」，和「没跑过」看不出来；
 // - 挑不出家族、冷调用没跑成 → verifier-invoke 已经判 pass=false，这一层照 stress 贴 failure；
-// - 贴状态本身失败 → ColdVerifyWriteError 抛出去，调用方按「没验成」处理，不吞。
+// - 贴状态本身失败 → 抛出去，调用方按「没验成」处理，不吞。开跑之前先贴一条 pending：贴不上就别花一次模型调用。
 //
-// **不自己判「要不要验」**：那是合并闸按路径判的事（coldVerifyNeed，改到先审后合那片路径才要）。
-// 这一层只要被调了就跑；谁调它、什么时候调，见调用方。重复贴同一条状态没有害处（同一 context 同一头只留最新一条），
-// 所以「该验的没验」这件事由合并闸拦住、不由这一层猜。
+// **不自己判「要不要验」**：那是合并闸按分支名判的事（merge-gates.ts 的 coldVerifyNeed：引擎任务工作流开的 PR 才要）。
+// 这一层只要被调了就跑；谁调它、什么时候调，见调用方（任务工作流在挂自动合并之前调）。重复贴同一条状态没有害处
+// （同一 context 同一头只留最新一条），所以「该验的没验」这件事由合并闸拦住、不由这一层猜。
 
 import {
   type ColdVerifyStatus,
   coldVerifyNotRun,
+  coldVerifyPending,
   coldVerifyStatus,
+  coldVerifyWaiting,
   type WriteColdVerifyStatus,
 } from './cold-verify-status.ts';
 import type { RunRecord, RunsWriter } from './runner/not-wired.ts';
@@ -26,9 +28,8 @@ import type { OneShotDeps } from './runner/one-shot.ts';
 import {
   type ChooseModelForFamily,
   FAMILY_ORDER,
-  type FetchDiff,
-  type FetchSpec,
-  invokeVerifier,
+  type ModelFamily,
+  type VerifierInvokeDeps,
   type VerifierInvokeInput,
   type VerifierInvokeOutput,
 } from './verifier-invoke.ts';
@@ -44,8 +45,8 @@ export interface ColdVerifySources {
   diff(args: { prNumber: number; baseSha: string }): Promise<{ diffText: string; changedFiles: string[] }>;
   /** 单子的「要什么 / 怎么算做完」+ 这单的 id（fetchSpec 照它找需求文档目录）。 */
   spec(prNumber: number): Promise<{ taskId: string; what: string; howToFinish: string[]; specDir?: string }>;
-  /** 写这张单的族（0006：跳过它再选）。读不到就是没查成（抛），不许猜成某一族。 */
-  authorFamily(prNumber: number): Promise<string>;
+  /** 写过这张单的所有族（0006：全部跳过再选）。读不到就是没查成（抛），不许猜成某一族；空表也算读不到。 */
+  authorFamilies(prNumber: number): Promise<string[]>;
 }
 
 export interface ColdVerifyDeps {
@@ -56,25 +57,25 @@ export interface ColdVerifyDeps {
   oneShot: OneShotDeps;
   /** 按族挑模型（生产给 cold-verify-pick.ts 的 familyPickerFrom(...) 那一份；测试给 fake）。 */
   chooseModelForFamily: ChooseModelForFamily;
-  /** 会话 cwd（调用方为这张 PR 准备的工作树）。 */
+  /** 会话 cwd（调用方为这张 PR 准备的目录）。给了 prepareCwd 就不用它。 */
   cwd: string;
+  /** 挑中谁之后、起会话之前，为它备工作目录（目录要归那条路由的会话用户）；透传给 invokeVerifier。 */
+  prepareCwd?: NonNullable<VerifierInvokeDeps['prepareCwd']>;
   /** 贴状态。给了才贴（不给 = 只跑不贴，测试/演练用）。 */
   writeStatus?: WriteColdVerifyStatus;
   /** 这是第几轮（默认 1）；上限由调用方判（canStartRound），这一层照给的值跑。 */
   round?: 1 | 2;
   /** 超时（分钟），透传给 one-shot。 */
   timeoutMinutes?: number;
+  /**
+   * 这一次的结局是不是「过一会儿再来就行」（比如内存放不下、会话没派出去）：回一句白话原因＝是。
+   * 是的话这一层不贴 failure（那会让合并闸和 PR 页面显示成验收没过），贴一条 pending 写明在等什么，并把原因放在返回的 wait 里。
+   */
+  waitReason?: (verdict: VerifierInvokeOutput) => string | undefined;
 }
 
-/** 交给 `invoke` 的那一份（生产是 invokeVerifier 的 deps 减去 cwd —— cwd 在 ColdVerifyDeps 上）。 */
-export interface ColdVerifyInvokeDeps {
-  oneShot: OneShotDeps;
-  fetchDiff: FetchDiff;
-  fetchSpec: FetchSpec;
-  chooseModelForFamily: ChooseModelForFamily;
-  cwd: string;
-  timeoutMinutes?: number;
-}
+/** 交给 `invoke` 的那一份：就是 invokeVerifier 的依赖（cwd 在 ColdVerifyDeps 上给，这里原样带过去）。 */
+export type ColdVerifyInvokeDeps = VerifierInvokeDeps;
 
 export interface ColdVerifyRunResult {
   /** 贴在头上了的那条状态（没给 writeStatus 时照样有，调用方自己报）。 */
@@ -85,12 +86,14 @@ export interface ColdVerifyRunResult {
   sourceProblem?: string;
   /** 真起了冷调用就有它。 */
   verdict?: VerifierInvokeOutput;
+  /** 这一次没做成但过一会儿再来就行（waitReason 认出的）：status 是 pending，不是 failure，也不是 sourceProblem。 */
+  wait?: string;
 }
 
 /**
  * 跑一个 PR 的验收那一遍。
  *
- * 返回里 `status` **一定**是 success 或 failure（pending 只在调用方自己先贴的时候用）：这一层不会「什么都不回」，
+ * 返回里 `status` 是 success、failure，或者（只有 waitReason 认出「过一会儿再来」时）pending：这一层不会「什么都不回」，
  * 也不会把「没查成」漏成 success。
  */
 export async function runColdVerifyForPr(
@@ -119,25 +122,43 @@ export async function runColdVerifyForPr(
     return await post(null, status, { sourceProblem: `读不到 PR：${why}` });
   }
 
+  // 开跑之前先贴 pending：合并闸显示「等验收」而不是「还没验」；贴不上（没权限、GitHub 不通）就在这里抛出去，
+  // 别先花一次模型调用、跑完了结论又贴不上。
+  if (deps.writeStatus !== undefined) {
+    await deps.writeStatus({ prNumber, head: pr.head, status: coldVerifyPending(round) });
+  }
+
   // 2. 取单子（要什么 / 怎么算做完 / 作者族）。读不到也贴 failure。
   let spec: { taskId: string; what: string; howToFinish: string[]; specDir?: string };
-  let familyAvoid: string;
+  let authorFamilies: string[];
   try {
     spec = await deps.sources.spec(prNumber);
-    familyAvoid = await deps.sources.authorFamily(prNumber);
+    authorFamilies = await deps.sources.authorFamilies(prNumber);
   } catch (err) {
     const why = message(err);
     const status = coldVerifyNotRun(`读不到 PR #${prNumber} 的单子（要什么 / 怎么算做完 / 作者族）：${why}`);
     return await post(pr.head, status, { sourceProblem: `读不到单子：${why}` });
   }
 
-  // 作者族必须是我们认得的那几个之一：认不出就别验（认不出就挑不出「不同的族」，硬跑就是同族自审）。
-  const avoid = FAMILY_ORDER.find((f) => f === familyAvoid.trim().toLowerCase());
-  if (avoid === undefined) {
+  // 作者族必须个个都是我们认得的：认不出就挑不出「不同的族」，硬跑就可能是同族自审。一个都没有也一样。
+  const known = new Set<string>(FAMILY_ORDER);
+  const avoid: ModelFamily[] = [];
+  const unknown: string[] = [];
+  for (const raw of authorFamilies) {
+    const family = raw.trim().toLowerCase();
+    if (known.has(family)) {
+      if (!avoid.includes(family as ModelFamily)) avoid.push(family as ModelFamily);
+    } else unknown.push(raw);
+  }
+  if (avoid.length === 0 || unknown.length > 0) {
     const status = coldVerifyNotRun(
-      `认不出 PR #${prNumber} 的作者族「${familyAvoid}」（0006 的族是 ${FAMILY_ORDER.join('、')}）：认不出就挑不出别家`,
+      avoid.length === 0 && unknown.length === 0
+        ? `PR #${prNumber} 没有记下是哪一族写的：没法保证换了家族`
+        : `认不出 PR #${prNumber} 的作者族「${unknown.join('、')}」（0006 的族是 ${FAMILY_ORDER.join('、')}）：认不出就挑不出别家`,
     );
-    return await post(pr.head, status, { sourceProblem: `作者族认不出：${familyAvoid}` });
+    return await post(pr.head, status, {
+      sourceProblem: `作者族认不出：${unknown.length > 0 ? unknown.join('、') : '没有记录'}`,
+    });
   }
 
   // 3. 起一次冷调用。diff / specDir 都注入进去（verifier-invoke 不自己调 git）。
@@ -148,7 +169,7 @@ export async function runColdVerifyForPr(
     taskId: spec.taskId,
     what: spec.what,
     howToFinish: spec.howToFinish,
-    modelFamilyAvoid: avoid,
+    modelFamiliesAvoid: avoid as [ModelFamily, ...ModelFamily[]],
     round,
   };
   const invokeDeps: ColdVerifyInvokeDeps = {
@@ -157,6 +178,7 @@ export async function runColdVerifyForPr(
     fetchSpec: async () => ({ ...(spec.specDir !== undefined ? { specDir: spec.specDir } : {}) }),
     chooseModelForFamily: deps.chooseModelForFamily,
     cwd: deps.cwd,
+    ...(deps.prepareCwd === undefined ? {} : { prepareCwd: deps.prepareCwd }),
     ...(deps.timeoutMinutes === undefined ? {} : { timeoutMinutes: deps.timeoutMinutes }),
   };
 
@@ -167,6 +189,12 @@ export async function runColdVerifyForPr(
     const why = message(err);
     const status = coldVerifyNotRun(`冷调用这一次没跑起来（${why}）`);
     return await post(pr.head, status, { sourceProblem: `起调用失败：${why}` });
+  }
+
+  // 过一会儿再来就行的（内存放不下没派出去之类）：贴 pending 写明在等什么，不贴 failure。
+  const wait = deps.waitReason?.(verdict);
+  if (wait !== undefined) {
+    return await post(pr.head, coldVerifyWaiting(wait), { verdict, wait });
   }
 
   // 4. 翻成状态、贴上（pass 才是 success；其余一律 failure）。

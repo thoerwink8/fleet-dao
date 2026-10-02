@@ -8,15 +8,16 @@
 //
 // 停下等人（waiting.kind = human，驾驶舱点「继续」「放弃」发信号）只有这几处，而且每一处都写清卡在哪、要人干什么：
 // - 交代不全（缺栏）；没有可用的路由；失败分流判「挂起」（同因连着两次再犯、额度要等很久、登录失效……）；
-// - 动手 3 轮、验收 2 轮都没过；验收做不出来（读不到 diff、没有别家模型）；
+// - 动手 3 轮、验收 2 轮都没过；验收做不出来（读不到 diff、没有别家模型、会话没跑成）；
 // - 改到了「改标准」的路径（人闸第四类，要创始人同意才挂自动合并）、先审后合的路径（合并闸要第二意见）；
 // - PR 被关了、PR 的头被别人改了。
 // 「继续」之后从头再试这一步；「放弃」收尾退出（工作树存档后删，PR 和单子不动，由人处理）。
 //
 // 改这里之前必须知道：
-// - 挂自动合并一定在冷验收通过之后。每小时对账有个兜底（jobs/auto-merge-check.ts）会给 CI 绿的机器人 PR 挂自动合并，
-//   合并闸不认冷验收的结论之前（#555-2、#625），这条路上验收会被抢先合并绕过去——所以**合并闸认冷验收的状态上线之前，
-//   不要给任何仓打开「让 AI 接活」**（docs/PROGRESS.md、docs/ops.md）。
+// - 挂自动合并一定在冷验收通过之后。合并闸认引擎任务流程的 PR（分支 fleet/<单号>-t<8 位>）头上通过的 cold-verify（#555-2、#625），
+//   每小时对账的兜底不碰这些分支（jobs/auto-merge-check.ts）；拉单入口在闸或冷验收没接上时不让任何仓接活
+//   （jobs/intake.ts 的 MERGE_GATE_REQUIRES_COLD_VERIFY）。头换了（人推过新提交）就对新的头重走 CI 和验收，不原样重新挂：
+//   新头上没有 cold-verify，合并闸不会放行。
 // - 动手会话只试一次（activity-options.ts 的 segment 档）：基础设施的失败由这里按失败分流重试、换路由、挂起，不靠 Temporal 自动再起一遍。
 // - 「放弃」「叫停」都要把正在跑的长活动取消掉（runSegment、coldVerify、waitCi、waitMerged 都心跳，收得到取消）。
 
@@ -294,14 +295,34 @@ class TaskFlow {
       this.round += 1;
       if (!(await this.implement(brief, tier))) continue;
 
-      const ci = await this.ci();
-      if (ci.kind === 'merged') return this.finish(ci.mergeCommit);
-      if (ci.kind === 'rework') continue;
+      const delivered = await this.deliver(brief);
+      if (delivered === 'rework') continue;
+      return this.finish(delivered.commit);
+    }
+  }
 
-      if (!(await this.verify(brief))) continue;
+  /**
+   * 推上去以后的路：等 CI → 冷验收 → 查路径 → 挂自动合并、等合并。回 'rework'＝要回去再动手一轮（意见已记下）。
+   * 等合并时 PR 的头被别人改了、人看过点「继续」：新的头上没有验收状态，合并闸（引擎任务流程的 PR 要有通过的 cold-verify）
+   * 不会放行，原样重新挂只会永远等下去——所以回到等 CI，对新的头把这条路重走一遍。
+   */
+  private async deliver(brief: TaskBrief): Promise<'rework' | { commit?: string | undefined }> {
+    for (;;) {
+      const ci = await this.ci();
+      if (ci.kind === 'merged') return { commit: ci.mergeCommit };
+      if (ci.kind === 'rework') return 'rework';
+
+      const verdict = await this.verify(brief);
+      if (verdict === 'rework') return 'rework';
+      if (verdict === 'head_moved') {
+        this.verifyRound = 0; // 头换了，验收对新的头重新数轮
+        continue;
+      }
 
       await this.guardedPaths();
-      return this.finish(await this.merge());
+      const merged = await this.merge();
+      if (merged.kind === 'merged') return { commit: merged.commit };
+      this.verifyRound = 0; // 头换了，验收对新的头重新数轮
     }
   }
 
@@ -590,8 +611,11 @@ class TaskFlow {
     }
   }
 
-  /** 冷验收。没过：记下问题表回动手；做不出来：停下等人，不让写代码的会话白改一轮。 */
-  private async verify(brief: TaskBrief): Promise<boolean> {
+  /**
+   * 冷验收。没过：记下问题表回动手（'rework'）；做不出来：停下等人，不让写代码的会话白改一轮；这会儿验不了、过一会儿就行：睡一会儿再来，
+   * 不算一轮；要验的头已经被别人换了：停下等人看过，回 'head_moved'，由调用方对新的头重走一遍。
+   */
+  private async verify(brief: TaskBrief): Promise<'pass' | 'rework' | 'head_moved'> {
     const wt = this.worktree;
     if (!wt || this.prNumber === null || this.head === null) {
       throw new Error('验收之前还没有 PR（工作流自己的状态乱了）');
@@ -626,15 +650,27 @@ class TaskFlow {
           }),
         ),
       );
+      if (res.headMoved !== undefined) {
+        this.verifyRound -= 1;
+        await this.park('PR 的头被别人改了', headMovedDetail(res.headMoved, headSha));
+        this.head = res.headMoved;
+        return 'head_moved';
+      }
+      if (res.retry) {
+        // 这会儿验不了、过一会儿就行（没空位、内存放不下、引擎在停机）：不算一轮，不停下报人
+        this.verifyRound -= 1;
+        await this.pause(res.retry.wait, res.retry.reason, res.retry.afterSeconds);
+        continue;
+      }
       if (res.unavailable) {
         this.verifyRound -= 1; // 没验成不算一轮
         await this.park('验收做不出来', res.unavailable);
         continue;
       }
-      if (res.pass) return true;
+      if (res.pass) return 'pass';
       this.feedback = res.problems.map((p) => `验收没过：${p}`);
       this.status.lastProblem = '验收没过';
-      return false;
+      return 'rework';
     }
   }
 
@@ -669,8 +705,11 @@ class TaskFlow {
     }
   }
 
-  /** 挂自动合并、等合并。回合并提交；PR 被关了、头被改了，停下等人。 */
-  private async merge(): Promise<string | undefined> {
+  /**
+   * 挂自动合并、等合并。PR 被关了、头被改了，停下等人。头被改了、人点「继续」之后回 head_moved，由调用方对新的头重走一遍
+   * （等 CI、验收、查路径）再来；别的情况一直等到合并才回。
+   */
+  private async merge(): Promise<{ kind: 'merged'; commit?: string | undefined } | { kind: 'head_moved' }> {
     const prNumber = this.prNumber;
     if (prNumber === null || this.head === null) throw new Error('合并之前还没有 PR');
     for (;;) {
@@ -679,7 +718,12 @@ class TaskFlow {
       const armed = await this.step('armAutoMerge', () =>
         this.acts.armAutoMerge({ schemaVersion: 1, repo: this.input.repo, prNumber, expectedHead: head }),
       );
-      if (armed.merged) return armed.mergeCommit;
+      if (armed.merged) return { kind: 'merged', commit: armed.mergeCommit };
+      if (armed.headMoved !== undefined) {
+        await this.park('PR 的头被别人改了', headMovedDetail(armed.headMoved, head));
+        this.head = armed.headMoved;
+        return { kind: 'head_moved' };
+      }
       if (!armed.armed) {
         await this.park('自动合并没挂上', armed.why ?? 'GitHub 没说为什么');
         continue;
@@ -701,7 +745,7 @@ class TaskFlow {
               ),
             ),
         );
-        if (w.state === 'merged') return w.mergeCommit;
+        if (w.state === 'merged') return { kind: 'merged', commit: w.mergeCommit };
         if (w.state === 'unarmed') {
           this.status.lastProblem = '自动合并被撤掉了，重新挂';
           break;
@@ -714,12 +758,9 @@ class TaskFlow {
           break;
         }
         if (w.state === 'head_moved') {
-          await this.park(
-            'PR 的头被别人改了',
-            `现在的头是 ${w.head}，不是引擎推上去的 ${head}。看过之后点「继续」。`,
-          );
+          await this.park('PR 的头被别人改了', headMovedDetail(w.head, head));
           this.head = w.head;
-          break;
+          return { kind: 'head_moved' };
         }
         // waiting：这一轮没合，接着等
       }
@@ -789,6 +830,11 @@ class TaskFlow {
     await this.cleanup(true);
     await CancellationScope.nonCancellable(() => this.mirror('stopped'));
   }
+}
+
+/** 头被别人改了，停下等人时写的话：点「继续」之后引擎对新的头重跑 CI 和验收，不是原样接着等。 */
+function headMovedDetail(now: string, pushed: string): string {
+  return `现在的头是 ${now}，不是引擎验过、推上去的 ${pushed}。看过之后点「继续」：引擎会对新的头重跑 CI 和验收；不要这个 PR 了点「放弃」。`;
 }
 
 function bump(counters: LadderCounters, next: NextAction): LadderCounters {

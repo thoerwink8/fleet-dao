@@ -5,6 +5,7 @@ import type { EngineTasks } from '../src/activities.ts';
 import { fakeHead } from '../src/fakes.ts';
 import { buildTaskBrief, type TaskBrief, type TaskBriefResult } from '../src/runner/task-brief.ts';
 import type {
+  ArmAutoMergeResult,
   ColdVerifyInput,
   ColdVerifyResult,
   DeliveryRead,
@@ -50,7 +51,7 @@ export interface Script {
   delivery: (n: number) => DeliveryRead;
   verify: (input: ColdVerifyInput, n: number) => ColdVerifyResult;
   guarded: (n: number) => GuardedPaths;
-  arm: (n: number) => { armed: boolean; merged: boolean; why?: string };
+  arm: (n: number) => ArmAutoMergeResult;
   merged: (n: number) => MergeWait;
 }
 

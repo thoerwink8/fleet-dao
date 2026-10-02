@@ -166,6 +166,13 @@ export interface ColdVerifyResult {
    * 工作流停下报人（等条件好了点「继续」重验），不回去让写代码的会话白改一轮。
    */
   unavailable?: string;
+  /**
+   * 这会儿验不了、但过一会儿再来就行（没空位、内存放不下、额度要等、引擎在停机发布）：不是没过，也不是做不出来。
+   * 工作流隔 afterSeconds 秒再验一次，不算一轮、不停下报人。老历史里没有这个字段，当作没有。
+   */
+  retry?: { wait: 'slot' | 'quota'; reason: string; afterSeconds: number };
+  /** 要验的头已经不是 PR 现在的头了（有人推过新提交）：现在的头。工作流停下等人看过，再对新的头重走一遍。老历史里没有这个字段。 */
+  headMoved?: string;
 }
 
 /** 改到了哪些要人拍或要第二意见的路径。两个都空＝合并闸之外没有别的门。 */
@@ -198,6 +205,8 @@ export interface ArmAutoMergeResult {
   /** merged 时的合并提交。 */
   mergeCommit?: string;
   why?: string;
+  /** 挂的时候发现 PR 的头已经不是引擎验过、推上去的那个了（有人改过）：现在的头。老历史里没有这个字段。 */
+  headMoved?: string;
 }
 
 export interface WaitMergedInput {
