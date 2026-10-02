@@ -131,7 +131,13 @@ export function parseVersionTags(text) {
     if (!m || Number.isNaN(at)) throw new Error(`tag 列表里有认不出的一行：${line.slice(0, 100)}`);
     const vm = VERSION_NUMBER_RE.exec(m[1]);
     if (!vm) continue;
-    out.push({ tag: m[1], version: `v${Number(vm[1])}`, n: Number(vm[1]), commit: m[3] ?? m[2], at: iso(at) });
+    out.push({
+      tag: m[1],
+      version: `v${Number(vm[1])}`,
+      n: Number(vm[1]),
+      commit: m[3] ?? m[2],
+      at: iso(at),
+    });
   }
   return out.sort((a, b) => b.n - a.n || String(b.at).localeCompare(String(a.at)));
 }
@@ -227,7 +233,7 @@ export function judgedUnhealthy(history, sha) {
  *   都不再自动试，等下一个版本标记。不往回挑它前面没试过的：没成的原因可能在机器上（香港不通、配置坏了），
  *   往回一个个试就是一轮轮重启服务、一条条报警。
  * 调用方（deployStep）拿这三个分别判：hold 就记 hold；failed 正好是这个标记指着的提交就记 failed-before；
- * candidates 里没有标记指着的提交（落后太多、读不到）也记 failed-before——都不发。
+ * candidates 里没有标记指着的提交（比在用的旧、落后太多、读不到）记 marker-not-newer——都不发。
  */
 export function releasable(commits, current, history, attempt) {
   const at = commits.findIndex((c) => c.sha === current);
@@ -539,6 +545,18 @@ async function deployStep(io, st, now) {
     act(st, now, 'failed-before', `${marker.tag} 指向的提交${failed?.why ?? '找不到能发的'}，等主线出新提交`);
     return current;
   }
+  // 要发的只能是「比在用的新、没被人按住、没被判过没成」的那一段里的提交（candidates）。标记指的不在里面——比在用的旧
+  // （人手动发过更新的、或有人补打了老 tag）、或在最近这段主线之外——发它就是降级或发没人核过的：不发，照实记。
+  if (!candidates.some((c) => c.sha === marker.commit)) {
+    st.waitingSince = null;
+    act(
+      st,
+      now,
+      'marker-not-newer',
+      `${marker.tag} 指向的 ${short(marker.commit)} 不比在用的 ${short(current)} 新（或落在最近这段主线之外）：不发，不降级`,
+    );
+    return current;
+  }
   const pick = await pickTarget(io, st, now, marker, stop);
   if (!pick.target) {
     if (pick.verdict === 'red') st.waitingSince = null;
@@ -694,9 +712,17 @@ export function publishSequence({ engineOn, target, tag }) {
     return {
       engineOn: false,
       steps: [
-        { name: '停派活', state: 'skipped-engine-off', detail: '引擎关着（FLEET_SERVICES 里没有 fleet-engine），没有派活可停' },
+        {
+          name: '停派活',
+          state: 'skipped-engine-off',
+          detail: '引擎关着（FLEET_SERVICES 里没有 fleet-engine），没有派活可停',
+        },
         { name: '等在跑的收尾', state: 'skipped-engine-off', detail: '引擎关着，没有在跑的会话可等' },
-        { name: '部署', state: 'delegated', detail: `由 deploy/release.sh 发 ${which}（构建、迁移、切版本、健康检查都在它那里）` },
+        {
+          name: '部署',
+          state: 'delegated',
+          detail: `由 deploy/release.sh 发 ${which}（构建、迁移、切版本、健康检查都在它那里）`,
+        },
         { name: '恢复派活', state: 'skipped-engine-off', detail: '引擎关着，没有派活可恢复；排空请求不会写' },
       ],
     };
@@ -704,10 +730,26 @@ export function publishSequence({ engineOn, target, tag }) {
   return {
     engineOn: true,
     steps: [
-      { name: '停派活', state: 'delegated', detail: `release.sh 发布一开始写排空请求 ${RELEASES}/.drain-request，引擎认了马上不起新会话` },
-      { name: '等在跑的收尾', state: 'delegated', detail: 'release.sh 读引擎的 drain.json 数还在跑的会话，等到截止；到点照实报、不硬切' },
-      { name: '部署', state: 'delegated', detail: `由 deploy/release.sh 发 ${which}（构建、迁移、切版本、健康检查都在它那里）` },
-      { name: '恢复派活', state: 'delegated', detail: '切完撤掉排空请求，引擎下一眼就接着派；新引擎起来按编号续上停下的会话' },
+      {
+        name: '停派活',
+        state: 'delegated',
+        detail: `release.sh 发布一开始写排空请求 ${RELEASES}/.drain-request，引擎认了马上不起新会话`,
+      },
+      {
+        name: '等在跑的收尾',
+        state: 'delegated',
+        detail: 'release.sh 读引擎的 drain.json 数还在跑的会话，等到截止；到点照实报、不硬切',
+      },
+      {
+        name: '部署',
+        state: 'delegated',
+        detail: `由 deploy/release.sh 发 ${which}（构建、迁移、切版本、健康检查都在它那里）`,
+      },
+      {
+        name: '恢复派活',
+        state: 'delegated',
+        detail: '切完撤掉排空请求，引擎下一眼就接着派；新引擎起来按编号续上停下的会话',
+      },
     ],
   };
 }
@@ -943,7 +985,11 @@ export function summary(st) {
   if (st.main) {
     const idx = st.main.commits.findIndex(([sha]) => sha === st.current);
     const lag =
-      st.current === st.main.head ? '跟上了主线头' : idx > 0 ? `落后主线头 ${idx} 个提交` : '不在主线最近的提交里';
+      st.current === st.main.head
+        ? '跟上了主线头'
+        : idx > 0
+          ? `落后主线头 ${idx} 个提交`
+          : '不在主线最近的提交里';
     parts.push(`在用 ${short(st.current)}，${lag}`);
   } else {
     parts.push('主线头没读到过');

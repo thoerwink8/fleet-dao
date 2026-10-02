@@ -201,11 +201,59 @@ describe('判定：读的时候现算', () => {
     // 标记正常（这一轮只是在等 CI）：不报这一条
     expect(
       codes(
-        judge(
-          input(H0, state({ marker: { tag: 'v1', commit: H2, at: ago(MIN), checkedAt: ago(MIN) } })),
-        ),
+        judge(input(H0, state({ marker: { tag: 'v1', commit: H2, at: ago(MIN), checkedAt: ago(MIN) } }))),
       ),
     ).toEqual([]);
+  });
+
+  describe('按版本发（决定 0011 第 3 条）：线上该跟的是版本标记，不是主线头', () => {
+    const marker = (commit: string, taggedAgo: number) => ({
+      tag: 'v3',
+      commit,
+      at: ago(taggedAgo),
+      taggedAt: ago(taggedAgo),
+      checkedAt: ago(2 * MIN),
+    });
+
+    it('主线往前走了、标记没动，在用的就是标记那一版：绿（合进主线的提交在下一版之前本来就不上线）', () => {
+      // 主线头 H2 是 10 分钟前合的，标记还指着 5 小时前的 H0；在用 H0。按老办法数这是「落后 2 个、100 分钟」，会一直红
+      expect(judge(input(H0, state({ marker: marker(H0, 300 * MIN) }))).ok).toBe(true);
+    });
+
+    it('在用的比标记还新（人手动发过更新的）：绿，不当落后', () => {
+      expect(judge(input(H1, state({ marker: marker(H0, 300 * MIN) }))).ok).toBe(true);
+    });
+
+    it('在用的比标记老：从标记打上那一刻起算，满 90 分钟才红；说法是「落后最新版本」，不拿主线头数', () => {
+      // 标记指着 H1（主线头 H2 之前的一个），在用 H0：差 1 个提交
+      expect(judge(input(H0, state({ marker: marker(H1, 30 * MIN) }))).ok).toBe(true);
+      const v = judge(input(H0, state({ marker: marker(H1, 100 * MIN) })));
+      expect(codes(v)).toEqual(['behind']);
+      expect(v.problems[0]?.message).toBe('落后最新版本 1 个提交、1 小时 40 分钟');
+      expect(v.problems[0]?.steady).toBe('落后最新版本太久');
+      expect(v.problems[0]?.message).not.toContain('主线');
+    });
+
+    it('【故意造出的失败】标记没查成（null）：不拿主线头充数去数落后——只报标记那一条', () => {
+      // 在用 H0 比主线头老 300 分钟：按老办法会多出一条 behind；按版本发，标记没查成时线上就该停着，不是落后
+      const v = judge(
+        input(
+          H0,
+          state({
+            marker: null,
+            markerError: { kind: 'none', why: '一个 v<N> 版本标记都没有', at: ago(MIN) },
+            last: { action: 'marker-none', detail: '', at: ago(MIN) },
+          }),
+        ),
+      );
+      expect(codes(v)).toEqual(['marker']);
+    });
+
+    it('状态里没有 marker 这个字段（老版本自动发布写的）：照老办法按主线头数', () => {
+      const old = state();
+      expect('marker' in old).toBe(false);
+      expect(codes(judge(input(H0, old)))).toEqual(['behind']);
+    });
   });
 
   it('一轮里在发：按发布本身的时限（60 分钟）算，不当成没报到；超了报「跑了太久」', () => {

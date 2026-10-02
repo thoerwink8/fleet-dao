@@ -24,8 +24,6 @@ import {
   IDLE_WAIT_MS,
   INSTALL_PATHS,
   manualHold,
-  MARKER_PREFIX,
-  MARKER_UNREADABLE_KEY,
   parseHistory,
   parseMainLog,
   parseVersionTags,
@@ -35,9 +33,9 @@ import {
   RULES_PREFIX,
   RULES_USERS,
   runOnce,
-  VERSION_TAG_RE,
   STATE_SCHEMA,
   summary,
+  VERSION_TAG_RE,
 } from '../france/auto-release/lib.mjs';
 
 const H0 = 'a'.repeat(40); // 在用的
@@ -315,7 +313,7 @@ test('刚合进来、CI 还没开跑或还在跑：等，不发', async () => {
 // ── 按版本发（决定 0011 第 3 条）：发的是版本号最大的 v<N> tag 指向的那个提交，不是主线头 ──
 
 const H3 = 'e'.repeat(40); // 再后来合进来的
-const ciCalls = (m) => m.calls.filter((c) => c.startsWith('ci'));
+const _ciCalls = (m) => m.calls.filter((c) => c.startsWith('ci'));
 const tagLine = (tag, sha, at = T1) => `${tag} ${sha} ${at}\n`; // for-each-ref 的一行
 
 test('【故意造出的失败】主线头比版本标记新：发标记那一版，不发主线头（旧的「发主线头」就是这个切片要废掉的）', async () => {
@@ -377,7 +375,8 @@ test('【故意造出的失败】marker 指向的提交不是 origin/main 的祖
   // v3 打在主线上的新提交：换成它、报警自己撤
   m.main.unshift([H3, '2026-09-27T08:20:00Z']);
   m.mainAncestors = [H3, H1, H0];
-  m.tags = tagLine('v3', H3, '2026-09-27T08:21:00Z') + tagLine('v2', H2, '2026-09-27T07:58:00Z') + tagLine('v1', H1);
+  m.tags =
+    tagLine('v3', H3, '2026-09-27T08:21:00Z') + tagLine('v2', H2, '2026-09-27T07:58:00Z') + tagLine('v1', H1);
   m.ci = runsBody(run(H3, 'completed', 'success'), run(H1, 'completed', 'success'));
   m.t += 5 * MIN;
   const again = await m.round();
@@ -502,6 +501,27 @@ test('标记指向的提交比在用的旧（人退回过、又打了老 tag）�
   assert.deepEqual(releases(m), []);
   assert.deepEqual(m.checkouts, []);
   assert.match(st.last.action, /failed-before|up-to-date/);
+});
+
+test('【故意造出的失败】标记比在用的旧、主线上却还有更新的提交：不发——不降级（候选里没有标记指的那个提交就不发）', async () => {
+  const m = machine();
+  // 主线新到旧 H3 H2 H1 H0；在用的是 H1（人手动发过）；版本标记 v1 还指着更旧的 H0
+  m.main = [
+    [H3, '2026-09-27T07:50:00Z'],
+    [H2, '2026-09-27T07:40:00Z'],
+    [H1, '2026-09-27T07:30:00Z'],
+    [H0, '2026-09-27T06:00:00Z'],
+  ];
+  m.mainAncestors = [H3, H2, H1, H0];
+  m.current = H1;
+  m.tags = `v1 ${H0} ${T1}
+`;
+  m.ci = runsBody(run(H0, 'completed', 'success'));
+  const st = await m.round();
+  assert.deepEqual(releases(m), [], '标记指的 H0 比在用的 H1 旧：发它就是降级');
+  assert.deepEqual(m.checkouts, []);
+  assert.equal(st.last.action, 'marker-not-newer');
+  assert.equal(st.attempt, null, '什么都没发：不留「发过」的记录');
 });
 
 test('发过没成的版本标记：不再自动试（不往回挑更旧的标记），等下一个版本标记', async () => {
@@ -1230,10 +1250,7 @@ test('【故意造出的失败】引擎开没开着没查成：按关着算、�
 });
 
 test('真机上那半边：systemctl 说引擎活着才算开着，认不出的回要抛（不当成关着也不当成开着）', () => {
-  const src = readFileSync(
-    new URL('../france/auto-release/fleet-auto-release.mjs', import.meta.url),
-    'utf8',
-  );
+  const src = readFileSync(new URL('../france/auto-release/fleet-auto-release.mjs', import.meta.url), 'utf8');
   assert.match(src, /'is-active', 'fleet-engine\.service'/, '和 release.sh 同一个判法');
   assert.match(src, /回的认不出/, '认不出的回要抛，不猜');
 });
