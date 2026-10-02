@@ -17,7 +17,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '../components/ui/dropdown-menu';
 import { useNow } from '../lib/hooks';
@@ -117,7 +116,6 @@ function FilterChip({
 function ActionsMenu({ target, label }: { target: ActionTarget; label: string }) {
   const { trigger } = useTaskActions();
   const actions = availableActions(target);
-  const href = `/tasks/${target.taskId}${target.sub ? `?sub=${target.sub.id}` : ''}`;
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -140,10 +138,6 @@ function ActionsMenu({ target, label }: { target: ActionTarget; label: string })
             </DropdownMenuItem>
           );
         })}
-        {actions.length ? <DropdownMenuSeparator /> : null}
-        <DropdownMenuItem asChild>
-          <Link to={href}>打开详情</Link>
-        </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   );
@@ -171,13 +165,13 @@ function TaskRow({ t }: { t: BoardTask }) {
           </CollapsibleTrigger>
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
-              <Link to={`/tasks/${t.id}`} className="flex items-center gap-2">
+              <Link to="/home3" className="flex items-center gap-2">
                 <span className="num text-xs font-semibold text-muted-foreground">#{t.issueNumber}</span>
                 <StatusChip tone={tone} label={taskStateLabel[t.state]} />
               </Link>
               <OrgDefaultMark flowSource={t.flowSource} />
             </div>
-            <Link to={`/tasks/${t.id}`} className="block">
+            <Link to="/home3" className="block">
               <div className="mt-1 text-[15px] leading-snug font-semibold">{t.title}</div>
               <p
                 className={cn(
@@ -227,7 +221,7 @@ function SubRow({
       <span className="mt-1 flex w-5 flex-col items-center gap-1">
         <StatusDot tone={tone} />
       </span>
-      <Link to={`/tasks/${task.id}?sub=${s.id}`} className="min-w-0 flex-1">
+      <Link to="/home3" className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5">
           <span className={cn('num text-xs font-bold', toneText[tone])}>{letter}</span>
           <span className="min-w-0 flex-1 truncate text-sm font-medium">{s.title}</span>

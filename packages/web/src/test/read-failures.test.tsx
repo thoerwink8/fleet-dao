@@ -1,13 +1,11 @@
 // @vitest-environment happy-dom
 // 读不到的时候必须说「没读成」，不许用空列表、0 冒充「查了没事」（AGENTS.md 底线）。
 // 这里对每条这样的路径故意造一次「读不到」：假后端的某个接口直接报错，看页面怎么说。
-import { act, cleanup, fireEvent, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, screen } from '@testing-library/react';
 import { useEffect, useRef } from 'react';
-import { Route, Routes } from 'react-router';
 import { afterEach, describe, expect, test } from 'vitest';
 import { ApiError, type FleetApi } from '../api/client';
 import { createMockApi, type MockApi } from '../api/mock/server';
-import { SidebarNav } from '../components/shell/sidebar';
 import { Topbar } from '../components/shell/topbar';
 import { targetOf, useTaskActions } from '../components/task-actions';
 import AuditPage from '../routes/audit';
@@ -16,8 +14,6 @@ import NotificationsPage from '../routes/notifications';
 import OverviewPage from '../routes/overview';
 import SchedulesPage from '../routes/schedules';
 import SettingsPage from '../routes/settings';
-import TaskDetailPage from '../routes/task-detail';
-import TasksPage from '../routes/tasks';
 import { renderApp } from './harness';
 
 afterEach(cleanup);
@@ -41,22 +37,6 @@ describe('读不到时照实说，不冒充「没有」', () => {
     renderApp(<NotificationsPage />, { api: failing('notifications') });
     expect(await screen.findByText(/提醒没读成/)).toBeTruthy();
     expect(screen.queryByText('没有待处理的提醒')).toBeNull();
-  });
-
-  test('任务清单：有仓的看板没读成，写明是哪个仓；全没读到时不说「没有符合条件的需求」', async () => {
-    renderApp(<TasksPage />, { api: failing('board') });
-    expect(await screen.findByText(/仓 .+ 的需求没读成/)).toBeTruthy();
-    expect(screen.getByText('看板没读全，这里空着不代表没有需求')).toBeTruthy();
-    expect(screen.queryByText('没有符合条件的需求')).toBeNull();
-  });
-
-  test('任务清单：只有一个仓没读成，别的仓照常列出，并点名缺了哪个', async () => {
-    const api = createMockApi({ live: false });
-    const board = api.board;
-    api.board = (repoId) => (repoId === 'r-canary' ? boom() : board(repoId));
-    renderApp(<TasksPage />, { api });
-    expect(await screen.findByText(/仓 orbit-canary 的需求没读成/)).toBeTruthy();
-    expect(await screen.findAllByText('登录页加手机验证码')).toBeTruthy();
   });
 
   test('总览：看板没读成时数字写「—」，不写 0', async () => {
@@ -88,29 +68,11 @@ describe('读不到时照实说，不冒充「没有」', () => {
     expect(screen.queryByText('这个渠道下还没有账号池')).toBeNull();
   });
 
-  test('任务详情：日志没读成不说「还没有过程记录」；步骤没读成不说「还没报步骤清单」', async () => {
-    renderApp(
-      <Routes>
-        <Route path="/tasks/:taskId" element={<TaskDetailPage />} />
-      </Routes>,
-      { api: failing('timeline', 'runSteps'), route: '/tasks/t-12?sub=t-12-b' },
-    );
-    expect(await screen.findByText(/日志没读成/)).toBeTruthy();
-    expect(screen.queryByText('还没有过程记录')).toBeNull();
-    expect(await screen.findByText(/步骤清单没读成/)).toBeTruthy();
-    expect(screen.queryByText('这个会话还没报步骤清单。')).toBeNull();
-  });
-
-  test('顶栏的铃和侧栏角标：没读成显示「!」，不显示成 0 条', async () => {
-    renderApp(
-      <>
-        <Topbar onMenu={() => undefined} onSearch={() => undefined} />
-        <SidebarNav />
-      </>,
-      { api: failing('notifications', 'board') },
-    );
+  test('顶栏的铃：没读成显示「!」，不显示成 0 条', async () => {
+    renderApp(<Topbar onMenu={() => undefined} onSearch={() => undefined} />, {
+      api: failing('notifications'),
+    });
     expect(await screen.findByRole('button', { name: '提醒没读成' })).toBeTruthy();
-    await waitFor(() => expect(screen.getAllByTitle('没读成').length).toBe(2));
   });
 });
 

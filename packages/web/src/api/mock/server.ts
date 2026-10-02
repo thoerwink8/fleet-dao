@@ -686,7 +686,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
           reason: '子任务都已合并，结果文档已写',
           via: 'engine',
         });
-        notify('daily', `#${tv.task.issueNumber} 已完成`, tv.task.title, `/tasks/${tv.task.id}`, tv.task.id);
+        notify('daily', `#${tv.task.issueNumber} 已完成`, tv.task.title, '/home3', tv.task.id);
       } else if (
         tv.task.state === 'running' &&
         subs.length &&
@@ -822,7 +822,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
               title: a.question,
               context: `#${t.task.issueNumber} ${t.task.title}`,
               since: a.askedAt,
-              link: `/tasks/${t.task.id}`,
+              link: '/home3',
             })),
         ),
       ].sort((a, b) => b.since.localeCompare(a.since));
@@ -846,7 +846,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
                 ? ('queue' as const)
                 : ('nothing' as const),
             ...(queued ? { waitingSince: queued.queuedAt } : {}),
-            link: `/tasks/${t.task.id}`,
+            link: '/home3',
           };
         });
       const done = st.tasks
