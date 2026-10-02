@@ -54,7 +54,7 @@ const outputs = planOutputs(plan);
 const human = [
   plan.full ? '全跑' : '按改动跑',
   ...plan.reasons.map((r) => `- ${r}`),
-  `lint：${plan.lint}（tsc：${outputs.tsc || '不跑'}）`,
+  `biome：${plan.biome}（tsc：${outputs.tsc || '不跑'}）`,
   `test：${plan.tests.map((s) => `${s.name}（${s.args.join(' ')}）`).join('；') || '不跑'}`,
   `web：${plan.web}  deploy：${plan.deploy}`,
 ];
