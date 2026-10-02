@@ -28,7 +28,7 @@ export function isDrillScope(scope: string | null | undefined): boolean {
   return typeof scope === 'string' && DRILL.test(scope);
 }
 
-/** 机器名和帅位技能里 doing.mjs 的机器名同一个写法（会公开写在单上：本机、法国、笔记本……）。 */
+/** 机器名：32 字以内的一段字母、汉字、数字、点、横线、下划线（本机认领脚本 #446 删了，写法沿用）。 */
 export function machineProblem(name: string): string | null {
   return MACHINE.test(name)
     ? null

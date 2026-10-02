@@ -28,7 +28,7 @@ describe('座位名、机器名、会话号', () => {
       expect(seatScopeProblem(bad), bad).toContain('不行');
   });
 
-  it('机器名照 doing.mjs 的写法；会话号多允许冒号', () => {
+  it('机器名的写法；会话号多允许冒号', () => {
     expect(machineProblem('本机')).toBeNull();
     expect(machineProblem('a:b')).toContain('不行');
     expect(sessionProblem('agent:a9f1')).toBeNull();
