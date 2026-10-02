@@ -619,11 +619,33 @@ describe('fleet done 要核实', () => {
     expect(h.signals.at(-1)?.signal).toMatchObject({ name: 'agentEvent', kind: 'done' });
   });
 
-  it('返工轮次带着已有的 PR 编号：PR 在、分支对也收下', async () => {
+  it('返工轮次带着已有的 PR 编号、这张 PR 的 CI 全绿：PR 在、分支对也收下（554-2 起判 PR 的 CI，不看会话里跑测试）', async () => {
     const h = harness();
-    withPr(h);
-    testRun(h, true);
+    withPr(h, { checks: 'success' });
     expect((await done(h, { summary: '按审查意见改了', prNumber: 31, testsPassed: true })).status).toBe(200);
+  });
+
+  it('带 PR 但 CI 还没跑完（pending）/ 还没起（none）：409 等，不能当绿', async () => {
+    const h = harness();
+    withPr(h, { checks: 'pending' });
+    const pending = await done(h, { summary: 's', prNumber: 31, testsPassed: true });
+    expect(pending.status).toBe(409);
+    expect(await errorCode(pending)).toBe('not_verifiable_yet');
+    const current = h.store.data.pullRequests[0];
+    if (!current) throw new Error('withPr 没塞上 PR？');
+    h.store.data.pullRequests[0] = { ...current, checks: 'none' };
+    const none = await done(h, { summary: 's', prNumber: 31, testsPassed: true });
+    expect(none.status).toBe(409);
+    expect(await errorCode(none)).toBe('not_verifiable_yet');
+  });
+
+  it('带 PR 但 CI 是红的：422，必须修这条 PR 再交（不能用「会话里测试过了」顶）', async () => {
+    const h = harness();
+    withPr(h, { checks: 'failure' });
+    testRun(h, true);
+    const res = await done(h, { summary: 's', prNumber: 31, testsPassed: true });
+    expect(res.status).toBe(422);
+    expect(await reasonsOf(res)).toContain('PR #31 的 CI 是红的');
   });
 
   it('说了就算不行：没跑过测试、最后一次测试是红的、PR 不在本会话分支上，逐条退回并说明原因', async () => {

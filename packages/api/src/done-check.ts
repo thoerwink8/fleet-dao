@@ -1,12 +1,17 @@
 // fleet done 的核实：不是说了就算。
-// 会话只在本地提交，推分支、开 PR、跑 GitHub 上的 CI 都由引擎在会话结束后做（设计文档第十四节），
-// 所以交活时能核实的证据是会话自己跑的测试（插头从过程记录里读出来记进库的）。PR 和 CI 由引擎的验证步骤再核。
-// 测试只认会话里真跑了起会话时交代的那条测试命令（session_runs.test_command：当时仓里 .fleet/flow.json 同步进库的副本，
-// fleet-dao 是 pnpm test:changed，只跑改动影响到的测试；全量检查和卫生检查归 CI 和引擎推分支时的扫描，
-// specs/164-会话内存与交活测试/）。认开工时记下的、不认此刻仓里的：开工后仓里改了命令，这次会话照旧按被告知的那条交活。
-// 以最后一次为准，认不出结果的那一次也算最后一次（不让它前面的「通过」顶上）。
-// 带了 PR 编号（返工轮次 PR 已经在了）就顺带核对它确实是本会话的分支、没被关掉；它上面的 CI 是上一次推送的结果，
-// 不代表这次会话的改动，不拿来判。
+// 判法分两种，新判在前：
+//
+// 1. 调用方带了 PR 编号（这是 554-2 起的主流程）：**判 done = 看这张 PR 的 CI 是不是全绿**（
+//    pull_requests.checks：checks.ts 的 mirrorChecks 已经把必过检查合成 success/failure/pending/none）。
+//    拿不到 PR、CI 还没起、CI 还在跑，都明确失败（409 not_verifiable_yet），**不拿空当绿**。
+//    测试由 CI 跑，会话里不再原样跑 test:changed（554-1 已经把「无头一次性子进程不跑测试」做成骨架；
+//    会话提示词同步改成「交活只带提交」）。
+//
+// 2. 没带 PR 编号的旧路径（Fusion 写码阶段「会话只在本地提交、PR 由引擎在会话后开」）：**fallback** 保留
+//    lastSessionTest 判定不变——只认起会话时记下的那条测试命令最后一次的结果（以 lastSessionTest 为准，
+//    认不出的那一次也算最后一次）。Fusion 还在跑时这条不能拔。
+//
+// 以最后一次为准。带 PR 编号同时顺带核它的分支和状态（没被关、是本会话的分支）。
 import { CODE_STAGES } from '@fleet-dao/core';
 import type { DoneRequest, StageKind } from '@fleet-dao/shared';
 import type { z } from 'zod';
@@ -37,7 +42,7 @@ export type DoneVerdict =
   | { ok: true; evidence: DoneEvidence }
   | {
       ok: false;
-      /** 422 = 核实不过，要改了再交；409 = 暂时核实不了（PR 还没同步进库），过一会儿再交。 */
+      /** 422 = 核实不过，要改了再交；409 = 暂时核实不了（PR 还没同步进库、CI 还没跑完），过一会儿再交。 */
       status: 409 | 422;
       code: 'done_rejected' | 'not_verifiable_yet';
       message: string;
@@ -54,13 +59,23 @@ function rejected(reasons: string[]): DoneVerdict {
   };
 }
 
+function waitOn(reasons: string[]): DoneVerdict {
+  return {
+    ok: false,
+    status: 409,
+    code: 'not_verifiable_yet',
+    message: `暂时核实不了：${reasons.join('；')}`,
+    reasons,
+  };
+}
+
 export function checkDone(input: {
   stage: StageKind;
   /** 本会话的分支；引擎还没建分支时没有。 */
   branch?: string | undefined;
   /**
-   * 起会话时交代给它的测试命令（session_runs.test_command）：只认它，退回时写明要跑哪一条。写码会话开工时都会记下
-   * （项目没写测试命令就起不来）；没有只可能是加这一列之前开的会话——这时不拿仓此刻的命令顶，明确退回。
+   * 起会话时交代给它的测试命令（session_runs.test_command）：**fallback 路径**用——没带 PR 编号的写码阶段只认它。
+   * 带了 PR 编号这条不再参与判定（测试由 CI 跑，不在这里）。
    */
   testCommand?: string | undefined;
   request: z.output<typeof DoneRequest>;
@@ -70,10 +85,56 @@ export function checkDone(input: {
 }): DoneVerdict {
   const { request, pr } = input;
   const reasons: string[] = [];
-  const run = `\`${input.testCommand}\``;
 
   if (!request.testsPassed) reasons.push('你自己报了测试没过：修好再交，或者用 fleet blocked 说明卡在哪');
 
+  // PR 分支和状态先核一遍：两条路径共用的额外核实（不带 PR 就没了）。
+  const prProblems: string[] = [];
+  if (pr) {
+    if (input.branch === undefined) {
+      prProblems.push(`本次会话还没有分支，没法核对 PR #${pr.number} 是不是它的`);
+    } else if (pr.headRef !== input.branch) {
+      prProblems.push(`PR #${pr.number} 的分支是 ${pr.headRef}，不是本会话的分支 ${input.branch}`);
+    }
+    if (pr.state === 'closed') prProblems.push(`PR #${pr.number} 已经关了`);
+  }
+
+  // 1) 主判：带了 PR 编号 → 看 PR 的 CI（mirrorChecks 的汇总）。**读不到 PR 不当绿当 409**。
+  if (request.prNumber !== undefined) {
+    if (!pr) {
+      reasons.push(
+        `PR #${request.prNumber} 还没同步进库，过一两分钟再交；编号写错了就改正再交，或者不带 --pr`,
+      );
+      return waitOn([...reasons, ...prProblems]);
+    }
+    if (prProblems.length > 0) return rejected([...reasons, ...prProblems]);
+    /** CODE_STAGES 才看 check；非写码阶段（分诊、写文档）不问 CI，PR 在不在都行。 */
+    if (CODE_STAGES.has(input.stage)) {
+      switch (pr.checks) {
+        case 'success':
+          break;
+        case 'failure':
+          reasons.push(`PR #${pr.number} 的 CI 是红的（必要检查有一条没过）：修好这条 PR 再交`);
+          return rejected(reasons);
+        case 'pending':
+          reasons.push(`PR #${pr.number} 的 CI 还在跑，等它跑完再交`);
+          return waitOn(reasons);
+        case 'none':
+          reasons.push(`PR #${pr.number} 的 CI 还没起（一条必要检查都没出现），等它起出来再交`);
+          return waitOn(reasons);
+      }
+    }
+    if (reasons.length > 0) return rejected(reasons);
+    return {
+      ok: true,
+      evidence: {
+        pr: { number: pr.number, state: pr.state, headRef: pr.headRef },
+      },
+    };
+  }
+
+  // 2) Fallback：没带 PR 编号 → Fusion 旧路径，只认会话里跑过的测试（最后一条为准）。
+  const run = `\`${input.testCommand}\``;
   const lastSessionTest = [...input.tests].sort((a, b) => a.at.localeCompare(b.at)).at(-1);
   if (CODE_STAGES.has(input.stage)) {
     if (!input.testCommand) {
@@ -93,20 +154,9 @@ export function checkDone(input: {
     }
   }
 
-  if (pr) {
-    if (input.branch === undefined) {
-      reasons.push(`本次会话还没有分支，没法核对 PR #${pr.number} 是不是它的`);
-    } else if (pr.headRef !== input.branch) {
-      reasons.push(`PR #${pr.number} 的分支是 ${pr.headRef}，不是本会话的分支 ${input.branch}`);
-    }
-    if (pr.state === 'closed') reasons.push(`PR #${pr.number} 已经关了`);
-  }
+  if (prProblems.length > 0) reasons.push(...prProblems);
   if (reasons.length > 0) return rejected(reasons);
 
-  if (request.prNumber !== undefined && !pr) {
-    const reason = `PR #${request.prNumber} 还没同步进库，过一两分钟再交；编号写错了就改正再交，或者不带 --pr`;
-    return { ok: false, status: 409, code: 'not_verifiable_yet', message: reason, reasons: [reason] };
-  }
   return {
     ok: true,
     evidence: {

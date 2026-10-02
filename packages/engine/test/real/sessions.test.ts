@@ -295,8 +295,11 @@ describe('写码会话', () => {
     });
     expect(spec?.model).toBe('claude-opus-5-5');
     expect(spec?.prompt).toContain('需求 #12');
-    // 测试命令来自仓的流程配置副本：交代给会话、插头按它认「跑了测试」，也记进会话那一行（交活核对认这一条）
-    expect(spec?.prompt).toContain('交活只认会话里原样跑的 `pnpm check`');
+    // 测试命令来自仓的流程配置副本：仍记进会话那一行（556-4 之前的兼容字段），但 554-2 起提示词不再要求
+    // 会话里原样跑——done 核查看的是 PR 上的 CI（packages/api/src/done-check.ts），会话里不跑。
+    expect(spec?.prompt).toContain('测试由 CI 跑');
+    expect(spec?.prompt).toContain('不在会话里跑测试');
+    expect(spec?.prompt).not.toContain('交活只认会话里原样跑的');
     expect(spec?.testCommands).toEqual(['pnpm check']);
     expect((await runRow(input.runId))?.testCommand).toBe('pnpm check');
     expect(fake.options[0]?.command).toEqual(['/opt/fake/fleet-agent-carpool/reclaude']);
