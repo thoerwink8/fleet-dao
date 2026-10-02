@@ -29,6 +29,13 @@
 - 验证：先看到 `TestUnmarkedProxyWithoutCredentialStripsToOwn` 以同一句报错失败，改完 `go test`（launcher）通过。20:18 本机迁移回读：`migration.json` 状态 `migrated`，磁盘命令和 Mirasim 的 Claude 启动命令都是 `releases/44e35673b882e819a76c0bbb7b5c6322152cdaf067fdd2ef9b42fb525c1d064b/mirasim-reclaude.exe`；`--fleet-version` 的 `sourceCommit` 是 `c7c77f0eba8c313ac284f9092fac610075d8882c`，`sourceHash` 与目录一致。
 - 20:26 PR [#627](https://github.com/thoerwink8/fleet-dao/pull/627) 已合进主线 `e1d35186`。别的机器在 fleet-dao 检出里跑 `pnpm agents:sync`（或新开 AI 会话，开会话钩子自己同步）就会换上。有 Go 的当场编译；没有 Go 的等主线 `mirasim-launcher` 这轮构建成功再同步。
 - 还没验证：真实两向请求扣费；明确选了「平台」但 Mirasim 仍不带令牌时，仍会拒绝。
+## 2026-10-02（钩子层不再从打印出来的命令行漏密钥）
+
+- 分支 `guard/redact-command-lines`，工作树 `.claude/worktrees/redact-lines`，基线 `3cccf20a`。创始人 2026-10-02 拍（原话「2」，对应「加一条钩子：打印进程命令行时先把密钥打码」）：`agents/hooks/` 加 `redact.mjs`（纯函数，把 `-s` / `--secret` / `--token` / `--password` 这类参数的值、名字带 secret / token / password 的 JSON 字段换成 `***`）和 `redact-secrets.mjs`（命令行外壳：管道进、打码后的文字出，读不了标准输入或文件就退出码 1 并说明，不打空）。
+- `pretool.mjs` 加一段：认打印进程命令行的命令（`ps -ef` / `ps aux` / `ps -o pid,cmd` / `/proc/*/cmdline` / `wmic process` / `Get-CimInstance Win32_Process` / 挑 `CommandLine` 那一列），**不接 redactor 就拦下**、拦下的消息里给几条照着敲的配方；接上的放行；只列进程名和 pid 的（`ps -A`、`ps -eo pid,comm`、`tasklist`、`Get-Process`）照样放行。认不出的输入照旧按拦处理。
+- 钉住规矩的测试在 `agents/test/rules/pretool.rules.test.ts`（+368 条里新增的那批）：两种故意造出失败都验过——把 `SHORT_FLAGS` 抽空、让 `ps -ef` 直接过，都会红；夹具里的密钥一律带 `FAKE`（卫生检查按值判，不用进白名单）。
+- 已跑：`pnpm exec vitest run agents/test/`（13 文件 / 687 过）、`packages/agents-sync/`（22 文件 / 307 过）、`packages/conventions/`（23 文件 / 662 过）、`pnpm exec tsc -b`、`biome check`（干净）、`node packages/hygiene/src/bin/check.ts`（0 条）。没跑全量 `pnpm check`（仓规）。
+- 还没验证：这台机器上 `pnpm agents:sync` 之后新脚本真的落到 `~/.fleet-dao/hooks/`（同步工具整份拷目录，`packages/agents-sync/test/hooks.test.ts` 覆盖拷贝，但本机没实地同步）；法国那两台的实际行为；引擎经 `--settings` 起会话时的表现。
 
 ## 2026-10-02（Mirasim 切换与一条命令迁移，实施）
 
