@@ -1240,37 +1240,6 @@ describe('失败', () => {
     expect(fake.count()).toBe(0);
   });
 
-  it('【失败】项目没写测试命令（流程配置副本里没有）：写码会话起之前明确拒，库里不留这一行，不拿给人看的旧值顶', async () => {
-    const { ports, fake } = setup(() => ({}));
-    const none = await addTask(t.db, { testCommand: null });
-    for (const stage of ['execute', 'ui'] as const) {
-      const input = launch({ taskId: none.task.id, stage });
-      await expect(ports.startSession(input, ctx()), stage).rejects.toMatchObject({
-        code: 'CONFIG_MISSING',
-        retryable: false,
-        message: expect.stringMatching(/停派：项目没写测试命令：.*\.fleet\/flow\.json.*testCommand/),
-      });
-      expect(await getSessionRun(t.db, input.runId)).toBeNull();
-    }
-    expect(fake.count()).toBe(0);
-  });
-
-  it.each<[string, Parameters<typeof addTask>[1], RegExp]>([
-    ['从没同步过（对账还没读成过）', { flowSyncedAt: null }, /还没从仓里同步过流程配置/],
-    ['认不出', { flowError: '项目配置 .fleet/flow.json：不是 JSON' }, /流程配置认不出：项目配置/],
-    ['太久没同步成', { flowSyncedAt: new Date(Date.now() - 60 * 60_000) }, /\d+ 分钟没同步成/],
-  ])('【失败】流程配置副本%s：什么会话都不起（停派），写明原因，库里不留这一行', async (_name, over, why) => {
-    const { ports, fake } = setup(() => ({}));
-    const bad = await addTask(t.db, over);
-    const input = launch({ taskId: bad.task.id });
-    await expect(ports.startSession(input, ctx())).rejects.toMatchObject({
-      code: 'CONFIG_MISSING',
-      message: expect.stringMatching(why),
-    });
-    expect(await getSessionRun(t.db, input.runId)).toBeNull();
-    expect(fake.count()).toBe(0);
-  });
-
   it('交给插头的上限帮手认得：交换区上限 0 写「0」，写成「0M」帮手会拒、会话起不来（法国 2026-09-26 实测）', async () => {
     const { ports, fake } = setup(commitAndDone());
     const input = launch({ resources: { memoryHighMb: 1536, memoryMaxMb: 2048, swapMaxMb: 0 } });

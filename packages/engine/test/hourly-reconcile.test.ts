@@ -162,7 +162,7 @@ describe('几部分的结局并成这一轮的（combineParts）', () => {
   it('什么都没看到、也没出错：unscanned（没扫到 ≠ 没问题），不记 ok', () => {
     expect(combineParts([part(), part()])).toEqual({
       outcome: 'unscanned',
-      why: '工作树的根下什么都没有，接活开着的项目里没有没结束的单，没有要审的合并 PR，没有没处理的提醒，也没有受管的仓',
+      why: '工作树的根下什么都没有，没有要审的合并 PR，没有没处理的提醒，也没有受管的仓',
     });
   });
 

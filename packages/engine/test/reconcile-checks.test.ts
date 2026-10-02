@@ -201,7 +201,7 @@ describe('撤掉「开着的单都有着落」留下的旧提醒', () => {
 
   it('【故意造出的失败】提醒太多只列了一部分：照实记没查全，看到的照撤', async () => {
     const old = openAlert(`${WORKFLOW_ALERT_PREFIX}${TASK}`);
-    const w = world({ listOpen: async () => ({ alerts: [old], truncated: true }) });
+    const w = world({ open: [old], listOpen: async () => ({ alerts: [old], truncated: true }) });
     const part = await retireWorkflowAlerts(w.deps);
     expect(part.unchecked.join('；')).toContain('只看了前 1 条');
     expect(part.found).toBe(1);

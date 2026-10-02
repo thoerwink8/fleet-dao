@@ -1327,7 +1327,7 @@ export function describeStoreContract(name: string, make: MakeStore): void {
       const created = (over: Partial<NewAuditEntry> = {}) =>
         audit({ action: 'task.create', target: `task:${NEW_TASK}`, via: 'github', ...over });
 
-      it('按名字找仓：不分大小写，带自动派活开关（没开是 null）和流程配置副本；没有就是 null', async () => {
+      it('按名字找仓：不分大小写，带自动派活开关（没开是 null）；没有就是 null', async () => {
         expect(await store.findRepoByName('Example', 'CANARY')).toEqual({
           id: IDS.repo,
           owner: 'example',
@@ -1335,12 +1335,6 @@ export function describeStoreContract(name: string, make: MakeStore): void {
           defaultBranch: 'main',
           testCommand: 'pnpm check',
           autoDispatchSince: null,
-          flow: {
-            syncedAt: new Date(T0.getTime() - 5 * MIN).toISOString(),
-            error: null,
-            unread: null,
-            testCommand: 'pnpm test:changed',
-          },
         });
         expect(await store.findRepoByName('example', 'other')).toBeNull();
       });
