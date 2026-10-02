@@ -2,7 +2,6 @@
 // #556-2：Fusion 的判断（简报、验收、验证结论、状态机、Lead 检查、PR 正文、关单评论）和库主键（newIds）随 Fusion 删了，
 // 只留 task.ts（#632）用的两样：上限（limits）和失败分流（failure）。
 import { describe, expect, it } from 'vitest';
-import { activityOptions, QUICK_TIMEOUT_SECONDS } from '../src/activity-options.ts';
 import { createDecide, evidenceOf, nextAction, retryDelaySeconds } from '../src/decisions/index.ts';
 import type { FailureVerdict } from '../src/failure/index.ts';
 import { describeHolds, normalizeHolds } from '../src/holds.ts';
@@ -65,18 +64,6 @@ describe('上限：读时现算默认值', () => {
     const { historyAlertEvents: _missing, ...old } = DEFAULT_LIMITS;
     expect(historyAlertLine(old)).toBe(DEFAULT_LIMITS.historyAlertEvents);
     expect(historyAlertLine({ ...old, historyAlertEvents: 20 })).toBe(20);
-  });
-
-  it('合并队列空闲收工有下限：不短于排队活动一次尝试的限时（30 秒），给小了取下限', () => {
-    const floor = QUICK_TIMEOUT_SECONDS / 60;
-    expect(floor).toBe(0.5);
-    expect(
-      [0, 0.1, 0.5, 5].map((m) => resolveLimits({ mergeQueueIdleMinutes: m }).mergeQueueIdleMinutes),
-    ).toEqual([0.5, 0.5, 0.5, 5]);
-    // 下限和排队活动的真实限时是同一个数（改了一边另一边跟着变）。
-    expect(activityOptions('enqueueMerge', DEFAULT_LIMITS).startToCloseTimeout).toBe(
-      `${QUICK_TIMEOUT_SECONDS} seconds`,
-    );
   });
 });
 

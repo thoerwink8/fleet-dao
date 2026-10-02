@@ -27,7 +27,7 @@
 //    会话的临时目录、收发目录）。工作流被强行终止留下的会话，现在要等工人下一次起来时这一步才收（每小时对账还没接这一项：#247）。
 
 import type { RiskyFile } from '@fleet-dao/conventions';
-import type { Brief, FlowConfigRead, Rebuttable, Rebuttal, TaskAsk, VerifyReport } from '@fleet-dao/core';
+import type { Brief, Rebuttable, Rebuttal, VerifyReport } from '@fleet-dao/core';
 import type {
   HostId,
   OrgKind,
@@ -856,9 +856,6 @@ export type TimingEntry = ActivityTiming | WaitTiming | SessionRunRecord;
 
 export interface EnginePorts {
   pickRoute(input: PickRouteInput, ctx: PortContext): Promise<PickRouteResult>;
-  startSession(input: LaunchSessionInput, ctx: PortContext): Promise<StartSessionResult>;
-  awaitSession(input: AwaitSessionInput, ctx: PortContext): Promise<SessionEnd>;
-  stopSession(input: StopSessionInput, ctx: PortContext): Promise<void>;
   createWorktree(input: CreateWorktreeInput, ctx: PortContext): Promise<Worktree>;
   removeWorktree(input: RemoveWorktreeInput, ctx: PortContext): Promise<RemoveWorktreeResult>;
   /**
@@ -866,55 +863,13 @@ export interface EnginePorts {
    * 的历史里就是这样），工作流照旧按会话交的累计算。
    */
   pushBranch(input: PushBranchInput, ctx: PortContext): Promise<{ head: string; changedFiles?: string[] }>;
-  runTests(input: RunTestsInput, ctx: PortContext): Promise<TestResult>;
   openPr(input: OpenPrInput, ctx: PortContext): Promise<PullRequestRef>;
   waitCi(input: WaitCiInput, ctx: PortContext): Promise<CiResult>;
-  /**
-   * 这个 PR 此刻的头碰没碰先审后合的路径（迁移里有删改语句、碰安全）：清单读主线上那份（和合并闸同一份判法），
-   * 文件读这个 PR 现在的（GitHub 现读，带 patch）。清单读不到、文件翻不完页一律抛错，不当「没碰到」。
-   */
-  checkHighRisk(input: CheckHighRiskInput, ctx: PortContext): Promise<CheckHighRiskResult>;
-  /**
-   * 第二意见的结论写回 GitHub：在这个头上贴提交状态 second-opinion（合并闸认的那个 context，通过 = success，必须改 = failure），
-   * 再留一条评论（幂等，按头和轮次去重）。贴状态没权限、GitHub 拒绝一律抛错（这一步没做成，合并闸会一直等）；评论被卫生检查
-   * 拦下、GitHub 一时不通只记进结果里，不影响状态照贴——状态是合并闸认的唯一信号，评论只是给人看。
-   */
-  postSecondOpinion(input: PostSecondOpinionInput, ctx: PortContext): Promise<PostSecondOpinionResult>;
-  /**
-   * ref 相对主线的 patch-id（git patch-id --stable，diff 从 merge-base(origin/<主线>, ref) 起算）：合并前重跑
-   * 那一步头变了，判「这段时间是不是只并了主线、PR 自己的改动没变」用，不是别的判法能替的（结构化，不匹配文案）。
-   * 工作树不在、git 报错一律抛 PortError（GIT_FAILED / WORKTREE_MISSING）：调用方按「没查成」处理，不许当成
-   * 能比、更不许当成一样。
-   */
-  patchIdOf(input: PatchIdOfInput, ctx: PortContext): Promise<string>;
   syncMainline(input: SyncMainlineInput, ctx: PortContext): Promise<SyncResult>;
-  mergePr(input: MergePrInput, ctx: PortContext): Promise<MergeOutcome>;
-  updateIssueProgress(input: UpdateIssueProgressInput, ctx: PortContext): Promise<void>;
   saveTaskState(input: TaskStateSnapshot, ctx: PortContext): Promise<void>;
   closeIssue(input: CloseIssueInput, ctx: PortContext): Promise<void>;
-  writeSpecDoc(input: WriteSpecDocInput, ctx: PortContext): Promise<SpecDocRef>;
-  /** 开 PR 前验证：读这张单的「怎么算做完」。文档不在、没有这一节，明确报错（SPEC_DOC_MISSING / CRITERIA_MISSING，不可重试）。 */
-  readCriteria(input: ReadCriteriaInput, ctx: PortContext): Promise<Criteria>;
   /** 写这张单的会话用过的路由的族（验证只派别家）。一个都查不到明确报错（AUTHORS_UNKNOWN，不可重试），不回空的。 */
   authorFamilies(input: Scope, ctx: PortContext): Promise<{ families: string[] }>;
-  /** 一轮验证写进库（同一个 id 整行覆盖，重试幂等）。 */
-  recordVerification(input: VerificationRecord, ctx: PortContext): Promise<void>;
-  /**
-   * 这张单所在仓的流程配置副本（库里 repos 的 flow_* 列）：原样交回，能不能用由工作流经 decide 调 core 判。
-   * 任务不在明确报错（TASK_NOT_FOUND，不可重试），不交空的。
-   */
-  flowConfig(input: Scope, ctx: PortContext): Promise<FlowConfigRead>;
-  /** 这张单现在的标题和正文（单子正文里改了需求文档那一行，人点「继续」后重认）。任务不在明确报错（TASK_NOT_FOUND）。 */
-  taskRequest(input: Scope, ctx: PortContext): Promise<TaskRequest>;
-  askHuman(input: AskHumanInput, ctx: PortContext): Promise<void>;
-  /**
-   * 这张单的全部提问（库里 asks，按提问先后）：存档点看他晚到的回答、开 PR 写「按推荐先做了」、关单记数（#259）。
-   * 任务不在明确报错（TASK_NOT_FOUND，不可重试），不拿「一条都没问过」顶。
-   */
-  taskAsks(input: Scope, ctx: PortContext): Promise<TaskAsk[]>;
-  /** 照改完记 applied_at：只记这张单的、回答了的、没记过的（重试幂等）。 */
-  markAsksApplied(input: MarkAsksAppliedInput, ctx: PortContext): Promise<void>;
-  requestApproval(input: RequestApprovalInput, ctx: PortContext): Promise<void>;
   raiseAlert(input: RaiseAlertInput, ctx: PortContext): Promise<{ alertId: string }>;
   recordTiming(input: TimingEntry, ctx: PortContext): Promise<void>;
 }

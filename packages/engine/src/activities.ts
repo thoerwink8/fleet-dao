@@ -1,17 +1,9 @@
-// 工人这边：把端口实现包成 Temporal 活动。每次尝试记一笔计时（排队、干活分开），PortError 转成带错误码的失败；
-// 起会话前现签 fleet 通行证、把 fleet 命令放进会话的 PATH（通行证不进工作流历史）。
+// 工人这边：把端口实现包成 Temporal 活动。每次尝试记一笔计时（排队、干活分开），PortError 转成带错误码的失败。
 
 import { Context } from '@temporalio/activity';
 import type { Client } from '@temporalio/client';
-import { ApplicationFailure, CancelledFailure, type SignalDefinition } from '@temporalio/common';
+import { ApplicationFailure, CancelledFailure } from '@temporalio/common';
 import type { EngineActivities } from './activity-options.ts';
-import {
-  enqueueSignal,
-  type MergeQueueInput,
-  mergeQueueWorkflowId,
-  WORKFLOW_TYPES,
-  withdrawSignal,
-} from './contract.ts';
 import {
   type CanaryDeps,
   CanaryNotRecordedError,
@@ -32,14 +24,12 @@ import {
 import { type IntakeDeps, IntakeFailedError, runIntakeJob } from './jobs/intake.ts';
 import { RouteProbeFailedError, type RouteProbeJobDeps, runRouteProbeJob } from './jobs/route-probe.ts';
 import { runWatchdogJob, type WatchdogDeps, WatchdogFailedError } from './jobs/watchdog.ts';
-import type { Limits } from './limits.ts';
 import {
   type ActivityTiming,
   type EnginePorts,
   type PortContext,
   PortError,
   type PortName,
-  type StartSessionInput,
 } from './ports.ts';
 import type { TaskBriefResult } from './runner/task-brief.ts';
 import type {
@@ -61,59 +51,19 @@ import type {
 /** 端口名的全集。写成 Record 让编译器保证一个不漏（windsurf-dao#1422：假活动表缺名字，生产卡在 activity not found）。 */
 const PORT_KEYS: Readonly<Record<PortName, true>> = {
   pickRoute: true,
-  startSession: true,
-  awaitSession: true,
-  stopSession: true,
   createWorktree: true,
   removeWorktree: true,
   pushBranch: true,
-  runTests: true,
   openPr: true,
   waitCi: true,
-  checkHighRisk: true,
-  postSecondOpinion: true,
-  patchIdOf: true,
   syncMainline: true,
-  mergePr: true,
-  updateIssueProgress: true,
   saveTaskState: true,
   closeIssue: true,
-  writeSpecDoc: true,
-  readCriteria: true,
   authorFamilies: true,
-  recordVerification: true,
-  flowConfig: true,
-  taskRequest: true,
-  askHuman: true,
-  taskAsks: true,
-  markAsksApplied: true,
-  requestApproval: true,
   raiseAlert: true,
   recordTiming: true,
 };
 export const PORT_NAMES = Object.keys(PORT_KEYS) as PortName[];
-
-/** fleet 通行证里的内容（驾驶舱后端 signAgentToken 的入参）。 */
-export interface AgentTokenClaims {
-  taskId: string;
-  subtaskId?: string;
-  runId: string;
-  ttlSeconds: number;
-}
-
-export interface SessionLaunchConfig {
-  /** fleet 命令的后端地址，进会话环境的 FLEET_API。 */
-  fleetApi: string;
-  /** 装着 fleet 命令的目录（packages/cli/bin），放到会话 PATH 最前面。 */
-  cliBinDir: string;
-  /** 签通行证：只对一个任务的一次会话有效。接驾驶舱后端的 signAgentToken（@fleet-dao/api/agent-token）。 */
-  signToken(claims: AgentTokenClaims): string;
-}
-
-/** 通行证比会话限时多给一刻钟，最长一天（后端验的时候也卡这个上限）。 */
-export function agentTokenTtlSeconds(sessionMinutes: number): number {
-  return Math.min(sessionMinutes * 60 + 15 * 60, 24 * 60 * 60);
-}
 
 /** 记计时本身失败不影响干活，最多等这么久。 */
 const TIMING_WRITE_BUDGET_MS = 5_000;
@@ -226,43 +176,6 @@ function timed(name: string, handler: Handler, record: EnginePorts['recordTiming
       );
     }
   };
-}
-
-/**
- * 给这个仓的合并队列发一个信号，队列不在跑就顺手起一条（工作流里发不了 signalWithStart，只能在活动里发）。
- * 发这一下带截止时间 = 这次尝试的限时：卡住的一下不会拖过这次尝试、事后才送到——服务端判这次尝试超时以后，
- * 工作流就当它收场了（叫停时照常收尾撤出），拖过去再送到的排队只能靠队列记下的撤回挡，队列收工了就挡不住。
- */
-async function signalMergeQueue<A>(
-  repo: MergeQueueInput['repo'],
-  limits: Partial<Limits>,
-  signal: SignalDefinition<[A]>,
-  arg: A,
-): Promise<void> {
-  const ctx = Context.current();
-  const args: MergeQueueInput = { schemaVersion: 1, repo, limits };
-  await ctx.client.withDeadline(Date.now() + ctx.info.startToCloseTimeoutMs, () =>
-    ctx.client.workflow.signalWithStart(WORKFLOW_TYPES.mergeQueue, {
-      workflowId: mergeQueueWorkflowId(repo),
-      taskQueue: ctx.info.taskQueue,
-      args: [args],
-      signal,
-      signalArgs: [arg],
-    }),
-  );
-}
-
-/** 引擎自己的活动：把条目排进合并队列。 */
-function enqueueMerge(input: Parameters<EngineActivities['enqueueMerge']>[0]): Promise<void> {
-  return signalMergeQueue(input.item.repo, input.limits, enqueueSignal, input.item);
-}
-
-/** 引擎自己的活动：撤出信号直接发不出去（队列没在跑）时经这里送去，把队列拉起来记下撤回。 */
-function withdrawMerge(input: Parameters<EngineActivities['withdrawMerge']>[0]): Promise<void> {
-  return signalMergeQueue(input.repo, input.limits, withdrawSignal, {
-    itemId: input.itemId,
-    subtaskWorkflowId: input.subtaskWorkflowId,
-  });
 }
 
 /**
@@ -469,7 +382,6 @@ async function canaryCheck(jobs: EngineJobs, input: unknown): Promise<unknown> {
 
 export function createActivities(
   ports: EnginePorts,
-  launch: SessionLaunchConfig,
   jobs: EngineJobs = {},
   tasks: EngineTasks = {},
 ): EngineActivities {
@@ -486,36 +398,10 @@ export function createActivities(
           throw toActivityFailure(error);
         }
       };
-    } else if (name === 'startSession') {
-      out[name] = timed(
-        name,
-        async (input, ctx) => {
-          if (!launch.fleetApi) {
-            // 会话里的 fleet 命令连不上后端就全废了：别起，挂起报警让人配 FLEET_AGENT_API_URL。
-            throw new PortError('CONFIG_MISSING', '没配 fleet 命令的后端地址（FLEET_AGENT_API_URL）', {
-              retryable: false,
-            });
-          }
-          const start = input as StartSessionInput;
-          const fleetToken = launch.signToken({
-            taskId: start.taskId,
-            ...(start.subtaskId ? { subtaskId: start.subtaskId } : {}),
-            runId: start.runId,
-            ttlSeconds: agentTokenTtlSeconds(start.sessionMinutes),
-          });
-          return port(
-            { ...start, launch: { fleetApi: launch.fleetApi, fleetToken, pathPrepend: [launch.cliBinDir] } },
-            ctx,
-          );
-        },
-        record,
-      );
     } else {
       out[name] = timed(name, port, record);
     }
   }
-  out.enqueueMerge = timed('enqueueMerge', (input) => enqueueMerge(input as never), record);
-  out.withdrawMerge = timed('withdrawMerge', (input) => withdrawMerge(input as never), record);
   out.reconcileGitHub = timed('reconcileGitHub', () => reconcileGitHub(jobs), record);
   out.probeRoutes = timed('probeRoutes', () => probeRoutes(jobs), record);
   out.reconcileHourly = timed('reconcileHourly', () => reconcileHourly(jobs), record);

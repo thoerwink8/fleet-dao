@@ -88,13 +88,14 @@ import { judgeStall, type StallPolicy, type StallToolCall } from '../failure/sta
 import type { FailureVerdict, TriageChoice } from '../failure/types.ts';
 import {
   type AwaitSessionInput,
-  type EnginePorts,
   type LaunchSessionInput,
+  type PortContext,
   PortError,
   type SessionEnd,
   type SessionHandle,
   type SessionOutput,
   type StartSessionResult,
+  type StopSessionInput,
 } from '../ports.ts';
 import { hostName } from '../routing/names.ts';
 import type { UserExec } from './exec.ts';
@@ -380,7 +381,11 @@ export interface SessionPortsDeps {
   log?: (message: string, fields?: Record<string, unknown>) => void;
 }
 
-export type SessionPorts = Pick<EnginePorts, 'startSession' | 'awaitSession' | 'stopSession'> & {
+export type SessionPorts = {
+  startSession(input: LaunchSessionInput, ctx: PortContext): Promise<StartSessionResult>;
+  awaitSession(input: AwaitSessionInput, ctx: PortContext): Promise<SessionEnd>;
+  stopSession(input: StopSessionInput, ctx: PortContext): Promise<void>;
+} & {
   /** 工人起来接活之前：收掉上一轮留下的会话 scope（fleet-agent-scope list 再逐个 stop）、清掉它们的临时目录，回收了几个会话。 */
   reapOrphanSessions(): Promise<number>;
   /** 切号（#59，real/org-switch.ts）用的两样：停下、还剩哪些。 */
@@ -1190,7 +1195,7 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
    * 选路这时回「过一会儿再选」、新引擎起来再派）。过了闸先登记（和上面的判断之间没有 await：停机信号插不进来），
    * 起来了改成按会话自己的时限等，没起来就撤掉。同一个 runId 的重试（这个进程里已经起了的）不拦。
    */
-  async function startSession(input: LaunchSessionInput, ctx: Parameters<EnginePorts['startSession']>[1]) {
+  async function startSession(input: LaunchSessionInput, ctx: PortContext) {
     // 三段（对题 / 动手 / 验收）走 runner（#554-4）：起一个无头进程，登记 promise；立即返回 sessionId，
     // awaitSession 拿那个 promise 的 SegmentOutcome。不动 Fusion 的 registry / db session_runs 行 / 插头链。
     // Spawner 没接（生产）时，launchSegment 当场 SEGMENT_NOT_WIRED——同步返错，不留登记。
@@ -1261,7 +1266,7 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     }
   }
 
-  async function launch(input: LaunchSessionInput, ctx: Parameters<EnginePorts['startSession']>[1]) {
+  async function launch(input: LaunchSessionInput, ctx: PortContext) {
     const route = await routeLaunchFacts(db, input.route.routeId);
     if (!route) {
       throw new PortError('ROUTE_NOT_FOUND', `库里没有路由 ${input.route.routeId}`, { retryable: false });
@@ -2197,7 +2202,7 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     };
   }
 
-  async function awaitSession(input: AwaitSessionInput, ctx: Parameters<EnginePorts['awaitSession']>[1]) {
+  async function awaitSession(input: AwaitSessionInput, ctx: PortContext) {
     // 三段（对题 / 动手 / 验收）走 runner（#554-4）：先看 segments registry；查到了等那个 promise，
     // 把 SegmentOutcome 折成 SessionEnd 交回。查不到才走 Fusion 老链路（registry / db / reattach）。
     const segPromise = segments.get(input.runId);
@@ -2266,11 +2271,7 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
   }
 
   /** 看守挂着的那一段：等进程收场、心跳、写进度、判停滞，收场后判结局、写库、交回。onSettled 在进程收场时叫。 */
-  async function watchLive(
-    live: Live,
-    ctx: Parameters<EnginePorts['awaitSession']>[1],
-    onSettled: () => void,
-  ): Promise<SessionEnd> {
+  async function watchLive(live: Live, ctx: PortContext, onSettled: () => void): Promise<SessionEnd> {
     let nextStall = Date.now() + stallCheckMs;
     let settled = false;
     const ended = live.report.then(
@@ -2388,7 +2389,7 @@ export function createSessionPorts(deps: SessionPortsDeps): SessionPorts {
     return out;
   }
 
-  async function stopSession(input: Parameters<EnginePorts['stopSession']>[0]) {
+  async function stopSession(input: StopSessionInput) {
     await requestSessionStop(db, { runId: input.runId, reason: input.reason });
     const live = registry.get(input.runId);
     if (live) {

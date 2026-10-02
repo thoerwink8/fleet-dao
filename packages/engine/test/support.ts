@@ -81,12 +81,8 @@ export async function withWorker<T>(
       taskQueue,
       shutdownGraceSeconds: 1,
       maxConcurrentActivities: 40,
-      agentApiUrl: 'http://127.0.0.1:8788',
-      cliBinDir: '/repo/packages/cli/bin',
     },
     ports: world.ports,
-    signAgentToken: (claims) =>
-      `token:${claims.taskId}:${claims.subtaskId ?? '-'}:${claims.runId}:${claims.ttlSeconds}`,
     connection: env.nativeConnection,
     workflowBundle: options.workflowBundle ?? (await engineBundle()),
     ...(options.triage ? { triage: options.triage } : {}),
