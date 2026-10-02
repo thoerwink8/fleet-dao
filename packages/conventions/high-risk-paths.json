@@ -163,6 +163,11 @@
       "why": "CI 汇总 job（必过检查 check）的入口"
     },
     {
+      "path": "packages/conventions/src/flow-branch.ts",
+      "kind": "碰安全",
+      "why": "合并闸认「引擎任务工作流开的 PR」的分支名判法：改松了，引擎的 PR 没验收也能合"
+    },
+    {
       "path": "packages/conventions/src/repo.ts",
       "kind": "碰安全",
       "why": "CI 的 changes job 经它读 package.json 算依赖图：改它能伪造依赖图，让受影响的包不测"
