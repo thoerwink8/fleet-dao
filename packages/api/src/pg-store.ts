@@ -15,8 +15,6 @@ import {
   feishuDrafts,
   feishuFollows,
   feishuOutbox,
-  flowReplicaOf,
-  followTaskOnEngineClaim,
   githubEvents,
   githubEventVersions,
   idempotencyKeys,
@@ -100,7 +98,6 @@ import {
   type TimelineRecord,
   type User,
 } from './ports.ts';
-import { pgSeatStore } from './seat-store.ts';
 
 export interface PgStoreOptions {
   now?: () => Date;
@@ -520,8 +517,6 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
   }
 
   return {
-    ...pgSeatStore(db, insertAudit),
-
     // —— 人 ——
     async getUser(id) {
       if (!isUuid(id)) return null;
@@ -619,19 +614,6 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       if (!isUuid(id)) return null;
       const [row] = await db.select().from(repos).where(eq(repos.id, id));
       return row ? toRepo(row) : null;
-    },
-    async getRepoFlow(id) {
-      if (!isUuid(id)) return null;
-      const [row] = await db.select().from(repos).where(eq(repos.id, id));
-      if (!row) return null;
-      const flow = flowReplicaOf(row);
-      return {
-        source: flow.source,
-        commit: flow.commit,
-        syncedAt: flow.syncedAt ? iso(flow.syncedAt) : null,
-        error: flow.error,
-        unread: flow.unread,
-      };
     },
     async listBoardTasks(repoId) {
       if (!isUuid(repoId)) return [];
@@ -1866,16 +1848,9 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         .where(and(sql`lower(${repos.owner}) = lower(${owner})`, sql`lower(${repos.name}) = lower(${name})`))
         .limit(1);
       if (!row) return null;
-      const flow = flowReplicaOf(row);
       return {
         ...toRepo(row),
         autoDispatchSince: row.autoDispatchSince ? iso(row.autoDispatchSince) : null,
-        flow: {
-          syncedAt: flow.syncedAt ? iso(flow.syncedAt) : null,
-          error: flow.error,
-          unread: flow.unread,
-          testCommand: flow.testCommand,
-        },
       };
     },
     async findTaskByIssue(repoId, issueNumber) {
@@ -1949,11 +1924,6 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
           .returning({ id: tasks.id });
         if (stopped.length === 0) return 'not_queued';
         await insertAudit(tx, entry);
-        // 没派出去过就叫停了：引擎待起的认领跟着放下（#299），本机能接着认领
-        await followTaskOnEngineClaim(tx, {
-          taskId,
-          end: { state: 'released', reason: '任务没派出去过就叫停了' },
-        });
         return 'ok';
       });
     },

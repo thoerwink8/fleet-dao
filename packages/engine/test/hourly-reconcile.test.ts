@@ -72,7 +72,6 @@ function harness(over: Partial<HourlyReconcileJobDeps> = {}): Harness {
       insertOnce: async () => ({ created: true }),
       updateOpen: async () => 'not_open',
     },
-    activeTasks: async () => [],
     repos: async () => [],
     auditMergedPrs: async () => ({
       outcome: 'ok',
@@ -82,10 +81,6 @@ function harness(over: Partial<HourlyReconcileJobDeps> = {}): Harness {
       problems: [],
       findings: [],
     }),
-    latestDelivery: async () => null,
-    repull: async () => {
-      throw new Error('不该补拉');
-    },
     ledgers: async () => [],
     apps: { repos: async () => [], selfCheck: async () => [] },
     gh: {
@@ -167,7 +162,7 @@ describe('几部分的结局并成这一轮的（combineParts）', () => {
   it('什么都没看到、也没出错：unscanned（没扫到 ≠ 没问题），不记 ok', () => {
     expect(combineParts([part(), part()])).toEqual({
       outcome: 'unscanned',
-      why: '工作树的根下什么都没有，接活开着的项目里没有没结束的单，没有要审的合并 PR，没有没处理的提醒，也没有受管的仓',
+      why: '工作树的根下什么都没有，没有要审的合并 PR，没有没处理的提醒，也没有受管的仓',
     });
   });
 
@@ -276,21 +271,10 @@ describe('一轮（runHourlyReconcileJob，不起 Temporal）', () => {
       outcome: 'partial',
       scanned: 1,
       why:
-        '3 处没查成：列没处理的提醒没成：库连不上；列没处理的提醒没成，工作流核对的旧提醒这一轮不撤：库连不上；' +
+        '3 处没查成：列没处理的提醒没成，工作流核对留下的旧提醒这一轮不撤：库连不上；列没处理的提醒没成：库连不上；' +
         '列没处理的提醒没成，记账核对的旧提醒这一轮不复查、不撤：库连不上',
     });
     expect(h.logs.some((l) => l.startsWith('warn:每小时对账：列没处理的提醒没成'))).toBe(true);
-  });
-
-  it('【故意造出的失败】列没结束的单没成：这一轮不记 ok，写明是列单没成', async () => {
-    const h = harness({
-      activeTasks: async () => {
-        throw new Error('库连不上');
-      },
-    });
-    const run = await runHourlyReconcileJob(h.deps);
-    expect(run.outcome).toBe('partial');
-    expect(run.why).toContain('列没结束的单没成：库连不上');
   });
 
   it('【故意造出的失败】列合并的 PR 失败（GitHub 读不到）：这个仓写进原因，这一轮不记 ok', async () => {
@@ -459,7 +443,7 @@ describe('每小时对账的工作流（真 Temporal 测试服务端）', { time
   it('登记的名字、频率：每小时对账、连着两轮没跑成才算过期', () => {
     expect(HOURLY_RECONCILE_JOB).toMatchObject({
       id: 'hourly-reconcile',
-      name: '每小时对账（工作树、工作流、PR 记账、提醒、GitHub 机器人权限）',
+      name: '每小时对账（工作树、PR 记账、提醒、GitHub 机器人权限）',
       expectEveryMinutes: 150,
     });
   });

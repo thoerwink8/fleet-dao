@@ -21,8 +21,6 @@ export const IDS = {
 
 export const DEV_USER_ID = IDS.founderA;
 export const DEV_RUN_ID = IDS.run1;
-/** 样例仓副本读自的提交，40 位全长。看板接口只给前 7 位。 */
-export const DEV_FLOW_COMMIT = 'a'.repeat(40);
 
 export function devFixtures(now: Date): Partial<MemoryData> {
   const ago = (minutes: number) => new Date(now.getTime() - minutes * 60_000).toISOString();
@@ -54,17 +52,7 @@ export function devFixtures(now: Date): Partial<MemoryData> {
         owner: 'example',
         name: 'canary',
         defaultBranch: 'main',
-        // 给人看的旧值：派活、交活都不认它，认下面副本里的（生产上对账读成后会把它改成一样的）
         testCommand: 'pnpm check',
-        // 流程配置副本五分钟前刚同步过，读自仓里（生产上由引擎的对账写；超过 45 分钟没同步就停派）
-        flow: {
-          syncedAt: ago(5),
-          error: null,
-          unread: null,
-          testCommand: 'pnpm test:changed',
-          source: 'project',
-          commit: DEV_FLOW_COMMIT,
-        },
       },
     ],
     channels: [

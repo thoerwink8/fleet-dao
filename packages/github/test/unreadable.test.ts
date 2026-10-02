@@ -109,30 +109,30 @@ describe('读不到 ≠ 没有', () => {
   it('轮询：一开头就读不到报 unscanned；送进去一部分后断了报 partial（不报 ok）', async () => {
     const denied = setup();
     denied.fake.before.push((req) =>
-      req.path.endsWith('/issues') ? json(403, { message: 'nope' }) : undefined,
+      req.path.endsWith('/pulls') ? json(403, { message: 'nope' }) : undefined,
     );
     const r1 = await denied.gh
       .reconciler({ intake: noIntake, pollDeliveryId })
       .poll('acme/widgets', new Date(0));
     expect(r1.outcome).toBe('unscanned');
 
+    // 第一条 PR 送进去了，第二条送不进去（门那边抛错）：查了一部分，报 partial
     const odd = setup();
-    odd.fake.addIssue();
-    odd.fake.before.push((req) => (req.path.endsWith('/issues/comments') ? garbage() : undefined));
-    const r2 = await odd.gh
-      .reconciler({ intake: noIntake, pollDeliveryId })
-      .poll('acme/widgets', new Date(0));
-    expect(r2).toMatchObject({ outcome: 'partial', checked: 1, why: expect.stringContaining('没做完') });
+    odd.fake.addPull({ head: { ref: 'task/1', sha: A } });
+    odd.fake.addPull({ head: { ref: 'task/2', sha: sha('b') } });
+    let calls = 0;
+    const flaky = {
+      ingest: async () => {
+        calls += 1;
+        if (calls === 2) throw new Error('门那边断了');
+        return { verdict: 'accepted' as const, wake: true };
+      },
+    };
+    const r2 = await odd.gh.reconciler({ intake: flaky, pollDeliveryId }).poll('acme/widgets', new Date(0));
+    expect(r2).toMatchObject({ outcome: 'partial', checked: 2, why: expect.stringContaining('没做完') });
   });
 
-  it('对账：列表读不到报 unscanned；单张读不到报 partial 并写明哪张没查成', async () => {
-    const down = setup();
-    down.fake.before.push((req) => (req.path.endsWith('/issues') ? json(500, { message: 'x' }) : undefined));
-    const open = await down.gh
-      .reconciler({ intake: noIntake, pollDeliveryId })
-      .auditOpenIssues('acme/widgets');
-    expect(open).toMatchObject({ outcome: 'unscanned', scanned: 0 });
-
+  it('对账：单张读不到报 partial 并写明哪张没查成', async () => {
     const partly = setup();
     const pr = partly.fake.addPull({
       head: { ref: 'task/1', sha: A },

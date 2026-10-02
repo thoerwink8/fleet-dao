@@ -1,7 +1,7 @@
 // Store 契约测试：ports.ts 写下的语义，内存版（参照实现）和 Postgres 版都得过同一套。
 // 两个实现各有一个入口文件（store.memory.test.ts / store.pg.test.ts）调 describeStoreContract。
 import { beforeEach, describe, expect, it } from 'vitest';
-import { DEV_FLOW_COMMIT, DEV_USER_ID, devFixtures, IDS } from '../src/dev-fixtures.ts';
+import { DEV_USER_ID, devFixtures, IDS } from '../src/dev-fixtures.ts';
 import type { MemoryData } from '../src/memory-store.ts';
 import {
   type GitHubObjectVersion,
@@ -175,19 +175,6 @@ export function describeStoreContract(name: string, make: MakeStore): void {
           },
         ]);
         expect(await store.getRepo('repo-1')).toBeNull();
-      });
-
-      it('流程配置副本：样例仓读得到来源和全长提交；没有的仓是 null', async () => {
-        expect(await store.getRepoFlow(IDS.repo)).toEqual({
-          source: 'project',
-          commit: DEV_FLOW_COMMIT,
-          syncedAt: new Date(T0.getTime() - 5 * MIN).toISOString(),
-          error: null,
-          unread: null,
-        });
-        expect(DEV_FLOW_COMMIT).toHaveLength(40);
-        expect(await store.getRepoFlow(OTHER_UUID)).toBeNull();
-        expect(await store.getRepoFlow('nope')).toBeNull();
       });
 
       it('看板上的需求：没结束的和刚结束的，按优先级排；别的仓、看不懂的编号是空', async () => {
@@ -1340,7 +1327,7 @@ export function describeStoreContract(name: string, make: MakeStore): void {
       const created = (over: Partial<NewAuditEntry> = {}) =>
         audit({ action: 'task.create', target: `task:${NEW_TASK}`, via: 'github', ...over });
 
-      it('按名字找仓：不分大小写，带自动派活开关（没开是 null）和流程配置副本；没有就是 null', async () => {
+      it('按名字找仓：不分大小写，带自动派活开关（没开是 null）；没有就是 null', async () => {
         expect(await store.findRepoByName('Example', 'CANARY')).toEqual({
           id: IDS.repo,
           owner: 'example',
@@ -1348,12 +1335,6 @@ export function describeStoreContract(name: string, make: MakeStore): void {
           defaultBranch: 'main',
           testCommand: 'pnpm check',
           autoDispatchSince: null,
-          flow: {
-            syncedAt: new Date(T0.getTime() - 5 * MIN).toISOString(),
-            error: null,
-            unread: null,
-            testCommand: 'pnpm test:changed',
-          },
         });
         expect(await store.findRepoByName('example', 'other')).toBeNull();
       });

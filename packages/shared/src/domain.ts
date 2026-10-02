@@ -71,29 +71,8 @@ export interface Repo {
   owner: string;
   name: string;
   defaultBranch: string;
-  /**
-   * 给人看的测试命令（repos.test_command）：对账从仓里 .fleet/flow.json 读成后跟着改成一样的。起会话、交活核对不认它，
-   * 认流程配置副本里的（项目没写就是没有，不拿这一列的旧值顶；packages/core/src/replica.ts）。
-   */
+  /** 给人看的测试命令（repos.test_command）。起会话、交活核对不认它：认每次会话自己带的（SessionRun.testCommand）。 */
   testCommand: string;
-}
-
-/**
- * 拉起一张单的工作流的输入：后端（api 的 RequirementWorkflows.start，起的是 Fusion）照它给，引擎 contract.ts 的
- * FusionInput（和旧的 RequirementInput）在它上面只加可选字段——两边共用这一份，不各写一份。进了工作流历史：以后只许加
- * 可选字段，不许改老字段的意思。
- */
-export interface RequirementStartInput {
-  schemaVersion: 1;
-  /** 库里的 tasks.id。 */
-  taskId: string;
-  repo: Repo;
-  issueNumber: number;
-  title: string;
-  /** 创始人原话（issue 正文去掉进度段；正文空就是标题）。 */
-  rawRequest: string;
-  /** issue 作者的 GitHub 登录名：结果文档里写「提出人」用，本来就公开在 issue 上。 */
-  requestedBy: string;
 }
 
 export interface Task {
@@ -112,11 +91,6 @@ export interface Task {
   specDir?: string;
   /** 做完标准（从需求文档来），fleet task 给会话看。 */
   acceptance?: string[];
-  /**
-   * 这一轮开工时用的流程配置读自哪。project = 仓里自己的文件；org_default = 没有，用的全组织默认。
-   * 不填 = 没记过（还没开工、开工前就停派、或旧工作流）。仓里后来改了文件不回头改这一列。
-   */
-  flowSource?: 'project' | 'org_default';
   createdAt: string;
 }
 

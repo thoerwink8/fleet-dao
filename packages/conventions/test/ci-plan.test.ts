@@ -306,7 +306,6 @@ describe('测试读包外的文件，改那个文件的 PR 一定测到它（漏
       'deploy/lib/snapshot.sh', // join(dirname(…), '..', …)
       'deploy/release.sh', // new URL('../../../deploy/release.sh', …)
       'packages/web/src/build/scan.ts',
-      'packages/github/test/fixtures/github/issue.json', // join(import.meta.dirname, '../../github/…')
       '.github/pull_request_template.md',
       '.gitignore',
     ]) {

@@ -114,8 +114,6 @@ export function createSeed(now: number): MockState {
     runs?: SessionRun[];
     subtasks?: MSubtask[];
     asks?: MAsk[];
-    /** 这一轮开工时读自哪。不填 = 卡片上不标。 */
-    flowSource?: 'project' | 'org_default';
   }
   function task(s: TaskSpec): MTask {
     const t: MTask['task'] = {
@@ -130,7 +128,6 @@ export function createSeed(now: number): MockState {
       createdAt: at(s.created),
     };
     if (s.spec) t.specDir = s.spec;
-    if (s.flowSource) t.flowSource = s.flowSource;
     return { task: t, runs: s.runs ?? [], subtasks: s.subtasks ?? [], paused: false, asks: s.asks ?? [] };
   }
   /** 分诊、需求文档、方案三段需求级会话。 */
@@ -687,7 +684,6 @@ export function createSeed(now: number): MockState {
       state: 'running',
       priority: 1,
       created: -9,
-      flowSource: 'org_default',
       runs: [
         run({
           task: 't-c7',
@@ -744,7 +740,6 @@ export function createSeed(now: number): MockState {
       state: 'done',
       priority: 2,
       created: -372,
-      flowSource: 'org_default',
       runs: [
         run({
           task: 't-c6',
@@ -1332,30 +1327,6 @@ export function createSeed(now: number): MockState {
       },
       { id: 'r-site', owner: 'acme', name: 'website', defaultBranch: 'main', testCommand: 'pnpm test' },
     ],
-    // 顶栏三种样子。提交 40 位十六进制；认不出不抹掉上次读成的。不在这里重算 45 分钟。
-    repoFlows: {
-      'r-orbit': {
-        source: 'project',
-        commit: `${'a1b2c3d'.padEnd(40, 'e')}`,
-        syncedAt: at(-6),
-        error: null,
-        unread: null,
-      },
-      'r-canary': {
-        source: 'org_default',
-        commit: `${'b7c0de1'.padEnd(40, 'b')}`,
-        syncedAt: at(-6),
-        error: null,
-        unread: null,
-      },
-      'r-site': {
-        source: 'project',
-        commit: `${'c9ffee0'.padEnd(40, 'c')}`,
-        syncedAt: at(-6),
-        error: '不是合法的 JSON',
-        unread: null,
-      },
-    },
     channels: [
       { id: 'ch-claude', name: 'Claude 订阅', billing: 'subscription', enabled: true },
       { id: 'ch-relay', name: '中转站', billing: 'subscription', enabled: true },

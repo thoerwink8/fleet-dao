@@ -176,8 +176,6 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
   app.get(WebRoutes.board.path, async (c) => {
     const repo = await store.getRepo(c.req.param('repoId'));
     if (!repo) throw new ApiError(404, 'repo_not_found', '没有这个仓');
-    const repoFlow = await store.getRepoFlow(repo.id);
-    if (!repoFlow) throw new ApiError(404, 'repo_not_found', '没有这个仓');
     const tasks = await store.listBoardTasks(repo.id);
     const taskIds = tasks.map((t) => t.id);
     const [subtasks, activeRuns, routes, models] = await Promise.all([
@@ -191,7 +189,7 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     return reply(
       c,
       BoardResponse,
-      buildBoard(repo, { tasks, subtasks, activeRuns, plans, route }, deps.now(), repoFlow),
+      buildBoard(repo, { tasks, subtasks, activeRuns, plans, route }, deps.now()),
     );
   });
 

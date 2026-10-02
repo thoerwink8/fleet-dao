@@ -3,7 +3,7 @@
 import { createHmac } from 'node:crypto';
 import type { TestDb } from '@fleet-dao/db/testing';
 import { resetTestDb } from '@fleet-dao/db/testing';
-import { FLEET_CHANGES_CHANNEL, requirementWorkflowId } from '@fleet-dao/shared';
+import { FLEET_CHANGES_CHANNEL } from '@fleet-dao/shared';
 import type { Hono } from 'hono';
 import { signAgentToken } from '../src/agent-token.ts';
 import { buildApps } from '../src/app.ts';
@@ -25,11 +25,7 @@ import type {
   FeishuIdentity,
   HealthCheck,
   IngestedEvent,
-  IssuePlan,
-  IssuePlanReader,
   Logger,
-  RequirementStart,
-  RequirementWorkflows,
   Store,
   TaskSignal,
   WorkflowControl,
@@ -45,22 +41,6 @@ export const TEST_SCRYPT_PARAMS = { N: 2 ** 8, r: 8, p: 1 } as const;
 /** 样例仓里的版本（GitHub 上的里程碑）：v1 是当前版本。 */
 export const V1 = { number: 8, title: 'v1 Fusion 接活' };
 export const V2 = { number: 9, title: 'v2 引擎打磨' };
-
-/** issue 此刻在 GitHub 上的样子：默认开着、挂在当前版本 v1 上、仓里开着 v1 和 v2，独立的单（不是母单也不是子单）。 */
-export function issuePlan(over: Partial<IssuePlan> = {}): IssuePlan {
-  return {
-    state: 'open',
-    reopened: false,
-    pullRequest: false,
-    author: 'founder-a',
-    milestone: V1,
-    openMilestones: [V1, V2],
-    labels: ['需求'],
-    parent: null,
-    subIssues: 0,
-    ...over,
-  };
-}
 
 export const PUBLIC_ORIGIN = 'https://cockpit.example.test';
 export const GATEWAY_PASS = 'gateway-pass-for-tests-0123456789abcdef';
@@ -122,12 +102,6 @@ export interface Harness<S extends Store = Store> {
   changes: ChangeFeed;
   /** workflowId 是目标工作流的编号（req:owner/name#issueNumber 或 sub:subtaskId），不是调用方传的原始 taskId。 */
   signals: { workflowId: string; signal: TaskSignal }[];
-  /** 真拉起了的需求工作流（假的：同一张 issue 的还在跑、没被叫停，再拉回 already_running，不记在这里）。 */
-  starts: RequirementStart[];
-  /** 读过哪几张 issue 挂在哪个版本（接活拉起前现读 GitHub）。 */
-  planReads: { repo: string; issueNumber: number }[];
-  /** 各张 issue 此刻在 GitHub 上的样子：按号设，没设的用 issuePlan() 的默认（挂在当前版本 v1 上）。 */
-  plans: Map<number, IssuePlan | Error>;
   accepted: IngestedEvent[];
   logs: { level: string; message: string; fields?: Record<string, unknown> | undefined }[];
   feishuCalls: Parameters<FeishuAuth['identify']>[0][];
@@ -143,9 +117,6 @@ export interface HarnessOptions {
   config?: Partial<Config>;
   data?: Partial<MemoryData>;
   workflows?: WorkflowControl;
-  requirements?: RequirementWorkflows;
-  /** 不给就是按 Harness.plans 回的假的（默认挂在当前版本 v1 上）。 */
-  plans?: IssuePlanReader;
   feishu?: 'fake' | null;
   github?: (event: IngestedEvent) => Promise<void>;
   health?: HealthCheck[];
@@ -177,9 +148,6 @@ function wire<S extends Store>(
   const now = () => new Date(clock.now);
   const config = testConfig(options.config);
   const signals: Harness['signals'] = [];
-  const starts: RequirementStart[] = [];
-  const planReads: Harness['planReads'] = [];
-  const plans: Harness['plans'] = new Map();
   const accepted: IngestedEvent[] = [];
   const logs: Harness['logs'] = [];
   const log: Logger = {
@@ -208,31 +176,6 @@ function wire<S extends Store>(
         signals.push({ workflowId, signal });
       },
     },
-    requirements: options.requirements ?? {
-      async start(input) {
-        // 像 Temporal 按工作流编号去重：同一张 issue 的工作流还在跑（没被叫停）就不起第二条
-        const running = starts.some(
-          (s) =>
-            s.repo.id === input.repo.id &&
-            s.issueNumber === input.issueNumber &&
-            !signals.some(
-              (x) =>
-                x.workflowId === requirementWorkflowId(s.repo, s.issueNumber) && x.signal.name === 'stop',
-            ),
-        );
-        if (running) return 'already_running';
-        starts.push(input);
-        return 'started';
-      },
-    },
-    plans: options.plans ?? {
-      async read(repo, issueNumber) {
-        planReads.push({ repo: `${repo.owner}/${repo.name}`, issueNumber });
-        const plan = plans.get(issueNumber) ?? issuePlan();
-        if (plan instanceof Error) throw plan;
-        return plan;
-      },
-    },
     github: {
       accept:
         options.github ??
@@ -257,9 +200,6 @@ function wire<S extends Store>(
     store,
     changes,
     signals,
-    starts,
-    planReads,
-    plans,
     accepted,
     logs,
     feishuCalls: feishu.calls,

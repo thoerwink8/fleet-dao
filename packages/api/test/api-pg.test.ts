@@ -193,45 +193,52 @@ describe('接口跑在真库上', () => {
     ]);
   });
 
-  it('GitHub 事件进来（真库）：原文落库、建任务行、拉起需求工作流；看板实时收到新任务；同一投递再来不重复建', async () => {
-    const data = devFixtures(T0);
-    data.repos = (data.repos ?? []).map((r) => ({ ...r, autoDispatchSince: '2026-09-25T07:00:00.000Z' }));
-    const h = await start({ data });
-    const session = await h.login();
-    const { reader } = await openEvents(h, session.cookie);
-    const buffer = await readUntil(reader, 'event: ready');
+  it('GitHub 事件进来（真库）：PR 事件原文落库、写镜像；同一投递再来不重复；issue 的事件记成不处理、不建任务', async () => {
+    const h = await start({ data: devFixtures(T0) });
     const founderA = { login: 'founder-a', id: 1001, type: 'User' };
+    const repository = { full_name: 'example/canary' };
     const payload = {
+      action: 'opened',
+      pull_request: {
+        number: 7,
+        state: 'open',
+        updated_at: '2026-09-25T07:30:00Z',
+        user: founderA,
+        head: { ref: 'fleet/7-a', sha: 'a'.repeat(40), repo: repository },
+        base: { ref: 'main', repo: repository },
+      },
+      sender: founderA,
+      repository,
+    };
+    const res = await deliverGithub(h, 'pull_request', payload, { delivery: 'pg-1' });
+    expect(await res.json()).toMatchObject({ ok: true, verdict: 'accepted' });
+    expect(
+      await deliverGithub(h, 'pull_request', payload, { delivery: 'pg-1' }).then((r) => r.json()),
+    ).toMatchObject({ verdict: 'duplicate' });
+    const [event] = await t.db.select().from(githubEvents).where(eq(githubEvents.deliveryId, 'pg-1'));
+    expect(event).toMatchObject({ status: 'accepted', attempts: 1, payload });
+    expect(h.accepted.map((e) => e.deliveryId)).toEqual(['pg-1']);
+
+    // issue 的事件门口不收（单子由引擎自己拉）：记成不处理，不建任务
+    const issue = {
       action: 'opened',
       issue: {
         number: 40,
-        title: '给 README 加一行当前时间',
-        body: '在 README 末尾加一行当前时间',
+        title: '给 README 加一行',
         state: 'open',
-        user: founderA,
         created_at: '2026-09-25T07:30:00Z',
-        updated_at: '2026-09-25T07:30:00Z',
+        user: founderA,
       },
       sender: founderA,
-      repository: { full_name: 'example/canary' },
+      repository,
     };
-    const res = await deliverGithub(h, 'issues', payload, { delivery: 'pg-1' });
-    expect(await res.json()).toMatchObject({ verdict: 'accepted', note: 'task=created, workflow=started' });
-    expect(
-      await deliverGithub(h, 'issues', payload, { delivery: 'pg-1' }).then((r) => r.json()),
-    ).toMatchObject({
-      verdict: 'duplicate',
-    });
-
-    const rows = await t.db.select().from(tasks).where(eq(tasks.issueNumber, 40));
-    expect(rows.map((r) => ({ state: r.state, priority: r.priority, requestedBy: r.requestedBy }))).toEqual([
-      { state: 'queued', priority: 3, requestedBy: IDS.founderA },
-    ]);
-    const [event] = await t.db.select().from(githubEvents).where(eq(githubEvents.deliveryId, 'pg-1'));
-    expect(event).toMatchObject({ status: 'accepted', attempts: 1, payload });
-    expect(h.starts.map((s) => s.taskId)).toEqual([rows[0]?.id]);
-    await readUntil(reader, `"table":"tasks","id":"${rows[0]?.id}"`, buffer);
-    await reader.cancel();
+    expect(await deliverGithub(h, 'issues', issue, { delivery: 'pg-2' }).then((r) => r.json())).toMatchObject(
+      {
+        verdict: 'ignored',
+        reason: 'event_not_handled',
+      },
+    );
+    expect(await t.db.select().from(tasks).where(eq(tasks.issueNumber, 40))).toHaveLength(0);
   });
 
   it('健康检查（生产那一套）：库、实时推送是真探的；Temporal 没接上、机器人凭据没读到如实报红，飞书草稿开单没接上报「未接」；LISTEN 停了实时推送也报红', async () => {

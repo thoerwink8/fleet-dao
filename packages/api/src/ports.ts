@@ -1,15 +1,7 @@
 // 后端依赖的外部能力，一律按接口写：数据库（pg-store.ts 用 @fleet-dao/db 实现）、Temporal、飞书、GitHub 补收
 // 由各自的实现接进来；测试和本地开发用 memory-store.ts。两个 Store 实现过同一套契约测试（test/store-contract.ts），
 // 改这里的语义要两边一起改、契约测试跟着改。
-import type {
-  AskHold,
-  AskScope,
-  FlowReplica,
-  IssueClaim,
-  IssueFamily,
-  IssueMilestones,
-  IssueNow,
-} from '@fleet-dao/core';
+import type { AskHold, AskScope } from '@fleet-dao/core';
 import type {
   AuditEntrySchema,
   Ban,
@@ -23,7 +15,6 @@ import type {
   QuotaWindow,
   RealtimeTable,
   Repo,
-  RequirementStartInput,
   Route,
   ScheduleOutcome,
   SessionRun,
@@ -320,24 +311,9 @@ export interface UserStore {
   recordPasswordSuccess(userId: string): Promise<void>;
 }
 
-/**
- * 一个仓此刻的流程配置副本，给看板顶栏（repos 表这五列的原值）。
- * 提交是全长，截到前 7 位在视图里做。没有这个仓是 null，不是「还没同步」。
- */
-export interface RepoFlowRow {
-  source: 'project' | 'org_default' | null;
-  commit: string | null;
-  /** ISO。从没同步成过是 null。 */
-  syncedAt: string | null;
-  error: string | null;
-  unread: string | null;
-}
-
 export interface BoardStore {
   listRepos(): Promise<Repo[]>;
   getRepo(id: string): Promise<Repo | null>;
-  /** 这个仓的流程配置副本。没有这个仓（含编号不是 uuid）回 null。 */
-  getRepoFlow(repoId: string): Promise<RepoFlowRow | null>;
   /** 看板上的需求：没结束的，加上进入终态不到 7 天的。按优先级、再按建单先后排。 */
   listBoardTasks(repoId: string): Promise<Task[]>;
   getTask(id: string): Promise<Task | null>;
@@ -569,13 +545,9 @@ export interface GitHubStore {
   }): Promise<{ exhausted: number; stale: number }>;
 }
 
-/**
- * 受管的仓，带自动派活开关：autoDispatchSince = 打开的时刻，null = 关着（只收单、显示，不拉起工作流）。
- * flow = 流程配置的副本（repos 表的 flow_* 列，对账从仓里 .fleet/flow.json 同步）：认不出、太旧就停派（core 的 replicaVerdict）。
- */
+/** 受管的仓，带「让 AI 接活」开关：autoDispatchSince = 打开的时刻，null = 关着（引擎拉单不派）。 */
 export interface IntakeRepo extends Repo {
   autoDispatchSince: string | null;
-  flow: FlowReplica;
 }
 
 /** 改「让 AI 接活」开关的结果（setAutoDispatch）。 */
@@ -866,73 +838,6 @@ export interface FeishuStore {
   ackOutbox(acks: readonly FeishuOutboxAck[], at: string): Promise<FeishuAckReport>;
 }
 
-// —— 认领账（#299，specs/299-帅位只一个/方案.md 第四节；帅位座位 2026-10-01 起整张删掉，见 #531 和 docs/goals.md「六、要删的，和怎么删」）——
-// 每张单一个认领（认领号是工人的栅栏号）。时间一律是库的 now()：每个结果都带着库的 now（ISO），判过期用它
-// （判法在 core 的 seat.ts），不用调用方的钟。内存版用 Store 的钟顶替。
-
-/** 要认领的这张单：仓（库里的编号）和单号。操作记录记成 claim:<仓的编号>#<单号>。 */
-export interface ClaimTarget {
-  repoId: string;
-  issueNumber: number;
-}
-
-/** 引擎拿一张单（接活、交单）的结果。 */
-export type EngineClaimResult =
-  /** 拿到了：fresh = 这次新认领的（待起）；false = 引擎本来就拿着（重投、重放）。voided = 强制改派作废掉的本机认领。 */
-  | { ok: true; claim: IssueClaim; fresh: boolean; voided: IssueClaim | null; now: string }
-  /** 本机（帅位、工人）拿着还没结束：这张单一点没动。 */
-  | { ok: false; reason: 'held'; claim: IssueClaim; now: string };
-
-export type ClaimUpdateResult =
-  | { ok: true; claim: IssueClaim; now: string }
-  /** 认领号对不上、已经结束了、这张单没有认领：claim 是此刻的样子（没有是 null），什么都没改。 */
-  | { ok: false; claim: IssueClaim | null; now: string };
-
-export interface SeatStore {
-  /**
-   * 作废过了宽限期没心跳的本机认领（按库的 now；引擎的不按心跳作废），一次最多 limit 张。每张一条操作记录（claim.void，
-   * 记在引擎名下）。回作废了的那几张。
-   */
-  voidExpiredClaims(input: { limit: number }): Promise<{ voided: IssueClaim[]; now: string }>;
-  /**
-   * 引擎拿这张单（接活、交单，方案第四节）：同一句抢——没有认领、结束了的换成引擎的新认领（待起，带工作流编号）；引擎本来就
-   * 拿着的照旧（fresh = false）；本机拿着的不动（held），除非带了创始人原话（founder）：作废掉本机的、再给引擎。新认领、作废
-   * 都记操作记录（claim.take / claim.reassign），记在 actor 名下。
-   */
-  claimForEngine(
-    input: ClaimTarget & {
-      workflowId: string;
-      actor: Actor;
-      founder?: string | undefined;
-      /** 记进认领的那一句（接活自动派、交给 fleet 的原因）。 */
-      note?: string | undefined;
-      /** 演练座位（drill:<名字>）下引擎那一边：记在演练座位名下，只抢认领、不起工作流，待起补起不碰它。 */
-      drill?: string | undefined;
-    },
-  ): Promise<EngineClaimResult>;
-  /** 引擎的认领起成了工作流：待起 → 在做。不是引擎的、不在待起的不动（changed = false，claim 是此刻的样子）。 */
-  startEngineClaim(input: ClaimTarget): Promise<{ changed: boolean; claim: IssueClaim | null; now: string }>;
-  /** 待起超过 minutes 分钟还没改成在做的引擎认领（演练座位下的不算），老的在前，最多 limit 张。 */
-  listStalePendingEngineClaims(input: {
-    minutes: number;
-    limit: number;
-  }): Promise<{ claims: IssueClaim[]; now: string }>;
-  /**
-   * 待起的引擎认领不起了（开关关了、单子不在了）：放下、写原因、记操作记录（claim.release）。认领号对不上、已经不是待起的
-   * 不动（回 null）。
-   */
-  releasePendingEngineClaim(
-    input: ClaimTarget & { claimId: string; reason: string; actor: Actor },
-  ): Promise<IssueClaim | null>;
-  /** 一张单的认领（没有是 null）。 */
-  getClaim(repoId: string, issueNumber: number): Promise<{ claim: IssueClaim | null; now: string }>;
-  /** 列认领：默认只要还活着的；可以只看一个仓。按仓、单号排。 */
-  listClaims(input: {
-    repoId?: string | undefined;
-    activeOnly: boolean;
-  }): Promise<{ claims: IssueClaim[]; now: string }>;
-}
-
 export type Store = UserStore &
   BoardStore &
   RoutingStore &
@@ -940,8 +845,7 @@ export type Store = UserStore &
   AgentStore &
   GitHubStore &
   IntakeStore &
-  FeishuStore &
-  SeatStore;
+  FeishuStore;
 
 // —— 飞书草稿开单：开 issue + 建任务 + 拉起需求工作流（飞书里确认的草稿用）——
 // 和 GitHub 那边的接活（issue 已经在了，进来建任务）方向相反：这里从飞书草稿出发，由后端去开 issue。
@@ -1039,39 +943,6 @@ export class WorkflowGoneError extends Error {
   }
 }
 
-/**
- * 拉起一张单的工作流要给的东西：就是 @fleet-dao/shared 的 RequirementStartInput，引擎 contract.ts 的 FusionInput（和旧的
- * RequirementInput）在它上面只加可选字段（limits、routeOverrides、类别、模式这些不给，用引擎的默认、按流程配置判）。
- * 进了工作流历史：以后只许加可选字段。
- */
-export type RequirementStart = RequirementStartInput;
-
-/** 拉起一张单的工作流：Fusion（一张 issue 一条，工作流编号 requirementWorkflowId(repo, issueNumber)）。 */
-export interface RequirementWorkflows {
-  /**
-   * 同一编号的工作流正在跑：already_running，不起第二条；上一条已经结束（需求重开）就再起一条。
-   * Temporal 没接上、连不上、超时抛 WorkflowUnavailableError；别的错原样抛。都不会回 started——
-   * 调用方把这条投递记成出错，重放时再来。真实现见 temporal.ts 的 createTemporalRequirementWorkflows。
-   */
-  start(input: RequirementStart): Promise<'started' | 'already_running'>;
-}
-
-/**
- * 一张 issue 此刻在 GitHub 上的样子：挂在哪个里程碑、仓里还开着哪些里程碑、是不是母单或子单（接活判「挂没挂在当前版本、
- * 是不是母单子单」，core 的 autoDispatchGate），开没开着、重开过没有（交给 fleet 判能不能交，core 的 handoverDecision），
- * 作者（拉起时写提出人）。
- */
-export interface IssuePlan extends IssueMilestones, IssueNow, IssueFamily {
-  /** 作者的 GitHub 登录名；账号删了是 null。 */
-  author: string | null;
-}
-
-/** 读 issue 此刻的样子（「引擎」机器人现读，计划以 GitHub 为准）：真实现是 @fleet-dao/github 的 readIssuePlan（issue-intake.ts 的 githubIssuePlans）。 */
-export interface IssuePlanReader {
-  /** 读不到、认不出一律抛错（调用方说「没查成」），不拿「没挂里程碑」「开着」顶。 */
-  read(repo: { owner: string; name: string }, issueNumber: number): Promise<IssuePlan>;
-}
-
 /** 发不了信号、起不了工作流：Temporal 客户端没接上、连不上或超时。 */
 export class WorkflowUnavailableError extends Error {
   constructor(message: string, cause?: unknown) {
@@ -1110,10 +981,9 @@ export class TableLockedError extends Error {
   }
 }
 
-/** 连 Temporal 的一份连接：发信号、拉起一张单的工作流 + 给健康检查用的两项探活。用 @temporalio/client 实现，见 temporal.ts。 */
+/** 连 Temporal 的一份连接：发信号 + 给健康检查用的两项探活。用 @temporalio/client 实现，见 temporal.ts。 */
 export interface TemporalConnection {
   control: WorkflowControl;
-  requirements: RequirementWorkflows;
   /** 连得上、命名空间也在就正常返回；连不上、超时、命名空间不存在都抛错（错误文字只进日志，不对外）。 */
   check(): Promise<void>;
   /** 查 FLEET_TASK_QUEUE 上 workflow、activity 两类 poller 在不在、新不新鲜；不在/太久没拉都抛错。 */

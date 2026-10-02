@@ -35,18 +35,6 @@ export interface Brand {
    * （原话拿一句去 GitHub 搜就能对上公开仓）。
    */
   stageHints: { triage: string; ui: string };
-  /**
-   * 流程配置在界面上怎么说。正式版用需求里的原句；演示版换掉会让打包扫描失败的那两个词，意思不变。
-   * 组件和假数据都从这里读，不写死。
-   */
-  flow: {
-    /** 仓里的流程配置文件在界面上叫什么。 */
-    fileName: string;
-    /** 全组织默认属于谁。 */
-    orgName: string;
-    /** 小标「全组织默认配置」点开的那一句。 */
-    orgDefaultDetail: string;
-  };
   /** 仓库里某个 PR、issue 的外链；演示版一律不给（不带任何外链）。 */
   repoLink(repo: { owner: string; name: string }, kind: 'pull' | 'issues', n: number): string | undefined;
 }

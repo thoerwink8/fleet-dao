@@ -6,10 +6,8 @@ import { TestWorkflowEnvironment } from '@temporalio/testing';
 import { DefaultLogger, Runtime, type WorkflowBundle } from '@temporalio/worker';
 import type { EngineJobs, EngineTasks } from '../src/activities.ts';
 import type { EngineActivities } from '../src/activity-options.ts';
-import type { FusionInput, RequirementInput, SubtaskInput } from '../src/contract.ts';
 import type { FailureTriage } from '../src/decisions/failure.ts';
 import type { Decide } from '../src/decisions/index.ts';
-import type { SubtaskSpec } from '../src/decisions/types.ts';
 import type { FakeWorld } from '../src/fakes.ts';
 import { bundleEngineWorkflows, createEngineWorker } from '../src/worker.ts';
 
@@ -109,55 +107,6 @@ export const REPO: Repo = {
  */
 export function freshRepo(): Repo {
   return { ...REPO, id: `repo-${randomUUID().slice(0, 8)}`, name: `demo-${randomUUID().slice(0, 8)}` };
-}
-
-export function requirementInput(over: Partial<RequirementInput> = {}): RequirementInput {
-  return {
-    schemaVersion: 1,
-    taskId: `task-${randomUUID().slice(0, 8)}`,
-    repo: freshRepo(),
-    issueNumber: 12,
-    title: '登录页加验证码',
-    rawRequest: '给登录页加手机验证码',
-    requestedBy: 'founder',
-    ...over,
-  };
-}
-
-/** Fusion 工作流的输入：单子正文里有指需求文档的那一行（pnpm issue:new 开的单都有），不按标题拼。 */
-export function fusionInput(over: Partial<FusionInput> = {}): FusionInput {
-  return {
-    ...requirementInput(),
-    rawRequest: '给登录页加手机验证码\n\n文档：`specs/12-登录页加验证码/需求.md`',
-    ...over,
-  };
-}
-
-export function spec(key: string, over: Partial<SubtaskSpec> = {}): SubtaskSpec {
-  return {
-    key,
-    index: 0,
-    title: `子任务 ${key}`,
-    touches: [`src/${key}`],
-    dependsOn: [],
-    stage: 'execute',
-    secondOpinion: true,
-    acceptance: [],
-    ...over,
-  };
-}
-
-export function subtaskInput(sub: SubtaskSpec, over: Partial<SubtaskInput> = {}): SubtaskInput {
-  return {
-    schemaVersion: 1,
-    taskId: `task-${randomUUID().slice(0, 8)}`,
-    subtaskId: randomUUID(),
-    repo: freshRepo(),
-    issueNumber: 12,
-    specDir: 'specs/12-登录页加验证码',
-    subtask: sub,
-    ...over,
-  };
 }
 
 /** 真实时间里轮询，直到条件成立（测试服务端在有活动跑着时不跳时间）。 */
