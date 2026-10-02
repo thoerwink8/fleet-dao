@@ -31,3 +31,25 @@ describe('读还开着的里程碑、读一张单开没开着', () => {
     await expect(gh.readIssueState({ repo, issueNumber: 999 })).rejects.toThrow();
   });
 });
+
+describe('读一张单的标题、正文、开没开着', () => {
+  it('原样回标题和正文（空正文回空串）、开没开着；没有这张单、是 PR 都抛错（不当成空单）', async () => {
+    const { gh, fake } = setup();
+    const withBody = fake.addIssue({ title: '给驾驶舱加状态', body: '## 场景\n\n要看到每张单走到哪一步' });
+    const empty = fake.addIssue({ title: '空正文' });
+    const closed = fake.addIssue({ state: 'closed', state_reason: 'completed' });
+    expect(await gh.readIssue({ repo, issueNumber: withBody.number })).toEqual({
+      number: withBody.number,
+      title: '给驾驶舱加状态',
+      body: '## 场景\n\n要看到每张单走到哪一步',
+      state: 'open',
+    });
+    expect(await gh.readIssue({ repo, issueNumber: empty.number })).toMatchObject({ body: '' });
+    expect(await gh.readIssue({ repo, issueNumber: closed.number })).toMatchObject({ state: 'closed' });
+    await expect(gh.readIssue({ repo, issueNumber: 999 })).rejects.toThrow();
+    const pr = fake.addPull({ head: { ref: 'fleet/1-x', sha: 'a'.repeat(40) } });
+    await expect(gh.readIssue({ repo, issueNumber: pr.number })).rejects.toMatchObject({
+      code: 'NOT_AN_ISSUE',
+    });
+  });
+});

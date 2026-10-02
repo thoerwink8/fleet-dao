@@ -202,4 +202,12 @@ export {
 } from './pr-labels.ts';
 export { FIX_ALERT_COLUMN, fixAlertRefs, prLinks } from './pr-links.ts';
 export { fsRepo, type RepoView } from './repo.ts';
+export {
+  matchesStandardPath,
+  parseStandardPaths,
+  STANDARD_PATHS_FILE,
+  type StandardFile,
+  type StandardPath,
+  standardFiles,
+} from './standard-paths.ts';
 export { ENGINE_SESSION_MARKER, REFUSED_FULL_RUN } from './test-changed.ts';

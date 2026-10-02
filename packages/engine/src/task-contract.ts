@@ -21,13 +21,7 @@ export const MERGE_POLL_MINUTES = 15;
 /** 没有可用路由、或额度没读成时隔多久再选一次（秒）。 */
 export const ROUTE_RETRY_SECONDS = 60;
 
-/**
- * 任务的分支：fleet/<单号>-t<这一轮执行编号的前 8 位>。带上执行编号：同一张单被重新起一轮（上一条放弃了或做完了）时，
- * 上一轮的分支在 GitHub 上还在，同名会推不上去。
- */
-export function taskBranch(issueNumber: number, runKey: string): string {
-  return `fleet/${issueNumber}-t${runKey.replace(/-/g, '').slice(0, 8)}`;
-}
+export { taskBranch } from './task-branch.ts';
 
 export interface TaskWorkflowInput {
   schemaVersion: 1;
