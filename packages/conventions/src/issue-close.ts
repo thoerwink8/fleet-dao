@@ -8,7 +8,10 @@ import type { Gh, GhResult } from './issue-new.ts';
 // —— pnpm issue:close <号> ——
 
 export const CLOSE_USAGE =
-  '用法：pnpm issue:close <单号>（主线上有 specs/<号>-<短名>/结果.md 才关成「完成」，评论里贴结果链接；没有、子单还开着都不关）';
+  '用法：pnpm issue:close <单号> [--reason <completed|not_planned|duplicate>] [--superseded-by <号>]' +
+  '（默认走 completed：主线上要有 specs/<号>-<短名>/结果.md 才关、评论里贴结果链接；' +
+  '--superseded-by 关成 not_planned、不查结果.md，评论里写「被 #<号> 取代」；' +
+  '--reason 单独用：只换关成的样子，其余「completed 才要的结果.md、子单、是 PR」规则照走）';
 
 /** 拒关：条件不够（没有结果文档、子单还开着、是 PR、参数不对）。入口退出码 1。 */
 export class CloseRefused extends Error {
@@ -31,7 +34,14 @@ export interface IssueCloseDeps {
 }
 
 export type IssueCloseResult =
-  | { outcome: 'closed'; number: number; issueUrl: string; resultDoc: string; resultUrl: string }
+  | {
+      outcome: 'closed';
+      number: number;
+      issueUrl: string;
+      /** completed 才有——主线上那张 结果.md 的仓内路径和 GitHub 链接。superseded-by / 其它 reason 没有。 */
+      resultDoc?: string;
+      resultUrl?: string;
+    }
   | { outcome: 'already'; number: number; issueUrl: string; stateReason: string | null };
 
 /** GitHub 的目录列表一次最多给 1000 项，到了就算没列全。 */
@@ -40,8 +50,17 @@ const LISTING_MAX = 1000;
 const SUB_ISSUES_MAX = 100;
 
 export async function issueClose(argv: readonly string[], deps: IssueCloseDeps): Promise<IssueCloseResult> {
-  const n = parseNumber(argv);
+  const args = parseArgs(argv);
   const { gh } = deps;
+  const n = args.number;
+  const reason = args.supersededBy === undefined ? (args.reason ?? 'completed') : ('not_planned' as const);
+  if (args.supersededBy !== undefined && args.reason !== undefined && args.reason !== 'not_planned') {
+    throw new CloseRefused(
+      `--superseded-by 隐含关成 not_planned（被取代、留史）；想关成 ${args.reason} 就别带 --superseded-by。没关。`,
+    );
+  }
+  const supersededBy = args.supersededBy;
+  const isCompleted = reason === 'completed';
   const repo = asObject(await readJson(gh, ['api', 'repos/{owner}/{repo}'], '读仓'), '仓');
   const branch = repo.default_branch;
   const repoUrl = repo.html_url;
@@ -62,41 +81,124 @@ export async function issueClose(argv: readonly string[], deps: IssueCloseDeps):
     );
   }
 
-  const main = await mainSpecs(gh, branch, n);
-  const result = resultDocOf(n, main.files);
-  if (!result) throw new CloseRefused(missingResult(n, branch, main.dirs));
+  // --superseded-by 给的号要真实存在、是一张开着的单——不然评论里写了个死链，留史也没意义。
+  if (supersededBy !== undefined) await checkSupersededBy(gh, n, supersededBy);
 
-  const resultUrl = `${repoUrl}/blob/${encodePath(branch)}/${encodePath(result)}`;
-  const closed = await gh([
-    'issue',
-    'close',
-    String(n),
-    '--reason',
-    'completed',
-    '--comment',
-    `做完了：结果见 [${result}](${resultUrl})。\n\n（pnpm issue:close 查过主线上有结果文档才关的。）`,
-  ]);
+  // completed 必须主线上有结果.md；superseded-by（或显式 --reason not_planned / duplicate）跳过这一项。
+  let resultDoc: string | undefined;
+  let resultUrl: string | undefined;
+  if (isCompleted) {
+    const main = await mainSpecs(gh, branch, n);
+    const result = resultDocOf(n, main.files);
+    if (!result) throw new CloseRefused(missingResult(n, branch, main.dirs));
+    resultDoc = result;
+    resultUrl = `${repoUrl}/blob/${encodePath(branch)}/${encodePath(result)}`;
+  }
+
+  const comment =
+    supersededBy !== undefined
+      ? `被 #${supersededBy} 取代，留史。（pnpm issue:close --superseded-by 关的，不查结果.md。）`
+      : isCompleted && resultDoc && resultUrl
+        ? `做完了：结果见 [${resultDoc}](${resultUrl})。\n\n（pnpm issue:close 查过主线上有结果文档才关的。）`
+        : `关成 ${reason}。（pnpm issue:close --reason 关的，「完成」之外的关法走这里。）`;
+  const closed = await gh(['issue', 'close', String(n), '--reason', reason, '--comment', comment]);
   if (closed.code !== 0) {
     throw new CloseUnchecked(
       `gh 关单报错（退出码 ${closed.code}）：${detail(closed)}。单可能关了也可能没关：去 GitHub 看一眼 #${n}，没关就重跑。`,
     );
   }
   const after = await readIssue(gh, n, `关完回读 #${n}`);
-  if (after.state !== 'closed' || after.stateReason !== 'completed') {
+  const reasonCn =
+    reason === 'completed'
+      ? '完成'
+      : reason === 'not_planned'
+        ? '不做了（not_planned）'
+        : '重复（duplicate）';
+  if (after.state !== 'closed' || after.stateReason !== reason) {
     throw new CloseUnchecked(
-      `关完回读 #${n}：state=${after.state}、state_reason=${after.stateReason ?? '（空）'}，不是「关了、完成」：去 GitHub 看一眼。`,
+      `关完回读 #${n}：state=${after.state}、state_reason=${after.stateReason ?? '（空）'}，不是「关了、${reasonCn}」：去 GitHub 看一眼。`,
     );
   }
-  return { outcome: 'closed', number: n, issueUrl: after.url, resultDoc: result, resultUrl };
+  if (isCompleted && resultDoc !== undefined && resultUrl !== undefined) {
+    return { outcome: 'closed', number: n, issueUrl: after.url, resultDoc, resultUrl };
+  }
+  return { outcome: 'closed', number: n, issueUrl: after.url };
 }
 
-function parseNumber(argv: readonly string[]): number {
+/** --superseded-by 给的号要真实存在、是一张单（不能是 PR、不能是被关的这张自己）。读不到、认不出报 CloseUnchecked；指错位置报 CloseRefused。 */
+async function checkSupersededBy(gh: Gh, n: number, by: number): Promise<void> {
+  if (by === n) {
+    throw new CloseRefused(`--superseded-by 不能给这张单自己（#${n}）。被谁取代，写谁的号。`);
+  }
+  const target = await readIssue(gh, by, `读取代它的 #${by}`);
+  if (target.pull) {
+    throw new CloseRefused(
+      `--superseded-by #${by} 是 PR，不是单。取代关系指向一张单；要给 PR 留史挂链接，直接评论、别用 --superseded-by。`,
+    );
+  }
+}
+
+interface ParsedCloseArgs {
+  number: number;
+  reason: 'completed' | 'not_planned' | 'duplicate' | undefined;
+  supersededBy: number | undefined;
+}
+
+function parseArgs(argv: readonly string[]): ParsedCloseArgs {
   const args = argv[0] === '--' ? argv.slice(1) : [...argv];
-  const [only, ...more] = args;
-  const m = /^#?([1-9]\d*)$/.exec(only?.trim() ?? '');
-  if (!m?.[1] || more.length > 0)
-    throw new CloseRefused(`参数不对（${args.join(' ') || '没给单号'}）。${CLOSE_USAGE}`);
-  return Number(m[1]);
+  let number: number | undefined;
+  let reason: ParsedCloseArgs['reason'];
+  let supersededBy: number | undefined;
+  const seen = new Set<string>();
+  for (let i = 0; i < args.length; i += 1) {
+    const a = args[i];
+    if (a === undefined) throw new CloseRefused(`参数不对（${args.join(' ')}）。${CLOSE_USAGE}`);
+    const bad = (): never => {
+      throw new CloseRefused(`参数不对（${args.join(' ')}）。${CLOSE_USAGE}`);
+    };
+    let flag: string | null = null;
+    let value: string | undefined;
+    if (a === '--reason' || a === '--superseded-by') {
+      flag = a;
+      value = args[++i];
+    } else if (a.startsWith('--reason=')) {
+      flag = '--reason';
+      value = a.slice('--reason='.length);
+    } else if (a.startsWith('--superseded-by=')) {
+      flag = '--superseded-by';
+      value = a.slice('--superseded-by='.length);
+    }
+    if (flag !== null) {
+      if (seen.has(flag)) bad();
+      seen.add(flag);
+      if (value === undefined || value === '') {
+        throw new CloseRefused(`参数不对（${args.join(' ')}）。${CLOSE_USAGE}`);
+      }
+      if (flag === '--reason') {
+        if (value !== 'completed' && value !== 'not_planned' && value !== 'duplicate') {
+          throw new CloseRefused(
+            `--reason 只认 completed / not_planned / duplicate（读到：${value}）。${CLOSE_USAGE}`,
+          );
+        }
+        reason = value;
+      } else {
+        const m = /^#?([1-9]\d*)$/.exec(value.trim());
+        if (!m || !m[1]) {
+          throw new CloseRefused(`--superseded-by 要给存在的单号（读到：${value}）。${CLOSE_USAGE}`);
+        }
+        supersededBy = Number(m[1]);
+      }
+      continue;
+    }
+    if (a.startsWith('-') || number !== undefined) bad();
+    const m = /^#?([1-9]\d*)$/.exec(a.trim());
+    if (!m || !m[1]) {
+      throw new CloseRefused(`参数不对（${args.join(' ')}）。${CLOSE_USAGE}`);
+    }
+    number = Number(m[1]);
+  }
+  if (number === undefined) throw new CloseRefused(`没给单号。${CLOSE_USAGE}`);
+  return { number, reason, supersededBy };
 }
 
 interface IssueFacts {
