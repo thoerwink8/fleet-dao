@@ -2,6 +2,14 @@
 
 > 一行一条、带日期和对应提交。规矩在 `AGENTS.md` 通用段「进度也要落盘」。
 
+## 2026-10-02（未标路由缺平台令牌时拒绝启动）
+
+- 断点：20:01 起新开的 Claude 回合退出 1，`session_failed 平台网关注入缺失或不完整`。现场 settings 只有回环 `ANTHROPIC_BASE_URL`，没有 `ANTHROPIC_AUTH_TOKEN`。路由键多数还没写上，启动器把「未标」当成必须有完整平台注入，于是拒绝，请求没发出去。
+- 写方：Mirasim 0.0.394 在没钉住平台时仍写入本机代理地址，平台令牌只在网关凭证打开时才加。读方：`applyRouteSettings`，未标且令牌不齐就按自有剥掉；明确 `cloud` 缺令牌仍拒绝，不回落到自有。
+- 为什么没人发现：拒绝日志以前不写 route。现已加上 `event=reject route=...`。
+- 验证：先看到 `TestUnmarkedProxyWithoutCredentialStripsToOwn` 以同一句报错失败，改完 `go test`（launcher）通过。本机启动命令是否已换成这个构建，以迁移回读为准，不能用测试通过代替。
+- 还没验证：真实两向请求扣费；明确选了「平台」但 Mirasim 仍不带令牌时，仍会拒绝。
+
 ## 2026-10-02（Mirasim 切换与一条命令迁移，实施）
 
 - 16:28 收尾：PR [#621](https://github.com/thoerwink8/fleet-dao/pull/621) 已合并，主线 `20a7e476`；必过 CI 及 Windows、Intel Mac、Apple Silicon Mac、Linux 原生测试/构建全部通过（Actions `36983791868` / `36983791622`）。16:29 本机一键同步已取到该主线，退出 0，并确认 Mirasim 已是当前新版、未重启会话；旧命令与参数备份保留。实现与本机迁移已交付；未验的仍为真实两向模型请求的服务端额度、用户 Mac GUI、法国现场，不能用上述检查替代。
