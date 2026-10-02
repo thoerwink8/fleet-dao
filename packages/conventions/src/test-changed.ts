@@ -96,7 +96,7 @@ export function selectTests(changed: readonly string[], graph: PackageGraph | st
   }
   const plan = planCi({ event: 'pull_request', changed, graph });
   const ciOnly = [
-    ...(plan.lint ? ['格式和类型（biome、tsc）'] : []),
+    ...(plan.biome ? ['格式和类型（biome、tsc）'] : []),
     ...(plan.web ? ['演示版打包'] : []),
     ...(plan.deploy === 'none'
       ? []

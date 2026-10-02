@@ -1,6 +1,6 @@
 name: ci
 # 按改动跑、并行跑（design 第五节「CI 按改动跑」）：changes 算出这次改了什么、哪几个 job 要跑（packages/conventions/src/ci-plan.ts），
-# lint、test、web、deploy 看它给的开关；hygiene、docs 每次都跑；check 汇总核对「该跑的跑了且绿、不该跑的确实跳过」
+# biome、tsc、test、web、deploy 看它给的开关；hygiene、docs 每次都跑；check 汇总核对「该跑的跑了且绿、不该跑的确实跳过」
 # ——hygiene 是例外，它每次都跑但只报不挡，红了不算进这条判定（真正挡的是推之前，见 hygiene job 的注释）。
 # 主线推送一律全跑，兜底按改动算漏了的。
 # 改这里之前必须知道：
@@ -35,7 +35,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       plan: ${{ steps.plan.outputs.plan }}
-      lint: ${{ steps.plan.outputs.lint }}
+      biome: ${{ steps.plan.outputs.biome }}
       tsc: ${{ steps.plan.outputs.tsc }}
       tests: ${{ steps.plan.outputs.tests }}
       web: ${{ steps.plan.outputs.web }}
@@ -123,9 +123,11 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec vitest run packages/conventions/test/doc-pointers.test.ts agents/test/
 
-  lint:
+  # biome 和 tsc 各一个 job：放在一个 job 的连续 step 里的话，biome 先红 = 后面的 tsc 被跳过（GitHub 默认
+  # step 失败就停），类型错一路没人看见（#566 就是这么漏的 7 个 TS2532）。拆开两个各自报告、两份都要绿。
+  biome:
     needs: changes
-    if: needs.changes.outputs.lint == 'true'
+    if: needs.changes.outputs.biome == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -139,10 +141,24 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec biome check .
-      # tsc -b 只查受影响的项目（各自 tsconfig 的 include 里跨包导入的源码一起查）；全跑时查整棵树
-      - name: tsc
-        if: needs.changes.outputs.tsc != ''
-        env:
+
+  # tsc -b 只查受影响的项目（各自 tsconfig 的 include 里跨包导入的源码一起查）；全跑时查整棵树
+  tsc:
+    needs: changes
+    if: needs.changes.outputs.tsc != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - env:
           TSC: ${{ needs.changes.outputs.tsc }}
         run: |
           set -euo pipefail
@@ -290,12 +306,12 @@ jobs:
       - if: needs.changes.outputs.deploy == 'ops'
         run: bash deploy/test/run.sh --ops
 
-  # 必过检查。逐个核对：changes、docs 必须绿；lint、test、web、deploy 本该跑的必须绿、本该跳过的必须是跳过
+  # 必过检查。逐个核对：changes、docs 必须绿；biome、tsc、test、web、deploy 本该跑的必须绿、本该跳过的必须是跳过
   # （packages/conventions/src/ci-plan.ts 的 ciVerdict）。hygiene 只报不挡：仍然 needs 它、等它跑完，状态在 PR 上
   # 看得见，但它红不算进这里的判定（创始人 2026-09-28 傍晚拍，specs/169-Fusion形态/需求.md）。
   check:
     if: always()
-    needs: [changes, hygiene, docs, lint, test, web, deploy]
+    needs: [changes, hygiene, docs, biome, tsc, test, web, deploy]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

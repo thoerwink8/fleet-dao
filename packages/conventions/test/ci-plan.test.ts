@@ -79,7 +79,7 @@ describe('按改动算要跑什么', () => {
     for (const event of ['push', 'workflow_dispatch', 'merge_group']) {
       const p = planCi({ event, changed: ['README.md'], graph: graph() });
       expect(p.full, event).toBe(true);
-      expect(p).toMatchObject({ lint: true, tsc: 'all', web: true, deploy: 'all' });
+      expect(p).toMatchObject({ biome: true, tsc: 'all', web: true, deploy: 'all' });
       expect(shards(p)).toEqual(['engine', 'db', 'rest']);
     }
   });
@@ -125,13 +125,13 @@ describe('按改动算要跑什么', () => {
     );
     expect(p).toMatchObject({ full: false, tests: [], web: false, deploy: 'none', tsc: [] });
     // .yml 不是 md：biome 会看它
-    expect(p.lint).toBe(true);
-    expect(pr('docs/design.md', 'specs/1-x/方案.md').lint).toBe(false);
+    expect(p.biome).toBe(true);
+    expect(pr('docs/design.md', 'specs/1-x/方案.md').biome).toBe(false);
   });
 
   it('只改一个没人依赖的包（cli）：只测它、只类型检查它，不打包 web、不跑 deploy', () => {
     const p = pr('packages/cli/src/help.ts');
-    expect(p).toMatchObject({ full: false, lint: true, tsc: ['packages/cli'], web: false, deploy: 'none' });
+    expect(p).toMatchObject({ full: false, biome: true, tsc: ['packages/cli'], web: false, deploy: 'none' });
     expect(p.tests).toEqual([{ name: 'rest', args: ['packages/cli/'], temporal: false }]);
   });
 
@@ -186,7 +186,7 @@ describe('按改动算要跑什么', () => {
     // AGENTS.md 要带两家：agents-sync 分发它，agents 的钉子测试读它（agents/test/rules/design-skills.rules.test.ts，#522）；
     // 只带 agents-sync 的话改通用段的 PR 不测 agents，那条钉子测试根本不跑（主线从 1bff4dbc 起红了 8+ 个提交）
     expect(pr('AGENTS.md')).toMatchObject({
-      lint: false,
+      biome: false,
       deploy: 'none',
       tests: [{ args: ['agents/', 'packages/agents-sync/'] }],
     });
@@ -371,7 +371,8 @@ describe('汇总（必过检查 check）：该跑的跑了且绿，不该跑的�
     changes: { result: 'success', outputs: planOutputs(p) },
     hygiene: { result: 'success', outputs: {} },
     docs: { result: 'success', outputs: {} },
-    lint: { result: 'success', outputs: {} },
+    biome: { result: 'success', outputs: {} },
+    tsc: { result: 'success', outputs: {} },
     test: { result: 'success', outputs: {} },
     web: { result: 'skipped', outputs: {} },
     deploy: { result: 'skipped', outputs: {} },
@@ -387,8 +388,8 @@ describe('汇总（必过检查 check）：该跑的跑了且绿，不该跑的�
   it('纯文档：只有 changes、hygiene、docs 跑了', () => {
     const docs = pr('docs/plan.md');
     const skipped = { result: 'skipped' };
-    expect(ciVerdict(needs({ lint: skipped, test: skipped }, docs)).ok).toBe(true);
-    expect(ciVerdict(needs({ lint: skipped }, docs)).ok).toBe(false);
+    expect(ciVerdict(needs({ biome: skipped, tsc: skipped, test: skipped }, docs)).ok).toBe(true);
+    expect(ciVerdict(needs({ biome: skipped }, docs)).ok).toBe(false);
   });
 
   it('本该跑的被跳过、红了、取消了：不过', () => {
@@ -401,7 +402,7 @@ describe('汇总（必过检查 check）：该跑的跑了且绿，不该跑的�
 
   it('deploy=ops：deploy job 要跑且绿（只跑两块也是跑），跳过、红了都不过', () => {
     const ops = pr('docs/ops.md');
-    const over = { lint: { result: 'skipped' }, test: { result: 'success' } };
+    const over = { biome: { result: 'skipped' }, tsc: { result: 'skipped' }, test: { result: 'success' } };
     expect(ciVerdict(needs({ ...over, deploy: { result: 'success' } }, ops)).ok).toBe(true);
     for (const result of ['skipped', 'failure']) {
       const v = ciVerdict(needs({ ...over, deploy: { result } }, ops));
@@ -445,14 +446,15 @@ describe('汇总（必过检查 check）：该跑的跑了且绿，不该跑的�
   it('plan 说全跑却有 job 没开（被改坏的 plan）：不过', () => {
     const full = planCi({ event: 'push', changed: [], graph: graph() });
     const broken = { ...full, web: false };
-    expect(ciVerdict(needs({ web: { result: 'skipped' }, lint: { result: 'success' } }, broken)).ok).toBe(
+    expect(ciVerdict(needs({ web: { result: 'skipped' }, biome: { result: 'success' } }, broken)).ok).toBe(
       false,
     );
     // 全跑却只跑 deploy 的两块：job 照样 success，但 plan 本身不对
     const opsOnly: CiPlan = { ...full, deploy: 'ops' };
     const allGreen = {
       web: { result: 'success' },
-      lint: { result: 'success' },
+      biome: { result: 'success' },
+      tsc: { result: 'success' },
       deploy: { result: 'success' },
     };
     expect(ciVerdict(needs(allGreen, full)).ok).toBe(true);
@@ -484,7 +486,7 @@ describe('入口', () => {
     const r = run(plan, ['--event', 'push'], { GITHUB_OUTPUT: out });
     expect(r.status).toBe(0);
     const text = readFileSync(out, 'utf8');
-    for (const line of ['lint=true', 'tsc=all', 'web=true', 'deploy=all'])
+    for (const line of ['biome=true', 'tsc=all', 'web=true', 'deploy=all'])
       expect(text).toContain(`${line}\n`);
     expect(text).toMatch(/^tests=\[.*"engine".*\]$/m);
   });
@@ -503,7 +505,8 @@ describe('入口', () => {
       changes: { result: 'success', outputs: p },
       hygiene: { result: 'success' },
       docs: { result: 'success' },
-      lint: { result: 'skipped' },
+      biome: { result: 'skipped' },
+      tsc: { result: 'skipped' },
       test: { result: 'skipped' },
       web: { result: 'skipped' },
       deploy: { result: 'skipped' },
@@ -527,6 +530,29 @@ describe('ci.yml 和这里对得上', () => {
     const next = yml.slice(start + 1).search(/^ {2}[\w-]+:$/m);
     return next < 0 ? yml.slice(start) : yml.slice(start, start + 1 + next);
   };
+
+  it('【故意造出的失败】biome 和 tsc 各自一个 job：合成一个 job 的连续 step，biome 先红就把 tsc 跳过（#566 的 7 个类型错就是这么漏的）', () => {
+    // job() 切到下一个 job 头，会把紧贴在它上面的注释一起带进来；判「正文里有没有 tsc」前先把整行注释去掉。
+    const body = (id: string) =>
+      job(id)
+        .split('\n')
+        .filter((l) => !/^\s*#/.test(l))
+        .join('\n');
+    const biome = job('biome');
+    const tsc = job('tsc');
+    expect(biome, 'biome job 不见了').not.toBe('');
+    expect(tsc, 'tsc job 不见了，或者又并回 biome 里了').not.toBe('');
+    // 两个各自开、各自看自己的开关
+    expect(biome).toMatch(/^ {4}needs: changes$/m);
+    expect(biome).toMatch(/^ {4}if: needs\.changes\.outputs\.biome == 'true'$/m);
+    expect(tsc).toMatch(/^ {4}needs: changes$/m);
+    expect(tsc).toMatch(/^ {4}if: needs\.changes\.outputs\.tsc != ''$/m);
+    expect(biome).toContain('pnpm exec biome check .');
+    expect(tsc).toContain('pnpm exec tsc -b');
+    // biome 那个 job 里不许再出现 tsc（连着写就又是「前一步红了后一步不跑」）。
+    // 不认命令怎么写、不认 step 叫什么名、也不认单行还是多行 run: | —— 正文里出现 tsc 就判红。
+    expect(body('biome')).not.toMatch(/\btsc\b/);
+  });
 
   it('必过检查 check 是汇总 job：always() 跑、needs 全部 job、跑汇总入口', () => {
     const check = job('check');

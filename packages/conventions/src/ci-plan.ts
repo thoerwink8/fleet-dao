@@ -28,9 +28,9 @@ export interface CiPlan {
   full: boolean;
   /** 为什么这么跑：全跑时是触发全跑的那几条，否则是各文件落到了哪。 */
   reasons: string[];
-  /** biome + tsc。只改 .md 时不跑（biome 不认 md，tsc 不看 md）。 */
-  lint: boolean;
-  /** tsc -b 的项目目录；'all' 是仓根整棵树。空数组 = 只跑 biome。 */
+  /** biome。只改 .md 时不跑（biome 不认 md）；tsc 同理不看 md。两个各一个 job，别合并（见 ci.yml 的注释）。 */
+  biome: boolean;
+  /** tsc -b 的项目目录；'all' 是仓根整棵树。空数组 = 只跑 biome、不跑 tsc。 */
   tsc: string[] | 'all';
   tests: TestShard[];
   /** 演示版打包 + 扫产物。 */
@@ -174,7 +174,7 @@ function fullPlan(reasons: string[]): CiPlan {
   return {
     full: true,
     reasons,
-    lint: true,
+    biome: true,
     tsc: 'all',
     tests: [
       { name: 'engine', args: ['packages/engine/'], temporal: true },
@@ -264,12 +264,12 @@ export function planCi({ event, changed, graph, rules = PATH_RULES }: PlanInput)
   const rest = all.filter((u) => u !== 'engine' && u !== 'db');
   if (rest.length > 0) tests.push({ name: 'rest', args: rest.map(unitPath), temporal: false });
 
-  const lint = changed.some((f) => !f.endsWith('.md'));
+  const biome = changed.some((f) => !f.endsWith('.md'));
   return {
     full: false,
     reasons,
-    lint,
-    tsc: lint ? all.map(unitProject) : [],
+    biome,
+    tsc: biome ? all.map(unitProject) : [],
     tests,
     web: closure.has('web'),
     deploy: DEPLOY_READS_PACKAGES.some((p) => closure.has(p)) ? 'all' : deploy,
@@ -280,7 +280,7 @@ export function planCi({ event, changed, graph, rules = PATH_RULES }: PlanInput)
 export function planOutputs(plan: CiPlan): Record<string, string> {
   return {
     plan: JSON.stringify(plan),
-    lint: String(plan.lint),
+    biome: String(plan.biome),
     tsc: plan.tsc === 'all' ? 'all' : plan.tsc.join(' '),
     tests: JSON.stringify(plan.tests),
     web: String(plan.web),
@@ -292,12 +292,14 @@ export function planOutputs(plan: CiPlan): Record<string, string> {
  * 汇总 job 核对的几个 job（ci.yml 里的 job id）；changes、docs 每次都得跑且绿。hygiene 也每次都跑，但只报不挡
  * （卫生检查改成挡在推之前，创始人 2026-09-28 傍晚拍），不在这两份名单里：它红不红不影响 ciVerdict 的结论。
  */
-export const PLANNED_JOBS = ['lint', 'test', 'web', 'deploy'] as const;
+/** 开着的 job：biome、tsc 各自一个（biome 先红会把 tsc 一起吃掉，两个错叠一起报，见 ci.yml 的注释）。 */
+export const PLANNED_JOBS = ['biome', 'tsc', 'test', 'web', 'deploy'] as const;
 export const ALWAYS_JOBS = ['changes', 'docs'] as const;
 
 function expected(plan: CiPlan, job: (typeof PLANNED_JOBS)[number]): boolean {
   if (job === 'test') return plan.tests.length > 0;
   if (job === 'deploy') return plan.deploy !== 'none';
+  if (job === 'tsc') return plan.tsc === 'all' || plan.tsc.length > 0;
   return plan[job];
 }
 
@@ -314,7 +316,7 @@ function parsePlan(text: unknown): CiPlan | string {
     typeof o !== 'object' ||
     o === null ||
     typeof o.full !== 'boolean' ||
-    typeof o.lint !== 'boolean' ||
+    typeof o.biome !== 'boolean' ||
     typeof o.web !== 'boolean' ||
     !(DEPLOY_MODES as readonly unknown[]).includes(o.deploy) ||
     !Array.isArray(o.tests) ||
