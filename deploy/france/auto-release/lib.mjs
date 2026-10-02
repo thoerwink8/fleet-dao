@@ -75,7 +75,8 @@ export const INSTALL_PATHS = [
 /**
  * 这边发的报警都以它开头：发布没成 `auto-release:failed:<提交号>`，规矩同步没成 `auto-release:rules:<提交号>`，
  * 配置和期望不一致 `auto-release:config:<文件>:<键>`（一项一条），配置没查成 `auto-release:config-unchecked`，
- * 版本标记读不到 / 不是主线上的提交 `auto-release:marker-unreadable`、`auto-release:marker:<tag>`（决定 0011 第 3 条）。
+ * 版本标记读不到 / 不是主线上的提交 `auto-release:marker-unreadable`、`auto-release:marker:<tag>`（决定 0011 第 3 条），
+ * 查不出引擎开没开着 `auto-release:engine-unknown`。
  */
 export const ALERT_PREFIX = 'auto-release:';
 export const FAILED_PREFIX = `${ALERT_PREFIX}failed:`;
@@ -86,6 +87,8 @@ export const CONFIG_UNCHECKED_KEY = `${ALERT_PREFIX}config-unchecked`;
 export const MARKER_UNREADABLE_KEY = `${ALERT_PREFIX}marker-unreadable`;
 /** 版本标记指向的提交不是 origin/main 的祖先（tag 打在别的分支、或主线被强推过）：一件一条，人看了手动处理。 */
 export const MARKER_PREFIX = `${ALERT_PREFIX}marker:`;
+/** 查不出引擎开没开着（systemctl 没跑成、回的认不出）：发布那一刻的四步没法照实记，这一轮不发，查成了自己撤。 */
+export const ENGINE_UNKNOWN_KEY = `${ALERT_PREFIX}engine-unknown`;
 /** release.sh --auto 的两种「这次不发、什么都没动」：另一个发布在跑；引擎不会排空、切之前看到会话在跑。 */
 export const EXIT_RELEASE_BUSY = 75;
 export const EXIT_SESSIONS_BUSY = 76;
@@ -116,26 +119,35 @@ export function parseMainLog(text) {
 
 /**
  * `git for-each-ref --format='%(refname:short) %(objectname) %(*objectname) %(creatordate:iso-strict)' refs/tags`：
- * 每一个 tag 一行。只认 `v<N>` 那种版本标记（别人的 tag 一概不看），返回 { tag, version, n, commit, at }，
+ * 每一个 tag 一行，四段、**单个空格**隔开。只认 `v<N>` 那种版本标记（别人的 tag 一概不看），返回 { tag, version, n, commit, at }，
  * 按 n 从大到小排（`v10` 在 `v9` 前面——版本号是数字，不许按字符串排）。
- * 认不出一行就抛（不拿半截当全部，免得漏掉最新的那个标记去发一个旧的）；非版本 tag 跳过不算认不出。
- * 注：annotated tag 的 `%(objectname)` 是 tag 对象、`%(*objectname)` 才是它指的提交；轻量 tag 反着来，两个都读。
+ * 认不出一行就抛（不拿半截当全部，免得漏掉最新的那个标记去发一个旧的）；非版本 tag 跳过不算认不出，但它的行也得是这个样子。
+ * 注：annotated tag 的 `%(objectname)` 是 tag 对象、`%(*objectname)` 才是它指的提交；**轻量 tag 的 `%(*objectname)` 是空的**，
+ * 所以那一行名字和时间之间隔着两个空格——不能把连着的空格当一个拆（那样人手打的轻量 tag 会把整份列表判成认不出，法国从此不发）。
  */
 export function parseVersionTags(text) {
   const out = [];
   for (const raw of String(text).split('\n')) {
     const line = raw.trim();
     if (line === '') continue;
-    const m = /^(\S+) ([0-9a-f]{40})(?: ([0-9a-f]{40}))? (\S+)$/.exec(line);
-    const at = m ? Date.parse(m[4]) : Number.NaN;
-    if (!m || Number.isNaN(at)) throw new Error(`tag 列表里有认不出的一行：${line.slice(0, 100)}`);
-    const vm = VERSION_NUMBER_RE.exec(m[1]);
+    const [name, object, peeled, when, ...extra] = line.split(' ');
+    const at = Date.parse(when ?? '');
+    if (
+      extra.length > 0 ||
+      !name ||
+      !SHA.test(object ?? '') ||
+      !(peeled === '' || SHA.test(peeled ?? '')) ||
+      Number.isNaN(at)
+    ) {
+      throw new Error(`tag 列表里有认不出的一行：${line.slice(0, 100)}`);
+    }
+    const vm = VERSION_NUMBER_RE.exec(name);
     if (!vm) continue;
     out.push({
-      tag: m[1],
+      tag: name,
       version: `v${Number(vm[1])}`,
       n: Number(vm[1]),
-      commit: m[3] ?? m[2],
+      commit: peeled || object,
       at: iso(at),
     });
   }
@@ -579,6 +591,27 @@ async function deployStep(io, st, now) {
     return current;
   }
 
+  // 停派活 → 等在跑的收尾 → 部署 → 恢复派活（决定 0011 第 4 条）：这几步由 release.sh 真做（排空协议），这里要先问清引擎
+  // 开没开着，才能照实记「做了」还是「引擎关着，跳过」。问不出来这一轮就不发（也不动部署检出）：不能在状态里写「引擎关着，
+  // 四步跳过」，而实际上引擎开着、发布脚本正在排空它——读不到不许拿「关着」冒充（通用段底线）。下一轮再问；一直问不出来，
+  // 报警和 /healthz 的 deploy_lag 会看出来。
+  let engineOn;
+  try {
+    engineOn = await io.engineOn();
+  } catch (e) {
+    st.sequenceError = `引擎开没开着没查成：${why(e)}`;
+    act(st, now, 'engine-unknown', `${st.sequenceError}；这一轮不发（不拿「关着」冒充）`);
+    keepRaised(
+      st,
+      ENGINE_UNKNOWN_KEY,
+      '自动发布查不出引擎开没开着，停着不发',
+      `${st.sequenceError}。发布那一刻的四步（停派活→等收尾→部署→恢复派活）要先知道引擎开没开着才能照实记，所以这一轮没发；` +
+        '查成了这条自己撤。在法国看：systemctl is-active fleet-engine.service。',
+    );
+    return current;
+  }
+  resolveKeyLater(st, ENGINE_UNKNOWN_KEY);
+
   let checkout;
   try {
     checkout = await io.prepareCheckout(target);
@@ -594,15 +627,6 @@ async function deployStep(io, st, now) {
   const waited = st.waitingSince ? now - Date.parse(st.waitingSince) : 0;
   const busyOk = st.waitingSince !== null && waited >= IDLE_WAIT_MS;
 
-  // 停派活 → 等在跑的收尾 → 部署 → 恢复派活（决定 0011 第 4 条）：这几步由 release.sh 真做（排空协议），
-  // 这里只把「引擎关着没做」照实记下来，不假装做过。
-  let engineOn = false;
-  try {
-    engineOn = await io.engineOn();
-  } catch (e) {
-    engineOn = false;
-    st.sequenceError = `引擎开没开着没查成（按关着算、照实说）：${why(e)}`;
-  }
   st.sequence = publishSequence({ engineOn, target, tag: marker.tag });
 
   const before = st.attempt;
@@ -974,23 +998,43 @@ async function flushAlerts(io, st) {
   }
 }
 
-/** 一行人看的读数（进 journal）：主线头、CI、在用、落后几个、这一轮干了什么、规矩和装机层到哪了。 */
+/**
+ * 在用的相对版本标记在哪儿（读数里「落后几个」按它数，和 /healthz 的 deploy_lag 同一个口径，见 packages/api/src/deploy-lag.ts
+ * 的 lagView）：就是标记那一版 / 比标记新（人手动发过更新的）/ 落后几个 / 数不了。
+ */
+function markerLag(st) {
+  const marker = st.marker;
+  if (!marker) return '没有版本标记可比';
+  if (st.current === marker.commit) return '跟上了版本标记';
+  if (!st.main) return '主线没读到，数不了落后几个';
+  const m = st.main.commits.findIndex(([sha]) => sha === marker.commit);
+  const c = st.main.commits.findIndex(([sha]) => sha === st.current);
+  if (c < 0) return '不在主线最近的提交里';
+  if (m < 0 || c <= m) return '比版本标记新';
+  return `落后版本标记 ${c - m} 个提交`;
+}
+
+/**
+ * 一行人看的读数（进 journal、release.sh --check）：版本标记、CI、在用、落后几个、这一轮干了什么、发布四步、规矩和装机层到哪了。
+ * 状态里有 marker 这个字段（新版自动发布写的，值可以是 null＝没查成）按版本标记说；没有这个字段的（老版本写的）照老样子按主线头说。
+ */
 export function summary(st) {
   const parts = [];
-  if (st.marker) {
-    parts.push(`版本标记 ${st.marker.tag}（${short(st.marker.commit)}）`);
-  } else {
-    parts.push(`版本标记没有${st.markerError?.why ? `（${st.markerError.why}）` : ''}`);
-  }
-  if (st.main) {
+  if (st.marker !== undefined) {
+    if (st.marker) {
+      const ci = st.ci?.sha === st.marker.commit ? `，CI ${st.ci.verdict}` : '';
+      parts.push(`版本标记 ${st.marker.tag}（${short(st.marker.commit)}）${ci}`);
+    } else {
+      parts.push(st.markerError?.why ? `版本标记没有（${st.markerError.why}）` : '版本标记这一轮没读到');
+    }
+    parts.push(`在用 ${short(st.current)}，${markerLag(st)}`);
+    parts.push(st.main ? `主线头 ${short(st.main.head)}（只作参考，没有新标记不上线）` : '主线头没读到过');
+  } else if (st.main) {
     const idx = st.main.commits.findIndex(([sha]) => sha === st.current);
     const lag =
-      st.current === st.main.head
-        ? '跟上了主线头'
-        : idx > 0
-          ? `落后主线头 ${idx} 个提交`
-          : '不在主线最近的提交里';
-    parts.push(`在用 ${short(st.current)}，${lag}`);
+      st.current === st.main.head ? '跟上了' : idx > 0 ? `落后 ${idx} 个提交` : '不在主线最近的提交里';
+    const ci = st.ci?.sha === st.main.head ? `，CI ${st.ci.verdict}` : '';
+    parts.push(`主线头 ${short(st.main.head)}${ci}；在用 ${short(st.current)}，${lag}`);
   } else {
     parts.push('主线头没读到过');
   }

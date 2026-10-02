@@ -395,7 +395,8 @@ describe('状态文件：和自动发布写的对得上', () => {
       };
       const t = { now: Date.parse('2026-09-27T08:00:00Z'), current: H0 as string, release: 0 };
       // 版本标记（决定 0011 第 3 条）：这一段拿真跑出来的状态核对字段，所以标记也得给——不然连不上发。
-      const tags = (sha: string, tag = 'v1') => `${tag} ${sha} 2026-09-27T07:31:00Z\n`;
+      // git for-each-ref 的真样子：轻量 tag 的第三段是空的，名字和时间之间两个空格（lib.mjs 的 parseVersionTags 只认这个样子）
+      const tags = (sha: string, tag = 'v1') => `${tag} ${sha}  2026-09-27T07:31:00Z\n`;
       const io = {
         now: () => new Date(t.now),
         readMain: async () => `${H1} 2026-09-27T07:30:00Z\n${H0} 2026-09-27T06:00:00Z`,

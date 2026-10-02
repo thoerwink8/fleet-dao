@@ -18,6 +18,7 @@ import {
   CONFIG_PREFIX,
   CONFIG_UNCHECKED_KEY,
   ciVerdict,
+  ENGINE_UNKNOWN_KEY,
   EXIT_RELEASE_BUSY,
   EXIT_SESSIONS_BUSY,
   FAILED_PREFIX,
@@ -102,7 +103,7 @@ function machine() {
     dbDown: false,
     // 版本标记（决定 0011 第 3 条）：tag 列表原文，和「哪些提交在主线上」两个都换成假的。
     // tagsThrow = 读的时候就抛（git 没跑成）；mainAncestors = null 表示判祖先关系时抛。
-    tags: `v1 ${H1} ${T1}\n`, // 默认：v1 → H1
+    tags: `v1 ${H1}  ${T1}\n`, // 默认：v1 → H1（轻量 tag：git 的第三段是空的，所以名字和时间之间两个空格）
     tagsThrow: null,
     mainAncestors: [H1, H0], // 这些提交算「在 origin/main 上」
     mainAncestorsThrow: null,
@@ -314,7 +315,12 @@ test('刚合进来、CI 还没开跑或还在跑：等，不发', async () => {
 
 const H3 = 'e'.repeat(40); // 再后来合进来的
 const _ciCalls = (m) => m.calls.filter((c) => c.startsWith('ci'));
-const tagLine = (tag, sha, at = T1) => `${tag} ${sha} ${at}\n`; // for-each-ref 的一行
+/**
+ * git for-each-ref 的一行真样子：轻量 tag 的第三段（指向的对象）是空的，所以名字和时间之间两个空格；annotated tag 第二段是
+ * tag 对象号、第三段才是提交号。早先的写法（只有一个空格）不是 git 真会吐出来的，把「轻量 tag 解析不了」这个洞盖住了。
+ */
+const tagLine = (tag, sha, at = T1, object = '') =>
+  object === '' ? `${tag} ${sha}  ${at}\n` : `${tag} ${object} ${sha} ${at}\n`;
 
 test('【故意造出的失败】主线头比版本标记新：发标记那一版，不发主线头（旧的「发主线头」就是这个切片要废掉的）', async () => {
   const m = machine();
@@ -514,14 +520,66 @@ test('【故意造出的失败】标记比在用的旧、主线上却还有更�
   ];
   m.mainAncestors = [H3, H2, H1, H0];
   m.current = H1;
-  m.tags = `v1 ${H0} ${T1}
-`;
+  m.tags = tagLine('v1', H0);
   m.ci = runsBody(run(H0, 'completed', 'success'));
   const st = await m.round();
   assert.deepEqual(releases(m), [], '标记指的 H0 比在用的 H1 旧：发它就是降级');
   assert.deepEqual(m.checkouts, []);
   assert.equal(st.last.action, 'marker-not-newer');
   assert.equal(st.attempt, null, '什么都没发：不留「发过」的记录');
+});
+
+test('读数（journal、release.sh --check）：新状态按版本标记说，老状态（没有 marker 字段）照老样子按主线头说', () => {
+  const base = {
+    schema: STATE_SCHEMA,
+    ranAt: '2026-09-27T08:00:00.000Z',
+    main: {
+      checkedAt: '2026-09-27T08:00:00.000Z',
+      head: H2,
+      headAt: '2026-09-27T07:50:00.000Z',
+      commits: [
+        [H2, '2026-09-27T07:50:00.000Z'],
+        [H1, '2026-09-27T07:30:00.000Z'],
+        [H0, '2026-09-27T06:00:00.000Z'],
+      ],
+    },
+    current: H0,
+    ci: { sha: H1, verdict: 'green', detail: '', checkedAt: '2026-09-27T08:00:00.000Z' },
+    last: null,
+    rules: null,
+    system: null,
+    config: null,
+  };
+  const lines = (st) => summary(st).split('；');
+  // 新状态：标记指着 H1，在用 H0（落后标记 1 个提交）；主线头 H2 只作参考，不算落后
+  const marker = {
+    tag: 'v3',
+    commit: H1,
+    at: '2026-09-27T07:30:00.000Z',
+    checkedAt: '2026-09-27T08:00:00.000Z',
+  };
+  const now = lines({ ...base, marker });
+  assert.ok(now.includes('版本标记 v3（bbbbbbbbbbbb），CI green'), now.join(' | '));
+  assert.ok(now.includes('在用 aaaaaaaaaaaa，落后版本标记 1 个提交'), now.join(' | '));
+  assert.ok(
+    now.some((l) => l.startsWith('主线头 cccccccccccc（只作参考')),
+    now.join(' | '),
+  );
+  // 在用的就是标记那一版 / 比标记还新（人手动发过更新的）
+  assert.ok(lines({ ...base, marker, current: H1 }).includes('在用 bbbbbbbbbbbb，跟上了版本标记'));
+  assert.ok(lines({ ...base, marker, current: H2 }).includes('在用 cccccccccccc，比版本标记新'));
+  // 标记没查成（null）：写明原因，不拿主线头充数说「落后几个」
+  const none = lines({
+    ...base,
+    marker: null,
+    markerError: { kind: 'none', why: '一个 v<N> 版本标记都没有', at: '2026-09-27T08:00:00.000Z' },
+  });
+  assert.ok(none.includes('版本标记没有（一个 v<N> 版本标记都没有）'), none.join(' | '));
+  assert.ok(none.includes('在用 aaaaaaaaaaaa，没有版本标记可比'), none.join(' | '));
+  // 老状态：没有 marker 这个字段，读数和改之前一模一样（release-flow.test.sh 的断言就拿它）
+  const legacy = lines(base);
+  assert.ok(legacy.includes('主线头 cccccccccccc'), legacy.join(' | '));
+  assert.ok(legacy.includes('在用 aaaaaaaaaaaa，落后 2 个提交'), legacy.join(' | '));
 });
 
 test('发过没成的版本标记：不再自动试（不往回挑更旧的标记），等下一个版本标记', async () => {
@@ -895,7 +953,7 @@ test('读数：一行人看的，写明版本标记、落后几个、这一轮�
   m.ci = runsBody(run(H1, 'completed', 'failure'));
   const line = summary(await m.round());
   assert.match(line, /版本标记 v1（bbbbbbbbbbbb）/);
-  assert.match(line, /在用 aaaaaaaaaaaa，落后主线头 1 个提交/);
+  assert.match(line, /在用 aaaaaaaaaaaa，落后版本标记 1 个提交/);
   assert.match(line, /这轮：ci-red/);
   assert.match(line, /规矩同步到/);
   assert.match(line, /装机脚本装到 aaaaaaaaaaaa，之后相关提交 0 个/);
@@ -1096,11 +1154,11 @@ const H4 = 'f'.repeat(40);
 test('【故意造出的失败】解析 tag 列表：非版本 tag 跳过、版本号按数字排、认不出的行抛（不拿半截当全部）', () => {
   const parsed = parseVersionTags(
     [
-      `nightly ${H0} 2026-09-27T06:00:00Z`,
-      `v9 ${H2} 2026-09-27T07:00:00Z`,
-      `v10 ${H1} 2026-09-27T07:30:00Z`,
-      `v1 ${H0} 2026-09-27T06:00:00Z`,
-    ].join('\n'),
+      tagLine('nightly', H0, '2026-09-27T06:00:00Z'),
+      tagLine('v9', H2, '2026-09-27T07:00:00Z'),
+      tagLine('v10', H1, '2026-09-27T07:30:00Z'),
+      tagLine('v1', H0, '2026-09-27T06:00:00Z'),
+    ].join(''),
   );
   assert.deepEqual(
     parsed.map((t) => t.tag),
@@ -1110,20 +1168,48 @@ test('【故意造出的失败】解析 tag 列表：非版本 tag 跳过、版�
   assert.equal(parsed[0].commit, H1);
   assert.equal(parsed[0].n, 10);
   assert.deepEqual(parseVersionTags(''), [], '一个 tag 都没有就是空数组（上层记「标记缺失」）');
-  assert.deepEqual(parseVersionTags(`nightly ${H0} 2026-09-27T06:00:00Z\n`), [], '只有非版本 tag');
+  assert.deepEqual(parseVersionTags(tagLine('nightly', H0, '2026-09-27T06:00:00Z')), [], '只有非版本 tag');
   // annotated tag：第一个 40 位是 tag 对象、第二个才是它指的提交，要取第二个
   assert.equal(
-    parseVersionTags(`v7 ${H4} ${H1} 2026-09-27T07:30:00Z`)[0].commit,
+    parseVersionTags(tagLine('v7', H1, '2026-09-27T07:30:00Z', H4))[0].commit,
     H1,
     'annotated tag 取它指的那个提交（*objectname）',
   );
-  assert.throws(() => parseVersionTags('v1 不是提交号 2026-09-27T07:30:00Z'), /认不出/);
-  assert.throws(() => parseVersionTags(`v1 ${H1} 不是时间`), /认不出/);
+  assert.throws(() => parseVersionTags('v1 不是提交号  2026-09-27T07:30:00Z'), /认不出/);
+  assert.throws(() => parseVersionTags(`v1 ${H1}  不是时间`), /认不出/);
+  assert.throws(
+    () => parseVersionTags(`v1 ${H1} 2026-09-27T07:30:00Z`),
+    /认不出/,
+    '只有三段：不是 git 吐出来的样子',
+  );
+  assert.throws(
+    () => parseVersionTags(`v1 ${H1} 不是提交  2026-09-27T07:30:00Z`),
+    /认不出/,
+    '第三段既不空也不是提交号',
+  );
+});
+
+test('【故意造出的失败】轻量 tag（git 的第三段是空的、两个空格）也认得；人手打的非版本轻量 tag 夹在里面不连累整份列表', () => {
+  // git for-each-ref 对轻量 tag 的真输出：`v1 <提交号>  <时间>`。早先的写法只认单个空格，一条轻量 tag 就让整份列表「认不出」，
+  // 版本标记读不到，法国从此不发——哪怕那条根本不是版本标记（比如人手打了个 `latest`）。
+  const text = [
+    `latest ${H0}  2026-09-27T05:00:00Z`,
+    `v2 ${H2}  2026-09-27T07:58:00Z`,
+    `v1 ${H4} ${H1} 2026-09-27T07:30:00Z`,
+  ].join('\n');
+  const parsed = parseVersionTags(text);
+  assert.deepEqual(
+    parsed.map((t) => [t.tag, t.commit]),
+    [
+      ['v2', H2],
+      ['v1', H1],
+    ],
+  );
 });
 
 test('【故意造出的失败】挑标记：最新的那个不是主线上的提交 → 明确失败（kind=not-ancestor），不往回退而求其次', async () => {
   const tags = parseVersionTags(
-    [`v2 ${H2} 2026-09-27T07:58:00Z`, `v1 ${H1} 2026-09-27T07:30:00Z`].join('\n'),
+    [tagLine('v2', H2, '2026-09-27T07:58:00Z'), tagLine('v1', H1, '2026-09-27T07:30:00Z')].join(''),
   );
   const only = [H1, H0]; // H2 不在主线上
   const r = await pickVersionMarker(tags, async (c) => only.includes(c));
@@ -1137,7 +1223,7 @@ test('【故意造出的失败】挑标记：一个都没有 → kind=none；判
   const none = await pickVersionMarker([], async () => true);
   assert.equal(none.kind, 'none');
   assert.match(none.why, /一个 v<N> 版本标记都没有/);
-  const tags = parseVersionTags(`v1 ${H1} 2026-09-27T07:30:00Z`);
+  const tags = parseVersionTags(tagLine('v1', H1, '2026-09-27T07:30:00Z'));
   const bad = await pickVersionMarker(tags, async () => {
     throw new Error('git merge-base 退出码 128');
   });
@@ -1147,9 +1233,11 @@ test('【故意造出的失败】挑标记：一个都没有 → kind=none；判
 
 test('挑标记：最新的那个在主线上就用它（只判最新的一个，不问更旧的）', async () => {
   const tags = parseVersionTags(
-    [`v3 ${H2} 2026-09-27T07:58:00Z`, `v2 ${H1} 2026-09-27T07:30:00Z`, `v1 ${H0} 2026-09-27T06:00:00Z`].join(
-      '\n',
-    ),
+    [
+      tagLine('v3', H2, '2026-09-27T07:58:00Z'),
+      tagLine('v2', H1, '2026-09-27T07:30:00Z'),
+      tagLine('v1', H0, '2026-09-27T06:00:00Z'),
+    ].join(''),
   );
   const asked = [];
   const r = await pickVersionMarker(tags, async (c) => {
@@ -1239,14 +1327,29 @@ test('引擎开着时发一版：状态里四步记「交给发布脚本」，�
   assert.match(summary(st), /发布四步（引擎开着）/);
 });
 
-test('【故意造出的失败】引擎开没开着没查成：按关着算、照实记，不当成开着', async () => {
+test('【故意造出的失败】引擎开没开着没查成：这一轮不发、不动部署检出、报警，不拿「关着」冒充；下一轮查成了就发并撤警', async () => {
   const m = machine();
   m.engineOnError = 'systemctl 没跑成';
-  const st = await m.round();
-  assert.deepEqual(releases(m), ['release b']);
-  assert.equal(st.sequence.engineOn, false, '查不成按关着算');
+  let st = await m.round();
+  assert.deepEqual(releases(m), [], '不知道引擎开没开着：发布脚本会不会去排空它、四步该记什么都说不准，不发');
+  assert.deepEqual(m.checkouts, [], '连部署检出都没动');
+  assert.equal(st.last.action, 'engine-unknown');
+  assert.equal(st.sequence, null, '没把四步写成「跳过（引擎关着）」');
   assert.match(st.sequenceError, /没查成/);
   assert.match(summary(st), /四步没查成/);
+  assert.equal(st.attempt, null, '什么都没发：不留「发过」的记录');
+  assert.ok(
+    m.alerts.some((a) => a.key === ENGINE_UNKNOWN_KEY),
+    '报一条，别让它一直悄悄停着',
+  );
+  // 下一轮问得出来了（关着）：发，并把那条警撤掉
+  m.engineOnError = null;
+  m.t += 5 * MIN;
+  st = await m.round();
+  assert.deepEqual(releases(m), ['release b']);
+  assert.equal(st.sequenceError, null);
+  assert.equal(st.sequence.engineOn, false);
+  assert.ok(m.resolvedKeys.includes(ENGINE_UNKNOWN_KEY), '查成了那条警自己撤');
 });
 
 test('真机上那半边：systemctl 说引擎活着才算开着，认不出的回要抛（不当成关着也不当成开着）', () => {

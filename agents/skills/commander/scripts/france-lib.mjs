@@ -821,6 +821,7 @@ export const ACTION_WORDS = {
   'marker-unknown': '版本标记读不到，不发',
   'marker-not-ancestor': '版本标记不是主线上的提交，不发',
   'marker-not-newer': '版本标记指的提交不比在用的新，不降级',
+  'engine-unknown': '查不出引擎开没开着，不发',
   'ci-pending': '在等 CI',
   'ci-red': '主线 CI 红',
   'ci-unknown': 'CI 结论读不到',

@@ -150,6 +150,8 @@ function waitingFor(st: DeployLagState): string {
     case 'release-busy':
     case 'releasing':
       return '（在发）';
+    case 'engine-unknown':
+      return '（查不出引擎开没开着）';
     default:
       return '';
   }
