@@ -192,27 +192,55 @@ export async function waitUntil(
   }
 }
 
-/** 轮询查询，直到状态满足条件；返回那一刻的状态。 */
-export async function queryUntil<S>(
-  handle: WorkflowHandle,
+/**
+ * 轮询一个读状态的动作，直到状态满足条件；返回那一刻的状态。
+ * 工作流刚起、worker 还没处理完第一个工作流任务时查询会当场失败：这算「还没好」接着等，不当成测试失败；
+ * 等到期还没读成，报错里带上最后一次读失败的原因（不是只剩一句「Failed to query Workflow」）。
+ */
+export async function pollQuery<S>(
+  read: () => Promise<S>,
   check: (status: S) => boolean,
   what: string,
   timeoutMs = 20_000,
 ): Promise<S> {
   let last: S | undefined;
+  let lastError: unknown;
   try {
     await waitUntil(
       async () => {
-        last = (await handle.query('status')) as S;
+        try {
+          last = await read();
+        } catch (error) {
+          lastError = error;
+          return false;
+        }
         return check(last);
       },
       what,
       timeoutMs,
     );
   } catch (error) {
-    throw new Error(`${(error as Error).message}\n最后一次状态：${JSON.stringify(last)}`);
+    throw new Error(`${(error as Error).message}
+最后一次状态：${JSON.stringify(last)}${describeReadFailure(lastError)}`);
   }
   return last as S;
+}
+
+function describeReadFailure(error: unknown): string {
+  if (error === undefined) return '';
+  const cause = error instanceof Error && error.cause instanceof Error ? `（${error.cause.message}）` : '';
+  return `
+最后一次读失败：${error instanceof Error ? error.message : String(error)}${cause}`;
+}
+
+/** 轮询查询，直到状态满足条件；返回那一刻的状态。 */
+export function queryUntil<S>(
+  handle: WorkflowHandle,
+  check: (status: S) => boolean,
+  what: string,
+  timeoutMs = 20_000,
+): Promise<S> {
+  return pollQuery(() => handle.query('status') as Promise<S>, check, what, timeoutMs);
 }
 
 /** 把历史里的载荷（字节）都解成文字拼起来，方便逐字查「有没有某样东西进了历史」。 */
