@@ -54,13 +54,7 @@ describe('提示词', () => {
       issueNumber: 12,
       mode: 'new',
     });
-    for (const part of [
-      'acme/widgets',
-      '#12',
-      '验证码 5 分钟过期',
-      'src/login/',
-      'fleet/12-login',
-    ]) {
+    for (const part of ['acme/widgets', '#12', '验证码 5 分钟过期', 'src/login/', 'fleet/12-login']) {
       expect(text).toContain(part);
     }
     // 554-2 起写码阶段提示词不再要求会话里原样跑测试命令——后端核的是 PR 上的 CI（checks 汇总）。
