@@ -27,7 +27,106 @@ function reasonsOf(v: ReturnType<typeof checkDone>): string {
   return v.ok ? '' : v.reasons.join('\n');
 }
 
-describe('checkDone', () => {
+describe('checkDone · 554-2 起的主判：带 PR 就看它的 CI', () => {
+  it('带 PR + CI 全绿：收了（即便 tests 全空、会话里没跑过仓的测试命令）', () => {
+    const v = checkDone({
+      ...base,
+      request: req({ prNumber: 31 }),
+      pr: pr({ checks: 'success' }),
+      tests: [],
+    });
+    expect(v).toEqual({ ok: true, evidence: { pr: { number: 31, state: 'open', headRef: 'fleet/12-a' } } });
+  });
+
+  it('带 PR + CI 红的：422，写明是这张 PR 的必过检查没过，不拿「会话里测试过了」顶', () => {
+    const v = checkDone({
+      ...base,
+      request: req({ prNumber: 31 }),
+      pr: pr({ checks: 'failure' }),
+      tests: [test(true)],
+    });
+    expect(v).toMatchObject({ ok: false, status: 422, code: 'done_rejected' });
+    expect(reasonsOf(v)).toContain('PR #31 的 CI 是红的');
+  });
+
+  it('带 PR + CI 还在跑（pending）：409 等它跑完再交', () => {
+    const v = checkDone({
+      ...base,
+      request: req({ prNumber: 31 }),
+      pr: pr({ checks: 'pending' }),
+      tests: [test(true)],
+    });
+    expect(v).toMatchObject({ ok: false, status: 409, code: 'not_verifiable_yet' });
+    expect(reasonsOf(v)).toContain('CI 还在跑');
+  });
+
+  it('带 PR + CI 还没起（none）：409 等它起出来再交', () => {
+    const v = checkDone({
+      ...base,
+      request: req({ prNumber: 31 }),
+      pr: pr({ checks: 'none' }),
+      tests: [test(true)],
+    });
+    expect(v).toMatchObject({ ok: false, status: 409, code: 'not_verifiable_yet' });
+    expect(reasonsOf(v)).toContain('还没起');
+  });
+
+  it('【故意造红】带 PR 编号但库里还没有：409，不当成收到，不能当成「绿」', () => {
+    const v = checkDone({ ...base, request: req({ prNumber: 31 }), pr: null, tests: [test(true)] });
+    expect(v).toMatchObject({ ok: false, status: 409, code: 'not_verifiable_yet' });
+    expect(reasonsOf(v)).toContain('还没同步进库');
+    // 哪怕 testsPassed 报了 true 也不行（测试不再认会话自报）
+    expect(v.ok).toBe(false);
+  });
+
+  it('自己报 testsFailed：即使 CI 是绿的，也当场退回', () => {
+    const v = checkDone({
+      ...base,
+      request: req({ prNumber: 31, testsPassed: false }),
+      pr: pr({ checks: 'success' }),
+      tests: [],
+    });
+    expect(v.ok).toBe(false);
+    expect(reasonsOf(v)).toContain('测试没过');
+  });
+
+  it('带 PR 时仍然核「这张 PR 是不是本会话的分支、是不是已经关了」', () => {
+    expect(
+      reasonsOf(
+        checkDone({
+          ...base,
+          request: req({ prNumber: 31 }),
+          pr: pr({ checks: 'success', headRef: 'x' }),
+          tests: [],
+        }),
+      ),
+    ).toContain('不是本会话的分支');
+    expect(
+      reasonsOf(
+        checkDone({
+          ...base,
+          request: req({ prNumber: 31 }),
+          pr: pr({ checks: 'success', state: 'closed' }),
+          tests: [],
+        }),
+      ),
+    ).toContain('已经关了');
+  });
+
+  it('写需求文档、调研这类活不要求 CI 过：带 PR 也只是顺带核分支和是否已关', () => {
+    const v = checkDone({
+      stage: 'spec',
+      branch: 'fleet/12-a',
+      request: req({ prNumber: 31 }),
+      pr: pr({ checks: 'pending' }),
+      tests: [],
+    });
+    // 没挂 stage 到 CODE_STAGES：不看 CI，PR 状态也只看分支和是否已关
+    expect(v).toEqual({ ok: true, evidence: { pr: { number: 31, state: 'open', headRef: 'fleet/12-a' } } });
+  });
+});
+
+describe('checkDone · fallback 旧路径：不带 PR 的写码会话仍走会话测试证据', () => {
   it('会话只在本地提交、PR 由引擎在会话后开：写码的活不带 PR，测试证据是绿的就收下', () => {
     const v = checkDone({ ...base, request: req(), pr: null, tests: [test(true)] });
     expect(v).toEqual({ ok: true, evidence: { lastSessionTest: test(true), pr: undefined } });
@@ -118,44 +217,13 @@ describe('checkDone', () => {
     ).toBe(true);
   });
 
-  it('带了 PR 编号：库里还没有就 409（过会儿再交），不是本会话的分支或已关掉就退回', () => {
-    expect(
-      checkDone({ ...base, request: req({ prNumber: 31 }), pr: null, tests: [test(true)] }),
-    ).toMatchObject({ ok: false, status: 409, code: 'not_verifiable_yet' });
-    expect(
-      reasonsOf(
-        checkDone({ ...base, request: req({ prNumber: 31 }), pr: pr({ headRef: 'x' }), tests: [test(true)] }),
-      ),
-    ).toContain('不是本会话的分支');
-    expect(
-      reasonsOf(
-        checkDone({
-          ...base,
-          request: req({ prNumber: 31 }),
-          pr: pr({ state: 'closed' }),
-          tests: [test(true)],
-        }),
-      ),
-    ).toContain('已经关了');
-  });
-
-  it('PR 上的 CI 是上一次推送的结果，不拿来判这次会话：CI 红但会话测试绿照样收下', () => {
-    const v = checkDone({
-      ...base,
-      request: req({ prNumber: 31 }),
-      pr: pr({ checks: 'failure' }),
-      tests: [test(true)],
-    });
-    expect(v).toMatchObject({ ok: true, evidence: { pr: { number: 31, state: 'open' } } });
-  });
-
   it('能判定的问题一次全列出来，不让 AI 一轮轮试', () => {
     const v = checkDone({
       ...base,
-      request: req({ testsPassed: false, prNumber: 31 }),
-      pr: pr({ headRef: 'x', state: 'closed' }),
+      request: req({ testsPassed: false }),
+      pr: null,
       tests: [],
     });
-    expect(v.ok ? [] : v.reasons).toHaveLength(4);
+    expect(v.ok ? [] : v.reasons).toHaveLength(2);
   });
 });

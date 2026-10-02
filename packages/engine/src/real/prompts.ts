@@ -254,16 +254,13 @@ function deliverBlock(input: PromptInput): string {
 /** 写码（副手、旧的子任务、Lead 自己接手）：改代码、补测试、提交，fleet done 交活。 */
 function codeBlock(input: PromptInput): string {
   const { brief, repo } = input;
-  const test = repo.testCommand;
-  // 写码阶段（execute、ui）一定有测试命令（没有起不来）；只有调研这类不核对测试的活会走到「没写」
-  const tests = test
-    ? `跑 \`${test}\` 看过。
-- 交活只认会话里原样跑的 \`${test}\`、以最后一次为准：别接管道、别放后台（结果会记成「认不出」），别的测试命令不算。`
-    : `这个项目没写测试命令（仓里 .fleet/flow.json 的 testCommand），交活不核对测试。`;
+  // 554-2 起，done 核对看 PR 上的 CI，不看会话里跑测试：会话里不跑，提示词也不再要求。testCommand 仍然会记进
+  // session_runs，但只是流程配置副本的历史字段（556-4 之前不动）；交活的核实由 done-check.ts 按 PR 镜像的
+  // checks 字段判（checks.ts 的 mirrorChecks 汇总）。
   return `## 你要做的：写码
-在当前目录（分支 ${brief.branch ?? '（没给）'}）上把活干完：改代码、补测试，${tests}主线在 origin/${repo.defaultBranch}。
+在当前目录（分支 ${brief.branch ?? '（没给）'}）上把活干完：改代码、补测试，主线在 origin/${repo.defaultBranch}。
 - 改动用 git commit 提交在本地（可以多次提交）；交活前工作区里不能有没提交的已跟踪改动。
-- 做完标准都满足了再交：\`fleet done "<一两句总结：做了什么>" --tests passed\`（测试没过就写 --tests failed，并在总结里说清）。后端会核实，没核实过会退回。
+- 做完标准都满足了再交：\`fleet done "<一两句总结：做了什么>" --tests passed\`（测试没过就写 --tests failed，并在总结里说清）。后端核的是**这张 PR 的 CI**——不在会话里跑测试，测试由 CI 跑；别在本地跑完再回报，没核实过会退回。
 - 做不下去就 \`fleet blocked "<卡在哪>" --needs human|info|access|other\`，别硬交；要他在几个做法里挑一个的不算卡住，用 \`fleet ask\` 带推荐、按推荐接着做。`;
 }
 
