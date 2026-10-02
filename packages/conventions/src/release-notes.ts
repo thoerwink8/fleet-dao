@@ -2,8 +2,12 @@
 // 核心解析（splitChangelog、UNRELEASED_HEADING、nextVersion、today、ChangelogSplit、Version）已挪到
 // packages/shared/src/changelog.ts，本文件只做再导出。CLI 那一侧的状态机（FinalizeState、nextState、planFinalize）、
 // 状态文件名（FINALIZE_DIR、stateFileName）、飞书正文（feishuBody、releaseBody、namesFor）还留在这里。
-// 业务那一侧（packages/conventions/src/bin/changelog-release.ts）、root 那一侧（deploy/bin/finalize-release.sh）都用这份。
-// 测试在 packages/conventions/test/release-notes.test.ts；Persistence 测试在 packages/conventions/test/changelog-persistence.test.ts。
+// 这份状态机被 .github/workflows/release.yml 一步步「合法顺序」用（打 tag → 建 release → 关 milestone → 推飞书）；
+// release.yml 自己的「事实」判定（tag、release 在不在、body 对不对、 milestone 开没开）不按这份状态文件走。
+// 「业务那一侧（bin/changelog-release.ts）、root 那一侧（deploy/bin/finalize-release.sh）」这两个文件名是上一稿方案
+// 留下的、现在并不存在：当时想要一份本机 CLI 加一份 root 机器脚本，重做成 #593（发布 vN 的 PR 合并由 GitHub Actions
+// 收尾，0011 第 4 条）之后这两个都不再要——所以本注释里不再点它们的名。
+// 测试在 packages/conventions/test/release-notes.test.ts。
 // 改这里之前必须知道：
 // - CHANGELOG.md 的格式钉死了（Unreleased 标题、版本标题的样子见 shared/changelog.ts 里的注释）：识别不到模样就报错，不宽容。
 // - 同一个提交幂等：tag 名、release 名、milestone 名、飞书头之一是重复的话就当「做过了」，不暗示第二次。

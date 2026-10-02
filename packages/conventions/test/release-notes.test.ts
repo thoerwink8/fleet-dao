@@ -4,7 +4,6 @@ import {
   INITIAL_STATE,
   namesFor,
   nextState,
-  nextVersion,
   planFinalize,
   releaseBody,
   splitChangelog,
