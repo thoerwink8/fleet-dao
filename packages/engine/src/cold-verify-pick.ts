@@ -88,6 +88,11 @@ export function familyPickerFrom(
   pickRoute: (input: PickRouteInput) => Promise<PickRouteResult>,
   order: readonly string[],
   stage: PickRouteInput['stage'] = 'review',
+  /**
+   * 某一族派不出时（选路回 ok: false）告诉调用方原因：等空位、等额度的和一条路由都没有的要分得开——前者过一会儿再来就行，
+   * 后者才是做不出来。pickRouteForFamily 只回 undefined，这个信息不然就丢了。
+   */
+  onNotPicked?: (family: string, why: Extract<PickRouteResult, { ok: false }>) => void,
 ): (taskId: string) => FamilyPickDeps {
   const all = order.map((f) => f.trim()).filter((f) => f !== '');
   return (taskId) => ({
@@ -102,7 +107,10 @@ export function familyPickerFrom(
         avoidPoolIds: [],
         avoidModelIds: [],
       });
-      if (!got.ok) return undefined;
+      if (!got.ok) {
+        onNotPicked?.(want, got);
+        return undefined;
+      }
       if (got.route.family.trim().toLowerCase() !== want) return undefined;
       return got.route;
     },

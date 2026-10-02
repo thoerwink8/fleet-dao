@@ -46,6 +46,7 @@ import { orgDriftReporter, orgSwitchRound } from './org-switch.ts';
 import { retireEngineSchedules } from './retire-schedules.ts';
 import { routeProbeJob } from './route-probe.ts';
 import { realRuns } from './runs-writer.ts';
+import type { SegmentSpawnerDeps } from './segment-spawner.ts';
 import { checkIoRoot, DEFAULT_SESSION_IO_DIR, reportIoRoot } from './session-io.ts';
 import { type SessionOrgReader, sessionOrgReader } from './session-org.ts';
 import {
@@ -57,6 +58,7 @@ import {
 import { createStorePorts } from './store-ports.ts';
 import { createTaskActivities } from './task-activities.ts';
 import { createRunSegment } from './task-segment.ts';
+import { createColdVerify } from './task-verify.ts';
 import { watchdogJob } from './watchdog.ts';
 import { DEFAULT_WORK_ROOT, helperWorkTrees, type WorkTrees } from './worktrees.ts';
 
@@ -450,7 +452,7 @@ export function realPortsFromEnv(
   extra: { drain?: EngineDrain; ownSha?: string | null; releasesDir?: string } = {},
 ): RealPorts & {
   jobs: EngineJobs;
-  /** 任务工作流（#632）的真活动：不碰会话的五个加动手会话；coldVerify 还没接（接之前报 TASK_NOT_CONFIGURED）。 */
+  /** 任务工作流（#632）的真活动：不碰会话的五个、动手会话、冷验收会话。 */
   tasks: EngineTasks;
   registerJobs(): Promise<void>;
   /** 引擎起来对齐定时任务之后跑一遍：把退役名单（jobs/retired-schedules.ts）里 Temporal 上还在的删掉，见 real/retire-schedules.ts。 */
@@ -568,30 +570,42 @@ export function realPortsFromEnv(
     watchdog: watchdogJob({ db }),
   };
   const taskLog = (message: string, fields?: Record<string, unknown>) => console.info(message, fields ?? {});
-  // 动手会话（#632 S2-4b-2）：和 Fusion 的会话用同一份执行方式驱动，但自己一份（驱动没有状态，只是包着各家的 run 函数）；
-  // 内存准入、会话的资源上限、runs 记账都用生产的那份。
+  // 动手会话（#632 S2-4b-2）和冷验收会话（S2-5b）：和 Fusion 的会话用同一份执行方式驱动，但自己一份（驱动没有状态，只是包着各家的
+  // run 函数）；内存准入、会话的资源上限、runs 记账都用生产的那份，两种会话共用同一个 Spawner 装配。
+  const segmentSpawner: SegmentSpawnerDeps = {
+    db,
+    drivers: hostDrivers({
+      claudeCommand,
+      cursorCommand,
+      grokCommand,
+      mirasimConnect: mirasim.connect,
+      mirasimLedgerDir: mirasim.ledgerDir,
+      mirasimLedgerFs: mirasim.ledgerFs,
+    }),
+    trees,
+    baseEnv: env,
+    resources: { memoryHighMb: SESSION_MEMORY_HIGH_MB, memoryMaxMb: SESSION_MEMORY_MAX_MB, swapMaxMb: 0 },
+    log: taskLog,
+  };
+  const taskRuns = realRuns({ db });
+  const runsDir = join(config.stateDir, 'runs');
   const tasks: EngineTasks = {
     ...createTaskActivities({ gh, trees, exec, log: taskLog }),
     runSegment: createRunSegment({
       tree: { gh, trees, exec, tmpDir: join(config.stateDir, 'tmp') },
-      spawner: {
-        db,
-        drivers: hostDrivers({
-          claudeCommand,
-          cursorCommand,
-          grokCommand,
-          mirasimConnect: mirasim.connect,
-          mirasimLedgerDir: mirasim.ledgerDir,
-          mirasimLedgerFs: mirasim.ledgerFs,
-        }),
-        trees,
-        baseEnv: env,
-        resources: { memoryHighMb: SESSION_MEMORY_HIGH_MB, memoryMaxMb: SESSION_MEMORY_MAX_MB, swapMaxMb: 0 },
-        log: taskLog,
-      },
-      runs: realRuns({ db }),
+      spawner: segmentSpawner,
+      runs: taskRuns,
       memoryAdmission: realMemoryAdmission(),
-      runsDir: join(config.stateDir, 'runs'),
+      runsDir,
+      log: taskLog,
+    }),
+    coldVerify: createColdVerify({
+      gh,
+      pickRoute: real.ports.pickRoute,
+      spawner: segmentSpawner,
+      runs: taskRuns,
+      memoryAdmission: realMemoryAdmission(),
+      runsDir,
       log: taskLog,
     }),
   };

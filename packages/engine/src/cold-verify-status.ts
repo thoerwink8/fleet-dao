@@ -80,6 +80,14 @@ export function coldVerifyPending(round: number): ColdVerifyStatus {
   };
 }
 
+/**
+ * 这一次没做成，但过一会儿再来就行（内存放不下没派出去之类）：pending，写明在等什么。
+ * 不是 failure：failure 会让合并闸和 PR 页面显示成「验收没过」，而这一轮根本没验。
+ */
+export function coldVerifyWaiting(why: string): ColdVerifyStatus {
+  return { state: 'pending', description: fit(`验收在等：${why}`) };
+}
+
 /** 到轮数上限了还不过：不再起第 2/3 轮，交人看。 */
 export function coldVerifyExhausted(round: number): ColdVerifyStatus {
   return {

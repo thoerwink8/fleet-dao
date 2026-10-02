@@ -30,7 +30,7 @@ const INPUT: VerifierInvokeInput = {
   taskId: 'task-1',
   what: '要 A',
   howToFinish: ['代码里有 A'],
-  modelFamilyAvoid: 'gpt',
+  modelFamiliesAvoid: ['gpt'],
   round: 1,
 };
 

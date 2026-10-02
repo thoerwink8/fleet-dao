@@ -56,7 +56,15 @@ export interface OneShotInput {
   effort?: string;
 }
 
-export type OneShotOutcome = 'done' | 'timeout' | 'killed' | 'spawn_failed' | 'admission_blocked' | 'failed';
+export const ONE_SHOT_OUTCOMES = [
+  'done',
+  'timeout',
+  'killed',
+  'spawn_failed',
+  'admission_blocked',
+  'failed',
+] as const;
+export type OneShotOutcome = (typeof ONE_SHOT_OUTCOMES)[number];
 
 export interface OneShotResult {
   runId: string;
