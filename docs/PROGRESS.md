@@ -12,6 +12,7 @@
 - 调研记录提交 `8cd3ec1c`，PR [#573](https://github.com/thoerwink8/fleet-dao/pull/573)；PR 仅文档，未实施。推前卫生检查扫描本次提交新增内容为 0 条问题。
 - #573 已在 CI 必过项全绿后自动合并，主线提交 `2563b13a`。创始人随后问 Linux 与 Fleet 工作模式：已核对 `hosts.ts` 的 Mirasim 固定 cloud、法国直接 reclaude 配置、无头 service，以及 #509「模型 → 渠道」「额度满由 Temporal 接续」。补充建议为 Linux 保留无头平台通路、核真实渠道与记账，不复制桌面混合路由封装；法国现场未验。这里只记 AI 建议，不写成创始人已定。
 - Linux 补充验证：旧 Go 源码交叉编译 linux/amd64 成功，ELF64/x86-64 头检查通过，未运行到法国；核到 `mirasimRunFacts` 的 cloud 成功条件只核 2xx，未将 viaRelay 纳入该条件，方案将所选渠道与额度记账列为 Linux 验收落点。
+- Linux 补充调研提交 `32b924d6`，PR [#579](https://github.com/thoerwink8/fleet-dao/pull/579)；仍为未实施的建议，没有改法国配置或发布二进制。
 
 ## 2026-09-30 / 10-01（本机，指挥官会话）
 
