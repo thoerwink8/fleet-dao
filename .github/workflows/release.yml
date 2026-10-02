@@ -168,38 +168,17 @@ jobs:
         run: |
           set -euo pipefail
           # 从仓根 CHANGELOG.md 拿「## [$VERSION] - 日期」那一段的原文当正文（发起人已经把它从 Unreleased 收进标题）。
-          # 找不到这一版的标题 → 直接失败：说明这一版没把 Unreleased 段收进标题（发起人忘了，或 dispatch 写错版本）；
-          # 不拿 Unreleased 段顶替（那里多是占位「还没有」，照抄就发了假 release，第二意见 2026-10-02）。
-          # 正文是占位符（只剩「还没有」「没有内容」「无」）也失败：发起前没写正文不许发。
+          # 逻辑在 packages/conventions/src/publish-release-logic.ts（extractReleaseBody）：找不到标题、正文空、
+          # 或正文只剩占位符（只剩「还没有」）都明确失败——不拿 Unreleased 段顶替（那里多是占位，照抄就发了假 release，第二意见 2026-10-02）。
           VERSION_ENV="$VERSION" node --input-type=module -e "
             import { readFileSync } from 'node:fs';
-            import { splitChangelog } from './packages/shared/src/changelog.ts';
-            const VERSION = process.env.VERSION_ENV;
-            const PLACEHOLDER = ['还没有', '没有内容', '无'];
-            const body = readFileSync('CHANGELOG.md', 'utf8');
-            const lines = body.split(/\r?\n/);
-            const heading = \`## [\${VERSION}] - \`;
-            const start = lines.findIndex((l) => l.trim().startsWith(heading));
-            if (start === -1) {
-              console.error(\`::error::CHANGELOG.md 里没有「\${heading}…」这一版：发起人没把 Unreleased 段收进标题，\`);
-              console.error(\`::error::或 workflow_dispatch 的 version 写错了。先把正文写进 Unreleased 段、\`);
-              console.error(\`::error::再重跑发布流程（不拿 Unreleased 段顶：那里多是占位「还没有」，发了就是假 release）。\`);
+            import { extractReleaseBody } from './packages/conventions/src/publish-release-logic.ts';
+            const r = extractReleaseBody(readFileSync('CHANGELOG.md', 'utf8'), process.env.VERSION_ENV);
+            if (r.kind !== 'ok') {
+              console.error(\`::error::\${r.message}\`);
               process.exit(1);
             }
-            let end = lines.length;
-            for (let i = start + 1; i < lines.length; i++) {
-              if (/^## \[/.test(lines[i]?.trim() ?? '')) { end = i; break; }
-            }
-            const section = lines.slice(start + 1, end).join('\n').trim();
-            if (!section) {
-              console.error(\`::error::CHANGELOG.md 这一版（\${VERSION}）正文是空的：发起前要把话写进 Unreleased 段。\`);
-              process.exit(1);
-            }
-            if (PLACEHOLDER.some((m) => section === m || section.includes(m))) {
-              console.error(\`::error::CHANGELOG.md 这一版（\${VERSION}）正文只剩占位「\${section.slice(0, 20)}…」，发起前要把话写进去。\`);
-              process.exit(1);
-            }
-            console.log(section);
+            console.log(r.body);
           " > /tmp/release-body.md
           # 已存在：读回比正文
           if existing=$(gh release view "$VERSION" --json body,tagName 2>/dev/null); then
@@ -224,36 +203,57 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          # GitHub 的 milestone 名是开放时起的（比如「v1 Fusion 接活」「v10 xxx」）；只按「v<N> 开头 + 词边界」放行——
-          # 不能 startsWith($v)，否则 v1 会同时撞上 v1 和 v10（第二意见 2026-10-02）。撞好几张照样错：可能是两张开放
-          # milestone 都叫 v1…，发起人要看一眼，不拿「第一张」糊弄。
-          rows=$(gh api "repos/${{ github.repository }}/milestones?state=open&per_page=100" | \
-                 jq -r --arg v "$VERSION" '[.[] | select(.title | test("^" + $v + "([^0-9]|$)"))]')
-          count=$(jq -r 'length' <<<"$rows")
-          if [[ $count == 0 ]]; then
-            echo "::notice::开放 milestone 里没找到以 $VERSION 开头的；多半已经被关过了，跳。"
+          # 开放 milestone 一页一页全翻完（per_page=100 × N，gh api --paginate 顺 link rel=next 翻到最后一页），
+          # 只拿一页的话 100+ 张时会漏目标、误报「已关」（第二意见 2026-10-02）。
+          # 挑哪一张的判定在 packages/conventions/src/publish-release-logic.ts 的 pickOpenMilestone：
+          # ^v<N>([^0-9]|$) 词边界（v1 不撞 v10），撞多张 → error、发起人先看一眼，不拿「第一张」糊弄。
+          MILESTONES_JSON=$(gh api --paginate "repos/${{ github.repository }}/milestones?state=open&per_page=100" | jq -s 'add')
+          export MILESTONES_JSON VERSION_ENV="$VERSION"
+          num=$(node --input-type=module -e "
+            import { pickOpenMilestone } from './packages/conventions/src/publish-release-logic.ts';
+            const list = JSON.parse(process.env.MILESTONES_JSON).map((m) => ({ number: m.number, title: m.title }));
+            const r = pickOpenMilestone(list, process.env.VERSION_ENV);
+            if (r.kind === 'found') { console.log(r.milestone.number); process.exit(0); }
+            if (r.kind === 'none') { console.error(\`::notice::\${r.why}\`); process.exit(0); }
+            console.error(\`::error::\${r.message}\`);
+            for (const m of r.candidates) console.error(\`  #\${m.number}  \${m.title}\`);
+            process.exit(2);
+          ")
+          if [[ -z $num ]]; then
+            echo "开放 milestone 里没找到 $VERSION 开头的那一张（可能已关或还没建），跳过。"
             exit 0
           fi
-          if [[ $count != 1 ]]; then
-            echo "::error::开放 milestone 里有 $count 张都以 $VERSION 开头（词边界匹配也分不清）——发起人先看一眼要关哪一张，再手动 gh api -X PATCH repos/<仓>/milestones/<号> -F state=closed；这里不瞎猜。"
-            jq -r '.[] | "  #\(.number)  \(.title)"' <<<"$rows"
-            exit 1
-          fi
-          num=$(jq -r '.[0].number' <<<"$rows")
-          title=$(jq -r '.[0].title' <<<"$rows")
+          title=$(jq -r --argjson n "$num" '.[] | select(.number == $n).title' <<<"$MILESTONES_JSON")
           gh api -X PATCH "repos/${{ github.repository }}/milestones/$num" -F state=closed >/dev/null
           echo "milestone #$num（$title）已关。"
 
-      # f. 飞书：配了 webhook 就发一条，没配写清「没配飞书，未通知」。
-      - name: 飞书推一条（FLEET_FEISHU 没配就明说、不算错）
+      # f. 飞书：配了 webhook 就发一条、Release 正文末尾打「<!-- fleet-notified: vN -->」标签记下；配了但没发过一次以上，
+      #     按「不在就不再发」幂等（第二意见 2026-10-02：手动重跑、超时要重试都不能让飞书重复收一条）。
+      - name: 飞书推一条（已发过就跳；FLEET_FEISHU 没配就明说、不算错）
         if: steps.invoke.outputs.proceed == 'true'
         env:
           VERSION: ${{ steps.invoke.outputs.version }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           FLEET_FEISHU: ${{ secrets.FLEET_FEISHU }}
         run: |
           set -euo pipefail
           if [[ -z ${FLEET_FEISHU:-} ]]; then
             echo "::notice::没配飞书（secret FLEET_FEISHU 不在），未通知。"
+            exit 0
+          fi
+          # 幂等：这一版的 release 正文里已经写了 <!-- fleet-notified: vN --> → 上次发过，跳。
+          export VERSION_ENV="$VERSION"
+          existing=$(gh release view "$VERSION" --json body 2>/dev/null || echo '{"body":""}')
+          notified=$(jq -r '.body' <<<"$existing" | node --input-type=module -e "
+            import { feishuAlreadyNotified } from './packages/conventions/src/publish-release-logic.ts';
+            let body = '';
+            process.stdin.on('data', (c) => (body += c));
+            process.stdin.on('end', () => {
+              console.log(feishuAlreadyNotified(body, process.env.VERSION_ENV) ? '1' : '0');
+            });
+          ")
+          if [[ $notified == 1 ]]; then
+            echo "::notice::release 正文里已有 <!-- fleet-notified: $VERSION -->：上次已经发过，跳（幂等）。"
             exit 0
           fi
           body=$(cat /tmp/release-body.md)
@@ -263,8 +263,19 @@ jobs:
 $body
 
 — $url"
-          jq -n --arg text "$msg" '{msg_type:"text", content:{text:$text}}' | curl -fsS -X POST -H 'content-type: application/json' --data-binary @- "$FLEET_FEISHU" >/dev/null
-          echo "飞书已推一条。"
+          jq -n --arg text "$msg" '{msg_type:"text", content:{text:$text}}' | \
+            curl -fsS -X POST -H 'content-type: application/json' --data-binary @- "$FLEET_FEISHU" >/dev/null
+          # 发成功了打标签：下次重跑撞见标签就跳，不重复发
+          jq -r '.body' <<<"$existing" | node --input-type=module -e "
+            import { appendFeishuNotifiedMark } from './packages/conventions/src/publish-release-logic.ts';
+            let body = '';
+            process.stdin.on('data', (c) => (body += c));
+            process.stdin.on('end', () => {
+              console.log(appendFeishuNotifiedMark(body, process.env.VERSION_ENV));
+            });
+          " > /tmp/release-body-with-mark.md
+          gh release edit "$VERSION" --notes-file /tmp/release-body-with-mark.md >/dev/null
+          echo "飞书已推一条（release 正文末尾已打 fleet-notified 标签）。"
 
       # g. 恢复派遣（说明性空转：引擎当前就不开派遣）。
       - name: 法国派遣恢复（说明）

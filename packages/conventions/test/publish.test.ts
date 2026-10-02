@@ -13,15 +13,16 @@ describe('classifyPullRequestClosed：release.yml 的入口过滤', () => {
     if (r.kind === 'noop') expect(r.why).toMatch(/没合/);
   });
 
-  it('分支不是 release/v<N> → error：明确失败，不悄悄跑', () => {
+  it('普通 feat/… 分支合进 main → noop：不是这条工作流的活，安安静静不动作（第二意见 2026-10-02 不把日常合并当红）', () => {
     const r = classifyPullRequestClosed({ merged: true, headRef: 'feat/fix-something', baseRef: 'main' });
-    expect(r.kind).toBe('error');
-    if (r.kind === 'error') expect(r.message).toMatch(/release\/v<N>/);
+    expect(r.kind).toBe('noop');
+    if (r.kind === 'noop') expect(r.why).toMatch(/普通 PR/);
   });
 
-  it('head 是 release/ 但版本号模样不对 → error', () => {
+  it('head 是 release/ 但版本号模样不对 → error：想走发布这条线但贴错版本号', () => {
     const r = classifyPullRequestClosed({ merged: true, headRef: 'release/vNext', baseRef: 'main' });
     expect(r.kind).toBe('error');
+    if (r.kind === 'error') expect(r.message).toMatch(/不是 release\/v<N>/);
   });
 
   it('base 不是 main（合到了别处）→ error：发布一律合到 main', () => {

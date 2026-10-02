@@ -15,8 +15,10 @@ export const RELEASE_BRANCH_RE = /^release\/v(\d+)$/;
  * release.yml 的入口过滤器：从 pull_request closed 事件来，要不要走。
  * - merged=true、base=main、head=release/v<N> → proceed（照走 tag → release → milestone → 飞书）。
  * - merged=false → noop：发布 PR 没合就关了，不算发布，不是错，不动作（不能让 Actions 红）。
- * - merged=true 但 base 或 head 不对 → error：明确失败；一个 release/v<N> 分支合到了别处、或一张不是发布 PR 的
- *   合进来却触发了这条链路，都是流程错——「悄悄跳过」会让人以为「已经发过一版了」。Actions 这一步红起来，人看得见。
+ * - merged=true、但 head 不带 release/ 前缀 → noop：一张普通功能 PR 合进 main 在仓里一天到晚发生，
+ *   不能每张都当「分支不对的发布 PR」红一次（第二意见 2026-10-02）；它不是这条工作流的活，安安静静不动作。
+ * - merged=true、head 带 release/ 但 base 不对或版本号模样不对 → error：「想走发布这条线但走错了」，
+ *   是人闸流程错——发起人要看一眼；不拿 noop 遮住（悄悄放掉等于以为「发过一版了」）。
  */
 export type ReleaseTrigger =
   | { kind: 'proceed'; headBranch: string; version: `v${number}` }
@@ -34,19 +36,25 @@ export function classifyPullRequestClosed(opts: {
       why: '发布 PR 没合（merged=false）：这次关上不算发一版。',
     };
   }
+  const m = RELEASE_BRANCH_RE.exec(opts.headRef);
+  if (!m || m[1] === undefined) {
+    if (!opts.headRef.startsWith('release/')) {
+      return {
+        kind: 'noop',
+        why: `普通 PR 合进 main（head「${opts.headRef}」）：不走这条发布链，安安静静不动作。`,
+      };
+    }
+    return {
+      kind: 'error',
+      message:
+        `head 分支「${opts.headRef}」不是 release/v<N> 的模样：想走发布这条线但版本号贴错了。` +
+        `只放行 ${String(RELEASE_BRANCH_RE)}；这一下不动作。`,
+    };
+  }
   if (opts.baseRef !== 'main') {
     return {
       kind: 'error',
       message: `发布 PR 的 base 不是 main：「${opts.baseRef}」。发布一律合到 main；这张 PR 走了别的 base，不动作。`,
-    };
-  }
-  const m = RELEASE_BRANCH_RE.exec(opts.headRef);
-  if (!m || m[1] === undefined) {
-    return {
-      kind: 'error',
-      message:
-        `发布 PR 的 head 分支不是 release/v<N>：「${opts.headRef}」。` +
-        `只放行 ${String(RELEASE_BRANCH_RE)}；这一下不动作。`,
     };
   }
   return {
