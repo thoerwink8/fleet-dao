@@ -31,8 +31,9 @@ const demoApi = () => createDemoApi(createMockApi({ live: false }));
 describe('演示版：模块开关', () => {
   test('导航只列开了的模块；占位页、发演示链接的页一律不列', () => {
     scope(['board', 'quota']);
-    expect(visibleNav().flatMap((g) => g.items.map((i) => i.to))).toEqual(['/', '/overview', '/quota']);
-    expect(demoBlocked('/')).toBe(false);
+    // 主页只在正式驾驶舱有（导航给它的没有 module），演示版里只有 /quota 列出来。
+    expect(visibleNav().flatMap((g) => g.items.map((i) => i.to))).toEqual(['/quota']);
+    expect(demoBlocked('/')).toBe(true);
     expect(demoBlocked('/dispatch')).toBe(true);
     expect(demoBlocked('/demo-links')).toBe(true);
     expect(demoBlocked('/models')).toBe(true);

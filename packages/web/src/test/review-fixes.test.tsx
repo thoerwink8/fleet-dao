@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
-// PR #13 审查意见的回归：用量没读到不冒充 0%、仓列表没读成不冒充「没有仓」、推送断了手机上也看得见、
-// 看板重拉失败保留旧画面。每条都故意造一次「读不到」。
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+// PR #13 审查意见的回归：用量没读到不冒充 0%、仓列表没读成不冒充「没有仓」、推送断了手机上也看得见。
+// 每条都故意造一次「读不到」。
+import { act, cleanup, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import { ApiError, type FleetApi, type LiveStatus, useLiveSync } from '../api/client';
 import { createMockApi, type MockApi } from '../api/mock/server';
@@ -19,10 +19,8 @@ import {
   windowLength,
   windowTitle,
 } from '../lib/catalog';
-import BoardPage from '../routes/board';
 import ChannelsPage from '../routes/channels';
 import DispatchPage from '../routes/dispatch';
-import OverviewPage from '../routes/overview';
 import QuotaPage from '../routes/quota';
 import SettingsPage from '../routes/settings';
 import { renderApp } from './harness';
@@ -148,14 +146,6 @@ describe('额度：用量没读到不当 0%', () => {
       expect(o.quota?.kind).toBe('unknown');
       expect(o.quota && headlineText(o.quota)).toBe('用量没读到');
     }
-  });
-
-  test('总览：没读到用量的窗不排进「最满」、不算「快清零」，底下写明有几个没读到', async () => {
-    renderApp(<OverviewPage />, { api: withUnknownUsage(createMockApi({ live: false })) });
-    expect(await screen.findByText(/个窗没排进来/)).toBeTruthy();
-    const stat = screen.getByText('额度快清零').closest('a');
-    expect(stat?.textContent).toContain('0');
-    expect(screen.queryByText('0%')).toBeNull();
   });
 
   test('额度页：没读到用量的窗列进「读数过期或没查成」，不进「先用它」', async () => {
@@ -305,35 +295,5 @@ describe('推送断了：顶栏照实说，手机上也看得见', () => {
     expect(indicator.className).not.toMatch(/(^|\s)hidden(\s|$)/);
     act(() => report?.('open'));
     expect(await screen.findByText('实时')).toBeTruthy();
-  });
-});
-
-describe('看板重拉失败：保留上次的画面', () => {
-  test('读成过之后重拉失败：树还在，上面一条「看板刷新没成」；重试成功提示消失', async () => {
-    // 手机宽度走树形列表（画布依赖浏览器排版，测试环境里不跑）。
-    vi.spyOn(window, 'matchMedia').mockImplementation(
-      (q: string) =>
-        ({
-          matches: q.includes('max-width'),
-          media: q,
-          addEventListener() {},
-          removeEventListener() {},
-        }) as unknown as MediaQueryList,
-    );
-    const api = createMockApi({ live: false });
-    const board = api.board.bind(api);
-    let fail = false;
-    api.board = (repoId) => (fail ? boom() : board(repoId));
-    const { qc } = renderApp(<BoardPage />, { api });
-    const title = (await screen.findAllByText('登录页加手机验证码'))[0];
-    expect(title).toBeTruthy();
-    fail = true;
-    await act(() => qc.refetchQueries({ queryKey: ['board'] }).catch(() => {}));
-    expect(await screen.findByText('看板刷新没成')).toBeTruthy();
-    expect(screen.getAllByText('登录页加手机验证码').length).toBeGreaterThan(0);
-    fail = false;
-    fireEvent.click(screen.getByRole('button', { name: '重试' }));
-    await waitFor(() => expect(screen.queryByText('看板刷新没成')).toBeNull());
-    expect(screen.getAllByText('登录页加手机验证码').length).toBeGreaterThan(0);
   });
 });

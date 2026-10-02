@@ -51,7 +51,7 @@ describe('正式驾驶舱：看得见的名字不带仓名', () => {
       brand.title(),
       ...Object.values(pages).flatMap((page) => (page.meta?.() ?? []).map((m) => m.title ?? '')),
     ];
-    expect(titles).toEqual(expect.arrayContaining(['驾驶舱', '登录 · 驾驶舱', '看板 · 驾驶舱']));
+    expect(titles).toEqual(expect.arrayContaining(['驾驶舱', '登录 · 驾驶舱', '主页 · 驾驶舱']));
     expect(scanText('标签页标题', titles.join('\n'), TERMS)).toEqual([]);
   });
 

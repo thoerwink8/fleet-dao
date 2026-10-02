@@ -179,7 +179,7 @@ describe('卡片', () => {
     const actions = buttonsOf(card).map((b) => (b.value as { a?: string } | undefined)?.a);
     expect(actions).not.toContain('draft.confirm');
     expect(actions).not.toContain('draft.revise');
-    expect(buttonsOf(card).map((b) => b.url)).toEqual(['https://cockpit.example.test/overview']);
+    expect(buttonsOf(card).map((b) => b.url)).toEqual(['https://cockpit.example.test/']);
   });
 
   it('截断不切在 emoji 中间（半个代理对交给后端，写库时会被换成 � 或整条被拒）', () => {

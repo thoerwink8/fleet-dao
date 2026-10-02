@@ -52,7 +52,7 @@ export const FORM = { note: 'note', repo: 'repo' } as const;
 // —— 驾驶舱页面（packages/web 的 routes.ts；test/static.test.ts 核对还在）——
 
 export const COCKPIT_PATHS = {
-  overview: '/overview',
+  overview: '/',
   notifications: '/notifications',
   home: '/home3',
 };

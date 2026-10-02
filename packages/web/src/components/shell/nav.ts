@@ -5,8 +5,6 @@ import {
   CalendarClock,
   Gauge,
   Home,
-  LayoutDashboard,
-  Network,
   Presentation,
   Radio,
   Scale,
@@ -36,20 +34,12 @@ export const NAV: { group: string; items: NavItem[] }[] = [
   {
     group: '盘面',
     items: [
-      { to: '/', label: '看板', icon: Network, hint: '按仓看全局任务树', module: 'board' },
       {
-        to: '/overview',
-        label: '总览',
-        icon: LayoutDashboard,
-        hint: '全部仓的盘面与待你处理的事',
-        module: 'board',
-      },
-      {
-        to: '/home3',
-        label: '主页（新）',
+        to: '/',
+        label: '主页',
         icon: Home,
         hint: '一屏三块：要你拍的、在跑的、做完的',
-        // 演示版里没有这一页（只在正式驾驶舱建替代主页）。
+        // 演示版里没有这一页（只在正式驾驶舱建主页）。
       },
     ],
   },

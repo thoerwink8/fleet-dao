@@ -410,7 +410,7 @@ export function buildPools(
   });
 }
 
-// —— 新主页（/home3，#589）——
+// —— 新主页（/，#589）——
 
 type HomeDecision = z.input<typeof HomeDecisionSchema>;
 type HomeRunning = z.input<typeof HomeRunningSchema>;

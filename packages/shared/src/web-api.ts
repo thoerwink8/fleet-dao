@@ -958,7 +958,7 @@ export const UpdateDemoDefaultRequest = z.object({
 });
 export const UpdateDemoDefaultResponse = z.object({ defaultScope: DemoScopeSchema });
 
-// —— 新主页（/home3）：一屏三块 + 持续状态条（#589）——
+// —— 新主页（/）：一屏三块 + 持续状态条（#589）——
 
 /**
  * 「要你拍的」一条：decision 级通知（approvals 未决开的时候就经 openApproval 同步写了这么一条，
@@ -1070,7 +1070,7 @@ export const WebRoutes = {
   updateCredentials: { method: 'PUT', path: '/me/credentials', request: UpdateCredentialsRequest },
   events: { method: 'GET', path: '/events' },
   repos: { method: 'GET', path: '/repos', response: ReposResponse },
-  /** 新主页（/home3）的一屏三块 + 持续状态条，一个往返聚齐（#589）。 */
+  /** 新主页（/）的一屏三块 + 持续状态条，一个往返聚齐（#589）。 */
   home: { method: 'GET', path: '/home', response: HomeResponseSchema },
   board: { method: 'GET', path: '/repos/:repoId/board', response: BoardResponse },
   task: { method: 'GET', path: '/tasks/:taskId', response: TaskDetailResponse },

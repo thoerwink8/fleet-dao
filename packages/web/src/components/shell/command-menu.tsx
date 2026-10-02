@@ -1,7 +1,6 @@
-import { FolderGit2, Moon, Palette, Sun, TriangleAlert, User } from 'lucide-react';
+import { FolderGit2, Moon, Palette, Sun } from 'lucide-react';
 import { useEffect } from 'react';
 import { useNavigate } from 'react-router';
-import { canSee } from '../../demo/access';
 import { PALETTES } from '../../lib/theme';
 import { useRepo } from '../repo-context';
 import { useTheme } from '../theme-provider';
@@ -13,11 +12,10 @@ import {
   CommandItem,
   CommandList,
   CommandSeparator,
-  CommandShortcut,
 } from '../ui/command';
 import { visibleNav } from './nav';
 
-/** ⌘K：跳页面、改看板过滤、切仓、切主题。 */
+/** ⌘K：跳页面、切仓、切主题。 */
 export function CommandMenu({ open, onOpenChange }: { open: boolean; onOpenChange(o: boolean): void }) {
   const navigate = useNavigate();
   const { repos, setRepoId } = useRepo();
@@ -63,22 +61,9 @@ export function CommandMenu({ open, onOpenChange }: { open: boolean; onOpenChang
             })}
         </CommandGroup>
         <CommandSeparator />
-        {canSee('board') ? (
+        {repos.length ? (
           <>
-            <CommandGroup heading="看板">
-              <CommandItem
-                value="只看卡住的 停滞 失败 等人"
-                onSelect={() => run(() => navigate('/?stuck=1'))}
-              >
-                <TriangleAlert />
-                只看卡住的
-                <CommandShortcut>S</CommandShortcut>
-              </CommandItem>
-              <CommandItem value="只看我提的" onSelect={() => run(() => navigate('/?mine=1'))}>
-                <User />
-                只看我提的
-                <CommandShortcut>I</CommandShortcut>
-              </CommandItem>
+            <CommandGroup heading="当前仓">
               {repos.map((r) => (
                 <CommandItem
                   key={r.id}

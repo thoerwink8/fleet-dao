@@ -1151,7 +1151,7 @@ export function createSeed(now: number): MockState {
       level: 'daily',
       title: '昨日日报',
       body: '合并 6 个 PR，失败 1 次；Claude A 号周窗用了 43%。',
-      link: '/overview',
+      link: '/',
       createdAt: at(-900),
       resolvedAt: at(-880),
       resolvedBy: 'u-lan',

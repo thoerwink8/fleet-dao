@@ -689,7 +689,7 @@ export function createGateway(o: GatewayOptions): Gateway {
     if (matches.length === 0) {
       await reply(
         msg.messageId,
-        { text: `没找到 #${issue}。全部任务在驾驶舱里：${o.publicUrl}/overview` },
+        { text: `没找到 #${issue}。全部任务在驾驶舱里：${o.publicUrl}/tasks` },
         'progress-none',
       );
       return;
