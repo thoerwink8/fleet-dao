@@ -1,0 +1,450 @@
+name: release
+# 发布 vN 的收尾（#227 下半，决定 0011 第 4 条）：「发布 vN」PR 合进 main 之后，由这条工作流接手把
+# tag 打好、release 建好、当前 milestone 关好、飞书推一条。可重试、幂等：哪一步已存在就跳那一步、接着走。
+# 不在这条链上做的：
+#   - 不改仓、不提交（Unreleased 段在 PR 里就要写好）；
+#   - 不排状态机状态文件（状态机 packages/conventions/src/release-notes.ts 是「法」判定，GitHub 上的 tag/release 才是「事实」；
+#     每一步动手之前先查它在不在，在就照幂等跳）。
+# 触发（两种）：
+#   1. pull_request closed：只放行 base=main、merged=true、head=release/v<N> 的（packages/conventions/src/publish.ts 的 classifyPullRequestClosed）。
+#      分支对不上 → 这一步红、说清为什么不动作；「发布 PR 走了别的 base/分支」不可能只用「跳」盖过去，要人看见。
+#      没合（merged=false）→ 不动作也不算红（这本来就是合法的「这张发布 PR 不发了」）。
+#   2. workflow_dispatch：给一个 version 输入，照样走；多半是上次「发布 vN」PR 合并之后这条跑挂了，人手动补一轮。
+#
+# 国外停机状态下的「停机 → 等等 → 部署 → 恢复」四步（决定 0011 第 4 条）：法国引擎当前 FLEET_SERVICES=fleet-api（不含 fleet-engine，
+# 即停机在.deploy/france/desired-config.json），所以「停派遣」和「恢复派遣」这两步是说明性的空转，只把状态写进日志；
+# #453 把法国发改成按版本+创始人拍之后，这里才真正接 deploy/france/。
+#
+# 改这里之前必须知道：
+# - 每一小节 step 都做一件事、打一行日志；哪一步挂了从日志一眼看得到。
+# - 打 tag → 建 release → 关 milestone → 推飞书，顺序不能反（release-notes.ts 的 nextState 也是这个顺序）。
+on:
+  pull_request:
+    types: [closed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '手动补一轮的版本号（比如 v42）；发布 PR 合并触发时不填'
+        required: true
+        type: string
+
+permissions:
+  contents: write # 打 tag、建 release
+  issues: write # 关 milestone（milestone API 在 issues 权限下）
+  pull-requests: read # workflow_dispatch 手动补跑时按 head=release/v<N> 查已合并 PR 的 merge_commit_sha（第二意见 2026-10-02）
+
+# 同一版本并发跑两轮会都读到「未通知」、各推一条飞书（第二意见 2026-10-02）。
+# 按版本分组：pull_request 触发用 head 分支名，dispatch 用手动输入的 version；同组只跑一轮，cancel-in-progress=false
+# 让后来的等（不是挤掉）——「发布 vN 收尾」对都是会写仓的（tag、release、milestone、飞书），并发跑会互相覆盖。
+concurrency:
+  group: release-${{ github.event.pull_request.head.ref || inputs.version || 'unknown' }}
+  cancel-in-progress: false
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # 分类要在 pnpm install 之前：普通 feat/… 合到 main 会触发这条 workflow，要先判成 noop、安安静静不动作（第二意见
+      # 2026-10-02）。判成 noop 的场合不安装依赖就让后续 step 全 if proceed 跳掉——安装撞网/锁的时候也不会把「日常合并」
+      # 这个无问题事件当红。classify 用的 packages/conventions/src/publish.ts 只用 Node 内置 API、不装依赖能直接跑。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # a. 事件过滤：从 pull_request closed 触发时，只放行「合到 main、head 是 release/v<N>」；其余场合明说为什么不动作。
+      # base/head 不 Bash 插值进 node 源码：分支名由仓库贡献者控制，单引号/反引号拼进 -e 的字符串就是远程代码执行。
+      # 整段事件 JSON 走环境变量送过去，node 那边 JSON.parse（第二意见 2026-10-02）。
+      - name: 认出这一版要不要发（pull_request closed）
+        if: github.event_name == 'pull_request'
+        id: classify
+        env:
+          EVENT: ${{ toJSON(github.event.pull_request) }}
+        run: |
+          set -euo pipefail
+          out=$(EVENT_JSON="$EVENT" node --input-type=module -e "
+            import { classifyPullRequestClosed } from './packages/conventions/src/publish.ts';
+            const pr = JSON.parse(process.env.EVENT_JSON);
+            const r = classifyPullRequestClosed({ merged: pr.merged === true, baseRef: pr.base.ref, headRef: pr.head.ref });
+            console.log(JSON.stringify(r));
+          ")
+          kind=$(jq -r '.kind' <<<"$out")
+          echo "kind=$kind" >> "$GITHUB_OUTPUT"
+          if [[ $kind == proceed ]]; then
+            version=$(jq -r '.version' <<<"$out")
+            head_branch=$(jq -r '.headBranch' <<<"$out")
+            echo "version=$version" >> "$GITHUB_OUTPUT"
+            echo "head_branch=$head_branch" >> "$GITHUB_OUTPUT"
+          elif [[ $kind == noop ]]; then
+            why=$(jq -r '.why' <<<"$out")
+            echo "::notice::$why"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            msg=$(jq -r '.message' <<<"$out")
+            echo "::error::$msg"
+            exit 1
+          fi
+
+      # 手动补一轮：版本号从输入拿，不做分支过滤（发起人自己说要补哪一版）。
+      - name: 手动补一轮：版本号从输入拿
+        if: github.event_name == 'workflow_dispatch'
+        id: dispatch
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ ! $VERSION =~ ^v[0-9]+$ ]]; then
+            echo "::error::version 得是 v<N> 的模样：「$VERSION」"
+            exit 1
+          fi
+          echo "kind=proceed" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "head_branch=release/$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: 这一版要不要发的汇总
+        id: invoke
+        env:
+          PR_KIND: ${{ steps.classify.outputs.kind }}
+          PR_SKIP: ${{ steps.classify.outputs.skip }}
+          PR_VERSION: ${{ steps.classify.outputs.version }}
+          PR_HEAD: ${{ steps.classify.outputs.head_branch }}
+          DS_VERSION: ${{ steps.dispatch.outputs.version }}
+          DS_HEAD: ${{ steps.dispatch.outputs.head_branch }}
+        run: |
+          set -euo pipefail
+          if [[ ${GITHUB_EVENT_NAME:-} == workflow_dispatch ]]; then
+            echo "version=$DS_VERSION" >> "$GITHUB_OUTPUT"
+            echo "head_branch=$DS_HEAD" >> "$GITHUB_OUTPUT"
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          elif [[ $PR_KIND == proceed ]]; then
+            echo "version=$PR_VERSION" >> "$GITHUB_OUTPUT"
+            echo "head_branch=$PR_HEAD" >> "$GITHUB_OUTPUT"
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          elif [[ $PR_SKIP == true ]]; then
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::这一版要不要发认不出来（merged 和分支黑白没进 classify 的三态）"
+            exit 1
+          fi
+
+      # 安装依赖挪到「确定要发」之后：noop / error 的场合不安装（第二意见 2026-10-02，普通 feat 合到 main 不该撞安装失败当红）。
+      - uses: pnpm/action-setup@v4
+        if: steps.invoke.outputs.proceed == 'true'
+      - uses: actions/setup-node@v4
+        if: steps.invoke.outputs.proceed == 'true'
+        with:
+          node-version: 22
+          cache: pnpm
+      - if: steps.invoke.outputs.proceed == 'true'
+        run: pnpm install --frozen-lockfile
+
+      # b. 停派遣（说明性空转）：法国引擎当前 FLEET_SERVICES=fleet-api（不含 fleet-engine），派遣已经停着；
+      # 等决定 0011 第 3/4 条把法国发改成「按版本+创始人拍」接了 release.yml 之后，这里才是真的动派遣。
+      - name: 法国派遣已停（说明）
+        if: steps.invoke.outputs.proceed == 'true'
+        run: |
+          echo "法国引擎当前 FLEET_SERVICES=fleet-api（deploy/france/desired-config.json），派遣已停；这里是空转。"
+          echo "等 #453（本机验过再发）把「按版本+创始人拍」接到这条工作流上，这一步才真动。"
+
+      # c. 打 tag：已存在就跳；不存在就打、推。
+      - name: 打 tag（已存在就跳）
+        if: steps.invoke.outputs.proceed == 'true'
+        env:
+          VERSION: ${{ steps.invoke.outputs.version }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_MERGE_COMMIT_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          set -euo pipefail
+          # 已存在的 tag 不能只说「在就跳」：得核它指向的提交是不是本次发布合并（merge commit）。
+          if [[ $EVENT_NAME == pull_request ]]; then
+            # pull_request 事件的 GITHUB_SHA 不是 merge_commit_sha：squash / rebase 合并时它是 PR head，
+            # 不是 main 上那一次 merge（第二意见 2026-10-02）。得用 github.event.pull_request.merge_commit_sha。
+            MERGE_SHA="${PR_MERGE_COMMIT_SHA:-}"
+            if [[ -z $MERGE_SHA ]]; then
+              echo "::error::pull_request closed 触发：github.event.pull_request.merge_commit_sha 是空的——";
+              echo "::error::没拿到 main 上哪一次合是这次发布（merged=false 已被 classify 挡掉，到这说明 merged=true 但没记 sha），不接着走。"
+              exit 1
+            fi
+          else
+            # workflow_dispatch 手动补跑：HEAD 已经走到「发布 PR 合了又合了几个」，不能拿 HEAD 当这次发布的提交。
+            # 用 gh 查 head=release/v<N> 已 merge 的那张 PR，拿它的 merge_commit_sha——squash / merge commit / rebase 都对得上
+            # （第二意见 2026-10-02：主线上的提交信息不一定是「发布 v<N>：CHANGELOG.md …」，squash 时尤其不是）。
+            MERGE_SHA=$(gh api "repos/${{ github.repository }}/pulls?state=closed&head=${{ github.repository_owner }}:release/$VERSION&per_page=10" | \
+              jq -r '[.[] | select(.merged_at != null)][0].merge_commit_sha // empty')
+            if [[ -z $MERGE_SHA ]]; then
+              echo "::error::workflow_dispatch 手动补跑：没找到 head=release/$VERSION 已 merge 的 PR（抓取的是「release/$VERSION」分支在 ${GITHUB_REPOSITORY_OWNER:-仓库 owner} 名下），"
+              echo "::error::发起人先核 version（多半写错了）、或这张发布 PR 走的是别的 head 分支名；确实存在的话手动 gh api 查 merge_commit_sha 再走下一步。"
+              exit 1
+            fi
+          fi
+          echo "本次发布的 merge 提交：$MERGE_SHA（事件=$EVENT_NAME）"
+          check_tag() {
+            if ! git rev-parse -q --verify "refs/tags/$VERSION^{}" >/dev/null; then return 1; fi
+            local target
+            target=$(git rev-list -n 1 "refs/tags/$VERSION^{}" 2>/dev/null || echo "")
+            if [[ -z $target ]]; then return 1; fi
+            if [[ $target == "$MERGE_SHA" ]]; then return 0; fi
+            echo "::error::tag $VERSION 已存在但指向的提交（$target）不是本次 merge（$MERGE_SHA）——撞名字的 tag 指着别人，"
+            echo "::error::发起人要看一眼，不接着走（不把它当真发的那一份）。"
+            exit 1
+          }
+          if check_tag; then
+            echo "::notice::tag $VERSION 已经在、指向本次 merge（幂等跳）。"
+            exit 0
+          fi
+          # 本地没有：拉下远端 tag 再核一次；gh api 用返回码判存在（pull request 检出默认不带这套 ref）
+          git fetch origin "+refs/tags/*:refs/tags/*" || true
+          if check_tag; then
+            echo "::notice::tag $VERSION 已经在、指向本次 merge（幂等跳）。"
+            exit 0
+          fi
+          # 本地还不在：或许远端有，但 fetch 失败；直接问 gh
+          if gh api "repos/${{ github.repository }}/git/ref/tags/$VERSION" >/dev/null 2>&1; then
+            echo "::error::远端 tag $VERSION 存在但本地查不到指向的提交：不假定它和本次 merge 一致、也不接着走。"
+            echo "::error::发起人本地 git fetch --tags 看一眼指向，然后手动 cleanup 或 gh api -X DELETE …/git/refs/tags/$VERSION 再重跑。"
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # tag 显式打在 $MERGE_SHA（本次发布那次 merge 提交）上：不指名的话 git tag 默认打在 HEAD，
+          # workflow_dispatch 手动补跑时 main 已前进、就会把 vN 指错提交（第二意见 2026-10-02）。
+          git tag -a "$VERSION" -m "$VERSION" "$MERGE_SHA"
+          git push origin "$VERSION"
+          echo "tag $VERSION 已打（指向 $MERGE_SHA）。"
+
+      # d. 建 GitHub release：已存在且正文一致跳；正文不一致更新；不存在就建。
+      - name: 建 GitHub release（幂等：不存在就建、正文不一致就改回）
+        if: steps.invoke.outputs.proceed == 'true'
+        env:
+          VERSION: ${{ steps.invoke.outputs.version }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # 从仓根 CHANGELOG.md 拿「## [$VERSION] - 日期」那一段的原文当正文（发起人已经把它从 Unreleased 收进标题）。
+          # 逻辑在 packages/conventions/src/publish-release-logic.ts（extractReleaseBody）：找不到标题、正文空、
+          # 或正文只剩占位符（只剩「还没有」）都明确失败——不拿 Unreleased 段顶替（那里多是占位，照抄就发了假 release，第二意见 2026-10-02）。
+          VERSION_ENV="$VERSION" node --input-type=module -e "
+            import { readFileSync } from 'node:fs';
+            import { extractReleaseBody } from './packages/conventions/src/publish-release-logic.ts';
+            const r = extractReleaseBody(readFileSync('CHANGELOG.md', 'utf8'), process.env.VERSION_ENV);
+            if (r.kind !== 'ok') {
+              console.error(\`::error::\${r.message}\`);
+              process.exit(1);
+            }
+            console.log(r.body);
+          " > /tmp/release-body.md
+          # 已存在：读回比正文。比对时把 fleet-notified 标记剥掉——飞书那一步打在末尾的标签不能当「被人手改了正文」，
+          # 不然重跑这一轮会先把正文改回去、飞书那步接着判「没标过」再发一遍（第二意见 2026-10-02）。
+          # 同时核 tagName：vN 这个 release 名字、tag 却不是 vN 的话——名字撞了但指着别的（第二意见 2026-10-02）。
+          version=$(echo "$VERSION")
+          # 拿 release 要分清「404 不在」和「读挂了」：GitHub 临时故障时把整个失败都当「不在」会接着 create、可能重复或覆盖
+          # （第二意见 2026-10-02）。任何非 0 退出码都先看 stderr 里有没有 release not found，不再一律当 404 处理。
+          existing_err=/tmp/release-view-err.log
+          if ! existing=$(gh release view "$VERSION" --json body,tagName 2>"$existing_err"); then
+            err_text=$(<"$existing_err")
+            if grep -qiE "release not found|not found" <<<"$err_text"; then
+              : # 这是「不在」，走下面 create 那一头
+              existing=""
+            else
+              echo "::error::gh release view $VERSION 失败（不是「不存在」）：$err_text"
+              exit 1
+            fi
+          fi
+          if [[ -n $existing ]]; then
+            existing_tag=$(jq -r '.tagName' <<<"$existing")
+            if [[ $existing_tag != "$VERSION" ]]; then
+              echo "::error::release「$VERSION」在，但 tagName 是「$existing_tag」——名字撞但 tag 指着别的、不接着走。"
+              exit 1
+            fi
+            existing_body=$(jq -r '.body' <<<"$existing")
+            # 剥掉 <!-- fleet-notified: vN --> 那一行再比。
+            existing_changelog_part=$(grep -vE '^<!-- fleet-notified: [^ ]+ -->$' <<<"$existing_body" | sed -e 's/[[:space:]]*$//')
+            want=$(cat /tmp/release-body.md | sed -e 's/[[:space:]]*$//')
+            if [[ $existing_changelog_part == "$want" ]]; then
+              echo "::notice::release $VERSION 已经在，正文一致（幂等跳，fleet-notified 标记保留）。"
+              exit 0
+            fi
+            echo "::notice::release $VERSION 正文被人手改过（不一致，剥掉 fleet-notified 标记后还是对不上 CHANGELOG.md），改回原文并记一笔。"
+            # 把剥掉的 fleet-notified 行贴回去，别把上次发飞书的证据一起抹了。
+            notified_marks=$(grep -E '^<!-- fleet-notified: [^ ]+ -->$' <<<"$existing_body" || true)
+            {
+              printf '%s' "$want"
+              if [[ -n $notified_marks ]]; then printf '\n\n%s\n' "$notified_marks"; fi
+            } > /tmp/release-body-rewrite.md
+            gh release edit "$VERSION" --notes-file /tmp/release-body-rewrite.md
+            # 读回核对：edit 之后读一次，确认正文落上去；对不上就不接着走（第二意见 2026-10-02）。
+            if ! readback=$(gh release view "$VERSION" --json body 2>&1); then
+              echo "::error::gh release view $VERSION 读回失败：$readback"
+              exit 1
+            fi
+            readback_norm=$(jq -r '.body' <<<"$readback" | sed -e 's/[[:space:]]*$//')
+            want_full=$(sed -e 's/[[:space:]]*$//' < /tmp/release-body-rewrite.md)
+            if [[ $readback_norm != "$want_full" ]]; then
+              echo "::error::release $VERSION 改写正文之后读回对不上：下一步不接着走（不关 milestone、不推飞书）。"
+              exit 1
+            fi
+            exit 0
+          fi
+          gh release create "$VERSION" --title "$VERSION" --notes-file /tmp/release-body.md
+          echo "release $VERSION 已建。"
+          # 读回核对：release 建好了之后读一次，确认 tag 名、正文和仓里 CHANGELOG.md 写的那份对得上；读不出、对不上就直接红，
+          # 不接着走关 milestone 和飞书（「release 建好但正文没照写」的场合，宁可这一轮中止让人看一眼，第二意见 2026-10-02）。
+          if ! readback=$(gh release view "$VERSION" --json tagName,body 2>&1); then
+            echo "::error::gh release view $VERSION 读回失败：$readback"
+            exit 1
+          fi
+          readback_body=$(jq -r '.body' <<<"$readback")
+          want=$(cat /tmp/release-body.md | sed -e 's/[[:space:]]*$//')
+          readback_body_norm=$(sed -e 's/[[:space:]]*$//' <<<"$readback_body")
+          if [[ $readback_body_norm != "$want" ]]; then
+            echo "::error::release $VERSION 建好之后读回正文和 CHANGELOG.md 对不上：哪个先建出来的被改了或正文没存上去；下一步不接着走（不关 milestone、不推飞书）。"
+            exit 1
+          fi
+          echo "release $VERSION 读回核对过：tag 名、正文都对得上。"
+
+      # e. 关 milestone：读回开放 milestone 里叫 v<N> 的那一张，关它。没开着的那一张不算错（可能已经关过了）。
+      - name: 关 milestone（开放里恰好叫这一版的那一张；对不上 / 撞号都明说）
+        if: steps.invoke.outputs.proceed == 'true'
+        env:
+          VERSION: ${{ steps.invoke.outputs.version }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # 开放 milestone 一页一页全翻完（per_page=100 × N，gh api --paginate 顺 link rel=next 翻到最后一页），
+          # 只拿一页的话 100+ 张时会漏目标、误报「已关」（第二意见 2026-10-02）。
+          # 挑哪一张的判定在 packages/conventions/src/publish-release-logic.ts 的 pickOpenMilestone：
+          # ^v<N>([^0-9]|$) 词边界（v1 不撞 v10），撞多张 → error、发起人先看一眼，不拿「第一张」糊弄。
+          MILESTONES_JSON=$(gh api --paginate "repos/${{ github.repository }}/milestones?state=open&per_page=100" | jq -s 'add')
+          export MILESTONES_JSON VERSION_ENV="$VERSION"
+          num=$(node --input-type=module -e "
+            import { pickOpenMilestone } from './packages/conventions/src/publish-release-logic.ts';
+            const list = JSON.parse(process.env.MILESTONES_JSON).map((m) => ({ number: m.number, title: m.title }));
+            const r = pickOpenMilestone(list, process.env.VERSION_ENV);
+            if (r.kind === 'found') { console.log(r.milestone.number); process.exit(0); }
+            if (r.kind === 'none') { console.error(\`::notice::\${r.why}\`); process.exit(0); }
+            console.error(\`::error::\${r.message}\`);
+            for (const m of r.candidates) console.error(\`  #\${m.number}  \${m.title}\`);
+            process.exit(2);
+          ")
+          if [[ -z $num ]]; then
+            # 开放里没找到 → 再核「已关」：以 v<N> 开头 + 词边界、state=closed 里得有一张，不然就是没找到（发起前 milestone 被人删了或改名），
+            # 那会发了一版却没关版本（第二意见 2026-10-02）。
+            CLOSED_ROWS=$(gh api --paginate "repos/${{ github.repository }}/milestones?state=closed&per_page=100" | jq -s 'add')
+            closed_count=$(jq -r --arg v "$VERSION" '[.[] | select(.title | test("^" + $v + "([^0-9]|$)"))] | length' <<<"$CLOSED_ROWS")
+            if [[ $closed_count == 0 ]]; then
+              echo "::error::开放 milestone 里没找到 $VERSION 开头的，已关 milestone 里也没有——这一版（$VERSION）的 milestone 被删了或改名了，"
+              echo "::error::现在 tag 打了、release 建了、却没 milestone 关——发起人上去重建一张同名 milestone 再手动 gh api -X PATCH state=closed。"
+              exit 1
+            fi
+            echo "开放里没找到 $VERSION 开头的那张，已关里有（$closed_count 张）：多半已经被关过了（幂等跳）。"
+            exit 0
+          fi
+          title=$(jq -r --argjson n "$num" '.[] | select(.number == $n).title' <<<"$MILESTONES_JSON")
+          gh api -X PATCH "repos/${{ github.repository }}/milestones/$num" -F state=closed >/dev/null
+          echo "milestone #$num（$title）已关。"
+
+      # f. 飞书：配了 webhook 就发一条、Release 正文末尾打「<!-- fleet-notified: vN -->」标签记下；配了但没发过一次以上，
+      #     按「不在就不再发」幂等（第二意见 2026-10-02：手动重跑、超时要重试都不能让飞书重复收一条）。
+      - name: 飞书推一条（已发过就跳；FLEET_FEISHU 没配就明说、不算错）
+        if: steps.invoke.outputs.proceed == 'true'
+        env:
+          VERSION: ${{ steps.invoke.outputs.version }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FLEET_FEISHU: ${{ secrets.FLEET_FEISHU }}
+        run: |
+          set -euo pipefail
+          if [[ -z ${FLEET_FEISHU:-} ]]; then
+            echo "::notice::没配飞书（secret FLEET_FEISHU 不在），未通知。"
+            exit 0
+          fi
+          # 幂等：这一版的 release 正文里已经写了 <!-- fleet-notified: vN --> → 上次发过，跳。
+          # 读 release 读不出来不许|||| 兜成空正文：GitHub 临时故障时「查不到」被当「没发过」，会重复推飞书；
+          # 读不出就明确失败、这一轮中止（第二意见 2026-10-02）。
+          export VERSION_ENV="$VERSION"
+          if ! existing=$(gh release view "$VERSION" --json body 2>&1); then
+            echo "::error::gh release view $VERSION 失败：$existing"
+            exit 1
+          fi
+          notified=$(jq -r '.body' <<<"$existing" | node --input-type=module -e "
+            import { feishuAlreadyNotified } from './packages/conventions/src/publish-release-logic.ts';
+            let body = '';
+            process.stdin.on('data', (c) => (body += c));
+            process.stdin.on('end', () => {
+              console.log(feishuAlreadyNotified(body, process.env.VERSION_ENV) ? '1' : '0');
+            });
+          ")
+          if [[ $notified == 1 ]]; then
+            echo "::notice::release 正文里已有 <!-- fleet-notified: $VERSION -->：上次已经发过，跳（幂等）。"
+            exit 0
+          fi
+          body=$(cat /tmp/release-body.md)
+          url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/blob/main/CHANGELOG.md"
+          msg="$VERSION 上线了。
+
+$body
+
+— $url"
+          # 标记两段式（第二意见 2026-10-02）：
+          #   ① 发之前写「尝试标记」<!-- fleet-notify-attempt: vN --> 占住位置——runner 在「写完标记、还没发出去」之间崩了的话，
+          #      下一次读到的是 attempt 而不是 notified，会再发一次，不重不漏；
+          #   ② 发成功才把 attempt 换成 <!-- fleet-notified: vN -->；发失败把 attempt 剥掉，别把假证据留下。
+          #   已知取舍（飞书 webhook 没有幂等键——做不到「发了不重、没发不漏」全都要）：runner 在「飞书发成、还没换
+          #   notified」之间被 cancel/超时杀掉时，下一次还会再发一次，收两条重复通知。这个窗口小于 1 秒、只在
+          #   runner 被外部杀时撞得上；选「重发优先于漏发」是因为漏一条通知比多一条难发现得多。
+          jq -r '.body' <<<"$existing" | node --input-type=module -e "
+            import { appendFeishuAttemptMark } from './packages/conventions/src/publish-release-logic.ts';
+            let body = '';
+            process.stdin.on('data', (c) => (body += c));
+            process.stdin.on('end', () => {
+              console.log(appendFeishuAttemptMark(body, process.env.VERSION_ENV));
+            });
+          " > /tmp/release-body-attempt.md
+          if ! gh release edit "$VERSION" --notes-file /tmp/release-body-attempt.md >/dev/null; then
+            echo "::error::「尝试标记」写不进 release 正文：不接着发（不冒险变成「没标就发了」）。"
+            exit 1
+          fi
+          # 飞书 webhook 即便 HTTP 200，JSON 里也会用 code != 0 表示业务失败（第二意见 2026-10-02）；
+          # curl 拿 -o 把响应体留下，发完看 code 是不是 0，不是就当失败处理，别把假 attempt 换 notified。
+          FEISHU_RESP_FILE=/tmp/feishu-resp.json
+          if ! jq -n --arg text "$msg" '{msg_type:"text", content:{text:$text}}' | \
+               curl -fsS -X POST -H 'content-type: application/json' --data-binary @- -o "$FEISHU_RESP_FILE" "$FLEET_FEISHU"; then
+            echo "::error::飞书 HTTP 调用失败：release 正文里留着 <!-- fleet-notify-attempt: $VERSION -->——下一轮重跑会再发一次（不重不漏，因为还没换 notified）。"
+            echo "::error::发起人手动补救：gh release edit $VERSION --notes-file <CHANGELOG.md 里这一版原文>，再重跑 workflow_dispatch（version=$VERSION）。"
+            exit 1
+          fi
+          # 飞书 webhook 的成功响应形如 {"code":0,"msg":"success"}；读不出 code、code 不是 0 都算失败
+          feishu_code=$(jq -r '.code // "missing"' < "$FEISHU_RESP_FILE" 2>/dev/null || echo "unparseable")
+          feishu_msg=$(jq -r '.msg // ""' < "$FEISHU_RESP_FILE" 2>/dev/null || echo "")
+          if [[ $feishu_code != 0 ]]; then
+            echo "::error::飞书 webhook 回的业务码不是 0（code=$feishu_code, msg=$feishu_msg）：发布 ${VERSION} 未真的会通知——"
+            echo "::error::attempt 标记留着、下一轮重跑会再发一次；查 webhook 是不是失效，处理完再 workflow_dispatch（version=$VERSION）。"
+            exit 1
+          fi
+          # 发成了：把 attempt 换成 notified，下一轮幂等跳
+          jq -r '.body' <<<"$(gh release view "$VERSION" --json body)" | node --input-type=module -e "
+            import { promoteFeishuAttemptToNotified } from './packages/conventions/src/publish-release-logic.ts';
+            let body = '';
+            process.stdin.on('data', (c) => (body += c));
+            process.stdin.on('end', () => {
+              console.log(promoteFeishuAttemptToNotified(body, process.env.VERSION_ENV));
+            });
+          " > /tmp/release-body-notified.md
+          if ! gh release edit "$VERSION" --notes-file /tmp/release-body-notified.md >/dev/null; then
+            echo "::error::飞书发成了但 attempt→notified 换标记写不回去：下一轮读到 attempt 会再发一次（能补发但重复）。"
+            echo "::error::发起人手动 gh release edit $VERSION --notes-file <正文>，把 attempt 换成 notified。"
+            exit 1
+          fi
+          echo "飞书已推一条（release 正文末尾已经把 fleet-notify-attempt 换成 fleet-notified）。"
+
+
+      # g. 恢复派遣（说明性空转：引擎当前就不开派遣）。
+      - name: 法国派遣恢复（说明）
+        if: steps.invoke.outputs.proceed == 'true'
+        run: |
+          echo "法国派遣本来就不开（FLEET_SERVICES=fleet-api）；这里同样是空转。"
+          echo "等 #453 把法国发按版本+创始人拍接上，这一步才真动。"
