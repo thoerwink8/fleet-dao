@@ -1,7 +1,7 @@
 // 驾驶舱的所有读写都经过 FleetApi：方法和 shared/web-api.ts 的 WebRoutes 一一对应，形状全用那份定义。
 // 实现有两个：http.ts（真后端，带 CSRF 头、SSE 推送）和 mock/（假数据，开发和测试用），在 api/index.ts 里选。
 
-import { REALTIME_TABLES, type RealtimeTable } from '@fleet-dao/shared';
+import { type NotWired, REALTIME_TABLES, type RealtimeTable } from '@fleet-dao/shared';
 import {
   type QueryClient,
   useInfiniteQuery,
@@ -11,6 +11,7 @@ import {
   useQueryClient,
 } from '@tanstack/react-query';
 import { createContext, type ReactNode, useContext, useEffect, useSyncExternalStore } from 'react';
+import type { HomeState } from '../components/home/types';
 import { canSee, canSeeDetail } from '../demo/access';
 import type {
   Audit,
@@ -259,6 +260,20 @@ export function useSettings() {
 export function useDemoLinks() {
   const api = useApi();
   return useQuery({ queryKey: keys.demoLinks, queryFn: () => api.demoLinks() });
+}
+
+/**
+ * 新主页（/home3）的聚合读取：一屏三块（要你拍的 / 在跑的 / 做完的）+ 持续状态条。
+ * home-api 切片（#556 下）还没做，现在固定返回 NotWired——页面那一块换成「待实现」占位，不装作
+ * 「读成了但是空」。等 home-api 落地，这个 hook 换成真的 useQuery 就行，调用方不用改。
+ */
+export function useHome(): { data: HomeState } {
+  const notWired: NotWired = {
+    what: '新主页（要你拍的 / 在跑的 / 做完的）',
+    phase: 'v3 主页轮',
+    issue: 556,
+  };
+  return { data: { status: 'notWired', notWired } };
 }
 
 // ---------- 写 ----------

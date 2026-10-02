@@ -4,6 +4,7 @@ import {
   Boxes,
   CalendarClock,
   Gauge,
+  Home,
   LayoutDashboard,
   ListChecks,
   Network,
@@ -43,6 +44,13 @@ export const NAV: { group: string; items: NavItem[] }[] = [
         icon: LayoutDashboard,
         hint: '全部仓的盘面与待你处理的事',
         module: 'board',
+      },
+      {
+        to: '/home3',
+        label: '主页（新）',
+        icon: Home,
+        hint: '一屏三块：要你拍的、在跑的、做完的',
+        // 演示版里没有这一页（只在正式驾驶舱建替代主页）。
       },
       { to: '/tasks', label: '任务', icon: ListChecks, hint: '所有需求的清单', module: 'task' },
     ],
