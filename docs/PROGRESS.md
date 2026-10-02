@@ -19,6 +19,9 @@
 - 本轮交付：调研及建议在 `docs/mirasim-routing-and-macos-proposal.md`。建议在每回合发送处重新确认来源、仅重建需要切换的会话子进程，不另开常驻服务。按 discuss 尝试 5 次不同模型复核均未拿到有效结论，失败已记入方案，不宣称审过。下一步仅在后续实施时验证 SDK 初始化/控制消息重建与实际请求归属；本轮尚未开始实现。
 - 还没验证：投诉对应的具体服务端账单、修复后的实际切换、Mac 实机运行及进程树退出。二进制有 reclaude 进程、启动日志写 cloud 都不能单独当计费证据；平台必须核对真实请求链。
 - 调研记录提交 `8cd3ec1c`，PR [#573](https://github.com/thoerwink8/fleet-dao/pull/573)；PR 仅文档，未实施。推前卫生检查扫描本次提交新增内容为 0 条问题。
+- #573 已在 CI 必过项全绿后自动合并，主线提交 `2563b13a`。创始人随后问 Linux 与 Fleet 工作模式：已核对 `hosts.ts` 的 Mirasim 固定 cloud、法国直接 reclaude 配置、无头 service，以及 #509「模型 → 渠道」「额度满由 Temporal 接续」。补充建议为 Linux 保留无头平台通路、核真实渠道与记账，不复制桌面混合路由封装；法国现场未验。这里只记 AI 建议，不写成创始人已定。
+- Linux 补充验证：旧 Go 源码交叉编译 linux/amd64 成功，ELF64/x86-64 头检查通过，未运行到法国；核到 `mirasimRunFacts` 的 cloud 成功条件只核 2xx，未将 viaRelay 纳入该条件，方案将所选渠道与额度记账列为 Linux 验收落点。
+- Linux 补充调研提交 `32b924d6`，PR [#579](https://github.com/thoerwink8/fleet-dao/pull/579)；仍为未实施的建议，没有改法国配置或发布二进制。
 
 ## 2026-09-30 / 10-01（本机，指挥官会话）
 
