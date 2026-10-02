@@ -194,6 +194,11 @@ export interface NotificationRecord {
   resolvedAt?: string | undefined;
   resolvedBy?: string | undefined;
   deliveries: DeliveryRecord[];
+  /**
+   * 去重键（「同一件事一条」的认法）：approvals 的是 approval:<编号>，主页据此把通知标成「待批」。
+   * 老数据（镜像里没存过的）没有。
+   */
+  dedupeKey?: string | undefined;
 }
 
 export interface SettingRecord {
@@ -227,7 +232,11 @@ export interface AgentSession {
   endedAt?: string | undefined;
 }
 
-/** GitHub 镜像里的 PR。checks = 当前 head 上 CI 的汇总。 */
+/**
+ * GitHub 镜像里的 PR。checks = 当前 head 上 CI 的汇总。
+ * openedAt / mergedAt / issueRefs：主页「做完的」要按合并时刻排、要反查挂的单；「没读到过」还是 undefined，
+ * 不拿「没有打开时刻」冒充「没合并」。
+ */
 export interface PullRequestRecord {
   repoId: string;
   number: number;
@@ -235,6 +244,11 @@ export interface PullRequestRecord {
   headRef: string;
   headSha: string;
   checks: 'success' | 'failure' | 'pending' | 'none';
+  /** GitHub 上这条 PR 的最后更新时间。 */
+  updatedAt?: string | undefined;
+  openedAt?: string | undefined;
+  mergedAt?: string | undefined;
+  issueRefs?: number[] | undefined;
 }
 
 /**
@@ -351,6 +365,16 @@ export interface BoardStore {
     input: { askId: string; answer: string; by: Actor },
     audit: NewAuditEntry,
   ): Promise<'ok' | 'already_answered' | 'not_found'>;
+  /** 全部还没答的追问（新主页「要你拍的」用），按提问先后排。 */
+  listPendingAsks(): Promise<AskRecord[]>;
+  /**
+   * PR 镜像（新主页「做完的」、将来「在跑的」判合并段用）：state 给了只要那个状态；merged 按 mergedAt 倒序、
+   * 其余按 updatedAt 倒序，最多 limit 条（默认 50）。镜像里没有的就给不出——不直接查 GitHub。
+   */
+  listPullRequests(input?: {
+    state?: PullRequestRecord['state'] | undefined;
+    limit?: number | undefined;
+  }): Promise<PullRequestRecord[]>;
 }
 
 export interface RoutingStore {

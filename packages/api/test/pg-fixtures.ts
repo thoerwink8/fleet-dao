@@ -232,6 +232,11 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
         answer: a.answer ?? null,
         answeredBy: a.answeredBy ?? null,
         answeredAt: dateOpt(a.answeredAt),
+        scope: a.scope ?? null,
+        recommended: a.recommended ?? null,
+        hold: a.hold ?? null,
+        followUpIssue: a.followUpIssue ?? null,
+        appliedAt: dateOpt(a.appliedAt),
       })),
     );
   }
@@ -239,7 +244,7 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
     await db.insert(notifications).values({
       id: n.id,
       level: n.level,
-      dedupeKey: n.id,
+      dedupeKey: n.dedupeKey ?? n.id,
       taskId: n.taskId ?? null,
       title: n.title,
       body: n.body,
@@ -305,9 +310,20 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
     );
   }
   if (data.pullRequests?.length) {
-    await db
-      .insert(pullRequests)
-      .values(data.pullRequests.map((p) => ({ ...p, updatedAt: new Date('2026-09-25T00:00:00Z') })));
+    await db.insert(pullRequests).values(
+      data.pullRequests.map((p) => ({
+        repoId: p.repoId,
+        number: p.number,
+        state: p.state,
+        headRef: p.headRef,
+        headSha: p.headSha,
+        checks: p.checks,
+        updatedAt: p.updatedAt ? new Date(p.updatedAt) : new Date('2026-09-25T00:00:00Z'),
+        openedAt: dateOpt(p.openedAt),
+        mergedAt: dateOpt(p.mergedAt),
+        issueRefs: p.issueRefs ?? [],
+      })),
+    );
   }
   if (data.specs?.length) {
     await db.insert(specs).values(

@@ -207,7 +207,7 @@ describe('随手记任务', () => {
     const done = h.feishu.cardOf(cardId);
     expect(checkCard(done)).toEqual([]);
     expect(buttonsOf(done).map((b) => b.label)).toEqual(['打开驾驶舱', '关注']);
-    expect(buttonsOf(done)[0]?.url).toBe('https://cockpit.example.test/tasks/task-12');
+    expect(buttonsOf(done)[0]?.url).toBe('https://cockpit.example.test/home3');
 
     await click(cardId, value, { from: B, form: {} });
     expect(textIn(h.feishu.cardOf(cardId))).toContain('没有重复开任务');

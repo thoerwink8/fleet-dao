@@ -3,10 +3,15 @@
 import type { RiskyFile } from '@fleet-dao/conventions';
 import type { Brief, FlowConfigRead, TaskAsk, VerifyReport } from '@fleet-dao/core';
 import type { StageKind } from '@fleet-dao/shared';
-import type { MergeOutcome, TestResult } from './decisions/merge.ts';
-import type { PlannedSubtask } from './decisions/plan.ts';
-import type { TriageVerdict } from './decisions/triage.ts';
-import type { CiResult, ReviewResult, SyncResult } from './decisions/verify.ts';
+import type {
+  CiResult,
+  MergeOutcome,
+  PlannedSubtask,
+  ReviewResult,
+  SyncResult,
+  TestResult,
+  TriageVerdict,
+} from './decisions/types.ts';
 import {
   type AskHumanInput,
   type CheckHighRiskInput,

@@ -56,11 +56,11 @@ export function PaletteSwatch({
       </div>
       <div className="flex items-center gap-1.5 border-t bg-card px-2 py-1.5">
         <span className="text-xs font-medium">{p.name}</span>
-        <span className="num truncate text-[10px] text-muted-foreground">{p.en}</span>
+        <span className="num truncate text-micro text-muted-foreground">{p.en}</span>
         {active ? <Check className="ml-auto size-3.5 shrink-0" aria-hidden /> : null}
       </div>
       {size === 'lg' ? (
-        <p className="border-t bg-card px-2 pb-2 text-[11px] text-muted-foreground">{p.blurb}</p>
+        <p className="border-t bg-card px-2 pb-2 text-caption text-muted-foreground">{p.blurb}</p>
       ) : null}
     </button>
   );

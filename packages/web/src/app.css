@@ -63,6 +63,45 @@
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
+
+  /*
+   * 字号档位（#182 设计 token）：页面代码一律从这里取，不再写 text-[Npx]。
+   * 名字按用途：micro（角标、徽标）、caption（辅助信息、时间戳）、sub（卡片正文、列表条目）、
+   * label（侧栏品牌名）、strong（小标）、stat-num（额度大数字）、title（页面标题）、stat（顶栏大数字）。
+   */
+  --text-micro: 10px;
+  --text-caption: 11px;
+  --text-sub: 13px;
+  --text-label: 14px;
+  --text-strong: 15px;
+  --text-stat-num: 17px;
+  --text-title: 22px;
+  --text-stat: 28px;
+
+  /*
+   * 专用尺寸：顶栏高、侧栏宽（展开/收起/小屏抽屉）。改这里，整站的壳一起变。
+   */
+  --size-topbar: 52px;
+  --size-sidebar: 232px;
+  --size-sidebar-collapsed: 60px;
+  --size-sidebar-sheet: 260px;
+
+  /* 内容容器宽度：页面最大宽、设置页左右分栏、各弹层。 */
+  --container-cockpit: 1320px;
+  --container-settings-row: 96px;
+  --container-settings-col: 240px;
+  --container-quota-table: 860px;
+  --container-quota-row: 220px;
+  --container-search: 380px;
+  --container-notifications: 380px;
+  --container-notifications-list: 360px;
+  --container-usage: 340px;
+  --container-command-list: 440px;
+
+  /* 阴影：卡片描边（亮色下勾下边线）、品牌色圈（额度热）、状态色光圈（完成时一闪）。 */
+  --shadow-card-edge: 0 1px 0 var(--border);
+  --shadow-brand-ring: 0 0 0 1px var(--brand);
+  --shadow-done-pop: 0 0 0 4px color-mix(in oklab, var(--st-done) 30%, transparent);
 }
 
 /* ---------- 派生色：所有主题共用一套算法 ---------- */
@@ -529,6 +568,18 @@
 @utility scrollbar-thin {
   scrollbar-width: thin;
   scrollbar-color: var(--border-strong) transparent;
+}
+
+/*
+ * 设置页左标题右内容的分栏（lg 以上）。宽度从 --container-settings-col 取。
+ */
+@utility grid-cols-settings {
+  grid-template-columns: var(--container-settings-col) 1fr;
+}
+
+/* 关于页的「键：值」对（窄标签 + 自由宽内容）。 */
+@utility grid-cols-about {
+  grid-template-columns: var(--container-settings-row) 1fr;
 }
 
 /* ---------- 动效：在跑的东西会呼吸 ----------

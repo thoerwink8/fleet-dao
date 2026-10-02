@@ -92,7 +92,7 @@ export default function Overview() {
           value={count(byTone('run'))}
           icon={Activity}
           hint="分诊、写方案、写码、验证、合并"
-          to={canSee('task') ? '/tasks' : undefined}
+          to={canSee('task') ? '/home3' : undefined}
         />
         <Stat
           label="卡住"
@@ -151,7 +151,7 @@ export default function Overview() {
               <ul className="divide-y">
                 {attention.map((t) => (
                   <li key={t.id} className="flex flex-col gap-2 px-4 py-3 md:flex-row md:items-center">
-                    <Link to={`/tasks/${t.id}`} className="min-w-0 flex-1">
+                    <Link to="/home3" className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">
                         <span className="num text-xs font-semibold text-muted-foreground">
                           #{t.issueNumber}
@@ -257,10 +257,7 @@ export default function Overview() {
                   .sort((a, b) => Number(a.queued) - Number(b.queued) || a.since.localeCompare(b.since))
                   .map((n) => (
                     <li key={n.runId}>
-                      <Link
-                        to={`/tasks/${n.taskId}${n.subtaskId ? `?sub=${n.subtaskId}` : ''}`}
-                        className="flex items-center gap-2 px-4 py-2 text-sm hover:bg-accent"
-                      >
+                      <Link to="/home3" className="flex items-center gap-2 px-4 py-2 text-sm hover:bg-accent">
                         <StatusDot tone={n.queued ? 'wait' : 'run'} />
                         <span className="num min-w-0 flex-1 truncate text-xs">{n.modelName}</span>
                         <span className="num shrink-0 text-xs text-muted-foreground">

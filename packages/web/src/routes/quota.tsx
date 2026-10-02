@@ -49,9 +49,9 @@ function Callout({
       </div>
       <p className="mt-0.5 text-xs text-muted-foreground">{hint}</p>
       {items.length ? (
-        <ul className="mt-3 space-y-1.5 text-[13px]">{items}</ul>
+        <ul className="mt-3 space-y-1.5 text-sub">{items}</ul>
       ) : (
-        <p className="mt-3 text-[13px] text-muted-foreground">没有</p>
+        <p className="mt-3 text-sub text-muted-foreground">没有</p>
       )}
     </div>
   );
@@ -186,10 +186,10 @@ function Matrix({ pools, kinds, now }: { pools: PoolView[]; kinds: QuotaWindowKi
   const channels = [...new Map(pools.map((p) => [p.channelId, p])).values()];
   return (
     <div className="overflow-x-auto rounded-xl border bg-card scrollbar-thin">
-      <table className="w-full min-w-[860px] table-fixed border-collapse text-left">
+      <table className="w-full min-w-quota-table table-fixed border-collapse text-left">
         <caption className="sr-only">每个账号池、每个时间窗的额度</caption>
         <colgroup>
-          <col className="w-[220px]" />
+          <col className="w-quota-row" />
           {kinds.map((k) => (
             <col key={k} />
           ))}
@@ -214,7 +214,7 @@ function Matrix({ pools, kinds, now }: { pools: PoolView[]; kinds: QuotaWindowKi
                 <th scope="colgroup" colSpan={kinds.length + 1} className="px-4 py-1.5 text-xs">
                   <span className="flex items-center gap-2">
                     <span className="font-semibold">{ch.channelName}</span>
-                    <Badge variant="outline" className="h-4 px-1 text-[10px] font-normal">
+                    <Badge variant="outline" className="h-4 px-1 text-micro font-normal">
                       {ch.billing ? billingLabel[ch.billing] : '计费未知'}
                     </Badge>
                     {ch.channelEnabled ? null : <span className="text-muted-foreground">已下架</span>}
@@ -225,7 +225,7 @@ function Matrix({ pools, kinds, now }: { pools: PoolView[]; kinds: QuotaWindowKi
                 <tr key={p.id} className="border-b align-top last:border-b-0">
                   <th scope="row" className="px-4 py-3 font-normal">
                     <div className="num text-sm font-medium">{p.id}</div>
-                    <div className="mt-0.5 text-[11px] text-muted-foreground">
+                    <div className="mt-0.5 text-caption text-muted-foreground">
                       {p.expiresAt ? (
                         <>
                           <span className="num">{formatDate(p.expiresAt)}</span> 到期 ·{' '}
@@ -235,7 +235,7 @@ function Matrix({ pools, kinds, now }: { pools: PoolView[]; kinds: QuotaWindowKi
                         '没有到期日'
                       )}
                     </div>
-                    <div className="mt-0.5 text-[11px] text-muted-foreground">
+                    <div className="mt-0.5 text-caption text-muted-foreground">
                       在跑 <span className="num">{p.running}</span>/
                       <span className="num">{p.maxConcurrency}</span>
                     </div>

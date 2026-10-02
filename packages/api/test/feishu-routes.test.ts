@@ -1353,7 +1353,7 @@ describe('GET /feishu/board：盘面快照', () => {
       await (await h.cockpit.request('/api/feishu/board', gw('GET', undefined, null))).json(),
     );
     expect(snap.asOf).toBe(T0.toISOString());
-    expect(snap.counts).toEqual({ running: 1, stalled: 0, waitingForYou: 0, mergedToday: 0 });
+    expect(snap.counts).toEqual({ running: 1, stalled: 0, waitingForYou: 1, mergedToday: 0 });
     expect(snap.active).toEqual([
       {
         taskId: IDS.task12,
@@ -1377,7 +1377,18 @@ describe('GET /feishu/board：盘面快照', () => {
     ]);
     expect(snap.teamBoardCard).toBeNull();
     expect(snap.stalled).toEqual([]);
-    expect(snap.waiting).toEqual([]);
+    // 样例数据里主页「要你拍的」那条 approval 通知（#589）：未处理的 decision，照算「等你们的」。
+    expect(snap.waiting).toEqual([
+      {
+        kind: 'decision',
+        notificationId: IDS.notification2,
+        taskId: IDS.task12,
+        repo: 'example/canary',
+        issueNumber: 12,
+        title: '等你批：合并 PR #41（碰了删数据的人闸）',
+        since: new Date(T0.getTime() - 6 * MIN).toISOString(),
+      },
+    ]);
   });
 
   it('卡住的（最久的在前、写明卡在哪）、等你们的（追问 + 要人拍，最早的在前）、今天合并的、置顶的盘面卡', async () => {
@@ -1425,7 +1436,7 @@ describe('GET /feishu/board：盘面快照', () => {
     const snap = FeishuBoardSnapshotSchema.parse(
       await (await h.cockpit.request('/api/feishu/board', gw('GET', undefined, null))).json(),
     );
-    expect(snap.counts).toEqual({ running: 1, stalled: 1, waitingForYou: 2, mergedToday: 1 });
+    expect(snap.counts).toEqual({ running: 1, stalled: 1, waitingForYou: 3, mergedToday: 1 });
     expect(snap.stalled).toEqual([
       {
         taskId: IDS.task12,
@@ -1437,6 +1448,16 @@ describe('GET /feishu/board：盘面快照', () => {
       },
     ]);
     expect(snap.waiting).toEqual([
+      {
+        // 样例数据里主页「要你拍的」那条 approval 通知（#589），按建立时刻最早，排在最前。
+        kind: 'decision',
+        notificationId: IDS.notification2,
+        taskId: IDS.task12,
+        repo: 'example/canary',
+        issueNumber: 12,
+        title: '等你批：合并 PR #41（碰了删数据的人闸）',
+        since: new Date(T0.getTime() - 6 * MIN).toISOString(),
+      },
       {
         kind: 'ask',
         askId: FEISHU_IDS.askOpen,
@@ -1531,10 +1552,11 @@ describe('GET /feishu/outbox 与 POST /feishu/outbox/acks：待推送与回执',
     expect(batch.asOf).toBe(T0.toISOString());
     expect(batch.items.map((i) => i.id)).toEqual([
       `notification:${IDS.notification1}`,
+      `notification:${IDS.notification2}`,
       `ask:${FEISHU_IDS.askOpen}`,
       `notification:${FEISHU_IDS.decision}`,
     ]);
-    expect(batch.items[1]).toEqual({
+    expect(batch.items[2]).toEqual({
       id: `ask:${FEISHU_IDS.askOpen}`,
       revision: 1,
       kind: 'ask',
@@ -1549,13 +1571,19 @@ describe('GET /feishu/outbox 与 POST /feishu/outbox/acks：待推送与回执',
       options: ['4 位', '6 位'],
       createdAt: new Date(T0.getTime() - 5 * MIN).toISOString(),
     });
-    expect(batch.items[2]).toMatchObject({
+    expect(batch.items[3]).toMatchObject({
       kind: 'decision',
       title: '要批：发版',
       lines: ['第一行', '第二行'],
       notificationId: FEISHU_IDS.decision,
     });
     expect(batch.items[0]).toMatchObject({ kind: 'alert', link: `/tasks/${IDS.task12}` });
+    // 主页 approval 样例（#589）也按未处理 decision 推送一张卡。
+    expect(batch.items[1]).toMatchObject({
+      kind: 'decision',
+      title: '等你批：合并 PR #41（碰了删数据的人闸）',
+      notificationId: IDS.notification2,
+    });
   });
 
   it('发了就不再给；答了变成下一版（done、写明谁答的），带上上次送到的卡，网关原地改；改了也不再给', async () => {
@@ -1583,28 +1611,32 @@ describe('GET /feishu/outbox 与 POST /feishu/outbox/acks：待推送与回执',
       },
     );
     const next = await outbox(h);
+    // ask 送达的消息编号按它在第一批里的位置（om_<序号>）：样例数据多了主页 approval 那条（#589），ask 是第 3 件。
+    const askMessageId = `om_${first.items.findIndex((i) => i.id === askId)}`;
     expect(next.items).toEqual([
       expect.objectContaining({
         id: askId,
         revision: 2,
         status: 'done',
         doneText: '已回答：6 位 · 创始人甲 · 09-25 16:00',
-        delivered: { messageId: 'om_1', chatId: 'oc_team', sentAt: T0.toISOString(), revision: 1 },
+        delivered: { messageId: askMessageId, chatId: 'oc_team', sentAt: T0.toISOString(), revision: 1 },
       }),
     ]);
-    await ack(h, [{ itemId: askId, revision: 2, result: { status: 'updated', messageId: 'om_1' } }]);
+    await ack(h, [{ itemId: askId, revision: 2, result: { status: 'updated', messageId: askMessageId } }]);
     expect((await outbox(h)).items).toEqual([]);
   });
 
   it('免打扰推迟的到 until 之后才再给；没发成的到 retryAfter 之后再给（送不到留着下次再送）；不发了的记下原因、不再给', async () => {
     const h = harness({ data: feishuData() });
-    const [n1, ask1, decision] = (await outbox(h)).items;
-    if (!n1 || !ask1 || !decision) throw new Error('应当有三件');
+    const [n1, n2, ask1, decision] = (await outbox(h)).items;
+    if (!n1 || !n2 || !ask1 || !decision) throw new Error('应当有四件');
+    if (n2.id !== `notification:${IDS.notification2}`) throw new Error('第二件应当是主页 approval 样例');
     const alertNote = h.store.data.notifications.find((n) => n.id === IDS.notification1);
     const alertDeliveriesBefore = structuredClone(alertNote?.deliveries);
     const until = new Date(T0.getTime() + 30 * MIN).toISOString();
     await ack(h, [
       { itemId: n1.id, revision: 1, result: { status: 'deferred', until, reason: 'quiet_hours' } },
+      { itemId: n2.id, revision: 1, result: { status: 'dropped', reason: 'already_done' } },
       { itemId: ask1.id, revision: 1, result: { status: 'failed', error: '飞书超时', retryAfter: until } },
       { itemId: decision.id, revision: 1, result: { status: 'dropped', reason: 'over_budget' } },
     ]);

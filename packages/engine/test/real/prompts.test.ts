@@ -54,16 +54,11 @@ describe('提示词', () => {
       issueNumber: 12,
       mode: 'new',
     });
-    for (const part of [
-      'acme/widgets',
-      '#12',
-      '验证码 5 分钟过期',
-      'src/login/',
-      'fleet/12-login',
-      'pnpm check',
-    ]) {
+    for (const part of ['acme/widgets', '#12', '验证码 5 分钟过期', 'src/login/', 'fleet/12-login']) {
       expect(text).toContain(part);
     }
+    // 554-2 起写码阶段提示词不再要求会话里原样跑测试命令——后端核的是 PR 上的 CI（checks 汇总）。
+    expect(text).not.toContain('pnpm check');
     expect(text).toContain('fleet done');
     expect(text).toContain('fleet blocked');
     expect(text).toContain('不 push');
@@ -116,7 +111,7 @@ describe('提示词', () => {
     }
   });
 
-  it('写码：交活只认原样跑的测试命令（别接管道、别放后台）；审查：和 origin/<主线> 比（引擎在树里钉好了）', () => {
+  it('写码：554-2 起提示「测试由 CI 跑，交活只带提交」，不再要求会话里原样跑测试命令；审查：和 origin/<主线> 比（引擎在树里钉好了）', () => {
     const exec = stagePrompt({
       stage: 'execute',
       brief: brief({ branch: 'fleet/12-login' }),
@@ -124,8 +119,10 @@ describe('提示词', () => {
       issueNumber: 12,
       mode: 'new',
     });
-    expect(exec).toContain('交活只认会话里原样跑的 `pnpm test:changed`');
-    expect(exec).toContain('别接管道、别放后台');
+    expect(exec).toContain('测试由 CI 跑');
+    expect(exec).toContain('不在会话里跑测试');
+    expect(exec).not.toContain('交活只认会话里原样跑的');
+    expect(exec).not.toContain('别接管道、别放后台');
     expect(exec).toContain('origin/main');
     const review = stagePrompt({
       stage: 'review',
@@ -158,9 +155,9 @@ describe('提示词', () => {
       issueNumber: 12,
       mode: 'new',
     });
-    expect(research).toContain(
-      '这个项目没写测试命令（仓里 .fleet/flow.json 的 testCommand），交活不核对测试',
-    );
+    // 554-2 起写码阶段不问测试命令：会话里不跑，PR 的 CI 由后端核。research 的提示词里不出现任何测试命令字样。
+    expect(research).not.toContain('null');
+    expect(research).not.toContain('pnpm check');
     for (const text of [review, research]) expect(text).not.toContain('null');
   });
 
@@ -685,7 +682,9 @@ describe('Fusion 的 Lead：每一步交代什么、交回什么', () => {
     );
     expect(takeover).toContain('副手打回两次还没做好');
     expect(takeover).toContain('fleet done');
-    expect(takeover).toContain('pnpm check');
+    // 554-2 起 Lead 接手那一步的写码提示也变成「测试由 CI 跑」，不再要求会话里原样跑仓的测试命令。
+    expect(takeover).not.toContain('pnpm check');
+    expect(takeover).toContain('测试由 CI 跑');
   });
 
   it('结论文件：合法的认出来（字段原样，前后空白去掉）', () => {

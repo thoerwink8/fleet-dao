@@ -12,6 +12,7 @@ import {
   DemoLinksResponse,
   type DemoScope,
   HARD_BANS,
+  HomeResponseSchema,
   type HostId,
   hardBanFor,
   JobsResponse,
@@ -685,7 +686,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
           reason: '子任务都已合并，结果文档已写',
           via: 'engine',
         });
-        notify('daily', `#${tv.task.issueNumber} 已完成`, tv.task.title, `/tasks/${tv.task.id}`, tv.task.id);
+        notify('daily', `#${tv.task.issueNumber} 已完成`, tv.task.title, '/home3', tv.task.id);
       } else if (
         tv.task.state === 'running' &&
         subs.length &&
@@ -787,6 +788,130 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     async repos() {
       await wait();
       return ReposResponse.parse({ repos: st.repos });
+    },
+    async home() {
+      await wait();
+      // 和真后端 buildHome 一个拼法（少一些数据源：假后端没有 approvals 表、没有 PR 镜像表）：
+      // decision = decision 级未处理通知（标题里「等你批/等你点头」的算待批）+ 未答追问；
+      // done = merged 的子任务里有 prNumber 的（模拟器 merge 时给的号），时刻用它状态变化的时刻（没有就用现在）。
+      const repoName = (repoId: string) => {
+        const r = st.repos.find((x) => x.id === repoId);
+        return r ? `${r.owner}/${r.name}` : '（仓不在库里）';
+      };
+      const decisions = [
+        ...st.notifications
+          .filter((n) => !n.resolvedAt && n.level === 'decision')
+          .map((n) => {
+            const task = n.taskId ? st.tasks.find((t) => t.task.id === n.taskId) : undefined;
+            const approval = /等你(批|点头)/.test(n.title);
+            return {
+              kind: approval ? ('approval' as const) : ('notification' as const),
+              id: n.id,
+              title: n.title,
+              ...(task ? { context: `#${task.task.issueNumber} ${task.task.title}` } : {}),
+              since: n.createdAt,
+              link: n.link ?? '/notifications',
+            };
+          }),
+        ...st.tasks.flatMap((t) =>
+          t.asks
+            .filter((a) => a.answer === undefined)
+            .map((a) => ({
+              kind: 'ask' as const,
+              id: a.id,
+              title: a.question,
+              context: `#${t.task.issueNumber} ${t.task.title}`,
+              since: a.askedAt,
+              link: '/home3',
+            })),
+        ),
+      ].sort((a, b) => b.since.localeCompare(a.since));
+      const TERMINAL_M = new Set(['done', 'stopped', 'failed']);
+      const running = st.tasks
+        .filter((t) => !TERMINAL_M.has(t.task.state))
+        .sort((a, b) => a.task.priority - b.task.priority)
+        .map((t) => {
+          const queued = [...t.runs, ...t.subtasks.flatMap((s) => s.runs)].find(
+            (r) => !r.startedAt && !r.endedAt,
+          );
+          const asking = t.task.state === 'asking';
+          return {
+            issueNumber: t.task.issueNumber,
+            title: t.task.title,
+            repo: repoName(t.task.repoId),
+            segment: null,
+            waitingReason: asking
+              ? ('founder_decision' as const)
+              : queued
+                ? ('queue' as const)
+                : ('nothing' as const),
+            ...(queued ? { waitingSince: queued.queuedAt } : {}),
+            link: '/home3',
+          };
+        });
+      const done = st.tasks
+        .flatMap((t) =>
+          t.subtasks
+            .filter((s) => s.subtask.state === 'merged' && s.subtask.prNumber !== undefined)
+            .map((s) => ({
+              prNumber: s.subtask.prNumber as number,
+              title: t.task.title,
+              repo: repoName(t.task.repoId),
+              // 假后端不记每个子任务合并的时刻：日志里「PR #n 已合并」那条就是它，没有再退回「建单时刻」。
+              mergedAt:
+                [...st.logs]
+                  .reverse()
+                  .find(
+                    (l) => l.subtaskId === s.subtask.id && l.kind === 'state' && l.text.endsWith('→ merged'),
+                  )?.at ?? t.task.createdAt,
+              issueNumber: t.task.issueNumber,
+            })),
+        )
+        .sort((a, b) => b.mergedAt.localeCompare(a.mergedAt))
+        .slice(0, 10);
+      const quotaPools = st.pools.map((p) => {
+        const ws = st.quota.filter((w) => w.poolId === p.id);
+        return { pool: p, windows: ws };
+      });
+      const quotaState =
+        quotaPools.length === 0
+          ? { state: 'empty' as const, detail: '还没配账号池' }
+          : quotaPools.every(({ windows }) => windows.length === 0)
+            ? { state: 'unknown' as const, detail: '额度一次都还没读成' }
+            : (() => {
+                const tight = quotaPools.filter(({ windows }) =>
+                  windows.some((w) => (w.utilization ?? 0) >= 0.9 || w.upstreamStatus === 'limit_reached'),
+                );
+                return tight.length > 0
+                  ? {
+                      state: 'tight' as const,
+                      detail: `${tight
+                        .map(({ pool }) => st.channels.find((c) => c.id === pool.channelId)?.name ?? pool.id)
+                        .join('、')}快清零或已超限`,
+                    }
+                  : { state: 'ok' as const, detail: `${quotaPools.length} 块池都在限度内` };
+              })();
+      const failedRoutes = st.routes.filter((r) => r.probe?.state === 'failed');
+      const alive = st.routes.filter((r) => r.alive).length;
+      const routesState =
+        st.routes.length === 0 || st.routes.every((r) => r.probe === undefined)
+          ? { state: 'unknown' as const, detail: '探针还没出过结论' }
+          : failedRoutes.length > 0 || alive === 0
+            ? {
+                state: 'degraded' as const,
+                detail:
+                  failedRoutes.length > 0
+                    ? `${failedRoutes.length} 条路由探不通；${alive} 条在线`
+                    : '没有在线路由',
+              }
+            : { state: 'ok' as const, detail: `${alive} 条路由在线` };
+      return HomeResponseSchema.parse({
+        decisions,
+        running,
+        done,
+        health: { quota: quotaState, routes: routesState, engine: { state: 'on' } },
+        asOf: iso(),
+      });
     },
     async board(repoId) {
       await wait();

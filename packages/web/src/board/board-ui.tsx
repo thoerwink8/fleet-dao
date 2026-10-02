@@ -90,14 +90,13 @@ export function nodeTarget(data: BoardNodeData): ActionTarget | undefined {
   }
 }
 
-/** 双击去哪：需求和子任务去任务详情，仓去总览。 */
+/** 双击去哪：需求和子任务去主页（详情页已删），仓去总览。 */
 export function hrefOf(data: BoardNodeData): string {
   switch (data.kind) {
     case 'task':
-      return `/tasks/${data.task.id}`;
     case 'sub':
     case 'pr':
-      return `/tasks/${data.task.id}?sub=${data.sub.id}`;
+      return '/home3';
     default:
       return '/overview';
   }

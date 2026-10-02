@@ -4,8 +4,8 @@ import {
   Boxes,
   CalendarClock,
   Gauge,
+  Home,
   LayoutDashboard,
-  ListChecks,
   Network,
   Presentation,
   Radio,
@@ -44,7 +44,13 @@ export const NAV: { group: string; items: NavItem[] }[] = [
         hint: '全部仓的盘面与待你处理的事',
         module: 'board',
       },
-      { to: '/tasks', label: '任务', icon: ListChecks, hint: '所有需求的清单', module: 'task' },
+      {
+        to: '/home3',
+        label: '主页（新）',
+        icon: Home,
+        hint: '一屏三块：要你拍的、在跑的、做完的',
+        // 演示版里没有这一页（只在正式驾驶舱建替代主页）。
+      },
     ],
   },
   {
@@ -81,6 +87,12 @@ export const NAV: { group: string; items: NavItem[] }[] = [
         module: 'schedules',
       },
       { to: '/judge', label: brand.terms.judgeNav, icon: Scale, soon: true, hint: '判断题的记录与准确率' },
+      {
+        to: '/changelog',
+        label: '更新日志',
+        icon: ScrollText,
+        hint: '仓根 CHANGELOG.md：还没发版的、已发出去的',
+      },
       {
         to: '/notifications',
         label: '通知中心',

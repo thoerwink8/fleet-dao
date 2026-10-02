@@ -1,8 +1,7 @@
 import { Database, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import { NavLink } from 'react-router';
 import { brand } from '#brand';
-import { useAllBoards, useApi, useNotifications } from '../../api/client';
-import { needsAttention } from '../../lib/status';
+import { useApi, useNotifications } from '../../api/client';
 import { cn } from '../../lib/utils';
 import { LogoMark } from '../logo';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../ui/tooltip';
@@ -11,14 +10,12 @@ import { type NavItem, visibleNav } from './nav';
 /** 侧栏角标：数字，或者「!」表示没读成（不拿 0 冒充没事）。 */
 function useBadges(): Record<string, number | '!'> {
   const notices = useNotifications('open');
-  const { boards, error } = useAllBoards();
   return {
     '/notifications': notices.data
       ? notices.data.items.filter((n) => n.level !== 'daily').length
       : notices.error
         ? '!'
         : 0,
-    '/tasks': error ? '!' : boards.flatMap((b) => b.tasks).filter(needsAttention).length,
   };
 }
 
@@ -29,7 +26,7 @@ function DataSource({ collapsed }: { collapsed: boolean }) {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <span className="flex min-w-0 items-center gap-1.5 rounded-md px-1.5 py-1 text-[11px] text-muted-foreground">
+        <span className="flex min-w-0 items-center gap-1.5 rounded-md px-1.5 py-1 text-caption text-muted-foreground">
           <Database className={cn('size-3.5 shrink-0', mock && 'text-ink-stall')} aria-hidden />
           {collapsed ? null : (
             <span className="truncate">{mock ? '假数据（演示）' : `${brand.product}后端`}</span>
@@ -64,7 +61,7 @@ function Item({
       onClick={onNavigate}
       className={({ isActive }) =>
         cn(
-          'group relative flex h-8 items-center gap-2.5 rounded-lg px-2.5 text-[13px] text-muted-foreground transition-colors',
+          'group relative flex h-8 items-center gap-2.5 rounded-lg px-2.5 text-sub text-muted-foreground transition-colors',
           'hover:bg-accent hover:text-foreground',
           isActive && 'bg-accent font-medium text-foreground',
           collapsed && 'justify-center px-0',
@@ -74,18 +71,18 @@ function Item({
       {({ isActive }) => (
         <>
           {isActive ? (
-            <span className="absolute top-1.5 bottom-1.5 -left-2 w-[3px] rounded-full bg-brand" />
+            <span className="absolute top-1.5 bottom-1.5 -left-2 w-0.75 rounded-full bg-brand" />
           ) : null}
           <Icon className="size-4 shrink-0" aria-hidden />
           {collapsed ? null : <span className="min-w-0 flex-1 truncate">{item.label}</span>}
           {!collapsed && item.soon ? (
-            <span className="rounded border border-dashed px-1 text-[10px] leading-4 text-faint">后续</span>
+            <span className="rounded border border-dashed px-1 text-micro leading-4 text-faint">后续</span>
           ) : null}
           {badge === '!' || badge > 0 ? (
             <span
               title={badge === '!' ? '没读成' : undefined}
               className={cn(
-                'num grid min-w-4 place-items-center rounded-full px-1 text-[10px] leading-4 font-semibold',
+                'num grid min-w-4 place-items-center rounded-full px-1 text-micro leading-4 font-semibold',
                 badge === '!' ? 'bg-st-fail text-white' : 'bg-foreground text-background',
                 collapsed && 'absolute top-0.5 right-1.5',
               )}
@@ -123,14 +120,14 @@ export function SidebarNav({
   return (
     <div className="flex h-full flex-col">
       <div
-        className={cn('flex h-[52px] shrink-0 items-center gap-2.5 px-4', collapsed && 'justify-center px-0')}
+        className={cn('flex h-topbar shrink-0 items-center gap-2.5 px-4', collapsed && 'justify-center px-0')}
       >
         <LogoMark className="size-7 shrink-0" />
         {collapsed ? null : (
           <div className="min-w-0 leading-tight">
-            <div className="num text-[14px] font-semibold tracking-tight">{brand.name}</div>
+            <div className="num text-label font-semibold tracking-tight">{brand.name}</div>
             {brand.product === brand.name ? null : (
-              <div className="text-[11px] text-muted-foreground">{brand.product}</div>
+              <div className="text-caption text-muted-foreground">{brand.product}</div>
             )}
           </div>
         )}
@@ -141,7 +138,7 @@ export function SidebarNav({
             {collapsed ? (
               <div className="mx-auto my-2 h-px w-6 bg-border" />
             ) : (
-              <div className="mb-1 px-2.5 text-[11px] font-medium text-faint">{g.group}</div>
+              <div className="mb-1 px-2.5 text-caption font-medium text-faint">{g.group}</div>
             )}
             <div className="space-y-0.5">
               {g.items.map((item) => (

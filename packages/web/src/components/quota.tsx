@@ -47,7 +47,7 @@ export function ReadingBadge({ w, className }: { w: QuotaWindowView; className?:
     <span
       title={measured ? '从官方或网页接口读到的' : '读不到，按我们自己的用量估的'}
       className={cn(
-        'inline-flex h-4 shrink-0 items-center gap-1 rounded px-1 text-[10px] leading-none whitespace-nowrap',
+        'inline-flex h-4 shrink-0 items-center gap-1 rounded px-1 text-micro leading-none whitespace-nowrap',
         measured
           ? 'bg-muted text-muted-foreground'
           : 'border border-dashed border-border-strong text-muted-foreground',
@@ -100,7 +100,7 @@ export function QuotaCell({ w, now }: { w: QuotaWindowView; now: number }) {
     <div
       className={cn(
         'rounded-lg border p-2.5 transition-colors',
-        hot && 'border-brand bg-brand/[0.06] shadow-[0_0_0_1px_var(--brand)]',
+        hot && 'border-brand bg-brand/[0.06] shadow-brand-ring',
         full && 'border-st-fail/50 bg-st-fail/[0.06]',
       )}
       data-hot={hot || undefined}
@@ -109,7 +109,7 @@ export function QuotaCell({ w, now }: { w: QuotaWindowView; now: number }) {
       data-unknown={!known || undefined}
     >
       <div className="flex items-center justify-between gap-2">
-        <span className="min-w-0 truncate text-[11px] text-muted-foreground" title={`上游原名：${w.label}`}>
+        <span className="min-w-0 truncate text-caption text-muted-foreground" title={`上游原名：${w.label}`}>
           {windowTitle(w)}
         </span>
         <ReadingBadge w={w} />
@@ -117,31 +117,31 @@ export function QuotaCell({ w, now }: { w: QuotaWindowView; now: number }) {
       <div className="mt-1.5 flex items-baseline justify-between gap-2">
         {w.used !== undefined && w.limit !== undefined ? (
           <span className="num min-w-0 truncate">
-            <span className={cn('text-[17px] font-semibold', full && 'text-ink-fail')}>
+            <span className={cn('text-stat-num font-semibold', full && 'text-ink-fail')}>
               {amount(w, w.used)}
             </span>
             <span className="text-xs text-muted-foreground"> / {amount(w, w.limit)}</span>
           </span>
         ) : util !== undefined ? (
-          <span className={cn('num text-[17px] font-semibold', full && 'text-ink-fail')}>
+          <span className={cn('num text-stat-num font-semibold', full && 'text-ink-fail')}>
             {formatPercent(util)}
           </span>
         ) : upstreamFull ? (
-          <span className="text-[17px] font-semibold text-ink-fail">已用满</span>
+          <span className="text-stat-num font-semibold text-ink-fail">已用满</span>
         ) : w.used !== undefined ? (
           <span className="num min-w-0 truncate">
-            <span className="text-[17px] font-semibold">{amount(w, w.used)}</span>
+            <span className="text-stat-num font-semibold">{amount(w, w.used)}</span>
             <span className="text-xs text-muted-foreground"> 已用，上限没读到</span>
           </span>
         ) : (
-          <span className="text-[13px] font-medium text-ink-stall">用量没读到</span>
+          <span className="text-sub font-medium text-ink-stall">用量没读到</span>
         )}
         {w.used !== undefined && util !== undefined ? (
           <span className="num shrink-0 text-xs text-muted-foreground">{formatUtil(util)}</span>
         ) : null}
       </div>
       <QuotaBar util={util ?? (upstreamFull ? 1 : undefined)} className="mt-1.5" />
-      <div className="mt-1.5 flex flex-wrap items-center justify-between gap-x-2 text-[11px] text-muted-foreground">
+      <div className="mt-1.5 flex flex-wrap items-center justify-between gap-x-2 text-caption text-muted-foreground">
         {w.resetsAt ? (
           <span className={cn(hot && 'font-medium text-foreground')}>
             <span className="num">{formatIn(w.resetsAt, now)}</span>清零
@@ -157,17 +157,17 @@ export function QuotaCell({ w, now }: { w: QuotaWindowView; now: number }) {
         </span>
       </div>
       {hot && util !== undefined ? (
-        <div className="mt-1.5 text-[11px] font-medium text-foreground">
+        <div className="mt-1.5 text-caption font-medium text-foreground">
           快清零还剩 <span className="num">{formatPercent(1 - util)}</span>，先用它
         </div>
       ) : null}
       {full ? (
-        <div className="mt-1.5 text-[11px] font-medium text-ink-fail">快用完了，调度会先绕开</div>
+        <div className="mt-1.5 text-caption font-medium text-ink-fail">快用完了，调度会先绕开</div>
       ) : null}
       {w.upstreamStatus && w.upstreamStatus !== 'allowed' ? (
         <div
           className={cn(
-            'mt-1.5 text-[11px] font-medium',
+            'mt-1.5 text-caption font-medium',
             w.upstreamStatus === 'limit_reached' ? 'text-ink-fail' : 'text-ink-stall',
           )}
           title={w.statusRaw ? `上游原话：${w.statusRaw}` : undefined}
@@ -176,12 +176,12 @@ export function QuotaCell({ w, now }: { w: QuotaWindowView; now: number }) {
         </div>
       ) : null}
       {w.staleSince ? (
-        <div className="mt-1.5 text-[11px] text-ink-stall">
+        <div className="mt-1.5 text-caption text-ink-stall">
           上游从 <span className="num">{formatAgo(w.staleSince, now)}</span>
           起没再报这个窗，数是之前的，不参与排序
         </div>
       ) : !known ? (
-        <div className="mt-1.5 text-[11px] text-muted-foreground">不参与「先用它」和排序</div>
+        <div className="mt-1.5 text-caption text-muted-foreground">不参与「先用它」和排序</div>
       ) : null}
     </div>
   );

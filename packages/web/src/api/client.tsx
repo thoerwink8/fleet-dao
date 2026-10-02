@@ -11,6 +11,8 @@ import {
   useQueryClient,
 } from '@tanstack/react-query';
 import { createContext, type ReactNode, useContext, useEffect, useSyncExternalStore } from 'react';
+import { brand } from '#brand';
+import type { HomeState } from '../components/home/types';
 import { canSee, canSeeDetail } from '../demo/access';
 import type {
   Audit,
@@ -20,6 +22,7 @@ import type {
   CreatedDemoLink,
   DemoLinks,
   DemoScopeView,
+  HomeResponse,
   Jobs,
   LiveEvent,
   Me,
@@ -53,6 +56,8 @@ export interface FleetApi {
   logout(): Promise<void>;
   me(): Promise<Me>;
   repos(): Promise<{ repos: Repo[] }>;
+  /** 新主页（/home3）的一屏三块 + 持续状态条（#589）。 */
+  home(): Promise<HomeResponse>;
   board(repoId: string): Promise<Board>;
   task(taskId: string): Promise<TaskDetail>;
   timeline(taskId: string, page?: { cursor?: string | undefined; limit?: number }): Promise<Timeline>;
@@ -259,6 +264,33 @@ export function useSettings() {
 export function useDemoLinks() {
   const api = useApi();
   return useQuery({ queryKey: keys.demoLinks, queryFn: () => api.demoLinks() });
+}
+
+/**
+ * 新主页（/home3）的聚合读取：一屏三块（要你拍的 / 在跑的 / 做完的）+ 持续状态条。
+ * 后端不发网址（和 alert-work 一个规矩）：done 的跳转链接这里按品牌拼好再给卡片。
+ */
+export function useHome(): { data: HomeState } {
+  const api = useApi();
+  const query = useQuery({ queryKey: ['home'], queryFn: () => api.home() });
+  if (query.isPending) return { data: { status: 'loading' } };
+  if (query.error) return { data: { status: 'error', error: query.error } };
+  const data = query.data;
+  return {
+    data: {
+      status: 'data',
+      data: {
+        decisions: data.decisions,
+        running: data.running,
+        done: data.done.map((d) => {
+          const cut = d.repo.indexOf('/');
+          const repo = { owner: d.repo.slice(0, cut), name: d.repo.slice(cut + 1) };
+          return { ...d, link: brand.repoLink(repo, 'pull', d.prNumber) };
+        }),
+        health: data.health,
+      },
+    },
+  };
 }
 
 // ---------- 写 ----------

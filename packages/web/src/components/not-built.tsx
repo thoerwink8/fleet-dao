@@ -26,7 +26,7 @@ export function NotBuilt({
       )}
     >
       <Blueprint className={compact ? 'size-10 shrink-0' : 'size-24'} />
-      <div className={cn('min-w-0', compact ? 'text-sm' : 'text-[15px]')}>
+      <div className={cn('min-w-0', compact ? 'text-sm' : 'text-strong')}>
         <div className="font-medium text-foreground">{notWired.what} · 待实现</div>
         <div className="mt-0.5">
           这块还没做，排在 {notWired.phase} ·{' '}

@@ -117,7 +117,7 @@ function Frame() {
         <aside
           className={cn(
             'hidden shrink-0 border-r bg-panel transition-[width] duration-200 md:block',
-            collapsed ? 'w-[60px]' : 'w-[232px]',
+            collapsed ? 'w-sidebar-collapsed' : 'w-sidebar',
           )}
         >
           <SidebarNav collapsed={collapsed} onToggle={() => setCollapsed(!collapsed)} />
@@ -135,7 +135,7 @@ function Frame() {
         </div>
       </div>
       <Sheet open={mobileNav} onOpenChange={setMobileNav}>
-        <SheetContent side="left" className="w-[260px] bg-panel p-0">
+        <SheetContent side="left" className="w-sidebar-sheet bg-panel p-0">
           <SheetTitle className="sr-only">导航</SheetTitle>
           <SheetDescription className="sr-only">{brand.product}的全部页面</SheetDescription>
           <SidebarNav onNavigate={() => setMobileNav(false)} />

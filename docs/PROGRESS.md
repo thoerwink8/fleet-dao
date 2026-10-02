@@ -5,6 +5,7 @@
 ## 2026-10-02（Mirasim 切换与一条命令迁移，实施）
 
 - 基线 `06533e1a`；创始人已同意实现并要求「一条命令或者不用命令」从旧机制迁移，决定记在 `docs/decisions/0012-mirasim-routing-and-migration.md`。独立工作树 `.claude/worktrees/mirasim-routing-impl`。
+- 实施提交 `0c323645`；首次提交包含启动器、迁移入口、失败测试、指南与 CI；正在合入并发推进的主线更新后审查。
 - 做到哪：新增 `packages/mirasim-reclaude`（Go 会话启动器、Node 迁移），自有 / 平台双向切换、严格选路、SDK 初始化/权限恢复、正常退出后 resume、父进程强杀后子孙回收、一次性 stdin EOF 保留退出码均已用真实编译的假执行体验证。暂未切本机启动命令、停会话或改法国配置。
 - 迁移：`pnpm mirasim:migrate` 支持检查、等待和撤回；`agents:sync --apply` 自动识别旧封装并安排隐藏后台任务，两个独立调用不会同时写配置或重复安排。备份只存启动字段；核源码、架构、文件校验和 reclaude 目标；保留原参数，损坏记录/文件明确失败。真实会话档案的 `incomplete` 已纳入已结束状态。
 - 验证：新包完整测试首轮 13 条通过（含 Go 生命周期），随后新增并复现并发、文件损坏、坏撤回记录、平台注入缺失、已退出执行体的控制恢复失败；相关迁移/后台 14 条、同步真实入口 4 条通过。Linux cloud 入账前核计费调用来源；本地 count_tokens / models 与模型调用分开。四平台原生测试/构建工作流已写，尚未运行到 GitHub。
@@ -12,9 +13,16 @@
 - 下一步：本机 Grok 独立审查（决定 0008），开 PR 后盯 CI 和两种 Mac 的真实 runner，再安全迁移本机；指南、README、design/ops 和旧自检指针已同步对齐。
 - 还没验证：新版与真实 Mirasim 的请求归属、Mac 用户机器的 GUI 接入、法国真实渠道与记账；没有把编译成功、日志 route=cloud 或先前讨论失败当作验收。
 
-# 进度（本机恢复与重做前置）
+## 2026-10-02（W4 顺位 9 / #605 / PR #606）
 
-> 一行一条、带日期和对应提交。规矩在 `AGENTS.md` 通用段「进度也要落盘」。
+- **556-1 删 Fusion 工作流 + 对应 decisions 实现**：分支 `feat/556-1-big-delete`，工作树 `.claude/worktrees/556-1-big-delete`。
+- 删的：`packages/engine/src/workflows/{fusion,requirement,subtask,merge-queue,sync-mainline}.ts`、`packages/engine/src/decisions/{triage,plan,delivery,verify,merge}.ts`、7 个对应的测试文件（fusion / requirement / requirement-start / subtask / merge-queue / replay / org-drift）。
+- 留的：`decisions/types.ts`（共享类型：Feedback/SyncResult/CiResult/PlannedSubtask/SubtaskSpec/TriageVerdict/MergeOutcome/TestResult），DecisionMap 只留 limits/newIds/failure/brief/parallelBriefs/acceptance/verdict/bodyCriteria/verifyLines/fusionStart/fusionFlow/leadPlan/leadReview/rebuttable/filesUnder/fusionPr/closeComment；`fusionFlow` 保留给开 PR 前验证回环的测试宿主。
+- spec 结果.md 里指向已删文件的指针改成「代码于 #556-1 删除」（#214/#253/#259/#335/#43/#444/#460/#598/ops.md）。
+- 单子 `gh issue view 605`，母单 #556；挂 v3 三段一条龙 里程碑（`gh issue edit` 补的：pnpm issue:new 报 graphql EOF 后手动补）。
+- PR [#606](https://github.com/thoerwink8/fleet-dao/pull/606)，`--auto --squash` 已挂；CI 还在跑；mergeStateStatus=BLOCKED（等 CI 绿）。
+- 验证：`pnpm test:changed`（115 文件 2577 过 / 32 跳过）、`pnpm exec tsc -b` 绿、`pnpm exec biome check` 0 错。
+- **接下来**：556-2 删 `packages/core/src/{flow,fusion}.ts` + `flow.default.json`（DecisionMap 里 leadPlan/fusionFlow 等还指着它）；556-3 删 API 侧 Fusion 接活（本切片没动 `packages/api/`）。
 
 **最近 24h（2026-10-02 02:30 UTC = 北京 10:30 前后）**：① 6 路调研收割回来 → 落 docs/decisions/0008（讨论改本机 Grok 4.7 无头）、0009（v3 实现排期 W0-W5）、0010（三段定稿，W1 起草）、0011（创始人对 7 件人闸的拍板，全部按推荐）；② 6 张 PR 合主线（#571 #572 #573 #575 #576 #578 #579 #580/581 进行中）；③ 关了 4 张被取代单（#440 #454 #69 #489 NOT_PLANNED） + #531 COMPLETED；④ 改写 #446 挂 #556、#556、#69 挂 #555；⑤ 新出 #574、#577；⑥ v3 里程碑 fleet:order 按 0009 重写；⑦ 派了 3 个工作流（v3-quick-fixes 完成、v3-headless-runner 554-1 在跑、v3-routing-db 完成、v3-cockpit-batch1 4 片在跑）。**详见下表 2026-10-02 各节和 docs/decisions/。**
 
@@ -363,6 +371,53 @@
 - v3 里程碑 #10 说明 fleet:order 更新为 #509/#554/#555/#556/#227/#450/#194/#76/#323。
 - 起 `v3-quick-fixes` 工作流（w56jpm7sa 完成后），4 个 agent 并行：W1 文档对齐（1 PR）+ fix-531 一行 + s489-spec-salvage + issue-close-superseded（3 个小 PR）。
 - 起 `v3-routing-db` 工作流（routing-two-layer-db 切片，1 个大 PR）。
+
+## 2026-10-02 02:30 UTC（W1 文档对齐已合主线，0010 落）
+
+- `docs/decisions/0010-three-segment-flow.md`：W1 起草的三段定稿——它和 #571 后放在 docs/0011-and-progress-b5d 分支上。其中「0008」的名字当时标成了（现在看应是 0010、因为 0008 是「讨论改 Grok」决定的占位）——这个已按 0010 名字落地。
+- `docs/goals.md` §七：副手/Temporal/飞书/本机环境四条定的，搬去「七之附」；头部「还没定的拍完之前不按 0003 开新活」过期间门删。
+- `docs/design.md` 行 3 横幅：改指 specs/509-需求梳理/流程重做方案.md 和 goals.md；第五/九/十五/十六节标题下各加一行「先别照本节做」。
+- AGENTS.md 本仓段（非通用段）4 处同步新口径；改动小于通用段、按「改标准」走闸。
+- ops.md 571-608 的 Fusion/认领段收口；「#532 一起来删」改指 #446。
+
+## 2026-10-02 10:25 UTC（Mirasim 后两批主工作流完成）
+
+- routing-two-layer-db（#574/#580）：routing_catalog 表 + routing.default.json 骨架已落主线；engine 解析（pickRoute 走两级）**未做**——那是 routing-two-layer-engine 切片。
+- 554-1 无头一次性子进程段 runner（#577/#581）：骨架已合主线；runs 是 NotWired 占位（写 _tmp/runs-not-wired/*.jsonl，等真 runs 表落上再补）。
+- 4 穴 cockpit （v3-cockpit-batch1）：tokens、home3、home-api、changelog——全部挂 PR 上、跑 CI 中。
+
+## 2026-10-02 10:40 UTC（v3-cockpit-batch1 完成、新一轮派工）
+
+**4/4 完成**：tokens（#587 已合主线）、home3（#584 已合主线）、**home-api（拒绝，新单 #589 出市；开始的具体工作流符人）**、changelog（#585 **已合主线**）。
+
+**新开**：#589 home-api（specs/589-驾驶舱-home-api/需求.md）。
+
+**新派**（10:40 UTC时刻，3 个工作流并行）：
+- **v3-554-next**（wf_435865ff-ddd）：554-2、554-3、554-4 三片。
+- **v3-home-api**（wf_6c4c1a59-564）：home-api（#589）。
+- **v3-227-release**（wf_ccb7ab48-99c）：release.yml GitHub Actions + 引擎暂停派活闸（先审后合）。
+
+**下一步**：554-2/3/4 合主线 → **556-1-3 删除**；home-api 合主线 → **delete-*** 系列 4 张；release.yml 合主线 → **#227** + **#453** 重写。
+
+- routing-two-layer-db（#574/#580）：routing_catalog 表 + routing.default.json 骨架已落主线；engine 解析（pickRoute 走两级）**未做**——那是 routing-two-layer-engine 切片。
+- 554-1 无头一次性子进程段 runner（#577/#581）：骨架已合主线；runs 是 NotWired 占位（写 _tmp/runs-not-wired/*.jsonl，等真 runs 表落上再补）。
+- 4 穴 cockpit （v3-cockpit-batch1）：tokens、home3、home-api、changelog——全部挂 PR 上、跑 CI 中。
+
+## 2026-10-02 10:3x UTC（收尾、接种、补漏）
+
+**补漏**：ci-plan 的 db test 依赖里没有「读 core」——我加上 `db: ['core']` 修 #580 的 ci 红（ebcad840）；做一次 merge 主线（f1f070f2）消大节纷。
+
+**接种**：派了 `v3-554-next` 工作流（wf_435865ff-ddd），并行的 3 片：
+- **554-2**：done-check 看 PR CI 不看 lastSessionTest（测试移出会话正式落地，Closes #577）
+- **554-3**：tier.ts 纯函数（改动面分档判据+effort，不接 engine）
+- **554-4**：sessions 接 runner——三段（对题/动手/验收）起无头进程（不动 Fusion 调度）
+
+**下一步**：
+- 这 3 片回来 + 3 片合主线 → **556-1** 起（删 workflows/* 加 decisions/*，W4 大删），才能完成幕「也样合二段=」的目标。
+- routing-db 的 **routing-two-layer-engine** 切片可以挂在 556-* 后面（它不干涉 sessions）。
+- 驾驶舱 4 片回来 → **delete-***（delete-board / delete-dispatch / delete-task-detail / delete-soon-members 的 4 个）。
+
+**还在跑（10-02 10:40 UTC 时）**：3 个 PR 还没合（#580、#584 home3、#585 changelog）、3 个新的切片在跑。
 
 **下一步（合并下来）**：
 - #531/#440/#489 走 `--superseded-by` 关掉（如果 issue-close PR 挂上了就顺手加；等 PR 合后底子到主线）。

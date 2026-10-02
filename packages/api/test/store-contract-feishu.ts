@@ -670,6 +670,7 @@ export function describeFeishuStoreContract(name: string, make: MakeStore): void
         expect(sources.asks[1]?.answeredByName).toBeUndefined();
         expect(sources.notifications.map((n) => n.notification.id)).toEqual([
           IDS.notification1,
+          IDS.notification2,
           FEISHU_IDS.decision,
         ]);
         expect(sources.notifications[0]).toMatchObject({

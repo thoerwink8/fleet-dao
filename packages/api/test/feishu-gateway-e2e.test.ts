@@ -258,7 +258,7 @@ describe('网关的真客户端对着后端跑一遍（真库）', () => {
     const askItemId = `ask:${asked.askId}`;
     const first = await gateway.outbox(0);
     expect(first.items.map((i) => i.id).sort()).toEqual(
-      [askItemId, `notification:${IDS.notification1}`].sort(),
+      [askItemId, `notification:${IDS.notification1}`, `notification:${IDS.notification2}`].sort(),
     );
     expect(first.items.find((i) => i.id === askItemId)).toMatchObject({
       kind: 'ask',
