@@ -21,13 +21,7 @@ export const MERGE_POLL_MINUTES = 15;
 /** 没有可用路由、或额度没读成时隔多久再选一次（秒）。 */
 export const ROUTE_RETRY_SECONDS = 60;
 
-/**
- * 任务的分支：fleet/<单号>-t<这一轮执行编号的前 8 位>。带上执行编号：同一张单被重新起一轮（上一条放弃了或做完了）时，
- * 上一轮的分支在 GitHub 上还在，同名会推不上去。
- */
-export function taskBranch(issueNumber: number, runKey: string): string {
-  return `fleet/${issueNumber}-t${runKey.replace(/-/g, '').slice(0, 8)}`;
-}
+export { taskBranch } from './task-branch.ts';
 
 export interface TaskWorkflowInput {
   schemaVersion: 1;
@@ -136,6 +130,11 @@ export interface DeliveryRead {
   head: string;
   commits: number;
   changedFiles: string[];
+  /**
+   * 工作树里还有没提交的改动（含没加进 git 的新文件，不含 .gitignore 忽略的）。有就不算交付完：只有提交了的才会进 PR。
+   * 真实现一定给；老历史里没有这个字段（当作没有）。
+   */
+  leftover?: string[];
 }
 
 export interface ColdVerifyInput {
@@ -194,8 +193,10 @@ export interface ArmAutoMergeInput {
 export interface ArmAutoMergeResult {
   /** 自动合并挂上了（或本来就挂着）。 */
   armed: boolean;
-  /** 挂的时候发现已经合了。 */
+  /** 挂的时候发现已经合了（或本来就满足合并条件、当场合了）。 */
   merged: boolean;
+  /** merged 时的合并提交。 */
+  mergeCommit?: string;
   why?: string;
 }
 
@@ -211,4 +212,6 @@ export type MergeWait =
   | { state: 'merged'; mergeCommit?: string }
   | { state: 'closed' }
   | { state: 'head_moved'; head: string }
+  /** 自动合并被撤掉了（人撤的，或 GitHub 因为头变了撤的）：回去重新挂。 */
+  | { state: 'unarmed' }
   | { state: 'waiting'; detail: string };

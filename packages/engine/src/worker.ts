@@ -309,6 +309,7 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
   let ports: EnginePorts;
   let reapOrphanSessions: (() => Promise<number>) | undefined;
   let jobs: EngineJobs | undefined;
+  let tasks: EngineTasks | undefined;
   let registerJobs: (() => Promise<void>) | undefined;
   let retireSchedules: ((client: Pick<Client, 'schedule'>) => Promise<void>) | undefined;
   let close: () => Promise<void> = async () => {};
@@ -329,6 +330,7 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
     ports = real.ports;
     reapOrphanSessions = real.reapOrphanSessions;
     jobs = real.jobs;
+    tasks = real.tasks;
     registerJobs = real.registerJobs;
     retireSchedules = real.retireSchedules;
     close = real.close;
@@ -380,6 +382,7 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
       signAgentToken: signAgentToken as (claims: AgentTokenClaims) => string,
       ...(reapOrphanSessions ? { reapOrphanSessions } : {}),
       ...(jobs ? { jobs } : {}),
+      ...(tasks ? { tasks } : {}),
       log: (message) => console.info(message),
     });
     shutdown = installGracefulShutdown({

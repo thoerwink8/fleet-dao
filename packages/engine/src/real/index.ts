@@ -16,7 +16,7 @@ import {
 import { createDb, type Db } from '@fleet-dao/db';
 import { assertPublishable, createGitHub, pgLedger, pgLocker } from '@fleet-dao/github';
 import type { Client } from '@temporalio/client';
-import type { EngineJobs } from '../activities.ts';
+import type { EngineJobs, EngineTasks } from '../activities.ts';
 import type { EngineDrain } from '../drain.ts';
 import { type DrainControlDeps, drainRequestFile, readDrainRequest } from '../drain-control.ts';
 import type { JevPort } from '../failure/jev.ts';
@@ -52,6 +52,7 @@ import {
   type SessionPortsDeps,
 } from './sessions.ts';
 import { createStorePorts } from './store-ports.ts';
+import { createTaskActivities } from './task-activities.ts';
 import { watchdogJob } from './watchdog.ts';
 import { DEFAULT_WORK_ROOT, helperWorkTrees, type WorkTrees } from './worktrees.ts';
 
@@ -445,6 +446,8 @@ export function realPortsFromEnv(
   extra: { drain?: EngineDrain; ownSha?: string | null; releasesDir?: string } = {},
 ): RealPorts & {
   jobs: EngineJobs;
+  /** 任务工作流（#632）的真活动：现在只有不碰会话的五个，runSegment、coldVerify 还没接（接之前报 TASK_NOT_CONFIGURED）。 */
+  tasks: EngineTasks;
   registerJobs(): Promise<void>;
   /** 引擎起来对齐定时任务之后跑一遍：把退役名单（jobs/retired-schedules.ts）里 Temporal 上还在的删掉，见 real/retire-schedules.ts。 */
   retireSchedules(client: Pick<Client, 'schedule'>): Promise<void>;
@@ -560,6 +563,12 @@ export function realPortsFromEnv(
     // 看门狗（#203）：按登记表看上面这些（和备份那几个）新不新鲜，没跑成、停了推提醒，恢复了自己撤
     watchdog: watchdogJob({ db }),
   };
+  const tasks: EngineTasks = createTaskActivities({
+    gh,
+    trees,
+    exec,
+    log: (message, fields) => console.info(message, fields ?? {}),
+  });
   const evidence = realKillEvidence(extra.releasesDir ? { releasesDir: extra.releasesDir } : {});
   const drainControl: Omit<DrainControlDeps, 'drain' | 'log'> = {
     readRequest: () => readDrainRequest(drainRequestFile(evidence.releasesDir)),
@@ -571,6 +580,7 @@ export function realPortsFromEnv(
   return {
     ...real,
     jobs,
+    tasks,
     drainControl,
     stateDir: config.stateDir,
     registerJobs: async () => {

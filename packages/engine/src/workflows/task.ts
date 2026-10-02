@@ -339,11 +339,18 @@ class TaskFlow {
         baseSha: this.since,
       }),
     );
-    if (delivery.commits === 0) {
+    // 老历史里读交付的结果没有 leftover 这个字段：当作没有
+    const leftover = delivery.leftover ?? [];
+    if (delivery.commits === 0 || leftover.length > 0) {
+      const left =
+        leftover.length > 0 ? `工作树里还有没提交的改动：${leftover.slice(0, 10).join('、')}。` : '';
       this.feedback = [
-        '上一轮会话跑完了，但没有产生新的提交。改完之后要用 git commit 提交，不提交等于没做。',
+        delivery.commits === 0
+          ? `上一轮会话跑完了，但没有产生新的提交。改完之后要用 git commit 提交，不提交等于没做。${left}`
+          : `${left}只有提交了的才会进 PR：要么 git add 再 git commit，要么删掉不要的文件。`,
       ];
-      this.status.lastProblem = '会话跑完没有提交';
+      this.status.lastProblem =
+        delivery.commits === 0 ? '会话跑完没有提交' : '会话跑完工作树里还有没提交的改动';
       return false;
     }
     const pushed = await this.step('pushBranch', () =>
@@ -672,7 +679,7 @@ class TaskFlow {
       const armed = await this.step('armAutoMerge', () =>
         this.acts.armAutoMerge({ schemaVersion: 1, repo: this.input.repo, prNumber, expectedHead: head }),
       );
-      if (armed.merged) return undefined;
+      if (armed.merged) return armed.mergeCommit;
       if (!armed.armed) {
         await this.park('自动合并没挂上', armed.why ?? 'GitHub 没说为什么');
         continue;
@@ -695,6 +702,10 @@ class TaskFlow {
             ),
         );
         if (w.state === 'merged') return w.mergeCommit;
+        if (w.state === 'unarmed') {
+          this.status.lastProblem = '自动合并被撤掉了，重新挂';
+          break;
+        }
         if (w.state === 'closed') {
           await this.park(
             'PR 被关了，没合并',
