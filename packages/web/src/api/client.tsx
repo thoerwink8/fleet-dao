@@ -270,7 +270,7 @@ export function useDemoLinks() {
 export function useHome(): { data: HomeState } {
   const notWired: NotWired = {
     what: '新主页（要你拍的 / 在跑的 / 做完的）',
-    phase: 'v3 驾驶舱轮',
+    phase: 'v3 主页轮',
     issue: 556,
   };
   return { data: { status: 'notWired', notWired } };

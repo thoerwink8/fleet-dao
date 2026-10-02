@@ -122,7 +122,7 @@ describe('home（/home3）：四种状态', () => {
   test('notWired：整块待实现，写明排期和单号；不说没查成', () => {
     renderHome({
       status: 'notWired',
-      notWired: { what: '新主页（要你拍的 / 在跑的 / 做完的）', phase: 'v3 驾驶舱轮', issue: 556 },
+      notWired: { what: '新主页（要你拍的 / 在跑的 / 做完的）', phase: 'v3 主页轮', issue: 556 },
     });
     expect(screen.getByText(/新主页（要你拍的 \/ 在跑的 \/ 做完的） · 待实现/)).toBeTruthy();
     expect(screen.getByText(/#556/)).toBeTruthy();
