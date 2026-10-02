@@ -43,10 +43,10 @@ function Section({
   return (
     <section
       id={id}
-      className="scroll-mt-6 grid gap-4 border-b py-8 first:pt-0 last:border-b-0 lg:grid-cols-[240px_1fr]"
+      className="scroll-mt-6 grid gap-4 border-b py-8 first:pt-0 last:border-b-0 lg:grid-cols-settings"
     >
       <div>
-        <h2 className="flex items-center gap-2 text-[15px] font-semibold">
+        <h2 className="flex items-center gap-2 text-strong font-semibold">
           <Icon className="size-4 text-muted-foreground" aria-hidden />
           {title}
         </h2>
@@ -380,7 +380,7 @@ export default function Settings() {
       </Section>
 
       <Section id="about" icon={Info} title="关于" description={`${brand.product} v1 的前端。`}>
-        <dl className="grid max-w-md grid-cols-[96px_1fr] gap-y-2 text-sm">
+        <dl className="grid max-w-md grid-cols-about gap-y-2 text-sm">
           <dt className="text-muted-foreground">数据</dt>
           <dd>
             {api.source === 'http'

@@ -21,13 +21,13 @@ export function Page({
   return (
     <div
       className={cn(
-        'fd-rise mx-auto w-full max-w-[1320px] px-4 pt-5 pb-16 sm:px-6 lg:px-8 lg:pt-7',
+        'fd-rise mx-auto w-full max-w-cockpit px-4 pt-5 pb-16 sm:px-6 lg:px-8 lg:pt-7',
         className,
       )}
     >
       <header className="mb-6 flex flex-wrap items-end justify-between gap-3">
         <div className="min-w-0">
-          <h1 className="text-[22px] font-semibold tracking-tight">{title}</h1>
+          <h1 className="text-title font-semibold tracking-tight">{title}</h1>
           {description ? <p className="mt-1 max-w-3xl text-sm text-muted-foreground">{description}</p> : null}
         </div>
         {actions ? <div className="flex flex-wrap items-center gap-2">{actions}</div> : null}
@@ -54,12 +54,7 @@ export function Panel({
   bodyClassName?: string;
 }) {
   return (
-    <section
-      className={cn(
-        'rounded-xl border bg-card text-card-foreground shadow-[0_1px_0_var(--border)]',
-        className,
-      )}
-    >
+    <section className={cn('rounded-xl border bg-card text-card-foreground shadow-card-edge', className)}>
       {title || actions ? (
         <header className="flex items-start justify-between gap-3 border-b px-4 py-3">
           <div className="min-w-0">
@@ -97,14 +92,14 @@ export function Stat({
         <span>{label}</span>
         {Icon ? <Icon className="size-4 opacity-60" aria-hidden /> : null}
       </div>
-      <div className={cn('num mt-2 text-[28px] leading-none font-semibold tracking-tight', accent)}>
+      <div className={cn('num mt-2 text-stat leading-none font-semibold tracking-tight', accent)}>
         {value}
       </div>
       {hint ? <div className="mt-2 truncate text-xs text-muted-foreground">{hint}</div> : null}
     </>
   );
   const cls =
-    'block rounded-xl border bg-card p-4 shadow-[0_1px_0_var(--border)] transition-colors hover:border-border-strong';
+    'block rounded-xl border bg-card p-4 shadow-card-edge transition-colors hover:border-border-strong';
   return to ? (
     <Link to={to} className={cls}>
       {body}

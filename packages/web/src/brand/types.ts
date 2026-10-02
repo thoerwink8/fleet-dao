@@ -47,8 +47,6 @@ export interface Brand {
     /** 小标「全组织默认配置」点开的那一句。 */
     orgDefaultDetail: string;
   };
-  /** 首页进度栏的标题。正式版用原词，演示版换成扫描名单里没有的说法。 */
-  seatBarTitle: string;
   /** 仓库里某个 PR、issue 的外链；演示版一律不给（不带任何外链）。 */
   repoLink(repo: { owner: string; name: string }, kind: 'pull' | 'issues', n: number): string | undefined;
 }
