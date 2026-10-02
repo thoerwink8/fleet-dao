@@ -4,6 +4,14 @@
 
 ## 2026-10-02（Mirasim 切换与一条命令迁移，实施）
 
+> 当前结果（15:03，北京时间）：实现 PR [#614](https://github.com/thoerwink8/fleet-dao/pull/614) 已于 14:49 合并，主线提交 `4de88172`；下面带时间的实施记录保留作历史，以本段当前结果为准。
+
+- 已实现：桌面自有/平台在下一回合选路，恢复同一原生会话和 SDK/权限状态；Windows、Intel Mac、Apple Silicon Mac、Linux 原生测试及构建通过。Linux 保持 Fleet 固定渠道，平台成功入账先核来源和调用时间。
+- 已审：当前提交头 `c8172993` 的 CI 高风险路径与构建下载链，取得不同厂商 Kimi 的真实完整终态和通过结论，评论见 [第二意见](https://github.com/thoerwink8/fleet-dao/pull/614#issuecomment-5946938624)。普通运行代码没有宣称全部经外部逐行审查；截断、超时和被停止的尝试均不算通过。
+- 已安排迁移：15:01 在旧检出 `333da1f5` 用 `pnpm agents:sync --seed D:/frank/fleet-dao` 成功取主线到专用检出，未要求主检出切分支或手动拉代码；真实后台 Node PID `72684` 已启动。15:03 回读 `worker.json` 为 waiting，进程存活，还有 1 个 running 的 Claude 回合，启动命令仍为旧 `reclaude-mirasim.exe`，没有标已迁移或停止会话。
+- 下一步：后台等全部 Claude 回合空闲后自动核版本、切配置并回读；用户不用再输命令。最长 6 小时，超时明确记 expired，后续同步可重新安排；检查/撤回入口已在指南中。
+- 还没验证：新版接入后的真实两向请求与服务端额度、用户 Mac 的 GUI 接入、法国现场；法国未部署、引擎未开启、账号未切换。
+
 - 基线 `06533e1a`；创始人已同意实现并要求「一条命令或者不用命令」从旧机制迁移，决定记在 `docs/decisions/0012-mirasim-routing-and-migration.md`。独立工作树 `.claude/worktrees/mirasim-routing-impl`。
 - 实施提交 `0c323645`；首次提交包含启动器、迁移入口、失败测试、指南与 CI；正在合入并发推进的主线更新后审查。
 - PR [#614](https://github.com/thoerwink8/fleet-dao/pull/614)，当前实现头 `2130f557`；第一次 Linux CI 的真实 Go 生命周期测试通过，迁移夹具首次编译耗时 14 秒，超过测试框架默认 10 秒的 setup 限时，已将 setup 限时与编译上限对齐，尚待重跑；本机 Grok 首次审查因材料截断尝试工具而到回合上限，不算通过。
