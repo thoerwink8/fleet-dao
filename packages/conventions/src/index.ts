@@ -111,6 +111,8 @@ export {
   issueNew,
   issueSummary,
   type MissingSection,
+  requiredSectionProblems,
+  sectionText,
   specsDoc,
   specsHint,
   USAGE,
@@ -128,6 +130,7 @@ export {
   milestonePhase,
   milestoneVersion,
 } from './labels.ts';
+export { type MdDoc, parseMd } from './markdown.ts';
 export { type GateResult, type GitHubReads, gateGitHub, gatePr, runMergeGate } from './merge-gate.ts';
 export {
   type ChangedFile,

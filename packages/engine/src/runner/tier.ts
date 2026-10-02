@@ -117,3 +117,72 @@ export function decideTier(changedFiles: readonly string[]): TierDecision {
     reason: `跨模块或非 packages/<包>/ 路径（前 5 个：${paths}${changedFiles.length > 5 ? `…共 ${changedFiles.length} 个` : ''}${interfaceHint}）→ 主力档`,
   };
 }
+
+/** 单子「已知的模块」里认出的一个路径：`file` 是具体文件，`dir` 是目录（或带通配的一片）。路径已规整（无 ./ 、无结尾 /）。 */
+export interface ModuleRef {
+  path: string;
+  kind: 'file' | 'dir';
+}
+
+/**
+ * 派活那一刻的分档（specs/632-三段总调度/方案.md §五）：这时还没有 diff，手里只有单子上「已知的模块」，所以判据和上面的
+ * decideTier 同一套（一个文件 → 快档；同一个 packages/<包>/ 里 → 中档；其余 → 主力档），差在三处：
+ *   - 什么都没写（暂无）或有一项认不出是哪个路径：**不猜，主力档**（decideTier 对空输入是抛错——那是「diff 没读出来」；
+ *     这里是「建单的人不知道」，是一种真实的输入，不是读失败）；
+ *   - 单子写的常常是目录（packages/x/src/runner/）：一个目录算「一个模块」→ 中档，不算一个文件；
+ *   - 同一路径写了几次只算一个。
+ * 一次定死，不升档、不回退（决定 0010 第 3 条）。纯函数。
+ */
+export function decideTierFromModules(
+  refs: readonly ModuleRef[],
+  unrecognized: readonly string[],
+): TierDecision {
+  const unique = [...new Map(refs.map((r) => [r.path, r])).values()];
+  if (unique.length === 0 && unrecognized.length === 0) {
+    return {
+      tier: 'heavyweight',
+      effort: 'high',
+      reason: '单子没写已知的模块（或写了「暂无」）：不猜，主力档',
+    };
+  }
+  if (unrecognized.length > 0) {
+    const first = unrecognized[0] ?? '';
+    return {
+      tier: 'heavyweight',
+      effort: 'high',
+      reason: `已知的模块里有 ${unrecognized.length} 项认不出是哪个路径（比如「${first.slice(0, 40)}」；路径要用反引号括起来）：不猜，主力档`,
+    };
+  }
+  if (unique.length > TIER_HEAVYWEIGHT_FILE_THRESHOLD) {
+    return {
+      tier: 'heavyweight',
+      effort: 'high',
+      reason: `单子列了超过 ${TIER_HEAVYWEIGHT_FILE_THRESHOLD} 处（实际 ${unique.length} 处）：直接主力档`,
+    };
+  }
+  const only = unique.length === 1 ? unique[0] : undefined;
+  if (only?.kind === 'file') {
+    return { tier: 'fast', effort: 'medium', reason: `单子只列了一个文件（${only.path}）→ 快档` };
+  }
+  const pkgs = new Set(unique.map((r) => PACKAGE_PATH_RE.exec(`${r.path}/`)?.[1] ?? null));
+  const [pkg] = [...pkgs];
+  if (pkgs.size === 1 && pkg !== null && pkg !== undefined) {
+    return {
+      tier: 'medium',
+      effort: 'high',
+      reason: `单子列的都在同一模块 packages/${pkg}/（${unique.length} 处）→ 中档`,
+    };
+  }
+  const touched = [...pkgs].filter((p): p is string => p !== null && INTERFACE_PACKAGES.has(p));
+  const interfaceHint =
+    touched.length > 0 ? `，碰接口包：${touched.map((p) => `packages/${p}/`).join('、')}` : '';
+  const paths = unique
+    .slice(0, 5)
+    .map((r) => r.path)
+    .join(', ');
+  return {
+    tier: 'heavyweight',
+    effort: 'high',
+    reason: `单子列的跨模块或不在 packages/<包>/ 下（前 5 处：${paths}${unique.length > 5 ? `…共 ${unique.length} 处` : ''}${interfaceHint}）→ 主力档`,
+  };
+}
