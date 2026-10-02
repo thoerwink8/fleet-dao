@@ -68,11 +68,7 @@ const fail = (what: string, r: RunnerResult) =>
  */
 export async function publishPr(deps: PublishDeps): Promise<PublishResult> {
   const note = deps.note ?? (() => {});
-  if (!deps.env.GITHUB_TOKEN?.trim()) {
-    throw new Error(
-      '缺 GITHUB_TOKEN：开「发布 vN」PR 是「对外发布」的发起，没令牌不伪造成功。把 GITHUB_TOKEN 放进环境（gh auth login 也行），再重跑。',
-    );
-  }
+  const gh = deps.gh ?? defaultRunner('gh');
   const changelogPath = join(deps.root, 'CHANGELOG.md');
   const changelog = await readFile(changelogPath, 'utf8');
   const git = deps.git ?? defaultRunner('git');
@@ -121,7 +117,17 @@ export async function publishPr(deps: PublishDeps): Promise<PublishResult> {
   if (push.code !== 0) throw fail(`git push -u origin ${plan.headBranch} 失败`, push);
   note(`推好了 ${plan.headBranch}（连带 CHANGELOG.md 收尾那一个提交）`);
 
-  const gh = deps.gh ?? defaultRunner('gh');
+  // 核查 gh 有没有可用身份（gh auth login 的存放凭据 或 GITHUB_TOKEN/GH_TOKEN，第二意见 2026-10-02）：
+  // 没有就明说、不伪造 PR 号。放这里（推完分支、真要开 PR 之前），前面的纯判定（分支名、CHANGELOG 格式）挂的话
+  // 不用 gh 也能在测试里跑到——「先查身份」会让前面那些不用 gh 的失败也要求测试 mock gh，太冤。
+  const auth = await gh(['auth', 'status'], deps.root);
+  if (auth.code !== 0) {
+    throw new Error(
+      `gh 没有可用的身份（gh auth status 退出码 ${auth.code}）：` +
+        '发起人先 gh auth login、或把 GITHUB_TOKEN/GH_TOKEN 放进环境，再重跑。没令牌不伪造成功。',
+    );
+  }
+
   const created = await gh(
     [
       'pr',

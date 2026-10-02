@@ -107,16 +107,28 @@ describe('publishPr：编排（deps 换 mock）', () => {
     rmSync(root, { recursive: true, force: true });
   });
 
-  it('故意造出的失败：没拿到 GITHUB_TOKEN → 明确失败，不伪造 PR 号、不拿 0 顶', async () => {
-    await expect(publishPr({ env: {}, root, currentBranch: 'release/v2' })).rejects.toThrow(
-      /缺 GITHUB_TOKEN/,
-    );
-  });
-
-  it('故意造出的失败：GITHUB_TOKEN 只是空白字符串照样不放行', async () => {
+  it('故意造出的失败：gh auth status 退出非 0（没 gh auth login、也没 GITHUB_TOKEN/GH_TOKEN）→ 明确失败，不伪造 PR 号、不拿 0 顶（第二意见 2026-10-02）', async () => {
     await expect(
-      publishPr({ env: { GITHUB_TOKEN: '  \n' }, root, currentBranch: 'release/v2' }),
-    ).rejects.toThrow(/缺 GITHUB_TOKEN/);
+      publishPr({
+        env: {},
+        root,
+        currentBranch: 'release/v2',
+        git: async (args) => {
+          if (args[0] === 'status') return { code: 0, stdout: '', stderr: '' };
+          if (args[0] === 'rev-parse')
+            return { code: 0, stdout: 'ab1234567890abcdef1234567890abcdef123456\n', stderr: '' };
+          return { code: 0, stdout: '', stderr: '' };
+        },
+        gh: async (args) =>
+          args[0] === 'auth'
+            ? {
+                code: 1,
+                stdout: '',
+                stderr: 'You are not logged into any GitHub hosts. Run gh auth login to authenticate.',
+              }
+            : { code: 0, stdout: '', stderr: '' },
+      }),
+    ).rejects.toThrow(/gh 没有可用的身份/);
   });
 
   it('故意造出的失败：当前分支不是 release/v<N>（feat/…）→ 明确失败，不开一张注定红的 PR（第二意见 2026-10-02）', async () => {
@@ -228,7 +240,10 @@ describe('publishPr：编排（deps 换 mock）', () => {
             return { code: 0, stdout: 'ab1234567890abcdef1234567890abcdef123456\n', stderr: '' };
           return { code: 0, stdout: '', stderr: '' };
         },
-        gh: async () => ({ code: 1, stdout: '', stderr: 'GraphQL: No commits between main and release/v2' }),
+        gh: async (args) =>
+          args[0] === 'auth'
+            ? { code: 0, stdout: '', stderr: '' }
+            : { code: 1, stdout: '', stderr: 'GraphQL: No commits between main and release/v2' },
       }),
     ).rejects.toThrow(/gh pr create 失败/);
   });
