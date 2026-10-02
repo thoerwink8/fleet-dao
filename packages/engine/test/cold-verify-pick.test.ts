@@ -121,4 +121,26 @@ describe('familyPickerFrom：接到真选路上（避开别的族、不替选路
     const deps = familyPickerFrom(port.pickRoute, ORDER)('task-1');
     expect(await deps.pickRouteForFamily('claude')).toBeUndefined();
   });
+
+  it('派不出的原因告诉调用方（等空位、等额度的和一条路由都没有的要分得开）；派得出的、别的族的不报', async () => {
+    const seen: { family: string; waitFor: string; detail: string }[] = [];
+    let answer: PickRouteResult = { ok: false, waitFor: 'slot', detail: '池满了', retryAfterSeconds: 30 };
+    const port = fakePort(() => answer);
+    const deps = familyPickerFrom(port.pickRoute, ORDER, 'review', (family, why) => {
+      seen.push({ family, waitFor: why.waitFor, detail: why.detail });
+    })('task-1');
+    await deps.pickRouteForFamily('Claude ');
+    answer = { ok: false, waitFor: 'none', detail: '没有路由' };
+    await deps.pickRouteForFamily('gpt');
+    answer = {
+      ok: true,
+      route: { routeId: 'r', poolId: 'p', modelId: 'auto-x', family: 'gemini', hostId: 'claude-code' },
+      why: '渠道自己挑的',
+    };
+    await deps.pickRouteForFamily('kimi'); // 选路回了别的族：当成没挑到，但这不是「选路说派不出」，不报
+    expect(seen).toEqual([
+      { family: 'claude', waitFor: 'slot', detail: '池满了' },
+      { family: 'gpt', waitFor: 'none', detail: '没有路由' },
+    ]);
+  });
 });

@@ -18,6 +18,7 @@ import {
   coldVerifyNotRun,
   coldVerifyPending,
   coldVerifyStatus,
+  coldVerifyWaiting,
   nextRound,
 } from '../src/cold-verify-status.ts';
 import type { VerifierInvokeInput, VerifierInvokeOutput } from '../src/verifier-invoke.ts';
@@ -81,6 +82,14 @@ describe('coldVerifyStatus：结论 → 状态（只有 pass 才是 success）',
   it('【故意造出的失败】「没跑成」和「还在跑」是两回事：pending 只说还在跑', () => {
     expect(coldVerifyPending(1).state).toBe('pending');
     expect(coldVerifyPending(1).description).not.toContain('没跑起来');
+  });
+
+  it('过一会儿再来的（内存放不下之类）是 pending 写明在等什么，不是 failure（failure 会显示成验收没过）；太长照样截到 140', () => {
+    const s = coldVerifyWaiting('机器内存放不下新会话');
+    expect(s).toEqual({ state: 'pending', description: '验收在等：机器内存放不下新会话' });
+    const long = coldVerifyWaiting('等'.repeat(300));
+    expect([...long.description].length).toBeLessThanOrEqual(140);
+    expect(long.state).toBe('pending');
   });
 });
 

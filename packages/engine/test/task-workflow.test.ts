@@ -548,3 +548,141 @@ describe('任务工作流 · 交付和合并的细节', { timeout: 60_000 }, () 
     expect(calls.order.slice(-4)).toEqual(['arm', 'merged', 'arm', 'merged']);
   });
 });
+
+describe('任务工作流 · 验收的岔路（#632 S2-5b）', { timeout: 60_000 }, () => {
+  it('这会儿验不了、过一会儿就行（没空位）：睡一会儿再验，不停下报人、不算一轮；验过了照常往下', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({
+      verify: (_i, n) =>
+        n === 1
+          ? {
+              pass: false,
+              problems: [],
+              round: 1,
+              retry: { wait: 'slot', reason: '这会儿没有能派的验收路由', afterSeconds: 30 },
+            }
+          : { pass: true, problems: [], round: 1 },
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 1, verifyRounds: 1 });
+    expect(calls.verify.map((v) => v.round)).toEqual([1, 1]); // 等的那次不算一轮
+    expect(calls.segment).toHaveLength(1); // 没有返工
+    expect(world.alerts).toEqual([]); // 没有停下报人
+    expect(calls.arm).toBe(1);
+  });
+
+  it('验收时发现 PR 的头被换了：停下等人看过；点「继续」后对新的头重走 CI 和验收，验收重新数轮', async () => {
+    const world = createFakeWorld();
+    const moved = fakeHead(999);
+    const { tasks, calls } = scripted({
+      verify: (_i, n) =>
+        n === 1
+          ? { pass: false, problems: [], round: 1, headMoved: moved }
+          : { pass: true, problems: [], round: 1 },
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        const s = await statusUntil(h, parked, 'PR 的头被别人改了，停下');
+        expect(s.waiting?.detail).toContain('头被别人改了');
+        expect(calls.arm).toBe(0);
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    expect(world.alerts[0]?.detail).toContain('重跑 CI 和验收'); // 告诉人点「继续」之后会发生什么
+    expect(run.outcome).toBe('merged');
+    expect(calls.verify).toHaveLength(2);
+    expect(calls.verify[1]?.headSha).toBe(moved); // 新的头
+    expect(calls.verify[1]?.round).toBe(1);
+    expect(world.callsOf('waitCi').map((c) => (c.input as { head: string }).head)).toEqual([
+      fakeHead(101),
+      moved,
+    ]);
+  });
+
+  it('等合并时头被换了、人点「继续」：不原样重新挂（新头上没有验收状态，闸不放行），回去重走 CI、验收、查路径、再挂', async () => {
+    const world = createFakeWorld();
+    const moved = fakeHead(888);
+    const { tasks, calls } = scripted({
+      merged: (n) =>
+        n === 1 ? { state: 'head_moved', head: moved } : { state: 'merged', mergeCommit: 'f00d1234567890' },
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        const s = await statusUntil(h, parked, 'PR 的头被别人改了，停下');
+        expect(s.waiting?.detail).toContain('头被别人改了');
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 1, verifyRounds: 1, head: moved });
+    expect(calls.order.slice(-8)).toEqual([
+      'verify',
+      'guarded',
+      'arm',
+      'merged',
+      'verify',
+      'guarded',
+      'arm',
+      'merged',
+    ]);
+    expect(calls.verify[1]?.headSha).toBe(moved);
+  });
+
+  it('挂自动合并时发现头已经不是验过的那个：同样回去对新的头重走，不在「自动合并没挂上」里原地打转', async () => {
+    const world = createFakeWorld();
+    const moved = fakeHead(777);
+    const { tasks, calls } = scripted({
+      arm: (n) =>
+        n === 1
+          ? { armed: false, merged: false, why: 'PR 的头变了', headMoved: moved }
+          : { armed: true, merged: false },
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        await statusUntil(h, parked, 'PR 的头被别人改了，停下');
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(calls.verify.map((v) => v.headSha)).toEqual([fakeHead(101), moved]);
+    expect(calls.arm).toBe(2);
+  });
+
+  it('【故意造出的失败】验收没过：返工意见带进下一轮动手，不是 unavailable 那条停下报人的路', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({
+      verify: (_i, n) =>
+        n === 1
+          ? { pass: false, problems: ['没做到验收条：页面上没有「验收中」'], round: 1 }
+          : { pass: true, problems: [], round: 2 },
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 2 });
+    expect(calls.segment[1]?.feedback.join('\n')).toContain('验收没过：没做到验收条');
+    expect(world.alerts).toEqual([]);
+  });
+});
