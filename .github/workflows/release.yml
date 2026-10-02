@@ -301,7 +301,16 @@ jobs:
             process.exit(2);
           ")
           if [[ -z $num ]]; then
-            echo "开放 milestone 里没找到 $VERSION 开头的那一张（可能已关或还没建），跳过。"
+            # 开放里没找到 → 再核「已关」：以 v<N> 开头 + 词边界、state=closed 里得有一张，不然就是没找到（发起前 milestone 被人删了或改名），
+            # 那会发了一版却没关版本（第二意见 2026-10-02）。
+            CLOSED_ROWS=$(gh api --paginate "repos/${{ github.repository }}/milestones?state=closed&per_page=100" | jq -s 'add')
+            closed_count=$(jq -r --arg v "$VERSION" '[.[] | select(.title | test("^" + $v + "([^0-9]|$)"))] | length' <<<"$CLOSED_ROWS")
+            if [[ $closed_count == 0 ]]; then
+              echo "::error::开放 milestone 里没找到 $VERSION 开头的，已关 milestone 里也没有——这一版（$VERSION）的 milestone 被删了或改名了，"
+              echo "::error::现在 tag 打了、release 建了、却没 milestone 关——发起人上去重建一张同名 milestone 再手动 gh api -X PATCH state=closed。"
+              exit 1
+            fi
+            echo "开放里没找到 $VERSION 开头的那张，已关里有（$closed_count 张）：多半已经被关过了（幂等跳）。"
             exit 0
           fi
           title=$(jq -r --argjson n "$num" '.[] | select(.number == $n).title' <<<"$MILESTONES_JSON")
