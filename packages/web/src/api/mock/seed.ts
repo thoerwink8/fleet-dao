@@ -1119,7 +1119,7 @@ export function createSeed(now: number): MockState {
       level: 'daily',
       title: 'AI 调度员调整了写码路由',
       body: '把 Kimi k3 挪到第 4：近 24 小时 5 次里 3 次测试没过。可以在调度台一键撤回。',
-      link: '/dispatch',
+      link: '/quota',
       createdAt: at(-20),
       resolvedAt: at(-15),
       resolvedBy: 'u-lan',

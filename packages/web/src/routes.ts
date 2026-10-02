@@ -21,8 +21,6 @@ export default [
   ...(demo ? [] : [route('login', 'routes/login.tsx')]),
   layout('routes/shell.tsx', [
     index('routes/home.tsx'),
-    route('dispatch', 'routes/dispatch.tsx'),
-    route('channels', 'routes/channels.tsx'),
     route('quota', 'routes/quota.tsx'),
     route('schedules', 'routes/schedules.tsx'),
     route('notifications', 'routes/notifications.tsx'),

@@ -17,6 +17,7 @@ UPLOAD_KEY=/etc/fleet-dao/web-upload.key
 HK_KNOWN_HOSTS=/etc/fleet-dao/hk-known-hosts
 HK_TUNNEL=10.99.0.1
 # 可见范围的模块，同 packages/shared 的 DEMO_MODULES（deploy/test/demo-scopes.test.sh 拿后端真写出来的文件核对）
+# dispatch、channels 两个模块随调度台、渠道页删了（#556），线上已写下的文件里还有，照收（后端读时丢掉，见 RETIRED_DEMO_MODULES）
 MODULES='board|task|dispatch|channels|quota|schedules|notifications|audit|settings'
 M="\"($MODULES)\""
 T='"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{1,3})?Z"'

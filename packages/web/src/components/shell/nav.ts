@@ -6,13 +6,11 @@ import {
   Gauge,
   Home,
   Presentation,
-  Radio,
   Scale,
   ScrollText,
   Settings,
   Trophy,
   Wallet,
-  Waypoints,
 } from 'lucide-react';
 import { brand } from '#brand';
 import { canSee, isDemo } from '../../demo/access';
@@ -45,20 +43,6 @@ export const NAV: { group: string; items: NavItem[] }[] = [
   {
     group: '调度',
     items: [
-      {
-        to: '/dispatch',
-        label: '调度台',
-        icon: Waypoints,
-        hint: '每个阶段挂哪些路由、先后顺序',
-        module: 'dispatch',
-      },
-      {
-        to: '/channels',
-        label: '渠道与账号',
-        icon: Radio,
-        hint: '付费入口、账号池、并发、到期日',
-        module: 'channels',
-      },
       { to: '/models', label: '模型目录', icon: Boxes, soon: true, hint: '各家模型、上下架' },
       { to: '/quota', label: '额度', icon: Gauge, hint: '每个账号池每个时间窗还剩多少', module: 'quota' },
       { to: '/billing', label: '账单', icon: Wallet, soon: true, hint: '花了多少、值不值' },

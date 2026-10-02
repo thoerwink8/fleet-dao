@@ -19,8 +19,6 @@ import {
   windowLength,
   windowTitle,
 } from '../lib/catalog';
-import ChannelsPage from '../routes/channels';
-import DispatchPage from '../routes/dispatch';
 import QuotaPage from '../routes/quota';
 import SettingsPage from '../routes/settings';
 import { renderApp } from './harness';
@@ -156,12 +154,6 @@ describe('额度：用量没读到不当 0%', () => {
     expect(within(hot).getByText('没有')).toBeTruthy();
     expect(screen.queryByText('0%')).toBeNull();
   });
-
-  test('调度台：路由行写「用量没读到」，不写 0%', async () => {
-    renderApp(<DispatchPage />, { api: withUnknownUsage(createMockApi({ live: false })) });
-    expect((await screen.findAllByText('用量没读到')).length).toBeGreaterThan(0);
-    expect(screen.queryByText('0%')).toBeNull();
-  });
 });
 
 /** 把假后端所有账号池换成同一种额度状况。 */
@@ -199,19 +191,9 @@ describe('额度：一个池一句话，各页说法一致', () => {
     const { ordered } = routeOptions(routing, pools.pools, 'execute', undefined, NOW);
     expect(ordered.length).toBeGreaterThan(0);
     expect(new Set(ordered.map((o) => o.quota?.kind))).toEqual(new Set(['full']));
-
-    renderApp(<DispatchPage />, { api });
-    expect((await screen.findAllByText('已用满')).length).toBeGreaterThan(0);
-    expect(screen.queryByText('50%')).toBeNull();
-    cleanup();
-
-    renderApp(<ChannelsPage />, { api: withPools(createMockApi({ live: false }), halfAndFull) });
-    expect((await screen.findAllByText('已用满')).length).toBeGreaterThan(0);
-    expect(screen.queryByText('用量没读到')).toBeNull();
-    expect(screen.queryByText('50%')).toBeNull();
   });
 
-  test('从没读成过的池：调度台、换模型、渠道页都写「额度没查成」，不是什么都不显示', async () => {
+  test('从没读成过的池：换模型候选写「额度没查成」，不是什么都不显示', async () => {
     expect(headlineText(quotaHeadline(neverRead))).toBe('额度没查成');
     // 额度表里查不到这个池，也一样说没查成；额度表本身还没读到时不下结论（对话框另有提示）。
     expect(quotaHeadline(undefined).kind).toBe('unread');
@@ -223,13 +205,6 @@ describe('额度：一个池一句话，各页说法一致', () => {
     expect(routeOptions(routing, undefined, 'execute', undefined, NOW).ordered.every((o) => !o.quota)).toBe(
       true,
     );
-
-    renderApp(<DispatchPage />, { api });
-    expect((await screen.findAllByText('额度没查成')).length).toBeGreaterThan(0);
-    cleanup();
-
-    renderApp(<ChannelsPage />, { api: withPools(createMockApi({ live: false }), neverRead) });
-    expect((await screen.findAllByText('额度没查成')).length).toBeGreaterThan(0);
   });
 
   test('额度格：上游说满了却没给比例，写「已用满」、条画满，不算「用量没读到」', () => {

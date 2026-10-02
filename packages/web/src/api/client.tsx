@@ -251,8 +251,7 @@ export function useAudit(target?: string) {
     queryFn: ({ pageParam }) => api.audit({ target, cursor: pageParam, limit: 100 }),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (last) => last.nextCursor,
-    // 调度台的「最近改动」也读它（演示版只开调度台时只给改路由顺序的那几条）。
-    enabled: canSee('audit') || canSee('dispatch'),
+    enabled: canSee('audit'),
   });
 }
 

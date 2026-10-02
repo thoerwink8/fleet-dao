@@ -30,7 +30,7 @@ const LINK: DemoScope = {
   detail: 'titles',
   expiresAt: '2026-10-01T00:00:00Z',
 };
-const DEFAULT: DemoScope = { v: 1, modules: ['board', 'dispatch'], detail: 'status' };
+const DEFAULT: DemoScope = { v: 1, modules: ['board', 'schedules'], detail: 'status' };
 
 describe('口令从地址里取', () => {
   test('?k= 或 #k=，样子不对的不认', () => {

@@ -4,8 +4,6 @@ import type { DemoDetail, DemoModule } from './scope';
 export const MODULE_LABEL: Record<DemoModule, { label: string; hint?: string }> = {
   board: { label: '看板', hint: '含总览' },
   task: { label: '任务详情', hint: '含任务清单' },
-  dispatch: { label: '调度台' },
-  channels: { label: '渠道与账号' },
   quota: { label: '额度' },
   schedules: { label: '定时任务' },
   notifications: { label: '通知' },
