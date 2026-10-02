@@ -1,6 +1,7 @@
-// 自动发布（deploy/france/auto-release/lib.mjs）每条路：CI 红不发、CI 结论读不到不发并记没查成、发布没成记下报警不死循环、
-// 引擎忙等空闲（到上限照发）、人手动切过不跟人打架、主线头读不到、规矩同步没成报警不挡发布、库连不上报警留到下一轮；
-// 主线头的 CI 还在跑、红了，沿主线往回发最新的全绿提交（只往前走，不越过在用的、人按住的、发过没成的）。
+// 自动发布（deploy/france/auto-release/lib.mjs）每条路：按版本发（发的不是主线头，是版本号最大的 v<N> tag 指向的提交）、
+// 标记缺失 / 读不到 / 不是主线上的提交都不发并报警、标记那一版 CI 红了/读不到就不发、发布没成记下报警不死循环、
+// 引擎忙等空闲（到上限照发）、人手动切过不跟人打架、规矩同步没成报警不挡发布、库连不上报警留到下一轮、
+// 发布四步（停派活→等收尾→部署→恢复派活）在引擎关着时照实写「跳过」不假装做过（决定 0011 第 3、4 条）。
 // git、GitHub、会话、发布脚本、库都换成假的；真机上那一半（真定时器、真发布）合并后在法国装上验，记在引入本文件的 PR 里。
 // 跑法：node --test deploy/test/auto-release.test.mjs（deploy/test/run.sh 会跑）。
 import assert from 'node:assert/strict';
@@ -17,6 +18,7 @@ import {
   CONFIG_PREFIX,
   CONFIG_UNCHECKED_KEY,
   ciVerdict,
+  ENGINE_UNKNOWN_KEY,
   EXIT_RELEASE_BUSY,
   EXIT_SESSIONS_BUSY,
   FAILED_PREFIX,
@@ -25,17 +27,23 @@ import {
   manualHold,
   parseHistory,
   parseMainLog,
+  parseVersionTags,
+  pickVersionMarker,
+  publishSequence,
+  publishSequenceSummary,
   RULES_PREFIX,
   RULES_USERS,
   runOnce,
   STATE_SCHEMA,
   summary,
+  VERSION_TAG_RE,
 } from '../france/auto-release/lib.mjs';
 
 const H0 = 'a'.repeat(40); // 在用的
 const H1 = 'b'.repeat(40); // 主线头
 const H2 = 'c'.repeat(40); // 后来又合进来的
 const T0 = Date.parse('2026-09-27T08:00:00Z');
+const T1 = '2026-09-27T07:35:00Z'; // 打 tag 的时刻
 const MIN = 60_000;
 
 const run = (sha, status, conclusion, extra = {}) => ({
@@ -73,7 +81,8 @@ const DESIRED = JSON.stringify({
 const ENGINE_ENV = 'FLEET_WORK_DIR=/var/lib/fleet-work\nFLEET_ENGINE_PORTS=real\n';
 const API_ENV = `FEISHU_APP_SECRET=${SECRET}\n`;
 
-/** 一台假机器：主线两个提交（H1 在 07:30 合进来、CI 绿），在用 H0，引擎空闲，发布会成。 */
+/** 一台假机器：主线两个提交（H1 在 07:30 合进来、CI 绿），在用 H0，引擎空闲，发布会成。
+ *  默认的版本标记：v1 打在 H1 上（H1 在主线 = 是祖先）——这一轮就发 H1。 */
 function machine() {
   const m = {
     t: T0,
@@ -92,6 +101,14 @@ function machine() {
     rules: { code: 0, out: '  ✓ 一致' },
     checkoutHead: null, // null = 和在用的同一个
     dbDown: false,
+    // 版本标记（决定 0011 第 3 条）：tag 列表原文，和「哪些提交在主线上」两个都换成假的。
+    // tagsThrow = 读的时候就抛（git 没跑成）；mainAncestors = null 表示判祖先关系时抛。
+    tags: `v1 ${H1}  ${T1}\n`, // 默认：v1 → H1（轻量 tag：git 的第三段是空的，所以名字和时间之间两个空格）
+    tagsThrow: null,
+    mainAncestors: [H1, H0], // 这些提交算「在 origin/main 上」
+    mainAncestorsThrow: null,
+    engineOnError: null,
+    engineUp: false, // 法国现在 FLEET_SERVICES=fleet-api：引擎关着
     // 配置对账读到的：期望（在用那一版里的）、线上的环境文件、指纹钥匙；configThrow = 读的时候就抛
     config: {
       desired: { text: DESIRED },
@@ -126,6 +143,22 @@ function machine() {
     },
     async readHistory() {
       return m.history;
+    },
+    // 版本标记：git for-each-ref 的原样输出；读不到就抛
+    async readVersionTags() {
+      m.calls.push('tags');
+      if (m.tagsThrow) throw new Error(m.tagsThrow);
+      return m.tags;
+    },
+    // 这个提交是不是 origin/main 的祖先：假的判法就是「在 m.mainAncestors 里」
+    async isAncestorOfMain(commit) {
+      m.calls.push(`ancestor ${commit[0]}`);
+      if (m.mainAncestorsThrow) throw new Error(m.mainAncestorsThrow);
+      return m.mainAncestors.includes(commit);
+    },
+    async engineOn() {
+      if (m.engineOnError) throw new Error(m.engineOnError);
+      return m.engineUp;
     },
     // 主线最近那些次 ci.yml 的运行（一次一整份，候选都从里面判）
     async ciRuns() {
@@ -278,33 +311,131 @@ test('刚合进来、CI 还没开跑或还在跑：等，不发', async () => {
   assert.deepEqual(releases(m), []);
 });
 
-// ── 主线头的 CI 没跑完、红了：沿主线往回发最新的全绿提交（2026-09-27 夜合并一密，只看主线头就一直发不出去）──
+// ── 按版本发（决定 0011 第 3 条）：发的是版本号最大的 v<N> tag 指向的那个提交，不是主线头 ──
 
 const H3 = 'e'.repeat(40); // 再后来合进来的
-const ciCalls = (m) => m.calls.filter((c) => c.startsWith('ci'));
+const _ciCalls = (m) => m.calls.filter((c) => c.startsWith('ci'));
+/**
+ * git for-each-ref 的一行真样子：轻量 tag 的第三段（指向的对象）是空的，所以名字和时间之间两个空格；annotated tag 第二段是
+ * tag 对象号、第三段才是提交号。早先的写法（只有一个空格）不是 git 真会吐出来的，把「轻量 tag 解析不了」这个洞盖住了。
+ */
+const tagLine = (tag, sha, at = T1, object = '') =>
+  object === '' ? `${tag} ${sha}  ${at}\n` : `${tag} ${object} ${sha} ${at}\n`;
 
-test('【故意造出的失败】主线头的 CI 还在跑、前一个提交全绿：发前一个（只看主线头时这一轮跳过，合并一密就一直发不出去）', async () => {
+test('【故意造出的失败】主线头比版本标记新：发标记那一版，不发主线头（旧的「发主线头」就是这个切片要废掉的）', async () => {
   const m = machine();
-  // 主线：H2（刚合进来，CI 在跑）、H1（CI 全绿）、H0（在用）
+  // 主线：H2（发布之后又合进来的普通 PR）、H1（v1 打在这里）、H0（在用）
   m.main.unshift([H2, '2026-09-27T07:58:00Z']);
-  m.ci = runsBody(run(H2, 'in_progress', null, { run_number: 11 }), run(H1, 'completed', 'success'));
+  m.tags = tagLine('v1', H1);
+  m.ci = runsBody(run(H1, 'completed', 'success'), run(H2, 'completed', 'success'));
   let st = await m.round();
-  assert.deepEqual(releases(m), ['release b'], '发前一个全绿的 H1');
-  assert.deepEqual(ciCalls(m), ['ci'], '一轮只问一次 GitHub，候选都从这一份判');
-  assert.deepEqual(m.checkouts, [H1], '部署检出快进到要发的那个，不是主线头');
+  assert.deepEqual(releases(m), ['release b'], '发的是 v1 指着的 H1');
+  assert.deepEqual(m.checkouts, [H1], '部署检出快进到标记那一版，不是主线头');
   assert.equal(st.attempt.sha, H1);
   assert.equal(st.attempt.result, 'ok');
   assert.equal(st.last.action, 'released');
-  assert.match(st.last.detail, /主线头 cccccccccccc 的 CI 在跑/);
-  assert.equal(st.ci.sha, H2, '读数照写主线头的 CI');
-  assert.equal(st.ci.verdict, 'pending');
+  assert.equal(st.marker.tag, 'v1');
+  assert.equal(st.marker.commit, H1);
+  assert.equal(st.ci.sha, H1, 'CI 结论记的是标记那一版，不是主线头');
   assert.equal(st.rules.commit, H1, '规矩同步跟着发出去的那个提交走');
-  // 下一轮：主线头还在跑 → 等它，H1 不再发一遍
+  // 主线头又变绿了也不发：没有新的版本标记，这一版已经上过线了
   m.t += 5 * MIN;
   st = await m.round();
   assert.deepEqual(releases(m), []);
+  assert.equal(st.last.action, 'up-to-date');
+});
+
+test('【故意造出的失败】marker 缺失：一个 v<N> tag 都没有 → 明确失败、报警、绝不发主线头', async () => {
+  const m = machine();
+  m.tags = '';
+  const st = await m.round();
+  assert.deepEqual(releases(m), [], '没有版本标记就什么都不发');
+  assert.deepEqual(m.checkouts, [], '连检出都不动');
+  assert.equal(st.last.action, 'marker-none');
+  assert.equal(st.marker, null);
+  assert.equal(st.markerError.kind, 'none');
+  assert.match(st.markerError.why, /一个 v<N> 版本标记都没有/);
+  assert.equal(m.alerts.length, 1, '报警一条');
+  assert.equal(m.alerts[0].key, 'auto-release:marker-unreadable');
+  assert.match(m.alerts[0].body, /没有版本标记就不发主线头/);
+  // 置回标记：报警自己撤
+  m.tags = tagLine('v1', H1);
+  m.t += 5 * MIN;
+  const again = await m.round();
+  assert.equal(again.last.action, 'released');
+  assert.ok(!again.alerts.some((a) => a.key === 'auto-release:marker-unreadable'), '查成了不留着');
+});
+
+test('【故意造出的失败】marker 指向的提交不是 origin/main 的祖先 → 明确失败、报警、不发主线头、也不往回发旧的', async () => {
+  const m = machine();
+  // v2 打在别的分支上的提交（H2 不在 m.mainAncestors 里），v1 还在 H1 上
+  m.tags = tagLine('v2', H2, '2026-09-27T07:58:00Z') + tagLine('v1', H1);
+  const st = await m.round();
+  assert.deepEqual(releases(m), [], 'v2 不是主线上的提交：不发');
+  assert.equal(st.marker, null);
+  assert.equal(st.markerError.kind, 'not-ancestor');
+  assert.match(st.markerError.why, /不是 origin\/main 的祖先/);
+  assert.equal(m.alerts.length, 1);
+  assert.equal(m.alerts[0].key, 'auto-release:marker:v2');
+  assert.match(m.alerts[0].title, /v2 不是主线上的提交/);
+  // v3 打在主线上的新提交：换成它、报警自己撤
+  m.main.unshift([H3, '2026-09-27T08:20:00Z']);
+  m.mainAncestors = [H3, H1, H0];
+  m.tags =
+    tagLine('v3', H3, '2026-09-27T08:21:00Z') + tagLine('v2', H2, '2026-09-27T07:58:00Z') + tagLine('v1', H1);
+  m.ci = runsBody(run(H3, 'completed', 'success'), run(H1, 'completed', 'success'));
+  m.t += 5 * MIN;
+  const again = await m.round();
+  assert.deepEqual(releases(m), ['release e']);
+  assert.ok(!again.alerts.some((a) => a.key === 'auto-release:marker:v2'), '不是祖先的报警撤掉');
+});
+
+test('【故意造出的失败】判祖先关系时 git 没跑成 → 明确失败、不当成「不是祖先」也不当成绿', async () => {
+  const m = machine();
+  m.mainAncestorsThrow = 'git merge-base 退出码 128';
+  const st = await m.round();
+  assert.deepEqual(releases(m), []);
+  assert.equal(st.marker, null);
+  assert.equal(st.markerError.kind, 'unchecked');
+  assert.match(st.markerError.why, /没查成/);
+  assert.equal(m.alerts[0]?.key, 'auto-release:marker-unreadable');
+});
+
+test('【故意造出的失败】读 tag 列表本身没跑成 → 明确失败、不发', async () => {
+  const m = machine();
+  m.tagsThrow = 'git for-each-ref 退出码 128：not a git repository';
+  const st = await m.round();
+  assert.deepEqual(releases(m), []);
+  assert.equal(st.marker, null);
+  assert.equal(st.markerError.kind, 'unreadable');
+  assert.equal(m.alerts[0]?.key, 'auto-release:marker-unreadable');
+});
+
+test('版本号按数字排，不按字符串：v10 > v9（字符串排会把 v9 当最新）', async () => {
+  const m = machine();
+  m.main.unshift([H3, '2026-09-27T08:20:00Z'], [H2, '2026-09-27T07:50:00Z']);
+  m.mainAncestors = [H3, H2, H1, H0];
+  // 故意把 v10 排在 v9 后面：按字符串排 v9 会胜出
+  m.tags = tagLine('v9', H2, '2026-09-27T07:51:00Z') + tagLine('v10', H3, '2026-09-27T08:21:00Z');
+  m.ci = runsBody(run(H3, 'completed', 'success'), run(H2, 'completed', 'success'));
+  const st = await m.round();
+  assert.equal(st.marker.tag, 'v10', 'v10 才是最新的');
+  assert.equal(st.marker.commit, H3);
+  assert.deepEqual(releases(m), ['release e']);
+});
+
+test('标记那一版的 CI 还在跑：等它（不往回找更旧的全绿提交，也不发主线头）', async () => {
+  const m = machine();
+  m.main.unshift([H2, '2026-09-27T07:58:00Z']);
+  m.mainAncestors = [H2, H1, H0];
+  m.tags = tagLine('v2', H2, '2026-09-27T07:58:00Z');
+  m.ci = runsBody(run(H2, 'in_progress', null, { run_number: 11 }), run(H1, 'completed', 'success'));
+  let st = await m.round();
+  assert.deepEqual(releases(m), [], '标记那一版还没绿：不发（H1 绿也不发它）');
   assert.equal(st.last.action, 'ci-pending');
-  // 主线头也绿了 → 发它，规矩跟着到它
+  assert.equal(st.ci.sha, H2);
+  assert.equal(st.ci.verdict, 'pending');
+  // 那一版绿了：发它
   m.ci = runsBody(run(H2, 'completed', 'success', { run_number: 11 }), run(H1, 'completed', 'success'));
   m.t += 5 * MIN;
   st = await m.round();
@@ -312,59 +443,24 @@ test('【故意造出的失败】主线头的 CI 还在跑、前一个提交全�
   assert.equal(st.rules.commit, H2);
 });
 
-test('往回找：前一个也没全绿（排着队、被后面的推送挤掉的）、再前一个绿：发再前一个', async () => {
-  for (const [what, h2] of [
-    ['排着队', run(H2, 'queued', null, { run_number: 12 })],
-    ['被挤掉', run(H2, 'completed', 'cancelled', { run_number: 12 })],
-    ['还没开跑', null],
-  ]) {
-    const m = machine();
-    // 主线：H3（CI 在跑）、H2、H1（全绿）、H0（在用）
-    m.main.unshift([H3, '2026-09-27T07:58:00Z'], [H2, '2026-09-27T07:50:00Z']);
-    m.ci = runsBody(
-      run(H3, 'in_progress', null, { run_number: 13 }),
-      ...(h2 ? [h2] : []),
-      run(H1, 'completed', 'success'),
-    );
-    const st = await m.round();
-    assert.deepEqual(releases(m), ['release b'], what);
-    assert.deepEqual(m.checkouts, [H1], what);
-    assert.equal(st.current, H1, what);
-  }
-});
-
-test('往回找到的要等引擎空闲：读数写明要发哪个，空了照发它', async () => {
+test('标记那一版的 CI 红了：报 ci-red，等它（人不修就发不出去，不会退回发别的）', async () => {
   const m = machine();
-  m.main.unshift([H2, '2026-09-27T07:58:00Z']);
-  m.ci = runsBody(run(H2, 'in_progress', null, { run_number: 11 }), run(H1, 'completed', 'success'));
-  m.release = { code: EXIT_SESSIONS_BUSY, log: '', detail: '' };
+  m.main.unshift([H2, '2026-09-27T07:50:00Z']);
+  m.mainAncestors = [H2, H1, H0];
+  m.tags = tagLine('v2', H2, '2026-09-27T07:50:00Z');
+  m.ci = runsBody(run(H2, 'completed', 'failure', { run_number: 11 }), run(H1, 'completed', 'success'));
   let st = await m.round();
-  assert.equal(st.last.action, 'wait-idle');
-  assert.match(st.last.detail, /要发的是 bbbbbbbbbbbb：主线头 cccccccccccc 的 CI 在跑/);
-  m.release = { code: 0, log: '', detail: '' };
+  assert.deepEqual(releases(m), []);
+  assert.equal(st.last.action, 'ci-red');
+  assert.match(st.last.detail, /v2（cccccccccccc）的 CI 结论是 failure/);
   m.t += 5 * MIN;
   st = await m.round();
-  assert.deepEqual(releases(m), ['release b']);
-});
-
-test('只往前走：比在用的旧的提交再绿也不发；在用的之后没有全绿的就等', async () => {
-  const m = machine();
-  // 主线：H2（CI 在跑）、H1（在用，自动发的）、H0（全绿，比在用的旧）
-  m.current = H1;
-  m.history += `2026-09-27T07:35:00Z ${H1} release auto\n`;
-  m.main.unshift([H2, '2026-09-27T07:58:00Z']);
-  m.ci = runsBody(
-    run(H2, 'in_progress', null, { run_number: 11 }),
-    run(H1, 'completed', 'failure'),
-    run(H0, 'completed', 'success', { run_number: 9 }),
-  );
-  const st = await m.round();
   assert.deepEqual(releases(m), []);
-  assert.deepEqual(m.checkouts, []);
-  assert.equal(st.last.action, 'ci-pending');
+  assert.equal(st.last.action, 'ci-red');
+  assert.equal(st.waitingSince, null);
 });
 
-test('往回找时 CI 状态读不到（限流、连不上、回的认不出、HTTP 出错）：整轮不发、写明没查成，不拿哪一个当绿', async () => {
+test('标记那一版的 CI 读不到（限流、连不上、回的认不出、HTTP 出错）：这一轮不发、写明没查成', async () => {
   for (const [why, setup] of [
     ['限流', (m) => (m.ci = { status: 403, body: '{"message":"API rate limit exceeded"}', rate: '' })],
     ['连不上', (m) => (m.ciThrow = 'getaddrinfo EAI_AGAIN api.github.com')],
@@ -373,6 +469,8 @@ test('往回找时 CI 状态读不到（限流、连不上、回的认不出、H
   ]) {
     const m = machine();
     m.main.unshift([H2, '2026-09-27T07:58:00Z']);
+    m.mainAncestors = [H2, H1, H0];
+    m.tags = tagLine('v2', H2, '2026-09-27T07:58:00Z');
     setup(m);
     const st = await m.round();
     assert.deepEqual(releases(m), [], why);
@@ -383,21 +481,108 @@ test('往回找时 CI 状态读不到（限流、连不上、回的认不出、H
   }
 });
 
-test('主线头红了、前一个全绿：前一个照发；之后主线头还红，照旧报 ci-red（主线红要修）', async () => {
+test('要发的版本标记也要等引擎空闲：读数写明要发哪个', async () => {
   const m = machine();
-  m.main.unshift([H2, '2026-09-27T07:50:00Z']);
-  m.ci = runsBody(run(H2, 'completed', 'failure', { run_number: 11 }), run(H1, 'completed', 'success'));
+  m.main.unshift([H2, '2026-09-27T07:58:00Z']);
+  m.mainAncestors = [H2, H1, H0];
+  m.tags = tagLine('v2', H2, '2026-09-27T07:58:00Z');
+  m.ci = runsBody(run(H2, 'completed', 'success', { run_number: 11 }), run(H1, 'completed', 'success'));
+  m.release = { code: EXIT_SESSIONS_BUSY, log: '', detail: '' };
   let st = await m.round();
-  assert.deepEqual(releases(m), ['release b']);
-  assert.match(st.last.detail, /主线头 cccccccccccc 的 CI 结论是 failure/);
+  assert.equal(st.last.action, 'wait-idle');
+  assert.match(st.last.detail, /要发的是 cccccccccccc/);
+  m.release = { code: 0, log: '', detail: '' };
   m.t += 5 * MIN;
   st = await m.round();
-  assert.deepEqual(releases(m), []);
-  assert.equal(st.last.action, 'ci-red');
-  assert.equal(st.waitingSince, null);
+  assert.deepEqual(releases(m), ['release c']);
 });
 
-test('发过没成的提交：它和比它旧的都不再自动发（不往回挑它前面的再试一个），等主线出比它新的全绿提交', async () => {
+test('标记指向的提交比在用的旧（人退回过、又打了老 tag）：不发——不往回退版本', async () => {
+  const m = machine();
+  // 在用的 H2（比 H1 新），标记还指着 H1
+  m.current = H2;
+  m.main.unshift([H2, '2026-09-27T07:58:00Z']);
+  m.tags = tagLine('v1', H1);
+  const st = await m.round();
+  assert.deepEqual(releases(m), []);
+  assert.deepEqual(m.checkouts, []);
+  assert.match(st.last.action, /failed-before|up-to-date/);
+});
+
+test('【故意造出的失败】标记比在用的旧、主线上却还有更新的提交：不发——不降级（候选里没有标记指的那个提交就不发）', async () => {
+  const m = machine();
+  // 主线新到旧 H3 H2 H1 H0；在用的是 H1（人手动发过）；版本标记 v1 还指着更旧的 H0
+  m.main = [
+    [H3, '2026-09-27T07:50:00Z'],
+    [H2, '2026-09-27T07:40:00Z'],
+    [H1, '2026-09-27T07:30:00Z'],
+    [H0, '2026-09-27T06:00:00Z'],
+  ];
+  m.mainAncestors = [H3, H2, H1, H0];
+  m.current = H1;
+  m.tags = tagLine('v1', H0);
+  m.ci = runsBody(run(H0, 'completed', 'success'));
+  const st = await m.round();
+  assert.deepEqual(releases(m), [], '标记指的 H0 比在用的 H1 旧：发它就是降级');
+  assert.deepEqual(m.checkouts, []);
+  assert.equal(st.last.action, 'marker-not-newer');
+  assert.equal(st.attempt, null, '什么都没发：不留「发过」的记录');
+});
+
+test('读数（journal、release.sh --check）：新状态按版本标记说，老状态（没有 marker 字段）照老样子按主线头说', () => {
+  const base = {
+    schema: STATE_SCHEMA,
+    ranAt: '2026-09-27T08:00:00.000Z',
+    main: {
+      checkedAt: '2026-09-27T08:00:00.000Z',
+      head: H2,
+      headAt: '2026-09-27T07:50:00.000Z',
+      commits: [
+        [H2, '2026-09-27T07:50:00.000Z'],
+        [H1, '2026-09-27T07:30:00.000Z'],
+        [H0, '2026-09-27T06:00:00.000Z'],
+      ],
+    },
+    current: H0,
+    ci: { sha: H1, verdict: 'green', detail: '', checkedAt: '2026-09-27T08:00:00.000Z' },
+    last: null,
+    rules: null,
+    system: null,
+    config: null,
+  };
+  const lines = (st) => summary(st).split('；');
+  // 新状态：标记指着 H1，在用 H0（落后标记 1 个提交）；主线头 H2 只作参考，不算落后
+  const marker = {
+    tag: 'v3',
+    commit: H1,
+    at: '2026-09-27T07:30:00.000Z',
+    checkedAt: '2026-09-27T08:00:00.000Z',
+  };
+  const now = lines({ ...base, marker });
+  assert.ok(now.includes('版本标记 v3（bbbbbbbbbbbb），CI green'), now.join(' | '));
+  assert.ok(now.includes('在用 aaaaaaaaaaaa，落后版本标记 1 个提交'), now.join(' | '));
+  assert.ok(
+    now.some((l) => l.startsWith('主线头 cccccccccccc（只作参考')),
+    now.join(' | '),
+  );
+  // 在用的就是标记那一版 / 比标记还新（人手动发过更新的）
+  assert.ok(lines({ ...base, marker, current: H1 }).includes('在用 bbbbbbbbbbbb，跟上了版本标记'));
+  assert.ok(lines({ ...base, marker, current: H2 }).includes('在用 cccccccccccc，比版本标记新'));
+  // 标记没查成（null）：写明原因，不拿主线头充数说「落后几个」
+  const none = lines({
+    ...base,
+    marker: null,
+    markerError: { kind: 'none', why: '一个 v<N> 版本标记都没有', at: '2026-09-27T08:00:00.000Z' },
+  });
+  assert.ok(none.includes('版本标记没有（一个 v<N> 版本标记都没有）'), none.join(' | '));
+  assert.ok(none.includes('在用 aaaaaaaaaaaa，没有版本标记可比'), none.join(' | '));
+  // 老状态：没有 marker 这个字段，读数和改之前一模一样（release-flow.test.sh 的断言就拿它）
+  const legacy = lines(base);
+  assert.ok(legacy.includes('主线头 cccccccccccc'), legacy.join(' | '));
+  assert.ok(legacy.includes('在用 aaaaaaaaaaaa，落后 2 个提交'), legacy.join(' | '));
+});
+
+test('发过没成的版本标记：不再自动试（不往回挑更旧的标记），等下一个版本标记', async () => {
   for (const [what, setup, said] of [
     [
       '自动发过、没成（记在状态里）',
@@ -413,7 +598,7 @@ test('发过没成的提交：它和比它旧的都不再自动发（不往回�
           alerts: [],
           resolve: [],
         }),
-      /cccccccccccc 自动发过、没成/,
+      /v2 指向的提交自动发过、没成/,
     ],
     [
       '发过、没过健康检查（记在发布历史里，状态文件丢了也认得）',
@@ -422,22 +607,22 @@ test('发过没成的提交：它和比它旧的都不再自动发（不往回�
           `2026-09-27T07:52:00Z ${H2} release auto\n` +
           `2026-09-27T07:55:00Z ${H2} unhealthy auto\n` +
           `2026-09-27T07:55:30Z ${H0} auto-rollback auto\n`),
-      /cccccccccccc 发过、没过健康检查/,
+      /v2 指向的提交发过、没过健康检查/,
     ],
   ]) {
     const m = machine();
-    // 主线：H3（CI 在跑）、H2（发过没成）、H1（全绿，从没发过）、H0（在用）
+    // 主线：H3（发布之后合进来的）、H2（v2 打在这里，发过没成）、H1（v1，从没被发过）、H0（在用）
     m.main.unshift([H3, '2026-09-27T07:58:00Z'], [H2, '2026-09-27T07:50:00Z']);
-    m.ci = runsBody(
-      run(H3, 'in_progress', null, { run_number: 12 }),
-      run(H2, 'completed', 'success', { run_number: 11 }),
-      run(H1, 'completed', 'success'),
-    );
+    m.mainAncestors = [H3, H2, H1, H0];
+    m.tags = tagLine('v2', H2, '2026-09-27T07:50:00Z') + tagLine('v1', H1);
+    m.ci = runsBody(run(H2, 'completed', 'success', { run_number: 11 }), run(H1, 'completed', 'success'));
     setup(m);
     let st = await m.round();
     assert.deepEqual(releases(m), [], what);
-    assert.equal(st.last.action, 'ci-pending', what);
+    assert.equal(st.last.action, 'failed-before', what);
     assert.match(st.last.detail, said, what);
+    // 下一个版本标记（v3 打在 H3 上）：照发新的，不回头试 v1
+    m.tags = `${tagLine('v3', H3, '2026-09-27T07:58:00Z')}${tagLine('v2', H2, '2026-09-27T07:50:00Z')}${tagLine('v1', H1)}`;
     m.ci = runsBody(run(H3, 'completed', 'success', { run_number: 12 }));
     m.t += 5 * MIN;
     st = await m.round();
@@ -445,10 +630,8 @@ test('发过没成的提交：它和比它旧的都不再自动发（不往回�
   }
 });
 
-test('往回找到的那个发布没成：报警记它；它不再试，主线头绿了发主线头，报警解除', async () => {
+test('某一版发布没成：报警记它；它不再试，下一个版本标记照发，报警解除', async () => {
   const m = machine();
-  m.main.unshift([H2, '2026-09-27T07:58:00Z']);
-  m.ci = runsBody(run(H2, 'in_progress', null, { run_number: 11 }), run(H1, 'completed', 'success'));
   m.release = { code: 1, log: '/srv/fleet-dao-releases/.logs/z.log', detail: '迁移失败' };
   let st = await m.round();
   assert.deepEqual(releases(m), ['release b']);
@@ -457,11 +640,16 @@ test('往回找到的那个发布没成：报警记它；它不再试，主线�
     m.alerts.map((a) => a.key),
     [`${FAILED_PREFIX}${H1}`],
   );
+  assert.match(m.alerts[0].title, /自动发布 v1/);
   m.t += 5 * MIN;
   st = await m.round();
   assert.deepEqual(releases(m), [], '没成的不再试');
-  assert.equal(st.last.action, 'ci-pending');
-  m.ci = runsBody(run(H2, 'completed', 'success', { run_number: 11 }), run(H1, 'completed', 'success'));
+  assert.equal(st.last.action, 'failed-before');
+  // 下一个版本标记（v2 打在 H2 上）：照发新的
+  m.main.unshift([H2, '2026-09-27T07:58:00Z']);
+  m.mainAncestors = [H2, H1, H0];
+  m.tags = tagLine('v2', H2, '2026-09-27T07:58:00Z') + tagLine('v1', H1);
+  m.ci = runsBody(run(H2, 'completed', 'success', { run_number: 11 }));
   m.release = { code: 0, log: '', detail: '' };
   m.t += 5 * MIN;
   await m.round();
@@ -469,23 +657,26 @@ test('往回找到的那个发布没成：报警记它；它不再试，主线�
   assert.deepEqual(m.resolved, [FAILED_PREFIX]);
 });
 
-test('人手动退回过：退回之前合进来的提交（含退回掉的那个）再绿也不自动发，只发那之后合进来的', async () => {
+test('人手动退回过：退回到那一刻之前打的版本标记不发（不跟人打架），下一个版本标记照发', async () => {
   const m = machine();
-  // H1 自动发过，人 07:50 手动退回 H0；之后合进来 H2（CI 在跑）
+  // H1 自动发过，人 07:50 手动退回 H0；标记还停在 H1（打在退回之前）
   m.history += `2026-09-27T07:40:00Z ${H1} release auto\n2026-09-27T07:50:00Z ${H0} rollback\n`;
-  m.main.unshift([H2, '2026-09-27T07:55:00Z']);
-  m.ci = runsBody(run(H2, 'in_progress', null, { run_number: 11 }), run(H1, 'completed', 'success'));
   let st = await m.round();
-  assert.deepEqual(releases(m), []);
-  assert.equal(st.last.action, 'ci-pending');
-  assert.equal(st.hold, null, '主线上有了人退回之后合进来的提交，就不算按住');
-  m.ci = runsBody(run(H2, 'completed', 'success', { run_number: 11 }), run(H1, 'completed', 'success'));
+  assert.deepEqual(releases(m), [], '人按住着：标记那一版不发');
+  assert.equal(st.last.action, 'hold');
+  assert.equal(st.hold.sha, H0);
+  // 人又发了一版（下一个版本标记 v2 打在 H2 上）：照发，不再跟人打架
+  m.main.unshift([H2, '2026-09-27T07:55:00Z']);
+  m.mainAncestors = [H2, H1, H0];
+  m.tags = tagLine('v2', H2, '2026-09-27T07:55:30Z') + tagLine('v1', H1);
+  m.ci = runsBody(run(H2, 'completed', 'success', { run_number: 11 }));
   m.t += 5 * MIN;
   st = await m.round();
   assert.deepEqual(releases(m), ['release c']);
+  assert.equal(st.hold, null, '主线上有了退回之后合进来的提交，就不算按住');
 });
 
-test('发布没成：记下、报警一次；同一个提交不再试（不死循环），主线出了新提交再发；跟上后报警解除', async () => {
+test('发布没成：记下、报警一次；同一版不再试（不死循环），下一个版本标记照发；跟上后报警解除', async () => {
   const m = machine();
   m.release = {
     code: 1,
@@ -506,8 +697,10 @@ test('发布没成：记下、报警一次；同一个提交不再试（不死�
     assert.equal(st.last.action, 'failed-before');
   }
   assert.equal(m.alerts.length, 1, '报警只发一次');
-  // 修复合进来
+  // 修复合进来、打下一个版本标记
   m.main.unshift([H2, '2026-09-27T08:20:00Z']);
+  m.mainAncestors = [H2, H1, H0];
+  m.tags = tagLine('v2', H2, '2026-09-27T08:20:30Z') + tagLine('v1', H1);
   m.ci = runsBody(run(H2, 'completed', 'success'));
   m.release = { code: 0, log: '', detail: '' };
   m.t += 5 * MIN;
@@ -543,9 +736,8 @@ test('引擎不会排空（发布脚本退出 76）：等空闲、记下从何�
   assert.equal(st.last.action, 'wait-idle');
   assert.equal(st.waitingSince, new Date(T0).toISOString());
   assert.equal(st.attempt, null);
-  // 新提交来了也接着算，不从头等
+  // 主线又有提交合进来（不是版本标记）：接着算等空闲的钟，不从头等，也不去发它
   m.main.unshift([H2, '2026-09-27T08:10:00Z']);
-  m.ci = runsBody(run(H2, 'completed', 'success'));
   m.t += 30 * MIN;
   st = await m.round();
   assert.equal(st.last.action, 'wait-idle');
@@ -553,7 +745,7 @@ test('引擎不会排空（发布脚本退出 76）：等空闲、记下从何�
   m.release = { code: 0, log: '', detail: '' };
   m.t = T0 + IDLE_WAIT_MS;
   st = await m.round();
-  assert.deepEqual(releases(m), ['release c busy-ok']);
+  assert.deepEqual(releases(m), ['release b busy-ok'], '要发的还是 v1 那一版（H2 上没有版本标记）');
   assert.equal(st.attempt.busyOk, true);
   assert.equal(st.waitingSince, null);
 
@@ -597,7 +789,7 @@ test('另一个发布在跑、部署检出有改动或分叉：不发', async ()
   assert.deepEqual(releases(m), []);
 });
 
-test('人手动退回过：主线上没有比那次更新的提交就不自动发（不跟人打架），修复合进来再发', async () => {
+test('人手动退回过：下一个版本标记打在退回之后，照发（不跟人打架）', async () => {
   const m = machine();
   m.history +=
     '2026-09-27T07:40:00Z bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb release auto\n' +
@@ -606,7 +798,10 @@ test('人手动退回过：主线上没有比那次更新的提交就不自动�
   assert.deepEqual(releases(m), []);
   assert.equal(st.last.action, 'hold');
   assert.equal(st.hold.event, 'rollback');
+  // 下一个版本标记（v2 打在 H2 上）：照发
   m.main.unshift([H2, '2026-09-27T08:10:00Z']);
+  m.mainAncestors = [H2, H1, H0];
+  m.tags = tagLine('v2', H2, '2026-09-27T08:10:30Z') + tagLine('v1', H1);
   m.ci = runsBody(run(H2, 'completed', 'success'));
   m.t += 15 * MIN;
   st = await m.round();
@@ -694,8 +889,10 @@ test('规矩同步没成：记下、报警，不挡发布；同一个提交不�
     [],
     '同一个提交不重跑',
   );
-  // 下一个提交发了、同步成了：解除
+  // 下一个版本标记发了、同步成了：解除
   m.main.unshift([H2, '2026-09-27T08:20:00Z']);
+  m.mainAncestors = [H2, H1, H0];
+  m.tags = tagLine('v2', H2, '2026-09-27T08:20:30Z') + tagLine('v1', H1);
   m.ci = runsBody(run(H2, 'completed', 'success'));
   m.rules = { code: 0, out: '  ✓ 一致' };
   m.t += 5 * MIN;
@@ -751,15 +948,23 @@ test('库连不上：报警留到下一轮再发，不丢', async () => {
   assert.equal(st.alerts[0].raised, true);
 });
 
-test('读数：一行人看的，写明主线头、落后几个、这一轮干了什么、规矩和装机层到哪', async () => {
+test('读数：一行人看的，写明版本标记、落后几个、这一轮干了什么、规矩和装机层到哪', async () => {
   const m = machine();
   m.ci = runsBody(run(H1, 'completed', 'failure'));
   const line = summary(await m.round());
-  assert.match(line, /主线头 bbbbbbbbbbbb，CI red；在用 aaaaaaaaaaaa，落后 1 个提交/);
+  assert.match(line, /版本标记 v1（bbbbbbbbbbbb）/);
+  assert.match(line, /在用 aaaaaaaaaaaa，落后版本标记 1 个提交/);
   assert.match(line, /这轮：ci-red/);
   assert.match(line, /规矩同步到/);
   assert.match(line, /装机脚本装到 aaaaaaaaaaaa，之后相关提交 0 个/);
   assert.match(line, /配置和期望一致/);
+});
+
+test('版本标记读不到时，读数里写明为什么（不是「主线头 ccc…」那种含糊话）', async () => {
+  const m = machine();
+  m.tags = '';
+  const line = summary(await m.round());
+  assert.match(line, /版本标记没有（一个 v<N> 版本标记都没有/);
 });
 
 // ── 配置对账（#323）：每一轮拿线上的环境文件跟在用那一版里的期望比 ──
@@ -940,4 +1145,215 @@ test('装机层落后的路径盖住了 france.sh 从仓里读的每个文件', 
       include.some((p) => (p.endsWith('/') ? r.startsWith(p) : r === p)) && !exclude.includes(r);
     assert.ok(covered, `${r} 没被 INSTALL_PATHS 盖住：它改了 france.sh 要重跑，后端却不会标落后`);
   }
+});
+
+// ── 版本标记的解析和挑选（决定 0011 第 3 条）：纯判定，单独测 ──
+
+const H4 = 'f'.repeat(40);
+
+test('【故意造出的失败】解析 tag 列表：非版本 tag 跳过、版本号按数字排、认不出的行抛（不拿半截当全部）', () => {
+  const parsed = parseVersionTags(
+    [
+      tagLine('nightly', H0, '2026-09-27T06:00:00Z'),
+      tagLine('v9', H2, '2026-09-27T07:00:00Z'),
+      tagLine('v10', H1, '2026-09-27T07:30:00Z'),
+      tagLine('v1', H0, '2026-09-27T06:00:00Z'),
+    ].join(''),
+  );
+  assert.deepEqual(
+    parsed.map((t) => t.tag),
+    ['v10', 'v9', 'v1'],
+    '版本号按数字排：v10 在 v9 前面（字符串排会把 v9 当最新）',
+  );
+  assert.equal(parsed[0].commit, H1);
+  assert.equal(parsed[0].n, 10);
+  assert.deepEqual(parseVersionTags(''), [], '一个 tag 都没有就是空数组（上层记「标记缺失」）');
+  assert.deepEqual(parseVersionTags(tagLine('nightly', H0, '2026-09-27T06:00:00Z')), [], '只有非版本 tag');
+  // annotated tag：第一个 40 位是 tag 对象、第二个才是它指的提交，要取第二个
+  assert.equal(
+    parseVersionTags(tagLine('v7', H1, '2026-09-27T07:30:00Z', H4))[0].commit,
+    H1,
+    'annotated tag 取它指的那个提交（*objectname）',
+  );
+  assert.throws(() => parseVersionTags('v1 不是提交号  2026-09-27T07:30:00Z'), /认不出/);
+  assert.throws(() => parseVersionTags(`v1 ${H1}  不是时间`), /认不出/);
+  assert.throws(
+    () => parseVersionTags(`v1 ${H1} 2026-09-27T07:30:00Z`),
+    /认不出/,
+    '只有三段：不是 git 吐出来的样子',
+  );
+  assert.throws(
+    () => parseVersionTags(`v1 ${H1} 不是提交  2026-09-27T07:30:00Z`),
+    /认不出/,
+    '第三段既不空也不是提交号',
+  );
+});
+
+test('【故意造出的失败】轻量 tag（git 的第三段是空的、两个空格）也认得；人手打的非版本轻量 tag 夹在里面不连累整份列表', () => {
+  // git for-each-ref 对轻量 tag 的真输出：`v1 <提交号>  <时间>`。早先的写法只认单个空格，一条轻量 tag 就让整份列表「认不出」，
+  // 版本标记读不到，法国从此不发——哪怕那条根本不是版本标记（比如人手打了个 `latest`）。
+  const text = [
+    `latest ${H0}  2026-09-27T05:00:00Z`,
+    `v2 ${H2}  2026-09-27T07:58:00Z`,
+    `v1 ${H4} ${H1} 2026-09-27T07:30:00Z`,
+  ].join('\n');
+  const parsed = parseVersionTags(text);
+  assert.deepEqual(
+    parsed.map((t) => [t.tag, t.commit]),
+    [
+      ['v2', H2],
+      ['v1', H1],
+    ],
+  );
+});
+
+test('【故意造出的失败】挑标记：最新的那个不是主线上的提交 → 明确失败（kind=not-ancestor），不往回退而求其次', async () => {
+  const tags = parseVersionTags(
+    [tagLine('v2', H2, '2026-09-27T07:58:00Z'), tagLine('v1', H1, '2026-09-27T07:30:00Z')].join(''),
+  );
+  const only = [H1, H0]; // H2 不在主线上
+  const r = await pickVersionMarker(tags, async (c) => only.includes(c));
+  assert.equal(r.ok, false);
+  assert.equal(r.kind, 'not-ancestor');
+  assert.equal(r.tag.tag, 'v2');
+  assert.match(r.why, /不是 origin\/main 的祖先/);
+});
+
+test('【故意造出的失败】挑标记：一个都没有 → kind=none；判祖先抛了 → kind=unchecked（不当成「不是祖先」）', async () => {
+  const none = await pickVersionMarker([], async () => true);
+  assert.equal(none.kind, 'none');
+  assert.match(none.why, /一个 v<N> 版本标记都没有/);
+  const tags = parseVersionTags(tagLine('v1', H1, '2026-09-27T07:30:00Z'));
+  const bad = await pickVersionMarker(tags, async () => {
+    throw new Error('git merge-base 退出码 128');
+  });
+  assert.equal(bad.kind, 'unchecked');
+  assert.match(bad.why, /没查成/);
+});
+
+test('挑标记：最新的那个在主线上就用它（只判最新的一个，不问更旧的）', async () => {
+  const tags = parseVersionTags(
+    [
+      tagLine('v3', H2, '2026-09-27T07:58:00Z'),
+      tagLine('v2', H1, '2026-09-27T07:30:00Z'),
+      tagLine('v1', H0, '2026-09-27T06:00:00Z'),
+    ].join(''),
+  );
+  const asked = [];
+  const r = await pickVersionMarker(tags, async (c) => {
+    asked.push(c);
+    return true;
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.tag.tag, 'v3');
+  assert.deepEqual(asked, [H2], '只问最新那一个');
+});
+
+test('版本标记的写法要和 packages/conventions 那边（release.yml 用的 isVersionTag）一致', () => {
+  // 两边一个判定「打不打 tag、叫什么名」，一个判定「法国发哪一版」：写法漂了就会一边认一边不认。
+  const src = readFileSync(
+    new URL('../../packages/conventions/src/publish-release-logic.ts', import.meta.url),
+    'utf8',
+  );
+  const m = /export function isVersionTag\(s: string\)[\s\S]*?return (\/.*?\/)\.test\(s\);/.exec(src);
+  assert.ok(m, '读到了 publish-release-logic.ts 里 isVersionTag 的正则');
+  assert.equal(
+    VERSION_TAG_RE.source,
+    m[1].slice(1, -1),
+    '两边的正则源码要一模一样（改了那边就要改这边，VERSION_TAG_RE 上面那段注释写着）',
+  );
+});
+
+// ── 发布四步（决定 0011 第 4 条）：停派活 → 等在跑的收尾 → 部署 → 恢复派活 ──
+
+test('【故意造出的失败】引擎关着：四步照实写「跳过」，绝不假装做过', () => {
+  const seq = publishSequence({ engineOn: false, target: H1, tag: 'v1' });
+  assert.equal(seq.engineOn, false);
+  assert.deepEqual(
+    seq.steps.map((s) => [s.name, s.state]),
+    [
+      ['停派活', 'skipped-engine-off'],
+      ['等在跑的收尾', 'skipped-engine-off'],
+      ['部署', 'delegated'],
+      ['恢复派活', 'skipped-engine-off'],
+    ],
+  );
+  for (const s of seq.steps.filter((x) => x.state === 'skipped-engine-off')) {
+    assert.match(s.detail, /引擎关着/, `${s.name}：要说清是关着才没做`);
+  }
+  const line = publishSequenceSummary(seq);
+  assert.match(line, /停派活：跳过（引擎关着）/);
+  assert.match(line, /恢复派活：跳过（引擎关着）/);
+  assert.ok(!/停派活：做了/.test(line), '没做的不许写成做了');
+});
+
+test('引擎开着：四步交给 release.sh 的排空协议做（不新加开关、不加库里的列），排空靠 .drain-request', () => {
+  const seq = publishSequence({ engineOn: true, target: H1, tag: 'v1' });
+  assert.equal(seq.engineOn, true);
+  assert.deepEqual(
+    seq.steps.map((s) => s.name),
+    ['停派活', '等在跑的收尾', '部署', '恢复派活'],
+  );
+  const text = seq.steps.map((s) => s.detail).join('\n');
+  assert.match(text, /\.drain-request/, '停派活 = 写排空请求（已有的协议）');
+  assert.match(text, /drain\.json/, '等收尾 = 读引擎的 drain.json 数会话');
+  assert.ok(!/engine_dispatch_paused/.test(text), '不引入库里的新开关');
+});
+
+test('【故意造出的失败】引擎关着时发一版：状态里四步都记「跳过」，读数照实写', async () => {
+  const m = machine();
+  m.engineUp = false;
+  const st = await m.round();
+  assert.deepEqual(releases(m), ['release b'], '引擎关着照样发（发布不靠引擎）');
+  assert.equal(st.sequence.engineOn, false);
+  assert.deepEqual(
+    st.sequence.steps.map((s) => s.state),
+    ['skipped-engine-off', 'skipped-engine-off', 'delegated', 'skipped-engine-off'],
+  );
+  const line = summary(st);
+  assert.match(line, /发布四步（引擎关着）/);
+  assert.match(line, /停派活：跳过（引擎关着）/);
+});
+
+test('引擎开着时发一版：状态里四步记「交给发布脚本」，不是「跳过」', async () => {
+  const m = machine();
+  m.engineUp = true;
+  const st = await m.round();
+  assert.equal(st.sequence.engineOn, true);
+  assert.deepEqual(
+    st.sequence.steps.map((s) => s.state),
+    ['delegated', 'delegated', 'delegated', 'delegated'],
+  );
+  assert.match(summary(st), /发布四步（引擎开着）/);
+});
+
+test('【故意造出的失败】引擎开没开着没查成：这一轮不发、不动部署检出、报警，不拿「关着」冒充；下一轮查成了就发并撤警', async () => {
+  const m = machine();
+  m.engineOnError = 'systemctl 没跑成';
+  let st = await m.round();
+  assert.deepEqual(releases(m), [], '不知道引擎开没开着：发布脚本会不会去排空它、四步该记什么都说不准，不发');
+  assert.deepEqual(m.checkouts, [], '连部署检出都没动');
+  assert.equal(st.last.action, 'engine-unknown');
+  assert.equal(st.sequence, null, '没把四步写成「跳过（引擎关着）」');
+  assert.match(st.sequenceError, /没查成/);
+  assert.match(summary(st), /四步没查成/);
+  assert.equal(st.attempt, null, '什么都没发：不留「发过」的记录');
+  assert.ok(
+    m.alerts.some((a) => a.key === ENGINE_UNKNOWN_KEY),
+    '报一条，别让它一直悄悄停着',
+  );
+  // 下一轮问得出来了（关着）：发，并把那条警撤掉
+  m.engineOnError = null;
+  m.t += 5 * MIN;
+  st = await m.round();
+  assert.deepEqual(releases(m), ['release b']);
+  assert.equal(st.sequenceError, null);
+  assert.equal(st.sequence.engineOn, false);
+  assert.ok(m.resolvedKeys.includes(ENGINE_UNKNOWN_KEY), '查成了那条警自己撤');
+});
+
+test('真机上那半边：systemctl 说引擎活着才算开着，认不出的回要抛（不当成关着也不当成开着）', () => {
+  const src = readFileSync(new URL('../france/auto-release/fleet-auto-release.mjs', import.meta.url), 'utf8');
+  assert.match(src, /'is-active', 'fleet-engine\.service'/, '和 release.sh 同一个判法');
+  assert.match(src, /回的认不出/, '认不出的回要抛，不猜');
 });

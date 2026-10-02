@@ -32,6 +32,7 @@ function pr(over: Partial<PrAutoMergeCandidate> = {}): PrAutoMergeCandidate {
     authorIsBot: true,
     autoMerge: false,
     headSha: 'a'.repeat(40),
+    headRef: 'fix/widget-typo',
     ...over,
   };
 }
@@ -69,7 +70,11 @@ function world(o: Over = {}): World {
         o.readStandardPathsFile ??
         (async () =>
           JSON.stringify({
-            paths: [{ path: 'packages/conventions/standard-paths.json', kind: '碰安全', why: '清单本身' }],
+            paths: [
+              { path: 'packages/conventions/standard-paths.json', why: '清单本身' },
+              { path: 'AGENTS.md', section: '通用段', why: '通用段' },
+              { path: 'agents/**/*.md', why: '技能说明' },
+            ],
           })),
       enableAutoMerge: async (repo, pull) => {
         enabled.push({ repo: `${repo.owner}/${repo.name}`, number: pull.number, nodeId: pull.nodeId });
@@ -138,6 +143,51 @@ describe('开着的 PR 由对账兜底挂上自动合并', () => {
         why: '改到了改标准的路径，不挂：等创始人同意（或照先审后合人自己挂）',
       },
     ]);
+  });
+
+  it('【故意造出的失败】改到的是通配里的技能说明（agents/**/*.md）：不挂——只会前缀匹配的老判法会放过它', async () => {
+    const w = world({
+      listPrs: async () => [pr()],
+      pullFiles: async () => [{ filename: 'agents/skills/discuss/SKILL.md', status: 'modified' }],
+    });
+    const part = await checkAutoMerges(w.deps);
+    expect(part).toMatchObject({ scanned: 1, found: 0, unchecked: [] });
+    expect(w.enabled).toEqual([]);
+    expect(w.resolved[0]?.why).toContain('改标准');
+  });
+
+  it('【故意造出的失败】任务工作流的 PR（分支 fleet/<单号>-t<8 位>）：兜底不挂，也不读文件和清单——只有工作流在验收通过之后才挂', async () => {
+    let read = 0;
+    const w = world({
+      listPrs: async () => [pr({ headRef: 'fleet/12-t1a2b3c4d' })],
+      pullFiles: async () => {
+        read += 1;
+        return [];
+      },
+      readStandardPathsFile: async () => {
+        read += 1;
+        return '{}'; // 读了就会因为清单认不出而报提醒
+      },
+    });
+    const part = await checkAutoMerges(w.deps);
+    expect(part).toMatchObject({ scanned: 1, found: 0, unchecked: [] });
+    expect(w.enabled).toEqual([]);
+    expect(w.raised).toEqual([]);
+    expect(read).toBe(0);
+    expect(w.resolved[0]?.why).toContain('任务工作流的 PR');
+  });
+
+  it('像任务分支又不是的（编号位数不对、前缀不对）：照常当普通机器人 PR 看', async () => {
+    const w = world({
+      listPrs: async () => [
+        pr({ number: 1, headRef: 'fleet/12-t1a2b3c4' }),
+        pr({ number: 2, headRef: 'fleet/12-tXYZ12345' }),
+        pr({ number: 3, headRef: 'feat/fleet/12-t1a2b3c4d' }),
+      ],
+    });
+    const part = await checkAutoMerges(w.deps);
+    expect(part).toMatchObject({ scanned: 3, found: 3, unchecked: [] });
+    expect(w.enabled.map((e) => e.number)).toEqual([1, 2, 3]);
   });
 
   it('【故意造出的失败】CI 在这个头上还不绿（red / pending）：不挂', async () => {

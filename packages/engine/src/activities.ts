@@ -40,6 +40,22 @@ import {
   type PortName,
   type StartSessionInput,
 } from './ports.ts';
+import type { TaskBriefResult } from './runner/task-brief.ts';
+import type {
+  ArmAutoMergeInput,
+  ArmAutoMergeResult,
+  CheckGuardedInput,
+  ColdVerifyInput,
+  ColdVerifyResult,
+  DeliveryRead,
+  GuardedPaths,
+  MergeWait,
+  ReadDeliveryInput,
+  ReadTaskBriefInput,
+  RunSegmentInput,
+  RunSegmentResult,
+  WaitMergedInput,
+} from './task-contract.ts';
 
 /** 端口名的全集。写成 Record 让编译器保证一个不漏（windsurf-dao#1422：假活动表缺名字，生产卡在 activity not found）。 */
 const PORT_KEYS: Readonly<Record<PortName, true>> = {
@@ -268,6 +284,32 @@ export interface EngineJobs {
   watchdog?: () => WatchdogDeps;
 }
 
+/**
+ * 任务工作流（task-contract.ts，#632）要的那几个活动的实现（真端口才有）。和 EngineJobs 一个做法：不给（假端口，或真端口没接上）
+ * 的活动明确报 TASK_NOT_CONFIGURED（不重试），不装作做过。
+ */
+export interface EngineTasks {
+  readTaskBrief?: (input: ReadTaskBriefInput, ctx: PortContext) => Promise<TaskBriefResult>;
+  runSegment?: (input: RunSegmentInput, ctx: PortContext) => Promise<RunSegmentResult>;
+  readDelivery?: (input: ReadDeliveryInput, ctx: PortContext) => Promise<DeliveryRead>;
+  coldVerify?: (input: ColdVerifyInput, ctx: PortContext) => Promise<ColdVerifyResult>;
+  checkGuarded?: (input: CheckGuardedInput, ctx: PortContext) => Promise<GuardedPaths>;
+  armAutoMerge?: (input: ArmAutoMergeInput, ctx: PortContext) => Promise<ArmAutoMergeResult>;
+  waitMerged?: (input: WaitMergedInput, ctx: PortContext) => Promise<MergeWait>;
+}
+
+/** 任务工作流的活动名全集（写成 Record 让编译器保证一个不漏）。 */
+const TASK_ACTIVITY_KEYS: Readonly<Record<keyof EngineTasks, true>> = {
+  readTaskBrief: true,
+  runSegment: true,
+  readDelivery: true,
+  coldVerify: true,
+  checkGuarded: true,
+  armAutoMerge: true,
+  waitMerged: true,
+};
+export const TASK_ACTIVITY_NAMES = Object.keys(TASK_ACTIVITY_KEYS) as (keyof EngineTasks)[];
+
 /** 引擎自己的活动：对账补漏跑一轮。没跑成的已经记进 schedule_runs，这里再报成不重试的失败（下一轮 15 分钟后照来）。 */
 async function reconcileGitHub(jobs: EngineJobs): Promise<unknown> {
   const make = jobs.githubReconcile;
@@ -402,6 +444,7 @@ export function createActivities(
   ports: EnginePorts,
   launch: SessionLaunchConfig,
   jobs: EngineJobs = {},
+  tasks: EngineTasks = {},
 ): EngineActivities {
   const record = ports.recordTiming.bind(ports);
   const out: Record<string, (input: unknown) => Promise<unknown>> = {};
@@ -452,5 +495,22 @@ export function createActivities(
   out.canaryOpen = timed('canaryOpen', () => canaryOpen(jobs), record);
   out.canaryCheck = timed('canaryCheck', (input) => canaryCheck(jobs, input), record);
   out.watchSchedules = timed('watchSchedules', () => watchSchedules(jobs), record);
+  for (const name of TASK_ACTIVITY_NAMES) {
+    out[name] = timed(
+      name,
+      async (input, ctx) => {
+        const impl = tasks[name] as Handler | undefined;
+        if (!impl) {
+          throw new PortError(
+            'TASK_NOT_CONFIGURED',
+            `这个引擎工人没装「${name}」（假端口，或真端口没接上）：不装作做过`,
+            { retryable: false },
+          );
+        }
+        return impl(input, ctx);
+      },
+      record,
+    );
+  }
   return out as unknown as EngineActivities;
 }

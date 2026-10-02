@@ -8,6 +8,7 @@
 # 逐项比、versions 钉死几个大版本、没登记的差别报红，也在这个文件里）、
 # 本机档（profile：FLEET_PROFILE 认不认得出、不带就是 france、is_local_profile、skip_local 只进 PENDING）、
 # france.sh 读回自动发布跑得怎么样（auto-release-state：没跑过、读不了、读到了分得清）、
+# 库只听回环的判定（listen：IPv4 回环一个也算，多出别的地址、一个都没读到判不是）、
 # 法国只有一个会话用户且读回拦得下故意造的错（session-user）、AI 会话用的 pnpm 的装和查（session-pnpm）、
 # 会话用户的 cursor-agent 的装和查（cursor-agent）、会话用户的 Cursor 密钥的放、查、撤（cursor-key）、
 # 会话用户的 grok 命令行的装和查、登录态的读回（grok）、会话用户自己的 Mirasim 服务的读回（mirasim，#345；
@@ -103,6 +104,13 @@ case $? in
 esac
 
 bash "$HERE/session-user.test.sh"
+case $? in
+0) ;;
+2) skipped=1 ;;
+*) fail=1 ;;
+esac
+
+bash "$HERE/listen.test.sh"
 case $? in
 0) ;;
 2) skipped=1 ;;

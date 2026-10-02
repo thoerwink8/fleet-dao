@@ -77,11 +77,32 @@ export interface MissingSection {
   why: string;
 }
 
+const REQUIRED_SECTIONS = ['场景', '原话', '已知的模块'] as const;
+type RequiredSection = (typeof REQUIRED_SECTIONS)[number];
+
+const EMPTY_WHY: Record<RequiredSection, string> = {
+  场景: '「## 场景」一节是空的：写清这是干什么的、为什么现在做（一段话就好）。',
+  原话: '「## 原话」一节是空的：抄创始人当时的原话（逐字）；AI 自己发现的问题就写「无（AI 发现）」。',
+  已知的模块:
+    '「## 已知的模块」一节是空的：建单时确实知道的模块（创始人提到的、建单前聊出来的）；不知道就写「暂无」。',
+};
+
+const ABSENT_WHY: Record<RequiredSection, string> = {
+  场景: '正文里没有「## 场景」一节：单子必须写清这是干什么的、为什么现在做（创始人 2026-10-02，specs/553-对题）。',
+  原话: '正文里没有「## 原话」一节：单子必须抄创始人当时的原话（逐字）；AI 自己发现的问题写「无（AI 发现）」（创始人 2026-10-02，specs/553-对题）。',
+  已知的模块:
+    '正文里没有「## 已知的模块」一节：单子必须写建单时确实知道的模块；不知道写「暂无」（创始人 2026-10-02，specs/553-对题）。',
+};
+
+const SURFACE_WHY =
+  '涉及面一律不写：那是算出来的、不是知道的（创始人 2026-10-02「那（涉及面）是算出来的、不是知道的」，specs/553-对题）。建单的 AI 动手前没读过代码，写它只会是猜；把它整节删掉。';
+
 /**
  * 正文里认出的小节里有没有「场景 / 原话 / 已知的模块」三栏、有没有「涉及面」不该出现的栏；缺或者写错就给一句为什么。
- * 一节下面只有标题、没有字也算缺。一级到六级小标题都算。
+ * 一节下面只有标题、没有字也算缺。一级到六级小标题都算。开单拒第一条（checkRequiredSections）；派活要一次说清缺哪几处，
+ * 所以这里全报：同一栏只报一次（空栏同时也算「没写字」，保留先出现的那条「是空的」）。
  */
-export function checkRequiredSections(doc: MdDoc): MissingSection | undefined {
+export function requiredSectionProblems(doc: MdDoc): MissingSection[] {
   const sections = new Map<string, string>();
   for (const h of doc.headings) {
     const key = norm(h.title);
@@ -99,40 +120,30 @@ export function checkRequiredSections(doc: MdDoc): MissingSection | undefined {
     return text !== undefined && text.length > 0;
   };
   const dummy = (name: string): boolean => sections.has(name) && (sections.get(name) ?? '').length === 0;
-  if (sections.has('涉及面')) {
-    return {
-      label: '涉及面',
-      why: '涉及面一律不写：那是算出来的、不是知道的（创始人 2026-10-02「那（涉及面）是算出来的、不是知道的」，specs/553-对题）。建单的 AI 动手前没读过代码，写它只会是猜；把它整节删掉。',
-    };
-  }
-  if (dummy('场景'))
-    return { label: '场景', why: '「## 场景」一节是空的：写清这是干什么的、为什么现在做（一段话就好）。' };
-  if (dummy('原话'))
-    return {
-      label: '原话',
-      why: '「## 原话」一节是空的：抄创始人当时的原话（逐字）；AI 自己发现的问题就写「无（AI 发现）」。',
-    };
-  if (dummy('已知的模块'))
-    return {
-      label: '已知的模块',
-      why: '「## 已知的模块」一节是空的：建单时确实知道的模块（创始人提到的、建单前聊出来的）；不知道就写「暂无」。',
-    };
-  if (!has('场景'))
-    return {
-      label: '场景',
-      why: '正文里没有「## 场景」一节：单子必须写清这是干什么的、为什么现在做（创始人 2026-10-02，specs/553-对题）。',
-    };
-  if (!has('原话'))
-    return {
-      label: '原话',
-      why: '正文里没有「## 原话」一节：单子必须抄创始人当时的原话（逐字）；AI 自己发现的问题写「无（AI 发现）」（创始人 2026-10-02，specs/553-对题）。',
-    };
-  if (!has('已知的模块'))
-    return {
-      label: '已知的模块',
-      why: '正文里没有「## 已知的模块」一节：单子必须写建单时确实知道的模块；不知道写「暂无」（创始人 2026-10-02，specs/553-对题）。',
-    };
-  return undefined;
+  const found: MissingSection[] = [];
+  if (sections.has('涉及面')) found.push({ label: '涉及面', why: SURFACE_WHY });
+  for (const name of REQUIRED_SECTIONS) if (dummy(name)) found.push({ label: name, why: EMPTY_WHY[name] });
+  for (const name of REQUIRED_SECTIONS) if (!has(name)) found.push({ label: name, why: ABSENT_WHY[name] });
+  return found.filter((p, i) => found.findIndex((q) => q.label === p.label) === i);
+}
+
+/** 开单用：第一条问题（顺序：涉及面、空栏、缺栏）；没有就是齐了。 */
+export function checkRequiredSections(doc: MdDoc): MissingSection | undefined {
+  return requiredSectionProblems(doc)[0];
+}
+
+/**
+ * 一节的原文（不含标题行）：保留换行和列表，去掉首尾空行。同名小标题取第一个；没有这一节回 undefined。
+ * 比较的写法和 requiredSectionProblems 认栏是同一个（norm），所以「它认得出的栏」这里一定取得到。
+ */
+export function sectionText(doc: MdDoc, name: string): string | undefined {
+  const h = doc.headings.find((x) => norm(x.title) === name);
+  if (!h) return undefined;
+  const { start, end } = sectionRange(doc, h);
+  return doc.lines
+    .slice(start + 1, end)
+    .join('\n')
+    .trim();
 }
 
 export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Promise<IssueNewResult> {

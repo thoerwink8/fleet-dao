@@ -111,6 +111,8 @@ export {
   issueNew,
   issueSummary,
   type MissingSection,
+  requiredSectionProblems,
+  sectionText,
   specsDoc,
   specsHint,
   USAGE,
@@ -128,6 +130,7 @@ export {
   milestonePhase,
   milestoneVersion,
 } from './labels.ts';
+export { type MdDoc, parseMd } from './markdown.ts';
 export { type GateResult, type GitHubReads, gateGitHub, gatePr, runMergeGate } from './merge-gate.ts';
 export {
   type ChangedFile,
@@ -206,4 +209,12 @@ export {
 } from './pr-labels.ts';
 export { FIX_ALERT_COLUMN, fixAlertRefs, prLinks } from './pr-links.ts';
 export { fsRepo, type RepoView } from './repo.ts';
+export {
+  matchesStandardPath,
+  parseStandardPaths,
+  STANDARD_PATHS_FILE,
+  type StandardFile,
+  type StandardPath,
+  standardFiles,
+} from './standard-paths.ts';
 export { ENGINE_SESSION_MARKER, REFUSED_FULL_RUN } from './test-changed.ts';

@@ -2,7 +2,12 @@
 import { ApplicationFailure, CancelledFailure } from '@temporalio/common';
 import { MockActivityEnvironment } from '@temporalio/testing';
 import { describe, expect, it } from 'vitest';
-import { agentTokenTtlSeconds, createActivities, PORT_NAMES } from '../src/activities.ts';
+import {
+  agentTokenTtlSeconds,
+  createActivities,
+  PORT_NAMES,
+  TASK_ACTIVITY_NAMES,
+} from '../src/activities.ts';
 import { ACTIVITY_PROFILE, activityOptions, profileOptions } from '../src/activity-options.ts';
 import type { MergeItem } from '../src/contract.ts';
 import { createFakeWorld } from '../src/fakes.ts';
@@ -55,6 +60,7 @@ describe('活动外壳', () => {
         'canaryOpen',
         'canaryCheck',
         'watchSchedules',
+        ...TASK_ACTIVITY_NAMES,
       ].sort(),
     ).toEqual(Object.keys(ACTIVITY_PROFILE).sort());
   });

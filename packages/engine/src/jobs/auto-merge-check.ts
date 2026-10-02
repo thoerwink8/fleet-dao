@@ -2,14 +2,18 @@
 // 没人挂自动合并）——「PR 开出来就挂自动合并」只靠开 PR 的人记得跑 `gh pr merge --auto`，漏了没有任何兜底；
 // 能不能合本来就只看合并闸，没理由让一个 PR 因为没挂自动合并而干等。
 // 一张 PR 挂上自动合并的判法（design 第五节「合并闸」）：开着、作者是我们机器人开的、不是草稿、没挂自动合并、
-// 当前头上那几条必过检查绿、不碰改标准的路径（照 main 上的 standard-paths.json 判，现在借 parseRiskPaths 那
-// 份判法；standard-paths.json 自己的完整判法——支持通配——等 #133 落地再换）——挂上 squash 的自动合并（用「引擎」机器人身份：
+// 当前头上那几条必过检查绿、不碰改标准的路径（照 main 上的 standard-paths.json 判，@fleet-dao/conventions 的
+// parseStandardPaths / standardFiles：支持目录和通配）——挂上 squash 的自动合并（用「引擎」机器人身份：
 // GitHub Actions 自带的 GITHUB_TOKEN 挂的不会触发主线上后续工作流，法国自动发布就会一直等不到主线的 CI）。
 // 读不到、判不出、挂不上的照实报警、写进这一轮没查成，不当成挂上了；不再开着的（掉了、合了、关了）那条提醒撤掉。
-// 改这里之前必须知道：只挂自动合并，不手动合（`gh pr merge`）——合并闸还没拦住改标准的那份（等 #133），
-// 所以碰到改标准路径的 PR 不挂，留给创始人（或照先审后合人自己挂）。
-import { parseRiskPaths, riskyFiles } from '@fleet-dao/conventions';
+// 改这里之前必须知道：
+// - 只挂自动合并，不手动合（`gh pr merge`）——合并闸还没拦住改标准的那份（等 #133），所以碰到改标准路径的 PR 不挂，
+//   留给创始人（或照先审后合人自己挂）。
+// - 任务工作流（#632）起的 PR（分支 fleet/<单号>-t<8 位>）不归这里挂：它们的自动合并只由工作流在冷验收通过之后挂；
+//   这里照 CI 绿就挂，会抢在验收之前把没验过的合进主线。判在读文件和清单之前（便宜、也不会因为清单读不出报一堆提醒）。
+import { parseStandardPaths, standardFiles } from '@fleet-dao/conventions';
 import type { RepoRef } from '@fleet-dao/github';
+import { isTaskBranch } from '../task-branch.ts';
 import { clip, message, RECONCILE_ACTOR, type SweepPart } from './reconcile-common.ts';
 
 /** 自动合并兜底用的 PR 的样子（claims 的 PullFacts 简化版）。 */
@@ -23,6 +27,8 @@ export interface PrAutoMergeCandidate {
   /** 已经挂上了自动合并。 */
   autoMerge: boolean;
   headSha: string;
+  /** PR 的分支名：任务工作流的分支（task-branch.ts）不归兜底挂。 */
+  headRef: string;
 }
 
 /** 改到的文件（github 包的 pullFiles 那一份）。 */
@@ -49,7 +55,7 @@ export interface AutoMergeGitHub {
   requiredChecks(repo: RepoRef): Promise<string[]>;
   /**
    * 主线上 packages/conventions/standard-paths.json 那份清单的原文。读不到照抛、调用方记没查成（不查这个仓）；
-   * 现在借 parseRiskPaths 判（它有 path、kind、why 三个字段，standard-paths.json 多余字段当透明的）。 TODO(#133)。
+   * 照 parseStandardPaths 判（目录、通配都认）。
    */
   readStandardPathsFile(repo: RepoRef): Promise<string>;
   /** 挂上自动合并（「引擎」机器人身份，squash）。 */
@@ -146,6 +152,15 @@ async function judgeOne(
     await resolveOne(deps, repo, pr.number, '不是我们机器人开的 PR，自动合并兜底不看它');
     return;
   }
+  if (isTaskBranch(pr.headRef)) {
+    await resolveOne(
+      deps,
+      repo,
+      pr.number,
+      '任务工作流的 PR：自动合并只由工作流在冷验收通过之后挂，兜底不挂',
+    );
+    return;
+  }
   if (pr.autoMerge) {
     await resolveOne(deps, repo, pr.number, '已经挂上了自动合并');
     return;
@@ -154,11 +169,11 @@ async function judgeOne(
   const text = await deps.gh.readStandardPathsFile(repo).catch((e) => {
     throw new Error(`读改标准路径清单没成：${message(e)}`);
   });
-  const parsed = parseRiskPaths(text);
+  const parsed = parseStandardPaths(text);
   if (typeof parsed === 'string') {
     throw new Error(`改标准路径清单认不出：${parsed}`);
   }
-  const risks = riskyFiles(files, parsed);
+  const risks = standardFiles(files, parsed);
   if (risks.length > 0) {
     await resolveOne(deps, repo, pr.number, '改到了改标准的路径，不挂：等创始人同意（或照先审后合人自己挂）');
     deps.log('info', '每小时对账：PR 改到改标准路径，不挂自动合并', {

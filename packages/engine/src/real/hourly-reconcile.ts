@@ -215,6 +215,7 @@ export function hourlyReconcileJob(
         authorIsBot: w.gh.claims.isAgentBot(p.author),
         autoMerge: p.autoMerge,
         headSha: p.headSha,
+        headRef: p.headRef,
       }));
     },
     pullFiles: (repo: RepoRef, prNumber: number) => w.gh.pullFiles({ repo, prNumber }),

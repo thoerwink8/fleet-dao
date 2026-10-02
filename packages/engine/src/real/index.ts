@@ -16,10 +16,11 @@ import {
 import { createDb, type Db } from '@fleet-dao/db';
 import { assertPublishable, createGitHub, pgLedger, pgLocker } from '@fleet-dao/github';
 import type { Client } from '@temporalio/client';
-import type { EngineJobs } from '../activities.ts';
+import type { EngineJobs, EngineTasks } from '../activities.ts';
 import type { EngineDrain } from '../drain.ts';
 import { type DrainControlDeps, drainRequestFile, readDrainRequest } from '../drain-control.ts';
 import type { JevPort } from '../failure/jev.ts';
+import { SESSION_MEMORY_HIGH_MB, SESSION_MEMORY_MAX_MB } from '../limits.ts';
 import type { EnginePorts } from '../ports.ts';
 import { canaryJob } from './canary.ts';
 import { drainNotifier } from './drain-alerts.ts';
@@ -32,6 +33,7 @@ import {
   DEFAULT_CURSOR_VERSIONS_DIR,
   DEFAULT_GROK_BIN,
   grokLaunchCommand,
+  hostDrivers,
 } from './hosts.ts';
 import { hourlyReconcileJob } from './hourly-reconcile.ts';
 import { issueGroomIdlePolicyFromEnv } from './issue-groom.ts';
@@ -43,6 +45,7 @@ import { realMemoryAdmission } from './memory-admission.ts';
 import { orgDriftReporter, orgSwitchRound } from './org-switch.ts';
 import { retireEngineSchedules } from './retire-schedules.ts';
 import { routeProbeJob } from './route-probe.ts';
+import { realRuns } from './runs-writer.ts';
 import { checkIoRoot, DEFAULT_SESSION_IO_DIR, reportIoRoot } from './session-io.ts';
 import { type SessionOrgReader, sessionOrgReader } from './session-org.ts';
 import {
@@ -52,6 +55,8 @@ import {
   type SessionPortsDeps,
 } from './sessions.ts';
 import { createStorePorts } from './store-ports.ts';
+import { createTaskActivities } from './task-activities.ts';
+import { createRunSegment } from './task-segment.ts';
 import { watchdogJob } from './watchdog.ts';
 import { DEFAULT_WORK_ROOT, helperWorkTrees, type WorkTrees } from './worktrees.ts';
 
@@ -445,6 +450,8 @@ export function realPortsFromEnv(
   extra: { drain?: EngineDrain; ownSha?: string | null; releasesDir?: string } = {},
 ): RealPorts & {
   jobs: EngineJobs;
+  /** 任务工作流（#632）的真活动：不碰会话的五个加动手会话；coldVerify 还没接（接之前报 TASK_NOT_CONFIGURED）。 */
+  tasks: EngineTasks;
   registerJobs(): Promise<void>;
   /** 引擎起来对齐定时任务之后跑一遍：把退役名单（jobs/retired-schedules.ts）里 Temporal 上还在的删掉，见 real/retire-schedules.ts。 */
   retireSchedules(client: Pick<Client, 'schedule'>): Promise<void>;
@@ -560,6 +567,34 @@ export function realPortsFromEnv(
     // 看门狗（#203）：按登记表看上面这些（和备份那几个）新不新鲜，没跑成、停了推提醒，恢复了自己撤
     watchdog: watchdogJob({ db }),
   };
+  const taskLog = (message: string, fields?: Record<string, unknown>) => console.info(message, fields ?? {});
+  // 动手会话（#632 S2-4b-2）：和 Fusion 的会话用同一份执行方式驱动，但自己一份（驱动没有状态，只是包着各家的 run 函数）；
+  // 内存准入、会话的资源上限、runs 记账都用生产的那份。
+  const tasks: EngineTasks = {
+    ...createTaskActivities({ gh, trees, exec, log: taskLog }),
+    runSegment: createRunSegment({
+      tree: { gh, trees, exec, tmpDir: join(config.stateDir, 'tmp') },
+      spawner: {
+        db,
+        drivers: hostDrivers({
+          claudeCommand,
+          cursorCommand,
+          grokCommand,
+          mirasimConnect: mirasim.connect,
+          mirasimLedgerDir: mirasim.ledgerDir,
+          mirasimLedgerFs: mirasim.ledgerFs,
+        }),
+        trees,
+        baseEnv: env,
+        resources: { memoryHighMb: SESSION_MEMORY_HIGH_MB, memoryMaxMb: SESSION_MEMORY_MAX_MB, swapMaxMb: 0 },
+        log: taskLog,
+      },
+      runs: realRuns({ db }),
+      memoryAdmission: realMemoryAdmission(),
+      runsDir: join(config.stateDir, 'runs'),
+      log: taskLog,
+    }),
+  };
   const evidence = realKillEvidence(extra.releasesDir ? { releasesDir: extra.releasesDir } : {});
   const drainControl: Omit<DrainControlDeps, 'drain' | 'log'> = {
     readRequest: () => readDrainRequest(drainRequestFile(evidence.releasesDir)),
@@ -571,6 +606,7 @@ export function realPortsFromEnv(
   return {
     ...real,
     jobs,
+    tasks,
     drainControl,
     stateDir: config.stateDir,
     registerJobs: async () => {

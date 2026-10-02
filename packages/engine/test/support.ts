@@ -5,7 +5,7 @@ import type { Repo } from '@fleet-dao/shared';
 import type { WorkflowHandle } from '@temporalio/client';
 import { TestWorkflowEnvironment } from '@temporalio/testing';
 import { bundleWorkflowCode, DefaultLogger, Runtime, type WorkflowBundle } from '@temporalio/worker';
-import type { EngineJobs } from '../src/activities.ts';
+import type { EngineJobs, EngineTasks } from '../src/activities.ts';
 import type { EngineActivities } from '../src/activity-options.ts';
 import type { FusionInput, RequirementInput, SubtaskInput } from '../src/contract.ts';
 import type { FailureTriage } from '../src/decisions/failure.ts';
@@ -74,6 +74,8 @@ export interface WorkerOptions {
   maxCachedWorkflows?: number;
   /** 定时任务要的东西（对账补漏）；不给就是假端口那样，定时任务的活动报 JOB_NOT_CONFIGURED。 */
   jobs?: EngineJobs;
+  /** 任务工作流要的活动；不给就是假端口那样，报 TASK_NOT_CONFIGURED。 */
+  tasks?: EngineTasks;
   /** 换一份工作流包（测试宿主工作流）；不给就是引擎自己的。 */
   workflowBundle?: WorkflowBundle;
 }
@@ -106,6 +108,7 @@ export async function withWorker<T>(
     ...(options.wrapActivities ? { wrapActivities: options.wrapActivities } : {}),
     ...(options.maxCachedWorkflows === undefined ? {} : { maxCachedWorkflows: options.maxCachedWorkflows }),
     ...(options.jobs ? { jobs: options.jobs } : {}),
+    ...(options.tasks ? { tasks: options.tasks } : {}),
   });
   return worker.runUntil(fn(taskQueue));
 }

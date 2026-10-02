@@ -47,6 +47,13 @@ export interface OneShotInput {
   timeoutMinutes?: number;
   /** 不许给：resume / session 接手。给了当场抛。 */
   resumeSessionId?: string;
+  /**
+   * 路由编号：生产 Spawner（real/segment-spawner.ts）据此在库里查执行方式、会话用户、上游模型串；
+   * 测试里的假 Spawner 不看。modelId 只是记账和提示用，真正起谁看这个。
+   */
+  routeId?: string;
+  /** 思考档位（按改动面分档给的，tier.ts 的 effort）；不给用执行方式自己的默认。 */
+  effort?: string;
 }
 
 export type OneShotOutcome = 'done' | 'timeout' | 'killed' | 'spawn_failed' | 'admission_blocked' | 'failed';
@@ -65,6 +72,8 @@ export interface OneShotResult {
   /** 取消原因，outcome != 'done' 时给。 */
   failureReason?: string;
   runsNotWired: boolean;
+  /** Spawner 带回来的执行体事实（用量、花费、额度……）；没带就没有。 */
+  facts?: SpawnFacts;
 }
 
 /**
@@ -78,21 +87,56 @@ export interface SpawnOutcome {
   stderr: string;
   /** 是不是我们自己的 watch 把进程杀了。 */
   killed: boolean;
+  /** 执行体自己报的东西（用量、花费、实际模型、额度）。读不到的字段不给，不当成 0；假 Spawner 可以不给。 */
+  facts?: SpawnFacts;
 }
+
+/** 一次无头会话跑完，执行体那一侧能读到的事实。失败分流按 reason、quotaExhausted、resetsAt、httpStatus 认。 */
+export interface SpawnFacts {
+  usage?: {
+    inputTokens?: number;
+    outputTokens?: number;
+    cacheReadTokens?: number;
+    cacheWriteTokens?: number;
+  };
+  /** 执行体自报的本轮花费（美元）。 */
+  costUsd?: number;
+  /** 实际回话的模型（只写观测值）。 */
+  actualModel?: string;
+  quotaExhausted?: boolean;
+  /** 额度用满时上游给的清零时刻。 */
+  resetsAt?: string;
+  /** 上游的 HTTP 状态码。 */
+  httpStatus?: number;
+  /** 判定原因码（adapters 的 judgeRun：quota_exhausted、model_mismatch、no_result……）；成功是 delivered / answered。 */
+  reason?: string;
+  /** 一句白话。 */
+  detail?: string;
+  /** 执行体报的原话（认证、额度、网络报错只在 stderr 的那几家）。 */
+  rawError?: string;
+}
+
 export interface SpawnCommand {
   argv: string[];
   cwd: string;
   stdin: string;
   /** 调用方给的 AbortSignal：调用方想取消时触发。 */
   signal: AbortSignal;
+  /** 这一次的全部入参（生产 Spawner 要里面的 routeId、effort、runId、modelId）。 */
+  input: OneShotInput & { runId: string };
+  /** 这一次的时限（毫秒）：Spawner 自己的看守要比它晚到，让这里的 signal 先触发。 */
+  timeoutMs: number;
 }
 export type OneShotSpawner = (cmd: SpawnCommand) => Promise<SpawnOutcome>;
 
 /** 装配 one-shot 的依赖。所有 IO 都依赖注入——测试不用碰真机器。 */
 export interface OneShotDeps {
   spawn: OneShotSpawner;
-  /** 拼装 argv / env 的回调：调用方知道哪个执行体（Claude / Codex / GPT……）怎么起。 */
-  buildCommand: (input: OneShotInput) => { argv: string[]; cwd?: string };
+  /**
+   * 拼装 argv 的回调：调用方知道哪个执行体怎么起。不给＝由 Spawner 自己按 routeId 定怎么起（生产：real/segment-spawner.ts），
+   * 传给它的 argv 是空的。
+   */
+  buildCommand?: (input: OneShotInput) => { argv: string[]; cwd?: string };
   memoryAdmission?: MemoryAdmissionDeps;
   /** stdout / stderr 落盘的根目录；默认 `_tmp`。 */
   tmpDir?: string;
@@ -148,7 +192,7 @@ export async function runOneShot(input: OneShotInput, deps: OneShotDeps): Promis
     }
   }
 
-  const { argv, cwd } = deps.buildCommand(input);
+  const { argv, cwd } = deps.buildCommand?.(input) ?? { argv: [] };
   const tmpDir = deps.tmpDir ?? '_tmp';
   const runDir = runDirOf(tmpDir, runId);
   await mkdir(runDir, { recursive: true });
@@ -163,6 +207,8 @@ export async function runOneShot(input: OneShotInput, deps: OneShotDeps): Promis
       cwd: cwd ?? input.cwd,
       stdin: input.prompt,
       signal: ac.signal,
+      input: { ...input, runId },
+      timeoutMs,
     });
   } catch (err) {
     clearTimeout(killTimer);
@@ -210,6 +256,7 @@ export async function runOneShot(input: OneShotInput, deps: OneShotDeps): Promis
         }
       : {}),
     runsNotWired: false,
+    ...(spawnResult.facts !== undefined ? { facts: spawnResult.facts } : {}),
   };
   await persistArtifacts(runDir, result);
   await recordRun(input, result, deps.runs);
@@ -256,8 +303,22 @@ async function recordRun(input: OneShotInput, result: OneShotResult, runs: RunsW
                 ? 'spawn_failed'
                 : 'failed',
     ...(result.failureReason !== undefined ? { failureReason: result.failureReason } : {}),
+    ...usageFields(result.facts),
   };
   await runs.record(record);
+}
+
+/** 执行体读到的用量和花费记进这一笔；读不到的字段不写，不当成 0（#216）。 */
+function usageFields(facts: SpawnFacts | undefined): Partial<RunRecord> {
+  if (!facts) return {};
+  const u = facts.usage;
+  return {
+    ...(u?.inputTokens !== undefined ? { inputTokens: u.inputTokens } : {}),
+    ...(u?.outputTokens !== undefined ? { outputTokens: u.outputTokens } : {}),
+    ...(u?.cacheReadTokens !== undefined ? { cacheReadTokens: u.cacheReadTokens } : {}),
+    ...(u?.cacheWriteTokens !== undefined ? { cacheWriteTokens: u.cacheWriteTokens } : {}),
+    ...(facts.costUsd !== undefined ? { costUsd: facts.costUsd } : {}),
+  };
 }
 
 /** 生产装配：沿用 real/memory-admission.ts 的真实现。打包到一起方便 main.ts 用。 */

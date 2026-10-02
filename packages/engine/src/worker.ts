@@ -12,7 +12,7 @@ import {
   Worker,
   type WorkflowBundle,
 } from '@temporalio/worker';
-import { type AgentTokenClaims, createActivities, type EngineJobs } from './activities.ts';
+import { type AgentTokenClaims, createActivities, type EngineJobs, type EngineTasks } from './activities.ts';
 import type { EngineActivities } from './activity-options.ts';
 import { createDecide, type Decide, type FailureTriage } from './decisions/index.ts';
 import {
@@ -105,6 +105,8 @@ export interface CreateEngineWorkerOptions {
   reapOrphanSessions?: () => Promise<number>;
   /** 定时任务要的东西（真端口才有）；不给，定时任务的活动明确报 JOB_NOT_CONFIGURED。 */
   jobs?: EngineJobs;
+  /** 任务工作流（#632）要的活动（真端口才有）；不给，那几个活动明确报 TASK_NOT_CONFIGURED。 */
+  tasks?: EngineTasks;
   /** 不给就按 config.address 自己连。 */
   connection?: NativeConnection;
   /** 不给就现打包。 */
@@ -135,6 +137,7 @@ export async function createEngineWorker(options: CreateEngineWorkerOptions): Pr
       signToken: options.signAgentToken,
     },
     options.jobs,
+    options.tasks,
   );
   return Worker.create({
     connection,
@@ -306,6 +309,7 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
   let ports: EnginePorts;
   let reapOrphanSessions: (() => Promise<number>) | undefined;
   let jobs: EngineJobs | undefined;
+  let tasks: EngineTasks | undefined;
   let registerJobs: (() => Promise<void>) | undefined;
   let retireSchedules: ((client: Pick<Client, 'schedule'>) => Promise<void>) | undefined;
   let close: () => Promise<void> = async () => {};
@@ -326,6 +330,7 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
     ports = real.ports;
     reapOrphanSessions = real.reapOrphanSessions;
     jobs = real.jobs;
+    tasks = real.tasks;
     registerJobs = real.registerJobs;
     retireSchedules = real.retireSchedules;
     close = real.close;
@@ -377,6 +382,7 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
       signAgentToken: signAgentToken as (claims: AgentTokenClaims) => string,
       ...(reapOrphanSessions ? { reapOrphanSessions } : {}),
       ...(jobs ? { jobs } : {}),
+      ...(tasks ? { tasks } : {}),
       log: (message) => console.info(message),
     });
     shutdown = installGracefulShutdown({
