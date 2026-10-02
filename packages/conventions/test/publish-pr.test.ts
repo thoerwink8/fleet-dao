@@ -160,6 +160,25 @@ describe('publishPr：编排（deps 换 mock）', () => {
     ).rejects.toThrow(/私货/);
   });
 
+  it('故意造出的失败：「fooCHANGELOG.md」「other/CHANGELOG.md」也算私货，不被路径名里带「CHANGELOG.md」骗过去（第二意见 2026-10-02）', async () => {
+    await expect(
+      publishPr({
+        env: { GITHUB_TOKEN: 'x' },
+        root,
+        currentBranch: 'release/v2',
+        git: async (args) => {
+          if (args[0] === 'status')
+            return {
+              code: 0,
+              stdout: ' M CHANGELOG.md\n M fooCHANGELOG.md\n?? other/CHANGELOG.md\n',
+              stderr: '',
+            };
+          return { code: 0, stdout: '', stderr: '' };
+        },
+      }),
+    ).rejects.toThrow(/fooCHANGELOG\.md/);
+  });
+
   it('正常一轮：改了 CHANGELOG.md、commit、push、gh pr create、拿到 PR 号', async () => {
     const ops: string[] = [];
     const r = await publishPr({

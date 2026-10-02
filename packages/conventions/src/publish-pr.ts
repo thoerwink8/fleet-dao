@@ -81,17 +81,26 @@ export async function publishPr(deps: PublishDeps): Promise<PublishResult> {
   if (!currentBranch) throw new Error('查不到当前分支：发起人先 git switch -c release/v<N> 再重跑。');
   const plan = publishReleasePlan({ changelog, head: currentBranch });
 
-  // 工作区除了 CHANGELOG.md 之外不许还有别的没提交的：发布 PR 不该带私货（第二意见 2026-10-02）。
+  // 工作区除了仓根的 CHANGELOG.md 之外不许还有别的没提交的：发布 PR 不该带私货（第二意见 2026-10-02）。
+  // porcelain 行格式是「XY 路径」（rename: XY 旧 → 新）；只放行精确等于「CHANGELOG.md」的路径，
+  // 「fooCHANGELOG.md」「other/CHANGELOG.md」都算私货（第二意见 2026-10-02）。
   const dirty = await git(['status', '--porcelain'], deps.root);
   if (dirty.code !== 0) throw fail('git status 失败', dirty);
+  const porcelainPath = (line: string): string => {
+    // 「XY 旧 -> 新」（rename/copy）拿箭头右边；其余拿 XY 后面的路径
+    const t = line.slice(3).trim();
+    const arrow = t.indexOf(' -> ');
+    return (arrow === -1 ? t : t.slice(arrow + 4)).replace(/^"|"$/g, '');
+  };
   const others = dirty.stdout
     .split('\n')
     .filter((l) => l.trim().length > 0)
-    .filter((l) => !l.includes('CHANGELOG.md'));
+    .map(porcelainPath)
+    .filter((p) => p !== 'CHANGELOG.md');
   if (others.length > 0) {
     throw new Error(
-      `工作区除了 CHANGELOG.md 还有没提交的改动（${others.length} 条）：发布 PR 不该带私货，先收起来（git stash 或先 commit）再重跑。\n` +
-        others.map((l) => `  ${l}`).join('\n'),
+      `工作区除了仓根 CHANGELOG.md 还有没提交的改动（${others.length} 条）：发布 PR 不该带私货，先收起来（git stash 或先 commit）再重跑。\n` +
+        others.map((p) => `  ${p}`).join('\n'),
     );
   }
 
