@@ -82,6 +82,12 @@ export const NAV: { group: string; items: NavItem[] }[] = [
       },
       { to: '/judge', label: brand.terms.judgeNav, icon: Scale, soon: true, hint: '判断题的记录与准确率' },
       {
+        to: '/changelog',
+        label: '更新日志',
+        icon: ScrollText,
+        hint: '仓根 CHANGELOG.md：还没发版的、已发出去的',
+      },
+      {
         to: '/notifications',
         label: '通知中心',
         icon: Bell,

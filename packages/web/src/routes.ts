@@ -8,6 +8,8 @@ const cockpitOnly = demo
   ? []
   : [
       route('demo-links', 'routes/demo-links.tsx'),
+      // 仓根 CHANGELOG.md 的仓名不能进演示版产物，这一页也不放进演示版路由表（导航同时不给 module）。
+      route('changelog', 'routes/changelog.tsx'),
       // 第二批页面（P3 之后）：先放占位页。
       route('models', 'routes/soon.tsx', { id: 'soon-models' }),
       route('billing', 'routes/soon.tsx', { id: 'soon-billing' }),
