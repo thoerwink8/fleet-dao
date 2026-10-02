@@ -1,8 +1,10 @@
 // 钉住合并闸能看的现状只有那几样（创始人 2026-09-27 晚拍，#299；2026-09-28 下午拍 #444 收窄成四样；design 第五节
 // 「发现问题当场修」第 5 条、AGENTS 本仓段）：CI 里跑的检查必须确定、只看检出来的文件；合并闸 merge-gate 汇总 PR
-// 此刻的状态——PR 本身（草稿、冲突、改了哪些文件，正文里的必填栏只提醒）和当前头上的提交状态（第二意见）。
-// 「认领对得上」「写了关单却没带结果.md」#444 起不再是合并闸的输入（缺的由每天的关单对账另外提醒，不再挡合并）。
-// 往合并闸里多加别的现状（单子开没开、时间、别的仓……）这里会红：要加得先改上面那两处的规矩，再改这里的清单。
+// 此刻的状态——PR 本身（草稿、冲突、改了哪些文件，正文里的必填栏只提醒）和当前头上的提交状态（第二意见；#555-2 起
+// 再加一条冷调用的结论）。#555-2 加 cold-verify 时**没有**给合并闸加新的读口子：冷调用的结论和第二意见在同一次
+// statuses 调用里读回来，只是另一个 context——闸里起模型调用会破坏「CI 检查必须确定」这条，所以冷调用在装配侧跑、
+// 结论贴成状态，闸只读。往合并闸里多加别的现状（单子开没开、时间、别的仓……）这里会红：要加得先改上面那两处的规矩，
+// 再改这里的清单。
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -15,7 +17,8 @@ const gates = src('merge-gates.ts');
 const ALLOWED_READS: Record<string, string> = {
   pr: 'PR 本身：草稿、冲突、当前头、改了几个文件、正文和标签（必填栏只提醒）',
   files: 'PR 改了哪些文件：判改没改到先审后合的路径',
-  statuses: '当前头上的提交状态（逐条的）：第二意见',
+  statuses:
+    '当前头上的提交状态（逐条的）：第二意见、合前一次冷调用的结论（#555-2，同一份读回来、各认各的 context）',
   fileAt: '这个 PR 里的 plan.md：必填栏「对应计划」只提醒',
   exists: '这个 PR 里的 specs 目录在不在：必填栏「specs」只提醒',
   openPrs: '主线一动、第二意见写上来时逐个重算开着的 PR：挑要算哪几个，不参与判',
@@ -23,10 +26,12 @@ const ALLOWED_READS: Record<string, string> = {
   writeStatus: '写 merge-gate 这一个状态',
 };
 
-/** 合并闸认得的提交状态名：自己写的 merge-gate、第二意见（#444 起「认领对得上」不算这里头，合并闸不再等它）。 */
+/** 合并闸认得的提交状态名：自己写的 merge-gate、第二意见（#444 起「认领对得上」不算这里头，合并闸不再等它）、
+ * 合前一次冷调用的结论（#555-2：验收那一遍的 verdict，装配侧贴、闸只读，不许闸里起模型调用）。 */
 const ALLOWED_CONTEXTS: Record<string, string> = {
   GATE_CONTEXT: 'merge-gate',
   SECOND_OPINION_CONTEXT: 'second-opinion',
+  COLD_VERIFY_CONTEXT: 'cold-verify',
 };
 
 const workflow = readFileSync(
@@ -42,6 +47,15 @@ function missingTriggers(yml: string): string[] {
     .filter(([name]) => name !== 'GATE_CONTEXT')
     .map(([, ctx]) => ctx)
     .filter((ctx) => !cond.includes(`github.event.context == '${ctx}'`));
+}
+
+/** 把某个 context 从 if 里摘掉（模拟「放了新状态名、忘了放行它」）。摘不到说明写法变了，测试当场炸。 */
+function withoutTrigger(yml: string, ctx: string): string {
+  const from = ` || github.event.context == '${ctx}'`;
+  const narrowed = yml.replace(from, '');
+  if (narrowed === yml)
+    throw new Error(`merge-gate.yml 的 if 里找不到 ${ctx} 的放行：写法换了，这条测试跟着改`);
+  return narrowed;
 }
 
 function interfaceMethods(code: string, name: string): string[] {
@@ -81,12 +95,25 @@ describe('合并闸只汇总 PR 此刻的状态（#299 创始人拍板）', () =
 
   it('合并闸读的每个状态（自己写的 merge-gate 除外）写上来时都会重算：merge-gate.yml 的 if 放行它的 status 事件', () => {
     expect(missingTriggers(workflow)).toEqual([]);
+    // 覆盖得全不全由 ALLOWED_CONTEXTS 和 if 现算，不写死几个名字：以后再加一条状态忘了放行，这里照样红。
+    expect(Object.keys(ALLOWED_CONTEXTS).length).toBeGreaterThan(2);
   });
 
   it('【故意造出的失败】merge-gate.yml 不放行 second-opinion：状态贴上来不重算，查得出来', () => {
-    const narrowed = workflow.replace(` || github.event.context == 'second-opinion'`, '');
+    const narrowed = withoutTrigger(workflow, 'second-opinion');
     expect(narrowed).not.toBe(workflow);
     expect(missingTriggers(narrowed)).toEqual(['second-opinion']);
+  });
+
+  it('【故意造出的失败】merge-gate.yml 不放行 cold-verify（#555-2 新加的那条）：状态贴上来不重算，查得出来', () => {
+    expect(ALLOWED_CONTEXTS.COLD_VERIFY_CONTEXT).toBe('cold-verify');
+    const narrowed = withoutTrigger(workflow, 'cold-verify');
+    expect(missingTriggers(narrowed)).toEqual(['cold-verify']);
+  });
+
+  it('【故意造出的失败】两条状态都忘了放行：两个名字都报出来（不是只报最后一个）', () => {
+    const narrowed = withoutTrigger(withoutTrigger(workflow, 'cold-verify'), 'second-opinion');
+    expect(missingTriggers(narrowed).sort()).toEqual(['cold-verify', 'second-opinion']);
   });
 
   it('【故意造出的失败】往读写口子里多加一个（比如读单子开没开）：上面那条就红', () => {
@@ -95,5 +122,16 @@ describe('合并闸只汇总 PR 此刻的状态（#299 创始人拍板）', () =
       'export interface GitHubReads {\n  issueOpen(number: number): Promise<boolean>;',
     );
     expect(interfaceMethods(extended, 'GitHubReads').sort()).not.toEqual(Object.keys(ALLOWED_READS).sort());
+  });
+
+  it('#555-2 的冷调用没给合并闸加新的读口子：读状态还是那一个 statuses，闸里不起模型调用', () => {
+    const methods = interfaceMethods(gate, 'GitHubReads');
+    // 读状态的口子只有一个（statuses）；writeStatus 是闸自己写 merge-gate 那一个，不是读别处的结论。
+    expect(methods).toContain('statuses');
+    expect(
+      methods.filter((m) => /^(get|read|list|fetch)?.*[Ss]tatus/.test(m) && m !== 'writeStatus'),
+    ).toEqual(['statuses']);
+    // 闸里不许出现起模型调用的痕迹（起了就不确定：同一份代码两次跑结果可能不一样）。
+    expect(gate).not.toMatch(/invokeVerifier|chooseModelForFamily|one-shot|runOneShot/);
   });
 });

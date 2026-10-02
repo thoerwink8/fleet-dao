@@ -131,6 +131,12 @@ export {
 export { type GateResult, type GitHubReads, gateGitHub, gatePr, runMergeGate } from './merge-gate.ts';
 export {
   type ChangedFile,
+  COLD_VERIFY_CONTEXT,
+  COLD_VERIFY_MAX_ROUND,
+  type ColdVerifyNeed,
+  checkColdVerify,
+  coldVerifyFrom,
+  coldVerifyNeed,
   destructiveIn,
   GATE_CONTEXT,
   parseRiskPaths,
@@ -142,6 +148,7 @@ export {
   type RiskyFile,
   riskyFiles,
   SECOND_OPINION_CONTEXT,
+  statusByContext,
   TIER_COLUMN,
   TIERS,
   type Tier,

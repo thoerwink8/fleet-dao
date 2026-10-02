@@ -1,17 +1,24 @@
 // 合并闸（#74）：在 PR 当前头上写提交状态 merge-gate，「按我们的规矩能不能合」只看它一个（design 第五节「流程只为快」）。
-// 判红只有四样（#444 起去掉「认领对得上」「写了关单却没带结果.md」两项——缺的由每天的关单对账另外提醒，不再挡合并）：
+// 判红只有这几样（#444 起去掉「认领对得上」「写了关单却没带结果.md」两项——缺的由每天的关单对账另外提醒，不再挡合并）：
 // 草稿、和主线冲突、改到先审后合的路径（删改迁移；碰安全：密钥鉴权、CI 和卫生检查、对公网开口子和提权的生产配置）而
-// 当前头上没有通过的 second-opinion；读不到、认不出写 failure（没查成），GitHub 还没算完冲突写 pending。必填栏（标签、
-// 里程碑、对应计划、specs、档位、这个 PR 做完就关单）只提醒。
-// merge-gate.yml 在 PR 事件、主线推送、second-opinion 状态写上来时跑它（后两种逐个重算所有开着的 PR）；
+// 当前头上没有通过的 second-opinion；#555-2 起还要一条：改到那片路径的，当前头上要有通过的 cold-verify（合前一次冷调用，
+// 换家族验「单子说要的东西真做了没有」）——**闸只读这条状态，不在这里起模型调用**（判法要确定，同一份代码什么时候跑
+// 结果都一样，design 第五节）；冷调用在装配侧跑、结论贴成状态。没改到那片路径的 PR 不验，也就没有这条状态——那是
+// 「不用验」，不是「没验成」，两者在 coldVerifyNeed 里分开。读不到、认不出写 failure（没查成），GitHub 还没算完冲突写
+// pending。必填栏（标签、里程碑、对应计划、specs、档位、这个 PR 做完就关单）只提醒。
+// merge-gate.yml 在 PR 事件、主线推送、second-opinion 或 cold-verify 状态写上来时跑它（后两种逐个重算所有开着的 PR）；
 // 不检出、不跑 PR 里的代码：判法和清单都用跑这段代码的那一份（主线的）。
 import { readFileSync } from 'node:fs';
 import type { GhApi } from './gh-api.ts';
 import { parseMd } from './markdown.ts';
 import {
   type ChangedFile,
+  COLD_VERIFY_CONTEXT,
   CONFLICT_PROBLEM,
+  checkColdVerify,
   checkSecondOpinion,
+  coldVerifyFrom,
+  coldVerifyNeed,
   DRAFT_PROBLEM,
   GATE_CONTEXT,
   MERGEABLE_UNKNOWN,
@@ -246,20 +253,27 @@ export async function gatePr(number: number, deps: GateDeps): Promise<GateResult
   if (meta.mergeable === false) problems.push(CONFLICT_PROBLEM);
 
   let hits: RiskyFile[] = [];
+  // 判不了「改没改到先审后合/N 的地方」的原因：有它就是没查成（下面两条判法都据此判红），不当成「没改到」。
+  let faceProblem: string | undefined;
   if (typeof deps.riskList === 'string') {
-    notChecked.push(`先审后合的路径清单 ${RISK_PATHS_FILE} ${deps.riskList}，没法判改没改到先审后合的地方`);
+    faceProblem = `先审后合的路径清单 ${RISK_PATHS_FILE} ${deps.riskList}`;
+    notChecked.push(`${faceProblem}，没法判改没改到先审后合的地方`);
   } else {
     try {
       const files = await gh.files(number);
       if (files.length !== meta.changedFiles) {
-        notChecked.push(
-          `PR #${number} 改了 ${meta.changedFiles} 个文件，只读到 ${files.length} 个（GitHub 的列表最多给 3000 个），没法判改没改到先审后合的地方`,
-        );
+        faceProblem = `PR #${number} 改了 ${meta.changedFiles} 个文件，只读到 ${files.length} 个（GitHub 的列表最多给 3000 个）`;
+        notChecked.push(`${faceProblem}，没法判改没改到先审后合的地方`);
       } else hits = riskyFiles(files, deps.riskList);
     } catch (e) {
-      notChecked.push(`读不到 PR #${number} 改了哪些文件（${message(e)}）`);
+      faceProblem = `读不到 PR #${number} 改了哪些文件（${message(e)}）`;
+      notChecked.push(faceProblem);
     }
   }
+  // 合前一次冷调用（#555-2）要不要等：和 second-opinion 同一处、同一份 hits（照搬那份路径判法，不另写一套）。
+  // 判不了改没改到时 faceProblem 那一条已经在 notChecked 里了，这里只把「要不要验」定下来（needed 一律 false：
+  // 判不了就不许说「要验」，也不许说「不用验」——前者会拦下一个可能没改到要紧地方的 PR，后者就是拿不到当没事）。
+  const cold = coldVerifyNeed(hits, faceProblem);
   if (hits.length > 0) {
     let statuses: unknown[] | undefined;
     try {
@@ -272,6 +286,15 @@ export async function gatePr(number: number, deps: GateDeps): Promise<GateResult
       if (typeof got === 'string')
         notChecked.push(`当前头 ${meta.head.slice(0, 7)} 的提交状态认不出：${got}`);
       else problems.push(...checkSecondOpinion(meta.head, got, hits));
+      // 同一份 statuses 里再取一条：冷调用的结论是**另一个** context（不是 second-opinion），各认各的。
+      const coldGot = coldVerifyFrom(statuses);
+      if (typeof coldGot === 'string') {
+        // 认不出 = 没查成（不当成没问题）：走 notChecked，不当作「还没验」往下判。
+        notChecked.push(`当前头 ${meta.head.slice(0, 7)} 的提交状态认不出：${coldGot}`);
+      } else {
+        // 没有这条、或不是 success：都判问题（不许拿「没有」当「没问题」，通用段底线第三条）。
+        problems.push(...checkColdVerify(meta.head, coldGot, cold.needed));
+      }
     }
   }
   const notes = (await reminders(live, meta, gh)).map((r) => `提醒：${r}`);
@@ -292,7 +315,7 @@ export async function gatePr(number: number, deps: GateDeps): Promise<GateResult
   const why =
     hits.length === 0
       ? '没改到先审后合的地方'
-      : `改到 ${hits.length} 个先审后合的地方，当前头上第二意见已通过`;
+      : `改到 ${hits.length} 个先审后合的地方，当前头上第二意见已通过${cold.needed ? '、验收那一遍也通过' : ''}`;
   return {
     ...base,
     state: 'success',
@@ -359,7 +382,8 @@ export async function targetPrs(
       // 不按事件里的 sha 只算那一个 PR：status 事件共用一个排队组（merge-gate.yml），排着的只留最新一个，中间的被取消——
       // 一轮里给好几个 PR 贴 second-opinion 时，只算最后那个的话前面几个就一直停在旧结论上（#351 演练撞到）。
       // 所以留下来的那一次把开着的 PR 全重算一遍，每个都现读自己此刻的状态。
-      if (ev.context !== SECOND_OPINION_CONTEXT) return [];
+      // 冷调用（cold-verify）写上时同理：它是另一个 context（#555-2），单子关上时这条状态才到，闸要跟着重算。
+      if (ev.context !== SECOND_OPINION_CONTEXT && ev.context !== COLD_VERIFY_CONTEXT) return [];
       return numbersOf(await gh.openPrs(), () => true);
     case 'workflow_dispatch': {
       const input = isObject(ev.inputs) ? String(ev.inputs.pr ?? '').trim() : '';

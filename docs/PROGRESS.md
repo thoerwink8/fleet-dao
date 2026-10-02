@@ -2,6 +2,19 @@
 
 > 一行一条、带日期和对应提交。规矩在 `AGENTS.md` 通用段「进度也要落盘」。
 
+## 2026-10-02（验收段 555-2：冷调用接通合并闸）
+
+- 555-2（母单 #555，排期见 `docs/decisions/0009-v3-implementation-plan.md` 第 6 行）：**合并闸加一条输入 `cold-verify`**——
+  闸只读这条状态（闸里不起模型调用，判法必须确定，design 第五节），冷调用在装配侧跑、结论贴成状态；新开 context，
+  不复用 `second-opinion`。`.github/workflows/merge-gate.yml` 的 status 事件放行它；
+  `packages/conventions/test/merge-gate-inputs.test.ts` 的放行清单跟着加一条（**改标准**）。装配侧新增
+  `packages/engine/src/cold-verify-{status,post,pick,run}.ts`：结论→状态（只有 pass 才 success）、贴状态、
+  `ChooseModelForFamily` 的生产实现（#555-1 留下的注入缺口）、装配入口（读不到一律贴 failure）。结果：
+  `specs/555-2-冷调用进合并闸/结果.md`。
+- 555-2 还欠：**没人自动起这一遍**（定时/事件触发没接）——在那之前改到先审后合路径的 PR 会一直卡「还没验」
+  （宁可卡住也不放行没验的改动）；`ColdVerifySources` 的三个真取样口（GitHub diff / 需求文档 / 作者族）也只有接口和测试。
+  两样都归母单 #555 下一片。
+
 ## 2026-10-02（Mirasim 切换与一条命令迁移，实施）
 
 - 16:28 收尾：PR [#621](https://github.com/thoerwink8/fleet-dao/pull/621) 已合并，主线 `20a7e476`；必过 CI 及 Windows、Intel Mac、Apple Silicon Mac、Linux 原生测试/构建全部通过（Actions `36983791868` / `36983791622`）。16:29 本机一键同步已取到该主线，退出 0，并确认 Mirasim 已是当前新版、未重启会话；旧命令与参数备份保留。实现与本机迁移已交付；未验的仍为真实两向模型请求的服务端额度、用户 Mac GUI、法国现场，不能用上述检查替代。
