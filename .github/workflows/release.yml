@@ -139,14 +139,19 @@ jobs:
           VERSION: ${{ steps.invoke.outputs.version }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           EVENT_NAME: ${{ github.event_name }}
+          PR_MERGE_COMMIT_SHA: ${{ github.event.pull_request.merge_commit_sha }}
         run: |
           set -euo pipefail
           # 已存在的 tag 不能只说「在就跳」：得核它指向的提交是不是本次发布合并（merge commit）。
-          # pull_request 触发：merge 提交就是 GITHUB_SHA（GitHub 在 PR 合上那一刻写的）。
-          # workflow_dispatch 手动补跑：当前 HEAD 已经走到「合并后又合进来几个」的下一版，不能拿 HEAD 当这次发布的提交——
-          # 得在 git log 主干按「发布 v<N>：CHANGELOG.md …」提交信息找回真发的那一次（第二意见 2026-10-02）。
           if [[ $EVENT_NAME == pull_request ]]; then
-            MERGE_SHA="${GITHUB_SHA}"
+            # pull_request 事件的 GITHUB_SHA 不是 merge_commit_sha：squash / rebase 合并时它是 PR head，
+            # 不是 main 上那一次 merge（第二意见 2026-10-02）。得用 github.event.pull_request.merge_commit_sha。
+            MERGE_SHA="${PR_MERGE_COMMIT_SHA:-}"
+            if [[ -z $MERGE_SHA ]]; then
+              echo "::error::pull_request closed 触发：github.event.pull_request.merge_commit_sha 是空的——";
+              echo "::error::没拿到 main 上哪一次合是这次发布（merged=false 已被 classify 挡掉，到这说明 merged=true 但没记 sha），不接着走。"
+              exit 1
+            fi
           else
             # workflow_dispatch 手动补跑：HEAD 已经走到「发布 PR 合了又合了几个」，不能拿 HEAD 当这次发布的提交。
             # 用 gh 查 head=release/v<N> 已 merge 的那张 PR，拿它的 merge_commit_sha——squash / merge commit / rebase 都对得上
