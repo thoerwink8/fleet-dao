@@ -4,7 +4,6 @@ import {
   BellRing,
   Check,
   ChevronsUpDown,
-  LayoutDashboard,
   LogOut,
   Menu,
   Monitor,
@@ -147,11 +146,6 @@ function RepoSwitcher() {
             </DropdownMenuItem>
           );
         })}
-        <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={() => navigate('/overview')}>
-          <LayoutDashboard />
-          全部仓 · 总览
-        </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   );

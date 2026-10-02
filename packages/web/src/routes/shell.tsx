@@ -15,7 +15,7 @@ import { Button } from '../components/ui/button';
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from '../components/ui/sheet';
 import { isDemo } from '../demo/access';
 import { DemoBanner, NotOpen } from '../demo/views';
-import { useIsMobile, useLocalState } from '../lib/hooks';
+import { useLocalState } from '../lib/hooks';
 import { cn } from '../lib/utils';
 
 function Screen({ children }: { children: ReactNode }) {
@@ -97,7 +97,6 @@ function useNoticeToasts() {
 
 function Frame() {
   const location = useLocation();
-  const isMobile = useIsMobile();
   const [collapsed, setCollapsed] = useLocalState(`${brand.storagePrefix}sidebar-collapsed`, false);
   const [mobileNav, setMobileNav] = useState(false);
   const [cmdk, setCmdk] = useState(false);
@@ -108,7 +107,6 @@ function Frame() {
 
   // 演示版：这一页所在的模块没开放，就不渲染它（它的数据也就不去读）。
   const blocked = demoBlocked(location.pathname);
-  const fullBleed = location.pathname === '/' && !isMobile && !blocked;
 
   return (
     <div className="flex h-dvh flex-col overflow-hidden bg-background">
@@ -124,12 +122,7 @@ function Frame() {
         </aside>
         <div className="flex min-w-0 flex-1 flex-col">
           <Topbar onMenu={() => setMobileNav(true)} onSearch={() => setCmdk(true)} />
-          <main
-            className={cn(
-              'relative min-h-0 flex-1',
-              fullBleed ? 'overflow-hidden' : 'overflow-y-auto scrollbar-thin',
-            )}
-          >
+          <main className="relative min-h-0 flex-1 overflow-y-auto scrollbar-thin">
             {blocked ? <NotOpen /> : <Outlet />}
           </main>
         </div>

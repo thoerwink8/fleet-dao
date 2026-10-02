@@ -1,4 +1,4 @@
-// 新主页（/home3）三块卡片的数据形状：一律从 @fleet-dao/shared 的 web-api.ts（zod）推导，不另写一份（#589）。
+// 新主页（/）三块卡片的数据形状：一律从 @fleet-dao/shared 的 web-api.ts（zod）推导，不另写一份（#589）。
 // HomeDone 多一个 link：后端不发网址（和 alert-work 一个规矩），由 useHome 按品牌拼好给卡片。
 //
 // 设计规矩（specs/509-需求梳理/流程重做方案.md 第五节）：

@@ -31,7 +31,7 @@ export function createDemoApi(inner: MockApi): FleetApi {
       return { ...me, user: { ...me.user, displayName: '访客' } };
     },
     repos: () => inner.repos(),
-    // 演示版路由表里没有新主页（/home3），这里照样满足接口（将来的演示「项目群」会用）。
+    // 演示版路由表里没有新主页（/），这里照样满足接口（将来的演示「项目群」会用）。
     home: () => inner.home(),
     board: async (repoId) => redactBoard(await inner.board(repoId), detailLevel()),
     task: async (taskId) => redactTaskDetail(await inner.task(taskId), detailLevel()),

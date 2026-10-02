@@ -13,7 +13,6 @@ import { targetOf, useTaskActions } from '../components/task-actions';
 import AuditPage from '../routes/audit';
 import ChannelsPage from '../routes/channels';
 import NotificationsPage from '../routes/notifications';
-import OverviewPage from '../routes/overview';
 import SchedulesPage from '../routes/schedules';
 import SettingsPage from '../routes/settings';
 import TaskDetailPage from '../routes/task-detail';
@@ -57,15 +56,6 @@ describe('读不到时照实说，不冒充「没有」', () => {
     renderApp(<TasksPage />, { api });
     expect(await screen.findByText(/仓 orbit-canary 的需求没读成/)).toBeTruthy();
     expect(await screen.findAllByText('登录页加手机验证码')).toBeTruthy();
-  });
-
-  test('总览：看板没读成时数字写「—」，不写 0', async () => {
-    renderApp(<OverviewPage />, { api: failing('board') });
-    expect(await screen.findByText(/的需求没读成/)).toBeTruthy();
-    const stat = screen.getByText('在干活').closest('a');
-    expect(stat?.textContent).toContain('—');
-    expect(screen.queryByText('没有等你处理的事')).toBeNull();
-    expect(screen.queryByText('现在没有会话在跑')).toBeNull();
   });
 
   test('定时任务：没读成时不说「还没有定时任务」，失败数写「—」', async () => {

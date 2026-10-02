@@ -21,7 +21,6 @@ import {
   useTimeline,
 } from '../api/client';
 import type { Ask, BoardSubtask, BoardTask, Routing, Run, TaskDetail, TimelineItem } from '../api/types';
-import { OrgDefaultMark } from '../board/flow-source';
 import { LogStream } from '../components/log-stream';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
 import { RepoLink, repoHref } from '../components/repo-link';
@@ -29,6 +28,8 @@ import { RunTimeline } from '../components/run-timeline';
 import { StatusChip, StatusDot, ToneBar } from '../components/status';
 import { ActionButtons, targetOf, useTaskActions } from '../components/task-actions';
 import { Button } from '../components/ui/button';
+import { Popover, PopoverContent, PopoverTrigger } from '../components/ui/popover';
+import { Tooltip, TooltipContent, TooltipTrigger } from '../components/ui/tooltip';
 import { UsagePanel } from '../components/usage';
 import { canSeeDetail } from '../demo/access';
 import { HiddenNote } from '../demo/views';
@@ -59,6 +60,37 @@ export function meta() {
 
 /** 「需求级」那一栏的编号（分诊、需求文档、方案这些不属于子任务的会话）。 */
 const FRONT = 'front';
+
+/**
+ * 这一轮用的是全组织默认的流程配置时的标识：点开和悬停是同一句。
+ * 原来跟着看板源走（board/flow-source.tsx），看板页删了就地保一个给详情用。
+ */
+function OrgDefaultMark({ flowSource }: { flowSource: 'project' | 'org_default' | undefined }) {
+  if (flowSource !== 'org_default') return null;
+  const text = brand.flow.orgDefaultDetail;
+  return (
+    <Popover>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <PopoverTrigger asChild>
+            <button
+              type="button"
+              className="inline-flex h-5 shrink-0 items-center rounded-full border border-border bg-muted px-1.5 text-[11px] font-medium whitespace-nowrap text-muted-foreground"
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => e.stopPropagation()}
+            >
+              全组织默认配置
+            </button>
+          </PopoverTrigger>
+        </TooltipTrigger>
+        <TooltipContent className="max-w-xs text-left">{text}</TooltipContent>
+      </Tooltip>
+      <PopoverContent className="w-72 text-xs leading-relaxed" onClick={(e) => e.stopPropagation()}>
+        {text}
+      </PopoverContent>
+    </Popover>
+  );
+}
 
 /**
  * 详情接口没有「此刻在干什么」，看板上有。看板里找得到就用看板那份（后端拼好的白话），

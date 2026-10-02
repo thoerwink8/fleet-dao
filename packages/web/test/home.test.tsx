@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-// 新主页（/home3）三块骨架的测试：
+// 主页（/）三块骨架的测试：
 // - 路由进来的四种状态：loading（骨架屏）/ error（照实说没读成）/ notWired（整块待实现）/ data（真的有数据，三块各自画出来）。
 // - 「verify_pending」「还没验」不画成失败红：卡片上有专属的 badge，不接 fail 颜色。
 // - 持续状态条有问题也用提示色，不伪装成失败。
@@ -30,7 +30,7 @@ function renderHome(state: HomeState) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const api = createMockApi({ live: false });
   return render(
-    <MemoryRouter initialEntries={['/home3']}>
+    <MemoryRouter initialEntries={['/']}>
       <QueryClientProvider client={qc}>
         <ApiProvider api={api}>
           <ThemeProvider>
@@ -106,7 +106,7 @@ const SAMPLE: HomeData = {
   ],
 };
 
-describe('home（/home3）：四种状态', () => {
+describe('home（/）：四种状态', () => {
   test('loading：三块各给一块骨架屏', () => {
     renderHome({ status: 'loading' });
     expect(document.querySelectorAll('[aria-busy]').length).toBeGreaterThan(0);

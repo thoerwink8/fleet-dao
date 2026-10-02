@@ -106,7 +106,9 @@ describe('静态检查', () => {
   const webRoutes = new URL('../../web/src/routes.ts', pkg);
   it.skipIf(!existsSync(webRoutes))('卡片直达的驾驶舱页面在前端的路由表里（前端合进来之前跳过）', () => {
     const routes = read(webRoutes);
-    expect(routes).toContain(`route('${COCKPIT_PATHS.overview.slice(1)}'`);
+    // overview 常量是 '/'（主页）：主页是 index 路由，不是具名 route('...')
+    expect(COCKPIT_PATHS.overview).toBe('/');
+    expect(routes).toContain("index('routes/home.tsx'");
     expect(routes).toContain(`route('${COCKPIT_PATHS.notifications.slice(1)}'`);
     expect(routes).toContain("route('tasks/:taskId'");
   });
