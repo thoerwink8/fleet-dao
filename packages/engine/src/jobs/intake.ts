@@ -43,11 +43,13 @@ export const INTAKE_JOB = {
 } as const;
 
 /**
- * 合并闸认冷验收的结论了没有（S2-5，#625）。没认之前拉单不起任务：任务工作流挂的自动合并不能绕过验收，而人手挂、别的路径挂
- * 要等合并闸那一层才拦得住。S2-5 的 PR 把它改成 true（同一个 PR 让合并闸认 cold-verify 提交状态）。
+ * 合并闸认冷验收的结论、冷验收的真活动也接上了没有（S2-5 的 #625 让合并闸认 cold-verify 提交状态，S2-5b 接上任务工作流的 coldVerify）。
+ * 没接上之前拉单不起任务：任务工作流挂的自动合并不能绕过验收，而人手挂、别的路径挂要等合并闸那一层才拦得住；冷验收没接上，
+ * 引擎自己的 PR 又永远得不到 cold-verify。S2-5b 把它改成 true。
  * 开着「让 AI 接活」的仓又碰上它是 false：这一轮记没跑成、一张单都不拉——开关开早了要看得见，不悄悄空转。
+ * 改回 false 要同时改 intake.test.ts 里钉住它的那一条（故意的）。
  */
-export const MERGE_GATE_REQUIRES_COLD_VERIFY = false;
+export const MERGE_GATE_REQUIRES_COLD_VERIFY = true;
 
 export const INTAKE_EVERY_MINUTES = 5;
 /** 和对账补漏（整点起每 15 分钟）、路由探针（7、22、37、52 分）、看门狗（4、9、14…分）、每小时对账（41 分）错开：每小时 3、8、13……分。 */

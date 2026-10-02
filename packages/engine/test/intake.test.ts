@@ -220,15 +220,13 @@ describe('runIntakeJob · 合并闸还没认冷验收', () => {
     expect(await runIntakeJob(h.deps)).toMatchObject({ outcome: 'ok', scanned: 1, found: 0 });
   });
 
-  it('默认值：没有显式给的时候用代码里的常量（S2-5 合并闸认了冷验收才会改成 true）', async () => {
-    const { gateLive: _unused, ...rest } = harness().deps;
+  it('默认值：没有显式给 gateLive 时用代码里的常量；常量已经是 true（合并闸认冷验收、冷验收真活动接上了，S2-5/S2-5b）——改回 false 要改这一条', async () => {
+    expect(MERGE_GATE_REQUIRES_COLD_VERIFY).toBe(true);
     const h = harness();
+    const { gateLive: _unused, ...rest } = h.deps;
     const deps: IntakeDeps = { ...rest };
-    // 常量现在是 false：开着开关的仓就是拒绝（S2-5 把常量改成 true 时，这条跟着改成「照常拉」）
-    if (!MERGE_GATE_REQUIRES_COLD_VERIFY)
-      await expect(runIntakeJob(deps)).rejects.toThrow(/合并闸还没认冷验收/);
-    else expect(await runIntakeJob(deps)).toMatchObject({ outcome: 'ok' });
-    expect(h.started).toEqual([]);
+    expect(await runIntakeJob(deps)).toMatchObject({ outcome: 'ok', found: 1 });
+    expect(h.started).toHaveLength(1);
   });
 });
 

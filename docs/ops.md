@@ -342,7 +342,13 @@ grok 装在会话用户自己家里：官方安装脚本把二进制放在 `~/.g
 - 开关全关是正常的空闲：这一轮记 ok、不读 GitHub。在跑的任务数、白名单、开着的单任何一样读不到：这一轮记没跑成（`schedule_runs` 里 `failed` 或 `partial`，看门狗照登记表报），不拿 0 或「没有」顶。
 - 看：`select * from schedule_runs where job = 'intake' order by id desc limit 5`、`journalctl -u fleet-engine --since '-1h' | grep 拉单`。
 - 停：`fleet-temporal schedule toggle --schedule-id intake --pause --reason "<为什么>"`，恢复换成 `--unpause`。停了超过 15 分钟看门狗会报「拉单停了」，要停得先说好。更常用的停法是把项目的「让 AI 接活」关掉。
-- **硬前提：合并闸认冷验收（#625，S2-5）合进来之前，不给任何仓打开「让 AI 接活」。**代码里也卡着：`jobs/intake.ts` 的 `MERGE_GATE_REQUIRES_COLD_VERIFY` 在 S2-5 之前是 false，开着开关的仓会让这一轮记没跑成（`schedule_runs` 里 `failed`、看门狗报）、一张单都不拉；S2-5 的 PR 把它改成 true。
+- **打开「让 AI 接活」之前**：合并闸认冷验收（#625）和冷验收真活动（S2-5b）都已合进主线，`jobs/intake.ts` 的 `MERGE_GATE_REQUIRES_COLD_VERIFY` 已是 true（有测试钉着；改回 false 时，开着开关的仓会让这一轮记没跑成：`schedule_runs` 里 `failed`、看门狗报、一张单都不拉）。但还没真跑过：先过演练仓三连跑（#452，S2-7），再由创始人在驾驶舱逐个项目打开。别的仓要先装上合并闸（一键补齐，#133），引擎任务流程的 PR 才有这道拦。
+
+冷验收（合并之前那一遍，`packages/engine/src/real/task-verify.ts`；工作流停在「验收做不出来」时看这里）：
+- 看：PR 页面的 `cold-verify` 检查——`pending` 是在跑或在等（description 写在等什么），`success` 通过，`failure` 是没过或没验成（description 第一句分得开：「验收没过」是模型挑出了问题，「没验成」是读不到、没有别家模型、会话没跑成）。会话的账在 `runs` 表（`segment = 'verify'`，记到这张单名下）。
+- 工作流停下等人写的原因：diff 太大（超过 24 万字符）、某个文本文件 GitHub 没给 diff、没有别家的路由（写过这张单的族都跳过了）、作者族认不出（路由的族不在 gpt / claude / deepseek / grok / kimi 里，比如 cursor）、会话没跑成（原因码和执行体的原话在第一句里：额度、模型对不上、中转对不上账）、结论写了 fail 却没有一条算挡的问题。修好之后在驾驶舱点「继续」重验；不验了点「放弃」。
+- 过一会儿就行的（没空位、内存放不下、额度要等、引擎在停机）工作流自己睡一会儿再来，不停下、不报人。
+- **验不了、又确认要合**（已知缺口）：合并闸只认引擎机器人贴的 `cold-verify`，人没有地方点「放行」。办法：仓管理员绕过必过检查合并（合并后不补审），并在单子上留一句为什么；或者关掉这个 PR，把分支改个不是 `fleet/<单号>-t<8 位>` 的名字重开成人手的 PR。
 
 退役的定时任务（断链修复：#445 删掉「提醒派单」整层撞上——代码删了，Temporal 上当初建的 Schedule 不会跟着消失，法国的 `alert-dispatch` 当时只能帅位手动 `fleet-temporal schedule toggle --pause` 止血，见 `specs/445-提醒减负/结果.md`；这里补上「引擎起来自己删」这一步）：
 
