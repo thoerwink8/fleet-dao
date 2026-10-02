@@ -165,6 +165,26 @@ export type PickRouteResult =
 
 // ---- 会话
 
+/**
+ * 三段（对题 / 动手 / 验收）走 runner 的标记（#554-4 切片）：brief 给了这个就走 runner/one-shot 起无头进程，
+ * 不动 Fusion 的 StageKind / 工作树 / db session_runs 行 / 插头链。三段之外（老 SessionBrief）一律走原链路。
+ *
+ * - scope（对题）：还没干活；会话只交一段「建单用的整理稿」。
+ * - manual（动手）：写代码起 PR。**branch / baseSha 是调用方给的**，会话起完由同一档（554-2）现算 PR#/changedFiles。
+ * - verify（验收）：PR 是参数，不许跨进程翻上一段的 PR#（specs/509 第六节）；diff 由调用方现算好交进来。
+ */
+export type SegmentLaunch =
+  | { kind: 'scope' }
+  | { kind: 'manual'; branch: string; baseSha: string }
+  | {
+      kind: 'verify';
+      prNumber: number;
+      baseSha: string;
+      headSha: string;
+      changedFiles: string[];
+      diffText: string;
+    };
+
 export interface SessionBrief {
   title: string;
   /** 创始人原话，或子任务说明。 */
@@ -180,6 +200,8 @@ export interface SessionBrief {
   /** 第二意见：审哪个 PR 的哪个头；开 PR 前验证：验哪个头（完整提交号，推上去的那个）。 */
   prNumber?: number;
   head?: string;
+  /** 三段（scope / manual / verify）走 runner 时的额外交代；给了就走 runner，没给走原 Fusion 链路。 */
+  segment?: SegmentLaunch;
   /** 开 PR 前验证要交代的（只有 verify 阶段给）。 */
   verify?: VerifyBrief;
   /** Fusion 的主导模型（Lead）这一步做什么、看什么（只有 Lead 的会话给；会话端口按它交代、按它读交回的东西）。 */

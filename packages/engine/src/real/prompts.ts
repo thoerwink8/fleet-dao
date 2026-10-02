@@ -11,6 +11,7 @@ import type { PlannedSubtask, Risk, SubtaskStage } from '../decisions/plan.ts';
 import type { TriageVerdict } from '../decisions/triage.ts';
 import type { Finding, ReviewResult } from '../decisions/verify.ts';
 import type { LeadBrief, LeadStep, SessionBrief } from '../ports.ts';
+import { type AnyBrief, AnyBriefSchema } from '../runner/brief.ts';
 import { checkPlanLine, PLAN_LINE_HINT, planLineOf } from './spec-doc.ts';
 
 /** 非写码阶段的结论写在检出副本的这个目录下（相对路径）。 */
@@ -750,4 +751,37 @@ export function parseLeadText(text: string): Parsed<{ summary: string; did: stri
   const did = r.texts('did');
   if ('error' in did) return did;
   return { ok: { summary: summary.ok, did: did.ok } };
+}
+
+/**
+ * 三段（对题 / 动手 / 验收）走 runner 时把 SessionBrief 转成 runner/one-shot 的 AnyBrief（#554-4）。
+ * 会话从工作流进来时 SessionBrief 各字段是老的形状，runner 的三份 Brief 是 #554-1 钉死的形状：本函数做转换。
+ * **不成熟的字段、形状对上就当场抛**（不鲁式化，底线第三条）。
+ */
+export function segmentBriefFrom(session: SessionBrief): AnyBrief {
+  if (!session.segment) {
+    throw new Error(
+      'segmentBriefFrom：brief.segment 没给——这是 runner 段的入口，老 SessionBrief 的走 stagePrompt',
+    );
+  }
+  const base = {
+    title: session.title,
+    request: session.request,
+    acceptance: session.acceptance,
+    touches: session.touches,
+    ...(session.specDir !== undefined ? { specDir: session.specDir } : {}),
+  };
+  const seg = session.segment;
+  if (seg.kind === 'scope') return AnyBriefSchema.parse({ kind: 'scope', ...base });
+  if (seg.kind === 'manual')
+    return AnyBriefSchema.parse({ kind: 'manual', ...base, branch: seg.branch, baseSha: seg.baseSha });
+  return AnyBriefSchema.parse({
+    kind: 'verify',
+    ...base,
+    prNumber: seg.prNumber,
+    baseSha: seg.baseSha,
+    headSha: seg.headSha,
+    changedFiles: seg.changedFiles,
+    diffText: seg.diffText,
+  });
 }
