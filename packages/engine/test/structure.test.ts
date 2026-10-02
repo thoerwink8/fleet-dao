@@ -57,6 +57,7 @@ describe('工作流文件的规矩', () => {
       'hello.ts',
       'hourly-reconcile.ts',
       'index.ts',
+      'intake.ts',
       'kit.ts',
       'route-probe.ts',
       'task.ts',

@@ -337,6 +337,13 @@ grok 装在会话用户自己家里：官方安装脚本把二进制放在 `~/.g
   - 日志：`journalctl -u fleet-engine --since '-1h' | grep 看门狗`、`journalctl -u fleet-api --since '-1h' | grep 看门狗`
 - 停：`fleet-temporal schedule toggle --schedule-id watchdog --pause --reason "<为什么>"`，恢复换成 `--unpause`。停了 15 分钟后端就推「看门狗停了」，要停得先说好。
 
+拉单（#632，替掉 webhook 接活加认领；`packages/engine/src/jobs/intake.ts`、`real/intake.ts`）：
+- 引擎每 5 分钟（每小时 3、8、13……分，定时任务 `intake`）自己到 GitHub 读该做的单：对每个「让 AI 接活」打开的项目（`repos.auto_dispatch_since` 不空），读开着的单，逐道过关——开关打开以后开的、作者在白名单里、挂在当前版本上、不是母单子单、没贴「本机做」、还没派过、现读一遍还开着、交代齐（`readTaskBrief`）、容量够（同时在跑的任务工作流 ≤ 6，一轮最多起 5 条）——过了的建任务行、起任务工作流（编号 `task:<owner>/<name>#<号>`，`REJECT_DUPLICATE`：同一张单任何时候最多一条，做完、停下的不会自己重来，要人在驾驶舱点「继续」）。交代不全的在单子上留一条言写清缺什么（同一处缺法只留一次）。拉单本身不动单子。
+- 开关全关是正常的空闲：这一轮记 ok、不读 GitHub。在跑的任务数、白名单、开着的单任何一样读不到：这一轮记没跑成（`schedule_runs` 里 `failed` 或 `partial`，看门狗照登记表报），不拿 0 或「没有」顶。
+- 看：`select * from schedule_runs where job = 'intake' order by id desc limit 5`、`journalctl -u fleet-engine --since '-1h' | grep 拉单`。
+- 停：`fleet-temporal schedule toggle --schedule-id intake --pause --reason "<为什么>"`，恢复换成 `--unpause`。停了超过 15 分钟看门狗会报「拉单停了」，要停得先说好。更常用的停法是把项目的「让 AI 接活」关掉。
+- **硬前提：合并闸认冷验收（#625，S2-5）合进来之前，不给任何仓打开「让 AI 接活」。**
+
 退役的定时任务（断链修复：#445 删掉「提醒派单」整层撞上——代码删了，Temporal 上当初建的 Schedule 不会跟着消失，法国的 `alert-dispatch` 当时只能帅位手动 `fleet-temporal schedule toggle --pause` 止血，见 `specs/445-提醒减负/结果.md`；这里补上「引擎起来自己删」这一步）：
 
 - 名单唯一的出处是 `packages/engine/src/jobs/retired-schedules.ts` 的 `RETIRED_SCHEDULES`（每条 `{ id, retiredBy }`，`retiredBy` 写哪个 PR 把这个定时任务的代码删掉的）。两处认它，不各写一份：看门狗（`packages/engine/src/real/watchdog.ts`）把这几个从「新不新鲜」的判断里剔除；引擎起来对齐定时任务（`ensureEngineSchedules`）之后，紧接着按这份名单把 Temporal 上还在的 Schedule 删掉（`packages/engine/src/jobs/schedules.ts` 的 `deleteRetiredSchedules` 算结局，真装配在 `packages/engine/src/real/retire-schedules.ts` 的 `retireEngineSchedules`，接线在 `worker.ts`）。

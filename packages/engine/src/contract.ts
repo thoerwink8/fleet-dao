@@ -49,6 +49,8 @@ export const WORKFLOW_TYPES = {
   watchdog: 'watchdogWorkflow',
   /** 任务（#632）：拉单（jobs/intake.ts）起的，一张单一条，编号 taskWorkflowId（shared/workflow-ids.ts），见 task-contract.ts。 */
   task: TASK_WORKFLOW_TYPE,
+  /** 拉单（#632）：Temporal Schedule 每 5 分钟起一条，引擎自己到 GitHub 读该做的单、起任务工作流，见 jobs/intake.ts。 */
+  intake: 'intakeWorkflow',
 } as const;
 
 /** 看门狗一轮的输入：看哪些任务、几点看，都由活动按当时的库和时刻定（工作流里不取时刻）。 */
@@ -58,6 +60,20 @@ export interface WatchdogInput {
 
 /** 看门狗一轮的结局：和记进 schedule_runs 的同一份。scanned = 看了几个定时任务（不算它自己），found = 几个没跑成或不新鲜。 */
 export interface WatchdogRun {
+  runId: number;
+  outcome: ScheduleOutcome;
+  scanned: number;
+  found: number;
+  why?: string | undefined;
+}
+
+/** 拉单一轮的输入：看哪些仓、哪些单、几点看，都由活动按当时的库和 GitHub 定（工作流里不取时刻）。 */
+export interface IntakeInput {
+  schemaVersion: 1;
+}
+
+/** 拉单一轮的结局：和记进 schedule_runs 的同一份。scanned = 受管的仓数，found = 起了几条任务加留了几条言。 */
+export interface IntakeRun {
   runId: number;
   outcome: ScheduleOutcome;
   scanned: number;

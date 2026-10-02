@@ -24,7 +24,14 @@ const NOW = new Date('2026-10-02T14:00:00.000Z');
 const SINCE = '2026-09-30T00:00:00.000Z';
 const V1 = { number: 3, title: 'v1 三段一条龙' };
 const V2 = { number: 4, title: 'v2 下一版' };
-const REPO: IntakeRepo = { id: 'r1', owner: 'acme', name: 'demo', autoDispatchSince: SINCE };
+const REPO: IntakeRepo = {
+  id: 'r1',
+  owner: 'acme',
+  name: 'demo',
+  defaultBranch: 'main',
+  testCommand: 'pnpm check',
+  autoDispatchSince: SINCE,
+};
 
 const BODY = [
   '## 场景',
@@ -76,7 +83,7 @@ const plan = (over: Partial<IntakePlan> = {}): IntakePlan => ({
 
 interface Harness {
   deps: IntakeDeps;
-  started: { issueNumber: number; title: string }[];
+  started: { issueNumber: number; title: string; body: string; author: IntakeIssue['author'] }[];
   comments: { issueNumber: number; key: string; body: string }[];
   finished: { id: number; result: ScheduleResult }[];
   logs: { level: string; text: string }[];
@@ -117,8 +124,8 @@ function harness(
     async runningTasks() {
       return 0;
     },
-    async start({ issueNumber, title }) {
-      started.push({ issueNumber, title });
+    async start({ issueNumber, title, body, author }) {
+      started.push({ issueNumber, title, body, author });
       return 'started';
     },
     async comment({ issueNumber, key, body }) {
@@ -196,7 +203,15 @@ describe('runIntakeJob · 一轮', () => {
   it('一张好单 → 起一条任务工作流，记 ok（扫了 仓+单，处理了 1）', async () => {
     const h = harness();
     const run = await runIntakeJob(h.deps);
-    expect(h.started).toEqual([{ issueNumber: 12, title: '给驾驶舱加状态' }]);
+    // 起的时候把开单人和正文原样交过去（真依赖据此建任务行：原话、谁要的）
+    expect(h.started).toEqual([
+      {
+        issueNumber: 12,
+        title: '给驾驶舱加状态',
+        body: BODY,
+        author: { login: 'frank', id: 1, type: 'User' },
+      },
+    ]);
     expect(run).toMatchObject({ runId: 7, outcome: 'ok', scanned: 2, found: 1 });
     expect(h.finished).toEqual([{ id: 7, result: { outcome: 'ok', scanned: 2, found: 1 } }]);
   });
@@ -261,9 +276,9 @@ describe('runIntakeJob · 一轮', () => {
       async dispatched(_r, n) {
         return dispatched.includes(n);
       },
-      async start({ issueNumber, title }) {
+      async start({ issueNumber, title, body, author }) {
         dispatched.push(issueNumber);
-        h.started.push({ issueNumber, title });
+        h.started.push({ issueNumber, title, body, author });
         return 'started';
       },
     });
