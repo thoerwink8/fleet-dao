@@ -94,33 +94,44 @@ export function outcomeOfReport(report: HostReport): SpawnOutcome {
   };
 }
 
-export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
+/**
+ * 路由编号 → 库里的路由、执行方式的驱动、会话用户。Spawner 起会话和调用方起会话之前备工作树（要知道树归谁）用同一个查法。
+ * 查不到、没接上、定不下会话用户一律抛错（带白话原因），不落到某个默认执行体上。
+ */
+export async function resolveSegmentRoute(
+  deps: Pick<SegmentSpawnerDeps, 'routeFacts' | 'db' | 'drivers'>,
+  routeId: string | undefined,
+): Promise<{ route: RouteLaunchFacts; driver: HostDriver; user: SessionUser }> {
+  if (!routeId) {
+    throw new Error('这一段没给路由编号（routeId）：生产 Spawner 不知道该起哪家执行体，也不落到默认的上');
+  }
   const lookup =
     deps.routeFacts ??
     (deps.db
-      ? (routeId: string) => routeLaunchFacts(deps.db as Db, routeId)
+      ? (id: string) => routeLaunchFacts(deps.db as Db, id)
       : () => {
           throw new Error('生产 Spawner 没装路由查询：要给 routeFacts 或 db');
         });
+  const route = await lookup(routeId);
+  if (!route) throw new Error(`库里没有路由 ${routeId}`);
+  if (!isWiredHost(route.hostId)) {
+    throw new Error(
+      `执行方式 ${route.hostId} 引擎还没接上（现在接了 ${wiredHostNames()}）：路由 ${route.routeId}`,
+    );
+  }
+  const driver = deps.drivers[route.hostId];
+  const who = sessionUserOf(driver, route.runAsUser);
+  if ('missing' in who) throw new Error(`账号池 ${route.poolId} ${who.missing}，起不了会话`);
+  return { route, driver, user: who.user };
+}
+
+export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
   const log = deps.log ?? (() => undefined);
 
   return async (cmd) => {
     const { input } = cmd;
     const runId = input.runId;
-    if (!input.routeId) {
-      throw new Error('这一段没给路由编号（routeId）：生产 Spawner 不知道该起哪家执行体，也不落到默认的上');
-    }
-    const route = await lookup(input.routeId);
-    if (!route) throw new Error(`库里没有路由 ${input.routeId}`);
-    if (!isWiredHost(route.hostId)) {
-      throw new Error(
-        `执行方式 ${route.hostId} 引擎还没接上（现在接了 ${wiredHostNames()}）：路由 ${route.routeId}`,
-      );
-    }
-    const driver = deps.drivers[route.hostId];
-    const who = sessionUserOf(driver, route.runAsUser);
-    if ('missing' in who) throw new Error(`账号池 ${route.poolId} ${who.missing}，起不了会话`);
-    const user: SessionUser = who.user;
+    const { route, driver, user } = await resolveSegmentRoute(deps, input.routeId);
 
     const tmpDir = deps.trees.tmpFor(runId);
     await deps.trees.adopt(tmpDir, user);
