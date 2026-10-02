@@ -30,7 +30,11 @@ importers:
         specifier: workspace:*
         version: link:../shared
 
-  packages/agents-sync: {}
+  packages/agents-sync:
+    dependencies:
+      '@fleet-dao/mirasim-reclaude':
+        specifier: workspace:*
+        version: link:../mirasim-reclaude
 
   packages/api:
     dependencies:
@@ -221,6 +225,12 @@ importers:
       '@fleet-dao/hygiene':
         specifier: workspace:*
         version: link:../hygiene
+
+  packages/mirasim-reclaude:
+    dependencies:
+      '@fleet-dao/adapters':
+        specifier: workspace:*
+        version: link:../adapters
 
   packages/shared:
     dependencies:

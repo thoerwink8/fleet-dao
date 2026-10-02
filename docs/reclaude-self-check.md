@@ -3,7 +3,7 @@
 > 给谁看：拿到这份文档的人（包括之后每一台机器上的 AI）。装了 reclaude 的机器，上机前 / 换机后 / 觉得「怎么老被踢」时照这份做。
 > 配套：装法与原理在 `docs/reclaude-in-mirasim.md`。本文讲两件事：先清掉 reclaude 使用前那个 Claude 账号留在本机的 id，再查有没有在产生上报。
 >
-> **脚本在哪**：`reclaude-old-account-clean.mjs`、`machine-check.mjs`、`reclaude-mirasim.mjs` 只在已退役的 ai-gateway-stack 仓（私有只读存档，创始人 2026-10-01 确认退役）`origin/master` 的 `deploy/` 下；下面写 `deploy/…` 的都是那个仓里的路径，要用先拉一份存档仓的检出、`git pull` 到 `origin/master` 再跑。这些检查现在没有定时任务在跑（那份定时配置随旧系统 2026-09-25 清退），换机后照本文手动查一遍就行。本仓只放这两份文档。
+> **脚本在哪**：旧账号清理、旧 `machine-check.mjs` 仍只在已退役的 ai-gateway-stack 存档仓，本文相关历史步骤不代表新版接入。Mirasim 启动器及迁移已由本仓 `packages/mirasim-reclaude` 维护，检查用 `pnpm mirasim:migrate --check`；来源验证见配套指南。清账号或删痕迹仍须先获删数据授权，不由迁移器执行。
 
 ## 0. 立场
 
@@ -70,8 +70,8 @@ node deploy/reclaude-old-account-clean.mjs --all-homes --apply
 
 ```bash
 # ① 启动命令指谁（只读）
-node deploy/reclaude-mirasim.mjs
-#   绿：✓ agentLaunch.claude.command = <…>/reclaude-mirasim
+pnpm mirasim:migrate --check
+#   退出 0：当前新版已核文件和目标；75：仍待迁移；1：没查成
 #   红：✗ … = reclaude（裸 reclaude = 自有流量会被 Mirasim 网关转出去，正是上报的来源）
 
 # ② 两道体检闸

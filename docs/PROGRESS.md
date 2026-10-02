@@ -2,6 +2,20 @@
 
 > 一行一条、带日期和对应提交。规矩在 `AGENTS.md` 通用段「进度也要落盘」。
 
+## 2026-10-02（Mirasim 切换与一条命令迁移，实施）
+
+- 基线 `06533e1a`；创始人已同意实现并要求「一条命令或者不用命令」从旧机制迁移，决定记在 `docs/decisions/0012-mirasim-routing-and-migration.md`。独立工作树 `.claude/worktrees/mirasim-routing-impl`。
+- 实施提交 `0c323645`；首次提交包含启动器、迁移入口、失败测试、指南与 CI；正在合入并发推进的主线更新后审查。
+- PR [#614](https://github.com/thoerwink8/fleet-dao/pull/614)，当前实现头 `2130f557`；第一次 Linux CI 的真实 Go 生命周期测试通过，迁移夹具首次编译耗时 14 秒，超过测试框架默认 10 秒的 setup 限时，已将 setup 限时与编译上限对齐，尚待重跑；本机 Grok 首次审查因材料截断尝试工具而到回合上限，不算通过。
+- 13:43 状态：头 `b62414d4` 的全量 CI 汇总 `check`、Windows / Intel Mac / Apple Silicon Mac / Linux 原生测试和 artifact 构建全绿（Actions `36968638477` / `36968638497`）。Grok 的完整/拆分/高风险限定题面及 reclaude 无头尝试均未获得有效结论，不标第二意见成功；正经 discuss 原入口以不同族 Kimi 起第二意见，会话 `kimi:bbf3fcd8-cc7a-41a6-983e-46b7e7220f9e`，只读审查树 `second-opinion-4`。本机启动命令仍未改、法国未部署。
+- 14:08 状态：Kimi 两次读取源码，第一轮 2 分钟、第二轮 10 分钟上限均未得到最终结论；第二轮账本 11 次 2xx、全部中继，实际 Read/Bash 已执行，没有把中继成功当成审查通过。另复现并修正时间格式损坏的账本行仍判平台成功：带起针时间的读取遇到无法识别时间立即返回 unknown，相关 41 条测试通过。下一步延续已读源码的独立审查、核新头 CI；仍不能标任务完成或强迁移正在运行的会话。
+- 做到哪：新增 `packages/mirasim-reclaude`（Go 会话启动器、Node 迁移），自有 / 平台双向切换、严格选路、SDK 初始化/权限恢复、正常退出后 resume、父进程强杀后子孙回收、一次性 stdin EOF 保留退出码均已用真实编译的假执行体验证。暂未切本机启动命令、停会话或改法国配置。
+- 迁移：`pnpm mirasim:migrate` 支持检查、等待和撤回；`agents:sync --apply` 自动识别旧封装并安排隐藏后台任务，两个独立调用不会同时写配置或重复安排。备份只存启动字段；核源码、架构、文件校验和 reclaude 目标；保留原参数，损坏记录/文件明确失败。真实会话档案的 `incomplete` 已纳入已结束状态。
+- 验证：新包完整测试首轮 13 条通过（含 Go 生命周期），随后新增并复现并发、文件损坏、坏撤回记录、平台注入缺失、已退出执行体的控制恢复失败；相关迁移/后台 14 条、同步真实入口 4 条通过。Linux cloud 入账前核计费调用来源；本地 count_tokens / models 与模型调用分开。四平台原生测试/构建工作流已写，尚未运行到 GitHub。
+- 13:08 验证：受影响三包整轮 786 条中 740 通过、44 平台跳过、2 个同步回归失败；修正无 Mirasim 时的入口后，两条失败与真实 CLI、新包复测 23 条通过。补齐撤回不自动重装、编译期间人改配置不覆盖后，新包完整 19 条通过（包含真实 Go 生命周期测试）；适配器/同步真实 CLI 44 条、文档指针 54 条通过。TS 编译已过；全量由 `test:changed` 正确判到 CI，本机未跑 `pnpm check`。
+- 下一步：本机 Grok 独立审查（决定 0008），开 PR 后盯 CI 和两种 Mac 的真实 runner，再安全迁移本机；指南、README、design/ops 和旧自检指针已同步对齐。
+- 还没验证：新版与真实 Mirasim 的请求归属、Mac 用户机器的 GUI 接入、法国真实渠道与记账；没有把编译成功、日志 route=cloud 或先前讨论失败当作验收。
+
 ## 2026-10-02（W4 顺位 9 / #605 / PR #606）
 
 - **556-1 删 Fusion 工作流 + 对应 decisions 实现**：分支 `feat/556-1-big-delete`，工作树 `.claude/worktrees/556-1-big-delete`。
@@ -12,10 +26,6 @@
 - PR [#606](https://github.com/thoerwink8/fleet-dao/pull/606)，`--auto --squash` 已挂；CI 还在跑；mergeStateStatus=BLOCKED（等 CI 绿）。
 - 验证：`pnpm test:changed`（115 文件 2577 过 / 32 跳过）、`pnpm exec tsc -b` 绿、`pnpm exec biome check` 0 错。
 - **接下来**：556-2 删 `packages/core/src/{flow,fusion}.ts` + `flow.default.json`（DecisionMap 里 leadPlan/fusionFlow 等还指着它）；556-3 删 API 侧 Fusion 接活（本切片没动 `packages/api/`）。
-
-# 进度（本机恢复与重做前置）
-
-> 一行一条、带日期和对应提交。规矩在 `AGENTS.md` 通用段「进度也要落盘」。
 
 **最近 24h（2026-10-02 02:30 UTC = 北京 10:30 前后）**：① 6 路调研收割回来 → 落 docs/decisions/0008（讨论改本机 Grok 4.7 无头）、0009（v3 实现排期 W0-W5）、0010（三段定稿，W1 起草）、0011（创始人对 7 件人闸的拍板，全部按推荐）；② 6 张 PR 合主线（#571 #572 #573 #575 #576 #578 #579 #580/581 进行中）；③ 关了 4 张被取代单（#440 #454 #69 #489 NOT_PLANNED） + #531 COMPLETED；④ 改写 #446 挂 #556、#556、#69 挂 #555；⑤ 新出 #574、#577；⑥ v3 里程碑 fleet:order 按 0009 重写；⑦ 派了 3 个工作流（v3-quick-fixes 完成、v3-headless-runner 554-1 在跑、v3-routing-db 完成、v3-cockpit-batch1 4 片在跑）。**详见下表 2026-10-02 各节和 docs/decisions/。**
 
@@ -41,6 +51,8 @@
 - Linux 补充调研提交 `32b924d6`，PR [#579](https://github.com/thoerwink8/fleet-dao/pull/579)；仍为未实施的建议，没有改法国配置或发布二进制。
 
 ## 2026-09-30 / 10-01（本机，指挥官会话）
+
+> 后续修正（2026-10-02）：下方「机制没坏」「启动器没问题」仅观察了进程启动，没覆盖进程内回合切换；已被本文件 Mirasim 调研/实施节的真实复现与决定 0012 取代。旧的「只对新起进程生效」是旧封装限制，不作为新版操作指南。
 
 - **Grok 在本机修好了**（2026-09-30）。原因：C 盘事故把 `~/.grok/auth.json` 冲掉，且 Grok 只认代理环境变量、不读 Windows 系统代理。做法：1) `grok login --device-auth` 重新登录（创始人本人在浏览器确认）；2) 给这台机器的用户级环境加 `HTTP_PROXY` / `HTTPS_PROXY = http://127.0.0.1:7890`（Clash 混合口），`NO_PROXY` 原有值不动。**法国 VPS 直连能通，不需要这段配置。** 验证：只带用户级环境变量跑 `grok -p …` 返回 OK，模型 `grok-4.7`。没验证的：Mirasim 里新开 Grok 会话（要人在界面上点）。
 - **Mirasim 的「平台 / 自有」两个额度来源按钮：机制没坏，是两边都没配好。** 查到的：`~/.mirasim/plugin-index/<机器>.json` 的 `routes` 按**会话**记路由，本机 262 条里 `cloud` 233 / `local` 29；本会话被钉在 `cloud`，所以每次调用都进 `relay.mirasim.ai`（`~/.mirasim/traffic/<会话>/index-0.ndjson` 494 行全部 `viaRelay=true`、`accountId=null`）。「自有」那条路要求「本机有该智能体的账号凭据」，`setting.json` 的 `agent_accounts` 是空的。

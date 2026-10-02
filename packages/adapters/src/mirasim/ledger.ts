@@ -27,6 +27,8 @@ export interface LedgerRow {
   upstreamHost?: string;
   viaRelay?: boolean;
   model?: string;
+  /** 用于区分计费模型调用与本地 count_tokens / models 辅助请求。 */
+  path?: string;
 }
 
 /** 三态：读到了（可能是 0 行）/ 没查成。没有目录、读不了、格式认不出都是「没查成」，不当成「没有调用」。 */
@@ -87,6 +89,8 @@ export async function readMirasimLedger(
         continue;
       }
       const at = typeof row.ts === 'string' ? Date.parse(row.ts) : num(row.ts);
+      if (since !== undefined && (at === undefined || !Number.isFinite(at)))
+        return { state: 'unknown', detail: `账本 ${name} 有时间认不出的行，无法确认属于本次调用` };
       if (since !== undefined && at !== undefined && Number.isFinite(at) && at < since) continue;
       rows.push({
         ...optional('at', at !== undefined && Number.isFinite(at) ? at : undefined),
@@ -94,6 +98,7 @@ export async function readMirasimLedger(
         ...optional('upstreamHost', str(row.upstreamHost)),
         ...optional('viaRelay', typeof row.viaRelay === 'boolean' ? row.viaRelay : undefined),
         ...optional('model', str(row.model)),
+        ...optional('path', str(row.path)),
       });
     }
   }

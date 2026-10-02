@@ -1,111 +1,72 @@
-# Mirasim 里让 claude「自有」会话吃 reclaude 订阅
+# Mirasim 自有 / 平台接入与旧安装迁移
 
-> 给谁看：在装了 reclaude 的桌面机上，要让 Mirasim 起的 claude 会话（路由选「自有」的）走 reclaude 订阅的 AI 或人。
-> 一次配置。**ai-gateway-stack 已退役**（创始人 2026-10-01 确认；2026-09-25 起两台服务器上的那一套已清退，仓转私有只读存档）：原来兜底的 `deploy/machine-check.mjs`（`reclaude-launch-bare` / `reclaude-shim-missing` 两道闸）**现在没人跑**，装好以后照第 0 节的判据自己核。
->
-> **两份文档**：本文＝**reclaude 迁移指南**（怎么装、怎么换机、服务器上怎么装）；
-> 姊妹篇 `docs/reclaude-self-check.md`＝**防封环境自检指南**（先清旧账号 id，再照那四步查）。
-> 可以清理下旧账号绑定的 id 和痕迹：reclaude 使用前那个 Claude 账号留在本机 Claude 配置和 memory 里的，按姊妹篇第 1 节清。本文不写步骤。
->
-> **脚本在哪**：启动器源码和装法脚本（`deploy/reclaude-mirasim.mjs`、`deploy/reclaude-mirasim/`、`deploy/machine-check.mjs`）只在已退役的 ai-gateway-stack 仓的 `origin/master` 上（本地检出要先 `git pull` 才有，旧检出里可能已经没有这几个文件）；下面写 `deploy/…` 的都是那个仓里的路径。**已经装好的机器不用它**：Mirasim 的启动命令指的是 `~/.local/bin/reclaude-mirasim.exe` 这个编好的文件，存档仓只在换机重装、要重新编译时才用得上。本仓只放这两份文档。
->
-> 更早散在 ai-gateway-stack `docs/MIRASIM.md` 与 windsurf-dao `docs/observations/2026-09-*` 的 reclaude 笔记是历史判例，要结论来这两份。
+Windows 和 macOS 的接入由本仓 `packages/mirasim-reclaude` 维护。旧 `reclaude-mirasim.exe` 的一次启动判路已被替代，装机和升级不再依赖退役的 ai-gateway-stack。批准范围见 [决定 0012](decisions/0012-mirasim-routing-and-migration.md)，验证状态看 [进度](PROGRESS.md)。
 
 ## 0. 判据：什么样才算接上了
 
-看 reclaude 的启动器日志 `%LOCALAPPDATA%\reclaude-mirasim\launch.log`（每次起 claude 一行，写明判了哪条路）和
-reclaude 日志 `~/.reclaude/logs/daemon.log`：
+新启动器在下一条用户输入发出前读取当前会话路由。明确 `local` 使用 reclaude 自有额度；`cloud` 保留 Mirasim 的网关注入，使用平台中继。切换发生在当前回合结束、权限与后台任务处理完以后，只重建该会话的执行进程，通过 `--resume` 保留原生会话。
 
-- 接上了：launch.log 那行 `route=local（自有）… settingsStripped=true`，daemon.log **没有**新的 `event: non-cc-client`，
-  会话的 `modelUsage` 里 provider 是 `firstParty`
-- 没接上：Mirasim 流量账本 `~/.mirasim/traffic/<会话>/index-0.ndjson` 出现 `upstreamHost=api.anthropic.com` +
-  `status=400` + `errorCode=non_cc_client`（随后整会话降到 `relay.mirasim.ai`）
+两种来源要分别看证据：
 
-**别看账本判「接上了」**：接上之后请求不再经过 Mirasim 网关，账本里这些会话的用量显示「未知」，这是预期。
+- 自有：启动器记录 `route=local`，Claude 实际经 reclaude 发请求；Mirasim 账本可能没有这笔用量，不能拿账本空白当成功。
+- 平台：下一回合的计费模型请求在 `~/.mirasim/traffic/<Mirasim 会话 ID>/index-*.ndjson` 中为 `viaRelay=true`，实际上游是平台中继。进程名叫 reclaude、日志写 `cloud` 都不能单独证明额度来源。
+- 读路由失败、ID 映射歧义、未知路由值、平台网关注入缺失时明确失败，不回落到另一份额度。
 
-## 1. 原理：为什么启动命令写 `reclaude` 不够
+`--fleet-doctor` 只核 reclaude 目标程序，不启动模型、不验证账号或扣费。
 
-`~/.mirasim/setting.json` 的 `agentLaunch.claude.command = reclaude` 只决定**用哪个程序**起 claude。
-Mirasim（0.0.354 起）还会把自己网关的地址写进 `--settings <临时文件>` 的 env：
+## 1. 原理：为什么需要会话启动器
 
-```json
-{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:<端口>/<会话令牌>","ANTHROPIC_AUTH_TOKEN":"…","ANTHROPIC_API_KEY":"…"}}
-```
+Mirasim 用 `--settings <文件或 JSON>` 把本地网关地址和认证字段交给 Claude。旧封装只在启动时剥掉自有会话的注入，复用进程时没有重新选路，切回平台后仍可能使用自有额度。
 
-reclaude 只清进程 env（2026-09-19 验过），清不到这个文件 ⇒ claude 把请求交给 Mirasim 网关 ⇒ 网关以 `Mirasim.exe`
-身份转发 ⇒ reclaude 服务端认出不是 Claude Code 本体，回 `400 仅支持 Claude Code 客户端访问 reclaude 网关`
-（`non_cc_client`），**并上报**（`~/.reclaude/state.json` 的 `leak_report: true`）。这类上报攒多了会解绑设备
-（2026-09-21 VPS 实咬）。
+新版保存原始 args/env；明确自有才在安全副本中剥掉 Mirasim 回环网关的 `ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_API_KEY`。切回平台从原始参数恢复，重新完成 SDK 初始化与控制状态恢复；已经执行的用户消息和工具结果不重放。用户级 reclaude 配置保持由 reclaude 管理，不假定它一直是某一种代理或认证形态。
 
-所以不能让「自有」流量经过 Mirasim 网关——想让它过 reclaude 的客户端校验，唯一的办法是伪装请求特征，**不做**。
+Claude 两种来源都经 reclaude 拉起。有效索引没有该会话 override 时保留 Mirasim 默认网关；索引缺失和坏 JSON 不能被当成「没有 override」。
 
-## 2. 做法：reclaude-mirasim 启动器
+## 2. 做法：三种桌面产物
 
-ai-gateway-stack 仓 `deploy/reclaude-mirasim/`（Go，无依赖）。Mirasim 起它，它再起同目录的 reclaude，其余参数、stdio、退出码原样透传：
+Go 核心共用，GitHub Actions 在 Windows、Intel Mac、Apple Silicon Mac 和 Linux 上分别运行协议/生命周期测试并构建本机产物。Windows 用 Job 回收子孙；Mac/Linux 用会话监管进程和进程组回收。监管进程随会话结束退出，不是新的常驻服务。
 
-- 只有**这个会话的路由是「自有」**（`~/.mirasim/plugin-index/*.json` 的 `routes["claude:<会话>"]` 为 `local`，
-  或没标过——Mirasim 自己也是先试自有）**且模型是 Claude 家的**时，才剥掉 `--settings` 里指向本机回环地址的
-  `ANTHROPIC_BASE_URL/AUTH_TOKEN/API_KEY`（写一份剥过的临时副本，不改 Mirasim 的原文件）并清进程 env 同名变量。
-  claude 于是回落到 `~/.claude/settings.json` 里 reclaude 写的代理 + OAuth 占位令牌，走真订阅。
-- 查路由用的 id 和命令行里的 id **不是同一个**：`routes` 的键是 **Mirasim 的会话 id**，而 claude 的命令行里
-  （`--resume` / `--session-id`）是 **claude 自己的会话 id**。两个不同的会话（接着别的原生会话起的那些）按
-  命令行里的 id 查不到 routes，启动器就按 `~/.mirasim/sessions/claude/<Mirasim 会话 id>/record.json` 里写着的
-  `nativeSessionId` 反查一次，拿 Mirasim 的会话 id 再查（2026-09-26 实咬：`claude:541a1e89…` 选了「平台」，
-  命令行里是 `--resume 478c5147…`，查不到就落进「未标」兜底当自有，剥了注入烧掉拼车号额度）。
-  每次启动那行日志都带 `sid=<命令行的 id>` 和反查到的 Mirasim 会话 id，判错时照它查。
-- 路由是「平台」（`cloud`）或模型是别家的：**一个字节不动**，照旧走 Mirasim 网关 → 中继。
-- 子进程挂在 `KILL_ON_JOB_CLOSE` 的 Job 里：Mirasim 杀启动器时整棵树跟着退（实测 cmd/ping/conhost 全退）。
+安装保存绝对路径；查找 reclaude 的顺序为程序同目录、用户 `~/.local/bin`、Windows 安装目录、PATH，也可指定 `RECLAUDE_MIRASIM_TARGET`。Mac GUI 不需要靠终端先改 PATH；reclaude 仍须已安装并登录。
 
 ## 3. 装 / 查 / 撤
 
-在 ai-gateway-stack 存档仓（先 `git pull` 到 `origin/master`）里跑：
+已有旧封装的桌面机：正常开新 AI 会话时，同步钩子取得主线后，`agents-sync --apply` 会自动安排迁移。忙时隐藏后台任务等空闲，不终止在途回合；再次同步不重复安排。没有 Mirasim、自定义启动命令、Linux 均跳过自动桌面迁移。
+
+也可以在 fleet-dao 检出里主动执行一条命令：
 
 ```bash
-node deploy/reclaude-mirasim.mjs                    # 只读：启动命令现在指谁
-node deploy/reclaude-mirasim.mjs apply --when-idle  # 编译到 ~/.local/bin/reclaude-mirasim.exe，等没有在途回合再切
-node deploy/reclaude-mirasim.mjs off --when-idle    # 撤回裸 reclaude
+pnpm agents:sync                   # 取得最新主线并自动安排旧封装迁移
+pnpm mirasim:migrate               # 当前检出的迁移器：等空闲、迁移、回读确认
+pnpm mirasim:migrate --check       # 只读，未迁移/未确认退出 75
+pnpm mirasim:migrate --rollback    # 等空闲，恢复迁移前的命令与参数
 ```
 
-**切启动命令会让 Mirasim 重建 claude driver，把所有在跑的 claude 回合杀掉**（2026-09-24 实咬：切一次杀两个，
-其中一个跑了 4.5 小时，报 `claude exited 1: 同步配置…`）。所以脚本见到在途回合（`~/.mirasim/sessions/claude/*/record.json`
-的 `runState=running`）默认拒绝；`--when-idle` 连续两次（间隔 15 秒）看到一个都没有才切，最多等 6 小时。
+Node 须为 22.22 或以上。目标机器无需安装 Go：有 Go 时从本仓编译；没有时用已登录的 `gh` 下载主线成功工作流中与源码匹配的构建，核对 manifest、架构、SHA-256 和版本。构建不存在、下载/校验失败或目标 reclaude 不可用都明确报错，不把旧文件或自报版本当作新版。
 
-改走 Mirasim 的 ws `setAgentLaunch`（界面「智能体配置 → 启动命令」同一条路），不手改 setting.json。
-生效范围：新起的 claude 进程。
+迁移通过 Mirasim 的本地认证 WS `setAgentLaunch` 更新并回读，使用连续空闲确认。此 API 会重建 Claude driver，所以首次迁移等待所有在途 Claude 回合结束。Mirasim 未运行则后台等待它启动；最长等 6 小时，到期明确记 `expired`，后续同步可以重新安排。
 
-启动器按「**同目录的 reclaude**」找目标，找不到才退到 PATH。所以要保证 `~/.local/bin` 下有一份 `reclaude.exe`
-（本机 reclaude 装在别处时，在那儿建个指过去的符号链接；`reclaude-mirasim.mjs` 也以这份的存在为前置条件），
-或者给启动器设 `RECLAUDE_MIRASIM_TARGET`。
+状态保存在 `~/.fleet-dao/mirasim-reclaude/`：
 
-## 4. 服务器（Linux）上怎么装
+- `migration.json`：迁移前命令/参数、源码和二进制校验，不复制账号或令牌。
+- `worker.json`：后台 PID、等待/完成/失败状态；Windows 的失败详情另见 `worker.err`。
+- `releases/<源码 hash>/`：新版产物。旧封装和历史版本保留，撤回不删除会话或账号数据。
 
-服务器上有 Mirasim + reclaude，但**通常没有 Go**，所以是「别处交叉编译 → 拷过去 → `--no-build`」三步。
-`reclaude-mirasim.mjs` 在没 Go 又没加 `--no-build` 时会大声失败并给出交叉编译命令，不会静默跳过编译。
+主动撤回后，同一源码版本不会被自动同步重新装回；后续新版本或显式 `pnpm mirasim:migrate` 可以再次迁移。
 
-```bash
-# 1. 在有 Go 的机器上（Windows PowerShell 写 $env:GOOS="linux"; $env:GOARCH="amd64"）
-GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o reclaude-mirasim ./deploy/reclaude-mirasim
-# 2. 拷到 reclaude 同目录——启动器按「同目录的 reclaude」找目标
-scp reclaude-mirasim root@<server>:/root/.local/bin/
-# 3. 在服务器上切启动命令（有在途回合就先等，理由见上一节）
-cd <ai-gateway-stack 存档仓的检出>        # 服务器上原来那份和 ags-sync.timer 已于 2026-09-25 随旧系统清退，现在要临时拉一份
-node deploy/reclaude-mirasim.mjs apply --no-build --when-idle
-```
+直接用 `node packages/mirasim-reclaude/bin/migrate` 也能运行，专用同步检出无需安装 `node_modules`。`--no-wait` 只尝试当前空闲状态，没完成退出 75；错误退出 1，不能把等待当迁移成功。
 
-验收（Linux 的日志在 `~/.cache/reclaude-mirasim/launch.log`，因为启动器用 `os.UserCacheDir()`）：
+## 4. 服务器（Linux）与 Fleet
 
-```bash
-tail -3 ~/.cache/reclaude-mirasim/launch.log   # 要有 route=local（自有）… settingsStripped=true
-node deploy/machine-check.mjs | grep -i reclaude   # reclaude-launch-bare / reclaude-shim-missing 转绿
-```
+法国维持两个明确入口：自有 Claude 直接由 reclaude 起，无头 Mirasim 固定 `cloud`。账号池、渠道切换与额度耗尽后的任务接续由 Fleet/Temporal 控制；不默认安装桌面混合来源启动器。自动迁移入口在 Linux 明确跳过。
 
-2026-09-24 在一台 VPS 上就是这么装的：`go` 不在 PATH 里，先在本机交叉编译，再 `apply --no-build`。
+Fleet 接收 Mirasim 的平台成功结果前核账本：至少有计费模型请求的 2xx，成功模型调用全部为 `viaRelay=true`。成功直连/混合来源拒绝平台成功入账；坏行、缺来源字段或读失败返回「没查成」。本地 `messages/count_tokens` 与 `v1/models` 辅助请求不能证明模型成功，也不误判成串账。
+
+该修改没有发布法国配置、开启引擎或改变账号切换规则。
 
 ## 5. 已知边界
 
-- 会话中途在界面上切「自有 / 平台」：已经起着的 claude 进程保持起它时的判法，下次重起进程才按新路由。
-- 还没起过原生会话的会话（记录里 `nativeSessionId` 还空着）按「自有」兜底——和 Mirasim 自己的默认一致；
-  这种会话的日志那行写 `route 未标`，判错的话照两个 id 去对。
-- 走启动器的「自有」会话在 Mirasim 用量统计里显示「未知」（绕过了它的网关），额度看 reclaude 面板。
-- Clash 里那条 `Mirasim.exe + api.anthropic.com → reclaude` 分流（ai-gateway-stack PR #37）在这个方案下**不需要**：自有会话已不经 Mirasim 出网。
-  留着它，漏网的 Mirasim 自有请求会以非 Claude Code 身份撞 reclaude——建议撤掉。
+切换不改变正在运行的回合，下一回合才应用；第一次从旧安装迁移仍要等所有 Claude 回合空闲。平台令牌/网关失效后由调用方重新建立接入，不用自有额度兜底。
+
+测试 runner 上的 Mac 协议与进程树验证不等于用户 Mac 的 GUI 接入或服务端账单验收。实际完成程度始终以 [进度](PROGRESS.md) 中的证据为准。
+
+诊断日志在 Windows `%LOCALAPPDATA%\reclaude-mirasim\launch.log`、Mac `~/Library/Caches/reclaude-mirasim/launch.log`、Linux `~/.cache/reclaude-mirasim/launch.log`，只记录版本、会话 ID、来源、generation 与失败原因，不记录认证字段，不占 stdout。
