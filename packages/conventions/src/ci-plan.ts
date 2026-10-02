@@ -50,7 +50,7 @@ export const DEPLOY_READS_PACKAGES = ['agents-sync', 'feishu', 'web'] as const;
  * 不再往下传——依赖读的那个包的，并不读被读的文件）。
  * api/test/health-public-text.test.ts 按路径动态加载 web/src/build/scan.ts；feishu/test/static.test.ts 读 web 的路由表。
  */
-export const TEST_READS: Record<string, string[]> = { api: ['web'], feishu: ['web'] };
+export const TEST_READS: Record<string, string[]> = { api: ['web'], feishu: ['web'], db: ['core'] };
 
 export type Rule =
   | { match: (f: string) => boolean; full: string }
