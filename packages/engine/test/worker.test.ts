@@ -6,23 +6,20 @@ import type { TestWorkflowEnvironment } from '@temporalio/testing';
 import { afterEach, describe, expect, it } from 'vitest';
 import { WORKFLOW_TYPES } from '../src/contract.ts';
 import { createFakeWorld } from '../src/fakes.ts';
-import { configFromEnv, createEngineWorker, DEFAULT_CLI_BIN_DIR } from '../src/worker.ts';
+import { configFromEnv, createEngineWorker } from '../src/worker.ts';
 import { createEnv, engineBundle, waitUntil } from './support.ts';
 
 const MAIN = fileURLToPath(new URL('../src/main.ts', import.meta.url));
 
 describe('worker 配置', () => {
-  it('不给环境变量就用默认值：127.0.0.1:7243、命名空间 fleet、任务队列 fleet；fleet 命令的后端地址没有默认值', () => {
+  it('不给环境变量就用默认值：127.0.0.1:7243、命名空间 fleet、任务队列 fleet', () => {
     expect(configFromEnv({})).toEqual({
       address: '127.0.0.1:7243',
       namespace: 'fleet',
       taskQueue: 'fleet',
       shutdownGraceSeconds: 30,
       maxConcurrentActivities: 40,
-      agentApiUrl: null,
-      cliBinDir: DEFAULT_CLI_BIN_DIR,
     });
-    expect(DEFAULT_CLI_BIN_DIR.replaceAll('\\', '/')).toMatch(/packages\/cli\/bin$/);
   });
 
   it('按环境变量改；数字不合法的回默认值', () => {
@@ -32,8 +29,6 @@ describe('worker 配置', () => {
       FLEET_TASK_QUEUE: 'q',
       FLEET_SHUTDOWN_GRACE_SECONDS: 'abc',
       FLEET_MAX_ACTIVITIES: '8',
-      FLEET_AGENT_API_URL: 'http://127.0.0.1:9999',
-      FLEET_CLI_BIN: '/opt/fleet/cli/bin',
     });
     expect(config).toEqual({
       address: 'temporal.example:7233',
@@ -41,8 +36,6 @@ describe('worker 配置', () => {
       taskQueue: 'q',
       shutdownGraceSeconds: 30,
       maxConcurrentActivities: 8,
-      agentApiUrl: 'http://127.0.0.1:9999',
-      cliBinDir: '/opt/fleet/cli/bin',
     });
   });
 });
@@ -60,7 +53,6 @@ describe('worker 起来之前', { timeout: 60_000 }, () => {
           taskQueue: 'reap',
         },
         ports: createFakeWorld().ports,
-        signAgentToken: () => 't',
         connection: env.nativeConnection,
         workflowBundle: await engineBundle(),
         reapOrphanSessions: async () => {
@@ -110,32 +102,18 @@ describe('worker 进程', { timeout: 120_000 }, () => {
     expect(out.join('')).toContain('FLEET_ENGINE_PORTS 要写 real');
   });
 
-  it('真端口缺配置（后端地址、通行证钥匙、机器名、库）：一次列全，退出码 1，不连 Temporal', async () => {
+  it('真端口缺配置（机器名、库）：一次列全，退出码 1，不连 Temporal', async () => {
     const { proc, out } = run({
       FLEET_ENGINE_PORTS: 'real',
-      FLEET_AGENT_API_URL: '',
-      FLEET_AGENT_TOKEN_SECRET: '',
+      FLEET_MACHINE_NAME: '',
+      DATABASE_URL: '',
       TEMPORAL_ADDRESS: '127.0.0.1:1',
     });
     child = proc;
     const code = await new Promise((resolve) => proc.once('exit', resolve));
     expect(code).toBe(1);
-    expect(out.join('')).toContain('FLEET_AGENT_API_URL');
-    expect(out.join('')).toContain('FLEET_AGENT_TOKEN_SECRET');
-
-    const second = run({
-      FLEET_ENGINE_PORTS: 'real',
-      FLEET_AGENT_API_URL: 'http://127.0.0.1:1',
-      FLEET_AGENT_TOKEN_SECRET: 'x'.repeat(40),
-      FLEET_MACHINE_NAME: '',
-      DATABASE_URL: '',
-      TEMPORAL_ADDRESS: '127.0.0.1:1',
-    });
-    child = second.proc;
-    const secondCode = await new Promise((resolve) => second.proc.once('exit', resolve));
-    expect(secondCode).toBe(1);
-    expect(second.out.join('')).toContain('FLEET_MACHINE_NAME');
-    expect(second.out.join('')).toContain('DATABASE_URL');
+    expect(out.join('')).toContain('FLEET_MACHINE_NAME');
+    expect(out.join('')).toContain('DATABASE_URL');
   });
 
   it('按环境变量连上服务端，跑完一个 P0 验收（hello）工作流', async () => {

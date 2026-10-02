@@ -1,10 +1,9 @@
 // 测试共用（不依赖 vitest，录重放夹具的脚本也用）：可跳时间的 Temporal 测试服务端 + 真的工作流包 + 假端口。
 import { randomUUID } from 'node:crypto';
-import { fileURLToPath } from 'node:url';
 import type { Repo } from '@fleet-dao/shared';
 import type { WorkflowHandle } from '@temporalio/client';
 import { TestWorkflowEnvironment } from '@temporalio/testing';
-import { bundleWorkflowCode, DefaultLogger, Runtime, type WorkflowBundle } from '@temporalio/worker';
+import { DefaultLogger, Runtime, type WorkflowBundle } from '@temporalio/worker';
 import type { EngineJobs, EngineTasks } from '../src/activities.ts';
 import type { EngineActivities } from '../src/activity-options.ts';
 import type { FusionInput, RequirementInput, SubtaskInput } from '../src/contract.ts';
@@ -22,19 +21,6 @@ let bundle: Promise<WorkflowBundle> | undefined;
 export function engineBundle(): Promise<WorkflowBundle> {
   bundle ??= bundleEngineWorkflows(silent as never);
   return bundle;
-}
-
-let verifyBundle: Promise<WorkflowBundle> | undefined;
-/**
- * 开 PR 前验证那一块（src/workflows/verify.ts）的测试宿主工作流（test/fixtures/verify/host.ts）打的包：#214 的工作流
- * 接上之前，靠它在真 Temporal 里跑这一块。
- */
-export function verifyHostBundle(): Promise<WorkflowBundle> {
-  verifyBundle ??= bundleWorkflowCode({
-    workflowsPath: fileURLToPath(new URL('./fixtures/verify/host.ts', import.meta.url)),
-    logger: silent as never,
-  });
-  return verifyBundle;
 }
 
 export function createEnv(): Promise<TestWorkflowEnvironment> {
@@ -95,12 +81,8 @@ export async function withWorker<T>(
       taskQueue,
       shutdownGraceSeconds: 1,
       maxConcurrentActivities: 40,
-      agentApiUrl: 'http://127.0.0.1:8788',
-      cliBinDir: '/repo/packages/cli/bin',
     },
     ports: world.ports,
-    signAgentToken: (claims) =>
-      `token:${claims.taskId}:${claims.subtaskId ?? '-'}:${claims.runId}:${claims.ttlSeconds}`,
     connection: env.nativeConnection,
     workflowBundle: options.workflowBundle ?? (await engineBundle()),
     ...(options.triage ? { triage: options.triage } : {}),

@@ -3,7 +3,6 @@
 import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import {
-  asks,
   finishSessionRun,
   getSessionRun,
   markSessionRunStarted,
@@ -15,7 +14,6 @@ import {
   stagePolicyRoutes,
   stepTimings,
   upsertAlert,
-  verifyRoundsOfTask,
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import type { StageKind } from '@fleet-dao/shared';
@@ -808,117 +806,6 @@ describe('报警、提问、人闸', () => {
       ].sort(),
     );
   });
-
-  it('提问按 askId 只发一张；人闸按 approvalId 只开一张、同时开一条要人拍的提醒', async () => {
-    await world(t.db);
-    const { task } = await addTask(t.db);
-    const p = ports();
-    const askId = randomUUID();
-    await p.askHuman(
-      { taskId: task.id, askId, question: '要不要兼容旧接口？', options: ['要', '不要'] },
-      ctx,
-    );
-    await p.askHuman({ taskId: task.id, askId, question: '要不要兼容旧接口？' }, ctx);
-    expect(await t.db.select().from(asks)).toHaveLength(1);
-    const approvalId = randomUUID();
-    const approval = {
-      taskId: task.id,
-      approvalId,
-      holds: ['release'],
-      repo: { owner: 'acme', name: 'widgets', defaultBranch: 'main', testCommand: 'pnpm check' },
-      prNumber: 7,
-      head: 'a'.repeat(40),
-      title: '发版',
-      summary: '合并即上线',
-    };
-    await p.requestApproval(approval as never, ctx);
-    await p.requestApproval(approval as never, ctx);
-    const cards = (await t.db.select().from(notifications)).filter(
-      (n) => n.dedupeKey === `approval:${approvalId}`,
-    );
-    expect(cards).toHaveLength(1);
-    expect(cards[0]?.level).toBe('decision');
-  });
-
-  it('提问的任务不在库里：照常抛（不假装发出去了）', async () => {
-    await world(t.db);
-    await expect(
-      ports().askHuman({ taskId: randomUUID(), askId: randomUUID(), question: '？' }, ctx),
-    ).rejects.toThrow();
-  });
-
-  it('引擎自己问、带推荐的（分诊说不清，#259）：记成这张单范围内按推荐先做的；读回来空的列不给，照改只记回答了的、时刻不往后挪', async () => {
-    await world(t.db);
-    const { task } = await addTask(t.db);
-    const { task: other } = await addTask(t.db);
-    const p = ports();
-    const withRec = randomUUID();
-    const legacy = randomUUID();
-    await p.askHuman(
-      {
-        taskId: task.id,
-        askId: withRec,
-        question: '验证码几位？',
-        options: ['6 位', '4 位'],
-        recommended: '6 位',
-      },
-      ctx,
-    );
-    await p.askHuman({ taskId: task.id, askId: legacy, question: '要不要兼容旧接口？' }, ctx);
-    await p.askHuman({ taskId: other.id, askId: randomUUID(), question: '别的单问的' }, ctx);
-
-    expect(await p.taskAsks({ taskId: task.id }, ctx)).toEqual([
-      {
-        id: withRec,
-        question: '验证码几位？',
-        options: ['6 位', '4 位'],
-        applied: false,
-        scope: 'task',
-        recommended: '6 位',
-      },
-      { id: legacy, question: '要不要兼容旧接口？', options: [], applied: false },
-    ]);
-
-    // 回答了的那条记上照改；没回答的不记；再记一次时刻不动
-    await t.client.query(
-      "update asks set answer = '4 位', answered_by = 'founder', answered_at = now() where id = $1",
-      [withRec],
-    );
-    await p.markAsksApplied({ taskId: task.id, askIds: [withRec, legacy] }, ctx);
-    const first = (await t.db.select().from(asks)).find((a) => a.id === withRec)?.appliedAt;
-    expect(first).toEqual(NOW);
-    await createStorePorts({
-      db: t.db,
-      now: () => new Date(NOW.getTime() + 60_000),
-      draw: () => 0.5,
-      log: () => {},
-      sessionOrg: onCarpool,
-    }).markAsksApplied({ taskId: task.id, askIds: [withRec] }, ctx);
-    const rows = await p.taskAsks({ taskId: task.id }, ctx);
-    expect(rows.map((r) => [r.id, r.answer, r.applied])).toEqual([
-      [withRec, '4 位', true],
-      [legacy, undefined, false],
-    ]);
-    expect((await t.db.select().from(asks)).find((a) => a.id === withRec)?.appliedAt).toEqual(first);
-  });
-
-  it('【故意造出的失败】读问过的、记照改：任务不在（或编号不是 UUID）报 TASK_NOT_FOUND、不可重试，不当成「一条都没问过」', async () => {
-    await world(t.db);
-    const p = ports();
-    for (const taskId of [randomUUID(), 'not-a-uuid']) {
-      await expect(p.taskAsks({ taskId }, ctx)).rejects.toMatchObject({
-        code: 'TASK_NOT_FOUND',
-        retryable: false,
-      });
-    }
-    await expect(p.markAsksApplied({ taskId: 'not-a-uuid', askIds: [] }, ctx)).rejects.toMatchObject({
-      code: 'TASK_NOT_FOUND',
-      retryable: false,
-    });
-    // 任务在、一条都没问过：是空的（这才是真的没问过）
-    const { task } = await addTask(t.db);
-    expect(await p.taskAsks({ taskId: task.id }, ctx)).toEqual([]);
-  });
 });
 
 describe('计时、快照', () => {
@@ -1131,71 +1018,6 @@ describe('开 PR 前验证：只派别家、作者是哪几族、每一轮的记
         retryable: false,
       });
     }
-  });
-
-  it('每一轮的记录：先记验证模型判的，Lead 驳回后改写同一行', async () => {
-    await world(t.db);
-    const { routeId } = await addCursorRoute(t.db);
-    const { task } = await addTask(t.db);
-    const runId = await startedRun(task.id, routeId, 'verify');
-    const record = {
-      taskId: task.id,
-      id: randomUUID(),
-      round: 1,
-      head: 'a'.repeat(40),
-      runId,
-      routeId,
-      family: 'cursor',
-      authorFamilies: ['claude'],
-      criteria: ['过期的验证码登录不了'],
-      report: { head: 'a'.repeat(40), results: [], findings: [] },
-      verdict: 'block' as const,
-      rebuttals: [],
-      finalVerdict: 'block' as const,
-      reasons: ['安全：验证码写进了日志（证据：code.ts 第 12 行）'],
-      notes: [],
-    };
-    await ports().recordVerification(record, ctx);
-    const rebuttal = { target: '验证码写进了日志', evidence: 'code.ts 第 12 行打的是编号' };
-    await ports().recordVerification(
-      { ...record, rebuttals: [rebuttal], finalVerdict: 'pass', reasons: [] },
-      ctx,
-    );
-    const rows = await verifyRoundsOfTask(t.db, task.id);
-    expect(rows).toMatchObject([
-      { id: record.id, verdict: 'block', finalVerdict: 'pass', rebuttals: [rebuttal], invalidWhy: null },
-    ]);
-  });
-
-  it('【故意造出的失败】记录对不上库里的规矩（作废却有结论）：照常抛，不假装记上了', async () => {
-    await world(t.db);
-    const { routeId } = await addCursorRoute(t.db);
-    const { task } = await addTask(t.db);
-    const runId = await startedRun(task.id, routeId, 'verify');
-    await expect(
-      ports().recordVerification(
-        {
-          taskId: task.id,
-          id: randomUUID(),
-          round: 1,
-          head: 'a'.repeat(40),
-          runId,
-          routeId,
-          family: 'cursor',
-          authorFamilies: ['claude'],
-          criteria: ['x'],
-          report: null,
-          verdict: 'invalid',
-          invalidWhy: '审的不是送检的头',
-          rebuttals: [],
-          finalVerdict: 'pass',
-          reasons: [],
-          notes: [],
-        },
-        ctx,
-      ),
-    ).rejects.toThrow();
-    expect(await verifyRoundsOfTask(t.db, task.id)).toEqual([]);
   });
 });
 
@@ -1452,49 +1274,5 @@ describe('给开 PR 前验证留一家（选副手、Lead 换路由）：#293 �
     const { taskId } = await franceWorld();
     await expect(sidekick(taskId, true)).rejects.toMatchObject({ code: 'AUTHORS_UNKNOWN', retryable: false });
     expect(await noVerifierAlerts()).toEqual([]);
-  });
-});
-
-describe('Fusion 开工前读的：流程配置副本、单子正文', () => {
-  it('流程配置副本原样交出去（时刻换成 ISO）：能不能用由 core 判，这里不补默认值', async () => {
-    const synced = await addTask(t.db, { testCommand: 'pnpm test:changed' });
-    expect(await ports().flowConfig({ taskId: synced.task.id }, ctx)).toEqual({
-      replica: {
-        syncedAt: synced.repo.flowSyncedAt?.toISOString(),
-        error: null,
-        unread: null,
-        testCommand: 'pnpm test:changed',
-      },
-      source: 'project',
-      config: { formatVersion: 1, testCommand: 'pnpm test:changed' },
-    });
-    // 从没同步成过、认不出：照实交出去（core 判停派），不拿空配置顶
-    const never = await addTask(t.db, { flowSyncedAt: null, flowError: '认不出：formatVersion 写成了 9' });
-    expect(await ports().flowConfig({ taskId: never.task.id }, ctx)).toEqual({
-      replica: { syncedAt: null, error: '认不出：formatVersion 写成了 9', unread: null, testCommand: null },
-      source: null,
-      config: null,
-    });
-  });
-
-  it('单子正文：库里这张单现在的标题和正文', async () => {
-    const { task } = await addTask(t.db);
-    expect(await ports().taskRequest({ taskId: task.id }, ctx)).toEqual({
-      title: '登录页加验证码',
-      rawRequest: '登录页加一个手机验证码',
-    });
-  });
-
-  it('【故意造出的失败】任务不在（或编号不是 UUID）：两个都报 TASK_NOT_FOUND、不可重试，不交空的', async () => {
-    for (const taskId of [randomUUID(), 'task-不是-uuid']) {
-      await expect(ports().flowConfig({ taskId }, ctx)).rejects.toMatchObject({
-        code: 'TASK_NOT_FOUND',
-        retryable: false,
-      });
-      await expect(ports().taskRequest({ taskId }, ctx)).rejects.toMatchObject({
-        code: 'TASK_NOT_FOUND',
-        retryable: false,
-      });
-    }
   });
 });
