@@ -17,7 +17,7 @@ import {
   taskContinueSignal,
   taskStatusQuery,
 } from '../src/task-contract.ts';
-import { freshRepo, useEnv, waitUntil, withWorker } from './helpers.ts';
+import { freshRepo, pollQuery, useEnv, waitUntil, withWorker } from './helpers.ts';
 import { goodBrief, OK_SEGMENT, scripted } from './task-script.ts';
 
 const currentEnv = useEnv();
@@ -47,18 +47,8 @@ async function start(q: string, i: TaskWorkflowInput): Promise<WorkflowHandle> {
 
 const statusOf = (h: WorkflowHandle): Promise<TaskStatus> => h.query(taskStatusQuery);
 
-async function statusUntil(h: WorkflowHandle, check: (s: TaskStatus) => boolean, what: string) {
-  let last: TaskStatus | undefined;
-  try {
-    await waitUntil(async () => {
-      last = await statusOf(h);
-      return check(last);
-    }, what);
-  } catch (error) {
-    throw new Error(`${(error as Error).message}\n最后一次状态：${JSON.stringify(last)}`);
-  }
-  return last as TaskStatus;
-}
+const statusUntil = (h: WorkflowHandle, check: (s: TaskStatus) => boolean, what: string) =>
+  pollQuery(() => statusOf(h), check, what);
 
 const parked = (s: TaskStatus) => s.waiting?.kind === 'human';
 
