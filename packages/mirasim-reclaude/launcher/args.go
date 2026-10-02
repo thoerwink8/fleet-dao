@@ -11,13 +11,13 @@ func workspaceIndexName(workspace string) string {
 	return base64.RawURLEncoding.EncodeToString([]byte(workspace)) + ".json"
 }
 
-func verifyGatewaySettings(args []string) error {
+func gatewayFacts(args []string) (loopback bool, credential bool, err error) {
 	env := map[string]any{}
 	for i := 0; i < len(args); i++ {
 		val := ""
 		if args[i] == "--settings" {
 			if i+1 >= len(args) {
-				return fmt.Errorf("--settings 缺参数")
+				return false, false, fmt.Errorf("--settings 缺参数")
 			}
 			i++
 			val = args[i]
@@ -28,15 +28,15 @@ func verifyGatewaySettings(args []string) error {
 		}
 		raw := []byte(val)
 		if !strings.HasPrefix(strings.TrimSpace(val), "{") {
-			var err error
-			raw, err = os.ReadFile(val)
-			if err != nil {
-				return fmt.Errorf("网关 settings 文件读失败，未发送请求")
+			var readErr error
+			raw, readErr = os.ReadFile(val)
+			if readErr != nil {
+				return false, false, fmt.Errorf("网关 settings 文件读失败，未发送请求")
 			}
 		}
-		_, values, err := settingsDocument(raw)
-		if err != nil {
-			return err
+		_, values, docErr := settingsDocument(raw)
+		if docErr != nil {
+			return false, false, docErr
 		}
 		for k, v := range values {
 			env[k] = v
@@ -45,7 +45,15 @@ func verifyGatewaySettings(args []string) error {
 	base, _ := env["ANTHROPIC_BASE_URL"].(string)
 	auth, _ := env["ANTHROPIC_AUTH_TOKEN"].(string)
 	key, _ := env["ANTHROPIC_API_KEY"].(string)
-	if !isLoopbackURL(base) || (strings.TrimSpace(auth) == "" && strings.TrimSpace(key) == "") {
+	return isLoopbackURL(base), strings.TrimSpace(auth) != "" || strings.TrimSpace(key) != "", nil
+}
+
+func verifyGatewaySettings(args []string) error {
+	loopback, credential, err := gatewayFacts(args)
+	if err != nil {
+		return err
+	}
+	if !loopback || !credential {
 		return fmt.Errorf("平台网关注入缺失或不完整，拒绝回落到自有，未发送请求")
 	}
 	return nil
