@@ -27,3 +27,4 @@ export * from './queries/verify.ts';
 export * from './queries/worktrees.ts';
 export * from './schema/index.ts';
 export * from './seed.ts';
+export * from './queries/runs.ts';
