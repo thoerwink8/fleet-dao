@@ -394,6 +394,15 @@ func TestNoOverridePreservesMirasimDefault(t *testing.T) {
 	}
 }
 
+func TestUnmarkedProxyWithoutCredentialStripsToOwn(t *testing.T) {
+	f := newFixture(t, "")
+	a := startAppSettings(t, f, `{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:12345/synthetic","KEEP_ME":"yes"}}`)
+	x := a.turn(t, "own")
+	if x["route"] != "local" {
+		t.Fatalf("未标且没有平台令牌应剥掉本机代理、走自有：%v", x)
+	}
+}
+
 func TestInitializationReplayedWithoutDuplicateHostReply(t *testing.T) {
 	f := newFixture(t, "local")
 	a := startApp(t, f, "MIRASIM_TEST_REQUIRE_INIT=1")

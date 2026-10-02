@@ -12,7 +12,7 @@ export const PLAN_COLUMN = '对应计划';
 export const SPECS_COLUMN = 'specs';
 /** 正文里写对应 issue 的那一栏。 */
 export const ISSUE_COLUMN = '需求';
-/** 正文里写认领号的那一栏（#348）：本机认领的单写 claim.mjs take 打印的认领号，引擎开的写「引擎」。 */
+/** 正文里写认领号的那一栏（#348）：引擎开的单写「引擎」；本机认领脚本 2026-10-02 删了（#446），本机开的写「无」。 */
 export const CLAIM_COLUMN = '认领';
 /**
  * 引擎机器人按库里的认领贴在 PR 当前头上的提交状态（#299、#348；#444 起合并闸不再等它，只是还在贴）；和 @fleet-dao/core
