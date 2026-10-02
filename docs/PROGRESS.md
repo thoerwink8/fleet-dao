@@ -352,6 +352,36 @@
 - 起 `v3-quick-fixes` 工作流（w56jpm7sa 完成后），4 个 agent 并行：W1 文档对齐（1 PR）+ fix-531 一行 + s489-spec-salvage + issue-close-superseded（3 个小 PR）。
 - 起 `v3-routing-db` 工作流（routing-two-layer-db 切片，1 个大 PR）。
 
+## 2026-10-02 02:30 UTC（W1 文档对齐已合主线，0010 落）
+
+- `docs/decisions/0010-three-segment-flow.md`：W1 起草的三段定稿——它和 #571 后放在 docs/0011-and-progress-b5d 分支上。其中「0008」的名字当时标成了（现在看应是 0010、因为 0008 是「讨论改 Grok」决定的占位）——这个已按 0010 名字落地。
+- `docs/goals.md` §七：副手/Temporal/飞书/本机环境四条定的，搬去「七之附」；头部「还没定的拍完之前不按 0003 开新活」过期间门删。
+- `docs/design.md` 行 3 横幅：改指 specs/509-需求梳理/流程重做方案.md 和 goals.md；第五/九/十五/十六节标题下各加一行「先别照本节做」。
+- AGENTS.md 本仓段（非通用段）4 处同步新口径；改动小于通用段、按「改标准」走闸。
+- ops.md 571-608 的 Fusion/认领段收口；「#532 一起来删」改指 #446。
+
+## 2026-10-02 10:25 UTC（Mirasim 后两批主工作流完成）
+
+- routing-two-layer-db（#574/#580）：routing_catalog 表 + routing.default.json 骨架已落主线；engine 解析（pickRoute 走两级）**未做**——那是 routing-two-layer-engine 切片。
+- 554-1 无头一次性子进程段 runner（#577/#581）：骨架已合主线；runs 是 NotWired 占位（写 _tmp/runs-not-wired/*.jsonl，等真 runs 表落上再补）。
+- 4 穴 cockpit （v3-cockpit-batch1）：tokens、home3、home-api、changelog——全部挂 PR 上、跑 CI 中。
+
+## 2026-10-02 10:3x UTC（收尾、接种、补漏）
+
+**补漏**：ci-plan 的 db test 依赖里没有「读 core」——我加上 `db: ['core']` 修 #580 的 ci 红（ebcad840）；做一次 merge 主线（f1f070f2）消大节纷。
+
+**接种**：派了 `v3-554-next` 工作流（wf_435865ff-ddd），并行的 3 片：
+- **554-2**：done-check 看 PR CI 不看 lastSessionTest（测试移出会话正式落地，Closes #577）
+- **554-3**：tier.ts 纯函数（改动面分档判据+effort，不接 engine）
+- **554-4**：sessions 接 runner——三段（对题/动手/验收）起无头进程（不动 Fusion 调度）
+
+**下一步**：
+- 这 3 片回来 + 3 片合主线 → **556-1** 起（删 workflows/* 加 decisions/*，W4 大删），才能完成幕「也样合二段=」的目标。
+- routing-db 的 **routing-two-layer-engine** 切片可以挂在 556-* 后面（它不干涉 sessions）。
+- 驾驶舱 4 片回来 → **delete-***（delete-board / delete-dispatch / delete-task-detail / delete-soon-members 的 4 个）。
+
+**还在跑（10-02 10:40 UTC 时）**：3 个 PR 还没合（#580、#584 home3、#585 changelog）、3 个新的切片在跑。
+
 **下一步（合并下来）**：
 - #531/#440/#489 走 `--superseded-by` 关掉（如果 issue-close PR 挂上了就顺手加；等 PR 合后底子到主线）。
 - 等 `v3-quick-fixes` 回来后挂起 `v3-w4-fusion-runner`（554-1 无头一次性子进程段 runner，W4 第一片，夜里最大）；
