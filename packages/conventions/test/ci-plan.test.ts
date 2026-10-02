@@ -532,6 +532,12 @@ describe('ci.yml 和这里对得上', () => {
   };
 
   it('【故意造出的失败】biome 和 tsc 各自一个 job：合成一个 job 的连续 step，biome 先红就把 tsc 跳过（#566 的 7 个类型错就是这么漏的）', () => {
+    // job() 切到下一个 job 头，会把紧贴在它上面的注释一起带进来；判「正文里有没有 tsc」前先把整行注释去掉。
+    const body = (id: string) =>
+      job(id)
+        .split('\n')
+        .filter((l) => !/^\s*#/.test(l))
+        .join('\n');
     const biome = job('biome');
     const tsc = job('tsc');
     expect(biome, 'biome job 不见了').not.toBe('');
@@ -543,11 +549,9 @@ describe('ci.yml 和这里对得上', () => {
     expect(tsc).toMatch(/^ {4}if: needs\.changes\.outputs\.tsc != ''$/m);
     expect(biome).toContain('pnpm exec biome check .');
     expect(tsc).toContain('pnpm exec tsc -b');
-    // biome 那个 job 里不许再出现 tsc 的 step（连着写就又是「前一步红了后一步不跑」）。
-    // 不认命令怎么写（pnpm/npx/裸跑都算），也不认 step 叫什么名：一行里出现 tsc 就判红。
-    expect(biome).not.toMatch(/^\s+- name: tsc\s*$/m);
-    expect(biome).not.toMatch(/(?:^|\s)(?:pnpm|npx|yarn|bunx)\s+(?:exec\s+)?tsc\b/m);
-    expect(biome).not.toMatch(/^\s*run:.*\btsc\b.*$/m);
+    // biome 那个 job 里不许再出现 tsc（连着写就又是「前一步红了后一步不跑」）。
+    // 不认命令怎么写、不认 step 叫什么名、也不认单行还是多行 run: | —— 正文里出现 tsc 就判红。
+    expect(body('biome')).not.toMatch(/\btsc\b/);
   });
 
   it('必过检查 check 是汇总 job：always() 跑、needs 全部 job、跑汇总入口', () => {
