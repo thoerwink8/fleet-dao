@@ -1,6 +1,8 @@
 // Fusion 工作流（src/workflows/fusion.ts，#214）：在真 Temporal（测试服务端）里跑，端口是假的（src/fakes.ts）。
-// 走通一条全程，再每条要紧的岔路各一条：副手打回两次 Lead 接手、验证挡两轮停下、CI 红三轮停下、要问创始人、
-// 流程配置读不到或认不出（停派报红，修好点「继续」接着走）、没有别家可验、单子正文没指需求文档、单模型模式、人闸。
+// 走通一条全程，再每条要紧的岔路各一条：副手打回两次 Lead 接手、CI 红三轮停下、要问创始人、
+// 流程配置读不到或认不出（停派报红，修好点「继续」接着走）、单子正文没指需求文档、单模型模式、人闸。
+// 555-4：Fusion 不再调 workflows/verify.ts 的 verifyRound / rebutRound / verifyLines——verify 这一步
+// 不当场起别家验证会话，验收那一遍由 segments/verify.ts（无头一次性会话）在 PR ready 时单独起，结论给合并闸。
 import type { WorkflowHandle } from '@temporalio/client';
 import type { TestWorkflowEnvironment } from '@temporalio/testing';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -70,13 +72,18 @@ function world(script: Partial<FakeScript> = {}): FakeWorld {
   return createFakeWorld({ routes: ROUTES, ...script });
 }
 
-/** 起过的会话按先后写成「谁:哪一步」：lead:plan、side（副手）、verify。 */
+/** 起过的会话按先后写成「谁:哪一步」：lead:plan、side（副手）。555-4 起 Fusion 不再起 verify 会话。 */
 function trail(w: FakeWorld): string[] {
   return w
     .callsOf('startSession')
     .map((c) =>
       c.input.brief.lead ? `lead:${c.input.brief.lead.step}` : c.input.stage === 'verify' ? 'verify' : 'side',
     );
+}
+/** 555-4：这一遍不再起 verify 会话——任何 `stage === 'verify'` 的 pickRoute / startSession 都是漏改。 */
+function noVerifySession(w: FakeWorld): void {
+  expect(w.callsOf('startSession').filter((c) => c.input.stage === 'verify')).toEqual([]);
+  expect(w.callsOf('pickRoute').filter((c) => c.input.stage === 'verify')).toEqual([]);
 }
 
 async function runToEnd(w: FakeWorld, input = fusionInput()): Promise<FusionResult> {
@@ -108,8 +115,11 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
     expect(result.docs).toEqual(DOCS);
     expect(w.count('writeSpecDoc')).toBe(0);
 
-    // 一步一步来：Lead 规划 → 副手干 → Lead 验收 → 别家验证 → Lead 最终审查
-    expect(trail(w)).toEqual(['lead:plan', 'side', 'lead:accept', 'verify', 'lead:review']);
+    // 一步一步来：Lead 规划 → 副手干 → Lead 验收 → Lead 最终审查（555-4：内联「别家验证」段已断）
+    expect(trail(w)).toEqual(['lead:plan', 'side', 'lead:accept', 'lead:review']);
+    // 555-4：verify 这一步一次不起（起过的会话、派过的路由里都没有 stage === 'verify'）
+    noVerifySession(w);
+    expect(w.verifications).toEqual([]);
     const sessions = w.callsOf('startSession');
     const leads = sessions.filter((c) => c.input.brief.lead);
     // Lead 一张单一个会话：同一条路由续用（同池 --resume），都在同一棵工作树上
@@ -148,13 +158,6 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
       testsPassed: true,
     });
 
-    // 别家验证：按流程配置的验证模型、整族避开写过这张单的（claude、kimi），派给 gpt
-    const verifyPick = w.callsOf('pickRoute').find((c) => c.input.stage === 'verify');
-    expect(verifyPick?.input).toMatchObject({ models: ['m3', 'm2'], avoidFamilies: ['claude', 'kimi'] });
-    expect(w.verifications.map((v) => [v.round, v.head, v.routeId, v.finalVerdict])).toEqual([
-      [1, fakeHead(2), 'r4', 'pass'],
-    ]);
-
     // 推了三次：方案、副手的改动、结果.md；都在这张单自己的分支上
     const pushes = w.callsOf('pushBranch');
     expect(pushes.map((c) => c.input.head)).toEqual([fakeHead(1), fakeHead(2), fakeHead(3)]);
@@ -180,7 +183,8 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
     expect(comment).toContain('做完了：PR #100 已合并');
     expect(comment).toContain('- 登录页加了验证码');
     expect(comment).toContain('**各模型额度**');
-    for (const model of ['m1', 'm2', 'm3']) expect(comment).toContain(`- ${model}：`);
+    // 555-4：内联别家验证这一段没起，不再用 m3（GPT）；Fusion 本身用的还是 Lead + 副手两家
+    for (const model of ['m1', 'm2']) expect(comment).toContain(`- ${model}：`);
     expect(comment).toContain('读自仓里的 .fleet/flow.json');
 
     // 任务上记这一轮用的流程配置读自哪（tasks.flow_source）：每一次快照都带着，读自仓里的
@@ -223,9 +227,9 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
       'side',
       'lead:accept',
       'lead:takeover',
-      'verify',
       'lead:review',
     ]);
+    noVerifySession(w);
     const sides = w.callsOf('startSession').filter((c) => !c.input.brief.lead && c.input.stage === 'execute');
     // 副手续同一个会话，带着 Lead 打回的理由
     expect(sides.map((c) => c.input.resumeSessionId ?? null)).toEqual([null, 's2', 's2']);
@@ -272,7 +276,8 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
       return { result: done, status: (await handle.query('status')) as FusionStatus };
     });
     expect(result.state).toBe('done');
-    expect(trail(w)).toEqual(['lead:plan', 'side', 'lead:accept', 'verify', 'lead:review']);
+    expect(trail(w)).toEqual(['lead:plan', 'side', 'lead:accept', 'lead:review']);
+    noVerifySession(w);
     expect(status.rounds.reworks).toBe(0);
     expect(w.callsOf('pushBranch').map((c) => c.input.head)).toContain(fakeHead(50));
 
@@ -283,9 +288,9 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
     expect(w.callsOf('closeIssue')[0]?.input.comment).toContain(`- ${line}`);
   });
 
-  it('【故意造出的失败】#293：副手并过主线、主线上别人改了页面代码——开 PR 前验证照推上去的头相对主线的净改动判，不按界面派；给验证方的清单、PR 正文也不带主线的页面代码', async () => {
+  it('#293 留下的那条教训只剩 PR 正文的净改动清单（555-4 起不再有内联验证）：副手并过主线、主线上别人改了页面代码——PR 正文照推上去的头相对主线的净改动写，不带主线的页面代码', async () => {
     // 法国 #293：会话交回的改动清单把并进来的主线也算成这张单改的（老版端口，在途任务的历史里就是这样），里面有主线上
-    // 别人改的页面代码（uiPaths 下的），验证就按界面类派：写它的两族之外只剩 GPT、GPT 不做界面，没人可派，干等 47 分钟
+    // 别人改的页面代码（uiPaths 下的）。原来验证就按界面类派；现在内联验证已断（555-4），但「PR 正文按净改动写」这一点保留。
     const mainlineUi = 'web/health/health.js';
     const w = world({
       session: (input) =>
@@ -305,11 +310,8 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
     });
     const result = await runToEnd(w);
     expect(result.state).toBe('done');
-    expect(trail(w)).toEqual(['lead:plan', 'side', 'lead:accept', 'verify', 'lead:review']);
-    const verifyPick = w.callsOf('pickRoute').find((c) => c.input.stage === 'verify');
-    expect(verifyPick?.input.uiWork).toBeUndefined();
-    const verify = w.callsOf('startSession').find((c) => c.input.stage === 'verify');
-    expect(verify?.input.brief.verify?.changedFiles).toEqual([DOCS.plan, 'src/login/changed.ts']);
+    expect(trail(w)).toEqual(['lead:plan', 'side', 'lead:accept', 'lead:review']);
+    noVerifySession(w);
     expect(w.callsOf('openPr')[0]?.input.body.changedFiles).toEqual([DOCS.plan, 'src/login/changed.ts']);
   });
 
@@ -335,46 +337,26 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
       'lead:plan',
       'side',
       'lead:accept',
-      'verify',
       'lead:fix-brief',
       'side',
       'lead:accept',
       'lead:review',
     ]);
+    noVerifySession(w);
     expect(w.callsOf('pushBranch').map((c) => c.input.head)).toContain(fakeHead(60));
     expect(w.callsOf('openPr')[0]?.input.body.verified.join('\n')).not.toContain('简报外');
     expect(w.callsOf('closeIssue')[0]?.input.comment).toContain('- 简报外改了：docs/ops.md（主导收下）');
   });
 
-  it('验证挡了两轮（Lead 没驳回）：回去改一轮还没过，停下等人，不开 PR', async () => {
-    const w = world({ verify: (input) => BLOCKING(input.brief.head ?? '') });
-    const { parked, result } = await runUntilParked(w);
-
-    expect(parked.lastProblem).toContain('验证 2 轮都没过');
-    expect(trail(w)).toEqual([
-      'lead:plan',
-      'side',
-      'lead:accept',
-      'verify',
-      'lead:rebut',
-      'side',
-      'lead:accept',
-      'verify',
-      'lead:rebut',
-    ]);
-    // Lead 看过挡住的原文（驳回的材料），副手第二次带着验证的意见改
-    const rebut = w.callsOf('startSession').find((c) => c.input.brief.lead?.step === 'rebut');
-    expect(rebut?.input.brief.lead?.blocking).toEqual([
-      { target: '有一条故意造出失败的测试', kind: 'not-done', evidence: 'test/ 下没有过期验证码的用例' },
-    ]);
-    const sides = w.callsOf('startSession').filter((c) => !c.input.brief.lead && c.input.stage === 'execute');
-    expect(sides[1]?.input.brief.feedback[0]?.summary).toContain('别家验证第 1 轮挡住了');
-    expect(w.verifications.map((v) => v.finalVerdict)).toEqual(['block', 'block']);
-    expect(w.count('openPr')).toBe(0);
-    expect(w.alerts.some((a) => a.level === 'stuck' && a.title.includes('验证 2 轮都没过'))).toBe(true);
-    // 叫停收尾：没合并的工作树先存档
-    expect(result.state).toBe('stopped');
-    expect(w.callsOf('removeWorktree')[0]?.input.archive).toBe(true);
+  it('555-4 钉死：Fusion 这条工作流一次都不起 verify 会话（验收改由 segments/verify.ts 单独起，结论给合并闸）', async () => {
+    // 「挡住就停下」这张构造在老 verifyRound 里才会触发（verify: BLOCKING）；断了之后这个钩子不应被任何会话触发——
+    // 起了 verify 会话才会走到 fakeWorld 的 verify 钩子。这条测试顺手就把「PR 照样开出、CI 绿就合、关单」跑通，
+    // 即「PR merged via 新 segments verify 钩子位」：Fusion 这边不再起，由调用方（段验收 → verifier-invoke → 合并闸）接。
+    const w = world({ verify: () => BLOCKING(fakeHead(2)) });
+    const result = await runToEnd(w);
+    expect(result).toMatchObject({ state: 'done', prNumber: 100, mergeCommit: 'mc-100-1' });
+    noVerifySession(w);
+    expect(w.verifications).toEqual([]);
   });
 
   it('CI 红了三轮都没修好：Lead 每轮写修复简报、副手改，第四次还红就停下等人', async () => {
@@ -967,9 +949,9 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
       'lead:fix-brief',
       'side',
       'lead:accept',
-      'verify',
       'lead:review',
     ]);
+    noVerifySession(w);
     // Lead 写照改的简报时看到了他改选的原话
     const brief = w.callsOf('startSession').find((c) => c.input.brief.lead?.step === 'fix-brief');
     const told = brief?.input.brief.feedback.find((f) => f.kind === 'answer');
@@ -980,9 +962,6 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
     expect(w.callsOf('markAsksApplied').map((c) => c.input.askIds)).toEqual([['ask-1']]);
     expect(w.askRows[0]?.applied).toBe(true);
     expect(w.count('pushBranch')).toBe(4);
-    // 验证是改完之后验的（验的是照改后推上去的头）
-    const pushes = w.callsOf('pushBranch').map((c) => c.input.head);
-    expect(w.verifications.map((v) => v.head)).toEqual([pushes[2]]);
     // PR 正文「按推荐先做了」一栏写明他改选了、已照改；关单评论记数
     expect(w.callsOf('openPr')[0]?.input.body.assumed).toEqual([
       '验证码几位？ → 先按推荐做了「6 位」，创始人改选了「4 位」，已照改',
@@ -1034,9 +1013,9 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
       'lead:fix-brief',
       'side',
       'lead:accept',
-      'verify',
       'lead:review',
     ]);
+    noVerifySession(w);
     // 方案评审那一步照走了（引擎还没接，照跳过、PR 里写明），没被改道绕过去
     expect(w.callsOf('openPr')[0]?.input.body.owed).toContain(
       '方案评审（0003 第 5 条第 3 步）引擎还没接，这次跳过（#249）',
@@ -1074,12 +1053,12 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
       'lead:plan',
       'side',
       'lead:accept',
-      'verify',
       'lead:fix-brief',
       'side',
       'lead:accept',
       'lead:review',
     ]);
+    noVerifySession(w);
     expect(status.rounds.fix).toBe(1);
     expect(w.count('openPr')).toBe(1);
     expect(w.count('waitCi')).toBe(2);
@@ -1104,7 +1083,8 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
     });
     const result = await runToEnd(w, input);
     expect(result.state).toBe('done');
-    expect(trail(w)).toEqual(['lead:plan', 'side', 'lead:accept', 'verify', 'lead:review']);
+    expect(trail(w)).toEqual(['lead:plan', 'side', 'lead:accept', 'lead:review']);
+    noVerifySession(w);
     expect(w.asks).toEqual([]);
     expect(w.callsOf('openPr')[0]?.input.body.assumed).toEqual([
       '要不要顺手改注册页？ → 超出这张单的范围，绕开了，另开一张单等创始人拍（对账时开）',
@@ -1166,13 +1146,8 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
     expect(w.count('flowConfig')).toBe(5);
   });
 
-  it('没有别家可验（写过这张单的两族之外没有能派的路由）：停下等人，不拿同族顶、不开 PR', async () => {
-    const w = createFakeWorld({ routes: [...FAKE_ROUTES] });
-    const { parked } = await runUntilParked(w);
-    expect(parked.lastProblem).toContain('没有别家可验');
-    expect(trail(w)).toEqual(['lead:plan', 'side', 'lead:accept']);
-    expect(w.count('openPr')).toBe(0);
-  });
+  // 555-4：原来那张「没有别家可验 → 停下等人、不开 PR」的用例已删——内联「别家验证」这一步整个断了，
+  // 验不验、谁来验都不再是 Fusion 这一条工作流的事（段验收由 segments/verify.ts 在 PR ready 时单独起）。
 
   it('单子正文没指需求文档：停下等人、不建工作树；正文补上后点「继续」，按库里最新的正文认', async () => {
     const input = fusionInput({ rawRequest: '给登录页加手机验证码' });
@@ -1229,18 +1204,15 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
         plan: `${dir}/方案.md`,
         result: `${dir}/结果.md`,
       });
-      expect(trail(w)).toEqual(['lead:plan', 'side', 'lead:accept', 'verify', 'lead:review']);
+      expect(trail(w)).toEqual(['lead:plan', 'side', 'lead:accept', 'lead:review']);
       // Lead 写方案时拿到照正文写好的需求文档（去掉了引擎开单的标记），交代它原样提交
       const plan = w.callsOf('startSession').find((c) => c.input.brief.lead?.step === 'plan');
       expect(plan?.input.brief.lead?.requirementText).toBe(
         `# ${title}（#12）\n\n${body.replace('\n\n<!-- fleet:issue:abc123 -->', '')}\n`,
       );
-      // 验证照单子正文逐条核，不读主线上的需求文档（还没进主线）
+      // 555-4：不再调 verifyRound——也就不会再 readCriteria；段验收那一遍由 segments/verify 在 PR ready 时核
+      noVerifySession(w);
       expect(w.count('readCriteria')).toBe(0);
-      expect(w.verifications[0]?.criteria).toEqual([
-        '#11 里按推荐先做的「6 位」改成「4 位」，测试跟着改',
-        'CI 绿，合进主线',
-      ]);
       // 开 PR：需求文档随这个 PR 进主线，「对应计划」照单子挂的版本写
       expect(w.callsOf('openPr')[0]?.input.body).toMatchObject({ specs: dir, planFromIssue: true });
       expect(w.callsOf('openPr')[0]?.input.body.changedFiles).toContain(`${dir}/需求.md`);
@@ -1273,15 +1245,8 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
       expect(retry?.input.brief.feedback[0]?.items.join('\n')).toContain(`${dir}/需求.md`);
     });
 
-    it('【失败】开 PR 前单子正文里的「怎么算做完」被删了：不验、也不当成验过了，停下等人补', async () => {
-      const w = world({ request: () => ({ title, rawRequest: '改成 4 位就行' }) });
-      const { parked } = await runUntilParked(w, bodyInput());
-      expect(parked.lastProblem).toContain('开 PR 前验证没法逐条核');
-      expect(parked.lastProblem).toContain('没有「## 怎么算做完」一节');
-      expect(trail(w)).toEqual(['lead:plan', 'side', 'lead:accept']);
-      expect(w.count('readCriteria')).toBe(0);
-      expect(w.count('openPr')).toBe(0);
-    });
+    // 555-4：原来那张「开 PR 前单子正文里「怎么算做完」被删 → 停下等人补」的用例已删——内联「别家验证」
+    // 这一步整个断了，「验收前必须从正文读『怎么算做完』」的钩子在 Fusion 这边不再存在（段验收自己读）。
   });
 
   it('【失败】流程配置不能用、停派时叫停：库里的任务记成叫停（不留在排队），没有配置就不记读自哪', async () => {
@@ -1319,14 +1284,15 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
     const w = createFakeWorld({ routes: [grokLead, GPT_ROUTE] });
     const result = await runToEnd(w);
     expect(result.state).toBe('done');
-    expect(trail(w)).toEqual(['lead:plan', 'lead:takeover', 'verify', 'lead:review']);
+    expect(trail(w)).toEqual(['lead:plan', 'lead:takeover', 'lead:review']);
+    noVerifySession(w);
     const verified = w.callsOf('openPr')[0]?.input.body.verified.join('\n') ?? '';
     expect(verified).toContain('这一块由 Lead 自己写：副手派不出（');
     expect(verified).toContain('Lead 单干（0003 第 7 条）');
     expect(verified).not.toContain('Claude');
   });
 
-  it('给开 PR 前验证留一家（#293）：界面单规划完、开 PR 之前选副手、Lead 续用都带上验证的模型顺序和界面类；规划本身、验证本身、开了 PR 之后不带', async () => {
+  it('给开 PR 前验证留一家（#293 的壳，555-4 起这条机制不再被 Fusion 用到）：界面单规划完、开 PR 之前选副手、Lead 续用还是照旧带；verify 这一格一次都不起', async () => {
     const plan: SessionOutput = {
       kind: 'lead-plan',
       head: fakeHead(90),
@@ -1347,12 +1313,12 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
       'lead:plan',
       'side',
       'lead:accept',
-      'verify',
       'lead:fix-brief',
       'side',
       'lead:accept',
       'lead:review',
     ]);
+    noVerifySession(w);
     const picks = w.callsOf('pickRoute').map((c) => c.input);
     const keep = { models: ['m3', 'm2'], uiWork: true };
     // Lead（规划阶段续同一个会话）：规划时界面与否还不知道不带；验收时带、留不下照常选（非派不可）；开了 PR 之后不带
@@ -1369,10 +1335,8 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
       [{ ...keep, spare: ['claude'], otherwise: 'none' }, undefined],
       [undefined, ['claude']],
     ]);
-    // 验证本身：只派别家、按界面类判，不带
-    const verifyPick = picks.find((p) => p.stage === 'verify');
-    expect(verifyPick).toMatchObject({ avoidFamilies: ['claude', 'kimi'], uiWork: true });
-    expect(verifyPick?.keepVerifier).toBeUndefined();
+    // 555-4：verify 这一格不再派（「只派别家、按界面类判」的那条选路整个不再出现）
+    expect(picks.find((p) => p.stage === 'verify')).toBeUndefined();
   });
 
   it('单模型模式高风险的单（要验）：Lead 自己写那一步带上给验证留一家；不高风险的不验，不带', async () => {
@@ -1392,16 +1356,18 @@ describe('Fusion 工作流', { timeout: 60_000 }, () => {
     });
     const result = await runToEnd(w, fusionInput({ mode: 'single' }));
     expect(result.state).toBe('done');
-    expect(trail(w)).toEqual(['lead:plan', 'lead:takeover', 'verify', 'lead:review']);
+    expect(trail(w)).toEqual(['lead:plan', 'lead:takeover', 'lead:review']);
+    noVerifySession(w);
     const takeover = w.callsOf('pickRoute').find((c) => c.input.stage === 'execute');
     expect(takeover?.input.keepVerifier).toEqual({ models: ['m3', 'm2'], uiWork: false, otherwise: 'any' });
   });
 
-  it('单模型模式：Lead 自己写、不派副手，不高风险就不验证，照样最终审查写结果', async () => {
+  it('单模型模式：Lead 自己写、不派副手，照样最终审查写结果（555-4：任何模式都不在 Fusion 里走内联验证了）', async () => {
     const w = createFakeWorld({ routes: [...FAKE_ROUTES] });
     const result = await runToEnd(w, fusionInput({ mode: 'single' }));
     expect(result.state).toBe('done');
     expect(trail(w)).toEqual(['lead:plan', 'lead:takeover', 'lead:review']);
+    noVerifySession(w);
     expect(w.verifications).toEqual([]);
     // 这张单不验：选路不用给验证留一家
     expect(w.callsOf('pickRoute').map((c) => c.input.keepVerifier)).toEqual([

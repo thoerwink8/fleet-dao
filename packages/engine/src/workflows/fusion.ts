@@ -164,6 +164,13 @@ const MAINLINE_SYNC_PATCH = 'mainline-sync-boundary';
  */
 const RISK_PATHS_FRESH_PATCH = 'second-opinion-fresh-risk-paths';
 /**
+ * 555-4：Fusion 不再调 workflows/verify.ts 的 verifyRound（老「工作流第 5 步别家验证」），改由 segments/verify.ts
+ * 在 PR ready 时单独起一次性无头会话，结论（verdict）给合并闸。在途任务的历史里 verifyRound 起过会话、
+ * 调过 readCriteria / recordVerification / rebutRound 这批活动，换上新代码直接跳过会报「历史对不上」（replay.test.ts 钉住）；
+ * 没打这个标记（老历史）就照老步序走，verify 这一步还是老 verifyRound 那一套。
+ */
+const NO_FUSION_VERIFY_555_4_PATCH = 'no-fusion-verify-555-4';
+/**
  * 存档点看晚到的回答的几步：规划做完、合进去之前（core 的 nextFlow 收「changed」的也是这几步）。规划之前方案还没有，
  * 读到的留到规划之后；合进去以后的只记在库里（原来由对账开后续单，#530 删了）。
  */
@@ -379,6 +386,9 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
   /** 这一块由 Lead 自己写的原因（副手写的是 undefined）。 */
   let soloWhy: string | undefined;
   let planReviewSkipped = false;
+  // 555-4：verify 这一轮不再走 workflows/verify.ts 的 verifyRound / rebutRound / verifyLines——打了
+  // NO_FUSION_VERIFY_555_4_PATCH 标记的（新起的 + 重放进来的都走到这里的话）这一段根本不进。rounds 数组
+  // 只因老历史还可能走老 verifyRound 那一条才留着；新起的跑完永远是空。
   const rounds: VerifyRound[] = [];
   let prNumber: number | null = null;
   /** 开 PR 时拼正文用的事实：开了 PR 之后 Lead 又收下简报外的，照它重拼一份给关单评论（PR 正文开出去就不改了）。 */
@@ -975,9 +985,18 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
     return { kind: 'accepted' };
   };
 
-  /** 5 验证：别家对照「怎么算做完」核推上去的头；挡了 Lead 看过、有证据就驳回。 */
+  /**
+   * 5 验证（555-4）：打了标记的不再内联调 workflows/verify.ts 的 verifyRound —— Fusion 走到这一步直接 pass；
+   * 验收那一遍按新规则由 segments/verify.ts（无头一次性会话，#554-1 已合）在「PR ready」时单独起，结论（verdict）
+   * 走 verifier-invoke 返回给合并闸（#555 母单；那一侧的接线属于 #556 段合入的子单，本切片只做 Fusion 这边断开）。
+   * 没打这个标记（老历史）照老步序走，verify 这一步还是老 verifyRound 那一套（readCriteria / authorFamilies /
+   * 起会话 / 判 verdict / recordVerification / 驳回走 rebutRound）。
+   */
   const doVerify = async (): Promise<FlowEvent> => {
     await syncWorktreeAtBoundary('verify');
+    if (patched(NO_FUSION_VERIFY_555_4_PATCH)) {
+      return { kind: 'verified', verdict: 'pass' };
+    }
     const current = need(setup, '流程配置');
     // 第几轮按验过几次数（不按没过的轮数）：验过了、他又改选了别的回去照改（#259），再验是新的一轮
     const n = rounds.length + 1;
@@ -1417,7 +1436,13 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
       // 开 PR 前再并一次（创始人 09-28 凌晨拍的第二点）：这一步只点一次（syncWorktreeAtBoundary 的 tag 去重）。
       await syncWorktreeAtBoundary('open-pr');
       const current = need(setup, '流程配置');
-      const lines = rounds.length > 0 ? await verifyLines(kit, rounds) : null;
+      // 555-4：打了标记的，Fusion 这边没有 verifyRound 的结论可写——PR 正文里「开 PR 前验证」一段不写；
+      // 真正的验收结果由 segments/verify（#555 / verifier-invoke）写回合并闸。没打标记（老历史）照老步序算 verifyLines。
+      const lines = patched(NO_FUSION_VERIFY_555_4_PATCH)
+        ? null
+        : rounds.length > 0
+          ? await verifyLines(kit, rounds)
+          : null;
       // 「按推荐先做了」一栏（#259）：照开 PR 这一刻库里这张单的提问写，加上退回重问到数、会话按自己的话接着做的
       // 那几条（#259 第 3 个 PR：kit.assumedNotes，不经 fleet ask、asks 表里没有，assumedLines 读不到）。
       const assumed = [
@@ -1621,7 +1646,8 @@ export async function fusionWorkflow(input: FusionInput): Promise<FusionResult> 
   const doFinalReview = async (): Promise<FlowEvent> => {
     let fb: Feedback[] = [];
     let tries = 0;
-    const notes = rounds.at(-1)?.final.notes ?? [];
+    // 555-4：内联 verifyRound 断了之后没有「上一轮开 PR 前验证」的 notes 可附；段验收的结论走合并闸，不进这里。
+    const notes: string[] = [];
     for (;;) {
       const out = await leadRun('review', 'lead-review', { feedback: fb, material: { notes } });
       const checked = await judge(kit, 'leadReview', { output: out, specDir, committed: [...changed] });
