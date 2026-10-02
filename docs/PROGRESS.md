@@ -2,14 +2,20 @@
 
 > 一行一条、带日期和对应提交。规矩在 `AGENTS.md` 通用段「进度也要落盘」。
 
+# 进度（本机恢复与重做前置）
+
+> 一行一条、带日期和对应提交。规矩在 `AGENTS.md` 通用段「进度也要落盘」。
+
+**最近 24h（2026-10-02 02:30 UTC = 北京 10:30 前后）**：① 6 路调研收割回来 → 落 docs/decisions/0008（讨论改本机 Grok 4.7 无头）、0009（v3 实现排期 W0-W5）、0010（三段定稿，W1 起草）、0011（创始人对 7 件人闸的拍板，全部按推荐）；② 6 张 PR 合主线（#571 #572 #573 #575 #576 #578 #579 #580/581 进行中）；③ 关了 4 张被取代单（#440 #454 #69 #489 NOT_PLANNED） + #531 COMPLETED；④ 改写 #446 挂 #556、#556、#69 挂 #555；⑤ 新出 #574、#577；⑥ v3 里程碑 fleet:order 按 0009 重写；⑦ 派了 3 个工作流（v3-quick-fixes 完成、v3-headless-runner 554-1 在跑、v3-routing-db 完成、v3-cockpit-batch1 4 片在跑）。**详见下表 2026-10-02 各节和 docs/decisions/。**
+
 ## 生效中的临时调整
 
 > 五列：内容｜当时为什么｜谁拍的（原话和日期）｜撤回条件｜最迟复查日期。撤回就删行（git 有历史）。规矩在 `AGENTS.md` 通用段「我拍了板，当场记进项目里记决定的地方」（日期一律 YYYY-MM-DD 北京时间）。
 
 | 内容 | 当时为什么 | 谁拍的（原话和日期） | 撤回条件 | 最迟复查日期 |
 |---|---|---|---|---|
-| 法国引擎关闭：不再派单、不接新活，`/etc/fleet-dao/release.env` 的 `FLEET_SERVICES` 只留 `fleet-api`；期望配置写在 `deploy/france/desired-config.json` 的【临时】段 | 引擎 3 天半只做完 12 张单（真需求 4 张）、写码会话成功率 38%；流程重做前不再让它接活 | 创始人 2026-09-29 叫停引擎、要改成三段一条龙（原话：「要删的东西都要删」） | 新流程（v3 三段一条龙）演练通过、创始人说重开；撤回做法：改回 `fleet-engine fleet-api`、发布一轮，再把 `canary`、`route-probe`、`hourly-reconcile`、`github-reconcile` 四个 Temporal 定时任务用 `fleet-temporal schedule toggle --unpause` 恢复 | 2026-10-05 |
-| 指挥官派工人用 Grok，不用 Claude：新派的活走 `commander` 技能的 `worker.mjs` 起 Grok 会话；改标准的活也派给 Grok，PR 不挂自动合并、等创始人点头；不开 Claude 子代理 | reclaude 独享号额度紧 | 创始人 2026-09-28 晚（原话：「reclaude独享号额度不多了，能不能尽量都grok做，帥位查看盯着进度，临时看板也能看」，`specs/169-Fusion形态/需求.md` 行 270、第 4 条撤回条件在行 278；同晚追加「后续不要开subagent了」在行 279；同晚「本机快马」第 5 条「最迟 2026-10-05 帅位复查」在行 333） | reclaude 独享号额度恢复，或创始人说撤 | 2026-10-05 |
+| 法国引擎关闭：不再派单、不接新活，`/etc/fleet-dao/release.env` 的 `FLEET_SERVICES` 只留 `fleet-api`；期望配置写在 `deploy/france/desired-config.json` 的【临时】段 | 引擎 3 天半只做完 12 张单（真需求 4 张）、写码会话成功率 38%；流程重做前不再让它接活 | 创始人 2026-09-29 叫停引擎、要改成三段一条龙（原话：「要删的东西都要删」）；10-02 拍板「继续关着，到 #452 演练三连跑通 + 你说过那句『开』才再评估」(docs/decisions/0011-…md 第 2 条) | 演练过 + 创始人说「开」；撤回做法：改回 `fleet-engine fleet-api`、发布一轮，再把 `canary`、`route-probe`、`hourly-reconcile`、`github-reconcile` 四个 Temporal 定时任务用 `fleet-temporal schedule toggle --unpause` 恢复 | **2026-10-15**（原 10-05 延期，#452 还没跑通） |
+| 指挥官派工人用 Grok，不用 Claude：新派的活走 `commander` 技能的 `worker.mjs` 起 Grok 会话；改标准的活也派给 Grok，PR 不挂自动合并、等创始人点头；不开 Claude 子代理 | reclaude 独享号额度紧 | 创始人 2026-09-28 晚（原话：「reclaude独享号额度不多了，能不能尽量都grok做，帥位查看盯着进度，临时看板也能看」，`specs/169-Fusion形态/需求.md` 行 270、第 4 条撤回条件在行 278；同晚追加「后续不要开subagent了」在行 279；同晚「本机快马」第 5 条「最迟 2026-10-05 帅位复查」在行 333）；10-02 结束时已验证：午夜 12 点独享号到点重启重开、拼车额度重置后无人工拍板照常用 Grok 4.7 无头写码 | reclaude 独享号额度恢复后不再单独工人模式，或创始人说撤 | **2026-10-15**（原 10-05 延期） |
 
 ## 2026-10-02（Mirasim 自有 / 平台切换与 macOS，先调研出方案）
 
@@ -351,3 +357,25 @@
 - 等 `v3-quick-fixes` 回来后挂起 `v3-w4-fusion-runner`（554-1 无头一次性子进程段 runner，W4 第一片，夜里最大）；
 - 等 `v3-routing-db` 回来后挂起 `routing-two-layer-engine`；
 - 家长醒过来前提下：W3 那 7 件要拍的事按个回 1/2 选项。
+
+## 2026-10-02 10:30 UTC（创始人拍完 7 件）
+
+**创始人 10-02 18:3x（北京时间）对 W3 的 7 件全部按推荐拍（原话「1-1，但不要重启 2-1 3-1 4-1……github actions 通过后可以暂停派活……引擎手头活都干完后自动部署到引擎，然后接着进行活和派活 5-1 6-1 7-1」）**：
+
+1. **WSL 修复照装，但完成也不重启**（D:\Tools\wsl-installer\repair-wsl.ps1 备好；若 MSI 输出 3010 先不重启，等创始人在机器边才允许自动起）。
+2. **法国引擎继续关**——撤回条件改成「#452 演练三连跑通 + 创始人说『开』」；延期到 2026-10-15。
+3. **法国发布机制 = 按版本创始人确认**（不是主线 auto merge；急修另带理由绕过、事后补演练）。
+4. **#227 走 GitHub Actions**（merge「发布 vN」PR → 挂 tag/release/关 milestone/推飞书，先审后合），**且 GitHub Actions 通过后暂停派活 → 手头活干完 → 部署 → 恢复派活**。
+5. **飞书发布里默认推**（FLEET_FEISHU 未配就写「没配」不报错）。
+6. **#454 关留史**（已关成 not_planned；推送令牌由 #450 母单 W4 的小号 GitHub App 承接）。
+7. **#323「开关放哪」留在法国库当指令**（OpenGitOps 例外）。
+
+**落盘**：docs/decisions/0011-founder-7-questions-2026-10-02.md。
+
+**下一步**（把上面的决定变成代码）：
+- **新起 v3-headless-runner 的下一波**：554-1 完成后必须挂 **554-2**（done-check 重做）→ **554-3**（tier.ts）→ **554-4**（runs 表迁移）。
+- **新单 + workflow** #453 重写（按版本创始人确认 publish + engine 暂停派活/手头 settle + deploy + 恢复派活）：具体形态生 GPT 挑错再写。
+- **新单 + workflow** #227 下半（release.yml GitHub Actions + 动作 > 飞书）：一并先审后合。
+- **#556-7 文档对齐切片**：顺带扫到 ops / design 也要把 #323 的「留在库里」写明（现在 ops / design 第九节仍然自动发布）。
+
+**还欠**：#574/#580（routing-two-layer-db）merge 后 → **routing-two-layer-engine**；v3-cockpit-batch1（4 片）完成后 → delete-* 系列。
