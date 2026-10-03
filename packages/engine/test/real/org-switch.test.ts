@@ -501,7 +501,7 @@ describe('手上有会话在跑也照切：先停下、等收场、再切（#59�
     });
     const row = (await t.db.select().from(auditLog)).find((r) => r.action === 'session-org.switch');
     expect(row?.reason).toContain('手上 2 个 Claude 会话先停下');
-    expect(row?.reason).toContain('切之前停下了 2 个在跑的 Claude 会话，切完各自续上');
+    expect(row?.reason).toContain('切之前停下了 2 个在跑的 Claude 会话，切完各自接着干');
     // 切的那一会儿选路停着
     expect(s.picksWhileSwitching[0]).toMatchObject({ ok: false, waitFor: 'slot' });
   });
@@ -519,7 +519,7 @@ describe('手上有会话在跑也照切：先停下、等收场、再切（#59�
       ok: false,
       after: { org: 'solo', stopped: [a.id] },
     });
-    expect(attempt?.error).toContain('还有 1 个没收场、0 个还在起，这一轮不切（停下的照样续上）');
+    expect(attempt?.error).toContain('还有 1 个没收场、0 个还在起，这一轮不切（停下的照样接着干）');
     expect(await alertOf(ORG_SWITCH_ALERT)).toMatchObject({ level: 'alert', resolvedAt: null });
     // 选路那一道解开了：停下的会话照样续上（还在拼车上，等额度）
     expect(await s.pick()).toMatchObject({ ok: false, waitFor: 'quota' });

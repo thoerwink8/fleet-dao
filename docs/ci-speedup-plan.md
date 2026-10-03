@@ -20,11 +20,11 @@
 |---|---|---|
 | A | 推送前预检：按改动跑 CI 上那几样确定的检查（biome/tsc），红了当场修 | **已合（#688）**，Windows 真推里验过 |
 | B | 合并 CI 小任务（biome/tsc/docs/hygiene 四台并成一个 `lint`） | **已合（#688）**：一个 PR 约 14→11 个任务；各步 continue-on-error + 汇总步核对（保住 #566 的「biome 红不吃掉 tsc」）；汇总脚本被测试真跑。**没在真 GitHub 上跑过**：`lint` 里 working-directory / pnpm/action-setup / setup-node 缓存路径几处，第一次 PR 要盯它起不起得来；`lint` 约 90 秒贴着最慢测试台 87 秒，若成瓶颈把 docs 挪回独立 job |
-| C | 主线只留最新一轮（连续合几个取消前面的） | **暂不做**：D 的区间口径下每轮主线已经只跑增量，取消前一轮的收益小；而取消会让自动发布闸门（认「这个提交自己那次绿」）断，要先改闸门认「被绿区间覆盖」才能开。区间口径跑出真实数字后再决定 |
+| C | 主线只留最新一轮（连续合几个取消前面的） | **不做**（第二轮实测后维持这个结论）：D 的区间口径下每轮主线已经只跑增量，取消前一轮的收益小；而取消会让自动发布闸门（认「这个提交自己那次绿」）断，要先改闸门认「被绿区间覆盖」才能开。真要开，按当时的实测另开单 |
 | D | 主线跑「上次绿…现在」的累计改动 | **前半已合（#688）、主线真跑通过**：`main-base.ts` 查基准、`ci-plan.ts --main-base`、ci.yml `changes` 加一步；基准读不到/区间为空 → 全跑 + ::warning::；每轮仍各自出结论，所以自动发布闸门不用动 |
 | E | PR 的测试分片结果缓存 | **已合（#688）**：`ci-cache.ts`，键盖源码闭包+夹具+环境身份，命中后逐文件哈希复核，清单坏/不 complete 一律真跑；只在 pull_request 上动、主线不碰。**真 CI 上要验三件**：同 PR 重推是否真显示「测试缓存命中」；key 步骤有没有被悄悄关成 enabled=false（runner 路径符号链接）；`actions/cache` restore/save 在 `contents: read` 下能否工作 |
-| F | deploy 里 login-user 那 94 秒压到 30 秒以内 | **已合（#688），实测 login-user 94→44s**：超时值可注入（login-user、cli-tools 两个样本都压到 2+1 秒）；真实秒数本机测不了（要 root），等 CI 的 ⏱ 行，分台名单到时再重排 |
-| G | 测试按耗时装箱（split by timings），台数按工作量定 | **已做、待合**（本分支）：`test-split.ts` 在仓里枚举测试文件（vitest.config.ts 的 include 取同一份）、按 `test-timings.json`（`pnpm ci:timings` 从主线日志刷新）用 LPT 装 k 台（每台目标 50 秒耗时合计、封顶 8 台）；db 的测试单独装 pg 台、只有那台起 Postgres（容器开头后台起、装完依赖再等）；装到 `github-reconcile.test.ts` 的那台才装 Temporal；每台跑完 `ci-box.ts verify` 核对实际跑的 == 分到的。全量按实测表算：pg 两台 70/71 秒 + 普通六台各 91 秒（原来 7 台 89/35/137 · 141 · 87/72/125）。**真 CI 上要验**：后台 docker run 跨步骤活着、`toJSON(matrix)` 传给 ci-box、JSON 报告里的路径和仓根对得上、实际墙钟 |
+| F | deploy 里 login-user 那 94 秒压到 30 秒以内 | **已合（#688），实测 login-user 94→44s**：超时值可注入（login-user、cli-tools 两个样本都压到 2+1 秒）；真实秒数后来在 CI 的 ⏱ 行量到：慢的根子是建测试账号时整份拷 `/etc/skel` 里 801M 工具链，瘦身后 login-user 49→3 秒、cli-tools 99→6 秒（#699），分台已按实测重排（#698），见第二轮结果 |
+| G | 测试按耗时装箱（split by timings），台数按工作量定 | **已合**（第二轮）：`test-split.ts` 在仓里枚举测试文件（vitest.config.ts 的 include 取同一份）、按 `test-timings.json`（`pnpm ci:timings` 从主线日志刷新）用 LPT 装 k 台（每台目标 50 秒耗时合计、封顶 8 台）；db 的测试单独装 pg 台、只有那台起 Postgres（容器开头后台起、装完依赖再等）；装到 `github-reconcile.test.ts` 的那台才装 Temporal；每台跑完 `ci-box.ts verify` 核对实际跑的 == 分到的。全量按实测表算：pg 两台 70/71 秒 + 普通六台各 91 秒（原来 7 台 89/35/137 · 141 · 87/72/125）。**真 CI 上要验**：后台 docker run 跨步骤活着、`toJSON(matrix)` 传给 ci-box、JSON 报告里的路径和仓根对得上、实际墙钟 |
 | H | 每 job 约 25 秒固定开销（checkout + setup-node + pnpm install） | 待做（在 B 之后逐项量） |
 
 ## 关键事实（都查过，别再重查）
@@ -48,7 +48,7 @@
 
 - E 缓存真实命中：同一 PR 重推要有一次实测（看「测试缓存命中」、key 步骤有没有被静默关成 enabled=false、restore/save 在 contents: read 下能否工作）。
 - A 推前预检：Windows 本机已在真推里验过（biome ENOENT 被拒推，已修，#688）；Linux/Mac 上没验过。
-- C 暂缓；自动发布闸门没动（每轮主线仍各自出结论）。
+- C 不做（见上表）；自动发布闸门没动（每轮主线仍各自出结论）。
 - 主线「没改 deploy/workflow 的普通代码合并」那一轮的耗时还没见到。
 
 ## 第二轮（创始人 2026-10-03 晚「测试文件也别全测」+「全程你拍板，直到达到最佳、不能再优化」）
@@ -62,7 +62,7 @@
 
 **什么时候算「压不动了」（停的标准，我自己定的）**：普通代码 PR 的墙钟 ≤ 下限 + 10 秒，下限 = changes + 一台 job 固定开销 + 选中的最慢单个测试文件 + check；并且下一个能想到的办法每轮省不到 5 秒，或者要花钱（更大的机器）、要改标准——那两样问创始人。每轮的真实 CI 数字记在这里。
 
-**后面排着的**（等前三条的数字再定）：web 打包并进 lint、check/changes 的固定开销、`isolate: false` 按包试、主线和 PR 抢并发槽。
+**量过之后的去向**（第二轮结果里有数字）：`isolate: false` 不全局开（省的和两轮波动一样大、还有测试靠隔离才过）；web 打包并进 lint、check/changes 的固定开销、主线和 PR 抢并发槽——每轮省不到 5 秒，按上面停的标准不做；谁要重开按当时实测另开单。
 
 ## 第二轮结果（2026-10-03 晚，#694/#697/#698/#699/#700/#701 合并后实测）
 

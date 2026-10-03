@@ -13,6 +13,7 @@ import type {
   Store,
   WorkflowControl,
 } from './ports.ts';
+import type { ReleaseSource } from './release-version.ts';
 import type { RoutingEffortsPort } from './routing-efforts.ts';
 import type { RoutingLayersPort } from './routing-layers.ts';
 
@@ -46,6 +47,11 @@ export interface Deps {
    * 读接口写 unavailable、改接口回 503，不拿空列表冒充「都没配」。
    */
   routingEfforts?: RoutingEffortsPort | undefined;
+  /**
+   * /changelog 页「发布 v<N>」定版本号要的两样（release-version.ts）：仓里开着的里程碑（GitHub 现读）、仓根 CHANGELOG.md。
+   * 没给（开发、内存版）接口照样回，写明「没接上、版本号核不了」，不拿「上一版 +1」顶。
+   */
+  release?: ReleaseSource | undefined;
   /**
    * 进程要停了（main.ts 收到 SIGTERM）：只有生产装配会给。飞书 outbox 的长轮询（feishu-routes.ts）拿它跟请求自己的
    * signal 合并着等，停机时马上醒、不再查库（#364：库关到一半时还查会报错，被当成「未处理的错误」500）。

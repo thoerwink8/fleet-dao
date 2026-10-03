@@ -9,6 +9,8 @@
 // 6. **stdout / stderr 落盘** `_tmp/<runId>/`：会话结束 24h 后由现有 _tmp 清理机制收（见引擎现有架子）。
 // 7. **开跑先在 runs 留一行没结束的**（#157）：切号数带组织类型的池上在跑的会话靠这一行，写不进去就不起会话
 //    （RUN_START_FAILED）。留了这一行之后的每条出路（跑完、超时、被杀、起不来）都要把它收掉——收不掉的行切号会一直当它在跑。
+// 8. **切号叫停（deps.stop，#59）**：信号响了，还没起会话的不起、起了的被杀，结局记 org_switch（不是 killed、不算失败），
+//    任务工作流切完在原分支上重跑这一段。叫停之后会话自己跑完了（done）照样算 done；没跑完的一律算 org_switch——是我们停的。
 //
 // **Spawner 依赖注入**：真实的生产 spawn 走 `real/exec.ts` 那一份 `fleet-agent-scope`；测试里换 fake——
 // 不调真进程，不调 sudo，不调 systemd，不写 /sys/fs/cgroup。本机 Windows / macOS 上跑也是 fake。
@@ -65,6 +67,7 @@ export const ONE_SHOT_OUTCOMES = [
   'spawn_failed',
   'admission_blocked',
   'failed',
+  'org_switch',
 ] as const;
 export type OneShotOutcome = (typeof ONE_SHOT_OUTCOMES)[number];
 
@@ -153,6 +156,11 @@ export interface OneShotDeps {
   /** runs 占位（#556 换上真实现）。不在 deps 里就不记（不鲁式化）。 */
   runs: RunsWriter;
   now?: () => Date;
+  /**
+   * 切号叫停（#59，real/one-shot-sessions.ts 的登记交回的信号；signal.reason 的 message 写为什么停）：响了就不起会话、
+   * 起了的杀掉，结局 org_switch。不给 = 切号停不下这一段。
+   */
+  stop?: AbortSignal;
 }
 
 /** 子进程结束 24h 后清落盘目录：调用方起 setTimeout / 调度器干；本文件只负责标「该清」。 */
@@ -179,6 +187,25 @@ export async function runOneShot(input: OneShotInput, deps: OneShotDeps): Promis
   const runId = input.runId ?? randomUUID();
   const startedAt = (deps.now ?? (() => new Date()))().toISOString();
   const timeoutMs = (input.timeoutMinutes ?? DEFAULT_TIMEOUT_MINUTES) * 60 * 1000;
+  const halted = (stop: AbortSignal, where: string): OneShotResult => ({
+    runId,
+    outcome: 'org_switch',
+    exitCode: null,
+    stdout: '',
+    stderrTail: '',
+    startedAt,
+    endedAt: (deps.now ?? (() => new Date()))().toISOString(),
+    failureReason: switchReason(stop, where),
+    runsNotWired: false,
+  });
+
+  // 切号已经叫停了（调用方等内存时叫停的也在这儿收）：先于内存准入看——放在准入后面，内存一直放不下时
+  // 这一段会一直回 admission_blocked、调用方一直等，切号等它收场等到超时。
+  if (deps.stop?.aborted) {
+    const result = halted(deps.stop, '还没起会话');
+    await recordRun(input, result, deps.runs);
+    return result;
+  }
 
   // 内存准入（沿用 real/memory-admission.ts）：本机（没挂载）会 skip，放了 block 才拦。
   if (deps.memoryAdmission !== undefined) {
@@ -209,6 +236,13 @@ export async function runOneShot(input: OneShotInput, deps: OneShotDeps): Promis
   await mkdir(runDir, { recursive: true });
   await writeFile(join(runDir, 'brief.txt'), input.prompt, 'utf8');
 
+  // 查内存、建落盘目录那会儿叫停的：同样不起会话，记一笔 org_switch（没起也有账）
+  if (deps.stop?.aborted) {
+    const result = halted(deps.stop, '还没起会话');
+    await settle(runDir, input, result, deps.runs);
+    return result;
+  }
+
   // 开跑：先留一行没结束的。写不进去不起会话——起了就是一个切号看不见的会话（切号会把它当场掐断）。
   try {
     await deps.runs.start({
@@ -229,19 +263,26 @@ export async function runOneShot(input: OneShotInput, deps: OneShotDeps): Promis
 
   const ac = new AbortController();
   const killTimer = setTimeout(() => ac.abort(new Error('one-shot timeout')), timeoutMs);
+  // 切号停的（超时先到的算超时）
+  const switched = () => deps.stop?.aborted === true && !ac.signal.aborted;
   let spawnResult: SpawnOutcome;
   try {
     spawnResult = await deps.spawn({
       argv,
       cwd: cwd ?? input.cwd,
       stdin: input.prompt,
-      signal: ac.signal,
+      signal: deps.stop ? AbortSignal.any([ac.signal, deps.stop]) : ac.signal,
       input: { ...input, runId },
       timeoutMs,
     });
   } catch (err) {
     clearTimeout(killTimer);
     const reason = err instanceof Error ? err.message : String(err);
+    if (switched() && deps.stop) {
+      const result: OneShotResult = { ...halted(deps.stop, '会话被停下'), stderrTail: reason.slice(-4096) };
+      await settle(runDir, input, result, deps.runs);
+      return result;
+    }
     if (ac.signal.aborted) {
       // 我们 kill 的：明确 timeout。
       const result: OneShotResult = {
@@ -283,13 +324,15 @@ export async function runOneShot(input: OneShotInput, deps: OneShotDeps): Promis
   clearTimeout(killTimer);
 
   const endedAt = (deps.now ?? (() => new Date()))().toISOString();
-  const outcome: OneShotOutcome = spawnResult.killed
+  const ended: OneShotOutcome = spawnResult.killed
     ? ac.signal.aborted
       ? 'timeout'
       : 'killed'
     : spawnResult.exitCode === 0
       ? 'done'
       : 'failed';
+  // 叫停之后没跑完的（被杀、杀的时候报了别的错）都是我们停的；赶在叫停前跑完了的照样是 done
+  const outcome: OneShotOutcome = ended !== 'done' && switched() ? 'org_switch' : ended;
   const result: OneShotResult = {
     runId,
     outcome,
@@ -298,16 +341,24 @@ export async function runOneShot(input: OneShotInput, deps: OneShotDeps): Promis
     stderrTail: spawnResult.stderr.slice(-4096),
     startedAt,
     endedAt,
-    ...(outcome !== 'done'
-      ? {
-          failureReason: `exit=${String(spawnResult.exitCode)} killed=${String(spawnResult.killed)}`,
-        }
-      : {}),
+    ...(outcome === 'org_switch' && deps.stop
+      ? { failureReason: switchReason(deps.stop, '会话被停下') }
+      : outcome !== 'done'
+        ? {
+            failureReason: `exit=${String(spawnResult.exitCode)} killed=${String(spawnResult.killed)}`,
+          }
+        : {}),
     runsNotWired: false,
     ...(spawnResult.facts !== undefined ? { facts: spawnResult.facts } : {}),
   };
   await settle(runDir, input, result, deps.runs);
   return result;
+}
+
+/** 切号停下的原因：叫停信号带的那句（real/one-shot-sessions.ts 写的「切号：…」），没带就写停在哪一步。 */
+function switchReason(stop: AbortSignal, where: string): string {
+  const why = stop.reason instanceof Error ? stop.reason.message : stop.reason ? String(stop.reason) : '';
+  return why.trim() ? `${why}（${where}）` : `切号叫停（${where}）`;
 }
 
 /** 收场：落盘和补完开跑那一行两样都做（一样没成不耽误另一样），没成的照抛。 */
@@ -348,18 +399,8 @@ async function recordRun(input: OneShotInput, result: OneShotResult, runs: RunsW
     ...(input.routeId !== undefined ? { routeId: input.routeId } : {}),
     startedAt: result.startedAt,
     endedAt: result.endedAt,
-    outcome:
-      result.outcome === 'done'
-        ? 'done'
-        : result.outcome === 'timeout'
-          ? 'timeout'
-          : result.outcome === 'admission_blocked'
-            ? 'admission_blocked'
-            : result.outcome === 'killed'
-              ? 'killed'
-              : result.outcome === 'spawn_failed'
-                ? 'spawn_failed'
-                : 'failed',
+    // 一次性会话的结局和 runs 的结局是同一份（ONE_SHOT_OUTCOMES、RunRecord.outcome、库里 runs_outcome_known）
+    outcome: result.outcome,
     ...(result.failureReason !== undefined ? { failureReason: result.failureReason } : {}),
     ...usageFields(result.facts),
   };

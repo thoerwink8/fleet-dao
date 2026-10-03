@@ -21,6 +21,7 @@ import {
   NotificationsResponse,
   PoolsResponse,
   type RealtimeTable,
+  ReleaseVersionResponse,
   ReposResponse,
   type Route,
   RoutingEffortsResponse,
@@ -1430,6 +1431,18 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       });
       emit('settings', key);
       return UpdateSettingResponse.parse({ setting: next }).setting;
+    },
+    async releaseVersion() {
+      await wait();
+      // 假数据：当前版本里程碑是 v3，还开着一张 v4（真后端读 GitHub，见 packages/api/src/release-version.ts）。
+      // 这份假数据也进演示版的包：标题别带演示版禁词（build/scan.ts）。
+      return ReleaseVersionResponse.parse({
+        state: 'ok',
+        version: 'v3',
+        milestone: { number: 3, title: 'v3 三段一条龙' },
+        others: [{ number: 4, title: 'v4 看得更清楚' }],
+        asOf: iso(),
+      });
     },
     async demoLinks() {
       await wait();

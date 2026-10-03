@@ -136,6 +136,8 @@ export interface HarnessOptions {
   routingLayers?: Deps['routingLayers'];
   /** 每条路由的思考档位（#470）；不给就是没接上（内存版、开发环境一样）。 */
   routingEfforts?: Deps['routingEfforts'];
+  /** /changelog 发布版本号读里程碑和 CHANGELOG.md 的替身；不给就是没接上（内存版、开发环境一样）。 */
+  release?: Deps['release'];
   /**
    * 新哈希用的 scrypt 参数。不传用 TEST_SCRYPT_PARAMS。
    * 传 null：不设到 Deps 上，跟生产 main.ts 一样走 SCRYPT_PARAMS（慢，一条测试里最多用一次）。
@@ -176,6 +178,7 @@ function wire<S extends Store>(
     ...(options.alertWork ? { alertWork: options.alertWork } : {}),
     ...(options.routingLayers ? { routingLayers: options.routingLayers } : {}),
     ...(options.routingEfforts ? { routingEfforts: options.routingEfforts } : {}),
+    ...(options.release ? { release: options.release } : {}),
     feishu: options.feishu === null ? null : feishu.auth,
     workflows: options.workflows ?? {
       async signal(workflowId, signal) {

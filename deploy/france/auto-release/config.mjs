@@ -2,14 +2,26 @@
 // 期望写在仓里的 deploy/france/desired-config.json；这里读期望、照 systemd 的读法读线上、比出哪一项不一致。
 // 公开的值写原值；私有的值（域名、账号、编号、密钥）只写指纹——HMAC-SHA256，钥匙是法国本机随机生成的
 // /etc/fleet-dao/config-fingerprint.key（没有钥匙猜不出低熵的值；做法和出处见 specs/323-配置进仓对账/方案.md）。
-// 自动发布每一轮 import 它对账（lib.mjs 的 configStep）；france.sh 读回、人算指纹走下面的命令行。
+// 自动发布每一轮 import 它对账（lib.mjs 的 configStep）；france.sh 读回、建新机器的环境文件（render），release.sh 切版本前
+// 照期望写（apply），人算指纹，都走下面的命令行。
 // 改这里之前必须知道：
 // - 读法照搬 systemd（和 deploy/lib/app-config.sh 的 env_parse 同一套）：deploy/test/config.test.mjs 用那边测试的同一批样本钉住两边一样。
-// - 线上的值一律不进输出、报警、状态文件：只报文件、键名、期望里公开的值和「不一致」；私有值连期望也只有指纹。
-// - 读不到、认不出一律「没查成」，不当成一致（AGENTS.md「底线」）。
+// - 线上的值一律不进输出、报警、状态文件：只报文件、键名、期望里公开的值和「不一致」；私有值连期望也只有指纹，发布时也不写。
+// - 读不到、认不出一律「没查成」，不当成一致（AGENTS.md「底线」）；发布时照期望写，读不到、认不出、写完读回不对一律不写（写了的改回原样）。
 // - 本文件跟着 lib.mjs 一起装到 /usr/local/lib/fleet-dao/auto-release/（france.sh 的 AUTO_RELEASE_FILES），只能 import node 自带的。
-import { createHmac } from 'node:crypto';
-import { lstatSync, readFileSync, readlinkSync } from 'node:fs';
+import { createHmac, randomBytes } from 'node:crypto';
+import {
+  chmodSync,
+  chownSync,
+  lstatSync,
+  readFileSync,
+  readlinkSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { basename, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 /** 期望文件在仓里的位置（每一版的目录里都有一份：对账拿在用的那一版的）。 */
@@ -34,10 +46,23 @@ export const LOCAL_DESIRED_FILE = fileURLToPath(new URL('../../local/desired-con
  * Node 只写大版本号：france.sh 的前提只要求 /usr/bin/node ≥ 这个数，不是钉死到点号版本。
  */
 export const PINNED_VERSION_KEYS = ['postgresMajor', 'nodeMajor', 'temporalServer', 'temporalCli'];
+/** 发布时照期望写的几份（单元读的环境文件）。france.env 归 france.sh 读，只对账、不在发布时写。 */
+export const APPLY_FILES = ['engine.env', 'api.env', 'release.env'];
+/** 上次照期望写了什么（每份文件里公开的键 → 值）：只有 release.sh 经命令行 apply 写，人别改；认不出就删掉它。 */
+export const APPLIED_FILE = `${RELEASES}/.config-applied.json`;
+export const APPLIED_FORMAT = 1;
+/** 写记录里留最近几次：什么时候照期望改了哪几项、删了哪几项、改回过哪几项。 */
+const APPLIED_LOG_KEEP = 20;
+/** 这台是哪个档位：一行 france 或 local，france.sh 记（deploy/lib/profile.sh）。不在就是法国（和 FLEET_PROFILE 不给时一样）。 */
+export const PROFILE_FILE = `${ETC_DIR}/profile`;
+/** 档位 → 这个档位的期望在每一版目录里的位置（#451：本机档的差别只写在 deploy/local 那一份）。 */
+export const PROFILE_DESIRED = { france: DESIRED_FILE, local: 'deploy/local/desired-config.json' };
 
 const KEY_NAME = /^[A-Z_][A-Z0-9_]*$/;
 const HEX64 = /^[0-9a-f]{64}$/;
 const HEX32 = /^[0-9a-f]{32}$/;
+const SHA = /^[0-9a-f]{40}$/;
+const isObj = (v) => typeof v === 'object' && v !== null && !Array.isArray(v);
 
 /** 读不到、认不出：调用方一律记「没查成」。 */
 export class ConfigError extends Error {}
@@ -575,41 +600,525 @@ export function readText(path) {
 
 /**
  * 对账要读的几样：在用的那一版（current）里的期望、线上的几份环境文件、指纹钥匙。
- * paths 只有测试和命令行换：{ releases, etc, key, desired }；desired 给了就用它，不看 current。
+ * 期望按这台的档位挑（档位文件在 etc 下，见 readProfile）：法国是 deploy/france/desired-config.json，本机档是
+ * deploy/local/desired-config.json；档位认不出记没查成，不猜。
+ * paths 只有测试和命令行换：{ releases, etc, key, desired, profile }；desired 给了就用它，不看 current、不看档位。
  */
 export function readLive(paths = {}) {
   const releases = paths.releases ?? RELEASES;
   const etc = paths.etc ?? ETC_DIR;
   let commit = null;
   let desired;
+  let rel = DESIRED_FILE;
   if (paths.desired) desired = readText(paths.desired);
   else {
+    try {
+      rel = readProfile(paths.profile ?? `${etc}/profile`).rel;
+    } catch (e) {
+      desired = { error: e.message };
+    }
     try {
       commit = readlinkSync(`${releases}/current`);
     } catch (e) {
       commit = null;
-      desired = {
+      desired ??= {
         error: e.code === 'ENOENT' ? '还没发布过（current 不在）' : `读不了 ${releases}/current（${e.code}）`,
       };
     }
-    if (commit !== null) {
-      if (!/^[0-9a-f]{40}$/.test(commit))
+    if (commit !== null && desired === undefined) {
+      if (!SHA.test(commit))
         desired = { error: `${releases}/current 指着认不出的「${commit.slice(0, 60)}」` };
-      else desired = readText(`${releases}/${commit}/${DESIRED_FILE}`);
+      else desired = readText(`${releases}/${commit}/${rel}`);
     }
   }
   const files = Object.fromEntries(CONFIG_FILES.map((f) => [f, readText(`${etc}/${f}`)]));
-  // 不一致时告诉人改哪份文件：给了 --desired 就是那个路径（本机档，#451）；不然照旧指仓里那份（要改期望，改的
+  // 不一致时告诉人改哪份文件：给了 --desired 就是那个路径（本机档，#451）；不然指仓里这个档位的那份（要改期望，改的
   // 是仓里现在这份、合进主线，不是某个旧提交里读到的快照，所以不用 commit 拼路径）
-  const desiredPath = paths.desired ?? DESIRED_FILE;
+  const desiredPath = paths.desired ?? rel;
   return { commit, desired, desiredPath, files, key: readText(paths.key ?? FINGERPRINT_KEY_FILE) };
+}
+
+/**
+ * 这台的档位 → { profile, rel（这个档位的期望在每一版里的位置）, note }。文件不在算法国（note 写明是按默认算的，
+ * 装档位文件之前的机器都是这样）；是符号链接、读不了、写的不是认识的档名，抛 ConfigError——不猜成法国：本机档拿
+ * 法国的期望写配置，会把法国的值写进本机。
+ */
+export function readProfile(path = PROFILE_FILE) {
+  try {
+    lstatSync(path);
+  } catch (e) {
+    if (e.code === 'ENOENT') {
+      return {
+        profile: 'france',
+        rel: PROFILE_DESIRED.france,
+        note: `没有档位文件 ${path}：按法国档（france.sh 下次跑会记上）`,
+      };
+    }
+    throw new ConfigError(`读不了档位文件 ${path}（${e.code ?? e.message}）`);
+  }
+  const got = readText(path);
+  if ('error' in got) throw new ConfigError(`档位文件读不到：${got.error}`);
+  // 末尾的换行不算（和 france.sh 用 bash 的 $(<文件) 核对时一个读法）
+  const name = got.text.replace(/\n+$/, '');
+  if (!Object.hasOwn(PROFILE_DESIRED, name)) {
+    throw new ConfigError(
+      `档位文件 ${path} 认不出（写的是「${name.slice(0, 40)}」，只认 ${Object.keys(PROFILE_DESIRED).join('、')}）`,
+    );
+  }
+  return { profile: name, rel: PROFILE_DESIRED[name], note: null };
+}
+
+// ── 发布时照期望写（release.sh 切版本之前；#323 方案第四节） ──
+// 照 Argo CD 不开自愈的做法：只写「这一版的期望和上次写的不一样」的公开键，人手改的偏离不改回（对账照旧只报警）；
+// 期望里 selfHeal 开了才连人手改的一起改回。期望里没有了的键删掉；改成私有值的不动（私有值不写，只对账）；
+// 期望里从来没有的键（人加的）不碰，对账报「多了一项」（Argo CD 的 prune 也是另一个开关）。
+
+/** 期望里发布时要写的公开值：{ 文件: { 键: 值 } }，APPLY_FILES 每份都有（一项都不管的是 {}）。 */
+function publicValues(want) {
+  return Object.fromEntries(
+    APPLY_FILES.map((f) => [
+      f,
+      Object.fromEntries(
+        (want.files[f] ?? []).filter((d) => d.kind === 'public').map((d) => [d.key, d.value]),
+      ),
+    ]),
+  );
+}
+
+/** 一份环境文件里每个键生效的赋值（同一个键写几行就几个值，按出现的顺序）。 */
+function valuesByKey(entries) {
+  const m = new Map();
+  for (const e of entries) m.set(e.key, [...(m.get(e.key) ?? []), e.value]);
+  return m;
+}
+
+const sameList = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
+
+/** 写进注释的一句话：控制字符（换行之类）换成空格——注释里断了行，后半句就成了一条赋值。 */
+const oneLine = (s) =>
+  [...String(s)]
+    .map((ch) => (ch.charCodeAt(0) < 0x20 || ch.charCodeAt(0) === 0x7f ? ' ' : ch))
+    .join('')
+    .trim();
+
+/**
+ * 改完的原文照 systemd 读回来对不对：expect 里的键（这次写的、删的）生效的值要正好是给的那几个，别的键一个都不许变、
+ * 也不许多出来。不对抛 ConfigError（只说键名，不带值：线上原来的值可能是人放的私有值）。
+ */
+export function checkRewrite(file, beforeText, afterText, expect) {
+  const before = valuesByKey(parseEnv(beforeText).entries);
+  let after;
+  try {
+    after = valuesByKey(parseEnv(afterText).entries);
+  } catch (e) {
+    throw new ConfigError(`${file} 改完照 systemd 读回来认不出（${e.message}）`);
+  }
+  const wrong = [];
+  for (const [k, vals] of expect) if (!sameList(after.get(k) ?? [], vals)) wrong.push(k);
+  for (const k of new Set([...before.keys(), ...after.keys()])) {
+    if (!expect.has(k) && !sameList(after.get(k) ?? [], before.get(k) ?? [])) wrong.push(k);
+  }
+  if (wrong.length > 0)
+    throw new ConfigError(`${file} 改完照 systemd 读回来不对：${wrong.join('、')} 不是该有的样子`);
+}
+
+/** 按 parseEnv 给的位置改原文：text 是 null 的整条删掉（连同它后面那个换行），appends 接在文件末尾。 */
+function rewrite(text, edits, appends) {
+  let out = text;
+  for (const e of [...edits].sort((a, b) => b.start - a.start)) {
+    if (e.text !== null) {
+      out = out.slice(0, e.start) + e.text + out.slice(e.end);
+      continue;
+    }
+    let end = e.end;
+    if (out[end] === '\r') end++;
+    if (out[end] === '\n') end++;
+    out = out.slice(0, e.start) + out.slice(end);
+  }
+  if (appends.length > 0) {
+    if (out !== '' && !out.endsWith('\n')) out += '\n';
+    out += `${appends.join('\n')}\n`;
+  }
+  return out;
+}
+
+/**
+ * 算这一版照期望要怎么写，不碰磁盘。
+ *   want：这一版的期望（parseDesired 的结果）；applied：上次写的记录（parseApplied 的结果，第一次是 null）；
+ *   cur：在用那一版的期望（只在第一次、没有记录时当「上次写的」；没有、读不出是 null）；
+ *   live：{ 文件: 原文 }，APPLY_FILES 每份都要有；stamp：补进文件末尾的那一行注释里写的来历。
+ * 返回 { baseline, texts, expect, set, removed, healed, kept, drift, files }：
+ *   baseline 是拿什么当「上次写的」——applied（有记录）、current（第一次，拿在用那一版的期望，只写这一版改了的）、
+ *   new（第一次、也没有在用的：只记基线，selfHeal 关着就一个字都不写）；texts 是三份文件改完的原文（不用改的原样），
+ *   expect 是每份文件这次动了的键 → 改完该有的值（读回核对用）；set 是期望变了、照着写的，removed 是期望里没有了、
+ *   删掉的，healed 是 selfHeal 开着、把人手改的改回去的，kept 是期望变了、线上已经是这个值的，drift 是 selfHeal 关着、
+ *   人手改过没改回的（一项一个「文件:键」）；files 是写完要记下的「上次写的」（这一版的公开值）。
+ * 写不成抛 ConfigError，一个字都不写：线上文件认不出、要写的键在文件里写了几行（不猜该改哪一行）、改完自己读回不对。
+ */
+export function planApply({ want, applied = null, cur = null, live, stamp }) {
+  const D = publicValues(want);
+  const baseline = applied ? 'applied' : cur ? 'current' : 'new';
+  const A = applied ? applied.files : cur ? publicValues(cur) : D;
+  const plan = {
+    baseline,
+    texts: {},
+    expect: {},
+    set: [],
+    removed: [],
+    healed: [],
+    kept: [],
+    drift: [],
+    files: D,
+  };
+  for (const file of APPLY_FILES) {
+    const text = live[file];
+    if (typeof text !== 'string') throw new ConfigError(`${file} 没读到`);
+    let parsed;
+    try {
+      parsed = parseEnv(text);
+    } catch (e) {
+      throw new ConfigError(`${file} 认不出（${e.message}）`);
+    }
+    const hits = new Map();
+    for (const e of parsed.entries) hits.set(e.key, [...(hits.get(e.key) ?? []), e]);
+    const declared = new Map((want.files[file] ?? []).map((d) => [d.key, d]));
+    const last = A[file] ?? {};
+    const edits = [];
+    const appends = [];
+    const expect = new Map();
+    for (const [key, value] of Object.entries(D[file])) {
+      const found = hits.get(key) ?? [];
+      const id = `${file}:${key}`;
+      const changed = last[key] !== value;
+      const matches = found.length === 1 && found[0].value === value;
+      if (!changed && (matches || !want.selfHeal)) {
+        if (!matches) plan.drift.push(id);
+        continue;
+      }
+      if (found.length > 1) {
+        throw new ConfigError(
+          `${file} 里 ${key} 写了 ${found.length} 行（服务里生效的是最后一行），不猜该改哪一行：删成一行再发布`,
+        );
+      }
+      if (matches) {
+        plan.kept.push(id);
+        continue;
+      }
+      (changed ? plan.set : plan.healed).push(id);
+      expect.set(key, [value]);
+      if (found.length === 1) {
+        edits.push({ start: found[0].start, end: found[0].end, text: `${key}=${value}` });
+      } else {
+        const note = declared.get(key)?.note;
+        appends.push(`# ${note ? `${oneLine(note)}（${stamp}）` : stamp}`, `${key}=${value}`);
+      }
+    }
+    for (const key of Object.keys(last)) {
+      // 还是公开的上面管了；改成私有值的不是发布该写的，也不删
+      if (declared.has(key)) continue;
+      const found = hits.get(key) ?? [];
+      if (found.length === 0) continue;
+      plan.removed.push(`${file}:${key}`);
+      expect.set(key, []);
+      for (const e of found) edits.push({ start: e.start, end: e.end, text: null });
+    }
+    const next = rewrite(text, edits, appends);
+    checkRewrite(file, text, next, expect);
+    plan.texts[file] = next;
+    plan.expect[file] = expect;
+  }
+  return plan;
+}
+
+/** 上次照期望写的记录。认不出抛 ConfigError：不猜，删掉它，下次发布重新记基线。 */
+export function parseApplied(text) {
+  let raw;
+  try {
+    raw = JSON.parse(String(text));
+  } catch (e) {
+    throw new ConfigError(`上次照期望写的记录不是 JSON（${e instanceof Error ? e.message : String(e)}）`);
+  }
+  const bad = (why) => {
+    throw new ConfigError(`上次照期望写的记录认不出：${why}`);
+  };
+  if (!isObj(raw)) bad('整份要是一个对象');
+  if (raw.schema !== APPLIED_FORMAT) bad(`schema 是 ${JSON.stringify(raw.schema)}，只认 ${APPLIED_FORMAT}`);
+  if (!isObj(raw.files)) bad('files 要是一个对象');
+  for (const f of Object.keys(raw.files)) if (!APPLY_FILES.includes(f)) bad(`files 里不认识的文件「${f}」`);
+  const files = {};
+  for (const f of APPLY_FILES) {
+    if (!isObj(raw.files[f])) bad(`files 里少了 ${f}`);
+    files[f] = {};
+    for (const [k, v] of Object.entries(raw.files[f])) {
+      if (!KEY_NAME.test(k) || typeof v !== 'string') bad(`${f} 里的「${k.slice(0, 60)}」认不出`);
+      files[f][k] = v;
+    }
+  }
+  if (!Array.isArray(raw.log)) bad('log 要是一个数组');
+  return { files, log: raw.log };
+}
+
+/** 先落临时名、再换上（写到一半断了也不会留半个文件）；属主、权限照原来那份（like 是它的 stat，没有就是 root 644）。 */
+function writeAtomic(path, text, like) {
+  const tmp = `${dirname(path)}/.${basename(path)}.fleet-dao-new-${randomBytes(6).toString('hex')}`;
+  writeFileSync(tmp, text, { mode: 0o600, flag: 'wx' });
+  try {
+    // Windows 上没有属主（只在开发机上跑测试时走到）
+    if (like && process.platform !== 'win32') chownSync(tmp, like.uid, like.gid);
+    chmodSync(tmp, like ? like.mode & 0o7777 : 0o644);
+    renameSync(tmp, path);
+  } catch (e) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      // 临时文件删不掉不影响结论：原文件没换
+    }
+    throw e;
+  }
+}
+
+/** 文件在不在（读不了的算在：交给 readText 照实说为什么读不了）。 */
+function exists(path) {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (e) {
+    return e.code !== 'ENOENT';
+  }
+}
+
+/** current 指着的提交号；没有、认不出是 null（只在第一次照期望写时拿它当基线）。 */
+function currentCommit(releases) {
+  try {
+    const s = readlinkSync(`${releases}/current`);
+    return SHA.test(s) ? s : null;
+  } catch {
+    return null;
+  }
+}
+
+const HOWS = ['release', 'rollback', 'auto-rollback'];
+
+/**
+ * 命令行 apply：release.sh 切版本之前调（发布、退回、自动退回都调）。按这台的档位读这一版的期望、上次写的记录、
+ * 线上三份文件，照 planApply 算好再写。
+ *   o.plan 给了一个目录：只把算好的三份写进那个目录（release.sh 用它自己读 release.env 的办法核一遍），线上一个字都不写；
+ *   o.expect 给了那个目录：重新算出来的和核过的不一样就不写（核完线上又被改了）。
+ * 写完照 systemd 读回核一遍，不对就把写过的几份改回原样；记录写不进也改回原样——这几种都算没写成。
+ * 返回退出码：0 写好了、不用写、这一版没有期望；1 没写成（线上和原来一样，或已改回原样；改回也没成的照实说）。
+ * io.out 一行一句：ok / changed / note / red 开头；io.writeFile 只有测试换（造「写后读回不一致」）。
+ */
+export function applyConfig(o, io = {}) {
+  const out = io.out ?? console.log;
+  const write = io.writeFile ?? writeAtomic;
+  const red = (why) => {
+    out(`red ${why}`);
+    return 1;
+  };
+  if (!SHA.test(o.commit ?? ''))
+    return red(`要写哪一版的期望：提交号认不出（${String(o.commit).slice(0, 60)}）`);
+  if (!HOWS.includes(o.how)) return red(`--how 只认 ${HOWS.join('、')}（是 ${String(o.how).slice(0, 30)}）`);
+  const commit = o.commit;
+  const short = commit.slice(0, 12);
+  const releases = o.releases ?? RELEASES;
+  const etc = o.etc ?? ETC_DIR;
+  const statePath = o.state ?? APPLIED_FILE;
+  let profile;
+  try {
+    profile = readProfile(o.profile ?? PROFILE_FILE);
+  } catch (e) {
+    return red(`${e.message}：不知道照哪一份期望写，没写`);
+  }
+  if (profile.note) out(`note ${profile.note}`);
+  const desiredPath = `${releases}/${commit}/${profile.rel}`;
+  if (!exists(desiredPath)) {
+    out(`ok ${short} 里没有 ${profile.rel}（这一版还不认配置期望）：不照期望写配置`);
+    return 0;
+  }
+  const got = readText(desiredPath);
+  if ('error' in got) return red(`这一版的期望读不到（${got.error}）：没写`);
+  let want;
+  try {
+    want = parseDesired(got.text);
+  } catch (e) {
+    return red(`${short} 的期望认不出（${e.message}）：没写`);
+  }
+  let applied = null;
+  if (exists(statePath)) {
+    const s = readText(statePath);
+    try {
+      if ('error' in s) throw new ConfigError(`上次照期望写的记录读不到（${s.error}）`);
+      applied = parseApplied(s.text);
+    } catch (e) {
+      return red(`${e.message}：没写（确认没在别处用它就删掉 ${statePath}，下次发布重新记基线）`);
+    }
+  }
+  let cur = null;
+  let curSha = null;
+  if (!applied) {
+    curSha = currentCommit(releases);
+    const curPath = curSha ? `${releases}/${curSha}/${profile.rel}` : null;
+    if (curPath && exists(curPath)) {
+      const t = readText(curPath);
+      try {
+        if ('error' in t) throw new ConfigError(t.error);
+        cur = parseDesired(t.text);
+      } catch (e) {
+        out(`note 在用的 ${curSha.slice(0, 12)} 的期望读不出（${e.message}）：这次只记基线`);
+      }
+    }
+  }
+  const live = {};
+  const like = {};
+  for (const f of APPLY_FILES) {
+    const t = readText(`${etc}/${f}`);
+    if ('error' in t) return red(`${f} 读不到（${t.error}）：没写`);
+    live[f] = t.text;
+    like[f] = statSync(`${etc}/${f}`);
+  }
+  let plan;
+  try {
+    plan = planApply({ want, applied, cur, live, stamp: `deploy/release.sh 照 ${short} 的期望写上` });
+  } catch (e) {
+    if (!(e instanceof ConfigError)) throw e;
+    return red(`${e.message}：没写`);
+  }
+  if (o.plan) {
+    for (const f of APPLY_FILES) writeFileSync(`${o.plan}/${f}`, plan.texts[f], { mode: 0o600 });
+    return 0;
+  }
+  if (o.expect) {
+    for (const f of APPLY_FILES) {
+      const t = readText(`${o.expect}/${f}`);
+      if ('error' in t || t.text !== plan.texts[f])
+        return red(`核过以后 ${f} 又变了（或核过的那份读不到）：没写，再发一次`);
+    }
+  }
+  const written = [];
+  const undo = (why) => {
+    const left = [];
+    for (const f of written) {
+      try {
+        write(`${etc}/${f}`, live[f], like[f]);
+      } catch {
+        left.push(f);
+      }
+    }
+    if (left.length > 0) return red(`${why}；改回原样也没成（${left.join('、')} 还是写过的样子）：要人看`);
+    return red(`${why}：${written.length > 0 ? `写过的 ${written.join('、')} 已改回原样` : '一个字都没写'}`);
+  };
+  for (const f of APPLY_FILES) {
+    if (plan.texts[f] === live[f]) continue;
+    try {
+      write(`${etc}/${f}`, plan.texts[f], like[f]);
+    } catch (e) {
+      return undo(`写 ${f} 没成（${e.code ?? e.message}）`);
+    }
+    written.push(f);
+  }
+  for (const f of written) {
+    const t = readText(`${etc}/${f}`);
+    try {
+      if ('error' in t) throw new ConfigError(`${f} 写完读不回（${t.error}）`);
+      checkRewrite(f, live[f], t.text, plan.expect[f]);
+    } catch (e) {
+      if (!(e instanceof ConfigError)) throw e;
+      return undo(`写完读回不一致：${e.message}`);
+    }
+  }
+  const did = plan.set.length + plan.removed.length + plan.healed.length;
+  const recordChanged = !applied || JSON.stringify(applied.files) !== JSON.stringify(plan.files);
+  if (did > 0 || recordChanged) {
+    const at = (o.now ?? new Date()).toISOString();
+    const entry = {
+      at,
+      commit,
+      how: o.how,
+      baseline: plan.baseline,
+      set: plan.set,
+      removed: plan.removed,
+      healed: plan.healed,
+    };
+    const next = {
+      schema: APPLIED_FORMAT,
+      说明: '发布时照期望写环境文件的记录（#323，deploy/france/auto-release/config.mjs 的 applyConfig）：files 是上次照期望写的公开值，release.sh 切版本时只写这一版的期望和它不一样的键；log 是最近几次写了什么。只有 release.sh 写，人别改；认不出就删掉，下次发布重新记基线。',
+      profile: profile.profile,
+      desired: profile.rel,
+      commit,
+      at,
+      files: plan.files,
+      log: [...(applied?.log ?? []), entry].slice(-APPLIED_LOG_KEEP),
+    };
+    try {
+      write(statePath, `${JSON.stringify(next, null, 2)}\n`, null);
+    } catch (e) {
+      return undo(`照期望写的记录 ${statePath} 写不进（${e.code ?? e.message}）`);
+    }
+  }
+  const wanted = (id) => {
+    const [f, k] = id.split(':');
+    return plan.files[f][k];
+  };
+  if (plan.baseline === 'current')
+    out(`note 第一次照期望写：拿在用的 ${curSha.slice(0, 12)} 的期望当「上次写的」，只写 ${short} 改了的`);
+  for (const id of plan.set)
+    out(`changed ${id.replace(':', ' 的 ')}：照 ${short} 的期望写成「${wanted(id)}」`);
+  for (const id of plan.removed)
+    out(`changed ${id.replace(':', ' 的 ')}：${short} 的期望里没有了，删掉（值不打印）`);
+  for (const id of plan.healed) {
+    out(
+      `changed ${id.replace(':', ' 的 ')}：人手改过，期望里 selfHeal 开着，照期望改回「${wanted(id)}」（线上原来的值不打印）`,
+    );
+  }
+  for (const id of plan.kept)
+    out(`ok ${id.replace(':', ' 的 ')}：期望改成了「${wanted(id)}」，线上已经是这个值`);
+  if (plan.drift.length > 0) {
+    out(
+      `note 人手改过、和期望不一致的 ${plan.drift.length} 项不改回（期望里 selfHeal 关着，对账照旧报警）：${plan.drift.join('、')}`,
+    );
+  }
+  if (did === 0) {
+    if (plan.baseline === 'new') {
+      const n = Object.values(plan.files).reduce((s, m) => s + Object.keys(m).length, 0);
+      out(
+        `changed 第一次照期望写：没有上次写的记录、也没有在用的版本，只记基线（${n} 项公开值，${statePath}），不写`,
+      );
+    } else if (recordChanged)
+      out(`changed 照期望写的记录跟着 ${short} 的期望更新（${statePath}），环境文件不用改`);
+    else out(`ok 配置：${short} 的期望和上次写的一样，不用写`);
+  }
+  return 0;
+}
+
+/**
+ * 新机器上照期望建一份环境文件（france.sh 用，文件已经在就不建，之后归发布时照期望写）：公开的写期望的值，私有的只留
+ * 空位（KEY=，人放；值不进仓，也不生造），每一项前面一行注释写它的「说明」。返回整份内容（末尾带换行）。
+ */
+export function renderEnv(want, file, source) {
+  const lines = [
+    `# /etc/fleet-dao/${file}：deploy/france.sh 照仓里的期望 ${source} 建的。每一项「应该是什么」以期望为准：`,
+    '# 要改先改期望、合进主线，发布时照期望写（只写期望变了的键）；空着的是私有值，由人放，值不进仓。',
+  ];
+  for (const d of want.files[file] ?? []) {
+    const note = d.note ? oneLine(d.note) : '';
+    if (d.kind === 'private') {
+      lines.push(
+        `# ${note || '私有值'}（空着由人放，值不进仓；放好后在法国以 root 算指纹写进期望，docs/ops.md 第九节「配置进仓对账」）`,
+        `${d.key}=`,
+      );
+    } else {
+      if (note) lines.push(`# ${note}`);
+      lines.push(`${d.key}=${d.value}`);
+    }
+  }
+  return `${lines.join('\n')}\n`;
 }
 
 // ── 命令行（法国，root） ──
 
 const USAGE = `用法（法国，root；值一律不打印）：
-  node config.mjs check [--desired <期望文件>] [--etc <目录>] [--key <钥匙文件>]
-      拿线上的环境文件跟期望比（不给 --desired 就用在用的那一版里的）。一行一条：ok / red / pending 开头。
+  node config.mjs check [--desired <期望文件>] [--etc <目录>] [--key <钥匙文件>] [--profile <档位文件>]
+      拿线上的环境文件跟期望比（不给 --desired 就用在用的那一版里、这台档位的那份）。一行一条：ok / red / pending 开头。
       退出码：0 一致；1 有不一致；2 没查成（读不到、认不出）；64 参数不对。
   node config.mjs fingerprint <文件> <键> [--stdin] [--etc <目录>] [--key <钥匙文件>]
       算这一项私有值的指纹（线上现在的值；带 --stdin 就算标准输入给的新值，去掉末尾一个换行），只打印指纹。
@@ -619,7 +1128,16 @@ const USAGE = `用法（法国，root；值一律不打印）：
       打印指纹钥匙的编号（期望文件的 fingerprint.keyId）。
   node config.mjs diff-local [--france <期望文件>] [--local <期望文件>]
       本机档和法国的期望逐项比（#451）：不给路径就用仓里的 deploy/france/desired-config.json、
-      deploy/local/desired-config.json。退出码：0 差别都登记过了；1 有没登记的差别；2 没查成；64 参数不对。`;
+      deploy/local/desired-config.json。退出码：0 差别都登记过了；1 有没登记的差别；2 没查成；64 参数不对。
+  node config.mjs apply --commit <提交号> --how release|rollback|auto-rollback [--releases <目录>] [--etc <目录>]
+                        [--state <记录文件>] [--profile <档位文件>] [--plan <目录> | --expect <目录>]
+      切到这一版之前照它的期望写 engine.env、api.env、release.env 里公开的值（deploy/release.sh 调，人不用）：只写这一版的
+      期望和上次写的不一样的键，人手改的不改回（期望里 selfHeal 开了才改回）。--plan 只把写成什么样放进那个目录、线上不动；
+      --expect 那个目录里核过的和重新算的不一样就不写。一行一条：ok / changed / note / red 开头。
+      退出码：0 写好了（或不用写、这一版没有期望）；1 没写成（一个字没写，或写过的已改回原样）；64 参数不对。
+  node config.mjs render engine.env|api.env|release.env [--desired <期望文件>]
+      照期望打印一份新的环境文件（france.sh 建新机器时用）：公开的写值，私有的只留空位，每一项带说明。
+      不给 --desired 就用仓里的 deploy/france/desired-config.json。`;
 
 function cliArgs(argv) {
   const o = { _: [] };
@@ -631,7 +1149,13 @@ function cliArgs(argv) {
       a === '--key' ||
       a === '--releases' ||
       a === '--france' ||
-      a === '--local'
+      a === '--local' ||
+      a === '--commit' ||
+      a === '--how' ||
+      a === '--state' ||
+      a === '--profile' ||
+      a === '--plan' ||
+      a === '--expect'
     ) {
       const v = argv[++i];
       if (!v) throw new ConfigError(`${a} 后面要跟路径`);
@@ -672,8 +1196,46 @@ export async function cli(
   }
   const [cmd, ...rest] = o._;
   try {
+    if (cmd === 'apply' && rest.length === 0) {
+      if (o.plan && o.expect) {
+        io.err(`--plan 和 --expect 只给一个\n${USAGE}`);
+        return 64;
+      }
+      return applyConfig(
+        {
+          releases: o.releases,
+          commit: o.commit,
+          how: o.how,
+          etc: o.etc,
+          state: o.state,
+          profile: o.profile,
+          plan: o.plan,
+          expect: o.expect,
+        },
+        { out: io.out },
+      );
+    }
+    if (cmd === 'render' && rest.length === 1) {
+      const [file] = rest;
+      if (!APPLY_FILES.includes(file))
+        throw new ConfigError(`不认识的文件 ${file}（只建 ${APPLY_FILES.join('、')}）`);
+      const path = o.desired ?? FRANCE_DESIRED_FILE;
+      const got = readText(path);
+      if ('error' in got) throw new ConfigError(`读不到期望：${got.error}`);
+      // 注释里写仓里的相对位置（哪个档位的那份），认不出就照给的路径写
+      const source =
+        Object.values(PROFILE_DESIRED).find((rel) => path.replaceAll('\\', '/').endsWith(`/${rel}`)) ?? path;
+      io.out(renderEnv(parseDesired(got.text), file, source).replace(/\n$/, ''));
+      return 0;
+    }
     if (cmd === 'check' && rest.length === 0) {
-      const live = readLive({ desired: o.desired, etc: o.etc, key: o.key, releases: o.releases });
+      const live = readLive({
+        desired: o.desired,
+        etc: o.etc,
+        key: o.key,
+        releases: o.releases,
+        profile: o.profile,
+      });
       const r = judgeConfig(live);
       const from =
         o.desired ??
@@ -701,7 +1263,7 @@ export async function cli(
       return r.result === 'ok' ? 0 : r.result === 'drift' ? 1 : 2;
     }
     if (cmd === 'fingerprint' && o.all && rest.length === 0) {
-      const live = readLive({ desired: o.desired, etc: o.etc, releases: o.releases });
+      const live = readLive({ desired: o.desired, etc: o.etc, releases: o.releases, profile: o.profile });
       if ('error' in live.desired) throw new ConfigError(`读不到期望：${live.desired.error}`);
       const want = parseDesired(live.desired.text);
       const key = loadKey(o.key);

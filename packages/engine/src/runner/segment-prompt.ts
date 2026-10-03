@@ -6,6 +6,7 @@
 //   退出状态和工作树里的提交。规矩里的每一条都对应引擎后面做的一步：只读提交（所以没提交的改动不算）、自己推分支开 PR（所以不许推、
 //   不许切分支）。需求在单子里、结果在 PR 里（#654）：不要求会话写 需求.md、结果.md。
 // - 返工意见原样带进来（CI 失败日志、验收问题表、没提交）：按条编号，每条超长截断（日志动辄几万字）；一条也没有就不出这一节。
+// - 上一次被切号停下的（#59）多一节：树里留着它的提交和改动，告诉新会话接着干（一次性会话没有续会话，这是唯一的交接）。
 
 import { type ManualBrief, renderBrief } from './brief.ts';
 
@@ -17,6 +18,8 @@ export interface SegmentPromptInput {
   /** 单子指着的需求文档目录（老单才有，已经在主线上）；需求在单子正文里的没有。 */
   specDir?: string | undefined;
   feedback: readonly string[];
+  /** 这一段上一次跑到一半被停下了（切号，#59）：为什么停的那一句；没被停过的不给。 */
+  interrupted?: string;
 }
 
 function clip(text: string): string {
@@ -42,6 +45,14 @@ export function renderSegmentPrompt(input: SegmentPromptInput): string {
     '- 不要新建需求文档、结果文档：需求在单子里，做成了什么写在 PR 正文里（引擎开 PR）。',
     '- 最后一条回复写三句话以内：做了什么、怎么验证的、还欠什么。',
   ];
+  const interrupted = input.interrupted?.trim();
+  if (interrupted) {
+    out.push(
+      '',
+      '## 这一段上一次跑到一半被停下了',
+      `上一次的会话被引擎停下（${clip(interrupted)}），这一次在同一个分支、同一棵工作树上接着干：树里可能已经有它的提交和没提交的改动。先看 git status、git log，接着它往下做，别从头重来，也别把那些改动当成别人的丢掉。`,
+    );
+  }
   const items = feedback.map((f) => f.trim()).filter(Boolean);
   if (items.length > 0) {
     out.push('', '## 上几轮留下的返工意见（照着改，改完才算做完）');

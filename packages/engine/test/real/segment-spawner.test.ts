@@ -5,8 +5,8 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { RunFacts, SessionUser } from '@fleet-dao/adapters';
-import type { RouteLaunchFacts } from '@fleet-dao/db';
+import type { RateLimitReading, RunFacts, SessionUser } from '@fleet-dao/adapters';
+import type { Db, RouteLaunchFacts } from '@fleet-dao/db';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { HostDriver, HostReport, HostRunHooks, HostRunSpec, WiredHost } from '../../src/real/hosts.ts';
 import {
@@ -67,6 +67,7 @@ interface Harness {
   removed: string[];
   order: string[];
   recorded: RunRecord[];
+  logs: string[];
   spawn: ReturnType<typeof hostSegmentSpawner>;
   run: (
     input?: { [K in keyof OneShotInput]?: OneShotInput[K] | undefined },
@@ -88,6 +89,8 @@ function harness(
     driverRun?: (spec: HostRunSpec, hooks: HostRunHooks) => Promise<HostReport>;
     userFrom?: HostDriver['userFrom'];
     unwired?: boolean;
+    /** 给了就把会话流里读到的额度记到库里（路由查询照样走 routeFacts）。 */
+    db?: Db;
   } = {},
 ): Harness {
   const calls: Harness['calls'] = [];
@@ -95,6 +98,7 @@ function harness(
   const removed: string[] = [];
   const order: string[] = [];
   const recorded: RunRecord[] = [];
+  const logs: string[] = [];
   const driver = (hostId: WiredHost): HostDriver => ({
     hostId,
     userFrom: opts.userFrom ?? 'pool',
@@ -130,6 +134,8 @@ function harness(
     },
     baseEnv: { PATH: '/usr/bin', GITHUB_TOKEN: 'secret-should-not-pass' },
     resources: { memoryHighMb: 5888, memoryMaxMb: 6144, swapMaxMb: 0 },
+    ...(opts.db ? { db: opts.db } : {}),
+    log: (message, fields) => void logs.push(`${message} ${JSON.stringify(fields ?? {})}`),
   });
   const run: Harness['run'] = (input = {}, timeoutMinutes = 60) =>
     runOneShot(
@@ -156,7 +162,7 @@ function harness(
         tmpDir: tmp,
       },
     );
-  return { calls, adopted, removed, order, recorded, spawn, run };
+  return { calls, adopted, removed, order, recorded, logs, spawn, run };
 }
 
 describe('hostSegmentSpawner · 成功', () => {
@@ -366,6 +372,71 @@ describe('hostSegmentSpawner · 经 runOneShot 的结局', () => {
     });
     await expect(h.run()).rejects.toThrow(OneShotError);
     expect(h.order).toEqual(['adopt', 'run', 'remove']);
+  });
+});
+
+describe('hostSegmentSpawner · 会话流里读到的额度（#59：切号、选路靠它知道拼车用满了）', () => {
+  const RESETS = '2026-10-02T18:00:00.000Z';
+  const rejectedReading = {
+    status: 'rejected',
+    exhausted: true,
+    rateLimitType: 'five_hour',
+    resetsAt: RESETS,
+    windows: [{ name: 'five_hour', utilization: 1, resetsAt: RESETS }],
+    observedAt: '2026-10-02T13:00:00.000Z',
+  } as RateLimitReading;
+  /** 像插头那样：读到一帧额度就交给 onRateLimit，收场前等它交回的东西落定（adapters 的 CallbackGate）。 */
+  const rejectedRun = async (_spec: HostRunSpec, hooks: HostRunHooks) => {
+    await hooks.onRateLimit?.(rejectedReading);
+    return report({
+      facts: okFacts({ quotaExhausted: true, terminal: { isError: true, detail: 'usage limit reached' } }),
+      resetsAt: RESETS,
+    });
+  };
+
+  it('给了库：交回写库那一下，插头收场前等它落定（这一段交回「额度用满」时读数已经在库里，重新选路不会又派回这个池）', async () => {
+    let commit: (value: unknown) => void = () => {};
+    const writing = new Promise((resolve) => {
+      commit = resolve;
+    });
+    // savePoolQuota 在一个事务里写：事务没落定，写库那一下就没落定
+    const db = { transaction: () => writing } as unknown as Db;
+    let saved = false;
+    const h = harness({
+      db,
+      driverRun: async (spec, hooks) => {
+        const pending = hooks.onRateLimit?.(rejectedReading);
+        expect(pending).toBeInstanceOf(Promise);
+        void (pending as Promise<unknown>).then(() => {
+          saved = true;
+        });
+        await new Promise((r) => setTimeout(r, 10));
+        expect(saved).toBe(false);
+        commit({ written: 1, skippedAsOlder: 0, markedStale: 0, deleted: 0 });
+        await pending;
+        expect(saved).toBe(true);
+        return rejectedRun(spec, {});
+      },
+    });
+    const r = await h.run();
+    expect(r.facts?.reason).toBe('quota_exhausted');
+    expect(h.logs.join('\n')).not.toContain('没记上');
+  });
+
+  it('没给库：不接额度回调（读数没处记，不假装记过）', async () => {
+    const h = harness({ driverRun: rejectedRun });
+    await h.run();
+    expect(h.calls[0]?.hooks.onRateLimit).toBeUndefined();
+  });
+
+  it('【故意造出的失败】额度记不进库：只记日志，这一段照样交回「额度用满」（不当成起不来、不改结局）', async () => {
+    const broken = {} as unknown as Db;
+    const h = harness({ db: broken, driverRun: rejectedRun });
+    const r = await h.run();
+    expect(r).toMatchObject({ outcome: 'failed', facts: { reason: 'quota_exhausted', resetsAt: RESETS } });
+    expect(h.recorded[0]?.outcome).toBe('failed');
+    expect(h.logs.join('\n')).toContain('一次性会话读到的额度没记上');
+    expect(h.logs.join('\n')).toContain('"poolId":"p1"');
   });
 });
 

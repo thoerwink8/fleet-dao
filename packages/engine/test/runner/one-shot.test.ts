@@ -222,3 +222,164 @@ describe('one-shot.ts', () => {
     }
   });
 });
+
+describe('切号叫停（deps.stop，#59）：结局 org_switch，不是 killed、不算失败', () => {
+  const WHY = '切号：会话用户从拼车组织切到独享组织，先停下，切完接着干';
+
+  it('会话跑着时叫停：进程被杀，结局 org_switch，原因写为什么停；runs 收成 org_switch', async () => {
+    const stop = new AbortController();
+    const { deps, recorded, started, cleanup } = await fakeDeps({
+      scripted: { exitCode: 0, stdout: '', stderr: '', killed: false },
+    });
+    deps.spawn = (cmd) =>
+      new Promise((resolve) => {
+        cmd.signal.addEventListener(
+          'abort',
+          () => resolve({ exitCode: null, stdout: '', stderr: '', killed: true }),
+          {
+            once: true,
+          },
+        );
+        setTimeout(() => stop.abort(new Error(WHY)), 5);
+      });
+    deps.stop = stop.signal;
+    try {
+      const r = await runOneShot(BASE_INPUT, deps);
+      expect(r.outcome).toBe('org_switch');
+      expect(r.failureReason).toBe(`${WHY}（会话被停下）`);
+      expect(started).toHaveLength(1);
+      expect(recorded).toEqual([
+        expect.objectContaining({
+          runId: r.runId,
+          outcome: 'org_switch',
+          failureReason: `${WHY}（会话被停下）`,
+        }),
+      ]);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('起会话之前就叫停了：不起会话、不留开跑那一行，记一笔 org_switch', async () => {
+    const stop = new AbortController();
+    stop.abort(new Error(WHY));
+    const { deps, calls, recorded, started, cleanup } = await fakeDeps({
+      scripted: { exitCode: 0, stdout: '做完了', stderr: '', killed: false },
+    });
+    deps.stop = stop.signal;
+    try {
+      const r = await runOneShot(BASE_INPUT, deps);
+      expect(r).toMatchObject({
+        outcome: 'org_switch',
+        exitCode: null,
+        failureReason: `${WHY}（还没起会话）`,
+      });
+      expect(calls).toHaveLength(0);
+      expect(started).toHaveLength(0);
+      expect(recorded).toEqual([expect.objectContaining({ runId: r.runId, outcome: 'org_switch' })]);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('【故意造出的失败】内存一直放不下时叫停：先认叫停，回 org_switch（不再回 admission_blocked 让调用方接着等），不查内存', async () => {
+    const stop = new AbortController();
+    stop.abort(new Error(WHY));
+    const { deps, calls, recorded, started, cleanup } = await fakeDeps({
+      scripted: { exitCode: 0, stdout: '做完了', stderr: '', killed: false },
+    });
+    let reads = 0;
+    deps.memoryAdmission = {
+      readText: async () => {
+        reads += 1;
+        return String(9500 * 1024 * 1024);
+      },
+      cgroupRoot: '/sys/fs/cgroup',
+      slicePath: 'fleet.slice/fleet-agents.slice',
+      sliceHighMb: 10_000,
+      reservePerSessionMb: 2048,
+    };
+    deps.stop = stop.signal;
+    try {
+      const r = await runOneShot(BASE_INPUT, deps);
+      expect(r).toMatchObject({ outcome: 'org_switch', failureReason: `${WHY}（还没起会话）` });
+      expect(reads).toBe(0);
+      expect(calls).toHaveLength(0);
+      expect(started).toHaveLength(0);
+      expect(recorded).toEqual([expect.objectContaining({ runId: r.runId, outcome: 'org_switch' })]);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('叫停时起会话那一步抛了（插头被杀时拒掉）：还是 org_switch，不当成起不来', async () => {
+    const stop = new AbortController();
+    const { deps, recorded, cleanup } = await fakeDeps({
+      scripted: { exitCode: 0, stdout: '', stderr: '', killed: false },
+    });
+    deps.spawn = (cmd) =>
+      new Promise((_resolve, reject) => {
+        cmd.signal.addEventListener('abort', () => reject(new Error('被杀了')), { once: true });
+        setTimeout(() => stop.abort(new Error(WHY)), 5);
+      });
+    deps.stop = stop.signal;
+    try {
+      const r = await runOneShot(BASE_INPUT, deps);
+      expect(r).toMatchObject({ outcome: 'org_switch', stderrTail: '被杀了' });
+      expect(recorded[0]).toMatchObject({ outcome: 'org_switch' });
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('叫停之后会话自己跑完了（赶在被杀之前交了）：照样是 done；叫停之后报了别的错的：算 org_switch（是我们停的）', async () => {
+    const finished = await fakeDeps({
+      scripted: { exitCode: 0, stdout: '做完了', stderr: '', killed: false },
+    });
+    const stopA = new AbortController();
+    finished.deps.spawn = async () => {
+      stopA.abort(new Error(WHY));
+      return { exitCode: 0, stdout: '做完了', stderr: '', killed: false };
+    };
+    finished.deps.stop = stopA.signal;
+    const failing = await fakeDeps({ scripted: { exitCode: 1, stdout: '', stderr: '', killed: false } });
+    const stopB = new AbortController();
+    failing.deps.spawn = async () => {
+      stopB.abort(new Error(WHY));
+      return { exitCode: 1, stdout: '', stderr: 'SIGTERM', killed: false };
+    };
+    failing.deps.stop = stopB.signal;
+    try {
+      expect((await runOneShot(BASE_INPUT, finished.deps)).outcome).toBe('done');
+      expect((await runOneShot(BASE_INPUT, failing.deps)).outcome).toBe('org_switch');
+    } finally {
+      await finished.cleanup();
+      await failing.cleanup();
+    }
+  });
+
+  it('超时先到的算超时（不算切号）', async () => {
+    const stop = new AbortController();
+    const { deps, cleanup } = await fakeDeps({
+      scripted: { exitCode: 0, stdout: '', stderr: '', killed: false },
+    });
+    deps.spawn = (cmd) =>
+      new Promise((resolve) => {
+        cmd.signal.addEventListener(
+          'abort',
+          () => {
+            stop.abort(new Error(WHY));
+            resolve({ exitCode: null, stdout: '', stderr: '', killed: true });
+          },
+          { once: true },
+        );
+      });
+    deps.stop = stop.signal;
+    try {
+      const r = await runOneShot({ ...BASE_INPUT, timeoutMinutes: 0.0005 }, deps);
+      expect(r.outcome).toBe('timeout');
+    } finally {
+      await cleanup();
+    }
+  });
+});

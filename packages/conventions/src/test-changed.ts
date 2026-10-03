@@ -2,24 +2,25 @@
 // 最后一次通过（specs/164-会话内存与交活测试/）。
 // 改动 = 和 origin/main 分叉以来提交了的 + 暂存的 + 没暂存的 + 没跟踪的：会话交活前测的是自己手上的这棵树。
 // 跑哪些测试和 CI 按改动跑同一套判法（ci-plan.ts 的 planCi：改到的包和依赖它们的包、测试读的包外文件；根配置、shared、夹具、
-// deploy/ 这类改到就全跑），再加上 CI 每个 PR 都跑的 docs job 那两份（ALWAYS_TESTS）。
+// deploy/ 这类改到就全跑）；要全跑、本机又不全跑时先跑的那份也从同一份判法算（ci-plan.ts 的 fallbackUnits），这里不另写
+// 「改动落在哪」。两种都带上 CI 每个 PR 都跑的那几份（ci-plan.ts 的 ALWAYS_TESTS），拒跑时也不例外（#740）。
 // 改这里之前必须知道：原先定的是直接跑 vitest --changed origin/main，实现时发现两个洞，所以改成按包选——
 // ① 基准分支读不到时 vitest 不报错：它调 git 用的 tinyexec 不抛非零退出码，git diff 失败就当「没提交过改动」，只测没提交的，
 //   照样退出 0（本机实测：给个不存在的分支名，它只跑了没提交的那一个测试文件）；
 // ② 它只顺着 import 找受影响的测试：引擎的工作流测试跑的是 Temporal 打包器按路径打的包，几个命令行测试另起进程跑，测试直接读的
 //   文档、迁移、夹具也不在 import 里——改了引擎的工作流代码，它一个工作流测试都不跑。按包选（有 ci-plan.test.ts 扫测试源码兜着
 //   「测试读包外文件」的清单）没有这个洞，代价是比按文件多跑一些。
-import { type PackageGraph, planCi, unitPath } from './ci-plan.ts';
-import type { RepoView } from './repo.ts';
+import {
+  ALWAYS_TESTS,
+  type Fallback,
+  fallbackUnits,
+  type PackageGraph,
+  planCi,
+  unitPath,
+} from './ci-plan.ts';
 
 /** 和谁比：引擎给会话的树钉好了这个引用（packages/engine/src/real/user-git.ts 的 pinMainline），本机是 git fetch 来的。 */
 export const BASE = 'origin/main';
-
-/** CI 的 lint job 里 docs 那一步每个 PR 都跑的两份（.github/workflows/ci.yml；test/test-changed.test.ts 核对两边一致）。 */
-export const ALWAYS_TESTS: readonly string[] = Object.freeze([
-  'packages/conventions/test/doc-pointers.test.ts',
-  'agents/test/',
-]);
 
 export class TestChangedError extends Error {
   constructor(message: string) {
@@ -74,14 +75,31 @@ export function changedFiles(git: GitRun, base = BASE): string[] {
   ].sort();
 }
 
-export interface TestSelection {
-  /** all：全跑；some：只跑 paths（交给 vitest run 的过滤）。 */
-  kind: 'all' | 'some';
+/** 要全跑、本机又不全跑时先跑的：fallbackUnits 算出的单元落成交给 vitest 的过滤，hubs、dependents 原样带着给人看。 */
+export interface LocalRun extends Fallback {
+  /** 交给 vitest run 的过滤：units 的目录，加上 CI 每次都跑的 ALWAYS_TESTS。 */
   paths: string[];
+}
+
+interface SelectionCommon {
   /** 为什么这么跑（各文件落到了哪；全跑时是触发全跑的那几条）。 */
   reasons: string[];
   /** CI 还会跑、这里不跑的（给人看，免得以为本机绿了 CI 一定绿）。 */
   ciOnly: string[];
+}
+
+/** some：只跑 paths（交给 vitest run 的过滤）；all：全跑，本机不全跑时先跑 local。 */
+export type TestSelection =
+  | (SelectionCommon & { kind: 'some'; paths: string[] })
+  | (SelectionCommon & { kind: 'all'; local: LocalRun });
+
+/**
+ * 交给 vitest 的过滤：单元的目录，再加 CI 每次都跑的 ALWAYS_TESTS。
+ * 本机不按耗时装箱（CI 是「单元 → 测试文件 → 装台」，bin/ci-plan.ts）：不是 4 核运行机，几台并行跑反而把机器拖满。
+ * vitest 的过滤是子串、一个文件只跑一次，所以 agents/ 和 agents/test/ 都在也不重跑；没有测试的包（shared）混在里面也不报错。
+ */
+function vitestPaths(units: readonly string[]): string[] {
+  return [...new Set([...units.map(unitPath), ...ALWAYS_TESTS])];
 }
 
 /** 跑哪些测试：和 CI 按改动跑同一套判法。依赖图读不出（graph 是一句为什么）照 CI 全跑，不少跑。 */
@@ -102,11 +120,14 @@ export function selectTests(changed: readonly string[], graph: PackageGraph | st
       ? []
       : [`装机测试（deploy/test/run.sh${plan.deploy === 'ops' ? ' --ops' : ''}）`]),
   ];
-  if (plan.full) return { kind: 'all', paths: [], reasons: plan.reasons, ciOnly };
-  // CI 现在按「选中的单元 → 测试文件 → 装台」跑（bin/ci-plan.ts），本机照旧按单元目录交给 vitest
-  // （本机不按耗时装箱：不是 4 核运行机，几台并行跑反而把机器拖满）。plan.full 在前一步就返回了，这里 testUnits 就是各单元。
-  const paths = [...new Set([...plan.testUnits.map(unitPath), ...ALWAYS_TESTS])];
-  return { kind: 'some', paths, reasons: plan.reasons, ciOnly };
+  if (!plan.full) return { kind: 'some', paths: vitestPaths(plan.testUnits), reasons: plan.reasons, ciOnly };
+  const fallback = fallbackUnits(changed, graph);
+  return {
+    kind: 'all',
+    local: { ...fallback, paths: vitestPaths(fallback.units) },
+    reasons: plan.reasons,
+    ciOnly,
+  };
 }
 
 /** 交给 vitest 的参数（不含 vitest 本身）。 */
@@ -140,59 +161,33 @@ function inCi(env: Readonly<Record<string, string | undefined>>): boolean {
   return v !== undefined && v !== '' && v !== 'false' && v !== '0';
 }
 
-/** 改到的文件落在哪几个测试单元：packages/<包>/ 和仓根的 agents/（测试在 agents/test/）；根配置、文档、deploy/ 这类不算。 */
-export function changedUnits(changed: readonly string[]): string[] {
-  const units = new Set<string>();
-  for (const f of changed) {
-    const m = /^packages\/([^/]+)\//.exec(f);
-    if (m) units.add(`packages/${m[1]}/`);
-    else if (f.startsWith('agents/')) units.add('agents/test/');
+/** 拒跑时打给人看的：本机先跑的那一条命令、依赖 hubs 的（CI 全跑会测到）、真要全跑怎么说。 */
+function refuseLines(local: LocalRun): string[] {
+  const lines = [
+    '要全跑（原因见上面几行：改到了根配置、锁文件、shared 这类），本机不跑全量——几个会话同时全跑会把机器拖满，全量交给 CI。',
+    '本机先跑这一条（和 CI 同一份判法，只是不升成全跑：改到的包和依赖它们的、测试读到改动的，再加 CI 每个 PR 都跑的 docs 那几份）：',
+    `  pnpm exec vitest run ${local.paths.join(' ')}`,
+  ];
+  if (typeof local.dependents === 'string') {
+    lines.push(`${local.dependents}：CI 全跑会测到。`);
+  } else if (local.dependents.length > 0) {
+    lines.push(
+      `依赖 ${local.hubs.join('、')} 的也要跑——本机不逐个跑，CI 全跑会测到：${local.dependents.join('、')}（想先在本机测哪个：pnpm exec vitest run packages/<包>/）`,
+    );
   }
-  return [...units].sort();
-}
-
-const TEST_FILE = /\.test\.tsx?$/;
-
-/** 目录下（递归，跳过 node_modules）有没有测试文件：true 有、false 没有、undefined 有目录列不出来（不当成没有）。 */
-function hasTestFiles(repo: RepoView, dir: string): boolean | undefined {
-  const names = repo.list(dir);
-  if (names === undefined) return repo.exists(dir) ? undefined : false;
-  let unknown = false;
-  for (const name of names) {
-    if (name === 'node_modules') continue;
-    const path = `${dir}/${name}`;
-    if (repo.isDir(path)) {
-      const sub = hasTestFiles(repo, path);
-      if (sub === true) return true;
-      if (sub === undefined) unknown = true;
-    } else if (TEST_FILE.test(name)) return true;
-  }
-  return unknown ? undefined : false;
-}
-
-/** 这个单元自己有没有测试（vitest.config.ts 的 include：包的 src/、test/ 下，agents/test/ 下）。 */
-export function unitHasTests(repo: RepoView, unit: string): boolean | undefined {
-  const base = unit.replace(/\/$/, '');
-  const dirs = base === 'agents/test' ? [base] : [`${base}/src`, `${base}/test`];
-  let unknown = false;
-  for (const dir of dirs) {
-    const r = hasTestFiles(repo, dir);
-    if (r === true) return true;
-    if (r === undefined) unknown = true;
-  }
-  return unknown ? undefined : false;
+  lines.push('真要在本机全跑：pnpm test:changed --all');
+  lines.push(`没跑测试，退出码 ${REFUSED_FULL_RUN}（不是测试没过）。`);
+  return lines;
 }
 
 /**
- * 跑不跑、跑什么。只在「判出要全跑、没带 --all、不在 CI、不是引擎会话」时拒跑：写明原因、改到的单元各自单跑的命令、
- * 真要全跑怎么说，退出码 REFUSED_FULL_RUN。带 --all 就全跑（明说了要）。
+ * 跑不跑、跑什么。只在「判出要全跑、没带 --all、不在 CI、不是引擎会话」时拒跑：写明原因、本机先跑的那一条命令
+ * （selection.local）、留给 CI 的那些、真要全跑怎么说，退出码 REFUSED_FULL_RUN。带 --all 就全跑（明说了要）。
  */
 export function decideRun(input: {
   selection: TestSelection;
-  changed: readonly string[];
   all: boolean;
   env: Readonly<Record<string, string | undefined>>;
-  repo: RepoView;
 }): RunDecision {
   const { selection, env } = input;
   if (input.all) return { kind: 'run', args: ['run'], note: '带了 --all：本机全跑' };
@@ -205,29 +200,13 @@ export function decideRun(input: {
       note: '引擎起的会话：照旧全跑（交活只认它；会话有内存上限，测试进程数按上限算）',
     };
   }
-  const units = changedUnits(input.changed);
-  const lines = [
-    '要全跑（原因见上面几行：改到了根配置、锁文件、shared 这类），本机不跑全量——几个会话同时全跑会把机器拖满，全量交给 CI。',
-  ];
-  if (units.length === 0) {
-    lines.push('这次没改到哪个包的代码，没有要单跑的。');
-  } else {
-    lines.push('改到的包各自单跑：');
-    for (const unit of units) {
-      const has = unitHasTests(input.repo, unit);
-      lines.push(`  pnpm exec vitest run ${unit}${has === false ? '（这个包自己没有测试，不用跑）' : ''}`);
-    }
-  }
-  lines.push('真要在本机全跑：pnpm test:changed --all');
-  lines.push(`没跑测试，退出码 ${REFUSED_FULL_RUN}（不是测试没过）。`);
-  return { kind: 'refuse', code: REFUSED_FULL_RUN, lines };
+  return { kind: 'refuse', code: REFUSED_FULL_RUN, lines: refuseLines(selection.local) };
 }
 
 export interface TestChangedDeps {
   argv: readonly string[];
   env: Readonly<Record<string, string | undefined>>;
   git: GitRun;
-  repo: RepoView;
   graph: () => PackageGraph | string;
   /** 跑 vitest（参数不含 vitest 本身）：回退出码；被信号杀掉 status 是 null；起不来 error 有值。 */
   vitest: (args: string[]) => { status: number | null; signal?: string | null; error?: Error | undefined };
@@ -256,13 +235,7 @@ export function testChanged(deps: TestChangedDeps): number {
   deps.out(`和 ${BASE} 比改了 ${changed.length} 个文件（含没提交的）`);
   for (const reason of selection.reasons) deps.out(`- ${reason}`);
   if (selection.ciOnly.length > 0) deps.out(`CI 另外还跑（这里不跑）：${selection.ciOnly.join('、')}`);
-  const decision = decideRun({
-    selection,
-    changed,
-    all: deps.argv.includes('--all'),
-    env: deps.env,
-    repo: deps.repo,
-  });
+  const decision = decideRun({ selection, all: deps.argv.includes('--all'), env: deps.env });
   if (decision.kind === 'refuse') {
     for (const line of decision.lines) deps.err(line);
     return decision.code;
