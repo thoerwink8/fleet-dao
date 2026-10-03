@@ -42,11 +42,13 @@ shard_n=0
 
 # 分台：SHARDS 的每一项是一台，里面是用空格隔开的项目名。项目名 = deploy/test 下 *.test.sh 去掉后缀；另有四个特殊项：
 # lint（语法 + shellcheck）、backup（deploy/backup/test）、node-tests（下面 NODE_TESTS 那几个 node --test）、ports（端口表）。
-# 按 CI 实测的耗时（2026-10-03，一整套 231 秒）搭，三台各 70 秒上下；每一项的秒数看日志里的「⏱」行，不匀了就挪项。
+# 按 CI 实测的耗时排（2026-10-03；每一项的秒数看日志里的「⏱」行，不匀了就挪项）。那轮实测的大项：
+# cli-tools 88、login-user 53、cursor-agent 48、session-ports 28、lint 20、session-pnpm/grok 各 11、release-flow/public-site 各 7~8，
+# 其余都在 2 秒以内（零碎的加一起约 20 秒）。分法：最重的三个各占一台打头（88 / 53+48 / 28+20），零碎的都塞第三台。
 SHARDS=(
-  'lint login-user session-user listen root-exec-check release-flow gateway-deploy gateway-bundle place-file ops-only auto-release-state public-site agents-sync agents-sync-account profile shards ports'
-  'cli-tools session-pnpm session-ports web-publish demo-scopes'
-  'cursor-agent cursor-key grok mirasim mirasim-session node-cache backup agent-scope-adopt agent-scope-org-use app-config node-tests'
+  'cli-tools session-pnpm'
+  'login-user cursor-agent'
+  'lint session-ports session-user listen root-exec-check release-flow gateway-deploy gateway-bundle place-file ops-only auto-release-state public-site agents-sync agents-sync-account profile shards ports web-publish demo-scopes cursor-key grok mirasim mirasim-session node-cache backup agent-scope-adopt agent-scope-org-use app-config node-tests'
 )
 NODE_TESTS=(health-page auto-release config)
 SPECIAL_UNITS=(lint backup node-tests ports)
