@@ -4,7 +4,16 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { jevAnswers, jevQuestions, loadCatalog, parseCatalog, seed, settings } from '@fleet-dao/db';
+import {
+  applyRoutingDefault,
+  jevAnswers,
+  jevQuestions,
+  loadCatalog,
+  loadRoutingConfig,
+  parseCatalog,
+  seed,
+  settings,
+} from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import type { BackendRequest, BackendResult, JevBackend, JevSetup } from '@fleet-dao/jev';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -270,9 +279,10 @@ describe('生产装配：配置在哪按环境变量定', () => {
     return path;
   };
 
-  it('FLEET_JEV_CONFIG 指的配置、库里判断阶段排第一的路由：起来时登记，问的时候记下路由', async () => {
+  it('FLEET_JEV_CONFIG 指的配置、路由两层里判断用途排第一的路由：起来时登记，问的时候记下路由', async () => {
     await seed(t.db);
     await loadCatalog(t.db, parseCatalog(repoFile(EXAMPLE), EXAMPLE));
+    await applyRoutingDefault(t.db, await loadRoutingConfig());
     const path = machine({
       typesafe: { endpoint: 'https://jev.example.invalid/v1', keyFile: '/nonexistent/key' },
     });

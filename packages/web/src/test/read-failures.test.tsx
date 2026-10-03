@@ -98,8 +98,8 @@ describe('对话框里读不到也照实说', () => {
     expect(screen.queryByText('这个需求现在没有待回答的追问。')).toBeNull();
   });
 
-  test('换模型：路由没读成，写明现在没法换', async () => {
-    renderApp(<Trigger action="reroute" />, { api: failing('routing') });
+  test('换模型：路由两层没读成，写明现在没法换', async () => {
+    renderApp(<Trigger action="reroute" />, { api: failing('routingLayers') });
     expect(await screen.findByText(/路由没读成，现在没法换/)).toBeTruthy();
     await act(async () => {
       fireEvent.keyDown(document.body, { key: 'Escape' });
