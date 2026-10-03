@@ -21,7 +21,8 @@
     "issue:close": "node packages/conventions/src/bin/issue-close.ts",
     "debt:check": "node packages/conventions/src/bin/debt-check.ts",
     "plan": "node packages/conventions/src/bin/plan.ts",
-    "github:audit": "node packages/conventions/src/bin/github-audit.ts"
+    "github:audit": "node packages/conventions/src/bin/github-audit.ts",
+    "drill": "node packages/engine/src/bin/drill.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.14",

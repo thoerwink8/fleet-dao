@@ -1,4 +1,5 @@
 // 全流程巡检（#223）的记录和它每一回从库里读的事实：没跑成、断了、通过分开记，读不到的不拿空顶。
+import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   canaryDbFacts,
@@ -12,21 +13,11 @@ import {
   startCanaryRun,
 } from '../src/queries/canary.ts';
 import { upsertAlert } from '../src/queries/engine.ts';
-import { registerScheduledJobs, startScheduleRun } from '../src/queries/schedule.ts';
-import { githubEvents, githubEventVersions, repos, stepTimings } from '../src/schema/index.ts';
+import { startRun } from '../src/queries/runs.ts';
+import { finishScheduleRun, registerScheduledJobs, startScheduleRun } from '../src/queries/schedule.ts';
+import { CANARY_STAGE_NAMES, canaryRuns, repos, stepTimings } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
-import {
-  addRepo,
-  addRoute,
-  addRun,
-  addSubtask,
-  addTask,
-  ago,
-  catalog,
-  expectViolation,
-  MIN,
-  NOW,
-} from './helpers.ts';
+import { addRepo, addTask, ago, expectViolation, MIN, NOW } from './helpers.ts';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -72,7 +63,7 @@ describe('巡检一轮的记录', () => {
     ];
     expect(
       await saveCanaryProgress(t.db, id, {
-        stage: 'dispatch',
+        stage: 'implement',
         steps,
         issueNumber: 12,
         taskId: task.id,
@@ -80,7 +71,7 @@ describe('巡检一轮的记录', () => {
       }),
     ).toBe(true);
     expect(await canaryRunById(t.db, id)).toMatchObject({
-      stage: 'dispatch',
+      stage: 'implement',
       issueNumber: 12,
       taskId: task.id,
       steps,
@@ -88,11 +79,11 @@ describe('巡检一轮的记录', () => {
     expect(
       await finishCanaryRun(t.db, id, { verdict: 'pass', stage: 'board', why: null, steps, at: NOW }),
     ).toBe('ok');
-    expect(await saveCanaryProgress(t.db, id, { stage: 'plan', steps: [], at: NOW })).toBe(false);
+    expect(await saveCanaryProgress(t.db, id, { stage: 'verify', steps: [], at: NOW })).toBe(false);
     expect(
       await finishCanaryRun(t.db, id, {
         verdict: 'broken',
-        stage: 'plan',
+        stage: 'verify',
         why: '又断了',
         steps: [],
         at: NOW,
@@ -110,7 +101,7 @@ describe('巡检一轮的记录', () => {
   it('【故意造出的失败】断了、没跑成却不写为什么：库里的约束拒掉，不许「没通过，也不知道为什么」', async () => {
     const { id } = await round();
     await expectViolation(
-      finishCanaryRun(t.db, id, { verdict: 'broken', stage: 'dispatch', why: null, steps: [], at: NOW }),
+      finishCanaryRun(t.db, id, { verdict: 'broken', stage: 'implement', why: null, steps: [], at: NOW }),
       'canary_runs_not_pass_has_why',
     );
     await expectViolation(
@@ -157,7 +148,7 @@ describe('巡检一轮的记录', () => {
     const broken = await round();
     await finishCanaryRun(t.db, broken.id, {
       verdict: 'broken',
-      stage: 'plan',
+      stage: 'verify',
       why: '挂起',
       steps: [],
       issueNumber: 5,
@@ -174,14 +165,14 @@ describe('巡检一轮的记录', () => {
     const other = await round('acme/other');
     await finishCanaryRun(t.db, other.id, {
       verdict: 'broken',
-      stage: 'plan',
+      stage: 'verify',
       why: '挂起',
       steps: [],
       issueNumber: 7,
       at: NOW,
     });
     const running = await round();
-    await saveCanaryProgress(t.db, running.id, { stage: 'plan', steps: [], issueNumber: 9, at: NOW });
+    await saveCanaryProgress(t.db, running.id, { stage: 'verify', steps: [], issueNumber: 9, at: NOW });
 
     const left = await leftoverCanaryRuns(t.db, { repo: 'acme/canary', limit: 5 });
     expect(left.map((r) => r.issueNumber)).toEqual([5]);
@@ -194,7 +185,7 @@ describe('巡检一轮的记录', () => {
   it('【故意造出的失败】没收尾的一轮（工作流没了、一直没结论）：补记成没跑成、写明原因，之后照留下的单收；在跑的、有结论的不动', async () => {
     const lost = await round('acme/canary', ago(7 * 60 * MIN));
     await saveCanaryProgress(t.db, lost.id, {
-      stage: 'plan',
+      stage: 'verify',
       steps: [],
       issueNumber: 5,
       at: ago(6 * 60 * MIN),
@@ -213,7 +204,7 @@ describe('巡检一轮的记录', () => {
     expect(got).toEqual([{ id: lost.id, scheduleRunId: lost.scheduleRunId, issueNumber: 5 }]);
     expect(await canaryRunById(t.db, lost.id)).toMatchObject({
       verdict: 'not_run',
-      stage: 'plan',
+      stage: 'verify',
       why,
       endedAt: NOW,
     });
@@ -233,111 +224,140 @@ describe('巡检一轮的记录', () => {
 });
 
 describe('巡检每一回从库里读的事实', () => {
-  it('巡检仓不在库里：repo 是空的，别的都是空（不报错、也不冒充有任务）', async () => {
-    const facts = await canaryDbFacts(t.db, { owner: 'acme', name: 'canary', issueNumber: 1 });
-    expect(facts).toMatchObject({ repo: null, task: null, sessions: { total: 0 }, timings: 0, block: null });
+  /** 这一轮巡检开单的时刻：runs 的账只认这之后起的。 */
+  const SINCE = ago(60 * MIN);
+  const factsOf = (issueNumber: number) =>
+    canaryDbFacts(t.db, { owner: 'acme', name: 'canary', issueNumber, since: SINCE, intakeJob: 'intake' });
+
+  it('巡检仓不在库里：repo 是空的，别的都是空（不报错、也不冒充有任务）；拉单一轮都没跑过是 null', async () => {
+    expect(await factsOf(1)).toEqual({
+      repo: null,
+      task: null,
+      runs: { total: 0, ended: 0, manual: 0, verify: 0, withUsage: 0 },
+      timings: 0,
+      openAlerts: [],
+      lastIntake: null,
+    });
   });
 
-  it('收进来之前：仓在、没有任务行，带上最近一次投递怎么处理的（没派的原因看得见）', async () => {
+  it('收进来之前：仓在、没有任务行，带上最近一轮拉单的结局（收单卡住时看得见拉单怎么了）', async () => {
     const repo = await addRepo(t.db, 'canary');
     await t.db.update(repos).set({ autoDispatchSince: ago(600 * MIN) });
-    await t.db.insert(githubEvents).values([
-      {
-        deliveryId: 'd1',
-        event: 'issues',
-        action: 'opened',
-        source: 'webhook',
-        repo: 'acme/canary',
-        payload: {},
-        status: 'accepted',
-        note: 'task=created, workflow=unscheduled',
-        receivedAt: ago(10 * MIN),
-        finishedAt: ago(10 * MIN),
-      },
-      {
-        deliveryId: 'd2',
-        event: 'issues',
-        action: 'milestoned',
-        source: 'webhook',
-        repo: 'acme/canary',
-        payload: {},
-        status: 'failed',
-        reason: '没查成：读不到挂在哪个版本',
-        receivedAt: ago(5 * MIN),
-        finishedAt: ago(5 * MIN),
-      },
+    await registerScheduledJobs(t.db, [
+      { id: 'intake', name: '引擎拉单', schedule: '每 5 分钟', expectEveryMinutes: 15 },
     ]);
-    await t.db.insert(githubEventVersions).values([
-      { deliveryId: 'd1', object: 'acme/canary:issue:12', version: ago(10 * MIN), state: 'open' },
-      { deliveryId: 'd2', object: 'acme/canary:issue:12', version: ago(5 * MIN), state: 'open' },
-    ]);
-    const facts = await canaryDbFacts(t.db, { owner: 'acme', name: 'canary', issueNumber: 12 });
+    const older = await startScheduleRun(t.db, 'intake', ago(10 * MIN));
+    await finishScheduleRun(t.db, older, { outcome: 'ok', scanned: 1, found: 0 }, ago(10 * MIN));
+    const latest = await startScheduleRun(t.db, 'intake', ago(5 * MIN));
+    await finishScheduleRun(t.db, latest, { outcome: 'failed', why: '白名单读不到' }, ago(5 * MIN));
+    const facts = await factsOf(12);
     expect(facts.repo).toMatchObject({ id: repo.id });
     expect(facts.repo?.autoDispatchSince?.getTime()).toBe(ago(600 * MIN).getTime());
     expect(facts.task).toBeNull();
-    expect(facts.lastDelivery).toEqual({
-      event: 'issues',
-      action: 'milestoned',
-      status: 'failed',
-      reason: '没查成：读不到挂在哪个版本',
-      note: null,
+    expect(facts.lastIntake).toEqual({
+      startedAt: ago(5 * MIN),
+      endedAt: ago(5 * MIN),
+      outcome: 'failed',
+      why: '白名单读不到',
     });
   });
 
-  it('收进来以后：任务行、会话几个起来了几个结束了几个有用量、每步耗时几笔、块和 PR、这张单工作流的开着的提醒（别的单的不算）', async () => {
-    await catalog(t.db);
-    await addRoute(t.db, { id: 'r1', poolId: 'relay-a', modelId: 'opus-4.9' });
+  it('收进来以后：任务行、runs 记的账（只认开单以后起的、这个单号的）、每步耗时、这张单任务工作流的开着的提醒（别的单的不算）', async () => {
     const repo = await addRepo(t.db, 'canary');
-    const task = await addTask(t.db, repo.id, { issueNumber: 1, state: 'running', phase: 'fusion:execute' });
-    await addRun(t.db, {
-      taskId: task.id,
-      routeId: 'r1',
-      stage: 'plan',
-      startedAt: ago(20 * MIN),
-      endedAt: ago(15 * MIN),
-      outcome: 'ok',
+    const task = await addTask(t.db, repo.id, { issueNumber: 1, state: 'running', phase: 'verify' });
+    // 动手两笔（一笔结束、记上了用量；一笔还在跑），验收一笔结束、用量读不到（留空，不当 0）
+    await startRun(t.db, {
+      segment: 'manual',
+      issueNumber: 1,
+      model: 'grok-5',
+      startedAt: ago(40 * MIN),
+      endedAt: ago(30 * MIN),
+      outcome: 'done',
       inputTokens: 1200,
     });
-    await addRun(t.db, { taskId: task.id, routeId: 'r1', startedAt: ago(10 * MIN) });
-    await addRun(t.db, { taskId: task.id, routeId: 'r1' });
-    await addSubtask(t.db, task.id, { key: 'fusion', state: 'verifying', prNumber: 4 });
+    await startRun(t.db, { segment: 'manual', issueNumber: 1, model: 'grok-5', startedAt: ago(20 * MIN) });
+    await startRun(t.db, {
+      segment: 'verify',
+      issueNumber: 1,
+      model: 'opus-5.5',
+      startedAt: ago(15 * MIN),
+      endedAt: ago(10 * MIN),
+      outcome: 'done',
+    });
+    // 开单以前就有的同号的账（别的仓、上一回的）、别的单号的账：都不算这张单的
+    await startRun(t.db, {
+      segment: 'manual',
+      issueNumber: 1,
+      model: 'grok-5',
+      startedAt: ago(120 * MIN),
+      endedAt: ago(110 * MIN),
+      outcome: 'done',
+      inputTokens: 9,
+    });
+    await startRun(t.db, {
+      segment: 'verify',
+      issueNumber: 12,
+      model: 'opus-5.5',
+      startedAt: ago(15 * MIN),
+      endedAt: ago(10 * MIN),
+      outcome: 'done',
+      inputTokens: 9,
+    });
     await t.db.insert(stepTimings).values({
       kind: 'activity',
-      workflowId: 'req:acme/canary#1',
+      workflowId: 'task:acme/canary#1',
       temporalRunId: 'run-1',
-      workflowType: 'fusionWorkflow',
+      workflowType: 'taskWorkflow',
       taskId: task.id,
       activity: 'createWorktree',
       attempt: 1,
-      scheduledAt: ago(25 * MIN),
-      startedAt: ago(25 * MIN),
-      endedAt: ago(24 * MIN),
+      scheduledAt: ago(45 * MIN),
+      startedAt: ago(45 * MIN),
+      endedAt: ago(44 * MIN),
       queueMs: 0,
       runMs: 60_000,
       outcome: 'ok',
     });
     await upsertAlert(t.db, {
-      dedupeKey: 'req:acme/canary#1:park:1',
+      dedupeKey: 'task:acme/canary#1:park:1',
       level: 'alert',
       taskId: task.id,
-      title: '「plan」没有能用的路由',
+      title: '没有可用的路由',
       body: '一条都派不出去',
     });
-    // 别的单（#12）的提醒：前缀只差一位，不能算进 #1
+    // 别的单（#12）的提醒：前缀只差一位，不能算进 #1；Fusion 时代 req: 开头的也不算
     await upsertAlert(t.db, {
-      dedupeKey: 'req:acme/canary#12:park:1',
+      dedupeKey: 'task:acme/canary#12:park:1',
       level: 'alert',
       taskId: null,
-      title: '别的单挂起了',
+      title: '别的单停下了',
       body: '-',
     });
-    const facts = await canaryDbFacts(t.db, { owner: 'acme', name: 'canary', issueNumber: 1 });
-    expect(facts.task).toMatchObject({ id: task.id, state: 'running', phase: 'fusion:execute' });
-    expect(facts.sessions).toEqual({ total: 3, started: 2, ended: 1, withUsage: 1 });
+    await upsertAlert(t.db, {
+      dedupeKey: 'req:acme/canary#1:park:1',
+      level: 'alert',
+      taskId: null,
+      title: '老的需求工作流挂起了',
+      body: '-',
+    });
+    const facts = await factsOf(1);
+    expect(facts.task).toMatchObject({ id: task.id, state: 'running', phase: 'verify' });
+    expect(facts.runs).toEqual({ total: 3, ended: 2, manual: 2, verify: 1, withUsage: 1 });
     expect(facts.timings).toBe(1);
-    expect(facts.block).toEqual({ prNumber: 4, state: 'verifying' });
-    expect(facts.openAlerts).toEqual([
-      { dedupeKey: 'req:acme/canary#1:park:1', title: '「plan」没有能用的路由' },
-    ]);
+    expect(facts.openAlerts).toEqual([{ dedupeKey: 'task:acme/canary#1:park:1', title: '没有可用的路由' }]);
+  });
+});
+
+describe('老的几轮', () => {
+  it('换成三段任务工作流之前记的老步骤（派活、规划）照样读得出来，给人看的名字也在', async () => {
+    const { id } = await round();
+    await t.db
+      .update(canaryRuns)
+      .set({ stage: 'dispatch', steps: [{ stage: 'plan', at: NOW.toISOString() }] })
+      .where(eq(canaryRuns.id, id));
+    const row = await canaryRunById(t.db, id);
+    expect(row?.stage).toBe('dispatch');
+    expect(CANARY_STAGE_NAMES[row?.stage ?? 'open']).toBe('派活');
+    expect(row?.steps.map((s) => CANARY_STAGE_NAMES[s.stage])).toEqual(['规划']);
   });
 });
