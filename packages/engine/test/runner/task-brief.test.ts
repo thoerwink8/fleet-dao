@@ -58,8 +58,7 @@ describe('buildTaskBrief · 正文自己写全了需求', () => {
       '`packages/web/src/pages/`：驾驶舱页面',
       '`packages/api/src/cockpit.ts`：接口',
     ]);
-    expect(b.specDir).toBe('specs/7-给分档加一条规矩');
-    expect(b.specDocOnMain).toBe(false);
+    expect(b.specDir).toBeUndefined(); // 正文就是需求：没有文档可对照，也不会再建
   });
 
   it('引擎写进正文的进度段、HTML 注释不算需求，去掉', () => {
@@ -96,7 +95,6 @@ describe('buildTaskBrief · 单子指着需求文档', () => {
     expect(r.brief.request).toContain('创始人要在驾驶舱看到每张单走到哪一步。');
     expect(r.brief.request).not.toContain('只留原话');
     expect(r.brief.specDir).toBe('specs/7-驾驶舱状态');
-    expect(r.brief.specDocOnMain).toBe(true);
   });
 
   it('【故意造出的失败】文档里缺栏 → 报需求文档里缺（不是单子正文）', () => {
@@ -311,7 +309,7 @@ describe('readTaskBrief · 现读单子和文档', () => {
       issueNumber: 7,
     });
     expect(reads).toEqual(['specs/7-驾驶舱状态/需求.md']);
-    expect(r.ok && r.brief.specDocOnMain).toBe(true);
+    expect(r.ok && r.brief.specDir).toBe('specs/7-驾驶舱状态');
     expect(r.ok && r.brief.request).toContain('创始人要在驾驶舱看到每张单走到哪一步。');
   });
 

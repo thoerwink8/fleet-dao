@@ -411,9 +411,6 @@ class TaskFlow {
     return true;
   }
 
-  private specDir = '';
-  private specDocOnMain = false;
-
   private async ensureWorktree(): Promise<Worktree> {
     if (this.worktree) return this.worktree;
     const wt = await this.step('createWorktree', () =>
@@ -433,8 +430,6 @@ class TaskFlow {
    * 回的时候会话是跑成了的（进程正常结束、终帧没报错）；有没有交付由调用方接着查。
    */
   private async write(brief: TaskBrief, tier: TierDecision, wt: Worktree): Promise<void> {
-    this.specDir = brief.specDir;
-    this.specDocOnMain = brief.specDocOnMain;
     let counters = ZERO;
     let avoid: Avoid = NO_AVOID;
     let previousMessage: string | undefined;

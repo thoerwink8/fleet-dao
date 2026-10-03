@@ -6,8 +6,8 @@
 // 结论三种：通过、断在哪、没跑成（巡检自己挂了：没配、仓读不到、开不了单、连着查不成）。没跑成的这一轮在 schedule_runs 记
 // failed，由看门狗（#203）照登记表报；断了的这一轮巡检自己跑成了，schedule_runs 记 ok、发现 1 个问题，报警由这里推。
 // 改这里之前必须知道：接活只派挂在当前版本上的单（design 第九节「在哪能做与接活开关」），开单时就挂上巡检仓的当前版本。
-// 巡检单没有「文档：」那一行，也不先在巡检仓里建需求文档（引擎不直写主线）：正文照 #295 的写法写全需求，收单照正文写需求
-// 文档、Lead 随 PR 提交，开 PR 前验证照正文核（core 的 specOf、bodyCriteria）。「怎么算做完」下面只放验收条，别的话会被当成一条。
+// 巡检单没有「文档：」那一行（#654 起所有新单都没有）：正文写全需求，动手照正文做、验收照正文里的「怎么算做完」核。
+// 「怎么算做完」下面只放验收条，别的话会被当成一条。
 // 判走到哪一步只在 canaryNext（纯函数），读东西只在 observe。
 import { currentVersion } from '@fleet-dao/core';
 import {
@@ -346,9 +346,8 @@ export function canaryNext(state: CanaryState, obs: CanaryObservation): CanaryDe
 // —— 巡检单本身 ——
 
 /**
- * 巡检单的标题和正文（#295 的写法）：正文写全需求——起因、要什么，最后是写了字的「## 怎么算做完」；不写「文档：」那一行。
- * 收单照正文写需求文档（目录 specs/<号>-<照标题取的短名>），Lead 随 PR 提交；开 PR 前验证照正文核。开单时还不知道单号，
- * 要追加的那一行用这一轮的编号和开单时刻认（每轮都不一样）。
+ * 巡检单的标题和正文：正文写全需求——起因、要什么，最后是写了字的「## 怎么算做完」；不写「文档：」那一行（#654 起所有新单都是这样，
+ * 需求就在单子正文里）。开单时还不知道单号，要追加的那一行用这一轮的编号和开单时刻认（每轮都不一样）。
  */
 export function canaryIssue(round: number, openedAt: Date): { title: string; body: string } {
   const line = canaryLogLine(round, openedAt);
@@ -364,7 +363,7 @@ export function canaryIssue(round: number, openedAt: Date): { title: string; bod
       '## 怎么算做完',
       '',
       `- \`${CANARY_LOG_FILE}\` 的最后一行是 \`${line}\`，一字不差。`,
-      `- 这张单改到的文件只有 \`${CANARY_LOG_FILE}\`，和 \`specs/\` 下这张单自己的目录（目录名以这张单的号开头）里的文档。`,
+      `- 这张单改到的文件只有 \`${CANARY_LOG_FILE}\`。`,
       '- `node --test` 通过。',
     ].join('\n'),
   };

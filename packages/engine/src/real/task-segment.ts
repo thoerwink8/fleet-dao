@@ -158,7 +158,6 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
     const prompt = renderSegmentPrompt({
       brief: manualBriefOf(input.brief, { branch: input.branch, baseSha: input.baseSha }),
       specDir: input.brief.specDir,
-      specDocOnMain: input.brief.specDocOnMain,
       feedback: input.feedback,
     });
     // 4. 起会话。叫停（ctx.signal）接进会话的看守。

@@ -4,19 +4,13 @@
 // 读主线上的需求文档）经 TaskBriefPorts 交进来，所以不接引擎、不接真 GitHub 就能测。缺什么**一次全报**（problems），
 // 不拿空冒充齐：读不到单子、读不到需求文档（「文件不在」和「读失败」是两回事）都明确失败，不降级成「按标题猜着做」。
 //
-// 需求原文＝需求文档的全文（单子指着一份文档时，issue 上只留了概述）或单子正文自己（没指文档、正文写全了需求的单，#295）。
+// 需求原文＝单子正文自己（#654 起新单都是这样：正文就是需求的唯一的家，不再另存 specs 需求文档）；单子指着一份文档的是 #654
+// 之前开的老单（issue 上只留了概述），照旧读主线上那份的全文。
 // 不拼装、不挑栏：「不许碰」「依据」这类栏里常有约束，挑了就丢。引擎写进正文的进度段不是需求，先去掉。
 // 分档按「已知的模块」一次定死（decideTierFromModules）：写在反引号里的才认作路径，认不出的一项就不猜、走主力档。
 
 import { type MdDoc, parseMd, requiredSectionProblems, sectionText } from '@fleet-dao/conventions';
-import {
-  cleanBody,
-  criteriaOf,
-  hasSpecPointer,
-  REQUIREMENT_FILE,
-  specDirOf,
-  specShortName,
-} from '@fleet-dao/core';
+import { cleanBody, criteriaOf, hasSpecPointer, REQUIREMENT_FILE, specDirOf } from '@fleet-dao/core';
 import { humanPart, type RepoRef } from '@fleet-dao/github';
 import { type ManualBrief, ManualBriefSchema } from './brief.ts';
 import { decideTierFromModules, type ModuleRef, type TierDecision } from './tier.ts';
@@ -45,10 +39,8 @@ export interface TaskBrief {
   acceptance: string[];
   /** 「已知的模块」每一项的原文（「暂无」不算一项）。 */
   touches: string[];
-  /** 需求文档目录：已经在主线上的那份，或正文自己写全了需求时将要建的（specs/<号>-<照标题取的短名>）。 */
-  specDir: string;
-  /** 主线上已经有这份需求文档（true）；false＝需求在单子正文里，文档要随 PR 进主线。 */
-  specDocOnMain: boolean;
+  /** 单子指着的需求文档目录（已经在主线上的那份；#654 之前开的老单才有）。正文自己就是需求的单没有，也不会再建。 */
+  specDir?: string | undefined;
   tier: TierDecision;
 }
 
@@ -198,8 +190,7 @@ export function buildTaskBrief(input: BuildInput): TaskBriefResult {
       request: text,
       acceptance: criteria.ok,
       touches,
-      specDir: specDoc ? specDoc.dir : `specs/${issue.number}-${specShortName(issue.title)}`,
-      specDocOnMain: specDoc !== undefined,
+      ...(specDoc ? { specDir: specDoc.dir } : {}),
       tier: decideTierFromModules(refs, unrecognized),
     },
   };
@@ -249,8 +240,8 @@ export function manualBriefOf(brief: TaskBrief, git: { branch: string; baseSha: 
     request: brief.request,
     acceptance: brief.acceptance,
     touches: brief.touches,
-    // 文档还没进主线（需求在单子正文里）时不给：提示词里写「对照这份」，对不上就是误导
-    ...(brief.specDocOnMain ? { specDir: brief.specDir } : {}),
+    // 需求在单子正文里的没有文档可对照：提示词里不写「对照这份」，免得误导
+    ...(brief.specDir !== undefined ? { specDir: brief.specDir } : {}),
     branch: git.branch,
     baseSha: git.baseSha,
   });
