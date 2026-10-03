@@ -30,6 +30,7 @@ import type {
   PoolsResponse,
   PoolViewSchema,
   QuotaWindowViewSchema,
+  ReleaseVersionResponse,
   RepoSchema,
   RouteSchema,
   RoutingResponse,
@@ -110,6 +111,9 @@ export type AuditEntry = z.infer<typeof AuditEntrySchema>;
 export type Settings = z.infer<typeof SettingsResponse>;
 export type Setting = z.infer<typeof SettingSchema>;
 export type UpdateSettingBody = z.input<typeof UpdateSettingRequest>;
+
+/** /changelog 页「发布 v<N>」的版本号（#725）：ok / blocked / unreadable 三种，见 web-api.ts 的 ReleaseVersionResponse。 */
+export type ReleaseVersion = z.infer<typeof ReleaseVersionResponse>;
 
 export type DemoLinks = z.infer<typeof DemoLinksResponse>;
 export type DemoLink = z.infer<typeof DemoLinkSchema>;

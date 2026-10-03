@@ -104,6 +104,7 @@ describe('演示版：数据层', () => {
       () => api.audit(),
       () => api.settings(),
       () => api.demoLinks(),
+      () => api.releaseVersion(),
     ]) {
       const err = await call().catch((e: unknown) => e);
       expect(err).toBeInstanceOf(ApiError);
