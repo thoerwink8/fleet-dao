@@ -43,13 +43,13 @@ shard_n=0
 # 分台：SHARDS 的每一项是一台，里面是用空格隔开的项目名。项目名 = deploy/test 下 *.test.sh 去掉后缀；另有四个特殊项：
 # lint（语法 + shellcheck）、backup（deploy/backup/test）、node-tests（下面 NODE_TESTS 那几个 node --test）、ports（端口表）。
 # 按 CI 实测的耗时（2026-10-03，一整套 300 秒上下）搭，三台各 100 秒上下。
-# 2026-10-03 之后：login-user、cli-tools 两个最慢项的登录/读回超时已做成可注入（测试里压到 2 秒，生产不变），
-# 卡住样本那一项从 94 秒、cli-tools 那一项各少几十秒——分台是按**高值**排的，真实秒数要等下一轮 CI 的「⏱」行，
-# 那时再按实测重排（挪项按「不匀了就挪」）。每一项的秒数都看日志里的「⏱」行。
+# 2026-10-03 超时可注入之后的实测（主线 ci.yml 一轮）：login-user 94→44 秒、cli-tools 约 34 秒；三台原先 61 / 66 / 140 秒，
+# 第三台拖后腿，把 session-ports、web-publish、release-flow 挪去第一台，grok、public-site、agent-scope-org-use 挪去第二台，
+# 估三台各 80–100 秒。挪完看下一轮 CI 的「⏱」行，不匀了再挪。每一项的秒数都看日志里的「⏱」行。
 SHARDS=(
-  'login-user session-user listen root-exec-check gateway-deploy ops-only ports shards profile'
-  'cli-tools cursor-agent cursor-key mirasim mirasim-session node-cache agent-scope-adopt app-config'
-  'lint session-ports session-pnpm grok public-site release-flow agent-scope-org-use web-publish demo-scopes gateway-bundle backup place-file auto-release-state agents-sync agents-sync-account node-tests'
+  'login-user session-user listen root-exec-check gateway-deploy ops-only ports shards profile session-ports web-publish release-flow'
+  'cli-tools cursor-agent cursor-key mirasim mirasim-session node-cache agent-scope-adopt app-config grok public-site agent-scope-org-use'
+  'lint session-pnpm demo-scopes gateway-bundle backup place-file auto-release-state agents-sync agents-sync-account node-tests'
 )
 NODE_TESTS=(health-page auto-release config)
 SPECIAL_UNITS=(lint backup node-tests ports)
