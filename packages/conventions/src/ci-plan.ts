@@ -1,4 +1,5 @@
-// CI 按改动跑（.github/workflows/ci.yml）：从这次 PR 改了哪些文件、各包谁依赖谁，算出哪几个 job 要跑、测试跑哪几个包；
+// CI 按改动跑（.github/workflows/ci.yml）：从这次 PR 改了哪些文件、各包谁依赖谁，算出哪几个 job 要跑、测试跑哪几个包，
+// 再把选中的测试文件按耗时装进几台（assignTests → test-split.ts）；
 // 汇总 job（必过检查 check）再逐个核对「该跑的跑了且绿、不该跑的确实跳过」。纯判断，不碰 git、不碰网络；入口在 bin/ci-plan.ts、bin/ci-verdict.ts。
 // job 数就是并发槽数（GitHub 免费档同时最多 20 个，一个 PR 的 CI 占掉越多，能并着跑的 PR 越少）：所以把两两不相干的小检查
 // 装进同一个 job（lint），装依赖只装一次；同一件事别开两个 job。见 PLANNED_JOBS 上面的注释。
@@ -8,6 +9,15 @@
 //   就是这些「谁的测试读谁」的清单；test/ci-plan.test.ts 扫所有测试文件里指向包外的路径，漏记一条就红。
 // - 这里判「少跑」等于放行没测过的改动，所以本文件和两个入口都在 high-risk-paths.json 里（先审后合）。
 import type { RepoView } from './repo.ts';
+import {
+  type Packed,
+  packTests,
+  TEMPORAL_MARKER,
+  type TestBox,
+  type Timings,
+  unitOfTestFile,
+  withSiblings,
+} from './test-split.ts';
 
 /** 测试单元：packages/ 下的包目录名，外加仓根的 agents（skill 的测试，tsconfig 和 vitest 都把它当一个单元）。 */
 export const AGENTS_UNIT = 'agents';
@@ -15,17 +25,6 @@ export const AGENTS_UNIT = 'agents';
 export interface PackageGraph {
   /** 包目录名 → 它依赖的仓内包目录名（package.json 里的 @fleet-dao/*）。 */
   deps: Record<string, string[]>;
-}
-
-export interface TestShard {
-  /** 哪一组：engine、db 各自一组（最慢的两个），其余合一组（rest）。一组可以再切成几台并行跑（TEST_SHARDS）。 */
-  name: 'engine' | 'db' | 'rest';
-  /** job 名里显示的：组名，切了的带「第几台/共几台」。 */
-  label: string;
-  /** 交给 `vitest run` 的参数：包目录（带 / 结尾，免得 api 匹配到 api-x），或全跑时 rest 排除 engine、db 的写法；切了的末尾带 --shard=i/n。 */
-  args: string[];
-  /** 引擎的测试要真的 Temporal 开发服务端（test/support.ts）。 */
-  temporal: boolean;
 }
 
 export interface CiPlan {
@@ -38,34 +37,17 @@ export interface CiPlan {
   biome: boolean;
   /** tsc -b 的项目目录；'all' 是仓根整棵树。空数组 = 只跑 biome、不跑 tsc。 */
   tsc: string[] | 'all';
-  tests: TestShard[];
+  /**
+   * 要测的单元（包目录名、agents）；全跑时是全部（和 full 一起看）。planCi 只算到这一步；
+   * 落到哪些测试文件、怎么分台由 assignTests 填进 tests（以后换成文件级选择，也只是换掉 assignTests 里「选文件」那一步）。
+   */
+  testUnits: string[];
+  /** 装好箱的测试台（test-split.ts）：每台一份明确的文件清单。testUnits 不空时 assignTests 之后才有，汇总核对两边对得上。 */
+  tests: TestBox[];
   /** 演示版打包 + 扫产物。 */
   web: boolean;
   /** deploy/test/run.sh：all 全套；ops 只跑读 docs/ops.md 的两块（`run.sh --ops`：端口表、place-file）；none 不跑。 */
   deploy: DeployMode;
-}
-
-/**
- * 每一组测试切成几台并行跑（vitest --shard=i/n，按测试文件均分）。数字按 CI 实测的耗时定（#654 F，2026-10-03 主线全量一轮：
- * engine 121 秒、rest 147 秒、db 56 秒的纯测试时间；每台机器另有约 30 秒装依赖、起容器的固定开销）：engine 切 2、rest 切 3，
- * 一台的墙钟降到 90 秒上下；db 不切（切了每台都要再建一份模板库，不划算）。
- * 2026-10-03 下午再量：engine 切 2 时两台差一截（80 秒、113 秒，vitest 按文件个数均分、不看耗时，real/ 下的慢文件扎堆），
- * 墙钟被慢的那台定死；切 3 摊开，三台各 65 秒上下，整轮的瓶颈让给 db（70–80 秒）。
- * rest 只有一两个包要测时不切（几十秒就跑完，切开只多出固定开销），见 REST_SPLIT_MIN_UNITS。
- */
-export const TEST_SHARDS = { engine: 3, db: 1, rest: 3 } as const;
-
-/** rest 这一组里的包少于这么多个就不切。 */
-const REST_SPLIT_MIN_UNITS = 3;
-
-function shardsOf(name: TestShard['name'], args: string[], temporal: boolean, count: number): TestShard[] {
-  if (count <= 1) return [{ name, label: name, args, temporal }];
-  return Array.from({ length: count }, (_, i) => ({
-    name,
-    label: `${name} ${i + 1}/${count}`,
-    args: [...args, `--shard=${i + 1}/${count}`],
-    temporal,
-  }));
 }
 
 export const DEPLOY_MODES = ['all', 'ops', 'none'] as const;
@@ -228,7 +210,8 @@ export function readGraph(repo: RepoView): PackageGraph | string {
   return { deps };
 }
 
-const unitPath = (u: string) => (u === AGENTS_UNIT ? 'agents/' : `packages/${u}/`);
+/** 单元的目录（带 / 结尾，免得 api 匹配到 api-x）：本机 test:changed 交给 vitest 当过滤条件。 */
+export const unitPath = (u: string) => (u === AGENTS_UNIT ? 'agents/' : `packages/${u}/`);
 const unitProject = (u: string) => (u === AGENTS_UNIT ? 'agents' : `packages/${u}`);
 
 function fullPlan(reasons: string[]): CiPlan {
@@ -237,16 +220,8 @@ function fullPlan(reasons: string[]): CiPlan {
     reasons,
     biome: true,
     tsc: 'all',
-    tests: [
-      ...shardsOf('engine', ['packages/engine/'], true, TEST_SHARDS.engine),
-      ...shardsOf('db', ['packages/db/'], false, TEST_SHARDS.db),
-      ...shardsOf(
-        'rest',
-        ['--exclude', 'packages/engine/**', '--exclude', 'packages/db/**'],
-        false,
-        TEST_SHARDS.rest,
-      ),
-    ],
+    testUnits: [],
+    tests: [],
     web: true,
     deploy: 'all',
   };
@@ -320,26 +295,56 @@ export function planCi({ event, changed, graph, rules = PATH_RULES }: PlanInput)
   }
   const all = [...new Set([...closure, ...readers])].sort();
 
-  const tests: TestShard[] = [];
-  if (all.includes('engine'))
-    tests.push(...shardsOf('engine', ['packages/engine/'], true, TEST_SHARDS.engine));
-  if (all.includes('db')) tests.push(...shardsOf('db', ['packages/db/'], false, TEST_SHARDS.db));
-  const rest = all.filter((u) => u !== 'engine' && u !== 'db');
-  if (rest.length > 0) {
-    const count = rest.length >= REST_SPLIT_MIN_UNITS ? TEST_SHARDS.rest : 1;
-    tests.push(...shardsOf('rest', rest.map(unitPath), false, count));
-  }
-
   const biome = changed.some((f) => !f.endsWith('.md'));
   return {
     full: false,
     reasons,
     biome,
     tsc: biome ? all.map(unitProject) : [],
-    tests,
+    testUnits: all,
+    tests: [],
     web: closure.has('web'),
     deploy: DEPLOY_READS_PACKAGES.some((p) => closure.has(p)) ? 'all' : deploy,
   };
+}
+
+export interface TestInputs {
+  /** 全部测试文件（test-split.ts 的 listTestFiles）；string 是列不出的原因。 */
+  all: readonly string[] | string;
+  /** 耗时表；string 是读不出的原因（照样装箱，只是分得可能不匀）。 */
+  timings: Timings | string;
+  /** 读测试文件的内容（认哪些要 Temporal 命令行）。 */
+  read: (rel: string) => string | undefined;
+}
+
+/**
+ * 把 planCi 选中的单元落到测试文件、装进几台（test-split.ts 的 packTests），填进 plan.tests。
+ * 选文件这一步：全跑（plan.full）是全部测试文件，否则是选中单元下的（再加上按名字会被一起拉上的，见 withSiblings）。
+ * 以后换成文件级选择，换的只是 picked 这一步，装箱只吃「要跑的测试文件」。
+ * 列不出测试文件、选中的单元一个测试文件都没有、读不了某个测试文件、装不了箱：返回一句为什么，调用方判红（不静默少跑）。
+ */
+export function assignTests(
+  plan: CiPlan,
+  input: TestInputs,
+): { plan: CiPlan; packed: Packed | undefined } | string {
+  if (!plan.full && plan.testUnits.length === 0) return { plan, packed: undefined };
+  if (typeof input.all === 'string') return `列不出测试文件：${input.all}`;
+  const units = plan.full ? undefined : new Set(plan.testUnits);
+  const picked = input.all.filter((f) => units === undefined || units.has(unitOfTestFile(f) ?? ''));
+  if (picked.length === 0) {
+    const what = plan.full ? '全部' : plan.testUnits.join('、');
+    return `要测 ${what}，却一个测试文件都没有（vitest 没收到文件会红）`;
+  }
+  const files = withSiblings(picked, input.all);
+  const temporal = new Set<string>();
+  for (const f of files) {
+    const text = input.read(f);
+    if (text === undefined) return `读不到测试文件 ${f}（认不出它要不要 Temporal 命令行）`;
+    if (TEMPORAL_MARKER.test(text)) temporal.add(f);
+  }
+  const packed = packTests({ files, universe: input.all, timings: input.timings, temporal });
+  if (typeof packed === 'string') return `装不了箱：${packed}`;
+  return { plan: { ...plan, tests: packed.boxes, reasons: [...plan.reasons, ...packed.notes] }, packed };
 }
 
 /** 写进 $GITHUB_OUTPUT 的几行；下游 job 的 if 和汇总 job 都只读这些。
@@ -393,11 +398,51 @@ function parsePlan(text: unknown): CiPlan | string {
     typeof o.web !== 'boolean' ||
     !(DEPLOY_MODES as readonly unknown[]).includes(o.deploy) ||
     !Array.isArray(o.tests) ||
-    !(o.tsc === 'all' || Array.isArray(o.tsc))
+    !(o.tsc === 'all' || Array.isArray(o.tsc)) ||
+    !(Array.isArray(o.testUnits) && o.testUnits.every((u) => typeof u === 'string'))
   ) {
     return 'changes 给的 plan 认不出';
   }
-  return o as CiPlan;
+  const why = testsProblem(o as CiPlan);
+  return why ?? (o as CiPlan);
+}
+
+/**
+ * 装好的台本身对不对：每台有名字、有文件、两个开关是真假值；一个文件不在两台里；要测的单元不空就必须有台、空就不许有台
+ * （planCi 之后忘了 assignTests，test job 就会被跳过、汇总还当它本该跳过——这里拦住）。
+ */
+function testsProblem(plan: CiPlan): string | undefined {
+  const seen = new Set<string>();
+  const labels = new Set<string>();
+  for (const b of plan.tests as unknown[]) {
+    const x = b as Partial<TestBox> | null;
+    if (
+      typeof x !== 'object' ||
+      x === null ||
+      typeof x.label !== 'string' ||
+      x.label === '' ||
+      !Array.isArray(x.files) ||
+      x.files.length === 0 ||
+      x.files.some((f) => typeof f !== 'string' || f === '') ||
+      typeof x.estMs !== 'number' ||
+      !Number.isFinite(x.estMs) ||
+      typeof x.pg !== 'boolean' ||
+      typeof x.temporal !== 'boolean'
+    ) {
+      return 'changes 给的测试台认不出（缺名字、文件清单、开关）';
+    }
+    if (labels.has(x.label)) return `两台测试同名：${x.label}`;
+    labels.add(x.label);
+    for (const f of x.files) {
+      if (seen.has(f)) return `${f} 分到了两台`;
+      seen.add(f);
+    }
+  }
+  const want = plan.full || plan.testUnits.length > 0;
+  if (want !== plan.tests.length > 0) {
+    return want ? 'plan 有要测的单元，却一台测试都没装（没装箱？）' : 'plan 没有要测的单元，却装了测试台';
+  }
+  return undefined;
 }
 
 /**
@@ -425,6 +470,9 @@ export function ciVerdict(needs: unknown): { ok: boolean; lines: string[] } {
     bad(plan);
     return { ok: false, lines };
   }
+  // test job 的矩阵铺的是 outputs.tests：必须和 plan 里核过的那份是同一份
+  if (n.changes?.outputs?.tests !== JSON.stringify(plan.tests))
+    bad('changes 给 test job 铺矩阵的 tests 和 plan 里的测试台不是同一份');
   if (plan.full && (PLANNED_JOBS.some((j) => !expected(plan, j)) || plan.deploy !== 'all'))
     bad('plan 说全跑，却有 job 没开（或 deploy 不是全套）');
   for (const job of PLANNED_JOBS) {

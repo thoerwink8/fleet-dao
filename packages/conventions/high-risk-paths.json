@@ -163,6 +163,21 @@
       "why": "CI 汇总 job（必过检查 check）的入口"
     },
     {
+      "path": "packages/conventions/src/test-split.ts",
+      "kind": "碰安全",
+      "why": "CI 检查本身：列测试文件、按环境的类分台、按耗时装箱（哪些测试跑、哪一台跑）；少列一个文件、少装一台，那个测试就没人跑了"
+    },
+    {
+      "path": "packages/conventions/src/ci-box.ts",
+      "kind": "碰安全",
+      "why": "CI 检查本身：认矩阵里那一台、跑完核对「实际跑的 == 分到的」；放松它等于让少跑、多跑都算过"
+    },
+    {
+      "path": "packages/conventions/src/bin/ci-box.ts",
+      "kind": "碰安全",
+      "why": "test job 里认这一台、跑完核对那两步的入口"
+    },
+    {
       "path": "packages/conventions/src/ci-cache.ts",
       "kind": "碰安全",
       "why": "CI 检查本身：PR 的测试分片结果缓存，算键、核对清单、决定哪些测试这一轮不跑；判「少跑」等于放行没测过的改动，主线那一轮（自动发布的闸门）也靠它认事件名才不被跳"

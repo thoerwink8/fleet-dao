@@ -1,4 +1,4 @@
-// PR 的测试分片结果缓存（src/ci-cache.ts）：键盖没盖住输入、清单怎么核对、什么情况一律回来真跑。
+// PR 的测试结果缓存（src/ci-cache.ts）：键盖没盖住输入、清单怎么核对、什么情况一律回来真跑。
 // 带【故意造出的失败】的几条，每一条都是「造一份坏的输入，判定器必须拒」：平时都绿，看不出判定器还在不在拦，所以得造一次坏的看它红。
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
@@ -8,9 +8,11 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 import {
+  boxUnits,
   CACHE_SCHEMA,
   CACHE_SUBDIR,
   CacheError,
+  checkedFiles,
   computeKey,
   type EnvIdentity,
   EXTERNAL_INPUT_DIRS,
@@ -25,12 +27,9 @@ import {
   type Manifest,
   makeHasher,
   parseManifest,
-  parseShardArgs,
   passedFiles,
-  predictShard,
   relativeToRoot,
   selectToRun,
-  shardUnits,
   sourceClosure,
   stepKey,
   stepPlan,
@@ -38,6 +37,7 @@ import {
   UNIVERSAL_PACKAGES,
 } from '../src/ci-cache.ts';
 import {
+  assignTests,
   FIXTURE_PATH,
   PATH_RULES,
   type PackageGraph,
@@ -47,6 +47,7 @@ import {
 } from '../src/ci-plan.ts';
 import { parseRiskPaths, RISK_PATHS_FILE } from '../src/merge-gates.ts';
 import { fsRepo } from '../src/repo.ts';
+import { listTestFiles, parseTimings, TIMINGS_FILE } from '../src/test-split.ts';
 
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 
@@ -116,9 +117,9 @@ const ENV: EnvIdentity = {
 const testsOf = (unit: string) => [`packages/${unit}/test/index.test.ts`];
 const keyOf = (opts: {
   files?: Record<string, string>;
-  args?: string[];
+  /** 这一台分到的文件（默认 api 的那一个）。 */
+  box?: string[];
   env?: Partial<EnvIdentity>;
-  collected?: string[];
   after?: (fs: ReturnType<typeof memFs>) => void;
 }) => {
   const fs = memFs({ ...BASE_FILES, ...opts.files });
@@ -126,54 +127,34 @@ const keyOf = (opts: {
   return computeKey({
     fs,
     graph: GRAPH,
-    args: opts.args ?? ['packages/api/', '--shard=1/2'],
+    box: opts.box ?? testsOf('api'),
     env: { ...ENV, ...opts.env },
-    collected: opts.collected ?? testsOf('api'),
   });
 };
 
-describe('分片参数：只认 ci-plan.ts 会给的三种，别的不猜', () => {
-  it('包目录、--exclude packages/<包>/**、--shard=i/n', () => {
-    expect(parseShardArgs(['packages/api/', 'agents/', '--shard=2/3'])).toEqual({
-      paths: ['packages/api/', 'agents/'],
-      excludes: [],
-      shard: { index: 2, count: 3 },
-    });
-    expect(parseShardArgs(['--exclude', 'packages/engine/**', '--exclude', 'packages/db/**'])).toMatchObject({
-      paths: [],
-      excludes: ['packages/engine/**', 'packages/db/**'],
-    });
+describe('这一台的文件清单：只认测试文件，别的不猜', () => {
+  it('单元从文件来：packages/<包>、agents', () => {
+    expect(
+      boxUnits(['packages/api/test/a.test.ts', 'agents/test/x.test.ts', 'packages/api/src/b.test.ts']),
+    ).toEqual(['agents', 'api']);
   });
 
-  it('【故意造出的失败】认不出的参数、怪的 --exclude、台号越界：抛错（调用方全跑），不当成没有', () => {
+  it('【故意造出的失败】空清单、不是测试文件、重复、单元不在依赖图里：抛错（调用方全跑），不当成没有', () => {
     for (const bad of [
+      [],
+      ['packages/api/src/index.ts'],
+      ['packages/api/'],
       ['--watch'],
-      ['packages/api'],
-      ['packages/api/test/x.test.ts'],
-      ['--exclude'],
-      ['--exclude', 'docs/**'],
-      ['--shard=0/3'],
-      ['--shard=4/3'],
-      ['--shard=1/3', '--shard=2/3'],
-      ['--shard=a/b'],
+      ['docs/a.test.ts'],
+      ['packages/api/test/a.test.ts', 'packages/api/test/a.test.ts'],
     ]) {
-      expect(() => parseShardArgs(bad), bad.join(' ')).toThrow(CacheError);
+      expect(() => boxUnits(bad), bad.join(' ')).toThrow(CacheError);
     }
-  });
-
-  it('没给包目录（rest 全跑）：依赖图里所有包加 agents，减去 --exclude 的；单元不在依赖图里抛', () => {
-    const units = shardUnits(
-      parseShardArgs(['--exclude', 'packages/engine/**', '--exclude', 'packages/db/**']),
-      GRAPH,
-    );
-    expect(units).toContain('agents');
-    expect(units).toContain('api');
-    expect(units).not.toContain('engine');
-    expect(units).not.toContain('db');
-    expect(() => shardUnits(parseShardArgs(['packages/nope/']), GRAPH)).toThrow(CacheError);
-    expect(() =>
-      shardUnits(parseShardArgs(['packages/api/', '--exclude', 'packages/api/**']), GRAPH),
-    ).toThrow(CacheError);
+    expect(() => checkedFiles(GRAPH, ['packages/nope/test/a.test.ts'])).toThrow(CacheError);
+    expect(checkedFiles(GRAPH, ['packages/db/test/b.test.ts', 'packages/api/test/a.test.ts'])).toEqual([
+      'packages/api/test/a.test.ts',
+      'packages/db/test/b.test.ts',
+    ]);
   });
 
   it('源码闭包：单元自己 + 向下依赖 + TEST_READS（api 读 web、db 读 core），不往上、不顺依赖往下传 TEST_READS', () => {
@@ -281,10 +262,13 @@ describe('键：盖住测试的全部输入，不相干的不变', () => {
     for (const c of change) expect(keyOf({ env: c }).key, JSON.stringify(c)).not.toBe(base);
   });
 
-  it('分片参数变了（换一台、换包）、vitest 收的测试文件变了（多一个、少一个、内容变）：键变', () => {
-    expect(keyOf({ args: ['packages/api/', '--shard=2/2'] }).key).not.toBe(base);
-    expect(keyOf({ args: ['packages/api/'] }).key).not.toBe(base);
-    expect(keyOf({ collected: [...testsOf('api'), 'packages/db/test/index.test.ts'] }).key).not.toBe(base);
+  it('这一台分到的文件变了（多一个、少一个、换一个）、文件内容变了：键变', () => {
+    const two = [...testsOf('api'), 'packages/db/test/index.test.ts'];
+    expect(keyOf({ box: two }).key).not.toBe(base);
+    expect(keyOf({ box: ['packages/db/test/index.test.ts'] }).key).not.toBe(base);
+    expect(keyOf({ files: { 'packages/api/test/index.test.ts': 'changed' } }).key).not.toBe(base);
+    // 同一份清单换个顺序：键一样（装箱给的是排好序的，这里再排一次也不怕）
+    expect(keyOf({ box: [...two].reverse() }).key).toBe(keyOf({ box: two }).key);
   });
 
   it('键的每一块（含 schema）变一个字，键都变；算键的代码自己的 schema 版本在里面', () => {
@@ -299,8 +283,7 @@ describe('键：盖住测试的全部输入，不相干的不变', () => {
   });
 
   it('conventions 那一组：别的包的测试文件、package.json 变了键也变（ci-plan.test.ts 的扫描器通读全仓测试）；别的组不受影响', () => {
-    const conv = (files: Record<string, string>) =>
-      keyOf({ args: ['packages/conventions/'], collected: testsOf('conventions'), files }).key;
+    const conv = (files: Record<string, string>) => keyOf({ box: testsOf('conventions'), files }).key;
     const baseConv = conv({});
     expect(conv({ 'packages/cli/test/index.test.ts': 'a test that reads outside' })).not.toBe(baseConv);
     expect(conv({ 'packages/cli/test/brand-new.test.ts': 'x' })).not.toBe(baseConv);
@@ -342,16 +325,14 @@ describe('键：盖住测试的全部输入，不相干的不变', () => {
         return fs.bytes(rel);
       },
     };
-    expect(() =>
-      computeKey({ fs: bad, graph: GRAPH, args: ['packages/api/'], env: ENV, collected: testsOf('api') }),
-    ).toThrow('EACCES');
-    // 一个测试文件都没收到（vitest list 空）：抛，不拿空集算出一个键
-    expect(() => keyOf({ collected: [] })).toThrow(CacheError);
-    // 收到的文件读不到
-    expect(() => keyOf({ collected: ['packages/api/test/ghost.test.ts'] })).toThrow(CacheError);
+    expect(() => computeKey({ fs: bad, graph: GRAPH, box: testsOf('api'), env: ENV })).toThrow('EACCES');
+    // 这一台一个测试文件都没有：抛，不拿空集算出一个键
+    expect(() => keyOf({ box: [] })).toThrow(CacheError);
+    // 分到的文件读不到
+    expect(() => keyOf({ box: ['packages/api/test/ghost.test.ts'] })).toThrow(CacheError);
   });
 
-  it('真读盘：不存在是 undefined，目录当目录；全跑那一版的每一台（engine、db、rest）在真仓上都能算出键', () => {
+  it('真读盘：不存在是 undefined，目录当目录；全跑那一版装出来的每一台在真仓上都能算出键、各不相同', () => {
     const fs = fsHashFs(ROOT);
     expect(fs.bytes('没有这个文件.txt')).toBeUndefined();
     expect(fs.list('没有这个目录')).toBeUndefined();
@@ -360,18 +341,16 @@ describe('键：盖住测试的全部输入，不相干的不变', () => {
     expect(Buffer.from(fs.bytes('package.json') as Uint8Array).toString('utf8')).toContain('fleet-dao');
     const real = readGraph(fsRepo(ROOT));
     if (typeof real === 'string') throw new Error(real);
-    const full = planCi({ event: 'push', changed: [], graph: real });
-    const keys = full.tests.map(
-      (t) =>
-        computeKey({
-          fs,
-          graph: real,
-          args: t.args,
-          env: ENV,
-          collected: ['packages/conventions/test/child.test.ts'],
-        }).key,
-    );
-    expect(new Set(keys).size, '每一台的键不一样（分片参数不同）').toBe(keys.length);
+    const repo = fsRepo(ROOT);
+    const r = assignTests(planCi({ event: 'push', changed: [], graph: real }), {
+      all: listTestFiles(repo),
+      timings: parseTimings(repo.read(TIMINGS_FILE)),
+      read: (rel) => repo.read(rel),
+    });
+    if (typeof r === 'string') throw new Error(r);
+    const keys = r.plan.tests.map((t) => computeKey({ fs, graph: real, box: t.files, env: ENV }).key);
+    expect(keys.length).toBeGreaterThan(1);
+    expect(new Set(keys).size, '每一台的键不一样（分到的文件不同）').toBe(keys.length);
   });
 });
 
@@ -379,22 +358,25 @@ describe('键：盖住测试的全部输入，不相干的不变', () => {
 
 const SHA = (c: string) => c.repeat(64);
 const KEY = SHA('a');
-const ARGS = ['packages/api/', '--shard=1/2'];
+const BOX = ['packages/api/test/a.test.ts', 'packages/api/test/b.test.ts'];
 const collected = { 'packages/api/test/a.test.ts': SHA('1'), 'packages/api/test/b.test.ts': SHA('2') };
 const manifest = (over: Record<string, unknown> = {}): string =>
   JSON.stringify({
     schema: CACHE_SCHEMA,
     complete: true,
     key: KEY,
-    args: ARGS,
+    box: BOX,
     files: {
       'packages/api/test/a.test.ts': { sha: SHA('1'), status: 'passed' },
       'packages/api/test/b.test.ts': { sha: SHA('2'), status: 'passed' },
     },
     ...over,
   });
-const select = (manifestText: string | undefined, c: Record<string, string> = collected) =>
-  selectToRun({ collected: c, key: KEY, args: ARGS, manifestText });
+const select = (
+  manifestText: string | undefined,
+  c: Record<string, string> = collected,
+  box: string[] = Object.keys(c).sort(),
+) => selectToRun({ collected: c, key: KEY, box, manifestText });
 const ALL = Object.keys(collected);
 
 describe('清单：命中了也不信键，逐个文件核对', () => {
@@ -425,8 +407,9 @@ describe('清单：命中了也不信键，逐个文件核对', () => {
       ['没有 schema', manifest({ schema: undefined })],
       ['没有 key', manifest({ key: undefined })],
       ['key 不像哈希', manifest({ key: 'abc' })],
-      ['没有 args', manifest({ args: undefined })],
-      ['args 里有非字符串', manifest({ args: [1] })],
+      ['没有文件清单', manifest({ box: undefined })],
+      ['文件清单是空的', manifest({ box: [] })],
+      ['文件清单里有非字符串', manifest({ box: [1] })],
       ['没有文件表', manifest({ files: undefined })],
       ['文件表是数组', manifest({ files: [] })],
       ['文件表是空的', manifest({ files: {} })],
@@ -447,27 +430,27 @@ describe('清单：命中了也不信键，逐个文件核对', () => {
     expect(typeof parseManifest(manifest())).toBe('object');
   });
 
-  it('清单里的键、分片参数和这次不一样：全跑（缓存是别的输入跑出来的）', () => {
+  it('清单里的键、文件清单和这一台不一样：全跑（缓存是别的输入跑出来的）', () => {
     expect(select(manifest({ key: SHA('b') })).mode).toBe('all');
-    expect(select(manifest({ args: ['packages/api/', '--shard=2/2'] })).mode).toBe('all');
+    expect(select(manifest({ box: ['packages/api/test/a.test.ts'] })).mode).toBe('all');
   });
 
   it('【故意造出的失败】清单不 complete、或文件不在清单里，必须跑：新增的测试文件一定跑', () => {
     for (const complete of [false, undefined, 'true', 1, null]) {
       expect(select(manifest({ complete })), String(complete)).toMatchObject({ mode: 'all', run: ALL });
     }
+    // 这一台多分到一个新文件：文件清单和上一轮不同，整台全跑（新文件当然在里面）
     const withNew = { ...collected, 'packages/api/test/new.test.ts': SHA('3') };
     const s = select(manifest(), withNew);
-    expect(s.mode).toBe('files');
-    expect(s.run).toEqual(['packages/api/test/new.test.ts']);
-    // 全集是 vitest 收到的：清单多出来的文件（已经删了、或换了台）不影响，也不会被当成「收到了」
-    const shrunk = { 'packages/api/test/a.test.ts': SHA('1') };
-    expect(select(manifest(), shrunk)).toMatchObject({
-      mode: 'none',
-      covered: ['packages/api/test/a.test.ts'],
+    expect(s.mode).toBe('all');
+    expect(s.run).toContain('packages/api/test/new.test.ts');
+    // 清单和这一台对得上、可清单里漏了某个文件（被改过的清单）：漏的那个一定跑
+    const partial = manifest({
+      files: { 'packages/api/test/a.test.ts': { sha: SHA('1'), status: 'passed' } },
     });
-    // vitest 一个文件都没收到：全跑（空集不是「全盖住了」）
-    expect(select(manifest(), {})).toMatchObject({ mode: 'all', run: [] });
+    expect(select(partial)).toMatchObject({ mode: 'files', run: ['packages/api/test/b.test.ts'] });
+    // 这一台一个文件都没有：全跑（空集不是「全盖住了」）
+    expect(select(manifest(), {}, BOX)).toMatchObject({ mode: 'all', run: [] });
   });
 
   it('【故意造出的失败】假清单里塞一个从没跑成的，不许算覆盖：标 failed / skipped / 没标，整份清单不信、全跑', () => {
@@ -486,70 +469,37 @@ describe('清单：命中了也不信键，逐个文件核对', () => {
 });
 
 describe('一轮的三步：key → plan → record', () => {
-  const stubList = (files: string[]) => () => files;
   const key = (over: Partial<Parameters<typeof stepKey>[0]> = {}) =>
     stepKey({
       event: 'pull_request',
-      args: ['packages/api/', '--shard=1/2'],
-      label: 'rest 1/2',
+      box: testsOf('api'),
+      label: '2/5 · pg',
       fs: memFs(BASE_FILES),
       graph: GRAPH,
       env: () => ENV,
-      listTests: stubList(testsOf('api')),
       ...over,
     });
 
-  it('正常：键、缓存键名（带组名）、交接文件里有收到的文件和哈希', () => {
+  it('正常：键、缓存键名（带台名）、交接文件里有这一台的文件和哈希', () => {
     const k = key();
     if (!k.enabled) throw new Error(k.why);
-    expect(k.cacheKey).toBe(`ci-test-v${CACHE_SCHEMA}-rest-1-2-${k.key}`);
+    expect(k.cacheKey).toBe(`ci-test-v${CACHE_SCHEMA}-2-5-pg-${k.key}`);
     expect(Object.keys(k.state.collected)).toEqual(testsOf('api'));
+    expect(k.state.box).toEqual(testsOf('api'));
     expect(k.state.mode).toBe('all');
   });
 
-  it('vitest list 不认 --shard（列的是切之前的全集）：交给它的参数里去掉 --shard，这一台的文件自己按 vitest 的算法切；三台正好不重不漏', () => {
+  it('文件就是矩阵给的那份：几台各算各的键，不重不漏（不再自己模仿 vitest 的 --shard 去猜一台跑哪些）', () => {
     const names = Array.from({ length: 7 }, (_, i) => `packages/api/test/t${i}.test.ts`);
     const fs = memFs({ ...BASE_FILES, ...Object.fromEntries(names.map((n) => [n, `body ${n}`])) });
-    const seen: string[][] = [];
-    const per = [1, 2, 3].map((index) => {
-      const k = key({
-        fs,
-        args: ['packages/api/', `--shard=${index}/3`],
-        listTests: (a) => {
-          seen.push(a);
-          return names;
-        },
-      });
+    const boxes = [names.slice(0, 3), names.slice(3, 5), names.slice(5)];
+    const per = boxes.map((box) => {
+      const k = key({ fs, box });
       if (!k.enabled) throw new Error(k.why);
-      return Object.keys(k.state.collected);
+      return k;
     });
-    expect(seen.every((a) => a.join(' ') === 'packages/api/')).toBe(true);
-    expect(per.map((p) => p.length).sort()).toEqual([2, 2, 3]);
-    expect([...per.flat()].sort()).toEqual([...names].sort());
-    // 一台一个都分不到（文件比台数少）：不缓存，不拿空集算键
-    const few = key({ args: ['packages/api/', '--shard=2/3'], listTests: () => testsOf('api') });
-    expect(few.enabled).toBe(false);
-  });
-
-  it('predictShard 和装着的 vitest 自己的分片逐个对：各种文件个数 × 台数，一个文件都不差', async () => {
-    const { BaseSequencer } = await import('vitest/node');
-    for (const n of [1, 2, 3, 5, 7, 10, 29, 88, 237]) {
-      const files = Array.from({ length: n }, (_, i) => `packages/p${i % 9}/test/some-file-${i}.test.ts`);
-      for (const count of [1, 2, 3, 4, 7]) {
-        if (count > n) continue;
-        for (let index = 1; index <= count; index++) {
-          const seq = new BaseSequencer({ config: { root: '/r', shard: { index, count } } } as never);
-          const actual = (await seq.shard(
-            files.map((f) => ({ moduleId: `/r/${f}` })) as never,
-          )) as unknown as {
-            moduleId: string;
-          }[];
-          expect(predictShard(files, { index, count }), `${n} 个文件，${index}/${count}`).toEqual(
-            actual.map((s) => s.moduleId.slice('/r/'.length)).sort(),
-          );
-        }
-      }
-    }
+    expect(per.flatMap((k) => Object.keys(k.state.collected)).sort()).toEqual([...names].sort());
+    expect(new Set(per.map((k) => k.key)).size).toBe(3);
   });
 
   it('【故意造出的失败】主线推送（和别的非 PR 事件）：三步都不缓存、测试全跑、不写清单——哪怕手边有一份完美的清单', () => {
@@ -563,17 +513,12 @@ describe('一轮的三步：key → plan → record', () => {
         schema: CACHE_SCHEMA,
         complete: true,
         key: real.key,
-        args: real.state.args,
+        box: real.state.box,
         files: Object.fromEntries(
           Object.entries(real.state.collected).map(([f, sha]) => [f, { sha, status: 'passed' }]),
         ),
       });
-      const p = stepPlan({
-        event,
-        stateText: JSON.stringify(real.state),
-        manifestText: perfect,
-        listTests: stubList([]),
-      });
+      const p = stepPlan({ event, stateText: JSON.stringify(real.state), manifestText: perfect });
       expect(p.mode, event).toBe('all');
       expect(p.state, event).toBeUndefined();
       const r = stepRecord({
@@ -586,17 +531,14 @@ describe('一轮的三步：key → plan → record', () => {
     }
   });
 
-  it('算不出就不开：依赖图读不出、vitest list 跑不成、认不出的参数、没收到文件：enabled=false，带原因', () => {
+  it('算不出就不开：依赖图读不出、清单认不出、空清单、单元不在依赖图里、环境认不出：enabled=false，带原因', () => {
     expect(key({ graph: '读不到 packages/b/package.json' })).toMatchObject({ enabled: false });
-    expect(
-      key({
-        listTests: () => {
-          throw new CacheError('vitest list 退出 1');
-        },
-      }),
-    ).toMatchObject({ enabled: false, why: expect.stringContaining('vitest list 退出 1') });
-    expect(key({ args: ['--watch'] })).toMatchObject({ enabled: false });
-    expect(key({ listTests: stubList([]) })).toMatchObject({ enabled: false });
+    expect(key({ box: ['--watch'] })).toMatchObject({ enabled: false });
+    expect(key({ box: [] })).toMatchObject({ enabled: false });
+    expect(key({ box: ['packages/nope/test/a.test.ts'] })).toMatchObject({
+      enabled: false,
+      why: expect.stringContaining('依赖图里没有这个单元'),
+    });
     expect(
       key({
         env: () => {
@@ -607,7 +549,7 @@ describe('一轮的三步：key → plan → record', () => {
     // CacheError 以外的错（代码写错了）不吞：往上抛，入口会打 ::warning:: 再全跑
     expect(() =>
       key({
-        listTests: () => {
+        env: () => {
           throw new TypeError('bug');
         },
       }),
@@ -622,7 +564,6 @@ describe('一轮的三步：key → plan → record', () => {
       event: 'pull_request',
       stateText: JSON.stringify(k.state),
       manifestText: undefined,
-      listTests: stubList([]),
     });
     expect(plan1.mode).toBe('all');
     const rec = stepRecord({
@@ -637,7 +578,7 @@ describe('一轮的三步：key → plan → record', () => {
 
   it('第一轮没清单：全跑、全绿后写清单（complete）；第二轮同样输入：命中、不跑', () => {
     const { k, manifest: m } = firstRound();
-    expect(m).toMatchObject({ schema: CACHE_SCHEMA, complete: true, key: k.key });
+    expect(m).toMatchObject({ schema: CACHE_SCHEMA, complete: true, key: k.key, box: testsOf('api') });
     const k2 = key();
     if (!k2.enabled) throw new Error(k2.why);
     expect(k2.key).toBe(k.key);
@@ -645,7 +586,6 @@ describe('一轮的三步：key → plan → record', () => {
       event: 'pull_request',
       stateText: JSON.stringify(k2.state),
       manifestText: JSON.stringify(m),
-      listTests: stubList([]),
     });
     expect(plan2.mode).toBe('none');
     // 命中的一轮没有跑测试：不写清单（也没有报告）
@@ -668,50 +608,33 @@ describe('一轮的三步：key → plan → record', () => {
       event: 'pull_request',
       stateText: JSON.stringify(k2.state),
       manifestText: JSON.stringify(m),
-      listTests: stubList([]),
     });
     expect(plan2.mode).toBe('all');
     expect(plan2.why).toContain('键');
   });
 
-  it('files 模式：按文件名过滤后 vitest 收到的和要跑的对不上（多一个、少一个、列不出），全跑', () => {
-    const files = { ...collected, 'packages/api/test/new.test.ts': SHA('3') };
+  it('files 模式：要跑的就是清单没盖住的那几个（这一台分到的文件本身），交接文件记下盖住的和要跑的', () => {
     const state = {
       schema: CACHE_SCHEMA,
       key: KEY,
-      args: ARGS,
-      collected: files,
+      box: BOX,
+      collected: { ...collected, 'packages/api/test/b.test.ts': SHA('9') },
       mode: 'all',
       covered: [],
-      run: Object.keys(files),
+      run: BOX,
     };
-    const plan = (list: (a: string[]) => string[]) =>
-      stepPlan({
-        event: 'pull_request',
-        stateText: JSON.stringify(state),
-        manifestText: manifest(),
-        listTests: list,
-      });
-    expect(plan((a) => a)).toMatchObject({ mode: 'files', run: ['packages/api/test/new.test.ts'] });
-    expect(plan((a) => [...a, 'packages/api/test/b.test.ts']).mode).toBe('all');
-    expect(plan(() => []).mode).toBe('all');
-    expect(
-      plan(() => {
-        throw new CacheError('vitest list 退出 1');
-      }).mode,
-    ).toBe('all');
+    const p = stepPlan({ event: 'pull_request', stateText: JSON.stringify(state), manifestText: manifest() });
+    expect(p).toMatchObject({ mode: 'files', run: ['packages/api/test/b.test.ts'] });
+    expect(p.state).toMatchObject({
+      mode: 'files',
+      covered: ['packages/api/test/a.test.ts'],
+      run: ['packages/api/test/b.test.ts'],
+    });
   });
 
   it('交接文件坏了（没有、不是 JSON、字段缺）：plan 全跑、record 不写', () => {
     for (const text of [undefined, '', '{', '[]', JSON.stringify({ schema: CACHE_SCHEMA })]) {
-      expect(
-        stepPlan({
-          event: 'pull_request',
-          stateText: text,
-          manifestText: manifest(),
-          listTests: stubList([]),
-        }).mode,
-      ).toBe('all');
+      expect(stepPlan({ event: 'pull_request', stateText: text, manifestText: manifest() }).mode).toBe('all');
       expect(
         stepRecord({ event: 'pull_request', stateText: text, reportText: '{}', root: '/r' }),
       ).toHaveProperty('why');
@@ -738,7 +661,7 @@ describe('写清单：整组全绿才写，每个文件都要有「跑成了」�
     JSON.stringify({
       schema: CACHE_SCHEMA,
       key: KEY,
-      args: ARGS,
+      box: BOX,
       collected,
       mode: 'all',
       covered: [],
@@ -751,7 +674,7 @@ describe('写清单：整组全绿才写，每个文件都要有「跑成了」�
   it('全绿：每个文件都在报告里标了 passed → 写出 complete 的清单，哈希是收到时那一份', () => {
     const r = record(report(ALL, 'passed'));
     if (!('manifest' in r)) throw new Error(r.why);
-    expect(r.manifest).toMatchObject({ complete: true, key: KEY, args: ARGS });
+    expect(r.manifest).toMatchObject({ complete: true, key: KEY, box: BOX });
     expect(r.manifest.files['packages/api/test/a.test.ts']).toEqual({ sha: SHA('1'), status: 'passed' });
     expect(parseManifest(JSON.stringify(r.manifest))).toEqual(r.manifest);
   });
@@ -861,48 +784,54 @@ describe('入口 bin/ci-cache.ts', () => {
     return { ...r, outputs: readFileSync(out, 'utf8') };
   };
 
+  /** 写一份这一台的文件清单（一行一个），返回路径。 */
+  const boxFile = (lines: string[]) => {
+    const p = join(tmp, `box-${Math.random().toString(36).slice(2)}.txt`);
+    writeFileSync(p, lines.length > 0 ? `${lines.join('\n')}\n` : '');
+    return p;
+  };
+
   it('参数不对：退出 2（工作流写错了，要红）', () => {
     expect(run([]).status).toBe(2);
     expect(run(['key']).status).toBe(2);
     expect(run(['nope', '--event', 'pull_request', '--tmp', tmp]).status).toBe(2);
-    expect(run(['key', '--event', 'pull_request', '--tmp', tmp, '--args', '--exclude x']).status).toBe(2);
+    expect(run(['key', '--event', 'pull_request', '--tmp', tmp, '--args', 'packages/cli/']).status).toBe(2);
   });
 
   it('【故意造出的失败】主线推送：key 不开、plan 全跑、record 不写，都退出 0、什么清单都不碰', () => {
-    expect(
-      run(['key', '--event', 'push', '--tmp', tmp, '--args=packages/cli/', '--label', 'rest']).outputs,
-    ).toBe('enabled=false\n');
+    const box = boxFile(['packages/cli/test/cli.test.ts']);
+    expect(run(['key', '--event', 'push', '--tmp', tmp, '--box-file', box, '--label', '1/1']).outputs).toBe(
+      'enabled=false\n',
+    );
     expect(run(['plan', '--event', 'push', '--tmp', tmp]).outputs).toMatch(/^mode=all\n/);
     const rec = run(['record', '--event', 'push', '--tmp', tmp, '--report', join(tmp, 'x.json')]);
     expect(rec.status).toBe(0);
     expect(rec.outputs).toBe('written=false\n');
   });
 
-  it('PR：认不出的分片参数不缓存（enabled=false、退出 0）；交接文件坏了 plan 全跑', () => {
-    const k = run(['key', '--event', 'pull_request', '--tmp', tmp, '--args=--weird', '--label', 'x']);
-    expect(k.status).toBe(0);
-    expect(k.outputs).toBe('enabled=false\n');
+  it('【故意造出的失败】PR：文件清单认不出（不是测试文件、空的、读不到）不缓存（enabled=false、退出 0）；交接文件坏了 plan 全跑', () => {
+    for (const box of [boxFile(['--weird']), boxFile([]), join(tmp, '没有这个清单.txt')]) {
+      const k = run(['key', '--event', 'pull_request', '--tmp', tmp, '--box-file', box, '--label', 'x']);
+      expect(k.status, box).toBe(0);
+      expect(k.outputs, box).toBe('enabled=false\n');
+    }
     writeFileSync(join(tmp, 'fleet-test-cache-state.json'), '{坏的');
     const p = run(['plan', '--event', 'pull_request', '--tmp', tmp]);
     expect(p.status).toBe(0);
     expect(p.outputs).toMatch(/^mode=all\n/);
   });
 
-  it('PR：真仓里 key 能算出来（vitest list 真跑），同样的输入键一样', () => {
-    const args = [
-      'key',
-      '--event',
-      'pull_request',
-      '--tmp',
-      tmp,
-      '--args=packages/cli/ --shard=1/1',
-      '--label',
-      'rest',
-    ];
+  it('PR：真仓里 key 能算出来，同样的输入键一样', () => {
+    const real = readGraph(fsRepo(ROOT));
+    if (typeof real === 'string') throw new Error(real);
+    const all = listTestFiles(fsRepo(ROOT));
+    if (typeof all === 'string') throw new Error(all);
+    const box = boxFile(all.filter((f) => f.startsWith('packages/cli/')));
+    const args = ['key', '--event', 'pull_request', '--tmp', tmp, '--box-file', box, '--label', '1/1'];
     const a = run(args);
     const b = run(args);
     expect(a.status).toBe(0);
-    expect(a.outputs).toMatch(/^enabled=true\ncache_key=ci-test-v\d+-rest-[0-9a-f]{64}\n/);
+    expect(a.outputs).toMatch(/^enabled=true\ncache_key=ci-test-v\d+-1-1-[0-9a-f]{64}\n/);
     expect(b.outputs).toBe(a.outputs);
   });
 });
@@ -973,33 +902,65 @@ describe('ci.yml 的 test job', () => {
     expect(record.if).not.toContain("mode == 'none'");
   });
 
-  it('跑 vitest 那一步：缓存模式为空时（主线、缓存没开）就是原来那条命令，不带报告、不改参数', () => {
+  it('跑 vitest 那一步：交出去的是这一台分到的文件清单（不再有 --shard），每一轮都出 JSON 报告给后面核对', () => {
     const run = need(
       steps.find((s) => /vitest run/.test(s.run ?? '') && !/ci-cache/.test(s.run ?? '')),
       '跑 vitest 那一步',
     );
     const text = run.run ?? '';
-    expect(text).toMatch(/^\s+"?"\) pnpm exec vitest run "\$\{args\[@\]\}" ;;$/m);
+    // 缓存模式为空（主线、缓存没开）：整台照跑，也出报告（核对那一步要它）
+    expect(text).toMatch(/^\s+""\) pnpm exec vitest run "\$\{box\[@\]\}" "\$\{report\[@\]\}" ;;$/m);
+    expect(text).toMatch(/^\s+all\) pnpm exec vitest run "\$\{box\[@\]\}" "\$\{report\[@\]\}" ;;$/m);
+    expect(text).toContain('mapfile -t box <"$BOX_FILE"');
+    expect(text).not.toContain('--shard');
     // 认不出的模式红，不是悄悄全跑或悄悄跳过
     expect(text).toMatch(/\*\)\n\s+echo "认不出的缓存模式[^\n]*>&2\n\s+exit 1/);
     // none 不跑 vitest
     expect(text).toMatch(/none\) echo "[^"]*不跑 vitest"/);
-    // 同一个 ARGS 表达式：键算的、vitest 跑的是同一串参数
+    // 同一份文件清单：键算的、vitest 跑的、跑完核对的是同一台（都从「这一台跑哪些文件」那步的输出来）
     const keyStep = need(
       cacheSteps.find((s) => s.id === 'cache-key'),
       '算键那一步',
     );
-    const expr = GH("join(matrix.args, ' ')");
-    expect(keyStep.env?.ARGS).toBe(expr);
-    expect(run.env?.ARGS).toBe(expr);
+    const boxFile = GH('steps.box.outputs.box_file');
+    expect(keyStep.env?.BOX_FILE).toBe(boxFile);
+    expect(run.env?.BOX_FILE).toBe(boxFile);
   });
 
-  it('FLEET_TEST_PG_URL 放在 job 上（算键的那一步也看得到），只给 db 分片；vitest 那一步不再单设', () => {
+  it('【故意造出的失败】跑完核对「实际跑的 == 分到的」那一步在、排在写清单之前、读的是同一份报告和矩阵', () => {
+    const at = (pred: (s: Step) => boolean) => steps.findIndex(pred);
+    const verify = at((s) => /ci-box\.ts verify/.test(s.run ?? ''));
+    const runAt = at((s) => /vitest run/.test(s.run ?? '') && !/ci-cache/.test(s.run ?? ''));
+    const recordAt = at((s) => s.id === 'cache-record');
+    expect(verify, '没有核对那一步').toBeGreaterThan(runAt);
+    expect(verify).toBeLessThan(recordAt);
+    const v = steps[verify] as Step;
+    expect(v.env?.MATRIX).toBe(GH('toJSON(matrix)'));
+    expect(v.env?.REPORT).toBe((steps[runAt] as Step).env?.REPORT);
+    // 主线也核对：这一步不认事件名（不是只在 PR 上）
+    expect(v.if ?? '').not.toContain('pull_request');
+    expect(v.run).toContain(['--mode "$', '{CACHE_MODE:-}"'].join(''));
+  });
+
+  it('FLEET_TEST_PG_URL 放在 job 上（算键的那一步也看得到），只给 pg 台；vitest 那一步不再单设', () => {
     const env = doc.jobs.test?.env;
-    expect(env?.FLEET_TEST_PG_URL).toContain("matrix.name == 'db'");
+    expect(env?.FLEET_TEST_PG_URL).toContain('matrix.pg');
     for (const s of steps) {
       expect(JSON.stringify(s.env ?? {}), s.name).not.toContain('FLEET_TEST_PG_URL');
     }
+  });
+
+  it('postgres 容器在 job 一开始就后台起、装依赖之后才等 pg_isready（不和装依赖串着等）', () => {
+    const start = steps.findIndex((s) => /docker run -d --name fleet-test-pg/.test(s.run ?? ''));
+    const install = steps.findIndex((s) => /pnpm install --frozen-lockfile/.test(s.run ?? ''));
+    const wait = steps.findIndex((s) => /pg_isready/.test(s.run ?? ''));
+    expect(start, '起容器那一步').toBeGreaterThanOrEqual(0);
+    expect(start).toBeLessThan(install);
+    expect(wait).toBeGreaterThan(install);
+    expect((steps[start] as Step).if).toBe('matrix.pg');
+    expect((steps[wait] as Step).if).toBe('matrix.pg');
+    // 起容器那一步自己不等（拉镜像放后台），也不跑 pg_isready
+    expect(steps[start]?.run).not.toContain('pg_isready');
   });
 
   it('新文件在先审后合清单里（它们是「决定少跑」的一步，和 ci-plan.ts 同类）', () => {
@@ -1008,12 +969,15 @@ describe('ci.yml 的 test job', () => {
     const listed = parsed.map((r) => r.path);
     expect(listed).toContain('packages/conventions/src/ci-cache.ts');
     expect(listed).toContain('packages/conventions/src/bin/ci-cache.ts');
+    expect(listed).toContain('packages/conventions/src/ci-box.ts');
+    expect(listed).toContain('packages/conventions/src/bin/ci-box.ts');
+    expect(listed).toContain('packages/conventions/src/test-split.ts');
   });
 
   it('清单文件名和缓存目录名两边一致（bin 写的、yml 存的是同一个目录）', () => {
     expect(MANIFEST_FILE).toBe('manifest.json');
     expect(yml).toContain(`/${CACHE_SUBDIR}`);
-    expect(yml).toContain('fleet-test-report.json');
+    expect(yml).toContain('fleet-test-out/report.json');
   });
 
   it('清单类型：Manifest 的 status 只有 passed（类型层面也不留别的）', () => {

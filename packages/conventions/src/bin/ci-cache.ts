@@ -1,12 +1,13 @@
 // CI test job 的结果缓存入口（.github/workflows/ci.yml，判法在 ../ci-cache.ts）。三步，每步都要 --event：
-//   key    算这一组测试的键，记下 vitest 实际会收哪些文件。输出 enabled、cache_key、dir、state。
+//   key    算这一台的键（这台分到哪些文件、它们的哈希、源码闭包、环境）。输出 enabled、cache_key、dir。
 //   plan   restore 之后：读清单、核对、算这次跑哪些。输出 mode=all|files|none；files 的文件名写进 <tmp>/fleet-test-run-files.txt。
 //   record vitest 全绿之后：写清单到 <tmp>/fleet-test-cache/manifest.json（之后 ci.yml 才 save 缓存）。输出 written。
-// 参数：--event <GitHub 事件名> --tmp <临时目录，CI 里是 $RUNNER_TEMP>；key 还要 --args "<交给 vitest 的参数>" --label <组名>
-//   [--temporal "<版本> <校验和>"]（引擎那几台，和 ci.yml 里 Temporal 命令行那一步同一份）；record 用 --report 指向 vitest 的 JSON 报告。
+// 参数：--event <GitHub 事件名> --tmp <临时目录，CI 里是 $RUNNER_TEMP>；key 还要 --box-file <这一台的文件清单>
+//   --label <台名> [--temporal "<版本> <校验和>"]（装了 Temporal 命令行那台，和 ci.yml 里那一步同一份）；
+//   record 用 --report 指向 vitest 的 JSON 报告。
+// 文件清单由 ci-box.ts files 写出来（一行一个文件），这里再核一遍（不是测试文件、重复的都当认不出，全跑）。
 // 非 pull_request 事件（主线推送）：每步都只打一行说明、不碰缓存，退出码 0、mode=all。
 // 算不出、读不出一律 enabled=false / mode=all（回来真跑），不是静默当成「跑过了」；退出码 2 只给参数不对（工作流写错了）。
-import { spawnSync } from 'node:child_process';
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,7 +18,6 @@ import {
   CacheError,
   fsHashFs,
   MANIFEST_FILE,
-  relativeToRoot,
   stepKey,
   stepPlan,
   stepRecord,
@@ -27,14 +27,14 @@ import { readGraph } from '../ci-plan.ts';
 import { fsRepo } from '../repo.ts';
 
 const USAGE =
-  '用法：ci-cache.ts <key|plan|record> --event <事件名> --tmp <临时目录> [--args "<vitest 参数>" --label <组名> --temporal "<版本> <校验和>"] [--report <vitest JSON 报告>]';
+  '用法：ci-cache.ts <key|plan|record> --event <事件名> --tmp <临时目录> [--box-file <这一台的文件清单> --label <台名> --temporal "<版本> <校验和>"] [--report <vitest JSON 报告>]';
 const root = fileURLToPath(new URL('../../../../', import.meta.url));
 
 const [command, ...rest] = process.argv.slice(2);
 let values: {
   event?: string;
   tmp?: string;
-  args?: string;
+  'box-file'?: string;
   label?: string;
   temporal?: string;
   report?: string;
@@ -45,7 +45,7 @@ try {
     options: {
       event: { type: 'string' },
       tmp: { type: 'string' },
-      args: { type: 'string' },
+      'box-file': { type: 'string' },
       label: { type: 'string' },
       temporal: { type: 'string' },
       report: { type: 'string' },
@@ -93,47 +93,28 @@ function readIfExists(path: string): string | undefined {
   }
 }
 
-/** vitest list：这组参数实际会收哪些测试文件（仓内相对路径、排好序）。跑不成、认不出抛 CacheError。 */
-function listTests(args: string[]): string[] {
-  mkdirSync(tmp, { recursive: true });
-  const out = join(tmp, 'fleet-test-list.json');
+/** 这一台分到的测试文件：ci-box.ts files 写出来的清单（一行一个）。读不到、空行算认不出（抛 CacheError，不缓存）。 */
+function readBox(): string[] {
+  const path = values['box-file'];
+  if (path === undefined) throw new CacheError('没给 --box-file（这一台的文件清单）');
+  let text: string;
   try {
-    writeFileSync(out, '');
+    text = readFileSync(path, 'utf8');
   } catch (e) {
-    throw new CacheError(`临时目录写不了（${e instanceof Error ? e.message : String(e)}）`);
+    throw new CacheError(`读不到文件清单 ${path}（${e instanceof Error ? e.message : String(e)}）`);
   }
-  const r = spawnSync(
-    process.execPath,
-    [join(root, 'node_modules/vitest/vitest.mjs'), 'list', '--filesOnly', `--json=${out}`, ...args],
-    { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
-  );
-  if (r.error) throw new CacheError(`vitest list 跑不起来（${r.error.message}）`);
-  if (r.status !== 0)
-    throw new CacheError(`vitest list 退出 ${r.status}：${(r.stderr || r.stdout).trim().slice(0, 300)}`);
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(readFileSync(out, 'utf8'));
-  } catch {
-    throw new CacheError('vitest list 的输出不是 JSON');
-  }
-  if (!Array.isArray(parsed)) throw new CacheError('vitest list 的输出不是数组');
-  const files = new Set<string>();
-  for (const item of parsed as { file?: unknown }[]) {
-    const rel = typeof item?.file === 'string' ? relativeToRoot(root, item.file) : undefined;
-    if (rel === undefined)
-      throw new CacheError(`vitest list 给了个认不出、不在仓里的文件：${JSON.stringify(item)}`);
-    files.add(rel);
-  }
-  return [...files].sort();
+  const files = text.split('\n').filter((l) => l !== '');
+  if (files.length === 0) throw new CacheError(`文件清单 ${path} 是空的`);
+  return files;
 }
 
 function main() {
   if (command === 'key') {
-    const args = (values.args ?? '').split(/\s+/).filter(Boolean);
+    const box = readBox();
     const fs = fsHashFs(root);
     const step = stepKey({
       event,
-      args,
+      box,
       label: values.label ?? '',
       fs,
       graph: readGraph(fsRepo(root)),
@@ -147,7 +128,6 @@ function main() {
           temporalLabel: values.temporal ?? '',
           now: new Date(),
         }),
-      listTests,
     });
     if (!step.enabled) {
       console.log(`测试缓存：不开（${step.why}）`);
@@ -156,7 +136,7 @@ function main() {
     }
     mkdirSync(tmp, { recursive: true });
     writeFileSync(statePath, JSON.stringify(step.state));
-    console.log(`测试缓存：键 ${step.key}（${Object.keys(step.state.collected).length} 个测试文件）`);
+    console.log(`测试缓存：键 ${step.key}（这一台 ${Object.keys(step.state.collected).length} 个测试文件）`);
     for (const [k, v] of Object.entries(step.parts)) console.log(`  ${k} ${v.slice(0, 12)}`);
     output({ enabled: 'true', cache_key: step.cacheKey, dir: cacheDir });
     return;
@@ -167,7 +147,6 @@ function main() {
       event,
       stateText: readIfExists(statePath),
       manifestText: readIfExists(join(cacheDir, MANIFEST_FILE)),
-      listTests,
     });
     console.log(`测试缓存：${step.why}`);
     if (step.state) writeFileSync(statePath, JSON.stringify(step.state));

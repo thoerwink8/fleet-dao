@@ -1,25 +1,29 @@
-// PR 的测试分片结果缓存（.github/workflows/ci.yml 的 test job，入口 bin/ci-cache.ts）：同一个 PR 重推时，
-// 一整组（engine 1/3、db、rest 2/3……各自一组）的输入没变、上一轮又全绿，就不再跑 vitest。
-// 缓存粒度是整组，不做按文件：按文件要算 import 图，test-changed.ts 开头注释记着那两个坑（vitest --changed 基准读不到不报错、
-// 引擎工作流测试走路径打的包不在 import 图里）。
+// PR 的测试结果缓存（.github/workflows/ci.yml 的 test job，入口 bin/ci-cache.ts）：同一个 PR 重推时，
+// 一台测试（test-split.ts 装好的箱，矩阵里给的是明确的文件清单）的输入没变、上一轮又全绿，就不再跑 vitest。
+// 缓存粒度是整台的输入（键），命中后再逐文件核对哈希；不按 import 图做按文件的键：test-changed.ts 开头注释记着那两个坑
+// （vitest --changed 基准读不到不报错、引擎工作流测试走路径打的包不在 import 图里）。
+// 装箱是确定的：同一个 PR 重推、选中的单元没变，每台分到的文件就一样，键才对得上；选中的单元变了、台重新分了，就全跑一轮。
 // 改这里之前必须知道：
 // - GitHub 的缓存按 ref 分作用域：pull_request 跑出来的缓存只有这个 PR 自己的重跑读得到，别的 PR、main 都读不到。
 //   所以只在 PR 的 test job 上做；主线（push）那一轮是自动发布的闸门（deploy/france/auto-release/lib.mjs 认它的结论），
 //   一个测试都不许跳——每一步都先认事件名（PR_EVENT），不是 pull_request 一律「全跑、不写」，工作流里的 if 丢了也一样。
 // - 这里判「少跑」等于放行没测过的改动，所以本文件和入口都在 high-risk-paths.json 里（先审后合）。
 // - 三态纪律（假绿的防线，缺一不可）：读不出、不是 JSON、字段认不全、schema 版本不对、缓存读不到、哈希对不上、
-//   vitest 列不出文件——一律回来真跑，绝不当成「都跑过了」。只在整组全绿的那一轮写清单；命中后不信键，把清单里每个文件的哈希
-//   重算比对；拿「vitest 实际会收哪些文件」当全集再减去已覆盖的（新增的测试文件必须跑）。
-// - 键要盖住测试读的一切：分片参数、被测单元整棵源码、向下依赖闭包、TEST_READS、根配置和包外读的文件、夹具、
-//   被 vitest 收的测试文件、环境身份（node、系统、vitest 版本、有没有真 Postgres、Temporal 命令行版本、日期）、本文件的 CACHE_SCHEMA。
+//   这一台的文件清单认不出——一律回来真跑，绝不当成「都跑过了」。只在整台全绿的那一轮写清单；命中后不信键，把清单里每个文件的哈希
+//   重算比对；拿「分到这一台的文件」当全集再减去已覆盖的（新增的测试文件必须跑）。跑完 ci-box.ts 再核对一遍
+//   「盖住的 + 实际跑的 == 分到的」，对不上 job 红。
+// - 键要盖住测试读的一切：这一台的文件清单、被测单元整棵源码、向下依赖闭包、TEST_READS、根配置和包外读的文件、夹具、
+//   这一台的测试文件内容、环境身份（node、系统、vitest 版本、有没有真 Postgres、Temporal 命令行版本、日期）、本文件的 CACHE_SCHEMA。
 //   test/ci-plan.test.ts 从扫描器反推「测试读的包外文件」，漏盖一处就红；键怎么算改了（多盖少盖）要升 CACHE_SCHEMA。
 import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { AGENTS_UNIT, FIXTURE_PATH, type PackageGraph, ROOT_CONFIG_FILES, TEST_READS } from './ci-plan.ts';
+import { isTestFile, unitOfTestFile, withSiblings } from './test-split.ts';
 
-/** 键和清单的格式版本：算键的办法、清单的字段一变就加一，旧缓存自然读不到、也不会被当成清单。 */
-export const CACHE_SCHEMA = 1;
+/** 键和清单的格式版本：算键的办法、清单的字段一变就加一，旧缓存自然读不到、也不会被当成清单。
+ * 2：分台从「包目录 + --shard」换成明确的文件清单（键里的 args 换成 box，清单、交接文件同改）。 */
+export const CACHE_SCHEMA = 2;
 /** 只有 pull_request 才缓存。 */
 export const PR_EVENT = 'pull_request';
 /** 缓存目录名（放在 $RUNNER_TEMP 下；ci.yml 的 restore/save 用同一个名字）。 */
@@ -135,64 +139,30 @@ export function fsHashFs(root: string): HashFs {
   };
 }
 
-// ---- 分片参数 → 单元 → 闭包
-
-export interface ShardArgs {
-  paths: string[];
-  excludes: string[];
-  shard: { index: number; count: number } | undefined;
-}
-
-const UNIT_PATH = /^(?:packages\/([a-z0-9][a-z0-9-]*)|(agents))\/$/;
-const EXCLUDE_PATH = /^packages\/([a-z0-9][a-z0-9-]*)\/\*\*$/;
+// ---- 这一台的文件清单 → 单元 → 闭包
 
 /**
- * ci-plan.ts 给的参数只有三种：包目录（packages/<包>/ 或 agents/）、--exclude packages/<包>/**、--shard=i/n。
- * 认不出的参数不猜：抛 CacheError，调用方全跑。
+ * 这一台跑的文件清单（ci.yml 矩阵里的 files，一行一个交给 vitest）。认不出的不猜：抛 CacheError，调用方全跑。
+ * 不是测试文件、空的、重复的都算认不出——清单是 ci-box.ts 解析过的，这里再核一遍，防的是工作流被改坏。
  */
-export function parseShardArgs(args: readonly string[]): ShardArgs {
-  const out: ShardArgs = { paths: [], excludes: [], shard: undefined };
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i] as string;
-    if (a === '--exclude') {
-      const v = args[++i];
-      if (v === undefined || !EXCLUDE_PATH.test(v))
-        throw new CacheError(`认不出的 --exclude：${v ?? '（没给）'}`);
-      out.excludes.push(v);
-    } else if (a.startsWith('--shard=')) {
-      const m = /^--shard=(\d+)\/(\d+)$/.exec(a);
-      const index = Number(m?.[1]);
-      const count = Number(m?.[2]);
-      if (!m || index < 1 || count < 1 || index > count || out.shard !== undefined) {
-        throw new CacheError(`认不出的分片参数：${a}`);
-      }
-      out.shard = { index, count };
-    } else if (UNIT_PATH.test(a)) {
-      out.paths.push(a);
-    } else {
-      throw new CacheError(`认不出的参数：${a}`);
-    }
+export function boxUnits(files: readonly string[]): string[] {
+  if (files.length === 0) throw new CacheError('这一台一个测试文件都没有');
+  const units = new Set<string>();
+  const seen = new Set<string>();
+  for (const f of files) {
+    if (!isTestFile(f)) throw new CacheError(`认不出的测试文件：${f}`);
+    if (seen.has(f)) throw new CacheError(`清单里 ${f} 出现了两次`);
+    seen.add(f);
+    const u = unitOfTestFile(f);
+    if (u === undefined) throw new CacheError(`认不出 ${f} 属于哪个单元`);
+    units.add(u);
   }
-  return out;
+  return [...units].sort();
 }
 
-const unitOfPath = (p: string): string => {
-  const m = UNIT_PATH.exec(p);
-  return (m?.[1] ?? m?.[2]) as string;
-};
-
-/** 这一组测哪些单元：给了包目录就是它们；没给（rest 全跑）是依赖图里所有包加 agents，减去 --exclude 的。 */
-export function shardUnits(parsed: ShardArgs, graph: PackageGraph): string[] {
-  const known = new Set([...Object.keys(graph.deps), AGENTS_UNIT]);
-  const excluded = new Set(
-    parsed.excludes.map((e) => (EXCLUDE_PATH.exec(e) as RegExpExecArray)[1] as string),
-  );
-  const base =
-    parsed.paths.length > 0 ? parsed.paths.map(unitOfPath) : [...known].filter((u) => !excluded.has(u));
-  const units = new Set(base.filter((u) => !excluded.has(u)));
-  for (const u of units) if (!known.has(u)) throw new CacheError(`依赖图里没有这个单元：${u}`);
-  if (units.size === 0) throw new CacheError('这一组一个单元都没有');
-  return [...units].sort();
+/** 这一台的文件，加上按名字会被过滤一起拉上的别的测试文件（vitest 是子串过滤，见 test-split.ts 的 withSiblings）。排好序。 */
+export function boxFiles(files: readonly string[], universe: readonly string[]): string[] {
+  return withSiblings(files, universe);
 }
 
 /** start 自己加上它们直接间接依赖的包（向下）。 */
@@ -342,10 +312,20 @@ export function keyCovers(roots: KeyRoots, path: string): boolean {
 export interface KeyInput {
   fs: HashFs;
   graph: PackageGraph;
-  args: readonly string[];
+  /** 这一台分到的测试文件（矩阵里的 files；里面每个都要在依赖图里有单元）。 */
+  box: readonly string[];
   env: EnvIdentity;
-  /** vitest 实际会收的测试文件（仓内相对路径）。 */
-  collected: readonly string[];
+}
+
+/** 单元都在依赖图里、且有测试文件的那些文件；认不出抛（调用方全跑，不拿半份清单算键）。 */
+export function checkedFiles(graph: PackageGraph, files: readonly string[]): string[] {
+  const known = new Set([...Object.keys(graph.deps), AGENTS_UNIT]);
+  boxUnits(files);
+  for (const f of files) {
+    const u = unitOfTestFile(f) as string;
+    if (!known.has(u)) throw new CacheError(`依赖图里没有这个单元：${u}（${f}）`);
+  }
+  return [...files].sort();
 }
 
 export interface KeyResult {
@@ -355,7 +335,7 @@ export interface KeyResult {
   parts: Record<string, string>;
   units: string[];
   closure: string[];
-  /** 被收的每个测试文件的内容哈希。 */
+  /** 这一台每个测试文件的内容哈希。 */
   collected: Record<string, string>;
 }
 
@@ -365,16 +345,15 @@ export function keyFromParts(parts: Readonly<Record<string, string>>): string {
 }
 
 export function computeKey(input: KeyInput): KeyResult {
-  const { fs, graph, args, env, collected } = input;
-  if (collected.length === 0) throw new CacheError('vitest 一个测试文件都没收到');
-  const parsed = parseShardArgs(args);
-  const units = shardUnits(parsed, graph);
+  const { fs, graph, box, env } = input;
+  const files = checkedFiles(graph, box);
+  const units = boxUnits(files);
   const closure = sourceClosure(graph, units);
   const roots = keyRoots(units, closure);
   const h = makeHasher(fs);
   const parts: Record<string, string> = {
     schema: String(CACHE_SCHEMA),
-    args: sha256(JSON.stringify(args)),
+    box: sha256(JSON.stringify(files)),
     env: sha256(JSON.stringify(env)),
   };
   for (const p of roots.packages) parts[`pkg:${p}`] = h.tree(p);
@@ -383,10 +362,10 @@ export function computeKey(input: KeyInput): KeyResult {
   const everything = [...(h.filesUnder('packages') ?? []), ...(h.filesUnder('agents/test') ?? [])];
   if (roots.fixtures) parts.fixtures = h.digestOf(everything.filter((p) => FIXTURE_PATH.test(p)));
   if (roots.wholeRepoTests) parts.wholeRepoTests = h.digestOf(everything.filter(isWholeRepoInput));
-  const files: Record<string, string> = {};
-  for (const f of [...collected].sort()) files[f] = h.file(f);
-  parts.collected = sha256(JSON.stringify(files));
-  return { key: keyFromParts(parts), parts, units, closure, collected: files };
+  const collected: Record<string, string> = {};
+  for (const f of files) collected[f] = h.file(f);
+  parts.collected = sha256(JSON.stringify(collected));
+  return { key: keyFromParts(parts), parts, units, closure, collected };
 }
 
 // ---- 清单
@@ -395,7 +374,8 @@ export interface Manifest {
   schema: number;
   complete: true;
   key: string;
-  args: string[];
+  /** 这一台分到的测试文件（矩阵里那一份，排好序）。 */
+  box: string[];
   files: Record<string, { sha: string; status: 'passed' }>;
 }
 
@@ -412,7 +392,8 @@ export function parseManifest(text: string): Manifest | string {
   if (o.schema !== CACHE_SCHEMA) return `清单的 schema 是 ${String(o.schema)}，要 ${CACHE_SCHEMA}`;
   if (o.complete !== true) return '清单没标 complete（上一轮没跑完、没全绿）';
   if (typeof o.key !== 'string' || !SHA.test(o.key)) return '清单里没有键';
-  if (!Array.isArray(o.args) || o.args.some((a) => typeof a !== 'string')) return '清单里的分片参数认不出';
+  if (!Array.isArray(o.box) || o.box.length === 0 || o.box.some((a) => typeof a !== 'string'))
+    return '清单里的文件清单认不出';
   const files = o.files;
   if (typeof files !== 'object' || files === null || Array.isArray(files)) return '清单里没有文件表';
   const entries = Object.entries(files as Record<string, unknown>);
@@ -439,13 +420,13 @@ export interface Selection {
 }
 
 /**
- * 命中之后怎么选：不信键，拿 vitest 实际收到的文件当全集，减去「清单里有、标了 passed、内容哈希和现在一样」的。
- * 清单读不出、键对不上、参数对不上，全跑；一个文件都盖不住也全跑。盖得住全部才 none。
+ * 命中之后怎么选：不信键，拿这一台分到的文件当全集，减去「清单里有、标了 passed、内容哈希和现在一样」的。
+ * 清单读不出、键对不上、文件清单对不上，全跑；一个文件都盖不住也全跑。盖得住全部才 none。
  */
 export function selectToRun(input: {
   collected: Readonly<Record<string, string>>;
   key: string;
-  args: readonly string[];
+  box: readonly string[];
   manifestText: string | undefined;
 }): Selection {
   const all = Object.keys(input.collected).sort();
@@ -455,8 +436,8 @@ export function selectToRun(input: {
   const m = parseManifest(input.manifestText);
   if (typeof m === 'string') return full(`${m}：全跑，不信这份缓存`);
   if (m.key !== input.key) return full('清单里的键和这次算出来的不一样：全跑，不信这份缓存');
-  if (JSON.stringify(m.args) !== JSON.stringify(input.args))
-    return full('清单里的分片参数和这次不一样：全跑');
+  if (JSON.stringify(m.box) !== JSON.stringify([...input.box].sort()))
+    return full('清单里的文件清单和这一台分到的不一样：全跑');
   const covered: string[] = [];
   const run: string[] = [];
   const changed: string[] = [];
@@ -486,8 +467,9 @@ export function selectToRun(input: {
 export interface State {
   schema: number;
   key: string;
-  args: string[];
-  /** vitest 收到的全部文件 → 内容哈希。 */
+  /** 这一台分到的文件（collected 的键就是它们；装箱是确定的，重推时是同一份）。 */
+  box: string[];
+  /** 这一台分到的文件 → 内容哈希。 */
   collected: Record<string, string>;
   mode: Mode;
   covered: string[];
@@ -509,7 +491,7 @@ export function parseState(text: string | undefined): State | string {
     o.schema !== CACHE_SCHEMA ||
     typeof o.key !== 'string' ||
     !SHA.test(o.key) ||
-    !strs(o.args) ||
+    !strs(o.box) ||
     typeof o.collected !== 'object' ||
     o.collected === null ||
     Object.values(o.collected).some((v) => typeof v !== 'string' || !SHA.test(v)) ||
@@ -529,59 +511,25 @@ export type KeyStep =
   | { enabled: false; why: string }
   | { enabled: true; cacheKey: string; key: string; parts: Record<string, string>; state: State };
 
-const sha1 = (s: string) => createHash('sha1').update(s).digest('hex');
-
-/**
- * vitest --shard=i/n 这一台会跑哪些文件：照抄 vitest 的 BaseSequencer.shard（按「/仓内路径」的 sha1 排序，再按文件个数均分，
- * 前 (总数 % n) 台多一个）。抄的是它的内部算法，所以：test/ci-cache.test.ts 拿装着的 vitest 自己的 BaseSequencer 逐个核对；
- * vitest 版本在键里；写清单时（stepRecord）要求报告里实际跑的文件正好等于这里预测的——算法哪天变了，只会是不写清单、
- * 不会是拿错的集合当「已覆盖」。
- */
-export function predictShard(files: readonly string[], shard: { index: number; count: number }): string[] {
-  const n = files.length;
-  const base = Math.floor(n / shard.count);
-  const rem = n % shard.count;
-  const start =
-    rem >= shard.index ? (base + 1) * (shard.index - 1) : rem * (base + 1) + (shard.index - rem - 1) * base;
-  const end = rem >= shard.index ? start + base + 1 : start + base;
-  return files
-    .map((f) => ({ f, h: sha1(`/${f}`) }))
-    .sort((a, b) => (a.h < b.h ? -1 : a.h > b.h ? 1 : 0))
-    .slice(start, end)
-    .map((x) => x.f)
-    .sort();
-}
-
-/** 第一步：算键，记下这一台 vitest 会跑的文件。算不出一律 enabled:false（不缓存、全跑）。 */
+/** 第一步：算键，记下这一台分到的文件。算不出一律 enabled:false（不缓存、全跑）。 */
 export function stepKey(input: {
   event: string;
-  args: readonly string[];
+  box: readonly string[];
   label: string;
   fs: HashFs;
   graph: PackageGraph | string;
   env: () => EnvIdentity;
-  listTests: (args: string[]) => string[];
 }): KeyStep {
   if (input.event !== PR_EVENT) return { enabled: false, why: notPr(input.event) };
   if (typeof input.graph === 'string')
     return { enabled: false, why: `包依赖图读不出（${input.graph}）：全跑` };
   try {
-    // vitest list 不认 --shard（列出来的是切之前的全集）：参数里去掉它，全集自己按 vitest 的算法切出这一台
-    const parsed = parseShardArgs(input.args);
-    const universe = input.listTests(input.args.filter((a) => !a.startsWith('--shard=')));
-    const collected = parsed.shard === undefined ? universe : predictShard(universe, parsed.shard);
-    const r = computeKey({
-      fs: input.fs,
-      graph: input.graph,
-      args: input.args,
-      env: input.env(),
-      collected,
-    });
+    const r = computeKey({ fs: input.fs, graph: input.graph, box: input.box, env: input.env() });
     const slug =
       input.label
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-|-$/g, '') || 'shard';
+        .replace(/^-|-$/g, '') || 'box';
     return {
       enabled: true,
       cacheKey: `ci-test-v${CACHE_SCHEMA}-${slug}-${r.key}`,
@@ -590,7 +538,7 @@ export function stepKey(input: {
       state: {
         schema: CACHE_SCHEMA,
         key: r.key,
-        args: [...input.args],
+        box: checkedFiles(input.graph, input.box),
         collected: r.collected,
         mode: 'all',
         covered: [],
@@ -605,12 +553,15 @@ export function stepKey(input: {
 
 export type PlanStep = { mode: Mode; why: string; run: string[]; state: State | undefined };
 
-/** 第二步：restore 之后，读清单、核对、算这次该跑哪些。任何一环对不上都是 all。 */
+/**
+ * 第二步：restore 之后，读清单、核对、算这次该跑哪些。任何一环对不上都是 all。
+ * files 模式跑的就是清单没盖住的那几个文件本身（是这一台分到的），不再交给 vitest 按名字过滤——跑完 ci-box.ts 会核对
+ * 「盖住的 + 真跑的 == 分到的」（vitest 是子串过滤，多拉上谁只有跑完才看得出）。
+ */
 export function stepPlan(input: {
   event: string;
   stateText: string | undefined;
   manifestText: string | undefined;
-  listTests: (args: string[]) => string[];
 }): PlanStep {
   if (input.event !== PR_EVENT) return { mode: 'all', why: notPr(input.event), run: [], state: undefined };
   const state = parseState(input.stateText);
@@ -618,25 +569,10 @@ export function stepPlan(input: {
   const sel = selectToRun({
     collected: state.collected,
     key: state.key,
-    args: state.args,
+    box: state.box,
     manifestText: input.manifestText,
   });
-  let { mode, run, covered, why } = sel;
-  if (mode === 'files') {
-    // 把要跑的文件当过滤条件交给 vitest 是按路径子串匹配的：交出去之前再列一遍，收到的必须正好是这些，多一个少一个都全跑
-    let got: string[] | undefined;
-    try {
-      got = input.listTests([...run]);
-    } catch (e) {
-      if (!(e instanceof CacheError)) throw e;
-    }
-    if (got === undefined || JSON.stringify([...got].sort()) !== JSON.stringify([...run].sort())) {
-      mode = 'all';
-      run = Object.keys(state.collected).sort();
-      covered = [];
-      why = '按文件名过滤 vitest 收到的和要跑的对不上：全跑';
-    }
-  }
+  const { mode, run, covered, why } = sel;
   return { mode, why, run, state: { ...state, mode, covered, run } };
 }
 
@@ -709,11 +645,11 @@ export function stepRecord(input: {
   const { passed, reported } = report;
   const covered = new Set(state.covered);
   const run = new Set(state.run);
-  // 报告里实际跑的文件必须正好是预测的这一批：多了少了都说明预测（分片算法、文件名过滤）和 vitest 实际做的对不上，不写
+  // 报告里实际跑的文件必须正好是这一轮该跑的：多了少了都说明 vitest 实际做的和清单对不上，不写
   const off =
     [...run].filter((f) => !reported.has(f)).length + [...reported].filter((f) => !run.has(f)).length;
   if (off > 0) {
-    return { why: `vitest 实际跑的文件和预测的对不上（差 ${off} 个，分片算法变了？）：不写清单` };
+    return { why: `vitest 实际跑的文件和这一台该跑的对不上（差 ${off} 个）：不写清单` };
   }
   const files: Manifest['files'] = {};
   const missing: string[] = [];
@@ -726,5 +662,5 @@ export function stepRecord(input: {
       why: `${missing.length} 个文件没有跑成的记录（${missing.slice(0, 3).join('、')}${missing.length > 3 ? '……' : ''}）：不写清单`,
     };
   }
-  return { manifest: { schema: CACHE_SCHEMA, complete: true, key: state.key, args: state.args, files } };
+  return { manifest: { schema: CACHE_SCHEMA, complete: true, key: state.key, box: state.box, files } };
 }
