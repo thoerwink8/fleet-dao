@@ -129,21 +129,6 @@ describe('读 GitHub：单张、里程碑', () => {
     expect(await gh.issue(4)).toMatchObject({ number: 4, isPr: true, state: 'closed' });
   });
 
-  it('里程碑和里程碑里开着的单', async () => {
-    const { impl } = fakeFetch({
-      [`${API}/milestones?state=all&per_page=100`]: () =>
-        json([{ number: 2, title: 'P1 核心闭环', state: 'open' }]),
-      [`${API}/issues?milestone=2&state=open&per_page=100`]: () =>
-        json([row(28), row(56, { pull_request: {} })]),
-    });
-    const gh = liveGitHub('o/r', {}, { fetchImpl: impl, token: () => undefined });
-    expect(await gh.milestones()).toEqual([{ number: 2, title: 'P1 核心闭环', state: 'open' }]);
-    expect((await gh.openInMilestone(2)).map((i) => [i.number, i.isPr])).toEqual([
-      [28, false],
-      [56, true],
-    ]);
-  });
-
   it('里程碑认不出：抛', async () => {
     const { impl } = fakeFetch({
       [`${API}/milestones?state=all&per_page=100`]: () => json([{ title: 'P1' }]),
@@ -209,7 +194,7 @@ describe('读 GitHub：单上的留言（欠账的定时任务用）', () => {
   });
 });
 
-describe('读 GitHub：版本快照要的几样（plan-snapshot）', () => {
+describe('读 GitHub：计划和对账要的几样（里程碑说明、关单原因、母子单）', () => {
   const ms = (extra: Record<string, unknown> = {}) => ({
     number: 8,
     title: 'v1 接活',
@@ -234,7 +219,7 @@ describe('读 GitHub：版本快照要的几样（plan-snapshot）', () => {
         ]),
     });
     const gh = liveGitHub('o/r', { GITHUB_TOKEN: TOKEN }, { fetchImpl: impl });
-    expect(await gh.milestoneDetails()).toEqual([
+    expect(await gh.milestones()).toEqual([
       { number: 8, title: 'v1 接活', state: 'open', description: '目标', closedAt: null },
       { number: 9, title: 'v0', state: 'closed', description: '', closedAt: '2026-09-20T16:30:00Z' },
     ]);
@@ -247,40 +232,71 @@ describe('读 GitHub：版本快照要的几样（plan-snapshot）', () => {
   ])('里程碑%s：抛', async (_name, extra, message) => {
     const { impl } = fakeFetch({ [`${API}/milestones?state=all&per_page=100`]: () => json([ms(extra)]) });
     await expect(
-      liveGitHub('o/r', { GITHUB_TOKEN: TOKEN }, { fetchImpl: impl }).milestoneDetails(),
+      liveGitHub('o/r', { GITHUB_TOKEN: TOKEN }, { fetchImpl: impl }).milestones(),
     ).rejects.toThrow(message);
   });
 
-  it('开着的单、版本里的单：去掉 PR，带上关单原因和子单数（没给子单数是 undefined）', async () => {
+  // 【故意造出的失败】接口没给这两个字段时，别拿空串顶：说明当空串会被读成「说明里没有先后标记」，
+  // 对账当成真断裂（退出码 1、留言到单上）；关掉的时间当空会被读成「还开着的版本」。两种都是「没查成」（退出码 2）。
+  it.each([
+    ['没给 description', { description: undefined }, '认不出（description）'],
+    ['没给 closed_at', { closed_at: undefined }, '认不出（closed_at）'],
+    ['只给了别的字段', { description: undefined, closed_at: undefined }, '认不出（description）'],
+  ])('里程碑%s：抛（不当空串、不当还开着）', async (_name, extra, message) => {
+    // 键整个不在（不是值给 undefined）：照接口真省掉字段的样子造
+    const raw = ms();
+    for (const key of Object.keys(extra)) {
+      delete (raw as Record<string, unknown>)[key];
+      expect(Object.keys(raw)).not.toContain(key);
+    }
+    const { impl } = fakeFetch({ [`${API}/milestones?state=all&per_page=100`]: () => json([raw]) });
+    await expect(
+      liveGitHub('o/r', { GITHUB_TOKEN: TOKEN }, { fetchImpl: impl }).milestones(),
+    ).rejects.toThrow(message);
+  });
+
+  it('开着的单、版本里的单：去掉 PR，带上关单原因、子单数、已关的子单数、母单号（没给是 undefined）', async () => {
     const { impl, seen } = fakeFetch({
       [`${API}/issues?state=open&per_page=100`]: () =>
         json([
-          row(191, { sub_issues_summary: { total: 2, completed: 0, percent_completed: 0 } }),
+          row(191, { sub_issues_summary: { total: 2, completed: 1, percent_completed: 50 } }),
           row(200, { pull_request: {}, sub_issues_summary: null }),
-          row(43),
+          row(43, { parent_issue_url: 'https://api.github.com/repos/o/r/issues/191' }),
         ]),
       [`${API}/issues?milestone=8&state=all&per_page=100`]: () =>
-        json([row(164, { state: 'closed', state_reason: 'completed', sub_issues_summary: { total: 0 } })]),
+        json([
+          row(164, {
+            state: 'closed',
+            state_reason: 'completed',
+            sub_issues_summary: { total: 0, completed: 0, percent_completed: 0 },
+          }),
+        ]),
     });
     const gh = liveGitHub('o/r', { GITHUB_TOKEN: TOKEN }, { fetchImpl: impl });
-    expect((await gh.openPlanIssues()).map((i) => [i.number, i.subIssues, i.stateReason])).toEqual([
-      [191, 2, null],
-      [43, undefined, null],
+    expect(
+      (await gh.openIssues()).map((i) => [i.number, i.subIssues, i.subIssuesDone, i.parent, i.stateReason]),
+    ).toEqual([
+      [191, 2, 1, undefined, null],
+      [43, undefined, undefined, 191, null],
     ]);
-    expect(await gh.milestonePlanIssues(8)).toMatchObject([
+    expect(await gh.milestoneIssues(8)).toMatchObject([
       { number: 164, state: 'closed', stateReason: 'completed', subIssues: 0 },
     ]);
     expect(seen.map((s) => s.auth)).toEqual([`Bearer ${TOKEN}`, `Bearer ${TOKEN}`]);
   });
 
   it.each([
-    ['子单数不是整数', { sub_issues_summary: { total: '2' } }, 'sub_issues_summary'],
-    ['子单数是负的', { sub_issues_summary: { total: -1 } }, 'sub_issues_summary'],
+    ['子单数不是整数', { sub_issues_summary: { total: '2', completed: 0 } }, 'sub_issues_summary'],
+    ['子单数是负的', { sub_issues_summary: { total: -1, completed: 0 } }, 'sub_issues_summary'],
+    ['没给已关的子单数', { sub_issues_summary: { total: 2 } }, 'sub_issues_summary'],
+    ['已关的比总数还多', { sub_issues_summary: { total: 1, completed: 2 } }, 'sub_issues_summary'],
+    ['母单地址认不出', { parent_issue_url: 'https://example.com/x' }, 'parent_issue_url'],
+    ['母单地址不是字', { parent_issue_url: 5 }, 'parent_issue_url'],
     ['关单原因不是字', { state_reason: 3 }, 'state_reason'],
   ])('单子%s：抛', async (_name, extra, field) => {
     const { impl } = fakeFetch({ [`${API}/issues?state=open&per_page=100`]: () => json([row(1, extra)]) });
     await expect(
-      liveGitHub('o/r', { GITHUB_TOKEN: TOKEN }, { fetchImpl: impl }).openPlanIssues(),
+      liveGitHub('o/r', { GITHUB_TOKEN: TOKEN }, { fetchImpl: impl }).openIssues(),
     ).rejects.toThrow(`有一条认不出（${field}）`);
   });
 

@@ -70,7 +70,7 @@ describe('依赖图：从 packages/*/package.json 读', () => {
   it('依赖图读不出：升成全跑，理由里写着为什么', () => {
     const p = planCi({
       event: 'pull_request',
-      changed: ['docs/plan.md'],
+      changed: ['docs/design.md'],
       graph: '读不到 packages/b/package.json',
     });
     expect(p.full).toBe(true);
@@ -94,7 +94,7 @@ describe('按改动算要跑什么', () => {
 
   it('认不出的路径、不在依赖图里的包：全跑', () => {
     for (const f of ['.gitattributes', 'scripts/new.sh', 'packages/nope/src/x.ts', 'LICENSE']) {
-      const p = pr('docs/plan.md', f);
+      const p = pr('docs/design.md', f);
       expect(p.full, f).toBe(true);
       expect(p.reasons.join(), f).toContain(f);
     }
@@ -122,7 +122,7 @@ describe('按改动算要跑什么', () => {
   it('纯文档（docs、specs、README、开单表单）：只剩每次都跑的 hygiene、docs', () => {
     const p = pr(
       'docs/design.md',
-      'docs/plan.md',
+      'docs/design.md',
       'specs/12-登录验证码/需求.md',
       'README.md',
       '.github/ISSUE_TEMPLATE/requirement.yml',
@@ -394,7 +394,7 @@ describe('汇总（必过检查 check）：该跑的跑了且绿，不该跑的�
   });
 
   it('纯文档：只有 changes、hygiene、docs 跑了', () => {
-    const docs = pr('docs/plan.md');
+    const docs = pr('docs/design.md');
     const skipped = { result: 'skipped' };
     expect(ciVerdict(needs({ biome: skipped, tsc: skipped, test: skipped }, docs)).ok).toBe(true);
     expect(ciVerdict(needs({ biome: skipped }, docs)).ok).toBe(false);
@@ -508,7 +508,7 @@ describe('入口', () => {
   it('汇总入口：没给 CI_NEEDS、不是 JSON 退出 2；对不上退出 1；对得上退出 0', () => {
     expect(run(verdict, [], { CI_NEEDS: '' }).status).toBe(2);
     expect(run(verdict, [], { CI_NEEDS: '{' }).status).toBe(2);
-    const p = planOutputs(pr('docs/plan.md'));
+    const p = planOutputs(pr('docs/design.md'));
     const base = {
       changes: { result: 'success', outputs: p },
       hygiene: { result: 'success' },

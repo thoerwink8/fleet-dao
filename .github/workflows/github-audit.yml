@@ -1,0 +1,32 @@
+name: github-audit
+# GitHub 对账（#654，packages/conventions/src/github-audit.ts）：每天一轮，查 GitHub 上的单子、母子单、版本先后有没有断裂——
+# 开着的单没有类别标签、母单的子单都关了它还开着、子单挂在已关的母单下面、母单标签和子单对不上、里程碑说明里的先后和实际对不上。
+# 查出来的挂得到单上的留言到那张单上（同一条只留一次），再把这一轮标红，修好才绿。
+# 只在定时和手动时跑：结果随单子开关、随时间变，不进 PR 的必过检查（#87），也不在 PR、主线推送上跑；随时想核就 pnpm github:audit。
+# 退出码：没有断裂 = 0；有断裂 = 1；没查成（读不到 GitHub、留言没留成）= 2。
+on:
+  schedule:
+    - cron: '41 1 * * *'
+  workflow_dispatch:
+concurrency:
+  group: github-audit
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node packages/conventions/src/bin/github-audit.ts --comment
+        env:
+          GITHUB_TOKEN: ${{ github.token }}

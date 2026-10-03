@@ -10,12 +10,11 @@
 // 推后的说法用一张写死的词表认（检查要每次一样、测试不出网，见 judge-or-code 第 3 问），宁漏不误：
 // 「以后加机器就是加工人」「先说结果，再说要我做什么」「它以后再发一次」这类不是推后，都不认。
 // 故意不查的：围栏代码块、HTML 注释、反引号里、「」引号里（那是在提这个词，不是在推后）、docs/reference/
-// （旧系统审计的快照，记的是当时的待查项）、docs/decisions/ 和 specs/（历史记录，#654）、plan.md 里
-// pnpm plan:snapshot 生成的快照段（照抄 GitHub 上的单子标题和里程碑说明，每一行本来就是一张单）。
+// （旧系统审计的快照，记的是当时的待查项）、docs/decisions/ 和 specs/（历史记录，#654）。
 // 有误报就收窄词表，不往文档里加豁免；漏了就补进词表，并在测试里加一条。
 
-import { createHash } from 'node:crypto';
-import type { GitHubCommenter, GitHubReader } from './github-api.ts';
+import type { Finding } from './findings.ts';
+import type { GitHubReader } from './github-api.ts';
 import { type MdDoc, norm, parseMd, sectionRange } from './markdown.ts';
 import type { RepoView } from './repo.ts';
 
@@ -106,7 +105,7 @@ function maskMentions(line: string): string {
 export function findDeferrals(doc: MdDoc): Deferral[] {
   const found: Deferral[] = [];
   doc.lines.forEach((raw, i) => {
-    if (doc.fenced[i] || doc.generated[i]) return;
+    if (doc.fenced[i]) return;
     const masked = maskMentions(raw);
     let start = 0;
     for (const piece of masked.split(/(?<=[。；！？])/)) {
@@ -161,14 +160,6 @@ export function untrackedDeferrals(deferrals: readonly Deferral[]): DebtProblem[
       line: d.line,
       message: `「${shorten(d.sentence)}」里有「${d.phrase}」，同一句里没有单号：开一张带「怎么算做完」和里程碑的 issue（pnpm issue:new）把 #号写进这一句，或者改掉推后的说法`,
     }));
-}
-
-/** 定时任务查出来的一条欠账。issue 是要留言的那张单；没有能留言的单时是 undefined。 */
-export interface Finding {
-  issue: number | undefined;
-  /** 同一条欠账的稳定标识：留言里带着它，下次查到同一条就不再重复留言。 */
-  key: string;
-  text: string;
 }
 
 /** 推后的话挂的单号都不是开着的 issue：留言到那张关了的单上；只挂着 PR 或查不到的号，没处留言。 */
@@ -271,7 +262,7 @@ export interface LiveDebt {
 
 /**
  * 定时任务那一半（.github/workflows/debt.yml）：推后的话挂的单号是不是开着的 issue。
- * 看的是 GitHub 上的现状，所以不进 PR 的必过检查；查出来的是 findings，由 reportFindings 留言到对应的单上。
+ * 看的是 GitHub 上的现状，所以不进 PR 的必过检查；查出来的是 findings，由 findings.ts 的 reportFindings 留言到对应的单上。
  */
 export async function liveDebt(opts: { repo: RepoView; gh: GitHubReader }): Promise<LiveDebt> {
   const docs = checkDebtDocs(opts.repo);
@@ -286,47 +277,8 @@ export async function liveDebt(opts: { repo: RepoView; gh: GitHubReader }): Prom
   return { docs: { code: docs.code, lines: docs.lines }, findings, notQueried };
 }
 
-/** 留言里的记号：同一条欠账只留一次。 */
-export function findingMarker(key: string): string {
-  return `<!-- fleet-debt:${createHash('sha256').update(key).digest('hex').slice(0, 16)} -->`;
-}
-
-/**
- * 把查出来的欠账留言到对应的单上：一张单一条留言，已经留过的（带着同一个记号）不再留。
- * 没处留言的（只挂着 PR 或查不到的号）原样交回；读留言、写留言失败记进 errors，不当成留过了。
- */
-export async function reportFindings(
-  findings: readonly Finding[],
-  gh: GitHubCommenter,
-): Promise<{ posted: number[]; already: number; unattached: Finding[]; errors: string[] }> {
-  const byIssue = new Map<number, Finding[]>();
-  const unattached: Finding[] = [];
-  for (const f of findings) {
-    if (f.issue === undefined) unattached.push(f);
-    else byIssue.set(f.issue, [...(byIssue.get(f.issue) ?? []), f]);
-  }
-  const posted: number[] = [];
-  const errors: string[] = [];
-  let already = 0;
-  for (const [n, list] of [...byIssue].sort((a, b) => a[0] - b[0])) {
-    try {
-      const existing = (await gh.comments(n)).join('\n');
-      const fresh = list.filter((f) => !existing.includes(findingMarker(f.key)));
-      already += list.length - fresh.length;
-      if (fresh.length === 0) continue;
-      const body = [
-        '欠账检查（.github/workflows/debt.yml，#67、#87）查出来的，挂在这张单上：',
-        '',
-        ...fresh.map((f) => `- ${f.text}${findingMarker(f.key)}`),
-      ].join('\n');
-      await gh.comment(n, body);
-      posted.push(n);
-    } catch (e) {
-      errors.push(`#${n} 上留言没留成（${message(e)}）`);
-    }
-  }
-  return { posted, already, unattached, errors };
-}
+/** 欠账留言的开头一句（findings.ts 的 reportFindings 用）。 */
+export const DEBT_REPORT_HEADER = '欠账检查（.github/workflows/debt.yml，#67、#87）查出来的，挂在这张单上：';
 
 function message(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
