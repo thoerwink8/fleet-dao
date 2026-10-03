@@ -152,7 +152,10 @@ export const routes = pgTable(
   ],
 );
 
-/** 每个阶段类型一行；顺序在 stage_policy_routes。 */
+/**
+ * 每个阶段类型一行；顺序在 stage_policy_routes。旧的平铺结构：选路、路由探针、切号已改读路由两层（下面两张表，#574），
+ * 这两张只剩目录装载器写、判断题后端（packages/jev 的 wiring.ts）和驾驶舱的换模型对话框读，随 #556-4 删库表那一步删。
+ */
 export const stagePolicies = pgTable('stage_policies', {
   stage: stageKind('stage').primaryKey(),
   /** 创始人手动钉住的顺序，AI 帅位不改。 */
@@ -187,7 +190,8 @@ export const stagePolicyRoutes = pgTable(
 
 /**
  * 路由两层的上层「用途 → 模型顺序」（#574，specs/574-路由两层DB）：每个用途（阶段类型）一串模型，越靠前越先用。
- * 新旧并存：选路此刻仍读 stage_policy_routes，这两张表只落存的形状，读法和切换随后续切片。
+ * 选路按这两张表挑（先模型的先后、再模型下路由的先后，queries/engine.ts 的 routeFactsForPurpose）；发布时由仓里的默认骨架
+ * 只补缺装进来（routing-apply.ts）。两层没有「钉住」这一列，选路一律按没钉住算。
  * 「这一层现在活着吗」不存列：它由下层现算（routing-liveness.ts 写明三件事各看哪张表的哪几列）。
  */
 export const routingPurposeModels = pgTable(
@@ -210,6 +214,7 @@ export const routingPurposeModels = pgTable(
 /**
  * 路由两层的下层「模型 → 渠道顺序」（#574）：一个模型一串路由（渠道 + 账号池 + 执行方式），越靠前越先用。
  * 加一个能跑这个模型的新渠道，只在这个模型下加一行。路由必须是这个模型自己的（复合外键）。
+ * 开关不分用途：关了这一行，哪个用途都不派它；路由探针也只探开着、模型又排进了某个用途的（routing-layers.ts 的 routesInUse）。
  */
 export const routingCatalog = pgTable(
   'routing_catalog',

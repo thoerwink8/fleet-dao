@@ -4,16 +4,8 @@
 import { type ModelRef, type OrgKind, windowAppliesTo } from '@fleet-dao/shared';
 import { and, asc, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
 import type { Db } from '../client.ts';
-import {
-  auditLog,
-  models,
-  pools,
-  quotaWindows,
-  routes,
-  runs,
-  sessionRuns,
-  stagePolicyRoutes,
-} from '../schema/index.ts';
+import { routesInUse } from '../routing-layers.ts';
+import { auditLog, models, pools, quotaWindows, routes, runs, sessionRuns } from '../schema/index.ts';
 import { type WindowState, windowFull, windowState } from './quota.ts';
 
 /**
@@ -124,13 +116,12 @@ export async function sessionOrgFacts(db: Db, options: { now: Date }): Promise<S
             modelId: models.id,
             family: models.family,
           })
-          .from(stagePolicyRoutes)
-          .innerJoin(routes, eq(routes.id, stagePolicyRoutes.routeId))
+          .from(routes)
           .innerJoin(models, eq(models.id, routes.modelId))
-          .where(and(eq(stagePolicyRoutes.enabled, true), inArray(routes.poolId, poolIds))),
+          .where(and(inArray(routes.id, routesInUse(db)), inArray(routes.poolId, poolIds))),
     openOrgRuns(db),
   ]);
-  // 在用的路由（一条路由挂在几个阶段上只算一次）→ 各池的模型
+  // 在用的路由（路由两层里开着、模型排进了某个用途的，routing-layers.ts 的 routesInUse）→ 各池的模型
   const refs = new Map<string, Map<string, ModelRef>>();
   for (const r of used) {
     const byRoute = refs.get(r.poolId) ?? new Map<string, ModelRef>();

@@ -1,10 +1,10 @@
-// 执行计时、任务快照、选路事实（在 candidates.ts 算好的挡法上加字段）。
+// 执行计时、任务快照、选路事实（按路由两层读，在 candidates.ts 算好的挡法上加字段）。
 import { randomUUID } from 'node:crypto';
 import { and, eq, isNull } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { recordStepTiming, routeFactsForStage, saveTaskSnapshot } from '../src/queries/engine.ts';
+import { recordStepTiming, routeFactsForPurpose, saveTaskSnapshot } from '../src/queries/engine.ts';
 import { saveRouteProbe } from '../src/queries/probe.ts';
-import { stagePolicies, stagePolicyRoutes, subtaskDeps, subtasks, tasks } from '../src/schema/index.ts';
+import { routingCatalog, subtaskDeps, subtasks, tasks } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import {
   addRepo,
@@ -17,6 +17,7 @@ import {
   expectViolation,
   MIN,
   NOW,
+  setRoutingLayers,
   setStageOrder,
 } from './helpers.ts';
 
@@ -264,19 +265,38 @@ describe('saveTaskSnapshot', () => {
   });
 });
 
-describe('routeFactsForStage', () => {
+describe('routeFactsForPurpose（路由两层，#574）', () => {
   const fresh = { reading: 'measured' as const, readAt: ago(MIN) };
 
-  it('阶段没配顺序：configured=false，不按 id 乱挑', async () => {
-    await t.db.delete(stagePolicies).where(eq(stagePolicies.stage, 'research'));
+  it('【故意造出的失败】用途没配模型顺序：configured=false、problems 写明，不按 id 乱挑；旧的阶段顺序不再算数', async () => {
     await addRoute(t.db, { id: 'r1', poolId: 'relay-a', modelId: 'opus-5.5' });
-    expect(await routeFactsForStage(t.db, 'research', { now: NOW })).toEqual({
-      stage: 'research',
+    // 旧的平铺表里给 research 排了它：选路已经不读这张表
+    await setStageOrder(t.db, 'research', ['r1']);
+    expect(await routeFactsForPurpose(t.db, 'research', { now: NOW })).toEqual({
+      purpose: 'research',
       configured: false,
-      stagePinned: false,
       order: [],
+      problems: ['用途 research 没配模型顺序'],
       routes: [],
     });
+  });
+
+  it('先后是用途下模型的先后、再是模型下路由的先后，摊平后位置从 0 重新数', async () => {
+    await addRoute(t.db, { id: 'opus-b', poolId: 'relay-b', modelId: 'opus-5.5' });
+    await addRoute(t.db, { id: 'opus-a', poolId: 'relay-a', modelId: 'opus-5.5' });
+    await addRoute(t.db, { id: 'old', poolId: 'relay-a', modelId: 'opus-4.9' });
+    await setRoutingLayers(t.db, {
+      purposes: { execute: ['opus-4.9', 'opus-5.5'] },
+      models: { 'opus-5.5': ['opus-b', 'opus-a'], 'opus-4.9': ['old'] },
+    });
+    const facts = await routeFactsForPurpose(t.db, 'execute', { now: NOW });
+    expect(facts.order).toEqual([
+      { routeId: 'old', position: 0, enabled: true },
+      { routeId: 'opus-b', position: 1, enabled: true },
+      { routeId: 'opus-a', position: 2, enabled: true },
+    ]);
+    expect(facts.routes.map((r) => r.routeId)).toEqual(['old', 'opus-b', 'opus-a']);
+    expect(facts.problems).toEqual([]);
   });
 
   it('给出 enabled=false 的行；用量比例、reading、reserved 都从原始额度窗和会话表补上', async () => {
@@ -287,11 +307,11 @@ describe('routeFactsForStage', () => {
       upstreamModel: 'claude-opus-5-5',
     });
     await addRoute(t.db, { id: 'off', poolId: 'relay-b', modelId: 'opus-4.9' });
-    await setStageOrder(t.db, 'execute', ['on', 'off']);
-    await t.db
-      .update(stagePolicyRoutes)
-      .set({ enabled: false })
-      .where(and(eq(stagePolicyRoutes.stage, 'execute'), eq(stagePolicyRoutes.routeId, 'off')));
+    await setRoutingLayers(t.db, {
+      purposes: { execute: ['opus-5.5', 'opus-4.9'] },
+      models: { 'opus-5.5': ['on'], 'opus-4.9': ['off'] },
+    });
+    await t.db.update(routingCatalog).set({ enabled: false }).where(eq(routingCatalog.routeId, 'off'));
     await addWindow(t.db, {
       poolId: 'relay-a',
       window: '7d',
@@ -306,7 +326,7 @@ describe('routeFactsForStage', () => {
     const task = await addTask(t.db, repo.id);
     await addRun(t.db, { taskId: task.id, routeId: 'on', queuedAt: ago(MIN) });
 
-    const facts = await routeFactsForStage(t.db, 'execute', { now: NOW });
+    const facts = await routeFactsForPurpose(t.db, 'execute', { now: NOW });
     expect(facts.configured).toBe(true);
     expect(facts.order).toEqual([
       { routeId: 'on', position: 0, enabled: true },
@@ -334,7 +354,10 @@ describe('routeFactsForStage', () => {
   it('探针那次结论是什么、那时会话用户挂的是哪个组织原样透出去（#335：选路分得清「那一轮没探它」和「探了没通」）', async () => {
     await addRoute(t.db, { id: 'on', poolId: 'relay-a', modelId: 'opus-5.5' });
     await addRoute(t.db, { id: 'skip', poolId: 'relay-b', modelId: 'opus-4.9' });
-    await setStageOrder(t.db, 'execute', ['on', 'skip']);
+    await setRoutingLayers(t.db, {
+      purposes: { execute: ['opus-5.5', 'opus-4.9'] },
+      models: { 'opus-5.5': ['on'], 'opus-4.9': ['skip'] },
+    });
     await saveRouteProbe(t.db, {
       routeId: 'skip',
       state: 'skipped',
@@ -342,7 +365,7 @@ describe('routeFactsForStage', () => {
       detail: '会话用户现在挂的是独享组织：不探',
       org: 'solo',
     });
-    const facts = await routeFactsForStage(t.db, 'execute', { now: NOW });
+    const facts = await routeFactsForPurpose(t.db, 'execute', { now: NOW });
     expect(facts.routes.find((r) => r.routeId === 'skip')).toMatchObject({
       probeState: 'skipped',
       probeOrg: 'solo',
