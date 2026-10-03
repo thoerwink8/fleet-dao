@@ -265,6 +265,74 @@ export function checkTemporary(cwd, git, now = Date.now()) {
   return out;
 }
 
+/**
+ * 第 3.5 件：会话所在仓里的「## 创始人引导（待处理）」一节（通用段「你的引导必须落盘」那条）。
+ * 有没处理完的引导就报几条、让人接着办；没有这一节、不是 git 仓不出声；git 跑不起来、读不了明说没查成。
+ * 只用本地 git grep 找已跟踪的 .md（不取远端，限时 GREP_MS），不拖慢开会话。返回要说的几行。
+ */
+export const DIRECTIVE_HEADING = '## 创始人引导（待处理）';
+const DIRECTIVE_NOT_CHECKED = '创始人引导待处理清单没查成';
+
+export function checkDirectives(cwd, git) {
+  const top = git(cwd, ['rev-parse', '--show-toplevel']);
+  if (gitBroken(top))
+    return [
+      `${DIRECTIVE_NOT_CHECKED}：这台的 git 跑不起来（${why(top)}），会话所在仓里有没有没处理的引导不知道。`,
+    ];
+  const root = top.stdout.trim();
+  if (!ok(top) || !root) return [];
+  const found = git(root, [
+    'grep',
+    '-n',
+    '-z',
+    '-I',
+    '-E',
+    `^${DIRECTIVE_HEADING}[[:space:]]*$`,
+    '--',
+    '*.md',
+  ]);
+  if (found.status === 1 && !found.error && !found.stderr.trim()) return [];
+  if (!ok(found)) return [`${DIRECTIVE_NOT_CHECKED}：git grep 找这一节没成（${why(found)}）。`];
+  const hits = found.stdout
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => /^([^\0]+)\0(\d+)\0/.exec(l));
+  if (hits.length === 0 || hits.some((m) => m === null))
+    return [`${DIRECTIVE_NOT_CHECKED}：git grep 的输出认不出（${why(found)}）。`];
+  const out = [];
+  for (const [, file, n] of hits) {
+    let text;
+    try {
+      text = readFileSync(join(root, file), 'utf8');
+    } catch (err) {
+      out.push(`${DIRECTIVE_NOT_CHECKED}（${file}:${n}）：读不了（${err?.code ?? err?.message ?? err}）。`);
+      continue;
+    }
+    const items = directiveItems(text, Number(n));
+    if (items === null) {
+      out.push(`${DIRECTIVE_NOT_CHECKED}（${file}:${n}）：标题下面认不出条目。`);
+      continue;
+    }
+    if (items.length > 0)
+      out.push(
+        `创始人引导还有 ${items.length} 条没处理（${file}:${n}）：${items.slice(0, 5).join('；')}${items.length > 5 ? ' 等' : ''}。先接着办，办完把那条标「已处理」或删掉。`,
+      );
+  }
+  return out;
+}
+
+/** 「## 创始人引导（待处理）」标题下一节里的条目：`- ` 开头、没标「已处理」的非空行；标题下到下一个一、二级标题为止 */
+function directiveItems(text, headingLine) {
+  const lines = text.split(/\r?\n/);
+  const items = [];
+  for (let i = headingLine; i < lines.length; i++) {
+    const t = lines[i].trim();
+    if (/^#{1,2}\s/.test(t)) break;
+    if (t.startsWith('- ') && !/已处理/.test(t)) items.push(brief(t.slice(2).trim()));
+  }
+  return items;
+}
+
 /** 这台同步到哪个提交、落后主线几个（g 已经钉在同步专用的检出上了；算不了就说算不了） */
 function lag(g, synced, stale) {
   const basis = stale ? '（按本机上次取到的主线算）' : '';
@@ -409,6 +477,7 @@ export function sessionStart({ cwd, home, git, sync, localGit = git, now = Date.
   return [
     ...(here.line ? [here.line] : []),
     ...checkTemporary(cwd, localGit, now),
+    ...checkDirectives(cwd, localGit),
     ...sweepWorktrees(cwd, localGit),
     syncFleet({ home, git, sync, fetch: here.fetch, now }),
   ];
