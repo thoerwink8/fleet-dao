@@ -761,14 +761,15 @@ describe('ci.yml 和这里对得上', () => {
     });
 
     it('【故意造出的失败】新的挪不进去：把原来的挪回去，照原样跑（退出 0、打 warning）', () => {
-      const { r, skel } = go(['skel.slim ']);
+      // 只卡「把瘦身目录换进去」那条 mv（命令里 skel.slim 后面跟着空格和路径）：这时原目录已经挪走了，要走恢复那条路
+      const { r, skel } = go(['skel.slim /']);
       expect(r.status, r.stderr).toBe(0);
       expect(skel).toEqual(['.bashrc', '.profile', '.rustup']);
       expect(r.stdout).toContain('::warning::');
     });
 
     it('【故意造出的失败】新的挪不进去、原来的也挪不回去：红，不拿「照原样跑」糊过去', () => {
-      const { r, skel } = go(['skel.slim ', 'skel.ci-full ']);
+      const { r, skel } = go(['skel.slim /', 'skel.ci-full /']);
       expect(r.status).toBe(1);
       expect(skel).toBeNull();
       expect(r.stdout).toContain('::error::');
