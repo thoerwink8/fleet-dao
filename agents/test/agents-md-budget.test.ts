@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
-const TEXT = readFileSync(fileURLToPath(new URL('../../../AGENTS.md', import.meta.url)), 'utf8').replace(
+const TEXT = readFileSync(fileURLToPath(new URL('../../AGENTS.md', import.meta.url)), 'utf8').replace(
   /\r\n/g,
   '\n',
 );
