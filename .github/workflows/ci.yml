@@ -2,7 +2,8 @@ name: ci
 # 按改动跑、并行跑（design 第五节「CI 按改动跑」）：changes 算出这次改了什么、哪几个 job 要跑（packages/conventions/src/ci-plan.ts），
 # biome、tsc、test、web、deploy 看它给的开关；hygiene、docs 每次都跑；check 汇总核对「该跑的跑了且绿、不该跑的确实跳过」
 # ——hygiene 是例外，它每次都跑但只报不挡，红了不算进这条判定（真正挡的是推之前，见 hygiene job 的注释）。
-# 主线推送一律全跑，兜底按改动算漏了的。
+# 主线推送跑「上一次主线真绿的头…这次的头」那段累计改动该跑的（基准查不到、认不出路径一律退回全跑）；
+# 区间口径、取消前一轮的取舍见 docs/ci-speedup-plan.md 的 D。
 # 改这里之前必须知道：
 # - 必过检查（规则集「主线保护」）只认 check 这一个 job 名，别改名；它 needs 全部 job、if: always()，少 needs 一个就等于不拦那个。
 # - 不用工作流级的 paths 过滤：必过检查要每个 PR 都触发，跳过的 job 由汇总核对（test/ci-plan.test.ts 核这份文件的结构）。
@@ -33,6 +34,10 @@ jobs:
   changes:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # 只有这一个 job 多要 actions: read（读主线运行记录找基准）；别的 job 仍只读代码。
+    permissions:
+      contents: read
+      actions: read
     outputs:
       plan: ${{ steps.plan.outputs.plan }}
       biome: ${{ steps.plan.outputs.biome }}
@@ -49,11 +54,19 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      # 主线推送：查「上一次主线真绿的头」，这一轮只跑它到现在这段累计改动该跑的（读不到就空，下一步照旧全跑）。
+      - id: mainbase
+        if: github.event_name == 'push'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.ref_name }}
+        run: echo "sha=$(node packages/conventions/src/bin/main-base.ts ci.yml "$BRANCH")" >> "$GITHUB_OUTPUT"
       - id: plan
         env:
           EVENT: ${{ github.event_name }}
           BASE: ${{ github.base_ref }}
-        run: node packages/conventions/src/bin/ci-plan.ts --event "$EVENT" --base "origin/$BASE"
+          MAIN_BASE: ${{ steps.mainbase.outputs.sha }}
+        run: node packages/conventions/src/bin/ci-plan.ts --event "$EVENT" --base "origin/$BASE" --main-base "$MAIN_BASE"
 
   # 卫生检查：每个 PR 都跑、不裁剪，但只报不挡（不进 check 的必过名单，见下面 check job）——真正挡的是推之前：
   # pre-push 钩子、引擎推分支时的扫描（创始人 2026-09-28 傍晚拍，specs/169-Fusion形态/需求.md）。这里留着是为了

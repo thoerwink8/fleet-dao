@@ -499,6 +499,33 @@ describe('入口', () => {
     expect(text).toMatch(/^tests=\[.*"engine".*\]$/m);
   });
 
+  it('主线推送给了基准：只按「基准…头」这段累计改动算，改文档不再全跑', () => {
+    // 走了 git diff（打出「改了 N 个文件」）；具体该跑什么由 planCi 的 PR 用例钉着，这里只验入口真的按区间算
+    const r = run(plan, ['--event', 'push', '--main-base', 'HEAD~1']);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(/改了 \d+ 个文件（push）/);
+  });
+
+  it('主线给的基准就是 HEAD（区间里没有改动）：认不出改了什么，兜底全跑，不当成「没东西要跑」', () => {
+    const out = join(mkdtempSync(join(tmpdir(), 'ci-plan-')), 'out');
+    const r = run(plan, ['--event', 'push', '--main-base', 'HEAD'], { GITHUB_OUTPUT: out });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('改了 0 个文件（push）');
+    expect(readFileSync(out, 'utf8')).toContain('tsc=all\n');
+  });
+
+  it('【故意造出的失败】主线基准认不出（不是提交、像参数）：退出 2 判红，不静默少跑', () => {
+    expect(run(plan, ['--event', 'push', '--main-base', '0'.repeat(40)]).status).toBe(2);
+    expect(run(plan, ['--event', 'push', '--main-base=--output=/tmp/x']).status).toBe(2);
+  });
+
+  it('【故意造出的失败】主线给了空基准（查不到上一次绿）：照旧全跑', () => {
+    const out = join(mkdtempSync(join(tmpdir(), 'ci-plan-')), 'out');
+    const r = run(plan, ['--event', 'push', '--main-base', ''], { GITHUB_OUTPUT: out });
+    expect(r.status).toBe(0);
+    expect(readFileSync(out, 'utf8')).toContain('tsc=all\n');
+  });
+
   it('GITHUB_OUTPUT 写不进去：退出 2', () => {
     expect(run(plan, ['--event', 'push'], { GITHUB_OUTPUT: join(ROOT, '没有这个目录', 'out') }).status).toBe(
       2,
