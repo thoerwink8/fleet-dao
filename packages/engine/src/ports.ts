@@ -133,7 +133,7 @@ export interface PickRouteInput extends Scope {
   uiWork?: boolean;
   /**
    * 流程配置里这一步的模型顺序（0003 第 9 条，目录里的模型 id）：只派这几个模型的路由，按这个先后；同一个模型的几条路由
-   * 照调度台的先后。给了空数组 = 这一步没配模型，派不出。不给 = 照调度台（需求工作流、子任务不给）。
+   * 照路由两层的先后。给了空数组 = 这一步没配模型，派不出。不给 = 照路由两层（用途 → 模型 → 路由，#574；三段一条龙不给）。
    */
   models?: string[];
   /**
@@ -148,7 +148,7 @@ export interface PickRouteInput extends Scope {
 
 /** PickRouteInput.keepVerifier：验证那一步怎么派（流程配置、界面类），留不下时怎么办。 */
 export interface KeepVerifierRequest {
-  /** 验证这一步的模型顺序（流程配置，0003 第 9 条）；不给照调度台。 */
+  /** 验证这一步的模型顺序（流程配置，0003 第 9 条）；不给照路由两层。 */
   models?: string[];
   /** 验证算不算界面类的活（规划完就知道：任务简报碰没碰页面代码）：GPT 不验。 */
   uiWork: boolean;

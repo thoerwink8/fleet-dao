@@ -35,9 +35,10 @@ import {
   pools,
   repos,
   routes,
+  routingCatalog,
+  routingPurposeModels,
   savePoolQuota,
   seed,
-  stagePolicyRoutes,
   tasks,
 } from '@fleet-dao/db';
 import type { TestDb } from '@fleet-dao/db/testing';
@@ -123,12 +124,11 @@ export async function world(db: Db, options: { order?: string[]; stages?: StageK
       upstreamModel: 'gpt-5.6-luna',
     },
   ]);
-  const order = options.order ?? ['solo', 'carpool'];
-  for (const stage of options.stages ?? (['execute', 'triage', 'review'] as StageKind[])) {
-    await db
-      .insert(stagePolicyRoutes)
-      .values(order.map((routeId, position) => ({ stage, routeId, position, enabled: true })));
-  }
+  await hangRoutes(
+    db,
+    options.stages ?? (['execute', 'triage', 'review'] as StageKind[]),
+    options.order ?? ['solo', 'carpool'],
+  );
   // 额度都读成了、都还宽：选路按人排的顺序走（额度未知的排在后面，别让它搅进来）。
   for (const poolId of ['claude-solo', 'claude-carpool', 'relay']) {
     await savePoolQuota(
@@ -162,6 +162,51 @@ export async function world(db: Db, options: { order?: string[]; stages?: StageK
       },
       { now: NOW },
     );
+  }
+}
+
+/**
+ * 把路由挂进路由两层（#574，选路、探针都读它）：每条路由挂在它自己的模型下（同一个模型下按给的先后），模型按第一次出现的先后
+ * 排进这些用途。at 给了就从这个位置排（和目录样例的老平铺位置对齐：cursor 9、grok 10、mirasim 11，排在 world 的路由后面），
+ * 不给就接在已有的后面。已经挂着的不动；位置撞了照样报错，不悄悄跳过。一个用途都不给就哪儿都不挂（不挂到模型下面：
+ * 模型要是已经排进了别的用途，挂上去那些用途就会派到它）。两层的开关、模型都不分用途：同一个模型下的路由，排了这个模型的
+ * 用途都看得见。
+ */
+export async function hangRoutes(
+  db: Db,
+  stages: readonly StageKind[],
+  routeIds: readonly string[],
+  at?: number,
+): Promise<void> {
+  if (routeIds.length === 0 || stages.length === 0) return;
+  // 引擎包不直接依赖 drizzle-orm：表都很小，整张读出来在这里算，不拼查询条件
+  const modelOf = new Map(
+    (await db.select({ id: routes.id, modelId: routes.modelId }).from(routes)).map((r) => [r.id, r.modelId]),
+  );
+  const next = (positions: number[]) => (positions.length === 0 ? 0 : Math.max(...positions) + 1);
+  const modelsInOrder: string[] = [];
+  for (const [i, routeId] of routeIds.entries()) {
+    const modelId = modelOf.get(routeId);
+    if (!modelId) throw new Error(`夹具：路由 ${routeId} 库里没有，挂不进路由两层`);
+    if (!modelsInOrder.includes(modelId)) modelsInOrder.push(modelId);
+    const taken = (await db.select().from(routingCatalog))
+      .filter((r) => r.modelId === modelId)
+      .map((r) => r.position);
+    await db
+      .insert(routingCatalog)
+      .values({ modelId, routeId, position: at === undefined ? next(taken) : at + i, enabled: true })
+      .onConflictDoNothing({ target: [routingCatalog.modelId, routingCatalog.routeId] });
+  }
+  for (const stage of stages) {
+    for (const [i, modelId] of modelsInOrder.entries()) {
+      const taken = (await db.select().from(routingPurposeModels))
+        .filter((r) => r.purpose === stage)
+        .map((r) => r.position);
+      await db
+        .insert(routingPurposeModels)
+        .values({ purpose: stage, modelId, position: at === undefined ? next(taken) : at + i })
+        .onConflictDoNothing({ target: [routingPurposeModels.purpose, routingPurposeModels.modelId] });
+    }
   }
 }
 
@@ -871,7 +916,7 @@ export function fakeMirasimRun(script: (spec: MirasimRunSpec, n: number) => Fake
 
 /**
  * 一条 mirasim 路由（和目录样例同一个样子）：中转池不绑会话用户，agent 由调用方给（对应 hosts.ts 的
- * MIRASIM_AGENT_BY_MODEL）。stages 给了就挂进这些阶段的调度台。
+ * MIRASIM_AGENT_BY_MODEL）。stages 给了就挂进这些用途的路由两层（hangRoutes，位置 11）。
  */
 export async function addMirasimRoute(
   db: Db,
@@ -900,15 +945,13 @@ export async function addMirasimRoute(
     ...PROBED_OK,
     upstreamModel: over.upstreamModel ?? modelId,
   });
-  for (const stage of over.stages ?? []) {
-    await db.insert(stagePolicyRoutes).values({ stage, routeId, position: 11, enabled: true });
-  }
+  await hangRoutes(db, over.stages ?? [], [routeId], 11);
   return { routeId, poolId };
 }
 
 /**
- * 一条 grok 路由（和目录样例同一个样子）：SuperGrok 的池不绑会话用户，模型 grok-4.7。stages 给了就挂进这些阶段的调度台
- * （探针只探有阶段在用的路由），排在 cursor 那条（9）后面。
+ * 一条 grok 路由（和目录样例同一个样子）：SuperGrok 的池不绑会话用户，模型 grok-4.7。stages 给了就挂进这些用途的路由两层
+ * （探针只探在用的路由），排在 cursor 那条（9）后面。
  */
 export async function addGrokRoute(
   db: Db,
@@ -930,15 +973,13 @@ export async function addGrokRoute(
     ...PROBED_OK,
     upstreamModel: over.upstreamModel ?? 'grok-4.7',
   });
-  for (const stage of over.stages ?? []) {
-    await db.insert(stagePolicyRoutes).values({ stage, routeId, position: 10, enabled: true });
-  }
+  await hangRoutes(db, over.stages ?? [], [routeId], 10);
   return { routeId, poolId };
 }
 
 /**
  * 一条 cursor-agent 路由（和目录样例同一个样子）：池不绑会话用户（库里约束会话用户和 reclaude 组织类型同有同无），
- * 模型默认 auto（给 modelId 就是钉住某个型号的）。stages 给了就挂进这些阶段的调度台（探针只探有阶段在用的路由）。
+ * 模型默认 auto（给 modelId 就是钉住某个型号的）。stages 给了就挂进这些用途的路由两层（探针只探在用的路由）。
  */
 export async function addCursorRoute(
   db: Db,
@@ -958,9 +999,7 @@ export async function addCursorRoute(
     ...PROBED_OK,
     upstreamModel: over.upstreamModel ?? 'auto',
   });
-  for (const stage of over.stages ?? []) {
-    await db.insert(stagePolicyRoutes).values({ stage, routeId, position: 9, enabled: true });
-  }
+  await hangRoutes(db, over.stages ?? [], [routeId], 9);
   return { routeId, poolId };
 }
 

@@ -16,7 +16,7 @@ import {
   later,
   MIN,
   NOW,
-  setStageOrder,
+  setRoutingLayers,
 } from './helpers.ts';
 
 let t: TestDb;
@@ -56,7 +56,10 @@ beforeEach(async () => {
     });
   }
   await addRoute(t.db, { id: 'relay-opus', poolId: 'relay-a', modelId: 'opus-5.5', hostId: 'mirasim' });
-  await setStageOrder(t.db, 'execute', ['car', 'solo', 'relay-opus']);
+  await setRoutingLayers(t.db, {
+    purposes: { execute: ['opus-5.5'] },
+    models: { 'opus-5.5': ['car', 'solo', 'relay-opus'] },
+  });
 });
 
 const fresh = { reading: 'measured', readAt: ago(MIN) } as const;
@@ -141,7 +144,7 @@ describe('sessionOrgFacts：带组织类型的池、它们的额度窗口、还�
   });
 
   it('池没有在用的路由：按模型组扣的窗口一个都不算，不分模型的照算', async () => {
-    await t.client.query(`update stage_policy_routes set enabled = false where route_id = 'car'`);
+    await t.client.query(`update routing_catalog set enabled = false where route_id = 'car'`);
     await addWindow(t.db, {
       poolId: 'claude-carpool',
       window: '7d_model',
@@ -175,7 +178,7 @@ describe('sessionOrgFacts：带组织类型的池、它们的额度窗口、还�
   });
 
   it('库里没有带组织类型的池：空的，会话照数', async () => {
-    await t.client.query(`delete from stage_policy_routes where route_id in ('car', 'solo')`);
+    await t.client.query(`delete from routing_catalog where route_id in ('car', 'solo')`);
     await t.client.query(`delete from routes where id in ('car', 'solo')`);
     await t.client.query(`delete from pools where org_kind is not null`);
     expect(await sessionOrgFacts(t.db, { now: NOW })).toEqual({ pools: [], busy: 0 });

@@ -64,7 +64,7 @@ export interface FilterContext {
 /** 族名比较用的写法：去掉首尾空白、小写（和 core 的 decideVerdict 判同族一个认法）。 */
 export const familyKey = (family: string): string => family.trim().toLowerCase();
 
-/** 这条路由此刻的全部被挡原因；空数组 = 能派。entry 是调度台上的那一行（任务指定、不在顺序里的没有）。 */
+/** 这条路由此刻的全部被挡原因；空数组 = 能派。entry 是它在路由两层顺序里的那一行（任务指定、不在顺序里的没有）。 */
 export function blocksFor(
   route: RouteFacts,
   entry: StageRouteEntry | undefined,
@@ -73,7 +73,7 @@ export function blocksFor(
   const out: Block[] = [];
   // 候选查询按同一个开关也会给 switched-off：两边任一说关着就挡，只记一条。
   if ((entry && !entry.enabled) || route.blockers.includes('switched-off')) {
-    out.push(hard('switched-off', '调度台上这一条关着'));
+    out.push(hard('switched-off', '这条路由在它的模型下关着（路由两层的开关）'));
   }
   out.push(...candidateBlocks(route, ctx));
   const unfit = hostUnfit(route.hostId, ctx.stage);

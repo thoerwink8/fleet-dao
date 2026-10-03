@@ -1,6 +1,6 @@
 // 路由两层「这一层现在活着吗」的存法（#574，specs/509 方案第八节）：不另存一列「活着」——那一列会和事实各过各的，
-// 层级一深就变成看着整齐、一条都派不出去（#293 断 47 分钟就是这个形状）。活着由三件事现算，每件事的来源写死在这里，
-// 读法（把表读成 RoutingLiveness）和选路切换留给后续切片。
+// 层级一深就变成看着整齐、一条都派不出去（#293 断 47 分钟就是这个形状）。活着由三件事现算，每件事的来源写死在这里；
+// 读成每一层的结论在 routing-layers.ts（驾驶舱看它），选路按同一份候选事实挑（queries/engine.ts 的 routeFactsForPurpose）。
 //
 // 改这里之前必须知道：
 // - 三件事一个都不能缺：接得上、额度够、没被禁令挡。缺一件，「活着」就是猜的。
@@ -67,7 +67,7 @@ const BLOCKER_WORDS: Readonly<Record<string, string>> = {
  * 把选路用的候选（queries/candidates.ts 的 evaluateRoutes，「为什么不能用」只有这一处判法）读成三件事。
  * - 接得上：渠道关了、池过期、模型下架、探针判不在线 = dead；探针还没看过、或那一轮没探它（skipped，不是它坏了）= unknown。
  * - 额度够：用满 = dead；没读成、读数过期、窗口判不了 = unknown（不当「还够」）。
- * - 没被禁令挡：命中禁令、或调度台上关着 = dead（关着的照样挂在顺序里，但不派）。
+ * - 没被禁令挡：命中禁令、或开关关着（这条路由在它的模型下关着）= dead（关着的照样挂在顺序里，但不派）。
  * 并发满了（no-slot）不算 dead：那是等空位，不是坏了。
  */
 export function livenessOf(c: RouteCandidate): RoutingLiveness {
@@ -94,7 +94,7 @@ export function livenessOf(c: RouteCandidate): RoutingLiveness {
   const ban: LivenessFact = c.blockers.includes('banned')
     ? dead(`命中禁令：${c.banReasons.join('；')}`)
     : c.blockers.includes('switched-off')
-      ? dead('调度台上关着')
+      ? dead('开关关着（这条路由在它的模型下关着）')
       : live('没有禁令、开关开着');
 
   return { connect, quota, ban };
