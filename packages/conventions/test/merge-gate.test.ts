@@ -674,7 +674,8 @@ describe('合并闸：ci.yml 按结构比对（改动前后两份全文），不
     const cases: [string, string][] = [
       [yml().replace('contents: read', 'contents: write'), '顶层 permissions'],
       [yml().replace('actions/checkout@v4', 'evil/x@v1'), 'action'],
-      [yml().replace('pnpm exec vitest run', 'echo 跳过'), '检查命令「vitest」'],
+      // 合并闸只报第一处（另有几处写个数）：检查那一步换了，先报的是路标先后
+      [yml().replace('pnpm exec vitest run', 'echo 跳过'), '跑检查'],
       [yml().replace('if: always()', 'if: false'), 'check 的 if'],
     ];
     for (const [after, what] of cases) {

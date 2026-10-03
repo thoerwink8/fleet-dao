@@ -177,16 +177,22 @@ export async function workflowDiff(before: string, after: string): Promise<strin
     // 里做，不在这里）：矩阵写法变了就算碰了；fail-fast、max-parallel 只影响快慢，不比
     const matrix = (j: Obj) => (isObj(j.strategy) ? j.strategy.matrix : undefined);
     if (canon(matrix(jb)) !== canon(matrix(ja))) out.push(`job ${n} 的矩阵（strategy.matrix）变了`);
-    // 只比带信任相关键的步骤：一步只有 run（加一步、删一步普通命令）不算——删掉的命令里有检查，下面 CHECK_TOKENS 那条会抓到
-    const sigs = (steps: unknown) =>
-      (Array.isArray(steps) ? steps : [])
-        .map(stepSig)
-        .filter((x) => x !== '{}')
-        .sort();
-    const sb = sigs(jb.steps);
-    const sa = sigs(ja.steps);
-    if (canon(sb) !== canon(sa))
-      out.push(`job ${n} 里步骤用到的 action、if、continue-on-error、shell、检出方式变了`);
+    // 「路标」步骤按顺序比：带信任相关键的（action、if、continue-on-error……）、装依赖的（跑 PR 的安装脚本）、跑检查的。
+    // 顺序也算：卫生检查挪到装依赖之后，PR 的安装脚本就能先改掉它（#115）。只有 run 的普通步骤（加一步、删一步）不算路标
+    const landmarks = (steps: unknown) =>
+      (Array.isArray(steps) ? steps : []).flatMap((s) => {
+        const sig = stepSig(s);
+        if (sig !== '{}') return [`信任:${sig}`];
+        const run = isObj(s) && typeof s.run === 'string' ? s.run : '';
+        if (/\binstall\b/.test(run)) return ['装依赖'];
+        if (CHECK_TOKENS.some((t) => run.includes(t)))
+          return [`检查:${canon({ run, env: isObj(s) ? (s.env ?? null) : null })}`];
+        return [];
+      });
+    if (canon(landmarks(jb.steps)) !== canon(landmarks(ja.steps)))
+      out.push(
+        `job ${n} 里步骤用到的 action、if、continue-on-error、shell、检出方式，或它们和装依赖、跑检查的先后变了`,
+      );
     // 跑检查的那几步（run 里带检查命令的）：改动后必须还有一步 run、env 一字不差的。只看「词还在不在」挡不住
     // 「echo vitest」「vitest run || true」这类，比整步就一类全收；代价是改检查命令行本身（加个参数）也要审，那本来就该审
     const checkSteps = (j: Obj) =>

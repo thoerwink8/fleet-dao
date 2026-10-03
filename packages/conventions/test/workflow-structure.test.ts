@@ -178,6 +178,33 @@ describe('【故意造出的失败】碰到信任的每一类：都要抓到，�
     });
   }
 
+  it('先后变了：带信任键的一步（卫生检查）挪到装依赖之后——PR 的安装脚本就能先改掉它（#115）', async () => {
+    const job = (steps: string[]) =>
+      [
+        'name: ci',
+        'on: [pull_request]',
+        'jobs:',
+        '  lint:',
+        '    runs-on: ubuntu-latest',
+        '    steps:',
+        ...steps,
+        '',
+      ].join('\n');
+    const hygiene = [
+      '      - name: 卫生检查',
+      '        continue-on-error: true',
+      '        run: node trusted/check.ts',
+    ];
+    const install = ['      - run: pnpm install --frozen-lockfile'];
+    const got = await workflowDiff(job([...hygiene, ...install]), job([...install, ...hygiene]));
+    expect((got as string[]).join('；')).toContain('先后变了');
+    // 只挪普通步骤（不是路标）：不算
+    const plain = ['      - run: echo a', '      - run: echo b'];
+    expect(await workflowDiff(job([...plain, ...install]), job([...install, ...plain].reverse()))).toEqual(
+      [],
+    );
+  });
+
   it('真 ci.yml 上动一处权限、删一个 job：都抓到', async () => {
     const perm = REAL.replace('permissions:\n  contents: read', 'permissions:\n  contents: write');
     expect(perm).not.toBe(REAL);
