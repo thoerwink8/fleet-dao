@@ -48,7 +48,17 @@ describe('规矩：认领账代码不再读它（#556-4 PR-1）', () => {
     const mig = read('packages/db/migrations/0024_clammy_maestro.sql');
     for (const t of ['issue_claims', 'seat_boards', 'seat_leases'])
       expect(mig).toContain(`DROP TABLE "${t}"`);
-    expect(mig).toContain('DROP COLUMN "flow_config"');
+    for (const c of [
+      'flow_config',
+      'flow_source',
+      'flow_commit',
+      'flow_synced_at',
+      'flow_error',
+      'flow_checked_at',
+      'flow_unread',
+    ])
+      expect(mig, c).toContain(`ALTER TABLE "repos" DROP COLUMN "${c}"`);
+    expect(mig).toContain('ALTER TABLE "tasks" DROP COLUMN "flow_source"');
   });
 
   it('【故意造出的失败】把读链塞回来：查得出来；注释里提名字不算', () => {
