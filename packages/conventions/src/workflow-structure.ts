@@ -187,10 +187,26 @@ export async function workflowDiff(before: string, after: string): Promise<strin
     const sa = sigs(ja.steps);
     if (canon(sb) !== canon(sa))
       out.push(`job ${n} 里步骤用到的 action、if、continue-on-error、shell、检出方式变了`);
-    const tb = runText(jb);
-    const ta = runText(ja);
-    for (const t of CHECK_TOKENS) {
-      if (tb.includes(t) && !ta.includes(t)) out.push(`job ${n} 里的检查命令「${t}」不见了`);
+    // 跑检查的那几步（run 里带检查命令的）：改动后必须还有一步 run、env 一字不差的。只看「词还在不在」挡不住
+    // 「echo vitest」「vitest run || true」这类，比整步就一类全收；代价是改检查命令行本身（加个参数）也要审，那本来就该审
+    const checkSteps = (j: Obj) =>
+      (Array.isArray(j.steps) ? j.steps : [])
+        .filter(
+          (s): s is Obj =>
+            isObj(s) && typeof s.run === 'string' && CHECK_TOKENS.some((t) => String(s.run).includes(t)),
+        )
+        .map((s) => canon({ run: s.run, env: s.env ?? null }));
+    const keptAfter = new Set(checkSteps(ja));
+    const changedChecks = checkSteps(jb).filter((sig) => !keptAfter.has(sig));
+    if (changedChecks.length > 0) {
+      const tb = runText(jb);
+      const ta = runText(ja);
+      const gone = CHECK_TOKENS.filter((t) => tb.includes(t) && !ta.includes(t));
+      out.push(
+        gone.length > 0
+          ? `job ${n} 里的检查命令「${gone.join('、')}」不见了`
+          : `job ${n} 里跑检查的步骤改了（${changedChecks.length} 步的命令或环境不再一字不差）`,
+      );
     }
   }
   if (canon(verdictScripts(b.jobs)) !== canon(verdictScripts(a.jobs)))

@@ -66,7 +66,6 @@ describe('不碰信任的改动：放过（这是提速改动的常态）', () =
         '        run: pnpm exec vitest run',
         '        run: pnpm exec vitest run\n      - run: echo 多一步',
       ),
-      swap('        run: pnpm exec vitest run', '        run: pnpm exec vitest run --reporter=dot'),
     ]) {
       expect(await workflowDiff(BASE, after), after).toEqual([]);
     }
@@ -151,6 +150,12 @@ describe('【故意造出的失败】碰到信任的每一类：都要抓到，�
     ],
     ['检查命令换成别的', swap('run: pnpm exec vitest run', 'run: echo 跳过'), '检查命令「vitest」'],
     ['矩阵改了（跑哪几台、测什么）', swap('shard: [1, 2, 3]', 'shard: [1]'), '矩阵'],
+    ['检查命令换成只打印那个词', swap('run: pnpm exec vitest run', 'run: echo vitest'), '跑检查的步骤改了'],
+    [
+      '检查命令改了参数（本来就该审）',
+      swap('run: pnpm exec vitest run', 'run: pnpm exec vitest run --reporter=dot'),
+      '跑检查的步骤改了',
+    ],
     ['检查命令吞掉失败', swap('run: pnpm exec vitest run', 'run: pnpm exec vitest run || true'), '|| true'],
     [
       '检查命令前关掉出错即停',
