@@ -111,6 +111,9 @@ describe('任务工作流 · 走通', { timeout: 60_000 }, () => {
     expect(world.count('pushBranch')).toBe(2);
     // 第二轮的交付检查从上一轮推上去的头起算，不是从最初的起点
     expect(calls.segment[1]?.baseSha).not.toBe(calls.segment[0]?.baseSha);
+    // runs 记账（#216）：第一轮动手时还没开 PR，不带 PR 号（不拿 0 顶）；第二轮带上第一轮开的那个
+    expect(calls.segment[0]).not.toHaveProperty('prNumber');
+    expect(calls.segment[1]?.prNumber).toBe(run.prNumber);
   });
 
   it('会话跑完没有提交：不推、不开 PR，意见是「没有提交」，下一轮再来', async () => {
