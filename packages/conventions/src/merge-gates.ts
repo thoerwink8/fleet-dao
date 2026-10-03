@@ -178,13 +178,12 @@ export function destructiveIn(patch: string | undefined): string | undefined {
  * - 汇总和依赖：check job 本身、任何 needs 行、删掉整个 job
  */
 const WORKFLOW_SENSITIVE: readonly (readonly [RegExp, string])[] = [
-  [
-    /\bpermissions\b|\b(?:contents|actions|statuses|pull-requests|checks|id-token|packages|issues):\s*(?:read|write|none)\b/,
-    '权限',
-  ],
+  // 权限不列名字：任何「某某: read|write|none」的行都算（GitHub 新增权限项也不会漏），再加 permissions 本身
+  [/\bpermissions\b|^\s*[\w-]+:\s*(?:read|write|none)\s*$/, '权限'],
   [/secrets\.|GITHUB_TOKEN|github\.token|persist-credentials/, '令牌或密钥'],
+  // 触发：on 下面的事件名一个不漏（GitHub 的 webhook 事件全列，加 cron、inputs），再加 types/branches/paths 这些过滤
   [
-    /^\s*(?:on|push|pull_request|pull_request_target|workflow_run):|\b(?:types|branches|paths|paths-ignore):/,
+    /^\s*(?:on|push|pull_request|pull_request_target|pull_request_review|pull_request_review_comment|workflow_run|workflow_dispatch|workflow_call|schedule|repository_dispatch|issue_comment|issues|release|status|check_run|check_suite|create|delete|deployment|deployment_status|discussion|discussion_comment|fork|gollum|label|merge_group|milestone|page_build|project|project_card|project_column|public|registry_package|watch):|\b(?:types|branches|branches-ignore|tags|tags-ignore|paths|paths-ignore|cron|inputs):/,
     '触发条件',
   ],
   [/\buses:/, '用到的 action'],
@@ -203,6 +202,18 @@ const WORKFLOW_SENSITIVE: readonly (readonly [RegExp, string])[] = [
 ];
 
 /**
+ * 去掉行尾的 YAML 注释（空白加 # 起到行尾），免得只改超时、行尾写一句「# permissions 不变」就被当成改了权限。
+ * 只在 # 之前的引号是成对的时候才去：# 落在引号字符串里（echo " # x "）它就不是注释，不能去，去了会把后面的内容藏起来。
+ */
+function stripTrailingComment(line: string): string {
+  const at = line.search(/\s#/);
+  if (at < 0) return line;
+  const head = line.slice(0, at);
+  const even = (ch: string) => (head.split(ch).length - 1) % 2 === 0;
+  return even("'") && even('"') ? head : line;
+}
+
+/**
  * 工作流改动里第一处碰到信任的地方；都是不碰信任的改动回 undefined；看不到改动内容回 '看不到改动内容'。
  * 只认「+」「-」开头的行（文件头 +++/--- 不算），去掉前缀后以 # 开头的注释行不算。
  */
@@ -210,8 +221,8 @@ export function workflowSensitive(patch: string | undefined): string | undefined
   if (patch === undefined) return '看不到改动内容';
   for (const raw of patch.split('\n')) {
     if (!/^[+-]/.test(raw) || raw.startsWith('+++') || raw.startsWith('---')) continue;
-    const line = raw.slice(1);
-    if (/^\s*#/.test(line)) continue;
+    const line = stripTrailingComment(raw.slice(1));
+    if (/^\s*#/.test(line) || line.trim() === '') continue;
     for (const [re, what] of WORKFLOW_SENSITIVE) {
       if (re.test(line)) return `改了${what}：${line.trim().slice(0, 50)}`;
     }

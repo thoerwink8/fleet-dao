@@ -208,10 +208,27 @@ describe('工作流按内容判（ci.yml：只有碰到信任的改动才要第�
     expect(verdict(patchOf('+++ b/x', '--- a/x'))).toEqual([]);
   });
 
+  it('行尾注释不算内容（只改超时、行尾写「# permissions 不变」不该被拦）；但 # 在引号字符串里就不是注释', () => {
+    expect(verdict(patchOf('+    timeout-minutes: 15 # permissions 不变'))).toEqual([]);
+    expect(verdict(patchOf('+    timeout-minutes: 15   # 没碰 secrets. 也没碰 uses:'))).toEqual([]);
+    // 【故意造出的失败】# 在引号里：后面的 secrets. 不能被当成注释藏起来
+    expect(verdict(patchOf('+        run: echo " # " && echo ${{ secrets.X }}'))).toHaveLength(1);
+    expect(verdict(patchOf("+        run: echo ' # ' && echo ${{ secrets.X }}"))).toHaveLength(1);
+    // 注释前面本来就碰信任：照拦
+    expect(verdict(patchOf('+  contents: write # 只给读'))).toHaveLength(1);
+  });
+
   it('【故意造出的失败】碰到信任的每一类都要审：权限、令牌、触发、action、卫生检查和合并闸、放过失败、条件、汇总依赖、整个 job', () => {
     const touches: [string, string][] = [
       ['+  contents: write', '权限'],
       ['+permissions: write-all', '权限'],
+      ['+  security-events: write', '权限'],
+      ['+  attestations: write', '权限'],
+      ['+  schedule:', '触发条件'],
+      ['+    - cron: "0 * * * *"', '触发条件'],
+      ['+  workflow_dispatch:', '触发条件'],
+      ['+  workflow_call:', '触发条件'],
+      ['+  issue_comment:', '触发条件'],
       ['+        env: ${{ secrets.X }}', '令牌或密钥'],
       ['+          GH_TOKEN: ${{ github.token }}', '令牌或密钥'],
       ['-          persist-credentials: false', '令牌或密钥'],
