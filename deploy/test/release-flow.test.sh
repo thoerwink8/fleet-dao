@@ -2,8 +2,8 @@
 # shellcheck source-path=SCRIPTDIR
 # shellcheck disable=SC2034 # APP_UNITS、SHA 这些是给 source 进来的 release.sh 里的函数读写的
 # deploy/release.sh 的来回：换版、健康检查不过自动退回、一键退回、不退到判过不健康的版本、只留最近几版；
-# 飞书网关什么时候发、什么时候不动香港，网关的健康检查怎么判；装目录的每条失败路径。
-# 取代码、构建、迁移、健康检查、往香港传文件、香港网关的入口、目录装载器和库的读回换成桩（按提交号预先定好健康不健康）；
+# 飞书网关什么时候发、什么时候不动香港，网关的健康检查怎么判；装目录、装路由两层的每条失败路径。
+# 取代码、构建、迁移、健康检查、往香港传文件、香港网关的入口、目录装载器、路由两层装载器和库的读回换成桩（按提交号预先定好健康不健康）；
 # 切 current、记历史、挑上一版、清旧版、迁移把关、装目录的检查、发网关的决定、网关健康检查用的是 release.sh 里的真代码，
 # 目录落在临时目录、不连网；
 # 最后一段以 root 真起一个临时服务
@@ -717,6 +717,159 @@ check "这一版没有装载器：照常切到 C" "$(current_sha)" "$C"
 check "这一版没有装载器：没跑装载器、没有红" "$(loader_runs):${#REDS[@]}" "0:0"
 check "这一版没有装载器：说了一声" "$(said '这一版没有目录装载器')" 1
 # runuser、pg_admin 的桩留着：后面那段不用它们（unset 掉 shellcheck 会当成桩从没被调过）
+NODE=$(command -v node) || NODE=""
+
+echo "== 装路由两层（#574）：目录装完之后、切版本之前；读不回、装载器报错、装完是 0 行都停下不切；同一版再发说已齐；老版本没有它照切"
+rm -rf "${RELEASES:?}"/* "$RELEASES"/.history
+GATE=()
+MIG=()
+DB_MIG=0
+FLEET_HK_PARTS=""
+# 两个装载器共用「这一版的 node」，桩按第一个参数分：目录装载器一律答已齐（上一段专测它）；路由两层装载器照 mode 答
+# （changed 装进去了、same 已齐、别的就报错），每次记一行「参数|当前目录|库连接」进 calls；order 记两个装载器谁先跑、
+# 跑的那一刻 current 指着哪一版
+RFAKE=$TMP/routing-fake
+mkdir -p "$RFAKE"
+cat >"$RFAKE/node" <<'EOF'
+#!/bin/bash
+d=$(dirname "$0")
+case $1 in
+packages/db/src/bin/catalog.ts)
+  printf 'catalog current=%s\n' "$(readlink ../current 2>/dev/null)" >>"$d/order"
+  echo "库里已经齐了，这次一行没改"
+  ;;
+packages/db/src/bin/routing.ts)
+  printf '%s|%s|%s\n' "$*" "$PWD" "${DATABASE_URL:-}" >>"$d/calls"
+  printf 'routing current=%s\n' "$(readlink ../current 2>/dev/null)" >>"$d/order"
+  case $(cat "$d/mode") in
+  changed)
+    echo "补了用途 → 模型 48 行（9 个用途：triage、spec、plan、execute、ui、review、verify、research、judge）"
+    echo "补了模型 → 路由 10 行（7 个模型：opus-5.5、gpt-5.6-luna、kimi-k3、deepseek-flash、cursor-auto、grok-4.7、jev-1.13）"
+    ;;
+  same) echo "路由两层已齐，这次一行没改；库里已有、没动的：用途 9 个、模型 7 个（驾驶舱改过的不覆盖）" ;;
+  *)
+    echo "默认骨架和库里对不上，一行没写"
+    echo "- 路由 grok:grok-4.7:grok 库里没有"
+    exit 1
+    ;;
+  esac
+  ;;
+*)
+  echo "桩：认不出的命令 $*" >&2
+  exit 99
+  ;;
+esac
+EOF
+chmod +x "$RFAKE/node"
+NODE=$RFAKE/node
+# 读回的桩：目录那几张表一律「都齐、装载器没改」；路由两层那两张，装载器这一轮还没跑时按 R_BEFORE 答，跑过了按 R_AFTER 答：
+# empty 两张都是 0 行，full 装齐了（48、10），fail 连不上库，garbage 答的不是数，zero-1 / zero-2 第几张是 0 行，grown 多出几行
+R_BEFORE=empty
+R_AFTER=full
+pg_admin() {
+  if [[ "$*" != *routing_purpose_models* ]]; then
+    printf '6|9|8|58|0\n'
+    return 0
+  fi
+  local mode=$R_BEFORE
+  if [[ -s "$RFAKE/calls" ]]; then mode=$R_AFTER; fi
+  case $mode in
+  fail)
+    echo 'psql: error: connection to server on socket "/var/run/postgresql/.s.PGSQL.5432" failed' >&2
+    return 2
+    ;;
+  garbage) echo 'ERROR:  relation "routing_catalog" does not exist' ;;
+  empty) echo '0|0' ;;
+  full) echo '48|10' ;;
+  zero-1) echo '0|10' ;;
+  zero-2) echo '48|0' ;;
+  grown) echo '3|1' ;;
+  esac
+}
+with_loaders() { # 提交号：构建这一版（桩），带上目录、路由两层两个装载器
+  build_release "$1" >/dev/null
+  mkdir -p "$RELEASES/$1/packages/db/src/bin"
+  : >"$RELEASES/$1/packages/db/src/bin/catalog.ts"
+  : >"$RELEASES/$1/packages/db/src/bin/routing.ts"
+}
+routing_runs() { if [[ -f "$RFAKE/calls" ]]; then grep -c . "$RFAKE/calls"; else echo 0; fi; }
+rround() { # 路由两层装载器这一轮怎么答；清掉上一轮的记录
+  printf '%s' "$1" >"$RFAKE/mode"
+  rm -f -- "$RFAKE/calls" "$RFAKE/order"
+  reset
+}
+with_loaders "$A"
+rround changed
+do_release "$A" >"$TMP/out"
+check "路由两层装进去了：切到 A、没有红" "$(current_sha):${#REDS[@]}" "$A:0"
+IFS='|' read -r got_args got_cwd got_db <"$RFAKE/calls"
+check "路由两层装载器收到的：这一版的命令，不带别的参数（骨架是这一版自己带的）" "$got_args" "packages/db/src/bin/routing.ts"
+check "路由两层装载器在这一版的目录里跑" "$([[ "$got_cwd" == */releases/"$A" ]] && echo 是 || echo "不是（$got_cwd）")" 是
+check "路由两层装载器连的是本机库" "$got_db" "postgres:///fleet"
+check "先装目录、再装路由两层，都在切版本之前（current 还没指着 A）" "$(tr '\n' '|' <"$RFAKE/order")" \
+  "catalog current=|routing current=|"
+check "路由两层装载器的话打出来了（补了几行）" "$(said '补了模型 → 路由 10 行')" 1
+check "记一处改动，带上读回的行数" \
+  "$(printf '%s\n' "${CHANGES[@]}" | grep -c '^路由两层装进库（用途 → 模型 48 行、模型 → 路由 10 行）$')" 1
+R_BEFORE=full
+rround same
+do_release "$A" >"$TMP/out"
+check "同一版再发：路由两层装载器照样跑，没有红、改动 0 处" "$(routing_runs):${#REDS[@]}:${#CHANGES[@]}" "1:0:0"
+check "同一版再发：说的是路由两层已齐" "$(said '路由两层已齐，这次一行没改（用途 → 模型 48 行、模型 → 路由 10 行）')" 1
+with_loaders "$B"
+before=$(events)
+rblocked() { # 说明 红里要有的字 装载器该跑几次：发 B，应当停下、不切、历史不变
+  do_release "$B" >"$TMP/out"
+  check "$1：不切，还在 A" "$(current_sha)" "$A"
+  check "$1：报红，说清是哪一种" "$(reds_with "$2")" 1
+  check "$1：历史没变" "$(events)" "$before"
+  check "$1：路由两层装载器跑了 $3 次" "$(routing_runs)" "$3"
+}
+R_BEFORE=fail
+rround changed
+rblocked "路由两层装之前连不上库" "装路由两层之前读不到库 fleet 里那两张表的行数：没装，没切版本" 0
+R_BEFORE=garbage
+rround changed
+rblocked "路由两层装之前读回的不是数" "装路由两层之前读不到库 fleet 里那两张表的行数" 0
+R_BEFORE=empty
+R_AFTER=empty
+rround fail
+rblocked "路由两层装载器报错（骨架里的路由库里没有），读回和装之前一样" \
+  "路由两层没装成（装载器退出码 1，原话见上；读回核过：两张表的行数和装之前一样；没切版本）：默认骨架和库里对不上，一行没写" 1
+check "路由两层装载器报错：它的原话一条条打出来了" "$(said '- 路由 grok:grok-4.7:grok 库里没有')" 1
+R_AFTER=grown
+rround fail
+rblocked "路由两层装载器报错，读回库却变了" \
+  "库变了（装之前 用途 → 模型 0 行、模型 → 路由 0 行，现在 用途 → 模型 3 行、模型 → 路由 1 行），要人看；没切版本" 1
+R_AFTER=fail
+rround fail
+rblocked "路由两层装载器报错，读回也读不到" "装完读不回库，库里变没变没查成；没切版本" 1
+rround changed
+rblocked "路由两层装完连不上库" "路由两层装完了，但读不回库 fleet 里那两张表的行数：没切版本" 1
+R_AFTER=garbage
+rround changed
+rblocked "路由两层装完读回的不是数" "路由两层装完了，但读不回库 fleet 里那两张表的行数" 1
+R_AFTER=zero-1
+rround changed
+rblocked "装完用途 → 模型是 0 行" \
+  "库 fleet 里路由两层用途 → 模型 0 行（装之前 用途 → 模型 0 行、模型 → 路由 0 行），选路派不出活（要人看）；没切版本" 1
+R_AFTER=zero-2
+rround changed
+rblocked "装完模型 → 路由是 0 行" "库 fleet 里路由两层模型 → 路由 0 行" 1
+R_AFTER=full
+rround changed
+do_release "$B" >"$TMP/out"
+check "路由两层都齐了再发 B：切到 B、没有红" "$(current_sha):${#REDS[@]}" "$B:0"
+check "发 B：先装目录、再装路由两层，装的时候还没切版本（current 还指着 A）" "$(tr '\n' '|' <"$RFAKE/order")" \
+  "catalog current=$A|routing current=$A|"
+build_release "$C" >/dev/null # 老提交：带目录装载器，没有路由两层装载器
+mkdir -p "$RELEASES/$C/packages/db/src/bin"
+: >"$RELEASES/$C/packages/db/src/bin/catalog.ts"
+rround changed
+do_release "$C" >"$TMP/out"
+check "这一版没有路由两层装载器：照常切到 C" "$(current_sha)" "$C"
+check "这一版没有路由两层装载器：没跑它、没有红" "$(routing_runs):${#REDS[@]}" "0:0"
+check "这一版没有路由两层装载器：说了一声" "$(said '这一版没有路由两层装载器')" 1
 NODE=$(command -v node) || NODE=""
 
 echo "== 自动发布（--auto）：演示版不发（对外，要人确认）；历史行带 auto；切之前看会话——在跑、读不到、认不出都不切，什么都没动（退出码 76）；--busy-ok 照切；另一个发布在跑是 75"
