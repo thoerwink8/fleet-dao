@@ -26,6 +26,7 @@ import {
   RoutingResponse,
   type RunOutcome,
   RunStepsResponse,
+  readSegmentRun,
   SETTING_SCHEMAS,
   type SessionRun,
   type SettingKey,
@@ -886,7 +887,8 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
               title: a.question,
               context: `#${t.task.issueNumber} ${t.task.title}`,
               since: a.askedAt,
-              link: '/home3',
+              // 和真后端 homeDecisions 一样链到任务页
+              link: `/tasks/${t.task.id}`,
             })),
         ),
       ].sort((a, b) => b.since.localeCompare(a.since));
@@ -910,7 +912,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
                 ? ('queue' as const)
                 : ('nothing' as const),
             ...(queued ? { waitingSince: queued.queuedAt } : {}),
-            link: '/home3',
+            link: `/tasks/${t.task.id}`,
           };
         });
       const done = st.tasks
@@ -985,13 +987,25 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       await wait();
       const tv = findTask(taskId);
       const runs = [...tv.runs, ...tv.subtasks.flatMap((s) => s.runs)];
+      // 三段的流水和真后端 segmentRunViews 一个读法（shared 的 readSegmentRun）：模型名查目录、计费方式查渠道
+      const finished = TERMINAL.has(tv.task.state);
+      const segmentRuns = (tv.segmentRuns ?? []).map((r) =>
+        readSegmentRun(
+          {
+            ...r,
+            modelName: st.models.find((m) => m.id === r.model)?.displayName ?? r.model,
+            billing: st.channels.find((c) => c.id === r.channel)?.billing,
+            matchedBy: r.taskId === undefined ? 'issueNumber' : 'task',
+          },
+          { taskFinished: finished },
+        ),
+      );
       return TaskDetailResponse.parse({
         task: tv.task,
         repo: repoView(tv.task.repoId),
         subtasks: tv.subtasks.map(subtaskView),
         runs: runs.map(runView),
-        // 假数据还没有三段的流水（runs 表）：驾驶舱按段显示那一片接上时一起补
-        segmentRuns: [],
+        segmentRuns,
         asks: tv.asks.map((a) => ({
           id: a.id,
           runId: a.runId,
@@ -1021,6 +1035,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
                 billing: info.billing,
               };
             }),
+          segmentRuns,
         ),
       });
     },

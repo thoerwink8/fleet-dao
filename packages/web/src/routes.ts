@@ -23,6 +23,8 @@ export default [
   ...(demo ? [] : [route('login', 'routes/login.tsx')]),
   layout('routes/shell.tsx', [
     index('routes/home.tsx'),
+    // 主页「在跑的」、追问的链接（后端拼的 /tasks/<编号>）落在这里；演示版按「任务」模块的开关看
+    route('tasks/:taskId', 'routes/task.tsx'),
     route('quota', 'routes/quota.tsx'),
     route('schedules', 'routes/schedules.tsx'),
     route('notifications', 'routes/notifications.tsx'),
