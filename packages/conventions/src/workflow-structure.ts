@@ -77,6 +77,11 @@ const WATCH_WORDS = [
   'GITHUB_TOKEN',
   'github.token',
   'persist-credentials',
+  // 吞掉失败的写法：检查命令还在、但红了也当绿（pnpm exec vitest run || true）
+  '|| true',
+  '|| :',
+  'exit 0',
+  'set +e',
 ];
 
 const count = (text: string, word: string) => text.split(word).length - 1;

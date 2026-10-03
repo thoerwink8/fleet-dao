@@ -150,6 +150,12 @@ describe('【故意造出的失败】碰到信任的每一类：都要抓到，�
       'if',
     ],
     ['检查命令换成别的', swap('run: pnpm exec vitest run', 'run: echo 跳过'), '检查命令「vitest」'],
+    ['检查命令吞掉失败', swap('run: pnpm exec vitest run', 'run: pnpm exec vitest run || true'), '|| true'],
+    [
+      '检查命令前关掉出错即停',
+      swap('run: pnpm exec vitest run', 'run: set +e; pnpm exec vitest run'),
+      'set +e',
+    ],
     ['汇总脚本改了', swap('run: node ci-verdict.ts', 'run: node ci-verdict.ts || true'), '汇总判红的脚本'],
     [
       '往步骤输出里写东西',
