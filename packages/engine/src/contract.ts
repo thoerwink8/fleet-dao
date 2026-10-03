@@ -13,6 +13,8 @@ export const WORKFLOW_TYPES = {
   githubReconcile: 'githubReconcileWorkflow',
   /** 路由探针（#129）：Temporal Schedule 每 15 分钟起一条（和对账错开），见 jobs/schedules.ts。 */
   routeProbe: 'routeProbeWorkflow',
+  /** 定时读额度入库（#76）：Temporal Schedule 每 15 分钟起一条，见 jobs/schedules.ts、jobs/quota-read.ts。 */
+  quotaRead: 'quotaReadWorkflow',
   /**
    * 每小时对账（工作树残留、核对、提醒按条件撤和再推、GitHub 机器人权限自检）：Temporal Schedule 每小时起一条，
    * 见 jobs/schedules.ts。
@@ -96,6 +98,20 @@ export interface RouteProbeRun {
   found: number;
   /** 这一轮之后在线的路由。 */
   online: string[];
+  why?: string | undefined;
+}
+
+/** 定时读额度一轮的输入：读哪些池、几点读由活动按配置和当时的时刻定（工作流里不取时刻）。 */
+export interface QuotaReadInput {
+  schemaVersion: 1;
+}
+
+/** 定时读额度一轮的结局：和记进 schedule_runs 的同一份。scanned = 配置里几个池，found = 这一轮要报的池数。 */
+export interface QuotaReadRun {
+  runId: number;
+  outcome: ScheduleOutcome;
+  scanned: number;
+  found: number;
   why?: string | undefined;
 }
 

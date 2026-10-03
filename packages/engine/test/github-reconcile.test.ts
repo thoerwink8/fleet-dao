@@ -43,6 +43,7 @@ import {
   GITHUB_RECONCILE_SCHEDULE_ID,
   HOURLY_RECONCILE_SCHEDULE_ID,
   INTAKE_SCHEDULE_ID,
+  QUOTA_READ_SCHEDULE_ID,
   ROUTE_PROBE_SCHEDULE_ID,
   WATCHDOG_SCHEDULE_ID,
 } from '../src/jobs/schedules.ts';
@@ -410,6 +411,7 @@ describe('定时任务按固定编号建：重启、重复部署不多出第二�
     expect(await ensureEngineSchedules(fresh.client, 'fleet')).toEqual({
       [GITHUB_RECONCILE_SCHEDULE_ID]: 'created',
       [ROUTE_PROBE_SCHEDULE_ID]: 'created',
+      [QUOTA_READ_SCHEDULE_ID]: 'created',
       [HOURLY_RECONCILE_SCHEDULE_ID]: 'created',
       [CANARY_SCHEDULE_ID]: 'created',
       [WATCHDOG_SCHEDULE_ID]: 'created',
@@ -419,6 +421,7 @@ describe('定时任务按固定编号建：重启、重复部署不多出第二�
     expect(await ensureEngineSchedules(again.client, 'fleet')).toEqual({
       [GITHUB_RECONCILE_SCHEDULE_ID]: 'updated',
       [ROUTE_PROBE_SCHEDULE_ID]: 'updated',
+      [QUOTA_READ_SCHEDULE_ID]: 'updated',
       [HOURLY_RECONCILE_SCHEDULE_ID]: 'updated',
       [CANARY_SCHEDULE_ID]: 'updated',
       [WATCHDOG_SCHEDULE_ID]: 'updated',
@@ -429,6 +432,8 @@ describe('定时任务按固定编号建：重启、重复部署不多出第二�
       `update:${GITHUB_RECONCILE_SCHEDULE_ID}`,
       `create:${ROUTE_PROBE_SCHEDULE_ID}`,
       `update:${ROUTE_PROBE_SCHEDULE_ID}`,
+      `create:${QUOTA_READ_SCHEDULE_ID}`,
+      `update:${QUOTA_READ_SCHEDULE_ID}`,
       `create:${HOURLY_RECONCILE_SCHEDULE_ID}`,
       `update:${HOURLY_RECONCILE_SCHEDULE_ID}`,
       `create:${CANARY_SCHEDULE_ID}`,
@@ -495,6 +500,7 @@ describe('定时任务按固定编号建：重启、重复部署不多出第二�
       expect(await ensureEngineSchedules(client, 'fleet-a')).toEqual({
         [GITHUB_RECONCILE_SCHEDULE_ID]: 'created',
         [ROUTE_PROBE_SCHEDULE_ID]: 'created',
+        [QUOTA_READ_SCHEDULE_ID]: 'created',
         [HOURLY_RECONCILE_SCHEDULE_ID]: 'created',
         [CANARY_SCHEDULE_ID]: 'created',
         [WATCHDOG_SCHEDULE_ID]: 'created',
@@ -504,6 +510,7 @@ describe('定时任务按固定编号建：重启、重复部署不多出第二�
       expect(await ensureEngineSchedules(client, 'fleet-b')).toEqual({
         [GITHUB_RECONCILE_SCHEDULE_ID]: 'updated',
         [ROUTE_PROBE_SCHEDULE_ID]: 'updated',
+        [QUOTA_READ_SCHEDULE_ID]: 'updated',
         [HOURLY_RECONCILE_SCHEDULE_ID]: 'updated',
         [CANARY_SCHEDULE_ID]: 'updated',
         [WATCHDOG_SCHEDULE_ID]: 'updated',

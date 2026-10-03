@@ -15,6 +15,7 @@ import {
   type GitHubReconcileInput,
   type HourlyReconcileInput,
   type IntakeInput,
+  type QuotaReadInput,
   type RouteProbeInput,
   type WatchdogInput,
   WORKFLOW_TYPES,
@@ -32,6 +33,7 @@ import {
   HOURLY_RECONCILE_OFFSET_MINUTES,
 } from './hourly-reconcile.ts';
 import { INTAKE_EVERY_MINUTES, INTAKE_JOB, INTAKE_OFFSET_MINUTES } from './intake.ts';
+import { QUOTA_READ_EVERY_MINUTES, QUOTA_READ_JOB, QUOTA_READ_OFFSET_MINUTES } from './quota-read.ts';
 import { RETIRED_SCHEDULES, type RetiredSchedule } from './retired-schedules.ts';
 import { ROUTE_PROBE_EVERY_MINUTES, ROUTE_PROBE_JOB, ROUTE_PROBE_OFFSET_MINUTES } from './route-probe.ts';
 import { WATCHDOG_EVERY_MINUTES, WATCHDOG_JOB, WATCHDOG_OFFSET_MINUTES } from './watchdog.ts';
@@ -42,6 +44,7 @@ export const HOURLY_RECONCILE_SCHEDULE_ID = HOURLY_RECONCILE_JOB.id;
 export const CANARY_SCHEDULE_ID = CANARY_JOB.id;
 export const WATCHDOG_SCHEDULE_ID = WATCHDOG_JOB.id;
 export const INTAKE_SCHEDULE_ID = INTAKE_JOB.id;
+export const QUOTA_READ_SCHEDULE_ID = QUOTA_READ_JOB.id;
 
 interface EngineSchedule {
   scheduleId: string;
@@ -58,6 +61,7 @@ export function engineSchedules(taskQueue: string): EngineSchedule[] {
   const canaryInput: CanaryInput = { schemaVersion: 1 };
   const watchdogInput: WatchdogInput = { schemaVersion: 1 };
   const intakeInput: IntakeInput = { schemaVersion: 1 };
+  const quotaInput: QuotaReadInput = { schemaVersion: 1 };
   return [
     {
       scheduleId: GITHUB_RECONCILE_SCHEDULE_ID,
@@ -104,6 +108,31 @@ export function engineSchedules(taskQueue: string): EngineSchedule[] {
         overlap: ScheduleOverlapPolicy.SKIP,
         // Temporal 停了一阵再起来：只补最近一轮（结论只看最新的，补旧的只是白花额度）
         catchupWindow: `${ROUTE_PROBE_EVERY_MINUTES} minutes`,
+        pauseOnFailure: false,
+      },
+    },
+    {
+      // 定时读额度入库（#76）：每 15 分钟读各池额度写进库；和路由探针（7 分起）、对账补漏错开
+      scheduleId: QUOTA_READ_SCHEDULE_ID,
+      spec: {
+        intervals: [
+          { every: `${QUOTA_READ_EVERY_MINUTES} minutes`, offset: `${QUOTA_READ_OFFSET_MINUTES} minutes` },
+        ],
+      },
+      action: {
+        type: 'startWorkflow',
+        workflowType: WORKFLOW_TYPES.quotaRead,
+        workflowId: QUOTA_READ_SCHEDULE_ID,
+        taskQueue,
+        args: [quotaInput],
+        // 一轮最多 10 分钟（活动的限时）；卡死的不拖到下一轮
+        workflowRunTimeout: '15 minutes',
+      },
+      policies: {
+        // 上一轮还没完就跳过：两轮叠着读，同一个池会被读两遍、后写的盖掉先写的
+        overlap: ScheduleOverlapPolicy.SKIP,
+        // Temporal 停了一阵再起来：只补最近一轮（额度只看最新读数，补旧的没意义）
+        catchupWindow: `${QUOTA_READ_EVERY_MINUTES} minutes`,
         pauseOnFailure: false,
       },
     },
