@@ -45,11 +45,11 @@ shard_n=0
 # 按 CI 实测的耗时（2026-10-03，一整套 300 秒上下）搭，三台各 100 秒上下。
 # 2026-10-03 超时可注入之后的实测（主线 ci.yml 一轮）：login-user 94→44 秒、cli-tools 约 34 秒；三台原先 61 / 66 / 140 秒，
 # 第三台拖后腿，把 session-ports、web-publish、release-flow 挪去第一台，grok、public-site、agent-scope-org-use 挪去第二台，
-# 估三台各 80–100 秒。挪完看下一轮 CI 的「⏱」行，不匀了再挪。每一项的秒数都看日志里的「⏱」行。
+# 估三台各 80–100 秒。第二轮实测三台 101 / 84 / 95 秒，再把 release-flow、web-publish 从第一台挪去第三台。挪完看下一轮 CI 的「⏱」行，不匀了再挪。每一项的秒数都看日志里的「⏱」行。
 SHARDS=(
-  'login-user session-user listen root-exec-check gateway-deploy ops-only ports shards profile session-ports web-publish release-flow'
+  'login-user session-user listen root-exec-check gateway-deploy ops-only ports shards profile session-ports'
   'cli-tools cursor-agent cursor-key mirasim mirasim-session node-cache agent-scope-adopt app-config grok public-site agent-scope-org-use'
-  'lint session-pnpm demo-scopes gateway-bundle backup place-file auto-release-state agents-sync agents-sync-account node-tests'
+  'lint session-pnpm demo-scopes gateway-bundle backup place-file auto-release-state agents-sync agents-sync-account node-tests release-flow web-publish'
 )
 NODE_TESTS=(health-page auto-release config)
 SPECIAL_UNITS=(lint backup node-tests ports)
